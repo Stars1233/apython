@@ -2064,6 +2064,11 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
     mov qword [rbp - BIM_FROMLIST], 0
     mov qword [rbp - BIM_LEVEL], 0
     mov qword [rbp - BIM_TEMP], 0
+    ; BIM_NAME belongs in this block too: .imp_check_name reads 0 as "no name
+    ; was given", and with neither a positional argument nor name= nothing
+    ; ever wrote the slot -- so `__import__()` tested uninitialised stack and
+    ; then used it as a PyStrObject*.
+    mov qword [rbp - BIM_NAME], 0
 
     ; Keyword arguments sit after the positional ones, named in order by
     ; kw_names_pending.  Consume it: a builtin that leaves it set hands its

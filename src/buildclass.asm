@@ -1513,7 +1513,23 @@ BCL_OKWV  equ 72
     ; FileIO is a raw stream, did not exist.
     mov r8, [rbp - BCL_META]                ; the winner so far
     test r8, r8
-    jnz .bc_meta_have_winner
+    jz .bc_meta_default
+    ; An explicit metaclass= need not be a type at all: CPython accepts any
+    ; callable, and `class D(object, metaclass=f)` for a plain function is
+    ; legal.  Seeding the scan with one and handing it to type_is_subtype read
+    ; tp_mro off the function.  Before this scan existed an explicit
+    ; metaclass= short-circuited it, so leave a non-type alone the same way --
+    ; it is called directly further down.
+    push r8
+    sub rsp, 8
+    mov rdi, r8
+    call type_check_is_class
+    add rsp, 8
+    pop r8
+    test eax, eax
+    jz .bc_meta_scan_done
+    jmp .bc_meta_have_winner
+.bc_meta_default:
     lea r8, [rel type_type]
 .bc_meta_have_winner:
     mov rcx, [rbp - BCL_BASES]
@@ -1661,12 +1677,11 @@ BCL_OKWV  equ 72
     cmp qword [rbp - BCL_META], 0
     je .bc_no_metaclass
     mov rdi, [rbp - BCL_META]
+    ; Whatever it is, it gets called.  CPython requires a callable here, not a
+    ; type: `class D(metaclass=f)` for a plain function binds D to f's return
+    ; value.  This used to ask type_check_is_class first and quietly build an
+    ; ordinary class when the answer was no, so metaclass=f was ignored.
     extern type_check_is_class
-    push rdi
-    call type_check_is_class
-    pop rdi
-    test eax, eax
-    jz .bc_no_metaclass
 
     ; meta(name, bases, ns, **kwds)
     mov rcx, [rbp - BCL_BASES]
@@ -1688,7 +1703,11 @@ BCL_OKWV  equ 72
     mov rcx, [rbp - BCL_OKWN]
     mov r8, [rbp - BCL_OKWV]
     call bc_call_kw
-    V_UNPACK rax, rdx
+    ; Kept as a Value, not unpacked: a metaclass that is not a type may answer
+    ; anything, including an immediate.  Unpacking here and re-packing in the
+    ; epilogue with a hardcoded TAG_PTR turned a returned 42 into a pointer to
+    ; address 42.  A class is a pointer, and a pointer is its own Value, so
+    ; the ordinary case is unchanged.
     add rsp, 32
     push rax
     mov rdi, [rbp - BCL_BASES]
@@ -1708,7 +1727,7 @@ BCL_OKWV  equ 72
     call obj_decref
 .bc_meta_done:
     pop rax
-    jmp .bc_have_class
+    jmp .bc_have_value
 
 .bc_no_metaclass:
     ; Build the heaptype from (name, bases, namespace); the three-argument
@@ -1734,6 +1753,18 @@ BCL_OKWV  equ 72
     pop rax
     test rax, rax
     jz .bc_have_class       ; NULL, with the exception already pending
+
+.bc_have_value:
+    ; The metaclass path arrives here with a finished Value in rax.  Same
+    ; unwind as below, minus the re-pack: there is nothing to tag.
+    add rsp, 64
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .bc_have_class:
     add rsp, 64        ; must match the sub above: the epilogue unwinds

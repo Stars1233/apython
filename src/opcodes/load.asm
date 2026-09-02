@@ -448,7 +448,14 @@ DEF_FUNC op_load_attr, LA_FRAME
 .la_resolve_tag_dict:
     ; No tp_getattr: walk the MRO's tp_dicts, so an immediate reaches what
     ; object supplies too -- `(1).__eq__` lives there and nowhere else.
-    mov [rbp - LA_TAGTYPE], r8
+    ;
+    ; The type comes back out of the frame rather than out of r8.  One of the
+    ; two ways in is the `jz` after `call rax` above, and that call is an
+    ; ordinary one: r8 is caller-saved, so by here it holds whatever the
+    ; tp_getattr left behind -- ap_strcmp leaves 0x8080808080808080 -- and the
+    ; walk below dereferenced it.  `.la_resolve_tag_type` stored the type at
+    ; LA_TAGTYPE on the way in, before either path diverged.
+    mov r8, [rbp - LA_TAGTYPE]
     mov [rbp - LA_WALK], r8
 .la_tag_loop:
     mov rax, [rbp - LA_WALK]

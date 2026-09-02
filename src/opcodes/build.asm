@@ -733,6 +733,8 @@ DEF_FUNC_BARE op_unpack_sequence
     mov edx, 1
     call tuple_type_call            ; raises for a non-iterable
     add rsp, 16
+    test rax, rax
+    jz .unpack_iter_raised
     pop rdi                         ; the original
     push rax                        ; the materialised tuple
     call obj_decref                 ; release the original
@@ -743,6 +745,23 @@ DEF_FUNC_BARE op_unpack_sequence
     mov rax, [rdi + PyObject.ob_type]
     jmp .unpack_tuple
 
+
+.unpack_iter_raised:
+    ; tuple_type_call answers NULL when the iteration itself raised -- a
+    ; __getitem__ or __next__ that threw partway through.  Reading ob_type off
+    ; that NULL is how `a, b, c = G()` became a segfault instead of the
+    ; exception G raised.
+    ;
+    ; The sequence is NOT released here.  The unwinder restores r13 from
+    ; eval_saved_r13, which is the value stack as it stood before this
+    ; instruction ran -- so the sequence VPOP_VAL took off the top is back on
+    ; it, and the unwind releases it.  Decref'ing it here as well frees it
+    ; while the unwinder is still holding it, which valgrind reports as an
+    ; invalid read inside eval_exception_unwind.
+    add rsp, 32                     ; the saved original, the count, and the
+                                    ; sequence Value the prologue pushed
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
 
 .unpack_type_error:
     ; Unknown type

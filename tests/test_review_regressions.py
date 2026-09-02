@@ -33,6 +33,19 @@ def check(label, fn):
     print(label.ljust(36), repr(got))
 
 
+def check_type(label, fn):
+    """Like check(), but names only the exception's class.
+
+    For the cases where the finding was a segfault and the wording of the
+    replacement message is not what is being pinned down.
+    """
+    try:
+        got = repr(fn())
+    except Exception as exc:
+        got = type(exc).__name__
+    print(label.ljust(36), got)
+
+
 # --- list()/tuple() of a Python iterator, inside a handler ---
 class Counter:
     def __init__(self):
@@ -195,3 +208,128 @@ check("a good one", lambda: posix.terminal_size((80, 24)))
 
 posix.unlink(TMP)
 print("cleaned")
+
+
+# ---------------------------------------------------------------------------
+# A register a call destroyed, and a frame slot nothing initialised.
+#
+# Seven crashes, six of them SIGSEGV.  The shape behind most of them is one
+# value left in a caller-saved register across a call that does not preserve
+# it -- r8 through tp_getattr, r8 through bytearray_resize, rdi through
+# dunder_call_1, a double parked in the red zone under a call that writes its
+# own return address there.
+# ---------------------------------------------------------------------------
+
+# LOAD_ATTR on an immediate whose tp_getattr declines: .la_resolve_tag_dict
+# walked r8, which the tp_getattr call had already clobbered.
+check("attr miss on an int", lambda: getattr(5, "numeratorZ", "absent"))
+check_type("attr miss raises", lambda: (5).numeratorZ)
+
+
+# bytearray slice assignment that grows: the removed span's width was the one
+# value in the stretch not spilled around bytearray_resize/bytearray_data.
+def ba_grow_big():
+    b = bytearray(b"0123456789")
+    b[2:5] = b"Y" * 30
+    return bytes(b)
+
+
+def ba_grow_small():
+    b = bytearray(b"abcdef")
+    b[1:3] = b"X" * 40
+    return bytes(b)
+
+
+def ba_shrink():
+    b = bytearray(b"0123456789")
+    b[2:8] = b"Z"
+    return bytes(b)
+
+
+check("bytearray slice grows", ba_grow_big)
+check("bytearray slice grows more", ba_grow_small)
+check("bytearray slice shrinks", ba_shrink)
+
+
+# posix.fspath: .pfs_bad read rdi back after dunder_call_1 had destroyed it,
+# and reported a raising __fspath__ as a bad path type rather than letting the
+# real exception out.
+class FsRaises:
+    def __fspath__(self):
+        raise ValueError("boom")
+
+
+class FsBadType:
+    def __fspath__(self):
+        return 42
+
+
+class FsGood:
+    def __fspath__(self):
+        return "/tmp"
+
+
+check("fspath that raises", lambda: posix.fspath(FsRaises()))
+check("fspath answering an int", lambda: posix.fspath(FsBadType()))
+check("fspath that works", lambda: posix.fspath(FsGood()))
+check("fspath of a str", lambda: posix.fspath("/tmp"))
+check("fspath of an int", lambda: posix.fspath(42))
+
+# __import__() with no arguments at all: BIM_NAME was the one slot the
+# prologue did not zero, so the "was a name given" test read stack garbage.
+check_type("__import__ with no name", lambda: __import__())
+check("__import__ still works", lambda: __import__("posix").__name__)
+
+
+# A metaclass that is not a type.  The most-derived-metaclass scan handed the
+# function to type_is_subtype, which read tp_mro off it; and once that no
+# longer crashed, the callable was still never called.
+def meta_fn(name, bases, ns):
+    return 42
+
+
+def build_with_fn_meta():
+    class D(object, metaclass=meta_fn):
+        pass
+    return D
+
+
+def build_with_fn_meta_nobase():
+    class E(metaclass=meta_fn):
+        pass
+    return E
+
+
+check("function as metaclass", build_with_fn_meta)
+check("function metaclass, no base", build_with_fn_meta_nobase)
+
+
+# UNPACK_SEQUENCE over an iterable whose iteration raises: tuple_type_call
+# answers NULL there, and the generic arm read ob_type off it.
+class GetitemRaises:
+    def __getitem__(self, i):
+        if i == 2:
+            raise ValueError("late")
+        return i
+
+
+def unpack_raising():
+    a, b, c = GetitemRaises()
+    return (a, b, c)
+
+
+def unpack_ok():
+    a, b, c = range(3)
+    return (a, b, c)
+
+
+check("unpack a raising __getitem__", unpack_raising)
+check("unpack a good one", unpack_ok)
+
+
+# int.__truediv__ with a GMP-backed operand: the left double was saved in the
+# red zone, and __gmpz_get_d's own return address landed on the same slot.
+check("1 / 2**70", lambda: 1 / (2 ** 70))
+check("2**70 / 2**70", lambda: (2 ** 70) / (2 ** 70))
+check("2**70 / 2", lambda: (2 ** 70) / 2)
+check("-(2**70) / 2**69", lambda: -(2 ** 70) / (2 ** 69))

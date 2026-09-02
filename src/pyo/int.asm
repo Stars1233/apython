@@ -2897,6 +2897,18 @@ DEF_FUNC int_true_divide
     push rbx
     push r12
     push r13
+    ; A real slot for the left double, and the padding that makes rsp
+    ; 16-byte aligned at the two __gmpz_get_d calls below.  It used to live at
+    ; [rsp-8] in the red zone, which is exactly where the second of those
+    ; calls writes its return address: `1/(2**70)` and `(2**70)/(2**70)` both
+    ; came back 0.0, having divided by a fragment of this function's own code
+    ; address.  The red zone is not a place to keep anything across a call.
+    ;
+    ; 24, not 16: `and rsp, -16` then three pushes leaves rsp 8 mod 16, so the
+    ; two __gmpz_get_d calls were already reached misaligned -- harmless until
+    ; glibc takes an aligned-SSE path.  24 restores the invariant the `and`
+    ; was there to establish.
+    sub rsp, 24
 
     mov rbx, rdi           ; left
     mov r12, rsi           ; right
@@ -2913,7 +2925,7 @@ DEF_FUNC int_true_divide
     mov rax, rbx
     cvtsi2sd xmm0, rax
 .td_have_left:
-    movsd [rsp-8], xmm0   ; save left double
+    movsd [rsp], xmm0     ; save left double, in the slot reserved above
 
     ; Convert right to double (r13d = right_tag)
     cmp r13d, TAG_SMALLINT
@@ -2933,10 +2945,11 @@ DEF_FUNC int_true_divide
     je .td_divzero
 
     movsd xmm1, xmm0      ; xmm1 = right
-    movsd xmm0, [rsp-8]   ; xmm0 = left
+    movsd xmm0, [rsp]     ; xmm0 = left
     divsd xmm0, xmm1
     call float_from_f64
 
+    add rsp, 24                 ; the left-double slot, and its padding
     pop r13
     pop r12
     pop rbx

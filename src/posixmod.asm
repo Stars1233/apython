@@ -1815,10 +1815,19 @@ DEF_FUNC posix_urandom, PUR_FRAME
 END_FUNC posix_urandom
 
 ;; posix.fspath(path) -> the path itself, or what __fspath__ gives
-DEF_FUNC posix_fspath, 16
+PFS_OBJ   equ 8             ; the argument, kept for the message
+PFS_EXC   equ 16            ; current_exception before __fspath__ ran
+PFS_FRAME equ 16            ; + 0 pushes = 16
+
+DEF_FUNC posix_fspath, PFS_FRAME
     test rsi, rsi
     jz .pfs_argerr
     mov rdi, [rdi]
+    ; Kept, because dunder_call_1 below does not preserve rdi and .pfs_bad
+    ; used to read it back out of the register afterwards -- a wild pointer
+    ; that raise_type_error_with_name then dereferenced.
+    mov [rbp - PFS_OBJ], rdi
+    mov qword [rbp - PFS_EXC], 0
     V_TEST_PTR rdi, rax
     ja .pfs_bad
     mov rax, [rdi + PyObject.ob_type]
@@ -1831,9 +1840,25 @@ DEF_FUNC posix_fspath, 16
     cmp rax, rcx
     je .pfs_self
     CSTRING rsi, "__fspath__"
+    DUNDER_EXC_SAVE [rbp - PFS_EXC]
     call dunder_call_1
     test edx, edx
-    jz .pfs_bad
+    jz .pfs_no_result
+
+    ; What __fspath__ answered has to be a path itself; CPython checks, and
+    ; without it `__fspath__` returning an int handed the int straight back.
+    V_TEST_PTR rax, rcx
+    ja .pfs_bad_result
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    je .pfs_result_ok
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .pfs_result_ok
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    jne .pfs_bad_result
+.pfs_result_ok:
     mov edx, TAG_PTR
     leave
     ret
@@ -1843,8 +1868,47 @@ DEF_FUNC posix_fspath, 16
     mov edx, TAG_PTR
     leave
     ret
+
+.pfs_no_result:
+    ; NULL means either "no __fspath__" or "__fspath__ raised", and reporting
+    ; the second as a bad path type buries the real exception.
+    DUNDER_RAISED [rbp - PFS_EXC], .pfs_propagate
+    jmp .pfs_bad
+.pfs_propagate:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+
+.pfs_bad_result:
+    ; The class whose __fspath__ misbehaved, then what it answered -- the
+    ; same two-name message posix_path_arg composes.
+    push rax                    ; the result, released once its name is copied:
+    push rax                    ; twice, to keep rsp 16-byte aligned
+    lea rdi, [rel pm_msgbuf]
+    lea rsi, [rel pm_msg_expected]
+    mov rdx, 40
+    call posix_copy_bounded
+    mov rdi, rax
+    mov rsi, [rbp - PFS_OBJ]
+    call posix_typename_of
+    mov rdi, rax
+    lea rsi, [rel pm_msg_fspath]
+    mov rdx, 60
+    call posix_copy_bounded
+    mov rdi, rax
+    mov rsi, [rsp]
+    call posix_typename_of
+    pop rdi
+    pop rdi
+    DECREF_V rdi, rcx           ; a Value: __fspath__ may answer an immediate
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel pm_msgbuf]
+    call raise_exception
+    ud2
+
 .pfs_bad:
-    mov rsi, rdi
+    mov rsi, [rbp - PFS_OBJ]
     CSTRING rdi, `expected str, bytes or os.PathLike object, not \x01`
     call raise_type_error_with_name
 .pfs_argerr:

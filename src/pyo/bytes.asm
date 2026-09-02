@@ -3221,6 +3221,7 @@ BAS_STOP  equ 64
 BAS_STEP  equ 72
 BAS_N     equ 80            ; the slice's element count
 BAS_TMP   equ 88            ; a copy, when source and target are the same object
+BAS_SPAN  equ 96            ; bytes the span gives up, across the two calls below
 BAS_FRAME equ 96            ; + 1 push = 104... padded to 112 below
 
 DEF_FUNC bytearray_ass_subscript, 104
@@ -3349,7 +3350,12 @@ DEF_FUNC bytearray_ass_subscript, 104
     jge .bas_span_ok
     mov r8, r9                  ; an empty span, as slice_indices allows
 .bas_span_ok:
-    sub r8, r9                  ; r8 = how many bytes go away
+    sub r8, r9                  ; how many bytes go away
+    ; To the frame, not left in r8: bytearray_resize and bytearray_data are
+    ; both ahead, both ordinary calls, and r8 is caller-saved.  rdx and rcx
+    ; were already spilled around each of them; this one was not, so the
+    ; memmove below read its source from a garbage offset.
+    mov [rbp - BAS_SPAN], r8
     mov rcx, [rbp - BAS_SLEN]   ; rcx = how many arrive
     mov rdi, [rbp - BAS_SELF]
     mov rdx, [rdi + PyByteArrayObject.ob_size]
@@ -3384,7 +3390,7 @@ DEF_FUNC bytearray_ass_subscript, 104
     lea rdi, [rax + r9]
     add rdi, rcx                ; the tail's new home
     lea rsi, [rax + r9]
-    add rsi, r8                 ; where it is now
+    add rsi, [rbp - BAS_SPAN]   ; where it is now
     push rdx
     push rcx
     mov rdx, rbx
