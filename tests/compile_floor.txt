@@ -167,6 +167,7 @@ test_future_import
 test_gc_generations
 test_gc_module
 test_gen_adv
+test_generator_close_on_drop
 test_generator_close_throw
 test_generator_frame
 test_generators

@@ -26,6 +26,10 @@ extern raise_exception_obj
 extern exc_new
 extern exc_TypeError_type
 extern exc_StopIteration_type
+extern set_exception
+extern exc_RuntimeError_type
+extern exc_GeneratorExit_type
+extern sys_write
 extern exc_StopAsyncIteration_type
 extern method_new
 extern builtin_func_new
@@ -606,15 +610,129 @@ END_FUNC ags_dealloc
 ;; gen_dealloc(PyObject *self)
 ;; Free generator: free frame if still held, DECREF code.
 ;; ============================================================================
-DEF_FUNC gen_dealloc
+
+;; ============================================================================
+;; gen_dealloc_close(rdi = a generator with a live, suspended frame)
+;;
+;; gen_close, minus the two arms that leave through the unwinder.  A dealloc
+;; is called from arbitrary depth -- including from inside
+;; eval_exception_unwind's own release loop -- and unwinding from there
+;; abandons a C stack that is in the middle of something.  So a cleanup that
+;; raises leaves its exception pending for gen_dealloc to report, the way
+;; instance_dealloc reports one from __del__, and nothing jumps.
+;; ============================================================================
+GDC_GEN   equ 8
+GDC_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+DEF_FUNC_LOCAL gen_dealloc_close, GDC_FRAME
     push rbx
+    mov rbx, rdi
+    mov [rbp - GDC_GEN], rbx
+
+    mov rdi, [rbx + PyGenObject.gi_frame]
+    test rdi, rdi
+    jz .gdc_free
+
+    mov rdi, rbx
+    lea rsi, [rel exc_GeneratorExit_type]
+    call gen_throw
+    test edx, edx
+    jz .gdc_settle
+
+    ; It yielded instead of finishing.  Python reports that; here it is
+    ; recorded rather than raised, because there is nowhere to raise to.
+    SET_EXC exc_RuntimeError_type, "generator ignored GeneratorExit"
+    jmp .gdc_free
+
+.gdc_settle:
+    ; GeneratorExit and StopIteration on the way out are the expected
+    ; outcomes; anything else is left pending for the caller to report.
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .gdc_free
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel exc_GeneratorExit_type]
+    cmp rcx, rdx
+    je .gdc_swallow
+    lea rdx, [rel exc_StopIteration_type]
+    cmp rcx, rdx
+    jne .gdc_free
+.gdc_swallow:
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    call obj_decref
+
+.gdc_free:
+    mov rbx, [rbp - GDC_GEN]
+    mov rdi, [rbx + PyGenObject.gi_frame]
+    test rdi, rdi
+    jz .gdc_done
+    mov qword [rbx + PyGenObject.gi_frame], 0
+    call frame_free
+.gdc_done:
+    pop rbx
+    leave
+    ret
+END_FUNC gen_dealloc_close
+
+GD_EXC   equ 8
+GD_FRAME equ 16             ; + 2 pushes = 32, 16-aligned
+DEF_FUNC gen_dealloc, GD_FRAME
+    push rbx
+    push r12
 
     mov rbx, rdi
 
-    ; Free frame if still held
+    ; A generator suspended inside a try/finally has cleanup still to run, and
+    ; CPython runs it when the generator is collected.  Doing it here means
+    ; running Python inside a dealloc, which needs three things:
+    ;
+    ;   - a resurrection bump, because the cleanup can take and drop
+    ;     references to the generator and would otherwise re-enter this at
+    ;     refcount 0;
+    ;   - the pending exception saved and put back, because a dealloc runs at
+    ;     arbitrary points -- including in the middle of somebody else's raise
+    ;     -- and the close both reads and clears current_exception;
+    ;   - and nothing that unwinds, which is what gen_dealloc_close is for.
+    ;
+    ; A frame with instr_ptr 0 has either never started or already finished:
+    ; there is nothing suspended in it, and CPython runs no cleanup for one
+    ; either.
     mov rdi, [rbx + PyGenObject.gi_frame]
     test rdi, rdi
     jz .no_frame
+    cmp qword [rdi + PyFrame.instr_ptr], 0
+    je .gd_just_free
+
+    inc qword [rbx + PyObject.ob_refcnt]
+    DUNDER_EXC_SAVE r12
+    mov qword [rel current_exception], 0
+
+    mov rdi, rbx
+    call gen_dealloc_close
+
+    ; Anything the cleanup raised is reported and dropped, as an exception
+    ; from __del__ is: there is no caller left to hand it to.
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .gd_close_done
+    mov qword [rel current_exception], 0
+    push rdi
+    mov edi, 2
+    lea rsi, [rel gd_ignored_msg]
+    mov edx, gd_ignored_len
+    call sys_write
+    pop rdi
+    call obj_decref
+.gd_close_done:
+    mov [rel current_exception], r12
+    dec qword [rbx + PyObject.ob_refcnt]
+
+.gd_just_free:
+    ; Free the frame if the close did not.
+    mov rdi, [rbx + PyGenObject.gi_frame]
+    test rdi, rdi
+    jz .no_frame
+    mov qword [rbx + PyGenObject.gi_frame], 0
     call frame_free
 .no_frame:
 
@@ -631,6 +749,7 @@ DEF_FUNC gen_dealloc
     mov rdi, rbx
     call gc_dealloc
 
+    pop r12
     pop rbx
     leave
     ret
@@ -1748,3 +1867,7 @@ DEF_FUNC gen_clear
     leave
     ret
 END_FUNC gen_clear
+
+section .rodata
+gd_ignored_msg: db "Exception ignored in: generator cleanup", 10, 0
+gd_ignored_len  equ $ - gd_ignored_msg - 1

@@ -233,13 +233,11 @@ than lying — but they are ordinary Python that does not work:
   missing one -- leaves the string `str_from_cstr_heap` built for it.  A loop
   that probes the filesystem with try/except leaks once per attempt.
 
-- **A dropped generator's `finally` never runs.**  `gen_close` exists and is
-  correct, but nothing calls it from `gen_dealloc`, so a generator suspended
-  inside a `try`/`finally` and then abandoned never reaches the `finally`.
-  CPython closes a generator when it is collected.  Doing it here means
-  running Python inside a dealloc, which is where the exception-ownership
-  question above bites: the finaliser is already the one place that has to
-  guard against `current_exception` holding an object nothing owns.
+- **A cleanup that raises is reported in one line.**  A `finally` in a dropped
+  generator, and a `__del__`, both report an exception they cannot propagate;
+  CPython prints the object's repr and a full traceback where these print
+  "Exception ignored in __del__" and "Exception ignored in: generator
+  cleanup".  The behaviour either side of the message is the same.
 
 - The `re` wrapper module.  The `_sre` engine underneath is complete, but
   without a shipped `re.py` an `import re` finds CPython's, which needs
