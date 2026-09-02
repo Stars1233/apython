@@ -122,3 +122,36 @@ print("gamma  ", "%.12g %.12g" % (math.gamma(5.0), math.gamma(0.5)))
 print("lgamma ", "%.12g %.12g" % (math.lgamma(5.0), math.lgamma(0.5)))
 print("hypot n", "%.12g %.12g" % (math.hypot(1.0, 2.0, 2.0), math.hypot(1e200, 1e200)))
 print("hypot 0", repr(math.hypot()), repr(math.hypot(5.0)), repr(math.hypot(-5.0)))
+
+# --- hypot: ucomisd sets ZF for an unordered compare, so the max scan read
+# a NaN as an infinity and hypot(1, 2, nan) answered inf.  An infinity really
+# does win over a NaN, which is why the test needs both orders.
+inf = float("inf")
+nan = float("nan")
+print(math.hypot(1.0, 2.0, nan), math.hypot(inf, nan), math.hypot(nan, inf))
+print(math.hypot(3.0, 4.0), math.hypot(3.0, 4.0, 12.0), math.hypot())
+
+# --- log(x, base) is two logs and a division, and this path checked none of
+# the three ways that goes wrong.
+for expr in ["math.log(0, 10)", "math.log(-1, 2)", "math.log(10, 1)",
+             "math.log(0)", "math.log(-1)", "math.log2(0)", "math.log10(0)"]:
+    try:
+        print(expr, "=", eval(expr))
+    except Exception as e:
+        print(expr, "->", type(e).__name__)
+print(math.log(8, 2), math.log(100, 10), math.log(1024, 2))
+print(math.log(nan, 2), math.log(2, nan), math.log(inf, 2), math.log(2, inf))
+
+# --- an int too large for a double: sqrt overflows and says so, but the log
+# family answers, because CPython's loghelper splits off the exponent instead
+# of converting.
+try:
+    math.sqrt(10**400)
+except OverflowError:
+    print("sqrt(10**400): OverflowError")
+print(math.log(10**400), math.log2(10**400), math.log10(10**400))
+print(math.log(2**1000), math.log(10**400, 10), math.log(10**400, 2))
+try:
+    math.log(-(10**400))
+except ValueError:
+    print("log(-huge): ValueError")

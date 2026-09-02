@@ -45,6 +45,8 @@ extern raise_type_error_with_name
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_OverflowError_type
+extern exc_ZeroDivisionError_type
+extern dunder_operand_is_int
 extern float_to_f64
 extern float_from_f64
 extern float_int
@@ -115,6 +117,8 @@ extern __gmpz_cmp_si
 extern __gmpz_fac_ui
 extern __gmpz_bin_ui
 extern __gmpz_fits_ulong_p
+extern __gmpz_fits_slong_p
+extern __gmpz_get_d_2exp
 extern __gmpz_get_ui
 extern get_iterator
 extern call_iternext
@@ -147,9 +151,29 @@ DEF_FUNC math_to_double, MTD_FRAME
     mov rdi, [rbp - MTD_VAL]
     V_UNPACK rdi, rsi
     call float_to_f64           ; its mpz arm rounds to nearest, as CPython's
-    mov eax, 1                  ; PyLong_AsDouble does, rather than truncating
+                                ; PyLong_AsDouble does, rather than truncating
+    ; An int too large for a double came back as an infinity, and every
+    ; caller then answered with it: math.sqrt(10**400) was inf rather than
+    ; CPython's OverflowError.  A float infinity is a legitimate argument, so
+    ; only the int arm asks.
+    movsd [rbp - MTD_RES], xmm0
+    mov rdi, [rbp - MTD_VAL]
+    call dunder_operand_is_int
+    test eax, eax
+    jz .mtd_ok
+    movsd xmm0, [rbp - MTD_RES]
+    andpd xmm0, [rel mm_absmask]
+    ucomisd xmm0, [rel mm_inf]
+    jp .mtd_ok
+    je .mtd_overflow
+.mtd_ok:
+    movsd xmm0, [rbp - MTD_RES]
+    mov eax, 1
     leave
     ret
+
+.mtd_overflow:
+    RAISE exc_OverflowError_type, "int too large to convert to float"
 
 .mtd_slow:
     ; Not a number itself.  __float__ first, then __index__, which is the
@@ -1168,31 +1192,193 @@ END_FUNC math_comb
 ;; ============================================================================
 MLG_X     equ 8
 MLG_B     equ 16
+MLG_ARGS  equ 24
 MLG_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+;; ============================================================================
+;; math_log_oversized(rdi = a Value, esi = 0 log, 1 log2, 2 log10)
+;;   -> eax = 1 and xmm0 = the answer, or eax = 0 meaning "not an int that
+;;      overflows a double, take the ordinary path"
+;;
+;; math.log(10**400) is 921.034..., not an error: CPython's loghelper splits
+;; the integer into a mantissa and an exponent with frexp and computes
+;; func(m) + func(2.0)*e, which needs no double large enough to hold the
+;; argument.  Without it the conversion overflowed and the answer was an
+;; infinity -- and once math_to_double started reporting that overflow
+;; honestly, an OverflowError.
+;;
+;; Only the mpz arm can overflow; an int that fits an i64 is at most 9.2e18
+;; and converts exactly enough.
+;; ============================================================================
+MLO_VAL   equ 8
+MLO_OWN   equ 16
+MLO_EXP   equ 24
+MLO_KIND  equ 32
+MLO_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
+
+DEF_FUNC_LOCAL math_log_oversized, MLO_FRAME
+    mov [rbp - MLO_KIND], rsi
+    call math_index
+    test rax, rax
+    jz .mlo_no
+    mov [rbp - MLO_VAL], rax
+    mov [rbp - MLO_OWN], rcx
+
+    ; Does it fit a double?  If it does, nothing here is needed.
+    lea rdi, [rax + PyIntObject.mpz]
+    call __gmpz_fits_slong_p wrt ..plt
+    test eax, eax
+    jnz .mlo_drop_no
+
+    mov rdi, [rbp - MLO_VAL]
+    lea rdi, [rdi + PyIntObject.mpz]
+    xor esi, esi
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    jle .mlo_domain             ; log of a non-positive integer
+
+    lea rdi, [rbp - MLO_EXP]
+    mov rsi, [rbp - MLO_VAL]
+    lea rsi, [rsi + PyIntObject.mpz]
+    call __gmpz_get_d_2exp wrt ..plt    ; xmm0 = m in [0.5, 1), MLO_EXP = e
+
+    mov rdi, [rbp - MLO_VAL]
+    mov rsi, [rbp - MLO_OWN]
+    call math_drop_temp
+
+    mov rax, [rbp - MLO_KIND]
+    cmp rax, 1
+    je .mlo_log2
+    cmp rax, 2
+    je .mlo_log10
+    call log wrt ..plt
+    movsd xmm1, [rel mm_ln2]
+    jmp .mlo_combine
+.mlo_log2:
+    call log2 wrt ..plt
+    movsd xmm1, [rel mm_log2_2]
+    jmp .mlo_combine
+.mlo_log10:
+    call log10 wrt ..plt
+    movsd xmm1, [rel mm_log10_2]
+.mlo_combine:
+    cvtsi2sd xmm2, qword [rbp - MLO_EXP]
+    mulsd xmm1, xmm2
+    addsd xmm0, xmm1
+    mov eax, 1
+    leave
+    ret
+
+.mlo_drop_no:
+    mov rdi, [rbp - MLO_VAL]
+    mov rsi, [rbp - MLO_OWN]
+    call math_drop_temp
+.mlo_no:
+    xor eax, eax
+    leave
+    ret
+
+.mlo_domain:
+    mov rdi, [rbp - MLO_VAL]
+    mov rsi, [rbp - MLO_OWN]
+    call math_drop_temp
+    RAISE exc_ValueError_type, "math domain error"
+END_FUNC math_log_oversized
+
+;; log2 and log10 wrap the generated one-argument forms so an oversized int
+;; reaches the helper above before the conversion can overflow.
+%macro MATH_LOG_WRAP 2          ; %1 = suffix, %2 = kind
+DEF_FUNC_BARE math_%1_big
+    cmp rsi, 1
+    jne math_%1                 ; arity and type errors are its to word
+    push rdi
+    push rsi
+    sub rsp, 8
+    mov rdi, [rdi]
+    mov esi, %2
+    call math_log_oversized
+    add rsp, 8
+    pop rsi
+    pop rdi
+    test eax, eax
+    jz math_%1
+    sub rsp, 8
+    call float_from_f64
+    add rsp, 8
+    V_PACK rax, rdx
+    ret
+END_FUNC math_%1_big
+%endmacro
+
+MATH_LOG_WRAP log2,  1
+MATH_LOG_WRAP log10, 2
+
+;; mlg_natural_log(rdi = a Value) -> eax = 1 and xmm0 = its natural log, or
+;; eax = 0 when the argument is not a real number at all.  A domain error it
+;; raises itself; the caller words the type error, which names the operand.
+MNL_VAL   equ 8
+MNL_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+
+DEF_FUNC_LOCAL mlg_natural_log, MNL_FRAME
+    mov [rbp - MNL_VAL], rdi
+    xor esi, esi
+    call math_log_oversized
+    test eax, eax
+    jnz .mnl_out
+    mov rdi, [rbp - MNL_VAL]
+    call math_to_double
+    test eax, eax
+    jz .mnl_no
+    ; A NaN propagates; anything else must be strictly positive.
+    ucomisd xmm0, xmm0
+    jp .mnl_call
+    pxor xmm1, xmm1
+    ucomisd xmm0, xmm1
+    jbe .mnl_domain
+.mnl_call:
+    call log wrt ..plt
+.mnl_out:
+    mov eax, 1
+    leave
+    ret
+.mnl_no:
+    xor eax, eax
+    leave
+    ret
+.mnl_domain:
+    RAISE exc_ValueError_type, "math domain error"
+END_FUNC mlg_natural_log
+
 DEF_FUNC math_log, MLG_FRAME
     cmp rsi, 1
     je .mlg_one
     cmp rsi, 2
     jne .mlg_args
+
+    ; log(x, base) is two logs and a division, and each has its own way of
+    ; going wrong.  This path took none of them: math.log(0, 10) answered
+    ; -inf, math.log(-1, 2) answered nan and math.log(10, 1) answered inf,
+    ; where CPython raises ValueError, ValueError and ZeroDivisionError.
     push rdi
     mov rdi, [rdi]
-    call math_to_double
+    call mlg_natural_log
     test eax, eax
     jz .mlg_type0
     movsd [rbp - MLG_X], xmm0
+
     mov rdi, [rsp]
     mov rdi, [rdi + 8]
-    call math_to_double
+    call mlg_natural_log
     test eax, eax
     jz .mlg_type1
     add rsp, 8
-    movsd [rbp - MLG_B], xmm0
-    and rsp, -16
-    movsd xmm0, [rbp - MLG_X]
-    call log wrt ..plt
-    movsd [rbp - MLG_X], xmm0
-    movsd xmm0, [rbp - MLG_B]
-    call log wrt ..plt
+
+    ; base 1.0 gives log(base) == 0 exactly, which is CPython's
+    ; ZeroDivisionError rather than an infinity.
+    pxor xmm1, xmm1
+    ucomisd xmm0, xmm1
+    jp .mlg_two_div
+    je .mlg_zerodiv
+.mlg_two_div:
     movsd xmm1, xmm0
     movsd xmm0, [rbp - MLG_X]
     divsd xmm0, xmm1
@@ -1201,7 +1387,24 @@ DEF_FUNC math_log, MLG_FRAME
     V_PACK rax, rdx
     ret
 
+.mlg_zerodiv:
+    RAISE exc_ZeroDivisionError_type, "float division by zero"
+
+
 .mlg_one:
+    mov [rbp - MLG_ARGS], rdi
+    mov rdi, [rdi]
+    xor esi, esi
+    call math_log_oversized
+    test eax, eax
+    jz .mlg_one_plain
+    call float_from_f64
+    leave
+    V_PACK rax, rdx
+    ret
+.mlg_one_plain:
+    mov rdi, [rbp - MLG_ARGS]
+    mov esi, 1
     lea rdx, [rel mm_n_log]
     call math_arg1_double
     movsd [rbp - MLG_X], xmm0
@@ -1597,7 +1800,9 @@ DEF_FUNC math_hypot, MHY_FRAME
     jz .mhy_type_i
     andpd xmm0, [rel mm_absmask]
     ucomisd xmm0, [rel mm_inf]
-    je .mhy_infinite
+    jp .mhy_not_inf             ; unordered: a NaN is not an infinity, and
+    je .mhy_infinite            ; ucomisd sets ZF for both
+.mhy_not_inf:
     ucomisd xmm0, [rbp - MHY_MAX]
     jbe .mhy_max_loop
     movsd [rbp - MHY_MAX], xmm0
@@ -1958,8 +2163,8 @@ DEF_FUNC math_module_create, MMC_FRAME
     MODULE_ADD_FUNC math_exp,       mm_n_exp
     MODULE_ADD_FUNC math_expm1,     mm_n_expm1
     MODULE_ADD_FUNC math_exp2,      mm_n_exp2
-    MODULE_ADD_FUNC math_log2,      mm_n_log2
-    MODULE_ADD_FUNC math_log10,     mm_n_log10
+    MODULE_ADD_FUNC math_log2_big,  mm_n_log2
+    MODULE_ADD_FUNC math_log10_big, mm_n_log10
     MODULE_ADD_FUNC math_log1p,     mm_n_log1p
     MODULE_ADD_FUNC math_sin,       mm_n_sin
     MODULE_ADD_FUNC math_cos,       mm_n_cos
@@ -2040,6 +2245,9 @@ align 16
 mm_absmask: dq 0x7fffffffffffffff, 0x7fffffffffffffff
 align 8
 mm_inf:     dq 0x7ff0000000000000
+mm_ln2:     dq 0.6931471805599453      ; log(2.0), log2(2.0), log10(2.0):
+mm_log2_2:  dq 1.0                     ; the second term of CPython's
+mm_log10_2: dq 0.30102999566398120     ; loghelper, one per base
 mm_math_dot:  db "math.", 0
 mm_takes_one: db "() takes exactly one argument (", 0
 mm_given:     db " given)", 0
