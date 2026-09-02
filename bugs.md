@@ -47,10 +47,6 @@ one-line fix.
 - **`func.__name__ = "x"` is silently ignored.**  Functions have no settable
   attributes.
 
-- **Dict views have no repr and no contents.**  `repr(d.keys())` is empty
-  where CPython gives `dict_keys(['a'])`; the same for `.values()` and
-  `.items()`.
-
 - **`bytearray` is not reversible.**  `b[0]`, `b[1:]` and `b[::-1]` all work
   now; `reversed(bytearray(...))` is still a TypeError, because the type has
   no `tp_iter`-side answer for it.

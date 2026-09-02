@@ -69,3 +69,40 @@ print(len(d5.values()))
 print(len(d5.items()))
 for x in d5.keys():
     print("should not print")
+
+# --- The repr, which the three view types did not have -----------------------
+#
+# All three had tp_repr 0, and obj_repr answers a NULL Value for that with no
+# exception pending -- so print(d.keys()) printed nothing at all.  The text is
+# the type's own name around the repr of a list of the view's contents, which
+# is what CPython writes and lets list_repr do the work, recursion guard
+# included.
+
+d = {"a": 1, "b": 2}
+print(repr(d.keys()), repr(d.values()), repr(d.items()))
+print(d.keys(), d.values(), d.items())
+print(str(d.keys()), "%s" % (d.items(),))
+
+e = {}
+print(repr(e.keys()), repr(e.values()), repr(e.items()))
+
+f = {1: "x", (2, 3): [4]}
+print(repr(f.keys()), repr(f.values()), repr(f.items()))
+
+# The contents were always there; only the repr was missing.
+print(list(d.keys()), list(d.values()), list(d.items()))
+print(len(d.keys()), len(d.values()), len(d.items()))
+print("a" in d.keys(), "z" in d.keys())
+print(sorted(d.keys()), sorted(d.values()))
+for k, v in d.items():
+    print(k, v)
+
+# A view reflects later changes, and its repr with it.
+g = {"x": 1}
+kv = g.keys()
+print(repr(kv))
+g["y"] = 2
+print(repr(kv), len(kv))
+
+# In a container, and as a dict value.
+print([d.keys()], {"v": d.values()})

@@ -1060,6 +1060,133 @@ DEF_FUNC dict_view_iter
 END_FUNC dict_view_iter
 
 ;; ============================================================================
+;; dict_view_repr(rdi = the view) -> rax = PyStrObject*, edx = TAG_PTR
+;;
+;; "dict_keys(['a'])", and the same for values and items.  The three view
+;; types had tp_repr 0, and obj_repr answers a NULL Value for that with no
+;; exception -- so print(d.keys()) printed nothing at all.
+;;
+;; The text is the type's own name around the repr of a list of the view's
+;; contents, which is exactly what CPython writes, and lets list_repr do the
+;; work including its recursion guard.
+;; ============================================================================
+DVR_VIEW  equ 8
+DVR_LIST  equ 16
+DVR_TEXT  equ 24
+DVR_FRAME equ 32            ; + 2 pushes = 48, 16-aligned
+
+extern obj_repr
+DEF_FUNC dict_view_repr, DVR_FRAME
+    push rbx
+    push r12
+    mov [rbp - DVR_VIEW], rdi
+
+    xor edi, edi
+    extern list_new
+    call list_new
+    mov [rbp - DVR_LIST], rax
+    mov rbx, rax
+
+    mov rdi, [rbp - DVR_VIEW]
+    call dict_view_iter
+    mov r12, rax
+.dvr_loop:
+    mov rdi, r12
+    call dict_iter_next
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .dvr_done
+    push rax
+    push rdx
+    mov rdi, rbx
+    mov rsi, rax
+    V_PACK rsi, rdx
+    extern list_append
+    call list_append
+    pop rdx
+    pop rax
+    jmp .dvr_loop
+.dvr_done:
+    mov rdi, r12
+    call obj_decref
+
+    mov rdi, rbx
+    call obj_repr
+    V_UNPACK rax, rdx
+    mov [rbp - DVR_TEXT], rax
+    mov rdi, rbx
+    call obj_decref
+    mov rax, [rbp - DVR_TEXT]
+    test rax, rax
+    jz .dvr_failed
+
+    ; "<name>(" + that + ")"
+    mov rdi, [rbp - DVR_VIEW]
+    mov rdi, [rdi + PyObject.ob_type]
+    mov rbx, [rdi + PyTypeObject.tp_name]
+    xor ecx, ecx
+.dvr_namelen:
+    cmp byte [rbx + rcx], 0
+    je .dvr_have_namelen
+    inc rcx
+    jmp .dvr_namelen
+.dvr_have_namelen:
+    mov r12, rcx                        ; the name's length
+    mov rax, [rbp - DVR_TEXT]
+    mov rdx, [rax + PyStrObject.ob_size]
+    lea rdi, [r12 + rdx]
+    add rdi, PyStrObject.data + 10      ; two brackets, a NUL and slack
+    extern ap_malloc
+    call ap_malloc
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel str_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyStrObject.ob_hash], -1
+    push rax
+
+    lea rdi, [rax + PyStrObject.data]
+    mov rsi, rbx
+    mov rdx, r12
+    extern ap_memcpy
+    call ap_memcpy
+    mov rax, [rsp]
+    mov byte [rax + PyStrObject.data + r12], '('
+    lea rdi, [rax + PyStrObject.data + r12 + 1]
+    mov rcx, [rbp - DVR_TEXT]
+    lea rsi, [rcx + PyStrObject.data]
+    mov rdx, [rcx + PyStrObject.ob_size]
+    call ap_memcpy
+    mov rax, [rsp]
+    mov rcx, [rbp - DVR_TEXT]
+    mov rdx, [rcx + PyStrObject.ob_size]
+    lea rcx, [r12 + rdx]
+    mov byte [rax + PyStrObject.data + rcx + 1], ')'
+    mov byte [rax + PyStrObject.data + rcx + 2], 0
+    add rcx, 2
+    mov [rax + PyStrObject.ob_size], rcx
+    mov rdi, rax
+    extern str_set_length
+    call str_set_length
+
+    mov rdi, [rbp - DVR_TEXT]
+    call obj_decref
+    pop rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dvr_failed:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_view_repr
+
+;; ============================================================================
 ;; dict_keys_view_contains(rdi=view, rsi=key, rdx=key_tag) -> int (0 or 1)
 ;; sq_contains for dict_keys view: delegates to dict_contains on underlying dict.
 ;; ============================================================================
@@ -1746,8 +1873,8 @@ dict_keys_view_type:
     dq dict_keys_view_name      ; tp_name
     dq PyDictViewObject_size    ; tp_basicsize
     dq dict_view_dealloc        ; tp_dealloc
-    dq 0                        ; tp_repr
-    dq 0                        ; tp_str
+    dq dict_view_repr           ; tp_repr
+    dq dict_view_repr           ; tp_str
     dq 0                        ; tp_hash
     dq 0                        ; tp_call
     dq 0                        ; tp_getattr
@@ -1778,8 +1905,8 @@ dict_values_view_type:
     dq dict_values_view_name    ; tp_name
     dq PyDictViewObject_size    ; tp_basicsize
     dq dict_view_dealloc        ; tp_dealloc
-    dq 0                        ; tp_repr
-    dq 0                        ; tp_str
+    dq dict_view_repr           ; tp_repr
+    dq dict_view_repr           ; tp_str
     dq 0                        ; tp_hash
     dq 0                        ; tp_call
     dq 0                        ; tp_getattr
@@ -1810,8 +1937,8 @@ dict_items_view_type:
     dq dict_items_view_name     ; tp_name
     dq PyDictViewObject_size    ; tp_basicsize
     dq dict_view_dealloc        ; tp_dealloc
-    dq 0                        ; tp_repr
-    dq 0                        ; tp_str
+    dq dict_view_repr           ; tp_repr
+    dq dict_view_repr           ; tp_str
     dq 0                        ; tp_hash
     dq 0                        ; tp_call
     dq 0                        ; tp_getattr
