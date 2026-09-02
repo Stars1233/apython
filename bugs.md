@@ -54,9 +54,7 @@ one-line fix.
   are missing the in-place forms; `set` is missing `__iand__` and `__ior__`,
   deliberately -- it has no `nb_inplace_*` slots, so `s &= t` degrades to the
   binary form, and a by-name `__iand__` that did not mutate in place would be
-  a wrong answer rather than a missing name.  `object.__getstate__` answers
-  `self.__dict__ or None` but not CPython's `(None, {...})` pair form for a
-  `__slots__` class, which here has no instance dict to build it from.
+  a wrong answer rather than a missing name.
 
 - **`collections.deque` is list-backed, and two itertools functions
   materialise.**  CPython's deque is a block-linked list, so `appendleft` and
@@ -131,6 +129,15 @@ one-line fix.
   ask about `TYPE_FLAG_HAS_SLOTS` as well as about `tp_dictoffset`.  Zeroing
   the offset means moving the slots down by one word and teaching the dealloc
   and traverse walks where the header now ends.
+
+- **A `__slots__` class inheriting from one without them keeps no dict.**
+  `class C(A)` with `__slots__ = ('y',)` and a plain `A` should still accept
+  an arbitrary attribute, because A's instances have a `__dict__` and C
+  inherits it; here `TYPE_FLAG_HAS_SLOTS` suppresses the dict unconditionally
+  and `c.z = 1` is an AttributeError.  It is also why `object.__getstate__`
+  cannot produce CPython's `({'z': 1}, {'y': 5})` form -- the dict half never
+  exists.  The `(None, {slots})` form, which is the one that matters, is
+  there.
 
 - **A heaptype's layout base is the widest of its bases, not CPython's solid
   base.**  `class C(A, B)` where A and B are unrelated builtin subclasses of

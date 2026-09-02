@@ -1046,14 +1046,22 @@ DEF_FUNC_BARE object_method_getattribute
     jmp builtin_getattr         ; with two arguments it raises, as it should
 END_FUNC object_method_getattribute
 
-;; object.__getstate__(self) -> self.__dict__, or None
+;; object.__getstate__(self) -> self.__dict__, the pair (dict, slots), or None
 ;;
-;; CPython 3.11+ also has a pair form for a __slots__ class, (None, {...}).
-;; A __slots__ class here has no instance dict at all, so that form would need
-;; a walk of the slot words instead of a dict; it is recorded in bugs.md
-;; rather than guessed at.  Nothing in lib/ asks -- copy reaches for
-;; __reduce_ex__, which still raises.
-OGS_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+;; CPython 3.11+ answers a two-tuple for a class with __slots__: (None,
+;; {name: value}), or (the instance dict, {slots}) when it has both.  Only
+;; the plain dict form was here, so every __slots__ class answered None and
+;; pickling one through __getstate__ lost every slot it had.
+;;
+;; There is no name-carrying slot walk anywhere else -- instance_traverse and
+;; instance_dealloc walk the same words by OFFSET, which is all they need --
+;; so the names come from where they are actually recorded: the member
+;; descriptors in each type's dict along the MRO.
+OGS_SELF  equ 8
+OGS_DICT  equ 16
+OGS_SLOTS equ 24
+OGS_TUP   equ 32
+OGS_FRAME equ 48            ; + 0 pushes = 48
 global object_method_getstate
 DEF_FUNC object_method_getstate, OGS_FRAME
     cmp rsi, 1
@@ -1063,12 +1071,54 @@ DEF_FUNC object_method_getstate, OGS_FRAME
     ja .ogs_none
     test rdi, rdi
     jz .ogs_none
-    LOAD_INST_DICT rax, rdi, .ogs_none
+    mov [rbp - OGS_SELF], rdi
+
+    ; The instance dict, if this class has one.  An empty one is None, as
+    ; CPython has it.
+    mov qword [rbp - OGS_DICT], 0
+    LOAD_INST_DICT rax, rdi, .ogs_no_dict
+    test rax, rax
+    jz .ogs_no_dict
+    cmp qword [rax + PyDictObject.ob_size], 0
+    je .ogs_no_dict
+    mov [rbp - OGS_DICT], rax
+.ogs_no_dict:
+
+    ; The slots, if this class has any set.
+    mov rdi, [rbp - OGS_SELF]
+    call object_collect_slots   ; -> rax = a dict, or 0 when there are none
+    mov [rbp - OGS_SLOTS], rax
+    test rax, rax
+    jnz .ogs_pair
+
+    ; No slots: the plain dict form.
+    mov rax, [rbp - OGS_DICT]
     test rax, rax
     jz .ogs_none
-    cmp qword [rax + PyDictObject.ob_size], 0
-    je .ogs_none                ; an empty dict is None, as CPython has it
     INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.ogs_pair:
+    ; (dict_or_None, {slots}).  The tuple takes over the slots dict this
+    ; built, and a reference to the instance dict.
+    mov edi, 2
+    extern tuple_new
+    call tuple_new
+    mov [rbp - OGS_TUP], rax
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rcx, [rbp - OGS_DICT]
+    test rcx, rcx
+    jnz .ogs_pair_dict
+    lea rcx, [rel none_singleton]
+.ogs_pair_dict:
+    INCREF rcx
+    mov [rdx], rcx
+    mov rcx, [rbp - OGS_SLOTS]
+    mov [rdx + 8], rcx          ; the reference object_collect_slots returned
+    mov rax, [rbp - OGS_TUP]
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx
@@ -1083,6 +1133,112 @@ DEF_FUNC object_method_getstate, OGS_FRAME
 .ogs_bad:
     RAISE exc_TypeError_type, "__getstate__() takes no arguments"
 END_FUNC object_method_getstate
+
+;; ============================================================================
+;; object_collect_slots(rdi = an instance) -> rax = a new dict of the slots
+;; that are set, or 0 when there are none
+;;
+;; Walks the MRO, and each type's dict, for member descriptors -- which are
+;; where a __slots__ name is recorded, one per slot, built by type_from_parts.
+;; The value is read the way instance_getattr's .found_slot reads it,
+;; including its convention that a 0 word means the slot was never assigned.
+;;
+;; CPython's order is the MRO's: the most derived class's slots first.
+;; ============================================================================
+OCS_SELF  equ 8
+OCS_DICT  equ 16
+OCS_TYPE  equ 24
+OCS_WALK  equ 32
+OCS_ENT   equ 40
+OCS_CAP   equ 48
+OCS_IDX   equ 56
+OCS_FRAME equ 64            ; + 0 pushes = 64
+DEF_FUNC_LOCAL object_collect_slots, OCS_FRAME
+    mov [rbp - OCS_SELF], rdi
+    mov rax, [rdi + PyObject.ob_type]
+    mov [rbp - OCS_TYPE], rax
+    mov [rbp - OCS_WALK], rax
+    mov qword [rbp - OCS_DICT], 0
+
+.ocs_type_loop:
+    mov rax, [rbp - OCS_WALK]
+    test rax, rax
+    jz .ocs_done
+    ; Not rbx: that is the eval loop's bytecode IP, and this function does
+    ; not save it.
+    mov rdx, [rax + PyTypeObject.tp_dict]
+    test rdx, rdx
+    jz .ocs_next_type
+    mov rcx, [rdx + PyDictObject.entries]
+    test rcx, rcx
+    jz .ocs_next_type
+    mov [rbp - OCS_ENT], rcx
+    mov rcx, [rdx + PyDictObject.capacity]
+    mov [rbp - OCS_CAP], rcx
+    mov qword [rbp - OCS_IDX], 0
+
+.ocs_entry_loop:
+    mov rax, [rbp - OCS_IDX]
+    cmp rax, [rbp - OCS_CAP]
+    jge .ocs_next_type
+    imul rax, DICT_ENTRY_SIZE
+    add rax, [rbp - OCS_ENT]
+    mov rdx, [rax + DictEntry.key]
+    test rdx, rdx
+    jz .ocs_next_entry
+    mov rax, [rax + DictEntry.value]
+    V_TEST_PTR rax, rcx
+    ja .ocs_next_entry
+    test rax, rax
+    jz .ocs_next_entry
+    extern member_descr_type
+    lea rcx, [rel member_descr_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .ocs_next_entry
+
+    ; A member descriptor: read the word it names.  0 means never assigned.
+    mov rcx, [rax + PyMemberDescrObject.md_offset]
+    mov rdi, [rbp - OCS_SELF]
+    mov rdx, [rdi + rcx]
+    test rdx, rdx
+    jz .ocs_next_entry
+
+    ; Make the dict on the first slot that is actually set, so a class with
+    ; __slots__ and nothing assigned answers None the way CPython's does.
+    push rax
+    sub rsp, 8
+    cmp qword [rbp - OCS_DICT], 0
+    jne .ocs_have_dict
+    extern dict_new
+    call dict_new
+    mov [rbp - OCS_DICT], rax
+.ocs_have_dict:
+    add rsp, 8
+    pop rax
+
+    mov rdi, [rbp - OCS_DICT]
+    mov rsi, [rax + PyMemberDescrObject.md_name]
+    mov rcx, [rax + PyMemberDescrObject.md_offset]
+    mov rdx, [rbp - OCS_SELF]
+    mov rdx, [rdx + rcx]
+    extern dict_set
+    call dict_set
+
+.ocs_next_entry:
+    inc qword [rbp - OCS_IDX]
+    jmp .ocs_entry_loop
+
+.ocs_next_type:
+    mov rax, [rbp - OCS_WALK]
+    MRO_NEXT rax, [rbp - OCS_TYPE]
+    mov [rbp - OCS_WALK], rax
+    jmp .ocs_type_loop
+
+.ocs_done:
+    mov rax, [rbp - OCS_DICT]
+    leave
+    ret
+END_FUNC object_collect_slots
 
 ;; object.__subclasshook__(cls, subclass) -> NotImplemented
 ;;

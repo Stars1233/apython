@@ -93,3 +93,72 @@ c.increment()
 c.increment()
 c.increment()
 print(c.get())
+
+# object.__getstate__ answered self.__dict__ or None, and a __slots__ class
+# has no instance dict -- so every one of them answered None and lost every
+# slot it had.  CPython 3.11+ gives a two-tuple, (None, {name: value}).
+#
+# There is no name-carrying slot walk anywhere else: instance_traverse and
+# instance_dealloc walk the same words by OFFSET, which is all they need.
+# The names come from where they are actually recorded -- the member
+# descriptors in each type's dict, along the MRO, most derived first.
+
+
+class Plain:
+    pass
+
+
+class One:
+    __slots__ = ('a', 'b')
+
+
+class NoSlots:
+    __slots__ = ()
+
+
+class Derived(One):
+    __slots__ = ('c',)
+
+
+p = Plain()
+print(p.__getstate__())
+p.q = 1
+print(p.__getstate__())
+
+print(One().__getstate__())          # nothing assigned yet: None
+o = One()
+o.a = 1
+print(o.__getstate__())
+o.b = 2
+print(o.__getstate__())
+
+print(NoSlots().__getstate__())
+
+d = Derived()
+d.a = 1
+d.c = 3
+print(d.__getstate__())
+d2 = Derived()
+d2.c = 9
+print(d2.__getstate__())
+
+# The values are the objects themselves, not copies.
+marker = [1, 2]
+o2 = One()
+o2.a = marker
+state = o2.__getstate__()
+print(state[0], state[1]['a'] is marker, sorted(state[1]))
+
+# Deleting a slot takes it back out of the state.
+o3 = One()
+o3.a = 1
+o3.b = 2
+del o3.a
+print(o3.__getstate__())
+
+# It is still a method on every object, and still takes no arguments.
+try:
+    o.__getstate__(1)
+except TypeError:
+    print("TypeError")
+print(object().__getstate__())
