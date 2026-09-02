@@ -118,6 +118,7 @@ struc PyByteArrayObject
     .ob_size:   resq 1    ; +16: length in bytes
     .ob_cap:    resq 1    ; +24: usable bytes at ob_bytes, excluding the NUL
     .ob_bytes:  resq 1    ; +32: the buffer
+    .ob_exports: resq 1   ; +40: live memoryviews over it, which block a resize
 endstruc
 
 ; MemoryView object — reference to a slice of a bytes-like object

@@ -19,6 +19,8 @@ extern io_buffer_acquired
 extern ap_memcmp
 extern ap_memmove
 extern exc_MemoryError_type
+extern exc_BufferError_type
+extern set_exception
 extern ap_realloc
 extern ap_malloc
 extern ap_free
@@ -2899,6 +2901,7 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     mov qword [rbx + PyByteArrayObject.ob_size], 0
     mov qword [rbx + PyByteArrayObject.ob_cap], 0
     mov qword [rbx + PyByteArrayObject.ob_bytes], 0
+    mov qword [rbx + PyByteArrayObject.ob_exports], 0
     ; Zero whatever the subclass added: a dict slot and any __slots__ values
     ; are read as Values by instance_dealloc and by the collector.
     mov rcx, [rbp - BA_SIZE]
@@ -2958,6 +2961,17 @@ END_FUNC bytearray_type_call
 ;; The bytes between the old and new length are NOT initialised; the caller
 ;; fills them.  bytearray(n) zeroes them itself.
 ;; ============================================================================
+; Several bytearray mutators move bytes with ap_memmove BEFORE they call
+; bytearray_resize, and call it only to settle ob_size afterwards.  For those
+; the guard inside resize fires too late -- the view's bytes have already
+; shifted under it -- so they ask up front instead.
+%macro BA_REFUSE_IF_EXPORTED 1  ; %1 = register holding the bytearray
+    cmp qword [%1 + PyByteArrayObject.ob_exports], 0
+    jle %%ok
+    RAISE exc_BufferError_type, "Existing exports of data: object cannot be re-sized"
+%%ok:
+%endmacro
+
 BRS_SELF  equ 8
 BRS_NEW   equ 16
 BRS_CAP   equ 24
@@ -2966,6 +2980,29 @@ BRS_FRAME equ 32            ; + 0 pushes = 32
 DEF_FUNC bytearray_resize, BRS_FRAME
     mov [rbp - BRS_SELF], rdi
     mov [rbp - BRS_NEW], rsi
+
+    ; A live memoryview points straight into ob_bytes, so a length change
+    ; leaves it dangling.  CPython refuses one; there was nothing here to
+    ; refuse it with, and `m = memoryview(ba); ba.extend(b'x'*200)` corrupted
+    ; the heap outright.  The same length is always allowed, which is what
+    ; keeps reverse() and a same-size slice assignment legal with a view out.
+    ;
+    ; SET_EXC, not RAISE: bytearray_ass_subscript holds an owned source buffer
+    ; and an owned temp bytearray across this call, and a RAISE abandons the C
+    ; stack and both of them.  The 0 return already means failure and cannot
+    ; be confused with anything -- its only other producer would be
+    ; ap_realloc, which calls fatal_error rather than returning NULL.
+    cmp rsi, [rdi + PyByteArrayObject.ob_size]
+    je .brs_exports_ok
+    cmp qword [rdi + PyByteArrayObject.ob_exports], 0
+    jle .brs_exports_ok
+    SET_EXC exc_BufferError_type, "Existing exports of data: object cannot be re-sized"
+    xor eax, eax
+    leave
+    ret
+.brs_exports_ok:
+    mov rdi, [rbp - BRS_SELF]
+    mov rsi, [rbp - BRS_NEW]
     mov rcx, [rdi + PyByteArrayObject.ob_cap]
     ; A fresh object has no buffer at all, and the NUL below has to go
     ; somewhere -- so allocate even when the requested length is 0.
@@ -3074,6 +3111,7 @@ DEF_FUNC bytearray_new, BAN_FRAME
     mov qword [rax + PyByteArrayObject.ob_size], 0
     mov qword [rax + PyByteArrayObject.ob_cap], 0
     mov qword [rax + PyByteArrayObject.ob_bytes], 0
+    mov qword [rax + PyByteArrayObject.ob_exports], 0
     inc qword [rcx + PyObject.ob_refcnt]
 
     mov rdi, rax
@@ -3315,6 +3353,8 @@ DEF_FUNC bytearray_ass_subscript, 104
     ret
 
 .bas_del_one:
+    mov rdi, [rbp - BAS_SELF]
+    BA_REFUSE_IF_EXPORTED rdi   ; the gap is closed before the resize
     ; Close the gap, then drop the length by one.
     mov rdi, [rbp - BAS_SELF]
     call bytearray_data
@@ -3392,6 +3432,19 @@ DEF_FUNC bytearray_ass_subscript, 104
     mov r8, r9                  ; an empty span, as slice_indices allows
 .bas_span_ok:
     sub r8, r9                  ; how many bytes go away
+    ; The only arm that changes the length, and it moves the tail before it
+    ; resizes.  Refused here, with the two owned things released first --
+    ; .bas_ext_mismatch below does the same for the same reason.
+    mov rcx, [rbp - BAS_SELF]
+    cmp qword [rcx + PyByteArrayObject.ob_exports], 0
+    jle .bas_span_exports_ok
+    mov rdx, [rcx + PyByteArrayObject.ob_size]
+    sub rdx, r8
+    add rdx, [rbp - BAS_SLEN]   ; the length this assignment would produce
+    cmp rdx, [rcx + PyByteArrayObject.ob_size]
+    je .bas_span_exports_ok     ; same size: legal with a view out
+    jmp .bas_span_exported
+.bas_span_exports_ok:
     ; To the frame, not left in r8: bytearray_resize and bytearray_data are
     ; both ahead, both ordinary calls, and r8 is caller-saved.  rdx and rcx
     ; were already spilled around each of them; this one was not, so the
@@ -3484,6 +3537,12 @@ DEF_FUNC bytearray_ass_subscript, 104
     jmp .bas_ext_loop
 
 .bas_ext_delete:
+    ; An empty selection removes nothing and never resizes.
+    cmp qword [rbp - BAS_N], 0
+    jle .bas_ext_delete_go
+    mov rdi, [rbp - BAS_SELF]
+    BA_REFUSE_IF_EXPORTED rdi   ; the compaction runs before the resize
+.bas_ext_delete_go:
     ; Walk forward, copying the bytes that survive down over the gaps.
     mov rdi, [rbp - BAS_SELF]
     call bytearray_data
@@ -3560,6 +3619,19 @@ DEF_FUNC bytearray_ass_subscript, 104
 
 .bas_range:
     RAISE exc_IndexError_type, "bytearray index out of range"
+
+.bas_span_exported:
+    mov rdi, [rbp - BAS_SRC]
+    test rdi, rdi
+    jz .bas_span_exported_raise
+    call ap_free
+.bas_span_exported_raise:
+    mov rdi, [rbp - BAS_TMP]
+    test rdi, rdi
+    jz .bas_span_exported_raise2
+    call obj_decref
+.bas_span_exported_raise2:
+    RAISE exc_BufferError_type, "Existing exports of data: object cannot be re-sized"
 
 .bas_ext_mismatch:
     ; RAISE abandons the C stack, so the buffer byteslike_source owns has to
@@ -3732,7 +3804,13 @@ DEF_FUNC bytearray_method_append, BAM_FRAME
     leave
     ret
 .bap_oom:
-    RAISE exc_MemoryError_type, "out of memory"
+    ; bytearray_resize's 0 now means "a live memoryview blocks this", with a
+    ; BufferError already recorded -- raising a MemoryError over it would
+    ; bury the real one.  Propagate the pending exception instead.
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
 .bap_argerr:
     RAISE exc_TypeError_type, "append() takes exactly one argument"
 END_FUNC bytearray_method_append
@@ -3802,7 +3880,13 @@ DEF_FUNC bytearray_method_extend, BAM_FRAME
     leave
     ret
 .bex_oom:
-    RAISE exc_MemoryError_type, "out of memory"
+    ; bytearray_resize's 0 now means "a live memoryview blocks this", with a
+    ; BufferError already recorded -- raising a MemoryError over it would
+    ; bury the real one.  Propagate the pending exception instead.
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
 .bex_argerr:
     RAISE exc_TypeError_type, "extend() takes exactly one argument"
 END_FUNC bytearray_method_extend
@@ -3862,7 +3946,13 @@ DEF_FUNC bytearray_method_insert, BAM_FRAME
     leave
     ret
 .bin_oom:
-    RAISE exc_MemoryError_type, "out of memory"
+    ; bytearray_resize's 0 now means "a live memoryview blocks this", with a
+    ; BufferError already recorded -- raising a MemoryError over it would
+    ; bury the real one.  Propagate the pending exception instead.
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
 .bin_argerr:
     RAISE exc_TypeError_type, "insert() takes exactly 2 arguments"
 END_FUNC bytearray_method_insert
@@ -3875,6 +3965,7 @@ DEF_FUNC bytearray_method_pop, BAM_FRAME
     jg .bpo_argerr
     mov rax, [rdi]
     mov [rbp - BAM_SELF], rax
+    BA_REFUSE_IF_EXPORTED rax   ; the memmove below runs before the resize
     mov rdx, [rax + PyByteArrayObject.ob_size]
     test rdx, rdx
     jz .bpo_empty
@@ -3933,6 +4024,7 @@ DEF_FUNC bytearray_method_remove, BAM_FRAME
     jne .brm_argerr
     mov rax, [rdi]
     mov [rbp - BAM_SELF], rax
+    BA_REFUSE_IF_EXPORTED rax   ; the memmove below runs before the resize
     mov rdi, [rdi + 8]
     call bytearray_index_arg
     mov [rbp - BAM_ARG], rax
@@ -3979,8 +4071,15 @@ DEF_FUNC bytearray_method_clear, BAM_FRAME
     mov rdi, [rdi]
     xor esi, esi
     call bytearray_resize
+    test eax, eax
+    jz .bcl_failed              ; the return was ignored outright
     LOAD_NONE rax
     mov edx, TAG_PTR
+    leave
+    ret
+.bcl_failed:
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
     leave
     ret
 END_FUNC bytearray_method_clear
@@ -4194,6 +4293,16 @@ DEF_FUNC bytearray_inplace_concat, BAO_FRAME
     call bytes_like_ptr_len
     test ecx, ecx
     jz .bic2_not_impl
+    ; Refused here rather than deeper down: bytearray_extend_from reports the
+    ; block with a 0 return, and op_binary_op reads a slot's NULL as
+    ; "declined" and reports "unsupported operand type(s)" -- burying the
+    ; BufferError.  Only when there is actually something to append; `ba +=
+    ; b""` changes no length and stays legal, as it does in CPython.
+    test r10, r10
+    jz .bic2_do_extend
+    mov rdi, [rbp - BAO_SELF]
+    BA_REFUSE_IF_EXPORTED rdi
+.bic2_do_extend:
     mov rdi, [rbp - BAO_SELF]
     mov rsi, [rbp - BAO_ARG]
     call bytearray_extend_from
@@ -4214,6 +4323,7 @@ END_FUNC bytearray_inplace_concat
 
 DEF_FUNC bytearray_inplace_repeat, BAO_FRAME
     mov [rbp - BAO_SELF], rdi
+    BA_REFUSE_IF_EXPORTED rdi   ; its shrink-to-0 arm ignores the resize result
     mov rdi, rsi                ; a Value, as in bytearray_repeat
     V_UNPACK rdi, rdx
     call obj_as_index
@@ -4271,6 +4381,43 @@ END_FUNC bytearray_inplace_repeat
 
 
 
+
+;; ============================================================================
+;; bytearray_export_acquired(rdi = any source object or Value)
+;; bytearray_export_released(rdi = the same)
+;;
+;; The BytesIO pair next door, for the other resizable buffer a memoryview can
+;; point into.  Both are no-ops unless the source really is a bytearray, so
+;; every memoryview site can call them unconditionally beside the io_buffer_*
+;; ones; the two are mutually exclusive by type.
+;; ============================================================================
+DEF_FUNC_BARE bytearray_export_acquired
+    test rdi, rdi
+    jz .bea_out
+    V_TEST_PTR rdi, rax
+    ja .bea_out
+    lea rax, [rel bytearray_type]
+    cmp [rdi + PyObject.ob_type], rax
+    jne .bea_out
+    inc qword [rdi + PyByteArrayObject.ob_exports]
+.bea_out:
+    ret
+END_FUNC bytearray_export_acquired
+
+DEF_FUNC_BARE bytearray_export_released
+    test rdi, rdi
+    jz .ber_out
+    V_TEST_PTR rdi, rax
+    ja .ber_out
+    lea rax, [rel bytearray_type]
+    cmp [rdi + PyObject.ob_type], rax
+    jne .ber_out
+    cmp qword [rdi + PyByteArrayObject.ob_exports], 0
+    jle .ber_out
+    dec qword [rdi + PyByteArrayObject.ob_exports]
+.ber_out:
+    ret
+END_FUNC bytearray_export_released
 
 ;; ============================================================================
 ;; bytearray_dealloc(obj)
@@ -4559,6 +4706,10 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     push rax                           ; save result
     push rdi                           ; save for INCREF
     INCREF rdi
+    ; A bytearray source counts this view, so a later resize can refuse.  The
+    ; BytesIO sites below already do the equivalent through io_buffer_*; this
+    ; arm called neither, which is the hole.
+    call bytearray_export_acquired
     pop rdi
     pop rax
 
@@ -4614,6 +4765,7 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     push rax
     push rdi
     mov rdi, rcx
+    call bytearray_export_acquired
     call io_buffer_acquired     ; a second view over a BytesIO is a second
     pop rdi                     ; export, and its release will decrement
     pop rax
@@ -4644,6 +4796,7 @@ DEF_FUNC memoryview_dealloc_proper
     test rdi, rdi
     jz .mvd_no_source                  ; already released
     push rdi
+    call bytearray_export_released
     call io_buffer_released
     pop rdi
     call obj_decref
@@ -4918,6 +5071,7 @@ DEF_FUNC memoryview_method_release, MVM_FRAME
     jz .mvrl_done
     push rax                    ; io_buffer_released returns in rax, so the
     mov rdi, rax                ; source has to survive the call in a slot
+    call bytearray_export_released
     call io_buffer_released     ; a BytesIO counts its live views
     pop rdi
     call obj_decref
@@ -5047,6 +5201,7 @@ DEF_FUNC memoryview_method_cast, MVC_FRAME
     push rax
     push rdi
     mov rdi, rcx
+    call bytearray_export_acquired
     call io_buffer_acquired
     pop rdi
     pop rax
@@ -5311,6 +5466,7 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     inc qword [rcx + PyObject.ob_refcnt]
     push rax
     mov rdi, rcx
+    call bytearray_export_acquired
     call io_buffer_acquired
     pop rax
 .ms_no_source:

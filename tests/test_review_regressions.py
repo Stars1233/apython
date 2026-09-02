@@ -896,3 +896,153 @@ def seek_to_tell():
 
 
 check("seek(tell()) over a CR", seek_to_tell)
+
+
+# ---------------------------------------------------------------------------
+# A memoryview over a bytearray holds a raw pointer into its buffer, and
+# nothing stopped the bytearray from moving out from under it: the first case
+# below did not merely read freed memory, it corrupted the heap outright
+# ("malloc(): unaligned tcache chunk detected").  BytesIO already counted its
+# live views; a bytearray now does too.
+# ---------------------------------------------------------------------------
+
+def view_then(mutate):
+    def run():
+        ba = bytearray(b"abcdef")
+        m = memoryview(ba)
+        mutate(ba)
+        return m[0]
+    return run
+
+
+def _extend(ba):
+    ba.extend(b"x" * 200)
+
+
+def _append(ba):
+    ba.append(1)
+
+
+def _pop(ba):
+    ba.pop()
+
+
+def _delitem(ba):
+    del ba[0]
+
+
+def _slice_grow(ba):
+    ba[0:1] = b"xyz"
+
+
+def _slice_del(ba):
+    del ba[::2]
+
+
+def _clear(ba):
+    ba.clear()
+
+
+def _remove(ba):
+    ba.remove(ord("a"))
+
+
+def _imul(ba):
+    ba *= 2
+
+
+def _iadd(ba):
+    ba += b"xyz"
+
+
+check("extend under a view", view_then(_extend))
+check("append under a view", view_then(_append))
+check("pop under a view", view_then(_pop))
+check("del b[0] under a view", view_then(_delitem))
+check("slice grow under a view", view_then(_slice_grow))
+check("del b[::2] under a view", view_then(_slice_del))
+check("clear under a view", view_then(_clear))
+check("remove under a view", view_then(_remove))
+check("b *= 2 under a view", view_then(_imul))
+check("b += x under a view", view_then(_iadd))
+
+
+def write_through_stale_view():
+    ba = bytearray(b"abcdef")
+    m = memoryview(ba)
+    try:
+        ba.extend(b"x" * 200)
+    except BufferError:
+        pass
+    m[0] = 90
+    return bytes(ba[:2])
+
+
+def slice_view_blocks():
+    ba = bytearray(b"abcdef")
+    m = memoryview(ba)[1:3]
+    ba.extend(b"x" * 100)
+    return m[0]
+
+
+def released_view_allows():
+    ba = bytearray(b"abc")
+    m = memoryview(ba)
+    m.release()
+    ba.extend(b"x" * 100)
+    return len(ba)
+
+
+def dropped_view_allows():
+    ba = bytearray(b"abc")
+    m = memoryview(ba)
+    del m
+    ba.extend(b"x" * 100)
+    return len(ba)
+
+
+def same_length_is_fine():
+    ba = bytearray(b"abcdef")
+    m = memoryview(ba)
+    ba[0:2] = b"XY"
+    ba.reverse()
+    return bytes(m)
+
+
+def two_views():
+    ba = bytearray(b"abc")
+    m1 = memoryview(ba)
+    m2 = memoryview(ba)
+    m1.release()
+    try:
+        ba.extend(b"x")
+        return "grew with one view still out"
+    except BufferError:
+        pass
+    m2.release()
+    ba.extend(b"x")
+    return len(ba)
+
+
+check("write through a stale view", write_through_stale_view)
+check("a slice view blocks too", slice_view_blocks)
+check("release, then grow", released_view_allows)
+check("drop the view, then grow", dropped_view_allows)
+check("same-length edits stay legal", same_length_is_fine)
+check("two views, released in turn", two_views)
+check("memoryview(bytes) untouched", lambda: (memoryview(b"abcdef")[0], len(memoryview(b"abc"))))
+check("bytearray still grows", lambda: len(bytearray(b"ab") + bytearray(b"cd")))
+
+
+# Reached while testing the above: the sequence fallback sent NB_INPLACE_ADD
+# to sq_concat and NB_INPLACE_MULTIPLY to sq_repeat, so `ba += x` built a new
+# object and rebound the name -- an alias never saw the change.
+def inplace_is_in_place():
+    c = bytearray(b"x")
+    d = c
+    c += b"y"
+    c *= 2
+    return (bytes(c), bytes(d), c is d)
+
+
+check("bytearray += is in place", inplace_is_in_place)

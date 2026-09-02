@@ -483,18 +483,37 @@ DEF_FUNC_BARE op_binary_op
     cmp r9d, 0              ; NB_ADD
     je .binop_seq_concat
     cmp r9d, 13             ; NB_INPLACE_ADD
-    je .binop_seq_concat
+    je .binop_seq_iconcat
     ; NB_MULTIPLY (5) or NB_INPLACE_MULTIPLY (18) → sq_repeat
     cmp r9d, 5
     je .binop_seq_repeat_left
     cmp r9d, 18             ; NB_INPLACE_MULTIPLY
-    je .binop_seq_repeat_left
+    je .binop_seq_irepeat
     jmp .binop_try_dunder
+
+.binop_seq_iconcat:
+    ; The comment above said sq_inplace_concat and the code read sq_concat, so
+    ; `ba += b"x"` built a NEW bytearray and rebound the name: an alias never
+    ; saw the change, and `c is d` went False across it.  bytearray's
+    ; sq_inplace_concat has existed all along and nothing reached it.
+    mov rcx, [rax + PySequenceMethods.sq_inplace_concat]
+    test rcx, rcx
+    jz .binop_seq_concat
+    mov rax, rcx
+    jmp .binop_seq_have_concat
+
+.binop_seq_irepeat:
+    mov rcx, [rax + PySequenceMethods.sq_inplace_repeat]
+    test rcx, rcx
+    jz .binop_seq_repeat_left
+    mov rax, rcx
+    jmp .binop_seq_have_repeat
 
 .binop_seq_concat:
     mov rax, [rax + PySequenceMethods.sq_concat]
     test rax, rax
     jz .binop_try_dunder
+.binop_seq_have_concat:
     ; sq_concat(left, right): rdi=left, rsi=right already set
     mov rdx, [rsp + BO_LTAG]
     mov rcx, [rsp + BO_RTAG]
@@ -514,6 +533,7 @@ DEF_FUNC_BARE op_binary_op
     mov rax, [rax + PySequenceMethods.sq_repeat]
     test rax, rax
     jz .binop_try_dunder
+.binop_seq_have_repeat:
     ; sq_repeat(left=sequence, right=count)
     mov rdx, [rsp + BO_LTAG]
     mov rcx, [rsp + BO_RTAG]

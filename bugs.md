@@ -34,11 +34,10 @@ one-line fix.
   `(start, stop, step)`, so `slice(1) < slice(2)` is True; here it is a
   TypeError.  Equality works.
 
-- **`bytearray` has no arithmetic at all.**  `bytearray_type.tp_as_number` is 0
-  and `bytearray_seq_methods` has neither `sq_concat` nor `sq_repeat`, so
-  `bytearray(b"a") + bytearray(b"b")`, `bytearray(b"a") * 2` and
-  `bytearray(b"%d") % 5` are all TypeErrors.  `tests/test_binop_matrix.py`
-  skips those cells rather than blessing them.
+- **`bytearray` has no `%`.**  `+`, `*`, `+=` and `*=` all work now, through
+  `bytearray_seq_methods`; `bytearray(b"%d") % 5` is still a TypeError, since
+  `bytearray_type.tp_as_number` is 0 and nothing supplies `nb_remainder`.
+  `tests/test_binop_matrix.py` skips that cell rather than blessing it.
 
 - **The set operators build their result with `set_new` whatever the left
   operand was**, so `frozenset({1}) | frozenset({2})` is a `set`, not a
