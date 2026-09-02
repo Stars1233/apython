@@ -13,8 +13,11 @@
 # and this one needs $CPYTHON_LIB.  tests/test_re_opcodes.py is the version
 # that runs in the ordinary gate, driving _sre directly.
 #
-# The score ratchets against tests/re_floor.txt, the way stdlib_probe.sh and
-# source_probe.sh do.  Raise it with --record in the commit that earns it.
+# The floor in tests/re_floor.txt is the set of lines that are ALLOWED to
+# differ, one per line, not a count.  A count cannot tell an improvement from
+# a regression that an improvement elsewhere happens to offset -- and this
+# engine is being fixed a family at a time, so that is the normal case rather
+# than a corner one.  Record it with --record in the commit that earns it.
 #
 #   CPYTHON_LIB=~/tmp/repo/cpython/Lib bash tests/re_probe.sh
 #   bash tests/re_probe.sh --record
@@ -51,15 +54,17 @@ if [ $rc -ge 128 ]; then
 fi
 
 total=$(wc -l < "$W/expected")
-# Count lines present in expected that the actual output does not reproduce.
-differing=$(diff "$W/expected" "$W/actual" | grep -c '^<')
+# The expected-side lines the actual output does not reproduce.  Sorted, so
+# that the floor file is stable against a reordering of the differential.
+diff "$W/expected" "$W/actual" | sed -n 's/^< //p' | sort > "$W/differing"
+differing=$(wc -l < "$W/differing")
 matching=$((total - differing))
 
 echo "re differential: $matching matching, $differing differing, $total total"
 
 if [ -n "$RECORD" ]; then
-    printf '%s\n' "$matching" > "$FLOOR"
-    echo "recorded floor: $matching matching lines -> $FLOOR"
+    cp "$W/differing" "$FLOOR"
+    echo "recorded floor: $differing lines allowed to differ -> $FLOOR"
     exit 0
 fi
 
@@ -68,14 +73,18 @@ if [ ! -f "$FLOOR" ]; then
     exit 0
 fi
 
-floor=$(head -1 "$FLOOR")
-if [ "$matching" -lt "$floor" ]; then
-    echo "${RED}FAIL${OFF} re scoreboard: $matching matching, below the floor of $floor"
-    diff "$W/expected" "$W/actual" | head -40
+sort "$FLOOR" > "$W/floor"
+# A line that differs now and was not allowed to is a regression, whatever
+# the totals say.
+comm -23 "$W/differing" "$W/floor" > "$W/new"
+fixed=$(comm -13 "$W/differing" "$W/floor" | wc -l)
+if [ -s "$W/new" ]; then
+    echo "${RED}FAIL${OFF} re scoreboard: $(wc -l < "$W/new") answer(s) that used to match now differ"
+    head -20 "$W/new"
     exit 1
 fi
-if [ "$matching" -gt "$floor" ]; then
-    echo "${GREEN}PASS${OFF} re scoreboard: $matching matching (floor $floor -- raise it with --record)"
+if [ "$fixed" -gt 0 ]; then
+    echo "${GREEN}PASS${OFF} re scoreboard: $matching matching, $fixed newly fixed (record it with --record)"
     exit 0
 fi
-echo "${GREEN}PASS${OFF} re scoreboard: $matching matching"
+echo "${GREEN}PASS${OFF} re scoreboard: $matching matching, $differing differing"

@@ -1249,15 +1249,19 @@ DEF_FUNC sre_state_init, SSI_FRAME
     mov [rbx + SRE_State.original_pos], r14
 
 .init_marks:
-    ; Allocate marks array
+    ; Allocate marks array.  Every reader here already treats -1 as "this
+    ; group never matched" -- and every one of them was reading whatever
+    ; ap_malloc left behind, because nothing ever wrote it.  marks_size is a
+    ; high-water mark, not a count of the marks that were set, so a group
+    ; below it that the match never reached is a hole, and the hole read as
+    ; the allocator's zeros: span (0, 0) and an empty string, where CPython
+    ; answers (-1, -1) and None.
     mov edi, SRE_MARKS_INITIAL * 8
     call ap_malloc
     mov [rbx + SRE_State.marks], rax
     mov qword [rbx + SRE_State.marks_count], SRE_MARKS_INITIAL
-    mov qword [rbx + SRE_State.marks_size], 0
-    mov qword [rbx + SRE_State.lastmark], -1
-    mov qword [rbx + SRE_State.lastindex], -1
-    mov qword [rbx + SRE_State.repeat_ctx], 0
+    mov rdi, rbx
+    call sre_state_reset_marks
 
     pop r14
     pop r13
@@ -1295,6 +1299,34 @@ DEF_FUNC sre_state_fini
 END_FUNC sre_state_fini
 
 ;; ============================================================================
+;; sre_state_reset_marks(SRE_State* state)
+;;
+;; Every attempt at a new starting position begins here, and so does the
+;; state's own construction.  The whole array goes back to -1: clearing only
+;; marks_size would leave the values a failed attempt wrote, and the next
+;; attempt's marks_size can rise back over them.
+;; ============================================================================
+global sre_state_reset_marks
+DEF_FUNC_BARE sre_state_reset_marks
+    mov qword [rdi + SRE_State.marks_size], 0
+    mov qword [rdi + SRE_State.lastmark], -1
+    mov qword [rdi + SRE_State.lastindex], -1
+    mov qword [rdi + SRE_State.repeat_ctx], 0
+    mov rax, [rdi + SRE_State.marks]
+    test rax, rax
+    jz .srm_done
+    mov rcx, [rdi + SRE_State.marks_count]
+.srm_loop:
+    test rcx, rcx
+    jz .srm_done
+    dec rcx
+    mov qword [rax + rcx*8], -1
+    jmp .srm_loop
+.srm_done:
+    ret
+END_FUNC sre_state_reset_marks
+
+;; ============================================================================
 ;; sre_state_set_mark(SRE_State* state, i64 mark_id, i64 pos)
 ;; Set a mark (group boundary) in the state.
 ;; ============================================================================
@@ -1311,16 +1343,29 @@ DEF_FUNC sre_state_set_mark
     ; Grow marks array
     lea rdi, [rsi + 1]
     shl rdi, 1                 ; double requested size
+    mov r8, [rbx + SRE_State.marks_count]   ; the old count, for the fill
     mov [rbx + SRE_State.marks_count], rdi
     shl rdi, 3                 ; * 8 bytes per mark
     push rsi
     push rdx
+    push r8
+    push r8                     ; a pair, so the call stays 16-byte aligned
     mov rsi, rdi               ; new size
     mov rdi, [rbx + SRE_State.marks]
     call ap_realloc
+    pop r8
+    pop r8
     pop rdx
     pop rsi
     mov [rbx + SRE_State.marks], rax
+    ; The new tail is uninitialised, and it has to read as "never matched".
+    mov rcx, [rbx + SRE_State.marks_count]
+.mark_fill:
+    cmp r8, rcx
+    jge .mark_fits
+    mov qword [rax + r8*8], -1
+    inc r8
+    jmp .mark_fill
 
 .mark_fits:
     ; Set mark
@@ -1340,11 +1385,17 @@ DEF_FUNC sre_state_set_mark
     mov [rbx + SRE_State.marks_size], rcx
 .no_update_size:
 
-    ; Update lastindex (group = mark_id / 2, but only for mark_id >= 2)
-    cmp rsi, 2
-    jb .done
+    ; Update lastindex.  CPython sets it on the *closing* mark of a group and
+    ; on no other -- `if (i & 1) state->lastindex = i/2 + 1` -- so mark 1
+    ; closes group 1.  Setting it on every mark from 2 up, at i/2, named the
+    ; wrong group by one and never named group 1 at all; lastgroup, which
+    ; indexes the pattern's indexgroup tuple with it, was therefore always
+    ; None.
+    test rsi, 1
+    jz .done
     mov rax, rsi
-    shr rax, 1                 ; group index
+    shr rax, 1
+    inc rax                     ; group = mark_id / 2 + 1
     mov [rbx + SRE_State.lastindex], rax
 
 .done:
@@ -2967,9 +3018,28 @@ DEF_FUNC sre_restore_marks
     lea rsi, [r12 + 24]
     mov rdx, rcx
     shl rdx, 3
+    push rcx
+    push rcx                    ; a pair, so the call stays 16-byte aligned
     call ap_memcpy
+    pop rcx
+    pop rcx
 
 .restore_done:
+    ; Above the restored size sit the marks the abandoned branch wrote.  They
+    ; were harmless while marks_size gated every read; now that the array
+    ; itself carries the sentinel, a later mark can raise marks_size back over
+    ; them and they would read as matches.
+    mov rax, [rbx + SRE_State.marks]
+    test rax, rax
+    jz .restore_out
+    mov rdx, [rbx + SRE_State.marks_count]
+.restore_clear:
+    cmp rcx, rdx
+    jge .restore_out
+    mov qword [rax + rcx*8], -1
+    inc rcx
+    jmp .restore_clear
+.restore_out:
     pop r12
     pop rbx
     leave
@@ -2998,10 +3068,8 @@ DEF_FUNC sre_search, 32
     ja .search_fail
 
     ; Reset marks for each attempt
-    mov qword [r12 + SRE_State.marks_size], 0
-    mov qword [r12 + SRE_State.lastmark], -1
-    mov qword [r12 + SRE_State.lastindex], -1
-    mov qword [r12 + SRE_State.repeat_ctx], 0
+    mov rdi, r12
+    call sre_state_reset_marks
     mov [r12 + SRE_State.str_pos], r13
     mov [r12 + SRE_State.str_start], r13
 

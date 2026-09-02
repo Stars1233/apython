@@ -118,18 +118,19 @@ one-line fix.
   an allocation per call -- worth threading a (pointer, length) pair through
   the bodies if bytearray ever becomes hot.
 
-- **The regex engine differs from CPython in 33 of 816 checked answers.**
+- **The regex engine differs from CPython in 30 of 816 checked answers.**
   `make check-re` runs `tests/re_differential.py` under both interpreters
   and ratchets against `tests/re_floor.txt`; it needs `$CPYTHON_LIB`,
   because `re` is a Python module and so comes from a real stdlib.  What is
   left, from that diff:
 
-  - An unmatched group reads as `''` with span `(0, 0)` where CPython gives
-    `None` and `(-1, -1)`.  `lastindex` is off by one and `lastgroup` is
-    always `None`.
   - `findall` and `split` return the whole match where a pattern has exactly
-    one group; CPython returns the group.  Both also mishandle a zero-width
-    match when advancing.
+    one group and that group did not match; CPython returns the group, as an
+    empty string.  A multi-group `findall` answers `None` there for the same
+    reason, where CPython also gives `''`.  Both also mishandle a zero-width
+    match when advancing: they step one character past it, which is CPython's
+    pre-3.7 rule, rather than re-searching the same position under a flag that
+    forbids another empty match.
   - `Match.expand()` and `re.sub`'s `\1` group references are not
     implemented -- the template comes back unchanged.
   - A nested unbounded repeat (`(a*)*b`) recurses until the limit.

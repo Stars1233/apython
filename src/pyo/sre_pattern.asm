@@ -32,6 +32,7 @@ extern bool_true
 extern bool_false
 ; SRE engine functions
 extern sre_match
+extern sre_state_reset_marks
 extern sre_search
 extern sre_state_init
 extern sre_state_fini
@@ -570,10 +571,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
 .fa_loop:
     ; Reset marks
     lea rdi, [rbp - FA_STATE]
-    mov qword [rdi + SRE_State.marks_size], 0
-    mov qword [rdi + SRE_State.lastmark], -1
-    mov qword [rdi + SRE_State.lastindex], -1
-    mov qword [rdi + SRE_State.repeat_ctx], 0
+    call sre_state_reset_marks
 
     ; Search
     lea rdi, [rbp - FA_STATE]
@@ -848,10 +846,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
 
 .sub_search:
     lea rdi, [rbp - SUB_STATE]
-    mov qword [rdi + SRE_State.marks_size], 0
-    mov qword [rdi + SRE_State.lastmark], -1
-    mov qword [rdi + SRE_State.lastindex], -1
-    mov qword [rdi + SRE_State.repeat_ctx], 0
+    call sre_state_reset_marks
     call sre_search
     test eax, eax
     jz .sub_finish
@@ -1127,10 +1122,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
 
 .subn_search:
     lea rdi, [rbp - SN_STATE]
-    mov qword [rdi + SRE_State.marks_size], 0
-    mov qword [rdi + SRE_State.lastmark], -1
-    mov qword [rdi + SRE_State.lastindex], -1
-    mov qword [rdi + SRE_State.repeat_ctx], 0
+    call sre_state_reset_marks
     call sre_search
     test eax, eax
     jz .subn_finish
@@ -1382,10 +1374,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
 
 .split_search:
     lea rdi, [rbp - SP_STATE]
-    mov qword [rdi + SRE_State.marks_size], 0
-    mov qword [rdi + SRE_State.lastmark], -1
-    mov qword [rdi + SRE_State.lastindex], -1
-    mov qword [rdi + SRE_State.repeat_ctx], 0
+    call sre_state_reset_marks
     call sre_search
     test eax, eax
     jz .split_finish
@@ -2077,10 +2066,7 @@ DEF_FUNC sre_scanner_iternext, SI_FRAME
 
     ; Reset state marks
     lea rdi, [rbp - SI_STATE]
-    mov qword [rdi + SRE_State.marks_size], 0
-    mov qword [rdi + SRE_State.lastmark], -1
-    mov qword [rdi + SRE_State.lastindex], -1
-    mov qword [rdi + SRE_State.repeat_ctx], 0
+    call sre_state_reset_marks
 
     ; Search
     lea rdi, [rbp - SI_STATE]
@@ -2185,10 +2171,7 @@ DEF_FUNC sre_scanner_match_method, SM2_FRAME
 
     ; Reset marks
     lea rdi, [rbp - SM2_STATE]
-    mov qword [rdi + SRE_State.marks_size], 0
-    mov qword [rdi + SRE_State.lastmark], -1
-    mov qword [rdi + SRE_State.lastindex], -1
-    mov qword [rdi + SRE_State.repeat_ctx], 0
+    call sre_state_reset_marks
 
     ; Anchored match (not search)
     lea rdi, [rbp - SM2_STATE]
