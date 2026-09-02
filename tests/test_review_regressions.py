@@ -333,3 +333,50 @@ check("1 / 2**70", lambda: 1 / (2 ** 70))
 check("2**70 / 2**70", lambda: (2 ** 70) / (2 ** 70))
 check("2**70 / 2", lambda: (2 ** 70) / 2)
 check("-(2**70) / 2**69", lambda: -(2 ** 70) / (2 ** 69))
+
+
+# ---------------------------------------------------------------------------
+# Sizes nothing checked: a re-encode past the allocation, an addition that
+# wrapped, and a repeat count taken on trust.
+# ---------------------------------------------------------------------------
+
+# bytes %-formatting decodes its argument through latin-1 and re-encodes it,
+# which only survives for ASCII.  The guard that refuses a wide str compared
+# the type pointer, so a subclass walked past it into the overflow.
+class WideStr(str):
+    pass
+
+
+check("b'%s' % a wide str subclass", lambda: b"%s" % (WideStr("\u4e2d" * 20),))
+check("b'%s' % a wide str", lambda: b"%s" % ("\u4e2d" * 20,))
+check("b'%s' % an ASCII str subclass", lambda: b"%r" % (WideStr("ab"),))
+check("b'%s' % bytes still works", lambda: b"%s" % (b"xy",))
+
+# BytesIO: cursor + length overflowed to negative, bytesio_reserve read that
+# as "big enough", and the gap-fill ran rep stosb with rcx near 2**63.
+def bytesio_far_seek():
+    b = io.BytesIO()
+    b.seek(2 ** 63 - 1)
+    b.write(b"x")
+    return b.tell()
+
+
+def bytesio_ordinary_gap():
+    b = io.BytesIO(b"ab")
+    b.seek(6)
+    b.write(b"z")
+    return b.getvalue()
+
+
+check("BytesIO write past 2**63", bytesio_far_seek)
+check("BytesIO write past the end", bytesio_ordinary_gap)
+
+# bytearray repeat had none of the guards bytes and list repeat both have.
+check_type("bytearray * 2**70", lambda: bytearray(b"x") * (2 ** 70))
+check_type("bytearray * 2**40", lambda: bytearray(b"xy") * (2 ** 40))
+check("bytearray * a str", lambda: bytearray(b"x") * "3")
+check("bytearray * a float", lambda: bytearray(b"x") * 2.0)
+check("bytearray * 3", lambda: bytes(bytearray(b"ab") * 3))
+check("bytearray * 0", lambda: bytes(bytearray(b"ab") * 0))
+check("bytearray * -1", lambda: bytes(bytearray(b"ab") * -1))
+check("bytearray * True", lambda: bytes(bytearray(b"ab") * True))

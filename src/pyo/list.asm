@@ -1530,7 +1530,7 @@ DEF_FUNC list_repeat
     jo .rep_overflow                         ; signed overflow → MemoryError
     ; Sanity check: total_items * 8 must fit in address space
     cmp r14, 0x10000000                      ; 256M items limit (~2GB)
-    ja .rep_overflow
+    ja .rep_toobig                           ; too large to allocate
 
     ; Allocate new list
     mov rdi, r14
@@ -1577,6 +1577,11 @@ DEF_FUNC list_repeat
     V_PACK rax, rdx             ; return one Value
     ret
 
+.rep_toobig:
+    ; Too large to allocate is a MemoryError in CPython; only a count that
+    ; does not fit an index is an OverflowError.
+    extern exc_MemoryError_type
+    RAISE exc_MemoryError_type, ""
 .rep_overflow:
     extern exc_OverflowError_type
     RAISE exc_OverflowError_type, "too many items for list repetition"

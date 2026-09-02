@@ -38,6 +38,7 @@ extern set_exception
 extern ap_strlen
 extern exc_TypeError_type
 extern exc_OSError_type
+extern exc_OverflowError_type
 extern exc_ValueError_type
 extern exc_BlockingIOError_type
 extern exc_BufferError_type
@@ -2303,6 +2304,14 @@ DEF_FUNC_LOCAL bytesio_reserve
     sub rsp, 8
     mov rbx, rdi
     mov r12, rsi
+    ; ap_realloc calls fatal_error rather than returning NULL, so a size that
+    ; can only fail has to be refused here.  This also makes the `jle` below
+    ; safe against a negative arriving from a caller that did not check.
+    test r12, r12
+    js .bre_fail
+    mov rax, 0x7fffffff
+    cmp r12, rax
+    jg .bre_fail
     cmp r12, [rbx + PyBytesIOObject.bio_cap]
     jle .bre_ok
     mov rax, [rbx + PyBytesIOObject.bio_cap]
@@ -2630,6 +2639,11 @@ DEF_FUNC bytesio_write_fn, BW_FRAME
     mov rdi, [rbp - BW_SELF]
     mov rsi, [rdi + PyBytesIOObject.bio_pos]
     add rsi, r10
+    ; A cursor near 2^63 plus a length overflows to negative, and
+    ; bytesio_reserve's `jle` then read that as "the buffer is already big
+    ; enough".  The gap-fill below duly ran `rep stosb` with rcx around 2^63
+    ; over a 64-byte allocation.
+    jo .bw_toolarge
     call bytesio_reserve
     test eax, eax
     jz .bw_nomem
@@ -2670,6 +2684,8 @@ DEF_FUNC bytesio_write_fn, BW_FRAME
     ret
 .bw_exported:
     RAISE exc_BufferError_type, "Existing exports of data: object cannot be re-sized"
+.bw_toolarge:
+    RAISE exc_OverflowError_type, "new buffer size too large"
 .bw_nomem:
     RAISE exc_OSError_type, "out of memory"
 .bw_type:

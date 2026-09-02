@@ -1704,7 +1704,16 @@ DEF_FUNC bytes_mod_reject_wide
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
-    jne .bmw_ok
+    je .bmw_is_str
+    ; A subclass has str's layout and str's data, so it reaches the same
+    ; latin-1 re-encode.  Testing the type pointer alone let one straight
+    ; past this guard and into the overflow it exists to prevent:
+    ; `class S(str): pass` then b"%s" % (S("中"*20),) wrote past the
+    ; allocation, because the size came from code points and the re-encode
+    ; assumed two bytes for each of them.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .bmw_ok
+.bmw_is_str:
     mov rax, [rdi + PyStrObject.ob_size]
     cmp rax, [rdi + PyStrObject.ob_length]
     jne .bmw_wide               ; more bytes than code points: not ASCII
@@ -1712,7 +1721,11 @@ DEF_FUNC bytes_mod_reject_wide
     leave
     ret
 .bmw_wide:
-    RAISE exc_TypeError_type, "%b requires a bytes-like object, or an object that implements __bytes__, not 'str'"
+    ; The class, not the literal word "str": CPython names the argument's own
+    ; type, which for a subclass is the subclass.
+    mov rsi, rdi
+    CSTRING rdi, `%b requires a bytes-like object, or an object that implements __bytes__, not '\x01'`
+    call raise_type_error_with_name
 END_FUNC bytes_mod_reject_wide
 
 DEF_FUNC_BARE bytes_mod_is_byteslike
@@ -1933,13 +1946,11 @@ DEF_FUNC bytes_mod, BM_FRAME
     ; 0x7f had arrived as part of a multi-byte sequence, so the re-encode
     ; wrote MORE bytes than the code-point count it had sized the result by.
     ; b"\xe4\xb8\xad" % () overran the allocation and aborted the process.
-    mov rsi, [rdi + PyBytesObject.ob_size]
-    lea rdi, [rdi + PyBytesObject.data]
-    call bytes_latin1_to_str
-    test rax, rax
-    jz .bm_failed_fmt
-    mov rbx, rax               ; rbx = temp str
-
+    ; The arguments are prepared BEFORE the format is decoded, because
+    ; preparing them can raise -- a wide str for %s -- and a raise abandons
+    ; the C stack.  With the temp str built first it was the thing abandoned,
+    ; one leaked str per `b"%s" % ("\u4e2d",)`.
+    ;
     ; Any bytes-like argument becomes the str its bytes decode to under
     ; latin-1, one code point per byte.  The result is re-encoded the same way
     ; below, so the bytes come through untouched -- where handing the object
@@ -1949,6 +1960,14 @@ DEF_FUNC bytes_mod, BM_FRAME
     mov [rbp-BM_ORIG], rdi
     call bytes_mod_prepare_args
     mov [rbp-BM_ARGS], rax
+
+    mov rdi, [rbp-BM_FMT]
+    mov rsi, [rdi + PyBytesObject.ob_size]
+    lea rdi, [rdi + PyBytesObject.data]
+    call bytes_latin1_to_str
+    test rax, rax
+    jz .bm_failed_fmt
+    mov rbx, rax               ; rbx = temp str
 
     ; Call str_mod(temp_str, args)
     extern str_mod
@@ -2024,6 +2043,10 @@ DEF_FUNC bytes_mod, BM_FRAME
     ret
 
 .bm_failed_fmt:
+    ; The arguments were prepared first, so they are ours to release here.
+    mov rdi, [rbp-BM_ARGS]
+    mov rsi, [rbp-BM_ORIG]
+    call bytes_mod_release_args
     xor eax, eax
     xor edx, edx
     pop r12
@@ -2217,7 +2240,7 @@ DEF_FUNC bytes_repeat
     imul r14, r12
     jo .brep_overflow
     cmp r14, 0x10000000
-    ja .brep_overflow
+    ja .brep_toobig
 
     lea rdi, [r14 + PyBytesObject.data + 8]
     call ap_malloc
@@ -2253,6 +2276,10 @@ DEF_FUNC bytes_repeat
     leave
     ret
 
+.brep_toobig:
+    ; Too large to allocate is a MemoryError in CPython; only a count that
+    ; does not fit an index is an OverflowError.
+    RAISE exc_MemoryError_type, ""
 .brep_overflow:
     extern exc_OverflowError_type
     RAISE exc_OverflowError_type, "repeated bytes are too long"
@@ -4059,10 +4086,31 @@ DEF_FUNC bytearray_repeat, BAO_FRAME
     mov [rbp - BAO_SELF], rdi
     ; sq_repeat is handed two VALUES, not a count -- op_binary_op packs both
     ; operands before the call, as bytes_repeat's own V_UNPACK shows.
-    mov rdi, rsi
+    ;
+    ; The count goes through the three checks bytes_repeat and list_repeat
+    ; both make, none of which this one had.  It called obj_as_index straight
+    ; away, so a non-int with an __index__ was accepted where CPython raises;
+    ; int_to_i64 truncated a count past 2^63 rather than refusing it, which is
+    ; how bytearray(b'x') * (2**70) answered bytearray(b''); and the product
+    ; was neither checked for overflow nor capped, so bytearray(b'xy') *
+    ; (2**40) went to the allocator and aborted the process.
+    mov [rbp - BAO_ARG], rsi        ; the count, still a Value
+    call seq_repeat_check_count     ; rsi = the count; raises for a non-int
+
+    mov rdi, [rbp - BAO_ARG]
     V_UNPACK rdi, rdx
-    call obj_as_index
+    push rdi
+    push rdx
+    extern int_fits_i64
+    call int_fits_i64
+    pop rdx
+    pop rdi
+    test eax, eax
+    jz .brp_overflow
+    extern int_to_i64
+    call int_to_i64
     mov rsi, rax
+
     mov rdi, [rbp - BAO_SELF]
     mov rdx, [rdi + PyByteArrayObject.ob_size]
     mov [rbp - BAO_SLEN], rdx
@@ -4073,6 +4121,9 @@ DEF_FUNC bytearray_repeat, BAO_FRAME
 .brp_count_ok:
     mov [rbp - BAO_ARG], rax
     imul rax, rdx
+    jo .brp_overflow
+    cmp rax, 0x10000000
+    ja .brp_toobig
     mov rsi, rax
     xor edi, edi
     call bytearray_new
@@ -4115,6 +4166,10 @@ DEF_FUNC bytearray_repeat, BAO_FRAME
     xor edx, edx
     leave
     ret
+.brp_toobig:
+    RAISE exc_MemoryError_type, ""
+.brp_overflow:
+    RAISE exc_OverflowError_type, "repeated bytes are too long"
 END_FUNC bytearray_repeat
 
 DEF_FUNC bytearray_inplace_concat, BAO_FRAME
