@@ -120,12 +120,14 @@ END_FUNC time_time_func
 ;; ============================================================================
 TSL_SEC   equ 16
 TSL_NSEC  equ 8
+TSL_ARG   equ 24            ; the argument Value, kept for the overflow message
 TSL_FRAME equ 32            ; + 0 pushes = 32
 DEF_FUNC time_sleep_func, TSL_FRAME
     cmp rsi, 1
     jne .sleep_error
 
     mov rdi, [rdi]
+    mov [rbp - TSL_ARG], rdi
     V_UNPACK rdi, rsi
     extern float_binop_accepts
     push rdi
@@ -138,9 +140,30 @@ DEF_FUNC time_sleep_func, TSL_FRAME
     extern float_to_f64
     call float_to_f64           ; seconds, as a double
 
+    ; NaN is its own answer, and CPython gives it its own wording -- it is not
+    ; "negative", which is what this used to call it.
+    ucomisd xmm0, xmm0
+    jp .sleep_nan
+
+    ; The delay has to survive the trip through nanoseconds.  CPython's
+    ; _PyTime_t is an int64 count of them, so it rejects anything whose
+    ; product with 1e9 will not fit one, and that check has to come BEFORE the
+    ; negative test: -inf and -1e300 are overflows in CPython, not "sleep
+    ; length must be non-negative".
+    ;
+    ; Without it, cvttsd2si below answered INT64_MIN for any argument out of
+    ; range -- the x86 "integer indefinite" -- and that went into tv_sec.  So
+    ; time.sleep(float('inf')) returned at once instead of raising, and
+    ; time.sleep(10**10) slept for three centuries.
+    movsd xmm1, xmm0
+    mulsd xmm1, [rel tm_1e9]        ; the delay in nanoseconds
+    ucomisd xmm1, [rel tm_i64_max]
+    jae .sleep_overflow
+    ucomisd xmm1, [rel tm_i64_min]
+    jb .sleep_overflow
+
     xorpd xmm1, xmm1
     ucomisd xmm0, xmm1
-    jp .sleep_value_error       ; a NaN delay is not a delay
     jb .sleep_value_error
 
     ; Split into whole seconds and nanoseconds for struct timespec.
@@ -167,8 +190,23 @@ DEF_FUNC time_sleep_func, TSL_FRAME
 
 .sleep_type_error:
     RAISE exc_TypeError_type, "sleep() argument must be a number"
-.sleep_value_error:
+.sleep_nan:
     extern exc_ValueError_type
+    RAISE exc_ValueError_type, "Invalid value NaN (not a number)"
+.sleep_overflow:
+    ; CPython reaches the same overflow by two roads and says so differently:
+    ; an int is rejected converting to _PyTime_t, a float converting back out
+    ; to the platform's timespec.  The wording is what a program greps for.
+    extern exc_OverflowError_type
+    mov rax, [rbp - TSL_ARG]
+    V_IS_FLOAT rax, rcx
+    jbe .sleep_overflow_float
+    RAISE exc_OverflowError_type, \
+          "timestamp too large to convert to C _PyTime_t"
+.sleep_overflow_float:
+    RAISE exc_OverflowError_type, \
+          "timestamp out of range for platform time_t"
+.sleep_value_error:
     RAISE exc_ValueError_type, "sleep length must be non-negative"
 .sleep_error:
     RAISE exc_TypeError_type, "sleep() takes exactly one argument"
@@ -279,6 +317,12 @@ END_FUNC time_module_create
 section .rodata
 align 8
 tm_1e9: dq 0x41cdcd6500000000     ; 1e9 as IEEE 754 double
+; The int64 range a nanosecond count has to fit, as doubles.  (double)INT64_MAX
+; rounds up to 2^63, so the positive test is >= rather than >; the only value
+; that separates the two is 2^63 nanoseconds exactly, and refusing it is the
+; safe side of a cast that would otherwise be undefined.
+tm_i64_max: dq 0x43e0000000000000   ; 2^63
+tm_i64_min: dq 0xc3e0000000000000   ; -2^63
 
 tm_time:         db "time", 0
 tm_process_time: db "process_time", 0
