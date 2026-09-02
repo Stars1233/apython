@@ -95,3 +95,75 @@ for name in ("fget", "fset", "fdel"):
         print(name, "-> set")
     except AttributeError:
         print(name, "-> AttributeError")
+
+# --- property's four fields hold Values, not pointers.  CPython takes any
+# object for each, and an INCREF that dereferenced one was a segfault on an
+# immediate: f.__doc__ may be an int, and so may the doc argument.
+def gx(self):
+    return 1
+
+
+def sx(self, v):
+    self._v = v
+
+
+def dx(self):
+    del self._v
+
+
+gx.__doc__ = 12345
+print(property(gx).__doc__)
+p2 = property(gx, None, None, 5)
+print(p2.__doc__, p2.fset, p2.fdel)
+p7 = property(gx)
+p7.__doc__ = 5
+print(p7.__doc__)
+print(gx.__doc__)
+
+# --- the four are positional-or-keyword.  Taken positionally, property(gx,
+# doc="D") set FSET to the string, and a property whose setter is a str calls
+# a str on assignment.
+p3 = property(gx, doc="D")
+print(p3.__doc__, p3.fset)
+p4 = property(doc="D3", fget=gx)
+print(p4.__doc__, p4.fget is gx)
+p5 = property(fget=gx, fset=sx, fdel=dx)
+print(p5.fget is gx, p5.fset is sx, p5.fdel is dx)
+p6 = property()
+print(p6.fget, p6.fset, p6.__doc__)
+try:
+    property(gx, bogus=1)
+except TypeError:
+    print("bad keyword: TypeError")
+try:
+    property(gx, fget=gx)
+except TypeError:
+    print("duplicate: TypeError")
+
+# --- a setter or deleter that raises was reported as success, and the
+# exception surfaced later at an unrelated instruction.  `del` reached the
+# deleter only through instance_setattr, whose caller never looked.
+class R:
+    @property
+    def v(self):
+        return 1
+
+    @v.setter
+    def v(self, x):
+        raise KeyError("setter")
+
+    @v.deleter
+    def v(self):
+        raise KeyError("deleter")
+
+
+r = R()
+for what, fn in [("assign", lambda: setattr(r, "v", 5)),
+                 ("delete", lambda: delattr(r, "v")),
+                 ("__set__", lambda: R.v.__set__(r, 5)),
+                 ("__delete__", lambda: R.v.__delete__(r))]:
+    try:
+        fn()
+        print(what, "NO ERROR")
+    except KeyError as e:
+        print(what, "raised", e)

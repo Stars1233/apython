@@ -1355,6 +1355,8 @@ END_FUNC builtin_hasattr
 ;; ============================================================================
 ;; 19. builtin_setattr(args, nargs) - setattr(obj, name, value)
 ;; ============================================================================
+SETA_EXC equ 16     ; the exception pending before tp_setattr ran
+
 DEF_FUNC builtin_setattr
     mov rbp, rsp
     push rbx
@@ -1379,13 +1381,29 @@ DEF_FUNC builtin_setattr
     mov rsi, [rbx + 8]               ; args[1] payload (name, 16-byte stride)
     mov rdx, [rbx + 16]               ; args[2] payload (value, 16-byte stride)
     pop rax                            ; restore tp_setattr
+    DUNDER_EXC_SAVE [rbp - SETA_EXC]
     call rax
+
+    ; tp_setattr reports failure by leaving an exception pending, not in a
+    ; register, so a property setter that raised came back here as a success
+    ; and setattr() answered None.  Compared against entry, because
+    ; current_exception is already set inside an except block.
+    EXC_RAISED_SINCE [rbp - SETA_EXC], rcx, .setattr_raised
 
     RET_NONE
     add rsp, 8
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.setattr_raised:
+    xor eax, eax
+    xor edx, edx
+    add rsp, 8
+    pop rbx
+    leave
+    V_PACK rax, rdx
     ret
 
 .setattr_no_attr:
@@ -2342,7 +2360,8 @@ END_FUNC builtin_vars_fn
 global builtin_delattr_fn
 DA2_OBJ   equ 8
 DA2_NAME  equ 16
-DA2_FRAME equ 24            ; + 0 pushes = 24, not 16-aligned
+DA2_EXC   equ 24            ; the exception pending before the deleter ran
+DA2_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC builtin_delattr_fn, DA2_FRAME
 
     cmp rsi, 2
@@ -2370,7 +2389,12 @@ DEF_FUNC builtin_delattr_fn, DA2_FRAME
     mov rsi, [rbp - DA2_NAME]
     xor edx, edx              ; value = NULL means delete
     xor ecx, ecx              ; value tag = TAG_NULL
+    DUNDER_EXC_SAVE [rbp - DA2_EXC]
     call rax
+
+    ; A deleter that raised leaves the exception pending and returns
+    ; normally, so delattr() answered None and it surfaced somewhere else.
+    EXC_RAISED_SINCE [rbp - DA2_EXC], rcx, .da2_raised
 
     ; Return None
     lea rax, [rel none_singleton]
@@ -2378,6 +2402,13 @@ DEF_FUNC builtin_delattr_fn, DA2_FRAME
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.da2_raised:
+    xor eax, eax
+    xor edx, edx
+    leave
+    V_PACK rax, rdx
     ret
 
 .da2_type_error:

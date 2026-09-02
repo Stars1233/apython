@@ -7,6 +7,9 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern current_exception
+extern kw_names_pending
+extern ap_strcmp
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -149,32 +152,113 @@ DEF_FUNC property_construct
     mov rbx, rsi                ; args
     mov r12, rdx                ; nargs
 
-    cmp r12, 1
-    jb .pc_error
+    ; The four are positional-or-keyword in CPython, and property(gx,
+    ; doc="D") is the common spelling.  Taken positionally, that string
+    ; became FSET -- and a property whose setter is a str calls a str on
+    ; assignment.  Collect the keywords into the same four slots first, then
+    ; let the positionals fill what is left.
+    push qword 0                ; [rsp + 24] = doc
+    push qword 0                ; [rsp + 16] = fdel
+    push qword 0                ; [rsp +  8] = fset
+    push qword 0                ; [rsp     ] = fget
+
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .pc_positional
+    mov r13, [rax + PyTupleObject.ob_size]      ; n_kw
+    mov r14, r12
+    sub r14, r13                                ; n_pos
+    xor ecx, ecx
+.pc_kw_loop:
+    cmp rcx, r13
+    jge .pc_kw_done
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rdx, [rdx + rcx*8]                      ; the keyword's name
+    mov rsi, r14
+    add rsi, rcx
+    mov rsi, [rbx + rsi*8]                      ; the value given for it
+    lea rdi, [rdx + PyStrObject.data]
+
+    push rax
+    push rcx
+    push rsi
+    push rdi
+    CSTRING rsi, "fget"
+    call ap_strcmp
+    test eax, eax
+    jz .pc_kw_slot0
+    mov rdi, [rsp]
+    CSTRING rsi, "fset"
+    call ap_strcmp
+    test eax, eax
+    jz .pc_kw_slot1
+    mov rdi, [rsp]
+    CSTRING rsi, "fdel"
+    call ap_strcmp
+    test eax, eax
+    jz .pc_kw_slot2
+    mov rdi, [rsp]
+    CSTRING rsi, "doc"
+    call ap_strcmp
+    test eax, eax
+    jnz .pc_kw_bad
+    mov edx, 3
+    jmp .pc_kw_store
+.pc_kw_slot0:
+    xor edx, edx
+    jmp .pc_kw_store
+.pc_kw_slot1:
+    mov edx, 1
+    jmp .pc_kw_store
+.pc_kw_slot2:
+    mov edx, 2
+.pc_kw_store:
+    mov rsi, [rsp + 8]                          ; the value
+    mov [rsp + 32 + rdx*8], rsi                 ; past the four pushes
+    pop rdi
+    pop rsi
+    pop rcx
+    pop rax
+    inc rcx
+    jmp .pc_kw_loop
+.pc_kw_bad:
+    pop rdi
+    pop rsi
+    pop rcx
+    pop rax
+    jmp .pc_kw_error
+.pc_kw_done:
+    mov r12, r14                                ; only the positionals remain
+    mov qword [rel kw_names_pending], 0
+
+.pc_positional:
     cmp r12, 4
     ja .pc_error
+    xor ecx, ecx
+.pc_pos_loop:
+    cmp rcx, r12
+    jge .pc_pos_done
+    mov rax, [rbx + rcx*8]
+    cmp qword [rsp + rcx*8], 0
+    jne .pc_dup_error
+    mov [rsp + rcx*8], rax
+    inc rcx
+    jmp .pc_pos_loop
+.pc_pos_done:
 
-    ; Extract args
-    mov r13, [rbx]              ; fget = args[0]
-    xor r14d, r14d              ; fset = NULL
-    cmp r12, 2
-    jb .pc_alloc
-    mov r14, [rbx + 8]         ; fset = args[1]
+    mov r13, [rsp]              ; fget
+    mov r14, [rsp + 8]          ; fset
+    test r13, r13
+    jnz .pc_alloc
+    lea r13, [rel none_singleton]   ; property() with no getter is legal
 
 .pc_alloc:
-    ; doc and fdel, pushed because rbx is about to become the new property
-    ; and the argument array would be lost with it.
-    push qword 0                ; doc default = NULL
-    cmp r12, 4
-    jb .pc_have_doc
-    mov rax, [rbx + 24]
-    mov [rsp], rax              ; doc = args[3]
-.pc_have_doc:
-    push qword 0                ; fdel default = NULL
-    cmp r12, 3
-    jb .pc_do_alloc
-    mov rax, [rbx + 16]
-    mov [rsp], rax              ; fdel = args[2]
+    ; doc and fdel, kept on the stack because rbx is about to become the new
+    ; property and the argument array would be lost with it.
+    mov rax, [rsp + 24]
+    push rax                    ; doc
+    mov rax, [rsp + 24]         ; fdel, now one slot deeper
+    push rax
 
 .pc_do_alloc:
     mov edi, PyPropertyObject_size
@@ -188,22 +272,22 @@ DEF_FUNC property_construct
     pop rax                     ; doc
     mov [rbx + PyPropertyObject.prop_doc], rax
 
-    ; INCREF fget
+    ; All four are Values, not pointers.  CPython takes any object for each --
+    ; property(f, None, None, 5).__doc__ is 5, and f.__doc__ may be an int --
+    ; so an INCREF that dereferences is a segfault on an immediate.
     mov rdi, r13
-    call obj_incref
+    INCREF_V rdi, rax
 
-    ; INCREF fset if non-NULL
     test r14, r14
     jz .pc_no_fset
     mov rdi, r14
-    call obj_incref
+    INCREF_V rdi, rax
 .pc_no_fset:
 
-    ; INCREF fdel if non-NULL
     mov rdi, [rbx + PyPropertyObject.prop_del]
     test rdi, rdi
     jz .pc_no_fdel
-    call obj_incref
+    INCREF_V rdi, rax
 .pc_no_fdel:
 
     ; __doc__: the explicit one if given, else fget's own -- which is what
@@ -211,7 +295,7 @@ DEF_FUNC property_construct
     mov rdi, [rbx + PyPropertyObject.prop_doc]
     test rdi, rdi
     jz .pc_doc_from_fget
-    call obj_incref
+    INCREF_V rdi, rax
     jmp .pc_doc_done
 
 .pc_doc_from_fget:
@@ -239,6 +323,7 @@ DEF_FUNC property_construct
     mov rax, rbx
     mov edx, TAG_PTR
 
+    add rsp, 32                 ; the four collected arguments
     pop r14
     pop r13
     pop r12
@@ -247,7 +332,13 @@ DEF_FUNC property_construct
     ret
 
 .pc_error:
-    RAISE exc_TypeError_type, "property expected 1 to 3 arguments"
+    RAISE exc_TypeError_type, "property expected 1 to 4 arguments"
+
+.pc_dup_error:
+    RAISE exc_TypeError_type, "property() got multiple values for an argument"
+
+.pc_kw_error:
+    RAISE exc_TypeError_type, "property() got an unexpected keyword argument"
 END_FUNC property_construct
 
 ;; ============================================================================
@@ -260,17 +351,17 @@ DEF_FUNC_LOCAL property_dealloc
     mov rdi, [rbx + PyPropertyObject.prop_get]
     test rdi, rdi
     jz .pd_no_get
-    call obj_decref
+    DECREF_V rdi, rcx
 .pd_no_get:
     mov rdi, [rbx + PyPropertyObject.prop_set]
     test rdi, rdi
     jz .pd_no_set
-    call obj_decref
+    DECREF_V rdi, rcx
 .pd_no_set:
     mov rdi, [rbx + PyPropertyObject.prop_del]
     test rdi, rdi
     jz .pd_no_del
-    call obj_decref
+    DECREF_V rdi, rcx
 .pd_no_del:
     mov rdi, [rbx + PyPropertyObject.prop_doc]
     test rdi, rdi
@@ -412,7 +503,7 @@ DEF_FUNC property_getattr
 .pga_incref_ret:
     mov rdi, rax
     push rax
-    call obj_incref
+    INCREF_V rdi, rcx
     pop rax
 
 .pga_done:
@@ -1937,16 +2028,25 @@ DEF_FUNC property_dunder_get
     ret
 END_FUNC property_dunder_get
 
-DEF_FUNC property_dunder_set
+PDS2_EXC   equ 8
+PDS2_FRAME equ 16
+
+DEF_FUNC property_dunder_set, PDS2_FRAME
     cmp rsi, 3
     jl .pds2_bad
     mov rax, [rdi]
     mov rdx, [rdi + 16]                 ; the value, already a Value
     mov rsi, [rdi + 8]                  ; the instance
     mov rdi, rax
+    DUNDER_EXC_SAVE [rbp - PDS2_EXC]
     call property_descr_set
+    DUNDER_RAISED [rbp - PDS2_EXC], .pds2_raised
     lea rax, [rel none_singleton]
     INCREF rax
+    leave
+    ret
+.pds2_raised:
+    xor eax, eax
     leave
     ret
 .pds2_bad:
@@ -2735,12 +2835,12 @@ END_FUNC classmethod_clear
 DEF_FUNC property_traverse
     push rbx
     mov rbx, rdi
-    mov rdi, [rbx + PyPropertyObject.prop_get]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyPropertyObject.prop_set]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyPropertyObject.prop_del]
-    VISIT_PTR rdi
+    mov rax, [rbx + PyPropertyObject.prop_get]
+    VISIT_V rax, rcx
+    mov rax, [rbx + PyPropertyObject.prop_set]
+    VISIT_V rax, rcx
+    mov rax, [rbx + PyPropertyObject.prop_del]
+    VISIT_V rax, rcx
     mov rax, [rbx + PyPropertyObject.prop_doc]
     VISIT_V rax, rcx
     pop rbx
@@ -2756,19 +2856,19 @@ DEF_FUNC property_clear
     mov qword [rbx + PyPropertyObject.prop_get], 0
     test rdi, rdi
     jz .no_get
-    call obj_decref
+    DECREF_V rdi, rcx
 .no_get:
     mov rdi, [rbx + PyPropertyObject.prop_set]
     mov qword [rbx + PyPropertyObject.prop_set], 0
     test rdi, rdi
     jz .no_set
-    call obj_decref
+    DECREF_V rdi, rcx
 .no_set:
     mov rdi, [rbx + PyPropertyObject.prop_del]
     mov qword [rbx + PyPropertyObject.prop_del], 0
     test rdi, rdi
     jz .no_del
-    call obj_decref
+    DECREF_V rdi, rcx
 .no_del:
     mov rdi, [rbx + PyPropertyObject.prop_doc]
     mov qword [rbx + PyPropertyObject.prop_doc], 0

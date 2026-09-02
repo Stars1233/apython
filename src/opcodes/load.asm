@@ -1877,7 +1877,8 @@ SA_FRAME  equ 80            ; + 0 pushes = 80
 ; op_delete_attr: rbp-frame (16 bytes)
 DA_NAME   equ 8
 DA_OBJ    equ 16
-DA_FRAME  equ 16            ; + 0 pushes = 16
+DA_EXC    equ 24            ; the exception pending before the deleter ran
+DA_FRAME  equ 32            ; + 0 pushes = 32
 
 ; op_delete_subscr: rbp-frame (32 bytes)
 DS_OBJ    equ 8
@@ -2300,14 +2301,27 @@ DEF_FUNC op_delete_attr, DA_FRAME
     mov rsi, [rbp - DA_NAME]
     xor edx, edx               ; value = NULL means delete
     xor ecx, ecx               ; value tag = TAG_NULL
+    DUNDER_EXC_SAVE [rbp - DA_EXC]
     call rax
 
     ; DECREF obj
     mov rdi, [rbp - DA_OBJ]
     call obj_decref
 
+    ; A deleter that raised returns normally, leaving the exception pending;
+    ; without this `del c.v` swallowed it and it surfaced somewhere else.
+    ; Compared against entry, because current_exception is already set
+    ; whenever this runs inside an except block.
+    DUNDER_RAISED [rbp - DA_EXC], .da_propagate
     leave
     DISPATCH
+
+.da_propagate:
+    ; Same shape as .sa_propagate: the unwinder reads the current IP from
+    ; eval_saved_rbx, which DISPATCH set, so rbx is not advanced.
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
 
 .da_error_decref:
     mov rdi, [rbp - DA_OBJ]

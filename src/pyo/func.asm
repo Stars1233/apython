@@ -1057,8 +1057,10 @@ DEF_FUNC func_getattr
     mov rax, [rbx + PyFuncObject.func_doc]
     test rax, rax
     jz .doc_try_dict
-    INCREF rax
-    mov edx, TAG_PTR
+    ; __doc__ takes any object, so the field holds a Value: f.__doc__ = 12345
+    ; is legal, and an INCREF that dereferences it is a segfault.
+    INCREF_V rax, rcx
+    V_UNPACK rax, rdx
     pop r12
     pop rbx
     leave
