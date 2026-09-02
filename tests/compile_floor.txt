@@ -3,6 +3,7 @@
 # A name here that stops matching is a regression; a name missing
 # from here that starts matching should be added in the same commit.
 test_abc
+test_abstract_and_str_subclass
 test_arithmetic
 test_async_await
 test_async_cancel

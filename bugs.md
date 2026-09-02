@@ -182,10 +182,11 @@ one-line fix.
   type, so an object that lies about its class -- a mock, mostly -- is judged
   by what it really is.
 
-- **A `str` subclass has no instance `__dict__`.**  A str keeps its
-  characters inline, so there is no fixed offset past the header to put one
-  at; CPython uses a negative `tp_dictoffset` scaled by `tp_itemsize`.  These
-  behave like `bytes` and like a `__slots__` class.
+- **`__slots__` does not suppress the instance `__dict__`.**  A class with
+  `__slots__ = ()` still takes arbitrary attributes here; CPython gives it no
+  `__dict__` at all.  The slots themselves work -- they are member
+  descriptors at fixed offsets -- so what is missing is the suppression, not
+  the storage.
 
 - **A heaptype's layout base is the widest of its bases, not CPython's solid
   base.**  `class C(A, B)` where A and B are unrelated builtin subclasses of
@@ -270,10 +271,10 @@ than lying — but they are ordinary Python that does not work:
   `tp_dictoffset`, which the subclass inherits.  Nothing detects the
   collision.
 
-- **`@abc.abstractmethod` is not enforced.**  A class with an unimplemented
-  abstract method instantiates.  `__abstractmethods__` is consulted by
-  `type_call`, so the missing half is abc's own bookkeeping rather than the
-  interpreter's check.
+- **The abstract-method TypeError does not name the methods.**  CPython says
+  "Can't instantiate abstract class Abs without an implementation for abstract
+  method 'f'"; here it is "Can't instantiate abstract class with abstract
+  methods".  The enforcement itself works.
 
 - **A memoryview with a step other than 1 is not a view.**  `mv[::2]` and
   `mv[::-1]` raise NotImplementedError.  CPython answers with a
