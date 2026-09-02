@@ -366,13 +366,14 @@ DEF_FUNC ags_iternext
     jmp .agsend_settled
 .agsend_raised:
     test rcx, rcx
-    jz .agsend_settled
+    jz .agsi_body_raised
     push rax
     push rdx
     mov rdi, rcx
     call obj_decref
     pop rdx
     pop rax
+    jmp .agsi_body_raised
 .agsend_settled:
     add rsp, 8
     V_UNPACK rax, rdx           ; eval_frame returns a Value
@@ -411,6 +412,37 @@ DEF_FUNC ags_iternext
     pop rbx
     leave
     ret
+
+;; --- the body raised ---------------------------------------------------
+;; Not a result, and above all not the end of the iteration.  The arm below
+;; decides "exhausted or yielded" from instr_ptr, and a body that raised
+;; leaves the frame finished -- so it read as exhausted and manufactured a
+;; StopAsyncIteration, whose raise_exception_obj then DECREF'd the real
+;; exception away.  `async for x in ag()` over a generator that raises ended
+;; the loop cleanly and lost the exception outright: not caught by an
+;; enclosing except, not reported at exit, the program simply carried on past
+;; a `raise`.
+;;
+;; The exception is pending and already owns its reference.  Do the same
+;; bookkeeping the exhausted arm does -- the generator is finished either way
+;; -- and unwind with it, which is how that arm reaches END_ASYNC_FOR too.
+.agsi_body_raised:
+    extern eval_exception_unwind
+    extern eval_saved_r13
+    add rsp, 8                  ; the scratch pushed before eval_frame
+    mov qword [r12 + PyGenObject.gi_running], 0
+    mov rdi, [r12 + PyGenObject.gi_frame]
+    test rdi, rdi
+    jz .agsi_body_raised_closed
+    call frame_free
+    mov qword [r12 + PyGenObject.gi_frame], 0
+.agsi_body_raised_closed:
+    mov dword [rbx + AsyncGenASend.ags_state], 2
+    pop r12
+    pop rbx
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
 
 .agsi_yielded:
     pop rdx                    ; result tag

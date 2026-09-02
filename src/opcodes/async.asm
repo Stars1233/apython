@@ -181,24 +181,43 @@ DEF_FUNC_BARE op_get_anext
     test rax, rax
     jz .gan_error
 
+    ; A NULL from an iternext means one of two things, and they are not the
+    ; same: the iterator is exhausted, or it RAISED.  Snapshot the pending
+    ; exception so the two can be told apart.  r15 is the eval loop's scratch
+    ; register and is callee-saved, so it survives the call below.
+    DUNDER_EXC_SAVE r15
+
     call rax                   ; tp_iternext(aiter) -> awaitable or NULL
     ; rax = result payload, edx = tag
     V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
-    jz .gan_stop               ; NULL = exhausted
+    jz .gan_null
 
     ; Push result (the awaitable from __anext__)
     VPUSH_VAL rax, rdx
     DISPATCH
 
+.gan_null:
+    ; Exhausted, or raised.  Manufacturing a StopAsyncIteration for both is
+    ; what made `async for x in ag()` over a generator that raises end the
+    ; loop cleanly and DISCARD the exception -- not caught, not reported, the
+    ; program simply carried on past a `raise`.  A real exception is already
+    ; pending and already owns its reference: leave it alone and unwind.
+    EXC_RAISED_SINCE r15, rcx, .gan_propagate
 .gan_stop:
-    ; Raise StopAsyncIteration
+    ; Genuinely exhausted.  Raise StopAsyncIteration, which END_ASYNC_FOR
+    ; reads as the end of the loop.
     lea rdi, [rel exc_StopAsyncIteration_type]
     xor esi, esi
     xor edx, edx
     call exc_new
     mov rdi, rax
     call raise_exception_obj
+
+.gan_propagate:
+    ; The stack is as DISPATCH published it -- nothing was popped -- so
+    ; eval_saved_r13 needs no correction here.
+    jmp eval_exception_unwind
 
 .gan_error:
     RAISE exc_TypeError_type, "'async for' requires an object with __anext__ method"
@@ -372,11 +391,24 @@ DEF_FUNC_BARE op_end_async_for
     jnz .eaf_stop
 
 .eaf_reraise:
-    ; Not StopAsyncIteration — re-raise original exception
+    ; Not StopAsyncIteration — re-raise the original exception.
     VPOP_VAL rdi, rsi          ; exc payload+tag
-    ; The exception is already a pointer; store as current_exception
-    ; and re-raise via eval_exception_unwind (which handles unwind).
-    ; raise_exception_obj INCREFs + XDECREFs old current_exception for us.
+    ; DISPATCH published eval_saved_r13 at the depth this handler was ENTERED
+    ; with, and eval_exception_unwind restores r13 from it -- so the pop above
+    ; has to be published too, or the unwinder brings the exception's slot
+    ; back to life while current_exception also points at it.  Its release
+    ; loop then drops the only reference and the global is left dangling: an
+    ; async for over a generator that raises lost the exception outright,
+    ; neither caught nor reported, and the program carried on.
+    ;
+    ; Every other pop-then-raise handler in the tree already does this --
+    ; RAISE_VARARGS, RERAISE, SEND's propagate arm, the two intrinsics.  This
+    ; was the one that did not.  (CLEANUP_THROW below reaches the same place
+    ; from the other side, by peeking and taking a second reference.)
+    mov [rel eval_saved_r13], r13
+    ; raise_exception_obj TAKES the reference VPOP_VAL just transferred off
+    ; the stack -- it does not add one.  The comment that used to sit here
+    ; said the opposite.
     call raise_exception_obj
 
 .eaf_stop:
