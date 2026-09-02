@@ -20,6 +20,7 @@
 
 section .text
 
+extern int_is_integer
 extern eval_dispatch
 extern obj_is_true
 extern bool_true
@@ -46,6 +47,28 @@ BO_RTAG  equ 8
 BO_LEFT  equ 16
 BO_LTAG  equ 24
 BO_SIZE  equ 32
+
+; A dunder that answers the NotImplemented singleton is DECLINING, exactly as
+; a slot declines with a NULL Value -- the protocol is supposed to move on to
+; the reflected form and then to TypeError.  All three dunder calls below
+; handed it back as the result instead, so `B() + C()` for a B whose __add__
+; returns NotImplemented printed NotImplemented rather than calling C.__radd__.
+; (rax, edx) hold the returned Value; r9 holds the op code and does not
+; survive obj_decref.
+%macro BINOP_DECLINED 1         ; %1 = where to go when it declined
+    extern notimpl_singleton
+    lea rcx, [rel notimpl_singleton]
+    cmp rax, rcx
+    jne %%kept
+    push r9
+    sub rsp, 8
+    mov rdi, rax
+    call obj_decref
+    add rsp, 8
+    pop r9
+    jmp %1
+%%kept:
+%endmacro
 
 ;; Stack layout constants for op_build_string (DEF_FUNC, 16 bytes).
 
@@ -89,6 +112,9 @@ DEF_FUNC_BARE binop_is_number
     je .bn_yes
     mov rax, [rax + PyTypeObject.tp_flags]
     test rax, TYPE_FLAG_INT_SUBCLASS
+    jnz .bn_yes
+    ; A float subclass keeps its double inline, where float_to_f64 reads it.
+    test rax, TYPE_FLAG_FLOAT_SUBCLASS
     jnz .bn_yes
 .bn_no:
     xor eax, eax
@@ -187,12 +213,28 @@ DEF_FUNC_BARE op_binary_op
     jmp .use_float_methods
 
 .no_float_coerce:
-    ; For NB_ADD (0/13) and NB_MULTIPLY (5/18): if left is int/SmallInt
-    ; and right has sq_concat/sq_repeat, use sequence method instead.
-    ; This handles: 3 * "ab", 3 * [1,2], etc.
-    cmp qword [rsp + BO_LTAG], TAG_SMALLINT
-    jne .binop_not_smallint_left
-    ; Left is SmallInt — check if right has sequence methods
+    ; For NB_MULTIPLY (5/18): an integer on one side and a sequence on the
+    ; other means sq_repeat -- 3 * "ab", 3 * [1,2].
+    ;
+    ; "Integer" is int_is_integer, not `tag == TAG_SMALLINT`.  True and False
+    ; are heap singletons, every int is a heap object under INT_STRESS=1, and
+    ; an int subclass instance is a pointer as well; all three arrive as
+    ; TAG_PTR.  Gating on the tag sent them past this arm into int_mul, where
+    ; INT_NEED_MPZ wrote an mpz_t over the sequence's own header -- and
+    ; `True * [1,2]` is ordinary Python, not a type error.
+    ;
+    ; r15 is the handler scratch register (CLAUDE.md's register table); r9d
+    ; holds the op index and does not survive a call.
+    mov r15d, r9d
+    mov rdi, [rsp + BO_LEFT]
+    mov rdx, [rsp + BO_LTAG]
+    call int_is_integer
+    mov r9d, r15d
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    test eax, eax
+    jz .binop_not_int_left
+    ; Left is an integer — check if right has sequence methods
     cmp r9d, 5              ; NB_MULTIPLY
     je .binop_try_right_seq
     cmp r9d, 18             ; NB_INPLACE_MULTIPLY
@@ -221,11 +263,17 @@ DEF_FUNC_BARE op_binary_op
     V_PACK rsi, rcx
     call rax
     V_UNPACK rax, rdx           ; sq_repeat returns a Value
+    test edx, edx               ; NotImplemented, as above
+    jz .binop_try_dunder
     jmp .binop_have_result
 
-.binop_not_smallint_left:
-    ; TAG_BOOL: route to int (int_unwrap handles TAG_BOOL)
-    ; Non-pointer guard: TAG_NONE, TAG_FLOAT can't be dereferenced
+.binop_not_int_left:
+    ; A float immediate has no ob_type to read but does have slots, and
+    ; .binop_left_type names float_type for exactly that.  Anything else that
+    ; is not a pointer has neither.
+    cmp qword [rsp + BO_LTAG], TAG_FLOAT
+    je .binop_left_type
+    ; Non-pointer guard: TAG_NONE and the sentinels can't be dereferenced
     test qword [rsp + BO_LTAG], TAG_RC_BIT
     jz .binop_no_method
     ; Check if left has sq_repeat and right is int (e.g. tuple*3, list*3)
@@ -234,8 +282,16 @@ DEF_FUNC_BARE op_binary_op
     je .binop_try_left_seq
     jmp .binop_left_seq_done
 .binop_try_left_seq:
-    cmp qword [rsp + BO_RTAG], TAG_SMALLINT
-    jne .binop_left_seq_done
+    ; Same reasoning as the arm above: the count may be a bool or a heap int.
+    mov r15d, r9d
+    mov rdi, [rsp + BO_RIGHT]
+    mov rdx, [rsp + BO_RTAG]
+    call int_is_integer
+    mov r9d, r15d
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    test eax, eax
+    jz .binop_left_seq_done
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_sequence]
     test rax, rax
@@ -251,6 +307,8 @@ DEF_FUNC_BARE op_binary_op
     V_PACK rsi, rcx
     call rax
     V_UNPACK rax, rdx           ; sq_repeat returns a Value
+    test edx, edx               ; NotImplemented, as above
+    jz .binop_try_dunder
     jmp .binop_have_result
 .binop_left_seq_done:
     mov rax, [rdi + PyObject.ob_type]
@@ -260,14 +318,24 @@ DEF_FUNC_BARE op_binary_op
     ; SmallInt check: use saved left tag
     cmp qword [rsp + BO_LTAG], TAG_SMALLINT
     je .binop_smallint_type
-    ; TAG_BOOL: route to int (int_unwrap handles TAG_BOOL)
-    ; Non-pointer guard: TAG_NONE, TAG_FLOAT can't be dereferenced
+    ; A float immediate has no ob_type to read, so name float_type here.  It
+    ; used to reach its slots only through the coercion arm above, which fires
+    ; only when the OTHER operand is a number too -- so `1.5 * <any other
+    ; type>` never resolved a type at all and went straight to TypeError.
+    ; Invisible while every such pair really was a TypeError; not once a type
+    ; exists that float should hand the pair on to.
+    cmp qword [rsp + BO_LTAG], TAG_FLOAT
+    je .binop_float_type
+    ; Non-pointer guard: TAG_NONE and the sentinels can't be dereferenced
     test qword [rsp + BO_LTAG], TAG_RC_BIT
     jz .binop_no_method
     mov rax, [rdi + PyObject.ob_type]
     jmp .binop_have_type
 .binop_smallint_type:
     lea rax, [rel int_type]
+    jmp .binop_have_type
+.binop_float_type:
+    lea rax, [rel float_type]
     jmp .binop_have_type
 .binop_have_type:
     push rax                   ; save type ptr for sq fallback
@@ -297,12 +365,43 @@ DEF_FUNC_BARE op_binary_op
     sub ecx, 13                 ; inplace → base op
     lea rdx, [rel binary_op_offsets]
     mov rdx, [rdx + rcx*8]     ; non-inplace offset
-    ; Float coercion: if either operand is float, use float_number_methods
-    ; (mirrors the initial float coercion at .use_float_methods)
+    ; Float coercion, on the same terms the primary path uses at
+    ; .use_float_methods: only when the OTHER operand is something float
+    ; arithmetic can actually be coerced with.  This tested the tags alone and
+    ; took the coercion for any partner at all -- and since
+    ; complex_number_methods leaves every nb_inplace_* NULL, EVERY augmented
+    ; assignment between a complex and a float arrived here and left as
+    ; "unsupported operand type(s)", while the same operands written `z + 1.5`
+    ; worked.
     cmp qword [rsp + BO_LTAG], TAG_FLOAT
-    je .binop_fallback_float
+    jne .binop_fb_right_float
+    push rdx                    ; the slot offset, and the op index: both are
+    push r9                     ; caller-saved, and both are needed below
+    mov rdi, [rsp + 16 + BO_RIGHT]
+    mov rsi, [rsp + 16 + BO_RTAG]
+    call binop_is_number
+    pop r9
+    pop rdx
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    test eax, eax
+    jnz .binop_fallback_float
+    jmp .binop_fb_no_float
+.binop_fb_right_float:
     cmp qword [rsp + BO_RTAG], TAG_FLOAT
-    je .binop_fallback_float
+    jne .binop_fb_no_float
+    push rdx
+    push r9
+    mov rdi, [rsp + 16 + BO_LEFT]
+    mov rsi, [rsp + 16 + BO_LTAG]
+    call binop_is_number
+    pop r9
+    pop rdx
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    test eax, eax
+    jnz .binop_fallback_float
+.binop_fb_no_float:
     ; Reload type's tp_as_number
     cmp qword [rsp + BO_LTAG], TAG_SMALLINT
     je .binop_fallback_int
@@ -321,37 +420,17 @@ DEF_FUNC_BARE op_binary_op
 .binop_fallback_have_methods:
     test rax, rax
     jz .binop_try_dunder
+    mov r8, rdx                ; the effective slot offset, for the right-slot try
     mov rax, [rax + rdx]
     test rax, rax
     jz .binop_try_dunder
 
 .binop_have_method:
-
-    ; Guard: if left is SmallInt/Bool and right is a heaptype (not int subclass),
-    ; the int nb_* methods can't handle it. Skip to dunder dispatch.
-    cmp qword [rsp + BO_LTAG], TAG_SMALLINT
-    je .binop_guard_int_left
-    jmp .binop_compat_ok
-
-.binop_guard_int_left:
-    ; Left is int/bool. Check if right is an incompatible heaptype.
-    test qword [rsp + BO_RTAG], TAG_RC_BIT
-    jz .binop_compat_ok          ; right not a heap pointer → compatible
-    ; Right is a heap pointer (TAG_PTR)
-    push rax                     ; save method ptr
-    mov r10, [rsp + 8 + BO_RIGHT]
-    mov r10, [r10 + PyObject.ob_type]
-    test qword [r10 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
-    jz .binop_guard_ok           ; not heaptype → could be GMP int, proceed
-    test qword [r10 + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
-    jnz .binop_guard_ok          ; int subclass → int methods handle it
-    ; Heaptype non-int-subclass → skip to dunders
-    pop rax
-    jmp .binop_try_dunder
-.binop_guard_ok:
-    pop rax
-
-.binop_compat_ok:
+    ; There is deliberately no guard here on what the right operand is.  There
+    ; used to be one, and it tested TYPE_FLAG_HEAPTYPE -- which no builtin
+    ; static type carries, so str, list, dict, tuple, bytes, None, range and
+    ; slice all walked straight into int's slots.  Deciding whether a slot can
+    ; handle a pair is the slot's own job now; each declines with a NULL Value.
 
 .binop_do_call:
     ; Call the method: rdi = left Value, rsi = right Value
@@ -359,8 +438,21 @@ DEF_FUNC_BARE op_binary_op
     mov rcx, [rsp + BO_RTAG]
     V_PACK rdi, rdx
     V_PACK rsi, rcx
+    ; r8 (slot offset) and r9 (op index) are caller-saved and both are needed
+    ; after the call now that it can decline.  Two pushes also keep rsp's
+    ; 16-byte alignment across the call.
+    push r9
+    push r8
     call rax
+    pop r8
+    pop r9
     V_UNPACK rax, rdx           ; the nb_ slot returns a Value
+    ; A NULL Value is NotImplemented: the slot does not handle this pair, so
+    ; the protocol carries on rather than pushing NULL as the answer.  Without
+    ; this test a slot cannot decline, which is why the int slots used to
+    ; dereference whatever they were handed instead of refusing it.
+    test edx, edx
+    jz .binop_try_right_slot
 
 .binop_have_result:
     ; rax = result payload, rdx = result tag
@@ -391,18 +483,37 @@ DEF_FUNC_BARE op_binary_op
     cmp r9d, 0              ; NB_ADD
     je .binop_seq_concat
     cmp r9d, 13             ; NB_INPLACE_ADD
-    je .binop_seq_concat
+    je .binop_seq_iconcat
     ; NB_MULTIPLY (5) or NB_INPLACE_MULTIPLY (18) → sq_repeat
     cmp r9d, 5
     je .binop_seq_repeat_left
     cmp r9d, 18             ; NB_INPLACE_MULTIPLY
-    je .binop_seq_repeat_left
+    je .binop_seq_irepeat
     jmp .binop_try_dunder
+
+.binop_seq_iconcat:
+    ; The comment above said sq_inplace_concat and the code read sq_concat, so
+    ; `ba += b"x"` built a NEW bytearray and rebound the name: an alias never
+    ; saw the change, and `c is d` went False across it.  bytearray's
+    ; sq_inplace_concat has existed all along and nothing reached it.
+    mov rcx, [rax + PySequenceMethods.sq_inplace_concat]
+    test rcx, rcx
+    jz .binop_seq_concat
+    mov rax, rcx
+    jmp .binop_seq_have_concat
+
+.binop_seq_irepeat:
+    mov rcx, [rax + PySequenceMethods.sq_inplace_repeat]
+    test rcx, rcx
+    jz .binop_seq_repeat_left
+    mov rax, rcx
+    jmp .binop_seq_have_repeat
 
 .binop_seq_concat:
     mov rax, [rax + PySequenceMethods.sq_concat]
     test rax, rax
     jz .binop_try_dunder
+.binop_seq_have_concat:
     ; sq_concat(left, right): rdi=left, rsi=right already set
     mov rdx, [rsp + BO_LTAG]
     mov rcx, [rsp + BO_RTAG]
@@ -410,12 +521,19 @@ DEF_FUNC_BARE op_binary_op
     V_PACK rsi, rcx
     call rax
     V_UNPACK rax, rdx           ; sq_concat returns a Value
+    ; A NULL Value is NotImplemented here too, exactly as it is for the nb_
+    ; slots.  Untested, a declining sq_concat or sq_repeat pushed NULL onto
+    ; the value stack -- which is what `bytearray(b"ab") + [1, 2]` did the
+    ; moment bytearray's sq_concat learned to refuse a non-bytes-like.
+    test edx, edx
+    jz .binop_try_dunder
     jmp .binop_have_result
 
 .binop_seq_repeat_left:
     mov rax, [rax + PySequenceMethods.sq_repeat]
     test rax, rax
     jz .binop_try_dunder
+.binop_seq_have_repeat:
     ; sq_repeat(left=sequence, right=count)
     mov rdx, [rsp + BO_LTAG]
     mov rcx, [rsp + BO_RTAG]
@@ -423,6 +541,60 @@ DEF_FUNC_BARE op_binary_op
     V_PACK rsi, rcx
     call rax
     V_UNPACK rax, rdx           ; sq_repeat returns a Value
+    test edx, edx               ; NotImplemented, as above
+    jz .binop_try_dunder
+    jmp .binop_have_result
+
+.binop_try_right_slot:
+    ; The second half of CPython's binary_op1: the LEFT type's slot declined,
+    ; so the RIGHT type gets its turn at the same slot, with the operands still
+    ; in their original order.
+    ;
+    ; This is what lets a type serve an operand the other side has never heard
+    ; of, and it is the only route by which a numeric type added later can
+    ; answer `1 + <that type>` -- int's slot declines, and the new type's slot
+    ; is asked next.  Without it a builtin static type on the right can never
+    ; be reached at all: the dunder arm below requires TYPE_FLAG_HEAPTYPE.
+    ;
+    ; CPython also skips this when both types resolve to the same slot
+    ; function.  Not worth a compare here: the only builtins that share one are
+    ; int and bool, whose slot declines a second time just as cheaply.
+    mov rsi, [rsp + BO_RIGHT]
+    mov rcx, [rsp + BO_RTAG]
+    cmp rcx, TAG_SMALLINT
+    je .brs_int_type
+    cmp rcx, TAG_FLOAT
+    je .brs_float_type
+    test rcx, TAG_RC_BIT
+    jz .binop_try_dunder        ; not a pointer: no type to ask
+    mov rax, [rsi + PyObject.ob_type]
+    jmp .brs_have_type
+.brs_int_type:
+    lea rax, [rel int_type]
+    jmp .brs_have_type
+.brs_float_type:
+    lea rax, [rel float_type]
+.brs_have_type:
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz .binop_try_dunder
+    mov rax, [rax + r8]         ; r8 = the effective nb_* slot offset
+    test rax, rax
+    jz .binop_try_dunder
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    mov rdx, [rsp + BO_LTAG]
+    mov rcx, [rsp + BO_RTAG]
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
+    push r9
+    push r8
+    call rax
+    pop r8
+    pop r9
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .binop_try_dunder        ; both sides declined
     jmp .binop_have_result
 
 .binop_try_dunder:
@@ -481,8 +653,9 @@ DEF_FUNC_BARE op_binary_op
     V_UNPACK rax, rdx           ; returns a Value
     pop r9
     test edx, edx
-    jnz .binop_have_result
-    ; Inplace dunder call returned NULL unexpectedly — fall through to regular
+    jz .binop_left_dunder
+    BINOP_DECLINED .binop_left_dunder
+    jmp .binop_have_result
 
 .binop_left_dunder:
     ; Map op code to regular dunder name
@@ -505,7 +678,9 @@ DEF_FUNC_BARE op_binary_op
     V_UNPACK rax, rdx           ; returns a Value
     pop r9
     test edx, edx
-    jnz .binop_have_result
+    jz .binop_try_right_dunder
+    BINOP_DECLINED .binop_try_right_dunder
+    jmp .binop_have_result
 
 .binop_try_right_dunder:
     ; Try reflected dunder on right operand
@@ -537,7 +712,9 @@ DEF_FUNC_BARE op_binary_op
     call dunder_call_2
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
-    jnz .binop_have_result
+    jz .binop_no_method
+    BINOP_DECLINED .binop_no_method
+    jmp .binop_have_result
 
 .binop_no_method:
     ; No method found — raise TypeError
@@ -774,20 +951,49 @@ section .text
     push r8                    ; save right tag
     push rsi                   ; save right
 
-    ; Float coercion: if either operand is TAG_FLOAT, use float_compare
+    ; Float coercion: use float_compare when one operand is a float AND the
+    ; other is something it accepts.  Short-circuiting on the tag alone sent
+    ; float-versus-anything to float_compare, which declines; the retry then
+    ; asked the float side again rather than the OTHER operand's
+    ; tp_richcompare, so a type that knows how to compare itself to a float
+    ; never got the question and the answer came from the identity fallback.
     cmp r9d, TAG_FLOAT
-    je .cmp_use_float
+    je .cmp_probe_right
     cmp r8d, TAG_FLOAT
-    je .cmp_use_float
+    jne .cmp_no_float
+    mov rdi, [rsp + BO_LEFT]
+    mov esi, [rsp + BO_LTAG]
+    jmp .cmp_probe
+.cmp_probe_right:
+    mov rdi, [rsp + BO_RIGHT]
+    mov esi, [rsp + BO_RTAG]
+.cmp_probe:
+    extern float_binop_accepts
+    mov r15d, ecx               ; r15 is the handler scratch; ecx holds the op
+    call float_binop_accepts
+    mov ecx, r15d
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    mov r9d, [rsp + BO_LTAG]
+    mov r8d, [rsp + BO_RTAG]
+    test eax, eax
+    jnz .cmp_use_float
 
 .cmp_no_float:
     ; Get type's tp_richcompare
     cmp r9d, TAG_SMALLINT
     je .cmp_smallint_type
+    ; A float immediate has no ob_type; name float_type for it, the same way
+    ; .binop_left_type does for arithmetic.
+    cmp r9d, TAG_FLOAT
+    je .cmp_float_type
     mov rax, [rdi + PyObject.ob_type]
     jmp .cmp_have_type
 .cmp_smallint_type:
     lea rax, [rel int_type]
+    jmp .cmp_have_type
+.cmp_float_type:
+    lea rax, [rel float_type]
     jmp .cmp_have_type
 .cmp_bool_type:
     lea rax, [rel bool_type]
@@ -1063,14 +1269,17 @@ section .text
     cmp ecx, PY_NE
     je .cmp_id_eq_ne
 
-    ; Ordering comparison with unsupported types → raise TypeError
-    ; DECREF both operands first
-    mov rdi, [rsp + BO_LEFT]
-    mov rsi, [rsp + BO_LTAG]
-    DECREF_VAL rdi, rsi
-    mov rdi, [rsp + BO_RIGHT]
-    mov rsi, [rsp + BO_RTAG]
-    DECREF_VAL rdi, rsi
+    ; Ordering comparison with unsupported types → raise TypeError.
+    ;
+    ; The operands are deliberately NOT DECREFed here.  eval_exception_unwind
+    ; releases the frame's value stack, and it unwinds from above the slots
+    ; these operands were VPOPped out of -- so DECREFing them first freed them
+    ; and the unwinder then decremented the refcount field of memory malloc had
+    ; already put on its tcache free list, overwriting the list's forward
+    ; pointer.  The symptom was "malloc(): unaligned tcache chunk detected" in
+    ; whatever allocated next, arbitrarily far away: `object() < object()`,
+    ; `range(1) < range(2)` and `int < str` all corrupted the heap.
+    ; op_binary_op's .binop_no_method has always left this to the unwinder too.
     add rsp, BO_SIZE
     extern raise_exception
     RAISE exc_TypeError_type, "'<' not supported between instances"
@@ -1276,6 +1485,9 @@ section .data
 ;; Maps NB_* argument (0-25) to the byte offset within PyNumberMethods
 ;; where the corresponding method function pointer resides.
 align 8
+; Also read by obj_binary_op (src/object.asm), which is the same protocol made
+; callable from a builtin.
+global binary_op_offsets
 binary_op_offsets:
     ; Symbolic, not literal: these are byte offsets into PyNumberMethods, and
     ; a reorder of that struc used to mis-dispatch every binary operator in

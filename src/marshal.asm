@@ -19,6 +19,7 @@ MARSHAL_TYPE_ELLIPSIS         equ 0x2e  ; '.'
 MARSHAL_TYPE_INT              equ 0x69  ; 'i'
 MARSHAL_TYPE_INT64            equ 0x49  ; 'I'
 MARSHAL_TYPE_BINARY_FLOAT     equ 0x67  ; 'g'
+MARSHAL_TYPE_BINARY_COMPLEX   equ 0x79  ; 'y'
 MARSHAL_TYPE_LONG             equ 0x6c  ; 'l'
 MARSHAL_TYPE_STRING           equ 0x73  ; 's'
 MARSHAL_TYPE_INTERNED         equ 0x74  ; 't'
@@ -291,6 +292,8 @@ DEF_FUNC marshal_read_object
     je mdo_long
     cmp ebx, MARSHAL_TYPE_BINARY_FLOAT
     je mdo_binary_float
+    cmp ebx, MARSHAL_TYPE_BINARY_COMPLEX
+    je mdo_binary_complex
     cmp ebx, MARSHAL_TYPE_SHORT_ASCII
     je mdo_short_ascii
     cmp ebx, MARSHAL_TYPE_SHORT_ASCII_INTERNED
@@ -593,6 +596,30 @@ mdo_binary_float:
     extern float_from_f64
     call float_from_f64
     jmp mfinish
+
+;--------------------------------------------------------------------------
+; TYPE_BINARY_COMPLEX handler: two IEEE 754 doubles, real then imaginary.
+;
+; No r_ref_reserve/r_ref_insert dance.  That protocol exists for containers,
+; which can hold a reference back to themselves, so their ref slot has to be
+; claimed before their children are read.  A complex has no children -- nothing
+; recurses into marshal_read_object between the type byte and the value -- so
+; mfinish handling FLAG_REF afterwards is correct, exactly as for a float.
+;
+; Until this existed, any .pyc carrying a complex literal hit fatal_error on
+; the unknown type code rather than raising.
+;--------------------------------------------------------------------------
+mdo_binary_complex:
+    call marshal_read_long64   ; real part, raw bits
+    push rax
+    call marshal_read_long64   ; imaginary part
+    movq xmm1, rax
+    pop rax
+    movq xmm0, rax
+    extern complex_from_doubles
+    call complex_from_doubles
+    mov edx, TAG_PTR           ; a complex is a heap object; the pointer is
+    jmp mfinish                ; its own Value
 
 ;--------------------------------------------------------------------------
 ; TYPE_SHORT_ASCII / TYPE_SHORT_ASCII_INTERNED handler

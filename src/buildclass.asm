@@ -309,7 +309,11 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     ; The layout base is the widest base, not simply the first: `class
     ; C(Mixin, list)` has to be laid out as a list.  Ties go to the earlier
     ; base, which is what CPython's solid-base rule gives for the ordinary
-    ; single-inheritance case.
+    ; single-inheritance case -- except that a plain heaptype is only as wide
+    ; as it is because it carries a __dict__, which is not a layout the way a
+    ; builtin's inline value is.  float is 24 bytes and so is an ordinary
+    ; heaptype, so `class MF(Mixin, float)` picked Mixin and the double had
+    ; nowhere to live.  On a tie the static base wins.
     xor eax, eax                ; best base
     test rsi, rsi
     jz .tfp_base_done
@@ -325,7 +329,17 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     jz .tfp_base_next
     mov rdx, [r11 + PyTypeObject.tp_basicsize]
     cmp rdx, r10
-    jbe .tfp_base_next
+    ja .tfp_base_take
+    jb .tfp_base_next
+    ; Equal widths: take this one only if the incumbent is a heaptype and
+    ; this is not.
+    test rax, rax
+    jz .tfp_base_next
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .tfp_base_next           ; the incumbent is already a builtin
+    test qword [r11 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jnz .tfp_base_next
+.tfp_base_take:
     mov r10, rdx
     mov rax, r11
 .tfp_base_next:
@@ -386,13 +400,12 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     lea rcx, [rel bytes_type]
     cmp rax, rcx
     je .bc_layout_no_dict
-    ; bytearray and memoryview are resizable or borrow their storage, so a
-    ; tail would move or not be theirs; they get no dict rather than a
-    ; corrupting one.
+    ; memoryview borrows its storage, so a tail dict would not be its to
+    ; write; it gets none rather than a corrupting one.  bytearray used to be
+    ; in the same sentence, back when its data was inline and could move --
+    ; it is a fixed-size header with an out-of-line buffer now, so the dict
+    ; goes past the header like any other builtin's.
     extern bytearray_type
-    lea rcx, [rel bytearray_type]
-    cmp rax, rcx
-    je .bc_layout_none
     extern memoryview_type
     lea rcx, [rel memoryview_type]
     cmp rax, rcx
@@ -749,7 +762,9 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
 .bc_flags_done:
     and r10, TYPE_FLAG_INT_SUBCLASS | TYPE_FLAG_STR_SUBCLASS | \
              TYPE_FLAG_LIST_SUBCLASS | TYPE_FLAG_TUPLE_SUBCLASS | \
-             TYPE_FLAG_DICT_SUBCLASS | TYPE_FLAG_SET_SUBCLASS
+             TYPE_FLAG_DICT_SUBCLASS | TYPE_FLAG_SET_SUBCLASS | \
+             TYPE_FLAG_FLOAT_SUBCLASS | TYPE_FLAG_COMPLEX_SUBCLASS | \
+             TYPE_FLAG_BYTEARRAY_SUBCLASS | TYPE_FLAG_BYTES_SUBCLASS
     or [r12 + PyTypeObject.tp_flags], r10
 
     ; A class deriving from `type` is a metatype: its instances are classes,
@@ -851,6 +866,19 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     cmp rax, rcx
     je .bc_container_sub
     lea rcx, [rel memoryview_type]
+    cmp rax, rcx
+    je .bc_container_sub
+    ; ...nor for float and complex, for the same reason.  Inheriting the
+    ; thunk sent type_call straight to it, and it built and returned a plain
+    ; float or complex: the subclass name was lost and its __init__ never
+    ; ran.  Both constructors now read the type they are handed, so the
+    ; base_slot route in type_call gives them the subclass.
+    extern float_type
+    lea rcx, [rel float_type]
+    cmp rax, rcx
+    je .bc_container_sub
+    extern complex_type
+    lea rcx, [rel complex_type]
     cmp rax, rcx
     je .bc_container_sub
 
@@ -1339,6 +1367,28 @@ END_FUNC bc_prepare_namespace
 ;; 4. Create a new type object with class_dict as tp_dict
 ;; 5. Return the new type
 ;; ============================================================================
+;; ============================================================================
+;; bc_normalize_metatype(rdi = a metatype) -> rdi, with the interpreter's own
+;; metatypes mapped to type_type
+;;
+;; user_type_metatype and exc_metatype are implementation detail: they exist
+;; so an ordinary class and an exception class can carry different tp_call,
+;; and no metaclass a program writes derives from either.  For the purpose of
+;; "which metaclass is most derived" they are `type`.
+;; ============================================================================
+DEF_FUNC_BARE bc_normalize_metatype
+    lea rax, [rel user_type_metatype]
+    cmp rdi, rax
+    je .bnm_type
+    lea rax, [rel exc_metatype]
+    cmp rdi, rax
+    je .bnm_type
+    ret
+.bnm_type:
+    lea rdi, [rel type_type]
+    ret
+END_FUNC bc_normalize_metatype
+
 DEF_FUNC builtin___build_class__
     push rbx
     push r12
@@ -1450,15 +1500,41 @@ BCL_OKWV  equ 72
     mov r14, [rbx + 8]     ; r14 = class_name (args[1])
 
     ; A metaclass is inherited: `class D(C)` where type(C) is M gives D the
-    ; metatype M as well.  CPython picks the most derived metatype among the
-    ; bases; the winner is the one that is a subtype of every other, and
-    ; starting from `type` makes an ordinary base contribute nothing.
-    cmp qword [rbp - BCL_META], 0
-    jne .bc_metaclass_settled
+    ; metatype M as well.  CPython's rule is a winner among the explicit
+    ; metaclass and every base's type -- the one that is a subclass of all the
+    ; others, and a TypeError when no such one exists.
+    ;
+    ; The three metatypes this interpreter ships stand in for `type` and are
+    ; not in any user metaclass's MRO, so each is normalised to type_type
+    ; before the comparison.  Without that, an ordinary Python base made the
+    ; winner user_type_metatype, no real metaclass was a subclass of it, and
+    ; `class RawIOBase(_io._RawIOBase, IOBase)` in Lib/io.py came out a plain
+    ; type -- so RawIOBase.register(), which is how io tells isinstance() that
+    ; FileIO is a raw stream, did not exist.
+    mov r8, [rbp - BCL_META]                ; the winner so far
+    test r8, r8
+    jz .bc_meta_default
+    ; An explicit metaclass= need not be a type at all: CPython accepts any
+    ; callable, and `class D(object, metaclass=f)` for a plain function is
+    ; legal.  Seeding the scan with one and handing it to type_is_subtype read
+    ; tp_mro off the function.  Before this scan existed an explicit
+    ; metaclass= short-circuited it, so leave a non-type alone the same way --
+    ; it is called directly further down.
+    push r8
+    sub rsp, 8
+    mov rdi, r8
+    call type_check_is_class
+    add rsp, 8
+    pop r8
+    test eax, eax
+    jz .bc_meta_scan_done
+    jmp .bc_meta_have_winner
+.bc_meta_default:
+    lea r8, [rel type_type]
+.bc_meta_have_winner:
     mov rcx, [rbp - BCL_BASES]
     test rcx, rcx
-    jz .bc_metaclass_settled
-    lea r8, [rel type_type]                 ; r8 = winner so far
+    jz .bc_meta_scan_done
     mov r9, [rcx + PyTupleObject.ob_size]
     mov r10, [rcx + PyTupleObject.ob_item]
     xor r11d, r11d
@@ -1471,25 +1547,54 @@ BCL_OKWV  equ 72
     test rdi, rdi
     jz .bc_meta_scan_next
     mov rdi, [rdi + PyObject.ob_type]       ; the base's metatype
+    call bc_normalize_metatype
     cmp rdi, r8
     je .bc_meta_scan_next
+
+    ; The winner already derives from this one: nothing to do.
     push r8
     push r9
     push r10
     push r11
-    mov rsi, r8
-    call type_is_subtype                    ; is it more derived than the winner?
+    push rdi
+    sub rsp, 8
+    mov rsi, rdi
+    mov rdi, r8
+    call type_is_subtype
+    add rsp, 8
+    pop rdi
     pop r11
     pop r10
     pop r9
     pop r8
     test eax, eax
-    jz .bc_meta_scan_next
-    mov rdi, [r10 + r11*8]
-    mov r8, [rdi + PyObject.ob_type]
+    jnz .bc_meta_scan_next
+
+    ; This one derives from the winner: it becomes the winner.
+    push r8
+    push r9
+    push r10
+    push r11
+    push rdi
+    sub rsp, 8
+    mov rsi, r8
+    call type_is_subtype
+    add rsp, 8
+    pop rdi
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    test eax, eax
+    jz .bc_meta_conflict
+    mov r8, rdi
 .bc_meta_scan_next:
     inc r11
     jmp .bc_meta_scan
+
+.bc_meta_conflict:
+    RAISE exc_TypeError_type, "metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases"
+
 .bc_meta_scan_done:
     ; The three built-in metatypes go through type_from_parts as before --
     ; they have no __new__ of their own to run.
@@ -1572,12 +1677,11 @@ BCL_OKWV  equ 72
     cmp qword [rbp - BCL_META], 0
     je .bc_no_metaclass
     mov rdi, [rbp - BCL_META]
+    ; Whatever it is, it gets called.  CPython requires a callable here, not a
+    ; type: `class D(metaclass=f)` for a plain function binds D to f's return
+    ; value.  This used to ask type_check_is_class first and quietly build an
+    ; ordinary class when the answer was no, so metaclass=f was ignored.
     extern type_check_is_class
-    push rdi
-    call type_check_is_class
-    pop rdi
-    test eax, eax
-    jz .bc_no_metaclass
 
     ; meta(name, bases, ns, **kwds)
     mov rcx, [rbp - BCL_BASES]
@@ -1599,7 +1703,11 @@ BCL_OKWV  equ 72
     mov rcx, [rbp - BCL_OKWN]
     mov r8, [rbp - BCL_OKWV]
     call bc_call_kw
-    V_UNPACK rax, rdx
+    ; Kept as a Value, not unpacked: a metaclass that is not a type may answer
+    ; anything, including an immediate.  Unpacking here and re-packing in the
+    ; epilogue with a hardcoded TAG_PTR turned a returned 42 into a pointer to
+    ; address 42.  A class is a pointer, and a pointer is its own Value, so
+    ; the ordinary case is unchanged.
     add rsp, 32
     push rax
     mov rdi, [rbp - BCL_BASES]
@@ -1619,7 +1727,7 @@ BCL_OKWV  equ 72
     call obj_decref
 .bc_meta_done:
     pop rax
-    jmp .bc_have_class
+    jmp .bc_have_value
 
 .bc_no_metaclass:
     ; Build the heaptype from (name, bases, namespace); the three-argument
@@ -1645,6 +1753,18 @@ BCL_OKWV  equ 72
     pop rax
     test rax, rax
     jz .bc_have_class       ; NULL, with the exception already pending
+
+.bc_have_value:
+    ; The metaclass path arrives here with a finished Value in rax.  Same
+    ; unwind as below, minus the re-pack: there is nothing to tag.
+    add rsp, 64
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .bc_have_class:
     add rsp, 64        ; must match the sub above: the epilogue unwinds

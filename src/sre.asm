@@ -1985,43 +1985,66 @@ DEF_FUNC sre_match, SM_MFRAME
     ; skip = u32 words from REPEAT_ONE to past the body
     ; min = minimum repeats
     ; max = maximum repeats (SRE_MAXREPEAT for unlimited)
+    ;
+    ; The counters are 64-bit and every comparison below is SIGNED.  They used
+    ; to be 32-bit with the two directions disagreeing, and both halves were
+    ; wrong:
+    ;
+    ;   MAXREPEAT is 0xFFFFFFFF, which as an int32 is -1.  `cmp r9d, r8d /
+    ;   jge` therefore read 0 >= -1 as true and skipped the greedy loop
+    ;   entirely, so EVERY unbounded quantifier -- *, +, {n,} -- matched its
+    ;   minimum and stopped.  `.*` matched nothing.
+    ;
+    ;   The back-off then did `dec r9d` on a 32-bit counter and tested it with
+    ;   an UNSIGNED jb, so 0 - 1 became 0xFFFFFFFF, which is below nothing.
+    ;   The loop never terminated on the low side and walked the position
+    ;   negative, one byte at a time, until it stepped off the front of the
+    ;   mapped page.  That was the segfault on `.*x\Z`.
+    ;
+    ; Loading a u32 with a 32-bit move zero-extends, so max is 4294967295 as a
+    ; signed 64-bit value -- positive, and larger than any real count.
     mov r14d, [rbx]            ; skip
-    mov ecx, [rbx + 4]        ; min
-    mov r8d, [rbx + 8]        ; max
+    mov ecx, [rbx + 4]        ; min, zero-extended into rcx
+    mov r8d, [rbx + 8]        ; max, likewise
     add rbx, 12                ; past skip/min/max, pointing at body pattern
 
     ; Save state
     push r13                   ; save start pos
 
     ; First, match minimum required repetitions
-    mov r9d, ecx               ; remaining minimum
-    test r9d, r9d
+    mov r9, rcx                ; remaining minimum
+    test r9, r9
     jz .ro_min_done
 
 .ro_min_loop:
-    ; Save and try body match
+    ; Save and try body match.  rcx holds min and is caller-saved, so it goes
+    ; on the stack with the rest: op_min_repeat_one already knew this and
+    ; re-read min from memory afterwards; this one never did, and the stale
+    ; register is half of the back-off bug above.
     mov [r12 + SRE_State.str_pos], r13
     push r9
     push r8
+    push rcx
     push r14
     mov rdi, r12
     mov rsi, rbx               ; body pattern
     call sre_match
     pop r14
+    pop rcx
     pop r8
     pop r9
     test eax, eax
     jz .ro_min_fail
     mov r13, [r12 + SRE_State.str_pos]
-    dec r9d
-    test r9d, r9d
+    dec r9
+    test r9, r9
     jnz .ro_min_loop
 .ro_min_done:
 
     ; Now greedily match up to max
     ; Count successful body matches
-    mov r9d, ecx               ; current count = min
-    cmp r9d, r8d
+    mov r9, rcx                ; current count = min
+    cmp r9, r8
     jge .ro_greedy_done
 
 .ro_greedy_loop:
@@ -2029,20 +2052,22 @@ DEF_FUNC sre_match, SM_MFRAME
     mov [r12 + SRE_State.str_pos], r13
     push r9
     push r8
+    push rcx
     push r14
     mov rdi, r12
     mov rsi, rbx               ; body pattern
     call sre_match
     pop r14
+    pop rcx
     pop r8
     pop r9
     test eax, eax
     jz .ro_greedy_body_fail
     mov r13, [r12 + SRE_State.str_pos]
     add rsp, 8                 ; discard saved pos (body succeeded)
-    inc r9d
-    cmp r9d, r8d
-    jb .ro_greedy_loop
+    inc r9
+    cmp r9, r8
+    jl .ro_greedy_loop
     jmp .ro_greedy_done
 
 .ro_greedy_body_fail:
@@ -2052,29 +2077,37 @@ DEF_FUNC sre_match, SM_MFRAME
     ; Tail starts at skip_word_addr + skip*4
     ; rbx = skip_word_addr + 12 (past skip/min/max)
     ; CPython: ctx->pattern += ctx->pattern[0] from skip_word_addr
-    lea rcx, [rbx - 12]       ; skip_word_addr
+    ; rcx holds min and must survive: the back-off below compares against it.
+    ; Computing the tail address through rcx destroyed it, so the very first
+    ; back-off compared the count against a pattern ADDRESS and gave up --
+    ; which is why the greedy match worked and no shorter one was ever found.
+    lea rdx, [rbx - 12]       ; skip_word_addr
     mov eax, r14d              ; skip
-    lea r14, [rcx + rax*4]    ; tail pattern
+    lea r14, [rdx + rax*4]    ; tail pattern
 
     ; Try tail from current position, back off on failure (greedy backtracking)
 .ro_tail_loop:
     mov [r12 + SRE_State.str_pos], r13
     push r13
     push r9
+    push rcx
+    push rcx                   ; twice: rsp must stay 16-byte aligned
     mov rdi, r12
     mov rsi, r14               ; tail pattern
     call sre_match
+    pop rcx
+    pop rcx
     pop r9
     test eax, eax
     jnz .ro_tail_success
 
     pop r13                    ; restore pos
-    ; Back off one body match
-    dec r9d
-    cmp r9d, ecx
-    jb .ro_fail                ; below minimum, fail
-    ; Need to recalculate position by undoing last body match
-    ; This is tricky for multi-char bodies. For single-char body, just dec pos.
+    ; Back off one body match.  64-bit and SIGNED: min is never negative, so
+    ; the count reaching -1 is what ends the loop.
+    dec r9
+    cmp r9, rcx
+    jl .ro_fail                ; below minimum, fail
+    ; The body is a single character, so undoing one match is one position.
     dec r13
     jmp .ro_tail_loop
 
@@ -2150,7 +2183,12 @@ DEF_FUNC sre_match, SM_MFRAME
 
     pop r13
     ; Try one more body match
-    cmp r9d, [rbx - 4]        ; max
+    ; 64-bit and signed: MAXREPEAT is 0xFFFFFFFF, which as an int32 is -1,
+    ; so a 32-bit `jge` here read "count >= max" as true at once and the
+    ; loop never ran.  See op_repeat_one for the whole story.
+    mov rdx, [rbx - 4]
+    mov edx, edx                ; zero-extend the u32 max
+    cmp r9, rdx
     jge .mro_fail
     mov [r12 + SRE_State.str_pos], r13
     push r9
@@ -2195,10 +2233,18 @@ DEF_FUNC sre_match, SM_MFRAME
     pop r8
     pop rcx
     pop rbx
-    mov qword [rax + SRE_RepeatContext.count], 0
+    ; count starts at -1 and last_pos at "nowhere", as CPython's
+    ; sre_lib.h does.  MAX_UNTIL increments before reading, so -1 makes the
+    ; first entry see 0; starting at 0 made it see 1, and `(ab)+` with min 1
+    ; then decided it had already matched once and went straight to the tail.
+    ; And last_pos = r13 made the zero-width guard fire on the FIRST
+    ; iteration, because the body had not moved yet by definition -- so the
+    ; body was never attempted at all and every multi-character repeat
+    ; matched zero times.
+    mov qword [rax + SRE_RepeatContext.count], -1
     mov [rax + SRE_RepeatContext.pattern], rbx  ; points to body (after skip/min/max)
     mov [rax + SRE_RepeatContext.prev], r15
-    mov [rax + SRE_RepeatContext.last_pos], r13
+    mov qword [rax + SRE_RepeatContext.last_pos], -1
 
     ; Push onto repeat context chain
     mov r15, rax
@@ -2237,11 +2283,16 @@ DEF_FUNC sre_match, SM_MFRAME
     push qword [r15 + SRE_RepeatContext.last_pos]
     mov [r15 + SRE_RepeatContext.last_pos], r13
 
-    ; If count <= max (or max == MAXREPEAT), try body first (greedy)
+    ; If count < max (or max == MAXREPEAT), try the body first (greedy).
+    ; CPython's test is strict, and it has to be: count is the number of
+    ; iterations that would follow this one, so `<=` runs the body once more
+    ; than the pattern asks.  It read correctly while count started at 0 and
+    ; compensated for it; making count start at -1, as sre_lib.h does, left
+    ; this comparison one out and every bounded repeat matching max + 1 times.
     cmp r9d, SRE_MAXREPEAT
     je .mu_try_body_greedy
     cmp rax, r9
-    jbe .mu_try_body_greedy
+    jb .mu_try_body_greedy
 
     ; count > max — try tail only
     pop rax                    ; discard saved last_pos
@@ -2372,10 +2423,12 @@ DEF_FUNC sre_match, SM_MFRAME
     mov rax, [r15 + SRE_RepeatContext.count]
     mov rcx, [r15 + SRE_RepeatContext.pattern]
     mov r9d, [rcx - 4]        ; max
+    ; The mirror of MAX_UNTIL's: sre_lib.h fails when count >= max, so `ja`
+    ; allowed one iteration past the bound here too.
     cmp r9d, SRE_MAXREPEAT
     je .miu_try_body
     cmp rax, r9
-    ja .miu_fail
+    jae .miu_fail
 
 .miu_try_body:
     ; Zero-width check
@@ -2410,21 +2463,28 @@ DEF_FUNC sre_match, SM_MFRAME
     jmp .op_failure
 
 .op_assert:
-    ; ASSERT direction width [pattern] — lookahead/lookbehind
-    mov eax, [rbx]             ; skip (offset to past assert pattern)
-    mov ecx, [rbx + 4]        ; direction (1=ahead, -1=behind)
-    mov r8d, [rbx + 8]        ; width
-    add rbx, 12
+    ; ASSERT skip back [pattern] — lookahead and lookbehind
+    ;
+    ; TWO operand words, not three.  CPython's compiler emits <skip> <back>
+    ; and nothing else (_compiler.py's ASSERT_CODES arm), where back is how
+    ; far to step the position back before running the body: 0 means
+    ; lookahead, a positive count means lookbehind.  There is no direction
+    ; word and there is no -1.
+    ;
+    ; Reading a third word took the body's FIRST OPCODE as "width" and left
+    ; the body pointer one word too far, so every positive lookaround
+    ; dispatched into the middle of an instruction and failed; and the
+    ; `cmp ecx, -1` test could never be true, so lookbehind ran as lookahead
+    ; with no step back at all.
+    mov r8d, [rbx + 4]        ; back
+    add rbx, 8                 ; the body
 
-    ; For lookbehind (direction == -1), pos must >= width
-    cmp ecx, -1
-    jne .assert_ahead
-    ; Lookbehind
+    ; Stepping back further than the string is a failure, not a wrap.
     cmp r13, r8
     jb .op_failure
     push r13
     push rbx
-    sub r13, r8                ; back up position
+    sub r13, r8
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, rbx               ; assert body pattern
@@ -2433,41 +2493,25 @@ DEF_FUNC sre_match, SM_MFRAME
     pop r13
     test eax, eax
     jz .op_failure
-    ; Advance past assert body
-    ; rbx = skip_word_addr + 12 (past skip/dir/width)
-    ; CPython: ctx->pattern += ctx->pattern[0] from skip_word_addr
-    mov eax, [rbx - 12]       ; skip
-    lea rbx, [rbx - 12 + rax*4]
-    jmp .dispatch
-
-.assert_ahead:
-    ; Lookahead
-    push r13
-    push rbx
+    ; An assertion consumes nothing: the position is whatever it was, and the
+    ; pattern advances by skip from the skip word.
     mov [r12 + SRE_State.str_pos], r13
-    mov rdi, r12
-    mov rsi, rbx               ; assert body
-    call sre_match
-    pop rbx
-    pop r13
-    test eax, eax
-    jz .op_failure
-    mov eax, [rbx - 12]
-    lea rbx, [rbx - 12 + rax*4]
+    mov eax, [rbx - 8]        ; skip
+    lea rbx, [rbx - 8 + rax*4]
     jmp .dispatch
 
 .op_assert_not:
-    ; ASSERT_NOT direction width [pattern] — negative lookahead/lookbehind
-    mov eax, [rbx]
-    mov ecx, [rbx + 4]
-    mov r8d, [rbx + 8]
-    add rbx, 12
+    ; ASSERT_NOT skip back [pattern] — the negative forms.  Two operand words,
+    ; exactly as ASSERT above; the same three-word decode was here, and its
+    ; accidental "the body always fails" behaviour made every negative
+    ; lookaround succeed vacuously.
+    mov r8d, [rbx + 4]        ; back
+    add rbx, 8                 ; the body
 
-    cmp ecx, -1
-    jne .assert_not_ahead
-    ; Negative lookbehind
+    ; Not enough string to look behind means the pattern cannot be there,
+    ; so the negative assertion passes.
     cmp r13, r8
-    jb .assert_not_pass        ; can't look behind — assertion passes
+    jb .assert_not_pass
     push r13
     push rbx
     sub r13, r8
@@ -2478,25 +2522,12 @@ DEF_FUNC sre_match, SM_MFRAME
     pop rbx
     pop r13
     test eax, eax
-    jnz .op_failure            ; pattern matched — assertion fails
-    jmp .assert_not_pass
-
-.assert_not_ahead:
-    push r13
-    push rbx
-    mov [r12 + SRE_State.str_pos], r13
-    mov rdi, r12
-    mov rsi, rbx
-    call sre_match
-    pop rbx
-    pop r13
-    test eax, eax
-    jnz .op_failure            ; matched — negative assertion fails
+    jnz .op_failure            ; it matched — the negative assertion fails
 
 .assert_not_pass:
-    ; rbx = skip_word_addr + 12
-    mov eax, [rbx - 12]
-    lea rbx, [rbx - 12 + rax*4]
+    mov [r12 + SRE_State.str_pos], r13
+    mov eax, [rbx - 8]        ; skip
+    lea rbx, [rbx - 8 + rax*4]
     jmp .dispatch
 
 .op_atomic_group:
@@ -2557,9 +2588,12 @@ DEF_FUNC sre_match, SM_MFRAME
 .pr_min_done:
 
     ; Greedily match up to max (no backtracking)
-    mov r9d, ecx
+    mov r9, rcx
 .pr_greedy_loop:
-    cmp r9d, r8d
+    ; 64-bit and signed: MAXREPEAT is 0xFFFFFFFF, which as an int32 is -1,
+    ; so a 32-bit `jge` here read "count >= max" as true at once and the
+    ; loop never ran.  See op_repeat_one for the whole story.
+    cmp r9, r8
     jge .pr_greedy_done
     push r13
     mov [r12 + SRE_State.str_pos], r13
@@ -2630,9 +2664,12 @@ DEF_FUNC sre_match, SM_MFRAME
 .pro_min_done:
 
     ; Greedy match
-    mov r9d, ecx
+    mov r9, rcx
 .pro_greedy_loop:
-    cmp r9d, r8d
+    ; 64-bit and signed: MAXREPEAT is 0xFFFFFFFF, which as an int32 is -1,
+    ; so a 32-bit `jge` here read "count >= max" as true at once and the
+    ; loop never ran.  See op_repeat_one for the whole story.
+    cmp r9, r8
     jge .pro_greedy_done
     push r13
     mov [r12 + SRE_State.str_pos], r13

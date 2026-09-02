@@ -13,6 +13,42 @@
 %include "opcodes.inc"
 
 ; External functions
+extern memoryview_method_tobytes
+extern memoryview_method_tolist
+extern memoryview_method_cast
+extern memoryview_method_release
+extern memoryview_method_enter
+extern memoryview_method_exit
+extern memoryview_method_hex
+extern memoryview_dunder_getitem
+extern memoryview_dunder_setitem
+extern memoryview_dunder_len
+extern memoryview_type
+extern bytearray_method_append
+extern bytearray_method_extend
+extern bytearray_method_insert
+extern bytearray_method_pop
+extern bytearray_method_remove
+extern bytearray_method_clear
+extern bytearray_method_reverse
+extern bytearray_method_copy
+extern ba_shared_hex
+extern ba_shared_startswith
+extern ba_shared_endswith
+extern ba_shared_count
+extern ba_shared_find
+extern ba_shared_replace
+extern ba_shared_split
+extern ba_shared_join
+extern ba_shared_decode
+extern builtin_method_format
+extern bytearray_dunder_len
+extern bytearray_dunder_iter
+extern bytearray_dunder_setitem
+extern bytearray_dunder_delitem
+extern bytearray_dunder_getitem
+extern bytearray_dunder_contains
+extern bytearray_type
 extern gc_alloc
 extern gc_track
 extern obj_incref
@@ -81,6 +117,11 @@ extern dict_method_values
 extern float_classmethod_fromhex
 extern float_method_as_integer_ratio
 extern float_method_conjugate
+extern complex_type
+extern complex_dunder_repr
+extern complex_method_conjugate
+extern complex_method_complex
+extern complex_method_getnewargs
 extern float_method_hex
 extern float_method_is_integer
 extern generic_method_contains
@@ -680,6 +721,11 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___iter__]
     lea rdx, [rel str_dunder_iter]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___format__]
+    lea rdx, [rel builtin_method_format]
     call dict_add_builtin_func
 
     lea rax, [rel str_type]
@@ -1550,7 +1596,55 @@ DEF_FUNC methods_init
     call obj_decref
 
     ; Store in int_type.tp_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___format__]
+    lea rdx, [rel builtin_method_format]
+    call dict_add_builtin_func
+
     lea rax, [rel int_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
+    ;; --- complex_type methods ---
+    ;
+    ; __repr__ goes through DEF_DUNDER_STRREPR, which calls the DEFINING
+    ; type's slot rather than the argument's; the naive form recurses on a
+    ; subclass (bugs.md).  There is deliberately no __str__: CPython's complex
+    ; has no tp_str of its own, so `complex.__str__ is object.__str__` is True
+    ; there, and leaving it out reproduces that while tp_str = complex_repr
+    ; still keeps print(2j) fast.
+    call dict_new
+    mov rbx, rax
+
+    mov rdi, rbx
+    lea rsi, [rel mn___repr__]
+    lea rdx, [rel complex_dunder_repr]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel scalar_dunder_new]
+    call add_new_staticmethod
+
+    mov rdi, rbx
+    lea rsi, [rel mn_conjugate]
+    lea rdx, [rel complex_method_conjugate]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___complex__]
+    lea rdx, [rel complex_method_complex]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___getnewargs__]
+    lea rdx, [rel complex_method_getnewargs]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___format__]
+    lea rdx, [rel builtin_method_format]
+    call dict_add_builtin_func
+
+    lea rax, [rel complex_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
     ;; --- float_type methods ---
@@ -1561,6 +1655,13 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___repr__]
     lea rdx, [rel float_dunder_repr]
     call dict_add_builtin_func
+
+    ; float.__new__, for the same reason int and str carry one: a subclass
+    ; that overrides __new__ reaches the base's through super(), and enum
+    ; looks the name up in __dict__ to pick its data type.
+    mov rdi, rbx
+    lea rsi, [rel scalar_dunder_new]
+    call add_new_staticmethod
 
     mov rdi, rbx
     lea rsi, [rel mn_is_integer]
@@ -1613,6 +1714,11 @@ DEF_FUNC methods_init
     call obj_decref
     pop rdi
     call obj_decref
+
+    mov rdi, rbx
+    lea rsi, [rel mn___format__]
+    lea rdx, [rel builtin_method_format]
+    call dict_add_builtin_func
 
     ; Store in float_type.tp_dict
     lea rax, [rel float_type]
@@ -1684,6 +1790,158 @@ DEF_FUNC methods_init
     call dict_add_builtin_func
 
     lea rax, [rel bytes_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
+    ;; --- bytearray_type methods ---
+    ;; It had none at all: tp_getattr was 0 and tp_dict was empty, so a
+    ;; bytearray had no append, no find, not even __setitem__ by name.  The
+    ;; mutators are its own; the read-only ones are bytes', reached through a
+    ;; wrapper that hands the bytes body a temporary bytes -- see
+    ;; bytearray_shared_call in src/methods/bytes.asm for why that is the
+    ;; cheap answer here.
+    call dict_new
+    mov rbx, rax
+    mov rdi, rbx
+    lea rsi, [rel mn_append]
+    lea rdx, [rel bytearray_method_append]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_extend]
+    lea rdx, [rel bytearray_method_extend]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_insert]
+    lea rdx, [rel bytearray_method_insert]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_pop]
+    lea rdx, [rel bytearray_method_pop]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_remove]
+    lea rdx, [rel bytearray_method_remove]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_clear]
+    lea rdx, [rel bytearray_method_clear]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_reverse]
+    lea rdx, [rel bytearray_method_reverse]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_copy]
+    lea rdx, [rel bytearray_method_copy]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_hex]
+    lea rdx, [rel ba_shared_hex]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_startswith]
+    lea rdx, [rel ba_shared_startswith]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_endswith]
+    lea rdx, [rel ba_shared_endswith]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_count]
+    lea rdx, [rel ba_shared_count]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_find]
+    lea rdx, [rel ba_shared_find]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_replace]
+    lea rdx, [rel ba_shared_replace]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_split]
+    lea rdx, [rel ba_shared_split]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_join]
+    lea rdx, [rel ba_shared_join]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_decode]
+    lea rdx, [rel ba_shared_decode]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___len__]
+    lea rdx, [rel bytearray_dunder_len]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___iter__]
+    lea rdx, [rel bytearray_dunder_iter]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___setitem__]
+    lea rdx, [rel bytearray_dunder_setitem]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___delitem__]
+    lea rdx, [rel bytearray_dunder_delitem]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___getitem__]
+    lea rdx, [rel bytearray_dunder_getitem]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___contains__]
+    lea rdx, [rel bytearray_dunder_contains]
+    call dict_add_builtin_func
+    lea rax, [rel bytearray_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+
+    ;; --- memoryview_type methods ---
+    ;; It had none: tp_getattr was 0 and tp_dict was empty.  _pyio calls
+    ;; tobytes and cast, and wraps every readinto in `with memoryview(b)`.
+    call dict_new
+    mov rbx, rax
+    mov rdi, rbx
+    lea rsi, [rel mn_tobytes]
+    lea rdx, [rel memoryview_method_tobytes]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_tolist]
+    lea rdx, [rel memoryview_method_tolist]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_cast]
+    lea rdx, [rel memoryview_method_cast]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_release]
+    lea rdx, [rel memoryview_method_release]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___enter__]
+    lea rdx, [rel memoryview_method_enter]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___exit__]
+    lea rdx, [rel memoryview_method_exit]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_hex]
+    lea rdx, [rel memoryview_method_hex]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___getitem__]
+    lea rdx, [rel memoryview_dunder_getitem]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___setitem__]
+    lea rdx, [rel memoryview_dunder_setitem]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___len__]
+    lea rdx, [rel memoryview_dunder_len]
+    call dict_add_builtin_func
+    lea rax, [rel memoryview_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
     pop r12
@@ -1782,12 +2040,21 @@ mn_from_bytes:  db "from_bytes", 0
 mn_bit_length:  db "bit_length", 0
 mn_bit_count:   db "bit_count", 0
 mn_conjugate:   db "conjugate", 0
+mn___getnewargs__: db "__getnewargs__", 0
+mn___complex__: db "__complex__", 0
 ; float method names
 mn_is_integer:  db "is_integer", 0
 mn_as_integer_ratio: db "as_integer_ratio", 0
 ; float method names (continued)
 mn_fromhex:     db "fromhex", 0
 ; bytes method names
+mn_decode:            db "decode", 0
+mn_tobytes:          db "tobytes", 0
+mn_tolist:           db "tolist", 0
+mn_cast:             db "cast", 0
+mn_release:          db "release", 0
+mn___enter__:        db "__enter__", 0
+mn___exit__:         db "__exit__", 0
 mn_hex:         db "hex", 0
 ; dict method names (continued)
 mn_fromkeys:    db "fromkeys", 0

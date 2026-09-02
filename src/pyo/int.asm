@@ -1195,23 +1195,12 @@ END_FUNC int_bool
 ;; SmallInt x SmallInt fast path with overflow check.
 ;; ============================================================================
 DEF_FUNC_BARE int_add
-    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
-    ; Unwrap int subclass instances
-    push rcx                ; save right_tag
-    push rsi
-    call int_unwrap
-    pop rsi
-    pop rcx                 ; restore right_tag
-    push rdx                ; save unwrapped left_tag
-    push rdi
-    mov rdi, rsi
-    mov edx, ecx            ; pass right_tag to int_unwrap
-    call int_unwrap
-    mov rsi, rdi
-    mov ecx, edx            ; ecx = unwrapped right_tag
-    pop rdi
-    pop rdx                 ; edx = unwrapped left_tag
+    call int_binop_unpack       ; rdi/edx = left, rsi/ecx = right, both ints
+    test eax, eax
+    jnz .operands_ok
+    xor eax, eax                ; not both ints: a NULL Value is NotImplemented,
+    ret                         ; so the caller tries the other operand's slot
+.operands_ok:
     ; Check both SmallInt
     cmp edx, TAG_SMALLINT
     jne .gmp_path
@@ -1303,23 +1292,12 @@ END_FUNC int_add
 ;; int_sub(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_sub
-    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
-    ; Unwrap int subclass instances
-    push rcx                ; save right_tag
-    push rsi
-    call int_unwrap
-    pop rsi
-    pop rcx                 ; restore right_tag
-    push rdx                ; save unwrapped left_tag
-    push rdi
-    mov rdi, rsi
-    mov edx, ecx            ; pass right_tag to int_unwrap
-    call int_unwrap
-    mov rsi, rdi
-    mov ecx, edx            ; ecx = unwrapped right_tag
-    pop rdi
-    pop rdx                 ; edx = unwrapped left_tag
+    call int_binop_unpack       ; rdi/edx = left, rsi/ecx = right, both ints
+    test eax, eax
+    jnz .operands_ok
+    xor eax, eax                ; not both ints: a NULL Value is NotImplemented,
+    ret                         ; so the caller tries the other operand's slot
+.operands_ok:
     ; Check both SmallInt
     cmp edx, TAG_SMALLINT
     jne .gmp_path
@@ -1404,23 +1382,12 @@ END_FUNC int_sub
 ;; SmallInt x SmallInt: use imul with overflow detection
 ;; ============================================================================
 DEF_FUNC_BARE int_mul
-    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
-    ; Unwrap int subclass instances
-    push rcx                ; save right_tag
-    push rsi
-    call int_unwrap
-    pop rsi
-    pop rcx                 ; restore right_tag
-    push rdx                ; save unwrapped left_tag
-    push rdi
-    mov rdi, rsi
-    mov edx, ecx            ; pass right_tag to int_unwrap
-    call int_unwrap
-    mov rsi, rdi
-    mov ecx, edx            ; ecx = unwrapped right_tag
-    pop rdi
-    pop rdx                 ; edx = unwrapped left_tag
+    call int_binop_unpack       ; rdi/edx = left, rsi/ecx = right, both ints
+    test eax, eax
+    jnz .operands_ok
+    xor eax, eax                ; not both ints: a NULL Value is NotImplemented,
+    ret                         ; so the caller tries the other operand's slot
+.operands_ok:
     ; Check both SmallInt
     cmp edx, TAG_SMALLINT
     jne .gmp_path
@@ -1508,23 +1475,12 @@ END_FUNC int_mul
 ;; int_floordiv(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_floordiv
-    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
-    ; Unwrap int subclass instances
-    push rcx                ; save right_tag
-    push rsi
-    call int_unwrap
-    pop rsi
-    pop rcx                 ; restore right_tag
-    push rdx                ; save unwrapped left_tag
-    push rdi
-    mov rdi, rsi
-    mov edx, ecx            ; pass right_tag to int_unwrap
-    call int_unwrap
-    mov rsi, rdi
-    mov ecx, edx            ; ecx = unwrapped right_tag
-    pop rdi
-    pop rdx                 ; edx = unwrapped left_tag
+    call int_binop_unpack       ; rdi/edx = left, rsi/ecx = right, both ints
+    test eax, eax
+    jnz .operands_ok
+    xor eax, eax                ; not both ints: a NULL Value is NotImplemented,
+    ret                         ; so the caller tries the other operand's slot
+.operands_ok:
     ; Check both SmallInt
     cmp edx, TAG_SMALLINT
     jne .gmp_path
@@ -1646,23 +1602,12 @@ END_FUNC int_floordiv
 ;; int_mod(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_mod
-    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
-    ; Unwrap int subclass instances
-    push rcx                ; save right_tag
-    push rsi
-    call int_unwrap
-    pop rsi
-    pop rcx                 ; restore right_tag
-    push rdx                ; save unwrapped left_tag
-    push rdi
-    mov rdi, rsi
-    mov edx, ecx            ; pass right_tag to int_unwrap
-    call int_unwrap
-    mov rsi, rdi
-    mov ecx, edx            ; ecx = unwrapped right_tag
-    pop rdi
-    pop rdx                 ; edx = unwrapped left_tag
+    call int_binop_unpack       ; rdi/edx = left, rsi/ecx = right, both ints
+    test eax, eax
+    jnz .operands_ok
+    xor eax, eax                ; not both ints: a NULL Value is NotImplemented,
+    ret                         ; so the caller tries the other operand's slot
+.operands_ok:
     ; Check both SmallInt
     cmp edx, TAG_SMALLINT
     jne .gmp_path
@@ -1947,6 +1892,71 @@ DEF_FUNC_BARE int_unwrap
     ret
 END_FUNC int_unwrap
 
+;; ============================================================================
+;; int_binop_unpack(rdi = left Value, rsi = right Value)
+;;   -> eax = 1, and rdi/edx = left payload+tag, rsi/ecx = right payload+tag
+;;      eax = 0 when either operand is not an integer, in which case the caller
+;;              returns a NULL Value -- this tree's NotImplemented.
+;;
+;; This is CPython's CHECK_BINOP, and it is the only place that decides what
+;; int arithmetic accepts.  Every int nb_* binary slot enters through it, so
+;; `1 + "a"` can no longer reach INT_NEED_MPZ and write an mpz_t over a foreign
+;; object's header.  Both operands come back flattened -- an int subclass is
+;; unwrapped and a compact heap int becomes (ival, TAG_SMALLINT) -- so the
+;; slots below still take their int64 fast path.
+;;
+;; Callee-saved only; calls nothing outside this file, so the frame alignment
+;; the SysV ABI wants at a libc call does not arise.
+;; ============================================================================
+DEF_FUNC_BARE int_binop_unpack
+    push rbx
+    push r12
+    push r13
+    push r14
+    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
+    mov rbx, rdi                ; rbx  = left payload
+    mov r12d, edx               ; r12d = left tag
+    mov r13, rsi                ; r13  = right payload
+    mov r14d, ecx               ; r14d = right tag
+
+    call int_is_integer         ; rdi/edx already hold the left operand
+    test eax, eax
+    jz .ibu_decline
+    mov rdi, r13
+    mov edx, r14d
+    call int_is_integer
+    test eax, eax
+    jz .ibu_decline
+
+    mov rdi, rbx                ; flatten subclasses and compact heap ints
+    mov edx, r12d
+    call int_unwrap
+    mov rbx, rdi
+    mov r12d, edx
+    mov rdi, r13
+    mov edx, r14d
+    call int_unwrap
+    mov rsi, rdi                ; rsi/ecx = unwrapped right
+    mov ecx, edx
+    mov rdi, rbx                ; rdi/edx = unwrapped left
+    mov edx, r12d
+    mov eax, 1
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+.ibu_decline:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+END_FUNC int_binop_unpack
+
 ;; int_compare(PyObject *a, PyObject *b, int op) -> PyObject*
 ;; op: PY_LT=0 PY_LE=1 PY_EQ=2 PY_NE=3 PY_GT=4 PY_GE=5
 ;; ============================================================================
@@ -2184,23 +2194,12 @@ END_FUNC int_dealloc
 ;; Bitwise AND: int_and(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_and
-    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
-    ; Unwrap int subclass instances
-    push rcx                ; save right_tag
-    push rsi
-    call int_unwrap
-    pop rsi
-    pop rcx                 ; restore right_tag
-    push rdx                ; save unwrapped left_tag
-    push rdi
-    mov rdi, rsi
-    mov edx, ecx            ; pass right_tag to int_unwrap
-    call int_unwrap
-    mov rsi, rdi
-    mov ecx, edx            ; ecx = unwrapped right_tag
-    pop rdi
-    pop rdx                 ; edx = unwrapped left_tag
+    call int_binop_unpack       ; rdi/edx = left, rsi/ecx = right, both ints
+    test eax, eax
+    jnz .operands_ok
+    xor eax, eax                ; not both ints: a NULL Value is NotImplemented,
+    ret                         ; so the caller tries the other operand's slot
+.operands_ok:
     ; Check both SmallInt
     cmp edx, TAG_SMALLINT
     jne .gmp
@@ -2283,23 +2282,12 @@ END_FUNC int_and
 ;; Bitwise OR: int_or(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_or
-    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
-    ; Unwrap int subclass instances
-    push rcx                ; save right_tag
-    push rsi
-    call int_unwrap
-    pop rsi
-    pop rcx                 ; restore right_tag
-    push rdx                ; save unwrapped left_tag
-    push rdi
-    mov rdi, rsi
-    mov edx, ecx            ; pass right_tag to int_unwrap
-    call int_unwrap
-    mov rsi, rdi
-    mov ecx, edx            ; ecx = unwrapped right_tag
-    pop rdi
-    pop rdx                 ; edx = unwrapped left_tag
+    call int_binop_unpack       ; rdi/edx = left, rsi/ecx = right, both ints
+    test eax, eax
+    jnz .operands_ok
+    xor eax, eax                ; not both ints: a NULL Value is NotImplemented,
+    ret                         ; so the caller tries the other operand's slot
+.operands_ok:
     ; Check both SmallInt
     cmp edx, TAG_SMALLINT
     jne .gmp
@@ -2382,23 +2370,12 @@ END_FUNC int_or
 ;; Bitwise XOR: int_xor(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE int_xor
-    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
-    ; Unwrap int subclass instances
-    push rcx                ; save right_tag
-    push rsi
-    call int_unwrap
-    pop rsi
-    pop rcx                 ; restore right_tag
-    push rdx                ; save unwrapped left_tag
-    push rdi
-    mov rdi, rsi
-    mov edx, ecx            ; pass right_tag to int_unwrap
-    call int_unwrap
-    mov rsi, rdi
-    mov ecx, edx            ; ecx = unwrapped right_tag
-    pop rdi
-    pop rdx                 ; edx = unwrapped left_tag
+    call int_binop_unpack       ; rdi/edx = left, rsi/ecx = right, both ints
+    test eax, eax
+    jnz .operands_ok
+    xor eax, eax                ; not both ints: a NULL Value is NotImplemented,
+    ret                         ; so the caller tries the other operand's slot
+.operands_ok:
     ; Check both SmallInt
     cmp edx, TAG_SMALLINT
     jne .gmp
@@ -2584,31 +2561,21 @@ END_FUNC int_shrink
 ;; Left shift: int_lshift(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC int_lshift
-    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
+    ; The check runs before the callee-saved pushes, so the decline path is a
+    ; bare leave/ret with no push mirror to unwind.
+    call int_binop_unpack       ; rdi/edx = left, rsi/ecx = right, both ints
+    test eax, eax
+    jnz .operands_ok
+    xor eax, eax                ; NULL Value = NotImplemented
+    leave
+    ret
+.operands_ok:
     push rbx
     push r12
     push r13
     push r14
 
-    ; Save tags
-    mov r14d, edx           ; r14d = left_tag
-    ; ecx = right_tag
-
-    ; Unwrap int subclass instances
-    push rsi
-    push rcx                ; save right_tag
-    call int_unwrap          ; rdi, edx -> unwrapped rdi, edx
-    mov r14d, edx            ; update left_tag
-    pop rcx                  ; right_tag
-    pop rsi
-    push rdi
-    mov rdi, rsi
-    mov edx, ecx
-    call int_unwrap          ; rdi, edx -> unwrapped rdi, edx
-    mov rsi, rdi             ; rsi = unwrapped right
-    mov ecx, edx             ; ecx = right_tag
-    pop rdi                  ; rdi = unwrapped left
+    mov r14d, edx           ; r14d = left_tag; ecx is already right_tag
 
     mov rbx, rdi           ; left operand
     mov r12, rsi           ; right operand (shift amount)
@@ -2685,31 +2652,19 @@ END_FUNC int_lshift
 ;; Right shift: int_rshift(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
 DEF_FUNC int_rshift
-    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
+    call int_binop_unpack       ; rdi/edx = left, rsi/ecx = right, both ints
+    test eax, eax
+    jnz .operands_ok
+    xor eax, eax                ; NULL Value = NotImplemented
+    leave
+    ret
+.operands_ok:
     push rbx
     push r12
     push r13
     push r14
 
-    ; Save tags
-    mov r14d, edx           ; r14d = left_tag
-    ; ecx = right_tag
-
-    ; Unwrap int subclass instances
-    push rsi
-    push rcx                ; save right_tag
-    call int_unwrap
-    mov r14d, edx            ; update left_tag
-    pop rcx
-    pop rsi
-    push rdi
-    mov rdi, rsi
-    mov edx, ecx
-    call int_unwrap
-    mov rsi, rdi
-    mov ecx, edx             ; ecx = right_tag
-    pop rdi
+    mov r14d, edx           ; r14d = left_tag; ecx is already right_tag
 
     mov rbx, rdi
     mov r12, rsi
@@ -2797,30 +2752,19 @@ END_FUNC int_rshift
 ;; For small positive exponents, use GMP mpz_pow_ui
 ;; ============================================================================
 DEF_FUNC int_power
-    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
+    call int_binop_unpack       ; rdi/edx = base, rsi/ecx = exponent, both ints
+    test eax, eax
+    jnz .operands_ok
+    xor eax, eax                ; NULL Value = NotImplemented
+    leave
+    ret
+.operands_ok:
     push rbx
     push r12
     push r13
     push r14
 
-    ; Calling convention: rdi=left, rsi=right, rdx=left_tag, rcx=right_tag
-    ; Unwrap int subclass instances, tracking tags
-    push rsi                ; save right
-    push rcx                ; save right_tag
-    call int_unwrap         ; rdi=unwrapped left, edx=left_tag
-    pop rcx                 ; restore right_tag
-    pop rsi                 ; restore right
-    mov r14d, edx           ; r14d = base_tag (left tag after unwrap)
-    push rdi                ; save unwrapped left
-    push r14                ; save base_tag
-    mov rdi, rsi
-    mov edx, ecx            ; right_tag
-    call int_unwrap         ; rdi=unwrapped right, edx=right_tag
-    mov rsi, rdi            ; rsi = unwrapped right (exponent)
-    mov ecx, edx            ; ecx = exp_tag (right tag after unwrap)
-    pop r14                 ; r14d = base_tag
-    pop rdi                 ; rdi = unwrapped left (base)
+    mov r14d, edx           ; r14d = base_tag; ecx is already exp_tag
 
     mov rbx, rdi           ; rbx = base
     mov r12, rsi           ; r12 = exponent
@@ -2939,13 +2883,32 @@ END_FUNC int_power
 ;; int / int always returns float in Python
 ;; ============================================================================
 DEF_FUNC int_true_divide
-    V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
-    ; rdi=left, rsi=right, rdx=left_tag, rcx=right_tag
+    ; This one never called int_unwrap at all, so an int subclass or a compact
+    ; heap int on either side took the GMP path unnecessarily; routing through
+    ; int_binop_unpack fixes that as well as rejecting foreign operands.
+    call int_binop_unpack       ; rdi/edx = left, rsi/ecx = right, both ints
+    test eax, eax
+    jnz .operands_ok
+    xor eax, eax                ; NULL Value = NotImplemented
+    leave
+    ret
+.operands_ok:
     and rsp, -16           ; align for potential libc calls
     push rbx
     push r12
     push r13
+    ; A real slot for the left double, and the padding that makes rsp
+    ; 16-byte aligned at the two __gmpz_get_d calls below.  It used to live at
+    ; [rsp-8] in the red zone, which is exactly where the second of those
+    ; calls writes its return address: `1/(2**70)` and `(2**70)/(2**70)` both
+    ; came back 0.0, having divided by a fragment of this function's own code
+    ; address.  The red zone is not a place to keep anything across a call.
+    ;
+    ; 24, not 16: `and rsp, -16` then three pushes leaves rsp 8 mod 16, so the
+    ; two __gmpz_get_d calls were already reached misaligned -- harmless until
+    ; glibc takes an aligned-SSE path.  24 restores the invariant the `and`
+    ; was there to establish.
+    sub rsp, 24
 
     mov rbx, rdi           ; left
     mov r12, rsi           ; right
@@ -2962,7 +2925,7 @@ DEF_FUNC int_true_divide
     mov rax, rbx
     cvtsi2sd xmm0, rax
 .td_have_left:
-    movsd [rsp-8], xmm0   ; save left double
+    movsd [rsp], xmm0     ; save left double, in the slot reserved above
 
     ; Convert right to double (r13d = right_tag)
     cmp r13d, TAG_SMALLINT
@@ -2982,10 +2945,11 @@ DEF_FUNC int_true_divide
     je .td_divzero
 
     movsd xmm1, xmm0      ; xmm1 = right
-    movsd xmm0, [rsp-8]   ; xmm0 = left
+    movsd xmm0, [rsp]     ; xmm0 = left
     divsd xmm0, xmm1
     call float_from_f64
 
+    add rsp, 24                 ; the left-double slot, and its padding
     pop r13
     pop r12
     pop rbx
@@ -2996,6 +2960,123 @@ DEF_FUNC int_true_divide
 .td_divzero:
     RAISE exc_ZeroDivisionError_type, "division by zero"
 END_FUNC int_true_divide
+
+;; ============================================================================
+;; int_getattr(rdi = self Value, rsi = name str) -> rax = Value, or NULL
+;;
+;; real, imag, numerator and denominator.  numbers.py and fractions.py reach
+;; for all four on a plain int, and every one of them was an AttributeError:
+;; only bool and complex had this chain, so `(5).real` raised while
+;; `True.real` did not.
+;;
+;; Not a getset descriptor -- getset_descr_new is a stub whose accessors are
+;; NULL and which nothing in the tree invokes.  bool_getattr and
+;; complex_getattr do exactly this, for exactly these names.  Returning NULL
+;; rather than raising is what lets bit_length() and __eq__ coexist with it:
+;; op_load_attr falls through to the MRO's tp_dicts.
+;;
+;; The argument is a Value, so all three shapes of int arrive here -- an
+;; immediate, a heap int and a subclass instance -- and .real has to hand
+;; back a plain int for the last of them, as CPython does.
+;; ============================================================================
+IG_SELF   equ 8
+IG_NAME   equ 16
+IG_FRAME  equ 16            ; + 0 pushes = 16
+
+extern ap_strcmp
+DEF_FUNC int_getattr, IG_FRAME
+    mov [rbp - IG_SELF], rdi
+    mov [rbp - IG_NAME], rsi
+
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "real"
+    call ap_strcmp
+    test eax, eax
+    jz .ig_self_value
+
+    mov rdi, [rbp - IG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "numerator"
+    call ap_strcmp
+    test eax, eax
+    jz .ig_self_value
+
+    mov rdi, [rbp - IG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "imag"
+    call ap_strcmp
+    test eax, eax
+    jz .ig_zero
+
+    mov rdi, [rbp - IG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "denominator"
+    call ap_strcmp
+    test eax, eax
+    jz .ig_one
+
+    RET_NULL
+    leave
+    V_PACK rax, rdx
+    ret
+
+.ig_self_value:
+    ; An exact int answers with itself; a subclass answers with its value, so
+    ; that type(I(5).real) is int.
+    mov rdi, [rbp - IG_SELF]
+    V_TEST_PTR rdi, rax
+    ja .ig_self_out             ; an immediate is already a plain int
+    ; Compare the TYPE, not the family flag: int_type carries
+    ; TYPE_FLAG_INT_SUBCLASS itself, so that a subclass inherits it, and an
+    ; exact heap int took the unwrapping path below.  int_unwrap reduced it
+    ; to a SmallInt payload and V_PACK boxed it again -- a fresh object, so
+    ; `v.real is v` was False for any v outside +-2^50, and the extra
+    ; reference on top of that leaked one int per read.
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .ig_self_out
+    extern bool_type
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
+    je .ig_self_out
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
+    jz .ig_self_out
+    mov edx, TAG_PTR
+    call int_unwrap             ; rdi/edx = the plain int it wraps
+    cmp edx, TAG_PTR
+    jne .ig_wrapped_immediate
+    ; A pointer here is BORROWED from the wrapper, and V_PACK does nothing to
+    ; it: handing it back without a reference of its own underflows the
+    ; refcount, which shows up as a crash at teardown rather than at the read.
+    mov rax, rdi
+    INCREF_V rax, rcx
+    leave
+    ret
+.ig_wrapped_immediate:
+    V_PACK rdi, rdx             ; an immediate, or a box V_PACK now owns
+    mov rax, rdi
+    leave
+    ret
+.ig_self_out:
+    mov rax, rdi
+    INCREF_V rax, rcx
+    leave
+    ret
+
+.ig_zero:
+    xor eax, eax
+    V_PACK_I64 rax, rcx
+    leave
+    ret
+
+.ig_one:
+    mov eax, 1
+    V_PACK_I64 rax, rcx
+    leave
+    ret
+END_FUNC int_getattr
+
 
 ;; ============================================================================
 ;; Data
@@ -3060,7 +3141,7 @@ int_type:
     dq int_repr             ; tp_str
     dq int_hash             ; tp_hash
     dq 0                    ; tp_call
-    dq 0                    ; tp_getattr
+    dq int_getattr          ; tp_getattr (.real/.imag/.numerator/.denominator)
     dq 0                    ; tp_setattr
     dq int_compare          ; tp_richcompare
     dq 0                    ; tp_iter

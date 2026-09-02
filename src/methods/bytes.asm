@@ -10,6 +10,18 @@
 
 
 ; External functions
+extern bytes_like_ptr_len
+extern int_is_integer
+extern obj_as_index
+extern bytearray_data
+extern bytearray_new
+extern bytearray_tp_iter
+extern bytearray_subscript
+extern bytearray_ass_subscript
+extern bytearray_contains
+extern exc_MemoryError_type
+extern none_singleton
+extern _bytes_decode_impl
 extern ap_malloc
 extern ap_free
 extern ap_realloc
@@ -33,6 +45,50 @@ extern bool_true
 ; --- moved to a sibling file by the split ---
 
 section .text
+
+;; ============================================================================
+;; BYTES_NEEDLE sub_slot, scratch_slot
+;;
+;; find(), count() and index() take an INT as well as a bytes-like -- CPython's
+;; do, and `charmap.find(1, q)` in the regex compiler is exactly that call.
+;; Reading an int as a PyBytesObject header is a wild dereference, and it
+;; segfaulted.
+;;
+;; Rather than give every reader a second path, a one-byte bytes header is
+;; built in the caller's frame and the sub slot pointed at it: ob_size = 1 and
+;; one data byte, which is all the bodies below read.  It lives exactly as
+;; long as the frame, so nothing owns or releases it.
+;; ============================================================================
+%macro BYTES_NEEDLE 2           ; %1 = the sub slot, %2 = the scratch slot
+    ; int_is_integer, not a pointer test: True, every int under INT_STRESS=1,
+    ; and every int subclass instance all arrive as pointers, and a tag test
+    ; sends them down the bytes-like path to be read as an object header.
+    mov rdi, [rbp - %1]
+    V_UNPACK rdi, rdx
+    call int_is_integer
+    test eax, eax
+    jz %%done                   ; a bytes-like: leave it alone
+    mov rdi, [rbp - %1]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    cmp rax, 0
+    jl %%range
+    cmp rax, 255
+    jle %%in_range
+%%range:
+    RAISE exc_ValueError_type, "byte must be in range(0, 256)"
+%%in_range:
+    lea rcx, [rbp - %2]
+    mov qword [rcx + PyBytesObject.ob_size], 1
+    mov [rcx + PyBytesObject.data], al
+    ; ob_type too: the fabricated header now goes through bytes_like_ptr_len
+    ; like any other argument, and that reads the type before the data.
+    lea rdx, [rel bytes_type]
+    mov [rcx + PyObject.ob_type], rdx
+    mov [rbp - %1], rcx
+%%done:
+%endmacro
+
 
 ;; ############################################################################
 ;;                       BYTES METHODS
@@ -132,99 +188,244 @@ DEF_FUNC bytes_method_hex, BH_FRAME
 END_FUNC bytes_method_hex
 
 ;; ============================================================================
-;; bytes_method_startswith(args, nargs) -> Bool
-;; args[0]=self (bytes), args[1]=prefix (bytes)
+;; bytes_affix_match(rdi = one affix Value, rsi = the subject's data,
+;;                   rdx = its length, ecx = 0 for a prefix, 1 for a suffix)
+;;   -> eax = 1 match, 0 no match, -1 the affix is not bytes-like
 ;; ============================================================================
-DEF_FUNC bytes_method_startswith
-    cmp rsi, 2
-    jne .bsw_error
+BAM_DATA  equ 8
+BAM_LEN   equ 16
+BAM_END   equ 24
+BAM_FRAME equ 32            ; + 0 pushes = 32
 
-    mov rax, [rdi]              ; self
-    mov rcx, [rdi + 8]         ; prefix
-
-    ; Get lengths
-    mov r8, [rax + PyBytesObject.ob_size]   ; self len
-    mov r9, [rcx + PyBytesObject.ob_size]   ; prefix len
-
-    ; If prefix longer than self: False
-    cmp r9, r8
-    ja .bsw_false
-
-    ; Compare first r9 bytes
-    lea rdi, [rax + PyBytesObject.data]
-    lea rsi, [rcx + PyBytesObject.data]
-    mov rdx, r9
-    test rdx, rdx
-    jz .bsw_true                ; empty prefix always matches
+DEF_FUNC_LOCAL bytes_affix_match, BAM_FRAME
+    mov [rbp - BAM_DATA], rsi
+    mov [rbp - BAM_LEN], rdx
+    mov [rbp - BAM_END], rcx
+    call bytes_like_ptr_len     ; rax = data, r10 = length, ecx = ok
+    test ecx, ecx
+    jz .bam_bad
+    cmp r10, [rbp - BAM_LEN]
+    ja .bam_no                  ; longer than the subject
+    test r10, r10
+    jz .bam_yes                 ; an empty affix always matches
+    mov rsi, rax
+    mov rdi, [rbp - BAM_DATA]
+    cmp qword [rbp - BAM_END], 0
+    je .bam_have_start
+    add rdi, [rbp - BAM_LEN]    ; a suffix starts len - affixlen in
+    sub rdi, r10
+.bam_have_start:
+    mov rdx, r10
     call ap_memcmp
     test eax, eax
-    jnz .bsw_false
-
-.bsw_true:
+    jnz .bam_no
+.bam_yes:
     mov eax, 1
-    RET_BOOL_RAX
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
+.bam_no:
+    xor eax, eax
+    leave
+    ret
+.bam_bad:
+    mov eax, -1
+    leave
+    ret
+END_FUNC bytes_affix_match
 
-.bsw_false:
+;; ============================================================================
+;; bytes_method_affix(rdi = args, rsi = nargs, edx = 0 prefix / 1 suffix,
+;;                    rcx = the method's name) -> a bool Value
+;;
+;; startswith and endswith differ only in which end they compare, and both
+;; take EITHER one affix or a tuple of them -- `data.startswith((b'PK',
+;; b'\x1f\x8b'))` is the idiom that matters, and routing the whole argument
+;; through bytes_like_ptr_len turned it into a TypeError.
+;; ============================================================================
+BAF_SELF  equ 8
+BAF_SLEN  equ 16
+BAF_ARG   equ 24
+BAF_END   equ 32
+BAF_NAME  equ 40
+BAF_I     equ 48
+BAF_N     equ 56
+BAF_BAD   equ 64            ; the element the message names, for a tuple
+BAF_FRAME equ 80            ; + 0 pushes = 80
+
+DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
+    cmp rsi, 2
+    jne .baf_argerr
+    mov [rbp - BAF_END], rdx
+    mov [rbp - BAF_NAME], rcx
+    mov rax, [rdi + 8]
+    mov [rbp - BAF_ARG], rax
+
+    ; The subject: a bytearray keeps its bytes out of line, so reading data
+    ; and ob_size off it with a bytes layout found the capacity word.
+    mov rdi, [rdi]
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .baf_self_type
+    mov [rbp - BAF_SELF], rax
+    mov [rbp - BAF_SLEN], r10
+
+    mov rdi, [rbp - BAF_ARG]
+    V_TEST_PTR rdi, rax
+    ja .baf_single
+    test rdi, rdi
+    jz .baf_single
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    jne .baf_single
+
+    ; A tuple: true if any element matches.
+    mov rax, [rdi + PyTupleObject.ob_size]
+    mov [rbp - BAF_N], rax
+    mov qword [rbp - BAF_I], 0
+.baf_loop:
+    mov rcx, [rbp - BAF_I]
+    cmp rcx, [rbp - BAF_N]
+    jge .baf_false
+    mov rax, [rbp - BAF_ARG]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rdi, [rax + rcx*8]
+    mov [rbp - BAF_BAD], rdi    ; the item, in case it is not bytes-like
+    mov rsi, [rbp - BAF_SELF]
+    mov rdx, [rbp - BAF_SLEN]
+    mov rcx, [rbp - BAF_END]
+    call bytes_affix_match
+    cmp eax, 0
+    jl .baf_item_type           ; an ELEMENT of the tuple, worded differently
+    test eax, eax
+    jnz .baf_true
+    inc qword [rbp - BAF_I]
+    jmp .baf_loop
+
+.baf_single:
+    mov rdi, [rbp - BAF_ARG]
+    mov [rbp - BAF_BAD], rdi
+    mov rsi, [rbp - BAF_SELF]
+    mov rdx, [rbp - BAF_SLEN]
+    mov rcx, [rbp - BAF_END]
+    call bytes_affix_match
+    cmp eax, 0
+    jl .baf_arg_type
+    test eax, eax
+    jnz .baf_true
+
+.baf_false:
     xor eax, eax
     RET_BOOL_RAX
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx
+    ret
+.baf_true:
+    mov eax, 1
+    RET_BOOL_RAX
+    leave
+    V_PACK rax, rdx
     ret
 
-.bsw_error:
-    RAISE exc_TypeError_type, "startswith() takes exactly one argument"
+.baf_self_type:
+    RAISE exc_TypeError_type, "a bytes-like object is required"
+.baf_item_type:
+    ; CPython words a bad ELEMENT differently from a bad argument: "a
+    ; bytes-like object is required, not 'str'" rather than "first arg must
+    ; be bytes or a tuple of bytes".
+    lea rdi, [rel bj_msgbuf]
+    lea rsi, [rel baf_msg_item]
+    call bj_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - BAF_BAD]
+    call baf_append_quoted_typename
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel bj_msgbuf]
+    call raise_exception
+    ud2
+.baf_arg_type:
+    ; CPython names the method and the offending type: "startswith first arg
+    ; must be bytes or a tuple of bytes, not str".
+    lea rdi, [rel bj_msgbuf]
+    mov rsi, [rbp - BAF_NAME]
+    call bj_append_cstr
+    mov rdi, rax
+    lea rsi, [rel baf_msg_first]
+    call bj_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - BAF_BAD]
+    call baf_append_typename
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel bj_msgbuf]
+    call raise_exception
+    ud2
+.baf_argerr:
+    lea rdi, [rel bj_msgbuf]
+    mov rsi, [rbp - BAF_NAME]
+    call bj_append_cstr
+    mov rdi, rax
+    lea rsi, [rel baf_msg_args]
+    call bj_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel bj_msgbuf]
+    call raise_exception
+    ud2
+END_FUNC bytes_method_affix
+
+DEF_FUNC_LOCAL baf_append_quoted_typename   ; (rdi = dest, rsi = a Value)
+    push rbx
+    mov rbx, rdi
+    mov byte [rbx], 0x27        ; an apostrophe
+    lea rdi, [rbx + 1]
+    call baf_append_typename
+    mov byte [rax], 0x27
+    mov byte [rax + 1], 0
+    lea rax, [rax + 1]
+    pop rbx
+    leave
+    ret
+END_FUNC baf_append_quoted_typename
+
+DEF_FUNC_LOCAL baf_append_typename  ; (rdi = dest, rsi = a Value) -> rax
+    V_TEST_PTR rsi, rax
+    ja .bat2_int
+    test rsi, rsi
+    jz .bat2_int
+    mov rsi, [rsi + PyObject.ob_type]
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    jmp .bat2_have
+.bat2_int:
+    lea rsi, [rel bj_name_int]
+.bat2_have:
+    call bj_append_cstr
+    leave
+    ret
+END_FUNC baf_append_typename
+
+;; ============================================================================
+;; bytes_method_startswith(args, nargs) -> Bool
+;; args[0]=self (bytes), args[1]=prefix (bytes)
+;; ============================================================================
+;; bytes_method_startswith / bytes_method_endswith -- one implementation, two
+;; ends.  Both accept a tuple of affixes, as CPython's do.
+;; ============================================================================
+DEF_FUNC bytes_method_startswith
+    xor edx, edx
+    lea rcx, [rel baf_name_startswith]
+    call bytes_method_affix
+    leave
+    ret
 END_FUNC bytes_method_startswith
 
 ;; ============================================================================
 ;; bytes_method_endswith(args, nargs) -> Bool
 ;; args[0]=self (bytes), args[1]=suffix (bytes)
-;; ============================================================================
 DEF_FUNC bytes_method_endswith
-    cmp rsi, 2
-    jne .bew_error
-
-    mov rax, [rdi]              ; self
-    mov rcx, [rdi + 8]         ; suffix
-
-    ; Get lengths
-    mov r8, [rax + PyBytesObject.ob_size]   ; self len
-    mov r9, [rcx + PyBytesObject.ob_size]   ; suffix len
-
-    ; If suffix longer than self: False
-    cmp r9, r8
-    ja .bew_false
-
-    ; Compare last r9 bytes
-    mov rdx, r8
-    sub rdx, r9                             ; offset = self_len - suffix_len
-    lea rdi, [rax + PyBytesObject.data + rdx]
-    lea rsi, [rcx + PyBytesObject.data]
-    mov rdx, r9
-    test rdx, rdx
-    jz .bew_true                ; empty suffix always matches
-    call ap_memcmp
-    test eax, eax
-    jnz .bew_false
-
-.bew_true:
-    mov eax, 1
-    RET_BOOL_RAX
+    mov edx, 1
+    lea rcx, [rel baf_name_endswith]
+    call bytes_method_affix
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
-
-.bew_false:
-    xor eax, eax
-    RET_BOOL_RAX
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.bew_error:
-    RAISE exc_TypeError_type, "endswith() takes exactly one argument"
 END_FUNC bytes_method_endswith
 
 ;; ============================================================================
@@ -234,7 +435,8 @@ END_FUNC bytes_method_endswith
 ;; ============================================================================
 BC_SELF   equ 8
 BC_SUB    equ 16
-BC_FRAME  equ 24            ; + 0 pushes = 24, not 16-aligned
+BC_ONE    equ 56            ; a one-byte bytes header, for an int needle
+BC_FRAME  equ 64            ; + 0 pushes = 64
 
 DEF_FUNC bytes_method_count, BC_FRAME
     cmp rsi, 2
@@ -244,9 +446,28 @@ DEF_FUNC bytes_method_count, BC_FRAME
     mov rcx, [rdi + 8]         ; sub
     mov [rbp - BC_SELF], rax
     mov [rbp - BC_SUB], rcx
+    BYTES_NEEDLE BC_SUB, BC_ONE
 
-    mov r8, [rax + PyBytesObject.ob_size]   ; self_len
-    mov r9, [rcx + PyBytesObject.ob_size]   ; sub_len
+    ; Both sides through bytes_like_ptr_len: a bytearray argument was read
+    ; with a bytes layout, so ob_size found its capacity and the data pointer
+    ; landed inside the header.  The one-byte needle BYTES_NEEDLE fabricates
+    ; above is bytes-shaped, so it comes through the same door.
+    mov rdi, [rbp - BC_SELF]
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .bc_type
+    mov [rbp - BC_SELF], rax
+    mov r8, r10                 ; self_len
+    mov rdi, [rbp - BC_SUB]
+    push r8
+    sub rsp, 8
+    call bytes_like_ptr_len
+    add rsp, 8
+    pop r8
+    test ecx, ecx
+    jz .bc_type
+    mov [rbp - BC_SUB], rax
+    mov r9, r10                 ; sub_len
 
     ; If sub_len == 0: count = self_len + 1
     test r9, r9
@@ -267,9 +488,8 @@ DEF_FUNC bytes_method_count, BC_FRAME
     jb .bc_result               ; not enough bytes left
 
     mov rdi, [rbp - BC_SELF]
-    lea rdi, [rdi + PyBytesObject.data + r11]
+    add rdi, r11
     mov rsi, [rbp - BC_SUB]
-    lea rsi, [rsi + PyBytesObject.data]
     mov rdx, r9
     push r8
     push r9
@@ -313,9 +533,12 @@ DEF_FUNC bytes_method_count, BC_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.bc_type:
+    RAISE exc_TypeError_type, "a bytes-like object is required"
 .bc_error:
     RAISE exc_TypeError_type, "count() takes exactly one argument"
 END_FUNC bytes_method_count
+
 
 ;; ============================================================================
 ;; bytes_method_find(args, nargs) -> SmallInt
@@ -324,30 +547,99 @@ END_FUNC bytes_method_count
 ;; ============================================================================
 BF_SELF   equ 8
 BF_SUB    equ 16
-BF_FRAME  equ 24            ; + 0 pushes = 24, not 16-aligned
+BF_ARGS   equ 24
+BF_NARGS  equ 32
+BF_ONE    equ 72            ; a one-byte bytes header, for an int needle
+; Derived, not picked: the fabricated header above runs from rbp-BF_ONE
+; upward, so a hand-chosen 48 landed on its data byte and the int-needle
+; find() searched for a length instead of a character.
+BF_SLEN   equ BF_ONE + 8
+BF_NLEN   equ BF_ONE + 16
+BF_FRAME  equ BF_ONE + 24   ; + 0 pushes = 96
 
 DEF_FUNC bytes_method_find, BF_FRAME
     cmp rsi, 2
-    jne .bf_error
+    jl .bf_error
+    cmp rsi, 4
+    jg .bf_error
 
     mov rax, [rdi]              ; self
     mov rcx, [rdi + 8]         ; sub
     mov [rbp - BF_SELF], rax
     mov [rbp - BF_SUB], rcx
+    mov [rbp - BF_ARGS], rdi
+    mov [rbp - BF_NARGS], rsi
+    BYTES_NEEDLE BF_SUB, BF_ONE
 
-    mov r8, [rax + PyBytesObject.ob_size]   ; self_len
-    mov r9, [rcx + PyBytesObject.ob_size]   ; sub_len
+    ; The slots hold (pointer, length) from here on, not objects: a bytearray
+    ; argument read with a bytes layout found its capacity where the length
+    ; should be and its header where the data should be.
+    mov rdi, [rbp - BF_SELF]
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .bf_type
+    mov [rbp - BF_SELF], rax
+    mov [rbp - BF_SLEN], r10
+    mov rdi, [rbp - BF_SUB]
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .bf_type
+    mov [rbp - BF_SUB], rax
+    mov [rbp - BF_NLEN], r10
 
-    ; If sub_len == 0: return 0
+    ; find(sub[, start[, end]]).  CPython's takes both, and the regex
+    ; compiler's `charmap.find(1, q)` walks a 256-byte map with the start
+    ; argument -- without it the loop never advances.
+    mov r8, [rbp - BF_SLEN]
+    xor r11d, r11d              ; start = 0
+    cmp qword [rbp - BF_NARGS], 3
+    jl .bf_have_range
+    mov rdi, [rbp - BF_ARGS]
+    mov rdi, [rdi + 16]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov r11, rax
+    mov r8, [rbp - BF_SLEN]
+    test r11, r11
+    jns .bf_start_ok
+    add r11, r8                 ; a negative start counts from the end
+    jns .bf_start_ok
+    xor r11d, r11d
+.bf_start_ok:
+    cmp qword [rbp - BF_NARGS], 4
+    jl .bf_have_range
+    push r11
+    mov rdi, [rbp - BF_ARGS]
+    mov rdi, [rdi + 24]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    pop r11
+    mov rcx, [rbp - BF_SLEN]
+    test rax, rax
+    jns .bf_end_ok
+    add rax, rcx
+    jns .bf_end_ok
+    xor eax, eax
+.bf_end_ok:
+    cmp rax, rcx
+    jbe .bf_end_clamped
+    mov rax, rcx
+.bf_end_clamped:
+    mov r8, rax                 ; the scan stops here
+
+.bf_have_range:
+    mov r9, [rbp - BF_NLEN]                 ; sub_len
+
+    ; An empty needle is found at the start position.
     test r9, r9
-    jz .bf_found_zero
+    jz .bf_found_at_start
 
-    ; If sub_len > self_len: return -1
-    cmp r9, r8
+    cmp r11, r8
     ja .bf_not_found
-
-    ; Scan
-    xor r11d, r11d              ; offset = 0
+    mov rax, r8
+    sub rax, r11
+    cmp r9, rax
+    ja .bf_not_found
 
 .bf_loop:
     mov rax, r8
@@ -356,9 +648,8 @@ DEF_FUNC bytes_method_find, BF_FRAME
     jb .bf_not_found
 
     mov rdi, [rbp - BF_SELF]
-    lea rdi, [rdi + PyBytesObject.data + r11]
+    add rdi, r11
     mov rsi, [rbp - BF_SUB]
-    lea rsi, [rsi + PyBytesObject.data]
     mov rdx, r9
     push r8
     push r9
@@ -394,8 +685,17 @@ DEF_FUNC bytes_method_find, BF_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.bf_found_at_start:
+    mov rax, r11
+    RET_TAG_SMALLINT
+    leave
+    V_PACK rax, rdx
+    ret
+
+.bf_type:
+    RAISE exc_TypeError_type, "a bytes-like object is required"
 .bf_error:
-    RAISE exc_TypeError_type, "find() takes exactly one argument"
+    RAISE exc_TypeError_type, "find() takes at most 3 arguments"
 END_FUNC bytes_method_find
 
 ;; ============================================================================
@@ -412,7 +712,9 @@ BR_NEW    equ 24
 BR_BUF    equ 32
 BR_BUFSZ  equ 40
 BR_WPOS   equ 48
-BR_FRAME  equ 56            ; + 5 pushes = 96
+BR_NEWLEN equ 56
+BR_FRAME  equ 72            ; + 5 pushes = 112, 16-aligned -- replace reaches
+                            ; glibc through ap_malloc
 
 DEF_FUNC bytes_method_replace, BR_FRAME
     push rbx
@@ -431,13 +733,32 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     mov [rbp - BR_OLD], rcx
     mov [rbp - BR_NEW], rdx
 
-    ; rbx=self, r12=old, r13=new
-    mov rbx, rax
-    mov r12, rcx
-    mov r13, rdx
+    ; The three slots hold (pointer, length) from here on: a bytearray
+    ; argument keeps its bytes out of line, so reading them with a bytes
+    ; layout found the capacity and the header instead.
+    mov rdi, rax
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .br_type
+    mov [rbp - BR_SELF], rax
+    mov r14, r10                            ; self_len
+    mov rdi, [rbp - BR_OLD]
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .br_type
+    mov [rbp - BR_OLD], rax
+    mov r15, r10                            ; old_len
+    mov rdi, [rbp - BR_NEW]
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .br_type
+    mov [rbp - BR_NEW], rax
+    mov [rbp - BR_NEWLEN], r10
 
-    mov r14, [rbx + PyBytesObject.ob_size]    ; self_len
-    mov r15, [r12 + PyBytesObject.ob_size]    ; old_len
+    ; rbx=self data, r12=old data, r13=new data
+    mov rbx, [rbp - BR_SELF]
+    mov r12, [rbp - BR_OLD]
+    mov r13, [rbp - BR_NEW]
 
     ; If old_len == 0, return copy of self
     test r15, r15
@@ -462,10 +783,8 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     ; memcmp at scan position
     push rcx
     mov rdi, [rbp - BR_SELF]
-    lea rdi, [rdi + PyBytesObject.data]
     add rdi, rcx
     mov rsi, [rbp - BR_OLD]
-    lea rsi, [rsi + PyBytesObject.data]
     mov rdx, r15
     call ap_memcmp
     pop rcx
@@ -474,7 +793,7 @@ DEF_FUNC bytes_method_replace, BR_FRAME
 
     ; Match found at rcx — ensure buffer space
     mov rax, [rbp - BR_WPOS]
-    add rax, [r13 + PyBytesObject.ob_size]
+    add rax, [rbp - BR_NEWLEN]
     add rax, r14
     cmp rax, [rbp - BR_BUFSZ]
     jl .br_space_ok
@@ -489,7 +808,7 @@ DEF_FUNC bytes_method_replace, BR_FRAME
 .br_space_ok:
 
     ; Copy new_str into buffer
-    mov rax, [r13 + PyBytesObject.ob_size]
+    mov rax, [rbp - BR_NEWLEN]
     test rax, rax
     jz .br_skip_new
     push rcx
@@ -497,7 +816,6 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     mov rdi, [rbp - BR_BUF]
     add rdi, [rbp - BR_WPOS]
     mov rsi, [rbp - BR_NEW]
-    lea rsi, [rsi + PyBytesObject.data]
     mov rdx, rax
     call ap_memcpy
     pop rax
@@ -512,7 +830,7 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     mov rdi, [rbp - BR_BUF]
     add rdi, [rbp - BR_WPOS]
     mov rax, [rbp - BR_SELF]
-    movzx eax, byte [rax + PyBytesObject.data + rcx]
+    movzx eax, byte [rax + rcx]
     mov [rdi], al
     inc qword [rbp - BR_WPOS]
     inc rcx
@@ -529,7 +847,6 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     mov rdi, [rbp - BR_BUF]
     add rdi, [rbp - BR_WPOS]
     mov rsi, [rbp - BR_SELF]
-    lea rsi, [rsi + PyBytesObject.data]
     add rsi, rcx
     mov rdx, rax
     call ap_memcpy
@@ -559,7 +876,7 @@ DEF_FUNC bytes_method_replace, BR_FRAME
 
 .br_copy_self:
     ; Return copy of self
-    lea rdi, [rbx + PyBytesObject.data]
+    mov rdi, rbx
     mov rsi, r14
     call bytes_from_data
     mov edx, TAG_PTR
@@ -572,6 +889,8 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.br_type:
+    RAISE exc_TypeError_type, "a bytes-like object is required"
 .br_error:
     RAISE exc_TypeError_type, "replace() takes exactly 2 arguments"
 END_FUNC bytes_method_replace
@@ -580,27 +899,73 @@ END_FUNC bytes_method_replace
 ;; bytes_method_split(args, nargs) -> list of bytes
 ;; nargs==1: split by whitespace; nargs==2: split by separator bytes
 ;; ============================================================================
-DEF_FUNC bytes_method_split
+BSP_SEPLEN equ 8
+BSP_MAX    equ 16           ; splits left, or negative for "no limit"
+BSP_FRAME  equ 24           ; + 5 pushes = 64, 16-aligned
+
+DEF_FUNC bytes_method_split, BSP_FRAME
     push rbx
     push r12
     push r13
     push r14
     push r15
-    sub rsp, 8                  ; align
 
-    mov rbx, [rdi]              ; self (bytes obj)
+    ; rbx and r15 hold DATA POINTERS, not objects: a bytearray keeps its bytes
+    ; out of line, so reading them through a bytes layout found the header.
     mov r14, rsi                ; nargs
+    push rdi
+    sub rsp, 8
+    mov rdi, [rdi]
+    call bytes_like_ptr_len
+    add rsp, 8
+    pop rdi
+    test ecx, ecx
+    jz .bsp_type
+    mov rbx, rax                ; self data
+    mov r12, r10                ; self_len
+
+    ; maxsplit, argument three.  It was never read: `cmp r14, 2 / jl` chose
+    ; between whitespace and separator mode and nothing else looked at nargs,
+    ; so b'a,b,,c'.split(b',', 1) answered four pieces.  A negative value, and
+    ; the default, mean no limit.
+    mov qword [rbp - BSP_MAX], -1
+    cmp r14, 3
+    jl .bsp_have_max
+    push rdi
+    sub rsp, 8
+    mov rdi, [rdi + 16]         ; args[2]
+    V_UNPACK rdi, rdx
+    extern obj_as_index
+    call obj_as_index
+    add rsp, 8
+    pop rdi
+    mov [rbp - BSP_MAX], rax
+.bsp_have_max:
 
     cmp r14, 2
     jl .bsp_no_sep
+    ; sep=None asks for whitespace mode, which bytes_like_ptr_len below would
+    ; refuse: b'a b'.split(None, 1) was a TypeError.
+    mov rax, [rdi + 8]
+    LOAD_NONE rcx
+    cmp rax, rcx
+    je .bsp_no_sep
 
     ; Separator mode
-    mov r15, [rdi + 8]         ; separator bytes obj
+    push r12
+    sub rsp, 8
+    mov rdi, [rdi + 8]
+    call bytes_like_ptr_len
+    add rsp, 8
+    pop r12
+    test ecx, ecx
+    jz .bsp_type
+    mov r15, rax                ; separator data
+    mov [rbp - BSP_SEPLEN], r10 ; the slot, not rbp-8: that is the saved rbx
     jmp .bsp_by_sep
 
 .bsp_no_sep:
     ; Split by whitespace
-    mov r12, [rbx + PyBytesObject.ob_size]
 
     mov rdi, 8
     call list_new
@@ -610,7 +975,7 @@ DEF_FUNC bytes_method_split
 .bsp_ws_scan:
     cmp rcx, r12
     jge .bsp_ws_done
-    movzx eax, byte [rbx + PyBytesObject.data + rcx]
+    movzx eax, byte [rbx + rcx]
     cmp al, ' '
     je .bsp_ws_skip
     cmp al, 9
@@ -627,11 +992,15 @@ DEF_FUNC bytes_method_split
 
 .bsp_ws_word:
     mov r15, rcx                ; word start
+    cmp qword [rbp - BSP_MAX], 0
+    jne .bsp_ws_wordscan
+    mov rcx, r12                ; no splits left: the rest is the last piece,
+    jmp .bsp_ws_wordend         ; internal whitespace and all
 .bsp_ws_wordscan:
     inc rcx
     cmp rcx, r12
     jge .bsp_ws_wordend
-    movzx eax, byte [rbx + PyBytesObject.data + rcx]
+    movzx eax, byte [rbx + rcx]
     cmp al, ' '
     je .bsp_ws_wordend
     cmp al, 9
@@ -644,7 +1013,7 @@ DEF_FUNC bytes_method_split
 
 .bsp_ws_wordend:
     push rcx
-    lea rdi, [rbx + PyBytesObject.data]
+    mov rdi, rbx
     add rdi, r15
     mov rsi, rcx
     sub rsi, r15
@@ -656,12 +1025,14 @@ DEF_FUNC bytes_method_split
     pop rdi
     call obj_decref
     pop rcx
+    cmp qword [rbp - BSP_MAX], 0
+    jl .bsp_ws_scan             ; negative: no limit, never counts down
+    dec qword [rbp - BSP_MAX]
     jmp .bsp_ws_scan
 
 .bsp_ws_done:
     mov rax, r13
     mov edx, TAG_PTR
-    add rsp, 8
     pop r15
     pop r14
     pop r13
@@ -672,8 +1043,7 @@ DEF_FUNC bytes_method_split
     ret
 
 .bsp_by_sep:
-    mov r12, [rbx + PyBytesObject.ob_size]   ; self_len
-    mov r14, [r15 + PyBytesObject.ob_size]   ; sep_len
+    mov r14, [rbp - BSP_SEPLEN]              ; sep_len
 
     mov rdi, 8
     call list_new
@@ -687,6 +1057,8 @@ DEF_FUNC bytes_method_split
     xor r11d, r11d              ; segment start = 0
 
 .bsp_sep_scan:
+    cmp qword [rbp - BSP_MAX], 0
+    je .bsp_sep_tail            ; no splits left: the rest is one piece
     ; Check if enough bytes remain for separator
     mov rax, r12
     sub rax, rcx
@@ -697,9 +1069,8 @@ DEF_FUNC bytes_method_split
     push rcx
     push r11
     mov rdi, rbx
-    lea rdi, [rdi + PyBytesObject.data]
     add rdi, rcx
-    lea rsi, [r15 + PyBytesObject.data]
+    mov rsi, r15
     mov rdx, r14
     call ap_memcmp
     pop r11
@@ -710,7 +1081,7 @@ DEF_FUNC bytes_method_split
     ; Found separator at rcx — extract segment [r11..rcx)
     push rcx
     push r11
-    lea rdi, [rbx + PyBytesObject.data]
+    mov rdi, rbx
     add rdi, r11
     mov rsi, rcx
     sub rsi, r11
@@ -727,6 +1098,9 @@ DEF_FUNC bytes_method_split
     ; Advance past separator
     add rcx, r14
     mov r11, rcx               ; new segment start
+    cmp qword [rbp - BSP_MAX], 0
+    jl .bsp_sep_scan           ; negative: no limit, never counts down
+    dec qword [rbp - BSP_MAX]
     jmp .bsp_sep_scan
 
 .bsp_sep_nomatch:
@@ -735,7 +1109,7 @@ DEF_FUNC bytes_method_split
 
 .bsp_sep_tail:
     ; Remaining segment from r11 to end
-    lea rdi, [rbx + PyBytesObject.data]
+    mov rdi, rbx
     add rdi, r11
     mov rsi, r12
     sub rsi, r11
@@ -749,7 +1123,6 @@ DEF_FUNC bytes_method_split
 
     mov rax, r13
     mov edx, TAG_PTR
-    add rsp, 8
     pop r15
     pop r14
     pop r13
@@ -761,6 +1134,9 @@ DEF_FUNC bytes_method_split
 
 .bsp_empty_sep:
     RAISE exc_ValueError_type, "empty separator"
+
+.bsp_type:
+    RAISE exc_TypeError_type, "a bytes-like object is required"
 END_FUNC bytes_method_split
 
 ;; ============================================================================
@@ -830,8 +1206,11 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     jz .bj_empty
 
     ; Compute total length: sum of all item sizes + (count-1)*sep_len
-    mov rbx, [rbp - BJ_SEP]
-    mov r14, [rbx + PyBytesObject.ob_size]  ; sep_len
+    mov rdi, [rbp - BJ_SEP]
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .bj_item_error
+    mov r14, r10                            ; sep_len
 
     xor r13d, r13d              ; total = 0
     xor ecx, ecx               ; index = 0
@@ -841,15 +1220,23 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     mov rax, [rbp - BJ_LIST]
     mov rax, [rax + PyListObject.ob_item]
     mov rax, [rax + rcx * 8]  ; item Value (8-byte stride)
-    ; Each item must really be bytes: its ob_size is read as a length and
-    ; its data copied, so a str item produced garbage rather than TypeError.
-    V_TEST_PTR rax, rdx
-    ja .bj_item_error
-    mov rdx, [rax + PyObject.ob_type]
-    lea r8, [rel bytes_type]
-    cmp rdx, r8
-    jne .bj_item_error
-    add r13, [rax + PyBytesObject.ob_size]
+    ; Each item must really be bytes-like: its length is read and its data
+    ; copied, so a str item produced garbage rather than TypeError -- and a
+    ; bytearray item, whose bytes are out of line, produced garbage too.
+    push rcx
+    push r12
+    push r13
+    sub rsp, 8
+    mov rdi, rax
+    call bytes_like_ptr_len
+    mov r9d, ecx                ; the answer, before the pops take rcx back
+    add rsp, 8
+    pop r13
+    pop r12
+    pop rcx
+    test r9d, r9d
+    jz .bj_bad_item
+    add r13, r10
     inc rcx
     jmp .bj_len_loop
 .bj_len_done:
@@ -875,14 +1262,15 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     ; Insert separator before all items except first
     test r15, r15
     jz .bj_no_sep
-    mov rax, [rbp - BJ_SEP]
-    mov rcx, [rax + PyBytesObject.ob_size]
+    mov rdi, [rbp - BJ_SEP]
+    call bytes_like_ptr_len
+    mov rcx, r10
     test rcx, rcx
     jz .bj_no_sep
     push rcx
+    mov rsi, rax
     mov rdi, [rbp - BJ_BUF]
     add rdi, [rbp - BJ_WPOS]
-    lea rsi, [rax + PyBytesObject.data]
     mov rdx, rcx
     call ap_memcpy
     pop rcx
@@ -891,14 +1279,15 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     ; Copy item bytes
     mov rax, [rbp - BJ_LIST]
     mov rax, [rax + PyListObject.ob_item]
-    mov rax, [rax + r15 * 8]  ; item bytes obj (8-byte stride)
-    mov rcx, [rax + PyBytesObject.ob_size]
+    mov rdi, [rax + r15 * 8]  ; item Value (8-byte stride)
+    call bytes_like_ptr_len
+    mov rcx, r10
     test rcx, rcx
     jz .bj_next_item
     push rcx
+    mov rsi, rax
     mov rdi, [rbp - BJ_BUF]
     add rdi, [rbp - BJ_WPOS]
-    lea rsi, [rax + PyBytesObject.data]
     mov rdx, rcx
     call ap_memcpy
     pop rcx
@@ -946,10 +1335,451 @@ DEF_FUNC bytes_method_join, BJ_FRAME
 .bj_error:
     RAISE exc_TypeError_type, "join() argument must be a list of bytes"
 
+.bj_bad_item:
+    ; CPython names the position and the type, which is the whole difference
+    ; between "one of these is wrong" and "the second one is a str".
+    mov [rbp - BJ_TOTAL], rcx   ; the index, free until the lengths are summed
+    mov rax, [rbp - BJ_LIST]
+    mov rax, [rax + PyListObject.ob_item]
+    mov rcx, [rbp - BJ_TOTAL]
+    mov rax, [rax + rcx*8]
+    ; The NAME, not the object: BJ_RELEASE_TMP frees the converted list, and
+    ; for `b"".join("ab")` that list holds the only reference to the item --
+    ; reading its type afterwards reads freed memory.  A type outlives it.
+    V_TEST_PTR rax, rdx
+    ja .bj_name_int
+    test rax, rax
+    jz .bj_name_int
+    mov rax, [rax + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_name]
+    jmp .bj_name_have
+.bj_name_int:
+    lea rax, [rel bj_name_int]
+.bj_name_have:
+    mov [rbp - BJ_WPOS], rax
+    BJ_RELEASE_TMP
+    lea rdi, [rel bj_msg_item]
+    mov rsi, [rbp - BJ_TOTAL]
+    call bj_append_i64
+    mov rdi, rax
+    lea rsi, [rel bj_msg_expected]
+    call bj_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - BJ_WPOS]
+    call bj_append_typename
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel bj_msgbuf]
+    call raise_exception
+    ud2
+
 .bj_item_error:
     BJ_RELEASE_TMP
     RAISE exc_TypeError_type, "sequence item: expected a bytes-like object"
 END_FUNC bytes_method_join
 
+;; The three pieces of join's message, kept apart from the scan loop so that
+;; the loop stays a loop.
+DEF_FUNC_LOCAL bj_append_cstr   ; (rdi = dest, rsi = src) -> rax = the NUL
+    xor ecx, ecx
+.bac_loop:
+    cmp rcx, 100
+    jge .bac_done
+    mov al, [rsi + rcx]
+    test al, al
+    jz .bac_done
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .bac_loop
+.bac_done:
+    lea rax, [rdi + rcx]
+    mov byte [rax], 0
+    leave
+    ret
+END_FUNC bj_append_cstr
+
+DEF_FUNC_LOCAL bj_append_i64    ; (rdi = prefix cstr, rsi = n) -> rax = the NUL
+    push rbx
+    push r12
+    sub rsp, 8
+    mov r12, rsi
+    mov rsi, rdi
+    lea rdi, [rel bj_msgbuf]
+    call bj_append_cstr
+    mov rbx, rax
+    mov rax, r12
+    lea r8, [rel bj_numbuf + 24]
+    mov byte [r8], 0
+    mov r9, 10
+.bai_loop:
+    xor edx, edx
+    div r9
+    dec r8
+    add dl, '0'
+    mov [r8], dl
+    test rax, rax
+    jnz .bai_loop
+    mov rdi, rbx
+    mov rsi, r8
+    call bj_append_cstr
+    add rsp, 8
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC bj_append_i64
+
+DEF_FUNC_LOCAL bj_append_typename   ; (rdi = dest, rsi = a type name) -> rax
+    call bj_append_cstr
+    mov rdi, rax
+    lea rsi, [rel bj_msg_found]
+    call bj_append_cstr
+    leave
+    ret
+END_FUNC bj_append_typename
+
+section .rodata
+
+bj_msg_item:     db "sequence item ", 0
+bj_msg_expected: db ": expected a bytes-like object, ", 0
+bj_msg_found:    db " found", 0
+bj_name_int:     db "int", 0
+baf_name_startswith: db "startswith", 0
+baf_name_endswith:   db "endswith", 0
+baf_msg_first:   db " first arg must be bytes or a tuple of bytes, not ", 0
+baf_msg_args:    db "() takes exactly one argument", 0
+baf_msg_item:    db "a bytes-like object is required, not ", 0
+
+section .bss
+bj_msgbuf: resb 192
+bj_numbuf: resb 32
+
 section .rodata
 empty_str_cstr: db 0
+
+section .text
+
+;; ============================================================================
+;; bytearray's share of bytes' read-only methods.
+;;
+;; bytes keeps its data inline and bytearray keeps it out of line, so the
+;; bytes bodies cannot read a bytearray directly.  Rather than thread a
+;; (pointer, length) pair through sixty-odd read sites in two files -- churn
+;; on the hot, well-tested type for the benefit of the scratch one -- each
+;; wrapper builds a temporary bytes, runs the bytes body on it and releases
+;; it.  A bytearray is a scratch buffer by definition; the copy is cheap
+;; against the risk of that refactor, and it is the sort of thing to revisit
+;; only if bytearray ever becomes hot.
+;;
+;; Some of these answer with a bytes-like where CPython answers with a
+;; bytearray, so the result is converted back where it should be.
+;; ============================================================================
+BSC_ARGS  equ 8
+BSC_NARGS equ 16
+BSC_TMP   equ 24            ; the temporary bytes standing in for self
+BSC_COPY  equ 32            ; the argument array with args[0] replaced
+BSC_RES   equ 40
+BSC_FRAME equ 64            ; + 1 push = 72... see the DEF_FUNC below
+
+;; bytearray_shared_call(rdi = args, rsi = nargs, rdx = the bytes body,
+;;                       ecx = 0 raw / 1 wrap a bytes-like / 2 wrap a list)
+;;   -> the body's Value
+DEF_FUNC bytearray_shared_call, 72
+    push rbx
+    mov [rbp - BSC_ARGS], rdi
+    mov [rbp - BSC_NARGS], rsi
+    mov [rbp - BSC_RES], rdx
+    mov rbx, rcx                ; the wrap mode
+
+    test rsi, rsi
+    jz .bsc_bad
+    mov rdi, [rdi]              ; self
+    mov r8, [rdi + PyByteArrayObject.ob_size]
+    push r8
+    call bytearray_data
+    pop r8
+    mov rdi, rax
+    mov rsi, r8
+    call bytes_from_data
+    test rax, rax
+    jz .bsc_oom
+    mov [rbp - BSC_TMP], rax
+
+    ; Copy the arguments, with args[0] swapped for the temporary.  Eight
+    ; slots is more than any of these methods takes.
+    mov rcx, [rbp - BSC_NARGS]
+    cmp rcx, 8
+    ja .bsc_bad_free
+    sub rsp, 64
+    mov [rbp - BSC_COPY], rsp
+    mov rax, [rbp - BSC_TMP]
+    mov [rsp], rax
+    mov rsi, [rbp - BSC_ARGS]
+    mov edx, 1
+.bsc_copy_loop:
+    cmp rdx, rcx
+    jge .bsc_copied
+    mov rax, [rsi + rdx*8]
+    mov [rsp + rdx*8], rax
+    inc rdx
+    jmp .bsc_copy_loop
+.bsc_copied:
+    mov rdi, rsp
+    mov rsi, [rbp - BSC_NARGS]
+    call qword [rbp - BSC_RES]
+    add rsp, 64
+    mov [rbp - BSC_RES], rax
+
+    mov rdi, [rbp - BSC_TMP]
+    call obj_decref
+
+    mov rax, [rbp - BSC_RES]
+    test rax, rax
+    jz .bsc_out                 ; it raised, or answered NULL
+    cmp rbx, 1
+    je .bsc_wrap_one
+    cmp rbx, 2
+    je .bsc_wrap_list
+.bsc_out:
+    pop rbx
+    leave
+    ret
+
+.bsc_wrap_one:
+    ; A bytes result becomes a bytearray, as CPython's does -- and the bytes
+    ; the body made is released, which it was not.
+    mov [rbp - BSC_RES], rax
+    mov rdi, rax
+    call bytearray_from_bytes
+    mov [rbp - BSC_TMP], rax
+    mov rdi, [rbp - BSC_RES]
+    call obj_decref
+    mov rax, [rbp - BSC_TMP]
+    pop rbx
+    leave
+    ret
+
+.bsc_wrap_list:
+    ; Every element of the list, likewise.
+    mov [rbp - BSC_RES], rax
+    mov rcx, [rax + PyListObject.ob_size]
+    xor esi, esi
+.bsc_wrap_loop:
+    cmp rsi, rcx
+    jge .bsc_wrapped
+    mov rax, [rbp - BSC_RES]
+    mov rax, [rax + PyListObject.ob_item]
+    mov rdi, [rax + rsi*8]
+    push rsi
+    push rcx
+    call bytearray_from_bytes
+    pop rcx
+    pop rsi
+    test rax, rax
+    jz .bsc_wrapped
+    mov rdx, [rbp - BSC_RES]
+    mov rdx, [rdx + PyListObject.ob_item]
+    push rax
+    push rsi
+    mov rdi, [rdx + rsi*8]
+    call obj_decref             ; the bytes the body made
+    pop rsi
+    pop rax
+    mov rdx, [rbp - BSC_RES]
+    mov rdx, [rdx + PyListObject.ob_item]
+    mov [rdx + rsi*8], rax
+    mov rcx, [rbp - BSC_RES]
+    mov rcx, [rcx + PyListObject.ob_size]
+    inc rsi
+    jmp .bsc_wrap_loop
+.bsc_wrapped:
+    mov rax, [rbp - BSC_RES]
+    pop rbx
+    leave
+    ret
+
+.bsc_bad_free:
+    mov rdi, [rbp - BSC_TMP]
+    call obj_decref
+.bsc_bad:
+    RAISE exc_TypeError_type, "descriptor requires a bytearray object"
+.bsc_oom:
+    RAISE exc_MemoryError_type, "out of memory"
+END_FUNC bytearray_shared_call
+
+;; bytearray_from_bytes(rdi = a bytes, borrowed) -> rax = a new bytearray
+DEF_FUNC bytearray_from_bytes
+    push rbx
+    mov rbx, rdi
+    V_TEST_PTR rdi, rax
+    ja .bfb_passthrough
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    jne .bfb_passthrough        ; not a bytes: hand it back untouched
+    mov rsi, [rbx + PyBytesObject.ob_size]
+    lea rdi, [rbx + PyBytesObject.data]
+    call bytearray_new
+    pop rbx
+    leave
+    ret
+.bfb_passthrough:
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+END_FUNC bytearray_from_bytes
+
+DEF_FUNC ba_shared_hex
+    lea rdx, [rel bytes_method_hex]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_hex
+
+DEF_FUNC ba_shared_startswith
+    lea rdx, [rel bytes_method_startswith]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_startswith
+
+DEF_FUNC ba_shared_endswith
+    lea rdx, [rel bytes_method_endswith]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_endswith
+
+DEF_FUNC ba_shared_count
+    lea rdx, [rel bytes_method_count]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_count
+
+DEF_FUNC ba_shared_find
+    lea rdx, [rel bytes_method_find]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_find
+
+DEF_FUNC ba_shared_decode
+    lea rdx, [rel _bytes_decode_impl]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_decode
+
+DEF_FUNC ba_shared_replace
+    lea rdx, [rel bytes_method_replace]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_replace
+
+DEF_FUNC ba_shared_split
+    lea rdx, [rel bytes_method_split]
+    mov ecx, 2
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_split
+
+DEF_FUNC ba_shared_join
+    lea rdx, [rel bytes_method_join]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_join
+
+;; The slots, reachable by name.  __setitem__ and __delitem__ especially:
+;; CPython's own code calls them directly, and `del b[i]` compiles to
+;; DELETE_SUBSCR but `b.__delitem__(i)` does not.
+DEF_FUNC bytearray_dunder_len
+    test rsi, rsi
+    jz .badl_bad
+    mov rdi, [rdi]
+    mov rax, [rdi + PyByteArrayObject.ob_size]
+    V_PACK_I64 rax, rcx
+    mov edx, TAG_PTR
+    leave
+    ret
+.badl_bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC bytearray_dunder_len
+
+DEF_FUNC bytearray_dunder_iter
+    test rsi, rsi
+    jz .badi_bad
+    mov rdi, [rdi]
+    call bytearray_tp_iter
+    mov edx, TAG_PTR
+    leave
+    ret
+.badi_bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC bytearray_dunder_iter
+
+DEF_FUNC bytearray_dunder_getitem
+    cmp rsi, 2
+    jne .badg_bad
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    call bytearray_subscript
+    mov edx, TAG_PTR
+    leave
+    ret
+.badg_bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC bytearray_dunder_getitem
+
+DEF_FUNC bytearray_dunder_setitem
+    cmp rsi, 3
+    jne .bads_bad
+    mov rdx, [rdi + 16]
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    call bytearray_ass_subscript
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.bads_bad:
+    RAISE exc_TypeError_type, "expected exactly two arguments"
+END_FUNC bytearray_dunder_setitem
+
+DEF_FUNC bytearray_dunder_delitem
+    cmp rsi, 2
+    jne .badd_bad
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    xor edx, edx                ; a NULL value Value means delete
+    call bytearray_ass_subscript
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.badd_bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC bytearray_dunder_delitem
+
+DEF_FUNC bytearray_dunder_contains
+    cmp rsi, 2
+    jne .badc_bad
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    call bytearray_contains
+    test eax, eax
+    jz .badc_false
+    lea rax, [rel bool_true]
+    jmp .badc_out
+.badc_false:
+    lea rax, [rel bool_false]
+.badc_out:
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+.badc_bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC bytearray_dunder_contains

@@ -15,6 +15,7 @@
 %include "opcodes.inc"
 
 ; External functions
+extern complex_type
 extern obj_decref
 extern obj_repr
 extern obj_str
@@ -91,6 +92,18 @@ DEF_FUNC scalar_dunder_new
     je .sdn_str
     test rax, TYPE_FLAG_STR_SUBCLASS
     jnz .sdn_str
+    extern float_type
+    lea rcx, [rel float_type]
+    cmp rbx, rcx
+    je .sdn_float
+    test rax, TYPE_FLAG_FLOAT_SUBCLASS
+    jnz .sdn_float
+    extern complex_type
+    lea rcx, [rel complex_type]
+    cmp rbx, rcx
+    je .sdn_complex
+    test rax, TYPE_FLAG_COMPLEX_SUBCLASS
+    jnz .sdn_complex
     jmp .sdn_bad
 
 .sdn_int:
@@ -116,11 +129,72 @@ DEF_FUNC scalar_dunder_new
     V_PACK rax, rdx
     ret
 
+;; float and complex have constructors that already read the type they are
+;; handed, so the subclass arm is the same call as the base one.  Both return
+;; a fat pair, which the V_PACK below is exactly right for.
+.sdn_float:
+    extern float_type_call
+    mov rdi, rbx
+    mov rdx, rsi
+    mov rsi, r12
+    call float_type_call
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.sdn_complex:
+    extern complex_type_call
+    mov rdi, rbx
+    mov rdx, rsi
+    mov rsi, r12
+    call complex_type_call
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
 .sdn_bad:
     RAISE exc_TypeError_type, "__new__() argument 1 must be a subclass of int or str"
 END_FUNC scalar_dunder_new
 
 ;; ============================================================================
+;; ============================================================================
+;; builtin_method_format(self, format_spec) -- __format__ for the four types
+;; the spec mini-language knows how to render itself.
+;;
+;; CPython gives int, float, str and complex a __format__ of their own, and a
+;; subclass inherits it.  Without one, `class F(float)` inherited OBJECT's,
+;; which refuses any non-empty spec: format(F(2.5), ".2f") was "unsupported
+;; format string passed to object.__format__".
+;; ============================================================================
+extern format_apply_spec
+
+DEF_FUNC builtin_method_format
+    cmp rsi, 2
+    jne .bmf_bad
+    mov rax, [rdi + 8]                  ; the format spec
+    V_TEST_PTR rax, rcx
+    ja .bmf_bad_spec
+    test rax, rax
+    jz .bmf_bad_spec
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .bmf_bad_spec
+    mov rsi, rax
+    mov rdi, [rdi]
+    call format_apply_spec
+    leave
+    ret
+.bmf_bad:
+    RAISE exc_TypeError_type, "__format__() takes exactly one argument"
+.bmf_bad_spec:
+    RAISE exc_TypeError_type, "__format__() argument must be str"
+END_FUNC builtin_method_format
+
 ;; object.__format__(self, format_spec)
 ;;
 ;; An empty spec is str(self); anything else is an error, because object has no
@@ -425,6 +499,7 @@ DEF_DUNDER_STRREPR bytes, str
 DEF_DUNDER_STRREPR bytes, repr
 DEF_DUNDER_STRREPR int, repr
 DEF_DUNDER_STRREPR float, repr
+DEF_DUNDER_STRREPR complex, repr
 
 ;; ############################################################################
 ;;                         SET METHODS

@@ -43,6 +43,26 @@ SYS_fcntl           equ 72
 SYS_ioctl           equ 16
 SYS_io_uring_setup  equ 425
 SYS_io_uring_enter  equ 426
+SYS_lseek           equ 8
+SYS_stat            equ 4
+SYS_lstat           equ 6
+SYS_dup             equ 32
+SYS_getpid          equ 39
+SYS_wait4           equ 61
+SYS_rename          equ 82
+SYS_mkdir           equ 83
+SYS_rmdir           equ 84
+SYS_unlink          equ 87
+SYS_readlink        equ 89
+SYS_chmod           equ 90
+SYS_getcwd          equ 79
+SYS_getdents64      equ 217
+SYS_pipe2           equ 293
+SYS_getrandom       equ 318
+SYS_ftruncate       equ 77
+SYS_uname           equ 63
+SYS_access          equ 21
+SYS_umask           equ 95
 SYS_exit_group      equ 231
 
 ; sys_write(int fd, const void *buf, size_t len) -> ssize_t
@@ -85,6 +105,157 @@ DEF_FUNC_BARE sys_fstat
     ret
 END_FUNC sys_fstat
 
+
+
+;; ---------------------------------------------------------------------------
+;; The syscalls the posix module needs.  Each returns the kernel's own value:
+;; the result, or -errno.  Nothing normalises to -1 -- posix_check reads the
+;; negative directly to build the OSError.
+;;
+;; The fourth argument goes in r10, not rcx, and `syscall` itself clobbers rcx
+;; and r11 -- so `mov r10, rcx` has to come before it, never after.
+;; ---------------------------------------------------------------------------
+
+; sys_stat(const char *path, struct stat *buf) -> int
+DEF_FUNC_BARE sys_stat
+    mov rax, SYS_stat
+    syscall
+    ret
+END_FUNC sys_stat
+
+; sys_lstat(const char *path, struct stat *buf) -> int
+DEF_FUNC_BARE sys_lstat
+    mov rax, SYS_lstat
+    syscall
+    ret
+END_FUNC sys_lstat
+
+; sys_lseek(int fd, off_t off, int whence) -> off_t
+DEF_FUNC_BARE sys_lseek
+    mov rax, SYS_lseek
+    syscall
+    ret
+END_FUNC sys_lseek
+
+; sys_dup(int fd) -> int
+DEF_FUNC_BARE sys_dup
+    mov rax, SYS_dup
+    syscall
+    ret
+END_FUNC sys_dup
+
+; sys_getpid(void) -> pid_t
+DEF_FUNC_BARE sys_getpid
+    mov rax, SYS_getpid
+    syscall
+    ret
+END_FUNC sys_getpid
+
+; sys_getcwd(char *buf, size_t size) -> long (the length including the NUL)
+DEF_FUNC_BARE sys_getcwd
+    mov rax, SYS_getcwd
+    syscall
+    ret
+END_FUNC sys_getcwd
+
+; sys_mkdir(const char *path, mode_t mode) -> int
+DEF_FUNC_BARE sys_mkdir
+    mov rax, SYS_mkdir
+    syscall
+    ret
+END_FUNC sys_mkdir
+
+; sys_rmdir(const char *path) -> int
+DEF_FUNC_BARE sys_rmdir
+    mov rax, SYS_rmdir
+    syscall
+    ret
+END_FUNC sys_rmdir
+
+; sys_unlink(const char *path) -> int
+DEF_FUNC_BARE sys_unlink
+    mov rax, SYS_unlink
+    syscall
+    ret
+END_FUNC sys_unlink
+
+; sys_rename(const char *old, const char *new) -> int
+DEF_FUNC_BARE sys_rename
+    mov rax, SYS_rename
+    syscall
+    ret
+END_FUNC sys_rename
+
+; sys_readlink(const char *path, char *buf, size_t size) -> ssize_t
+DEF_FUNC_BARE sys_readlink
+    mov rax, SYS_readlink
+    syscall
+    ret
+END_FUNC sys_readlink
+
+; sys_chmod(const char *path, mode_t mode) -> int
+DEF_FUNC_BARE sys_chmod
+    mov rax, SYS_chmod
+    syscall
+    ret
+END_FUNC sys_chmod
+
+; sys_access(const char *path, int mode) -> int
+DEF_FUNC_BARE sys_access
+    mov rax, SYS_access
+    syscall
+    ret
+END_FUNC sys_access
+
+; sys_umask(mode_t mask) -> mode_t (the previous one)
+DEF_FUNC_BARE sys_umask
+    mov rax, SYS_umask
+    syscall
+    ret
+END_FUNC sys_umask
+
+; sys_pipe2(int fds[2], int flags) -> int
+DEF_FUNC_BARE sys_pipe2
+    mov rax, SYS_pipe2
+    syscall
+    ret
+END_FUNC sys_pipe2
+
+; sys_getdents64(int fd, void *dirp, unsigned count) -> int bytes read
+DEF_FUNC_BARE sys_getdents64
+    mov rax, SYS_getdents64
+    syscall
+    ret
+END_FUNC sys_getdents64
+
+; sys_getrandom(void *buf, size_t len, unsigned flags) -> ssize_t
+DEF_FUNC_BARE sys_getrandom
+    mov rax, SYS_getrandom
+    syscall
+    ret
+END_FUNC sys_getrandom
+
+; sys_ftruncate(int fd, off_t length) -> int
+DEF_FUNC_BARE sys_ftruncate
+    mov rax, SYS_ftruncate
+    syscall
+    ret
+END_FUNC sys_ftruncate
+
+; sys_uname(struct utsname *buf) -> int
+DEF_FUNC_BARE sys_uname
+    mov rax, SYS_uname
+    syscall
+    ret
+END_FUNC sys_uname
+
+; sys_wait4(pid_t pid, int *status, int options, struct rusage *ru) -> pid_t
+DEF_FUNC_BARE sys_wait4
+    mov rax, SYS_wait4
+    mov r10, rcx               ; 4th arg -- and syscall clobbers rcx, so first
+    syscall
+    ret
+END_FUNC sys_wait4
 
 ; sys_exit(int code) -> noreturn
 DEF_FUNC_BARE sys_exit

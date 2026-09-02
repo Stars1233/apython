@@ -10,6 +10,7 @@
 
 
 ; External functions
+extern float_type
 extern ap_malloc
 extern ap_free
 extern ap_strcmp
@@ -45,18 +46,38 @@ section .text
 ;; Clobbers: rcx, rdx
 ;; ============================================================================
 DEF_FUNC int_method_self_to_i64
-    mov rax, [rdi]              ; args[0] = self
-    V_UNPACK rax, rdx
+    ; int_unwrap first.  A bool, a compact heap int and an int SUBCLASS each
+    ; keep their value somewhere the raw Value is not: I(7).bit_length() was
+    ; 0.  And int_to_i64 reads PyIntObject fields off whatever it is handed,
+    ; so int.bit_length(1.5) walked a float object and segfaulted -- the same
+    ; shape float_self_bits was written to fix on the other side.
+    mov rdi, [rdi]              ; args[0] = self, a Value
+    V_UNPACK rdi, rdx
+    extern int_unwrap
+    call int_unwrap
     cmp edx, TAG_SMALLINT
-    jne .imsi_heap
-    leave
-    ret
-.imsi_heap:
-    ; TAG_PTR: heap int (subclass) — use int_to_i64
-    mov rdi, [rdi]              ; heap int ptr
+    je .imsi_done
+    test edx, TAG_RC_BIT
+    jz .imsi_bad
+    test rdi, rdi
+    jz .imsi_bad
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    jne .imsi_bad
     call int_to_i64
     leave
     ret
+.imsi_done:
+    mov rax, rdi
+    leave
+    ret
+.imsi_bad:
+    V_PACK rdi, rdx
+    mov rsi, rdi
+    CSTRING rdi, `descriptor for 'int' objects doesn't apply to a '\x01' object`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
 END_FUNC int_method_self_to_i64
 
 ;; ============================================================================
@@ -68,14 +89,35 @@ END_FUNC int_method_self_to_i64
 DEF_FUNC int_method_bit_length
     ; A value too large for int64 has to be measured on its mpz: going
     ; through int_to_i64 truncated it, so (2**63).bit_length() was 0.
-    mov rax, [rdi]
-    V_UNPACK rax, rdx
+    ;
+    ; Unwrapped first, for the same reason the helper below unwraps: a
+    ; subclass instance's own compact/mpz fields are not the wrapped int's,
+    ; so I(2**70).bit_length() read compact off the wrapper and answered 0.
+    mov rdi, [rdi]
+    V_UNPACK rdi, rdx
+    extern int_unwrap
+    call int_unwrap
+    mov rax, rdi
     cmp edx, TAG_SMALLINT
     je .ibl_small
-    cmp edx, TAG_PTR
-    jne .ibl_small
+    test edx, TAG_RC_BIT
+    jz .ibl_bad
+    test rax, rax
+    jz .ibl_bad
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel int_type]
+    cmp rcx, rdx
+    jne .ibl_bad
     cmp qword [rax + PyIntObject.compact], 0
-    jne .ibl_small
+    je .ibl_use_mpz
+    mov rax, [rax + PyIntObject.ival]
+    jmp .ibl_small
+.ibl_bad:
+    mov rsi, rax
+    CSTRING rdi, `descriptor 'bit_length' for 'int' objects doesn't apply to a '\x01' object`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
+.ibl_use_mpz:
 
     push rbx
     mov rbx, rax
@@ -103,7 +145,7 @@ DEF_FUNC int_method_bit_length
     ret
 
 .ibl_small:
-    call int_method_self_to_i64
+    ; rax already holds the i64, unwrapped above.
 
     ; abs(self)
     mov rcx, rax
@@ -457,8 +499,9 @@ END_FUNC int_classmethod_from_bytes
 ;; ============================================================================
 
 DEF_FUNC float_method_is_integer
-    mov rax, [rdi]              ; args[0] = self
-    V_TO_F64 rax                ; raw double bits
+    mov rdi, [rdi]              ; args[0] = self
+    call float_self_bits        ; a subclass instance is a pointer, not an
+                                ; immediate: see float_self_bits
     movq xmm0, rax
 
     ; Check for inf/nan — not integer
@@ -492,9 +535,43 @@ END_FUNC float_method_is_integer
 ;; ============================================================================
 ;; float_method_conjugate(args, nargs) -> Float (return self)
 ;; ============================================================================
+;; ============================================================================
+;; float_self_bits(rdi = the self Value) -> rax = the raw double bits
+;;
+;; V_TO_F64 alone is right only for a float IMMEDIATE.  A float subclass
+;; instance is a pointer, and subtracting the NaN-box offset from an address
+;; produced a number whose bits happen to be a NaN -- which is why F(2.5).hex()
+;; answered '-nan' rather than raising anything.
+;; ============================================================================
+DEF_FUNC_BARE float_self_bits
+    V_IS_FLOAT rdi, rax
+    ja .fsb_not_immediate
+    mov rax, rdi
+    V_TO_F64 rax
+    ret
+.fsb_not_immediate:
+    V_TEST_PTR rdi, rax
+    ja .fsb_zero                ; an int immediate: 0.0 is as good as anything
+    test rdi, rdi
+    jz .fsb_zero
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel float_type]
+    cmp rax, rcx
+    je .fsb_inline
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_FLOAT_SUBCLASS
+    jz .fsb_zero
+.fsb_inline:
+    mov rax, [rdi + PyFloatObject.value]
+    ret
+.fsb_zero:
+    xor eax, eax
+    ret
+END_FUNC float_self_bits
+
 DEF_FUNC_BARE float_method_conjugate
-    mov rax, [rdi]              ; args[0] = self
-    V_TO_F64 rax                ; raw double bits
+    mov rdi, [rdi]              ; args[0] = self
+    call float_self_bits        ; a subclass instance is a pointer, not an
+                                ; immediate: see float_self_bits
     mov edx, TAG_FLOAT
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -514,8 +591,9 @@ FIR_FRAME equ 8             ; + 1 push = 16
 DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     push rbx
 
-    mov rax, [rdi]              ; args[0] = self
-    V_TO_F64 rax                ; raw double bits
+    mov rdi, [rdi]              ; args[0] = self
+    call float_self_bits        ; a subclass instance is a pointer, not an
+                                ; immediate: see float_self_bits
 
     ; Check for inf/nan
     mov rcx, rax
@@ -663,8 +741,9 @@ DEF_FUNC float_method_hex, FH_FRAME
     push rbx
     push r12
 
-    mov rax, [rdi]              ; args[0] = self
-    V_TO_F64 rax                ; raw double bits
+    mov rdi, [rdi]              ; args[0] = self
+    call float_self_bits        ; a subclass instance is a pointer, not an
+                                ; immediate: see float_self_bits
     mov rbx, rax                ; save bits
 
     ; Allocate temp buffer (64 bytes is enough for any hex float)
@@ -1069,3 +1148,66 @@ DEF_FUNC float_classmethod_fromhex, FFH_FRAME
 .ffh_parse_error:
     RAISE exc_ValueError_type, "invalid hexadecimal floating-point string"
 END_FUNC float_classmethod_fromhex
+
+;; ============================================================================
+;; complex_method_conjugate(args, nargs) -> complex with the imaginary part
+;; negated.
+;; ============================================================================
+DEF_FUNC complex_method_conjugate
+    mov rdi, [rdi]              ; args[0] = self
+    movsd xmm0, [rdi + PyComplexObject.cval_real]
+    movsd xmm1, [rdi + PyComplexObject.cval_imag]
+    xorpd xmm1, [rel cx_meth_signmask]
+    extern complex_from_doubles
+    call complex_from_doubles
+    leave
+    ret
+END_FUNC complex_method_conjugate
+
+;; ============================================================================
+;; complex_method_complex(args, nargs) -> self.  complex.__complex__().
+;; ============================================================================
+DEF_FUNC complex_method_complex
+    mov rdi, [rdi]
+    push rdi
+    extern obj_incref
+    call obj_incref
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC complex_method_complex
+
+;; ============================================================================
+;; complex_method_getnewargs(args, nargs) -> (real, imag)
+;; copyreg pickles a complex as `complex, (c.real, c.imag)`; pickle protocol 2
+;; asks for this by name.
+;; ============================================================================
+CMG_SELF  equ 8
+CMG_TUP   equ 16
+CMG_FRAME equ 16            ; + 0 pushes = 16
+DEF_FUNC complex_method_getnewargs, CMG_FRAME
+    mov rdi, [rdi]
+    mov [rbp - CMG_SELF], rdi
+    mov edi, 2
+    extern tuple_new
+    call tuple_new
+    mov [rbp - CMG_TUP], rax
+    mov rcx, [rbp - CMG_SELF]
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rax, [rcx + PyComplexObject.cval_real]
+    V_FROM_F64 rax, rsi
+    mov [rdx], rax
+    mov rax, [rcx + PyComplexObject.cval_imag]
+    V_FROM_F64 rax, rsi
+    mov [rdx + 8], rax
+    mov rax, [rbp - CMG_TUP]
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC complex_method_getnewargs
+
+section .rodata
+align 16
+cx_meth_signmask: dq 0x8000000000000000, 0x8000000000000000
+section .text

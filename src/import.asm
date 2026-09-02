@@ -54,11 +54,6 @@ extern exc_ImportError_type
 extern exc_ModuleNotFoundError_type
 
 ; Builtin modules
-extern time_module_create
-extern asyncio_module_create
-extern sre_module_create
-extern abc_module_create
-extern weakref_module_create
 
 ; --- import_module frame layout ---
 IF_NAME     equ 8            ; import name str
@@ -311,80 +306,42 @@ DEF_FUNC import_init
     mov rdi, rbx                ; DECREF module (dict_set INCREF'd)
     call obj_decref
 
-    ; Register time module in sys.modules
-    call time_module_create
-    mov rbx, rax                ; time module
-    lea rdi, [rel im_time_name]
+    ; Every remaining builtin module, from the one table
+    ; sys.builtin_module_names is also built from.
+    extern builtin_module_table
+    xor r12d, r12d                          ; r12 = the row index
+.ii_mod_loop:
+    cmp r12, BUILTIN_MODULE_COUNT
+    jge .ii_mods_done
+    lea rax, [rel builtin_module_table]
+    mov rcx, r12
+    shl rcx, 4                              ; BuiltinModule_size
+    mov rbx, [rax + rcx + BuiltinModule.create_fn]
+    test rbx, rbx
+    jz .ii_mod_next                         ; wired above, or by sys_module_init
+    mov rdi, [rax + rcx + BuiltinModule.name]
+    push r12                                ; r12 is the loop index and also
+    push rdi                                ; the frame register; save it here
+    call rbx
+    mov rbx, rax                            ; the module, owned
+    pop rdi
     call str_from_cstr_heap
-    push rax                    ; save key for DECREF
-    mov rdi, [rel sys_modules_dict]
-    mov rsi, rax                ; key = "time"
-    mov rdx, rbx                ; value = time module
-    call dict_set
-    pop rdi                     ; DECREF key
-    call obj_decref
-    mov rdi, rbx                ; DECREF module (dict_set INCREF'd)
-    call obj_decref
-
-    ; Register asyncio module in sys.modules
-    call asyncio_module_create
-    mov rbx, rax                ; asyncio module
-    lea rdi, [rel im_asyncio_name]
-    call str_from_cstr_heap
-    push rax                    ; save key for DECREF
-    mov rdi, [rel sys_modules_dict]
-    mov rsi, rax                ; key = "asyncio"
-    mov rdx, rbx                ; value = asyncio module
-    call dict_set
-    pop rdi                     ; DECREF key
-    call obj_decref
-    mov rdi, rbx                ; DECREF module (dict_set INCREF'd)
-    call obj_decref
-
-    ; Register _sre module in sys.modules
-    call sre_module_create
-    mov rbx, rax                ; _sre module
-    lea rdi, [rel im_sre_name]
-    call str_from_cstr_heap
-    push rax                    ; save key for DECREF
-    mov rdi, [rel sys_modules_dict]
-    mov rsi, rax                ; key = "_sre"
-    mov rdx, rbx                ; value = _sre module
-    call dict_set
-    pop rdi                     ; DECREF key
-    call obj_decref
-    mov rdi, rbx                ; DECREF module (dict_set INCREF'd)
-    call obj_decref
-
-    ; Register _abc module in sys.modules
-    call abc_module_create
-    mov rbx, rax                ; _abc module
-    lea rdi, [rel im_abc_name]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, [rel sys_modules_dict]
-    mov rsi, rax                ; key = "_abc"
-    mov rdx, rbx                ; value = _abc module
-    call dict_set
-    pop rdi                     ; DECREF key
-    call obj_decref
-    mov rdi, rbx                ; DECREF module (dict_set INCREF'd)
-    call obj_decref
-
-    ; Register _weakref module in sys.modules
-    call weakref_module_create
-    mov rbx, rax
-    lea rdi, [rel im_weakref_name]
-    call str_from_cstr_heap
-    push rax
+    push rax                                ; the key
+    push rax                                ; pushed twice to keep rsp aligned
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax
     mov rdx, rbx
     call dict_set
     pop rdi
-    call obj_decref
+    pop rdi
+    call obj_decref                         ; the key; dict_set took its own
     mov rdi, rbx
-    call obj_decref
+    call obj_decref                         ; the module, likewise
+    pop r12
+.ii_mod_next:
+    inc r12
+    jmp .ii_mod_loop
+.ii_mods_done:
 
     ; PYTHONPATH, colon-separated, appended in order.
     ;
@@ -1930,11 +1887,6 @@ im_no_module_prefix: db "No module named '", 0
 irr_package_key:    db "__package__", 0
 im_lib_path:        db "lib", 0
 im_tests_cpython_path: db "tests/cpython", 0
-im_time_name:       db "time", 0
-im_asyncio_name:    db "asyncio", 0
-im_sre_name:        db "_sre", 0
-im_abc_name:        db "_abc", 0
-im_weakref_name:    db "_weakref", 0
 im_builtins:        db "builtins", 0
 im_dunder_name:     db "__name__", 0
 im_dunder_file:     db "__file__", 0

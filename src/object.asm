@@ -134,7 +134,9 @@ DEF_FUNC obj_repr
     ret
 
 .float_tag:
-    ; rdi = raw double bits — pass directly to float_repr
+    ; rdi = raw double bits.  float_repr reads edx to tell these from a
+    ; float subclass instance, which reaches it as a pointer.
+    mov edx, TAG_FLOAT
     call float_repr
     leave
     ret
@@ -212,8 +214,9 @@ DEF_FUNC obj_str
     ret
 
 .float_tag:
-    ; rbx = raw double bits — pass directly to float_repr
+    ; rbx = raw double bits; see the note in obj_repr.
     mov rdi, rbx
+    mov edx, TAG_FLOAT
     call float_repr
     pop r12
     pop rbx
@@ -386,6 +389,17 @@ END_FUNC value_type
 ; Composes the message into a static buffer and raises TypeError.  Does not
 ; return.
 RTN_BUFSZ equ 160
+
+section .rodata
+rbt_open:    db ": '", 0
+rbt_and:     db "' and '", 0
+rbt_close:   db "'", 0
+rbt_unknown: db "object", 0
+
+section .bss
+rbt_buf: resb 320   ; two 80-char type names plus the prefix and separators
+
+section .text
 DEF_FUNC raise_type_error_with_name
     push rbx
     push r12
@@ -393,6 +407,19 @@ DEF_FUNC raise_type_error_with_name
     mov rdi, rsi
     call value_type
     mov r12, rax                    ; type, or 0
+    jmp rtn_compose
+END_FUNC raise_type_error_with_name
+
+; raise_type_error_with_typename(rdi = the same template, rsi = a type object)
+; For a caller that has released the object it is complaining about and kept
+; only its type -- the object is gone by then, and reading ob_type off freed
+; memory is exactly the bug this message is reporting.
+DEF_FUNC raise_type_error_with_typename
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+rtn_compose:
 
     lea rdi, [rel rtn_buf]
     xor ecx, ecx
@@ -430,7 +457,149 @@ DEF_FUNC raise_type_error_with_name
     extern raise_exception
     call raise_exception
     ud2
-END_FUNC raise_type_error_with_name
+END_FUNC raise_type_error_with_typename
+
+; raise_binop_type_error(rdi = left Value, rsi = right Value,
+;                        rdx = prefix C string) -> never returns
+; "<prefix>: 'int' and 'complex'", which is how CPython words every binary
+; operator's TypeError.  With two operands the bare prefix does not say which
+; one was wrong.
+RBT_LEFT  equ 8
+RBT_RIGHT equ 16
+RBT_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+
+DEF_FUNC raise_binop_type_error, RBT_FRAME
+    push rbx
+    mov [rbp - RBT_LEFT], rdi
+    mov [rbp - RBT_RIGHT], rsi
+    mov rbx, rdx
+
+    lea rdi, [rel rbt_buf]
+    mov rsi, rbx
+    call rbt_copy
+    mov rdi, rax
+    lea rsi, [rel rbt_open]
+    call rbt_copy
+    mov rdi, rax
+    mov rsi, [rbp - RBT_LEFT]
+    call rbt_typename
+    mov rdi, rax
+    lea rsi, [rel rbt_and]
+    call rbt_copy
+    mov rdi, rax
+    mov rsi, [rbp - RBT_RIGHT]
+    call rbt_typename
+    mov rdi, rax
+    lea rsi, [rel rbt_close]
+    call rbt_copy
+
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel rbt_buf]
+    call raise_exception
+    ud2
+END_FUNC raise_binop_type_error
+
+; The cap and the buffer have to agree: 40 (prefix) + 3 + 80 + 7 + 80 + 1 + a
+; NUL is 212, which overran a 192-byte buffer and wrote into the globals
+; after it -- one of them being attr_error_pending, so an over-long type name
+; in a divmod TypeError made the NEXT attribute error re-raise this one.
+DEF_FUNC_LOCAL rbt_copy         ; (rdi = dest, rsi = src) -> rax = the NUL
+    xor ecx, ecx
+.rbtc_loop:
+    cmp rcx, 80
+    jge .rbtc_done
+    mov al, [rsi + rcx]
+    test al, al
+    jz .rbtc_done
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .rbtc_loop
+.rbtc_done:
+    lea rax, [rdi + rcx]
+    mov byte [rax], 0
+    leave
+    ret
+END_FUNC rbt_copy
+
+DEF_FUNC_LOCAL rbt_typename     ; (rdi = dest, rsi = a Value) -> rax = the NUL
+    push rbx
+    mov rbx, rdi
+    mov rdi, rsi
+    call value_type
+    test rax, rax
+    jz .rbtt_unknown
+    mov rsi, [rax + PyTypeObject.tp_name]
+    jmp .rbtt_have
+.rbtt_unknown:
+    lea rsi, [rel rbt_unknown]
+.rbtt_have:
+    mov rdi, rbx
+    call rbt_copy
+    pop rbx
+    leave
+    ret
+END_FUNC rbt_typename
+
+; raise_value_error_with_repr(rdi = prefix C string, rsi = the object Value)
+;   -> never returns
+;
+; ValueError("<prefix><repr(obj)>"), which CPython writes as "%s: %R".  int's
+; own copy of this is inline and stays there, because its prefix carries the
+; base; float's message had simply lost the value it could not convert, and
+; complex's underscore rule needs the same shape.
+RVR_PREFIX equ 8
+RVR_OBJ    equ 16
+RVR_REPR   equ 24
+RVR_FULL   equ 32
+RVR_FRAME  equ 32           ; + 0 pushes = 32
+
+extern str_from_cstr_heap
+extern str_concat
+extern exc_new
+extern exc_ValueError_type
+extern raise_exception_obj
+
+DEF_FUNC raise_value_error_with_repr, RVR_FRAME
+    mov [rbp - RVR_OBJ], rsi
+    call str_from_cstr_heap         ; rdi still holds the prefix
+    mov [rbp - RVR_PREFIX], rax
+
+    mov rdi, [rbp - RVR_OBJ]
+    call obj_repr
+    test rax, rax
+    jnz .rvr_have_repr
+    ; repr itself raised.  Let that exception stand rather than replacing it
+    ; with one about a message we could not build.
+    mov rdi, [rbp - RVR_PREFIX]
+    call obj_decref
+    leave
+    jmp eval_exception_unwind
+
+.rvr_have_repr:
+    mov [rbp - RVR_REPR], rax
+    mov rdi, [rbp - RVR_PREFIX]
+    mov rsi, rax
+    mov ecx, TAG_PTR
+    call str_concat
+    mov [rbp - RVR_FULL], rax
+
+    mov rdi, [rbp - RVR_PREFIX]
+    call obj_decref
+    mov rdi, [rbp - RVR_REPR]
+    call obj_decref
+
+    lea rdi, [rel exc_ValueError_type]
+    mov rsi, [rbp - RVR_FULL]
+    mov edx, TAG_PTR
+    call exc_new
+    mov [rbp - RVR_PREFIX], rax     ; the exception; that slot is free now
+    mov rdi, [rbp - RVR_FULL]
+    call obj_decref                 ; exc_new took its own reference
+
+    mov rdi, [rbp - RVR_PREFIX]
+    leave
+    jmp raise_exception_obj         ; chains and unwinds; takes the reference
+END_FUNC raise_value_error_with_repr
 
 section .bss
 ; Set by instance_getattr when __getattr__ raised an AttributeError and it
@@ -739,7 +908,19 @@ DEF_FUNC obj_richcompare_bool, ORB_FRAME
     je .orb_false
     cmp edx, PY_NE
     je .orb_true
-    RAISE exc_TypeError_type, "unorderable types"
+    ; Name the operator the caller actually asked for.  A flat "unorderable
+    ; types" here read differently from the identical failure raised by
+    ; COMPARE_OP and by list.sort, and min()/max() go through this one.
+    lea rax, [rel orb_unorderable_msgs]
+    movsxd rdx, edx
+    mov rsi, [rax + rdx*8]
+    lea rdi, [rel exc_TypeError_type]
+    ; set_exception, not raise_exception: this function holds a reference to
+    ; both operands, and an unwind from here abandons the C stack and leaks
+    ; them.  -1 is what the contract above already promises.
+    extern set_exception
+    call set_exception
+    jmp .orb_error
 
 .orb_have_result:
     mov [rbp - ORB_RES], rax    ; the result Value, owned
@@ -773,7 +954,199 @@ DEF_FUNC obj_richcompare_bool, ORB_FRAME
     ret
 END_FUNC obj_richcompare_bool
 
+; obj_binary_op(rdi = left Value, rsi = right Value, edx = op index, 0..12)
+;   -> rax = result Value, or 0 with an exception pending
+;
+; CPython's PyNumber_Add and its siblings, made callable.  The whole protocol
+; lived inside op_binary_op, which pops from r13 and leaves through DISPATCH,
+; so no builtin could reach it: sum() hardcoded int_add/float_add and
+; min()/max() hardcoded a type ladder.  Both then read a declining slot's NULL
+; Value as the answer, and a NULL on the value stack surfaces as a failure in
+; whatever runs next -- sum([1j, 2j]) reported "build_string expects str".
+;
+; The order is binary_op1's: the left type's slot, the right type's same slot,
+; then the sequence fallback, then the dunder pair on a heaptype, then
+; TypeError.  Only the non-inplace half, 0..12; nothing that reduces a
+; sequence needs the other one.
+OBO_LEFT  equ 8
+OBO_RIGHT equ 16
+OBO_OP    equ 24
+OBO_OFF   equ 32
+OBO_EXC   equ 40
+OBO_FRAME equ 48            ; + 0 pushes = 48
+
+extern binary_op_offsets
+extern binop_dunder_table
+extern binop_rdunder_table
+extern dunder_call_2
+
+DEF_FUNC obj_binary_op, OBO_FRAME
+    mov [rbp - OBO_LEFT], rdi
+    mov [rbp - OBO_RIGHT], rsi
+    movsxd rdx, edx
+    mov [rbp - OBO_OP], rdx
+    lea rax, [rel binary_op_offsets]
+    mov rax, [rax + rdx*8]
+    mov [rbp - OBO_OFF], rax    ; the nb_* offset both slot tries use
+
+    ; Hold a strong reference to both operands for the duration, as
+    ; obj_richcompare_bool does and for the same reason: a slot or a dunder
+    ; runs arbitrary Python, and the caller's operands are usually borrowed
+    ; slots in an array that call can reach.
+    INCREF_V rdi, rax
+    INCREF_V rsi, rax
+
+    DUNDER_EXC_SAVE [rbp - OBO_EXC]
+
+    ; --- the left type's slot ---
+    mov rdi, [rbp - OBO_LEFT]
+    call value_type
+    test rax, rax
+    jz .obo_right_slot
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz .obo_right_slot
+    mov rcx, [rbp - OBO_OFF]
+    mov rax, [rax + rcx]
+    test rax, rax
+    jz .obo_right_slot
+    mov rdi, [rbp - OBO_LEFT]
+    mov rsi, [rbp - OBO_RIGHT]
+    call rax
+    test rax, rax
+    jnz .obo_done               ; a non-NULL Value is the answer
+    DUNDER_RAISED [rbp - OBO_EXC], .obo_error
+
+.obo_right_slot:
+    ; The left slot declined.  The right type gets the same slot with the
+    ; operands still in their original order -- the only route by which a
+    ; numeric type the left side has never heard of can answer.
+    mov rdi, [rbp - OBO_RIGHT]
+    call value_type
+    test rax, rax
+    jz .obo_seq
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz .obo_seq
+    mov rcx, [rbp - OBO_OFF]
+    mov rax, [rax + rcx]
+    test rax, rax
+    jz .obo_seq
+    mov rdi, [rbp - OBO_LEFT]
+    mov rsi, [rbp - OBO_RIGHT]
+    call rax
+    test rax, rax
+    jnz .obo_done
+    DUNDER_RAISED [rbp - OBO_EXC], .obo_error
+
+.obo_seq:
+    ; sq_concat for +, sq_repeat for *, off the left operand -- what makes
+    ; sum(list_of_lists, []) work.
+    mov rcx, [rbp - OBO_OP]
+    cmp rcx, 0                  ; NB_ADD
+    je .obo_seq_have_op
+    cmp rcx, 5                  ; NB_MULTIPLY
+    jne .obo_dunder
+.obo_seq_have_op:
+    mov rdi, [rbp - OBO_LEFT]
+    call value_type
+    test rax, rax
+    jz .obo_dunder
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .obo_dunder
+    mov rcx, [rbp - OBO_OP]
+    test rcx, rcx
+    jnz .obo_seq_repeat
+    mov rax, [rax + PySequenceMethods.sq_concat]
+    jmp .obo_seq_call
+.obo_seq_repeat:
+    mov rax, [rax + PySequenceMethods.sq_repeat]
+.obo_seq_call:
+    test rax, rax
+    jz .obo_dunder
+    mov rdi, [rbp - OBO_LEFT]
+    mov rsi, [rbp - OBO_RIGHT]
+    call rax
+    test rax, rax
+    jnz .obo_done
+    DUNDER_RAISED [rbp - OBO_EXC], .obo_error
+
+.obo_dunder:
+    ; __add__ on the left, then __radd__ on the right.  A heaptype's binary
+    ; dunders have no nb_* slot of their own -- slots.asm installs only the
+    ; unary ones -- so this arm, not the two above, is what serves a user
+    ; class.  The tag argument is TAG_PTR because V_PACK leaves a Value
+    ; alone under it, which is what the operands already are.
+    mov rdi, [rbp - OBO_LEFT]
+    V_TEST_PTR rdi, rax
+    ja .obo_rdunder          ; an immediate has no dunders
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .obo_rdunder
+    mov rcx, [rbp - OBO_OP]
+    lea rdx, [rel binop_dunder_table]
+    mov rdx, [rdx + rcx*8]
+    test rdx, rdx
+    jz .obo_rdunder
+    mov rsi, [rbp - OBO_RIGHT]
+    mov ecx, TAG_PTR
+    call dunder_call_2
+    test rax, rax
+    jnz .obo_done
+    DUNDER_RAISED [rbp - OBO_EXC], .obo_error
+
+.obo_rdunder:
+    mov rdi, [rbp - OBO_RIGHT]
+    V_TEST_PTR rdi, rax
+    ja .obo_unsupported          ; an immediate has no dunders
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .obo_unsupported
+    mov rcx, [rbp - OBO_OP]
+    lea rdx, [rel binop_rdunder_table]
+    mov rdx, [rdx + rcx*8]
+    test rdx, rdx
+    jz .obo_unsupported
+    mov rsi, [rbp - OBO_LEFT]   ; reflected: the right operand is self
+    mov ecx, TAG_PTR
+    call dunder_call_2
+    test rax, rax
+    jnz .obo_done
+    DUNDER_RAISED [rbp - OBO_EXC], .obo_error
+
+.obo_unsupported:
+    ; SET_EXC, not RAISE: .obo_done below still has to release both operands,
+    ; and an unwind from here would never reach it.
+    SET_EXC exc_TypeError_type, "unsupported operand type(s)"
+    jmp .obo_error
+
+.obo_error:
+    xor eax, eax
+
+.obo_done:
+    mov [rbp - OBO_OP], rax     ; the op is finished with; reuse the slot
+    mov rdi, [rbp - OBO_LEFT]
+    DECREF_V rdi, rdx
+    mov rdi, [rbp - OBO_RIGHT]
+    DECREF_V rdi, rdx
+    mov rax, [rbp - OBO_OP]
+    leave
+    ret
+END_FUNC obj_binary_op
+
 section .rodata
+align 8
+orb_unorderable_msgs:
+    dq orb_msg_lt, orb_msg_le, orb_msg_eq, orb_msg_eq, orb_msg_gt, orb_msg_ge
+orb_msg_lt: db "'<' not supported between instances", 0
+orb_msg_le: db "'<=' not supported between instances", 0
+orb_msg_gt: db "'>' not supported between instances", 0
+orb_msg_ge: db "'>=' not supported between instances", 0
+; == and != never reach the raise -- both fall back to identity above -- but
+; the table is indexed by the op, so the two slots have to hold something.
+orb_msg_eq: db "unorderable types", 0
+
 align 4
 orb_swap_table:
     dd PY_GT                    ; PY_LT reversed
@@ -832,6 +1205,7 @@ DEF_FUNC obj_hash
 .float_hash:
     ; Inline float: call float_hash for PEP-correct integer-float matching
     extern float_hash
+    mov edx, TAG_FLOAT
     call float_hash
     leave
     ret
@@ -891,6 +1265,12 @@ DEF_FUNC_BARE obj_is_true
     test rax, rax
     jz .check_seq_len
     mov rdi, rbx
+    ; nb_bool still takes (payload, tag): int_bool hands the pair straight to
+    ; int_unwrap, and without the tag it read whatever the caller had left in
+    ; edx.  When that happened to be TAG_SMALLINT it tested the POINTER,
+    ; which is never zero -- so bool() of a heap-boxed 0 was True, while
+    ; `not x` and `if x:` were right, because they go elsewhere.
+    mov edx, TAG_PTR
     call rax
     pop rbx
     pop rbp

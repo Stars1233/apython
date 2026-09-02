@@ -114,13 +114,38 @@ DEF_FUNC call_iternext
 END_FUNC call_iternext
 
 ;; ============================================================================
-;; Helper: get_iterator(obj) -> iterator
-;; Calls tp_iter on obj, returns iterator. Raises TypeError if no tp_iter.
-;; Falls back to __getitem__ sequence protocol for heaptypes.
-;; Validates returned iterator has tp_iternext or __next__.
+;; get_iterator(rdi = obj payload, esi = obj tag) -> rax = iterator, owned
+;;   Raises TypeError when the object is not iterable.
+;; get_iterator_opt(same) -> rax = iterator, or 0 with NO exception set
+;;
+;; Both consult tp_iter, then __iter__ on a heaptype, then the legacy
+;; __getitem__ sequence protocol -- an object with __getitem__ and no
+;; __iter__ is iterable, and iter() synthesises a counter that stops at
+;; IndexError.  An __iter__ that RAISES propagates from either.
+;;
+;; The _opt form exists because every caller that iterates a user-supplied
+;; argument has its own message: "set() argument is not iterable",
+;; "list.extend() argument must be iterable", "can only assign an iterable".
+;; Seven of them used to read tp_iter off the type themselves and so rejected
+;; the legacy protocol outright -- which is what made CPython's re parser fail
+;; on every non-capturing group, since its SubPattern has __getitem__ and
+;; __len__ and no __iter__.
+;;
 ;; Clobbers caller-saved regs.
 ;; ============================================================================
 DEF_FUNC get_iterator
+    push rbx
+    call get_iterator_opt
+    test rax, rax
+    jz .gi_not_iterable
+    pop rbx
+    leave
+    ret
+.gi_not_iterable:
+    RAISE exc_TypeError_type, "object is not iterable"
+END_FUNC get_iterator
+
+DEF_FUNC get_iterator_opt
     push rbx
     ; rdi = obj payload, esi = obj tag
 
@@ -144,16 +169,23 @@ DEF_FUNC get_iterator
     extern dunder_iter
     lea rsi, [rel dunder_iter]
     extern dunder_call_1
+    ; Snapshot rather than test for non-NULL: inside an except block
+    ; current_exception is the exception BEING HANDLED, so a plain test said
+    ; "__iter__ raised" for every object that simply has no __iter__ -- and
+    ; the legacy __getitem__ fallback below was never reached there.
+    DUNDER_EXC_SAVE r10
+    push r10
+    sub rsp, 8
     call dunder_call_1
+    add rsp, 8
+    pop r10
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .validate_iter
 
-    ; __iter__ returned NULL — check if exception pending (vs not found)
+    ; __iter__ returned NULL: did it raise, or is there no __iter__ at all?
     extern current_exception
-    mov rax, [rel current_exception]
-    test rax, rax
-    jnz .iter_exc_pending         ; exception raised by __iter__, propagate
+    DUNDER_RAISED r10, .iter_exc_pending
 
     ; __iter__ not found — try __getitem__ sequence protocol
     mov rdi, rbx
@@ -195,10 +227,18 @@ DEF_FUNC get_iterator
     ret
 
 .iter_bad:
-    ; DECREF the bad iterator, raise TypeError
+    ; The type is kept across the DECREF and the object is not: naming it
+    ; afterwards would read ob_type out of the block just freed.
+    mov rax, [rbx + PyObject.ob_type]
+    push rax
+    push rax                    ; twice, to keep rsp 16-byte aligned
     mov rdi, rbx
     call obj_decref
-    RAISE exc_TypeError_type, "iter() returned non-iterator"
+    pop rsi
+    pop rsi
+    extern raise_type_error_with_typename
+    CSTRING rdi, `iter() returned non-iterator of type '\x01'`
+    call raise_type_error_with_typename
 
 .try_getitem:
     ; rdi = original object. Check if it has __getitem__ on heaptype.
@@ -222,7 +262,11 @@ DEF_FUNC get_iterator
     ret
 
 .no_iter:
-    RAISE exc_TypeError_type, "object is not iterable"
+    ; Not iterable.  No exception: the caller names the argument.
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 
 .iter_exc_pending:
     ; Exception was raised by __iter__. Propagate it via eval_exception_unwind.
@@ -232,7 +276,7 @@ DEF_FUNC get_iterator
     pop rbx
     leave
     jmp eval_exception_unwind
-END_FUNC get_iterator
+END_FUNC get_iterator_opt
 
 ;; ============================================================================
 ;; ENUMERATE
@@ -1605,7 +1649,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     ; against the value saved on entry, not against 0: current_exception is
     ; also the exception *being handled*, so inside an `except` block a bare
     ; test made sorted() re-raise it.
-    DUNDER_RAISED [rbp - SO_EXC], .sorted_propagate
+    EXC_RAISED_SINCE [rbp - SO_EXC], rax, .sorted_propagate
 
     ; Build args for list_method_sort in the fixed frame buffer
     ; args[0] = list (a pointer is its own Value)
@@ -1647,6 +1691,13 @@ DEF_FUNC builtin_sorted, SO_FRAME
     call list_method_sort
 
 .sorted_return:
+    ; list_method_sort answers None on success and a NULL Value with the
+    ; exception pending on failure -- a comparison that raised, or a key=
+    ; that did.  Handing the list back regardless made sorted() answer a
+    ; half-sorted list where L.sort() over the same items correctly raised,
+    ; and left the exception to surface at interpreter exit.
+    test rax, rax
+    jz .sorted_sort_raised
     DECREF_V rax, rdx
 
     mov rax, r12
@@ -1661,6 +1712,17 @@ DEF_FUNC builtin_sorted, SO_FRAME
 
 .sorted_error:
     RAISE exc_TypeError_type, "sorted() requires exactly 1 argument"
+.sorted_sort_raised:
+    mov rdi, r12                ; the list we built and were about to return
+    call obj_decref
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
 .sorted_propagate:
     mov rdi, r12
     call obj_decref             ; the partially built list
@@ -1743,9 +1805,19 @@ END_FUNC seq_iter_new
 
 ;; seq_iter_iternext(self) -> (rax=payload, edx=tag) or NULL
 ;; Calls self.it_obj.__getitem__(self.it_index); catches IndexError as exhaustion.
-DEF_FUNC_LOCAL seq_iter_iternext
+SI_EXC   equ 8
+SI_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+
+DEF_FUNC_LOCAL seq_iter_iternext, SI_FRAME
     push rbx
     mov rbx, rdi                   ; self
+
+    ; Snapshot first.  current_exception is also the exception BEING HANDLED,
+    ; so inside an `except` block this saw one on the very first item, decided
+    ; it was not an IndexError, and reported exhaustion: sorted(seq) answered
+    ; [] for an object with __getitem__ and no __iter__.  And when the handled
+    ; exception WAS an IndexError, the clear below threw it away.
+    DUNDER_EXC_SAVE [rbp - SI_EXC]
 
     ; Call __getitem__(it_obj, it_index)
     mov rdi, [rbx + IT_FIELD1]     ; obj
@@ -1767,7 +1839,11 @@ DEF_FUNC_LOCAL seq_iter_iternext
     ret
 
 .si_check_exc:
-    ; Check if exception is IndexError or StopIteration
+    ; Only an exception THIS call raised counts; anything that was already
+    ; pending belongs to whoever is handling it.
+    DUNDER_RAISED [rbp - SI_EXC], .si_raised
+    jmp .si_exhausted
+.si_raised:
     mov rax, [rel current_exception]
     test rax, rax
     jz .si_exhausted               ; no exception, clean exhaustion
@@ -1783,9 +1859,20 @@ DEF_FUNC_LOCAL seq_iter_iternext
     jmp .si_exhausted
 
 .si_clear_exc:
-    mov rdi, rax
+    ; Put back what was being handled when this call started, with a
+    ; reference of its own: installing the IndexError released the global's
+    ; old one, so storing the bare pointer back would leave the global
+    ; holding a reference nobody owns.
+    push rax
+    mov rdi, [rbp - SI_EXC]
+    test rdi, rdi
+    jz .si_no_restore
+    call obj_incref
+.si_no_restore:
+    mov rcx, [rbp - SI_EXC]
+    mov [rel current_exception], rcx
+    pop rdi
     call obj_decref
-    mov qword [rel current_exception], 0
 .si_exhausted:
     RET_NULL
     pop rbx
@@ -1907,10 +1994,17 @@ END_FUNC builtin_chain
 
 ;; chain_iternext(self) -> (rax=payload, edx=tag) or NULL
 ;; Tries current sub-iterator; on exhaustion advances to next.
-DEF_FUNC_LOCAL chain_iternext
+CHI_EXC   equ 8
+CHI_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+
+DEF_FUNC_LOCAL chain_iternext, CHI_FRAME
     push rbx
 
     mov rbx, rdi            ; self
+    ; The same snapshot the other iterators take: inside an `except` block a
+    ; bare test read the handled exception as "this sub-iterator failed", and
+    ; chain stopped at the first one.
+    DUNDER_EXC_SAVE [rbp - CHI_EXC]
 
 .chain_retry:
     ; Load current index and count
@@ -1929,9 +2023,7 @@ DEF_FUNC_LOCAL chain_iternext
 
     ; call_iternext clears StopIteration automatically.
     ; Check for other exceptions — those must propagate.
-    mov rax, [rel current_exception]
-    test rax, rax
-    jnz .chain_exhausted
+    EXC_RAISED_SINCE [rbp - CHI_EXC], rax, .chain_exhausted
 
     ; Normal exhaustion — advance to next iterator
     inc qword [rbx + CHAIN_IDX]

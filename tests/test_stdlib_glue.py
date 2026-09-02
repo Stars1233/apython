@@ -3,8 +3,26 @@ import sys
 import itertools
 import _thread
 
-# sys.builtin_module_names: os.py reads it to pick a platform module.
+# sys.builtin_module_names: os.py reads it to pick a platform module, gating
+# the whole import on `if 'posix' in sys.builtin_module_names`.  It used to be
+# a hand-written array separate from the one import_init registers from, and
+# the two had drifted: errno and asyncio were in sys.modules and absent here.
+# Both are now built from builtin_module_table, so every registered module
+# appears -- which is what this checks, rather than a fixed list.
 print(type(sys.builtin_module_names).__name__, "sys" in sys.builtin_module_names)
+# The list is compared as a set of invariants, not as a fixed roster: CPython
+# ships some sixty of these and apython a handful.  What must hold in both is
+# that every name apython registers is here, and that the tuple is sorted --
+# which is what a table-driven list gives and a hand-written one had lost.
+print("named:", all(n in sys.builtin_module_names
+                    for n in ("builtins", "sys", "errno", "_sre", "_abc",
+                              "_weakref", "time")))
+print("sorted:", list(sys.builtin_module_names) == sorted(sys.builtin_module_names))
+print("no dups:", len(set(sys.builtin_module_names)) == len(sys.builtin_module_names))
+print("all str:", all(type(n).__name__ == "str" for n in sys.builtin_module_names))
+
+# os._createenviron decodes posix.environ with this.
+print("fsencoding:", sys.getfilesystemencoding())
 
 # itertools is found relative to the interpreter, not the working directory.
 print(list(itertools.islice(itertools.count(3), 4)))

@@ -240,6 +240,21 @@ DEF_FUNC eval_frame
     mov qword [rel cfex_merged_pending], 0
     mov qword [rel cfex_kwnames_pending], 0
 
+    ; KW_NAMES is per-call-site state: it names the keywords of the ONE call
+    ; that follows it, and the callee is meant to consume it.  A builtin that
+    ; ignores it leaves it set -- and __import__ runs a whole module body
+    ; before returning, so the first class statement in that module read the
+    ; importer's `fromlist=`/`level=` as its own class keywords and raised
+    ; "__init_subclass__() takes no keyword arguments" from a module with no
+    ; keyword arguments in it anywhere.  Scope it to the frame, as the cfex
+    ; globals above are.  The tuple is borrowed from co_consts, so no
+    ; refcounting.
+    mov rax, [rel kw_names_pending]
+    push rax
+    sub rsp, 8                  ; keep the push list even: the ABI wants rsp
+                                ; 16-aligned at the calls this frame makes
+    mov qword [rel kw_names_pending], 0
+
     ; Set globals for this frame
     mov [rel eval_co_consts], r14
     mov [rel eval_co_names], rcx
@@ -318,6 +333,9 @@ DEF_FUNC_BARE eval_return
     dec qword [rel recursion_depth]
     ; Restore caller's eval globals (reverse of save order)
     ; Use rcx as scratch — rdx holds return tag (fat value protocol)
+    add rsp, 8                  ; the alignment pad pushed with kw_names
+    pop rcx
+    mov [rel kw_names_pending], rcx
     pop rcx
     mov [rel cfex_kwnames_pending], rcx
     pop rcx
@@ -636,6 +654,32 @@ END_FUNC eval_exception_unwind
 ; raise_exception(PyTypeObject *type, const char *msg_cstr)
 ; Create an exception from a C string and begin unwinding.
 ; Callable from opcode handlers - uses eval loop registers.
+; set_exception(rdi = exception type, rsi = message C string)
+;
+; raise_exception's first half, without the unwind.  raise_exception tail-jumps
+; into eval_exception_unwind, which abandons the C stack -- so a helper that
+; holds an owned reference cannot raise and still release it, and every one
+; that tried leaked.  A helper whose contract already says "0 (or -1) with an
+; exception pending" uses this instead and returns normally, leaving the
+; unwinding to the interpreter frame that called it.
+DEF_FUNC set_exception
+    call exc_from_cstr
+
+    push rax
+    mov rsi, [rel current_exception]
+    test rsi, rsi
+    jz .se_no_prev
+    mov rdi, rax
+    call exc_set_context
+    mov rdi, [rel current_exception]
+    call obj_decref
+.se_no_prev:
+    pop rax
+    mov [rel current_exception], rax
+    leave
+    ret
+END_FUNC set_exception
+
 DEF_FUNC raise_exception
 
     ; Create exception: exc_from_cstr(type, msg)

@@ -6,7 +6,7 @@ VERSION_PATCH = 0
 VERSION = $(VERSION_MAJOR).$(VERSION_MINOR).$(VERSION_PATCH)
 
 NASM = nasm
-NASMFLAGS = -f elf64 -I include/ -I compiler/ -g -F dwarf \
+NASMFLAGS = -f elf64 -I src/include/ -I src/compiler/ -g -F dwarf \
     -DVERSION_MAJOR=$(VERSION_MAJOR) -DVERSION_MINOR=$(VERSION_MINOR) \
     -DVERSION_PATCH=$(VERSION_PATCH) -DVERSION_STR=\"$(VERSION)\"
 # INT_STRESS=N boxes every |int| >= N as a heap PyIntObject, so the normal
@@ -22,30 +22,29 @@ NASMFLAGS += -DINT_STRESS_BOX=$(INT_STRESS_THRESHOLD)
 endif
 
 CC = cc
-LDFLAGS = -no-pie -lc -lgmp
+# -lm is for complex: hypot, pow, atan2, exp, log, cos and sin, which
+# src/pyo/complex.asm calls for the general complex power and for abs().
+# float.asm avoids libm by doing its own x87 sequence; complex does not, since
+# the polar form needs all seven and hand-rolling them would be a worse bargain.
+LDFLAGS = -no-pie -lc -lm -lgmp
 TARGET = apython
 
-# Source files
-SRCS = $(wildcard src/*.asm)
-PYO_SRCS = $(wildcard src/pyo/*.asm)
-METHODS_SRCS = $(wildcard src/methods/*.asm)
-OPCODES_SRCS = $(wildcard src/opcodes/*.asm)
-# The Python source compiler is its own subsystem, peer to src/.
-COMPILER_SRCS = $(wildcard compiler/*.asm)
+# Source files.  Everything the interpreter is built from lives under src/:
+# the eval loop and runtime at the top, then objects, methods and opcode
+# handlers, and the Python source compiler in its own subdirectory.
+SRCS = $(wildcard src/*.asm) $(wildcard src/*/*.asm)
 # Objects mirror the source tree.  A flat build/ would put every basename in
-# one namespace across the four source directories, and a collision there is
+# one namespace across the source directories, and a collision there is
 # silent: make picks the first pattern rule whose prerequisite exists, the
 # other file is never assembled, and the only symptom is a pile of undefined
-# references at link time naming nothing useful.
-OBJS = $(SRCS:src/%.asm=build/%.o) $(PYO_SRCS:src/pyo/%.asm=build/pyo/%.o) \
-       $(METHODS_SRCS:src/methods/%.asm=build/methods/%.o) \
-       $(OPCODES_SRCS:src/opcodes/%.asm=build/opcodes/%.o) \
-       $(COMPILER_SRCS:compiler/%.asm=build/compiler/%.o)
+# references at link time naming nothing useful.  Keeping the subdirectory in
+# the stem is what avoids that -- build/pyo/dict.o and build/methods/dict.o.
+OBJS = $(SRCS:src/%.asm=build/%.o)
 
 # Every object depends on every header: nasm has no depfile support here, and
-# a stale build after editing a struct layout in include/*.inc is a silent,
+# a stale build after editing a struct layout in src/include/*.inc is a silent,
 # very confusing failure.
-HEADERS = $(wildcard include/*.inc) $(wildcard compiler/*.inc)
+HEADERS = $(wildcard src/include/*.inc) $(wildcard src/compiler/*.inc)
 
 # ...and on the flags they were assembled with.  Without this, `make
 # INT_STRESS=1` after an ordinary `make` finds every object up to date and
@@ -64,7 +63,7 @@ $(shell mkdir -p build; printf '%s\n' '$(NASMFLAGS)' | cmp -s - $(FLAGSTAMP) \
 # Python compiler for tests
 PYTHON = python3
 
-.PHONY: all clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-source lib-pyc
+.PHONY: all clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-re check-source lib-pyc
 
 all: $(TARGET) lib-pyc
 
@@ -74,11 +73,11 @@ all: $(TARGET) lib-pyc
 # CPython 3.12, so a real file rule would break the build for everyone else the
 # moment a fresh clone's mtimes came out in the wrong order.
 regen:
-	$(PYTHON) compiler/gen_tables.py > compiler/tables.asm.new
-	mv compiler/tables.asm.new compiler/tables.asm
-	$(PYTHON) compiler/gen_prule.py
-	$(PYTHON) compiler/gen_unicodename.py > compiler/unicodename.asm.new
-	mv compiler/unicodename.asm.new compiler/unicodename.asm
+	$(PYTHON) src/compiler/gen_tables.py > src/compiler/tables.asm.new
+	mv src/compiler/tables.asm.new src/compiler/tables.asm
+	$(PYTHON) src/compiler/gen_prule.py
+	$(PYTHON) src/compiler/gen_unicodename.py > src/compiler/unicodename.asm.new
+	mv src/compiler/unicodename.asm.new src/compiler/unicodename.asm
 
 $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
@@ -90,27 +89,13 @@ $(TARGET): $(OBJS)
 lib-pyc:
 	@find lib -name '*.py' -exec $(PYTHON) -m py_compile {} \; 2>/dev/null || true
 
+# One rule for every source directory: the stem carries the subdirectory, so
+# src/pyo/dict.asm and src/methods/dict.asm land in different objects.
 build/%.o: src/%.asm $(HEADERS) $(FLAGSTAMP)
 	@mkdir -p $(@D)
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
-build/pyo/%.o: src/pyo/%.asm $(HEADERS) $(FLAGSTAMP)
-	@mkdir -p $(@D)
-	$(NASM) $(NASMFLAGS) -o $@ $<
-
-build/methods/%.o: src/methods/%.asm $(HEADERS) $(FLAGSTAMP)
-	@mkdir -p $(@D)
-	$(NASM) $(NASMFLAGS) -o $@ $<
-
-build/opcodes/%.o: src/opcodes/%.asm $(HEADERS) $(FLAGSTAMP)
-	@mkdir -p $(@D)
-	$(NASM) $(NASMFLAGS) -o $@ $<
-
-build/compiler/%.o: compiler/%.asm $(HEADERS) $(FLAGSTAMP)
-	@mkdir -p $(@D)
-	$(NASM) $(NASMFLAGS) -o $@ $<
-
-# The generated compiler/tables.asm and compiler/unicodename.asm are checked-in
+# The generated tables.asm and unicodename.asm under src/compiler are checked-in
 # sources, not build products -- see `regen` below.  clean must never touch them.
 clean:
 	rm -rf build $(TARGET)
@@ -131,6 +116,11 @@ check-source: $(TARGET) lib-pyc
 # to point at its Lib/ directory.  Skips cleanly when it is absent.
 check-stdlib: $(TARGET)
 	@bash tests/stdlib_probe.sh
+
+# The regex engine, diffed against CPython over a few hundred patterns.  Not
+# in `make check`: `re` is a Python module, so it comes from $CPYTHON_LIB.
+check-re: $(TARGET)
+	@bash tests/re_probe.sh
 
 # CPython test suite targets
 # The CPython-derived test corpus.  One list, used by both the compile step

@@ -6,6 +6,12 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "opcodes.inc"
+
+extern complex_to_parts
+extern obj_incref
+extern complex_from_doubles
+extern complex_type
 
 ; External symbols used
 extern int_to_i64
@@ -240,6 +246,31 @@ DEF_FUNC builtin_divmod
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
+    ; A slot may decline: this branch taught int_floordiv and int_mod to
+    ; answer NULL for a non-int operand, and op_binary_op to fall back on the
+    ; other operand's slot.  divmod() is the other direct caller and was not
+    ; taught, so the NULL went into the result tuple and `divmod(7, 2.0)`
+    ; produced an object with no repr instead of (3.0, 1.0).
+    test rax, rax
+    jnz .divmod_have_quot
+    mov rdi, r12
+    mov edx, r14d
+    call value_number_methods   ; the RIGHT operand's, as the reflected op
+    test rax, rax
+    jz .divmod_type_error
+    mov rax, [rax + PyNumberMethods.nb_floor_divide]
+    test rax, rax
+    jz .divmod_type_error
+    mov rdi, rbx
+    mov edx, r13d
+    mov rsi, r12
+    mov ecx, r14d
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
+    call rax
+    test rax, rax
+    jz .divmod_type_error
+.divmod_have_quot:
     V_UNPACK rax, rdx           ; int_floordiv returns a Value
     mov r15, rax                ; r15 = quotient payload
     push rdx                   ; save quotient tag (stack slot)
@@ -261,6 +292,26 @@ DEF_FUNC builtin_divmod
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
+    test rax, rax
+    jnz .divmod_have_rem
+    mov rdi, r12
+    mov edx, r14d
+    call value_number_methods
+    test rax, rax
+    jz .divmod_pop_type_error
+    mov rax, [rax + PyNumberMethods.nb_remainder]
+    test rax, rax
+    jz .divmod_pop_type_error
+    mov rdi, rbx
+    mov edx, r13d
+    mov rsi, r12
+    mov ecx, r14d
+    V_PACK rdi, rdx
+    V_PACK rsi, rcx
+    call rax
+    test rax, rax
+    jz .divmod_pop_type_error
+.divmod_have_rem:
     V_UNPACK rax, rdx           ; int_mod returns a Value
     mov r12, rax                ; r12 = remainder payload
     mov r13, rdx                ; r13 = remainder tag
@@ -289,8 +340,19 @@ DEF_FUNC builtin_divmod
 .divmod_error:
     RAISE exc_TypeError_type, "divmod expected 2 arguments"
 
+.divmod_pop_type_error:
+    add rsp, 8                  ; the quotient tag pushed above
 .divmod_type_error:
-    RAISE exc_TypeError_type, "unsupported operand type(s) for divmod()"
+    ; Name both operands, as CPython does: with two of them, "unsupported"
+    ; alone does not say which.
+    mov rdi, rbx
+    mov edx, r13d
+    V_PACK rdi, rdx
+    mov rsi, r12
+    mov ecx, r14d
+    V_PACK rsi, rcx
+    CSTRING rdx, "unsupported operand type(s) for divmod()"
+    call raise_binop_type_error
 END_FUNC builtin_divmod
 
 ; tp_call wrappers: shift (type, args, nargs) → (args, nargs)
@@ -373,10 +435,42 @@ DEF_FUNC_BARE bool_type_call
     RAISE exc_TypeError_type, "bool() takes no keyword arguments"
 END_FUNC bool_type_call
 
-DEF_FUNC_BARE float_type_call
+;; float_type_call(rdi = type, rsi = args, rdx = nargs) -> a fat pair
+;;
+;; The type argument used to be discarded, so `class F(float)` produced a
+;; plain float: the subclass name was lost and its __init__ never ran.  int
+;; and str were right because their family flag routes type_call elsewhere;
+;; float and complex had neither the flag nor a constructor that read rdi.
+FTC_TYPE  equ 8
+FTC_BITS  equ 16
+FTC_FRAME equ 16            ; + 0 pushes = 16
+extern builtin_sub_alloc
+
+DEF_FUNC float_type_call, FTC_FRAME
+    mov [rbp - FTC_TYPE], rdi
     mov rdi, rsi
     mov rsi, rdx
-    jmp builtin_float
+    call builtin_float          ; rax = raw double bits, edx = TAG_FLOAT
+    lea rcx, [rel float_type]
+    cmp [rbp - FTC_TYPE], rcx
+    je .ftc_out                 ; float() itself: the immediate is the answer
+    test edx, edx
+    jz .ftc_out                 ; it raised
+
+    ; A subclass instance carries the double where float_to_f64 reads it,
+    ; at the base's own offset.  Returning a pointer here is what lets
+    ; type_call's two callers agree: .not_type_self packs the fat pair and
+    ; .nnf_check_base_new unpacks it as a Value, and only a pointer means
+    ; the same thing to both.
+    mov [rbp - FTC_BITS], rax
+    mov rdi, [rbp - FTC_TYPE]
+    call builtin_sub_alloc
+    mov rcx, [rbp - FTC_BITS]
+    mov [rax + PyFloatObject.value], rcx
+    mov edx, TAG_PTR
+.ftc_out:
+    leave
+    ret
 END_FUNC float_type_call
 
 ;; ============================================================================
@@ -388,7 +482,9 @@ BI_NARGS  equ 16
 BI_OBJ    equ 24       ; original string/bytes obj for error messages
 BI_BASE   equ 32       ; base value for error messages
 BI_ORIGIN equ 40       ; the argument's type, for the bytes-family MRO walk
-BI_FRAME  equ 48            ; + 1 push = 56, not 16-aligned
+BI_LEN    equ 48       ; the source length: bytes and bytearray keep it in
+                       ; different fields, so the shared tail cannot re-read it
+BI_FRAME  equ 56            ; + 1 push = 64, 16-byte aligned
 
 DEF_FUNC builtin_int_fn, BI_FRAME
     push rbx
@@ -436,6 +532,10 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     lea rcx, [rel float_type]
     cmp rax, rcx
     je .int_from_float
+    ; A float subclass keeps its double inline; .int_from_float reads it
+    ; through float_int, which unwraps one.
+    test rdx, TYPE_FLAG_FLOAT_SUBCLASS
+    jnz .int_from_float
 
     lea rcx, [rel str_type]
     cmp rax, rcx
@@ -501,7 +601,11 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jmp .int_ret
 
 .int_from_float:
-    mov rdi, rbx
+    ; A float subclass instance: the double is inline, at the base's offset.
+    ; Exact float never arrives here -- a float is an immediate, so no pointer
+    ; ever has float_type -- which is why this arm read the pointer as bits
+    ; unnoticed until float had a subclass.
+    mov rdi, [rbx + PyFloatObject.value]
     call float_int
     jmp .int_ret
 
@@ -579,7 +683,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     pop rcx
     push rax
     mov rdi, rax
-    lea rsi, [rbx + PyByteArrayObject.data]
+    mov rsi, [rbx + PyByteArrayObject.ob_bytes]
     mov rdx, rcx
     call ap_memcpy
     pop rdi
@@ -1082,7 +1186,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     je .int_base_from_bytes
     lea rdx, [rel bytearray_type]
     cmp rcx, rdx
-    je .int_base_from_bytes            ; same layout as bytes
+    je .int_base_from_bytearray
     MRO_NEXT rcx, [rbp - BI_ORIGIN]
     test rcx, rcx
     jnz .int_base_check_bytes_chain
@@ -1102,25 +1206,42 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jz .int_base_parse_error
     jmp .int_ret
 
+.int_base_from_bytearray:
+    ; A bytearray keeps its data OUT OF LINE, so it cannot be read through
+    ; the bytes offsets -- which is what this did while the two layouts
+    ; happened to match.  rsi and rcx are set here, then the shared body
+    ; below copies from them.
+    mov rcx, [rbx + PyByteArrayObject.ob_size]
+    mov rsi, [rbx + PyByteArrayObject.ob_bytes]
+    test rsi, rsi
+    jnz .int_base_bytes_have
+    lea rsi, [rel int_base_empty]
+    jmp .int_base_bytes_have
+
 .int_base_from_bytes:
     ; Parse bytes with given base — make null-terminated copy
     mov rcx, [rbx + PyBytesObject.ob_size]
+    lea rsi, [rbx + PyBytesObject.data]
+
+.int_base_bytes_have:
+    mov [rbp - BI_LEN], rcx
+    push rsi
     lea rdi, [rcx + 8]
     push rcx
     call ap_malloc
     pop rcx
+    pop rsi
     push rax
     mov rdi, rax
-    lea rsi, [rbx + PyBytesObject.data]
     mov rdx, rcx
     call ap_memcpy
     pop rdi
     push rdi
-    mov rcx, [rbx + PyBytesObject.ob_size]
+    mov rcx, [rbp - BI_LEN]
     mov qword [rdi + rcx], 0
     ; Check for embedded NUL
     call strlen wrt ..plt
-    cmp rax, [rbx + PyBytesObject.ob_size]
+    cmp rax, [rbp - BI_LEN]
     jne .int_base_bytes_nul_error
     mov rdi, [rsp]                 ; buffer
     mov rsi, [rbp - BI_NARGS]      ; base
@@ -1609,14 +1730,20 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     ; Check if it's a PyFloatObject
     lea rcx, [rel float_type]
     cmp [rax + PyObject.ob_type], rcx
-    jne .rnd_one_check_int_obj
+    je .rnd_one_float_obj
+    ; A float SUBCLASS keeps its double inline at the same offset, and the
+    ; exact-pointer test refused it: round(F(2.5)) was a TypeError.
+    mov rcx, [rax + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_FLOAT_SUBCLASS
+    jz .rnd_one_check_int_obj
+.rnd_one_float_obj:
     movsd xmm0, [rax + PyFloatObject.value]
     jmp .rnd_one_do_round
 .rnd_one_check_int_obj:
     ; Check if it's a PyIntObject (heap int)
     lea rcx, [rel int_type]
     cmp [rax + PyObject.ob_type], rcx
-    jne .rnd_type_error
+    jne .rnd_one_dunder
     ; It's a heap int — convert to i64 and return as SmallInt.
     ; int_to_i64 dispatches on edx, so the tag must be supplied.
     mov rdi, rax
@@ -1641,6 +1768,21 @@ DEF_FUNC builtin_round_fn, RND_FRAME
 
 .rnd_int_ret:
     RET_TAG_SMALLINT
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.rnd_one_dunder:
+    ; Anything else is asked for __round__, which is how round() works on a
+    ; Decimal, a Fraction or any class that defines it.  Nothing consulted it
+    ; at all, so every one of them was "type cannot be rounded".
+    mov rdi, rax
+    CSTRING rsi, "__round__"
+    extern dunder_call_1
+    call dunder_call_1
+    test edx, edx
+    jz .rnd_type_error          ; no __round__, or it raised
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -1674,10 +1816,14 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     je .rnd_two_raw_float
     cmp ecx, TAG_PTR
     jne .rnd_type_error
-    ; Check if PyFloatObject
+    ; Check if PyFloatObject, or a subclass -- the double is inline for both.
     lea rcx, [rel float_type]
     cmp [rax + PyObject.ob_type], rcx
-    jne .rnd_type_error
+    je .rnd_two_float_obj
+    mov rcx, [rax + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_FLOAT_SUBCLASS
+    jz .rnd_type_error
+.rnd_two_float_obj:
     movsd xmm0, [rax + PyFloatObject.value]
     jmp .rnd_two_got_float
 .rnd_two_raw_float:
@@ -1822,11 +1968,40 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     mov r8d, [rbp - POW_ETAG]
     jmp .pow_two_int
 .pow_reload_float:
-    mov rax, r12
-    mov rbx, r13
-    mov ecx, [rbp - POW_BTAG]
-    mov r8d, [rbp - POW_ETAG]
-    jmp .pow_two_float
+    ; Not two integers.  Everything else goes through obj_binary_op, the same
+    ; protocol `base ** exp` uses, so pow() answers whatever the operator
+    ; answers -- for float subclasses, for complex, and for any class with
+    ; __pow__.  The hand-rolled float path that used to be here tested
+    ; `ob_type == float_type` exactly and knew nothing of complex, so
+    ; pow(F(2.0), 2) raised where F(2.0) ** 2 worked, and pow(1+2j, 2) raised
+    ; where (1+2j) ** 2 worked.
+    mov rdi, r12
+    mov esi, [rbp - POW_BTAG]
+    V_PACK rdi, rsi
+    mov rsi, r13
+    mov edx, [rbp - POW_ETAG]
+    V_PACK rsi, rdx
+    mov edx, NB_POWER
+    extern obj_binary_op
+    call obj_binary_op
+    test rax, rax
+    jz .pow_propagate
+    V_UNPACK rax, rdx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.pow_propagate:
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 .pow_two_int:
 
     ; int ** int — call int_power(base, exp, base_tag, exp_tag)
@@ -1847,137 +2022,8 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.pow_two_float:
-    ; At least one is float: convert both to double
-    cmp ecx, TAG_SMALLINT
-    jne .pow_f_base_float
-    cvtsi2sd xmm0, rax
-    jmp .pow_f_got_base
-.pow_f_base_float:
-    cmp ecx, TAG_FLOAT
-    je .pow_f_base_raw
-    ; TAG_PTR: extract from PyFloatObject
-    cmp ecx, TAG_PTR
-    jne .pow_type_error
-    lea rcx, [rel float_type]
-    cmp [rax + PyObject.ob_type], rcx
-    jne .pow_type_error
-    movsd xmm0, [rax + PyFloatObject.value]
-    jmp .pow_f_got_base
-.pow_f_base_raw:
-    movq xmm0, rax
-.pow_f_got_base:
-    cmp r8d, TAG_SMALLINT
-    jne .pow_f_exp_float
-    cvtsi2sd xmm1, rbx
-    jmp .pow_f_got_exp
-.pow_f_exp_float:
-    cmp r8d, TAG_FLOAT
-    je .pow_f_exp_raw
-    ; TAG_PTR: extract from PyFloatObject
-    cmp r8d, TAG_PTR
-    jne .pow_type_error
-    lea rcx, [rel float_type]
-    cmp [rbx + PyObject.ob_type], rcx
-    jne .pow_type_error
-    movsd xmm1, [rbx + PyFloatObject.value]
-    jmp .pow_f_got_exp
-.pow_f_exp_raw:
-    movq xmm1, rbx
-.pow_f_got_exp:
-    ; xmm0 = base, xmm1 = exp
-    ; Use repeated squaring for integer exponents, or fall back to exp*ln
-    ; Simple: convert to C pow() equivalent using exp/ln
-    ; x^y = exp2(y * log2(x)) — but we don't have those instructions easily
-    ; Use a simpler approach: if exp is a small integer, use repeated mult
-    cvtsd2si rcx, xmm1
-    cvtsi2sd xmm2, rcx
-    ucomisd xmm1, xmm2
-    jne .pow_f_general       ; exp is not an integer
-    jp .pow_f_general        ; NaN
-
-    ; Integer exponent: repeated squaring
-    mov r13, rcx
-    test r13, r13
-    js .pow_f_neg
-
-    movq xmm2, [rel const_one] ; result = 1.0
-.pow_f_sq:
-    test r13, r13
-    jz .pow_f_sq_done
-    test r13, 1
-    jz .pow_f_sq_even
-    mulsd xmm2, xmm0
-.pow_f_sq_even:
-    mulsd xmm0, xmm0
-    shr r13, 1
-    jmp .pow_f_sq
-.pow_f_sq_done:
-    movq rax, xmm2
-    mov edx, TAG_FLOAT
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.pow_f_neg:
-    neg r13
-    movq xmm2, [rel const_one]
-.pow_f_neg_sq:
-    test r13, r13
-    jz .pow_f_neg_done
-    test r13, 1
-    jz .pow_f_neg_even
-    mulsd xmm2, xmm0
-.pow_f_neg_even:
-    mulsd xmm0, xmm0
-    shr r13, 1
-    jmp .pow_f_neg_sq
-.pow_f_neg_done:
-    movq xmm0, [rel const_one]
-    divsd xmm0, xmm2
-    movq rax, xmm0
-    mov edx, TAG_FLOAT
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.pow_f_general:
-    ; Non-integer float exponent: x^y = 2^(y * log2(x))
-    ; xmm0 = base, xmm1 = exp
-    ; fyl2x computes st(1) * log2(st(0)), so load exp first, then base
-    sub rsp, 16
-    movsd [rsp], xmm1          ; exp on stack
-    fld qword [rsp]             ; st(0) = exp
-    movsd [rsp], xmm0          ; base on stack
-    fld qword [rsp]             ; st(0) = base, st(1) = exp
-    fyl2x                       ; st(0) = exp * log2(base)
-    ; Compute 2^st(0): split into int + frac
-    fld st0                     ; dup
-    frndint                     ; st(0) = int part
-    fsub st1, st0               ; st(1) = frac part
-    fxch st1                    ; st(0) = frac, st(1) = int
-    f2xm1                       ; st(0) = 2^frac - 1
-    fld1
-    faddp st1, st0              ; st(0) = 2^frac
-    fscale                      ; st(0) = 2^frac * 2^int = result
-    fstp st1                    ; pop int part
-    fstp qword [rsp]            ; store result
-    movsd xmm0, [rsp]
-    add rsp, 16
-    movq rax, xmm0
-    mov edx, TAG_FLOAT
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
+; The hand-rolled float path that used to live here is gone with it: one
+; implementation of `**` rather than two that disagreed about what a float is.
 
 .pow_three:
     ; pow(base, exp, mod) — modular exponentiation.
@@ -2299,5 +2345,365 @@ END_FUNC builtin_oct
 ; const_one is read by round() and pow(); it lived in a .rodata block shared
 ; with format()'s name string, which is now in builtins_obj.asm.
 section .rodata
+int_base_empty: db 0
+
 align 8
 const_one: dq 0x3ff0000000000000   ; 1.0 in IEEE 754
+
+section .text
+
+;; ============================================================================
+;; complex_type_call(rdi = type, rsi = args, rdx = nargs) -> Value
+;; The tp_new thunk.  Keywords are not accepted yet -- CPython takes real= and
+;; imag= -- so a pending kw_names is rejected rather than ignored, and cleared
+;; on the way out the way int_type_call and bool_type_call do.
+;; ============================================================================
+CTC_TYPE  equ 8
+CTC_VAL   equ 16
+CTC_FRAME equ 16            ; + 0 pushes = 16
+
+DEF_FUNC complex_type_call, CTC_FRAME
+    cmp qword [rel kw_names_pending], 0
+    jne .ctc_kwargs
+    mov [rbp - CTC_TYPE], rdi
+    mov rdi, rsi
+    mov rsi, rdx
+    call builtin_complex        ; rax = a complex pointer, edx = TAG_PTR
+    lea rcx, [rel complex_type]
+    cmp [rbp - CTC_TYPE], rcx
+    je .ctc_out                 ; complex() itself
+    test edx, edx
+    jz .ctc_out                 ; it raised
+
+    ; Re-home the two doubles into an instance of the subclass, then drop the
+    ; exact complex builtin_complex built.  Copying is cheaper than teaching
+    ; builtin_complex a type argument it would have to thread through six
+    ; return paths.
+    mov [rbp - CTC_VAL], rax
+    mov rdi, [rbp - CTC_TYPE]
+    call builtin_sub_alloc
+    mov rcx, [rbp - CTC_VAL]
+    movsd xmm0, [rcx + PyComplexObject.cval_real]
+    movsd xmm1, [rcx + PyComplexObject.cval_imag]
+    movsd [rax + PyComplexObject.cval_real], xmm0
+    movsd [rax + PyComplexObject.cval_imag], xmm1
+    mov [rbp - CTC_TYPE], rax
+    mov rdi, [rbp - CTC_VAL]
+    call obj_decref
+    mov rax, [rbp - CTC_TYPE]
+    mov edx, TAG_PTR
+.ctc_out:
+    leave
+    ret
+.ctc_kwargs:
+    mov qword [rel kw_names_pending], 0
+    RAISE exc_TypeError_type, "complex() takes no keyword arguments"
+END_FUNC complex_type_call
+
+;; ============================================================================
+;; builtin_complex(rdi = args, rsi = nargs) -> Value
+;;
+;;   complex()            0j
+;;   complex(z)           z itself when it is already an exact complex
+;;   complex(x)           (float(x)+0j) for an int, bool or float
+;;   complex(a, b)        real = ar - bi, imag = ai + br
+;;
+;; That last formula is the whole of the two-argument case, and it is not
+;; (a, b): complex(1j, 1) is 2j and complex(1, 1j) is 0j.
+;; ============================================================================
+BCX_A     equ 16              ; first argument's parts
+BCX_B     equ 32              ; second argument's parts
+BCX_ARGS  equ 40
+BCX_NARGS equ 48
+BCX_RA    equ 56              ; bcx_coerce's verdict for each argument: the
+BCX_RB    equ 64              ; COERCED value's shape decides, not the given one
+BCX_FRAME equ 64              ; + 0 pushes = 64
+;; ============================================================================
+;; bcx_coerce(rdi = Value, rsi = &double[2], edx = may call __complex__)
+;;   -> eax = 0 not a number, 1 a real number, 2 a complex one
+;;
+;; complex_to_parts, then the conversion protocols CPython's constructor
+;; consults and its arithmetic does not: __complex__, then __float__, then
+;; __index__.  They belong here rather than in complex_to_parts because
+;; `1j + obj` must go on returning NotImplemented for an object with only a
+;; __float__; only complex() itself coerces.
+;;
+;; __complex__ is offered for the first argument alone -- CPython calls
+;; try_complex_special_method on r and never on i, so complex(1, C()) is a
+;; TypeError even though complex(C(), 1) is not.
+;;
+;; Telling 1 from 2 is what the caller needs to finish the two-argument case:
+;; it is the coerced value's shape that decides, not the argument's, so
+;; complex(C(), 1) where C.__complex__ gives 3+4j is (3+5j).
+;;
+;; A __complex__ returning something other than a complex raises here rather
+;; than answering 0: that is a different error, and CPython reports it as one.
+;; ============================================================================
+BCC_OUT   equ 8
+BCC_SELF  equ 16
+BCC_EXC   equ 24
+BCC_DUN   equ 32            ; whether __complex__ may be tried
+BCC_FRAME equ 32            ; + 0 pushes = 32
+
+extern dunder_call_1
+extern obj_dealloc
+extern complex_type
+extern raise_type_error_with_name
+extern raise_binop_type_error
+extern eval_exception_unwind
+
+DEF_FUNC_LOCAL bcx_coerce, BCC_FRAME
+    mov [rbp - BCC_OUT], rsi
+    mov [rbp - BCC_SELF], rdi
+    mov [rbp - BCC_DUN], rdx
+    ; Is it complex-valued?  A subclass counts, as PyComplex_Check does.
+    xor r8d, r8d
+    V_TEST_PTR rdi, rax
+    ja .bcc_classified
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel complex_type]
+    cmp rax, rcx
+    je .bcc_is_complex
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_COMPLEX_SUBCLASS
+    jz .bcc_classified
+.bcc_is_complex:
+    mov r8d, 1
+.bcc_classified:
+    mov [rbp - BCC_EXC], r8     ; parked; DUNDER_EXC_SAVE comes later
+    call complex_to_parts
+    test eax, eax
+    jz .bcc_protocols
+    mov rax, [rbp - BCC_EXC]
+    add eax, 1                  ; 1 for a real number, 2 for a complex one
+    jmp .bcc_done
+
+.bcc_protocols:
+    ; Only a heaptype can carry these; a builtin that had one would already
+    ; have been recognised above.
+    mov rdi, [rbp - BCC_SELF]
+    V_TEST_PTR rdi, rax
+    ja .bcc_no
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .bcc_no
+
+    DUNDER_EXC_SAVE [rbp - BCC_EXC]
+    cmp qword [rbp - BCC_DUN], 0
+    je .bcc_try_float
+
+    ; --- __complex__ ---
+    CSTRING rsi, "__complex__"
+    call dunder_call_1
+    test edx, edx
+    jz .bcc_try_float           ; absent, or it raised
+    ; The result must be a complex.  Take its parts and release it: an exact
+    ; complex or a subclass both answer, as CPython accepts both.
+    mov [rbp - BCC_SELF], rax
+    V_TEST_PTR rax, rcx
+    ja .bcc_bad_complex
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel complex_type]
+    cmp rcx, rdx
+    je .bcc_complex_ok
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_COMPLEX_SUBCLASS
+    jz .bcc_bad_complex
+.bcc_complex_ok:
+    mov rdi, rax
+    mov rsi, [rbp - BCC_OUT]
+    call complex_to_parts
+    mov rdi, [rbp - BCC_SELF]
+    DECREF_V rdi, rdx
+    mov eax, 2                  ; complex-valued, whatever the argument was
+    jmp .bcc_done
+
+.bcc_bad_complex:
+    mov rsi, [rbp - BCC_SELF]
+    CSTRING rdi, `__complex__ returned non-complex (type \x01)`
+    call raise_type_error_with_name
+
+.bcc_try_float:
+    DUNDER_RAISED [rbp - BCC_EXC], .bcc_raised
+    ; --- __float__, then __index__: both through their slots, which is where
+    ; slots.asm puts a heaptype's, and both give a real part with a +0.0
+    ; imaginary one.
+    mov rdi, [rbp - BCC_SELF]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_as_number]
+    test rcx, rcx
+    jz .bcc_no
+    mov rax, [rcx + PyNumberMethods.nb_float]
+    test rax, rax
+    jnz .bcc_call_conv
+    mov rax, [rcx + PyNumberMethods.nb_index]
+    test rax, rax
+    jz .bcc_no
+.bcc_call_conv:
+    call rax                    ; rdi is still self; returns a Value
+    test rax, rax
+    jz .bcc_raised
+    mov [rbp - BCC_SELF], rax
+    mov rdi, rax
+    mov rsi, [rbp - BCC_OUT]
+    call complex_to_parts       ; a float or an int: 1 on success, 0 otherwise
+    mov [rbp - BCC_EXC], rax    ; the verdict, across the release
+    mov rdi, [rbp - BCC_SELF]
+    DECREF_V rdi, rdx
+    mov rax, [rbp - BCC_EXC]
+    jmp .bcc_done
+
+.bcc_raised:
+    ; A protocol method raised.  Report that, not "not a number".
+    leave
+    jmp eval_exception_unwind
+
+.bcc_no:
+    xor eax, eax
+.bcc_done:
+    leave
+    ret
+END_FUNC bcx_coerce
+
+DEF_FUNC builtin_complex, BCX_FRAME
+    mov [rbp - BCX_ARGS], rdi
+    mov [rbp - BCX_NARGS], rsi
+    cmp rsi, 0
+    je .bcx_zero
+    cmp rsi, 2
+    ja .bcx_argcount
+
+    ; --- a string argument, which is a parse rather than a conversion ---
+    mov rdi, [rbp - BCX_ARGS]
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rax
+    ja .bcx_first_not_str
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .bcx_from_string
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .bcx_from_string
+.bcx_first_not_str:
+    ; The second argument may not be one either, and that is a distinct
+    ; message from "must be a number".
+    cmp qword [rbp - BCX_NARGS], 2
+    jne .bcx_first
+    mov rdi, [rbp - BCX_ARGS]
+    mov rdi, [rdi + 8]
+    V_TEST_PTR rdi, rax
+    ja .bcx_first
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .bcx_second_is_str
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .bcx_second_is_str
+
+.bcx_first:
+    mov rdi, [rbp - BCX_ARGS]
+    mov rdi, [rdi]
+    lea rsi, [rbp - BCX_A]
+    mov edx, 1                  ; __complex__ is offered to this one only
+    call bcx_coerce
+    mov [rbp - BCX_RA], rax
+    test eax, eax
+    jz .bcx_bad_type
+
+    cmp qword [rbp - BCX_NARGS], 1
+    jne .bcx_two
+
+    ; complex(z) hands back an exact complex unchanged, as CPython does.
+    mov rdi, [rbp - BCX_ARGS]
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rax
+    ja .bcx_one_build
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel complex_type]
+    cmp rax, rcx
+    jne .bcx_one_build
+    push rdi
+    call obj_incref
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.bcx_one_build:
+    movsd xmm0, [rbp - BCX_A]
+    movsd xmm1, [rbp - BCX_A + 8]
+    call complex_from_doubles
+    leave
+    ret
+
+.bcx_two:
+    mov rdi, [rbp - BCX_ARGS]
+    mov rdi, [rdi + 8]
+    lea rsi, [rbp - BCX_B]
+    xor edx, edx                ; ...and never to the second
+    call bcx_coerce
+    mov [rbp - BCX_RB], rax
+    test eax, eax
+    jz .bcx_bad_second
+
+    ; CPython subtracts the second argument's imaginary part only when that
+    ; argument really is a complex, and *assigns* the imaginary part rather
+    ; than adding to it unless the FIRST argument was one.  The difference is
+    ; invisible except on a signed zero, where it is the whole answer:
+    ; complex(0, -0.0) is -0j, and 0.0 + -0.0 is +0.0.
+    movsd xmm0, [rbp - BCX_A]           ; real = ar
+    cmp qword [rbp - BCX_RB], 2
+    jne .bcx_two_imag
+    movsd xmm1, [rbp - BCX_B + 8]
+    subsd xmm0, xmm1                    ; real -= bi
+.bcx_two_imag:
+    movsd [rbp - BCX_A], xmm0
+    movsd xmm1, [rbp - BCX_B]           ; br
+    cmp qword [rbp - BCX_RA], 2
+    jne .bcx_two_build                  ; imag = br
+    addsd xmm1, [rbp - BCX_A + 8]       ; imag = ai + br
+.bcx_two_build:
+    movsd xmm0, [rbp - BCX_A]
+    call complex_from_doubles
+    leave
+    ret
+
+.bcx_zero:
+    xorpd xmm0, xmm0
+    xorpd xmm1, xmm1
+    call complex_from_doubles
+    leave
+    ret
+
+.bcx_from_string:
+    ; complex("1+2j").  Reached only when there is one argument -- a string
+    ; with a second is its own error, below.
+    cmp qword [rbp - BCX_NARGS], 2
+    je .bcx_str_and_second
+    mov rdi, [rbp - BCX_ARGS]
+    mov rdi, [rdi]
+    lea rsi, [rbp - BCX_A]
+    extern complex_parse_string
+    call complex_parse_string    ; raises rather than returning on a bad parse
+    jmp .bcx_one_build
+
+.bcx_bad_type:
+    mov rdi, [rbp - BCX_ARGS]
+    mov rsi, [rdi]
+    CSTRING rdi, `complex() first argument must be a string or a number, not '\x01'`
+    call raise_type_error_with_name
+
+.bcx_bad_second:
+    mov rdi, [rbp - BCX_ARGS]
+    mov rsi, [rdi + 8]
+    CSTRING rdi, `complex() second argument must be a number, not '\x01'`
+    call raise_type_error_with_name
+
+.bcx_str_and_second:
+    RAISE exc_TypeError_type, "complex() can't take second arg if first is a string"
+
+.bcx_second_is_str:
+    RAISE exc_TypeError_type, "complex() second arg can't be a string"
+
+.bcx_argcount:
+    RAISE exc_TypeError_type, "complex() takes at most 2 arguments"
+END_FUNC builtin_complex
+
+

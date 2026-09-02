@@ -9,6 +9,7 @@
 %include "opcodes.inc"
 
 ; External functions
+extern get_iterator_opt
 extern ap_malloc
 extern ap_free
 extern ap_realloc
@@ -296,13 +297,21 @@ LS_SAVED_ITEMS equ 144  ; saved fat items buffer
 LS_SAVED_SIZE  equ 152  ; saved ob_size before sort
 LS_SAVED_PAYLOADS equ 176 ; saved payload array ptr
 LS_SAVED_TAGS     equ 184 ; saved tag array ptr
-LS_FRAME   equ 192     ; includes saved payload/tag pointers
+LS_EXC     equ 192    ; current_exception on entry
+LS_FRAME   equ 200     ; includes saved payload/tag pointers; + 5 pushes = 240
 DEF_FUNC list_method_sort, LS_FRAME
     push rbx
     push r12
     push r13
     push r14
     push r15
+
+    ; Both "did the sort raise" tests below used to read current_exception and
+    ; compare it against zero.  That global is also the exception *being
+    ; handled*, so inside any `except` block an ordinary L.sort() reported
+    ; failure -- invisible until sorted() stopped discarding this function's
+    ; return value.
+    DUNDER_EXC_SAVE [rbp - LS_EXC]
 
     ; sort() takes no positional argument beyond self; only the keywords key
     ; and reverse.  nargs was never compared against anything, so
@@ -780,7 +789,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     extern notimpl_singleton
     lea rcx, [rel notimpl_singleton]
     cmp rax, rcx
-    je .merge_cmp_type_error       ; NotImplemented → raise TypeError
+    je .merge_cmp_reflected        ; NotImplemented → try the other operand
     push rax                       ; save for DECREF
     lea rcx, [rel bool_true]
     cmp rax, rcx
@@ -800,7 +809,51 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov rax, [rel current_exception]
     test rax, rax
     jnz .sort_free_temp            ; real exception → cleanup and propagate
-    ; No exception → unorderable types, raise TypeError
+    ; No exception → the right operand's slot declined; ask the left one.
+
+.merge_cmp_reflected:
+    ; The merge asks "right < left" and resolves tp_richcompare from the right
+    ; element alone.  A slot that declines ended the sort with a TypeError,
+    ; with no reflected retry -- so once float became subclassable,
+    ; sorted([F(3.5), 1]) raised while sorted([2.5, F(3.5)]) worked, the
+    ; failure depending on which way round the two happened to fall.
+    ;
+    ; obj_richcompare_bool already implements the whole protocol, reflected
+    ; retry and identity fallback included, so the decline hands over to it
+    ; rather than growing a second copy of it here.
+    mov rax, [rbp - LS_KSRC]
+    test rax, rax
+    jnz .merge_refl_arr
+    mov rax, [rbp - LS_SRC]
+.merge_refl_arr:
+    mov rcx, [rbp - LS_MJ]
+    shl rcx, 4
+    mov rdi, [rax + rcx]           ; right payload
+    mov rsi, [rax + rcx + 8]       ; right tag
+    V_PACK rdi, rsi
+    mov rax, [rbp - LS_KSRC]
+    test rax, rax
+    jnz .merge_refl_arr2
+    mov rax, [rbp - LS_SRC]
+.merge_refl_arr2:
+    mov rcx, [rbp - LS_MI]
+    shl rcx, 4
+    mov rsi, [rax + rcx]           ; left payload
+    mov rdx, [rax + rcx + 8]       ; left tag
+    V_PACK rsi, rdx
+    xor edx, edx                   ; PY_LT
+    cmp qword [rbp - LS_REV], 0
+    je .merge_refl_call
+    mov edx, PY_GT
+.merge_refl_call:
+    extern obj_richcompare_bool
+    call obj_richcompare_bool
+    cmp eax, 0
+    jl .sort_free_temp             ; it raised: clean up and propagate
+    test eax, eax
+    jnz .merge_take_right
+    jmp .merge_take_left
+
 .merge_cmp_type_error:
     ; IMPORTANT: raise_exception does not return (non-local jump to eval_exception_unwind)
     ; Must free temp buffer and restore list state BEFORE raising.
@@ -1089,9 +1142,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     call ap_free
     ; Error path: propagate exception (return TAG_NULL)
     extern current_exception
-    mov rax, [rel current_exception]
-    test rax, rax
-    jnz .sort_error_return
+    EXC_RAISED_SINCE [rbp - LS_EXC], rax, .sort_error_return
 
 .sort_trivial_done:
     ; n < 2, no sort needed, return None
@@ -1151,9 +1202,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov [rbx + PyListObject.ob_size], rax
 
     ; Check if an exception was raised during sort
-    mov rax, [rel current_exception]
-    test rax, rax
-    jnz .sort_error_return
+    EXC_RAISED_SINCE [rbp - LS_EXC], rax, .sort_error_return
     RET_NONE
     pop r15
     pop r14
@@ -1793,7 +1842,8 @@ END_FUNC list_method_clear
 ;; ============================================================================
 LE_SELF   equ 8
 LE_ITER   equ 16
-LE_FRAME  equ 16            ; + 3 pushes = 40, not 16-aligned
+LE_EXC    equ 24            ; current_exception before the iteration started
+LE_FRAME  equ 24            ; + 3 pushes = 48, 16-aligned
 DEF_FUNC list_method_extend, LE_FRAME
     push rbx
     push r12
@@ -1853,19 +1903,18 @@ DEF_FUNC list_method_extend, LE_FRAME
     jmp .extend_tuple_loop
 
 .extend_generic:
-    ; Get tp_iter from iterable type
+    ; get_iterator_opt, not a tp_iter read: an object with __getitem__
+    ; and no __iter__ is iterable, and the slot read rejected it.
     test r13d, TAG_RC_BIT
-    jz .extend_type_error       ; non-pointer has no tp_iter
-    mov rax, [r12 + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
-    test rax, rax
-    jz .extend_type_error
+    jz .extend_type_error       ; a non-pointer is never iterable
     mov rdi, r12
-    call rax                    ; tp_iter(iterable) → iterator
+    mov esi, TAG_PTR
+    call get_iterator_opt
     test rax, rax
     jz .extend_type_error
     mov [rbp - LE_ITER], rax
 
+    DUNDER_EXC_SAVE [rbp - LE_EXC]
 .extend_iter_loop:
     mov rdi, [rbp - LE_ITER]
     mov rax, [rdi + PyObject.ob_type]
@@ -1896,6 +1945,20 @@ DEF_FUNC list_method_extend, LE_FRAME
     ; DECREF iterator
     mov rdi, [rbp - LE_ITER]
     call obj_decref
+
+    ; NULL means exhausted or raised, and only the pending exception says
+    ; which: L.extend(G()) for a raising __getitem__ appended a short run and
+    ; answered None.
+    EXC_RAISED_SINCE [rbp - LE_EXC], rcx, .extend_iter_raised
+
+.extend_iter_raised:
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .extend_done:
     RET_NONE

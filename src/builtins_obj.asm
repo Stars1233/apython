@@ -9,6 +9,7 @@
 %include "object.inc"
 
 ; External symbols used
+extern get_iterator_opt
 extern int_from_i64
 extern int_add
 extern ap_malloc
@@ -158,6 +159,7 @@ DEF_FUNC builtin_hash_fn
     extern float_hash
     mov rdi, rbx
     V_TO_F64 rdi
+    mov edx, TAG_FLOAT          ; raw bits, not a float subclass instance
     call float_hash
     mov rdi, rax
     call int_from_i64
@@ -300,8 +302,12 @@ END_FUNC builtin_iter_fn
 ;; ============================================================================
 ;; 11. builtin_next_fn(args, nargs) - next(x)
 ;; ============================================================================
-DEF_FUNC builtin_next_fn
+NX_EXC   equ 8              ; current_exception before __next__ ran
+NX_FRAME equ 16
+
+DEF_FUNC builtin_next_fn, NX_FRAME
     push rbx
+    DUNDER_EXC_SAVE [rbp - NX_EXC]
 
     cmp rsi, 1
     je .next_one_arg
@@ -332,11 +338,20 @@ DEF_FUNC builtin_next_fn
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .next_two_default:
-    ; Clear any StopIteration exception
+    ; Only a StopIteration means "use the default".  This cleared whatever was
+    ; pending, so next(it, d) answered d for a __next__ that failed outright
+    ; and the real exception surfaced somewhere unrelated.
     extern current_exception
     mov rax, [rel current_exception]
     test rax, rax
     jz .next_two_ret_default
+    cmp rax, [rbp - NX_EXC]
+    je .next_two_ret_default           ; the one already being handled
+    mov rcx, [rax + PyObject.ob_type]
+    extern exc_StopIteration_type
+    lea rdx, [rel exc_StopIteration_type]
+    cmp rcx, rdx
+    jne .next_two_raised
     push rdi
     mov rdi, rax
     mov qword [rel current_exception], 0
@@ -351,6 +366,10 @@ DEF_FUNC builtin_next_fn
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.next_two_raised:
+    add rsp, 16                    ; discard saved default
+    jmp .next_got_val_null
+
 .next_two_type_error:
     add rsp, 16                    ; discard saved default
     jmp .next_type_error
@@ -416,6 +435,11 @@ DEF_FUNC builtin_next_fn
     ret
 
 .next_stop:
+    ; A NULL from tp_iternext is a clean exhaustion or a raise, and
+    ; manufacturing a StopIteration here discarded the second: next(it) for a
+    ; __next__ raising ValueError reported StopIteration instead.
+    EXC_RAISED_SINCE [rbp - NX_EXC], rcx, .next_got_val_null
+
     ; Check if iterator is a generator (has gi_return_value)
     lea rax, [rel gen_type]
     cmp [rbx + PyObject.ob_type], rax
@@ -425,7 +449,11 @@ DEF_FUNC builtin_next_fn
     test rsi, rsi
     jnz .next_stop_with_val
 .next_stop_no_val:
-    lea rsi, [rel none_singleton]
+    ; No argument, not None: CPython's next() over an exhausted iterator
+    ; raises a bare StopIteration, whose str() is '' -- passing the None
+    ; singleton made it 'None'.  exc_new documents 0 as "no message", and
+    ; StopIteration.value still reads None off the empty args tuple.
+    xor esi, esi
 .next_stop_with_val:
     lea rdi, [rel exc_StopIteration_type]
     call exc_new
@@ -442,7 +470,10 @@ END_FUNC builtin_next_fn
 ;; ============================================================================
 ;; 12. builtin_any(args, nargs) - any(iterable)
 ;; ============================================================================
-DEF_FUNC builtin_any
+ANY_EXC   equ 8             ; current_exception before the iteration started
+ANY_FRAME equ 16            ; + 4 pushes = 48, 16-aligned
+
+DEF_FUNC builtin_any, ANY_FRAME
     push rbx
     push r12
     push r13
@@ -454,17 +485,17 @@ DEF_FUNC builtin_any
     V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
     ja .any_type_error
     mov rdi, [rdi]
-    mov rax, [rdi + PyObject.ob_type]
-    mov rcx, [rax + PyTypeObject.tp_iter]
-    test rcx, rcx
+    mov esi, TAG_PTR
+    call get_iterator_opt       ; not tp_iter: the legacy __getitem__ protocol
+    test rax, rax               ; counts as iterable too
     jz .any_type_error
-    call rcx
     V_UNPACK rax, rdx           ; tp_call returns a Value
     mov rbx, rax
 
     mov rax, [rbx + PyObject.ob_type]
     mov r12, [rax + PyTypeObject.tp_iternext]
 
+    DUNDER_EXC_SAVE [rbp - ANY_EXC]
 .any_loop:
     mov rdi, rbx
     call r12
@@ -504,6 +535,11 @@ DEF_FUNC builtin_any
 .any_false:
     mov rdi, rbx
     call obj_decref
+    ; The loop ends on a NULL from tp_iternext, which is a clean exhaustion
+    ; and a raise alike.  Answering from it without asking swallowed the
+    ; exception outright: any() over a generator that threw after a run of
+    ; falsy items reported a plain result and stranded it.
+    EXC_RAISED_SINCE [rbp - ANY_EXC], rcx, .any_raised
     RET_FALSE
     pop r14
     pop r13
@@ -511,6 +547,16 @@ DEF_FUNC builtin_any
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.any_raised:
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .any_type_error:
@@ -523,7 +569,10 @@ END_FUNC builtin_any
 ;; ============================================================================
 ;; 13. builtin_all(args, nargs) - all(iterable)
 ;; ============================================================================
-DEF_FUNC builtin_all
+ALL_EXC   equ 8             ; current_exception before the iteration started
+ALL_FRAME equ 16            ; + 4 pushes = 48, 16-aligned
+
+DEF_FUNC builtin_all, ALL_FRAME
     push rbx
     push r12
     push r13
@@ -535,16 +584,16 @@ DEF_FUNC builtin_all
     V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
     ja .all_type_error
     mov rdi, [rdi]
-    mov rax, [rdi + PyObject.ob_type]
-    mov rcx, [rax + PyTypeObject.tp_iter]
-    test rcx, rcx
+    mov esi, TAG_PTR
+    call get_iterator_opt       ; not tp_iter: the legacy __getitem__ protocol
+    test rax, rax               ; counts as iterable too
     jz .all_type_error
-    call rcx
     mov rbx, rax
 
     mov rax, [rbx + PyObject.ob_type]
     mov r12, [rax + PyTypeObject.tp_iternext]
 
+    DUNDER_EXC_SAVE [rbp - ALL_EXC]
 .all_loop:
     mov rdi, rbx
     call r12
@@ -584,6 +633,11 @@ DEF_FUNC builtin_all
 .all_true:
     mov rdi, rbx
     call obj_decref
+    ; The loop ends on a NULL from tp_iternext, which is a clean exhaustion
+    ; and a raise alike.  Answering from it without asking swallowed the
+    ; exception outright: all() over a generator that threw after a run of
+    ; falsy items reported a plain result and stranded it.
+    EXC_RAISED_SINCE [rbp - ALL_EXC], rcx, .all_raised
     RET_TRUE
     pop r14
     pop r13
@@ -591,6 +645,16 @@ DEF_FUNC builtin_all
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.all_raised:
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .all_type_error:
@@ -603,122 +667,157 @@ END_FUNC builtin_all
 ;; ============================================================================
 ;; 14. builtin_sum(args, nargs) - sum(iterable[, start])
 ;; ============================================================================
-DEF_FUNC builtin_sum
+;; Every addition goes through obj_binary_op, the whole numeric protocol.
+;; This used to pick between int_add and float_add on the two operands' tags
+;; and never test the result, so anything neither of those slots accepted --
+;; complex, Decimal, any class with __add__ -- left a NULL Value as the
+;; accumulator.  NULL is not an error the loop noticed; it was added to,
+;; DECREFed, and finally returned, and the failure surfaced wherever the
+;; caller next touched it.
+SM_ACC   equ 8              ; the accumulator Value, owned
+SM_ITEM  equ 16             ; the item just pulled from the iterator, owned
+SM_NEW   equ 24             ; the sum, held across the two DECREFs below
+SM_EXC   equ 32
+SM_OBJ   equ 40             ; args[0], for the error message: rbx is reused
+SM_FRAME equ 48             ; + 2 pushes = 64, 16-byte aligned
+
+extern value_type
+extern raise_type_error_with_name
+extern obj_binary_op
+extern bytes_type
+extern bytearray_type
+
+DEF_FUNC builtin_sum, SM_FRAME
     push rbx
     push r12
-    push r13
-    push r14
-    push r15
-    sub rsp, 8
 
-    mov rbx, rdi
-    mov r14, rsi
-
-    cmp r14, 1
+    cmp rsi, 1
     jb .sum_error
-    cmp r14, 2
+    cmp rsi, 2
     ja .sum_error
 
-    cmp r14, 2
-    je .sum_has_start
+    mov rbx, rdi                ; args
+    cmp rsi, 2
+    je .sum_start
+
     xor eax, eax
-    mov r13, rax
-    mov qword [rsp], TAG_SMALLINT      ; accum_tag = SmallInt (0)
-    jmp .sum_get_iter
+    V_PACK_I64 rax, rcx         ; the default start is the int 0
+    mov [rbp - SM_ACC], rax
+    jmp .sum_iter
 
-.sum_has_start:
-    mov r13, [rbx + 8]            ; args[1] payload (start value, 16-byte stride)
-    V_UNPACK r13, rax       ; args[1]
-    mov [rsp], eax                 ; accum_tag
-    cmp eax, TAG_PTR
-    jne .sum_get_iter
-    inc qword [r13 + PyObject.ob_refcnt]
+.sum_start:
+    mov rax, [rbx + 8]          ; args[1]
+    mov [rbp - SM_ACC], rax
+    INCREF_V rax, rcx
+    ; CPython refuses a str, bytes or bytearray start and names the better
+    ; tool.  Summing them works, but builds one temporary per element.
+    V_TEST_PTR rax, rcx
+    ja .sum_iter                ; an immediate is fine
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    je .sum_no_str
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    je .sum_no_bytes
+    lea rdx, [rel bytearray_type]
+    cmp rcx, rdx
+    je .sum_no_bytearray
 
-.sum_get_iter:
-    V_TEST_PTR_M [rbx], r11      ; args[0] a pointer?
-    ja .sum_type_error
-    mov rdi, [rbx]                     ; args[0] payload (iterable)
-    mov rax, [rdi + PyObject.ob_type]
-    mov rcx, [rax + PyTypeObject.tp_iter]
-    test rcx, rcx
-    jz .sum_type_error
-    call rcx
-    mov rbx, rax
-
+.sum_iter:
+    ; get_iterator_opt, not a tp_iter read: an object with __getitem__ and no
+    ; __iter__ is iterable everywhere else here, and this rejected it.
+    mov rdi, [rbx]              ; args[0], the iterable
+    mov [rbp - SM_OBJ], rdi     ; parked: rbx becomes the iterator below, and
+                                ; the error message still has to name this
+    V_TEST_PTR rdi, rax
+    ja .sum_not_iterable        ; an immediate is never iterable
+    mov esi, TAG_PTR
+    call get_iterator_opt
+    test rax, rax
+    jz .sum_not_iterable
+    mov rbx, rax                ; rbx = the iterator, owned
     mov rax, [rbx + PyObject.ob_type]
     mov r12, [rax + PyTypeObject.tp_iternext]
+    test r12, r12
+    jz .sum_not_iterable_have
+
+    DUNDER_EXC_SAVE [rbp - SM_EXC]
 
 .sum_loop:
     mov rdi, rbx
     call r12
-    V_UNPACK rax, rdx           ; tp_iternext returns a Value
-    test edx, edx
-    jz .sum_done
+    test rax, rax
+    jz .sum_stop                ; exhausted -- or it raised
+    mov [rbp - SM_ITEM], rax
 
-    mov r14, rax                   ; item payload
-    mov r15d, edx                  ; item tag
-
-    mov rdi, r13                   ; accum payload
-    mov rsi, r14                   ; item payload
-    mov edx, [rsp]                 ; accum tag (left_tag)
-    mov ecx, r15d                  ; item tag (right_tag)
-    ; Use float_add if either operand is float, else int_add
-    cmp edx, TAG_FLOAT
-    je .sum_float_add
-    cmp ecx, TAG_FLOAT
-    je .sum_float_add
-    V_PACK rdi, rdx
-    V_PACK rsi, rcx
-    call int_add
-    V_UNPACK rax, rdx           ; int_add returns a Value
-    jmp .sum_have_result
-.sum_float_add:
-    extern float_add
-    V_PACK rdi, rdx
-    V_PACK rsi, rcx
-    call float_add
-    V_UNPACK rax, rdx           ; float_add returns a Value
-.sum_have_result:
-    ; rax = new accum payload, edx = new accum tag
-
-    ; Save new accum before DECREFs
-    push rax
-    push rdx
-
-    ; DECREF old accumulator (tag at [rsp+16] = original [rsp])
-    mov rdi, r13
-    mov esi, [rsp + 16]
-    DECREF_VAL rdi, rsi
-
-    ; DECREF item
-    mov rdi, r14
-    mov esi, r15d
-    DECREF_VAL rdi, rsi
-
-    ; Restore new accum
-    pop rdx                        ; new accum tag
-    pop r13                        ; new accum payload
-    mov [rsp], edx                 ; update accum_tag slot
-
+    mov rdi, [rbp - SM_ACC]
+    mov rsi, rax
+    xor edx, edx                ; NB_ADD
+    call obj_binary_op
+    ; Park the result before either DECREF: obj_dealloc clobbers every
+    ; caller-saved register, this one included.
+    mov [rbp - SM_NEW], rax
+    mov rdi, [rbp - SM_ITEM]
+    DECREF_V rdi, rdx
+    mov rdi, [rbp - SM_ACC]
+    DECREF_V rdi, rdx
+    mov rax, [rbp - SM_NEW]
+    mov [rbp - SM_ACC], rax     ; NULL if it raised; DECREF_V below is NULL-safe
+    test rax, rax
+    jz .sum_fail
     jmp .sum_loop
 
-.sum_done:
+.sum_stop:
+    ; tp_iternext answers NULL both for "exhausted" and for a raise, so the
+    ; two are told apart by the pending exception, not by the return.
+    EXC_RAISED_SINCE [rbp - SM_EXC], rcx, .sum_fail
     mov rdi, rbx
     call obj_decref
-    mov rax, r13
-    mov edx, [rsp]                 ; accum_tag
-    add rsp, 8
-    pop r15
-    pop r14
-    pop r13
+    mov rax, [rbp - SM_ACC]
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.sum_type_error:
-    RAISE exc_TypeError_type, "argument is not iterable"
+.sum_fail:
+    mov rdi, rbx
+    call obj_decref
+.sum_fail_no_iter:
+    mov rdi, [rbp - SM_ACC]
+    DECREF_V rdi, rdx
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sum_not_iterable_have:
+    ; The iterator exists but has no tp_iternext.  Releasing it and falling
+    ; through read the freed object as if it were the argument array.
+    mov rdi, rbx
+    call obj_decref
+.sum_not_iterable:
+    mov rdi, [rbp - SM_ACC]
+    DECREF_V rdi, rdx
+    mov rsi, [rbp - SM_OBJ]
+    CSTRING rdi, `'\x01' object is not iterable`
+    call raise_type_error_with_name
+
+.sum_no_str:
+    mov rdi, [rbp - SM_ACC]
+    DECREF_V rdi, rdx
+    RAISE exc_TypeError_type, "sum() can't sum strings [use ''.join(seq) instead]"
+
+.sum_no_bytes:
+    mov rdi, [rbp - SM_ACC]
+    DECREF_V rdi, rdx
+    RAISE exc_TypeError_type, "sum() can't sum bytes [use b''.join(seq) instead]"
+
+.sum_no_bytearray:
+    mov rdi, [rbp - SM_ACC]
+    DECREF_V rdi, rdx
+    RAISE exc_TypeError_type, "sum() can't sum bytearray [use b''.join(seq) instead]"
 
 .sum_error:
     RAISE exc_TypeError_type, "sum expected 1-2 arguments"
@@ -728,21 +827,34 @@ END_FUNC builtin_sum
 ;; 15-16. builtin_min / builtin_max
 ;; ============================================================================
 ; Shared implementation: minmax_impl(args, nargs, cmp_op)
-;   rdi = args, rsi = nargs, edx = cmp_op (PY_LT=0 for min, PY_GT=4 for max)
-; Returns (rax=payload, rdx=tag)
+;   rdi = args (Value[]), rsi = nargs, edx = cmp_op (PY_LT for min, PY_GT for max)
+;   -> rax = the winning Value, or 0 with an exception pending
 ;
-; Stack layout:
-;   [rsp + MM_TAG]     = current best tag (64-bit)
-;   [rsp + MM_CMP_RES] = richcompare result ptr
-;   [rsp + MM_ITER]    = iterator ptr (iter path only)
-;   [rsp + MM_ITERNX]  = tp_iternext fn ptr (iter path only)
-;   [rsp + MM_CMP_OP]  = comparison op (PY_LT or PY_GT)
-MM_TAG     equ 8
-MM_CMP_RES equ 16
-MM_ITER    equ 24
-MM_ITERNX  equ 32
-MM_CMP_OP  equ 40
-MM_FRAME   equ 48           ; + 5 pushes = 88, not 16-aligned
+; Every comparison goes through obj_richcompare_bool.  This used to call
+; tp_richcompare off a hand-rolled type ladder and then test the result
+; against bool_true, which conflated three different answers with "the
+; incumbent keeps": a type the ladder did not recognise, a slot that declined,
+; and a comparison that raised.  max([1j, 2j]) answered 1j where CPython
+; raises TypeError, and a raising __lt__ was swallowed outright -- while
+; sorted() over the same values was correct, because list.sort had already
+; been taught the difference.  It also handed obj_decref the NULL a declining
+; slot returns.
+MM_BEST   equ 8             ; the incumbent Value, owned
+MM_CAND   equ 16            ; the candidate Value; owned on the iterator path
+MM_ITER   equ 24
+MM_ITERNX equ 32
+MM_OP     equ 40
+MM_N      equ 48
+MM_EXC    equ 56
+MM_KEY    equ 64            ; the key= callable, or 0
+MM_HASDEF equ 72            ; 1 when default= was given
+MM_DEFAULT equ 80           ; its Value, borrowed from the argument array
+MM_BESTKEY equ 88           ; key(best), owned; == MM_BEST when there is no key
+MM_CANDKEY equ 96           ; key(candidate), owned
+MM_NPOS   equ 104           ; positional count, once the keywords are split off
+MM_FRAME  equ 112           ; + 2 pushes = 128, 16-byte aligned
+
+extern obj_richcompare_bool
 
 DEF_FUNC_BARE builtin_min
     xor edx, edx                   ; PY_LT = 0
@@ -754,271 +866,343 @@ DEF_FUNC_BARE builtin_max
     jmp minmax_impl
 END_FUNC builtin_max
 
+;; mm_key_of(rdi = a Value) -> rax = key(it), owned, or 0 with an exception
+;; pending.  With no key= it is the value itself, INCREF'd, so both loops hold
+;; an owned key either way and release it the same.  Reads minmax_impl's frame
+;; through rbp, so it lives only inside it.
+DEF_FUNC_LOCAL mm_key_of
+    push rbx
+    mov rbx, [rbp]                  ; minmax_impl's rbp
+    mov rax, [rbx - MM_KEY]
+    test rax, rax
+    jnz .mko_call
+    mov rax, rdi
+    INCREF_V rax, rcx
+    pop rbx
+    leave
+    ret
+.mko_call:
+    ; minmax_impl checked that this is a pointer with a tp_call before it
+    ; allocated anything, so the slot is here.
+    sub rsp, 16                     ; one Value; 16 keeps rsp aligned
+    mov [rsp], rdi
+    mov rdi, rax
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    mov rsi, rsp
+    mov edx, 1
+    call rax
+    add rsp, 16
+    pop rbx
+    leave
+    ret
+END_FUNC mm_key_of
+
 DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     push rbx
     push r12
-    push r13
-    push r14
-    push r15
+    mov [rbp - MM_OP], edx
+    ; The failure paths release both of these, so they must be readable from
+    ; the first instruction that can jump to one.
+    mov qword [rbp - MM_BEST], 0
+    mov qword [rbp - MM_CAND], 0
+    mov qword [rbp - MM_BESTKEY], 0
+    mov qword [rbp - MM_CANDKEY], 0
+    mov qword [rbp - MM_KEY], 0
+    mov qword [rbp - MM_HASDEF], 0
+    mov qword [rbp - MM_DEFAULT], 0
+    mov [rbp - MM_NPOS], rsi
 
-    mov [rbp - MM_CMP_OP], edx    ; save comparison op
+    ; key= and default=.  Nothing here read kw_names_pending, so both arrived
+    ; as extra POSITIONAL operands and were compared as values:
+    ; min([1,-3,2], key=abs) compared the function object against the list.
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .mm_no_kw
+    mov qword [rel kw_names_pending], 0
+    mov rcx, [rax + PyTupleObject.ob_size]
+    mov rdx, [rbp - MM_NPOS]
+    sub rdx, rcx
+    mov [rbp - MM_NPOS], rdx
+    mov r9, [rax + PyTupleObject.ob_item]
+    xor r8d, r8d
+.mm_kw_loop:
+    cmp r8, rcx
+    jge .mm_no_kw
+    push rcx
+    push r8
+    push r9
+    push rdi
+    mov r10, [r9 + r8*8]
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "key"
+    call ap_strcmp
+    mov r11d, eax
+    pop rdi
+    pop r9
+    pop r8
+    pop rcx
+    mov r10, [rbp - MM_NPOS]
+    add r10, r8
+    mov r10, [rdi + r10*8]      ; the keyword's value
+    test r11d, r11d
+    jnz .mm_kw_try_default
+    LOAD_NONE rax               ; key=None means no key, as CPython has it
+    cmp r10, rax
+    je .mm_kw_next
+    mov [rbp - MM_KEY], r10
+    jmp .mm_kw_next
+.mm_kw_try_default:
+    push rcx
+    push r8
+    push r9
+    push rdi
+    mov r10, [r9 + r8*8]
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "default"
+    call ap_strcmp
+    mov r11d, eax
+    pop rdi
+    pop r9
+    pop r8
+    pop rcx
+    test r11d, r11d
+    jnz .mm_kw_next
+    mov r10, [rbp - MM_NPOS]
+    add r10, r8
+    mov r10, [rdi + r10*8]
+    mov [rbp - MM_DEFAULT], r10
+    mov qword [rbp - MM_HASDEF], 1
+.mm_kw_next:
+    inc r8
+    jmp .mm_kw_loop
+.mm_no_kw:
 
+    ; The key is checked here, before anything is allocated: mm_key_of raises
+    ; through raise_type_error_with_name, which abandons the C stack, and by
+    ; the time it is first called the iterator is already live -- min([1,2],
+    ; key=5) leaked it.
+    mov rax, [rbp - MM_KEY]
+    test rax, rax
+    jz .mm_key_ok
+    V_TEST_PTR rax, rcx
+    ja .mm_key_bad
+    mov rcx, [rax + PyObject.ob_type]
+    cmp qword [rcx + PyTypeObject.tp_call], 0
+    je .mm_key_bad
+.mm_key_ok:
+
+    mov rsi, [rbp - MM_NPOS]
     cmp rsi, 1
     jb .mm_error
-
-    ; nargs == 1 → iterate the single argument
-    cmp rsi, 1
     je .mm_iter_path
+    ; default= is only meaningful for the single-iterable form.
+    cmp qword [rbp - MM_HASDEF], 0
+    jne .mm_default_with_args
 
-    ; --- Multi-arg path: min/max(a, b, ...) ---
-    mov rbx, rdi                   ; args array
-    mov r12, rsi                   ; nargs
-    mov r13, 1                     ; index = 1
-
-    mov r14, [rbx]                 ; args[0] = current best
-    V_UNPACK r14, rax
-    mov [rbp - MM_TAG], rax
-    INCREF_VAL r14, rax
+    ; --- min/max(a, b, ...) ---
+    mov rbx, rdi                ; args
+    mov [rbp - MM_N], rsi
+    mov rax, [rbx]              ; args[0] starts as the incumbent
+    mov [rbp - MM_BEST], rax
+    INCREF_V rax, rcx
+    mov rdi, rax
+    call mm_key_of
+    test rax, rax
+    jz .mm_fail
+    mov [rbp - MM_BESTKEY], rax
+    mov r12, 1
 
 .mm_loop:
-    cmp r13, r12
+    cmp r12, [rbp - MM_N]
     jge .mm_done
-
-    mov rax, r13
-    shl rax, 3
-    mov r15, [rbx + rax]          ; candidate Value
-    V_UNPACK r15, rcx
-
-    ; SmallInt fast path: both SmallInt?
-    cmp qword [rbp - MM_TAG], TAG_SMALLINT
-    jne .mm_slow
-    cmp rcx, TAG_SMALLINT
-    jne .mm_slow
-    ; For min (PY_LT=0): update if candidate < best
-    ; For max (PY_GT=4): update if candidate > best
-    cmp dword [rbp - MM_CMP_OP], 0
-    jne .mm_si_max
-    cmp r15, r14
-    jge .mm_no_update
-    mov r14, r15
-    jmp .mm_no_update
-.mm_si_max:
-    cmp r15, r14
-    jle .mm_no_update
-    mov r14, r15
-    jmp .mm_no_update
-
-.mm_slow:
-    ; Resolve candidate type for richcompare
-    mov r8, rcx                    ; save candidate tag
-    test rcx, rcx
-    js .mm_cand_ss
-    cmp rcx, TAG_PTR
-    jne .mm_try_float
-    mov rdi, r15
-    mov rax, [rdi + PyObject.ob_type]
-    jmp .mm_have_type
-.mm_cand_ss:
-    lea rax, [rel str_type]
-    jmp .mm_have_type
-.mm_try_float:
-    cmp rcx, TAG_FLOAT
-    jne .mm_no_update
-    lea rax, [rel float_type]
-.mm_have_type:
-    mov rcx, [rax + PyTypeObject.tp_richcompare]
-    test rcx, rcx
-    jz .mm_no_update
-
-    ; tp_richcompare(candidate, best, cmp_op, cand_tag, best_tag)
-    mov rdi, r15
-    mov rsi, r14
-    mov edx, [rbp - MM_CMP_OP]
-    mov rax, rcx                   ; fn ptr
-    mov rcx, r8                    ; left_tag = candidate tag
-    mov r8, [rbp - MM_TAG]         ; right_tag = best tag
-    V_PACK rdi, rcx             ; left  -> Value
-    V_PACK rsi, r8              ; right -> Value
-    call rax
-
-    lea rcx, [rel bool_true]
-    cmp rax, rcx
-    mov [rbp - MM_CMP_RES], rax
-    jne .mm_slow_no_upd
-
-    ; Update best: DECREF old, set new = candidate
-    mov rdi, r14
-    mov rsi, [rbp - MM_TAG]
-    DECREF_VAL rdi, rsi
-    mov r14, r15
-    mov rax, r13
-    shl rax, 3
-    mov rax, [rbx + rax]
-    V_UNPACK rax, rcx
-    mov [rbp - MM_TAG], rcx
-    INCREF_VAL r14, rcx
-
-    mov rdi, [rbp - MM_CMP_RES]
-    call obj_decref
-    jmp .mm_no_update
-
-.mm_slow_no_upd:
-    mov rdi, [rbp - MM_CMP_RES]
-    call obj_decref
-
-.mm_no_update:
-    inc r13
+    mov rdi, [rbx + r12*8]      ; the candidate
+    call mm_key_of
+    test rax, rax
+    jz .mm_fail
+    mov [rbp - MM_CANDKEY], rax
+    mov rdi, rax
+    mov rsi, [rbp - MM_BESTKEY]
+    mov edx, [rbp - MM_OP]
+    call obj_richcompare_bool
+    cmp eax, 0
+    jl .mm_fail                 ; the comparison raised
+    je .mm_next                 ; the incumbent keeps
+    mov rax, [rbx + r12*8]
+    INCREF_V rax, rcx           ; before the release, in case they are one object
+    mov rdi, [rbp - MM_BEST]
+    mov [rbp - MM_BEST], rax
+    DECREF_V rdi, rdx
+    mov rdi, [rbp - MM_BESTKEY]
+    mov rax, [rbp - MM_CANDKEY]
+    mov [rbp - MM_BESTKEY], rax
+    mov qword [rbp - MM_CANDKEY], 0
+    DECREF_V rdi, rdx
+.mm_next:
+    mov rdi, [rbp - MM_CANDKEY]
+    DECREF_V rdi, rdx
+    mov qword [rbp - MM_CANDKEY], 0
+    inc r12
     jmp .mm_loop
 
 .mm_done:
-    mov rax, r14
-    mov rdx, [rbp - MM_TAG]
-    pop r15
-    pop r14
-    pop r13
+    mov rdi, [rbp - MM_BESTKEY]
+    DECREF_V rdi, rdx
+    mov rax, [rbp - MM_BEST]
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
-    ; --- Iterator path: min/max(iterable) ---
+.mm_fail:
+    mov rdi, [rbp - MM_BEST]
+    DECREF_V rdi, rdx
+    mov rdi, [rbp - MM_BESTKEY]
+    DECREF_V rdi, rdx
+    mov rdi, [rbp - MM_CANDKEY]
+    DECREF_V rdi, rdx
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.mm_key_bad:
+    mov rsi, [rbp - MM_KEY]
+    CSTRING rdi, `'\x01' object is not callable`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
+
+.mm_default_with_args:
+    cmp dword [rbp - MM_OP], PY_GT
+    je .mm_default_max
+    RAISE exc_TypeError_type, "Cannot specify a default for min() with multiple positional arguments"
+.mm_default_max:
+    RAISE exc_TypeError_type, "Cannot specify a default for max() with multiple positional arguments"
+
+    ; --- min/max(iterable) ---
 .mm_iter_path:
-    ; Get iterator from args[0]
-    V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
-    ja .mm_iter_type_error
-    mov rdi, [rdi]                     ; iterable
-    mov rax, [rdi + PyObject.ob_type]
-    mov rcx, [rax + PyTypeObject.tp_iter]
-    test rcx, rcx
-    jz .mm_iter_type_error
-    call rcx
+    mov rbx, rdi                ; args, kept for the error message
+    mov rdi, [rdi]              ; args[0], the iterable
+    V_TEST_PTR rdi, rax
+    ja .mm_not_iterable         ; an immediate is never iterable
+    mov esi, TAG_PTR
+    call get_iterator_opt       ; see the note in builtin_sum
     test rax, rax
-    jz .mm_iter_type_error
+    jz .mm_not_iterable
     mov [rbp - MM_ITER], rax
-    mov rbx, [rax + PyObject.ob_type]
-    mov rbx, [rbx + PyTypeObject.tp_iternext]
-    mov [rbp - MM_ITERNX], rbx
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_iternext]
+    test rcx, rcx
+    jz .mm_iter_no_next
+    mov [rbp - MM_ITERNX], rcx
 
-    ; Get first element → initial best
+    DUNDER_EXC_SAVE [rbp - MM_EXC]
+
     mov rdi, [rbp - MM_ITER]
-    call rbx
-    V_UNPACK rax, rdx           ; tp_iternext returns a Value
-    test edx, edx
+    call qword [rbp - MM_ITERNX]
+    test rax, rax
     jz .mm_iter_empty
-
-    mov r14, rax                       ; best payload
-    mov [rbp - MM_TAG], rdx            ; best tag
-    INCREF_VAL r14, rdx
-    DECREF_VAL rax, rdx                ; DECREF iternext result
+    mov [rbp - MM_BEST], rax    ; owned, as tp_iternext hands it over
+    mov rdi, rax
+    call mm_key_of
+    test rax, rax
+    jz .mm_iter_fail
+    mov [rbp - MM_BESTKEY], rax
 
 .mm_iter_loop:
     mov rdi, [rbp - MM_ITER]
     call qword [rbp - MM_ITERNX]
-    V_UNPACK rax, rdx           ; tp_iternext returns a Value
-    test edx, edx
-    jz .mm_iter_done
-
-    mov r15, rax                       ; candidate payload
-    mov r12, rdx                       ; candidate tag
-
-    ; SmallInt fast path
-    cmp qword [rbp - MM_TAG], TAG_SMALLINT
-    jne .mm_iter_slow
-    cmp r12, TAG_SMALLINT
-    jne .mm_iter_slow
-    cmp dword [rbp - MM_CMP_OP], 0
-    jne .mm_iter_si_max
-    cmp r15, r14
-    jge .mm_iter_no_update
-    mov r14, r15
-    jmp .mm_iter_no_update
-.mm_iter_si_max:
-    cmp r15, r14
-    jle .mm_iter_no_update
-    mov r14, r15
-    jmp .mm_iter_no_update
-
-.mm_iter_slow:
-    ; Resolve candidate type for richcompare
-    mov rcx, r12
-    test rcx, rcx
-    js .mm_iter_cand_ss
-    cmp rcx, TAG_PTR
-    jne .mm_iter_try_float
-    mov rdi, r15
-    mov rax, [rdi + PyObject.ob_type]
-    jmp .mm_iter_have_type
-.mm_iter_cand_ss:
-    lea rax, [rel str_type]
-    jmp .mm_iter_have_type
-.mm_iter_try_float:
-    cmp rcx, TAG_FLOAT
-    jne .mm_iter_no_update
-    lea rax, [rel float_type]
-.mm_iter_have_type:
-    mov rax, [rax + PyTypeObject.tp_richcompare]
     test rax, rax
-    jz .mm_iter_no_update
-
-    ; tp_richcompare(candidate, best, cmp_op, cand_tag, best_tag)
-    mov rdi, r15
-    mov rsi, r14
-    mov edx, [rbp - MM_CMP_OP]
-    mov rcx, r12
-    mov r8, [rbp - MM_TAG]
-    V_PACK rdi, rcx             ; left  -> Value
-    V_PACK rsi, r8              ; right -> Value
-    call rax
-    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
-
-    lea rcx, [rel bool_true]
-    cmp rax, rcx
-    mov [rbp - MM_CMP_RES], rax
-    jne .mm_iter_slow_no_upd
-
-    ; Update best
-    mov rdi, r14
-    mov rsi, [rbp - MM_TAG]
-    DECREF_VAL rdi, rsi
-    mov r14, r15
-    mov [rbp - MM_TAG], r12
-    INCREF_VAL r14, r12
-
-    mov rdi, [rbp - MM_CMP_RES]
-    call obj_decref
-    jmp .mm_iter_no_update
-
-.mm_iter_slow_no_upd:
-    mov rdi, [rbp - MM_CMP_RES]
-    call obj_decref
-
-.mm_iter_no_update:
-    ; DECREF candidate
-    DECREF_VAL r15, r12
+    jz .mm_iter_stop
+    mov [rbp - MM_CAND], rax
+    mov rdi, rax
+    call mm_key_of
+    test rax, rax
+    jz .mm_iter_fail
+    mov [rbp - MM_CANDKEY], rax
+    mov rdi, rax
+    mov rsi, [rbp - MM_BESTKEY]
+    mov edx, [rbp - MM_OP]
+    call obj_richcompare_bool
+    cmp eax, 0
+    jl .mm_iter_fail
+    je .mm_iter_next
+    ; The candidate wins: hand its reference to BEST rather than adjusting
+    ; two counts, and blank CAND so the release below is a no-op.
+    mov rdi, [rbp - MM_BEST]
+    mov rax, [rbp - MM_CAND]
+    mov [rbp - MM_BEST], rax
+    mov qword [rbp - MM_CAND], 0
+    DECREF_V rdi, rdx
+    mov rdi, [rbp - MM_BESTKEY]
+    mov rax, [rbp - MM_CANDKEY]
+    mov [rbp - MM_BESTKEY], rax
+    mov qword [rbp - MM_CANDKEY], 0
+    DECREF_V rdi, rdx
+.mm_iter_next:
+    mov rdi, [rbp - MM_CAND]
+    DECREF_V rdi, rdx
+    mov qword [rbp - MM_CAND], 0
+    mov rdi, [rbp - MM_CANDKEY]
+    DECREF_V rdi, rdx
+    mov qword [rbp - MM_CANDKEY], 0
     jmp .mm_iter_loop
 
-.mm_iter_done:
+.mm_iter_stop:
+    ; tp_iternext answers NULL for "exhausted" and for a raise alike.
+    EXC_RAISED_SINCE [rbp - MM_EXC], rcx, .mm_iter_fail
     mov rdi, [rbp - MM_ITER]
     call obj_decref
-    mov rax, r14
-    mov rdx, [rbp - MM_TAG]
-    pop r15
-    pop r14
-    pop r13
+    mov rdi, [rbp - MM_BESTKEY]
+    DECREF_V rdi, rdx
+    mov rax, [rbp - MM_BEST]
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.mm_iter_empty:
+.mm_iter_fail:
     mov rdi, [rbp - MM_ITER]
     call obj_decref
-    RAISE exc_ValueError_type, "min()/max() arg is an empty sequence"
+    mov rdi, [rbp - MM_BESTKEY]
+    DECREF_V rdi, rdx
+    mov qword [rbp - MM_BESTKEY], 0
+    mov rdi, [rbp - MM_CANDKEY]
+    DECREF_V rdi, rdx
+    mov qword [rbp - MM_CANDKEY], 0
+    mov rdi, [rbp - MM_CAND]
+    DECREF_V rdi, rdx
+    jmp .mm_fail
 
-.mm_iter_type_error:
-    RAISE exc_TypeError_type, "argument is not iterable"
+.mm_iter_empty:
+    EXC_RAISED_SINCE [rbp - MM_EXC], rcx, .mm_iter_fail
+    mov rdi, [rbp - MM_ITER]
+    call obj_decref
+    ; default= is what an empty iterable answers with, when it was given.
+    cmp qword [rbp - MM_HASDEF], 0
+    je .mm_iter_really_empty
+    mov rax, [rbp - MM_DEFAULT]
+    INCREF_V rax, rcx
+    pop r12
+    pop rbx
+    leave
+    ret
+.mm_iter_really_empty:
+    ; CPython names the builtin, and MM_OP is what tells them apart.
+    cmp dword [rbp - MM_OP], PY_GT
+    je .mm_iter_empty_max
+    RAISE exc_ValueError_type, "min() iterable argument is empty"
+.mm_iter_empty_max:
+    RAISE exc_ValueError_type, "max() iterable argument is empty"
+
+.mm_iter_no_next:
+    mov rdi, [rbp - MM_ITER]
+    call obj_decref
+.mm_not_iterable:
+    mov rsi, [rbx]
+    CSTRING rdi, `'\x01' object is not iterable`
+    call raise_type_error_with_name
 
 .mm_error:
     RAISE exc_TypeError_type, "min()/max() expected at least 1 argument"
@@ -1489,149 +1673,149 @@ END_FUNC builtin_input_fn
 ;; 2 args: open with specified mode
 ;; ============================================================================
 extern sys_open
+extern sys_close
 extern file_type
 
 global builtin_open_fn
 OPN_FRAME equ 32            ; + 3 pushes = 56, not 16-aligned
-DEF_FUNC builtin_open_fn, OPN_FRAME
+
+;; ============================================================================
+;; open_reject_dir(rdi = fd, rsi = filename str) -- returns, or raises
+;;
+;; Linux lets open(2) succeed on a directory; it is read(2) that fails with
+;; EISDIR, so open("/tmp") used to hand back a file object that failed later
+;; and elsewhere.  CPython fstats the descriptor and raises IsADirectoryError,
+;; and the mode bits say the same thing here.
+;; ============================================================================
+ORD_FD    equ 8
+ORD_NAME  equ 16
+ORD_STAT  equ 16 + 144      ; struct stat; only st_mode, at byte 24, is read
+ORD_FRAME equ ORD_STAT      ; + 0 pushes = 160
+DEF_FUNC_LOCAL open_reject_dir, ORD_FRAME
+    mov [rbp - ORD_FD], rdi
+    mov [rbp - ORD_NAME], rsi
+    lea rsi, [rbp - ORD_STAT]
+    extern sys_fstat
+    call sys_fstat
+    test rax, rax
+    js .ord_ok                          ; fstat failed: let the read report it
+    mov eax, [rbp - ORD_STAT + 24]      ; st_mode is a 4-byte field
+    and eax, 0o170000                   ; S_IFMT
+    cmp eax, 0o40000                    ; S_IFDIR
+    jne .ord_ok
+    mov rdi, [rbp - ORD_FD]
+    call sys_close
+    mov edi, 21                         ; EISDIR
+    mov rsi, [rbp - ORD_NAME]
+    extern raise_oserror
+    call raise_oserror                  ; does not return
+.ord_ok:
+    leave
+    ret
+END_FUNC open_reject_dir
+
+;; ============================================================================
+;; builtin_open_fn(args, nargs) -> the stream _pyio.open builds
+;;
+;; open() is _io.open in CPython, and the same thing here: the whole stack --
+;; buffering, text decoding, universal newlines -- lives above FileIO and
+;; there is no reason for the builtin to be a second, worse implementation of
+;; it.  What stood here opened a descriptor and returned an object with no
+;; buffering, no encoding and no seek.
+;;
+;; The lookup is lazy and cached.  It cannot happen at startup: builtins is
+;; built before the import system can run, and _pyio imports abc, posix and
+;; _codecs.
+;;
+;; Keyword arguments pass straight through.  A builtin is handed its keyword
+;; values in the same array, with the names in kw_names_pending, and that is
+;; exactly what the callee expects -- so this must NOT consume the global.
+;; ============================================================================
+section .data
+align 8
+builtin_open_impl: dq 0
+
+section .rodata
+bo_mod_name:  db "_io", 0
+bo_attr_name: db "open", 0
+
+section .text
+
+DEF_FUNC builtin_open_fn
     push rbx
     push r12
     push r13
+    sub rsp, 8                  ; 3 pushes + 8, so rsp is 16-aligned at calls
+    mov rbx, rdi
+    mov r12, rsi
 
-    cmp rsi, 1
-    je .opn_default_mode
-    cmp rsi, 2
-    je .opn_with_mode
-    jmp .opn_error
+    mov r13, [rel builtin_open_impl]
+    test r13, r13
+    jnz .bo_have
 
-.opn_default_mode:
-    ; filename only — default mode 'r'
-    mov rax, [rdi]          ; args[0] = filename
-    V_TEST_PTR rax, rcx
-    ja .opn_type_error
-    mov rbx, rax            ; save filename str
-
-    ; Open read-only: O_RDONLY=0
-    lea rdi, [rax + PyStrObject.data]
-    xor esi, esi            ; flags = O_RDONLY
-    xor edx, edx            ; mode = 0
-    call sys_open
-    mov r12, rax            ; fd
-    test rax, rax
-    js .opn_file_error
-
-    ; Create default mode string "r" (heap — stored in PyFileObject struct field)
-    CSTRING rdi, "r"
-    call str_from_cstr_heap
-    mov r13, rax            ; mode str
-    jmp .opn_create_fileobj
-
-.opn_with_mode:
-    mov rax, [rdi]          ; args[0] = filename
-    push rdi                ; save args ptr
-    V_TEST_PTR rax, rcx
-    ja .opn_type_error_pop
-    mov rbx, rax            ; save filename str
-    pop rdi                 ; restore args ptr
-
-    mov rax, [rdi + 8]    ; mode str
-    V_UNPACK rax, rcx       ; args[1]
-    cmp rcx, TAG_PTR
-    jne .opn_type_error
-    mov r13, rax            ; save mode str
-
-    ; Parse mode string
-    lea rdi, [rax + PyStrObject.data]
-    movzx eax, byte [rdi]
-
-    cmp al, 'r'
-    je .opn_mode_r
-    cmp al, 'w'
-    je .opn_mode_w
-    cmp al, 'a'
-    je .opn_mode_a
-    cmp al, 'x'
-    je .opn_mode_x
-    jmp .opn_bad_mode
-
-.opn_mode_r:
-    ; Check for 'r+' or 'rb' or just 'r'
-    movzx ecx, byte [rdi + 1]
-    cmp cl, '+'
-    je .opn_rw
-    xor esi, esi            ; O_RDONLY
-    jmp .opn_do_open
-
-.opn_rw:
-    mov esi, 2              ; O_RDWR
-    jmp .opn_do_open
-
-.opn_mode_w:
-    mov esi, 0x241          ; O_WRONLY|O_CREAT|O_TRUNC (1|0x40|0x200)
-    jmp .opn_do_open
-
-.opn_mode_a:
-    mov esi, 0x441          ; O_WRONLY|O_CREAT|O_APPEND (1|0x40|0x400)
-    jmp .opn_do_open
-
-.opn_mode_x:
-    mov esi, 0xc1           ; O_WRONLY|O_CREAT|O_EXCL (1|0x40|0x80)
-    jmp .opn_do_open
-
-.opn_do_open:
-    push rsi                ; save flags
-    lea rdi, [rbx + PyStrObject.data]  ; filename cstr
-    pop rsi                 ; restore flags
-    mov edx, 0644o          ; default file permissions
-    call sys_open
-    mov r12, rax
-    test rax, rax
-    js .opn_file_error
-
-    ; INCREF mode str (we're storing a ref)
-    mov rdi, r13
-    call obj_incref
-
-.opn_create_fileobj:
-    ; Allocate PyFileObject
-    mov edi, PyFileObject_size
-    call ap_malloc
-
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel file_type]
-    mov [rax + PyObject.ob_type], rcx
-    mov [rax + PyFileObject.file_fd], r12
-    mov [rax + PyFileObject.file_name], rbx
-    mov [rax + PyFileObject.file_mode], r13
-
-    ; INCREF filename (storing ref)
+    ; The pending keyword names belong to the open() call, not to the import
+    ; that is about to run a module body; park them across it.
+    mov rax, [rel kw_names_pending]
     push rax
-    mov rdi, rbx
-    call obj_incref
-    pop rax
+    mov qword [rel kw_names_pending], 0
 
-    mov edx, TAG_PTR
+    lea rdi, [rel bo_mod_name]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    call import_module
+    mov r13, rax
+    pop rdi
+    call obj_decref
+    test r13, r13
+    jz .bo_import_failed
+
+    lea rdi, [rel bo_attr_name]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [r13 + PyModuleObject.mod_dict]
+    mov rsi, rax
+    call dict_get
+    mov r13, rax
+    pop rdi
+    call obj_decref
+    test r13, r13
+    jz .bo_missing
+    mov rdi, r13
+    call obj_incref             ; the cache holds it for the process's life
+    mov [rel builtin_open_impl], r13
+
+    pop rax
+    mov [rel kw_names_pending], rax
+
+.bo_have:
+    mov rax, [r13 + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_call]
+    test rcx, rcx
+    jz .bo_missing
+    mov rdi, r13
+    mov rsi, rbx
+    mov rdx, r12
+    call rcx
+    add rsp, 8
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.opn_file_error:
-    extern exc_FileNotFoundError_type
-    RAISE exc_FileNotFoundError_type, "No such file or directory"
-
-.opn_bad_mode:
-    RAISE exc_ValueError_type, "invalid mode string"
-
-.opn_error:
-    RAISE exc_TypeError_type, "open() takes 1 or 2 arguments"
-
-.opn_type_error_pop:
-    add rsp, 8                 ; discard saved args ptr
-.opn_type_error:
-    RAISE exc_TypeError_type, "open() arguments must be strings"
+.bo_import_failed:
+    add rsp, 8                  ; the parked keyword names
+    cmp qword [rel current_exception], 0
+    jne .bo_propagate
+    RAISE exc_ImportError_type, "open() requires the _io module"
+.bo_propagate:
+    leave
+    jmp eval_exception_unwind
+.bo_missing:
+    RAISE exc_ImportError_type, "_io.open is missing"
 END_FUNC builtin_open_fn
 
 ;; ============================================================================
@@ -2112,20 +2296,216 @@ DEF_FUNC builtin_anext_fn, AN_FRAME
 END_FUNC builtin_anext_fn
 
 ;; ============================================================================
-;; builtin_import_fn(args, nargs) - __import__(name, ...)
-;; Wraps import_module(name_str, fromlist=NULL, level=0)
-;; Only uses first arg (name), ignores globals/locals/fromlist/level for now
+;; builtin_import_fn(args, nargs) - __import__(name, globals, locals,
+;;                                             fromlist, level)
+;;
+;; fromlist decides WHICH module comes back: empty or None gives the top-level
+;; package, non-empty gives the module actually named.  Ignoring it returned
+;; `encodings` where `encodings.utf_8` was asked for, which is why
+;; encodings.search_function found no getregentry and codecs.lookup("utf-8")
+;; reported an unknown encoding.
+;;
+;; globals and locals are still ignored: they only matter for a relative
+;; import, and level > 0 is rejected below rather than silently mishandled.
 ;; ============================================================================
+extern kw_names_pending
+extern sys_modules_dict
+extern dict_get
+extern obj_as_index
+extern exc_NotImplementedError_type
+extern ap_strcmp
+extern tuple_type
+extern tuple_new
+extern list_type
 extern import_module
-DEF_FUNC builtin_import_fn
 
-    cmp rsi, 1
-    jb .imp_nargs_error
+BIM_ARGS     equ 8
+BIM_FROMLIST equ 16
+BIM_LEVEL    equ 24
+BIM_NAME     equ 32
+BIM_NPOS     equ 40
+BIM_TEMP     equ 48         ; a wrapped fromlist, released before returning
+BIM_FRAME    equ 64         ; + 0 pushes = 64
 
-    ; Get name string
-    mov rdi, [rdi]             ; name payload (must be str)
-    xor esi, esi               ; fromlist = NULL
-    xor edx, edx              ; level = 0
+DEF_FUNC builtin_import_fn, BIM_FRAME
+    mov [rbp - BIM_ARGS], rdi
+    mov [rbp - BIM_NPOS], rsi
+    mov qword [rbp - BIM_FROMLIST], 0
+    mov qword [rbp - BIM_LEVEL], 0
+    mov qword [rbp - BIM_TEMP], 0
+    ; BIM_NAME belongs in this block too: .imp_check_name reads 0 as "no name
+    ; was given", and with neither a positional argument nor name= nothing
+    ; ever wrote the slot -- so `__import__()` tested uninitialised stack and
+    ; then used it as a PyStrObject*.
+    mov qword [rbp - BIM_NAME], 0
+
+    ; Keyword arguments sit after the positional ones, named in order by
+    ; kw_names_pending.  Consume it: a builtin that leaves it set hands its
+    ; caller's keywords to whatever call runs next -- and this one runs a
+    ; whole module body before it returns.
+    mov rax, [rel kw_names_pending]
+    mov qword [rel kw_names_pending], 0
+    test rax, rax
+    jz .imp_have_pos
+
+    mov rcx, [rax + PyTupleObject.ob_size]
+    sub qword [rbp - BIM_NPOS], rcx     ; the positional count alone
+    xor r9d, r9d
+.imp_kw_loop:
+    cmp r9, rcx
+    jge .imp_have_pos
+    push rcx
+    push rax
+    push r9
+    sub rsp, 8                          ; align for ap_strcmp
+
+    mov r10, [rax + PyTupleObject.ob_item]
+    mov r10, [r10 + r9*8]               ; the keyword's name
+    mov r11, [rbp - BIM_NPOS]
+    add r11, r9
+    mov rdi, [rbp - BIM_ARGS]
+    mov r11, [rdi + r11*8]              ; its value
+
+    push r11
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "fromlist"
+    call ap_strcmp
+    pop r11
+    test eax, eax
+    jz .imp_kw_fromlist
+
+    push r11
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "level"
+    call ap_strcmp
+    pop r11
+    test eax, eax
+    jz .imp_kw_level
+
+    ; globals= and locals= are accepted and ignored, as the positional forms
+    ; are; anything else is a genuine error.
+    push r11
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "globals"
+    call ap_strcmp
+    pop r11
+    test eax, eax
+    jz .imp_kw_next
+    push r11
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "locals"
+    call ap_strcmp
+    pop r11
+    test eax, eax
+    jz .imp_kw_next
+    push r11
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "name"
+    call ap_strcmp
+    pop r11
+    test eax, eax
+    jnz .imp_kw_bad
+    add rsp, 8
+    pop r9
+    pop rax
+    pop rcx
+    mov [rbp - BIM_NAME], r11
+    inc r9
+    jmp .imp_kw_loop
+.imp_kw_fromlist:
+    mov [rbp - BIM_FROMLIST], r11
+    jmp .imp_kw_next
+.imp_kw_level:
+    mov [rbp - BIM_LEVEL], r11
+.imp_kw_next:
+    add rsp, 8
+    pop r9
+    pop rax
+    pop rcx
+    inc r9
+    jmp .imp_kw_loop
+
+.imp_have_pos:
+    ; Positional: name, globals, locals, fromlist, level
+    mov rdi, [rbp - BIM_ARGS]
+    mov rsi, [rbp - BIM_NPOS]
+    test rsi, rsi
+    jz .imp_check_name
+    mov rax, [rdi]
+    mov [rbp - BIM_NAME], rax
+    cmp rsi, 4
+    jl .imp_check_name
+    mov rax, [rdi + 24]
+    mov [rbp - BIM_FROMLIST], rax
+    cmp rsi, 5
+    jl .imp_check_name
+    mov rax, [rdi + 32]
+    mov [rbp - BIM_LEVEL], rax
+
+.imp_check_name:
+    mov rdi, [rbp - BIM_NAME]
+    test rdi, rdi
+    jz .imp_nargs_error
+
+    ; level: only 0 is honoured.  A relative import needs the caller's
+    ; __package__, which this entry point does not consult, so say so rather
+    ; than import the wrong module.
+    mov rdi, [rbp - BIM_LEVEL]
+    test rdi, rdi
+    jz .imp_level_ok
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    test rax, rax
+    jnz .imp_level_error
+.imp_level_ok:
+
+    ; import_module reads the fromlist as a tuple, so what reaches it has to
+    ; be one.  __import__("sys", None, None, 0) -- a falsy fromlist CPython
+    ; accepts -- faulted on ob_size; None was the only shape rejected here.
+    ; A list is passed through, since that is what `from x import *` compiles
+    ; to and it carries ob_size in the same place; anything else truthy is
+    ; wrapped, so "there is a fromlist" survives without handing over a shape
+    ; that will be dereferenced as one.
+    mov rax, [rbp - BIM_FROMLIST]
+    test rax, rax
+    jz .imp_do
+    V_TEST_PTR rax, rcx
+    ja .imp_no_fromlist         ; an immediate is not a sequence of names
+    LOAD_NONE rcx
+    cmp rax, rcx
+    je .imp_no_fromlist
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    je .imp_do
+    lea rdx, [rel list_type]
+    cmp rcx, rdx
+    je .imp_do
+
+    mov rdi, rax
+    call obj_is_true
+    test eax, eax
+    jz .imp_no_fromlist
+    mov edi, 1
+    call tuple_new
+    test rax, rax
+    jz .imp_no_fromlist
+    mov [rbp - BIM_TEMP], rax
+    mov rcx, [rbp - BIM_FROMLIST]
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov [rdx], rcx
+    mov rax, rcx
+    INCREF_V rax, rcx
+    mov rax, [rbp - BIM_TEMP]
+    mov [rbp - BIM_FROMLIST], rax
+    jmp .imp_do
+.imp_no_fromlist:
+    mov qword [rbp - BIM_FROMLIST], 0
+
+.imp_do:
+    mov rdi, [rbp - BIM_NAME]
+    mov rsi, [rbp - BIM_FROMLIST]
+    xor edx, edx                ; level = 0
     call import_module
     ; import_module never sets rdx, so V_PACK was branching on whatever the
     ; last call left there -- re-encoding the module *pointer* as an int or a
@@ -2133,7 +2513,58 @@ DEF_FUNC builtin_import_fn
     ; otherwise.  A module is a pointer; a pointer is its own Value.
     mov edx, TAG_PTR
     test rax, rax
-    jnz .imp_done
+    jz .imp_failed
+
+    ; With a non-empty fromlist the caller wants the module it named, not the
+    ; package that anchors it.  import_module has already put every level in
+    ; sys.modules, so the leaf is one lookup away.
+    mov rcx, [rbp - BIM_FROMLIST]
+    test rcx, rcx
+    jz .imp_done
+    push rax
+    mov rdi, rcx
+    call obj_is_true
+    mov edx, TAG_PTR            ; obj_is_true clobbers rdx, and the pack below
+    test eax, eax               ; branches on it
+    pop rax
+    jz .imp_done
+
+    push rax                    ; the package, still owned
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, [rbp - BIM_NAME]
+    V_PACK rsi, rdx
+    call dict_get
+    test rax, rax
+    jz .imp_leaf_missing
+    V_UNPACK rax, rdx
+    INCREF rax                  ; dict_get hands back a borrowed reference
+    mov rdi, rax
+    pop rax                     ; the package
+    push rdi
+    call obj_decref
+    pop rax
+    mov edx, TAG_PTR
+    jmp .imp_done
+.imp_leaf_missing:
+    pop rax                     ; no leaf: the package is the honest answer
+    mov edx, TAG_PTR
+
+.imp_done:
+    cmp qword [rbp - BIM_TEMP], 0
+    je .imp_no_temp
+    push rax
+    push rdx
+    mov rdi, [rbp - BIM_TEMP]
+    mov qword [rbp - BIM_TEMP], 0
+    call obj_decref
+    pop rdx
+    pop rax
+.imp_no_temp:
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.imp_failed:
     ; NULL means the module body raised and the exception is still pending.
     extern current_exception
     extern eval_exception_unwind
@@ -2144,11 +2575,15 @@ DEF_FUNC builtin_import_fn
 .imp_propagate:
     leave
     jmp eval_exception_unwind
-.imp_done:
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
 
+.imp_kw_bad:
+    add rsp, 8
+    pop r9
+    pop rax
+    pop rcx
+    RAISE exc_TypeError_type, "__import__() got an unexpected keyword argument"
+.imp_level_error:
+    RAISE exc_NotImplementedError_type, "__import__(): relative import is not supported"
 .imp_nargs_error:
     RAISE exc_TypeError_type, "__import__() requires at least 1 argument"
 END_FUNC builtin_import_fn

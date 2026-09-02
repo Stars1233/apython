@@ -19,14 +19,16 @@ A **Value** is one 64-bit word. Let `high16 = v >> 48`:
 | `0xFFF8`–`0xFFFF` | int immediate | `i = v - V_INT_BIAS` |
 
 ```
-V_F64_OFF   = 0x0001_0000_0000_0000   ; 2^48
-V_INT_LO    = 0xFFF8_0000_0000_0000
-V_INT_BIAS  = 0xFFFC_0000_0000_0000   ; immediate int range [-2^50, 2^50)
-V_NAN_LIM   = 0xFFF1_0000_0000_0000   ; raw doubles at or above this are purified
-V_CANON_NAN = 0x7FF8_0000_0000_0000
+V_F64_OFF    = 0x0001_0000_0000_0000  ; 2^48
+V_INT_LO     = 0xFFF8_0000_0000_0000
+V_INT_BIAS   = 0xFFFC_0000_0000_0000  ; immediate int range [-2^50, 2^50)
+V_NAN_LIM    = 0xFFF1_0000_0000_0000  ; raw doubles at or above this are purified
+V_CANON_NAN  = 0x7FF8_0000_0000_0000
+V_PTR_MAX_M1 = 0x0000_FFFF_FFFF_FFFE  ; (v-1) <= this means a non-NULL pointer
+V_MASK48     = 0x0000_FFFF_FFFF_FFFF  ; the payload of a sentinel
 ```
 
-The constants live in `include/value.inc`. x86-64 has no `cmp r64, imm64`, so
+The constants live in `src/include/value.inc`. x86-64 has no `cmp r64, imm64`, so
 each one also has a rip-relative home in `src/val.asm`'s `.rodata` and the
 macros compare against `[rel v_*]`.
 
@@ -105,7 +107,9 @@ back.
 
 ## Macros
 
-All in `include/value.inc`.
+All in `src/include/value.inc`.  These are the ones worth knowing before
+touching the encoding; STYLE.md's macro tables list the rest, including the
+register-operand classifiers and the stack macros built on them.
 
 | Macro | Purpose |
 |---|---|
@@ -125,18 +129,21 @@ covers "is a pointer" and "is not NULL" in a single unsigned compare.
 
 ## Testing
 
-`./apython --selftest-value` runs before the Python suite and checks four
-groups: integer boundaries around ±2^50, float cases (signed zero, inf,
-subnormals, DBL_MAX, canonical and x86 NaN, the purification threshold),
-NULL/pointer classification and refcount gating, and `V_PACK`/`V_UNPACK`
-round-trips. Failure ids are `group*1000 + case + 1`. Encoding bugs are close
+`./apython --selftest-value` runs before the Python suite and checks integer
+boundaries around ±2^50; float cases (signed zero, inf, subnormals, DBL_MAX,
+canonical and x86 NaN, the purification threshold); NULL/pointer
+classification and refcount gating; and `V_PACK`/`V_UNPACK` round-trips.
+A failure reports `group*1000 + case + 1`. Encoding bugs are close
 to undebuggable from Python-level symptoms, so this pays for itself.
 
 `make INT_STRESS=1` builds with every integer of magnitude ≥ 8 boxed onto the
 heap, which makes the ordinary suite exercise the heap-int paths that
-immediates normally hide. It found six pre-existing bugs the first time it ran.
-It is not expected to pass `make check-cpython`, whose `test_int.py` asserts
-things like `10 is 10`.
+immediates normally hide. It earned its keep the first time it ran, and again
+later: see CLAUDE.md, which records that the flag reached `NASMFLAGS` without
+any object depending on it, so for a long time an incremental
+`make INT_STRESS=1` quietly relinked the unstressed binary. It is not expected
+to pass `make check-cpython`, whose `test_int.py` asserts things like
+`10 is 10`.
 
 `tests/test_nanbox_int.py` and `tests/test_nanbox_float.py` cover the same
 ground from Python.

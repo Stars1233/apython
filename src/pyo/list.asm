@@ -4,6 +4,9 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern eval_saved_r13
+extern get_iterator_opt
+extern int_is_integer
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -352,7 +355,8 @@ END_FUNC list_subscript
 ;; ============================================================================
 LAS_VTAG  equ 8
 LAS_TEMP  equ 16       ; temp list from generic iterable (NULL if not used)
-LAS_FRAME equ 16            ; + 2 pushes = 32
+LAS_EXC   equ 24       ; current_exception, to tell "exhausted" from "raised"
+LAS_FRAME equ 32            ; + 2 pushes = 48, 16-byte aligned
 DEF_FUNC list_ass_subscript, LAS_FRAME
     push rbx
     push r12
@@ -538,15 +542,16 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     jmp .las_have_items
 
 .las_try_generic:
-    ; Generic iterable: iterate into a temp list, then use it
-    mov rax, [r12 + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
-    test rax, rax
-    jz .las_type_error
+    ; Generic iterable: iterate into a temp list, then use it.
+    ; get_iterator_opt, not a tp_iter read: an object with __getitem__
+    ; and no __iter__ is iterable, and the slot read rejected it.
+    ; This is the one that made CPython's re parser fail on every `(?:...)`:
+    ; its SubPattern has __len__ and __getitem__ and no __iter__, and
+    ; _parser.py splices with `self.data[i:i+1] = p`.
     mov rdi, r12
-    ; Save rcx (old_len) since it may be clobbered
-    push rcx
-    call rax                    ; tp_iter(iterable) → iterator
+    mov esi, TAG_PTR
+    push rcx                    ; old_len; the call below clobbers rcx
+    call get_iterator_opt
     test rax, rax
     jz .las_type_error_pop
     push rax                    ; save iterator
@@ -555,6 +560,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     xor edi, edi
     call list_new
     push rax                    ; save temp list [rsp]=templist, [rsp+8]=iter, [rsp+16]=old_len
+    DUNDER_EXC_SAVE [rbp - LAS_EXC]
 
 .las_gen_loop:
     mov rdi, [rsp + 8]         ; iterator
@@ -579,6 +585,11 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     jmp .las_gen_loop
 
 .las_gen_done:
+    ; tp_iternext answers NULL for "exhausted" and for a raise alike, so the
+    ; two are told apart by the pending exception.  Without this a
+    ; __getitem__ that raised was read as the end of the sequence and the
+    ; assignment quietly succeeded with a short list.
+    EXC_RAISED_SINCE [rbp - LAS_EXC], rcx, .las_gen_raised
     pop r12                     ; temp list (becomes new value)
     pop rdi                     ; iterator
     pop rcx                     ; old_len (restore)
@@ -601,8 +612,58 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     xor r10d, r10d             ; r10 = 0 (new tag ptr, unused)
     jmp .las_have_items
 
+.las_gen_raised:
+    ; An exception from inside the iteration.  Release the temp list and the
+    ; iterator and hand the pending exception back to the caller.
+    ;
+    ; Everything is popped BEFORE either call: a `call` with one push still
+    ; on the stack is 8 bytes out of alignment, and obj_dealloc reaches
+    ; glibc, which uses aligned SSE.
+    pop rdi                     ; temp list
+    mov [rbp - LAS_TEMP], rdi
+    pop rdi                     ; iterator
+    mov [rbp - LAS_EXC], rdi    ; the snapshot is finished with
+    pop rcx                     ; the saved old_len, discarded
+    jmp .las_gen_release
+
+.ext_gen_raised:
+    pop rdi                     ; temp list
+    mov [rbp - LAS_TEMP], rdi
+    pop rdi                     ; iterator
+    mov [rbp - LAS_EXC], rdi
+
+.las_gen_release:
+    mov rdi, [rbp - LAS_TEMP]
+    call obj_decref
+    mov qword [rbp - LAS_TEMP], 0
+    mov rdi, [rbp - LAS_EXC]
+    call obj_decref
+
+.las_gen_fail:
+    ; Restore exactly what .las_slice pushed -- r13, r14, r15 and the
+    ; alignment pad -- then hand the pending exception to the unwinder.
+    ; Returning NULL would signal nothing: op_store_subscr calls
+    ; mp_ass_subscript and never looks at the result, so the exception would
+    ; sit pending until some later opcode tripped over it.  get_iterator
+    ; propagates the same way.
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    mov [rel eval_saved_r13], r13
+    leave
+    jmp eval_exception_unwind
+
 .las_type_error_pop:
+    ; This used to FALL THROUGH into .las_have_items with r8 and r9 undefined,
+    ; so a non-iterable value ran the insert with a garbage length and pointer.
+    ; It was unreachable in practice while the arm above read tp_iter itself --
+    ; a NULL from tp_iter is rare -- and became reachable the moment the arm
+    ; started asking get_iterator_opt, which answers NULL for "not iterable".
     pop rcx                     ; discard saved old_len
+    jmp .las_type_error
 
 .las_have_items:
     ; rcx = old_len (items being removed)
@@ -828,7 +889,53 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     lea rcx, [rel tuple_type]
     cmp rax, rcx
     je .ext_from_tuple
-    jmp .las_type_error
+
+.ext_from_iterable:
+    ; Anything else iterable, materialised into a temp list.  CPython accepts
+    ; any iterable for an extended slice and counts it before comparing
+    ; lengths; this arm used to accept only a list or a tuple.
+    mov rdi, r12
+    mov esi, TAG_PTR
+    call get_iterator_opt
+    test rax, rax
+    jz .las_type_error
+    push rax                    ; the iterator
+    xor edi, edi
+    call list_new
+    push rax                    ; [rsp] = temp list, [rsp+8] = iterator
+    DUNDER_EXC_SAVE [rbp - LAS_EXC]
+.ext_gen_loop:
+    mov rdi, [rsp + 8]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    test rax, rax
+    jz .ext_gen_done
+    mov rdi, [rsp + 8]
+    call rax
+    test rax, rax
+    jz .ext_gen_done
+    push rax
+    push rax                    ; twice, to keep rsp 16-byte aligned
+    mov rdi, [rsp + 16]         ; the temp list, two pushes deeper
+    mov rsi, rax
+    call list_append
+    pop rdi
+    pop rdi
+    DECREF_V rdi, rsi           ; list_append took its own reference
+    jmp .ext_gen_loop
+.ext_gen_done:
+    EXC_RAISED_SINCE [rbp - LAS_EXC], rcx, .ext_gen_raised
+    pop r12                     ; the temp list becomes the value
+    pop rdi                     ; the iterator
+    push r12
+    push r12
+    call obj_decref
+    pop r12
+    pop r12
+    mov [rbp - LAS_TEMP], r12   ; released at the shared exit
+    mov r8, [r12 + PyListObject.ob_size]
+    mov r12, [r12 + PyListObject.ob_item]
+    jmp .ext_check_len
 
 .ext_from_list:
     ; Self-assignment check: if source == target, make a shallow copy
@@ -959,6 +1066,15 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     pop r15
     pop r14
     pop r13
+    ; The materialised iterable is ours, and RAISE abandons the C stack:
+    ; `L[::2] = G()` for any generic iterable leaked the temp list built to
+    ; hold it every time the lengths disagreed.
+    mov rdi, [rbp - LAS_TEMP]
+    test rdi, rdi
+    jz .ext_len_mismatch_raise
+    mov qword [rbp - LAS_TEMP], 0
+    call obj_decref
+.ext_len_mismatch_raise:
     RAISE exc_ValueError_type, "attempt to assign sequence of wrong size to extended slice"
 
 .las_key_type_error:
@@ -1296,6 +1412,7 @@ END_FUNC list_getslice
 ;; Concatenate two lists: [1,2] + [3,4] -> [1,2,3,4]
 ;; ============================================================================
 DEF_FUNC list_concat
+    BINOP_REQUIRE_LEFT list_type, TYPE_FLAG_LIST_SUBCLASS, 1
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
@@ -1375,6 +1492,7 @@ END_FUNC list_concat
 ;; Repeat a list: [1,2] * 3 -> [1,2,1,2,1,2]
 ;; ============================================================================
 DEF_FUNC list_repeat
+    BINOP_REQUIRE_LEFT list_type, TYPE_FLAG_LIST_SUBCLASS, 1
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
@@ -1421,7 +1539,7 @@ DEF_FUNC list_repeat
     jo .rep_overflow                         ; signed overflow → MemoryError
     ; Sanity check: total_items * 8 must fit in address space
     cmp r14, 0x10000000                      ; 256M items limit (~2GB)
-    ja .rep_overflow
+    ja .rep_toobig                           ; too large to allocate
 
     ; Allocate new list
     mov rdi, r14
@@ -1468,6 +1586,11 @@ DEF_FUNC list_repeat
     V_PACK rax, rdx             ; return one Value
     ret
 
+.rep_toobig:
+    ; Too large to allocate is a MemoryError in CPython; only a count that
+    ; does not fit an index is an OverflowError.
+    extern exc_MemoryError_type
+    RAISE exc_MemoryError_type, ""
 .rep_overflow:
     extern exc_OverflowError_type
     RAISE exc_OverflowError_type, "too many items for list repetition"
@@ -1480,7 +1603,8 @@ END_FUNC list_repeat
 ;; ============================================================================
 LIC_SELF   equ 8
 LIC_ITER   equ 16
-LIC_FRAME  equ 16           ; + 0 pushes = 16
+LIC_EXC    equ 24           ; current_exception before the iteration started
+LIC_FRAME  equ 24           ; + 3 pushes = 48, 16-aligned
 DEF_FUNC list_inplace_concat, LIC_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
@@ -1541,17 +1665,16 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     jmp .lic_tuple_loop
 
 .lic_generic:
-    ; Use tp_iter/tp_iternext
-    mov rax, [r12 + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
-    test rax, rax
-    jz .lic_type_error
+    ; get_iterator_opt, not a tp_iter read: an object with __getitem__
+    ; and no __iter__ is iterable, and the slot read rejected it.
     mov rdi, r12
-    call rax
+    mov esi, TAG_PTR
+    call get_iterator_opt
     test rax, rax
     jz .lic_type_error
     mov [rbp - LIC_ITER], rax
 
+    DUNDER_EXC_SAVE [rbp - LIC_EXC]
 .lic_gen_loop:
     mov rdi, [rbp - LIC_ITER]
     mov rax, [rdi + PyObject.ob_type]
@@ -1579,6 +1702,10 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     mov rdi, [rbp - LIC_ITER]
     call obj_decref
 
+    ; NULL is exhaustion or a raise alike: `L += G()` for a raising
+    ; __getitem__ appended a short run and handed L back as a success.
+    EXC_RAISED_SINCE [rbp - LIC_EXC], rcx, .lic_gen_raised
+
 .lic_done:
     ; Return (self, TAG_PTR) — INCREF self
     INCREF rbx
@@ -1590,6 +1717,20 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+
+.lic_gen_raised:
+    ; Not a NULL return: this is an nb_inplace_add slot, and op_binary_op
+    ; reads NULL from a slot as "declined", which it reports as
+    ; "unsupported operand type(s)" -- burying the exception the iterator
+    ; raised.  Unwind directly, exactly as .lic_type_error's RAISE does.
+    ; The operands are back on the value stack once the unwinder restores
+    ; r13, so they are not released here either.
+    extern eval_exception_unwind
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    jmp eval_exception_unwind
 
 .lic_type_error:
     RAISE exc_TypeError_type, "can only concatenate list (not other) to list"
@@ -1603,6 +1744,17 @@ END_FUNC list_inplace_concat
 LIR_OLDSIZE equ 16
 LIR_FRAME   equ 16          ; + 0 pushes = 16
 DEF_FUNC list_inplace_repeat, LIR_FRAME
+    ; The count must be an integer.  int_to_i64 below reads its argument as a
+    ; PyIntObject, so `a = [1]; a *= "x"` used to read a PyStrObject's header
+    ; as an int and repeat the list that many times.  Checked before the
+    ; pushes, so the decline is a bare leave/ret.
+    push rdi                    ; save the left Value (int_is_integer is a leaf,
+    mov rdi, rsi                ; so the odd rsp across the call is harmless)
+    V_UNPACK rdi, rdx           ; right Value -> (payload, tag)
+    call int_is_integer
+    pop rdi
+    test eax, eax
+    jz .lir_decline
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
@@ -1723,6 +1875,11 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
 .lir_overflow:
     extern exc_OverflowError_type
     RAISE exc_OverflowError_type, "too many items for list repetition"
+.lir_decline:
+    ; Reached before the pushes, so there is no mirror to unwind.
+    xor eax, eax                ; NULL Value = NotImplemented
+    leave
+    ret
 END_FUNC list_inplace_repeat
 
 ;; ============================================================================
@@ -1732,12 +1889,16 @@ END_FUNC list_inplace_repeat
 ; Frame layout
 LTC_LIST    equ 8       ; new list object
 LTC_ITER    equ 16      ; iterator object
-LTC_FRAME   equ 24          ; + 3 pushes = 48
+LTC_EXC     equ 24      ; current_exception on entry, to tell "raised" from
+                        ; "already being handled"
+LTC_FRAME   equ 40          ; + 3 pushes = 64, 16-aligned -- this frame
+                            ; reaches glibc through ap_malloc
 
 DEF_FUNC list_type_call, LTC_FRAME
     push rbx
     push r12
     push r13
+    DUNDER_EXC_SAVE [rbp - LTC_EXC]
 
     mov r12, rsi            ; args
     mov r13, rdx            ; nargs
@@ -1797,11 +1958,12 @@ DEF_FUNC list_type_call, LTC_FRAME
     mov rdi, [rbp - LTC_ITER]
     call obj_decref
 
-    ; Check for pending exception from iternext (e.g. zip strict ValueError)
+    ; Did iternext raise (a zip strict ValueError, say), or was something
+    ; already being handled?  A bare test against 0 cannot tell: inside an
+    ; `except` block current_exception is the exception being handled, so
+    ; list(x) there re-raised it.
     extern current_exception
-    mov rax, [rel current_exception]
-    test rax, rax
-    jnz .ltc_exc_cleanup
+    EXC_RAISED_SINCE [rbp - LTC_EXC], rax, .ltc_exc_cleanup
 
     mov rax, rbx            ; return the list
     mov edx, TAG_PTR

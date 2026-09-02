@@ -4,6 +4,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern get_iterator_opt
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -736,10 +737,12 @@ END_FUNC set_dealloc
 ;; Constructor: set() or set(iterable)
 ;; self = set_type, args = arg array, nargs = count
 ;; ============================================================================
+extern current_exception
 extern raise_exception
 extern exc_TypeError_type
 
-STC_FRAME equ 8             ; + 2 pushes = 24, not 16-aligned
+STC_EXC   equ 16            ; current_exception before the iteration started
+STC_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
 DEF_FUNC set_type_call, STC_FRAME
     push rbx
     push r12
@@ -761,14 +764,16 @@ DEF_FUNC set_type_call, STC_FRAME
     mov rbx, rax            ; rbx = new set
 
     ; Get iterator: tp_iter(iterable)
+    ; get_iterator_opt, not tp_iter: an object with __getitem__ and no
+    ; __iter__ is iterable, and reading the slot rejects it.
     mov rdi, r12
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
+    mov esi, TAG_PTR
+    call get_iterator_opt
     test rax, rax
     jz .stc_not_iterable_decref_set
-    call rax
     mov r12, rax            ; r12 = iterator
 
+    DUNDER_EXC_SAVE [rbp - STC_EXC]
 .stc_iter_loop:
     ; Get next: tp_iternext(iterator)
     mov rdi, r12
@@ -799,6 +804,10 @@ DEF_FUNC set_type_call, STC_FRAME
     mov rdi, r12
     call obj_decref
 
+    ; NULL is exhaustion and a raise alike.  Read as exhaustion, a raising
+    ; __getitem__ or __next__ produced a short set and a stranded exception.
+    EXC_RAISED_SINCE [rbp - STC_EXC], rcx, .stc_iter_raised
+
     mov rax, rbx            ; return new set
     mov edx, TAG_PTR
     pop r12
@@ -809,6 +818,16 @@ DEF_FUNC set_type_call, STC_FRAME
 .stc_empty:
     call set_new
     mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.stc_iter_raised:
+    mov rdi, rbx                ; the partly built set
+    call obj_decref
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
     pop r12
     pop rbx
     leave
@@ -944,7 +963,8 @@ END_FUNC set_iter_self
 ;; rdi = self (frozenset_type), rsi = args (16-byte fat slots), rdx = nargs
 ;; ============================================================================
 global frozenset_type_call
-FTC_FRAME equ 8             ; + 2 pushes = 24, not 16-aligned
+FTC_EXC   equ 16            ; current_exception before the iteration started
+FTC_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
 DEF_FUNC frozenset_type_call, FTC_FRAME
     push rbx
     push r12
@@ -964,14 +984,16 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     mov rbx, rax
 
     ; Get iterator
+    ; get_iterator_opt, not tp_iter: an object with __getitem__ and no
+    ; __iter__ is iterable, and reading the slot rejects it.
     mov rdi, r12
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
+    mov esi, TAG_PTR
+    call get_iterator_opt
     test rax, rax
     jz .ftc_not_iterable_decref
-    call rax
     mov r12, rax
 
+    DUNDER_EXC_SAVE [rbp - FTC_EXC]
 .ftc_iter_loop:
     mov rdi, r12
     mov rax, [rdi + PyObject.ob_type]
@@ -998,6 +1020,10 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     mov rdi, r12
     call obj_decref
 
+    ; NULL is exhaustion and a raise alike.  Read as exhaustion, a raising
+    ; __getitem__ or __next__ produced a short set and a stranded exception.
+    EXC_RAISED_SINCE [rbp - FTC_EXC], rcx, .ftc_iter_raised
+
     ; Set type to frozenset_type
     lea rax, [rel frozenset_type]
     mov [rbx + PyObject.ob_type], rax
@@ -1013,6 +1039,16 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     lea rcx, [rel frozenset_type]
     mov [rax + PyObject.ob_type], rcx
     mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ftc_iter_raised:
+    mov rdi, rbx                ; the partly built set
+    call obj_decref
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
     pop r12
     pop rbx
     leave
@@ -1045,7 +1081,33 @@ SNB_FRAME equ 32            ; + 0 pushes = 32
 ; The two operands, laid out as the args array the method form expects.
 SNB_LEFT  equ 32
 SNB_RIGHT equ 24
+
+; Both operands of a set operator must be sets.  The method forms are laxer on
+; purpose -- set.union(iterable) takes any iterable -- but the OPERATORS are
+; not: CPython raises TypeError for `{1,2} | [1]`, and these slots used to hand
+; the right operand to set_method_union, which reads it as a PyDictObject.
+; `{1,2} | 5` was an arbitrary read through address 5.
+;
+; Declining with a NULL Value rather than raising is what lets the protocol try
+; the other operand and then a user class's __ror__.
+%macro SET_NB_REQUIRE_BOTH 0
+    V_TEST_PTR rdi, rax         ; ja == not a pointer, so not a set either
+    ja %%bad
+    V_TEST_PTR rsi, rax
+    ja %%bad
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_SET_TYPE rax, rcx, %%bad
+    mov rax, [rsi + PyObject.ob_type]
+    REQUIRE_SET_TYPE rax, rcx, %%bad
+    jmp %%ok
+%%bad:
+    xor eax, eax                ; NULL Value = NotImplemented
+    leave
+    ret
+%%ok:
+%endmacro
 DEF_FUNC set_nb_or, SNB_FRAME
+    SET_NB_REQUIRE_BOTH
     mov [rbp - SNB_LEFT], rdi         ; args[0] = left
     mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
     lea rdi, [rbp - SNB_LEFT]
@@ -1057,6 +1119,7 @@ END_FUNC set_nb_or
 
 ;; set_nb_and(left, right, ltag, rtag) -> new set (intersection)
 DEF_FUNC set_nb_and, SNB_FRAME
+    SET_NB_REQUIRE_BOTH
     mov [rbp - SNB_LEFT], rdi         ; args[0] = left
     mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
     lea rdi, [rbp - SNB_LEFT]
@@ -1068,6 +1131,7 @@ END_FUNC set_nb_and
 
 ;; set_nb_sub(left, right, ltag, rtag) -> new set (difference)
 DEF_FUNC set_nb_sub, SNB_FRAME
+    SET_NB_REQUIRE_BOTH
     mov [rbp - SNB_LEFT], rdi         ; args[0] = left
     mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
     lea rdi, [rbp - SNB_LEFT]
@@ -1079,6 +1143,7 @@ END_FUNC set_nb_sub
 
 ;; set_nb_xor(left, right, ltag, rtag) -> new set (symmetric_difference)
 DEF_FUNC set_nb_xor, SNB_FRAME
+    SET_NB_REQUIRE_BOTH
     mov [rbp - SNB_LEFT], rdi         ; args[0] = left
     mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
     lea rdi, [rbp - SNB_LEFT]

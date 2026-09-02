@@ -361,6 +361,73 @@ DEF_FUNC builtin_sub_init_base
     ret
 END_FUNC builtin_sub_init_base
 
+;; ============================================================================
+;; builtin_sub_alloc(rdi = type) -> rax = a zeroed instance
+;;
+;; The allocation half of a builtin constructor that has to honour the type it
+;; was handed.  float and complex keep their value inline, exactly as int and
+;; str do, so a subclass of either cannot come from instance_new -- the base's
+;; own constructor builds it, and this is the only part that differs between
+;; the base and a subclass.
+;;
+;; A heaptype always carries TYPE_FLAG_HAVE_GC, so it has to come from
+;; gc_alloc and be tracked.  complex itself does not: it owns nothing, and
+;; gc_alloc hands back raw + GC_HEAD_SIZE, which obj_dealloc's plain-free path
+;; would give ap_free unshifted.  Both branches are here so a caller cannot
+;; pick the wrong one.
+;;
+;; Everything past the header is zeroed, the tail __dict__ slot included: a
+;; subclass instance is reachable before its __init__ has run, and the
+;; collector reads tp_dictoffset on the way past.
+;; ============================================================================
+BSA_TYPE  equ 8
+BSA_SAVE  equ 16
+BSA_FRAME equ 16            ; + 0 pushes = 16
+
+DEF_FUNC builtin_sub_alloc, BSA_FRAME
+    mov [rbp - BSA_TYPE], rdi
+    mov rsi, [rdi + PyTypeObject.tp_basicsize]
+    test qword [rdi + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .bsa_plain
+    mov rdi, rsi
+    mov rsi, [rbp - BSA_TYPE]
+    call gc_alloc               ; sets ob_refcnt and ob_type itself
+    jmp .bsa_zero
+.bsa_plain:
+    mov rdi, rsi
+    call ap_malloc
+    mov qword [rax + PyObject.ob_refcnt], 1
+    mov rcx, [rbp - BSA_TYPE]
+    mov [rax + PyObject.ob_type], rcx
+
+.bsa_zero:
+    mov rcx, [rbp - BSA_TYPE]
+    mov rcx, [rcx + PyTypeObject.tp_basicsize]
+    lea rdx, [rax + PyObject_size]
+    sub rcx, PyObject_size
+.bsa_zero_loop:
+    cmp rcx, 8
+    jb .bsa_zeroed
+    mov qword [rdx], 0
+    add rdx, 8
+    sub rcx, 8
+    jmp .bsa_zero_loop
+
+.bsa_zeroed:
+    ; The instance holds a reference to its type, as every instance does.
+    mov rcx, [rbp - BSA_TYPE]
+    inc qword [rcx + PyObject.ob_refcnt]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .bsa_done
+    mov [rbp - BSA_SAVE], rax
+    mov rdi, rax
+    call gc_track               ; may collect, which is why the body is zeroed
+    mov rax, [rbp - BSA_SAVE]
+.bsa_done:
+    leave
+    ret
+END_FUNC builtin_sub_alloc
+
 DEF_FUNC instance_new
     push rbx
     push r12
@@ -980,6 +1047,120 @@ DEF_FUNC instance_dealloc, ID_FRAME
 
 .no_slots:
     pop r12
+
+    ; A bytearray subclass owns a second allocation -- its bytes -- that the
+    ; slot walk above knows nothing about, and the base's own dealloc never
+    ; runs for a subclass.  Every instance leaked its buffer.
+    mov rax, [rbx + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTEARRAY_SUBCLASS
+    jz .id_no_bytes
+    mov rdi, [rbx + PyByteArrayObject.ob_bytes]
+    test rdi, rdi
+    jz .id_no_bytes
+    mov qword [rbx + PyByteArrayObject.ob_bytes], 0
+    mov qword [rbx + PyByteArrayObject.ob_cap], 0
+    mov qword [rbx + PyByteArrayObject.ob_size], 0
+    extern ap_free
+    call ap_free
+.id_no_bytes:
+
+    ; The same shape for the three containers that keep their storage out of
+    ; line.  A dict, list or set subclass instance owns tables the slot walk
+    ; above knows nothing about, and the base's own dealloc never runs for a
+    ; subclass -- so every instance leaked both its contents and its tables:
+    ; `class D(dict): pass` leaked 256 bytes per D(), and a list or set
+    ; subclass the same in its own currency.  The contents go through the
+    ; type's existing tp_clear, which is exactly "release everything held and
+    ; leave the tables empty"; the tables are freed here afterwards.
+    mov rax, [rbx + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_DICT_SUBCLASS
+    jnz .id_dict_storage
+    test rcx, TYPE_FLAG_LIST_SUBCLASS
+    jnz .id_list_storage
+    test rcx, TYPE_FLAG_SET_SUBCLASS
+    jnz .id_set_storage
+    test rcx, TYPE_FLAG_TUPLE_SUBCLASS
+    jnz .id_tuple_storage
+    jmp .id_no_storage
+
+.id_tuple_storage:
+    ; tuple_sub_fill gives a subclass instance its own ob_item array and
+    ; INCREFs every element into it.  tuple has no tp_clear to borrow, so the
+    ; walk is written out.  Only when ob_size is positive: tuple_sub_fill
+    ; allocates nothing for an empty one and leaves ob_item unwritten, so
+    ; there is nothing there to read, let alone free.
+    ;
+    ; r12 and r13 belong to the caller here -- instance_dealloc saves only
+    ; rbx -- so they are pushed around the loop rather than simply used.
+    mov rax, [rbx + PyTupleObject.ob_size]
+    test rax, rax
+    jle .id_no_storage
+    push r12
+    push r13
+    mov r12, rax
+    xor r13d, r13d
+.id_tuple_loop:
+    cmp r13, r12
+    jge .id_tuple_free
+    mov rax, [rbx + PyTupleObject.ob_item]
+    mov rdi, [rax + r13*8]
+    XDECREF_V rdi, rsi
+    inc r13
+    jmp .id_tuple_loop
+.id_tuple_free:
+    mov qword [rbx + PyTupleObject.ob_size], 0
+    mov rdi, [rbx + PyTupleObject.ob_item]
+    mov qword [rbx + PyTupleObject.ob_item], 0
+    pop r13
+    pop r12
+    test rdi, rdi
+    jz .id_no_storage
+    call ap_free
+    jmp .id_no_storage
+
+.id_dict_storage:
+    extern dict_clear_gc
+    mov rdi, rbx
+    call dict_clear_gc
+    mov rdi, [rbx + PyDictObject.entries]
+    test rdi, rdi
+    jz .id_dict_no_entries
+    mov qword [rbx + PyDictObject.entries], 0
+    call ap_free
+.id_dict_no_entries:
+    mov rdi, [rbx + PyDictObject.dk_indices]
+    test rdi, rdi
+    jz .id_no_storage
+    mov qword [rbx + PyDictObject.dk_indices], 0
+    mov qword [rbx + PyDictObject.capacity], 0
+    call ap_free
+    jmp .id_no_storage
+
+.id_list_storage:
+    extern list_clear
+    mov rdi, rbx
+    call list_clear
+    mov rdi, [rbx + PyListObject.ob_item]
+    test rdi, rdi
+    jz .id_no_storage
+    mov qword [rbx + PyListObject.ob_item], 0
+    mov qword [rbx + PyListObject.ob_size], 0
+    call ap_free
+    jmp .id_no_storage
+
+.id_set_storage:
+    extern set_clear_gc
+    mov rdi, rbx
+    call set_clear_gc
+    mov rdi, [rbx + PyDictObject.entries]
+    test rdi, rdi
+    jz .id_no_storage
+    mov qword [rbx + PyDictObject.entries], 0
+    mov qword [rbx + PyDictObject.capacity], 0
+    call ap_free
+
+.id_no_storage:
 
     ; Save ob_type before freeing (gc_dealloc reads ob_type, then frees)
     push qword [rbx + PyObject.ob_type]
@@ -1813,6 +1994,8 @@ DEF_FUNC type_call
     lea rdx, [r13 + 1]          ; nargs + 1
     call r11
     V_UNPACK rax, rdx           ; tp_call returns a Value
+    test edx, edx
+    jz .init_raised             ; NULL, with the exception still pending
 
     ; DECREF __init__'s return value (should be None — TAG_NONE, not a pointer)
     mov rsi, rdx
@@ -1822,6 +2005,23 @@ DEF_FUNC type_call
     lea rax, [r13 + 1]
     shl rax, 4
     add rsp, rax
+    jmp .no_init
+
+.init_raised:
+    ; What __init__ returned was never looked at, so a raise inside it
+    ; produced a "successful" construction: the caller got an object whose
+    ; __init__ had not finished, and the exception surfaced at whatever ran
+    ; next, as a "During handling of the above exception" chain attached to
+    ; code that had nothing to do with it.  io.StringIO(5) is where it turned
+    ; up -- it raises TypeError from __init__ and got back a StringIO.
+    lea rax, [r13 + 1]
+    shl rax, 4
+    add rsp, rax
+    mov rax, r14
+    mov rsi, [rbp - TC_NEW_TAG]
+    DECREF_VAL rax, rsi         ; the half-built instance goes no further
+    xor r14d, r14d
+    mov qword [rbp - TC_NEW_TAG], 0
 
 .no_init:
     ; Return the instance (tag from TC_NEW_TAG; default TAG_PTR, or __new__ result tag)
@@ -2514,6 +2714,19 @@ DEF_FUNC_BARE object_type_call
     lea rsi, [rel object_type]
     call gc_alloc
     mov qword [rax + PyInstanceObject.inst_dict], 0
+
+    ; gc_alloc does not INCREF the type it stamps into ob_type, and
+    ; instance_dealloc DECREFs it -- so without this the reference count of
+    ; object_type itself went down by one for every object() that died.  It
+    ; starts at 1, so the FIRST such instance took it to zero and handed
+    ; &object_type, a .data address, to ap_free: the heap was corrupted from
+    ; then on, and the crash landed in whatever allocated next.
+    ; instance_new and slots_new both INCREF here for the same reason.
+    push rax
+    lea rdi, [rel object_type]
+    call obj_incref
+    pop rax
+
     ; Track in GC
     push rax
     mov rdi, rax

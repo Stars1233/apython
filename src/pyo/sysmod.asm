@@ -201,33 +201,54 @@ DEF_FUNC sys_module_init, 32
     pop rdi
     call obj_decref
 
-    ; --- sys.version_info (tuple) ---
-    mov rdi, 5
-    call tuple_new
-    mov rbx, rax                ; rbx = version_info tuple
-    mov r8, [rbx + PyTupleObject.ob_item]       ; payloads
+    ; --- sys.version_info (a struct sequence) ---
+    ; It was a bare tuple, so type(sys.version_info).__name__ was 'tuple' and
+    ; sys.version_info.major was an AttributeError.  platform.py and several
+    ; stdlib modules read the names.
+    extern version_info_type
+    extern float_info_type
+    extern int_info_type
+    extern hash_info_type
+    extern float_info_v0
+    extern float_info_v3
+    extern float_info_v8
+    extern hash_info_v5
+    extern structseq_new
+    extern structseq_set
+    extern structseq_init_type
+    lea rdi, [rel version_info_type]
+    call structseq_init_type
+    lea rdi, [rel version_info_type]
+    call structseq_new
+    mov rbx, rax                ; rbx = the version_info object
+
     ; (3, 12, 0, 'final', 0)
-    ; slot 0: 3
-    mov rdi, 3
-    V_PACK_I64 rdi, rcx
-    mov [r8], rdi
-    ; slot 1: 12
-    mov rdi, 12
-    V_PACK_I64 rdi, rcx
-    mov [r8 + 8], rdi
-    ; slot 2: 0
-    xor edi, edi
-    V_PACK_I64 rdi, rcx
-    mov [r8 + 16], rdi
-    ; slot 3: 'final' (string, TAG_PTR)
+    mov rdi, rbx
+    xor esi, esi
+    mov rdx, 3
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 1
+    mov rdx, 12
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 2
+    xor edx, edx
+    V_PACK_I64 rdx, rcx
+    call structseq_set
     lea rdi, [rel sm_final]
     call str_from_cstr_heap
-    mov r8, [rbx + PyTupleObject.ob_item]       ; reload payloads (clobbered)
-    mov [r8 + 24], rax
-    ; slot 4: 0
-    xor edi, edi
-    V_PACK_I64 rdi, rcx
-    mov [r8 + 32], rdi
+    mov rdx, rax                ; structseq_set takes over the reference
+    mov rdi, rbx
+    mov esi, 3
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 4
+    xor edx, edx
+    V_PACK_I64 rdx, rcx
+    call structseq_set
 
     lea rdi, [rel sm_version_info]
     call str_from_cstr_heap
@@ -238,7 +259,6 @@ DEF_FUNC sys_module_init, 32
     call dict_set
     pop rdi
     call obj_decref
-    ; DECREF tuple
     mov rdi, rbx
     call obj_decref
 
@@ -479,18 +499,25 @@ DEF_FUNC sys_module_init, 32
     ; The modules that are compiled in rather than found on sys.path.  os.py
     ; reads it to decide which platform module to import, and several others
     ; use it to tell a built-in apart from a shadowing file.
-    mov edi, SM_BUILTIN_COUNT
+    ; Built from builtin_module_table, the same rows import_init registers
+    ; from.  It used to be a hand-written array here, and it had never grown
+    ; `asyncio` or `errno` -- so a module sitting in sys.modules was absent
+    ; from the list os.py gates its platform import on.
+    extern builtin_module_table
+    mov edi, BUILTIN_MODULE_COUNT
     call tuple_new
     mov [rbp - SMI_TMP], rax
     xor r13d, r13d
 .sm_bmn_loop:
-    cmp r13, SM_BUILTIN_COUNT
+    cmp r13, BUILTIN_MODULE_COUNT
     jge .sm_bmn_done
-    lea rax, [rel sm_builtin_names]
-    mov rdi, [rax + r13*8]
+    lea rax, [rel builtin_module_table]
+    mov rcx, r13
+    shl rcx, 4                              ; BuiltinModule_size
+    mov rdi, [rax + rcx + BuiltinModule.name]
     call str_from_cstr_heap
     mov rcx, [rbp - SMI_TMP]
-    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rcx, [rcx + PyTupleObject.ob_item]  ; reload: the allocation moves it
     mov [rcx + r13*8], rax
     inc r13
     jmp .sm_bmn_loop
@@ -523,14 +550,296 @@ DEF_FUNC sys_module_init, 32
     pop rdi
     call obj_decref
 
-    ; --- sys.int_info (simple stub: bits_per_digit=30, sizeof_digit=4) ---
-    ; Skip for now — not critical for basic imports
+    ; --- sys.flags ---
+    extern flags_type
+    lea rdi, [rel flags_type]
+    call structseq_init_type
+    lea rdi, [rel flags_type]
+    call structseq_new
+    mov rbx, rax
+    mov rdi, rbx
+    mov esi, 0
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 1
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 2
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 3
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 4
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 5
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 6
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 7
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 8
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 9
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 10
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 11
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 12
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 13
+    lea rdx, [rel bool_false]
+    inc qword [rdx + PyObject.ob_refcnt]
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 14
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 15
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 16
+    lea rdx, [rel bool_false]
+    inc qword [rdx + PyObject.ob_refcnt]
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 17
+    mov rdx, 4300
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    lea rdi, [rel sm_flags]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, rbx
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, rbx
+    call obj_decref
+    ; --- sys.float_info ---
+    lea rdi, [rel float_info_type]
+    call structseq_init_type
+    lea rdi, [rel float_info_type]
+    call structseq_new
+    mov rbx, rax
+    mov rdi, rbx
+    mov esi, 0
+    mov rdx, [rel float_info_v0]
+    V_FROM_F64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 1
+    mov rdx, 1024
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 2
+    mov rdx, 308
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 3
+    mov rdx, [rel float_info_v3]
+    V_FROM_F64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 4
+    mov rdx, -1021
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 5
+    mov rdx, -307
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 6
+    mov rdx, 15
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 7
+    mov rdx, 53
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 8
+    mov rdx, [rel float_info_v8]
+    V_FROM_F64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 9
+    mov rdx, 2
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 10
+    mov rdx, 1
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    lea rdi, [rel sm_float_info]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, rbx
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, rbx
+    call obj_decref
 
-    ; --- sys.float_info (stub) ---
-    ; Skip for now
+    ; --- sys.int_info ---
+    ; GMP-backed ints have no fixed digit size; these are CPython's
+    ; numbers, which is what the modules reading them expect.
+    lea rdi, [rel int_info_type]
+    call structseq_init_type
+    lea rdi, [rel int_info_type]
+    call structseq_new
+    mov rbx, rax
+    mov rdi, rbx
+    mov esi, 0
+    mov rdx, 30
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 1
+    mov rdx, 4
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 2
+    mov rdx, 4300
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 3
+    mov rdx, 640
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    lea rdi, [rel sm_int_info]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, rbx
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, rbx
+    call obj_decref
 
-    ; --- sys.hash_info (stub) ---
-    ; Skip for now
+    ; --- sys.hash_info ---
+    ; modulus and imag are ours for real -- int_hash_i64 uses 2^61-1
+    ; and complex_hash 1000003.  algorithm says 'fnv' because
+    ; str_hash is FNV-1a, not siphash; seed_bits and cutoff are 0
+    ; because there is no hash randomisation to describe.
+    lea rdi, [rel hash_info_type]
+    call structseq_init_type
+    lea rdi, [rel hash_info_type]
+    call structseq_new
+    mov rbx, rax
+    mov rdi, rbx
+    mov esi, 0
+    mov rdx, 64
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 1
+    mov rdx, 2305843009213693951
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 2
+    mov rdx, 314159
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 3
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 4
+    mov rdx, 1000003
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 5
+    lea rdi, [rel hash_info_v5]
+    call str_from_cstr_heap
+    mov rdx, rax
+    mov rdi, rbx
+    mov esi, 5
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 6
+    mov rdx, 64
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 7
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    mov rdi, rbx
+    mov esi, 8
+    mov rdx, 0
+    V_PACK_I64 rdx, rcx
+    call structseq_set
+    lea rdi, [rel sm_hash_info]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, rbx
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, rbx
+    call obj_decref
 
     ; --- sys.getdefaultencoding function ---
     lea rdi, [rel sys_getdefaultencoding_func]
@@ -538,6 +847,47 @@ DEF_FUNC sys_module_init, 32
     call builtin_func_new
     push rax
     lea rdi, [rel sm_getdefaultencoding]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    ; --- sys.getfilesystemencoding function ---
+    ; os._createenviron decodes posix.environ with it.  It answers 'utf-8'
+    ; unconditionally: PEP 540's locale handling does not exist here, and
+    ; neither does the surrogateescape error handler that would make a
+    ; non-UTF-8 filename survive the round trip -- bugs.md records the gap.
+    lea rdi, [rel sys_getfsencoding_func]
+    lea rsi, [rel sm_getfsencoding]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel sm_getfsencoding]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    ; --- sys.getfilesystemencodeerrors function ---
+    ; os._fscodec reads it next to getfilesystemencoding.  It answers
+    ; 'surrogateescape', which is the name CPython uses -- and which
+    ; str.encode here accepts and ignores; bugs.md records that.
+    lea rdi, [rel sys_getfsencodeerrors_func]
+    lea rsi, [rel sm_getfsencodeerrors]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel sm_getfsencodeerrors]
     call str_from_cstr_heap
     push rax
     mov rdi, r15
@@ -839,6 +1189,26 @@ END_FUNC sys_path_add_script_dir
 ;; A real intern table, so `sys.intern(a) is sys.intern(b)` for equal strings.
 ;; functools and enum both intern names and then compare them with `is`.
 ;; ============================================================================
+;; sys.getfilesystemencodeerrors() -> 'surrogateescape'
+DEF_FUNC sys_getfsencodeerrors_func
+    lea rdi, [rel sm_surrogateescape]
+    call str_from_cstr_heap
+    leave
+    mov edx, TAG_PTR
+    V_PACK rax, rdx
+    ret
+END_FUNC sys_getfsencodeerrors_func
+
+;; sys.getfilesystemencoding() -> 'utf-8'
+DEF_FUNC sys_getfsencoding_func
+    lea rdi, [rel sm_utf8]
+    call str_from_cstr_heap
+    leave
+    mov edx, TAG_PTR
+    V_PACK rax, rdx
+    ret
+END_FUNC sys_getfsencoding_func
+
 DEF_FUNC sys_intern_func
     cmp rsi, 1
     jne .si_error               ; exactly one argument, as CPython requires
@@ -902,6 +1272,10 @@ sm_linux:        db "linux", 0
 sm_version:      db "version", 0
 sm_version_val:  db "3.12.0 (apython ", VERSION_STR, ")", 0
 sm_version_info: db "version_info", 0
+sm_float_info:   db "float_info", 0
+sm_flags:        db "flags", 0
+sm_int_info:     db "int_info", 0
+sm_hash_info:    db "hash_info", 0
 sm_final:        db "final", 0
 sm_executable:   db "executable", 0
 sm_prefix:       db "prefix", 0
@@ -924,17 +1298,9 @@ sm_cache_tag:    db "cache_tag", 0
 sm_cache_tag_val: db "cpython-312", 0
 sm_warnoptions:  db "warnoptions", 0
 sm_builtin_module_names: db "builtin_module_names", 0
-sm_bmn_abc:      db "_abc", 0
-sm_bmn_weakref:  db "_weakref", 0
-sm_bmn_sre:      db "_sre", 0
-sm_bmn_builtins: db "builtins", 0
-sm_bmn_sys:      db "sys", 0
-sm_bmn_time:     db "time", 0
-align 8
-sm_builtin_names:
-    dq sm_bmn_abc, sm_bmn_weakref, sm_bmn_sre, sm_bmn_builtins, sm_bmn_sys
-    dq sm_bmn_time
-SM_BUILTIN_COUNT equ 6
+sm_getfsencoding: db "getfilesystemencoding", 0
+sm_getfsencodeerrors: db "getfilesystemencodeerrors", 0
+sm_surrogateescape: db "surrogateescape", 0
 sm_intern:       db "intern", 0
 sm_byteorder:    db "byteorder", 0
 sm_little:       db "little", 0

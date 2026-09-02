@@ -920,10 +920,10 @@ DEF_FUNC generic_alias_new
     push rax
     mov rdi, rbx
     call obj_incref
-    mov rdi, r12
-    test rdi, rdi
-    jz .gan_done
-    call obj_incref
+    ; ga_args is a VALUE, not a pointer: `list[0]` puts an int immediate here
+    ; and obj_incref on one writes through the number.
+    mov rax, r12
+    INCREF_V rax, rcx
 .gan_done:
     pop rax
     pop r12
@@ -940,10 +940,10 @@ DEF_FUNC_LOCAL generic_alias_dealloc
     jz .gad_args
     call obj_decref
 .gad_args:
-    mov rdi, [rbx + PyGenericAliasObject.ga_args]
-    test rdi, rdi
+    mov rax, [rbx + PyGenericAliasObject.ga_args]
+    test rax, rax
     jz .gad_free
-    call obj_decref
+    DECREF_V rax, rcx
 .gad_free:
     mov rdi, rbx
     call ap_free
@@ -1018,6 +1018,8 @@ DEF_FUNC generic_alias_repr, GAR_FRAME
     ; A tuple argument prints comma-joined without its parentheses, and a
     ; type prints as its name: list[int], not list[<class 'int'>].
     extern tuple_type
+    V_TEST_PTR rdi, rax         ; classify before reading ob_type: the
+    ja .gar_one                 ; argument may be a number
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel tuple_type]
     cmp rax, rcx
@@ -1159,15 +1161,70 @@ DEF_FUNC_BARE generic_alias_call
 END_FUNC generic_alias_call
 
 ;; __origin__ / __args__
-DEF_FUNC generic_alias_getattr
+GAG_NAME  equ 8
+GAG_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+
+DEF_FUNC generic_alias_getattr, GAG_FRAME
     push rbx
     mov rbx, rdi
+    mov [rbp - GAG_NAME], rsi
     lea rdi, [rsi + PyStrObject.data]
     CSTRING rsi, "__origin__"
     call ap_strcmp
     test eax, eax
     jz .gag_origin
+
+    ; __args__ is always a tuple, even when the subscript was one thing:
+    ; CPython wraps it, and typing.get_args() and every annotation reader
+    ; expect that.  This used to answer NULL, which reads as "no attribute".
+    mov rdi, [rbp - GAG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "__args__"
+    call ap_strcmp
+    test eax, eax
+    jnz .gag_missing
+
     mov rax, [rbx + PyGenericAliasObject.ga_args]
+    test rax, rax
+    jz .gag_empty_args
+    V_TEST_PTR rax, rcx
+    ja .gag_wrap_args
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    jne .gag_wrap_args
+    mov rdi, rax
+    call obj_incref
+    mov rax, [rbx + PyGenericAliasObject.ga_args]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.gag_wrap_args:
+    mov edi, 1
+    call tuple_new
+    test rax, rax
+    jz .gag_missing
+    mov rcx, [rbx + PyGenericAliasObject.ga_args]
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov [rdx], rcx
+    push rax
+    mov rax, rcx
+    INCREF_V rax, rcx
+    pop rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.gag_empty_args:
+    xor edi, edi
+    call tuple_new
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+
+.gag_missing:
     xor eax, eax
     xor edx, edx
     pop rbx
@@ -1787,11 +1844,11 @@ union_type:
     dq generic_alias_dealloc        ; tp_dealloc
     dq union_repr                   ; tp_repr
     dq union_repr                   ; tp_str
-    dq 0                            ; tp_hash
+    dq union_hash                   ; tp_hash
     dq 0                            ; tp_call
     dq 0                            ; tp_getattr
     dq 0                            ; tp_setattr
-    dq 0                            ; tp_richcompare
+    dq union_richcompare            ; tp_richcompare
     dq 0                            ; tp_iter
     dq 0                            ; tp_iternext
     dq 0                            ; tp_init
@@ -1808,6 +1865,207 @@ union_type:
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
 
+
+section .text
+
+;; ============================================================================
+;; union_hash(rdi = PyGenericAliasObject*) -> rax = hash
+;; union_richcompare(rdi = left, rsi = right, edx = op) -> Value
+;;
+;; `hash(int | str)` used to raise: builtin_hash_fn raises when tp_hash is 0,
+;; and copyreg.py hashes `type(int | str)` two lines after the complex one, so
+;; the whole module -- and everything that imports it -- stopped there.
+;;
+;; CPython hashes a union as `hash(frozenset(args))` and compares them as
+;; frozensets.  frozenset_type.tp_hash is 0 here, so instead the args are
+;; combined with XOR, which induces exactly the same equivalence: order does
+;; not matter and a repeat is absorbed, so `int | str` and `str | int` hash
+;; alike.  The values differ from CPython's; nothing observes them, and the
+;; language only requires that equal objects hash equal.
+;; ============================================================================
+UH_FRAME equ 16             ; + 2 pushes = 32
+DEF_FUNC union_hash, UH_FRAME
+    push rbx
+    push r12
+    mov rax, [rdi + PyGenericAliasObject.ga_args]
+    test rax, rax
+    jz .uh_empty
+    mov r12, [rax + PyTupleObject.ob_size]
+    mov rbx, [rax + PyTupleObject.ob_item]
+    xor eax, eax
+    test r12, r12
+    jz .uh_done
+    push rax
+    xor ecx, ecx
+.uh_loop:
+    push rcx
+    mov rdi, [rbx + rcx*8]
+    extern obj_hash
+    call obj_hash
+    pop rcx
+    pop rdx
+    xor rdx, rax
+    push rdx
+    inc rcx
+    cmp rcx, r12
+    jb .uh_loop
+    pop rax
+.uh_done:
+    ; A light avalanche, so that two unions differing only in one member do
+    ; not collide merely because XOR preserves low bits.
+    mov rdx, rax
+    shr rdx, 32
+    imul rdx, rdx, 1000003
+    xor rax, rdx
+    cmp rax, -1
+    jne .uh_ret
+    mov rax, -2
+.uh_ret:
+    pop r12
+    pop rbx
+    leave
+    ret
+.uh_empty:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC union_hash
+
+URC_LEFT  equ 8
+URC_RIGHT equ 16
+URC_OP    equ 24
+URC_FRAME equ 32             ; + 2 pushes = 48
+DEF_FUNC union_richcompare, URC_FRAME
+    push rbx
+    push r12
+    cmp edx, PY_EQ
+    je .ur_ok
+    cmp edx, PY_NE
+    jne .ur_decline
+.ur_ok:
+    mov [rbp - URC_OP], edx
+    ; Both sides must be unions; anything else declines so the protocol can
+    ; try the other operand.
+    V_TEST_PTR rdi, rax
+    ja .ur_decline
+    V_TEST_PTR rsi, rax
+    ja .ur_decline
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel union_type]
+    cmp rax, rcx
+    jne .ur_decline
+    mov rax, [rsi + PyObject.ob_type]
+    cmp rax, rcx
+    jne .ur_decline
+    mov [rbp - URC_LEFT], rdi
+    mov [rbp - URC_RIGHT], rsi
+
+    ; Set equality: every member of each side is present in the other.
+    mov rdi, [rbp - URC_LEFT]
+    mov rsi, [rbp - URC_RIGHT]
+    call union_args_subset
+    test eax, eax
+    jz .ur_false
+    mov rdi, [rbp - URC_RIGHT]
+    mov rsi, [rbp - URC_LEFT]
+    call union_args_subset
+    test eax, eax
+    jz .ur_false
+.ur_true:
+    cmp dword [rbp - URC_OP], PY_EQ
+    je .ur_ret_true
+    jmp .ur_ret_false
+.ur_false:
+    cmp dword [rbp - URC_OP], PY_EQ
+    je .ur_ret_false
+.ur_ret_true:
+    extern bool_true
+    lea rax, [rel bool_true]
+    pop r12
+    pop rbx
+    leave
+    ret
+.ur_ret_false:
+    extern bool_false
+    lea rax, [rel bool_false]
+    pop r12
+    pop rbx
+    leave
+    ret
+.ur_decline:
+    xor eax, eax                    ; NULL Value = NotImplemented
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC union_richcompare
+
+;; ============================================================================
+;; union_args_subset(rdi = a, rsi = b) -> eax = 1 when every member of a's
+;; args tuple is also in b's.  Members are compared with
+;; obj_richcompare_bool, not by pointer: union_operand_ok admits None and
+;; nested unions as well as types.
+;; ============================================================================
+UAS_BITEMS equ 8
+UAS_BSIZE  equ 16
+UAS_AITEMS equ 24
+UAS_ASIZE  equ 32
+UAS_I      equ 40
+UAS_FRAME  equ 48           ; + 0 pushes = 48
+DEF_FUNC_LOCAL union_args_subset, UAS_FRAME
+    mov rax, [rdi + PyGenericAliasObject.ga_args]
+    test rax, rax
+    jz .uas_yes
+    mov rcx, [rax + PyTupleObject.ob_size]
+    mov [rbp - UAS_ASIZE], rcx
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov [rbp - UAS_AITEMS], rcx
+    mov rax, [rsi + PyGenericAliasObject.ga_args]
+    test rax, rax
+    jz .uas_no
+    mov rcx, [rax + PyTupleObject.ob_size]
+    mov [rbp - UAS_BSIZE], rcx
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov [rbp - UAS_BITEMS], rcx
+    mov qword [rbp - UAS_I], 0
+.uas_outer:
+    mov rax, [rbp - UAS_I]
+    cmp rax, [rbp - UAS_ASIZE]
+    jae .uas_yes
+    xor ecx, ecx
+.uas_inner:
+    cmp rcx, [rbp - UAS_BSIZE]
+    jae .uas_no
+    push rcx
+    mov rax, [rbp - UAS_AITEMS]
+    mov r8, [rbp - UAS_I]
+    mov rdi, [rax + r8*8]
+    mov rax, [rbp - UAS_BITEMS]
+    mov rsi, [rax + rcx*8]
+    mov edx, PY_EQ
+    extern obj_richcompare_bool
+    call obj_richcompare_bool
+    pop rcx
+    cmp eax, 1
+    je .uas_found
+    inc rcx
+    jmp .uas_inner
+.uas_found:
+    inc qword [rbp - UAS_I]
+    jmp .uas_outer
+.uas_yes:
+    mov eax, 1
+    leave
+    ret
+.uas_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC union_args_subset
+
+section .data
 align 8
 union_number_methods:
     times 15 dq 0
@@ -1816,6 +2074,136 @@ union_number_methods:
 
 align 8
 ga_name_str: db "types.GenericAlias", 0
+
+align 8
+section .text
+
+;; ============================================================================
+;; generic_alias_hash(rdi = self) -> rax = hash
+;; generic_alias_richcompare(rdi = left, rsi = right, edx = op) -> Value
+;;
+;; union_type got both of these and generic_alias_type did not, so
+;; `{list[int]: 1}[list[int]]` was a KeyError: two aliases spelt the same way
+;; hashed by identity and compared by it.  Unlike a union, an alias is ordered
+;; -- list[int, str] is not list[str, int] -- so this is a plain combine over
+;; (origin, args) rather than union's set equality.
+;; ============================================================================
+GAH_FRAME equ 16            ; + 2 pushes = 32
+
+DEF_FUNC generic_alias_hash, GAH_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov rdi, [rbx + PyGenericAliasObject.ga_origin]
+    test rdi, rdi
+    jz .gah_no_origin
+    call obj_hash
+    jmp .gah_have_origin
+.gah_no_origin:
+    xor eax, eax
+.gah_have_origin:
+    mov r12, rax
+    mov rdi, [rbx + PyGenericAliasObject.ga_args]
+    test rdi, rdi
+    jz .gah_done
+    call obj_hash
+    imul r12, r12, 1000003
+    xor r12, rax
+.gah_done:
+    mov rax, r12
+    cmp rax, -1
+    jne .gah_ret
+    mov rax, -2
+.gah_ret:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC generic_alias_hash
+
+GRC_LEFT  equ 8
+GRC_RIGHT equ 16
+GRC_OP    equ 24
+GRC_FRAME equ 32            ; + 0 pushes = 32
+
+DEF_FUNC generic_alias_richcompare, GRC_FRAME
+    cmp edx, PY_EQ
+    je .grc_ok
+    cmp edx, PY_NE
+    jne .grc_decline
+.grc_ok:
+    mov [rbp - GRC_OP], edx
+    ; Both sides must be aliases; anything else declines so the protocol can
+    ; try the other operand.
+    V_TEST_PTR rdi, rax
+    ja .grc_decline
+    V_TEST_PTR rsi, rax
+    ja .grc_decline
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel generic_alias_type]
+    cmp rax, rcx
+    jne .grc_decline
+    mov rax, [rsi + PyObject.ob_type]
+    cmp rax, rcx
+    jne .grc_decline
+    mov [rbp - GRC_LEFT], rdi
+    mov [rbp - GRC_RIGHT], rsi
+
+    mov rdi, [rdi + PyGenericAliasObject.ga_origin]
+    mov rsi, [rsi + PyGenericAliasObject.ga_origin]
+    mov edx, PY_EQ
+    extern obj_richcompare_bool
+    call obj_richcompare_bool
+    cmp eax, 0
+    jl .grc_raised
+    test eax, eax
+    jz .grc_false
+
+    mov rdi, [rbp - GRC_LEFT]
+    mov rdi, [rdi + PyGenericAliasObject.ga_args]
+    mov rsi, [rbp - GRC_RIGHT]
+    mov rsi, [rsi + PyGenericAliasObject.ga_args]
+    mov edx, PY_EQ
+    call obj_richcompare_bool
+    cmp eax, 0
+    jl .grc_raised
+    test eax, eax
+    jz .grc_false
+
+    mov eax, 1
+    jmp .grc_answer
+.grc_false:
+    xor eax, eax
+.grc_answer:
+    cmp dword [rbp - GRC_OP], PY_NE
+    jne .grc_emit
+    xor eax, 1
+.grc_emit:
+    test eax, eax
+    jz .grc_emit_false
+    lea rax, [rel bool_true]
+    jmp .grc_emit_done
+.grc_emit_false:
+    lea rax, [rel bool_false]
+.grc_emit_done:
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.grc_decline:
+    xor eax, eax                ; a NULL Value: NotImplemented
+    xor edx, edx
+    leave
+    ret
+.grc_raised:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+END_FUNC generic_alias_richcompare
+
+section .data
 
 align 8
 global generic_alias_type
@@ -1827,11 +2215,11 @@ generic_alias_type:
     dq generic_alias_dealloc        ; tp_dealloc
     dq generic_alias_repr           ; tp_repr
     dq generic_alias_repr           ; tp_str
-    dq 0                            ; tp_hash
+    dq generic_alias_hash           ; tp_hash
     dq generic_alias_call           ; tp_call
     dq generic_alias_getattr        ; tp_getattr
     dq 0                            ; tp_setattr
-    dq 0                            ; tp_richcompare
+    dq generic_alias_richcompare    ; tp_richcompare
     dq 0                            ; tp_iter
     dq 0                            ; tp_iternext
     dq 0                            ; tp_init

@@ -1,184 +1,41 @@
-# io.py - Core I/O module (minimal for apython)
+"""io - the public interface to the streams _io and _pyio implement.
 
+Mirrors CPython's Lib/io.py, and is here for the same reason theirs is: _io
+holds the implementations, this holds the public names and the abstract base
+classes, which are the _io ones given a metaclass so that register() and
+isinstance() work against anything that merely behaves like a stream.
+"""
 
-class StringIO:
-    """Text I/O implementation using an in-memory buffer."""
+__all__ = ["BlockingIOError", "open", "open_code", "IOBase", "RawIOBase",
+           "FileIO", "BytesIO", "StringIO", "BufferedIOBase",
+           "BufferedReader", "BufferedWriter", "BufferedRandom", "BufferedRWPair",
+           "TextIOBase", "TextIOWrapper", "UnsupportedOperation",
+           "IncrementalNewlineDecoder", "DEFAULT_BUFFER_SIZE",
+           "SEEK_SET", "SEEK_CUR", "SEEK_END", "text_encoding"]
 
-    def __init__(self, initial_value=''):
-        self._buf = initial_value
-        self._pos = 0
+import _io
 
-    def read(self, size=-1):
-        if size < 0:
-            result = self._buf[self._pos:]
-            self._pos = len(self._buf)
-        else:
-            result = self._buf[self._pos:self._pos + size]
-            self._pos += len(result)
-        return result
+from _io import (BlockingIOError, BufferedIOBase, BufferedRWPair,
+                 BufferedRandom, BufferedReader, BufferedWriter, BytesIO,
+                 DEFAULT_BUFFER_SIZE, FileIO, IOBase,
+                 IncrementalNewlineDecoder, RawIOBase, StringIO, TextIOBase,
+                 TextIOWrapper, UnsupportedOperation, open, open_code,
+                 text_encoding)
 
-    def readline(self, size=-1):
-        buf = self._buf
-        pos = self._pos
-        idx = buf.find('\n', pos)
-        if idx < 0:
-            end = len(buf)
-        else:
-            end = idx + 1
-        if size >= 0:
-            end = min(end, pos + size)
-        result = buf[pos:end]
-        self._pos = end
-        return result
+SEEK_SET = 0
+SEEK_CUR = 1
+SEEK_END = 2
 
-    def readlines(self, hint=-1):
-        lines = []
-        total = 0
-        while True:
-            line = self.readline()
-            if not line:
-                break
-            lines.append(line)
-            total += len(line)
-            if 0 < hint <= total:
-                break
-        return lines
+UnsupportedOperation.__module__ = "io"
 
-    def write(self, s):
-        if not isinstance(s, str):
-            raise TypeError("string argument expected, got %r" % type(s).__name__)
-        pos = self._pos
-        buf = self._buf
-        if pos == len(buf):
-            self._buf = buf + s
-        else:
-            self._buf = buf[:pos] + s + buf[pos + len(s):]
-        self._pos = pos + len(s)
-        return len(s)
-
-    def writelines(self, lines):
-        for line in lines:
-            self.write(line)
-
-    def getvalue(self):
-        return self._buf
-
-    def tell(self):
-        return self._pos
-
-    def seek(self, pos, whence=0):
-        if whence == 0:
-            self._pos = max(0, pos)
-        elif whence == 1:
-            self._pos = max(0, self._pos + pos)
-        elif whence == 2:
-            self._pos = max(0, len(self._buf) + pos)
-        return self._pos
-
-    def truncate(self, size=None):
-        if size is None:
-            size = self._pos
-        self._buf = self._buf[:size]
-        return size
-
-    def close(self):
-        pass
-
-    def closed(self):
-        return False
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.close()
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        line = self.readline()
-        if not line:
-            raise StopIteration
-        return line
-
-
-class BytesIO:
-    """Binary I/O implementation using an in-memory bytes buffer."""
-
-    def __init__(self, initial_bytes=b''):
-        if isinstance(initial_bytes, (bytes, bytearray)):
-            self._buf = bytearray(initial_bytes)
-        else:
-            self._buf = bytearray()
-        self._pos = 0
-
-    def read(self, size=-1):
-        if size < 0:
-            result = bytes(self._buf[self._pos:])
-            self._pos = len(self._buf)
-        else:
-            result = bytes(self._buf[self._pos:self._pos + size])
-            self._pos += len(result)
-        return result
-
-    def write(self, b):
-        if isinstance(b, (bytes, bytearray)):
-            n = len(b)
-            pos = self._pos
-            buf = self._buf
-            end = pos + n
-            if end > len(buf):
-                buf += bytearray(end - len(buf))
-            buf[pos:end] = b
-            self._buf = buf
-            self._pos = end
-            return n
-        raise TypeError("a bytes-like object is required")
-
-    def getvalue(self):
-        return bytes(self._buf)
-
-    def tell(self):
-        return self._pos
-
-    def seek(self, pos, whence=0):
-        if whence == 0:
-            self._pos = max(0, pos)
-        elif whence == 1:
-            self._pos = max(0, self._pos + pos)
-        elif whence == 2:
-            self._pos = max(0, len(self._buf) + pos)
-        return self._pos
-
-    def truncate(self, size=None):
-        if size is None:
-            size = self._pos
-        self._buf = self._buf[:size]
-        return size
-
-    def close(self):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.close()
-
-
-# TextIOBase and similar are stubs for compatibility
-class IOBase:
-    pass
-
-class RawIOBase(IOBase):
-    pass
-
-class BufferedIOBase(IOBase):
-    pass
-
-class TextIOBase(IOBase):
-    pass
-
-# Constants
-DEFAULT_BUFFER_SIZE = 8192
+# The concrete classes are not subclasses of the abstract ones -- FileIO comes
+# from _io and derives from _io._RawIOBase, not from _pyio.RawIOBase -- so
+# isinstance() has to be told.  CPython's io.py does exactly this, and for the
+# same reason.
+RawIOBase.register(FileIO)
+for _klass in (BytesIO, BufferedReader, BufferedWriter, BufferedRandom,
+               BufferedRWPair):
+    BufferedIOBase.register(_klass)
+for _klass in (StringIO, TextIOWrapper):
+    TextIOBase.register(_klass)
+del _klass

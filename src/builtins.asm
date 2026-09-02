@@ -1211,6 +1211,7 @@ global builtin_float
 BF_FRAME equ 32             ; + 0 pushes = 32
 BF_START  equ 8              ; the string strtod was handed
 BF_ENDPTR equ 16            ; where strtod stopped
+BF_OBJ    equ 24            ; the str object itself, for the error message
 DEF_FUNC builtin_float, BF_FRAME
 
     cmp rsi, 0
@@ -1289,6 +1290,7 @@ DEF_FUNC builtin_float, BF_FRAME
 
 .float_from_str:
     ; rdi = PyStrObject*. Parse string → double via strtod.
+    mov [rbp - BF_OBJ], rdi
     lea rdi, [rdi + PyStrObject.data]   ; rdi = null-terminated string data
     mov [rbp - BF_START], rdi                  ; save start ptr
 
@@ -1328,7 +1330,12 @@ DEF_FUNC builtin_float, BF_FRAME
     ret
 
 .float_str_error:
-    RAISE exc_ValueError_type, "could not convert string to float"
+    ; CPython names the string it could not convert, and int() here already
+    ; does; float's message had lost it.
+    mov rsi, [rbp - BF_OBJ]
+    CSTRING rdi, "could not convert string to float: "
+    extern raise_value_error_with_repr
+    call raise_value_error_with_repr
 
 .float_no_args:
     ; float() -> 0.0
@@ -1494,6 +1501,14 @@ DEF_FUNC builtins_init
     lea rsi, [rel bi_name_float]
     lea rdx, [rel float_type]
     lea rcx, [rel float_type_call]
+    call add_builtin_type
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_complex]
+    extern complex_type
+    extern complex_type_call
+    lea rdx, [rel complex_type]
+    lea rcx, [rel complex_type_call]
     call add_builtin_type
 
     mov rdi, rbx
@@ -1800,6 +1815,46 @@ DEF_FUNC builtins_init
 
     mov rdi, rbx
     lea rsi, [rel bi_name_OSError]
+    lea rdx, [rel exc_OSError_type]
+    call add_exc_type_builtin
+
+    ; OSError's own constructor: it parses (errno, strerror, filename, ...),
+    ; truncates .args, and remaps to a subclass by errno.  It goes in tp_new,
+    ; which exc_type_call consults, and only on OSError itself -- DEF_EXC_TYPE
+    ; leaves the slot 0 on the subclasses, which is what CPython wants: the
+    ; remapping applies when the type is exactly OSError.
+    extern oserror_new
+    lea rax, [rel exc_OSError_type]
+    lea rcx, [rel oserror_new]
+    mov [rax + PyTypeObject.tp_new], rcx
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_FileNotFoundError]
+    extern exc_FileNotFoundError_type
+    lea rdx, [rel exc_FileNotFoundError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_FileExistsError]
+    extern exc_FileExistsError_type
+    lea rdx, [rel exc_FileExistsError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_UnicodeTranslateError]
+    extern exc_UnicodeTranslateError_type
+    lea rdx, [rel exc_UnicodeTranslateError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_IOError]
+    extern exc_OSError_type
+    lea rdx, [rel exc_OSError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_EnvironmentError]
+    extern exc_OSError_type
     lea rdx, [rel exc_OSError_type]
     call add_exc_type_builtin
 
@@ -2308,6 +2363,7 @@ bi_name_isinstance:   db "isinstance", 0
 bi_name_issubclass:   db "issubclass", 0
 bi_name_repr:         db "repr", 0
 bi_name_float:        db "float", 0
+bi_name_complex:      db "complex", 0
 bi_name_bool:         db "bool", 0
 bi_name_object:       db "object", 0
 bi_name_build_class:  db "__build_class__", 0
@@ -2374,6 +2430,11 @@ bi_name_NotImplementedError: db "NotImplementedError", 0
 bi_name_OverflowError:     db "OverflowError", 0
 bi_name_AssertionError:    db "AssertionError", 0
 bi_name_OSError:           db "OSError", 0
+bi_name_FileNotFoundError: db "FileNotFoundError", 0
+bi_name_FileExistsError: db "FileExistsError", 0
+bi_name_UnicodeTranslateError: db "UnicodeTranslateError", 0
+bi_name_IOError: db "IOError", 0
+bi_name_EnvironmentError: db "EnvironmentError", 0
 bi_name_LookupError:       db "LookupError", 0
 bi_name_ArithmeticError:   db "ArithmeticError", 0
 bi_name_RecursionError:    db "RecursionError", 0

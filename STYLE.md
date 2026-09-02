@@ -4,15 +4,16 @@ Rules for writing x86-64 NASM in this codebase.  Read CLAUDE.md first for
 architecture context (register convention, struct layouts, build commands);
 the two overlap deliberately, and where both speak they agree.
 
-This guide covers `src/` and `compiler/` both.  Where the two differ, the
+This guide covers all of `src/`, the source compiler included.  Where
+`src/compiler/` differs, the
 difference is called out; the compiler's own rules are collected under
-[`compiler/` differs](#compiler-differs).
+[`src/compiler/` differs](#srccompiler-differs).
 
 ## What is mechanically enforced
 
-NASM is invoked with **no warning flags** (`-f elf64 -I include/ -I compiler/
+NASM is invoked with **no warning flags** (`-f elf64 -I src/include/ -I src/compiler/
 -g -F dwarf`).  It will not catch a 4-byte/8-byte field mismatch, a misaligned
-frame, or a clobbered callee-saved register.  `compiler/lint.py` is the only
+frame, or a clobbered callee-saved register.  `src/compiler/lint.py` is the only
 net, and it runs inside `make check`.
 
 These run over **every** hand-written `.asm` in the tree:
@@ -29,7 +30,7 @@ These run over **every** hand-written `.asm` in the tree:
 | No raw `[rbp +- N]`; frame slots carry named `equ` constants | `check_frame_offsets` | error |
 | Heavy separators are `;;` and 76 `=`, 79 columns | `check_separators` | error |
 
-These are scoped to `compiler/*.asm` plus `src/main.asm`:
+These are scoped to `src/compiler/*.asm` plus `src/main.asm`:
 
 | Rule | Check | Severity |
 |------|-------|----------|
@@ -83,11 +84,11 @@ extern exc_TypeError_type
 section .text
 ```
 
-In `compiler/`, `compiler.inc` is always the last include, and the file's last
+In `src/compiler/`, `compiler.inc` is always the last include, and the file's last
 line is a bare `ASM_INIT`.
 
 A one-line header is fine for a small file, but the mature files state the
-invariant that makes the file reviewable — see `compiler/codegen.asm` and
+invariant that makes the file reviewable — see `src/compiler/codegen.asm` and
 `src/traceback.asm`.  That is the form to imitate.
 
 Two relaxations the codebase uses on purpose:
@@ -198,7 +199,7 @@ an opcode with N trailing CACHE entries, with a comment naming the count:
     DISPATCH
 ```
 
-The counts are listed in CLAUDE.md.  `include/opcodes.inc` no longer carries
+The counts are listed in CLAUDE.md.  `src/include/opcodes.inc` no longer carries
 `CACHE_*` constants, and every handler hardcodes the byte count, so the comment
 is the only thing tying the two together.  Get this wrong and execution resumes
 in the middle of an instruction.
@@ -368,7 +369,7 @@ The SysV ABI wants `rsp` 16-byte aligned at every `call`.  After `DEF_FUNC`'s
 
 **Pad the frame, not the push list** — the pushes are there because the values
 are needed.  Much of `src/` predates this rule and violates it harmlessly, but
-anything that reaches libc must obey it: `compiler/` calls `strtod`, and glibc's
+anything that reaches libc must obey it: `src/compiler/` calls `strtod`, and glibc's
 float paths use aligned SSE stores.
 
 Two mechanics worth knowing:
@@ -417,7 +418,7 @@ Two safe patterns for preserving values across calls:
 
 **Eval loop registers** (`rbx`, `r12`, `r13`, `r14`) hold interpreter state and
 must never be repurposed within an opcode handler.  `r15` is free **for opcode
-handlers in `src/`**; in `compiler/` it is an ordinary callee-saved register and
+handlers in `src/`**; in `src/compiler/` it is an ordinary callee-saved register and
 must be saved like the rest.
 
 ## Stack Macros
@@ -450,7 +451,7 @@ the overflow path, so it clobbers caller-saved registers too.
 ## Value Macros
 
 The Value encoding is described in CLAUDE.md and `valuebox.md`; these are
-the macros that implement it, all in `include/value.inc`.
+the macros that implement it, all in `src/include/value.inc`.
 
 **Classify** — each takes the value and a scratch register, which must differ:
 
@@ -610,12 +611,12 @@ An error path is still a return path: if the function pushed callee-saved
 registers, the error exit pops them in the same mirrored order as the success
 exit.
 
-## `compiler/` differs
+## `src/compiler/` differs
 
 The source compiler is a peer subsystem to `src/`, with its own error protocol
 and its own lifetimes.  All six lint checks apply to it, and only to it.
 
-**Never call `raise_exception` from `compiler/`.**  It tail-jumps into
+**Never call `raise_exception` from `src/compiler/`.**  It tail-jumps into
 `eval_exception_unwind`, which calls `fatal_error` when there is no live
 interpreter frame — and `./apython foo.py` compiles before any frame exists.
 Record the error with `comp_error()` and return 0/NULL; the driver turns it into
@@ -624,7 +625,7 @@ so a failing path can `jmp` into it and be done.
 
 The exception is `compile()`, `exec()` and `eval()` — they are called *from* a
 running frame, so raising there is correct, and their eleven `raise_exception`
-sites in `compiler/compile.asm` are deliberate.  The rule is about the paths
+sites in `src/compiler/compile.asm` are deliberate.  The rule is about the paths
 reachable from `main`.
 
 **The first error wins.**  The parser keeps running after one is recorded, in a

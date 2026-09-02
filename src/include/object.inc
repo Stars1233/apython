@@ -63,6 +63,22 @@ struc PyFloatObject
     .value:     resq 1    ; +16: double value
 endstruc
 
+; Complex object.
+;
+; Unlike float -- which is a NaN-boxed immediate, leaving PyFloatObject above
+; all but vestigial -- a complex is a real heap object.  A pointer is its own
+; Value, so the box is untouched and --selftest-value has nothing to say about
+; it.  It holds two raw doubles and no references, so it is invisible to the
+; collector: no tp_traverse, no tp_clear, no TYPE_FLAG_HAVE_GC, and ap_malloc
+; rather than gc_alloc (gc_alloc hands back raw + GC_HEAD_SIZE, which
+; obj_dealloc's plain-free path would hand to ap_free unshifted).
+struc PyComplexObject
+    .ob_refcnt: resq 1    ; +0
+    .ob_type:   resq 1    ; +8
+    .cval_real: resq 1    ; +16: double
+    .cval_imag: resq 1    ; +24: double
+endstruc
+
 ; String object
 ; A str stores UTF-8 and carries both lengths: ob_size is what the bytes
 ; occupy, ob_length is how many code points that is.  Python counts in code
@@ -86,22 +102,41 @@ struc PyBytesObject
     .data:                 ; +24: raw bytes (variable)
 endstruc
 
-; ByteArray object — same layout as bytes (variable-size inline data)
+; ByteArray object.  Unlike bytes, the data is OUT OF LINE: a bytearray is
+; mutable and grows, and inline data at a fixed offset in the object body
+; cannot -- which is why it used to have no append, no extend and no slice
+; assignment at all.  ob_bytes is its own allocation, doubling as it fills, so
+; appending n bytes costs O(n) copies in total.  The compiler's Buf is the
+; same shape.
+;
+; The buffer is always NUL-terminated one byte past ob_size, so the data
+; pointer can be handed to anything that wants a C string; ob_cap counts the
+; usable bytes and excludes that terminator.
 struc PyByteArrayObject
     .ob_refcnt: resq 1    ; +0
     .ob_type:   resq 1    ; +8
     .ob_size:   resq 1    ; +16: length in bytes
-    .data:                 ; +24: raw bytes (variable)
+    .ob_cap:    resq 1    ; +24: usable bytes at ob_bytes, excluding the NUL
+    .ob_bytes:  resq 1    ; +32: the buffer
+    .ob_exports: resq 1   ; +40: live memoryviews over it, which block a resize
 endstruc
 
 ; MemoryView object — reference to a slice of a bytes-like object
 struc PyMemoryViewObject
     .ob_refcnt: resq 1    ; +0
     .ob_type:   resq 1    ; +8
-    .mv_source: resq 1    ; +16: ptr to source bytes-like object (strong ref)
-    .mv_buf:    resq 1    ; +24: ptr to start of buffer data
-    .mv_len:    resq 1    ; +32: length of view in bytes
+    .mv_source: resq 1    ; +16: the source object, strong; 0 once released
+    .mv_buf:    resq 1    ; +24: the start of the data; 0 once released
+    .mv_len:    resq 1    ; +32: the view's length in BYTES, not items
+    .mv_itemsize: resq 1  ; +40: bytes per item, 1 unless cast()
+    .mv_format:   resq 1  ; +48: the one-character format, as a C string
+    .mv_readonly: resq 1  ; +56: 1 for a view over bytes
 endstruc
+
+; A released memoryview: mv_buf is 0 and every operation raises.  The source
+; reference is dropped at that moment rather than at dealloc, which is the
+; point of release() -- it lets the buffer's owner resize again.
+MV_RELEASED equ 0
 
 ; List object
 struc PyListObject
@@ -465,6 +500,47 @@ struc PyFileObject
     .file_mode:   resq 1  ; +32: mode string ('w', 'r')
 endstruc
 
+; _io.FileIO.  The first three fields are PyInstanceObject's, because FileIO
+; is a heaptype built with type_from_parts over _RawIOBase: instance_new
+; allocates tp_basicsize and zero-fills, so the fields below start where the
+; base's layout ends and cost nothing but a patched tp_basicsize.
+struc PyFileIOObject
+    .ob_refcnt:   resq 1  ; +0
+    .ob_type:     resq 1  ; +8
+    .inst_dict:   resq 1  ; +16: the tp_dictoffset _RawIOBase hands down
+    .fio_fd:      resq 1  ; +24: the descriptor, meaningless unless FIO_OPEN
+    .fio_flags:   resq 1  ; +32
+    .fio_name:    resq 1  ; +40: the name as given, a Value -- an adopted
+                          ;      descriptor makes it an int, not a str
+    .fio_blksize: resq 1  ; +48: st_blksize, what readall() grows by
+    .fio_mode:    resq 1  ; +56: the mode string, strong
+endstruc
+
+FIO_OPEN      equ 0x01
+FIO_READABLE  equ 0x02
+FIO_WRITABLE  equ 0x04
+FIO_APPENDING equ 0x08
+FIO_CREATED   equ 0x10
+FIO_CLOSEFD   equ 0x20
+; Whether seekability has been asked yet, and the answer.  One lseek settles
+; it, and a pipe must answer False rather than raising every time.
+FIO_SEEK_KNOWN equ 0x40
+FIO_SEEKABLE   equ 0x80
+
+; _io.BytesIO.  Laid out like PyFileIOObject and for the same reason: a
+; heaptype over _BufferedIOBase whose tp_basicsize is patched, so the fields
+; below sit past the instance header the base hands down.
+struc PyBytesIOObject
+    .ob_refcnt:   resq 1  ; +0
+    .ob_type:     resq 1  ; +8
+    .inst_dict:   resq 1  ; +16
+    .bio_buf:     resq 1  ; +24: the storage, or 0 once closed
+    .bio_size:    resq 1  ; +32: bytes written, which is what getvalue returns
+    .bio_cap:     resq 1  ; +40: bytes allocated
+    .bio_pos:     resq 1  ; +48: the read/write cursor
+    .bio_exports: resq 1  ; +56: live getbuffer() views, which block a resize
+endstruc
+
 ; Async task object (for event loop)
 struc AsyncTask
     .ob_refcnt:    resq 1  ; +0
@@ -702,6 +778,140 @@ struc PyMappingMethods
     .mp_ass_subscript: resq 1  ; +16
 endstruc
 
+; Linux x86-64 `struct stat`, as the stat/lstat/fstat syscalls fill it.
+; STAT_SIZE and a couple of the offsets were copied privately into
+; src/marshal.asm, src/compiler/compile.asm and inline into
+; src/builtins_obj.asm; posix reads nearly all of them.
+;
+; st_uid and st_gid are 32-bit and st_mode is too -- a 64-bit read of any of
+; the three silently ORs in its neighbour, which is the trap CLAUDE.md names.
+struc StatBuf
+    .st_dev:        resq 1  ; +0
+    .st_ino:        resq 1  ; +8
+    .st_nlink:      resq 1  ; +16
+    .st_mode:       resd 1  ; +24  (32-bit)
+    .st_uid:        resd 1  ; +28  (32-bit)
+    .st_gid:        resd 1  ; +32  (32-bit)
+    .st_pad0:       resd 1  ; +36
+    .st_rdev:       resq 1  ; +40
+    .st_size:       resq 1  ; +48
+    .st_blksize:    resq 1  ; +56
+    .st_blocks:     resq 1  ; +64
+    .st_atime:      resq 1  ; +72
+    .st_atime_ns:   resq 1  ; +80
+    .st_mtime:      resq 1  ; +88
+    .st_mtime_ns:   resq 1  ; +96
+    .st_ctime:      resq 1  ; +104
+    .st_ctime_ns:   resq 1  ; +112
+    .st_unused:     resq 3  ; +120
+endstruc                    ; 144 bytes
+
+; open() flags, as <fcntl.h> has them on Linux.  builtin_open_fn hardcoded
+; 0x241, 0x441 and 0xc1 inline.
+O_RDONLY    equ 0o0
+O_WRONLY    equ 0o1
+O_RDWR      equ 0o2
+O_ACCMODE   equ 0o3
+O_CREAT     equ 0o100
+O_EXCL      equ 0o200
+O_NOCTTY    equ 0o400
+O_TRUNC     equ 0o1000
+O_APPEND    equ 0o2000
+O_NONBLOCK  equ 0o4000
+O_DIRECTORY equ 0o200000
+O_NOFOLLOW  equ 0o400000
+O_CLOEXEC   equ 0o2000000
+
+; access() modes
+F_OK equ 0
+X_OK equ 1
+W_OK equ 2
+R_OK equ 4
+
+; lseek() whence
+SEEK_SET equ 0
+SEEK_CUR equ 1
+SEEK_END equ 2
+
+; st_mode's file-type field, and the mask that selects it.
+S_IFMT   equ 0o170000
+S_IFSOCK equ 0o140000
+S_IFLNK  equ 0o120000
+S_IFREG  equ 0o100000
+S_IFBLK  equ 0o060000
+S_IFDIR  equ 0o040000
+S_IFCHR  equ 0o020000
+S_IFIFO  equ 0o010000
+
+; linux_dirent64, the record getdents64 writes.  d_reclen is the stride to the
+; next record and is TWO bytes: a 64-bit read of it ORs in d_type and five
+; bytes of the name, which is exactly the multi-gigabyte-memcpy bug CLAUDE.md
+; records.  lint.py derives widths from `resd` and so does not catch a `resw`.
+struc LinuxDirent64
+    .d_ino:    resq 1   ; +0
+    .d_off:    resq 1   ; +8
+    .d_reclen: resw 1   ; +16  (16-bit -- the stride)
+    .d_type:   resb 1   ; +18
+    .d_name:            ; +19, NUL-terminated
+endstruc
+
+; Linux's `struct utsname`: six fixed 65-byte NUL-terminated fields.  os.uname()
+; exposes the first five; the sixth, domainname, is a GNU extension CPython
+; does not report.
+UTSNAME_FIELD equ 65
+UTSNAME_SIZE  equ 65 * 6
+
+; ioctl request numbers
+TCGETS equ 0x5401
+
+; fcntl commands, for the close-on-exec flag os.set_inheritable moves
+F_GETFD    equ 1
+F_SETFD    equ 2
+FD_CLOEXEC equ 1
+
+; d_type values
+DT_UNKNOWN equ 0
+DT_FIFO    equ 1
+DT_CHR     equ 2
+DT_DIR     equ 4
+DT_BLK     equ 6
+DT_REG     equ 8
+DT_LNK     equ 10
+DT_SOCK    equ 12
+
+; waitpid() options, and the encoding of the status word it fills in.
+WNOHANG   equ 1
+WUNTRACED equ 2
+WCONTINUED equ 8
+
+; A struct sequence: a tuple whose entries are also named (os.stat_result,
+; sys.version_info).  The descriptor hangs off the end of the type -- one
+; qword just past PyTypeObject -- so tp_getattr, tp_repr and tp_dealloc can
+; each find their own from the instance's type instead of needing a thunk.
+struc StructSeqField
+    .name:  resq 1          ; +0: NUL-terminated C string
+    .index: resq 1          ; +8: below n_in_sequence => ob_item[index];
+endstruc                    ;     at or above it => the (index - n) tail slot
+
+struc StructSeqDesc
+    .n_in_sequence: resq 1  ; +0: the tuple's length, NOT the field count
+    .n_fields:      resq 1  ; +8: including the named-only tail
+    .fields:        resq 1  ; +16: -> StructSeqField[n_fields]
+endstruc
+
+; The descriptor's offset within a struct-sequence type object.
+STRUCTSEQ_DESC equ PyTypeObject_size
+
+; One row of builtin_module_table (src/modtable.asm): a module compiled into
+; the interpreter.  Both sys.modules and sys.builtin_module_names are built
+; from it, so the two cannot drift apart again.
+struc BuiltinModule
+    .name:      resq 1      ; +0: NUL-terminated C string
+    .create_fn: resq 1      ; +8: PyObject *(*)(void), or 0 when import_init
+endstruc                    ;     wires that module some other way
+
+BUILTIN_MODULE_COUNT equ 10
+
 ; Type flags
 TYPE_FLAG_HEAPTYPE     equ 0x0001
 TYPE_FLAG_BASETYPE     equ 0x0002
@@ -718,6 +928,20 @@ TYPE_FLAG_HAS_SLOTS     equ 0x2000
 ; a metaclass of its own -- so a classmethod reached through such a class bound
 ; the metaclass instead of the class.
 TYPE_FLAG_METATYPE      equ 0x8000
+; float and complex keep their value inline, exactly as int and str do, so a
+; subclass cannot come from instance_new either -- it has to be built by the
+; base's own constructor, and every conversion helper has to recognise it.
+; The low nibble range is full; these two start the next one.
+TYPE_FLAG_FLOAT_SUBCLASS   equ 0x10000
+TYPE_FLAG_COMPLEX_SUBCLASS equ 0x20000
+; bytearray keeps its bytes in a separate allocation, so a subclass instance
+; owns memory the generic instance_dealloc knows nothing about.
+TYPE_FLAG_BYTEARRAY_SUBCLASS equ 0x40000
+; bytes keeps its data inline as str does, so a subclass instance is a pointer
+; whose ob_type is not bytes_type.  Without a flag for it BINOP_REQUIRE_LEFT
+; was given a literal 0 at bytes' two arithmetic slots, and every `+` and `*`
+; on a bytes subclass declined into a TypeError.
+TYPE_FLAG_BYTES_SUBCLASS equ 0x80000
 
 ; Comparison opcodes (used by tp_richcompare)
 PY_LT equ 0

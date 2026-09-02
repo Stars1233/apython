@@ -2,9 +2,9 @@
 """Static checks over the assembly, for bug classes that are invisible at
 assembly time and expensive to find at runtime.
 
-Six checks run over every hand-written .asm in the tree; four are scoped to
-compiler/ plus src/main.asm, because the rest of src/ predates the alignment
-rule and would drown the signal.  See STYLE.md for which is which.
+Most checks run over every hand-written .asm in the tree; the rest are scoped
+to src/compiler plus src/main.asm, because the rest of src/ predates the
+alignment rule and would drown the signal.  See STYLE.md for which is which.
 
 The two that started it both bit during development:
 
@@ -27,7 +27,8 @@ Run standalone, or as part of `make check`.
 """
 import re, sys, glob, os
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# .../src/compiler/lint.py -> the repo root is three levels up.
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 R64 = (r'\b(?:rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|r8|r9|r10|r11|r12|r13|r14|r15)\b')
 
 def dword_fields(paths):
@@ -412,17 +413,16 @@ def check_guards(paths):
 
 def all_asm():
     """Every hand-written .asm in the tree."""
-    return sorted(glob.glob('src/*.asm') + glob.glob('src/*/*.asm')
-                  + glob.glob('compiler/*.asm'))
+    return sorted(glob.glob('src/*.asm') + glob.glob('src/*/*.asm'))
 
 def main():
     os.chdir(ROOT)
-    # Four of the six checks are scoped to compiler/ plus src/main.asm: main
-    # holds argc and argv across compile_source, and DEF_FUNC main + 5 pushes
-    # enters glibc's strtod misaligned on any source file with a float literal.
-    # The rest of src/ predates the alignment rule -- 315 functions violate it
-    # harmlessly -- and would drown the signal.  See STYLE.md.
-    scoped = sorted(glob.glob('compiler/*.asm')) + ['src/main.asm']
+    # Some checks are scoped to src/compiler plus src/main.asm: main holds argc
+    # and argv across compile_source, and DEF_FUNC main + 5 pushes enters
+    # glibc's strtod misaligned on any source file with a float literal.  The
+    # rest of src/ predates the alignment rule and would drown the signal.
+    # See STYLE.md.
+    scoped = sorted(glob.glob('src/compiler/*.asm')) + ['src/main.asm']
 
     # The other two are clean across the whole tree, so they run over the whole
     # tree: there is no debt to pay down first, and the only cost of scoping
@@ -432,9 +432,10 @@ def main():
     # Every header that declares a struct, not just the two the compiler uses.
     # sre.inc and eventloop.inc were missing, which is why the 8-byte read of
     # SRE_PatternObject.flags in sre_pattern.asm went unseen.
-    fields = dword_fields(['compiler/compiler.inc'] + sorted(glob.glob('include/*.inc')))
+    fields = dword_fields(sorted(glob.glob('src/include/*.inc'))
+                          + ['src/compiler/compiler.inc'])
 
-    headers = sorted(glob.glob('include/*.inc')) + ['compiler/compiler.inc']
+    headers = sorted(glob.glob('src/include/*.inc')) + ['src/compiler/compiler.inc']
 
     problems = (check_field_widths(everything, fields) + check_section(everything)
                 + check_rel(everything) + check_markers(everything)

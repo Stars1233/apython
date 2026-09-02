@@ -14,6 +14,7 @@
 
 section .text
 
+extern get_iterator_opt
 extern eval_dispatch
 extern eval_saved_r13
 extern eval_co_consts
@@ -732,6 +733,8 @@ DEF_FUNC_BARE op_unpack_sequence
     mov edx, 1
     call tuple_type_call            ; raises for a non-iterable
     add rsp, 16
+    test rax, rax
+    jz .unpack_iter_raised
     pop rdi                         ; the original
     push rax                        ; the materialised tuple
     call obj_decref                 ; release the original
@@ -742,6 +745,23 @@ DEF_FUNC_BARE op_unpack_sequence
     mov rax, [rdi + PyObject.ob_type]
     jmp .unpack_tuple
 
+
+.unpack_iter_raised:
+    ; tuple_type_call answers NULL when the iteration itself raised -- a
+    ; __getitem__ or __next__ that threw partway through.  Reading ob_type off
+    ; that NULL is how `a, b, c = G()` became a segfault instead of the
+    ; exception G raised.
+    ;
+    ; The sequence is NOT released here.  The unwinder restores r13 from
+    ; eval_saved_r13, which is the value stack as it stood before this
+    ; instruction ran -- so the sequence VPOP_VAL took off the top is back on
+    ; it, and the unwind releases it.  Decref'ing it here as well frees it
+    ; while the unwinder is still holding it, which valgrind reports as an
+    ; invalid read inside eval_exception_unwind.
+    add rsp, 32                     ; the saved original, the count, and the
+                                    ; sequence Value the prologue pushed
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
 
 .unpack_type_error:
     ; Unknown type
@@ -1218,7 +1238,8 @@ LE_LIST     equ 8
 LE_ITERABLE equ 16
 LE_COUNT    equ 24
 LE_CURSOR   equ 32
-DEF_FUNC op_list_extend, 32
+LE_EXC      equ 40        ; current_exception before the iteration started
+DEF_FUNC op_list_extend, 48
     ; locals: [rbp - LE_LIST]=list, [rbp - LE_ITERABLE]=iterable, [rbp - LE_COUNT]=count, [rbp - LE_CURSOR]=items
 
     ; TOS = iterable
@@ -1292,18 +1313,17 @@ DEF_FUNC op_list_extend, 32
     jmp .extend_done          ; or we fall into .extend_generic and re-append
 
 .extend_generic:
-    ; Generic iterable: tp_iter + tp_iternext loop
-    mov rsi, [rbp - LE_ITERABLE]         ; iterable
-    mov rax, [rsi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
-    test rax, rax
-    jz .extend_type_error
-    mov rdi, rsi
-    call rax                   ; tp_iter(iterable) → iterator
+    ; get_iterator_opt, not a tp_iter read: an object with __getitem__
+    ; and no __iter__ is iterable, and the slot read rejected it.
+    ; This is what `f(*seq)`, `[*seq]` and `(*seq,)` compile to.
+    mov rdi, [rbp - LE_ITERABLE]         ; iterable
+    mov esi, TAG_PTR
+    call get_iterator_opt
     test rax, rax
     jz .extend_type_error
     mov [rbp - LE_CURSOR], rax          ; save iterator (reusing locals slot)
 
+    DUNDER_EXC_SAVE [rbp - LE_EXC]
 .extend_generic_loop:
     mov rdi, [rbp - LE_CURSOR]         ; iterator
     mov rax, [rdi + PyObject.ob_type]
@@ -1335,6 +1355,13 @@ DEF_FUNC op_list_extend, 32
     mov rdi, [rbp - LE_CURSOR]
     call obj_decref
 
+    ; tp_iternext answers NULL for a clean exhaustion and for a __next__ that
+    ; raised alike, and eb7cdce made the second reachable from ordinary code
+    ; by enabling the legacy __getitem__ protocol.  Without the distinction
+    ; `[*G()]` for a G whose __getitem__ throws built a short list and left
+    ; the exception to surface at some later, unrelated instruction.
+    EXC_RAISED_SINCE [rbp - LE_EXC], rcx, .extend_generic_raised
+
 .extend_done:
     ; DECREF iterable
     mov rdi, [rbp - LE_ITERABLE]
@@ -1342,6 +1369,14 @@ DEF_FUNC op_list_extend, 32
 
     leave
     DISPATCH
+
+.extend_generic_raised:
+    ; The iterable is not released here.  The unwinder restores r13 to the
+    ; value stack as it stood before this instruction ran, where VPOP_VAL had
+    ; not yet taken the iterable off it, so the unwind owns that reference.
+    extern eval_exception_unwind
+    leave
+    jmp eval_exception_unwind
 
 .extend_type_error:
     RAISE exc_TypeError_type, "list.extend() argument must be iterable"
@@ -1491,6 +1526,7 @@ DEF_FUNC_BARE op_contains_op
     mov rdi, rax
     mov rsi, rdx
     extern obj_is_true
+    extern obj_richcompare_bool
     V_PACK rdi, rsi
     call obj_is_true
     mov ecx, eax              ; save truthiness
@@ -1545,7 +1581,10 @@ DEF_FUNC_BARE op_contains_op
     call rax                     ; tp_iter(container) → iterator
     test rax, rax
     jz .contains_getitem_fallback
-    push rax                     ; save iterator (+8 shift)
+    mov rcx, [rel current_exception]
+    push rcx                     ; what was in flight before the loop, so a
+                                 ; NULL below can be told from an exhaustion
+    push rax                     ; save iterator (+16 shift now)
 
 .contains_iter_loop:
     ; Call tp_iternext(iterator) → (rax=payload, edx=tag) or (0, TAG_NULL)
@@ -1559,69 +1598,67 @@ DEF_FUNC_BARE op_contains_op
 
     ; Identity check: payload and tag both match → found
     ; +8 for iterator push on stack
-    cmp rax, [rsp + 8 + CN_LEFT]
+    cmp rax, [rsp + 16 + CN_LEFT]
     jne .contains_iter_try_eq
-    cmp edx, [rsp + 8 + CN_LTAG]
+    cmp edx, [rsp + 16 + CN_LTAG]
     je .contains_iter_found_decref
 
 .contains_iter_try_eq:
-    ; Both SmallInt → direct value compare
+    ; obj_richcompare_bool answers for every combination of representations
+    ; and propagates a raising __eq__.  What stood here open-coded the
+    ; comparison instead, and handled exactly two shapes: both SmallInt, or a
+    ; TAG_PTR element.  A SmallInt element against a heap-int value fell
+    ; through to identity and answered False -- so `98 in memoryview(b"abc..")`
+    ; was False while `98 in list(mv)` was True, and every int outside the
+    ; immediate range disagreed with itself depending on which side it sat on.
     push rax                     ; save elem payload
     push rdx                     ; save elem tag
-    mov r8d, edx                ; elem tag
-    mov ecx, [rsp + 16 + 8 + CN_LTAG]  ; value tag
-    cmp r8d, TAG_SMALLINT
-    jne .contains_iter_slow_eq
-    cmp ecx, TAG_SMALLINT
-    jne .contains_iter_slow_eq
-    ; Both SmallInt
-    cmp rax, [rsp + 16 + 8 + CN_LEFT]
-    pop rdx
-    pop rax
-    je .contains_iter_found_decref_elem
-    jmp .contains_iter_loop
-
-.contains_iter_slow_eq:
-    ; Use tp_richcompare for equality
-    ; rdi = elem (already on stack[+8]), rsi = value, edx = PY_EQ, rcx = elem_tag, r8 = value_tag
-    mov rdi, [rsp + 8]            ; elem payload
-    mov rsi, [rsp + 16 + 8 + CN_LEFT]  ; value payload
-    mov edx, 2                     ; PY_EQ
-    mov ecx, [rsp]                 ; elem tag
-    mov r8d, [rsp + 16 + 8 + CN_LTAG] ; value tag
-    ; Resolve element type
-    cmp ecx, TAG_PTR
-    jne .contains_iter_skip_eq     ; for non-PTR non-SmallInt, skip (identity only)
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_richcompare]
-    test rax, rax
-    jz .contains_iter_skip_eq
-    V_PACK rdi, rcx             ; left  -> Value
-    V_PACK rsi, r8              ; right -> Value
-    call rax                        ; tp_richcompare(left, right, PY_EQ, left_tag, right_tag)
-    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
-    ; Result: (rax=payload, edx=tag). Check if True
-    push rax
-    push rdx
     mov rdi, rax
     mov rsi, rdx
-    extern obj_is_true
-    V_PACK rdi, rsi
-    call obj_is_true
-    mov r8d, eax
-    pop rsi                         ; result tag
-    pop rdi                         ; result payload
-    DECREF_VAL rdi, rsi
-    pop rdx                         ; elem tag
-    pop rax                         ; elem payload
-    test r8d, r8d
+    V_PACK rdi, rsi              ; element -> Value
+    mov rsi, [rsp + 16 + 16 + CN_LEFT]
+    mov rcx, [rsp + 16 + 16 + CN_LTAG]
+    push rdi
+    sub rsp, 8                   ; keep rsp 16-aligned across the call
+    V_PACK rsi, rcx              ; the searched value -> Value
+    mov rdi, [rsp + 8]
+    mov edx, 2                   ; PY_EQ, set last: V_PACK can box, and the
+                                 ; call that boxes clobbers rdx
+    call obj_richcompare_bool
+    add rsp, 16
+    cmp eax, 0
+    jl .contains_iter_eq_raised
+    test eax, eax
+    pop rdx                      ; elem tag
+    pop rax                      ; elem payload
     jnz .contains_iter_found_decref_elem
     jmp .contains_iter_loop
 
-.contains_iter_skip_eq:
+.contains_iter_eq_raised:
+    ; __eq__ raised.  Drop the element and the iterator and let the pending
+    ; exception through rather than answering False.
     pop rdx
     pop rax
-    jmp .contains_iter_loop
+    mov rdi, rax
+    mov rsi, rdx
+    DECREF_VAL rdi, rsi
+    pop rdi                      ; iterator
+    call obj_decref
+    ; The two operands stay untouched.  They came off the value stack, and the
+    ; unwinder walks that stack and releases what is on it -- releasing them
+    ; here as the non-raising exits do would be one decref too many, and for
+    ; `x in iter(...)`, where the container IS the iterator, freed the object
+    ; the unwinder then read.  rsp needs no repair either: the unwinder
+    ; restores it from eval_base_rsp, which is how every RAISE in this file
+    ; leaves the machine stack.
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
+
+.contains_iter_raised:
+    ; Same reasoning as .contains_iter_eq_raised: the operands came off the
+    ; value stack and the unwinder releases them, and it restores rsp from
+    ; eval_base_rsp, so the saved slot needs no repair.
+    jmp eval_exception_unwind
 
 .contains_iter_found_decref_elem:
     ; DECREF element if needed
@@ -1640,6 +1677,7 @@ DEF_FUNC_BARE op_contains_op
     ; DECREF iterator
     pop rdi                      ; iterator
     call obj_decref
+    add rsp, 8                   ; the saved exception
     mov eax, 1                   ; found
     jmp .contains_iter_result
 
@@ -1647,6 +1685,19 @@ DEF_FUNC_BARE op_contains_op
     ; DECREF iterator
     pop rdi                      ; iterator
     call obj_decref
+    ; NULL from tp_iternext is a clean exhaustion and a raise alike, and
+    ; answering False for the second buried it: `99 in gen()` for a generator
+    ; that throws returned False, and the exception surfaced later at some
+    ; unrelated instruction.  The comparison is against what was in flight
+    ; before the loop, not against 0 -- inside an `except` block
+    ; current_exception already holds the exception being handled.
+    mov rcx, [rel current_exception]
+    test rcx, rcx
+    jz .contains_iter_nf_done
+    cmp rcx, [rsp]
+    jne .contains_iter_raised
+.contains_iter_nf_done:
+    add rsp, 8                   ; the saved exception
     xor eax, eax                ; not found
 
 .contains_iter_result:
@@ -1677,6 +1728,12 @@ DEF_FUNC_BARE op_contains_op
     mov rdx, [rax + PyTypeObject.tp_flags]
     test rdx, TYPE_FLAG_HEAPTYPE
     jz .contains_type_error
+    ; The exception that was already pending, if any: current_exception is
+    ; also the exception BEING HANDLED, so a bare test for non-NULL below said
+    ; "__getitem__ raised" for every lookup made inside an `except` block.
+    ; r15 is the handler scratch register the eval loop leaves free, and a
+    ; call preserves it.
+    DUNDER_EXC_SAVE r15
     ; Probe __getitem__ exists by trying index 0
     push qword 0                 ; push index counter (+8 shift)
 
@@ -1692,16 +1749,12 @@ DEF_FUNC_BARE op_contains_op
     jz .contains_gi_null_result
     ; Check for exception (IndexError = stop)
     extern current_exception
-    mov rcx, [rel current_exception]
-    test rcx, rcx
-    jnz .contains_gi_check_exc
+    EXC_RAISED_SINCE r15, rcx, .contains_gi_check_exc
     jmp .contains_gi_got_elem
 
 .contains_gi_null_result:
     ; TAG_NULL: either dunder not found, or exception raised
-    mov rcx, [rel current_exception]
-    test rcx, rcx
-    jnz .contains_gi_check_exc     ; exception → check if IndexError
+    EXC_RAISED_SINCE r15, rcx, .contains_gi_check_exc
     ; First call with index 0: if no exception and TAG_NULL, dunder not found
     cmp qword [rsp], 0
     je .contains_gi_no_dunder
@@ -2303,12 +2356,15 @@ UEX_TOTAL   equ 32
 UEX_REST    equ 40
 UEX_ITAG    equ 48
 UEX_IPAY    equ 56
+UEX_EXC     equ 64        ; current_exception before the iteration started
 DEF_FUNC op_unpack_ex
     push rbx
     push r14
     ; NOTE: do NOT push/pop r13 — the VPUSH macros advance it
     ; (tag stack top) and restoring it would desync from r13 (payload stack top)
-    sub rsp, 40                ; locals: [rbp - UEX_TOTAL]=total_len, [rbp - UEX_REST]=rest_count,
+    sub rsp, 48                ; 48, not 40: the extra slot, and with it the
+                               ; 16-byte alignment the two pushes had broken.
+                               ; locals: [rbp - UEX_TOTAL]=total_len, [rbp - UEX_REST]=rest_count,
                                ;         [rbp - UEX_ITAG]=iter_tag, [rbp - UEX_IPAY]=iterable payload
 
     ; Decode arg: count_before = ecx & 0xff, count_after = ecx >> 8
@@ -2459,7 +2515,7 @@ DEF_FUNC op_unpack_ex
     mov rsi, [rbp - UEX_ITAG]         ; iterable tag
     DECREF_VAL rdi, rsi
 
-    add rsp, 40
+    add rsp, 48
     pop r14
     pop rbx
     leave
@@ -2470,12 +2526,8 @@ DEF_FUNC op_unpack_ex
     ; [rbp - UEX_IPAY] = iterable payload, [rbp - UEX_ITAG] = iterable tag
     ; ebx = count_before, r14 = count_after (must preserve)
     mov rdi, [rbp - UEX_IPAY]
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
-    test rax, rax
-    jz .ue_type_error
-    mov rdi, [rbp - UEX_IPAY]
-    call rax                   ; tp_iter(iterable) → iterator
+    mov esi, TAG_PTR
+    call get_iterator_opt       ; see the note in .extend_generic
     test rax, rax
     jz .ue_type_error
     push rax                   ; [rsp] = iterator
@@ -2486,6 +2538,7 @@ DEF_FUNC op_unpack_ex
     call list_new
     push rax                   ; [rsp] = temp_list, [rsp+8] = iterator
 
+    DUNDER_EXC_SAVE [rbp - UEX_EXC]
 .ue_gen_loop:
     mov rdi, [rsp + 8]        ; iterator
     mov rax, [rdi + PyObject.ob_type]
@@ -2516,6 +2569,11 @@ DEF_FUNC op_unpack_ex
     push rax                   ; save temp_list
     call obj_decref            ; DECREF iterator
 
+    ; NULL is exhaustion or a raise alike.  Read as exhaustion, `a, *b = G()`
+    ; for a G whose __getitem__ throws bound a and b to a short answer and
+    ; left the exception to surface somewhere unrelated.
+    EXC_RAISED_SINCE [rbp - UEX_EXC], rcx, .ue_gen_raised
+
     ; DECREF original iterable
     mov rdi, [rbp - UEX_IPAY]
     mov rsi, [rbp - UEX_ITAG]
@@ -2529,6 +2587,18 @@ DEF_FUNC op_unpack_ex
     ; Now fall through to .ue_list path (reload rdi — clobbered by DECREF_VAL above)
     mov rdi, rax
     jmp .ue_list
+
+.ue_gen_raised:
+    pop rdi                    ; the partly built temp list
+    call obj_decref
+    ; The iterable is left alone: the unwinder restores r13 to the stack as
+    ; it stood before this instruction, where the pop had not happened.
+    extern eval_exception_unwind
+    add rsp, 48
+    pop r14
+    pop rbx
+    leave
+    jmp eval_exception_unwind
 
 .ue_not_enough:
     RAISE exc_ValueError_type, "not enough values to unpack"
@@ -2680,10 +2750,13 @@ SU_SOURCE   equ 24
 SU_SET      equ 32
 SU_CAP      equ 40
 SU_ENTRIES  equ 48
+SU_EXC      equ 56        ; current_exception before the iteration started
 DEF_FUNC op_set_update
     push rbx
     push r14
-    sub rsp, 40                ; locals: [rbp - SU_SOURCE]=set, [rbp - SU_SET]=iterable, [rbp - SU_CAP]=iter, [rbp - SU_ENTRIES]=iter_tag
+    sub rsp, 48                ; 48, not 40: the extra slot, and with it the
+                               ; 16-byte alignment the two pushes had broken.
+                               ; locals: [rbp - SU_SOURCE]=set, [rbp - SU_SET]=iterable, [rbp - SU_CAP]=iter, [rbp - SU_ENTRIES]=iter_tag
 
     ; TOS = iterable
     VPOP_VAL rsi, rax          ; rsi = iterable
@@ -2704,15 +2777,16 @@ DEF_FUNC op_set_update
     cmp rax, rdx
     je .su_from_set
 
-    ; Generic approach: get iterator via tp_iter, then loop tp_iternext
+    ; Generic: get_iterator_opt, which also accepts the legacy __getitem__
+    ; protocol.  `{*seq}` compiles to this.
     mov rdi, rsi
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
+    mov esi, TAG_PTR
+    call get_iterator_opt
     test rax, rax
     jz .su_type_error
-    call rax
     mov [rbp - SU_CAP], rax          ; save iterator
 
+    DUNDER_EXC_SAVE [rbp - SU_EXC]
 .su_iter_loop:
     mov rdi, [rbp - SU_CAP]          ; iterator
     mov rax, [rdi + PyObject.ob_type]
@@ -2739,16 +2813,30 @@ DEF_FUNC op_set_update
     mov rdi, [rbp - SU_CAP]
     call obj_decref
 
+    ; NULL is exhaustion or a raise, and only the pending exception tells
+    ; them apart: `{*G()}` for a raising __getitem__ built a short set.
+    EXC_RAISED_SINCE [rbp - SU_EXC], rcx, .su_iter_raised
+
     ; DECREF iterable (tag-aware)
     mov rdi, [rbp - SU_SET]
     mov rsi, [rbp - SU_ENTRIES]
     DECREF_VAL rdi, rsi
 
-    add rsp, 40
+    add rsp, 48
     pop r14
     pop rbx
     leave
     DISPATCH
+
+.su_iter_raised:
+    ; The iterable is left alone: the unwinder restores r13 to the stack as
+    ; it stood before this instruction, where VPOP_VAL had not taken it off.
+    extern eval_exception_unwind
+    add rsp, 48
+    pop r14
+    pop rbx
+    leave
+    jmp eval_exception_unwind
 
 .su_from_set:
     ; Iterable is a set - iterate entries directly
@@ -2786,7 +2874,7 @@ DEF_FUNC op_set_update
     mov rsi, [rbp - SU_ENTRIES]
     DECREF_VAL rdi, rsi
 
-    add rsp, 40
+    add rsp, 48
     pop r14
     pop rbx
     leave

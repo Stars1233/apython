@@ -386,6 +386,87 @@ END_FUNC str_search_window
 
 
 ;; ============================================================================
+;; codec_error_id(rdi = the errors= argument, a Value, or 0) -> eax
+;;   0 = strict (the default), 1 = ignore, 2 = replace, -1 = anything else
+;;
+;; The three handlers the interpreter implements itself.  CPython has a
+;; registry; reaching it from here would mean calling into Python, and the
+;; three below are what the interpreter's own decoding needs.
+;; ============================================================================
+CEI_BUF   equ 32
+CEI_FRAME equ 48            ; + 0 pushes = 48
+
+DEF_FUNC codec_error_id, CEI_FRAME
+    mov qword [rbp - CEI_BUF], 0
+    mov qword [rbp - CEI_BUF + 8], 0
+    mov qword [rbp - CEI_BUF + 16], 0
+    mov qword [rbp - CEI_BUF + 24], 0
+    test rdi, rdi
+    jz .cei_strict
+    LOAD_NONE rax
+    cmp rdi, rax
+    je .cei_strict
+    V_TEST_PTR rdi, rax
+    ja .cei_unknown
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .cei_is_str
+    ; A subclass has str's layout and str's data, and bytes_check_errors_type
+    ; -- which validates this same argument one call earlier -- already
+    ; accepts one.  Refusing it here made the two disagree:
+    ; b"...".decode("utf-8", MyStr("ignore")) got past the type check and then
+    ; came back as "unknown error handler name 'ignore'".
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .cei_unknown
+.cei_is_str:
+    mov rcx, [rdi + PyStrObject.ob_size]
+    cmp rcx, 24
+    ja .cei_unknown
+    lea rsi, [rbp - CEI_BUF]
+    xor edx, edx
+.cei_copy:
+    cmp rdx, rcx
+    jge .cei_done
+    movzx eax, byte [rdi + PyStrObject.data + rdx]
+    mov [rsi + rdx], al
+    inc rdx
+    jmp .cei_copy
+.cei_done:
+    lea rdi, [rbp - CEI_BUF]
+    CSTRING rsi, "strict"
+    call ap_strcmp
+    test eax, eax
+    jz .cei_strict
+    lea rdi, [rbp - CEI_BUF]
+    CSTRING rsi, "ignore"
+    call ap_strcmp
+    test eax, eax
+    jz .cei_ignore
+    lea rdi, [rbp - CEI_BUF]
+    CSTRING rsi, "replace"
+    call ap_strcmp
+    test eax, eax
+    jz .cei_replace
+.cei_unknown:
+    mov eax, -1
+    leave
+    ret
+.cei_strict:
+    xor eax, eax
+    leave
+    ret
+.cei_ignore:
+    mov eax, 1
+    leave
+    ret
+.cei_replace:
+    mov eax, 2
+    leave
+    ret
+END_FUNC codec_error_id
+
+;; ============================================================================
 ;; codec_id(rdi = encoding str, or 0 for the default) -> eax
 ;;   0 = utf-8, 1 = ascii, 2 = latin-1.  Raises LookupError for anything else.
 ;;
@@ -848,6 +929,7 @@ END_FUNC str_hash
 ;; Binary op handler passes right_tag in ecx. Direct callers must set ecx=TAG_PTR.
 ;; ============================================================================
 DEF_FUNC str_concat
+    BINOP_REQUIRE_LEFT str_type, TYPE_FLAG_STR_SUBCLASS, 1
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     ; Check right tag first — non-TAG_PTR means not a heap string
@@ -919,6 +1001,7 @@ END_FUNC str_concat
 ;; String repetition via nb_multiply
 ;; ============================================================================
 DEF_FUNC str_repeat
+    BINOP_REQUIRE_LEFT str_type, TYPE_FLAG_STR_SUBCLASS, 1
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
@@ -1052,6 +1135,7 @@ SM_ISMAP   equ 176       ; the right operand is a mapping: %(name)s, no arity ch
 SM_FRAME   equ 184          ; + 0 pushes = 184, not 16-aligned
 
 DEF_FUNC str_mod, SM_FRAME
+    BINOP_REQUIRE_LEFT str_type, TYPE_FLAG_STR_SUBCLASS, 1
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     ; Stack layout:

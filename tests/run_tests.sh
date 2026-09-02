@@ -38,11 +38,11 @@ else
     ERRORS="$ERRORS value-selftest"
 fi
 
-# Static checks over compiler/*.asm: 64-bit reads of 4-byte struct fields, and
+# Static checks over the assembly: 64-bit reads of 4-byte struct fields, and
 # calls made with a misaligned rsp.  Both assemble cleanly and fail at runtime
 # far from the cause, so they are checked here rather than discovered.
 printf "%-40s " "compiler lint"
-if $PYTHON compiler/lint.py > "$WORK/lint.out" 2>&1; then
+if $PYTHON src/compiler/lint.py > "$WORK/lint.out" 2>&1; then
     printf "${GREEN}PASS${NC}\n"
     PASS=$((PASS + 1))
 else

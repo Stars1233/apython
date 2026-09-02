@@ -1079,6 +1079,18 @@ DNO_NEW   equ 24
 DNO_FRAME equ 32            ; + 0 pushes = 32
 
 DEF_FUNC dict_nb_or, DNO_FRAME
+    ; Both operands of `|` must be dicts.  These slots used to read whatever
+    ; they were handed as a PyDictObject: `{1:2} | 5` dereferenced address
+    ; 5 + capacity_offset.  A NULL Value declines, so the protocol can still
+    ; reach a user class's __ror__.
+    V_TEST_PTR rdi, rax         ; ja == not a pointer, so not a dict either
+    ja .nb_or_decline
+    V_TEST_PTR rsi, rax
+    ja .nb_or_decline
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_DICT_TYPE rax, rcx, .nb_or_decline
+    mov rax, [rsi + PyObject.ob_type]
+    REQUIRE_DICT_TYPE rax, rcx, .nb_or_decline
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     mov [rbp - DNO_LEFT], rdi       ; left dict
@@ -1153,6 +1165,10 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.nb_or_decline:
+    xor eax, eax                ; NULL Value = NotImplemented
+    leave
+    ret
 END_FUNC dict_nb_or
 
 ;; ============================================================================
@@ -1165,6 +1181,18 @@ DIO_RIGHT equ 16
 DIO_FRAME equ 24            ; + 0 pushes = 24, not 16-aligned
 
 DEF_FUNC dict_nb_ior, DIO_FRAME
+    ; Both operands must be dicts.  CPython's `|=` also accepts any iterable of
+    ; key/value pairs; this slot read whatever it was given as a PyDictObject,
+    ; so `d |= 5` was an arbitrary dereference.  Declining is safe and gives the
+    ; right exception type; the iterable-of-pairs form is a gap, in bugs.md.
+    V_TEST_PTR rdi, rax         ; ja == not a pointer, so not a dict either
+    ja .nb_ior_decline
+    V_TEST_PTR rsi, rax
+    ja .nb_ior_decline
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_DICT_TYPE rax, rcx, .nb_ior_decline
+    mov rax, [rsi + PyObject.ob_type]
+    REQUIRE_DICT_TYPE rax, rcx, .nb_ior_decline
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     mov [rbp - DIO_LEFT], rdi       ; left dict
@@ -1205,6 +1233,10 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; return one Value
+    ret
+.nb_ior_decline:
+    xor eax, eax                ; NULL Value = NotImplemented
+    leave
     ret
 END_FUNC dict_nb_ior
 

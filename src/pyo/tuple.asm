@@ -742,13 +742,14 @@ END_FUNC tuple_richcompare
 DEF_FUNC_LOCAL tuple_richcompare_inner, TRC_FRAME
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, r8            ; right Value -> (payload, tag)
-    ; Verify right is TAG_PTR and a tuple
+    ; Verify right is TAG_PTR and a tuple.  A subclass counts: this asked for
+    ; the exact type, so T([1,2]) == T([1,2]) was False and sorted() over a
+    ; mixed list raised -- both sides declined and the protocol ran out.  It
+    ; is the one comparison in the family that was not using the macro.
     cmp r8d, TAG_PTR
     jne .trc_not_impl
     mov rax, [rsi + PyObject.ob_type]
-    lea r9, [rel tuple_type]
-    cmp rax, r9
-    jne .trc_not_impl
+    REQUIRE_TUPLE_TYPE rax, r9, .trc_not_impl
 
     mov [rbp - TRC_LEFT], rdi
     mov [rbp - TRC_RIGHT], rsi
@@ -1083,13 +1084,16 @@ END_FUNC tuple_richcompare_inner
 ;; ============================================================================
 TTC_LIST    equ 8       ; temp list
 TTC_ITER    equ 16      ; iterator
-TTC_FRAME   equ 24          ; + 4 pushes = 56, not 16-aligned
+TTC_EXC     equ 24      ; current_exception on entry, to tell "raised" from
+                        ; "already being handled"
+TTC_FRAME   equ 32          ; + 4 pushes = 64, 16-aligned
 
 DEF_FUNC tuple_type_call, TTC_FRAME
     push rbx
     push r12
     push r13
     push r14
+    DUNDER_EXC_SAVE [rbp - TTC_EXC]
 
     mov r12, rsi            ; args
     mov r13, rdx            ; nargs
@@ -1146,11 +1150,11 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     mov rdi, [rbp - TTC_ITER]
     call obj_decref
 
-    ; Check for pending exception
+    ; Did iternext raise, or was something already being handled?  Inside an
+    ; `except` block current_exception is the exception being handled, so a
+    ; bare test made tuple(x) there re-raise it.
     extern current_exception
-    mov rax, [rel current_exception]
-    test rax, rax
-    jnz .ttc_exc_cleanup
+    EXC_RAISED_SINCE [rbp - TTC_EXC], rax, .ttc_exc_cleanup
 
     ; Convert list to tuple
     mov rcx, [rbx + PyListObject.ob_size]

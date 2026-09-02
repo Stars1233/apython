@@ -838,11 +838,21 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
     mov rdi, [rbp - GD_SELF]
     call sre_match_get_group_str
     ; rax = val payload, edx = val tag
-    ; If None, substitute default
+    ; If None, substitute default.
+    ;
+    ; sre_match_get_group_str hands back a fresh string the dict_set below
+    ; adopts, and the DECREF_VAL after it releases this frame's reference.  The
+    ; default is BORROWED from the caller's argument array, so it has to be
+    ; INCREFed here or that DECREF_VAL takes the caller's reference instead:
+    ; `d = m.groupdict('N/A')` left the dict holding a co_consts string it did
+    ; not own, and the interpreter read freed memory at shutdown, when whichever
+    ; of the two died first took the string with it.  groups() has always done
+    ; this; groupdict() did not.
     IS_NONE rax, r8
     jne .gd_use_val
     mov rax, [rbp - GD_DEFAULT]
     mov edx, [rbp - GD_DEFAULT_TAG]
+    INCREF_VAL rax, rdx
 .gd_use_val:
 
     ; dict_set(result, name, val, val_tag, name_tag)

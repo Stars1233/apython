@@ -67,6 +67,10 @@ DEF_FUNC_BARE float_to_f64
     ; An int subclass wraps its value; unwrap and retry, or 1.0 == MyInt(1)
     ; came out False.
     mov rcx, [rax + PyTypeObject.tp_flags]
+    ; A float subclass stores its double inline at the same offset the base
+    ; would, which is the whole reason it cannot come from instance_new.
+    test rcx, TYPE_FLAG_FLOAT_SUBCLASS
+    jnz .from_float_sub
     test rcx, TYPE_FLAG_INT_SUBCLASS
     jz .ret_zero
     mov edx, esi
@@ -89,6 +93,10 @@ DEF_FUNC_BARE float_to_f64
 
 .from_float:
     movq xmm0, rdi
+    ret
+
+.from_float_sub:
+    movsd xmm0, [rdi + PyFloatObject.value]
     ret
 
 .from_smallint:
@@ -125,6 +133,13 @@ FR_BUF   equ 64             ; 48-byte render buffer
                             ; (the frame is built by hand below: `and rsp,-16`
                             ; then `sub rsp,160`, for libc's aligned SSE)
 DEF_FUNC float_repr
+    ; A float subclass arrives as a pointer with its double inline, and only
+    ; the tag can say so: a subnormal's bit pattern is a small integer, which
+    ; is exactly what a pointer looks like.  Every caller supplies edx.
+    cmp edx, TAG_PTR
+    jne .fr_have_bits
+    mov rdi, [rdi + PyFloatObject.value]
+.fr_have_bits:
     and rsp, -16              ; ensure 16-byte alignment for libc calls
     sub rsp, 160
     ; Stack layout:
@@ -392,6 +407,12 @@ DEF_FUNC float_format_spec, FS_FRAME
     movzx eax, byte [rbp - FS_TYPE]  ; type char
     cmp al, 'f'
     je .ffs_use_f
+    ; 'F' is 'f' with INF and NAN spelled in capitals.  It used to fall through
+    ; to the %g default, so format(1.5, "F") was "1.5" where CPython gives
+    ; "1.500000".  The capitalisation of a non-finite result is still missing;
+    ; bugs.md records it.
+    cmp al, 'F'
+    je .ffs_use_f
     cmp al, 'e'
     je .ffs_use_e
     cmp al, 'E'
@@ -437,6 +458,12 @@ DEF_FUNC float_hash, FH_FRAME
     push rbx
     push r12
     push r13
+    ; As float_repr: a subclass instance is a pointer, and the tag is the only
+    ; thing that distinguishes it from the bits of a subnormal.
+    cmp edx, TAG_PTR
+    jne .fh_have_bits
+    mov rdi, [rdi + PyFloatObject.value]
+.fh_have_bits:
     movq xmm0, rdi
 
     ; Check NaN (unordered with itself)
@@ -580,6 +607,15 @@ section .text
 ;; float_bool(rdi = raw double bits) -> int (0 or 1) in eax
 ;; ============================================================================
 DEF_FUNC_BARE float_bool
+    ; A subclass instance arrives as a pointer; nb_bool takes a Value, so an
+    ; immediate arrives boxed rather than as raw bits.
+    V_TEST_PTR rdi, rax
+    ja .fbool_immediate
+    mov rdi, [rdi + PyFloatObject.value]
+    jmp .fbool_have_bits
+.fbool_immediate:
+    V_TO_F64 rdi
+.fbool_have_bits:
     movq xmm0, rdi
     xorpd xmm1, xmm1         ; xmm1 = 0.0
     ucomisd xmm0, xmm1
@@ -595,6 +631,51 @@ END_FUNC float_bool
 ;; float_dealloc removed — floats are inline (TAG_FLOAT), no heap allocation
 
 ;; ============================================================================
+;; float_binop_accepts(rdi = payload, esi = tag) -> eax = 1 when this operand
+;; is one float arithmetic can consume: a float or an int in any of its shapes.
+;;
+;; The single definition of what float arithmetic accepts.  It used to be
+;; written out twice inside float_compare and a third time, differently, as
+;; binop_is_number in src/opcodes/arith.asm; the point of naming it is that a
+;; fourth copy cannot now drift from the others.
+;; ============================================================================
+DEF_FUNC_BARE float_binop_accepts
+    cmp esi, TAG_FLOAT
+    je .fba_yes
+    cmp esi, TAG_SMALLINT
+    je .fba_yes
+    cmp esi, TAG_PTR
+    jne .fba_no
+    test rdi, rdi
+    jz .fba_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .fba_yes
+    lea rcx, [rel float_type]
+    cmp rax, rcx
+    je .fba_yes
+    ; A bool is an int, and float_to_f64 already handles one; only the
+    ; whitelist was missing it, so True < 2.5 raised and 1.0 == True was
+    ; False -- which also put True and 1.0 in different dict slots.
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
+    je .fba_yes
+    mov rax, [rax + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_INT_SUBCLASS
+    jnz .fba_yes
+    ; A float subclass keeps its double where float_to_f64 can read it.
+    test rax, TYPE_FLAG_FLOAT_SUBCLASS
+    jnz .fba_yes
+.fba_no:
+    xor eax, eax
+    ret
+.fba_yes:
+    mov eax, 1
+    ret
+END_FUNC float_binop_accepts
+
+;; ============================================================================
 ;; Binary arithmetic: float_add, float_sub, float_mul, float_truediv,
 ;;                    float_floordiv, float_mod, float_neg
 ;; All take (PyObject *a, PyObject *b) -> PyObject*
@@ -607,12 +688,38 @@ FB_LEFT   equ 8             ; left operand, as a double
 FB_RIGHT  equ 16            ; right operand, as a double
 FB_RSAVE  equ 24            ; the right operand across the first conversion
 FB_RTAG   equ 32            ; and its tag
-FB_FRAME  equ 32            ; + 0 pushes = 32
+FB_LSAVE  equ 40            ; the left operand across the acceptance checks
+FB_LTAG   equ 48            ; and its tag
+FB_FRAME  equ 48            ; + 0 pushes = 48
 %macro FLOAT_BINOP_SETUP 0
     ; rdi=left, rsi=right, edx=left_tag, ecx=right_tag
-    mov [rbp - FB_RSAVE], rsi          ; save right operand
-    mov dword [rbp - FB_RTAG], ecx    ; save right_tag
-    mov esi, edx               ; esi = left_tag for float_to_f64
+    ;
+    ; Both operands are classified BEFORE either is converted.  float_to_f64
+    ; answers 0.0 for anything it does not recognise (.ret_zero below), so a
+    ; slot that converted first read a foreign object's bytes as a double and
+    ; returned a number: `a = "s"; a %= 1.5` was 0.0 rather than a TypeError.
+    ; Declining with a NULL Value hands the pair back to the protocol, which
+    ; then tries the other operand and finally raises.
+    mov [rbp - FB_RSAVE], rsi
+    mov dword [rbp - FB_RTAG], ecx
+    mov [rbp - FB_LSAVE], rdi
+    mov dword [rbp - FB_LTAG], edx
+    mov esi, edx                       ; esi = left_tag
+    call float_binop_accepts
+    test eax, eax
+    jz %%decline
+    mov rdi, [rbp - FB_RSAVE]
+    mov esi, dword [rbp - FB_RTAG]
+    call float_binop_accepts
+    test eax, eax
+    jnz %%accepted
+%%decline:
+    xor eax, eax                       ; NULL Value = NotImplemented
+    leave
+    ret
+%%accepted:
+    mov rdi, [rbp - FB_LSAVE]
+    mov esi, dword [rbp - FB_LTAG]
     call float_to_f64          ; rdi = left → xmm0
     movsd [rbp - FB_LEFT], xmm0
     mov rdi, [rbp - FB_RSAVE]
@@ -732,14 +839,48 @@ DEF_FUNC float_mod, FB_FRAME
     RAISE exc_ZeroDivisionError_type, "float modulo"
 END_FUNC float_mod
 
+;; ============================================================================
+;; float_neg / float_pos / float_abs (rdi = operand Value) -> a float Value
+;;
+;; Only a float subclass instance reaches these.  op_unary_negative flips an
+;; immediate's sign bit itself and never consults the slot for one, and until
+;; float had a subclass nothing else could arrive -- which is why these used
+;; to return a fat pair into a caller that reads a Value, harmlessly, because
+;; they were unreachable.  CPython gives -F(x) and abs(F(x)) a plain float
+;; rather than an F, which is what returning an immediate does here.
+;; ============================================================================
 DEF_FUNC_BARE float_neg
-    ; rdi = raw double bits (payload), edx = tag
-    ; Negate: flip sign bit (bit 63)
+    V_TEST_PTR rdi, rax
+    ja .fneg_immediate
+    mov rdi, [rdi + PyFloatObject.value]
     btc rdi, 63
     mov rax, rdi
+    V_FROM_F64 rax, rdx
+    mov edx, TAG_FLOAT
+    ret
+.fneg_immediate:
+    V_TO_F64 rdi
+    btc rdi, 63
+    mov rax, rdi
+    V_FROM_F64 rax, rdx
     mov edx, TAG_FLOAT
     ret
 END_FUNC float_neg
+
+DEF_FUNC_BARE float_abs
+    V_TEST_PTR rdi, rax
+    ja .fabs_immediate
+    mov rdi, [rdi + PyFloatObject.value]
+    jmp .fabs_have_bits
+.fabs_immediate:
+    V_TO_F64 rdi
+.fabs_have_bits:
+    btr rdi, 63                 ; clear the sign; abs(-0.0) is 0.0
+    mov rax, rdi
+    V_FROM_F64 rax, rdx
+    mov edx, TAG_FLOAT
+    ret
+END_FUNC float_abs
 
 ;; ============================================================================
 ;; float_pos(rdi = left, rsi = right, edx = left_tag, ecx = right_tag)
@@ -747,7 +888,15 @@ END_FUNC float_neg
 ;; Note: called via nb_positive slot — only left operand matters.
 ;; ============================================================================
 DEF_FUNC_BARE float_pos
+    V_TEST_PTR rdi, rax
+    ja .fpos_immediate
+    mov rdi, [rdi + PyFloatObject.value]
     mov rax, rdi
+    V_FROM_F64 rax, rdx
+    mov edx, TAG_FLOAT
+    ret
+.fpos_immediate:
+    mov rax, rdi                ; already a float Value
     mov edx, TAG_FLOAT
     ret
 END_FUNC float_pos
@@ -883,16 +1032,29 @@ DEF_FUNC float_int
 
     movq xmm0, rdi
 
-    ; Check for NaN/inf
+    ; Check for NaN/inf.  CPython words and TYPES these differently: a NaN is
+    ; a ValueError, an infinity an OverflowError.  Both were the ValueError.
     ucomisd xmm0, xmm0
-    jp .not_finite
+    jp .not_a_number
 
     movsd xmm1, [rel pos_inf]
     ucomisd xmm0, xmm1
-    je .not_finite
+    je .is_infinite
     movsd xmm1, [rel neg_inf]
     ucomisd xmm0, xmm1
-    je .not_finite
+    je .is_infinite
+
+    ; Out of int64's range, cvttsd2si answers INT64_MIN and says nothing about
+    ; it -- int(1e300) and int(2.0**70) were both -9223372036854775808.  A
+    ; double is exactly representable as an integer whenever it has no
+    ; fractional part, so the big ones go through GMP, which converts it
+    ; exactly.
+    movsd xmm1, [rel fi_two63]
+    ucomisd xmm0, xmm1
+    jae .fi_big
+    movsd xmm1, [rel fi_neg_two63]
+    ucomisd xmm0, xmm1
+    jb .fi_big
 
     ; Truncate to int64
     cvttsd2si rdi, xmm0
@@ -900,8 +1062,33 @@ DEF_FUNC float_int
     leave
     ret
 
-.not_finite:
-    RAISE exc_ValueError_type, "cannot convert float NaN or infinity to integer"
+.fi_big:
+    push rbx
+    sub rsp, 24
+    movsd [rsp], xmm0
+    ; int_new_compact, not int_from_i64: the latter answers an IMMEDIATE for a
+    ; small value, and there is no mpz on an immediate to set.
+    xor edi, edi
+    extern int_new_compact
+    call int_new_compact        ; a compact zero, promoted below
+    mov rbx, rax
+    INT_NEED_MPZ rbx            ; initialises the mpz and clears compact
+    lea rdi, [rbx + PyIntObject.mpz]
+    movsd xmm0, [rsp]
+    extern __gmpz_set_d
+    call __gmpz_set_d wrt ..plt
+    mov rax, rbx
+    mov edx, TAG_PTR
+    add rsp, 24
+    pop rbx
+    leave
+    ret
+
+.not_a_number:
+    RAISE exc_ValueError_type, "cannot convert float NaN to integer"
+.is_infinite:
+    extern exc_OverflowError_type
+    RAISE exc_OverflowError_type, "cannot convert float infinity to integer"
 END_FUNC float_int
 
 ;; ============================================================================
@@ -913,61 +1100,41 @@ FC_LEFT  equ 8              ; left operand, as a double
 FC_RIGHT equ 16             ; right operand, as a double
 FC_OP    equ 24             ; the comparison opcode (4 bytes)
 FC_RTAG  equ 28             ; right operand's tag (4 bytes)
+FC_LTAG  equ 32             ; left operand's tag (4 bytes; 33..36 unused)
 FC_RSAVE equ 40             ; the right operand across the first conversion
-FC_FRAME equ 40             ; + 0 pushes = 40
+FC_LSAVE equ 48             ; and the left, across the two acceptance checks
+FC_FRAME equ 48             ; + 0 pushes = 48
 DEF_FUNC float_compare, FC_FRAME
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     ; rdi=left, rsi=right, edx=op, ecx=left_tag, r8d=right_tag
-    ; Validate both operands are numeric (float, int, or bool)
-    ; Left tag
-    cmp ecx, TAG_FLOAT
-    je .fc_left_ok
-    cmp ecx, TAG_SMALLINT
-    je .fc_left_ok
-    cmp ecx, TAG_PTR
-    jne .fc_not_impl
-    mov rax, [rdi + PyObject.ob_type]
-    lea r9, [rel int_type]
-    cmp rax, r9
-    je .fc_left_ok
-    lea r9, [rel float_type]
-    cmp rax, r9
-    je .fc_left_ok
-    ; A bool is an int, and float_to_f64 already handles one; only this
-    ; whitelist was missing it, so True < 2.5 raised and 1.0 == True was
-    ; False -- which also put True and 1.0 in different dict slots.
-    lea r9, [rel bool_type]
-    cmp rax, r9
-    je .fc_left_ok
-    mov rax, [rax + PyTypeObject.tp_flags]
-    test rax, TYPE_FLAG_INT_SUBCLASS
-    jnz .fc_left_ok
-    jmp .fc_not_impl
-.fc_left_ok:
-    ; Right tag
-    cmp r8d, TAG_FLOAT
-    je .fc_right_ok
-    cmp r8d, TAG_SMALLINT
-    je .fc_right_ok
-    cmp r8d, TAG_PTR
-    jne .fc_not_impl
-    mov rax, [rsi + PyObject.ob_type]
-    lea r9, [rel int_type]
-    cmp rax, r9
-    je .fc_right_ok
-    lea r9, [rel float_type]
-    cmp rax, r9
-    je .fc_right_ok
-    lea r9, [rel bool_type]
-    cmp rax, r9
-    je .fc_right_ok
-    mov rax, [rax + PyTypeObject.tp_flags]
-    test rax, TYPE_FLAG_INT_SUBCLASS
-    jnz .fc_right_ok
-    jmp .fc_not_impl
+    ;
+    ; Both operands must be numeric.  The whitelist lives in
+    ; float_binop_accepts, which the arithmetic slots share; comparison used to
+    ; carry its own two copies of it.
+    ; Everything the code below still needs goes to the frame first: the calls
+    ; clobber every caller-saved register, and ecx (the left tag) and r8d (the
+    ; right tag) are both read again after this block.
+    mov [rbp - FC_OP], edx
+    mov [rbp - FC_LSAVE], rdi
+    mov [rbp - FC_RSAVE], rsi
+    mov [rbp - FC_LTAG], ecx
+    mov [rbp - FC_RTAG], r8d
+    mov esi, ecx                    ; esi = left_tag
+    call float_binop_accepts
+    test eax, eax
+    jz .fc_not_impl
+    mov rdi, [rbp - FC_RSAVE]
+    mov esi, [rbp - FC_RTAG]
+    call float_binop_accepts
+    test eax, eax
+    jz .fc_not_impl
+    mov rdi, [rbp - FC_LSAVE]
+    mov rsi, [rbp - FC_RSAVE]
+    mov edx, [rbp - FC_OP]
+    mov ecx, [rbp - FC_LTAG]
+    mov r8d, [rbp - FC_RTAG]
 .fc_right_ok:
-    mov [rbp - FC_OP], edx          ; save op (4 bytes)
 
     ; Convert both to doubles
     mov [rbp - FC_RSAVE], rsi          ; save right (8 bytes)
@@ -1056,6 +1223,63 @@ DEF_FUNC float_compare, FC_FRAME
 END_FUNC float_compare
 
 ;; ============================================================================
+;; float_getattr(rdi = self Value, rsi = name str) -> rax = Value, or NULL
+;;
+;; real and imag, the two numbers.py asks for.  float has no numerator or
+;; denominator -- CPython raises for those -- so the chain is shorter than
+;; int's.  See int_getattr for why this is a strcmp chain and not a
+;; descriptor.
+;; ============================================================================
+FG_SELF   equ 8
+FG_NAME   equ 16
+FG_FRAME  equ 16            ; + 0 pushes = 16
+
+extern ap_strcmp
+DEF_FUNC float_getattr, FG_FRAME
+    mov [rbp - FG_SELF], rdi
+    mov [rbp - FG_NAME], rsi
+
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "real"
+    call ap_strcmp
+    test eax, eax
+    jz .fg_real
+
+    mov rdi, [rbp - FG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "imag"
+    call ap_strcmp
+    test eax, eax
+    jz .fg_imag
+
+    RET_NULL
+    leave
+    V_PACK rax, rdx
+    ret
+
+.fg_real:
+    ; A subclass instance answers with a plain float, as CPython does.
+    mov rax, [rbp - FG_SELF]
+    V_TEST_PTR rax, rcx
+    ja .fg_real_out             ; already a float immediate
+    mov rax, [rax + PyFloatObject.value]
+    V_FROM_F64 rax, rcx
+.fg_real_out:
+    mov edx, TAG_FLOAT
+    leave
+    ret
+
+.fg_imag:
+    xorpd xmm0, xmm0
+    movq rax, xmm0
+    V_FROM_F64 rax, rcx
+    mov edx, TAG_FLOAT
+    leave
+    ret
+END_FUNC float_getattr
+
+
+;; ============================================================================
 ;; Data
 ;; ============================================================================
 section .data
@@ -1070,6 +1294,8 @@ fmt_e: db "%.*e", 0
 fmt_E: db "%.*E", 0
 
 align 8
+fi_two63:     dq 0x43e0000000000000   ; 2.0**63
+fi_neg_two63: dq 0xc3e0000000000000   ; -(2.0**63)
 pos_inf:     dq 0x7ff0000000000000
 neg_inf:     dq 0xfff0000000000000
 const_one_f:  dq 0x3ff0000000000000   ; 1.0 in IEEE 754
@@ -1087,7 +1313,7 @@ float_number_methods:
     dq float_pow              ; nb_power        +40
     dq float_neg              ; nb_negative     +48
     dq float_pos              ; nb_positive     +56
-    dq 0                      ; nb_absolute     +64
+    dq float_abs              ; nb_absolute     +64
     dq float_bool             ; nb_bool         +72
     dq 0                      ; nb_invert       +80
     dq 0                      ; nb_lshift       +88
@@ -1129,7 +1355,7 @@ float_type:
     dq float_repr             ; tp_str (same as repr for float)
     dq float_hash             ; tp_hash
     dq 0                      ; tp_call
-    dq 0                      ; tp_getattr
+    dq float_getattr          ; tp_getattr (.real / .imag)
     dq 0                      ; tp_setattr
     dq float_compare          ; tp_richcompare
     dq 0                      ; tp_iter
@@ -1142,7 +1368,8 @@ float_type:
     dq 0                      ; tp_base
     dq 0                      ; tp_dict
     dq 0                      ; tp_mro
-    dq 0                      ; tp_flags
+    dq TYPE_FLAG_FLOAT_SUBCLASS ; tp_flags -- the family bit type_from_parts
+                                ; hands down, so a subclass is recognisable
     dq 0                      ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear

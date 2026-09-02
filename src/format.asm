@@ -56,7 +56,8 @@ FS_VALUE  equ 80
 FS_BODY   equ 88         ; rendered body, a str object
 FS_SIGNCH equ 96         ; the sign actually emitted, or 0
 FS_SPECLEN equ 104       ; length of the spec as given
-FS_FRAME  equ 112           ; + 5 pushes = 152, not 16-aligned
+FS_OWNED  equ 112        ; a box V_PACK made for a wide int subclass, or 0
+FS_FRAME  equ 120           ; + 5 pushes = 160, 16-aligned
 
 ;; ============================================================================
 ;; format_apply_spec(rdi = value Value, rsi = spec str) -> Value (a str)
@@ -67,6 +68,10 @@ DEF_FUNC format_apply_spec, FS_FRAME
     push r13
     push r14
     push r15
+    ; Zeroed here and not where it is set: every arm reaches the release in
+    ; .fs_body_int, and only the int-subclass arm assigns it, so a frame slot
+    ; left holding whatever was on the stack was handed to obj_decref.
+    mov qword [rbp - FS_OWNED], 0
 
     mov [rbp - FS_VALUE], rdi
     mov qword [rbp - FS_BODY], 0
@@ -227,7 +232,89 @@ DEF_FUNC format_apply_spec, FS_FRAME
     call value_type
     mov r15, rax                        ; the value's type
 
+    ; A subclass formats as its base does: every arm below compares r15
+    ; against an exact type, so format(F(2.5), ".2f") for `class F(float)`
+    ; found no arm and fell out as "unsupported format string passed to
+    ; object.__format__".  The family flags say which base to answer as.
+    ; The family flags live on the BASE types too, so that a subclass
+    ; inherits them: float_type itself carries TYPE_FLAG_FLOAT_SUBCLASS.
+    ; Anything keyed off the flag alone therefore fires for the exact type as
+    ; well, and unwrapping an immediate as if it were an instance reads a
+    ; NaN-boxed double as an address.  Ask whether it IS one of the four
+    ; first, and only then whether it derives from one.
+    test r15, r15
+    jz .fs_family_done
+    lea rax, [rel complex_type]
+    cmp r15, rax
+    je .fs_family_done
+    lea rax, [rel float_type]
+    cmp r15, rax
+    je .fs_family_done
+    lea rax, [rel int_type]
+    cmp r15, rax
+    je .fs_family_done
+    lea rax, [rel str_type]
+    cmp r15, rax
+    je .fs_family_done
+    extern bool_type
+    mov rdx, [r15 + PyTypeObject.tp_flags]
+    lea rax, [rel bool_type]
+    cmp r15, rax
+    je .fs_bool
+
+    test rdx, TYPE_FLAG_COMPLEX_SUBCLASS
+    jz .fs_not_complex_sub
+    lea r15, [rel complex_type]     ; complex_to_parts unwraps the value
+    jmp .fs_family_done
+.fs_not_complex_sub:
+    test rdx, TYPE_FLAG_FLOAT_SUBCLASS
+    jz .fs_not_float_sub
+    lea r15, [rel float_type]
+    ; The double lives inline in the instance, and the float arm below wants
+    ; an immediate.
+    mov rdi, [rbp - FS_VALUE]
+    mov rax, [rdi + PyFloatObject.value]
+    V_FROM_F64 rax, rcx
+    mov [rbp - FS_VALUE], rax
+    jmp .fs_family_done
+.fs_not_int_sub:
+    test rdx, TYPE_FLAG_STR_SUBCLASS
+    jz .fs_family_done
+    lea r15, [rel str_type]         ; a str subclass has str's layout
+    jmp .fs_family_done
+.fs_bool:
+    ; bool formats as an int, which is what CPython does: format(True, "d")
+    ; is "1".  Its value is a singleton, not an int, so it is unwrapped too.
+    ; tp_flags is loaded BEFORE the jump here, because this falls straight
+    ; into a test of rdx and nothing else on this path writes it -- it held
+    ; whatever the caller had left in it.
+    lea r15, [rel int_type]
+.fs_not_float_sub:
+    test rdx, TYPE_FLAG_INT_SUBCLASS
+    jz .fs_not_int_sub
+    lea r15, [rel int_type]
+    mov rdi, [rbp - FS_VALUE]
+    mov edx, TAG_PTR
+    extern int_unwrap
+    call int_unwrap
+    ; V_PACK on a SmallInt outside +-2^50 ALLOCATES, and FS_VALUE is a slot
+    ; this function neither owns nor releases: one boxed int leaked per
+    ; format() of such a subclass instance.  Note whether it boxed, and give
+    ; the box back once the body has been rendered.
+    V_PACK rdi, rdx
+    mov [rbp - FS_VALUE], rdi
+    V_TEST_PTR rdi, rax
+    ja .fs_family_done          ; still an immediate: nothing was allocated
+    mov [rbp - FS_OWNED], rdi
+.fs_family_done:
+
     mov rcx, [rbp - FS_TYPE]
+    ; complex is asked first: format(1+2j, 's') is a ValueError in CPython, so
+    ; it must not reach the 's' short-circuit below.
+    extern complex_type
+    lea rax, [rel complex_type]
+    cmp r15, rax
+    je .fs_typed
     cmp rcx, 's'
     je .fs_body_str
     test rcx, rcx
@@ -240,6 +327,10 @@ DEF_FUNC format_apply_spec, FS_FRAME
     lea rax, [rel float_type]
     cmp r15, rax
     je .fs_body_float
+    extern complex_type
+    lea rax, [rel complex_type]
+    cmp r15, rax
+    je .fs_body_complex
     lea rax, [rel int_type]
     cmp r15, rax
     je .fs_body_int
@@ -266,6 +357,30 @@ DEF_FUNC format_apply_spec, FS_FRAME
     call raise_type_error_with_name
 
 .fs_typed:
+    ; complex is checked before the 's' arm: format(1+2j, 's') is a ValueError
+    ; in CPython, not a string.  The accepted letters are exactly e E f F g G n.
+    lea rax, [rel complex_type]
+    cmp r15, rax
+    jne .fs_typed_not_complex
+    test rcx, rcx
+    jz .fs_body_complex             ; no type letter: repr, handled there
+    cmp rcx, 'e'
+    je .fs_body_complex
+    cmp rcx, 'E'
+    je .fs_body_complex
+    cmp rcx, 'f'
+    je .fs_body_complex
+    cmp rcx, 'F'
+    je .fs_body_complex
+    cmp rcx, 'g'
+    je .fs_body_complex
+    cmp rcx, 'G'
+    je .fs_body_complex
+    cmp rcx, 'n'
+    je .fs_body_complex
+    extern exc_ValueError_type
+    RAISE exc_ValueError_type, "Unknown format code for object of type 'complex'"
+.fs_typed_not_complex:
     ; A numeric type letter needs a number.
     cmp rcx, 's'
     je .fs_body_str
@@ -324,7 +439,32 @@ DEF_FUNC format_apply_spec, FS_FRAME
 .fs_body_int:
     call format_int_body
     mov [rbp - FS_BODY], rax
+    mov rdi, [rbp - FS_OWNED]
+    test rdi, rdi
+    jz .fs_pad
+    mov qword [rbp - FS_OWNED], 0
+    push rax
+    sub rsp, 8
+    call obj_decref             ; the box V_PACK made for a wide subclass
+    add rsp, 8
+    pop rax
     jmp .fs_pad
+
+.fs_body_complex:
+    ; CPython rejects these two for a complex before it formats anything, and
+    ; the messages are its own.
+    cmp qword [rbp - FS_ZERO], 0
+    jne .fs_complex_zero_pad
+    cmp qword [rbp - FS_ALIGN], '='
+    je .fs_complex_equals_align
+    call format_complex_body
+    mov [rbp - FS_BODY], rax
+    jmp .fs_pad
+
+.fs_complex_zero_pad:
+    RAISE exc_ValueError_type, "Zero padding is not allowed in complex format specifier"
+.fs_complex_equals_align:
+    RAISE exc_ValueError_type, "'=' alignment flag is not allowed in complex format specifier"
 
     ; ---- pad to width ------------------------------------------------------
 .fs_pad:
@@ -1004,3 +1144,197 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     leave
     ret
 END_FUNC format_float_body
+
+;; ============================================================================
+;; format_complex_body() -> rax = PyStrObject*
+;;
+;; Reached with the caller's format_apply_spec frame live, the same way
+;; format_float_body is: r12 addresses it and the FS_* slots are read through
+;; that.
+;;
+;; With no type letter the body is exactly repr(z) -- CPython's
+;; format_complex_internal sets type 'r' and precision 0 and applies the same
+;; skip-the-real-part rule, which is what repr already is.  With a letter, both
+;; halves go through float_format_spec with the same synthesised ".<prec><t>"
+;; spec and are joined as `re` + signed(`im`) + "j", with no parentheses.
+;;
+;; The sign flag applies to the real part only; the imaginary part always
+;; carries its own explicit sign.
+;; ============================================================================
+FCB_SPEC    equ 16          ; the synthesised ".<prec><type>", at most 6 bytes
+FCB_SPECLEN equ 24
+FCB_RE      equ 32          ; the real part's rendered str
+FCB_IM      equ 40          ; the imaginary part's
+FCB_SELF    equ 48
+FCB_OUT     equ 56
+FCB_FRAME   equ 64          ; + 2 pushes = 80
+DEF_FUNC_LOCAL format_complex_body, FCB_FRAME
+    push rbx
+    push r12
+    mov r12, [rbp]                      ; the caller's rbp
+    mov rax, [r12 - FS_VALUE]
+    mov [rbp - FCB_SELF], rax
+
+    mov rax, [r12 - FS_TYPE]
+    test rax, rax
+    jz .fcb_repr                        ; an empty spec is repr, exactly
+
+    ; ---- build ".<prec><type>" ---------------------------------------------
+    lea rbx, [rbp - FCB_SPEC]
+    mov rax, [r12 - FS_PREC]
+    cmp rax, 0
+    jge .fcb_prec_given
+    mov rax, 6                          ; e E f F g G n all default to six
+.fcb_prec_given:
+    cmp rax, 999
+    jle .fcb_prec_ok
+    mov rax, 999
+.fcb_prec_ok:
+    mov byte [rbx], '.'
+    mov ecx, 1
+    xor r8d, r8d                        ; a digit has been emitted
+    mov r9, 100
+    xor edx, edx
+    div r9                              ; rax = hundreds, rdx = rest
+    test rax, rax
+    jz .fcb_tens
+    add al, '0'
+    mov [rbx + rcx], al
+    inc rcx
+    mov r8d, 1
+.fcb_tens:
+    mov rax, rdx
+    xor edx, edx
+    mov r9, 10
+    div r9                              ; rax = tens, rdx = units
+    mov r10, rdx
+    test rax, rax
+    jnz .fcb_emit_tens
+    test r8d, r8d
+    jz .fcb_units
+.fcb_emit_tens:
+    add al, '0'
+    mov [rbx + rcx], al
+    inc rcx
+.fcb_units:
+    mov rax, r10
+    add al, '0'
+    mov [rbx + rcx], al
+    inc rcx
+    ; 'n' is 'g' with locale grouping, which we do not do; format it as 'g'.
+    mov rax, [r12 - FS_TYPE]
+    cmp rax, 'n'
+    jne .fcb_type_ok
+    mov rax, 'g'
+.fcb_type_ok:
+    mov [rbx + rcx], al
+    inc rcx
+    mov [rbp - FCB_SPECLEN], rcx
+
+    ; ---- render both halves ------------------------------------------------
+    mov rax, [rbp - FCB_SELF]
+    mov rdi, [rax + PyComplexObject.cval_real]
+    lea rsi, [rbp - FCB_SPEC]
+    mov rdx, [rbp - FCB_SPECLEN]
+    extern float_format_spec
+    call float_format_spec
+    V_UNPACK rax, rdx
+    mov [rbp - FCB_RE], rax
+
+    mov rax, [rbp - FCB_SELF]
+    mov rdi, [rax + PyComplexObject.cval_imag]
+    lea rsi, [rbp - FCB_SPEC]
+    mov rdx, [rbp - FCB_SPECLEN]
+    call float_format_spec
+    V_UNPACK rax, rdx
+    mov [rbp - FCB_IM], rax
+
+    ; ---- join: [sign] re [+] im 'j' ----------------------------------------
+    ; Room for both halves, an explicit sign on each, the 'j' and a NUL.
+    mov rdi, [rbp - FCB_RE]
+    mov rdi, [rdi + PyStrObject.ob_size]
+    mov rax, [rbp - FCB_IM]
+    add rdi, [rax + PyStrObject.ob_size]
+    add rdi, 8
+    extern ap_malloc
+    call ap_malloc
+    mov [rbp - FCB_OUT], rax
+    mov rbx, rax                        ; rbx = write cursor
+
+    ; The sign flag is the real part's; float_format_spec knows nothing of it.
+    mov rax, [rbp - FCB_RE]
+    cmp qword [rax + PyStrObject.ob_size], 0
+    jle .fcb_no_sign
+    cmp byte [rax + PyStrObject.data], '-'
+    je .fcb_no_sign
+    mov rcx, [r12 - FS_SIGN]
+    cmp rcx, '+'
+    je .fcb_put_sign
+    cmp rcx, ' '
+    jne .fcb_no_sign
+.fcb_put_sign:
+    mov [rbx], cl
+    inc rbx
+.fcb_no_sign:
+    mov rdi, rbx
+    mov rax, [rbp - FCB_RE]
+    lea rsi, [rax + PyStrObject.data]
+    mov rdx, [rax + PyStrObject.ob_size]
+    add rbx, rdx
+    extern ap_memcpy
+    call ap_memcpy
+
+    ; The imaginary part is always signed.
+    mov rax, [rbp - FCB_IM]
+    cmp qword [rax + PyStrObject.ob_size], 0
+    jle .fcb_im_signed
+    cmp byte [rax + PyStrObject.data], '-'
+    je .fcb_im_signed
+    mov byte [rbx], '+'
+    inc rbx
+.fcb_im_signed:
+    mov rdi, rbx
+    mov rax, [rbp - FCB_IM]
+    lea rsi, [rax + PyStrObject.data]
+    mov rdx, [rax + PyStrObject.ob_size]
+    add rbx, rdx
+    call ap_memcpy
+    mov byte [rbx], 'j'
+    inc rbx
+
+    ; ---- wrap up -----------------------------------------------------------
+    mov rdi, [rbp - FCB_OUT]
+    mov rsi, rbx
+    sub rsi, rdi                        ; the byte length
+    extern str_new_heap
+    call str_new_heap
+    mov rbx, rax                        ; the finished body
+
+    mov rdi, [rbp - FCB_OUT]
+    extern ap_free
+    call ap_free
+    mov rdi, [rbp - FCB_RE]
+    extern obj_decref
+    call obj_decref
+    mov rdi, [rbp - FCB_IM]
+    call obj_decref
+
+    ; '=' alignment is rejected for a complex, so there is no sign to hoist.
+    mov qword [r12 - FS_SIGNCH], 0
+    mov rax, rbx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.fcb_repr:
+    mov rdi, [rbp - FCB_SELF]
+    extern complex_repr
+    call complex_repr
+    V_UNPACK rax, rdx
+    mov qword [r12 - FS_SIGNCH], 0
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC format_complex_body

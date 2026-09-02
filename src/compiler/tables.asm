@@ -1,7 +1,7 @@
 ; tables.asm - Static lookup tables for the Python source compiler
 ;
 ; GENERATED FILE.  Regenerate with:
-;     python3 compiler/gen_tables.py > compiler/tables.asm
+;     python3 src/compiler/gen_tables.py > src/compiler/tables.asm
 ; The output is committed so that building apython never needs Python.
 ;
 ; The opcode metadata is taken from CPython 3.12.3's own opcode and dis
@@ -172,6 +172,7 @@ kw_table:               ; { packed text, token, length }
     dq 0x000000646c656979
     dw TOK_YIELD             , 5
     dd 0
+KW_ENT_SIZE equ 16
 
 align 8
 global kw_index
@@ -592,6 +593,7 @@ op_table:               ; { packed text, length, token }
     dd 0x0000007e
     db 1, TOK_TILDE                ; '~'
     dw 0
+OP_ENT_SIZE equ 8
 
 align 8
 global op_index
