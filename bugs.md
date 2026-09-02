@@ -58,8 +58,7 @@ one-line fix.
 - **`dict.__ior__` takes only a dict.**  CPython's takes any iterable of
   key/value pairs.
 
-- **PEP 604 unions are thin.**  `None | int` is a TypeError rather than
-  `None | int`, and `int | int` is not collapsed to `int`.
+- **PEP 604 unions are thin.**  `int | int` is not collapsed to `int`.
 
 - **The binary-operator TypeError names neither the operator nor the operand
   types.**  Ours is the fixed string `unsupported operand type(s)`; CPython

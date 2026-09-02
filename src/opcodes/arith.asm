@@ -359,7 +359,8 @@ DEF_FUNC_BARE op_binary_op
 
     ; If inplace slot was NULL, fall back to non-inplace slot
     cmp r9d, 13
-    jl .binop_try_dunder        ; not inplace, no fallback
+    jl .binop_try_right_slot    ; not inplace: the left type simply has no
+                                ; such slot, so the right type gets its turn
     ; Map inplace op to non-inplace offset
     mov ecx, r9d
     sub ecx, 13                 ; inplace → base op
@@ -418,12 +419,12 @@ DEF_FUNC_BARE op_binary_op
 .binop_fallback_have_type:
     mov rax, [rax + PyTypeObject.tp_as_number]
 .binop_fallback_have_methods:
-    test rax, rax
-    jz .binop_try_dunder
     mov r8, rdx                ; the effective slot offset, for the right-slot try
+    test rax, rax
+    jz .binop_try_right_slot
     mov rax, [rax + rdx]
     test rax, rax
-    jz .binop_try_dunder
+    jz .binop_try_right_slot
 
 .binop_have_method:
     ; There is deliberately no guard here on what the right operand is.  There
@@ -476,9 +477,12 @@ DEF_FUNC_BARE op_binary_op
 
 .binop_try_seq_fallback:
     ; rax = type ptr. Check if type has tp_as_sequence for ADD/MUL ops.
+    ; Every exit from here that finds no slot goes to .binop_try_right_slot,
+    ; not to the dunder arm: the left type has nothing to offer this pair, and
+    ; that is exactly the case where CPython asks the right type.
     mov rax, [rax + PyTypeObject.tp_as_sequence]
     test rax, rax
-    jz .binop_try_dunder
+    jz .binop_try_right_slot
     ; NB_ADD (0) or NB_INPLACE_ADD (13) → sq_concat / sq_inplace_concat
     cmp r9d, 0              ; NB_ADD
     je .binop_seq_concat
@@ -489,7 +493,7 @@ DEF_FUNC_BARE op_binary_op
     je .binop_seq_repeat_left
     cmp r9d, 18             ; NB_INPLACE_MULTIPLY
     je .binop_seq_irepeat
-    jmp .binop_try_dunder
+    jmp .binop_try_right_slot
 
 .binop_seq_iconcat:
     ; The comment above said sq_inplace_concat and the code read sq_concat, so
@@ -512,7 +516,7 @@ DEF_FUNC_BARE op_binary_op
 .binop_seq_concat:
     mov rax, [rax + PySequenceMethods.sq_concat]
     test rax, rax
-    jz .binop_try_dunder
+    jz .binop_try_right_slot
 .binop_seq_have_concat:
     ; sq_concat(left, right): rdi=left, rsi=right already set
     mov rdx, [rsp + BO_LTAG]
@@ -532,7 +536,7 @@ DEF_FUNC_BARE op_binary_op
 .binop_seq_repeat_left:
     mov rax, [rax + PySequenceMethods.sq_repeat]
     test rax, rax
-    jz .binop_try_dunder
+    jz .binop_try_right_slot
 .binop_seq_have_repeat:
     ; sq_repeat(left=sequence, right=count)
     mov rdx, [rsp + BO_LTAG]
@@ -546,9 +550,15 @@ DEF_FUNC_BARE op_binary_op
     jmp .binop_have_result
 
 .binop_try_right_slot:
-    ; The second half of CPython's binary_op1: the LEFT type's slot declined,
-    ; so the RIGHT type gets its turn at the same slot, with the operands still
-    ; in their original order.
+    ; The second half of CPython's binary_op1: the LEFT type had no slot, or
+    ; had one and declined, so the RIGHT type gets its turn at the same slot,
+    ; with the operands still in their original order.
+    ;
+    ; The "had no slot" half was missing, and every path that found nothing on
+    ; the left jumped past this to the dunder arm -- which requires
+    ; TYPE_FLAG_HEAPTYPE and therefore refuses every builtin static type.  So
+    ; `None | int` was a TypeError: NoneType's nb_or is 0, type's is
+    ; union_type_or, and nothing ever asked it.
     ;
     ; This is what lets a type serve an operand the other side has never heard
     ; of, and it is the only route by which a numeric type added later can
@@ -559,6 +569,19 @@ DEF_FUNC_BARE op_binary_op
     ; CPython also skips this when both types resolve to the same slot
     ; function.  Not worth a compare here: the only builtins that share one are
     ; int and bool, whose slot declines a second time just as cheaply.
+    ;
+    ; An inplace op asks the right type for its BINARY slot, never its inplace
+    ; one -- that is what CPython's binary_iop1 does when it falls back to
+    ; binary_op1.  An nb_i* slot is written for a left operand of its own type
+    ; and does not check: `range(3) += [1]` reached list_inplace_concat with a
+    ; range as self and dereferenced it as a list.
+    cmp r9d, 13
+    jl .brs_have_offset
+    mov ecx, r9d
+    sub ecx, 13                 ; inplace -> base op
+    lea rax, [rel binary_op_offsets]
+    mov r8, [rax + rcx*8]
+.brs_have_offset:
     mov rsi, [rsp + BO_RIGHT]
     mov rcx, [rsp + BO_RTAG]
     cmp rcx, TAG_SMALLINT
