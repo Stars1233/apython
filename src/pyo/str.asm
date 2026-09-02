@@ -223,6 +223,87 @@ DEF_FUNC str_byte_to_cp
 END_FUNC str_byte_to_cp
 
 ;; ============================================================================
+;; str_cp_at(rdi = PyStrObject*, rsi = code point index) -> rax = the code
+;; point, or -1 when the index is out of range.
+;;
+;; str_cp_offset gives the byte offset; this decodes the UTF-8 sequence that
+;; starts there.  builtin_ord had the only decoder in the tree and it insists
+;; the character is the whole string.
+;; ============================================================================
+DEF_FUNC str_cp_at
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    cmp r12, [rbx + PyStrObject.ob_length]
+    jae .sca_out_of_range
+    test r12, r12
+    js .sca_out_of_range
+
+    mov rdi, rbx
+    mov rsi, r12
+    call str_cp_offset          ; rax = the byte offset
+    lea rcx, [rbx + PyStrObject.data]
+    add rcx, rax
+
+    movzx eax, byte [rcx]
+    test al, 0x80
+    jz .sca_done                ; ASCII: the byte is the code point
+
+    mov r8d, eax
+    and r8d, 0xf8
+    cmp r8d, 0xf0
+    je .sca_four
+    mov r8d, eax
+    and r8d, 0xf0
+    cmp r8d, 0xe0
+    je .sca_three
+
+    and eax, 0x1f
+    shl eax, 6
+    movzx edx, byte [rcx + 1]
+    and edx, 0x3f
+    or eax, edx
+    jmp .sca_done
+.sca_three:
+    and eax, 0x0f
+    shl eax, 12
+    movzx edx, byte [rcx + 1]
+    and edx, 0x3f
+    shl edx, 6
+    or eax, edx
+    movzx edx, byte [rcx + 2]
+    and edx, 0x3f
+    or eax, edx
+    jmp .sca_done
+.sca_four:
+    and eax, 0x07
+    shl eax, 18
+    movzx edx, byte [rcx + 1]
+    and edx, 0x3f
+    shl edx, 12
+    or eax, edx
+    movzx edx, byte [rcx + 2]
+    and edx, 0x3f
+    shl edx, 6
+    or eax, edx
+    movzx edx, byte [rcx + 3]
+    and edx, 0x3f
+    or eax, edx
+.sca_done:
+    pop r12
+    pop rbx
+    leave
+    ret
+.sca_out_of_range:
+    mov rax, -1
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_cp_at
+
+;; ============================================================================
 ;; str_cp_offset(rdi = PyStrObject*, rsi = code point index) -> rax = byte offset
 ;; The index is not bounds-checked; an index at or past the end gives ob_size.
 ;; ============================================================================

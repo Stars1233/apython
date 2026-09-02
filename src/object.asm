@@ -395,6 +395,7 @@ rbt_open:    db ": '", 0
 rbt_and:     db "' and '", 0
 rbt_close:   db "'", 0
 rbt_unknown: db "object", 0
+mah_digits:  db "0123456789abcdef", 0
 
 section .bss
 rbt_buf: resb 320   ; two 80-char type names plus the prefix and separators
@@ -609,6 +610,106 @@ DEF_FUNC msg_append_i64
     leave
     ret
 END_FUNC msg_append_i64
+
+;; ============================================================================
+;; msg_append_hex2(rdi = dest, esi = a byte) -> rax = the NUL it wrote
+;; Two lowercase hex digits, which is how CPython spells the byte in a
+;; UnicodeDecodeError.
+;; ============================================================================
+DEF_FUNC msg_append_hex2
+    movzx esi, sil
+    mov eax, esi
+    shr eax, 4
+    lea rcx, [rel mah_digits]
+    movzx eax, byte [rcx + rax]
+    mov [rdi], al
+    mov eax, esi
+    and eax, 15
+    movzx eax, byte [rcx + rax]
+    mov [rdi + 1], al
+    mov byte [rdi + 2], 0
+    lea rax, [rdi + 2]
+    leave
+    ret
+END_FUNC msg_append_hex2
+
+;; ============================================================================
+;; msg_append_escaped_cp(rdi = dest, rsi = a str, rdx = index in code points)
+;;   -> rax = the NUL it wrote
+;;
+;; One character, quoted and escaped the way CPython writes it in a
+;; UnicodeEncodeError: '\xNN', '\uNNNN' or '\UNNNNNNNN' by magnitude.
+;; ============================================================================
+MAE_DEST equ 8
+MAE_CP   equ 16
+MAE_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+
+DEF_FUNC msg_append_escaped_cp, MAE_FRAME
+    push rbx
+    mov [rbp - MAE_DEST], rdi
+    mov rbx, rdi
+
+    ; The code point at that index.  A str keeps UTF-8, so the byte offset has
+    ; to be found first; an ASCII string is its own index.
+    mov rdi, rsi
+    mov rsi, rdx
+    extern str_cp_at
+    call str_cp_at
+    mov [rbp - MAE_CP], rax
+
+    mov byte [rbx], 39          ; a single quote
+    lea rdi, [rbx + 1]
+    ; Always escaped, printable or not: CPython writes even 'Z' as '\x5a' in
+    ; a UnicodeEncodeError.
+.mae_escape:
+    mov byte [rdi], 92          ; a backslash
+    inc rdi
+    mov rax, [rbp - MAE_CP]
+    cmp rax, 0x100
+    jb .mae_x
+    cmp rax, 0x10000
+    jb .mae_u
+    mov byte [rdi], 'U'
+    inc rdi
+    mov ecx, 8
+    jmp .mae_digits
+.mae_u:
+    mov byte [rdi], 'u'
+    inc rdi
+    mov ecx, 4
+    jmp .mae_digits
+.mae_x:
+    mov byte [rdi], 'x'
+    inc rdi
+    mov ecx, 2
+.mae_digits:
+    ; ecx nibbles, most significant first
+    mov rax, [rbp - MAE_CP]
+    lea r8, [rel mah_digits]
+.mae_digit_loop:
+    dec ecx
+    mov r9, rax
+    mov r10d, ecx
+    shl r10d, 2
+    mov r11, rcx
+    mov ecx, r10d
+    shr r9, cl
+    mov rcx, r11
+    and r9, 15
+    movzx r9d, byte [r8 + r9]
+    mov [rdi], r9b
+    inc rdi
+    test ecx, ecx
+    jnz .mae_digit_loop
+
+.mae_close:
+    mov byte [rdi], 39
+    mov byte [rdi + 1], 0
+    lea rax, [rdi + 1]
+    pop rbx
+    leave
+    ret
+END_FUNC msg_append_escaped_cp
 
 ; raise_value_error_with_repr(rdi = prefix C string, rsi = the object Value)
 ;   -> never returns

@@ -50,3 +50,40 @@ for e in exprs[:4]:
         eval(e)
     except Exception as t:
         print(type(t).__name__)
+
+# An extended-slice length mismatch names both sizes.  They were known thirty
+# lines above the raise and gone by the time it happened, and naming them also
+# needed an int-to-decimal helper another file could reach -- there were six
+# copies of one, every one of them file-local.
+for stmt in ("l = [1, 2, 3, 4]\nl[0:4:2] = [1, 2, 3]",
+             "l = [1, 2, 3, 4]\nl[::2] = []",
+             "l = [1, 2, 3, 4]\nl[::-1] = [1]",
+             "b = bytearray(b'abcd')\nb[0:4:2] = b'abc'"):
+    try:
+        exec(stmt)
+        print(stmt.replace("\n", " ; "), "=> no error")
+    except ValueError as e:
+        print(stmt.replace("\n", " ; "), "=>", e)
+
+# str() of a Unicode error renders its five fields rather than printing them
+# as a tuple.
+for args in (("ascii", b"abc", 1, 2, "ordinal not in range(128)"),
+             ("utf-8", b"a\xffb", 1, 2, "invalid start byte"),
+             ("ascii", b"abcdef", 1, 4, "ordinal not in range(128)")):
+    print(str(UnicodeDecodeError(*args)))
+for args in (("ascii", "aሴb", 1, 2, "ordinal not in range(128)"),
+             ("ascii", "a\xe9b", 1, 2, "ordinal not in range(128)"),
+             ("ascii", "a\U0001F600b", 1, 2, "ordinal not in range(128)"),
+             ("ascii", "aZb", 1, 2, "ordinal not in range(128)"),
+             ("ascii", "abcdef", 1, 4, "ordinal not in range(128)")):
+    print(str(UnicodeEncodeError(*args)))
+
+# A five-argument exception that is not one of those two still prints its
+# tuple, and the other arities are unchanged.
+print(str(ValueError(1, 2, 3, 4, 5)))
+print(str(ValueError()), "|", str(ValueError("one")), "|", str(ValueError(1, 2)))
+print(str(KeyError("k")))
+try:
+    b"a\xffb".decode("utf-8")
+except UnicodeDecodeError as e:
+    print(str(e))

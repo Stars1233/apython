@@ -9,6 +9,11 @@ one-line fix.
 
 ## Correctness
 
+- **An empty right-hand side does not delete an extended bytearray slice.**
+  `b[::2] = b''` empties those positions in CPython -- `bytearray(b'abcd')`
+  becomes `bytearray(b'bd')` -- where here it is a length mismatch.  A list
+  raises for the same assignment in both, so only bytearray differs.
+
 - **`bytearray` has no `%`.**  `+`, `*`, `+=` and `*=` all work now, through
   `bytearray_seq_methods`; `bytearray(b"%d") % 5` is still a TypeError, since
   `bytearray_type.tp_as_number` is 0 and nothing supplies `nb_remainder`.
@@ -241,12 +246,6 @@ than lying — but they are ordinary Python that does not work:
   defines exactly that.  `asyncio` streams and every hand-written async
   iterator are shaped this way.
 
-- **An extended-slice length mismatch does not name the sizes.**  CPython says
-  "attempt to assign sequence of size 3 to extended slice of size 2"; here the
-  message is "of wrong size", because `src/pyo/list.asm` has no int-to-string
-  helper to build the two numbers with -- the one that exists is file-local to
-  `src/opcodes/build.asm`.  The exception type and the condition are right.
-
 - **`bytes % args` leaks its temporary when the format is malformed.**  The
   work is done by handing a decoded copy of the format and the arguments to
   `str_mod`, and `str_mod` RAISES for a wrong argument count -- a raise
@@ -265,10 +264,13 @@ than lying — but they are ordinary Python that does not work:
   function-name prefix and no "or integer" variant for the calls that take a
   descriptor.  The resolved path itself does reach both.
 
-- **`str()` of a `UnicodeDecodeError` prints its argument tuple.**  CPython
-  renders "'ascii' codec can't decode byte 0xc3 in position 1: ordinal not in
-  range(128)" from the exception's fields; here the five arguments come out
-  as a tuple repr.  The same applies to `UnicodeEncodeError`.
+- **`bytes.decode`'s ascii arm raises a fixed message.**  `str()` of a
+  Unicode error renders its five fields now, so an exception raised from
+  `lib/_codecs.py` reads as CPython's does.  The asm sites still pre-render a
+  one-argument exception instead: the utf-8 arm builds CPython's wording by
+  hand, and the ascii arm says only "byte not in range for this encoding".
+  Raising a real five-argument exception from asm needs a way to call an
+  exception type with five arguments, which `exc_new` does not offer.
 
 - **A subclass of `_io.FileIO` cannot declare `__slots__`.**  FileIO stores
   its descriptor and flags past the instance header, in the same words a

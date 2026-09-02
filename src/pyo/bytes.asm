@@ -3653,7 +3653,27 @@ DEF_FUNC bytearray_ass_subscript, 104
     jz .bas_mismatch_raise2
     call obj_decref
 .bas_mismatch_raise2:
-    RAISE exc_ValueError_type, "attempt to assign bytes of wrong size to extended slice"
+    ; "attempt to assign bytes of size 3 to extended slice of size 2", the two
+    ; numbers being BAS_SLEN and BAS_N, both still in the frame.
+    sub rsp, 128
+    mov rdi, rsp
+    lea rsi, [rel bas_msg_size]
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - BAS_SLEN]
+    extern msg_append_i64
+    call msg_append_i64
+    mov rdi, rax
+    lea rsi, [rel bas_msg_to]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - BAS_N]
+    call msg_append_i64
+    lea rdi, [rel exc_ValueError_type]
+    mov rsi, rsp
+    call raise_exception
+    ud2
 END_FUNC bytearray_ass_subscript
 
 ;; ============================================================================
@@ -5804,3 +5824,7 @@ memoryview_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+
+section .rodata
+bas_msg_size: db "attempt to assign bytes of size ", 0
+bas_msg_to:   db " to extended slice of size ", 0

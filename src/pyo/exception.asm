@@ -726,6 +726,27 @@ DEF_FUNC exc_str, ES_FRAME
     mov rax, [rbx + PyExceptionObject.exc_args]
     mov rcx, [rax + PyTupleObject.ob_size]
 
+    ; A Unicode{Decode,Encode}Error carries five arguments -- encoding,
+    ; object, start, end, reason -- and CPython renders them into a sentence.
+    ; Falling through to .es_tuple printed the tuple instead, so str() of one
+    ; raised from lib/_codecs.py was "('ascii', b'abc', 1, 2, 'ordinal not in
+    ; range(128)')".  The asm sites that raise these build the sentence
+    ; themselves for exactly that reason; now they need not.
+    cmp rcx, 5
+    jne .es_not_unicode
+    mov rdi, rbx
+    call unicode_error_str
+    test rax, rax
+    jz .es_not_unicode
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+
+.es_not_unicode:
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    mov rcx, [rax + PyTupleObject.ob_size]
+
     cmp rcx, 1
     jne .es_tuple
 
@@ -768,6 +789,199 @@ DEF_FUNC exc_str, ES_FRAME
     leave
     ret
 END_FUNC exc_str
+
+;; ============================================================================
+;; unicode_error_str(rdi = the exception) -> rax = PyStrObject*, or 0
+;;
+;; CPython's wording for a UnicodeDecodeError or UnicodeEncodeError, out of the
+;; five arguments the exception carries:
+;;
+;;   'ascii' codec can't decode byte 0xc3 in position 1: ordinal not in range(128)
+;;   'ascii' codec can't encode character '\u1234' in position 1: <reason>
+;;
+;; and the plural forms when the span is wider than one.  Answers 0 for
+;; anything that is not one of the two types, or whose arguments are not the
+;; shapes below, so exc_str falls back to the tuple repr.
+;; ============================================================================
+UES_EXC   equ 8
+UES_ARGS  equ 16
+UES_START equ 24
+UES_END   equ 32
+UES_BUF   equ 288           ; the sentence, built in place
+UES_FRAME equ 288           ; + 1 push = 296, not 16-aligned
+
+extern rbt_append_cstr
+extern msg_append_i64
+extern msg_append_hex2
+extern msg_append_escaped_cp
+extern str_cp_at
+DEF_FUNC unicode_error_str, UES_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - UES_EXC], rdi
+
+    ; Which of the two, and therefore which verb?
+    mov rdi, rbx
+    lea rsi, [rel exc_UnicodeDecodeError_type]
+    call exc_isinstance
+    test eax, eax
+    jnz .ues_decode
+    mov rdi, rbx
+    lea rsi, [rel exc_UnicodeEncodeError_type]
+    call exc_isinstance
+    test eax, eax
+    jz .ues_no
+    xor r9d, r9d                ; encode
+    jmp .ues_have_kind
+.ues_decode:
+    mov r9d, 1                  ; decode
+.ues_have_kind:
+    mov [rbp - UES_START], r9   ; borrow the slot until the args are read
+
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov [rbp - UES_ARGS], rax
+
+    ; args[0] must be a str, args[2] and args[3] ints, args[4] a str.
+    mov rdi, [rax]
+    V_TEST_PTR rdi, rcx
+    ja .ues_no
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .ues_no
+    mov rdi, [rax + 32]
+    V_TEST_PTR rdi, rcx
+    ja .ues_no
+    mov rcx, [rdi + PyObject.ob_type]
+    cmp rcx, rdx
+    jne .ues_no
+
+    mov r9, [rbp - UES_START]   ; the kind, before the slot is reused
+    mov rdi, [rax + 16]
+    V_IS_INT rdi, rcx
+    jb .ues_no
+    V_TO_I64 rdi
+    mov [rbp - UES_START], rdi
+    mov rax, [rbp - UES_ARGS]
+    mov rdi, [rax + 24]
+    V_IS_INT rdi, rcx
+    jb .ues_no
+    V_TO_I64 rdi
+    mov [rbp - UES_END], rdi
+
+    ; "'<encoding>' codec can't "
+    lea rdi, [rbp - UES_BUF]
+    lea rsi, [rel ues_quote]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rcx, [rbp - UES_ARGS]
+    mov rsi, [rcx]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel ues_codec]
+    call rbt_append_cstr
+    mov rdi, rax
+    test r9d, r9d
+    jz .ues_verb_encode
+    lea rsi, [rel ues_decode_w]
+    jmp .ues_verb_done
+.ues_verb_encode:
+    lea rsi, [rel ues_encode_w]
+.ues_verb_done:
+    push r9
+    call rbt_append_cstr
+    pop r9
+
+    ; One position, or a span?
+    mov rcx, [rbp - UES_START]
+    inc rcx
+    cmp rcx, [rbp - UES_END]
+    jne .ues_span
+
+    ; "byte 0xNN " or "character 'X' "
+    mov rdi, rax
+    test r9d, r9d
+    jz .ues_one_char
+    lea rsi, [rel ues_byte]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rcx, [rbp - UES_ARGS]
+    mov rsi, [rcx + 8]          ; the bytes
+    V_TEST_PTR rsi, rcx
+    ja .ues_no
+    mov rcx, [rbp - UES_START]
+    cmp rcx, [rsi + PyBytesObject.ob_size]
+    jae .ues_no
+    movzx esi, byte [rsi + PyBytesObject.data + rcx]
+    call msg_append_hex2
+    jmp .ues_position
+.ues_one_char:
+    lea rsi, [rel ues_char]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rcx, [rbp - UES_ARGS]
+    mov rsi, [rcx + 8]          ; the str
+    mov rdx, [rbp - UES_START]
+    call msg_append_escaped_cp
+    jmp .ues_position
+
+.ues_span:
+    mov rdi, rax
+    test r9d, r9d
+    jz .ues_span_chars
+    lea rsi, [rel ues_bytes_pl]
+    jmp .ues_span_emit
+.ues_span_chars:
+    lea rsi, [rel ues_chars_pl]
+.ues_span_emit:
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel ues_in_pos]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - UES_START]
+    call msg_append_i64
+    mov rdi, rax
+    lea rsi, [rel ues_dash]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - UES_END]
+    dec rsi
+    call msg_append_i64
+    jmp .ues_reason
+
+.ues_position:
+    mov rdi, rax
+    lea rsi, [rel ues_in_pos]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - UES_START]
+    call msg_append_i64
+
+.ues_reason:
+    mov rdi, rax
+    lea rsi, [rel ues_colon]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rcx, [rbp - UES_ARGS]
+    mov rsi, [rcx + 32]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+
+    lea rdi, [rbp - UES_BUF]
+    call str_from_cstr
+    pop rbx
+    leave
+    ret
+
+.ues_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC unicode_error_str
 
 ; exc_getattr(PyExceptionObject *exc, PyStrObject *name) -> PyObject* or NULL
 ; Handle attribute access on exception objects: args, __context__, __cause__, etc.
@@ -2157,3 +2371,17 @@ DEF_FUNC exc_clear_gc
     leave
     ret
 END_FUNC exc_clear_gc
+
+
+section .rodata
+ues_quote:    db "'", 0
+ues_codec:    db "' codec can't ", 0
+ues_decode_w: db "decode ", 0
+ues_encode_w: db "encode ", 0
+ues_byte:     db "byte 0x", 0
+ues_char:     db "character ", 0
+ues_bytes_pl: db "bytes", 0
+ues_chars_pl: db "characters", 0
+ues_in_pos:   db " in position ", 0
+ues_dash:     db "-", 0
+ues_colon:    db ": ", 0
