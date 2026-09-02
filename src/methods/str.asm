@@ -56,41 +56,14 @@ section .text
 ;; args[0] = self (PyStrObject*)
 ;; ============================================================================
 DEF_FUNC str_method_upper
-    push rbx
-    push r12
-    push r13
-
-    mov rax, [rdi]          ; self = args[0]
-    mov rbx, rax            ; rbx = self
-    mov r12, [rbx + PyStrObject.ob_size]  ; r12 = length
-
-    ; Create new string: str_new(data, len)
-    lea rdi, [rbx + PyStrObject.data]
-    mov rsi, r12
-    call str_new_heap
-    mov r13, rax            ; r13 = new string
-
-    ; Convert each byte to uppercase in-place
-    xor ecx, ecx
-.upper_loop:
-    cmp rcx, r12
-    jge .upper_done
-    movzx eax, byte [r13 + PyStrObject.data + rcx]
-    cmp al, 'a'
-    jb .upper_next
-    cmp al, 'z'
-    ja .upper_next
-    sub al, 32             ; 'a'-'A' = 32
-    mov [r13 + PyStrObject.data + rcx], al
-.upper_next:
-    inc rcx
-    jmp .upper_loop
-.upper_done:
-    mov rax, r13
+    ; The whole of it is str_case_map in methods/str_case.asm: the six differ
+    ; only in which of the four Unicode mappings each character takes.
+    mov rax, [rdi]
+    mov rdi, rax
+    mov esi, 0
+    extern str_case_map
+    call str_case_map
     mov edx, TAG_PTR
-    pop r13
-    pop r12
-    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -100,39 +73,14 @@ END_FUNC str_method_upper
 ;; str_method_lower(args, nargs) -> new lowercase string
 ;; ============================================================================
 DEF_FUNC str_method_lower
-    push rbx
-    push r12
-    push r13
-
-    mov rax, [rdi]          ; self
-    mov rbx, rax
-    mov r12, [rbx + PyStrObject.ob_size]
-
-    lea rdi, [rbx + PyStrObject.data]
-    mov rsi, r12
-    call str_new_heap
-    mov r13, rax
-
-    xor ecx, ecx
-.lower_loop:
-    cmp rcx, r12
-    jge .lower_done
-    movzx eax, byte [r13 + PyStrObject.data + rcx]
-    cmp al, 'A'
-    jb .lower_next
-    cmp al, 'Z'
-    ja .lower_next
-    add al, 32
-    mov [r13 + PyStrObject.data + rcx], al
-.lower_next:
-    inc rcx
-    jmp .lower_loop
-.lower_done:
-    mov rax, r13
+    ; The whole of it is str_case_map in methods/str_case.asm: the six differ
+    ; only in which of the four Unicode mappings each character takes.
+    mov rax, [rdi]
+    mov rdi, rax
+    mov esi, 1
+    extern str_case_map
+    call str_case_map
     mov edx, TAG_PTR
-    pop r13
-    pop r12
-    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret

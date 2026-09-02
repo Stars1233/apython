@@ -594,67 +594,14 @@ END_FUNC str_method_islower
 ;; Uppercase after non-alpha, lowercase after alpha
 ;; ============================================================================
 DEF_FUNC str_method_title
-    push rbx
-    push r12
-    push r13
-
-    mov rbx, [rdi]          ; self
-    mov r12, [rbx + PyStrObject.ob_size]
-
-    lea rdi, [rbx + PyStrObject.data]
-    mov rsi, r12
-    call str_new_heap
-    mov r13, rax
-
-    xor ecx, ecx            ; i = 0
-    mov r8d, 1               ; prev_is_sep = true (start of string)
-.title_loop:
-    cmp rcx, r12
-    jge .title_done
-    movzx eax, byte [r13 + PyStrObject.data + rcx]
-    ; Check if alpha
-    cmp al, 'A'
-    jb .title_not_alpha
-    cmp al, 'Z'
-    jbe .title_is_upper
-    cmp al, 'a'
-    jb .title_not_alpha
-    cmp al, 'z'
-    ja .title_not_alpha
-    ; lowercase char
-    test r8d, r8d
-    jz .title_to_lower       ; prev was alpha → stay lower
-    ; prev was non-alpha → capitalize
-    sub al, 32
-    mov [r13 + PyStrObject.data + rcx], al
-    xor r8d, r8d             ; prev_is_sep = false
-    jmp .title_next
-.title_is_upper:
-    test r8d, r8d
-    jnz .title_keep_upper     ; prev was non-alpha → keep upper
-    ; prev was alpha → lowercase it
-    add al, 32
-    mov [r13 + PyStrObject.data + rcx], al
-    xor r8d, r8d
-    jmp .title_next
-.title_keep_upper:
-    xor r8d, r8d
-    jmp .title_next
-.title_to_lower:
-    ; already lowercase, prev was alpha → keep as-is
-    xor r8d, r8d
-    jmp .title_next
-.title_not_alpha:
-    mov r8d, 1               ; prev_is_sep = true
-.title_next:
-    inc rcx
-    jmp .title_loop
-.title_done:
-    mov rax, r13
+    ; The whole of it is str_case_map in methods/str_case.asm: the six differ
+    ; only in which of the four Unicode mappings each character takes.
+    mov rax, [rdi]
+    mov rdi, rax
+    mov esi, 2
+    extern str_case_map
+    call str_case_map
     mov edx, TAG_PTR
-    pop r13
-    pop r12
-    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -665,51 +612,14 @@ END_FUNC str_method_title
 ;; First char upper, rest lower
 ;; ============================================================================
 DEF_FUNC str_method_capitalize
-    push rbx
-    push r12
-    push r13
-
-    mov rbx, [rdi]
-    mov r12, [rbx + PyStrObject.ob_size]
-
-    lea rdi, [rbx + PyStrObject.data]
-    mov rsi, r12
-    call str_new_heap
-    mov r13, rax
-
-    ; First char → upper
-    test r12, r12
-    jz .cap_done
-    movzx eax, byte [r13 + PyStrObject.data]
-    cmp al, 'a'
-    jb .cap_rest
-    cmp al, 'z'
-    ja .cap_rest
-    sub al, 32
-    mov [r13 + PyStrObject.data], al
-
-.cap_rest:
-    ; Remaining chars → lower
-    mov rcx, 1
-.cap_loop:
-    cmp rcx, r12
-    jge .cap_done
-    movzx eax, byte [r13 + PyStrObject.data + rcx]
-    cmp al, 'A'
-    jb .cap_next
-    cmp al, 'Z'
-    ja .cap_next
-    add al, 32
-    mov [r13 + PyStrObject.data + rcx], al
-.cap_next:
-    inc rcx
-    jmp .cap_loop
-.cap_done:
-    mov rax, r13
+    ; The whole of it is str_case_map in methods/str_case.asm: the six differ
+    ; only in which of the four Unicode mappings each character takes.
+    mov rax, [rdi]
+    mov rdi, rax
+    mov esi, 3
+    extern str_case_map
+    call str_case_map
     mov edx, TAG_PTR
-    pop r13
-    pop r12
-    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -720,47 +630,14 @@ END_FUNC str_method_capitalize
 ;; Upper→lower, lower→upper
 ;; ============================================================================
 DEF_FUNC str_method_swapcase
-    push rbx
-    push r12
-    push r13
-
-    mov rbx, [rdi]
-    mov r12, [rbx + PyStrObject.ob_size]
-
-    lea rdi, [rbx + PyStrObject.data]
-    mov rsi, r12
-    call str_new_heap
-    mov r13, rax
-
-    xor ecx, ecx
-.swap_loop:
-    cmp rcx, r12
-    jge .swap_done
-    movzx eax, byte [r13 + PyStrObject.data + rcx]
-    cmp al, 'A'
-    jb .swap_next
-    cmp al, 'Z'
-    jbe .swap_to_lower
-    cmp al, 'a'
-    jb .swap_next
-    cmp al, 'z'
-    ja .swap_next
-    ; lowercase → upper
-    sub al, 32
-    mov [r13 + PyStrObject.data + rcx], al
-    jmp .swap_next
-.swap_to_lower:
-    add al, 32
-    mov [r13 + PyStrObject.data + rcx], al
-.swap_next:
-    inc rcx
-    jmp .swap_loop
-.swap_done:
-    mov rax, r13
+    ; The whole of it is str_case_map in methods/str_case.asm: the six differ
+    ; only in which of the four Unicode mappings each character takes.
+    mov rax, [rdi]
+    mov rdi, rax
+    mov esi, 4
+    extern str_case_map
+    call str_case_map
     mov edx, TAG_PTR
-    pop r13
-    pop r12
-    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -771,38 +648,14 @@ END_FUNC str_method_swapcase
 ;; ASCII casefold = lowercase (full Unicode casefold deferred)
 ;; ============================================================================
 DEF_FUNC str_method_casefold
-    push rbx
-    push r12
-    push r13
-
-    mov rbx, [rdi]
-    mov r12, [rbx + PyStrObject.ob_size]
-
-    lea rdi, [rbx + PyStrObject.data]
-    mov rsi, r12
-    call str_new_heap
-    mov r13, rax
-
-    xor ecx, ecx
-.cf_loop:
-    cmp rcx, r12
-    jge .cf_done
-    movzx eax, byte [r13 + PyStrObject.data + rcx]
-    cmp al, 'A'
-    jb .cf_next
-    cmp al, 'Z'
-    ja .cf_next
-    add al, 32
-    mov [r13 + PyStrObject.data + rcx], al
-.cf_next:
-    inc rcx
-    jmp .cf_loop
-.cf_done:
-    mov rax, r13
+    ; The whole of it is str_case_map in methods/str_case.asm: the six differ
+    ; only in which of the four Unicode mappings each character takes.
+    mov rax, [rdi]
+    mov rdi, rax
+    mov esi, 5
+    extern str_case_map
+    call str_case_map
     mov edx, TAG_PTR
-    pop r13
-    pop r12
-    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret

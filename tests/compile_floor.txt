@@ -316,6 +316,7 @@ test_type_metatype
 test_type_repr
 test_type_three_arg
 test_unary
+test_unicode_case
 test_unicode
 test_union_flatten
 test_union_hash

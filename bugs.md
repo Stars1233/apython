@@ -34,10 +34,6 @@ one-line fix.
   `if (slotw == slotv)` collapses to nothing.  Revisit if a builtin static type
   is ever given a slot function that differs from its base's.
 
-- **Case conversion is ASCII-only.**  `"é".upper()` is `"é"`, not `"É"`;
-  `upper`, `lower`, `title`, `capitalize` and `swapcase` all leave a
-  non-ASCII byte as it is.  Needs Unicode case tables.
-
 - **`str.encode` and `bytes.decode` know only utf-8, ascii and latin-1.**
   Any other name is a LookupError, where CPython would find the codec through
   the registry; reaching it from the interpreter would mean calling Python
@@ -51,10 +47,6 @@ one-line fix.
 - **A module without a docstring has no `__doc__`.**  CPython binds
   `__doc__ = None`; here the name is simply absent, so reading it is a
   NameError.
-
-- **`bytearray` is not reversible.**  `b[0]`, `b[1:]` and `b[::-1]` all work
-  now; `reversed(bytearray(...))` is still a TypeError, because the type has
-  no `tp_iter`-side answer for it.
 
 - **The `_abc` registry and caches hold strong references.**  CPython uses
   weak ones, so a class registered against an ABC can be collected and the
