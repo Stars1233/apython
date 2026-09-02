@@ -1,3 +1,1 @@
 '(a*)*b'                 'aaa'          match=None search=None groups=None findall=[]
-expand : aa-bb-c
-sub  '(a)(b)'   '\\2\\1' 'abab'       'baba'

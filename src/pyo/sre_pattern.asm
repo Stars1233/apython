@@ -32,6 +32,8 @@ extern bool_true
 extern bool_false
 ; SRE engine functions
 extern sre_match
+extern sre_template_parse
+extern sre_template_expand
 extern sre_state_reset_marks
 extern sre_search
 extern sre_state_init
@@ -804,8 +806,13 @@ SUB_NSUBS    equ 48
 SUB_LASTEND  equ 56
 SUB_CALLABLE equ 64
 SUB_REPL_TAG equ 72
-SUB_STATE    equ 72 + SRE_State_size
-SUB_FRAME    equ 72 + SRE_State_size
+; The parsed replacement template, and the single literal it collapses to
+; when it names no group.  Both sit above the state struct, which starts at
+; SUB_STATE and grows downward from there.
+SUB_TMPL     equ 80
+SUB_LITERAL  equ 88
+SUB_STATE    equ 88 + SRE_State_size
+SUB_FRAME    equ 88 + SRE_State_size
 
 DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     ; rdi = args (fat array), rsi = nargs
@@ -878,6 +885,49 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     call str_from_cstr_heap
     mov [rbp - SUB_RESULT], rax
 
+    ; A string replacement is a template, not a literal: \1, \g<name> and the
+    ; escapes all mean something.  It is parsed once here, as CPython's
+    ; _compile_template is, rather than per match.  A template that names no
+    ; group collapses to a single literal, and that keeps the old fast path --
+    ; no match object is built for it.
+    mov qword [rbp - SUB_TMPL], 0
+    mov qword [rbp - SUB_LITERAL], 0
+    cmp qword [rbp - SUB_CALLABLE], 0
+    jnz .sub_have_template
+    mov rax, [rbp - SUB_REPL]
+    V_TEST_PTR rax, rcx
+    ja .sub_have_template
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .sub_have_template
+
+    mov rdi, rax
+    mov rsi, [rbp - SUB_PAT]
+    call sre_template_parse
+    mov [rbp - SUB_TMPL], rax
+    mov rcx, [rax + PyListObject.ob_size]
+    cmp rcx, 1
+    ja .sub_have_template       ; it names at least one group
+    jb .sub_empty_template
+    mov rdx, [rax + PyListObject.ob_item]
+    mov rdx, [rdx]
+    V_TEST_PTR rdx, rcx
+    ja .sub_have_template
+    mov rcx, [rdx + PyObject.ob_type]
+    lea rax, [rel str_type]
+    cmp rcx, rax
+    jne .sub_have_template
+    mov [rbp - SUB_LITERAL], rdx
+    mov rdi, rdx
+    call obj_incref
+    jmp .sub_have_template
+.sub_empty_template:
+    CSTRING rdi, ""
+    call str_from_cstr_heap
+    mov [rbp - SUB_LITERAL], rax
+.sub_have_template:
+
     ; Init state
     lea rdi, [rbp - SUB_STATE]
     mov rsi, [rbp - SUB_PAT]
@@ -934,11 +984,49 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     cmp qword [rbp - SUB_CALLABLE], 0
     jnz .sub_callable_repl
 
-    ; String replacement: concat repl directly
+    ; String replacement.  A pure literal goes straight in; anything naming a
+    ; group needs a match object to read the groups from.
+    cmp qword [rbp - SUB_LITERAL], 0
+    jz .sub_expand_repl
     mov rdi, [rbp - SUB_RESULT]
-    mov rsi, [rbp - SUB_REPL]
+    mov rsi, [rbp - SUB_LITERAL]
     mov ecx, TAG_PTR
     call str_concat
+    jmp .sub_repl_concated
+
+.sub_expand_repl:
+    push r12
+    push r13
+    lea rdi, [rbp - SUB_STATE]
+    mov rsi, [rbp - SUB_PAT]
+    mov rdx, [rbp - SUB_STR]
+    call sre_match_new
+    push rax
+    push rax                   ; a pair, so the calls stay 16-byte aligned
+    mov rdi, [rbp - SUB_TMPL]
+    mov rsi, rax
+    call sre_template_expand
+    pop rdi
+    pop rdi                    ; the match object
+    push rax
+    push rax                   ; the expansion, ours
+    call obj_decref
+    pop rsi
+    pop rsi
+    push rsi
+    push rsi
+    mov rdi, [rbp - SUB_RESULT]
+    mov ecx, TAG_PTR
+    call str_concat
+    pop rdi
+    pop rdi                    ; the expansion again
+    push rax
+    push rax                   ; the concatenation
+    call obj_decref
+    pop rax
+    pop rax
+    pop r13
+    pop r12
 
 .sub_repl_concated:
     push rax
@@ -1034,6 +1122,17 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     jmp .sub_loop
 
 .sub_finish:
+    mov rdi, [rbp - SUB_TMPL]
+    test rdi, rdi
+    jz .sub_tmpl_freed
+    mov qword [rbp - SUB_TMPL], 0
+    call obj_decref
+    mov rdi, [rbp - SUB_LITERAL]
+    test rdi, rdi
+    jz .sub_tmpl_freed
+    mov qword [rbp - SUB_LITERAL], 0
+    call obj_decref
+.sub_tmpl_freed:
     ; Append remaining text after last match (Unicode-safe)
     lea rdi, [rbp - SUB_STATE]
     call sre_string_len
@@ -1093,8 +1192,10 @@ SN_NSUBS    equ 48
 SN_LASTEND  equ 56
 SN_CALLABLE equ 64
 SN_REPL_TAG equ 72
-SN_STATE    equ 72 + SRE_State_size
-SN_FRAME    equ 72 + SRE_State_size
+SN_TMPL     equ 80
+SN_LITERAL  equ 88
+SN_STATE    equ 88 + SRE_State_size
+SN_FRAME    equ 88 + SRE_State_size
 
 DEF_FUNC sre_pattern_subn_method, SN_FRAME
     push rbx
@@ -1159,6 +1260,49 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     call str_from_cstr_heap
     mov [rbp - SN_RESULT], rax
 
+    ; A string replacement is a template, not a literal: \1, \g<name> and the
+    ; escapes all mean something.  It is parsed once here, as CPython's
+    ; _compile_template is, rather than per match.  A template that names no
+    ; group collapses to a single literal, and that keeps the old fast path --
+    ; no match object is built for it.
+    mov qword [rbp - SN_TMPL], 0
+    mov qword [rbp - SN_LITERAL], 0
+    cmp qword [rbp - SN_CALLABLE], 0
+    jnz .subn_have_template
+    mov rax, [rbp - SN_REPL]
+    V_TEST_PTR rax, rcx
+    ja .subn_have_template
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .subn_have_template
+
+    mov rdi, rax
+    mov rsi, [rbp - SN_PAT]
+    call sre_template_parse
+    mov [rbp - SN_TMPL], rax
+    mov rcx, [rax + PyListObject.ob_size]
+    cmp rcx, 1
+    ja .subn_have_template       ; it names at least one group
+    jb .subn_empty_template
+    mov rdx, [rax + PyListObject.ob_item]
+    mov rdx, [rdx]
+    V_TEST_PTR rdx, rcx
+    ja .subn_have_template
+    mov rcx, [rdx + PyObject.ob_type]
+    lea rax, [rel str_type]
+    cmp rcx, rax
+    jne .subn_have_template
+    mov [rbp - SN_LITERAL], rdx
+    mov rdi, rdx
+    call obj_incref
+    jmp .subn_have_template
+.subn_empty_template:
+    CSTRING rdi, ""
+    call str_from_cstr_heap
+    mov [rbp - SN_LITERAL], rax
+.subn_have_template:
+
     lea rdi, [rbp - SN_STATE]
     mov rsi, [rbp - SN_PAT]
     mov rdx, [rbp - SN_STR]
@@ -1209,11 +1353,49 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     cmp qword [rbp - SN_CALLABLE], 0
     jnz .subn_callable_repl
 
-    ; String replacement: concat repl directly
+    ; String replacement.  A pure literal goes straight in; anything naming a
+    ; group needs a match object to read the groups from.
+    cmp qword [rbp - SN_LITERAL], 0
+    jz .subn_expand_repl
     mov rdi, [rbp - SN_RESULT]
-    mov rsi, [rbp - SN_REPL]
+    mov rsi, [rbp - SN_LITERAL]
     mov ecx, TAG_PTR
     call str_concat
+    jmp .subn_repl_concated
+
+.subn_expand_repl:
+    push r12
+    push r13
+    lea rdi, [rbp - SN_STATE]
+    mov rsi, [rbp - SN_PAT]
+    mov rdx, [rbp - SN_STR]
+    call sre_match_new
+    push rax
+    push rax                   ; a pair, so the calls stay 16-byte aligned
+    mov rdi, [rbp - SN_TMPL]
+    mov rsi, rax
+    call sre_template_expand
+    pop rdi
+    pop rdi                    ; the match object
+    push rax
+    push rax                   ; the expansion, ours
+    call obj_decref
+    pop rsi
+    pop rsi
+    push rsi
+    push rsi
+    mov rdi, [rbp - SN_RESULT]
+    mov ecx, TAG_PTR
+    call str_concat
+    pop rdi
+    pop rdi                    ; the expansion again
+    push rax
+    push rax                   ; the concatenation
+    call obj_decref
+    pop rax
+    pop rax
+    pop r13
+    pop r12
 
 .subn_repl_concated:
     push rax
@@ -1298,6 +1480,17 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     jmp .subn_loop
 
 .subn_finish:
+    mov rdi, [rbp - SN_TMPL]
+    test rdi, rdi
+    jz .subn_tmpl_freed
+    mov qword [rbp - SN_TMPL], 0
+    call obj_decref
+    mov rdi, [rbp - SN_LITERAL]
+    test rdi, rdi
+    jz .subn_tmpl_freed
+    mov qword [rbp - SN_LITERAL], 0
+    call obj_decref
+.subn_tmpl_freed:
     lea rdi, [rbp - SN_STATE]
     call sre_string_len
     mov rcx, rax
