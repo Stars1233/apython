@@ -240,6 +240,41 @@ than lying — but they are ordinary Python that does not work:
 
 ## Robustness
 
+- **`re.fullmatch(r'([a-z]*)+', 'abc1')` exhausts the regex recursion limit**
+  where CPython answers None.  Seven of the eight patterns in
+  `tests/re_differential.py`'s fullmatch block agree; this is the eighth.
+  The zero-width guard now saves and restores `last_pos` the way CPython's
+  `save_last_ptr` does, which fixed the sibling `(a*)*` against `'aab'`, so
+  what is left is a second bound this engine does not have -- CPython's
+  MAX_UNTIL also restores `state->ptr` and the mark stack on the failure
+  path, and reaches the tail iteratively rather than one C frame per
+  iteration.
+
+- **`collections.OrderedDict` is `dict`.**  `move_to_end`, `popitem(last=False)`
+  and the order-sensitive `__eq__` are all missing, and `lib/_collections.py`
+  exports the alias, which shadows the complete pure-Python class CPython's
+  own `collections/__init__.py` defines when `$CPYTHON_LIB` is on the path.
+  Not a regression -- `lib/collections/__init__.py` has said `OrderedDict =
+  dict` since long before the `_collections` split -- but the shadowing makes
+  it reachable in more places than before.  `deque` and `defaultdict` have no
+  pure-Python fallback there and must stay; only `OrderedDict` should be
+  withheld.
+
+- **`getset_descr_type` is not shaped like a descriptor by name.**
+  `repr(int.real)` is the empty string where CPython gives
+  `"<attribute 'real' of 'int' objects>"`, and `hasattr(int.real, '__get__')`
+  is False where CPython says True.  Attribute reads work; what breaks is the
+  stdlib asking by name -- `inspect.isdatadescriptor` and the `enum` and
+  `dataclasses` classifiers walk `__dict__` and ask exactly that.  The type
+  needs a `tp_repr` and a `tp_dict` carrying `__get__`/`__set__`, which is
+  CLAUDE.md's "a builtin's behaviour that lives only in a slot".
+
+- **`set.__and__(frozenset(...), ...)` is accepted** where CPython raises,
+  because set and frozenset are registered from one shared table and the
+  receiver check has to admit both.  CPython gives frozenset its own
+  descriptors.  We are the more permissive of the two; nothing depends on the
+  refusal.
+
 - **asyncio `Task`s and `wait_for` wrappers are not GC-tracked.**  A `Task`
   holds its coroutine, which holds a frame, whose locals can hold the task --
   an ordinary cycle that never collects.  Code objects were in the same state

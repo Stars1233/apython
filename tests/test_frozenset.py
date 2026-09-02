@@ -136,3 +136,13 @@ print("usable as a key:", {F([1, 2]): "v"}[frozenset([1, 2])])
 class Sub(set):
     pass
 print("set subclass still fills:", sorted(Sub([7, 8])))
+
+# CPython's frozenset carries the reflected four as well as the forward four
+# -- the comment here used to claim otherwise -- and both types hold the same
+# slots, so they belong in the block the two share.
+print(hasattr(frozenset, "__rsub__"), hasattr(frozenset, "__rand__"),
+      hasattr(frozenset, "__rxor__"), hasattr(frozenset, "__ror__"))
+print(frozenset({2}).__rsub__({1}))
+print(sorted(frozenset({1, 2}).__rand__({2, 3})))
+print(sorted(frozenset({1}).__rxor__({2})))
+print(sorted(frozenset({1}).__ror__({2})))

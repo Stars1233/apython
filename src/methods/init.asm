@@ -652,8 +652,9 @@ DEF_FUNC_LOCAL set_add_shared_methods, SASM_FRAME
     call add_class_getitem
 
     ; The set operators, by name.  Both types hold the same slots, so both
-    ; get the same eight; CPython's frozenset carries only the forward four,
-    ; and the reflected ones are harmless there -- they answer the same thing.
+    ; get the same eight -- and CPython's frozenset really does carry the
+    ; reflected four as well: hasattr(frozenset, '__rsub__') is True there,
+    ; and frozenset({2}).__rsub__({1}) is frozenset({1}).
     mov rdi, [rbp - SASM_DICT]
     lea rsi, [rel mn___sub__]
     lea rdx, [rel set_dunder_sub]
@@ -669,6 +670,22 @@ DEF_FUNC_LOCAL set_add_shared_methods, SASM_FRAME
     mov rdi, [rbp - SASM_DICT]
     lea rsi, [rel mn___or__]
     lea rdx, [rel set_dunder_or]
+    call dict_add_builtin_func
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___rsub__]
+    lea rdx, [rel set_dunder_rsub]
+    call dict_add_builtin_func
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___rand__]
+    lea rdx, [rel set_dunder_rand]
+    call dict_add_builtin_func
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___rxor__]
+    lea rdx, [rel set_dunder_rxor]
+    call dict_add_builtin_func
+    mov rdi, [rbp - SASM_DICT]
+    lea rsi, [rel mn___ror__]
+    lea rdx, [rel set_dunder_ror]
     call dict_add_builtin_func
 
     leave
@@ -1438,27 +1455,11 @@ DEF_FUNC methods_init
     mov rdi, rbx
     call set_add_shared_methods
 
-    ; The reflected four are set's alone: CPython's frozenset carries only the
-    ; forward ones.  __iand__ and __ior__ are deliberately absent -- set has no
-    ; nb_inplace_* slots here, so `s &= t` degrades to the binary form, and a
-    ; by-name __iand__ that did not mutate in place would be a wrong answer
-    ; rather than a missing name.
-    mov rdi, rbx
-    lea rsi, [rel mn___rsub__]
-    lea rdx, [rel set_dunder_rsub]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rand__]
-    lea rdx, [rel set_dunder_rand]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rxor__]
-    lea rdx, [rel set_dunder_rxor]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ror__]
-    lea rdx, [rel set_dunder_ror]
-    call dict_add_builtin_func
+    ; The reflected four are registered with the forward four, in the block
+    ; both types share.  __iand__ and __ior__ are deliberately absent -- set
+    ; has no nb_inplace_* slots here, so `s &= t` degrades to the binary
+    ; form, and a by-name __iand__ that did not mutate in place would be a
+    ; wrong answer rather than a missing name.
 
     lea rax, [rel set_type]
     mov [rax + PyTypeObject.tp_dict], rbx
