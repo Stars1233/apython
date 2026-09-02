@@ -410,6 +410,35 @@ DEF_FUNC sre_pattern_fullmatch_method
 END_FUNC sre_pattern_fullmatch_method
 
 ;; ============================================================================
+;; sre_substr_from_state_empty(rdi=state, rsi=start_idx, rdx=end_idx)
+;; -> (rax=payload, edx=tag)
+;;
+;; The same, except that an unmatched group is the empty string rather than
+;; None.  CPython has both -- state_getslice's `empty` argument -- and which
+;; one a caller wants is not a detail: findall gives '' for a group that did
+;; not match, split gives None, and they read the same marks to do it.
+;; ============================================================================
+DEF_FUNC sre_substr_from_state_empty
+    cmp rsi, -1
+    je .sse_empty
+    cmp rdx, -1
+    je .sse_empty
+    call sre_substr_from_state
+    leave
+    ret
+.sse_empty:
+    lea rdi, [rel sse_nothing]
+    xor esi, esi
+    call str_new_heap
+    mov edx, TAG_PTR
+    leave
+    ret
+section .rodata
+sse_nothing: db 0
+section .text
+END_FUNC sre_substr_from_state_empty
+
+;; ============================================================================
 ;; sre_substr_from_state(rdi=state, rsi=start_idx, rdx=end_idx)
 ;; -> (rax=payload, edx=tag)
 ;; Extracts substring handling both ASCII and codepoint modes.
@@ -610,16 +639,25 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     jmp .fa_advance
 
 .fa_one_group:
-    ; Append group(1) string
-    ; State marks[0:1] = group 1 in CPython convention
+    ; Append group(1) string.
+    ; State marks[0:1] = group 1 in CPython convention.
+    ;
+    ; A group that did not match is the empty string, not the whole match:
+    ; this used to fall through to .fa_no_groups when marks_size said the
+    ; group was never set, so re.findall('(a)?b', 'b') answered ['b'] where
+    ; CPython answers [''].  The marks now carry -1 for a hole, so the only
+    ; thing to guard is the array's own length.
     lea rdi, [rbp - FA_STATE]
     mov rax, [rdi + SRE_State.marks]
-    cmp qword [rdi + SRE_State.marks_size], 2
-    jb .fa_no_groups           ; fallback to whole match
+    mov rsi, -1
+    mov rdx, -1
+    cmp qword [rdi + SRE_State.marks_count], 2
+    jb .fa_og_have
     mov rsi, [rax]            ; mark[0] = group 1 start
     mov rdx, [rax + 8]       ; mark[1] = group 1 end
+.fa_og_have:
     lea rdi, [rbp - FA_STATE]
-    call sre_substr_from_state
+    call sre_substr_from_state_empty
     ; rax = payload, edx = tag (str or None)
     mov rdi, r14
     mov rsi, rax
@@ -658,18 +696,20 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     shl r8, 1                  ; r8 = 2 * (group - 1)
     ; Check marks_size > 2*(group-1)+1
     lea r9, [r8 + 2]
-    cmp r9, [rdi + SRE_State.marks_size]
-    ja .fa_mg_none
+    cmp r9, [rdi + SRE_State.marks_count]
+    ja .fa_mg_unset
 
     mov rsi, [rax + r8*8]     ; start
     mov rdx, [rax + r8*8 + 8] ; end
+    jmp .fa_mg_call
+.fa_mg_unset:
+    ; Past the end of the array: never marked, same as a -1 hole in it.
+    mov rsi, -1
+    mov rdx, -1
+.fa_mg_call:
     lea rdi, [rbp - FA_STATE]
-    call sre_substr_from_state
+    call sre_substr_from_state_empty
     jmp .fa_mg_set
-
-.fa_mg_none:
-    xor eax, eax
-    RET_NONE
 
 .fa_mg_set:
     ; Set tuple[group-1] = (rax, edx)
