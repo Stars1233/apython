@@ -38,17 +38,6 @@ one-line fix.
   Registries are process-lifetime and small in practice.  Revisit if
   `_weakref` lands.
 
-- **`type.__subclasses__` does not exist**, and `_abc_subclasscheck` cannot do
-  CPython's step 6 without it: step 6 finds a registration made on a
-  *subclass* of the ABC, so `issubclass(X, ABC)` is False here when X was
-  registered against a subclass of ABC rather than against ABC itself.
-  Direct registration and real inheritance both work.
-
-  Giving types a subclass list is the whole of it, and neither shape is
-  small: a `tp_subclasses` field means editing every static type table in the
-  tree, and a side table keyed by type pointer -- the shape `_weakref`
-  already uses -- means removing entries in `type_dealloc`.
-
 - **`posix` is a subset, and a deliberate one.**  The file, directory and
   process calls `os.py` and `os.path` reach for are there, along with
   `environ`, `stat_result`, `error` and the O_*/W* constants -- enough that

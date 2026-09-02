@@ -13,10 +13,10 @@
 ;     ones so a registered class can be collected; here a class that is
 ;     registered lives as long as the ABC does.
 ;
-;   * Step 6 of the subclass check -- recursing into cls.__subclasses__() to
-;     find a registration made on a subclass of the ABC -- is missing, because
-;     types do not keep a subclass list.  Direct registrations and real
-;     inheritance are both handled.
+; Step 6 -- recursing into cls.__subclasses__() to find a registration made
+; on a subclass of the ABC -- was missing for a long time, because types kept
+; no subclass list.  They do now, in src/pyo/subclasses.asm, and this reads it
+; directly rather than through the Python-level __subclasses__.
 ;
 ; State lives in the class's own tp_dict, under the names _py_abc uses, and is
 ; read straight out of it rather than through type_getattr: an ABC's subclass
@@ -24,6 +24,12 @@
 
 %include "macros.inc"
 %include "object.inc"
+
+struc SubList
+    .count:    resq 1
+    .capacity: resq 1
+    .items:    resq 1
+endstruc
 %include "value.inc"
 
 extern dict_new
@@ -42,6 +48,7 @@ extern obj_is_true
 extern tuple_new
 extern type_getattr
 extern type_is_subtype
+extern sub_list_for_type
 extern type_check_is_class
 extern value_type
 extern raise_exception
@@ -590,14 +597,14 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     CSTRING rsi, "_abc_registry"
     call abc_state_get
     test rax, rax
-    jz .cache_no
+    jz .subclasses
     mov [rbp - SC_REG], rax
     mov qword [rbp - SC_IDX], 0
 .reg_loop:
     mov rax, [rbp - SC_REG]
     mov rcx, [rbp - SC_IDX]
     cmp rcx, [rax + PyDictObject.capacity]
-    jge .cache_no
+    jge .subclasses
     mov rdx, [rax + PyDictObject.entries]
     shl rcx, 4                  ; SET_ENTRY_SIZE
     mov rdi, [rdx + rcx + 8]    ; the entry's key Value (hash sits at +0)
@@ -613,6 +620,36 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     je .error
     test eax, eax
     jz .reg_loop
+    jmp .cache_yes
+
+.subclasses:
+    ; 6. a subclass of one of THIS class's subclasses.  A registration made
+    ; against a subclass of the ABC counts for the ABC too, and this is the
+    ; only step that can find it: without it, `B.register(X)` for a B deriving
+    ; from A left issubclass(X, A) answering False.  It was missing because
+    ; nothing kept a list of subclasses; type.__subclasses__ does now.
+    mov rdi, [rbp - SC_CLS]
+    call sub_list_for_type
+    test rax, rax
+    jz .cache_no
+    mov [rbp - SC_REG], rax     ; the SubList, reusing the registry slot
+    mov qword [rbp - SC_IDX], 0
+.sub_loop:
+    mov rax, [rbp - SC_REG]
+    mov rcx, [rbp - SC_IDX]
+    cmp rcx, [rax + SubList.count]
+    jge .cache_no
+    mov rdx, [rax + SubList.items]
+    mov rsi, [rdx + rcx*8]
+    inc qword [rbp - SC_IDX]
+    cmp rsi, [rbp - SC_CLS]
+    je .sub_loop                ; not itself, or the recursion never ends
+    mov rdi, [rbp - SC_SUB]
+    call abc_call_issubclass
+    cmp eax, -1
+    je .error
+    test eax, eax
+    jz .sub_loop
     jmp .cache_yes
 
 .cache_yes:

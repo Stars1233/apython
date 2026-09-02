@@ -1025,6 +1025,14 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     mov rdi, r12
     call gc_track
 
+    ; Record it against each of its bases, so type.__subclasses__ can answer.
+    ; Borrowed, and dropped again by user_type_dealloc, so the list only ever
+    ; holds live classes -- which is what CPython's weak-referenced
+    ; tp_subclasses amounts to.
+    extern subclass_register
+    mov rdi, r12
+    call subclass_register
+
     ; Now that the class exists, tell every descriptor in it what it is called.
     mov rdi, r12
     mov rsi, r15

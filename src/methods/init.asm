@@ -1567,6 +1567,21 @@ DEF_FUNC methods_init
     mov rdi, rbx
     call add_class_getitem
 
+    ; bool is a static subclass of int -- the only one in the tree -- so it
+    ; never went through type_from_parts and had nothing to register it.
+    ; CPython lists it in int.__subclasses__(), so it is recorded by hand.
+    extern subclass_register
+    extern bool_type
+    lea rdi, [rel bool_type]
+    call subclass_register
+
+    ; type.__subclasses__ -- the direct subclasses, live ones only.
+    extern type_method_subclasses
+    mov rdi, rbx
+    lea rsi, [rel mn___subclasses__]
+    lea rdx, [rel type_method_subclasses]
+    call dict_add_builtin_func
+
     lea rax, [rel type_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 
@@ -2920,6 +2935,7 @@ gs_denominator: db "denominator", 0
 mn___eq__: db "__eq__", 0
 mn___ne__: db "__ne__", 0
 mn___hash__:    db "__hash__", 0
+mn___subclasses__: db "__subclasses__", 0
 mn___add__:     db "__add__", 0
 mn___radd__: db "__radd__", 0
 mn___sub__: db "__sub__", 0

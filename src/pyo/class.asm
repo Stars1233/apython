@@ -3001,9 +3001,74 @@ END_FUNC object_new_fn
 ;; Deallocator for user-defined heap types (created by __build_class__).
 ;; Frees tp_dict, tp_name string, and the type object itself.
 ;; ============================================================================
+
+;; ============================================================================
+;; type_traverse / type_clear -- a heap type is a GC object like any other
+;;
+;; user_type_metatype carried TYPE_FLAG_HAVE_GC and a NULL tp_traverse, so
+;; every class was tracked and none was reachable THROUGH: the collector could
+;; see a class but not what it held.  A class always sits in a cycle -- its
+;; own tp_mro tuple contains it -- so with no traverse none of them was ever
+;; collected.  `def f(): class Temp: pass` leaked a class per call, and so did
+;; every decorator, factory and closure that builds one.
+;;
+;; type_clear follows CPython's: the dict's contents and tp_mro, and not
+;; tp_base or tp_bases.  Breaking the MRO is enough to break the cycle, and
+;; the bases are what the type needs to stay coherent while the rest of the
+;; collection runs.
+;; ============================================================================
+global type_traverse
+DEF_FUNC type_traverse
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyTypeObject.tp_dict]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyTypeObject.tp_base]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyTypeObject.tp_bases]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyTypeObject.tp_mro]
+    VISIT_PTR rdi
+    pop rbx
+    leave
+    ret
+END_FUNC type_traverse
+
+global type_clear
+DEF_FUNC type_clear
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .tcl_mro
+    extern dict_clear_gc
+    call dict_clear_gc          ; the contents, not the dict itself
+.tcl_mro:
+    mov rdi, [rbx + PyTypeObject.tp_mro]
+    test rdi, rdi
+    jz .tcl_done
+    mov qword [rbx + PyTypeObject.tp_mro], 0
+    call obj_decref
+.tcl_done:
+    pop rbx
+    leave
+    ret
+END_FUNC type_clear
+
 DEF_FUNC user_type_dealloc
     push rbx
     mov rbx, rdi                ; rbx = type object
+
+    ; Out of every base's subclass list first, while tp_bases is still there
+    ; to say which they are.  The entries are borrowed, so this is the only
+    ; thing that keeps a freed class out of __subclasses__().
+    extern subclass_live
+    cmp qword [rel subclass_live], 0
+    je .utd_no_subclasses
+    extern subclass_unregister
+    mov rdi, rbx
+    call subclass_unregister
+.utd_no_subclasses:
 
     ; DECREF tp_dict if present
     mov rdi, [rbx + PyTypeObject.tp_dict]
@@ -3105,8 +3170,8 @@ user_type_metatype:
     dq 0                        ; tp_mro
     dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_METATYPE  ; tp_flags (heaptypes are gc_alloc'd)
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq type_traverse            ; tp_traverse
+    dq type_clear               ; tp_clear
     dq 0 ; tp_dictoffset
 
 ; object_type - base type for all Python objects
