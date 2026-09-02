@@ -379,6 +379,62 @@ DEF_FUNC_LOCAL add_method_to_dict_checked
     ret
 END_FUNC add_method_to_dict_checked
 
+;; ============================================================================
+;; add_staticmethod(rdi = type dict, rsi = name cstr, rdx = function)
+;;
+;; A staticmethod is what keeps maketrans from being handed a self it does not
+;; want: bytes.maketrans(a, b) and b"".maketrans(a, b) must both see exactly
+;; two arguments.  str's maketrans was the only one of these and did it
+;; inline; three of them is enough to want one place.
+;; ============================================================================
+ASM_FUNC  equ 8
+ASM_SM    equ 16
+ASM_KEY   equ 24
+ASM_FRAME equ 40            ; + 3 pushes = 64
+
+DEF_FUNC_LOCAL add_staticmethod, ASM_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi                ; the type dict
+    mov r12, rsi                ; the name
+    mov r13, rdx                ; the function
+
+    mov rdi, r13
+    mov rsi, r12
+    call builtin_func_new
+    mov [rbp - ASM_FUNC], rax
+
+    mov edi, PyStaticMethodObject_size
+    lea rsi, [rel staticmethod_type]
+    call gc_alloc
+    mov rcx, [rbp - ASM_FUNC]
+    mov [rax + PyStaticMethodObject.sm_callable], rcx
+    mov [rbp - ASM_SM], rax
+    mov rdi, rax
+    call gc_track
+
+    mov rdi, r12
+    call str_from_cstr_heap
+    mov [rbp - ASM_KEY], rax
+
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, [rbp - ASM_SM]
+    call dict_set
+
+    mov rdi, [rbp - ASM_KEY]
+    call obj_decref
+    mov rdi, [rbp - ASM_SM]
+    call obj_decref
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC add_staticmethod
+
 ;; add_new_staticmethod(rdi = type dict, rsi = function) -- register `function`
 ;; as the type's __new__, wrapped so it is not bound to the instance.
 extern staticmethod_construct
@@ -730,36 +786,10 @@ DEF_FUNC methods_init
     lea rdx, [rel str_method_format_map]
     call dict_add_builtin_func
 
-    ; Add maketrans as staticmethod
-    lea rdi, [rel str_staticmethod_maketrans]
-    lea rsi, [rel mn_maketrans]
-    call builtin_func_new
-    push rax
-
-    mov edi, PyStaticMethodObject_size
-    lea rsi, [rel staticmethod_type]
-    call gc_alloc
-    pop rcx
-    mov [rax + PyStaticMethodObject.sm_callable], rcx
-    push rax
-    mov rdi, rax
-    call gc_track
-    pop rax
-    push rax
-
-    lea rdi, [rel mn_maketrans]
-    call str_from_cstr_heap
-    push rax
-
     mov rdi, rbx
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    call dict_set
-
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
+    lea rsi, [rel mn_maketrans]
+    lea rdx, [rel str_staticmethod_maketrans]
+    call add_staticmethod
 
     ; Store dict in str_type.tp_dict
 
@@ -2031,6 +2061,116 @@ DEF_FUNC methods_init
     call dict_add_builtin_func
 
     mov rdi, rbx
+    lea rsi, [rel mn_upper]
+    extern bytes_method_upper
+    lea rdx, [rel bytes_method_upper]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_lower]
+    extern bytes_method_lower
+    lea rdx, [rel bytes_method_lower]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_swapcase]
+    extern bytes_method_swapcase
+    lea rdx, [rel bytes_method_swapcase]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_capitalize]
+    extern bytes_method_capitalize
+    lea rdx, [rel bytes_method_capitalize]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_title]
+    extern bytes_method_title
+    lea rdx, [rel bytes_method_title]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isalpha]
+    extern bytes_method_isalpha
+    lea rdx, [rel bytes_method_isalpha]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isdigit]
+    extern bytes_method_isdigit
+    lea rdx, [rel bytes_method_isdigit]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isspace]
+    extern bytes_method_isspace
+    lea rdx, [rel bytes_method_isspace]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isalnum]
+    extern bytes_method_isalnum
+    lea rdx, [rel bytes_method_isalnum]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isascii]
+    extern bytes_method_isascii
+    lea rdx, [rel bytes_method_isascii]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isupper]
+    extern bytes_method_isupper
+    lea rdx, [rel bytes_method_isupper]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_islower]
+    extern bytes_method_islower
+    lea rdx, [rel bytes_method_islower]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_istitle]
+    extern bytes_method_istitle
+    lea rdx, [rel bytes_method_istitle]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_ljust]
+    extern bytes_method_ljust
+    lea rdx, [rel bytes_method_ljust]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rjust]
+    extern bytes_method_rjust
+    lea rdx, [rel bytes_method_rjust]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_center]
+    extern bytes_method_center
+    lea rdx, [rel bytes_method_center]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_zfill]
+    extern bytes_method_zfill
+    lea rdx, [rel bytes_method_zfill]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_expandtabs]
+    extern bytes_method_expandtabs
+    lea rdx, [rel bytes_method_expandtabs]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_translate]
+    extern bytes_method_translate
+    lea rdx, [rel bytes_method_translate]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_splitlines]
+    extern bytes_method_splitlines
+    lea rdx, [rel bytes_method_splitlines]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_removeprefix]
+    extern bytes_method_removeprefix
+    lea rdx, [rel bytes_method_removeprefix]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_removesuffix]
+    extern bytes_method_removesuffix
+    lea rdx, [rel bytes_method_removesuffix]
+    call dict_add_builtin_func
+    mov rdi, rbx
     lea rsi, [rel mn_join]
     lea rdx, [rel bytes_method_join]
     call dict_add_builtin_func
@@ -2046,6 +2186,12 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___iter__]
     lea rdx, [rel bytes_dunder_iter]
     call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn_maketrans]
+    extern bytes_staticmethod_maketrans
+    lea rdx, [rel bytes_staticmethod_maketrans]
+    call add_staticmethod
 
     lea rax, [rel bytes_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2165,6 +2311,116 @@ DEF_FUNC methods_init
     lea rdx, [rel ba_shared_rpartition]
     call dict_add_builtin_func
     mov rdi, rbx
+    lea rsi, [rel mn_upper]
+    extern ba_shared_upper
+    lea rdx, [rel ba_shared_upper]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_lower]
+    extern ba_shared_lower
+    lea rdx, [rel ba_shared_lower]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_swapcase]
+    extern ba_shared_swapcase
+    lea rdx, [rel ba_shared_swapcase]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_capitalize]
+    extern ba_shared_capitalize
+    lea rdx, [rel ba_shared_capitalize]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_title]
+    extern ba_shared_title
+    lea rdx, [rel ba_shared_title]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isalpha]
+    extern ba_shared_isalpha
+    lea rdx, [rel ba_shared_isalpha]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isdigit]
+    extern ba_shared_isdigit
+    lea rdx, [rel ba_shared_isdigit]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isspace]
+    extern ba_shared_isspace
+    lea rdx, [rel ba_shared_isspace]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isalnum]
+    extern ba_shared_isalnum
+    lea rdx, [rel ba_shared_isalnum]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isascii]
+    extern ba_shared_isascii
+    lea rdx, [rel ba_shared_isascii]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_isupper]
+    extern ba_shared_isupper
+    lea rdx, [rel ba_shared_isupper]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_islower]
+    extern ba_shared_islower
+    lea rdx, [rel ba_shared_islower]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_istitle]
+    extern ba_shared_istitle
+    lea rdx, [rel ba_shared_istitle]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_ljust]
+    extern ba_shared_ljust
+    lea rdx, [rel ba_shared_ljust]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_rjust]
+    extern ba_shared_rjust
+    lea rdx, [rel ba_shared_rjust]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_center]
+    extern ba_shared_center
+    lea rdx, [rel ba_shared_center]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_zfill]
+    extern ba_shared_zfill
+    lea rdx, [rel ba_shared_zfill]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_expandtabs]
+    extern ba_shared_expandtabs
+    lea rdx, [rel ba_shared_expandtabs]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_translate]
+    extern ba_shared_translate
+    lea rdx, [rel ba_shared_translate]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_splitlines]
+    extern ba_shared_splitlines
+    lea rdx, [rel ba_shared_splitlines]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_removeprefix]
+    extern ba_shared_removeprefix
+    lea rdx, [rel ba_shared_removeprefix]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_removesuffix]
+    extern ba_shared_removesuffix
+    lea rdx, [rel ba_shared_removesuffix]
+    call dict_add_builtin_func
+    mov rdi, rbx
     lea rsi, [rel mn_join]
     lea rdx, [rel ba_shared_join]
     call dict_add_builtin_func
@@ -2196,6 +2452,11 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___contains__]
     lea rdx, [rel bytearray_dunder_contains]
     call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_maketrans]
+    lea rdx, [rel bytes_staticmethod_maketrans]
+    call add_staticmethod
+
     lea rax, [rel bytearray_type]
     mov [rax + PyTypeObject.tp_dict], rbx
 

@@ -2428,3 +2428,188 @@ DEF_FUNC bytearray_dunder_contains
 .badc_bad:
     RAISE exc_TypeError_type, "expected exactly one argument"
 END_FUNC bytearray_dunder_contains
+
+;; ============================================================================
+;; bytearray's share of the string-shaped methods in methods/bytes_str.asm.
+;;
+;; Same shape as the trampolines above: the bytes body runs on a temporary
+;; bytes and the wrap mode says what the answer has to become -- a bytearray
+;; for the ones that build a new buffer, a list of bytearrays for splitlines,
+;; and nothing at all for the predicates, which answer with a bool.
+;; ============================================================================
+
+DEF_FUNC ba_shared_upper
+    extern bytes_method_upper
+    lea rdx, [rel bytes_method_upper]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_upper
+
+DEF_FUNC ba_shared_lower
+    extern bytes_method_lower
+    lea rdx, [rel bytes_method_lower]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_lower
+
+DEF_FUNC ba_shared_swapcase
+    extern bytes_method_swapcase
+    lea rdx, [rel bytes_method_swapcase]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_swapcase
+
+DEF_FUNC ba_shared_capitalize
+    extern bytes_method_capitalize
+    lea rdx, [rel bytes_method_capitalize]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_capitalize
+
+DEF_FUNC ba_shared_title
+    extern bytes_method_title
+    lea rdx, [rel bytes_method_title]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_title
+
+DEF_FUNC ba_shared_isalpha
+    extern bytes_method_isalpha
+    lea rdx, [rel bytes_method_isalpha]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_isalpha
+
+DEF_FUNC ba_shared_isdigit
+    extern bytes_method_isdigit
+    lea rdx, [rel bytes_method_isdigit]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_isdigit
+
+DEF_FUNC ba_shared_isspace
+    extern bytes_method_isspace
+    lea rdx, [rel bytes_method_isspace]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_isspace
+
+DEF_FUNC ba_shared_isalnum
+    extern bytes_method_isalnum
+    lea rdx, [rel bytes_method_isalnum]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_isalnum
+
+DEF_FUNC ba_shared_isascii
+    extern bytes_method_isascii
+    lea rdx, [rel bytes_method_isascii]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_isascii
+
+DEF_FUNC ba_shared_isupper
+    extern bytes_method_isupper
+    lea rdx, [rel bytes_method_isupper]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_isupper
+
+DEF_FUNC ba_shared_islower
+    extern bytes_method_islower
+    lea rdx, [rel bytes_method_islower]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_islower
+
+DEF_FUNC ba_shared_istitle
+    extern bytes_method_istitle
+    lea rdx, [rel bytes_method_istitle]
+    mov ecx, 0
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_istitle
+
+DEF_FUNC ba_shared_ljust
+    extern bytes_method_ljust
+    lea rdx, [rel bytes_method_ljust]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_ljust
+
+DEF_FUNC ba_shared_rjust
+    extern bytes_method_rjust
+    lea rdx, [rel bytes_method_rjust]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_rjust
+
+DEF_FUNC ba_shared_center
+    extern bytes_method_center
+    lea rdx, [rel bytes_method_center]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_center
+
+DEF_FUNC ba_shared_zfill
+    extern bytes_method_zfill
+    lea rdx, [rel bytes_method_zfill]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_zfill
+
+DEF_FUNC ba_shared_expandtabs
+    extern bytes_method_expandtabs
+    lea rdx, [rel bytes_method_expandtabs]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_expandtabs
+
+DEF_FUNC ba_shared_translate
+    extern bytes_method_translate
+    lea rdx, [rel bytes_method_translate]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_translate
+
+DEF_FUNC ba_shared_splitlines
+    extern bytes_method_splitlines
+    lea rdx, [rel bytes_method_splitlines]
+    mov ecx, 2
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_splitlines
+
+DEF_FUNC ba_shared_removeprefix
+    extern bytes_method_removeprefix
+    lea rdx, [rel bytes_method_removeprefix]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_removeprefix
+
+DEF_FUNC ba_shared_removesuffix
+    extern bytes_method_removesuffix
+    lea rdx, [rel bytes_method_removesuffix]
+    mov ecx, 1
+    leave
+    jmp bytearray_shared_call
+END_FUNC ba_shared_removesuffix
