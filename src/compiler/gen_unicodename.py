@@ -103,6 +103,9 @@ def emit(names, cjk_ranges, out):
     w(";; written in the name itself.  uniname_cjk_ranges is what makes a bogus one\n")
     w(";; still an error.\n")
     w("\n")
+    # A data-only object still needs the marker, or the linker assumes an
+    # executable stack for the whole program and says so.
+    w("section .note.GNU-stack noalloc noexec nowrite progbits\n\n")
     w("section .rodata\n\n")
 
     w("global uniname_blob\n")

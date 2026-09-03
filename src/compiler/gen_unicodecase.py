@@ -167,6 +167,10 @@ def main():
     emit(out, ";; not one character, and %d runs of equal character flags." % len(uflags))
     emit(out, ";; A codepoint in no case range has no case.")
     emit(out)
+    # A data-only object still needs the marker, or the linker assumes an
+    # executable stack for the whole program and says so.
+    emit(out, "section .note.GNU-stack noalloc noexec nowrite progbits")
+    emit(out)
     emit(out, "section .rodata")
     emit(out)
     emit(out, "global ucase_range_count")

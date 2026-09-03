@@ -7,6 +7,8 @@
 ;; not one character, and 3898 runs of equal character flags.
 ;; A codepoint in no case range has no case.
 
+section .note.GNU-stack noalloc noexec nowrite progbits
+
 section .rodata
 
 global ucase_range_count
