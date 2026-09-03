@@ -396,6 +396,32 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
 .tfp_base_done:
     mov [rbp - TFP_BASE], rax   ; layout base, or NULL
 
+    ; A base CPython refuses.  The check goes here rather than in
+    ; __build_class__, where the one for `bool` used to live on its own:
+    ; type(name, bases, ns) reaches this and not that, so `type("B", (bool,),
+    ; {})` was accepted while `class B(bool)` was not.
+    cmp qword [rbp - TFP_BASES], 0
+    je .tfp_final_ok
+    xor r9, r9
+.tfp_final_scan:
+    mov rcx, [rbp - TFP_BASES]
+    cmp r9, [rcx + PyTupleObject.ob_size]
+    jge .tfp_final_ok
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rcx, [rcx + r9*8]
+    test rcx, rcx
+    jz .tfp_final_next
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_FINAL
+    jnz .tfp_final_base
+.tfp_final_next:
+    inc r9
+    jmp .tfp_final_scan
+.tfp_final_base:
+    mov rdi, [rcx + PyTypeObject.tp_name]
+    extern raise_final_base
+    call raise_final_base
+.tfp_final_ok:
+
     ; Two bases whose layouts are unrelated cannot both be laid out in one
     ; instance.  `class C(MyList, MyDict)` was accepted here and laid out as
     ; whichever base was wider, after which the family flags were OR'd from
@@ -1958,11 +1984,6 @@ BCL_OKWV  equ 72
     pop rsi
     test eax, eax
     jz .build_class_base_error
-    ; Prevent subclassing bool
-    extern bool_type
-    lea rcx, [rel bool_type]
-    cmp rdx, rcx
-    je .build_class_bool_error
     mov [r8 + r9*8], rdx
     push rsi
     push r8
@@ -2293,9 +2314,6 @@ BCL_OKWV  equ 72
 
 .build_class_base_error:
     RAISE exc_TypeError_type, "bases must be types"
-
-.build_class_bool_error:
-    RAISE exc_TypeError_type, "type 'bool' is not an acceptable base type"
 END_FUNC builtin___build_class__
 section .rodata
 bc_prepare_name: db "__prepare__", 0

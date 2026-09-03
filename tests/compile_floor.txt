@@ -154,6 +154,7 @@ test_except_star
 test_exec_builtins_value
 test_extended_slice
 test_fileio
+test_final_types
 test_float_big_int
 test_float_complex_subclass
 test_float_fromhex

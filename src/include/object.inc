@@ -993,6 +993,14 @@ TYPE_FLAG_BYTEARRAY_SUBCLASS equ 0x40000
 ; on a bytes subclass declined into a TypeError.
 TYPE_FLAG_BYTES_SUBCLASS equ 0x80000
 
+; A type CPython refuses to let you subclass -- the ones without
+; Py_TPFLAGS_BASETYPE.  It is the inverse of CPython's flag on purpose: every
+; type here is subclassable unless it says otherwise, so adding the flag to a
+; handful is a change of four lines rather than an audit of ninety-four
+; tables, and a type object that predates it reads as subclassable, which is
+; what it was.
+TYPE_FLAG_FINAL          equ 0x100000
+
 ; Comparison opcodes (used by tp_richcompare)
 PY_LT equ 0
 PY_LE equ 1

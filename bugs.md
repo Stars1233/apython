@@ -34,15 +34,6 @@ one-line fix.
   zero-argument form needs: CPython reads the `__class__` cell and the first
   positional argument out of the calling frame.
 
-- **Three types CPython refuses to let you subclass are subclassable here.**
-  `bool`, `memoryview` and `range` are all final in CPython -- they lack
-  `Py_TPFLAGS_BASETYPE` -- and `class B(bool): pass` is
-  "type 'bool' is not an acceptable base type".  Here all three are accepted,
-  and the instances that come out are not obviously wrong, merely not
-  something CPython would have let you make.  A `TYPE_FLAG_BASETYPE` test in
-  `type_from_parts` is the whole of it; the work is auditing which static
-  types should carry the flag.
-
 - **`str.encode` and `bytes.decode` know only utf-8, ascii and latin-1.**
   Any other name is a LookupError, where CPython would find the codec through
   the registry; reaching it from the interpreter would mean calling Python

@@ -646,6 +646,31 @@ DEF_FUNC raise_type_error_counted, RTC_FRAME
 END_FUNC raise_type_error_counted
 
 ;; ============================================================================
+;; raise_final_base(rdi = the type's name, as a C string) -- does not return
+;;
+;; "type 'bool' is not an acceptable base type", for a type CPython gives no
+;; Py_TPFLAGS_BASETYPE.
+;; ============================================================================
+RFB_BUF   equ 176
+RFB_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
+global raise_final_base
+DEF_FUNC raise_final_base, RFB_FRAME
+    mov rdx, rdi
+    lea rdi, [rbp - RFB_BUF]
+    CSTRING rsi, "type '"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, rdx
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "' is not an acceptable base type"
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RFB_BUF]
+    call raise_exception
+END_FUNC raise_final_base
+
+;; ============================================================================
 ;; raise_descriptor_receiver(rdi = the PyBuiltinObject, rsi = the receiver
 ;;                           Value) -- does not return
 ;;

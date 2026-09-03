@@ -749,7 +749,7 @@ slice_type:
     dq 0                      ; tp_base
     dq 0                      ; tp_dict
     dq 0                      ; tp_mro
-    dq TYPE_FLAG_HAVE_GC                      ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_FINAL  ; tp_flags -- no Py_TPFLAGS_BASETYPE
     dq 0                      ; tp_bases
     dq slice_traverse                        ; tp_traverse
     dq slice_clear_gc                        ; tp_clear
