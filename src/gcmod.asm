@@ -32,8 +32,8 @@ extern exc_ValueError_type
 extern gc_collect_gen
 extern gc_enabled
 extern gc_gen0_count
-extern gc_gen1_count
-extern gc_gen2_count
+extern gc_gen1_collections
+extern gc_gen2_collections
 extern gc_gen0_threshold
 extern gc_gen1_threshold
 extern gc_gen2_threshold
@@ -159,12 +159,18 @@ DEF_FUNC_LOCAL gm_three, GM3_FRAME
     ret
 END_FUNC gm_three
 
+; CPython's get_count() is (allocations since the last gen0 pass, gen0
+; collections since the last gen1 pass, gen1 collections since the last gen2
+; pass) -- only the first is an object count.  The last two were reported
+; from a pair of counters nothing ever incremented, so they were always 0;
+; the collector's real ones are gc_gen1_collections and gc_gen2_collections,
+; which are also what its own thresholds are compared against.
 DEF_FUNC gc_mod_get_count
     test rsi, rsi
     jnz .gmgc_args
     mov rdi, [rel gc_gen0_count]
-    mov rsi, [rel gc_gen1_count]
-    mov rdx, [rel gc_gen2_count]
+    mov rsi, [rel gc_gen1_collections]
+    mov rdx, [rel gc_gen2_collections]
     call gm_three
     mov edx, TAG_PTR
     leave

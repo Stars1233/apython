@@ -19,8 +19,16 @@ gc.enable()
 print(gc.isenabled())
 
 print("=== the counts and the thresholds ===")
+# get_count() is (allocations since the last gen0 pass, gen0 collections
+# since the last gen1 pass, gen1 collections since the last gen2 pass).  The
+# first depends on how much the interpreter itself has allocated, so only its
+# type is compared; a collect() moves the second, which is compared.
 c = gc.get_count()
 print(type(c).__name__, len(c), all(isinstance(x, int) for x in c))
+gc.collect(2)
+before = gc.get_count()[1]
+gc.collect(0)
+print(gc.get_count()[1] - before)
 t = gc.get_threshold()
 print(type(t).__name__, len(t), t)
 gc.set_threshold(123, 4, 5)
@@ -50,10 +58,11 @@ def make_cycle():
     a.other = b
     b.other = a
 
-# The COUNT is not compared: CPython counts both instances of a two-object
-# cycle and this collector counts one, because clearing the first drops the
-# second by refcount before the sweep reaches it.  That something was
-# collected is the property that matters.
+# An instance cycle's count is not compared: CPython 3.12 keeps an
+# instance's __dict__ in a managed slot that is not a tracked object of its
+# own, so it counts two here where this collector counts four -- two
+# instances and their two dicts.  See bugs.md.  Container cycles, below, are
+# compared exactly.
 gc.collect()
 make_cycle()
 print(gc.collect() > 0)
@@ -64,7 +73,7 @@ def make_self_cycle():
 
 gc.collect()
 make_self_cycle()
-print(gc.collect() > 0)
+print(gc.collect())
 
 def make_dict_cycle():
     d = {}
@@ -72,7 +81,31 @@ def make_dict_cycle():
 
 gc.collect()
 make_dict_cycle()
-print(gc.collect() > 0)
+print(gc.collect())
+
+print("=== the count is the size of the unreachable set ===")
+# Every object in the cycle, not just the one the sweep happened to reach
+# first.  This used to answer 1 for all of them.
+gc.collect()
+a, b = [], []
+a.append(b)
+b.append(a)
+del a, b
+print(gc.collect())
+
+gc.collect()
+ring = [[] for _ in range(5)]
+for i in range(5):
+    ring[i].append(ring[(i + 1) % 5])
+del ring
+print(gc.collect())
+
+gc.collect()
+d, e = {}, {}
+d["x"] = e
+e["x"] = d
+del d, e
+print(gc.collect())
 
 print("=== a chain of cycles ===")
 gc.collect()

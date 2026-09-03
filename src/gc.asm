@@ -35,10 +35,9 @@ align 8
 gc_gen1:
     dq gc_gen1
     dq gc_gen1
-global gc_gen1_count
-gc_gen1_count:  dq 0
 global gc_gen1_threshold
 gc_gen1_threshold: dq 10
+global gc_gen1_collections
 gc_gen1_collections: dq 0
 
 ; Generation 2 sentinel
@@ -46,10 +45,9 @@ align 8
 gc_gen2:
     dq gc_gen2
     dq gc_gen2
-global gc_gen2_count
-gc_gen2_count:  dq 0
 global gc_gen2_threshold
 gc_gen2_threshold: dq 10
+global gc_gen2_collections
 gc_gen2_collections: dq 0
 
 ; GC state
@@ -60,14 +58,17 @@ global gc_collecting        ; eval_exception_unwind resets this: a raising
                             ; would otherwise latch it on for good
 gc_collecting:  dq 0    ; reentrancy guard
 
-; Generation table (for indexed access)
+; Generation table (for indexed access).  Only the sentinel is ever read
+; through it: the count and threshold columns it used to carry were named
+; directly by everything that wanted them, and two of the three counts did
+; not exist -- gen1 and gen2 were declared, exported and never once written.
 align 8
 gc_generations:
-    dq gc_gen0, gc_gen0_count, gc_gen0_threshold, 0                ; gen 0
-    dq gc_gen1, gc_gen1_count, gc_gen1_threshold, gc_gen1_collections ; gen 1
-    dq gc_gen2, gc_gen2_count, gc_gen2_threshold, gc_gen2_collections ; gen 2
+    dq gc_gen0                  ; gen 0
+    dq gc_gen1                  ; gen 1
+    dq gc_gen2                  ; gen 2
 
-GEN_ENTRY_SIZE equ 32   ; 4 qwords per generation entry
+GEN_ENTRY_SIZE equ 8    ; one qword per generation entry
 
 section .text
 
@@ -490,6 +491,20 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     jmp .phase4_loop
 .phase4_done:
 
+    ; ---- Count the unreachable set, before phase 5 starts freeing it ----
+    ; This is the number gc.collect() answers with.  Counting inside phase 5
+    ; undercounts, and by a lot: clearing one member of a cycle drops the
+    ; others by refcount, and obj_dealloc -> gc_untrack unlinks them before
+    ; the loop ever reaches them.  A three-object cycle answered 1.
+    mov rbx, [r15 + PyGC_Head.gc_next]
+.count_loop:
+    cmp rbx, r15
+    je .count_done
+    inc qword [rbp - GCG_FOUND]
+    mov rbx, [rbx + PyGC_Head.gc_next]
+    jmp .count_loop
+.count_done:
+
     ; ---- Phase 5: Clear the unreachable set, letting DECREF free it ----
     ; One pass, and the head is re-read from the sentinel every time round.
     ; Caching a next pointer across tp_clear is what broke here: clearing one
@@ -501,7 +516,6 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     mov rbx, [r15 + PyGC_Head.gc_next]
     cmp rbx, r15
     je .phase5_done
-    inc qword [rbp - GCG_FOUND]            ; what gc.collect() answers with
 
     lea r13, [rbx + GC_HEAD_SIZE]          ; r13 = obj
     inc qword [r13 + PyObject.ob_refcnt]

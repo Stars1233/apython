@@ -305,11 +305,11 @@ than lying — but they are ordinary Python that does not work:
 
 - **`gc` has no `get_objects` and no debug flags.**  The module answers about
   the collector -- `collect`, `enable`/`disable`/`isenabled`, the counts, the
-  thresholds, `garbage` and `callbacks` -- but this collector keeps no list of
-  tracked objects it could hand back, and has no debug output to switch on.
-  `gc.collect()` also counts a two-object cycle as one where CPython counts
-  two: clearing the first drops the second by refcount before the sweep
-  reaches it.
+  thresholds, `garbage` and `callbacks` -- but not `get_objects`,
+  `set_debug`/`get_debug`, `is_tracked` or `get_referents`.  The three
+  generations *are* linked lists with static sentinels, so `get_objects` is a
+  walk; the hazard is that the walk allocates, and an allocation can trigger
+  a collection that mutates the list being walked.
 
 
 - **`s += x` in a loop is O(n^2)**: `str_concat` always allocates, and
