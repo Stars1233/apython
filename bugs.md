@@ -262,24 +262,13 @@ than lying — but they are ordinary Python that does not work:
   were registered; what is left is per-method, and CPython's own wordings
   there are inconsistent between clinic-generated and hand-written methods.
 
-- **asyncio `Task`s and `wait_for` wrappers are not GC-tracked.**  A `Task`
-  holds its coroutine, which holds a frame, whose locals can hold the task --
-  an ordinary cycle that never collects.  Code objects were in the same state
-  and are tracked now.
-
-  Every raw holder of a live `Task` now takes a reference -- the ready queue,
-  `EventLoop.root_task`, `AsyncTask.waiters[]`, the poll backend's fd array
-  and timer heap, and both io_uring SQE kinds -- so the mechanical part is
-  what is left: `gc_alloc` and a deferred `gc_track` in `task_new`,
-  `gc_dealloc` in `task_dealloc`, `TYPE_FLAG_HAVE_GC`, and a traverse/clear
-  pair over the coroutine, the result, the exception, the send value and the
-  waiters.
-
-  The three awaitable types -- `WaitForAwaitable`, `GatherAwaitable`,
-  `SleepAwaitable` -- would stay untracked, which is safe in the conservative
-  direction: an untracked holder's reference is not subtracted, so a task it
-  holds looks reachable.  That can leave a cycle uncollected; it cannot free
-  anything early.
+- **The three async awaitable types are not GC-tracked.**
+  `WaitForAwaitable`, `GatherAwaitable` and `SleepAwaitable` are ap_malloc'd
+  with no `TYPE_FLAG_HAVE_GC` and no traverse, so a cycle through one of them
+  never collects.  `Task` itself is tracked now, and the awaitables keep
+  counted references to the tasks they hold, which is conservative in the
+  safe direction: an untracked holder's reference is not subtracted, so a
+  task it holds looks reachable and is never freed early.
 
 - **`gc` has no `get_referrers`, `freeze`/`unfreeze` or `get_stats`.**
   `get_referrers` needs a reverse edge nothing records -- CPython finds it by

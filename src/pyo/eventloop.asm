@@ -20,6 +20,8 @@ extern bool_true
 extern bool_false
 extern ap_malloc
 extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern obj_incref
 extern obj_decref
@@ -134,11 +136,10 @@ DEF_FUNC task_new
     mov rbx, rdi               ; save coro
 
     mov edi, AsyncTask_size
-    call ap_malloc
+    lea rsi, [rel task_type]
+    call gc_alloc
 
     mov qword [rax + AsyncTask.ob_refcnt], 1
-    lea rcx, [rel task_type]
-    mov [rax + AsyncTask.ob_type], rcx
     mov [rax + AsyncTask.coro], rbx
     ; INCREF coro
     mov rdi, rbx
@@ -161,6 +162,17 @@ DEF_FUNC task_new
     mov qword [rax + AsyncTask.waiters], 0
     mov dword [rax + AsyncTask.waiters_cap], 0
     mov qword [rax + AsyncTask.next], 0
+    mov qword [rax + AsyncTask.ts_sec], 0
+    mov qword [rax + AsyncTask.ts_nsec], 0
+    mov qword [rax + AsyncTask.pad_result], 0
+    mov qword [rax + AsyncTask.pad_send], 0
+
+    ; gc_track only now, for the reason code_new gives: tracking can trigger
+    ; a collection, and the traverse would walk fields not yet written.
+    mov rbx, rax
+    mov rdi, rax
+    call gc_track
+    mov rax, rbx
 
     pop rbx
     leave
@@ -226,7 +238,7 @@ DEF_FUNC task_dealloc
 
     ; Free self
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
@@ -260,6 +272,103 @@ DEF_FUNC task_set_send_value
     leave
     ret
 END_FUNC task_set_send_value
+
+;; ============================================================================
+;; task_traverse / task_clear
+;;
+;; A task holds its coroutine, the coroutine holds a frame, and the frame's
+;; locals can hold the task -- an ordinary cycle, and one nothing could
+;; collect while a task was invisible to the collector.
+;;
+;; The waiters array is part of it: an awaited task holds every task waiting
+;; on it, so a pair of coroutines awaiting each other is a cycle through two
+;; waiters arrays.
+;;
+;; The three awaitable types stay untracked, and keep counted references to
+;; the tasks they hold.  That is conservative in the safe direction: an
+;; untracked holder's reference is not subtracted, so a task it holds looks
+;; reachable and is never freed early.  It can leave a cycle uncollected.
+;; ============================================================================
+global task_traverse
+DEF_FUNC task_traverse
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov rdi, [rbx + AsyncTask.coro]
+    VISIT_PTR rdi
+    mov rdi, [rbx + AsyncTask.result]
+    VISIT_V rdi, rsi
+    mov rdi, [rbx + AsyncTask.exception]
+    VISIT_PTR rdi
+    mov rdi, [rbx + AsyncTask.send_value]
+    VISIT_V rdi, rsi
+    mov r12d, [rbx + AsyncTask.n_waiters]
+    test r12d, r12d
+    jz .tt_done
+    mov r13, [rbx + AsyncTask.waiters]
+    test r13, r13
+    jz .tt_done
+.tt_waiter_loop:
+    dec r12d
+    mov rdi, [r13 + r12*8]
+    VISIT_PTR rdi
+    test r12d, r12d
+    jnz .tt_waiter_loop
+.tt_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC task_traverse
+
+;; The coroutine is the field that closes the cycle; the result and the send
+;; value can too, and neither is read again once the task is unreachable.
+;; The waiters go with them -- a waiter list on a task nothing can reach is
+;; a list nothing will ever wake.
+global task_clear
+DEF_FUNC task_clear
+    push rbx
+    push r12
+    mov rbx, rdi
+
+    mov r12d, [rbx + AsyncTask.n_waiters]
+    test r12d, r12d
+    jz .tc_no_waiters
+    mov dword [rbx + AsyncTask.n_waiters], 0
+.tc_waiter_loop:
+    dec r12d
+    mov rax, [rbx + AsyncTask.waiters]
+    mov rdi, [rax + r12*8]
+    test rdi, rdi
+    jz .tc_waiter_next
+    call obj_decref
+.tc_waiter_next:
+    test r12d, r12d
+    jnz .tc_waiter_loop
+.tc_no_waiters:
+
+    mov rdi, [rbx + AsyncTask.coro]
+    test rdi, rdi
+    jz .tc_no_coro
+    mov qword [rbx + AsyncTask.coro], 0
+    call obj_decref
+.tc_no_coro:
+
+    mov rdi, [rbx + AsyncTask.result]
+    mov qword [rbx + AsyncTask.result], 0
+    XDECREF_V rdi, rcx
+
+    mov rdi, [rbx + AsyncTask.send_value]
+    mov qword [rbx + AsyncTask.send_value], 0
+    XDECREF_V rdi, rcx
+
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC task_clear
 
 ;; ============================================================================
 ;; ready_enqueue(AsyncTask *task)
@@ -1130,10 +1239,10 @@ task_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq task_traverse            ; tp_traverse
+    dq task_clear               ; tp_clear
     dq 0 ; tp_dictoffset
 
 section .bss

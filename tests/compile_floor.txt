@@ -11,6 +11,7 @@ test_async_cancel
 test_async_coro
 test_async_for
 test_async_gather
+test_async_gc
 test_async_gen_await
 test_async_gen
 test_async_gen_sleep
