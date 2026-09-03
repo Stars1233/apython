@@ -281,6 +281,7 @@ test_re_opcodes
 test_repr
 test_review_regressions
 test_richcompare_bool
+test_richcompare_byname
 test_round
 test_sequence_iteration
 test_set_fatval

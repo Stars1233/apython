@@ -1039,6 +1039,37 @@ DEF_FUNC methods_init
     lea rdx, [rel str_dunder_hash]
     call dict_add_builtin_func
 
+    mov rdi, rbx
+    lea rsi, [rel mn___lt__]
+    extern str_dunder_lt
+    lea rdx, [rel str_dunder_lt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___le__]
+    extern str_dunder_le
+    lea rdx, [rel str_dunder_le]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___gt__]
+    extern str_dunder_gt
+    lea rdx, [rel str_dunder_gt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ge__]
+    extern str_dunder_ge
+    lea rdx, [rel str_dunder_ge]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___eq__]
+    extern str_dunder_eq
+    lea rdx, [rel str_dunder_eq]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ne__]
+    extern str_dunder_ne
+    lea rdx, [rel str_dunder_ne]
+    call dict_add_builtin_func
+
     lea rax, [rel str_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1217,6 +1248,37 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___hash__]
     call dict_add_none
 
+    mov rdi, rbx
+    lea rsi, [rel mn___lt__]
+    extern list_dunder_lt
+    lea rdx, [rel list_dunder_lt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___le__]
+    extern list_dunder_le
+    lea rdx, [rel list_dunder_le]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___gt__]
+    extern list_dunder_gt
+    lea rdx, [rel list_dunder_gt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ge__]
+    extern list_dunder_ge
+    lea rdx, [rel list_dunder_ge]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___eq__]
+    extern list_dunder_eq
+    lea rdx, [rel list_dunder_eq]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ne__]
+    extern list_dunder_ne
+    lea rdx, [rel list_dunder_ne]
+    call dict_add_builtin_func
+
     lea rax, [rel list_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1379,6 +1441,37 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___hash__]
     call dict_add_none
 
+    mov rdi, rbx
+    lea rsi, [rel mn___lt__]
+    extern dict_dunder_lt
+    lea rdx, [rel dict_dunder_lt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___le__]
+    extern dict_dunder_le
+    lea rdx, [rel dict_dunder_le]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___gt__]
+    extern dict_dunder_gt
+    lea rdx, [rel dict_dunder_gt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ge__]
+    extern dict_dunder_ge
+    lea rdx, [rel dict_dunder_ge]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___eq__]
+    extern dict_dunder_eq
+    lea rdx, [rel dict_dunder_eq]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ne__]
+    extern dict_dunder_ne
+    lea rdx, [rel dict_dunder_ne]
+    call dict_add_builtin_func
+
     lea rax, [rel dict_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1467,6 +1560,37 @@ DEF_FUNC methods_init
     lea rdx, [rel tuple_dunder_hash]
     call dict_add_builtin_func
 
+    mov rdi, rbx
+    lea rsi, [rel mn___lt__]
+    extern tuple_dunder_lt
+    lea rdx, [rel tuple_dunder_lt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___le__]
+    extern tuple_dunder_le
+    lea rdx, [rel tuple_dunder_le]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___gt__]
+    extern tuple_dunder_gt
+    lea rdx, [rel tuple_dunder_gt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ge__]
+    extern tuple_dunder_ge
+    lea rdx, [rel tuple_dunder_ge]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___eq__]
+    extern tuple_dunder_eq
+    lea rdx, [rel tuple_dunder_eq]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ne__]
+    extern tuple_dunder_ne
+    lea rdx, [rel tuple_dunder_ne]
+    call dict_add_builtin_func
+
     lea rax, [rel tuple_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1533,6 +1657,37 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___hash__]
     call dict_add_none
 
+    mov rdi, rbx
+    lea rsi, [rel mn___lt__]
+    extern set_dunder_lt
+    lea rdx, [rel set_dunder_lt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___le__]
+    extern set_dunder_le
+    lea rdx, [rel set_dunder_le]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___gt__]
+    extern set_dunder_gt
+    lea rdx, [rel set_dunder_gt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ge__]
+    extern set_dunder_ge
+    lea rdx, [rel set_dunder_ge]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___eq__]
+    extern set_dunder_eq
+    lea rdx, [rel set_dunder_eq]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ne__]
+    extern set_dunder_ne
+    lea rdx, [rel set_dunder_ne]
+    call dict_add_builtin_func
+
     lea rax, [rel set_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1568,6 +1723,37 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___hash__]
     lea rdx, [rel frozenset_dunder_hash]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___lt__]
+    extern frozenset_dunder_lt
+    lea rdx, [rel frozenset_dunder_lt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___le__]
+    extern frozenset_dunder_le
+    lea rdx, [rel frozenset_dunder_le]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___gt__]
+    extern frozenset_dunder_gt
+    lea rdx, [rel frozenset_dunder_gt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ge__]
+    extern frozenset_dunder_ge
+    lea rdx, [rel frozenset_dunder_ge]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___eq__]
+    extern frozenset_dunder_eq
+    lea rdx, [rel frozenset_dunder_eq]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ne__]
+    extern frozenset_dunder_ne
+    lea rdx, [rel frozenset_dunder_ne]
     call dict_add_builtin_func
 
     lea rax, [rel frozenset_type]
@@ -2348,6 +2534,37 @@ DEF_FUNC methods_init
     lea rdx, [rel int_dunder_hash]
     call dict_add_builtin_func
 
+    mov rdi, rbx
+    lea rsi, [rel mn___lt__]
+    extern int_dunder_lt
+    lea rdx, [rel int_dunder_lt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___le__]
+    extern int_dunder_le
+    lea rdx, [rel int_dunder_le]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___gt__]
+    extern int_dunder_gt
+    lea rdx, [rel int_dunder_gt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ge__]
+    extern int_dunder_ge
+    lea rdx, [rel int_dunder_ge]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___eq__]
+    extern int_dunder_eq
+    lea rdx, [rel int_dunder_eq]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ne__]
+    extern int_dunder_ne
+    lea rdx, [rel int_dunder_ne]
+    call dict_add_builtin_func
+
     lea rax, [rel int_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -2655,6 +2872,37 @@ DEF_FUNC methods_init
     lea rdx, [rel float_dunder_hash]
     call dict_add_builtin_func
 
+    mov rdi, rbx
+    lea rsi, [rel mn___lt__]
+    extern float_dunder_lt
+    lea rdx, [rel float_dunder_lt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___le__]
+    extern float_dunder_le
+    lea rdx, [rel float_dunder_le]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___gt__]
+    extern float_dunder_gt
+    lea rdx, [rel float_dunder_gt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ge__]
+    extern float_dunder_ge
+    lea rdx, [rel float_dunder_ge]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___eq__]
+    extern float_dunder_eq
+    lea rdx, [rel float_dunder_eq]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ne__]
+    extern float_dunder_ne
+    lea rdx, [rel float_dunder_ne]
+    call dict_add_builtin_func
+
     lea rax, [rel float_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -2922,6 +3170,37 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___hash__]
     extern bytes_dunder_hash
     lea rdx, [rel bytes_dunder_hash]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___lt__]
+    extern bytes_dunder_lt
+    lea rdx, [rel bytes_dunder_lt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___le__]
+    extern bytes_dunder_le
+    lea rdx, [rel bytes_dunder_le]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___gt__]
+    extern bytes_dunder_gt
+    lea rdx, [rel bytes_dunder_gt]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ge__]
+    extern bytes_dunder_ge
+    lea rdx, [rel bytes_dunder_ge]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___eq__]
+    extern bytes_dunder_eq
+    lea rdx, [rel bytes_dunder_eq]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ne__]
+    extern bytes_dunder_ne
+    lea rdx, [rel bytes_dunder_ne]
     call dict_add_builtin_func
 
     lea rax, [rel bytes_type]

@@ -1656,6 +1656,87 @@ DEF_FUNC %1_dunder_hash
 END_FUNC %1_dunder_hash
 %endmacro
 
+;; ============================================================================
+;; DEF_DUNDER_RICHCMP prefix, suffix, PY_op
+;;
+;; T.__eq__(a, b) calling the DEFINING type's tp_richcompare -- the same rule
+;; DEF_DUNDER_HASH above and DEF_DUNDER_STRREPR follow, so a subclass reaches
+;; the base's comparison rather than re-entering its own.
+;;
+;; No builtin registered __eq__ or __ne__ at all, so every one resolved the
+;; name through the MRO to object's, which compares identities:
+;; `int.__eq__ is object.__eq__` was True where CPython says False, and
+;; dict.__eq__(d, e) answered NotImplemented where CPython compares the
+;; contents.  == itself was always right -- it goes through tp_richcompare --
+;; so this is the by-name half, and the stdlib asks by name:
+;; `__eq__ = dict.__eq__` in a mixin is ordinary.
+;; ============================================================================
+%macro DEF_DUNDER_RICHCMP 3     ; %1 prefix, %2 suffix, %3 the PY_ op
+DEF_FUNC %1_dunder_%2, DB_FRAME
+    cmp rsi, 2
+    jne %%bad
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    mov [rbp - DB_RHS], rsi
+    lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING_DUNDER rcx, %2
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
+    mov rsi, [rbp - DB_RHS]
+
+    lea rax, [rel %1_type]
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz %%notimpl
+    mov edx, %3
+    DUNDER_EXC_SAVE [rbp - DB_EXC]
+    call rax
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz %%out
+
+    ; A slot declines with a NULL Value; by name that has to be
+    ; NotImplemented, so the caller can try the reflected form.
+    EXC_RAISED_SINCE [rbp - DB_EXC], rcx, %%out
+%%notimpl:
+    extern notimpl_singleton
+    lea rax, [rel notimpl_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+%%out:
+    leave
+    V_PACK rax, rdx
+    ret
+%%bad:
+    RAISE exc_TypeError_type, "expected exactly one argument"
+END_FUNC %1_dunder_%2
+%endmacro
+
+;; All six, because every one of them is the same call with a different op
+;; and CPython gives all six to each of these types.  A type whose slot has
+;; no ordering -- dict -- answers NotImplemented for the four, which is what
+;; its slot already does.
+%macro DEF_RICHCMP_PAIR 1
+DEF_DUNDER_RICHCMP %1, eq, PY_EQ
+DEF_DUNDER_RICHCMP %1, ne, PY_NE
+DEF_DUNDER_RICHCMP %1, lt, PY_LT
+DEF_DUNDER_RICHCMP %1, le, PY_LE
+DEF_DUNDER_RICHCMP %1, gt, PY_GT
+DEF_DUNDER_RICHCMP %1, ge, PY_GE
+%endmacro
+
+DEF_RICHCMP_PAIR int
+DEF_RICHCMP_PAIR str
+DEF_RICHCMP_PAIR float
+DEF_RICHCMP_PAIR bytes
+DEF_RICHCMP_PAIR tuple
+DEF_RICHCMP_PAIR dict
+DEF_RICHCMP_PAIR list
+DEF_RICHCMP_PAIR set
+DEF_RICHCMP_PAIR frozenset
+
 DEF_DUNDER_HASH int
 DEF_DUNDER_HASH str
 DEF_DUNDER_HASH float

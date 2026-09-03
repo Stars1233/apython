@@ -105,16 +105,6 @@ one-line fix.
   0xa3cf20>` -- which this tree does not print for anything, so there is
   nothing to match exactly.
 
-- **No builtin registers `__eq__` or `__ne__` of its own.**  The names
-  resolve through the MRO to `object`'s, so `int.__eq__ is object.__eq__` is
-  True where CPython says False, `dict.__eq__(d, e)` is NotImplemented where
-  CPython compares the contents, and the reprs say `of 'object' objects`
-  rather than `of 'int' objects`.  `==` itself is right -- it goes through
-  `tp_richcompare` -- so this is the by-name half only.  The stdlib reaches
-  for it: `__eq__ = dict.__eq__` in a mixin gets object's.  `__hash__` was
-  the same and is fixed; the same `DEF_DUNDER_HASH` shape is what `__eq__`
-  and `__ne__` want.
-
 - **`complex()` of a string does not accept Unicode spaces or Unicode digits.**
   CPython runs `_PyUnicode_TransformDecimalAndSpaceToASCII` first, so
   `complex("\u30001+2j")` parses there; here any byte past ASCII is a

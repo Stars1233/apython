@@ -2433,13 +2433,14 @@ DEF_FUNC str_compare
     jmp .ret_false
 
 .not_string:
-    ; Right operand is not a string.
-    ; EQ → False, NE → True, ordering → NotImplemented (NULL)
-    cmp ebx, PY_EQ
-    je .ret_false
-    cmp ebx, PY_NE
-    je .ret_true
-    ; Ordering comparison with non-string → return NotImplemented (NULL)
+    ; Right operand is not a string: DECLINE, for every op.
+    ;
+    ; EQ used to answer False here and NE True, which is the right final
+    ; answer but not this slot's to give -- declining is what lets the
+    ; protocol ask the OTHER operand, and it only falls back to identity
+    ; when that declines too.  `'a' == S()` for a class defining __eq__ was
+    ; False where CPython calls S.__eq__, and by name str.__eq__('a', 1) was
+    ; False where CPython says NotImplemented.
     RET_NULL
     pop rbx
     leave

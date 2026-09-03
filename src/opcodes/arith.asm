@@ -1664,7 +1664,7 @@ section .text
     ; No tp_richcompare — try dunder on heaptype
     mov rdx, [r9 + PyTypeObject.tp_flags]
     test rdx, TYPE_FLAG_HEAPTYPE
-    jz .cmp_identity
+    jz .cmp_left_declines       ; a static type with nothing to say
 
     ; Map compare op to dunder name via lookup table
     extern cmp_dunder_table
@@ -1811,6 +1811,18 @@ section .text
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
     DISPATCH
+
+.cmp_left_declines:
+    ; The left operand's type has no comparison at all.  That is a DECLINE,
+    ; not an answer: do_richcompare asks the other operand before it falls
+    ; back to identity.  Jumping straight to .cmp_identity meant
+    ; `None == S()` was False for a class defining __eq__, where CPython
+    ; calls S.__eq__.
+    ;
+    ; .cmp_try_right opens by popping the op that .cmp_do_call pushed before
+    ; calling the slot, so this path has to push it too.
+    push rcx
+    jmp .cmp_try_right
 
 .cmp_try_right:
     ; Left's tp_richcompare returned NotImplemented (NULL).
