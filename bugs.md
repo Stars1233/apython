@@ -78,12 +78,6 @@ one-line fix.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **Weak references keep no per-object slot.**  The links live in a side
-  table keyed by the referent's address rather than in the object, so
-  `tp_weaklistoffset` does not exist and `__weakref__` is not an attribute.
-  Everything observable through `_weakref` works, including which types
-  refuse a reference; a C extension expecting the slot would not.
-
 - **`collections.deque` is list-backed, and two itertools functions
   materialise.**  CPython's deque is a block-linked list, so `appendleft` and
   `popleft` are O(1) there and O(n) here; `itertools.groupby` materialises
@@ -287,18 +281,21 @@ than lying — but they are ordinary Python that does not work:
 
 ## Test infrastructure
 
-Two tests compare against a recorded transcript in `tests/expected/` rather
+Three tests compare against a recorded transcript in `tests/expected/` rather
 than against CPython, because CPython cannot serve as an oracle for them:
 
 - `test_sre.py` feeds hand-written SRE bytecode to `_sre.compile()`, a
   private API that does not validate its input; CPython segfaults on the
   group pattern it uses.
-- `test_del_and_gc_state.py` compares stderr wording that legitimately
-  differs, and its transcript also freezes the shutdown-finalization gap
-  above.  The asserts, not the transcript, are what establish correctness.
+- `test_traceback_carets.py` and `test_unraisable.py` both let an exception
+  be reported on stderr, and the report names the file: CPython absolutizes
+  the path of a script it runs directly and a run from a `.pyc` does not.
+  `test_unraisable.py` also prints on both streams, which the two interpreters
+  interleave differently -- see the buffering entry above.  Every line of both
+  was compared against CPython modulo those two before it was recorded.
 
-Both are self-asserting.  Any *new* recorded-oracle test needs the same
-justification, or it risks blessing a divergence instead of catching it.
+Any *new* recorded-oracle test needs the same justification, or it risks
+blessing a divergence instead of catching it.
 
 ## Style debt
 
