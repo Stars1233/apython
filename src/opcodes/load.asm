@@ -1343,7 +1343,14 @@ END_FUNC op_load_fast_and_clear
 ;;
 ;; Pops all three stack values, looks up attribute in class->tp_base->tp_dict
 ;; (walking the MRO chain), and pushes result.
-;; If method flag: push self + func. Otherwise: push NULL + attr.
+;;
+;; The low bit decides how MANY values come back, not just which: with it set
+;; this is a method load and pushes two -- the callable and the receiver, or
+;; NULL and a value that is not one -- and with it clear it pushes exactly
+;; ONE, the attribute.  dis.stack_effect agrees: -1 with the bit, -2 without.
+;; Pushing two either way is invisible in `return super().x`, where the extra
+;; word dies with the frame, and becomes an extra argument the moment the
+;; result is used in the middle of an expression.
 ;; ============================================================================
 DEF_FUNC op_load_super_attr, LSA_FRAME
 
@@ -1506,21 +1513,52 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rdi, [rbp - LSA_SELF]
     call obj_decref                ; and on self
     pop rax
-    VPUSH_NULL
     VPUSH_PTR rax
     jmp .lsa_done
 
 .lsa_attr_plain:
-    ; Not a function: a plain class attribute, returned as-is.
+    ; Not a function.  A property still has to be RUN -- `super().value` is
+    ; the getter's answer, not the descriptor -- and anything else is the
+    ; class attribute itself.
+    cmp qword [rbp - LSA_ATTR_TAG], TAG_PTR
+    jne .lsa_attr_value
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel property_type]
+    cmp rcx, rdx
+    je .lsa_attr_property
+.lsa_attr_value:
     push rax                      ; save attr
     mov rdi, [rbp - LSA_SELF]
     call obj_decref
-    xor eax, eax
-    VPUSH_NULL                  ; push NULL
     pop rax
     mov rdx, [rbp - LSA_ATTR_TAG]
     VPUSH_VAL rax, rdx             ; push attr
     jmp .lsa_done
+
+.lsa_attr_property:
+    mov [rbp - LSA_ATTR], rax
+    mov rdi, rax
+    mov rsi, [rbp - LSA_SELF]
+    call property_descr_get        ; -> (rax, rdx), owned
+    SAVE_FAT_RESULT
+    mov rdi, [rbp - LSA_ATTR]
+    call obj_decref
+    mov rdi, [rbp - LSA_SELF]
+    call obj_decref
+    RESTORE_FAT_RESULT
+    test edx, edx
+    jz .lsa_propagate              ; the getter raised
+    cmp qword [rbp - LSA_FLAG], 0
+    je .lsa_prop_one
+    VPUSH_NULL                     ; a value, not a method: NULL beneath it
+.lsa_prop_one:
+    VPUSH_VAL rax, rdx
+    jmp .lsa_done
+
+.lsa_propagate:
+    leave
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
 
 .lsa_staticmethod:
     ; Unwrap sm_callable, release the wrapper and self, push (NULL, callable)
@@ -1534,7 +1572,10 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     call obj_decref
     mov rdi, [rbp - LSA_SELF]
     call obj_decref                ; not binding self
+    cmp qword [rbp - LSA_FLAG], 0
+    je .lsa_sm_one
     VPUSH_NULL
+.lsa_sm_one:
     mov rax, [rbp - LSA_ATTR]
     VPUSH_PTR rax
     jmp .lsa_done
@@ -1569,7 +1610,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     cmp qword [rbp - LSA_FLAG], 0
     jne .lsa_cm_flag1
 
-    ; Attr mode: push NULL + a method bound to the class
+    ; Attr mode: one value, a method bound to the class
     mov rdi, [rbp - LSA_ATTR]
     mov rsi, [rbp - LSA_BIND]
     call method_new                ; INCREFs both
@@ -1579,7 +1620,6 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rdi, [rbp - LSA_BIND]
     call obj_decref
     pop rax
-    VPUSH_NULL
     VPUSH_PTR rax
     jmp .lsa_done
 
