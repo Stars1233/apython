@@ -8,6 +8,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern type_is_subtype
 extern dict_new
 extern dunder_call_3
 extern dunder_lookup
@@ -290,6 +291,53 @@ global class_kwvalues_pending
 class_kwvalues_pending: dq 0
 
 section .text
+
+;; ============================================================================
+;; bc_solid_base(rdi = type) -> rax = the type its instance layout belongs to
+;;
+;; CPython's solid_base: walk down tp_base for as long as the type adds
+;; nothing to its base's layout except the instance dict word.  What comes
+;; back is the type that actually owns the shape of the instance -- `list` for
+;; any number of plain subclasses of list, `object` for a plain class.
+;;
+;; The dict word is excluded deliberately, exactly as extra_ivars() excludes
+;; it: every heaptype over a builtin adds one, and if that counted as a layout
+;; of its own then no two of them could ever be combined.
+;; ============================================================================
+DEF_FUNC_LOCAL bc_solid_base
+.sb_loop:
+    mov rsi, [rdi + PyTypeObject.tp_base]
+    test rsi, rsi
+    jz .sb_done                     ; object itself, or a base-less builtin
+    mov rax, [rdi + PyTypeObject.tp_basicsize]
+    mov rcx, [rsi + PyTypeObject.tp_basicsize]
+
+    mov rdx, [rdi + PyTypeObject.tp_dictoffset]
+    test rdx, rdx
+    jz .sb_compare                  ; no dict word to discount
+    cmp qword [rsi + PyTypeObject.tp_dictoffset], 0
+    jne .sb_compare                 ; the base already had one
+    test qword [rdi + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .sb_compare
+    cmp rdx, rcx
+    jb .sb_compare                  ; inside the base's own layout, not added
+    lea r8, [rdx + 8]
+    cmp r8, rax
+    jne .sb_compare                 ; TP_DICT_AT_TAIL, or not the last word
+    sub rax, 8
+
+.sb_compare:
+    cmp rax, rcx
+    jne .sb_done                    ; it adds a layout of its own
+    mov rdi, rsi
+    jmp .sb_loop
+
+.sb_done:
+    mov rax, rdi
+    leave
+    ret
+END_FUNC bc_solid_base
+
 DEF_FUNC type_from_parts
     push rbx
     push r12
@@ -347,6 +395,52 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     jmp .tfp_base_scan
 .tfp_base_done:
     mov [rbp - TFP_BASE], rax   ; layout base, or NULL
+
+    ; Two bases whose layouts are unrelated cannot both be laid out in one
+    ; instance.  `class C(MyList, MyDict)` was accepted here and laid out as
+    ; whichever base was wider, after which the family flags were OR'd from
+    ; both and instance_dealloc ran whichever storage arm it tested first.
+    ; CPython answers "multiple bases have instance lay-out conflict", and the
+    ; question it asks is about the solid bases: unless one is a subtype of
+    ; the other, the two shapes cannot be nested.
+    ;
+    ; rbx, r12 and r13 are free here -- r12 does not become the new type until
+    ; the allocation below, and nothing has claimed the other two.
+    test rax, rax
+    jz .tfp_layout_ok
+    mov rdi, rax
+    call bc_solid_base
+    mov r13, rax                ; the layout base's solid base
+    cmp qword [rbp - TFP_BASES], 0
+    je .tfp_layout_ok
+    xor ebx, ebx
+.tfp_layout_scan:
+    mov rcx, [rbp - TFP_BASES]
+    cmp rbx, [rcx + PyTupleObject.ob_size]
+    jge .tfp_layout_ok
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rdi, [rcx + rbx*8]
+    test rdi, rdi
+    jz .tfp_layout_next
+    call bc_solid_base
+    mov r12, rax
+    mov rdi, r13
+    mov rsi, r12
+    call type_is_subtype
+    test eax, eax
+    jnz .tfp_layout_next
+    mov rdi, r12
+    mov rsi, r13
+    call type_is_subtype
+    test eax, eax
+    jz .tfp_layout_conflict
+.tfp_layout_next:
+    inc rbx
+    jmp .tfp_layout_scan
+.tfp_layout_conflict:
+    RAISE exc_TypeError_type, "multiple bases have instance lay-out conflict"
+.tfp_layout_ok:
+    mov rax, [rbp - TFP_BASE]
     mov rdx, r15                ; restore namespace (scan clobbered rdx)
 
     ; Allocate the type object (GC-tracked)

@@ -157,11 +157,6 @@ one-line fix.
   the offset means moving the slots down by one word and teaching the dealloc
   and traverse walks where the header now ends.
 
-- **A heaptype's layout base is the widest of its bases, not CPython's solid
-  base.**  `class C(A, B)` where A and B are unrelated builtin subclasses of
-  different layouts is accepted and laid out as the wider one, where CPython
-  raises "multiple bases have instance lay-out conflict".
-
 - **The default `repr` names the type but not the address.**  CPython answers
   `<set_iterator object at 0x7f...>`; a type with no `tp_repr` answers
   `<set_iterator>` here, and a plain class instance answers `<instance>`

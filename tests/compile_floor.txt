@@ -221,6 +221,7 @@ test_itertools_gc
 test_itertools
 test_itertools_tail
 test_kwargs
+test_layout_conflict
 test_list_extend_iterable
 test_list_extend_star
 test_list_fixes
