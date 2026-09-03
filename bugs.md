@@ -9,6 +9,19 @@ one-line fix.
 
 ## Correctness
 
+~~- **set's method forms took exactly one argument.**  `union`,
+  `intersection` and `difference` are variadic in CPython -- `s.difference(a,
+  b)` is `(s - a) - b`, and the no-argument form is a copy -- and all three
+  raised `union() takes exactly one argument` for anything else, so
+  `set().union(*parts)`, the ordinary way to flatten a list of sets, did not
+  work.  `update` was worse: it took the first source and silently ignored
+  the rest.  And `intersection_update`, `difference_update` and
+  `symmetric_difference_update` did not exist at all, so the only way to
+  narrow a set in place was `s &= t`, which until the commit before this one
+  did not narrow it in place either.~~  Found by an audit, not by a test.
+  The bodies stay two-operand and a fold walks the arguments;
+  `tests/test_set_variadic.py`.
+
 - **`str.encode` and `bytes.decode` know only utf-8, ascii and latin-1.**
   Any other name is a LookupError, where CPython would find the codec through
   the registry; reaching it from the interpreter would mean calling Python

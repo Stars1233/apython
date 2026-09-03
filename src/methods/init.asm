@@ -231,6 +231,9 @@ extern set_method_remove
 extern set_method_symmetric_difference
 extern set_method_union
 extern set_method_update
+extern set_method_intersection_update
+extern set_method_difference_update
+extern set_method_symmetric_difference_update
 extern str_method_capitalize
 extern str_method_casefold
 extern str_method_center
@@ -1649,6 +1652,22 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel set_operator_fns]
     call set_add_operator_methods
+
+    ; The mutating method forms, on set alone -- frozenset has nothing to
+    ; update.  `update` itself is registered with the shared methods, because
+    ; it doubles as set.__init__.
+    mov rdi, rbx
+    lea rsi, [rel mn_intersection_update]
+    lea rdx, [rel set_method_intersection_update]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_difference_update]
+    lea rdx, [rel set_method_difference_update]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_symmetric_difference_update]
+    lea rdx, [rel set_method_symmetric_difference_update]
+    call dict_add_builtin_func
 
     ; The reflected four are registered with the forward four.  The in-place
     ; four go on set alone: they mutate, and frozenset cannot.  They are not
@@ -3639,6 +3658,9 @@ mn_union:       db "union", 0
 mn_intersection: db "intersection", 0
 mn_difference:  db "difference", 0
 mn_symmetric_difference: db "symmetric_difference", 0
+mn_intersection_update: db "intersection_update", 0
+mn_difference_update: db "difference_update", 0
+mn_symmetric_difference_update: db "symmetric_difference_update", 0
 mn_issubset:    db "issubset", 0
 mn_issuperset:  db "issuperset", 0
 mn_isdisjoint:  db "isdisjoint", 0

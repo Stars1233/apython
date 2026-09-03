@@ -26,6 +26,8 @@ extern none_singleton
 extern current_exception
 extern tuple_new
 extern list_new
+extern int_type
+extern float_type
 extern list_append
 extern int_to_i64
 extern list_method_sort
@@ -139,15 +141,47 @@ END_FUNC call_iternext
 ;; ============================================================================
 DEF_FUNC get_iterator
     push rbx
+    push r12
+    mov rbx, rdi                ; the payload and tag, kept for the message
+    mov r12d, esi
     call get_iterator_opt
     test rax, rax
     jz .gi_not_iterable
+    pop r12
     pop rbx
     leave
     ret
 .gi_not_iterable:
-    RAISE exc_TypeError_type, "object is not iterable"
+    ; CPython names the type: "'int' object is not iterable".  A bare
+    ; "object is not iterable" is the same sentence with the one word that
+    ; identifies the mistake taken out of it.  The type comes from the
+    ; (payload, tag) pair directly rather than from V_PACK, which would
+    ; ALLOCATE for a large int -- on the error path, and unowned.
+    cmp r12d, TAG_SMALLINT
+    je .gi_int
+    cmp r12d, TAG_FLOAT
+    je .gi_float
+    test rbx, rbx
+    jz .gi_unknown
+    mov rsi, [rbx + PyObject.ob_type]
+    jmp .gi_raise
+.gi_int:
+    lea rsi, [rel int_type]
+    jmp .gi_raise
+.gi_float:
+    lea rsi, [rel float_type]
+    jmp .gi_raise
+.gi_unknown:
+    xor esi, esi                ; no type: the helper says "object"
+.gi_raise:
+    lea rdi, [rel gi_not_iterable_msg]
+    extern raise_type_error_with_typename
+    call raise_type_error_with_typename
 END_FUNC get_iterator
+
+section .rodata
+gi_not_iterable_msg: db "'", 1, "' object is not iterable", 0
+section .text
 
 DEF_FUNC get_iterator_opt
     push rbx

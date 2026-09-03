@@ -1355,7 +1355,7 @@ DEF_SET_INPLACE xor, set_nb_xor
 ;; into the temporary, which then releases it -- so the old keys are dropped
 ;; by the ordinary set dealloc rather than by a second copy of it here.
 ;; ============================================================================
-DEF_FUNC_LOCAL set_swap_storage
+DEF_FUNC set_swap_storage
     push rbx
     push r12
     sub rsp, 8                  ; 8 + 16 = 24; + the pushed rbp = aligned
