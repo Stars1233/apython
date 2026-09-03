@@ -585,7 +585,8 @@ END_FUNC %1_dunder_%2
 ;; Arity is not checked here.  It is in the registration, and
 ;; builtin_func_call rejects the wrong count before this is entered.
 ;; ============================================================================
-%macro DEF_SEQ_DUNDER 3         ; %1 prefix, %2 suffix, %3 implementation
+%macro DEF_SEQ_DUNDER 3-4       ; %1 prefix, %2 suffix, %3 implementation,
+                                ; %4 present = decline as NotImplemented
 DEF_FUNC %1_dunder_%2, DB_FRAME
     cmp rsi, 2
     jne %%bad
@@ -605,6 +606,16 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     test rax, rax
     jnz %%out
     EXC_RAISED_SINCE [rbp - DB_EXC], rcx, %%out
+%if %0 >= 4
+    ; The implementation declined the pair without raising.  Called by name,
+    ; that has to read as NotImplemented so the caller can try the reflected
+    ; form; only the operator machinery turns a decline into a TypeError.
+    extern notimpl_singleton
+    lea rax, [rel notimpl_singleton]
+    INCREF rax
+    leave
+    ret
+%endif
 %%bad:
     RAISE exc_TypeError_type, "unsupported operand type"
 %%out:
@@ -1314,6 +1325,15 @@ DEF_DUNDER_BINARY set, xor,  nb_xor,      0, dunder_operand_any
 DEF_DUNDER_BINARY set, rxor, nb_xor,      1, dunder_operand_any
 DEF_DUNDER_BINARY set, or,   nb_or,       0, dunder_operand_any
 DEF_DUNDER_BINARY set, ror,  nb_or,       1, dunder_operand_any
+
+;; The in-place four, which set really does have and frozenset really does
+;; not.  These take the mutating nb_inplace_* slots directly rather than
+;; going through DEF_DUNDER_BINARY's nb_ lookup, because a subclass reaching
+;; the slot off its own type would re-enter this wrapper.
+DEF_SEQ_DUNDER    set, iand, set_nb_iand, 1
+DEF_SEQ_DUNDER    set, ior,  set_nb_ior, 1
+DEF_SEQ_DUNDER    set, isub, set_nb_isub, 1
+DEF_SEQ_DUNDER    set, ixor, set_nb_ixor, 1
 
 DEF_DUNDER_BINARY frozenset, sub,  nb_subtract, 0, dunder_operand_any
 DEF_DUNDER_BINARY frozenset, rsub, nb_subtract, 1, dunder_operand_any

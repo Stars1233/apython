@@ -116,6 +116,10 @@ extern set_dunder_rsub
 extern set_dunder_rand
 extern set_dunder_rxor
 extern set_dunder_ror
+extern set_dunder_iand
+extern set_dunder_ior
+extern set_dunder_isub
+extern set_dunder_ixor
 extern type_stamp_methods
 extern frozenset_dunder_len
 extern frozenset_dunder_iter
@@ -1646,11 +1650,26 @@ DEF_FUNC methods_init
     lea rsi, [rel set_operator_fns]
     call set_add_operator_methods
 
-    ; The reflected four are registered with the forward four.  __iand__ and
-    ; __ior__ are deliberately absent -- set has no nb_inplace_* slots here,
-    ; so `s &= t` degrades to the binary form, and a by-name __iand__ that
-    ; did not mutate in place would be a wrong answer rather than a missing
-    ; name.
+    ; The reflected four are registered with the forward four.  The in-place
+    ; four go on set alone: they mutate, and frozenset cannot.  They are not
+    ; in set_operator_names for exactly that reason -- that table is walked
+    ; for both types.
+    mov rdi, rbx
+    lea rsi, [rel mn___iand__]
+    lea rdx, [rel set_dunder_iand]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ior__]
+    lea rdx, [rel set_dunder_ior]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___isub__]
+    lea rdx, [rel set_dunder_isub]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ixor__]
+    lea rdx, [rel set_dunder_ixor]
+    call dict_add_builtin_func
 
     ; Unhashable: the name has to BE None, not resolve to object's.
     mov rdi, rbx
@@ -3716,6 +3735,9 @@ mn___getattribute__: db "__getattribute__", 0
 mn___delattr__: db "__delattr__", 0
 mn___setattr__: db "__setattr__", 0
 mn___ior__: db "__ior__", 0
+mn___iand__: db "__iand__", 0
+mn___isub__: db "__isub__", 0
+mn___ixor__: db "__ixor__", 0
 mn___imul__: db "__imul__", 0
 mn___subclasses__: db "__subclasses__", 0
 mn___add__:     db "__add__", 0

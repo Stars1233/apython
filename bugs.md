@@ -51,11 +51,19 @@ one-line fix.
   Everything observable through `_weakref` works; a C extension expecting the
   slot would not.
 
-- **A few names are still short of CPython's `dir()`.**  `int` and `float`
+~~- **A few names are still short of CPython's `dir()`.**  `int` and `float`
   are missing the in-place forms; `set` is missing `__iand__` and `__ior__`,
   deliberately -- it has no `nb_inplace_*` slots, so `s &= t` degrades to the
   binary form, and a by-name `__iand__` that did not mutate in place would be
-  a wrong answer rather than a missing name.
+  a wrong answer rather than a missing name.~~  Both halves were wrong.
+  CPython's `int` and `float` have no in-place forms either, so there was
+  nothing missing there.  And `set` was not short a *name*: it was short the
+  behaviour.  `s &= t` computed the right contents into a new set and rebound
+  the name, so every other reference to the same set went on seeing the old
+  value -- an ordinary aliasing bug, filed here as a design choice.  set now
+  has real `nb_iand`/`nb_ior`/`nb_isub`/`nb_ixor` that mutate, and the four
+  dunders to match.  frozenset keeps none of them, as CPython's does not.
+  `tests/test_set_inplace.py`.
 
 - **`collections.deque` is list-backed, and two itertools functions
   materialise.**  CPython's deque is a block-linked list, so `appendleft` and
