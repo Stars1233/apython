@@ -288,6 +288,13 @@ DEF_FUNC sre_match_get_group_str
     cmp r13, -1
     je .group_none
 
+    ; A BYTES subject is byte-indexed, so it takes the ASCII path whatever
+    ; the values are, and answers bytes.
+    mov rax, [rbx + SRE_MatchObject.pattern]
+    mov r14, [rax + SRE_PatternObject.is_bytes]
+    test r14, r14
+    jnz .group_ascii
+
     ; Check if string has non-ASCII (scan for bytes >= 0x80)
     mov rdi, [rbx + SRE_MatchObject.string]
     mov rcx, [rdi + PyStrObject.ob_size]
@@ -307,8 +314,10 @@ DEF_FUNC sre_match_get_group_str
     add rdi, r12
     mov rsi, r13
     sub rsi, r12
-    call str_new_heap
-    mov edx, TAG_PTR
+    mov rax, [rbx + SRE_MatchObject.pattern]
+    mov edx, [rax + SRE_PatternObject.is_bytes]
+    extern sre_new_slice
+    call sre_new_slice
     pop r14
     pop r13
     pop r12
@@ -915,8 +924,23 @@ DEF_FUNC sre_match_expand_method, EX_FRAME
     ; m.expand(S(template)) for `class S(str)`, where CPython expands it and
     ; hands back a plain str -- and a template is exactly the sort of thing a
     ; program keeps in a str subclass of its own.
+    ; And a bytes template for a bytes pattern: the two kinds must agree, as
+    ; they do everywhere else in the engine.
     mov rcx, [rax + PyObject.ob_type]
+    mov rdx, [rbp - EX_SELF]
+    mov rdx, [rdx + SRE_MatchObject.pattern]
+    cmp qword [rdx + SRE_PatternObject.is_bytes], 0
+    jne .ex_want_bytes
     REQUIRE_STR_TYPE rcx, rdx, .ex_type
+    jmp .ex_kind_ok
+.ex_want_bytes:
+    extern bytes_type
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    je .ex_kind_ok
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
+    jz .ex_type
+.ex_kind_ok:
 
     mov rdi, rax
     mov rax, [rbp - EX_SELF]

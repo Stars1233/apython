@@ -2374,6 +2374,23 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     test eax, eax
     jz .tga_return_name
 
+    ; A builtin type's __qualname__ is its __name__, and its __module__ is
+    ; "builtins".  Neither existed, so `ValueError.__qualname__` was an
+    ; AttributeError -- and CPython's traceback and warnings machinery reads
+    ; both off an exception's type.  A heaptype sets them in its own dict,
+    ; which the walk below finds first.
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__qualname__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_qualname
+
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__module__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_module
+
     lea rdi, [rbx + PyStrObject.data]
     CSTRING rsi, "__dict__"
     call ap_strcmp
@@ -2534,6 +2551,84 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     pop rbx
     leave
     V_PACK rax, rdx             ; return one Value
+    ret
+
+.tga_return_qualname:
+    ; A class defined in Python records its own, which carries the enclosing
+    ; scope -- "outer.<locals>.Local".  Only a builtin type falls through to
+    ; __name__.
+    mov rdi, [r12 + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .tga_return_name
+    mov rsi, rbx
+    extern dict_get
+    call dict_get
+    test rax, rax
+    jz .tga_return_name
+    V_UNPACK rax, rdx
+    INCREF_VAL rax, rdx
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.tga_return_module:
+    ; A class defined in Python records its own __module__ in its dict; only
+    ; a builtin type falls through to the default below.
+    mov rdi, [r12 + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .tga_module_builtin
+    mov rsi, rbx
+    extern dict_get
+    call dict_get
+    test rax, rax
+    jz .tga_module_builtin
+    V_UNPACK rax, rdx
+    INCREF_VAL rax, rdx
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.tga_module_builtin:
+    ; The dotted prefix of tp_name when there is one -- "_io.FileIO" is in
+    ; module "_io" -- and "builtins" otherwise, as CPython has it.
+    mov rsi, [r12 + PyTypeObject.tp_name]
+    xor ecx, ecx
+    xor r8d, r8d                ; the index just past the last dot, or 0
+.tga_mod_scan:
+    movzx eax, byte [rsi + rcx]
+    test al, al
+    jz .tga_mod_done
+    cmp al, '.'
+    jne .tga_mod_next
+    mov r8, rcx
+.tga_mod_next:
+    inc rcx
+    jmp .tga_mod_scan
+.tga_mod_done:
+    test r8, r8
+    jz .tga_mod_plain
+    mov rdi, rsi
+    mov rsi, r8
+    extern str_new_heap
+    call str_new_heap
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+.tga_mod_plain:
+    CSTRING rdi, "builtins"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
     ret
 
 .tga_return_name:

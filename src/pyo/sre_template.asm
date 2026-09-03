@@ -27,7 +27,7 @@
 extern ap_malloc
 extern ap_free
 extern obj_decref
-extern str_new_heap
+extern sre_new_slice
 extern str_type
 extern list_new
 extern list_append
@@ -44,9 +44,13 @@ extern exc_MemoryError_type
 section .text
 
 ;; ============================================================================
-;; sre_template_parse(rdi = template str, rsi = pattern) -> rax = a list
+;; sre_template_parse(rdi = the template, rsi = pattern) -> rax = a list
 ;;
-;; Literal runs become str elements and group references become int elements.
+;; Literal runs become str -- or bytes, for a bytes pattern -- elements, and
+;; group references become int elements.  Which kind the pieces are is the
+;; pattern's, and it is the only difference between the two: the escape
+;; syntax is identical, and a bytes template is scanned as bytes because that
+;; is what it already does.
 ;; Raises rather than answering NULL: every caller is a builtin method with a
 ;; live frame above it.
 ;; ============================================================================
@@ -60,6 +64,7 @@ TP_LIST   equ 56
 TP_POS    equ 64
 TP_NGROUP equ 72
 TP_SCRATCH equ 80
+TP_ISBYTES equ 88           ; the pattern's kind, which the pieces take
 TP_FRAME  equ 96            ; + 0 pushes = 96
 
 DEF_FUNC sre_template_parse, TP_FRAME
@@ -71,7 +76,17 @@ DEF_FUNC sre_template_parse, TP_FRAME
     mov eax, [rsi + SRE_PatternObject.groups]
     mov [rbp - TP_NGROUP], rax
 
+    ; bytes keeps its data at +24 and str at +40; the length is at +16 in
+    ; both.
+    mov rcx, [rsi + SRE_PatternObject.is_bytes]
+    mov [rbp - TP_ISBYTES], rcx
+    test rcx, rcx
+    jz .tp_str_data
+    lea rax, [rdi + PyBytesObject.data]
+    jmp .tp_have_data
+.tp_str_data:
     lea rax, [rdi + PyStrObject.data]
+.tp_have_data:
     mov [rbp - TP_DATA], rax
     mov rax, [rdi + PyStrObject.ob_size]
     mov [rbp - TP_LEN], rax
@@ -343,7 +358,8 @@ DEF_FUNC sre_template_parse, TP_FRAME
     mov rdi, [rbp - TP_DATA]
     add rdi, r9
     mov rsi, r10
-    call str_new_heap
+    mov edx, [rbp - TP_ISBYTES]
+    call sre_new_slice
     test rax, rax
     jz .tp_oom
     mov rsi, rax                ; the name, ours
@@ -400,7 +416,8 @@ DEF_FUNC sre_template_parse, TP_FRAME
     je .tp_flush_none
     mov rdi, [rbp - TP_BUF]
     mov rsi, [rbp - TP_BLEN]
-    call str_new_heap
+    mov edx, [rbp - TP_ISBYTES]
+    call sre_new_slice
     test rax, rax
     jz .tp_oom
     push rax
@@ -489,13 +506,18 @@ TE_MATCH  equ 16
 TE_OUT    equ 24
 TE_SEP    equ 32
 TE_IDX    equ 40
-TE_FRAME  equ 48            ; + 0 pushes = 48
+TE_ISBYTES equ 48           ; the match's pattern kind: the pieces take it
+TE_FRAME  equ 64            ; + 0 pushes = 64
 
 DEF_FUNC sre_template_expand, TE_FRAME
     mov [rbp - TE_TMPL], rdi
     mov [rbp - TE_MATCH], rsi
     mov qword [rbp - TE_OUT], 0
     mov qword [rbp - TE_SEP], 0
+    ; Which kind the pieces are is the match's pattern's.
+    mov rax, [rsi + SRE_MatchObject.pattern]
+    mov rax, [rax + SRE_PatternObject.is_bytes]
+    mov [rbp - TE_ISBYTES], rax
 
     xor edi, edi
     call list_new
@@ -515,10 +537,18 @@ DEF_FUNC sre_template_expand, TE_FRAME
     ; A str is a literal; anything else is the int naming a group.
     V_TEST_PTR rax, rcx
     ja .te_group
+    ; A literal piece is a str -- or a bytes, for a bytes template.  Testing
+    ; only for str sent every bytes literal down the group branch, where it
+    ; was read as an index.
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
+    je .te_literal
+    extern bytes_type
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
     jne .te_group
+.te_literal:
 
     mov rdi, [rbp - TE_OUT]
     mov rsi, rax
@@ -542,7 +572,8 @@ DEF_FUNC sre_template_expand, TE_FRAME
     ; Unmatched: the empty string.
     lea rdi, [rel te_nothing]
     xor esi, esi
-    call str_new_heap
+    mov edx, [rbp - TE_ISBYTES]
+    call sre_new_slice
     test rax, rax
     jz .te_oom
 .te_group_have:
@@ -559,10 +590,11 @@ DEF_FUNC sre_template_expand, TE_FRAME
     jmp .te_loop
 
 .te_join:
-    ; "".join(pieces), through str's own method.
+    ; "".join(pieces) -- or b"".join, for a bytes pattern.
     lea rdi, [rel te_nothing]
     xor esi, esi
-    call str_new_heap
+    mov edx, [rbp - TE_ISBYTES]
+    call sre_new_slice
     test rax, rax
     jz .te_oom
     mov [rbp - TE_SEP], rax
@@ -573,7 +605,14 @@ DEF_FUNC sre_template_expand, TE_FRAME
     mov [rsp + 8], rax
     mov rdi, rsp
     mov esi, 2
+    cmp qword [rbp - TE_ISBYTES], 0
+    jne .te_join_bytes
     call str_method_join
+    jmp .te_joined
+.te_join_bytes:
+    extern bytes_method_join
+    call bytes_method_join
+.te_joined:
     add rsp, 16
     V_UNPACK rax, rdx
     mov [rbp - TE_IDX], rax

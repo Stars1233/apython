@@ -323,6 +323,7 @@ test_smallstr_ops
 test_smallstr
 test_source_import
 test_sre2
+test_sre_bytes
 test_sre_groupdict_refcount
 test_sre
 test_stdlib_glue

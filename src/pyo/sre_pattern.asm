@@ -5,6 +5,7 @@
 %include "object.inc"
 %include "sre.inc"
 
+extern bytes_type
 extern ap_malloc
 extern ap_free
 extern ap_realloc
@@ -432,10 +433,10 @@ DEF_FUNC sre_substr_from_state_empty
     leave
     ret
 .sse_empty:
+    mov edx, [rdi + SRE_State.is_bytes]
     lea rdi, [rel sse_nothing]
     xor esi, esi
-    call str_new_heap
-    mov edx, TAG_PTR
+    call sre_new_slice
     leave
     ret
 section .rodata
@@ -470,13 +471,15 @@ DEF_FUNC sre_substr_from_state
     test rax, rax
     jnz .ss_unicode
 
-    ; ASCII mode: byte index = codepoint index
+    ; ASCII mode: byte index = codepoint index.  A bytes subject is always
+    ; here, and its slices are bytes.
     mov rdi, [rbx + SRE_State.str_begin]
     add rdi, r12
     mov rsi, r13
     sub rsi, r12
-    call str_new_heap
-    mov edx, TAG_PTR
+    mov edx, [rbx + SRE_State.is_bytes]
+    extern sre_new_slice
+    call sre_new_slice
 
     pop r14
     pop r13
@@ -880,9 +883,11 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov qword [rbp - SUB_NSUBS], 0
     mov qword [rbp - SUB_LASTEND], 0
 
-    ; Create empty result string
-    CSTRING rdi, ""
-    call str_from_cstr_heap
+    ; Create the empty result -- "" or b"", whichever the pattern is.
+    mov rax, [rbp - SUB_PAT]
+    mov edx, [rax + SRE_PatternObject.is_bytes]
+    extern sre_empty
+    call sre_empty
     mov [rbp - SUB_RESULT], rax
 
     ; A string replacement is a template, not a literal: \1, \g<name> and the
@@ -906,8 +911,20 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     jne .sub_repl_type
     test rax, rax
     jz .sub_repl_type
+    ; A bytes pattern takes a bytes replacement and a str pattern a str one.
     mov rcx, [rax + PyObject.ob_type]
+    mov rdx, [rbp - SUB_PAT]
+    cmp qword [rdx + SRE_PatternObject.is_bytes], 0
+    jne .sub_repl_bytes
     REQUIRE_STR_TYPE rcx, rdx, .sub_repl_type
+    jmp .sub_repl_ok
+.sub_repl_bytes:
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    je .sub_repl_ok
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
+    jz .sub_repl_type
+.sub_repl_ok:
 
     mov rdi, rax
     mov rsi, [rbp - SUB_PAT]
@@ -924,14 +941,19 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov rcx, [rdx + PyObject.ob_type]
     lea rax, [rel str_type]
     cmp rcx, rax
+    je .sub_single_literal
+    lea rax, [rel bytes_type]
+    cmp rcx, rax
     jne .sub_have_template
+.sub_single_literal:
     mov [rbp - SUB_LITERAL], rdx
     mov rdi, rdx
     call obj_incref
     jmp .sub_have_template
 .sub_empty_template:
-    CSTRING rdi, ""
-    call str_from_cstr_heap
+    mov rax, [rbp - SUB_PAT]
+    mov edx, [rax + SRE_PatternObject.is_bytes]
+    call sre_empty
     mov [rbp - SUB_LITERAL], rax
     jmp .sub_have_template
 
@@ -987,7 +1009,14 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov rsi, rax
     mov ecx, TAG_PTR
     push rax                   ; save for DECREF
-    call str_concat
+    push rdi
+    push rsi
+    mov rax, [rbp - SUB_PAT]
+    mov edx, [rax + SRE_PatternObject.is_bytes]
+    pop rsi
+    pop rdi
+    extern sre_concat
+    call sre_concat        ; str or bytes, as the pattern is
     push rax                   ; save new result
     mov rdi, [rbp - SUB_RESULT]
     call obj_decref
@@ -1008,7 +1037,14 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov rdi, [rbp - SUB_RESULT]
     mov rsi, [rbp - SUB_LITERAL]
     mov ecx, TAG_PTR
-    call str_concat
+    push rdi
+    push rsi
+    mov rax, [rbp - SUB_PAT]
+    mov edx, [rax + SRE_PatternObject.is_bytes]
+    pop rsi
+    pop rdi
+    extern sre_concat
+    call sre_concat        ; str or bytes, as the pattern is
     jmp .sub_repl_concated
 
 .sub_expand_repl:
@@ -1034,7 +1070,14 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     push rsi
     mov rdi, [rbp - SUB_RESULT]
     mov ecx, TAG_PTR
-    call str_concat
+    push rdi
+    push rsi
+    mov rax, [rbp - SUB_PAT]
+    mov edx, [rax + SRE_PatternObject.is_bytes]
+    pop rsi
+    pop rdi
+    extern sre_concat
+    call sre_concat        ; str or bytes, as the pattern is
     pop rdi
     pop rdi                    ; the expansion again
     push rax
@@ -1093,7 +1136,14 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     push rsi                   ; save for DECREF
     push rsi                   ; alignment
     mov rdi, [rbp - SUB_RESULT]
-    call str_concat
+    push rdi
+    push rsi
+    mov rax, [rbp - SUB_PAT]
+    mov edx, [rax + SRE_PatternObject.is_bytes]
+    pop rsi
+    pop rdi
+    extern sre_concat
+    call sre_concat        ; str or bytes, as the pattern is
     push rax
     push rax
     mov rdi, [rbp - SUB_RESULT]
@@ -1166,7 +1216,14 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov rsi, rax
     mov ecx, TAG_PTR
     push rax
-    call str_concat
+    push rdi
+    push rsi
+    mov rax, [rbp - SUB_PAT]
+    mov edx, [rax + SRE_PatternObject.is_bytes]
+    pop rsi
+    pop rdi
+    extern sre_concat
+    call sre_concat        ; str or bytes, as the pattern is
     push rax
     mov rdi, [rbp - SUB_RESULT]
     call obj_decref
@@ -1273,8 +1330,9 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov qword [rbp - SN_NSUBS], 0
     mov qword [rbp - SN_LASTEND], 0
 
-    CSTRING rdi, ""
-    call str_from_cstr_heap
+    mov rax, [rbp - SN_PAT]
+    mov edx, [rax + SRE_PatternObject.is_bytes]
+    call sre_empty
     mov [rbp - SN_RESULT], rax
 
     ; A string replacement is a template, not a literal: \1, \g<name> and the
@@ -1297,7 +1355,18 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     test rax, rax
     jz .subn_repl_type
     mov rcx, [rax + PyObject.ob_type]
+    mov rdx, [rbp - SN_PAT]
+    cmp qword [rdx + SRE_PatternObject.is_bytes], 0
+    jne .subn_repl_bytes
     REQUIRE_STR_TYPE rcx, rdx, .subn_repl_type
+    jmp .subn_repl_ok
+.subn_repl_bytes:
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    je .subn_repl_ok
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
+    jz .subn_repl_type
+.subn_repl_ok:
 
     mov rdi, rax
     mov rsi, [rbp - SN_PAT]
@@ -1314,14 +1383,19 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov rcx, [rdx + PyObject.ob_type]
     lea rax, [rel str_type]
     cmp rcx, rax
+    je .subn_single_literal
+    lea rax, [rel bytes_type]
+    cmp rcx, rax
     jne .subn_have_template
+.subn_single_literal:
     mov [rbp - SN_LITERAL], rdx
     mov rdi, rdx
     call obj_incref
     jmp .subn_have_template
 .subn_empty_template:
-    CSTRING rdi, ""
-    call str_from_cstr_heap
+    mov rax, [rbp - SN_PAT]
+    mov edx, [rax + SRE_PatternObject.is_bytes]
+    call sre_empty
     mov [rbp - SN_LITERAL], rax
     jmp .subn_have_template
 
@@ -1370,7 +1444,14 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov rsi, rax
     mov ecx, TAG_PTR
     push rax
-    call str_concat
+    push rdi
+    push rsi
+    mov rax, [rbp - SN_PAT]
+    mov edx, [rax + SRE_PatternObject.is_bytes]
+    pop rsi
+    pop rdi
+    extern sre_concat
+    call sre_concat        ; str or bytes, as the pattern is
     push rax
     mov rdi, [rbp - SN_RESULT]
     call obj_decref
@@ -1391,7 +1472,14 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov rdi, [rbp - SN_RESULT]
     mov rsi, [rbp - SN_LITERAL]
     mov ecx, TAG_PTR
-    call str_concat
+    push rdi
+    push rsi
+    mov rax, [rbp - SN_PAT]
+    mov edx, [rax + SRE_PatternObject.is_bytes]
+    pop rsi
+    pop rdi
+    extern sre_concat
+    call sre_concat        ; str or bytes, as the pattern is
     jmp .subn_repl_concated
 
 .subn_expand_repl:
@@ -1417,7 +1505,14 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     push rsi
     mov rdi, [rbp - SN_RESULT]
     mov ecx, TAG_PTR
-    call str_concat
+    push rdi
+    push rsi
+    mov rax, [rbp - SN_PAT]
+    mov edx, [rax + SRE_PatternObject.is_bytes]
+    pop rsi
+    pop rdi
+    extern sre_concat
+    call sre_concat        ; str or bytes, as the pattern is
     pop rdi
     pop rdi                    ; the expansion again
     push rax
@@ -1472,7 +1567,14 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     push rsi                   ; save repl payload for DECREF
     push rcx                   ; save repl tag for DECREF
     mov rdi, [rbp - SN_RESULT]
-    call str_concat
+    push rdi
+    push rsi
+    mov rax, [rbp - SN_PAT]
+    mov edx, [rax + SRE_PatternObject.is_bytes]
+    pop rsi
+    pop rdi
+    extern sre_concat
+    call sre_concat        ; str or bytes, as the pattern is
     push rax
     mov rdi, [rbp - SN_RESULT]
     call obj_decref
@@ -1537,7 +1639,14 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov rsi, rax
     mov ecx, TAG_PTR
     push rax
-    call str_concat
+    push rdi
+    push rsi
+    mov rax, [rbp - SN_PAT]
+    mov edx, [rax + SRE_PatternObject.is_bytes]
+    pop rsi
+    pop rdi
+    extern sre_concat
+    call sre_concat        ; str or bytes, as the pattern is
     push rax
     mov rdi, [rbp - SN_RESULT]
     call obj_decref
@@ -2222,9 +2331,14 @@ DEF_FUNC sre_pattern_finditer_method
     ; the crash arrived somewhere else entirely.
     push rdx
     push rcx
-    mov rdi, rsi
+    push rsi
+    sub rsp, 8
+    mov rdi, [r12]              ; the subject, read from the arguments again
+    mov rsi, rbx                ; the pattern, so the kinds are checked
     extern sre_require_subject
     call sre_require_subject
+    add rsp, 8
+    pop rsi
     pop rcx
     pop rdx
 

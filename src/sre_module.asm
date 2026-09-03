@@ -180,6 +180,27 @@ DEF_FUNC sre_compile_func, SC_FRAME
     mov [rbx + SRE_PatternObject.code], r14
     mov [rbx + SRE_PatternObject.code_len], r13
 
+    ; A pattern compiled from BYTES matches bytes-like subjects and answers
+    ; bytes.  The engine is the same either way -- bytes are byte-indexed,
+    ; which is the ASCII path it already has -- so all this records is which
+    ; kind was asked for.
+    mov qword [rbx + SRE_PatternObject.is_bytes], 0
+    mov rax, [rbp - SC_PATTERN]
+    V_TEST_PTR rax, rcx
+    ja .pattern_kind_done
+    test rax, rax
+    jz .pattern_kind_done
+    mov rcx, [rax + PyObject.ob_type]
+    extern bytes_type
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    je .pattern_is_bytes
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
+    jz .pattern_kind_done
+.pattern_is_bytes:
+    mov qword [rbx + SRE_PatternObject.is_bytes], 1
+.pattern_kind_done:
+
     ; Return pattern object
     mov rax, rbx
     mov edx, TAG_PTR

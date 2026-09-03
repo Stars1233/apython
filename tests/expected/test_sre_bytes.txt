@@ -1,0 +1,17 @@
+pattern kinds OK
+match OK
+fullmatch OK
+search OK
+bytearray subject OK
+kind checking OK
+findall OK
+split OK
+sub OK
+finditer OK
+callable sub OK
+replacement kinds OK
+groups and templates OK
+scanner OK
+str patterns unchanged OK
+high bytes OK
+All bytes-pattern tests passed!

@@ -9,6 +9,13 @@ one-line fix.
 
 ## Correctness
 
+~~- **A builtin type had no `__qualname__` and no `__module__`.**
+  `ValueError.__qualname__` was an AttributeError, and CPython's traceback
+  and warnings machinery reads both off an exception's type.~~  A builtin's
+  `__qualname__` is its `__name__` and its `__module__` is the dotted prefix
+  of `tp_name`, or `builtins`; a class defined in Python records its own, and
+  those still win.
+
 ~~- **`repr()` of a float was not always the shortest form.**  The search
   tried `"%.*g"` at rising precision and took the first that read back, which
   finds the shortest of the forms *glibc* produces -- and at an exact
@@ -380,6 +387,17 @@ than lying — but they are ordinary Python that does not work:
   `enum` and `types`.
 
 ## Robustness
+
+~~- **The regex engine matches str only.**  `SRE_State.is_bytes` existed and
+  was never set or read: every pattern was a str pattern and every subject
+  had to be a str, so `re.compile(rb'...')` was impossible -- and CPython's
+  own `tokenize.detect_encoding` uses one, which is what kept `hashlib`,
+  `random` and `uu` out.~~  A pattern records which kind it was compiled
+  from, the subject has to match it, and every result -- groups, splits,
+  substitutions, templates -- is built as that kind.  The engine itself is
+  unchanged: bytes are byte-indexed, which is the ASCII path it already had,
+  and a byte above 127 is one element rather than the start of a sequence.
+  `tests/test_sre_bytes.py`.
 
 - **`re.fullmatch(r'([a-z]*)+', 'abc1')` exhausts the regex recursion limit**
   where CPython answers None.  Seven of the eight patterns in

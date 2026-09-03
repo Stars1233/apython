@@ -1073,34 +1073,54 @@ DEF_FUNC sre_state_init, SSI_FRAME
     ; One call here covers every method that builds a state; finditer builds
     ; a scanner instead and calls it for itself.
     mov rdi, r13
+    mov rsi, r12
     call sre_require_subject
 
     ; Set basic fields
     mov [rbx + SRE_State.pattern], r12
     mov [rbx + SRE_State.string_obj], r13
 
-    ; Get string data
+    ; Get the subject's data.  bytes keeps it at +24 and str at +40, and both
+    ; put the length at +16 -- so only the data pointer differs.
+    mov rax, [r12 + SRE_PatternObject.is_bytes]
+    mov [rbx + SRE_State.is_bytes], eax
+    test rax, rax
+    jz .ssi_str_data
+    call sre_subject_data       ; r13 -> rax = data, rdx = length
+    mov [rbx + SRE_State.str_begin], rax
+    lea rdx, [rax + rdx]
+    mov [rbx + SRE_State.str_end], rdx
+    jmp .ssi_have_data
+.ssi_str_data:
     lea rax, [r13 + PyStrObject.data]
     mov [rbx + SRE_State.str_begin], rax
     mov rcx, [r13 + PyStrObject.ob_size]
     lea rdx, [rax + rcx]
     mov [rbx + SRE_State.str_end], rdx
+.ssi_have_data:
 
     ; Set flags from pattern
     mov eax, [r12 + SRE_PatternObject.flags]
     mov [rbx + SRE_State.flags], eax
     mov dword [rbx + SRE_State.match_all], 0
-    mov dword [rbx + SRE_State.is_bytes], 0
     mov dword [rbx + SRE_State.match_depth], 0
 
     ; Determine if ASCII or needs Unicode codepoint decode
-    ; Scan string bytes — if all < 0x80, ASCII fast path
+    ; Scan string bytes — if all < 0x80, ASCII fast path.  A BYTES subject is
+    ; byte-indexed by definition, so it takes that path whatever the values
+    ; are: \xff in bytes is one element, not the start of a sequence.
     mov rdi, [rbx + SRE_State.str_begin]
-    mov rcx, [r13 + PyStrObject.ob_size]
+    mov rcx, [rbx + SRE_State.str_end]
+    sub rcx, rdi
+    cmp dword [rbx + SRE_State.is_bytes], 0
+    jne .ssi_bytes_ascii
+.ssi_bytes_ascii:
     mov dword [rbx + SRE_State.charsize], 1  ; assume ASCII
     mov qword [rbx + SRE_State.codepoint_buf], 0
     test rcx, rcx
     jz .ascii_done
+    cmp dword [rbx + SRE_State.is_bytes], 0
+    jne .ascii_done
 
     xor r8d, r8d               ; index
 .scan_ascii:
@@ -1114,7 +1134,8 @@ DEF_FUNC sre_state_init, SSI_FRAME
 
 .ascii_done:
     ; Pure ASCII: str_begin/str_end are byte ptrs, charsize=1
-    ; String length in chars = byte length
+    ; String length in chars = byte length.  ob_size is at the same offset in
+    ; bytes and str, so this reads either.
     mov rax, [r13 + PyStrObject.ob_size]
 
     ; Clamp effective length with endpos
@@ -1287,44 +1308,67 @@ END_FUNC sre_state_init
 ;; ============================================================================
 global sre_require_subject
 DEF_FUNC sre_require_subject
+    ; rdi = the subject Value, rsi = the pattern object (0 = a str pattern)
     push rbx
-    sub rsp, 8
+    push r12
     mov rbx, rdi
+    mov r12, rsi
     extern str_type
+extern bytes_new
+extern ap_memcpy
     V_TEST_PTR rdi, rax
     ja .srs_not_string
     test rdi, rdi
     jz .srs_not_string
     mov rax, [rdi + PyObject.ob_type]
+
+    ; Which kind the pattern wants.
+    xor r8d, r8d
+    test r12, r12
+    jz .srs_have_kind
+    mov r8, [r12 + SRE_PatternObject.is_bytes]
+.srs_have_kind:
+
     lea rcx, [rel str_type]
     cmp rax, rcx
-    je .srs_ok
+    je .srs_is_str
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
-    jnz .srs_ok
+    jnz .srs_is_str
 
     extern bytes_type
     extern bytearray_type
     lea rcx, [rel bytes_type]
     cmp rax, rcx
-    je .srs_bytes
+    je .srs_is_bytes
     lea rcx, [rel bytearray_type]
     cmp rax, rcx
-    je .srs_bytes
+    je .srs_is_bytes
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
-    jnz .srs_bytes
+    jnz .srs_is_bytes
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTEARRAY_SUBCLASS
-    jnz .srs_bytes
+    jnz .srs_is_bytes
     jmp .srs_not_string
 
+.srs_is_str:
+    test r8, r8
+    jnz .srs_want_bytes
+    jmp .srs_ok
+.srs_is_bytes:
+    test r8, r8
+    jz .srs_want_str
+    jmp .srs_ok
+
 .srs_ok:
-    add rsp, 8
+    pop r12
     pop rbx
     leave
     ret
 
-.srs_bytes:
+.srs_want_str:
     extern exc_TypeError_type
     RAISE exc_TypeError_type, "cannot use a string pattern on a bytes-like object"
+.srs_want_bytes:
+    RAISE exc_TypeError_type, "cannot use a bytes pattern on a string-like object"
 
 .srs_not_string:
     extern raise_type_error_with_name
@@ -1332,6 +1376,157 @@ DEF_FUNC sre_require_subject
     CSTRING rdi, `expected string or bytes-like object, got '\x01'`
     call raise_type_error_with_name     ; does not return
 END_FUNC sre_require_subject
+
+;; ============================================================================
+;; sre_subject_data(r13 = the subject) -> rax = the data, rdx = its length
+;;
+;; bytes keeps its data inline at +24 and a bytearray keeps it out of line, so
+;; the two need different reads; str is handled by the caller, which knows it
+;; is not here.  Nothing is copied: the state points into the object, which
+;; the caller holds for the length of the match.
+;; ============================================================================
+global sre_subject_data
+DEF_FUNC sre_subject_data
+    mov rax, [r13 + PyObject.ob_type]
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .ssd_bytearray
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTEARRAY_SUBCLASS
+    jnz .ssd_bytearray
+    lea rax, [r13 + PyBytesObject.data]
+    mov rdx, [r13 + PyBytesObject.ob_size]
+    leave
+    ret
+.ssd_bytearray:
+    extern bytearray_data
+    mov rdi, r13
+    call bytearray_data         ; -> rax = the buffer, never NULL
+    mov rdx, [r13 + PyByteArrayObject.ob_size]
+    leave
+    ret
+END_FUNC sre_subject_data
+
+;; ============================================================================
+;; sre_new_slice(rdi = the data, rsi = its length, edx = 1 for bytes)
+;;   -> rax = a str or a bytes, edx = TAG_PTR
+;;
+;; Every result the engine builds goes through here, so the kind is decided in
+;; one place rather than at each of the seventeen sites that used to call
+;; str_new_heap directly.
+;; ============================================================================
+global sre_new_slice
+DEF_FUNC sre_new_slice
+    test edx, edx
+    jnz .sns_bytes
+    extern str_new_heap
+    call str_new_heap
+    mov edx, TAG_PTR
+    leave
+    ret
+.sns_bytes:
+    push rdi
+    push rsi
+    mov rdi, rsi
+    extern bytes_new
+    call bytes_new
+    pop rdx                     ; length
+    pop rsi                     ; source
+    test rax, rax
+    jz .sns_fail
+    push rax
+    sub rsp, 8
+    lea rdi, [rax + PyBytesObject.data]
+    extern ap_memcpy
+    call ap_memcpy
+    add rsp, 8
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.sns_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+END_FUNC sre_new_slice
+
+;; ============================================================================
+;; sre_concat(rdi = a Value, rsi = a Value, edx = 1 for bytes) -> a Value
+;;
+;; str_concat for one kind and bytes concatenation for the other.  Both take
+;; over neither reference: the caller owns what it passed in, as str_concat
+;; has it.
+;; ============================================================================
+SCC_A     equ 8
+SCC_B     equ 16
+SCC_FRAME equ 32            ; + 0 pushes = 32
+global sre_concat
+DEF_FUNC sre_concat, SCC_FRAME
+    test edx, edx
+    jnz .scc_bytes
+    extern str_concat
+    call str_concat
+    leave
+    ret
+.scc_bytes:
+    mov [rbp - SCC_A], rdi
+    mov [rbp - SCC_B], rsi
+    mov rdi, [rdi + PyBytesObject.ob_size]
+    add rdi, [rsi + PyBytesObject.ob_size]
+    call bytes_new
+    test rax, rax
+    jz .scc_fail
+    push rax
+    sub rsp, 8
+    lea rdi, [rax + PyBytesObject.data]
+    mov rcx, [rbp - SCC_A]
+    lea rsi, [rcx + PyBytesObject.data]
+    mov rdx, [rcx + PyBytesObject.ob_size]
+    call ap_memcpy
+    add rsp, 8
+    pop rax
+    push rax
+    sub rsp, 8
+    mov rcx, [rbp - SCC_A]
+    lea rdi, [rax + PyBytesObject.data]
+    add rdi, [rcx + PyBytesObject.ob_size]
+    mov rcx, [rbp - SCC_B]
+    lea rsi, [rcx + PyBytesObject.data]
+    mov rdx, [rcx + PyBytesObject.ob_size]
+    call ap_memcpy
+    add rsp, 8
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.scc_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+END_FUNC sre_concat
+
+;; ============================================================================
+;; sre_empty(edx = 1 for bytes) -> rax = "" or b"", edx = TAG_PTR
+;; The seed a join or a substitution starts from.
+;; ============================================================================
+global sre_empty
+DEF_FUNC sre_empty
+    test edx, edx
+    jnz .se_bytes
+    CSTRING rdi, ""
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    mov edx, TAG_PTR
+    leave
+    ret
+.se_bytes:
+    xor edi, edi
+    call bytes_new
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC sre_empty
 
 ;; ============================================================================
 ;; sre_state_fini(SRE_State* state)
