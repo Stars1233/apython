@@ -3370,7 +3370,7 @@ uname_result_type:
     dq 0
     dq 0
     dq 0
-    dq un_desc
+    dq un_desc                  ; STRUCTSEQ_DESC, one qword past the type
 
 align 8
 global terminal_size_type
@@ -3402,7 +3402,7 @@ terminal_size_type:
     dq 0
     dq 0
     dq 0
-    dq ts_desc
+    dq ts_desc                  ; STRUCTSEQ_DESC, one qword past the type
 
 section .rodata
 align 8

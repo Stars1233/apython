@@ -3334,7 +3334,7 @@ super_type:
     dq super_type               ; ob_type (self-referential)
     dq super_name_str           ; tp_name
     dq TYPE_OBJECT_SIZE         ; tp_basicsize
-    times 20 dq 0               ; remaining tp_* fields
+    times 23 dq 0               ; remaining tp_* fields
 
 ; method_type - type descriptor for bound methods
 align 8

@@ -1822,7 +1822,7 @@ async_gen_wrapped_type:
     dq agw_name_str             ; tp_name
     dq AsyncGenWrapped_size     ; tp_basicsize
     dq agw_dealloc              ; tp_dealloc
-    times 20 dq 0               ; the rest: this box is never used as a value
+    times 22 dq 0               ; the rest: this box is never used as a value
 
 align 8
 global async_gen_asend_type
