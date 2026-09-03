@@ -949,6 +949,17 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     mov rdi, r12
     call type_install_slots
 
+    ; __hash__ is the one slot whose ABSENCE is meaningful.  Python's rule:
+    ; a class that defines __eq__ and not __hash__ is unhashable, and
+    ; `__hash__ = None` says so explicitly.  type_install_slots leaves the
+    ; inherited slot in place for both -- it treats a None dunder as "no
+    ; definition" -- so `{Eq(): 1}` succeeded and Eq.__hash__ is None was
+    ; False.  CPython does this in type_new for exactly the same reason: it
+    ; cannot be expressed as a slot wrapper.
+    mov rdi, r12
+    mov rsi, r15
+    call type_apply_hash_rule
+
     ; Call parent's __init_subclass__ if present
     mov rax, [rbp - TFP_BASE]          ; base class
     test rax, rax
@@ -1069,6 +1080,125 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     leave
     ret
 END_FUNC type_from_parts
+
+;; ============================================================================
+;; type_apply_hash_rule(rdi = the type, rsi = the class dict)
+;;
+;; Python's inherited-hash rule, which is about a name being ABSENT and so
+;; cannot be a slot wrapper:
+;;
+;;   __hash__ = None in the body   -> unhashable
+;;   __eq__ defined, __hash__ not  -> unhashable
+;;   otherwise                     -> whatever was inherited or installed
+;;
+;; __ne__ does not count: only __eq__ suppresses it.
+;; ============================================================================
+TAH_TYPE  equ 8
+TAH_DICT  equ 16
+TAH_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC_LOCAL type_apply_hash_rule, TAH_FRAME
+    mov [rbp - TAH_TYPE], rdi
+    mov [rbp - TAH_DICT], rsi
+    test rsi, rsi
+    jz .tah_done
+
+    CSTRING rdi, "__hash__"
+    mov rsi, [rbp - TAH_DICT]
+    call tah_dict_get
+    test rax, rax
+    jz .tah_no_hash
+
+    ; Present in the body: only None means unhashable.
+    extern none_singleton
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .tah_unhashable_slot
+    jmp .tah_done
+
+.tah_no_hash:
+    ; Absent from the body: __eq__ here suppresses it...
+    CSTRING rdi, "__eq__"
+    mov rsi, [rbp - TAH_DICT]
+    call tah_dict_get
+    test rax, rax
+    jnz .tah_unhashable
+
+    ; ...and so does an INHERITED __hash__ of None, which is how a subclass
+    ; of an unhashable class stays unhashable without a rule of its own.
+    ; The name resolves through the MRO; the slot does not follow it, so the
+    ; two have to be reconciled here.
+    mov rdi, [rbp - TAH_TYPE]
+    CSTRING rsi, "__hash__"
+    extern dunder_lookup
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .tah_done
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    jne .tah_done
+    jmp .tah_unhashable_slot
+
+.tah_unhashable_slot:
+    ; The slot only: the name already says None, here or up the MRO.
+    extern hash_not_implemented
+    mov rax, [rbp - TAH_TYPE]
+    lea rcx, [rel hash_not_implemented]
+    mov [rax + PyTypeObject.tp_hash], rcx
+    jmp .tah_done
+
+.tah_unhashable:
+    mov rax, [rbp - TAH_TYPE]
+    lea rcx, [rel hash_not_implemented]
+    mov [rax + PyTypeObject.tp_hash], rcx
+
+    ; The NAME has to say so too: `Eq.__hash__ is None` is how the stdlib
+    ; asks, and a subclass that defines neither inherits the None through the
+    ; MRO -- which is why SubEq(Eq) is unhashable in CPython without any
+    ; rule of its own.
+    CSTRING rdi, "__hash__"
+    call str_from_cstr_heap
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - TAH_DICT]
+    mov rsi, rax
+    lea rdx, [rel none_singleton]
+    extern dict_set
+    call dict_set
+    add rsp, 8
+    pop rdi
+    call obj_decref
+.tah_done:
+    leave
+    ret
+END_FUNC type_apply_hash_rule
+
+;; tah_dict_get(rdi = a name C string, rsi = the dict)
+;;   -> rax = the Value, or 0 when absent
+DEF_FUNC_LOCAL tah_dict_get, 16
+    push rbx
+    sub rsp, 8
+    mov rbx, rsi
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    push rax
+    sub rsp, 8
+    mov rdi, rbx
+    mov rsi, rax
+    extern dict_get
+    call dict_get
+    add rsp, 8
+    pop rdi
+    push rax
+    sub rsp, 8
+    call obj_decref             ; the key this built
+    add rsp, 8
+    pop rax
+    add rsp, 8
+    pop rbx
+    leave
+    ret
+END_FUNC tah_dict_get
 
 
 

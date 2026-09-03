@@ -182,6 +182,7 @@ test_getattr_descriptors
 test_getattr_immediate
 test_getattr_raises
 test_getset_descriptors
+test_hash_protocol
 test_immediate_operands
 test_import_errors
 test_import_from

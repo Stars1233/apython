@@ -519,6 +519,7 @@ rbt_open:    db ": '", 0
 rbt_and:     db "' and '", 0
 rbt_close:   db "'", 0
 rbt_unknown: db "object", 0
+hni_open:    db "unhashable type: '", 0
 odr_open:    db "<", 0
 odr_close:   db ">", 0
 drs_prefix:  db "descriptor ", 0
@@ -1565,14 +1566,46 @@ orb_swap_table:
     dd PY_LE                    ; PY_GE
 section .text
 
-; hash_not_implemented() -> never returns
-; Used as tp_hash for unhashable types (dict, list, set).
-; Raises TypeError("unhashable type").
+; hash_not_implemented(rdi = the object) -> never returns
+; Used as tp_hash for unhashable types (dict, list, set, bytearray), and
+; installed on a class that defines __eq__ without __hash__ or sets
+; __hash__ = None.  Raises TypeError("unhashable type: 'list'") -- it used to
+; name nothing, which is the one thing the message is for.
+global hash_not_implemented
 DEF_FUNC hash_not_implemented
     extern raise_exception
     extern exc_TypeError_type
-    RAISE exc_TypeError_type, "unhashable type"
+    push rdi
+    sub rsp, 8
+    lea rdi, [rel rbt_buf]
+    lea rsi, [rel hni_open]
+    call rbt_append_cstr
+    mov rdi, rax
+    add rsp, 8
+    pop rsi
+    call rbt_typename
+    mov rdi, rax
+    lea rsi, [rel rbt_close]
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel rbt_buf]
+    call raise_exception
+    ud2
 END_FUNC hash_not_implemented
+
+; object_hash(rdi = the object, edx = its tag) -> int64
+;
+; object.__hash__: the address, which is CPython's default for any object
+; that does not define one.  object_type.tp_hash was 0, and tp_hash is
+; inherited -- so every instance, every plain class, every function, module,
+; iterator and object() had none, and hash() on one raised TypeError.  dict
+; and set did not notice because obj_hash falls back to the address itself;
+; only the hash() builtin, which reads tp_hash directly, could see it.
+global object_hash
+DEF_FUNC_BARE object_hash
+    mov rax, rdi
+    ret
+END_FUNC object_hash
 
 ; obj_hash(rdi=value) -> int64
 ; Decodes the Value, then dispatches: int immediate → int_hash_i64, pointer → tp_hash.

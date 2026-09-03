@@ -289,6 +289,35 @@ section .text
 ;; rdi=dict, rsi=name_cstr, rdx=func_ptr
 ;; Creates a builtin func wrapper and stores it in the dict.
 ;; ============================================================================
+;; ============================================================================
+;; dict_add_none(rdi = a dict, rsi = a name C string)
+;;
+;; Stores None under the name.  `__hash__ = None` is how a type says it is
+;; unhashable, and the stdlib asks by name: list.__hash__ is None decides
+;; whether something can be a dict key long before anyone calls hash().
+;; list, dict, set and bytearray all carry hash_not_implemented in tp_hash
+;; and had nothing in tp_dict, so the name resolved to object's and they
+;; advertised a working __hash__.
+;; ============================================================================
+DAN_DICT  equ 8
+DAN_FRAME equ 16            ; + 0 pushes = 16
+DEF_FUNC_LOCAL dict_add_none, DAN_FRAME
+    mov [rbp - DAN_DICT], rdi
+    mov rdi, rsi
+    call str_from_cstr_heap
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - DAN_DICT]
+    mov rsi, rax
+    lea rdx, [rel none_singleton]
+    call dict_set
+    add rsp, 8
+    pop rdi
+    call obj_decref
+    leave
+    ret
+END_FUNC dict_add_none
+
 DEF_FUNC dict_add_builtin_func
     push rbx
     push r12
@@ -1004,6 +1033,12 @@ DEF_FUNC methods_init
     lea rdx, [rel generic_method_contains]
     call dict_add_builtin_func
 
+    mov rdi, rbx
+    lea rsi, [rel mn___hash__]
+    extern str_dunder_hash
+    lea rdx, [rel str_dunder_hash]
+    call dict_add_builtin_func
+
     lea rax, [rel str_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1177,6 +1212,11 @@ DEF_FUNC methods_init
     lea rdx, [rel list_dunder_imul]
     call dict_add_builtin_func
 
+    ; Unhashable: the name has to BE None, not resolve to object's.
+    mov rdi, rbx
+    lea rsi, [rel mn___hash__]
+    call dict_add_none
+
     lea rax, [rel list_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1334,6 +1374,11 @@ DEF_FUNC methods_init
     lea rdx, [rel dict_dunder_ior]
     call dict_add_builtin_func
 
+    ; Unhashable: the name has to BE None, not resolve to object's.
+    mov rdi, rbx
+    lea rsi, [rel mn___hash__]
+    call dict_add_none
+
     lea rax, [rel dict_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1416,6 +1461,12 @@ DEF_FUNC methods_init
     lea rdx, [rel tuple_dunder_iter]
     call dict_add_builtin_func
 
+    mov rdi, rbx
+    lea rsi, [rel mn___hash__]
+    extern tuple_dunder_hash
+    lea rdx, [rel tuple_dunder_hash]
+    call dict_add_builtin_func
+
     lea rax, [rel tuple_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1476,6 +1527,11 @@ DEF_FUNC methods_init
     ; so `s &= t` degrades to the binary form, and a by-name __iand__ that
     ; did not mutate in place would be a wrong answer rather than a missing
     ; name.
+
+    ; Unhashable: the name has to BE None, not resolve to object's.
+    mov rdi, rbx
+    lea rsi, [rel mn___hash__]
+    call dict_add_none
 
     lea rax, [rel set_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2286,6 +2342,12 @@ DEF_FUNC methods_init
     lea rdx, [rel builtin_method_format]
     call dict_add_builtin_func
 
+    mov rdi, rbx
+    lea rsi, [rel mn___hash__]
+    extern int_dunder_hash
+    lea rdx, [rel int_dunder_hash]
+    call dict_add_builtin_func
+
     lea rax, [rel int_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -2343,6 +2405,12 @@ DEF_FUNC methods_init
     lea rdx, [rel complex_get_imag]
     xor ecx, ecx
     call dict_add_getset
+
+    mov rdi, rbx
+    lea rsi, [rel mn___hash__]
+    extern complex_dunder_hash
+    lea rdx, [rel complex_dunder_hash]
+    call dict_add_builtin_func
 
     lea rax, [rel complex_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2581,6 +2649,12 @@ DEF_FUNC methods_init
     call dict_add_getset
 
     ; Store in float_type.tp_dict
+    mov rdi, rbx
+    lea rsi, [rel mn___hash__]
+    extern float_dunder_hash
+    lea rdx, [rel float_dunder_hash]
+    call dict_add_builtin_func
+
     lea rax, [rel float_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -2842,6 +2916,12 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___getitem__]
     lea rdx, [rel bytes_dunder_getitem]
+    call dict_add_builtin_func
+
+    mov rdi, rbx
+    lea rsi, [rel mn___hash__]
+    extern bytes_dunder_hash
+    lea rdx, [rel bytes_dunder_hash]
     call dict_add_builtin_func
 
     lea rax, [rel bytes_type]
@@ -3139,6 +3219,11 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___rmod__]
     lea rdx, [rel bytearray_dunder_rmod]
     call dict_add_builtin_func
+
+    ; Unhashable: the name has to BE None, not resolve to object's.
+    mov rdi, rbx
+    lea rsi, [rel mn___hash__]
+    call dict_add_none
 
     lea rax, [rel bytearray_type]
     mov [rax + PyTypeObject.tp_dict], rbx

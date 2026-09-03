@@ -120,81 +120,28 @@ END_FUNC builtin_id
 
 ;; ============================================================================
 ;; 8. builtin_hash_fn(args, nargs) - hash(x)
+;;
+;; obj_hash and nothing else.  This used to reimplement the dispatch -- int
+;; immediate, float immediate, else tp_hash -- and raise when tp_hash was 0.
+;; object_type's was 0 and tp_hash is inherited, so every instance, plain
+;; class, function, module, iterator and object() answered TypeError, while
+;; `d[obj] = 1` worked: dict goes through obj_hash, which falls back to the
+;; address.  Two dispatchers, one of them wrong.
+;;
+;; They must agree in any case, or a key hashes one way going in and another
+;; coming out, so there is no version of this that should have its own copy.
 ;; ============================================================================
 DEF_FUNC builtin_hash_fn
-    push rbx
-    sub rsp, 8
-
     cmp rsi, 1
     jne .hash_nargs_error
-
-    mov rbx, [rdi]
-
-    V_TEST_INT_M [rdi], r11      ; args[0] an int immediate?
-    jae .hash_smallint
-
-    V_TEST_F64_M [rdi], r11      ; args[0] a float?
-    jbe .hash_float
-
-    ; Check non-pointer tags before dereference
-
-    mov rax, [rbx + PyObject.ob_type]
-    mov rcx, [rax + PyTypeObject.tp_hash]
-    test rcx, rcx
-    jz .hash_type_error
-
-    mov rdi, rbx
-    mov edx, TAG_PTR            ; tp_hash forwards edx to int_unwrap
-    call rcx
+    mov rdi, [rdi]
+    extern obj_hash
+    call obj_hash               ; raises for an unhashable type
     mov rdi, rax
     call int_from_i64
-    add rsp, 8
-    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
-
-.hash_float:
-    ; A float immediate: float_hash gives the PEP-correct int/float match
-    extern float_hash
-    mov rdi, rbx
-    V_TO_F64 rdi
-    mov edx, TAG_FLOAT          ; raw bits, not a float subclass instance
-    call float_hash
-    mov rdi, rax
-    call int_from_i64
-    add rsp, 8
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.hash_smallint:
-    extern int_hash_i64
-    mov rdi, rbx
-    V_TO_I64 rdi
-    call int_hash_i64
-.hash_si_ok:
-    mov rdi, rax
-    call int_from_i64
-    add rsp, 8
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.hash_bool:
-    ; hash(True) = 1, hash(False) = 0 — payload is already 0 or 1
-    mov rax, rbx
-    jmp .hash_si_ok
-
-.hash_none:
-    ; hash(None) — CPython convention
-    mov eax, 0x48ae2ce5
-    jmp .hash_si_ok
-
-.hash_type_error:
-    RAISE exc_TypeError_type, "unhashable type"
 
 .hash_nargs_error:
     RAISE exc_TypeError_type, "hash() takes exactly one argument"

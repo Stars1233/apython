@@ -1548,14 +1548,28 @@ DEF_FUNC object_method_ne
     RAISE exc_TypeError_type, "__ne__() takes exactly one argument"
 END_FUNC object_method_ne
 
-;; The address, which is what obj_hash falls back to when a type has no
-;; tp_hash -- reached directly so that a heaptype's slot cannot bounce back.
+;; object.__hash__(self) -- the address, which is what obj_hash falls back to
+;; when a type has no tp_hash, reached directly so a heaptype's slot cannot
+;; bounce back into itself.
+;;
+;; It used to hand back `args[0] + V_INT_BIAS` without unpacking.  For a
+;; pointer the Value IS the address and biasing turns it into an int
+;; immediate, which is the intended answer -- but an int immediate is already
+;; biased, so it was biased twice and int.__hash__(5) was
+;; -1125899906842619.  object_hash takes the decoded pointer; the bias
+;; belongs only on the way out.
 DEF_FUNC object_method_hash
     cmp rsi, 1
     jl .omh_error
-    mov rax, [rdi]
-    add rax, [rel v_int_bias]
+    mov rdi, [rdi]
+    V_UNPACK rdi, rdx
+    extern object_hash
+    call object_hash
+    mov rdi, rax                ; boxed, not biased: see DEF_DUNDER_HASH
+    extern int_from_i64
+    call int_from_i64
     leave
+    V_PACK rax, rdx
     ret
 .omh_error:
     RAISE exc_TypeError_type, "__hash__() takes no arguments"
@@ -1585,12 +1599,73 @@ DEF_FUNC generic_method_hash
     mov rdi, [rdi]
     extern obj_hash
     call obj_hash
-    add rax, [rel v_int_bias]
+    mov rdi, rax                ; boxed, not biased: see DEF_DUNDER_HASH
+    extern int_from_i64
+    call int_from_i64
     leave
+    V_PACK rax, rdx
     ret
 .gmh_error:
     RAISE exc_TypeError_type, "__hash__() takes no arguments"
 END_FUNC generic_method_hash
+
+;; ============================================================================
+;; DEF_DUNDER_HASH prefix
+;;
+;; T.__hash__(x) calling the DEFINING type's tp_hash, the same rule
+;; DEF_DUNDER_STRREPR and DEF_DUNDER_UNARY follow -- so a subclass reaches
+;; the base's hash rather than re-entering its own.
+;;
+;; Nothing but object registered __hash__, so every builtin resolved the name
+;; through the MRO to object's, which answers the ADDRESS:
+;; str.__hash__('a') was 403506976 and float.__hash__(1.25) was 1.25.  The
+;; stdlib binds these by name -- `__hash__ = tuple.__hash__` in a mixin is
+;; ordinary -- and got object's every time.
+;; ============================================================================
+%macro DEF_DUNDER_HASH 1
+DEF_FUNC %1_dunder_hash
+    test rsi, rsi
+    jz %%bad
+    cmp rsi, 1
+    jne %%bad
+    mov rdi, [rdi]
+    lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING rcx, "__hash__"
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
+    V_UNPACK rdi, rdx
+    lea rax, [rel %1_type]
+    mov rax, [rax + PyTypeObject.tp_hash]
+    test rax, rax
+    jz %%bad
+    call rax
+    ; A hash is a full int64 and most of them fall outside the +-2^50 an
+    ; immediate holds, so it has to be boxed rather than biased: adding
+    ; V_INT_BIAS to a large one lands in the float range, and
+    ; str.__hash__('a') came out as -1.6e-80.
+    mov rdi, rax
+    extern int_from_i64
+    call int_from_i64
+    leave
+    V_PACK rax, rdx
+    ret
+%%bad:
+    RAISE exc_TypeError_type, "__hash__() takes no arguments"
+END_FUNC %1_dunder_hash
+%endmacro
+
+DEF_DUNDER_HASH int
+DEF_DUNDER_HASH str
+DEF_DUNDER_HASH float
+DEF_DUNDER_HASH bytes
+DEF_DUNDER_HASH tuple
+DEF_DUNDER_HASH complex
+extern bool_type
+extern slice_type
+DEF_DUNDER_HASH bool
+DEF_DUNDER_HASH slice
 
 ;; ============================================================================
 ;; generic_method_contains(args, nargs) -> bool

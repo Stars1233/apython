@@ -3102,6 +3102,8 @@ user_type_metatype:
 ; Used as explicit base class: class Foo(object): pass
 ; Also callable: object() returns a bare instance
 align 8
+extern object_hash
+
 global object_type
 object_type:
     dq 1                        ; ob_refcnt (immortal)
@@ -3111,7 +3113,7 @@ object_type:
     dq instance_dealloc         ; tp_dealloc
     dq instance_repr            ; tp_repr
     dq 0                        ; tp_str
-    dq 0                        ; tp_hash
+    dq object_hash              ; tp_hash
     dq 0                        ; tp_call  (instances are not callable)
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
