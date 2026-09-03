@@ -1086,6 +1086,17 @@ DEF_FUNC dict_view_iter
     mov qword [rax + PyDictIterObject.it_index], 0
     mov rcx, [rbx + PyDictViewObject.dv_kind]
     mov [rax + PyDictIterObject.it_kind], rcx
+    ; The three kinds are three types, differing only in the name they report.
+    lea rdx, [rel dict_value_iter_type]
+    cmp rcx, 1
+    je .dvi_named
+    lea rdx, [rel dict_item_iter_type]
+    cmp rcx, 2
+    je .dvi_named
+    jmp .dvi_kind_done
+.dvi_named:
+    mov [rax + PyObject.ob_type], rdx
+.dvi_kind_done:
     ; Snapshot dk_version for mutation detection
     mov rcx, [rdi + PyDictObject.dk_version]
     mov [rax + PyDictIterObject.it_version], rcx
@@ -1771,6 +1782,8 @@ section .data
 
 ; dict_repr_str removed - repr now in src/repr.asm
 dict_iter_name: db "dict_keyiterator", 0
+dict_value_iter_name: db "dict_valueiterator", 0
+dict_item_iter_name: db "dict_itemiterator", 0
 dict_rev_iter_name: db "dict_reversekeyiterator", 0
 dict_keys_view_name: db "dict_keys", 0
 dict_values_view_name: db "dict_values", 0
@@ -1878,6 +1891,72 @@ dict_iter_type:
     dq 1                        ; ob_refcnt (immortal)
     dq type_type                ; ob_type
     dq dict_iter_name           ; tp_name
+    dq PyDictIterObject_size    ; tp_basicsize
+    dq dict_iter_dealloc        ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq dict_iter_self           ; tp_iter (return self)
+    dq dict_iter_next           ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
+    dq 0                        ; tp_bases
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
+    dq 0 ; tp_dictoffset
+
+; The values and items iterators differ from the keys iterator in nothing
+; but their name, which is what `type(iter(d.items())).__name__` answers
+; and what a default repr prints.  One shared type called them all
+; dict_keyiterator.
+align 8
+global dict_value_iter_type
+dict_value_iter_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq dict_value_iter_name           ; tp_name
+    dq PyDictIterObject_size    ; tp_basicsize
+    dq dict_iter_dealloc        ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq dict_iter_self           ; tp_iter (return self)
+    dq dict_iter_next           ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
+    dq 0                        ; tp_bases
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
+    dq 0 ; tp_dictoffset
+
+align 8
+global dict_item_iter_type
+dict_item_iter_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq dict_item_iter_name           ; tp_name
     dq PyDictIterObject_size    ; tp_basicsize
     dq dict_iter_dealloc        ; tp_dealloc
     dq 0                        ; tp_repr

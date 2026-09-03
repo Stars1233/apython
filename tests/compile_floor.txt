@@ -111,6 +111,7 @@ test_control_flow
 test_crash_regressions
 test_decode_errors
 test_deep_dealloc
+test_default_repr
 test_defaults
 test_del_and_gc_state
 test_del_dict

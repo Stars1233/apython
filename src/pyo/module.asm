@@ -205,19 +205,86 @@ END_FUNC module_setattr
 
 ;; ============================================================================
 ;; module_repr(PyObject *self) -> PyObject*
-;; Returns "<module 'name'>"
-;; Simplified: just returns the name
+;;
+;; "<module 'sys' (built-in)>" for a module with no __file__, and
+;; "<module 'x' from '/path'>" for one that has it.  This used to answer the
+;; bare name, which reads as a string rather than a module and is the one
+;; repr in the tree that did not even have angle brackets.
+;;
+;; Note that __file__ here is the .pyc a module was loaded from, where
+;; CPython's is the .py -- a difference in that attribute, not in this.
 ;; ============================================================================
-DEF_FUNC module_repr
-    mov rax, [rdi + PyModuleObject.mod_name]
+MR_FILE  equ 8
+MR_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+DEF_FUNC module_repr, MR_FRAME
+    push rbx
+    mov rbx, rdi
+    mov qword [rbp - MR_FILE], 0
+
+    extern obj_repr_buf
+    extern obj_repr_buf_str
+    extern rbt_append_cstr
+
+    ; __file__ out of the module dict, when it is a str.
+    mov rax, [rbx + PyModuleObject.mod_dict]
     test rax, rax
-    jz .fallback
-    inc qword [rax + PyObject.ob_refcnt]
-    leave
-    ret
-.fallback:
-    lea rdi, [rel module_repr_str]
+    jz .mr_no_file
+    mov rdi, rax
+    lea rdi, [rel mod_file_key]
     call str_from_cstr
+    push rax
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    extern dict_get
+    call dict_get
+    pop rdi
+    push rax
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .mr_no_file
+    V_UNPACK rax, rdx
+    cmp edx, TAG_PTR
+    jne .mr_no_file
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .mr_no_file
+    mov [rbp - MR_FILE], rax
+.mr_no_file:
+
+    lea rdi, [rel mod_repr_open]
+    call obj_repr_buf
+    mov rdi, rax
+    mov rsi, [rbx + PyModuleObject.mod_name]
+    test rsi, rsi
+    jz .mr_unnamed
+    lea rsi, [rsi + PyStrObject.data]
+    jmp .mr_have_name
+.mr_unnamed:
+    lea rsi, [rel mod_repr_unknown]
+.mr_have_name:
+    call rbt_append_cstr
+    mov rdi, rax
+    cmp qword [rbp - MR_FILE], 0
+    jne .mr_from
+    lea rsi, [rel mod_repr_builtin]
+    call rbt_append_cstr
+    jmp .mr_done
+.mr_from:
+    lea rsi, [rel mod_repr_from]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - MR_FILE]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel mod_repr_close]
+    call rbt_append_cstr
+.mr_done:
+    call obj_repr_buf_str
+    mov edx, TAG_PTR
+    pop rbx
     leave
     ret
 END_FUNC module_repr
@@ -229,7 +296,12 @@ section .rodata
 
 mod_name_key: db "__name__", 0
 mod_doc_key: db "__doc__", 0
-module_repr_str: db "<module>", 0
+mod_file_key: db "__file__", 0
+mod_repr_open:    db "<module '", 0
+mod_repr_unknown: db "?", 0
+mod_repr_builtin: db "' (built-in)>", 0
+mod_repr_from:    db "' from '", 0
+mod_repr_close:   db "'>", 0
 module_type_name: db "module", 0
 ma_dunder_dict: db "__dict__", 0
 

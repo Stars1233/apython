@@ -1469,8 +1469,11 @@ DEF_FUNC instance_repr, IR_FRAME
     jmp .done
 
 .ir_generic:
-    lea rdi, [rel instance_repr_cstr]
-    call str_from_cstr
+    ; object.__repr__: "<module.qualname object at 0x...>", with the module
+    ; left out when it is "builtins".  This used to be the fixed string
+    ; "<instance>", which said neither which class nor which object.
+    mov rdi, rbx
+    call instance_repr_default
 
 .done:
     pop rbx
@@ -1483,6 +1486,106 @@ DEF_FUNC instance_repr, IR_FRAME
     leave
     ret
 END_FUNC instance_repr
+
+;; ============================================================================
+;; instance_repr_default(rdi = the instance) -> rax = PyStrObject*
+;;
+;; The shape object.__repr__ has: the defining module and the qualified name,
+;; then the address.  The module is dropped when it is "builtins", which is
+;; the rule that keeps a builtin's own default repr free of a "builtins."
+;; prefix.  Both names come through type_getattr, so a class that sets
+;; __qualname__ or __module__ itself is answered with what it set.
+;; ============================================================================
+IRD_OBJ   equ 8
+IRD_MOD   equ 16
+IRD_NAME  equ 24
+IRD_FRAME equ 32            ; + 1 push = 40
+
+DEF_FUNC_LOCAL instance_repr_default, IRD_FRAME
+    push rbx
+    mov [rbp - IRD_OBJ], rdi
+    mov qword [rbp - IRD_MOD], 0
+    mov qword [rbp - IRD_NAME], 0
+    mov rbx, [rdi + PyObject.ob_type]
+
+    CSTRING rdi, "__qualname__"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    call type_getattr
+    V_UNPACK rax, rdx
+    cmp edx, TAG_PTR
+    je .ird_have_name
+    xor eax, eax
+.ird_have_name:
+    mov [rbp - IRD_NAME], rax
+    pop rdi
+    call obj_decref
+
+    CSTRING rdi, "__module__"
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    call type_getattr
+    V_UNPACK rax, rdx
+    cmp edx, TAG_PTR
+    je .ird_have_mod
+    xor eax, eax
+.ird_have_mod:
+    mov [rbp - IRD_MOD], rax
+    pop rdi
+    call obj_decref
+
+    ; "builtins" is not printed, exactly as CPython's object_repr has it.
+    mov rax, [rbp - IRD_MOD]
+    test rax, rax
+    jz .ird_build
+    lea rdi, [rax + PyStrObject.data]
+    CSTRING rsi, "builtins"
+    extern ap_strcmp
+    call ap_strcmp
+    test eax, eax
+    jne .ird_build
+    mov rdi, [rbp - IRD_MOD]
+    call obj_decref
+    mov qword [rbp - IRD_MOD], 0
+
+.ird_build:
+    mov rdi, [rbp - IRD_OBJ]
+    xor esi, esi
+    mov rax, [rbp - IRD_MOD]
+    test rax, rax
+    jz .ird_no_mod
+    lea rsi, [rax + PyStrObject.data]
+.ird_no_mod:
+    mov rdx, [rbx + PyTypeObject.tp_name]
+    mov rax, [rbp - IRD_NAME]
+    test rax, rax
+    jz .ird_no_name
+    lea rdx, [rax + PyStrObject.data]
+.ird_no_name:
+    extern obj_default_repr_named
+    call obj_default_repr_named
+    push rax
+    mov rdi, [rbp - IRD_NAME]
+    test rdi, rdi
+    jz .ird_no_name_ref
+    call obj_decref
+.ird_no_name_ref:
+    mov rdi, [rbp - IRD_MOD]
+    test rdi, rdi
+    jz .ird_no_mod_ref
+    call obj_decref
+.ird_no_mod_ref:
+    pop rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+END_FUNC instance_repr_default
 
 ;; ============================================================================
 ;; instance_str(PyObject *self) -> PyStrObject*

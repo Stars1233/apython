@@ -239,14 +239,14 @@ DEF_FUNC obj_repr
     ; skipped the argument, and repr(iter({1})) handed ITS caller a missing
     ; argument -- or, one frame further on, a segfault.
     ;
-    ; CPython's default is "<set_iterator object at 0x...>".  The address is
-    ; the one part this tree deliberately does not print -- nothing here
-    ; formats a pointer, because it cannot match CPython's and every test is
-    ; a diff against it -- so the name alone, in the same shape as the
-    ; <function> and <module> placeholders beside it.
+    ; CPython's default: "<set_iterator object at 0x7f...>".  The address is
+    ; this object's own, so it cannot match CPython's -- but neither can
+    ; CPython's match its own from one run to the next, so nothing correct
+    ; can be comparing it, and leaving it out only made the shape wrong.
     mov rax, [rdi + PyObject.ob_type]
     test rax, rax
     jz .null_obj
+    mov rsi, rdi
     mov rdi, rax
     call obj_default_repr
     mov edx, TAG_PTR
@@ -261,16 +261,19 @@ DEF_FUNC obj_repr
     ret
 END_FUNC obj_repr
 
-; obj_default_repr(rdi = a PyTypeObject*) -> rax = PyStrObject* "<name>"
+; obj_default_repr(rdi = a PyTypeObject*, rsi = the object)
+;   -> rax = PyStrObject* "<name object at 0x...>"
 ;
-; The repr a type with no tp_repr gets.  Its own function because instance
-; and module reprs want the same shape, and because rbt_buf is shared with
-; the TypeError composer -- neither can be live across the other.
+; The repr a type with no tp_repr gets, and object.__repr__'s own answer.  Its
+; own function because the instance repr wants the same shape, and because
+; rbt_buf is shared with the TypeError composer -- neither can be live across
+; the other.
 global obj_default_repr
 DEF_FUNC obj_default_repr
     push rbx
-    sub rsp, 8                  ; realign: 1 push + 8 = 16
+    push r12
     mov rbx, rdi
+    mov r12, rsi
     lea rdi, [rel rbt_buf]
     lea rsi, [rel odr_open]
     call rbt_append_cstr
@@ -282,15 +285,172 @@ DEF_FUNC obj_default_repr
 .odr_have_name:
     call rbt_append_cstr
     mov rdi, rax
-    lea rsi, [rel odr_close]
+    lea rsi, [rel odr_object]
     call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, r12
+    call obj_repr_address
     lea rdi, [rel rbt_buf]
     call str_from_cstr
-    add rsp, 8
+    pop r12
     pop rbx
     leave
     ret
 END_FUNC obj_default_repr
+
+; obj_default_repr_named(rdi = the object, rsi = a module cstr or 0,
+;                        rdx = the type's name cstr)
+;   -> rax = PyStrObject* "<module.name object at 0x...>"
+;
+; What object.__repr__ answers for a class defined in Python.  CPython leaves
+; the module out when it is "builtins", which is the same rule that makes
+; `repr(iter({1}))` say "set_iterator" and not "builtins.set_iterator".
+global obj_default_repr_named
+ODN_OBJ  equ 8
+ODN_MOD  equ 16
+ODN_NAME equ 24
+ODN_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC obj_default_repr_named, ODN_FRAME
+    mov [rbp - ODN_OBJ], rdi
+    mov [rbp - ODN_MOD], rsi
+    mov [rbp - ODN_NAME], rdx
+
+    lea rdi, [rel rbt_buf]
+    lea rsi, [rel odr_open]
+    call rbt_append_cstr
+    mov rsi, [rbp - ODN_MOD]
+    test rsi, rsi
+    jz .odn_name
+    mov rdi, rax
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel odr_dot]
+    call rbt_append_cstr
+.odn_name:
+    mov rdi, rax
+    mov rsi, [rbp - ODN_NAME]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel odr_object]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - ODN_OBJ]
+    call obj_repr_address
+    lea rdi, [rel rbt_buf]
+    call str_from_cstr
+    leave
+    ret
+END_FUNC obj_default_repr_named
+
+; obj_repr_named_at(rdi = the object, rsi = a prefix cstr, rdx = a name cstr
+;                   or 0) -> rax = PyStrObject* "<prefix name at 0x...>"
+;
+; The shape a function, a generator, a coroutine and an async generator all
+; have.  With no name it is just "<prefix at 0x...>".
+global obj_repr_named_at
+ORN_OBJ  equ 8
+ORN_NAME equ 16
+ORN_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC obj_repr_named_at, ORN_FRAME
+    mov [rbp - ORN_OBJ], rdi
+    mov [rbp - ORN_NAME], rdx
+    mov rdx, rsi
+    lea rdi, [rel rbt_buf]
+    lea rsi, [rel odr_open]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, rdx
+    call rbt_append_cstr
+    mov rsi, [rbp - ORN_NAME]
+    test rsi, rsi
+    jz .orn_addr
+    mov rdi, rax
+    push rsi
+    lea rsi, [rel odr_space]
+    call rbt_append_cstr
+    pop rsi
+    mov rdi, rax
+    call rbt_append_cstr
+.orn_addr:
+    mov rdi, rax
+    mov rsi, [rbp - ORN_OBJ]
+    call obj_repr_address
+    lea rdi, [rel rbt_buf]
+    call str_from_cstr
+    leave
+    ret
+END_FUNC obj_repr_named_at
+
+; obj_repr_buf(rdi = the first cstr) -> rax = a cursor into the shared repr
+; buffer, with that string already in it.  Append with rbt_append_cstr and
+; finish with obj_repr_buf_str; the buffer is shared with the TypeError
+; composer, so nothing may be live across the two.
+global obj_repr_buf
+DEF_FUNC obj_repr_buf
+    mov rsi, rdi
+    lea rdi, [rel rbt_buf]
+    call rbt_append_cstr
+    leave
+    ret
+END_FUNC obj_repr_buf
+
+; obj_repr_buf_str() -> rax = the buffer as a str
+global obj_repr_buf_str
+DEF_FUNC obj_repr_buf_str
+    lea rdi, [rel rbt_buf]
+    call str_from_cstr
+    leave
+    ret
+END_FUNC obj_repr_buf_str
+
+; obj_repr_address(rdi = cursor into rbt_buf, rsi = the object)
+;   -> rax = the new cursor, having written " at 0xADDR>"
+;
+; CPython formats the address with %p, which on glibc is "0x" and lowercase
+; hex with no leading zeroes.  Every default repr in the tree ends this way.
+global obj_repr_address
+DEF_FUNC obj_repr_address
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    mov rdi, rbx
+    lea rsi, [rel odr_object_at]
+    call rbt_append_cstr
+    mov rbx, rax
+    ; The digits, high nibble first, skipping leading zeroes.
+    mov rax, r12
+    mov ecx, 60
+.ora_skip:
+    mov rdx, rax
+    shr rdx, cl
+    and edx, 15
+    jnz .ora_digits
+    sub ecx, 4
+    jns .ora_skip
+    xor ecx, ecx                ; the address is 0: print one digit
+.ora_digits:
+    mov rdx, rax
+    shr rdx, cl
+    and edx, 15
+    add dl, '0'
+    cmp dl, '9'
+    jbe .ora_put
+    add dl, 'a' - '0' - 10
+.ora_put:
+    mov [rbx], dl
+    inc rbx
+    sub ecx, 4
+    jns .ora_digits
+    mov byte [rbx], '>'
+    inc rbx
+    mov byte [rbx], 0
+    mov rax, rbx
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC obj_repr_address
 
 ; obj_str(rdi=value) -> PyObject* (string)
 ; Decodes the Value, then dispatches: int immediate → int_repr, pointer → tp_str
@@ -783,6 +943,11 @@ rbt_unknown: db "object", 0
 hni_open:    db "unhashable type: '", 0
 odr_open:    db "<", 0
 odr_close:   db ">", 0
+odr_object:  db " object", 0
+odr_object_at: db " at 0x", 0
+odr_quote:   db "'", 0
+odr_space:   db " ", 0
+odr_dot:     db ".", 0
 drs_prefix:  db "descriptor ", 0
 drs_after_name: db "' ", 0
 drs_requires: db "requires a '", 0

@@ -131,13 +131,12 @@ one-line fix.
   does not survive a decode/encode round trip, where CPython preserves it.
   The entry above is the other half of why.
 
-- **A classmethod on a builtin type reprs as its bare name.**  Ordinary
+- **A classmethod on a builtin type reprs as a bound method.**  Ordinary
   methods, slot wrappers and getsets all name themselves and their owner now;
   `int.from_bytes`, `float.fromhex` and `str.maketrans` are wrapped in a
-  classmethod object, which `type_stamp_methods` skips.  CPython's repr for
-  those carries an address -- `<built-in method from_bytes of type object at
-  0xa3cf20>` -- which this tree does not print for anything, so there is
-  nothing to match exactly.
+  classmethod object, which `type_stamp_methods` skips, so they answer
+  `<bound method from_bytes of <class 'int'>>` where CPython answers
+  `<built-in method from_bytes of type object at 0x...>`.
 
 - **`complex()` of a string does not accept Unicode spaces or Unicode digits.**
   CPython runs `_PyUnicode_TransformDecimalAndSpaceToASCII` first, so
@@ -150,15 +149,10 @@ one-line fix.
   `start_new_thread`.  Everything in the stdlib that only takes a lock works;
   anything that expects a second thread does not.
 
-- **The default `repr` names the type but not the address.**  CPython answers
-  `<set_iterator object at 0x7f...>`; a type with no `tp_repr` answers
-  `<set_iterator>` here, and a plain class instance answers `<instance>`
-  rather than `<__main__.C object at 0x...>`.  Nothing in the tree formats a
-  pointer, and deliberately: an address cannot match CPython's, and every
-  test is a diff against it.  What was wrong and is fixed is the NULL --
-  `obj_repr` used to answer a NULL Value with no exception set, so `print()`
-  silently skipped the argument and `repr(iter({1}))` handed its own caller a
-  missing argument.
+- **A module's `__file__` is the `.pyc` it was loaded from, where CPython's is
+  the `.py`.**  Visible in the attribute and in `repr(module)`, which prints
+  it.  CPython records the source path even when it executes a cached
+  bytecode file, and derives the cache path from it when it needs to.
 
 - **Traceback carets are two jobs, not one.**  The `.pyc` path already has
   the column fields and merely steps over them (`code_addr2line`), so the

@@ -1173,12 +1173,39 @@ END_FUNC func_getattr
 
 ;; ============================================================================
 ;; func_repr(PyFuncObject *self) -> PyStrObject*
-;; Returns the string "<function>"
+;; "<function NAME at 0x...>", with NAME the qualified name -- which is what
+;; tells `f` from `C.m` and both from `<lambda>`.  It used to be the fixed
+;; string "<function>".
 ;; rdi = function object
 ;; ============================================================================
-DEF_FUNC_BARE func_repr
-    lea rdi, [rel func_repr_str]
-    jmp str_from_cstr
+DEF_FUNC func_repr
+    push rbx
+    mov rbx, rdi
+    mov rax, [rbx + PyFuncObject.func_qualname]
+    test rax, rax
+    jnz .fr_have_name
+    mov rax, [rbx + PyFuncObject.func_code]
+    test rax, rax
+    jz .fr_no_name
+    mov rax, [rax + PyCodeObject.co_qualname]
+    test rax, rax
+    jnz .fr_have_name
+    mov rax, [rbx + PyFuncObject.func_name]
+    test rax, rax
+    jz .fr_no_name
+.fr_have_name:
+    lea rdx, [rax + PyStrObject.data]
+    jmp .fr_build
+.fr_no_name:
+    xor edx, edx
+.fr_build:
+    mov rdi, rbx
+    lea rsi, [rel func_repr_str]
+    extern obj_repr_named_at
+    call obj_repr_named_at
+    pop rbx
+    leave
+    ret
 END_FUNC func_repr
 
 ;; ============================================================================
@@ -1379,7 +1406,7 @@ section .text
 section .data
 
 func_name_str:  db "function", 0
-func_repr_str:  db "<function>", 0
+func_repr_str:  db "function", 0
 fn_attr_name:   db "__name__", 0
 fn_attr_dict:   db "__dict__", 0
 fn_attr_code:   db "__code__", 0

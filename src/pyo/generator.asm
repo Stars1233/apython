@@ -810,27 +810,57 @@ DEF_FUNC_BARE gen_iter_self
 END_FUNC gen_iter_self
 
 ;; ============================================================================
-;; gen_repr(PyObject *self) -> PyStrObject*
+;; gen_repr / coro_repr / async_gen_repr (PyObject *self) -> PyStrObject*
+;;
+;; "<generator object NAME at 0x...>", with the qualified name off the code
+;; object -- which is how a generator expression says "<genexpr>" and a
+;; generator function says its own name.  All three used to be a fixed string
+;; naming only the kind.
 ;; ============================================================================
+GRP_KIND  equ 8
+GRP_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+DEF_FUNC_LOCAL gen_repr_kind, GRP_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - GRP_KIND], rsi
+    mov rax, [rbx + PyGenObject.gi_code]
+    test rax, rax
+    jz .grp_gi_name
+    mov rax, [rax + PyCodeObject.co_qualname]
+    test rax, rax
+    jnz .grp_have_name
+.grp_gi_name:
+    mov rax, [rbx + PyGenObject.gi_name]
+    test rax, rax
+    jz .grp_no_name
+.grp_have_name:
+    lea rdx, [rax + PyStrObject.data]
+    jmp .grp_build
+.grp_no_name:
+    xor edx, edx
+.grp_build:
+    mov rdi, rbx
+    mov rsi, [rbp - GRP_KIND]
+    extern obj_repr_named_at
+    call obj_repr_named_at
+    pop rbx
+    leave
+    ret
+END_FUNC gen_repr_kind
+
 DEF_FUNC_BARE gen_repr
-    lea rdi, [rel gen_repr_str]
-    jmp str_from_cstr
+    lea rsi, [rel gen_repr_str]
+    jmp gen_repr_kind
 END_FUNC gen_repr
 
-;; ============================================================================
-;; coro_repr(PyObject *self) -> PyStrObject*
-;; ============================================================================
 DEF_FUNC_BARE coro_repr
-    lea rdi, [rel coro_repr_str]
-    jmp str_from_cstr
+    lea rsi, [rel coro_repr_str]
+    jmp gen_repr_kind
 END_FUNC coro_repr
 
-;; ============================================================================
-;; async_gen_repr(PyObject *self) -> PyStrObject*
-;; ============================================================================
 DEF_FUNC_BARE async_gen_repr
-    lea rdi, [rel async_gen_repr_str]
-    jmp str_from_cstr
+    lea rsi, [rel async_gen_repr_str]
+    jmp gen_repr_kind
 END_FUNC async_gen_repr
 
 ;; ============================================================================
@@ -1705,11 +1735,11 @@ END_FUNC _get_gen_throw_builtin
 section .data
 
 gen_name_str:       db "generator", 0
-gen_repr_str:       db "<generator>", 0
+gen_repr_str:       db "generator object", 0
 coro_name_str:      db "coroutine", 0
-coro_repr_str:      db "<coroutine>", 0
+coro_repr_str:      db "coroutine object", 0
 async_gen_name_str: db "async_generator", 0
-async_gen_repr_str: db "<async_generator>", 0
+async_gen_repr_str: db "async_generator object", 0
 
 ; Cached builtin singletons for gen methods
 align 8
