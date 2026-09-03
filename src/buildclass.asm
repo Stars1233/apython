@@ -472,6 +472,21 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     lea rax, [rel instance_clear]
     mov [r12 + PyTypeObject.tp_clear], rax
 
+    ; A layout base with a dealloc, traverse or clear of its OWN keeps it.
+    ;
+    ; The three above are the generic ones, right for an ordinary class.  A
+    ; base that keeps raw fields past the instance header has to clean them
+    ; up itself, and _io.FileIO does: fileio_dealloc closes the descriptor,
+    ; releases the name and the mode, zeroes the raw words and only then
+    ; chains to the generic dealloc.  Overwriting it meant a subclass never
+    ; ran any of that -- `class F(_io.FileIO): pass` leaked a file descriptor
+    ; per instance, and the collector walked the descriptor as a pointer.
+    ;
+    ; Inheriting is CPython's rule too: a subtype that adds no storage gets
+    ; its base's tp_dealloc.  Nothing changes for an ordinary base, whose
+    ; three slots are the generic ones already.
+    call bc_inherit_lifecycle
+
     ; tp_dict = class_dict (ownership transferred from r15, no INCREF needed)
     mov [r12 + PyTypeObject.tp_dict], r15
 
@@ -1095,6 +1110,59 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     leave
     ret
 END_FUNC type_from_parts
+
+;; ============================================================================
+;; bc_inherit_lifecycle() -- keep the layout base's tp_dealloc / tp_traverse /
+;; tp_clear when they are not the generic ones
+;;
+;; Reads type_from_parts' r12 (the new type) and [rbp - TFP_BASE] through the
+;; saved rbp, as bc_base_has_dict does.
+;; ============================================================================
+DEF_FUNC_LOCAL bc_inherit_lifecycle
+    mov r9, [rbp]                   ; type_from_parts' frame
+    mov r9, [r9 - TFP_BASE]
+    test r9, r9
+    jz .bil_done
+
+    ; Only a HEAPTYPE base.  A static builtin -- int, str, list, dict -- has
+    ; a tp_dealloc written for its own storage layout, and a subclass of one
+    ; is instance-shaped, not int-shaped; type_from_parts has dedicated arms
+    ; further down for those.  The bases this is for are the heaptypes that
+    ; were built here and then had their tp_basicsize patched to make room
+    ; for raw fields: _io.FileIO and _io.BytesIO.
+    test qword [r9 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .bil_done
+
+    extern instance_dealloc
+    mov rax, [r9 + PyTypeObject.tp_dealloc]
+    test rax, rax
+    jz .bil_traverse
+    lea rcx, [rel instance_dealloc]
+    cmp rax, rcx
+    je .bil_traverse
+    mov [r12 + PyTypeObject.tp_dealloc], rax
+.bil_traverse:
+    extern instance_traverse
+    mov rax, [r9 + PyTypeObject.tp_traverse]
+    test rax, rax
+    jz .bil_clear
+    lea rcx, [rel instance_traverse]
+    cmp rax, rcx
+    je .bil_clear
+    mov [r12 + PyTypeObject.tp_traverse], rax
+.bil_clear:
+    extern instance_clear
+    mov rax, [r9 + PyTypeObject.tp_clear]
+    test rax, rax
+    jz .bil_done
+    lea rcx, [rel instance_clear]
+    cmp rax, rcx
+    je .bil_done
+    mov [r12 + PyTypeObject.tp_clear], rax
+.bil_done:
+    leave
+    ret
+END_FUNC bc_inherit_lifecycle
 
 ;; ============================================================================
 ;; bc_base_has_dict() -> eax = 1 when the layout base already gives instances

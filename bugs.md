@@ -212,12 +212,6 @@ than lying — but they are ordinary Python that does not work:
   Raising a real five-argument exception from asm needs a way to call an
   exception type with five arguments, which `exc_new` does not offer.
 
-- **A subclass of `_io.FileIO` cannot declare `__slots__`.**  FileIO stores
-  its descriptor and flags past the instance header, in the same words a
-  subclass's slots would land in: both are placed relative to the base's
-  `tp_dictoffset`, which the subclass inherits.  Nothing detects the
-  collision.
-
 - **A memoryview with a step other than 1 is not a view.**  `mv[::2]` and
   `mv[::-1]` raise NotImplementedError.  CPython answers with a
   non-contiguous view, which needs a stride the object does not carry -- and

@@ -1161,6 +1161,24 @@ DEF_FUNC instance_dealloc, ID_FRAME
     cmp rcx, TP_DICT_AT_TAIL
     je .id_no_dict_hdr          ; the dict is past the data, not in the header
     add rcx, 8
+    ; ...but the header does not end at the dict word when the layout base
+    ; keeps fields of its own PAST it.  _io.FileIO is built by
+    ; type_from_parts and then has its tp_basicsize patched up to make room
+    ; for the descriptor, the flags, the name, the blksize and the mode --
+    ; all above tp_dictoffset + 8.  `class F(_io.FileIO): pass` therefore
+    ; walked five of FileIO's own fields as if they were __slots__ Values and
+    ; XDECREF'd them: a file descriptor of 3 is `dec qword [3]`, a wild write
+    ; on ordinary single inheritance with no __slots__ anywhere.
+    ;
+    ; tp_base is the layout base -- the type whose fields sit below the
+    ; subclass's own slots -- so its basicsize is the real floor.
+    mov rdx, [rax + PyTypeObject.tp_base]
+    test rdx, rdx
+    jz .id_have_hdr
+    mov rdx, [rdx + PyTypeObject.tp_basicsize]
+    cmp rdx, rcx
+    jbe .id_have_hdr
+    mov rcx, rdx
     jmp .id_have_hdr
 .id_no_dict_hdr:
     ; No dict word: a str subclass, whose header is the base's, not
@@ -1323,6 +1341,7 @@ DEF_FUNC instance_dealloc, ID_FRAME
     leave
     ret
 END_FUNC instance_dealloc
+
 
 ;; ============================================================================
 ;; builtin_sub_dealloc(PyObject *self)
@@ -3266,6 +3285,17 @@ DEF_FUNC instance_traverse
     cmp rcx, TP_DICT_AT_TAIL
     je .it_no_dict_hdr          ; the dict is past the data, not in the header
     add rcx, 8
+    ; The layout base's own fields can sit past the dict word -- see the same
+    ; floor in instance_dealloc.  Here the consequence is the collector
+    ; visiting a file descriptor as an object pointer, which is why FileIO
+    ; had to be given a tp_traverse of its own.
+    mov rdx, [rax + PyTypeObject.tp_base]
+    test rdx, rdx
+    jz .it_have_hdr
+    mov rdx, [rdx + PyTypeObject.tp_basicsize]
+    cmp rdx, rcx
+    jbe .it_have_hdr
+    mov rcx, rdx
     jmp .it_have_hdr
 .it_no_dict_hdr:
     ; No dict word: a str subclass, whose header is the base's, not
