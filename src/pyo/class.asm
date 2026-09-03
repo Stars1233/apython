@@ -1196,7 +1196,7 @@ DEF_FUNC instance_dealloc, ID_FRAME
     test rcx, rcx
     jnz .id_have_hdr
 .id_no_dict_hdr_default:
-    mov rcx, PyInstanceObject_size
+    mov rcx, OBJ_HEADER_SIZE
 .id_have_hdr:
     mov rax, [rax + PyTypeObject.tp_basicsize]
     sub rax, rcx
@@ -3070,10 +3070,9 @@ DEF_FUNC_BARE object_type_call
     ; Create a bare instance with object_type (gc_alloc since HAVE_GC)
     push rbp
     mov rbp, rsp
-    mov edi, PyInstanceObject_size
+    mov edi, OBJ_HEADER_SIZE
     lea rsi, [rel object_type]
     call gc_alloc
-    mov qword [rax + PyInstanceObject.inst_dict], 0
 
     ; gc_alloc does not INCREF the type it stamps into ob_type, and
     ; instance_dealloc DECREFs it -- so without this the reference count of
@@ -3296,7 +3295,12 @@ object_type:
     dq 1                        ; ob_refcnt (immortal)
     dq type_type                ; ob_type
     dq object_name_str          ; tp_name
-    dq PyInstanceObject_size    ; tp_basicsize
+    ; object() has no __dict__, so its instances are the bare header.  This
+    ; used to be PyInstanceObject_size -- the header PLUS a dict word that
+    ; object's own tp_dictoffset of 0 says is not there.  Every object() paid
+    ; for it, and `class B(object): pass` put its dict one word further out
+    ; than `class B: pass` did, for two different layouts of the same class.
+    dq OBJ_HEADER_SIZE          ; tp_basicsize
     dq instance_dealloc         ; tp_dealloc
     dq instance_repr            ; tp_repr
     dq 0                        ; tp_str
@@ -3453,7 +3457,7 @@ DEF_FUNC instance_traverse
     test rcx, rcx
     jnz .it_have_hdr
 .it_no_dict_hdr_default:
-    mov rcx, PyInstanceObject_size
+    mov rcx, OBJ_HEADER_SIZE
 .it_have_hdr:
     mov rax, [rax + PyTypeObject.tp_basicsize]
     sub rax, rcx

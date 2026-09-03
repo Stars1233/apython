@@ -39,10 +39,54 @@ print('two slots cost', SlottedTwo.__basicsize__ - Empty.__basicsize__)
 # The header is never empty and never negative.
 print(object.__basicsize__ > 0, type.__basicsize__ > object.__basicsize__)
 
-# A __slots__ class cannot be weak-referenced unless it asks for it, so its
-# __weakrefoffset__ is zero in both.  A plain class can, and CPython reports
-# a negative offset there -- see bugs.md.
-print(Slotted.__weakrefoffset__, Empty.__weakrefoffset__)
+# A __slots__ class has no instance dict and cannot be weak-referenced
+# unless it asks for it, so both offsets are zero -- and with no dict word in
+# the way, the whole layout matches CPython's.
+print(Slotted.__dictoffset__, Slotted.__weakrefoffset__)
+print(Empty.__dictoffset__, Empty.__weakrefoffset__)
+print(Slotted.__basicsize__, SlottedTwo.__basicsize__, Empty.__basicsize__)
+print(object.__basicsize__, Empty.__basicsize__ == object.__basicsize__)
+
+
+# Inheriting slots from a slotted base stacks them, and still no dict.
+class SlottedChild(Slotted):
+    __slots__ = ('z',)
+
+
+print(SlottedChild.__basicsize__, SlottedChild.__dictoffset__)
+print(SlottedChild.__basicsize__ - Slotted.__basicsize__)
+
+# A slotted class really refuses an attribute it did not declare, and the
+# slots themselves still work.
+sc = SlottedChild()
+sc.x = 1
+sc.z = 3
+print(sc.x, sc.z)
+try:
+    sc.nope = 1
+except AttributeError as e:
+    print("AttributeError")
+try:
+    sc.__dict__
+except AttributeError:
+    print("no __dict__")
+
+
+# A class whose base has a dict inherits it, __slots__ or not: the slots go
+# after the whole header then, and the dict still works.
+class Plain2:
+    pass
+
+
+class SlotsOverDict(Plain2):
+    __slots__ = ('w',)
+
+
+sod = SlotsOverDict()
+sod.w = 1
+sod.anything = 2
+print(sod.w, sod.anything, sod.__dict__)
+print(SlotsOverDict.__dictoffset__ != 0)
 
 
 # These are getsets on the metatype, which makes them data descriptors: a

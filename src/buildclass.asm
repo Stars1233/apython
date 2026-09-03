@@ -720,14 +720,26 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     test eax, eax
     jnz .bc_no_slots
     or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+    call bc_drop_dict_word
     jmp .bc_no_slots
 .bc_have_slots:
 
-    ; Determine base_basicsize
-    ; Slots are laid out after the whole instance header, which is what
-    ; tp_basicsize was just set to -- the base's layout plus the dict word.
-    ; Using the *base's* basicsize instead puts the first slot on top of the
-    ; dict pointer.
+    ; Where the slots start.  A class that declares __slots__ and inherits no
+    ; dict has none of its own, so the dict word comes out of the layout and
+    ; the slots take its place -- which is the layout CPython has, and eight
+    ; bytes per instance that used to be a word that could never be written.
+    ;
+    ; When a base does provide a dict, the class shares it and the slots go
+    ; after the whole header, dict word included: putting them at the base's
+    ; basicsize instead lands the first slot on top of the dict pointer.
+    call bc_base_has_dict
+    test eax, eax
+    jnz .bc_slots_share_dict
+    or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+    call bc_drop_dict_word
+    mov rdi, [r12 + PyTypeObject.tp_basicsize]
+    jmp .bc_have_basic
+.bc_slots_share_dict:
     mov rdi, [r12 + PyTypeObject.tp_basicsize]
 .bc_have_basic:
     ; rdi = base_basicsize
@@ -737,20 +749,11 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     add rax, rdi                    ; + base_basicsize
     mov [r12 + PyTypeObject.tp_basicsize], rax
 
-    ; TYPE_FLAG_HAS_SLOTS says "this class has NO instance dict", and four
-    ; sites read it that way: instance_new, instance_setattr's fallback,
-    ; obj_generic_attr's __dict__ arm and vars().  __slots__ suppresses the
-    ; dict only when NO BASE already provides one -- `class C(A)` with a
-    ; plain A inherits A's __dict__ and must still accept `c.z = 1`, which
-    ; was an AttributeError here.  The slots themselves are unaffected: they
-    ; are laid out past the header either way, and the walks in
-    ; instance_dealloc and instance_traverse derive the header end from
-    ; tp_dictoffset, which is untouched.
-    call bc_base_has_dict
-    test eax, eax
-    jnz .bc_slots_flag_done
-    or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
-.bc_slots_flag_done:
+    ; TYPE_FLAG_HAS_SLOTS says "this class has NO instance dict", and it is
+    ; set above, before the layout is decided, because it is what decides it.
+    ; __slots__ suppresses the dict only when NO BASE already provides one --
+    ; `class C(A)` with a plain A inherits A's __dict__ and must still accept
+    ; `c.z = 1`, which was an AttributeError here.
 
     ; Create member descriptors for each slot
     ; rbx = slots tuple, r13 = nslots, rdi = base_basicsize
@@ -1278,6 +1281,38 @@ END_FUNC bc_inherit_lifecycle
 ;; reserved in its layout that it can never use (bugs.md carries that), so
 ;; the offset being non-zero says nothing about whether instances have one.
 ;; ============================================================================
+;; ============================================================================
+;; bc_drop_dict_word() -- the class being built has no instance dict
+;;
+;; Zero tp_dictoffset and pull tp_basicsize back to where the header really
+;; ends: the layout base's basicsize, or the bare object header when there is
+;; no base yet (tp_base is filled in with object further down, and object is
+;; exactly that size).  Both slot walks read the header end back out of these
+;; two fields, so this is the only place that has to know.
+;;
+;; The type being built is r12, as it is throughout type_from_parts; the
+;; layout base is reached through the saved rbp, as bc_base_has_dict does.
+;; ============================================================================
+DEF_FUNC_LOCAL bc_drop_dict_word
+    push rbx
+    mov rax, r12                        ; the type being built
+    mov qword [rax + PyTypeObject.tp_dictoffset], 0
+    mov rbx, [rbp]                      ; type_from_parts' frame
+    mov rcx, [rbx - TFP_BASE]
+    test rcx, rcx
+    jz .bddw_no_base
+    mov rcx, [rcx + PyTypeObject.tp_basicsize]
+    test rcx, rcx
+    jnz .bddw_store
+.bddw_no_base:
+    mov ecx, OBJ_HEADER_SIZE
+.bddw_store:
+    mov [rax + PyTypeObject.tp_basicsize], rcx
+    pop rbx
+    leave
+    ret
+END_FUNC bc_drop_dict_word
+
 DEF_FUNC_LOCAL bc_base_has_dict
     mov rax, [rbp]              ; type_from_parts' frame
     mov rax, [rax - TFP_BASE]

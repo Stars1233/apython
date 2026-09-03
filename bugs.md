@@ -150,13 +150,6 @@ one-line fix.
   `start_new_thread`.  Everything in the stdlib that only takes a lock works;
   anything that expects a second thread does not.
 
-- **A `__slots__` instance still carries a dict WORD it can never use.**  The
-  suppression works now, but `tp_dictoffset` is left pointing at a word that
-  is always NULL: eight bytes per instance, and the reason every reader has to
-  ask about `TYPE_FLAG_HAS_SLOTS` as well as about `tp_dictoffset`.  Zeroing
-  the offset means moving the slots down by one word and teaching the dealloc
-  and traverse walks where the header now ends.
-
 - **The default `repr` names the type but not the address.**  CPython answers
   `<set_iterator object at 0x7f...>`; a type with no `tp_repr` answers
   `<set_iterator>` here, and a plain class instance answers `<instance>`
@@ -190,8 +183,8 @@ one-line fix.
   `__dictoffset__ == -1` and `__weakrefoffset__ == -32`; the header itself is
   then 16 bytes.  Here the dict is a word inside the instance, so
   `class A: pass` reports a positive `__dictoffset__` and a header one word
-  wider.  A `__slots__` class has no dict of its own, so once its dict word
-  goes away it will match CPython exactly.
+  wider.  A `__slots__` class has no dict of its own and matches CPython
+  exactly.
 
   Nothing in Python reads these except code that is measuring the layout, and
   a managed dict is a whole allocation strategy -- the values are honest about
