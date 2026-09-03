@@ -2544,7 +2544,6 @@ enumerate_iter_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
 
 ; Zip iterator type
 align 8
@@ -2577,7 +2576,6 @@ zip_iter_type:
     dq iters_array_traverse                        ; tp_traverse
     dq iters_array_clear                        ; tp_clear
     dq 0 ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
 
 ; Map iterator type
 align 8
@@ -2610,7 +2608,6 @@ map_iter_type:
     dq map_traverse                        ; tp_traverse
     dq map_clear                        ; tp_clear
     dq 0 ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
 
 ; Filter iterator type
 align 8
@@ -2643,7 +2640,6 @@ filter_iter_type:
     dq filter_traverse                        ; tp_traverse
     dq filter_clear                        ; tp_clear
     dq 0 ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
 
 ; Sequence iterator type (__getitem__ protocol)
 align 8
@@ -2677,7 +2673,6 @@ callable_iter_type:
     dq callable_iter_traverse   ; tp_traverse
     dq callable_iter_clear      ; tp_clear
     dq 0 ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
 
 align 8
 global seq_iter_type
@@ -2709,7 +2704,6 @@ seq_iter_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
 
 ; Reversed iterator type
 align 8
@@ -2742,7 +2736,6 @@ reversed_iter_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
 
 ; Chain iterator type
 align 8
@@ -2775,4 +2768,3 @@ chain_iter_type:
     dq iters_array_traverse                        ; tp_traverse
     dq iters_array_clear                        ; tp_clear
     dq 0 ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset

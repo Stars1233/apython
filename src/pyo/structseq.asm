@@ -794,7 +794,6 @@ version_info_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
     dq vi_desc                  ; STRUCTSEQ_DESC, one qword past the type
 
 ;; ============================================================================
@@ -870,7 +869,6 @@ float_info_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
     dq float_info_desc          ; STRUCTSEQ_DESC, one qword past the type
 
 ;; sys.int_info
@@ -926,7 +924,6 @@ int_info_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
     dq int_info_desc            ; STRUCTSEQ_DESC, one qword past the type
 
 ;; sys.hash_info
@@ -992,7 +989,6 @@ hash_info_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
     dq hash_info_desc           ; STRUCTSEQ_DESC, one qword past the type
 
 section .rodata
@@ -1095,5 +1091,4 @@ flags_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
     dq flags_desc               ; STRUCTSEQ_DESC

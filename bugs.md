@@ -270,6 +270,25 @@ than lying — but they are ordinary Python that does not work:
   safe direction: an untracked holder's reference is not subtracted, so a
   task it holds looks reachable and is never freed early.
 
+- **Weak references live in a side table, not in the object, so
+  `__weakrefoffset__` is 0 everywhere.**  The links are kept in one dict keyed
+  by the referent's address and `obj_dealloc` consults it, which works and is
+  tested; what it cannot do is answer CPython's question, because there is no
+  offset to report.
+
+  Putting the head in the object is not the 95-line edit it looks like.  The
+  `PyTypeObject` field is the easy part.  The word itself has to go in the
+  *instances* of all seventeen static types CPython lets you weak-reference --
+  set, frozenset, type and both metatypes, function, builtin, method,
+  generator, coroutine, async generator, module, memoryview, code, file,
+  BytesIO, Task -- which means a field on each of those structs, a zeroing
+  store at each of their forty-odd allocation sites, a release in each
+  dealloc, and, because `type` is one of them, a second new `PyTypeObject`
+  field and another pass over all 94 tables.  A missed zeroing store is a
+  garbage pointer walked as a list.  The whole of it buys one number that
+  still would not match CPython's, since the basicsizes it is an offset into
+  differ anyway.
+
 - **`gc` has no `get_referrers`, `freeze`/`unfreeze` or `get_stats`.**
   `get_referrers` needs a reverse edge nothing records -- CPython finds it by
   traversing every tracked object and asking whether it points at the

@@ -1347,7 +1347,6 @@ tuple_type:
     dq tuple_traverse                        ; tp_traverse
     dq tuple_clear                        ; tp_clear
     dq 0        ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
 
 section .text
 

@@ -3338,7 +3338,6 @@ stat_result_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
     dq sr_desc                  ; STRUCTSEQ_DESC
 
 align 8
@@ -3371,7 +3370,6 @@ uname_result_type:
     dq 0
     dq 0
     dq 0
-    dq 0                        ; tp_weaklistoffset
     dq un_desc                  ; STRUCTSEQ_DESC, one qword past the type
 
 align 8
@@ -3404,7 +3402,6 @@ terminal_size_type:
     dq 0
     dq 0
     dq 0
-    dq 0                        ; tp_weaklistoffset
     dq ts_desc                  ; STRUCTSEQ_DESC, one qword past the type
 
 section .rodata

@@ -1062,7 +1062,6 @@ sleep_awaitable_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
 
 align 8
 global wait_for_awaitable_type
@@ -1094,7 +1093,6 @@ gather_awaitable_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
 
 align 8
 global gather_awaitable_type
@@ -1126,4 +1124,3 @@ wait_for_awaitable_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset

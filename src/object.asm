@@ -2379,4 +2379,3 @@ type_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset

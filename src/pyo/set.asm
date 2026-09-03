@@ -1517,7 +1517,6 @@ set_type:
     dq set_traverse                        ; tp_traverse
     dq set_clear_gc                        ; tp_clear
     dq 0         ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
 
 ; Frozenset type object
 align 8
@@ -1550,7 +1549,6 @@ frozenset_type:
     dq set_traverse                        ; tp_traverse
     dq set_clear_gc                        ; tp_clear
     dq 0         ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
 
 ; Set iterator type
 align 8
@@ -1583,7 +1581,6 @@ set_iter_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
-    dq 0                        ; tp_weaklistoffset
 
 section .text
 
