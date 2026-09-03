@@ -226,9 +226,6 @@ than lying — but they are ordinary Python that does not work:
   and only an `except` block counts.  Visible in the report for a generator
   whose cleanup raises: the GeneratorExit appears as context.
 
-- The `re` wrapper module.  The `_sre` engine underneath is complete, but
-  without a shipped `re.py` an `import re` finds CPython's, which needs
-  `enum` and `types`.
 
 ## Robustness
 

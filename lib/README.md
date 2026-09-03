@@ -14,9 +14,16 @@ repository (`../LICENSE`).
 
 | Origin | Files |
 |---|---|
-| CPython, unmodified | `abc.py` |
-| CPython, modified for apython | `__future__.py`, `collections/`, `contextlib.py`, `copy.py`, `functools.py`, `io.py`, `operator.py`, `pickle.py`, `string.py`, `unittest/`, `warnings.py`, `test/` |
+| CPython, unmodified | `abc.py`, `copyreg.py`, `enum.py`, `functools.py`, `re/`, `reprlib.py`, `types.py` |
+| CPython, modified for apython | `__future__.py`, `collections/`, `contextlib.py`, `copy.py`, `io.py`, `operator.py`, `pickle.py`, `string.py`, `unittest/`, `warnings.py`, `test/` |
 | Written for apython | `_codecs.py`, `_io.py`, `_thread.py`, `itertools.py` |
+
+`re/` is the wrapper around the `_sre` engine, which is assembly.  It comes
+over unmodified, and with it the modules it needs that were not here:
+`enum.py`, `types.py`, `reprlib.py`, `copyreg.py`, and a `functools.py` that
+is CPython's rather than the four-function stand-in this used to carry.
+Before that, `import re` found CPython's own only when a real stdlib was on
+`$PYTHONPATH`.
 
 The four apython files stand in for CPython C extension modules of the same
 name; they are covered by the repository's MIT license.  Each carries a

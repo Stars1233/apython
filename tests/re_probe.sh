@@ -7,7 +7,8 @@
 #
 # It is not part of `make check`: `re` is a PYTHON module, and lib/README.md's
 # rule is that lib/ stands in for CPython's C modules, not its Python ones --
-# so `import re` needs a real stdlib on $CPYTHON_LIB, exactly as `os` does.
+# so `import re` used to need a real stdlib on $CPYTHON_LIB.  apython ships
+# `re` itself now, and only the oracle needs one -- which python3 has.
 #
 # It is deliberately NOT named test_*.py: run_tests.sh auto-discovers those,
 # and this one needs $CPYTHON_LIB.  tests/test_re_opcodes.py is the version
@@ -33,11 +34,9 @@ RECORD=""
 
 GREEN=$'\033[0;32m'; RED=$'\033[0;31m'; YELLOW=$'\033[0;33m'; OFF=$'\033[0m'
 
-if [ ! -d "$CPYTHON_LIB/re" ]; then
-    echo "${YELLOW}SKIP${OFF} re differential: no CPython Lib at $CPYTHON_LIB"
-    echo "     (set CPYTHON_LIB to a CPython 3.12 checkout's Lib/)"
-    exit 0
-fi
+# apython ships its own `re` now, so only the ORACLE needs a real stdlib --
+# and python3 has one.  $CPYTHON_LIB is still honoured, and still puts the
+# same library in front of both sides, but it is no longer required.
 
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
@@ -45,8 +44,11 @@ trap 'rm -rf "$W"' EXIT
 python3 -m py_compile "$TEST" 2>/dev/null || { echo "${RED}FAIL${OFF} cannot compile $TEST"; exit 1; }
 PYC="tests/__pycache__/$(basename "$TEST" .py).cpython-312.pyc"
 
-PYTHONPATH="$CPYTHON_LIB" python3 "$TEST" > "$W/expected" 2>&1
-PYTHONPATH="$CPYTHON_LIB" timeout 300 ./apython "$PYC" > "$W/actual" 2>&1
+if [ -d "$CPYTHON_LIB/re" ]; then
+    export PYTHONPATH="$CPYTHON_LIB"
+fi
+python3 "$TEST" > "$W/expected" 2>&1
+timeout 300 ./apython "$PYC" > "$W/actual" 2>&1
 rc=$?
 if [ $rc -ge 128 ]; then
     echo "${RED}CRASH${OFF} re differential: apython died with signal $((rc - 128))"

@@ -818,6 +818,14 @@ DEF_FUNC op_load_attr, LA_FRAME
     lea rcx, [rel module_type]
     cmp rax, rcx
     je .la_not_method
+    ; A function's tp_getattr is the same shape: it reads out of the
+    ; function's own __dict__, so `f.g` is whatever was stored there and
+    ; calling it must not pass f.  functools.lru_cache hangs cache_info off
+    ; the wrapper exactly like that, and `slow.cache_info()` was called with
+    ; the wrapper as its first argument.
+    lea rcx, [rel func_type]
+    cmp rax, rcx
+    je .la_not_method
     ; The same for a classmethod or staticmethod wrapper: its __func__ is the
     ; function it wraps, not a method of the wrapper.
     lea rcx, [rel classmethod_type]
