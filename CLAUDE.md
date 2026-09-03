@@ -187,6 +187,10 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   of the I/O stack subclasses, `UnsupportedOperation`, `FileIO` and `BytesIO`.
   The buffering and text layers are `lib/_io.py`, which assembles both halves
   under the name `_io`
+- `src/socketmod.asm` — the `_socketcore` module: the socket syscalls and the
+  constant table, taking and returning sockaddrs as opaque bytes.  The socket
+  type, the address packing and `select` are `lib/_socket.py` and
+  `lib/select.py`, the same split as `_iocore`/`lib/_io.py`
 - `src/itertools.asm` — the *iterator builtins* (`enumerate`, `zip`, `map`,
   `filter`, `reversed`, `sorted`, `chain`, `get_iterator`), not the `itertools`
   module, which is `lib/itertools.py`
