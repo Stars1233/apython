@@ -6,6 +6,7 @@ test_abc
 test_abc_spoofed_class
 test_abstract_and_str_subclass
 test_arithmetic
+test_ast
 test_async_await
 test_async_cancel
 test_async_coro

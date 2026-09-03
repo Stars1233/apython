@@ -5,6 +5,7 @@ crash_ceiling 0
 ok abc
 ok _aix_support
 ok argparse
+ok ast
 ok asyncio
 ok base64
 ok bisect

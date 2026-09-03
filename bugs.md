@@ -53,20 +53,23 @@ one-line fix.
   `_have_functions` is an empty list, which is the honest answer -- no
   `dir_fd=` support -- and os.py reads it to build `supports_dir_fd`.
 
-- **Missing C modules**, in rough order of how many stdlib modules each
-  blocks: `_ast`, `_socket`, `_imp`, `_hashlib` and the `_sha*`/`_md5`
-  family, `_csv`, `pyexpat`, `_typing`, then a long tail of one apiece.
+- **Missing C modules.**  The ranking here used to be by how often each was
+  the FIRST import to fail, which is not the same as how many modules each
+  blocks: twelve of the thirteen that stopped at `_ast` import
+  `importlib.machinery` a few lines later.  Measured by what actually stands
+  in the way, over CPython 3.12's 196: `_imp` (with `marshal` and
+  `_warnings`) 27, `select` 18, `_socket` 11, `_hashlib` and the
+  `_sha*`/`_md5` family, `array`, `_typing`, `_posixsubprocess`, `_signal`,
+  `_csv`, `pyexpat`, then a long tail of one apiece.
   (`_io` is not among them: `src/iomod.asm` supplies `_iocore` and
   `lib/_io.py` assembles both halves under the name `_io`.  Neither are
   `math`, `_collections`, `_struct`, `_random`, `_contextvars`, `_string`,
-  `_tokenize`, `_operator`, `binascii` and `atexit`, which are there now --
-  the last nine in `lib/`.)  `make check-stdlib` gives the current figure:
-  107 of 196.
+  `_tokenize`, `_operator`, `binascii`, `atexit` and now `_ast`, which are
+  there.)  `make check-stdlib` gives the current figure: 109 of 196.
 
-  `_ast` is the largest of what is left.  The arena AST cannot be exposed as
-  it stands: 32-byte POD addressed by a u32 index, freed wholesale at the end
-  of a compile, and its shape does not match CPython's `_fields`.  It needs
-  its own object model and `PyCF_ONLY_AST` in `builtin_compile_fn`.
+  `_socket` is worth nothing on its own: `socket.py` imports `selectors`
+  three lines after `_socket`, and `selectors` imports `select`.  The two are
+  one piece of work, and together they are seven modules.
 
   `hashlib` imports but has no digests, because every one of them is a C
   module here as well.
@@ -111,6 +114,24 @@ one-line fix.
   classmethod object, which `type_stamp_methods` skips, so they answer
   `<bound method from_bytes of <class 'int'>>` where CPython answers
   `<built-in method from_bytes of type object at 0x...>`.
+
+- **A `SyntaxError` carries none of its attributes.**  CPython sets `.msg`,
+  `.filename`, `.lineno`, `.offset` and `.text` from the exception's own
+  args, and `str(e)` appends " (file, line N)" to the message.  Here the
+  args are there -- the traceback header renders the file, the line and the
+  caret out of them -- but `exc_getattr` does not map any of the five names,
+  so `e.msg` is an AttributeError and `str(e)` is the bare message.  Every
+  tool that reports a syntax error reads at least `.lineno`.
+
+- **The parser records four things CPython's AST carries and this one
+  cannot.**  Visible now that `ast.parse` exists, and all four are the
+  parser's, not `_ast`'s: a `def`'s return annotation is read and discarded
+  (`FunctionDef.returns` is always absent), PEP 695 type parameters are
+  skipped so `TypeAlias`, `TypeVar`, `ParamSpec` and `TypeVarTuple` never
+  appear, `AnnAssign.simple` is always 1 because whether the target was
+  parenthesised is not stored, and a nested format spec is missing the empty
+  literal CPython puts after its last field.  `type_comment` is permanently
+  None for the same reason: there are no type comments.
 
 - **`_thread` is a single-threaded stand-in.**  `lib/_thread.py` gives
   `get_ident` a constant, makes locks uncontended, and raises from

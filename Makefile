@@ -80,6 +80,8 @@ regen:
 	mv src/compiler/unicodename.asm.new src/compiler/unicodename.asm
 	$(PYTHON) src/compiler/gen_unicodecase.py > src/compiler/unicodecase.asm.new
 	mv src/compiler/unicodecase.asm.new src/compiler/unicodecase.asm
+	$(PYTHON) src/compiler/gen_ast.py > lib/_ast.py.new
+	mv lib/_ast.py.new lib/_ast.py
 
 $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
