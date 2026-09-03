@@ -165,6 +165,7 @@ test_format_float_spec
 test_format_map
 test_format
 test_format_spec
+test_frames_and_time
 test_frozenset_descriptors
 test_frozenset
 test_fstrings
@@ -324,6 +325,7 @@ test_sre2
 test_sre_groupdict_refcount
 test_sre
 test_stdlib_glue
+test_stdlib_shims
 test_str_case
 test_str_decode
 test_strfmt

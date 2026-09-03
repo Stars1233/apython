@@ -3,6 +3,8 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern exc_TypeError_type
+extern raise_exception
 extern none_singleton
 extern ap_free
 extern ap_malloc
@@ -351,6 +353,13 @@ DEF_FUNC code_getattr
     test eax, eax
     jz .return_varnames
 
+    ; co_positions() is a method, not a field.
+    lea rdi, [rel co_attr_positions]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_positions
+
     ; Everything else is a straight field read.  Only three of the seventeen
     ; co_* were reachable from Python, which is most of what inspect,
     ; dataclasses and traceback formatting want from a code object.
@@ -410,6 +419,21 @@ DEF_FUNC code_getattr
     V_PACK rax, rdx             ; return one Value
     ret
 
+.return_positions:
+    ; A *bound* method: `code.co_positions()` and `f = code.co_positions`
+    ; must both know which code object they belong to.
+    call _get_co_positions_builtin
+    mov rdi, rax
+    mov rsi, rbx
+    extern method_new
+    call method_new
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
 .return_kwonlyargcount:
     movsxd rax, dword [rbx + PyCodeObject.co_kwonlyargcount]
     mov edx, TAG_SMALLINT
@@ -449,6 +473,99 @@ DEF_FUNC code_getattr
     V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC code_getattr
+
+;; ============================================================================
+;; code.co_positions() -> an iterable of (lineno, end_lineno, col, end_col)
+;;
+;; CPython's traceback.py calls this on every traceback entry, to underline
+;; the failing expression.  This tree records lines and not columns yet (the
+;; caret work is its own job), and CPython's own format allows None for a
+;; missing column -- so what comes back is one (line, line, None, None) per
+;; code unit, which is enough for traceback.py to run and gives it exactly
+;; the information there is.
+;;
+;; A list rather than a generator: the caller indexes into it with
+;; islice, and a list is the shortest thing that supports that.
+;; ============================================================================
+CPO_CODE  equ 8
+CPO_LIST  equ 16
+CPO_I     equ 24
+CPO_N     equ 32
+CPO_FRAME equ 48            ; + 0 pushes = 48
+DEF_FUNC code_method_co_positions, CPO_FRAME
+    test rsi, rsi
+    jz .cpo_args
+    mov rdi, [rdi]
+    mov [rbp - CPO_CODE], rdi
+    mov eax, [rdi + PyCodeObject.co_code_len]
+    shr eax, 1                  ; code units, two bytes each
+    mov [rbp - CPO_N], rax
+
+    mov rdi, rax
+    extern list_new
+    call list_new
+    test rax, rax
+    jz .cpo_failed
+    mov [rbp - CPO_LIST], rax
+    mov qword [rbp - CPO_I], 0
+
+.cpo_loop:
+    mov rax, [rbp - CPO_I]
+    cmp rax, [rbp - CPO_N]
+    jge .cpo_done
+    mov rdi, [rbp - CPO_CODE]
+    mov rsi, rax
+    extern code_addr2line
+    call code_addr2line
+    push rax
+    sub rsp, 8
+    mov edi, 4
+    extern tuple_new
+    call tuple_new
+    add rsp, 8
+    pop rcx
+    test rax, rax
+    jz .cpo_drop
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rsi, rcx
+    V_PACK_I64 rsi, r8
+    mov [rdx], rsi
+    mov [rdx + 8], rsi
+    LOAD_NONE rsi
+    INCREF rsi
+    mov [rdx + 16], rsi
+    INCREF rsi
+    mov [rdx + 24], rsi
+
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - CPO_LIST]
+    mov rsi, rax
+    extern list_append
+    call list_append
+    add rsp, 8
+    pop rdi
+    extern obj_decref
+    call obj_decref             ; list_append took its own reference
+    inc qword [rbp - CPO_I]
+    jmp .cpo_loop
+
+.cpo_done:
+    mov rax, [rbp - CPO_LIST]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+.cpo_drop:
+    mov rdi, [rbp - CPO_LIST]
+    call obj_decref
+.cpo_failed:
+    xor eax, eax
+    leave
+    ret
+.cpo_args:
+    RAISE exc_TypeError_type, "co_positions() takes no arguments"
+END_FUNC code_method_co_positions
 
 section .rodata
 align 8
@@ -520,3 +637,25 @@ code_type:
     dq code_traverse    ; tp_traverse
     dq code_clear       ; tp_clear
     dq 0 ; tp_dictoffset
+
+
+section .bss
+_co_positions_cache: resq 1
+
+section .text
+DEF_FUNC_LOCAL _get_co_positions_builtin
+    mov rax, [rel _co_positions_cache]
+    test rax, rax
+    jnz .ret
+    lea rdi, [rel code_method_co_positions]
+    lea rsi, [rel co_attr_positions]
+    extern builtin_func_new
+    call builtin_func_new
+    mov [rel _co_positions_cache], rax
+.ret:
+    leave
+    ret
+END_FUNC _get_co_positions_builtin
+
+section .rodata
+co_attr_positions: db "co_positions", 0

@@ -32,6 +32,27 @@ extern builtin_func_new
 extern fatal_error
 extern raise_exception
 
+;; SYS_ADD_FUNC impl, name -- the module dict is in r15 here, not r12, so
+;; MODULE_ADD_FUNC does not fit; this is the same four steps.
+%macro SYS_ADD_FUNC 2
+    lea rdi, [rel %1]
+    lea rsi, [rel %2]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel %2]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+%endmacro
+
+
 ;; ============================================================================
 ;; sys_module_init(int argc, char **argv) -> void
 ;; Initialize the sys module and register it in sys.modules
@@ -934,6 +955,26 @@ DEF_FUNC sys_module_init, 32
     pop rdi
     call obj_decref
 
+    ; --- sys.excepthook / sys.__excepthook__ / sys.unraisablehook ---
+    ;
+    ; threading reads sys.excepthook at import time, to save and restore it
+    ; around a thread's run().  It is the same report the interpreter prints
+    ; for an uncaught exception, which traceback_print already produces.
+    SYS_ADD_FUNC sys_excepthook_func, sm_excepthook
+    SYS_ADD_FUNC sys_excepthook_func, sm_dunder_excepthook
+    SYS_ADD_FUNC sys_unraisablehook_func, sm_unraisablehook
+    SYS_ADD_FUNC sys_exc_info_func, sm_exc_info
+
+    ; --- sys._getframe / sys._getframemodulename ---
+    ;
+    ; warnings._deprecated reaches for both, and nine stdlib modules come in
+    ; behind that one call.  What comes back is a SNAPSHOT: see
+    ; src/pyo/frameobj.asm for why it cannot be the frame itself.
+    extern sys_getframe_func
+    extern sys_getframemodulename_func
+    SYS_ADD_FUNC sys_getframe_func, sm_getframe
+    SYS_ADD_FUNC sys_getframemodulename_func, sm_getframemodulename
+
     ; --- sys.intern function ---
     lea rdi, [rel sys_intern_func]
     lea rsi, [rel sm_intern]
@@ -1347,6 +1388,12 @@ sm_getfsencoding: db "getfilesystemencoding", 0
 sm_getfsencodeerrors: db "getfilesystemencodeerrors", 0
 sm_surrogateescape: db "surrogateescape", 0
 sm_intern:       db "intern", 0
+sm_excepthook:   db "excepthook", 0
+sm_dunder_excepthook: db "__excepthook__", 0
+sm_unraisablehook: db "unraisablehook", 0
+sm_exc_info:     db "exc_info", 0
+sm_getframe:     db "_getframe", 0
+sm_getframemodulename: db "_getframemodulename", 0
 sm_byteorder:    db "byteorder", 0
 sm_little:       db "little", 0
 sm_getdefaultencoding: db "getdefaultencoding", 0
@@ -1378,3 +1425,150 @@ global sys_int_max_str_digits
 sys_int_max_str_digits: dq 4300
 
 sys_intern_table: dq 0
+
+section .text
+
+;; ============================================================================
+;; sys.excepthook(type, value, traceback)
+;;
+;; The report the interpreter prints for an uncaught exception, on stderr.
+;; threading saves and restores this around a thread's run(), and reads it at
+;; import time -- which is where CPython's threading.py stopped.
+;;
+;; Only the VALUE is used: the exception object carries its own type and
+;; traceback, and CPython's C hook falls back on the same when the three
+;; arguments disagree.
+;; ============================================================================
+DEF_FUNC sys_excepthook_func
+    cmp rsi, 3
+    jl .seh_args
+    mov rdi, [rdi + 8]          ; args[1], the exception
+    V_TEST_PTR rdi, rax
+    ja .seh_bad
+    test rdi, rdi
+    jz .seh_bad
+    extern traceback_print
+    call traceback_print
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+.seh_bad:
+    RAISE exc_TypeError_type, "excepthook(): Exception expected for value"
+.seh_args:
+    RAISE exc_TypeError_type, "excepthook() takes exactly 3 arguments"
+END_FUNC sys_excepthook_func
+
+;; ============================================================================
+;; sys.unraisablehook(unraisable)
+;;
+;; What CPython calls for an exception that cannot be propagated -- in a
+;; __del__, or in a generator being finalised.  The argument is a structseq;
+;; the only field this can use is exc_value, and a missing one is not an
+;; error, because the whole point of the hook is that nothing escapes it.
+;; ============================================================================
+UNH_EXC   equ 8
+UNH_KEY   equ 16
+UNH_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC sys_unraisablehook_func, UNH_FRAME
+    test rsi, rsi
+    jz .suh_done
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rax
+    ja .suh_done
+    test rdi, rdi
+    jz .suh_done
+    mov [rbp - UNH_EXC], rdi
+
+    CSTRING rdi, "exc_value"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    mov [rbp - UNH_KEY], rax
+    mov rdi, [rbp - UNH_EXC]
+    mov rsi, rax
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    mov [rbp - UNH_EXC], rax
+    mov rdi, [rbp - UNH_KEY]
+    call obj_decref
+    mov rax, [rbp - UNH_EXC]
+    test rax, rax
+    jz .suh_done
+    V_TEST_PTR rax, rcx
+    ja .suh_drop
+    mov rdi, rax
+    call traceback_print
+.suh_drop:
+    mov rdi, [rbp - UNH_EXC]
+    XDECREF_V rdi, rcx
+.suh_done:
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC sys_unraisablehook_func
+
+
+;; ============================================================================
+;; sys.exc_info() -> (type, value, traceback), or (None, None, None)
+;;
+;; The exception being handled, which is what current_exception holds for the
+;; length of an except block.  threading reads it to report a thread that
+;; died, and CPython's contextlib and unittest both use it.
+;; ============================================================================
+DEF_FUNC sys_exc_info_func
+    extern current_exception
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .sei_none
+    push rax
+    sub rsp, 8
+    mov edi, 3
+    extern tuple_new
+    call tuple_new
+    add rsp, 8
+    pop rcx
+    test rax, rax
+    jz .sei_failed
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rsi, [rcx + PyObject.ob_type]
+    INCREF rsi
+    mov [rdx], rsi
+    INCREF rcx
+    mov [rdx + 8], rcx
+    mov rsi, [rcx + PyExceptionObject.exc_tb]
+    test rsi, rsi
+    jnz .sei_have_tb
+    LOAD_NONE rsi
+.sei_have_tb:
+    INCREF rsi
+    mov [rdx + 16], rsi
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+.sei_failed:
+    xor eax, eax
+    leave
+    ret
+
+.sei_none:
+    mov edi, 3
+    call tuple_new
+    test rax, rax
+    jz .sei_failed
+    mov rdx, [rax + PyTupleObject.ob_item]
+    LOAD_NONE rcx
+    INCREF rcx
+    mov [rdx], rcx
+    INCREF rcx
+    mov [rdx + 8], rcx
+    INCREF rcx
+    mov [rdx + 16], rcx
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC sys_exc_info_func

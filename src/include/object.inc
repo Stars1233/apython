@@ -1020,6 +1020,21 @@ endstruc
 
 FRAME_HEADER_SIZE equ PyFrame.localsplus
 
+; The snapshot sys._getframe() hands back.  A PyFrame is pooled and recycled,
+; so an object holding one would be looking at a later call's frame; this
+; copies what a caller can read and outlives the frames.
+struc PyFrameObject
+    .ob_refcnt:   resq 1  ; +0
+    .ob_type:     resq 1  ; +8
+    .f_back:      resq 1  ; +16: the next snapshot outward, owned, or 0
+    .f_code:      resq 1  ; +24
+    .f_globals:   resq 1  ; +32
+    .f_locals:    resq 1  ; +40
+    .f_builtins:  resq 1  ; +48
+    .f_lineno:    resq 1  ; +56: where the frame was when the snapshot ran
+    .f_lasti:     resq 1  ; +64
+endstruc
+
 ;; ============================================================================
 ;; Exceptions, tracebacks, and the fatal error codes
 ;; (was include/errcodes.inc)

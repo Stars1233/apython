@@ -1300,6 +1300,46 @@ DEF_FUNC gen_getattr
 END_FUNC gen_getattr
 
 ;; ============================================================================
+;; The generator protocol, by name.
+;;
+;; gen_type had no tp_dict at all, so `hasattr(gen, "__next__")` was False and
+;; `it.__next__` an AttributeError -- and `_counter = _count(1).__next__` is
+;; line 838 of CPython's threading.py, which is as far as it got.  The four
+;; getters are what a repr and the async machinery read.
+;; ============================================================================
+%macro DEF_GEN_GETTER 2         ; %1 = the exposed name, %2 = the field
+DEF_FUNC gen_get_%1
+    mov rax, [rdi + PyGenObject.%2]
+    test rax, rax
+    jnz %%have
+    LOAD_NONE rax
+    leave
+    ret
+%%have:
+    INCREF_V rax, rdx
+    leave
+    ret
+END_FUNC gen_get_%1
+%endmacro
+DEF_GEN_GETTER name,    gi_name
+DEF_GEN_GETTER code,    gi_code
+
+;; gi_running is a plain flag, not an object.
+DEF_FUNC gen_get_running
+    mov rax, [rdi + PyGenObject.gi_running]
+    test rax, rax
+    jz .ggr_false
+    lea rax, [rel bool_true]
+    jmp .ggr_out
+.ggr_false:
+    lea rax, [rel bool_false]
+.ggr_out:
+    INCREF rax
+    leave
+    ret
+END_FUNC gen_get_running
+
+;; ============================================================================
 ;; coro_getattr(PyGenObject *self, PyObject *name) -> rax = Value
 ;; Attribute lookup for coroutines: send, close, throw, cr_await, cr_running
 ;; ============================================================================
@@ -1499,6 +1539,7 @@ END_FUNC async_gen_getattr
 ;; ============================================================================
 
 ;; _gen_send_impl(args, nargs) — gen.send(value)
+global _gen_send_impl
 DEF_FUNC _gen_send_impl
     push rbx
 
@@ -1555,6 +1596,8 @@ DEF_FUNC _gen_send_impl
 END_FUNC _gen_send_impl
 
 ;; _gen_close_impl(args, nargs) — gen.close()
+global _gen_close_impl
+global _gen_close_impl
 DEF_FUNC _gen_close_impl
     mov rdi, [rdi]             ; gen = args[0]
     call gen_close
@@ -1564,6 +1607,8 @@ DEF_FUNC _gen_close_impl
 END_FUNC _gen_close_impl
 
 ;; _gen_throw_impl(args, nargs) — gen.throw(exc_type)
+global _gen_throw_impl
+global _gen_throw_impl
 DEF_FUNC _gen_throw_impl
     push rbx
 

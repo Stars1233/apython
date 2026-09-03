@@ -732,6 +732,15 @@ DEF_FUNC_LOCAL set_add_operator_methods, SAOM_FRAME
     ret
 END_FUNC set_add_operator_methods
 
+%macro GEN_GETSET 2             ; %1 = the name string, %2 = the getter
+    mov rdi, rbx
+    lea rsi, [rel %1]
+    extern %2
+    lea rdx, [rel %2]
+    xor ecx, ecx
+    call dict_add_getset
+%endmacro
+
 DEF_FUNC methods_init
     push rbx
     push r12
@@ -1198,6 +1207,88 @@ DEF_FUNC methods_init
 
     extern slice_type
     lea rax, [rel slice_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
+    ;; --- generator and coroutine dicts ---
+    ;; gen_type had no tp_dict, so `hasattr(gen, "__next__")` was False and
+    ;; `it.__next__` an AttributeError.  CPython's threading.py does
+    ;; `_counter = _count(1).__next__` at import, which is as far as it got.
+    call dict_new
+    mov rbx, rax
+
+    mov rdi, rbx
+    lea rsi, [rel mn___next__]
+    extern builtin_next_fn
+    lea rdx, [rel builtin_next_fn]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___iter__]
+    extern gen_dunder_iter
+    lea rdx, [rel gen_dunder_iter]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_send]
+    extern _gen_send_impl
+    lea rdx, [rel _gen_send_impl]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_throw]
+    extern _gen_throw_impl
+    lea rdx, [rel _gen_throw_impl]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_close]
+    extern _gen_close_impl
+    lea rdx, [rel _gen_close_impl]
+    call dict_add_builtin_func
+
+    GEN_GETSET gs___name__,     gen_get_name
+    GEN_GETSET gs___qualname__, gen_get_name
+    ; gi_frame and cr_frame are NOT here: a PyFrame is pooled and recycled and
+    ; is not an object with a type, so there is nothing to hand back.  Saying
+    ; so by leaving the name absent beats answering None to a caller that is
+    ; about to read f_lineno off it.
+    GEN_GETSET gs_gi_code,      gen_get_code
+    GEN_GETSET gs_gi_running,   gen_get_running
+
+    extern gen_type
+    lea rax, [rel gen_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
+    ;; A coroutine is awaited rather than iterated, so it gets the same
+    ;; three methods and the cr_* spellings of the same fields.
+    call dict_new
+    mov rbx, rax
+
+    mov rdi, rbx
+    lea rsi, [rel mn___await__]
+    extern coro_dunder_iter
+    lea rdx, [rel coro_dunder_iter]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_send]
+    lea rdx, [rel _gen_send_impl]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_throw]
+    lea rdx, [rel _gen_throw_impl]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_close]
+    lea rdx, [rel _gen_close_impl]
+    call dict_add_builtin_func
+
+    GEN_GETSET gs___name__,     gen_get_name
+    GEN_GETSET gs___qualname__, gen_get_name
+    GEN_GETSET gs_cr_code,      gen_get_code
+    GEN_GETSET gs_cr_running,   gen_get_running
+
+    extern coro_type
+    lea rax, [rel coro_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
     call type_stamp_methods
@@ -3753,6 +3844,9 @@ mn_insert:      db "insert", 0
 mn_reverse:     db "reverse", 0
 mn_sort:        db "sort", 0
 mn_index:       db "index", 0
+mn_send:        db "send", 0
+mn_throw:       db "throw", 0
+mn_close:       db "close", 0
 mn_indices:     db "indices", 0
 mn_count:       db "count", 0
 mn_copy:        db "copy", 0
@@ -3850,6 +3944,8 @@ mn___sizeof__:  db "__sizeof__", 0
 mn___doc__:     db "__doc__", 0
 mn___init_subclass__: db "__init_subclass__", 0
 mn___iter__:    db "__iter__", 0
+mn___next__:    db "__next__", 0
+mn___await__:   db "__await__", 0
 mn___dir__:     db "__dir__", 0
 mn___reduce__:  db "__reduce__", 0
 mn___reduce_ex__: db "__reduce_ex__", 0
@@ -3876,6 +3972,14 @@ gs_imag:        db "imag", 0
 gs_start:       db "start", 0
 gs_stop:        db "stop", 0
 gs_step:        db "step", 0
+gs___name__:    db "__name__", 0
+gs___qualname__: db "__qualname__", 0
+gs_gi_frame:    db "gi_frame", 0
+gs_gi_code:     db "gi_code", 0
+gs_gi_running:  db "gi_running", 0
+gs_cr_frame:    db "cr_frame", 0
+gs_cr_code:     db "cr_code", 0
+gs_cr_running:  db "cr_running", 0
 gs_numerator:   db "numerator", 0
 gs_denominator: db "denominator", 0
 mn___eq__: db "__eq__", 0

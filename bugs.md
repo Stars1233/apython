@@ -136,12 +136,21 @@ one-line fix.
   os.py reads it to build `supports_dir_fd`.
 
 - **Missing C modules**, in rough order of how many stdlib modules each
-  blocks: `_struct`, `_socket`, `_random`, `_contextvars`, `_tokenize`,
-  `_ast`, `_imp`, `binascii`, `_string`, then a long tail of one apiece.
-  (`_io` is not among them: `src/iomod.asm` supplies `_iocore` and
-  `lib/_io.py` assembles both halves under the name `_io`.  Neither are
-  `math` and `_collections`, which are there now.)
-  `make check-stdlib` gives the current figure.
+  blocks: `_struct`, `_socket`, ~~`_random`, `_contextvars`, `_tokenize`,~~
+  `_ast`, `_imp`, `binascii`, ~~`_string`,~~ then a long tail of one apiece.
+  (`_io` is not among them: `src/iomod.asm` supplies
+  `_iocore` and `lib/_io.py` assembles both halves under the name `_io`.
+  Neither are `math` and `_collections`, which are there now.)
+  `make check-stdlib` gives the current figure -- 99 of 196, up from 78.
+
+  The struck ones are in `lib/` now, with `_operator` (`_compare_digest`,
+  which `hmac` imports directly and which has no fallback) and `atexit`.
+  `_tokenize` is the notable one: it is a real tokenizer, and its token
+  stream is identical to CPython's over all 163 of CPython's own `Lib/*.py`
+  that CPython itself can tokenize.  Its one deliberate difference is that an
+  f-string comes out as a single STRING token, as it did through 3.11, rather
+  than the FSTRING_START/MIDDLE/END triple 3.12 splits it into.
+
 
   ~~`math` itself is short of `dist`, `prod`, `isclose`, `perm`, `ulp` and
   `nan`/`inf` parsing corners;~~ all five are there now

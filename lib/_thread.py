@@ -42,6 +42,91 @@ def start_new_thread(function, args, kwargs=None):
 start_joinable_thread = start_new_thread
 
 
+def daemon_threads_allowed():
+    """Whether a thread may be made a daemon.  CPython says no in a
+    subinterpreter that owns its GIL; here there is one interpreter and one
+    thread, so the answer is yes.  threading reads this at import time, which
+    is what kept it -- and the thirteen modules behind it -- from loading."""
+    return True
+
+
+def _is_main_interpreter():
+    """There is only one."""
+    return True
+
+
+def _set_sentinel():
+    """A lock released when the calling thread dies.
+
+    Thread._bootstrap uses it to detect that a thread is gone: it takes the
+    lock itself and the interpreter releases it when the thread dies.  So it
+    comes back UNLOCKED -- acquiring it here made threading's own acquire()
+    the second one and a deadlock.  The one thread there is outlives anything
+    that could ask, so nothing ever releases it."""
+    return LockType()
+
+
+class _ExceptHookArgs(tuple):
+    """The named 4-tuple threading.excepthook is handed.
+
+    CPython's is a structseq; the fields are what the stdlib reads."""
+
+    __slots__ = ()
+
+    def __new__(cls, seq):
+        return tuple.__new__(cls, seq)
+
+    @property
+    def exc_type(self):
+        return self[0]
+
+    @property
+    def exc_value(self):
+        return self[1]
+
+    @property
+    def exc_traceback(self):
+        return self[2]
+
+    @property
+    def thread(self):
+        return self[3]
+
+    def __repr__(self):
+        return ("_thread._ExceptHookArgs(exc_type=%r, exc_value=%r, "
+                "exc_traceback=%r, thread=%r)"
+                % (self[0], self[1], self[2], self[3]))
+
+
+def _excepthook(args):
+    """Report an exception that escaped a thread's run().
+
+    threading imports this in preference to a pure-Python fallback that pulls
+    in traceback -> linecache -> _tokenize, none of which is here yet.  A
+    SystemExit is silent, as it is in CPython.
+    """
+    import sys
+
+    if args.exc_type is SystemExit:
+        return
+    stderr = getattr(sys, "stderr", None)
+    if stderr is None:
+        return
+    name = getattr(args.thread, "name", None)
+    if name is None:
+        name = "MainThread"
+    print("Exception in thread %s:" % (name,), file=stderr)
+    exc = args.exc_value
+    if exc is None:
+        print("%s" % (args.exc_type,), file=stderr)
+        return
+    text = str(exc)
+    if text:
+        print("%s: %s" % (args.exc_type.__name__, text), file=stderr)
+    else:
+        print("%s" % (args.exc_type.__name__,), file=stderr)
+
+
 class LockType:
     """An uncontended lock.  With one thread, acquire always succeeds."""
 

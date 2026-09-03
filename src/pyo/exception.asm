@@ -2223,7 +2223,14 @@ DEF_FUNC traceback_getattr
     CSTRING rsi, "tb_frame"
     call ap_strcmp
     test eax, eax
-    jz .tb_return_none
+    jz .tb_get_frame
+
+    ; Check "tb_lasti"
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "tb_lasti"
+    call ap_strcmp
+    test eax, eax
+    jz .tb_get_lasti
 
     ; Not found
     RET_NULL
@@ -2252,6 +2259,33 @@ DEF_FUNC traceback_getattr
     pop rbx
     leave
     V_PACK rax, rdx             ; return one Value
+    ret
+
+.tb_get_frame:
+    ; A snapshot built from what the entry records.  This answered None, and
+    ; CPython's traceback.py reads tb_frame.f_code on every entry -- so
+    ; importing anything that formats a traceback died on the None.
+    mov rdi, [rbx + PyTracebackObject.tb_code]
+    mov rsi, [rbx + PyTracebackObject.tb_lineno]
+    mov rdx, [rbx + PyTracebackObject.tb_lasti]
+    extern frameobj_from_code
+    call frameobj_from_code
+    test rax, rax
+    jz .tb_return_none
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.tb_get_lasti:
+    mov rax, [rbx + PyTracebackObject.tb_lasti]
+    mov edx, TAG_SMALLINT
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
     ret
 
 .tb_return_none:

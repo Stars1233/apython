@@ -566,6 +566,12 @@ DEF_DUNDER_ITER frozenset
 DEF_DUNDER_ITER bytes
 DEF_DUNDER_LEN range
 DEF_DUNDER_ITER range
+; A generator is its own iterator, and CPython's type says so by name.
+extern gen_type
+extern coro_type
+DEF_DUNDER_ITER gen
+; A coroutine's __await__ is the same thing under the name `await` uses.
+DEF_DUNDER_ITER coro
 
 
 ;; A builtin number's unary dunders, reachable by name.  int and float had

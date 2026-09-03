@@ -259,7 +259,13 @@ DEF_FUNC eval_frame
     mov [rel eval_co_consts], r14
     mov [rel eval_co_names], rcx
 
-    ; Set up for this frame
+    ; Set up for this frame.  The frame that was current until now is this
+    ; one's caller, and linking them is what gives sys._getframe an f_back to
+    ; walk: nothing else maintained the chain, and PyFrame.prev_frame was
+    ; written once, as zero, and never read.  eval_return restores the global
+    ; from its own stack, so the links stay consistent as frames unwind.
+    mov rax, [rel eval_saved_r12]
+    mov [r12 + PyFrame.prev_frame], rax
     mov [rel eval_saved_r12], r12
     ; Save machine stack pointer for exception unwind cleanup
     mov [rel eval_base_rsp], rsp

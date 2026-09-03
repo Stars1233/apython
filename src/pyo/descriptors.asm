@@ -87,6 +87,7 @@ END_FUNC staticmethod_dealloc
 ;; tp_call for classmethod_type. Creates a classmethod wrapper.
 ;; rdi = classmethod_type (ignored), rsi = args, rdx = nargs
 ;; ============================================================================
+global classmethod_construct
 DEF_FUNC classmethod_construct
     push rbx
 

@@ -990,6 +990,15 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     mov rsi, r15
     call type_apply_hash_rule
 
+    ; Two names are implicitly classmethods, whatever the class body wrote.
+    ; CPython wraps them in type_new; without it `Template.__init_subclass__()`
+    ; -- which CPython's own string.py does at import -- called a plain
+    ; function with no arguments, and `C[int]` never reached
+    ; __class_getitem__ with the class.
+    mov rdi, r12
+    mov rsi, r15
+    call type_wrap_implicit_classmethods
+
     ; Call parent's __init_subclass__ if present
     mov rax, [rbp - TFP_BASE]          ; base class
     test rax, rax
@@ -1284,6 +1293,93 @@ DEF_FUNC_LOCAL type_apply_hash_rule, TAH_FRAME
     leave
     ret
 END_FUNC type_apply_hash_rule
+
+;; ============================================================================
+;; type_wrap_implicit_classmethods(rdi = the type, rsi = the class dict)
+;;
+;; __init_subclass__ and __class_getitem__ are classmethods even when the
+;; class body defines them as plain functions -- CPython does this in
+;; type_new, and it cannot be expressed as a slot.  Anything already wrapped,
+;; or not a plain function at all, is left alone.
+;; ============================================================================
+TWI_TYPE  equ 8
+TWI_DICT  equ 16
+TWI_KEY   equ 24
+TWI_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+DEF_FUNC_LOCAL type_wrap_implicit_classmethods, TWI_FRAME
+    push rbx
+    mov [rbp - TWI_TYPE], rdi
+    mov [rbp - TWI_DICT], rsi
+    test rsi, rsi
+    jz .twi_done
+
+    CSTRING rbx, "__init_subclass__"
+    call .twi_one
+    CSTRING rbx, "__class_getitem__"
+    call .twi_one
+.twi_done:
+    pop rbx
+    leave
+    ret
+
+;; rbx = the name, as a C string
+.twi_one:
+    push rbx
+    sub rsp, 8
+    mov rdi, rbx
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    add rsp, 8
+    pop rbx
+    mov [rbp - TWI_KEY], rax
+
+    mov rdi, [rbp - TWI_DICT]
+    mov rsi, rax
+    extern dict_get
+    call dict_get
+    test rax, rax
+    jz .twi_release
+
+    ; Only a plain function is wrapped; a classmethod or staticmethod the
+    ; body wrote is already what the author asked for.
+    V_TEST_PTR rax, rcx
+    ja .twi_release
+    mov rcx, [rax + PyObject.ob_type]
+    extern func_type
+    lea rdx, [rel func_type]
+    cmp rcx, rdx
+    jne .twi_release
+
+    push rax                    ; [rsp] is the one-element argument array
+    sub rsp, 8
+    extern classmethod_type
+    extern classmethod_construct
+    lea rdi, [rel classmethod_type]
+    lea rsi, [rsp + 8]
+    mov edx, 1
+    call classmethod_construct
+    add rsp, 8
+    pop rcx
+    test rax, rax
+    jz .twi_release
+
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - TWI_DICT]
+    mov rsi, [rbp - TWI_KEY]
+    mov rdx, rax
+    extern dict_set
+    call dict_set
+    add rsp, 8
+    pop rdi
+    extern obj_decref
+    call obj_decref             ; dict_set took its own reference
+
+.twi_release:
+    mov rdi, [rbp - TWI_KEY]
+    call obj_decref
+    ret
+END_FUNC type_wrap_implicit_classmethods
 
 ;; tah_dict_get(rdi = a name C string, rsi = the dict)
 ;;   -> rax = the Value, or 0 when absent
