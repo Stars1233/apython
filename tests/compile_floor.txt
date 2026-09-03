@@ -212,6 +212,7 @@ test_int_bytes_wide
 test_int_from_bytes
 test_int_methods
 test_introspection
+test_int_subclass_index
 test_int_subclass_methods
 test_int_subclass_new
 test_io_module

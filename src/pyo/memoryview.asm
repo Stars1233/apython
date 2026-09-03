@@ -892,6 +892,9 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     mov rax, [rsi + PyObject.ob_type]   ; int_to_i64 reads PyIntObject.compact
     REQUIRE_INT_TYPE rax, rcx, .ms_type_error   ; unconditionally
     mov rdi, rsi
+    mov edx, TAG_PTR
+    extern int_unwrap
+    call int_unwrap                     ; an int subclass wraps its value
     call int_to_i64
     mov rsi, rax
     jmp .ms_int_index

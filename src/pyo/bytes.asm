@@ -15,6 +15,7 @@ extern tuple_new
 extern list_append
 extern list_new
 extern int_is_integer
+extern int_unwrap
 extern type_is_subtype
 extern hash_not_implemented
 extern io_buffer_released
@@ -340,7 +341,7 @@ DEF_FUNC bytes_contains
     ; f64 bits as an address -- and the subsequence form was missing
     ; entirely, so b"a" in b"xaby" was False.
     cmp edx, TAG_SMALLINT
-    je .bc_byte
+    je .bc_immediate
     cmp edx, TAG_PTR
     jne .bc_type_error
     mov rax, [rsi + PyObject.ob_type]
@@ -348,7 +349,10 @@ DEF_FUNC bytes_contains
     cmp rax, rcx
     je .bc_sub
     REQUIRE_INT_TYPE rax, rcx, .bc_type_error
-
+    mov edx, TAG_PTR            ; the macro above clobbered the tag register
+    jmp .bc_byte
+.bc_immediate:
+    mov edx, TAG_SMALLINT
 .bc_byte:
     mov rdi, rsi                ; int_to_i64 takes the payload plus the tag
     call int_to_i64             ; in edx, not a packed Value
@@ -2668,6 +2672,7 @@ DEF_FUNC_LOCAL bls_item_byte, BIB_FRAME
     jz .bib_range               ; wider than int64 is certainly not a byte
     mov rdi, [rbp - BIB_ITEM]
     mov edx, TAG_PTR
+    call int_unwrap             ; an int subclass wraps its value
     call int_to_i64
     jmp .bib_check
 
@@ -2755,6 +2760,10 @@ DEF_FUNC byteslike_source, BLS_FRAME
     lea rcx, [rel int_type]
     cmp rax, rcx
     je .bls_count_obj
+    ; bytes(N(3)) for an int subclass is bytes(3): CPython takes any index
+    ; here, and the wrapper is unwrapped on the way to the count.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
+    jnz .bls_count_obj
     extern str_type
 extern codec_error_id
 extern exc_LookupError_type
@@ -2778,6 +2787,7 @@ extern str_set_length
     mov rbx, rdi
     jmp .bls_count_have
 .bls_count_obj:
+    mov edx, TAG_PTR
     call int_to_i64
     mov rbx, rax
 .bls_count_have:

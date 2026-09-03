@@ -811,6 +811,9 @@ DEF_FUNC int_fits_i64
     cmp edx, TAG_PTR
     jne .ifi_yes                ; not an int at all; the caller's type check
                                 ; deals with that
+    call int_unwrap             ; see int_to_i64
+    cmp edx, TAG_SMALLINT
+    je .ifi_yes
     cmp qword [rdi + PyIntObject.compact], 0
     jne .ifi_yes                ; the compact ival is live, so it fits
     lea rdi, [rdi + PyIntObject.mpz]
@@ -832,6 +835,15 @@ END_FUNC int_fits_i64
 ;; Extract integer value as C int64. Handles SmallInt.
 ;; ============================================================================
 DEF_FUNC_BARE int_to_i64
+    cmp edx, TAG_SMALLINT
+    je .smallint
+    ; An int SUBCLASS wraps an int rather than being one -- buildclass gives
+    ; it a PyInstanceObject layout, not room on the end of a PyIntObject -- so
+    ; reading .compact here would read the wrapper's own header.  Most callers
+    ; unwrap first; the ones that only checked the type with REQUIRE_INT_TYPE
+    ; did not, and every value they read came out as 0.  int_unwrap is cheap
+    ; and idempotent: for an exact int it is one compare.
+    call int_unwrap
     cmp edx, TAG_SMALLINT
     je .smallint
     cmp qword [rdi + PyIntObject.compact], 0

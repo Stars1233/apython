@@ -558,6 +558,15 @@ DEF_FUNC obj_as_index
     je .oai_immediate
     cmp edx, TAG_PTR
     jne .oai_error
+    ; An int subclass WRAPS an int rather than being one -- buildclass gives
+    ; it a PyInstanceObject layout, not room on the end of a PyIntObject -- so
+    ; the value has to be unwrapped before it can be read.  Without this the
+    ; wrapper's own header was read as the number, and every index built from
+    ; one, `class N(int)` or an IntEnum member alike, came out as 0.
+    extern int_unwrap
+    call int_unwrap
+    cmp edx, TAG_SMALLINT
+    je .oai_immediate
     mov rax, [rdi + PyObject.ob_type]
     REQUIRE_INT_TYPE rax, rcx, .oai_try_dunder
     call int_to_i64
@@ -591,7 +600,15 @@ DEF_FUNC obj_as_index
     mov rcx, [rax + PyObject.ob_type]
     REQUIRE_INT_TYPE rcx, rsi, .oai_bad_index
     mov rdi, rax
+    mov edx, TAG_PTR
+    call int_unwrap             ; __index__ may itself return an int subclass
+    cmp edx, TAG_SMALLINT
+    je .oai_dunder_immediate
     call int_to_i64
+    leave
+    ret
+.oai_dunder_immediate:
+    mov rax, rdi
     leave
     ret
 .oai_dunder_done:

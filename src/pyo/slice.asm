@@ -321,6 +321,19 @@ DEF_FUNC_BARE pyobj_to_i64
     ; to INT_NEED_MPZ.
     cmp esi, TAG_PTR
     jne .not_an_index
+    ; An int subclass WRAPS an int rather than being one, so what follows --
+    ; INT_NEED_MPZ, which INITIALISES the mpz in place -- would write over the
+    ; wrapper's own header.  `a[N(1):]` read the bound as 0 and left the
+    ; object with a NULL type, so the next use of it crashed somewhere else.
+    extern int_unwrap
+    push rbp
+    mov rbp, rsp
+    mov edx, esi
+    call int_unwrap
+    mov esi, edx
+    pop rbp
+    cmp esi, TAG_SMALLINT
+    je .smallint
     mov rax, [rdi + PyObject.ob_type]
     REQUIRE_INT_TYPE rax, rcx, .not_an_index
     ; GMP int: check if it fits in i64, clamp if not
