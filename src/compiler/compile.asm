@@ -197,6 +197,9 @@ DEF_FUNC comp_init, CI_FRAME
     lea rdi, [rbx + Comp.nodes]
     mov esi, AstNode_size
     call buf_init
+    lea rdi, [rbx + Comp.spans]
+    mov esi, AstSpan_size
+    call buf_init
     lea rdi, [rbx + Comp.children]
     mov esi, 4
     call buf_init
@@ -211,7 +214,8 @@ DEF_FUNC comp_init, CI_FRAME
     call buf_init
 
     ; Reserve node 0 as the null node, so a 0 index reads as "absent" without
-    ; any call site needing a separate presence flag.
+    ; any call site needing a separate presence flag.  Its span goes with it:
+    ; the two Bufs are indexed the same way and must stay in step.
     lea rdi, [rbx + Comp.nodes]
     mov esi, 1
     call buf_reserve
@@ -219,6 +223,11 @@ DEF_FUNC comp_init, CI_FRAME
     xor esi, esi
     mov edx, AstNode_size
     call ap_memset
+    lea rdi, [rbx + Comp.spans]
+    mov esi, 1
+    call buf_reserve
+    mov dword [rax + AstSpan.end_lineno], -1
+    mov dword [rax + AstSpan.end_col], -1
 
     ; Reserve objs[0] for the same reason.  Without it the first literal in a
     ; compilation gets index 0, and every caller that tests an object index for
@@ -269,6 +278,8 @@ DEF_FUNC comp_free, 8
     lea rdi, [rbx + Comp.objs]
     call buf_free
     lea rdi, [rbx + Comp.pending]
+    call buf_free
+    lea rdi, [rbx + Comp.spans]
     call buf_free
     lea rdi, [rbx + Comp.children]
     call buf_free
@@ -971,7 +982,8 @@ cs_module_name: db "<module>", 0
 section .text
 
 ;; ============================================================================
-;; comp_lex_span(Comp *c, const char *start, const char *end, int lineno)
+;; comp_lex_span(Comp *c, const char *start, const char *end, int lineno,
+;;               const char *line_start)
 ;;   -> rax = the token index the span's tokens start at, or -1
 ;;
 ;; Appends a span's tokens to the array and hands back where they begin, so a
@@ -983,7 +995,8 @@ CLS_START equ 16
 CLS_END   equ 24
 CLS_LINE  equ 32
 CLS_IDX   equ 40
-CLS_SAVE  equ 48 + Lexer_size
+CLS_BASE  equ 48          ; where the span's line begins, for its columns
+CLS_SAVE  equ 56 + Lexer_size
 CLS_FRAME equ ((CLS_SAVE + 15) / 16) * 16 + 8      ; + 1 push = 16-aligned
 DEF_FUNC comp_lex_span, CLS_FRAME
     push rbx
@@ -991,6 +1004,7 @@ DEF_FUNC comp_lex_span, CLS_FRAME
     mov [rbp - CLS_START], rsi
     mov [rbp - CLS_END], rdx
     mov [rbp - CLS_LINE], rcx
+    mov [rbp - CLS_BASE], r8
 
     mov rax, [rbx + Comp.tokens + Buf.len]
     mov [rbp - CLS_IDX], rax
@@ -1004,6 +1018,7 @@ DEF_FUNC comp_lex_span, CLS_FRAME
     mov rsi, [rbp - CLS_START]
     mov rdx, [rbp - CLS_END]
     mov rcx, [rbp - CLS_LINE]
+    mov r8, [rbp - CLS_BASE]
     call lex_run
     push rax
     lea rdi, [rbx + Comp.lex]

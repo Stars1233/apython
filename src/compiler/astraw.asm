@@ -34,6 +34,7 @@
 extern ast_at
 extern ast_child
 extern ast_obj_at
+extern ast_span_at
 extern tuple_new
 extern list_new
 extern list_append
@@ -266,6 +267,7 @@ ARN_COMP  equ 8
 ARN_IDX   equ 16
 ARN_TUP   equ 24
 ARN_KIND  equ 32
+ARN_SPAN  equ 40
 ARN_FRAME equ 48            ; + 2 pushes = 64
 
 global ar_node
@@ -299,20 +301,37 @@ DEF_FUNC ar_node, ARN_FRAME
     call ar_int
     mov [r12 + 8], rax
 
-    ; 2 lineno, 3 col, 4 end_lineno, 5 end_col.  The last three are -1 until
-    ; the parser records them; _ast_build reads -1 as None.
+    ; 2 lineno, 3 col, 4 end_lineno, 5 end_col.  The end pair comes out of the
+    ; parallel span Buf; -1 there means the parser did not record it, and
+    ; _ast_build reads that as None.
     mov edi, [rbx + AstNode.lineno]
     call ar_int
     mov [r12 + 16], rax
-    mov rdi, -1
+    mov edi, [rbx + AstNode.col]
     call ar_int
     mov [r12 + 24], rax
+    mov rdi, [rbp - ARN_COMP]
+    mov rsi, [rbp - ARN_IDX]
+    call ast_span_at
+    test rax, rax
+    jz .arn_no_span
+    mov [rbp - ARN_SPAN], rax
+    movsxd rdi, dword [rax + AstSpan.end_lineno]
+    call ar_int
+    mov [r12 + 32], rax
+    mov rcx, [rbp - ARN_SPAN]
+    movsxd rdi, dword [rcx + AstSpan.end_col]
+    call ar_int
+    mov [r12 + 40], rax
+    jmp .arn_have_pos
+.arn_no_span:
     mov rdi, -1
     call ar_int
     mov [r12 + 32], rax
     mov rdi, -1
     call ar_int
     mov [r12 + 40], rax
+.arn_have_pos:
 
     ; 6 a, 7 b, 8 c -- each read the way this kind's row says.
     lea rcx, [rel ar_fieldkinds]

@@ -123,15 +123,13 @@ one-line fix.
   so `e.msg` is an AttributeError and `str(e)` is the bare message.  Every
   tool that reports a syntax error reads at least `.lineno`.
 
-- **The parser records four things CPython's AST carries and this one
-  cannot.**  Visible now that `ast.parse` exists, and all four are the
-  parser's, not `_ast`'s: a `def`'s return annotation is read and discarded
-  (`FunctionDef.returns` is always absent), PEP 695 type parameters are
-  skipped so `TypeAlias`, `TypeVar`, `ParamSpec` and `TypeVarTuple` never
-  appear, `AnnAssign.simple` is always 1 because whether the target was
-  parenthesised is not stored, and a nested format spec is missing the empty
-  literal CPython puts after its last field.  `type_comment` is permanently
-  None for the same reason: there are no type comments.
+- **The parser records two things CPython's AST carries and this one
+  cannot.**  Visible now that `ast.parse` exists, and both are the parser's,
+  not `_ast`'s: PEP 695 type parameters are skipped, so `TypeAlias`,
+  `TypeVar`, `ParamSpec` and `TypeVarTuple` never appear, and
+  `AnnAssign.simple` is always 1 because whether the target was parenthesised
+  is not stored.  `type_comment` is permanently None for a different reason:
+  there are no type comments.
 
 - **`_thread` is a single-threaded stand-in.**  `lib/_thread.py` gives
   `get_ident` a constant, makes locks uncontended, and raises from
@@ -149,11 +147,13 @@ one-line fix.
   byte for byte there.  `asm_linetable` emits only form 13, "no columns", so
   running the same file from source loses the caret row.
 
-  Threading columns through would mean an end position on every AST node, two
-  more fields on `Instr`, and the start and end columns at all 300-odd
-  `cg_emit` call sites -- and then the spans would have to agree with
-  CPython's choice of which subexpression each opcode belongs to, which is
-  not obvious and is not written down anywhere but its compiler.
+  Half of what that needs is now there: every AST node carries all four of
+  CPython's positions, and `tests/test_ast.py` diffs them against CPython's
+  own `ast.dump(include_attributes=True)`.  What is left is two more fields
+  on `Instr`, the start and end columns at all 300-odd `cg_emit` call sites,
+  and form 14 in `asm_linetable` -- and then the spans would have to agree
+  with CPython's choice of which subexpression each opcode belongs to, which
+  is not obvious and is not written down anywhere but its compiler.
 
 - **No managed dicts, so the layout attributes differ for any class that has
   an instance `__dict__`.**  CPython 3.12 keeps a class's instance dict in a

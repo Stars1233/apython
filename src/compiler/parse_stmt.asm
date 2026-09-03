@@ -19,6 +19,8 @@
 extern ast_at
 extern ast_commit
 extern ast_make
+extern ast_end_at
+extern ast_end_here
 extern ast_mark
 extern ast_obj
 extern ast_obj_at
@@ -61,7 +63,7 @@ DEF_FUNC par_module, PM_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PM_LINE], rcx
     mov rdi, rbx
     call ast_mark
@@ -232,7 +234,7 @@ DEF_FUNC par_expr_stmt, PE2_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PE2_LINE], rcx
 
     mov rdi, rbx
@@ -408,6 +410,11 @@ DEF_FUNC par_expr_stmt, PE2_FRAME
     call ast_at
     pop rdx
     mov [rax + AstNode.c], edx
+    ; The node was made before the value: its end is here, not at the
+    ; annotation.
+    mov rdi, rbx
+    mov esi, [rbp - PE2_NODE]
+    call ast_end_here
 .ann_done:
     mov rax, [rbp - PE2_NODE]
     pop rbx
@@ -443,7 +450,7 @@ DEF_FUNC par_exprlist_stmt, PX2_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PX2_LINE], rcx
 
     mov rdi, rbx
@@ -556,15 +563,18 @@ PK_A     equ 24
 PK_B     equ 32
 PK_MARK  equ 40
 PK_NODE  equ 48
-PK_FRAME equ 56          ; + 1 push = 64
-PK2_FRAME equ 64         ; + 2 pushes = 80, for the handlers that save r12
+PK_ALINE equ 56          ; where one alias starts, which is not where the
+                         ; statement does
+PK_FRAME equ 72          ; + 1 push = 80, 16-byte aligned
+PK2_FRAME equ 64         ; + 2 pushes = 80, 16-byte aligned; for the handlers
+                         ; that save r12
 
 ;; ps_simple - pass, break and continue: a keyword and nothing else.
 DEF_FUNC_LOCAL ps_simple, PK_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PK_LINE], rcx
     movzx eax, word [rax + Token.kind]
     mov esi, AST_PASS
@@ -597,7 +607,7 @@ DEF_FUNC_LOCAL ps_del, PK_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PK_LINE], rcx
     mov rdi, rbx
     call par_advance
@@ -653,7 +663,7 @@ DEF_FUNC_LOCAL ps_scope, PK2_FRAME
     push r12
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PK_LINE], rcx
     movzx eax, word [rax + Token.kind]
     mov r12d, AST_GLOBAL
@@ -725,7 +735,7 @@ DEF_FUNC_LOCAL ps_assert, PK_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PK_LINE], rcx
     mov rdi, rbx
     call par_advance
@@ -772,7 +782,7 @@ DEF_FUNC_LOCAL ps_raise, PK_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PK_LINE], rcx
     mov rdi, rbx
     call par_advance
@@ -994,7 +1004,7 @@ DEF_FUNC_LOCAL ps_import, PK2_FRAME
     push r12
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PK_LINE], rcx
     mov rdi, rbx
     call par_advance
@@ -1002,6 +1012,12 @@ DEF_FUNC_LOCAL ps_import, PK2_FRAME
     call ast_mark
     mov [rbp - PK_MARK], rax
 .loop:
+    ; Each alias starts at its own name.  PK_LINE is the statement's, which
+    ; is what `import` is at, and every alias in `import a, b` would take it.
+    mov rdi, rbx
+    call par_peek
+    TOK_POS rax
+    mov [rbp - PK_ALINE], rcx
     mov rdi, rbx
     call par_dotted_name
     test rax, rax
@@ -1023,7 +1039,7 @@ DEF_FUNC_LOCAL ps_import, PK2_FRAME
     mov rdi, rbx
     mov esi, AST_ALIAS
     xor edx, edx
-    mov rcx, [rbp - PK_LINE]
+    mov rcx, [rbp - PK_ALINE]
     mov r8, r12
     mov r9, [rbp - PK_B]
     call ast_make
@@ -1083,7 +1099,7 @@ DEF_FUNC_LOCAL ps_from, PFR_FRAME
     push r12
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PK_LINE], rcx
     mov rdi, rbx
     call par_advance
@@ -1146,6 +1162,11 @@ DEF_FUNC_LOCAL ps_from, PFR_FRAME
     mov rdi, rbx
     call par_advance
 .names:
+    ; As in ps_import: the alias starts at its own name, not at `from`.
+    mov rdi, rbx
+    call par_peek
+    TOK_POS rax
+    mov [rbp - PK_ALINE], rcx
     mov rdi, rbx
     call par_name_obj
     test rax, rax
@@ -1167,7 +1188,7 @@ DEF_FUNC_LOCAL ps_from, PFR_FRAME
     mov rdi, rbx
     mov esi, AST_ALIAS
     xor edx, edx
-    mov rcx, [rbp - PK_LINE]
+    mov rcx, [rbp - PK_ALINE]
     mov r8, [rbp - PK_A]
     mov r9, [rbp - PK_B]
     call ast_make
@@ -1268,7 +1289,7 @@ DEF_FUNC par_suite, PSU_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PSU_LINE], rcx
 
     mov rdi, rbx
@@ -1422,7 +1443,7 @@ DEF_FUNC_LOCAL ps_if, PIF_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PIF_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; `if` or `elif`
@@ -1510,7 +1531,7 @@ DEF_FUNC_LOCAL ps_while, PIF_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PIF_LINE], rcx
     mov rdi, rbx
     call par_advance
@@ -1576,7 +1597,7 @@ DEF_FUNC_LOCAL ps_for, PIF_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PIF_LINE], rcx
     mov rdi, rbx
     call par_advance
@@ -1658,7 +1679,7 @@ DEF_FUNC par_for_target, PFT_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PFT_LINE], rcx
 
     mov rdi, rbx
@@ -1759,7 +1780,7 @@ DEF_FUNC par_params, PP_FRAME
     mov rbx, rdi
     mov [rbp - PP_CLOSE], rsi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PP_LINE], rcx
     mov rdi, rbx
     call ast_mark
@@ -1919,6 +1940,7 @@ POP_NAME  equ 24
 POP_ANN   equ 32
 POP_DEF   equ 40
 POP_NODE  equ 48
+POP_END   equ 56          ; the token cursor where the parameter itself ends
 POP_FRAME equ 64          ; + 2 pushes = 80
 DEF_FUNC par_one_param, POP_FRAME
     push rbx
@@ -1926,7 +1948,7 @@ DEF_FUNC par_one_param, POP_FRAME
     mov rbx, rdi
     mov r12, rsi                        ; annotations allowed?
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - POP_LINE], rcx
     mov qword [rbp - POP_ANN], 0
     mov qword [rbp - POP_DEF], 0
@@ -1955,6 +1977,11 @@ DEF_FUNC par_one_param, POP_FRAME
     jz .fail
     mov [rbp - POP_ANN], rax
 .no_ann:
+    ; A parameter ends at its name, or at its annotation; the default that
+    ; may follow is not part of it, and this node is not made until after it
+    ; has been parsed.
+    mov eax, [rbx + Comp.tok_idx]
+    mov [rbp - POP_END], rax
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_EQUAL
@@ -1982,6 +2009,10 @@ DEF_FUNC par_one_param, POP_FRAME
     call ast_at
     mov rdx, [rbp - POP_DEF]
     mov [rax + AstNode.c], edx
+    mov rdi, rbx
+    mov rsi, [rbp - POP_NODE]
+    mov edx, [rbp - POP_END]
+    call ast_end_at
     mov rax, [rbp - POP_NODE]
     pop r12
     pop rbx
@@ -2014,12 +2045,13 @@ PDF_NAME  equ 24
 PDF_ARGS  equ 32
 PDF_MARK  equ 40
 PDF_NODE  equ 48
-PDF_FRAME equ 56          ; + 1 push = 64
+PDF_RET   equ 56          ; the return annotation, kept but never generated
+PDF_FRAME equ 72          ; + 1 push = 80
 DEF_FUNC_LOCAL ps_def, PDF_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PDF_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; `def`
@@ -2054,9 +2086,12 @@ DEF_FUNC_LOCAL ps_def, PDF_FRAME
     test eax, eax
     jz .fail
 
-    ; A return annotation is parsed and discarded: apython's MAKE_FUNCTION
-    ; drops annotations anyway, so evaluating one would only add a side effect
-    ; that CPython has and we cannot honour.
+    ; A return annotation is parsed and kept on the node, but never generated:
+    ; apython's MAKE_FUNCTION drops annotations anyway, so evaluating one would
+    ; only add a side effect that CPython has and we cannot honour.  Neither
+    ; the symbol table nor the code generator looks at `.c`; `_ast` does, and
+    ; reports it as `returns`.
+    mov qword [rbp - PDF_RET], 0
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_RARROW
@@ -2068,6 +2103,7 @@ DEF_FUNC_LOCAL ps_def, PDF_FRAME
     call par_expr
     test rax, rax
     jz .fail
+    mov [rbp - PDF_RET], rax
 
 .suite:
     ; The body is collected directly into the def's own child list.
@@ -2094,6 +2130,8 @@ DEF_FUNC_LOCAL ps_def, PDF_FRAME
     mov [rax + AstNode.a], edx
     mov rdx, [rbp - PDF_ARGS]
     mov [rax + AstNode.b], edx
+    mov rdx, [rbp - PDF_RET]
+    mov [rax + AstNode.c], edx
     mov rax, [rbp - PDF_NODE]
     pop rbx
     leave
@@ -2181,10 +2219,15 @@ END_FUNC par_suite_into
 ;; stamp subkind=1 on what comes back; every consumer of AST_FUNCTIONDEF,
 ;; AST_FOR and AST_WITH reads that one bit rather than a parallel node kind.
 ;; ============================================================================
+PAS_LINE  equ 8           ; the `async` keyword's own position
 PAS_FRAME equ 24          ; + 1 push = 32
 DEF_FUNC_LOCAL ps_async, PAS_FRAME
     push rbx
     mov rbx, rdi
+    mov rdi, rbx
+    call par_peek
+    TOK_POS rax
+    mov [rbp - PAS_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; `async`
 
@@ -2222,6 +2265,12 @@ DEF_FUNC_LOCAL ps_async, PAS_FRAME
     mov rsi, rax
     call ast_at
     mov byte [rax + AstNode.subkind], 1
+    ; The statement begins at `async`, not at the `def`/`for`/`with` that the
+    ; inner parser saw first.
+    mov rcx, [rbp - PAS_LINE]
+    mov [rax + AstNode.lineno], ecx
+    shr rcx, 32
+    mov [rax + AstNode.col], ecx
     pop rax
 .done:
     pop rbx
@@ -2344,13 +2393,13 @@ DEF_FUNC_LOCAL ps_type_alias, PTA_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PTA_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; the soft keyword `type`
 
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov rdi, rbx
     call par_name_obj
     test rax, rax
@@ -2422,7 +2471,7 @@ DEF_FUNC_LOCAL ps_return, PK_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PK_LINE], rcx
     mov rdi, rbx
     call par_advance
@@ -2482,12 +2531,13 @@ PT2_SAVEP equ 96          ; pending-stack height
 PT2_SAVEE equ 104         ; whether an error was already recorded
 PT2_PAREN equ 112         ; 1 while inside a parenthesised item list
 PT2_STAR  equ 88
-PT2_FRAME equ 152         ; + 1 push = 112
+PT2_HLINE equ 120         ; where THIS handler's `except` is, not the `try`
+PT2_FRAME equ 152         ; + 1 push = 160, 16-byte aligned
 DEF_FUNC_LOCAL ps_try, PT2_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PT2_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; `try`
@@ -2518,6 +2568,11 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     call par_kind
     cmp eax, TOK_EXCEPT
     jne .close_handlers
+    ; A handler is at its own `except`, not at the `try` above it.
+    mov rdi, rbx
+    call par_peek
+    TOK_POS rax
+    mov [rbp - PT2_HLINE], rcx
     mov rdi, rbx
     call par_advance
     mov qword [rbp - PT2_TYPE], 0
@@ -2567,7 +2622,7 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     jz .fail
     mov rdi, rbx
     mov esi, AST_HANDLER
-    mov rdx, [rbp - PT2_LINE]
+    mov rdx, [rbp - PT2_HLINE]
     mov rcx, [rbp - PT2_BODY]
     call par_finish_list
     test rax, rax
@@ -2670,7 +2725,7 @@ DEF_FUNC_LOCAL ps_with, PT2_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PT2_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; `with`
@@ -2835,7 +2890,7 @@ DEF_FUNC_LOCAL ps_class, PC_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PC_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; `class`
@@ -2931,7 +2986,7 @@ DEF_FUNC_LOCAL ps_decorated, PDC_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PDC_LINE], rcx
 
     mov rdi, rbx

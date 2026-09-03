@@ -9,6 +9,9 @@
 # function of every node's _fields, so one diff covers the whole model -- the
 # class names, the field names, the field ORDER, and the shape of every list.
 #
+# The positions are compared too, with include_attributes=True: all four of
+# lineno, col_offset, end_lineno and end_col_offset.
+#
 # Four things are left out because the parser, not this, is what is missing:
 # a return annotation (`def f() -> int`) and the type-parameter syntax, which
 # it reads and discards; the empty literal CPython puts after the last field
@@ -154,6 +157,68 @@ except AttributeError:
 # ast.get_docstring is not called here: it imports inspect for cleandoc, and
 # inspect needs _imp.
 print(ast.parse("'doc'\npass").body[0].value.value)
+
+print("=== positions, on every node ===")
+POS = [
+    "x = a + 1", "a.b.c", "f(x, y)", "a[1:2]", "x if y else z",
+    "a and b or c", "a < b < c", "[1, 2]", "{'k': v}", "-x",
+    "def f(a, b=1):\n    return a\n",
+    "class C(B):\n    x = 1\n",
+    "if a:\n    b\nelse:\n    c\n",
+    "for i in r:\n    pass\n",
+    "while a:\n    b\n",
+    "with a as b:\n    pass\n",
+    "try:\n    a\nexcept E as e:\n    b\nfinally:\n    c\n",
+    "lambda a: a + 1",
+    "[i for i in r]",
+    "x: int = 1",
+    "x += 1",
+    "import a.b as c",
+    "from x import y",
+    "assert a, b",
+    "del a, b",
+    "@d\ndef f(): pass\n",
+    "a = (\n    1 +\n    2\n)\n",
+    "def f():\n    return (a,\n            b)\n",
+    "f(x for x in y)",
+    "sum(i * 2 for i in r if i)",
+    "(x for x in y)",
+    "{i for i in r}",
+    "{i: j for i, j in r}",
+    "async def f():\n    async for i in r:\n        await g()\n",
+    "async def f():\n    async with a as b:\n        pass\n",
+    "try:\n    a\nexcept A:\n    b\nexcept B as e:\n    c\nelse:\n    d\n",
+    "try:\n    a\nexcept* E:\n    b\n",
+    "from . import x",
+    "from ..p import a as b, c",
+    "import a.b, c as d",
+    "def f(a, /, b, *c, d=1, **e):\n    pass\n",
+    "def f(a: int = 1, *, b: str) -> bool:\n    pass\n",
+    "x = *a, *b",
+    "a[b], c = d",
+    "a[::2, ...]",
+    "global g\nnonlocal_ = 1\n",
+    "raise E('m') from f",
+    "x = f'{a!r:>{w}} tail'",
+    "x = 'a' 'b'",
+    "match p:\n    case [1, *r] if r:\n        pass\n    case {'k': v, **w}:\n        pass\n    case C(a, b=2) | None:\n        pass\n    case _:\n        pass\n",
+    "@a.b(c)\nclass C(B, metaclass=M):\n    pass\n",
+    "yield_ = lambda: (yield)",
+    "def f():\n    yield 1\n    x = yield from g()\n",
+    "if a:\n    pass\nelif b:\n    pass\nelse:\n    pass\n",
+    "while a:\n    break\nelse:\n    continue\n",
+    "for i in r:\n    pass\nelse:\n    pass\n",
+    "with (a as b, c as d):\n    pass\n",
+    "x = a if b else c if d else e",
+    "print(*a, **b)",
+    "x = not a is not b",
+    "x = ~-+1",
+    "x = b'ab' b'cd'",
+    "x = (\n)",
+    "x = [\n    1,\n]",
+]
+for src in POS:
+    print(repr(src), ast.dump(ast.parse(src), include_attributes=True))
 
 print("=== a syntax error is still a syntax error ===")
 for bad in ["1 +", "def", "class 1:", "for x in: pass"]:

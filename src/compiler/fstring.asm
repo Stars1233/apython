@@ -30,6 +30,7 @@ extern comp_error
 extern comp_intern
 extern comp_lex_span
 
+extern ast_span_at
 extern par_expr
 extern par_finish_list
 extern par_syntax_error
@@ -44,10 +45,54 @@ FS2_P     equ 32
 FS2_END   equ 40
 FS2_LINE  equ 48
 FS2_RAW   equ 56
-FS2_BUF   equ 96          ; a Buf lives here
-FS2_FRAME equ 136         ; + 3 pushes = 160
+FS2_LBASE equ 64          ; where the line the f-string starts on begins
+FS2_PSTART equ 72         ; where the literal run being accumulated started
+FS2_NODE  equ 80
+FS2_BUF   equ 112         ; a Buf lives here
+FS2_FRAME equ 152         ; + 3 pushes = 176
 
 section .text
+
+;; ============================================================================
+;; fs_pos(rdi = the f-string's packed line, rsi = a pointer into the source,
+;;        rdx = where that line begins) -> rax = line | (column << 32)
+;;
+;; Every piece of an f-string is at a column of its own, and the token the
+;; parser has is the whole string.  So the pieces are placed from their source
+;; pointers instead, against the line start the caller carries down.
+;; ============================================================================
+DEF_FUNC_BARE fs_pos
+    mov rax, rsi
+    sub rax, rdx
+    shl rax, 32
+    mov edi, edi
+    or  rax, rdi
+    ret
+END_FUNC fs_pos
+
+;; ============================================================================
+;; fs_end(rdi = Comp*, esi = a node, edx = the line, rcx = just past the node,
+;;        r8 = where the line begins) -- the other half: a node built from
+;; source pointers has no token cursor to end it, so its span is written here.
+;; ============================================================================
+DEF_FUNC_LOCAL fs_end
+    push rbx
+    push r12
+    mov r12d, edx
+    mov rbx, rcx
+    sub rbx, r8
+    call ast_span_at
+    test rax, rax
+    jz .out
+    mov [rax + AstSpan.end_lineno], r12d
+    mov [rax + AstSpan.end_col], ebx
+.out:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC fs_end
+
 
 ;; ============================================================================
 ;; par_fstring_pieces(Comp *c, Token *t, uint64_t mark) -> rax = 1 ok, 0 error
@@ -63,8 +108,14 @@ DEF_FUNC par_fstring_pieces, FS2_FRAME
     mov [rbp - FS2_TOK], rsi
     mov [rbp - FS2_MARK], rdx
 
-    mov ecx, [rsi + Token.lineno]
+    TOK_POS rsi
     mov [rbp - FS2_LINE], rcx
+    ; Columns inside the string are measured from where its line begins, which
+    ; is the token's own start less its column.
+    mov rax, [rsi + Token.start]
+    mov edx, [rsi + Token.col]
+    sub rax, rdx
+    mov [rbp - FS2_LBASE], rax
     movzx eax, word [rsi + Token.flags]
     xor ecx, ecx
     test eax, TF_STR_RAW
@@ -100,6 +151,7 @@ DEF_FUNC par_fstring_pieces, FS2_FRAME
     add r12, rdx
     sub r13, rdx
     mov [rbp - FS2_P], r12
+    mov [rbp - FS2_PSTART], r12
     mov [rbp - FS2_END], r13
 
     lea rdi, [rbp - FS2_BUF]
@@ -186,12 +238,15 @@ DEF_FUNC par_fstring_pieces, FS2_FRAME
     lea rdx, [rbp - FS2_P]
     mov rcx, [rbp - FS2_END]
     mov r8, [rbp - FS2_LINE]
+    mov r9, [rbp - FS2_LBASE]
     call par_fstring_field
     test rax, rax
     jz .fail
     mov rdi, rbx
     mov rsi, rax
     call ast_push
+    mov rax, [rbp - FS2_P]
+    mov [rbp - FS2_PSTART], rax         ; the next literal starts past the '}'
     jmp .scan
 
 .flush_last:
@@ -216,15 +271,27 @@ DEF_FUNC par_fstring_pieces, FS2_FRAME
     mov rdi, rbx
     mov rsi, rax
     call ast_obj
-    mov r8, rax
+    mov [rbp - FS2_NODE], rax
+    mov rdi, [rbp - FS2_LINE]
+    mov rsi, [rbp - FS2_PSTART]
+    mov rdx, [rbp - FS2_LBASE]
+    call fs_pos
+    mov rcx, rax
+    mov r8, [rbp - FS2_NODE]
     mov rdi, rbx
     mov esi, AST_CONST
     xor edx, edx
-    mov rcx, [rbp - FS2_LINE]
     xor r9d, r9d
     call ast_make
+    mov [rbp - FS2_NODE], rax
     mov rdi, rbx
-    mov rsi, rax
+    mov esi, eax
+    mov rdx, [rbp - FS2_LINE]
+    mov rcx, [rbp - FS2_P]
+    mov r8, [rbp - FS2_LBASE]
+    call fs_end
+    mov rdi, rbx
+    mov rsi, [rbp - FS2_NODE]
     call ast_push
     mov qword [rbp - FS2_BUF + Buf.len], 0
 .flush_none:
@@ -258,7 +325,8 @@ DEF_FUNC par_fstring_pieces, FS2_FRAME
 END_FUNC par_fstring_pieces
 
 ;; ============================================================================
-;; par_fstring_field(Comp *c, Token *t, uint64_t *p, const char *end, int line)
+;; par_fstring_field(Comp *c, Token *t, uint64_t *p, const char *end, int line,
+;;                   const char *line_start)
 ;;   -> rax = an AST_FORMATTEDVALUE node, 0 on error
 ;;
 ;; One replacement field, with *p just past its opening brace.  Scans to the
@@ -280,7 +348,11 @@ FF_EXPR  equ 96
 FF_SAVE  equ 104
 FF_DEBUG equ 112
 FF_WSEND equ 120         ; end of the run of spaces after a `=`
-FF_FRAME equ 136          ; + 3 pushes = 144
+FF_LBASE equ 128         ; where the line the f-string starts on begins
+FF_FSTART equ 136        ; the field's own '{'
+FF_FEND  equ 144         ; just past its '}'
+FF_NODE  equ 152
+FF_FRAME equ 168          ; + 3 pushes = 192
 DEF_FUNC par_fstring_field, FF_FRAME
     push rbx
     push r12
@@ -290,6 +362,10 @@ DEF_FUNC par_fstring_field, FF_FRAME
     mov [rbp - FF_P], rdx
     mov [rbp - FF_END], rcx
     mov [rbp - FF_LINE], r8
+    mov [rbp - FF_LBASE], r9
+    mov rax, [rdx]
+    dec rax                             ; the '{' the caller has just passed
+    mov [rbp - FF_FSTART], rax
     mov qword [rbp - FF_CONV], 0
     mov qword [rbp - FF_SPEC], 0
     mov qword [rbp - FF_SSTART], 0
@@ -487,12 +563,14 @@ DEF_FUNC par_fstring_field, FF_FRAME
     inc r12
     mov rdx, [rbp - FF_P]
     mov [rdx], r12                      ; hand the cursor back past the '}'
+    mov [rbp - FF_FEND], r12
 
     ; --- the expression ---
     mov rdi, rbx
     mov rsi, [rbp - FF_ESTART]
     mov rdx, [rbp - FF_EEND]
     mov rcx, [rbp - FF_LINE]
+    mov r8, [rbp - FF_LBASE]
     call comp_lex_span
     cmp rax, -1
     je .fail
@@ -544,26 +622,52 @@ DEF_FUNC par_fstring_field, FF_FRAME
     mov rsi, [rbp - FF_SSTART]
     mov rdx, [rbp - FF_SEND]
     mov rcx, [rbp - FF_LINE]
+    mov r8, [rbp - FF_LBASE]
     call par_fstring_spec
     test eax, eax
     jz .fail
+    mov rdi, [rbp - FF_LINE]
+    mov rsi, [rbp - FF_SSTART]
+    dec rsi                             ; the spec begins at its ':'
+    mov rdx, [rbp - FF_LBASE]
+    call fs_pos
     mov rdi, rbx
     mov esi, AST_JOINEDSTR
-    mov rdx, [rbp - FF_LINE]
+    mov rdx, rax
     mov rcx, r12
     call par_finish_list
     test rax, rax
     jz .fail
     mov [rbp - FF_SPEC], rax
+    mov rdi, rbx
+    mov esi, eax
+    mov rdx, [rbp - FF_LINE]
+    mov rcx, [rbp - FF_SEND]            ; up to, not past, the closing '}'
+    mov r8, [rbp - FF_LBASE]
+    call fs_end
 
 .build:
+    mov rdi, [rbp - FF_LINE]
+    mov rsi, [rbp - FF_FSTART]
+    mov rdx, [rbp - FF_LBASE]
+    call fs_pos
+    mov rcx, rax
     mov rdi, rbx
     mov esi, AST_FORMATTEDVALUE
     mov rdx, [rbp - FF_CONV]
-    mov rcx, [rbp - FF_LINE]
     mov r8, [rbp - FF_EXPR]
     mov r9, [rbp - FF_SPEC]
     call ast_make
+    test rax, rax
+    jz .ret
+    mov [rbp - FF_NODE], rax
+    mov rdi, rbx
+    mov esi, eax
+    mov rdx, [rbp - FF_LINE]
+    mov rcx, [rbp - FF_FEND]
+    mov r8, [rbp - FF_LBASE]
+    call fs_end
+    mov rax, [rbp - FF_NODE]
     jmp .ret
 
 .unterminated:
@@ -586,24 +690,38 @@ DEF_FUNC par_fstring_field, FF_FRAME
 END_FUNC par_fstring_field
 
 ;; ============================================================================
-;; par_fstring_spec(Comp *c, const char *start, const char *end, int line)
+;; par_fstring_spec(Comp *c, const char *start, const char *end, int line,
+;;                  const char *line_start)
 ;;   -> rax = 1 ok, 0 error
 ;; A format spec is itself an f-string: `f"{x:{width}}"` is legal.  The pieces
 ;; go onto the pending list the caller opened.
+;;
+;; A spec that holds a replacement field ends with a literal piece even when
+;; that piece is empty -- CPython's own parser flushes unconditionally there,
+;; and `f"{a:{w}}"` really does carry a trailing Constant('').
 ;; ============================================================================
 FSP_P     equ 16
 FSP_END   equ 24
 FSP_LINE  equ 32
-FSP_BUF   equ 72
-FSP_FRAME equ 72          ; + 3 pushes = 96
+FSP_LBASE equ 40
+FSP_PSTART equ 48
+FSP_SAW   equ 56          ; a replacement field has been seen
+FSP_NODE  equ 64
+FSP_FORCE equ 72          ; emit the trailing literal even when it is empty
+FSP_BUF   equ 104
+FSP_FRAME equ 104         ; + 3 pushes = 128
 DEF_FUNC par_fstring_spec, FSP_FRAME
     push rbx
     push r12
     push r13
     mov rbx, rdi
     mov [rbp - FSP_P], rsi
+    mov [rbp - FSP_PSTART], rsi
     mov [rbp - FSP_END], rdx
     mov [rbp - FSP_LINE], rcx
+    mov [rbp - FSP_LBASE], r8
+    mov qword [rbp - FSP_SAW], 0
+    mov qword [rbp - FSP_FORCE], 0
     lea rdi, [rbp - FSP_BUF]
     mov esi, 1
     call buf_init
@@ -629,14 +747,20 @@ DEF_FUNC par_fstring_spec, FSP_FRAME
     lea rdx, [rbp - FSP_P]
     mov rcx, [rbp - FSP_END]
     mov r8, [rbp - FSP_LINE]
+    mov r9, [rbp - FSP_LBASE]
     call par_fstring_field
     test rax, rax
     jz .fail
     mov rdi, rbx
     mov rsi, rax
     call ast_push
+    mov qword [rbp - FSP_SAW], 1
+    mov rax, [rbp - FSP_P]
+    mov [rbp - FSP_PSTART], rax
     jmp .scan
 .flush_last:
+    mov rax, [rbp - FSP_SAW]
+    mov [rbp - FSP_FORCE], rax
     call .flush
     test eax, eax
     jz .fail
@@ -648,7 +772,10 @@ DEF_FUNC par_fstring_spec, FSP_FRAME
 .flush:
     sub rsp, 8
     cmp qword [rbp - FSP_BUF + Buf.len], 0
+    jne .flush_emit
+    cmp qword [rbp - FSP_FORCE], 0
     je .flush_none
+.flush_emit:
     mov rdi, [rbp - FSP_BUF + Buf.data]
     mov rsi, [rbp - FSP_BUF + Buf.len]
     call comp_intern
@@ -657,15 +784,27 @@ DEF_FUNC par_fstring_spec, FSP_FRAME
     mov rdi, rbx
     mov rsi, rax
     call ast_obj
-    mov r8, rax
+    mov [rbp - FSP_NODE], rax
+    mov rdi, [rbp - FSP_LINE]
+    mov rsi, [rbp - FSP_PSTART]
+    mov rdx, [rbp - FSP_LBASE]
+    call fs_pos
+    mov rcx, rax
+    mov r8, [rbp - FSP_NODE]
     mov rdi, rbx
     mov esi, AST_CONST
     xor edx, edx
-    mov rcx, [rbp - FSP_LINE]
     xor r9d, r9d
     call ast_make
+    mov [rbp - FSP_NODE], rax
     mov rdi, rbx
-    mov rsi, rax
+    mov esi, eax
+    mov rdx, [rbp - FSP_LINE]
+    mov rcx, [rbp - FSP_P]
+    mov r8, [rbp - FSP_LBASE]
+    call fs_end
+    mov rdi, rbx
+    mov rsi, [rbp - FSP_NODE]
     call ast_push
     mov qword [rbp - FSP_BUF + Buf.len], 0
 .flush_none:

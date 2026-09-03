@@ -315,7 +315,8 @@ END_FUNC lex_str_prefix
 ASM_INIT
 
 ;; ============================================================================
-;; lex_run(Comp *c, const char *start, const char *end, int lineno)
+;; lex_run(Comp *c, const char *start, const char *end, int lineno,
+;;         const char *line_start)
 ;;   -> rax = 1 on success, 0 with comp.err recorded
 ;;
 ;; With start == 0 it tokenizes the whole of comp.src.  With a span it appends
@@ -349,15 +350,27 @@ DEF_FUNC lex_run, LR_FRAME
     mov r13, r12
     add r13, [rbx + Comp.srclen]
     mov ecx, 1
+    xor r8d, r8d
     jmp .set_state
 .have_span:
     mov r12, rsi
     mov r13, rdx
-    mov ecx, r8d
+    ; The line arrives in ecx, which is where the SysV ABI puts a fourth
+    ; argument.  Reading it out of r8d gave every f-string field's tokens
+    ; whatever happened to be there -- usually line 0, so an exception raised
+    ; inside a replacement field pointed at the first line of the file.
 .set_state:
     mov [r14 + Lexer.cur], r12
     mov [r14 + Lexer.end], r13
+    ; Columns are measured from line_start.  A span that begins in the middle
+    ; of a line -- an f-string's replacement field -- is handed where its line
+    ; really began, so the columns it reports are the file's and not the
+    ; span's.  Zero means the span is its own line.
     mov [r14 + Lexer.line_start], r12
+    test r8, r8
+    jz .no_base
+    mov [r14 + Lexer.line_start], r8
+.no_base:
     mov [r14 + Lexer.lineno], ecx
     mov dword [r14 + Lexer.paren_depth], 0
     mov dword [r14 + Lexer.indent_top], 0

@@ -63,13 +63,40 @@ BINOPS = (_ast.Add, _ast.BitAnd, _ast.FloorDiv, _ast.LShift, _ast.MatMult,
           _ast.Div, _ast.BitXor)
 
 
+# A node whose source starts with one of its children rather than with the
+# token that named it.  The parser stamps each node with the token it was
+# looking at when the node was made, which for an infix or postfix form is
+# the operator: `a + 1` gave the BinOp the column of the `+`, where CPython
+# gives it the column of `a`.  The value is which raw slot the leftmost
+# component is in.
+LEFT_START = {
+    BINOP: A, COMPARE: A, ATTRIBUTE: A, SUBSCRIPT: A, CALL: A,
+    NAMEDEXPR: A, AUGASSIGN: A, ANNASSIGN: A, WITHITEM: A,
+    IFEXP: B,                   # `x if y else z` starts at x, which is .b
+    BOOLOP: CH, ASSIGN: CH,     # and these start with their first child
+}
+
+
+def _start(raw):
+    """Where a node's source really starts."""
+    slot = LEFT_START.get(raw[K])
+    if slot is not None:
+        child = raw[slot]
+        if slot is CH:
+            child = child[0] if child else None
+        if child is not None and isinstance(child, tuple):
+            return _start(child)
+    return raw[LINE], raw[COL]
+
+
 def _pos(raw):
     """The four position attributes, as CPython's constructors take them."""
+    line, col = _start(raw)
     end_line = raw[ELINE]
     end_col = raw[ECOL]
     return {
-        "lineno": raw[LINE],
-        "col_offset": raw[COL] if raw[COL] >= 0 else 0,
+        "lineno": line,
+        "col_offset": col if col >= 0 else 0,
         "end_lineno": None if end_line < 0 else end_line,
         "end_col_offset": None if end_col < 0 else end_col,
     }
@@ -443,7 +470,7 @@ def _b_decorated(r, p):
 
 def _b_functiondef(r, p):
     cls = _ast.AsyncFunctionDef if r[SUB] else _ast.FunctionDef
-    return cls(r[A], _arguments(r[B]), _each(r[CH]), [], None, None, [], **p)
+    return cls(r[A], _arguments(r[B]), _each(r[CH]), [], _node(r[C]), None, [], **p)
 
 
 def _b_classdef(r, p):

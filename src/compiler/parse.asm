@@ -34,6 +34,7 @@ extern complex_from_doubles
 extern ast_at
 extern ast_commit
 extern ast_make
+extern ast_end_here
 extern ast_mark
 extern ast_obj
 extern ast_push
@@ -146,7 +147,7 @@ DEF_FUNC par_syntax_error, PS_FRAME
     mov rbx, rdi
     mov [rbp - PS_MSG], rsi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov r8d, [rax + Token.col]
     mov rdi, rbx
     lea rsi, [rel exc_SyntaxError_type]
@@ -455,7 +456,7 @@ DEF_FUNC_LOCAL pf_unary, PFU_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PFU_LINE], rcx
     movzx eax, word [rax + Token.kind]
     lea rcx, [rel prule_table]
@@ -526,7 +527,7 @@ DEF_FUNC_LOCAL in_binop, IB_FRAME
     mov rbx, rdi
     mov [rbp - IB_LEFT], rsi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - IB_LINE], rcx
     movzx eax, word [rax + Token.kind]
     lea rcx, [rel prule_table]
@@ -575,7 +576,7 @@ DEF_FUNC_LOCAL in_boolop, IO_FRAME
     mov rbx, rdi
     mov [rbp - IO_LEFT], rsi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - IO_LINE], rcx
     movzx eax, word [rax + Token.kind]
     mov edx, BOOL_AND
@@ -670,7 +671,7 @@ DEF_FUNC_LOCAL in_ternary, IT_FRAME
     mov rbx, rdi
     mov [rbp - IT_BODY], rsi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - IT_LINE], rcx
 
     mov rdi, rbx
@@ -744,7 +745,7 @@ DEF_FUNC_LOCAL in_compare, IC_FRAME
     mov rbx, rdi
     mov [rbp - IC_LEFT], rsi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - IC_LINE], rcx
 
     mov rdi, rbx
@@ -914,7 +915,7 @@ DEF_FUNC_LOCAL pf_number, PFN_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PFN_LINE], rcx
     mov rdi, rbx
     mov rsi, rax
@@ -948,7 +949,7 @@ DEF_FUNC_LOCAL pf_const, PFN_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PFN_LINE], rcx
     movzx edx, word [rax + Token.kind]
 
@@ -996,7 +997,7 @@ DEF_FUNC_LOCAL pf_name, PFM_FRAME
     mov rbx, rdi
     call par_peek
     mov [rbp - PFM_TOK], rax
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PFM_LINE], rcx
 
     mov rdi, rbx
@@ -1503,7 +1504,7 @@ DEF_FUNC_LOCAL pf_string, PS2_FRAME
     mov rbx, rdi
 
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PS2_LINE], rcx
     movzx ecx, word [rax + Token.flags]
     and ecx, TF_STR_BYTES
@@ -1687,7 +1688,7 @@ DEF_FUNC par_fstring_piece_any, PFA_FRAME
     call ast_obj
     mov r8, rax
     mov rcx, [rbp - PFA_TOK]
-    mov ecx, [rcx + Token.lineno]
+    TOK_POS rcx
     mov rdi, rbx
     mov esi, AST_CONST
     xor edx, edx
@@ -1842,7 +1843,7 @@ DEF_FUNC_LOCAL pf_group, PG_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PG_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; consume '('
@@ -1932,7 +1933,7 @@ DEF_FUNC_LOCAL pf_list, PG_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PG_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; consume '['
@@ -2037,7 +2038,7 @@ DEF_FUNC_LOCAL pf_dictset, PD_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PD_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; consume '{'
@@ -2232,7 +2233,7 @@ DEF_FUNC_LOCAL pf_starred, PST_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PST_LINE], rcx
     movzx eax, word [rax + Token.kind]
     mov edx, AST_STARRED
@@ -2281,7 +2282,7 @@ DEF_FUNC_LOCAL in_attr, IA_FRAME
     mov rbx, rdi
     mov [rbp - IA_VAL], rsi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - IA_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; consume '.'
@@ -2366,7 +2367,7 @@ DEF_FUNC_LOCAL par_subscript_item, SI_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - SI_LINE], rcx
     mov qword [rbp - SI_UPPER], 0
     mov qword [rbp - SI_STEP], 0
@@ -2453,17 +2454,23 @@ IS_VAL   equ 16
 IS_LINE  equ 24
 IS_IDX   equ 32
 IS_MARK  equ 40
-IS_FRAME equ 40           ; + 1 push = 48
+IS_ILINE equ 48           ; the first index item, where an implicit tuple starts
+IS_FRAME equ 56           ; + 1 push = 64
 DEF_FUNC_LOCAL in_subscript, IS_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - IS_VAL], rsi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - IS_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; consume '['
 
+    ; An implicit tuple index starts at the first item, not at the bracket.
+    mov rdi, rbx
+    call par_peek
+    TOK_POS rax
+    mov [rbp - IS_ILINE], rcx
     mov rdi, rbx
     call par_subscript_item
     test rax, rax
@@ -2506,7 +2513,7 @@ DEF_FUNC_LOCAL in_subscript, IS_FRAME
 .finish_tuple:
     mov rdi, rbx
     mov esi, AST_TUPLE
-    mov rdx, [rbp - IS_LINE]
+    mov rdx, [rbp - IS_ILINE]
     mov rcx, [rbp - IS_MARK]
     call par_finish_list
     test rax, rax
@@ -2551,13 +2558,16 @@ ICL_FUNC  equ 16
 ICL_LINE  equ 24
 ICL_MARK  equ 32
 ICL_NAME  equ 40
-ICL_FRAME equ 40         ; + 1 push = 48
+ICL_GEN   equ 48         ; a bare genexp argument, which ends at the call's ')'
+ICL_KWLINE equ 56        ; where one keyword argument's own name is
+ICL_FRAME equ 72         ; + 1 push = 80
 DEF_FUNC_LOCAL in_call, ICL_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - ICL_FUNC], rsi
+    mov qword [rbp - ICL_GEN], 0
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - ICL_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; consume '('
@@ -2587,6 +2597,9 @@ DEF_FUNC_LOCAL in_call, ICL_FRAME
 
     mov rdi, rbx
     call par_peek
+    ; The keyword is at its own name, not at the call's '('.
+    TOK_POS rax
+    mov [rbp - ICL_KWLINE], rcx
     mov rdi, [rax + Token.start]
     mov esi, [rax + Token.len]
     call comp_intern
@@ -2609,7 +2622,7 @@ DEF_FUNC_LOCAL in_call, ICL_FRAME
     mov rdi, rbx
     mov esi, AST_KEYWORD
     xor edx, edx
-    mov rcx, [rbp - ICL_LINE]
+    mov rcx, [rbp - ICL_KWLINE]
     mov r8, [rbp - ICL_NAME]
     call ast_make
     jmp .push_arg
@@ -2642,6 +2655,7 @@ DEF_FUNC_LOCAL in_call, ICL_FRAME
     call par_comprehension
     test rax, rax
     jz .fail
+    mov [rbp - ICL_GEN], rax
 .push_arg:
     mov rdi, rbx
     mov rsi, rax
@@ -2663,6 +2677,13 @@ DEF_FUNC_LOCAL in_call, ICL_FRAME
     test eax, eax
     jz .fail
 
+    ; An unparenthesised genexp argument borrows the call's own ')'.
+    cmp qword [rbp - ICL_GEN], 0
+    je .no_genexp
+    mov rdi, rbx
+    mov esi, [rbp - ICL_GEN]
+    call ast_end_here
+.no_genexp:
     mov rdi, rbx
     mov esi, AST_CALL
     xor edx, edx
@@ -2739,7 +2760,7 @@ DEF_FUNC_LOCAL pf_lambda, PLM_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PLM_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; `lambda`
@@ -2946,6 +2967,11 @@ DEF_FUNC par_comprehension, PCM_FRAME
     test eax, eax
     jz .fail
 .done:
+    ; The node was made before the bracket that closes it; CPython's span
+    ; takes that bracket in.
+    mov rdi, rbx
+    mov esi, [rbp - PCM_NODE]
+    call ast_end_here
     mov rax, [rbp - PCM_NODE]
     pop rbx
     leave
@@ -3043,7 +3069,7 @@ DEF_FUNC_LOCAL pf_yield, PY_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PY_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; `yield`
@@ -3185,7 +3211,7 @@ DEF_FUNC_LOCAL pf_await, PAW_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PAW_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; `await`
@@ -3228,7 +3254,7 @@ DEF_FUNC_LOCAL in_walrus, IW_FRAME
     mov rbx, rdi
     mov [rbp - IW_LEFT], rsi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - IW_LINE], rcx
 
     mov rdi, rbx

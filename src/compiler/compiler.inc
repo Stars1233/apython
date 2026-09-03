@@ -147,6 +147,20 @@ struc Token
 endstruc                 ;  32 -> index by shl 5
 TOKEN_SHIFT equ 5
 
+;; TOK_POS tokptr -- that token's position in rcx, packed the way ast_make
+;; takes it: the line in the low half and the column in the high half.  One
+;; word, because a seventh argument to ast_make would be a stack argument at
+;; fifty-odd call sites, and rcx because that is where every one of them
+;; already puts the line.  Clobbers r11.
+%macro TOK_POS 1                ; %1 = a Token*
+    ; The column is read FIRST, so that %1 may itself be rcx -- writing ecx
+    ; destroys the pointer.  %1 must not be r11.
+    mov r11d, [%1 + Token.col]
+    shl r11, 32
+    mov ecx, [%1 + Token.lineno]
+    or  rcx, r11
+%endmacro
+
 ;; ===========================================================================
 ;; Character classes.  One 256-byte table drives every scanning decision in
 ;; the lexer.
@@ -232,7 +246,7 @@ AST_IMPORTFROM  equ 60   ; a=obj index (module), clist=aliases, subkind=level
 AST_ALIAS       equ 61   ; a=obj index (name) b=obj index (asname or 0)
                          ; c=obj index of the name actually bound: the asname,
                          ; or the mangled leading component of the dotted name
-AST_FUNCTIONDEF equ 62   ; a=obj index (name) b=args, clist=body, c=extra node
+AST_FUNCTIONDEF equ 62   ; a=obj index (name) b=args, clist=body, c=return ann
 AST_CLASSDEF    equ 63   ; a=obj index (name) b=bases call, clist=body, c=extra
 AST_TRY         equ 64   ; clist=body, a=handlers block, b=orelse, c=finalbody
 AST_HANDLER     equ 65   ; a=type b=obj index (name), clist=body
@@ -304,6 +318,16 @@ struc AstNode
     .col:     resd 1  ; +28
 endstruc                  ; 32 -> index by shl 5
 AST_SHIFT equ 5
+
+;; Where a node ENDS.  Not in the node: it is exactly 32 bytes and addressed
+;; by `shl 5`, and two more fields would cost the doubling to 64 for two
+;; words.  A parallel Buf indexed by the same u32 costs eight bytes a node and
+;; leaves every existing shift alone; ast_make is the only thing that makes a
+;; node, so the two cannot drift apart.
+struc AstSpan
+    .end_lineno: resd 1  ; +0   -1 when it was not recorded
+    .end_col:    resd 1  ; +4
+endstruc                 ; 8
 
 ;; ===========================================================================
 ;; Buf - the growable array this codebase otherwise lacks.  Used for the token
@@ -463,6 +487,7 @@ struc Comp
     .root:      resd 1              ; +36  AST index of the parse root
     .tokens:    resb Buf_size       ; +40  Token[]
     .nodes:     resb Buf_size       ; AstNode[]; index 0 is the null node
+    .spans:     resb Buf_size       ; AstSpan[], parallel to .nodes
     .children:  resb Buf_size       ; u32[] committed child lists
     .pending:   resb Buf_size       ; u32[] LIFO scratch for lists under construction
     .objs:      resb Buf_size       ; PyObject*[], owned
