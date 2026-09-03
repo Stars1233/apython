@@ -375,6 +375,7 @@ test_unicode
 test_union_flatten
 test_union_hash
 test_unpack_dict
+test_unpack_refcount
 test_value_typeconfusion
 test_weakref
 test_weakref_types

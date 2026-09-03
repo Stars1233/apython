@@ -699,9 +699,16 @@ DEF_FUNC_BARE op_unpack_sequence
     cmp r8d, TAG_PTR
     jne .unpack_type_error
 
-    ; Determine if tuple or list and get item array + size
-    push r8                    ; save tag (deeper)
-    push rdi                   ; save payload
+    ; Determine if tuple or list and get item array + size.
+    ;
+    ; Three saved words, and the third is the one that matters: the
+    ; materialising path below builds a tuple out of an arbitrary iterable,
+    ; and that tuple is ours to release, while the original is not -- the
+    ; unwinder releases the original for us if this instruction raises.  The
+    ; slot holds the tuple, or 0 when there is none.
+    push r8                    ; [rsp+16] save tag
+    push rdi                   ; [rsp+8]  save payload
+    push 0                     ; [rsp]    the materialised tuple, or 0
 
     mov rax, [rdi + PyObject.ob_type]
 
@@ -722,27 +729,25 @@ DEF_FUNC_BARE op_unpack_sequence
     ; Anything iterable unpacks in Python -- a set, a range, a generator, a
     ; dict, a str subclass.  Only exact tuple, list and str were accepted, so
     ; `a, b = {1, 2}` and `a, b = range(2)` raised.
-    ; Stack here: [rsp] = payload, [rsp+8] = tag.
+    ; Stack here: [rsp] = the materialised tuple slot, [rsp+8] = payload,
+    ; [rsp+16] = tag.
     push rcx                        ; expected count
-    push rdi                        ; the original, released below
-    sub rsp, 16                     ; scratch Value slot, keeps rsp aligned
+    sub rsp, 24                     ; scratch Value slot, keeps rsp aligned
     mov [rsp], rdi
     lea rsi, [rsp]
     extern tuple_type_call
     lea rdi, [rel tuple_type]
     mov edx, 1
     call tuple_type_call            ; raises for a non-iterable
-    add rsp, 16
+    add rsp, 24
+    pop rcx                         ; expected count
     test rax, rax
     jz .unpack_iter_raised
-    pop rdi                         ; the original
-    push rax                        ; the materialised tuple
-    call obj_decref                 ; release the original
-    pop rdi                         ; rdi = the tuple
-    pop rcx                         ; expected count
-    mov [rsp], rdi                  ; the saved payload is now the tuple, so
-    mov qword [rsp + 8], TAG_PTR    ; the existing cleanup frees it
-    mov rax, [rdi + PyObject.ob_type]
+    ; The original stays in its saved slot: it is what the unwinder releases
+    ; if the count then turns out to be wrong.  The tuple goes in the third
+    ; slot, and is released on both ways out.
+    mov [rsp], rax
+    mov rdi, rax
     jmp .unpack_tuple
 
 
@@ -758,8 +763,7 @@ DEF_FUNC_BARE op_unpack_sequence
     ; it, and the unwind releases it.  Decref'ing it here as well frees it
     ; while the unwinder is still holding it, which valgrind reports as an
     ; invalid read inside eval_exception_unwind.
-    add rsp, 32                     ; the saved original, the count, and the
-                                    ; sequence Value the prologue pushed
+    add rsp, 24                     ; the three words the prologue pushed
     extern eval_exception_unwind
     jmp eval_exception_unwind
 
@@ -806,7 +810,13 @@ DEF_FUNC_BARE op_unpack_sequence
     jmp .unpack_fill_loop
 
 .unpack_done:
-    ; DECREF the sequence (payload + tag)
+    ; Release the materialised tuple, if the iterable path built one, and then
+    ; the sequence itself (payload + tag).
+    pop rdi
+    test rdi, rdi
+    jz .unpack_done_seq
+    call obj_decref
+.unpack_done_seq:
     pop rdi                    ; sequence payload
     pop rsi                    ; sequence tag
     DECREF_VAL rdi, rsi
@@ -818,13 +828,28 @@ DEF_FUNC_BARE op_unpack_sequence
 .unpack_count_error:
     ; Count mismatch: rcx expected, r8 actually there.  The two directions get
     ; different messages, and both carry the counts.
-    pop rdi                    ; sequence payload
-    pop rsi                    ; sequence tag
-    push rcx                   ; expected
-    push r8                    ; got
-    DECREF_VAL rdi, rsi
-    pop rsi                    ; got
-    pop rdi                    ; expected
+    ;
+    ; The sequence is NOT released here, for the reason .unpack_iter_raised
+    ; gives above: the unwinder restores r13 from eval_saved_r13, the value
+    ; the stack pointer had before this instruction, so the slot VPOP_VAL took
+    ; the sequence out of is inside the range the unwind releases.  Releasing
+    ; it here as well drove a live sequence's refcount to zero -- `print(xs)`
+    ; after `except ValueError` read freed memory and segfaulted.
+    ;
+    ; The materialised tuple is a different matter: nothing else has ever seen
+    ; it, so it has to go here or it leaks.
+    pop rdi
+    test rdi, rdi
+    jz .unpack_count_raise
+    push rcx
+    push r8
+    call obj_decref
+    pop r8
+    pop rcx
+.unpack_count_raise:
+    add rsp, 16                ; the payload and tag the prologue pushed
+    mov rdi, rcx               ; expected
+    mov rsi, r8                ; got
     call raise_unpack_count
 
 .unpack_str:
@@ -878,15 +903,7 @@ DEF_FUNC_BARE op_unpack_sequence
     pop r14
     pop r12
     pop rbx                    ; restore bytecode IP
-
-    ; DECREF the string
-    pop rdi                    ; string payload
-    pop rsi                    ; string tag
-    DECREF_VAL rdi, rsi
-
-    ; Skip 1 CACHE entry = 2 bytes
-    add rbx, 2
-    DISPATCH
+    jmp .unpack_done           ; the three saved words, and the dispatch
 END_FUNC op_unpack_sequence
 
 ;; ============================================================================
