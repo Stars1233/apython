@@ -9,6 +9,30 @@ one-line fix.
 
 ## Correctness
 
+- **`super` is not an object.**  The zero- and two-argument forms both work
+  written as `super(...).attr`, because the compiler emits `LOAD_SUPER_ATTR`
+  for exactly that shape and the opcode does the MRO walk itself.  What does
+  not exist is a super *object*: `s = super()` and `s = super(B, self)` both
+  raise "object is not callable", because `super_type` is a placeholder with
+  no `tp_call`, no `tp_new` and no fields -- a stand-in that
+  `LOAD_SUPER_ATTR` pops and discards.  Anything that stores one, passes one,
+  or reaches it through `getattr` fails.  `super(B, B).m` also answers a
+  bound method where CPython answers the plain function.
+
+  The fix is a real three-field type and a `tp_getattr` doing the walk that
+  `op_load_super_attr` already does inline, plus the frame introspection the
+  zero-argument form needs: CPython reads the `__class__` cell and the first
+  positional argument out of the calling frame.
+
+- **Three types CPython refuses to let you subclass are subclassable here.**
+  `bool`, `memoryview` and `range` are all final in CPython -- they lack
+  `Py_TPFLAGS_BASETYPE` -- and `class B(bool): pass` is
+  "type 'bool' is not an acceptable base type".  Here all three are accepted,
+  and the instances that come out are not obviously wrong, merely not
+  something CPython would have let you make.  A `TYPE_FLAG_BASETYPE` test in
+  `type_from_parts` is the whole of it; the work is auditing which static
+  types should carry the flag.
+
 ~~- **Three holes that each blocked a stdlib module.**  `str(bytes,
   encoding[, errors])` did not exist -- `str(b, "utf-8")` answered "str()
   takes at most 1 argument" -- which is what kept `glob` and `fnmatch` out,
