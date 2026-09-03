@@ -733,17 +733,38 @@ DEF_FUNC_BARE dict_ass_subscript
 END_FUNC dict_ass_subscript
 
 ;; ============================================================================
-;; dict_del(rdi=dict, rsi=key Value) -> int (0=ok, -1=not found)
-;; Delete key from dict. DECREFs both key and value.
+;; dict_del(rdi=dict, rsi=key Value) -> 0 on success; RAISES KeyError on a miss
+;; dict_del_opt(rdi=dict, rsi=key Value) -> 0 on success, -1 on a miss
+;;
+;; Delete key from dict.  DECREFs both key and value.
+;;
+;; The two differ only in what a miss does.  dict_del's header used to
+;; promise "-1 = not found" and then raise instead, so DELETE_NAME's
+;; locals-then-globals fallback never ran and its NameError arm was
+;; unreachable: `del undefined_global` reported the dict's KeyError, where
+;; CPython says "name 'g' is not defined".
 ;; ============================================================================
 DD_DICT  equ 8
 DD_KEYV  equ 16
+DD_QUIET equ 24             ; answer -1 instead of raising
 DD_FRAME equ 32             ; + 2 pushes = 48
+global dict_del_opt
+DEF_FUNC dict_del_opt, DD_FRAME
+    push rbx
+    push r12
+    mov [rbp - DD_DICT], rdi
+    mov [rbp - DD_KEYV], rsi
+    mov qword [rbp - DD_QUIET], 1
+    jmp dict_del.dd_body
+END_FUNC dict_del_opt
+
 DEF_FUNC dict_del, DD_FRAME
     push rbx
     push r12
     mov [rbp - DD_DICT], rdi
     mov [rbp - DD_KEYV], rsi
+    mov qword [rbp - DD_QUIET], 0
+.dd_body:
 
     call dict_lookup            ; rax = index or -1, rdx = slot
     mov rbx, [rbp - DD_DICT]
@@ -781,6 +802,14 @@ DEF_FUNC dict_del, DD_FRAME
     ret
 
 .dd_missing:
+    cmp qword [rbp - DD_QUIET], 0
+    je .dd_raise
+    mov rax, -1
+    pop r12
+    pop rbx
+    leave
+    ret
+.dd_raise:
     mov rdi, [rbp - DD_KEYV]
     call raise_key_error
 END_FUNC dict_del

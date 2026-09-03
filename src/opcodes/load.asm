@@ -1163,8 +1163,14 @@ DEF_FUNC_BARE op_load_deref
     DISPATCH
 
 .deref_error:
-    extern exc_UnboundLocalError_type
-    RAISE exc_UnboundLocalError_type, "cannot access variable before assignment"
+    ; An empty cell is one of CPython's two different exceptions, and which
+    ; one depends on whose cell it is: this function's own (a local that a
+    ; nested scope closes over) is an UnboundLocalError, and a FREE variable
+    ; from an enclosing scope is a NameError with its own wording.
+    ; co_localspluskinds says which -- and now says it truthfully, the
+    ; compiler having written CO_FAST_LOCAL for every slot until now.
+    mov edi, ecx
+    call unbound_local_raise    ; does not return
 END_FUNC op_load_deref
 
 ;; ============================================================================
@@ -1182,9 +1188,102 @@ DEF_FUNC_BARE op_load_fast_check
     DISPATCH
 
 .lfc_error:
-    extern exc_UnboundLocalError_type
-    RAISE exc_UnboundLocalError_type, "cannot access local variable before assignment"
+    mov edi, ecx
+    call unbound_local_raise    ; does not return
 END_FUNC op_load_fast_check
+
+;; ============================================================================
+;; unbound_local_raise(edi = the localsplus slot) -- does not return
+;;
+;; "cannot access local variable 'x' where it is not associated with a value",
+;; which is CPython's wording and names the variable.  The name is in the
+;; frame's code object, at the same index the slot has.
+;; ============================================================================
+ULR_BUF   equ 264
+ULR_FREE  equ 272           ; is this slot a free variable?
+ULR_SLOT  equ 280
+ULR_FRAME equ 288           ; + 0 pushes = 288
+DEF_FUNC_LOCAL unbound_local_raise, ULR_FRAME
+    mov [rbp - ULR_SLOT], rdi
+    mov qword [rbp - ULR_FREE], 0
+
+    ; CO_FAST_FREE in co_localspluskinds is what separates the two forms.
+    mov rax, [r12 + PyFrame.code]
+    test rax, rax
+    jz .ulr_kind_done
+    mov rax, [rax + PyCodeObject.co_localspluskinds]
+    test rax, rax
+    jz .ulr_kind_done
+    mov rcx, [rbp - ULR_SLOT]
+    cmp rcx, [rax + PyBytesObject.ob_size]
+    jae .ulr_kind_done
+    movzx edx, byte [rax + PyBytesObject.data + rcx]
+    test edx, CO_FAST_FREE
+    jz .ulr_kind_done
+    mov qword [rbp - ULR_FREE], 1
+.ulr_kind_done:
+
+    mov r8, [rbp - ULR_SLOT]    ; the slot, across the appends
+    lea rdi, [rbp - ULR_BUF]
+    lea rsi, [rel ulr_open]
+    cmp qword [rbp - ULR_FREE], 0
+    je .ulr_have_open
+    lea rsi, [rel ulr_free_open]
+.ulr_have_open:
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+
+    ; co_localsplusnames[slot], when the code object has one.
+    mov rax, [r12 + PyFrame.code]
+    test rax, rax
+    jz .ulr_no_name
+    mov rax, [rax + PyCodeObject.co_localsplusnames]
+    test rax, rax
+    jz .ulr_no_name
+    movsxd rcx, r8d
+    cmp rcx, [rax + PyTupleObject.ob_size]
+    jae .ulr_no_name
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rax, [rax + rcx*8]
+    V_TEST_PTR rax, rdx
+    ja .ulr_no_name
+    test rax, rax
+    jz .ulr_no_name
+    lea rsi, [rax + PyStrObject.data]
+    jmp .ulr_have_name
+.ulr_no_name:
+    lea rsi, [rel ulr_unknown]
+.ulr_have_name:
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel ulr_close]
+    cmp qword [rbp - ULR_FREE], 0
+    je .ulr_have_close
+    lea rsi, [rel ulr_free_close]
+.ulr_have_close:
+    call rbt_append_cstr
+
+    extern exc_UnboundLocalError_type
+    extern exc_NameError_type
+    lea rdi, [rel exc_UnboundLocalError_type]
+    cmp qword [rbp - ULR_FREE], 0
+    je .ulr_raise
+    lea rdi, [rel exc_NameError_type]
+.ulr_raise:
+    lea rsi, [rbp - ULR_BUF]
+    extern raise_exception
+    call raise_exception
+    ud2
+END_FUNC unbound_local_raise
+
+section .rodata
+ulr_open:      db "cannot access local variable '", 0
+ulr_close:     db "' where it is not associated with a value", 0
+ulr_free_open: db "cannot access free variable '", 0
+ulr_free_close: db "' where it is not associated with a value in enclosing scope", 0
+ulr_unknown:   db "?", 0
+section .text
 
 ;; ============================================================================
 ;; op_load_fast_and_clear - Load local and set slot to NULL
@@ -2223,9 +2322,16 @@ END_FUNC op_delete_deref
 ;; ============================================================================
 DEF_FUNC_BARE op_delete_fast
     mov rdi, [r12 + PyFrame.localsplus + rcx*8]       ; old value
+    ; Deleting a local that was never bound is an UnboundLocalError, not a
+    ; no-op: `def f(): del y; y = 1` used to succeed silently.
+    test rdi, rdi
+    jz .dfa_unbound
     mov qword [r12 + PyFrame.localsplus + rcx*8], 0
     XDECREF_V rdi, rsi
     DISPATCH
+.dfa_unbound:
+    mov edi, ecx
+    call unbound_local_raise    ; does not return
 END_FUNC op_delete_fast
 
 ;; ============================================================================
@@ -2240,19 +2346,22 @@ DEF_FUNC_BARE op_delete_name
     test rdi, rdi
     jz .dn_globals
     push rsi
-    call dict_del
+    extern dict_del_opt
+    call dict_del_opt          ; a miss must FALL THROUGH to globals, not raise
     pop rsi
     test eax, eax
     jz .dn_ok                  ; found and deleted
 .dn_globals:
     mov rdi, [r12 + PyFrame.globals]
-    call dict_del
+    push rsi
+    call dict_del_opt
+    pop rsi
     test eax, eax
     jnz .dn_error
 .dn_ok:
     DISPATCH
 .dn_error:
-    RAISE exc_NameError_type, "name not defined"
+    call name_error_raise      ; does not return
 END_FUNC op_delete_name
 
 ;; ============================================================================
@@ -2263,13 +2372,53 @@ DEF_FUNC_BARE op_delete_global
     LOAD_CO_NAMES rsi
     mov rsi, [rsi + rcx]      ; name
     mov rdi, [r12 + PyFrame.globals]
-    call dict_del
+    push rsi
+    extern dict_del_opt
+    call dict_del_opt
+    pop rsi
     test eax, eax
     jnz .dg_error
     DISPATCH
 .dg_error:
-    RAISE exc_NameError_type, "name not defined"
+    call name_error_raise      ; does not return
 END_FUNC op_delete_global
+
+;; ============================================================================
+;; name_error_raise(rsi = the name string) -- does not return
+;; "name 'g' is not defined", which is CPython's wording and names the name.
+;; ============================================================================
+NER_BUF   equ 264
+NER_FRAME equ 272           ; + 0 pushes = 272
+DEF_FUNC_LOCAL name_error_raise, NER_FRAME
+    mov r8, rsi
+    lea rdi, [rel ner_buf_open]
+    mov rsi, r8
+    lea rdi, [rbp - NER_BUF]
+    lea rsi, [rel ner_buf_open]
+    call rbt_append_cstr
+    mov rdi, rax
+    test r8, r8
+    jz .ner_no_name
+    lea rsi, [r8 + PyStrObject.data]
+    jmp .ner_have_name
+.ner_no_name:
+    lea rsi, [rel ner_unknown]
+.ner_have_name:
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel ner_close]
+    call rbt_append_cstr
+    lea rdi, [rel exc_NameError_type]
+    lea rsi, [rbp - NER_BUF]
+    call raise_exception
+    ud2
+END_FUNC name_error_raise
+
+section .rodata
+ner_buf_open: db "name '", 0
+ner_close:    db "' is not defined", 0
+ner_unknown:  db "?", 0
+section .text
 
 ;; ============================================================================
 ;; op_delete_attr - Delete attribute from object

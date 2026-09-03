@@ -160,6 +160,15 @@ one-line fix.
   silently skipped the argument and `repr(iter({1}))` handed its own caller a
   missing argument.
 
+- **Traceback carets are two jobs, not one.**  The `.pyc` path already has
+  the column fields and merely steps over them (`code_addr2line`), so the
+  renderer half is decode-only.  But apython's own compiler emits **no**
+  columns at all: `Instr` has no column field, the AST carries `col` but no
+  `end_col`, and `asm_linetable` writes only the line-only forms 13 and 15.
+  Doing the `.pyc` half alone would make `check-source` differ from CPython
+  on any test that lets an exception escape, so the two halves have to land
+  together.
+
 - **Traceback rendering has no caret line.**  CPython underlines the failing
   expression (`^^^^^^^^`, and `~~^~~` for binary operators and subscripts)
   using the column fields of the location table and, for the anchor forms, a

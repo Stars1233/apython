@@ -1163,6 +1163,7 @@ DEF_FUNC asm_assemble, AA_FRAME
     jz .oom
     mov [rbp - AA_SPEC + CodeSpec.localsplusnames], rax
     mov rdi, rax
+    mov rsi, r12
     call asm_kinds_bytes
     mov [rbp - AA_SPEC + CodeSpec.localspluskinds], rax
 
@@ -1319,15 +1320,70 @@ DEF_FUNC asm_nlocals, 8
 END_FUNC asm_nlocals
 
 ;; ============================================================================
-;; asm_kinds_bytes(PyTupleObject *localsplusnames) -> rax = bytes, or 0
-;; apython never reads co_localspluskinds, but emitting it correctly costs a
-;; dozen lines and keeps introspection honest if it is ever wired up.
+;; asm_ncells(rsi = the CompUnit) -> eax = the scope's cell count
+;; asm_nlocals' sibling, reaching the same Scope the same way.
 ;; ============================================================================
-DEF_FUNC asm_kinds_bytes, 16
+DEF_FUNC asm_ncells, 8
+    push rbx
+    mov rax, [rsi + CompUnit.comp]
+    test rax, rax
+    jz .anc_zero
+    mov rdi, rax
+    mov esi, [rsi + CompUnit.scope]
+    call sym_at
+    mov eax, [rax + Scope.ncells]
+    pop rbx
+    leave
+    ret
+.anc_zero:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC asm_ncells
+
+;; ============================================================================
+;; asm_kinds_bytes(rdi = localsplusnames tuple, rsi = the CompUnit)
+;;   -> rax = bytes, or 0
+;;
+;; The layout asm_localsplus_tuple settles is varnames, then the cells that
+;; needed a new slot, then the free variables -- so the kind of a slot is
+;; decided by where it falls against nlocals and ncells.
+;;
+;; It used to write CO_FAST_LOCAL for every slot, which nothing read.  It is
+;; read now: LOAD_DEREF's failure has to say whether the empty slot is this
+;; function's own cell (UnboundLocalError) or a free variable from an
+;; enclosing scope (NameError), and those are CPython's two different
+;; exceptions.
+;; ============================================================================
+AKB_UNIT   equ 8
+AKB_NLOCAL equ 16
+AKB_NCELL  equ 24
+AKB_FRAME  equ 32           ; + 2 pushes = 8 + 32 + 16 = 56, not 16-aligned
+DEF_FUNC asm_kinds_bytes, AKB_FRAME
     push rbx
     push r12
+    mov [rbp - AKB_UNIT], rsi
     mov rbx, rdi
     mov r12, [rdi + PyVarObject.ob_size]
+
+    ; The two boundaries.  A unit with no scope answers zero for both, which
+    ; makes every slot a plain local -- the old behaviour, and right for a
+    ; module body.
+    xor eax, eax
+    mov [rbp - AKB_NLOCAL], rax
+    mov [rbp - AKB_NCELL], rax
+    test rsi, rsi
+    jz .sizes_done
+    mov rsi, [rbp - AKB_UNIT]   ; asm_nlocals reads the unit from rsi
+    call asm_nlocals
+    mov [rbp - AKB_NLOCAL], eax
+    ; The cell count lives on the same Scope, reached the same way.
+    mov rsi, [rbp - AKB_UNIT]
+    call asm_ncells
+    mov [rbp - AKB_NCELL], eax
+.sizes_done:
+
     mov rdi, r12
     add rdi, 8
     call ap_malloc
@@ -1336,7 +1392,17 @@ DEF_FUNC asm_kinds_bytes, 16
 .fill:
     cmp rcx, r12
     jae .make
-    mov byte [rbx + rcx], CO_FAST_LOCAL
+    mov eax, CO_FAST_LOCAL
+    cmp ecx, [rbp - AKB_NLOCAL]
+    jb .fill_store
+    mov eax, CO_FAST_CELL
+    mov edx, [rbp - AKB_NLOCAL]
+    add edx, [rbp - AKB_NCELL]
+    cmp ecx, edx
+    jb .fill_store
+    mov eax, CO_FAST_FREE
+.fill_store:
+    mov [rbx + rcx], al
     inc rcx
     jmp .fill
 .make:
