@@ -169,13 +169,17 @@ one-line fix.
   on any test that lets an exception escape, so the two halves have to land
   together.
 
-- **Traceback rendering has no caret line.**  CPython underlines the failing
-  expression (`^^^^^^^^`, and `~~^~~` for binary operators and subscripts)
-  using the column fields of the location table and, for the anchor forms, a
-  tokenizer over the source segment.  Everything else in the report --
-  frames, line numbers, source lines, the repeated-frame elision, the
-  `__cause__` / `__context__` preamble -- matches; only the caret line is
-  missing.
+- **Our own compiler records no columns, so a traceback from a `.py` has no
+  caret line.**  The renderer draws one whenever the location table has
+  columns, and a `.pyc` CPython produced always does -- the reports match
+  byte for byte there.  `asm_linetable` emits only form 13, "no columns", so
+  running the same file from source loses the caret row.
+
+  Threading columns through would mean an end position on every AST node, two
+  more fields on `Instr`, and the start and end columns at all 300-odd
+  `cg_emit` call sites -- and then the spans would have to agree with
+  CPython's choice of which subexpression each opcode belongs to, which is
+  not obvious and is not written down anywhere but its compiler.
 
 - **No managed dicts, so the layout attributes differ for any class that has
   an instance `__dict__`.**  CPython 3.12 keeps a class's instance dict in a
