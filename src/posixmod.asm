@@ -107,6 +107,15 @@ extern kw_names_pending
 extern ap_strcmp
 extern sys_uname
 extern sys_ftruncate
+extern sys_chdir
+extern sys_truncate
+extern sys_link
+extern sys_chown
+extern sys_fchmod
+extern sys_fsync
+extern sys_dup2
+extern sys_utimensat
+extern tuple_type
 extern sys_fcntl
 extern sys_ioctl
 
@@ -938,8 +947,59 @@ P1_OWNED  equ 24            ; what posix_path_arg asked us to release
 P1_MODE   equ 32            ; the mode, converted before the path is resolved
 P1_FRAME  equ 48            ; + 0 pushes = 48
 
-%macro POSIX_ONE_PATH 4         ; %1 = name, %2 = the syscall, %3 = "n args",
-                                ; %4 = the "<func>: path" refusal prefix
+;; ============================================================================
+;; posix_raise_missing(rdi = the function's name, rsi = the parameter's name,
+;;                     rdx = its 1-based position) -- does not return
+;;
+;; CPython's argument clinic: "chdir() missing required argument 'path'
+;; (pos 1)".  Every one of these said "takes exactly N arguments", which does
+;; not say WHICH one is missing -- the only thing the caller needs.
+;; ============================================================================
+PRM_FUNC  equ 8
+PRM_ARG   equ 16
+PRM_POS   equ 24
+PRM_BUF   equ 208
+PRM_FRAME equ 208           ; + 0 pushes = 208, 16-aligned
+DEF_FUNC_LOCAL posix_raise_missing, PRM_FRAME
+    mov [rbp - PRM_FUNC], rdi
+    mov [rbp - PRM_ARG], rsi
+    mov [rbp - PRM_POS], rdx
+    lea rdi, [rbp - PRM_BUF]
+    mov rsi, [rbp - PRM_FUNC]
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "() missing required argument '"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - PRM_ARG]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "' (pos "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - PRM_POS]
+    extern msg_append_i64
+    call msg_append_i64
+    mov rdi, rax
+    CSTRING rsi, ")"
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - PRM_BUF]
+    call raise_exception
+END_FUNC posix_raise_missing
+
+;; PM_MISSING func, arg, pos -- the three-argument form, spelled once.
+%macro PM_MISSING 3
+    CSTRING rdi, %1
+    CSTRING rsi, %2
+    mov edx, %3
+    call posix_raise_missing
+%endmacro
+
+%macro POSIX_ONE_PATH 4         ; %1 = name, %2 = the syscall,
+                                ; %3 = the function's name for the arity
+                                ; message, %4 = the "<func>: path" prefix
 DEF_FUNC %1, P1_FRAME
     test rsi, rsi
     jz %%argerr
@@ -964,12 +1024,13 @@ DEF_FUNC %1, P1_FRAME
     leave
     ret
 %%argerr:
-    RAISE exc_TypeError_type, %3
+    PM_MISSING %3, "path", 1
 END_FUNC %1
 %endmacro
 
-POSIX_ONE_PATH posix_unlink, sys_unlink, "unlink() takes exactly 1 argument", "unlink: path"
-POSIX_ONE_PATH posix_rmdir,  sys_rmdir,  "rmdir() takes exactly 1 argument", "rmdir: path"
+POSIX_ONE_PATH posix_unlink, sys_unlink, "unlink", "unlink: path"
+POSIX_ONE_PATH posix_rmdir,  sys_rmdir,  "rmdir",  "rmdir: path"
+POSIX_ONE_PATH posix_chdir,  sys_chdir,  "chdir",  "chdir: path"
 
 ;; posix.mkdir(path, mode=0o777)
 DEF_FUNC posix_mkdir, P1_FRAME
@@ -1859,6 +1920,371 @@ DEF_FUNC posix_ftruncate, 16
     RAISE exc_TypeError_type, "ftruncate() takes exactly 2 arguments"
 END_FUNC posix_ftruncate
 
+
+;; ============================================================================
+;; The rest of the file-system calls the module was short of: truncate, link,
+;; chown, fchmod, fsync, dup2 and utime.
+;;
+;; bugs.md listed ftruncate among the missing ones; ftruncate was here and
+;; `truncate` -- the path-taking form, which is what shutil and tempfile
+;; reach for -- was not.
+;; ============================================================================
+
+;; posix.truncate(path, length)
+PTR_PATH  equ 8
+PTR_OWNED equ 16
+PTR_LEN   equ 24
+PTR_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+DEF_FUNC posix_truncate, PTR_FRAME
+    push rbx
+    cmp rsi, 2
+    jl .ptr_argerr
+    mov rbx, rdi
+    ; The length is converted first: a raise abandons the C stack, and doing
+    ; it after the path would strand whatever __fspath__ built.
+    mov rdi, [rbx + 8]
+    call posix_int_arg
+    mov [rbp - PTR_LEN], rax
+    mov rdi, [rbx]
+    mov [rbp - PTR_PATH], rdi
+    CSTRING rsi, "truncate: path"
+    mov edx, POSIX_PATH_KIND_PLAIN
+    call posix_path_arg
+    test rax, rax
+    jz .ptr_fail
+    mov [rbp - PTR_OWNED], rdx
+    mov rdi, rax
+    mov rsi, [rbp - PTR_LEN]
+    call sys_truncate
+    POSIX_PATH_CHECK rax, [rbp - PTR_PATH], [rbp - PTR_OWNED]
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.ptr_fail:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+.ptr_argerr:
+    pop rbx
+    PM_MISSING "truncate", "length", 2
+END_FUNC posix_truncate
+
+;; posix.link(src, dst)
+PLK_SRC   equ 8
+PLK_SOWN  equ 16
+PLK_SPTR  equ 24
+PLK_DST   equ 32
+PLK_DOWN  equ 40
+PLK_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+DEF_FUNC posix_link, PLK_FRAME
+    push rbx
+    cmp rsi, 2
+    jl .plk_argerr
+    mov rbx, rdi
+    mov qword [rbp - PLK_SOWN], 0
+    mov qword [rbp - PLK_DOWN], 0
+    mov rdi, [rbx]
+    mov [rbp - PLK_SRC], rdi
+    CSTRING rsi, "link: src"
+    mov edx, POSIX_PATH_KIND_PLAIN
+    call posix_path_arg
+    test rax, rax
+    jz .plk_fail
+    mov [rbp - PLK_SPTR], rax
+    mov [rbp - PLK_SOWN], rdx
+    mov rdi, [rbx + 8]
+    mov [rbp - PLK_DST], rdi
+    CSTRING rsi, "link: dst"
+    mov edx, POSIX_PATH_KIND_PLAIN
+    call posix_path_arg
+    test rax, rax
+    jz .plk_fail
+    mov [rbp - PLK_DOWN], rdx
+    mov rsi, rax
+    mov rdi, [rbp - PLK_SPTR]
+    call sys_link
+    ; Both paths stay alive across the check: the message names them both.
+    cmp rax, -4095
+    jb .plk_ok
+    mov rdi, rax
+    neg rdi
+    mov rsi, [rbp - PLK_SRC]
+    mov rdx, [rbp - PLK_SOWN]
+    mov rcx, [rbp - PLK_DST]
+    mov r8, [rbp - PLK_DOWN]
+    extern raise_oserror_owned2
+    call raise_oserror_owned2   ; does not return
+.plk_ok:
+    call .plk_release
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.plk_release:
+    mov rdi, [rbp - PLK_SOWN]
+    test rdi, rdi
+    jz .plk_rel_d
+    mov qword [rbp - PLK_SOWN], 0
+    call obj_decref
+.plk_rel_d:
+    mov rdi, [rbp - PLK_DOWN]
+    test rdi, rdi
+    jz .plk_rel_done
+    mov qword [rbp - PLK_DOWN], 0
+    call obj_decref
+.plk_rel_done:
+    ret
+.plk_fail:
+    call .plk_release
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+.plk_argerr:
+    pop rbx
+    PM_MISSING "link", "dst", 2
+END_FUNC posix_link
+
+;; posix.chown(path, uid, gid)
+PCH_PATH  equ 8
+PCH_OWNED equ 16
+PCH_UID   equ 24
+PCH_GID   equ 32
+PCH_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+DEF_FUNC posix_chown, PCH_FRAME
+    push rbx
+    cmp rsi, 3
+    jl .pch_argerr
+    mov rbx, rdi
+    mov rdi, [rbx + 8]
+    call posix_int_arg
+    mov [rbp - PCH_UID], rax
+    mov rdi, [rbx + 16]
+    call posix_int_arg
+    mov [rbp - PCH_GID], rax
+    mov rdi, [rbx]
+    mov [rbp - PCH_PATH], rdi
+    CSTRING rsi, "chown: path"
+    mov edx, POSIX_PATH_KIND_PLAIN
+    call posix_path_arg
+    test rax, rax
+    jz .pch_fail
+    mov [rbp - PCH_OWNED], rdx
+    mov rdi, rax
+    mov rsi, [rbp - PCH_UID]
+    mov rdx, [rbp - PCH_GID]
+    call sys_chown
+    POSIX_PATH_CHECK rax, [rbp - PCH_PATH], [rbp - PCH_OWNED]
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.pch_fail:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+.pch_argerr:
+    pop rbx
+    PM_MISSING "chown", "gid", 3
+END_FUNC posix_chown
+
+;; The three that take descriptors and no path.
+%macro POSIX_FD_ONLY 5          ; %1 = name, %2 = the syscall,
+                                ; %3/%4/%5 = the clinic message's three parts
+DEF_FUNC %1, 16
+    test rsi, rsi
+    jz %%argerr
+    mov rdi, [rdi]
+    call posix_int_arg
+    mov rdi, rax
+    call %2
+    POSIX_CHECK rax, 0
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+%%argerr:
+    PM_MISSING %3, %4, %5
+END_FUNC %1
+%endmacro
+POSIX_FD_ONLY posix_fsync, sys_fsync, "fsync", "fd", 1
+
+;; The two that take a descriptor and one more integer.
+%macro POSIX_FD_INT 5           ; %1 = name, %2 = the syscall,
+                                ; %3/%4/%5 = the clinic message's three parts
+DEF_FUNC %1, 16
+    cmp rsi, 2
+    jl %%argerr
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx]
+    call posix_int_arg
+    push rax
+    push rax
+    mov rdi, [rbx + 8]
+    call posix_int_arg
+    mov rsi, rax
+    pop rdi
+    pop rdi
+    call %2
+    POSIX_CHECK rax, 0
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+%%argerr:
+    PM_MISSING %3, %4, %5
+END_FUNC %1
+%endmacro
+POSIX_FD_INT posix_fchmod, sys_fchmod, "fchmod", "mode", 2
+
+;; posix.dup2(fd, fd2) -> fd2.  Unlike the others this ANSWERS the descriptor.
+DEF_FUNC posix_dup2, 16
+    cmp rsi, 2
+    jl .pd2_argerr
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx]
+    call posix_int_arg
+    push rax
+    push rax
+    mov rdi, [rbx + 8]
+    call posix_int_arg
+    mov rsi, rax
+    pop rdi
+    pop rdi
+    call sys_dup2
+    POSIX_CHECK rax, 0
+    mov edx, TAG_SMALLINT
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.pd2_argerr:
+    PM_MISSING "dup2", "fd2", 2
+END_FUNC posix_dup2
+
+;; posix.utime(path, times=None)
+;;
+;; utimensat is the only member of the family Linux still keeps.  A NULL
+;; times means "now", which is what utime(path) alone does; a two-element
+;; (atime, mtime) is converted to the pair of timespecs it wants.
+PUT_PATH  equ 8
+PUT_OWNED equ 16
+PUT_TIMES equ 48            ; two struct timespec, 16 bytes each
+PUT_FRAME equ 64            ; + 1 push = 72, not 16-aligned
+DEF_FUNC posix_utime, PUT_FRAME
+    push rbx
+    test rsi, rsi
+    jz .put_argerr
+    mov rbx, rdi
+    mov r8, rsi
+
+    ; A NULL times argument is "set both to now".
+    xor r9d, r9d
+    cmp r8, 2
+    jl .put_have_times
+    mov rdi, [rbx + 8]
+    lea rax, [rel none_singleton]
+    cmp rdi, rax
+    je .put_have_times
+    ; A two-element sequence of seconds.  Fractional seconds are accepted and
+    ; truncated, as CPython's utime(path, (a, m)) does for a float pair.
+    V_TEST_PTR rdi, rax
+    ja .put_bad_times
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    jne .put_bad_times
+    cmp qword [rdi + PyTupleObject.ob_size], 2
+    jne .put_bad_times
+    mov rax, [rdi + PyTupleObject.ob_item]
+    push rax
+    mov rdi, [rax]
+    call posix_time_seconds
+    mov [rbp - PUT_TIMES], rax
+    mov qword [rbp - PUT_TIMES + 8], 0
+    pop rax
+    push rax
+    mov rdi, [rax + 8]
+    call posix_time_seconds
+    mov [rbp - PUT_TIMES + 16], rax
+    mov qword [rbp - PUT_TIMES + 24], 0
+    pop rax
+    lea r9, [rbp - PUT_TIMES]
+
+.put_have_times:
+    mov [rbp - PUT_OWNED], r9   ; parked across posix_path_arg
+    mov rdi, [rbx]
+    mov [rbp - PUT_PATH], rdi
+    CSTRING rsi, "utime: path"
+    mov edx, POSIX_PATH_KIND_PLAIN
+    call posix_path_arg
+    test rax, rax
+    jz .put_fail
+    mov r9, [rbp - PUT_OWNED]
+    mov [rbp - PUT_OWNED], rdx
+    mov rsi, rax
+    mov edi, -100               ; AT_FDCWD
+    mov rdx, r9
+    xor ecx, ecx
+    call sys_utimensat
+    ; CPython's utime does not put the filename in the OSError, unlike every
+    ; other path call here, so neither does this.
+    push rax
+    mov rdi, [rbp - PUT_OWNED]
+    test rdi, rdi
+    jz .put_no_release
+    mov qword [rbp - PUT_OWNED], 0
+    call obj_decref
+.put_no_release:
+    pop rax
+    POSIX_CHECK rax, 0
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.put_fail:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+.put_bad_times:
+    pop rbx
+    RAISE exc_TypeError_type, "utime: 'times' must be either a tuple of two ints or None"
+.put_argerr:
+    pop rbx
+    PM_MISSING "utime", "path", 1
+END_FUNC posix_utime
+
+;; posix_time_seconds(rdi = a Value) -> rax = whole seconds
+;; An int stays exact; a float truncates toward zero.
+DEF_FUNC_LOCAL posix_time_seconds
+    V_IS_FLOAT rdi, rax
+    ja .pts_int
+    V_TO_F64 rdi
+    movq xmm0, rdi
+    cvttsd2si rax, xmm0
+    leave
+    ret
+.pts_int:
+    call posix_int_arg
+    leave
+    ret
+END_FUNC posix_time_seconds
+
 ;; ============================================================================
 ;; posix.get_inheritable(fd) -> bool   /   posix.set_inheritable(fd, bool)
 ;;
@@ -2561,6 +2987,14 @@ DEF_FUNC posix_module_create, 40
     MODULE_ADD_FUNC posix_umask, pm_n_umask
     MODULE_ADD_FUNC posix_isatty, pm_n_isatty
     MODULE_ADD_FUNC posix_ftruncate, pm_n_ftruncate
+    MODULE_ADD_FUNC posix_chdir, pm_n_chdir
+    MODULE_ADD_FUNC posix_truncate, pm_n_truncate
+    MODULE_ADD_FUNC posix_link, pm_n_link
+    MODULE_ADD_FUNC posix_chown, pm_n_chown
+    MODULE_ADD_FUNC posix_fchmod, pm_n_fchmod
+    MODULE_ADD_FUNC posix_fsync, pm_n_fsync
+    MODULE_ADD_FUNC posix_dup2, pm_n_dup2
+    MODULE_ADD_FUNC posix_utime, pm_n_utime
     MODULE_ADD_FUNC posix_get_inheritable, pm_n_get_inheritable
     MODULE_ADD_FUNC posix_set_inheritable, pm_n_set_inheritable
     MODULE_ADD_FUNC posix_device_encoding, pm_n_device_encoding
@@ -2716,6 +3150,14 @@ pm_msg_fspath:   db ".__fspath__() to return str or bytes, not ", 0
 pm_n_umask:      db "umask", 0
 pm_n_isatty:     db "isatty", 0
 pm_n_ftruncate:  db "ftruncate", 0
+pm_n_chdir:      db "chdir", 0
+pm_n_truncate:   db "truncate", 0
+pm_n_link:       db "link", 0
+pm_n_chown:      db "chown", 0
+pm_n_fchmod:     db "fchmod", 0
+pm_n_fsync:      db "fsync", 0
+pm_n_dup2:       db "dup2", 0
+pm_n_utime:      db "utime", 0
 pm_n_get_inheritable: db "get_inheritable", 0
 pm_n_set_inheritable: db "set_inheritable", 0
 pm_n_device_encoding: db "device_encoding", 0

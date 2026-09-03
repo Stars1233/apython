@@ -1081,6 +1081,126 @@ DEF_FUNC methods_init
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
     call type_stamp_methods
+
+    ;; --- range's own dict ---
+    ;; range had none: `hasattr(range, "index")` was False, and so was
+    ;; `hasattr(range, "__len__")`, because every one of these lived only in
+    ;; a slot.  A range is a value and the stdlib treats it as one.
+    call dict_new
+    mov rbx, rax
+
+    mov rdi, rbx
+    lea rsi, [rel mn_index]
+    extern range_method_index
+    lea rdx, [rel range_method_index]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn_count]
+    extern range_method_count
+    lea rdx, [rel range_method_count]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___getitem__]
+    extern range_dunder_getitem
+    lea rdx, [rel range_dunder_getitem]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___reversed__]
+    extern range_dunder_reversed
+    lea rdx, [rel range_dunder_reversed]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___contains__]
+    lea rdx, [rel generic_method_contains]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___len__]
+    extern range_dunder_len
+    lea rdx, [rel range_dunder_len]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___iter__]
+    extern range_dunder_iter
+    lea rdx, [rel range_dunder_iter]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___eq__]
+    extern range_dunder_eq
+    lea rdx, [rel range_dunder_eq]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___ne__]
+    extern range_dunder_ne
+    lea rdx, [rel range_dunder_ne]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel mn___hash__]
+    extern range_dunder_hash
+    lea rdx, [rel range_dunder_hash]
+    call dict_add_builtin_func
+
+    ; start, stop and step are read-only: a range is immutable.
+    mov rdi, rbx
+    lea rsi, [rel gs_start]
+    extern range_get_start
+    lea rdx, [rel range_get_start]
+    xor ecx, ecx
+    call dict_add_getset
+    mov rdi, rbx
+    lea rsi, [rel gs_stop]
+    extern range_get_stop
+    lea rdx, [rel range_get_stop]
+    xor ecx, ecx
+    call dict_add_getset
+    mov rdi, rbx
+    lea rsi, [rel gs_step]
+    extern range_get_step
+    lea rdx, [rel range_get_step]
+    xor ecx, ecx
+    call dict_add_getset
+
+    extern range_obj_type
+    lea rax, [rel range_obj_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
+    ;; --- slice's own dict ---
+    ;; slice answered start/stop/step through its tp_getattr and had no dict
+    ;; at all, so `hasattr(slice, "start")` was False and `slice.indices` did
+    ;; not exist in either place.
+    call dict_new
+    mov rbx, rax
+
+    mov rdi, rbx
+    lea rsi, [rel mn_indices]
+    extern slice_method_indices
+    lea rdx, [rel slice_method_indices]
+    call dict_add_builtin_func
+    mov rdi, rbx
+    lea rsi, [rel gs_start]
+    extern slice_get_start
+    lea rdx, [rel slice_get_start]
+    xor ecx, ecx
+    call dict_add_getset
+    mov rdi, rbx
+    lea rsi, [rel gs_stop]
+    extern slice_get_stop
+    lea rdx, [rel slice_get_stop]
+    xor ecx, ecx
+    call dict_add_getset
+    mov rdi, rbx
+    lea rsi, [rel gs_step]
+    extern slice_get_step
+    lea rdx, [rel slice_get_step]
+    xor ecx, ecx
+    call dict_add_getset
+
+    extern slice_type
+    lea rax, [rel slice_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
     ; INCREF the dict (type holds ref; dict_new gave us refcnt=1, which we keep)
 
     ;; --- list methods (with arg count validation) ---
@@ -2667,6 +2787,12 @@ DEF_FUNC methods_init
     lea rdx, [rel complex_dunder_hash]
     call dict_add_builtin_func
 
+    mov rdi, rbx
+    lea rsi, [rel mn___bool__]
+    extern complex_dunder_bool
+    lea rdx, [rel complex_dunder_bool]
+    call dict_add_builtin_func
+
     lea rax, [rel complex_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -3627,6 +3753,7 @@ mn_insert:      db "insert", 0
 mn_reverse:     db "reverse", 0
 mn_sort:        db "sort", 0
 mn_index:       db "index", 0
+mn_indices:     db "indices", 0
 mn_count:       db "count", 0
 mn_copy:        db "copy", 0
 mn_clear:       db "clear", 0
@@ -3746,6 +3873,9 @@ mn___trunc__:   db "__trunc__", 0
 mn___bool__:    db "__bool__", 0
 gs_real:        db "real", 0
 gs_imag:        db "imag", 0
+gs_start:       db "start", 0
+gs_stop:        db "stop", 0
+gs_step:        db "step", 0
 gs_numerator:   db "numerator", 0
 gs_denominator: db "denominator", 0
 mn___eq__: db "__eq__", 0

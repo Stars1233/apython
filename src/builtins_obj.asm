@@ -40,6 +40,7 @@ extern bytes_type_call
 extern rbt_append_cstr
 extern msg_append_i64
 extern value_type
+extern raise_type_error_counted
 extern _bytes_decode_impl
 extern ba_shared_decode
 extern kw_names_pending
@@ -327,7 +328,8 @@ DEF_FUNC builtin_str_fn, SB_FRAME
     mov rsi, [rbp - SB_NPOS]
     add rsi, [rbp - SB_NKW]
     lea rdi, [rel str_too_many_msg]
-    call str_raise_counted
+    CSTRING rdx, " given)"
+    call raise_type_error_counted
 END_FUNC builtin_str_fn
 
 ;; ============================================================================
@@ -383,28 +385,6 @@ DEF_FUNC_LOCAL str_require_str_arg, SRA_FRAME
     ret
 END_FUNC str_require_str_arg
 
-;; ============================================================================
-;; str_raise_counted(rdi = a message ending in "(", rsi = the count)
-;; "str() takes at most 3 arguments (4 given)" -- CPython reports the count.
-;; ============================================================================
-SRC_N     equ 8
-SRC_BUF   equ 176
-SRC_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
-DEF_FUNC_LOCAL str_raise_counted, SRC_FRAME
-    mov [rbp - SRC_N], rsi
-    mov rsi, rdi
-    lea rdi, [rbp - SRC_BUF]
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, [rbp - SRC_N]
-    call msg_append_i64
-    mov rdi, rax
-    CSTRING rsi, " given)"
-    call rbt_append_cstr
-    lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rbp - SRC_BUF]
-    call raise_exception
-END_FUNC str_raise_counted
 
 ;; ============================================================================
 ;; str_raise_bad_keyword(rdi = the keyword's name, as a C string)
@@ -575,6 +555,8 @@ END_FUNC builtin_callable
 ;; ============================================================================
 DEF_FUNC builtin_iter_fn
 
+    cmp rsi, 2
+    je .iter_sentinel
     cmp rsi, 1
     jne .iter_error
 
@@ -589,9 +571,45 @@ DEF_FUNC builtin_iter_fn
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.iter_sentinel:
+    ; iter(callable, sentinel): call it until it answers the sentinel.  This
+    ; form did not exist, and it is the ordinary way to read a stream until a
+    ; marker turns up -- `iter(lambda: f.read(4096), b"")`.
+    mov rsi, [rdi + 8]                 ; the sentinel, as a Value
+    mov rdi, [rdi]                     ; the callable
+    V_TEST_PTR rdi, rax
+    ja .iter_not_callable
+    test rdi, rdi
+    jz .iter_not_callable
+    mov rax, [rdi + PyObject.ob_type]
+    cmp qword [rax + PyTypeObject.tp_call], 0
+    je .iter_not_callable
+    extern callable_iter_new
+    call callable_iter_new
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.iter_not_callable:
+    RAISE exc_TypeError_type, "iter(object, sentinel): object must be callable"
 .iter_error:
-    RAISE exc_TypeError_type, "iter() takes exactly one argument"
+    ; CPython has two wordings, and they differ by which bound was broken.
+    test rsi, rsi
+    jnz .iter_too_many
+    lea rdi, [rel iter_few_msg]
+    jmp .iter_count
+.iter_too_many:
+    lea rdi, [rel iter_arity_msg]
+.iter_count:
+    xor edx, edx
+    call raise_type_error_counted
 END_FUNC builtin_iter_fn
+
+section .rodata
+iter_arity_msg: db "iter expected at most 2 arguments, got ", 0
+iter_few_msg:   db "iter expected at least 1 argument, got ", 0
+section .text
 
 ;; ============================================================================
 ;; 11. builtin_next_fn(args, nargs) - next(x)
@@ -1580,7 +1598,13 @@ DEF_FUNC builtin_getattr, 24
     ret
 
 .getattr_raise:
-    RAISE exc_AttributeError_type, "object has no attribute"
+    ; Name the object's type and the attribute, as every other path does.
+    ; getattr(o, "zzz") said only "object has no attribute", which is the
+    ; sentence with both nouns taken out of it.
+    mov rdi, [rbx]
+    mov rsi, [rbx + 8]
+    extern raise_no_attribute
+    call raise_no_attribute
 
 .getattr_error:
     RAISE exc_TypeError_type, "getattr expected 2 or 3 arguments"

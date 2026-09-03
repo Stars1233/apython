@@ -45,6 +45,7 @@ extern raise_exception
 extern tuple_new
 extern tuple_type
 extern ap_strcmp
+extern kw_names_pending
 extern dict_get
 extern dict_new
 extern dict_set
@@ -1470,7 +1471,10 @@ END_FUNC type_is_exc_subclass
 ETC_EXC   equ 8
 ETC_ARGS  equ 16
 ETC_NARGS equ 24
-ETC_FRAME equ 24            ; + 2 pushes = 40, not 16-aligned
+ETC_KWFAM equ 32            ; 0 none, 1 AttributeError, 2 ImportError
+ETC_KW1   equ 40            ; the 'name' keyword's value, or 0
+ETC_KW2   equ 48            ; 'obj' for AttributeError, 'path' for ImportError
+ETC_FRAME equ 48            ; + 2 pushes = 64, 16-byte aligned
 DEF_FUNC exc_type_call, ETC_FRAME
     push rbx
     push r12
@@ -1478,6 +1482,96 @@ DEF_FUNC exc_type_call, ETC_FRAME
     mov rbx, rdi            ; rbx = type
     mov [rbp - ETC_ARGS], rsi
     mov [rbp - ETC_NARGS], rdx
+    mov qword [rbp - ETC_KW1], 0
+    mov qword [rbp - ETC_KW2], 0
+
+    ; ------------------------------------------------------------------
+    ; Keyword arguments.  AttributeError and ImportError each carry two
+    ; named attributes -- `AttributeError("x", name=n, obj=o)` and
+    ; `ImportError("x", name=n, path=p)` -- and the stdlib reads both back:
+    ; importlib sets ModuleNotFoundError.name, and the "did you mean"
+    ; machinery reads AttributeError.name and .obj.  Neither existed here.
+    ; The keywords were folded into .args, so `.args` came out one item too
+    ; long and `.name` was an AttributeError of its own.
+    ;
+    ; They are the only builtin exceptions that take keywords; every other
+    ; one answers "takes no keyword arguments", as CPython's does.
+    ; ------------------------------------------------------------------
+    mov rdi, rbx
+    call exc_kw_family
+    mov [rbp - ETC_KWFAM], rax
+
+    mov r12, [rel kw_names_pending]
+    test r12, r12
+    jz .etc_kw_done
+    mov qword [rel kw_names_pending], 0     ; consumed, however this ends
+    mov rcx, [r12 + PyTupleObject.ob_size]
+    sub [rbp - ETC_NARGS], rcx              ; .args gets the positionals only
+    cmp qword [rbp - ETC_KWFAM], 0
+    je .etc_no_keywords
+
+    xor edx, edx                            ; the keyword index
+.etc_kw_loop:
+    cmp rdx, [r12 + PyTupleObject.ob_size]
+    jge .etc_kw_done
+    mov rax, [r12 + PyTupleObject.ob_item]
+    mov r8, [rax + rdx*8]                   ; the keyword's name
+    mov rax, [rbp - ETC_NARGS]
+    add rax, rdx
+    mov rcx, [rbp - ETC_ARGS]
+    mov r9, [rcx + rax*8]                   ; the value that goes with it
+
+    push rdx
+    push r8
+    push r9
+    sub rsp, 8
+    lea rdi, [r8 + PyStrObject.data]
+    CSTRING rsi, "name"
+    call ap_strcmp
+    test eax, eax
+    jz .etc_kw_name
+    mov r8, [rsp + 16]
+    lea rdi, [r8 + PyStrObject.data]
+    cmp qword [rbp - ETC_KWFAM], 1
+    je .etc_kw_cmp_obj
+    CSTRING rsi, "path"
+    jmp .etc_kw_cmp2
+.etc_kw_cmp_obj:
+    CSTRING rsi, "obj"
+.etc_kw_cmp2:
+    call ap_strcmp
+    test eax, eax
+    jz .etc_kw_second
+    add rsp, 8
+    pop r9
+    pop r8
+    pop rdx
+    lea rdi, [r8 + PyStrObject.data]
+    mov rsi, [rbx + PyTypeObject.tp_name]
+    call exc_raise_bad_keyword
+.etc_kw_name:
+    add rsp, 8
+    pop r9
+    pop r8
+    pop rdx
+    mov [rbp - ETC_KW1], r9
+    jmp .etc_kw_next
+.etc_kw_second:
+    add rsp, 8
+    pop r9
+    pop r8
+    pop rdx
+    mov [rbp - ETC_KW2], r9
+.etc_kw_next:
+    inc rdx
+    jmp .etc_kw_loop
+.etc_no_keywords:
+    xor edi, edi                ; no keyword name: the whole class is refused
+    mov rsi, [rbx + PyTypeObject.tp_name]
+    call exc_raise_bad_keyword
+.etc_kw_done:
+    mov rdx, [rbp - ETC_NARGS]
+    mov rsi, [rbp - ETC_ARGS]
 
     ; Check for a constructor (ExceptionGroup's, or OSError's).  It lives in
     ; tp_new; tp_call would make instances callable.
@@ -1574,6 +1668,16 @@ DEF_FUNC exc_type_call, ETC_FRAME
     mov [rdi + PyExceptionObject.exc_args], r12
 
 .done:
+    ; The two named attributes, defaulting to None -- CPython reports None
+    ; there, not AttributeError, when they were not given.
+    cmp qword [rbp - ETC_KWFAM], 0
+    je .etc_finish
+    mov rdi, [rbp - ETC_EXC]
+    mov rsi, [rbp - ETC_KWFAM]
+    mov rdx, [rbp - ETC_KW1]
+    mov rcx, [rbp - ETC_KW2]
+    call exc_store_named
+.etc_finish:
     mov rax, [rbp - ETC_EXC]
     mov edx, TAG_PTR
     pop r12
@@ -1582,6 +1686,139 @@ DEF_FUNC exc_type_call, ETC_FRAME
     V_PACK rax, rdx             ; tp_call returns one Value
     ret
 END_FUNC exc_type_call
+
+;; exc_kw_family(rdi = the type) -> rax = 0 none, 1 AttributeError,
+;;                                       2 ImportError
+DEF_FUNC_LOCAL exc_kw_family
+    push rbx
+    mov rbx, rdi
+    lea rsi, [rel exc_AttributeError_type]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jnz .ekf_attr
+    mov rdi, rbx
+    lea rsi, [rel exc_ImportError_type]
+    call type_is_subtype
+    test eax, eax
+    jnz .ekf_import
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.ekf_attr:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.ekf_import:
+    mov eax, 2
+    pop rbx
+    leave
+    ret
+END_FUNC exc_kw_family
+
+;; exc_raise_bad_keyword(rdi = the keyword's name as a C string, or 0 when the
+;;                        type takes none at all; rsi = the type's name)
+;; CPython's two wordings:
+;;   'foo' is an invalid keyword argument for AttributeError()
+;;   ValueError() takes no keyword arguments
+ERB_NAME  equ 8
+ERB_TYPE  equ 16
+ERB_BUF   equ 192
+ERB_FRAME equ 192           ; + 0 pushes = 192, 16-aligned
+DEF_FUNC_LOCAL exc_raise_bad_keyword, ERB_FRAME
+    mov [rbp - ERB_NAME], rdi
+    mov [rbp - ERB_TYPE], rsi
+    lea rdi, [rbp - ERB_BUF]
+    cmp qword [rbp - ERB_NAME], 0
+    je .erb_none_taken
+    CSTRING rsi, "'"
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - ERB_NAME]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "' is an invalid keyword argument for "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - ERB_TYPE]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "()"
+    call rbt_append_cstr
+    jmp .erb_raise
+.erb_none_taken:
+    mov rsi, [rbp - ERB_TYPE]
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "() takes no keyword arguments"
+    call rbt_append_cstr
+.erb_raise:
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - ERB_BUF]
+    call raise_exception
+END_FUNC exc_raise_bad_keyword
+
+;; exc_store_named(rdi = the exception, rsi = the family,
+;;                 rdx = the 'name' Value or 0, rcx = the second one or 0)
+ESN_EXC   equ 8
+ESN_FAM   equ 16
+ESN_V1    equ 24
+ESN_V2    equ 32
+ESN_FRAME equ 48            ; + 0 pushes = 48
+DEF_FUNC_LOCAL exc_store_named, ESN_FRAME
+    mov [rbp - ESN_EXC], rdi
+    mov [rbp - ESN_FAM], rsi
+    mov [rbp - ESN_V1], rdx
+    mov [rbp - ESN_V2], rcx
+
+    CSTRING rdi, "name"
+    call str_from_cstr_heap
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - ESN_EXC]
+    mov rsi, [rsp + 8]
+    mov rdx, [rbp - ESN_V1]
+    test rdx, rdx
+    jnz .esn_have1
+    lea rdx, [rel none_singleton]
+.esn_have1:
+    INCREF_V rdx, rcx
+    xor ecx, ecx
+    call exc_setattr
+    add rsp, 8
+    pop rdi
+    call obj_decref
+
+    cmp qword [rbp - ESN_FAM], 1
+    je .esn_second_obj
+    CSTRING rdi, "path"
+    jmp .esn_second
+.esn_second_obj:
+    CSTRING rdi, "obj"
+.esn_second:
+    call str_from_cstr_heap
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - ESN_EXC]
+    mov rsi, [rsp + 8]
+    mov rdx, [rbp - ESN_V2]
+    test rdx, rdx
+    jnz .esn_have2
+    lea rdx, [rel none_singleton]
+.esn_have2:
+    INCREF_V rdx, rcx
+    xor ecx, ecx
+    call exc_setattr
+    add rsp, 8
+    pop rdi
+    call obj_decref
+    leave
+    ret
+END_FUNC exc_store_named
 
 ;; ============================================================================
 ;; oserror_new(rdi = type, rsi = args, rdx = nargs) -> fat pair (rax, rdx)

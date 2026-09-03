@@ -139,6 +139,7 @@ test_errno
 test_error_messages
 test_exc_catchable
 test_exception_context
+test_exception_kwargs
 test_exception_metatype
 test_exceptions
 test_exception_str_repr
@@ -209,6 +210,7 @@ test_io_tail
 test_iterable_arguments
 test_iterator_cycles
 test_iterator_slots
+test_iter_sentinel
 test_itertools_gc
 test_itertools
 test_itertools_tail
@@ -226,6 +228,7 @@ test_marshal_interned
 test_match_class
 test_match_mapping_types
 test_match
+test_math_more
 test_math
 test_membership
 test_metaclass_prepare
@@ -264,6 +267,7 @@ test_percent_typecheck
 test_phase4
 test_phase6
 test_posix_files
+test_posix_more
 test_posix_pathlike
 test_posix
 test_pow
@@ -275,6 +279,7 @@ test_property
 test_property_raises
 test_raise_cause
 test_raise_from
+test_range_protocol
 test_range
 test_range_slice
 test_recursion_and_repr
@@ -298,6 +303,7 @@ test_size_and_recursion_limits
 test_slice_and_star_args
 test_slice_assign
 test_slice_compare
+test_slice_indices
 test_slicing
 test_slots
 test_slots_suppression

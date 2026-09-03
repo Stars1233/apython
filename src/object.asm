@@ -442,8 +442,52 @@ DEF_FUNC obj_as_index
     RAISE exc_TypeError_type, "__index__ returned non-int"
 
 .oai_error:
-    RAISE exc_TypeError_type, "object cannot be interpreted as an integer"
+    ; Name the type.  This is the single funnel for every __index__ context --
+    ; subscripts, slice bounds, repetition counts, hex() -- so the one word
+    ; that identifies the mistake was missing from all of them.  The Value has
+    ; to be rebuilt from the (payload, tag) pair the caller passed.
+    mov rsi, rdi
+    V_PACK rsi, rdx
+    lea rdi, [rel oai_not_an_index]
+    jmp raise_type_error_with_name
 END_FUNC obj_as_index
+
+;; ============================================================================
+;; raise_type_error_counted(rdi = the text before the number, rsi = the count,
+;;                          rdx = the text after it, or 0) -- does not return
+;;
+;; "str() takes at most 3 arguments (4 given)".  CPython reports the count in
+;; every arity message and this tree reported it in almost none, so a caller
+;; was told the rule but not what it had actually passed.
+;; ============================================================================
+RTC_N     equ 8
+RTC_TAIL  equ 16
+RTC_BUF   equ 192
+RTC_FRAME equ 192           ; + 0 pushes = 192, 16-aligned
+global raise_type_error_counted
+DEF_FUNC raise_type_error_counted, RTC_FRAME
+    mov [rbp - RTC_N], rsi
+    mov [rbp - RTC_TAIL], rdx
+    mov rsi, rdi
+    lea rdi, [rbp - RTC_BUF]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RTC_N]
+    call msg_append_i64
+    cmp qword [rbp - RTC_TAIL], 0
+    je .rtc_raise
+    mov rdi, rax
+    mov rsi, [rbp - RTC_TAIL]
+    call rbt_append_cstr
+.rtc_raise:
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RTC_BUF]
+    call raise_exception
+END_FUNC raise_type_error_counted
+
+section .rodata
+oai_not_an_index: db "'", 1, "' object cannot be interpreted as an integer", 0
+section .text
 
 ; value_number_methods(rdi = payload, edx = tag) -> rax = PyNumberMethods*, or 0
 ;
@@ -1066,8 +1110,18 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     jmp eval_exception_unwind
 .rna_fresh:
     mov [rbp - RNA_NAME], rsi
+    push rdi
     call value_type
+    pop rdi
     mov r12, rax
+
+    ; A module names itself rather than its type: CPython says
+    ; "module 'sys' has no attribute 'zzz'", not "'module' object has ...".
+    ; The name is the one thing that tells you WHICH module was asked.
+    extern module_type
+    lea rcx, [rel module_type]
+    cmp r12, rcx
+    je .rna_module
 
     lea rbx, [rel rtn_buf]
     xor ecx, ecx
@@ -1076,6 +1130,45 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     test r12, r12
     jz .rna_after_type
     mov rsi, [r12 + PyTypeObject.tp_name]
+    jmp .rna_type
+
+.rna_module:
+    lea rbx, [rel rtn_buf]
+    xor ecx, ecx
+    mov rsi, [rdi + PyModuleObject.mod_name]
+    test rsi, rsi
+    jz .rna_module_unnamed
+    CSTRING rsi, "module '"
+    jmp .rna_module_prefix
+.rna_module_unnamed:
+    CSTRING rsi, "module '?"
+.rna_module_prefix:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .rna_module_name
+    inc rsi
+    mov [rbx + rcx], al
+    inc rcx
+    jmp .rna_module_prefix
+.rna_module_name:
+    mov rsi, [rdi + PyModuleObject.mod_name]
+    test rsi, rsi
+    jz .rna_after_module
+    lea rsi, [rsi + PyStrObject.data]
+.rna_module_loop:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .rna_after_module
+    inc rsi
+    cmp rcx, RTN_BUFSZ - 2
+    jae .rna_after_module
+    mov [rbx + rcx], al
+    inc rcx
+    jmp .rna_module_loop
+.rna_after_module:
+    CSTRING rsi, `' has no attribute '`
+    jmp .rna_mid
+
 .rna_type:
     movzx eax, byte [rsi]
     test al, al

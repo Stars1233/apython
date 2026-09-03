@@ -26,6 +26,8 @@ extern none_singleton
 extern current_exception
 extern tuple_new
 extern list_new
+extern obj_richcompare_bool
+extern set_exception
 extern int_type
 extern float_type
 extern list_append
@@ -2054,6 +2056,163 @@ DEF_FUNC seq_iter_new
     ret
 END_FUNC seq_iter_new
 
+;; ============================================================================
+;; The two-argument iter(): iter(callable, sentinel).
+;;
+;; It did not exist -- `iter(f, 0)` was "iter() takes exactly one argument" --
+;; and it is the ordinary way to read a file or a queue until a marker turns
+;; up: `for chunk in iter(lambda: f.read(4096), b"")`.
+;;
+;; Layout: +16 the callable (owned), +24 the sentinel (an owned Value).
+;; ============================================================================
+CI_CALL equ IT_FIELD1
+CI_SENT equ IT_FIELD2
+
+;; callable_iter_new(rdi = the callable, rsi = the sentinel Value) -> the iterator
+DEF_FUNC callable_iter_new
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    mov rdi, ITER_OBJ_SIZE
+    lea rsi, [rel callable_iter_type]
+    call gc_alloc
+    INCREF rbx
+    mov [rax + CI_CALL], rbx
+    mov rdi, r12
+    INCREF_V rdi, rcx
+    mov [rax + CI_SENT], r12
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC callable_iter_new
+
+;; callable_iter_iternext(self) -> rax = a Value, or 0 for exhaustion
+;;
+;; Exhaustion is a NULL return with no exception pending, which is what every
+;; other builtin iterator here does; a real error returns NULL with one set.
+;; RAISE is wrong either way -- it tail-jumps into the unwinder, and a builtin
+;; has no Python frame of its own for it to stop at.
+CIN_SELF  equ 8
+CIN_RES   equ 16
+CIN_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC_LOCAL callable_iter_iternext, CIN_FRAME
+    mov [rbp - CIN_SELF], rdi
+    mov rdi, [rdi + CI_CALL]
+    test rdi, rdi
+    jz .cin_exhausted           ; already finished; stay finished
+
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz .cin_not_callable
+    xor esi, esi                ; no arguments
+    xor edx, edx
+    call rax
+    test rax, rax
+    jz .cin_failed              ; the callable raised; hand it on
+    mov [rbp - CIN_RES], rax
+
+    ; CPython compares with ==, not identity, and a comparison that itself
+    ; raises propagates.
+    mov rdi, rax
+    mov rax, [rbp - CIN_SELF]
+    mov rsi, [rax + CI_SENT]
+    mov edx, PY_EQ
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .cin_cmp_failed
+    test eax, eax
+    jnz .cin_reached
+
+    mov rax, [rbp - CIN_RES]    ; tp_iternext hands back a Value, not a pair
+    leave
+    ret
+
+.cin_reached:
+    ; The sentinel came back.  Drop the value, release the callable so a
+    ; second next() cannot call it again, and report exhaustion.
+    mov rdi, [rbp - CIN_RES]
+    DECREF_V rdi, rsi
+    mov rax, [rbp - CIN_SELF]
+    mov rdi, [rax + CI_CALL]
+    mov qword [rax + CI_CALL], 0
+    test rdi, rdi
+    jz .cin_exhausted
+    call obj_decref
+.cin_exhausted:
+    ; A builtin tp_iternext reports clean exhaustion as NULL with NOTHING
+    ; pending -- setting StopIteration here made `list(it)` propagate it
+    ; instead of stopping.  next() is what turns the NULL into the exception.
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+
+.cin_cmp_failed:
+    mov rdi, [rbp - CIN_RES]
+    DECREF_V rdi, rsi
+.cin_failed:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+
+.cin_not_callable:
+    SET_EXC exc_TypeError_type, "iter(v, w): v must be callable"
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+END_FUNC callable_iter_iternext
+
+DEF_FUNC_LOCAL callable_iter_traverse
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + CI_CALL]
+    VISIT_PTR rdi
+    mov rdi, [rbx + CI_SENT]
+    VISIT_V rdi, rcx
+    pop rbx
+    leave
+    ret
+END_FUNC callable_iter_traverse
+
+DEF_FUNC_LOCAL callable_iter_clear
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + CI_CALL]
+    mov qword [rbx + CI_CALL], 0
+    test rdi, rdi
+    jz .cic_sent
+    call obj_decref
+.cic_sent:
+    mov rdi, [rbx + CI_SENT]
+    mov qword [rbx + CI_SENT], 0
+    XDECREF_V rdi, rcx
+    pop rbx
+    leave
+    ret
+END_FUNC callable_iter_clear
+
+DEF_FUNC_LOCAL callable_iter_dealloc
+    push rbx
+    mov rbx, rdi
+    call callable_iter_clear    ; drops the callable and the sentinel
+    mov rdi, rbx
+    extern gc_dealloc
+    call gc_dealloc             ; untracks AND frees; ap_free here too was a
+                                ; double free
+    pop rbx
+    leave
+    ret
+END_FUNC callable_iter_dealloc
+
 ;; seq_iter_iternext(self) -> (rax=payload, edx=tag) or NULL
 ;; Calls self.it_obj.__getitem__(self.it_index); catches IndexError as exhaustion.
 SI_EXC   equ 8
@@ -2351,6 +2510,7 @@ map_iter_name:       db "map", 0
 filter_iter_name:    db "filter", 0
 reversed_iter_name:  db "reversed", 0
 seq_iter_name:       db "iterator", 0
+callable_iter_name:  db "callable_iterator", 0
 chain_iter_name:     db "itertools.chain", 0
 
 ; Enumerate iterator type
@@ -2482,6 +2642,38 @@ filter_iter_type:
     dq 0 ; tp_dictoffset
 
 ; Sequence iterator type (__getitem__ protocol)
+align 8
+align 8
+global callable_iter_type
+callable_iter_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq callable_iter_name       ; tp_name
+    dq ITER_OBJ_SIZE            ; tp_basicsize
+    dq callable_iter_dealloc    ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq itertools_iter_self      ; tp_iter
+    dq callable_iter_iternext   ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq TYPE_FLAG_HAVE_GC        ; tp_flags
+    dq 0                        ; tp_bases
+    dq callable_iter_traverse   ; tp_traverse
+    dq callable_iter_clear      ; tp_clear
+    dq 0 ; tp_dictoffset
+
 align 8
 global seq_iter_type
 seq_iter_type:

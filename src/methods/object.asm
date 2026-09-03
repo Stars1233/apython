@@ -516,6 +516,11 @@ DEF_FUNC %1_dunder_iter
 END_FUNC %1_dunder_iter
 %endmacro
 
+; range's type symbol is range_obj_type, so the generators that build
+; `%1_type` need the alias.  It is a preprocessor name, not a second symbol.
+%define range_type range_obj_type
+extern range_obj_type
+
 ; list and tuple already have hand-written ones.
 DEF_DUNDER_LEN dict
 DEF_DUNDER_LEN str
@@ -529,6 +534,8 @@ DEF_DUNDER_ITER str
 DEF_DUNDER_ITER set
 DEF_DUNDER_ITER frozenset
 DEF_DUNDER_ITER bytes
+DEF_DUNDER_LEN range
+DEF_DUNDER_ITER range
 
 
 ;; A builtin number's unary dunders, reachable by name.  int and float had
@@ -982,6 +989,8 @@ DEF_DUNDER_UNARY float, int, nb_int
 DEF_DUNDER_UNARY float, float, nb_float
 DEF_DUNDER_UNARY float, trunc, nb_int
 DEF_DUNDER_BOOL float
+; complex has an nb_bool of its own; only the by-name half was missing.
+DEF_DUNDER_BOOL complex
 
 ;; int's binary family, forward and reflected.
 DEF_DUNDER_BINARY int, add, nb_add, 0, dunder_operand_is_int
@@ -1756,6 +1765,12 @@ DEF_RICHCMP_PAIR dict
 DEF_RICHCMP_PAIR list
 DEF_RICHCMP_PAIR set
 DEF_RICHCMP_PAIR frozenset
+
+; range defines only == and != of its own; the ordering dunders stay
+; object's, as they are in CPython.
+DEF_DUNDER_RICHCMP range, eq, PY_EQ
+DEF_DUNDER_RICHCMP range, ne, PY_NE
+DEF_DUNDER_HASH range
 
 DEF_DUNDER_HASH int
 DEF_DUNDER_HASH str

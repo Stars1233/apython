@@ -9,6 +9,23 @@ one-line fix.
 
 ## Correctness
 
+~~- **Six pieces of the ordinary protocol were missing outright.**  `range`
+  had no `__eq__`, no `__hash__`, no `index`/`count` and no `start`/`stop`/
+  `step` -- and no `tp_dict` at all, so none of `__len__`, `__iter__` or
+  `__getitem__` could be asked for by name.  `iter(callable, sentinel)`, the
+  two-argument form, did not exist.  Neither did `slice.indices(length)`,
+  `complex.__bool__` by name, or `AttributeError(name=, obj=)` /
+  `ImportError(name=, path=)` -- whose keywords were silently folded into
+  `.args`.~~  `tests/test_range_protocol.py`, `tests/test_iter_sentinel.py`,
+  `tests/test_slice_indices.py`, `tests/test_exception_kwargs.py`.
+
+  Two of them were wrong in a way the entries did not say.  `range(3) ==
+  range(3)` was **False**, not merely unimplemented, because with no
+  `tp_richcompare` the comparison fell back to identity -- so
+  `{range(3), range(0, 3, 1)}` held two elements where CPython holds one.
+  And an exception's keyword arguments did not just go unread: they landed in
+  `.args`, so `AttributeError("x", name="n").args` was a 2-tuple.
+
 - **`super` is not an object.**  The zero- and two-argument forms both work
   written as `super(...).attr`, because the compiler emits `LOAD_SUPER_ATTR`
   for exactly that shape and the opcode does the MRO walk itself.  What does
@@ -78,10 +95,15 @@ one-line fix.
   process calls `os.py` and `os.path` reach for are there, along with
   `environ`, `stat_result`, `error` and the O_*/W* constants -- enough that
   CPython's own `os.py` imports and works.  What is not: `scandir` and
-  `DirEntry`, `chdir`, `chown`, `utime`, `truncate`,
-  `dup2`, `fork`, `execv`, `link`, and the whole `*at` family.  `chmod` takes
-  no file descriptor, where CPython's does.  `_have_functions` is
-  an empty list, which is the honest answer -- no `dir_fd=` support -- and
+  `DirEntry`, ~~`chdir`, `chown`, `utime`, `truncate`,
+  `dup2`,~~ `fork`, `execv`, ~~`link`,~~ and the whole `*at` family.
+  ~~`chmod` takes no file descriptor, where CPython's does.~~  The struck
+  eight, plus `fsync` and `fchmod`, are there now
+  (`tests/test_posix_more.py`); the entry named `ftruncate` among them, which
+  was already present -- it is `truncate`, the path-taking form, that was
+  missing.  Their arity messages are CPython's argument-clinic wording, and
+  the same helper corrected `unlink` and `rmdir`, which had the old one.
+  `_have_functions` is an empty list, which is the honest answer -- no `dir_fd=` support -- and
   os.py reads it to build `supports_dir_fd`.
 
 - **Missing C modules**, in rough order of how many stdlib modules each
@@ -92,8 +114,12 @@ one-line fix.
   `math` and `_collections`, which are there now.)
   `make check-stdlib` gives the current figure.
 
-  `math` itself is short of `dist`, `prod`, `isclose`, `perm`, `ulp` and
-  `nan`/`inf` parsing corners; and `gamma`, `lgamma`, the n-ary `hypot` and
+  ~~`math` itself is short of `dist`, `prod`, `isclose`, `perm`, `ulp` and
+  `nan`/`inf` parsing corners;~~ all five are there now
+  (`tests/test_math_more.py`); `nan`/`inf` parsing already matched.  `dist`
+  hands its coordinate differences to the same routine `hypot` uses, so the
+  two always agree with each other -- and it inherits the rounding note
+  below.  And `gamma`, `lgamma`, the n-ary `hypot` and
   `sumprod` round differently from CPython's, which uses its own Lanczos
   approximation and double-double arithmetic where these use glibc and a
   Neumaier sum.  `fsum` is exact: it is Shewchuk's algorithm, as CPython's

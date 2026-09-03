@@ -65,6 +65,14 @@ SYS_uname           equ 63
 SYS_access          equ 21
 SYS_umask           equ 95
 SYS_exit_group      equ 231
+SYS_chdir           equ 80
+SYS_truncate        equ 76
+SYS_link            equ 86
+SYS_chown           equ 92
+SYS_fchmod          equ 91
+SYS_fsync           equ 74
+SYS_dup2            equ 33
+SYS_utimensat       equ 280
 
 ; sys_write(int fd, const void *buf, size_t len) -> ssize_t
 DEF_FUNC_BARE sys_write
@@ -250,6 +258,76 @@ DEF_FUNC_BARE sys_ftruncate
     syscall
     ret
 END_FUNC sys_ftruncate
+
+; The eight the posix module was short of.  Each is the bare syscall; the
+; argument checking and the OSError live in src/posixmod.asm.
+; sys_chdir(const char *path) -> int
+global sys_chdir
+DEF_FUNC_BARE sys_chdir
+    mov rax, SYS_chdir
+    syscall
+    ret
+END_FUNC sys_chdir
+
+; sys_truncate(const char *path, off_t length) -> int
+global sys_truncate
+DEF_FUNC_BARE sys_truncate
+    mov rax, SYS_truncate
+    syscall
+    ret
+END_FUNC sys_truncate
+
+; sys_link(const char *old, const char *new) -> int
+global sys_link
+DEF_FUNC_BARE sys_link
+    mov rax, SYS_link
+    syscall
+    ret
+END_FUNC sys_link
+
+; sys_chown(const char *path, uid_t uid, gid_t gid) -> int
+global sys_chown
+DEF_FUNC_BARE sys_chown
+    mov rax, SYS_chown
+    syscall
+    ret
+END_FUNC sys_chown
+
+; sys_fchmod(int fd, mode_t mode) -> int
+global sys_fchmod
+DEF_FUNC_BARE sys_fchmod
+    mov rax, SYS_fchmod
+    syscall
+    ret
+END_FUNC sys_fchmod
+
+; sys_fsync(int fd) -> int
+global sys_fsync
+DEF_FUNC_BARE sys_fsync
+    mov rax, SYS_fsync
+    syscall
+    ret
+END_FUNC sys_fsync
+
+; sys_dup2(int oldfd, int newfd) -> int
+global sys_dup2
+DEF_FUNC_BARE sys_dup2
+    mov rax, SYS_dup2
+    syscall
+    ret
+END_FUNC sys_dup2
+
+; sys_utimensat(int dirfd, const char *path, const struct timespec times[2],
+;               int flags) -> int
+; utime(path, times) goes through this: utimensat is the only one of the
+; family Linux still keeps, and AT_FDCWD with a NULL times means "now".
+global sys_utimensat
+DEF_FUNC_BARE sys_utimensat
+    mov r10, rcx                ; the fourth syscall argument is r10, not rcx
+    mov rax, SYS_utimensat
+    syscall
+    ret
+END_FUNC sys_utimensat
 
 ; sys_uname(struct utsname *buf) -> int
 DEF_FUNC_BARE sys_uname
