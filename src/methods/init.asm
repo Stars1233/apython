@@ -289,6 +289,38 @@ extern tuple_dunder_rmul
 extern tuple_method_count
 extern tuple_method_index
 
+
+;; ADD_FN name, func -- register one method into the dict in rbx.
+;; ADD_FN_N name, func, min, max -- the same, with argument-count bounds.
+;;
+;; These were open-coded: four instructions per method, six for a checked one,
+;; 455 times, which is most of what made this file 115k.  The expansion is
+;; identical -- the object file is unchanged to the byte.
+%macro ADD_FN 2
+    mov rdi, rbx
+    lea rsi, [rel %1]
+    lea rdx, [rel %2]
+    call dict_add_builtin_func
+%endmacro
+
+;; ADD_FN_D slot, name, func -- the same, for the few blocks whose dict is in a
+;; frame slot rather than in rbx.
+%macro ADD_FN_D 3
+    mov rdi, [rbp - %1]
+    lea rsi, [rel %2]
+    lea rdx, [rel %3]
+    call dict_add_builtin_func
+%endmacro
+
+%macro ADD_FN_N 4
+    mov rdi, rbx
+    lea rsi, [rel %1]
+    lea rdx, [rel %2]
+    mov rcx, %3
+    mov r8, %4
+    call add_method_to_dict_checked
+%endmacro
+
 section .text
 
 ;; ============================================================================
@@ -635,50 +667,23 @@ SASM_FRAME equ 16           ; + 0 pushes = 16, 16-aligned
 DEF_FUNC_LOCAL set_add_shared_methods, SASM_FRAME
     mov [rbp - SASM_DICT], rdi
 
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn_copy]
-    lea rdx, [rel set_method_copy]
-    call dict_add_builtin_func
+    ADD_FN_D SASM_DICT, mn_copy, set_method_copy
 
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn_union]
-    lea rdx, [rel set_method_union]
-    call dict_add_builtin_func
+    ADD_FN_D SASM_DICT, mn_union, set_method_union
 
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn_intersection]
-    lea rdx, [rel set_method_intersection]
-    call dict_add_builtin_func
+    ADD_FN_D SASM_DICT, mn_intersection, set_method_intersection
 
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn_difference]
-    lea rdx, [rel set_method_difference]
-    call dict_add_builtin_func
+    ADD_FN_D SASM_DICT, mn_difference, set_method_difference
 
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn_symmetric_difference]
-    lea rdx, [rel set_method_symmetric_difference]
-    call dict_add_builtin_func
+    ADD_FN_D SASM_DICT, mn_symmetric_difference, set_method_symmetric_difference
 
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn_issubset]
-    lea rdx, [rel set_method_issubset]
-    call dict_add_builtin_func
+    ADD_FN_D SASM_DICT, mn_issubset, set_method_issubset
 
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn_issuperset]
-    lea rdx, [rel set_method_issuperset]
-    call dict_add_builtin_func
+    ADD_FN_D SASM_DICT, mn_issuperset, set_method_issuperset
 
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn_isdisjoint]
-    lea rdx, [rel set_method_isdisjoint]
-    call dict_add_builtin_func
+    ADD_FN_D SASM_DICT, mn_isdisjoint, set_method_isdisjoint
 
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel mn___contains__]
-    lea rdx, [rel generic_method_contains]
-    call dict_add_builtin_func
+    ADD_FN_D SASM_DICT, mn___contains__, generic_method_contains
 
     ; __new__ allocates an empty instance of args[0], so it serves both.
     mov rdi, [rbp - SASM_DICT]
@@ -779,14 +784,8 @@ DEF_FUNC methods_init
     mov rbx, rax            ; rbx = str method dict
 
     ; str's own __str__ and __repr__, by name.  See DEF_DUNDER_STRREPR.
-    mov rdi, rbx
-    lea rsi, [rel mn___str__]
-    lea rdx, [rel str_dunder_str]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___repr__]
-    lea rdx, [rel str_dunder_repr]
-    call dict_add_builtin_func
+    ADD_FN mn___str__, str_dunder_str
+    ADD_FN mn___repr__, str_dunder_repr
 
     ; int.__new__ / str.__new__: enum builds each member with
     ; `member_type.__new__(cls, *args)`, and decides which base is the data
@@ -795,236 +794,98 @@ DEF_FUNC methods_init
     lea rsi, [rel scalar_dunder_new]
     call add_new_staticmethod
 
-    mov rdi, rbx
-    lea rsi, [rel mn_upper]
-    lea rdx, [rel str_method_upper]
-    call dict_add_builtin_func
+    ADD_FN mn_upper, str_method_upper
 
-    mov rdi, rbx
-    lea rsi, [rel mn_lower]
-    lea rdx, [rel str_method_lower]
-    call dict_add_builtin_func
+    ADD_FN mn_lower, str_method_lower
 
-    mov rdi, rbx
-    lea rsi, [rel mn_strip]
-    lea rdx, [rel str_method_strip]
-    call dict_add_builtin_func
+    ADD_FN mn_strip, str_method_strip
 
-    mov rdi, rbx
-    lea rsi, [rel mn_startswith]
-    lea rdx, [rel str_method_startswith]
-    call dict_add_builtin_func
+    ADD_FN mn_startswith, str_method_startswith
 
-    mov rdi, rbx
-    lea rsi, [rel mn_endswith]
-    lea rdx, [rel str_method_endswith]
-    call dict_add_builtin_func
+    ADD_FN mn_endswith, str_method_endswith
 
-    mov rdi, rbx
-    lea rsi, [rel mn_find]
-    lea rdx, [rel str_method_find]
-    call dict_add_builtin_func
+    ADD_FN mn_find, str_method_find
 
-    mov rdi, rbx
-    lea rsi, [rel mn_replace]
-    lea rdx, [rel str_method_replace]
-    call dict_add_builtin_func
+    ADD_FN mn_replace, str_method_replace
 
-    mov rdi, rbx
-    lea rsi, [rel mn_join]
-    lea rdx, [rel str_method_join]
-    call dict_add_builtin_func
+    ADD_FN mn_join, str_method_join
 
-    mov rdi, rbx
-    lea rsi, [rel mn_split]
-    lea rdx, [rel str_method_split]
-    call dict_add_builtin_func
+    ADD_FN mn_split, str_method_split
 
-    mov rdi, rbx
-    lea rsi, [rel mn_format]
-    lea rdx, [rel str_method_format]
-    call dict_add_builtin_func
+    ADD_FN mn_format, str_method_format
 
-    mov rdi, rbx
-    lea rsi, [rel mn_lstrip]
-    lea rdx, [rel str_method_lstrip]
-    call dict_add_builtin_func
+    ADD_FN mn_lstrip, str_method_lstrip
 
-    mov rdi, rbx
-    lea rsi, [rel mn_rstrip]
-    lea rdx, [rel str_method_rstrip]
-    call dict_add_builtin_func
+    ADD_FN mn_rstrip, str_method_rstrip
 
-    mov rdi, rbx
-    lea rsi, [rel mn_count]
-    lea rdx, [rel str_method_count]
-    call dict_add_builtin_func
+    ADD_FN mn_count, str_method_count
 
-    mov rdi, rbx
-    lea rsi, [rel mn_index]
-    lea rdx, [rel str_method_index]
-    call dict_add_builtin_func
+    ADD_FN mn_index, str_method_index
 
-    mov rdi, rbx
-    lea rsi, [rel mn_rfind]
-    lea rdx, [rel str_method_rfind]
-    call dict_add_builtin_func
+    ADD_FN mn_rfind, str_method_rfind
 
-    mov rdi, rbx
-    lea rsi, [rel mn_isdigit]
-    lea rdx, [rel str_method_isdigit]
-    call dict_add_builtin_func
+    ADD_FN mn_isdigit, str_method_isdigit
 
-    mov rdi, rbx
-    lea rsi, [rel mn_isalpha]
-    lea rdx, [rel str_method_isalpha]
-    call dict_add_builtin_func
+    ADD_FN mn_isalpha, str_method_isalpha
 
-    mov rdi, rbx
-    lea rsi, [rel mn_isidentifier]
-    lea rdx, [rel str_method_isidentifier]
-    call dict_add_builtin_func
+    ADD_FN mn_isidentifier, str_method_isidentifier
 
-    mov rdi, rbx
-    lea rsi, [rel mn_isprintable]
-    lea rdx, [rel str_method_isprintable]
-    call dict_add_builtin_func
+    ADD_FN mn_isprintable, str_method_isprintable
 
-    mov rdi, rbx
-    lea rsi, [rel mn_isascii]
-    lea rdx, [rel str_method_isascii]
-    call dict_add_builtin_func
+    ADD_FN mn_isascii, str_method_isascii
 
-    mov rdi, rbx
-    lea rsi, [rel mn_isdecimal]
-    lea rdx, [rel str_method_isdecimal]
-    call dict_add_builtin_func
+    ADD_FN mn_isdecimal, str_method_isdecimal
 
-    mov rdi, rbx
-    lea rsi, [rel mn_isnumeric]
     extern str_method_isnumeric
-    lea rdx, [rel str_method_isnumeric]
-    call dict_add_builtin_func
+    ADD_FN mn_isnumeric, str_method_isnumeric
 
-    mov rdi, rbx
-    lea rsi, [rel mn_removeprefix]
-    lea rdx, [rel str_method_removeprefix]
-    call dict_add_builtin_func
+    ADD_FN mn_removeprefix, str_method_removeprefix
 
-    mov rdi, rbx
-    lea rsi, [rel mn_removesuffix]
-    lea rdx, [rel str_method_removesuffix]
-    call dict_add_builtin_func
+    ADD_FN mn_removesuffix, str_method_removesuffix
 
-    mov rdi, rbx
-    lea rsi, [rel mn_encode]
-    lea rdx, [rel str_method_encode]
-    call dict_add_builtin_func
+    ADD_FN mn_encode, str_method_encode
 
-    mov rdi, rbx
-    lea rsi, [rel mn_isalnum]
-    lea rdx, [rel str_method_isalnum]
-    call dict_add_builtin_func
+    ADD_FN mn_isalnum, str_method_isalnum
 
-    mov rdi, rbx
-    lea rsi, [rel mn_isspace]
-    lea rdx, [rel str_method_isspace]
-    call dict_add_builtin_func
+    ADD_FN mn_isspace, str_method_isspace
 
-    mov rdi, rbx
-    lea rsi, [rel mn_isupper]
-    lea rdx, [rel str_method_isupper]
-    call dict_add_builtin_func
+    ADD_FN mn_isupper, str_method_isupper
 
-    mov rdi, rbx
-    lea rsi, [rel mn_islower]
-    lea rdx, [rel str_method_islower]
-    call dict_add_builtin_func
+    ADD_FN mn_islower, str_method_islower
 
-    mov rdi, rbx
-    lea rsi, [rel mn_title]
-    lea rdx, [rel str_method_title]
-    call dict_add_builtin_func
+    ADD_FN mn_title, str_method_title
 
-    mov rdi, rbx
-    lea rsi, [rel mn_capitalize]
-    lea rdx, [rel str_method_capitalize]
-    call dict_add_builtin_func
+    ADD_FN mn_capitalize, str_method_capitalize
 
-    mov rdi, rbx
-    lea rsi, [rel mn_swapcase]
-    lea rdx, [rel str_method_swapcase]
-    call dict_add_builtin_func
+    ADD_FN mn_swapcase, str_method_swapcase
 
-    mov rdi, rbx
-    lea rsi, [rel mn_casefold]
-    lea rdx, [rel str_method_casefold]
-    call dict_add_builtin_func
+    ADD_FN mn_casefold, str_method_casefold
 
-    mov rdi, rbx
-    lea rsi, [rel mn_center]
-    lea rdx, [rel str_method_center]
-    call dict_add_builtin_func
+    ADD_FN mn_center, str_method_center
 
-    mov rdi, rbx
-    lea rsi, [rel mn_ljust]
-    lea rdx, [rel str_method_ljust]
-    call dict_add_builtin_func
+    ADD_FN mn_ljust, str_method_ljust
 
-    mov rdi, rbx
-    lea rsi, [rel mn_rjust]
-    lea rdx, [rel str_method_rjust]
-    call dict_add_builtin_func
+    ADD_FN mn_rjust, str_method_rjust
 
-    mov rdi, rbx
-    lea rsi, [rel mn_zfill]
-    lea rdx, [rel str_method_zfill]
-    call dict_add_builtin_func
+    ADD_FN mn_zfill, str_method_zfill
 
-    mov rdi, rbx
-    lea rsi, [rel mn_rindex]
-    lea rdx, [rel str_method_rindex]
-    call dict_add_builtin_func
+    ADD_FN mn_rindex, str_method_rindex
 
-    mov rdi, rbx
-    lea rsi, [rel mn_istitle]
-    lea rdx, [rel str_method_istitle]
-    call dict_add_builtin_func
+    ADD_FN mn_istitle, str_method_istitle
 
-    mov rdi, rbx
-    lea rsi, [rel mn_partition]
-    lea rdx, [rel str_method_partition]
-    call dict_add_builtin_func
+    ADD_FN mn_partition, str_method_partition
 
-    mov rdi, rbx
-    lea rsi, [rel mn_rpartition]
-    lea rdx, [rel str_method_rpartition]
-    call dict_add_builtin_func
+    ADD_FN mn_rpartition, str_method_rpartition
 
-    mov rdi, rbx
-    lea rsi, [rel mn_rsplit]
-    lea rdx, [rel str_method_rsplit]
-    call dict_add_builtin_func
+    ADD_FN mn_rsplit, str_method_rsplit
 
-    mov rdi, rbx
-    lea rsi, [rel mn_splitlines]
-    lea rdx, [rel str_method_splitlines]
-    call dict_add_builtin_func
+    ADD_FN mn_splitlines, str_method_splitlines
 
-    mov rdi, rbx
-    lea rsi, [rel mn_expandtabs]
-    lea rdx, [rel str_method_expandtabs]
-    call dict_add_builtin_func
+    ADD_FN mn_expandtabs, str_method_expandtabs
 
-    mov rdi, rbx
-    lea rsi, [rel mn_translate]
-    lea rdx, [rel str_method_translate]
-    call dict_add_builtin_func
+    ADD_FN mn_translate, str_method_translate
 
-    mov rdi, rbx
-    lea rsi, [rel mn_format_map]
-    lea rdx, [rel str_method_format_map]
-    call dict_add_builtin_func
+    ADD_FN mn_format_map, str_method_format_map
 
     mov rdi, rbx
     lea rsi, [rel mn_maketrans]
@@ -1034,86 +895,35 @@ DEF_FUNC methods_init
     ; Store dict in str_type.tp_dict
 
     ; the slots, reachable by name: the stdlib reaches for them directly.
-    mov rdi, rbx
-    lea rsi, [rel mn___len__]
-    lea rdx, [rel str_dunder_len]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___iter__]
-    lea rdx, [rel str_dunder_iter]
-    call dict_add_builtin_func
+    ADD_FN mn___len__, str_dunder_len
+    ADD_FN mn___iter__, str_dunder_iter
 
-    mov rdi, rbx
-    lea rsi, [rel mn___format__]
-    lea rdx, [rel builtin_method_format]
-    call dict_add_builtin_func
+    ADD_FN mn___format__, builtin_method_format
 
     ; The operators, by name.
-    mov rdi, rbx
-    lea rsi, [rel mn___add__]
-    lea rdx, [rel str_dunder_add]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___mul__]
-    lea rdx, [rel str_dunder_mul]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rmul__]
-    lea rdx, [rel str_dunder_rmul]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___mod__]
-    lea rdx, [rel str_dunder_mod]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rmod__]
-    lea rdx, [rel str_dunder_rmod]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___getitem__]
-    lea rdx, [rel str_dunder_getitem]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___contains__]
-    lea rdx, [rel generic_method_contains]
-    call dict_add_builtin_func
+    ADD_FN mn___add__, str_dunder_add
+    ADD_FN mn___mul__, str_dunder_mul
+    ADD_FN mn___rmul__, str_dunder_rmul
+    ADD_FN mn___mod__, str_dunder_mod
+    ADD_FN mn___rmod__, str_dunder_rmod
+    ADD_FN mn___getitem__, str_dunder_getitem
+    ADD_FN mn___contains__, generic_method_contains
 
-    mov rdi, rbx
-    lea rsi, [rel mn___hash__]
     extern str_dunder_hash
-    lea rdx, [rel str_dunder_hash]
-    call dict_add_builtin_func
+    ADD_FN mn___hash__, str_dunder_hash
 
-    mov rdi, rbx
-    lea rsi, [rel mn___lt__]
     extern str_dunder_lt
-    lea rdx, [rel str_dunder_lt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___le__]
+    ADD_FN mn___lt__, str_dunder_lt
     extern str_dunder_le
-    lea rdx, [rel str_dunder_le]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___gt__]
+    ADD_FN mn___le__, str_dunder_le
     extern str_dunder_gt
-    lea rdx, [rel str_dunder_gt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ge__]
+    ADD_FN mn___gt__, str_dunder_gt
     extern str_dunder_ge
-    lea rdx, [rel str_dunder_ge]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___eq__]
+    ADD_FN mn___ge__, str_dunder_ge
     extern str_dunder_eq
-    lea rdx, [rel str_dunder_eq]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ne__]
+    ADD_FN mn___eq__, str_dunder_eq
     extern str_dunder_ne
-    lea rdx, [rel str_dunder_ne]
-    call dict_add_builtin_func
+    ADD_FN mn___ne__, str_dunder_ne
 
     lea rax, [rel str_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1127,55 +937,25 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax
 
-    mov rdi, rbx
-    lea rsi, [rel mn_index]
     extern range_method_index
-    lea rdx, [rel range_method_index]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_count]
+    ADD_FN mn_index, range_method_index
     extern range_method_count
-    lea rdx, [rel range_method_count]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___getitem__]
+    ADD_FN mn_count, range_method_count
     extern range_dunder_getitem
-    lea rdx, [rel range_dunder_getitem]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___reversed__]
+    ADD_FN mn___getitem__, range_dunder_getitem
     extern range_dunder_reversed
-    lea rdx, [rel range_dunder_reversed]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___contains__]
-    lea rdx, [rel generic_method_contains]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___len__]
+    ADD_FN mn___reversed__, range_dunder_reversed
+    ADD_FN mn___contains__, generic_method_contains
     extern range_dunder_len
-    lea rdx, [rel range_dunder_len]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___iter__]
+    ADD_FN mn___len__, range_dunder_len
     extern range_dunder_iter
-    lea rdx, [rel range_dunder_iter]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___eq__]
+    ADD_FN mn___iter__, range_dunder_iter
     extern range_dunder_eq
-    lea rdx, [rel range_dunder_eq]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ne__]
+    ADD_FN mn___eq__, range_dunder_eq
     extern range_dunder_ne
-    lea rdx, [rel range_dunder_ne]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___hash__]
+    ADD_FN mn___ne__, range_dunder_ne
     extern range_dunder_hash
-    lea rdx, [rel range_dunder_hash]
-    call dict_add_builtin_func
+    ADD_FN mn___hash__, range_dunder_hash
 
     ; start, stop and step are read-only: a range is immutable.
     mov rdi, rbx
@@ -1210,11 +990,8 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax
 
-    mov rdi, rbx
-    lea rsi, [rel mn_indices]
     extern slice_method_indices
-    lea rdx, [rel slice_method_indices]
-    call dict_add_builtin_func
+    ADD_FN mn_indices, slice_method_indices
     mov rdi, rbx
     lea rsi, [rel gs_start]
     extern slice_get_start
@@ -1247,31 +1024,16 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax
 
-    mov rdi, rbx
-    lea rsi, [rel mn___next__]
     extern builtin_next_fn
-    lea rdx, [rel builtin_next_fn]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___iter__]
+    ADD_FN mn___next__, builtin_next_fn
     extern gen_dunder_iter
-    lea rdx, [rel gen_dunder_iter]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_send]
+    ADD_FN mn___iter__, gen_dunder_iter
     extern _gen_send_impl
-    lea rdx, [rel _gen_send_impl]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_throw]
+    ADD_FN mn_send, _gen_send_impl
     extern _gen_throw_impl
-    lea rdx, [rel _gen_throw_impl]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_close]
+    ADD_FN mn_throw, _gen_throw_impl
     extern _gen_close_impl
-    lea rdx, [rel _gen_close_impl]
-    call dict_add_builtin_func
+    ADD_FN mn_close, _gen_close_impl
 
     GEN_GETSET gs___name__,     gen_get_name
     GEN_GETSET gs___qualname__, gen_get_name
@@ -1293,23 +1055,11 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax
 
-    mov rdi, rbx
-    lea rsi, [rel mn___await__]
     extern coro_dunder_iter
-    lea rdx, [rel coro_dunder_iter]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_send]
-    lea rdx, [rel _gen_send_impl]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_throw]
-    lea rdx, [rel _gen_throw_impl]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_close]
-    lea rdx, [rel _gen_close_impl]
-    call dict_add_builtin_func
+    ADD_FN mn___await__, coro_dunder_iter
+    ADD_FN mn_send, _gen_send_impl
+    ADD_FN mn_throw, _gen_throw_impl
+    ADD_FN mn_close, _gen_close_impl
 
     GEN_GETSET gs___name__,     gen_get_name
     GEN_GETSET gs___qualname__, gen_get_name
@@ -1327,135 +1077,44 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax
 
-    mov rdi, rbx
-    lea rsi, [rel mn_append]
-    lea rdx, [rel list_method_append]
-    mov rcx, 2              ; min: self + item
-    mov r8, 2               ; max: self + item
-    call add_method_to_dict_checked
+    ADD_FN_N mn_append, list_method_append, 2, 2
 
-    mov rdi, rbx
-    lea rsi, [rel mn_pop]
-    lea rdx, [rel list_method_pop]
-    mov rcx, 1              ; min: self (index optional)
-    mov r8, 2               ; max: self + index
-    call add_method_to_dict_checked
+    ADD_FN_N mn_pop, list_method_pop, 1, 2
 
-    mov rdi, rbx
-    lea rsi, [rel mn_insert]
-    lea rdx, [rel list_method_insert]
-    mov rcx, 3              ; min: self + index + item
-    mov r8, 3               ; max
-    call add_method_to_dict_checked
+    ADD_FN_N mn_insert, list_method_insert, 3, 3
 
-    mov rdi, rbx
-    lea rsi, [rel mn_reverse]
-    lea rdx, [rel list_method_reverse]
-    mov rcx, 1              ; min: self
-    mov r8, 1               ; max: self
-    call add_method_to_dict_checked
+    ADD_FN_N mn_reverse, list_method_reverse, 1, 1
 
-    mov rdi, rbx
-    lea rsi, [rel mn_sort]
-    lea rdx, [rel list_method_sort]
-    call dict_add_builtin_func
+    ADD_FN mn_sort, list_method_sort
 
-    mov rdi, rbx
-    lea rsi, [rel mn_index]
-    lea rdx, [rel list_method_index]
-    mov rcx, 2              ; min: self + value
-    mov r8, -1              ; max: unlimited (start, stop optional)
-    call add_method_to_dict_checked
+    ADD_FN_N mn_index, list_method_index, 2, -1
 
-    mov rdi, rbx
-    lea rsi, [rel mn_count]
-    lea rdx, [rel list_method_count]
-    mov rcx, 2              ; min: self + value
-    mov r8, 2               ; max: self + value
-    call add_method_to_dict_checked
+    ADD_FN_N mn_count, list_method_count, 2, 2
 
-    mov rdi, rbx
-    lea rsi, [rel mn_copy]
-    lea rdx, [rel list_method_copy]
-    mov rcx, 1              ; min: self
-    mov r8, 1               ; max: self
-    call add_method_to_dict_checked
+    ADD_FN_N mn_copy, list_method_copy, 1, 1
 
-    mov rdi, rbx
-    lea rsi, [rel mn_clear]
-    lea rdx, [rel list_method_clear]
-    mov rcx, 1              ; min: self
-    mov r8, 1               ; max: self
-    call add_method_to_dict_checked
+    ADD_FN_N mn_clear, list_method_clear, 1, 1
 
-    mov rdi, rbx
-    lea rsi, [rel mn_extend]
-    lea rdx, [rel list_method_extend]
-    mov rcx, 2              ; min: self + iterable
-    mov r8, 2               ; max
-    call add_method_to_dict_checked
+    ADD_FN_N mn_extend, list_method_extend, 2, 2
 
-    mov rdi, rbx
-    lea rsi, [rel mn_remove]
-    lea rdx, [rel list_method_remove]
-    mov rcx, 2              ; min: self + value
-    mov r8, 2               ; max
-    call add_method_to_dict_checked
+    ADD_FN_N mn_remove, list_method_remove, 2, 2
 
-    mov rdi, rbx
-    lea rsi, [rel mn___reversed__]
-    lea rdx, [rel list_method_reversed]
-    call dict_add_builtin_func
+    ADD_FN mn___reversed__, list_method_reversed
 
     ;; list dunder methods
-    mov rdi, rbx
-    lea rsi, [rel mn___getitem__]
-    lea rdx, [rel list_dunder_getitem]
-    mov rcx, 2
-    mov r8, 2
-    call add_method_to_dict_checked
+    ADD_FN_N mn___getitem__, list_dunder_getitem, 2, 2
 
-    mov rdi, rbx
-    lea rsi, [rel mn___setitem__]
-    lea rdx, [rel list_dunder_setitem]
-    mov rcx, 3
-    mov r8, 3
-    call add_method_to_dict_checked
+    ADD_FN_N mn___setitem__, list_dunder_setitem, 3, 3
 
-    mov rdi, rbx
-    lea rsi, [rel mn___delitem__]
-    lea rdx, [rel list_dunder_delitem]
-    mov rcx, 2
-    mov r8, 2
-    call add_method_to_dict_checked
+    ADD_FN_N mn___delitem__, list_dunder_delitem, 2, 2
 
-    mov rdi, rbx
-    lea rsi, [rel mn___contains__]
-    lea rdx, [rel list_dunder_contains]
-    mov rcx, 2
-    mov r8, 2
-    call add_method_to_dict_checked
+    ADD_FN_N mn___contains__, list_dunder_contains, 2, 2
 
-    mov rdi, rbx
-    lea rsi, [rel mn___len__]
-    lea rdx, [rel list_dunder_len]
-    mov rcx, 1
-    mov r8, 1
-    call add_method_to_dict_checked
+    ADD_FN_N mn___len__, list_dunder_len, 1, 1
 
-    mov rdi, rbx
-    lea rsi, [rel mn___iadd__]
-    lea rdx, [rel list_dunder_iadd]
-    mov rcx, 2
-    mov r8, 2
-    call add_method_to_dict_checked
+    ADD_FN_N mn___iadd__, list_dunder_iadd, 2, 2
 
-    mov rdi, rbx
-    lea rsi, [rel mn___init__]
-    lea rdx, [rel list_dunder_init]
-    mov rcx, 1
-    mov r8, -1
-    call add_method_to_dict_checked
+    ADD_FN_N mn___init__, list_dunder_init, 1, -1
 
     mov rdi, rbx
     lea rsi, [rel container_dunder_new]
@@ -1467,64 +1126,31 @@ DEF_FUNC methods_init
     ; Store in list_type.tp_dict
 
     ; the slots, reachable by name: the stdlib reaches for them directly.
-    mov rdi, rbx
-    lea rsi, [rel mn___iter__]
-    lea rdx, [rel list_dunder_iter]
-    call dict_add_builtin_func
+    ADD_FN mn___iter__, list_dunder_iter
 
     ; The operators, by name.  The slots were there and the names were not.
-    mov rdi, rbx
-    lea rsi, [rel mn___add__]
-    lea rdx, [rel list_dunder_add]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___mul__]
-    lea rdx, [rel list_dunder_mul]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rmul__]
-    lea rdx, [rel list_dunder_rmul]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___imul__]
-    lea rdx, [rel list_dunder_imul]
-    call dict_add_builtin_func
+    ADD_FN mn___add__, list_dunder_add
+    ADD_FN mn___mul__, list_dunder_mul
+    ADD_FN mn___rmul__, list_dunder_rmul
+    ADD_FN mn___imul__, list_dunder_imul
 
     ; Unhashable: the name has to BE None, not resolve to object's.
     mov rdi, rbx
     lea rsi, [rel mn___hash__]
     call dict_add_none
 
-    mov rdi, rbx
-    lea rsi, [rel mn___lt__]
     extern list_dunder_lt
-    lea rdx, [rel list_dunder_lt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___le__]
+    ADD_FN mn___lt__, list_dunder_lt
     extern list_dunder_le
-    lea rdx, [rel list_dunder_le]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___gt__]
+    ADD_FN mn___le__, list_dunder_le
     extern list_dunder_gt
-    lea rdx, [rel list_dunder_gt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ge__]
+    ADD_FN mn___gt__, list_dunder_gt
     extern list_dunder_ge
-    lea rdx, [rel list_dunder_ge]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___eq__]
+    ADD_FN mn___ge__, list_dunder_ge
     extern list_dunder_eq
-    lea rdx, [rel list_dunder_eq]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ne__]
+    ADD_FN mn___eq__, list_dunder_eq
     extern list_dunder_ne
-    lea rdx, [rel list_dunder_ne]
-    call dict_add_builtin_func
+    ADD_FN mn___ne__, list_dunder_ne
 
     lea rax, [rel list_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1535,69 +1161,31 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax
 
-    mov rdi, rbx
-    lea rsi, [rel mn_get]
-    lea rdx, [rel dict_method_get]
-    call dict_add_builtin_func
+    ADD_FN mn_get, dict_method_get
 
-    mov rdi, rbx
-    lea rsi, [rel mn_keys]
-    lea rdx, [rel dict_method_keys]
-    call dict_add_builtin_func
+    ADD_FN mn_keys, dict_method_keys
 
-    mov rdi, rbx
-    lea rsi, [rel mn_values]
-    lea rdx, [rel dict_method_values]
-    call dict_add_builtin_func
+    ADD_FN mn_values, dict_method_values
 
-    mov rdi, rbx
-    lea rsi, [rel mn_items]
-    lea rdx, [rel dict_method_items]
-    call dict_add_builtin_func
+    ADD_FN mn_items, dict_method_items
 
-    mov rdi, rbx
-    lea rsi, [rel mn_pop]
-    lea rdx, [rel dict_method_pop]
-    call dict_add_builtin_func
+    ADD_FN mn_pop, dict_method_pop
 
-    mov rdi, rbx
-    lea rsi, [rel mn_clear]
-    lea rdx, [rel dict_method_clear]
-    call dict_add_builtin_func
+    ADD_FN mn_clear, dict_method_clear
 
-    mov rdi, rbx
-    lea rsi, [rel mn_update]
-    lea rdx, [rel dict_method_update]
-    call dict_add_builtin_func
+    ADD_FN mn_update, dict_method_update
 
     ; dict() has no __init__ either; update() is the same operation.
-    mov rdi, rbx
-    lea rsi, [rel mn___init__]
-    lea rdx, [rel dict_method_update]
-    mov rcx, 1
-    mov r8, -1
-    call add_method_to_dict_checked
+    ADD_FN_N mn___init__, dict_method_update, 1, -1
 
-    mov rdi, rbx
-    lea rsi, [rel mn_setdefault]
-    lea rdx, [rel dict_method_setdefault]
-    call dict_add_builtin_func
+    ADD_FN mn_setdefault, dict_method_setdefault
 
-    mov rdi, rbx
-    lea rsi, [rel mn_copy]
-    lea rdx, [rel dict_method_copy]
-    call dict_add_builtin_func
+    ADD_FN mn_copy, dict_method_copy
 
-    mov rdi, rbx
-    lea rsi, [rel mn_popitem]
-    lea rdx, [rel dict_method_popitem]
-    call dict_add_builtin_func
+    ADD_FN mn_popitem, dict_method_popitem
 
     extern dict_reversed
-    mov rdi, rbx
-    lea rsi, [rel mn___reversed__]
-    lea rdx, [rel dict_reversed]
-    call dict_add_builtin_func
+    ADD_FN mn___reversed__, dict_reversed
 
     ; Add fromkeys as classmethod
     lea rdi, [rel dict_classmethod_fromkeys]
@@ -1634,25 +1222,13 @@ DEF_FUNC methods_init
     lea rsi, [rel container_dunder_new]
     call add_new_staticmethod
 
-    mov rdi, rbx
-    lea rsi, [rel mn___contains__]
-    lea rdx, [rel generic_method_contains]
-    call dict_add_builtin_func
+    ADD_FN mn___contains__, generic_method_contains
 
-    mov rdi, rbx
-    lea rsi, [rel mn___setitem__]
-    lea rdx, [rel dict_dunder_setitem]
-    call dict_add_builtin_func
+    ADD_FN mn___setitem__, dict_dunder_setitem
 
-    mov rdi, rbx
-    lea rsi, [rel mn___delitem__]
-    lea rdx, [rel dict_dunder_delitem]
-    call dict_add_builtin_func
+    ADD_FN mn___delitem__, dict_dunder_delitem
 
-    mov rdi, rbx
-    lea rsi, [rel mn___getitem__]
-    lea rdx, [rel dict_dunder_getitem]
-    call dict_add_builtin_func
+    ADD_FN mn___getitem__, dict_dunder_getitem
 
     mov rdi, rbx
     call add_class_getitem
@@ -1660,64 +1236,31 @@ DEF_FUNC methods_init
     ; Store in dict_type.tp_dict
 
     ; the slots, reachable by name: the stdlib reaches for them directly.
-    mov rdi, rbx
-    lea rsi, [rel mn___len__]
-    lea rdx, [rel dict_dunder_len]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___iter__]
-    lea rdx, [rel dict_dunder_iter]
-    call dict_add_builtin_func
+    ADD_FN mn___len__, dict_dunder_len
+    ADD_FN mn___iter__, dict_dunder_iter
 
     ; The union operators, by name.
-    mov rdi, rbx
-    lea rsi, [rel mn___or__]
-    lea rdx, [rel dict_dunder_or]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ror__]
-    lea rdx, [rel dict_dunder_ror]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ior__]
-    lea rdx, [rel dict_dunder_ior]
-    call dict_add_builtin_func
+    ADD_FN mn___or__, dict_dunder_or
+    ADD_FN mn___ror__, dict_dunder_ror
+    ADD_FN mn___ior__, dict_dunder_ior
 
     ; Unhashable: the name has to BE None, not resolve to object's.
     mov rdi, rbx
     lea rsi, [rel mn___hash__]
     call dict_add_none
 
-    mov rdi, rbx
-    lea rsi, [rel mn___lt__]
     extern dict_dunder_lt
-    lea rdx, [rel dict_dunder_lt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___le__]
+    ADD_FN mn___lt__, dict_dunder_lt
     extern dict_dunder_le
-    lea rdx, [rel dict_dunder_le]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___gt__]
+    ADD_FN mn___le__, dict_dunder_le
     extern dict_dunder_gt
-    lea rdx, [rel dict_dunder_gt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ge__]
+    ADD_FN mn___gt__, dict_dunder_gt
     extern dict_dunder_ge
-    lea rdx, [rel dict_dunder_ge]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___eq__]
+    ADD_FN mn___ge__, dict_dunder_ge
     extern dict_dunder_eq
-    lea rdx, [rel dict_dunder_eq]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ne__]
+    ADD_FN mn___eq__, dict_dunder_eq
     extern dict_dunder_ne
-    lea rdx, [rel dict_dunder_ne]
-    call dict_add_builtin_func
+    ADD_FN mn___ne__, dict_dunder_ne
 
     lea rax, [rel dict_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1730,61 +1273,21 @@ DEF_FUNC methods_init
 
     ; Registered with arity checks: a.count() and u.index() with no argument
     ; must raise TypeError, which seq_tests asserts.
-    mov rdi, rbx
-    lea rsi, [rel mn_index]
-    lea rdx, [rel tuple_method_index]
-    mov rcx, 2
-    mov r8, 4                   ; self, value, optional start and stop
-    call add_method_to_dict_checked
+    ADD_FN_N mn_index, tuple_method_index, 2, 4
 
-    mov rdi, rbx
-    lea rsi, [rel mn_count]
-    lea rdx, [rel tuple_method_count]
-    mov rcx, 2
-    mov r8, 2
-    call add_method_to_dict_checked
+    ADD_FN_N mn_count, tuple_method_count, 2, 2
 
-    mov rdi, rbx
-    lea rsi, [rel mn___getitem__]
-    lea rdx, [rel tuple_dunder_getitem]
-    mov rcx, 2
-    mov r8, 2
-    call add_method_to_dict_checked
+    ADD_FN_N mn___getitem__, tuple_dunder_getitem, 2, 2
 
-    mov rdi, rbx
-    lea rsi, [rel mn___contains__]
-    lea rdx, [rel tuple_dunder_contains]
-    mov rcx, 2
-    mov r8, 2
-    call add_method_to_dict_checked
+    ADD_FN_N mn___contains__, tuple_dunder_contains, 2, 2
 
-    mov rdi, rbx
-    lea rsi, [rel mn___len__]
-    lea rdx, [rel tuple_dunder_len]
-    mov rcx, 1
-    mov r8, 1
-    call add_method_to_dict_checked
+    ADD_FN_N mn___len__, tuple_dunder_len, 1, 1
 
-    mov rdi, rbx
-    lea rsi, [rel mn___add__]
-    lea rdx, [rel tuple_dunder_add]
-    mov rcx, 2
-    mov r8, 2
-    call add_method_to_dict_checked
+    ADD_FN_N mn___add__, tuple_dunder_add, 2, 2
 
-    mov rdi, rbx
-    lea rsi, [rel mn___mul__]
-    lea rdx, [rel tuple_dunder_mul]
-    mov rcx, 2
-    mov r8, 2
-    call add_method_to_dict_checked
+    ADD_FN_N mn___mul__, tuple_dunder_mul, 2, 2
 
-    mov rdi, rbx
-    lea rsi, [rel mn___rmul__]
-    lea rdx, [rel tuple_dunder_rmul]
-    mov rcx, 2
-    mov r8, 2
-    call add_method_to_dict_checked
+    ADD_FN_N mn___rmul__, tuple_dunder_rmul, 2, 2
 
     mov rdi, rbx
     lea rsi, [rel container_dunder_new]
@@ -1796,47 +1299,23 @@ DEF_FUNC methods_init
     ; Store in tuple_type.tp_dict
 
     ; the slots, reachable by name: the stdlib reaches for them directly.
-    mov rdi, rbx
-    lea rsi, [rel mn___iter__]
-    lea rdx, [rel tuple_dunder_iter]
-    call dict_add_builtin_func
+    ADD_FN mn___iter__, tuple_dunder_iter
 
-    mov rdi, rbx
-    lea rsi, [rel mn___hash__]
     extern tuple_dunder_hash
-    lea rdx, [rel tuple_dunder_hash]
-    call dict_add_builtin_func
+    ADD_FN mn___hash__, tuple_dunder_hash
 
-    mov rdi, rbx
-    lea rsi, [rel mn___lt__]
     extern tuple_dunder_lt
-    lea rdx, [rel tuple_dunder_lt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___le__]
+    ADD_FN mn___lt__, tuple_dunder_lt
     extern tuple_dunder_le
-    lea rdx, [rel tuple_dunder_le]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___gt__]
+    ADD_FN mn___le__, tuple_dunder_le
     extern tuple_dunder_gt
-    lea rdx, [rel tuple_dunder_gt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ge__]
+    ADD_FN mn___gt__, tuple_dunder_gt
     extern tuple_dunder_ge
-    lea rdx, [rel tuple_dunder_ge]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___eq__]
+    ADD_FN mn___ge__, tuple_dunder_ge
     extern tuple_dunder_eq
-    lea rdx, [rel tuple_dunder_eq]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ne__]
+    ADD_FN mn___eq__, tuple_dunder_eq
     extern tuple_dunder_ne
-    lea rdx, [rel tuple_dunder_ne]
-    call dict_add_builtin_func
+    ADD_FN mn___ne__, tuple_dunder_ne
 
     lea rax, [rel tuple_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1847,44 +1326,21 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax
 
-    mov rdi, rbx
-    lea rsi, [rel mn_add]
-    lea rdx, [rel set_method_add]
-    call dict_add_builtin_func
+    ADD_FN mn_add, set_method_add
 
-    mov rdi, rbx
-    lea rsi, [rel mn_remove]
-    lea rdx, [rel set_method_remove]
-    call dict_add_builtin_func
+    ADD_FN mn_remove, set_method_remove
 
-    mov rdi, rbx
-    lea rsi, [rel mn_discard]
-    lea rdx, [rel set_method_discard]
-    call dict_add_builtin_func
+    ADD_FN mn_discard, set_method_discard
 
-    mov rdi, rbx
-    lea rsi, [rel mn_pop]
-    lea rdx, [rel set_method_pop]
-    call dict_add_builtin_func
+    ADD_FN mn_pop, set_method_pop
 
-    mov rdi, rbx
-    lea rsi, [rel mn_clear]
-    lea rdx, [rel set_method_clear]
-    call dict_add_builtin_func
+    ADD_FN mn_clear, set_method_clear
 
-    mov rdi, rbx
-    lea rsi, [rel mn_update]
-    lea rdx, [rel set_method_update]
-    call dict_add_builtin_func
+    ADD_FN mn_update, set_method_update
 
     ; set() has no __init__, so a subclass had nothing to fill it from.
     ; update() already takes (self, iterable) and returns None.
-    mov rdi, rbx
-    lea rsi, [rel mn___init__]
-    lea rdx, [rel set_method_update]
-    mov rcx, 1
-    mov r8, -1
-    call add_method_to_dict_checked
+    ADD_FN_N mn___init__, set_method_update, 1, -1
 
     mov rdi, rbx
     call set_add_shared_methods
@@ -1896,75 +1352,36 @@ DEF_FUNC methods_init
     ; The mutating method forms, on set alone -- frozenset has nothing to
     ; update.  `update` itself is registered with the shared methods, because
     ; it doubles as set.__init__.
-    mov rdi, rbx
-    lea rsi, [rel mn_intersection_update]
-    lea rdx, [rel set_method_intersection_update]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_difference_update]
-    lea rdx, [rel set_method_difference_update]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_symmetric_difference_update]
-    lea rdx, [rel set_method_symmetric_difference_update]
-    call dict_add_builtin_func
+    ADD_FN mn_intersection_update, set_method_intersection_update
+    ADD_FN mn_difference_update, set_method_difference_update
+    ADD_FN mn_symmetric_difference_update, set_method_symmetric_difference_update
 
     ; The reflected four are registered with the forward four.  The in-place
     ; four go on set alone: they mutate, and frozenset cannot.  They are not
     ; in set_operator_names for exactly that reason -- that table is walked
     ; for both types.
-    mov rdi, rbx
-    lea rsi, [rel mn___iand__]
-    lea rdx, [rel set_dunder_iand]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ior__]
-    lea rdx, [rel set_dunder_ior]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___isub__]
-    lea rdx, [rel set_dunder_isub]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ixor__]
-    lea rdx, [rel set_dunder_ixor]
-    call dict_add_builtin_func
+    ADD_FN mn___iand__, set_dunder_iand
+    ADD_FN mn___ior__, set_dunder_ior
+    ADD_FN mn___isub__, set_dunder_isub
+    ADD_FN mn___ixor__, set_dunder_ixor
 
     ; Unhashable: the name has to BE None, not resolve to object's.
     mov rdi, rbx
     lea rsi, [rel mn___hash__]
     call dict_add_none
 
-    mov rdi, rbx
-    lea rsi, [rel mn___lt__]
     extern set_dunder_lt
-    lea rdx, [rel set_dunder_lt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___le__]
+    ADD_FN mn___lt__, set_dunder_lt
     extern set_dunder_le
-    lea rdx, [rel set_dunder_le]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___gt__]
+    ADD_FN mn___le__, set_dunder_le
     extern set_dunder_gt
-    lea rdx, [rel set_dunder_gt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ge__]
+    ADD_FN mn___gt__, set_dunder_gt
     extern set_dunder_ge
-    lea rdx, [rel set_dunder_ge]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___eq__]
+    ADD_FN mn___ge__, set_dunder_ge
     extern set_dunder_eq
-    lea rdx, [rel set_dunder_eq]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ne__]
+    ADD_FN mn___eq__, set_dunder_eq
     extern set_dunder_ne
-    lea rdx, [rel set_dunder_ne]
-    call dict_add_builtin_func
+    ADD_FN mn___ne__, set_dunder_ne
 
     lea rax, [rel set_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1998,41 +1415,20 @@ DEF_FUNC methods_init
     ; frozenset.__hash__(f) and hash(f) disagreed on the one type that exists
     ; to be a dict key.  It cannot go through obj_hash either: that reads
     ; tp_hash, and a subclass defining __hash__ would re-enter itself.
-    mov rdi, rbx
-    lea rsi, [rel mn___hash__]
-    lea rdx, [rel frozenset_dunder_hash]
-    call dict_add_builtin_func
+    ADD_FN mn___hash__, frozenset_dunder_hash
 
-    mov rdi, rbx
-    lea rsi, [rel mn___lt__]
     extern frozenset_dunder_lt
-    lea rdx, [rel frozenset_dunder_lt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___le__]
+    ADD_FN mn___lt__, frozenset_dunder_lt
     extern frozenset_dunder_le
-    lea rdx, [rel frozenset_dunder_le]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___gt__]
+    ADD_FN mn___le__, frozenset_dunder_le
     extern frozenset_dunder_gt
-    lea rdx, [rel frozenset_dunder_gt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ge__]
+    ADD_FN mn___gt__, frozenset_dunder_gt
     extern frozenset_dunder_ge
-    lea rdx, [rel frozenset_dunder_ge]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___eq__]
+    ADD_FN mn___ge__, frozenset_dunder_ge
     extern frozenset_dunder_eq
-    lea rdx, [rel frozenset_dunder_eq]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ne__]
+    ADD_FN mn___eq__, frozenset_dunder_eq
     extern frozenset_dunder_ne
-    lea rdx, [rel frozenset_dunder_ne]
-    call dict_add_builtin_func
+    ADD_FN mn___ne__, frozenset_dunder_ne
 
     lea rax, [rel frozenset_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2044,10 +1440,7 @@ DEF_FUNC methods_init
     ; class definition time, so those have to exist as methods.
     call dict_new
     mov rbx, rax
-    mov rdi, rbx
-    lea rsi, [rel mn___hash__]
-    lea rdx, [rel generic_method_hash]
-    call dict_add_builtin_func
+    ADD_FN mn___hash__, generic_method_hash
     mov rdi, rbx
     call add_class_getitem
     extern weakref_type
@@ -2098,28 +1491,16 @@ DEF_FUNC methods_init
     call obj_decref
 
     ; __init__, __str__ and __repr__ so the base type is introspectable
-    mov rdi, rbx
-    lea rsi, [rel mn___init__]
-    lea rdx, [rel object_method_init]
-    call dict_add_builtin_func
+    ADD_FN mn___init__, object_method_init
 
-    mov rdi, rbx
-    lea rsi, [rel mn___str__]
-    lea rdx, [rel object_method_str]
-    call dict_add_builtin_func
+    ADD_FN mn___str__, object_method_str
 
-    mov rdi, rbx
-    lea rsi, [rel mn___repr__]
-    lea rdx, [rel object_method_repr]
-    call dict_add_builtin_func
+    ADD_FN mn___repr__, object_method_repr
 
     ; The rest of what object supplies by name.  types.py and enum both ask
     ; whether a class overrode one of these, which means asking object for its
     ; own first.
-    mov rdi, rbx
-    lea rsi, [rel mn___format__]
-    lea rdx, [rel object_method_format]
-    call dict_add_builtin_func
+    ADD_FN mn___format__, object_method_format
 
     ; __doc__ is an attribute, not a method, and object supplies it so that
     ; anything without a docstring answers None rather than raising.  CPython
@@ -2136,10 +1517,7 @@ DEF_FUNC methods_init
     pop rdi
     call obj_decref
 
-    mov rdi, rbx
-    lea rsi, [rel mn___sizeof__]
-    lea rdx, [rel object_method_sizeof]
-    call dict_add_builtin_func
+    ADD_FN mn___sizeof__, object_method_sizeof
 
     ; A classmethod: `super().__init_subclass__()` is how every real one ends.
     lea rdi, [rel object_method_init_subclass]
@@ -2166,81 +1544,39 @@ DEF_FUNC methods_init
     mov rdi, r12
     call obj_decref
 
-    mov rdi, rbx
-    lea rsi, [rel mn___dir__]
-    lea rdx, [rel object_method_dir]
-    call dict_add_builtin_func
+    ADD_FN mn___dir__, object_method_dir
 
-    mov rdi, rbx
-    lea rsi, [rel mn___reduce__]
-    lea rdx, [rel object_method_reduce]
-    call dict_add_builtin_func
+    ADD_FN mn___reduce__, object_method_reduce
 
-    mov rdi, rbx
-    lea rsi, [rel mn___reduce_ex__]
-    lea rdx, [rel object_method_reduce]
-    call dict_add_builtin_func
+    ADD_FN mn___reduce_ex__, object_method_reduce
 
     ; The comparisons, which every class inherits and the stdlib binds by
     ; name: `__ne__ = MutableMapping.__ne__` reaches object's.
-    mov rdi, rbx
-    lea rsi, [rel mn___eq__]
-    lea rdx, [rel object_method_eq]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ne__]
-    lea rdx, [rel object_method_ne]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___hash__]
-    lea rdx, [rel object_method_hash]
-    call dict_add_builtin_func
+    ADD_FN mn___eq__, object_method_eq
+    ADD_FN mn___ne__, object_method_ne
+    ADD_FN mn___hash__, object_method_hash
 
     ; The ordering four, which answer NotImplemented.  They are safe for the
     ; same reason __eq__ is: type_install_slots installs no wrapper over a
     ; dunder that came from a type which is not a heaptype, and object is
     ; not, so a builtin subclass keeps its base's comparison rather than
     ; object's.
-    mov rdi, rbx
-    lea rsi, [rel mn___lt__]
     extern object_method_lt
-    lea rdx, [rel object_method_lt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___le__]
+    ADD_FN mn___lt__, object_method_lt
     extern object_method_le
-    lea rdx, [rel object_method_le]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___gt__]
+    ADD_FN mn___le__, object_method_le
     extern object_method_gt
-    lea rdx, [rel object_method_gt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ge__]
+    ADD_FN mn___gt__, object_method_gt
     extern object_method_ge
-    lea rdx, [rel object_method_ge]
-    call dict_add_builtin_func
+    ADD_FN mn___ge__, object_method_ge
 
     ; The generic attribute dunders, and the two hooks.  All five were
     ; absent, and every type inherits them -- abcmod has been looking for
     ; __subclasshook__ since it was written and silently finding nothing.
-    mov rdi, rbx
-    lea rsi, [rel mn___setattr__]
-    lea rdx, [rel object_method_setattr]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___delattr__]
-    lea rdx, [rel object_method_delattr]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___getattribute__]
-    lea rdx, [rel object_method_getattribute]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___getstate__]
-    lea rdx, [rel object_method_getstate]
-    call dict_add_builtin_func
+    ADD_FN mn___setattr__, object_method_setattr
+    ADD_FN mn___delattr__, object_method_delattr
+    ADD_FN mn___getattribute__, object_method_getattribute
+    ADD_FN mn___getstate__, object_method_getstate
 
     ; __subclasshook__ is a classmethod: it takes the class explicitly.
     lea rdi, [rel object_method_subclasshook]
@@ -2316,10 +1652,7 @@ DEF_FUNC methods_init
 
     ; type.__subclasses__ -- the direct subclasses, live ones only.
     extern type_method_subclasses
-    mov rdi, rbx
-    lea rsi, [rel mn___subclasses__]
-    lea rdx, [rel type_method_subclasses]
-    call dict_add_builtin_func
+    ADD_FN mn___subclasses__, type_method_subclasses
 
     lea rax, [rel type_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2375,11 +1708,8 @@ DEF_FUNC methods_init
     ; A function is a descriptor.  enum asks hasattr(value, '__get__') to tell
     ; a method in a class body from an enum member, so the binding LOAD_ATTR
     ; does natively has to be reachable by name as well.
-    mov rdi, rbx
-    lea rsi, [rel mn___get__]
     extern func_dunder_get
-    lea rdx, [rel func_dunder_get]
-    call dict_add_builtin_func
+    ADD_FN mn___get__, func_dunder_get
 
     extern func_type
     lea rax, [rel func_type]
@@ -2390,11 +1720,8 @@ DEF_FUNC methods_init
     ;; --- staticmethod and classmethod: descriptors for the same reason ---
     call dict_new
     mov rbx, rax
-    mov rdi, rbx
-    lea rsi, [rel mn___get__]
     extern staticmethod_dunder_get
-    lea rdx, [rel staticmethod_dunder_get]
-    call dict_add_builtin_func
+    ADD_FN mn___get__, staticmethod_dunder_get
     lea rax, [rel staticmethod_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -2402,11 +1729,8 @@ DEF_FUNC methods_init
 
     call dict_new
     mov rbx, rax
-    mov rdi, rbx
-    lea rsi, [rel mn___get__]
     extern classmethod_dunder_get
-    lea rdx, [rel classmethod_dunder_get]
-    call dict_add_builtin_func
+    ADD_FN mn___get__, classmethod_dunder_get
     lea rax, [rel classmethod_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -2415,21 +1739,12 @@ DEF_FUNC methods_init
     ;; --- property: the same three, by name ---
     call dict_new
     mov rbx, rax
-    mov rdi, rbx
-    lea rsi, [rel mn___get__]
     extern property_dunder_get
-    lea rdx, [rel property_dunder_get]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___set__]
+    ADD_FN mn___get__, property_dunder_get
     extern property_dunder_set
-    lea rdx, [rel property_dunder_set]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___delete__]
+    ADD_FN mn___set__, property_dunder_set
     extern property_dunder_delete
-    lea rdx, [rel property_dunder_delete]
-    call dict_add_builtin_func
+    ADD_FN mn___delete__, property_dunder_delete
     extern property_type
     lea rax, [rel property_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2443,21 +1758,12 @@ DEF_FUNC methods_init
     ; tp_dict, so every getset in the tree answered False.
     call dict_new
     mov rbx, rax
-    mov rdi, rbx
-    lea rsi, [rel mn___get__]
     extern getset_descr_dunder_get
-    lea rdx, [rel getset_descr_dunder_get]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___set__]
+    ADD_FN mn___get__, getset_descr_dunder_get
     extern getset_descr_dunder_set
-    lea rdx, [rel getset_descr_dunder_set]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___delete__]
+    ADD_FN mn___set__, getset_descr_dunder_set
     extern getset_descr_dunder_delete
-    lea rdx, [rel getset_descr_dunder_delete]
-    call dict_add_builtin_func
+    ADD_FN mn___delete__, getset_descr_dunder_delete
     extern getset_descr_type
     lea rax, [rel getset_descr_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2469,11 +1775,8 @@ DEF_FUNC methods_init
     ; classifiers tell a method from a getset.
     call dict_new
     mov rbx, rax
-    mov rdi, rbx
-    lea rsi, [rel mn___get__]
     extern builtin_func_dunder_get
-    lea rdx, [rel builtin_func_dunder_get]
-    call dict_add_builtin_func
+    ADD_FN mn___get__, builtin_func_dunder_get
     extern builtin_func_type
     lea rax, [rel builtin_func_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2484,10 +1787,7 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax
 
-    mov rdi, rbx
-    lea rsi, [rel mn___repr__]
-    lea rdx, [rel int_dunder_repr]
-    call dict_add_builtin_func
+    ADD_FN mn___repr__, int_dunder_repr
 
     ; int.__new__ / str.__new__: enum builds each member with
     ; `member_type.__new__(cls, *args)`, and decides which base is the data
@@ -2496,62 +1796,32 @@ DEF_FUNC methods_init
     lea rsi, [rel scalar_dunder_new]
     call add_new_staticmethod
 
-    mov rdi, rbx
-    lea rsi, [rel mn_bit_length]
-    lea rdx, [rel int_method_bit_length]
-    call dict_add_builtin_func
+    ADD_FN mn_bit_length, int_method_bit_length
 
     ; The names dir(int) was short of.  __round__ IS builtin_round_fn: a
     ; method's (args, nargs) is the shape round()'s own arguments arrive in.
-    mov rdi, rbx
-    lea rsi, [rel mn_is_integer]
     extern int_method_is_integer
-    lea rdx, [rel int_method_is_integer]
-    call dict_add_builtin_func
+    ADD_FN mn_is_integer, int_method_is_integer
 
-    mov rdi, rbx
-    lea rsi, [rel mn_as_integer_ratio]
     extern int_method_as_integer_ratio
-    lea rdx, [rel int_method_as_integer_ratio]
-    call dict_add_builtin_func
+    ADD_FN mn_as_integer_ratio, int_method_as_integer_ratio
 
-    mov rdi, rbx
-    lea rsi, [rel mn___round__]
     extern int_method_round
-    lea rdx, [rel int_method_round]
-    call dict_add_builtin_func
+    ADD_FN mn___round__, int_method_round
 
-    mov rdi, rbx
-    lea rsi, [rel mn___floor__]
     extern int_method_identity
-    lea rdx, [rel int_method_identity]
-    call dict_add_builtin_func
+    ADD_FN mn___floor__, int_method_identity
 
-    mov rdi, rbx
-    lea rsi, [rel mn___ceil__]
-    lea rdx, [rel int_method_identity]
-    call dict_add_builtin_func
+    ADD_FN mn___ceil__, int_method_identity
 
-    mov rdi, rbx
-    lea rsi, [rel mn___getnewargs__]
     extern int_method_getnewargs
-    lea rdx, [rel int_method_getnewargs]
-    call dict_add_builtin_func
+    ADD_FN mn___getnewargs__, int_method_getnewargs
 
-    mov rdi, rbx
-    lea rsi, [rel mn_bit_count]
-    lea rdx, [rel int_method_bit_count]
-    call dict_add_builtin_func
+    ADD_FN mn_bit_count, int_method_bit_count
 
-    mov rdi, rbx
-    lea rsi, [rel mn_conjugate]
-    lea rdx, [rel int_method_conjugate]
-    call dict_add_builtin_func
+    ADD_FN mn_conjugate, int_method_conjugate
 
-    mov rdi, rbx
-    lea rsi, [rel mn_to_bytes]
-    lea rdx, [rel int_method_to_bytes]
-    call dict_add_builtin_func
+    ADD_FN mn_to_bytes, int_method_to_bytes
 
 
     ; Add from_bytes as classmethod
@@ -2594,183 +1864,78 @@ DEF_FUNC methods_init
     ;; __invert__ on `class I(int, M)` could not find int's before M's, since
     ;; int had nothing in its dict to find, and type_install_slots wrote M's
     ;; wrapper over the nb_invert the class had already inherited.
-    mov rdi, rbx
-    lea rsi, [rel mn___neg__]
     extern int_dunder_neg
-    lea rdx, [rel int_dunder_neg]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___pos__]
+    ADD_FN mn___neg__, int_dunder_neg
     extern int_dunder_pos
-    lea rdx, [rel int_dunder_pos]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___abs__]
+    ADD_FN mn___pos__, int_dunder_pos
     extern int_dunder_abs
-    lea rdx, [rel int_dunder_abs]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___invert__]
+    ADD_FN mn___abs__, int_dunder_abs
     extern int_dunder_invert
-    lea rdx, [rel int_dunder_invert]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___int__]
+    ADD_FN mn___invert__, int_dunder_invert
     extern int_dunder_int
-    lea rdx, [rel int_dunder_int]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___float__]
+    ADD_FN mn___int__, int_dunder_int
     extern int_dunder_float
-    lea rdx, [rel int_dunder_float]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___index__]
+    ADD_FN mn___float__, int_dunder_float
     extern int_dunder_index
-    lea rdx, [rel int_dunder_index]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___trunc__]
+    ADD_FN mn___index__, int_dunder_index
     extern int_dunder_trunc
-    lea rdx, [rel int_dunder_trunc]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___bool__]
+    ADD_FN mn___trunc__, int_dunder_trunc
     extern int_dunder_bool
-    lea rdx, [rel int_dunder_bool]
-    call dict_add_builtin_func
+    ADD_FN mn___bool__, int_dunder_bool
 
     ;; and the binary family, forward and reflected.
-    mov rdi, rbx
-    lea rsi, [rel mn___add__]
     extern int_dunder_add
-    lea rdx, [rel int_dunder_add]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___sub__]
+    ADD_FN mn___add__, int_dunder_add
     extern int_dunder_sub
-    lea rdx, [rel int_dunder_sub]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___mul__]
+    ADD_FN mn___sub__, int_dunder_sub
     extern int_dunder_mul
-    lea rdx, [rel int_dunder_mul]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___mod__]
+    ADD_FN mn___mul__, int_dunder_mul
     extern int_dunder_mod
-    lea rdx, [rel int_dunder_mod]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___divmod__]
+    ADD_FN mn___mod__, int_dunder_mod
     extern int_dunder_divmod
-    lea rdx, [rel int_dunder_divmod]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___pow__]
+    ADD_FN mn___divmod__, int_dunder_divmod
     extern int_dunder_pow
-    lea rdx, [rel int_dunder_pow]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___lshift__]
+    ADD_FN mn___pow__, int_dunder_pow
     extern int_dunder_lshift
-    lea rdx, [rel int_dunder_lshift]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rshift__]
+    ADD_FN mn___lshift__, int_dunder_lshift
     extern int_dunder_rshift
-    lea rdx, [rel int_dunder_rshift]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___and__]
+    ADD_FN mn___rshift__, int_dunder_rshift
     extern int_dunder_and
-    lea rdx, [rel int_dunder_and]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___xor__]
+    ADD_FN mn___and__, int_dunder_and
     extern int_dunder_xor
-    lea rdx, [rel int_dunder_xor]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___or__]
+    ADD_FN mn___xor__, int_dunder_xor
     extern int_dunder_or
-    lea rdx, [rel int_dunder_or]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___floordiv__]
+    ADD_FN mn___or__, int_dunder_or
     extern int_dunder_floordiv
-    lea rdx, [rel int_dunder_floordiv]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___truediv__]
+    ADD_FN mn___floordiv__, int_dunder_floordiv
     extern int_dunder_truediv
-    lea rdx, [rel int_dunder_truediv]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___radd__]
+    ADD_FN mn___truediv__, int_dunder_truediv
     extern int_dunder_radd
-    lea rdx, [rel int_dunder_radd]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rsub__]
+    ADD_FN mn___radd__, int_dunder_radd
     extern int_dunder_rsub
-    lea rdx, [rel int_dunder_rsub]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rmul__]
+    ADD_FN mn___rsub__, int_dunder_rsub
     extern int_dunder_rmul
-    lea rdx, [rel int_dunder_rmul]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rmod__]
+    ADD_FN mn___rmul__, int_dunder_rmul
     extern int_dunder_rmod
-    lea rdx, [rel int_dunder_rmod]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rdivmod__]
+    ADD_FN mn___rmod__, int_dunder_rmod
     extern int_dunder_rdivmod
-    lea rdx, [rel int_dunder_rdivmod]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rpow__]
+    ADD_FN mn___rdivmod__, int_dunder_rdivmod
     extern int_dunder_rpow
-    lea rdx, [rel int_dunder_rpow]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rlshift__]
+    ADD_FN mn___rpow__, int_dunder_rpow
     extern int_dunder_rlshift
-    lea rdx, [rel int_dunder_rlshift]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rrshift__]
+    ADD_FN mn___rlshift__, int_dunder_rlshift
     extern int_dunder_rrshift
-    lea rdx, [rel int_dunder_rrshift]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rand__]
+    ADD_FN mn___rrshift__, int_dunder_rrshift
     extern int_dunder_rand
-    lea rdx, [rel int_dunder_rand]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rxor__]
+    ADD_FN mn___rand__, int_dunder_rand
     extern int_dunder_rxor
-    lea rdx, [rel int_dunder_rxor]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ror__]
+    ADD_FN mn___rxor__, int_dunder_rxor
     extern int_dunder_ror
-    lea rdx, [rel int_dunder_ror]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rfloordiv__]
+    ADD_FN mn___ror__, int_dunder_ror
     extern int_dunder_rfloordiv
-    lea rdx, [rel int_dunder_rfloordiv]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rtruediv__]
+    ADD_FN mn___rfloordiv__, int_dunder_rfloordiv
     extern int_dunder_rtruediv
-    lea rdx, [rel int_dunder_rtruediv]
-    call dict_add_builtin_func
+    ADD_FN mn___rtruediv__, int_dunder_rtruediv
 
     ;; real, imag, numerator and denominator, as getset descriptors.  int's
     ;; tp_getattr answers an instance read before this dict is consulted;
@@ -2801,47 +1966,23 @@ DEF_FUNC methods_init
     call dict_add_getset
 
     ; Store in int_type.tp_dict
-    mov rdi, rbx
-    lea rsi, [rel mn___format__]
-    lea rdx, [rel builtin_method_format]
-    call dict_add_builtin_func
+    ADD_FN mn___format__, builtin_method_format
 
-    mov rdi, rbx
-    lea rsi, [rel mn___hash__]
     extern int_dunder_hash
-    lea rdx, [rel int_dunder_hash]
-    call dict_add_builtin_func
+    ADD_FN mn___hash__, int_dunder_hash
 
-    mov rdi, rbx
-    lea rsi, [rel mn___lt__]
     extern int_dunder_lt
-    lea rdx, [rel int_dunder_lt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___le__]
+    ADD_FN mn___lt__, int_dunder_lt
     extern int_dunder_le
-    lea rdx, [rel int_dunder_le]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___gt__]
+    ADD_FN mn___le__, int_dunder_le
     extern int_dunder_gt
-    lea rdx, [rel int_dunder_gt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ge__]
+    ADD_FN mn___gt__, int_dunder_gt
     extern int_dunder_ge
-    lea rdx, [rel int_dunder_ge]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___eq__]
+    ADD_FN mn___ge__, int_dunder_ge
     extern int_dunder_eq
-    lea rdx, [rel int_dunder_eq]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ne__]
+    ADD_FN mn___eq__, int_dunder_eq
     extern int_dunder_ne
-    lea rdx, [rel int_dunder_ne]
-    call dict_add_builtin_func
+    ADD_FN mn___ne__, int_dunder_ne
 
     lea rax, [rel int_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2859,34 +2000,19 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax
 
-    mov rdi, rbx
-    lea rsi, [rel mn___repr__]
-    lea rdx, [rel complex_dunder_repr]
-    call dict_add_builtin_func
+    ADD_FN mn___repr__, complex_dunder_repr
 
     mov rdi, rbx
     lea rsi, [rel scalar_dunder_new]
     call add_new_staticmethod
 
-    mov rdi, rbx
-    lea rsi, [rel mn_conjugate]
-    lea rdx, [rel complex_method_conjugate]
-    call dict_add_builtin_func
+    ADD_FN mn_conjugate, complex_method_conjugate
 
-    mov rdi, rbx
-    lea rsi, [rel mn___complex__]
-    lea rdx, [rel complex_method_complex]
-    call dict_add_builtin_func
+    ADD_FN mn___complex__, complex_method_complex
 
-    mov rdi, rbx
-    lea rsi, [rel mn___getnewargs__]
-    lea rdx, [rel complex_method_getnewargs]
-    call dict_add_builtin_func
+    ADD_FN mn___getnewargs__, complex_method_getnewargs
 
-    mov rdi, rbx
-    lea rsi, [rel mn___format__]
-    lea rdx, [rel builtin_method_format]
-    call dict_add_builtin_func
+    ADD_FN mn___format__, builtin_method_format
 
     mov rdi, rbx
     lea rsi, [rel gs_real]
@@ -2901,17 +2027,11 @@ DEF_FUNC methods_init
     xor ecx, ecx
     call dict_add_getset
 
-    mov rdi, rbx
-    lea rsi, [rel mn___hash__]
     extern complex_dunder_hash
-    lea rdx, [rel complex_dunder_hash]
-    call dict_add_builtin_func
+    ADD_FN mn___hash__, complex_dunder_hash
 
-    mov rdi, rbx
-    lea rsi, [rel mn___bool__]
     extern complex_dunder_bool
-    lea rdx, [rel complex_dunder_bool]
-    call dict_add_builtin_func
+    ADD_FN mn___bool__, complex_dunder_bool
 
     lea rax, [rel complex_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2922,10 +2042,7 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax
 
-    mov rdi, rbx
-    lea rsi, [rel mn___repr__]
-    lea rdx, [rel float_dunder_repr]
-    call dict_add_builtin_func
+    ADD_FN mn___repr__, float_dunder_repr
 
     ; float.__new__, for the same reason int and str carry one: a subclass
     ; that overrides __new__ reaches the base's through super(), and enum
@@ -2934,51 +2051,27 @@ DEF_FUNC methods_init
     lea rsi, [rel scalar_dunder_new]
     call add_new_staticmethod
 
-    mov rdi, rbx
-    lea rsi, [rel mn_is_integer]
-    lea rdx, [rel float_method_is_integer]
-    call dict_add_builtin_func
+    ADD_FN mn_is_integer, float_method_is_integer
 
     ; float's four.  __floor__ and __ceil__ do exactly what MATH_ROUNDER's
     ; native arm does, because adding them newly routes a float SUBCLASS
     ; instance through the dunder: that arm reaches only an immediate.
-    mov rdi, rbx
-    lea rsi, [rel mn___round__]
-    lea rdx, [rel int_method_round]
-    call dict_add_builtin_func
+    ADD_FN mn___round__, int_method_round
 
-    mov rdi, rbx
-    lea rsi, [rel mn___floor__]
     extern float_method_floor
-    lea rdx, [rel float_method_floor]
-    call dict_add_builtin_func
+    ADD_FN mn___floor__, float_method_floor
 
-    mov rdi, rbx
-    lea rsi, [rel mn___ceil__]
     extern float_method_ceil
-    lea rdx, [rel float_method_ceil]
-    call dict_add_builtin_func
+    ADD_FN mn___ceil__, float_method_ceil
 
-    mov rdi, rbx
-    lea rsi, [rel mn___getnewargs__]
     extern float_method_getnewargs
-    lea rdx, [rel float_method_getnewargs]
-    call dict_add_builtin_func
+    ADD_FN mn___getnewargs__, float_method_getnewargs
 
-    mov rdi, rbx
-    lea rsi, [rel mn_conjugate]
-    lea rdx, [rel float_method_conjugate]
-    call dict_add_builtin_func
+    ADD_FN mn_conjugate, float_method_conjugate
 
-    mov rdi, rbx
-    lea rsi, [rel mn_as_integer_ratio]
-    lea rdx, [rel float_method_as_integer_ratio]
-    call dict_add_builtin_func
+    ADD_FN mn_as_integer_ratio, float_method_as_integer_ratio
 
-    mov rdi, rbx
-    lea rsi, [rel mn_hex]
-    lea rdx, [rel float_method_hex]
-    call dict_add_builtin_func
+    ADD_FN mn_hex, float_method_hex
 
 
     ; Add fromhex as classmethod
@@ -3012,128 +2105,56 @@ DEF_FUNC methods_init
     pop rdi
     call obj_decref
 
-    mov rdi, rbx
-    lea rsi, [rel mn___format__]
-    lea rdx, [rel builtin_method_format]
-    call dict_add_builtin_func
+    ADD_FN mn___format__, builtin_method_format
 
-    mov rdi, rbx
-    lea rsi, [rel mn___neg__]
     extern float_dunder_neg
-    lea rdx, [rel float_dunder_neg]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___pos__]
+    ADD_FN mn___neg__, float_dunder_neg
     extern float_dunder_pos
-    lea rdx, [rel float_dunder_pos]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___abs__]
+    ADD_FN mn___pos__, float_dunder_pos
     extern float_dunder_abs
-    lea rdx, [rel float_dunder_abs]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___int__]
+    ADD_FN mn___abs__, float_dunder_abs
     extern float_dunder_int
-    lea rdx, [rel float_dunder_int]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___float__]
+    ADD_FN mn___int__, float_dunder_int
     extern float_dunder_float
-    lea rdx, [rel float_dunder_float]
-    call dict_add_builtin_func
+    ADD_FN mn___float__, float_dunder_float
 
     ;; the binary family, forward and reflected.
-    mov rdi, rbx
-    lea rsi, [rel mn___add__]
     extern float_dunder_add
-    lea rdx, [rel float_dunder_add]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___sub__]
+    ADD_FN mn___add__, float_dunder_add
     extern float_dunder_sub
-    lea rdx, [rel float_dunder_sub]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___mul__]
+    ADD_FN mn___sub__, float_dunder_sub
     extern float_dunder_mul
-    lea rdx, [rel float_dunder_mul]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___mod__]
+    ADD_FN mn___mul__, float_dunder_mul
     extern float_dunder_mod
-    lea rdx, [rel float_dunder_mod]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___divmod__]
+    ADD_FN mn___mod__, float_dunder_mod
     extern float_dunder_divmod
-    lea rdx, [rel float_dunder_divmod]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___pow__]
+    ADD_FN mn___divmod__, float_dunder_divmod
     extern float_dunder_pow
-    lea rdx, [rel float_dunder_pow]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___floordiv__]
+    ADD_FN mn___pow__, float_dunder_pow
     extern float_dunder_floordiv
-    lea rdx, [rel float_dunder_floordiv]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___truediv__]
+    ADD_FN mn___floordiv__, float_dunder_floordiv
     extern float_dunder_truediv
-    lea rdx, [rel float_dunder_truediv]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___radd__]
+    ADD_FN mn___truediv__, float_dunder_truediv
     extern float_dunder_radd
-    lea rdx, [rel float_dunder_radd]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rsub__]
+    ADD_FN mn___radd__, float_dunder_radd
     extern float_dunder_rsub
-    lea rdx, [rel float_dunder_rsub]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rmul__]
+    ADD_FN mn___rsub__, float_dunder_rsub
     extern float_dunder_rmul
-    lea rdx, [rel float_dunder_rmul]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rmod__]
+    ADD_FN mn___rmul__, float_dunder_rmul
     extern float_dunder_rmod
-    lea rdx, [rel float_dunder_rmod]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rdivmod__]
+    ADD_FN mn___rmod__, float_dunder_rmod
     extern float_dunder_rdivmod
-    lea rdx, [rel float_dunder_rdivmod]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rpow__]
+    ADD_FN mn___rdivmod__, float_dunder_rdivmod
     extern float_dunder_rpow
-    lea rdx, [rel float_dunder_rpow]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rfloordiv__]
+    ADD_FN mn___rpow__, float_dunder_rpow
     extern float_dunder_rfloordiv
-    lea rdx, [rel float_dunder_rfloordiv]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rtruediv__]
+    ADD_FN mn___rfloordiv__, float_dunder_rfloordiv
     extern float_dunder_rtruediv
-    lea rdx, [rel float_dunder_rtruediv]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___trunc__]
+    ADD_FN mn___rtruediv__, float_dunder_rtruediv
     extern float_dunder_trunc
-    lea rdx, [rel float_dunder_trunc]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___bool__]
+    ADD_FN mn___trunc__, float_dunder_trunc
     extern float_dunder_bool
-    lea rdx, [rel float_dunder_bool]
-    call dict_add_builtin_func
+    ADD_FN mn___bool__, float_dunder_bool
 
     ; real and imag; float has no numerator or denominator, as CPython has not
     mov rdi, rbx
@@ -3150,42 +2171,21 @@ DEF_FUNC methods_init
     call dict_add_getset
 
     ; Store in float_type.tp_dict
-    mov rdi, rbx
-    lea rsi, [rel mn___hash__]
     extern float_dunder_hash
-    lea rdx, [rel float_dunder_hash]
-    call dict_add_builtin_func
+    ADD_FN mn___hash__, float_dunder_hash
 
-    mov rdi, rbx
-    lea rsi, [rel mn___lt__]
     extern float_dunder_lt
-    lea rdx, [rel float_dunder_lt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___le__]
+    ADD_FN mn___lt__, float_dunder_lt
     extern float_dunder_le
-    lea rdx, [rel float_dunder_le]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___gt__]
+    ADD_FN mn___le__, float_dunder_le
     extern float_dunder_gt
-    lea rdx, [rel float_dunder_gt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ge__]
+    ADD_FN mn___gt__, float_dunder_gt
     extern float_dunder_ge
-    lea rdx, [rel float_dunder_ge]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___eq__]
+    ADD_FN mn___ge__, float_dunder_ge
     extern float_dunder_eq
-    lea rdx, [rel float_dunder_eq]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ne__]
+    ADD_FN mn___eq__, float_dunder_eq
     extern float_dunder_ne
-    lea rdx, [rel float_dunder_ne]
-    call dict_add_builtin_func
+    ADD_FN mn___ne__, float_dunder_ne
 
     lea rax, [rel float_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -3196,228 +2196,99 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax
 
-    mov rdi, rbx
-    lea rsi, [rel mn___str__]
-    lea rdx, [rel bytes_dunder_str]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___repr__]
-    lea rdx, [rel bytes_dunder_repr]
-    call dict_add_builtin_func
+    ADD_FN mn___str__, bytes_dunder_str
+    ADD_FN mn___repr__, bytes_dunder_repr
 
-    mov rdi, rbx
-    lea rsi, [rel mn_hex]
-    lea rdx, [rel bytes_method_hex]
-    call dict_add_builtin_func
+    ADD_FN mn_hex, bytes_method_hex
 
     ; And its inverse, which binascii.unhexlify needs -- and binascii is what
     ; base64, quopri, uu and plistlib come in behind.
     extern bytes_fromhex_impl
     ADD_CLASSMETHOD mn_fromhex, bytes_fromhex_impl
 
-    mov rdi, rbx
-    lea rsi, [rel mn_startswith]
-    lea rdx, [rel bytes_method_startswith]
-    call dict_add_builtin_func
+    ADD_FN mn_startswith, bytes_method_startswith
 
-    mov rdi, rbx
-    lea rsi, [rel mn_endswith]
-    lea rdx, [rel bytes_method_endswith]
-    call dict_add_builtin_func
+    ADD_FN mn_endswith, bytes_method_endswith
 
-    mov rdi, rbx
-    lea rsi, [rel mn_count]
-    lea rdx, [rel bytes_method_count]
-    call dict_add_builtin_func
+    ADD_FN mn_count, bytes_method_count
 
-    mov rdi, rbx
-    lea rsi, [rel mn_find]
-    lea rdx, [rel bytes_method_find]
-    call dict_add_builtin_func
+    ADD_FN mn_find, bytes_method_find
 
-    mov rdi, rbx
-    lea rsi, [rel mn_replace]
-    lea rdx, [rel bytes_method_replace]
-    call dict_add_builtin_func
+    ADD_FN mn_replace, bytes_method_replace
 
-    mov rdi, rbx
-    lea rsi, [rel mn_split]
-    lea rdx, [rel bytes_method_split]
-    call dict_add_builtin_func
+    ADD_FN mn_split, bytes_method_split
 
-    mov rdi, rbx
-    lea rsi, [rel mn_rsplit]
     extern bytes_method_rsplit
-    lea rdx, [rel bytes_method_rsplit]
-    call dict_add_builtin_func
+    ADD_FN mn_rsplit, bytes_method_rsplit
 
-    mov rdi, rbx
-    lea rsi, [rel mn_rfind]
     extern bytes_method_rfind
-    lea rdx, [rel bytes_method_rfind]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_index]
+    ADD_FN mn_rfind, bytes_method_rfind
     extern bytes_method_index
-    lea rdx, [rel bytes_method_index]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_rindex]
+    ADD_FN mn_index, bytes_method_index
     extern bytes_method_rindex
-    lea rdx, [rel bytes_method_rindex]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_strip]
+    ADD_FN mn_rindex, bytes_method_rindex
     extern bytes_method_strip
-    lea rdx, [rel bytes_method_strip]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_lstrip]
+    ADD_FN mn_strip, bytes_method_strip
     extern bytes_method_lstrip
-    lea rdx, [rel bytes_method_lstrip]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_rstrip]
+    ADD_FN mn_lstrip, bytes_method_lstrip
     extern bytes_method_rstrip
-    lea rdx, [rel bytes_method_rstrip]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_partition]
+    ADD_FN mn_rstrip, bytes_method_rstrip
     extern bytes_method_partition
-    lea rdx, [rel bytes_method_partition]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_rpartition]
+    ADD_FN mn_partition, bytes_method_partition
     extern bytes_method_rpartition
-    lea rdx, [rel bytes_method_rpartition]
-    call dict_add_builtin_func
+    ADD_FN mn_rpartition, bytes_method_rpartition
 
-    mov rdi, rbx
-    lea rsi, [rel mn_upper]
     extern bytes_method_upper
-    lea rdx, [rel bytes_method_upper]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_lower]
+    ADD_FN mn_upper, bytes_method_upper
     extern bytes_method_lower
-    lea rdx, [rel bytes_method_lower]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_swapcase]
+    ADD_FN mn_lower, bytes_method_lower
     extern bytes_method_swapcase
-    lea rdx, [rel bytes_method_swapcase]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_capitalize]
+    ADD_FN mn_swapcase, bytes_method_swapcase
     extern bytes_method_capitalize
-    lea rdx, [rel bytes_method_capitalize]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_title]
+    ADD_FN mn_capitalize, bytes_method_capitalize
     extern bytes_method_title
-    lea rdx, [rel bytes_method_title]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_isalpha]
+    ADD_FN mn_title, bytes_method_title
     extern bytes_method_isalpha
-    lea rdx, [rel bytes_method_isalpha]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_isdigit]
+    ADD_FN mn_isalpha, bytes_method_isalpha
     extern bytes_method_isdigit
-    lea rdx, [rel bytes_method_isdigit]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_isspace]
+    ADD_FN mn_isdigit, bytes_method_isdigit
     extern bytes_method_isspace
-    lea rdx, [rel bytes_method_isspace]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_isalnum]
+    ADD_FN mn_isspace, bytes_method_isspace
     extern bytes_method_isalnum
-    lea rdx, [rel bytes_method_isalnum]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_isascii]
+    ADD_FN mn_isalnum, bytes_method_isalnum
     extern bytes_method_isascii
-    lea rdx, [rel bytes_method_isascii]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_isupper]
+    ADD_FN mn_isascii, bytes_method_isascii
     extern bytes_method_isupper
-    lea rdx, [rel bytes_method_isupper]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_islower]
+    ADD_FN mn_isupper, bytes_method_isupper
     extern bytes_method_islower
-    lea rdx, [rel bytes_method_islower]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_istitle]
+    ADD_FN mn_islower, bytes_method_islower
     extern bytes_method_istitle
-    lea rdx, [rel bytes_method_istitle]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_ljust]
+    ADD_FN mn_istitle, bytes_method_istitle
     extern bytes_method_ljust
-    lea rdx, [rel bytes_method_ljust]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_rjust]
+    ADD_FN mn_ljust, bytes_method_ljust
     extern bytes_method_rjust
-    lea rdx, [rel bytes_method_rjust]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_center]
+    ADD_FN mn_rjust, bytes_method_rjust
     extern bytes_method_center
-    lea rdx, [rel bytes_method_center]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_zfill]
+    ADD_FN mn_center, bytes_method_center
     extern bytes_method_zfill
-    lea rdx, [rel bytes_method_zfill]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_expandtabs]
+    ADD_FN mn_zfill, bytes_method_zfill
     extern bytes_method_expandtabs
-    lea rdx, [rel bytes_method_expandtabs]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_translate]
+    ADD_FN mn_expandtabs, bytes_method_expandtabs
     extern bytes_method_translate
-    lea rdx, [rel bytes_method_translate]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_splitlines]
+    ADD_FN mn_translate, bytes_method_translate
     extern bytes_method_splitlines
-    lea rdx, [rel bytes_method_splitlines]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_removeprefix]
+    ADD_FN mn_splitlines, bytes_method_splitlines
     extern bytes_method_removeprefix
-    lea rdx, [rel bytes_method_removeprefix]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_removesuffix]
+    ADD_FN mn_removeprefix, bytes_method_removeprefix
     extern bytes_method_removesuffix
-    lea rdx, [rel bytes_method_removesuffix]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_join]
-    lea rdx, [rel bytes_method_join]
-    call dict_add_builtin_func
+    ADD_FN mn_removesuffix, bytes_method_removesuffix
+    ADD_FN mn_join, bytes_method_join
 
     ; Store in bytes_type.tp_dict
 
     ; the slots, reachable by name: the stdlib reaches for them directly.
-    mov rdi, rbx
-    lea rsi, [rel mn___len__]
-    lea rdx, [rel bytes_dunder_len]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___iter__]
-    lea rdx, [rel bytes_dunder_iter]
-    call dict_add_builtin_func
+    ADD_FN mn___len__, bytes_dunder_len
+    ADD_FN mn___iter__, bytes_dunder_iter
 
     mov rdi, rbx
     lea rsi, [rel mn_maketrans]
@@ -3426,71 +2297,29 @@ DEF_FUNC methods_init
     call add_staticmethod
 
     ; The operators, by name.
-    mov rdi, rbx
-    lea rsi, [rel mn___add__]
-    lea rdx, [rel bytes_dunder_add]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___mul__]
-    lea rdx, [rel bytes_dunder_mul]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rmul__]
-    lea rdx, [rel bytes_dunder_rmul]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___mod__]
-    lea rdx, [rel bytes_dunder_mod]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rmod__]
-    lea rdx, [rel bytes_dunder_rmod]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___contains__]
-    lea rdx, [rel generic_method_contains]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___getitem__]
-    lea rdx, [rel bytes_dunder_getitem]
-    call dict_add_builtin_func
+    ADD_FN mn___add__, bytes_dunder_add
+    ADD_FN mn___mul__, bytes_dunder_mul
+    ADD_FN mn___rmul__, bytes_dunder_rmul
+    ADD_FN mn___mod__, bytes_dunder_mod
+    ADD_FN mn___rmod__, bytes_dunder_rmod
+    ADD_FN mn___contains__, generic_method_contains
+    ADD_FN mn___getitem__, bytes_dunder_getitem
 
-    mov rdi, rbx
-    lea rsi, [rel mn___hash__]
     extern bytes_dunder_hash
-    lea rdx, [rel bytes_dunder_hash]
-    call dict_add_builtin_func
+    ADD_FN mn___hash__, bytes_dunder_hash
 
-    mov rdi, rbx
-    lea rsi, [rel mn___lt__]
     extern bytes_dunder_lt
-    lea rdx, [rel bytes_dunder_lt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___le__]
+    ADD_FN mn___lt__, bytes_dunder_lt
     extern bytes_dunder_le
-    lea rdx, [rel bytes_dunder_le]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___gt__]
+    ADD_FN mn___le__, bytes_dunder_le
     extern bytes_dunder_gt
-    lea rdx, [rel bytes_dunder_gt]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ge__]
+    ADD_FN mn___gt__, bytes_dunder_gt
     extern bytes_dunder_ge
-    lea rdx, [rel bytes_dunder_ge]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___eq__]
+    ADD_FN mn___ge__, bytes_dunder_ge
     extern bytes_dunder_eq
-    lea rdx, [rel bytes_dunder_eq]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___ne__]
+    ADD_FN mn___eq__, bytes_dunder_eq
     extern bytes_dunder_ne
-    lea rdx, [rel bytes_dunder_ne]
-    call dict_add_builtin_func
+    ADD_FN mn___ne__, bytes_dunder_ne
 
     lea rax, [rel bytes_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -3506,291 +2335,108 @@ DEF_FUNC methods_init
     ;; cheap answer here.
     call dict_new
     mov rbx, rax
-    mov rdi, rbx
-    lea rsi, [rel mn_append]
-    lea rdx, [rel bytearray_method_append]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_extend]
-    lea rdx, [rel bytearray_method_extend]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_insert]
-    lea rdx, [rel bytearray_method_insert]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_pop]
-    lea rdx, [rel bytearray_method_pop]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_remove]
-    lea rdx, [rel bytearray_method_remove]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_clear]
-    lea rdx, [rel bytearray_method_clear]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_reverse]
-    lea rdx, [rel bytearray_method_reverse]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_copy]
-    lea rdx, [rel bytearray_method_copy]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_hex]
-    lea rdx, [rel ba_shared_hex]
-    call dict_add_builtin_func
+    ADD_FN mn_append, bytearray_method_append
+    ADD_FN mn_extend, bytearray_method_extend
+    ADD_FN mn_insert, bytearray_method_insert
+    ADD_FN mn_pop, bytearray_method_pop
+    ADD_FN mn_remove, bytearray_method_remove
+    ADD_FN mn_clear, bytearray_method_clear
+    ADD_FN mn_reverse, bytearray_method_reverse
+    ADD_FN mn_copy, bytearray_method_copy
+    ADD_FN mn_hex, ba_shared_hex
 
     ; The same classmethod: it reads the class it was called on and answers a
     ; bytearray when that is bytearray.
     ADD_CLASSMETHOD mn_fromhex, bytes_fromhex_impl
-    mov rdi, rbx
-    lea rsi, [rel mn_startswith]
-    lea rdx, [rel ba_shared_startswith]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_endswith]
-    lea rdx, [rel ba_shared_endswith]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_count]
-    lea rdx, [rel ba_shared_count]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_find]
-    lea rdx, [rel ba_shared_find]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_replace]
-    lea rdx, [rel ba_shared_replace]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_split]
-    lea rdx, [rel ba_shared_split]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_rsplit]
+    ADD_FN mn_startswith, ba_shared_startswith
+    ADD_FN mn_endswith, ba_shared_endswith
+    ADD_FN mn_count, ba_shared_count
+    ADD_FN mn_find, ba_shared_find
+    ADD_FN mn_replace, ba_shared_replace
+    ADD_FN mn_split, ba_shared_split
     extern ba_shared_rsplit
-    lea rdx, [rel ba_shared_rsplit]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_rfind]
+    ADD_FN mn_rsplit, ba_shared_rsplit
     extern ba_shared_rfind
-    lea rdx, [rel ba_shared_rfind]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_index]
+    ADD_FN mn_rfind, ba_shared_rfind
     extern ba_shared_index
-    lea rdx, [rel ba_shared_index]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_rindex]
+    ADD_FN mn_index, ba_shared_index
     extern ba_shared_rindex
-    lea rdx, [rel ba_shared_rindex]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_strip]
+    ADD_FN mn_rindex, ba_shared_rindex
     extern ba_shared_strip
-    lea rdx, [rel ba_shared_strip]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_lstrip]
+    ADD_FN mn_strip, ba_shared_strip
     extern ba_shared_lstrip
-    lea rdx, [rel ba_shared_lstrip]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_rstrip]
+    ADD_FN mn_lstrip, ba_shared_lstrip
     extern ba_shared_rstrip
-    lea rdx, [rel ba_shared_rstrip]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_partition]
+    ADD_FN mn_rstrip, ba_shared_rstrip
     extern ba_shared_partition
-    lea rdx, [rel ba_shared_partition]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_rpartition]
+    ADD_FN mn_partition, ba_shared_partition
     extern ba_shared_rpartition
-    lea rdx, [rel ba_shared_rpartition]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_upper]
+    ADD_FN mn_rpartition, ba_shared_rpartition
     extern ba_shared_upper
-    lea rdx, [rel ba_shared_upper]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_lower]
+    ADD_FN mn_upper, ba_shared_upper
     extern ba_shared_lower
-    lea rdx, [rel ba_shared_lower]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_swapcase]
+    ADD_FN mn_lower, ba_shared_lower
     extern ba_shared_swapcase
-    lea rdx, [rel ba_shared_swapcase]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_capitalize]
+    ADD_FN mn_swapcase, ba_shared_swapcase
     extern ba_shared_capitalize
-    lea rdx, [rel ba_shared_capitalize]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_title]
+    ADD_FN mn_capitalize, ba_shared_capitalize
     extern ba_shared_title
-    lea rdx, [rel ba_shared_title]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_isalpha]
+    ADD_FN mn_title, ba_shared_title
     extern ba_shared_isalpha
-    lea rdx, [rel ba_shared_isalpha]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_isdigit]
+    ADD_FN mn_isalpha, ba_shared_isalpha
     extern ba_shared_isdigit
-    lea rdx, [rel ba_shared_isdigit]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_isspace]
+    ADD_FN mn_isdigit, ba_shared_isdigit
     extern ba_shared_isspace
-    lea rdx, [rel ba_shared_isspace]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_isalnum]
+    ADD_FN mn_isspace, ba_shared_isspace
     extern ba_shared_isalnum
-    lea rdx, [rel ba_shared_isalnum]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_isascii]
+    ADD_FN mn_isalnum, ba_shared_isalnum
     extern ba_shared_isascii
-    lea rdx, [rel ba_shared_isascii]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_isupper]
+    ADD_FN mn_isascii, ba_shared_isascii
     extern ba_shared_isupper
-    lea rdx, [rel ba_shared_isupper]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_islower]
+    ADD_FN mn_isupper, ba_shared_isupper
     extern ba_shared_islower
-    lea rdx, [rel ba_shared_islower]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_istitle]
+    ADD_FN mn_islower, ba_shared_islower
     extern ba_shared_istitle
-    lea rdx, [rel ba_shared_istitle]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_ljust]
+    ADD_FN mn_istitle, ba_shared_istitle
     extern ba_shared_ljust
-    lea rdx, [rel ba_shared_ljust]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_rjust]
+    ADD_FN mn_ljust, ba_shared_ljust
     extern ba_shared_rjust
-    lea rdx, [rel ba_shared_rjust]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_center]
+    ADD_FN mn_rjust, ba_shared_rjust
     extern ba_shared_center
-    lea rdx, [rel ba_shared_center]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_zfill]
+    ADD_FN mn_center, ba_shared_center
     extern ba_shared_zfill
-    lea rdx, [rel ba_shared_zfill]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_expandtabs]
+    ADD_FN mn_zfill, ba_shared_zfill
     extern ba_shared_expandtabs
-    lea rdx, [rel ba_shared_expandtabs]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_translate]
+    ADD_FN mn_expandtabs, ba_shared_expandtabs
     extern ba_shared_translate
-    lea rdx, [rel ba_shared_translate]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_splitlines]
+    ADD_FN mn_translate, ba_shared_translate
     extern ba_shared_splitlines
-    lea rdx, [rel ba_shared_splitlines]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_removeprefix]
+    ADD_FN mn_splitlines, ba_shared_splitlines
     extern ba_shared_removeprefix
-    lea rdx, [rel ba_shared_removeprefix]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_removesuffix]
+    ADD_FN mn_removeprefix, ba_shared_removeprefix
     extern ba_shared_removesuffix
-    lea rdx, [rel ba_shared_removesuffix]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_join]
-    lea rdx, [rel ba_shared_join]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_decode]
-    lea rdx, [rel ba_shared_decode]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___len__]
-    lea rdx, [rel bytearray_dunder_len]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___iter__]
-    lea rdx, [rel bytearray_dunder_iter]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___setitem__]
-    lea rdx, [rel bytearray_dunder_setitem]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___delitem__]
-    lea rdx, [rel bytearray_dunder_delitem]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___getitem__]
-    lea rdx, [rel bytearray_dunder_getitem]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___contains__]
-    lea rdx, [rel bytearray_dunder_contains]
-    call dict_add_builtin_func
+    ADD_FN mn_removesuffix, ba_shared_removesuffix
+    ADD_FN mn_join, ba_shared_join
+    ADD_FN mn_decode, ba_shared_decode
+    ADD_FN mn___len__, bytearray_dunder_len
+    ADD_FN mn___iter__, bytearray_dunder_iter
+    ADD_FN mn___setitem__, bytearray_dunder_setitem
+    ADD_FN mn___delitem__, bytearray_dunder_delitem
+    ADD_FN mn___getitem__, bytearray_dunder_getitem
+    ADD_FN mn___contains__, bytearray_dunder_contains
     mov rdi, rbx
     lea rsi, [rel mn_maketrans]
     lea rdx, [rel bytes_staticmethod_maketrans]
     call add_staticmethod
 
     ; The operators, by name.
-    mov rdi, rbx
-    lea rsi, [rel mn___add__]
-    lea rdx, [rel bytearray_dunder_add]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___mul__]
-    lea rdx, [rel bytearray_dunder_mul]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rmul__]
-    lea rdx, [rel bytearray_dunder_rmul]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___iadd__]
-    lea rdx, [rel bytearray_dunder_iadd]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___imul__]
-    lea rdx, [rel bytearray_dunder_imul]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___mod__]
-    lea rdx, [rel bytearray_dunder_mod]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___rmod__]
-    lea rdx, [rel bytearray_dunder_rmod]
-    call dict_add_builtin_func
+    ADD_FN mn___add__, bytearray_dunder_add
+    ADD_FN mn___mul__, bytearray_dunder_mul
+    ADD_FN mn___rmul__, bytearray_dunder_rmul
+    ADD_FN mn___iadd__, bytearray_dunder_iadd
+    ADD_FN mn___imul__, bytearray_dunder_imul
+    ADD_FN mn___mod__, bytearray_dunder_mod
+    ADD_FN mn___rmod__, bytearray_dunder_rmod
 
     ; Unhashable: the name has to BE None, not resolve to object's.
     mov rdi, rbx
@@ -3807,46 +2453,16 @@ DEF_FUNC methods_init
     ;; tobytes and cast, and wraps every readinto in `with memoryview(b)`.
     call dict_new
     mov rbx, rax
-    mov rdi, rbx
-    lea rsi, [rel mn_tobytes]
-    lea rdx, [rel memoryview_method_tobytes]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_tolist]
-    lea rdx, [rel memoryview_method_tolist]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_cast]
-    lea rdx, [rel memoryview_method_cast]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_release]
-    lea rdx, [rel memoryview_method_release]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___enter__]
-    lea rdx, [rel memoryview_method_enter]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___exit__]
-    lea rdx, [rel memoryview_method_exit]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn_hex]
-    lea rdx, [rel memoryview_method_hex]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___getitem__]
-    lea rdx, [rel memoryview_dunder_getitem]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___setitem__]
-    lea rdx, [rel memoryview_dunder_setitem]
-    call dict_add_builtin_func
-    mov rdi, rbx
-    lea rsi, [rel mn___len__]
-    lea rdx, [rel memoryview_dunder_len]
-    call dict_add_builtin_func
+    ADD_FN mn_tobytes, memoryview_method_tobytes
+    ADD_FN mn_tolist, memoryview_method_tolist
+    ADD_FN mn_cast, memoryview_method_cast
+    ADD_FN mn_release, memoryview_method_release
+    ADD_FN mn___enter__, memoryview_method_enter
+    ADD_FN mn___exit__, memoryview_method_exit
+    ADD_FN mn_hex, memoryview_method_hex
+    ADD_FN mn___getitem__, memoryview_dunder_getitem
+    ADD_FN mn___setitem__, memoryview_dunder_setitem
+    ADD_FN mn___len__, memoryview_dunder_len
     lea rax, [rel memoryview_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
