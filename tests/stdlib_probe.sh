@@ -81,12 +81,18 @@ probe_one() {
         return
     fi
     local out rc
-    # Run from inside Lib/ so apython's own lib/ and tests/cpython shims --
-    # both *relative* sys.path entries -- do not resolve and shadow the real
-    # stdlib.  What is being measured is CPython's library, not our stand-ins.
+    # Run from inside Lib/ so CPython's own stdlib wins every name it has.
+    # apython's lib/ is on sys.path behind it -- absolutely, not relatively --
+    # which is what supplies the modules CPython implements in C and this
+    # interpreter implements in Python: _io, _socket, select.  What is being
+    # measured is CPython's library, not our stand-ins for the rest of it.
     out=$(cd "$CPYTHON_LIB" && PYTHONPATH="$CPYTHON_LIB" timeout 20 "$APY" \
           "$WORK/__pycache__/probe.cpython-312.pyc" 2>&1)
     rc=$?
+    # The LAST line, not the whole output: a module that imports and warns
+    # while doing it has imported.  telnetlib and nntplib both print
+    # CPython's own DeprecationWarning and were counted as failures for it.
+    out=${out##*$'\n'}
     if [ "$out" = "OK" ]; then
         echo "$m OK" >> "$RESULTS"
     elif [ $rc -ge 132 ] && [ $rc -le 139 ]; then

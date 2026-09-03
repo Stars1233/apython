@@ -58,18 +58,15 @@ one-line fix.
   blocks: twelve of the thirteen that stopped at `_ast` import
   `importlib.machinery` a few lines later.  Measured by what actually stands
   in the way, over CPython 3.12's 196: `_imp` (with `marshal` and
-  `_warnings`) 27, `select` 18, `_socket` 11, `_hashlib` and the
-  `_sha*`/`_md5` family, `array`, `_typing`, `_posixsubprocess`, `_signal`,
-  `_csv`, `pyexpat`, then a long tail of one apiece.
+  `_warnings`) 27, `_hashlib` and the `_sha*`/`_md5` family, `array`,
+  `_typing`, `_posixsubprocess`, `_signal`, `_csv`, `pyexpat`, then a long
+  tail of one apiece.
   (`_io` is not among them: `src/iomod.asm` supplies `_iocore` and
-  `lib/_io.py` assembles both halves under the name `_io`.  Neither are
-  `math`, `_collections`, `_struct`, `_random`, `_contextvars`, `_string`,
-  `_tokenize`, `_operator`, `binascii`, `atexit` and now `_ast`, which are
-  there.)  `make check-stdlib` gives the current figure: 109 of 196.
-
-  `_socket` is worth nothing on its own: `socket.py` imports `selectors`
-  three lines after `_socket`, and `selectors` imports `select`.  The two are
-  one piece of work, and together they are seven modules.
+  `lib/_io.py` assembles both halves under the name `_io`.  `_socket` and
+  `select` are the same split over `_socketcore`.  Neither are `math`,
+  `_collections`, `_struct`, `_random`, `_contextvars`, `_string`,
+  `_tokenize`, `_operator`, `binascii`, `atexit` and `_ast`, which are
+  there.)  `make check-stdlib` gives the current figure: 129 of 196.
 
   `hashlib` imports but has no digests, because every one of them is a C
   module here as well.
@@ -80,6 +77,16 @@ one-line fix.
   shares `hypot`'s routine and so shares the note.  `fsum` is exact: it is
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
+
+- **asyncio's stream layer is a stub, and now an unnecessary one.**
+  `src/pyo/asyncio_streams.asm` predates any socket support: it hard-codes
+  127.0.0.1 and ignores the `host` argument it is given, discards what
+  `connect` returns, reads into a fixed stack buffer, hands back a `str`
+  where CPython hands back `bytes`, and raises OSErrors built from fixed
+  strings with no errno -- so `except ConnectionRefusedError` cannot catch
+  one.  It has no test.  There is a real socket layer under it now
+  (`_socketcore`, `lib/_socket.py`), and the stream types should be rewritten
+  on top of it rather than on raw syscalls of their own.
 
 - **`collections.deque` is list-backed, and two itertools functions
   materialise.**  CPython's deque is a block-linked list, so `appendleft` and

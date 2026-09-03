@@ -14,10 +14,10 @@ repository (`../LICENSE`).
 
 | Origin | Files |
 |---|---|
-| CPython, unmodified | `abc.py`, `ast.py`, `copyreg.py`, `enum.py`, `functools.py`, `re/`, `reprlib.py`, `types.py` |
+| CPython, unmodified | `abc.py`, `ast.py`, `_collections_abc.py`, `collections/abc.py`, `copyreg.py`, `enum.py`, `functools.py`, `genericpath.py`, `os.py`, `posixpath.py`, `re/`, `reprlib.py`, `selectors.py`, `socket.py`, `stat.py`, `types.py` |
 | Generated from CPython | `_ast.py` |
 | CPython, modified for apython | `__future__.py`, `collections/`, `contextlib.py`, `copy.py`, `io.py`, `operator.py`, `pickle.py`, `string.py`, `unittest/`, `warnings.py`, `test/` |
-| Written for apython | `_ast_build.py`, `_codecs.py`, `_io.py`, `_thread.py`, `itertools.py` |
+| Written for apython | `_ast_build.py`, `_codecs.py`, `_io.py`, `_socket.py`, `_thread.py`, `itertools.py`, `select.py` |
 
 `re/` is the wrapper around the `_sre` engine, which is assembly.  It comes
 over unmodified, and with it the modules it needs that were not here:
@@ -35,9 +35,9 @@ reason.  `_ast_build.py` beside it is hand-written: it is the half that turns
 apython's own parse tree into those classes, and keeping it in its own module
 is what lets `make regen` rewrite `_ast.py` wholesale.
 
-The four apython files stand in for CPython C extension modules of the same
-name; they are covered by the repository's MIT license.  Each carries a
-docstring saying what it does and does not implement.
+The apython files stand in for CPython C extension modules of the same name;
+they are covered by the repository's MIT license.  Each carries a docstring
+saying what it does and does not implement.
 
 `_io.py` is the one that is only half here: the raw layer and the type
 objects are assembly, in the builtin module `_iocore`, and this is the
@@ -47,3 +47,14 @@ outside -- the types say `_io` in their `__module__`, and CPython's own
 must not be called `_pyio`, which is the name CPython gives its own Python
 replica of the C module: on a path where CPython's stdlib is visible, theirs
 would win, and theirs opens with `from io import ...`.
+
+`_socket.py` and `select.py` are the same split as `_io.py`, over the builtin
+module `_socketcore`: the syscalls are assembly and know nothing about what a
+sockaddr contains, and the packing for AF_INET and AF_UNIX, the timeout loop,
+the socket type itself and `select()` over `poll()` are here.  CPython's own
+`Lib/socket.py` and `Lib/selectors.py` come over unmodified on top of them,
+and with them `os.py` and the four modules it needs -- `stat`, `posixpath`,
+`genericpath` and `_collections_abc` -- since `socket.py` opens with
+`import os`.  IPv6, `sendmsg`/`recvmsg` and a real resolver are deliberately
+absent: `getaddrinfo` answers for dotted quads and for the names in
+`/etc/hosts`, and Lib/socket.py guards the rest with `hasattr`.

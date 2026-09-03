@@ -306,6 +306,7 @@ test_review_regressions
 test_richcompare_bool
 test_richcompare_byname
 test_round
+test_select
 test_sequence_iteration
 test_set_fatval
 test_set_inplace
@@ -330,6 +331,8 @@ test_smallstr_iter
 test_smallstr_methods
 test_smallstr_ops
 test_smallstr
+test_socket_module
+test_socket
 test_source_import
 test_sre2
 test_sre_bytes

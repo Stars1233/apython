@@ -38,7 +38,12 @@ SYS_sendto          equ 44
 SYS_recvfrom        equ 45
 SYS_bind            equ 49
 SYS_listen          equ 50
+SYS_getsockname     equ 51
+SYS_getpeername     equ 52
+SYS_socketpair      equ 53
 SYS_setsockopt      equ 54
+SYS_getsockopt      equ 55
+SYS_shutdown        equ 48
 SYS_fcntl           equ 72
 SYS_ioctl           equ 16
 SYS_io_uring_setup  equ 425
@@ -442,6 +447,43 @@ DEF_FUNC_BARE sys_setsockopt
     syscall
     ret
 END_FUNC sys_setsockopt
+
+; sys_getsockopt(fd, level, optname, optval*, optlen*) -> int
+DEF_FUNC_BARE sys_getsockopt
+    mov rax, SYS_getsockopt
+    mov r10, rcx               ; 4th arg
+    syscall
+    ret
+END_FUNC sys_getsockopt
+
+; sys_getsockname(fd, addr*, addrlen*) -> int
+DEF_FUNC_BARE sys_getsockname
+    mov rax, SYS_getsockname
+    syscall
+    ret
+END_FUNC sys_getsockname
+
+; sys_getpeername(fd, addr*, addrlen*) -> int
+DEF_FUNC_BARE sys_getpeername
+    mov rax, SYS_getpeername
+    syscall
+    ret
+END_FUNC sys_getpeername
+
+; sys_shutdown(fd, how) -> int
+DEF_FUNC_BARE sys_shutdown
+    mov rax, SYS_shutdown
+    syscall
+    ret
+END_FUNC sys_shutdown
+
+; sys_socketpair(domain, type, protocol, int sv[2]) -> int
+DEF_FUNC_BARE sys_socketpair
+    mov rax, SYS_socketpair
+    mov r10, rcx               ; 4th arg
+    syscall
+    ret
+END_FUNC sys_socketpair
 
 
 ; sys_fcntl(fd, cmd, arg) -> int
