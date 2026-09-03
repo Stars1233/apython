@@ -569,7 +569,11 @@ struc AsyncTask
     .done:         resd 1  ; +64: 0=pending, 1=done
     .cancelling:   resd 1  ; +68: 1=cancel requested
     .n_waiters:    resd 1  ; +72: number of waiters
-    .pad:          resd 1  ; +76
+    ; Whether this task is sitting in the ready queue.  ready_enqueue zeroes
+    ; .next unconditionally, so enqueuing a task that is ALREADY queued
+    ; truncated the list and lost everything behind it -- the loop then sat
+    ; in wait_and_drain with nothing left to wake it.
+    .queued:       resd 1  ; +76
     .waiters:      resq 1  ; +80: ptr to AsyncTask*[] array
     .waiters_cap:  resd 1  ; +88: waiters array capacity
     .pad2:         resd 1  ; +92
@@ -585,6 +589,33 @@ struc SleepAwaitable
     .delay_ns:  resq 1  ; +16
     .yielded:   resd 1  ; +24: 0=not yet, 1=done
     .pad:       resd 1  ; +28
+endstruc
+
+; asyncio.gather()'s awaitable.
+;
+; gather used to build one task per coroutine and hand back the LIST of them,
+; with a TODO saying the awaiting was still to do -- so `await
+; asyncio.gather(...)` awaited a list, which is not awaitable, and answered
+; None.  This waits on each task in turn; every task is already enqueued, so
+; they still run concurrently and the order only decides which one is
+; observed first.
+;
+; +48 must line up with PyGenObject.gi_return_value: op_send reads that offset
+; on the exhaustion path, the same reason WaitForAwaitable does.
+struc GatherAwaitable
+    .ob_refcnt:       resq 1  ; +0
+    .ob_type:         resq 1  ; +8
+    ; A plain ap_malloc'd AsyncTask*[], each entry owned, NOT a list: this
+    ; object is not GC-visible, and a collection that ran while only this
+    ; field referenced a list freed it under us.  Tasks are not collectable,
+    ; so raw pointers to them are safe -- the same reason WaitForAwaitable
+    ; keeps its inner_task raw.
+    .ga_tasks:        resq 1  ; +16
+    .ga_count:        resq 1  ; +24: how many
+    .ga_index:        resq 1  ; +32: the task being waited on
+    .ga_flags:        resq 1  ; +40: 1 = return_exceptions
+    .gi_return_value: resq 1  ; +48: the results list, as a Value
+    .ga_state:        resq 1  ; +56: 0 running, 1 finished
 endstruc
 
 ; WaitFor awaitable object (for asyncio.wait_for)

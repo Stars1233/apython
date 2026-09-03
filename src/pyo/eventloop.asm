@@ -132,6 +132,7 @@ DEF_FUNC task_new
 
     mov qword [rax + AsyncTask.result], 0
     mov qword [rax + AsyncTask.exception], 0
+    mov dword [rax + AsyncTask.queued], 0
     ; send_value starts as None, and is OWNED from here on: task_step stores
     ; into it with an INCREF, and task_dealloc releases it.  Storing the
     ; singleton without taking a reference made that release one too many.
@@ -210,6 +211,14 @@ DEF_FUNC_BARE ready_enqueue
     ; see tasks: make them visible and a cyclic task sitting in the queue
     ; becomes collectable, and the queue is left following a freed pointer.
     ; One reference here, released by the drain loop after task_step.
+    ;
+    ; And a task already in the queue is left where it is: the line below
+    ; zeroes .next, so enqueuing one twice cut the list off after it.  The
+    ; queue holds a task once; task_step reads send_value when it runs, so
+    ; the second enqueue has nothing to deliver that the first will not.
+    cmp dword [rdi + AsyncTask.queued], 0
+    jne .re_already
+    mov dword [rdi + AsyncTask.queued], 1
     inc qword [rdi + PyObject.ob_refcnt]
     mov qword [rdi + AsyncTask.next], 0
     mov rax, [rel eventloop + EventLoop.ready_tail]
@@ -226,6 +235,8 @@ DEF_FUNC_BARE ready_enqueue
     mov [rel eventloop + EventLoop.ready_head], rdi
     mov [rel eventloop + EventLoop.ready_tail], rdi
     ret
+.re_already:
+    ret
 END_FUNC ready_enqueue
 
 ;; ============================================================================
@@ -236,6 +247,7 @@ DEF_FUNC_BARE ready_dequeue
     mov rax, [rel eventloop + EventLoop.ready_head]
     test rax, rax
     jz .rd_empty
+    mov dword [rax + AsyncTask.queued], 0
 
     ; Advance head
     mov rcx, [rax + AsyncTask.next]
@@ -656,6 +668,11 @@ END_FUNC task_add_waiter
 ;; ============================================================================
 ER_ROOT equ 8
 ER_FRAME equ 8              ; + 2 pushes = 24, not 16-aligned
+section .bss
+global eventloop_root_exception
+eventloop_root_exception: resq 1    ; the root task's exception, owned, or 0
+section .text
+
 DEF_FUNC eventloop_run, ER_FRAME
     push rbx
     push r12
@@ -663,6 +680,7 @@ DEF_FUNC eventloop_run, ER_FRAME
     mov rbx, rdi               ; root task
     mov [rel eventloop + EventLoop.root_task], rdi
     mov [rbp - ER_ROOT], rdi
+    mov qword [rel eventloop_root_exception], 0
 
     ; Enqueue root task
     mov rdi, rbx
@@ -697,10 +715,27 @@ DEF_FUNC eventloop_run, ER_FRAME
     jmp .er_loop
 
 .er_done:
+    ; An exception that reached the root task was DROPPED here: this read
+    ; only .result, so `asyncio.run(main())` where main raises answered None
+    ; and the exception was never seen again.  It is handed back through a
+    ; global rather than raised here, because the loop still has to be torn
+    ; down before anything unwinds.
+    mov rax, [rbx + AsyncTask.exception]
+    test rax, rax
+    jz .er_result
+    INCREF rax
+    mov [rel eventloop_root_exception], rax
+    xor eax, eax
+    xor edx, edx
+    jmp .er_release
+
+.er_result:
     ; Return root task's result
     mov rax, [rbx + AsyncTask.result]
     V_UNPACK rax, rdx
     INCREF_VAL rax, rdx
+
+.er_release:
 
     ; And let go of the root task.  It is a RAW pointer, kept across the whole
     ; run for the done check, and leaving it behind was harmless only while

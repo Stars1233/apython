@@ -191,20 +191,48 @@ DEF_FUNC gen_iternext
     ; caller was left with the exception still pending, and the interpreter
     ; reported it at exit.  Its own POP_EXCEPT restores from the value stack
     ; when it resumes, so nothing is lost by putting the caller's back.
+    ;
+    ; The caller's exception is left IN PLACE for the duration rather than
+    ; cleared, because that is what a raise inside the body chains to.
+    ; Clearing it meant `next(it)` from inside an except block produced an
+    ; exception with __context__ of None -- and `await` goes through here
+    ; too, so every awaited exception lost its context the same way.
+    ; A raise is a NULL result, not a set current_exception: the async
+    ; generator's copy of this below already says so, and reading the global
+    ; instead cannot tell a raise from a body suspended inside an except.
     push rax
     mov rax, [rel current_exception]
     push rax
-    mov qword [rel current_exception], 0
+    test rax, rax
+    jz .gs_no_saved
+    INCREF rax                  ; ours for the duration of the resume
+.gs_no_saved:
     call eval_frame
     pop rcx
-    ; If the generator body raised, that exception is the result and must not
-    ; be overwritten by the caller's saved one -- doing so turned every
-    ; exception raised after the first yield into a silent StopIteration.
-    cmp qword [rel current_exception], 0
-    jne .gs_gen_raised
-    mov [rel current_exception], rcx
+    test rax, rax
+    jz .gs_gen_raised
+    ; It did not raise.  Put the caller's back, dropping whatever the body
+    ; left set -- which is its own business and lives on its value stack.
+    cmp rcx, [rel current_exception]
+    je .gs_drop_extra
+    push rax
+    push rdx
+    mov rdi, [rel current_exception]
+    mov [rel current_exception], rcx    ; takes over our reference
+    test rdi, rdi
+    jz .gs_put_back
+    call obj_decref
+.gs_put_back:
+    pop rdx
+    pop rax
     jmp .gs_exc_settled
+.gs_drop_extra:
+    ; Already in place; only the extra reference has to go.
 .gs_gen_raised:
+    ; The body raised.  The new exception is the result and already carries
+    ; the caller's as its __context__; raise_exception_obj released the
+    ; global's own reference to it, so ours is the one left to drop.
+    ;
     test rcx, rcx
     jz .gs_exc_settled
     push rax

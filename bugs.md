@@ -9,6 +9,35 @@ one-line fix.
 
 ## Correctness
 
+~~- **`asyncio.gather` did not gather.**  It built one task per coroutine and
+  handed back the LIST of them, with a TODO in the source saying the awaiting
+  was still to do -- so `await asyncio.gather(...)` awaited a list, which is
+  not awaitable, and answered None.  And an exception that reached the root
+  task was dropped by `eventloop_run`, which read only `.result`:
+  `asyncio.run(main())` where main raises answered None and the exception was
+  never seen again.~~  `tests/test_async_gather.py`.
+
+  Two more came out of it.  `ready_enqueue` zeroed `.next` unconditionally,
+  so enqueuing a task that was ALREADY queued cut the ready list off after
+  it and the loop then sat waiting for something that could not arrive.  And
+  a `list_new` called with a stale register for its capacity argument turns
+  into a zeroing loop over about 700 million words -- an "intermittent hang"
+  whose length depended on ASLR.
+
+~~- **`__context__` is not set across a generator resume.**~~  `gen_send`
+  CLEARED `current_exception` before resuming the frame, so an exception
+  raised inside the generator had nothing to chain to: `next(it)` from inside
+  an except block produced one with `__context__` of None.  `await` goes
+  through `gen_send` too, so every awaited exception lost its context the
+  same way.  `tests/test_exc_context.py`.
+
+  What is still open is the third shape: `await SOME_TASK` where the task
+  raised.  `current_exception` is a single global and task switching does not
+  follow it, so the exception the awaiting coroutine was handling is not
+  what is current when the task's exception is re-raised.  The fix is a
+  per-task exception state; it was tried, and it needs `task_step` to tell a
+  raise from a `return` out of an except block, which it currently cannot.
+
 ~~- **Six pieces of the ordinary protocol were missing outright.**  `range`
   had no `__eq__`, no `__hash__`, no `index`/`count` and no `start`/`stop`/
   `step` -- and no `tp_dict` at all, so none of `__len__`, `__iter__` or

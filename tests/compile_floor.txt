@@ -10,6 +10,7 @@ test_async_await
 test_async_cancel
 test_async_coro
 test_async_for
+test_async_gather
 test_async_gen_await
 test_async_gen
 test_async_gen_sleep
@@ -140,6 +141,7 @@ test_empty_bases
 test_errno
 test_error_messages
 test_exc_catchable
+test_exc_context
 test_exception_context
 test_exception_kwargs
 test_exception_metatype
