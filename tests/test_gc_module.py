@@ -138,6 +138,77 @@ try:
 except TypeError:
     print("TypeError")
 
+print("=== is_tracked ===")
+# An immediate -- an int, a float -- is not an object at all here, so it is
+# never tracked.  An empty dict is not compared: CPython untracks one whose
+# contents are all untrackable, which is an optimization this collector does
+# not have.
+print(gc.is_tracked([]), gc.is_tracked({"a": []}), gc.is_tracked([1, 2]))
+print(gc.is_tracked(1), gc.is_tracked(1.5), gc.is_tracked("abc"), gc.is_tracked(None))
+
+
+class Tracked:
+    pass
+
+
+print(gc.is_tracked(Tracked()), gc.is_tracked(Tracked))
+try:
+    gc.is_tracked()
+except TypeError:
+    print("TypeError")
+
+print("=== get_referents ===")
+# The dict case visits keys as well as values, which CPython's split-key
+# dicts do not, so only a list and a tuple are compared exactly.
+print(sorted(gc.get_referents(["a", "b"])))
+print(sorted(map(repr, gc.get_referents(("a", ("b",))))))
+inner = ["deep"]
+outer = [inner]
+print(gc.get_referents(outer)[0] is inner)
+# Nothing to traverse, and no arguments at all, both answer an empty list.
+print(gc.get_referents(), gc.get_referents(1, "s", 2.5))
+
+print("=== get_objects ===")
+mine = ["a marker this test can find"]
+objs = gc.get_objects()
+print(type(objs).__name__, len(objs) > 0)
+print(any(o is mine for o in objs))
+# The result list is tracked itself, and must not contain itself.
+print(objs in objs)
+print(type(gc.get_objects(0)).__name__, type(gc.get_objects(None)).__name__)
+try:
+    gc.get_objects(3)
+except ValueError as e:
+    print("ValueError", e)
+try:
+    gc.get_objects(0, 1)
+except TypeError:
+    print("TypeError")
+
+print("=== the debug flags ===")
+print(gc.DEBUG_STATS, gc.DEBUG_COLLECTABLE, gc.DEBUG_UNCOLLECTABLE)
+print(gc.DEBUG_SAVEALL, gc.DEBUG_LEAK)
+print(gc.get_debug())
+gc.set_debug(gc.DEBUG_SAVEALL)
+print(gc.get_debug() == gc.DEBUG_SAVEALL)
+
+# SAVEALL keeps the unreachable set instead of clearing it: it goes into
+# gc.garbage, still intact.  DEBUG_STATS and DEBUG_COLLECTABLE are not
+# exercised here because they write to stderr, which this harness merges into
+# the output it compares -- and one of the two prints addresses.
+gc.collect()
+del gc.garbage[:]
+saved_a, saved_b = [], []
+saved_a.append(saved_b)
+saved_b.append(saved_a)
+del saved_a, saved_b
+print(gc.collect())
+print(len(gc.garbage), [len(x) for x in gc.garbage])
+del gc.garbage[:]
+gc.set_debug(0)
+print(gc.get_debug())
+print(gc.collect())
+
 print("=== disabled means the thresholds do not fire ===")
 gc.disable()
 make_cycle()

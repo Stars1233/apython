@@ -303,13 +303,19 @@ than lying — but they are ordinary Python that does not work:
   awaited corrupts the heap: `asyncio.run()` after a collected task cycle
   segfaults inside an unrelated allocation.
 
-- **`gc` has no `get_objects` and no debug flags.**  The module answers about
-  the collector -- `collect`, `enable`/`disable`/`isenabled`, the counts, the
-  thresholds, `garbage` and `callbacks` -- but not `get_objects`,
-  `set_debug`/`get_debug`, `is_tracked` or `get_referents`.  The three
-  generations *are* linked lists with static sentinels, so `get_objects` is a
-  walk; the hazard is that the walk allocates, and an allocation can trigger
-  a collection that mutates the list being walked.
+- **`gc` has no `get_referrers`, `freeze`/`unfreeze` or `get_stats`.**
+  `get_referrers` needs a reverse edge nothing records -- CPython finds it by
+  traversing every tracked object and asking whether it points at the
+  argument, which this could do too and which is O(heap) per call.  The
+  freeze family and `get_stats` are about machinery this collector does not
+  have: there is no permanent generation and no per-pass statistics.
+
+- **Two of CPython's tracking optimizations are absent, and both are
+  visible.**  CPython untracks a dict whose contents are all untrackable, so
+  `gc.is_tracked({})` is False there and True here; and a dict whose keys are
+  all strings shares its key table, so `gc.get_referents` on one answers with
+  the values only, where this answers with the keys as well.  Both are
+  conservative in the safe direction -- more is tracked, more is reported.
 
 
 - **`s += x` in a loop is O(n^2)**: `str_concat` always allocates, and

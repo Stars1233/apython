@@ -1156,6 +1156,14 @@ endstruc
 
 GC_HEAD_SIZE equ PyGC_Head_size   ; 16
 
+; gc.set_debug() flags, with CPython's values.  DEBUG_LEAK is the union of
+; the three that keep something around to look at.
+GC_DEBUG_STATS         equ 1
+GC_DEBUG_COLLECTABLE   equ 2
+GC_DEBUG_UNCOLLECTABLE equ 4
+GC_DEBUG_SAVEALL       equ 32
+GC_DEBUG_LEAK          equ GC_DEBUG_COLLECTABLE | GC_DEBUG_UNCOLLECTABLE | GC_DEBUG_SAVEALL
+
 ; GC state bits stored in low 2 bits of gc_prev
 GC_PREV_MASK_COLLECTING equ 1     ; object is in unreachable set
 GC_PREV_SHIFT           equ 2     ; gc_refs stored in bits 2+
