@@ -13,6 +13,9 @@ extern sys_mmap
 extern sys_munmap
 extern sys_close
 extern ready_enqueue
+extern obj_incref
+extern obj_decref
+extern task_set_send_value
 extern ap_malloc
 extern none_singleton
 
@@ -325,6 +328,14 @@ DEF_FUNC uring_submit_timeout
     mov dword [rax + IoUringSqe.len], 1    ; count = 1
     mov [rax + IoUringSqe.user_data], rbx  ; task as user_data
 
+    ; The SQE owns the task for as long as the kernel holds it -- and it holds
+    ; an interior pointer into it as well, the timespec at .ts_sec, which it
+    ; reads after this returns.  Nothing could traverse a submission queue in
+    ; shared memory, so the reference is what keeps the task there.  Released
+    ; on the completion, which io_uring posts even for a cancelled op.
+    mov rdi, rbx
+    call obj_incref
+
 .ust_done:
     pop r12
     pop rbx
@@ -352,6 +363,8 @@ DEF_FUNC uring_submit_poll
     mov [rax + IoUringSqe.fd], r12d
     mov [rax + IoUringSqe.rw_flags], r13d  ; poll_events
     mov [rax + IoUringSqe.user_data], rbx
+    mov rdi, rbx                ; the SQE's reference, as above
+    call obj_incref
 
 .usp_done:
     pop r13
@@ -433,12 +446,16 @@ DEF_FUNC uring_wait_and_drain
     test rdi, rdi
     jz .uwd_skip               ; cancel completion, ignore
 
-    ; Set send_value = None, enqueue
-    lea rcx, [rel none_singleton]
-    mov [rdi + AsyncTask.send_value], rcx
-
+    ; Set send_value = None, enqueue, and release the SQE's reference: this
+    ; completion is the end of it.
     push rbx
+    push rdi
+    lea rsi, [rel none_singleton]
+    call task_set_send_value
+    mov rdi, [rsp]
     call ready_enqueue
+    pop rdi
+    call obj_decref
     pop rbx
 
 .uwd_skip:

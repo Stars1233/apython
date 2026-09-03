@@ -10,6 +10,9 @@
 extern ap_malloc
 extern ready_enqueue
 extern none_singleton
+extern obj_incref
+extern obj_decref
+extern task_set_send_value
 
 ; libc poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
 extern poll
@@ -60,6 +63,49 @@ END_FUNC poll_init
 ;; Nothing to clean up for poll backend.
 ;; ============================================================================
 DEF_FUNC poll_teardown
+    push rbx
+    push r12
+    ; Release everything the two arrays still hold.  A loop torn down with
+    ; work outstanding -- a cancelled sleep, a socket nobody read -- used to
+    ; leave those tasks unreferenced by anything and unfreed.
+    mov ebx, [rel poll_nfds]
+    mov dword [rel poll_nfds], 0
+    test ebx, ebx
+    jz .pt_timers
+.pt_fd_loop:
+    dec ebx
+    lea rax, [rel poll_fd_tasks]
+    mov rdi, [rax + rbx*8]
+    mov qword [rax + rbx*8], 0
+    test rdi, rdi
+    jz .pt_fd_next
+    call obj_decref
+.pt_fd_next:
+    test ebx, ebx
+    jnz .pt_fd_loop
+
+.pt_timers:
+    mov ebx, [rel timer_count]
+    mov dword [rel timer_count], 0
+    test ebx, ebx
+    jz .pt_done
+.pt_timer_loop:
+    dec ebx
+    lea rax, [rel timer_heap]
+    mov r12d, ebx
+    shl r12d, 4
+    mov rdi, [rax + r12 + TimerEntry.task]
+    mov qword [rax + r12 + TimerEntry.task], 0
+    test rdi, rdi
+    jz .pt_timer_next
+    call obj_decref
+.pt_timer_next:
+    test ebx, ebx
+    jnz .pt_timer_loop
+
+.pt_done:
+    pop r12
+    pop rbx
     leave
     ret
 END_FUNC poll_teardown
@@ -112,6 +158,15 @@ DEF_FUNC poll_submit_timeout
 
     inc dword [rel timer_count]
 
+    ; The heap OWNS its entry.  A task waiting on a timer may have no other
+    ; reference at all -- asyncio.sleep() inside a task nobody holds -- and
+    ; a raw pointer here was safe only while a task could not be collected.
+    ; Released where the entry is removed: expiry, cancellation, teardown.
+    push rcx
+    mov rdi, rbx
+    call obj_incref
+    pop rcx
+
     ; Sift up
     mov eax, ecx               ; index = timer_count (before inc, 0-based)
     call timer_sift_up
@@ -142,13 +197,20 @@ DEF_FUNC poll_submit_poll_fd
     mov [rax + PollFd.events], dx
     mov word [rax + PollFd.revents], 0
 
-    ; Store task mapping
+    ; Store task mapping.  The array owns it, for the same reason the timer
+    ; heap owns its entries.
     lea rax, [rel poll_fd_tasks]
     mov [rax + rcx*8], rdi
 
     inc dword [rel poll_nfds]
+    call obj_incref
 
 .pspf_full:
+    ; `ret` alone was wrong: DEF_FUNC pushes rbp, so returning without
+    ; `leave` jumps to whatever the caller's rbp happened to be.  Nothing had
+    ; noticed, because the only caller is a socket read or write and the
+    ; stream tests skip when the poll backend is not the one in use.
+    leave
     ret
 END_FUNC poll_submit_poll_fd
 
@@ -173,7 +235,14 @@ DEF_FUNC poll_cancel_io
     jmp .pc_fd_loop
 
 .pc_remove_fd:
-    ; Swap with last and decrement count
+    ; Swap with last and decrement count.  The array's reference on the task
+    ; goes with the entry; rbx still names it, and the caller holds one too.
+    push rcx
+    push rdx
+    mov rdi, rbx
+    call obj_decref
+    pop rdx
+    pop rcx
     dec edx
     mov [rel poll_nfds], edx
     cmp ecx, edx
@@ -211,7 +280,14 @@ DEF_FUNC poll_cancel_io
     jmp .pc_timer_loop
 
 .pc_remove_timer:
-    ; Replace with last and re-heapify
+    ; Replace with last and re-heapify.  As above, the heap's reference ends
+    ; with the entry.
+    push rcx
+    push rdx
+    mov rdi, rbx
+    call obj_decref
+    pop rdx
+    pop rcx
     dec edx
     mov [rel timer_count], edx
     cmp ecx, edx
@@ -338,12 +414,15 @@ DEF_FUNC poll_wait_and_drain
     call timer_sift_down
 
 .pwd_timer_empty:
-    ; Enqueue expired task
-    ; Set send_value to None (timer expired, no I/O result)
-    lea rax, [rel none_singleton]
-    mov [rbx + AsyncTask.send_value], rax
+    ; Enqueue the expired task and let go of the heap's reference: the entry
+    ; is gone, and ready_enqueue has taken one of its own.
+    mov rdi, rbx
+    lea rsi, [rel none_singleton]
+    call task_set_send_value
     mov rdi, rbx
     call ready_enqueue
+    mov rdi, rbx
+    call obj_decref
     jmp .pwd_timer_check
 
 .pwd_check_fds:
@@ -368,8 +447,9 @@ DEF_FUNC poll_wait_and_drain
     mov rbx, [rax + rcx*8]
 
     ; Set send_value to None (fd ready notification)
-    lea rax, [rel none_singleton]
-    mov [rbx + AsyncTask.send_value], rax
+    mov rdi, rbx
+    lea rsi, [rel none_singleton]
+    call task_set_send_value
 
     ; Remove this fd entry (swap with last, decrement)
     dec r12d
@@ -399,6 +479,8 @@ DEF_FUNC poll_wait_and_drain
 .pwd_fd_removed:
     mov rdi, rbx
     call ready_enqueue
+    mov rdi, rbx                ; and the array's reference, entry removed
+    call obj_decref
     jmp .pwd_fd_loop            ; don't increment, new entry at same index
 
 .pwd_fd_next:

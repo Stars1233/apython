@@ -267,24 +267,19 @@ than lying — but they are ordinary Python that does not work:
   an ordinary cycle that never collects.  Code objects were in the same state
   and are tracked now.
 
-  The mechanical part is small -- `gc_alloc` + `gc_track` in `task_new`,
-  `gc_dealloc` in `task_dealloc`, `TYPE_FLAG_HAVE_GC` and a traverse/clear
-  pair.  It was tried, and it is not enough: the tree holds a live `Task`
-  through **four** raw pointers, and the moment tasks become collectable each
-  of them can be left dangling.  The ready queue (`ready_enqueue`) and
-  `EventLoop.root_task` are dealt with -- the queue owns what it holds now,
-  and the root is released when the loop finishes -- and two are not:
+  Every raw holder of a live `Task` now takes a reference -- the ready queue,
+  `EventLoop.root_task`, `AsyncTask.waiters[]`, the poll backend's fd array
+  and timer heap, and both io_uring SQE kinds -- so the mechanical part is
+  what is left: `gc_alloc` and a deferred `gc_track` in `task_new`,
+  `gc_dealloc` in `task_dealloc`, `TYPE_FLAG_HAVE_GC`, and a traverse/clear
+  pair over the coroutine, the result, the exception, the send value and the
+  waiters.
 
-  - `TimerEntry.task` in the poll backend's min-heap
-    (`src/pyo/eventloop_poll.asm`), and the io_uring SQE's `user_data`
-    (`src/pyo/eventloop_iouring.asm`);
-  - `AsyncTask.waiters[]`, appended raw by `task_add_waiter` and dropped en
-    masse when the task completes.
-
-  Each needs to take a reference, or the collector needs to treat it as a
-  root.  Without that, a `Task` collected while it is sleeping or being
-  awaited corrupts the heap: `asyncio.run()` after a collected task cycle
-  segfaults inside an unrelated allocation.
+  The three awaitable types -- `WaitForAwaitable`, `GatherAwaitable`,
+  `SleepAwaitable` -- would stay untracked, which is safe in the conservative
+  direction: an untracked holder's reference is not subtracted, so a task it
+  holds looks reachable.  That can leave a cycle uncollected; it cannot free
+  anything early.
 
 - **`gc` has no `get_referrers`, `freeze`/`unfreeze` or `get_stats`.**
   `get_referrers` needs a reverse edge nothing records -- CPython finds it by

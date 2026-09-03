@@ -81,6 +81,9 @@ DEF_FUNC eventloop_init
 
 .init_done:
     ; Initialize ready queue
+    ; eventloop_teardown drains the queue and clears root_task, so these are
+    ; a first-run initialisation rather than a way of forgetting a previous
+    ; run's contents -- which is what they used to be.
     mov qword [rel eventloop + EventLoop.ready_head], 0
     mov qword [rel eventloop + EventLoop.ready_tail], 0
     mov dword [rel eventloop + EventLoop.running], 1
@@ -96,6 +99,19 @@ END_FUNC eventloop_init
 ;; Shut down the event loop and backend.
 ;; ============================================================================
 DEF_FUNC eventloop_teardown
+    ; Drain the ready queue first.  It owns a reference per task, and
+    ; eventloop_init used to start the next run by zeroing the head and tail
+    ; over whatever was still linked there -- every one of those tasks leaked,
+    ; and with them their coroutine, its frame and everything the frame held.
+.tdn_drain:
+    call ready_dequeue
+    test rax, rax
+    jz .tdn_drained
+    mov rdi, rax
+    call obj_decref
+    jmp .tdn_drain
+.tdn_drained:
+
     mov rax, [rel eventloop + EventLoop.backend]
     test rax, rax
     jz .td_done
@@ -177,10 +193,26 @@ DEF_FUNC task_dealloc
     call obj_decref
 .td_no_exc:
 
-    ; Free waiters array
+    ; Release any waiters still in the array, then free it.  A task that dies
+    ; without ever completing -- cancelled, or dropped with the loop torn
+    ; down under it -- still holds one reference per waiter.
+    mov ecx, [rbx + AsyncTask.n_waiters]
+    test ecx, ecx
+    jz .td_free_waiters
+    mov dword [rbx + AsyncTask.n_waiters], 0
+.td_waiter_loop:
+    mov rax, [rbx + AsyncTask.waiters]
+    mov rdi, [rax + rcx*8 - 8]
+    push rcx
+    call obj_decref
+    pop rcx
+    dec ecx
+    jnz .td_waiter_loop
+.td_free_waiters:
     mov rdi, [rbx + AsyncTask.waiters]
     test rdi, rdi
     jz .td_no_waiters
+    mov qword [rbx + AsyncTask.waiters], 0
     call ap_free
 .td_no_waiters:
 
@@ -200,6 +232,34 @@ DEF_FUNC task_dealloc
     leave
     ret
 END_FUNC task_dealloc
+
+;; ============================================================================
+;; task_set_send_value(rdi = task, rsi = the Value to resume it with)
+;;
+;; send_value is an OWNED reference -- task_dealloc releases it -- so every
+;; store has to release what was there.  Both backends stored none_singleton
+;; over it with neither an incref of the new nor a release of the old: None is
+;; immortal, so nothing crashed, and whatever the field had been holding was
+;; leaked once per timer expiry and once per fd readiness.
+;;
+;; The new value is increfd before the old is released, so setting a task's
+;; send_value to what it already holds is safe.
+;; ============================================================================
+global task_set_send_value
+DEF_FUNC task_set_send_value
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    INCREF_V r12, rax
+    mov rdi, [rbx + AsyncTask.send_value]
+    mov [rbx + AsyncTask.send_value], r12
+    XDECREF_V rdi, rax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC task_set_send_value
 
 ;; ============================================================================
 ;; ready_enqueue(AsyncTask *task)
@@ -373,9 +433,9 @@ DEF_FUNC task_step, TS_FRAME
     ; send_value is an OWNED reference: task_dealloc releases it, and the
     ; sibling path below increfs for exactly this reason.  Handing over the
     ; awaited task's own result borrowed made that release one too many.
-    mov rax, [r12 + AsyncTask.result]
-    INCREF_V rax, rdx
-    mov [rbx + AsyncTask.send_value], rax
+    mov rdi, rbx
+    mov rsi, [r12 + AsyncTask.result]
+    call task_set_send_value
     mov rdi, rbx
     call ready_enqueue
     jmp .ts_decref_awaited
@@ -384,9 +444,9 @@ DEF_FUNC task_step, TS_FRAME
     ; Awaited task had exception — set send_value = None, re-enqueue.
     ; When waiter resumes, SEND calls task_iternext which detects the
     ; awaited task's exception and raises it via eval_exception_unwind.
-    lea rax, [rel none_singleton]
-    INCREF rax
-    mov [rbx + AsyncTask.send_value], rax
+    mov rdi, rbx
+    lea rsi, [rel none_singleton]
+    call task_set_send_value
     mov rdi, rbx
     call ready_enqueue
 
@@ -399,8 +459,6 @@ DEF_FUNC task_step, TS_FRAME
 .ts_wait_for:
     ; rax = WaitForAwaitable*
     mov r12, rax               ; r12 = wfa
-    ; Store outer task reference
-    mov [r12 + WaitForAwaitable.outer_task], rbx
 
     ; Check if inner task already done
     mov rax, [r12 + WaitForAwaitable.inner_task]
@@ -426,9 +484,9 @@ DEF_FUNC task_step, TS_FRAME
 .ts_wf_done:
     ; Inner task already done — fast path: set send_value, re-enqueue
     ; Set None as send_value (wfa iternext will check inner task result)
-    lea rax, [rel none_singleton]
-    INCREF rax
-    mov [rbx + AsyncTask.send_value], rax
+    mov rdi, rbx
+    lea rsi, [rel none_singleton]
+    call task_set_send_value
     mov rdi, rbx
     call ready_enqueue
     ; DECREF wfa
@@ -553,31 +611,33 @@ DEF_FUNC task_wake_waiters
 
     push rcx
     mov rdi, [r13 + rcx*8]    ; waiter task
+    push rdi
 
     ; Check if completed task has an exception
     mov rax, [rbx + AsyncTask.exception]
     test rax, rax
     jnz .tw_set_cancel
 
-    ; Set send_value = task's result (INCREF for each waiter)
-    mov rax, [rbx + AsyncTask.result]
-    V_UNPACK rax, rdx
-    INCREF_VAL rax, rdx
-    V_PACK rax, rdx
-    mov [rdi + AsyncTask.send_value], rax
+    ; Set send_value = task's result, one owned reference per waiter
+    mov rsi, [rbx + AsyncTask.result]
+    call task_set_send_value
     jmp .tw_enqueue
 
 .tw_set_cancel:
     ; Task had exception — set send_value = None and enqueue waiter.
     ; When waiter is resumed, SEND calls task_iternext which will detect
     ; the awaited task's exception and raise it via eval_exception_unwind.
-    lea rax, [rel none_singleton]
-    INCREF rax
-    mov [rdi + AsyncTask.send_value], rax
+    lea rsi, [rel none_singleton]
+    call task_set_send_value
 
 .tw_enqueue:
-    ; Enqueue waiter
+    ; Enqueue the waiter, and let go of the array's own reference: the
+    ; waiters array holds one per entry, and this is where they end.
+    pop rdi
+    push rdi
     call ready_enqueue
+    pop rdi
+    call obj_decref
     pop rcx
     inc ecx
     jmp .tw_loop
@@ -650,6 +710,13 @@ DEF_FUNC task_add_waiter
     mov [rbx + AsyncTask.waiters], rax
 
 .taw_add:
+    ; The array OWNS what it holds.  It used to be raw pointers, which was
+    ; safe only while a task could not be collected: an awaited task keeps a
+    ; waiter alive for as long as it takes to finish, and nothing else has to
+    ; be holding that waiter.  task_wake_waiters releases them, and
+    ; task_dealloc releases whatever is left.
+    mov rdi, r12
+    call obj_incref
     mov eax, [rbx + AsyncTask.n_waiters]
     mov rcx, [rbx + AsyncTask.waiters]
     mov [rcx + rax*8], r12     ; waiters[n_waiters] = waiter
@@ -678,8 +745,12 @@ DEF_FUNC eventloop_run, ER_FRAME
     push r12
 
     mov rbx, rdi               ; root task
-    mov [rel eventloop + EventLoop.root_task], rdi
-    mov [rbp - ER_ROOT], rdi
+    ; The loop's own reference on the root task, released at .er_release.  It
+    ; is read on every pass round the loop for the done check, and a raw
+    ; pointer there was safe only while tasks could not be collected.
+    call obj_incref
+    mov [rel eventloop + EventLoop.root_task], rbx
+    mov [rbp - ER_ROOT], rbx
     mov qword [rel eventloop_root_exception], 0
 
     ; Enqueue root task
@@ -737,11 +808,17 @@ DEF_FUNC eventloop_run, ER_FRAME
 
 .er_release:
 
-    ; And let go of the root task.  It is a RAW pointer, kept across the whole
-    ; run for the done check, and leaving it behind was harmless only while
-    ; tasks could not be collected: once they can, the next asyncio.run()
-    ; starts by reading a task that a collection has since freed.
+    ; And let go of the root task.
+    mov rdi, [rel eventloop + EventLoop.root_task]
     mov qword [rel eventloop + EventLoop.root_task], 0
+    test rdi, rdi
+    jz .er_out
+    push rax
+    push rdx
+    call obj_decref
+    pop rdx
+    pop rax
+.er_out:
 
     pop r12
     pop rbx
@@ -869,9 +946,8 @@ DEF_FUNC_BARE task_iternext
     ; No exception — copy result for StopIteration protocol.  A copy into an
     ; owned slot needs its own reference, even from the same task's result:
     ; both are released.
-    mov rax, [rdi + AsyncTask.result]
-    INCREF_V rax, rdx
-    mov [rdi + AsyncTask.send_value], rax
+    mov rsi, [rdi + AsyncTask.result]
+    call task_set_send_value
     ; Return NULL to signal completion
     RET_NULL
     ret

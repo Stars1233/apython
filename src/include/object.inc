@@ -626,7 +626,11 @@ struc WaitForAwaitable
     .timeout_ns:      resq 1  ; +24: timeout in nanoseconds
     .state:           resd 1  ; +32: 0=init, 1=yielded, 2=done
     .pad:             resd 1  ; +36
-    .outer_task:      resq 1  ; +40: AsyncTask* (the waiter, set by task_step)
+    ; +40 is dead space, and has to stay: gi_return_value below must line up
+    ; with PyGenObject's, which op_send reads without knowing which it has.
+    ; It held an outer_task pointer that task_step wrote on every wait_for and
+    ; nothing ever read -- a raw reference to a live task, for nothing.
+    .unused:          resq 1  ; +40
     .gi_return_value: resq 1  ; +48: result Value (matches PyGenObject offset)
 endstruc
 

@@ -302,7 +302,7 @@ DEF_FUNC asyncio_wait_for_func, WF_FRAME
     mov rcx, [rbp - WF_DELAY]
     mov [rax + WaitForAwaitable.timeout_ns], rcx
     mov dword [rax + WaitForAwaitable.state], 0
-    mov qword [rax + WaitForAwaitable.outer_task], 0
+    mov qword [rax + WaitForAwaitable.unused], 0
     mov qword [rax + WaitForAwaitable.gi_return_value], 0
 
     mov edx, TAG_PTR
