@@ -1078,6 +1078,7 @@ weakref_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 align 8
 global proxy_type
@@ -1109,6 +1110,7 @@ proxy_type:
     dq 0
     dq 0
     dq 0
+    dq 0                        ; tp_weaklistoffset
 
 align 8
 global callableproxy_type
@@ -1140,6 +1142,7 @@ callableproxy_type:
     dq 0
     dq 0
     dq 0
+    dq 0                        ; tp_weaklistoffset
 
 section .rodata
 wrm_name:              db "_weakref", 0

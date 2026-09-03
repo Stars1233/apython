@@ -2331,6 +2331,7 @@ list_type:
     dq list_traverse                        ; tp_traverse
     dq list_clear                        ; tp_clear
     dq 0       ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 section .text
 

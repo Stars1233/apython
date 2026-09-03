@@ -351,6 +351,7 @@ bool_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ; True singleton - has embedded mpz_t value of 1
 align 8
@@ -510,6 +511,7 @@ none_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ; None singleton - immortal object, never freed
 align 8
@@ -564,6 +566,7 @@ notimpl_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ; NotImplemented singleton - immortal object, never freed
 align 8
@@ -618,6 +621,7 @@ ellipsis_type:
     dq 0                    ; tp_traverse
     dq 0                    ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ; Ellipsis singleton - immortal object, never freed
 align 8

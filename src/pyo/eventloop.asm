@@ -1244,6 +1244,7 @@ task_type:
     dq task_traverse            ; tp_traverse
     dq task_clear               ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 section .bss
 align 8

@@ -3167,6 +3167,7 @@ bytes_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ; bytes_iter type object
 align 8
@@ -3198,6 +3199,7 @@ bytes_iter_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 section .rodata
 
@@ -5033,6 +5035,7 @@ bytearray_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ; What bytearray_data hands back when ob_bytes is NULL, so no reader has to
 ; test for it.
@@ -5084,6 +5087,7 @@ memoryview_iter_type:
     dq 0                            ; tp_traverse
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 align 8
 global bytearray_iter_type
@@ -5115,6 +5119,7 @@ bytearray_iter_type:
     dq 0                            ; tp_traverse
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ;; ============================================================================
 ;; (was src/pyo/memview.asm)
@@ -6267,6 +6272,7 @@ memoryview_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 section .rodata
 bas_msg_size: db "attempt to assign bytes of size ", 0

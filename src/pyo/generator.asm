@@ -1747,6 +1747,7 @@ gen_type:
     dq gen_traverse                        ; tp_traverse
     dq gen_clear                        ; tp_clear
     dq 0      ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 align 8
 global coro_type
@@ -1778,6 +1779,7 @@ coro_type:
     dq gen_traverse                        ; tp_traverse
     dq gen_clear                        ; tp_clear
     dq 0      ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 align 8
 global async_gen_type
@@ -1809,6 +1811,7 @@ async_gen_type:
     dq gen_traverse                        ; tp_traverse
     dq gen_clear                        ; tp_clear
     dq 0      ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ags_name_str: db "async_generator_asend", 0
 
@@ -1822,7 +1825,7 @@ async_gen_wrapped_type:
     dq agw_name_str             ; tp_name
     dq AsyncGenWrapped_size     ; tp_basicsize
     dq agw_dealloc              ; tp_dealloc
-    times 22 dq 0               ; the rest: this box is never used as a value
+    times 23 dq 0               ; the rest: this box is never used as a value
 
 align 8
 global async_gen_asend_type
@@ -1854,6 +1857,7 @@ async_gen_asend_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 section .text
 

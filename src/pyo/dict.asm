@@ -1870,6 +1870,7 @@ dict_type:
     dq dict_traverse                        ; tp_traverse
     dq dict_clear_gc                        ; tp_clear
     dq 0          ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ; Dict key iterator type
 align 8
@@ -1902,6 +1903,7 @@ dict_iter_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ; Dict reverse key iterator type
 align 8
@@ -1934,6 +1936,7 @@ dict_rev_iter_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ; Dict keys view sequence methods (len + contains)
 align 8
@@ -1990,6 +1993,7 @@ dict_keys_view_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ; Dict values view type
 align 8
@@ -2022,6 +2026,7 @@ dict_values_view_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ; Dict items view type
 align 8
@@ -2054,6 +2059,7 @@ dict_items_view_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 section .text
 

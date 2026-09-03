@@ -637,6 +637,7 @@ code_type:
     dq code_traverse    ; tp_traverse
     dq code_clear       ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 
 section .bss

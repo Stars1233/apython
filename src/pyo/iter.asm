@@ -1132,6 +1132,7 @@ list_iter_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ; Tuple iterator type
 align 8
@@ -1164,6 +1165,7 @@ tuple_iter_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ; Range iterator type
 align 8
@@ -1196,6 +1198,7 @@ range_iter_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ; Range object type (reusable sequence, creates fresh iterators)
 align 8
@@ -1228,6 +1231,7 @@ range_obj_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ; Range object sequence methods
 align 8

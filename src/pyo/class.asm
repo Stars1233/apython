@@ -3283,6 +3283,7 @@ user_type_metatype:
     dq type_traverse            ; tp_traverse
     dq type_clear               ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ; object_type - base type for all Python objects
 ; Used as explicit base class: class Foo(object): pass
@@ -3324,6 +3325,7 @@ object_type:
     dq instance_traverse                        ; tp_traverse
     dq instance_clear                        ; tp_clear
     dq 0           ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 ; super_type - placeholder for the 'super' builtin
 ; LOAD_SUPER_ATTR pops and discards this; it just needs to be loadable.
@@ -3334,7 +3336,7 @@ super_type:
     dq super_type               ; ob_type (self-referential)
     dq super_name_str           ; tp_name
     dq TYPE_OBJECT_SIZE         ; tp_basicsize
-    times 23 dq 0               ; remaining tp_* fields
+    times 24 dq 0               ; remaining tp_* fields
 
 ; method_type - type descriptor for bound methods
 align 8
@@ -3367,6 +3369,7 @@ method_type:
     dq method_traverse                        ; tp_traverse
     dq method_clear                        ; tp_clear
     dq 0         ; tp_dictoffset
+    dq 0                        ; tp_weaklistoffset
 
 section .text
 

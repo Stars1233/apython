@@ -760,6 +760,11 @@ struc PyTypeObject
     ; is gc_alloc'd and zero-filled, so a static table that predates this
     ; field cannot be misread.
     .tp_dictoffset:  resq 1  ; +208
+    ; Byte offset of the instance's weak-reference list head, or 0 for a type
+    ; whose instances cannot be weak-referenced.  Like tp_dictoffset it goes
+    ; at the end, so a table that predates it is short rather than shifted --
+    ; and src/compiler/lint.py rejects a short one outright.
+    .tp_weaklistoffset: resq 1  ; +216
 endstruc
 
 TYPE_OBJECT_SIZE equ PyTypeObject_size
