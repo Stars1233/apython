@@ -36,6 +36,7 @@ extern staticmethod_type
 extern classmethod_type
 extern property_type
 extern property_descr_get
+extern none_singleton
 extern dunder_get
 extern dunder_call_3
 extern dunder_lookup
@@ -411,6 +412,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     VPOP_VAL rdi, rax
     mov [rbp - LA_OBJ], rdi
     mov [rbp - LA_OBJ_TAG], rax
+    ; Only the type_getattr path writes this, and every other path reads it
+    ; as "the class's own mro answered", which is what 0 means.
+    mov qword [rbp - LA_FROMMETA], 0
 
     ; Dispatch on obj tag — resolve non-pointer tags to their type
     cmp qword [rbp - LA_OBJ_TAG], TAG_PTR
@@ -639,12 +643,34 @@ DEF_FUNC op_load_attr, LA_FRAME
     test edx, edx
     jz .la_check_flag          ; no __get__, treat normally
 
-    ; Has __get__! Call descriptor.__get__(obj, type(obj))
-    mov rdi, [rbp - LA_ATTR]   ; descriptor (attr)
+    ; Has __get__!  Which two arguments it gets depends on where the lookup
+    ; started.  `obj.x` is __get__(obj, type(obj)); `C.x` is __get__(None, C),
+    ; and CPython's type.__getattribute__ is what draws that line.  Passing
+    ; the class as the instance and the METAclass as the owner made every
+    ; descriptor that distinguishes the two answer the wrong case -- enum's
+    ; property looks the name up in the instance's value rather than handing
+    ; back the member, which is what stopped `import enum`'s users working.
+    ;
+    ; The test is TYPE_FLAG_METATYPE on the object's own type, not a compare
+    ; against type_type: a class built by a metaclass of its own is still a
+    ; class.  And the descriptor has to have come from the class's OWN mro --
+    ; one found on the metatype is an ordinary instance access, where the
+    ; class IS the instance.
     mov rsi, [rbp - LA_OBJ]    ; obj (instance)
     mov rdx, [rsi + PyObject.ob_type] ; type(obj)
+    mov rax, [rbp - LA_OBJVAL]
+    V_TEST_PTR rax, rcx         ; the Value, not the tag: VPOP_VAL writes only
+    ja .la_descr_have_args      ; the low half of the tag slot
+    cmp qword [rbp - LA_FROMMETA], 0
+    jne .la_descr_have_args
+    test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .la_descr_have_args
+    mov rdx, rsi               ; owner = the class
+    LOAD_NONE rsi              ; instance = None
+.la_descr_have_args:
+    mov rdi, [rbp - LA_ATTR]   ; descriptor (attr)
     lea rcx, [rel dunder_get]
-    mov r8d, TAG_PTR             ; type(obj) is always heap ptr
+    mov r8d, TAG_PTR             ; both are always heap pointers
     call dunder_call_3
     V_UNPACK rax, rdx           ; returns a Value
 

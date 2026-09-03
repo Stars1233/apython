@@ -102,6 +102,7 @@ ok traceback
 ok turtledemo
 ok types
 ok urllib
+ok uuid
 ok warnings
 ok wave
 ok weakref
