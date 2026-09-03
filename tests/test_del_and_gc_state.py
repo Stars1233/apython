@@ -13,12 +13,13 @@
 # usual differential comparison cannot be used.  tests/expected/ holds a
 # recorded transcript; the asserts are what actually establish correctness.
 #
-# The transcript is NOT a claim of parity.  CPython finalizes the cyclic Node
-# pairs below at interpreter shutdown and reports each raising __del__ --
-# eighty lines that apython does not emit, because it does not run __del__ on
-# cyclic garbage at shutdown.  That gap is recorded in bugs.md; what this
-# test establishes is that a raising __del__ does not poison the exception
-# state or latch the collector off, which the asserts check directly.
+# The transcript is not line-for-line CPython's: the forty cyclic Node
+# objects below are finalized at shutdown by both, but CPython prints a full
+# traceback for each ignored exception where this prints one line.  The count
+# is the part that matters, and it matches -- one report per object.  What
+# this test establishes beyond that is that a raising __del__ does not poison
+# the exception state or latch the collector off, which the asserts check
+# directly.
 
 
 class Boom:

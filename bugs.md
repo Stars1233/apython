@@ -162,11 +162,6 @@ one-line fix.
   different layouts is accepted and laid out as the wider one, where CPython
   raises "multiple bases have instance lay-out conflict".
 
-- **Cyclic garbage is not finalized at shutdown.**  CPython runs `__del__` on
-  the cycles still alive when the interpreter exits; apython does not, so
-  those finalizers never run.  `tests/test_del_and_gc_state.py` records this
-  divergence in its recorded transcript deliberately -- see the note there.
-
 - **The default `repr` names the type but not the address.**  CPython answers
   `<set_iterator object at 0x7f...>`; a type with no `tp_repr` answers
   `<set_iterator>` here, and a plain class instance answers `<instance>`
