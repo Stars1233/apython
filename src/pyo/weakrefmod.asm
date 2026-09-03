@@ -41,6 +41,26 @@ extern str_new_heap
 extern module_new
 extern builtin_func_new
 extern type_type
+extern user_type_metatype
+extern exc_metatype
+extern func_type
+extern builtin_func_type
+extern method_type
+extern gen_type
+extern coro_type
+extern async_gen_type
+extern module_type
+extern memoryview_type
+extern code_type
+extern file_type
+extern io_bytesio_type
+extern task_type
+extern set_type
+extern frozenset_type
+extern int_type
+extern float_type
+extern tuple_type
+extern bytes_type
 extern raise_exception
 extern exc_TypeError_type
 extern bool_true
@@ -499,17 +519,191 @@ END_FUNC ref_richcompare
 ;; ============================================================================
 ;; ref(object[, callback]) -- tp_new for ReferenceType and its subclasses
 ;; ============================================================================
+
+;; ============================================================================
+;; weakref_check_referent(rdi = the referent Value) -> rax = the object, or 0
+;;                                                     with a TypeError pending
+;;
+;; CPython refuses a weak reference to most builtin types: `weakref.ref([])`
+;; is a TypeError, not a reference.  That is what a zero tp_weaklistoffset
+;; means, and it is load-bearing -- WeakValueDictionary relies on the refusal
+;; to reject a value it could never observe dying.  Every one of them was
+;; accepted here, so the failure surfaced much later, as a dictionary that
+;; quietly never dropped anything.
+;;
+;; The links live in a side table rather than in a per-object slot (see the
+;; file header), so there is no offset to test.  This answers the same
+;; question from the type instead.
+;; ============================================================================
+DEF_FUNC weakref_check_referent
+    push rbx
+    ; An immediate is an int or a float, and CPython refuses both -- but it
+    ; names the type, so resolve it rather than falling into a generic
+    ; message.
+    V_IS_INT rdi, rax
+    jae .wcr_refuse_int
+    V_IS_FLOAT rdi, rax
+    jb .wcr_refuse_float
+    test rdi, rdi
+    jz .wcr_refuse_null
+    mov rbx, rdi
+    mov rdi, [rdi + PyObject.ob_type]
+    call weakref_referenceable
+    test eax, eax
+    jz .wcr_refuse
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+.wcr_refuse:
+    mov rsi, [rbx + PyObject.ob_type]
+    jmp .wcr_raise
+.wcr_refuse_int:
+    lea rsi, [rel int_type]
+    jmp .wcr_raise
+.wcr_refuse_float:
+    lea rsi, [rel float_type]
+    jmp .wcr_raise
+.wcr_refuse_null:
+    xor esi, esi
+.wcr_raise:
+    lea rdi, [rel wcr_message]
+    extern raise_type_error_with_typename
+    call raise_type_error_with_typename
+END_FUNC weakref_check_referent
+
+section .rodata
+wcr_message: db "cannot create weak reference to '", 1, "' object", 0
+
+;; The static types CPython gives a weaklist slot.  Everything else static --
+;; int, str, list, dict, tuple, the iterators, the descriptors, the exception
+;; types -- refuses, and so does `object` itself.
+align 8
+weakref_allowed_types:
+    dq set_type
+    dq frozenset_type
+    dq type_type
+    dq user_type_metatype
+    dq exc_metatype
+    dq func_type
+    dq builtin_func_type
+    dq method_type
+    dq gen_type
+    dq coro_type
+    dq async_gen_type
+    dq module_type
+    dq memoryview_type
+    dq code_type
+    dq file_type
+    dq io_bytesio_type
+    dq task_type
+    dq 0
+
+;; The three whose instances keep their value inline and variable-sized.  A
+;; heaptype over one of them cannot be given a weaklist word at a fixed
+;; offset, so CPython does not, and `class I(int): pass` is not
+;; weak-referenceable even though `class L(list): pass` is.
+align 8
+weakref_varsize_types:
+    dq int_type
+    dq tuple_type
+    dq bytes_type
+    dq 0
+section .text
+
+;; ============================================================================
+;; weakref_referenceable(rdi = a type) -> eax = 1 when its instances can be
+;;                                        weakly referenced
+;;
+;; CPython's rule, which lives in type_new_set_attrs: a heaptype is given a
+;; __weakref__ word unless it declares __slots__ without naming it, or its
+;; layout base keeps its value inline and variable-sized.  Once any level in
+;; the chain has the word, every type below it inherits one.
+;; ============================================================================
+WRR_ADDS  equ 8
+WRR_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+DEF_FUNC weakref_referenceable, WRR_FRAME
+    push rbx
+    mov rbx, rdi
+
+    ; A __weakref__ named in __slots__ settles it, at any level.
+    lea rsi, [rel wrr_weakref_name]
+    extern dunder_lookup
+    call dunder_lookup
+    test rax, rax
+    jnz .wrr_yes
+
+    ; Walk down to the first static ancestor, noting whether any heaptype on
+    ; the way would have been given the word.
+    mov qword [rbp - WRR_ADDS], 0
+.wrr_walk:
+    test rbx, rbx
+    jz .wrr_from_adds
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .wrr_static
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+    jnz .wrr_next
+    mov qword [rbp - WRR_ADDS], 1
+.wrr_next:
+    mov rbx, [rbx + PyTypeObject.tp_base]
+    jmp .wrr_walk
+
+.wrr_static:
+    lea rcx, [rel weakref_allowed_types]
+.wrr_allow_loop:
+    mov rax, [rcx]
+    test rax, rax
+    jz .wrr_check_varsize
+    cmp rax, rbx
+    je .wrr_yes
+    add rcx, 8
+    jmp .wrr_allow_loop
+
+.wrr_check_varsize:
+    lea rcx, [rel weakref_varsize_types]
+.wrr_var_loop:
+    mov rax, [rcx]
+    test rax, rax
+    jz .wrr_from_adds
+    cmp rax, rbx
+    je .wrr_no
+    add rcx, 8
+    jmp .wrr_var_loop
+
+.wrr_from_adds:
+    mov rax, [rbp - WRR_ADDS]
+    pop rbx
+    leave
+    ret
+.wrr_yes:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.wrr_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC weakref_referenceable
+
+section .rodata
+wrr_weakref_name: db "__weakref__", 0
+section .text
+
 DEF_FUNC ref_construct
     ; rdi = type, rsi = args, rdx = nargs
     cmp rdx, 1
     jl .bad
     push rbx
     mov rbx, rdi
+    push rdx                    ; nargs, across the check
+    push rsi
     mov rdi, [rsi]
-    V_TEST_PTR rdi, rax
-    ja .not_referenceable
-    test rdi, rdi
-    jz .not_referenceable
+    call weakref_check_referent ; raises, naming the type, when it refuses
+    pop rsi
+    pop rdx
+    mov rdi, rax
     xor ecx, ecx
     cmp rdx, 2
     jl .no_cb
@@ -529,9 +723,6 @@ DEF_FUNC ref_construct
     V_PACK rax, rdx
     leave
     ret
-.not_referenceable:
-    pop rbx
-    RAISE exc_TypeError_type, "cannot create weak reference to this object"
 .bad:
     RAISE exc_TypeError_type, "ref expected at least 1 argument"
 END_FUNC ref_construct
@@ -646,11 +837,11 @@ DEF_FUNC wr_proxy_func
     jl .bad
     push rbx
     mov rbx, rdi
+    push rsi                    ; nargs, across the check
     mov rdi, [rbx]
-    V_TEST_PTR rdi, rax
-    ja .bad_pop
-    test rdi, rdi
-    jz .bad_pop
+    call weakref_check_referent ; raises, naming the type, when it refuses
+    pop rsi
+    mov rdi, rax
     ; A callable referent gets CallableProxyType, as CPython does.
     mov rax, [rdi + PyObject.ob_type]
     cmp qword [rax + PyTypeObject.tp_call], 0
@@ -679,8 +870,6 @@ DEF_FUNC wr_proxy_func
     V_PACK rax, rdx
     leave
     ret
-.bad_pop:
-    pop rbx
 .bad:
     RAISE exc_TypeError_type, "cannot create weak proxy to this object"
 END_FUNC wr_proxy_func

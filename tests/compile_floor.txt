@@ -358,6 +358,7 @@ test_union_hash
 test_unpack_dict
 test_value_typeconfusion
 test_weakref
+test_weakref_types
 test_wrong_answers
 test_zero_valued_lookup
 test_zip_strict

@@ -62,7 +62,16 @@ one-line fix.
   table keyed by the referent's address rather than in the object, so
   `tp_weaklistoffset` does not exist and `__weakref__` is not an attribute.
   Everything observable through `_weakref` works; a C extension expecting the
-  slot would not.
+  slot would not.  ~~And because there is no offset, there was nothing to be
+  zero: every type was weak-referenceable, where CPython refuses `ref([])`,
+  `ref(1)`, `ref(None)` and most other builtins.  The refusal is
+  load-bearing -- `WeakValueDictionary` relies on it to reject a value whose
+  death it could never observe -- so accepting them turned a TypeError at the
+  call into a dictionary that quietly never dropped anything.~~
+  `weakref_referenceable` now answers the same question from the type, by
+  CPython's rule: a class is given the word unless it declares `__slots__`
+  without naming `__weakref__`, or its layout base keeps its value inline and
+  variable-sized.  `tests/test_weakref_types.py`.
 
 ~~- **A few names are still short of CPython's `dir()`.**  `int` and `float`
   are missing the in-place forms; `set` is missing `__iand__` and `__ior__`,
