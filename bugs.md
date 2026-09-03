@@ -306,7 +306,11 @@ than lying — but they are ordinary Python that does not work:
   `lib/_codecs.py` reads as CPython's does.  The asm sites still pre-render a
   one-argument exception instead.  The utf-8 *decode* arm and both *encode*
   arms build CPython's wording by hand, character, position, range and all;
-  the ascii decode arm still says only "byte not in range for this encoding".
+  ~~the ascii decode arm still says only "byte not in range for this
+  encoding"~~ -- it names the codec, the byte and the position now, and every
+  decode error carries CPython's five fields (`encoding`, `object`, `start`,
+  `end`, `reason`), which are how an error handler knows what to replace.
+  `tests/test_decode_errors.py`.
   Raising a real five-argument exception from asm needs a way to call an
   exception type with five arguments, which `exc_new` does not offer.
 
@@ -339,21 +343,27 @@ than lying — but they are ordinary Python that does not work:
   path, and reaches the tail iteratively rather than one C frame per
   iteration.
 
-- **`set.__contains__(frozenset(...), x)` is accepted** where CPython raises.
-  The eight operators, `__len__` and `__iter__` are each type's own now, and
-  refuse the sibling; `__contains__` is still the shared
-  `generic_method_contains`.  CPython's refusal there carries the
-  *wrapper*-descriptor wording -- "descriptor '__contains__' for 'set'
-  objects doesn't apply to a 'frozenset' object" -- rather than the method
-  descriptor's "requires ... but received", and this tree does not draw that
-  distinction yet.  Matching the refusal without the wording would trade one
-  divergence for another.
+~~- **`set.__contains__(frozenset(...), x)` is accepted** where CPython
+  raises.  ... this tree does not draw that distinction yet.~~
 
-- **A descriptor's arity is checked before its receiver.**  CPython asks
-  which object it was handed first, so `int.__neg__(2.5, 1)` is "descriptor
-  '__neg__' requires a 'int' object"; here the argument count is rejected
-  first and the message is "expected exactly one argument".  Only the order
-  and the wording differ -- both raise TypeError.
+~~- **A descriptor's arity is checked before its receiver.**  CPython asks
+  which object it was handed first ...~~
+
+  Both are fixed, and the entries badly understated the first one.  Nothing
+  checked an unbound descriptor's receiver at all: `list.append((1, 2), 9)`
+  read a tuple's header as a list's and tried to grow it -- "Fatal: out of
+  memory", from a two-element tuple.  `builtin_func_call` is the single
+  funnel every builtin method goes through and `func_owner` was already
+  recorded there for the repr, so one check covers all of them, before the
+  arity as CPython checks it.  `func_kind` picks between the two wordings.
+  `tests/test_descriptor_receiver.py`.
+
+  The arity messages went with it: "function takes at most N arguments" --
+  with a literal N -- and "expected exactly one argument" are now CPython's
+  counted forms.  What is left is per-method: a builtin registered with no
+  argument counts still accepts extras silently (`str.upper("a", 1)`), and
+  CPython's own wordings there are inconsistent between clinic-generated and
+  hand-written methods.
 
 - **asyncio `Task`s and `wait_for` wrappers are not GC-tracked.**  A `Task`
   holds its coroutine, which holds a frame, whose locals can hold the task --

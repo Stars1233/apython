@@ -107,6 +107,7 @@ test_container_operator_names
 test_contains_fallback
 test_control_flow
 test_crash_regressions
+test_decode_errors
 test_deep_dealloc
 test_defaults
 test_del_and_gc_state
@@ -117,6 +118,7 @@ test_del
 test_deopt_extended_arg
 test_deque
 test_descr_func_attr
+test_descriptor_receiver
 test_descriptors
 test_dict_bugs
 test_dict_dunder_args

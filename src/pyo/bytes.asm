@@ -4,6 +4,9 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern exc_UnicodeDecodeError_type
+extern exc_new
+extern exc_setattr
 extern tuple_type
 extern tuple_new
 extern bytes_method_hex
@@ -748,13 +751,26 @@ END_FUNC bytes_check_errors_type
 ;; ============================================================================
 BRD_POS   equ 8
 BRD_SPAN  equ 16
-BRD_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+BRD_SELF  equ 24
+BRD_CODEC equ 32
+BRD_REASON equ 40
+BRD_FRAME equ 48            ; + 1 push = 56, not 16-aligned
 
 DEF_FUNC bytes_raise_decode_error, BRD_FRAME
     push rbx
     mov [rbp - BRD_POS], rsi
     mov [rbp - BRD_SPAN], rcx
+    mov [rbp - BRD_SELF], rdi
     mov rbx, rdx                ; the reason
+    ; The codec is a parameter now: the ascii arm raised
+    ; "byte not in range for this encoding", which says neither which byte
+    ; nor where, and named no codec at all.
+    lea rax, [rel bd_codec_utf8]
+    test r8, r8
+    jz .brd_have_codec
+    mov rax, r8
+.brd_have_codec:
+    mov [rbp - BRD_CODEC], rax
     cmp rcx, 1
     jg .brd_range               ; more than one byte is reported as a range
 
@@ -769,6 +785,15 @@ DEF_FUNC bytes_raise_decode_error, BRD_FRAME
     push rcx
     push rax
     lea rdi, [rel bd_msgbuf]
+    lea rsi, [rel bd_quote]
+    call bd_copy
+    mov rdi, rax
+    mov rsi, [rbp - BRD_CODEC]
+    call bd_copy
+    mov rdi, rax
+    lea rsi, [rel bd_quote]
+    call bd_copy
+    mov rdi, rax
     lea rsi, [rel bd_msg_head]
     call bd_copy
     pop rdx                         ; low
@@ -787,26 +812,24 @@ DEF_FUNC bytes_raise_decode_error, BRD_FRAME
     lea rsi, [rel bd_msg_colon]
     call bd_copy
     mov rdi, rax
-    lea rsi, [rel bd_reason_start]
-    cmp rbx, 1
-    jne .brd_check_end
-    lea rsi, [rel bd_reason_cont]
-    jmp .brd_go
-.brd_check_end:
-    cmp rbx, 2
-    jne .brd_go
-    lea rsi, [rel bd_reason_end]
-.brd_go:
+    call .brd_reason_text
+    mov [rbp - BRD_REASON], rsi
     call bd_copy
-    lea rdi, [rel exc_UnicodeDecodeError_type]
-    lea rsi, [rel bd_msgbuf]
-    call raise_exception
-    ud2
+    jmp .brd_finish
 
 .brd_range:
     ; "can't decode bytes in position 0-1", which is what CPython says when
     ; the input ends in the middle of a sequence.
     lea rdi, [rel bd_msgbuf]
+    lea rsi, [rel bd_quote]
+    call bd_copy
+    mov rdi, rax
+    mov rsi, [rbp - BRD_CODEC]
+    call bd_copy
+    mov rdi, rax
+    lea rsi, [rel bd_quote]
+    call bd_copy
+    mov rdi, rax
     lea rsi, [rel bd_msg_bytes]
     call bd_copy
     mov rdi, rax
@@ -824,21 +847,111 @@ DEF_FUNC bytes_raise_decode_error, BRD_FRAME
     lea rsi, [rel bd_msg_colon]
     call bd_copy
     mov rdi, rax
+    call .brd_reason_text
+    mov [rbp - BRD_REASON], rsi
+    call bd_copy
+
+.brd_finish:
+    ; The five fields CPython puts on a UnicodeDecodeError.  The stdlib's
+    ; error handlers read every one of them: `e.start`, `e.end` and
+    ; `e.object` are how a replacement handler knows what to replace.  This
+    ; raised a bare message with none of them.
+    lea rdi, [rel bd_msgbuf]
+    call str_from_cstr_heap
+    push rax
+    sub rsp, 8
+    mov rsi, rax
+    lea rdi, [rel exc_UnicodeDecodeError_type]
+    mov edx, TAG_PTR
+    call exc_new
+    add rsp, 8
+    pop rdi
+    push rax                    ; the exception
+    sub rsp, 8
+    call obj_decref             ; exc_new took its own reference to the message
+    mov rbx, [rsp + 8]
+
+    CSTRING rdi, "encoding"
+    mov rsi, [rbp - BRD_CODEC]
+    call .brd_set_str_field
+    CSTRING rdi, "reason"
+    mov rsi, [rbp - BRD_REASON]
+    call .brd_set_str_field
+
+    CSTRING rdi, "object"
+    mov rsi, [rbp - BRD_SELF]
+    INCREF rsi
+    call .brd_set_field
+
+    CSTRING rdi, "start"
+    mov rsi, [rbp - BRD_POS]
+    V_PACK_I64 rsi, rcx
+    call .brd_set_field
+    CSTRING rdi, "end"
+    mov rsi, [rbp - BRD_POS]
+    add rsi, [rbp - BRD_SPAN]
+    V_PACK_I64 rsi, rcx
+    call .brd_set_field
+
+    add rsp, 8
+    pop rdi
+    extern raise_exception_obj
+    jmp raise_exception_obj     ; takes the reference; does not return
+
+;; .brd_reason_text -- rbx = the reason id -> rsi = the text
+.brd_reason_text:
     lea rsi, [rel bd_reason_start]
     cmp rbx, 1
-    jne .brd_range_reason
+    jne .brd_reason_2
     lea rsi, [rel bd_reason_cont]
-    jmp .brd_range_have
-.brd_range_reason:
+    ret
+.brd_reason_2:
     cmp rbx, 2
-    jne .brd_range_have
+    jne .brd_reason_3
     lea rsi, [rel bd_reason_end]
-.brd_range_have:
-    call bd_copy
-    lea rdi, [rel exc_UnicodeDecodeError_type]
-    lea rsi, [rel bd_msgbuf]
-    call raise_exception
-    ud2
+    ret
+.brd_reason_3:
+    cmp rbx, 3
+    jne .brd_reason_done
+    lea rsi, [rel bd_reason_ascii]
+.brd_reason_done:
+    ret
+
+;; .brd_set_str_field(rdi = the field's name, rsi = a C string) -- makes the
+;; string and hands it to .brd_set_field, which takes over the reference.
+.brd_set_str_field:
+    push rdi
+    sub rsp, 8
+    mov rdi, rsi
+    call str_from_cstr_heap
+    mov rsi, rax
+    add rsp, 8
+    pop rdi
+    ; fall through
+
+;; .brd_set_field(rdi = the field's name, rsi = an owned Value)
+;; rbx holds the exception.
+.brd_set_field:
+    push rsi                    ; [rsp] = the value
+    push rdi
+    sub rsp, 8
+    mov rdi, [rsp + 8]
+    call str_from_cstr_heap
+    add rsp, 8
+    pop rdi                     ; the name cstring, done with
+    push rax                    ; [rsp] = the key, [rsp+8] = the value
+    sub rsp, 8
+    mov rdi, rbx
+    mov rsi, [rsp + 8]
+    mov rdx, [rsp + 16]
+    xor ecx, ecx
+    call exc_setattr
+    add rsp, 8
+    pop rdi
+    call obj_decref             ; the key
+    pop rdi
+    DECREF_V rdi, rcx           ; exc_setattr took its own reference
+    ret
 END_FUNC bytes_raise_decode_error
 
 DEF_FUNC_LOCAL bd_append_typename   ; (rdi = dest, rsi = a Value) -> rax
@@ -1142,6 +1255,7 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     mov rsi, [rbp - BD_POS]
     mov rdx, [rbp - BD_WHY]
     mov rcx, [rbp - BD_SPAN]
+    xor r8d, r8d                ; the default codec name, 'utf-8'
     call bytes_raise_decode_error
     ud2
 
@@ -1263,6 +1377,7 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     ; This arm jumped straight to the raise, so `b"a\xffb".decode("ascii",
     ; "ignore")` raised where CPython answers 'ab' -- and an unknown handler
     ; name was never reported as a LookupError on this path either.
+    mov [rbp - BD_POS], rcx     ; where it failed, for the message
     mov rdi, [rbp - BD_ERRORS]
     call codec_error_id         ; 0 strict, 1 ignore, 2 replace, -1 unknown
     cmp eax, -1
@@ -1384,8 +1499,16 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     RAISE exc_TypeError_type, "decode() takes at most 2 arguments"
 
 .bd_not_decodable:
-    extern exc_UnicodeDecodeError_type
-    RAISE exc_UnicodeDecodeError_type, "byte not in range for this encoding"
+    ; "'ascii' codec can't decode byte 0xff in position 2: ordinal not in
+    ; range(128)".  This said "byte not in range for this encoding", which
+    ; names neither the codec, nor the byte, nor where it was.
+    mov rdi, [rbp - BD_SELF]
+    mov rsi, [rbp - BD_POS]
+    mov edx, 3                  ; "ordinal not in range(128)"
+    mov ecx, 1
+    lea r8, [rel bd_codec_ascii]
+    call bytes_raise_decode_error
+    ud2
 END_FUNC _bytes_decode_impl
 
 ;; ============================================================================
@@ -3079,16 +3202,20 @@ bytes_iter_type:
 section .rodata
 
 bd_hexdigits:     db "0123456789abcdef"
-bd_msg_head:      db "'utf-8' codec can't decode byte 0x", 0
+bd_codec_utf8:    db "utf-8", 0
+bd_codec_ascii:   db "ascii", 0
+bd_quote:         db "'", 0
+bd_msg_head:      db " codec can't decode byte 0x", 0
 bd_msg_inpos:     db " in position ", 0
 bd_msg_colon:     db ": ", 0
-bd_msg_bytes:     db "'utf-8' codec can't decode bytes in position ", 0
+bd_msg_bytes:     db " codec can't decode bytes in position ", 0
 bd_msg_dash:      db "-", 0
 bd_msg_handler:   db "unknown error handler name '", 0
 bd_msg_errtype:   db "decode() argument 'errors' must be str, not ", 0
 bd_reason_start:  db "invalid start byte", 0
 bd_reason_cont:   db "invalid continuation byte", 0
 bd_reason_end:    db "unexpected end of data", 0
+bd_reason_ascii:  db "ordinal not in range(128)", 0
 bd_name_int:      db "int", 0
 bd_name_float:    db "float", 0
 bd_name_none:     db "None", 0

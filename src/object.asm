@@ -485,6 +485,223 @@ DEF_FUNC raise_type_error_counted, RTC_FRAME
     call raise_exception
 END_FUNC raise_type_error_counted
 
+;; ============================================================================
+;; raise_descriptor_receiver(rdi = the PyBuiltinObject, rsi = the receiver
+;;                           Value) -- does not return
+;;
+;; CPython has two wordings here, and which one you get says what kind of
+;; descriptor you reached:
+;;   descriptor 'append' for 'list' objects doesn't apply to a 'tuple' object
+;;   descriptor '__neg__' requires a 'int' object but received a 'float'
+;; The first is a method descriptor, the second a slot wrapper.  func_kind
+;; already records which, for the repr; this is the second reader of it.
+;; ============================================================================
+RDR_DESC  equ 8
+RDR_RECV  equ 16
+RDR_BUF   equ 240
+RDR_FRAME equ 240           ; + 0 pushes = 240, 16-aligned
+global raise_descriptor_receiver
+DEF_FUNC raise_descriptor_receiver, RDR_FRAME
+    mov [rbp - RDR_DESC], rdi
+    mov [rbp - RDR_RECV], rsi
+    lea rdi, [rbp - RDR_BUF]
+    CSTRING rsi, "descriptor '"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RDR_DESC]
+    mov rsi, [rsi + PyBuiltinObject.func_name]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+
+    mov rcx, [rbp - RDR_DESC]
+    cmp qword [rcx + PyBuiltinObject.func_kind], BUILTIN_KIND_WRAPPER
+    je .rdr_wrapper
+
+    CSTRING rsi, "' for '"
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rdr_owner_name
+    mov rdi, rax
+    CSTRING rsi, "' objects doesn't apply to a '"
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rdr_recv_name
+    mov rdi, rax
+    CSTRING rsi, "' object"
+    call rbt_append_cstr
+    jmp .rdr_raise
+
+.rdr_wrapper:
+    CSTRING rsi, "' requires a '"
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rdr_owner_name
+    mov rdi, rax
+    CSTRING rsi, "' object but received a '"
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rdr_recv_name
+    mov rdi, rax
+    CSTRING rsi, "'"
+    call rbt_append_cstr
+
+.rdr_raise:
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RDR_BUF]
+    call raise_exception
+
+;; The two names, appended at the cursor in rdi.
+.rdr_owner_name:
+    mov rcx, [rbp - RDR_DESC]
+    mov rcx, [rcx + PyBuiltinObject.func_owner]
+    mov rsi, [rcx + PyTypeObject.tp_name]
+    jmp rbt_append_cstr
+.rdr_recv_name:
+    push rdi
+    mov rdi, [rbp - RDR_RECV]
+    call value_type
+    test rax, rax
+    jz .rdr_recv_unknown
+    mov rsi, [rax + PyTypeObject.tp_name]
+    jmp .rdr_recv_go
+.rdr_recv_unknown:
+    CSTRING rsi, "object"
+.rdr_recv_go:
+    pop rdi
+    jmp rbt_append_cstr
+END_FUNC raise_descriptor_receiver
+
+;; ============================================================================
+;; raise_wrapper_arity(rdi = the number of arguments wanted, not counting
+;;                     self; rsi = the number given, likewise) -- no return
+;;
+;; "expected 0 arguments, got 1" -- CPython's wording for a slot wrapper.
+;; Every one of these said "expected exactly one argument", which is neither
+;; the count nor, for the nullary ones, even the right number.
+;; ============================================================================
+RWA_WANT  equ 8
+RWA_GOT   equ 16
+RWA_BUF   equ 192
+RWA_FRAME equ 192           ; + 0 pushes = 192, 16-aligned
+global raise_wrapper_arity
+DEF_FUNC raise_wrapper_arity, RWA_FRAME
+    mov [rbp - RWA_WANT], rdi
+    mov [rbp - RWA_GOT], rsi
+    lea rdi, [rbp - RWA_BUF]
+    CSTRING rsi, "expected "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RWA_WANT]
+    call msg_append_i64
+    mov rdi, rax
+    cmp qword [rbp - RWA_WANT], 1
+    je .rwa_singular
+    CSTRING rsi, " arguments, got "
+    jmp .rwa_join
+.rwa_singular:
+    CSTRING rsi, " argument, got "
+.rwa_join:
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RWA_GOT]
+    call msg_append_i64
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RWA_BUF]
+    call raise_exception
+END_FUNC raise_wrapper_arity
+
+;; ============================================================================
+;; raise_builtin_arity(rdi = the PyBuiltinObject, rsi = the count given,
+;;                     rdx = the count wanted) -- neither counts self
+;;
+;; CPython's shapes, which differ by whether the method takes a fixed number:
+;;   list.append() takes exactly one argument (2 given)
+;;   str.upper() takes no arguments (1 given)
+;;   hex() takes at most 2 arguments (3 given)
+;;   expected 0 arguments, got 1            <- a slot wrapper
+;; ============================================================================
+RBA_DESC  equ 8
+RBA_GOT   equ 16
+RBA_WANT  equ 24
+RBA_BUF   equ 240
+RBA_FRAME equ 240           ; + 0 pushes = 240, 16-aligned
+global raise_builtin_arity
+DEF_FUNC raise_builtin_arity, RBA_FRAME
+    mov [rbp - RBA_DESC], rdi
+    mov [rbp - RBA_GOT], rsi
+    mov [rbp - RBA_WANT], rdx
+
+    ; A slot wrapper has its own wording, and never names itself.
+    cmp qword [rdi + PyBuiltinObject.func_kind], BUILTIN_KIND_WRAPPER
+    jne .rba_method
+    mov rdi, rdx
+    mov rsi, [rbp - RBA_GOT]
+    jmp raise_wrapper_arity
+
+.rba_method:
+    lea rdi, [rbp - RBA_BUF]
+    mov rcx, [rbp - RBA_DESC]
+    cmp qword [rcx + PyBuiltinObject.func_owner], 0
+    je .rba_bare_name
+    mov rsi, [rcx + PyBuiltinObject.func_owner]
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "."
+    call rbt_append_cstr
+    mov rdi, rax
+.rba_bare_name:
+    mov rcx, [rbp - RBA_DESC]
+    mov rsi, [rcx + PyBuiltinObject.func_name]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+
+    ; A fixed arity names the number; a range says "at most".
+    mov rcx, [rbp - RBA_DESC]
+    mov rax, [rcx + PyBuiltinObject.min_args]
+    cmp rax, [rcx + PyBuiltinObject.max_args]
+    jne .rba_range
+    cmp qword [rbp - RBA_WANT], 0
+    je .rba_none
+    cmp qword [rbp - RBA_WANT], 1
+    je .rba_one
+    CSTRING rsi, "() takes exactly "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RBA_WANT]
+    call msg_append_i64
+    mov rdi, rax
+    CSTRING rsi, " arguments ("
+    jmp .rba_tail
+.rba_one:
+    CSTRING rsi, "() takes exactly one argument ("
+    jmp .rba_tail
+.rba_none:
+    CSTRING rsi, "() takes no arguments ("
+    jmp .rba_tail
+.rba_range:
+    CSTRING rsi, "() takes at most "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RBA_WANT]
+    call msg_append_i64
+    mov rdi, rax
+    CSTRING rsi, " arguments ("
+.rba_tail:
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RBA_GOT]
+    call msg_append_i64
+    mov rdi, rax
+    CSTRING rsi, " given)"
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RBA_BUF]
+    call raise_exception
+END_FUNC raise_builtin_arity
+
 section .rodata
 oai_not_an_index: db "'", 1, "' object cannot be interpreted as an integer", 0
 section .text

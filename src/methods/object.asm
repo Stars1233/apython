@@ -122,6 +122,22 @@ DEF_FUNC scalar_dunder_new
     ret
 
 .sdn_str:
+    ; str.__new__(str) is a plain str, not a subclass instance.  str_sub_new
+    ; allocates through gc_alloc and appends a tail __dict__ word; handing
+    ; that object str_type meant str_dealloc freed it with ap_free, and
+    ; `str.__new__(str)` aborted with "double free or corruption".
+    lea rcx, [rel str_type]
+    cmp rbx, rcx
+    jne .sdn_str_sub
+    mov rdi, r12
+    mov rsi, rsi                ; the argument count, less the class
+    extern builtin_str_fn
+    call builtin_str_fn
+    pop r12
+    pop rbx
+    leave
+    ret
+.sdn_str_sub:
     mov rdi, rbx
     mov rdx, rsi
     mov rsi, r12
@@ -401,8 +417,8 @@ END_FUNC object_method_init_subclass
 ;; ============================================================================
 %macro DEF_DUNDER_STRREPR 3     ; %1 = type prefix, %2 = tp_str or tp_repr, %3 = the dunder's own name
 DEF_FUNC %1_dunder_%2
-    test rsi, rsi
-    jz %%bad
+    cmp rsi, 1                  ; exactly self; an extra was accepted
+    jne %%bad
     mov rdi, [rdi]
     lea rsi, [rel %1_type]
     xor edx, edx
@@ -428,7 +444,11 @@ DEF_FUNC %1_dunder_%2
     leave
     ret
 %%bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    ; CPython reports both counts, and counts self in neither.
+    dec rsi                     ; rsi is still nargs on this path
+    xor edi, edi
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 END_FUNC %1_dunder_%2
 %endmacro
 
@@ -439,8 +459,8 @@ END_FUNC %1_dunder_%2
 ;; inherits the base's behaviour rather than re-dispatching into itself.
 %macro DEF_DUNDER_LEN 1-2 0
 DEF_FUNC %1_dunder_len
-    test rsi, rsi
-    jz %%bad
+    cmp rsi, 1                  ; exactly self: an extra argument
+    jne %%arity                 ; was silently accepted
     mov rdi, [rdi]
     lea rsi, [rel %1_type]
 %ifnum %2
@@ -473,6 +493,11 @@ DEF_FUNC %1_dunder_len
     leave
     V_PACK rax, rdx
     ret
+%%arity:
+    dec rsi
+    xor edi, edi
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 %%bad:
     RAISE exc_TypeError_type, "object has no len()"
 END_FUNC %1_dunder_len
@@ -480,8 +505,8 @@ END_FUNC %1_dunder_len
 
 %macro DEF_DUNDER_ITER 1-2 0
 DEF_FUNC %1_dunder_iter
-    test rsi, rsi
-    jz %%bad
+    cmp rsi, 1                  ; exactly self: an extra argument
+    jne %%arity                 ; was silently accepted
     mov rdi, [rdi]
     lea rsi, [rel %1_type]
 %ifnum %2
@@ -511,6 +536,11 @@ DEF_FUNC %1_dunder_iter
     leave
     V_PACK rax, rdx
     ret
+%%arity:
+    dec rsi
+    xor edi, edi
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 %%bad:
     RAISE exc_TypeError_type, "object is not iterable"
 END_FUNC %1_dunder_iter
@@ -568,7 +598,11 @@ DEF_FUNC %1_dunder_%2
     leave
     ret
 %%bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    ; CPython reports both counts, and counts self in neither.
+    dec rsi                     ; rsi is still nargs on this path
+    xor edi, edi
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 END_FUNC %1_dunder_%2
 %endmacro
 
@@ -864,7 +898,11 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     leave
     ret
 %%bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    ; CPython reports both counts, and counts self in neither.
+    dec rsi                     ; rsi is still nargs on this path
+    mov edi, 1
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 END_FUNC %1_dunder_%2
 %endmacro
 
@@ -931,7 +969,11 @@ DEF_FUNC %1_dunder_%2, 16
     leave
     ret
 %%bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    ; CPython reports both counts, and counts self in neither.
+    dec rsi                     ; rsi is still nargs on this path
+    mov edi, 1
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 END_FUNC %1_dunder_%2
 %endmacro
 
@@ -969,7 +1011,11 @@ DEF_FUNC %1_dunder_bool
     leave
     ret
 %%bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    ; CPython reports both counts, and counts self in neither.
+    dec rsi                     ; rsi is still nargs on this path
+    xor edi, edi
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 END_FUNC %1_dunder_bool
 %endmacro
 
@@ -1375,7 +1421,11 @@ DEF_FUNC int_dunder_bool
     leave
     ret
 .idb_bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    ; CPython reports both counts, and counts self in neither.
+    dec rsi
+    xor edi, edi
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 END_FUNC int_dunder_bool
 
 DEF_DUNDER_STRREPR str, str, "__str__"
@@ -1440,7 +1490,11 @@ DEF_FUNC object_method_%1
     V_PACK rax, rdx
     ret
 %%bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    ; CPython reports both counts, and counts self in neither.
+    dec rsi                     ; rsi is still nargs on this path
+    xor edi, edi
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 END_FUNC object_method_%1
 %endmacro
 
@@ -1681,7 +1735,10 @@ DEF_FUNC %1_dunder_hash
     V_PACK rax, rdx
     ret
 %%bad:
-    RAISE exc_TypeError_type, "__hash__() takes no arguments"
+    dec rsi
+    xor edi, edi
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 END_FUNC %1_dunder_hash
 %endmacro
 
@@ -1739,7 +1796,11 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     V_PACK rax, rdx
     ret
 %%bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    ; CPython reports both counts, and counts self in neither.
+    dec rsi                     ; rsi is still nargs on this path
+    mov edi, 1
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 END_FUNC %1_dunder_%2
 %endmacro
 

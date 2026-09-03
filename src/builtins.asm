@@ -207,6 +207,43 @@ DEF_FUNC_BARE builtin_func_call
     cmp rdx, rcx
     jg .bfc_too_many
 .bfc_no_max_check:
+    ; A method descriptor reached UNBOUND has to be handed one of its own
+    ; type's instances.  Nothing checked, so `list.append((1, 2), 9)` read a
+    ; tuple's header as a list's and tried to grow it -- "Fatal: out of
+    ; memory", from a two-element tuple.  Every builtin method funnels
+    ; through here, so one check covers all of them.
+    ;
+    ; func_owner is 0 for a plain module function, and for the static and
+    ; class methods, which are wrapped in their own descriptor objects and so
+    ; are never stamped -- exactly the ones whose first argument is a class
+    ; rather than an instance.
+    mov rcx, [rdi + PyBuiltinObject.func_owner]
+    test rcx, rcx
+    jz .bfc_receiver_ok
+    test rdx, rdx
+    jz .bfc_receiver_ok         ; no arguments at all: the arity check ruled
+    push rdi
+    push rsi
+    push rdx
+    sub rsp, 8
+    mov rdi, [rsi]              ; args[0], the receiver
+    extern value_type
+    call value_type
+    test rax, rax
+    jz .bfc_wrong_receiver
+    mov rdi, rax
+    mov rsi, [rsp + 24]
+    mov rsi, [rsi + PyBuiltinObject.func_owner]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jz .bfc_wrong_receiver
+    add rsp, 8
+    pop rdx
+    pop rsi
+    pop rdi
+
+.bfc_receiver_ok:
     ; Extract func_ptr from self
     mov rax, [rdi + PyBuiltinObject.func_ptr]
     ; Call func_ptr(args, nargs) — builtins return a Value, so this stays a
@@ -215,12 +252,30 @@ DEF_FUNC_BARE builtin_func_call
     mov rsi, rdx                ; nargs
     jmp rax
 
+.bfc_wrong_receiver:
+    add rsp, 8
+    pop rdx
+    pop rsi
+    pop rdi
+    mov rsi, [rsi]              ; the receiver
+    extern raise_descriptor_receiver
+    jmp raise_descriptor_receiver   ; rdi = the descriptor; does not return
+
 .bfc_too_few:
-    extern exc_TypeError_type
-    extern raise_exception
-    RAISE exc_TypeError_type, "function takes at least 1 argument"
+    ; "list.append() takes exactly one argument (0 given)".  Both of these
+    ; said "function takes at most N arguments" -- with a literal N, and
+    ; naming neither the method nor what it was actually given.
+    mov rcx, [rdi + PyBuiltinObject.min_args]
+    jmp .bfc_arity
 .bfc_too_many:
-    RAISE exc_TypeError_type, "function takes at most N arguments"
+    mov rcx, [rdi + PyBuiltinObject.max_args]
+.bfc_arity:
+    dec rcx                     ; self counts in neither number
+    dec rdx
+    mov rsi, rdx
+    mov rdx, rcx
+    extern raise_builtin_arity
+    jmp raise_builtin_arity     ; rdi = the descriptor; does not return
 END_FUNC builtin_func_call
 
 ;; ============================================================================
