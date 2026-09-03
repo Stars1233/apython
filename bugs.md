@@ -194,6 +194,19 @@ one-line fix.
   `__cause__` / `__context__` preamble -- matches; only the caret line is
   missing.
 
+- **No managed dicts, so the layout attributes differ for any class that has
+  an instance `__dict__`.**  CPython 3.12 keeps a class's instance dict in a
+  slot before the object rather than in the object, and reports that as
+  `__dictoffset__ == -1` and `__weakrefoffset__ == -32`; the header itself is
+  then 16 bytes.  Here the dict is a word inside the instance, so
+  `class A: pass` reports a positive `__dictoffset__` and a header one word
+  wider.  A `__slots__` class has no dict of its own, so once its dict word
+  goes away it will match CPython exactly.
+
+  Nothing in Python reads these except code that is measuring the layout, and
+  a managed dict is a whole allocation strategy -- the values are honest about
+  the layout apython actually has.
+
 ## Missing pieces
 
 These are absences rather than wrong answers — the interpreter raises rather

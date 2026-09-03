@@ -2409,6 +2409,28 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     test eax, eax
     jz .tga_return_bases
 
+    ; The instance layout, as CPython reports it.  These are getsets on the
+    ; metatype in CPython, so they are data descriptors and win over anything
+    ; a class body puts under the same name -- hence the check here, ahead of
+    ; the tp_dict walk, rather than after it.
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__basicsize__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_basicsize
+
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__dictoffset__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_dictoffset
+
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__weakrefoffset__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_weakrefoffset
+
     ; Check type->tp_dict, then walk tp_base chain
 .tga_walk:
     mov rdi, [r12 + PyTypeObject.tp_dict]
@@ -2551,6 +2573,29 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     pop rbx
     leave
     V_PACK rax, rdx             ; return one Value
+    ret
+
+.tga_return_basicsize:
+    mov rdi, [r12 + PyTypeObject.tp_basicsize]
+    jmp .tga_return_layout_int
+
+.tga_return_dictoffset:
+    mov rdi, [r12 + PyTypeObject.tp_dictoffset]
+    jmp .tga_return_layout_int
+
+.tga_return_weakrefoffset:
+    ; No weakref word in the instance layout yet: the links live in a side
+    ; table, so every type reports 0, which is also what CPython reports for
+    ; a type whose instances cannot be weak-referenced.
+    xor edi, edi
+
+.tga_return_layout_int:
+    extern int_from_i64
+    call int_from_i64
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
     ret
 
 .tga_return_qualname:
