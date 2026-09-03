@@ -179,7 +179,7 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   basenames with `src/pyo/` on purpose: `methods/dict.asm` is dict's methods,
   `pyo/dict.asm` is dict itself
 - `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func,
-  class, iter, singleton, bytes, code)
+  class, iter, singleton, bytes, bytearray, memoryview, code)
 - `src/marshal.asm` — .pyc marshal deserializer, and the .pyc file reader
 - `src/main.asm` — argument parsing, startup order, and the `-t`/`--dis` modes
 - `src/import.asm` — the import system: finders, `sys.modules`, packages
