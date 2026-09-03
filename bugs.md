@@ -112,12 +112,6 @@ one-line fix.
   `<bound method from_bytes of <class 'int'>>` where CPython answers
   `<built-in method from_bytes of type object at 0x...>`.
 
-- **`complex()` of a string does not accept Unicode spaces or Unicode digits.**
-  CPython runs `_PyUnicode_TransformDecimalAndSpaceToASCII` first, so
-  `complex("\u30001+2j")` parses there; here any byte past ASCII is a
-  malformed string.  ASCII whitespace, brackets, underscores, `inf` and `nan`
-  all behave as CPython's do.
-
 - **`_thread` is a single-threaded stand-in.**  `lib/_thread.py` gives
   `get_ident` a constant, makes locks uncontended, and raises from
   `start_new_thread`.  Everything in the stdlib that only takes a lock works;

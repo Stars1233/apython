@@ -1797,10 +1797,12 @@ END_FUNC builtin_bool
 ;; float(x)   -> convert x to float (int, float, or string)
 ;; ============================================================================
 global builtin_float
-BF_FRAME equ 32             ; + 0 pushes = 32
 BF_START  equ 8              ; the string strtod was handed
 BF_ENDPTR equ 16            ; where strtod stopped
 BF_OBJ    equ 24            ; the str object itself, for the error message
+BF_XLAT   equ 32            ; a Unicode-to-ASCII copy of it, or 0
+BF_XLEN   equ 40            ; and the length of what is being parsed
+BF_FRAME equ 48             ; + 0 pushes = 48
 DEF_FUNC builtin_float, BF_FRAME
 
     cmp rsi, 0
@@ -1880,8 +1882,32 @@ DEF_FUNC builtin_float, BF_FRAME
 .float_from_str:
     ; rdi = PyStrObject*. Parse string → double via strtod.
     mov [rbp - BF_OBJ], rdi
+    ; A Unicode decimal digit is a digit and a Unicode space is a space, as
+    ; CPython's _PyUnicode_TransformDecimalAndSpaceToASCII has it.
+    mov qword [rbp - BF_XLAT], 0
+    extern str_decimal_ascii
+    call str_decimal_ascii
+    test rax, rax
+    jz .float_str_ascii
+    mov [rbp - BF_XLAT], rax
+    mov [rbp - BF_XLEN], rdx
+    mov rdi, rax
+    jmp .float_str_have_data
+.float_str_ascii:
+    mov rdi, [rbp - BF_OBJ]
+    mov rax, [rdi + PyStrObject.ob_size]
+    mov [rbp - BF_XLEN], rax
     lea rdi, [rdi + PyStrObject.data]   ; rdi = null-terminated string data
+.float_str_have_data:
     mov [rbp - BF_START], rdi                  ; save start ptr
+
+    ; An embedded NUL is not the end of the string, and strtod thinks it is:
+    ; float("1\x002") answered 1.0 where CPython raises.
+    extern strlen
+    call strlen wrt ..plt
+    cmp rax, [rbp - BF_XLEN]
+    jne .float_str_error
+    mov rdi, [rbp - BF_START]
 
     ; Call strtod(str, &endptr)
     extern strtod
@@ -1914,11 +1940,27 @@ DEF_FUNC builtin_float, BF_FRAME
     jne .float_str_error               ; trailing garbage → ValueError
 
     ; xmm0 still holds the strtod result
+    mov rdi, [rbp - BF_XLAT]
+    test rdi, rdi
+    jz .float_str_kept
+    movq rax, xmm0
+    push rax
+    extern ap_free
+    call ap_free
+    pop rax
+    movq xmm0, rax
+.float_str_kept:
     call float_from_f64                ; rax = double bits, edx = TAG_FLOAT
     leave
     ret
 
 .float_str_error:
+    mov rdi, [rbp - BF_XLAT]
+    test rdi, rdi
+    jz .float_str_error_msg
+    mov qword [rbp - BF_XLAT], 0
+    call ap_free
+.float_str_error_msg:
     ; CPython names the string it could not convert, and int() here already
     ; does; float's message had lost it.
     mov rsi, [rbp - BF_OBJ]

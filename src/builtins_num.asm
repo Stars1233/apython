@@ -607,9 +607,12 @@ BI_NARGS  equ 16
 BI_OBJ    equ 24       ; original string/bytes obj for error messages
 BI_BASE   equ 32       ; base value for error messages
 BI_ORIGIN equ 40       ; the argument's type, for the bytes-family MRO walk
+BI_XLAT   equ 64       ; a Unicode-to-ASCII copy of the argument, or 0
+BI_DATA   equ 72       ; the bytes actually parsed: that copy, or the original
+BI_XLEN   equ 80       ; and its length, which strlen cannot recover
 BI_LEN    equ 48       ; the source length: bytes and bytearray keep it in
                        ; different fields, so the shared tail cannot re-read it
-BI_FRAME  equ 56            ; + 1 push = 64, 16-byte aligned
+BI_FRAME  equ 88            ; + 1 push = 96, 16-byte aligned
 
 DEF_FUNC builtin_int_fn, BI_FRAME
     push rbx
@@ -736,17 +739,53 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 .int_from_str:
     mov [rbp - BI_OBJ], rbx           ; save original obj for error msg
     mov qword [rbp - BI_BASE], 10     ; base 10
-    ; Check for embedded NUL bytes
+    ; A Unicode decimal digit is a digit, and a Unicode space is a space:
+    ; int("\uff11\uff12\uff13") is 123 in CPython, which runs
+    ; _PyUnicode_TransformDecimalAndSpaceToASCII over the argument first.
+    mov qword [rbp - BI_XLAT], 0
+    mov rdi, rbx
+    extern str_decimal_ascii
+    call str_decimal_ascii
+    test rax, rax
+    jz .int_str_ascii
+    mov [rbp - BI_XLAT], rax
+    mov [rbp - BI_XLEN], rdx
+    mov rdi, rax
+    jmp .int_str_have_data
+.int_str_ascii:
+    mov rax, [rbx + PyStrObject.ob_size]
+    mov [rbp - BI_XLEN], rax
     lea rdi, [rbx + PyStrObject.data]
+.int_str_have_data:
+    mov [rbp - BI_DATA], rdi
+    ; Check for embedded NUL bytes -- against the length of what is actually
+    ; being parsed, which is the translated copy's when there is one.
     call strlen wrt ..plt
-    cmp rax, [rbx + PyStrObject.ob_size]
-    jne .int_str_parse_error           ; embedded NUL → reject
-    lea rdi, [rbx + PyStrObject.data]
+    cmp rax, [rbp - BI_XLEN]
+    jne .int_str_parse_error_x
+    mov rdi, [rbp - BI_DATA]
     mov rsi, 10
     call int_from_cstr_base
     test edx, edx
-    jz .int_str_parse_error
+    jz .int_str_parse_error_x
+    push rax
+    push rdx
+    mov rdi, [rbp - BI_XLAT]
+    test rdi, rdi
+    jz .int_str_kept
+    extern ap_free
+    call ap_free
+.int_str_kept:
+    pop rdx
+    pop rax
     jmp .int_ret
+
+.int_str_parse_error_x:
+    mov rdi, [rbp - BI_XLAT]
+    test rdi, rdi
+    jz .int_str_parse_error
+    call ap_free
+    jmp .int_str_parse_error
 
 .int_from_bytes:
     ; int(bytes_obj) — need null-terminated copy for int_from_cstr_base

@@ -206,7 +206,8 @@ CPS_X     equ 56            ; the real part
 CPS_Y     equ 64            ; the imaginary part
 CPS_END   equ 72            ; strtod's endptr
 CPS_BRK   equ 80            ; whether a '(' was consumed
-CPS_FRAME equ 80            ; + 0 pushes = 80, 16-byte aligned
+CPS_XLAT  equ 88            ; the Unicode-to-ASCII copy, or 0
+CPS_FRAME equ 96            ; + 0 pushes = 96, 16-byte aligned
 
 extern ap_malloc
 extern ap_free
@@ -223,14 +224,30 @@ DEF_FUNC complex_parse_string, CPS_FRAME
     movsd [rbp - CPS_X], xmm0
     movsd [rbp - CPS_Y], xmm0
 
+    ; A Unicode decimal digit is a digit and a Unicode space is a space, as
+    ; CPython's _PyUnicode_TransformDecimalAndSpaceToASCII has it.  The copy
+    ; is all-ASCII where it could be, and whatever it could not map is left
+    ; alone and rejected below exactly as before.
+    mov qword [rbp - CPS_XLAT], 0
+    extern str_decimal_ascii
+    call str_decimal_ascii
+    test rax, rax
+    jz .cps_ascii
+    mov [rbp - CPS_XLAT], rax
+    mov rsi, rax
+    mov rcx, rdx                ; its length: strlen would stop at an
+                                ; embedded NUL, which the end-of-string check
+                                ; below is there to catch
+    jmp .cps_have_data
+.cps_ascii:
+    mov rdi, [rbp - CPS_OBJ]
     mov rcx, [rdi + PyStrObject.ob_size]     ; the length in bytes
     lea rsi, [rdi + PyStrObject.data]
+.cps_have_data:
     mov [rbp - CPS_START], rsi
     mov [rbp - CPS_LEN], rcx
 
-    ; Any byte past ASCII, and any underscore.  CPython maps Unicode spaces
-    ; and Unicode decimal digits to ASCII before parsing; this does not, and
-    ; refuses them instead -- recorded in bugs.md.
+    ; Any byte past ASCII, and any underscore.
     xor edx, edx                ; saw an underscore
     xor r8, r8
 .cps_scan:
@@ -429,6 +446,11 @@ DEF_FUNC complex_parse_string, CPS_FRAME
     jz .cps_no_buf
     call ap_free
 .cps_no_buf:
+    mov rdi, [rbp - CPS_XLAT]
+    test rdi, rdi
+    jz .cps_no_xlat
+    call ap_free
+.cps_no_xlat:
     mov rax, [rbp - CPS_OUT]
     movsd xmm0, [rbp - CPS_X]
     movsd xmm1, [rbp - CPS_Y]
@@ -446,6 +468,11 @@ DEF_FUNC complex_parse_string, CPS_FRAME
 .cps_malformed:
     mov rdi, [rbp - CPS_BUF]
     test rdi, rdi
+    jz .cps_malformed_xlat
+    call ap_free
+.cps_malformed_xlat:
+    mov rdi, [rbp - CPS_XLAT]
+    test rdi, rdi
     jz .cps_malformed_raise
     call ap_free
 .cps_malformed_raise:
@@ -453,6 +480,11 @@ DEF_FUNC complex_parse_string, CPS_FRAME
 
 .cps_underscore_error:
     mov rdi, [rbp - CPS_BUF]
+    test rdi, rdi
+    jz .cps_underscore_xlat
+    call ap_free
+.cps_underscore_xlat:
+    mov rdi, [rbp - CPS_XLAT]
     test rdi, rdi
     jz .cps_underscore_raise
     call ap_free
