@@ -9,68 +9,15 @@ one-line fix.
 
 ## Correctness
 
-~~- **A builtin type had no `__qualname__` and no `__module__`.**
-  `ValueError.__qualname__` was an AttributeError, and CPython's traceback
-  and warnings machinery reads both off an exception's type.~~  A builtin's
-  `__qualname__` is its `__name__` and its `__module__` is the dotted prefix
-  of `tp_name`, or `builtins`; a class defined in Python records its own, and
-  those still win.
-
-~~- **`repr()` of a float was not always the shortest form.**  The search
-  tried `"%.*g"` at rising precision and took the first that read back, which
-  finds the shortest of the forms *glibc* produces -- and at an exact
-  half-way case glibc rounds to even, where it is the other neighbour that
-  round-trips.  `repr(2.0**-24)` came out with seventeen digits where CPython
-  prints sixteen.  About one ordinary value in a hundred.~~  Each precision
-  is tried twice now, as rendered and with the last digit carried up by one,
-  which is the same pair CPython's own dtoa searches.
-  `tests/test_float_repr_ties.py`.
-
-~~- **`asyncio.gather` did not gather.**  It built one task per coroutine and
-  handed back the LIST of them, with a TODO in the source saying the awaiting
-  was still to do -- so `await asyncio.gather(...)` awaited a list, which is
-  not awaitable, and answered None.  And an exception that reached the root
-  task was dropped by `eventloop_run`, which read only `.result`:
-  `asyncio.run(main())` where main raises answered None and the exception was
-  never seen again.~~  `tests/test_async_gather.py`.
-
-  Two more came out of it.  `ready_enqueue` zeroed `.next` unconditionally,
-  so enqueuing a task that was ALREADY queued cut the ready list off after
-  it and the loop then sat waiting for something that could not arrive.  And
-  a `list_new` called with a stale register for its capacity argument turns
-  into a zeroing loop over about 700 million words -- an "intermittent hang"
-  whose length depended on ASLR.
-
-~~- **`__context__` is not set across a generator resume.**~~  `gen_send`
-  CLEARED `current_exception` before resuming the frame, so an exception
-  raised inside the generator had nothing to chain to: `next(it)` from inside
-  an except block produced one with `__context__` of None.  `await` goes
-  through `gen_send` too, so every awaited exception lost its context the
-  same way.  `tests/test_exc_context.py`.
-
-  What is still open is the third shape: `await SOME_TASK` where the task
+- **`__context__` is not set across `await SOME_TASK`** where the task
   raised.  `current_exception` is a single global and task switching does not
-  follow it, so the exception the awaiting coroutine was handling is not
-  what is current when the task's exception is re-raised.  The fix is a
-  per-task exception state; it was tried, and it needs `task_step` to tell a
-  raise from a `return` out of an except block, which it currently cannot.
+  follow it, so the exception the awaiting coroutine was handling is not what
+  is current when the task's exception is re-raised.  The other two shapes --
+  a generator resume, and `await` on a coroutine -- are right.
 
-~~- **Six pieces of the ordinary protocol were missing outright.**  `range`
-  had no `__eq__`, no `__hash__`, no `index`/`count` and no `start`/`stop`/
-  `step` -- and no `tp_dict` at all, so none of `__len__`, `__iter__` or
-  `__getitem__` could be asked for by name.  `iter(callable, sentinel)`, the
-  two-argument form, did not exist.  Neither did `slice.indices(length)`,
-  `complex.__bool__` by name, or `AttributeError(name=, obj=)` /
-  `ImportError(name=, path=)` -- whose keywords were silently folded into
-  `.args`.~~  `tests/test_range_protocol.py`, `tests/test_iter_sentinel.py`,
-  `tests/test_slice_indices.py`, `tests/test_exception_kwargs.py`.
-
-  Two of them were wrong in a way the entries did not say.  `range(3) ==
-  range(3)` was **False**, not merely unimplemented, because with no
-  `tp_richcompare` the comparison fell back to identity -- so
-  `{range(3), range(0, 3, 1)}` held two elements where CPython holds one.
-  And an exception's keyword arguments did not just go unread: they landed in
-  `.args`, so `AttributeError("x", name="n").args` was a 2-tuple.
+  The fix is a per-task exception state.  It was tried, and it needs
+  `task_step` to tell a raise from a `return` out of an except block, which
+  it currently cannot: both leave `current_exception` set.
 
 - **`super` is not an object.**  The zero- and two-argument forms both work
   written as `super(...).attr`, because the compiler emits `LOAD_SUPER_ATTR`
@@ -96,36 +43,6 @@ one-line fix.
   `type_from_parts` is the whole of it; the work is auditing which static
   types should carry the flag.
 
-~~- **Three holes that each blocked a stdlib module.**  `str(bytes,
-  encoding[, errors])` did not exist -- `str(b, "utf-8")` answered "str()
-  takes at most 1 argument" -- which is what kept `glob` and `fnmatch` out,
-  through `re/_parser.py`.  `str.maketrans({...})`, the one-argument dict
-  form, did not exist either, and `pathlib` builds its table that way.  And
-  `%`-formatting did not understand `*`: `"%.*g" % (3, x)` reported "not all
-  arguments converted during string formatting", which is what `timeit`
-  runs into.~~  `glob`, `json` and `pathlib` import now, and the floor in
-  `tests/stdlib_floor.txt` records it.  `tests/test_str_decode.py`,
-  `tests/test_maketrans.py`, `tests/test_percent_star.py`.
-
-  Two of the three turned out to be wider than the entry said.  The `*`
-  bug was not only precision: `%*d` took no width either, and `%*.*f` took
-  neither.  And `maketrans`'s two- and three-argument forms never checked
-  that they had been handed strings, so `str.maketrans("ab", 1)` read the
-  int as a `PyStrObject`.
-
-~~- **set's method forms took exactly one argument.**  `union`,
-  `intersection` and `difference` are variadic in CPython -- `s.difference(a,
-  b)` is `(s - a) - b`, and the no-argument form is a copy -- and all three
-  raised `union() takes exactly one argument` for anything else, so
-  `set().union(*parts)`, the ordinary way to flatten a list of sets, did not
-  work.  `update` was worse: it took the first source and silently ignored
-  the rest.  And `intersection_update`, `difference_update` and
-  `symmetric_difference_update` did not exist at all, so the only way to
-  narrow a set in place was `s &= t`, which until the commit before this one
-  did not narrow it in place either.~~  Found by an audit, not by a test.
-  The bodies stay two-operand and a fold walks the arguments;
-  `tests/test_set_variadic.py`.
-
 - **`str.encode` and `bytes.decode` know only utf-8, ascii and latin-1.**
   Any other name is a LookupError, where CPython would find the codec through
   the registry; reaching it from the interpreter would mean calling Python
@@ -141,73 +58,40 @@ one-line fix.
   process calls `os.py` and `os.path` reach for are there, along with
   `environ`, `stat_result`, `error` and the O_*/W* constants -- enough that
   CPython's own `os.py` imports and works.  What is not: `scandir` and
-  `DirEntry`, ~~`chdir`, `chown`, `utime`, `truncate`,
-  `dup2`,~~ `fork`, `execv`, ~~`link`,~~ and the whole `*at` family.
-  ~~`chmod` takes no file descriptor, where CPython's does.~~  The struck
-  eight, plus `fsync` and `fchmod`, are there now
-  (`tests/test_posix_more.py`); the entry named `ftruncate` among them, which
-  was already present -- it is `truncate`, the path-taking form, that was
-  missing.  Their arity messages are CPython's argument-clinic wording, and
-  the same helper corrected `unlink` and `rmdir`, which had the old one.
-  `_have_functions` is an empty list, which is the honest answer -- no `dir_fd=` support -- and
-  os.py reads it to build `supports_dir_fd`.
+  `DirEntry`, `fork`, `execv`, and the whole `*at` family.
+  `_have_functions` is an empty list, which is the honest answer -- no
+  `dir_fd=` support -- and os.py reads it to build `supports_dir_fd`.
 
 - **Missing C modules**, in rough order of how many stdlib modules each
-  blocks: ~~`_struct`,~~ `_socket`, ~~`_random`, `_contextvars`, `_tokenize`,~~
-  `_ast`, `_imp`, ~~`binascii`, `_string`,~~ then a long tail of one apiece.
-  (`_io` is not among them: `src/iomod.asm` supplies
-  `_iocore` and `lib/_io.py` assembles both halves under the name `_io`.
-  Neither are `math` and `_collections`, which are there now.)
-  `make check-stdlib` gives the current figure -- 107 of 196, up from 78.
+  blocks: `_ast`, `_socket`, `_imp`, `_hashlib` and the `_sha*`/`_md5`
+  family, `_csv`, `pyexpat`, `_typing`, then a long tail of one apiece.
+  (`_io` is not among them: `src/iomod.asm` supplies `_iocore` and
+  `lib/_io.py` assembles both halves under the name `_io`.  Neither are
+  `math`, `_collections`, `_struct`, `_random`, `_contextvars`, `_string`,
+  `_tokenize`, `_operator`, `binascii` and `atexit`, which are there now --
+  the last nine in `lib/`.)  `make check-stdlib` gives the current figure:
+  107 of 196.
 
-  The struck ones are in `lib/` now, with `_operator` (`_compare_digest`,
-  which `hmac` imports directly and which has no fallback) and `atexit`.
-  `_tokenize` is the notable one: it is a real tokenizer, and its token
-  stream is identical to CPython's over all 163 of CPython's own `Lib/*.py`
-  that CPython itself can tokenize.  Its one deliberate difference is that an
-  f-string comes out as a single STRING token, as it did through 3.11, rather
-  than the FSTRING_START/MIDDLE/END triple 3.12 splits it into.
+  `_ast` is the largest of what is left.  The arena AST cannot be exposed as
+  it stands: 32-byte POD addressed by a u32 index, freed wholesale at the end
+  of a compile, and its shape does not match CPython's `_fields`.  It needs
+  its own object model and `PyCF_ONLY_AST` in `builtin_compile_fn`.
 
+  `hashlib` imports but has no digests, because every one of them is a C
+  module here as well.
 
-  ~~`math` itself is short of `dist`, `prod`, `isclose`, `perm`, `ulp` and
-  `nan`/`inf` parsing corners;~~ all five are there now
-  (`tests/test_math_more.py`); `nan`/`inf` parsing already matched.  `dist`
-  hands its coordinate differences to the same routine `hypot` uses, so the
-  two always agree with each other -- and it inherits the rounding note
-  below.  And `gamma`, `lgamma`, the n-ary `hypot` and
-  `sumprod` round differently from CPython's, which uses its own Lanczos
-  approximation and double-double arithmetic where these use glibc and a
-  Neumaier sum.  `fsum` is exact: it is Shewchuk's algorithm, as CPython's
-  is.  `tests/test_math.py` says which is which.
+  `math`'s `gamma`, `lgamma`, the n-ary `hypot` and `sumprod` round
+  differently from CPython's, which uses its own Lanczos approximation and
+  double-double arithmetic where these use glibc and a Neumaier sum.  `dist`
+  shares `hypot`'s routine and so shares the note.  `fsum` is exact: it is
+  Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
+  which.
 
 - **Weak references keep no per-object slot.**  The links live in a side
   table keyed by the referent's address rather than in the object, so
   `tp_weaklistoffset` does not exist and `__weakref__` is not an attribute.
-  Everything observable through `_weakref` works; a C extension expecting the
-  slot would not.  ~~And because there is no offset, there was nothing to be
-  zero: every type was weak-referenceable, where CPython refuses `ref([])`,
-  `ref(1)`, `ref(None)` and most other builtins.  The refusal is
-  load-bearing -- `WeakValueDictionary` relies on it to reject a value whose
-  death it could never observe -- so accepting them turned a TypeError at the
-  call into a dictionary that quietly never dropped anything.~~
-  `weakref_referenceable` now answers the same question from the type, by
-  CPython's rule: a class is given the word unless it declares `__slots__`
-  without naming `__weakref__`, or its layout base keeps its value inline and
-  variable-sized.  `tests/test_weakref_types.py`.
-
-~~- **A few names are still short of CPython's `dir()`.**  `int` and `float`
-  are missing the in-place forms; `set` is missing `__iand__` and `__ior__`,
-  deliberately -- it has no `nb_inplace_*` slots, so `s &= t` degrades to the
-  binary form, and a by-name `__iand__` that did not mutate in place would be
-  a wrong answer rather than a missing name.~~  Both halves were wrong.
-  CPython's `int` and `float` have no in-place forms either, so there was
-  nothing missing there.  And `set` was not short a *name*: it was short the
-  behaviour.  `s &= t` computed the right contents into a new set and rebound
-  the name, so every other reference to the same set went on seeing the old
-  value -- an ordinary aliasing bug, filed here as a design choice.  set now
-  has real `nb_iand`/`nb_ior`/`nb_isub`/`nb_ixor` that mutate, and the four
-  dunders to match.  frozenset keeps none of them, as CPython's does not.
-  `tests/test_set_inplace.py`.
+  Everything observable through `_weakref` works, including which types
+  refuse a reference; a C extension expecting the slot would not.
 
 - **`collections.deque` is list-backed, and two itertools functions
   materialise.**  CPython's deque is a block-linked list, so `appendleft` and
@@ -225,16 +109,13 @@ one-line fix.
 - **The regex engine matches CPython on all 831 checked answers.**
   `make check-re` runs `tests/re_differential.py` under both interpreters and
   ratchets against `tests/re_floor.txt`; it needs `$CPYTHON_LIB`, because `re`
-  is a Python module and so comes from a real stdlib.  Three things outside
+  is a Python module and so comes from a real stdlib.  Two things outside
   that pattern set are still open:
 
   - A malformed replacement template raises `IndexError` or `ValueError`
     where CPython raises `re.error`.  `re.error` is defined in Python, so
     constructing one from the engine would mean importing `re` from `_sre`.
   - A nested unbounded repeat (`(a*)*b`) recurses until the limit.
-  - `bytes` patterns are unsupported: `sre_state_init` hardcodes
-    `is_bytes = 0`, and nothing reads the field.  A bytes SUBJECT is refused
-    with CPython's own message now; a bytes PATTERN is the missing half.
 
 - **C code here cannot catch a Python exception.**  `raise_exception`
   tail-jumps into `eval_exception_unwind`, which resumes the eval loop from
@@ -334,20 +215,6 @@ than lying — but they are ordinary Python that does not work:
   check stays: it is two instructions, and the invariant it guards is one a
   future caller can break again.
 
-- **`__context__` is not chained across an `await` into another coroutine.**
-  `gen_send` saves and clears `current_exception` around the awaited frame,
-  so a raise inside it has nothing to chain to -- an exception raised while
-  the awaiting frame is handling another gets `__context__` of None where
-  CPython gives the outer one.  Chaining WITHIN a frame is right, coroutines
-  included.  It is not specific to tasks: a plain `await coro()` loses it
-  too.
-
-- **`asyncio.gather` returns the tasks rather than their results.**  It
-  creates and enqueues one task per argument and hands back the list, so
-  `await asyncio.gather(a(), b())` is None instead of `[1, 2]`.  A real
-  gather needs an awaitable that collects, the shape
-  `wait_for_awaitable_type` has.
-
 - **`bytes % args` leaks its temporary when the format is malformed.**  The
   work is done by handing a decoded copy of the format and the arguments to
   `str_mod`, and `str_mod` RAISES for a wrong argument count -- a raise
@@ -356,18 +223,13 @@ than lying — but they are ordinary Python that does not work:
   argument's `__str__` can run Python, and a raise caught inside it would
   free a buffer `str_mod` is still reading.
 
-- **`bytes.decode`'s ascii arm raises a fixed message.**  `str()` of a
-  Unicode error renders its five fields now, so an exception raised from
-  `lib/_codecs.py` reads as CPython's does.  The asm sites still pre-render a
-  one-argument exception instead.  The utf-8 *decode* arm and both *encode*
-  arms build CPython's wording by hand, character, position, range and all;
-  ~~the ascii decode arm still says only "byte not in range for this
-  encoding"~~ -- it names the codec, the byte and the position now, and every
-  decode error carries CPython's five fields (`encoding`, `object`, `start`,
-  `end`, `reason`), which are how an error handler knows what to replace.
-  `tests/test_decode_errors.py`.
-  Raising a real five-argument exception from asm needs a way to call an
-  exception type with five arguments, which `exc_new` does not offer.
+- **The asm codec sites pre-render their exceptions.**  A decode error
+  carries CPython's five fields (`encoding`, `object`, `start`, `end`,
+  `reason`) and its message names the codec, the byte and the position; what
+  the asm sites still cannot do is raise a real five-argument
+  `UnicodeEncodeError` the way `lib/_codecs.py` does, because `exc_new` has
+  no way to call an exception type with five arguments.  The *encode* arms
+  therefore build CPython's wording by hand and set no fields.
 
 - **A memoryview with a step other than 1 is not a view.**  `mv[::2]` and
   `mv[::-1]` raise NotImplementedError.  CPython answers with a
@@ -388,17 +250,6 @@ than lying — but they are ordinary Python that does not work:
 
 ## Robustness
 
-~~- **The regex engine matches str only.**  `SRE_State.is_bytes` existed and
-  was never set or read: every pattern was a str pattern and every subject
-  had to be a str, so `re.compile(rb'...')` was impossible -- and CPython's
-  own `tokenize.detect_encoding` uses one, which is what kept `hashlib`,
-  `random` and `uu` out.~~  A pattern records which kind it was compiled
-  from, the subject has to match it, and every result -- groups, splits,
-  substitutions, templates -- is built as that kind.  The engine itself is
-  unchanged: bytes are byte-indexed, which is the ASCII path it already had,
-  and a byte above 127 is one element rather than the start of a sequence.
-  `tests/test_sre_bytes.py`.
-
 - **`re.fullmatch(r'([a-z]*)+', 'abc1')` exhausts the regex recursion limit**
   where CPython answers None.  Seven of the eight patterns in
   `tests/re_differential.py`'s fullmatch block agree; this is the eighth.
@@ -409,27 +260,11 @@ than lying — but they are ordinary Python that does not work:
   path, and reaches the tail iteratively rather than one C frame per
   iteration.
 
-~~- **`set.__contains__(frozenset(...), x)` is accepted** where CPython
-  raises.  ... this tree does not draw that distinction yet.~~
-
-~~- **A descriptor's arity is checked before its receiver.**  CPython asks
-  which object it was handed first ...~~
-
-  Both are fixed, and the entries badly understated the first one.  Nothing
-  checked an unbound descriptor's receiver at all: `list.append((1, 2), 9)`
-  read a tuple's header as a list's and tried to grow it -- "Fatal: out of
-  memory", from a two-element tuple.  `builtin_func_call` is the single
-  funnel every builtin method goes through and `func_owner` was already
-  recorded there for the repr, so one check covers all of them, before the
-  arity as CPython checks it.  `func_kind` picks between the two wordings.
-  `tests/test_descriptor_receiver.py`.
-
-  The arity messages went with it: "function takes at most N arguments" --
-  with a literal N -- and "expected exactly one argument" are now CPython's
-  counted forms.  What is left is per-method: a builtin registered with no
-  argument counts still accepts extras silently (`str.upper("a", 1)`), and
-  CPython's own wordings there are inconsistent between clinic-generated and
-  hand-written methods.
+- **A builtin registered with no argument counts accepts extras silently.**
+  `str.upper("a", 1)` answers 'A' where CPython raises.  The shared arity
+  machinery reports CPython's counted wording wherever `min_args`/`max_args`
+  were registered; what is left is per-method, and CPython's own wordings
+  there are inconsistent between clinic-generated and hand-written methods.
 
 - **asyncio `Task`s and `wait_for` wrappers are not GC-tracked.**  A `Task`
   holds its coroutine, which holds a frame, whose locals can hold the task --
