@@ -1712,6 +1712,7 @@ SM_STATE     equ 8
 SM_PATTERN   equ 16
 SM_TOPLEVEL  equ 24
 SM_LASTPOS   equ 32     ; the repeat's last_pos, kept across a body attempt
+SM_COUNT     equ 40     ; MAX_UNTIL's ctx->count, kept across a body attempt
 SM_MFRAME    equ 96
 
 DEF_FUNC sre_match, SM_MFRAME
@@ -2606,64 +2607,56 @@ DEF_FUNC sre_match, SM_MFRAME
     jmp .dispatch
 
 .op_max_until:
-    ; MAX_UNTIL — greedy repeat body iteration
-    ; r15 = current RepeatContext
+    ; MAX_UNTIL -- greedy repeat body iteration.
+    ;
+    ; The count discipline is CPython's, and it has to be exact: rep->count is
+    ; written only by a branch that is about to attempt the body, and put back
+    ; before control reaches the tail.  Incrementing it on the way in and
+    ; decrementing it on every failure path instead left it one too LOW when a
+    ; greedy body attempt failed and the tail then failed as well -- two
+    ; decrements for one increment -- so the enclosing repeat iterated again
+    ; from a count it had already spent.  `(a*)+` against 'a1' recursed until
+    ; the depth limit rather than answering None; `(a*)*` did not, because
+    ; with min == 0 the first branch below is never taken.
     test r15, r15
     jz .op_failure
 
     mov rax, [r15 + SRE_RepeatContext.count]
     inc rax
-    mov [r15 + SRE_RepeatContext.count], rax
+    mov [rbp - SM_COUNT], rax          ; ctx->count; rep->count stays as it was
 
-    ; Get min/max from the REPEAT pattern
-    ; rpt->pattern points to body, REPEAT's min is at pattern - 8, max at pattern - 4
+    ; min at pattern - 8, max at pattern - 4
     mov rcx, [r15 + SRE_RepeatContext.pattern]
-    mov r8d, [rcx - 8]        ; min
-    mov r9d, [rcx - 4]        ; max
+    mov r8d, [rcx - 8]
+    mov r9d, [rcx - 4]
 
-    ; If count < min, must match body again
     cmp rax, r8
     jb .mu_try_body
 
-    ; Save last_pos for the zero-width check.  It is a frame slot rather than
-    ; the stack because it has to survive the body attempt and be put BACK
-    ; when that attempt fails -- CPython's save_last_ptr.  Discarding it
-    ; instead left last_pos pointing at a position the engine had already
-    ; backtracked out of, the guard stopped firing, and an empty body could
-    ; be retried at the same place until the recursion limit.
-    mov rdx, [r15 + SRE_RepeatContext.last_pos]     ; rax is the count, live
+    ; Enough matches.  Try for one more only when the repeat is not full and
+    ; the last iteration was not empty -- the second is the zero-width guard,
+    ; and it is a plain compare against the repeat's own last_pos, not against
+    ; a saved copy.
+    cmp r9d, SRE_MAXREPEAT
+    je .mu_greedy_ok
+    cmp rax, r9
+    jae .mu_try_tail
+.mu_greedy_ok:
+    cmp r13, [r15 + SRE_RepeatContext.last_pos]
+    je .mu_try_tail
+
+    mov [r15 + SRE_RepeatContext.count], rax
+    ; last_pos is saved across the attempt and put back after it, whether it
+    ; succeeds or fails: CPython's DATA_PUSH/DATA_POP pair.
+    mov rdx, [r15 + SRE_RepeatContext.last_pos]
     mov [rbp - SM_LASTPOS], rdx
     mov [r15 + SRE_RepeatContext.last_pos], r13
 
-    ; If count < max (or max == MAXREPEAT), try the body first (greedy).
-    ; CPython's test is strict, and it has to be: count is the number of
-    ; iterations that would follow this one, so `<=` runs the body once more
-    ; than the pattern asks.  It read correctly while count started at 0 and
-    ; compensated for it; making count start at -1, as sre_lib.h does, left
-    ; this comparison one out and every bounded repeat matching max + 1 times.
-    cmp r9d, SRE_MAXREPEAT
-    je .mu_try_body_greedy
-    cmp rax, r9
-    jb .mu_try_body_greedy
-
-    ; count > max — try tail only
-    mov rdx, [rbp - SM_LASTPOS]
-    mov [r15 + SRE_RepeatContext.last_pos], rdx
-    jmp .mu_try_tail
-
-.mu_try_body_greedy:
-    ; Zero-width check: if pos == last_pos, body matched empty, don't loop
-    mov rdx, [rbp - SM_LASTPOS]
-    cmp r13, rdx
-    je .mu_zero_width
-
-    ; Save marks for backtracking
     push r13
     mov rdi, r12
     call sre_save_marks
     push rax
 
-    ; Try body
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, [r15 + SRE_RepeatContext.pattern]
@@ -2674,7 +2667,7 @@ DEF_FUNC sre_match, SM_MFRAME
     test eax, eax
     jnz .mu_body_success
 
-    ; Body failed — restore marks, put last_pos back, try tail
+    ; Body failed: marks, last_pos, count and position all go back.
     pop rdi
     push rdi
     mov rsi, r12
@@ -2682,20 +2675,19 @@ DEF_FUNC sre_match, SM_MFRAME
     pop rdi
     call ap_free
     pop r13
-
     mov rdx, [rbp - SM_LASTPOS]
     mov [r15 + SRE_RepeatContext.last_pos], rdx
-
-    ; Undo count increment
-    dec qword [r15 + SRE_RepeatContext.count]
-    jmp .mu_try_tail
-
-.mu_zero_width:
-    mov rdx, [rbp - SM_LASTPOS]
-    mov [r15 + SRE_RepeatContext.last_pos], rdx
+    mov rax, [rbp - SM_COUNT]
+    dec rax
+    mov [r15 + SRE_RepeatContext.count], rax
     jmp .mu_try_tail
 
 .mu_body_success:
+    ; CPython's DATA_POP puts last_ptr back here too, and can: its repeat
+    ; context is a stack frame.  Ours is heap-allocated and .mu_tail_success
+    ; frees it, so on the way out through a successful body the context this
+    ; r15 names may already be gone -- writing to it is a use-after-free that
+    ; valgrind sees immediately.  Nothing reads it after a success anyway.
     pop rdi                    ; free saved marks
     call ap_free
     pop r13
@@ -2704,13 +2696,12 @@ DEF_FUNC sre_match, SM_MFRAME
     jmp .return
 
 .mu_try_body:
-    ; Must match body (count < min)
+    ; count < min: the body is not optional here.
+    mov [r15 + SRE_RepeatContext.count], rax
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, [r15 + SRE_RepeatContext.pattern]
-    mov edx, [rbp - SM_TOPLEVEL]   ; the body's continuation IS the tail --
-                                   ; MAX_UNTIL follows it -- so the SUCCESS it
-                                   ; eventually reaches is the pattern's own
+    mov edx, [rbp - SM_TOPLEVEL]
     call sre_match
     test eax, eax
     jz .mu_body_required_fail
@@ -2719,11 +2710,14 @@ DEF_FUNC sre_match, SM_MFRAME
     jmp .return
 
 .mu_body_required_fail:
-    dec qword [r15 + SRE_RepeatContext.count]
+    mov rax, [rbp - SM_COUNT]
+    dec rax
+    mov [r15 + SRE_RepeatContext.count], rax
     jmp .op_failure
 
 .mu_try_tail:
-    ; Pop repeat context and try tail
+    ; Pop the repeat context and try the tail.  rep->count is already what it
+    ; was on entry, whichever way control reached here.
     mov rax, [r15 + SRE_RepeatContext.prev]
     push r15                   ; save for potential restore
     mov r15, rax
@@ -2741,7 +2735,6 @@ DEF_FUNC sre_match, SM_MFRAME
     ; Restore repeat context
     pop r15
     mov [r12 + SRE_State.repeat_ctx], r15
-    dec qword [r15 + SRE_RepeatContext.count]
     jmp .op_failure
 
 .mu_tail_success:
@@ -2753,23 +2746,27 @@ DEF_FUNC sre_match, SM_MFRAME
     jmp .return
 
 .op_min_until:
-    ; MIN_UNTIL — non-greedy repeat body iteration
+    ; MIN_UNTIL -- non-greedy repeat body iteration.
+    ;
+    ; sre_lib.h's order, which is not the mirror image of MAX_UNTIL's: the
+    ; tail is tried FIRST, and only when it fails are the bound and the
+    ; zero-width guard consulted and the body attempted.  Ours applied the
+    ; zero-width guard to the count < min path as well, where CPython does
+    ; not, and kept rep->count with an increment on the way in and a
+    ; decrement on each way out -- the same shape that made MAX_UNTIL loop.
     test r15, r15
     jz .op_failure
 
     mov rax, [r15 + SRE_RepeatContext.count]
     inc rax
-    mov [r15 + SRE_RepeatContext.count], rax
+    mov [rbp - SM_COUNT], rax       ; ctx->count; rep->count stays as it was
 
     mov rcx, [r15 + SRE_RepeatContext.pattern]
     mov r8d, [rcx - 8]        ; min
-    mov r9d, [rcx - 4]        ; max
-
-    ; If count < min, must match body
     cmp rax, r8
-    jb .miu_try_body
+    jb .miu_required_body
 
-    ; Try tail first (non-greedy)
+    ; See if the tail matches.
     push r13
     mov rax, [r15 + SRE_RepeatContext.prev]
     push r15
@@ -2785,36 +2782,58 @@ DEF_FUNC sre_match, SM_MFRAME
     test eax, eax
     jnz .miu_tail_success
 
-    ; Restore repeat context
+    ; Restore the repeat context and the position.
     pop r15
     mov [r12 + SRE_State.repeat_ctx], r15
     pop r13
 
-    ; Check max
-    mov rax, [r15 + SRE_RepeatContext.count]
+    ; Out of iterations, or the last one matched empty: no body attempt.
+    mov rax, [rbp - SM_COUNT]
     mov rcx, [r15 + SRE_RepeatContext.pattern]
     mov r9d, [rcx - 4]        ; max
-    ; The mirror of MAX_UNTIL's: sre_lib.h fails when count >= max, so `ja`
-    ; allowed one iteration past the bound here too.
     cmp r9d, SRE_MAXREPEAT
-    je .miu_try_body
+    je .miu_bound_ok
     cmp rax, r9
-    jae .miu_fail
-
-.miu_try_body:
-    ; Zero-width check
+    jae .op_failure
+.miu_bound_ok:
     cmp r13, [r15 + SRE_RepeatContext.last_pos]
-    je .miu_fail
+    je .op_failure
+
+    ; One more iteration of the body, with last_pos saved across it.
+    mov [r15 + SRE_RepeatContext.count], rax
+    mov rdx, [r15 + SRE_RepeatContext.last_pos]
+    mov [rbp - SM_LASTPOS], rdx
     mov [r15 + SRE_RepeatContext.last_pos], r13
 
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, [r15 + SRE_RepeatContext.pattern]
-    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
+    mov edx, [rbp - SM_TOPLEVEL]   ; as in MAX_UNTIL: the body's continuation
+                                   ; is MIN_UNTIL and so the tail, which makes
+                                   ; the SUCCESS it reaches the pattern's own
+    call sre_match
+    test eax, eax
+    jnz .miu_body_ok            ; see .mu_body_success: no write on this path
+    mov rdx, [rbp - SM_LASTPOS]
+    mov [r15 + SRE_RepeatContext.last_pos], rdx
+    mov rax, [rbp - SM_COUNT]
+    dec rax
+    mov [r15 + SRE_RepeatContext.count], rax
+    jmp .op_failure
+
+.miu_required_body:
+    ; count < min: the body is not optional here, and no guard applies.
+    mov [r15 + SRE_RepeatContext.count], rax
+    mov [r12 + SRE_State.str_pos], r13
+    mov rdi, r12
+    mov rsi, [r15 + SRE_RepeatContext.pattern]
+    mov edx, [rbp - SM_TOPLEVEL]
     call sre_match
     test eax, eax
     jnz .miu_body_ok
-    dec qword [r15 + SRE_RepeatContext.count]
+    mov rax, [rbp - SM_COUNT]
+    dec rax
+    mov [r15 + SRE_RepeatContext.count], rax
     jmp .op_failure
 
 .miu_body_ok:
@@ -2829,10 +2848,6 @@ DEF_FUNC sre_match, SM_MFRAME
     mov r13, [r12 + SRE_State.str_pos]
     mov eax, 1
     jmp .return
-
-.miu_fail:
-    dec qword [r15 + SRE_RepeatContext.count]
-    jmp .op_failure
 
 .op_assert:
     ; ASSERT skip back [pattern] — lookahead and lookbehind

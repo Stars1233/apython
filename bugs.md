@@ -106,7 +106,7 @@ one-line fix.
   an allocation per call -- worth threading a (pointer, length) pair through
   the bodies if bytearray ever becomes hot.
 
-- **The regex engine matches CPython on all 831 checked answers.**
+- **The regex engine matches CPython on all 900 checked answers.**
   `make check-re` runs `tests/re_differential.py` under both interpreters and
   ratchets against `tests/re_floor.txt`; it needs `$CPYTHON_LIB`, because `re`
   is a Python module and so comes from a real stdlib.  Two things outside
@@ -115,7 +115,6 @@ one-line fix.
   - A malformed replacement template raises `IndexError` or `ValueError`
     where CPython raises `re.error`.  `re.error` is defined in Python, so
     constructing one from the engine would mean importing `re` from `_sre`.
-  - A nested unbounded repeat (`(a*)*b`) recurses until the limit.
 
 - **C code here cannot catch a Python exception.**  `raise_exception`
   tail-jumps into `eval_exception_unwind`, which resumes the eval loop from
@@ -243,16 +242,6 @@ than lying — but they are ordinary Python that does not work:
   `enum` and `types`.
 
 ## Robustness
-
-- **`re.fullmatch(r'([a-z]*)+', 'abc1')` exhausts the regex recursion limit**
-  where CPython answers None.  Seven of the eight patterns in
-  `tests/re_differential.py`'s fullmatch block agree; this is the eighth.
-  The zero-width guard now saves and restores `last_pos` the way CPython's
-  `save_last_ptr` does, which fixed the sibling `(a*)*` against `'aab'`, so
-  what is left is a second bound this engine does not have -- CPython's
-  MAX_UNTIL also restores `state->ptr` and the mark stack on the failure
-  path, and reaches the tail iteratively rather than one C frame per
-  iteration.
 
 - **A builtin registered with no argument counts accepts extras silently.**
   `str.upper("a", 1)` answers 'A' where CPython raises.  The shared arity

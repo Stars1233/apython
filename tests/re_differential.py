@@ -213,3 +213,24 @@ for p, s in [(r"(a*)*", "aab"), (r"(\d*)*", "12x"), (r"(?=a*)ab", "ab"),
              (r"(ab)*", "abab")]:
     m = re.fullmatch(p, s)
     print(repr(p), repr(s), m.span() if m else None)
+
+# --- A nullable body under a repeat with a lower bound.  MAX_UNTIL and
+# MIN_UNTIL both write rep->count only in the branch that is about to attempt
+# the body, and put it back before the tail is tried; incrementing on the way
+# in and decrementing on each way out instead spent one count twice, and the
+# enclosing repeat iterated from a count it had already used.  `(a*)+` over
+# 'a1' recursed until the depth limit rather than answering None, and every
+# pattern here is one that used to.
+for p, s in [(r"(a*)+", "a1"), (r"(a*)+", "aa1"), (r"(a*)+", "aa"),
+             (r"([a-z]*)+", "abc1"), (r"(a*){1,3}", "a1"),
+             (r"(a*)+$", "a1"), (r"(?:a*)+", "a1"), (r"(a*)+?", "a1"),
+             (r"(a*?)+", "a1"), (r"(a*?)+b", "aab"), (r"(a*?)*b", "aab"),
+             (r"(a??)+", "a1"), (r"(|a)+", "aa"), (r"(a|)+b", "aab"),
+             (r"()+", "a"), (r"()*", "a"), (r"(a?)+", "aab"),
+             (r"(a?)*b", "aab"), (r"((a*)*)*b", "aab"),
+             (r"(a*)+(b*)+c", "aabbc"), (r"(x*)+y", "xxxxxxxxz"),
+             (r"(a*)+", ""), (r"(a*)+", "b")]:
+    for fn in ("fullmatch", "match", "search"):
+        m = getattr(re, fn)(p, s)
+        print(fn, repr(p), repr(s), m.span() if m else None,
+              m.groups() if m else "")
