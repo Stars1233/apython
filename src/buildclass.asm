@@ -607,6 +607,9 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     ; __slots__ = () is still __slots__.  Skipping it here left the flag
     ; unset, so a class that declares it took arbitrary attributes -- which is
     ; the one thing the empty form exists to prevent.
+    call bc_base_has_dict
+    test eax, eax
+    jnz .bc_no_slots
     or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
     jmp .bc_no_slots
 .bc_have_slots:
@@ -625,8 +628,20 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     add rax, rdi                    ; + base_basicsize
     mov [r12 + PyTypeObject.tp_basicsize], rax
 
-    ; Set TYPE_FLAG_HAS_SLOTS
+    ; TYPE_FLAG_HAS_SLOTS says "this class has NO instance dict", and four
+    ; sites read it that way: instance_new, instance_setattr's fallback,
+    ; obj_generic_attr's __dict__ arm and vars().  __slots__ suppresses the
+    ; dict only when NO BASE already provides one -- `class C(A)` with a
+    ; plain A inherits A's __dict__ and must still accept `c.z = 1`, which
+    ; was an AttributeError here.  The slots themselves are unaffected: they
+    ; are laid out past the header either way, and the walks in
+    ; instance_dealloc and instance_traverse derive the header end from
+    ; tp_dictoffset, which is untouched.
+    call bc_base_has_dict
+    test eax, eax
+    jnz .bc_slots_flag_done
     or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+.bc_slots_flag_done:
 
     ; Create member descriptors for each slot
     ; rbx = slots tuple, r13 = nslots, rdi = base_basicsize
@@ -1080,6 +1095,35 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     leave
     ret
 END_FUNC type_from_parts
+
+;; ============================================================================
+;; bc_base_has_dict() -> eax = 1 when the layout base already gives instances
+;; a __dict__
+;;
+;; Reads type_from_parts' [rbp - TFP_BASE] through the saved rbp, which is
+;; why it is file-local and named for its one caller.
+;;
+;; A base with __slots__ of its own does NOT count: it has a dict word
+;; reserved in its layout that it can never use (bugs.md carries that), so
+;; the offset being non-zero says nothing about whether instances have one.
+;; ============================================================================
+DEF_FUNC_LOCAL bc_base_has_dict
+    mov rax, [rbp]              ; type_from_parts' frame
+    mov rax, [rax - TFP_BASE]
+    test rax, rax
+    jz .bbhd_no
+    cmp qword [rax + PyTypeObject.tp_dictoffset], 0
+    je .bbhd_no
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+    jnz .bbhd_no
+    mov eax, 1
+    leave
+    ret
+.bbhd_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC bc_base_has_dict
 
 ;; ============================================================================
 ;; type_apply_hash_rule(rdi = the type, rsi = the class dict)

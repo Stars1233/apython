@@ -162,3 +162,120 @@ try:
 except TypeError:
     print("TypeError")
 print(object().__getstate__())
+
+# __slots__ suppressed the instance dict unconditionally.  Python's rule is
+# that it suppresses one only when NO BASE already provides it -- `class C(A)`
+# with a plain A inherits A's __dict__, so `c.z = 1` is ordinary and was an
+# AttributeError here.  TYPE_FLAG_HAS_SLOTS is what four sites read as "this
+# class has no dict": instance_new, instance_setattr's fallback,
+# obj_generic_attr's __dict__ arm and vars().
+#
+# The slots are unaffected either way -- they are laid out past the header,
+# and instance_dealloc's and instance_traverse's walks derive the header end
+# from tp_dictoffset, which is untouched.
+#
+# This is also what makes object.__getstate__'s (dict, slots) pair form
+# reachable; it could only ever answer (None, {...}) before.
+
+
+class NoBase:
+    pass
+
+
+class WithDict(NoBase):
+    __slots__ = ("y",)
+
+
+class PureSlots:
+    __slots__ = ("a",)
+
+
+class EmptySlotsOnDict(NoBase):
+    __slots__ = ()
+
+
+class EmptySlotsPure:
+    __slots__ = ()
+
+
+class SlotsOnSlots(PureSlots):
+    __slots__ = ("b",)
+
+
+def show(label, fn):
+    try:
+        return "%s => %r" % (label, fn())
+    except BaseException as e:
+        return "%s !! %s: %s" % (label, type(e).__name__, e)
+
+
+# A base with a dict keeps it.
+w = WithDict()
+w.y = 5
+w.z = 6
+print(w.y, w.z, sorted(vars(w)), w.__getstate__())
+
+e = EmptySlotsOnDict()
+e.anything = 1
+print(vars(e), show("getstate", e.__getstate__))
+
+# A base without one still refuses.
+p = PureSlots()
+p.a = 1
+print(show("pure setattr", lambda: setattr(p, "zz", 1)))
+print(show("pure vars", lambda: vars(p)))
+print(p.__getstate__())
+
+ep = EmptySlotsPure()
+print(show("empty pure setattr", lambda: setattr(ep, "zz", 1)))
+print(show("empty pure getstate", ep.__getstate__))
+
+# Slots on top of slots: still no dict, and both levels' slots are present.
+ss = SlotsOnSlots()
+ss.a = 1
+ss.b = 2
+print(ss.a, ss.b, show("setattr", lambda: setattr(ss, "zz", 1)))
+print(ss.__getstate__())
+
+# A subclass of a __slots__ class that declares none regains a dict, which is
+# the behaviour that was already right and must stay.
+class Regains(PureSlots):
+    pass
+
+
+r = Regains()
+r.a = 1
+r.q = 2
+print(r.a, r.q, sorted(vars(r)), r.__getstate__())
+
+# Deleting and re-setting through both storage kinds.
+w2 = WithDict()
+w2.y = 1
+w2.z = 2
+del w2.z
+print(show("deleted dict attr", lambda: w2.z))
+del w2.y
+print(show("deleted slot", lambda: w2.y))
+w2.y = 3
+print(w2.y, w2.__getstate__())
+
+# `del obj.attr` stored a NULL into the instance dict instead of removing the
+# key.  instance_setattr's dict fallback called dict_set either way, and a
+# NULL value means DELETE -- so vars(obj) could not be repr'd, len(vars(obj))
+# still counted the deleted name, and deleting a second time succeeded.
+# Nothing to do with __slots__; found while testing it.
+class Plain:
+    pass
+
+
+d = Plain()
+d.z = 2
+d.k = 1
+del d.z
+print(sorted(vars(d)), len(vars(d)), vars(d))
+print(show("read deleted", lambda: d.z))
+print(show("hasattr", lambda: hasattr(d, "z")))
+print(show("delete twice", lambda: delattr(d, "z")))
+print(show("delete never-set", lambda: delattr(d, "never")))
+d.z = 9
+print(d.z, d.k, sorted(vars(d)))

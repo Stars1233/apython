@@ -925,7 +925,12 @@ DEF_FUNC instance_setattr
 
 .sa_have_dict:
 .sa_dict_set:
-    ; dict_set(inst_dict, name Value, value Value)
+    ; A NULL value means DELETE, not "store a NULL".  dict_set was called
+    ; either way, so `del obj.attr` left the key in the instance dict bound
+    ; to a NULL Value: vars(obj) could not be repr'd, len(vars(obj)) still
+    ; counted it, and deleting twice succeeded.
+    test r13, r13
+    jz .sa_dict_del
     mov rsi, r12                ; name
     mov rdx, r13                ; value
     call dict_set
@@ -936,6 +941,24 @@ DEF_FUNC instance_setattr
     pop rbx
     leave
     ret
+
+.sa_dict_del:
+    mov rsi, r12                ; name
+    extern dict_del_opt
+    call dict_del_opt           ; -1 when it was never there
+    test eax, eax
+    jnz .sa_del_missing
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sa_del_missing:
+    mov rdi, rbx
+    mov rsi, r12
+    call raise_no_attribute     ; does not return
 
 .sa_no_dict_error:
 .sa_no_dict_slot:

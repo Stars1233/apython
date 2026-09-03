@@ -123,15 +123,6 @@ one-line fix.
   the offset means moving the slots down by one word and teaching the dealloc
   and traverse walks where the header now ends.
 
-- **A `__slots__` class inheriting from one without them keeps no dict.**
-  `class C(A)` with `__slots__ = ('y',)` and a plain `A` should still accept
-  an arbitrary attribute, because A's instances have a `__dict__` and C
-  inherits it; here `TYPE_FLAG_HAS_SLOTS` suppresses the dict unconditionally
-  and `c.z = 1` is an AttributeError.  It is also why `object.__getstate__`
-  cannot produce CPython's `({'z': 1}, {'y': 5})` form -- the dict half never
-  exists.  The `(None, {slots})` form, which is the one that matters, is
-  there.
-
 - **A heaptype's layout base is the widest of its bases, not CPython's solid
   base.**  `class C(A, B)` where A and B are unrelated builtin subclasses of
   different layouts is accepted and laid out as the wider one, where CPython
