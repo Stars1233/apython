@@ -200,6 +200,20 @@ for bad in [5, None, 2.5, [1]]:
         print(type(bad).__name__, "TypeError")
 print(re.sub("a", "b", "aaa"), re.sub("a", lambda m: "X", "aaa"))
 
+# --- A malformed replacement template.  These used to be an IndexError or a
+# bare ValueError with no position in the message; CPython raises re.error,
+# which is defined in Python, so the class is fetched out of sys.modules at
+# the moment it is needed and handed the template and the offset -- and
+# composes "at position N" itself.  The one exception is an unknown group
+# name, which CPython leaves as an IndexError.
+for tmpl in [r"\g<99>", r"\g<name>", r"\9", r"\g<", r"\g", "\\", r"\q",
+             r"\g<abc", r"\g<>", r"\g<1a>", r"x\g<-1>", r"ab\Q",
+             r"\g<0>", r"\g<1>", r"\1", r"\g<one>"]:
+    try:
+        print(repr(tmpl), repr(re.sub(r"(?P<one>a)", tmpl, "a")))
+    except Exception as exc:
+        print(repr(tmpl), type(exc).__name__, "|", exc)
+
 # --- fullmatch reaches its end-of-string test only at the top level, and a
 # continuation of the same match -- a branch, a repeat body, the tail after
 # MAX_UNTIL -- is still that same match.  Hardcoding "toplevel" at those five

@@ -1475,6 +1475,111 @@ ETC_KWFAM equ 32            ; 0 none, 1 AttributeError, 2 ImportError
 ETC_KW1   equ 40            ; the 'name' keyword's value, or 0
 ETC_KW2   equ 48            ; 'obj' for AttributeError, 'path' for ImportError
 ETC_FRAME equ 48            ; + 2 pushes = 64, 16-byte aligned
+;; ============================================================================
+;; exc_method_init(args, nargs) -> None -- BaseException.__init__
+;;
+;; `class E(Exception)` whose __init__ calls super().__init__(msg) has to end
+;; up with args == (msg,), which is what str(e) and repr(e) are built from.
+;; BaseException had no __init__ of its own, so the super() call walked past
+;; every exception type in the MRO and reached object.__init__, which takes
+;; its arguments and ignores them: re.error's message came out as the whole
+;; three-item constructor tuple, and so did every other exception that
+;; composes its own message.
+;; ============================================================================
+EMI_SELF  equ 8
+EMI_TUP   equ 16
+EMI_FRAME equ 32            ; + 1 push = 40
+
+DEF_FUNC exc_method_init, EMI_FRAME
+    push rbx
+    test rsi, rsi
+    jz .emi_none
+    mov rax, [rdi]
+    V_TEST_PTR rax, rcx
+    ja .emi_none
+    test rax, rax
+    jz .emi_none
+    mov [rbp - EMI_SELF], rax
+
+    ; args = the tuple of everything after self
+    lea rbx, [rdi + 8]
+    dec rsi
+    mov [rbp - EMI_TUP], rsi
+    mov rdi, rsi
+    call tuple_new
+    test rax, rax
+    jz .emi_none
+    mov rcx, rax
+    mov r8, [rax + PyTupleObject.ob_item]
+    xor edx, edx
+.emi_copy:
+    cmp rdx, [rbp - EMI_TUP]
+    jge .emi_copied
+    mov r9, [rbx + rdx*8]
+    INCREF_V r9, r10
+    mov [r8 + rdx*8], r9
+    inc rdx
+    jmp .emi_copy
+.emi_copied:
+    mov rdi, [rbp - EMI_SELF]
+    mov rsi, [rdi + PyExceptionObject.exc_args]
+    mov [rdi + PyExceptionObject.exc_args], rcx
+    test rsi, rsi
+    jz .emi_none
+    mov rdi, rsi
+    call obj_decref
+
+.emi_none:
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC exc_method_init
+
+;; ============================================================================
+;; exc_install_methods() -- give BaseException a tp_dict with __init__ in it
+;;
+;; One dict on the root of the exception hierarchy is enough: every other
+;; exception type reaches it through the MRO, which is what a super() call
+;; walks.
+;; ============================================================================
+EIM_KEY   equ 8
+EIM_FN    equ 16
+EIM_FRAME equ 32            ; + 1 push = 40
+
+global exc_install_methods
+DEF_FUNC exc_install_methods, EIM_FRAME
+    push rbx
+    call dict_new
+    test rax, rax
+    jz .eim_out
+    mov rbx, rax
+    mov [rel exc_BaseException_type + PyTypeObject.tp_dict], rbx
+
+    CSTRING rdi, "__init__"
+    call str_from_cstr_heap
+    mov [rbp - EIM_KEY], rax
+    lea rdi, [rel exc_method_init]
+    CSTRING rsi, "__init__"
+    extern builtin_func_new
+    call builtin_func_new
+    mov [rbp - EIM_FN], rax
+    mov rdi, rbx
+    mov rsi, [rbp - EIM_KEY]
+    mov rdx, rax
+    call dict_set
+    mov rdi, [rbp - EIM_KEY]
+    call obj_decref
+    mov rdi, [rbp - EIM_FN]
+    call obj_decref
+.eim_out:
+    pop rbx
+    leave
+    ret
+END_FUNC exc_install_methods
+
 DEF_FUNC exc_type_call, ETC_FRAME
     push rbx
     push r12

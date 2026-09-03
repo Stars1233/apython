@@ -2019,6 +2019,11 @@ DEF_FUNC builtins_init
     ; Initialize iterator types (patches list/tuple tp_iter)
     call init_iter_types
 
+    ; BaseException gets a tp_dict, so that super().__init__ from a user
+    ; exception subclass reaches something that sets .args.
+    extern exc_install_methods
+    call exc_install_methods
+
     ; Create the builtins dict
     call dict_new
     mov rbx, rax                ; rbx = builtins dict

@@ -106,16 +106,6 @@ one-line fix.
   an allocation per call -- worth threading a (pointer, length) pair through
   the bodies if bytearray ever becomes hot.
 
-- **The regex engine matches CPython on all 900 checked answers.**
-  `make check-re` runs `tests/re_differential.py` under both interpreters and
-  ratchets against `tests/re_floor.txt`; it needs `$CPYTHON_LIB`, because `re`
-  is a Python module and so comes from a real stdlib.  Two things outside
-  that pattern set are still open:
-
-  - A malformed replacement template raises `IndexError` or `ValueError`
-    where CPython raises `re.error`.  `re.error` is defined in Python, so
-    constructing one from the engine would mean importing `re` from `_sre`.
-
 - **C code here cannot catch a Python exception.**  `raise_exception`
   tail-jumps into `eval_exception_unwind`, which resumes the eval loop from
   saved globals rather than returning through the C stack, so a `call` to a
