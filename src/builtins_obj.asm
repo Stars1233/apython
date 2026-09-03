@@ -1999,6 +1999,11 @@ DEF_FUNC builtin_dir, BD_FRAME
     DUNDER_EXC_SAVE [rbp - BD_EXC]
     push rbx
 
+    ; dir() with no argument is the names in the current scope, which is
+    ; sorted(locals()) -- CPython's own rule.  It was a TypeError here, and
+    ; pickle calls it at import.
+    test rsi, rsi
+    jz .bd_no_args
     cmp rsi, 1
     jne .bd_error
 
@@ -2092,6 +2097,37 @@ DEF_FUNC builtin_dir, BD_FRAME
     pop rbx
     leave
     V_PACK rax, rdx
+    ret
+
+.bd_no_args:
+    ; locals() answers the mapping; dir() is its keys, sorted, which is the
+    ; same list-and-sort tail the __dir__ path takes.
+    xor edi, edi
+    xor esi, esi
+    extern builtin_locals
+    call builtin_locals
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .bd_failed
+    mov rbx, rax
+    xor edi, edi
+    call list_new
+    mov [rbp - BD_SORT], rax
+    mov [rbp - BD_SORT + 8], rbx
+    lea rdi, [rbp - BD_SORT]
+    mov esi, 2
+    call list_method_extend
+    push rax
+    DECREF_V rbx, rcx           ; the mapping locals() handed us
+    pop rax
+    mov rbx, [rbp - BD_SORT]
+    test rax, rax
+    jz .bd_list_failed
+    jmp .bd_sort
+.bd_failed:
+    xor eax, eax
+    pop rbx
+    leave
     ret
 
 .bd_error:

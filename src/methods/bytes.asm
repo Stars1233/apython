@@ -10,6 +10,9 @@
 
 
 ; External functions
+extern str_type
+extern bytes_new
+extern bytearray_type_call
 extern bytearray_type
 extern bytes_like_ptr_len
 extern int_is_integer
@@ -187,6 +190,224 @@ DEF_FUNC bytes_method_hex, BH_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC bytes_method_hex
+
+;; ============================================================================
+;; bytes.fromhex(s) / bytearray.fromhex(s) -- a classmethod on both.
+;;
+;; hex() was here and its inverse was not, which is the half that
+;; binascii.unhexlify needs -- and binascii is what base64, quopri, uu and
+;; plistlib come in behind.  CPython skips ASCII whitespace between BYTES
+;; (not inside a pair), and rejects anything else.
+;; ============================================================================
+BFH_SRC   equ 8
+BFH_OUT   equ 16
+BFH_N     equ 24
+BFH_I     equ 32
+BFH_POS   equ 40
+BFH_TYPE  equ 48
+BFH_FRAME equ 64            ; + 0 pushes = 64
+
+DEF_FUNC bytes_fromhex_impl, BFH_FRAME
+    ; rdi = args, rsi = nargs; args[0] is the class, args[1] the string.
+    cmp rsi, 2
+    jne .bfh_args
+    mov rax, [rdi]
+    mov [rbp - BFH_TYPE], rax
+    mov rdi, [rdi + 8]
+    V_TEST_PTR rdi, rax
+    ja .bfh_type
+    test rdi, rdi
+    jz .bfh_type
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .bfh_type
+    mov [rbp - BFH_SRC], rdi
+    mov rax, [rdi + PyStrObject.ob_size]
+    mov [rbp - BFH_N], rax
+
+    ; At most one byte per two characters; whitespace only shortens it.
+    shr rax, 1
+    inc rax
+    mov rdi, rax
+    extern ap_malloc
+    call ap_malloc
+    test rax, rax
+    jz .bfh_nomem
+    mov [rbp - BFH_OUT], rax
+    mov qword [rbp - BFH_I], 0
+    mov qword [rbp - BFH_POS], 0
+
+.bfh_loop:
+    mov rcx, [rbp - BFH_I]
+    cmp rcx, [rbp - BFH_N]
+    jge .bfh_done
+    mov rdx, [rbp - BFH_SRC]
+    movzx eax, byte [rdx + PyStrObject.data + rcx]
+    ; Whitespace between bytes is skipped, as CPython's is.
+    cmp al, ' '
+    je .bfh_skip
+    cmp al, 9
+    je .bfh_skip
+    cmp al, 10
+    je .bfh_skip
+    cmp al, 13
+    je .bfh_skip
+
+    call bfh_digit
+    cmp eax, -1
+    je .bfh_bad
+    mov r8d, eax
+    shl r8d, 4
+    inc qword [rbp - BFH_I]
+    mov rcx, [rbp - BFH_I]
+    cmp rcx, [rbp - BFH_N]
+    jge .bfh_odd
+    mov rdx, [rbp - BFH_SRC]
+    movzx eax, byte [rdx + PyStrObject.data + rcx]
+    push r8
+    call bfh_digit
+    pop r8
+    cmp eax, -1
+    je .bfh_bad
+    or r8d, eax
+    mov rdx, [rbp - BFH_OUT]
+    mov rcx, [rbp - BFH_POS]
+    mov [rdx + rcx], r8b
+    inc qword [rbp - BFH_POS]
+    inc qword [rbp - BFH_I]
+    jmp .bfh_loop
+
+.bfh_skip:
+    inc qword [rbp - BFH_I]
+    jmp .bfh_loop
+
+.bfh_done:
+    ; bytes_new takes the SIZE and allocates; the data is copied in after.
+    mov rdi, [rbp - BFH_POS]
+    extern bytes_new
+    call bytes_new
+    test rax, rax
+    jz .bfh_nomem
+    push rax
+    sub rsp, 8
+    lea rdi, [rax + PyBytesObject.data]
+    mov rsi, [rbp - BFH_OUT]
+    mov rdx, [rbp - BFH_POS]
+    extern ap_memcpy
+    call ap_memcpy
+    add rsp, 8
+    pop rax
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - BFH_OUT]
+    extern ap_free
+    call ap_free
+    add rsp, 8
+    pop rax
+
+    ; bytearray.fromhex answers a bytearray; the class comes in as args[0].
+    mov rcx, [rbp - BFH_TYPE]
+    lea rdx, [rel bytearray_type]
+    cmp rcx, rdx
+    jne .bfh_return
+    push rax
+    sub rsp, 8
+    lea rdi, [rel bytearray_type]
+    lea rsi, [rsp + 8]
+    mov edx, 1
+    extern bytearray_type_call
+    call bytearray_type_call
+    mov rcx, rax
+    add rsp, 8
+    pop rdi
+    push rcx
+    sub rsp, 8
+    extern obj_decref
+    call obj_decref
+    add rsp, 8
+    pop rax
+    test rax, rax
+    jz .bfh_nomem
+    leave
+    ret
+
+.bfh_return:
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.bfh_odd:
+    mov rdi, [rbp - BFH_OUT]
+    call ap_free
+    mov rsi, [rbp - BFH_I]
+    call bfh_raise_position
+.bfh_bad:
+    mov rdi, [rbp - BFH_OUT]
+    call ap_free
+    mov rsi, [rbp - BFH_I]
+    call bfh_raise_position
+.bfh_nomem:
+    xor eax, eax
+    leave
+    ret
+.bfh_type:
+    mov rsi, rdi
+    CSTRING rdi, `fromhex() argument must be str, not \x01`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
+.bfh_args:
+    RAISE exc_TypeError_type, "fromhex() takes exactly one argument"
+END_FUNC bytes_fromhex_impl
+
+;; bfh_digit(eax = a character) -> eax = its value, or -1
+DEF_FUNC_BARE bfh_digit
+    cmp al, '0'
+    jb .bd_no
+    cmp al, '9'
+    jbe .bd_dec
+    cmp al, 'A'
+    jb .bd_no
+    cmp al, 'F'
+    jbe .bd_upper
+    cmp al, 'a'
+    jb .bd_no
+    cmp al, 'f'
+    jbe .bd_lower
+.bd_no:
+    mov eax, -1
+    ret
+.bd_dec:
+    sub eax, '0'
+    ret
+.bd_upper:
+    sub eax, 'A' - 10
+    ret
+.bd_lower:
+    sub eax, 'a' - 10
+    ret
+END_FUNC bfh_digit
+
+;; bfh_raise_position(rsi = the character index) -- does not return
+BRP_POS   equ 8
+BRP_BUF   equ 176
+BRP_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
+DEF_FUNC_LOCAL bfh_raise_position, BRP_FRAME
+    mov [rbp - BRP_POS], rsi
+    lea rdi, [rbp - BRP_BUF]
+    CSTRING rsi, "non-hexadecimal number found in fromhex() arg at position "
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - BRP_POS]
+    extern msg_append_i64
+    call msg_append_i64
+    lea rdi, [rel exc_ValueError_type]
+    lea rsi, [rbp - BRP_BUF]
+    extern raise_exception
+    call raise_exception
+END_FUNC bfh_raise_position
 
 ;; ============================================================================
 ;; bytes_affix_match(rdi = one affix Value, rsi = the subject's data,

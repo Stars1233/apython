@@ -169,12 +169,63 @@ FR_PREC  equ 16
 FR_BUF   equ 64          ; 48 bytes, [rbp-64, rbp-16)
 FR_EBUF  equ 128         ; 48 bytes, [rbp-128, rbp-80)
 FR_EXP   equ 136
+FR_BUMP  equ 144         ; the last digit was carried up by one; the frame
+                         ; below grew from 160 to 176 to make room
 
 FR_VALUE equ 8              ; the double being rendered
 FR_PREC  equ 16             ; precision counter (low 4 bytes)
 FR_BUF   equ 64             ; 48-byte render buffer
                             ; (the frame is built by hand below: `and rsp,-16`
-                            ; then `sub rsp,160`, for libc's aligned SSE)
+                            ; then `sub rsp,176`, for libc's aligned SSE)
+;; ============================================================================
+;; fr_bump_last(rdi = a NUL-terminated "d.ddd[e+dd]") -> eax = 1 on success
+;;
+;; Carry one into the last significant digit.  The exponent part, if any, is
+;; left alone; a carry that escapes the leading digit would change the
+;; exponent, and that candidate is refused rather than fixed up -- it can
+;; only arise from an all-nines mantissa, where the next precision answers.
+;; ============================================================================
+DEF_FUNC_BARE fr_bump_last
+    ; Find the end of the mantissa: the 'e', or the terminator.
+    xor ecx, ecx
+.fbl_scan:
+    movzx eax, byte [rdi + rcx]
+    test al, al
+    jz .fbl_at_end
+    cmp al, 'e'
+    je .fbl_at_end
+    cmp al, 'E'
+    je .fbl_at_end
+    inc rcx
+    jmp .fbl_scan
+.fbl_at_end:
+    dec rcx                     ; the last character of the mantissa
+.fbl_carry:
+    test rcx, rcx
+    js .fbl_overflow
+    movzx eax, byte [rdi + rcx]
+    cmp al, '.'
+    je .fbl_skip
+    cmp al, '0'
+    jb .fbl_overflow
+    cmp al, '9'
+    ja .fbl_overflow
+    cmp al, '9'
+    je .fbl_nine
+    inc al
+    mov [rdi + rcx], al
+    mov eax, 1
+    ret
+.fbl_nine:
+    mov byte [rdi + rcx], '0'
+.fbl_skip:
+    dec rcx
+    jmp .fbl_carry
+.fbl_overflow:
+    xor eax, eax
+    ret
+END_FUNC fr_bump_last
+
 DEF_FUNC float_repr
     ; A float subclass arrives as a pointer with its double inline, and only
     ; the tag can say so: a subnormal's bit pattern is a small integer, which
@@ -184,7 +235,7 @@ DEF_FUNC float_repr
     mov rdi, [rdi + PyFloatObject.value]
 .fr_have_bits:
     and rsp, -16              ; ensure 16-byte alignment for libc calls
-    sub rsp, 160
+    sub rsp, 176
     ; Stack layout:
     ;   [rbp - FR_VALUE]   = original double value (8 bytes)
     ;   [rbp - FR_PREC]  = precision counter (8 bytes, only low 4 used)
@@ -205,11 +256,24 @@ DEF_FUNC float_repr
     ucomisd xmm0, xmm1
     je .is_neg_inf
 
-    ; General case: find shortest representation
-    ; Try precision 1..17 with snprintf "%.*g"
+    ; General case: the shortest decimal that reads back as this double.
+    ;
+    ; Trying "%.*g" at rising precision finds the shortest of the forms GLIBC
+    ; produces, which is not always the shortest that exists: at an exact
+    ; half-way case glibc rounds to even, and it is the other neighbour that
+    ; round-trips.  repr(2.0**-24) came out with seventeen digits where
+    ; CPython prints sixteen, because "5.960464477539062e-08" -- glibc's
+    ; correctly-rounded sixteen -- does not read back as 2**-24 and
+    ; "...063" does.  About one in a hundred ordinary values hits it.
+    ;
+    ; So each precision is tried twice: as rendered, and with the last digit
+    ; carried up by one.  CPython's own dtoa searches the same two candidates
+    ; for the same reason.
     mov qword [rbp - FR_PREC], 1     ; prec = 1
 
 .repr_loop:
+    mov qword [rbp - FR_BUMP], 0
+.repr_try:
     lea rdi, [rbp - FR_BUF]   ; buf
     mov esi, 48                ; bufsz
     lea rdx, [rel fmt_g]      ; "%.*g"
@@ -218,6 +282,14 @@ DEF_FUNC float_repr
     mov eax, 1                ; 1 xmm register used
     call snprintf wrt ..plt
 
+    cmp qword [rbp - FR_BUMP], 0
+    je .repr_check
+    lea rdi, [rbp - FR_BUF]
+    call fr_bump_last
+    test eax, eax
+    jz .repr_next             ; the carry escaped: not a candidate
+
+.repr_check:
     ; Round-trip check: strtod(buf, NULL) == val?
     lea rdi, [rbp - FR_BUF]   ; buf
     xor esi, esi              ; endptr = NULL
@@ -227,9 +299,16 @@ DEF_FUNC float_repr
     ucomisd xmm0, xmm1
     je .repr_found             ; match! use this precision
 
+    cmp qword [rbp - FR_BUMP], 0
+    jne .repr_next
+    mov qword [rbp - FR_BUMP], 1
+    jmp .repr_try
+
+.repr_next:
     inc qword [rbp - FR_PREC]
     cmp qword [rbp - FR_PREC], 17
     jle .repr_loop
+    mov qword [rbp - FR_BUMP], 0      ; seventeen digits always round-trips
 
 .repr_found:
     ; The loop above found the shortest digit count that round-trips, but it
@@ -245,6 +324,11 @@ DEF_FUNC float_repr
     movsd xmm0, [rbp - FR_VAL]
     mov eax, 1
     call snprintf wrt ..plt
+    cmp qword [rbp - FR_BUMP], 0
+    je .fr_e_ready
+    lea rdi, [rbp - FR_EBUF]
+    call fr_bump_last
+.fr_e_ready:
 
     ; Read the exponent out of "d.dddde<sign>dd".
     lea rsi, [rbp - FR_EBUF]
@@ -308,6 +392,12 @@ DEF_FUNC float_repr
     movsd xmm0, [rbp - FR_VAL]
     mov eax, 1
     call snprintf wrt ..plt
+    cmp qword [rbp - FR_BUMP], 0
+    je .fr_notation_done
+    ; The last digit of the fixed form sits at the same decimal place as the
+    ; last digit of the exponential one, so it takes the same adjustment.
+    lea rdi, [rbp - FR_BUF]
+    call fr_bump_last
     jmp .fr_notation_done
 
 .fr_use_e:

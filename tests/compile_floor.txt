@@ -158,6 +158,7 @@ test_float_methods
 test_float_nan_ops
 test_float
 test_float_repr
+test_float_repr_ties
 test_fmtspec
 test_for_loops
 test_format_fields
@@ -342,6 +343,7 @@ test_str_search
 test_str_subclass_dict
 test_str_translate_mapping
 test_str_translate
+test_struct_binascii
 test_structseq
 test_subclass_binop
 test_subclass_contains

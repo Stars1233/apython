@@ -732,6 +732,35 @@ DEF_FUNC_LOCAL set_add_operator_methods, SAOM_FRAME
     ret
 END_FUNC set_add_operator_methods
 
+;; ADD_CLASSMETHOD name, impl -- the dict is in rbx, as everywhere else here.
+%macro ADD_CLASSMETHOD 2
+    lea rdi, [rel %2]
+    lea rsi, [rel %1]
+    call builtin_func_new
+    push rax
+    mov edi, PyClassMethodObject_size
+    lea rsi, [rel classmethod_type]
+    call gc_alloc
+    pop rcx
+    mov [rax + PyClassMethodObject.cm_callable], rcx
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
+    push rax
+    lea rdi, [rel %1]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+%endmacro
+
 %macro GEN_GETSET 2             ; %1 = the name string, %2 = the getter
     mov rdi, rbx
     lea rsi, [rel %1]
@@ -3181,6 +3210,11 @@ DEF_FUNC methods_init
     lea rdx, [rel bytes_method_hex]
     call dict_add_builtin_func
 
+    ; And its inverse, which binascii.unhexlify needs -- and binascii is what
+    ; base64, quopri, uu and plistlib come in behind.
+    extern bytes_fromhex_impl
+    ADD_CLASSMETHOD mn_fromhex, bytes_fromhex_impl
+
     mov rdi, rbx
     lea rsi, [rel mn_startswith]
     lea rdx, [rel bytes_method_startswith]
@@ -3508,6 +3542,10 @@ DEF_FUNC methods_init
     lea rsi, [rel mn_hex]
     lea rdx, [rel ba_shared_hex]
     call dict_add_builtin_func
+
+    ; The same classmethod: it reads the class it was called on and answers a
+    ; bytearray when that is bytearray.
+    ADD_CLASSMETHOD mn_fromhex, bytes_fromhex_impl
     mov rdi, rbx
     lea rsi, [rel mn_startswith]
     lea rdx, [rel ba_shared_startswith]

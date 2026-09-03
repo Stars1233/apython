@@ -9,6 +9,16 @@ one-line fix.
 
 ## Correctness
 
+~~- **`repr()` of a float was not always the shortest form.**  The search
+  tried `"%.*g"` at rising precision and took the first that read back, which
+  finds the shortest of the forms *glibc* produces -- and at an exact
+  half-way case glibc rounds to even, where it is the other neighbour that
+  round-trips.  `repr(2.0**-24)` came out with seventeen digits where CPython
+  prints sixteen.  About one ordinary value in a hundred.~~  Each precision
+  is tried twice now, as rendered and with the last digit carried up by one,
+  which is the same pair CPython's own dtoa searches.
+  `tests/test_float_repr_ties.py`.
+
 ~~- **`asyncio.gather` did not gather.**  It built one task per coroutine and
   handed back the LIST of them, with a TODO in the source saying the awaiting
   was still to do -- so `await asyncio.gather(...)` awaited a list, which is
@@ -136,12 +146,12 @@ one-line fix.
   os.py reads it to build `supports_dir_fd`.
 
 - **Missing C modules**, in rough order of how many stdlib modules each
-  blocks: `_struct`, `_socket`, ~~`_random`, `_contextvars`, `_tokenize`,~~
-  `_ast`, `_imp`, `binascii`, ~~`_string`,~~ then a long tail of one apiece.
+  blocks: ~~`_struct`,~~ `_socket`, ~~`_random`, `_contextvars`, `_tokenize`,~~
+  `_ast`, `_imp`, ~~`binascii`, `_string`,~~ then a long tail of one apiece.
   (`_io` is not among them: `src/iomod.asm` supplies
   `_iocore` and `lib/_io.py` assembles both halves under the name `_io`.
   Neither are `math` and `_collections`, which are there now.)
-  `make check-stdlib` gives the current figure -- 99 of 196, up from 78.
+  `make check-stdlib` gives the current figure -- 107 of 196, up from 78.
 
   The struck ones are in `lib/` now, with `_operator` (`_compare_digest`,
   which `hmac` imports directly and which has no fallback) and `atexit`.

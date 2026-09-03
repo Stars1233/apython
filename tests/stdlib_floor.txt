@@ -6,6 +6,7 @@ ok abc
 ok _aix_support
 ok argparse
 ok asyncio
+ok base64
 ok bisect
 ok calendar
 ok cmd
@@ -24,6 +25,7 @@ ok contextvars
 ok copy
 ok copyreg
 ok datetime
+ok dbm
 ok decimal
 ok difflib
 ok dis
@@ -65,6 +67,8 @@ ok os
 ok _osx_support
 ok pathlib
 ok __phello__
+ok pickle
+ok pickletools
 ok platform
 ok posixpath
 ok _py_abc
@@ -78,13 +82,16 @@ ok quopri
 ok re
 ok reprlib
 ok sched
+ok shelve
 ok shlex
 ok shutil
 ok _sitebuiltins
 ok stat
 ok string
+ok struct
 ok sysconfig
 ok tabnanny
+ok tarfile
 ok textwrap
 ok threading
 ok _threading_local
@@ -96,6 +103,7 @@ ok turtledemo
 ok types
 ok urllib
 ok warnings
+ok wave
 ok weakref
 ok _weakrefset
 ok wsgiref

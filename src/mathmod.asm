@@ -2156,7 +2156,26 @@ DEF_FUNC math_ldexp, MLD_FRAME
     jz .mld_exp_type
     call int_unwrap
     cmp edx, TAG_SMALLINT
-    jne .mld_overflow           ; an exponent that needs GMP is out of range
+    je .mld_have_exp
+    ; A heap int that int_unwrap did not flatten is GMP-backed -- which does
+    ; NOT mean it is large.  int.from_bytes promotes, and every arithmetic
+    ; result built from one stays promoted, so `math.ldexp(m, e)` with an `e`
+    ; computed from unpacked bytes was "math range error" for e = -23.  Ask
+    ; the number, not its representation.
+    push rdi
+    sub rsp, 8
+    lea rdi, [rdi + PyIntObject.mpz]
+    extern __gmpz_fits_slong_p
+    call __gmpz_fits_slong_p wrt ..plt
+    add rsp, 8
+    pop rdi
+    test eax, eax
+    jz .mld_overflow
+    lea rdi, [rdi + PyIntObject.mpz]
+    extern __gmpz_get_si
+    call __gmpz_get_si wrt ..plt
+    mov rdi, rax
+.mld_have_exp:
     mov rsi, rdi
     cmp rsi, 2147483647
     jg .mld_overflow
