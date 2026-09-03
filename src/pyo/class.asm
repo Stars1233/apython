@@ -156,10 +156,15 @@ DEF_FUNC str_sub_new, SSN_FRAME
     test rdx, rdx
     jz .ssn_empty
 
-    ; str(x) of the argument gives a plain str to copy from.
-    mov rdi, [rsi]
-    extern obj_str
-    call obj_str
+    ; str(x) of the arguments gives a plain str to copy from.  This called
+    ; obj_str on args[0] and ignored the rest, so a str subclass could not be
+    ; built from the DECODING form: S(b"abc", "utf-8") came out as the repr
+    ; "b'abc'".  builtin_str_fn is the whole of str(), keyword arguments
+    ; included, and its one-argument case is the same obj_str.
+    mov rdi, rsi
+    mov rsi, rdx
+    extern builtin_str_fn
+    call builtin_str_fn
     V_UNPACK rax, rdx
     test edx, edx
     jz .ssn_failed

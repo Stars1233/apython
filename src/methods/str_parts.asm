@@ -13,6 +13,9 @@
 
 
 ; External functions
+extern int_type
+extern bool_type
+extern dict_type
 extern ap_memfind
 extern str_find_impl
 extern ap_malloc
@@ -1137,12 +1140,44 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     push r12
     push r13
 
-    cmp rsi, 2
-    jl .smt_error
-    cmp rsi, 3
-    jg .smt_error
-    mov [rbp - SMT_NARGS], rsi
+    mov [rbp - SMT_NARGS], rsi  ; before the bounds check: the message counts
     mov [rbp - SMT_ARGS], rdi
+    test rsi, rsi
+    jz .smt_no_args
+    cmp rsi, 3
+    jg .smt_too_many
+    cmp rsi, 1
+    je .smt_from_dict
+
+    ; The two- and three-argument forms take strings, and CPython names the
+    ; one that is not.  Nothing checked, so str.maketrans("ab", 1) read the
+    ; int as a PyStrObject.  The later arguments are checked FIRST, which is
+    ; the order CPython's own argument clinic runs in: maketrans(1, 2) is
+    ; reported against argument 2, not argument 1.
+    mov rdi, [rdi + 8]
+    call smt_is_str
+    test eax, eax
+    jnz .smt_second_str
+    mov esi, 2
+    jmp .smt_arg_not_str
+.smt_second_str:
+    cmp qword [rbp - SMT_NARGS], 3
+    jne .smt_third_ok
+    mov rax, [rbp - SMT_ARGS]
+    mov rdi, [rax + 16]
+    call smt_is_str
+    test eax, eax
+    jnz .smt_third_ok
+    mov esi, 3
+    jmp .smt_arg_not_str
+.smt_third_ok:
+    mov rax, [rbp - SMT_ARGS]
+    mov rdi, [rax]
+    call smt_is_str
+    test eax, eax
+    jz .smt_first_not_str
+.smt_args_checked:
+    mov rdi, [rbp - SMT_ARGS]   ; the checks above went through rdi
 
     ; Get from and to strings
     mov rcx, [rdi]                 ; args[0] payload (from str)
@@ -1237,12 +1272,197 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+;; ============================================================================
+;; The one-argument form: str.maketrans({...}).
+;;
+;; It did not exist -- one argument was "maketrans requires 2 or 3 string
+;; arguments" -- and pathlib builds its table this way, so pathlib could not
+;; import.  A str key of one character becomes its ordinal; an int key stays
+;; as it is; the values are copied through untouched, None included, because
+;; translate() reads None as "delete this character".
+;; ============================================================================
+.smt_from_dict:
+    mov rbx, [rdi]
+    V_TEST_PTR rbx, rax
+    ja .smt_one_not_dict
+    test rbx, rbx
+    jz .smt_one_not_dict
+    ; CPython takes an exact dict here, not a subclass of one.
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    jne .smt_one_not_dict
+    call dict_new
+    mov r12, rax                    ; the table being built
+    xor r13d, r13d                  ; the source entry index
+.smt_dict_loop:
+    cmp r13, [rbx + PyDictObject.capacity]
+    jge .smt_dict_done
+    mov rax, [rbx + PyDictObject.entries]
+    imul rcx, r13, DictEntry_size
+    add rax, rcx
+    mov rdi, [rax + DictEntry.key]
+    test rdi, rdi
+    jz .smt_dict_next               ; empty, or a tombstone
+    mov rdx, [rax + DictEntry.value]
+    mov [rbp - SMT_TO], rdx         ; the value travels through untouched
+
+    ; An int key is its own ordinal.
+    V_IS_INT rdi, rax
+    jae .smt_key_ready
+    V_TEST_PTR rdi, rax
+    ja .smt_key_bad
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .smt_key_int_obj
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
+    je .smt_key_int_obj
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
+    jnz .smt_key_int_obj
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .smt_key_str
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .smt_key_str
+    jmp .smt_key_bad
+
+.smt_key_int_obj:
+    ; An int key is copied as it stands -- CPython's maketrans({True: 'x'})
+    ; keeps True as the key, not 1.
+    jmp .smt_key_ready
+
+.smt_key_str:
+    cmp qword [rdi + PyStrObject.ob_length], 1
+    jne .smt_key_len
+    push rdi
+    lea rdi, [rdi + PyStrObject.data]
+    mov rsi, 4
+    call trn_decode_cp
+    pop rdi
+    V_PACK_I64 rax, rcx
+    mov rdi, rax
+
+.smt_key_ready:
+    mov rsi, rdi
+    mov rdx, [rbp - SMT_TO]
+    mov rdi, r12
+    call dict_set
+.smt_dict_next:
+    inc r13
+    jmp .smt_dict_loop
+.smt_dict_done:
+    mov rax, r12
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.smt_key_bad:
+    RAISE exc_TypeError_type, "keys in translate table must be strings or integers"
+.smt_key_len:
+    RAISE exc_ValueError_type, "string keys in translate table must be of length 1"
+.smt_one_not_dict:
+    RAISE exc_TypeError_type, "if you give only one argument to maketrans it must be a dict"
+.smt_no_args:
+    RAISE exc_TypeError_type, "maketrans expected at least 1 argument, got 0"
+.smt_first_not_str:
+    RAISE exc_TypeError_type, "first maketrans argument must be a string if there is a second argument"
+.smt_arg_not_str:
+    ; esi = which one, 2 or 3
+    mov rdi, [rbp - SMT_ARGS]
+    mov rdi, [rdi + rsi*8 - 8]
+    call smt_raise_not_str
 .smt_error:
     RAISE exc_TypeError_type, "maketrans requires 2 or 3 string arguments"
+.smt_too_many:
+    mov rsi, [rbp - SMT_NARGS]
+    call smt_raise_too_many
 
 .smt_len_error:
-    RAISE exc_ValueError_type, "maketrans arguments must have equal length"
+    RAISE exc_ValueError_type, "the first two maketrans arguments must have equal length"
 END_FUNC str_staticmethod_maketrans
+
+;; smt_is_str(rdi = a Value) -> eax = 1 when it is a str
+DEF_FUNC_BARE smt_is_str
+    V_TEST_PTR rdi, rax
+    ja .sis_no
+    test rdi, rdi
+    jz .sis_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .sis_yes
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .sis_yes
+.sis_no:
+    xor eax, eax
+    ret
+.sis_yes:
+    mov eax, 1
+    ret
+END_FUNC smt_is_str
+
+;; smt_raise_not_str(rdi = the offending argument, esi = which one) -- no return
+;; "maketrans() argument 2 must be str, not int", CPython's wording.
+SRN_ARG   equ 8
+SRN_WHICH equ 16
+SRN_BUF   equ 176
+SRN_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
+DEF_FUNC_LOCAL smt_raise_not_str, SRN_FRAME
+    mov [rbp - SRN_ARG], rdi
+    mov [rbp - SRN_WHICH], rsi
+    lea rdi, [rbp - SRN_BUF]
+    CSTRING rsi, "maketrans() argument "
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SRN_WHICH]
+    extern msg_append_i64
+    call msg_append_i64
+    mov rdi, rax
+    CSTRING rsi, " must be str, not "
+    call rbt_append_cstr
+    push rax
+    mov rdi, [rbp - SRN_ARG]
+    extern value_type
+    call value_type
+    test rax, rax
+    jz .srn_unknown
+    mov rsi, [rax + PyTypeObject.tp_name]
+    jmp .srn_named
+.srn_unknown:
+    CSTRING rsi, "object"
+.srn_named:
+    pop rdi
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - SRN_BUF]
+    extern raise_exception
+    call raise_exception
+END_FUNC smt_raise_not_str
+
+;; smt_raise_too_many(rsi = the count) -- no return
+;; "maketrans expected at most 3 arguments, got 4"
+STM_BUF   equ 176
+STM_N     equ 184
+STM_FRAME equ 192           ; + 0 pushes = 192, 16-aligned
+DEF_FUNC_LOCAL smt_raise_too_many, STM_FRAME
+    mov [rbp - STM_N], rsi
+    lea rdi, [rbp - STM_BUF]
+    CSTRING rsi, "maketrans expected at most 3 arguments, got "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - STM_N]
+    call msg_append_i64
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - STM_BUF]
+    call raise_exception
+END_FUNC smt_raise_too_many
 
 ;; args[0]=self, args[1]=prefix
 ;; If self starts with prefix, return self[len(prefix):], else return self.

@@ -219,6 +219,7 @@ test_list_fixes
 test_list_insert_pop
 test_list_remove_eq
 test_lists
+test_maketrans
 test_map_multi
 test_mappingproxy_call
 test_marshal_interned
@@ -258,6 +259,7 @@ test_ordering_typeerror
 test_oserror
 test_percent_and_ior
 test_percent_format
+test_percent_star
 test_percent_typecheck
 test_phase4
 test_phase6
@@ -313,6 +315,7 @@ test_sre_groupdict_refcount
 test_sre
 test_stdlib_glue
 test_str_case
+test_str_decode
 test_strfmt
 test_str_format
 test_strings2

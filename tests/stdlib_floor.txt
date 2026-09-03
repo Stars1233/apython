@@ -33,6 +33,7 @@ ok __future__
 ok getopt
 ok getpass
 ok gettext
+ok glob
 ok graphlib
 ok heapq
 ok __hello__
@@ -41,6 +42,7 @@ ok http
 ok idlelib
 ok io
 ok ipaddress
+ok json
 ok keyword
 ok locale
 ok _markupbase
@@ -54,6 +56,7 @@ ok operator
 ok optparse
 ok os
 ok _osx_support
+ok pathlib
 ok __phello__
 ok platform
 ok posixpath

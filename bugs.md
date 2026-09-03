@@ -9,6 +9,23 @@ one-line fix.
 
 ## Correctness
 
+~~- **Three holes that each blocked a stdlib module.**  `str(bytes,
+  encoding[, errors])` did not exist -- `str(b, "utf-8")` answered "str()
+  takes at most 1 argument" -- which is what kept `glob` and `fnmatch` out,
+  through `re/_parser.py`.  `str.maketrans({...})`, the one-argument dict
+  form, did not exist either, and `pathlib` builds its table that way.  And
+  `%`-formatting did not understand `*`: `"%.*g" % (3, x)` reported "not all
+  arguments converted during string formatting", which is what `timeit`
+  runs into.~~  `glob`, `json` and `pathlib` import now, and the floor in
+  `tests/stdlib_floor.txt` records it.  `tests/test_str_decode.py`,
+  `tests/test_maketrans.py`, `tests/test_percent_star.py`.
+
+  Two of the three turned out to be wider than the entry said.  The `*`
+  bug was not only precision: `%*d` took no width either, and `%*.*f` took
+  neither.  And `maketrans`'s two- and three-argument forms never checked
+  that they had been handed strings, so `str.maketrans("ab", 1)` read the
+  int as a `PyStrObject`.
+
 ~~- **set's method forms took exactly one argument.**  `union`,
   `intersection` and `difference` are variadic in CPython -- `s.difference(a,
   b)` is `(s - a) - b`, and the no-argument form is a copy -- and all three

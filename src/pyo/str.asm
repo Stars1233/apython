@@ -13,6 +13,8 @@ extern ap_strcmp
 extern bool_true
 extern bool_false
 extern int_to_i64
+extern int_unwrap
+extern int_is_integer
 extern fatal_error
 extern raise_exception
 extern exc_IndexError_type
@@ -556,7 +558,8 @@ END_FUNC codec_error_id
 ;; through the codecs module, which is Python and cannot be reached from here.
 ;; ============================================================================
 CI_BUF   equ 48
-CI_FRAME equ 64             ; + 1 push = 72, not 16-aligned
+CI_MSG   equ 240            ; the "unknown encoding: x" message, built in place
+CI_FRAME equ 256            ; + 1 push = 264, not 16-aligned
 DEF_FUNC codec_id, CI_FRAME
     push rbx
     ; ap_strcmp compares eight bytes at a time, so the buffer has to be zeroed
@@ -661,8 +664,19 @@ DEF_FUNC codec_id, CI_FRAME
     leave
     ret
 .ci_unknown:
+    ; CPython names the encoding it could not find, which is the whole of
+    ; what the caller needs to know.
+    lea rdi, [rbp - CI_MSG]
+    CSTRING rsi, "unknown encoding: "
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, rbx
+    call rbt_append_cstr
     extern exc_LookupError_type
-    RAISE exc_LookupError_type, "unknown encoding"
+    lea rdi, [rel exc_LookupError_type]
+    lea rsi, [rbp - CI_MSG]
+    call raise_exception
 END_FUNC codec_id
 
 ; str_from_cstr_heap(const char *cstr) -> (rax=PyStrObject*, edx=TAG_PTR)
@@ -1312,7 +1326,12 @@ SM_ISMAP   equ 176       ; the right operand is a mapping: %(name)s, no arity ch
 SM_SPECCH  equ 184       ; the conversion as format() spells it: i and u are d
 SM_ISBYTES equ 192       ; formatting a BYTES: %s means bytes, %r means b'x'
 SM_KEYOBJ  equ 200       ; the %(name)s key, for the message when it is missing
-SM_FRAME   equ 208          ; + 0 pushes = 208
+SM_STARW   equ 208       ; a '*' width taken from the argument list
+SM_STARWON equ 216       ; ...and whether there was one
+SM_STARP   equ 224       ; a '*' precision, likewise
+SM_STARPON equ 232
+SM_SAWDOT  equ 240       ; the spec copier's cursor has passed the '.'
+SM_FRAME   equ 256          ; + 0 pushes = 256
 
 ;; str_mod is the nb_remainder slot.  str_mod_impl is what bytes_mod calls, with
 ;; the flag that changes what half the conversions mean: %s on a bytes REQUIRES
@@ -1517,6 +1536,8 @@ DEF_FUNC str_mod_impl, SM_FRAME
     inc rcx                         ; step past ')'
 
 .sm_mark_spec:
+    mov qword [rbp-SM_STARWON], 0
+    mov qword [rbp-SM_STARPON], 0
     ; Remember where the flags start.  This used to sit on .sm_skip_flags
     ; itself, which .sm_skip_one jumps back to once per flag -- so the marker
     ; ended up *after* the flags and "%-5s" looked like it had none.
@@ -1543,6 +1564,8 @@ DEF_FUNC str_mod_impl, SM_FRAME
 
 .sm_skip_width:
     movzx eax, byte [rbx + rcx]
+    cmp al, '*'
+    je .sm_star_width
     cmp al, '0'
     jb .sm_check_dot
     cmp al, '9'
@@ -1560,6 +1583,8 @@ DEF_FUNC str_mod_impl, SM_FRAME
     jge .sm_done
 .sm_skip_prec:
     movzx eax, byte [rbx + rcx]
+    cmp al, '*'
+    je .sm_star_prec
     cmp al, '0'
     jb .sm_dispatch
     cmp al, '9'
@@ -1568,6 +1593,68 @@ DEF_FUNC str_mod_impl, SM_FRAME
     cmp rcx, r12
     jge .sm_done
     jmp .sm_skip_prec
+
+;; "%*d" % (6, 42) and "%.*g" % (3, x): the width, the precision or both come
+;; from the argument list.  The whole family was unhandled -- '*' is not a
+;; flag, not a digit and not '.', so the scanner stopped there, the conversion
+;; went out with no width, and the width argument was still sitting in the
+;; tuple when the arity check ran.  What that reported was "not all arguments
+;; converted during string formatting", which names neither the directive nor
+;; the reason.
+.sm_star_width:
+    push rcx
+    call .sm_get_arg            ; rax = payload, rdx = tag
+    call .sm_star_to_i64
+    pop rcx
+    mov [rbp-SM_STARW], rax
+    mov qword [rbp-SM_STARWON], 1
+    inc rcx
+    cmp rcx, r12
+    jge .sm_done
+    movzx eax, byte [rbx + rcx] ; .sm_check_dot reads the character in al
+    jmp .sm_check_dot
+
+.sm_star_prec:
+    push rcx
+    call .sm_get_arg
+    call .sm_star_to_i64
+    pop rcx
+    ; A negative precision is no precision at all -- CPython's
+    ; "%.*g" % (-1, 1.5) is "%.0g" % 1.5, which is '2'.
+    test rax, rax
+    jns .sm_star_prec_keep
+    xor eax, eax
+.sm_star_prec_keep:
+    mov [rbp-SM_STARP], rax
+    mov qword [rbp-SM_STARPON], 1
+    inc rcx
+    cmp rcx, r12
+    jge .sm_done
+    jmp .sm_dispatch
+
+;; .sm_star_to_i64(rax = payload, rdx = tag) -> rax = the number
+;; CPython takes an int and nothing else here -- not a float, and not even an
+;; object with __index__ -- and says "* wants int".
+.sm_star_to_i64:
+    push rcx
+    mov rdi, rax
+    call int_is_integer
+    test eax, eax
+    jz .sm_star_bad
+    call int_unwrap             ; rdi, edx: a compact int flattens to a smallint
+    cmp edx, TAG_SMALLINT
+    jne .sm_star_big
+    mov rax, rdi
+    pop rcx
+    ret
+.sm_star_big:
+    ; A width or precision that needs GMP is nonsense, but truncating it is
+    ; still better than reading the pointer as a number.
+    call int_to_i64
+    pop rcx
+    ret
+.sm_star_bad:
+    RAISE exc_TypeError_type, "* wants int"
 
 .sm_dispatch:
     ; In bytes mode every conversion takes the spec path, so the argument is
@@ -1870,6 +1957,12 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov rax, [rbp-SM_KEYVAL]
     V_UNPACK rax, rdx
     mov qword [rbp-SM_HASKEY], 0
+    ; CPython makes the keyed value the argument source and lets it be taken
+    ; once: "%(a)*d" % {"a": 1} uses the 1 as the WIDTH and then has nothing
+    ; left for the %d.  Without this the second fetch fell back to the mapping
+    ; itself and complained about formatting a dict.  A mapping skips the
+    ; arity check entirely, so counting here costs nothing else.
+    inc r15
     ret
 .sm_arg_positional:
     cmp qword [rbp-SM_ISTUPLE], 1
@@ -2024,6 +2117,14 @@ DEF_FUNC str_mod_impl, SM_FRAME
     inc rax
     jmp .sm_sc_seek_minus
 .sm_sc_seek_done:
+    ; A '*' width that came out negative means left-alignment, as a literal
+    ; '-' flag does: CPython's "%*d" % (-6, 42) is '42    '.
+    cmp qword [rbp-SM_STARWON], 0
+    je .sm_sc_align_from_flags
+    cmp qword [rbp-SM_STARW], 0
+    jge .sm_sc_align_from_flags
+    mov r11d, 1
+.sm_sc_align_from_flags:
     mov byte [rdi], '>'
     test r11d, r11d
     jz .sm_sc_numeric_zero
@@ -2062,6 +2163,7 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov r10d, 1
 
     ; Then the flags, width and precision verbatim, minus the '-'.
+    mov qword [rbp-SM_SAWDOT], 0
     mov rax, [rbp-SM_SPECST]
 .sm_sc_copy:
     mov rcx, [rbp-SM_POS]
@@ -2069,6 +2171,10 @@ DEF_FUNC str_mod_impl, SM_FRAME
     cmp rax, rcx
     jge .sm_sc_copy_done
     movzx ecx, byte [rbx + rax]
+    cmp cl, '.'
+    je .sm_sc_copy_dot
+    cmp cl, '*'
+    je .sm_sc_copy_star
     cmp cl, '-'
     je .sm_sc_copy_next
     ; A '0' flag means nothing for %s and %r; CPython pads those with spaces.
@@ -2090,6 +2196,53 @@ DEF_FUNC str_mod_impl, SM_FRAME
 .sm_sc_copy_next:
     inc rax
     jmp .sm_sc_copy
+
+.sm_sc_copy_dot:
+    mov qword [rbp-SM_SAWDOT], 1
+    jmp .sm_sc_copy_keep
+
+;; A '*' in the source stands for a number taken from the argument list; the
+;; format-spec engine downstream knows nothing about '*', so the digits go in
+;; here.  Which of the two it is follows from whether the '.' has gone by.
+.sm_sc_copy_star:
+    push rax
+    mov rax, [rbp-SM_STARW]
+    cmp qword [rbp-SM_SAWDOT], 0
+    je .sm_sc_star_have
+    mov rax, [rbp-SM_STARP]
+.sm_sc_star_have:
+    ; The sign is not part of the spec: a negative width has already become
+    ; left-alignment, and a negative precision has already become zero.
+    test rax, rax
+    jns .sm_sc_star_emit
+    neg rax
+.sm_sc_star_emit:
+    push rbx
+    push r12
+    xor r12d, r12d              ; digits pushed
+.sm_sc_star_split:
+    xor edx, edx
+    mov rbx, 10
+    div rbx                     ; rax = quotient, rdx = digit
+    add rdx, '0'
+    push rdx
+    inc r12
+    test rax, rax
+    jnz .sm_sc_star_split
+.sm_sc_star_pop:
+    pop rcx
+    cmp r10, 36                 ; the spec buffer is 40 bytes and grows up
+    jge .sm_sc_star_skip
+    mov [rdi + r10], cl
+    inc r10
+.sm_sc_star_skip:
+    dec r12
+    jnz .sm_sc_star_pop
+    pop r12
+    pop rbx
+    pop rax
+    jmp .sm_sc_copy_next
+
 .sm_sc_copy_done:
 
     ; The conversion letter, mapped onto a spec type.
