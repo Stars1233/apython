@@ -2216,6 +2216,18 @@ DEF_FUNC sre_pattern_finditer_method
     mov rcx, rax               ; endpos
 .fi_no_endpos:
 
+    ; finditer does not build a state -- it builds a scanner and walks it
+    ; later -- so it is the one entry point sre_state_init's check does not
+    ; cover.  Without this, p.finditer(5) stored the int in the scanner and
+    ; the crash arrived somewhere else entirely.
+    push rdx
+    push rcx
+    mov rdi, rsi
+    extern sre_require_subject
+    call sre_require_subject
+    pop rcx
+    pop rdx
+
     ; scanner_new(pattern, string, pos, endpos)
     mov rdi, rbx               ; pattern
     ; rsi = string (already set)
@@ -2387,6 +2399,13 @@ DEF_FUNC sre_scanner_iternext, SI_FRAME
     mov [rbx + SRE_ScannerObject.pos], rax
 
     pop rax                    ; match object
+    mov edx, TAG_PTR           ; the tag was never set on this path: the
+                               ; caller V_PACKs (rax, rdx), so scanner.search()
+                               ; handed back whatever edx happened to hold.
+                               ; With the ordinary allocator that looked like a
+                               ; pointer; under a different heap layout it read
+                               ; as TAG_SMALLINT and the match came back as its
+                               ; own address.
 
     pop r13
     pop r12

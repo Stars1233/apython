@@ -1066,6 +1066,15 @@ DEF_FUNC sre_state_init, SSI_FRAME
     dec ecx
     jnz .zero_loop
 
+    ; The subject has to BE a string before it is read as one.  The entry
+    ; points in sre_pattern.asm check only their argument COUNT and hand
+    ; args[0] straight through, so `p.match(5)` reached the dereference below
+    ; with an int immediate and read PyStrObject.ob_size out of address 5.
+    ; One call here covers every method that builds a state; finditer builds
+    ; a scanner instead and calls it for itself.
+    mov rdi, r13
+    call sre_require_subject
+
     ; Set basic fields
     mov [rbx + SRE_State.pattern], r12
     mov [rbx + SRE_State.string_obj], r13
@@ -1269,6 +1278,60 @@ DEF_FUNC sre_state_init, SSI_FRAME
     leave
     ret
 END_FUNC sre_state_init
+
+;; ============================================================================
+;; sre_require_subject(rdi = the subject Value) -- returns, or raises
+;;
+;; A bytes-like subject is a different refusal from "that is not a string":
+;; the pattern is a str pattern, and CPython says so.  Both are TypeError.
+;; ============================================================================
+global sre_require_subject
+DEF_FUNC sre_require_subject
+    push rbx
+    sub rsp, 8
+    mov rbx, rdi
+    extern str_type
+    V_TEST_PTR rdi, rax
+    ja .srs_not_string
+    test rdi, rdi
+    jz .srs_not_string
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .srs_ok
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .srs_ok
+
+    extern bytes_type
+    extern bytearray_type
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .srs_bytes
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .srs_bytes
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
+    jnz .srs_bytes
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTEARRAY_SUBCLASS
+    jnz .srs_bytes
+    jmp .srs_not_string
+
+.srs_ok:
+    add rsp, 8
+    pop rbx
+    leave
+    ret
+
+.srs_bytes:
+    extern exc_TypeError_type
+    RAISE exc_TypeError_type, "cannot use a string pattern on a bytes-like object"
+
+.srs_not_string:
+    extern raise_type_error_with_name
+    mov rsi, rbx
+    CSTRING rdi, `expected string or bytes-like object, got '\x01'`
+    call raise_type_error_with_name     ; does not return
+END_FUNC sre_require_subject
 
 ;; ============================================================================
 ;; sre_state_fini(SRE_State* state)

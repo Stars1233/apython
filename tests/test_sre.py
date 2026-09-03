@@ -277,4 +277,48 @@ assert subn_result2[0] == "HELLO world hello", f"callable subn count=1 wrong: {s
 assert subn_result2[1] == 1, f"callable subn count=1 count wrong: {subn_result2[1]}"
 print("callable subn count limit OK")
 
+# The six entry points -- match, search, fullmatch, findall, split, finditer --
+# checked only their ARGUMENT COUNT and handed args[0] straight to
+# sre_state_init, which dereferences it as a PyStrObject.  pattern.match(5)
+# read PyStrObject.ob_size out of address 5 and segfaulted.  One check in
+# sre_state_init covers all six, because every one of them funnels through it.
+#
+# A bytes-like subject gets CPython's separate wording: the pattern is a str
+# pattern, which is a different complaint from "that is not a string".
+
+
+class StrSub(str):
+    pass
+
+
+for _name in ("match", "search", "fullmatch", "findall", "split", "finditer"):
+    _meth = getattr(pattern, _name)
+    for _bad in (5, None, [1], 1.5, {}, (), int, object()):
+        try:
+            _meth(_bad)
+        except TypeError as e:
+            assert "expected string or bytes-like object" in str(e), \
+                f"{_name}({_bad!r}) wrong message: {e}"
+            assert type(_bad).__name__ in str(e), \
+                f"{_name}({_bad!r}) does not name the type: {e}"
+        else:
+            raise AssertionError(f"{_name}({_bad!r}) was accepted")
+
+    for _bad in (b"hello", bytearray(b"hello")):
+        try:
+            _meth(_bad)
+        except TypeError as e:
+            assert str(e) == "cannot use a string pattern on a bytes-like object", \
+                f"{_name}({_bad!r}) wrong message: {e}"
+        else:
+            raise AssertionError(f"{_name}({_bad!r}) was accepted")
+
+print("argument types OK")
+
+# A str subclass is still a string, and the ordinary paths are untouched.
+assert pattern.match(StrSub("hello")) is not None
+assert pattern.search("say hello") is not None
+assert pattern.findall("hello hello") == ["hello", "hello"]
+print("str subclass subject OK")
+
 print("All _sre tests passed!")
