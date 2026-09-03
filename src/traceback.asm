@@ -39,6 +39,9 @@ extern str_type
 extern tuple_type
 extern obj_decref
 extern str_type
+extern current_exception
+extern none_singleton
+extern obj_dealloc
 extern traceback_type
 extern ap_malloc
 
@@ -1474,6 +1477,272 @@ DEF_FUNC tb_print_repeated
     leave
     ret
 END_FUNC tb_print_repeated
+
+;; ============================================================================
+;; traceback_print_unraisable(rdi = exception, rsi = the object it came out
+;;                            of, or 0)
+;;
+;; What CPython's _PyErr_WriteUnraisableMsg prints: a line naming the object,
+;; then the exception's own report.  A __del__ that raises and a cleanup in a
+;; dropped generator both reach it -- neither has a caller left to hand the
+;; exception to, and both used to print a single line that named the kind of
+;; failure and nothing else, so which object, which line and which exception
+;; were all lost.
+;;
+;; The object is named by repr, and a repr can itself raise or recurse.  It is
+;; called only when it is one of the shapes whose repr is a plain string --
+;; the safe answer here is CPython's fallback, "<object repr() failed>".
+;; ============================================================================
+TPU_EXC   equ 8
+TPU_OBJ   equ 16
+TPU_FRAME equ 32            ; + 0 pushes = 32
+
+global traceback_unraisable_default
+DEF_FUNC traceback_unraisable_default, TPU_FRAME
+    mov [rbp - TPU_EXC], rdi
+    mov [rbp - TPU_OBJ], rsi
+
+    CSTRING rdi, "Exception ignored in: "
+    call tb_write_cstr
+    mov rdi, [rbp - TPU_EXC]
+    mov rsi, [rbp - TPU_OBJ]
+    call tb_unraisable_name
+    mov rdi, [rbp - TPU_EXC]
+    call traceback_print
+    leave
+    ret
+END_FUNC traceback_unraisable_default
+
+;; tb_unraisable_name(rdi = the exception being reported, rsi = the object to
+;; name, or 0) -- writes "<repr>\n", or a stand-in when there is no repr to
+;; be had.  The exception is only there to be put back: a repr can raise.
+TUN_EXC   equ 8
+TUN_FRAME equ 16            ; + 0 pushes = 16
+DEF_FUNC_LOCAL tb_unraisable_name, TUN_FRAME
+    mov [rbp - TUN_EXC], rdi
+    mov rdi, rsi
+    test rdi, rdi
+    jz .tpu_unknown
+    extern obj_repr
+    call obj_repr
+    V_UNPACK rax, rdx
+    cmp edx, TAG_PTR
+    jne .tpu_failed
+    test rax, rax
+    jz .tpu_failed
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .tpu_failed_ref
+    push rax
+    mov rdi, rax
+    call tb_write_str
+    pop rdi
+    call obj_decref
+    jmp .tpu_newline
+
+.tpu_failed_ref:
+    mov rdi, rax
+    call obj_decref
+.tpu_failed:
+    ; A repr that raised leaves ITS exception pending; the one being reported
+    ; is what matters, so put that back.
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .tpu_failed_msg
+    mov rax, [rbp - TUN_EXC]
+    mov [rel current_exception], rax
+    call obj_decref
+.tpu_failed_msg:
+    CSTRING rdi, "<object repr() failed>"
+    call tb_write_cstr
+    jmp .tpu_newline
+
+.tpu_unknown:
+    CSTRING rdi, "<unknown>"
+    call tb_write_cstr
+
+.tpu_newline:
+    CSTRING rdi, `\n`
+    call tb_write_cstr
+    leave
+    ret
+END_FUNC tb_unraisable_name
+
+;; ============================================================================
+;; traceback_print_unraisable(rdi = exception, rsi = the object it came out of)
+;;
+;; The interpreter's way in.  CPython routes this through sys.unraisablehook,
+;; so a program can collect these rather than have them written to stderr --
+;; which is also the only way a test can look at one, since the default report
+;; names the object by repr and so carries an address.
+;;
+;; The hook is looked up by name every time, because the point of it is that
+;; it can be replaced at any moment.  Anything that goes wrong on the way --
+;; no sys module, no hook, a hook that raises -- falls back to printing, and
+;; the exception the hook raised is dropped: there is nobody to give it to,
+;; which is what made this an unraisable exception in the first place.
+;; ============================================================================
+TPH_EXC   equ 8
+TPH_OBJ   equ 16
+TPH_HOOK  equ 24
+TPH_ARG   equ 32
+TPH_SAVED equ 40
+TPH_ARGV  equ 56            ; one Value
+TPH_FRAME equ 64            ; + 1 push = 72
+
+global traceback_print_unraisable
+DEF_FUNC traceback_print_unraisable, TPH_FRAME
+    push rbx
+    mov [rbp - TPH_EXC], rdi
+    mov [rbp - TPH_OBJ], rsi
+    mov qword [rbp - TPH_ARG], 0
+
+    ; sys.unraisablehook, if sys is loaded and something replaced it.
+    extern sys_module_obj
+    mov rbx, [rel sys_module_obj]
+    test rbx, rbx
+    jz .tph_default
+    CSTRING rdi, "unraisablehook"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    mov rbx, rax
+    pop rdi
+    call obj_decref
+    test rbx, rbx
+    jz .tph_default
+    V_TEST_PTR rbx, rax
+    ja .tph_default
+
+    ; The default is this printer wearing a builtin's clothes; calling it
+    ; would be a detour through a structseq and back.
+    mov rax, [rbx + PyObject.ob_type]
+    extern builtin_func_type
+    lea rcx, [rel builtin_func_type]
+    cmp rax, rcx
+    jne .tph_call_hook
+    extern sys_unraisablehook_func
+    mov rax, [rbx + PyBuiltinObject.func_ptr]
+    lea rcx, [rel sys_unraisablehook_func]
+    cmp rax, rcx
+    je .tph_drop_hook
+
+.tph_call_hook:
+    mov [rbp - TPH_HOOK], rbx
+    ; The five-field structseq CPython passes.
+    extern unraisable_args_type
+    extern structseq_new
+    extern structseq_set
+    lea rdi, [rel unraisable_args_type]
+    call structseq_new
+    test rax, rax
+    jz .tph_drop_hook
+    mov [rbp - TPH_ARG], rax
+
+    mov rdi, rax
+    xor esi, esi
+    mov rdx, [rbp - TPH_EXC]
+    mov rdx, [rdx + PyObject.ob_type]
+    INCREF rdx
+    call structseq_set
+    mov rdi, [rbp - TPH_ARG]
+    mov esi, 1
+    mov rdx, [rbp - TPH_EXC]
+    INCREF rdx
+    call structseq_set
+    mov rdi, [rbp - TPH_ARG]
+    mov esi, 2
+    mov rdx, [rbp - TPH_EXC]
+    mov rdx, [rdx + PyExceptionObject.exc_tb]
+    test rdx, rdx
+    jnz .tph_have_tb
+    LOAD_NONE rdx
+.tph_have_tb:
+    INCREF rdx
+    call structseq_set
+    mov rdi, [rbp - TPH_ARG]
+    mov esi, 3
+    LOAD_NONE rdx
+    INCREF rdx
+    call structseq_set
+    mov rdi, [rbp - TPH_ARG]
+    mov esi, 4
+    mov rdx, [rbp - TPH_OBJ]
+    test rdx, rdx
+    jnz .tph_have_obj
+    LOAD_NONE rdx
+.tph_have_obj:
+    INCREF rdx
+    call structseq_set
+
+    ; The hook runs with no exception pending: it is ordinary Python, and the
+    ; one being reported is an argument, not the current state.
+    mov rax, [rel current_exception]
+    mov [rbp - TPH_SAVED], rax
+    mov qword [rel current_exception], 0
+
+    mov rax, [rbp - TPH_ARG]
+    mov [rbp - TPH_ARGV], rax
+    mov rdi, [rbp - TPH_HOOK]
+    lea rsi, [rbp - TPH_ARGV]
+    mov edx, 1
+    extern obj_call_n
+    call obj_call_n
+    push rax
+    ; A hook that raises is reported against the HOOK, and the exception it
+    ; was given is dropped -- CPython says "Exception ignored in
+    ; sys.unraisablehook: <the hook>" and does not fall back to printing the
+    ; original.  Reporting both would be reporting the same failure twice.
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .tph_no_exc
+    mov qword [rel current_exception], 0
+    push rdi
+    CSTRING rdi, "Exception ignored in sys.unraisablehook: "
+    call tb_write_cstr
+    pop rdi
+    push rdi
+    mov rsi, [rbp - TPH_HOOK]
+    call tb_unraisable_name
+    pop rdi
+    push rdi
+    call traceback_print
+    pop rdi
+    call obj_decref
+.tph_no_exc:
+    mov rax, [rbp - TPH_SAVED]
+    mov [rel current_exception], rax
+    pop rax
+    test rax, rax
+    jz .tph_hook_done
+    V_UNPACK rax, rdx
+    XDECREF_VAL rax, rdx
+.tph_hook_done:
+    mov rdi, [rbp - TPH_ARG]
+    call obj_decref
+    mov rdi, [rbp - TPH_HOOK]
+    call obj_decref
+    pop rbx
+    leave
+    ret
+
+.tph_drop_hook:
+    mov rdi, rbx
+    call obj_decref
+.tph_default:
+.tph_print:
+    mov rdi, [rbp - TPH_EXC]
+    mov rsi, [rbp - TPH_OBJ]
+    call traceback_unraisable_default
+    pop rbx
+    leave
+    ret
+END_FUNC traceback_print_unraisable
 
 ;; ============================================================================
 ;; traceback_print(rdi = exception)

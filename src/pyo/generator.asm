@@ -759,11 +759,13 @@ DEF_FUNC gen_dealloc, GD_FRAME
     test rdi, rdi
     jz .gd_close_done
     mov qword [rel current_exception], 0
+    ; The full report, as CPython's does: the generator itself, then the
+    ; traceback of where inside the cleanup it happened.  One line naming
+    ; neither was all this used to print.
     push rdi
-    mov edi, 2
-    lea rsi, [rel gd_ignored_msg]
-    mov edx, gd_ignored_len
-    call sys_write
+    mov rsi, rbx
+    extern traceback_print_unraisable
+    call traceback_print_unraisable
     pop rdi
     call obj_decref
 .gd_close_done:

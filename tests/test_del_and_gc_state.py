@@ -8,18 +8,26 @@
 # which the reentrancy guard made the collector a permanent no-op and cyclic
 # garbage accumulated silently for the rest of the run.
 #
-# This test is self-asserting rather than print-and-diff: both interpreters
-# report the ignored exception on stderr, but with different wording, so the
-# usual differential comparison cannot be used.  tests/expected/ holds a
-# recorded transcript; the asserts are what actually establish correctness.
-#
-# The transcript is not line-for-line CPython's: the forty cyclic Node
-# objects below are finalized at shutdown by both, but CPython prints a full
-# traceback for each ignored exception where this prints one line.  The count
-# is the part that matters, and it matches -- one report per object.  What
-# this test establishes beyond that is that a raising __del__ does not poison
-# the exception state or latch the collector off, which the asserts check
-# directly.
+# The reports themselves cannot be diffed: the default one names the object,
+# and naming an object means printing its address.  sys.unraisablehook is the
+# way round that -- and it is the way a program is meant to collect these --
+# so the hook below counts them and the count is what is compared.  It used to
+# be a recorded transcript, which stopped working the moment the reports
+# started carrying an address.
+
+import sys
+
+ignored = []
+
+
+def collect_unraisable(unraisable):
+    ignored.append((unraisable.exc_type.__name__,
+                    str(unraisable.exc_value),
+                    unraisable.exc_traceback is not None,
+                    type(unraisable.object).__name__))
+
+
+sys.unraisablehook = collect_unraisable
 
 
 class Boom:
@@ -78,5 +86,15 @@ class Quiet:
 q = Quiet()
 q = None
 assert log == ["gone"], log
+
+# Every ignored exception reached the hook, with its type, its message, a
+# traceback and the object it came out of.  The collection is explicit so the
+# count does not depend on when a threshold happens to fire: five Booms, and
+# forty Nodes in twenty cycles.
+import gc
+
+gc.collect()
+print(len(ignored))
+print(sorted(set(ignored)))
 
 print("PASS: del and gc state")

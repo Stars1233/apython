@@ -52,6 +52,38 @@ extern raise_exception
     call obj_decref
 %endmacro
 
+;; SYS_ADD_FUNC_ALIAS impl, name, alias -- the same object under two names.
+;; sys.excepthook and sys.__excepthook__ ARE the same object in CPython, and
+;; code checks it: `sys.excepthook is sys.__excepthook__` is how a program
+;; asks whether anything has replaced the hook.  Two SYS_ADD_FUNC calls made
+;; two objects and that test was always False.
+%macro SYS_ADD_FUNC_ALIAS 3
+    lea rdi, [rel %1]
+    lea rsi, [rel %2]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel %2]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    lea rdi, [rel %3]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+%endmacro
+
 
 ;; ============================================================================
 ;; sys_module_init(int argc, char **argv) -> void
@@ -270,6 +302,12 @@ DEF_FUNC sys_module_init, 32
     extern structseq_set
     extern structseq_init_type
     lea rdi, [rel version_info_type]
+    call structseq_init_type
+    ; sys.UnraisableHookArgs, which sys.unraisablehook is handed.  Only the
+    ; type needs registering; the instances are built one at a time by the
+    ; unraisable printer.
+    extern unraisable_args_type
+    lea rdi, [rel unraisable_args_type]
     call structseq_init_type
     lea rdi, [rel version_info_type]
     call structseq_new
@@ -960,9 +998,9 @@ DEF_FUNC sys_module_init, 32
     ; threading reads sys.excepthook at import time, to save and restore it
     ; around a thread's run().  It is the same report the interpreter prints
     ; for an uncaught exception, which traceback_print already produces.
-    SYS_ADD_FUNC sys_excepthook_func, sm_excepthook
-    SYS_ADD_FUNC sys_excepthook_func, sm_dunder_excepthook
-    SYS_ADD_FUNC sys_unraisablehook_func, sm_unraisablehook
+    SYS_ADD_FUNC_ALIAS sys_excepthook_func, sm_excepthook, sm_dunder_excepthook
+    SYS_ADD_FUNC_ALIAS sys_unraisablehook_func, sm_unraisablehook, \
+                       sm_dunder_unraisablehook
     SYS_ADD_FUNC sys_exc_info_func, sm_exc_info
 
     ; --- sys._getframe / sys._getframemodulename ---
@@ -1390,6 +1428,7 @@ sm_surrogateescape: db "surrogateescape", 0
 sm_intern:       db "intern", 0
 sm_excepthook:   db "excepthook", 0
 sm_dunder_excepthook: db "__excepthook__", 0
+sm_dunder_unraisablehook: db "__unraisablehook__", 0
 sm_unraisablehook: db "unraisablehook", 0
 sm_exc_info:     db "exc_info", 0
 sm_getframe:     db "_getframe", 0
@@ -1470,8 +1509,11 @@ END_FUNC sys_excepthook_func
 ;; ============================================================================
 UNH_EXC   equ 8
 UNH_KEY   equ 16
-UNH_FRAME equ 32            ; + 0 pushes = 32
+UNH_ARG   equ 24
+UNH_OBJ   equ 32
+UNH_FRAME equ 48            ; + 0 pushes = 48
 DEF_FUNC sys_unraisablehook_func, UNH_FRAME
+    mov qword [rbp - UNH_OBJ], 0
     test rsi, rsi
     jz .suh_done
     mov rdi, [rdi]
@@ -1480,6 +1522,29 @@ DEF_FUNC sys_unraisablehook_func, UNH_FRAME
     test rdi, rdi
     jz .suh_done
     mov [rbp - UNH_EXC], rdi
+    mov [rbp - UNH_ARG], rdi
+
+    ; The object the exception came out of, for the first line of the report.
+    CSTRING rdi, "object"
+    call str_from_cstr_heap
+    mov [rbp - UNH_KEY], rax
+    mov rdi, [rbp - UNH_ARG]
+    mov rsi, rax
+    call obj_getattr_opt
+    push rax
+    mov rdi, [rbp - UNH_KEY]
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .suh_no_object
+    V_TEST_PTR rax, rcx
+    ja .suh_drop_object
+    mov [rbp - UNH_OBJ], rax
+    jmp .suh_no_object
+.suh_drop_object:
+    mov rdi, rax
+    XDECREF_V rdi, rcx
+.suh_no_object:
 
     CSTRING rdi, "exc_value"
     extern str_from_cstr_heap
@@ -1497,11 +1562,19 @@ DEF_FUNC sys_unraisablehook_func, UNH_FRAME
     jz .suh_done
     V_TEST_PTR rax, rcx
     ja .suh_drop
+    ; The whole report, object line included -- the same one the interpreter
+    ; prints when nothing has replaced this hook.
     mov rdi, rax
-    call traceback_print
+    mov rsi, [rbp - UNH_OBJ]
+    extern traceback_unraisable_default
+    call traceback_unraisable_default
 .suh_drop:
     mov rdi, [rbp - UNH_EXC]
     XDECREF_V rdi, rcx
+    mov rdi, [rbp - UNH_OBJ]
+    test rdi, rdi
+    jz .suh_done
+    call obj_decref
 .suh_done:
     LOAD_NONE rax
     mov edx, TAG_PTR

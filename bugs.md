@@ -143,15 +143,6 @@ one-line fix.
   it.  CPython records the source path even when it executes a cached
   bytecode file, and derives the cache path from it when it needs to.
 
-- **Traceback carets are two jobs, not one.**  The `.pyc` path already has
-  the column fields and merely steps over them (`code_addr2line`), so the
-  renderer half is decode-only.  But apython's own compiler emits **no**
-  columns at all: `Instr` has no column field, the AST carries `col` but no
-  `end_col`, and `asm_linetable` writes only the line-only forms 13 and 15.
-  Doing the `.pyc` half alone would make `check-source` differ from CPython
-  on any test that lets an exception escape, so the two halves have to land
-  together.
-
 - **Our own compiler records no columns, so a traceback from a `.py` has no
   caret line.**  The renderer draws one whenever the location table has
   columns, and a `.pyc` CPython produced always does -- the reports match
@@ -221,11 +212,19 @@ than lying — but they are ordinary Python that does not work:
   `bytes()`, comparison, `hex`, `tolist`, and the write path.  Nothing in
   `_pyio` asks for one, so the field is not there yet.
 
-- **A cleanup that raises is reported in one line.**  A `finally` in a dropped
-  generator, and a `__del__`, both report an exception they cannot propagate;
-  CPython prints the object's repr and a full traceback where these print
-  "Exception ignored in __del__" and "Exception ignored in: generator
-  cleanup".  The behaviour either side of the message is the same.
+- **stdout is not block-buffered when it is not a terminal.**  CPython's is,
+  so a program that writes to both streams through a pipe sees all its
+  `print()` output after everything on stderr; here the two interleave as
+  they were written.  Visible in any test that lets an exception be reported
+  while it is also printing, which is why two of them compare against a
+  recorded transcript.
+
+- **An exception raised while another is being handled by a `finally` gets a
+  `__context__` where CPython gives it none.**  `current_exception` is also
+  the exception being handled, and a `finally` body runs with it set, so a
+  raise there chains it.  CPython's exception stack distinguishes the two,
+  and only an `except` block counts.  Visible in the report for a generator
+  whose cleanup raises: the GeneratorExit appears as context.
 
 - The `re` wrapper module.  The `_sre` engine underneath is complete, but
   without a shipped `re.py` an `import re` finds CPython's, which needs

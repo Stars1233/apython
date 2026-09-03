@@ -797,6 +797,70 @@ version_info_type:
     dq vi_desc                  ; STRUCTSEQ_DESC, one qword past the type
 
 ;; ============================================================================
+;; sys.UnraisableHookArgs -- what sys.unraisablehook is handed
+;;
+;; Five fields, in CPython's order.  err_msg is always None here: it is the
+;; string CPython puts in front of "Exception ignored", and the two callers --
+;; a __del__ and a generator being finalised -- both use the plain form.
+;; ============================================================================
+section .rodata
+uh_name:        db "UnraisableHookArgs", 0
+uh_f_type:      db "exc_type", 0
+uh_f_value:     db "exc_value", 0
+uh_f_tb:        db "exc_traceback", 0
+uh_f_errmsg:    db "err_msg", 0
+uh_f_object:    db "object", 0
+
+align 8
+uh_fields:
+    dq uh_f_type,   0
+    dq uh_f_value,  1
+    dq uh_f_tb,     2
+    dq uh_f_errmsg, 3
+    dq uh_f_object, 4
+
+align 8
+uh_desc:
+    dq 5                        ; n_in_sequence
+    dq 5                        ; n_fields
+    dq uh_fields
+
+section .data
+align 8
+global unraisable_args_type
+unraisable_args_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq uh_name                  ; tp_name
+    dq PyTupleObject_size       ; tp_basicsize: no named-only tail
+    dq structseq_dealloc        ; tp_dealloc
+    dq structseq_repr           ; tp_repr
+    dq structseq_repr           ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq structseq_getattr        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq 0                        ; tp_iter
+    dq 0                        ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq TYPE_FLAG_TUPLE_SUBCLASS ; tp_flags
+    dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
+    dq 0                        ; tp_dictoffset
+    dq uh_desc                  ; STRUCTSEQ_DESC, one qword past the type
+
+section .text
+
+;; ============================================================================
 ;; sys.float_info, sys.int_info and sys.hash_info.  All three were absent --
 ;; sysmod.asm carried "Skip for now" where each should have been -- and the
 ;; numeric stdlib reads them.  Their values are filled in by sys_module_init.

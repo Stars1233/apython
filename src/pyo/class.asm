@@ -1128,11 +1128,23 @@ DEF_FUNC instance_dealloc, ID_FRAME
     jmp .no_del
 
 .del_report:
-    ; A genuinely new exception: say so on stderr, then put back the old one.
-    mov edi, 2
-    lea rsi, [rel id_del_ignored_msg]
-    mov edx, id_del_ignored_len
-    call sys_write
+    ; A genuinely new exception: report it in full on stderr -- the object it
+    ; came out of, and the traceback of where inside __del__ it happened --
+    ; then put back the old one.  This used to be one line that named neither.
+    ; CPython names the __del__ FUNCTION, not the object it was called on.
+    ; The lookup is borrowed, and cannot raise: it just found this method.
+    mov rdi, [rbx + PyObject.ob_type]
+    lea rsi, [rel dunder_del]
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    cmp edx, TAG_PTR
+    je .del_report_have_fn
+    xor eax, eax
+.del_report_have_fn:
+    mov rsi, rax
+    mov rdi, [rel current_exception]
+    extern traceback_print_unraisable
+    call traceback_print_unraisable
     jmp .del_restore
 
 .no_del:
