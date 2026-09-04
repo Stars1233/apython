@@ -329,6 +329,33 @@ DEF_FUNC par_syntax_error, PS_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - PS_MSG], rsi
+
+    ; A bracket still open when the input runs out is the error, whatever the
+    ; site thought it was looking for -- CPython's tokenizer reports it and
+    ; its parser never gets a chance to say anything else.  The converse
+    ; matters too: `class C(object: pass` never closes its paren either, and
+    ; CPython says "invalid syntax" there because its parser fails at the
+    ; colon before the tokenizer reaches the end.
+    ; A NEWLINE counts as the end here too: inside brackets they are
+    ; suppressed, so one reached with the depth still up is the synthetic one
+    ; the lexer emits at EOF.
+    call par_kind
+    cmp eax, TOK_ENDMARKER
+    je .ps_at_end
+    cmp eax, TOK_NEWLINE
+    jne .ps_here
+.ps_at_end:
+    cmp dword [rbx + Comp.lex + Lexer.paren_depth], 0
+    je .ps_here
+    mov rdi, rbx
+    call par_unclosed
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.ps_here:
+    mov rdi, rbx
     call par_peek
     TOK_POS rax
     mov r8d, [rax + Token.col]
@@ -371,6 +398,63 @@ DEF_FUNC par_expect, PX_FRAME
     leave
     ret
 END_FUNC par_expect
+
+;; ============================================================================
+;; par_unclosed(Comp *c) -> rax = 0, always
+;;
+;; "'(' was never closed", at the innermost bracket still open when the input
+;; ran out.  CPython's end_offset for it is 0 rather than the column after,
+;; which is why comp_error_span exists.
+;; ============================================================================
+PU_BUF   equ 72
+PU_FRAME equ 88             ; + 1 push = 96, 16-aligned
+DEF_FUNC par_unclosed, PU_FRAME
+    push rbx
+    mov rbx, rdi
+
+    mov ecx, [rbx + Comp.lex + Lexer.paren_depth]
+    dec ecx                             ; the innermost
+    cmp ecx, LEX_MAX_BRACKET
+    jae .pu_generic
+    movzx edx, byte [rbx + Comp.lex + Lexer.open_ch + rcx]
+    push rcx
+    push rdx
+    call comp_msg_start
+    push rax
+    mov rdi, rax
+    CSTRING rsi, "'"
+    call comp_msg_cstr
+    mov rcx, [rsp + 8]                  ; the bracket character
+    mov [rax], cl
+    mov byte [rax + 1], 0
+    lea rdi, [rax + 1]
+    CSTRING rsi, "' was never closed"
+    call comp_msg_cstr
+    pop rdx                             ; the message
+    add rsp, 8                          ; the character
+    pop rcx                             ; the index
+
+    mov r8d, [rbx + Comp.lex + Lexer.open_col + rcx*4]
+    mov ecx, [rbx + Comp.lex + Lexer.open_line + rcx*4]
+    mov r9d, ecx
+    mov r10d, -1                        ; CPython's end_offset here is 0
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    call comp_error_span
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.pu_generic:
+    mov rdi, rbx
+    CSTRING rsi, "invalid syntax"
+    call par_syntax_error
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_unclosed
 
 ;; ============================================================================
 ;; par_expr(Comp *c, int min_bp) -> rax = node index, 0 on error
@@ -2091,7 +2175,7 @@ DEF_FUNC_LOCAL pf_group, PG_FRAME
 
     mov rdi, rbx
     mov esi, TOK_RPAR
-    CSTRING rdx, "'(' was never closed"
+    CSTRING rdx, "invalid syntax"
     call par_expect
     test eax, eax
     jz .fail
@@ -2195,7 +2279,7 @@ DEF_FUNC_LOCAL pf_list, PG_FRAME
 .close:
     mov rdi, rbx
     mov esi, TOK_RSQB
-    CSTRING rdx, "'[' was never closed"
+    CSTRING rdx, "invalid syntax"
     call par_expect
     test eax, eax
     jz .fail
@@ -2403,7 +2487,7 @@ DEF_FUNC_LOCAL pf_dictset, PD_FRAME
 .close:
     mov rdi, rbx
     mov esi, TOK_RBRACE
-    CSTRING rdx, "'{' was never closed"
+    CSTRING rdx, "invalid syntax"
     call par_expect
     test eax, eax
     jz .fail
@@ -2726,7 +2810,7 @@ DEF_FUNC_LOCAL in_subscript, IS_FRAME
 .close:
     mov rdi, rbx
     mov esi, TOK_RSQB
-    CSTRING rdx, "'[' was never closed"
+    CSTRING rdx, "invalid syntax"
     call par_expect
     test eax, eax
     jz .fail
@@ -2875,7 +2959,7 @@ DEF_FUNC_LOCAL in_call, ICL_FRAME
 .close:
     mov rdi, rbx
     mov esi, TOK_RPAR
-    CSTRING rdx, "'(' was never closed"
+    CSTRING rdx, "invalid syntax"
     call par_expect
     test eax, eax
     jz .fail
@@ -3165,7 +3249,7 @@ DEF_FUNC par_comprehension, PCM_FRAME
     je .done
     mov rdi, rbx
     mov rsi, [rbp - PCM_CLOSE]
-    CSTRING rdx, "the comprehension was never closed"
+    CSTRING rdx, "invalid syntax"
     call par_expect
     test eax, eax
     jz .fail

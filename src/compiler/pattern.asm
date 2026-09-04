@@ -782,7 +782,7 @@ DEF_FUNC_LOCAL par_sequence_pattern, SP_FRAME
 .close:
     mov rdi, rbx
     mov esi, [rbp - SP_CLOSE]
-    CSTRING rdx, "the pattern was never closed"
+    CSTRING rdx, "invalid syntax"
     call par_expect
     test eax, eax
     jz .fail
@@ -903,7 +903,7 @@ DEF_FUNC_LOCAL par_mapping_pattern, MP_FRAME
 .close:
     mov rdi, rbx
     mov esi, TOK_RBRACE
-    CSTRING rdx, "'{' was never closed"
+    CSTRING rdx, "invalid syntax"
     call par_expect
     test eax, eax
     jz .fail
@@ -1103,7 +1103,7 @@ DEF_FUNC_LOCAL par_class_pattern, KP_FRAME
 .close:
     mov rdi, rbx
     mov esi, TOK_RPAR
-    CSTRING rdx, "'(' was never closed"
+    CSTRING rdx, "invalid syntax"
     call par_expect
     test eax, eax
     jz .fail

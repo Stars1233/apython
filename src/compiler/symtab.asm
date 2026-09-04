@@ -32,6 +32,8 @@ extern buf_free
 extern buf_init
 extern buf_push_ptr
 extern buf_reserve
+extern comp_msg_start
+extern comp_msg_cstr
 extern comp_error
 extern comp_intern_cstr
 
@@ -432,6 +434,17 @@ DEF_FUNC sym_visit, SV_FRAME
     mov r8d, DEF_GLOBAL
     jmp .decl_common
 .nonlocal_decl:
+    ; A module has nothing to be nonlocal TO, and CPython says so before it
+    ; looks at any name -- spanning the whole statement, as the other
+    ; declaration errors do.
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_MODULE
+    jne .nonlocal_ok
+    CSTRING rdx, "nonlocal declaration not allowed at module level"
+    jmp .out_of_scope
+.nonlocal_ok:
     mov r8d, DEF_NONLOCAL
 .decl_common:
     mov [rbp - SV_KIND], r8
@@ -1674,20 +1687,35 @@ DEF_FUNC sym_classify, SCL_FRAME
     ret
 
 .both:
-    mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "name is nonlocal and global"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
-    xor eax, eax
-    pop rbx
-    leave
-    ret
+    CSTRING rax, "name '"
+    CSTRING rcx, "' is nonlocal and global"
+    jmp .name_error
 .no_binding:
+    CSTRING rax, "no binding for nonlocal '"
+    CSTRING rcx, "' found"
+.name_error:
+    ; CPython names the name in both: "no binding for nonlocal 'x' found".
+    ; The position is the scope's, not the declaration's -- by the time a
+    ; scope is classified its statements are long parsed, and CPython's
+    ; symtable keeps a per-name one this does not.
+    push rcx                            ; [rsp + 16] once the buffer is pushed
+    push rax                            ; [rsp + 8]
+    call comp_msg_start
+    push rax                            ; the buffer, which is the message
+    mov rdi, rax
+    mov rsi, [rsp + 8]
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SCL_NAME]
+    add rsi, PyStrObject.data
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rsp + 16]
+    call comp_msg_cstr
+    pop rdx                             ; the message
+    add rsp, 16                         ; the two halves
     mov rdi, rbx
     lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "no binding for nonlocal found"
     xor ecx, ecx
     xor r8d, r8d
     call comp_error

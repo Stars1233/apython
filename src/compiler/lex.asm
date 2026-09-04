@@ -1250,6 +1250,18 @@ DEF_FUNC lex_run, LR_FRAME
     je .op_close
     jmp .op_emit
 .op_open:
+    ; Remember where it was opened, for the "never closed" message.
+    mov ecx, [r14 + Lexer.paren_depth]
+    cmp ecx, LEX_MAX_BRACKET
+    jae .op_open_deep
+    movzx edx, byte [r15]
+    mov [r14 + Lexer.open_ch + rcx], dl
+    mov edx, [r14 + Lexer.lineno]
+    mov [r14 + Lexer.open_line + rcx*4], edx
+    mov rdx, r15
+    sub rdx, [r14 + Lexer.line_start]
+    mov [r14 + Lexer.open_col + rcx*4], edx
+.op_open_deep:
     inc dword [r14 + Lexer.paren_depth]
     jmp .op_emit
 .op_close:

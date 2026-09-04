@@ -498,6 +498,10 @@ BP_POSTFIX  equ 32
 LEX_MAX_INDENT equ 100
 LEX_TABSIZE    equ 8
 
+; How deeply brackets may nest before the lexer stops recording where each
+; was opened.  Past this the depth still counts; only the position is lost.
+LEX_MAX_BRACKET equ 200
+
 struc Lexer
     .cur:          resq 1   ; +0   read cursor into comp.src
     .end:          resq 1   ; +8   one past the last source byte
@@ -506,7 +510,14 @@ struc Lexer
     .paren_depth:  resd 1   ; +28  suppresses NEWLINE and INDENT while > 0
     .indent_top:   resd 1   ; +32  index of the live entry in .indents
     .atbol:        resd 1   ; +36  at the beginning of a logical line
-    .indents:      resd LEX_MAX_INDENT  ; +40  column stack, .indents[0] == 0
+    ; The open brackets, innermost last: the character, the line and the
+    ; column of each.  CPython's tokenizer names the one that was never
+    ; closed and points at where it was opened, and nothing else in the token
+    ; stream can say where that was.
+    .open_ch:      resb LEX_MAX_BRACKET      ; the '(', '[' or '{'
+    .open_line:    resd LEX_MAX_BRACKET
+    .open_col:     resd LEX_MAX_BRACKET
+    .indents:      resd LEX_MAX_INDENT  ; column stack, .indents[0] == 0
 endstruc
 
 ;; ===========================================================================
