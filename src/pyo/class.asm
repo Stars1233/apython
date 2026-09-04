@@ -1148,13 +1148,6 @@ DEF_FUNC instance_dealloc, ID_FRAME
     jmp .del_restore
 
 .no_del:
-    ; XDECREF the instance dict; a type may have no dict slot at all.
-    LOAD_INST_DICT rdi, rbx, .no_dict
-    test rdi, rdi
-    jz .no_dict
-    call obj_decref
-.no_dict:
-
     ; Check if this is an int subclass — XDECREF int_value (tag-aware)
     mov rax, [rbx + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_flags]
@@ -1178,6 +1171,23 @@ DEF_FUNC instance_dealloc, ID_FRAME
     cmp rcx, TP_DICT_AT_TAIL
     je .id_no_dict_hdr          ; the dict is past the data, not in the header
     add rcx, 8
+    ; A base's slots are BELOW the dict word when the subclass is the one that
+    ; added the dict: `class C: __slots__ = ('a',)` puts a at 16 and `class
+    ; D(C): pass` puts D's dict at 24, so starting past the dict found no
+    ; slots at all and D never released C's.  The floor is the family's, and
+    ; the walk skips the dict word wherever it sits.
+    push rax
+    push rcx
+    mov rdi, rax
+    call instance_slot_floor
+    mov rdx, rax
+    pop rcx
+    pop rax
+    test rdx, rdx
+    jz .id_have_hdr
+    cmp rdx, rcx
+    jae .id_have_hdr
+    mov rcx, rdx
     ; ...but the header does not end at the dict word when the layout base
     ; keeps fields of its own PAST it.  _io.FileIO is built by
     ; type_from_parts and then has its tp_basicsize patched up to make room
@@ -1189,45 +1199,59 @@ DEF_FUNC instance_dealloc, ID_FRAME
     ;
     ; tp_base is the layout base -- the type whose fields sit below the
     ; subclass's own slots -- so its basicsize is the real floor.
-    mov rdx, [rax + PyTypeObject.tp_base]
-    test rdx, rdx
-    jz .id_have_hdr
-    mov rdx, [rdx + PyTypeObject.tp_basicsize]
-    cmp rdx, rcx
-    jbe .id_have_hdr
-    mov rcx, rdx
     jmp .id_have_hdr
 .id_no_dict_hdr:
     ; No dict word: a str subclass, whose header is the base's, not
     ; PyInstanceObject's.  Using 24 there found a phantom slot at +24 --
     ; PyStrObject.ob_hash -- and XDECREF'd the hash as if it were a pointer.
-    mov rcx, [rax + PyTypeObject.tp_base]
-    test rcx, rcx
-    jz .id_no_dict_hdr_default
-    mov rcx, [rcx + PyTypeObject.tp_basicsize]
+    push rax
+    mov rdi, rax
+    call instance_slot_floor
+    mov rcx, rax
+    pop rax
     test rcx, rcx
     jnz .id_have_hdr
-.id_no_dict_hdr_default:
     mov rcx, OBJ_HEADER_SIZE
 .id_have_hdr:
+    push r13
+    mov r13, [rax + PyTypeObject.tp_dictoffset]
+    cmp r13, TP_DICT_AT_TAIL
+    jne .id_dict_off_ok
+    xor r13d, r13d              ; nothing in the header to skip
+.id_dict_off_ok:
     mov rax, [rax + PyTypeObject.tp_basicsize]
-    sub rax, rcx
-    jle .no_slots                ; no slots
-    shr rax, 3                  ; nslots
-    mov r12, rax                ; r12 = remaining count
-    add rcx, rbx                ; rcx = first slot address
-
+    cmp rax, rcx
+    jbe .id_slots_done          ; no slots
+    ; Downwards, from the most derived class's slots to the base's, which is
+    ; the order CPython releases them in and therefore the order two __del__s
+    ; run in.
+    mov r12, rax
 .slot_decref_loop:
+    sub r12, 8
+    cmp r12, rcx
+    jb .id_slots_done
+    cmp r12, r13
+    je .slot_decref_loop        ; the instance dict, released above
     push rcx
-    mov rdi, [rcx]              ; slot Value
+    lea rdi, [rbx + r12]
+    mov rdi, [rdi]              ; slot Value
     XDECREF_V rdi, rsi
     pop rcx
-    add rcx, 8                  ; next slot
-    dec r12
-    jnz .slot_decref_loop
+    jmp .slot_decref_loop
+.id_slots_done:
+    pop r13
 
 .no_slots:
     pop r12
+
+    ; XDECREF the instance dict; a type may have no dict slot at all.  AFTER
+    ; the slots, which is the order CPython's subtype_dealloc uses and so the
+    ; order two __del__s run in.  The slot walk skips this word.
+    LOAD_INST_DICT rdi, rbx, .no_dict
+    test rdi, rdi
+    jz .no_dict
+    call obj_decref
+.no_dict:
 
     ; A bytearray subclass owns a second allocation -- its bytes -- that the
     ; slot walk above knows nothing about, and the base's own dealloc never
@@ -3527,10 +3551,50 @@ DEF_FUNC method_clear
 END_FUNC method_clear
 
 ; ---- instance_traverse / instance_clear ----
+;; ============================================================================
+;; instance_slot_floor(rdi = the instance's type) -> rax = where its __slots__
+;; begin
+;;
+;; Every heaptype whose instances this function deallocs lays out its own
+;; slots directly above its base's, so a subclass's slot region includes the
+;; ones its ancestors declared: `class C: __slots__ = ('a',)` and `class
+;; D(C): pass` give D exactly C's layout, and taking the floor from D's own
+;; base -- C -- found no slots at all and released none.  D's `a` was never
+;; freed, and a cycle through it was uncollectable.
+;;
+;; The walk stops at the first ancestor that manages its own storage: a
+;; static type, or a heaptype with a tp_dealloc of its own.  _io.FileIO is
+;; the second kind -- a heaptype with a patched basicsize and five C fields
+;; -- and walking past it would hand a file descriptor to DECREF_VAL.
+;; ============================================================================
+DEF_FUNC_LOCAL instance_slot_floor
+    push rbx
+    mov rbx, rdi                ; the type whose base chain is walked
+    xor eax, eax                ; the floor, 0 until an ancestor sets it
+.isf_loop:
+    mov rcx, [rbx + PyTypeObject.tp_base]
+    test rcx, rcx
+    jz .isf_done
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .isf_builtin
+    lea rdx, [rel instance_dealloc]
+    cmp [rcx + PyTypeObject.tp_dealloc], rdx
+    jne .isf_builtin            ; it keeps fields of its own
+    mov rbx, rcx
+    jmp .isf_loop
+.isf_builtin:
+    mov rax, [rcx + PyTypeObject.tp_basicsize]
+.isf_done:
+    pop rbx
+    leave
+    ret
+END_FUNC instance_slot_floor
+
 DEF_FUNC instance_traverse
     push rbx
     push r12
     push r13
+    push r15                    ; r14 is the visit callback, VISIT_V's own
 
     mov rbx, rdi
 
@@ -3549,31 +3613,45 @@ DEF_FUNC instance_traverse
     cmp rcx, TP_DICT_AT_TAIL
     je .it_no_dict_hdr          ; the dict is past the data, not in the header
     add rcx, 8
-    ; The layout base's own fields can sit past the dict word -- see the same
-    ; floor in instance_dealloc.  Here the consequence is the collector
-    ; visiting a file descriptor as an object pointer, which is why FileIO
-    ; had to be given a tp_traverse of its own.
-    mov rdx, [rax + PyTypeObject.tp_base]
+    ; The same floor and the same skip as instance_dealloc: a base's slots sit
+    ; BELOW the dict word the subclass added, and starting past the dict left
+    ; them unvisited -- so a cycle through an inherited slot was never
+    ; collectable.  The layout base's own fields can sit past the dict word
+    ; too, which is why the floor stops at the first ancestor that manages its
+    ; own storage: here the consequence of walking those would be the
+    ; collector visiting a file descriptor as an object pointer.
+    push rax
+    push rcx
+    mov rdi, rax
+    call instance_slot_floor
+    mov rdx, rax
+    pop rcx
+    pop rax
     test rdx, rdx
     jz .it_have_hdr
-    mov rdx, [rdx + PyTypeObject.tp_basicsize]
     cmp rdx, rcx
-    jbe .it_have_hdr
+    jae .it_have_hdr
     mov rcx, rdx
     jmp .it_have_hdr
 .it_no_dict_hdr:
     ; No dict word: a str subclass, whose header is the base's, not
     ; PyInstanceObject's.  Using 24 there found a phantom slot at +24 --
     ; PyStrObject.ob_hash -- and XDECREF'd the hash as if it were a pointer.
-    mov rcx, [rax + PyTypeObject.tp_base]
-    test rcx, rcx
-    jz .it_no_dict_hdr_default
-    mov rcx, [rcx + PyTypeObject.tp_basicsize]
+    push rax
+    mov rdi, rax
+    call instance_slot_floor
+    mov rcx, rax
+    pop rax
     test rcx, rcx
     jnz .it_have_hdr
-.it_no_dict_hdr_default:
     mov rcx, OBJ_HEADER_SIZE
 .it_have_hdr:
+    mov r15, [rax + PyTypeObject.tp_dictoffset]
+    cmp r15, TP_DICT_AT_TAIL
+    jne .it_dict_off_ok
+    xor r15d, r15d
+.it_dict_off_ok:
+    add r15, rbx                ; the dict word's address, or rbx
     mov rax, [rax + PyTypeObject.tp_basicsize]
     sub rax, rcx
     jle .done
@@ -3582,13 +3660,17 @@ DEF_FUNC instance_traverse
     lea r12, [rbx + rcx]
 
 .slot_loop:
+    cmp r12, r15
+    je .it_slot_skip            ; the instance dict, visited above
     mov rdi, [r12]
     VISIT_V rdi, rsi
+.it_slot_skip:
     add r12, 8
     dec r13
     jnz .slot_loop
 
 .done:
+    pop r15
     pop r13
     pop r12
     pop rbx

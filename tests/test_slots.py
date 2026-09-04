@@ -328,3 +328,76 @@ try:
 except TypeError:
     safe = True
 print("str slots handled safely:", safe)
+
+
+# A slot declared by a BASE is the subclass's to release too.  The walk used
+# to start at the subclass's own base's basicsize, which for `class D(C):
+# pass` is the whole layout -- so it found no slots and released none of them,
+# and a cycle through one was uncollectable because tp_traverse had the same
+# floor.  The dict word sits in the middle of the region when the subclass is
+# the one that added it, so the walk skips it rather than starting past it.
+print("=== inherited slots are released ===")
+import gc
+
+
+class SA:
+    __slots__ = ("a",)
+
+
+class SB(SA):
+    __slots__ = ("b",)
+
+
+class SC(SA):
+    pass
+
+
+class SD(SC):
+    __slots__ = ("d",)
+
+
+class SE:
+    pass
+
+
+class SF(SE):
+    __slots__ = ("f",)
+
+
+class Tag:
+    def __init__(self, name):
+        self.name = name
+
+    def __del__(self):
+        print("released", self.name)
+
+
+for cls, names in ((SA, "a"), (SB, "ab"), (SC, "a"), (SD, "ad"), (SF, "f")):
+    obj = cls()
+    for n in names:
+        setattr(obj, n, Tag(cls.__name__ + "." + n))
+    del obj
+    print("--", cls.__name__)
+
+# A subclass that adds a dict keeps its base's slot below it, and both go.
+sc = SC()
+sc.a = Tag("SC.a")
+sc.other = Tag("SC.other")
+del sc
+
+print("=== and a cycle through one is collectable ===")
+
+
+def make_cycles():
+    x = SC()
+    x.a = x
+    y = SB()
+    y.a = y
+    y.b = y
+    z = SD()
+    z.d = z
+
+
+make_cycles()
+print("collected:", gc.collect() >= 3)
+print("slots done")
