@@ -289,10 +289,52 @@ DEF_FUNC_LOCAL uring_get_sqe
     ret
 
 .ugs_full:
+    ; The ring is full only because nothing has been handed to the kernel
+    ; yet -- every SQE here is queued, and the tail is advanced without an
+    ; enter().  Submit what is waiting, which frees every slot the kernel
+    ; takes, and try once more.  Returning 0 dropped the submission and left
+    ; the task waiting for a wakeup that was never armed: one `gather` of a
+    ; few hundred sleeps hung the whole loop.
+    call uring_submit_pending
+    mov rax, [rel uring_sq_tail]
+    mov ecx, [rax]
+    mov rdx, [rel uring_sq_head]
+    mov edx, [rdx]
+    mov r8d, ecx
+    sub r8d, edx
+    cmp r8d, [rel uring_sq_mask]
+    ja .ugs_really_full
+    leave
+    jmp uring_get_sqe
+.ugs_really_full:
     xor eax, eax
     leave
     ret
 END_FUNC uring_get_sqe
+
+;; ============================================================================
+;; uring_submit_pending() -- hand the queued SQEs to the kernel without
+;; waiting for anything.  The wait path does the same enter() with
+;; min_complete=1; this is the half that only submits.
+;; ============================================================================
+DEF_FUNC_LOCAL uring_submit_pending
+    mov rax, [rel uring_sq_tail]
+    mov eax, [rax]
+    mov rcx, [rel uring_sq_head]
+    sub eax, [rcx]
+    test eax, eax
+    jz .usp_none
+    mov esi, eax                ; to_submit
+    mov edi, [rel uring_fd]
+    xor edx, edx                ; min_complete = 0
+    xor ecx, ecx                ; no flags: do not wait
+    xor r8d, r8d
+    xor r9d, r9d
+    call sys_io_uring_enter
+.usp_none:
+    leave
+    ret
+END_FUNC uring_submit_pending
 
 ;; ============================================================================
 ;; uring_submit_timeout(AsyncTask *task, uint64_t delay_ns)

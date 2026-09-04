@@ -8,6 +8,7 @@
 %include "eventloop.inc"
 
 extern ap_malloc
+extern ap_realloc
 extern ready_enqueue
 extern none_singleton
 extern obj_incref
@@ -28,18 +29,21 @@ CLOCK_MONOTONIC equ 1
 section .bss
 
 align 8
-; pollfd array: POLL_MAX_FDS entries
-poll_fds:       resb (POLL_MAX_FDS * PollFd_size)
-; fd->task mapping (parallel array)
-poll_fd_tasks:  resq POLL_MAX_FDS
-; Count of active fds
+; Both arrays GROW.  They were fixed at 1024 fds and 256 timers, and both
+; submit paths simply returned when full -- as though the request had been
+; armed -- so the task waited for a wakeup that could never come.  256 timers
+; is one `gather` of 300 sleeps, which is not an unusual program.
+;
+; pollfd array and the parallel fd->task mapping, one entry each per fd.
+poll_fds:       resq 1      ; PollFd*
+poll_fd_tasks:  resq 1      ; AsyncTask**
+poll_cap:       resd 1
 poll_nfds:      resd 1
-poll_pad1:      resd 1
 
-; Timer heap: POLL_MAX_TIMERS entries (deadline_ns, task*)
-timer_heap:     resb (POLL_MAX_TIMERS * TimerEntry_size)
+; Timer min-heap: (deadline_ns, task*) per entry.
+timer_heap:     resq 1      ; TimerEntry*
+timer_cap:      resd 1
 timer_count:    resd 1
-timer_pad1:     resd 1
 
 ; Scratch timespec for clock_gettime
 timespec_buf:   resq 2
@@ -59,6 +63,88 @@ DEF_FUNC poll_init
 END_FUNC poll_init
 
 ;; ============================================================================
+;; poll_grow_timers() / poll_grow_fds() -> rax = 1 ok, 0 out of memory
+;;
+;; Room for one more entry, doubling from a first allocation of 64.  The two
+;; fd arrays are parallel and grow together, so one capacity covers both.
+;; ============================================================================
+POLL_FIRST_CAP equ 64
+
+DEF_FUNC_LOCAL poll_grow_timers
+    push rbx
+    mov ebx, [rel timer_cap]
+    cmp ebx, [rel timer_count]
+    jg .pgt_ok
+    test ebx, ebx
+    jnz .pgt_double
+    mov ebx, POLL_FIRST_CAP
+    jmp .pgt_alloc
+.pgt_double:
+    add ebx, ebx
+.pgt_alloc:
+    mov rdi, [rel timer_heap]
+    mov esi, ebx
+    imul rsi, rsi, TimerEntry_size
+    call ap_realloc             ; ap_realloc(0, n) is a fresh allocation
+    test rax, rax
+    jz .pgt_fail
+    mov [rel timer_heap], rax
+    mov [rel timer_cap], ebx
+.pgt_ok:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.pgt_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC poll_grow_timers
+
+DEF_FUNC_LOCAL poll_grow_fds
+    push rbx
+    push r12
+    mov ebx, [rel poll_cap]
+    cmp ebx, [rel poll_nfds]
+    jg .pgf_ok
+    test ebx, ebx
+    jnz .pgf_double
+    mov ebx, POLL_FIRST_CAP
+    jmp .pgf_alloc
+.pgf_double:
+    add ebx, ebx
+.pgf_alloc:
+    mov rdi, [rel poll_fds]
+    mov esi, ebx
+    imul rsi, rsi, PollFd_size
+    call ap_realloc
+    test rax, rax
+    jz .pgf_fail
+    mov [rel poll_fds], rax
+    mov rdi, [rel poll_fd_tasks]
+    mov esi, ebx
+    shl rsi, 3
+    call ap_realloc
+    test rax, rax
+    jz .pgf_fail
+    mov [rel poll_fd_tasks], rax
+    mov [rel poll_cap], ebx
+.pgf_ok:
+    mov eax, 1
+    pop r12
+    pop rbx
+    leave
+    ret
+.pgf_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC poll_grow_fds
+
+;; ============================================================================
 ;; poll_teardown()
 ;; Nothing to clean up for poll backend.
 ;; ============================================================================
@@ -74,7 +160,7 @@ DEF_FUNC poll_teardown
     jz .pt_timers
 .pt_fd_loop:
     dec ebx
-    lea rax, [rel poll_fd_tasks]
+    mov rax, [rel poll_fd_tasks]
     mov rdi, [rax + rbx*8]
     mov qword [rax + rbx*8], 0
     test rdi, rdi
@@ -91,7 +177,7 @@ DEF_FUNC poll_teardown
     jz .pt_done
 .pt_timer_loop:
     dec ebx
-    lea rax, [rel timer_heap]
+    mov rax, [rel timer_heap]
     mov r12d, ebx
     shl r12d, 4
     mov rdi, [rax + r12 + TimerEntry.task]
@@ -142,12 +228,15 @@ DEF_FUNC poll_submit_timeout
     call get_monotonic_ns
     add rax, r12               ; deadline = now + delay_ns
 
-    ; Insert at end of heap
+    ; Insert at end of heap, growing it if this is the entry that does not fit.
+    push rax
+    call poll_grow_timers
+    test eax, eax
+    pop rax
+    jz .pst_full                ; out of memory: the only way to lose one now
     mov ecx, [rel timer_count]
-    cmp ecx, POLL_MAX_TIMERS
-    jge .pst_full
 
-    lea rdx, [rel timer_heap]
+    mov rdx, [rel timer_heap]
     ; Entry = timer_heap[timer_count]
     mov rdi, rcx
     shl rdi, 4                 ; * TimerEntry_size (16 bytes)
@@ -184,12 +273,21 @@ END_FUNC poll_submit_timeout
 ;; ============================================================================
 DEF_FUNC poll_submit_poll_fd
     ; rdi = task, esi = fd, edx = events
+    push rdi
+    push rsi
+    push rdx
+    sub rsp, 8
+    call poll_grow_fds
+    add rsp, 8
+    pop rdx
+    pop rsi
+    pop rdi
+    test eax, eax
+    jz .pspf_full
     mov ecx, [rel poll_nfds]
-    cmp ecx, POLL_MAX_FDS
-    jge .pspf_full
 
     ; Fill pollfd entry
-    lea rax, [rel poll_fds]
+    mov rax, [rel poll_fds]
     mov r8d, ecx
     imul r8d, PollFd_size
     add rax, r8
@@ -199,7 +297,7 @@ DEF_FUNC poll_submit_poll_fd
 
     ; Store task mapping.  The array owns it, for the same reason the timer
     ; heap owns its entries.
-    lea rax, [rel poll_fd_tasks]
+    mov rax, [rel poll_fd_tasks]
     mov [rax + rcx*8], rdi
 
     inc dword [rel poll_nfds]
@@ -228,7 +326,7 @@ DEF_FUNC poll_cancel_io
 .pc_fd_loop:
     cmp ecx, edx
     jge .pc_check_timers
-    lea rax, [rel poll_fd_tasks]
+    mov rax, [rel poll_fd_tasks]
     cmp [rax + rcx*8], rbx
     je .pc_remove_fd
     inc ecx
@@ -249,7 +347,7 @@ DEF_FUNC poll_cancel_io
     je .pc_check_timers        ; was already last
 
     ; Copy last entry to current slot
-    lea rax, [rel poll_fds]
+    mov rax, [rel poll_fds]
     mov r8d, edx
     imul r8d, PollFd_size
     mov edi, ecx
@@ -260,7 +358,7 @@ DEF_FUNC poll_cancel_io
     mov r9w, [rax + r8 + 4]
     mov [rax + rdi + 4], r9w
     ; Copy task mapping
-    lea rax, [rel poll_fd_tasks]
+    mov rax, [rel poll_fd_tasks]
     mov r9, [rax + rdx*8]
     mov [rax + rcx*8], r9
 
@@ -271,7 +369,7 @@ DEF_FUNC poll_cancel_io
 .pc_timer_loop:
     cmp ecx, edx
     jge .pc_done
-    lea rax, [rel timer_heap]
+    mov rax, [rel timer_heap]
     mov edi, ecx
     shl edi, 4
     cmp [rax + rdi + TimerEntry.task], rbx
@@ -292,7 +390,7 @@ DEF_FUNC poll_cancel_io
     mov [rel timer_count], edx
     cmp ecx, edx
     je .pc_done
-    lea rax, [rel timer_heap]
+    mov rax, [rel timer_heap]
     mov edi, edx
     shl edi, 4
     mov r8d, ecx
@@ -327,7 +425,7 @@ DEF_FUNC poll_wait_and_drain
     jz .pwd_no_timers
 
     ; Get earliest deadline
-    lea rax, [rel timer_heap]
+    mov rax, [rel timer_heap]
     mov rbx, [rax + TimerEntry.deadline_ns]  ; min deadline
 
     ; Get current time
@@ -375,7 +473,7 @@ DEF_FUNC poll_wait_and_drain
 
 .pwd_do_poll:
     ; Call poll(poll_fds, nfds, timeout_ms)
-    lea rdi, [rel poll_fds]
+    mov rdi, [rel poll_fds]
     mov esi, [rel poll_nfds]
     mov edx, r12d
     call poll
@@ -390,7 +488,7 @@ DEF_FUNC poll_wait_and_drain
     test eax, eax
     jz .pwd_check_fds
 
-    lea rcx, [rel timer_heap]
+    mov rcx, [rel timer_heap]
     cmp r13, [rcx + TimerEntry.deadline_ns]
     jl .pwd_check_fds          ; heap top not expired yet
 
@@ -434,7 +532,7 @@ DEF_FUNC poll_wait_and_drain
     cmp ecx, r12d
     jge .pwd_done
 
-    lea rax, [rel poll_fds]
+    mov rax, [rel poll_fds]
     mov edx, ecx
     imul edx, PollFd_size
     movzx r8d, word [rax + rdx + PollFd.revents]
@@ -443,7 +541,7 @@ DEF_FUNC poll_wait_and_drain
 
     ; This fd has events — enqueue its task
     push rcx
-    lea rax, [rel poll_fd_tasks]
+    mov rax, [rel poll_fd_tasks]
     mov rbx, [rax + rcx*8]
 
     ; Set send_value to None (fd ready notification)
@@ -461,7 +559,7 @@ DEF_FUNC poll_wait_and_drain
 
     ; Swap with last
     push rcx
-    lea rax, [rel poll_fds]
+    mov rax, [rel poll_fds]
     mov edx, r12d
     imul edx, PollFd_size
     mov edi, ecx
@@ -471,7 +569,7 @@ DEF_FUNC poll_wait_and_drain
     mov r9w, [rax + rdx + 4]
     mov [rax + rdi + 4], r9w
 
-    lea rax, [rel poll_fd_tasks]
+    mov rax, [rel poll_fd_tasks]
     mov r9, [rax + r12*8]
     mov [rax + rcx*8], r9
     pop rcx
@@ -503,7 +601,7 @@ END_FUNC poll_wait_and_drain
 ;; eax = index of newly inserted element
 DEF_FUNC_LOCAL timer_sift_up
     push rbx
-    lea rbx, [rel timer_heap]
+    mov rbx, [rel timer_heap]
 
 .tsu_loop:
     test eax, eax
@@ -548,7 +646,7 @@ END_FUNC timer_sift_up
 DEF_FUNC_LOCAL timer_sift_down
     push rbx
     push r12
-    lea rbx, [rel timer_heap]
+    mov rbx, [rel timer_heap]
     mov r12d, [rel timer_count]
 
 .tsd_loop:
