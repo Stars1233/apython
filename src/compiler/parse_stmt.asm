@@ -142,14 +142,18 @@ END_FUNC par_module
 ;; One logical line: `stmt (';' stmt)* NEWLINE`, each pushed onto the pending
 ;; stack for whatever list is being built.
 ;; ============================================================================
-DEF_FUNC par_simple_stmts, 8
+PSS_STMT  equ 8
+PSS_FRAME equ 16            ; + 1 push = 24... one word more to land right
+DEF_FUNC par_simple_stmts, 24           ; + 1 push = 32, 16-aligned
     push rbx
     mov rbx, rdi
+    mov qword [rbp - PSS_STMT], 0
 .loop:
     mov rdi, rbx
     call par_statement
     test eax, eax
     jz .fail
+    mov [rbp - PSS_STMT], rax
     mov rdi, rbx
     mov rsi, rax
     call ast_push
@@ -174,6 +178,21 @@ DEF_FUNC par_simple_stmts, 8
     call par_kind
     cmp eax, TOK_ENDMARKER
     je .ok
+    ; Python 2's print and exec are the one shape CPython guesses at:
+    ; `print 'hi'` gets "Missing parentheses in call to 'print'. Did you mean
+    ; print(...)?", spanning the whole line.  It is worth the special case
+    ; because the statement is otherwise a bare name followed by nonsense,
+    ; and the message a beginner needs is not "invalid syntax".
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_NEWLINE
+    je .pss_have_newline
+    mov rdi, rbx
+    mov rsi, [rbp - PSS_STMT]
+    call pss_py2_statement
+    test eax, eax
+    jnz .fail
+.pss_have_newline:
     mov rdi, rbx
     mov esi, TOK_NEWLINE
     CSTRING rdx, "invalid syntax"
@@ -191,6 +210,104 @@ DEF_FUNC par_simple_stmts, 8
     leave
     ret
 END_FUNC par_simple_stmts
+
+;; ============================================================================
+;; pss_py2_statement(Comp *c, uint32_t stmt) -> rax = 1 when it reported a
+;; Python 2 print or exec statement, 0 when this is not one
+;;
+;; `print 'hi'` parses as the bare name `print` and then stops, because a
+;; string does not follow a name.  CPython recognises exactly that shape and
+;; says what to do about it, spanning from the name to the end of the line.
+;; ============================================================================
+PPS_COMP  equ 8
+PPS_STMT  equ 16
+PPS_NAME  equ 24
+PPS_FRAME equ 32            ; + 1 push = 40... one more word to land right
+DEF_FUNC_LOCAL pss_py2_statement, 40    ; + 1 push = 48, 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PPS_COMP], rdi
+    mov [rbp - PPS_STMT], rsi
+    test rsi, rsi
+    jz .pps_no
+
+    ; The statement has to be an expression statement holding a bare name.
+    mov rdi, rbx
+    mov rsi, [rbp - PPS_STMT]
+    call ast_at
+    cmp byte [rax + AstNode.kind], AST_EXPR_STMT
+    jne .pps_no
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_at
+    cmp byte [rax + AstNode.kind], AST_NAME
+    jne .pps_no
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - PPS_NAME], rcx
+    mov r8d, [rax + AstNode.col]
+    mov [rbp - PPS_NAME + 4], r8d
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    test rax, rax
+    jz .pps_no
+    mov rbx, rax
+
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "print"
+    call ap_strcmp
+    test eax, eax
+    jz .pps_report
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "exec"
+    call ap_strcmp
+    test eax, eax
+    jnz .pps_no
+
+.pps_report:
+    ; "Missing parentheses in call to 'print'. Did you mean print(...)?",
+    ; from the name to the end of the line.
+    call comp_msg_start
+    push rax
+    mov rdi, rax
+    CSTRING rsi, "Missing parentheses in call to '"
+    call comp_msg_cstr
+    mov rdi, rax
+    lea rsi, [rbx + PyStrObject.data]
+    call comp_msg_cstr
+    mov rdi, rax
+    CSTRING rsi, "'. Did you mean "
+    call comp_msg_cstr
+    mov rdi, rax
+    lea rsi, [rbx + PyStrObject.data]
+    call comp_msg_cstr
+    mov rdi, rax
+    CSTRING rsi, "(...)?"
+    call comp_msg_cstr
+    pop rdx
+
+    ; The span ends where the token that follows the name does, which for a
+    ; whole `print 'hi'` is the end of the line.
+    mov rdi, [rbp - PPS_COMP]
+    call par_peek
+    mov r9d, [rax + Token.lineno]
+    mov r10d, [rax + Token.col]
+    add r10d, [rax + Token.len]
+    mov ecx, [rbp - PPS_NAME]
+    mov r8d, [rbp - PPS_NAME + 4]
+    mov rdi, [rbp - PPS_COMP]
+    lea rsi, [rel exc_SyntaxError_type]
+    call comp_error_span
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.pps_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC pss_py2_statement
 
 ;; ============================================================================
 ;; par_statement(Comp *c) -> rax = a statement node, 0 on error

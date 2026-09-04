@@ -2115,14 +2115,26 @@ DEF_FUNC par_exprlist, PL_FRAME
     call par_expr
     test rax, rax
     jz .fail
+    push rax
     mov rdi, rbx
     mov rsi, rax
     call ast_push
+    pop rsi
 
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_COMMA
-    jne .done
+    je .pl_comma
+    ; Two expressions with nothing between them: `f(a b)`.  CPython guesses
+    ; what was meant, and spans both.
+    push rsi
+    mov rdi, rbx
+    call par_forgot_comma
+    pop rsi
+    test eax, eax
+    jnz .fail
+    jmp .done
+.pl_comma:
     mov rdx, [rbp - PL_FLAG]
     mov qword [rdx], 1
     mov rdi, rbx
@@ -2317,7 +2329,16 @@ DEF_FUNC pf_list, PG_FRAME
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_COMMA
-    jne .close
+    je .comma_ok
+    mov rdi, rbx
+    call par_last_pushed
+    mov rsi, rax
+    mov rdi, rbx
+    call par_forgot_comma
+    test eax, eax
+    jnz .fail
+    jmp .close
+.comma_ok:
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
@@ -2498,7 +2519,16 @@ DEF_FUNC pf_dictset, PD_FRAME
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_COMMA
-    jne .close
+    je .comma_ok
+    mov rdi, rbx
+    call par_last_pushed
+    mov rsi, rax
+    mov rdi, rbx
+    call par_forgot_comma
+    test eax, eax
+    jnz .fail
+    jmp .close
+.comma_ok:
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
@@ -3061,7 +3091,16 @@ DEF_FUNC in_call, ICL_FRAME
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_COMMA
-    jne .close
+    je .comma_ok
+    mov rdi, rbx
+    call par_last_pushed
+    mov rsi, rax
+    mov rdi, rbx
+    call par_forgot_comma
+    test eax, eax
+    jnz .fail
+    jmp .close
+.comma_ok:
     mov rdi, rbx
     call par_advance
     jmp .arg_loop
@@ -3703,3 +3742,84 @@ END_FUNC in_walrus
 extern prule_table
 
 ASM_INIT
+
+section .text
+
+;; ============================================================================
+;; par_forgot_comma(rdi = Comp*, rsi = the element just parsed)
+;;   -> rax = 1 when it reported one, 0 when this is not that shape
+;;
+;; "invalid syntax. Perhaps you forgot a comma?", CPython's guess when one
+;; expression in a bracketed list is followed straight by another.  The test
+;; is whether the token that follows could START an expression, which is
+;; exactly what prule_table's prefix column says.  The span runs from the
+;; element to the end of that token, as CPython's does.
+;; ============================================================================
+PFC_COMP  equ 8
+PFC_NODE  equ 16
+PFC_LINE  equ 24
+PFC_COL   equ 32
+PFC_FRAME equ 40            ; + 1 push = 48, 16-aligned
+global par_forgot_comma
+DEF_FUNC par_forgot_comma, PFC_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PFC_COMP], rdi
+    mov [rbp - PFC_NODE], rsi
+
+    call par_kind
+    lea rcx, [rel prule_table]
+    imul rax, rax, PRule_size
+    cmp qword [rcx + rax + PRule.prefix], 0
+    je .pfc_no
+
+    mov rdi, rbx
+    mov rsi, [rbp - PFC_NODE]
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - PFC_LINE], ecx
+    mov ecx, [rax + AstNode.col]
+    mov [rbp - PFC_COL], ecx
+
+    mov rdi, rbx
+    call par_peek
+    mov r9d, [rax + Token.lineno]
+    mov r10d, [rax + Token.col]
+    add r10d, [rax + Token.len]
+    mov ecx, [rbp - PFC_LINE]
+    mov r8d, [rbp - PFC_COL]
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "invalid syntax. Perhaps you forgot a comma?"
+    call comp_error_span
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.pfc_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_forgot_comma
+
+;; ============================================================================
+;; par_last_pushed(rdi = Comp*) -> rax = the node most recently pushed onto the
+;; pending stack, or 0 when it is empty
+;;
+;; The element a "forgot a comma" message should span from.  Reading it back
+;; is what lets the three bracketed loops share the check without each one
+;; keeping the node in a register across the push.
+;; ============================================================================
+global par_last_pushed
+DEF_FUNC_BARE par_last_pushed
+    mov rcx, [rdi + Comp.pending + Buf.len]
+    test rcx, rcx
+    jz .plp_none
+    mov rax, [rdi + Comp.pending + Buf.data]
+    mov eax, [rax + rcx*4 - 4]
+    ret
+.plp_none:
+    xor eax, eax
+    ret
+END_FUNC par_last_pushed
