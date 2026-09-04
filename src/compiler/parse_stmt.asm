@@ -34,6 +34,9 @@ extern ap_strcmp
 extern par_bad_target
 extern comp_msg_i64
 extern comp_error_span
+extern ast_take_typecomment
+extern ast_park_typecomment
+extern ast_claim_typecomment
 extern comp_error
 extern comp_intern
 extern buf_free
@@ -344,6 +347,11 @@ DEF_FUNC par_expr_stmt, PE2_FRAME
     call ast_at
     mov rdx, [rbp - PE2_FIRST]
     mov [rax + AstNode.b], edx          ; the value
+    ; `x = 1  # type: int`.  The comment token sits between the value and the
+    ; NEWLINE, which is where the tokenizer found it.
+    mov rdi, rbx
+    mov rsi, [rbp - PE2_NODE]
+    call ast_take_typecomment
     mov rax, [rbp - PE2_NODE]
     pop rbx
     leave
@@ -1411,6 +1419,10 @@ DEF_FUNC par_suite, PSU_FRAME
     call par_expect
     test eax, eax
     jz .fail
+    ; `for x in y:  # type: int` -- the comment belongs to the statement, and
+    ; the statement's node does not exist yet.
+    mov rdi, rbx
+    call ast_park_typecomment
 
     mov rdi, rbx
     call ast_mark
@@ -1431,6 +1443,12 @@ DEF_FUNC par_suite, PSU_FRAME
 .block:
     mov rdi, rbx
     call par_advance                    ; the NEWLINE
+    ; A `# type:` comment on its own line sits between the NEWLINE and the
+    ; INDENT, and belongs to the statement whose suite this is.  Only the
+    ; first is taken, so an inline one on the header wins -- as CPython's
+    ; grammar makes it.
+    mov rdi, rbx
+    call ast_park_typecomment
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_INDENT
@@ -1779,6 +1797,9 @@ DEF_FUNC_LOCAL ps_for, PIF_FRAME
     mov [rax + AstNode.c], edx          ; c = body block
     mov rdx, [rbp - PIF_ELSE]
     mov [rax + AstNode.clist], edx      ; clist doubles as the else block here
+    mov rdi, rbx
+    mov rsi, [rbp - PIF_MARK]
+    call ast_claim_typecomment
     mov rax, [rbp - PIF_MARK]
     pop rbx
     leave
@@ -1917,6 +1938,7 @@ DEF_FUNC par_params, PP_FRAME
     mov qword [rbp - PP_VARARG], 0
     mov qword [rbp - PP_VARKW], 0
     mov qword [rbp - PP_DEFLT], 0
+    mov qword [rbp - PP_BAD], 0
 
 .loop:
     mov rdi, rbx
@@ -2090,6 +2112,14 @@ DEF_FUNC par_params, PP_FRAME
     jne .build
     mov rdi, rbx
     call par_advance
+    ; `def g(a,  # type: int` -- the comment follows the comma and belongs to
+    ; the parameter before it, which PP_BAD is already holding.
+    cmp qword [rbp - PP_BAD], 0
+    je .comma_no_tc
+    mov rdi, rbx
+    mov rsi, [rbp - PP_BAD]
+    call ast_take_typecomment
+.comma_no_tc:
     jmp .loop
 
 .build:
@@ -2497,6 +2527,9 @@ DEF_FUNC_LOCAL ps_def, PDF_FRAME
     mov esi, [rbp - PDF_NODE]
     mov edx, [rbp - PDF_TP]
     call ast_set_typeparams
+    mov rdi, rbx
+    mov rsi, [rbp - PDF_NODE]
+    call ast_claim_typecomment
     mov rax, [rbp - PDF_NODE]
     pop rbx
     leave
@@ -2521,6 +2554,10 @@ DEF_FUNC par_suite_into, 8
     call par_expect
     test eax, eax
     jz .fail
+    ; `for x in y:  # type: int` -- the comment belongs to the statement, and
+    ; the statement's node does not exist yet.
+    mov rdi, rbx
+    call ast_park_typecomment
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_NEWLINE
@@ -2533,6 +2570,12 @@ DEF_FUNC par_suite_into, 8
 .block:
     mov rdi, rbx
     call par_advance
+    ; A `# type:` comment on its own line sits between the NEWLINE and the
+    ; INDENT, and belongs to the statement whose suite this is.  Only the
+    ; first is taken, so an inline one on the header wins -- as CPython's
+    ; grammar makes it.
+    mov rdi, rbx
+    call ast_park_typecomment
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_INDENT
@@ -3351,6 +3394,11 @@ DEF_FUNC_LOCAL ps_with, PT2_FRAME
     mov rdx, [rbp - PT2_LINE]
     mov rcx, [rbp - PT2_MARK]
     call par_finish_list
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_claim_typecomment
+    pop rax
     test rax, rax
     jz .fail
     mov [rbp - PT2_NODE], rax

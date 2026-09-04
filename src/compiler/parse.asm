@@ -3793,5 +3793,11 @@ prule_table:
     dq pf_yield    , 0           
     db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_YIELD -- an expression, not a statement: `x = yield v` receives from send()
     dd 0
+    dq 0           , 0           
+    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_TYPE_COMMENT
+    dd 0
+    dq 0           , 0           
+    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_TYPE_IGNORE
+    dd 0
 
 ASM_INIT

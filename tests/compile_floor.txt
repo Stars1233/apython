@@ -9,6 +9,7 @@ test_abstract_and_str_subclass
 test_arithmetic
 test_ast_mangling
 test_ast
+test_ast_type_comments
 test_async_argument_types
 test_async_await
 test_async_cancel

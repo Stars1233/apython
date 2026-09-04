@@ -302,7 +302,7 @@ DEF_FUNC ar_node, ARN_FRAME
     movzx eax, byte [rbx + AstNode.kind]
     mov [rbp - ARN_KIND], rax
 
-    mov edi, 11
+    mov edi, 12
     call tuple_new
     test rax, rax
     jz .arn_fail
@@ -404,6 +404,38 @@ DEF_FUNC ar_node, ARN_FRAME
     mov r12, [rbp - ARN_TUP]
     mov r12, [r12 + PyTupleObject.ob_item]
     mov [r12 + 80], rax
+
+    ; 11 type_comment: the text of a `# type:` comment, when one was asked
+    ; for and one was there.  A side table like type_params, and for the same
+    ; reason: AstNode has no field left.
+    ;
+    ; A Module has no type comment of its own and carries the file's
+    ; `# type: ignore` list in this slot instead, which is where CPython puts
+    ; them too -- on the Module, not on any statement.
+    cmp qword [rbp - ARN_KIND], AST_MODULE
+    jne .arn_ordinary_tc
+    mov rdi, [rbp - ARN_COMP]
+    call ar_typeignores
+    jmp .arn_have_typecomment
+.arn_ordinary_tc:
+    mov rdi, [rbp - ARN_COMP]
+    mov rsi, [rbp - ARN_IDX]
+    extern ast_typecomment_at
+    call ast_typecomment_at
+    test eax, eax
+    jz .arn_no_typecomment
+    mov rdi, [rbp - ARN_COMP]
+    mov esi, eax
+    mov edx, AF_OBJ
+    call ar_field
+    jmp .arn_have_typecomment
+.arn_no_typecomment:
+    LOAD_NONE rax
+    INCREF rax
+.arn_have_typecomment:
+    mov r12, [rbp - ARN_TUP]
+    mov r12, [r12 + PyTupleObject.ob_item]
+    mov [r12 + 88], rax
 
     mov rax, [rbp - ARN_TUP]
     pop r12
@@ -516,8 +548,97 @@ ar_fieldkinds:
     db AF_OBJ , AF_NODE, AF_NONE, AC_NONE ; 85 TYPEVAR
     db AF_OBJ , AF_NONE, AF_NONE, AC_NONE ; 86 PARAMSPEC
     db AF_OBJ , AF_NONE, AF_NONE, AC_NONE ; 87 TYPEVARTUPLE
+    db AF_NODE, AF_NONE, AF_NONE, AC_NODE ; 88 FUNCTIONTYPE
     db AF_NONE, AF_NONE, AF_NONE, AC_NONE ; 83 --
     db AF_NONE, AF_NONE, AF_NONE, AC_NONE ; 84 --
     db AF_NONE, AF_NONE, AF_NONE, AC_NONE ; 85 --
     db AF_NONE, AF_NONE, AF_NONE, AC_NONE ; 86 --
     db AF_NONE, AF_NONE, AF_NONE, AC_NONE ; 87 --
+
+section .text
+
+;; ============================================================================
+;; ar_typeignores(rdi = Comp*) -> rax = a list of (lineno, tag) tuples, owned
+;;
+;; Every `# type: ignore` in the file, in source order.  It is a list rather
+;; than a tuple because the builder turns each pair into a TypeIgnore and
+;; CPython's Module.type_ignores is a list.
+;; ============================================================================
+ATI2_COMP equ 8
+ATI2_LIST equ 16
+ATI2_I    equ 24
+ATI2_N    equ 32
+ATI2_FRAME equ 48           ; + 2 pushes = 64, 16-aligned
+global ar_typeignores
+DEF_FUNC ar_typeignores, ATI2_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov [rbp - ATI2_COMP], rdi
+
+    extern list_new
+    xor edi, edi
+    call list_new
+    test rax, rax
+    jz .ati2_none
+    mov [rbp - ATI2_LIST], rax
+
+    mov rcx, [rbx + Comp.typeignores + Buf.len]
+    mov [rbp - ATI2_N], rcx
+    mov qword [rbp - ATI2_I], 0
+.ati2_loop:
+    mov rcx, [rbp - ATI2_I]
+    cmp rcx, [rbp - ATI2_N]
+    jae .ati2_done
+    mov edi, 2
+    extern tuple_new
+    call tuple_new
+    test rax, rax
+    jz .ati2_done
+    mov r12, rax
+    mov rax, [rbx + Comp.typeignores + Buf.data]
+    mov rcx, [rbp - ATI2_I]
+    mov edx, [rax + rcx*4]              ; the line
+    push rax
+    push rcx
+    mov rdi, rdx
+    extern int_from_i64
+    call int_from_i64
+    V_PACK rax, rdx             ; a tuple slot holds a Value, not a payload
+    pop rcx
+    pop rdx
+    mov rdx, [r12 + PyTupleObject.ob_item]
+    mov [rdx], rax
+    ; The tag, an obj index into the arena.
+    mov rax, [rbx + Comp.typeignores + Buf.data]
+    inc rcx
+    mov esi, [rax + rcx*4]
+    mov rdi, rbx
+    extern ast_obj_at
+    call ast_obj_at
+    INCREF rax
+    mov rdx, [r12 + PyTupleObject.ob_item]
+    mov [rdx + 8], rax
+    mov rdi, [rbp - ATI2_LIST]
+    mov rsi, r12
+    extern list_append
+    call list_append
+    mov rdi, r12
+    extern obj_decref
+    call obj_decref
+    add qword [rbp - ATI2_I], 2
+    jmp .ati2_loop
+.ati2_done:
+    mov rax, [rbp - ATI2_LIST]
+    pop r12
+    pop rbx
+    leave
+    ret
+.ati2_none:
+    LOAD_NONE rax
+    INCREF rax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC ar_typeignores

@@ -123,7 +123,17 @@ TOK_WITH        equ 88
 TOK_YIELD       equ 89
 TOK_KW_LAST     equ 89
 
-TOK_COUNT       equ 90
+; A `# type:` comment, emitted only when PyCF_TYPE_COMMENTS asked for one.
+; The token's span covers the text AFTER the colon, with the leading blanks
+; already dropped -- which is what ast.parse reports.
+TOK_TYPE_COMMENT equ 90
+
+; `# type: ignore` and `# type: ignore[code]`.  CPython does not attach these
+; to a statement; it collects them on the Module as TypeIgnore(lineno, tag),
+; where the tag is whatever followed the word.
+TOK_TYPE_IGNORE  equ 91
+
+TOK_COUNT       equ 92
 
 ; Token.flags bits
 TF_SOFT_MATCH   equ 0x0001   ; the NAME is literally "match"
@@ -288,6 +298,10 @@ AST_TYPEVAR     equ 85   ; a=obj index (name), b=bound or 0
 AST_PARAMSPEC   equ 86   ; a=obj index (name)
 AST_TYPEVARTUPLE equ 87  ; a=obj index (name)
 
+; The "func_type" start symbol: `(int, str) -> bool`, the type comment form a
+; stub file carries.  Produced only by compile_ast_raw, never compiled.
+AST_FUNCTIONTYPE equ 88  ; clist=argument types, a=the return type
+
 AST_COUNT       equ 88
 
 ; AstNode.subkind for expression context
@@ -441,6 +455,7 @@ endstruc                 ;      to a whole token or a whole subexpression
 CMODE_EXEC   equ 0
 CMODE_EVAL   equ 1
 CMODE_SINGLE equ 2
+CMODE_FUNC_TYPE equ 3
 
 ; The parser's own recursion guard.  apython's recursion_depth counts Python
 ; frames only, so deeply nested parentheses would otherwise blow the machine
@@ -525,6 +540,15 @@ struc Comp
                                     ; alias carries, or 0.  A side table
                                     ; because AstNode is full: PEP 695 arrived
                                     ; after every field had a use
+    .typeignores: resb Buf_size     ; u32[] pairs (lineno, obj index of the
+                                    ; tag) for every `# type: ignore`, which
+                                    ; belongs to the Module rather than to any
+                                    ; statement
+    .typecomments: resb Buf_size    ; u32[], parallel to .nodes: the obj index
+                                    ; of a `# type:` comment's text, or 0.
+                                    ; Another side table for the same reason
+                                    ; typeparams is one, and collected only
+                                    ; when PyCF_TYPE_COMMENTS asked for them
     .rawnames:  resb Buf_size       ; u32[], parallel to .objs: for an
                                     ; identifier that private-name mangling
                                     ; rewrote, the obj index of the name as it
@@ -537,6 +561,12 @@ struc Comp
     .pad1:      resd 1
     .private:   resq 1              ; the enclosing class's name, for private
                                     ; name mangling; 0 outside a class body
+    .want_tc:   resd 1              ; PyCF_TYPE_COMMENTS: collect `# type:`
+    .pending_tc: resd 1             ; a `# type:` comment par_suite found after
+                                    ; the colon, waiting for the statement that
+                                    ; will own it -- `for x in y:  # type: int`
+                                    ; is the For's, and the For node does not
+                                    ; exist until its body has been parsed
     .err:       resb CompErr_size
     .lex:       resb Lexer_size
 endstruc

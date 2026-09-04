@@ -66,6 +66,10 @@ extern obj_decref
 extern par_expect
 extern par_expr
 extern par_module
+extern par_peek
+extern ast_mark
+extern ast_push
+extern par_finish_list
 extern cg_body
 extern par_kind
 extern par_advance
@@ -217,6 +221,14 @@ DEF_FUNC comp_init, CI_FRAME
     lea rdi, [rbx + Comp.typeparams]
     mov esi, 4
     call buf_init
+    lea rdi, [rbx + Comp.typecomments]
+    mov esi, 4
+    call buf_init
+    lea rdi, [rbx + Comp.typeignores]
+    mov esi, 4
+    call buf_init
+    mov dword [rbx + Comp.want_tc], 0
+    mov dword [rbx + Comp.pending_tc], 0
     lea rdi, [rbx + Comp.scopes]
     mov esi, Scope_size
     call buf_init
@@ -239,6 +251,10 @@ DEF_FUNC comp_init, CI_FRAME
     ; And its type-parameter slot: typeparams is indexed by node number too,
     ; and ast_make only ever appends for a node it makes itself.
     lea rdi, [rbx + Comp.typeparams]
+    mov esi, 1
+    call buf_reserve
+    mov dword [rax], 0
+    lea rdi, [rbx + Comp.typecomments]
     mov esi, 1
     call buf_reserve
     mov dword [rax], 0
@@ -300,6 +316,10 @@ DEF_FUNC comp_free, 8
     lea rdi, [rbx + Comp.rawnames]
     call buf_free
     lea rdi, [rbx + Comp.typeparams]
+    call buf_free
+    lea rdi, [rbx + Comp.typecomments]
+    call buf_free
+    lea rdi, [rbx + Comp.typeignores]
     call buf_free
     lea rdi, [rbx + Comp.pending]
     call buf_free
@@ -510,9 +530,135 @@ DEF_FUNC par_eval_root, 16      ; + 2 pushes = 32
 END_FUNC par_eval_root
 
 ;; ============================================================================
+;; par_func_type_root(Comp *c) -> rax = an AST_FUNCTIONTYPE node, 0 on error
+;;
+;; The "func_type" start symbol: `(int, str) -> bool`, or `(...) -> bool` for
+;; a signature whose arguments are not spelled out.  It is the type comment a
+;; stub file carries, and the only mode whose grammar is not a subset of the
+;; module's -- a bare `->` is not an expression anywhere else.
 ;; ============================================================================
-;; compile_ast_raw(const char *src, i64 len, PyStrObject *filename, int mode)
-;;   -> rax = the raw tree, or 0 with the exception already pending
+PFT_MARK  equ 16
+PFT_RET   equ 24
+PFT_LINE  equ 32
+PFT_FRAME equ 40            ; + 2 pushes = 56... one word more to land right
+DEF_FUNC par_func_type_root, 48         ; + 2 pushes = 64, 16-aligned
+    push rbx
+    push r12
+    mov rbx, rdi
+
+    call par_peek
+    TOK_POS rax
+    mov [rbp - PFT_LINE], rcx
+
+    mov rdi, rbx
+    mov esi, TOK_LPAR
+    CSTRING rdx, "invalid syntax"
+    call par_expect
+    test eax, eax
+    jz .pft_fail
+
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PFT_MARK], rax
+
+    ; `(...)` means "any arguments"; CPython answers an empty argtypes list
+    ; with an Ellipsis constant in it, which ast.dump shows as [Constant(...)].
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_RPAR
+    je .pft_args_done
+
+.pft_arg_loop:
+    mov rdi, rbx
+    mov esi, 0                          ; BP_NONE
+    call par_expr
+    test rax, rax
+    jz .pft_fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COMMA
+    jne .pft_args_done
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_RPAR
+    je .pft_args_done
+    jmp .pft_arg_loop
+
+.pft_args_done:
+    mov rdi, rbx
+    mov esi, TOK_RPAR
+    CSTRING rdx, "invalid syntax"
+    call par_expect
+    test eax, eax
+    jz .pft_fail
+
+    mov rdi, rbx
+    mov esi, TOK_RARROW
+    CSTRING rdx, "invalid syntax"
+    call par_expect
+    test eax, eax
+    jz .pft_fail
+
+    mov rdi, rbx
+    mov esi, 0                          ; BP_NONE
+    call par_expr
+    test rax, rax
+    jz .pft_fail
+    mov [rbp - PFT_RET], rax
+
+.pft_skip_newlines:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_NEWLINE
+    jne .pft_at_end
+    mov rdi, rbx
+    call par_advance
+    jmp .pft_skip_newlines
+
+.pft_at_end:
+    mov rdi, rbx
+    mov esi, TOK_ENDMARKER
+    CSTRING rdx, "invalid syntax"
+    call par_expect
+    test eax, eax
+    jz .pft_fail
+
+    mov rdi, rbx
+    mov esi, AST_FUNCTIONTYPE
+    mov rdx, [rbp - PFT_LINE]
+    mov rcx, [rbp - PFT_MARK]
+    call par_finish_list
+    test rax, rax
+    jz .pft_fail
+    mov r12, rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov edx, [rbp - PFT_RET]
+    mov [rax + AstNode.a], edx          ; the return type
+    mov rax, r12
+    pop r12
+    pop rbx
+    leave
+    ret
+.pft_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC par_func_type_root
+
+;; ============================================================================
+;; ============================================================================
+;; compile_ast_raw(const char *src, i64 len, PyStrObject *filename, int mode,
+;;                  int want_type_comments) -> rax = the raw tree, or 0 with
+;;                  the exception already pending
 ;;
 ;; compile_source's sibling, stopping where the AST is complete.  It runs
 ;; comp_init, the lexer and the parser, hands the arena to ar_node, and then
@@ -531,6 +677,7 @@ CAR_MODE  equ 32
 CAR_ROOT  equ 40
 CAR_TREE  equ 48
 CAR_COMP  equ 56
+CAR_WANTTC equ 64           ; PyCF_TYPE_COMMENTS
 CAR_FRAME equ 72            ; + 1 push = 80, 16-byte aligned
 
 global compile_ast_raw
@@ -540,6 +687,7 @@ DEF_FUNC compile_ast_raw, CAR_FRAME
     mov [rbp - CAR_LEN], rsi
     mov [rbp - CAR_FILE], rdx
     mov [rbp - CAR_MODE], rcx
+    mov [rbp - CAR_WANTTC], r8
     mov qword [rbp - CAR_TREE], 0
 
     mov edi, Comp_size
@@ -553,6 +701,8 @@ DEF_FUNC compile_ast_raw, CAR_FRAME
     mov rcx, [rbp - CAR_FILE]
     mov r8, [rbp - CAR_MODE]
     call comp_init
+    mov rax, [rbp - CAR_WANTTC]
+    mov [rbx + Comp.want_tc], eax
 
     mov rdi, rbx
     xor esi, esi                        ; the whole source
@@ -564,6 +714,8 @@ DEF_FUNC compile_ast_raw, CAR_FRAME
 
     cmp qword [rbp - CAR_MODE], CMODE_EVAL
     je .car_parse_eval
+    cmp qword [rbp - CAR_MODE], CMODE_FUNC_TYPE
+    je .car_parse_func_type
     mov rdi, rbx
     call par_module
     test rax, rax
@@ -586,6 +738,13 @@ DEF_FUNC compile_ast_raw, CAR_FRAME
     test eax, eax
     jz .car_failed
     jmp .car_parsed
+.car_parse_func_type:
+    mov rdi, rbx
+    call par_func_type_root
+    test rax, rax
+    jz .car_failed
+    jmp .car_parsed
+
 .car_parse_eval:
     mov rdi, rbx
     call par_eval_root
@@ -2224,6 +2383,7 @@ section .rodata
 co_ast_mod:  db "_ast", 0
 co_ast_attr: db "_from_raw", 0
 PYCF_ONLY_AST equ 0x400
+PYCF_TYPE_COMMENTS equ 0x1000
 section .text
 
 CAB_KEY   equ 8             ; the name being looked up
@@ -2407,6 +2567,18 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     mov ecx, CMODE_EVAL
     jmp .have_mode
 .check_single:
+    cmp qword [r13 + PyStrObject.ob_size], 9
+    jne .check_single6
+    ; "func_type": `(int, str) -> bool`, the stub-file signature form.
+    mov eax, [r13 + PyStrObject.data]
+    cmp eax, 'func'
+    jne .unsupported_mode
+    mov eax, [r13 + PyStrObject.data + 5]
+    cmp eax, 'type'
+    jne .unsupported_mode
+    mov ecx, CMODE_FUNC_TYPE
+    jmp .have_mode
+.check_single6:
     cmp qword [r13 + PyStrObject.ob_size], 6
     jne .unsupported_mode
     mov eax, [r13 + PyStrObject.data]
@@ -2445,6 +2617,11 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     ; The parse tree, not a code object.  _ast is imported here rather than at
     ; startup for the reason builtin_open_fn gives about _io: builtins are
     ; built before the import system can run.
+    xor r8d, r8d
+    test qword [rbp - CO_FLAGS], PYCF_TYPE_COMMENTS
+    jz .co_no_tc
+    mov r8d, 1
+.co_no_tc:
     call compile_ast_raw
     test rax, rax
     jz .propagate

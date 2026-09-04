@@ -516,6 +516,14 @@ DEF_FUNC lex_run, LR_FRAME
     jae .eof
     cmp byte [r12], '#'
     jne .bl_at_eol
+    ; A `# type:` comment on a line of its own is the form a function
+    ; signature takes: `def f(a, b):` then `# type: (int, str) -> bool`.  The
+    ; token is emitted BETWEEN the NEWLINE and the INDENT, which is where
+    ; CPython's grammar looks for it, and the line still counts as blank so
+    ; the indentation stack is untouched.
+    call .sub_type_comment
+    test eax, eax
+    jnz .bl_at_eol                      ; r12 is at the end of the line already
 .bl_comment:
     inc r12
     cmp r12, r13
@@ -590,6 +598,104 @@ DEF_FUNC lex_run, LR_FRAME
 
 .comment:
     ; Run to the end of the line, leaving the newline itself for .newline.
+    ;
+    ; A `# type: ...` comment is a token of its own when PyCF_TYPE_COMMENTS
+    ; asked for one -- the only comment this lexer ever emits.  It is
+    ; recognised here rather than in the parser because the parser never sees
+    ; a comment at all: everything else about them is that they are skipped.
+    call .sub_type_comment
+    test eax, eax
+    jnz .scan                           ; r12 is at the end of the line already
+    jmp .comment_loop
+
+; .sub_type_comment - r12 points at a '#'.  Emit a TOK_TYPE_COMMENT or a
+; TOK_TYPE_IGNORE for it if this is one and the flag asked for them, leaving
+; r12 at the end of the line.  Falls through harmlessly otherwise.
+.sub_type_comment:
+    cmp dword [rbx + Comp.want_tc], 0
+    je .tc_no
+    mov rax, r12
+    inc rax                             ; past the '#'
+.tc_blanks:
+    cmp rax, r13
+    jae .tc_no
+    cmp byte [rax], ' '
+    jne .tc_have_word
+    inc rax
+    jmp .tc_blanks
+.tc_have_word:
+    lea rcx, [rax + 5]
+    cmp rcx, r13
+    ja .tc_no
+    cmp dword [rax], 'type'
+    jne .tc_no
+    cmp byte [rax + 4], ':'
+    jne .tc_no
+    add rax, 5
+.tc_skip_blanks:
+    cmp rax, r13
+    jae .tc_emit
+    cmp byte [rax], ' '
+    jne .tc_emit
+    inc rax
+    jmp .tc_skip_blanks
+.tc_emit:
+    ; "ignore" -- as a whole word -- makes this an ignore rather than a type,
+    ; and CPython keeps the rest of the line as its tag.
+    mov esi, TOK_TYPE_COMMENT
+    lea rcx, [rax + 6]
+    cmp rcx, r13
+    ja .tc_have_kind
+    cmp dword [rax], 'igno'
+    jne .tc_have_kind
+    cmp word [rax + 4], 're'
+    jne .tc_have_kind
+    ; The word has to end there: `# type: ignoreme` is an ordinary comment.
+    cmp rcx, r13
+    jae .tc_is_ignore
+    push rax
+    lea rax, [rel cc_table]
+    movzx edx, byte [rcx]
+    test byte [rax + rdx], CC_IDCONT
+    pop rax
+    jnz .tc_have_kind
+.tc_is_ignore:
+    mov esi, TOK_TYPE_IGNORE
+    mov rax, rcx                        ; the tag is what follows the word
+.tc_have_kind:
+    ; rax is the first byte of the text.  Find the end of the line for its
+    ; length, then leave r12 there so the newline is still the parser's.
+    push rsi
+    mov rcx, rax
+.tc_end:
+    cmp rcx, r13
+    jae .tc_have_end
+    movzx edx, byte [rcx]
+    cmp dl, 10
+    je .tc_have_end
+    cmp dl, 13
+    je .tc_have_end
+    inc rcx
+    jmp .tc_end
+.tc_have_end:
+    push rcx
+    push rax
+    mov rdi, rbx
+    mov rsi, [rsp + 16]                 ; the kind chosen above
+    mov rdx, rax
+    sub rcx, rax
+    xor r8d, r8d
+    call lex_emit
+    pop rax
+    pop rcx
+    add rsp, 8                          ; the kind
+    mov r12, rcx
+    mov eax, 1
+    ret
+.tc_no:
+    xor eax, eax
+    ret
+
 .comment_loop:
     cmp r12, r13
     jae .scan

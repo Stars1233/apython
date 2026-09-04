@@ -27,6 +27,8 @@
 %include "macros.inc"
 %include "object.inc"
 %include "compiler.inc"
+extern par_peek
+extern par_advance
 
 ; --- Named frame-layout constants ---
 AM_KIND  equ 16
@@ -264,6 +266,10 @@ DEF_FUNC ast_make, AM_FRAME
     lea rdi, [rbx + Comp.typeparams]
     xor esi, esi
     call buf_push_u32
+    ; And the type-comment slot, likewise, so both stay parallel to .nodes.
+    lea rdi, [rbx + Comp.typecomments]
+    xor esi, esi
+    call buf_push_u32
 
     ; The index is one less than the new length, since buf_reserve appended it.
     mov rax, [rbx + Comp.nodes + Buf.len]
@@ -400,9 +406,8 @@ DEF_FUNC ast_obj, 8            ; the 8 pads the push to a 16-aligned rsp
 END_FUNC ast_obj
 
 ;; ============================================================================
-;; ast_set_typeparams(Comp *c, uint32_t node, uint32_t tp) -- hang a PEP 695
-;; parameter list off a def, a class or a type alias
-;; ast_typeparams_at(Comp *c, uint32_t node) -> rax = that node, or 0
+;; ast_set_typeparams(Comp *c, uint32_t node, uint32_t tp) -> nothing; hangs a
+;; PEP 695 parameter list off a def, a class or a type alias
 ;; ============================================================================
 global ast_set_typeparams
 DEF_FUNC_BARE ast_set_typeparams
@@ -415,6 +420,190 @@ DEF_FUNC_BARE ast_set_typeparams
     ret
 END_FUNC ast_set_typeparams
 
+;; ============================================================================
+;; ast_take_typecomment(Comp *c, uint32_t node) -> nothing; if the parser is
+;; looking at a TOK_TYPE_COMMENT, interns its text and hangs it off the node
+;;
+;; The comment sits where the tokenizer found it, which for `x = 1  # type:
+;; int` is after the value and before the NEWLINE.  Every statement that can
+;; carry one calls this at the point it has its node and has not yet consumed
+;; the newline.
+;; ============================================================================
+ATC_NODE  equ 8
+ATC_FRAME equ 16            ; + 1 push = 24... one word more to land right
+global ast_take_typecomment
+DEF_FUNC ast_take_typecomment, 24       ; + 1 push = 32, 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov [rbp - ATC_NODE], rsi
+    cmp dword [rdi + Comp.want_tc], 0
+    je .atc_none
+    call ast_take_typeignore
+    mov rdi, rbx
+
+    call par_peek
+    cmp word [rax + Token.kind], TOK_TYPE_COMMENT
+    jne .atc_none
+
+    push rax
+    mov rdi, [rax + Token.start]
+    mov esi, [rax + Token.len]
+    extern str_new_heap
+    call str_new_heap
+    pop rcx
+    test rax, rax
+    jz .atc_none
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj                        ; the arena takes the reference
+    mov rcx, [rbx + Comp.typecomments + Buf.len]
+    cmp qword [rbp - ATC_NODE], rcx
+    jae .atc_advance
+    mov rcx, [rbx + Comp.typecomments + Buf.data]
+    mov rdx, [rbp - ATC_NODE]
+    mov [rcx + rdx*4], eax
+.atc_advance:
+    mov rdi, rbx
+    call par_advance
+.atc_none:
+    pop rbx
+    leave
+    ret
+END_FUNC ast_take_typecomment
+
+;; ============================================================================
+;; ast_typecomment_at(Comp *c, uint32_t node) -> rax = the obj index of that
+;; node's `# type:` comment, or 0
+;; ============================================================================
+;; ============================================================================
+;; ast_park_typecomment(Comp *c) -- take the type comment the parser is
+;; looking at, if any, and hold it until a statement claims it
+;;
+;; A compound statement's comment comes after its colon, which is inside
+;; par_suite -- long before the node exists.
+;; ============================================================================
+;; ============================================================================
+;; ast_take_typeignore(Comp *c) -> nothing; records every `# type: ignore` the
+;; parser is looking at on the module
+;;
+;; Not attached to any statement: CPython puts every one of them in
+;; Module.type_ignores as TypeIgnore(lineno, tag), where the tag is whatever
+;; followed the word -- "" for a bare ignore, "[misc]" for a coded one.
+;; ============================================================================
+ATI_LINE  equ 8
+ATI_FRAME equ 24            ; + 1 push = 32, 16-aligned
+global ast_take_typeignore
+DEF_FUNC ast_take_typeignore, ATI_FRAME
+    push rbx
+    mov rbx, rdi
+    cmp dword [rdi + Comp.want_tc], 0
+    je .ati_done
+.ati_loop:
+    mov rdi, rbx
+    call par_peek
+    cmp word [rax + Token.kind], TOK_TYPE_IGNORE
+    jne .ati_done
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - ATI_LINE], rcx
+    mov rdi, [rax + Token.start]
+    mov esi, [rax + Token.len]
+    call str_new_heap
+    test rax, rax
+    jz .ati_done
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj
+    push rax
+    lea rdi, [rbx + Comp.typeignores]
+    mov esi, [rbp - ATI_LINE]
+    call buf_push_u32
+    pop rsi
+    lea rdi, [rbx + Comp.typeignores]
+    call buf_push_u32
+    mov rdi, rbx
+    call par_advance
+    jmp .ati_loop
+.ati_done:
+    pop rbx
+    leave
+    ret
+END_FUNC ast_take_typeignore
+
+;; ============================================================================
+;; ast_park_typecomment(Comp *c) -> nothing; the comment, if there was one, is
+;; held on the Comp until a statement claims it
+;;
+;; A compound statement's comment comes after its colon, which is inside
+;; par_suite -- long before the node exists.
+;; ============================================================================
+global ast_park_typecomment
+DEF_FUNC ast_park_typecomment, 24       ; + 1 push = 32, 16-aligned
+    push rbx
+    mov rbx, rdi
+    cmp dword [rdi + Comp.want_tc], 0
+    je .apt_done
+    call ast_take_typeignore
+    mov rdi, rbx
+    call par_peek
+    cmp word [rax + Token.kind], TOK_TYPE_COMMENT
+    jne .apt_done
+    mov rdi, [rax + Token.start]
+    mov esi, [rax + Token.len]
+    call str_new_heap
+    test rax, rax
+    jz .apt_done
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj
+    mov [rbx + Comp.pending_tc], eax
+    mov rdi, rbx
+    call par_advance
+.apt_done:
+    pop rbx
+    leave
+    ret
+END_FUNC ast_park_typecomment
+
+;; ============================================================================
+;; ast_claim_typecomment(Comp *c, uint32_t node) -> nothing; moves the parked
+;; comment, if there is one, onto this node
+;; ============================================================================
+global ast_claim_typecomment
+DEF_FUNC_BARE ast_claim_typecomment
+    mov eax, [rdi + Comp.pending_tc]
+    test eax, eax
+    jz .act_none
+    mov dword [rdi + Comp.pending_tc], 0
+    mov rcx, [rdi + Comp.typecomments + Buf.len]
+    cmp rsi, rcx
+    jae .act_none
+    mov rcx, [rdi + Comp.typecomments + Buf.data]
+    mov [rcx + rsi*4], eax
+.act_none:
+    ret
+END_FUNC ast_claim_typecomment
+
+;; ============================================================================
+;; ast_typecomment_at(Comp *c, uint32_t node) -> rax = the obj index of that
+;; node's `# type:` comment, or 0
+;; ============================================================================
+global ast_typecomment_at
+DEF_FUNC_BARE ast_typecomment_at
+    mov rax, [rdi + Comp.typecomments + Buf.len]
+    cmp rsi, rax
+    jae .atca_none
+    mov rax, [rdi + Comp.typecomments + Buf.data]
+    mov eax, [rax + rsi*4]
+    ret
+.atca_none:
+    xor eax, eax
+    ret
+END_FUNC ast_typecomment_at
+
+;; ============================================================================
+;; ast_typeparams_at(Comp *c, uint32_t node) -> rax = the AST_TYPEPARAMS node
+;; hung off it, or 0
+;; ============================================================================
 global ast_typeparams_at
 DEF_FUNC_BARE ast_typeparams_at
     mov rax, [rdi + Comp.typeparams + Buf.len]

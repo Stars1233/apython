@@ -104,6 +104,11 @@ ORDER = [
  "TOK_ELSE","TOK_EXCEPT","TOK_FINALLY","TOK_FOR","TOK_FROM","TOK_GLOBAL","TOK_IF",
  "TOK_IMPORT","TOK_IN","TOK_IS","TOK_LAMBDA","TOK_NONLOCAL","TOK_NOT","TOK_OR",
  "TOK_PASS","TOK_RAISE","TOK_RETURN","TOK_TRY","TOK_WHILE","TOK_WITH","TOK_YIELD",
+ # A `# type:` comment is a token only when PyCF_TYPE_COMMENTS asked for one,
+ # and it is never part of an expression -- but it can FOLLOW one, and this
+ # table is what par_expr reads to decide that an expression has ended.  A
+ # missing row there is a read past the end of the table.
+ "TOK_TYPE_COMMENT","TOK_TYPE_IGNORE",
 ]
 
 HEADER = """;; ============================================================================

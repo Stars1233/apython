@@ -86,18 +86,6 @@ reasoning that chose them and what changing one would cost.
   compiler, where CPython reports it as the codec's own error wrapped in a
   SyntaxError.
 
-- **`ast.parse` is missing two of its arguments.**  `type_comments=True`
-  collects nothing, because the tokenizer discards comments and has nowhere
-  to put a `# type:` one; and `mode="func_type"` is a ValueError, because
-  there is no `(int, str) -> bool` start symbol.
-
-## Style debt
-
-Everything here assembles and runs.  These are places the tree does not follow
-STYLE.md, listed so the gap is a known quantity rather than a surprise to
-whoever copies a neighbouring file.  Counts are deliberately absent -- grep
-gives a current one, and a number written here is wrong by the next commit.
-
 - **Functions with no docblock at all**, and, among those that have one,
   docblocks with no `->` signature line.  The signature is the only part of a
   function's contract that nothing checks, so its absence is a real gap rather
