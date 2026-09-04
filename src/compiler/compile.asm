@@ -213,6 +213,9 @@ DEF_FUNC comp_init, CI_FRAME
     lea rdi, [rbx + Comp.rawnames]
     mov esi, 4
     call buf_init
+    lea rdi, [rbx + Comp.typeparams]
+    mov esi, 4
+    call buf_init
     lea rdi, [rbx + Comp.scopes]
     mov esi, Scope_size
     call buf_init
@@ -232,6 +235,12 @@ DEF_FUNC comp_init, CI_FRAME
     call buf_reserve
     mov dword [rax + AstSpan.end_lineno], -1
     mov dword [rax + AstSpan.end_col], -1
+    ; And its type-parameter slot: typeparams is indexed by node number too,
+    ; and ast_make only ever appends for a node it makes itself.
+    lea rdi, [rbx + Comp.typeparams]
+    mov esi, 1
+    call buf_reserve
+    mov dword [rax], 0
 
     ; Reserve objs[0] for the same reason.  Without it the first literal in a
     ; compilation gets index 0, and every caller that tests an object index for
@@ -288,6 +297,8 @@ DEF_FUNC comp_free, 8
     lea rdi, [rbx + Comp.objs]
     call buf_free
     lea rdi, [rbx + Comp.rawnames]
+    call buf_free
+    lea rdi, [rbx + Comp.typeparams]
     call buf_free
     lea rdi, [rbx + Comp.pending]
     call buf_free

@@ -11,10 +11,6 @@
 #
 # The positions are compared too, with include_attributes=True: all four of
 # lineno, col_offset, end_lineno and end_col_offset.
-#
-# One thing is left out because the parser, not this, is what is missing: the
-# PEP 695 type-parameter syntax, which it reads and discards.  It is in
-# bugs.md.
 
 import ast
 
@@ -86,6 +82,17 @@ STMTS = [
     "match x:\n    case _: pass",
     "match x:\n    case y if y > 1: pass",
     "match x:\n    case 1: pass\n    case 2: pass",
+    # PEP 695.  The parser used to skip the brackets by counting them, so a
+    # def carried no type parameters and `type X = int` was an Assign
+    # indistinguishable from `X = int`.
+    "type X = int", "type X[T] = list[T]",
+    "type X[T: int, *Ts, **P] = dict[T, P]",
+    "def f[T](x: T) -> T: return x", "def f[T: int](): pass",
+    "def f[T: (int, str)](): pass", "def f[*Ts](): pass", "def f[**P](): pass",
+    "def f[T, *Ts, **P](): pass", "async def f[T](): pass",
+    "@d\ndef f[T](): pass",
+    "class C[T]: pass", "class C[T](B, metaclass=M): pass",
+    "class C[T: int, *Ts, **P]: pass",
 ]
 
 print("=== expressions, in eval mode ===")
@@ -304,3 +311,26 @@ for src in STMTS:
     again = ast.unparse(ast.parse(out))
     if again != out:
         print("   NOT STABLE:", repr(again))
+
+print("=== PEP 695, with every position ===")
+# The bracket skipper accepted `def f[](): pass` and `def f[1, +]():` alike and
+# interned nothing.  These check the grammar it did not have, and the
+# positions: a TypeVarTuple starts at its `*`, not at the name.
+for src in ["def f[T, *Ts, **P](x): pass", "class C[T: (int, str)]: pass",
+            "type X[T: int] = list[T]", "type X = int"]:
+    print(repr(src), ast.dump(ast.parse(src), include_attributes=True))
+
+for src in ["def f[](): pass", "def f[1](): pass", "class C[T,,]: pass",
+            "type X[] = int", "def f[T:](): pass", "def f[*](): pass",
+            "def f[**](): pass", "class C[T: ]: pass", "type X = ",
+            "def f[T](: pass", "class C[T: pass"]:
+    try:
+        ast.parse(src)
+        print(repr(src), "PARSED")
+    except SyntaxError:
+        print(repr(src), "SyntaxError")
+
+# A trailing comma is allowed, and `type` stays a soft keyword.
+for src in ["def f[T,](): pass", "class C[*Ts,]: pass", "type X[T,] = T",
+            "type = 1", "type(x)", "type.mro", "x = type"]:
+    print(repr(src), ast.dump(ast.parse(src)))

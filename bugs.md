@@ -166,11 +166,19 @@ one-line fix.
   are accepted here.  The tree `single` produces is right: it is
   `Interactive`, and it compiles as `exec` does.
 
-- **PEP 695 type parameters are skipped, so `TypeAlias`, `TypeVar`,
-  `ParamSpec` and `TypeVarTuple` never appear in the AST.**  The parser
-  accepts the syntax by counting brackets and discarding what is inside, so
-  `type X = int` is indistinguishable from `X = int` in the tree and
-  `def f[T]()` reads as `def f()`.  `type_comment` is permanently None for a
+- **PEP 695 exists in the tree and not at run time.**  `ast.parse` now builds
+  `TypeAlias`, `TypeVar`, `ParamSpec` and `TypeVarTuple`, and the brackets are
+  a grammar rather than a bracket-depth skip, but the code generator still
+  lowers `type X = V` to the assignment `X = V` and still discards
+  `type_params`.  So `X` is the value itself rather than a `TypeAliasType`
+  with a lazily evaluated `__value__` and the alias's own repr, there are no
+  runtime `TypeVar` objects, and the annotation scope PEP 695 opens for the
+  parameters is not opened -- a bound or a `type` value that names one is a
+  NameError where CPython defers it.  A CPython-produced `.pyc` says the same
+  thing from the other side: `CALL_INTRINSIC_1` 7, 10 and 11 and
+  `CALL_INTRINSIC_2` 2, 3 and 4 are the intrinsics that build these, and they
+  raise `SystemError` naming the selector.  (They used to call `fatal_error`
+  and kill the interpreter.)  `type_comment` is permanently None for a
   different reason: there are no type comments.
 
 - **`_thread` is a single-threaded stand-in.**  `lib/_thread.py` gives

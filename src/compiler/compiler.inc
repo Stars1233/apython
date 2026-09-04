@@ -275,6 +275,19 @@ AST_PAT_AS      equ 81   ; a=pattern (0 = wildcard) b=obj index (name)
 
 AST_INTERACTIVE equ 82   ; clist=body    (the "single" mode root); produced
                          ; only by compile_ast_raw, never compiled
+
+; PEP 695.  The parameters are parsed into these and then ignored by
+; everything downstream: a type parameter is visible only to annotations, and
+; annotations are not evaluated here.  They exist so that the AST says what
+; the source said -- bugs.md carries what the RUNTIME would additionally need.
+AST_TYPEALIAS   equ 83   ; a=target name node, b=value; type params on the side
+AST_TYPEPARAMS  equ 84   ; clist=the parameters; hung off a def, class or alias
+                         ; through Comp.typeparams rather than a field, because
+                         ; a def has none free
+AST_TYPEVAR     equ 85   ; a=obj index (name), b=bound or 0
+AST_PARAMSPEC   equ 86   ; a=obj index (name)
+AST_TYPEVARTUPLE equ 87  ; a=obj index (name)
+
 AST_COUNT       equ 88
 
 ; AstNode.subkind for expression context
@@ -497,6 +510,11 @@ struc Comp
     .children:  resb Buf_size       ; u32[] committed child lists
     .pending:   resb Buf_size       ; u32[] LIFO scratch for lists under construction
     .objs:      resb Buf_size       ; PyObject*[], owned
+    .typeparams: resb Buf_size      ; u32[], parallel to .nodes: the
+                                    ; AST_TYPEPARAMS node a def, class or type
+                                    ; alias carries, or 0.  A side table
+                                    ; because AstNode is full: PEP 695 arrived
+                                    ; after every field had a use
     .rawnames:  resb Buf_size       ; u32[], parallel to .objs: for an
                                     ; identifier that private-name mangling
                                     ; rewrote, the obj index of the name as it

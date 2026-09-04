@@ -31,6 +31,7 @@ extern int_type
 extern float_type
 extern raise_exception
 extern exc_RuntimeError_type
+extern exc_SystemError_type
 extern exc_StopIteration_type
 extern exc_TypeError_type
 extern current_exception
@@ -66,6 +67,63 @@ extern op_send
 section .text
 
 ;; ============================================================================
+;; ci_unsupported(const char *prefix, uint32_t sel) -- raise
+;; `SystemError: <prefix> N`.  Does not return.
+;;
+;; The message is built into a static buffer because RAISE takes a literal and
+;; the selector is the one thing worth saying.  One process-wide buffer is
+;; safe: it is written and handed to raise_exception before anything else can
+;; run, and the exception copies it.
+;; ============================================================================
+section .bss
+ci_msgbuf: resb 64
+section .text
+DEF_FUNC_BARE ci_unsupported
+    lea r9, [rel ci_msgbuf]
+.cu_copy:
+    mov al, [rdi]
+    test al, al
+    jz .cu_space
+    mov [r9], al
+    inc rdi
+    inc r9
+    jmp .cu_copy
+.cu_space:
+    mov byte [r9], ' '
+    inc r9
+    mov r10d, 100                       ; the divisor, 100 then 10 then 1
+    xor r11d, r11d                      ; a digit has been written
+.cu_digit:
+    mov eax, esi
+    xor edx, edx
+    div r10d                            ; eax = digit, edx = what is left
+    test eax, eax
+    jnz .cu_emit
+    test r11d, r11d
+    jnz .cu_emit
+    cmp r10d, 1
+    jne .cu_next
+.cu_emit:
+    add al, '0'
+    mov [r9], al
+    inc r9
+    mov r11d, 1
+.cu_next:
+    mov esi, edx
+    mov eax, r10d
+    xor edx, edx
+    mov ecx, 10
+    div ecx
+    mov r10d, eax
+    test r10d, r10d
+    jnz .cu_digit
+    mov byte [r9], 0
+    lea rdi, [rel exc_SystemError_type]
+    lea rsi, [rel ci_msgbuf]
+    call raise_exception
+END_FUNC ci_unsupported
+
+;; ============================================================================
 ;; op_call_intrinsic_1 - Call 1-arg intrinsic function
 ;;
 ;; CALL_INTRINSIC_1 (173): arg selects the intrinsic.
@@ -87,9 +145,16 @@ DEF_FUNC_BARE op_call_intrinsic_1
     cmp ecx, 6
     je .ci1_list_to_tuple
 
-    ; Unknown intrinsic — fatal
-    CSTRING rdi, "unimplemented CALL_INTRINSIC_1"
-    call fatal_error
+    ; Anything else is a real program reaching an intrinsic this interpreter
+    ; does not have -- the PEP 695 family (7, 10, 11) is the live example, and
+    ; a CPython .pyc holding `type X = int` used to kill the process here.
+    ; A SystemError naming the selector is what CPython raises for an
+    ; intrinsic it cannot dispatch, and it leaves the program able to report
+    ; it.  TOS is left where it is: the unwinder empties the stack.
+    CSTRING rdi, "CALL_INTRINSIC_1 selector"
+    mov esi, ecx
+    jmp ci_unsupported
+
 
 ;; INTRINSIC_IMPORT_STAR (arg=2): import * from module
 ;; TOS = module object. Copy module's exported names into frame.locals.
@@ -1126,12 +1191,12 @@ DEF_FUNC_BARE op_call_intrinsic_2
     cmp ecx, 1
     je .ci2_prep_reraise
 
-    ; For type parameter intrinsics, just keep TOS1 and discard TOS
-    ; (a simplification — full type parameter support would need more)
-    VPOP rdi
-    DECREF_V rdi, rsi
-    ; TOS1 stays
-    DISPATCH
+    ; The rest are the PEP 695 constructors (2, 3, 4), which this interpreter
+    ; does not have.  Dropping one operand and keeping the other silently
+    ; produced a wrong TypeVar rather than an error; say so instead.
+    CSTRING rdi, "CALL_INTRINSIC_2 selector"
+    mov esi, ecx
+    jmp ci_unsupported
 
 .ci2_prep_reraise:
     ; INTRINSIC_PREP_RERAISE_STAR: TOS = exc_list, TOS1 = orig_exc

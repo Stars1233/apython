@@ -14,9 +14,14 @@
 ; every one of those is list surgery, which is cheap in Python and expensive
 ; here.
 ;
-; One raw node is a ten-tuple:
+; One raw node is an eleven-tuple:
 ;
-;   (kind, subkind, lineno, col, end_lineno, end_col, a, b, c, children)
+;   (kind, subkind, lineno, col, end_lineno, end_col, a, b, c, children,
+;    type_params)
+;
+; type_params is the PEP 695 list, which a def, a class and a type alias carry
+; in a side table rather than a field -- AstNode was full before PEP 695
+; existed.  It is None for every other kind.
 ;
 ; a, b and c are a nested raw node, a Python object, an int, or None,
 ; according to the kind; `children` is a list, a single nested node, or None,
@@ -297,7 +302,7 @@ DEF_FUNC ar_node, ARN_FRAME
     movzx eax, byte [rbx + AstNode.kind]
     mov [rbp - ARN_KIND], rax
 
-    mov edi, 10
+    mov edi, 11
     call tuple_new
     test rax, rax
     jz .arn_fail
@@ -377,6 +382,28 @@ DEF_FUNC ar_node, ARN_FRAME
     movzx edx, byte [rcx + 3]
     call ar_children
     mov [r12 + 72], rax
+
+    ; 10 type_params: the children of the AST_TYPEPARAMS node hung off this
+    ; one, or None.  Read through the node rather than a field because a def
+    ; has none free.
+    mov rdi, [rbp - ARN_COMP]
+    mov rsi, [rbp - ARN_IDX]
+    extern ast_typeparams_at
+    call ast_typeparams_at
+    test eax, eax
+    jz .arn_no_typeparams
+    mov rdi, [rbp - ARN_COMP]
+    mov esi, eax
+    mov edx, AF_NODE
+    call ar_field
+    jmp .arn_have_typeparams
+.arn_no_typeparams:
+    LOAD_NONE rax
+    INCREF rax
+.arn_have_typeparams:
+    mov r12, [rbp - ARN_TUP]
+    mov r12, [r12 + PyTupleObject.ob_item]
+    mov [r12 + 80], rax
 
     mov rax, [rbp - ARN_TUP]
     pop r12
@@ -484,6 +511,11 @@ ar_fieldkinds:
     db AF_NONE, AF_NONE, AF_NONE, AC_NODE ; 80 PAT_OR
     db AF_NODE, AF_OBJ , AF_NONE, AC_NONE ; 81 PAT_AS
     db AF_NONE, AF_NONE, AF_NONE, AC_NODE ; 82 INTERACTIVE
+    db AF_NODE, AF_NODE, AF_NONE, AC_NONE ; 83 TYPEALIAS
+    db AF_NONE, AF_NONE, AF_NONE, AC_NODE ; 84 TYPEPARAMS
+    db AF_OBJ , AF_NODE, AF_NONE, AC_NONE ; 85 TYPEVAR
+    db AF_OBJ , AF_NONE, AF_NONE, AC_NONE ; 86 PARAMSPEC
+    db AF_OBJ , AF_NONE, AF_NONE, AC_NONE ; 87 TYPEVARTUPLE
     db AF_NONE, AF_NONE, AF_NONE, AC_NONE ; 83 --
     db AF_NONE, AF_NONE, AF_NONE, AC_NONE ; 84 --
     db AF_NONE, AF_NONE, AF_NONE, AC_NONE ; 85 --

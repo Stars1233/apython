@@ -19,6 +19,7 @@
 extern ast_at
 extern ast_commit
 extern ast_make
+extern ast_set_typeparams
 extern ast_end_at
 extern ast_end_here
 extern ast_mark
@@ -2057,6 +2058,7 @@ PDF_ARGS  equ 32
 PDF_MARK  equ 40
 PDF_NODE  equ 48
 PDF_RET   equ 56          ; the return annotation, kept but never generated
+PDF_TP    equ 64          ; the PEP 695 type parameters, likewise
 PDF_FRAME equ 72          ; + 1 push = 80
 DEF_FUNC_LOCAL ps_def, PDF_FRAME
     push rbx
@@ -2074,7 +2076,8 @@ DEF_FUNC_LOCAL ps_def, PDF_FRAME
     mov [rbp - PDF_NAME], rax
 
     mov rdi, rbx
-    call par_skip_type_params
+    lea rsi, [rbp - PDF_TP]
+    call par_type_params
     test eax, eax
     jz .fail
 
@@ -2143,6 +2146,11 @@ DEF_FUNC_LOCAL ps_def, PDF_FRAME
     mov [rax + AstNode.b], edx
     mov rdx, [rbp - PDF_RET]
     mov [rax + AstNode.c], edx
+    ; The type parameters go in the side table: every field is spoken for.
+    mov rdi, rbx
+    mov esi, [rbp - PDF_NODE]
+    mov edx, [rbp - PDF_TP]
+    call ast_set_typeparams
     mov rax, [rbp - PDF_NODE]
     pop rbx
     leave
@@ -2290,65 +2298,192 @@ DEF_FUNC_LOCAL ps_async, PAS_FRAME
 END_FUNC ps_async
 
 ;; ============================================================================
-;; par_skip_type_params(Comp *c) -> rax = 1 ok, 0 error
+;; par_type_params(Comp *c, uint32_t *out) -> rax = 1 ok, 0 error
 ;;
 ;; PEP 695's `def f[T](...)`, `class C[T]:` and `type X[T] = ...`.
 ;;
-;; The parameters are read and discarded.  A type parameter is visible only to
-;; annotations, and annotations are not evaluated here at all -- op_make_function
-;; pops and discards them -- so there is nothing for the names to be bound for.
-;; Accepting the syntax is what matters: without this the whole definition is a
-;; syntax error rather than a function that ignores its type parameters.
+;;   type_params: '[' type_param (',' type_param)* [','] ']'
+;;   type_param:  NAME [':' expression] | '*' NAME | '**' NAME
+;;
+;; *out is an AST_TYPEPARAMS node, or 0 when there were no brackets.  The
+;; parameters are parsed and then ignored by everything downstream: a type
+;; parameter is visible only to annotations, and annotations are not evaluated
+;; here at all -- op_make_function pops and discards them -- so there is
+;; nothing for the names to be bound for.  What the tree says is the point:
+;; this was a bracket-depth token skipper that interned nothing, so
+;; `type X = int` was indistinguishable from `X = int` in the AST, and
+;; `def f[1, +]()` was accepted.
 ;; ============================================================================
-STP_DEPTH equ 8
-STP_FRAME equ 24          ; + 1 push = 32
-DEF_FUNC par_skip_type_params, STP_FRAME
+PTP_OUT   equ 8
+PTP_MARK  equ 16
+PTP_LINE  equ 24
+PTP_NAME  equ 32
+PTP_ILINE equ 40          ; where the item itself starts: the '*' or the name
+PTP_N     equ 48          ; items so far, so that `[]` is rejected
+PTP_FRAME equ 56          ; + 1 push = 64
+DEF_FUNC par_type_params, PTP_FRAME
     push rbx
     mov rbx, rdi
+    mov [rbp - PTP_OUT], rsi
+    mov qword [rsi], 0
+
     call par_kind
     cmp eax, TOK_LSQB
-    jne .none
-    mov qword [rbp - STP_DEPTH], 0
-.loop:
+    jne .ptp_none
+
+    mov rdi, rbx
+    call par_peek
+    TOK_POS rax
+    mov [rbp - PTP_LINE], rcx
+    mov rdi, rbx
+    call par_advance                    ; the '['
+
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PTP_MARK], rax
+    mov qword [rbp - PTP_N], 0
+
+.ptp_item:
+    ; Each parameter carries its own position, and it is the '*' or the '**'
+    ; that starts a starred one -- CPython's TypeVarTuple begins at the star.
+    ; Taken before par_kind, which returns in the same register par_peek does.
+    mov rdi, rbx
+    call par_peek
+    TOK_POS rax
+    mov [rbp - PTP_ILINE], rcx
+
     mov rdi, rbx
     call par_kind
-    cmp eax, TOK_ENDMARKER
-    je .unterminated
-    cmp eax, TOK_NEWLINE
-    je .unterminated
-    cmp eax, TOK_LSQB
-    jne .not_open
-    inc qword [rbp - STP_DEPTH]
-.not_open:
     cmp eax, TOK_RSQB
-    jne .step
-    dec qword [rbp - STP_DEPTH]
-    cmp qword [rbp - STP_DEPTH], 0
-    jne .step
+    je .ptp_maybe_close
+    cmp eax, TOK_ENDMARKER
+    je .ptp_unterminated
+    cmp eax, TOK_NEWLINE
+    je .ptp_unterminated
+
+    ; `*Ts` and `**P` are the two starred forms; anything else is a plain name.
+    mov qword [rbp - PTP_NAME], AST_TYPEVAR
+    cmp eax, TOK_STAR
+    je .ptp_star
+    cmp eax, TOK_DOUBLESTAR
+    je .ptp_doublestar
+    jmp .ptp_name
+.ptp_star:
+    mov qword [rbp - PTP_NAME], AST_TYPEVARTUPLE
     mov rdi, rbx
     call par_advance
+    jmp .ptp_name
+.ptp_doublestar:
+    mov qword [rbp - PTP_NAME], AST_PARAMSPEC
+    mov rdi, rbx
+    call par_advance
+
+.ptp_name:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_NAME
+    jne .ptp_expected_name
+    mov rdi, rbx
+    call par_name_obj                   ; interns and advances
+    test rax, rax
+    jz .ptp_fail
+    mov r8d, eax                        ; a = the name
+
+    ; A bound belongs to a plain TypeVar only: `*Ts: int` is a syntax error.
+    xor r9d, r9d
+    mov rdi, rbx
+    push r8
+    call par_kind
+    pop r8
+    cmp eax, TOK_COLON
+    jne .ptp_build
+    cmp qword [rbp - PTP_NAME], AST_TYPEVAR
+    jne .ptp_bad_bound
+    push r8
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    pop r8
+    test rax, rax
+    jz .ptp_fail
+    mov r9d, eax                        ; b = the bound
+
+.ptp_build:
+    mov rdi, rbx
+    mov rsi, [rbp - PTP_NAME]
+    xor edx, edx
+    mov rcx, [rbp - PTP_ILINE]
+    call ast_make
+    test rax, rax
+    jz .ptp_fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    inc qword [rbp - PTP_N]
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COMMA
+    jne .ptp_close
+    mov rdi, rbx
+    call par_advance
+    jmp .ptp_item
+
+.ptp_maybe_close:
+    ; `[]` is not an empty list of parameters, it is a syntax error.
+    cmp qword [rbp - PTP_N], 0
+    je .ptp_expected_name
+
+.ptp_close:
+    mov rdi, rbx
+    mov esi, TOK_RSQB
+    CSTRING rdx, "'[' was never closed"
+    call par_expect
+    test eax, eax
+    jz .ptp_fail
+
+    mov rdi, rbx
+    mov esi, AST_TYPEPARAMS
+    mov rdx, [rbp - PTP_LINE]
+    mov rcx, [rbp - PTP_MARK]
+    call par_finish_list
+    test rax, rax
+    jz .ptp_fail
+    mov rcx, [rbp - PTP_OUT]
+    mov [rcx], rax
     mov eax, 1
     pop rbx
     leave
     ret
-.step:
+
+.ptp_expected_name:
     mov rdi, rbx
-    call par_advance
-    jmp .loop
-.unterminated:
+    CSTRING rsi, "expected a type parameter name"
+    call par_syntax_error
+    jmp .ptp_fail
+.ptp_bad_bound:
+    mov rdi, rbx
+    CSTRING rsi, "cannot use bound with TypeVarTuple or ParamSpec"
+    call par_syntax_error
+    jmp .ptp_fail
+.ptp_unterminated:
     mov rdi, rbx
     CSTRING rsi, "'[' was never closed"
     call par_syntax_error
+.ptp_fail:
     xor eax, eax
     pop rbx
     leave
     ret
-.none:
+
+.ptp_none:
     mov eax, 1
     pop rbx
     leave
     ret
-END_FUNC par_skip_type_params
+END_FUNC par_type_params
 
 ;; ============================================================================
 ;; par_looks_like_type_alias(Comp *c) -> rax = 1 for a PEP 695 `type X = ...`
@@ -2399,7 +2534,9 @@ PTA_NAME  equ 16
 PTA_MARK  equ 24
 PTA_VALUE equ 32
 PTA_NODE  equ 40
-PTA_FRAME equ 40          ; + 1 push = 48
+PTA_TP    equ 48          ; the PEP 695 type parameters
+PTA_NLINE equ 56          ; where the alias's own name starts
+PTA_FRAME equ 72          ; + 1 push = 80
 DEF_FUNC_LOCAL ps_type_alias, PTA_FRAME
     push rbx
     mov rbx, rdi
@@ -2409,8 +2546,10 @@ DEF_FUNC_LOCAL ps_type_alias, PTA_FRAME
     mov rdi, rbx
     call par_advance                    ; the soft keyword `type`
 
+    mov rdi, rbx
     call par_peek
     TOK_POS rax
+    mov [rbp - PTA_NLINE], rcx
     mov rdi, rbx
     call par_name_obj
     test rax, rax
@@ -2419,7 +2558,7 @@ DEF_FUNC_LOCAL ps_type_alias, PTA_FRAME
     mov rdi, rbx
     mov esi, AST_NAME
     mov edx, CTX_STORE
-    mov rcx, [rbp - PTA_LINE]
+    mov rcx, [rbp - PTA_NLINE]
     xor r9d, r9d
     call ast_make
     test rax, rax
@@ -2427,7 +2566,8 @@ DEF_FUNC_LOCAL ps_type_alias, PTA_FRAME
     mov [rbp - PTA_NAME], rax
 
     mov rdi, rbx
-    call par_skip_type_params
+    lea rsi, [rbp - PTA_TP]
+    call par_type_params
     test eax, eax
     jz .fail
 
@@ -2445,25 +2585,25 @@ DEF_FUNC_LOCAL ps_type_alias, PTA_FRAME
     jz .fail
     mov [rbp - PTA_VALUE], rax
 
+    ; A node of its own, which the code generator lowers to the assignment
+    ; this used to build directly.  CPython's TypeAlias is not an assignment:
+    ; its value is evaluated lazily, inside a TypeAliasType.  That is the
+    ; runtime half, and it is in bugs.md; the tree is what says what was
+    ; written.
     mov rdi, rbx
-    call ast_mark
-    mov [rbp - PTA_MARK], rax
-    mov rdi, rbx
-    mov rsi, [rbp - PTA_NAME]
-    call ast_push
-    mov rdi, rbx
-    mov esi, AST_ASSIGN
-    mov rdx, [rbp - PTA_LINE]
-    mov rcx, [rbp - PTA_MARK]
-    call par_finish_list
+    mov esi, AST_TYPEALIAS
+    xor edx, edx
+    mov rcx, [rbp - PTA_LINE]
+    mov r8d, [rbp - PTA_NAME]
+    mov r9d, [rbp - PTA_VALUE]
+    call ast_make
     test rax, rax
     jz .fail
     mov [rbp - PTA_NODE], rax
     mov rdi, rbx
-    mov rsi, rax
-    call ast_at
-    mov rdx, [rbp - PTA_VALUE]
-    mov [rax + AstNode.b], edx
+    mov esi, eax
+    mov edx, [rbp - PTA_TP]
+    call ast_set_typeparams
     mov rax, [rbp - PTA_NODE]
     pop rbx
     leave
@@ -2896,7 +3036,8 @@ PC_BASES  equ 24
 PC_MARK   equ 32
 PC_NODE   equ 40
 PC_PRIV   equ 48          ; Comp.private, saved across the body
-PC_FRAME  equ 56          ; + 1 push = 64
+PC_TP     equ 56          ; the PEP 695 type parameters
+PC_FRAME  equ 72          ; + 1 push = 80
 DEF_FUNC_LOCAL ps_class, PC_FRAME
     push rbx
     mov rbx, rdi
@@ -2914,7 +3055,8 @@ DEF_FUNC_LOCAL ps_class, PC_FRAME
     mov qword [rbp - PC_BASES], 0
 
     mov rdi, rbx
-    call par_skip_type_params
+    lea rsi, [rbp - PC_TP]
+    call par_type_params
     test eax, eax
     jz .fail
 
@@ -2971,6 +3113,10 @@ DEF_FUNC_LOCAL ps_class, PC_FRAME
     mov [rax + AstNode.a], edx
     mov rdx, [rbp - PC_BASES]
     mov [rax + AstNode.b], edx
+    mov rdi, rbx
+    mov esi, [rbp - PC_NODE]
+    mov edx, [rbp - PC_TP]
+    call ast_set_typeparams
     mov rax, [rbp - PC_NODE]
     pop rbx
     leave

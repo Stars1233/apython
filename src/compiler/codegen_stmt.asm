@@ -502,6 +502,52 @@ DEF_FUNC_LOCAL cg_s_assign, CST_FRAME
     ret
 END_FUNC cg_s_assign
 
+;; cg_s_typealias - `type X = V`, and `type X[T] = V`
+;;
+;; Lowered to the assignment `X = V`, which is what the parser used to build
+;; directly.  CPython's TypeAlias is not an assignment: X becomes a
+;; TypeAliasType whose value is evaluated lazily, inside a scope where the
+;; type parameters are bound.  There is no such type here and nothing that
+;; would observe one, since annotations are never evaluated; the difference is
+;; in bugs.md, and the tree now says what was written either way.
+CTA_LINE  equ 8
+CTA_FRAME equ 24            ; + 3 pushes = 48, 16-byte aligned
+DEF_FUNC_LOCAL cg_s_typealias, CTA_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.b]          ; the value
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .cta_fail
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.a]          ; the name, with a Store context
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_store
+    test eax, eax
+    jz .cta_fail
+    mov eax, 1
+.cta_fail:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_s_typealias
+
 ;; cg_s_augassign - `a += b`
 ;;
 ;; The target is evaluated ONCE.  A name just loads and stores, but a subscript
@@ -2547,13 +2593,21 @@ cg_stmt_table:
     dq cg_s_match       ; 70 AST_MATCH
     dq 0                ; 71 AST_EXTRA
     dq cg_s_decorated   ; 72 AST_DECORATED
-    dq 0                ; 73 
-    dq 0                ; 74 
-    dq 0                ; 75 
-    dq 0                ; 76 
-    dq 0                ; 77 
-    dq 0                ; 78 
-    dq 0                ; 79 
+    dq 0                ; 73 AST_CASE
+    dq 0                ; 74 AST_PAT_VALUE
+    dq 0                ; 75 AST_PAT_CAPTURE
+    dq 0                ; 76 AST_PAT_SEQUENCE
+    dq 0                ; 77 AST_PAT_MAPPING
+    dq 0                ; 78 AST_PAT_CLASS
+    dq 0                ; 79 AST_PAT_KEYWORD
+    dq 0                ; 80 AST_PAT_OR
+    dq 0                ; 81 AST_PAT_AS
+    dq 0                ; 82 AST_INTERACTIVE  (never compiled)
+    dq cg_s_typealias   ; 83 AST_TYPEALIAS
+    dq 0                ; 84 AST_TYPEPARAMS   (parsed, never generated)
+    dq 0                ; 85 AST_TYPEVAR
+    dq 0                ; 86 AST_PARAMSPEC
+    dq 0                ; 87 AST_TYPEVARTUPLE
 
 cg_star_name: db "*", 0
 

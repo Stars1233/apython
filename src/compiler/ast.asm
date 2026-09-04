@@ -260,6 +260,10 @@ DEF_FUNC ast_make, AM_FRAME
     mov rdi, rbx
     mov rsi, rax
     call ast_span_here
+    ; And the type-parameter slot, zero until a def, class or alias fills it.
+    lea rdi, [rbx + Comp.typeparams]
+    xor esi, esi
+    call buf_push_u32
 
     ; The index is one less than the new length, since buf_reserve appended it.
     mov rax, [rbx + Comp.nodes + Buf.len]
@@ -394,6 +398,35 @@ DEF_FUNC ast_obj, 8            ; the 8 pads the push to a 16-aligned rsp
     leave
     ret
 END_FUNC ast_obj
+
+;; ============================================================================
+;; ast_set_typeparams(Comp *c, uint32_t node, uint32_t tp) -- hang a PEP 695
+;; parameter list off a def, a class or a type alias
+;; ast_typeparams_at(Comp *c, uint32_t node) -> rax = that node, or 0
+;; ============================================================================
+global ast_set_typeparams
+DEF_FUNC_BARE ast_set_typeparams
+    mov rax, [rdi + Comp.typeparams + Buf.len]
+    cmp rsi, rax
+    jae .astp_out
+    mov rax, [rdi + Comp.typeparams + Buf.data]
+    mov [rax + rsi*4], edx
+.astp_out:
+    ret
+END_FUNC ast_set_typeparams
+
+global ast_typeparams_at
+DEF_FUNC_BARE ast_typeparams_at
+    mov rax, [rdi + Comp.typeparams + Buf.len]
+    cmp rsi, rax
+    jae .atpa_none
+    mov rax, [rdi + Comp.typeparams + Buf.data]
+    mov eax, [rax + rsi*4]
+    ret
+.atpa_none:
+    xor eax, eax
+    ret
+END_FUNC ast_typeparams_at
 
 ;; ============================================================================
 ;; ast_rawname_at(Comp *c, uint32_t idx) -> rax = the obj index of the name as

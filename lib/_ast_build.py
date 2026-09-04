@@ -45,9 +45,10 @@ ARGUMENTS, ARG, MATCH, EXTRA, DECORATED = range(68, 73)
 (CASE, PAT_VALUE, PAT_CAPTURE, PAT_SEQUENCE, PAT_MAPPING, PAT_CLASS,
  PAT_KEYWORD, PAT_OR, PAT_AS) = range(73, 82)
 INTERACTIVE = 82
+TYPEALIAS, TYPEPARAMS, TYPEVAR, PARAMSPEC, TYPEVARTUPLE = range(83, 88)
 
 # Raw tuple slots.
-K, SUB, LINE, COL, ELINE, ECOL, A, B, C, CH = range(10)
+K, SUB, LINE, COL, ELINE, ECOL, A, B, C, CH, TP = range(11)
 
 # --- subkind tables --------------------------------------------------------
 # One instance each, not one per node: CPython's parser shares them, so every
@@ -325,6 +326,23 @@ def _b_expression(r, p):
     return _ast.Expression(_node(r[A]))
 
 
+def _b_typealias(r, p):
+    # CPython's `name` is a Name node with a Store context, not a string.
+    return _ast.TypeAlias(_node(r[A]), _type_params(r[TP]), _node(r[B]), **p)
+
+
+def _b_typevar(r, p):
+    return _ast.TypeVar(r[A], _opt(r[B]), **p)
+
+
+def _b_paramspec(r, p):
+    return _ast.ParamSpec(r[A], **p)
+
+
+def _b_typevartuple(r, p):
+    return _ast.TypeVarTuple(r[A], **p)
+
+
 def _b_interactive(r, p):
     # mode="single".  Module's body and Interactive's are the same list; the
     # parser hands back the one node with a different kind on it.
@@ -511,9 +529,17 @@ def _b_decorated(r, p):
     return inner
 
 
+def _type_params(raw):
+    """The PEP 695 list, which rides beside the node rather than in it."""
+    if raw is None:
+        return []
+    return _each(raw[CH])
+
+
 def _b_functiondef(r, p):
     cls = _ast.AsyncFunctionDef if r[SUB] else _ast.FunctionDef
-    return cls(r[A], _arguments(r[B]), _each(r[CH]), [], _node(r[C]), None, [], **p)
+    return cls(r[A], _arguments(r[B]), _each(r[CH]), [], _node(r[C]), None,
+               _type_params(r[TP]), **p)
 
 
 def _b_classdef(r, p):
@@ -521,7 +547,8 @@ def _b_classdef(r, p):
     if r[B] is not None:
         call = _b_call(r[B], _pos(r[B]))
         bases, keywords = call.args, call.keywords
-    return _ast.ClassDef(r[A], bases, keywords, _each(r[CH]), [], [], **p)
+    return _ast.ClassDef(r[A], bases, keywords, _each(r[CH]), [],
+                         _type_params(r[TP]), **p)
 
 
 def _arguments(raw):
@@ -570,6 +597,8 @@ BUILDERS = {
     SETCOMP: _b_setcomp, DICTCOMP: _b_dictcomp, GENEXP: _b_genexp,
     COMPREHENSION: _b_comprehension,
     MODULE: _b_module, EXPRESSION: _b_expression, INTERACTIVE: _b_interactive,
+    TYPEALIAS: _b_typealias, TYPEVAR: _b_typevar, PARAMSPEC: _b_paramspec,
+    TYPEVARTUPLE: _b_typevartuple,
     EXPR_STMT: _b_expr_stmt,
     ASSIGN: _b_assign, AUGASSIGN: _b_augassign, ANNASSIGN: _b_annassign,
     IF: _b_if, WHILE: _b_while, FOR: _b_for, PASS: _b_pass, BREAK: _b_break,
