@@ -32,6 +32,10 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
 # in bugs.md, but it is not the compiler getting an answer wrong.
 SKIP="test_traceback_carets"
 
+# The skip list is itself ratcheted: a name here that no longer needs to be
+# is a skip that has outlived its reason, and a list nothing checks grows
+# quietly.  Each is re-run at the end and reported if it now matches.
+
 matched=""
 failed=""
 crashed=""
@@ -99,6 +103,22 @@ for n in $(grep -v '^#' "$FLOOR" | grep -v '^$'); do
     esac
 done
 
+# A skipped file that now matches should come off the list.
+unskipped=""
+for name in $SKIP; do
+    test_py="$TESTDIR/$name.py"
+    [ -f "$test_py" ] || continue
+    if [ -f "$TESTDIR/expected/$name.txt" ]; then
+        expected=$(cat "$TESTDIR/expected/$name.txt")
+    else
+        expected=$(timeout 60 $PYTHON "$test_py" 2>&1) || true
+    fi
+    actual=$(timeout 60 $APYTHON "$test_py" 2>&1)
+    if [ "$expected" = "$actual" ]; then
+        unskipped="$unskipped $name"
+    fi
+done
+
 echo ""
 echo "source compiler: $n_match matching, $n_fail differing, $n_crash crashing, $n_skip skipped, $total total"
 
@@ -119,6 +139,8 @@ for n in $matched; do
     if ! grep -qx "$n" "$FLOOR"; then gained="$gained $n"; fi
 done
 [ -n "$gained" ] && echo -e "${YELLOW}NEW${NC}$gained (raise the floor: bash tests/source_probe.sh --record)"
+
+[ -n "$unskipped" ] && echo -e "${YELLOW}UNSKIP${NC}$unskipped (matches now; take it out of SKIP)"
 
 [ $status -eq 0 ] && echo -e "${GREEN}PASS${NC} source-compiler scoreboard: $n_match matching, 0 crashing"
 exit $status
