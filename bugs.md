@@ -141,13 +141,14 @@ one-line fix.
   `<bound method from_bytes of <class 'int'>>` where CPython answers
   `<built-in method from_bytes of type object at 0x...>`.
 
-- **A `SyntaxError` carries none of its attributes.**  CPython sets `.msg`,
-  `.filename`, `.lineno`, `.offset` and `.text` from the exception's own
-  args, and `str(e)` appends " (file, line N)" to the message.  Here the
-  args are there -- the traceback header renders the file, the line and the
-  caret out of them -- but `exc_getattr` does not map any of the five names,
-  so `e.msg` is an AttributeError and `str(e)` is the bare message.  Every
-  tool that reports a syntax error reads at least `.lineno`.
+- **A syntax error's wording, its column and the width of its span are our
+  own.**  The attributes and `str()` are CPython's now, and the line is
+  right, but the message text is this compiler's ("expected ':'" where
+  CPython says something longer), the column is the token the parser stopped
+  at rather than the one CPython blames, and `end_lineno`/`end_offset` cover
+  the single character at that column -- CPython widens the span to a whole
+  token or to the subexpression the message is about.  `CompErr` has the two
+  fields for a narrower answer; nothing records one yet.
 
 - **`__slots__` names are not mangled.**  `class C: __slots__ = ('__x',)`
   then `self.__x = 5` is an AttributeError here: CPython's `type_new` mangles

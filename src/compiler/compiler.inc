@@ -421,8 +421,10 @@ struc CompErr
     .lineno: resd 1  ; +16
     .col:    resd 1  ; +20
     .set:    resd 1  ; +24  non-zero once an error is recorded
-    .pad:    resd 1  ; +28
-endstruc
+    .end_lineno: resd 1  ; +28  the end of the span the error covers, which
+    .end_col:    resd 1  ; +32  comp_error defaults to the one character at
+    .pad:        resd 1  ; +36  (lineno, col) -- CPython narrows some errors
+endstruc                 ;      to a whole token or a whole subexpression
 
 ; Compilation modes, matching CPython's start symbols.  SINGLE compiles
 ; exactly as EXEC -- there is no PRINT_EXPR here, so the interactive echo is

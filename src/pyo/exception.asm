@@ -411,8 +411,9 @@ DEF_FUNC exc_is_syntax
     lea rdx, [rel tuple_type]
     cmp rcx, rdx
     jne .no
+    ; Four fields, or CPython's six with end_lineno and end_offset.
     cmp qword [rax + PyTupleObject.ob_size], 4
-    jne .no
+    jl .no
     mov eax, 1
     pop rbx
     leave
@@ -425,18 +426,167 @@ DEF_FUNC exc_is_syntax
 END_FUNC exc_is_syntax
 
 ;; ============================================================================
-;; exc_syntax_str(PyObject *exc) -> PyStrObject*, the bare message
+;; exc_syntax_str(PyObject *exc) -> PyStrObject*
 ;;
-;; CPython appends " (filename, line N)" here.  The traceback printer shows the
-;; same information in its own File/line/caret block, so this is the one place
-;; the two differ, and only for code that prints a caught SyntaxError itself.
+;; "invalid syntax (f.py, line 1)" -- CPython's SyntaxError_str, which appends
+;; the basename of the filename and the line number to the message.  Each half
+;; is dropped when its field is not there, so `SyntaxError('m', (None, 1, 1,
+;; 't'))` renders as "m (line 1)" and one with neither is the bare message.
+;;
+;; This was the bare message, which is the form every tool that prints a caught
+;; SyntaxError itself shows.  The traceback block carries the location
+;; separately, so the difference was invisible in tracebacks and present
+;; everywhere else.
 ;; ============================================================================
-DEF_FUNC exc_syntax_str
+SS_MSG   equ 8              ; the str() of args[0], owned
+SS_LOC   equ 16             ; the location tuple, borrowed
+SS_DIG   equ 56             ; 32 bytes: the line number's digits, backwards
+SS_BUF   equ 584            ; 512 bytes of assembly space, at the bottom
+SS_FRAME equ 584            ; + 3 pushes = 608
+DEF_FUNC exc_syntax_str, SS_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+
     mov rax, [rdi + PyExceptionObject.exc_args]
     mov rax, [rax + PyTupleObject.ob_item]
     mov rdi, [rax]
     call obj_str
     V_UNPACK rax, rdx
+    test rax, rax
+    jz .ss_out
+    mov [rbp - SS_MSG], rax
+
+    ; Only a located SyntaxError gets a suffix.
+    mov rdi, rbx
+    call exc_is_syntax
+    test eax, eax
+    jz .ss_bare
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rax, [rax + 8]
+    mov [rbp - SS_LOC], rax
+
+    ; The message first, truncated to leave room for the suffix.
+    mov r13, [rbp - SS_MSG]
+    mov rdx, [r13 + PyStrObject.ob_size]
+    cmp rdx, 400
+    jle .ss_msg_len
+    mov edx, 400
+.ss_msg_len:
+    lea rdi, [rbp - SS_BUF]
+    lea rsi, [r13 + PyStrObject.data]
+    mov r12, rdi
+    add r12, rdx                        ; where the suffix will start
+    call ap_memcpy
+
+    ; " (basename", if there is a filename.  CPython prints the basename only.
+    mov rax, [rbp - SS_LOC]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rax, [rax]
+    V_TEST_PTR rax, rcx
+    ja .ss_no_file
+    test rax, rax
+    jz .ss_no_file
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .ss_no_file
+
+    mov word [r12], ' ('                ; ' ' then '(' -- NASM is little-endian
+    add r12, 2
+    lea rsi, [rax + PyStrObject.data]
+    mov rcx, [rax + PyStrObject.ob_size]
+    add rcx, rsi                        ; one past the end
+    mov r8, rsi
+.ss_base:
+    cmp r8, rcx
+    jae .ss_base_done
+    cmp byte [r8], '/'
+    jne .ss_base_next
+    lea rsi, [r8 + 1]
+.ss_base_next:
+    inc r8
+    jmp .ss_base
+.ss_base_done:
+    sub rcx, rsi                        ; what is left of it is the basename
+    cmp rcx, 100
+    jle .ss_base_len
+    mov ecx, 100
+.ss_base_len:
+    mov rdx, rcx
+    mov rdi, r12
+    add r12, rdx
+    call ap_memcpy
+    mov r13d, 1                         ; the parenthesis is open
+    jmp .ss_line
+
+.ss_no_file:
+    xor r13d, r13d
+.ss_line:
+    ; ", line N", or " (line N" when there was no filename to open with.
+    mov rax, [rbp - SS_LOC]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rax, [rax + 8]
+    V_IS_INT rax, rcx
+    jb .ss_close
+    V_TO_I64 rax
+    test r13d, r13d
+    jnz .ss_line_sep
+    mov word [r12], ' ('
+    add r12, 2
+    mov r13d, 1
+    jmp .ss_line_word
+.ss_line_sep:
+    mov word [r12], ', '                ; ',' then ' '
+    add r12, 2
+.ss_line_word:
+    mov dword [r12], 'line'
+    mov byte [r12 + 4], ' '
+    add r12, 5
+
+    ; The digits, least significant first into a scratch and then reversed.
+    xor r8d, r8d
+.ss_digit:
+    xor edx, edx
+    mov rcx, 10
+    div rcx                             ; rax = rax/10, rdx = the digit
+    add dl, '0'
+    mov [rbp - SS_DIG + r8], dl
+    inc r8
+    test rax, rax
+    jnz .ss_digit
+.ss_emit:
+    dec r8
+    mov dl, [rbp - SS_DIG + r8]
+    mov [r12], dl
+    inc r12
+    test r8, r8
+    jnz .ss_emit
+
+.ss_close:
+    test r13d, r13d
+    jz .ss_finish
+    mov byte [r12], ')'
+    inc r12
+.ss_finish:
+    lea rdi, [rbp - SS_BUF]
+    mov rsi, r12
+    sub rsi, rdi                        ; the length written
+    call str_new_heap
+    test rax, rax
+    jz .ss_bare
+    mov rdi, [rbp - SS_MSG]
+    mov [rbp - SS_MSG], rax
+    call obj_decref
+.ss_bare:
+    mov rax, [rbp - SS_MSG]
+.ss_out:
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
     leave
     ret
 END_FUNC exc_syntax_str
@@ -784,8 +934,24 @@ DEF_FUNC exc_str, ES_FRAME
     ret
 
 .es_empty:
+    ; A SyntaxError renders its msg, and with no args at all the msg is None:
+    ; CPython's str(SyntaxError()) is "None", not the empty string every other
+    ; argument-less exception gives.
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    call exc_isinstance
+    test eax, eax
+    jz .es_empty_str
+    CSTRING rdi, "None"
+    call str_from_cstr
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.es_empty_str:
     CSTRING rdi, ""
     call str_from_cstr
+    mov edx, TAG_PTR
     pop rbx
     leave
     ret
@@ -1052,6 +1218,114 @@ DEF_FUNC exc_getattr
     call ap_strcmp
     test eax, eax
     jz .get_value
+
+    ; SyntaxError's seven attributes.  They are not fields: they live in the
+    ; args tuple CPython puts them in -- args = (msg, (filename, lineno,
+    ; offset, text, end_lineno, end_offset)) -- so reading them back out of it
+    ; keeps one source of truth, and an exception built by hand with the same
+    ; args answers the same way.  r14d carries which one: 0 is the message and
+    ; 1..6 index the location tuple.
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "msg"
+    mov r14d, 0
+    call ap_strcmp
+    test eax, eax
+    jz .syn_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "filename"
+    mov r14d, 1
+    call ap_strcmp
+    test eax, eax
+    jz .syn_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "lineno"
+    mov r14d, 2
+    call ap_strcmp
+    test eax, eax
+    jz .syn_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "offset"
+    mov r14d, 3
+    call ap_strcmp
+    test eax, eax
+    jz .syn_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "text"
+    mov r14d, 4
+    call ap_strcmp
+    test eax, eax
+    jz .syn_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "end_lineno"
+    mov r14d, 5
+    call ap_strcmp
+    test eax, eax
+    jz .syn_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "end_offset"
+    mov r14d, 6
+    call ap_strcmp
+    test eax, eax
+    jz .syn_attr
+    jmp .not_syntax_attr
+
+.syn_attr:
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    call exc_isinstance
+    test eax, eax
+    jz .not_syntax_attr
+    ; An explicit `e.lineno = 3` wins, the way .get_code lets one win.
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    test rdi, rdi
+    jz .syn_from_args
+    mov rsi, r12
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz .found_in_dict
+.syn_from_args:
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    test rax, rax
+    jz .return_none
+    test r14d, r14d
+    jnz .syn_loc
+    cmp qword [rax + PyTupleObject.ob_size], 1
+    jl .return_none
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov rax, [rcx]
+    jmp .syn_have
+.syn_loc:
+    ; Anything short of a real tuple in args[1] means the attribute is absent,
+    ; which is None -- `SyntaxError('boom')` has a msg and no location.
+    cmp qword [rax + PyTupleObject.ob_size], 2
+    jl .return_none
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov rax, [rcx + 8]
+    V_TEST_PTR rax, rcx
+    ja .return_none
+    test rax, rax
+    jz .return_none
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    jne .return_none
+    movsxd rcx, r14d
+    cmp [rax + PyTupleObject.ob_size], rcx
+    jl .return_none
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rax, [rdx + rcx*8 - 8]
+.syn_have:
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+.not_syntax_attr:
 
     ; The instance dict comes first: a class attribute used to shadow the
     ; instance attribute of the same name, so `e.x = 2` then `e.x` read the

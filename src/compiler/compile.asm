@@ -1177,7 +1177,7 @@ DEF_FUNC comp_attach_location, AL_FRAME
     cmp rax, rcx
     jne .done
 .go:
-    mov edi, 4
+    mov edi, 6
     call tuple_new
     test rax, rax
     jz .done
@@ -1224,6 +1224,20 @@ DEF_FUNC comp_attach_location, AL_FRAME
     mov rdx, [rbp - AL_INNER]
     mov rdx, [rdx + PyTupleObject.ob_item]
     mov [rdx + 24], rax
+
+    ; CPython's tuple has six fields; the last two are the end of the span,
+    ; and its offset is one-based like the first one.
+    mov ecx, [rbx + Comp.err + CompErr.end_lineno]
+    V_PACK_I64 rcx, rsi
+    mov [rdx + 32], rcx
+    movsxd rcx, dword [rbx + Comp.err + CompErr.end_col]
+    test rcx, rcx
+    jns .end_col_ok
+    xor ecx, ecx
+.end_col_ok:
+    inc rcx
+    V_PACK_I64 rcx, rsi
+    mov [rdx + 40], rcx
 
     mov edi, 2
     call tuple_new
@@ -1346,6 +1360,13 @@ DEF_FUNC_BARE comp_error
     mov [rdi + Comp.err + CompErr.msg], rdx
     mov [rdi + Comp.err + CompErr.lineno], ecx
     mov [rdi + Comp.err + CompErr.col], r8d
+    ; The span defaults to the one character the error points at.  CPython's
+    ; is sometimes wider -- a whole token, or the subexpression a message is
+    ; about -- and nothing here knows which yet, so this says the narrowest
+    ; true thing rather than guessing.
+    mov [rdi + Comp.err + CompErr.end_lineno], ecx
+    inc r8d
+    mov [rdi + Comp.err + CompErr.end_col], r8d
     mov dword [rdi + Comp.err + CompErr.set], 1
 .already:
     xor eax, eax
