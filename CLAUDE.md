@@ -292,7 +292,9 @@ never needs Python -- and `gen_tables.py` refuses to run on anything but CPython
 
 **Gates:** `make check-source` and `make check-cpython-source` (both corpora
 compiled by this compiler and diffed against `python3` — where nearly every bug
-below was found), `./apython --selftest-compile`, `python3 src/compiler/lint.py`,
+below was found), `tests/syntax_probe.sh` (every field of a SyntaxError, over
+`tests/syntax_corpus.txt`, against CPython's; `--show` prints what differs),
+`./apython --selftest-compile`, `python3 src/compiler/lint.py`,
 and the `tests/test_compile_*.py` files.  All but the two `-source` targets run
 inside `make check`.
 

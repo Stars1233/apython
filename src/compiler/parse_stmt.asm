@@ -2572,7 +2572,8 @@ PDF_MARK  equ 40
 PDF_NODE  equ 48
 PDF_RET   equ 56          ; the return annotation, kept but never generated
 PDF_TP    equ 64          ; the PEP 695 type parameters, likewise
-PDF_FRAME equ 72          ; + 1 push = 80
+PDF_ARROW equ 72          ; the `->`'s line and column, for "expected ':'"
+PDF_FRAME equ 88          ; + 1 push = 96, 16-aligned
 DEF_FUNC_LOCAL ps_def, PDF_FRAME
     push rbx
     mov rbx, rdi
@@ -2623,8 +2624,31 @@ DEF_FUNC_LOCAL ps_def, PDF_FRAME
     call par_kind
     cmp eax, TOK_RARROW
     jne .suite
+    ; `def f(x) -> : pass` -- CPython treats the whole `-> expr` as optional
+    ; and, finding no expression, asks for the colon AT THE ARROW rather than
+    ; blaming whatever followed it.
+    mov rdi, rbx
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PDF_ARROW], ecx
+    mov ecx, [rax + Token.col]
+    mov [rbp - PDF_ARROW + 4], ecx
     mov rdi, rbx
     call par_advance
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COLON
+    jne .pdf_ann
+    mov ecx, [rbp - PDF_ARROW]
+    mov r8d, [rbp - PDF_ARROW + 4]
+    mov r9d, ecx
+    lea r10d, [r8d + 2]                 ; the arrow is two characters
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "expected ':'"
+    call comp_error_span
+    jmp .fail
+.pdf_ann:
     mov rdi, rbx
     mov esi, BP_NONE
     call par_expr

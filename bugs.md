@@ -67,25 +67,6 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **A syntax error's wording and span still differ in a measured tail.**
-  `tests/syntax_probe.sh` compiles a corpus of malformed snippets under both
-  interpreters and compares all five fields -- msg, lineno, offset,
-  end_lineno, end_offset.  Most match; `bash tests/syntax_probe.sh --show`
-  prints the rest, and `tests/syntax_floor.txt` keeps them from growing.
-
-  What is left is four shapes.  A bracket that is never closed is reported
-  at the token the parser gave up on rather than at the opening bracket, and
-  the wording is used where CPython says "invalid syntax" (`class C(object:`)
-  and not used where it does (`x = a[`).  Three errors are recorded with no
-  position at all and come out on line 0: a starred expression where one
-  cannot go, an operator with no operand, and `nonlocal` at module level.
-  CPython has several messages that suggest what was meant -- "Perhaps you
-  forgot a comma?", "Missing parentheses in call to 'print'" -- which are
-  its parser's second pass over a failed rule and have no counterpart here.
-  And an escape or a `\N{...}` that will not decode is reported by the
-  compiler, where CPython reports it as the codec's own error wrapped in a
-  SyntaxError.
-
 - **Functions with no docblock at all**, and, among those that have one,
   docblocks with no `->` signature line.  The signature is the only part of a
   function's contract that nothing checks, so its absence is a real gap rather

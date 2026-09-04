@@ -33,6 +33,7 @@ extern comp_lex_span
 extern ast_span_at
 extern par_expr
 extern par_finish_list
+extern exc_SyntaxError_type
 extern par_syntax_error
 
 
@@ -256,7 +257,7 @@ DEF_FUNC par_fstring_pieces, FS2_FRAME
     ; `{{` is a literal brace.
     lea rax, [r12 + 1]
     cmp rax, [rbp - FS2_END]
-    jae .bad_brace
+    jae .brace_at_end
     cmp byte [rax], '{'
     jne .field
     lea rdi, [rbp - FS2_BUF]
@@ -341,10 +342,37 @@ DEF_FUNC par_fstring_pieces, FS2_FRAME
     add rsp, 8
     ret
 
-.bad_brace:
+.brace_at_end:
+    ; `f'{'` -- the brace opens a field that the literal ends before.  CPython
+    ; says what it wanted and points just past the brace, with the span
+    ; ending where it begins.
+    mov rax, r12
+    inc rax
+    sub rax, [rbp - FS2_LBASE]
+    mov r8d, eax
+    mov ecx, [rbp - FS2_LINE]
+    mov r9d, ecx
+    mov r10d, r8d
     mov rdi, rbx
-    CSTRING rsi, "single '}' is not allowed in an f-string"
-    call par_syntax_error
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "f-string: expecting '}'"
+    extern comp_error_span
+    call comp_error_span
+    jmp .fail
+
+.bad_brace:
+    ; CPython says "f-string: single '}' is not allowed", and points AT the
+    ; brace -- unlike the missing one above, which it points just past.
+    mov rax, r12
+    sub rax, [rbp - FS2_LBASE]
+    mov r8d, eax
+    mov ecx, [rbp - FS2_LINE]
+    mov r9d, ecx
+    mov r10d, r8d
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "f-string: single '}' is not allowed"
+    call comp_error_span
     jmp .fail
 .bad:
     mov rdi, rbx
