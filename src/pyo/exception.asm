@@ -39,6 +39,7 @@ extern none_singleton
 extern int_from_i64
 extern int_is_integer
 extern int_to_i64
+extern int_type
 extern obj_repr
 extern obj_str
 extern raise_exception
@@ -529,9 +530,26 @@ DEF_FUNC exc_syntax_str, SS_FRAME
     mov rax, [rbp - SS_LOC]
     mov rax, [rax + PyTupleObject.ob_item]
     mov rax, [rax + 8]
+    ; The line may be an immediate or a heap int: the exception's args are
+    ; whatever the caller put there, and past +-2^50 -- or under INT_STRESS,
+    ; past 8 -- an ordinary line number is boxed.
     V_IS_INT rax, rcx
-    jb .ss_close
+    jae .ss_line_imm
+    V_TEST_PTR rax, rcx
+    ja .ss_close
+    test rax, rax
+    jz .ss_close
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel int_type]
+    cmp rcx, rdx
+    jne .ss_close
+    mov rdi, rax
+    mov edx, TAG_PTR
+    call int_to_i64
+    jmp .ss_line_have
+.ss_line_imm:
     V_TO_I64 rax
+.ss_line_have:
     test r13d, r13d
     jnz .ss_line_sep
     mov word [r12], ' ('
