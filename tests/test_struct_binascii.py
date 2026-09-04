@@ -138,3 +138,28 @@ def scope():
 show("dir()", scope)
 
 print("done")
+
+
+# base64 has to END on a group boundary, padding included: a2b_base64(b'ab')
+# is truncated input and not b'i'.  And quoted-printable's two rules are the
+# ones that make it that: whitespace at the end of a line is escaped, and a
+# line longer than 76 columns is broken with a soft `=`.
+print("=== base64 padding ===")
+for bad in (b"a", b"ab", b"abc", b"a=", b"ab=", b"a*b=", b"====", b"\n\n"):
+    try:
+        print(bad, binascii.a2b_base64(bad))
+    except binascii.Error as e:
+        print(bad, "Error:", e)
+for good in (b"", b"a", b"ab", b"abc", b"abcd", b"hello world",
+             b"\x00\xff\xfe", b"a" * 100, bytes(range(256))):
+    enc = binascii.b2a_base64(good)
+    print(len(good), enc[:16], binascii.a2b_base64(enc) == good)
+
+print("=== quoted-printable ===")
+for case in (b"", b"a", b"a" * 80, b"a" * 200, b"trailing ", b"tab\t",
+             b"line\nnext ", b"=", b"\xff", b"a b\tc",
+             b"x" * 74 + b" " + b"y" * 5, b"hi\r\nthere\r\n"):
+    enc = binascii.b2a_qp(case)
+    print(repr(case)[:26], repr(enc)[:64], binascii.a2b_qp(enc) == case)
+print(binascii.b2a_qp(b"a b", quotetabs=True), binascii.b2a_qp(b"a b", header=True))
+print("binascii done")

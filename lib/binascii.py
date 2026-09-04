@@ -113,6 +113,14 @@ def a2b_base64(data, *, strict_mode=False):
         raise Error("Invalid base64-encoded string: number of data characters "
                     "(%d) cannot be 1 more than a multiple of 4"
                     % (len(quad),))
+    # The input has to END on a group boundary, padding included: `a2b_base64
+    # (b'ab')` is an error and not b'i'.  A group of two needs two '=' after
+    # it and a group of three needs one; anything less is truncated input,
+    # which is what "Incorrect padding" means.
+    if len(quad) == 2 and padding < 2:
+        raise Error("Incorrect padding")
+    if len(quad) == 3 and padding < 1:
+        raise Error("Incorrect padding")
     if len(quad) == 2:
         v = (quad[0] << 18) | (quad[1] << 12)
         out.append((v >> 16) & 0xff)
@@ -176,20 +184,72 @@ def _hqx_table():
 _HEXDIGITS = b"0123456789ABCDEF"
 
 
+def _qp_escape(out, b):
+    out.append(0x3d)                  # '='
+    out.append(_HEXDIGITS[b >> 4])
+    out.append(_HEXDIGITS[b & 0xf])
+
+
 def b2a_qp(data, quotetabs=False, istext=True, header=False):
+    """Quoted-printable, including the two rules that make it that.
+
+    Whitespace at the end of a line -- or at the end of the data -- is
+    escaped, since a mail transport is free to strip it; and a line longer
+    than 76 characters is broken with a soft break, `=` and a newline, which
+    the decoder removes.  Without either, this encoded but did not round-trip
+    through anything that reflows or trims.
+    """
     data = _as_bytes(data)
     out = bytearray()
-    for i, b in enumerate(data):
-        if b == 0x20 and header:
+    n = len(data)
+    linelen = 0
+    i = 0
+    while i < n:
+        b = data[i]
+        if istext and b in (0x0a, 0x0d):
+            out.append(b)
+            if b == 0x0a:
+                linelen = 0
+            i += 1
+            continue
+
+        if b in (0x20, 0x09) and not quotetabs:
+            # A space or tab is literal unless it ends the line: then it has
+            # to be escaped, or a transport may eat it.
+            j = i + 1
+            while j < n and data[j] in (0x20, 0x09):
+                j += 1
+            at_end = j >= n or (istext and data[j] in (0x0a, 0x0d))
+            if not at_end:
+                width = 1
+                enc = None
+            else:
+                width = 3
+                enc = b
+        elif b == 0x20 and header:
+            width = 1
+            enc = None
+        elif 0x21 <= b <= 0x3c or 0x3e <= b <= 0x7e:
+            width = 1
+            enc = None
+        else:
+            width = 3
+            enc = b
+
+        # 76 columns including the soft break's own `=`.
+        if linelen + width > 75:
+            out.append(0x3d)
+            out.append(0x0a)
+            linelen = 0
+
+        if b == 0x20 and header and enc is None:
             out.append(0x5f)          # '_'
-        elif (0x21 <= b <= 0x3c or 0x3e <= b <= 0x7e
-              or b in (0x20, 0x09) and not quotetabs
-              or (istext and b in (0x0a, 0x0d))):
+        elif enc is None:
             out.append(b)
         else:
-            out.append(0x3d)          # '='
-            out.append(_HEXDIGITS[b >> 4])
-            out.append(_HEXDIGITS[b & 0xf])
+            _qp_escape(out, enc)
+        linelen += width
+        i += 1
     return bytes(out)
 
 
