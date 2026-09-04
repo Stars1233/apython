@@ -818,6 +818,33 @@ DEF_FUNC in_binop, IB_FRAME
     test rax, rax
     jz .fail
     mov r9, rax
+
+    ; A starred expression is not an operand: `1 +* 2` is CPython's plain
+    ; "invalid syntax" at the star.  The check belongs here rather than where
+    ; the star is parsed, because the contexts that DO take one -- `[*a]`,
+    ; `f(*a)`, `for a, *b in z` -- reach it at every binding power there is.
+    push r9
+    mov rdi, rbx
+    mov esi, r9d
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_STARRED
+    je .ib_bad_star
+    cmp ecx, AST_DOUBLESTARRED
+    je .ib_bad_star
+    pop r9
+    jmp .ib_build
+.ib_bad_star:
+    mov ecx, [rax + AstNode.lineno]
+    mov r8d, [rax + AstNode.col]
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "invalid syntax"
+    call comp_error
+    pop r9
+    jmp .fail
+
+.ib_build:
     mov rdi, rbx
     mov esi, AST_BINOP
     mov rdx, [rbp - IB_OP]
@@ -2414,7 +2441,28 @@ DEF_FUNC pf_dictset, PD_FRAME
 .dict_first:
     mov [rbp - PD_KEY], r8
     mov rdi, rbx
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov r8d, [rax + Token.col]
+    push rcx
+    push r8
+    mov rdi, rbx
     call par_advance                    ; consume ':'
+    ; CPython names what is missing rather than saying "invalid syntax", and
+    ; blames the colon it should have followed.
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_RBRACE
+    jne .dict_value
+    pop r8
+    pop rcx
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "expression expected after dictionary key and ':'"
+    call comp_error
+    jmp .fail
+.dict_value:
+    add rsp, 16
     mov rdi, rbx
     mov esi, BP_NONE
     call par_expr
@@ -2573,6 +2621,18 @@ DEF_FUNC pf_starred, PST_FRAME
     ; the `in` of a for statement, so `for a, *b in z` had no loop keyword left
     ; -- while `for *a, b in z` parsed, because there the star was not the
     ; element the `in` followed.
+    ; A star with nothing after it: `f(*)`.  CPython refuses it by name, and
+    ; capitalises it, which nothing else in its messages does.
+    call par_kind
+    cmp eax, TOK_RPAR
+    je .pst_bare
+    cmp eax, TOK_RSQB
+    je .pst_bare
+    cmp eax, TOK_RBRACE
+    je .pst_bare
+    cmp eax, TOK_COMMA
+    je .pst_bare
+    mov rdi, rbx
     mov esi, BP_STAROP
     call par_expr
     test rax, rax
@@ -2587,6 +2647,20 @@ DEF_FUNC pf_starred, PST_FRAME
     pop rbx
     leave
     ret
+.pst_bare:
+    ; `f(*)` is CPython's "Invalid star expression", capital and all; `f(**)`
+    ; and `{**}` are only "invalid syntax", so the wording follows which of
+    ; the two stars this was.  A trailing comma -- `x = *,` -- is the plain
+    ; message too.
+    mov rdi, rbx
+    CSTRING rsi, "invalid syntax"
+    cmp qword [rbp - PST_KIND], AST_STARRED
+    jne .pst_say
+    cmp eax, TOK_COMMA
+    je .pst_say
+    CSTRING rsi, "Invalid star expression"
+.pst_say:
+    call par_syntax_error
 .fail:
     xor eax, eax
     pop rbx

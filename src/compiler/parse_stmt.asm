@@ -37,6 +37,8 @@ extern comp_error_span
 extern ast_take_typecomment
 extern ast_park_typecomment
 extern ast_claim_typecomment
+extern exc_IndentationError_type
+extern ast_span_at
 extern comp_error
 extern comp_intern
 extern buf_free
@@ -85,11 +87,30 @@ DEF_FUNC par_module, PM_FRAME
     call par_kind
     cmp eax, TOK_ENDMARKER
     je .done
+    ; An INDENT where a statement should start is an indentation error, not a
+    ; grammar one, and CPython says so: "unexpected indent", at the first
+    ; non-blank column and running to the end of the line.
+    cmp eax, TOK_INDENT
+    je .bad_indent
     cmp eax, TOK_NEWLINE
     jne .stmt
     mov rdi, rbx
     call par_advance
     jmp .loop
+
+.bad_indent:
+    mov rdi, rbx
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov r8d, [rax + Token.col]
+    mov r9d, ecx
+    mov r10d, -2                        ; CPython's end_offset here is -1
+    mov rdi, rbx
+    lea rsi, [rel exc_IndentationError_type]
+    CSTRING rdx, "unexpected indent"
+    call comp_error_span
+    jmp .fail
+
 .stmt:
     ; par_statement_any, not par_simple_stmts: a compound statement consumes
     ; its own suite and the DEDENT that ends it, so there is no NEWLINE left
@@ -3229,8 +3250,27 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     jne .build
     cmp qword [rbp - PT2_FIN], 0
     jne .build
+    ; CPython blames the END of the try's body -- the place a handler should
+    ; have followed -- and runs the span to the end of that line.
     mov rdi, rbx
-    CSTRING rsi, "try statement must have except or finally"
+    mov esi, [rbp - PT2_BODY]
+    call ast_span_at
+    test rax, rax
+    jz .try_no_span
+    cmp dword [rax + AstSpan.end_lineno], -1
+    je .try_no_span
+    mov ecx, [rax + AstSpan.end_lineno]
+    mov r8d, [rax + AstSpan.end_col]
+    mov r9d, ecx
+    mov r10d, -2                        ; CPython's end_offset here is -1
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "expected 'except' or 'finally' block"
+    call comp_error_span
+    jmp .fail
+.try_no_span:
+    mov rdi, rbx
+    CSTRING rsi, "expected 'except' or 'finally' block"
     call par_syntax_error
     jmp .fail
 
