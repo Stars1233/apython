@@ -30,10 +30,17 @@ reasoning that chose them and what changing one would cost.
   with the shadowed ones saved and restored around it, which is a symbol-table
   change as much as a codegen one.
 
-- **`str.encode` and `bytes.decode` know only utf-8, ascii and latin-1.**
-  Any other name is a LookupError, where CPython would find the codec through
-  the registry; reaching it from the interpreter would mean calling Python
-  from a builtin method.
+- **No `encodings` package, so the registry finds only what this tree ships.**
+  `str.encode` and `bytes.decode` reach the registry now, and the registry has
+  what `lib/_codecs.py` can express without a table: utf-8 and its BOM'd form,
+  ascii, latin-1, the six UTF-16 and UTF-32 forms, the two escape codecs, and
+  their aliases.  CPython's `encodings/` is two hundred modules, most of them
+  a 256-entry mapping, and this ships none of them -- so `cp1252`,
+  `iso-8859-15`, `koi8-r` and the rest are a LookupError unless a CPython
+  `Lib/` is on the path, in which case `encodings.search_function` finds them
+  and they work.  `namereplace` is the one error handler that only
+  approximates: it needs a code point's Unicode NAME, and the table that
+  resolves `\N{...}` at compile time indexes the other way.
 
 - **The `_abc` registry and caches hold strong references.**  CPython uses
   weak ones, so a class registered against an ABC can be collected and the
@@ -142,14 +149,6 @@ than lying — but they are ordinary Python that does not work:
   released.  Putting them somewhere the unwinder frees would be worse: an
   argument's `__str__` can run Python, and a raise caught inside it would
   free a buffer `str_mod` is still reading.
-
-- **The asm codec sites pre-render their exceptions.**  A decode error
-  carries CPython's five fields (`encoding`, `object`, `start`, `end`,
-  `reason`) and its message names the codec, the byte and the position; what
-  the asm sites still cannot do is raise a real five-argument
-  `UnicodeEncodeError` the way `lib/_codecs.py` does, because `exc_new` has
-  no way to call an exception type with five arguments.  The *encode* arms
-  therefore build CPython's wording by hand and set no fields.
 
 - **A memoryview with a step other than 1 is not a view.**  `mv[::2]` and
   `mv[::-1]` raise NotImplementedError.  CPython answers with a

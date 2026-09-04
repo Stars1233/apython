@@ -1237,6 +1237,80 @@ DEF_FUNC exc_getattr
     test eax, eax
     jz .get_value
 
+    ; UnicodeEncodeError's and UnicodeDecodeError's five, which are their
+    ; whole point: an error handler is given the exception and reads the span
+    ; it has to replace out of it.  They are not fields either -- args is
+    ; (encoding, object, start, end, reason), which is the shape both the
+    ; message builder and lib/_codecs already assume -- so reading them back
+    ; out keeps one source of truth and needs no five-argument constructor.
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "encoding"
+    mov r14d, 0
+    call ap_strcmp
+    test eax, eax
+    jz .uni_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "object"
+    mov r14d, 1
+    call ap_strcmp
+    test eax, eax
+    jz .uni_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "start"
+    mov r14d, 2
+    call ap_strcmp
+    test eax, eax
+    jz .uni_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "end"
+    mov r14d, 3
+    call ap_strcmp
+    test eax, eax
+    jz .uni_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "reason"
+    mov r14d, 4
+    call ap_strcmp
+    test eax, eax
+    jz .uni_attr
+    jmp .not_unicode_attr
+
+.uni_attr:
+    mov rdi, rbx
+
+    lea rsi, [rel exc_UnicodeError_type]
+    call exc_isinstance
+    test eax, eax
+    jz .not_unicode_attr
+    ; An explicit assignment wins, as it does for SyntaxError's.
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    test rdi, rdi
+    jz .uni_from_args
+    mov rsi, r12
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz .found_in_dict
+.uni_from_args:
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    test rax, rax
+    jz .return_none
+    movsxd rcx, r14d
+    cmp [rax + PyTupleObject.ob_size], rcx
+    jle .return_none
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rax, [rdx + rcx*8]
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.not_unicode_attr:
+
     ; SyntaxError's seven attributes.  They are not fields: they live in the
     ; args tuple CPython puts them in -- args = (msg, (filename, lineno,
     ; offset, text, end_lineno, end_offset)) -- so reading them back out of it

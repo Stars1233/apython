@@ -551,11 +551,251 @@ DEF_FUNC codec_error_id, CEI_FRAME
 END_FUNC codec_error_id
 
 ;; ============================================================================
-;; codec_id(rdi = encoding str, or 0 for the default) -> eax
-;;   0 = utf-8, 1 = ascii, 2 = latin-1.  Raises LookupError for anything else.
+;; codec_via_python(rdi = the object, a Value; rsi = the encoding str or 0;
+;;                  rdx = the errors argument, a Value, or 0;
+;;                  ecx = 0 to encode, 1 to decode)
+;;   -> rax = payload, rdx = tag; (0, 0) with an exception pending on failure
 ;;
-;; The three codecs the interpreter can do itself.  Everything else goes
-;; through the codecs module, which is Python and cannot be reached from here.
+;; Everything the interpreter cannot spell itself.  `_codecs` is Python -- it
+;; holds the registry, the cache, CPython's normalizestring, the search
+;; functions and the six error handlers -- and this is how a builtin method
+;; reaches it: lazily import the module, pull `encode` or `decode` out of its
+;; dict, cache the callable for the process's life, and call it.
+;;
+;; The pattern is builtin_open_fn's, down to parking kw_names_pending across
+;; the import: an import runs whole module bodies, and the keyword names of
+;; the call that got us here are not theirs.  The import cannot happen at
+;; startup, which is the other half of why it is done here and not there.
+;;
+;; A codec written in Python can itself call str.encode, so this has to be
+;; re-entrant; it is, because the only state it keeps is the two cached
+;; callables and neither is mutated after the first call.
+;; ============================================================================
+CVP_OBJ    equ 8
+CVP_ENC    equ 16
+CVP_ERR    equ 24
+CVP_DIR    equ 32
+CVP_ARGS   equ 56           ; three Values, the tp_call argument array
+CVP_FRAME  equ 64           ; 56 used + 8 pad = 64, 16-aligned
+global codec_via_python
+DEF_FUNC codec_via_python, CVP_FRAME
+    push rbx
+    mov [rbp - CVP_OBJ], rdi
+    mov [rbp - CVP_ENC], rsi
+    mov [rbp - CVP_ERR], rdx
+    mov [rbp - CVP_DIR], rcx
+
+    test ecx, ecx
+    jz .cvp_encode
+    mov rbx, [rel codec_decode_impl]
+    jmp .cvp_have_impl
+.cvp_encode:
+    mov rbx, [rel codec_encode_impl]
+.cvp_have_impl:
+    test rbx, rbx
+    jnz .cvp_call
+
+    extern kw_names_pending
+    mov rax, [rel kw_names_pending]
+    push rax
+    mov qword [rel kw_names_pending], 0
+
+    CSTRING rdi, "_codecs"
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    extern import_module
+    call import_module
+    mov rbx, rax
+    pop rdi
+    call obj_decref
+    test rbx, rbx
+    jz .cvp_import_failed
+
+    ; Both callables come out at once: the module is imported either way, and
+    ; caching only the one asked for means importing again for the other.
+    push rbx
+    CSTRING rdi, "encode"
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    call dict_get
+    mov rbx, rax
+    pop rdi
+    call obj_decref
+    test rbx, rbx
+    jz .cvp_missing
+    mov rdi, rbx
+    call obj_incref
+    mov [rel codec_encode_impl], rbx
+    pop rbx
+
+    push rbx
+    CSTRING rdi, "decode"
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    call dict_get
+    mov rbx, rax
+    pop rdi
+    call obj_decref
+    test rbx, rbx
+    jz .cvp_missing
+    mov rdi, rbx
+    call obj_incref
+    mov [rel codec_decode_impl], rbx
+    pop rbx
+
+    pop rax
+    mov [rel kw_names_pending], rax
+
+    cmp qword [rbp - CVP_DIR], 0
+    je .cvp_pick_encode
+    mov rbx, [rel codec_decode_impl]
+    jmp .cvp_call
+.cvp_pick_encode:
+    mov rbx, [rel codec_encode_impl]
+
+.cvp_call:
+    ; args = (obj, encoding, errors).  The two defaults are the ones CPython
+    ; gives the same call, and they are built here rather than kept as
+    ; constants because a str is a heap object.
+    mov rax, [rbp - CVP_OBJ]
+    mov [rbp - CVP_ARGS], rax
+
+    mov rax, [rbp - CVP_ENC]
+    test rax, rax
+    jnz .cvp_have_enc
+    CSTRING rdi, "utf-8"
+    call str_from_cstr_heap
+    mov [rbp - CVP_ENC], rax    ; ours to release below
+    mov [rbp - CVP_ARGS + 8], rax
+    jmp .cvp_errors
+.cvp_have_enc:
+    mov [rbp - CVP_ARGS + 8], rax
+    mov qword [rbp - CVP_ENC], 0    ; borrowed: nothing to release
+
+.cvp_errors:
+    mov rax, [rbp - CVP_ERR]
+    test rax, rax
+    jz .cvp_default_err
+    extern none_singleton
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .cvp_default_err
+    mov [rbp - CVP_ARGS + 16], rax
+    mov qword [rbp - CVP_ERR], 0
+    jmp .cvp_invoke
+.cvp_default_err:
+    CSTRING rdi, "strict"
+    call str_from_cstr_heap
+    mov [rbp - CVP_ERR], rax
+    mov [rbp - CVP_ARGS + 16], rax
+
+.cvp_invoke:
+    mov rax, [rbx + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_call]
+    test rcx, rcx
+    jz .cvp_missing_call
+    mov rdi, rbx
+    lea rsi, [rbp - CVP_ARGS]
+    mov edx, 3
+    call rcx
+    V_UNPACK rax, rdx
+
+.cvp_release:
+    push rax
+    push rdx
+    mov rdi, [rbp - CVP_ENC]
+    test rdi, rdi
+    jz .cvp_no_enc_ref
+    call obj_decref
+.cvp_no_enc_ref:
+    mov rdi, [rbp - CVP_ERR]
+    test rdi, rdi
+    jz .cvp_no_err_ref
+    call obj_decref
+.cvp_no_err_ref:
+    pop rdx
+    pop rax
+    pop rbx
+    leave
+    ret
+
+.cvp_missing_call:
+    extern exc_TypeError_type
+    SET_EXC exc_TypeError_type, "_codecs.encode is not callable"
+    xor eax, eax
+    xor edx, edx
+    jmp .cvp_release
+
+.cvp_missing:
+    pop rbx
+    add rsp, 8                  ; the parked keyword names
+.cvp_import_failed:
+    ; import_module leaves its own exception pending; if it somehow did not,
+    ; say what was being looked for.
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    jne .cvp_failed_pending
+    extern exc_LookupError_type
+    SET_EXC exc_LookupError_type, "unknown encoding"
+.cvp_failed_pending:
+    xor eax, eax
+    xor edx, edx
+    mov qword [rbp - CVP_ENC], 0
+    mov qword [rbp - CVP_ERR], 0
+    pop rbx
+    leave
+    ret
+END_FUNC codec_via_python
+
+;; ============================================================================
+;; codec_unknown_encoding(rdi = the encoding str, or 0) -- sets the LookupError
+;; CPython raises, naming the encoding AS WRITTEN.  codec_id normalises before
+;; it compares, and reporting the normalised form said "utf_16" for a lookup
+;; of "utf-16".
+;; ============================================================================
+CUE_MSG   equ 264
+CUE_FRAME equ 272           ; 264 used + 8 pad = 272, 16-aligned
+global codec_unknown_encoding
+DEF_FUNC codec_unknown_encoding, CUE_FRAME
+    push rbx
+    mov rbx, rdi
+    lea rdi, [rbp - CUE_MSG]
+    CSTRING rsi, "unknown encoding: "
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    test rbx, rbx
+    jz .cue_raise
+    mov rdi, rax
+    lea rsi, [rbx + PyStrObject.data]
+    call rbt_append_cstr
+.cue_raise:
+    extern exc_LookupError_type
+    lea rdi, [rel exc_LookupError_type]
+    lea rsi, [rbp - CUE_MSG]
+    extern set_exception
+    call set_exception
+    pop rbx
+    leave
+    ret
+END_FUNC codec_unknown_encoding
+
+;; ============================================================================
+;; codec_id(rdi = encoding str, or 0 for the default) -> eax
+;;   0 = utf-8, 1 = ascii, 2 = latin-1, -1 = something else
+;;
+;; The three codecs the interpreter can do itself.  Anything else is the
+;; registry's business: codec_via_python hands the whole call to
+;; `_codecs.encode` / `_codecs.decode`, which is where the search functions,
+;; the cache and the error handlers all live.  This used to raise LookupError
+;; here instead, so a name the registry would have found was refused before
+;; anyone asked it.
 ;; ============================================================================
 CI_BUF   equ 48
 CI_MSG   equ 240            ; the "unknown encoding: x" message, built in place
@@ -664,19 +904,10 @@ DEF_FUNC codec_id, CI_FRAME
     leave
     ret
 .ci_unknown:
-    ; CPython names the encoding it could not find, which is the whole of
-    ; what the caller needs to know.
-    lea rdi, [rbp - CI_MSG]
-    CSTRING rsi, "unknown encoding: "
-    extern rbt_append_cstr
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, rbx
-    call rbt_append_cstr
-    extern exc_LookupError_type
-    lea rdi, [rel exc_LookupError_type]
-    lea rsi, [rbp - CI_MSG]
-    call raise_exception
+    mov eax, -1
+    pop rbx
+    leave
+    ret
 END_FUNC codec_id
 
 ; str_from_cstr_heap(const char *cstr) -> (rax=PyStrObject*, edx=TAG_PTR)
@@ -3134,3 +3365,9 @@ str_iter_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+
+
+section .data
+align 8
+codec_encode_impl: dq 0
+codec_decode_impl: dq 0

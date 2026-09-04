@@ -56,6 +56,7 @@ test_classmethod_metaclass
 test_closures
 test_codec_args
 test_codecs
+test_codecs_registry_bridge
 test_codecs_registry
 test_code_gc
 test_comparisons

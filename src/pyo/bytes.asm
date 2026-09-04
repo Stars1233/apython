@@ -704,6 +704,7 @@ BD_WHY    equ 40            ; which of the three malformations
 BD_ERRID  equ 48            ; 1 = ignore, 2 = replace
 BD_READ   equ 56            ; the read cursor, while rebuilding
 BD_SPAN   equ 64            ; how many bytes the bad subpart covers
+BD_ENC    equ 72            ; the encoding argument, for the Python path
 BD_FRAME  equ 80            ; + 2 pushes = 96, 16-aligned
 ;; ============================================================================
 ;; bytes_utf8_check(rdi = data, rsi = length) -> rax = the index of the first
@@ -1214,9 +1215,12 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
 .bd_default_enc:
     xor eax, eax
 .bd_have_enc:
+    mov [rbp - BD_ENC], rax
     mov rdi, rax
     extern codec_id
     call codec_id
+    cmp eax, -1
+    je .bd_python               ; not one of the three: ask the registry
     cmp eax, 1
     je .bd_ascii
     cmp eax, 2
@@ -1353,22 +1357,30 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
 
 .bd_nomem:
     RAISE exc_MemoryError_type, "out of memory"
+.bd_python:
+    ; Everything this file cannot do itself: an encoding the registry has to
+    ; find, and an error handler that is not one of the three built in here.
+    ; The second is reached only once a malformation has been found, which is
+    ; where CPython looks a handler up as well.
+    mov rdi, [rbp - BD_SELF]
+    mov rsi, [rbp - BD_ENC]
+    mov rdx, [rbp - BD_ERRORS]
+    mov ecx, 1                  ; decode
+    extern codec_via_python
+    call codec_via_python
+    pop r12
+    pop rbx
+    leave
+    test edx, edx
+    jz .bd_python_failed
+    V_PACK rax, rdx
+    ret
+.bd_python_failed:
+    xor eax, eax
+    ret
+
 .bd_bad_errors:
-    ; The name is the useful half: "unknown error handler name" leaves the
-    ; caller to guess which of their arguments was wrong.
-    lea rdi, [rel bd_msgbuf]
-    lea rsi, [rel bd_msg_handler]
-    call bd_copy
-    mov rdi, rax
-    mov rsi, [rbp - BD_ERRORS]
-    lea rsi, [rsi + PyStrObject.data]
-    call bd_copy
-    mov byte [rax], 0x27        ; the closing quote
-    mov byte [rax + 1], 0
-    lea rdi, [rel exc_LookupError_type]
-    lea rsi, [rel bd_msgbuf]
-    call raise_exception
-    ud2
+    jmp .bd_python
 
 .bd_ascii:
     xor ecx, ecx
