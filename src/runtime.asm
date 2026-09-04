@@ -85,6 +85,10 @@ SYS_exit            equ 60
 SYS_kill            equ 62
 SYS_setsid          equ 112
 SYS_close_range     equ 436
+SYS_rt_sigaction    equ 13
+SYS_rt_sigprocmask  equ 14
+SYS_alarm           equ 37
+SYS_pause           equ 34
 
 ;; ============================================================================
 ;; sys_write(int fd, const void *buf, size_t len) -> ssize_t
@@ -1121,6 +1125,28 @@ DEF_FUNC_BARE sys_kill
     syscall
     ret
 END_FUNC sys_kill
+
+;; ============================================================================
+;; sys_alarm(unsigned int seconds) -> unsigned int
+;; The seconds left on the previous alarm, or 0 when there was none.
+;; ============================================================================
+global sys_alarm
+DEF_FUNC_BARE sys_alarm
+    mov rax, SYS_alarm
+    syscall
+    ret
+END_FUNC sys_alarm
+
+;; ============================================================================
+;; sys_pause(void) -> int
+;; Blocks until a signal is delivered; always -EINTR when it returns.
+;; ============================================================================
+global sys_pause
+DEF_FUNC_BARE sys_pause
+    mov rax, SYS_pause
+    syscall
+    ret
+END_FUNC sys_pause
 
 ;; ============================================================================
 ;; sys_setsid(void) -> pid_t

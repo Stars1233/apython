@@ -223,6 +223,13 @@ DEF_FUNC main, 8
     mov rsi, r15                ; argv
     call import_init
 
+    ; SIGINT raises KeyboardInterrupt rather than killing the process where it
+    ; stands, which is what every `except KeyboardInterrupt` in the stdlib is
+    ; written against.  After import_init, because it builds a builtin
+    ; function object and the type machinery has to be up.
+    extern signal_default_init
+    call signal_default_init
+
     ; Set sys.path[0] to script directory
     mov rdi, rbx                ; pyc filename
     call sys_path_add_script_dir

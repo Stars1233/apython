@@ -36,6 +36,7 @@ ok dbm
 ok decimal
 ok difflib
 ok dis
+ok doctest
 ok email
 ok encodings
 ok enum
@@ -86,6 +87,7 @@ ok optparse
 ok os
 ok _osx_support
 ok pathlib
+ok pdb
 ok __phello__
 ok pickle
 ok pickletools
@@ -118,6 +120,7 @@ ok selectors
 ok shelve
 ok shlex
 ok shutil
+ok signal
 ok site
 ok _sitebuiltins
 ok smtplib
@@ -152,6 +155,7 @@ ok traceback
 ok turtledemo
 ok types
 ok typing
+ok unittest
 ok urllib
 ok uu
 ok uuid

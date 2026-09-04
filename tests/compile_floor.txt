@@ -350,6 +350,7 @@ test_set_name
 test_set_ops
 test_sets
 test_set_variadic
+test_signal
 test_size_and_recursion_limits
 test_slice_and_star_args
 test_slice_assign

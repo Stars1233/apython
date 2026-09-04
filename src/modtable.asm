@@ -34,6 +34,7 @@ extern gc_module_create
 extern math_module_create
 extern socket_module_create
 extern marshal_module_init
+extern signal_module_create
 
 section .rodata
 
@@ -51,6 +52,7 @@ bm_n_gc:       db "gc", 0
 bm_n_math:     db "math", 0
 bm_n_socket:   db "_socketcore", 0
 bm_n_marshal:  db "marshal", 0
+bm_n_signal:   db "_signal", 0
 
 align 8
 global builtin_module_table
@@ -62,6 +64,7 @@ builtin_module_table:
     dq bm_n_asyncio,  asyncio_module_create
     dq bm_n_io,       io_module_create
     dq bm_n_socket,   socket_module_create
+    dq bm_n_signal,   signal_module_create
     dq bm_n_sre,      sre_module_create
     dq bm_n_weakref,  weakref_module_create
     dq bm_n_builtins, 0                 ; wraps builtins_dict_global
