@@ -111,6 +111,7 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     ; A view starts out over single bytes, and is read-only exactly when its
     ; source is.
     mov qword [rax + PyMemoryViewObject.mv_itemsize], 1
+    mov qword [rax + PyMemoryViewObject.mv_stride], 1
     lea rcx, [rel mv_format_B]
     mov [rax + PyMemoryViewObject.mv_format], rcx
     mov rcx, [rdi + PyObject.ob_type]
@@ -165,6 +166,8 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     mov [rax + PyMemoryViewObject.mv_format], rcx
     mov rcx, [rdi + PyMemoryViewObject.mv_readonly]
     mov [rax + PyMemoryViewObject.mv_readonly], rcx
+    mov rcx, [rdi + PyMemoryViewObject.mv_stride]
+    mov [rax + PyMemoryViewObject.mv_stride], rcx
     mov edx, TAG_PTR
     leave
     ret
@@ -217,9 +220,7 @@ END_FUNC memoryview_released_error
 ;; ============================================================================
 DEF_FUNC_BARE memoryview_item_value
     mov rcx, [rdi + PyMemoryViewObject.mv_itemsize]
-    mov rax, [rdi + PyMemoryViewObject.mv_buf]
-    imul rsi, rcx
-    add rax, rsi
+    MV_ITEM_ADDR rax, rdi, rsi, r8
     cmp rcx, 1
     je .miv_1
     cmp rcx, 2
@@ -238,6 +239,210 @@ DEF_FUNC_BARE memoryview_item_value
     mov eax, [rax]
     ret
 END_FUNC memoryview_item_value
+
+;; ============================================================================
+;; memoryview_hash(rdi = self) -> rax = the hash
+;;
+;; A view over a READ-ONLY buffer hashes as the bytes it holds, which is what
+;; makes one usable as a dict key without copying; one over a writable buffer
+;; cannot, because the value would change under the table.  This answered
+;; "unhashable type: 'memoryview'" for both, which is neither.
+;; ============================================================================
+DEF_FUNC memoryview_hash
+    push rbx
+    mov rbx, rdi
+    call memoryview_check
+    cmp qword [rbx + PyMemoryViewObject.mv_readonly], 0
+    je .mvh_writable
+    mov rdi, rbx
+    call memoryview_as_bytes
+    test rax, rax
+    jz .mvh_fail
+    push rax
+    mov rdi, rax
+    extern bytes_hash
+    call bytes_hash
+    mov rbx, rax
+    pop rdi
+    call obj_decref
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+.mvh_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.mvh_writable:
+    RAISE exc_ValueError_type, "cannot hash writable memoryview object"
+END_FUNC memoryview_hash
+
+;; ============================================================================
+;; memoryview_as_bytes(rdi = self) -> rax = a new bytes with the view's items
+;; laid out contiguously, or 0.  What tobytes(), hex() and every comparison
+;; need, and the only way a strided view can hand its contents to anything
+;; that reads a pointer and a length.
+;; ============================================================================
+global memoryview_as_bytes
+DEF_FUNC memoryview_as_bytes
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov rdi, [rbx + PyMemoryViewObject.mv_len]
+    extern bytes_new
+    call bytes_new
+    test rax, rax
+    jz .mab_done
+    mov r12, rax
+    mov rdi, rbx
+    lea rsi, [r12 + PyBytesObject.data]
+    call memoryview_copy_out
+    mov rax, r12
+.mab_done:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC memoryview_as_bytes
+
+;; ============================================================================
+;; memoryview_richcompare(rdi = left Value, rsi = right Value, edx = op)
+;;
+;; bytes_compare over the shared (pointer, length) reader is the whole of it
+;; for a contiguous view.  A strided one has no pointer to give, so it is
+;; copied out first -- either side may be one, since a comparison between two
+;; views reaches here twice.
+;; ============================================================================
+MRC_LEFT  equ 8
+MRC_RIGHT equ 16
+MRC_TL    equ 24             ; the temporaries, to release
+MRC_TR    equ 32
+MRC_OP    equ 40
+MRC_FRAME equ 48            ; 40 used + 8 pad = 48, 16-aligned
+DEF_FUNC memoryview_richcompare, MRC_FRAME
+    mov [rbp - MRC_LEFT], rdi
+    mov [rbp - MRC_RIGHT], rsi
+    mov [rbp - MRC_OP], rdx
+    mov qword [rbp - MRC_TL], 0
+    mov qword [rbp - MRC_TR], 0
+
+    mov rdi, [rbp - MRC_LEFT]
+    call mrc_substitute
+    test rax, rax
+    jz .mrc_left_done
+    mov [rbp - MRC_TL], rax
+    mov [rbp - MRC_LEFT], rax
+.mrc_left_done:
+    mov rdi, [rbp - MRC_RIGHT]
+    call mrc_substitute
+    test rax, rax
+    jz .mrc_right_done
+    mov [rbp - MRC_TR], rax
+    mov [rbp - MRC_RIGHT], rax
+.mrc_right_done:
+
+    mov rdi, [rbp - MRC_LEFT]
+    mov rsi, [rbp - MRC_RIGHT]
+    mov rdx, [rbp - MRC_OP]
+    call bytes_compare
+    push rax
+    push rdx
+    mov rdi, [rbp - MRC_TL]
+    test rdi, rdi
+    jz .mrc_no_tl
+    call obj_decref
+.mrc_no_tl:
+    mov rdi, [rbp - MRC_TR]
+    test rdi, rdi
+    jz .mrc_no_tr
+    call obj_decref
+.mrc_no_tr:
+    pop rdx
+    pop rax
+    leave
+    ret
+END_FUNC memoryview_richcompare
+
+;; mrc_substitute(rdi = a Value) -> rax = a bytes standing in for it, owned,
+;; or 0 when it is not a strided memoryview and can be compared as it is.
+DEF_FUNC_LOCAL mrc_substitute
+    V_TEST_PTR rdi, rcx
+    ja .mrs_no
+    test rdi, rdi
+    jz .mrs_no
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rdx, [rel memoryview_type]
+    cmp rcx, rdx
+    jne .mrs_no
+    cmp qword [rdi + PyMemoryViewObject.mv_buf], MV_RELEASED
+    je .mrs_no
+    cmp qword [rdi + PyMemoryViewObject.mv_stride], 1
+    je .mrs_no
+    call memoryview_as_bytes
+    leave
+    ret
+.mrs_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC mrc_substitute
+
+;; ============================================================================
+;; memoryview_copy_out(rdi = self, rsi = destination) -> rax = bytes written
+;;
+;; The view's items laid out contiguously, which is what tobytes(), bytes(),
+;; hex() and every comparison want.  A contiguous view is one memcpy; a
+;; strided one is a walk, because there is no contiguous run to copy.
+;; ============================================================================
+MCO_SELF equ 8
+MCO_DST  equ 16
+MCO_I    equ 24
+MCO_N    equ 32
+MCO_FRAME equ 48            ; 32 used + 16 pad = 48, 16-aligned
+global memoryview_copy_out
+DEF_FUNC memoryview_copy_out, MCO_FRAME
+    mov [rbp - MCO_SELF], rdi
+    mov [rbp - MCO_DST], rsi
+
+    cmp qword [rdi + PyMemoryViewObject.mv_stride], 1
+    jne .mco_strided
+    mov rdx, [rdi + PyMemoryViewObject.mv_len]
+    test rdx, rdx
+    jz .mco_done_len
+    mov rdi, rsi
+    mov rsi, [rbp - MCO_SELF]
+    mov rsi, [rsi + PyMemoryViewObject.mv_buf]
+    call ap_memcpy
+    jmp .mco_done_len
+
+.mco_strided:
+    call memoryview_nitems
+    mov [rbp - MCO_N], rax
+    mov qword [rbp - MCO_I], 0
+.mco_loop:
+    mov rcx, [rbp - MCO_I]
+    cmp rcx, [rbp - MCO_N]
+    jge .mco_done_len
+    mov rdi, [rbp - MCO_SELF]
+    MV_ITEM_ADDR rsi, rdi, rcx, r8
+    mov rdx, [rdi + PyMemoryViewObject.mv_itemsize]
+    mov rdi, [rbp - MCO_DST]
+    mov rax, [rbp - MCO_I]
+    imul rax, rdx
+    add rdi, rax
+    push rdx
+    call ap_memcpy
+    pop rdx
+    inc qword [rbp - MCO_I]
+    jmp .mco_loop
+
+.mco_done_len:
+    mov rdi, [rbp - MCO_SELF]
+    mov rax, [rdi + PyMemoryViewObject.mv_len]
+    leave
+    ret
+END_FUNC memoryview_copy_out
 
 ;; ============================================================================
 ;; memoryview_getattr(rdi = self, rsi = name str) -> rax = Value, or NULL
@@ -275,12 +480,24 @@ DEF_FUNC memoryview_getattr, MVG_FRAME
     MVG_NAME_IS "shape",        .mvg_shape
     MVG_NAME_IS "strides",      .mvg_strides
     MVG_NAME_IS "suboffsets",   .mvg_suboffsets
-    MVG_NAME_IS "c_contiguous", .mvg_true
-    MVG_NAME_IS "f_contiguous", .mvg_true
-    MVG_NAME_IS "contiguous",   .mvg_true
+    ; Contiguous unless the view has a stride, which `mv[::2]` and `mv[::-1]`
+    ; give it.  All three answered True unconditionally, back when a strided
+    ; view could not be built at all.
+    MVG_NAME_IS "c_contiguous", .mvg_contiguous
+    MVG_NAME_IS "f_contiguous", .mvg_contiguous
+    MVG_NAME_IS "contiguous",   .mvg_contiguous
 
     ; Not an attribute of ours: the methods live in tp_dict.
     RET_NULL
+    leave
+    V_PACK rax, rdx
+    ret
+
+.mvg_contiguous:
+    mov rdi, [rbp - MVG_SELF]
+    cmp qword [rdi + PyMemoryViewObject.mv_stride], 1
+    je .mvg_true
+    RET_FALSE
     leave
     V_PACK rax, rdx
     ret
@@ -431,11 +648,25 @@ DEF_FUNC memoryview_method_tobytes, MVM_FRAME
     mov rdi, [rdi]
     mov [rbp - MVM_SELF], rdi
     call memoryview_check
+    ; A strided view has no contiguous run to hand over, so the bytes are
+    ; built empty and filled item by item.
     mov rdi, [rbp - MVM_SELF]
-    mov rsi, [rdi + PyMemoryViewObject.mv_len]
-    mov rdi, [rdi + PyMemoryViewObject.mv_buf]
-    call bytes_from_data
+    mov rdi, [rdi + PyMemoryViewObject.mv_len]
+    extern bytes_new
+    call bytes_new
+    test rax, rax
+    jz .mvt_fail
+    push rax
+    mov rdi, [rbp - MVM_SELF]
+    lea rsi, [rax + PyBytesObject.data]
+    call memoryview_copy_out
+    pop rax
     mov edx, TAG_PTR
+    leave
+    ret
+.mvt_fail:
+    xor eax, eax
+    xor edx, edx
     leave
     ret
 .mvt_argerr:
@@ -516,6 +747,12 @@ DEF_FUNC memoryview_method_cast, MVC_FRAME
     mov [rbp - MVC_STR], rcx
     mov rdi, rax
     call memoryview_check
+
+    ; A cast reinterprets a contiguous run of bytes, so a strided view has
+    ; nothing to cast; CPython refuses it with this wording.
+    mov rdi, [rbp - MVC_SELF]
+    cmp qword [rdi + PyMemoryViewObject.mv_stride], 1
+    jne .mvc_not_contiguous
 
     ; One character, and only the unsigned formats: those are what
     ; memoryview_item_value reads, and what CPython's own callers use here.
@@ -601,10 +838,14 @@ DEF_FUNC memoryview_method_cast, MVC_FRAME
     mov [rax + PyMemoryViewObject.mv_itemsize], rcx
     mov rcx, [rbp - MVC_FMT]
     mov [rax + PyMemoryViewObject.mv_format], rcx
+    ; cast() is refused on a non-contiguous view below, so this is always 1.
+    mov qword [rax + PyMemoryViewObject.mv_stride], 1
     mov edx, TAG_PTR
     leave
     ret
 
+.mvc_not_contiguous:
+    RAISE exc_TypeError_type, "memoryview: casts are restricted to C-contiguous views"
 .mvc_badfmt:
     RAISE exc_ValueError_type, "memoryview: destination format must be a native single character format prefixed with an optional '@'"
 .mvc_badlen:
@@ -710,9 +951,7 @@ DEF_FUNC memoryview_method_hex, MVH_FRAME
 END_FUNC memoryview_method_hex
 
 DEF_FUNC memoryview_method_hex_self, MVH_FRAME
-    mov rsi, [rdi + PyMemoryViewObject.mv_len]
-    mov rdi, [rdi + PyMemoryViewObject.mv_buf]
-    call bytes_from_data
+    call memoryview_as_bytes
     test rax, rax
     jz .mvhs_fail
     mov [rbp - MVH_TMP], rax
@@ -776,7 +1015,8 @@ MS_OBJ   equ 8
 MS_KEY   equ 16
 MS_START equ 24
 MS_COUNT equ 32
-MS_FRAME equ 32             ; + 0 pushes = 32
+MS_STEP  equ 40
+MS_FRAME equ 48             ; 40 used + 8 pad = 48, + 0 pushes
 DEF_FUNC memoryview_subscript, MS_FRAME
     ; A view indexes in ITEMS, not bytes.  They are the same thing until
     ; cast() has been called, which is why the byte length stood in for the
@@ -803,16 +1043,32 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     mov rdi, [rbp - MS_KEY]            ; slice obj
     call slice_indices                 ; rax=start, rdx=stop, rcx=step
 
-    ; A step other than 1 needs a stride, which this view does not carry;
-    ; CPython answers with a non-contiguous view.  Recorded in bugs.md.
-    cmp rcx, 1
-    jne .ms_step_error
-
-    sub rdx, rax                       ; item count
-    jns .ms_have_count
-    xor edx, edx                       ; an empty slice, not a negative one
-.ms_have_count:
+    ; The item count for a step of any sign: ceil((stop - start) / step),
+    ; clamped at zero, which is what range() answers for the same three.
+    mov [rbp - MS_STEP], rcx
     mov [rbp - MS_START], rax
+    sub rdx, rax                       ; the span
+    test rcx, rcx
+    js .ms_count_negative
+    test rdx, rdx
+    jle .ms_count_zero
+    add rdx, rcx
+    dec rdx
+    jmp .ms_count_div
+.ms_count_negative:
+    test rdx, rdx
+    jge .ms_count_zero
+    add rdx, rcx
+    inc rdx
+.ms_count_div:
+    mov rax, rdx
+    cqo
+    idiv rcx
+    mov rdx, rax
+    jmp .ms_have_count
+.ms_count_zero:
+    xor edx, edx
+.ms_have_count:
     mov [rbp - MS_COUNT], rdx
 
     mov edi, PyMemoryViewObject_size
@@ -834,13 +1090,20 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     mov rdx, [rdi + PyMemoryViewObject.mv_readonly]
     mov [rax + PyMemoryViewObject.mv_readonly], rdx
 
+    ; mv_buf points at the slice's FIRST item, which for a negative step is
+    ; the highest address in it -- the source's own stride is what turns an
+    ; index into an offset, and a slice of a slice multiplies the two.
+    push rcx
     mov rdx, [rbp - MS_START]
-    imul rdx, rcx
-    add rdx, [rdi + PyMemoryViewObject.mv_buf]
-    mov [rax + PyMemoryViewObject.mv_buf], rdx
+    MV_ITEM_ADDR rcx, rdi, rdx, r8
+    mov [rax + PyMemoryViewObject.mv_buf], rcx
+    pop rcx
     mov rdx, [rbp - MS_COUNT]
     imul rdx, rcx
     mov [rax + PyMemoryViewObject.mv_len], rdx
+    mov rdx, [rbp - MS_STEP]
+    imul rdx, [rdi + PyMemoryViewObject.mv_stride]
+    mov [rax + PyMemoryViewObject.mv_stride], rdx
 
     ; The slice shares the ORIGINAL owner, not the view it came from: a
     ; chain of slices would otherwise keep every intermediate alive.
@@ -900,7 +1163,7 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     jmp .ms_int_index
 
 .ms_index_error:
-    RAISE exc_IndexError_type, "index out of range"
+    RAISE exc_IndexError_type, "index out of bounds on dimension 1"
 
 .ms_step_error:
     RAISE exc_NotImplementedError_type, "memoryview: only step 1 is supported"
@@ -939,7 +1202,10 @@ MA_KEY    equ 16
 MA_VAL    equ 24
 MA_START  equ 32
 MA_COUNT  equ 40
-MA_FRAME  equ 48            ; + 0 pushes = 48
+MA_STEP   equ 48
+MA_SRC    equ 56
+MA_I      equ 64
+MA_FRAME  equ 80            ; 64 used + 16 pad = 80, + 0 pushes
 
 DEF_FUNC memoryview_ass_subscript, MA_FRAME
     mov [rbp - MA_OBJ], rdi
@@ -989,10 +1255,9 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     jg .ma_value_range
 
     mov rdi, [rbp - MA_OBJ]
-    mov rsi, [rbp - MA_START]
+    mov rcx, [rbp - MA_START]
+    MV_ITEM_ADDR rsi, rdi, rcx, r8
     mov rcx, [rdi + PyMemoryViewObject.mv_itemsize]
-    imul rsi, rcx
-    add rsi, [rdi + PyMemoryViewObject.mv_buf]
     cmp rcx, 1
     je .ma_store1
     cmp rcx, 2
@@ -1027,39 +1292,72 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     mov rsi, rax
     mov rdi, [rbp - MA_KEY]
     call slice_indices                 ; rax=start, rdx=stop, rcx=step
-    cmp rcx, 1
-    jne .ma_step_error
+    ; The count for a step of any sign, as memoryview_subscript computes it.
+    mov [rbp - MA_STEP], rcx
+    mov [rbp - MA_START], rax
     sub rdx, rax
-    jns .ma_have_count
+    test rcx, rcx
+    js .ma_count_negative
+    test rdx, rdx
+    jle .ma_count_zero
+    add rdx, rcx
+    dec rdx
+    jmp .ma_count_div
+.ma_count_negative:
+    test rdx, rdx
+    jge .ma_count_zero
+    add rdx, rcx
+    inc rdx
+.ma_count_div:
+    mov rax, rdx
+    cqo
+    idiv rcx
+    mov rdx, rax
+    jmp .ma_have_count
+.ma_count_zero:
     xor edx, edx
 .ma_have_count:
-    mov [rbp - MA_START], rax
     mov [rbp - MA_COUNT], rdx
 
     mov rdi, [rbp - MA_VAL]
     call bytes_like_ptr_len            ; rax = data, r10 = length, ecx = ok
     test ecx, ecx
     jz .ma_value_type
+    mov [rbp - MA_SRC], rax
     mov rdi, [rbp - MA_OBJ]
     mov rdx, [rbp - MA_COUNT]
     imul rdx, [rdi + PyMemoryViewObject.mv_itemsize]
     cmp r10, rdx
     jne .ma_size_error
 
-    mov rsi, rax                       ; source
-    mov rdi, [rbp - MA_START]
+    ; One item at a time: the destination items are mv_stride apart, and for
+    ; a slice with a step of its own they are that many further again.  The
+    ; SOURCE is contiguous either way.
+    mov qword [rbp - MA_I], 0
+.ma_write_loop:
+    mov rcx, [rbp - MA_I]
+    cmp rcx, [rbp - MA_COUNT]
+    jge .ma_ok
+    mov rdi, [rbp - MA_OBJ]
+    mov rax, [rbp - MA_STEP]
+    imul rax, rcx
+    add rax, [rbp - MA_START]
+    MV_ITEM_ADDR rdi, rdi, rax, r8
     mov rax, [rbp - MA_OBJ]
-    imul rdi, [rax + PyMemoryViewObject.mv_itemsize]
-    add rdi, [rax + PyMemoryViewObject.mv_buf]
+    mov rdx, [rax + PyMemoryViewObject.mv_itemsize]
+    mov rsi, [rbp - MA_I]
+    imul rsi, rdx
+    add rsi, [rbp - MA_SRC]
     call ap_memcpy
-    jmp .ma_ok
+    inc qword [rbp - MA_I]
+    jmp .ma_write_loop
 
 .ma_del_error:
     RAISE exc_TypeError_type, "cannot delete memory"
 .ma_readonly:
     RAISE exc_TypeError_type, "cannot modify read-only memory"
 .ma_index_error:
-    RAISE exc_IndexError_type, "index out of range"
+    RAISE exc_IndexError_type, "index out of bounds on dimension 1"
 .ma_value_range:
     RAISE exc_ValueError_type, "memoryview: invalid value for format 'B'"
 .ma_value_type:
@@ -1168,11 +1466,12 @@ memoryview_type:
     dq memoryview_repr               ; tp_str
     ; Unhashable while the buffer is writable, which is the only kind that
     ; reaches here in practice; a 0 would fall through to the object address.
-    dq hash_not_implemented          ; tp_hash
+    dq memoryview_hash               ; tp_hash (read-only views only)
     dq 0                             ; tp_call (set by add_builtin_type)
     dq memoryview_getattr            ; tp_getattr
     dq 0                             ; tp_setattr
-    dq bytes_compare                 ; tp_richcompare (over the shared reader)
+    dq memoryview_richcompare        ; tp_richcompare (bytes_compare, over a
+                                     ; copy when the view is strided)
     dq memoryview_tp_iter            ; tp_iter
     dq 0                             ; tp_iternext
     dq 0                             ; tp_init

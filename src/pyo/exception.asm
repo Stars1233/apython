@@ -197,14 +197,28 @@ END_FUNC exc_set_context
 ; CPython reports the missing key itself as the exception's single argument,
 ; so that KeyError('k') and str(e) == "'k'" carry which key was absent.
 DEF_FUNC raise_key_error
+    extern current_exception
+    call set_key_error
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    call raise_exception_obj
+    ud2
+END_FUNC raise_key_error
+
+; set_key_error(rdi = key Value) -- the same KeyError, RECORDED rather than
+; raised, for a caller that has a C stack it still has to unwind by hand.
+global set_key_error
+DEF_FUNC set_key_error
     mov rsi, rdi                ; exc_new takes the message as a Value
     lea rdi, [rel exc_KeyError_type]
     xor edx, edx
     call exc_new
     mov rdi, rax
-    call raise_exception_obj
-    ud2
-END_FUNC raise_key_error
+    extern exc_install
+    call exc_install
+    leave
+    ret
+END_FUNC set_key_error
 
 ; exc_from_cstr(PyTypeObject *type, const char *msg) -> PyExceptionObject*
 ; Creates exception with a C string message (converted to PyStrObject).

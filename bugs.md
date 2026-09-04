@@ -107,21 +107,6 @@ reasoning that chose them and what changing one would cost.
 These are absences rather than wrong answers — the interpreter raises rather
 than lying — but they are ordinary Python that does not work:
 
-- **`bytes % args` leaks its temporary when the format is malformed.**  The
-  work is done by handing a decoded copy of the format and the arguments to
-  `str_mod`, and `str_mod` RAISES for a wrong argument count -- a raise
-  abandons the C stack, so neither the copy nor the converted arguments are
-  released.  Putting them somewhere the unwinder frees would be worse: an
-  argument's `__str__` can run Python, and a raise caught inside it would
-  free a buffer `str_mod` is still reading.
-
-- **A memoryview with a step other than 1 is not a view.**  `mv[::2]` and
-  `mv[::-1]` raise NotImplementedError.  CPython answers with a
-  non-contiguous view, which needs a stride the object does not carry -- and
-  a stride would have to be honoured by every reader: `tobytes`, iteration,
-  `bytes()`, comparison, `hex`, `tolist`, and the write path.  Nothing in
-  `_pyio` asks for one, so the field is not there yet.
-
 ## Robustness
 
 - **A builtin registered with no argument counts accepts extras silently.**

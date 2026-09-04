@@ -3003,6 +3003,7 @@ DEF_FUNC bytesio_getbuffer_fn
     mov rcx, [rbx + PyBytesIOObject.bio_size]
     mov [rax + PyMemoryViewObject.mv_len], rcx
     mov qword [rax + PyMemoryViewObject.mv_itemsize], 1
+    mov qword [rax + PyMemoryViewObject.mv_stride], 1
     lea rcx, [rel mv_format_B]
     mov [rax + PyMemoryViewObject.mv_format], rcx
     mov qword [rax + PyMemoryViewObject.mv_readonly], 0

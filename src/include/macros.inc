@@ -616,6 +616,17 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
 ; with a negative offset.
 TP_DICT_AT_TAIL equ -1
 
+; MV_ITEM_ADDR dest, view, index, scratch -- the address of a memoryview's
+; item.  A contiguous view is mv_buf + i*itemsize; a strided one steps by
+; mv_stride items, which is negative for a reversed view.  %3 is preserved.
+%macro MV_ITEM_ADDR 4           ; %1 = dest, %2 = view, %3 = index, %4 = scratch
+    mov %4, %3
+    imul %4, [%2 + PyMemoryViewObject.mv_stride]
+    imul %4, [%2 + PyMemoryViewObject.mv_itemsize]
+    mov %1, [%2 + PyMemoryViewObject.mv_buf]
+    add %1, %4
+%endmacro
+
 ; SLOT_ADDR dest, inst, off -- the address of a __slots__ word.
 ;
 ; A non-negative md_offset is a byte offset from the object's start, which is

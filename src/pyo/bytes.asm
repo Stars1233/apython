@@ -1699,6 +1699,12 @@ DEF_FUNC bytes_like_ptr_len
     mov rax, [rdi + PyMemoryViewObject.mv_buf]
     cmp rax, MV_RELEASED
     je .bpl_no
+    ; A strided view has no contiguous run to point at: mv_buf is its first
+    ; item and the rest are mv_stride items apart, in either direction.  It
+    ; declines here and is materialised by the one caller that can --
+    ; memoryview's own tp_richcompare, which copies before it compares.
+    cmp qword [rdi + PyMemoryViewObject.mv_stride], 1
+    jne .bpl_no
     mov r10, [rdi + PyMemoryViewObject.mv_len]
 .bpl_yes:
     mov ecx, 1
@@ -2249,16 +2255,20 @@ DEF_FUNC bytes_mod, BM_FRAME
     mov rdi, rbx               ; temp str
     mov rsi, [rbp-BM_ARGS]    ; args, a Value -- str_mod is a slot and unpacks
     mov edx, 1                 ; and this one is a BYTES format
+    mov ecx, 1                 ; report by RETURNING: see below
     extern str_mod_impl
     call str_mod_impl
     mov r12, rax               ; r12 = result str Value (a str is a pointer)
 
-    ; DECREF temp fmt str
+    ; DECREF temp fmt str.  This is the whole reason str_mod_impl is asked to
+    ; return rather than raise: a raise abandons the C stack, so the decoded
+    ; copy of the format above was leaked once per malformed `b"%d" % (1, 2)`
+    ; -- and putting it somewhere the unwinder frees would be worse, since an
+    ; argument's __str__ can run Python and a raise caught inside it would
+    ; free a buffer str_mod_impl is still reading.
     mov rdi, rbx
     DECREF_REG rdi
 
-    ; str_mod raises rather than declining, but a NULL here would be read as a
-    ; PyStrObject below, so refuse it rather than trusting the callee.
     test r12, r12
     jz .bm_failed
 
@@ -2325,7 +2335,23 @@ DEF_FUNC bytes_mod, BM_FRAME
     ret
 
 .bm_failed:
-    ; str_mod left an exception pending; propagate the NULL Value.
+    ; str_mod_impl recorded the error rather than raising it, so that the
+    ; temporary above could be released; now that it has been, the exception
+    ; goes on its way.  Returning the NULL instead would be read as "this
+    ; slot declines" -- a number slot has no other way to say NULL -- and the
+    ; interpreter would report "unsupported operand type(s) for %" over the
+    ; top of the real message.
+    extern current_exception
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .bm_failed_no_exc
+    mov qword [rel current_exception], 0
+    pop r12
+    pop rbx
+    leave
+    extern raise_exception_obj
+    jmp raise_exception_obj     ; takes the reference, does not return
+.bm_failed_no_exc:
     xor eax, eax
     pop r12
     pop rbx
@@ -2768,6 +2794,9 @@ DEF_FUNC byteslike_source, BLS_FRAME
     lea rcx, [rel bytearray_type]
     cmp rax, rcx
     je .bls_copy_bytearray
+    lea rcx, [rel memoryview_type]
+    cmp rax, rcx
+    je .bls_copy_view
     extern int_type
     lea rcx, [rel int_type]
     cmp rax, rcx
@@ -2836,10 +2865,25 @@ extern str_set_length
     mov rbx, [rdi + PyByteArrayObject.ob_size]
     call bytearray_data
     mov r12, rax
+    jmp .bls_copy
+
+.bls_copy_view:
+    ; A memoryview used to fall through to the iterable path, which takes one
+    ; byte per ITEM -- so bytes(m.cast('I')) was "bytes must be in range(0,
+    ; 256)" for a view whose items are four bytes wide, and a strided view
+    ; has no contiguous run to read at all.  memoryview_as_bytes answers
+    ; both: it lays the items out end to end, which is what bytes() means.
+    extern memoryview_as_bytes
+    call memoryview_as_bytes
+    test rax, rax
+    jz .bls_empty
+    mov [rbp - BLS_LIST], rax   ; released below, with the list's arm
+    mov rbx, [rax + PyBytesObject.ob_size]
+    lea r12, [rax + PyBytesObject.data]
 
 .bls_copy:
     test rbx, rbx
-    jz .bls_empty
+    jz .bls_copy_empty
     lea rdi, [rbx + 8]
     call ap_malloc
     push rax
@@ -2850,10 +2894,28 @@ extern str_set_length
     pop rax
     mov qword [rax + rbx], 0
     mov rdx, rbx
+    push rax
+    push rdx
+    mov rdi, [rbp - BLS_LIST]   ; the memoryview's temporary, if there was one
+    test rdi, rdi
+    jz .bls_copy_no_temp
+    mov qword [rbp - BLS_LIST], 0
+    call obj_decref
+.bls_copy_no_temp:
+    pop rdx
+    pop rax
     pop r12
     pop rbx
     leave
     ret
+
+.bls_copy_empty:
+    mov rdi, [rbp - BLS_LIST]
+    test rdi, rdi
+    jz .bls_empty
+    mov qword [rbp - BLS_LIST], 0
+    call obj_decref
+    jmp .bls_empty
 
     ; Any other iterable: materialise it as a list, then take one byte per
     ; item.  Going through list() rather than the iterator protocol directly

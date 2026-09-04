@@ -131,6 +131,13 @@ struc PyMemoryViewObject
     .mv_itemsize: resq 1  ; +40: bytes per item, 1 unless cast()
     .mv_format:   resq 1  ; +48: the one-character format, as a C string
     .mv_readonly: resq 1  ; +56: 1 for a view over bytes
+    ; The step between items, in ITEMS, signed.  1 for every view that comes
+    ; from a buffer or from a contiguous slice; anything else is what `mv[::2]`
+    ; and `mv[::-1]` produce, and mv_buf then points at the FIRST item of the
+    ; view rather than at the lowest address in it.  MV_ITEM_ADDR is the one
+    ; place that knows, and mv_stride == 1 is what `c_contiguous` answers and
+    ; what anything handing the raw pointer to a syscall has to insist on.
+    .mv_stride:   resq 1  ; +64
 endstruc
 
 ; A released memoryview: mv_buf is 0 and every operation raises.  The source

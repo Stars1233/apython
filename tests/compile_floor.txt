@@ -258,6 +258,7 @@ test_match
 test_math_more
 test_math
 test_membership
+test_memoryview_stride
 test_metaclass_prepare
 test_metaclass
 test_metaclass_resolution
@@ -289,6 +290,7 @@ test_ordereddict
 test_ordering_typeerror
 test_oserror
 test_percent_and_ior
+test_percent_errors
 test_percent_format
 test_percent_star
 test_percent_typecheck
