@@ -804,14 +804,18 @@ END_FUNC property_descr_set
 ;; ============================================================================
 ;; member_descr_new(i64 offset, PyStrObject *name) -> PyMemberDescrObject*
 ;; Create a member descriptor for a __slots__ slot.
-;; rdi = byte offset in instance, rsi = slot name (INCREF'd, ownership taken)
+;; rdi = byte offset in instance, rsi = slot name (INCREF'd, ownership taken),
+;; rdx = the class it belongs to, borrowed -- the type owns the dict that owns
+;; this, and only the repr reads it.
 ;; ============================================================================
 DEF_FUNC member_descr_new
     push rbx
     push r12
+    push r13
 
     mov rbx, rdi            ; offset
     mov r12, rsi            ; name str
+    mov r13, rdx            ; the owning class
 
     mov edi, PyMemberDescrObject_size
     call ap_malloc
@@ -821,12 +825,58 @@ DEF_FUNC member_descr_new
     mov [rax + PyMemberDescrObject.ob_type], rcx
     mov [rax + PyMemberDescrObject.md_offset], rbx
     mov [rax + PyMemberDescrObject.md_name], r12
+    mov [rax + PyMemberDescrObject.md_owner], r13
 
+    pop r13
     pop r12
     pop rbx
     leave
     ret
 END_FUNC member_descr_new
+
+;; ============================================================================
+;; member_descr_repr(rdi = the descriptor) -> "<member 'x' of 'S' objects>"
+;;
+;; CPython's wording, and the same shape a method descriptor's repr has.  It
+;; used to fall through to object's, which prints the type and an address and
+;; says neither which slot nor whose.
+;; ============================================================================
+MDR_BUF   equ 272
+MDR_FRAME equ 288           ; 272 used + 16 pad = 288, 16-aligned
+DEF_FUNC_LOCAL member_descr_repr, MDR_FRAME
+    push rbx
+    mov rbx, rdi
+    lea rdi, [rbp - MDR_BUF]
+    CSTRING rsi, "<member '"
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbx + PyMemberDescrObject.md_name]
+    test rsi, rsi
+    jz .mdr_no_name
+    add rsi, PyStrObject.data
+    call rbt_append_cstr
+.mdr_no_name:
+    mov rdi, rax
+    CSTRING rsi, "' of '"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbx + PyMemberDescrObject.md_owner]
+    test rsi, rsi
+    jz .mdr_no_owner
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    call rbt_append_cstr
+.mdr_no_owner:
+    mov rdi, rax
+    CSTRING rsi, "' objects>"
+    call rbt_append_cstr
+    lea rdi, [rbp - MDR_BUF]
+    extern str_from_cstr
+    call str_from_cstr
+    pop rbx
+    leave
+    ret
+END_FUNC member_descr_repr
 
 ;; member_descr_dealloc(PyMemberDescrObject *self)
 DEF_FUNC member_descr_dealloc
@@ -2530,7 +2580,7 @@ member_descr_type:
     dq md_name_str                  ; tp_name
     dq PyMemberDescrObject_size     ; tp_basicsize
     dq member_descr_dealloc         ; tp_dealloc
-    dq 0                            ; tp_repr
+    dq member_descr_repr            ; tp_repr
     dq 0                            ; tp_str
     dq 0                            ; tp_hash
     dq 0                            ; tp_call

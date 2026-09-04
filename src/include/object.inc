@@ -362,8 +362,14 @@ endstruc
 struc PyMemberDescrObject
     .ob_refcnt: resq 1  ; +0
     .ob_type:   resq 1  ; +8
-    .md_offset: resq 1  ; +16: byte offset in instance for slot payload
+    ; The byte offset of the slot within an instance.  NEGATIVE for a slot at
+    ; the instance's TAIL, which is where a str subclass's go; SLOT_ADDR is
+    ; the one place that knows.
+    .md_offset: resq 1  ; +16
     .md_name:   resq 1  ; +24: ptr to slot name (PyStrObject*, owned)
+    ; The class it was built for, borrowed -- the type owns the dict that
+    ; owns this.  Only the repr reads it: "<member 'x' of 'S' objects>".
+    .md_owner:  resq 1  ; +32
 endstruc
 
 ; Class instance object
@@ -1176,6 +1182,13 @@ endstruc
 BUILTIN_KIND_FUNCTION equ 0
 BUILTIN_KIND_METHOD   equ 1
 BUILTIN_KIND_WRAPPER  equ 2
+; Wrapped in a classmethod or a staticmethod, so it belongs to the TYPE
+; rather than to an instance: int.from_bytes, float.fromhex, dict.fromkeys,
+; str.maketrans.  CPython's METH_CLASS and METH_STATIC both repr this way --
+; "<built-in method from_bytes of type object at 0x...>" -- and the receiver
+; check in builtin_func_call has to leave them alone, since what arrives is a
+; class or nothing at all rather than one of the owner's instances.
+BUILTIN_KIND_ON_TYPE equ 3
 
 ;; ============================================================================
 ;; The GC header, and the traverse helpers

@@ -221,6 +221,8 @@ DEF_FUNC_BARE builtin_func_call
     mov rcx, [rdi + PyBuiltinObject.func_owner]
     test rcx, rcx
     jz .bfc_receiver_ok
+    cmp qword [rdi + PyBuiltinObject.func_kind], BUILTIN_KIND_ON_TYPE
+    je .bfc_receiver_ok         ; its receiver is a class, not an instance
     test rdx, rdx
     jz .bfc_receiver_ok         ; no arguments at all: the arity check ruled
     push rdi
@@ -329,6 +331,12 @@ DEF_FUNC_LOCAL builtin_func_repr, BFR_FRAME
     test rcx, rcx
     jz .plain
 
+    ; A classmethod's or staticmethod's callable, reached without binding:
+    ; "<built-in method maketrans of type object at 0x...>", naming the type
+    ; it was found on.  method_repr has the same form for the bound case.
+    cmp qword [rbx + PyBuiltinObject.func_kind], BUILTIN_KIND_ON_TYPE
+    je .on_type
+
     ; "<method '" or "<slot wrapper '"
     lea rdi, [rbp - BFR_BUF]
     lea rsi, [rel bfr_method_open]
@@ -351,6 +359,27 @@ DEF_FUNC_LOCAL builtin_func_repr, BFR_FRAME
     mov rdi, rax
     lea rsi, [rel bfr_objects]
     call rbt_append_cstr
+    lea rdi, [rbp - BFR_BUF]
+    call str_from_cstr
+    pop rbx
+    leave
+    ret
+
+.on_type:
+    lea rdi, [rbp - BFR_BUF]
+    lea rsi, [rel bfr_on_type_open]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbx + PyBuiltinObject.func_name]
+    add rsi, PyStrObject.data
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel bfr_of_type_object]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbx + PyBuiltinObject.func_owner]
+    extern obj_repr_address
+    call obj_repr_address       ; writes " at 0xADDR>"
     lea rdi, [rbp - BFR_BUF]
     call str_from_cstr
     pop rbx
@@ -432,6 +461,14 @@ DEF_FUNC type_stamp_methods, TSM_FRAME
     lea r9, [rel getset_descr_type]
     cmp [rax + PyObject.ob_type], r9
     je .tsm_getset
+    extern classmethod_type
+    lea r9, [rel classmethod_type]
+    cmp [rax + PyObject.ob_type], r9
+    je .tsm_on_type
+    extern staticmethod_type
+    lea r9, [rel staticmethod_type]
+    cmp [rax + PyObject.ob_type], r9
+    je .tsm_on_type
     lea r9, [rel builtin_func_type]
     cmp [rax + PyObject.ob_type], r9
     jne .tsm_next
@@ -454,6 +491,28 @@ DEF_FUNC type_stamp_methods, TSM_FRAME
     pop rcx
     mov r12, [rbx + PyDictObject.entries]
     jmp .tsm_next
+.tsm_on_type:
+    ; int.from_bytes, float.fromhex, dict.fromkeys and str.maketrans are
+    ; builtins wrapped in a classmethod or a staticmethod, and skipping the
+    ; wrapper left the builtin inside unstamped -- so a bound one reprd as
+    ; "<bound method from_bytes of <class 'int'>>" and an unbound one as
+    ; "<built-in function maketrans>", where CPython says "<built-in method
+    ; from_bytes of type object at 0x...>" for both.  Reach through and stamp
+    ; the callable.  The two wrappers keep cm_callable and sm_callable at the
+    ; same offset, which is why one arm serves both.
+    mov rdx, [rax + PyClassMethodObject.cm_callable]
+    test rdx, rdx
+    jz .tsm_next
+    lea r9, [rel builtin_func_type]
+    cmp [rdx + PyObject.ob_type], r9
+    jne .tsm_next
+    cmp qword [rdx + PyBuiltinObject.func_owner], 0
+    jne .tsm_next
+    mov r9, [rbp - TSM_TYPE]
+    mov [rdx + PyBuiltinObject.func_owner], r9
+    mov qword [rdx + PyBuiltinObject.func_kind], BUILTIN_KIND_ON_TYPE
+    jmp .tsm_next
+
 .tsm_getset:
     ; A getset carries its owner for the same reason, and for the same repr.
     cmp qword [rax + PyGetSetDescrObject.gs_owner], 0
@@ -750,6 +809,8 @@ extern list_type
 section .rodata
 builtin_func_repr_unknown_str: db "<built-in function>", 0
 bfr_function_open: db "<built-in function ", 0
+bfr_on_type_open:  db "<built-in method ", 0
+bfr_of_type_object: db " of type object", 0
 bfr_method_open:   db "<method '", 0
 bfr_wrapper_open:  db "<slot wrapper '", 0
 bfr_of:            db "' of '", 0

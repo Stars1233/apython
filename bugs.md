@@ -73,13 +73,6 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **A classmethod on a builtin type reprs as a bound method.**  Ordinary
-  methods, slot wrappers and getsets all name themselves and their owner now;
-  `int.from_bytes`, `float.fromhex` and `str.maketrans` are wrapped in a
-  classmethod object, which `type_stamp_methods` skips, so they answer
-  `<bound method from_bytes of <class 'int'>>` where CPython answers
-  `<built-in method from_bytes of type object at 0x...>`.
-
 - **A syntax error's wording, its column and the width of its span are our
   own.**  The attributes and `str()` are CPython's now, and the line is
   right, but the message text is this compiler's ("expected ':'" where
@@ -89,15 +82,10 @@ reasoning that chose them and what changing one would cost.
   token or to the subexpression the message is about.  `CompErr` has the two
   fields for a narrower answer; nothing records one yet.
 
-- **`ast.parse` is missing two of its arguments and one of its modes.**
-  `type_comments=True` collects nothing, because the tokenizer discards
-  comments and has nowhere to put a `# type:` one; `mode="func_type"` is a
-  ValueError, because there is no `(int, str) -> bool` start symbol; and
-  `mode="single"` accepts more than CPython's does -- its grammar is
-  `NEWLINE | simple_stmt | compound_stmt NEWLINE`, so `def f(): pass` without
-  a trailing newline and the empty string are both syntax errors there and
-  are accepted here.  The tree `single` produces is right: it is
-  `Interactive`, and it compiles as `exec` does.
+- **`ast.parse` is missing two of its arguments.**  `type_comments=True`
+  collects nothing, because the tokenizer discards comments and has nowhere
+  to put a `# type:` one; and `mode="func_type"` is a ValueError, because
+  there is no `(int, str) -> bool` start symbol.
 
 - **PEP 695 exists in the tree and not at run time.**  `ast.parse` now builds
   `TypeAlias`, `TypeVar`, `ParamSpec` and `TypeVarTuple`, and the brackets are
@@ -113,11 +101,6 @@ reasoning that chose them and what changing one would cost.
   raise `SystemError` naming the selector.  (They used to call `fatal_error`
   and kill the interpreter.)  `type_comment` is permanently None for a
   different reason: there are no type comments.
-
-- **A module's `__file__` is the `.pyc` it was loaded from, where CPython's is
-  the `.py`.**  Visible in the attribute and in `repr(module)`, which prints
-  it.  CPython records the source path even when it executes a cached
-  bytecode file, and derives the cache path from it when it needs to.
 
 ## Missing pieces
 

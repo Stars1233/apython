@@ -36,6 +36,7 @@ extern buf_init
 extern buf_push_u8
 extern buf_reserve
 extern exc_SyntaxError_type
+extern ast_child
 extern exc_IndentationError_type
 extern exc_TabError_type
 extern tuple_new
@@ -578,7 +579,12 @@ DEF_FUNC compile_ast_raw, CAR_FRAME
     mov esi, eax
     call ast_at
     mov byte [rax + AstNode.kind], AST_INTERACTIVE
+    mov rdi, rbx
+    mov rsi, rax
+    call par_single_check
     pop rax
+    test eax, eax
+    jz .car_failed
     jmp .car_parsed
 .car_parse_eval:
     mov rdi, rbx
@@ -685,6 +691,24 @@ DEF_FUNC compile_source, CS_FRAME
     je .parse_eval
     mov rdi, rbx
     call par_module
+    test rax, rax
+    jz .parsed
+    cmp qword [rbp - CS_MODE], CMODE_SINGLE
+    jne .parsed
+    ; `single` is exec with a narrower start symbol; par_single_check is what
+    ; enforces the narrowing, and compile_ast_raw applies it to the tree it
+    ; hands back for the same reason.
+    push rax
+    mov rdi, rbx
+    mov esi, eax
+    call ast_at
+    mov rdi, rbx
+    mov rsi, rax
+    call par_single_check
+    pop rcx
+    test eax, eax
+    jz .failed
+    mov rax, rcx
     jmp .parsed
 .parse_eval:
     mov rdi, rbx
@@ -1347,6 +1371,173 @@ END_FUNC comp_line_text
 section .text
 
 section .text
+
+;; ============================================================================
+;; par_single_check(Comp *c, AstNode *root) -> rax = 1 ok, 0 with an error set
+;;
+;; CPython's `single` start symbol is `NEWLINE | simple_stmt | compound_stmt
+;; NEWLINE`, and this ran the full module grammar and then relabelled the
+;; root -- so it accepted three things CPython refuses, and the tree it built
+;; for them was fine.  Nothing else here notices, which is why this is a
+;; check rather than a second parser.
+;;
+;;   * nothing at all.  "" and "\n" and "# comment\n" are all a SyntaxError
+;;     there, despite NEWLINE being one of the three alternatives.
+;;   * more than one statement, which has a message of its own.
+;;   * a compound statement whose last suite is on the same line as its
+;;     header, without a trailing newline: `def f(): pass` is an error and
+;;     `def f(): pass\n` is not, and so are `if 1: pass` and
+;;     `if 1:\n pass\nelse: pass`, where the LAST line is the inline one.
+;;     The tokenizer's NEWLINE is what CPython is really testing for; the
+;;     readable equivalent is that the last non-blank line is indented, which
+;;     is what an inline suite is not.
+;; ============================================================================
+PSC_COMP  equ 8
+PSC_ROOT  equ 16
+PSC_COMPOUND equ 24         ; is the FIRST statement a compound one?
+PSC_FRAME equ 40            ; 24 used + 16 pad = 40, + 1 push = 16-aligned
+DEF_FUNC_LOCAL par_single_check, PSC_FRAME
+    push rbx
+    mov [rbp - PSC_COMP], rdi
+    mov [rbp - PSC_ROOT], rsi
+    mov rbx, rsi                    ; the Interactive root
+    mov qword [rbp - PSC_COMPOUND], 0
+
+    mov ecx, [rbx + AstNode.nchild]
+    test ecx, ecx
+    jz .psc_empty
+
+    ; Is the first statement a compound one?  Which of the two messages a
+    ; second statement gets depends on it: CPython's grammar fails at the
+    ; parse for `compound_stmt` followed by anything, and only reaches its
+    ; "multiple statements" check for a simple one.
+    mov rdi, [rbp - PSC_COMP]
+    mov rsi, rbx
+    xor edx, edx
+    call ast_child
+    mov rdi, [rbp - PSC_COMP]
+    mov esi, eax
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_IF
+    je .psc_is_compound
+    cmp ecx, AST_WHILE
+    je .psc_is_compound
+    cmp ecx, AST_FOR
+    je .psc_is_compound
+    cmp ecx, AST_TRY
+    je .psc_is_compound
+    cmp ecx, AST_WITH
+    je .psc_is_compound
+    cmp ecx, AST_FUNCTIONDEF
+    je .psc_is_compound
+    cmp ecx, AST_CLASSDEF
+    je .psc_is_compound
+    cmp ecx, AST_MATCH
+    jne .psc_have_kind
+.psc_is_compound:
+    mov qword [rbp - PSC_COMPOUND], 1
+.psc_have_kind:
+
+    mov ecx, [rbx + AstNode.nchild]
+    cmp ecx, 1
+    jbe .psc_one
+
+    ; More than one node is still ONE statement when they are the halves of a
+    ; `;`-separated simple_stmt: `x=1; y=2` is a single statement to that
+    ; grammar and two children to this parser.  What CPython refuses is a
+    ; second LOGICAL line, so the test is whether they all start on one.
+    mov r9d, ecx                    ; the count
+    xor r10d, r10d                  ; i
+    mov r11d, -1                    ; the first child's line
+.psc_line_loop:
+    cmp r10d, r9d
+    jge .psc_ok
+    push r9
+    push r10
+    push r11
+    sub rsp, 8
+    mov rdi, [rbp - PSC_COMP]
+    mov rsi, rbx
+    mov edx, r10d
+    call ast_child
+    mov rdi, [rbp - PSC_COMP]
+    mov esi, eax
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    add rsp, 8
+    pop r11
+    pop r10
+    pop r9
+    cmp r11d, -1
+    jne .psc_line_cmp
+    mov r11d, ecx
+.psc_line_cmp:
+    cmp r11d, ecx
+    jne .psc_multiple
+    inc r10d
+    jmp .psc_line_loop
+
+.psc_one:
+    cmp qword [rbp - PSC_COMPOUND], 0
+    je .psc_ok
+
+    ; A trailing newline settles it.
+    mov rdi, [rbp - PSC_COMP]
+    mov rsi, [rdi + Comp.src]
+    mov rcx, [rdi + Comp.srclen]
+    test rcx, rcx
+    jz .psc_empty
+    cmp byte [rsi + rcx - 1], 10
+    je .psc_ok
+    ; Otherwise the last non-blank line has to be indented, which an inline
+    ; suite is not: `if 1:\n pass` ends on an indented line and is legal,
+    ; `if 1: pass` and `if 1:\n pass\nelse: pass` do not and are not.
+.psc_back:
+    dec rcx
+    jz .psc_invalid                 ; the whole source is one line
+    cmp byte [rsi + rcx - 1], 10
+    jne .psc_back
+    movzx eax, byte [rsi + rcx]
+    cmp al, ' '
+    je .psc_ok
+    cmp al, 9                       ; tab
+    je .psc_ok
+    jmp .psc_invalid
+
+.psc_ok:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+
+.psc_multiple:
+    cmp qword [rbp - PSC_COMPOUND], 0
+    jne .psc_invalid
+    mov rdi, [rbp - PSC_COMP]
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "multiple statements found while compiling a single statement"
+    mov ecx, 1
+    xor r8d, r8d
+    call comp_error
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.psc_empty:
+.psc_invalid:
+    mov rdi, [rbp - PSC_COMP]
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "invalid syntax"
+    mov ecx, 1
+    xor r8d, r8d
+    call comp_error
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_single_check
 
 ;; ============================================================================
 ;; comp_error(Comp *c, PyTypeObject *type, const char *msg, int lineno, int col)

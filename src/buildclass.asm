@@ -1068,10 +1068,11 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov rcx, rax
     pop rdi                        ; the offset
 
-    ; Create descriptor: member_descr_new(offset, name_str)
+    ; Create descriptor: member_descr_new(offset, name_str, owner)
     mov rsi, rcx                   ; name string
     push rcx                       ; the name: the dict key, then ours to drop
     INCREF rsi                     ; descriptor takes ownership
+    mov rdx, r12                   ; the class, for the repr
     extern member_descr_new
     call member_descr_new          ; rax = new descriptor
 

@@ -8,6 +8,8 @@ extern ap_malloc
 extern ap_free
 extern ap_memcpy
 extern ap_strlen
+extern ap_strcmp
+extern ap_memcmp
 extern obj_decref
 extern obj_incref
 extern obj_dealloc
@@ -940,6 +942,118 @@ DEF_FUNC import_find_and_load, FL_FRAME
 END_FUNC import_find_and_load
 
 ;; ============================================================================
+;; import_source_path(rdi = the path a search matched) -> rax = the path to
+;;   record as __file__, which is rdi itself unless it is a __pycache__ entry
+;;
+;; "<dir>/__pycache__/<name>.cpython-312.pyc" becomes "<dir>/<name>.py".  The
+;; other two cache shapes the search tries -- a bare "<name>.cpython-312.pyc"
+;; beside the source, and a package's __init__ -- are handled by the same
+;; rewrite, since both keep the name in the last component.  A .pyc that is
+;; NOT in a __pycache__ directory is CPython's sourceless form, whose
+;; __file__ is the .pyc, so it is left alone.
+;;
+;; The answer is written into a buffer of its own: the caller's path is the
+;; one the code object was loaded from and is still needed.
+;; ============================================================================
+global import_source_path
+DEF_FUNC import_source_path
+    push rbx
+    push r12
+    push r13
+    push r14                    ; four pushes keep rsp 16-aligned at the call
+    mov rbx, rdi
+
+    ; It has to end in ".cpython-312.pyc".
+    mov rdi, rbx
+    call ap_strlen
+    mov r12, rax                ; the length
+    cmp r12, 16 + 13            ; the suffix, plus the shortest marker
+    jb .isp_keep
+    ; ap_memcmp with an explicit length, not ap_strcmp: that one compares
+    ; eight bytes at a time and reads past the terminator, and the path here
+    ; sits in a heap buffer whose tail was never written.  Valgrind says so.
+    lea rdi, [rbx + r12 - 16]
+    lea rsi, [rel isp_suffix]
+    mov edx, 16
+    call ap_memcmp
+    test eax, eax
+    jnz .isp_keep
+
+    ; ...and contain "/__pycache__/" somewhere before the last component.
+    xor r13, r13                ; the index of the marker, once found
+    mov r14, -1
+.isp_scan:
+    lea rax, [r13 + 13]
+    cmp rax, r12
+    ja .isp_scanned
+    push r13
+    lea rdi, [rbx + r13]
+    lea rsi, [rel isp_marker]
+    mov edx, 13
+    call ap_memcmp
+    pop r13
+    test eax, eax
+    jnz .isp_scan_next
+    mov r14, r13
+.isp_scan_next:
+    inc r13
+    jmp .isp_scan
+.isp_scanned:
+    cmp r14, -1
+    je .isp_keep
+
+    ; <dir> is everything before the marker; <name> is between the marker's
+    ; trailing slash and the suffix.
+    lea rax, [r14 + 13]         ; the first byte of <name>
+    lea rcx, [r12 - 16]         ; one past its last
+    cmp rcx, rax
+    jbe .isp_keep
+    sub rcx, rax                ; the name's length
+    lea rdx, [r14 + rcx + 4]    ; <dir> + '/' + <name> + ".py" + NUL
+    cmp rdx, ISP_BUFSZ
+    jae .isp_keep
+
+    lea rdi, [rel isp_buf]
+    mov rsi, rbx
+    mov rdx, r14
+    push rcx
+    push rax
+    call ap_memcpy              ; <dir>, without the trailing slash
+    pop rax
+    pop rcx
+    lea rdi, [rel isp_buf]
+    add rdi, r14
+    mov byte [rdi], '/'
+    inc rdi
+    lea rsi, [rbx + rax]
+    mov rdx, rcx
+    push rcx
+    call ap_memcpy
+    pop rcx
+    lea rdi, [rel isp_buf]
+    add rdi, r14
+    add rdi, rcx
+    inc rdi
+    mov dword [rdi], `.py\0`
+    lea rax, [rel isp_buf]
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.isp_keep:
+    mov rax, rbx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC import_source_path
+
+;; ============================================================================
 ;; import_search_dirs(PyListObject *dirs, const char *leaf, int64_t leaf_len) -> int
 ;; Search a list of directory strings for a module named 'leaf'.
 ;; Tries: <dir>/<leaf>/__pycache__/__init__.cpython-312.pyc (package)
@@ -1577,7 +1691,16 @@ DEF_FUNC import_load_module, IF_FRAME
     call obj_decref
 
     ; Set __file__
+    ;
+    ; The SOURCE path, not the cache file the code actually came out of.
+    ; CPython records the .py even when it executes a cached .pyc -- it is
+    ; what a module's repr prints, what inspect.getsource opens, and what a
+    ; traceback through the module names -- and this recorded whichever file
+    ; the search matched, so every import through __pycache__ answered
+    ; ".../__pycache__/m.cpython-312.pyc".
     mov rdi, r12                ; path cstr
+    call import_source_path     ; -> the .py, or r12 unchanged
+    mov rdi, rax
     call str_from_cstr_heap
     push rax                    ; file str
     lea rdi, [rel im_dunder_file]
@@ -1914,6 +2037,14 @@ im_pkg_py_suffix_len   equ $ - im_pkg_py_suffix - 1
 
 im_py_suffix:          db ".py", 0
 im_py_suffix_len       equ $ - im_py_suffix - 1
+
+section .rodata
+isp_suffix: db ".cpython-312.pyc", 0
+isp_marker: db "/__pycache__/", 0
+
+section .bss
+ISP_BUFSZ equ 4096
+isp_buf: resb ISP_BUFSZ
 
 section .bss
 import_path_buf_ptr: resq 1    ; malloc'd path buffer (lazy-allocated)

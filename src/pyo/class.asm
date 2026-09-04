@@ -3129,6 +3129,24 @@ DEF_FUNC method_repr, MR_FRAME
     lea rbx, [rbp - MR_BUF]
     xor r12d, r12d
 
+    ; A builtin bound to a CLASS is CPython's fourth descriptor form:
+    ; "<built-in method from_bytes of type object at 0x...>".  int.from_bytes
+    ; and its three siblings are builtins wrapped in a classmethod object,
+    ; and binding one produces a bound method here where CPython produces a
+    ; builtin_function_or_method -- which is a divergence of its own, and one
+    ; DIVERGENCES.md records; the repr is not.
+    mov rax, [rdi + PyMethodObject.im_func]
+    test rax, rax
+    jz .mr_ordinary
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel builtin_func_type]
+    cmp rcx, rdx
+    jne .mr_ordinary
+    cmp qword [rax + PyBuiltinObject.func_kind], BUILTIN_KIND_ON_TYPE
+    jne .mr_ordinary
+    jmp mr_builtin_classmethod
+
+.mr_ordinary:
     CSTRING rsi, "<bound method "
 .mr_pre:
     movzx eax, byte [rsi]
@@ -3237,6 +3255,39 @@ DEF_FUNC method_repr, MR_FRAME
     pop rbx
     leave
     ret
+;; The classmethod form, out of line: it shares nothing with the loop above
+;; but the frame it is written into.  rbp is method_repr's; rbx and r12 are
+;; still pushed, and the epilogue below is method_repr's own.
+mr_builtin_classmethod:
+    lea rdi, [rbp - MR_BUF]
+    CSTRING rsi, "<built-in method "
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rcx, [rbp - MR_SELF]
+    mov rcx, [rcx + PyMethodObject.im_func]
+    mov rsi, [rcx + PyBuiltinObject.func_name]
+    test rsi, rsi
+    jz .mrbc_no_name
+    add rsi, PyStrObject.data
+    call rbt_append_cstr
+.mrbc_no_name:
+    mov rdi, rax
+    CSTRING rsi, " of type object"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - MR_SELF]
+    mov rsi, [rsi + PyMethodObject.im_self]
+    extern obj_repr_address
+    call obj_repr_address       ; writes " at 0xADDR>"
+    lea rdi, [rbp - MR_BUF]
+    extern str_from_cstr
+    call str_from_cstr
+    pop r12
+    pop rbx
+    leave
+    ret
+
 END_FUNC method_repr
 
 ;; ============================================================================

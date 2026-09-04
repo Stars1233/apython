@@ -100,6 +100,26 @@ the reasoning rather than from scratch.
   give up its stack reference before the concat, so it is recorded rather than
   done.
 
+- **One builtin function type where CPython has four.**  CPython separates
+  `builtin_function_or_method`, `method_descriptor`, `wrapper_descriptor` and
+  a classmethod's bound form; here they are one type with a `func_kind` field,
+  which is enough to repr all four the way CPython does but not enough to
+  answer `type()` the way CPython does.  `type(int.from_bytes)` is `method`
+  rather than `builtin_function_or_method`, and `type(list.append)` is
+  `builtin_function_or_method` rather than `method_descriptor`.  Everything
+  that asks *what* a descriptor is -- `hasattr(f, '__get__')`, `__set__`,
+  the repr -- gets CPython's answer; only the type's name differs.
+
+- **A class's `__dict__` does not carry `__dict__`, `__weakref__` or
+  `__doc__`, and does carry `__qualname__`.**  CPython's `type_new` adds the
+  first two as getset descriptors, sets `__doc__` to None when the body has
+  no docstring, and moves `__qualname__` out of the dict onto the type.  Here
+  the two descriptors do not exist -- they are the instance-dict and weakref
+  layout recorded above -- `__doc__` is answered by a fallback rather than
+  stored, and `__qualname__` stays in the dict because there is no field on
+  the type to move it to.  Every one of those attributes reads correctly
+  through the class; it is only `sorted(C.__dict__)` that differs.
+
 ## Interpreter structure
 
 - **C code here cannot catch a Python exception.**  `raise_exception`

@@ -101,6 +101,7 @@ test_compile_pep695
 test_compile_precedence
 test_compile_qualname
 test_compile_scope_unbound
+test_compile_single_mode
 test_compile_subscript_except
 test_compile_syntax_gaps
 test_compile_ternary_or
@@ -264,6 +265,7 @@ test_methods
 test_misc_ops
 test_module_attr_call
 test_module_doc_and_repr_depth
+test_module_file_attr
 test_multiple_inheritance
 test_nanbox_float
 test_nanbox_int
