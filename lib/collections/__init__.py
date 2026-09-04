@@ -1,13 +1,95 @@
 # collections - High-performance container datatypes (minimal for apython)
 #
-# deque, defaultdict and OrderedDict live in _collections, and are imported
-# back from there.  That is CPython's own arrangement, and the reason for it
-# is that CPython's collections/__init__.py does `from _collections import
-# deque` and exports the name from __all__ whether or not the import
-# succeeded -- so a missing _collections made `from collections import deque`
-# an ImportError under a real stdlib, not merely a slower deque.
+# deque and defaultdict live in _collections, and are imported back from
+# there.  That is CPython's own arrangement, and the reason for it is that
+# CPython's collections/__init__.py does `from _collections import deque` and
+# exports the name from __all__ whether or not the import succeeded -- so a
+# missing _collections made `from collections import deque` an ImportError
+# under a real stdlib, not merely a slower deque.
+#
+# OrderedDict goes the other way, for the same reason read in reverse.
+# CPython defines the complete pure-Python class HERE and only then tries to
+# override it with the C one, so an `OrderedDict = dict` alias exported from
+# _collections shadowed the real class wherever a real stdlib was on the
+# path.  The class below is the whole of what OrderedDict adds over an
+# insertion-ordered dict.
 
-from _collections import deque, defaultdict, OrderedDict
+from _collections import deque, defaultdict
+
+
+class OrderedDict(dict):
+    """Dictionary that remembers insertion order, and can reorder itself.
+
+    dict has preserved insertion order since 3.7, so the ordering itself is
+    inherited.  What this adds is the part that is not free: move_to_end,
+    popitem's `last` argument, and an __eq__ that is order-sensitive against
+    another OrderedDict.
+    """
+
+    def move_to_end(self, key, last=True):
+        """Move an existing key to either end of the ordered dictionary."""
+        if key not in self:
+            raise KeyError(key)
+        value = dict.pop(self, key)
+        if last:
+            dict.__setitem__(self, key, value)
+            return
+        # No cheaper way with a plain dict behind us: re-insert everything so
+        # the moved key leads.
+        rest = list(dict.items(self))
+        dict.clear(self)
+        dict.__setitem__(self, key, value)
+        for k, v in rest:
+            dict.__setitem__(self, k, v)
+
+    def popitem(self, last=True):
+        """Remove and return a (key, value) pair; LIFO if last is true."""
+        if not self:
+            raise KeyError("dictionary is empty")
+        if last:
+            return dict.popitem(self)
+        key = next(iter(self))
+        return key, dict.pop(self, key)
+
+    def __eq__(self, other):
+        # Order-sensitive against another OrderedDict, order-insensitive
+        # against a plain dict -- which is CPython's rule, not a shortcut.
+        #
+        # `dict.__eq__` cannot serve the second half: dict registers no
+        # __eq__ of its own, so the name resolves to object.__eq__ and
+        # answers NotImplemented (bugs.md carries it).  Two plain dicts built
+        # from the operands reach dict_richcompare directly instead.
+        if isinstance(other, OrderedDict):
+            return list(self.items()) == list(other.items())
+        if isinstance(other, dict):
+            return dict(self) == dict(other)
+        return NotImplemented
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __repr__(self):
+        # 3.12 reprs the mapping, not the item list: OrderedDict({'a': 1}).
+        if not self:
+            return self.__class__.__name__ + "()"
+        return self.__class__.__name__ + "(" + repr(dict(self)) + ")"
+
+    def copy(self):
+        return self.__class__(self)
+
+    @classmethod
+    def fromkeys(cls, iterable, value=None):
+        d = cls()
+        for key in iterable:
+            d[key] = value
+        return d
+
+    def __reduce__(self):
+        inst_dict = vars(self).copy() if hasattr(self, "__dict__") else {}
+        return self.__class__, (), inst_dict or None, None, iter(self.items())
 
 
 class Counter:

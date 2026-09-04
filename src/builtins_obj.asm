@@ -33,6 +33,19 @@ extern obj_dealloc
 
 extern float_type
 extern str_type
+extern bytes_type
+extern bytearray_type
+extern memoryview_type
+extern bytes_type_call
+extern rbt_append_cstr
+extern msg_append_i64
+extern value_type
+extern raise_type_error_counted
+extern _bytes_decode_impl
+extern ba_shared_decode
+extern kw_names_pending
+extern ap_strcmp
+extern raise_type_error_with_name
 extern bool_true
 extern bool_false
 
@@ -65,17 +78,128 @@ DEF_FUNC_BARE str_type_call
 END_FUNC str_type_call
 
 ;; ============================================================================
-;; 3. builtin_str_fn(args, nargs) - str(x)
+;; 3. builtin_str_fn(args, nargs) - str(x[, encoding[, errors]])
+;;
+;; The decoding form was missing outright: `str(b, "utf-8")` was
+;; "str() takes at most 1 argument".  CPython's re/_parser.py uses it, which
+;; is what kept glob and fnmatch from importing.
+;;
+;; It is the one builtin whose second argument changes what the first one
+;; means: with an encoding, str() is a decode and takes a bytes-like object
+;; only -- str("a", "utf-8") is an error, not a copy.
 ;; ============================================================================
-DEF_FUNC builtin_str_fn
+SB_OBJ   equ 8
+SB_ENC   equ 16
+SB_ERR   equ 24
+SB_NPOS  equ 32
+SB_NKW   equ 40
+SB_ARGS  equ 48
+SB_ARGV  equ 80          ; the three-slot array handed to decode:
+                         ; [-80] self, [-72] encoding, [-64] errors
+SB_FRAME equ 96          ; + 0 pushes = 96
 
-    test rsi, rsi
-    jz .str_no_args
+DEF_FUNC builtin_str_fn, SB_FRAME
+    mov qword [rbp - SB_OBJ], 0
+    mov qword [rbp - SB_ENC], 0
+    mov qword [rbp - SB_ERR], 0
+    mov [rbp - SB_ARGS], rdi
+    mov [rbp - SB_NPOS], rsi
+    mov qword [rbp - SB_NKW], 0
 
-    cmp rsi, 1
-    jne .str_error
+    ; Keyword arguments arrive as trailing positional slots, named by
+    ; kw_names_pending.  str's three names are object, encoding and errors.
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .str_bind_positional
+    mov qword [rel kw_names_pending], 0     ; consumed, however this ends
+    mov rcx, [rax + PyTupleObject.ob_size]
+    mov [rbp - SB_NKW], rcx
+    sub qword [rbp - SB_NPOS], rcx
 
-    mov rdi, [rdi]             ; args[0]
+    xor r9d, r9d
+.str_kw_loop:
+    cmp r9, [rbp - SB_NKW]
+    jge .str_bind_positional
+    mov r10, [rax + PyTupleObject.ob_item]
+    mov r10, [r10 + r9*8]                   ; the keyword's name
+    mov r11, [rbp - SB_ARGS]
+    mov rcx, [rbp - SB_NPOS]
+    add rcx, r9
+    mov r11, [r11 + rcx*8]                  ; the value that goes with it
+
+    push rax
+    push r9
+    push r11
+    sub rsp, 8
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "object"
+    call ap_strcmp
+    test eax, eax
+    jz .str_kw_object
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "encoding"
+    call ap_strcmp
+    test eax, eax
+    jz .str_kw_encoding
+    lea rdi, [r10 + PyStrObject.data]
+    CSTRING rsi, "errors"
+    call ap_strcmp
+    test eax, eax
+    jz .str_kw_errors
+    add rsp, 8
+    pop r11
+    pop r9
+    pop rax
+    lea rdi, [r10 + PyStrObject.data]
+    call str_raise_bad_keyword
+.str_kw_object:
+    mov rcx, [rsp + 8]
+    mov [rbp - SB_OBJ], rcx
+    jmp .str_kw_next
+.str_kw_encoding:
+    mov rcx, [rsp + 8]
+    mov [rbp - SB_ENC], rcx
+    jmp .str_kw_next
+.str_kw_errors:
+    mov rcx, [rsp + 8]
+    mov [rbp - SB_ERR], rcx
+.str_kw_next:
+    add rsp, 8
+    pop r11
+    pop r9
+    pop rax
+    inc r9
+    jmp .str_kw_loop
+
+.str_bind_positional:
+    ; The positional slots fill object, encoding and errors in that order.
+    mov rcx, [rbp - SB_NPOS]
+    cmp rcx, 3
+    jg .str_too_many
+    mov rdi, [rbp - SB_ARGS]
+    test rcx, rcx
+    jle .str_bound
+    mov rax, [rdi]
+    mov [rbp - SB_OBJ], rax
+    cmp rcx, 2
+    jl .str_bound
+    mov rax, [rdi + 8]
+    mov [rbp - SB_ENC], rax
+    cmp rcx, 3
+    jl .str_bound
+    mov rax, [rdi + 16]
+    mov [rbp - SB_ERR], rax
+
+.str_bound:
+    ; No encoding and no errors is the ordinary str(): str() is "", and
+    ; str(x) is x's __str__.
+    cmp qword [rbp - SB_ENC], 0
+    jne .str_decode
+    cmp qword [rbp - SB_ERR], 0
+    jne .str_decode
+    cmp qword [rbp - SB_OBJ], 0
+    je .str_no_args
+    mov rdi, [rbp - SB_OBJ]
     call obj_str
     leave
     ret
@@ -86,9 +210,212 @@ DEF_FUNC builtin_str_fn
     leave
     ret
 
-.str_error:
-    RAISE exc_TypeError_type, "str() takes at most 1 argument"
+.str_decode:
+    ; With an encoding, str() decodes -- and takes a bytes-like object only.
+    ; str() with errors= and no object is still "", as CPython's is.
+    cmp qword [rbp - SB_OBJ], 0
+    je .str_no_args
+    mov rdi, [rbp - SB_OBJ]
+    V_TEST_PTR rdi, rax
+    ja .str_not_bytes
+    test rdi, rdi
+    jz .str_not_bytes
+    mov rax, [rdi + PyObject.ob_type]
+
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .str_decoding_str
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .str_decoding_str
+
+    ; Default the encoding to utf-8, which is what CPython does when only
+    ; errors= was given.
+    cmp qword [rbp - SB_ENC], 0
+    jne .str_have_enc
+    push rax
+    CSTRING rdi, "utf-8"
+    call str_from_cstr
+    mov [rbp - SB_ENC], rax
+    pop rax
+    ; The temporary is dropped below, once the decode has read it.
+.str_have_enc:
+    ; CPython checks both here and names str(), not the decode underneath.
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - SB_ENC]
+    CSTRING rsi, "encoding"
+    call str_require_str_arg
+    mov rdi, [rbp - SB_ERR]
+    CSTRING rsi, "errors"
+    call str_require_str_arg
+    add rsp, 8
+    pop rax
+
+    mov rcx, [rbp - SB_OBJ]
+    mov [rbp - SB_ARGV], rcx
+    mov rcx, [rbp - SB_ENC]
+    mov [rbp - SB_ARGV + 8], rcx
+    mov rcx, [rbp - SB_ERR]
+    mov [rbp - SB_ARGV + 16], rcx
+    mov esi, 2
+    cmp qword [rbp - SB_ERR], 0
+    je .str_argc_set
+    mov esi, 3
+.str_argc_set:
+    lea rdi, [rbp - SB_ARGV]
+
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .str_call_bytes
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
+    jnz .str_call_bytes
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .str_call_bytearray
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTEARRAY_SUBCLASS
+    jnz .str_call_bytearray
+    lea rcx, [rel memoryview_type]
+    cmp rax, rcx
+    je .str_call_memoryview
+    jmp .str_not_bytes
+
+.str_call_bytes:
+    call _bytes_decode_impl
+    leave
+    ret
+.str_call_bytearray:
+    call ba_shared_decode
+    leave
+    ret
+.str_call_memoryview:
+    ; A memoryview has no decode of its own; CPython's str() reads its buffer.
+    ; Copying it to a bytes first is the same answer for the contiguous views
+    ; this build can make.
+    push rdi
+    push rsi
+    lea rsi, [rbp - SB_ARGV]
+    mov edx, 1
+    lea rdi, [rel bytes_type]
+    call bytes_type_call
+    pop rsi
+    pop rdi
+    test rax, rax
+    jz .str_failed
+    mov [rbp - SB_ARGV], rax
+    push rax
+    sub rsp, 8
+    lea rdi, [rbp - SB_ARGV]
+    call _bytes_decode_impl
+    add rsp, 8
+    pop rdi
+    push rax
+    call obj_decref
+    pop rax
+    leave
+    ret
+.str_failed:
+    xor eax, eax
+    leave
+    ret
+
+.str_decoding_str:
+    RAISE exc_TypeError_type, "decoding str is not supported"
+.str_not_bytes:
+    mov rsi, [rbp - SB_OBJ]
+    lea rdi, [rel str_decode_needs_bytes]
+    call raise_type_error_with_name
+.str_too_many:
+    mov rsi, [rbp - SB_NPOS]
+    add rsi, [rbp - SB_NKW]
+    lea rdi, [rel str_too_many_msg]
+    CSTRING rdx, " given)"
+    call raise_type_error_counted
 END_FUNC builtin_str_fn
+
+;; ============================================================================
+;; str_require_str_arg(rdi = the argument, or 0 when it was not given,
+;;                     rsi = the parameter's name)
+;; Raises "str() argument 'encoding' must be str, not int", CPython's wording.
+;; ============================================================================
+SRA_NAME  equ 8
+SRA_ARG   equ 16
+SRA_BUF   equ 176
+SRA_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
+DEF_FUNC_LOCAL str_require_str_arg, SRA_FRAME
+    test rdi, rdi
+    jz .sras_ok                 ; not given at all
+    mov [rbp - SRA_ARG], rdi
+    mov [rbp - SRA_NAME], rsi
+    V_TEST_PTR rdi, rax
+    ja .sras_bad
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .sras_ok
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .sras_ok
+.sras_bad:
+    lea rdi, [rbp - SRA_BUF]
+    CSTRING rsi, "str() argument '"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SRA_NAME]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "' must be str, not "
+    call rbt_append_cstr
+    mov rdi, rax
+    push rax
+    mov rdi, [rbp - SRA_ARG]
+    call value_type
+    test rax, rax
+    jz .sras_unknown
+    mov rsi, [rax + PyTypeObject.tp_name]
+    jmp .sras_named
+.sras_unknown:
+    CSTRING rsi, "object"
+.sras_named:
+    pop rdi
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - SRA_BUF]
+    call raise_exception
+.sras_ok:
+    leave
+    ret
+END_FUNC str_require_str_arg
+
+
+;; ============================================================================
+;; str_raise_bad_keyword(rdi = the keyword's name, as a C string)
+;; "'foo' is an invalid keyword argument for str()".
+;; ============================================================================
+SRK_NAME  equ 8
+SRK_BUF   equ 176
+SRK_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
+DEF_FUNC_LOCAL str_raise_bad_keyword, SRK_FRAME
+    mov [rbp - SRK_NAME], rdi
+    lea rdi, [rbp - SRK_BUF]
+    CSTRING rsi, "'"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SRK_NAME]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "' is an invalid keyword argument for str()"
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - SRK_BUF]
+    call raise_exception
+END_FUNC str_raise_bad_keyword
+
+section .rodata
+str_too_many_msg: db "str() takes at most 3 arguments (", 0
+section .text
+
+section .rodata
+str_decode_needs_bytes: db "decoding to str: need a bytes-like object, ", 1, " found", 0
+section .text
 
 ;; ============================================================================
 ;; 7. builtin_id(args, nargs) - id(x)
@@ -120,81 +447,28 @@ END_FUNC builtin_id
 
 ;; ============================================================================
 ;; 8. builtin_hash_fn(args, nargs) - hash(x)
+;;
+;; obj_hash and nothing else.  This used to reimplement the dispatch -- int
+;; immediate, float immediate, else tp_hash -- and raise when tp_hash was 0.
+;; object_type's was 0 and tp_hash is inherited, so every instance, plain
+;; class, function, module, iterator and object() answered TypeError, while
+;; `d[obj] = 1` worked: dict goes through obj_hash, which falls back to the
+;; address.  Two dispatchers, one of them wrong.
+;;
+;; They must agree in any case, or a key hashes one way going in and another
+;; coming out, so there is no version of this that should have its own copy.
 ;; ============================================================================
 DEF_FUNC builtin_hash_fn
-    push rbx
-    sub rsp, 8
-
     cmp rsi, 1
     jne .hash_nargs_error
-
-    mov rbx, [rdi]
-
-    V_TEST_INT_M [rdi], r11      ; args[0] an int immediate?
-    jae .hash_smallint
-
-    V_TEST_F64_M [rdi], r11      ; args[0] a float?
-    jbe .hash_float
-
-    ; Check non-pointer tags before dereference
-
-    mov rax, [rbx + PyObject.ob_type]
-    mov rcx, [rax + PyTypeObject.tp_hash]
-    test rcx, rcx
-    jz .hash_type_error
-
-    mov rdi, rbx
-    mov edx, TAG_PTR            ; tp_hash forwards edx to int_unwrap
-    call rcx
+    mov rdi, [rdi]
+    extern obj_hash
+    call obj_hash               ; raises for an unhashable type
     mov rdi, rax
     call int_from_i64
-    add rsp, 8
-    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
-
-.hash_float:
-    ; A float immediate: float_hash gives the PEP-correct int/float match
-    extern float_hash
-    mov rdi, rbx
-    V_TO_F64 rdi
-    mov edx, TAG_FLOAT          ; raw bits, not a float subclass instance
-    call float_hash
-    mov rdi, rax
-    call int_from_i64
-    add rsp, 8
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.hash_smallint:
-    extern int_hash_i64
-    mov rdi, rbx
-    V_TO_I64 rdi
-    call int_hash_i64
-.hash_si_ok:
-    mov rdi, rax
-    call int_from_i64
-    add rsp, 8
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.hash_bool:
-    ; hash(True) = 1, hash(False) = 0 — payload is already 0 or 1
-    mov rax, rbx
-    jmp .hash_si_ok
-
-.hash_none:
-    ; hash(None) — CPython convention
-    mov eax, 0x48ae2ce5
-    jmp .hash_si_ok
-
-.hash_type_error:
-    RAISE exc_TypeError_type, "unhashable type"
 
 .hash_nargs_error:
     RAISE exc_TypeError_type, "hash() takes exactly one argument"
@@ -281,6 +555,8 @@ END_FUNC builtin_callable
 ;; ============================================================================
 DEF_FUNC builtin_iter_fn
 
+    cmp rsi, 2
+    je .iter_sentinel
     cmp rsi, 1
     jne .iter_error
 
@@ -295,9 +571,45 @@ DEF_FUNC builtin_iter_fn
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.iter_sentinel:
+    ; iter(callable, sentinel): call it until it answers the sentinel.  This
+    ; form did not exist, and it is the ordinary way to read a stream until a
+    ; marker turns up -- `iter(lambda: f.read(4096), b"")`.
+    mov rsi, [rdi + 8]                 ; the sentinel, as a Value
+    mov rdi, [rdi]                     ; the callable
+    V_TEST_PTR rdi, rax
+    ja .iter_not_callable
+    test rdi, rdi
+    jz .iter_not_callable
+    mov rax, [rdi + PyObject.ob_type]
+    cmp qword [rax + PyTypeObject.tp_call], 0
+    je .iter_not_callable
+    extern callable_iter_new
+    call callable_iter_new
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.iter_not_callable:
+    RAISE exc_TypeError_type, "iter(object, sentinel): object must be callable"
 .iter_error:
-    RAISE exc_TypeError_type, "iter() takes exactly one argument"
+    ; CPython has two wordings, and they differ by which bound was broken.
+    test rsi, rsi
+    jnz .iter_too_many
+    lea rdi, [rel iter_few_msg]
+    jmp .iter_count
+.iter_too_many:
+    lea rdi, [rel iter_arity_msg]
+.iter_count:
+    xor edx, edx
+    call raise_type_error_counted
 END_FUNC builtin_iter_fn
+
+section .rodata
+iter_arity_msg: db "iter expected at most 2 arguments, got ", 0
+iter_few_msg:   db "iter expected at least 1 argument, got ", 0
+section .text
 
 ;; ============================================================================
 ;; 11. builtin_next_fn(args, nargs) - next(x)
@@ -1286,7 +1598,13 @@ DEF_FUNC builtin_getattr, 24
     ret
 
 .getattr_raise:
-    RAISE exc_AttributeError_type, "object has no attribute"
+    ; Name the object's type and the attribute, as every other path does.
+    ; getattr(o, "zzz") said only "object has no attribute", which is the
+    ; sentence with both nouns taken out of it.
+    mov rdi, [rbx]
+    mov rsi, [rbx + 8]
+    extern raise_no_attribute
+    call raise_no_attribute
 
 .getattr_error:
     RAISE exc_TypeError_type, "getattr expected 2 or 3 arguments"
@@ -1681,6 +1999,11 @@ DEF_FUNC builtin_dir, BD_FRAME
     DUNDER_EXC_SAVE [rbp - BD_EXC]
     push rbx
 
+    ; dir() with no argument is the names in the current scope, which is
+    ; sorted(locals()) -- CPython's own rule.  It was a TypeError here, and
+    ; pickle calls it at import.
+    test rsi, rsi
+    jz .bd_no_args
     cmp rsi, 1
     jne .bd_error
 
@@ -1774,6 +2097,37 @@ DEF_FUNC builtin_dir, BD_FRAME
     pop rbx
     leave
     V_PACK rax, rdx
+    ret
+
+.bd_no_args:
+    ; locals() answers the mapping; dir() is its keys, sorted, which is the
+    ; same list-and-sort tail the __dir__ path takes.
+    xor edi, edi
+    xor esi, esi
+    extern builtin_locals
+    call builtin_locals
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .bd_failed
+    mov rbx, rax
+    xor edi, edi
+    call list_new
+    mov [rbp - BD_SORT], rax
+    mov [rbp - BD_SORT + 8], rbx
+    lea rdi, [rbp - BD_SORT]
+    mov esi, 2
+    call list_method_extend
+    push rax
+    DECREF_V rbx, rcx           ; the mapping locals() handed us
+    pop rax
+    mov rbx, [rbp - BD_SORT]
+    test rax, rax
+    jz .bd_list_failed
+    jmp .bd_sort
+.bd_failed:
+    xor eax, eax
+    pop rbx
+    leave
     ret
 
 .bd_error:
@@ -2319,8 +2673,13 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     test rcx, TYPE_FLAG_HAS_SLOTS
     jnz .vars_no_dict
 
-    ; User instance: get inst_dict
-    mov rax, [rdi + PyInstanceObject.inst_dict]
+    ; User instance: get the instance dict.  The offset is the type's, not a
+    ; constant -- a dict, list or str subclass puts its __dict__ past its own
+    ; storage, and reading PyInstanceObject.inst_dict on one of those lands
+    ; inside the base object's header.  For a populated dict subclass that
+    ; word is a live pointer, which this then increfs and returned as a dict:
+    ; vars(D()) after a single d['a'] = 1 was a segfault.
+    LOAD_INST_DICT rax, rdi, .vars_empty_dict
     test rax, rax
     jz .vars_empty_dict
     INCREF rax

@@ -316,7 +316,7 @@ END_FUNC set_method_copy
 ;; set_method_union(args, nargs) -> new set = self | other
 ;; args[0]=self, args[1]=other (iterable)
 ;; ============================================================================
-DEF_FUNC set_method_union
+DEF_FUNC_LOCAL set_binop_union
     push rbx
     push r12
     push r13
@@ -423,7 +423,7 @@ DEF_FUNC set_method_union
 
 .smu_error:
     RAISE exc_TypeError_type, "union() takes exactly one argument"
-END_FUNC set_method_union
+END_FUNC set_binop_union
 
 ;; ============================================================================
 ;; set_method_update(args, nargs) -> None
@@ -437,7 +437,7 @@ SU_SELF   equ 8
 SU_TMP    equ 16        ; materialised sequence, owned, or 0
 SU_FRAME  equ 32            ; + 3 pushes = 56, not 16-aligned
 
-DEF_FUNC set_method_update, SU_FRAME
+DEF_FUNC_LOCAL set_update_one, SU_FRAME
     push rbx
     push r12
     push r13
@@ -535,13 +535,13 @@ DEF_FUNC set_method_update, SU_FRAME
     pop rbx
     leave
     ret
-END_FUNC set_method_update
+END_FUNC set_update_one
 
 ;; ============================================================================
 ;; set_method_intersection(args, nargs) -> new set = self & other
 ;; args[0]=self, args[1]=other
 ;; ============================================================================
-DEF_FUNC set_method_intersection
+DEF_FUNC_LOCAL set_binop_intersection
     push rbx
     push r12
     push r13
@@ -633,13 +633,13 @@ DEF_FUNC set_method_intersection
 
 .smi_error:
     RAISE exc_TypeError_type, "intersection() takes exactly one argument"
-END_FUNC set_method_intersection
+END_FUNC set_binop_intersection
 
 ;; ============================================================================
 ;; set_method_difference(args, nargs) -> new set = self - other
 ;; args[0]=self, args[1]=other
 ;; ============================================================================
-DEF_FUNC set_method_difference
+DEF_FUNC_LOCAL set_binop_difference
     push rbx
     push r12
     push r13
@@ -731,12 +731,283 @@ DEF_FUNC set_method_difference
 
 .smdf_error:
     RAISE exc_TypeError_type, "difference() takes exactly one argument"
+END_FUNC set_binop_difference
+
+;; ============================================================================
+;; set_fold(rdi = args, rsi = nargs, rdx = the two-operand body)
+;;   -> a Value: a new set, or NULL with the exception pending
+;;
+;; union, intersection and difference take ANY number of iterables in CPython
+;; -- `s.difference(a, b)` is `(s - a) - b`, and the no-argument forms are a
+;; copy.  All three here took exactly one and raised
+;; "union() takes exactly one argument" for everything else, so
+;; `set().union(*parts)` -- the ordinary way to flatten a list of sets -- was
+;; a TypeError.
+;;
+;; Folding is what makes the three variadic without a second implementation of
+;; any of them: the bodies stay two-operand, and this walks the arguments.  A
+;; single operand is the overwhelmingly common case and still reaches the body
+;; directly, with no intermediate copy.
+;; ============================================================================
+SF_ARGS  equ 8
+SF_N     equ 16
+SF_BODY  equ 24
+SF_ACC   equ 32
+SF_IDX   equ 40
+SF_TMP   equ 56             ; the two-slot argument array: [-56]=acc, [-48]=other
+SF_FRAME equ 64             ; + 0 pushes = 64
+
+DEF_FUNC_LOCAL set_fold, SF_FRAME
+    cmp rsi, 2
+    je .sf_direct           ; the common case: no accumulator needed
+    cmp rsi, 1
+    jl .sf_arity
+
+    mov [rbp - SF_ARGS], rdi
+    mov [rbp - SF_N], rsi
+    mov [rbp - SF_BODY], rdx
+
+    ; Seed the fold with a copy of self, which is also the whole answer for
+    ; the no-argument form.  A set is a pointer, and a pointer is its own
+    ; Value, so nothing here needs unpacking.
+    mov esi, 1
+    call set_method_copy
+    test rax, rax
+    jz .sf_fail
+    mov [rbp - SF_ACC], rax
+    mov qword [rbp - SF_IDX], 1
+
+.sf_loop:
+    mov rcx, [rbp - SF_IDX]
+    cmp rcx, [rbp - SF_N]
+    jge .sf_done
+
+    mov rax, [rbp - SF_ACC]
+    mov [rbp - SF_TMP], rax
+    mov rax, [rbp - SF_ARGS]
+    mov rcx, [rbp - SF_IDX]
+    mov rax, [rax + rcx * 8]
+    mov [rbp - SF_TMP + 8], rax
+    lea rdi, [rbp - SF_TMP]
+    mov esi, 2
+    call [rbp - SF_BODY]
+    test rax, rax
+    jz .sf_drop_acc
+
+    mov rdi, [rbp - SF_ACC]
+    mov [rbp - SF_ACC], rax     ; the new accumulator, before the old one dies
+    call obj_decref
+    inc qword [rbp - SF_IDX]
+    jmp .sf_loop
+
+.sf_done:
+    mov rax, [rbp - SF_ACC]
+    leave
+    ret
+
+.sf_drop_acc:
+    mov rdi, [rbp - SF_ACC]
+    call obj_decref
+.sf_fail:
+    xor eax, eax                ; a NULL Value, with the exception pending
+    leave
+    ret
+
+.sf_direct:
+    mov rax, rdx
+    leave
+    jmp rax                     ; a tail call: rdi and rsi are already right
+
+.sf_arity:
+    RAISE exc_TypeError_type, "descriptor requires a set argument"
+END_FUNC set_fold
+
+;; The three variadic entry points.  The operators reach the bodies through
+;; these too, always with exactly two operands, so they cost one jump.
+DEF_FUNC_BARE set_method_union
+    lea rdx, [rel set_binop_union]
+    jmp set_fold
+END_FUNC set_method_union
+
+DEF_FUNC_BARE set_method_intersection
+    lea rdx, [rel set_binop_intersection]
+    jmp set_fold
+END_FUNC set_method_intersection
+
+DEF_FUNC_BARE set_method_difference
+    lea rdx, [rel set_binop_difference]
+    jmp set_fold
 END_FUNC set_method_difference
+
+;; ============================================================================
+;; set_method_update(args, nargs) -> None
+;;
+;; update is variadic in CPython as well, and this took one source and
+;; silently IGNORED the rest -- `s.update(a, b)` dropped b without a word,
+;; which is worse than the TypeError the other three raised.  It is also
+;; set.__init__, so it has to tolerate nargs == 1.
+;; ============================================================================
+SUV_ARGS  equ 8
+SUV_N     equ 16
+SUV_IDX   equ 24
+SUV_TMP   equ 40            ; [-40] = self, [-32] = one source
+SUV_FRAME equ 48            ; + 0 pushes = 48
+
+DEF_FUNC set_method_update, SUV_FRAME
+    mov [rbp - SUV_ARGS], rdi
+    mov [rbp - SUV_N], rsi
+    mov qword [rbp - SUV_IDX], 1
+    mov rax, [rdi]
+    mov [rbp - SUV_TMP], rax    ; self, once; only the source slot moves
+.suv_loop:
+    mov rcx, [rbp - SUV_IDX]
+    cmp rcx, [rbp - SUV_N]
+    jge .suv_done
+    mov rax, [rbp - SUV_ARGS]
+    mov rax, [rax + rcx * 8]
+    mov [rbp - SUV_TMP + 8], rax
+    lea rdi, [rbp - SUV_TMP]
+    mov esi, 2
+    call set_update_one
+    test rax, rax
+    jz .suv_fail
+    inc qword [rbp - SUV_IDX]
+    jmp .suv_loop
+.suv_done:
+    RET_NONE
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+.suv_fail:
+    xor eax, eax                ; a NULL Value, with the exception pending
+    leave
+    ret
+END_FUNC set_method_update
+
+;; ============================================================================
+;; The three in-place method forms: intersection_update, difference_update and
+;; symmetric_difference_update.  All three were simply absent, so the only way
+;; to narrow a set in place was `s &= t` -- which, until the commit before
+;; this one, did not narrow it in place either.
+;;
+;; Each computes the ordinary answer and then swaps the two sets' storage, the
+;; same trick the nb_inplace_* slots use, so the object the caller holds is
+;; the one that changes.  frozenset gets none of them, and calling one through
+;; the unbound descriptor with a frozen receiver is a TypeError rather than a
+;; mutation of something immutable.
+;; ============================================================================
+SUI_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+%macro DEF_SET_UPDATE 2-3    ; %1 = method name, %2 = the value-producing form,
+                             ; %3 = a name symbol when the form takes exactly one
+DEF_FUNC set_method_%1, SUI_FRAME
+    push rbx
+    cmp rsi, 1
+    jl %%bad
+%if %0 >= 3
+    ; The delegate would raise under ITS own name; CPython names the method
+    ; that was actually called.
+    cmp rsi, 2
+    je %%arity_ok
+    lea rdi, [rel %3]
+    call set_raise_arity
+%%arity_ok:
+%endif
+    mov rbx, [rdi]              ; self, kept across the call
+
+    push rdi
+    push rsi
+    mov rdi, rbx
+    call set_result_type
+    lea rcx, [rel frozenset_type]
+    cmp rax, rcx
+    pop rsi
+    pop rdi
+    je %%frozen
+
+    call %2
+    test rax, rax
+    jz %%fail
+
+    mov rdi, rbx
+    mov rsi, rax                ; takes over the answer's reference
+    extern set_swap_storage
+    call set_swap_storage
+    mov rdi, rax
+    call obj_decref             ; set_swap_storage hands back a reference
+    RET_NONE
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+%%fail:
+    xor eax, eax                ; a NULL Value, with the exception pending
+    pop rbx
+    leave
+    ret
+%%frozen:
+    pop rbx
+    RAISE exc_TypeError_type, "descriptor requires a 'set' object"
+%%bad:
+    pop rbx
+    RAISE exc_TypeError_type, "descriptor requires a set argument"
+END_FUNC set_method_%1
+%endmacro
+
+DEF_SET_UPDATE intersection_update,         set_method_intersection
+DEF_SET_UPDATE difference_update,           set_method_difference
+DEF_SET_UPDATE symmetric_difference_update, set_method_symmetric_difference, \
+               sn_symmetric_difference_update
 
 ;; ============================================================================
 ;; set_method_symmetric_difference(args, nargs) -> new set = self ^ other
 ;; args[0]=self, args[1]=other
 ;; ============================================================================
+;; ============================================================================
+;; set_raise_arity(rdi = the method's name, rsi = nargs) -- does not return
+;;
+;; CPython's wording for a set method given the wrong number of arguments:
+;;   set.symmetric_difference() takes exactly one argument (2 given)
+;; nargs counts self, so the number reported is one less.
+;; ============================================================================
+SRA_NAME  equ 8
+SRA_N     equ 16
+SRA_BUF   equ 160
+SRA_FRAME equ 160           ; + 0 pushes = 160, 16-aligned
+DEF_FUNC_LOCAL set_raise_arity, SRA_FRAME
+    mov [rbp - SRA_NAME], rdi
+    dec rsi                     ; self does not count
+    mov [rbp - SRA_N], rsi
+    lea rdi, [rbp - SRA_BUF]
+    lea rsi, [rel sn_set_dot]
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SRA_NAME]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel sn_takes_one]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SRA_N]
+    extern msg_append_i64
+    call msg_append_i64
+    mov rdi, rax
+    lea rsi, [rel sn_given]
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - SRA_BUF]
+    extern raise_exception
+    call raise_exception
+END_FUNC set_raise_arity
+
+section .rodata
+sn_set_dot:   db "set.", 0
+sn_takes_one: db "() takes exactly one argument (", 0
+sn_given:     db " given)", 0
+sn_symmetric_difference:        db "symmetric_difference", 0
+sn_symmetric_difference_update: db "symmetric_difference_update", 0
+section .text
+
 DEF_FUNC set_method_symmetric_difference
     push rbx
     push r12
@@ -860,7 +1131,10 @@ DEF_FUNC set_method_symmetric_difference
     ret
 
 .smsd_error:
-    RAISE exc_TypeError_type, "symmetric_difference() takes exactly one argument"
+    ; CPython names the method in full and reports the count:
+    ;   set.symmetric_difference() takes exactly one argument (2 given)
+    lea rdi, [rel sn_symmetric_difference]
+    call set_raise_arity
 END_FUNC set_method_symmetric_difference
 
 ;; ============================================================================
@@ -879,7 +1153,17 @@ DEF_FUNC set_method_issubset
     jne .smss_error
 
     mov r14, [rdi]          ; self
-    mov r15, [rdi + 8]     ; other
+    ; The three predicates take any iterable, as the four builders beside them
+    ; do: `{1}.issubset([1])` read a list's header as a hash table.  It found
+    ; nothing occupied -- so issubset answered True for anything and isdisjoint
+    ; answered True for everything -- and a two-element list made the probe run
+    ; off the end of a table it had measured wrong, into "set: hash table
+    ; full", which is a fatal_error and not an exception.
+    mov rdi, [rdi + 8]
+    call set_coerce_operand
+    test rax, rax
+    jz .smss_fail
+    mov r15, rax            ; owned: the set itself, or one built from it
 
     mov r12, [r14 + PyDictObject.entries]
     mov r13, [r14 + PyDictObject.capacity]
@@ -908,6 +1192,8 @@ DEF_FUNC set_method_issubset
     jmp .smss_loop
 
 .smss_true:
+    mov rdi, r15
+    call obj_decref
     RET_TRUE
     pop r15
     pop r14
@@ -920,6 +1206,8 @@ DEF_FUNC set_method_issubset
 
 .smss_false:
     pop rcx                 ; balance the push in loop
+    mov rdi, r15
+    call obj_decref
     RET_FALSE
     pop r15
     pop r14
@@ -928,6 +1216,17 @@ DEF_FUNC set_method_issubset
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.smss_fail:
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .smss_error:
@@ -949,8 +1248,12 @@ DEF_FUNC set_method_issuperset
     cmp rsi, 2
     jne .smis_error
 
-    mov r14, [rdi + 8]     ; other (iterate this)
     mov r15, [rdi]          ; self (check contains)
+    mov rdi, [rdi + 8]     ; other (iterate this); see issubset above
+    call set_coerce_operand
+    test rax, rax
+    jz .smis_fail
+    mov r14, rax            ; owned
 
     mov r12, [r14 + PyDictObject.entries]
     mov r13, [r14 + PyDictObject.capacity]
@@ -979,6 +1282,8 @@ DEF_FUNC set_method_issuperset
     jmp .smis_loop
 
 .smis_true:
+    mov rdi, r14
+    call obj_decref
     RET_TRUE
     pop r15
     pop r14
@@ -991,6 +1296,8 @@ DEF_FUNC set_method_issuperset
 
 .smis_false:
     pop rcx
+    mov rdi, r14
+    call obj_decref
     RET_FALSE
     pop r15
     pop r14
@@ -999,6 +1306,17 @@ DEF_FUNC set_method_issuperset
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.smis_fail:
+    xor eax, eax
+    xor edx, edx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .smis_error:
@@ -1021,7 +1339,11 @@ DEF_FUNC set_method_isdisjoint
     jne .smdj_error
 
     mov r14, [rdi]          ; self
-    mov r15, [rdi + 8]     ; other
+    mov rdi, [rdi + 8]     ; other; see issubset above
+    call set_coerce_operand
+    test rax, rax
+    jz .smdj_fail
+    mov r15, rax            ; owned
 
     mov r12, [r14 + PyDictObject.entries]
     mov r13, [r14 + PyDictObject.capacity]
@@ -1050,6 +1372,8 @@ DEF_FUNC set_method_isdisjoint
     jmp .smdj_loop
 
 .smdj_true:
+    mov rdi, r15
+    call obj_decref
     RET_TRUE
     pop r15
     pop r14
@@ -1062,6 +1386,8 @@ DEF_FUNC set_method_isdisjoint
 
 .smdj_false:
     pop rcx
+    mov rdi, r15
+    call obj_decref
     RET_FALSE
     pop r15
     pop r14
@@ -1070,6 +1396,17 @@ DEF_FUNC set_method_isdisjoint
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.smdj_fail:
+    xor eax, eax
+    xor edx, edx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .smdj_error:
@@ -1091,7 +1428,7 @@ END_FUNC set_method_isdisjoint
 ;; ============================================================================
 global frozenset_dunder_hash
 DEF_FUNC frozenset_dunder_hash
-    REQUIRE_SELF frozenset_type
+    REQUIRE_SELF frozenset_type, "__hash__"
     cmp rsi, 1
     jne .fdh_error
     mov rdi, [rdi]

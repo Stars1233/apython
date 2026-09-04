@@ -1,0 +1,57 @@
+ZeroDivisionError
+ZeroDivisionError
+TypeError
+TypeError
+TypeError
+TypeError
+TypeError
+IndexError
+IndexError
+AttributeError
+TypeError
+TypeError
+TypeError
+ZeroDivisionError
+Traceback (most recent call last):
+  File "tests/test_traceback_carets.py", line 127, in <module>
+    subscript([1, 2, 3], 9)
+  File "tests/test_traceback_carets.py", line 56, in subscript
+    return xs[i]
+           ~~^^^
+IndexError: list index out of range
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "tests/test_traceback_carets.py", line 130, in <module>
+    nested()
+  File "tests/test_traceback_carets.py", line 85, in nested
+    return call_it(divide)
+           ^^^^^^^^^^^^^^^
+  File "tests/test_traceback_carets.py", line 68, in call_it
+    return f(1, 0)
+           ^^^^^^^
+  File "tests/test_traceback_carets.py", line 28, in divide
+    return a / b
+           ~~^~~
+ZeroDivisionError: division by zero
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "tests/test_traceback_carets.py", line 133, in <module>
+    divide_unicode(1, 0)
+  File "tests/test_traceback_carets.py", line 119, in divide_unicode
+    return ä / b
+           ~~^~~
+ZeroDivisionError: division by zero
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "tests/test_traceback_carets.py", line 135, in <module>
+    subscript_unicode([1], 9)
+  File "tests/test_traceback_carets.py", line 123, in subscript_unicode
+    return seq[ïndex]
+           ~~~^^^^^^^
+IndexError: list index out of range

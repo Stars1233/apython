@@ -14,6 +14,8 @@ extern obj_decref
 extern obj_dealloc
 extern obj_incref
 extern frame_free
+extern sys_write
+extern list_append
 
 ;; ============================================================================
 ;; GC data (BSS + DATA)
@@ -35,10 +37,9 @@ align 8
 gc_gen1:
     dq gc_gen1
     dq gc_gen1
-global gc_gen1_count
-gc_gen1_count:  dq 0
 global gc_gen1_threshold
 gc_gen1_threshold: dq 10
+global gc_gen1_collections
 gc_gen1_collections: dq 0
 
 ; Generation 2 sentinel
@@ -46,28 +47,38 @@ align 8
 gc_gen2:
     dq gc_gen2
     dq gc_gen2
-global gc_gen2_count
-gc_gen2_count:  dq 0
 global gc_gen2_threshold
 gc_gen2_threshold: dq 10
+global gc_gen2_collections
 gc_gen2_collections: dq 0
 
 ; GC state
 global gc_enabled
 gc_enabled:     dq 1
+
+; The gc.set_debug() flags, and the gc.garbage list the SAVEALL one needs.
+; The list is registered by gc_module_create; it is 0 until `import gc`, and
+; SAVEALL with no list simply collects as usual rather than losing objects.
+global gc_debug
+gc_debug:       dq 0
+global gc_garbage_list
+gc_garbage_list: dq 0
 global gc_collecting        ; eval_exception_unwind resets this: a raising
                             ; __del__ during a collection longjmps out and
                             ; would otherwise latch it on for good
 gc_collecting:  dq 0    ; reentrancy guard
 
-; Generation table (for indexed access)
+; Generation table (for indexed access).  Only the sentinel is ever read
+; through it: the count and threshold columns it used to carry were named
+; directly by everything that wanted them, and two of the three counts did
+; not exist -- gen1 and gen2 were declared, exported and never once written.
 align 8
 gc_generations:
-    dq gc_gen0, gc_gen0_count, gc_gen0_threshold, 0                ; gen 0
-    dq gc_gen1, gc_gen1_count, gc_gen1_threshold, gc_gen1_collections ; gen 1
-    dq gc_gen2, gc_gen2_count, gc_gen2_threshold, gc_gen2_collections ; gen 2
+    dq gc_gen0                  ; gen 0
+    dq gc_gen1                  ; gen 1
+    dq gc_gen2                  ; gen 2
 
-GEN_ENTRY_SIZE equ 32   ; 4 qwords per generation entry
+GEN_ENTRY_SIZE equ 8    ; one qword per generation entry
 
 section .text
 
@@ -309,6 +320,181 @@ DEF_FUNC gc_dealloc
 END_FUNC gc_dealloc
 
 ;; ============================================================================
+;; gc_walk_generation(rdi = generation 0..2, rsi = list)
+;; Appends every object tracked in that generation to the list.
+;;
+;; The list is itself a tracked object and is skipped by identity: appending
+;; it to itself would still terminate, but it would report a list that
+;; contains itself.  list_append can reallocate, and a reallocation is the
+;; kind of thing that could otherwise trigger a collection and unlink nodes
+;; out from under the walk -- gc_collecting is the flag gc_track already
+;; tests before triggering one, so the walk raises it for its duration.
+;; ============================================================================
+GWG_LIST  equ 8
+GWG_SAVED equ 16
+GWG_FRAME equ 32            ; + 2 pushes = 48
+
+global gc_walk_generation
+DEF_FUNC gc_walk_generation, GWG_FRAME
+    push rbx
+    push r12
+    mov [rbp - GWG_LIST], rsi
+    lea rax, [rel gc_generations]
+    mov r12, [rax + rdi*8]              ; the generation's sentinel
+
+    mov rax, [rel gc_collecting]
+    mov [rbp - GWG_SAVED], rax
+    mov qword [rel gc_collecting], 1
+
+    mov rbx, [r12 + PyGC_Head.gc_next]
+.gwg_loop:
+    cmp rbx, r12
+    je .gwg_done
+    lea rsi, [rbx + GC_HEAD_SIZE]
+    cmp rsi, [rbp - GWG_LIST]
+    je .gwg_next
+    mov rdi, [rbp - GWG_LIST]
+    call list_append
+.gwg_next:
+    mov rbx, [rbx + PyGC_Head.gc_next]
+    jmp .gwg_loop
+.gwg_done:
+    mov rax, [rbp - GWG_SAVED]
+    mov [rel gc_collecting], rax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC gc_walk_generation
+
+;; ============================================================================
+;; The gc.set_debug() reporting.  It goes to stderr, unbuffered, through the
+;; write syscall: a collection can be running under any interpreter state at
+;; all -- including inside a tp_clear -- so it must not allocate, must not
+;; call into Python, and must not touch sys.stderr.
+;;
+;; DEBUG_COLLECTABLE names the type and the address rather than calling repr,
+;; which is what CPython does too, and for the same reason: repr on a
+;; half-cleared object runs arbitrary Python inside the collector.
+;; ============================================================================
+
+;; gcd_puts(rdi = NUL-terminated string)
+DEF_FUNC_LOCAL gcd_puts, 8                          ; + 1 push = 16
+    push rbx
+    mov rbx, rdi
+    xor ecx, ecx
+.gcp_len:
+    cmp byte [rbx + rcx], 0
+    je .gcp_write
+    inc rcx
+    jmp .gcp_len
+.gcp_write:
+    mov edi, 2
+    mov rsi, rbx
+    mov rdx, rcx
+    call sys_write
+    pop rbx
+    leave
+    ret
+END_FUNC gcd_puts
+
+;; gcd_putu(rdi = unsigned) -- decimal, right-to-left into the frame
+GCU_END   equ 8             ; one past the last digit
+GCU_FRAME equ 40            ; + 0 pushes = 40, 32 bytes of digits below it
+DEF_FUNC_LOCAL gcd_putu, GCU_FRAME
+    mov rax, rdi
+    lea rcx, [rbp - GCU_END]
+    mov r8, 10
+.gcu_loop:
+    xor edx, edx
+    div r8
+    dec rcx
+    add dl, '0'
+    mov [rcx], dl
+    test rax, rax
+    jnz .gcu_loop
+    lea rdx, [rbp - GCU_END]
+    sub rdx, rcx                ; length
+    mov rsi, rcx
+    mov edi, 2
+    call sys_write
+    leave
+    ret
+END_FUNC gcd_putu
+
+;; gcd_putp(rdi = pointer) -- "0x" and lowercase hex
+GCP_END   equ 8
+GCP_FRAME equ 40            ; + 0 pushes = 40
+DEF_FUNC_LOCAL gcd_putp, GCP_FRAME
+    mov rax, rdi
+    lea rcx, [rbp - GCP_END]
+.gcx_loop:
+    mov rdx, rax
+    and edx, 15
+    cmp dl, 10
+    jb .gcx_digit
+    add dl, 'a' - 10 - '0'
+.gcx_digit:
+    add dl, '0'
+    dec rcx
+    mov [rcx], dl
+    shr rax, 4
+    jnz .gcx_loop
+    push rcx
+    lea rdi, [rel gcd_s_0x]
+    call gcd_puts
+    pop rcx
+    lea rdx, [rbp - GCP_END]
+    sub rdx, rcx
+    mov rsi, rcx
+    mov edi, 2
+    call sys_write
+    leave
+    ret
+END_FUNC gcd_putp
+
+;; gcd_report(rdi = obj, rsi = "collectable" or "unreachable" cstr)
+;;   gc: <msg> <typename 0xADDR>
+DEF_FUNC_LOCAL gcd_report, 8                        ; + 2 pushes = 24
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    lea rdi, [rel gcd_s_gc]
+    call gcd_puts
+    mov rdi, r12
+    call gcd_puts
+    lea rdi, [rel gcd_s_lt]
+    call gcd_puts
+    mov rdi, [rbx + PyObject.ob_type]
+    mov rdi, [rdi + PyTypeObject.tp_name]
+    call gcd_puts
+    lea rdi, [rel gcd_s_sp]
+    call gcd_puts
+    mov rdi, rbx
+    call gcd_putp
+    lea rdi, [rel gcd_s_gtnl]
+    call gcd_puts
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC gcd_report
+
+section .rodata
+gcd_s_0x:     db "0x", 0
+gcd_s_gc:     db "gc: ", 0
+gcd_s_lt:     db " <", 0
+gcd_s_sp:     db " ", 0
+gcd_s_gtnl:   db ">", 10, 0
+gcd_s_coll:   db "collectable", 0
+gcd_s_start:  db "gc: collecting generation ", 0
+gcd_s_dots:   db "...", 10, 0
+gcd_s_done:   db "gc: done, ", 0
+gcd_s_unre:   db " unreachable, 0 uncollectable", 10, 0
+section .text
+
+;; ============================================================================
 ;; gc_collect_gen(edi=generation) -> rax = the unreachable objects it cleared
 ;; Core cycle collection algorithm.
 ;; ============================================================================
@@ -332,6 +518,16 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
 
     ; Set collecting flag
     mov qword [rel gc_collecting], 1
+
+    test qword [rel gc_debug], GC_DEBUG_STATS
+    jz .no_stats_start
+    lea rdi, [rel gcd_s_start]
+    call gcd_puts
+    mov edi, [rbp - GCG_GEN]
+    call gcd_putu
+    lea rdi, [rel gcd_s_dots]
+    call gcd_puts
+.no_stats_start:
 
     ; Initialize young list sentinel on stack
     lea rax, [rbp - GCG_YOUNG]
@@ -490,6 +686,55 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     jmp .phase4_loop
 .phase4_done:
 
+    ; ---- Count the unreachable set, before phase 5 starts freeing it ----
+    ; This is the number gc.collect() answers with.  Counting inside phase 5
+    ; undercounts, and by a lot: clearing one member of a cycle drops the
+    ; others by refcount, and obj_dealloc -> gc_untrack unlinks them before
+    ; the loop ever reaches them.  A three-object cycle answered 1.
+    mov rbx, [r15 + PyGC_Head.gc_next]
+.count_loop:
+    cmp rbx, r15
+    je .count_done
+    inc qword [rbp - GCG_FOUND]
+    test qword [rel gc_debug], GC_DEBUG_COLLECTABLE
+    jz .count_next
+    lea rdi, [rbx + GC_HEAD_SIZE]
+    lea rsi, [rel gcd_s_coll]
+    call gcd_report
+.count_next:
+    mov rbx, [rbx + PyGC_Head.gc_next]
+    jmp .count_loop
+.count_done:
+
+    ; ---- DEBUG_SAVEALL: hand the unreachable set to gc.garbage ----
+    ; CPython appends every unreachable object to gc.garbage and does not
+    ; clear any of them, so the whole cycle stays alive to be looked at.  The
+    ; nodes go back into the young list one at a time rather than by a list
+    ; merge: gc_list_append rewrites gc_prev, which is what clears the
+    ; COLLECTING bit phase 3 set.  Leaving it set would make the next
+    ; collection's gc_visit_decref treat these as part of *its* generation.
+    test qword [rel gc_debug], GC_DEBUG_SAVEALL
+    jz .no_saveall
+    mov rax, [rel gc_garbage_list]
+    test rax, rax
+    jz .no_saveall
+.saveall_loop:
+    mov rbx, [r15 + PyGC_Head.gc_next]
+    cmp rbx, r15
+    je .saveall_done
+    lea rsi, [rbx + GC_HEAD_SIZE]
+    mov rdi, [rel gc_garbage_list]
+    call list_append
+    mov rdi, rbx
+    call gc_list_remove
+    mov rdi, rbx
+    mov rsi, r12
+    call gc_list_append
+    jmp .saveall_loop
+.saveall_done:
+    jmp .phase5_done
+.no_saveall:
+
     ; ---- Phase 5: Clear the unreachable set, letting DECREF free it ----
     ; One pass, and the head is re-read from the sentinel every time round.
     ; Caching a next pointer across tp_clear is what broke here: clearing one
@@ -501,7 +746,6 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     mov rbx, [r15 + PyGC_Head.gc_next]
     cmp rbx, r15
     je .phase5_done
-    inc qword [rbp - GCG_FOUND]            ; what gc.collect() answers with
 
     lea r13, [rbx + GC_HEAD_SIZE]          ; r13 = obj
     inc qword [r13 + PyObject.ob_refcnt]
@@ -533,6 +777,16 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     jmp .phase5_loop
 
 .phase5_done:
+
+    test qword [rel gc_debug], GC_DEBUG_STATS
+    jz .no_stats_done
+    lea rdi, [rel gcd_s_done]
+    call gcd_puts
+    mov rdi, [rbp - GCG_FOUND]
+    call gcd_putu
+    lea rdi, [rel gcd_s_unre]
+    call gcd_puts
+.no_stats_done:
 
     ; ---- Move surviving reachable objects to next generation ----
     mov eax, [rbp - GCG_GEN]

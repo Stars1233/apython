@@ -793,10 +793,16 @@ END_FUNC asm_loc_svarint
 ;; ============================================================================
 ;; asm_linetable(CompUnit *u, Buf *out) -> fills out with a PEP 626 table
 ;;
-;; Only two of the fifteen encodings are used: form 13 (a line number, no
-;; column information) and form 15 (no location at all, for prologue
-;; instructions).  code_addr2line decodes both, and the compact forms buy only
-;; columns, which nothing in apython reads.
+;; Three of the fifteen encodings are used: form 14 (the long form, with the
+;; end line and both columns), form 13 (a line number and no columns, for an
+;; instruction whose emitter attributed it to a line other than the node's)
+;; and form 15 (no location at all, for prologue instructions).  The compact
+;; forms 0-12 would pack the same information into fewer bytes for the common
+;; case and are not worth a second encoder.
+;;
+;; The columns are what a traceback's `~~^~~` row is derived from, and without
+;; them a file run from source had no caret row where the same file run from a
+;; CPython .pyc did.
 ;;
 ;; Two constraints come straight from that decoder: the first byte of every
 ;; entry must have bit 7 set, and an entry covers at most eight code units --
@@ -811,7 +817,10 @@ AL_N     equ 32
 AL_CUR   equ 40
 AL_SIZE  equ 48
 AL_LINE  equ 56
-AL_FRAME equ 56          ; + 3 pushes = 80
+AL_ENDD  equ 64          ; end_line - line, the same on every chunk
+AL_COL   equ 72
+AL_ECOL  equ 80
+AL_FRAME equ 88          ; + 3 pushes = 112
 DEF_FUNC asm_linetable, AL_FRAME
     push rbx
     push r12
@@ -845,8 +854,64 @@ DEF_FUNC asm_linetable, AL_FRAME
     jz .no_location
     mov [rbp - AL_LINE], rcx
 
-    ; Form 13, split into runs of at most eight code units.  The delta lands on
-    ; the first chunk; the rest repeat the same line with a delta of zero.
+    ; With columns, the long form; without them, a line on its own.  cg_emit
+    ; writes -1 for the column whenever the instruction's line is not the one
+    ; the code generator was positioned at, so this needs no second opinion
+    ; about whether the two belong together.
+    mov edx, [rax + Instr.col]
+    cmp edx, 0
+    jl .line_only
+    mov [rbp - AL_COL], rdx
+    mov edx, [rax + Instr.end_col]
+    mov [rbp - AL_ECOL], rdx
+    mov edx, [rax + Instr.end_line]
+    sub edx, ecx
+    js .line_only                       ; an end before the start is no span
+    mov [rbp - AL_ENDD], rdx
+
+    ; Form 14, split into runs of at most eight code units.  Every chunk
+    ; repeats the WHOLE payload -- the decoder resolves whichever entry covers
+    ; the offset it is asked about and never looks at the one before it -- and
+    ; only the first carries the line delta, since it walks entries in order
+    ; and adds each delta as it goes.
+    mov rax, [rbp - AL_LINE]
+    sub rax, [rbp - AL_CUR]
+    mov [rbp - AL_LINE], rax
+.col_chunk:
+    mov rcx, [rbp - AL_SIZE]
+    test rcx, rcx
+    jz .next
+    cmp rcx, 8
+    jbe .col_len
+    mov rcx, 8
+.col_len:
+    mov rdi, [rbp - AL_OUT]
+    lea rsi, [rcx - 1]
+    or rsi, 0x80 | (14 << 3)
+    push rcx
+    call buf_push_u8
+    mov rdi, [rbp - AL_OUT]
+    mov rsi, [rbp - AL_LINE]
+    call asm_loc_svarint
+    mov qword [rbp - AL_LINE], 0        ; only the first chunk carries it
+    mov rdi, [rbp - AL_OUT]
+    mov rsi, [rbp - AL_ENDD]
+    call asm_loc_varint
+    mov rdi, [rbp - AL_OUT]
+    mov rsi, [rbp - AL_COL]
+    inc rsi                             ; the columns are stored one-based, so
+    call asm_loc_varint                 ; that 0 can mean "not recorded"
+    mov rdi, [rbp - AL_OUT]
+    mov rsi, [rbp - AL_ECOL]
+    inc rsi
+    call asm_loc_varint
+    pop rcx
+    sub [rbp - AL_SIZE], rcx
+    jmp .col_chunk
+
+.line_only:
+    ; Form 13, split the same way.  The delta lands on the first chunk; the
+    ; rest repeat the same line with a delta of zero.
     mov rax, [rbp - AL_LINE]
     sub rax, [rbp - AL_CUR]
     mov [rbp - AL_LINE], rax            ; the delta to emit first
@@ -1163,6 +1228,7 @@ DEF_FUNC asm_assemble, AA_FRAME
     jz .oom
     mov [rbp - AA_SPEC + CodeSpec.localsplusnames], rax
     mov rdi, rax
+    mov rsi, r12
     call asm_kinds_bytes
     mov [rbp - AA_SPEC + CodeSpec.localspluskinds], rax
 
@@ -1319,15 +1385,70 @@ DEF_FUNC asm_nlocals, 8
 END_FUNC asm_nlocals
 
 ;; ============================================================================
-;; asm_kinds_bytes(PyTupleObject *localsplusnames) -> rax = bytes, or 0
-;; apython never reads co_localspluskinds, but emitting it correctly costs a
-;; dozen lines and keeps introspection honest if it is ever wired up.
+;; asm_ncells(rsi = the CompUnit) -> eax = the scope's cell count
+;; asm_nlocals' sibling, reaching the same Scope the same way.
 ;; ============================================================================
-DEF_FUNC asm_kinds_bytes, 16
+DEF_FUNC asm_ncells, 8
+    push rbx
+    mov rax, [rsi + CompUnit.comp]
+    test rax, rax
+    jz .anc_zero
+    mov rdi, rax
+    mov esi, [rsi + CompUnit.scope]
+    call sym_at
+    mov eax, [rax + Scope.ncells]
+    pop rbx
+    leave
+    ret
+.anc_zero:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC asm_ncells
+
+;; ============================================================================
+;; asm_kinds_bytes(rdi = localsplusnames tuple, rsi = the CompUnit)
+;;   -> rax = bytes, or 0
+;;
+;; The layout asm_localsplus_tuple settles is varnames, then the cells that
+;; needed a new slot, then the free variables -- so the kind of a slot is
+;; decided by where it falls against nlocals and ncells.
+;;
+;; It used to write CO_FAST_LOCAL for every slot, which nothing read.  It is
+;; read now: LOAD_DEREF's failure has to say whether the empty slot is this
+;; function's own cell (UnboundLocalError) or a free variable from an
+;; enclosing scope (NameError), and those are CPython's two different
+;; exceptions.
+;; ============================================================================
+AKB_UNIT   equ 8
+AKB_NLOCAL equ 16
+AKB_NCELL  equ 24
+AKB_FRAME  equ 32           ; + 2 pushes = 8 + 32 + 16 = 56, not 16-aligned
+DEF_FUNC asm_kinds_bytes, AKB_FRAME
     push rbx
     push r12
+    mov [rbp - AKB_UNIT], rsi
     mov rbx, rdi
     mov r12, [rdi + PyVarObject.ob_size]
+
+    ; The two boundaries.  A unit with no scope answers zero for both, which
+    ; makes every slot a plain local -- the old behaviour, and right for a
+    ; module body.
+    xor eax, eax
+    mov [rbp - AKB_NLOCAL], rax
+    mov [rbp - AKB_NCELL], rax
+    test rsi, rsi
+    jz .sizes_done
+    mov rsi, [rbp - AKB_UNIT]   ; asm_nlocals reads the unit from rsi
+    call asm_nlocals
+    mov [rbp - AKB_NLOCAL], eax
+    ; The cell count lives on the same Scope, reached the same way.
+    mov rsi, [rbp - AKB_UNIT]
+    call asm_ncells
+    mov [rbp - AKB_NCELL], eax
+.sizes_done:
+
     mov rdi, r12
     add rdi, 8
     call ap_malloc
@@ -1336,7 +1457,17 @@ DEF_FUNC asm_kinds_bytes, 16
 .fill:
     cmp rcx, r12
     jae .make
-    mov byte [rbx + rcx], CO_FAST_LOCAL
+    mov eax, CO_FAST_LOCAL
+    cmp ecx, [rbp - AKB_NLOCAL]
+    jb .fill_store
+    mov eax, CO_FAST_CELL
+    mov edx, [rbp - AKB_NLOCAL]
+    add edx, [rbp - AKB_NCELL]
+    cmp ecx, edx
+    jb .fill_store
+    mov eax, CO_FAST_FREE
+.fill_store:
+    mov [rbx + rcx], al
     inc rcx
     jmp .fill
 .make:

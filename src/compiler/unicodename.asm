@@ -12,6 +12,8 @@
 ;; written in the name itself.  uniname_cjk_ranges is what makes a bogus one
 ;; still an error.
 
+section .note.GNU-stack noalloc noexec nowrite progbits
+
 section .rodata
 
 global uniname_blob

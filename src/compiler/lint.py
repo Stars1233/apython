@@ -411,6 +411,71 @@ def check_guards(paths):
                         "write `%endif ; " + want + "`"))
     return bad
 
+def type_field_count(headers):
+    """How many qwords a PyTypeObject is, from the struct declaration."""
+    for path in headers:
+        m = re.search(r'struc\s+PyTypeObject(.*?)endstruc', open(path).read(), re.S)
+        if m:
+            return len(re.findall(r'^\s*\.\w+:\s*resq\s+1', m.group(1), re.M))
+    return None
+
+def check_type_tables(files, nfields):
+    """A static type table must be the whole PyTypeObject.
+
+    NASM has nothing to say about a table that stops early: the fields past
+    the end read whatever the next object in the section happens to be.  Both
+    tables that were short here used `times N dq 0` for their tail and were
+    left behind when a field was added -- super_type read its tp_flags,
+    tp_traverse and tp_dictoffset out of the type object that followed it.
+
+    A structseq type carries one extra qword, its descriptor, one past the
+    end; those are the only tables allowed to be longer.
+    """
+    if not nfields:
+        return []
+    dq = re.compile(r'^\s*dq\s')
+    times = re.compile(r'^\s*times\s+(\d+)\s+dq\s')
+    skip = re.compile(r'^\s*(?:extern|global)\s')
+    label = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*(?:_type|_metatype)):\s*(?:;.*)?$')
+    bad = []
+    for path in files:
+        lines = open(path).read().split('\n')
+        i = 0
+        while i < len(lines):
+            m = label.match(lines[i])
+            if m:
+                j, n, last = i + 1, 0, None
+                while j < len(lines):
+                    L = lines[j]
+                    t = times.match(L)
+                    if t:
+                        n += int(t.group(1)); last = j; j += 1
+                    elif dq.match(L):
+                        n += 1; last = j; j += 1
+                    elif skip.match(L):
+                        j += 1
+                    elif n and (L.strip().startswith(';') or not L.strip()):
+                        k = j
+                        while k < len(lines) and (lines[k].strip().startswith(';')
+                                                  or not lines[k].strip()):
+                            k += 1
+                        if k < len(lines) and (dq.match(lines[k]) or times.match(lines[k])
+                                               or skip.match(lines[k])):
+                            j = k
+                        else:
+                            break
+                    else:
+                        break
+                if n >= 20:
+                    extra = 1 if 'STRUCTSEQ_DESC' in lines[last] else 0
+                    if n != nfields + extra:
+                        bad.append((path, i + 1,
+                                    "type table %s has %d qwords, PyTypeObject is %d"
+                                    % (m.group(1), n, nfields + extra),
+                                    "a short table reads the next object's fields"))
+            i += 1
+    return bad
+
 def all_asm():
     """Every hand-written .asm in the tree."""
     return sorted(glob.glob('src/*.asm') + glob.glob('src/*/*.asm'))
@@ -436,6 +501,7 @@ def main():
                           + ['src/compiler/compiler.inc'])
 
     headers = sorted(glob.glob('src/include/*.inc')) + ['src/compiler/compiler.inc']
+    nfields = type_field_count(headers)
 
     problems = (check_field_widths(everything, fields) + check_section(everything)
                 + check_rel(everything) + check_markers(everything)
@@ -443,6 +509,7 @@ def main():
                 + check_frame_offsets(everything)
                 + check_separators(everything)
                 + check_text(everything) + check_guards(headers)
+                + check_type_tables(everything, nfields)
                 + check_alignment(scoped) + check_tailjumps(scoped)
                 + check_callee_saved(scoped) + check_saved_writes(scoped))
     for path, n, what, detail in problems:
@@ -451,8 +518,9 @@ def main():
     if problems:
         print("\n%d problem(s)" % len(problems))
         return 1
-    print("lint: ok (%d files tree-wide, %d scoped, %d headers, %d dword fields)"
-          % (len(everything), len(scoped), len(headers), len(fields)))
+    print("lint: ok (%d files tree-wide, %d scoped, %d headers, %d dword fields,"
+          " %d-qword type tables)"
+          % (len(everything), len(scoped), len(headers), len(fields), nfields))
     return 0
 
 if __name__ == '__main__':

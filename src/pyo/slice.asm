@@ -321,6 +321,19 @@ DEF_FUNC_BARE pyobj_to_i64
     ; to INT_NEED_MPZ.
     cmp esi, TAG_PTR
     jne .not_an_index
+    ; An int subclass WRAPS an int rather than being one, so what follows --
+    ; INT_NEED_MPZ, which INITIALISES the mpz in place -- would write over the
+    ; wrapper's own header.  `a[N(1):]` read the bound as 0 and left the
+    ; object with a NULL type, so the next use of it crashed somewhere else.
+    extern int_unwrap
+    push rbp
+    mov rbp, rsp
+    mov edx, esi
+    call int_unwrap
+    mov esi, edx
+    pop rbp
+    cmp esi, TAG_SMALLINT
+    je .smallint
     mov rax, [rdi + PyObject.ob_type]
     REQUIRE_INT_TYPE rax, rcx, .not_an_index
     ; GMP int: check if it fits in i64, clamp if not
@@ -562,6 +575,92 @@ DEF_FUNC slice_getattr
 END_FUNC slice_getattr
 
 ;; ============================================================================
+;; slice.indices(length) -> (start, stop, step)
+;;
+;; The method did not exist -- only the internal slice_indices behind the
+;; subscript operators did -- so `slice(1, 10, 2).indices(20)` was an
+;; AttributeError.  It is how anything implementing __getitem__ for slices in
+;; Python resolves one, and _pyio and the ABCs both do that.
+;; ============================================================================
+SMI_SELF  equ 8
+SMI_START equ 16
+SMI_STOP  equ 24
+SMI_STEP  equ 32
+SMI_FRAME equ 48            ; + 0 pushes = 48
+
+DEF_FUNC slice_method_indices, SMI_FRAME
+    cmp rsi, 2
+    jne .smi_arity
+    mov rax, [rdi]
+    mov [rbp - SMI_SELF], rax
+    mov rdi, [rdi + 8]
+    V_UNPACK rdi, rdx
+    extern obj_as_index
+    call obj_as_index
+    ; obj_as_index reports a non-integer by raising, and comes back 0 on the
+    ; paths that do not.  A negative length is CPython's own check.
+    test rax, rax
+    js .smi_negative
+    mov rsi, rax
+    mov rdi, [rbp - SMI_SELF]
+    call slice_indices          ; -> rax = start, rdx = stop, rcx = step
+    mov [rbp - SMI_START], rax
+    mov [rbp - SMI_STOP], rdx
+    mov [rbp - SMI_STEP], rcx
+
+    mov edi, 3
+    extern tuple_new
+    call tuple_new
+    test rax, rax
+    jz .smi_failed
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov rdx, [rbp - SMI_START]
+    V_PACK_I64 rdx, rsi
+    mov [rcx], rdx
+    mov rdx, [rbp - SMI_STOP]
+    V_PACK_I64 rdx, rsi
+    mov [rcx + 8], rdx
+    mov rdx, [rbp - SMI_STEP]
+    V_PACK_I64 rdx, rsi
+    mov [rcx + 16], rdx
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+.smi_failed:
+    xor eax, eax
+    leave
+    ret
+.smi_negative:
+    RAISE exc_ValueError_type, "length should not be negative"
+.smi_arity:
+    dec rsi                     ; self does not count
+    lea rdi, [rel smi_arity_msg]
+    CSTRING rdx, " given)"
+    extern raise_type_error_counted
+    call raise_type_error_counted
+
+section .rodata
+smi_arity_msg: db "slice.indices() takes exactly one argument (", 0
+section .text
+END_FUNC slice_method_indices
+
+;; The three fields as getset descriptors, so they are on the TYPE as well as
+;; on the instance.  slice_getattr answers them for an instance and is faster,
+;; but `hasattr(slice, "start")` and dir(slice) go through the type's dict.
+%macro DEF_SLICE_GETTER 1
+DEF_FUNC slice_get_%1
+    mov rax, [rdi + PySliceObject.%1]
+    INCREF_V rax, rdx
+    leave
+    ret
+END_FUNC slice_get_%1
+%endmacro
+DEF_SLICE_GETTER start
+DEF_SLICE_GETTER stop
+DEF_SLICE_GETTER step
+
+;; ============================================================================
 ;; slice_type_call(self, args, nargs) -> (rax, edx) fat value
 ;; slice(stop), slice(start, stop), slice(start, stop, step)
 ;; rdi = self (slice_type), rsi = args (16-byte fat slots), rdx = nargs
@@ -663,7 +762,7 @@ slice_type:
     dq 0                      ; tp_base
     dq 0                      ; tp_dict
     dq 0                      ; tp_mro
-    dq TYPE_FLAG_HAVE_GC                      ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_FINAL  ; tp_flags -- no Py_TPFLAGS_BASETYPE
     dq 0                      ; tp_bases
     dq slice_traverse                        ; tp_traverse
     dq slice_clear_gc                        ; tp_clear

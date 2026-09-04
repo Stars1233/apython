@@ -15,6 +15,7 @@
 %include "compiler.inc"
 
 extern ast_at
+extern ast_span_at
 extern comp_keep
 extern ast_child
 extern ast_obj_at
@@ -43,6 +44,10 @@ extern exc_SyntaxError_type
 
 ; --- Named frame-layout constants ---
 CE_NPTR  equ 32
+CE_SLINE equ 40          ; cg_expr only: the caller's location, saved field by
+CE_SEND  equ 44          ; field across the emitter it dispatches to
+CE_SCOL  equ 48
+CE_SECOL equ 52
 CE_FRAME equ 56          ; + 3 pushes = 80
 
 section .text
@@ -253,6 +258,9 @@ DEF_FUNC cg_unit_init, CU_FRAME
     mov dword [rbx + CompUnit.stacksize], 0
     mov dword [rbx + CompUnit.firstline], 1
     mov dword [rbx + CompUnit.curline], 0
+    mov dword [rbx + CompUnit.curend], 0
+    mov dword [rbx + CompUnit.curcol], -1
+    mov dword [rbx + CompUnit.curendcol], -1
     mov rax, [rbp - CU_FILE]
     mov [rbx + CompUnit.filename], rax
     mov rax, [rbp - CU_NAME]
@@ -323,6 +331,29 @@ DEF_FUNC cg_emit, CM_FRAME
     mov rdx, [rbp - CM_LINE]
     mov [rax + Instr.line], edx
     mov dword [rax + Instr.offset], 0
+
+    ; The columns come from the location the dispatcher set, and only when the
+    ; caller is emitting for that same line.  An emitter that attributes an
+    ; instruction to some other line -- a loop's jump back, a prologue, the
+    ; sites that pass 0 for "no line" -- would otherwise pair one node's line
+    ; with another node's columns, which reads as a caret under the wrong text.
+    mov dword [rax + Instr.end_line], 0
+    mov dword [rax + Instr.col], -1
+    mov dword [rax + Instr.end_col], -1
+    mov dword [rax + Instr.pad], 0
+    test edx, edx
+    jz .cm_done
+    cmp edx, [rbx + CompUnit.curline]
+    jne .cm_done
+    mov ecx, [rbx + CompUnit.curcol]
+    cmp ecx, 0
+    jl .cm_done
+    mov [rax + Instr.col], ecx
+    mov ecx, [rbx + CompUnit.curendcol]
+    mov [rax + Instr.end_col], ecx
+    mov ecx, [rbx + CompUnit.curend]
+    mov [rax + Instr.end_line], ecx
+.cm_done:
 
     pop rbx
     leave
@@ -706,6 +737,64 @@ DEF_FUNC cg_cmpop, CC_FRAME
 END_FUNC cg_cmpop
 
 ;; ============================================================================
+;; cg_set_loc(Comp *c, CompUnit *u, uint32_t node)
+;;
+;; Point the unit's current location at one node.  cg_expr and cg_stmt call it
+;; on the way in and put back what was there on the way out, so every
+;; instruction an emitter produces without saying anything about position
+;; inherits the node being compiled -- which is what gives the line table
+;; columns, and the traceback its caret row.
+;;
+;; A node whose span was never filled in has -1 ends; the columns are dropped
+;; rather than half-reported, and cg_emit then writes the line-only form.
+;; ============================================================================
+SLOC_NODE  equ 8
+SLOC_FRAME equ 32         ; + 2 pushes = 48
+DEF_FUNC cg_set_loc, SLOC_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    mov [rbp - SLOC_NODE], rdx
+
+    mov rdi, rbx
+    mov rsi, rdx
+    call ast_at
+    test rax, rax
+    jz .csl_none
+    mov ecx, [rax + AstNode.lineno]
+    mov [r12 + CompUnit.curline], ecx
+    mov ecx, [rax + AstNode.col]
+    mov [r12 + CompUnit.curcol], ecx
+    cmp ecx, 0
+    jl .csl_none
+
+    mov rdi, rbx
+    mov rsi, [rbp - SLOC_NODE]
+    call ast_span_at
+    test rax, rax
+    jz .csl_none
+    mov ecx, [rax + AstSpan.end_lineno]
+    mov edx, [rax + AstSpan.end_col]
+    cmp ecx, 0
+    jl .csl_none
+    cmp edx, 0
+    jl .csl_none
+    mov [r12 + CompUnit.curend], ecx
+    mov [r12 + CompUnit.curendcol], edx
+    pop r12
+    pop rbx
+    leave
+    ret
+.csl_none:
+    mov dword [r12 + CompUnit.curcol], -1
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_set_loc
+
+;; ============================================================================
 ;; cg_expr(Comp *c, CompUnit *u, uint32_t node) -> rax = 1 ok, 0 error
 ;;
 ;; Dispatches on the node kind.  Every emitter reached from here leaves exactly
@@ -733,10 +822,32 @@ DEF_FUNC cg_expr, CE_FRAME
     test rax, rax
     jz .unsupported
 
+    mov ecx, [r12 + CompUnit.curline]
+    mov [rbp - CE_SLINE], ecx
+    mov ecx, [r12 + CompUnit.curend]
+    mov [rbp - CE_SEND], ecx
+    mov ecx, [r12 + CompUnit.curcol]
+    mov [rbp - CE_SCOL], ecx
+    mov ecx, [r12 + CompUnit.curendcol]
+    mov [rbp - CE_SECOL], ecx
+    mov [rbp - CE_NPTR], rax
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
-    call rax
+    call cg_set_loc
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call qword [rbp - CE_NPTR]
+    mov ecx, [rbp - CE_SLINE]
+    mov [r12 + CompUnit.curline], ecx
+    mov ecx, [rbp - CE_SEND]
+    mov [r12 + CompUnit.curend], ecx
+    mov ecx, [rbp - CE_SCOL]
+    mov [r12 + CompUnit.curcol], ecx
+    mov ecx, [rbp - CE_SECOL]
+    mov [r12 + CompUnit.curendcol], ecx
     pop r13
     pop r12
     pop rbx
@@ -2112,6 +2223,12 @@ DEF_FUNC_LOCAL cg_e_call, CC2_FRAME
     call cg_expr
     test eax, eax
     jz .fail
+    ; The load belongs to the ATTRIBUTE, not to the call around it: CPython
+    ; underlines `v.upper().nope` and not `v.upper().nope()` when it raises.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CC2_CHILD]
+    call cg_set_loc
     mov rdi, rbx
     mov rsi, [rbp - CC2_CHILD]
     call ast_at
@@ -2130,6 +2247,10 @@ DEF_FUNC_LOCAL cg_e_call, CC2_FRAME
     mov esi, OP_LOAD_ATTR
     mov rcx, [rbp - CC2_LINE]
     call cg_emit
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call cg_set_loc
 
 .args:
     cmp qword [rbp - CC2_EX], 0

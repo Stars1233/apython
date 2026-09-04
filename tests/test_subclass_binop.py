@@ -126,3 +126,102 @@ class All(int):
 a = All(6)
 print(a + 1, a - 1, a * 2, a % 4, a ** 2, a << 1, a >> 1)
 print(a & 3, a ^ 3, a | 3, a // 2, a / 2, divmod(a, 2), a @ 2)
+
+
+# The subclass-priority path is an exit of its own, and it owed the two
+# DECREFs the operands came off the value stack with.  Nothing noticed until
+# an operand had a __del__: every `A() < B()` for a B(A) defining __gt__ leaked
+# both of them, and so did the arithmetic form when it raised.
+print("=== the operands are released ===")
+
+
+class Base:
+    def __add__(self, o):
+        return "Base.add"
+
+    def __lt__(self, o):
+        return "Base.lt"
+
+
+class Sub(Base):
+    def __init__(self, tag):
+        self.tag = tag
+
+    def __radd__(self, o):
+        return "Sub.radd"
+
+    def __gt__(self, o):
+        return "Sub.gt"
+
+    def __del__(self):
+        print("released", self.tag)
+
+
+def add_form():
+    print(Base() + Sub("add"))
+
+
+def cmp_form():
+    print(Base() < Sub("cmp"))
+
+
+add_form()
+cmp_form()
+
+
+# The raising form releases them too.  WHEN it does is not comparable: an
+# exception here carries a traceback that keeps the frame -- and so the
+# operand -- alive until the handler is done, and this interpreter's unwinder
+# releases the stack slots as it goes.  So the check is made after the except
+# block, where both have finished.
+gone = []
+
+
+class Raiser(Base):
+    def __init__(self, tag):
+        self.tag = tag
+
+    def __radd__(self, o):
+        raise ValueError("from radd")
+
+    def __gt__(self, o):
+        raise KeyError("from gt")
+
+    def __del__(self):
+        gone.append(self.tag)
+
+
+def add_raises():
+    try:
+        Base() + Raiser("add-raise")
+    except ValueError as e:
+        print("caught", e)
+    print("released after add:", "add-raise" in gone)
+
+
+def cmp_raises():
+    try:
+        Base() < Raiser("cmp-raise")
+    except KeyError as e:
+        print("caught", e.args[0])
+    print("released after cmp:", "cmp-raise" in gone)
+
+
+add_raises()
+cmp_raises()
+
+# Every result type through the same exit, since it packs one.
+print("=== results of every shape ===")
+
+
+class R(Base):
+    def __radd__(self, o):
+        return ret
+
+    def __gt__(self, o):
+        return ret
+
+
+for ret in (5, 2.5, "s", None, True, [1], 2 ** 70, -0.0, ()):
+    print(repr(Base() + R()), repr(Base() < R()))
+print("done")

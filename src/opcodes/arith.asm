@@ -163,6 +163,324 @@ DEF_FUNC_BARE binop_left_wrapper
     ret
 END_FUNC binop_left_wrapper
 
+;; ============================================================================
+;; binop_subclass_first(rdi = left payload, rsi = left tag,
+;;                      rdx = right payload, rcx = right tag,
+;;                      r8 = the byte offset into PyNumberMethods,
+;;                      r9 = the reflected dunder's C string, or 0)
+;;   -> rax = a result VALUE with ecx = 1, ecx = 0 to carry on,
+;;      or ecx = 2 when the reflected call raised
+;;
+;; The other half of CPython's binary_op1: when the right operand's type is a
+;; PROPER SUBCLASS of the left's and overrides the operator, the right side
+;; goes first.  1 + MyInt(2) for a MyInt defining __radd__ answered 3 here
+;; and answers 'MyInt.radd' in CPython.
+;;
+;; Only reached when the left operand is not a heaptype holding our own
+;; wrapper -- that wrapper runs the same rule itself, in
+;; slot_binop_reflect_first, because for two such types the slot functions
+;; are one object and CPython's `slotv != slotw` cannot separate them.
+;;
+;; The test here is likewise the reflected NAME rather than the slot pointer.
+;; A class defining only __radd__ inherits int's nb_add, where CPython's
+;; slot_nb_add serves both directions and so differs from long_add; and the
+;; reflected DUNDER is what has to run, not the inherited slot, which would
+;; simply add.
+;; ============================================================================
+BSF_LEFT  equ 8
+BSF_LTAG  equ 16
+BSF_RIGHT equ 24
+BSF_RTAG  equ 32
+BSF_LTYPE equ 40
+BSF_RTYPE equ 48
+BSF_RNAME equ 56
+BSF_LMETH equ 64
+BSF_EXC   equ 72
+BSF_FRAME equ 80            ; + 0 pushes = 80
+extern current_exception
+extern eval_exception_unwind
+DEF_FUNC_LOCAL binop_subclass_first, BSF_FRAME
+    mov [rbp - BSF_LEFT], rdi
+    mov [rbp - BSF_LTAG], rsi
+    mov [rbp - BSF_RIGHT], rdx
+    mov [rbp - BSF_RTAG], rcx
+    mov [rbp - BSF_RNAME], r9
+    test r9, r9
+    jz .bsf_no                  ; no reflected form for this operator
+
+    ; The operands arrive as (payload, tag) PAIRS, not as Values, so the tag
+    ; is what names the type -- and 1 + MyInt(2), the whole point of the
+    ; rule, has an immediate on the left with no ob_type to read.
+    mov esi, esi
+    call binop_type_of
+    test rax, rax
+    jz .bsf_no
+    mov [rbp - BSF_LTYPE], rax
+    mov rdi, [rbp - BSF_RIGHT]
+    mov esi, [rbp - BSF_RTAG]
+    call binop_type_of
+    test rax, rax
+    jz .bsf_no
+    mov [rbp - BSF_RTYPE], rax
+    cmp rax, [rbp - BSF_LTYPE]
+    je .bsf_no                  ; same type: nothing to prefer
+
+    mov rdi, [rbp - BSF_RTYPE]
+    mov rsi, [rbp - BSF_LTYPE]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jz .bsf_no                  ; and a PROPER one, the equality above having
+                                ; excluded the other case
+
+    ; method_is_overloaded: the right type must define the reflected name,
+    ; and not merely inherit the left type's.
+    mov rdi, [rbp - BSF_RTYPE]
+    mov rsi, [rbp - BSF_RNAME]
+    extern dunder_lookup
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .bsf_no
+    mov [rbp - BSF_LMETH], rax
+    mov rdi, [rbp - BSF_LTYPE]
+    mov rsi, [rbp - BSF_RNAME]
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .bsf_call                ; only the right type defines it
+    cmp rax, [rbp - BSF_LMETH]
+    je .bsf_no                  ; the same object: inherited, not overridden
+
+.bsf_call:
+    DUNDER_EXC_SAVE [rbp - BSF_EXC]
+    mov rdi, [rbp - BSF_RIGHT]
+    mov rsi, [rbp - BSF_LEFT]
+    mov rdx, [rbp - BSF_RNAME]
+    mov ecx, [rbp - BSF_LTAG]
+    extern dunder_call_2
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .bsf_none_or_raised
+
+    extern notimpl_singleton
+    lea rcx, [rel notimpl_singleton]
+    cmp rax, rcx
+    je .bsf_drop_notimpl
+    V_PACK rax, rdx
+    mov ecx, 1
+    leave
+    ret
+
+.bsf_drop_notimpl:
+    mov rdi, rax                ; dunder_call_2 hands back an owned reference
+    extern obj_decref
+    call obj_decref
+.bsf_no:
+    xor eax, eax
+    xor ecx, ecx
+    leave
+    ret
+
+.bsf_none_or_raised:
+    EXC_RAISED_SINCE [rbp - BSF_EXC], rcx, .bsf_raised
+    xor eax, eax
+    xor ecx, ecx
+    leave
+    ret
+.bsf_raised:
+    xor eax, eax
+    mov ecx, 2
+    leave
+    ret
+END_FUNC binop_subclass_first
+
+;; ============================================================================
+;; binop_type_of(rdi = payload, esi = tag) -> rax = the PyTypeObject*, or 0
+;; The type an operand names, immediates included.  .binop_left_type does the
+;; same thing inline; this is the callable form.
+;; ============================================================================
+DEF_FUNC_LOCAL binop_type_of
+    cmp esi, TAG_SMALLINT
+    je .bto_int
+    cmp esi, TAG_FLOAT
+    je .bto_float
+    cmp esi, TAG_PTR
+    jne .bto_no
+    test rdi, rdi
+    jz .bto_no
+    mov rax, [rdi + PyObject.ob_type]
+    leave
+    ret
+.bto_int:
+    lea rax, [rel int_type]
+    leave
+    ret
+.bto_float:
+    lea rax, [rel float_type]
+    leave
+    ret
+.bto_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC binop_type_of
+
+;; ============================================================================
+;; cmp_subclass_first(rdi = left payload, esi = left tag,
+;;                    rdx = right payload, r8d = right tag,
+;;                    r15d = the comparison op)
+;;   -> rax = a result VALUE with edx = 1, edx = 0 to carry on,
+;;      or edx = 2 when the reflected comparison raised
+;;
+;; CPython's do_richcompare prologue.  Unlike the arithmetic rule this one
+;; asks nothing about which method is overridden -- a proper subclass with a
+;; tp_richcompare is enough -- so it is the subtype test and the swapped op.
+;; ============================================================================
+CSF_LEFT  equ 8
+CSF_LTAG  equ 16
+CSF_RIGHT equ 24
+CSF_RTAG  equ 32
+CSF_LTYPE equ 40
+CSF_RTYPE equ 48
+CSF_OP    equ 56
+CSF_EXC   equ 64
+CSF_FRAME equ 80            ; + 0 pushes = 80
+DEF_FUNC_LOCAL cmp_subclass_first, CSF_FRAME
+    mov [rbp - CSF_LEFT], rdi
+    mov [rbp - CSF_LTAG], rsi
+    mov [rbp - CSF_RIGHT], rdx
+    mov [rbp - CSF_RTAG], r8
+    mov [rbp - CSF_OP], r15
+
+    ; A pointer on the right is the only shape that can be a subclass of
+    ; anything: an immediate names a static type, and no static type here is
+    ; a proper subclass of another.
+    cmp r8d, TAG_PTR
+    jne .csf_no
+    test rdx, rdx
+    jz .csf_no
+
+    mov esi, esi
+    call binop_type_of
+    test rax, rax
+    jz .csf_no
+    mov [rbp - CSF_LTYPE], rax
+    mov rdi, [rbp - CSF_RIGHT]
+    mov rax, [rdi + PyObject.ob_type]
+    mov [rbp - CSF_RTYPE], rax
+    cmp rax, [rbp - CSF_LTYPE]
+    je .csf_no
+
+    mov rdi, [rbp - CSF_RTYPE]
+    mov rsi, [rbp - CSF_LTYPE]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jz .csf_no
+
+    ; It has to be able to answer: a heaptype with the comparison dunder, or
+    ; a type with a tp_richcompare of its own.
+    mov rax, [rbp - CSF_RTYPE]
+    mov rcx, [rax + PyTypeObject.tp_richcompare]
+    test rcx, rcx
+    jnz .csf_slot
+
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .csf_no
+    ; The dunder, with the op swapped: LT<->GT, LE<->GE, EQ and NE their own.
+    DUNDER_EXC_SAVE [rbp - CSF_EXC]
+    mov rax, [rbp - CSF_OP]
+    lea rcx, [rel cmp_swap_table_shared]
+    mov eax, [rcx + rax*4]
+    extern cmp_dunder_table
+    lea rcx, [rel cmp_dunder_table]
+    mov rdx, [rcx + rax*8]
+    test rdx, rdx
+    jz .csf_no
+    mov rdi, [rbp - CSF_RIGHT]
+    mov rsi, [rbp - CSF_LEFT]
+    mov ecx, [rbp - CSF_LTAG]
+    extern dunder_call_2
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .csf_none_or_raised
+    extern notimpl_singleton
+    lea rcx, [rel notimpl_singleton]
+    cmp rax, rcx
+    je .csf_drop_notimpl
+    V_PACK rax, rdx
+    mov edx, 1
+    mov r15, [rbp - CSF_OP]
+    leave
+    ret
+
+.csf_slot:
+    ; tp_richcompare(right Value, left Value, swapped_op) -- the shape
+    ; .cmp_do_call uses, with the operands the other way round.
+    DUNDER_EXC_SAVE [rbp - CSF_EXC]
+    mov rax, [rbp - CSF_OP]
+    lea rdx, [rel cmp_swap_table_shared]
+    mov r10d, [rdx + rax*4]
+    mov rdi, [rbp - CSF_RIGHT]
+    mov rcx, [rbp - CSF_RTAG]
+    V_PACK rdi, rcx
+    mov rsi, [rbp - CSF_LEFT]
+    mov rcx, [rbp - CSF_LTAG]
+    V_PACK rsi, rcx
+    mov edx, r10d
+    mov rax, [rbp - CSF_RTYPE]
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    call rax
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .csf_none_or_raised
+    extern notimpl_singleton
+    lea rcx, [rel notimpl_singleton]
+    cmp rax, rcx
+    je .csf_drop_notimpl
+    V_PACK rax, rdx
+    mov edx, 1
+    mov r15, [rbp - CSF_OP]
+    leave
+    ret
+
+.csf_drop_notimpl:
+    mov rdi, rax
+    extern obj_decref
+    call obj_decref
+.csf_no:
+    xor eax, eax
+    xor edx, edx
+    mov r15, [rbp - CSF_OP]
+    leave
+    ret
+
+.csf_none_or_raised:
+    EXC_RAISED_SINCE [rbp - CSF_EXC], rcx, .csf_raised
+    xor eax, eax
+    xor edx, edx
+    mov r15, [rbp - CSF_OP]
+    leave
+    ret
+.csf_raised:
+    xor eax, eax
+    mov edx, 2
+    mov r15, [rbp - CSF_OP]
+    leave
+    ret
+END_FUNC cmp_subclass_first
+
+section .rodata
+align 4
+; LT<->GT, LE<->GE, EQ and NE their own; the same permutation op_compare_op's
+; own reflected arm uses, hoisted so both can name it.
+cmp_swap_table_shared:
+    dd PY_GT, PY_GE, PY_EQ, PY_NE, PY_LT, PY_LE
+section .text
+
 DEF_FUNC_BARE op_binary_op
     ; ecx = NB_* op code
     ; Save the op index before pops (VPOP doesn't clobber ecx)
@@ -229,11 +547,53 @@ DEF_FUNC_BARE op_binary_op
     mov edx, r9d
     call binop_left_wrapper
     test rax, rax
-    jz .binop_no_left_wrapper
+    jz .binop_check_subclass_first
     ; .binop_do_call reads the operands out of rdi and rsi, not off the stack.
     mov rdi, [rsp + BO_LEFT]
     mov rsi, [rsp + BO_RIGHT]
     jmp .binop_have_method
+
+.binop_check_subclass_first:
+    ; The other half of CPython's binary_op1: when the right operand's type
+    ; is a proper subclass of the left's and overrides the operator, the
+    ; right side goes first.  1 + MyInt(2) for a MyInt defining __radd__
+    ; answered 3 here and answers 'MyInt.radd' in CPython.
+    ;
+    ; Only when the left is NOT a heaptype holding our wrapper: that wrapper
+    ; runs the same rule itself, in slot_binop_reflect_first.
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_LTAG]
+    mov rdx, [rsp + BO_RIGHT]
+    mov rcx, [rsp + BO_RTAG]
+    mov r10, r8                 ; the slot offset; the call clobbers r8
+    push r9
+    push r10
+    mov eax, r9d
+    cmp eax, 13
+    jl .binop_bsf_ridx
+    sub eax, 13
+.binop_bsf_ridx:
+    extern binop_rdunder_table
+    lea r9, [rel binop_rdunder_table]
+    mov r9, [r9 + rax*8]
+    mov r8, r10
+    call binop_subclass_first
+    mov r11d, ecx               ; the status; the pops clobber nothing else
+    pop r10
+    pop r9
+    mov r8, r10
+    test r11d, r11d
+    jz .binop_no_left_wrapper
+    cmp r11d, 2
+    je .binop_subclass_raised
+    ; rax is already a Value; .binop_have_result owes it the two DECREFs the
+    ; operands came off the stack with.
+    mov edx, TAG_PTR
+    jmp .binop_have_result
+.binop_subclass_raised:
+    ; See .cmp_subclass_raised: the unwinder releases the operands.
+    add rsp, 32
+    jmp eval_exception_unwind
 .binop_no_left_wrapper:
 
     ; Float coercion: if either operand is TAG_FLOAT, use float methods
@@ -1244,6 +1604,40 @@ section .text
     jnz .cmp_use_float
 
 .cmp_no_float:
+    ; CPython's do_richcompare tries the RIGHT operand first when its type is
+    ; a proper subclass of the left's -- the same subclass-priority rule the
+    ; arithmetic operators have, and the half bugs.md did not record.
+    ; `P() < Q()` for a Q(P) defining __gt__ called P.__lt__ here and calls
+    ; Q.__gt__ in CPython.
+    mov r15d, ecx               ; r15 is the handler scratch; ecx holds the op
+    mov rdi, [rsp + BO_LEFT]
+    mov esi, [rsp + BO_LTAG]
+    mov rdx, [rsp + BO_RIGHT]
+    mov r10d, [rsp + BO_RTAG]
+    mov r8d, r10d
+    call cmp_subclass_first     ; r15 = op, in and out
+    mov ecx, r15d
+    test edx, edx
+    jz .cmp_no_subclass_first
+    cmp edx, 2
+    je .cmp_subclass_raised
+    ; Both operands came off the value stack owning a reference, so this exit
+    ; owes the same two DECREFs every other one does.  Dropping the saved
+    ; words without them leaked an object per comparison, which is invisible
+    ; until something has a __del__.
+    mov edx, TAG_PTR
+    jmp .cmp_do_call_result
+.cmp_subclass_raised:
+    ; No DECREFs here: the unwinder cleans up from eval_saved_r13, which is
+    ; where the stack was BEFORE these two came off it, so it releases them.
+    add rsp, 32
+    jmp eval_exception_unwind
+.cmp_no_subclass_first:
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    mov r9d, [rsp + BO_LTAG]
+    mov r8d, [rsp + BO_RTAG]
+
     ; Get type's tp_richcompare
     cmp r9d, TAG_SMALLINT
     je .cmp_smallint_type
@@ -1274,7 +1668,7 @@ section .text
     ; No tp_richcompare — try dunder on heaptype
     mov rdx, [r9 + PyTypeObject.tp_flags]
     test rdx, TYPE_FLAG_HEAPTYPE
-    jz .cmp_identity
+    jz .cmp_left_declines       ; a static type with nothing to say
 
     ; Map compare op to dunder name via lookup table
     extern cmp_dunder_table
@@ -1421,6 +1815,18 @@ section .text
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
     DISPATCH
+
+.cmp_left_declines:
+    ; The left operand's type has no comparison at all.  That is a DECLINE,
+    ; not an answer: do_richcompare asks the other operand before it falls
+    ; back to identity.  Jumping straight to .cmp_identity meant
+    ; `None == S()` was False for a class defining __eq__, where CPython
+    ; calls S.__eq__.
+    ;
+    ; .cmp_try_right opens by popping the op that .cmp_do_call pushed before
+    ; calling the slot, so this path has to push it too.
+    push rcx
+    jmp .cmp_try_right
 
 .cmp_try_right:
     ; Left's tp_richcompare returned NotImplemented (NULL).

@@ -32,6 +32,59 @@ extern builtin_func_new
 extern fatal_error
 extern raise_exception
 
+;; SYS_ADD_FUNC impl, name -- the module dict is in r15 here, not r12, so
+;; MODULE_ADD_FUNC does not fit; this is the same four steps.
+%macro SYS_ADD_FUNC 2
+    lea rdi, [rel %1]
+    lea rsi, [rel %2]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel %2]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+%endmacro
+
+;; SYS_ADD_FUNC_ALIAS impl, name, alias -- the same object under two names.
+;; sys.excepthook and sys.__excepthook__ ARE the same object in CPython, and
+;; code checks it: `sys.excepthook is sys.__excepthook__` is how a program
+;; asks whether anything has replaced the hook.  Two SYS_ADD_FUNC calls made
+;; two objects and that test was always False.
+%macro SYS_ADD_FUNC_ALIAS 3
+    lea rdi, [rel %1]
+    lea rsi, [rel %2]
+    call builtin_func_new
+    push rax
+    lea rdi, [rel %2]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    lea rdi, [rel %3]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+%endmacro
+
+
 ;; ============================================================================
 ;; sys_module_init(int argc, char **argv) -> void
 ;; Initialize the sys module and register it in sys.modules
@@ -249,6 +302,12 @@ DEF_FUNC sys_module_init, 32
     extern structseq_set
     extern structseq_init_type
     lea rdi, [rel version_info_type]
+    call structseq_init_type
+    ; sys.UnraisableHookArgs, which sys.unraisablehook is handed.  Only the
+    ; type needs registering; the instances are built one at a time by the
+    ; unraisable printer.
+    extern unraisable_args_type
+    lea rdi, [rel unraisable_args_type]
     call structseq_init_type
     lea rdi, [rel version_info_type]
     call structseq_new
@@ -934,6 +993,32 @@ DEF_FUNC sys_module_init, 32
     pop rdi
     call obj_decref
 
+    ; --- sys.excepthook / sys.__excepthook__ / sys.unraisablehook ---
+    ;
+    ; threading reads sys.excepthook at import time, to save and restore it
+    ; around a thread's run().  It is the same report the interpreter prints
+    ; for an uncaught exception, which traceback_print already produces.
+    SYS_ADD_FUNC_ALIAS sys_excepthook_func, sm_excepthook, sm_dunder_excepthook
+    SYS_ADD_FUNC_ALIAS sys_unraisablehook_func, sm_unraisablehook, \
+                       sm_dunder_unraisablehook
+    SYS_ADD_FUNC sys_exc_info_func, sm_exc_info
+    ; audit() and addaudithook() do nothing: there are no audit hooks here,
+    ; and with none installed CPython's audit() is a no-op too.  os.walk,
+    ; os.listdir and half of shutil call audit() unconditionally, and an
+    ; AttributeError from it stopped them.
+    SYS_ADD_FUNC sys_audit_func, sm_audit
+    SYS_ADD_FUNC sys_audit_func, sm_addaudithook
+
+    ; --- sys._getframe / sys._getframemodulename ---
+    ;
+    ; warnings._deprecated reaches for both, and nine stdlib modules come in
+    ; behind that one call.  What comes back is a SNAPSHOT: see
+    ; src/pyo/frameobj.asm for why it cannot be the frame itself.
+    extern sys_getframe_func
+    extern sys_getframemodulename_func
+    SYS_ADD_FUNC sys_getframe_func, sm_getframe
+    SYS_ADD_FUNC sys_getframemodulename_func, sm_getframemodulename
+
     ; --- sys.intern function ---
     lea rdi, [rel sys_intern_func]
     lea rsi, [rel sm_intern]
@@ -1234,6 +1319,19 @@ DEF_FUNC sys_getfsencodeerrors_func
     ret
 END_FUNC sys_getfsencodeerrors_func
 
+;; sys.audit(event, *args) / sys.addaudithook(hook) -> None
+;;
+;; No hooks, so nothing to run.  Both are here because the stdlib calls
+;; audit() on the way into any number of ordinary operations and does not
+;; guard it.
+;; ============================================================================
+DEF_FUNC sys_audit_func
+    LOAD_NONE rax
+    leave
+    ret
+END_FUNC sys_audit_func
+
+;; ============================================================================
 ;; sys.getfilesystemencoding() -> 'utf-8'
 DEF_FUNC sys_getfsencoding_func
     lea rdi, [rel sm_utf8]
@@ -1297,6 +1395,9 @@ END_FUNC sys_intern_func
 
 section .rodata
 
+seh_not_exc_msg:
+    db "TypeError: print_exception(): Exception expected for value, ", 0
+seh_not_exc_end: db " found", 10, 0
 sm_sys:          db "sys", 0
 sm_modules:      db "modules", 0
 sm_path:         db "path", 0
@@ -1343,10 +1444,19 @@ sm_cache_tag:    db "cache_tag", 0
 sm_cache_tag_val: db "cpython-312", 0
 sm_warnoptions:  db "warnoptions", 0
 sm_builtin_module_names: db "builtin_module_names", 0
+sm_audit:         db "audit", 0
+sm_addaudithook:  db "addaudithook", 0
 sm_getfsencoding: db "getfilesystemencoding", 0
 sm_getfsencodeerrors: db "getfilesystemencodeerrors", 0
 sm_surrogateescape: db "surrogateescape", 0
 sm_intern:       db "intern", 0
+sm_excepthook:   db "excepthook", 0
+sm_dunder_excepthook: db "__excepthook__", 0
+sm_dunder_unraisablehook: db "__unraisablehook__", 0
+sm_unraisablehook: db "unraisablehook", 0
+sm_exc_info:     db "exc_info", 0
+sm_getframe:     db "_getframe", 0
+sm_getframemodulename: db "_getframemodulename", 0
 sm_byteorder:    db "byteorder", 0
 sm_little:       db "little", 0
 sm_getdefaultencoding: db "getdefaultencoding", 0
@@ -1378,3 +1488,218 @@ global sys_int_max_str_digits
 sys_int_max_str_digits: dq 4300
 
 sys_intern_table: dq 0
+
+section .text
+
+;; ============================================================================
+;; sys.excepthook(type, value, traceback)
+;;
+;; The report the interpreter prints for an uncaught exception, on stderr.
+;; threading saves and restores this around a thread's run(), and reads it at
+;; import time -- which is where CPython's threading.py stopped.
+;;
+;; Only the VALUE is used: the exception object carries its own type and
+;; traceback, and CPython's C hook falls back on the same when the three
+;; arguments disagree.
+;; ============================================================================
+DEF_FUNC sys_excepthook_func
+    cmp rsi, 3
+    jl .seh_args
+    mov rdi, [rdi + 8]          ; args[1], the exception
+    ; "is a pointer" is not "is an exception": None is a pointer too, and
+    ; `sys.excepthook(*sys.exc_info())` outside an except block passes three
+    ; of them.  traceback_print read the exception's own fields off it.
+    push rdi
+    extern value_type
+    call value_type             ; a Value, which may be an immediate
+    pop rdi
+    test rax, rax
+    jz .seh_bad
+    push rdi
+    push rax
+    mov rdi, rax
+    extern exc_BaseException_type
+    lea rsi, [rel exc_BaseException_type]
+    extern type_is_subtype
+    call type_is_subtype
+    pop rsi                     ; the type
+    pop rdi                     ; the value
+    test eax, eax
+    jz .seh_not_exc
+    extern traceback_print
+    call traceback_print
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+.seh_not_exc:
+    ; CPython REPORTS this rather than raising it -- the hook is what runs
+    ; when there is nothing left to catch anything, so it prints the TypeError
+    ; on stderr and returns.  Same text, same place.  rsi = the type.
+    push rsi
+    extern tb_write_cstr
+    lea rdi, [rel seh_not_exc_msg]
+    call tb_write_cstr
+    pop rdi
+    mov rdi, [rdi + PyTypeObject.tp_name]
+    call tb_write_cstr
+    lea rdi, [rel seh_not_exc_end]
+    call tb_write_cstr
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.seh_bad:
+    RAISE exc_TypeError_type, "excepthook(): Exception expected for value"
+.seh_args:
+    RAISE exc_TypeError_type, "excepthook() takes exactly 3 arguments"
+END_FUNC sys_excepthook_func
+
+;; ============================================================================
+;; sys.unraisablehook(unraisable)
+;;
+;; What CPython calls for an exception that cannot be propagated -- in a
+;; __del__, or in a generator being finalised.  The argument is a structseq;
+;; the only field this can use is exc_value, and a missing one is not an
+;; error, because the whole point of the hook is that nothing escapes it.
+;; ============================================================================
+UNH_EXC   equ 8
+UNH_KEY   equ 16
+UNH_ARG   equ 24
+UNH_OBJ   equ 32
+UNH_FRAME equ 48            ; + 0 pushes = 48
+DEF_FUNC sys_unraisablehook_func, UNH_FRAME
+    mov qword [rbp - UNH_OBJ], 0
+    test rsi, rsi
+    jz .suh_done
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rax
+    ja .suh_done
+    test rdi, rdi
+    jz .suh_done
+    mov [rbp - UNH_EXC], rdi
+    mov [rbp - UNH_ARG], rdi
+
+    ; The object the exception came out of, for the first line of the report.
+    CSTRING rdi, "object"
+    call str_from_cstr_heap
+    mov [rbp - UNH_KEY], rax
+    mov rdi, [rbp - UNH_ARG]
+    mov rsi, rax
+    call obj_getattr_opt
+    push rax
+    mov rdi, [rbp - UNH_KEY]
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .suh_no_object
+    V_TEST_PTR rax, rcx
+    ja .suh_drop_object
+    mov [rbp - UNH_OBJ], rax
+    jmp .suh_no_object
+.suh_drop_object:
+    mov rdi, rax
+    XDECREF_V rdi, rcx
+.suh_no_object:
+
+    CSTRING rdi, "exc_value"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    mov [rbp - UNH_KEY], rax
+    mov rdi, [rbp - UNH_EXC]
+    mov rsi, rax
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    mov [rbp - UNH_EXC], rax
+    mov rdi, [rbp - UNH_KEY]
+    call obj_decref
+    mov rax, [rbp - UNH_EXC]
+    test rax, rax
+    jz .suh_done
+    V_TEST_PTR rax, rcx
+    ja .suh_drop
+    ; The whole report, object line included -- the same one the interpreter
+    ; prints when nothing has replaced this hook.
+    mov rdi, rax
+    mov rsi, [rbp - UNH_OBJ]
+    extern traceback_unraisable_default
+    call traceback_unraisable_default
+.suh_drop:
+    mov rdi, [rbp - UNH_EXC]
+    XDECREF_V rdi, rcx
+    mov rdi, [rbp - UNH_OBJ]
+    test rdi, rdi
+    jz .suh_done
+    call obj_decref
+.suh_done:
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC sys_unraisablehook_func
+
+
+;; ============================================================================
+;; sys.exc_info() -> (type, value, traceback), or (None, None, None)
+;;
+;; The exception being handled, which is what current_exception holds for the
+;; length of an except block.  threading reads it to report a thread that
+;; died, and CPython's contextlib and unittest both use it.
+;; ============================================================================
+DEF_FUNC sys_exc_info_func
+    extern current_exception
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .sei_none
+    push rax
+    sub rsp, 8
+    mov edi, 3
+    extern tuple_new
+    call tuple_new
+    add rsp, 8
+    pop rcx
+    test rax, rax
+    jz .sei_failed
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rsi, [rcx + PyObject.ob_type]
+    INCREF rsi
+    mov [rdx], rsi
+    INCREF rcx
+    mov [rdx + 8], rcx
+    mov rsi, [rcx + PyExceptionObject.exc_tb]
+    test rsi, rsi
+    jnz .sei_have_tb
+    LOAD_NONE rsi
+.sei_have_tb:
+    INCREF rsi
+    mov [rdx + 16], rsi
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+.sei_failed:
+    xor eax, eax
+    leave
+    ret
+
+.sei_none:
+    mov edi, 3
+    call tuple_new
+    test rax, rax
+    jz .sei_failed
+    mov rdx, [rax + PyTupleObject.ob_item]
+    LOAD_NONE rcx
+    INCREF rcx
+    mov [rdx], rcx
+    INCREF rcx
+    mov [rdx + 8], rcx
+    INCREF rcx
+    mov [rdx + 16], rcx
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC sys_exc_info_func

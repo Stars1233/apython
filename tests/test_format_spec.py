@@ -53,3 +53,37 @@ class Custom:
 
 
 print(format(Custom(), ">5"), format(Custom()), f"{Custom():^9}")
+
+# float_format_spec rendered into a fixed 48-byte stack buffer and took
+# whatever snprintf managed to fit.  format(1e300, '.2f') needs 305 bytes and
+# came back truncated at 46 digits -- with the fractional part it was asked
+# for missing entirely, and no sign that anything had been dropped.
+# format(1e16, '.30f') was one zero short of thirty for the same reason.
+#
+# snprintf reports what it WOULD have written, so anything that does not fit
+# is rendered again into a heap buffer of exactly that size.  The stack path
+# is untouched, which is every ordinary magnitude and every repr.
+
+BIG = 1e300
+MAX = 1.7976931348623157e308
+
+print(len(format(BIG, '.2f')), format(BIG, '.2f')[-4:])
+print(format(BIG, '.2f') == format(BIG, '.0f') + '.00')
+print(len(format(BIG, '.0f')), format(BIG, '.0f')[:20])
+print(len(format(MAX, '.2f')), format(MAX, '.2f')[-4:])
+print(len(format(BIG, '.20f')), len(format(BIG, '.30f')))
+print(format(1e16, '.30f'))
+print(format(1e17, '.30f') == '100000000000000000.' + '0' * 30)
+print(len(format(5e-324, '.100f')), format(5e-324, '.100f')[:12])
+print(format(0.1, '.50f'))
+
+# The value survives the round trip.
+print(float(format(BIG, '.2f')) == BIG, float(format(MAX, '.0f')) == MAX)
+print(float(format(0.1, '.50f')) == 0.1)
+
+# And the ordinary cases, which never leave the stack buffer.
+print(format(2.675, '.2f'), format(1.0, '.6f'), format(-0.0, '.1f'))
+print(format(123.456, '.2f'), format(1e22, '.2f'), format(1 / 3, '.17f'))
+print(format(float('inf'), '.2f'), format(float('nan'), '.2F'))
+print("%.2f|%.20f|%g" % (BIG, 0.1, 1e100))
+print(repr(BIG), repr(0.1), repr(MAX))

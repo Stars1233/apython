@@ -56,3 +56,20 @@ print(g(), g(9))
 '''
 ns = {}
 exec(compile(SRC, "<t>", "exec"), ns)
+
+# The brackets are a grammar now, not a bracket-depth skip that accepted
+# anything between them.  These are the shapes the skipper let through.
+for bad in ["def f[](): pass", "def f[1](): pass", "def f[T:](): pass",
+            "def f[*](): pass", "def f[**](): pass", "class C[T,,]: pass",
+            "class C[*Ts: int]: pass", "type X[] = int", "type X[T = int"]:
+    try:
+        compile(bad, "<t>", "exec")
+        print("accepted:", bad)
+    except SyntaxError:
+        print("rejected:", bad)
+
+# And the shapes it must keep taking.
+for good in ["def f[T,](): pass", "class C[*Ts,]: pass", "type X[T,] = T",
+             "def f[T: (int, str)](): pass", "async def f[T, **P](): pass"]:
+    compile(good, "<t>", "exec")
+    print("accepted:", good)

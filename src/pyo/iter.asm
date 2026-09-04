@@ -12,6 +12,13 @@ extern fatal_error
 extern list_type
 extern tuple_type
 extern type_type
+extern bool_true
+extern bool_false
+extern int_type
+extern bool_type
+extern exc_ValueError_type
+extern exc_TypeError_type
+extern raise_exception
 
 ;; ============================================================================
 ;; list_iter_new(PyListObject *list) -> PyListIterObject*
@@ -589,6 +596,346 @@ DEF_FUNC range_obj_reversed
 END_FUNC range_obj_reversed
 
 ;; ============================================================================
+;; range's own protocol: ==, hash, index, count, and start/stop/step.
+;;
+;; range had none of it.  `range(3) == range(3)` was False, because with no
+;; tp_richcompare the comparison fell back to identity; `{range(3),
+;; range(0, 3, 1)}` held two elements where CPython holds one; and
+;; `r.start`, `r.index(x)` and `r.count(x)` were all AttributeError.  A range
+;; is a value, and the stdlib treats it as one.
+;; ============================================================================
+
+;; range_obj_richcompare(rdi = self, rsi = other, edx = op) -> Value
+;;
+;; CPython's rule, which is NOT field-by-field: two ranges are equal when
+;; they generate the same sequence.  Empty ranges are all equal to each
+;; other -- range(0) == range(5, 3) -- a one-element range ignores its step,
+;; and only from two elements up does the step matter.  So range(0, 3, 1)
+;; == range(3) even though the objects differ.
+DEF_FUNC range_obj_richcompare
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13d, edx
+
+    cmp r13d, PY_EQ
+    je .rrc_eq
+    cmp r13d, PY_NE
+    je .rrc_eq
+    jmp .rrc_notimpl            ; ranges are unordered, as CPython has them
+
+.rrc_eq:
+    V_TEST_PTR r12, rax
+    ja .rrc_notimpl
+    test r12, r12
+    jz .rrc_notimpl
+    mov rax, [r12 + PyObject.ob_type]
+    lea rcx, [rel range_obj_type]
+    cmp rax, rcx
+    jne .rrc_notimpl
+
+    mov rdi, rbx
+    call range_obj_sq_length
+    mov rdi, rax                ; our length
+    push rdi
+    mov rdi, r12
+    call range_obj_sq_length
+    pop rdi
+    cmp rdi, rax
+    jne .rrc_false
+    test rdi, rdi
+    jz .rrc_true                ; both empty: equal whatever the fields say
+
+    mov rax, [rbx + PyRangeObject.start]
+    cmp rax, [r12 + PyRangeObject.start]
+    jne .rrc_false
+    cmp rdi, 1
+    je .rrc_true                ; one element: the step cannot be observed
+
+    mov rax, [rbx + PyRangeObject.step]
+    cmp rax, [r12 + PyRangeObject.step]
+    jne .rrc_false
+
+.rrc_true:
+    cmp r13d, PY_NE
+    je .rrc_ret_false
+.rrc_ret_true:
+    RET_TRUE
+    jmp .rrc_out
+.rrc_false:
+    cmp r13d, PY_NE
+    je .rrc_ret_true
+.rrc_ret_false:
+    RET_FALSE
+.rrc_out:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.rrc_notimpl:
+    ; tp_richcompare declines with NULL and nothing pending -- not with the
+    ; NotImplemented object.  Returning the object made `range(1) < range(2)`
+    ; answer NotImplemented instead of raising, because the caller took it
+    ; for the result.
+    RET_NULL
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC range_obj_richcompare
+
+;; range_obj_hash(rdi = self) -> rax = the hash
+;;
+;; Equal ranges must hash alike, so this hashes exactly what the comparison
+;; looks at: the length, then the start once there is an element, then the
+;; step once there are two.  CPython hashes the tuple (len, start, step) with
+;; None standing in for the fields that do not count; the mixing here is the
+;; same shape without building the tuple.
+ROH_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+DEF_FUNC range_obj_hash, ROH_FRAME
+    push rbx
+    mov rbx, rdi
+    call range_obj_sq_length
+    mov rcx, rax                ; the length
+
+    mov rax, 0x345678
+    imul rax, 1000003
+    xor rax, rcx
+    test rcx, rcx
+    jz .roh_done
+
+    mov rdx, [rbx + PyRangeObject.start]
+    imul rax, 1000003
+    xor rax, rdx
+    cmp rcx, 1
+    je .roh_done
+
+    mov rdx, [rbx + PyRangeObject.step]
+    imul rax, 1000003
+    xor rax, rdx
+.roh_done:
+    ; -1 is the error signal everywhere a hash is consumed.
+    cmp rax, -1
+    jne .roh_out
+    mov rax, -2
+.roh_out:
+    pop rbx
+    leave
+    ret
+END_FUNC range_obj_hash
+
+;; range_index_of(rdi = self, rsi = the value as an i64, rdx = out flag)
+;;   -> rax = the index, or -1 when the value is not in the range
+DEF_FUNC_BARE range_index_of
+    mov rcx, [rdi + PyRangeObject.start]
+    sub rsi, rcx                ; value - start
+    mov rcx, [rdi + PyRangeObject.step]
+    mov rax, rsi
+    cqo
+    idiv rcx                    ; rax = quotient, rdx = remainder
+    test rdx, rdx
+    jnz .rio_no                 ; not on the step grid
+    test rax, rax
+    js .rio_no                  ; before the start
+    push rax
+    call range_obj_sq_length
+    pop rcx
+    cmp rcx, rax
+    jge .rio_no                 ; past the end
+    mov rax, rcx
+    ret
+.rio_no:
+    mov rax, -1
+    ret
+END_FUNC range_index_of
+
+;; range_arg_i64(rdi = a Value, rsi = out) -> eax = 1 and [rsi] = the number,
+;; or eax = 0 when the value is not an integer at all.
+DEF_FUNC range_arg_i64
+    push rbx
+    mov rbx, rsi
+    V_IS_INT rdi, rax
+    jb .rai_not_immediate
+    V_TO_I64 rdi
+    mov [rbx], rdi
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.rai_not_immediate:
+    V_TEST_PTR rdi, rax
+    ja .rai_no
+    test rdi, rdi
+    jz .rai_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .rai_heap_int
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
+    je .rai_heap_int
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
+    jz .rai_no
+.rai_heap_int:
+    extern int_to_i64
+    call int_to_i64
+    mov [rbx], rax
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.rai_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC range_arg_i64
+
+;; range_method_index(args, nargs) -> the index of the value
+RMI_VAL   equ 8
+RMI_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+DEF_FUNC range_method_index, RMI_FRAME
+    push rbx
+    cmp rsi, 2
+    jne .rmi_arity
+    mov rbx, [rdi]              ; self
+    mov rdi, [rdi + 8]
+    lea rsi, [rbp - RMI_VAL]
+    call range_arg_i64
+    test eax, eax
+    jz .rmi_not_integer         ; a non-integer could never be a member
+    mov rdi, rbx
+    mov rsi, [rbp - RMI_VAL]
+    call range_index_of
+    cmp rax, -1
+    je .rmi_missing
+    mov edx, TAG_SMALLINT
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+.rmi_missing:
+    ; CPython has two wordings here and they differ by what was asked for:
+    ; an integer that is simply not a member names itself, and anything that
+    ; could never be a member at all gets the generic sequence message.
+    pop rbx
+    mov rsi, [rbp - RMI_VAL]
+    call range_raise_not_in
+.rmi_not_integer:
+    pop rbx
+    RAISE exc_ValueError_type, "sequence.index(x): x not in sequence"
+.rmi_arity:
+    pop rbx
+    RAISE exc_TypeError_type, "index() takes exactly one argument"
+END_FUNC range_method_index
+
+;; range_raise_not_in(rsi = the value) -- does not return
+;; "6 is not in range", CPython's wording for an integer that is not a member.
+RRN_N     equ 8
+RRN_BUF   equ 176
+RRN_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
+DEF_FUNC_LOCAL range_raise_not_in, RRN_FRAME
+    mov [rbp - RRN_N], rsi
+    lea rdi, [rbp - RRN_BUF]
+    CSTRING rsi, ""
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RRN_N]
+    extern msg_append_i64
+    call msg_append_i64
+    mov rdi, rax
+    CSTRING rsi, " is not in range"
+    call rbt_append_cstr
+    lea rdi, [rel exc_ValueError_type]
+    lea rsi, [rbp - RRN_BUF]
+    call raise_exception
+END_FUNC range_raise_not_in
+
+;; range_method_count(args, nargs) -> 1 when the value is in the range, else 0
+RMC_VAL   equ 8
+RMC_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+DEF_FUNC range_method_count, RMC_FRAME
+    push rbx
+    cmp rsi, 2
+    jne .rmc_arity
+    mov rbx, [rdi]
+    mov rdi, [rdi + 8]
+    lea rsi, [rbp - RMC_VAL]
+    call range_arg_i64
+    test eax, eax
+    jz .rmc_zero
+    mov rdi, rbx
+    mov rsi, [rbp - RMC_VAL]
+    call range_index_of
+    cmp rax, -1
+    je .rmc_zero
+    mov eax, 1
+    jmp .rmc_out
+.rmc_zero:
+    xor eax, eax
+.rmc_out:
+    mov edx, TAG_SMALLINT
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.rmc_arity:
+    pop rbx
+    RAISE exc_TypeError_type, "count() takes exactly one argument"
+END_FUNC range_method_count
+
+;; The three fields, as getset descriptors.  A range is immutable, so there
+;; is no setter.
+%macro DEF_RANGE_GETTER 1
+DEF_FUNC range_get_%1
+    mov rax, [rdi + PyRangeObject.%1]
+    mov edx, TAG_SMALLINT
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC range_get_%1
+%endmacro
+DEF_RANGE_GETTER start
+DEF_RANGE_GETTER stop
+DEF_RANGE_GETTER step
+
+;; The by-name protocol.  range answered `hasattr(range, "index")` and
+;; `hasattr(range, "__getitem__")` with False, because range_obj_type had no
+;; tp_dict at all -- every one of these lived only in a slot.  The stdlib asks
+;; by name: collections.abc.Sequence.register(range) leans on __getitem__ and
+;; __len__ being there, and reversed(range(n)) goes through __reversed__.
+DEF_FUNC range_dunder_getitem
+    cmp rsi, 2
+    jne .rdg_bad
+    mov rax, [rdi]
+    mov rsi, [rdi + 8]
+    mov rdi, rax
+    call range_obj_mp_subscript
+    leave
+    ret
+.rdg_bad:
+    RAISE exc_TypeError_type, "__getitem__() takes exactly one argument"
+END_FUNC range_dunder_getitem
+
+DEF_FUNC range_dunder_reversed
+    test rsi, rsi
+    jz .rdr_bad
+    mov rdi, [rdi]
+    call range_obj_reversed
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+.rdr_bad:
+    RAISE exc_TypeError_type, "__reversed__() takes no arguments"
+END_FUNC range_dunder_reversed
+
+;; ============================================================================
 ;; range_obj_repr(PyRangeObject *self) -> PyStrObject*
 ;; Returns "range(start, stop)" or "range(start, stop, step)" if step != 1
 ;; ============================================================================
@@ -861,11 +1208,11 @@ range_obj_type:
     dq range_obj_dealloc        ; tp_dealloc
     dq range_obj_repr           ; tp_repr
     dq range_obj_repr           ; tp_str
-    dq 0                        ; tp_hash
+    dq range_obj_hash           ; tp_hash
     dq 0                        ; tp_call
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
-    dq 0                        ; tp_richcompare
+    dq range_obj_richcompare    ; tp_richcompare
     dq range_obj_tp_iter        ; tp_iter (creates new iterator)
     dq 0                        ; tp_iternext (NOT an iterator)
     dq 0                        ; tp_init
@@ -876,7 +1223,8 @@ range_obj_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_FINAL          ; tp_flags -- CPython gives this type no
+                                ; Py_TPFLAGS_BASETYPE
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear

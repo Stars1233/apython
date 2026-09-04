@@ -10,6 +10,9 @@
 
 
 ; External functions
+extern str_type
+extern bytes_new
+extern bytearray_type_call
 extern bytearray_type
 extern bytes_like_ptr_len
 extern int_is_integer
@@ -187,6 +190,264 @@ DEF_FUNC bytes_method_hex, BH_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC bytes_method_hex
+
+;; ============================================================================
+;; bytes.fromhex(s) / bytearray.fromhex(s) -- a classmethod on both.
+;;
+;; hex() was here and its inverse was not, which is the half that
+;; binascii.unhexlify needs -- and binascii is what base64, quopri, uu and
+;; plistlib come in behind.  CPython skips ASCII whitespace between BYTES
+;; (not inside a pair), and rejects anything else.
+;; ============================================================================
+BFH_SRC   equ 8
+BFH_OUT   equ 16
+BFH_N     equ 24
+BFH_I     equ 32
+BFH_POS   equ 40
+BFH_TYPE  equ 48
+BFH_FRAME equ 64            ; + 0 pushes = 64
+
+DEF_FUNC bytes_fromhex_impl, BFH_FRAME
+    ; rdi = args, rsi = nargs; args[0] is the class, args[1] the string.
+    cmp rsi, 2
+    jne .bfh_args
+    mov rax, [rdi]
+    mov [rbp - BFH_TYPE], rax
+    mov rdi, [rdi + 8]
+    V_TEST_PTR rdi, rax
+    ja .bfh_type
+    test rdi, rdi
+    jz .bfh_type
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .bfh_have_str
+    ; A str SUBCLASS is a str here, as everywhere: its characters are at the
+    ; same offset, and CPython takes one.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .bfh_type
+.bfh_have_str:
+    mov [rbp - BFH_SRC], rdi
+    mov rax, [rdi + PyStrObject.ob_size]
+    mov [rbp - BFH_N], rax
+
+    ; At most one byte per two characters; whitespace only shortens it.
+    shr rax, 1
+    inc rax
+    mov rdi, rax
+    extern ap_malloc
+    call ap_malloc
+    test rax, rax
+    jz .bfh_nomem
+    mov [rbp - BFH_OUT], rax
+    mov qword [rbp - BFH_I], 0
+    mov qword [rbp - BFH_POS], 0
+
+.bfh_loop:
+    mov rcx, [rbp - BFH_I]
+    cmp rcx, [rbp - BFH_N]
+    jge .bfh_done
+    mov rdx, [rbp - BFH_SRC]
+    movzx eax, byte [rdx + PyStrObject.data + rcx]
+    ; Whitespace between bytes is skipped, as CPython's is.
+    cmp al, ' '
+    je .bfh_skip
+    cmp al, 9
+    je .bfh_skip
+    cmp al, 10
+    je .bfh_skip
+    cmp al, 13
+    je .bfh_skip
+
+    call bfh_digit
+    cmp eax, -1
+    je .bfh_bad
+    mov r8d, eax
+    shl r8d, 4
+    inc qword [rbp - BFH_I]
+    mov rcx, [rbp - BFH_I]
+    cmp rcx, [rbp - BFH_N]
+    jge .bfh_odd
+    mov rdx, [rbp - BFH_SRC]
+    movzx eax, byte [rdx + PyStrObject.data + rcx]
+    push r8
+    call bfh_digit
+    pop r8
+    cmp eax, -1
+    je .bfh_bad
+    or r8d, eax
+    mov rdx, [rbp - BFH_OUT]
+    mov rcx, [rbp - BFH_POS]
+    mov [rdx + rcx], r8b
+    inc qword [rbp - BFH_POS]
+    inc qword [rbp - BFH_I]
+    jmp .bfh_loop
+
+.bfh_skip:
+    inc qword [rbp - BFH_I]
+    jmp .bfh_loop
+
+.bfh_done:
+    ; bytes_new takes the SIZE and allocates; the data is copied in after.
+    mov rdi, [rbp - BFH_POS]
+    extern bytes_new
+    call bytes_new
+    test rax, rax
+    jz .bfh_nomem
+    push rax
+    sub rsp, 8
+    lea rdi, [rax + PyBytesObject.data]
+    mov rsi, [rbp - BFH_OUT]
+    mov rdx, [rbp - BFH_POS]
+    extern ap_memcpy
+    call ap_memcpy
+    add rsp, 8
+    pop rax
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - BFH_OUT]
+    extern ap_free
+    call ap_free
+    add rsp, 8
+    pop rax
+
+    ; bytearray.fromhex answers a bytearray; the class comes in as args[0],
+    ; and a SUBCLASS of either answers an instance of itself -- fromhex is a
+    ; classmethod, and CPython's builds whatever it was called on.
+    mov rcx, [rbp - BFH_TYPE]
+    lea rdx, [rel bytearray_type]
+    cmp rcx, rdx
+    je .bfh_as_bytearray
+    V_TEST_PTR rcx, rdx
+    ja .bfh_return
+    test rcx, rcx
+    jz .bfh_return
+    mov rdx, [rcx + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_BYTEARRAY_SUBCLASS
+    jnz .bfh_as_subclass
+    test rdx, TYPE_FLAG_BYTES_SUBCLASS
+    jz .bfh_return
+.bfh_as_subclass:
+    ; type(hexdigits) -- the ordinary constructor, which knows how to build a
+    ; subclass of either.
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - BFH_TYPE]
+    lea rsi, [rsp + 8]
+    mov edx, 1
+    extern type_call
+    call type_call
+    V_UNPACK rax, rdx
+    mov rcx, rax
+    add rsp, 8
+    pop rdi
+    push rcx
+    sub rsp, 8
+    call obj_decref
+    add rsp, 8
+    pop rax
+    test rax, rax
+    jz .bfh_nomem
+    leave
+    ret
+.bfh_as_bytearray:
+    push rax
+    sub rsp, 8
+    lea rdi, [rel bytearray_type]
+    lea rsi, [rsp + 8]
+    mov edx, 1
+    extern bytearray_type_call
+    call bytearray_type_call
+    mov rcx, rax
+    add rsp, 8
+    pop rdi
+    push rcx
+    sub rsp, 8
+    extern obj_decref
+    call obj_decref
+    add rsp, 8
+    pop rax
+    test rax, rax
+    jz .bfh_nomem
+    leave
+    ret
+
+.bfh_return:
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.bfh_odd:
+    mov rdi, [rbp - BFH_OUT]
+    call ap_free
+    mov rsi, [rbp - BFH_I]
+    call bfh_raise_position
+.bfh_bad:
+    mov rdi, [rbp - BFH_OUT]
+    call ap_free
+    mov rsi, [rbp - BFH_I]
+    call bfh_raise_position
+.bfh_nomem:
+    xor eax, eax
+    leave
+    ret
+.bfh_type:
+    mov rsi, rdi
+    CSTRING rdi, `fromhex() argument must be str, not \x01`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
+.bfh_args:
+    RAISE exc_TypeError_type, "fromhex() takes exactly one argument"
+END_FUNC bytes_fromhex_impl
+
+;; bfh_digit(eax = a character) -> eax = its value, or -1
+DEF_FUNC_BARE bfh_digit
+    cmp al, '0'
+    jb .bd_no
+    cmp al, '9'
+    jbe .bd_dec
+    cmp al, 'A'
+    jb .bd_no
+    cmp al, 'F'
+    jbe .bd_upper
+    cmp al, 'a'
+    jb .bd_no
+    cmp al, 'f'
+    jbe .bd_lower
+.bd_no:
+    mov eax, -1
+    ret
+.bd_dec:
+    sub eax, '0'
+    ret
+.bd_upper:
+    sub eax, 'A' - 10
+    ret
+.bd_lower:
+    sub eax, 'a' - 10
+    ret
+END_FUNC bfh_digit
+
+;; bfh_raise_position(rsi = the character index) -- does not return
+BRP_POS   equ 8
+BRP_BUF   equ 176
+BRP_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
+DEF_FUNC_LOCAL bfh_raise_position, BRP_FRAME
+    mov [rbp - BRP_POS], rsi
+    lea rdi, [rbp - BRP_BUF]
+    CSTRING rsi, "non-hexadecimal number found in fromhex() arg at position "
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - BRP_POS]
+    extern msg_append_i64
+    call msg_append_i64
+    lea rdi, [rel exc_ValueError_type]
+    lea rsi, [rbp - BRP_BUF]
+    extern raise_exception
+    call raise_exception
+END_FUNC bfh_raise_position
 
 ;; ============================================================================
 ;; bytes_affix_match(rdi = one affix Value, rsi = the subject's data,
@@ -437,16 +698,22 @@ END_FUNC bytes_method_endswith
 BC_SELF   equ 8
 BC_SUB    equ 16
 BC_ONE    equ 56            ; a one-byte bytes header, for an int needle
-BC_FRAME  equ 64            ; + 0 pushes = 64
+BC_ARGS   equ 64
+BC_NARGS  equ 72
+BC_FRAME  equ 80            ; + 0 pushes = 80
 
 DEF_FUNC bytes_method_count, BC_FRAME
     cmp rsi, 2
-    jne .bc_error
+    jl .bc_noargs
+    cmp rsi, 4
+    jg .bc_error
 
     mov rax, [rdi]              ; self
     mov rcx, [rdi + 8]         ; sub
     mov [rbp - BC_SELF], rax
     mov [rbp - BC_SUB], rcx
+    mov [rbp - BC_ARGS], rdi
+    mov [rbp - BC_NARGS], rsi
     BYTES_NEEDLE BC_SUB, BC_ONE
 
     ; Both sides through bytes_like_ptr_len: a bytearray argument was read
@@ -470,17 +737,72 @@ DEF_FUNC bytes_method_count, BC_FRAME
     mov [rbp - BC_SUB], rax
     mov r9, r10                 ; sub_len
 
-    ; If sub_len == 0: count = self_len + 1
+    ; count(sub[, start[, end]]), the same range arguments find() takes.
+    ; Without them `re.error` could not build its message: it counts newlines
+    ; up to the offending position, and the three-argument call raised a
+    ; TypeError inside the constructor, so a bad pattern reported a raw tuple
+    ; instead of "bad escape \q at position 0".
+    xor r11d, r11d              ; start = 0
+    cmp qword [rbp - BC_NARGS], 3
+    jl .bc_have_range
+    push r8
+    push r9
+    mov rdi, [rbp - BC_ARGS]
+    mov rdi, [rdi + 16]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    pop r9
+    pop r8
+    mov r11, rax
+    test r11, r11
+    jns .bc_start_ok
+    add r11, r8                 ; a negative start counts from the end
+    jns .bc_start_ok
+    xor r11d, r11d
+.bc_start_ok:
+    cmp r11, r8
+    ja .bc_zero
+    cmp qword [rbp - BC_NARGS], 4
+    jl .bc_have_range
+    push r8
+    push r9
+    push r11
+    sub rsp, 8
+    mov rdi, [rbp - BC_ARGS]
+    mov rdi, [rdi + 24]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    add rsp, 8
+    pop r11
+    pop r9
+    pop r8
+    test rax, rax
+    jns .bc_end_ok
+    add rax, r8
+    jns .bc_end_ok
+    xor eax, eax
+.bc_end_ok:
+    cmp rax, r8
+    jbe .bc_end_clamped
+    mov rax, r8
+.bc_end_clamped:
+    mov r8, rax                 ; the scan stops here
+    cmp r11, r8
+    ja .bc_zero
+
+.bc_have_range:
+    ; If sub_len == 0: one match at every position in the range, plus one
     test r9, r9
     jz .bc_empty_sub
 
-    ; If sub_len > self_len: count = 0
-    cmp r9, r8
+    ; If sub_len > what is left: count = 0
+    mov rax, r8
+    sub rax, r11
+    cmp r9, rax
     ja .bc_zero
 
     ; Scan
     xor r10d, r10d              ; count = 0
-    xor r11d, r11d              ; offset = 0
 
 .bc_loop:
     mov rax, r8
@@ -521,7 +843,9 @@ DEF_FUNC bytes_method_count, BC_FRAME
     ret
 
 .bc_empty_sub:
-    lea rax, [r8 + 1]
+    mov rax, r8
+    sub rax, r11
+    inc rax
     RET_TAG_SMALLINT
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -537,7 +861,9 @@ DEF_FUNC bytes_method_count, BC_FRAME
 .bc_type:
     RAISE exc_TypeError_type, "a bytes-like object is required"
 .bc_error:
-    RAISE exc_TypeError_type, "count() takes exactly one argument"
+    RAISE exc_TypeError_type, "count() takes at most 3 arguments"
+.bc_noargs:
+    RAISE exc_TypeError_type, "count() takes at least 1 argument (0 given)"
 END_FUNC bytes_method_count
 
 
@@ -2342,7 +2668,7 @@ END_FUNC ba_shared_join
 ;; CPython's own code calls them directly, and `del b[i]` compiles to
 ;; DELETE_SUBSCR but `b.__delitem__(i)` does not.
 DEF_FUNC bytearray_dunder_len
-    REQUIRE_SELF bytearray_type
+    REQUIRE_SELF bytearray_type, "__len__"
     test rsi, rsi
     jz .badl_bad
     mov rdi, [rdi]
@@ -2356,7 +2682,7 @@ DEF_FUNC bytearray_dunder_len
 END_FUNC bytearray_dunder_len
 
 DEF_FUNC bytearray_dunder_iter
-    REQUIRE_SELF bytearray_type
+    REQUIRE_SELF bytearray_type, "__iter__"
     test rsi, rsi
     jz .badi_bad
     mov rdi, [rdi]
@@ -2369,7 +2695,7 @@ DEF_FUNC bytearray_dunder_iter
 END_FUNC bytearray_dunder_iter
 
 DEF_FUNC bytearray_dunder_getitem
-    REQUIRE_SELF bytearray_type
+    REQUIRE_SELF bytearray_type, "__getitem__"
     cmp rsi, 2
     jne .badg_bad
     mov rsi, [rdi + 8]
@@ -2383,7 +2709,7 @@ DEF_FUNC bytearray_dunder_getitem
 END_FUNC bytearray_dunder_getitem
 
 DEF_FUNC bytearray_dunder_setitem
-    REQUIRE_SELF bytearray_type
+    REQUIRE_SELF bytearray_type, "__setitem__"
     cmp rsi, 3
     jne .bads_bad
     mov rdx, [rdi + 16]
@@ -2399,7 +2725,7 @@ DEF_FUNC bytearray_dunder_setitem
 END_FUNC bytearray_dunder_setitem
 
 DEF_FUNC bytearray_dunder_delitem
-    REQUIRE_SELF bytearray_type
+    REQUIRE_SELF bytearray_type, "__delitem__"
     cmp rsi, 2
     jne .badd_bad
     mov rsi, [rdi + 8]
@@ -2415,7 +2741,7 @@ DEF_FUNC bytearray_dunder_delitem
 END_FUNC bytearray_dunder_delitem
 
 DEF_FUNC bytearray_dunder_contains
-    REQUIRE_SELF bytearray_type
+    REQUIRE_SELF bytearray_type, "__contains__"
     cmp rsi, 2
     jne .badc_bad
     mov rsi, [rdi + 8]

@@ -36,6 +36,7 @@ extern staticmethod_type
 extern classmethod_type
 extern property_type
 extern property_descr_get
+extern none_singleton
 extern dunder_get
 extern dunder_call_3
 extern dunder_lookup
@@ -411,6 +412,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     VPOP_VAL rdi, rax
     mov [rbp - LA_OBJ], rdi
     mov [rbp - LA_OBJ_TAG], rax
+    ; Only the type_getattr path writes this, and every other path reads it
+    ; as "the class's own mro answered", which is what 0 means.
+    mov qword [rbp - LA_FROMMETA], 0
 
     ; Dispatch on obj tag — resolve non-pointer tags to their type
     cmp qword [rbp - LA_OBJ_TAG], TAG_PTR
@@ -639,12 +643,34 @@ DEF_FUNC op_load_attr, LA_FRAME
     test edx, edx
     jz .la_check_flag          ; no __get__, treat normally
 
-    ; Has __get__! Call descriptor.__get__(obj, type(obj))
-    mov rdi, [rbp - LA_ATTR]   ; descriptor (attr)
+    ; Has __get__!  Which two arguments it gets depends on where the lookup
+    ; started.  `obj.x` is __get__(obj, type(obj)); `C.x` is __get__(None, C),
+    ; and CPython's type.__getattribute__ is what draws that line.  Passing
+    ; the class as the instance and the METAclass as the owner made every
+    ; descriptor that distinguishes the two answer the wrong case -- enum's
+    ; property looks the name up in the instance's value rather than handing
+    ; back the member, which is what stopped `import enum`'s users working.
+    ;
+    ; The test is TYPE_FLAG_METATYPE on the object's own type, not a compare
+    ; against type_type: a class built by a metaclass of its own is still a
+    ; class.  And the descriptor has to have come from the class's OWN mro --
+    ; one found on the metatype is an ordinary instance access, where the
+    ; class IS the instance.
     mov rsi, [rbp - LA_OBJ]    ; obj (instance)
     mov rdx, [rsi + PyObject.ob_type] ; type(obj)
+    mov rax, [rbp - LA_OBJVAL]
+    V_TEST_PTR rax, rcx         ; the Value, not the tag: VPOP_VAL writes only
+    ja .la_descr_have_args      ; the low half of the tag slot
+    cmp qword [rbp - LA_FROMMETA], 0
+    jne .la_descr_have_args
+    test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .la_descr_have_args
+    mov rdx, rsi               ; owner = the class
+    LOAD_NONE rsi              ; instance = None
+.la_descr_have_args:
+    mov rdi, [rbp - LA_ATTR]   ; descriptor (attr)
     lea rcx, [rel dunder_get]
-    mov r8d, TAG_PTR             ; type(obj) is always heap ptr
+    mov r8d, TAG_PTR             ; both are always heap pointers
     call dunder_call_3
     V_UNPACK rax, rdx           ; returns a Value
 
@@ -816,6 +842,14 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; a heaptype, so without this it fell into the built-in case below and was
     ; called with the module as its first argument.
     lea rcx, [rel module_type]
+    cmp rax, rcx
+    je .la_not_method
+    ; A function's tp_getattr is the same shape: it reads out of the
+    ; function's own __dict__, so `f.g` is whatever was stored there and
+    ; calling it must not pass f.  functools.lru_cache hangs cache_info off
+    ; the wrapper exactly like that, and `slow.cache_info()` was called with
+    ; the wrapper as its first argument.
+    lea rcx, [rel func_type]
     cmp rax, rcx
     je .la_not_method
     ; The same for a classmethod or staticmethod wrapper: its __func__ is the
@@ -1163,8 +1197,14 @@ DEF_FUNC_BARE op_load_deref
     DISPATCH
 
 .deref_error:
-    extern exc_UnboundLocalError_type
-    RAISE exc_UnboundLocalError_type, "cannot access variable before assignment"
+    ; An empty cell is one of CPython's two different exceptions, and which
+    ; one depends on whose cell it is: this function's own (a local that a
+    ; nested scope closes over) is an UnboundLocalError, and a FREE variable
+    ; from an enclosing scope is a NameError with its own wording.
+    ; co_localspluskinds says which -- and now says it truthfully, the
+    ; compiler having written CO_FAST_LOCAL for every slot until now.
+    mov edi, ecx
+    call unbound_local_raise    ; does not return
 END_FUNC op_load_deref
 
 ;; ============================================================================
@@ -1182,9 +1222,102 @@ DEF_FUNC_BARE op_load_fast_check
     DISPATCH
 
 .lfc_error:
-    extern exc_UnboundLocalError_type
-    RAISE exc_UnboundLocalError_type, "cannot access local variable before assignment"
+    mov edi, ecx
+    call unbound_local_raise    ; does not return
 END_FUNC op_load_fast_check
+
+;; ============================================================================
+;; unbound_local_raise(edi = the localsplus slot) -- does not return
+;;
+;; "cannot access local variable 'x' where it is not associated with a value",
+;; which is CPython's wording and names the variable.  The name is in the
+;; frame's code object, at the same index the slot has.
+;; ============================================================================
+ULR_BUF   equ 264
+ULR_FREE  equ 272           ; is this slot a free variable?
+ULR_SLOT  equ 280
+ULR_FRAME equ 288           ; + 0 pushes = 288
+DEF_FUNC_LOCAL unbound_local_raise, ULR_FRAME
+    mov [rbp - ULR_SLOT], rdi
+    mov qword [rbp - ULR_FREE], 0
+
+    ; CO_FAST_FREE in co_localspluskinds is what separates the two forms.
+    mov rax, [r12 + PyFrame.code]
+    test rax, rax
+    jz .ulr_kind_done
+    mov rax, [rax + PyCodeObject.co_localspluskinds]
+    test rax, rax
+    jz .ulr_kind_done
+    mov rcx, [rbp - ULR_SLOT]
+    cmp rcx, [rax + PyBytesObject.ob_size]
+    jae .ulr_kind_done
+    movzx edx, byte [rax + PyBytesObject.data + rcx]
+    test edx, CO_FAST_FREE
+    jz .ulr_kind_done
+    mov qword [rbp - ULR_FREE], 1
+.ulr_kind_done:
+
+    mov r8, [rbp - ULR_SLOT]    ; the slot, across the appends
+    lea rdi, [rbp - ULR_BUF]
+    lea rsi, [rel ulr_open]
+    cmp qword [rbp - ULR_FREE], 0
+    je .ulr_have_open
+    lea rsi, [rel ulr_free_open]
+.ulr_have_open:
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+
+    ; co_localsplusnames[slot], when the code object has one.
+    mov rax, [r12 + PyFrame.code]
+    test rax, rax
+    jz .ulr_no_name
+    mov rax, [rax + PyCodeObject.co_localsplusnames]
+    test rax, rax
+    jz .ulr_no_name
+    movsxd rcx, r8d
+    cmp rcx, [rax + PyTupleObject.ob_size]
+    jae .ulr_no_name
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rax, [rax + rcx*8]
+    V_TEST_PTR rax, rdx
+    ja .ulr_no_name
+    test rax, rax
+    jz .ulr_no_name
+    lea rsi, [rax + PyStrObject.data]
+    jmp .ulr_have_name
+.ulr_no_name:
+    lea rsi, [rel ulr_unknown]
+.ulr_have_name:
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel ulr_close]
+    cmp qword [rbp - ULR_FREE], 0
+    je .ulr_have_close
+    lea rsi, [rel ulr_free_close]
+.ulr_have_close:
+    call rbt_append_cstr
+
+    extern exc_UnboundLocalError_type
+    extern exc_NameError_type
+    lea rdi, [rel exc_UnboundLocalError_type]
+    cmp qword [rbp - ULR_FREE], 0
+    je .ulr_raise
+    lea rdi, [rel exc_NameError_type]
+.ulr_raise:
+    lea rsi, [rbp - ULR_BUF]
+    extern raise_exception
+    call raise_exception
+    ud2
+END_FUNC unbound_local_raise
+
+section .rodata
+ulr_open:      db "cannot access local variable '", 0
+ulr_close:     db "' where it is not associated with a value", 0
+ulr_free_open: db "cannot access free variable '", 0
+ulr_free_close: db "' where it is not associated with a value in enclosing scope", 0
+ulr_unknown:   db "?", 0
+section .text
 
 ;; ============================================================================
 ;; op_load_fast_and_clear - Load local and set slot to NULL
@@ -1210,7 +1343,14 @@ END_FUNC op_load_fast_and_clear
 ;;
 ;; Pops all three stack values, looks up attribute in class->tp_base->tp_dict
 ;; (walking the MRO chain), and pushes result.
-;; If method flag: push self + func. Otherwise: push NULL + attr.
+;;
+;; The low bit decides how MANY values come back, not just which: with it set
+;; this is a method load and pushes two -- the callable and the receiver, or
+;; NULL and a value that is not one -- and with it clear it pushes exactly
+;; ONE, the attribute.  dis.stack_effect agrees: -1 with the bit, -2 without.
+;; Pushing two either way is invisible in `return super().x`, where the extra
+;; word dies with the frame, and becomes an extra argument the moment the
+;; result is used in the middle of an expression.
 ;; ============================================================================
 DEF_FUNC op_load_super_attr, LSA_FRAME
 
@@ -1297,6 +1437,10 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     call obj_decref
     mov rdi, [rbp - LSA_SELF]
     call obj_decref
+    ; DISPATCH saved the stack top as it was BEFORE this handler popped its
+    ; three operands, and the unwinder cleans up from there -- so raising
+    ; without republishing r13 releases those three a second time.
+    mov [rel eval_saved_r13], r13
     RAISE exc_AttributeError_type, "super: attribute not found"
 
 .lsa_found:
@@ -1373,21 +1517,55 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rdi, [rbp - LSA_SELF]
     call obj_decref                ; and on self
     pop rax
-    VPUSH_NULL
     VPUSH_PTR rax
     jmp .lsa_done
 
 .lsa_attr_plain:
-    ; Not a function: a plain class attribute, returned as-is.
+    ; Not a function.  A property still has to be RUN -- `super().value` is
+    ; the getter's answer, not the descriptor -- and anything else is the
+    ; class attribute itself.
+    cmp qword [rbp - LSA_ATTR_TAG], TAG_PTR
+    jne .lsa_attr_value
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel property_type]
+    cmp rcx, rdx
+    je .lsa_attr_property
+.lsa_attr_value:
     push rax                      ; save attr
     mov rdi, [rbp - LSA_SELF]
     call obj_decref
-    xor eax, eax
-    VPUSH_NULL                  ; push NULL
     pop rax
     mov rdx, [rbp - LSA_ATTR_TAG]
     VPUSH_VAL rax, rdx             ; push attr
     jmp .lsa_done
+
+.lsa_attr_property:
+    mov [rbp - LSA_ATTR], rax
+    mov rdi, rax
+    mov rsi, [rbp - LSA_SELF]
+    call property_descr_get        ; -> (rax, rdx), owned
+    SAVE_FAT_RESULT
+    mov rdi, [rbp - LSA_ATTR]
+    call obj_decref
+    mov rdi, [rbp - LSA_SELF]
+    call obj_decref
+    RESTORE_FAT_RESULT
+    test edx, edx
+    jz .lsa_propagate              ; the getter raised
+    cmp qword [rbp - LSA_FLAG], 0
+    je .lsa_prop_one
+    VPUSH_NULL                     ; a value, not a method: NULL beneath it
+.lsa_prop_one:
+    VPUSH_VAL rax, rdx
+    jmp .lsa_done
+
+.lsa_propagate:
+    ; As at .lsa_not_found: the unwinder starts from eval_saved_r13, which is
+    ; where the stack was before the three operands came off it.
+    mov [rel eval_saved_r13], r13
+    leave
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
 
 .lsa_staticmethod:
     ; Unwrap sm_callable, release the wrapper and self, push (NULL, callable)
@@ -1401,7 +1579,10 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     call obj_decref
     mov rdi, [rbp - LSA_SELF]
     call obj_decref                ; not binding self
+    cmp qword [rbp - LSA_FLAG], 0
+    je .lsa_sm_one
     VPUSH_NULL
+.lsa_sm_one:
     mov rax, [rbp - LSA_ATTR]
     VPUSH_PTR rax
     jmp .lsa_done
@@ -1436,7 +1617,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     cmp qword [rbp - LSA_FLAG], 0
     jne .lsa_cm_flag1
 
-    ; Attr mode: push NULL + a method bound to the class
+    ; Attr mode: one value, a method bound to the class
     mov rdi, [rbp - LSA_ATTR]
     mov rsi, [rbp - LSA_BIND]
     call method_new                ; INCREFs both
@@ -1446,7 +1627,6 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rdi, [rbp - LSA_BIND]
     call obj_decref
     pop rax
-    VPUSH_NULL
     VPUSH_PTR rax
     jmp .lsa_done
 
@@ -2223,9 +2403,16 @@ END_FUNC op_delete_deref
 ;; ============================================================================
 DEF_FUNC_BARE op_delete_fast
     mov rdi, [r12 + PyFrame.localsplus + rcx*8]       ; old value
+    ; Deleting a local that was never bound is an UnboundLocalError, not a
+    ; no-op: `def f(): del y; y = 1` used to succeed silently.
+    test rdi, rdi
+    jz .dfa_unbound
     mov qword [r12 + PyFrame.localsplus + rcx*8], 0
     XDECREF_V rdi, rsi
     DISPATCH
+.dfa_unbound:
+    mov edi, ecx
+    call unbound_local_raise    ; does not return
 END_FUNC op_delete_fast
 
 ;; ============================================================================
@@ -2235,24 +2422,33 @@ DEF_FUNC_BARE op_delete_name
     shl ecx, 3                ; payload array: 8-byte stride
     LOAD_CO_NAMES rsi
     mov rsi, [rsi + rcx]      ; name
-    ; Try locals first
+    ; The frame's locals, and ONLY those when it has some: CPython's
+    ; DELETE_NAME is a delete from f_locals and a NameError when it misses.
+    ; Falling through to globals meant `class C: del g` deleting a module
+    ; global -- silently, and leaving nothing behind to say so.  A frame with
+    ; no locals dict of its own is the module case, where the two are the
+    ; same mapping anyway.
     mov rdi, [r12 + PyFrame.locals]
     test rdi, rdi
     jz .dn_globals
     push rsi
-    call dict_del
+    extern dict_del_opt
+    call dict_del_opt
     pop rsi
     test eax, eax
     jz .dn_ok                  ; found and deleted
+    jmp .dn_error
 .dn_globals:
     mov rdi, [r12 + PyFrame.globals]
-    call dict_del
+    push rsi
+    call dict_del_opt
+    pop rsi
     test eax, eax
     jnz .dn_error
 .dn_ok:
     DISPATCH
 .dn_error:
-    RAISE exc_NameError_type, "name not defined"
+    call name_error_raise      ; does not return
 END_FUNC op_delete_name
 
 ;; ============================================================================
@@ -2263,13 +2459,53 @@ DEF_FUNC_BARE op_delete_global
     LOAD_CO_NAMES rsi
     mov rsi, [rsi + rcx]      ; name
     mov rdi, [r12 + PyFrame.globals]
-    call dict_del
+    push rsi
+    extern dict_del_opt
+    call dict_del_opt
+    pop rsi
     test eax, eax
     jnz .dg_error
     DISPATCH
 .dg_error:
-    RAISE exc_NameError_type, "name not defined"
+    call name_error_raise      ; does not return
 END_FUNC op_delete_global
+
+;; ============================================================================
+;; name_error_raise(rsi = the name string) -- does not return
+;; "name 'g' is not defined", which is CPython's wording and names the name.
+;; ============================================================================
+NER_BUF   equ 264
+NER_FRAME equ 272           ; + 0 pushes = 272
+DEF_FUNC_LOCAL name_error_raise, NER_FRAME
+    mov r8, rsi
+    lea rdi, [rel ner_buf_open]
+    mov rsi, r8
+    lea rdi, [rbp - NER_BUF]
+    lea rsi, [rel ner_buf_open]
+    call rbt_append_cstr
+    mov rdi, rax
+    test r8, r8
+    jz .ner_no_name
+    lea rsi, [r8 + PyStrObject.data]
+    jmp .ner_have_name
+.ner_no_name:
+    lea rsi, [rel ner_unknown]
+.ner_have_name:
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel ner_close]
+    call rbt_append_cstr
+    lea rdi, [rel exc_NameError_type]
+    lea rsi, [rbp - NER_BUF]
+    call raise_exception
+    ud2
+END_FUNC name_error_raise
+
+section .rodata
+ner_buf_open: db "name '", 0
+ner_close:    db "' is not defined", 0
+ner_unknown:  db "?", 0
+section .text
 
 ;; ============================================================================
 ;; op_delete_attr - Delete attribute from object

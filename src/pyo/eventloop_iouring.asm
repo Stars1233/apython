@@ -13,6 +13,9 @@ extern sys_mmap
 extern sys_munmap
 extern sys_close
 extern ready_enqueue
+extern obj_incref
+extern obj_decref
+extern task_set_send_value
 extern ap_malloc
 extern none_singleton
 
@@ -286,10 +289,52 @@ DEF_FUNC_LOCAL uring_get_sqe
     ret
 
 .ugs_full:
+    ; The ring is full only because nothing has been handed to the kernel
+    ; yet -- every SQE here is queued, and the tail is advanced without an
+    ; enter().  Submit what is waiting, which frees every slot the kernel
+    ; takes, and try once more.  Returning 0 dropped the submission and left
+    ; the task waiting for a wakeup that was never armed: one `gather` of a
+    ; few hundred sleeps hung the whole loop.
+    call uring_submit_pending
+    mov rax, [rel uring_sq_tail]
+    mov ecx, [rax]
+    mov rdx, [rel uring_sq_head]
+    mov edx, [rdx]
+    mov r8d, ecx
+    sub r8d, edx
+    cmp r8d, [rel uring_sq_mask]
+    ja .ugs_really_full
+    leave
+    jmp uring_get_sqe
+.ugs_really_full:
     xor eax, eax
     leave
     ret
 END_FUNC uring_get_sqe
+
+;; ============================================================================
+;; uring_submit_pending() -- hand the queued SQEs to the kernel without
+;; waiting for anything.  The wait path does the same enter() with
+;; min_complete=1; this is the half that only submits.
+;; ============================================================================
+DEF_FUNC_LOCAL uring_submit_pending
+    mov rax, [rel uring_sq_tail]
+    mov eax, [rax]
+    mov rcx, [rel uring_sq_head]
+    sub eax, [rcx]
+    test eax, eax
+    jz .usp_none
+    mov esi, eax                ; to_submit
+    mov edi, [rel uring_fd]
+    xor edx, edx                ; min_complete = 0
+    xor ecx, ecx                ; no flags: do not wait
+    xor r8d, r8d
+    xor r9d, r9d
+    call sys_io_uring_enter
+.usp_none:
+    leave
+    ret
+END_FUNC uring_submit_pending
 
 ;; ============================================================================
 ;; uring_submit_timeout(AsyncTask *task, uint64_t delay_ns)
@@ -325,6 +370,14 @@ DEF_FUNC uring_submit_timeout
     mov dword [rax + IoUringSqe.len], 1    ; count = 1
     mov [rax + IoUringSqe.user_data], rbx  ; task as user_data
 
+    ; The SQE owns the task for as long as the kernel holds it -- and it holds
+    ; an interior pointer into it as well, the timespec at .ts_sec, which it
+    ; reads after this returns.  Nothing could traverse a submission queue in
+    ; shared memory, so the reference is what keeps the task there.  Released
+    ; on the completion, which io_uring posts even for a cancelled op.
+    mov rdi, rbx
+    call obj_incref
+
 .ust_done:
     pop r12
     pop rbx
@@ -352,6 +405,8 @@ DEF_FUNC uring_submit_poll
     mov [rax + IoUringSqe.fd], r12d
     mov [rax + IoUringSqe.rw_flags], r13d  ; poll_events
     mov [rax + IoUringSqe.user_data], rbx
+    mov rdi, rbx                ; the SQE's reference, as above
+    call obj_incref
 
 .usp_done:
     pop r13
@@ -433,12 +488,16 @@ DEF_FUNC uring_wait_and_drain
     test rdi, rdi
     jz .uwd_skip               ; cancel completion, ignore
 
-    ; Set send_value = None, enqueue
-    lea rcx, [rel none_singleton]
-    mov [rdi + AsyncTask.send_value], rcx
-
+    ; Set send_value = None, enqueue, and release the SQE's reference: this
+    ; completion is the end of it.
     push rbx
+    push rdi
+    lea rsi, [rel none_singleton]
+    call task_set_send_value
+    mov rdi, [rsp]
     call ready_enqueue
+    pop rdi
+    call obj_decref
     pop rbx
 
 .uwd_skip:

@@ -387,6 +387,16 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     je .las_slice
     ; A bool is an int here too, as it is on the read path
     REQUIRE_INT_TYPE rax, rcx, .las_key_type_error
+    ; An int subclass WRAPS an int rather than being one, so its value has to
+    ; be unwrapped before it can be read -- and the macro above has just
+    ; clobbered the register the tag was in, so the tag is restated here.
+    extern int_unwrap
+    mov rdi, rsi
+    mov edx, TAG_PTR
+    call int_unwrap
+    call int_to_i64
+    mov rsi, rax
+    jmp .las_have_key
 
 .las_int:
     ; Convert key to i64
@@ -394,6 +404,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov edx, ecx              ; key tag for int_to_i64
     call int_to_i64
     mov rsi, rax
+.las_have_key:
 
     ; Check if this is a delete (value_tag == TAG_NULL)
     cmp qword [rbp - LAS_VTAG], TAG_NULL

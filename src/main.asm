@@ -445,6 +445,16 @@ DEF_FUNC main, 8
     call obj_decref
 .no_sys_module:
 
+    ; Finalize cyclic garbage while the interpreter is still whole.  CPython
+    ; runs a full collection at shutdown, which is what makes a __del__ on an
+    ; object in a cycle run at all; without one, every such cycle was simply
+    ; abandoned.  It goes before the sys.modules cascade rather than after:
+    ; module dicts are what most cycles hang off, and a collection run after
+    ; they are torn down finds nothing to do.
+    extern gc_collect_gen
+    mov edi, 2
+    call gc_collect_gen
+
     ; DECREF owned objects.
     ;
     ; sys.modules goes first, and before the code object.  Freeing it cascades

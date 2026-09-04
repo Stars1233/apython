@@ -50,8 +50,164 @@ DEF_FUNC_BARE ast_at
 END_FUNC ast_at
 
 ;; ============================================================================
-;; ast_make(Comp *c, int kind, int subkind, int lineno, uint32_t a, uint32_t b)
-;;   -> rax = the new node's index
+;; ast_span_from(rdi = Comp*, rsi = AstSpan*, edx = a token cursor) -- fill it
+;; from the last real token before that cursor.
+;; ============================================================================
+DEF_FUNC_LOCAL ast_span_from
+    mov eax, edx
+    test eax, eax
+    jz .ash_none
+    mov rdx, [rdi + Comp.tokens + Buf.len]
+    mov r8, [rdi + Comp.tokens + Buf.data]
+.ash_back:
+    dec eax
+    js .ash_none
+    cmp rax, rdx
+    jae .ash_none
+    mov rcx, rax
+    shl rcx, TOKEN_SHIFT
+    add rcx, r8
+    ; NEWLINE, INDENT, DEDENT and the end marker are layout, not source text:
+    ; a compound statement's last real token is the one before them, and
+    ; taking the cursor's own predecessor put a `for`'s end on the line after
+    ; the block.
+    movzx r9d, word [rcx + Token.kind]
+    cmp r9d, TOK_NEWLINE
+    je .ash_back
+    cmp r9d, TOK_INDENT
+    je .ash_back
+    cmp r9d, TOK_DEDENT
+    je .ash_back
+    cmp r9d, TOK_ENDMARKER
+    je .ash_back
+    ; A token is one line long, except when it is not: a triple-quoted string
+    ; carries its START line and a length that runs past it, and adding that
+    ; length to its column put every docstring's end on the wrong line at a
+    ; column past the end of the file's longest line.  The newlines in the
+    ; token's own text are what the end is measured from.
+    mov eax, [rcx + Token.lineno]
+    mov r9d, [rcx + Token.col]
+    add r9d, [rcx + Token.len]      ; the one-line answer
+    mov r10, [rcx + Token.start]
+    mov r11d, [rcx + Token.len]
+    test r11d, r11d
+    jz .ash_have_end
+    xor edx, edx                    ; index
+.ash_scan:
+    cmp edx, r11d
+    jae .ash_have_end
+    cmp byte [r10 + rdx], 10
+    jne .ash_scan_next
+    inc eax                         ; one more line
+    mov r9d, r11d
+    sub r9d, edx
+    dec r9d                         ; bytes after this newline
+.ash_scan_next:
+    inc edx
+    jmp .ash_scan
+.ash_have_end:
+    mov [rsi + AstSpan.end_lineno], eax
+    mov [rsi + AstSpan.end_col], r9d
+    leave
+    ret
+.ash_none:
+    mov dword [rsi + AstSpan.end_lineno], -1
+    mov dword [rsi + AstSpan.end_col], -1
+    leave
+    ret
+END_FUNC ast_span_from
+
+;; ast_span_here(rdi = Comp*, rsi = AstSpan*) -- the same, at the cursor now,
+;; which is where the production that just finished ends.
+DEF_FUNC_BARE ast_span_here
+    mov edx, [rdi + Comp.tok_idx]
+    jmp ast_span_from
+END_FUNC ast_span_here
+
+;; ============================================================================
+;; ast_end_at(rdi = Comp*, esi = a node index, edx = a token cursor) -- move
+;; that node's end back to where the cursor was.  For a node built after
+;; something that is not part of it: a parameter's node is made once its
+;; default has been parsed, and CPython's `arg` ends at the name.
+;; ============================================================================
+global ast_end_at
+DEF_FUNC ast_end_at
+    mov rax, [rdi + Comp.spans + Buf.len]
+    cmp rsi, rax
+    jae .aen_out
+    mov rax, [rdi + Comp.spans + Buf.data]
+    shl rsi, 3
+    add rsi, rax
+    call ast_span_from
+.aen_out:
+    leave
+    ret
+END_FUNC ast_end_at
+
+;; ============================================================================
+;; ast_end_here(rdi = Comp*, esi = a node index) -- move that node's end to
+;; the cursor now.  For a node made before the last of its own parts was
+;; parsed: a comprehension is built before its closing bracket is consumed,
+;; and an AnnAssign before its value.
+;; ============================================================================
+global ast_end_here
+DEF_FUNC_BARE ast_end_here
+    mov edx, [rdi + Comp.tok_idx]
+    jmp ast_end_at
+END_FUNC ast_end_here
+
+;; ============================================================================
+;; ast_start_at(rdi = Comp*, esi = a node index, edx = a token index) -- move
+;; that node's START to where that token is.  For a node built when its
+;; operator was reached, whose production began earlier: CPython's position
+;; for an infix expression is its first token, parentheses included.
+;; ============================================================================
+global ast_start_at
+DEF_FUNC ast_start_at
+    mov rax, [rdi + Comp.tokens + Buf.len]
+    cmp rdx, rax
+    jae .asa_out
+    mov rax, [rdi + Comp.tokens + Buf.data]
+    shl rdx, TOKEN_SHIFT
+    add rdx, rax                ; the token
+    mov rax, [rdi + Comp.nodes + Buf.len]
+    cmp rsi, rax
+    jae .asa_out
+    mov rax, [rdi + Comp.nodes + Buf.data]
+    shl rsi, AST_SHIFT
+    add rsi, rax                ; the node
+    mov eax, [rdx + Token.lineno]
+    mov [rsi + AstNode.lineno], eax
+    mov eax, [rdx + Token.col]
+    mov [rsi + AstNode.col], eax
+.asa_out:
+    leave
+    ret
+END_FUNC ast_start_at
+
+;; ============================================================================
+;; ast_span_at(rdi = Comp*, esi = a node index) -> rax = AstSpan*, or 0
+;; ============================================================================
+global ast_span_at
+DEF_FUNC_BARE ast_span_at
+    mov rax, [rdi + Comp.spans + Buf.len]
+    cmp rsi, rax
+    jae .asa_none
+    mov rax, [rdi + Comp.spans + Buf.data]
+    shl rsi, 3
+    add rax, rsi
+    ret
+.asa_none:
+    xor eax, eax
+    ret
+END_FUNC ast_span_at
+
+;; ============================================================================
+;; ast_make(Comp *c, int kind, int subkind, uint64_t pos, uint32_t a,
+;;          uint32_t b) -> rax = the new node's index
+;;
+;; `pos` is the line in its low half and the column in its high half; TOK_POS
+;; packs one out of a Token.
 ;;
 ;; .c, .clist and .nchild are left zero; the few node kinds that use them fill
 ;; them in through ast_at once their children are known.
@@ -74,8 +230,13 @@ DEF_FUNC ast_make, AM_FRAME
     mov rdx, [rbp - AM_SUB]
     mov [rax + AstNode.subkind], dl
     mov word [rax + AstNode.flags], 0
+    ; The line and the column arrive as one word -- line low, column high --
+    ; because a seventh argument would be a stack argument at fifty-odd call
+    ; sites.  TOK_POS packs it out of a Token.
     mov rdx, [rbp - AM_LINE]
     mov [rax + AstNode.lineno], edx
+    shr rdx, 32
+    mov [rax + AstNode.col], edx
     mov rdx, [rbp - AM_A]
     mov [rax + AstNode.a], edx
     mov rdx, [rbp - AM_B]
@@ -83,7 +244,26 @@ DEF_FUNC ast_make, AM_FRAME
     mov dword [rax + AstNode.c], 0
     mov dword [rax + AstNode.clist], 0
     mov dword [rax + AstNode.nchild], 0
-    mov dword [rax + AstNode.col], 0
+
+    ; Where the node ENDS, in a Buf of its own indexed the same way.  There is
+    ; no room in the 32-byte node and a wider one would break the shl 5 that
+    ; addresses it, so the span rides alongside -- and because ast_make is the
+    ; only thing that ever makes a node, the two cannot drift apart.
+    ;
+    ; A production calls ast_make once it has consumed its last token, so the
+    ; end is tokens[tok_idx - 1] and no call site has to say so.  The few
+    ; nodes built before or after the last of their own parts fix it with
+    ; ast_end_here or ast_end_at.
+    lea rdi, [rbx + Comp.spans]
+    mov esi, 1
+    call buf_reserve                    ; rax = AstSpan*
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_span_here
+    ; And the type-parameter slot, zero until a def, class or alias fills it.
+    lea rdi, [rbx + Comp.typeparams]
+    xor esi, esi
+    call buf_push_u32
 
     ; The index is one less than the new length, since buf_reserve appended it.
     mov rax, [rbx + Comp.nodes + Buf.len]
@@ -206,12 +386,64 @@ DEF_FUNC ast_obj, 8            ; the 8 pads the push to a 16-aligned rsp
     mov rbx, rdi
     lea rdi, [rbx + Comp.objs]
     call buf_push_ptr
+    ; rawnames is indexed by the same number, so it grows here and nowhere
+    ; else: a zero for every object, overwritten only by comp_name_obj for the
+    ; identifiers mangling rewrote.
+    lea rdi, [rbx + Comp.rawnames]
+    xor esi, esi
+    call buf_push_u32
     mov rax, [rbx + Comp.objs + Buf.len]
     dec rax
     pop rbx
     leave
     ret
 END_FUNC ast_obj
+
+;; ============================================================================
+;; ast_set_typeparams(Comp *c, uint32_t node, uint32_t tp) -- hang a PEP 695
+;; parameter list off a def, a class or a type alias
+;; ast_typeparams_at(Comp *c, uint32_t node) -> rax = that node, or 0
+;; ============================================================================
+global ast_set_typeparams
+DEF_FUNC_BARE ast_set_typeparams
+    mov rax, [rdi + Comp.typeparams + Buf.len]
+    cmp rsi, rax
+    jae .astp_out
+    mov rax, [rdi + Comp.typeparams + Buf.data]
+    mov [rax + rsi*4], edx
+.astp_out:
+    ret
+END_FUNC ast_set_typeparams
+
+global ast_typeparams_at
+DEF_FUNC_BARE ast_typeparams_at
+    mov rax, [rdi + Comp.typeparams + Buf.len]
+    cmp rsi, rax
+    jae .atpa_none
+    mov rax, [rdi + Comp.typeparams + Buf.data]
+    mov eax, [rax + rsi*4]
+    ret
+.atpa_none:
+    xor eax, eax
+    ret
+END_FUNC ast_typeparams_at
+
+;; ============================================================================
+;; ast_rawname_at(Comp *c, uint32_t idx) -> rax = the obj index of the name as
+;; it was written, or 0
+;; ============================================================================
+global ast_rawname_at
+DEF_FUNC_BARE ast_rawname_at
+    mov rax, [rdi + Comp.rawnames + Buf.len]
+    cmp rsi, rax
+    jae .arn_none
+    mov rax, [rdi + Comp.rawnames + Buf.data]
+    mov eax, [rax + rsi*4]
+    ret
+.arn_none:
+    xor eax, eax
+    ret
+END_FUNC ast_rawname_at
 
 ;; ============================================================================
 ;; ast_obj_at(Comp *c, uint32_t idx) -> rax = the borrowed Value

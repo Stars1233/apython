@@ -200,6 +200,20 @@ for bad in [5, None, 2.5, [1]]:
         print(type(bad).__name__, "TypeError")
 print(re.sub("a", "b", "aaa"), re.sub("a", lambda m: "X", "aaa"))
 
+# --- A malformed replacement template.  These used to be an IndexError or a
+# bare ValueError with no position in the message; CPython raises re.error,
+# which is defined in Python, so the class is fetched out of sys.modules at
+# the moment it is needed and handed the template and the offset -- and
+# composes "at position N" itself.  The one exception is an unknown group
+# name, which CPython leaves as an IndexError.
+for tmpl in [r"\g<99>", r"\g<name>", r"\9", r"\g<", r"\g", "\\", r"\q",
+             r"\g<abc", r"\g<>", r"\g<1a>", r"x\g<-1>", r"ab\Q",
+             r"\g<0>", r"\g<1>", r"\1", r"\g<one>"]:
+    try:
+        print(repr(tmpl), repr(re.sub(r"(?P<one>a)", tmpl, "a")))
+    except Exception as exc:
+        print(repr(tmpl), type(exc).__name__, "|", exc)
+
 # --- fullmatch reaches its end-of-string test only at the top level, and a
 # continuation of the same match -- a branch, a repeat body, the tail after
 # MAX_UNTIL -- is still that same match.  Hardcoding "toplevel" at those five
@@ -213,3 +227,24 @@ for p, s in [(r"(a*)*", "aab"), (r"(\d*)*", "12x"), (r"(?=a*)ab", "ab"),
              (r"(ab)*", "abab")]:
     m = re.fullmatch(p, s)
     print(repr(p), repr(s), m.span() if m else None)
+
+# --- A nullable body under a repeat with a lower bound.  MAX_UNTIL and
+# MIN_UNTIL both write rep->count only in the branch that is about to attempt
+# the body, and put it back before the tail is tried; incrementing on the way
+# in and decrementing on each way out instead spent one count twice, and the
+# enclosing repeat iterated from a count it had already used.  `(a*)+` over
+# 'a1' recursed until the depth limit rather than answering None, and every
+# pattern here is one that used to.
+for p, s in [(r"(a*)+", "a1"), (r"(a*)+", "aa1"), (r"(a*)+", "aa"),
+             (r"([a-z]*)+", "abc1"), (r"(a*){1,3}", "a1"),
+             (r"(a*)+$", "a1"), (r"(?:a*)+", "a1"), (r"(a*)+?", "a1"),
+             (r"(a*?)+", "a1"), (r"(a*?)+b", "aab"), (r"(a*?)*b", "aab"),
+             (r"(a??)+", "a1"), (r"(|a)+", "aa"), (r"(a|)+b", "aab"),
+             (r"()+", "a"), (r"()*", "a"), (r"(a?)+", "aab"),
+             (r"(a?)*b", "aab"), (r"((a*)*)*b", "aab"),
+             (r"(a*)+(b*)+c", "aabbc"), (r"(x*)+y", "xxxxxxxxz"),
+             (r"(a*)+", ""), (r"(a*)+", "b")]:
+    for fn in ("fullmatch", "match", "search"):
+        m = getattr(re, fn)(p, s)
+        print(fn, repr(p), repr(s), m.span() if m else None,
+              m.groups() if m else "")

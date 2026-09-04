@@ -179,7 +179,7 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   basenames with `src/pyo/` on purpose: `methods/dict.asm` is dict's methods,
   `pyo/dict.asm` is dict itself
 - `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func,
-  class, iter, singleton, bytes, code)
+  class, iter, singleton, bytes, bytearray, memoryview, code)
 - `src/marshal.asm` — .pyc marshal deserializer, and the .pyc file reader
 - `src/main.asm` — argument parsing, startup order, and the `-t`/`--dis` modes
 - `src/import.asm` — the import system: finders, `sys.modules`, packages
@@ -187,6 +187,10 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   of the I/O stack subclasses, `UnsupportedOperation`, `FileIO` and `BytesIO`.
   The buffering and text layers are `lib/_io.py`, which assembles both halves
   under the name `_io`
+- `src/socketmod.asm` — the `_socketcore` module: the socket syscalls and the
+  constant table, taking and returning sockaddrs as opaque bytes.  The socket
+  type, the address packing and `select` are `lib/_socket.py` and
+  `lib/select.py`, the same split as `_iocore`/`lib/_io.py`
 - `src/itertools.asm` — the *iterator builtins* (`enumerate`, `zip`, `map`,
   `filter`, `reversed`, `sorted`, `chain`, `get_iterator`), not the `itertools`
   module, which is `lib/itertools.py`

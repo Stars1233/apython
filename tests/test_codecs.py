@@ -74,3 +74,76 @@ for label, fn in (("encode", lambda: "a\u1234b".encode("ascii", "bogus")),
 # utf-8 and latin-1 are unchanged.
 print(repr(b"a\xffb".decode("utf-8", "ignore")), repr(b"a\xffb".decode("utf-8", "replace")))
 print(repr("a\u00e9b".encode("latin-1")), repr("a\u1234b".encode("utf-8")))
+
+# The latin-1 encode arm honoured no error handler at all.  The ascii arm
+# beside it has acted on errors= for a while; latin-1 jumped straight to the
+# UnicodeEncodeError whether or not one was asked for, so
+# "aሴb".encode("latin-1", "ignore") raised.
+#
+# The message is CPython's now too, on both arms.  str() of a
+# UnicodeEncodeError renders its five fields, but raising a five-argument
+# exception from asm needs something exc_new does not offer, so the text is
+# composed -- which is what bytes_raise_decode_error already does for the
+# decode side.  It used to say only "character not in range for this
+# encoding", naming neither the character nor the position.
+
+
+def show(e):
+    try:
+        print(e, "=>", repr(eval(e)))
+    except UnicodeEncodeError as ex:
+        print(e, "=> UnicodeEncodeError", ex)
+
+
+# The handlers.  A run of unencodable characters is skipped whole, not one
+# UTF-8 byte at a time.
+BAD = chr(0x1234)
+for spec in ('"ab".encode("latin-1")',
+             '(chr(0xff) + "b").encode("latin-1")',
+             '("a" + BAD + "b").encode("latin-1")',
+             '("a" + BAD + "b").encode("latin-1", "ignore")',
+             '("a" + BAD + "b").encode("latin-1", "replace")',
+             '("a" + BAD + "b").encode("latin-1", "strict")',
+             '(BAD + chr(0x1235)).encode("latin-1", "replace")',
+             '(BAD + chr(0x1235)).encode("latin-1", "ignore")',
+             '(chr(0xff) + BAD).encode("latin-1", "replace")',
+             '"".encode("latin-1")',
+             '("a" + BAD + "b").encode("latin1", "ignore")',
+             '("a" + BAD + "b").encode("iso8859_1", "replace")',
+             'chr(0x1F600).encode("latin-1", "replace")',
+             'chr(0x1F600).encode("latin-1", "ignore")'):
+    show(spec)
+
+# An unknown handler is reported only once something actually fails, which is
+# CPython's rule and the ascii arm's design.
+print("ab".encode("latin-1", "bogus"))
+try:
+    ("a" + BAD).encode("latin-1", "bogus")
+except LookupError as e:
+    print("LookupError")
+
+# The strict message: every escape width, and the position counted in
+# characters rather than bytes.
+for spec in ('chr(0x80).encode("ascii")', 'chr(0xff).encode("ascii")',
+             'chr(0x100).encode("ascii")', 'chr(0x1234).encode("ascii")',
+             'chr(0x1F600).encode("ascii")', 'chr(0x100).encode("latin-1")',
+             'chr(0x1234).encode("latin-1")', 'chr(0x1F600).encode("latin-1")',
+             'chr(0x7ff).encode("latin-1")', 'chr(0x800).encode("latin-1")',
+             '(chr(0xe9) + chr(0x1234)).encode("latin-1")',
+             '("ab" + chr(0xe9) + "cd" + chr(0x1234)).encode("ascii")',
+             '("ab" + chr(0xe9) + "cd" + chr(0x1234)).encode("latin-1")',
+             '(chr(0x1234) + "aaa").encode("latin-1")'):
+    show(spec)
+
+# And the plural form, for a run of more than one.
+for spec in ('(chr(0xff) * 3 + chr(0x1234)).encode("ascii")',
+             '(chr(0x1234) * 2).encode("latin-1")',
+             '(chr(0x1234) * 5).encode("latin-1")',
+             '("ok" + chr(0x1234) * 3 + "ok").encode("latin-1")'):
+    show(spec)
+
+# The round trip still works, and the output is NUL-terminated -- the latin-1
+# arm did not write the terminator the ascii arm does.
+enc = ("a" + BAD + "b").encode("latin-1", "ignore")
+print(enc, len(enc), enc.decode("latin-1"))
+print((chr(0xff) + "abc").encode("latin-1").decode("latin-1"))

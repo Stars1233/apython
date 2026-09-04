@@ -156,10 +156,15 @@ DEF_FUNC str_sub_new, SSN_FRAME
     test rdx, rdx
     jz .ssn_empty
 
-    ; str(x) of the argument gives a plain str to copy from.
-    mov rdi, [rsi]
-    extern obj_str
-    call obj_str
+    ; str(x) of the arguments gives a plain str to copy from.  This called
+    ; obj_str on args[0] and ignored the rest, so a str subclass could not be
+    ; built from the DECODING form: S(b"abc", "utf-8") came out as the repr
+    ; "b'abc'".  builtin_str_fn is the whole of str(), keyword arguments
+    ; included, and its one-argument case is the same obj_str.
+    mov rdi, rsi
+    mov rsi, rdx
+    extern builtin_str_fn
+    call builtin_str_fn
     V_UNPACK rax, rdx
     test edx, edx
     jz .ssn_failed
@@ -925,7 +930,12 @@ DEF_FUNC instance_setattr
 
 .sa_have_dict:
 .sa_dict_set:
-    ; dict_set(inst_dict, name Value, value Value)
+    ; A NULL value means DELETE, not "store a NULL".  dict_set was called
+    ; either way, so `del obj.attr` left the key in the instance dict bound
+    ; to a NULL Value: vars(obj) could not be repr'd, len(vars(obj)) still
+    ; counted it, and deleting twice succeeded.
+    test r13, r13
+    jz .sa_dict_del
     mov rsi, r12                ; name
     mov rdx, r13                ; value
     call dict_set
@@ -936,6 +946,24 @@ DEF_FUNC instance_setattr
     pop rbx
     leave
     ret
+
+.sa_dict_del:
+    mov rsi, r12                ; name
+    extern dict_del_opt
+    call dict_del_opt           ; -1 when it was never there
+    test eax, eax
+    jnz .sa_del_missing
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sa_del_missing:
+    mov rdi, rbx
+    mov rsi, r12
+    call raise_no_attribute     ; does not return
 
 .sa_no_dict_error:
 .sa_no_dict_slot:
@@ -1029,9 +1057,17 @@ DEF_FUNC instance_dealloc, ID_FRAME
     test rdi, rdi
     jz .del_nothing_pending
     ; ...but only when the global's own reference is real.  The unwinder can
-    ; reach here with current_exception pointing at an object whose refcount is
-    ; already zero -- bugs.md carries the case -- and taking and dropping a
-    ; reference on that one frees an exception that is still being carried.
+    ; reach here with current_exception pointing at an object whose refcount
+    ; is already zero, and taking and dropping a reference on that one frees
+    ; an exception that is still being carried.
+    ;
+    ; No path produces that state today: the case bugs.md used to carry does
+    ; not reproduce, valgrind is clean over the async suite, and a watch here
+    ; gets no hits across the corpus.  The check stays anyway.  It is two
+    ; instructions, and the invariant behind it is genuinely fragile --
+    ; raise_exception_obj takes over its caller's reference rather than
+    ; adding one, so the global's is often the only reference there is, and
+    ; this function runs while the unwinder is releasing the value stack.
     cmp qword [rdi + PyObject.ob_refcnt], 0
     jle .del_nothing_pending
     call obj_incref
@@ -1092,21 +1128,26 @@ DEF_FUNC instance_dealloc, ID_FRAME
     jmp .no_del
 
 .del_report:
-    ; A genuinely new exception: say so on stderr, then put back the old one.
-    mov edi, 2
-    lea rsi, [rel id_del_ignored_msg]
-    mov edx, id_del_ignored_len
-    call sys_write
+    ; A genuinely new exception: report it in full on stderr -- the object it
+    ; came out of, and the traceback of where inside __del__ it happened --
+    ; then put back the old one.  This used to be one line that named neither.
+    ; CPython names the __del__ FUNCTION, not the object it was called on.
+    ; The lookup is borrowed, and cannot raise: it just found this method.
+    mov rdi, [rbx + PyObject.ob_type]
+    lea rsi, [rel dunder_del]
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    cmp edx, TAG_PTR
+    je .del_report_have_fn
+    xor eax, eax
+.del_report_have_fn:
+    mov rsi, rax
+    mov rdi, [rel current_exception]
+    extern traceback_print_unraisable
+    call traceback_print_unraisable
     jmp .del_restore
 
 .no_del:
-    ; XDECREF the instance dict; a type may have no dict slot at all.
-    LOAD_INST_DICT rdi, rbx, .no_dict
-    test rdi, rdi
-    jz .no_dict
-    call obj_decref
-.no_dict:
-
     ; Check if this is an int subclass — XDECREF int_value (tag-aware)
     mov rax, [rbx + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_flags]
@@ -1130,38 +1171,87 @@ DEF_FUNC instance_dealloc, ID_FRAME
     cmp rcx, TP_DICT_AT_TAIL
     je .id_no_dict_hdr          ; the dict is past the data, not in the header
     add rcx, 8
+    ; A base's slots are BELOW the dict word when the subclass is the one that
+    ; added the dict: `class C: __slots__ = ('a',)` puts a at 16 and `class
+    ; D(C): pass` puts D's dict at 24, so starting past the dict found no
+    ; slots at all and D never released C's.  The floor is the family's, and
+    ; the walk skips the dict word wherever it sits.
+    push rax
+    push rcx
+    mov rdi, rax
+    call instance_slot_floor
+    mov rdx, rax
+    pop rcx
+    pop rax
+    test rdx, rdx
+    jz .id_have_hdr
+    cmp rdx, rcx
+    jae .id_have_hdr
+    mov rcx, rdx
+    ; ...but the header does not end at the dict word when the layout base
+    ; keeps fields of its own PAST it.  _io.FileIO is built by
+    ; type_from_parts and then has its tp_basicsize patched up to make room
+    ; for the descriptor, the flags, the name, the blksize and the mode --
+    ; all above tp_dictoffset + 8.  `class F(_io.FileIO): pass` therefore
+    ; walked five of FileIO's own fields as if they were __slots__ Values and
+    ; XDECREF'd them: a file descriptor of 3 is `dec qword [3]`, a wild write
+    ; on ordinary single inheritance with no __slots__ anywhere.
+    ;
+    ; tp_base is the layout base -- the type whose fields sit below the
+    ; subclass's own slots -- so its basicsize is the real floor.
     jmp .id_have_hdr
 .id_no_dict_hdr:
     ; No dict word: a str subclass, whose header is the base's, not
     ; PyInstanceObject's.  Using 24 there found a phantom slot at +24 --
     ; PyStrObject.ob_hash -- and XDECREF'd the hash as if it were a pointer.
-    mov rcx, [rax + PyTypeObject.tp_base]
-    test rcx, rcx
-    jz .id_no_dict_hdr_default
-    mov rcx, [rcx + PyTypeObject.tp_basicsize]
+    push rax
+    mov rdi, rax
+    call instance_slot_floor
+    mov rcx, rax
+    pop rax
     test rcx, rcx
     jnz .id_have_hdr
-.id_no_dict_hdr_default:
-    mov rcx, PyInstanceObject_size
+    mov rcx, OBJ_HEADER_SIZE
 .id_have_hdr:
+    push r13
+    mov r13, [rax + PyTypeObject.tp_dictoffset]
+    cmp r13, TP_DICT_AT_TAIL
+    jne .id_dict_off_ok
+    xor r13d, r13d              ; nothing in the header to skip
+.id_dict_off_ok:
     mov rax, [rax + PyTypeObject.tp_basicsize]
-    sub rax, rcx
-    jle .no_slots                ; no slots
-    shr rax, 3                  ; nslots
-    mov r12, rax                ; r12 = remaining count
-    add rcx, rbx                ; rcx = first slot address
-
+    cmp rax, rcx
+    jbe .id_slots_done          ; no slots
+    ; Downwards, from the most derived class's slots to the base's, which is
+    ; the order CPython releases them in and therefore the order two __del__s
+    ; run in.
+    mov r12, rax
 .slot_decref_loop:
+    sub r12, 8
+    cmp r12, rcx
+    jb .id_slots_done
+    cmp r12, r13
+    je .slot_decref_loop        ; the instance dict, released above
     push rcx
-    mov rdi, [rcx]              ; slot Value
+    lea rdi, [rbx + r12]
+    mov rdi, [rdi]              ; slot Value
     XDECREF_V rdi, rsi
     pop rcx
-    add rcx, 8                  ; next slot
-    dec r12
-    jnz .slot_decref_loop
+    jmp .slot_decref_loop
+.id_slots_done:
+    pop r13
 
 .no_slots:
     pop r12
+
+    ; XDECREF the instance dict; a type may have no dict slot at all.  AFTER
+    ; the slots, which is the order CPython's subtype_dealloc uses and so the
+    ; order two __del__s run in.  The slot walk skips this word.
+    LOAD_INST_DICT rdi, rbx, .no_dict
+    test rdi, rdi
+    jz .no_dict
+    call obj_decref
+.no_dict:
 
     ; A bytearray subclass owns a second allocation -- its bytes -- that the
     ; slot walk above knows nothing about, and the base's own dealloc never
@@ -1293,6 +1383,7 @@ DEF_FUNC instance_dealloc, ID_FRAME
     ret
 END_FUNC instance_dealloc
 
+
 ;; ============================================================================
 ;; builtin_sub_dealloc(PyObject *self)
 ;; Dealloc for heap-type subclasses of builtin types (bytes, bytearray, etc.)
@@ -1414,8 +1505,11 @@ DEF_FUNC instance_repr, IR_FRAME
     jmp .done
 
 .ir_generic:
-    lea rdi, [rel instance_repr_cstr]
-    call str_from_cstr
+    ; object.__repr__: "<module.qualname object at 0x...>", with the module
+    ; left out when it is "builtins".  This used to be the fixed string
+    ; "<instance>", which said neither which class nor which object.
+    mov rdi, rbx
+    call instance_repr_default
 
 .done:
     pop rbx
@@ -1428,6 +1522,106 @@ DEF_FUNC instance_repr, IR_FRAME
     leave
     ret
 END_FUNC instance_repr
+
+;; ============================================================================
+;; instance_repr_default(rdi = the instance) -> rax = PyStrObject*
+;;
+;; The shape object.__repr__ has: the defining module and the qualified name,
+;; then the address.  The module is dropped when it is "builtins", which is
+;; the rule that keeps a builtin's own default repr free of a "builtins."
+;; prefix.  Both names come through type_getattr, so a class that sets
+;; __qualname__ or __module__ itself is answered with what it set.
+;; ============================================================================
+IRD_OBJ   equ 8
+IRD_MOD   equ 16
+IRD_NAME  equ 24
+IRD_FRAME equ 32            ; + 1 push = 40
+
+DEF_FUNC_LOCAL instance_repr_default, IRD_FRAME
+    push rbx
+    mov [rbp - IRD_OBJ], rdi
+    mov qword [rbp - IRD_MOD], 0
+    mov qword [rbp - IRD_NAME], 0
+    mov rbx, [rdi + PyObject.ob_type]
+
+    CSTRING rdi, "__qualname__"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    call type_getattr
+    V_UNPACK rax, rdx
+    cmp edx, TAG_PTR
+    je .ird_have_name
+    xor eax, eax
+.ird_have_name:
+    mov [rbp - IRD_NAME], rax
+    pop rdi
+    call obj_decref
+
+    CSTRING rdi, "__module__"
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    call type_getattr
+    V_UNPACK rax, rdx
+    cmp edx, TAG_PTR
+    je .ird_have_mod
+    xor eax, eax
+.ird_have_mod:
+    mov [rbp - IRD_MOD], rax
+    pop rdi
+    call obj_decref
+
+    ; "builtins" is not printed, exactly as CPython's object_repr has it.
+    mov rax, [rbp - IRD_MOD]
+    test rax, rax
+    jz .ird_build
+    lea rdi, [rax + PyStrObject.data]
+    CSTRING rsi, "builtins"
+    extern ap_strcmp
+    call ap_strcmp
+    test eax, eax
+    jne .ird_build
+    mov rdi, [rbp - IRD_MOD]
+    call obj_decref
+    mov qword [rbp - IRD_MOD], 0
+
+.ird_build:
+    mov rdi, [rbp - IRD_OBJ]
+    xor esi, esi
+    mov rax, [rbp - IRD_MOD]
+    test rax, rax
+    jz .ird_no_mod
+    lea rsi, [rax + PyStrObject.data]
+.ird_no_mod:
+    mov rdx, [rbx + PyTypeObject.tp_name]
+    mov rax, [rbp - IRD_NAME]
+    test rax, rax
+    jz .ird_no_name
+    lea rdx, [rax + PyStrObject.data]
+.ird_no_name:
+    extern obj_default_repr_named
+    call obj_default_repr_named
+    push rax
+    mov rdi, [rbp - IRD_NAME]
+    test rdi, rdi
+    jz .ird_no_name_ref
+    call obj_decref
+.ird_no_name_ref:
+    mov rdi, [rbp - IRD_MOD]
+    test rdi, rdi
+    jz .ird_no_mod_ref
+    call obj_decref
+.ird_no_mod_ref:
+    pop rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+END_FUNC instance_repr_default
 
 ;; ============================================================================
 ;; instance_str(PyObject *self) -> PyStrObject*
@@ -2319,6 +2513,23 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     test eax, eax
     jz .tga_return_name
 
+    ; A builtin type's __qualname__ is its __name__, and its __module__ is
+    ; "builtins".  Neither existed, so `ValueError.__qualname__` was an
+    ; AttributeError -- and CPython's traceback and warnings machinery reads
+    ; both off an exception's type.  A heaptype sets them in its own dict,
+    ; which the walk below finds first.
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__qualname__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_qualname
+
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__module__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_module
+
     lea rdi, [rbx + PyStrObject.data]
     CSTRING rsi, "__dict__"
     call ap_strcmp
@@ -2336,6 +2547,28 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     call ap_strcmp
     test eax, eax
     jz .tga_return_bases
+
+    ; The instance layout, as CPython reports it.  These are getsets on the
+    ; metatype in CPython, so they are data descriptors and win over anything
+    ; a class body puts under the same name -- hence the check here, ahead of
+    ; the tp_dict walk, rather than after it.
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__basicsize__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_basicsize
+
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__dictoffset__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_dictoffset
+
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__weakrefoffset__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_weakrefoffset
 
     ; Check type->tp_dict, then walk tp_base chain
 .tga_walk:
@@ -2479,6 +2712,107 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     pop rbx
     leave
     V_PACK rax, rdx             ; return one Value
+    ret
+
+.tga_return_basicsize:
+    mov rdi, [r12 + PyTypeObject.tp_basicsize]
+    jmp .tga_return_layout_int
+
+.tga_return_dictoffset:
+    mov rdi, [r12 + PyTypeObject.tp_dictoffset]
+    jmp .tga_return_layout_int
+
+.tga_return_weakrefoffset:
+    ; No weakref word in the instance layout yet: the links live in a side
+    ; table, so every type reports 0, which is also what CPython reports for
+    ; a type whose instances cannot be weak-referenced.
+    xor edi, edi
+
+.tga_return_layout_int:
+    extern int_from_i64
+    call int_from_i64
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.tga_return_qualname:
+    ; A class defined in Python records its own, which carries the enclosing
+    ; scope -- "outer.<locals>.Local".  Only a builtin type falls through to
+    ; __name__.
+    mov rdi, [r12 + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .tga_return_name
+    mov rsi, rbx
+    extern dict_get
+    call dict_get
+    test rax, rax
+    jz .tga_return_name
+    V_UNPACK rax, rdx
+    INCREF_VAL rax, rdx
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.tga_return_module:
+    ; A class defined in Python records its own __module__ in its dict; only
+    ; a builtin type falls through to the default below.
+    mov rdi, [r12 + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .tga_module_builtin
+    mov rsi, rbx
+    extern dict_get
+    call dict_get
+    test rax, rax
+    jz .tga_module_builtin
+    V_UNPACK rax, rdx
+    INCREF_VAL rax, rdx
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.tga_module_builtin:
+    ; The dotted prefix of tp_name when there is one -- "_io.FileIO" is in
+    ; module "_io" -- and "builtins" otherwise, as CPython has it.
+    mov rsi, [r12 + PyTypeObject.tp_name]
+    xor ecx, ecx
+    xor r8d, r8d                ; the index just past the last dot, or 0
+.tga_mod_scan:
+    movzx eax, byte [rsi + rcx]
+    test al, al
+    jz .tga_mod_done
+    cmp al, '.'
+    jne .tga_mod_next
+    mov r8, rcx
+.tga_mod_next:
+    inc rcx
+    jmp .tga_mod_scan
+.tga_mod_done:
+    test r8, r8
+    jz .tga_mod_plain
+    mov rdi, rsi
+    mov rsi, r8
+    extern str_new_heap
+    call str_new_heap
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+.tga_mod_plain:
+    CSTRING rdi, "builtins"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
     ret
 
 .tga_return_name:
@@ -2875,10 +3209,9 @@ DEF_FUNC_BARE object_type_call
     ; Create a bare instance with object_type (gc_alloc since HAVE_GC)
     push rbp
     mov rbp, rsp
-    mov edi, PyInstanceObject_size
+    mov edi, OBJ_HEADER_SIZE
     lea rsi, [rel object_type]
     call gc_alloc
-    mov qword [rax + PyInstanceObject.inst_dict], 0
 
     ; gc_alloc does not INCREF the type it stamps into ob_type, and
     ; instance_dealloc DECREFs it -- so without this the reference count of
@@ -3094,16 +3427,23 @@ user_type_metatype:
 ; Used as explicit base class: class Foo(object): pass
 ; Also callable: object() returns a bare instance
 align 8
+extern object_hash
+
 global object_type
 object_type:
     dq 1                        ; ob_refcnt (immortal)
     dq type_type                ; ob_type
     dq object_name_str          ; tp_name
-    dq PyInstanceObject_size    ; tp_basicsize
+    ; object() has no __dict__, so its instances are the bare header.  This
+    ; used to be PyInstanceObject_size -- the header PLUS a dict word that
+    ; object's own tp_dictoffset of 0 says is not there.  Every object() paid
+    ; for it, and `class B(object): pass` put its dict one word further out
+    ; than `class B: pass` did, for two different layouts of the same class.
+    dq OBJ_HEADER_SIZE          ; tp_basicsize
     dq instance_dealloc         ; tp_dealloc
     dq instance_repr            ; tp_repr
     dq 0                        ; tp_str
-    dq 0                        ; tp_hash
+    dq object_hash              ; tp_hash
     dq 0                        ; tp_call  (instances are not callable)
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
@@ -3133,7 +3473,7 @@ super_type:
     dq super_type               ; ob_type (self-referential)
     dq super_name_str           ; tp_name
     dq TYPE_OBJECT_SIZE         ; tp_basicsize
-    times 20 dq 0               ; remaining tp_* fields
+    times 23 dq 0               ; remaining tp_* fields
 
 ; method_type - type descriptor for bound methods
 align 8
@@ -3211,10 +3551,50 @@ DEF_FUNC method_clear
 END_FUNC method_clear
 
 ; ---- instance_traverse / instance_clear ----
+;; ============================================================================
+;; instance_slot_floor(rdi = the instance's type) -> rax = where its __slots__
+;; begin
+;;
+;; Every heaptype whose instances this function deallocs lays out its own
+;; slots directly above its base's, so a subclass's slot region includes the
+;; ones its ancestors declared: `class C: __slots__ = ('a',)` and `class
+;; D(C): pass` give D exactly C's layout, and taking the floor from D's own
+;; base -- C -- found no slots at all and released none.  D's `a` was never
+;; freed, and a cycle through it was uncollectable.
+;;
+;; The walk stops at the first ancestor that manages its own storage: a
+;; static type, or a heaptype with a tp_dealloc of its own.  _io.FileIO is
+;; the second kind -- a heaptype with a patched basicsize and five C fields
+;; -- and walking past it would hand a file descriptor to DECREF_VAL.
+;; ============================================================================
+DEF_FUNC_LOCAL instance_slot_floor
+    push rbx
+    mov rbx, rdi                ; the type whose base chain is walked
+    xor eax, eax                ; the floor, 0 until an ancestor sets it
+.isf_loop:
+    mov rcx, [rbx + PyTypeObject.tp_base]
+    test rcx, rcx
+    jz .isf_done
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .isf_builtin
+    lea rdx, [rel instance_dealloc]
+    cmp [rcx + PyTypeObject.tp_dealloc], rdx
+    jne .isf_builtin            ; it keeps fields of its own
+    mov rbx, rcx
+    jmp .isf_loop
+.isf_builtin:
+    mov rax, [rcx + PyTypeObject.tp_basicsize]
+.isf_done:
+    pop rbx
+    leave
+    ret
+END_FUNC instance_slot_floor
+
 DEF_FUNC instance_traverse
     push rbx
     push r12
     push r13
+    push r15                    ; r14 is the visit callback, VISIT_V's own
 
     mov rbx, rdi
 
@@ -3233,20 +3613,45 @@ DEF_FUNC instance_traverse
     cmp rcx, TP_DICT_AT_TAIL
     je .it_no_dict_hdr          ; the dict is past the data, not in the header
     add rcx, 8
+    ; The same floor and the same skip as instance_dealloc: a base's slots sit
+    ; BELOW the dict word the subclass added, and starting past the dict left
+    ; them unvisited -- so a cycle through an inherited slot was never
+    ; collectable.  The layout base's own fields can sit past the dict word
+    ; too, which is why the floor stops at the first ancestor that manages its
+    ; own storage: here the consequence of walking those would be the
+    ; collector visiting a file descriptor as an object pointer.
+    push rax
+    push rcx
+    mov rdi, rax
+    call instance_slot_floor
+    mov rdx, rax
+    pop rcx
+    pop rax
+    test rdx, rdx
+    jz .it_have_hdr
+    cmp rdx, rcx
+    jae .it_have_hdr
+    mov rcx, rdx
     jmp .it_have_hdr
 .it_no_dict_hdr:
     ; No dict word: a str subclass, whose header is the base's, not
     ; PyInstanceObject's.  Using 24 there found a phantom slot at +24 --
     ; PyStrObject.ob_hash -- and XDECREF'd the hash as if it were a pointer.
-    mov rcx, [rax + PyTypeObject.tp_base]
-    test rcx, rcx
-    jz .it_no_dict_hdr_default
-    mov rcx, [rcx + PyTypeObject.tp_basicsize]
+    push rax
+    mov rdi, rax
+    call instance_slot_floor
+    mov rcx, rax
+    pop rax
     test rcx, rcx
     jnz .it_have_hdr
-.it_no_dict_hdr_default:
-    mov rcx, PyInstanceObject_size
+    mov rcx, OBJ_HEADER_SIZE
 .it_have_hdr:
+    mov r15, [rax + PyTypeObject.tp_dictoffset]
+    cmp r15, TP_DICT_AT_TAIL
+    jne .it_dict_off_ok
+    xor r15d, r15d
+.it_dict_off_ok:
+    add r15, rbx                ; the dict word's address, or rbx
     mov rax, [rax + PyTypeObject.tp_basicsize]
     sub rax, rcx
     jle .done
@@ -3255,13 +3660,17 @@ DEF_FUNC instance_traverse
     lea r12, [rbx + rcx]
 
 .slot_loop:
+    cmp r12, r15
+    je .it_slot_skip            ; the instance dict, visited above
     mov rdi, [r12]
     VISIT_V rdi, rsi
+.it_slot_skip:
     add r12, 8
     dec r13
     jnz .slot_loop
 
 .done:
+    pop r15
     pop r13
     pop r12
     pop rbx

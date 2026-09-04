@@ -141,6 +141,177 @@ DEF_FUNC_BARE uflags_of
 END_FUNC uflags_of
 
 ;; ============================================================================
+;; udecimal_value(edi = a code point) -> eax = its value 0..9, or -1
+;;
+;; Unicode decimal digits come in blocks of ten, in order, and the flag table
+;; only records where the flags change -- so a run carrying UF_DECIMAL begins
+;; at a block's own zero, and the value is the distance into it.  The modulo
+;; is for the runs that are several blocks long: U+1D7CE..U+1D7FF is five of
+;; them back to back with identical flags, and they merge into one entry.
+;;
+;; The rule is exact against the committed table -- all 680 decimal code
+;; points agree with unicodedata.decimal().
+;; ============================================================================
+global udecimal_value
+DEF_FUNC_BARE udecimal_value
+    xor esi, esi
+    mov rdx, [rel uflag_count]
+    lea r8, [rel uflag_starts]
+    xor eax, eax                    ; the best flags so far
+    xor r10d, r10d                  ; and where that run starts
+.udv_loop:
+    cmp rsi, rdx
+    jge .udv_done
+    lea rcx, [rsi + rdx]
+    shr rcx, 1
+    mov r9, rcx
+    shl r9, 3
+    add r9, r8
+    cmp edi, [r9]
+    jb .udv_left
+    mov r10d, [r9]
+    mov eax, [r9 + 4]
+    lea rsi, [rcx + 1]
+    jmp .udv_loop
+.udv_left:
+    mov rdx, rcx
+    jmp .udv_loop
+.udv_done:
+    test eax, UF_DECIMAL
+    jz .udv_none
+    mov eax, edi
+    sub eax, r10d
+    xor edx, edx
+    mov ecx, 10
+    div ecx
+    mov eax, edx                    ; the remainder
+    ret
+.udv_none:
+    mov eax, -1
+    ret
+END_FUNC udecimal_value
+
+;; ============================================================================
+;; str_decimal_ascii(rdi = PyStrObject*) -> rax = an ASCII copy, ap_malloc'd
+;;                    and NUL-terminated, or 0; rdx = its length in bytes
+;;
+;; CPython's _PyUnicode_TransformDecimalAndSpaceToASCII, which int(), float()
+;; and complex() all run over their argument first: a Unicode decimal digit
+;; becomes the ASCII digit of the same value, any Unicode space becomes an
+;; ASCII space, and everything else is left as it is -- so a string that was
+;; never going to parse still does not.
+;;
+;; An all-ASCII string answers 0: there is nothing to do, and the caller uses
+;; the original.  Otherwise the caller owns the buffer and frees it.
+;;
+;; The length comes back because strlen cannot be used to recover it: a NUL in
+;; the source is copied through like any other byte, and every caller has to
+;; be able to tell that apart from the end of the string.
+;; ============================================================================
+SDA_OBJ   equ 8
+SDA_BUF   equ 16
+SDA_OUT   equ 24
+SDA_POS   equ 32
+SDA_LEN   equ 40
+SDA_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+
+global str_decimal_ascii
+DEF_FUNC str_decimal_ascii, SDA_FRAME
+    push rbx
+    mov [rbp - SDA_OBJ], rdi
+    mov rax, [rdi + PyStrObject.ob_size]
+    mov [rbp - SDA_LEN], rax
+    ; All ASCII?  Then the two lengths agree and there is nothing to map.
+    cmp rax, [rdi + PyStrObject.ob_length]
+    je .sda_none
+
+    ; One output byte per input byte is always enough: every replacement is
+    ; one byte and every code point is at least one.
+    lea rdi, [rax + 8]
+    extern ap_malloc
+    call ap_malloc
+    test rax, rax
+    jz .sda_none
+    mov [rbp - SDA_BUF], rax
+    mov qword [rbp - SDA_OUT], 0
+    mov qword [rbp - SDA_POS], 0
+
+.sda_loop:
+    mov rsi, [rbp - SDA_POS]
+    cmp rsi, [rbp - SDA_LEN]
+    jge .sda_done
+    mov rdi, [rbp - SDA_OBJ]
+    lea rdi, [rdi + PyStrObject.data]
+    call ucase_utf8_get             ; eax = code point, ecx = width
+    mov rbx, rcx                    ; the width, across the calls below
+    cmp eax, 0x80
+    jb .sda_copy_raw                ; ASCII: as it is
+
+    push rax
+    mov edi, eax
+    call udecimal_value
+    mov edx, eax
+    pop rax
+    cmp edx, 0
+    jl .sda_maybe_space
+    add dl, '0'
+    jmp .sda_emit_byte
+
+.sda_maybe_space:
+    push rax
+    mov edi, eax
+    call uflags_of
+    test eax, UF_SPACE
+    pop rax
+    jz .sda_copy_raw
+    mov dl, ' '
+
+.sda_emit_byte:
+    mov rcx, [rbp - SDA_BUF]
+    mov r8, [rbp - SDA_OUT]
+    mov [rcx + r8], dl
+    inc qword [rbp - SDA_OUT]
+    add [rbp - SDA_POS], rbx
+    jmp .sda_loop
+
+.sda_copy_raw:
+    ; Not a digit and not a space: the bytes go through untouched, and
+    ; whatever was going to reject them still does.
+    mov rsi, [rbp - SDA_OBJ]
+    lea rsi, [rsi + PyStrObject.data]
+    add rsi, [rbp - SDA_POS]
+    mov rcx, [rbp - SDA_BUF]
+    add rcx, [rbp - SDA_OUT]
+    xor edx, edx
+.sda_raw_loop:
+    cmp rdx, rbx
+    jge .sda_raw_done
+    mov r8b, [rsi + rdx]
+    mov [rcx + rdx], r8b
+    inc rdx
+    jmp .sda_raw_loop
+.sda_raw_done:
+    add [rbp - SDA_OUT], rbx
+    add [rbp - SDA_POS], rbx
+    jmp .sda_loop
+
+.sda_done:
+    mov rax, [rbp - SDA_BUF]
+    mov rdx, [rbp - SDA_OUT]
+    mov byte [rax + rdx], 0
+    pop rbx
+    leave
+    ret
+
+.sda_none:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+END_FUNC str_decimal_ascii
+
+;; ============================================================================
 ;; ucase_utf8_get(rdi = data, rsi = index) -> eax = code point, ecx = its width
 ;; A UTF-8 decode that trusts its input: every str here is well-formed.
 ;; ============================================================================

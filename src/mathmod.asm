@@ -28,6 +28,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "opcodes.inc"
 %include "value.inc"
 
 ASM_INIT
@@ -96,6 +97,15 @@ extern floor
 extern ceil
 extern trunc
 extern ldexp
+extern __gmpz_mul
+extern kw_names_pending
+extern ap_strcmp
+extern get_iterator_opt
+extern obj_binary_op
+extern tuple_type
+extern tuple_type_call
+extern bool_true
+extern bool_false
 extern nextafter
 extern modf
 extern int_is_integer
@@ -1188,6 +1198,707 @@ DEF_FUNC math_comb, MCB_FRAME
 END_FUNC math_comb
 
 ;; ============================================================================
+;; math.perm(n, k=None) -> n! / (n - k)!, and n! when k is omitted.
+;;
+;; comb was here and perm was not, which is the odd half of the pair to be
+;; missing: perm is the one the sampling and combinatorics code in the stdlib
+;; actually calls.  GMP has no falling factorial, so this is bin(n, k) * k!,
+;; which is exact and needs one temporary.
+;; ============================================================================
+MPM_N     equ 8
+MPM_OWNN  equ 16
+MPM_K     equ 24
+MPM_OWNK  equ 32
+MPM_RES   equ 40
+MPM_TMP   equ 48
+MPM_KUI   equ 56
+MPM_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
+DEF_FUNC math_perm, MPM_FRAME
+    cmp rsi, 1
+    jl .mpm_args
+    cmp rsi, 2
+    jg .mpm_args
+    push rdi
+    push rsi
+    mov rdi, [rdi]
+    call math_index
+    test rax, rax
+    jz .mpm_type_n
+    mov [rbp - MPM_N], rax
+    mov [rbp - MPM_OWNN], rcx
+
+    mov rsi, [rsp]
+    cmp rsi, 2
+    jl .mpm_k_is_n              ; perm(n) is n!
+    mov rdi, [rsp + 8]
+    mov rdi, [rdi + 8]
+    ; perm(n, None) is n! as well.
+    lea rax, [rel none_singleton]
+    cmp rdi, rax
+    je .mpm_k_is_n
+    call math_index
+    test rax, rax
+    jz .mpm_type_k
+    mov [rbp - MPM_K], rax
+    mov [rbp - MPM_OWNK], rcx
+    jmp .mpm_have_k
+
+.mpm_k_is_n:
+    ; k = n, which makes bin(n, n) * n! = n!.
+    mov rax, [rbp - MPM_N]
+    mov [rbp - MPM_K], rax
+    mov qword [rbp - MPM_OWNK], 0
+
+.mpm_have_k:
+    add rsp, 16
+
+    mov rdi, [rbp - MPM_N]
+    lea rdi, [rdi + PyIntObject.mpz]
+    xor esi, esi
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    js .mpm_neg_n
+    mov rdi, [rbp - MPM_K]
+    lea rdi, [rdi + PyIntObject.mpz]
+    xor esi, esi
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    js .mpm_neg_k
+
+    ; k larger than an unsigned long means k > n, so the answer is 0.
+    mov rdi, [rbp - MPM_K]
+    lea rdi, [rdi + PyIntObject.mpz]
+    call __gmpz_fits_ulong_p wrt ..plt
+    test eax, eax
+    jz .mpm_zero
+
+    mov rdi, [rbp - MPM_K]
+    lea rdi, [rdi + PyIntObject.mpz]
+    call __gmpz_get_ui wrt ..plt
+    mov [rbp - MPM_KUI], rax
+
+    call math_new_mpz
+    mov [rbp - MPM_RES], rax
+    lea rdi, [rax + PyIntObject.mpz]
+    mov rsi, [rbp - MPM_N]
+    add rsi, PyIntObject.mpz
+    mov rdx, [rbp - MPM_KUI]
+    call __gmpz_bin_ui wrt ..plt
+
+    call math_new_mpz
+    mov [rbp - MPM_TMP], rax
+    lea rdi, [rax + PyIntObject.mpz]
+    mov rsi, [rbp - MPM_KUI]
+    call __gmpz_fac_ui wrt ..plt
+
+    mov rdi, [rbp - MPM_RES]
+    lea rdi, [rdi + PyIntObject.mpz]
+    mov rsi, rdi
+    mov rdx, [rbp - MPM_TMP]
+    add rdx, PyIntObject.mpz
+    call __gmpz_mul wrt ..plt
+
+    mov rdi, [rbp - MPM_TMP]
+    call int_dealloc
+    jmp .mpm_done
+
+.mpm_zero:
+    call math_new_mpz
+    mov [rbp - MPM_RES], rax
+
+.mpm_done:
+    call .mpm_release
+    mov rdi, [rbp - MPM_RES]
+    call math_int_result
+    leave
+    ret
+
+.mpm_release:
+    mov rdi, [rbp - MPM_N]
+    mov rsi, [rbp - MPM_OWNN]
+    call math_drop_temp
+    mov rdi, [rbp - MPM_K]
+    mov rsi, [rbp - MPM_OWNK]
+    call math_drop_temp
+    ret
+
+.mpm_neg_n:
+    call .mpm_release
+    RAISE exc_ValueError_type, "n must be a non-negative integer"
+.mpm_neg_k:
+    call .mpm_release
+    RAISE exc_ValueError_type, "k must be a non-negative integer"
+.mpm_type_n:
+    pop rsi
+    pop rsi
+    mov rsi, [rsi]
+    jmp .mpm_type
+.mpm_type_k:
+    mov rdi, [rbp - MPM_N]
+    mov rsi, [rbp - MPM_OWNN]
+    call math_drop_temp
+    pop rsi
+    pop rsi
+    mov rsi, [rsi + 8]
+.mpm_type:
+    CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
+    call raise_type_error_with_name
+.mpm_args:
+    lea rdi, [rel mm_n_perm]
+    call math_raise_arity2
+END_FUNC math_perm
+
+;; ============================================================================
+;; math.ulp(x) -> the distance from x to the next representable double
+;;
+;; CPython's m_ulp, including the top-of-range case where stepping upward
+;; overflows to infinity and the step has to be taken downward instead.
+;; ============================================================================
+MUL_X     equ 8
+MUL_OBJ   equ 16            ; the argument, for the type error
+MUL_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC math_ulp, MUL_FRAME
+    cmp rsi, 1
+    jne .mul_args
+    mov rdi, [rdi]
+    ; The argument, kept for the error message.  MUL_X is written only once
+    ; the conversion has succeeded -- and with the double, not the object --
+    ; so the message read uninitialised stack as a Value.
+    mov [rbp - MUL_OBJ], rdi
+    call math_to_double
+    test eax, eax
+    jz .mul_type
+    ; A NaN is its own ulp, and so is an infinity.
+    ucomisd xmm0, xmm0
+    jp .mul_self
+    andpd xmm0, [rel mm_absmask]
+    ucomisd xmm0, [rel mm_inf]
+    je .mul_self
+    movsd [rbp - MUL_X], xmm0
+    movsd xmm1, [rel mm_inf]
+    call nextafter wrt ..plt
+    ; Stepping up from the largest finite double overflows; step down instead.
+    movapd xmm2, xmm0
+    andpd xmm2, [rel mm_absmask]
+    ucomisd xmm2, [rel mm_inf]
+    je .mul_top
+    subsd xmm0, [rbp - MUL_X]
+    call float_from_f64
+    leave
+    V_PACK rax, rdx
+    ret
+.mul_top:
+    movsd xmm0, [rbp - MUL_X]
+    movsd xmm1, [rel mm_inf]
+    xorpd xmm2, xmm2
+    subsd xmm2, xmm1
+    movapd xmm1, xmm2           ; -inf
+    call nextafter wrt ..plt
+    movsd xmm1, xmm0
+    movsd xmm0, [rbp - MUL_X]
+    subsd xmm0, xmm1
+    call float_from_f64
+    leave
+    V_PACK rax, rdx
+    ret
+.mul_self:
+    call float_from_f64
+    leave
+    V_PACK rax, rdx
+    ret
+.mul_type:
+    mov rsi, [rbp - MUL_OBJ]
+    CSTRING rdi, `must be real number, not \x01`
+    call raise_type_error_with_name
+.mul_args:
+    lea rdi, [rel mm_n_ulp]
+    call math_raise_arity
+END_FUNC math_ulp
+
+;; ============================================================================
+;; math_bind_kw(rdi = args, rsi = nargs, rdx = a NULL-terminated table of
+;;              keyword names, rcx = an array of out slots, one per name)
+;;   -> rax = the positional count
+;;
+;; math's three keyword-taking functions -- prod(start=), isclose(rel_tol=,
+;; abs_tol=) -- all bind the same way, and nothing else in this module took a
+;; keyword at all.  An unknown one raises.
+;; ============================================================================
+MBK_ARGS  equ 8
+MBK_NPOS  equ 16
+MBK_NAMES equ 24
+MBK_OUT   equ 32
+MBK_KW    equ 40
+MBK_I     equ 48
+MBK_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
+DEF_FUNC_LOCAL math_bind_kw, MBK_FRAME
+    mov [rbp - MBK_ARGS], rdi
+    mov [rbp - MBK_NPOS], rsi
+    mov [rbp - MBK_NAMES], rdx
+    mov [rbp - MBK_OUT], rcx
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .mbk_done
+    mov qword [rel kw_names_pending], 0
+    mov [rbp - MBK_KW], rax
+    mov rcx, [rax + PyTupleObject.ob_size]
+    sub [rbp - MBK_NPOS], rcx
+    mov qword [rbp - MBK_I], 0
+.mbk_loop:
+    mov rax, [rbp - MBK_KW]
+    mov rcx, [rbp - MBK_I]
+    cmp rcx, [rax + PyTupleObject.ob_size]
+    jge .mbk_done
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov r8, [rdx + rcx*8]           ; the keyword's name
+    mov rax, [rbp - MBK_NPOS]
+    add rax, rcx
+    mov rdx, [rbp - MBK_ARGS]
+    mov r9, [rdx + rax*8]           ; the value
+
+    xor r10d, r10d                  ; the name-table index
+.mbk_match:
+    mov rax, [rbp - MBK_NAMES]
+    mov rax, [rax + r10*8]
+    test rax, rax
+    jz .mbk_unknown
+    push r8
+    push r9
+    push r10
+    sub rsp, 8
+    lea rdi, [r8 + PyStrObject.data]
+    mov rsi, rax
+    call ap_strcmp
+    add rsp, 8
+    pop r10
+    pop r9
+    pop r8
+    test eax, eax
+    jz .mbk_hit
+    inc r10
+    jmp .mbk_match
+.mbk_hit:
+    mov rax, [rbp - MBK_OUT]
+    mov [rax + r10*8], r9
+    inc qword [rbp - MBK_I]
+    jmp .mbk_loop
+.mbk_unknown:
+    RAISE exc_TypeError_type, "invalid keyword argument"
+.mbk_done:
+    mov rax, [rbp - MBK_NPOS]
+    leave
+    ret
+END_FUNC math_bind_kw
+
+;; ============================================================================
+;; math.prod(iterable, *, start=1)
+;;
+;; Exact for integers, because it multiplies through the ordinary binary
+;; operator rather than through a double: math.prod(range(1, 30)) is the same
+;; integer CPython answers, not a float that lost the low bits.
+;; ============================================================================
+MPR_ACC   equ 8
+MPR_ITER  equ 16
+MPR_ITEM  equ 24
+MPR_NEW   equ 32
+MPR_EXC   equ 40
+MPR_KWOUT equ 48            ; one slot: start
+MPR_FRAME equ 64            ; + 2 pushes = 80, 16-aligned
+DEF_FUNC math_prod, MPR_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi                    ; args, before math_bind_kw clobbers rdi
+    mov qword [rbp - MPR_KWOUT], 0
+    lea rdx, [rel mm_prod_kwnames]
+    lea rcx, [rbp - MPR_KWOUT]
+    call math_bind_kw
+    mov r12, rax                    ; the positional count
+    cmp r12, 1
+    jl .mpr_args
+    cmp r12, 2
+    jg .mpr_args
+
+    ; start defaults to the int 1, and a positional second argument is
+    ; CPython's own spelling of the same thing.
+    mov rax, [rbp - MPR_KWOUT]
+    test rax, rax
+    jnz .mpr_have_start
+    cmp r12, 2
+    jne .mpr_default_start
+    mov rax, [rbx + 8]
+    jmp .mpr_have_start
+.mpr_default_start:
+    mov eax, 1
+    V_PACK_I64 rax, rcx
+.mpr_have_start:
+    mov [rbp - MPR_ACC], rax
+    INCREF_V rax, rcx
+
+    mov rdi, [rbx]
+    V_TEST_PTR rdi, rax
+    ja .mpr_not_iterable
+    mov esi, TAG_PTR
+    call get_iterator_opt
+    test rax, rax
+    jz .mpr_not_iterable
+    mov [rbp - MPR_ITER], rax
+    mov rbx, rax
+    DUNDER_EXC_SAVE [rbp - MPR_EXC]
+
+.mpr_loop:
+    mov rdi, rbx
+    call call_iternext
+    test rax, rax
+    jz .mpr_stop
+    mov [rbp - MPR_ITEM], rax
+    mov rdi, [rbp - MPR_ACC]
+    mov rsi, rax
+    mov edx, NB_MULTIPLY
+    call obj_binary_op
+    mov [rbp - MPR_NEW], rax
+    mov rdi, [rbp - MPR_ITEM]
+    DECREF_V rdi, rdx
+    mov rdi, [rbp - MPR_ACC]
+    DECREF_V rdi, rdx
+    mov rax, [rbp - MPR_NEW]
+    mov [rbp - MPR_ACC], rax
+    test rax, rax
+    jz .mpr_fail
+    jmp .mpr_loop
+
+.mpr_stop:
+    EXC_RAISED_SINCE [rbp - MPR_EXC], rcx, .mpr_fail
+    mov rdi, rbx
+    call obj_decref
+    mov rax, [rbp - MPR_ACC]
+    pop r12
+    pop rbx
+    leave
+    ret
+.mpr_fail:
+    mov rdi, rbx
+    call obj_decref
+    mov rdi, [rbp - MPR_ACC]
+    XDECREF_V rdi, rcx
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+.mpr_not_iterable:
+    mov rdi, [rbp - MPR_ACC]
+    XDECREF_V rdi, rcx
+    mov rsi, [rbx]
+    CSTRING rdi, `'\x01' object is not iterable`
+    call raise_type_error_with_name
+.mpr_args:
+    RAISE exc_TypeError_type, "prod() takes exactly one argument"
+END_FUNC math_prod
+
+;; ============================================================================
+;; math.isclose(a, b, *, rel_tol=1e-09, abs_tol=0.0)
+;; PEP 485's definition, including the identity and infinity short-circuits.
+;; ============================================================================
+MIC_A     equ 8
+MIC_B     equ 16
+MIC_KWOUT equ 32            ; two slots: rel_tol and abs_tol, at -32 and -24
+MIC_REL   equ 40            ; both tolerances, converted
+MIC_ABS   equ 48
+MIC_FRAME equ 64            ; + 0 pushes = 64
+DEF_FUNC math_isclose, MIC_FRAME
+    mov qword [rbp - MIC_KWOUT], 0
+    mov qword [rbp - MIC_KWOUT + 8], 0
+    lea rdx, [rel mm_isclose_kwnames]
+    lea rcx, [rbp - MIC_KWOUT]
+    push rdi
+    sub rsp, 8
+    call math_bind_kw
+    add rsp, 8
+    pop rdi
+    cmp rax, 2
+    jne .mic_args
+
+    push rdi
+    sub rsp, 8
+    mov rdi, [rdi]
+    call math_to_double
+    test eax, eax
+    jz .mic_type
+    movsd [rbp - MIC_A], xmm0
+    mov rdi, [rsp + 8]
+    mov rdi, [rdi + 8]
+    call math_to_double
+    test eax, eax
+    jz .mic_type
+    add rsp, 16
+    movsd [rbp - MIC_B], xmm0
+
+    ; Both tolerances are converted and range-checked BEFORE anything is
+    ; decided, which is the order CPython's argument clinic gives it:
+    ; isclose(1.0, 1.0, rel_tol="x") is a TypeError, not True, and a negative
+    ; tolerance is a ValueError even when the two values are equal.
+    mov rdi, [rbp - MIC_KWOUT]
+    test rdi, rdi
+    jz .mic_default_rel
+    mov [rbp - MIC_REL], rdi    ; the object, for the message if it is not one
+    call math_to_double
+    test eax, eax
+    jz .mic_type_tol
+    jmp .mic_have_rel
+.mic_default_rel:
+    movsd xmm0, [rel mm_default_rel_tol]
+.mic_have_rel:
+    movsd [rbp - MIC_REL], xmm0
+
+    mov rdi, [rbp - MIC_KWOUT + 8]
+    test rdi, rdi
+    jz .mic_default_abs
+    mov [rbp - MIC_ABS], rdi
+    call math_to_double
+    test eax, eax
+    jz .mic_type_tol
+    jmp .mic_have_abs
+.mic_default_abs:
+    xorpd xmm0, xmm0
+.mic_have_abs:
+    movsd [rbp - MIC_ABS], xmm0
+
+    xorpd xmm1, xmm1
+    ucomisd xmm1, [rbp - MIC_REL]
+    ja .mic_negative_tol        ; 0 > rel_tol
+    ucomisd xmm1, [rbp - MIC_ABS]
+    ja .mic_negative_tol
+
+    ; Equal is close, and that arm also settles two infinities of the
+    ; same sign; an infinity against anything else never is.
+    movsd xmm0, [rbp - MIC_A]
+    ucomisd xmm0, [rbp - MIC_B]
+    jp .mic_have_values         ; a NaN is close to nothing, including itself
+    je .mic_true
+.mic_have_values:
+    movsd xmm0, [rbp - MIC_A]
+    andpd xmm0, [rel mm_absmask]
+    ucomisd xmm0, [rel mm_inf]
+    je .mic_false
+    movsd xmm0, [rbp - MIC_B]
+    andpd xmm0, [rel mm_absmask]
+    ucomisd xmm0, [rel mm_inf]
+    je .mic_false
+
+    ; |a - b| <= max(rel_tol * max(|a|, |b|), abs_tol).  Nothing below calls
+    ; anything, so the working values stay in registers.
+    movsd xmm0, [rbp - MIC_A]
+    subsd xmm0, [rbp - MIC_B]
+    andpd xmm0, [rel mm_absmask]
+    movsd xmm3, xmm0            ; the difference
+
+    movsd xmm1, [rbp - MIC_B]
+    andpd xmm1, [rel mm_absmask]
+    movsd xmm2, [rbp - MIC_A]
+    andpd xmm2, [rel mm_absmask]
+    maxsd xmm1, xmm2            ; max(|a|, |b|)
+    movsd xmm4, [rbp - MIC_REL]
+    mulsd xmm4, xmm1
+    maxsd xmm4, [rbp - MIC_ABS]
+    ucomisd xmm3, xmm4
+    jbe .mic_true
+.mic_false:
+    lea rax, [rel bool_false]
+    INCREF rax
+    leave
+    ret
+.mic_true:
+    lea rax, [rel bool_true]
+    INCREF rax
+    leave
+    ret
+.mic_type:
+    add rsp, 16
+    RAISE exc_TypeError_type, "must be real number"
+.mic_type_tol:
+    ; rdi still holds the tolerance that would not convert.
+    mov rsi, rdi
+    CSTRING rdi, `must be real number, not \x01`
+    call raise_type_error_with_name
+.mic_negative_tol:
+    RAISE exc_ValueError_type, "tolerances must be non-negative"
+.mic_args:
+    RAISE exc_TypeError_type, "isclose() takes exactly 2 positional arguments"
+END_FUNC math_isclose
+
+;; ============================================================================
+;; math.dist(p, q) -> the Euclidean distance between two points
+;;
+;; The differences are handed to the same routine hypot uses, so the two
+;; always agree with each other.  (bugs.md records that our n-ary hypot rounds
+;; differently from CPython's, which uses a compensated sum; dist inherits
+;; that, and inherits the fix when it comes.)
+;; ============================================================================
+MDS_P     equ 8
+MDS_Q     equ 16
+MDS_BUF   equ 24
+MDS_N     equ 32
+MDS_I     equ 40
+MDS_FRAME equ 48            ; + 2 pushes = 64, 16-aligned
+DEF_FUNC math_dist, MDS_FRAME
+    push rbx
+    push r12
+    cmp rsi, 2
+    jne .mds_args
+    mov qword [rbp - MDS_P], 0
+    mov qword [rbp - MDS_Q], 0
+    mov qword [rbp - MDS_BUF], 0
+
+    push rdi
+    sub rsp, 8
+    mov rsi, rdi
+    mov edx, 1
+    lea rdi, [rel tuple_type]
+    call tuple_type_call        ; materialise p; raises for a non-iterable
+    test rax, rax
+    jz .mds_failed_args
+    mov [rbp - MDS_P], rax
+    mov rsi, [rsp + 8]
+    add rsi, 8                  ; &args[1]
+    mov edx, 1
+    lea rdi, [rel tuple_type]
+    call tuple_type_call
+    add rsp, 16
+    test rax, rax
+    jz .mds_failed
+    mov [rbp - MDS_Q], rax
+
+    mov rbx, [rbp - MDS_P]
+    mov r12, [rbp - MDS_Q]
+    mov rax, [rbx + PyTupleObject.ob_size]
+    cmp rax, [r12 + PyTupleObject.ob_size]
+    jne .mds_len_mismatch
+    mov [rbp - MDS_N], rax
+    test rax, rax
+    jz .mds_zero
+
+    ; One Value per coordinate difference, handed to the same routine hypot
+    ; uses so the two always agree.
+    lea rdi, [rax * 8]
+    call ap_malloc
+    test rax, rax
+    jz .mds_failed
+    mov [rbp - MDS_BUF], rax
+
+    mov qword [rbp - MDS_I], 0
+.mds_loop:
+    mov rcx, [rbp - MDS_I]
+    cmp rcx, [rbp - MDS_N]
+    jge .mds_have_diffs
+    mov rax, [rbx + PyTupleObject.ob_item]
+    mov rdi, [rax + rcx*8]
+    call math_to_double
+    test eax, eax
+    jz .mds_type
+    movsd [rbp - MDS_FRAME], xmm0   ; scratch below the named slots
+    mov rcx, [rbp - MDS_I]
+    mov rax, [r12 + PyTupleObject.ob_item]
+    mov rdi, [rax + rcx*8]
+    call math_to_double
+    test eax, eax
+    jz .mds_type
+    movsd xmm1, xmm0
+    movsd xmm0, [rbp - MDS_FRAME]
+    subsd xmm0, xmm1
+    call float_from_f64
+    V_PACK rax, rdx
+    mov rcx, [rbp - MDS_I]
+    mov rdx, [rbp - MDS_BUF]
+    mov [rdx + rcx*8], rax
+    inc qword [rbp - MDS_I]
+    jmp .mds_loop
+
+.mds_have_diffs:
+    mov rdi, [rbp - MDS_BUF]
+    mov rsi, [rbp - MDS_N]
+    call math_hypot
+    push rax
+    call .mds_release
+    pop rax
+    pop r12                     ; rbx is the eval loop's bytecode IP and r12
+    pop rbx                     ; its frame: `leave` alone discards both
+    leave
+    ret
+
+.mds_zero:
+    call .mds_release
+    xorpd xmm0, xmm0
+    call float_from_f64
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.mds_release:
+    mov rdi, [rbp - MDS_BUF]
+    test rdi, rdi
+    jz .mds_rel_p
+    call ap_free
+    mov qword [rbp - MDS_BUF], 0
+.mds_rel_p:
+    mov rdi, [rbp - MDS_P]
+    test rdi, rdi
+    jz .mds_rel_q
+    mov qword [rbp - MDS_P], 0
+    call obj_decref
+.mds_rel_q:
+    mov rdi, [rbp - MDS_Q]
+    test rdi, rdi
+    jz .mds_rel_done
+    mov qword [rbp - MDS_Q], 0
+    call obj_decref
+.mds_rel_done:
+    ret
+
+.mds_failed_args:
+    add rsp, 16
+.mds_failed:
+    call .mds_release
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+.mds_type:
+    call .mds_release
+    pop r12
+    pop rbx
+    RAISE exc_TypeError_type, "must be real number"
+.mds_len_mismatch:
+    call .mds_release
+    pop r12
+    pop rbx
+    RAISE exc_ValueError_type, "both points must have the same number of dimensions"
+.mds_args:
+    pop r12
+    pop rbx
+    lea rdi, [rel mm_n_dist]
+    call math_raise_arity2
+END_FUNC math_dist
+
+section .rodata
+align 8
+mm_prod_kwnames:
+    dq mm_kw_start
+    dq 0
+mm_isclose_kwnames:
+    dq mm_kw_rel_tol
+    dq mm_kw_abs_tol
+    dq 0
+mm_kw_start:   db "start", 0
+mm_kw_rel_tol: db "rel_tol", 0
+mm_kw_abs_tol: db "abs_tol", 0
+align 8
+mm_default_rel_tol: dq 0x3E112E0BE826D695      ; 1e-09
+section .text
+
+;; ============================================================================
 ;; math_log(x[, base]) -- one argument is the natural log, two is a ratio.
 ;; ============================================================================
 MLG_X     equ 8
@@ -1464,7 +2175,26 @@ DEF_FUNC math_ldexp, MLD_FRAME
     jz .mld_exp_type
     call int_unwrap
     cmp edx, TAG_SMALLINT
-    jne .mld_overflow           ; an exponent that needs GMP is out of range
+    je .mld_have_exp
+    ; A heap int that int_unwrap did not flatten is GMP-backed -- which does
+    ; NOT mean it is large.  int.from_bytes promotes, and every arithmetic
+    ; result built from one stays promoted, so `math.ldexp(m, e)` with an `e`
+    ; computed from unpacked bytes was "math range error" for e = -23.  Ask
+    ; the number, not its representation.
+    push rdi
+    sub rsp, 8
+    lea rdi, [rdi + PyIntObject.mpz]
+    extern __gmpz_fits_slong_p
+    call __gmpz_fits_slong_p wrt ..plt
+    add rsp, 8
+    pop rdi
+    test eax, eax
+    jz .mld_overflow
+    lea rdi, [rdi + PyIntObject.mpz]
+    extern __gmpz_get_si
+    call __gmpz_get_si wrt ..plt
+    mov rdi, rax
+.mld_have_exp:
     mov rsi, rdi
     cmp rsi, 2147483647
     jg .mld_overflow
@@ -2160,6 +2890,11 @@ DEF_FUNC math_module_create, MMC_FRAME
     mov r12, rax                ; MODULE_ADD_FUNC reads the dict from r12
 
     MODULE_ADD_FUNC math_sqrt,      mm_n_sqrt
+    MODULE_ADD_FUNC math_perm,      mm_n_perm
+    MODULE_ADD_FUNC math_ulp,       mm_n_ulp
+    MODULE_ADD_FUNC math_prod,      mm_n_prod
+    MODULE_ADD_FUNC math_isclose,   mm_n_isclose
+    MODULE_ADD_FUNC math_dist,      mm_n_dist
     MODULE_ADD_FUNC math_exp,       mm_n_exp
     MODULE_ADD_FUNC math_expm1,     mm_n_expm1
     MODULE_ADD_FUNC math_exp2,      mm_n_exp2
@@ -2319,6 +3054,11 @@ mm_v_deg2rad: dq 0x3f91df46a2529d39  ; pi/180
 mm_n_isqrt: db "isqrt", 0
 mm_n_factorial: db "factorial", 0
 mm_n_comb: db "comb", 0
+mm_n_perm: db "perm", 0
+mm_n_ulp: db "ulp", 0
+mm_n_prod: db "prod", 0
+mm_n_isclose: db "isclose", 0
+mm_n_dist: db "dist", 0
 mm_n_gcd: db "gcd", 0
 mm_n_lcm: db "lcm", 0
 mm_n_log: db "log", 0

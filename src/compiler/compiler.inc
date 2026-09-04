@@ -147,6 +147,20 @@ struc Token
 endstruc                 ;  32 -> index by shl 5
 TOKEN_SHIFT equ 5
 
+;; TOK_POS tokptr -- that token's position in rcx, packed the way ast_make
+;; takes it: the line in the low half and the column in the high half.  One
+;; word, because a seventh argument to ast_make would be a stack argument at
+;; fifty-odd call sites, and rcx because that is where every one of them
+;; already puts the line.  Clobbers r11.
+%macro TOK_POS 1                ; %1 = a Token*
+    ; The column is read FIRST, so that %1 may itself be rcx -- writing ecx
+    ; destroys the pointer.  %1 must not be r11.
+    mov r11d, [%1 + Token.col]
+    shl r11, 32
+    mov ecx, [%1 + Token.lineno]
+    or  rcx, r11
+%endmacro
+
 ;; ===========================================================================
 ;; Character classes.  One 256-byte table drives every scanning decision in
 ;; the lexer.
@@ -232,7 +246,7 @@ AST_IMPORTFROM  equ 60   ; a=obj index (module), clist=aliases, subkind=level
 AST_ALIAS       equ 61   ; a=obj index (name) b=obj index (asname or 0)
                          ; c=obj index of the name actually bound: the asname,
                          ; or the mangled leading component of the dotted name
-AST_FUNCTIONDEF equ 62   ; a=obj index (name) b=args, clist=body, c=extra node
+AST_FUNCTIONDEF equ 62   ; a=obj index (name) b=args, clist=body, c=return ann
 AST_CLASSDEF    equ 63   ; a=obj index (name) b=bases call, clist=body, c=extra
 AST_TRY         equ 64   ; clist=body, a=handlers block, b=orelse, c=finalbody
 AST_HANDLER     equ 65   ; a=type b=obj index (name), clist=body
@@ -258,6 +272,21 @@ AST_PAT_CLASS   equ 78   ; a=class expr, clist=positional then keyword patterns,
 AST_PAT_KEYWORD equ 79   ; a=obj index (name) b=pattern
 AST_PAT_OR      equ 80   ; clist=alternatives
 AST_PAT_AS      equ 81   ; a=pattern (0 = wildcard) b=obj index (name)
+
+AST_INTERACTIVE equ 82   ; clist=body    (the "single" mode root); produced
+                         ; only by compile_ast_raw, never compiled
+
+; PEP 695.  The parameters are parsed into these and then ignored by
+; everything downstream: a type parameter is visible only to annotations, and
+; annotations are not evaluated here.  They exist so that the AST says what
+; the source said -- bugs.md carries what the RUNTIME would additionally need.
+AST_TYPEALIAS   equ 83   ; a=target name node, b=value; type params on the side
+AST_TYPEPARAMS  equ 84   ; clist=the parameters; hung off a def, class or alias
+                         ; through Comp.typeparams rather than a field, because
+                         ; a def has none free
+AST_TYPEVAR     equ 85   ; a=obj index (name), b=bound or 0
+AST_PARAMSPEC   equ 86   ; a=obj index (name)
+AST_TYPEVARTUPLE equ 87  ; a=obj index (name)
 
 AST_COUNT       equ 88
 
@@ -305,6 +334,16 @@ struc AstNode
 endstruc                  ; 32 -> index by shl 5
 AST_SHIFT equ 5
 
+;; Where a node ENDS.  Not in the node: it is exactly 32 bytes and addressed
+;; by `shl 5`, and two more fields would cost the doubling to 64 for two
+;; words.  A parallel Buf indexed by the same u32 costs eight bytes a node and
+;; leaves every existing shift alone; ast_make is the only thing that makes a
+;; node, so the two cannot drift apart.
+struc AstSpan
+    .end_lineno: resd 1  ; +0   -1 when it was not recorded
+    .end_col:    resd 1  ; +4
+endstruc                 ; 8
+
 ;; ===========================================================================
 ;; Buf - the growable array this codebase otherwise lacks.  Used for the token
 ;; array, the child-list arena, the instruction stream, and all three byte
@@ -344,8 +383,16 @@ struc Instr
     .oparg:   resd 1  ; +4   literal oparg, or a label id when IF_LABELARG
     .line:    resd 1  ; +8   source line; 0 = no location
     .offset:  resd 1  ; +12  code-unit offset, filled by the sizing fixpoint
-endstruc                  ; 16 -> index by shl 4
-INSTR_SHIFT equ 4
+    ; The rest of the location, so that the line table can carry columns and a
+    ; traceback rendered from OUR bytecode gets its caret row.  .col is -1 when
+    ; the instruction has only a line, which is what every emitter that
+    ; attributes an instruction to some other line than the node's produces.
+    .end_line: resd 1 ; +16
+    .col:      resd 1 ; +20  a BYTE offset into the line, zero-based
+    .end_col:  resd 1 ; +24
+    .pad:      resd 1 ; +28
+endstruc                  ; 32 -> index by shl 5
+INSTR_SHIFT equ 5
 
 IF_LABELARG  equ 0x01   ; .oparg names a label, resolve it to a delta
 IF_JREL_FWD  equ 0x02   ; delta = target - (offset + size)
@@ -382,12 +429,18 @@ struc CompErr
     .lineno: resd 1  ; +16
     .col:    resd 1  ; +20
     .set:    resd 1  ; +24  non-zero once an error is recorded
-    .pad:    resd 1  ; +28
-endstruc
+    .end_lineno: resd 1  ; +28  the end of the span the error covers, which
+    .end_col:    resd 1  ; +32  comp_error defaults to the one character at
+    .pad:        resd 1  ; +36  (lineno, col) -- CPython narrows some errors
+endstruc                 ;      to a whole token or a whole subexpression
 
-; Compilation modes, matching CPython's start symbols.
+; Compilation modes, matching CPython's start symbols.  SINGLE compiles
+; exactly as EXEC -- there is no PRINT_EXPR here, so the interactive echo is
+; not reproducible -- and differs only in the root node the AST gets, which is
+; the one thing about it that IS observable.
 CMODE_EXEC   equ 0
 CMODE_EVAL   equ 1
+CMODE_SINGLE equ 2
 
 ; The parser's own recursion guard.  apython's recursion_depth counts Python
 ; frames only, so deeply nested parentheses would otherwise blow the machine
@@ -463,9 +516,21 @@ struc Comp
     .root:      resd 1              ; +36  AST index of the parse root
     .tokens:    resb Buf_size       ; +40  Token[]
     .nodes:     resb Buf_size       ; AstNode[]; index 0 is the null node
+    .spans:     resb Buf_size       ; AstSpan[], parallel to .nodes
     .children:  resb Buf_size       ; u32[] committed child lists
     .pending:   resb Buf_size       ; u32[] LIFO scratch for lists under construction
     .objs:      resb Buf_size       ; PyObject*[], owned
+    .typeparams: resb Buf_size      ; u32[], parallel to .nodes: the
+                                    ; AST_TYPEPARAMS node a def, class or type
+                                    ; alias carries, or 0.  A side table
+                                    ; because AstNode is full: PEP 695 arrived
+                                    ; after every field had a use
+    .rawnames:  resb Buf_size       ; u32[], parallel to .objs: for an
+                                    ; identifier that private-name mangling
+                                    ; rewrote, the obj index of the name as it
+                                    ; was WRITTEN.  0 for everything else.
+                                    ; The compiler uses the mangled name; the
+                                    ; AST reports this one, as CPython's does
     .scopes:    resb Buf_size       ; Scope[]; index 0 reserved
     .cur_unit:  resq 1              ; the CompUnit being emitted into
     .cur_scope: resd 1
@@ -538,7 +603,15 @@ struc CompUnit
     .nlocals:   resd 1
     .stacksize: resd 1
     .firstline: resd 1
+    ; The location the emitters are currently generating for.  cg_expr and
+    ; cg_stmt set all four from the node before dispatching and restore them
+    ; after, so an emitter that says nothing about where it is inherits its
+    ; statement's position rather than the last one anybody happened to write.
     .curline:   resd 1
+    .curend:    resd 1
+    .curcol:    resd 1
+    .curendcol: resd 1
+    .pad5:      resd 1
     .name:      resq 1          ; PyStrObject*, borrowed
     .qualname:  resq 1
     .filename:  resq 1

@@ -136,6 +136,11 @@ struc SRE_PatternObject
     .indexgroup:  resq 1  ; +40: index -> group name tuple (PyTupleObject* or NULL)
     .code:        resq 1  ; +48: u32* compiled pattern code
     .code_len:    resq 1  ; +56: number of u32 code words
+    ; Whether the pattern was compiled from BYTES.  A bytes pattern matches
+    ; bytes-like subjects and answers bytes; a str pattern matches str and
+    ; answers str, and mixing them is a TypeError.  The engine itself is the
+    ; same: bytes are byte-indexed, which is the ASCII path it already has.
+    .is_bytes:    resq 1  ; +64
 endstruc
 
 ; ============================================================================

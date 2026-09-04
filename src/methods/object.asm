@@ -122,6 +122,22 @@ DEF_FUNC scalar_dunder_new
     ret
 
 .sdn_str:
+    ; str.__new__(str) is a plain str, not a subclass instance.  str_sub_new
+    ; allocates through gc_alloc and appends a tail __dict__ word; handing
+    ; that object str_type meant str_dealloc freed it with ap_free, and
+    ; `str.__new__(str)` aborted with "double free or corruption".
+    lea rcx, [rel str_type]
+    cmp rbx, rcx
+    jne .sdn_str_sub
+    mov rdi, r12
+    mov rsi, rsi                ; the argument count, less the class
+    extern builtin_str_fn
+    call builtin_str_fn
+    pop r12
+    pop rbx
+    leave
+    ret
+.sdn_str_sub:
     mov rdi, rbx
     mov rdx, rsi
     mov rsi, r12
@@ -399,12 +415,14 @@ END_FUNC object_method_init_subclass
 ;; recursion a re-dispatch would cause.  An immediate int or float has no
 ;; ob_type to read a slot from, so it goes through obj_repr, which knows them.
 ;; ============================================================================
-%macro DEF_DUNDER_STRREPR 2     ; %1 = type prefix, %2 = tp_str or tp_repr
+%macro DEF_DUNDER_STRREPR 3     ; %1 = type prefix, %2 = tp_str or tp_repr, %3 = the dunder's own name
 DEF_FUNC %1_dunder_%2
-    test rsi, rsi
-    jz %%bad
+    cmp rsi, 1                  ; exactly self; an extra was accepted
+    jne %%bad
     mov rdi, [rdi]
     lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING rcx, %3             ; %2 is the slot name, not the dunder's
     extern dunder_require_self
     call dunder_require_self
     mov rdi, rax
@@ -426,7 +444,11 @@ DEF_FUNC %1_dunder_%2
     leave
     ret
 %%bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    ; CPython reports both counts, and counts self in neither.
+    dec rsi                     ; rsi is still nargs on this path
+    xor edi, edi
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 END_FUNC %1_dunder_%2
 %endmacro
 
@@ -437,8 +459,8 @@ END_FUNC %1_dunder_%2
 ;; inherits the base's behaviour rather than re-dispatching into itself.
 %macro DEF_DUNDER_LEN 1-2 0
 DEF_FUNC %1_dunder_len
-    test rsi, rsi
-    jz %%bad
+    cmp rsi, 1                  ; exactly self: an extra argument
+    jne %%arity                 ; was silently accepted
     mov rdi, [rdi]
     lea rsi, [rel %1_type]
 %ifnum %2
@@ -446,6 +468,8 @@ DEF_FUNC %1_dunder_len
 %else
     lea rdx, [rel %2]
 %endif
+    CSTRING rcx, "__len__"
+
     extern dunder_require_self
     call dunder_require_self
     mov rdi, rax
@@ -469,6 +493,11 @@ DEF_FUNC %1_dunder_len
     leave
     V_PACK rax, rdx
     ret
+%%arity:
+    dec rsi
+    xor edi, edi
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 %%bad:
     RAISE exc_TypeError_type, "object has no len()"
 END_FUNC %1_dunder_len
@@ -476,8 +505,8 @@ END_FUNC %1_dunder_len
 
 %macro DEF_DUNDER_ITER 1-2 0
 DEF_FUNC %1_dunder_iter
-    test rsi, rsi
-    jz %%bad
+    cmp rsi, 1                  ; exactly self: an extra argument
+    jne %%arity                 ; was silently accepted
     mov rdi, [rdi]
     lea rsi, [rel %1_type]
 %ifnum %2
@@ -485,6 +514,8 @@ DEF_FUNC %1_dunder_iter
 %else
     lea rdx, [rel %2]
 %endif
+    CSTRING rcx, "__iter__"
+
     extern dunder_require_self
     call dunder_require_self
     mov rdi, rax
@@ -505,22 +536,42 @@ DEF_FUNC %1_dunder_iter
     leave
     V_PACK rax, rdx
     ret
+%%arity:
+    dec rsi
+    xor edi, edi
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 %%bad:
     RAISE exc_TypeError_type, "object is not iterable"
 END_FUNC %1_dunder_iter
 %endmacro
 
+; range's type symbol is range_obj_type, so the generators that build
+; `%1_type` need the alias.  It is a preprocessor name, not a second symbol.
+%define range_type range_obj_type
+extern range_obj_type
+
 ; list and tuple already have hand-written ones.
 DEF_DUNDER_LEN dict
 DEF_DUNDER_LEN str
-DEF_DUNDER_LEN set, frozenset_type
+DEF_DUNDER_LEN set
+DEF_DUNDER_LEN frozenset
 DEF_DUNDER_LEN bytes
 DEF_DUNDER_ITER dict
 DEF_DUNDER_ITER list
 DEF_DUNDER_ITER tuple
 DEF_DUNDER_ITER str
-DEF_DUNDER_ITER set, frozenset_type
+DEF_DUNDER_ITER set
+DEF_DUNDER_ITER frozenset
 DEF_DUNDER_ITER bytes
+DEF_DUNDER_LEN range
+DEF_DUNDER_ITER range
+; A generator is its own iterator, and CPython's type says so by name.
+extern gen_type
+extern coro_type
+DEF_DUNDER_ITER gen
+; A coroutine's __await__ is the same thing under the name `await` uses.
+DEF_DUNDER_ITER coro
 
 
 ;; A builtin number's unary dunders, reachable by name.  int and float had
@@ -537,6 +588,8 @@ DEF_FUNC %1_dunder_%2
     jne %%bad
     mov rdi, [rdi]              ; args[0] = self, a Value
     lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
     mov rdi, rax
@@ -551,7 +604,11 @@ DEF_FUNC %1_dunder_%2
     leave
     ret
 %%bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    ; CPython reports both counts, and counts self in neither.
+    dec rsi                     ; rsi is still nargs on this path
+    xor edi, edi
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 END_FUNC %1_dunder_%2
 %endmacro
 
@@ -575,7 +632,8 @@ END_FUNC %1_dunder_%2
 ;; Arity is not checked here.  It is in the registration, and
 ;; builtin_func_call rejects the wrong count before this is entered.
 ;; ============================================================================
-%macro DEF_SEQ_DUNDER 3         ; %1 prefix, %2 suffix, %3 implementation
+%macro DEF_SEQ_DUNDER 3-4       ; %1 prefix, %2 suffix, %3 implementation,
+                                ; %4 present = decline as NotImplemented
 DEF_FUNC %1_dunder_%2, DB_FRAME
     cmp rsi, 2
     jne %%bad
@@ -583,6 +641,8 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     mov rdi, [rdi]
     mov [rbp - DB_RHS], rsi
     lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
     mov rdi, rax
@@ -593,6 +653,16 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     test rax, rax
     jnz %%out
     EXC_RAISED_SINCE [rbp - DB_EXC], rcx, %%out
+%if %0 >= 4
+    ; The implementation declined the pair without raising.  Called by name,
+    ; that has to read as NotImplemented so the caller can try the reflected
+    ; form; only the operator machinery turns a decline into a TypeError.
+    extern notimpl_singleton
+    lea rax, [rel notimpl_singleton]
+    INCREF rax
+    leave
+    ret
+%endif
 %%bad:
     RAISE exc_TypeError_type, "unsupported operand type"
 %%out:
@@ -612,6 +682,8 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     mov rdi, [rdi]
     mov [rbp - DB_RHS], rsi
     lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
     mov rdi, rax
@@ -772,6 +844,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
 %else
     lea rdx, [rel %6]
 %endif
+    CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
     mov rsi, rax
@@ -784,6 +857,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
 %else
     lea rdx, [rel %6]
 %endif
+    CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
     mov rdi, rax
@@ -830,7 +904,11 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     leave
     ret
 %%bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    ; CPython reports both counts, and counts self in neither.
+    dec rsi                     ; rsi is still nargs on this path
+    mov edi, 1
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 END_FUNC %1_dunder_%2
 %endmacro
 
@@ -866,6 +944,8 @@ DEF_FUNC %1_dunder_%2, 16
     mov rdi, [rsp]
 %endif
     lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
 
@@ -895,7 +975,11 @@ DEF_FUNC %1_dunder_%2, 16
     leave
     ret
 %%bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    ; CPython reports both counts, and counts self in neither.
+    dec rsi                     ; rsi is still nargs on this path
+    mov edi, 1
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 END_FUNC %1_dunder_%2
 %endmacro
 
@@ -906,6 +990,8 @@ DEF_FUNC %1_dunder_bool
     jne %%bad
     mov rdi, [rdi]
     lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING rcx, "__bool__"
     extern dunder_require_self
     call dunder_require_self
     mov rdi, rax
@@ -931,7 +1017,11 @@ DEF_FUNC %1_dunder_bool
     leave
     ret
 %%bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    ; CPython reports both counts, and counts self in neither.
+    dec rsi                     ; rsi is still nargs on this path
+    xor edi, edi
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 END_FUNC %1_dunder_bool
 %endmacro
 
@@ -951,6 +1041,8 @@ DEF_DUNDER_UNARY float, int, nb_int
 DEF_DUNDER_UNARY float, float, nb_float
 DEF_DUNDER_UNARY float, trunc, nb_int
 DEF_DUNDER_BOOL float
+; complex has an nb_bool of its own; only the by-name half was missing.
+DEF_DUNDER_BOOL complex
 
 ;; int's binary family, forward and reflected.
 DEF_DUNDER_BINARY int, add, nb_add, 0, dunder_operand_is_int
@@ -1026,14 +1118,22 @@ DEF_FUNC_BARE object_method_getattribute
     jmp builtin_getattr         ; with two arguments it raises, as it should
 END_FUNC object_method_getattribute
 
-;; object.__getstate__(self) -> self.__dict__, or None
+;; object.__getstate__(self) -> self.__dict__, the pair (dict, slots), or None
 ;;
-;; CPython 3.11+ also has a pair form for a __slots__ class, (None, {...}).
-;; A __slots__ class here has no instance dict at all, so that form would need
-;; a walk of the slot words instead of a dict; it is recorded in bugs.md
-;; rather than guessed at.  Nothing in lib/ asks -- copy reaches for
-;; __reduce_ex__, which still raises.
-OGS_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+;; CPython 3.11+ answers a two-tuple for a class with __slots__: (None,
+;; {name: value}), or (the instance dict, {slots}) when it has both.  Only
+;; the plain dict form was here, so every __slots__ class answered None and
+;; pickling one through __getstate__ lost every slot it had.
+;;
+;; There is no name-carrying slot walk anywhere else -- instance_traverse and
+;; instance_dealloc walk the same words by OFFSET, which is all they need --
+;; so the names come from where they are actually recorded: the member
+;; descriptors in each type's dict along the MRO.
+OGS_SELF  equ 8
+OGS_DICT  equ 16
+OGS_SLOTS equ 24
+OGS_TUP   equ 32
+OGS_FRAME equ 48            ; + 0 pushes = 48
 global object_method_getstate
 DEF_FUNC object_method_getstate, OGS_FRAME
     cmp rsi, 1
@@ -1043,12 +1143,54 @@ DEF_FUNC object_method_getstate, OGS_FRAME
     ja .ogs_none
     test rdi, rdi
     jz .ogs_none
-    LOAD_INST_DICT rax, rdi, .ogs_none
+    mov [rbp - OGS_SELF], rdi
+
+    ; The instance dict, if this class has one.  An empty one is None, as
+    ; CPython has it.
+    mov qword [rbp - OGS_DICT], 0
+    LOAD_INST_DICT rax, rdi, .ogs_no_dict
+    test rax, rax
+    jz .ogs_no_dict
+    cmp qword [rax + PyDictObject.ob_size], 0
+    je .ogs_no_dict
+    mov [rbp - OGS_DICT], rax
+.ogs_no_dict:
+
+    ; The slots, if this class has any set.
+    mov rdi, [rbp - OGS_SELF]
+    call object_collect_slots   ; -> rax = a dict, or 0 when there are none
+    mov [rbp - OGS_SLOTS], rax
+    test rax, rax
+    jnz .ogs_pair
+
+    ; No slots: the plain dict form.
+    mov rax, [rbp - OGS_DICT]
     test rax, rax
     jz .ogs_none
-    cmp qword [rax + PyDictObject.ob_size], 0
-    je .ogs_none                ; an empty dict is None, as CPython has it
     INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.ogs_pair:
+    ; (dict_or_None, {slots}).  The tuple takes over the slots dict this
+    ; built, and a reference to the instance dict.
+    mov edi, 2
+    extern tuple_new
+    call tuple_new
+    mov [rbp - OGS_TUP], rax
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rcx, [rbp - OGS_DICT]
+    test rcx, rcx
+    jnz .ogs_pair_dict
+    lea rcx, [rel none_singleton]
+.ogs_pair_dict:
+    INCREF rcx
+    mov [rdx], rcx
+    mov rcx, [rbp - OGS_SLOTS]
+    mov [rdx + 8], rcx          ; the reference object_collect_slots returned
+    mov rax, [rbp - OGS_TUP]
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx
@@ -1063,6 +1205,118 @@ DEF_FUNC object_method_getstate, OGS_FRAME
 .ogs_bad:
     RAISE exc_TypeError_type, "__getstate__() takes no arguments"
 END_FUNC object_method_getstate
+
+;; ============================================================================
+;; object_collect_slots(rdi = an instance) -> rax = a new dict of the slots
+;; that are set, or 0 when there are none
+;;
+;; Walks the MRO, and each type's dict, for member descriptors -- which are
+;; where a __slots__ name is recorded, one per slot, built by type_from_parts.
+;; The value is read the way instance_getattr's .found_slot reads it,
+;; including its convention that a 0 word means the slot was never assigned.
+;;
+;; CPython's order is the MRO's: the most derived class's slots first.
+;; ============================================================================
+OCS_SELF  equ 8
+OCS_DICT  equ 16
+OCS_TYPE  equ 24
+OCS_WALK  equ 32
+OCS_ENT   equ 40
+OCS_CAP   equ 48
+OCS_IDX   equ 56
+OCS_FRAME equ 64            ; + 0 pushes = 64
+DEF_FUNC_LOCAL object_collect_slots, OCS_FRAME
+    mov [rbp - OCS_SELF], rdi
+    mov rax, [rdi + PyObject.ob_type]
+    mov [rbp - OCS_TYPE], rax
+    mov [rbp - OCS_WALK], rax
+    mov qword [rbp - OCS_DICT], 0
+
+.ocs_type_loop:
+    mov rax, [rbp - OCS_WALK]
+    test rax, rax
+    jz .ocs_done
+    ; Only a CLASS has __slots__.  A builtin's tp_dict holds member
+    ; descriptors of its own -- func_type has one for __globals__ -- and
+    ; taking those for slots made `f.__getstate__()` on a function answer a
+    ; dict holding the whole module namespace.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .ocs_next_type
+    ; Not rbx: that is the eval loop's bytecode IP, and this function does
+    ; not save it.
+    mov rdx, [rax + PyTypeObject.tp_dict]
+    test rdx, rdx
+    jz .ocs_next_type
+    mov rcx, [rdx + PyDictObject.entries]
+    test rcx, rcx
+    jz .ocs_next_type
+    mov [rbp - OCS_ENT], rcx
+    mov rcx, [rdx + PyDictObject.capacity]
+    mov [rbp - OCS_CAP], rcx
+    mov qword [rbp - OCS_IDX], 0
+
+.ocs_entry_loop:
+    mov rax, [rbp - OCS_IDX]
+    cmp rax, [rbp - OCS_CAP]
+    jge .ocs_next_type
+    imul rax, DICT_ENTRY_SIZE
+    add rax, [rbp - OCS_ENT]
+    mov rdx, [rax + DictEntry.key]
+    test rdx, rdx
+    jz .ocs_next_entry
+    mov rax, [rax + DictEntry.value]
+    V_TEST_PTR rax, rcx
+    ja .ocs_next_entry
+    test rax, rax
+    jz .ocs_next_entry
+    extern member_descr_type
+    lea rcx, [rel member_descr_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .ocs_next_entry
+
+    ; A member descriptor: read the word it names.  0 means never assigned.
+    mov rcx, [rax + PyMemberDescrObject.md_offset]
+    mov rdi, [rbp - OCS_SELF]
+    mov rdx, [rdi + rcx]
+    test rdx, rdx
+    jz .ocs_next_entry
+
+    ; Make the dict on the first slot that is actually set, so a class with
+    ; __slots__ and nothing assigned answers None the way CPython's does.
+    push rax
+    sub rsp, 8
+    cmp qword [rbp - OCS_DICT], 0
+    jne .ocs_have_dict
+    extern dict_new
+    call dict_new
+    mov [rbp - OCS_DICT], rax
+.ocs_have_dict:
+    add rsp, 8
+    pop rax
+
+    mov rdi, [rbp - OCS_DICT]
+    mov rsi, [rax + PyMemberDescrObject.md_name]
+    mov rcx, [rax + PyMemberDescrObject.md_offset]
+    mov rdx, [rbp - OCS_SELF]
+    mov rdx, [rdx + rcx]
+    extern dict_set
+    call dict_set
+
+.ocs_next_entry:
+    inc qword [rbp - OCS_IDX]
+    jmp .ocs_entry_loop
+
+.ocs_next_type:
+    mov rax, [rbp - OCS_WALK]
+    MRO_NEXT rax, [rbp - OCS_TYPE]
+    mov [rbp - OCS_WALK], rax
+    jmp .ocs_type_loop
+
+.ocs_done:
+    mov rax, [rbp - OCS_DICT]
+    leave
+    ret
+END_FUNC object_collect_slots
 
 ;; object.__subclasshook__(cls, subclass) -> NotImplemented
 ;;
@@ -1123,19 +1377,44 @@ DEF_DUNDER_BINARY dict, or,  nb_or, 0, dunder_operand_any
 DEF_DUNDER_BINARY dict, ror, nb_or, 1, dunder_operand_any
 DEF_SEQ_DUNDER    dict, ior, dict_nb_ior
 
-DEF_DUNDER_BINARY set, sub,  nb_subtract, 0, dunder_operand_any, frozenset_type
-DEF_DUNDER_BINARY set, rsub, nb_subtract, 1, dunder_operand_any, frozenset_type
-DEF_DUNDER_BINARY set, and,  nb_and,      0, dunder_operand_any, frozenset_type
-DEF_DUNDER_BINARY set, rand, nb_and,      1, dunder_operand_any, frozenset_type
-DEF_DUNDER_BINARY set, xor,  nb_xor,      0, dunder_operand_any, frozenset_type
-DEF_DUNDER_BINARY set, rxor, nb_xor,      1, dunder_operand_any, frozenset_type
-DEF_DUNDER_BINARY set, or,   nb_or,       0, dunder_operand_any, frozenset_type
-DEF_DUNDER_BINARY set, ror,  nb_or,       1, dunder_operand_any, frozenset_type
+;; The set operators.  These used to be registered from one shared table into
+;; both types' dicts, so each had to name frozenset_type as a second
+;; acceptable receiver -- and set.__and__(frozenset(...), ...) was accepted
+;; where CPython raises.  CPython gives frozenset its own eight descriptors;
+;; so do we, and each side now names only itself.  The bodies are identical
+;; apart from the receiver check: frozenset_type carries set_number_methods,
+;; so both reach the same slots.
+DEF_DUNDER_BINARY set, sub,  nb_subtract, 0, dunder_operand_any
+DEF_DUNDER_BINARY set, rsub, nb_subtract, 1, dunder_operand_any
+DEF_DUNDER_BINARY set, and,  nb_and,      0, dunder_operand_any
+DEF_DUNDER_BINARY set, rand, nb_and,      1, dunder_operand_any
+DEF_DUNDER_BINARY set, xor,  nb_xor,      0, dunder_operand_any
+DEF_DUNDER_BINARY set, rxor, nb_xor,      1, dunder_operand_any
+DEF_DUNDER_BINARY set, or,   nb_or,       0, dunder_operand_any
+DEF_DUNDER_BINARY set, ror,  nb_or,       1, dunder_operand_any
+
+;; The in-place four, which set really does have and frozenset really does
+;; not.  These take the mutating nb_inplace_* slots directly rather than
+;; going through DEF_DUNDER_BINARY's nb_ lookup, because a subclass reaching
+;; the slot off its own type would re-enter this wrapper.
+DEF_SEQ_DUNDER    set, iand, set_nb_iand, 1
+DEF_SEQ_DUNDER    set, ior,  set_nb_ior, 1
+DEF_SEQ_DUNDER    set, isub, set_nb_isub, 1
+DEF_SEQ_DUNDER    set, ixor, set_nb_ixor, 1
+
+DEF_DUNDER_BINARY frozenset, sub,  nb_subtract, 0, dunder_operand_any
+DEF_DUNDER_BINARY frozenset, rsub, nb_subtract, 1, dunder_operand_any
+DEF_DUNDER_BINARY frozenset, and,  nb_and,      0, dunder_operand_any
+DEF_DUNDER_BINARY frozenset, rand, nb_and,      1, dunder_operand_any
+DEF_DUNDER_BINARY frozenset, xor,  nb_xor,      0, dunder_operand_any
+DEF_DUNDER_BINARY frozenset, rxor, nb_xor,      1, dunder_operand_any
+DEF_DUNDER_BINARY frozenset, or,   nb_or,       0, dunder_operand_any
+DEF_DUNDER_BINARY frozenset, ror,  nb_or,       1, dunder_operand_any
 
 ;; int's nb_bool takes the (payload, tag) pair rather than a Value -- it hands
 ;; the pair straight to int_unwrap -- so it cannot go through the macro.
 DEF_FUNC int_dunder_bool
-    REQUIRE_SELF int_type
+    REQUIRE_SELF int_type, "__bool__"
     cmp rsi, 1
     jne .idb_bad
     mov rdi, [rdi]
@@ -1154,16 +1433,20 @@ DEF_FUNC int_dunder_bool
     leave
     ret
 .idb_bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    ; CPython reports both counts, and counts self in neither.
+    dec rsi
+    xor edi, edi
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 END_FUNC int_dunder_bool
 
-DEF_DUNDER_STRREPR str, str
-DEF_DUNDER_STRREPR str, repr
-DEF_DUNDER_STRREPR bytes, str
-DEF_DUNDER_STRREPR bytes, repr
-DEF_DUNDER_STRREPR int, repr
-DEF_DUNDER_STRREPR float, repr
-DEF_DUNDER_STRREPR complex, repr
+DEF_DUNDER_STRREPR str, str, "__str__"
+DEF_DUNDER_STRREPR str, repr, "__repr__"
+DEF_DUNDER_STRREPR bytes, str, "__str__"
+DEF_DUNDER_STRREPR bytes, repr, "__repr__"
+DEF_DUNDER_STRREPR int, repr, "__repr__"
+DEF_DUNDER_STRREPR float, repr, "__repr__"
+DEF_DUNDER_STRREPR complex, repr, "__repr__"
 
 ;; ############################################################################
 ;;                         SET METHODS
@@ -1219,7 +1502,11 @@ DEF_FUNC object_method_%1
     V_PACK rax, rdx
     ret
 %%bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    ; CPython reports both counts, and counts self in neither.
+    dec rsi                     ; rsi is still nargs on this path
+    xor edi, edi
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
 END_FUNC object_method_%1
 %endmacro
 
@@ -1356,14 +1643,28 @@ DEF_FUNC object_method_ne
     RAISE exc_TypeError_type, "__ne__() takes exactly one argument"
 END_FUNC object_method_ne
 
-;; The address, which is what obj_hash falls back to when a type has no
-;; tp_hash -- reached directly so that a heaptype's slot cannot bounce back.
+;; object.__hash__(self) -- the address, which is what obj_hash falls back to
+;; when a type has no tp_hash, reached directly so a heaptype's slot cannot
+;; bounce back into itself.
+;;
+;; It used to hand back `args[0] + V_INT_BIAS` without unpacking.  For a
+;; pointer the Value IS the address and biasing turns it into an int
+;; immediate, which is the intended answer -- but an int immediate is already
+;; biased, so it was biased twice and int.__hash__(5) was
+;; -1125899906842619.  object_hash takes the decoded pointer; the bias
+;; belongs only on the way out.
 DEF_FUNC object_method_hash
     cmp rsi, 1
     jl .omh_error
-    mov rax, [rdi]
-    add rax, [rel v_int_bias]
+    mov rdi, [rdi]
+    V_UNPACK rdi, rdx
+    extern object_hash
+    call object_hash
+    mov rdi, rax                ; boxed, not biased: see DEF_DUNDER_HASH
+    extern int_from_i64
+    call int_from_i64
     leave
+    V_PACK rax, rdx
     ret
 .omh_error:
     RAISE exc_TypeError_type, "__hash__() takes no arguments"
@@ -1393,12 +1694,167 @@ DEF_FUNC generic_method_hash
     mov rdi, [rdi]
     extern obj_hash
     call obj_hash
-    add rax, [rel v_int_bias]
+    mov rdi, rax                ; boxed, not biased: see DEF_DUNDER_HASH
+    extern int_from_i64
+    call int_from_i64
     leave
+    V_PACK rax, rdx
     ret
 .gmh_error:
     RAISE exc_TypeError_type, "__hash__() takes no arguments"
 END_FUNC generic_method_hash
+
+;; ============================================================================
+;; DEF_DUNDER_HASH prefix
+;;
+;; T.__hash__(x) calling the DEFINING type's tp_hash, the same rule
+;; DEF_DUNDER_STRREPR and DEF_DUNDER_UNARY follow -- so a subclass reaches
+;; the base's hash rather than re-entering its own.
+;;
+;; Nothing but object registered __hash__, so every builtin resolved the name
+;; through the MRO to object's, which answers the ADDRESS:
+;; str.__hash__('a') was 403506976 and float.__hash__(1.25) was 1.25.  The
+;; stdlib binds these by name -- `__hash__ = tuple.__hash__` in a mixin is
+;; ordinary -- and got object's every time.
+;; ============================================================================
+%macro DEF_DUNDER_HASH 1
+DEF_FUNC %1_dunder_hash
+    test rsi, rsi
+    jz %%bad
+    cmp rsi, 1
+    jne %%bad
+    mov rdi, [rdi]
+    lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING rcx, "__hash__"
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
+    V_UNPACK rdi, rdx
+    lea rax, [rel %1_type]
+    mov rax, [rax + PyTypeObject.tp_hash]
+    test rax, rax
+    jz %%bad
+    call rax
+    ; A hash is a full int64 and most of them fall outside the +-2^50 an
+    ; immediate holds, so it has to be boxed rather than biased: adding
+    ; V_INT_BIAS to a large one lands in the float range, and
+    ; str.__hash__('a') came out as -1.6e-80.
+    mov rdi, rax
+    extern int_from_i64
+    call int_from_i64
+    leave
+    V_PACK rax, rdx
+    ret
+%%bad:
+    dec rsi
+    xor edi, edi
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
+END_FUNC %1_dunder_hash
+%endmacro
+
+;; ============================================================================
+;; DEF_DUNDER_RICHCMP prefix, suffix, PY_op
+;;
+;; T.__eq__(a, b) calling the DEFINING type's tp_richcompare -- the same rule
+;; DEF_DUNDER_HASH above and DEF_DUNDER_STRREPR follow, so a subclass reaches
+;; the base's comparison rather than re-entering its own.
+;;
+;; No builtin registered __eq__ or __ne__ at all, so every one resolved the
+;; name through the MRO to object's, which compares identities:
+;; `int.__eq__ is object.__eq__` was True where CPython says False, and
+;; dict.__eq__(d, e) answered NotImplemented where CPython compares the
+;; contents.  == itself was always right -- it goes through tp_richcompare --
+;; so this is the by-name half, and the stdlib asks by name:
+;; `__eq__ = dict.__eq__` in a mixin is ordinary.
+;; ============================================================================
+%macro DEF_DUNDER_RICHCMP 3     ; %1 prefix, %2 suffix, %3 the PY_ op
+DEF_FUNC %1_dunder_%2, DB_FRAME
+    cmp rsi, 2
+    jne %%bad
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    mov [rbp - DB_RHS], rsi
+    lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING_DUNDER rcx, %2
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
+    mov rsi, [rbp - DB_RHS]
+
+    lea rax, [rel %1_type]
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz %%notimpl
+    mov edx, %3
+    DUNDER_EXC_SAVE [rbp - DB_EXC]
+    call rax
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz %%out
+
+    ; A slot declines with a NULL Value; by name that has to be
+    ; NotImplemented, so the caller can try the reflected form.
+    EXC_RAISED_SINCE [rbp - DB_EXC], rcx, %%out
+%%notimpl:
+    extern notimpl_singleton
+    lea rax, [rel notimpl_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+%%out:
+    leave
+    V_PACK rax, rdx
+    ret
+%%bad:
+    ; CPython reports both counts, and counts self in neither.
+    dec rsi                     ; rsi is still nargs on this path
+    mov edi, 1
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
+END_FUNC %1_dunder_%2
+%endmacro
+
+;; All six, because every one of them is the same call with a different op
+;; and CPython gives all six to each of these types.  A type whose slot has
+;; no ordering -- dict -- answers NotImplemented for the four, which is what
+;; its slot already does.
+%macro DEF_RICHCMP_PAIR 1
+DEF_DUNDER_RICHCMP %1, eq, PY_EQ
+DEF_DUNDER_RICHCMP %1, ne, PY_NE
+DEF_DUNDER_RICHCMP %1, lt, PY_LT
+DEF_DUNDER_RICHCMP %1, le, PY_LE
+DEF_DUNDER_RICHCMP %1, gt, PY_GT
+DEF_DUNDER_RICHCMP %1, ge, PY_GE
+%endmacro
+
+DEF_RICHCMP_PAIR int
+DEF_RICHCMP_PAIR str
+DEF_RICHCMP_PAIR float
+DEF_RICHCMP_PAIR bytes
+DEF_RICHCMP_PAIR tuple
+DEF_RICHCMP_PAIR dict
+DEF_RICHCMP_PAIR list
+DEF_RICHCMP_PAIR set
+DEF_RICHCMP_PAIR frozenset
+
+; range defines only == and != of its own; the ordering dunders stay
+; object's, as they are in CPython.
+DEF_DUNDER_RICHCMP range, eq, PY_EQ
+DEF_DUNDER_RICHCMP range, ne, PY_NE
+DEF_DUNDER_HASH range
+
+DEF_DUNDER_HASH int
+DEF_DUNDER_HASH str
+DEF_DUNDER_HASH float
+DEF_DUNDER_HASH bytes
+DEF_DUNDER_HASH tuple
+DEF_DUNDER_HASH complex
+extern bool_type
+extern slice_type
+DEF_DUNDER_HASH bool
+DEF_DUNDER_HASH slice
 
 ;; ============================================================================
 ;; generic_method_contains(args, nargs) -> bool

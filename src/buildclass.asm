@@ -8,6 +8,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern type_is_subtype
 extern dict_new
 extern dunder_call_3
 extern dunder_lookup
@@ -290,6 +291,53 @@ global class_kwvalues_pending
 class_kwvalues_pending: dq 0
 
 section .text
+
+;; ============================================================================
+;; bc_solid_base(rdi = type) -> rax = the type its instance layout belongs to
+;;
+;; CPython's solid_base: walk down tp_base for as long as the type adds
+;; nothing to its base's layout except the instance dict word.  What comes
+;; back is the type that actually owns the shape of the instance -- `list` for
+;; any number of plain subclasses of list, `object` for a plain class.
+;;
+;; The dict word is excluded deliberately, exactly as extra_ivars() excludes
+;; it: every heaptype over a builtin adds one, and if that counted as a layout
+;; of its own then no two of them could ever be combined.
+;; ============================================================================
+DEF_FUNC_LOCAL bc_solid_base
+.sb_loop:
+    mov rsi, [rdi + PyTypeObject.tp_base]
+    test rsi, rsi
+    jz .sb_done                     ; object itself, or a base-less builtin
+    mov rax, [rdi + PyTypeObject.tp_basicsize]
+    mov rcx, [rsi + PyTypeObject.tp_basicsize]
+
+    mov rdx, [rdi + PyTypeObject.tp_dictoffset]
+    test rdx, rdx
+    jz .sb_compare                  ; no dict word to discount
+    cmp qword [rsi + PyTypeObject.tp_dictoffset], 0
+    jne .sb_compare                 ; the base already had one
+    test qword [rdi + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .sb_compare
+    cmp rdx, rcx
+    jb .sb_compare                  ; inside the base's own layout, not added
+    lea r8, [rdx + 8]
+    cmp r8, rax
+    jne .sb_compare                 ; TP_DICT_AT_TAIL, or not the last word
+    sub rax, 8
+
+.sb_compare:
+    cmp rax, rcx
+    jne .sb_done                    ; it adds a layout of its own
+    mov rdi, rsi
+    jmp .sb_loop
+
+.sb_done:
+    mov rax, rdi
+    leave
+    ret
+END_FUNC bc_solid_base
+
 DEF_FUNC type_from_parts
     push rbx
     push r12
@@ -301,6 +349,7 @@ DEF_FUNC type_from_parts
 TFP_BASE  equ 48            ; the layout base: the widest of the bases
 TFP_BASES equ 56            ; the bases tuple, or NULL
 TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
+TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     mov r14, rdi                ; class name str
     mov r15, rdx                ; namespace dict, becomes tp_dict
     mov [rbp - TFP_BASES], rsi
@@ -347,6 +396,138 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     jmp .tfp_base_scan
 .tfp_base_done:
     mov [rbp - TFP_BASE], rax   ; layout base, or NULL
+
+    ; A base CPython refuses.  The check goes here rather than in
+    ; __build_class__, where the one for `bool` used to live on its own:
+    ; type(name, bases, ns) reaches this and not that, so `type("B", (bool,),
+    ; {})` was accepted while `class B(bool)` was not.
+    cmp qword [rbp - TFP_BASES], 0
+    je .tfp_final_ok
+    xor r9, r9
+.tfp_final_scan:
+    mov rcx, [rbp - TFP_BASES]
+    cmp r9, [rcx + PyTupleObject.ob_size]
+    jge .tfp_final_ok
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rcx, [rcx + r9*8]
+    test rcx, rcx
+    jz .tfp_final_next
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_FINAL
+    jnz .tfp_final_base
+.tfp_final_next:
+    inc r9
+    jmp .tfp_final_scan
+.tfp_final_base:
+    mov rdi, [rcx + PyTypeObject.tp_name]
+    extern raise_final_base
+    call raise_final_base
+.tfp_final_ok:
+
+    ; Two bases whose layouts are unrelated cannot both be laid out in one
+    ; instance.  `class C(MyList, MyDict)` was accepted here and laid out as
+    ; whichever base was wider, after which the family flags were OR'd from
+    ; both and instance_dealloc ran whichever storage arm it tested first.
+    ; CPython answers "multiple bases have instance lay-out conflict", and the
+    ; question it asks is about the solid bases: unless one is a subtype of
+    ; the other, the two shapes cannot be nested.
+    ;
+    ; rbx, r12 and r13 are free here -- r12 does not become the new type until
+    ; the allocation below, and nothing has claimed the other two.
+    test rax, rax
+    jz .tfp_layout_ok
+    mov rdi, rax
+    call bc_solid_base
+    mov r13, rax                ; the layout base's solid base
+    cmp qword [rbp - TFP_BASES], 0
+    je .tfp_layout_ok
+    xor ebx, ebx
+.tfp_layout_scan:
+    mov rcx, [rbp - TFP_BASES]
+    cmp rbx, [rcx + PyTupleObject.ob_size]
+    jge .tfp_layout_ok
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rdi, [rcx + rbx*8]
+    test rdi, rdi
+    jz .tfp_layout_next
+    call bc_solid_base
+    mov r12, rax
+    mov rdi, r13
+    mov rsi, r12
+    call type_is_subtype
+    test eax, eax
+    jnz .tfp_layout_next
+    mov rdi, r12
+    mov rsi, r13
+    call type_is_subtype
+    test eax, eax
+    jz .tfp_layout_conflict
+.tfp_layout_next:
+    inc rbx
+    jmp .tfp_layout_scan
+.tfp_layout_conflict:
+    RAISE exc_TypeError_type, "multiple bases have instance lay-out conflict"
+.tfp_layout_ok:
+    ; A subtype of int, str, bytes or tuple cannot carry slots.  int wraps its
+    ; value rather than embedding it and the other three keep their data
+    ; inline, so a slot laid out at the base's basicsize lands inside that
+    ; data or past the allocation entirely -- `class N(int): __slots__ =
+    ; ('tag',)` put the member at offset 48 of a 32-byte object, and a str
+    ; subclass wrote its slot over its own characters.  Both were a SIGSEGV.
+    ;
+    ; CPython refuses int, bytes and tuple with this wording and accepts str,
+    ; whose subtype layout is not ours; refusing str too is a divergence, and
+    ; it is in bugs.md.
+    mov rdi, [rbp - TFP_BASE]
+    test rdi, rdi
+    jz .tfp_slots_ok
+    call bc_solid_base
+    mov r13, rax
+    lea rcx, [rel int_type]
+    cmp r13, rcx
+    je .tfp_slots_check
+    extern bytes_type
+    lea rcx, [rel bytes_type]
+    cmp r13, rcx
+    je .tfp_slots_check
+    extern str_type
+    lea rcx, [rel str_type]
+    cmp r13, rcx
+    je .tfp_slots_check
+    lea rcx, [rel tuple_type]
+    cmp r13, rcx
+    jne .tfp_slots_ok
+.tfp_slots_check:
+    lea rdi, [rel bc_slots_name]
+    call str_from_cstr_heap
+    mov rbx, rax
+    mov rdi, r15
+    mov rsi, rax
+    call dict_get
+    V_UNPACK rax, rdx
+    mov r12, rax
+    mov [rbp - TFP_SLOTV], rdx
+    mov rdi, rbx
+    call obj_decref
+    cmp qword [rbp - TFP_SLOTV], TAG_PTR
+    jne .tfp_slots_ok
+    test r12, r12
+    jz .tfp_slots_ok
+    mov rcx, [r12 + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    je .tfp_slots_size
+    lea rdx, [rel list_type]
+    cmp rcx, rdx
+    jne .tfp_slots_ok
+.tfp_slots_size:
+    cmp qword [r12 + PyTupleObject.ob_size], 0
+    je .tfp_slots_ok
+    lea rdi, [rel bc_slots_unsupported]
+    mov rsi, r13
+    extern raise_type_error_with_typename
+    call raise_type_error_with_typename
+.tfp_slots_ok:
+    mov rax, [rbp - TFP_BASE]
     mov rdx, r15                ; restore namespace (scan clobbered rdx)
 
     ; Allocate the type object (GC-tracked)
@@ -471,6 +652,21 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     mov [r12 + PyTypeObject.tp_traverse], rax
     lea rax, [rel instance_clear]
     mov [r12 + PyTypeObject.tp_clear], rax
+
+    ; A layout base with a dealloc, traverse or clear of its OWN keeps it.
+    ;
+    ; The three above are the generic ones, right for an ordinary class.  A
+    ; base that keeps raw fields past the instance header has to clean them
+    ; up itself, and _io.FileIO does: fileio_dealloc closes the descriptor,
+    ; releases the name and the mode, zeroes the raw words and only then
+    ; chains to the generic dealloc.  Overwriting it meant a subclass never
+    ; ran any of that -- `class F(_io.FileIO): pass` leaked a file descriptor
+    ; per instance, and the collector walked the descriptor as a pointer.
+    ;
+    ; Inheriting is CPython's rule too: a subtype that adds no storage gets
+    ; its base's tp_dealloc.  Nothing changes for an ordinary base, whose
+    ; three slots are the generic ones already.
+    call bc_inherit_lifecycle
 
     ; tp_dict = class_dict (ownership transferred from r15, no INCREF needed)
     mov [r12 + PyTypeObject.tp_dict], r15
@@ -607,15 +803,30 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     ; __slots__ = () is still __slots__.  Skipping it here left the flag
     ; unset, so a class that declares it took arbitrary attributes -- which is
     ; the one thing the empty form exists to prevent.
+    call bc_base_has_dict
+    test eax, eax
+    jnz .bc_no_slots
     or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+    call bc_drop_dict_word
     jmp .bc_no_slots
 .bc_have_slots:
 
-    ; Determine base_basicsize
-    ; Slots are laid out after the whole instance header, which is what
-    ; tp_basicsize was just set to -- the base's layout plus the dict word.
-    ; Using the *base's* basicsize instead puts the first slot on top of the
-    ; dict pointer.
+    ; Where the slots start.  A class that declares __slots__ and inherits no
+    ; dict has none of its own, so the dict word comes out of the layout and
+    ; the slots take its place -- which is the layout CPython has, and eight
+    ; bytes per instance that used to be a word that could never be written.
+    ;
+    ; When a base does provide a dict, the class shares it and the slots go
+    ; after the whole header, dict word included: putting them at the base's
+    ; basicsize instead lands the first slot on top of the dict pointer.
+    call bc_base_has_dict
+    test eax, eax
+    jnz .bc_slots_share_dict
+    or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+    call bc_drop_dict_word
+    mov rdi, [r12 + PyTypeObject.tp_basicsize]
+    jmp .bc_have_basic
+.bc_slots_share_dict:
     mov rdi, [r12 + PyTypeObject.tp_basicsize]
 .bc_have_basic:
     ; rdi = base_basicsize
@@ -625,8 +836,11 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     add rax, rdi                    ; + base_basicsize
     mov [r12 + PyTypeObject.tp_basicsize], rax
 
-    ; Set TYPE_FLAG_HAS_SLOTS
-    or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+    ; TYPE_FLAG_HAS_SLOTS says "this class has NO instance dict", and it is
+    ; set above, before the layout is decided, because it is what decides it.
+    ; __slots__ suppresses the dict only when NO BASE already provides one --
+    ; `class C(A)` with a plain A inherits A's __dict__ and must still accept
+    ; `c.z = 1`, which was an AttributeError here.
 
     ; Create member descriptors for each slot
     ; rbx = slots tuple, r13 = nslots, rdi = base_basicsize
@@ -949,6 +1163,26 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     mov rdi, r12
     call type_install_slots
 
+    ; __hash__ is the one slot whose ABSENCE is meaningful.  Python's rule:
+    ; a class that defines __eq__ and not __hash__ is unhashable, and
+    ; `__hash__ = None` says so explicitly.  type_install_slots leaves the
+    ; inherited slot in place for both -- it treats a None dunder as "no
+    ; definition" -- so `{Eq(): 1}` succeeded and Eq.__hash__ is None was
+    ; False.  CPython does this in type_new for exactly the same reason: it
+    ; cannot be expressed as a slot wrapper.
+    mov rdi, r12
+    mov rsi, r15
+    call type_apply_hash_rule
+
+    ; Two names are implicitly classmethods, whatever the class body wrote.
+    ; CPython wraps them in type_new; without it `Template.__init_subclass__()`
+    ; -- which CPython's own string.py does at import -- called a plain
+    ; function with no arguments, and `C[int]` never reached
+    ; __class_getitem__ with the class.
+    mov rdi, r12
+    mov rsi, r15
+    call type_wrap_implicit_classmethods
+
     ; Call parent's __init_subclass__ if present
     mov rax, [rbp - TFP_BASE]          ; base class
     test rax, rax
@@ -1069,6 +1303,326 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
     leave
     ret
 END_FUNC type_from_parts
+
+;; ============================================================================
+;; bc_inherit_lifecycle() -- keep the layout base's tp_dealloc / tp_traverse /
+;; tp_clear when they are not the generic ones
+;;
+;; Reads type_from_parts' r12 (the new type) and [rbp - TFP_BASE] through the
+;; saved rbp, as bc_base_has_dict does.
+;; ============================================================================
+DEF_FUNC_LOCAL bc_inherit_lifecycle
+    mov r9, [rbp]                   ; type_from_parts' frame
+    mov r9, [r9 - TFP_BASE]
+    test r9, r9
+    jz .bil_done
+
+    ; Only a HEAPTYPE base.  A static builtin -- int, str, list, dict -- has
+    ; a tp_dealloc written for its own storage layout, and a subclass of one
+    ; is instance-shaped, not int-shaped; type_from_parts has dedicated arms
+    ; further down for those.  The bases this is for are the heaptypes that
+    ; were built here and then had their tp_basicsize patched to make room
+    ; for raw fields: _io.FileIO and _io.BytesIO.
+    test qword [r9 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .bil_done
+
+    extern instance_dealloc
+    mov rax, [r9 + PyTypeObject.tp_dealloc]
+    test rax, rax
+    jz .bil_traverse
+    lea rcx, [rel instance_dealloc]
+    cmp rax, rcx
+    je .bil_traverse
+    mov [r12 + PyTypeObject.tp_dealloc], rax
+.bil_traverse:
+    extern instance_traverse
+    mov rax, [r9 + PyTypeObject.tp_traverse]
+    test rax, rax
+    jz .bil_clear
+    lea rcx, [rel instance_traverse]
+    cmp rax, rcx
+    je .bil_clear
+    mov [r12 + PyTypeObject.tp_traverse], rax
+.bil_clear:
+    extern instance_clear
+    mov rax, [r9 + PyTypeObject.tp_clear]
+    test rax, rax
+    jz .bil_done
+    lea rcx, [rel instance_clear]
+    cmp rax, rcx
+    je .bil_done
+    mov [r12 + PyTypeObject.tp_clear], rax
+.bil_done:
+    leave
+    ret
+END_FUNC bc_inherit_lifecycle
+
+;; ============================================================================
+;; bc_base_has_dict() -> eax = 1 when the layout base already gives instances
+;; a __dict__
+;;
+;; Reads type_from_parts' [rbp - TFP_BASE] through the saved rbp, which is
+;; why it is file-local and named for its one caller.
+;;
+;; A base with __slots__ of its own does NOT count: it has a dict word
+;; reserved in its layout that it can never use (bugs.md carries that), so
+;; the offset being non-zero says nothing about whether instances have one.
+;; ============================================================================
+;; ============================================================================
+;; bc_drop_dict_word() -- the class being built has no instance dict
+;;
+;; Zero tp_dictoffset and pull tp_basicsize back to where the header really
+;; ends: the layout base's basicsize, or the bare object header when there is
+;; no base yet (tp_base is filled in with object further down, and object is
+;; exactly that size).  Both slot walks read the header end back out of these
+;; two fields, so this is the only place that has to know.
+;;
+;; The type being built is r12, as it is throughout type_from_parts; the
+;; layout base is reached through the saved rbp, as bc_base_has_dict does.
+;; ============================================================================
+DEF_FUNC_LOCAL bc_drop_dict_word
+    push rbx
+    mov rax, r12                        ; the type being built
+    mov qword [rax + PyTypeObject.tp_dictoffset], 0
+    mov rbx, [rbp]                      ; type_from_parts' frame
+    mov rcx, [rbx - TFP_BASE]
+    test rcx, rcx
+    jz .bddw_no_base
+    mov rcx, [rcx + PyTypeObject.tp_basicsize]
+    test rcx, rcx
+    jnz .bddw_store
+.bddw_no_base:
+    mov ecx, OBJ_HEADER_SIZE
+.bddw_store:
+    mov [rax + PyTypeObject.tp_basicsize], rcx
+    pop rbx
+    leave
+    ret
+END_FUNC bc_drop_dict_word
+
+DEF_FUNC_LOCAL bc_base_has_dict
+    mov rax, [rbp]              ; type_from_parts' frame
+    mov rax, [rax - TFP_BASE]
+    test rax, rax
+    jz .bbhd_no
+    cmp qword [rax + PyTypeObject.tp_dictoffset], 0
+    je .bbhd_no
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+    jnz .bbhd_no
+    mov eax, 1
+    leave
+    ret
+.bbhd_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC bc_base_has_dict
+
+;; ============================================================================
+;; type_apply_hash_rule(rdi = the type, rsi = the class dict)
+;;
+;; Python's inherited-hash rule, which is about a name being ABSENT and so
+;; cannot be a slot wrapper:
+;;
+;;   __hash__ = None in the body   -> unhashable
+;;   __eq__ defined, __hash__ not  -> unhashable
+;;   otherwise                     -> whatever was inherited or installed
+;;
+;; __ne__ does not count: only __eq__ suppresses it.
+;; ============================================================================
+TAH_TYPE  equ 8
+TAH_DICT  equ 16
+TAH_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC_LOCAL type_apply_hash_rule, TAH_FRAME
+    mov [rbp - TAH_TYPE], rdi
+    mov [rbp - TAH_DICT], rsi
+    test rsi, rsi
+    jz .tah_done
+
+    CSTRING rdi, "__hash__"
+    mov rsi, [rbp - TAH_DICT]
+    call tah_dict_get
+    test rax, rax
+    jz .tah_no_hash
+
+    ; Present in the body: only None means unhashable.
+    extern none_singleton
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .tah_unhashable_slot
+    jmp .tah_done
+
+.tah_no_hash:
+    ; Absent from the body: __eq__ here suppresses it...
+    CSTRING rdi, "__eq__"
+    mov rsi, [rbp - TAH_DICT]
+    call tah_dict_get
+    test rax, rax
+    jnz .tah_unhashable
+
+    ; ...and so does an INHERITED __hash__ of None, which is how a subclass
+    ; of an unhashable class stays unhashable without a rule of its own.
+    ; The name resolves through the MRO; the slot does not follow it, so the
+    ; two have to be reconciled here.
+    mov rdi, [rbp - TAH_TYPE]
+    CSTRING rsi, "__hash__"
+    extern dunder_lookup
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .tah_done
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    jne .tah_done
+    jmp .tah_unhashable_slot
+
+.tah_unhashable_slot:
+    ; The slot only: the name already says None, here or up the MRO.
+    extern hash_not_implemented
+    mov rax, [rbp - TAH_TYPE]
+    lea rcx, [rel hash_not_implemented]
+    mov [rax + PyTypeObject.tp_hash], rcx
+    jmp .tah_done
+
+.tah_unhashable:
+    mov rax, [rbp - TAH_TYPE]
+    lea rcx, [rel hash_not_implemented]
+    mov [rax + PyTypeObject.tp_hash], rcx
+
+    ; The NAME has to say so too: `Eq.__hash__ is None` is how the stdlib
+    ; asks, and a subclass that defines neither inherits the None through the
+    ; MRO -- which is why SubEq(Eq) is unhashable in CPython without any
+    ; rule of its own.
+    CSTRING rdi, "__hash__"
+    call str_from_cstr_heap
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - TAH_DICT]
+    mov rsi, rax
+    lea rdx, [rel none_singleton]
+    extern dict_set
+    call dict_set
+    add rsp, 8
+    pop rdi
+    call obj_decref
+.tah_done:
+    leave
+    ret
+END_FUNC type_apply_hash_rule
+
+;; ============================================================================
+;; type_wrap_implicit_classmethods(rdi = the type, rsi = the class dict)
+;;
+;; __init_subclass__ and __class_getitem__ are classmethods even when the
+;; class body defines them as plain functions -- CPython does this in
+;; type_new, and it cannot be expressed as a slot.  Anything already wrapped,
+;; or not a plain function at all, is left alone.
+;; ============================================================================
+TWI_TYPE  equ 8
+TWI_DICT  equ 16
+TWI_KEY   equ 24
+TWI_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+DEF_FUNC_LOCAL type_wrap_implicit_classmethods, TWI_FRAME
+    push rbx
+    mov [rbp - TWI_TYPE], rdi
+    mov [rbp - TWI_DICT], rsi
+    test rsi, rsi
+    jz .twi_done
+
+    CSTRING rbx, "__init_subclass__"
+    call .twi_one
+    CSTRING rbx, "__class_getitem__"
+    call .twi_one
+.twi_done:
+    pop rbx
+    leave
+    ret
+
+;; rbx = the name, as a C string
+.twi_one:
+    push rbx
+    sub rsp, 8
+    mov rdi, rbx
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    add rsp, 8
+    pop rbx
+    mov [rbp - TWI_KEY], rax
+
+    mov rdi, [rbp - TWI_DICT]
+    mov rsi, rax
+    extern dict_get
+    call dict_get
+    test rax, rax
+    jz .twi_release
+
+    ; Only a plain function is wrapped; a classmethod or staticmethod the
+    ; body wrote is already what the author asked for.
+    V_TEST_PTR rax, rcx
+    ja .twi_release
+    mov rcx, [rax + PyObject.ob_type]
+    extern func_type
+    lea rdx, [rel func_type]
+    cmp rcx, rdx
+    jne .twi_release
+
+    push rax                    ; [rsp] is the one-element argument array
+    sub rsp, 8
+    extern classmethod_type
+    extern classmethod_construct
+    lea rdi, [rel classmethod_type]
+    lea rsi, [rsp + 8]
+    mov edx, 1
+    call classmethod_construct
+    add rsp, 8
+    pop rcx
+    test rax, rax
+    jz .twi_release
+
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - TWI_DICT]
+    mov rsi, [rbp - TWI_KEY]
+    mov rdx, rax
+    extern dict_set
+    call dict_set
+    add rsp, 8
+    pop rdi
+    extern obj_decref
+    call obj_decref             ; dict_set took its own reference
+
+.twi_release:
+    mov rdi, [rbp - TWI_KEY]
+    call obj_decref
+    ret
+END_FUNC type_wrap_implicit_classmethods
+
+;; tah_dict_get(rdi = a name C string, rsi = the dict)
+;;   -> rax = the Value, or 0 when absent
+DEF_FUNC_LOCAL tah_dict_get, 16
+    push rbx
+    sub rsp, 8
+    mov rbx, rsi
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    push rax
+    sub rsp, 8
+    mov rdi, rbx
+    mov rsi, rax
+    extern dict_get
+    call dict_get
+    add rsp, 8
+    pop rdi
+    push rax
+    sub rsp, 8
+    call obj_decref             ; the key this built
+    add rsp, 8
+    pop rax
+    add rsp, 8
+    pop rbx
+    leave
+    ret
+END_FUNC tah_dict_get
 
 
 
@@ -1491,11 +2045,6 @@ BCL_OKWV  equ 72
     pop rsi
     test eax, eax
     jz .build_class_base_error
-    ; Prevent subclassing bool
-    extern bool_type
-    lea rcx, [rel bool_type]
-    cmp rdx, rcx
-    je .build_class_bool_error
     mov [r8 + r9*8], rdx
     push rsi
     push r8
@@ -1826,9 +2375,6 @@ BCL_OKWV  equ 72
 
 .build_class_base_error:
     RAISE exc_TypeError_type, "bases must be types"
-
-.build_class_bool_error:
-    RAISE exc_TypeError_type, "type 'bool' is not an acceptable base type"
 END_FUNC builtin___build_class__
 section .rodata
 bc_prepare_name: db "__prepare__", 0
@@ -1838,5 +2384,7 @@ bc_module_name: db "__module__", 0
 bc_dunder_name_name: db "__name__", 0
 bc_classcell_name: db "__classcell__", 0
 bc_slots_name: db "__slots__", 0
+bc_slots_unsupported:
+    db "nonempty __slots__ not supported for subtype of '", 1, "'", 0
 bc_new_name:          db "__new__", 0
 section .text

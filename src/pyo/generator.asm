@@ -191,20 +191,48 @@ DEF_FUNC gen_iternext
     ; caller was left with the exception still pending, and the interpreter
     ; reported it at exit.  Its own POP_EXCEPT restores from the value stack
     ; when it resumes, so nothing is lost by putting the caller's back.
+    ;
+    ; The caller's exception is left IN PLACE for the duration rather than
+    ; cleared, because that is what a raise inside the body chains to.
+    ; Clearing it meant `next(it)` from inside an except block produced an
+    ; exception with __context__ of None -- and `await` goes through here
+    ; too, so every awaited exception lost its context the same way.
+    ; A raise is a NULL result, not a set current_exception: the async
+    ; generator's copy of this below already says so, and reading the global
+    ; instead cannot tell a raise from a body suspended inside an except.
     push rax
     mov rax, [rel current_exception]
     push rax
-    mov qword [rel current_exception], 0
+    test rax, rax
+    jz .gs_no_saved
+    INCREF rax                  ; ours for the duration of the resume
+.gs_no_saved:
     call eval_frame
     pop rcx
-    ; If the generator body raised, that exception is the result and must not
-    ; be overwritten by the caller's saved one -- doing so turned every
-    ; exception raised after the first yield into a silent StopIteration.
-    cmp qword [rel current_exception], 0
-    jne .gs_gen_raised
-    mov [rel current_exception], rcx
+    test rax, rax
+    jz .gs_gen_raised
+    ; It did not raise.  Put the caller's back, dropping whatever the body
+    ; left set -- which is its own business and lives on its value stack.
+    cmp rcx, [rel current_exception]
+    je .gs_drop_extra
+    push rax
+    push rdx
+    mov rdi, [rel current_exception]
+    mov [rel current_exception], rcx    ; takes over our reference
+    test rdi, rdi
+    jz .gs_put_back
+    call obj_decref
+.gs_put_back:
+    pop rdx
+    pop rax
     jmp .gs_exc_settled
+.gs_drop_extra:
+    ; Already in place; only the extra reference has to go.
 .gs_gen_raised:
+    ; The body raised.  The new exception is the result and already carries
+    ; the caller's as its __context__; raise_exception_obj released the
+    ; global's own reference to it, so ours is the one left to drop.
+    ;
     test rcx, rcx
     jz .gs_exc_settled
     push rax
@@ -708,7 +736,18 @@ DEF_FUNC gen_dealloc, GD_FRAME
     je .gd_just_free
 
     inc qword [rbx + PyObject.ob_refcnt]
+    ; The pending exception is held in a register across the cleanup, and
+    ; DUNDER_EXC_SAVE only borrows.  raise_exception_obj takes over its
+    ; caller's reference rather than adding one, so the global's is often the
+    ; only one there is -- and gen_dealloc_close runs arbitrary Python, which
+    ; can free anything nothing else holds.  Take a reference for the
+    ; register's own copy; .gd_close_done gives it back to the global.
     DUNDER_EXC_SAVE r12
+    test r12, r12
+    jz .gd_no_pending
+    mov rdi, r12
+    call obj_incref
+.gd_no_pending:
     mov qword [rel current_exception], 0
 
     mov rdi, rbx
@@ -720,14 +759,17 @@ DEF_FUNC gen_dealloc, GD_FRAME
     test rdi, rdi
     jz .gd_close_done
     mov qword [rel current_exception], 0
+    ; The full report, as CPython's does: the generator itself, then the
+    ; traceback of where inside the cleanup it happened.  One line naming
+    ; neither was all this used to print.
     push rdi
-    mov edi, 2
-    lea rsi, [rel gd_ignored_msg]
-    mov edx, gd_ignored_len
-    call sys_write
+    mov rsi, rbx
+    extern traceback_print_unraisable
+    call traceback_print_unraisable
     pop rdi
     call obj_decref
 .gd_close_done:
+    ; Hand the reference taken above back to the global.
     mov [rel current_exception], r12
     dec qword [rbx + PyObject.ob_refcnt]
 
@@ -770,27 +812,57 @@ DEF_FUNC_BARE gen_iter_self
 END_FUNC gen_iter_self
 
 ;; ============================================================================
-;; gen_repr(PyObject *self) -> PyStrObject*
+;; gen_repr / coro_repr / async_gen_repr (PyObject *self) -> PyStrObject*
+;;
+;; "<generator object NAME at 0x...>", with the qualified name off the code
+;; object -- which is how a generator expression says "<genexpr>" and a
+;; generator function says its own name.  All three used to be a fixed string
+;; naming only the kind.
 ;; ============================================================================
+GRP_KIND  equ 8
+GRP_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+DEF_FUNC_LOCAL gen_repr_kind, GRP_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - GRP_KIND], rsi
+    mov rax, [rbx + PyGenObject.gi_code]
+    test rax, rax
+    jz .grp_gi_name
+    mov rax, [rax + PyCodeObject.co_qualname]
+    test rax, rax
+    jnz .grp_have_name
+.grp_gi_name:
+    mov rax, [rbx + PyGenObject.gi_name]
+    test rax, rax
+    jz .grp_no_name
+.grp_have_name:
+    lea rdx, [rax + PyStrObject.data]
+    jmp .grp_build
+.grp_no_name:
+    xor edx, edx
+.grp_build:
+    mov rdi, rbx
+    mov rsi, [rbp - GRP_KIND]
+    extern obj_repr_named_at
+    call obj_repr_named_at
+    pop rbx
+    leave
+    ret
+END_FUNC gen_repr_kind
+
 DEF_FUNC_BARE gen_repr
-    lea rdi, [rel gen_repr_str]
-    jmp str_from_cstr
+    lea rsi, [rel gen_repr_str]
+    jmp gen_repr_kind
 END_FUNC gen_repr
 
-;; ============================================================================
-;; coro_repr(PyObject *self) -> PyStrObject*
-;; ============================================================================
 DEF_FUNC_BARE coro_repr
-    lea rdi, [rel coro_repr_str]
-    jmp str_from_cstr
+    lea rsi, [rel coro_repr_str]
+    jmp gen_repr_kind
 END_FUNC coro_repr
 
-;; ============================================================================
-;; async_gen_repr(PyObject *self) -> PyStrObject*
-;; ============================================================================
 DEF_FUNC_BARE async_gen_repr
-    lea rdi, [rel async_gen_repr_str]
-    jmp str_from_cstr
+    lea rsi, [rel async_gen_repr_str]
+    jmp gen_repr_kind
 END_FUNC async_gen_repr
 
 ;; ============================================================================
@@ -848,8 +920,16 @@ DEF_FUNC gen_send
     ; be overwritten by the caller's saved one -- gen_iternext was fixed for
     ; this; the identical block here was not, so send() after a raise gave
     ; StopIteration instead of the exception.
-    cmp qword [rel current_exception], 0
-    jne .gsend_raised
+    ;
+    ; A raise is a NULL result, not a set current_exception.  Reading the
+    ; global cannot tell a raise from a body SUSPENDED inside an except
+    ; block, whose PUSH_EXC_INFO leaves the global set at the yield: the
+    ; caller's exception state was then dropped and the body's handled one
+    ; left in its place, so every await inside an except block leaked that
+    ; exception to the event loop, and the interpreter reported it at exit.
+    ; gen_iternext's copy of this block already says so.
+    test rax, rax
+    jz .gsend_raised
     mov [rel current_exception], rcx
     jmp .gsend_settled
 .gsend_raised:
@@ -1260,6 +1340,46 @@ DEF_FUNC gen_getattr
 END_FUNC gen_getattr
 
 ;; ============================================================================
+;; The generator protocol, by name.
+;;
+;; gen_type had no tp_dict at all, so `hasattr(gen, "__next__")` was False and
+;; `it.__next__` an AttributeError -- and `_counter = _count(1).__next__` is
+;; line 838 of CPython's threading.py, which is as far as it got.  The four
+;; getters are what a repr and the async machinery read.
+;; ============================================================================
+%macro DEF_GEN_GETTER 2         ; %1 = the exposed name, %2 = the field
+DEF_FUNC gen_get_%1
+    mov rax, [rdi + PyGenObject.%2]
+    test rax, rax
+    jnz %%have
+    LOAD_NONE rax
+    leave
+    ret
+%%have:
+    INCREF_V rax, rdx
+    leave
+    ret
+END_FUNC gen_get_%1
+%endmacro
+DEF_GEN_GETTER name,    gi_name
+DEF_GEN_GETTER code,    gi_code
+
+;; gi_running is a plain flag, not an object.
+DEF_FUNC gen_get_running
+    mov rax, [rdi + PyGenObject.gi_running]
+    test rax, rax
+    jz .ggr_false
+    lea rax, [rel bool_true]
+    jmp .ggr_out
+.ggr_false:
+    lea rax, [rel bool_false]
+.ggr_out:
+    INCREF rax
+    leave
+    ret
+END_FUNC gen_get_running
+
+;; ============================================================================
 ;; coro_getattr(PyGenObject *self, PyObject *name) -> rax = Value
 ;; Attribute lookup for coroutines: send, close, throw, cr_await, cr_running
 ;; ============================================================================
@@ -1459,6 +1579,7 @@ END_FUNC async_gen_getattr
 ;; ============================================================================
 
 ;; _gen_send_impl(args, nargs) — gen.send(value)
+global _gen_send_impl
 DEF_FUNC _gen_send_impl
     push rbx
 
@@ -1515,6 +1636,8 @@ DEF_FUNC _gen_send_impl
 END_FUNC _gen_send_impl
 
 ;; _gen_close_impl(args, nargs) — gen.close()
+global _gen_close_impl
+global _gen_close_impl
 DEF_FUNC _gen_close_impl
     mov rdi, [rdi]             ; gen = args[0]
     call gen_close
@@ -1524,6 +1647,8 @@ DEF_FUNC _gen_close_impl
 END_FUNC _gen_close_impl
 
 ;; _gen_throw_impl(args, nargs) — gen.throw(exc_type)
+global _gen_throw_impl
+global _gen_throw_impl
 DEF_FUNC _gen_throw_impl
     push rbx
 
@@ -1620,11 +1745,11 @@ END_FUNC _get_gen_throw_builtin
 section .data
 
 gen_name_str:       db "generator", 0
-gen_repr_str:       db "<generator>", 0
+gen_repr_str:       db "generator object", 0
 coro_name_str:      db "coroutine", 0
-coro_repr_str:      db "<coroutine>", 0
+coro_repr_str:      db "coroutine object", 0
 async_gen_name_str: db "async_generator", 0
-async_gen_repr_str: db "<async_generator>", 0
+async_gen_repr_str: db "async_generator object", 0
 
 ; Cached builtin singletons for gen methods
 align 8
@@ -1737,7 +1862,7 @@ async_gen_wrapped_type:
     dq agw_name_str             ; tp_name
     dq AsyncGenWrapped_size     ; tp_basicsize
     dq agw_dealloc              ; tp_dealloc
-    times 20 dq 0               ; the rest: this box is never used as a value
+    times 22 dq 0               ; the rest: this box is never used as a value
 
 align 8
 global async_gen_asend_type

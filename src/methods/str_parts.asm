@@ -13,6 +13,9 @@
 
 
 ; External functions
+extern int_type
+extern bool_type
+extern dict_type
 extern ap_memfind
 extern str_find_impl
 extern ap_malloc
@@ -36,6 +39,8 @@ extern bool_false
 extern int_from_i64
 extern int_to_i64
 extern raise_exception
+extern rbt_append_cstr
+extern str_byte_to_cp
 extern exc_TypeError_type
 extern exc_ValueError_type
 
@@ -1135,12 +1140,44 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     push r12
     push r13
 
-    cmp rsi, 2
-    jl .smt_error
-    cmp rsi, 3
-    jg .smt_error
-    mov [rbp - SMT_NARGS], rsi
+    mov [rbp - SMT_NARGS], rsi  ; before the bounds check: the message counts
     mov [rbp - SMT_ARGS], rdi
+    test rsi, rsi
+    jz .smt_no_args
+    cmp rsi, 3
+    jg .smt_too_many
+    cmp rsi, 1
+    je .smt_from_dict
+
+    ; The two- and three-argument forms take strings, and CPython names the
+    ; one that is not.  Nothing checked, so str.maketrans("ab", 1) read the
+    ; int as a PyStrObject.  The later arguments are checked FIRST, which is
+    ; the order CPython's own argument clinic runs in: maketrans(1, 2) is
+    ; reported against argument 2, not argument 1.
+    mov rdi, [rdi + 8]
+    call smt_is_str
+    test eax, eax
+    jnz .smt_second_str
+    mov esi, 2
+    jmp .smt_arg_not_str
+.smt_second_str:
+    cmp qword [rbp - SMT_NARGS], 3
+    jne .smt_third_ok
+    mov rax, [rbp - SMT_ARGS]
+    mov rdi, [rax + 16]
+    call smt_is_str
+    test eax, eax
+    jnz .smt_third_ok
+    mov esi, 3
+    jmp .smt_arg_not_str
+.smt_third_ok:
+    mov rax, [rbp - SMT_ARGS]
+    mov rdi, [rax]
+    call smt_is_str
+    test eax, eax
+    jz .smt_first_not_str
+.smt_args_checked:
+    mov rdi, [rbp - SMT_ARGS]   ; the checks above went through rdi
 
     ; Get from and to strings
     mov rcx, [rdi]                 ; args[0] payload (from str)
@@ -1235,12 +1272,197 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+;; ============================================================================
+;; The one-argument form: str.maketrans({...}).
+;;
+;; It did not exist -- one argument was "maketrans requires 2 or 3 string
+;; arguments" -- and pathlib builds its table this way, so pathlib could not
+;; import.  A str key of one character becomes its ordinal; an int key stays
+;; as it is; the values are copied through untouched, None included, because
+;; translate() reads None as "delete this character".
+;; ============================================================================
+.smt_from_dict:
+    mov rbx, [rdi]
+    V_TEST_PTR rbx, rax
+    ja .smt_one_not_dict
+    test rbx, rbx
+    jz .smt_one_not_dict
+    ; CPython takes an exact dict here, not a subclass of one.
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    jne .smt_one_not_dict
+    call dict_new
+    mov r12, rax                    ; the table being built
+    xor r13d, r13d                  ; the source entry index
+.smt_dict_loop:
+    cmp r13, [rbx + PyDictObject.capacity]
+    jge .smt_dict_done
+    mov rax, [rbx + PyDictObject.entries]
+    imul rcx, r13, DictEntry_size
+    add rax, rcx
+    mov rdi, [rax + DictEntry.key]
+    test rdi, rdi
+    jz .smt_dict_next               ; empty, or a tombstone
+    mov rdx, [rax + DictEntry.value]
+    mov [rbp - SMT_TO], rdx         ; the value travels through untouched
+
+    ; An int key is its own ordinal.
+    V_IS_INT rdi, rax
+    jae .smt_key_ready
+    V_TEST_PTR rdi, rax
+    ja .smt_key_bad
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .smt_key_int_obj
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
+    je .smt_key_int_obj
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
+    jnz .smt_key_int_obj
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .smt_key_str
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .smt_key_str
+    jmp .smt_key_bad
+
+.smt_key_int_obj:
+    ; An int key is copied as it stands -- CPython's maketrans({True: 'x'})
+    ; keeps True as the key, not 1.
+    jmp .smt_key_ready
+
+.smt_key_str:
+    cmp qword [rdi + PyStrObject.ob_length], 1
+    jne .smt_key_len
+    push rdi
+    lea rdi, [rdi + PyStrObject.data]
+    mov rsi, 4
+    call trn_decode_cp
+    pop rdi
+    V_PACK_I64 rax, rcx
+    mov rdi, rax
+
+.smt_key_ready:
+    mov rsi, rdi
+    mov rdx, [rbp - SMT_TO]
+    mov rdi, r12
+    call dict_set
+.smt_dict_next:
+    inc r13
+    jmp .smt_dict_loop
+.smt_dict_done:
+    mov rax, r12
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.smt_key_bad:
+    RAISE exc_TypeError_type, "keys in translate table must be strings or integers"
+.smt_key_len:
+    RAISE exc_ValueError_type, "string keys in translate table must be of length 1"
+.smt_one_not_dict:
+    RAISE exc_TypeError_type, "if you give only one argument to maketrans it must be a dict"
+.smt_no_args:
+    RAISE exc_TypeError_type, "maketrans expected at least 1 argument, got 0"
+.smt_first_not_str:
+    RAISE exc_TypeError_type, "first maketrans argument must be a string if there is a second argument"
+.smt_arg_not_str:
+    ; esi = which one, 2 or 3
+    mov rdi, [rbp - SMT_ARGS]
+    mov rdi, [rdi + rsi*8 - 8]
+    call smt_raise_not_str
 .smt_error:
     RAISE exc_TypeError_type, "maketrans requires 2 or 3 string arguments"
+.smt_too_many:
+    mov rsi, [rbp - SMT_NARGS]
+    call smt_raise_too_many
 
 .smt_len_error:
-    RAISE exc_ValueError_type, "maketrans arguments must have equal length"
+    RAISE exc_ValueError_type, "the first two maketrans arguments must have equal length"
 END_FUNC str_staticmethod_maketrans
+
+;; smt_is_str(rdi = a Value) -> eax = 1 when it is a str
+DEF_FUNC_BARE smt_is_str
+    V_TEST_PTR rdi, rax
+    ja .sis_no
+    test rdi, rdi
+    jz .sis_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .sis_yes
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .sis_yes
+.sis_no:
+    xor eax, eax
+    ret
+.sis_yes:
+    mov eax, 1
+    ret
+END_FUNC smt_is_str
+
+;; smt_raise_not_str(rdi = the offending argument, esi = which one) -- no return
+;; "maketrans() argument 2 must be str, not int", CPython's wording.
+SRN_ARG   equ 8
+SRN_WHICH equ 16
+SRN_BUF   equ 176
+SRN_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
+DEF_FUNC_LOCAL smt_raise_not_str, SRN_FRAME
+    mov [rbp - SRN_ARG], rdi
+    mov [rbp - SRN_WHICH], rsi
+    lea rdi, [rbp - SRN_BUF]
+    CSTRING rsi, "maketrans() argument "
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SRN_WHICH]
+    extern msg_append_i64
+    call msg_append_i64
+    mov rdi, rax
+    CSTRING rsi, " must be str, not "
+    call rbt_append_cstr
+    push rax
+    mov rdi, [rbp - SRN_ARG]
+    extern value_type
+    call value_type
+    test rax, rax
+    jz .srn_unknown
+    mov rsi, [rax + PyTypeObject.tp_name]
+    jmp .srn_named
+.srn_unknown:
+    CSTRING rsi, "object"
+.srn_named:
+    pop rdi
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - SRN_BUF]
+    extern raise_exception
+    call raise_exception
+END_FUNC smt_raise_not_str
+
+;; smt_raise_too_many(rsi = the count) -- no return
+;; "maketrans expected at most 3 arguments, got 4"
+STM_BUF   equ 176
+STM_N     equ 184
+STM_FRAME equ 192           ; + 0 pushes = 192, 16-aligned
+DEF_FUNC_LOCAL smt_raise_too_many, STM_FRAME
+    mov [rbp - STM_N], rsi
+    lea rdi, [rbp - STM_BUF]
+    CSTRING rsi, "maketrans expected at most 3 arguments, got "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - STM_N]
+    call msg_append_i64
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - STM_BUF]
+    call raise_exception
+END_FUNC smt_raise_too_many
 
 ;; args[0]=self, args[1]=prefix
 ;; If self starts with prefix, return self[len(prefix):], else return self.
@@ -1399,6 +1621,7 @@ SE_ERRS  equ 40
 SE_EID   equ 48             ; 0 strict, 1 ignore, 2 replace
 SE_ARGS  equ 56
 SE_NARGS equ 64
+SE_CURSOR equ 72            ; the source cursor, across codec_error_id
 SE_FRAME equ 80             ; + 2 pushes = 96
 DEF_FUNC str_method_encode, SE_FRAME
     push rbx
@@ -1493,6 +1716,7 @@ DEF_FUNC str_method_encode, SE_FRAME
     ; The handler is looked up only once something actually fails, which is
     ; also when CPython reports an unknown name: "ab".encode("ascii", "bogus")
     ; succeeds there.
+    mov [rbp - SE_CURSOR], rcx  ; the offending byte, for the strict message
     mov rdi, [rbp - SE_ERRS]
     extern codec_error_id
     call codec_error_id         ; 0 strict, 1 ignore, 2 replace, -1 unknown
@@ -1500,7 +1724,12 @@ DEF_FUNC str_method_encode, SE_FRAME
     je .se_bad_errors
     mov [rbp - SE_EID], rax
     test eax, eax
-    jz .se_not_encodable
+    jnz .se_ascii_handled
+    mov rdi, [rbp - SE_SELF]
+    mov rsi, [rbp - SE_CURSOR]
+    mov rdx, 128
+    lea rcx, [rel see_ascii_name]
+    call se_report_unencodable  ; does not return
 
 .se_ascii_handled:
     ; One byte out per code point at most, so the code point count is an upper
@@ -1566,7 +1795,15 @@ DEF_FUNC str_method_encode, SE_FRAME
     RAISE exc_LookupError_type, "unknown error handler name"
 
 .se_latin1:
-    ; One byte per code point, for the code points that fit in one.
+    ; One byte per code point, for the code points that fit in one.  A
+    ; character that does not used to raise regardless of errors=, where the
+    ; ascii arm beside it has honoured ignore and replace for a while:
+    ; "a\u1234b".encode("latin-1", "ignore") was a UnicodeEncodeError.
+    ;
+    ; The handler is looked up only once something actually fails, as the
+    ; ascii arm does and for the same reason -- CPython reports an unknown
+    ; name only then, so "ab".encode("latin-1", "bogus") succeeds there.
+    mov qword [rbp - SE_EID], 0     ; strict until a failure says otherwise
     mov rdi, [rbx + PyStrObject.ob_length]
     call bytes_new
     mov [rbp - SE_OUT], rax
@@ -1583,10 +1820,10 @@ DEF_FUNC str_method_encode, SE_FRAME
     mov edx, eax
     and edx, 0xe0
     cmp edx, 0xc0
-    jne .se_not_encodable
+    jne .se_l1_unencodable
     and eax, 0x1f
     cmp eax, 3
-    ja .se_not_encodable
+    ja .se_l1_unencodable
     shl eax, 6
     inc rcx
     movzx edx, byte [rbx + PyStrObject.data + rcx]
@@ -1599,10 +1836,55 @@ DEF_FUNC str_method_encode, SE_FRAME
     inc qword [rbp - SE_POS]
     inc rcx
     jmp .se_l1_loop
+
+.se_l1_unencodable:
+    ; rcx is on the LEAD byte of the offending sequence.
+    cmp qword [rbp - SE_EID], 0
+    jne .se_l1_skip             ; a handler is already chosen
+    mov [rbp - SE_CURSOR], rcx
+    mov rdi, [rbp - SE_ERRS]
+    call codec_error_id         ; 0 strict, 1 ignore, 2 replace, -1 unknown
+    mov rcx, [rbp - SE_CURSOR]
+    cmp eax, -1
+    je .se_bad_errors
+    mov [rbp - SE_EID], rax
+    test eax, eax
+    jz .se_l1_strict            ; strict
+.se_l1_skip:
+    ; Step over the whole UTF-8 sequence, the way .se_ah_skip does.
+    mov rbx, [rbp - SE_SELF]
+    inc rcx
+.se_l1_skip_loop:
+    cmp rcx, [rbp - SE_LEN]
+    jge .se_l1_after
+    movzx edx, byte [rbx + PyStrObject.data + rcx]
+    and edx, 0xc0
+    cmp edx, 0x80
+    jne .se_l1_after
+    inc rcx
+    jmp .se_l1_skip_loop
+.se_l1_after:
+    cmp qword [rbp - SE_EID], 2
+    jne .se_l1_loop             ; ignore
+    mov rdx, [rbp - SE_OUT]
+    mov r8, [rbp - SE_POS]
+    mov byte [rdx + PyBytesObject.data + r8], '?'
+    inc qword [rbp - SE_POS]
+    jmp .se_l1_loop
+
+.se_l1_strict:
+    mov rdi, [rbp - SE_SELF]
+    mov rsi, rcx
+    mov rdx, 256
+    lea rcx, [rel see_latin1_name]
+    call se_report_unencodable  ; does not return
+
 .se_l1_done:
     mov rax, [rbp - SE_OUT]
     mov rcx, [rbp - SE_POS]
     mov [rax + PyBytesObject.ob_size], rcx
+    ; The trailing NUL the ascii arm writes and this one did not.
+    mov byte [rax + PyBytesObject.data + rcx], 0
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1622,3 +1904,348 @@ DEF_FUNC str_method_encode, SE_FRAME
     extern exc_UnicodeEncodeError_type
     RAISE exc_UnicodeEncodeError_type, "character not in range for this encoding"
 END_FUNC str_method_encode
+
+;; ============================================================================
+;; str_raise_encode_error(rdi = the code point, rsi = its code-point position,
+;;                        rdx = the codec's name, ecx = the range limit)
+;;
+;; "'latin-1' codec can't encode character 'ሴ' in position 1: ordinal not
+;; in range(256)" -- CPython's wording, built here for the same reason
+;; bytes_raise_decode_error builds the decode side's: str() of a
+;; UnicodeEncodeError renders its five fields, but raising a five-argument
+;; exception from asm needs something exc_new does not offer, so the text is
+;; composed instead.  Without it the message named neither the character nor
+;; the position.
+;;
+;; The escape follows CPython's: \xHH below U+0100, \uHHHH below U+10000,
+;; \UHHHHHHHH above it.
+;; ============================================================================
+SRE_CP    equ 8
+SRE_POS   equ 16
+SRE_NAME  equ 24
+SRE_LIMIT equ 32
+SRE_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+DEF_FUNC_LOCAL str_raise_encode_error, SRE_FRAME
+    push rbx
+    mov [rbp - SRE_CP], rdi
+    mov [rbp - SRE_POS], rsi
+    mov [rbp - SRE_NAME], rdx
+    mov [rbp - SRE_LIMIT], rcx
+
+    lea rdi, [rel se_msgbuf]
+    lea rsi, [rel see_quote]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SRE_NAME]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel see_cant]
+    call rbt_append_cstr
+    mov rbx, rax
+
+    ; The escape and its digit count.
+    mov rax, [rbp - SRE_CP]
+    cmp rax, 0x100
+    jb .sre_x
+    cmp rax, 0x10000
+    jb .sre_u
+    mov rdi, rbx
+    lea rsi, [rel see_bigu]
+    call rbt_append_cstr
+    mov rbx, rax
+    mov ecx, 8
+    jmp .sre_digits
+.sre_u:
+    mov rdi, rbx
+    lea rsi, [rel see_smallu]
+    call rbt_append_cstr
+    mov rbx, rax
+    mov ecx, 4
+    jmp .sre_digits
+.sre_x:
+    mov rdi, rbx
+    lea rsi, [rel see_smallx]
+    call rbt_append_cstr
+    mov rbx, rax
+    mov ecx, 2
+
+.sre_digits:
+    ; Most significant nibble first.
+    mov rax, [rbp - SRE_CP]
+    lea r8, [rel see_hexdigits]
+.sre_digit_loop:
+    dec ecx
+    js .sre_digits_done
+    mov rdx, rax
+    mov r9d, ecx
+    shl r9d, 2
+    mov r10, rcx
+    mov ecx, r9d
+    shr rdx, cl
+    mov rcx, r10
+    and edx, 0x0f
+    movzx edx, byte [r8 + rdx]
+    mov [rbx], dl
+    inc rbx
+    jmp .sre_digit_loop
+.sre_digits_done:
+    mov byte [rbx], 0
+
+    mov rdi, rbx
+    lea rsi, [rel see_inpos]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SRE_POS]
+    call see_append_u64
+    mov rdi, rax
+    lea rsi, [rel see_ordinal]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SRE_LIMIT]
+    call see_append_u64
+    mov rdi, rax
+    lea rsi, [rel see_close]
+    call rbt_append_cstr
+
+    extern exc_UnicodeEncodeError_type
+    lea rdi, [rel exc_UnicodeEncodeError_type]
+    lea rsi, [rel se_msgbuf]
+    call raise_exception
+    ud2
+END_FUNC str_raise_encode_error
+
+;; ============================================================================
+;; se_report_unencodable(rdi = the str, rsi = the byte offset of the lead
+;;                       byte, rdx = the range limit, rcx = the codec's name)
+;;
+;; CPython hands its error handler a SPAN of consecutive unencodable
+;; characters and words the strict message from it: one character is
+;; "character 'ሴ' in position 1", several are "characters in position
+;; 0-3".  Positions are counted in characters, not bytes.
+;; ============================================================================
+SRU_STR   equ 8
+SRU_OFF   equ 16
+SRU_LIMIT equ 24
+SRU_NAME  equ 32
+SRU_CP    equ 40
+SRU_SPAN  equ 48
+SRU_FRAME equ 64            ; + 1 push = 72, not 16-aligned
+DEF_FUNC_LOCAL se_report_unencodable, SRU_FRAME
+    push rbx
+    mov [rbp - SRU_STR], rdi
+    mov [rbp - SRU_OFF], rsi
+    mov [rbp - SRU_LIMIT], rdx
+    mov [rbp - SRU_NAME], rcx
+    mov qword [rbp - SRU_SPAN], 0
+
+    mov rbx, rsi                ; the walking byte offset
+.sru_span_loop:
+    cmp rbx, [rdi + PyStrObject.ob_size]
+    jge .sru_span_done
+    mov rdi, [rbp - SRU_STR]
+    mov rsi, rbx
+    call se_decode_at           ; -> rax = code point, rdx = byte length
+    cmp rax, [rbp - SRU_LIMIT]
+    jb .sru_span_done
+    cmp qword [rbp - SRU_SPAN], 0
+    jne .sru_span_next
+    mov [rbp - SRU_CP], rax     ; the first one, which the message names
+.sru_span_next:
+    inc qword [rbp - SRU_SPAN]
+    add rbx, rdx
+    mov rdi, [rbp - SRU_STR]
+    jmp .sru_span_loop
+.sru_span_done:
+
+    ; The start position, in code points.
+    mov rdi, [rbp - SRU_STR]
+    mov rsi, [rbp - SRU_OFF]
+    call str_byte_to_cp
+    mov rbx, rax
+
+    cmp qword [rbp - SRU_SPAN], 1
+    jg .sru_range
+
+    mov rdi, [rbp - SRU_CP]
+    mov rsi, rbx
+    mov rdx, [rbp - SRU_NAME]
+    mov rcx, [rbp - SRU_LIMIT]
+    call str_raise_encode_error ; does not return
+    ud2
+
+.sru_range:
+    mov rdi, rbx                ; the first position
+    mov rsi, rbx
+    add rsi, [rbp - SRU_SPAN]
+    dec rsi                     ; the last
+    mov rdx, [rbp - SRU_NAME]
+    mov rcx, [rbp - SRU_LIMIT]
+    call str_raise_encode_range ; does not return
+    ud2
+END_FUNC se_report_unencodable
+
+;; ============================================================================
+;; se_decode_at(rdi = the str, rsi = a byte offset) -> rax = the code point,
+;;                                                     rdx = its byte length
+;; ============================================================================
+DEF_FUNC_LOCAL se_decode_at
+    lea r8, [rdi + PyStrObject.data]
+    add r8, rsi
+    movzx eax, byte [r8]
+    mov ecx, eax
+    and ecx, 0x80
+    jz .sda_one
+    mov ecx, eax
+    and ecx, 0xe0
+    cmp ecx, 0xc0
+    je .sda_two
+    mov ecx, eax
+    and ecx, 0xf0
+    cmp ecx, 0xe0
+    je .sda_three
+    mov ecx, eax
+    and ecx, 0xf8
+    cmp ecx, 0xf0
+    je .sda_four
+.sda_one:
+    mov edx, 1
+    leave
+    ret
+.sda_two:
+    and eax, 0x1f
+    shl eax, 6
+    movzx ecx, byte [r8 + 1]
+    and ecx, 0x3f
+    or eax, ecx
+    mov edx, 2
+    leave
+    ret
+.sda_three:
+    and eax, 0x0f
+    shl eax, 12
+    movzx ecx, byte [r8 + 1]
+    and ecx, 0x3f
+    shl ecx, 6
+    or eax, ecx
+    movzx ecx, byte [r8 + 2]
+    and ecx, 0x3f
+    or eax, ecx
+    mov edx, 3
+    leave
+    ret
+.sda_four:
+    and eax, 0x07
+    shl eax, 18
+    movzx ecx, byte [r8 + 1]
+    and ecx, 0x3f
+    shl ecx, 12
+    or eax, ecx
+    movzx ecx, byte [r8 + 2]
+    and ecx, 0x3f
+    shl ecx, 6
+    or eax, ecx
+    movzx ecx, byte [r8 + 3]
+    and ecx, 0x3f
+    or eax, ecx
+    mov edx, 4
+    leave
+    ret
+END_FUNC se_decode_at
+
+;; ============================================================================
+;; str_raise_encode_range(rdi = first position, rsi = last position,
+;;                        rdx = the codec's name, rcx = the range limit)
+;;
+;; "'ascii' codec can't encode characters in position 0-3: ordinal not in
+;; range(128)" -- the plural form, for a run of more than one.
+;; ============================================================================
+SRR_FIRST equ 8
+SRR_LAST  equ 16
+SRR_NAME  equ 24
+SRR_LIMIT equ 32
+SRR_FRAME equ 48            ; + 0 pushes = 48
+DEF_FUNC_LOCAL str_raise_encode_range, SRR_FRAME
+    mov [rbp - SRR_FIRST], rdi
+    mov [rbp - SRR_LAST], rsi
+    mov [rbp - SRR_NAME], rdx
+    mov [rbp - SRR_LIMIT], rcx
+
+    lea rdi, [rel se_msgbuf]
+    lea rsi, [rel see_quote]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SRR_NAME]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel see_cants]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SRR_FIRST]
+    call see_append_u64
+    mov rdi, rax
+    lea rsi, [rel see_dash]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SRR_LAST]
+    call see_append_u64
+    mov rdi, rax
+    lea rsi, [rel see_ordinal]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SRR_LIMIT]
+    call see_append_u64
+    mov rdi, rax
+    lea rsi, [rel see_close]
+    call rbt_append_cstr
+
+    lea rdi, [rel exc_UnicodeEncodeError_type]
+    lea rsi, [rel se_msgbuf]
+    call raise_exception
+    ud2
+END_FUNC str_raise_encode_range
+
+;; see_append_u64(rdi = dest, rsi = the value) -> rax = the new NUL
+DEF_FUNC_LOCAL see_append_u64
+    mov rax, rsi
+    mov r8, rdi
+    mov r9, rsp
+    sub rsp, 32
+    mov rcx, rsp
+    add rcx, 24
+    mov byte [rcx], 0
+    mov r10, 10
+.sau_loop:
+    xor edx, edx
+    div r10
+    add edx, '0'
+    dec rcx
+    mov [rcx], dl
+    test rax, rax
+    jnz .sau_loop
+    mov rdi, r8
+    mov rsi, rcx
+    call rbt_append_cstr
+    mov rsp, r9
+    leave
+    ret
+END_FUNC see_append_u64
+
+section .rodata
+see_hexdigits: db "0123456789abcdef"
+see_quote:     db "'", 0
+see_cant:      db "' codec can't encode character '", 0
+; NASM processes no escapes in a double-quoted string, so one backslash here
+; is one backslash in the message.
+see_smallx:    db "\x", 0
+see_smallu:    db "\u", 0
+see_bigu:      db "\U", 0
+see_inpos:     db "' in position ", 0
+see_cants:     db "' codec can't encode characters in position ", 0
+see_dash:      db "-", 0
+see_ordinal:   db ": ordinal not in range(", 0
+see_close:     db ")", 0
+see_latin1_name: db "latin-1", 0
+see_ascii_name:  db "ascii", 0
+section .bss
+se_msgbuf: resb 160
+section .text

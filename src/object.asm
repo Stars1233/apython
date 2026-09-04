@@ -233,14 +233,224 @@ DEF_FUNC obj_repr
     leave
     ret
 
-.null_obj:
 .no_repr:
+    ; A type with no tp_repr used to answer a NULL Value and set no
+    ; exception, and every caller had to guess what that meant: print()
+    ; skipped the argument, and repr(iter({1})) handed ITS caller a missing
+    ; argument -- or, one frame further on, a segfault.
+    ;
+    ; CPython's default: "<set_iterator object at 0x7f...>".  The address is
+    ; this object's own, so it cannot match CPython's -- but neither can
+    ; CPython's match its own from one run to the next, so nothing correct
+    ; can be comparing it, and leaving it out only made the shape wrong.
+    mov rax, [rdi + PyObject.ob_type]
+    test rax, rax
+    jz .null_obj
+    mov rsi, rdi
+    mov rdi, rax
+    call obj_default_repr
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.null_obj:
     ; Return a NULL *Value*, not just a zero payload: callers test the tag,
     ; and leaving edx stale made print() dereference the NULL.
     RET_NULL
     leave
     ret
 END_FUNC obj_repr
+
+; obj_default_repr(rdi = a PyTypeObject*, rsi = the object)
+;   -> rax = PyStrObject* "<name object at 0x...>"
+;
+; The repr a type with no tp_repr gets, and object.__repr__'s own answer.  Its
+; own function because the instance repr wants the same shape, and because
+; rbt_buf is shared with the TypeError composer -- neither can be live across
+; the other.
+global obj_default_repr
+DEF_FUNC obj_default_repr
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    lea rdi, [rel rbt_buf]
+    lea rsi, [rel odr_open]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbx + PyTypeObject.tp_name]
+    test rsi, rsi
+    jnz .odr_have_name
+    lea rsi, [rel rbt_unknown]
+.odr_have_name:
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel odr_object]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, r12
+    call obj_repr_address
+    lea rdi, [rel rbt_buf]
+    call str_from_cstr
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC obj_default_repr
+
+; obj_default_repr_named(rdi = the object, rsi = a module cstr or 0,
+;                        rdx = the type's name cstr)
+;   -> rax = PyStrObject* "<module.name object at 0x...>"
+;
+; What object.__repr__ answers for a class defined in Python.  CPython leaves
+; the module out when it is "builtins", which is the same rule that makes
+; `repr(iter({1}))` say "set_iterator" and not "builtins.set_iterator".
+global obj_default_repr_named
+ODN_OBJ  equ 8
+ODN_MOD  equ 16
+ODN_NAME equ 24
+ODN_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC obj_default_repr_named, ODN_FRAME
+    mov [rbp - ODN_OBJ], rdi
+    mov [rbp - ODN_MOD], rsi
+    mov [rbp - ODN_NAME], rdx
+
+    lea rdi, [rel rbt_buf]
+    lea rsi, [rel odr_open]
+    call rbt_append_cstr
+    mov rsi, [rbp - ODN_MOD]
+    test rsi, rsi
+    jz .odn_name
+    mov rdi, rax
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel odr_dot]
+    call rbt_append_cstr
+.odn_name:
+    mov rdi, rax
+    mov rsi, [rbp - ODN_NAME]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel odr_object]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - ODN_OBJ]
+    call obj_repr_address
+    lea rdi, [rel rbt_buf]
+    call str_from_cstr
+    leave
+    ret
+END_FUNC obj_default_repr_named
+
+; obj_repr_named_at(rdi = the object, rsi = a prefix cstr, rdx = a name cstr
+;                   or 0) -> rax = PyStrObject* "<prefix name at 0x...>"
+;
+; The shape a function, a generator, a coroutine and an async generator all
+; have.  With no name it is just "<prefix at 0x...>".
+global obj_repr_named_at
+ORN_OBJ  equ 8
+ORN_NAME equ 16
+ORN_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC obj_repr_named_at, ORN_FRAME
+    mov [rbp - ORN_OBJ], rdi
+    mov [rbp - ORN_NAME], rdx
+    mov rdx, rsi
+    lea rdi, [rel rbt_buf]
+    lea rsi, [rel odr_open]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, rdx
+    call rbt_append_cstr
+    mov rsi, [rbp - ORN_NAME]
+    test rsi, rsi
+    jz .orn_addr
+    mov rdi, rax
+    push rsi
+    lea rsi, [rel odr_space]
+    call rbt_append_cstr
+    pop rsi
+    mov rdi, rax
+    call rbt_append_cstr
+.orn_addr:
+    mov rdi, rax
+    mov rsi, [rbp - ORN_OBJ]
+    call obj_repr_address
+    lea rdi, [rel rbt_buf]
+    call str_from_cstr
+    leave
+    ret
+END_FUNC obj_repr_named_at
+
+; obj_repr_buf(rdi = the first cstr) -> rax = a cursor into the shared repr
+; buffer, with that string already in it.  Append with rbt_append_cstr and
+; finish with obj_repr_buf_str; the buffer is shared with the TypeError
+; composer, so nothing may be live across the two.
+global obj_repr_buf
+DEF_FUNC obj_repr_buf
+    mov rsi, rdi
+    lea rdi, [rel rbt_buf]
+    call rbt_append_cstr
+    leave
+    ret
+END_FUNC obj_repr_buf
+
+; obj_repr_buf_str() -> rax = the buffer as a str
+global obj_repr_buf_str
+DEF_FUNC obj_repr_buf_str
+    lea rdi, [rel rbt_buf]
+    call str_from_cstr
+    leave
+    ret
+END_FUNC obj_repr_buf_str
+
+; obj_repr_address(rdi = cursor into rbt_buf, rsi = the object)
+;   -> rax = the new cursor, having written " at 0xADDR>"
+;
+; CPython formats the address with %p, which on glibc is "0x" and lowercase
+; hex with no leading zeroes.  Every default repr in the tree ends this way.
+global obj_repr_address
+DEF_FUNC obj_repr_address
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    mov rdi, rbx
+    lea rsi, [rel odr_object_at]
+    call rbt_append_cstr
+    mov rbx, rax
+    ; The digits, high nibble first, skipping leading zeroes.
+    mov rax, r12
+    mov ecx, 60
+.ora_skip:
+    mov rdx, rax
+    shr rdx, cl
+    and edx, 15
+    jnz .ora_digits
+    sub ecx, 4
+    jns .ora_skip
+    xor ecx, ecx                ; the address is 0: print one digit
+.ora_digits:
+    mov rdx, rax
+    shr rdx, cl
+    and edx, 15
+    add dl, '0'
+    cmp dl, '9'
+    jbe .ora_put
+    add dl, 'a' - '0' - 10
+.ora_put:
+    mov [rbx], dl
+    inc rbx
+    sub ecx, 4
+    jns .ora_digits
+    mov byte [rbx], '>'
+    inc rbx
+    mov byte [rbx], 0
+    mov rax, rbx
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC obj_repr_address
 
 ; obj_str(rdi=value) -> PyObject* (string)
 ; Decodes the Value, then dispatches: int immediate → int_repr, pointer → tp_str
@@ -348,6 +558,15 @@ DEF_FUNC obj_as_index
     je .oai_immediate
     cmp edx, TAG_PTR
     jne .oai_error
+    ; An int subclass WRAPS an int rather than being one -- buildclass gives
+    ; it a PyInstanceObject layout, not room on the end of a PyIntObject -- so
+    ; the value has to be unwrapped before it can be read.  Without this the
+    ; wrapper's own header was read as the number, and every index built from
+    ; one, `class N(int)` or an IntEnum member alike, came out as 0.
+    extern int_unwrap
+    call int_unwrap
+    cmp edx, TAG_SMALLINT
+    je .oai_immediate
     mov rax, [rdi + PyObject.ob_type]
     REQUIRE_INT_TYPE rax, rcx, .oai_try_dunder
     call int_to_i64
@@ -381,7 +600,15 @@ DEF_FUNC obj_as_index
     mov rcx, [rax + PyObject.ob_type]
     REQUIRE_INT_TYPE rcx, rsi, .oai_bad_index
     mov rdi, rax
+    mov edx, TAG_PTR
+    call int_unwrap             ; __index__ may itself return an int subclass
+    cmp edx, TAG_SMALLINT
+    je .oai_dunder_immediate
     call int_to_i64
+    leave
+    ret
+.oai_dunder_immediate:
+    mov rax, rdi
     leave
     ret
 .oai_dunder_done:
@@ -392,8 +619,294 @@ DEF_FUNC obj_as_index
     RAISE exc_TypeError_type, "__index__ returned non-int"
 
 .oai_error:
-    RAISE exc_TypeError_type, "object cannot be interpreted as an integer"
+    ; Name the type.  This is the single funnel for every __index__ context --
+    ; subscripts, slice bounds, repetition counts, hex() -- so the one word
+    ; that identifies the mistake was missing from all of them.  The Value has
+    ; to be rebuilt from the (payload, tag) pair the caller passed.
+    mov rsi, rdi
+    V_PACK rsi, rdx
+    lea rdi, [rel oai_not_an_index]
+    jmp raise_type_error_with_name
 END_FUNC obj_as_index
+
+;; ============================================================================
+;; raise_type_error_counted(rdi = the text before the number, rsi = the count,
+;;                          rdx = the text after it, or 0) -- does not return
+;;
+;; "str() takes at most 3 arguments (4 given)".  CPython reports the count in
+;; every arity message and this tree reported it in almost none, so a caller
+;; was told the rule but not what it had actually passed.
+;; ============================================================================
+RTC_N     equ 8
+RTC_TAIL  equ 16
+RTC_BUF   equ 192
+RTC_FRAME equ 192           ; + 0 pushes = 192, 16-aligned
+global raise_type_error_counted
+DEF_FUNC raise_type_error_counted, RTC_FRAME
+    mov [rbp - RTC_N], rsi
+    mov [rbp - RTC_TAIL], rdx
+    mov rsi, rdi
+    lea rdi, [rbp - RTC_BUF]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RTC_N]
+    call msg_append_i64
+    cmp qword [rbp - RTC_TAIL], 0
+    je .rtc_raise
+    mov rdi, rax
+    mov rsi, [rbp - RTC_TAIL]
+    call rbt_append_cstr
+.rtc_raise:
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RTC_BUF]
+    call raise_exception
+END_FUNC raise_type_error_counted
+
+;; ============================================================================
+;; raise_final_base(rdi = the type's name, as a C string) -- does not return
+;;
+;; "type 'bool' is not an acceptable base type", for a type CPython gives no
+;; Py_TPFLAGS_BASETYPE.
+;; ============================================================================
+RFB_BUF   equ 176
+RFB_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
+global raise_final_base
+DEF_FUNC raise_final_base, RFB_FRAME
+    mov rdx, rdi
+    lea rdi, [rbp - RFB_BUF]
+    CSTRING rsi, "type '"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, rdx
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "' is not an acceptable base type"
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RFB_BUF]
+    call raise_exception
+END_FUNC raise_final_base
+
+;; ============================================================================
+;; raise_descriptor_receiver(rdi = the PyBuiltinObject, rsi = the receiver
+;;                           Value) -- does not return
+;;
+;; CPython has two wordings here, and which one you get says what kind of
+;; descriptor you reached:
+;;   descriptor 'append' for 'list' objects doesn't apply to a 'tuple' object
+;;   descriptor '__neg__' requires a 'int' object but received a 'float'
+;; The first is a method descriptor, the second a slot wrapper.  func_kind
+;; already records which, for the repr; this is the second reader of it.
+;; ============================================================================
+RDR_DESC  equ 8
+RDR_RECV  equ 16
+RDR_BUF   equ 240
+RDR_FRAME equ 240           ; + 0 pushes = 240, 16-aligned
+global raise_descriptor_receiver
+DEF_FUNC raise_descriptor_receiver, RDR_FRAME
+    mov [rbp - RDR_DESC], rdi
+    mov [rbp - RDR_RECV], rsi
+    lea rdi, [rbp - RDR_BUF]
+    CSTRING rsi, "descriptor '"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RDR_DESC]
+    mov rsi, [rsi + PyBuiltinObject.func_name]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+
+    mov rcx, [rbp - RDR_DESC]
+    cmp qword [rcx + PyBuiltinObject.func_kind], BUILTIN_KIND_WRAPPER
+    je .rdr_wrapper
+
+    CSTRING rsi, "' for '"
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rdr_owner_name
+    mov rdi, rax
+    CSTRING rsi, "' objects doesn't apply to a '"
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rdr_recv_name
+    mov rdi, rax
+    CSTRING rsi, "' object"
+    call rbt_append_cstr
+    jmp .rdr_raise
+
+.rdr_wrapper:
+    CSTRING rsi, "' requires a '"
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rdr_owner_name
+    mov rdi, rax
+    CSTRING rsi, "' object but received a '"
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rdr_recv_name
+    mov rdi, rax
+    CSTRING rsi, "'"
+    call rbt_append_cstr
+
+.rdr_raise:
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RDR_BUF]
+    call raise_exception
+
+;; The two names, appended at the cursor in rdi.
+.rdr_owner_name:
+    mov rcx, [rbp - RDR_DESC]
+    mov rcx, [rcx + PyBuiltinObject.func_owner]
+    mov rsi, [rcx + PyTypeObject.tp_name]
+    jmp rbt_append_cstr
+.rdr_recv_name:
+    push rdi
+    mov rdi, [rbp - RDR_RECV]
+    call value_type
+    test rax, rax
+    jz .rdr_recv_unknown
+    mov rsi, [rax + PyTypeObject.tp_name]
+    jmp .rdr_recv_go
+.rdr_recv_unknown:
+    CSTRING rsi, "object"
+.rdr_recv_go:
+    pop rdi
+    jmp rbt_append_cstr
+END_FUNC raise_descriptor_receiver
+
+;; ============================================================================
+;; raise_wrapper_arity(rdi = the number of arguments wanted, not counting
+;;                     self; rsi = the number given, likewise) -- no return
+;;
+;; "expected 0 arguments, got 1" -- CPython's wording for a slot wrapper.
+;; Every one of these said "expected exactly one argument", which is neither
+;; the count nor, for the nullary ones, even the right number.
+;; ============================================================================
+RWA_WANT  equ 8
+RWA_GOT   equ 16
+RWA_BUF   equ 192
+RWA_FRAME equ 192           ; + 0 pushes = 192, 16-aligned
+global raise_wrapper_arity
+DEF_FUNC raise_wrapper_arity, RWA_FRAME
+    mov [rbp - RWA_WANT], rdi
+    mov [rbp - RWA_GOT], rsi
+    lea rdi, [rbp - RWA_BUF]
+    CSTRING rsi, "expected "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RWA_WANT]
+    call msg_append_i64
+    mov rdi, rax
+    cmp qword [rbp - RWA_WANT], 1
+    je .rwa_singular
+    CSTRING rsi, " arguments, got "
+    jmp .rwa_join
+.rwa_singular:
+    CSTRING rsi, " argument, got "
+.rwa_join:
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RWA_GOT]
+    call msg_append_i64
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RWA_BUF]
+    call raise_exception
+END_FUNC raise_wrapper_arity
+
+;; ============================================================================
+;; raise_builtin_arity(rdi = the PyBuiltinObject, rsi = the count given,
+;;                     rdx = the count wanted) -- neither counts self
+;;
+;; CPython's shapes, which differ by whether the method takes a fixed number:
+;;   list.append() takes exactly one argument (2 given)
+;;   str.upper() takes no arguments (1 given)
+;;   hex() takes at most 2 arguments (3 given)
+;;   expected 0 arguments, got 1            <- a slot wrapper
+;; ============================================================================
+RBA_DESC  equ 8
+RBA_GOT   equ 16
+RBA_WANT  equ 24
+RBA_BUF   equ 240
+RBA_FRAME equ 240           ; + 0 pushes = 240, 16-aligned
+global raise_builtin_arity
+DEF_FUNC raise_builtin_arity, RBA_FRAME
+    mov [rbp - RBA_DESC], rdi
+    mov [rbp - RBA_GOT], rsi
+    mov [rbp - RBA_WANT], rdx
+
+    ; A slot wrapper has its own wording, and never names itself.
+    cmp qword [rdi + PyBuiltinObject.func_kind], BUILTIN_KIND_WRAPPER
+    jne .rba_method
+    mov rdi, rdx
+    mov rsi, [rbp - RBA_GOT]
+    jmp raise_wrapper_arity
+
+.rba_method:
+    lea rdi, [rbp - RBA_BUF]
+    mov rcx, [rbp - RBA_DESC]
+    cmp qword [rcx + PyBuiltinObject.func_owner], 0
+    je .rba_bare_name
+    mov rsi, [rcx + PyBuiltinObject.func_owner]
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "."
+    call rbt_append_cstr
+    mov rdi, rax
+.rba_bare_name:
+    mov rcx, [rbp - RBA_DESC]
+    mov rsi, [rcx + PyBuiltinObject.func_name]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+
+    ; A fixed arity names the number; a range says "at most".
+    mov rcx, [rbp - RBA_DESC]
+    mov rax, [rcx + PyBuiltinObject.min_args]
+    cmp rax, [rcx + PyBuiltinObject.max_args]
+    jne .rba_range
+    cmp qword [rbp - RBA_WANT], 0
+    je .rba_none
+    cmp qword [rbp - RBA_WANT], 1
+    je .rba_one
+    CSTRING rsi, "() takes exactly "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RBA_WANT]
+    call msg_append_i64
+    mov rdi, rax
+    CSTRING rsi, " arguments ("
+    jmp .rba_tail
+.rba_one:
+    CSTRING rsi, "() takes exactly one argument ("
+    jmp .rba_tail
+.rba_none:
+    CSTRING rsi, "() takes no arguments ("
+    jmp .rba_tail
+.rba_range:
+    CSTRING rsi, "() takes at most "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RBA_WANT]
+    call msg_append_i64
+    mov rdi, rax
+    CSTRING rsi, " arguments ("
+.rba_tail:
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RBA_GOT]
+    call msg_append_i64
+    mov rdi, rax
+    CSTRING rsi, " given)"
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RBA_BUF]
+    call raise_exception
+END_FUNC raise_builtin_arity
+
+section .rodata
+oai_not_an_index: db "'", 1, "' object cannot be interpreted as an integer", 0
+section .text
 
 ; value_number_methods(rdi = payload, edx = tag) -> rax = PyNumberMethods*, or 0
 ;
@@ -469,7 +982,17 @@ rbt_open:    db ": '", 0
 rbt_and:     db "' and '", 0
 rbt_close:   db "'", 0
 rbt_unknown: db "object", 0
-drs_prefix:  db "descriptor requires a '", 0
+hni_open:    db "unhashable type: '", 0
+odr_open:    db "<", 0
+odr_close:   db ">", 0
+odr_object:  db " object", 0
+odr_object_at: db " at 0x", 0
+odr_quote:   db "'", 0
+odr_space:   db " ", 0
+odr_dot:     db ".", 0
+drs_prefix:  db "descriptor ", 0
+drs_after_name: db "' ", 0
+drs_requires: db "requires a '", 0
 drs_middle:  db "' object but received a '", 0
 mah_digits:  db "0123456789abcdef", 0
 
@@ -537,7 +1060,8 @@ rtn_compose:
 END_FUNC raise_type_error_with_typename
 
 ; dunder_require_self(rdi = self Value, rsi = the type whose method this is,
-;                     rdx = a second acceptable type, or 0)
+;                     rdx = a second acceptable type, or 0,
+;                     rcx = the descriptor's own name, or 0)
 ;   -> rax = the self Value, unchanged; does not return if the type is wrong
 ;
 ; A dunder reached BY NAME is handed whatever the caller passed, and the slot
@@ -548,8 +1072,9 @@ END_FUNC raise_type_error_with_typename
 ; one has to ask this first.
 ;
 ; CPython words it "descriptor '__neg__' requires a 'int' object but received
-; a 'float'".  Threading the descriptor's own name through every generator
-; buys one clause, so the two type names carry the message instead.
+; a 'float'".  The generators know their own suffix, so they pass it and the
+; message reads as CPython's; a caller with nothing to say passes 0 and gets
+; the two type names alone.
 ;
 ; A subclass is accepted: int.__neg__(D(2)) for class D(int) is how a
 ; subclass reaches the base's operator, and is the reason this is
@@ -557,17 +1082,21 @@ END_FUNC raise_type_error_with_typename
 ;
 ; The second type is for the pairs that genuinely share one function.  set
 ; and frozenset are registered from one table -- they are siblings, neither a
-; subtype of the other -- so set_dunder_len has to answer for both.
+; subtype of the other -- so set_dunder_len has to answer for both.  The
+; eight set operators used to need it too, and no longer do: each type
+; carries its own bodies now.
 DRS_SELF  equ 8
 DRS_TYPE  equ 16
 DRS_ALT   equ 24
-DRS_FRAME equ 32
+DRS_NAME  equ 32
+DRS_FRAME equ 48            ; + 0 pushes = 48
 
 global dunder_require_self
 DEF_FUNC dunder_require_self, DRS_FRAME
     mov [rbp - DRS_SELF], rdi
     mov [rbp - DRS_TYPE], rsi
     mov [rbp - DRS_ALT], rdx
+    mov [rbp - DRS_NAME], rcx
     call value_type
     test rax, rax
     jz .drs_bad
@@ -594,6 +1123,22 @@ DEF_FUNC dunder_require_self, DRS_FRAME
 .drs_bad:
     lea rdi, [rel rbt_buf]
     lea rsi, [rel drs_prefix]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - DRS_NAME]
+    test rsi, rsi
+    jz .drs_no_name
+    lea rsi, [rel rbt_close]        ; the opening quote
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - DRS_NAME]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel drs_after_name]
+    call rbt_append_cstr
+    mov rdi, rax
+.drs_no_name:
+    lea rsi, [rel drs_requires]
     call rbt_append_cstr
     mov rdi, rax
     mov rsi, [rbp - DRS_TYPE]
@@ -989,8 +1534,18 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     jmp eval_exception_unwind
 .rna_fresh:
     mov [rbp - RNA_NAME], rsi
+    push rdi
     call value_type
+    pop rdi
     mov r12, rax
+
+    ; A module names itself rather than its type: CPython says
+    ; "module 'sys' has no attribute 'zzz'", not "'module' object has ...".
+    ; The name is the one thing that tells you WHICH module was asked.
+    extern module_type
+    lea rcx, [rel module_type]
+    cmp r12, rcx
+    je .rna_module
 
     lea rbx, [rel rtn_buf]
     xor ecx, ecx
@@ -999,6 +1554,45 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     test r12, r12
     jz .rna_after_type
     mov rsi, [r12 + PyTypeObject.tp_name]
+    jmp .rna_type
+
+.rna_module:
+    lea rbx, [rel rtn_buf]
+    xor ecx, ecx
+    mov rsi, [rdi + PyModuleObject.mod_name]
+    test rsi, rsi
+    jz .rna_module_unnamed
+    CSTRING rsi, "module '"
+    jmp .rna_module_prefix
+.rna_module_unnamed:
+    CSTRING rsi, "module '?"
+.rna_module_prefix:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .rna_module_name
+    inc rsi
+    mov [rbx + rcx], al
+    inc rcx
+    jmp .rna_module_prefix
+.rna_module_name:
+    mov rsi, [rdi + PyModuleObject.mod_name]
+    test rsi, rsi
+    jz .rna_after_module
+    lea rsi, [rsi + PyStrObject.data]
+.rna_module_loop:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .rna_after_module
+    inc rsi
+    cmp rcx, RTN_BUFSZ - 2
+    jae .rna_after_module
+    mov [rbx + rcx], al
+    inc rcx
+    jmp .rna_module_loop
+.rna_after_module:
+    CSTRING rsi, `' has no attribute '`
+    jmp .rna_mid
+
 .rna_type:
     movzx eax, byte [rsi]
     test al, al
@@ -1489,14 +2083,46 @@ orb_swap_table:
     dd PY_LE                    ; PY_GE
 section .text
 
-; hash_not_implemented() -> never returns
-; Used as tp_hash for unhashable types (dict, list, set).
-; Raises TypeError("unhashable type").
+; hash_not_implemented(rdi = the object) -> never returns
+; Used as tp_hash for unhashable types (dict, list, set, bytearray), and
+; installed on a class that defines __eq__ without __hash__ or sets
+; __hash__ = None.  Raises TypeError("unhashable type: 'list'") -- it used to
+; name nothing, which is the one thing the message is for.
+global hash_not_implemented
 DEF_FUNC hash_not_implemented
     extern raise_exception
     extern exc_TypeError_type
-    RAISE exc_TypeError_type, "unhashable type"
+    push rdi
+    sub rsp, 8
+    lea rdi, [rel rbt_buf]
+    lea rsi, [rel hni_open]
+    call rbt_append_cstr
+    mov rdi, rax
+    add rsp, 8
+    pop rsi
+    call rbt_typename
+    mov rdi, rax
+    lea rsi, [rel rbt_close]
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel rbt_buf]
+    call raise_exception
+    ud2
 END_FUNC hash_not_implemented
+
+; object_hash(rdi = the object, edx = its tag) -> int64
+;
+; object.__hash__: the address, which is CPython's default for any object
+; that does not define one.  object_type.tp_hash was 0, and tp_hash is
+; inherited -- so every instance, every plain class, every function, module,
+; iterator and object() had none, and hash() on one raised TypeError.  dict
+; and set did not notice because obj_hash falls back to the address itself;
+; only the hash() builtin, which reads tp_hash directly, could see it.
+global object_hash
+DEF_FUNC_BARE object_hash
+    mov rax, rdi
+    ret
+END_FUNC object_hash
 
 ; obj_hash(rdi=value) -> int64
 ; Decodes the Value, then dispatches: int immediate → int_hash_i64, pointer → tp_hash.

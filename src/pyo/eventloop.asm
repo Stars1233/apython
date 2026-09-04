@@ -18,8 +18,14 @@
 
 extern bool_true
 extern bool_false
+extern coro_type
+extern gen_type
+extern exc_TypeError_type
+extern set_exception
 extern ap_malloc
 extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern obj_incref
 extern obj_decref
@@ -81,6 +87,9 @@ DEF_FUNC eventloop_init
 
 .init_done:
     ; Initialize ready queue
+    ; eventloop_teardown drains the queue and clears root_task, so these are
+    ; a first-run initialisation rather than a way of forgetting a previous
+    ; run's contents -- which is what they used to be.
     mov qword [rel eventloop + EventLoop.ready_head], 0
     mov qword [rel eventloop + EventLoop.ready_tail], 0
     mov dword [rel eventloop + EventLoop.running], 1
@@ -96,6 +105,19 @@ END_FUNC eventloop_init
 ;; Shut down the event loop and backend.
 ;; ============================================================================
 DEF_FUNC eventloop_teardown
+    ; Drain the ready queue first.  It owns a reference per task, and
+    ; eventloop_init used to start the next run by zeroing the head and tail
+    ; over whatever was still linked there -- every one of those tasks leaked,
+    ; and with them their coroutine, its frame and everything the frame held.
+.tdn_drain:
+    call ready_dequeue
+    test rax, rax
+    jz .tdn_drained
+    mov rdi, rax
+    call obj_decref
+    jmp .tdn_drain
+.tdn_drained:
+
     mov rax, [rel eventloop + EventLoop.backend]
     test rax, rax
     jz .td_done
@@ -115,14 +137,36 @@ END_FUNC eventloop_teardown
 DEF_FUNC task_new
     push rbx
 
+    ; The argument is stepped with gen_send, which reads PyGenObject fields
+    ; off it -- so it has to BE one.  Nothing checked: `gather("hello")` and a
+    ; nested gather() both wrapped whatever they were given and crashed on the
+    ; first step, several stack frames from where the mistake was made.
+    ; Coroutines, generators and async generators are the three that can be
+    ; sent to; a task or a future is recognised by the callers before they get
+    ; here.
+    V_TEST_PTR rdi, rax
+    ja .tn_not_awaitable
+    test rdi, rdi
+    jz .tn_not_awaitable
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel coro_type]
+    cmp rax, rcx
+    je .tn_ok
+    lea rcx, [rel gen_type]
+    cmp rax, rcx
+    je .tn_ok
+    extern async_gen_type
+    lea rcx, [rel async_gen_type]
+    cmp rax, rcx
+    jne .tn_not_awaitable
+.tn_ok:
     mov rbx, rdi               ; save coro
 
     mov edi, AsyncTask_size
-    call ap_malloc
+    lea rsi, [rel task_type]
+    call gc_alloc
 
     mov qword [rax + AsyncTask.ob_refcnt], 1
-    lea rcx, [rel task_type]
-    mov [rax + AsyncTask.ob_type], rcx
     mov [rax + AsyncTask.coro], rbx
     ; INCREF coro
     mov rdi, rbx
@@ -132,6 +176,7 @@ DEF_FUNC task_new
 
     mov qword [rax + AsyncTask.result], 0
     mov qword [rax + AsyncTask.exception], 0
+    mov dword [rax + AsyncTask.queued], 0
     ; send_value starts as None, and is OWNED from here on: task_step stores
     ; into it with an INCREF, and task_dealloc releases it.  Storing the
     ; singleton without taking a reference made that release one too many.
@@ -144,7 +189,28 @@ DEF_FUNC task_new
     mov qword [rax + AsyncTask.waiters], 0
     mov dword [rax + AsyncTask.waiters_cap], 0
     mov qword [rax + AsyncTask.next], 0
+    mov qword [rax + AsyncTask.ts_sec], 0
+    mov qword [rax + AsyncTask.ts_nsec], 0
+    mov qword [rax + AsyncTask.pad_result], 0
+    mov qword [rax + AsyncTask.pad_send], 0
 
+    ; gc_track only now, for the reason code_new gives: tracking can trigger
+    ; a collection, and the traverse would walk fields not yet written.
+    mov rbx, rax
+    mov rdi, rax
+    call gc_track
+    mov rax, rbx
+
+    pop rbx
+    leave
+    ret
+
+.tn_not_awaitable:
+    ; SET_EXC and 0, not RAISE: every caller checks for the NULL and releases
+    ; what it is holding, and a builtin that abandons its C frame leaks it.
+    SET_EXC exc_TypeError_type, \
+            "An asyncio.Future, a coroutine or an awaitable is required"
+    xor eax, eax
     pop rbx
     leave
     ret
@@ -176,10 +242,26 @@ DEF_FUNC task_dealloc
     call obj_decref
 .td_no_exc:
 
-    ; Free waiters array
+    ; Release any waiters still in the array, then free it.  A task that dies
+    ; without ever completing -- cancelled, or dropped with the loop torn
+    ; down under it -- still holds one reference per waiter.
+    mov ecx, [rbx + AsyncTask.n_waiters]
+    test ecx, ecx
+    jz .td_free_waiters
+    mov dword [rbx + AsyncTask.n_waiters], 0
+.td_waiter_loop:
+    mov rax, [rbx + AsyncTask.waiters]
+    mov rdi, [rax + rcx*8 - 8]
+    push rcx
+    call obj_decref
+    pop rcx
+    dec ecx
+    jnz .td_waiter_loop
+.td_free_waiters:
     mov rdi, [rbx + AsyncTask.waiters]
     test rdi, rdi
     jz .td_no_waiters
+    mov qword [rbx + AsyncTask.waiters], 0
     call ap_free
 .td_no_waiters:
 
@@ -193,12 +275,137 @@ DEF_FUNC task_dealloc
 
     ; Free self
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
     ret
 END_FUNC task_dealloc
+
+;; ============================================================================
+;; task_set_send_value(rdi = task, rsi = the Value to resume it with)
+;;
+;; send_value is an OWNED reference -- task_dealloc releases it -- so every
+;; store has to release what was there.  Both backends stored none_singleton
+;; over it with neither an incref of the new nor a release of the old: None is
+;; immortal, so nothing crashed, and whatever the field had been holding was
+;; leaked once per timer expiry and once per fd readiness.
+;;
+;; The new value is increfd before the old is released, so setting a task's
+;; send_value to what it already holds is safe.
+;; ============================================================================
+global task_set_send_value
+DEF_FUNC task_set_send_value
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    INCREF_V r12, rax
+    mov rdi, [rbx + AsyncTask.send_value]
+    mov [rbx + AsyncTask.send_value], r12
+    XDECREF_V rdi, rax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC task_set_send_value
+
+;; ============================================================================
+;; task_traverse / task_clear
+;;
+;; A task holds its coroutine, the coroutine holds a frame, and the frame's
+;; locals can hold the task -- an ordinary cycle, and one nothing could
+;; collect while a task was invisible to the collector.
+;;
+;; The waiters array is part of it: an awaited task holds every task waiting
+;; on it, so a pair of coroutines awaiting each other is a cycle through two
+;; waiters arrays.
+;;
+;; The three awaitable types stay untracked, and keep counted references to
+;; the tasks they hold.  That is conservative in the safe direction: an
+;; untracked holder's reference is not subtracted, so a task it holds looks
+;; reachable and is never freed early.  It can leave a cycle uncollected.
+;; ============================================================================
+global task_traverse
+DEF_FUNC task_traverse
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov rdi, [rbx + AsyncTask.coro]
+    VISIT_PTR rdi
+    mov rdi, [rbx + AsyncTask.result]
+    VISIT_V rdi, rsi
+    mov rdi, [rbx + AsyncTask.exception]
+    VISIT_PTR rdi
+    mov rdi, [rbx + AsyncTask.send_value]
+    VISIT_V rdi, rsi
+    mov r12d, [rbx + AsyncTask.n_waiters]
+    test r12d, r12d
+    jz .tt_done
+    mov r13, [rbx + AsyncTask.waiters]
+    test r13, r13
+    jz .tt_done
+.tt_waiter_loop:
+    dec r12d
+    mov rdi, [r13 + r12*8]
+    VISIT_PTR rdi
+    test r12d, r12d
+    jnz .tt_waiter_loop
+.tt_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC task_traverse
+
+;; The coroutine is the field that closes the cycle; the result and the send
+;; value can too, and neither is read again once the task is unreachable.
+;; The waiters go with them -- a waiter list on a task nothing can reach is
+;; a list nothing will ever wake.
+global task_clear
+DEF_FUNC task_clear
+    push rbx
+    push r12
+    mov rbx, rdi
+
+    mov r12d, [rbx + AsyncTask.n_waiters]
+    test r12d, r12d
+    jz .tc_no_waiters
+    mov dword [rbx + AsyncTask.n_waiters], 0
+.tc_waiter_loop:
+    dec r12d
+    mov rax, [rbx + AsyncTask.waiters]
+    mov rdi, [rax + r12*8]
+    test rdi, rdi
+    jz .tc_waiter_next
+    call obj_decref
+.tc_waiter_next:
+    test r12d, r12d
+    jnz .tc_waiter_loop
+.tc_no_waiters:
+
+    mov rdi, [rbx + AsyncTask.coro]
+    test rdi, rdi
+    jz .tc_no_coro
+    mov qword [rbx + AsyncTask.coro], 0
+    call obj_decref
+.tc_no_coro:
+
+    mov rdi, [rbx + AsyncTask.result]
+    mov qword [rbx + AsyncTask.result], 0
+    XDECREF_V rdi, rcx
+
+    mov rdi, [rbx + AsyncTask.send_value]
+    mov qword [rbx + AsyncTask.send_value], 0
+    XDECREF_V rdi, rcx
+
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC task_clear
 
 ;; ============================================================================
 ;; ready_enqueue(AsyncTask *task)
@@ -210,6 +417,14 @@ DEF_FUNC_BARE ready_enqueue
     ; see tasks: make them visible and a cyclic task sitting in the queue
     ; becomes collectable, and the queue is left following a freed pointer.
     ; One reference here, released by the drain loop after task_step.
+    ;
+    ; And a task already in the queue is left where it is: the line below
+    ; zeroes .next, so enqueuing one twice cut the list off after it.  The
+    ; queue holds a task once; task_step reads send_value when it runs, so
+    ; the second enqueue has nothing to deliver that the first will not.
+    cmp dword [rdi + AsyncTask.queued], 0
+    jne .re_already
+    mov dword [rdi + AsyncTask.queued], 1
     inc qword [rdi + PyObject.ob_refcnt]
     mov qword [rdi + AsyncTask.next], 0
     mov rax, [rel eventloop + EventLoop.ready_tail]
@@ -226,6 +441,8 @@ DEF_FUNC_BARE ready_enqueue
     mov [rel eventloop + EventLoop.ready_head], rdi
     mov [rel eventloop + EventLoop.ready_tail], rdi
     ret
+.re_already:
+    ret
 END_FUNC ready_enqueue
 
 ;; ============================================================================
@@ -236,6 +453,7 @@ DEF_FUNC_BARE ready_dequeue
     mov rax, [rel eventloop + EventLoop.ready_head]
     test rax, rax
     jz .rd_empty
+    mov dword [rax + AsyncTask.queued], 0
 
     ; Advance head
     mov rcx, [rax + AsyncTask.next]
@@ -255,7 +473,8 @@ END_FUNC ready_dequeue
 ;; Resume the task's coroutine via gen_send. Dispatch on result tag.
 ;; ============================================================================
 TS_TASK  equ 8
-TS_FRAME equ 8              ; + 2 pushes = 24, not 16-aligned
+TS_EXC   equ 16             ; current_exception before the step
+TS_FRAME equ 32             ; + 2 pushes = 48, 16-aligned
 DEF_FUNC task_step, TS_FRAME
     push rbx
     push r12
@@ -270,6 +489,14 @@ DEF_FUNC task_step, TS_FRAME
     ; Check if cancelled
     cmp dword [rbx + AsyncTask.cancelling], 1
     je .ts_cancel
+
+    ; current_exception is also the exception being HANDLED: it stays set for
+    ; the length of an except block, so "is one pending afterwards?" cannot
+    ; mean "did the coroutine raise?".  A task that finished inside a live
+    ; handler -- `except E: return await f()` -- adopted that exception and
+    ; took its reference, and asyncio.run re-raised what the coroutine had
+    ; already caught.  Snapshot it and compare.
+    DUNDER_EXC_SAVE [rbp - TS_EXC]
 
     ; gen_send(coro, send_value, send_tag)
     mov rdi, [rbx + AsyncTask.coro]
@@ -361,9 +588,9 @@ DEF_FUNC task_step, TS_FRAME
     ; send_value is an OWNED reference: task_dealloc releases it, and the
     ; sibling path below increfs for exactly this reason.  Handing over the
     ; awaited task's own result borrowed made that release one too many.
-    mov rax, [r12 + AsyncTask.result]
-    INCREF_V rax, rdx
-    mov [rbx + AsyncTask.send_value], rax
+    mov rdi, rbx
+    mov rsi, [r12 + AsyncTask.result]
+    call task_set_send_value
     mov rdi, rbx
     call ready_enqueue
     jmp .ts_decref_awaited
@@ -372,9 +599,9 @@ DEF_FUNC task_step, TS_FRAME
     ; Awaited task had exception — set send_value = None, re-enqueue.
     ; When waiter resumes, SEND calls task_iternext which detects the
     ; awaited task's exception and raises it via eval_exception_unwind.
-    lea rax, [rel none_singleton]
-    INCREF rax
-    mov [rbx + AsyncTask.send_value], rax
+    mov rdi, rbx
+    lea rsi, [rel none_singleton]
+    call task_set_send_value
     mov rdi, rbx
     call ready_enqueue
 
@@ -387,8 +614,6 @@ DEF_FUNC task_step, TS_FRAME
 .ts_wait_for:
     ; rax = WaitForAwaitable*
     mov r12, rax               ; r12 = wfa
-    ; Store outer task reference
-    mov [r12 + WaitForAwaitable.outer_task], rbx
 
     ; Check if inner task already done
     mov rax, [r12 + WaitForAwaitable.inner_task]
@@ -414,9 +639,9 @@ DEF_FUNC task_step, TS_FRAME
 .ts_wf_done:
     ; Inner task already done — fast path: set send_value, re-enqueue
     ; Set None as send_value (wfa iternext will check inner task result)
-    lea rax, [rel none_singleton]
-    INCREF rax
-    mov [rbx + AsyncTask.send_value], rax
+    mov rdi, rbx
+    lea rsi, [rel none_singleton]
+    call task_set_send_value
     mov rdi, rbx
     call ready_enqueue
     ; DECREF wfa
@@ -425,6 +650,36 @@ DEF_FUNC task_step, TS_FRAME
     jmp .ts_ret
 
 .ts_finished:
+    ; A NULL tag from gen_send means the coroutine RETURNED or RAISED, and
+    ; this arm used to assume the first.  Nothing ever wrote
+    ; AsyncTask.exception outside the cancellation path, so `await t` on a
+    ; task that raised saw a done task with no exception, took .ti_done, and
+    ; evaluated to None -- try/except around the await caught nothing, and
+    ; the exception surfaced at interpreter exit instead.  t.result() and
+    ; asyncio.wait_for read the same never-set field.
+    ;
+    ; The exception IS available here: a raise inside a coroutine body does
+    ; not abandon the C stack past the generator frame -- the unwinder's
+    ; no-handler arm returns normally through eval_return -- and gen_send
+    ; deliberately leaves it pending.  The whole re-raise path downstream
+    ; (task_wake_waiters' .tw_set_cancel, task_iternext's .ti_done_exc)
+    ; already exists and was simply unreachable.
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .ts_finished_value
+    cmp rax, [rbp - TS_EXC]
+    je .ts_finished_value       ; the one already being handled
+
+    ; Move it, owned: raise_exception_obj took over its caller's reference,
+    ; so the global holds exactly one and the task takes it over in turn.
+    mov [rbx + AsyncTask.exception], rax
+    mov qword [rel current_exception], 0
+    mov dword [rbx + AsyncTask.done], 1
+    mov rdi, rbx
+    call task_wake_waiters
+    jmp .ts_ret
+
+.ts_finished_value:
     ; Coroutine returned (StopIteration) — task is done
     ; The return value is in gen.gi_return_value
     mov rdi, [rbx + AsyncTask.coro]
@@ -448,10 +703,14 @@ DEF_FUNC task_step, TS_FRAME
     ; gen_throw may have left it in current_exception, or coro caught it
     test edx, edx
     jnz .ts_cancel_caught
-    ; Exception propagated (NULL return) — grab from current_exception
+    ; Exception propagated (NULL return) — grab from current_exception, and
+    ; for the same reason as above, only if it is not the one that was
+    ; already being handled when the step began.
     mov rax, [rel current_exception]
     test rax, rax
     jz .ts_cancel_no_exc
+    cmp rax, [rbp - TS_EXC]
+    je .ts_cancel_no_exc
     INCREF rax
     mov [rbx + AsyncTask.exception], rax
     ; Clear current_exception
@@ -513,31 +772,33 @@ DEF_FUNC task_wake_waiters
 
     push rcx
     mov rdi, [r13 + rcx*8]    ; waiter task
+    push rdi
 
     ; Check if completed task has an exception
     mov rax, [rbx + AsyncTask.exception]
     test rax, rax
     jnz .tw_set_cancel
 
-    ; Set send_value = task's result (INCREF for each waiter)
-    mov rax, [rbx + AsyncTask.result]
-    V_UNPACK rax, rdx
-    INCREF_VAL rax, rdx
-    V_PACK rax, rdx
-    mov [rdi + AsyncTask.send_value], rax
+    ; Set send_value = task's result, one owned reference per waiter
+    mov rsi, [rbx + AsyncTask.result]
+    call task_set_send_value
     jmp .tw_enqueue
 
 .tw_set_cancel:
     ; Task had exception — set send_value = None and enqueue waiter.
     ; When waiter is resumed, SEND calls task_iternext which will detect
     ; the awaited task's exception and raise it via eval_exception_unwind.
-    lea rax, [rel none_singleton]
-    INCREF rax
-    mov [rdi + AsyncTask.send_value], rax
+    lea rsi, [rel none_singleton]
+    call task_set_send_value
 
 .tw_enqueue:
-    ; Enqueue waiter
+    ; Enqueue the waiter, and let go of the array's own reference: the
+    ; waiters array holds one per entry, and this is where they end.
+    pop rdi
+    push rdi
     call ready_enqueue
+    pop rdi
+    call obj_decref
     pop rcx
     inc ecx
     jmp .tw_loop
@@ -610,6 +871,13 @@ DEF_FUNC task_add_waiter
     mov [rbx + AsyncTask.waiters], rax
 
 .taw_add:
+    ; The array OWNS what it holds.  It used to be raw pointers, which was
+    ; safe only while a task could not be collected: an awaited task keeps a
+    ; waiter alive for as long as it takes to finish, and nothing else has to
+    ; be holding that waiter.  task_wake_waiters releases them, and
+    ; task_dealloc releases whatever is left.
+    mov rdi, r12
+    call obj_incref
     mov eax, [rbx + AsyncTask.n_waiters]
     mov rcx, [rbx + AsyncTask.waiters]
     mov [rcx + rax*8], r12     ; waiters[n_waiters] = waiter
@@ -628,13 +896,23 @@ END_FUNC task_add_waiter
 ;; ============================================================================
 ER_ROOT equ 8
 ER_FRAME equ 8              ; + 2 pushes = 24, not 16-aligned
+section .bss
+global eventloop_root_exception
+eventloop_root_exception: resq 1    ; the root task's exception, owned, or 0
+section .text
+
 DEF_FUNC eventloop_run, ER_FRAME
     push rbx
     push r12
 
     mov rbx, rdi               ; root task
-    mov [rel eventloop + EventLoop.root_task], rdi
-    mov [rbp - ER_ROOT], rdi
+    ; The loop's own reference on the root task, released at .er_release.  It
+    ; is read on every pass round the loop for the done check, and a raw
+    ; pointer there was safe only while tasks could not be collected.
+    call obj_incref
+    mov [rel eventloop + EventLoop.root_task], rbx
+    mov [rbp - ER_ROOT], rbx
+    mov qword [rel eventloop_root_exception], 0
 
     ; Enqueue root task
     mov rdi, rbx
@@ -669,16 +947,39 @@ DEF_FUNC eventloop_run, ER_FRAME
     jmp .er_loop
 
 .er_done:
+    ; An exception that reached the root task was DROPPED here: this read
+    ; only .result, so `asyncio.run(main())` where main raises answered None
+    ; and the exception was never seen again.  It is handed back through a
+    ; global rather than raised here, because the loop still has to be torn
+    ; down before anything unwinds.
+    mov rax, [rbx + AsyncTask.exception]
+    test rax, rax
+    jz .er_result
+    INCREF rax
+    mov [rel eventloop_root_exception], rax
+    xor eax, eax
+    xor edx, edx
+    jmp .er_release
+
+.er_result:
     ; Return root task's result
     mov rax, [rbx + AsyncTask.result]
     V_UNPACK rax, rdx
     INCREF_VAL rax, rdx
 
-    ; And let go of the root task.  It is a RAW pointer, kept across the whole
-    ; run for the done check, and leaving it behind was harmless only while
-    ; tasks could not be collected: once they can, the next asyncio.run()
-    ; starts by reading a task that a collection has since freed.
+.er_release:
+
+    ; And let go of the root task.
+    mov rdi, [rel eventloop + EventLoop.root_task]
     mov qword [rel eventloop + EventLoop.root_task], 0
+    test rdi, rdi
+    jz .er_out
+    push rax
+    push rdx
+    call obj_decref
+    pop rdx
+    pop rax
+.er_out:
 
     pop r12
     pop rbx
@@ -806,18 +1107,27 @@ DEF_FUNC_BARE task_iternext
     ; No exception — copy result for StopIteration protocol.  A copy into an
     ; owned slot needs its own reference, even from the same task's result:
     ; both are released.
-    mov rax, [rdi + AsyncTask.result]
-    INCREF_V rax, rdx
-    mov [rdi + AsyncTask.send_value], rax
+    mov rsi, [rdi + AsyncTask.result]
+    call task_set_send_value
     ; Return NULL to signal completion
     RET_NULL
     ret
 
 .ti_done_exc:
-    ; Task had exception — raise it (non-local jump into eval exception unwind)
+    ; The task carries an exception: re-raise it into the awaiting frame.
+    ;
+    ; This used to store straight into current_exception, which drops
+    ; whatever was already there without releasing it and skips
+    ; __context__ chaining entirely.  Reached from SEND inside an except
+    ; block -- which is exactly where `try: await t` puts it -- that leaks
+    ; the handled exception's reference and loses the chain.  It was
+    ; unreachable until task_step started recording the exception, and is
+    ; live now.  raise_exception_obj does both, and takes over the reference
+    ; INCREF just added.
     INCREF rax
-    mov [rel current_exception], rax
-    jmp eval_exception_unwind
+    mov rdi, rax
+    extern raise_exception_obj
+    call raise_exception_obj    ; does not return
 END_FUNC task_iternext
 
 ;; ============================================================================
@@ -981,10 +1291,10 @@ task_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq task_traverse            ; tp_traverse
+    dq task_clear               ; tp_clear
     dq 0 ; tp_dictoffset
 
 section .bss

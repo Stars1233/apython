@@ -1,0 +1,11 @@
+[('ValueError', 'delfail', True, None, 'function'), ('RuntimeError', 'genfail', True, None, 'generator')]
+True ('delfail',) None __del__
+5
+Exception ignored in sys.unraisablehook: <the bad hook>
+Traceback (most recent call last):
+  File "tests/test_unraisable.py", line 92, in __call__
+    raise KeyError("hook failed")
+KeyError: 'hook failed'
+survived a raising hook
+True
+done

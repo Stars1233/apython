@@ -30,6 +30,7 @@ extern cg_loop_pop
 extern cg_loop_push
 extern cg_loop_top
 extern cg_expr
+extern cg_set_loc
 extern cg_label_bind
 extern cg_label_new
 extern cg_name
@@ -58,7 +59,12 @@ CST_I     equ 40
 CST_N     equ 48
 CST_TMP   equ 56
 CST_TMP2  equ 64
-CST_FRAME equ 72          ; + 3 pushes = 96
+CST_SLINE equ 72          ; the caller's location, saved field by field across
+CST_SEND  equ 76          ; the emitter this statement dispatches to
+CST_SCOL  equ 80
+CST_SECOL equ 84
+CST_FN    equ 96
+CST_FRAME equ 104         ; + 3 pushes = 128
 
 section .text
 
@@ -86,10 +92,36 @@ DEF_FUNC cg_stmt, CST_FRAME
     test rax, rax
     jz .unsupported
     mov [rbx + Comp.cur_unit], r12
+
+    ; The statement's own position, restored on the way out, so that anything
+    ; emitted after a nested expression is attributed to the statement again.
+    ; The four fields are contiguous, so the save is two qwords.
+    mov ecx, [r12 + CompUnit.curline]
+    mov [rbp - CST_SLINE], ecx
+    mov ecx, [r12 + CompUnit.curend]
+    mov [rbp - CST_SEND], ecx
+    mov ecx, [r12 + CompUnit.curcol]
+    mov [rbp - CST_SCOL], ecx
+    mov ecx, [r12 + CompUnit.curendcol]
+    mov [rbp - CST_SECOL], ecx
+    mov [rbp - CST_FN], rax
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
-    call rax
+    call cg_set_loc
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call qword [rbp - CST_FN]
+    mov ecx, [rbp - CST_SLINE]
+    mov [r12 + CompUnit.curline], ecx
+    mov ecx, [rbp - CST_SEND]
+    mov [r12 + CompUnit.curend], ecx
+    mov ecx, [rbp - CST_SCOL]
+    mov [r12 + CompUnit.curcol], ecx
+    mov ecx, [rbp - CST_SECOL]
+    mov [r12 + CompUnit.curendcol], ecx
     jmp .ret
 
 .unsupported:
@@ -206,13 +238,18 @@ DEF_FUNC cg_store, CSV_FRAME
     jmp .bad
 
 .name:
+    ; A store is attributed to its target, not to the statement around it:
+    ; that is where CPython draws the caret when the store itself raises.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call cg_set_loc
     mov rax, [rbp - CSV_NPTR]
     mov esi, [rax + AstNode.a]
     mov rdi, rbx
     call ast_obj_at
     mov rdx, rax
     mov rcx, [rbp - CSV_LINE]
-    mov [r12 + CompUnit.curline], ecx
     mov rdi, rbx
     mov rsi, r12
     mov ecx, CTX_STORE
@@ -239,7 +276,14 @@ DEF_FUNC cg_store, CSV_FRAME
     mov rdi, r12
     mov rsi, rax
     call cg_name
-    mov rdx, rax
+    push rax
+    push rax                            ; twice, to keep rsp 16-byte aligned
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call cg_set_loc
+    pop rdx
+    pop rdx
     mov rdi, r12
     mov esi, OP_STORE_ATTR
     mov rcx, [rbp - CSV_LINE]
@@ -263,6 +307,10 @@ DEF_FUNC cg_store, CSV_FRAME
     call cg_expr
     test eax, eax
     jz .fail
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call cg_set_loc
     mov rdi, r12
     mov esi, OP_STORE_SUBSCR
     xor edx, edx
@@ -501,6 +549,52 @@ DEF_FUNC_LOCAL cg_s_assign, CST_FRAME
     leave
     ret
 END_FUNC cg_s_assign
+
+;; cg_s_typealias - `type X = V`, and `type X[T] = V`
+;;
+;; Lowered to the assignment `X = V`, which is what the parser used to build
+;; directly.  CPython's TypeAlias is not an assignment: X becomes a
+;; TypeAliasType whose value is evaluated lazily, inside a scope where the
+;; type parameters are bound.  There is no such type here and nothing that
+;; would observe one, since annotations are never evaluated; the difference is
+;; in bugs.md, and the tree now says what was written either way.
+CTA_LINE  equ 8
+CTA_FRAME equ 24            ; + 3 pushes = 48, 16-byte aligned
+DEF_FUNC_LOCAL cg_s_typealias, CTA_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.b]          ; the value
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .cta_fail
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.a]          ; the name, with a Store context
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_store
+    test eax, eax
+    jz .cta_fail
+    mov eax, 1
+.cta_fail:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_s_typealias
 
 ;; cg_s_augassign - `a += b`
 ;;
@@ -976,10 +1070,15 @@ DEF_FUNC_LOCAL cg_s_annassign, CST_FRAME
     test eax, eax
     jz .fail
 
-    ; A simple name is recorded; anything else is evaluated and dropped.
+    ; A simple name is recorded; anything else is evaluated and dropped.  A
+    ; PARENTHESISED name is not simple either -- `(x): int = 1` records
+    ; nothing in CPython -- and the parser leaves that bit in the node's
+    ; subkind, since (x) and x are otherwise the same Name node.
     mov rdi, rbx
     mov rsi, r13
     call ast_at
+    cmp byte [rax + AstNode.subkind], 0
+    jne .ann_discard
     mov edx, [rax + AstNode.a]
     mov rdi, rbx
     mov rsi, rdx
@@ -2542,13 +2641,21 @@ cg_stmt_table:
     dq cg_s_match       ; 70 AST_MATCH
     dq 0                ; 71 AST_EXTRA
     dq cg_s_decorated   ; 72 AST_DECORATED
-    dq 0                ; 73 
-    dq 0                ; 74 
-    dq 0                ; 75 
-    dq 0                ; 76 
-    dq 0                ; 77 
-    dq 0                ; 78 
-    dq 0                ; 79 
+    dq 0                ; 73 AST_CASE
+    dq 0                ; 74 AST_PAT_VALUE
+    dq 0                ; 75 AST_PAT_CAPTURE
+    dq 0                ; 76 AST_PAT_SEQUENCE
+    dq 0                ; 77 AST_PAT_MAPPING
+    dq 0                ; 78 AST_PAT_CLASS
+    dq 0                ; 79 AST_PAT_KEYWORD
+    dq 0                ; 80 AST_PAT_OR
+    dq 0                ; 81 AST_PAT_AS
+    dq 0                ; 82 AST_INTERACTIVE  (never compiled)
+    dq cg_s_typealias   ; 83 AST_TYPEALIAS
+    dq 0                ; 84 AST_TYPEPARAMS   (parsed, never generated)
+    dq 0                ; 85 AST_TYPEVAR
+    dq 0                ; 86 AST_PARAMSPEC
+    dq 0                ; 87 AST_TYPEVARTUPLE
 
 cg_star_name: db "*", 0
 

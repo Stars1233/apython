@@ -381,7 +381,8 @@ SB_RIGHT equ 16
 SB_EXC   equ 24
 SB_FRAME equ 32             ; + 0 pushes = 32, 16-aligned
 
-%macro DEF_BINARY_SLOT 3        ; %1 = wrapper, %2 = name symbol, %3 = nb field
+%macro DEF_BINARY_SLOT 3-4 0    ; %1 = wrapper, %2 = name symbol, %3 = nb field,
+                                ; %4 = the reflected name symbol, or 0
 DEF_FUNC %1, SB_FRAME
     mov [rbp - SB_LEFT], rdi
     mov [rbp - SB_RIGHT], rsi
@@ -398,6 +399,32 @@ DEF_FUNC %1, SB_FRAME
     lea rcx, [rel %1]
     cmp rax, rcx
     jne %%decline               ; we are the RIGHT type's slot here
+
+%ifnum %4
+%else
+    ; CPython's subclass-priority rule, which lives in SLOT1BINFULL and not
+    ; in binary_op1: when the right operand's type is a PROPER SUBCLASS of
+    ; the left's and overrides the reflected name, its __rop__ runs first.
+    ; P() + Q() for a Q deriving from P called P.__add__ here and calls
+    ; Q.__radd__ in CPython.
+    ;
+    ; It cannot be binary_op1's `slotv != slotw`: every heaptype that
+    ; overrides an operator holds this same wrapper, so that compare is
+    ; always equal and the rule would never fire.  CPython's own answer for
+    ; a Python class is method_is_overloaded, which asks the two TYPES for
+    ; the reflected name and compares what they hand back.
+    mov rdi, [rbp - SB_LEFT]
+    mov rsi, [rbp - SB_RIGHT]
+    lea rdx, [rel %4]
+    call slot_binop_reflect_first
+    test ecx, ecx
+    jz %%no_reflect
+    cmp ecx, 2
+    je %%raised
+    leave
+    ret                         ; rax is already a Value
+%%no_reflect:
+%endif
 
     DUNDER_EXC_SAVE [rbp - SB_EXC]
     mov rdi, [rbp - SB_LEFT]
@@ -434,6 +461,124 @@ DEF_FUNC %1, SB_FRAME
 END_FUNC %1
 %endmacro
 
+;; ============================================================================
+;; slot_binop_reflect_first(rdi = left Value, rsi = right Value,
+;;                          rdx = the reflected name's C string)
+;;   -> rax = a result VALUE with ecx = 1, or ecx = 0 to carry on,
+;;      or ecx = 2 when the reflected call raised
+;;
+;; The status is in ecx and not edx because the answer is already a Value:
+;; edx would be read as its tag, and TAG_SMALLINT is 1.
+;;
+;; CPython's SLOT1BINFULL prologue.  The reflected form runs FIRST when the
+;; right operand's type is a proper subclass of the left's and overrides the
+;; reflected name -- so `P() + Q()` for a Q(P) defining __radd__ answers
+;; Q.__radd__ rather than P.__add__.
+;;
+;; "Overrides" is method_is_overloaded: ask both TYPES for the reflected name
+;; and compare what they hand back.  A raw slot compare cannot serve, because
+;; every heaptype that overrides an operator holds the same wrapper.
+;; ============================================================================
+SBR_LEFT  equ 8
+SBR_RIGHT equ 16
+SBR_NAME  equ 24
+SBR_EXC   equ 32
+SBR_LMETH equ 40
+SBR_FRAME equ 48            ; + 0 pushes = 48
+DEF_FUNC_LOCAL slot_binop_reflect_first, SBR_FRAME
+    mov [rbp - SBR_LEFT], rdi
+    mov [rbp - SBR_RIGHT], rsi
+    mov [rbp - SBR_NAME], rdx
+
+    ; Both operands have to be objects with types to compare.
+    V_TEST_PTR rdi, rax
+    ja .sbr_no
+    V_TEST_PTR rsi, rax
+    ja .sbr_no
+    test rsi, rsi
+    jz .sbr_no
+
+    mov rax, [rdi + PyObject.ob_type]
+    mov rcx, [rsi + PyObject.ob_type]
+    cmp rax, rcx
+    je .sbr_no                  ; same type: nothing to prefer
+
+    ; PyType_IsSubtype(type(right), type(left)), and a PROPER one -- the
+    ; equality above has already excluded the other case.
+    mov rdi, rcx
+    mov rsi, rax
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jz .sbr_no
+
+    ; method_is_overloaded: the right type must HAVE the reflected name, and
+    ; it must not be the same object the left type hands back.
+    mov rdi, [rbp - SBR_RIGHT]
+    mov rdi, [rdi + PyObject.ob_type]
+    mov rsi, [rbp - SBR_NAME]
+    extern dunder_lookup
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .sbr_no                  ; the right type does not define it
+    mov [rbp - SBR_LMETH], rax  ; the right type's, for the compare below
+
+    mov rdi, [rbp - SBR_LEFT]
+    mov rdi, [rdi + PyObject.ob_type]
+    mov rsi, [rbp - SBR_NAME]
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .sbr_call                ; the left type has none: overridden
+    cmp rax, [rbp - SBR_LMETH]
+    je .sbr_no                  ; the same object: inherited, not overridden
+
+.sbr_call:
+    ; __rop__(right, left).
+    DUNDER_EXC_SAVE [rbp - SBR_EXC]
+    mov rdi, [rbp - SBR_RIGHT]
+    mov rsi, [rbp - SBR_LEFT]
+    V_UNPACK rsi, rcx
+    mov rdx, [rbp - SBR_NAME]
+    extern dunder_call_2
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .sbr_none_or_raised
+
+    extern notimpl_singleton
+    lea rcx, [rel notimpl_singleton]
+    cmp rax, rcx
+    je .sbr_drop_notimpl
+    V_PACK rax, rdx
+    mov ecx, 1
+    leave
+    ret
+
+.sbr_drop_notimpl:
+    mov rdi, rax                ; dunder_call_2 hands back an owned reference
+    extern obj_decref
+    call obj_decref
+.sbr_no:
+    xor eax, eax
+    xor ecx, ecx
+    leave
+    ret
+
+.sbr_none_or_raised:
+    EXC_RAISED_SINCE [rbp - SBR_EXC], rcx, .sbr_raised
+    xor eax, eax
+    xor ecx, ecx
+    leave
+    ret
+.sbr_raised:
+    xor eax, eax
+    mov ecx, 2
+    leave
+    ret
+END_FUNC slot_binop_reflect_first
+
 DEF_UNARY_SLOT slot_nb_negative, sl_neg_name
 DEF_UNARY_SLOT slot_nb_positive, sl_pos_name
 DEF_UNARY_SLOT slot_nb_invert,   sl_invert_name
@@ -443,20 +588,20 @@ DEF_UNARY_SLOT slot_nb_absolute, sl_abs_name
 ; wrapper: this one is one-directional, unlike CPython's SLOT1BIN, and
 ; op_binary_op's reflected-dunder arm already serves that direction.
 
-DEF_BINARY_SLOT slot_nb_add, sl_add_name, nb_add
-DEF_BINARY_SLOT slot_nb_sub, sl_sub_name, nb_subtract
-DEF_BINARY_SLOT slot_nb_mul, sl_mul_name, nb_multiply
-DEF_BINARY_SLOT slot_nb_mod, sl_mod_name, nb_remainder
-DEF_BINARY_SLOT slot_nb_divmod, sl_divmod_name, nb_divmod
-DEF_BINARY_SLOT slot_nb_pow, sl_pow_name, nb_power
-DEF_BINARY_SLOT slot_nb_lshift, sl_lshift_name, nb_lshift
-DEF_BINARY_SLOT slot_nb_rshift, sl_rshift_name, nb_rshift
-DEF_BINARY_SLOT slot_nb_and, sl_and_name, nb_and
-DEF_BINARY_SLOT slot_nb_xor, sl_xor_name, nb_xor
-DEF_BINARY_SLOT slot_nb_or, sl_or_name, nb_or
-DEF_BINARY_SLOT slot_nb_floordiv, sl_floordiv_name, nb_floor_divide
-DEF_BINARY_SLOT slot_nb_truediv, sl_truediv_name, nb_true_divide
-DEF_BINARY_SLOT slot_nb_matmul, sl_matmul_name, nb_matmul
+DEF_BINARY_SLOT slot_nb_add, sl_add_name, nb_add, sl_radd_name
+DEF_BINARY_SLOT slot_nb_sub, sl_sub_name, nb_subtract, sl_rsub_name
+DEF_BINARY_SLOT slot_nb_mul, sl_mul_name, nb_multiply, sl_rmul_name
+DEF_BINARY_SLOT slot_nb_mod, sl_mod_name, nb_remainder, sl_rmod_name
+DEF_BINARY_SLOT slot_nb_divmod, sl_divmod_name, nb_divmod, sl_rdivmod_name
+DEF_BINARY_SLOT slot_nb_pow, sl_pow_name, nb_power, sl_rpow_name
+DEF_BINARY_SLOT slot_nb_lshift, sl_lshift_name, nb_lshift, sl_rlshift_name
+DEF_BINARY_SLOT slot_nb_rshift, sl_rshift_name, nb_rshift, sl_rrshift_name
+DEF_BINARY_SLOT slot_nb_and, sl_and_name, nb_and, sl_rand_name
+DEF_BINARY_SLOT slot_nb_xor, sl_xor_name, nb_xor, sl_rxor_name
+DEF_BINARY_SLOT slot_nb_or, sl_or_name, nb_or, sl_ror_name
+DEF_BINARY_SLOT slot_nb_floordiv, sl_floordiv_name, nb_floor_divide, sl_rfloordiv_name
+DEF_BINARY_SLOT slot_nb_truediv, sl_truediv_name, nb_true_divide, sl_rtruediv_name
+DEF_BINARY_SLOT slot_nb_matmul, sl_matmul_name, nb_matmul, sl_rmatmul_name
 DEF_BINARY_SLOT slot_nb_iadd, sl_iadd_name, nb_iadd
 DEF_BINARY_SLOT slot_nb_isub, sl_isub_name, nb_isub
 DEF_BINARY_SLOT slot_nb_imul, sl_imul_name, nb_imul
@@ -754,6 +899,20 @@ sl_hash_name:   db "__hash__", 0
 sl_neg_name:    db "__neg__", 0
 sl_contains_name: db "__contains__", 0
 sl_add_name: db "__add__", 0
+sl_radd_name: db "__radd__", 0
+sl_rsub_name: db "__rsub__", 0
+sl_rmul_name: db "__rmul__", 0
+sl_rmod_name: db "__rmod__", 0
+sl_rdivmod_name: db "__rdivmod__", 0
+sl_rpow_name: db "__rpow__", 0
+sl_rlshift_name: db "__rlshift__", 0
+sl_rrshift_name: db "__rrshift__", 0
+sl_rand_name: db "__rand__", 0
+sl_rxor_name: db "__rxor__", 0
+sl_ror_name: db "__ror__", 0
+sl_rfloordiv_name: db "__rfloordiv__", 0
+sl_rtruediv_name: db "__rtruediv__", 0
+sl_rmatmul_name: db "__rmatmul__", 0
 sl_sub_name: db "__sub__", 0
 sl_mul_name: db "__mul__", 0
 sl_mod_name: db "__mod__", 0

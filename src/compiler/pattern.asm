@@ -165,7 +165,7 @@ DEF_FUNC ps_match, PM_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PM_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; the soft keyword `match`
@@ -266,7 +266,7 @@ DEF_FUNC_LOCAL par_case, PC2_FRAME
     jz .not_case
     mov rdi, rbx
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PC2_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; `case`
@@ -345,7 +345,7 @@ DEF_FUNC_LOCAL par_patterns, PP_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PP_LINE], rcx
 
     mov rdi, rbx
@@ -453,7 +453,7 @@ DEF_FUNC_LOCAL par_or_pattern, PO_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PO_LINE], rcx
 
     mov rdi, rbx
@@ -542,7 +542,7 @@ DEF_FUNC_LOCAL par_closed_pattern, CP_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - CP_LINE], rcx
     mov rdi, rbx
     call par_kind
@@ -730,7 +730,7 @@ DEF_FUNC_LOCAL par_sequence_pattern, SP_FRAME
     mov rbx, rdi
     mov [rbp - SP_CLOSE], rsi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - SP_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; the opening bracket
@@ -840,7 +840,7 @@ DEF_FUNC_LOCAL par_mapping_pattern, MP_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - MP_LINE], rcx
     mov rdi, rbx
     call par_advance                    ; '{'
@@ -948,7 +948,7 @@ DEF_FUNC_LOCAL par_value_pattern, VP_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - VP_LINE], rcx
     movzx eax, word [rax + Token.kind]
     mov [rbp - VP_KIND], rax
@@ -1181,7 +1181,7 @@ DEF_FUNC_LOCAL par_pattern_value_expr, PV_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
-    mov ecx, [rax + Token.lineno]
+    TOK_POS rax
     mov [rbp - PV_LINE], rcx
     mov rdi, rbx
     call par_kind

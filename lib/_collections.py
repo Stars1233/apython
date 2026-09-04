@@ -1,12 +1,11 @@
 # _collections - the C accelerator module CPython's collections/__init__.py
 # reaches for.
 #
-# It opens with `from _collections import deque` / `defaultdict` /
-# `OrderedDict` in a try/except ImportError and exports all three from
-# __all__ regardless -- so with no _collections at all, `from collections
-# import deque` was an ImportError rather than a slower deque.  That blocked
-# contextlib, typing, shlex, glob, webbrowser, bdb and the rest of their
-# dependents from importing at all.
+# It opens with `from _collections import deque` / `defaultdict` in a
+# try/except ImportError and exports both from __all__ regardless -- so with
+# no _collections at all, `from collections import deque` was an ImportError
+# rather than a slower deque.  That blocked contextlib, typing, shlex, glob,
+# webbrowser, bdb and the rest of their dependents from importing at all.
 #
 # So the implementations live here and collections/__init__.py imports them
 # back, which is the arrangement CPython uses.  These are the same
@@ -19,11 +18,13 @@
 # import fails, so supplying them would replace a working fallback with a
 # slower copy of it.
 
-__all__ = ["deque", "defaultdict", "OrderedDict"]
+__all__ = ["deque", "defaultdict"]
 
-# dict has preserved insertion order since 3.7, which is the whole of what
-# OrderedDict adds -- move_to_end and the order-sensitive __eq__ aside.
-OrderedDict = dict
+# OrderedDict is deliberately NOT here.  CPython's collections/__init__.py
+# defines the complete pure-Python class and only *then* tries to override it
+# from _collections -- so exporting an `OrderedDict = dict` alias from here
+# shadowed the real one everywhere a real stdlib was on the path.  deque and
+# defaultdict have no such fallback there and must stay.
 
 
 class defaultdict:

@@ -134,19 +134,34 @@ DEF_FUNC cg_nameop, CN2_FRAME
     mov edx, eax
     cmp qword [rbp - CN2_CTX], CTX_LOAD
     jne .fast_store
-    ; A local that is deleted anywhere in the block -- or bound by an
-    ; `except E as e`, which deletes it at the end of the clause -- may be
-    ; empty here.  LOAD_FAST would hand back whatever the slot holds; only
-    ; LOAD_FAST_CHECK raises for it.
+    ; Which of the two load opcodes: LOAD_FAST hands back whatever the slot
+    ; holds, and an EMPTY slot is a NULL Value with no exception set -- which
+    ; print() silently skips, obj_repr calls "object has no repr", and
+    ; op_pop_jump_if_false dereferences.  `def f(): x; x = 1` read as nothing
+    ; and `if x:` segfaulted.
+    ;
+    ; DEF_UNBOUND alone was the test, and it only marks a name that is
+    ; DELETED somewhere or bound by an `except E as e`.  It says nothing
+    ; about a name simply read before its assignment, which is the ordinary
+    ; typo.  CPython decides this with a definite-assignment analysis over
+    ; the CFG and falls back to the checked form whenever it cannot prove
+    ; boundness; the sound approximation here is that a PARAMETER is always
+    ; bound on entry and every other local might not be.
+    ;
+    ; The check never raises where CPython's LOAD_FAST would have succeeded:
+    ; it fires only on an actually-empty slot, which is exactly the case
+    ; CPython raises for too.  It costs one test and one branch.
     mov [rbp - CN2_SLOT], rdx
     mov rdi, rbx
     mov rsi, [rbp - CN2_SCOPE]
     mov rdx, [rbp - CN2_NAME]
     call sym_flags_of
-    mov esi, OP_LOAD_FAST
-    test eax, DEF_UNBOUND
-    jz .fast_load
     mov esi, OP_LOAD_FAST_CHECK
+    test eax, DEF_PARAM
+    jz .fast_load
+    test eax, DEF_UNBOUND
+    jnz .fast_load              ; a parameter that is deleted can still be empty
+    mov esi, OP_LOAD_FAST
 .fast_load:
     mov rdx, [rbp - CN2_SLOT]
     jmp .emit

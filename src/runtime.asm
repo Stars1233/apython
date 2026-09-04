@@ -36,9 +36,15 @@ SYS_connect         equ 42
 SYS_accept4         equ 288
 SYS_sendto          equ 44
 SYS_recvfrom        equ 45
+SYS_poll            equ 7
 SYS_bind            equ 49
 SYS_listen          equ 50
+SYS_getsockname     equ 51
+SYS_getpeername     equ 52
+SYS_socketpair      equ 53
 SYS_setsockopt      equ 54
+SYS_getsockopt      equ 55
+SYS_shutdown        equ 48
 SYS_fcntl           equ 72
 SYS_ioctl           equ 16
 SYS_io_uring_setup  equ 425
@@ -50,6 +56,7 @@ SYS_dup             equ 32
 SYS_getpid          equ 39
 SYS_wait4           equ 61
 SYS_rename          equ 82
+SYS_symlink equ 88
 SYS_mkdir           equ 83
 SYS_rmdir           equ 84
 SYS_unlink          equ 87
@@ -64,6 +71,14 @@ SYS_uname           equ 63
 SYS_access          equ 21
 SYS_umask           equ 95
 SYS_exit_group      equ 231
+SYS_chdir           equ 80
+SYS_truncate        equ 76
+SYS_link            equ 86
+SYS_chown           equ 92
+SYS_fchmod          equ 91
+SYS_fsync           equ 74
+SYS_dup2            equ 33
+SYS_utimensat       equ 280
 
 ; sys_write(int fd, const void *buf, size_t len) -> ssize_t
 DEF_FUNC_BARE sys_write
@@ -186,6 +201,14 @@ DEF_FUNC_BARE sys_rename
     ret
 END_FUNC sys_rename
 
+; sys_symlink(const char *target, const char *linkpath) -> int
+global sys_symlink
+DEF_FUNC_BARE sys_symlink
+    mov rax, SYS_symlink
+    syscall
+    ret
+END_FUNC sys_symlink
+
 ; sys_readlink(const char *path, char *buf, size_t size) -> ssize_t
 DEF_FUNC_BARE sys_readlink
     mov rax, SYS_readlink
@@ -241,6 +264,76 @@ DEF_FUNC_BARE sys_ftruncate
     syscall
     ret
 END_FUNC sys_ftruncate
+
+; The eight the posix module was short of.  Each is the bare syscall; the
+; argument checking and the OSError live in src/posixmod.asm.
+; sys_chdir(const char *path) -> int
+global sys_chdir
+DEF_FUNC_BARE sys_chdir
+    mov rax, SYS_chdir
+    syscall
+    ret
+END_FUNC sys_chdir
+
+; sys_truncate(const char *path, off_t length) -> int
+global sys_truncate
+DEF_FUNC_BARE sys_truncate
+    mov rax, SYS_truncate
+    syscall
+    ret
+END_FUNC sys_truncate
+
+; sys_link(const char *old, const char *new) -> int
+global sys_link
+DEF_FUNC_BARE sys_link
+    mov rax, SYS_link
+    syscall
+    ret
+END_FUNC sys_link
+
+; sys_chown(const char *path, uid_t uid, gid_t gid) -> int
+global sys_chown
+DEF_FUNC_BARE sys_chown
+    mov rax, SYS_chown
+    syscall
+    ret
+END_FUNC sys_chown
+
+; sys_fchmod(int fd, mode_t mode) -> int
+global sys_fchmod
+DEF_FUNC_BARE sys_fchmod
+    mov rax, SYS_fchmod
+    syscall
+    ret
+END_FUNC sys_fchmod
+
+; sys_fsync(int fd) -> int
+global sys_fsync
+DEF_FUNC_BARE sys_fsync
+    mov rax, SYS_fsync
+    syscall
+    ret
+END_FUNC sys_fsync
+
+; sys_dup2(int oldfd, int newfd) -> int
+global sys_dup2
+DEF_FUNC_BARE sys_dup2
+    mov rax, SYS_dup2
+    syscall
+    ret
+END_FUNC sys_dup2
+
+; sys_utimensat(int dirfd, const char *path, const struct timespec times[2],
+;               int flags) -> int
+; utime(path, times) goes through this: utimensat is the only one of the
+; family Linux still keeps, and AT_FDCWD with a NULL times means "now".
+global sys_utimensat
+DEF_FUNC_BARE sys_utimensat
+    mov r10, rcx                ; the fourth syscall argument is r10, not rcx
+    mov rax, SYS_utimensat
+    syscall
+    ret
+END_FUNC sys_utimensat
 
 ; sys_uname(struct utsname *buf) -> int
 DEF_FUNC_BARE sys_uname
@@ -355,6 +448,52 @@ DEF_FUNC_BARE sys_setsockopt
     syscall
     ret
 END_FUNC sys_setsockopt
+
+; sys_getsockopt(fd, level, optname, optval*, optlen*) -> int
+DEF_FUNC_BARE sys_getsockopt
+    mov rax, SYS_getsockopt
+    mov r10, rcx               ; 4th arg
+    syscall
+    ret
+END_FUNC sys_getsockopt
+
+; sys_getsockname(fd, addr*, addrlen*) -> int
+DEF_FUNC_BARE sys_getsockname
+    mov rax, SYS_getsockname
+    syscall
+    ret
+END_FUNC sys_getsockname
+
+; sys_getpeername(fd, addr*, addrlen*) -> int
+DEF_FUNC_BARE sys_getpeername
+    mov rax, SYS_getpeername
+    syscall
+    ret
+END_FUNC sys_getpeername
+
+; sys_poll(struct pollfd *fds, nfds_t n, int timeout_ms) -> int
+; The syscall rather than glibc's wrapper: this returns -errno, where the
+; wrapper returns -1 in a 32-bit register and leaves the reason in errno.
+DEF_FUNC_BARE sys_poll
+    mov rax, SYS_poll
+    syscall
+    ret
+END_FUNC sys_poll
+
+; sys_shutdown(fd, how) -> int
+DEF_FUNC_BARE sys_shutdown
+    mov rax, SYS_shutdown
+    syscall
+    ret
+END_FUNC sys_shutdown
+
+; sys_socketpair(domain, type, protocol, int sv[2]) -> int
+DEF_FUNC_BARE sys_socketpair
+    mov rax, SYS_socketpair
+    mov r10, rcx               ; 4th arg
+    syscall
+    ret
+END_FUNC sys_socketpair
 
 
 ; sys_fcntl(fd, cmd, arg) -> int

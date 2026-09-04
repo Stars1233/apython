@@ -112,26 +112,53 @@ DEF_FUNC sre_compile_func, SC_FRAME
     mov r14, rax               ; r14 = u32* code buffer
     mov [rbp - SC_CODEBUF], r14
 
-    ; Iterate code list, extract each SmallInt as u32
+    ; Iterate the code list, taking the low 32 bits of each integer.
+    ;
+    ; "Is it an integer?" and "what is its value?" are two questions, and
+    ; asking only the first used to be enough here because every entry was an
+    ; int immediate.  It is not: a compiled pattern carries 4294967295 --
+    ; MAXREPEAT -- which arithmetic in re._compiler can hand back GMP-backed,
+    ; and a _NamedIntConstant is an int subclass besides.  int_unwrap
+    ; flattens the compact forms but leaves a GMP-backed one as a pointer, so
+    ; testing its tag rejected a perfectly good integer.  `make INT_STRESS=1`
+    ; is what surfaced it: every value of eight or more is on the heap there.
     mov r15, [r12 + PyListObject.ob_item]       ; payloads
     xor ecx, ecx               ; index
 .code_loop:
     cmp rcx, r13
     jge .code_done
-    ; Normalize first: int_unwrap flattens bool, compact heap ints and int
-    ; subclasses to (value, TAG_SMALLINT), so the check accepts any integer.
     extern int_unwrap
     mov rdi, [r15 + rcx*8]
     V_UNPACK rdi, rdx
     push rcx
-    call int_unwrap
-    pop rcx
+    call int_unwrap            ; bool, a compact heap int and an int subclass
+                               ; all flatten to a value here
     cmp edx, TAG_SMALLINT
-    jne .code_type_error
-    mov eax, edi               ; unwrapped value
-    mov [r14 + rcx*4], eax    ; store as u32
+    je .code_have_value
+    ; Still a pointer: a GMP-backed int is an integer too, and taking the tag
+    ; as the answer rejected one.
+    push rdx
+    push rdi
+    sub rsp, 8
+    extern int_is_integer
+    call int_is_integer
+    add rsp, 8
+    pop rdi
+    pop rdx
+    test eax, eax
+    jz .code_type_error_pop
+    extern int_to_i64
+    call int_to_i64
+    mov rdi, rax
+.code_have_value:
+    pop rcx
+    mov eax, edi
+    mov [r14 + rcx*4], eax     ; the low 32 bits, as the engine reads them
     inc rcx
     jmp .code_loop
+
+.code_type_error_pop:
+    pop rcx
 .code_type_error:
     ; Non-int element in code list — raise TypeError
     mov rdi, r14               ; free code buffer
@@ -179,6 +206,27 @@ DEF_FUNC sre_compile_func, SC_FRAME
 
     mov [rbx + SRE_PatternObject.code], r14
     mov [rbx + SRE_PatternObject.code_len], r13
+
+    ; A pattern compiled from BYTES matches bytes-like subjects and answers
+    ; bytes.  The engine is the same either way -- bytes are byte-indexed,
+    ; which is the ASCII path it already has -- so all this records is which
+    ; kind was asked for.
+    mov qword [rbx + SRE_PatternObject.is_bytes], 0
+    mov rax, [rbp - SC_PATTERN]
+    V_TEST_PTR rax, rcx
+    ja .pattern_kind_done
+    test rax, rax
+    jz .pattern_kind_done
+    mov rcx, [rax + PyObject.ob_type]
+    extern bytes_type
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    je .pattern_is_bytes
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
+    jz .pattern_kind_done
+.pattern_is_bytes:
+    mov qword [rbx + SRE_PatternObject.is_bytes], 1
+.pattern_kind_done:
 
     ; Return pattern object
     mov rax, rbx

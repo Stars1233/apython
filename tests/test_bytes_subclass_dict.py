@@ -55,3 +55,39 @@ class BA(bytearray):
 
 ba = BA(b"pq")
 print(bytes(ba), len(ba), type(ba).__name__)
+
+
+# fromhex is a classmethod, and CPython's builds whatever it was called on --
+# a bytes subclass answers that subclass.  This built a plain bytes unless it
+# was bytearray exactly.  And its argument is a str, which a str SUBCLASS is.
+print("=== fromhex through a subclass ===")
+
+
+class HexBytes(bytes):
+    pass
+
+
+class HexArray(bytearray):
+    pass
+
+
+class HexStr(str):
+    pass
+
+
+for cls in (bytes, bytearray, HexBytes, HexArray):
+    v = cls.fromhex("41 42")
+    print(cls.__name__, bytes(v), type(v).__name__, isinstance(v, cls))
+print(bytes.fromhex(HexStr("43 44")))
+print(bytearray.fromhex(HexStr("45")))
+try:
+    bytes.fromhex(b"41")
+except TypeError as e:
+    print("bytes argument:", e)
+try:
+    bytes.fromhex("4")
+except ValueError as e:
+    print("odd length:", type(e).__name__)
+
+# bool is an int, so bytes(True) is a count and not an iteration.
+print(bytes(True), bytes(False), bytearray(True), bytes(3))

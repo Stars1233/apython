@@ -12,6 +12,10 @@
 %include "object.inc"
 %include "eventloop.inc"
 
+extern kw_names_pending
+extern ap_strcmp
+extern obj_is_true
+extern task_type
 extern ap_malloc
 extern gc_alloc
 extern ap_free
@@ -27,6 +31,7 @@ extern none_singleton
 extern raise_exception
 extern raise_exception_obj
 extern exc_TypeError_type
+extern exc_ValueError_type
 extern exc_RuntimeError_type
 extern exc_TimeoutError_type
 extern type_type
@@ -71,9 +76,12 @@ DEF_FUNC asyncio_run_func, AR_FRAME
     ; Initialize event loop
     call eventloop_init
 
-    ; Create root task
+    ; Create root task.  task_new answers 0 for anything that cannot be sent
+    ; to, with the TypeError already recorded.
     mov rdi, rbx
     call task_new
+    test rax, rax
+    jz .ar_not_coro
     mov r12, rax               ; r12 = root task
 
     ; Run the event loop
@@ -93,17 +101,42 @@ DEF_FUNC asyncio_run_func, AR_FRAME
     pop rax
     pop rdx
 
+    ; An exception that reached the root task is re-raised here, once the
+    ; loop is down: the run() call is where the caller expects to see it.
+    extern eventloop_root_exception
+    mov rcx, [rel eventloop_root_exception]
+    test rcx, rcx
+    jnz .ar_raise_root
+
     pop r12
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.ar_raise_root:
+    mov qword [rel eventloop_root_exception], 0
+    mov rdi, rcx
+    pop r12
+    pop rbx
+    leave
+    extern raise_exception_obj
+    jmp raise_exception_obj     ; takes the reference; does not return
+
+.ar_not_coro:
+    ; The loop was initialised above; leave it as it was found.  CPython's
+    ; runner raises ValueError here where everything else raises TypeError,
+    ; so the TypeError task_new recorded is replaced rather than propagated.
+    call eventloop_teardown
+    pop r12
+    pop rbx
+    RAISE exc_ValueError_type, "a coroutine was expected"
+
 .ar_error:
     RAISE exc_TypeError_type, "asyncio.run() takes exactly 1 argument"
 
 .ar_type_error:
-    RAISE exc_TypeError_type, "asyncio.run() requires a coroutine"
+    RAISE exc_ValueError_type, "a coroutine was expected"
 
 .ar_reentrant:
     RAISE exc_RuntimeError_type, "asyncio.run() cannot be called from a running event loop"
@@ -231,6 +264,8 @@ DEF_FUNC asyncio_wait_for_func, WF_FRAME
     ; Create inner task from coro
     mov rdi, [rdi]             ; coro = args[0] payload
     call task_new
+    test rax, rax
+    jz .wf_failed
     mov [rbp - WF_INNER], rax  ; save inner task
 
     ; Enqueue inner task on ready queue
@@ -282,13 +317,22 @@ DEF_FUNC asyncio_wait_for_func, WF_FRAME
     mov rcx, [rbp - WF_DELAY]
     mov [rax + WaitForAwaitable.timeout_ns], rcx
     mov dword [rax + WaitForAwaitable.state], 0
-    mov qword [rax + WaitForAwaitable.outer_task], 0
+    mov qword [rax + WaitForAwaitable.unused], 0
     mov qword [rax + WaitForAwaitable.gi_return_value], 0
 
     mov edx, TAG_PTR
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.wf_failed:
+    ; task_new recorded the TypeError; the saved args are still on the stack.
+    add rsp, 8
+    pop rbx
+    xor eax, eax
+    xor edx, edx
+    leave
     ret
 
 .wf_error:
@@ -413,6 +457,8 @@ DEF_FUNC asyncio_create_task_func, ACT_FRAME
 
     mov rdi, [rdi]             ; coro = args[0]
     call task_new
+    test rax, rax
+    jz .act_failed
     mov [rbp - ACT_TASK], rax  ; save task (stack-aligned)
 
     ; Enqueue the new task
@@ -423,6 +469,12 @@ DEF_FUNC asyncio_create_task_func, ACT_FRAME
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.act_failed:
+    xor eax, eax
+    xor edx, edx
+    leave
     ret
 
 .act_error:
@@ -439,74 +491,339 @@ END_FUNC asyncio_create_task_func
 ;; and return a special GatherAwaitable that the event loop recognizes.
 ;; For now: simply create tasks and return a list placeholder.
 ;; ============================================================================
-DEF_FUNC asyncio_gather_func
+AGF_LIST  equ 8
+AGF_ARGS  equ 16
+AGF_NARGS equ 24
+AGF_RETEX equ 32
+AGF_IDX   equ 40
+AGF_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+DEF_FUNC asyncio_gather_func, AGF_FRAME
     push rbx
-    push r12
-    push r13
+    mov [rbp - AGF_ARGS], rdi
+    mov [rbp - AGF_NARGS], rsi
+    mov qword [rbp - AGF_RETEX], 0
 
-    mov rbx, rdi               ; args
-    mov r12, rsi               ; nargs
+    ; return_exceptions is the one keyword gather takes.
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .ag_no_kw
+    mov qword [rel kw_names_pending], 0
+    mov rcx, [rax + PyTupleObject.ob_size]
+    sub [rbp - AGF_NARGS], rcx
+    xor edx, edx
+.ag_kw_loop:
+    cmp rdx, [rax + PyTupleObject.ob_size]
+    jge .ag_no_kw
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov r8, [rcx + rdx*8]
+    mov rcx, [rbp - AGF_NARGS]
+    add rcx, rdx
+    mov r9, [rbp - AGF_ARGS]
+    mov r9, [r9 + rcx*8]
+    push rax
+    push rdx
+    push r9
+    sub rsp, 8
+    lea rdi, [r8 + PyStrObject.data]
+    CSTRING rsi, "return_exceptions"
+    call ap_strcmp
+    mov r10d, eax               ; the verdict, before the pops overwrite rax
+    add rsp, 8
+    pop r9
+    pop rdx
+    pop rax
+    test r10d, r10d
+    jnz .ag_bad_kw
+    mov rdi, r9
+    push rax
+    push rdx
+    call obj_is_true
+    pop rdx
+    pop rcx
+    mov [rbp - AGF_RETEX], rax
+    mov rax, rcx
+    inc rdx
+    jmp .ag_kw_loop
+.ag_no_kw:
 
-    ; Create a list to collect tasks
-    call list_new
-    mov r13, rax               ; r13 = result list
-
-    ; Create a task for each coroutine arg
-    xor ecx, ecx
-.ag_loop:
-    cmp rcx, r12
-    jge .ag_done
-    push rcx
-
-    ; Get coro from args[i] (one Value per slot)
-    mov rdi, rcx
+    ; One task per argument, all enqueued, so they run concurrently.  The
+    ; array is plain memory: see the struct comment on why it is not a list.
+    mov rdi, [rbp - AGF_NARGS]
     shl rdi, 3
-    mov rdi, [rbx + rdi]      ; coro Value
+    add rdi, 8                  ; ap_malloc(0) is not worth reasoning about
+    call ap_malloc
+    test rax, rax
+    jz .ag_nomem
+    mov rbx, rax
+    mov [rbp - AGF_LIST], rax
+    mov qword [rbp - AGF_IDX], 0
+.ag_loop:
+    mov rcx, [rbp - AGF_IDX]
+    cmp rcx, [rbp - AGF_NARGS]
+    jge .ag_done
+    mov rax, [rbp - AGF_ARGS]
+    mov rdi, [rax + rcx*8]
     V_TEST_PTR rdi, rdx
     ja .ag_type_error
-    call task_new
-    push rax
+    test rdi, rdi
+    jz .ag_type_error
 
-    ; Enqueue the task
+    ; A task or future passed straight in is used as it stands; anything
+    ; else is wrapped, which is what CPython's ensure_future does.
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel task_type]
+    cmp rax, rcx
+    je .ag_have_task
+    call task_new
+    jmp .ag_enqueue
+.ag_have_task:
+    INCREF rdi
+    mov rax, rdi
+.ag_enqueue:
+    test rax, rax
+    jz .ag_failed
+    mov rcx, [rbp - AGF_IDX]
+    mov [rbx + rcx*8], rax      ; the array takes over the reference
+    push rax
+    sub rsp, 8
     mov rdi, rax
     call ready_enqueue
-
-    ; Add to result list
+    add rsp, 8
     pop rax
-    push rax                   ; save task for DECREF
-    mov rdi, r13
-    mov rsi, rax
-    call list_append
-
-    ; DECREF task (list_append INCREFs, release our initial ref)
-    pop rdi
-    call obj_decref
-
-    pop rcx
-    inc rcx
+    inc qword [rbp - AGF_IDX]
     jmp .ag_loop
 
 .ag_done:
-    ; Return the task list
-    ; TODO: Properly await all tasks and return results
-    ; For now, return the list of tasks (caller must await each)
-    mov rax, r13
+    mov edi, GatherAwaitable_size
+    call ap_malloc
+    test rax, rax
+    jz .ag_failed
+    mov qword [rax + GatherAwaitable.ob_refcnt], 1
+    lea rcx, [rel gather_awaitable_type]
+    mov [rax + GatherAwaitable.ob_type], rcx
+    mov [rax + GatherAwaitable.ga_tasks], rbx   ; takes over the array
+    mov rcx, [rbp - AGF_NARGS]
+    mov [rax + GatherAwaitable.ga_count], rcx
+    mov qword [rax + GatherAwaitable.ga_index], 0
+    mov rcx, [rbp - AGF_RETEX]
+    mov [rax + GatherAwaitable.ga_flags], rcx
+    mov qword [rax + GatherAwaitable.ga_state], 0
+    mov qword [rax + GatherAwaitable.gi_return_value], 0
     mov edx, TAG_PTR
-
-    pop r13
-    pop r12
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.ag_type_error:
-    pop rcx                    ; restore loop counter from stack
-    ; DECREF the partially-built list
-    mov rdi, r13
+.ag_failed:
+    call .ag_release
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.ag_nomem:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.ag_release:
+    ; Whatever tasks were built before the failure.
+    xor ecx, ecx
+.ag_rel_loop:
+    cmp rcx, [rbp - AGF_IDX]
+    jge .ag_rel_done
+    push rcx
+    mov rdi, [rbx + rcx*8]
     call obj_decref
-    RAISE exc_TypeError_type, "asyncio.gather() arguments must be coroutines"
+    pop rcx
+    inc rcx
+    jmp .ag_rel_loop
+.ag_rel_done:
+    mov rdi, rbx
+    jmp ap_free
+.ag_type_error:
+    call .ag_release
+    pop rbx
+    RAISE exc_TypeError_type, "An asyncio.Future, a coroutine or an awaitable is required"
+.ag_bad_kw:
+    lea rdi, [r8 + PyStrObject.data]
+    call ag_raise_bad_keyword
 END_FUNC asyncio_gather_func
+
+;; ag_raise_bad_keyword(rdi = the keyword's name, as a C string) -- no return
+AGK_NAME  equ 8
+AGK_BUF   equ 176
+AGK_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
+DEF_FUNC_LOCAL ag_raise_bad_keyword, AGK_FRAME
+    mov [rbp - AGK_NAME], rdi
+    lea rdi, [rbp - AGK_BUF]
+    CSTRING rsi, "gather() got an unexpected keyword argument '"
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - AGK_NAME]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "'"
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - AGK_BUF]
+    call raise_exception
+END_FUNC ag_raise_bad_keyword
+
+;; ============================================================================
+;; The gather awaitable.
+;;
+;; It waits on one task at a time, yielding each unfinished one; task_step
+;; already knows how to suspend on a yielded task, so this needs no new case
+;; in the event loop.  Every task is enqueued before the first yield, so they
+;; run concurrently regardless of the order this observes them in.
+;; ============================================================================
+DEF_FUNC_BARE gather_awaitable_iter_self
+    inc qword [rdi + PyObject.ob_refcnt]
+    mov rax, rdi
+    ret
+END_FUNC gather_awaitable_iter_self
+
+GAI_SELF  equ 8
+GAI_LIST  equ 16
+GAI_N     equ 24
+GAI_I     equ 32
+GAI_FRAME equ 48            ; + 0 pushes = 48
+DEF_FUNC gather_awaitable_iternext, GAI_FRAME
+    mov [rbp - GAI_SELF], rdi
+    cmp qword [rdi + GatherAwaitable.ga_state], 0
+    jne .gai_exhausted
+
+    mov rax, [rdi + GatherAwaitable.ga_tasks]
+    mov [rbp - GAI_LIST], rax
+    mov rcx, [rdi + GatherAwaitable.ga_count]
+    mov [rbp - GAI_N], rcx
+
+.gai_scan:
+    mov rdi, [rbp - GAI_SELF]
+    mov rcx, [rdi + GatherAwaitable.ga_index]
+    cmp rcx, [rbp - GAI_N]
+    jge .gai_collect
+    mov rax, [rbp - GAI_LIST]
+    mov rax, [rax + rcx*8]      ; the task
+    cmp dword [rax + AsyncTask.done], 1
+    je .gai_next
+    ; Yield it.  task_step decrefs what it was handed, so this owes it a
+    ; reference -- the same contract task_iternext keeps when it yields
+    ; itself.
+    INCREF rax
+    leave
+    ret
+.gai_next:
+    inc qword [rdi + GatherAwaitable.ga_index]
+    jmp .gai_scan
+
+.gai_collect:
+    ; Every task has finished.  Build the results, in the order the arguments
+    ; were given -- which is what gather promises, not completion order.
+    mov qword [rdi + GatherAwaitable.ga_state], 1
+    ; list_new takes a CAPACITY.  Calling it with rdi still holding self made
+    ; that capacity a pointer -- about 700 million -- and the zeroing loop
+    ; inside it ran for ever.  Which pointer, and so how long, depended on
+    ; ASLR, which is what made this look like an intermittent hang.
+    mov rdi, [rbp - GAI_N]
+    call list_new
+    test rax, rax
+    jz .gai_failed
+    push rax
+    sub rsp, 8
+    mov qword [rbp - GAI_I], 0
+.gai_gather:
+    mov rcx, [rbp - GAI_I]
+    cmp rcx, [rbp - GAI_N]
+    jge .gai_gathered
+    mov rax, [rbp - GAI_LIST]
+    mov rax, [rax + rcx*8]
+    mov rdx, [rax + AsyncTask.exception]
+    test rdx, rdx
+    jnz .gai_had_exception
+    mov rsi, [rax + AsyncTask.result]
+.gai_append:
+    mov rdi, [rsp + 8]
+    call list_append
+    inc qword [rbp - GAI_I]
+    jmp .gai_gather
+
+.gai_had_exception:
+    ; return_exceptions puts the exception in the list; without it the first
+    ; one propagates, which is what CPython's default does.
+    mov rcx, [rbp - GAI_SELF]
+    cmp qword [rcx + GatherAwaitable.ga_flags], 0
+    je .gai_propagate
+    mov rsi, rdx
+    jmp .gai_append
+
+.gai_propagate:
+    add rsp, 8
+    pop rdi
+    call obj_decref             ; the partial results list
+    mov rcx, [rbp - GAI_I]
+    mov rax, [rbp - GAI_LIST]
+    mov rax, [rax + rcx*8]
+    mov rdi, [rax + AsyncTask.exception]
+    INCREF rdi
+    call raise_exception_obj
+    xor eax, eax
+    leave
+    ret
+
+.gai_gathered:
+    add rsp, 8
+    pop rax
+    mov rdi, [rbp - GAI_SELF]
+    mov [rdi + GatherAwaitable.gi_return_value], rax
+    xor eax, eax                ; NULL, with the value in gi_return_value
+    leave
+    ret
+
+.gai_exhausted:
+    xor eax, eax
+    leave
+    ret
+.gai_failed:
+    xor eax, eax
+    leave
+    ret
+END_FUNC gather_awaitable_iternext
+
+GAD_I     equ 8
+GAD_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+DEF_FUNC gather_awaitable_dealloc, GAD_FRAME
+    push rbx
+    mov rbx, rdi
+    mov rax, [rbx + GatherAwaitable.ga_tasks]
+    test rax, rax
+    jz .gad_value
+    mov qword [rbp - GAD_I], 0
+.gad_loop:
+    mov rcx, [rbp - GAD_I]
+    cmp rcx, [rbx + GatherAwaitable.ga_count]
+    jge .gad_free_array
+    mov rax, [rbx + GatherAwaitable.ga_tasks]
+    mov rdi, [rax + rcx*8]
+    call obj_decref
+    inc qword [rbp - GAD_I]
+    jmp .gad_loop
+.gad_free_array:
+    mov rdi, [rbx + GatherAwaitable.ga_tasks]
+    mov qword [rbx + GatherAwaitable.ga_tasks], 0
+    call ap_free
+.gad_value:
+    mov rdi, [rbx + GatherAwaitable.gi_return_value]
+    mov qword [rbx + GatherAwaitable.gi_return_value], 0
+    XDECREF_V rdi, rcx
+    mov rdi, rbx
+    call ap_free
+    pop rbx
+    leave
+    ret
+END_FUNC gather_awaitable_dealloc
 
 ;; ============================================================================
 ;; asyncio_get_running_loop(args, nargs)
@@ -743,6 +1060,7 @@ am_stream_reader:    db "StreamReader", 0
 am_stream_writer:    db "StreamWriter", 0
 
 sleep_awaitable_name: db "SleepAwaitable", 0
+gather_awaitable_name: db "_GatherAwaitable", 0
 wait_for_awaitable_name: db "WaitForAwaitable", 0
 
 section .data
@@ -779,6 +1097,37 @@ sleep_awaitable_type:
 
 align 8
 global wait_for_awaitable_type
+gather_awaitable_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq gather_awaitable_name    ; tp_name
+    dq GatherAwaitable_size     ; tp_basicsize
+    dq gather_awaitable_dealloc ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq gather_awaitable_iter_self ; tp_iter
+    dq gather_awaitable_iternext  ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq 0                        ; tp_flags
+    dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
+
+align 8
+global gather_awaitable_type
 wait_for_awaitable_type:
     dq 1                        ; ob_refcnt (immortal)
     dq type_type                ; ob_type

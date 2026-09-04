@@ -811,6 +811,9 @@ DEF_FUNC int_fits_i64
     cmp edx, TAG_PTR
     jne .ifi_yes                ; not an int at all; the caller's type check
                                 ; deals with that
+    call int_unwrap             ; see int_to_i64
+    cmp edx, TAG_SMALLINT
+    je .ifi_yes
     cmp qword [rdi + PyIntObject.compact], 0
     jne .ifi_yes                ; the compact ival is live, so it fits
     lea rdi, [rdi + PyIntObject.mpz]
@@ -832,6 +835,15 @@ END_FUNC int_fits_i64
 ;; Extract integer value as C int64. Handles SmallInt.
 ;; ============================================================================
 DEF_FUNC_BARE int_to_i64
+    cmp edx, TAG_SMALLINT
+    je .smallint
+    ; An int SUBCLASS wraps an int rather than being one -- buildclass gives
+    ; it a PyInstanceObject layout, not room on the end of a PyIntObject -- so
+    ; reading .compact here would read the wrapper's own header.  Most callers
+    ; unwrap first; the ones that only checked the type with REQUIRE_INT_TYPE
+    ; did not, and every value they read came out as 0.  int_unwrap is cheap
+    ; and idempotent: for an exact int it is one compare.
+    call int_unwrap
     cmp edx, TAG_SMALLINT
     je .smallint
     cmp qword [rdi + PyIntObject.compact], 0
@@ -1636,7 +1648,7 @@ DEF_FUNC_BARE int_mod
 .mod_zdiv_error:
     push rbp
     mov rbp, rsp
-    RAISE exc_ZeroDivisionError_type, "integer division or modulo by zero"
+    RAISE exc_ZeroDivisionError_type, "integer modulo by zero"
 
 .gmp_path:
     push rbp
@@ -1721,7 +1733,7 @@ DEF_FUNC_BARE int_mod
     mov rdi, r12
     call int_dealloc
 .gmp_mod_zdiv_nb:
-    RAISE exc_ZeroDivisionError_type, "integer division or modulo by zero"
+    RAISE exc_ZeroDivisionError_type, "integer modulo by zero"
 END_FUNC int_mod
 
 ;; ============================================================================
@@ -2751,7 +2763,10 @@ END_FUNC int_rshift
 ;; Power: int_power(PyObject *a, PyObject *b) -> rax = Value
 ;; For small positive exponents, use GMP mpz_pow_ui
 ;; ============================================================================
-DEF_FUNC int_power
+IPW_ETAG  equ 8             ; the exponent's tag, across the GMP calls
+IPW_BASED equ 16            ; the base as a double, likewise
+IPW_FRAME equ 24            ; + 4 pushes = 8 + 24 + 32 = 64, 16-aligned
+DEF_FUNC int_power, IPW_FRAME
     call int_binop_unpack       ; rdi/edx = base, rsi/ecx = exponent, both ints
     test eax, eax
     jnz .operands_ok
@@ -2764,21 +2779,26 @@ DEF_FUNC int_power
     push r13
     push r14
 
-    mov r14d, edx           ; r14d = base_tag; ecx is already exp_tag
+    mov r14d, edx           ; r14d = base_tag
+    mov [rbp - IPW_ETAG], ecx   ; the exponent's tag, which the GMP calls
+                                ; below clobber and .neg_exp still needs
 
     mov rbx, rdi           ; rbx = base
     mov r12, rsi           ; r12 = exponent
 
-    ; Get exponent as int64
+    ; The exponent's SIGN first, and from the value rather than from a
+    ; truncated copy of it: mpz_get_si is undefined past int64, so the sign
+    ; of 10**20 read back through it is whatever the low bits say.
     cmp ecx, TAG_SMALLINT
     je .exp_smallint
-    push rbx                ; save base across GMP call
-    push r14                ; save base_tag
     INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
+    xor esi, esi
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    js .neg_exp
+    lea rdi, [r12 + PyIntObject.mpz]
     call __gmpz_get_si wrt ..plt
-    pop r14                 ; restore base_tag
-    pop rbx                 ; restore base
     mov r13, rax
     jmp .have_exp
 .exp_smallint:
@@ -2838,11 +2858,17 @@ DEF_FUNC int_power
     ret
 
 .neg_exp:
-    ; int ** negative → float result (1.0 / base**abs(exp))
-    ; For simplicity, convert both to double and use pow
-    ; Actually, just raise a TypeError for now (like many impls)
-    ; Python returns float for negative int power
-    ; Convert base to double (r14d = base_tag)
+    ; int ** negative -> float.  This used to compute 1.0 / base**|exp| with
+    ; a LINEAR loop -- one multiply per unit of the exponent -- so
+    ; 0 ** -10**20 ran 10**20 iterations and never came back, and it divided
+    ; by the 0.0 it had just built rather than raising ZeroDivisionError.
+    ; It also overflowed on the way: 2 ** -1074 is 5e-324, and base**1074 is
+    ; an infinity, so the reciprocal came out 0.0.
+    ;
+    ; float_pow answers all of it, and is the only place the IEEE corners are
+    ; written down.  Both operands go through GMP's mpz_get_d, which does not
+    ; truncate the way mpz_get_si does -- an exponent past int64 used to come
+    ; back with the wrong magnitude and sometimes the wrong sign.
     cmp r14d, TAG_SMALLINT
     je .neg_exp_smallint
     INT_NEED_MPZ rbx
@@ -2853,29 +2879,29 @@ DEF_FUNC int_power
     mov rax, rbx
     cvtsi2sd xmm0, rax
 .neg_exp_have_base:
-    ; xmm0 = base as double
-    ; Compute base ** exp using repeated multiply (simple)
-    ; For now: 1.0 / (base ** abs(exp))
-    neg r13                ; abs(exp)
-    movsd xmm1, [rel one_double]    ; xmm1 = result = 1.0
-.pow_loop:
-    test r13, r13
-    jz .pow_loop_done
-    mulsd xmm1, xmm0
-    dec r13
-    jmp .pow_loop
-.pow_loop_done:
-    ; result = 1.0 / xmm1
-    movsd xmm0, [rel one_double]
-    divsd xmm0, xmm1
-    call float_from_f64
+    ; The exponent: r13 holds it when it fit an int64, and otherwise the
+    ; original object still does.
+    movsd [rbp - IPW_BASED], xmm0   ; r13 still holds the exponent
+    cmp dword [rbp - IPW_ETAG], TAG_SMALLINT
+    je .neg_exp_exp_small
+    INT_NEED_MPZ r12
+    lea rdi, [r12 + PyIntObject.mpz]
+    call __gmpz_get_d wrt ..plt
+    jmp .neg_exp_have_exp
+.neg_exp_exp_small:
+    cvtsi2sd xmm0, r13
+.neg_exp_have_exp:
+    movq rsi, xmm0
+    V_FROM_F64 rsi, rax
+    mov rdi, [rbp - IPW_BASED]
+    V_FROM_F64 rdi, rax
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; return one Value
-    ret
+    extern float_pow
+    jmp float_pow
 END_FUNC int_power
 
 ;; ============================================================================

@@ -34,3 +34,27 @@ for bad in ["f'}'", "f'{'", "f'{x!q}'", "f'{'"]:
         print("no error for", bad)
     except SyntaxError:
         print("SyntaxError for", bad)
+
+# A replacement field's tokens are lexed as a span of the same source, and the
+# span's starting line has to be handed to the lexer -- an exception raised
+# inside a field used to point at line 1 of the file.
+print("=== a field's own line ===")
+SRC = "def g():\n    return 0\n\n\nx = f'{1 / g()}'\n"
+try:
+    exec(compile(SRC, "<lines>", "exec"), {})
+except ZeroDivisionError as e:
+    tb = e.__traceback__
+    seen = []
+    while tb is not None:
+        seen.append(tb.tb_lineno)
+        tb = tb.tb_next
+    print("innermost line", seen[-1])
+
+SPEC = "w = 0\n\n\n\n\ny = f'{1:{2 / w}}'\n"
+try:
+    exec(compile(SPEC, "<lines>", "exec"), {})
+except ZeroDivisionError as e:
+    tb = e.__traceback__
+    while tb.tb_next is not None:
+        tb = tb.tb_next
+    print("nested spec line", tb.tb_lineno)

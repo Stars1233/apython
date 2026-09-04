@@ -1763,6 +1763,165 @@ DEF_FUNC complex_method_getnewargs, CMG_FRAME
     ret
 END_FUNC complex_method_getnewargs
 
+;; ============================================================================
+;; The names int and float were short of.  dir(int) was missing is_integer,
+;; as_integer_ratio, __round__, __ceil__, __floor__ and __getnewargs__, and
+;; dir(float) the last four -- so (5).is_integer() was an AttributeError, and
+;; anything in the stdlib that classifies a number by asking for one of them
+;; got the wrong answer about a builtin.
+;;
+;; Each is a thin wrapper over work that already exists.  __round__ IS
+;; builtin_round_fn: a method's (args, nargs) is the same shape round()'s
+;; own arguments arrive in, and round() reaches int and float natively rather
+;; than through the dunder, so there is no recursion to worry about.
+;; ============================================================================
+
+;; int.__round__(self[, ndigits]) and float.__round__(self[, ndigits])
+global int_method_round
+DEF_FUNC_BARE int_method_round
+    extern builtin_round_fn
+    jmp builtin_round_fn
+END_FUNC int_method_round
+
+;; int.is_integer(self) -> True, always
+global int_method_is_integer
+NII_FRAME equ 16            ; + 0 pushes = 16
+DEF_FUNC int_method_is_integer, NII_FRAME
+    mov eax, 1
+    RET_BOOL_RAX
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+END_FUNC int_method_is_integer
+
+;; int.as_integer_ratio(self) -> (self, 1)
+global int_method_as_integer_ratio
+NIR_SELF  equ 8
+NIR_TUP   equ 16
+NIR_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC int_method_as_integer_ratio, NIR_FRAME
+    ; int_unwrap flattens bool and an int subclass, so True and I(5) answer
+    ; with a plain int the way CPython's do.
+    mov rdi, [rdi]
+    V_UNPACK rdi, rdx
+    extern int_unwrap
+    call int_unwrap
+    V_PACK rdi, rdx
+    mov [rbp - NIR_SELF], rdi
+    mov edi, 2
+    extern tuple_new
+    call tuple_new
+    mov [rbp - NIR_TUP], rax
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rcx, [rbp - NIR_SELF]
+    INCREF_V rcx, rsi
+    mov [rdx], rcx
+    mov rcx, 1
+    V_PACK_I64 rcx, rsi
+    mov [rdx + 8], rcx
+    mov rax, [rbp - NIR_TUP]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+END_FUNC int_method_as_integer_ratio
+
+;; int.__floor__(self) / int.__ceil__(self) / int.__trunc__(self) -> self
+global int_method_identity
+NID_FRAME equ 16            ; + 0 pushes = 16
+DEF_FUNC int_method_identity, NID_FRAME
+    mov rdi, [rdi]
+    V_UNPACK rdi, rdx
+    call int_unwrap
+    V_PACK rdi, rdx
+    mov rax, rdi
+    INCREF_V rax, rcx
+    leave
+    ret
+END_FUNC int_method_identity
+
+;; int.__getnewargs__(self) -> (self,)
+global int_method_getnewargs
+NGA_SELF  equ 8
+NGA_TUP   equ 16
+NGA_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC int_method_getnewargs, NGA_FRAME
+    mov rdi, [rdi]
+    V_UNPACK rdi, rdx
+    call int_unwrap
+    V_PACK rdi, rdx
+    mov [rbp - NGA_SELF], rdi
+    mov edi, 1
+    call tuple_new
+    mov [rbp - NGA_TUP], rax
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rcx, [rbp - NGA_SELF]
+    INCREF_V rcx, rsi
+    mov [rdx], rcx
+    mov rax, [rbp - NGA_TUP]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+END_FUNC int_method_getnewargs
+
+;; float.__getnewargs__(self) -> (float(self),)
+;; A subclass answers with a plain float: F(2.5).__getnewargs__() is (2.5,).
+global float_method_getnewargs
+DEF_FUNC float_method_getnewargs, NGA_FRAME
+    mov rdi, [rdi]
+    call float_self_bits
+    V_FROM_F64 rax, rcx
+    mov [rbp - NGA_SELF], rax
+    mov edi, 1
+    call tuple_new
+    mov [rbp - NGA_TUP], rax
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rcx, [rbp - NGA_SELF]
+    mov [rdx], rcx
+    mov rax, [rbp - NGA_TUP]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+END_FUNC float_method_getnewargs
+
+;; float.__floor__(self) and float.__ceil__(self) -> int
+;;
+;; The same work math.floor and math.ceil do for a float: round the double the
+;; right way and hand it to float_int, which knows about the infinities, NaN
+;; and the values that need GMP.  It has to be the same work: adding these
+;; names newly routes a float SUBCLASS instance through the dunder in
+;; MATH_ROUNDER, which reaches its native arm only for an immediate.
+global float_method_floor
+DEF_FUNC float_method_floor
+    mov rdi, [rdi]
+    call float_self_bits
+    movq xmm0, rax
+    roundsd xmm0, xmm0, 1       ; toward -inf
+    jmp float_method_to_int
+END_FUNC float_method_floor
+
+global float_method_ceil
+DEF_FUNC float_method_ceil
+    mov rdi, [rdi]
+    call float_self_bits
+    movq xmm0, rax
+    roundsd xmm0, xmm0, 2       ; toward +inf
+    jmp float_method_to_int
+END_FUNC float_method_ceil
+
+;; The tail both share.  Not a DEF_FUNC: it inherits its caller's frame and
+;; returns through its caller's leave.
+float_method_to_int:
+    movq rdi, xmm0
+    V_FROM_F64 rdi, rax
+    extern float_int
+    call float_int
+    leave
+    ret
+
+
 section .rodata
 align 16
 cx_meth_signmask: dq 0x8000000000000000, 0x8000000000000000

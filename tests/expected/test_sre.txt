@@ -31,4 +31,6 @@ pattern hash/eq OK
 callable sub OK
 callable subn OK
 callable subn count limit OK
+argument types OK
+str subclass subject OK
 All _sre tests passed!

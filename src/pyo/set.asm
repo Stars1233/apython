@@ -1288,6 +1288,115 @@ DEF_FUNC set_nb_and, SNB_FRAME
     ret
 END_FUNC set_nb_and
 
+;; ============================================================================
+;; The in-place set operators.
+;;
+;; `s &= t` used to fall through to the binary form and REBIND, so every other
+;; name for the same set went on seeing the old value.  bugs.md filed that as a
+;; deliberate omission, on the grounds that a by-name `__iand__` that did not
+;; really mutate would be worse than none at all.  It would be; the answer is
+;; to mutate.
+;;
+;; Each computes the binary result into a fresh set and then swaps the two
+;; sets' storage, so the object the caller is holding is the one that changes.
+;; The temporary leaves holding the old table and releases it on the way out.
+;; Doing it that way means the four share every line of the actual set algebra
+;; with the binary forms, rather than growing a second implementation of it.
+;;
+;; frozenset does NOT get these -- it shares set_number_methods, so each one
+;; asks set_result_type what kind the receiver is and declines for a frozen
+;; one.  CPython's frozenset has no `__iand__` either, and `fs &= t` rebinds
+;; there too.
+;; ============================================================================
+%macro DEF_SET_INPLACE 2        ; %1 = name suffix, %2 = the binary form
+DEF_FUNC set_nb_i%1, SNB_FRAME
+    SET_NB_REQUIRE_BOTH         ; both are sets, or NotImplemented
+    mov [rbp - SNB_LEFT], rdi
+    mov [rbp - SNB_RIGHT], rsi
+
+    ; An immutable receiver has nothing to mutate: hand back NotImplemented
+    ; and let the protocol fall back to the binary form and rebind.
+    call set_result_type
+    lea rcx, [rel frozenset_type]
+    cmp rax, rcx
+    je %%decline
+
+    mov rdi, [rbp - SNB_LEFT]
+    mov rsi, [rbp - SNB_RIGHT]
+    call %2                     ; the binary form: an owned set, as a Value
+    test rax, rax
+    jz %%decline                ; NULL: it raised, or it declined
+
+    mov rdi, [rbp - SNB_LEFT]
+    mov rsi, rax                ; takes over the temporary's reference
+    call set_swap_storage       ; -> rax = the receiver, one new reference
+    leave
+    ret
+%%decline:
+    xor eax, eax                ; a NULL Value is NotImplemented here
+    leave
+    ret
+END_FUNC set_nb_i%1
+%endmacro
+
+DEF_SET_INPLACE and, set_nb_and
+DEF_SET_INPLACE or,  set_nb_or
+DEF_SET_INPLACE sub, set_nb_sub
+DEF_SET_INPLACE xor, set_nb_xor
+
+;; ============================================================================
+;; set_swap_storage(rdi = the set to mutate,
+;;                  rsi = a fresh set holding the answer, whose reference this
+;;                        takes over)
+;;   -> rax = the mutated set, with a reference of its own
+;;
+;; set and frozenset reuse the dict header, of which a set uses four words.
+;; Swapping them moves the answer into the caller's object and the old table
+;; into the temporary, which then releases it -- so the old keys are dropped
+;; by the ordinary set dealloc rather than by a second copy of it here.
+;; ============================================================================
+DEF_FUNC set_swap_storage
+    push rbx
+    push r12
+    sub rsp, 8                  ; 8 + 16 = 24; + the pushed rbp = aligned
+    mov rbx, rdi
+    mov r12, rsi
+
+    mov rax, [rbx + PyDictObject.ob_size]
+    mov rcx, [r12 + PyDictObject.ob_size]
+    mov [rbx + PyDictObject.ob_size], rcx
+    mov [r12 + PyDictObject.ob_size], rax
+
+    mov rax, [rbx + PyDictObject.capacity]
+    mov rcx, [r12 + PyDictObject.capacity]
+    mov [rbx + PyDictObject.capacity], rcx
+    mov [r12 + PyDictObject.capacity], rax
+
+    mov rax, [rbx + PyDictObject.entries]
+    mov rcx, [r12 + PyDictObject.entries]
+    mov [rbx + PyDictObject.entries], rcx
+    mov [r12 + PyDictObject.entries], rax
+
+    mov rax, [rbx + PyDictObject.dk_tombstones]
+    mov rcx, [r12 + PyDictObject.dk_tombstones]
+    mov [rbx + PyDictObject.dk_tombstones], rcx
+    mov [r12 + PyDictObject.dk_tombstones], rax
+
+    ; The version counter belongs to the object, not to the table, so it does
+    ; not travel -- but it does have to move, or an iterator that is mid-walk
+    ; will not notice that the set changed under it.
+    inc qword [rbx + PyDictObject.dk_version]
+
+    DECREF_REG r12              ; releases the old table and its keys
+    mov rax, rbx
+    INCREF rax
+    add rsp, 8
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC set_swap_storage
+
 ;; set_nb_sub(left, right, ltag, rtag) -> new set (difference)
 DEF_FUNC set_nb_sub, SNB_FRAME
     SET_NB_REQUIRE_BOTH
@@ -1349,15 +1458,15 @@ set_number_methods:
     dq 0                        ; nb_true_divide  +152
     dq 0                        ; nb_index        +160
     dq 0                        ; nb_iadd         +168
-    dq 0                        ; nb_isub         +176
+    dq set_nb_isub            ; nb_isub         +176
     dq 0                        ; nb_imul         +184
     dq 0                        ; nb_irem         +192
     dq 0                        ; nb_ipow         +200
     dq 0                        ; nb_ilshift      +208
     dq 0                        ; nb_irshift      +216
-    dq 0                        ; nb_iand         +224
-    dq 0                        ; nb_ixor         +232
-    dq 0                        ; nb_ior          +240
+    dq set_nb_iand            ; nb_iand         +224
+    dq set_nb_ixor            ; nb_ixor         +232
+    dq set_nb_ior            ; nb_ior          +240
     dq 0                        ; nb_ifloor_divide +248
     dq 0                        ; nb_itrue_divide +256
     dq 0 ; nb_matmul

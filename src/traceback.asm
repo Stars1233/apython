@@ -39,6 +39,9 @@ extern str_type
 extern tuple_type
 extern obj_decref
 extern str_type
+extern current_exception
+extern none_singleton
+extern obj_dealloc
 extern traceback_type
 extern ap_malloc
 
@@ -162,6 +165,190 @@ DEF_FUNC_BARE code_addr2line
     xor eax, eax
     ret
 END_FUNC code_addr2line
+
+;; ============================================================================
+;; code_addr2location(rdi = PyCodeObject*, rsi = offset in code units,
+;;                    rdx = out: four qwords, start_line, end_line,
+;;                                start_col, end_col)
+;;   -> eax = 1 when the table covers the offset, 0 otherwise
+;;
+;; The same walk as code_addr2line, keeping the columns this time.  The
+;; columns are BYTE offsets into the source line, zero-based; -1 means the
+;; entry does not carry them, which is what CPython reports for a NO_COLUMNS
+;; or NONE entry and what makes it skip the caret line.
+;;
+;; The five entry shapes, from CPython's Objects/locations.md:
+;;   code 0-9   one byte follows: col = code*8 + (b >> 4),
+;;              end_col = col + (b & 15); same line
+;;   code 10-12 two raw bytes: col, end_col; line delta = code - 10
+;;   code 13    signed varint line delta; no columns
+;;   code 14    signed varint line delta, then end-line delta, col+1, end_col+1
+;;   code 15    no location at all
+;; ============================================================================
+A2C_OUT   equ 8
+A2C_LINE  equ 16
+A2C_FRAME equ 32            ; + 4 pushes = 64
+
+DEF_FUNC code_addr2location, A2C_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov [rbp - A2C_OUT], rdx
+    mov qword [rdx], -1
+    mov qword [rdx + 8], -1
+    mov qword [rdx + 16], -1
+    mov qword [rdx + 24], -1
+
+    test rdi, rdi
+    jz .a2c_none
+    mov r14, [rdi + PyCodeObject.co_linetable]
+    test r14, r14
+    jz .a2c_none
+    mov rax, [r14 + PyObject.ob_type]
+    extern bytes_type
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    jne .a2c_none
+
+    mov eax, [rdi + PyCodeObject.co_firstlineno]
+    mov [rbp - A2C_LINE], rax
+    mov r9, [r14 + PyBytesObject.ob_size]
+    lea r8, [r14 + PyBytesObject.data]          ; cursor
+    add r9, r8                                  ; end
+    xor r10d, r10d                              ; code-unit offset of entry
+
+.a2c_entry:
+    cmp r8, r9
+    jae .a2c_none
+    movzx ecx, byte [r8]
+    inc r8
+    test cl, 0x80
+    jz .a2c_none                                ; desynchronised
+    mov edx, ecx
+    and edx, 7
+    inc edx                                     ; edx = length in code units
+    shr ecx, 3
+    and ecx, 0x0f                               ; ecx = code
+    mov ebx, ecx                                ; ebx = code, kept across reads
+
+    xor r12d, r12d                              ; start col, or -1
+    xor r13d, r13d                              ; end col, or -1
+    mov r12d, -1
+    mov r13d, -1
+
+    cmp ebx, 15
+    je .a2c_check                               ; no location: line delta 0
+    cmp ebx, 14
+    je .a2c_long
+    cmp ebx, 13
+    je .a2c_nocol
+    cmp ebx, 10
+    jb .a2c_short
+
+    ; one-line form: two raw column bytes, line delta in the code
+    lea eax, [rbx - 10]
+    add [rbp - A2C_LINE], eax
+    movzx r12d, byte [r8]
+    movzx r13d, byte [r8 + 1]
+    add r8, 2
+    jmp .a2c_check
+
+.a2c_short:
+    movzx eax, byte [r8]
+    inc r8
+    mov r12d, ebx
+    shl r12d, 3                                 ; code * 8
+    mov ecx, eax
+    shr ecx, 4
+    add r12d, ecx                               ; start column
+    mov r13d, eax
+    and r13d, 15
+    add r13d, r12d                              ; end column
+    jmp .a2c_check
+
+.a2c_nocol:
+    call tb_read_svarint
+    add [rbp - A2C_LINE], ecx
+    jmp .a2c_check
+
+.a2c_long:
+    call tb_read_svarint
+    add [rbp - A2C_LINE], ecx
+    call tb_read_varint
+    mov r12d, ecx                               ; end line delta, for now
+    call tb_read_varint
+    mov r13d, ecx                               ; start column + 1
+    call tb_read_varint                         ; end column + 1
+    ; Fold the three into place below; r12 is the end-line delta here, so it
+    ; is dealt with at .a2c_hit rather than in the common tail.
+    mov eax, r12d
+    mov r12d, r13d
+    dec r12d                                    ; -1 when the field was 0
+    mov r13d, ecx
+    dec r13d
+    push rax                                    ; the end-line delta
+    jmp .a2c_check_long
+
+.a2c_check_long:
+    cmp rsi, r10
+    jb .a2c_advance_long
+    lea r11, [r10 + rdx]
+    cmp rsi, r11
+    jae .a2c_advance_long
+    pop rax
+    mov rdx, [rbp - A2C_OUT]
+    mov rcx, [rbp - A2C_LINE]
+    mov [rdx], rcx
+    add rax, rcx
+    mov [rdx + 8], rax                          ; end line
+    movsxd rax, r12d
+    mov [rdx + 16], rax
+    movsxd rax, r13d
+    mov [rdx + 24], rax
+    mov eax, 1
+    jmp .a2c_out
+.a2c_advance_long:
+    pop rax
+    add r10, rdx
+    jmp .a2c_entry
+
+.a2c_check:
+    cmp rsi, r10
+    jb .a2c_advance
+    lea r11, [r10 + rdx]
+    cmp rsi, r11
+    jae .a2c_advance
+    mov rdx, [rbp - A2C_OUT]
+    cmp ebx, 15
+    je .a2c_out_none                            ; no location for this range
+    mov rcx, [rbp - A2C_LINE]
+    mov [rdx], rcx
+    mov [rdx + 8], rcx                          ; every other form is one line
+    movsxd rax, r12d
+    mov [rdx + 16], rax
+    movsxd rax, r13d
+    mov [rdx + 24], rax
+    mov eax, 1
+    jmp .a2c_out
+
+.a2c_advance:
+    add r10, rdx
+    jmp .a2c_entry
+
+.a2c_out_none:
+    mov eax, 1
+    jmp .a2c_out
+.a2c_none:
+    xor eax, eax
+.a2c_out:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC code_addr2location
 
 ;; ============================================================================
 ;; traceback_here(rdi = exception, rsi = code object, rdx = lasti in code units)
@@ -291,17 +478,821 @@ DEF_FUNC tb_write_dec, TD_FRAME
 END_FUNC tb_write_dec
 
 ;; ============================================================================
-;; tb_write_source(rdi = filename str, rsi = line number)
-;; Prints the source line stripped and indented four spaces.  A file that
-;; cannot be opened simply produces nothing, which is what CPython does.
-;; The file is scanned in chunks, so a large source costs no extra memory and
-;; the frame stays small enough to use while unwinding.
+;; tb_write_carets(rdi = the raw source line, rsi = its length in bytes,
+;;                 rdx = how many leading whitespace bytes were stripped,
+;;                 rcx = the four-qword location)
+;;
+;; CPython's tb_displayline, in the same order:
+;;
+;;   * the columns are byte offsets into the line and the carets are drawn in
+;;     characters, so both ends are converted first;
+;;   * on one line, the segment between them decides whether there are inner
+;;     anchors -- `~~^~~` rather than `^^^^^`;
+;;   * across lines, the highlight runs to the last non-whitespace character;
+;;   * and when the primary run covers the whole stripped line and there are
+;;     no inner anchors, the row is left out entirely, because underlining a
+;;     line with itself says nothing.
+;;
+;; The row starts at the stripped indentation minus four, which is what puts
+;; the first caret under the right column of a line printed with a four-space
+;; indent.  It is arithmetic on signed offsets: with no indentation at all
+;; the counter starts at -4.
+;; ============================================================================
+TC_LINE  equ 8
+TC_LEN   equ 16
+TC_I     equ 24
+TC_LOC   equ 32
+TC_ANCH  equ 48             ; two qwords
+TC_START equ 56
+TC_END   equ 64
+TC_LEFT  equ 72
+TC_RIGHT equ 80
+TC_PRIM  equ 88
+TC_SEC   equ 96
+TC_SEGB  equ 104            ; the segment's start, as a clamped byte offset
+TC_BUF   equ 112 + TB_LINE
+TC_FRAME equ TC_BUF + 16    ; + 2 pushes = TC_BUF + 32
+
+DEF_FUNC_LOCAL tb_write_carets, TC_FRAME
+    push rbx
+    push r12
+    mov [rbp - TC_LINE], rdi
+    mov [rbp - TC_LEN], rsi
+    mov [rbp - TC_I], rdx
+    mov [rbp - TC_LOC], rcx
+    mov byte [rbp - TC_PRIM], '^'
+    mov byte [rbp - TC_SEC], '^'
+    mov qword [rbp - TC_LEFT], -1
+    mov qword [rbp - TC_RIGHT], -1
+
+    ; No location, or no columns: CPython prints the line and no carets.
+    cmp qword [rcx], 0
+    jl .tc_out
+    mov rax, [rcx + 16]
+    cmp rax, 0
+    jl .tc_out
+    mov rdx, [rcx + 24]
+    cmp rdx, 0
+    jl .tc_out
+    ; Clamp rather than give up: the end column of an expression that runs
+    ; past this line is a column on a LATER line, and the multi-line branch
+    ; below replaces it anyway.
+    cmp rax, rsi
+    jbe .tc_start_ok
+    mov rax, rsi
+.tc_start_ok:
+    cmp rdx, rsi
+    jbe .tc_end_ok
+    mov rdx, rsi
+.tc_end_ok:
+
+    ; Byte offsets to character offsets.
+    mov rdi, [rbp - TC_LINE]
+    mov rsi, rax
+    push rdx
+    call tb_byte_to_char
+    pop rdx
+    mov [rbp - TC_START], rax
+    mov rdi, [rbp - TC_LINE]
+    mov rsi, rdx
+    call tb_byte_to_char
+    mov [rbp - TC_END], rax
+
+    mov rcx, [rbp - TC_LOC]
+    mov rax, [rcx]
+    cmp rax, [rcx + 8]
+    jne .tc_multiline
+
+    ; One line: ask the segment whether it has inner anchors.  The columns are
+    ; clamped to the line, so a truncated line cannot walk off the buffer.
+    mov rdi, [rbp - TC_LINE]
+    mov rax, [rcx + 16]
+    cmp rax, [rbp - TC_LEN]
+    jbe .tc_seg_start_ok
+    mov rax, [rbp - TC_LEN]
+.tc_seg_start_ok:
+    mov [rbp - TC_SEGB], rax
+    add rdi, rax
+    mov rsi, [rcx + 24]
+    cmp rsi, [rbp - TC_LEN]
+    jbe .tc_seg_end_ok
+    mov rsi, [rbp - TC_LEN]
+.tc_seg_end_ok:
+    sub rsi, rax
+    jle .tc_measure
+    lea rdx, [rbp - TC_ANCH]
+    call tb_anchors
+    test eax, eax
+    jz .tc_measure
+    ; The anchors are byte offsets within the segment; CPython converts them
+    ; the same way and adds the segment's own start.
+    mov rdi, [rbp - TC_LINE]
+    add rdi, [rbp - TC_SEGB]
+    mov rsi, [rbp - TC_ANCH]
+    call tb_byte_to_char
+    add rax, [rbp - TC_START]
+    mov [rbp - TC_LEFT], rax
+    mov rdi, [rbp - TC_LINE]
+    add rdi, [rbp - TC_SEGB]
+    mov rsi, [rbp - TC_ANCH + 8]
+    call tb_byte_to_char
+    add rax, [rbp - TC_START]
+    mov [rbp - TC_RIGHT], rax
+    mov byte [rbp - TC_PRIM], '~'
+    mov byte [rbp - TC_SEC], '^'
+    jmp .tc_measure
+
+.tc_multiline:
+    ; The expression runs past this line: highlight to its last
+    ; non-whitespace character.
+    mov rdx, [rbp - TC_LEN]
+.tc_ml_scan:
+    test rdx, rdx
+    jz .tc_ml_done
+    mov rax, [rbp - TC_LINE]
+    movzx ecx, byte [rax + rdx - 1]
+    cmp cl, ' '
+    je .tc_ml_next
+    cmp cl, 9
+    je .tc_ml_next
+    cmp cl, 12
+    je .tc_ml_next
+    cmp cl, 13
+    je .tc_ml_next
+    cmp cl, 10
+    jne .tc_ml_done
+.tc_ml_next:
+    dec rdx
+    jmp .tc_ml_scan
+.tc_ml_done:
+    mov rdi, [rbp - TC_LINE]
+    mov rsi, rdx
+    call tb_byte_to_char
+    mov [rbp - TC_END], rax
+
+.tc_measure:
+    ; Elide the row when the primary run is the whole stripped line.
+    mov rax, [rbp - TC_LEFT]
+    cmp rax, 0
+    jge .tc_emit
+    cmp qword [rbp - TC_RIGHT], 0
+    jge .tc_emit
+    mov rdi, [rbp - TC_LINE]
+    mov rsi, [rbp - TC_LEN]
+    call tb_byte_to_char        ; the line's length in characters
+    sub rax, [rbp - TC_I]       ; the stripped length; the indent is ASCII
+    mov rcx, [rbp - TC_END]
+    sub rcx, [rbp - TC_START]
+    cmp rcx, rax
+    je .tc_out
+
+.tc_emit:
+    ; offset = i - 4, then one character per ++offset up to end.
+    mov rbx, [rbp - TC_I]
+    sub rbx, 4                  ; the counter, signed
+    xor r12, r12                ; bytes in the buffer
+.tc_loop:
+    inc rbx
+    cmp rbx, [rbp - TC_END]
+    jg .tc_flush
+    cmp r12, TB_LINE - 1
+    jae .tc_flush
+    mov al, ' '
+    cmp rbx, [rbp - TC_START]
+    jle .tc_put
+    mov al, [rbp - TC_PRIM]
+    cmp qword [rbp - TC_LEFT], 0
+    jl .tc_put
+    cmp rbx, [rbp - TC_LEFT]
+    jle .tc_put
+    cmp rbx, [rbp - TC_RIGHT]
+    jg .tc_put
+    mov al, [rbp - TC_SEC]
+.tc_put:
+    lea rcx, [rbp - TC_BUF]
+    mov [rcx + r12], al
+    inc r12
+    jmp .tc_loop
+
+.tc_flush:
+    test r12, r12
+    jz .tc_out
+    lea rdi, [rbp - TC_BUF]
+    mov rsi, r12
+    call tb_write
+    CSTRING rdi, `\n`
+    call tb_write_cstr
+.tc_out:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC tb_write_carets
+
+;; tb_byte_to_char(rdi = buffer, rsi = a byte offset) -> rax = the character
+;; offset, counting UTF-8 lead bytes.  An ASCII line, which is nearly every
+;; line, answers rsi.
+DEF_FUNC_BARE tb_byte_to_char
+    xor eax, eax
+    xor ecx, ecx
+.b2c_loop:
+    cmp rcx, rsi
+    jae .b2c_done
+    mov dl, [rdi + rcx]
+    and dl, 0xC0
+    cmp dl, 0x80
+    je .b2c_next
+    inc rax
+.b2c_next:
+    inc rcx
+    jmp .b2c_loop
+.b2c_done:
+    ret
+END_FUNC tb_byte_to_char
+
+;; ============================================================================
+;; tb_anchors(rdi = segment, rsi = length, rdx = out: left, right byte offsets)
+;;   -> eax = 1 when the segment is a top-level binary operation or subscript
+;;
+;; CPython parses the segment with the real parser and looks at the one node
+;; it produces: only a BinOp or a Subscript gets the `~~^~~` treatment, and
+;; anything else -- a call, a comparison, a boolean operator, a tuple -- gets
+;; a plain row of carets.  Running the compiler from inside the unwinder is
+;; not an option, so this reads the same answer off a token scan:
+;;
+;;   * the top-level BinOp's operator is the one of lowest precedence at
+;;     bracket depth zero, the last of its kind because they associate left --
+;;     except `**`, which associates right, so there the first;
+;;   * anything that would make the top node something other than a BinOp --
+;;     a comma, a comparison, `and`, `or`, `not`, `if`, `lambda`, a colon --
+;;     rules the segment out entirely;
+;;   * failing that, a segment ending in `]` whose matching `[` follows an
+;;     operand is a subscript.
+;;
+;; The offsets are bytes within the segment, as CPython's are before it
+;; converts them.
+;; ============================================================================
+AN_OUT   equ 8
+AN_PREC  equ 16             ; best (lowest) precedence seen, 99 for none
+AN_IDX   equ 24             ; byte offset of that operator
+AN_LEN   equ 32             ; its length, 1 or 2
+AN_DISQ  equ 40             ; the segment cannot be a BinOp or Subscript
+AN_SOPEN equ 48             ; `[` of the last depth-0 subscript, or -1
+AN_SCLOSE equ 56            ; its `]`, or -1
+AN_FRAME equ 64             ; + 5 pushes = 104
+
+; Precedence, lowest binding first.  Only the binary operators appear.
+AN_P_OR   equ 1
+AN_P_XOR  equ 2
+AN_P_AND  equ 3
+AN_P_SHIFT equ 4
+AN_P_ADD  equ 5
+AN_P_MUL  equ 6
+AN_P_POW  equ 7
+
+DEF_FUNC tb_anchors, AN_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rbx, rdi
+    mov r12, rsi
+    mov [rbp - AN_OUT], rdx
+    mov qword [rbp - AN_PREC], 99
+    mov qword [rbp - AN_IDX], -1
+    mov qword [rbp - AN_LEN], 0
+    mov qword [rbp - AN_DISQ], 0
+    mov qword [rbp - AN_SOPEN], -1
+    mov qword [rbp - AN_SCLOSE], -1
+    xor r13, r13                    ; i
+    xor r14, r14                    ; bracket depth
+    xor r15, r15                    ; 1 = the previous token can end an operand
+
+.an_loop:
+    cmp r13, r12
+    jae .an_end
+    movzx eax, byte [rbx + r13]
+
+    cmp al, ' '
+    je .an_skip1
+    cmp al, 9
+    je .an_skip1
+    cmp al, 12
+    je .an_skip1
+    cmp al, 13
+    je .an_skip1
+    cmp al, 10
+    je .an_skip1
+
+    cmp al, '#'
+    je .an_end                      ; a comment ends the expression
+
+    cmp al, 39                      ; '
+    je .an_string
+    cmp al, '"'
+    je .an_string
+
+    cmp al, '('
+    je .an_open
+    cmp al, '['
+    je .an_open_sq
+    cmp al, '{'
+    je .an_open
+    cmp al, ')'
+    je .an_close
+    cmp al, ']'
+    je .an_close_sq
+    cmp al, '}'
+    je .an_close
+
+    ; a name, or a string prefix.  A byte at or above 0x80 is part of a
+    ; non-ASCII identifier -- `ä / b` is a division like any other -- and
+    ; falling through to .an_operator for it made the whole expression the
+    ; caret span rather than anchoring on the operator.
+    cmp al, 0x80
+    jae .an_name
+    cmp al, '_'
+    je .an_name
+    or al, 0x20
+    cmp al, 'a'
+    jb .an_maybe_digit
+    cmp al, 'z'
+    jbe .an_name
+.an_maybe_digit:
+    movzx eax, byte [rbx + r13]
+    cmp al, '0'
+    jb .an_operator
+    cmp al, '9'
+    jbe .an_number
+    jmp .an_operator
+
+.an_skip1:
+    inc r13
+    jmp .an_loop
+
+.an_open:
+    inc r14
+    inc r13
+    xor r15, r15
+    jmp .an_loop
+
+.an_open_sq:
+    ; A `[` after an operand opens a subscript; after anything else it is a
+    ; list display, which is not what the anchor rule is about.
+    test r14, r14
+    jnz .an_open_sq_deep
+    test r15, r15
+    jz .an_open_sq_deep
+    mov [rbp - AN_SOPEN], r13
+.an_open_sq_deep:
+    inc r14
+    inc r13
+    xor r15, r15
+    jmp .an_loop
+
+.an_close:
+    dec r14
+    inc r13
+    mov r15, 1
+    jmp .an_loop
+
+.an_close_sq:
+    dec r14
+    test r14, r14
+    jnz .an_close_sq_deep
+    cmp qword [rbp - AN_SOPEN], 0
+    jl .an_close_sq_deep
+    mov [rbp - AN_SCLOSE], r13
+.an_close_sq_deep:
+    inc r13
+    mov r15, 1
+    jmp .an_loop
+
+.an_string:
+    ; Skip a string literal, single or triple quoted, honouring backslashes.
+    mov cl, al                      ; the quote character
+    mov rdx, r13
+    inc rdx
+    ; triple?
+    lea rax, [r13 + 2]
+    cmp rax, r12
+    jae .an_str_single
+    cmp cl, [rbx + r13 + 1]
+    jne .an_str_single
+    cmp cl, [rbx + r13 + 2]
+    jne .an_str_single
+    add rdx, 2
+.an_str_triple:
+    cmp rdx, r12
+    jae .an_str_done
+    mov al, [rbx + rdx]
+    cmp al, 92                      ; backslash
+    je .an_str_triple_esc
+    cmp al, cl
+    jne .an_str_triple_next
+    lea rax, [rdx + 2]
+    cmp rax, r12
+    jae .an_str_triple_next
+    cmp cl, [rbx + rdx + 1]
+    jne .an_str_triple_next
+    cmp cl, [rbx + rdx + 2]
+    jne .an_str_triple_next
+    add rdx, 3
+    jmp .an_str_done
+.an_str_triple_esc:
+    inc rdx
+.an_str_triple_next:
+    inc rdx
+    jmp .an_str_triple
+
+.an_str_single:
+    cmp rdx, r12
+    jae .an_str_done
+    mov al, [rbx + rdx]
+    cmp al, 92
+    je .an_str_single_esc
+    cmp al, cl
+    je .an_str_single_close
+    cmp al, 10
+    je .an_str_done
+    inc rdx
+    jmp .an_str_single
+.an_str_single_esc:
+    add rdx, 2
+    jmp .an_str_single
+.an_str_single_close:
+    inc rdx
+.an_str_done:
+    mov r13, rdx
+    mov r15, 1
+    jmp .an_loop
+
+.an_name:
+    ; Read the identifier, then decide whether it is a keyword that rules the
+    ; segment out, or a string prefix, or an ordinary name.
+    mov rdx, r13
+.an_name_scan:
+    cmp rdx, r12
+    jae .an_name_done
+    movzx eax, byte [rbx + rdx]
+    cmp al, 0x80
+    jae .an_name_next           ; a continuation or lead byte of a non-ASCII
+                                ; identifier; stopping here left the cursor
+                                ; where it was and the scan spun forever
+    cmp al, '_'
+    je .an_name_next
+    cmp al, '0'
+    jb .an_name_done
+    cmp al, '9'
+    jbe .an_name_next
+    or al, 0x20
+    cmp al, 'a'
+    jb .an_name_done
+    cmp al, 'z'
+    ja .an_name_done
+.an_name_next:
+    inc rdx
+    jmp .an_name_scan
+.an_name_done:
+    ; A prefix immediately followed by a quote is a string, not a name.
+    cmp rdx, r12
+    jae .an_name_plain
+    movzx eax, byte [rbx + rdx]
+    cmp al, 39
+    je .an_name_string
+    cmp al, '"'
+    jne .an_name_plain
+.an_name_string:
+    mov r13, rdx
+    movzx eax, byte [rbx + r13]
+    jmp .an_string
+.an_name_plain:
+    test r14, r14
+    jnz .an_name_ordinary          ; inside brackets nothing disqualifies
+    mov rdi, rbx
+    add rdi, r13
+    mov rsi, rdx
+    sub rsi, r13
+    push rdx
+    call tb_anchor_keyword
+    pop rdx
+    test eax, eax
+    jz .an_name_ordinary
+    mov qword [rbp - AN_DISQ], 1
+    mov r13, rdx
+    xor r15, r15
+    jmp .an_loop
+.an_name_ordinary:
+    mov r13, rdx
+    mov r15, 1
+    jmp .an_loop
+
+.an_number:
+    ; Digits, letters, dots and underscores, with the sign of an exponent.
+    mov rdx, r13
+.an_num_scan:
+    cmp rdx, r12
+    jae .an_num_done
+    movzx eax, byte [rbx + rdx]
+    cmp al, '.'
+    je .an_num_next
+    cmp al, '_'
+    je .an_num_next
+    cmp al, '0'
+    jb .an_num_done
+    cmp al, '9'
+    jbe .an_num_next
+    or al, 0x20
+    cmp al, 'a'
+    jb .an_num_done
+    cmp al, 'z'
+    ja .an_num_done
+    ; an exponent takes the sign that follows it
+    cmp al, 'e'
+    jne .an_num_next
+    lea rcx, [rdx + 1]
+    cmp rcx, r12
+    jae .an_num_next
+    movzx eax, byte [rbx + rcx]
+    cmp al, '+'
+    je .an_num_exp
+    cmp al, '-'
+    jne .an_num_next
+.an_num_exp:
+    inc rdx
+.an_num_next:
+    inc rdx
+    jmp .an_num_scan
+.an_num_done:
+    mov r13, rdx
+    mov r15, 1
+    jmp .an_loop
+
+.an_operator:
+    movzx eax, byte [rbx + r13]
+    movzx ecx, byte [rbx + r13 + 1]        ; one past is the NUL or the next
+    lea rdx, [r13 + 1]
+    cmp rdx, r12
+    jb .an_op_have_next
+    xor ecx, ecx
+.an_op_have_next:
+
+    cmp al, '.'
+    je .an_op_dot
+    cmp al, ','
+    je .an_op_disq
+    cmp al, ':'
+    je .an_op_disq
+    cmp al, ';'
+    je .an_op_disq
+    cmp al, '='
+    je .an_op_disq
+    cmp al, '!'
+    je .an_op_disq
+    cmp al, '~'
+    je .an_op_unary
+
+    cmp al, '<'
+    je .an_op_lt
+    cmp al, '>'
+    je .an_op_gt
+
+    ; The rest are binary only in operand position; in any other position a
+    ; `+`, `-` or `*` is a unary or a star, and neither is an anchor.
+    test r15, r15
+    jz .an_op_unary
+
+    cmp al, '|'
+    je .an_op_or
+    cmp al, '^'
+    je .an_op_xor
+    cmp al, '&'
+    je .an_op_and
+    cmp al, '+'
+    je .an_op_add
+    cmp al, '-'
+    je .an_op_add
+    cmp al, '@'
+    je .an_op_mul1
+    cmp al, '%'
+    je .an_op_mul1
+    cmp al, '/'
+    je .an_op_slash
+    cmp al, '*'
+    je .an_op_star
+    jmp .an_op_unary                       ; something else: ignore it
+
+.an_op_dot:
+    inc r13
+    xor r15, r15
+    jmp .an_loop
+
+.an_op_unary:
+    inc r13
+    xor r15, r15
+    jmp .an_loop
+
+.an_op_disq:
+    test r14, r14
+    jnz .an_op_unary
+    mov qword [rbp - AN_DISQ], 1
+    jmp .an_op_unary
+
+.an_op_lt:
+    cmp cl, '<'
+    jne .an_op_disq
+    mov esi, AN_P_SHIFT
+    mov edi, 2
+    jmp .an_op_record
+.an_op_gt:
+    cmp cl, '>'
+    jne .an_op_disq
+    mov esi, AN_P_SHIFT
+    mov edi, 2
+    jmp .an_op_record
+.an_op_or:
+    mov esi, AN_P_OR
+    mov edi, 1
+    jmp .an_op_record
+.an_op_xor:
+    mov esi, AN_P_XOR
+    mov edi, 1
+    jmp .an_op_record
+.an_op_and:
+    mov esi, AN_P_AND
+    mov edi, 1
+    jmp .an_op_record
+.an_op_add:
+    mov esi, AN_P_ADD
+    mov edi, 1
+    jmp .an_op_record
+.an_op_mul1:
+    mov esi, AN_P_MUL
+    mov edi, 1
+    jmp .an_op_record
+.an_op_slash:
+    mov esi, AN_P_MUL
+    mov edi, 1
+    cmp cl, '/'
+    jne .an_op_record
+    mov edi, 2
+    jmp .an_op_record
+.an_op_star:
+    cmp cl, '*'
+    je .an_op_pow
+    mov esi, AN_P_MUL
+    mov edi, 1
+    jmp .an_op_record
+.an_op_pow:
+    mov esi, AN_P_POW
+    mov edi, 2
+
+.an_op_record:
+    ; esi = precedence, edi = operator length
+    test r14, r14
+    jnz .an_op_recorded            ; only depth zero is the top level
+    movsxd rax, esi
+    cmp rax, [rbp - AN_PREC]
+    jb .an_op_take
+    jne .an_op_recorded
+    ; Equal precedence: the later one is the top node, because everything
+    ; here associates left -- except `**`, where the first one is.
+    cmp esi, AN_P_POW
+    je .an_op_recorded
+.an_op_take:
+    mov [rbp - AN_PREC], rax
+    mov [rbp - AN_IDX], r13
+    movsxd rax, edi
+    mov [rbp - AN_LEN], rax
+.an_op_recorded:
+    movsxd rax, edi
+    add r13, rax
+    xor r15, r15
+    jmp .an_loop
+
+.an_end:
+    cmp qword [rbp - AN_DISQ], 0
+    jne .an_no
+    mov rax, [rbp - AN_IDX]
+    cmp rax, 0
+    jl .an_try_subscript
+    mov rdx, [rbp - AN_OUT]
+    mov [rdx], rax
+    add rax, [rbp - AN_LEN]
+    mov [rdx + 8], rax
+    mov eax, 1
+    jmp .an_out
+
+.an_try_subscript:
+    ; The segment is a subscript when its last character closes one.
+    mov rax, [rbp - AN_SCLOSE]
+    cmp rax, 0
+    jl .an_no
+    lea rcx, [rax + 1]
+    cmp rcx, r12
+    jne .an_no
+    mov rdx, [rbp - AN_SOPEN]
+    cmp rdx, 0
+    jle .an_no                     ; `[1, 2]` is a list, not a subscript
+    mov r8, [rbp - AN_OUT]
+    mov [r8], rdx
+    mov [r8 + 8], rcx
+    mov eax, 1
+    jmp .an_out
+
+.an_no:
+    xor eax, eax
+.an_out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC tb_anchors
+
+;; tb_anchor_keyword(rdi = name, rsi = length) -> eax = 1 when the name makes
+;; the segment something other than a BinOp or a Subscript.
+DEF_FUNC_LOCAL tb_anchor_keyword
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    lea rcx, [rel tb_anchor_keywords]
+.ak_loop:
+    mov rdx, [rcx]
+    test rdx, rdx
+    jz .ak_no
+    ; compare rsi bytes and require the table entry to end there
+    xor eax, eax
+.ak_cmp:
+    cmp rax, r12
+    jge .ak_cmp_end
+    mov r8b, [rdx + rax]
+    test r8b, r8b
+    jz .ak_next
+    cmp r8b, [rbx + rax]
+    jne .ak_next
+    inc rax
+    jmp .ak_cmp
+.ak_cmp_end:
+    cmp byte [rdx + rax], 0
+    je .ak_yes
+.ak_next:
+    add rcx, 8
+    jmp .ak_loop
+.ak_yes:
+    mov eax, 1
+    pop r12
+    pop rbx
+    leave
+    ret
+.ak_no:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC tb_anchor_keyword
+
+section .rodata
+tb_kw_if:     db "if", 0
+tb_kw_else:   db "else", 0
+tb_kw_or:     db "or", 0
+tb_kw_and:    db "and", 0
+tb_kw_not:    db "not", 0
+tb_kw_in:     db "in", 0
+tb_kw_is:     db "is", 0
+tb_kw_lambda: db "lambda", 0
+tb_kw_for:    db "for", 0
+tb_kw_yield:  db "yield", 0
+align 8
+tb_anchor_keywords:
+    dq tb_kw_if, tb_kw_else, tb_kw_or, tb_kw_and, tb_kw_not
+    dq tb_kw_in, tb_kw_is, tb_kw_lambda, tb_kw_for, tb_kw_yield
+    dq 0
+section .text
+
+;; ============================================================================
+;; tb_write_source(rdi = filename str, rsi = line number, rdx = code object or
+;;                 0, rcx = lasti in code units)
+;; Prints the source line stripped and indented four spaces, and under it the
+;; caret line, when the code object's location table says which part of the
+;; line the failing instruction came from.  A file that cannot be opened
+;; simply produces nothing, which is what CPython does.  The file is scanned
+;; in chunks, so a large source costs no extra memory and the frame stays
+;; small enough to use while unwinding.
 ;; ============================================================================
 TS_FD    equ 8
 TS_TGT   equ 16
 TS_CUR   equ 24
 TS_LEN   equ 32
-TS_PATH  equ 48 + TB_PATH
+TS_CODE  equ 40
+TS_LASTI equ 48
+TS_LOC   equ 88             ; four qwords: start line, end line, start, end col
+TS_PATH  equ 96 + TB_PATH
 TS_LBUF  equ TS_PATH + TB_LINE
 TS_CBUF  equ TS_LBUF + TB_CHUNK
 TS_FRAME equ TS_CBUF + 16
@@ -310,6 +1301,8 @@ DEF_FUNC tb_write_source, TS_FRAME
     push r12
     push r13
     mov [rbp - TS_TGT], rsi
+    mov [rbp - TS_CODE], rdx
+    mov [rbp - TS_LASTI], rcx
     mov qword [rbp - TS_CUR], 1
     mov qword [rbp - TS_LEN], 0
     mov qword [rbp - TS_FD], -1
@@ -432,6 +1425,7 @@ DEF_FUNC tb_write_source, TS_FRAME
     call tb_write_cstr
     pop rdx
     pop rcx
+    push rcx
     lea rdi, [rbp - TS_LBUF]
     add rdi, rcx
     mov rsi, rdx
@@ -439,6 +1433,24 @@ DEF_FUNC tb_write_source, TS_FRAME
     call tb_write
     CSTRING rdi, `\n`
     call tb_write_cstr
+    pop rcx
+
+    ; The caret line under it, when there is a location to draw from.
+    cmp qword [rbp - TS_CODE], 0
+    je .ts_close
+    push rcx
+    mov rdi, [rbp - TS_CODE]
+    mov rsi, [rbp - TS_LASTI]
+    lea rdx, [rbp - TS_LOC]
+    call code_addr2location
+    pop rcx
+    test eax, eax
+    jz .ts_close
+    lea rdi, [rbp - TS_LBUF]
+    mov rsi, [rbp - TS_LEN]
+    mov rdx, rcx                    ; the leading whitespace we stripped
+    lea rcx, [rbp - TS_LOC]
+    call tb_write_carets
 
 .ts_close:
     mov rdi, [rbp - TS_FD]
@@ -474,6 +1486,272 @@ DEF_FUNC tb_print_repeated
     leave
     ret
 END_FUNC tb_print_repeated
+
+;; ============================================================================
+;; traceback_print_unraisable(rdi = exception, rsi = the object it came out
+;;                            of, or 0)
+;;
+;; What CPython's _PyErr_WriteUnraisableMsg prints: a line naming the object,
+;; then the exception's own report.  A __del__ that raises and a cleanup in a
+;; dropped generator both reach it -- neither has a caller left to hand the
+;; exception to, and both used to print a single line that named the kind of
+;; failure and nothing else, so which object, which line and which exception
+;; were all lost.
+;;
+;; The object is named by repr, and a repr can itself raise or recurse.  It is
+;; called only when it is one of the shapes whose repr is a plain string --
+;; the safe answer here is CPython's fallback, "<object repr() failed>".
+;; ============================================================================
+TPU_EXC   equ 8
+TPU_OBJ   equ 16
+TPU_FRAME equ 32            ; + 0 pushes = 32
+
+global traceback_unraisable_default
+DEF_FUNC traceback_unraisable_default, TPU_FRAME
+    mov [rbp - TPU_EXC], rdi
+    mov [rbp - TPU_OBJ], rsi
+
+    CSTRING rdi, "Exception ignored in: "
+    call tb_write_cstr
+    mov rdi, [rbp - TPU_EXC]
+    mov rsi, [rbp - TPU_OBJ]
+    call tb_unraisable_name
+    mov rdi, [rbp - TPU_EXC]
+    call traceback_print
+    leave
+    ret
+END_FUNC traceback_unraisable_default
+
+;; tb_unraisable_name(rdi = the exception being reported, rsi = the object to
+;; name, or 0) -- writes "<repr>\n", or a stand-in when there is no repr to
+;; be had.  The exception is only there to be put back: a repr can raise.
+TUN_EXC   equ 8
+TUN_FRAME equ 16            ; + 0 pushes = 16
+DEF_FUNC_LOCAL tb_unraisable_name, TUN_FRAME
+    mov [rbp - TUN_EXC], rdi
+    mov rdi, rsi
+    test rdi, rdi
+    jz .tpu_unknown
+    extern obj_repr
+    call obj_repr
+    V_UNPACK rax, rdx
+    cmp edx, TAG_PTR
+    jne .tpu_failed
+    test rax, rax
+    jz .tpu_failed
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .tpu_failed_ref
+    push rax
+    mov rdi, rax
+    call tb_write_str
+    pop rdi
+    call obj_decref
+    jmp .tpu_newline
+
+.tpu_failed_ref:
+    mov rdi, rax
+    call obj_decref
+.tpu_failed:
+    ; A repr that raised leaves ITS exception pending; the one being reported
+    ; is what matters, so put that back.
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .tpu_failed_msg
+    mov rax, [rbp - TUN_EXC]
+    mov [rel current_exception], rax
+    call obj_decref
+.tpu_failed_msg:
+    CSTRING rdi, "<object repr() failed>"
+    call tb_write_cstr
+    jmp .tpu_newline
+
+.tpu_unknown:
+    CSTRING rdi, "<unknown>"
+    call tb_write_cstr
+
+.tpu_newline:
+    CSTRING rdi, `\n`
+    call tb_write_cstr
+    leave
+    ret
+END_FUNC tb_unraisable_name
+
+;; ============================================================================
+;; traceback_print_unraisable(rdi = exception, rsi = the object it came out of)
+;;
+;; The interpreter's way in.  CPython routes this through sys.unraisablehook,
+;; so a program can collect these rather than have them written to stderr --
+;; which is also the only way a test can look at one, since the default report
+;; names the object by repr and so carries an address.
+;;
+;; The hook is looked up by name every time, because the point of it is that
+;; it can be replaced at any moment.  Anything that goes wrong on the way --
+;; no sys module, no hook, a hook that raises -- falls back to printing, and
+;; the exception the hook raised is dropped: there is nobody to give it to,
+;; which is what made this an unraisable exception in the first place.
+;; ============================================================================
+TPH_EXC   equ 8
+TPH_OBJ   equ 16
+TPH_HOOK  equ 24
+TPH_ARG   equ 32
+TPH_SAVED equ 40
+TPH_ARGV  equ 56            ; one Value
+TPH_FRAME equ 64            ; + 1 push = 72
+
+global traceback_print_unraisable
+DEF_FUNC traceback_print_unraisable, TPH_FRAME
+    push rbx
+    mov [rbp - TPH_EXC], rdi
+    mov [rbp - TPH_OBJ], rsi
+    mov qword [rbp - TPH_ARG], 0
+
+    ; sys.unraisablehook, if sys is loaded and something replaced it.
+    extern sys_module_obj
+    mov rbx, [rel sys_module_obj]
+    test rbx, rbx
+    jz .tph_default
+    CSTRING rdi, "unraisablehook"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    mov rbx, rax
+    pop rdi
+    call obj_decref
+    test rbx, rbx
+    jz .tph_default
+    V_TEST_PTR rbx, rax
+    ja .tph_default
+
+    ; The default is this printer wearing a builtin's clothes; calling it
+    ; would be a detour through a structseq and back.
+    mov rax, [rbx + PyObject.ob_type]
+    extern builtin_func_type
+    lea rcx, [rel builtin_func_type]
+    cmp rax, rcx
+    jne .tph_call_hook
+    extern sys_unraisablehook_func
+    mov rax, [rbx + PyBuiltinObject.func_ptr]
+    lea rcx, [rel sys_unraisablehook_func]
+    cmp rax, rcx
+    je .tph_drop_hook
+
+.tph_call_hook:
+    mov [rbp - TPH_HOOK], rbx
+    ; The five-field structseq CPython passes.
+    extern unraisable_args_type
+    extern structseq_new
+    extern structseq_set
+    lea rdi, [rel unraisable_args_type]
+    call structseq_new
+    test rax, rax
+    jz .tph_drop_hook
+    mov [rbp - TPH_ARG], rax
+
+    mov rdi, rax
+    xor esi, esi
+    mov rdx, [rbp - TPH_EXC]
+    mov rdx, [rdx + PyObject.ob_type]
+    INCREF rdx
+    call structseq_set
+    mov rdi, [rbp - TPH_ARG]
+    mov esi, 1
+    mov rdx, [rbp - TPH_EXC]
+    INCREF rdx
+    call structseq_set
+    mov rdi, [rbp - TPH_ARG]
+    mov esi, 2
+    mov rdx, [rbp - TPH_EXC]
+    mov rdx, [rdx + PyExceptionObject.exc_tb]
+    test rdx, rdx
+    jnz .tph_have_tb
+    LOAD_NONE rdx
+.tph_have_tb:
+    INCREF rdx
+    call structseq_set
+    mov rdi, [rbp - TPH_ARG]
+    mov esi, 3
+    LOAD_NONE rdx
+    INCREF rdx
+    call structseq_set
+    mov rdi, [rbp - TPH_ARG]
+    mov esi, 4
+    mov rdx, [rbp - TPH_OBJ]
+    test rdx, rdx
+    jnz .tph_have_obj
+    LOAD_NONE rdx
+.tph_have_obj:
+    INCREF rdx
+    call structseq_set
+
+    ; The hook runs with no exception pending: it is ordinary Python, and the
+    ; one being reported is an argument, not the current state.
+    mov rax, [rel current_exception]
+    mov [rbp - TPH_SAVED], rax
+    mov qword [rel current_exception], 0
+
+    mov rax, [rbp - TPH_ARG]
+    mov [rbp - TPH_ARGV], rax
+    mov rdi, [rbp - TPH_HOOK]
+    lea rsi, [rbp - TPH_ARGV]
+    mov edx, 1
+    extern obj_call_n
+    call obj_call_n
+    push rax
+    ; A hook that raises is reported against the HOOK, and the exception it
+    ; was given is dropped -- CPython says "Exception ignored in
+    ; sys.unraisablehook: <the hook>" and does not fall back to printing the
+    ; original.  Reporting both would be reporting the same failure twice.
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .tph_no_exc
+    mov qword [rel current_exception], 0
+    push rdi
+    CSTRING rdi, "Exception ignored in sys.unraisablehook: "
+    call tb_write_cstr
+    pop rdi
+    push rdi
+    mov rsi, [rbp - TPH_HOOK]
+    call tb_unraisable_name
+    pop rdi
+    push rdi
+    call traceback_print
+    pop rdi
+    call obj_decref
+.tph_no_exc:
+    mov rax, [rbp - TPH_SAVED]
+    mov [rel current_exception], rax
+    pop rax
+    test rax, rax
+    jz .tph_hook_done
+    V_UNPACK rax, rdx
+    XDECREF_VAL rax, rdx
+.tph_hook_done:
+    mov rdi, [rbp - TPH_ARG]
+    call obj_decref
+    mov rdi, [rbp - TPH_HOOK]
+    call obj_decref
+    pop rbx
+    leave
+    ret
+
+.tph_drop_hook:
+    mov rdi, rbx
+    call obj_decref
+.tph_default:
+.tph_print:
+    mov rdi, [rbp - TPH_EXC]
+    mov rsi, [rbp - TPH_OBJ]
+    call traceback_unraisable_default
+    pop rbx
+    leave
+    ret
+END_FUNC traceback_print_unraisable
 
 ;; ============================================================================
 ;; traceback_print(rdi = exception)
@@ -630,6 +1908,8 @@ DEF_FUNC tb_print_one, TP_FRAME
     mov rax, [rbx + PyTracebackObject.tb_code]
     mov rdi, [rax + PyCodeObject.co_filename]
     mov rsi, [rbx + PyTracebackObject.tb_lineno]
+    mov rdx, rax
+    mov rcx, [rbx + PyTracebackObject.tb_lasti]
     push rbx
     call tb_write_source
     pop rbx

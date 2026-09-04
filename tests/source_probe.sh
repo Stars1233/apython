@@ -24,12 +24,28 @@ RECORD=0
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
 
+# Files whose output is legitimately different depending on which compiler
+# produced the bytecode, and so cannot be a differential test of anything.
+# The list is empty: test_traceback_carets was on it because our location
+# table carried no columns, so a report rendered from our own bytecode had no
+# caret rows.  It emits the long form now and the two reports match.
+SKIP=""
+
+# The skip list is itself ratcheted: a name here that no longer needs to be
+# is a skip that has outlived its reason, and a list nothing checks grows
+# quietly.  Each is re-run at the end and reported if it now matches.
+
 matched=""
 failed=""
 crashed=""
+skipped=""
 
 for test_py in "$TESTDIR"/test_*.py; do
     name=$(basename "$test_py" .py)
+
+    case " $SKIP " in
+        *" $name "*) skipped="$skipped $name"; continue ;;
+    esac
 
     # The same oracle the ordinary suite uses: CPython, except for the handful
     # of tests that crash it, which record their expected output instead.
@@ -58,6 +74,7 @@ done
 n_match=$(echo $matched | wc -w)
 n_fail=$(echo $failed | wc -w)
 n_crash=$(echo $crashed | wc -w)
+n_skip=$(echo $skipped | wc -w)
 total=$((n_match + n_fail + n_crash))
 
 if [ $RECORD -eq 1 ]; then
@@ -85,8 +102,24 @@ for n in $(grep -v '^#' "$FLOOR" | grep -v '^$'); do
     esac
 done
 
+# A skipped file that now matches should come off the list.
+unskipped=""
+for name in $SKIP; do
+    test_py="$TESTDIR/$name.py"
+    [ -f "$test_py" ] || continue
+    if [ -f "$TESTDIR/expected/$name.txt" ]; then
+        expected=$(cat "$TESTDIR/expected/$name.txt")
+    else
+        expected=$(timeout 60 $PYTHON "$test_py" 2>&1) || true
+    fi
+    actual=$(timeout 60 $APYTHON "$test_py" 2>&1)
+    if [ "$expected" = "$actual" ]; then
+        unskipped="$unskipped $name"
+    fi
+done
+
 echo ""
-echo "source compiler: $n_match matching, $n_fail differing, $n_crash crashing, $total total"
+echo "source compiler: $n_match matching, $n_fail differing, $n_crash crashing, $n_skip skipped, $total total"
 
 status=0
 if [ -n "$crashed" ]; then
@@ -105,6 +138,8 @@ for n in $matched; do
     if ! grep -qx "$n" "$FLOOR"; then gained="$gained $n"; fi
 done
 [ -n "$gained" ] && echo -e "${YELLOW}NEW${NC}$gained (raise the floor: bash tests/source_probe.sh --record)"
+
+[ -n "$unskipped" ] && echo -e "${YELLOW}UNSKIP${NC}$unskipped (matches now; take it out of SKIP)"
 
 [ $status -eq 0 ] && echo -e "${GREEN}PASS${NC} source-compiler scoreboard: $n_match matching, 0 crashing"
 exit $status

@@ -22,6 +22,12 @@
 %include "compiler.inc"
 
 extern ap_free
+extern ap_strcmp
+extern dict_get
+extern kw_names_pending
+extern obj_as_index
+extern obj_call_n
+extern str_from_cstr_heap
 extern ap_malloc
 extern ap_memcpy
 extern ap_memset
@@ -44,6 +50,7 @@ extern str_new_heap
 
 extern asm_assemble
 extern ast_obj
+extern ast_at
 extern ast_obj_at
 extern cg_const
 extern cg_emit
@@ -191,6 +198,9 @@ DEF_FUNC comp_init, CI_FRAME
     lea rdi, [rbx + Comp.nodes]
     mov esi, AstNode_size
     call buf_init
+    lea rdi, [rbx + Comp.spans]
+    mov esi, AstSpan_size
+    call buf_init
     lea rdi, [rbx + Comp.children]
     mov esi, 4
     call buf_init
@@ -200,12 +210,19 @@ DEF_FUNC comp_init, CI_FRAME
     lea rdi, [rbx + Comp.objs]
     mov esi, 8
     call buf_init
+    lea rdi, [rbx + Comp.rawnames]
+    mov esi, 4
+    call buf_init
+    lea rdi, [rbx + Comp.typeparams]
+    mov esi, 4
+    call buf_init
     lea rdi, [rbx + Comp.scopes]
     mov esi, Scope_size
     call buf_init
 
     ; Reserve node 0 as the null node, so a 0 index reads as "absent" without
-    ; any call site needing a separate presence flag.
+    ; any call site needing a separate presence flag.  Its span goes with it:
+    ; the two Bufs are indexed the same way and must stay in step.
     lea rdi, [rbx + Comp.nodes]
     mov esi, 1
     call buf_reserve
@@ -213,6 +230,17 @@ DEF_FUNC comp_init, CI_FRAME
     xor esi, esi
     mov edx, AstNode_size
     call ap_memset
+    lea rdi, [rbx + Comp.spans]
+    mov esi, 1
+    call buf_reserve
+    mov dword [rax + AstSpan.end_lineno], -1
+    mov dword [rax + AstSpan.end_col], -1
+    ; And its type-parameter slot: typeparams is indexed by node number too,
+    ; and ast_make only ever appends for a node it makes itself.
+    lea rdi, [rbx + Comp.typeparams]
+    mov esi, 1
+    call buf_reserve
+    mov dword [rax], 0
 
     ; Reserve objs[0] for the same reason.  Without it the first literal in a
     ; compilation gets index 0, and every caller that tests an object index for
@@ -221,6 +249,12 @@ DEF_FUNC comp_init, CI_FRAME
     mov esi, 1
     call buf_reserve
     mov qword [rax], 0
+    ; rawnames is indexed by the same number and grows with objs in ast_obj,
+    ; so slot 0 is reserved here too.
+    lea rdi, [rbx + Comp.rawnames]
+    mov esi, 1
+    call buf_reserve
+    mov dword [rax], 0
 
     pop rbx
     leave
@@ -262,7 +296,13 @@ DEF_FUNC comp_free, 8
     call buf_free
     lea rdi, [rbx + Comp.objs]
     call buf_free
+    lea rdi, [rbx + Comp.rawnames]
+    call buf_free
+    lea rdi, [rbx + Comp.typeparams]
+    call buf_free
     lea rdi, [rbx + Comp.pending]
+    call buf_free
+    lea rdi, [rbx + Comp.spans]
     call buf_free
     lea rdi, [rbx + Comp.children]
     call buf_free
@@ -298,6 +338,80 @@ END_FUNC comp_free
 DEF_FUNC_BARE comp_intern
     jmp str_new_heap
 END_FUNC comp_intern
+
+
+;; ============================================================================
+;; comp_name_obj(Comp *c, const char *s, int64_t len) -> rax = obj index, 0 on
+;; failure
+;;
+;; Every identifier in the tree goes through here: intern it with private-name
+;; mangling applied, hand it to the object arena, and -- when the mangling
+;; actually rewrote it -- record the name as it was WRITTEN alongside.
+;;
+;; The compiler wants the mangled name and the AST wants the source one.
+;; CPython gets both by mangling later, in the symbol table and the code
+;; generator; here the class is only in hand while the parser is inside its
+;; body, so the mangling has to happen now and the other half is kept rather
+;; than recomputed.  Without it `self.__x` inside `class C` read back from
+;; ast.parse as `_C__x`.
+;;
+;; Mangling always lengthens -- it prepends `_` and at least one character of
+;; the class name -- so the two are told apart by the length alone.
+;; ============================================================================
+CNO_COMP  equ 8
+CNO_STR   equ 16
+CNO_LEN   equ 24
+CNO_IDX   equ 32
+CNO_FRAME equ 48            ; + 0 pushes = 48
+global comp_name_obj
+DEF_FUNC comp_name_obj, CNO_FRAME
+    mov [rbp - CNO_COMP], rdi
+    mov [rbp - CNO_STR], rsi
+    mov [rbp - CNO_LEN], rdx
+
+    call comp_intern_name
+    test rax, rax
+    jz .cno_fail
+    mov rsi, rax
+    mov rdi, [rbp - CNO_COMP]
+    call ast_obj                ; takes ownership
+    test rax, rax
+    jz .cno_fail
+    mov [rbp - CNO_IDX], rax
+
+    ; Did it mangle?  The interned string is longer than the source text
+    ; exactly when it did.
+    mov rdi, [rbp - CNO_COMP]
+    mov esi, eax
+    call ast_obj_at             ; borrowed
+    mov rcx, [rax + PyStrObject.ob_size]
+    cmp rcx, [rbp - CNO_LEN]
+    je .cno_done
+
+    mov rdi, [rbp - CNO_STR]
+    mov rsi, [rbp - CNO_LEN]
+    call comp_intern
+    test rax, rax
+    jz .cno_done                ; the mangled name alone is still usable
+    mov rsi, rax
+    mov rdi, [rbp - CNO_COMP]
+    call ast_obj
+    test rax, rax
+    jz .cno_done
+    mov rdx, [rbp - CNO_COMP]
+    mov rcx, [rdx + Comp.rawnames + Buf.data]
+    mov rdx, [rbp - CNO_IDX]
+    mov [rcx + rdx*4], eax
+
+.cno_done:
+    mov rax, [rbp - CNO_IDX]
+    leave
+    ret
+.cno_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC comp_name_obj
 
 ;; ============================================================================
 ;; comp_set_pending(Comp *c)
@@ -395,6 +509,121 @@ DEF_FUNC par_eval_root, 16      ; + 2 pushes = 32
 END_FUNC par_eval_root
 
 ;; ============================================================================
+;; ============================================================================
+;; compile_ast_raw(const char *src, i64 len, PyStrObject *filename, int mode)
+;;   -> rax = the raw tree, or 0 with the exception already pending
+;;
+;; compile_source's sibling, stopping where the AST is complete.  It runs
+;; comp_init, the lexer and the parser, hands the arena to ar_node, and then
+;; tears the Comp down exactly as compile_source does -- so nothing about the
+;; arena's lifetime changes: the tree ar_node builds is made of ordinary
+;; Python objects that own themselves, and by the time this returns there is
+;; no arena left to point into.
+;;
+;; No symbol table, no CompUnit, no codegen.  Those decide how names are
+;; stored and what bytecode says it; neither is a question about the tree.
+;; ============================================================================
+CAR_SRC   equ 8
+CAR_LEN   equ 16
+CAR_FILE  equ 24
+CAR_MODE  equ 32
+CAR_ROOT  equ 40
+CAR_TREE  equ 48
+CAR_COMP  equ 56
+CAR_FRAME equ 72            ; + 1 push = 80, 16-byte aligned
+
+global compile_ast_raw
+DEF_FUNC compile_ast_raw, CAR_FRAME
+    push rbx
+    mov [rbp - CAR_SRC], rdi
+    mov [rbp - CAR_LEN], rsi
+    mov [rbp - CAR_FILE], rdx
+    mov [rbp - CAR_MODE], rcx
+    mov qword [rbp - CAR_TREE], 0
+
+    mov edi, Comp_size
+    call ap_malloc
+    mov rbx, rax
+    mov [rbp - CAR_COMP], rax
+
+    mov rdi, rbx
+    mov rsi, [rbp - CAR_SRC]
+    mov rdx, [rbp - CAR_LEN]
+    mov rcx, [rbp - CAR_FILE]
+    mov r8, [rbp - CAR_MODE]
+    call comp_init
+
+    mov rdi, rbx
+    xor esi, esi                        ; the whole source
+    xor edx, edx
+    xor ecx, ecx
+    call lex_run
+    test eax, eax
+    jz .car_failed
+
+    cmp qword [rbp - CAR_MODE], CMODE_EVAL
+    je .car_parse_eval
+    mov rdi, rbx
+    call par_module
+    test rax, rax
+    jz .car_failed
+    ; "single" is exec with a different root: CPython's is Interactive, whose
+    ; body is a statement list exactly as Module's is, so the node the parser
+    ; already built only needs its kind changed.  Nothing compiles this tree,
+    ; so the kind is never dispatched on.
+    cmp qword [rbp - CAR_MODE], CMODE_SINGLE
+    jne .car_parsed
+    push rax
+    mov rdi, rbx
+    mov esi, eax
+    call ast_at
+    mov byte [rax + AstNode.kind], AST_INTERACTIVE
+    pop rax
+    jmp .car_parsed
+.car_parse_eval:
+    mov rdi, rbx
+    call par_eval_root
+    test rax, rax
+    jz .car_failed
+    ; par_eval_root answers the bare expression, because that is all codegen
+    ; needs; CPython's `eval` mode root is an Expression around it, and
+    ; AST_EXPRESSION exists for exactly this and had no producer.
+    mov r8d, eax                    ; a = the expression
+    mov rdi, rbx
+    mov esi, AST_EXPRESSION
+    xor edx, edx                    ; subkind
+    mov ecx, 1                      ; lineno
+    xor r9d, r9d                    ; b
+    extern ast_make
+    call ast_make
+.car_parsed:
+    test rax, rax
+    jz .car_failed
+    mov [rbp - CAR_ROOT], rax
+
+    mov rdi, rbx
+    mov esi, eax
+    extern ar_node
+    call ar_node
+    mov [rbp - CAR_TREE], rax
+
+.car_cleanup:
+    mov rdi, rbx
+    call comp_free
+    mov rdi, rbx
+    call ap_free
+    mov rax, [rbp - CAR_TREE]
+    pop rbx
+    leave
+    ret
+
+.car_failed:
+    mov rdi, rbx
+    call comp_set_pending
+    mov qword [rbp - CAR_TREE], 0
+    jmp .car_cleanup
+END_FUNC compile_ast_raw
+
 ;; compile_source(const char *src, int64_t len, PyStrObject *filename, int mode)
 ;;   -> rax = PyCodeObject*, or 0 with the exception already pending
 ;;
@@ -864,7 +1093,8 @@ cs_module_name: db "<module>", 0
 section .text
 
 ;; ============================================================================
-;; comp_lex_span(Comp *c, const char *start, const char *end, int lineno)
+;; comp_lex_span(Comp *c, const char *start, const char *end, int lineno,
+;;               const char *line_start)
 ;;   -> rax = the token index the span's tokens start at, or -1
 ;;
 ;; Appends a span's tokens to the array and hands back where they begin, so a
@@ -876,7 +1106,8 @@ CLS_START equ 16
 CLS_END   equ 24
 CLS_LINE  equ 32
 CLS_IDX   equ 40
-CLS_SAVE  equ 48 + Lexer_size
+CLS_BASE  equ 48          ; where the span's line begins, for its columns
+CLS_SAVE  equ 56 + Lexer_size
 CLS_FRAME equ ((CLS_SAVE + 15) / 16) * 16 + 8      ; + 1 push = 16-aligned
 DEF_FUNC comp_lex_span, CLS_FRAME
     push rbx
@@ -884,6 +1115,7 @@ DEF_FUNC comp_lex_span, CLS_FRAME
     mov [rbp - CLS_START], rsi
     mov [rbp - CLS_END], rdx
     mov [rbp - CLS_LINE], rcx
+    mov [rbp - CLS_BASE], r8
 
     mov rax, [rbx + Comp.tokens + Buf.len]
     mov [rbp - CLS_IDX], rax
@@ -897,6 +1129,7 @@ DEF_FUNC comp_lex_span, CLS_FRAME
     mov rsi, [rbp - CLS_START]
     mov rdx, [rbp - CLS_END]
     mov rcx, [rbp - CLS_LINE]
+    mov r8, [rbp - CLS_BASE]
     call lex_run
     push rax
     lea rdi, [rbx + Comp.lex]
@@ -944,7 +1177,7 @@ DEF_FUNC comp_attach_location, AL_FRAME
     cmp rax, rcx
     jne .done
 .go:
-    mov edi, 4
+    mov edi, 6
     call tuple_new
     test rax, rax
     jz .done
@@ -991,6 +1224,20 @@ DEF_FUNC comp_attach_location, AL_FRAME
     mov rdx, [rbp - AL_INNER]
     mov rdx, [rdx + PyTupleObject.ob_item]
     mov [rdx + 24], rax
+
+    ; CPython's tuple has six fields; the last two are the end of the span,
+    ; and its offset is one-based like the first one.
+    mov ecx, [rbx + Comp.err + CompErr.end_lineno]
+    V_PACK_I64 rcx, rsi
+    mov [rdx + 32], rcx
+    movsxd rcx, dword [rbx + Comp.err + CompErr.end_col]
+    test rcx, rcx
+    jns .end_col_ok
+    xor ecx, ecx
+.end_col_ok:
+    inc rcx
+    V_PACK_I64 rcx, rsi
+    mov [rdx + 40], rcx
 
     mov edi, 2
     call tuple_new
@@ -1113,6 +1360,13 @@ DEF_FUNC_BARE comp_error
     mov [rdi + Comp.err + CompErr.msg], rdx
     mov [rdi + Comp.err + CompErr.lineno], ecx
     mov [rdi + Comp.err + CompErr.col], r8d
+    ; The span defaults to the one character the error points at.  CPython's
+    ; is sometimes wider -- a whole token, or the subexpression a message is
+    ; about -- and nothing here knows which yet, so this says the narrowest
+    ; true thing rather than guessing.
+    mov [rdi + Comp.err + CompErr.end_lineno], ecx
+    inc r8d
+    mov [rdi + Comp.err + CompErr.end_col], r8d
     mov dword [rdi + Comp.err + CompErr.set], 1
 .already:
     xor eax, eax
@@ -1697,29 +1951,164 @@ DEF_FUNC builtin_eval_fn, EV_FRAME
 END_FUNC builtin_eval_fn
 
 ;; ============================================================================
+;; co_ast_builder() -> rax = _ast._from_raw, borrowed, or 0 with an exception
+;;
+;; Looked up lazily and cached for the life of the process, the way
+;; builtin_open_fn caches _io.open.  It cannot be resolved at startup:
+;; builtins are built before the import system can run, and _ast is an
+;; ordinary module in lib/.
+;; ============================================================================
+section .data
+co_from_raw: dq 0
+section .rodata
+co_ast_mod:  db "_ast", 0
+co_ast_attr: db "_from_raw", 0
+PYCF_ONLY_AST equ 0x400
+section .text
+
+CAB_KEY   equ 8             ; the name being looked up
+CAB_MOD   equ 16            ; the _ast module, while its dict is read
+CAB_FRAME equ 16            ; + 0 pushes = 16
+
+DEF_FUNC_LOCAL co_ast_builder, CAB_FRAME
+    mov rax, [rel co_from_raw]
+    test rax, rax
+    jnz .cab_out
+
+    ; The import must not inherit this call's keywords; compile() has already
+    ; consumed them, so there is nothing to park.
+    lea rdi, [rel co_ast_mod]
+    call str_from_cstr_heap
+    mov [rbp - CAB_KEY], rax
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    extern import_module
+    call import_module
+    mov [rbp - CAB_MOD], rax
+    mov rdi, [rbp - CAB_KEY]
+    call obj_decref
+    mov rax, [rbp - CAB_MOD]
+    test rax, rax
+    jz .cab_fail
+
+    lea rdi, [rel co_ast_attr]
+    call str_from_cstr_heap
+    mov [rbp - CAB_KEY], rax
+    mov rdi, [rbp - CAB_MOD]
+    mov rdi, [rdi + PyModuleObject.mod_dict]
+    mov rsi, rax
+    call dict_get
+    push rax
+    mov rdi, [rbp - CAB_KEY]
+    call obj_decref
+    mov rdi, [rbp - CAB_MOD]
+    call obj_decref             ; sys.modules keeps the module alive
+    pop rax
+    test rax, rax
+    jz .cab_fail
+    V_UNPACK rax, rdx
+    cmp edx, TAG_PTR
+    jne .cab_fail
+    mov [rel co_from_raw], rax  ; borrowed: _ast stays in sys.modules
+.cab_out:
+    leave
+    ret
+
+.cab_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC co_ast_builder
+
+;; ============================================================================
 ;; builtin_compile_fn(args, nargs) -> Value
 ;;   compile(source, filename, mode[, flags[, dont_inherit[, optimize]]])
 ;;
-;; flags, dont_inherit and optimize are accepted and ignored: there are no
-;; __future__ features to inherit here and no optimization levels to select.
-;; Only "eval" mode is implemented so far; "exec" and "single" report it
-;; plainly rather than producing something that half works.
+;; dont_inherit and optimize are accepted and ignored: there are no __future__
+;; features to inherit here and no optimization levels to select.  flags is
+;; read for one bit, PyCF_ONLY_AST, which is what ast.parse passes: with it
+;; set the answer is the parse tree rather than a code object.
+;;
+;; Which argument is `flags` depends on the keywords: ast.parse calls
+;; compile(src, fn, mode, flags, _feature_version=n), so a builtin that reads
+;; position 4 without consulting kw_names_pending takes _feature_version for
+;; dont_inherit -- and, worse, leaves the pending names set for whatever call
+;; runs next.
 ;; ============================================================================
 CO_ARGS  equ 8
 CO_NARGS equ 16
 CO_MODE  equ 24
-CO_FRAME equ 24          ; + 3 pushes = 48
+CO_FLAGS equ 32
+CO_NPOS  equ 40
+CO_RAW   equ 48          ; the raw tree, while _ast._from_raw runs on it
+CO_KWNAMES equ 56        ; the pending keyword names, while they are scanned
+CO_KWI   equ 64
+CO_FRAME equ 72          ; + 3 pushes = 96, 16-byte aligned
 DEF_FUNC builtin_compile_fn, CO_FRAME
     push rbx
     push r12
     push r13
     mov [rbp - CO_ARGS], rdi
     mov [rbp - CO_NARGS], rsi
+    mov qword [rbp - CO_FLAGS], 0
 
+    ; The keywords sit after the positional arguments and are named in order
+    ; by kw_names_pending.  Consume it however this call ends.
+    mov [rbp - CO_NPOS], rsi
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .co_no_kw
+    mov qword [rel kw_names_pending], 0
+    mov rcx, [rax + PyTupleObject.ob_size]
+    sub [rbp - CO_NPOS], rcx
+    ; `flags=` by name is the only keyword worth reading; every other one
+    ; compile() takes is ignored anyway.  The tuple and the index live in the
+    ; frame rather than in registers: obj_as_index below can reach a heap
+    ; integer and clobber every caller-saved one, which under INT_STRESS=1 is
+    ; every value of eight or more.
+    mov [rbp - CO_KWNAMES], rax
+    mov qword [rbp - CO_KWI], 0
+.co_kw_loop:
+    mov rax, [rbp - CO_KWNAMES]
+    mov rcx, [rbp - CO_KWI]
+    cmp rcx, [rax + PyTupleObject.ob_size]
+    jge .co_no_kw
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rdx, [rax + rcx*8]
+    lea rdi, [rdx + PyStrObject.data]
+    CSTRING rsi, "flags"
+    call ap_strcmp
+    test eax, eax
+    jnz .co_kw_next
+    mov rax, [rbp - CO_NPOS]
+    add rax, [rbp - CO_KWI]
+    mov rdx, [rbp - CO_ARGS]
+    mov rdi, [rdx + rax*8]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov [rbp - CO_FLAGS], rax
+.co_kw_next:
+    inc qword [rbp - CO_KWI]
+    jmp .co_kw_loop
+.co_no_kw:
+
+    mov rsi, [rbp - CO_NPOS]
     cmp rsi, 3
     jb .bad_nargs
     cmp rsi, 6
     ja .bad_nargs
+
+    ; Positional flags, when there are four or more.
+    cmp rsi, 4
+    jb .co_have_flags
+    mov rdi, [rbp - CO_ARGS]
+    mov rdi, [rdi + 24]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov [rbp - CO_FLAGS], rax
+.co_have_flags:
+    mov rdi, [rbp - CO_ARGS]
 
     mov rbx, [rdi]                      ; source
     mov r12, [rdi + 8]                  ; filename
@@ -1743,7 +2132,8 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     jne .bad_mode
 
     ; "eval", "exec" or "single".  Interactive echo is not reproducible here --
-    ; apython has no PRINT_EXPR -- so "single" compiles as "exec".
+    ; apython has no PRINT_EXPR -- so "single" compiles as "exec", and differs
+    ; only in the AST root PyCF_ONLY_AST hands back.
     mov ecx, CMODE_EXEC
     cmp qword [r13 + PyStrObject.ob_size], 4
     jne .check_single
@@ -1765,12 +2155,15 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     mov eax, [r13 + PyStrObject.data + 2]
     cmp eax, 'ngle'
     jne .unsupported_mode
+    mov ecx, CMODE_SINGLE
 .have_mode:
     mov [rbp - CO_MODE], rcx
     lea rdi, [rbx + PyStrObject.data]
     mov rsi, [rbx + PyStrObject.ob_size]
     mov rdx, r12
     mov rcx, [rbp - CO_MODE]
+    test qword [rbp - CO_FLAGS], PYCF_ONLY_AST
+    jnz .co_only_ast
     call compile_source
     test rax, rax
     jz .propagate
@@ -1787,6 +2180,39 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     pop rbx
     leave
     ret
+
+.co_only_ast:
+    ; The parse tree, not a code object.  _ast is imported here rather than at
+    ; startup for the reason builtin_open_fn gives about _io: builtins are
+    ; built before the import system can run.
+    call compile_ast_raw
+    test rax, rax
+    jz .propagate
+    push rax
+    call co_ast_builder
+    test rax, rax
+    jz .co_no_builder
+    mov rdi, rax
+    pop rsi
+    mov [rbp - CO_RAW], rsi
+    lea rsi, [rbp - CO_RAW]
+    mov edx, 1
+    call obj_call_n
+    push rax
+    mov rdi, [rbp - CO_RAW]
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .propagate               ; a pointer is its own Value, as compile_source's
+    pop r13                     ; code object is a few lines above
+    pop r12
+    pop rbx
+    leave
+    ret
+.co_no_builder:
+    pop rdi
+    call obj_decref
+    jmp .propagate
 
 .bad_nargs:
     lea rdi, [rel exc_TypeError_type]

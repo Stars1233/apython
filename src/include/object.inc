@@ -339,6 +339,9 @@ struc PyGetSetDescrObject
     .gs_get:    resq 1  ; +16: C getter(self) -> Value, or 0
     .gs_set:    resq 1  ; +24: C setter(self, value) -> int, or 0
     .gs_name:   resq 1  ; +32: ptr to the name (PyStrObject*, owned)
+    .gs_owner:  resq 1  ; +40: the type it was registered on, or 0 -- for the
+                        ;      repr, which CPython words "<attribute 'real'
+                        ;      of 'int' objects>"; borrowed, types are static
 endstruc
 
 ; types.SimpleNamespace: attributes are the entries of a dict.
@@ -566,7 +569,11 @@ struc AsyncTask
     .done:         resd 1  ; +64: 0=pending, 1=done
     .cancelling:   resd 1  ; +68: 1=cancel requested
     .n_waiters:    resd 1  ; +72: number of waiters
-    .pad:          resd 1  ; +76
+    ; Whether this task is sitting in the ready queue.  ready_enqueue zeroes
+    ; .next unconditionally, so enqueuing a task that is ALREADY queued
+    ; truncated the list and lost everything behind it -- the loop then sat
+    ; in wait_and_drain with nothing left to wake it.
+    .queued:       resd 1  ; +76
     .waiters:      resq 1  ; +80: ptr to AsyncTask*[] array
     .waiters_cap:  resd 1  ; +88: waiters array capacity
     .pad2:         resd 1  ; +92
@@ -584,6 +591,33 @@ struc SleepAwaitable
     .pad:       resd 1  ; +28
 endstruc
 
+; asyncio.gather()'s awaitable.
+;
+; gather used to build one task per coroutine and hand back the LIST of them,
+; with a TODO saying the awaiting was still to do -- so `await
+; asyncio.gather(...)` awaited a list, which is not awaitable, and answered
+; None.  This waits on each task in turn; every task is already enqueued, so
+; they still run concurrently and the order only decides which one is
+; observed first.
+;
+; +48 must line up with PyGenObject.gi_return_value: op_send reads that offset
+; on the exhaustion path, the same reason WaitForAwaitable does.
+struc GatherAwaitable
+    .ob_refcnt:       resq 1  ; +0
+    .ob_type:         resq 1  ; +8
+    ; A plain ap_malloc'd AsyncTask*[], each entry owned, NOT a list: this
+    ; object is not GC-visible, and a collection that ran while only this
+    ; field referenced a list freed it under us.  Tasks are not collectable,
+    ; so raw pointers to them are safe -- the same reason WaitForAwaitable
+    ; keeps its inner_task raw.
+    .ga_tasks:        resq 1  ; +16
+    .ga_count:        resq 1  ; +24: how many
+    .ga_index:        resq 1  ; +32: the task being waited on
+    .ga_flags:        resq 1  ; +40: 1 = return_exceptions
+    .gi_return_value: resq 1  ; +48: the results list, as a Value
+    .ga_state:        resq 1  ; +56: 0 running, 1 finished
+endstruc
+
 ; WaitFor awaitable object (for asyncio.wait_for)
 struc WaitForAwaitable
     .ob_refcnt:       resq 1  ; +0
@@ -592,7 +626,11 @@ struc WaitForAwaitable
     .timeout_ns:      resq 1  ; +24: timeout in nanoseconds
     .state:           resd 1  ; +32: 0=init, 1=yielded, 2=done
     .pad:             resd 1  ; +36
-    .outer_task:      resq 1  ; +40: AsyncTask* (the waiter, set by task_step)
+    ; +40 is dead space, and has to stay: gi_return_value below must line up
+    ; with PyGenObject's, which op_send reads without knowing which it has.
+    ; It held an outer_task pointer that task_step wrote on every wait_for and
+    ; nothing ever read -- a raw reference to a live task, for nothing.
+    .unused:          resq 1  ; +40
     .gi_return_value: resq 1  ; +48: result Value (matches PyGenObject offset)
 endstruc
 
@@ -955,6 +993,14 @@ TYPE_FLAG_BYTEARRAY_SUBCLASS equ 0x40000
 ; on a bytes subclass declined into a TypeError.
 TYPE_FLAG_BYTES_SUBCLASS equ 0x80000
 
+; A type CPython refuses to let you subclass -- the ones without
+; Py_TPFLAGS_BASETYPE.  It is the inverse of CPython's flag on purpose: every
+; type here is subclassable unless it says otherwise, so adding the flag to a
+; handful is a change of four lines rather than an audit of ninety-four
+; tables, and a type object that predates it reads as subclassable, which is
+; what it was.
+TYPE_FLAG_FINAL          equ 0x100000
+
 ; Comparison opcodes (used by tp_richcompare)
 PY_LT equ 0
 PY_LE equ 1
@@ -981,10 +1027,31 @@ struc PyFrame
     .return_offset: resd 1  ; +64: return offset
     .nlocalsplus:   resd 1  ; +68: number of locals + cells + frees
     .func_obj:      resq 1  ; +72: ptr to function object (for closures)
-    .localsplus:            ; +80: Value array (variable size)
+    .call_ip:       resq 1  ; +80: where this frame was when it called into
+                            ;      the next one -- what f_lineno reads for a
+                            ;      frame that is not the innermost.  instr_ptr
+                            ;      cannot carry it: non-zero there means the
+                            ;      frame is SUSPENDED, and func_call reads it
+                            ;      to decide whether to free the frame.
+    .localsplus:            ; +88: Value array (variable size)
 endstruc
 
 FRAME_HEADER_SIZE equ PyFrame.localsplus
+
+; The snapshot sys._getframe() hands back.  A PyFrame is pooled and recycled,
+; so an object holding one would be looking at a later call's frame; this
+; copies what a caller can read and outlives the frames.
+struc PyFrameObject
+    .ob_refcnt:   resq 1  ; +0
+    .ob_type:     resq 1  ; +8
+    .f_back:      resq 1  ; +16: the next snapshot outward, owned, or 0
+    .f_code:      resq 1  ; +24
+    .f_globals:   resq 1  ; +32
+    .f_locals:    resq 1  ; +40
+    .f_builtins:  resq 1  ; +48
+    .f_lineno:    resq 1  ; +56: where the frame was when the snapshot ran
+    .f_lasti:     resq 1  ; +64
+endstruc
 
 ;; ============================================================================
 ;; Exceptions, tracebacks, and the fatal error codes
@@ -1079,7 +1146,17 @@ struc PyBuiltinObject
     .func_ptr:    resq 1  ; +32: ptr to C implementation
     .min_args:    resq 1  ; +40: minimum nargs (including self), 0 = no check
     .max_args:    resq 1  ; +48: maximum nargs, -1 = no max check
+    ; The two below are what a repr needs and nothing else reads.  CPython
+    ; has three distinct types here -- builtin_function_or_method,
+    ; method_descriptor and wrapper_descriptor -- reprd three ways; this tree
+    ; has one, so the type it belongs to and which kind it is are fields.
+    .func_owner:  resq 1  ; +56: the type whose method this is, or 0
+    .func_kind:   resq 1  ; +64: 0 plain function, 1 method, 2 slot wrapper
 endstruc
+
+BUILTIN_KIND_FUNCTION equ 0
+BUILTIN_KIND_METHOD   equ 1
+BUILTIN_KIND_WRAPPER  equ 2
 
 ;; ============================================================================
 ;; The GC header, and the traverse helpers
@@ -1096,6 +1173,14 @@ struc PyGC_Head
 endstruc
 
 GC_HEAD_SIZE equ PyGC_Head_size   ; 16
+
+; gc.set_debug() flags, with CPython's values.  DEBUG_LEAK is the union of
+; the three that keep something around to look at.
+GC_DEBUG_STATS         equ 1
+GC_DEBUG_COLLECTABLE   equ 2
+GC_DEBUG_UNCOLLECTABLE equ 4
+GC_DEBUG_SAVEALL       equ 32
+GC_DEBUG_LEAK          equ GC_DEBUG_COLLECTABLE | GC_DEBUG_UNCOLLECTABLE | GC_DEBUG_SAVEALL
 
 ; GC state bits stored in low 2 bits of gc_prev
 GC_PREV_MASK_COLLECTING equ 1     ; object is in unreachable set

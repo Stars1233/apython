@@ -39,12 +39,14 @@ extern none_singleton
 extern int_from_i64
 extern int_is_integer
 extern int_to_i64
+extern int_type
 extern obj_repr
 extern obj_str
 extern raise_exception
 extern tuple_new
 extern tuple_type
 extern ap_strcmp
+extern kw_names_pending
 extern dict_get
 extern dict_new
 extern dict_set
@@ -410,8 +412,9 @@ DEF_FUNC exc_is_syntax
     lea rdx, [rel tuple_type]
     cmp rcx, rdx
     jne .no
+    ; Four fields, or CPython's six with end_lineno and end_offset.
     cmp qword [rax + PyTupleObject.ob_size], 4
-    jne .no
+    jl .no
     mov eax, 1
     pop rbx
     leave
@@ -424,18 +427,184 @@ DEF_FUNC exc_is_syntax
 END_FUNC exc_is_syntax
 
 ;; ============================================================================
-;; exc_syntax_str(PyObject *exc) -> PyStrObject*, the bare message
+;; exc_syntax_str(PyObject *exc) -> PyStrObject*
 ;;
-;; CPython appends " (filename, line N)" here.  The traceback printer shows the
-;; same information in its own File/line/caret block, so this is the one place
-;; the two differ, and only for code that prints a caught SyntaxError itself.
+;; "invalid syntax (f.py, line 1)" -- CPython's SyntaxError_str, which appends
+;; the basename of the filename and the line number to the message.  Each half
+;; is dropped when its field is not there, so `SyntaxError('m', (None, 1, 1,
+;; 't'))` renders as "m (line 1)" and one with neither is the bare message.
+;;
+;; This was the bare message, which is the form every tool that prints a caught
+;; SyntaxError itself shows.  The traceback block carries the location
+;; separately, so the difference was invisible in tracebacks and present
+;; everywhere else.
 ;; ============================================================================
-DEF_FUNC exc_syntax_str
+SS_MSG   equ 8              ; the str() of args[0], owned
+SS_LOC   equ 16             ; the location tuple, borrowed
+SS_DIG   equ 56             ; 32 bytes: the line number's digits, backwards
+SS_BUF   equ 584            ; 512 bytes of assembly space, at the bottom
+SS_FRAME equ 584            ; + 3 pushes = 608
+DEF_FUNC exc_syntax_str, SS_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+
     mov rax, [rdi + PyExceptionObject.exc_args]
     mov rax, [rax + PyTupleObject.ob_item]
     mov rdi, [rax]
     call obj_str
     V_UNPACK rax, rdx
+    test rax, rax
+    jz .ss_out
+    mov [rbp - SS_MSG], rax
+
+    ; Only a located SyntaxError gets a suffix.
+    mov rdi, rbx
+    call exc_is_syntax
+    test eax, eax
+    jz .ss_bare
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rax, [rax + 8]
+    mov [rbp - SS_LOC], rax
+
+    ; The message first, truncated to leave room for the suffix.
+    mov r13, [rbp - SS_MSG]
+    mov rdx, [r13 + PyStrObject.ob_size]
+    cmp rdx, 400
+    jle .ss_msg_len
+    mov edx, 400
+.ss_msg_len:
+    lea rdi, [rbp - SS_BUF]
+    lea rsi, [r13 + PyStrObject.data]
+    mov r12, rdi
+    add r12, rdx                        ; where the suffix will start
+    call ap_memcpy
+
+    ; " (basename", if there is a filename.  CPython prints the basename only.
+    mov rax, [rbp - SS_LOC]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rax, [rax]
+    V_TEST_PTR rax, rcx
+    ja .ss_no_file
+    test rax, rax
+    jz .ss_no_file
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .ss_no_file
+
+    mov word [r12], ' ('                ; ' ' then '(' -- NASM is little-endian
+    add r12, 2
+    lea rsi, [rax + PyStrObject.data]
+    mov rcx, [rax + PyStrObject.ob_size]
+    add rcx, rsi                        ; one past the end
+    mov r8, rsi
+.ss_base:
+    cmp r8, rcx
+    jae .ss_base_done
+    cmp byte [r8], '/'
+    jne .ss_base_next
+    lea rsi, [r8 + 1]
+.ss_base_next:
+    inc r8
+    jmp .ss_base
+.ss_base_done:
+    sub rcx, rsi                        ; what is left of it is the basename
+    cmp rcx, 100
+    jle .ss_base_len
+    mov ecx, 100
+.ss_base_len:
+    mov rdx, rcx
+    mov rdi, r12
+    add r12, rdx
+    call ap_memcpy
+    mov r13d, 1                         ; the parenthesis is open
+    jmp .ss_line
+
+.ss_no_file:
+    xor r13d, r13d
+.ss_line:
+    ; ", line N", or " (line N" when there was no filename to open with.
+    mov rax, [rbp - SS_LOC]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rax, [rax + 8]
+    ; The line may be an immediate or a heap int: the exception's args are
+    ; whatever the caller put there, and past +-2^50 -- or under INT_STRESS,
+    ; past 8 -- an ordinary line number is boxed.
+    V_IS_INT rax, rcx
+    jae .ss_line_imm
+    V_TEST_PTR rax, rcx
+    ja .ss_close
+    test rax, rax
+    jz .ss_close
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel int_type]
+    cmp rcx, rdx
+    jne .ss_close
+    mov rdi, rax
+    mov edx, TAG_PTR
+    call int_to_i64
+    jmp .ss_line_have
+.ss_line_imm:
+    V_TO_I64 rax
+.ss_line_have:
+    test r13d, r13d
+    jnz .ss_line_sep
+    mov word [r12], ' ('
+    add r12, 2
+    mov r13d, 1
+    jmp .ss_line_word
+.ss_line_sep:
+    mov word [r12], ', '                ; ',' then ' '
+    add r12, 2
+.ss_line_word:
+    mov dword [r12], 'line'
+    mov byte [r12 + 4], ' '
+    add r12, 5
+
+    ; The digits, least significant first into a scratch and then reversed.
+    xor r8d, r8d
+.ss_digit:
+    xor edx, edx
+    mov rcx, 10
+    div rcx                             ; rax = rax/10, rdx = the digit
+    add dl, '0'
+    mov [rbp - SS_DIG + r8], dl
+    inc r8
+    test rax, rax
+    jnz .ss_digit
+.ss_emit:
+    dec r8
+    mov dl, [rbp - SS_DIG + r8]
+    mov [r12], dl
+    inc r12
+    test r8, r8
+    jnz .ss_emit
+
+.ss_close:
+    test r13d, r13d
+    jz .ss_finish
+    mov byte [r12], ')'
+    inc r12
+.ss_finish:
+    lea rdi, [rbp - SS_BUF]
+    mov rsi, r12
+    sub rsi, rdi                        ; the length written
+    call str_new_heap
+    test rax, rax
+    jz .ss_bare
+    mov rdi, [rbp - SS_MSG]
+    mov [rbp - SS_MSG], rax
+    call obj_decref
+.ss_bare:
+    mov rax, [rbp - SS_MSG]
+.ss_out:
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
     leave
     ret
 END_FUNC exc_syntax_str
@@ -783,8 +952,24 @@ DEF_FUNC exc_str, ES_FRAME
     ret
 
 .es_empty:
+    ; A SyntaxError renders its msg, and with no args at all the msg is None:
+    ; CPython's str(SyntaxError()) is "None", not the empty string every other
+    ; argument-less exception gives.
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    call exc_isinstance
+    test eax, eax
+    jz .es_empty_str
+    CSTRING rdi, "None"
+    call str_from_cstr
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.es_empty_str:
     CSTRING rdi, ""
     call str_from_cstr
+    mov edx, TAG_PTR
     pop rbx
     leave
     ret
@@ -1051,6 +1236,114 @@ DEF_FUNC exc_getattr
     call ap_strcmp
     test eax, eax
     jz .get_value
+
+    ; SyntaxError's seven attributes.  They are not fields: they live in the
+    ; args tuple CPython puts them in -- args = (msg, (filename, lineno,
+    ; offset, text, end_lineno, end_offset)) -- so reading them back out of it
+    ; keeps one source of truth, and an exception built by hand with the same
+    ; args answers the same way.  r14d carries which one: 0 is the message and
+    ; 1..6 index the location tuple.
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "msg"
+    mov r14d, 0
+    call ap_strcmp
+    test eax, eax
+    jz .syn_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "filename"
+    mov r14d, 1
+    call ap_strcmp
+    test eax, eax
+    jz .syn_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "lineno"
+    mov r14d, 2
+    call ap_strcmp
+    test eax, eax
+    jz .syn_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "offset"
+    mov r14d, 3
+    call ap_strcmp
+    test eax, eax
+    jz .syn_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "text"
+    mov r14d, 4
+    call ap_strcmp
+    test eax, eax
+    jz .syn_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "end_lineno"
+    mov r14d, 5
+    call ap_strcmp
+    test eax, eax
+    jz .syn_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "end_offset"
+    mov r14d, 6
+    call ap_strcmp
+    test eax, eax
+    jz .syn_attr
+    jmp .not_syntax_attr
+
+.syn_attr:
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    call exc_isinstance
+    test eax, eax
+    jz .not_syntax_attr
+    ; An explicit `e.lineno = 3` wins, the way .get_code lets one win.
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    test rdi, rdi
+    jz .syn_from_args
+    mov rsi, r12
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz .found_in_dict
+.syn_from_args:
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    test rax, rax
+    jz .return_none
+    test r14d, r14d
+    jnz .syn_loc
+    cmp qword [rax + PyTupleObject.ob_size], 1
+    jl .return_none
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov rax, [rcx]
+    jmp .syn_have
+.syn_loc:
+    ; Anything short of a real tuple in args[1] means the attribute is absent,
+    ; which is None -- `SyntaxError('boom')` has a msg and no location.
+    cmp qword [rax + PyTupleObject.ob_size], 2
+    jl .return_none
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov rax, [rcx + 8]
+    V_TEST_PTR rax, rcx
+    ja .return_none
+    test rax, rax
+    jz .return_none
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    jne .return_none
+    movsxd rcx, r14d
+    cmp [rax + PyTupleObject.ob_size], rcx
+    jl .return_none
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rax, [rdx + rcx*8 - 8]
+.syn_have:
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+.not_syntax_attr:
 
     ; The instance dict comes first: a class attribute used to shadow the
     ; instance attribute of the same name, so `e.x = 2` then `e.x` read the
@@ -1323,9 +1616,48 @@ END_FUNC exc_getattr
 ; exc_setattr(PyExceptionObject *exc, PyStrObject *name, PyObject *value, int value_tag)
 ; Store a custom attribute on an exception object using exc_dict.
 ; rdi = exc, rsi = name, rdx = value, ecx = value_tag
-DEF_FUNC exc_setattr
+ESA_VAL   equ 8
+ESA_TAG   equ 16
+ESA_FRAME equ 32            ; + 2 pushes = 48
+DEF_FUNC exc_setattr, ESA_FRAME
     push rbx
+    push r12
     mov rbx, rdi            ; exc
+    mov r12, rsi            ; the name
+    mov [rbp - ESA_VAL], rdx
+    mov [rbp - ESA_TAG], rcx
+
+    ; Four names are fields of the object, not entries in its dict, and
+    ; exc_getattr reads them from the fields.  Writing them to the dict left
+    ; the assignment invisible: `e.__cause__ = other` read back as None, and
+    ; the report the traceback printer produced had no cause chain in it.
+    ; `raise x from y` goes through the fields directly, which is why only the
+    ; hand-written form was affected.
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__cause__"
+    call ap_strcmp
+    test eax, eax
+    jz .esa_cause
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__context__"
+    call ap_strcmp
+    test eax, eax
+    jz .esa_context
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__traceback__"
+    call ap_strcmp
+    test eax, eax
+    jz .esa_tb
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__suppress_context__"
+    call ap_strcmp
+    test eax, eax
+    jz .esa_suppress
+    ; ap_strcmp clobbers the argument registers, so the value and its tag come
+    ; back from the frame.
+    mov rsi, r12
+    mov rdx, [rbp - ESA_VAL]
+    mov rcx, [rbp - ESA_TAG]
 
     ; Create exc_dict if needed
     mov rax, [rbx + PyExceptionObject.exc_dict]
@@ -1347,9 +1679,75 @@ DEF_FUNC exc_setattr
     xor eax, eax            ; return 0 (success)
     xor edx, edx
 
+    pop r12
     pop rbx
     leave
     ret
+
+    ; Each field holds a strong reference, and None means "none of it": the
+    ; report walks a NULL field, not a None one.
+.esa_cause:
+    mov esi, PyExceptionObject.exc_cause
+    ; `raise x from y` also sets __suppress_context__, and so does assigning
+    ; to __cause__ -- CPython's cause setter does both.
+    mov qword [rbx + PyExceptionObject.exc_suppress], 1
+    jmp .esa_field
+.esa_context:
+    mov esi, PyExceptionObject.exc_context
+    jmp .esa_field
+.esa_tb:
+    mov esi, PyExceptionObject.exc_tb
+.esa_field:
+    mov rdx, [rbp - ESA_VAL]
+    lea rcx, [rel none_singleton]
+    cmp rdx, rcx
+    jne .esa_field_store
+    xor edx, edx            ; None clears it
+.esa_field_store:
+    mov r12, rdx
+    test r12, r12
+    jz .esa_field_swap
+    mov rdi, r12
+    push rsi
+    call obj_incref
+    pop rsi
+.esa_field_swap:
+    mov rdi, [rbx + rsi]
+    mov [rbx + rsi], r12
+    test rdi, rdi
+    jz .esa_field_done
+    call obj_decref
+.esa_field_done:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.esa_suppress:
+    ; CPython's setter takes a bool and nothing else, down to the wording.
+    mov rdi, [rbp - ESA_VAL]
+    lea rcx, [rel bool_true]
+    cmp rdi, rcx
+    je .esa_suppress_true
+    lea rcx, [rel bool_false]
+    cmp rdi, rcx
+    jne .esa_suppress_bad
+    xor eax, eax
+    jmp .esa_suppress_store
+.esa_suppress_true:
+    mov eax, 1
+.esa_suppress_store:
+    mov [rbx + PyExceptionObject.exc_suppress], rax
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+.esa_suppress_bad:
+    RAISE exc_TypeError_type, "attribute value type must be bool"
 END_FUNC exc_setattr
 
 ; exc_isinstance(PyExceptionObject *exc, PyTypeObject *type) -> int (0/1)
@@ -1470,7 +1868,122 @@ END_FUNC type_is_exc_subclass
 ETC_EXC   equ 8
 ETC_ARGS  equ 16
 ETC_NARGS equ 24
-ETC_FRAME equ 24            ; + 2 pushes = 40, not 16-aligned
+ETC_KWFAM equ 32            ; 0 none, 1 AttributeError, 2 ImportError
+ETC_KW1   equ 40            ; the 'name' keyword's value, or 0
+ETC_KW2   equ 48            ; 'obj' for AttributeError, 'path' for ImportError
+ETC_FRAME equ 48            ; + 2 pushes = 64, 16-byte aligned
+;; ============================================================================
+;; exc_method_init(args, nargs) -> None -- BaseException.__init__
+;;
+;; `class E(Exception)` whose __init__ calls super().__init__(msg) has to end
+;; up with args == (msg,), which is what str(e) and repr(e) are built from.
+;; BaseException had no __init__ of its own, so the super() call walked past
+;; every exception type in the MRO and reached object.__init__, which takes
+;; its arguments and ignores them: re.error's message came out as the whole
+;; three-item constructor tuple, and so did every other exception that
+;; composes its own message.
+;; ============================================================================
+EMI_SELF  equ 8
+EMI_TUP   equ 16
+EMI_FRAME equ 32            ; + 1 push = 40
+
+DEF_FUNC exc_method_init, EMI_FRAME
+    push rbx
+    test rsi, rsi
+    jz .emi_none
+    mov rax, [rdi]
+    V_TEST_PTR rax, rcx
+    ja .emi_none
+    test rax, rax
+    jz .emi_none
+    mov [rbp - EMI_SELF], rax
+
+    ; args = the tuple of everything after self
+    lea rbx, [rdi + 8]
+    dec rsi
+    mov [rbp - EMI_TUP], rsi
+    mov rdi, rsi
+    call tuple_new
+    test rax, rax
+    jz .emi_none
+    mov rcx, rax
+    mov r8, [rax + PyTupleObject.ob_item]
+    xor edx, edx
+.emi_copy:
+    cmp rdx, [rbp - EMI_TUP]
+    jge .emi_copied
+    mov r9, [rbx + rdx*8]
+    INCREF_V r9, r10
+    mov [r8 + rdx*8], r9
+    inc rdx
+    jmp .emi_copy
+.emi_copied:
+    mov rdi, [rbp - EMI_SELF]
+    mov rsi, [rdi + PyExceptionObject.exc_args]
+    mov [rdi + PyExceptionObject.exc_args], rcx
+    test rsi, rsi
+    jz .emi_none
+    mov rdi, rsi
+    call obj_decref
+
+.emi_none:
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC exc_method_init
+
+;; ============================================================================
+;; exc_install_methods() -- give BaseException a tp_dict with __init__ in it
+;;
+;; One dict on the root of the exception hierarchy is enough: every other
+;; exception type reaches it through the MRO, which is what a super() call
+;; walks.
+;; ============================================================================
+EIM_KEY   equ 8
+EIM_FN    equ 16
+EIM_FRAME equ 32            ; + 1 push = 40
+
+global exc_install_methods
+DEF_FUNC exc_install_methods, EIM_FRAME
+    push rbx
+    call dict_new
+    test rax, rax
+    jz .eim_out
+    mov rbx, rax
+    mov [rel exc_BaseException_type + PyTypeObject.tp_dict], rbx
+
+    CSTRING rdi, "__init__"
+    call str_from_cstr_heap
+    mov [rbp - EIM_KEY], rax
+    lea rdi, [rel exc_method_init]
+    CSTRING rsi, "__init__"
+    extern builtin_func_new
+    call builtin_func_new
+    mov [rbp - EIM_FN], rax
+    mov rdi, rbx
+    mov rsi, [rbp - EIM_KEY]
+    mov rdx, rax
+    call dict_set
+    mov rdi, [rbp - EIM_KEY]
+    call obj_decref
+    mov rdi, [rbp - EIM_FN]
+    call obj_decref
+    ; Stamp the owner on it, which is what makes builtin_func_call check the
+    ; receiver.  Without it `BaseException.__init__([], 'a')` wrote a tuple
+    ; into a list's 57th byte -- exc_args' offset -- and released whatever
+    ; word was there.
+    lea rdi, [rel exc_BaseException_type]
+    extern type_stamp_methods
+    call type_stamp_methods
+.eim_out:
+    pop rbx
+    leave
+    ret
+END_FUNC exc_install_methods
+
 DEF_FUNC exc_type_call, ETC_FRAME
     push rbx
     push r12
@@ -1478,6 +1991,96 @@ DEF_FUNC exc_type_call, ETC_FRAME
     mov rbx, rdi            ; rbx = type
     mov [rbp - ETC_ARGS], rsi
     mov [rbp - ETC_NARGS], rdx
+    mov qword [rbp - ETC_KW1], 0
+    mov qword [rbp - ETC_KW2], 0
+
+    ; ------------------------------------------------------------------
+    ; Keyword arguments.  AttributeError and ImportError each carry two
+    ; named attributes -- `AttributeError("x", name=n, obj=o)` and
+    ; `ImportError("x", name=n, path=p)` -- and the stdlib reads both back:
+    ; importlib sets ModuleNotFoundError.name, and the "did you mean"
+    ; machinery reads AttributeError.name and .obj.  Neither existed here.
+    ; The keywords were folded into .args, so `.args` came out one item too
+    ; long and `.name` was an AttributeError of its own.
+    ;
+    ; They are the only builtin exceptions that take keywords; every other
+    ; one answers "takes no keyword arguments", as CPython's does.
+    ; ------------------------------------------------------------------
+    mov rdi, rbx
+    call exc_kw_family
+    mov [rbp - ETC_KWFAM], rax
+
+    mov r12, [rel kw_names_pending]
+    test r12, r12
+    jz .etc_kw_done
+    mov qword [rel kw_names_pending], 0     ; consumed, however this ends
+    mov rcx, [r12 + PyTupleObject.ob_size]
+    sub [rbp - ETC_NARGS], rcx              ; .args gets the positionals only
+    cmp qword [rbp - ETC_KWFAM], 0
+    je .etc_no_keywords
+
+    xor edx, edx                            ; the keyword index
+.etc_kw_loop:
+    cmp rdx, [r12 + PyTupleObject.ob_size]
+    jge .etc_kw_done
+    mov rax, [r12 + PyTupleObject.ob_item]
+    mov r8, [rax + rdx*8]                   ; the keyword's name
+    mov rax, [rbp - ETC_NARGS]
+    add rax, rdx
+    mov rcx, [rbp - ETC_ARGS]
+    mov r9, [rcx + rax*8]                   ; the value that goes with it
+
+    push rdx
+    push r8
+    push r9
+    sub rsp, 8
+    lea rdi, [r8 + PyStrObject.data]
+    CSTRING rsi, "name"
+    call ap_strcmp
+    test eax, eax
+    jz .etc_kw_name
+    mov r8, [rsp + 16]
+    lea rdi, [r8 + PyStrObject.data]
+    cmp qword [rbp - ETC_KWFAM], 1
+    je .etc_kw_cmp_obj
+    CSTRING rsi, "path"
+    jmp .etc_kw_cmp2
+.etc_kw_cmp_obj:
+    CSTRING rsi, "obj"
+.etc_kw_cmp2:
+    call ap_strcmp
+    test eax, eax
+    jz .etc_kw_second
+    add rsp, 8
+    pop r9
+    pop r8
+    pop rdx
+    lea rdi, [r8 + PyStrObject.data]
+    mov rsi, [rbx + PyTypeObject.tp_name]
+    call exc_raise_bad_keyword
+.etc_kw_name:
+    add rsp, 8
+    pop r9
+    pop r8
+    pop rdx
+    mov [rbp - ETC_KW1], r9
+    jmp .etc_kw_next
+.etc_kw_second:
+    add rsp, 8
+    pop r9
+    pop r8
+    pop rdx
+    mov [rbp - ETC_KW2], r9
+.etc_kw_next:
+    inc rdx
+    jmp .etc_kw_loop
+.etc_no_keywords:
+    xor edi, edi                ; no keyword name: the whole class is refused
+    mov rsi, [rbx + PyTypeObject.tp_name]
+    call exc_raise_bad_keyword
+.etc_kw_done:
+    mov rdx, [rbp - ETC_NARGS]
+    mov rsi, [rbp - ETC_ARGS]
 
     ; Check for a constructor (ExceptionGroup's, or OSError's).  It lives in
     ; tp_new; tp_call would make instances callable.
@@ -1574,6 +2177,16 @@ DEF_FUNC exc_type_call, ETC_FRAME
     mov [rdi + PyExceptionObject.exc_args], r12
 
 .done:
+    ; The two named attributes, defaulting to None -- CPython reports None
+    ; there, not AttributeError, when they were not given.
+    cmp qword [rbp - ETC_KWFAM], 0
+    je .etc_finish
+    mov rdi, [rbp - ETC_EXC]
+    mov rsi, [rbp - ETC_KWFAM]
+    mov rdx, [rbp - ETC_KW1]
+    mov rcx, [rbp - ETC_KW2]
+    call exc_store_named
+.etc_finish:
     mov rax, [rbp - ETC_EXC]
     mov edx, TAG_PTR
     pop r12
@@ -1582,6 +2195,139 @@ DEF_FUNC exc_type_call, ETC_FRAME
     V_PACK rax, rdx             ; tp_call returns one Value
     ret
 END_FUNC exc_type_call
+
+;; exc_kw_family(rdi = the type) -> rax = 0 none, 1 AttributeError,
+;;                                       2 ImportError
+DEF_FUNC_LOCAL exc_kw_family
+    push rbx
+    mov rbx, rdi
+    lea rsi, [rel exc_AttributeError_type]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jnz .ekf_attr
+    mov rdi, rbx
+    lea rsi, [rel exc_ImportError_type]
+    call type_is_subtype
+    test eax, eax
+    jnz .ekf_import
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.ekf_attr:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.ekf_import:
+    mov eax, 2
+    pop rbx
+    leave
+    ret
+END_FUNC exc_kw_family
+
+;; exc_raise_bad_keyword(rdi = the keyword's name as a C string, or 0 when the
+;;                        type takes none at all; rsi = the type's name)
+;; CPython's two wordings:
+;;   'foo' is an invalid keyword argument for AttributeError()
+;;   ValueError() takes no keyword arguments
+ERB_NAME  equ 8
+ERB_TYPE  equ 16
+ERB_BUF   equ 192
+ERB_FRAME equ 192           ; + 0 pushes = 192, 16-aligned
+DEF_FUNC_LOCAL exc_raise_bad_keyword, ERB_FRAME
+    mov [rbp - ERB_NAME], rdi
+    mov [rbp - ERB_TYPE], rsi
+    lea rdi, [rbp - ERB_BUF]
+    cmp qword [rbp - ERB_NAME], 0
+    je .erb_none_taken
+    CSTRING rsi, "'"
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - ERB_NAME]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "' is an invalid keyword argument for "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - ERB_TYPE]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "()"
+    call rbt_append_cstr
+    jmp .erb_raise
+.erb_none_taken:
+    mov rsi, [rbp - ERB_TYPE]
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "() takes no keyword arguments"
+    call rbt_append_cstr
+.erb_raise:
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - ERB_BUF]
+    call raise_exception
+END_FUNC exc_raise_bad_keyword
+
+;; exc_store_named(rdi = the exception, rsi = the family,
+;;                 rdx = the 'name' Value or 0, rcx = the second one or 0)
+ESN_EXC   equ 8
+ESN_FAM   equ 16
+ESN_V1    equ 24
+ESN_V2    equ 32
+ESN_FRAME equ 48            ; + 0 pushes = 48
+DEF_FUNC_LOCAL exc_store_named, ESN_FRAME
+    mov [rbp - ESN_EXC], rdi
+    mov [rbp - ESN_FAM], rsi
+    mov [rbp - ESN_V1], rdx
+    mov [rbp - ESN_V2], rcx
+
+    CSTRING rdi, "name"
+    call str_from_cstr_heap
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - ESN_EXC]
+    mov rsi, [rsp + 8]
+    mov rdx, [rbp - ESN_V1]
+    test rdx, rdx
+    jnz .esn_have1
+    lea rdx, [rel none_singleton]
+.esn_have1:
+    INCREF_V rdx, rcx
+    xor ecx, ecx
+    call exc_setattr
+    add rsp, 8
+    pop rdi
+    call obj_decref
+
+    cmp qword [rbp - ESN_FAM], 1
+    je .esn_second_obj
+    CSTRING rdi, "path"
+    jmp .esn_second
+.esn_second_obj:
+    CSTRING rdi, "obj"
+.esn_second:
+    call str_from_cstr_heap
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - ESN_EXC]
+    mov rsi, [rsp + 8]
+    mov rdx, [rbp - ESN_V2]
+    test rdx, rdx
+    jnz .esn_have2
+    lea rdx, [rel none_singleton]
+.esn_have2:
+    INCREF_V rdx, rcx
+    xor ecx, ecx
+    call exc_setattr
+    add rsp, 8
+    pop rdi
+    call obj_decref
+    leave
+    ret
+END_FUNC exc_store_named
 
 ;; ============================================================================
 ;; oserror_new(rdi = type, rsi = args, rdx = nargs) -> fat pair (rax, rdx)
@@ -1774,8 +2520,9 @@ END_FUNC oserror_new
 ;; The sibling of raise_key_error: a raise that needs richer args than the
 ;; two-argument RAISE macro can build.
 ;; ============================================================================
-RO_ARGS  equ 24             ; three Values
-RO_FRAME equ 32             ; + 0 pushes = 32
+RO_ARGS  equ 40             ; five Values: errno, strerror, filename,
+                            ; winerror, filename2 -- CPython's full form
+RO_FRAME equ 48             ; + 0 pushes = 48
 ;; raise_oserror_owned(rdi = errno, rsi = the caller's path Value,
 ;;                     rdx = a resolved path the caller owns, or 0)
 ;;
@@ -1784,19 +2531,45 @@ RO_FRAME equ 32             ; + 0 pushes = 32
 ;; the message has to name that rather than the object that produced it --
 ;; which means it cannot be released before the exception is built.
 ROO_OWNED equ 8
-ROO_FRAME equ 16            ; + 0 pushes = 16
+ROO_OWNED2 equ 16           ; the second resolved path, for rename
+ROO_FRAME equ 32            ; + 0 pushes = 32
 
 DEF_FUNC raise_oserror_owned, ROO_FRAME
+    xor ecx, ecx                ; no second path
+    xor r8d, r8d
+    leave
+    jmp raise_oserror_owned2
+END_FUNC raise_oserror_owned
+
+;; raise_oserror_owned2(rdi = errno, rsi = the first path Value,
+;;                      rdx = the owned resolved first path or 0,
+;;                      rcx = the second path Value,
+;;                      r8 = the owned resolved second path or 0)
+;;
+;; The two-path form, for rename and symlink: CPython reports
+;; "'src' -> 'dst'".  Each path is named by its RESOLVED form when
+;; posix_path_arg had to build one -- a PathLike argument -- and by the
+;; argument itself otherwise.  Both resolved paths are released after the
+;; exception is built and before the raise, which is the whole reason this
+;; and its sibling exist.
+global raise_oserror_owned2
+DEF_FUNC raise_oserror_owned2, ROO_FRAME
     mov [rbp - ROO_OWNED], rdx
+    mov [rbp - ROO_OWNED2], r8
     test rdx, rdx
-    jz .roo_plain
+    jz .roo_have_second
     mov rsi, rdx                ; name the resolved path, not the PathLike
-.roo_plain:
+.roo_have_second:
+    mov rdx, rcx
+    test r8, r8
+    jz .roo_second_plain
+    mov rdx, r8
+.roo_second_plain:
     ; raise_oserror does not return, so the release has to happen inside the
     ; build: hand it the pieces and let it call back here.  Simplest is to
     ; do the build here too.
     call raise_oserror_build    ; rax = the exception, and it took its own
-                                ; reference to the filename
+                                ; reference to both filenames
     push rax
     sub rsp, 8
     mov rdi, [rbp - ROO_OWNED]
@@ -1804,25 +2577,38 @@ DEF_FUNC raise_oserror_owned, ROO_FRAME
     jz .roo_no_owned
     call obj_decref
 .roo_no_owned:
+    mov rdi, [rbp - ROO_OWNED2]
+    test rdi, rdi
+    jz .roo_no_owned2
+    call obj_decref
+.roo_no_owned2:
     add rsp, 8
     pop rdi
     call raise_exception_obj    ; does not return
-END_FUNC raise_oserror_owned
+END_FUNC raise_oserror_owned2
 
 DEF_FUNC raise_oserror, RO_FRAME
+    xor edx, edx                    ; no second path
     call raise_oserror_build
     mov rdi, rax
     extern raise_exception_obj
     call raise_exception_obj        ; does not return
 END_FUNC raise_oserror
 
-;; raise_oserror_build(rdi = errno, rsi = filename or 0) -> rax = the exception
+;; raise_oserror_build(rdi = errno, rsi = filename or 0, rdx = a second
+;;                     filename or 0) -> rax = the exception
 ;;
 ;; The half of raise_oserror that can return, so a caller with cleanup of its
 ;; own can do it between building and raising: a raise abandons the C stack,
 ;; and posix has a resolved path to release that the message names.
+;;
+;; The second filename is CPython's five-argument form, (errno, strerror,
+;; filename, winerror, filename2); OSError.__str__ already renders it as
+;; "... : 'src' -> 'dst'".  rename reported only its source without it.
 DEF_FUNC raise_oserror_build, RO_FRAME
     mov [rbp - RO_ARGS + 16], rsi   ; args[2] = filename, or NULL for now
+    mov [rbp - RO_ARGS + 24], rdx   ; args[3] = winerror; overwritten below
+    mov [rbp - RO_ARGS + 32], rdx   ; args[4] = filename2, or NULL
     push rdi
     call int_from_i64
     V_PACK rax, rdx
@@ -1838,6 +2624,12 @@ DEF_FUNC raise_oserror_build, RO_FRAME
     cmp qword [rbp - RO_ARGS + 16], 0
     je .ro_call
     mov edx, 3
+    cmp qword [rbp - RO_ARGS + 32], 0
+    je .ro_call
+    ; The five-argument form.  args[3] is Windows-only and is None here.
+    lea rax, [rel none_singleton]
+    mov [rbp - RO_ARGS + 24], rax
+    mov edx, 5
 .ro_call:
     lea rdi, [rel exc_OSError_type]
     lea rsi, [rbp - RO_ARGS]
@@ -1940,7 +2732,14 @@ DEF_FUNC traceback_getattr
     CSTRING rsi, "tb_frame"
     call ap_strcmp
     test eax, eax
-    jz .tb_return_none
+    jz .tb_get_frame
+
+    ; Check "tb_lasti"
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "tb_lasti"
+    call ap_strcmp
+    test eax, eax
+    jz .tb_get_lasti
 
     ; Not found
     RET_NULL
@@ -1969,6 +2768,38 @@ DEF_FUNC traceback_getattr
     pop rbx
     leave
     V_PACK rax, rdx             ; return one Value
+    ret
+
+.tb_get_frame:
+    ; A snapshot built from what the entry records.  This answered None, and
+    ; CPython's traceback.py reads tb_frame.f_code on every entry -- so
+    ; importing anything that formats a traceback died on the None.
+    mov rdi, [rbx + PyTracebackObject.tb_code]
+    mov rsi, [rbx + PyTracebackObject.tb_lineno]
+    mov rdx, [rbx + PyTracebackObject.tb_lasti]
+    extern frameobj_from_code
+    call frameobj_from_code
+    test rax, rax
+    jz .tb_return_none
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.tb_get_lasti:
+    ; Stored in code units, which is what the line and column tables are
+    ; indexed by; CPython's attribute is a BYTE offset into co_code, and
+    ; anything that indexes co_code with it -- dis, traceback -- reads it
+    ; that way.
+    mov rax, [rbx + PyTracebackObject.tb_lasti]
+    add rax, rax
+    mov edx, TAG_SMALLINT
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
     ret
 
 .tb_return_none:
@@ -2132,7 +2963,11 @@ exc_metatype:
     dq 0                    ; tp_clear
     dq 0 ; tp_dictoffset
 
-exc_meta_name: db "exception_metatype", 0
+; The metatype is implementation detail -- it exists so an exception class can
+; carry a tp_call of its own -- and it says `type`, as user_type_metatype
+; already did.  Naming itself made `type(ValueError)` print
+; <class 'exception_metatype'> where CPython prints <class 'type'>.
+exc_meta_name: db "type", 0
 
 ; Traceback type object (immortal)
 align 8

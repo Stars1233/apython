@@ -18,6 +18,7 @@ extern int_from_i64
 extern int_type
 extern raise_exception
 extern exc_ZeroDivisionError_type
+extern exc_OverflowError_type
 extern exc_ValueError_type
 extern obj_incref
 
@@ -168,12 +169,63 @@ FR_PREC  equ 16
 FR_BUF   equ 64          ; 48 bytes, [rbp-64, rbp-16)
 FR_EBUF  equ 128         ; 48 bytes, [rbp-128, rbp-80)
 FR_EXP   equ 136
+FR_BUMP  equ 144         ; the last digit was carried up by one; the frame
+                         ; below grew from 160 to 176 to make room
 
 FR_VALUE equ 8              ; the double being rendered
 FR_PREC  equ 16             ; precision counter (low 4 bytes)
 FR_BUF   equ 64             ; 48-byte render buffer
                             ; (the frame is built by hand below: `and rsp,-16`
-                            ; then `sub rsp,160`, for libc's aligned SSE)
+                            ; then `sub rsp,176`, for libc's aligned SSE)
+;; ============================================================================
+;; fr_bump_last(rdi = a NUL-terminated "d.ddd[e+dd]") -> eax = 1 on success
+;;
+;; Carry one into the last significant digit.  The exponent part, if any, is
+;; left alone; a carry that escapes the leading digit would change the
+;; exponent, and that candidate is refused rather than fixed up -- it can
+;; only arise from an all-nines mantissa, where the next precision answers.
+;; ============================================================================
+DEF_FUNC_BARE fr_bump_last
+    ; Find the end of the mantissa: the 'e', or the terminator.
+    xor ecx, ecx
+.fbl_scan:
+    movzx eax, byte [rdi + rcx]
+    test al, al
+    jz .fbl_at_end
+    cmp al, 'e'
+    je .fbl_at_end
+    cmp al, 'E'
+    je .fbl_at_end
+    inc rcx
+    jmp .fbl_scan
+.fbl_at_end:
+    dec rcx                     ; the last character of the mantissa
+.fbl_carry:
+    test rcx, rcx
+    js .fbl_overflow
+    movzx eax, byte [rdi + rcx]
+    cmp al, '.'
+    je .fbl_skip
+    cmp al, '0'
+    jb .fbl_overflow
+    cmp al, '9'
+    ja .fbl_overflow
+    cmp al, '9'
+    je .fbl_nine
+    inc al
+    mov [rdi + rcx], al
+    mov eax, 1
+    ret
+.fbl_nine:
+    mov byte [rdi + rcx], '0'
+.fbl_skip:
+    dec rcx
+    jmp .fbl_carry
+.fbl_overflow:
+    xor eax, eax
+    ret
+END_FUNC fr_bump_last
+
 DEF_FUNC float_repr
     ; A float subclass arrives as a pointer with its double inline, and only
     ; the tag can say so: a subnormal's bit pattern is a small integer, which
@@ -183,7 +235,7 @@ DEF_FUNC float_repr
     mov rdi, [rdi + PyFloatObject.value]
 .fr_have_bits:
     and rsp, -16              ; ensure 16-byte alignment for libc calls
-    sub rsp, 160
+    sub rsp, 176
     ; Stack layout:
     ;   [rbp - FR_VALUE]   = original double value (8 bytes)
     ;   [rbp - FR_PREC]  = precision counter (8 bytes, only low 4 used)
@@ -204,11 +256,24 @@ DEF_FUNC float_repr
     ucomisd xmm0, xmm1
     je .is_neg_inf
 
-    ; General case: find shortest representation
-    ; Try precision 1..17 with snprintf "%.*g"
+    ; General case: the shortest decimal that reads back as this double.
+    ;
+    ; Trying "%.*g" at rising precision finds the shortest of the forms GLIBC
+    ; produces, which is not always the shortest that exists: at an exact
+    ; half-way case glibc rounds to even, and it is the other neighbour that
+    ; round-trips.  repr(2.0**-24) came out with seventeen digits where
+    ; CPython prints sixteen, because "5.960464477539062e-08" -- glibc's
+    ; correctly-rounded sixteen -- does not read back as 2**-24 and
+    ; "...063" does.  About one in a hundred ordinary values hits it.
+    ;
+    ; So each precision is tried twice: as rendered, and with the last digit
+    ; carried up by one.  CPython's own dtoa searches the same two candidates
+    ; for the same reason.
     mov qword [rbp - FR_PREC], 1     ; prec = 1
 
 .repr_loop:
+    mov qword [rbp - FR_BUMP], 0
+.repr_try:
     lea rdi, [rbp - FR_BUF]   ; buf
     mov esi, 48                ; bufsz
     lea rdx, [rel fmt_g]      ; "%.*g"
@@ -217,6 +282,14 @@ DEF_FUNC float_repr
     mov eax, 1                ; 1 xmm register used
     call snprintf wrt ..plt
 
+    cmp qword [rbp - FR_BUMP], 0
+    je .repr_check
+    lea rdi, [rbp - FR_BUF]
+    call fr_bump_last
+    test eax, eax
+    jz .repr_next             ; the carry escaped: not a candidate
+
+.repr_check:
     ; Round-trip check: strtod(buf, NULL) == val?
     lea rdi, [rbp - FR_BUF]   ; buf
     xor esi, esi              ; endptr = NULL
@@ -226,9 +299,16 @@ DEF_FUNC float_repr
     ucomisd xmm0, xmm1
     je .repr_found             ; match! use this precision
 
+    cmp qword [rbp - FR_BUMP], 0
+    jne .repr_next
+    mov qword [rbp - FR_BUMP], 1
+    jmp .repr_try
+
+.repr_next:
     inc qword [rbp - FR_PREC]
     cmp qword [rbp - FR_PREC], 17
     jle .repr_loop
+    mov qword [rbp - FR_BUMP], 0      ; seventeen digits always round-trips
 
 .repr_found:
     ; The loop above found the shortest digit count that round-trips, but it
@@ -244,6 +324,11 @@ DEF_FUNC float_repr
     movsd xmm0, [rbp - FR_VAL]
     mov eax, 1
     call snprintf wrt ..plt
+    cmp qword [rbp - FR_BUMP], 0
+    je .fr_e_ready
+    lea rdi, [rbp - FR_EBUF]
+    call fr_bump_last
+.fr_e_ready:
 
     ; Read the exponent out of "d.dddde<sign>dd".
     lea rsi, [rbp - FR_EBUF]
@@ -307,6 +392,12 @@ DEF_FUNC float_repr
     movsd xmm0, [rbp - FR_VAL]
     mov eax, 1
     call snprintf wrt ..plt
+    cmp qword [rbp - FR_BUMP], 0
+    je .fr_notation_done
+    ; The last digit of the fixed form sits at the same decimal place as the
+    ; last digit of the exponential one, so it takes the same adjustment.
+    lea rdi, [rbp - FR_BUF]
+    call fr_bump_last
     jmp .fr_notation_done
 
 .fr_use_e:
@@ -383,8 +474,12 @@ FS_SPEC    equ 16           ; spec data pointer
 FS_SPECLEN equ 20           ; spec length (4 bytes)
 FS_PREC    equ 24           ; precision (4 bytes)
 FS_TYPE    equ 25           ; the type character
-FS_BUF     equ 76           ; 48-byte render buffer
-FS_FRAME   equ 80           ; + 0 pushes = 80
+FS_BUF     equ 76           ; 48-byte render buffer, for the ordinary case
+FS_BUFSZ   equ 48
+FS_FMT     equ 88           ; the snprintf format, across the retry
+FS_HEAP    equ 96           ; a bigger buffer, when 48 bytes will not do
+FS_HEAPN   equ 104
+FS_FRAME   equ 112          ; + 0 pushes = 112
 DEF_FUNC float_format_spec, FS_FRAME
     and rsp, -16              ; ensure alignment
 
@@ -443,8 +538,6 @@ DEF_FUNC float_format_spec, FS_FRAME
 
 .ffs_have_spec:
     ; Format using snprintf with appropriate format string
-    lea rdi, [rbp - FS_BUF]         ; buffer (48 bytes)
-    mov esi, 48               ; bufsz
 
     ; Each of the six letters has its own conversion.  The uppercase ones are
     ; not cosmetic: C99's %F and %G spell a non-finite result INF and NAN,
@@ -482,13 +575,50 @@ DEF_FUNC float_format_spec, FS_FRAME
     lea rdx, [rel fmt_E]
 
 .ffs_do_snprintf:
+    mov [rbp - FS_FMT], rdx
+    lea rdi, [rbp - FS_BUF]         ; the 48-byte stack buffer
+    mov esi, FS_BUFSZ
     mov ecx, [rbp - FS_PREC]         ; precision
     movsd xmm0, [rbp - FS_VALUE]      ; value
     mov eax, 1                ; 1 xmm register
     call snprintf wrt ..plt
 
+    ; snprintf reports what it WOULD have written, and the buffer is 48
+    ; bytes: format(1e300, '.2f') needs 305 and used to come back truncated
+    ; at 46 digits, with the fractional part it was asked for missing
+    ; entirely, and format(1e16, '.30f') was one zero short.  Anything that
+    ; does not fit is rendered again into a heap buffer of the size snprintf
+    ; just named.  The stack path is untouched, which is every ordinary
+    ; magnitude and every repr.
+    cmp eax, FS_BUFSZ
+    jae .ffs_needs_heap
+
     lea rdi, [rbp - FS_BUF]
     call str_from_cstr
+    leave
+    ret
+
+.ffs_needs_heap:
+    inc eax                     ; room for the NUL
+    mov [rbp - FS_HEAPN], eax
+    mov edi, eax
+    extern ap_malloc
+    call ap_malloc
+    mov [rbp - FS_HEAP], rax
+    mov rdi, rax
+    mov esi, [rbp - FS_HEAPN]
+    mov rdx, [rbp - FS_FMT]
+    mov ecx, [rbp - FS_PREC]
+    movsd xmm0, [rbp - FS_VALUE]
+    mov eax, 1
+    call snprintf wrt ..plt
+    mov rdi, [rbp - FS_HEAP]
+    call str_from_cstr
+    mov [rbp - FS_VALUE], rax   ; the string, across the free
+    mov rdi, [rbp - FS_HEAP]
+    extern ap_free
+    call ap_free
+    mov rax, [rbp - FS_VALUE]
     leave
     ret
 END_FUNC float_format_spec
@@ -651,6 +781,8 @@ END_FUNC float_hash
 section .rodata
 align 16
 fh_sign_mask: dq 0x8000000000000000, 0
+align 16
+frn_absmask:  dq 0x7fffffffffffffff, 0x7fffffffffffffff
 align 8
 fh_two28:     dq 0x41b0000000000000      ; 2.0**28
 section .text
@@ -965,126 +1097,498 @@ END_FUNC float_pos
 
 ;; ============================================================================
 ;; float_pow(rdi = left, rsi = right, edx = left_tag, ecx = right_tag)
-;; Compute left ** right, returning TAG_FLOAT result.
-;; Both args are converted to double. Uses x87 fyl2x/f2xm1/fscale for
-;; non-integer exponents, repeated squaring for integer exponents.
+;;
+;; CPython's float_pow, followed clause by clause, because the answers this
+;; has to give are almost all special cases and none of them fall out of a
+;; general formula.  What used to be here was x**y = 2**(y*log2(x)) on the
+;; x87, plus fast paths for 0.5 and 2.0 and repeated squaring for an integral
+;; exponent, and it got every one of the IEEE corners wrong:
+;;
+;;   0.0 ** -1        inf, where CPython raises ZeroDivisionError
+;;   (-7.5) ** 2.5    nan -- fyl2x's invalid-operation result, handed back
+;;                    unexamined -- where CPython promotes to complex
+;;   (-1.0) ** inf    nan, where the answer is 1.0
+;;   1.0 ** nan       nan, where the answer is 1.0
+;;   0.0 ** inf       nan, where the answer is 0.0
+;;   2 ** -1074       0.0, because 1/base**1074 overflows on the way
+;;   2.0 ** 10000     inf, where CPython raises OverflowError
+;;
+;; libm's pow is the one that is specified for all of them (C99 Annex F), so
+;; the guards below are only the cases CPython settles before calling it.
 ;; ============================================================================
+FP_LEFT   equ 8             ; iv
+FP_RIGHT  equ 16            ; iw
+FP_NEG    equ 24            ; negate the result?
+FP_FRAME  equ 32            ; + 0 pushes = 32
 DEF_FUNC float_pow, FB_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     FLOAT_BINOP_SETUP
-    ; [rbp - FB_LEFT] = left double, [rbp - FB_RIGHT] = right double
+    ; [rbp - FB_LEFT] = iv, [rbp - FB_RIGHT] = iw.  FB_FRAME is 48 and the
+    ; three slots below reuse the ones the setup has finished with.
 
-    movsd xmm0, [rbp - FB_LEFT]        ; base
-    movsd xmm1, [rbp - FB_RIGHT]       ; exp
+    movsd xmm0, [rbp - FB_LEFT]
+    movsd xmm1, [rbp - FB_RIGHT]
+    mov qword [rbp - FB_RSAVE], 0       ; negate_result
 
-    ; Fast path: exp == 0.5 → sqrtsd (~12 cycles vs ~100+ for general)
-    movsd xmm2, [rel const_half_f]
+    ; v ** 0 is 1.0, even 0.0 ** 0.0 and nan ** 0.0.
+    xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
-    jne .not_sqrt
-    jp .not_sqrt
-    ; base >= 0 check (negative base → general path for complex/error)
-    xorpd xmm3, xmm3
-    ucomisd xmm0, xmm3
-    jb .fpow_general
-    sqrtsd xmm0, xmm0
-    call float_from_f64
-    leave
-    V_PACK rax, rdx             ; return one Value
-    ret
-.not_sqrt:
-    ; Fast path: exp == 2.0 → mulsd
-    movsd xmm2, [rel const_two_f]
+    jp .fpow_iw_not_zero
+    jne .fpow_iw_not_zero
+    jmp .fpow_one
+.fpow_iw_not_zero:
+
+    ; nan ** w is nan (w == 0 is already gone).
+    ucomisd xmm0, xmm0
+    jp .fpow_return_iv
+
+    ; v ** nan is nan, unless v is 1.0.
+    ucomisd xmm1, xmm1
+    jnp .fpow_iw_not_nan
+    movsd xmm2, [rel const_one_f]
+    ucomisd xmm0, xmm2
+    je .fpow_one
+    jmp .fpow_return_iw
+.fpow_iw_not_nan:
+
+    ; v ** +-inf: 0.0 when |v| < 1, 1.0 when |v| == 1, inf when |v| > 1 --
+    ; and the other way round for -inf.
+    movapd xmm3, xmm1
+    andpd xmm3, [rel frn_absmask]
+    movsd xmm2, [rel pos_inf]
+    ucomisd xmm3, xmm2
+    jne .fpow_iw_finite
+    movapd xmm3, xmm0
+    andpd xmm3, [rel frn_absmask]       ; |v|
+    movsd xmm2, [rel const_one_f]
+    ucomisd xmm3, xmm2
+    je .fpow_one                        ; |v| == 1
+    ja .fpow_v_gt_one
+    ; |v| < 1: inf for a negative exponent, 0.0 for a positive one
+    xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
-    jne .check_int_exp
-    jp .check_int_exp
-    mulsd xmm0, xmm0
-    call float_from_f64
-    leave
-    V_PACK rax, rdx             ; return one Value
-    ret
-
-.check_int_exp:
-    ; Check if exponent is an integer
-    cvtsd2si rcx, xmm1
-    cvtsi2sd xmm2, rcx
+    ja .fpow_zero
+    jmp .fpow_inf
+.fpow_v_gt_one:
+    xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
-    jne .fpow_general           ; non-integer exp
-    jp .fpow_general            ; NaN exp
+    ja .fpow_inf
+    jmp .fpow_zero
+.fpow_iw_finite:
 
-    ; Integer exponent: repeated squaring
-    test rcx, rcx
-    js .fpow_neg
+    ; (+-inf) ** w: inf for a positive w, 0.0 for a negative one, and the
+    ; sign is v's when w is an odd integer.
+    movapd xmm3, xmm0
+    andpd xmm3, [rel frn_absmask]
+    movsd xmm2, [rel pos_inf]
+    ucomisd xmm3, xmm2
+    jne .fpow_iv_finite
+    movsd xmm0, [rbp - FB_RIGHT]
+    call float_is_odd_integer          ; -> eax
+    mov r8d, eax
+    xorpd xmm2, xmm2
+    movsd xmm1, [rbp - FB_RIGHT]
+    ucomisd xmm1, xmm2
+    jbe .fpow_inf_negexp
+    test r8d, r8d
+    jz .fpow_inf
+    movsd xmm0, [rbp - FB_LEFT]        ; keeps v's sign
+    jmp .fpow_out
+.fpow_inf_negexp:
+    test r8d, r8d
+    jz .fpow_zero
+    ; copysign(0.0, v)
+    xorpd xmm0, xmm0
+    movsd xmm1, [rbp - FB_LEFT]
+    andpd xmm1, [rel fh_sign_mask]
+    orpd xmm0, xmm1
+    jmp .fpow_out
+.fpow_iv_finite:
 
-    ; Non-negative integer exponent
-    mov rax, rcx                ; exponent
-    movsd xmm2, [rel const_one_f] ; result = 1.0
-.fpow_sq:
-    test rax, rax
-    jz .fpow_sq_done
-    test rax, 1
-    jz .fpow_sq_even
-    mulsd xmm2, xmm0
-.fpow_sq_even:
-    mulsd xmm0, xmm0
-    shr rax, 1
-    jmp .fpow_sq
-.fpow_sq_done:
-    movapd xmm0, xmm2
-    call float_from_f64
+    ; 0.0 ** w: an error for a negative w, and otherwise 0.0 with v's sign
+    ; when w is an odd integer.
+    xorpd xmm2, xmm2
+    movsd xmm0, [rbp - FB_LEFT]
+    ucomisd xmm0, xmm2
+    jp .fpow_iv_not_zero
+    jne .fpow_iv_not_zero
+    movsd xmm1, [rbp - FB_RIGHT]
+    ucomisd xmm1, xmm2
+    jb .fpow_zero_div
+    movsd xmm0, [rbp - FB_RIGHT]
+    call float_is_odd_integer
+    test eax, eax
+    jz .fpow_zero
+    movsd xmm0, [rbp - FB_LEFT]
+    jmp .fpow_out
+.fpow_iv_not_zero:
+
+    ; A negative base with a non-integral exponent has no real answer, and
+    ; CPython's float_pow hands the pair to complex's nb_power rather than
+    ; returning the invalid-operation nan.
+    xorpd xmm2, xmm2
+    ucomisd xmm0, xmm2
+    jae .fpow_iv_positive
+    movsd xmm0, [rbp - FB_RIGHT]
+    roundsd xmm1, xmm0, 1               ; floor(iw)
+    ucomisd xmm0, xmm1
+    je .fpow_iw_integral
+    ; Fractional: complex_pow, which already answers correctly for these.
+    mov rdi, [rbp - FB_LEFT]
+    V_FROM_F64 rdi, rax
+    mov rsi, [rbp - FB_RIGHT]
+    V_FROM_F64 rsi, rax
+    extern complex_pow
     leave
-    V_PACK rax, rdx             ; return one Value
-    ret
+    jmp complex_pow
+.fpow_iw_integral:
+    ; |v| ** w, negated afterwards when w is odd.
+    movsd xmm0, [rbp - FB_RIGHT]
+    call float_is_odd_integer
+    mov [rbp - FB_RSAVE], rax
+    movsd xmm0, [rbp - FB_LEFT]
+    xorpd xmm1, xmm1
+    subsd xmm1, xmm0
+    movsd [rbp - FB_LEFT], xmm1         ; iv = -iv
+    movapd xmm0, xmm1
+.fpow_iv_positive:
 
-.fpow_neg:
-    neg rcx
-    mov rax, rcx
-    movsd xmm2, [rel const_one_f] ; result = 1.0
-.fpow_neg_sq:
-    test rax, rax
-    jz .fpow_neg_done
-    test rax, 1
-    jz .fpow_neg_even
-    mulsd xmm2, xmm0
-.fpow_neg_even:
-    mulsd xmm0, xmm0
-    shr rax, 1
-    jmp .fpow_neg_sq
-.fpow_neg_done:
+    ; 1.0 ** w is 1.0 for every w, including the infinities and nan -- and
+    ; (-1) ** a large integer arrives here as well, with negate_result set.
+    movsd xmm2, [rel const_one_f]
+    ucomisd xmm0, xmm2
+    jne .fpow_call_libm
     movsd xmm0, [rel const_one_f]
-    divsd xmm0, xmm2
+    jmp .fpow_apply_negate
+
+.fpow_call_libm:
+    ; iv is finite and positive and not 1.0; iw is finite and not 0.0.
+    movsd xmm0, [rbp - FB_LEFT]
+    movsd xmm1, [rbp - FB_RIGHT]
+    extern pow
+    call pow wrt ..plt
+.fpow_apply_negate:
+    cmp qword [rbp - FB_RSAVE], 0
+    je .fpow_check_range
+    xorpd xmm1, xmm1
+    subsd xmm1, xmm0
+    movapd xmm0, xmm1
+.fpow_check_range:
+    ; Both operands were finite, so an infinite result is an overflow.
+    ; CPython reports it through errno as OverflowError.
+    movapd xmm3, xmm0
+    andpd xmm3, [rel frn_absmask]
+    movsd xmm2, [rel pos_inf]
+    ucomisd xmm3, xmm2
+    je .fpow_overflow
+.fpow_out:
+    movq rdi, xmm0
     call float_from_f64
     leave
     V_PACK rax, rdx             ; return one Value
     ret
 
-.fpow_general:
-    ; Non-integer exponent: x^y = 2^(y * log2(x))
-    ; xmm0 = base, xmm1 = exp
-    sub rsp, 16
-    movsd [rsp], xmm1          ; exp on stack
-    fld qword [rsp]             ; st(0) = exp
-    movsd [rsp], xmm0          ; base on stack
-    fld qword [rsp]             ; st(0) = base, st(1) = exp
-    fyl2x                       ; st(0) = exp * log2(base)
-    ; Compute 2^st(0): split into int + frac
-    fld st0                     ; dup
-    frndint                     ; st(0) = int part
-    fsub st1, st0               ; st(1) = frac part
-    fxch st1                    ; st(0) = frac, st(1) = int
-    f2xm1                       ; st(0) = 2^frac - 1
-    fld1
-    faddp st1, st0              ; st(0) = 2^frac
-    fscale                      ; st(0) = 2^frac * 2^int = result
-    fstp st1                    ; pop int part
-    fstp qword [rsp]            ; store result
-    movsd xmm0, [rsp]
-    add rsp, 16
-    call float_from_f64
-    leave
-    V_PACK rax, rdx             ; return one Value
-    ret
+.fpow_one:
+    movsd xmm0, [rel const_one_f]
+    jmp .fpow_out
+.fpow_zero:
+    xorpd xmm0, xmm0
+    jmp .fpow_out
+.fpow_inf:
+    movsd xmm0, [rel pos_inf]
+    jmp .fpow_out
+.fpow_return_iv:
+    movsd xmm0, [rbp - FB_LEFT]
+    jmp .fpow_out
+.fpow_return_iw:
+    movsd xmm0, [rbp - FB_RIGHT]
+    jmp .fpow_out
+
+.fpow_zero_div:
+    RAISE exc_ZeroDivisionError_type, "0.0 cannot be raised to a negative power"
+
+.fpow_overflow:
+    ; CPython builds this one from errno, so its args are the pair
+    ; (34, 'Numerical result out of range') and str() renders the tuple.
+    RAISE exc_OverflowError_type, "(34, 'Numerical result out of range')"
 END_FUNC float_pow
+
+;; ============================================================================
+;; float_is_odd_integer(xmm0 = x) -> eax = 1 when x is an odd integer
+;;
+;; CPython's DOUBLE_IS_ODD_INTEGER.  A double at or above 2**53 has no odd
+;; values left, so fmod against 2.0 settles it without overflowing anything.
+;; ============================================================================
+DEF_FUNC_LOCAL float_is_odd_integer
+    ; floor(x) == x, and fmod(x, 2.0) is +-1
+    roundsd xmm1, xmm0, 1
+    ucomisd xmm0, xmm1
+    jp .fio_no
+    jne .fio_no
+    movapd xmm1, xmm0
+    andpd xmm1, [rel frn_absmask]
+    movsd xmm2, [rel fio_two53]
+    ucomisd xmm1, xmm2
+    jae .fio_no                 ; every double this large is even
+    cvttsd2si rax, xmm0
+    and eax, 1
+    leave
+    ret
+.fio_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC float_is_odd_integer
+
+section .rodata
+align 8
+fio_two53: dq 0x4340000000000000      ; 2.0**53
+section .text
+
+;; ============================================================================
+;; float_round_ndigits(xmm0 = x, edi = ndigits) -> xmm0 = the rounded double
+;;
+;; round(x, n) for a finite double.  CPython rounds the DECIMAL
+;; representation, not the scaled binary value: double_round hands the value
+;; to _Py_dg_dtoa in mode 3 and reads the digits back with _Py_dg_strtod.
+;; Scaling by 10**n and rounding the product is a different function --
+;; round(2.675, 2) is 2.68 that way and 2.67 CPython's -- and it is also
+;; where every one of round()'s wrong answers came from: 10**n overflowed
+;; int64 at n >= 19, x * 10**n overflowed to infinity for a large x, and
+;; cvtsd2si answered the integer indefinite value for both.
+;;
+;; glibc's snprintf and strtod are the same pair of correctly-rounded
+;; conversions dtoa/strtod are, and float_repr already leans on exactly that
+;; to find the shortest round-tripping repr.  So: ask for the value at k
+;; significant digits and read it back.
+;;
+;;   k = (decimal exponent of x) + ndigits + 1
+;;
+;; k >= 17 means the request is finer than a double can hold and x is its own
+;; answer.  k <= 0 means the rounding position is at or left of the leading
+;; digit, so the answer is zero or a single power of ten.
+;;
+;; Frame: aligned for libc's SSE, as float_repr's is.
+;; ============================================================================
+FRN_X     equ 8               ; the original double
+FRN_ND    equ 16              ; ndigits
+FRN_BUF   equ 64              ; 40-byte render buffer, [rbp-64, rbp-24)
+FRN_FRAME equ 64              ; + 0 pushes = 64
+global float_round_ndigits
+DEF_FUNC float_round_ndigits, FRN_FRAME
+    and rsp, -16
+    sub rsp, 96
+    movsd [rbp - FRN_X], xmm0
+    mov [rbp - FRN_ND], edi
+
+    ; A NaN or an infinity is its own answer, and so is a zero -- which also
+    ; keeps its sign, where a round trip through cvtsd2si lost it.
+    ucomisd xmm0, xmm0
+    jp .frn_identity
+    movsd xmm1, [rel pos_inf]
+    ucomisd xmm0, xmm1
+    je .frn_identity
+    movsd xmm1, [rel neg_inf]
+    ucomisd xmm0, xmm1
+    je .frn_identity
+    xorpd xmm1, xmm1
+    ucomisd xmm0, xmm1
+    jp .frn_not_zero
+    jne .frn_not_zero
+    jmp .frn_identity           ; +-0.0, sign intact
+.frn_not_zero:
+
+    ; CPython's NDIGITS_MAX / NDIGITS_MIN: past either bound the answer is
+    ; settled without looking at the digits.
+    cmp dword [rbp - FRN_ND], 323
+    jg .frn_identity
+    cmp dword [rbp - FRN_ND], -308
+    jl .frn_zero
+
+    ; The decimal exponent, read out of a "%.17e" rendering.  It has to be 17
+    ; and not 1: a short precision ROUNDS, and 9.995 at one digit is
+    ; "1.0e+01", an exponent one too high -- which made round(9.995, 1)
+    ; answer 9.99 where CPython says 10.0, and round(99.5, -3) answer 1000.0
+    ; where CPython says 0.0.  Seventeen digits is enough that no double can
+    ; round up across a decade: one that close to a power of ten IS that
+    ; power of ten.
+    lea rdi, [rbp - FRN_BUF]
+    mov esi, 40
+    lea rdx, [rel fmt_e]
+    mov ecx, 17
+    movsd xmm0, [rbp - FRN_X]
+    mov eax, 1
+    call snprintf wrt ..plt
+
+    lea rsi, [rbp - FRN_BUF]
+    call float_parse_exp10       ; -> eax = the decimal exponent
+    add eax, [rbp - FRN_ND]
+    inc eax                      ; eax = k, the significant digits to keep
+
+    cmp eax, 17
+    jge .frn_identity            ; finer than a double: x is its own answer
+    test eax, eax
+    jle .frn_underflow           ; at or left of the leading digit
+
+    ; k significant digits is "%.*e" with k-1 after the point.  glibc rounds
+    ; half-even on the exact value, which is what dtoa mode 3 does.
+    dec eax
+    mov r8d, eax
+    lea rdi, [rbp - FRN_BUF]
+    mov esi, 40
+    lea rdx, [rel fmt_e]
+    mov ecx, r8d
+    movsd xmm0, [rbp - FRN_X]
+    mov eax, 1
+    call snprintf wrt ..plt
+
+    lea rdi, [rbp - FRN_BUF]
+    xor esi, esi
+    call strtod wrt ..plt
+    ; A finite x whose rounded value is not finite: round(DBL_MAX, -308) is
+    ; 2e308.  CPython raises rather than answering an infinity it was not
+    ; given.
+    movsd xmm1, [rel pos_inf]
+    andpd xmm1, [rel frn_absmask]
+    movapd xmm2, xmm0
+    andpd xmm2, [rel frn_absmask]
+    ucomisd xmm2, xmm1
+    je .frn_overflow
+    leave
+    ret
+
+.frn_overflow:
+    RAISE exc_OverflowError_type, "rounded value too large to represent"
+
+.frn_underflow:
+    ; k <= 0.  Everything rounds to a signed zero except the one case where
+    ; the leading digit is 5 or more AND k is exactly 0: then the value is at
+    ; least half of 10**-ndigits and rounds up to it.  A leading 5 with
+    ; nothing behind it is a tie, and half-even sends a tie to the even side,
+    ; which here is the zero.
+    test eax, eax
+    jnz .frn_zero
+    lea rdi, [rbp - FRN_BUF]
+    mov esi, 40
+    lea rdx, [rel fmt_e]
+    mov ecx, 17
+    movsd xmm0, [rbp - FRN_X]
+    mov eax, 1
+    call snprintf wrt ..plt
+
+    lea rsi, [rbp - FRN_BUF]
+    xor ecx, ecx
+    movzx eax, byte [rsi]
+    cmp al, '-'
+    jne .frn_uf_lead
+    inc rsi
+.frn_uf_lead:
+    movzx eax, byte [rsi]        ; the leading digit
+    cmp al, '5'
+    jl .frn_zero
+    jg .frn_round_up
+    ; Exactly 5 so far: a tie only if every digit behind it is a zero.
+    add rsi, 2                   ; skip "5."
+.frn_uf_scan:
+    movzx eax, byte [rsi]
+    cmp al, 'e'
+    je .frn_zero                 ; ran out of digits: a true tie
+    test al, al
+    jz .frn_zero
+    cmp al, '0'
+    jne .frn_round_up
+    inc rsi
+    jmp .frn_uf_scan
+
+.frn_round_up:
+    ; The answer is 10**-ndigits with x's sign.  Build it through strtod so
+    ; the exponent is exact for every reachable ndigits.
+    lea rdi, [rbp - FRN_BUF]
+    mov esi, 40
+    lea rdx, [rel fmt_pow10]
+    mov ecx, [rbp - FRN_ND]
+    neg ecx
+    xor eax, eax
+    call snprintf wrt ..plt
+    lea rdi, [rbp - FRN_BUF]
+    xor esi, esi
+    call strtod wrt ..plt
+    jmp .frn_apply_sign
+
+.frn_zero:
+    xorpd xmm0, xmm0
+.frn_apply_sign:
+    ; copysign(result, x)
+    movsd xmm1, [rbp - FRN_X]
+    movsd xmm2, [rel fh_sign_mask]
+    andpd xmm1, xmm2
+    andnpd xmm2, xmm0
+    orpd xmm2, xmm1
+    movapd xmm0, xmm2
+    leave
+    ret
+
+.frn_identity:
+    movsd xmm0, [rbp - FRN_X]
+    leave
+    ret
+END_FUNC float_round_ndigits
+
+;; ============================================================================
+;; float_parse_exp10(rsi = "d.dde[+-]ddd") -> eax = the signed exponent
+;;
+;; The exponent field of a %e rendering.  Its own function because both arms
+;; of float_round_ndigits want it and neither can spare the registers.
+;; ============================================================================
+DEF_FUNC_LOCAL float_parse_exp10
+    xor ecx, ecx
+.fpe_find:
+    movzx eax, byte [rsi + rcx]
+    test al, al
+    jz .fpe_none
+    cmp al, 'e'
+    je .fpe_found
+    inc rcx
+    jmp .fpe_find
+.fpe_found:
+    inc rcx
+    xor r8d, r8d                ; negative?
+    movzx eax, byte [rsi + rcx]
+    cmp al, '-'
+    jne .fpe_check_plus
+    mov r8d, 1
+    inc rcx
+    jmp .fpe_digits
+.fpe_check_plus:
+    cmp al, '+'
+    jne .fpe_digits
+    inc rcx
+.fpe_digits:
+    xor eax, eax
+.fpe_loop:
+    movzx edx, byte [rsi + rcx]
+    test dl, dl
+    jz .fpe_end
+    sub edx, '0'
+    cmp edx, 9
+    ja .fpe_end
+    imul eax, eax, 10
+    add eax, edx
+    inc rcx
+    jmp .fpe_loop
+.fpe_end:
+    test r8d, r8d
+    jz .fpe_out
+    neg eax
+.fpe_out:
+    leave
+    ret
+.fpe_none:
+    xor eax, eax
+    leave
+    ret
+END_FUNC float_parse_exp10
 
 ;; ============================================================================
 ;; float_int(rdi = self Value) -> SmallInt or GMP int
@@ -1539,6 +2043,7 @@ str_neg_inf: db "-inf", 0
 fmt_g: db "%.*g", 0
 fmt_f: db "%.*f", 0
 fmt_e: db "%.*e", 0
+fmt_pow10: db "1e%d", 0
 fmt_E: db "%.*E", 0
 fmt_F: db "%.*F", 0
 fmt_G: db "%.*G", 0

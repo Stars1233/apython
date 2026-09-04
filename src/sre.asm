@@ -1066,32 +1066,61 @@ DEF_FUNC sre_state_init, SSI_FRAME
     dec ecx
     jnz .zero_loop
 
+    ; The subject has to BE a string before it is read as one.  The entry
+    ; points in sre_pattern.asm check only their argument COUNT and hand
+    ; args[0] straight through, so `p.match(5)` reached the dereference below
+    ; with an int immediate and read PyStrObject.ob_size out of address 5.
+    ; One call here covers every method that builds a state; finditer builds
+    ; a scanner instead and calls it for itself.
+    mov rdi, r13
+    mov rsi, r12
+    call sre_require_subject
+
     ; Set basic fields
     mov [rbx + SRE_State.pattern], r12
     mov [rbx + SRE_State.string_obj], r13
 
-    ; Get string data
+    ; Get the subject's data.  bytes keeps it at +24 and str at +40, and both
+    ; put the length at +16 -- so only the data pointer differs.
+    mov rax, [r12 + SRE_PatternObject.is_bytes]
+    mov [rbx + SRE_State.is_bytes], eax
+    test rax, rax
+    jz .ssi_str_data
+    call sre_subject_data       ; r13 -> rax = data, rdx = length
+    mov [rbx + SRE_State.str_begin], rax
+    lea rdx, [rax + rdx]
+    mov [rbx + SRE_State.str_end], rdx
+    jmp .ssi_have_data
+.ssi_str_data:
     lea rax, [r13 + PyStrObject.data]
     mov [rbx + SRE_State.str_begin], rax
     mov rcx, [r13 + PyStrObject.ob_size]
     lea rdx, [rax + rcx]
     mov [rbx + SRE_State.str_end], rdx
+.ssi_have_data:
 
     ; Set flags from pattern
     mov eax, [r12 + SRE_PatternObject.flags]
     mov [rbx + SRE_State.flags], eax
     mov dword [rbx + SRE_State.match_all], 0
-    mov dword [rbx + SRE_State.is_bytes], 0
     mov dword [rbx + SRE_State.match_depth], 0
 
     ; Determine if ASCII or needs Unicode codepoint decode
-    ; Scan string bytes — if all < 0x80, ASCII fast path
+    ; Scan string bytes — if all < 0x80, ASCII fast path.  A BYTES subject is
+    ; byte-indexed by definition, so it takes that path whatever the values
+    ; are: \xff in bytes is one element, not the start of a sequence.
     mov rdi, [rbx + SRE_State.str_begin]
-    mov rcx, [r13 + PyStrObject.ob_size]
+    mov rcx, [rbx + SRE_State.str_end]
+    sub rcx, rdi
+    cmp dword [rbx + SRE_State.is_bytes], 0
+    jne .ssi_bytes_ascii
+.ssi_bytes_ascii:
     mov dword [rbx + SRE_State.charsize], 1  ; assume ASCII
     mov qword [rbx + SRE_State.codepoint_buf], 0
     test rcx, rcx
     jz .ascii_done
+    cmp dword [rbx + SRE_State.is_bytes], 0
+    jne .ascii_done
 
     xor r8d, r8d               ; index
 .scan_ascii:
@@ -1105,7 +1134,8 @@ DEF_FUNC sre_state_init, SSI_FRAME
 
 .ascii_done:
     ; Pure ASCII: str_begin/str_end are byte ptrs, charsize=1
-    ; String length in chars = byte length
+    ; String length in chars = byte length.  ob_size is at the same offset in
+    ; bytes and str, so this reads either.
     mov rax, [r13 + PyStrObject.ob_size]
 
     ; Clamp effective length with endpos
@@ -1269,6 +1299,282 @@ DEF_FUNC sre_state_init, SSI_FRAME
     leave
     ret
 END_FUNC sre_state_init
+
+;; ============================================================================
+;; sre_require_subject(rdi = the subject Value) -- returns, or raises
+;;
+;; A bytes-like subject is a different refusal from "that is not a string":
+;; the pattern is a str pattern, and CPython says so.  Both are TypeError.
+;; ============================================================================
+global sre_require_subject
+DEF_FUNC sre_require_subject
+    ; rdi = the subject Value, rsi = the pattern object (0 = a str pattern)
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    extern str_type
+extern bytes_new
+extern ap_memcpy
+    V_TEST_PTR rdi, rax
+    ja .srs_not_string
+    test rdi, rdi
+    jz .srs_not_string
+    mov rax, [rdi + PyObject.ob_type]
+
+    ; Which kind the pattern wants.
+    xor r8d, r8d
+    test r12, r12
+    jz .srs_have_kind
+    mov r8, [r12 + SRE_PatternObject.is_bytes]
+.srs_have_kind:
+
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .srs_is_str
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .srs_is_str
+
+    extern bytes_type
+    extern bytearray_type
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .srs_is_bytes
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .srs_is_bytes
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
+    jnz .srs_is_bytes
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTEARRAY_SUBCLASS
+    jnz .srs_is_bytes
+    jmp .srs_not_string
+
+.srs_is_str:
+    test r8, r8
+    jnz .srs_want_bytes
+    jmp .srs_ok
+.srs_is_bytes:
+    test r8, r8
+    jz .srs_want_str
+    jmp .srs_ok
+
+.srs_ok:
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.srs_want_str:
+    extern exc_TypeError_type
+    RAISE exc_TypeError_type, "cannot use a string pattern on a bytes-like object"
+.srs_want_bytes:
+    RAISE exc_TypeError_type, "cannot use a bytes pattern on a string-like object"
+
+.srs_not_string:
+    extern raise_type_error_with_name
+    mov rsi, rbx
+    CSTRING rdi, `expected string or bytes-like object, got '\x01'`
+    call raise_type_error_with_name     ; does not return
+END_FUNC sre_require_subject
+
+;; ============================================================================
+;; sre_subject_data(r13 = the subject) -> rax = the data, rdx = its length
+;;
+;; bytes keeps its data inline at +24 and a bytearray keeps it out of line, so
+;; the two need different reads; str is handled by the caller, which knows it
+;; is not here.  Nothing is copied: the state points into the object, which
+;; the caller holds for the length of the match.
+;; ============================================================================
+global sre_subject_data
+DEF_FUNC sre_subject_data
+    mov rax, [r13 + PyObject.ob_type]
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .ssd_bytearray
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTEARRAY_SUBCLASS
+    jnz .ssd_bytearray
+    lea rax, [r13 + PyBytesObject.data]
+    mov rdx, [r13 + PyBytesObject.ob_size]
+    leave
+    ret
+.ssd_bytearray:
+    extern bytearray_data
+    mov rdi, r13
+    call bytearray_data         ; -> rax = the buffer, never NULL
+    mov rdx, [r13 + PyByteArrayObject.ob_size]
+    leave
+    ret
+END_FUNC sre_subject_data
+
+;; ============================================================================
+;; sre_new_slice(rdi = the data, rsi = its length, edx = 1 for bytes)
+;;   -> rax = a str or a bytes, edx = TAG_PTR
+;;
+;; Every result the engine builds goes through here, so the kind is decided in
+;; one place rather than at each of the seventeen sites that used to call
+;; str_new_heap directly.
+;; ============================================================================
+global sre_new_slice
+DEF_FUNC sre_new_slice
+    test edx, edx
+    jnz .sns_bytes
+    extern str_new_heap
+    call str_new_heap
+    mov edx, TAG_PTR
+    leave
+    ret
+.sns_bytes:
+    push rdi
+    push rsi
+    mov rdi, rsi
+    extern bytes_new
+    call bytes_new
+    pop rdx                     ; length
+    pop rsi                     ; source
+    test rax, rax
+    jz .sns_fail
+    push rax
+    sub rsp, 8
+    lea rdi, [rax + PyBytesObject.data]
+    extern ap_memcpy
+    call ap_memcpy
+    add rsp, 8
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.sns_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+END_FUNC sre_new_slice
+
+;; ============================================================================
+;; sre_concat(rdi = a Value, rsi = a Value, edx = 1 for bytes) -> a Value
+;;
+;; str_concat for one kind and bytes concatenation for the other.  Both take
+;; over neither reference: the caller owns what it passed in, as str_concat
+;; has it.
+;; ============================================================================
+SCC_A     equ 8
+SCC_B     equ 16
+SCC_ADATA equ 24
+SCC_ALEN  equ 32
+SCC_BDATA equ 40
+SCC_BLEN  equ 48
+SCC_OUT   equ 56
+SCC_FRAME equ 64            ; + 0 pushes = 64
+global sre_concat
+DEF_FUNC sre_concat, SCC_FRAME
+    test edx, edx
+    jnz .scc_bytes
+    ; str_concat's message is the one `'a' + 5` gets; CPython reports this
+    ; from the join that assembles the result, and names the item.
+    mov [rbp - SCC_B], rsi
+    V_TEST_PTR rsi, rax
+    ja .scc_str_type_error
+    test rsi, rsi
+    jz .scc_str_type_error
+    mov rax, [rsi + PyObject.ob_type]
+    extern str_type
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .scc_str_type_error
+    extern str_concat
+    call str_concat
+    leave
+    ret
+.scc_str_type_error:
+    mov rsi, [rbp - SCC_B]
+    lea rdi, [rel scc_notstr]
+    extern raise_type_error_with_name
+    call raise_type_error_with_name     ; does not return
+.scc_bytes:
+    ; Both operands used to be dereferenced as bytes objects, and one of them
+    ; is whatever a callable replacement returned: `re.sub(b'a', lambda m: 5,
+    ; b'aba')` read PyBytesObject.ob_size off an int immediate.  The str arm
+    ; delegates its check to str_concat; this one makes its own -- and takes
+    ; the data through bytes_like_ptr_len, which is what lets a bytearray
+    ; replacement work, as it does in CPython.
+    mov [rbp - SCC_A], rdi
+    mov [rbp - SCC_B], rsi
+    extern bytes_like_ptr_len
+    call bytes_like_ptr_len     ; rdi, the left
+    test ecx, ecx
+    jz .scc_type_error
+    mov [rbp - SCC_ADATA], rax
+    mov [rbp - SCC_ALEN], r10
+    mov rdi, [rbp - SCC_B]
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .scc_type_error
+    mov [rbp - SCC_BDATA], rax
+    mov [rbp - SCC_BLEN], r10
+
+    mov rdi, [rbp - SCC_ALEN]
+    add rdi, [rbp - SCC_BLEN]
+    call bytes_new
+    test rax, rax
+    jz .scc_fail
+    mov [rbp - SCC_OUT], rax
+    lea rdi, [rax + PyBytesObject.data]
+    mov rsi, [rbp - SCC_ADATA]
+    mov rdx, [rbp - SCC_ALEN]
+    call ap_memcpy
+    mov rax, [rbp - SCC_OUT]
+    lea rdi, [rax + PyBytesObject.data]
+    add rdi, [rbp - SCC_ALEN]
+    mov rsi, [rbp - SCC_BDATA]
+    mov rdx, [rbp - SCC_BLEN]
+    call ap_memcpy
+    mov rax, [rbp - SCC_OUT]
+    mov edx, TAG_PTR
+    leave
+    ret
+.scc_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+.scc_type_error:
+    ; CPython reports this from the join that builds the result, naming the
+    ; offending type: "sequence item 0: expected a bytes-like object, int
+    ; found".  The item index is not knowable here; the rest is.
+    mov rsi, [rbp - SCC_B]
+    lea rdi, [rel scc_notbytes]
+    extern raise_type_error_with_name
+    call raise_type_error_with_name     ; does not return
+END_FUNC sre_concat
+
+section .rodata
+scc_notbytes:
+    db "sequence item 0: expected a bytes-like object, ", 1, " found", 0
+scc_notstr:
+    db "sequence item 0: expected str instance, ", 1, " found", 0
+section .text
+
+;; ============================================================================
+;; sre_empty(edx = 1 for bytes) -> rax = "" or b"", edx = TAG_PTR
+;; The seed a join or a substitution starts from.
+;; ============================================================================
+global sre_empty
+DEF_FUNC sre_empty
+    test edx, edx
+    jnz .se_bytes
+    CSTRING rdi, ""
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    mov edx, TAG_PTR
+    leave
+    ret
+.se_bytes:
+    xor edi, edi
+    call bytes_new
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC sre_empty
 
 ;; ============================================================================
 ;; sre_state_fini(SRE_State* state)
@@ -1454,6 +1760,7 @@ SM_STATE     equ 8
 SM_PATTERN   equ 16
 SM_TOPLEVEL  equ 24
 SM_LASTPOS   equ 32     ; the repeat's last_pos, kept across a body attempt
+SM_COUNT     equ 40     ; MAX_UNTIL's ctx->count, kept across a body attempt
 SM_MFRAME    equ 96
 
 DEF_FUNC sre_match, SM_MFRAME
@@ -2348,64 +2655,56 @@ DEF_FUNC sre_match, SM_MFRAME
     jmp .dispatch
 
 .op_max_until:
-    ; MAX_UNTIL — greedy repeat body iteration
-    ; r15 = current RepeatContext
+    ; MAX_UNTIL -- greedy repeat body iteration.
+    ;
+    ; The count discipline is CPython's, and it has to be exact: rep->count is
+    ; written only by a branch that is about to attempt the body, and put back
+    ; before control reaches the tail.  Incrementing it on the way in and
+    ; decrementing it on every failure path instead left it one too LOW when a
+    ; greedy body attempt failed and the tail then failed as well -- two
+    ; decrements for one increment -- so the enclosing repeat iterated again
+    ; from a count it had already spent.  `(a*)+` against 'a1' recursed until
+    ; the depth limit rather than answering None; `(a*)*` did not, because
+    ; with min == 0 the first branch below is never taken.
     test r15, r15
     jz .op_failure
 
     mov rax, [r15 + SRE_RepeatContext.count]
     inc rax
-    mov [r15 + SRE_RepeatContext.count], rax
+    mov [rbp - SM_COUNT], rax          ; ctx->count; rep->count stays as it was
 
-    ; Get min/max from the REPEAT pattern
-    ; rpt->pattern points to body, REPEAT's min is at pattern - 8, max at pattern - 4
+    ; min at pattern - 8, max at pattern - 4
     mov rcx, [r15 + SRE_RepeatContext.pattern]
-    mov r8d, [rcx - 8]        ; min
-    mov r9d, [rcx - 4]        ; max
+    mov r8d, [rcx - 8]
+    mov r9d, [rcx - 4]
 
-    ; If count < min, must match body again
     cmp rax, r8
     jb .mu_try_body
 
-    ; Save last_pos for the zero-width check.  It is a frame slot rather than
-    ; the stack because it has to survive the body attempt and be put BACK
-    ; when that attempt fails -- CPython's save_last_ptr.  Discarding it
-    ; instead left last_pos pointing at a position the engine had already
-    ; backtracked out of, the guard stopped firing, and an empty body could
-    ; be retried at the same place until the recursion limit.
-    mov rdx, [r15 + SRE_RepeatContext.last_pos]     ; rax is the count, live
+    ; Enough matches.  Try for one more only when the repeat is not full and
+    ; the last iteration was not empty -- the second is the zero-width guard,
+    ; and it is a plain compare against the repeat's own last_pos, not against
+    ; a saved copy.
+    cmp r9d, SRE_MAXREPEAT
+    je .mu_greedy_ok
+    cmp rax, r9
+    jae .mu_try_tail
+.mu_greedy_ok:
+    cmp r13, [r15 + SRE_RepeatContext.last_pos]
+    je .mu_try_tail
+
+    mov [r15 + SRE_RepeatContext.count], rax
+    ; last_pos is saved across the attempt and put back after it, whether it
+    ; succeeds or fails: CPython's DATA_PUSH/DATA_POP pair.
+    mov rdx, [r15 + SRE_RepeatContext.last_pos]
     mov [rbp - SM_LASTPOS], rdx
     mov [r15 + SRE_RepeatContext.last_pos], r13
 
-    ; If count < max (or max == MAXREPEAT), try the body first (greedy).
-    ; CPython's test is strict, and it has to be: count is the number of
-    ; iterations that would follow this one, so `<=` runs the body once more
-    ; than the pattern asks.  It read correctly while count started at 0 and
-    ; compensated for it; making count start at -1, as sre_lib.h does, left
-    ; this comparison one out and every bounded repeat matching max + 1 times.
-    cmp r9d, SRE_MAXREPEAT
-    je .mu_try_body_greedy
-    cmp rax, r9
-    jb .mu_try_body_greedy
-
-    ; count > max — try tail only
-    mov rdx, [rbp - SM_LASTPOS]
-    mov [r15 + SRE_RepeatContext.last_pos], rdx
-    jmp .mu_try_tail
-
-.mu_try_body_greedy:
-    ; Zero-width check: if pos == last_pos, body matched empty, don't loop
-    mov rdx, [rbp - SM_LASTPOS]
-    cmp r13, rdx
-    je .mu_zero_width
-
-    ; Save marks for backtracking
     push r13
     mov rdi, r12
     call sre_save_marks
     push rax
 
-    ; Try body
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, [r15 + SRE_RepeatContext.pattern]
@@ -2416,7 +2715,7 @@ DEF_FUNC sre_match, SM_MFRAME
     test eax, eax
     jnz .mu_body_success
 
-    ; Body failed — restore marks, put last_pos back, try tail
+    ; Body failed: marks, last_pos, count and position all go back.
     pop rdi
     push rdi
     mov rsi, r12
@@ -2424,20 +2723,19 @@ DEF_FUNC sre_match, SM_MFRAME
     pop rdi
     call ap_free
     pop r13
-
     mov rdx, [rbp - SM_LASTPOS]
     mov [r15 + SRE_RepeatContext.last_pos], rdx
-
-    ; Undo count increment
-    dec qword [r15 + SRE_RepeatContext.count]
-    jmp .mu_try_tail
-
-.mu_zero_width:
-    mov rdx, [rbp - SM_LASTPOS]
-    mov [r15 + SRE_RepeatContext.last_pos], rdx
+    mov rax, [rbp - SM_COUNT]
+    dec rax
+    mov [r15 + SRE_RepeatContext.count], rax
     jmp .mu_try_tail
 
 .mu_body_success:
+    ; CPython's DATA_POP puts last_ptr back here too, and can: its repeat
+    ; context is a stack frame.  Ours is heap-allocated and .mu_tail_success
+    ; frees it, so on the way out through a successful body the context this
+    ; r15 names may already be gone -- writing to it is a use-after-free that
+    ; valgrind sees immediately.  Nothing reads it after a success anyway.
     pop rdi                    ; free saved marks
     call ap_free
     pop r13
@@ -2446,13 +2744,12 @@ DEF_FUNC sre_match, SM_MFRAME
     jmp .return
 
 .mu_try_body:
-    ; Must match body (count < min)
+    ; count < min: the body is not optional here.
+    mov [r15 + SRE_RepeatContext.count], rax
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, [r15 + SRE_RepeatContext.pattern]
-    mov edx, [rbp - SM_TOPLEVEL]   ; the body's continuation IS the tail --
-                                   ; MAX_UNTIL follows it -- so the SUCCESS it
-                                   ; eventually reaches is the pattern's own
+    mov edx, [rbp - SM_TOPLEVEL]
     call sre_match
     test eax, eax
     jz .mu_body_required_fail
@@ -2461,11 +2758,14 @@ DEF_FUNC sre_match, SM_MFRAME
     jmp .return
 
 .mu_body_required_fail:
-    dec qword [r15 + SRE_RepeatContext.count]
+    mov rax, [rbp - SM_COUNT]
+    dec rax
+    mov [r15 + SRE_RepeatContext.count], rax
     jmp .op_failure
 
 .mu_try_tail:
-    ; Pop repeat context and try tail
+    ; Pop the repeat context and try the tail.  rep->count is already what it
+    ; was on entry, whichever way control reached here.
     mov rax, [r15 + SRE_RepeatContext.prev]
     push r15                   ; save for potential restore
     mov r15, rax
@@ -2483,7 +2783,6 @@ DEF_FUNC sre_match, SM_MFRAME
     ; Restore repeat context
     pop r15
     mov [r12 + SRE_State.repeat_ctx], r15
-    dec qword [r15 + SRE_RepeatContext.count]
     jmp .op_failure
 
 .mu_tail_success:
@@ -2495,23 +2794,27 @@ DEF_FUNC sre_match, SM_MFRAME
     jmp .return
 
 .op_min_until:
-    ; MIN_UNTIL — non-greedy repeat body iteration
+    ; MIN_UNTIL -- non-greedy repeat body iteration.
+    ;
+    ; sre_lib.h's order, which is not the mirror image of MAX_UNTIL's: the
+    ; tail is tried FIRST, and only when it fails are the bound and the
+    ; zero-width guard consulted and the body attempted.  Ours applied the
+    ; zero-width guard to the count < min path as well, where CPython does
+    ; not, and kept rep->count with an increment on the way in and a
+    ; decrement on each way out -- the same shape that made MAX_UNTIL loop.
     test r15, r15
     jz .op_failure
 
     mov rax, [r15 + SRE_RepeatContext.count]
     inc rax
-    mov [r15 + SRE_RepeatContext.count], rax
+    mov [rbp - SM_COUNT], rax       ; ctx->count; rep->count stays as it was
 
     mov rcx, [r15 + SRE_RepeatContext.pattern]
     mov r8d, [rcx - 8]        ; min
-    mov r9d, [rcx - 4]        ; max
-
-    ; If count < min, must match body
     cmp rax, r8
-    jb .miu_try_body
+    jb .miu_required_body
 
-    ; Try tail first (non-greedy)
+    ; See if the tail matches.
     push r13
     mov rax, [r15 + SRE_RepeatContext.prev]
     push r15
@@ -2527,36 +2830,80 @@ DEF_FUNC sre_match, SM_MFRAME
     test eax, eax
     jnz .miu_tail_success
 
-    ; Restore repeat context
+    ; Restore the repeat context and the position.
     pop r15
     mov [r12 + SRE_State.repeat_ctx], r15
     pop r13
 
-    ; Check max
-    mov rax, [r15 + SRE_RepeatContext.count]
+    ; Out of iterations, or the last one matched empty: no body attempt.
+    mov rax, [rbp - SM_COUNT]
     mov rcx, [r15 + SRE_RepeatContext.pattern]
     mov r9d, [rcx - 4]        ; max
-    ; The mirror of MAX_UNTIL's: sre_lib.h fails when count >= max, so `ja`
-    ; allowed one iteration past the bound here too.
     cmp r9d, SRE_MAXREPEAT
-    je .miu_try_body
+    je .miu_bound_ok
     cmp rax, r9
-    jae .miu_fail
-
-.miu_try_body:
-    ; Zero-width check
+    jae .op_failure
+.miu_bound_ok:
     cmp r13, [r15 + SRE_RepeatContext.last_pos]
-    je .miu_fail
+    je .op_failure
+
+    ; One more iteration of the body, with last_pos AND the group marks saved
+    ; across it -- CPython's MIN_UNTIL_3 does LASTMARK_SAVE/LASTMARK_RESTORE,
+    ; and MAX_UNTIL here already does.  Without the marks a failed lazy
+    ; iteration left half-written ones behind, so a group could end up with
+    ; start > end: `(a)(a?)+?a+?` on 'aab' reported span(2) == (2, 1), and
+    ; group(2) then asked for a slice of length -1.
+    mov [r15 + SRE_RepeatContext.count], rax
+    mov rdx, [r15 + SRE_RepeatContext.last_pos]
+    mov [rbp - SM_LASTPOS], rdx
     mov [r15 + SRE_RepeatContext.last_pos], r13
+
+    mov rdi, r12
+    call sre_save_marks
+    push rax
+    sub rsp, 8
 
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
     mov rsi, [r15 + SRE_RepeatContext.pattern]
-    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
+    mov edx, [rbp - SM_TOPLEVEL]   ; as in MAX_UNTIL: the body's continuation
+                                   ; is MIN_UNTIL and so the tail, which makes
+                                   ; the SUCCESS it reaches the pattern's own
+    call sre_match
+    test eax, eax
+    jnz .miu_body_matched       ; see .mu_body_success: no write on this path
+    add rsp, 8
+    pop rdi
+    push rdi
+    mov rsi, r12
+    call sre_restore_marks
+    pop rdi
+    call ap_free
+    mov rdx, [rbp - SM_LASTPOS]
+    mov [r15 + SRE_RepeatContext.last_pos], rdx
+    mov rax, [rbp - SM_COUNT]
+    dec rax
+    mov [r15 + SRE_RepeatContext.count], rax
+    jmp .op_failure
+.miu_body_matched:
+    add rsp, 8
+    pop rdi
+    call ap_free
+    jmp .miu_body_ok
+
+.miu_required_body:
+    ; count < min: the body is not optional here, and no guard applies.
+    mov [r15 + SRE_RepeatContext.count], rax
+    mov [r12 + SRE_State.str_pos], r13
+    mov rdi, r12
+    mov rsi, [r15 + SRE_RepeatContext.pattern]
+    mov edx, [rbp - SM_TOPLEVEL]
     call sre_match
     test eax, eax
     jnz .miu_body_ok
-    dec qword [r15 + SRE_RepeatContext.count]
+    mov rax, [rbp - SM_COUNT]
+    dec rax
+    mov [r15 + SRE_RepeatContext.count], rax
     jmp .op_failure
 
 .miu_body_ok:
@@ -2571,10 +2918,6 @@ DEF_FUNC sre_match, SM_MFRAME
     mov r13, [r12 + SRE_State.str_pos]
     mov eax, 1
     jmp .return
-
-.miu_fail:
-    dec qword [r15 + SRE_RepeatContext.count]
-    jmp .op_failure
 
 .op_assert:
     ; ASSERT skip back [pattern] — lookahead and lookbehind

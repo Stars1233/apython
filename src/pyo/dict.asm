@@ -733,17 +733,38 @@ DEF_FUNC_BARE dict_ass_subscript
 END_FUNC dict_ass_subscript
 
 ;; ============================================================================
-;; dict_del(rdi=dict, rsi=key Value) -> int (0=ok, -1=not found)
-;; Delete key from dict. DECREFs both key and value.
+;; dict_del(rdi=dict, rsi=key Value) -> 0 on success; RAISES KeyError on a miss
+;; dict_del_opt(rdi=dict, rsi=key Value) -> 0 on success, -1 on a miss
+;;
+;; Delete key from dict.  DECREFs both key and value.
+;;
+;; The two differ only in what a miss does.  dict_del's header used to
+;; promise "-1 = not found" and then raise instead, so DELETE_NAME's
+;; locals-then-globals fallback never ran and its NameError arm was
+;; unreachable: `del undefined_global` reported the dict's KeyError, where
+;; CPython says "name 'g' is not defined".
 ;; ============================================================================
 DD_DICT  equ 8
 DD_KEYV  equ 16
+DD_QUIET equ 24             ; answer -1 instead of raising
 DD_FRAME equ 32             ; + 2 pushes = 48
+global dict_del_opt
+DEF_FUNC dict_del_opt, DD_FRAME
+    push rbx
+    push r12
+    mov [rbp - DD_DICT], rdi
+    mov [rbp - DD_KEYV], rsi
+    mov qword [rbp - DD_QUIET], 1
+    jmp dict_del.dd_body
+END_FUNC dict_del_opt
+
 DEF_FUNC dict_del, DD_FRAME
     push rbx
     push r12
     mov [rbp - DD_DICT], rdi
     mov [rbp - DD_KEYV], rsi
+    mov qword [rbp - DD_QUIET], 0
+.dd_body:
 
     call dict_lookup            ; rax = index or -1, rdx = slot
     mov rbx, [rbp - DD_DICT]
@@ -781,6 +802,14 @@ DEF_FUNC dict_del, DD_FRAME
     ret
 
 .dd_missing:
+    cmp qword [rbp - DD_QUIET], 0
+    je .dd_raise
+    mov rax, -1
+    pop r12
+    pop rbx
+    leave
+    ret
+.dd_raise:
     mov rdi, [rbp - DD_KEYV]
     call raise_key_error
 END_FUNC dict_del
@@ -1057,6 +1086,17 @@ DEF_FUNC dict_view_iter
     mov qword [rax + PyDictIterObject.it_index], 0
     mov rcx, [rbx + PyDictViewObject.dv_kind]
     mov [rax + PyDictIterObject.it_kind], rcx
+    ; The three kinds are three types, differing only in the name they report.
+    lea rdx, [rel dict_value_iter_type]
+    cmp rcx, 1
+    je .dvi_named
+    lea rdx, [rel dict_item_iter_type]
+    cmp rcx, 2
+    je .dvi_named
+    jmp .dvi_kind_done
+.dvi_named:
+    mov [rax + PyObject.ob_type], rdx
+.dvi_kind_done:
     ; Snapshot dk_version for mutation detection
     mov rcx, [rdi + PyDictObject.dk_version]
     mov [rax + PyDictIterObject.it_version], rcx
@@ -1479,11 +1519,21 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     ; The right operand is dereferenced as a dict below, so it has to be
     ; one: an immediate's payload is not an address, and any other object's
     ; fields are not ob_size/capacity/entries.
+    ;
+    ; A *subclass* is one too, and the test used to be for the exact type --
+    ; so `D(x) == D(x)` for any dict subclass answered NotImplemented on the
+    ; right, fell through to identity, and came out False.  CPython's
+    ; dict_richcompare asks PyDict_Check, which admits a subclass; the same
+    ; question here is the flag, which type_from_parts propagates.
     cmp r8d, TAG_PTR
     jne .drc_not_impl
-    lea rax, [rel dict_type]
-    cmp [rsi + PyObject.ob_type], rax
-    jne .drc_not_impl
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    je .drc_right_ok
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_DICT_SUBCLASS
+    jz .drc_not_impl
+.drc_right_ok:
 
     ; Only handle EQ (2) and NE (3)
     cmp edx, 2
@@ -1732,6 +1782,8 @@ section .data
 
 ; dict_repr_str removed - repr now in src/repr.asm
 dict_iter_name: db "dict_keyiterator", 0
+dict_value_iter_name: db "dict_valueiterator", 0
+dict_item_iter_name: db "dict_itemiterator", 0
 dict_rev_iter_name: db "dict_reversekeyiterator", 0
 dict_keys_view_name: db "dict_keys", 0
 dict_values_view_name: db "dict_values", 0
@@ -1839,6 +1891,72 @@ dict_iter_type:
     dq 1                        ; ob_refcnt (immortal)
     dq type_type                ; ob_type
     dq dict_iter_name           ; tp_name
+    dq PyDictIterObject_size    ; tp_basicsize
+    dq dict_iter_dealloc        ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq dict_iter_self           ; tp_iter (return self)
+    dq dict_iter_next           ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
+    dq 0                        ; tp_bases
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
+    dq 0 ; tp_dictoffset
+
+; The values and items iterators differ from the keys iterator in nothing
+; but their name, which is what `type(iter(d.items())).__name__` answers
+; and what a default repr prints.  One shared type called them all
+; dict_keyiterator.
+align 8
+global dict_value_iter_type
+dict_value_iter_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq dict_value_iter_name           ; tp_name
+    dq PyDictIterObject_size    ; tp_basicsize
+    dq dict_iter_dealloc        ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq dict_iter_self           ; tp_iter (return self)
+    dq dict_iter_next           ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
+    dq 0                        ; tp_bases
+    dq iter_traverse_one                        ; tp_traverse
+    dq iter_clear_one                        ; tp_clear
+    dq 0 ; tp_dictoffset
+
+align 8
+global dict_item_iter_type
+dict_item_iter_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq dict_item_iter_name           ; tp_name
     dq PyDictIterObject_size    ; tp_basicsize
     dq dict_iter_dealloc        ; tp_dealloc
     dq 0                        ; tp_repr

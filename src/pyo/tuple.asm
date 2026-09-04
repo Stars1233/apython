@@ -35,6 +35,7 @@ extern c_recursion_depth
 extern exc_RecursionError_type
 extern int_fits_i64
 extern exc_OverflowError_type
+extern exc_MemoryError_type
 extern str_type
 extern bool_type
 extern none_type
@@ -677,7 +678,7 @@ DEF_FUNC tuple_repeat
     imul r14, r12            ; r14 = total items
     jo .trep_overflow        ; the product wrapped; (1,) * (2**61) wrapped
     cmp r14, 0x10000000      ; 256M items, as list_repeat caps at
-    ja .trep_overflow
+    ja .trep_toobig
 
     ; Allocate new tuple
     mov rdi, r14
@@ -719,6 +720,11 @@ DEF_FUNC tuple_repeat
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.trep_toobig:
+    ; Too large to allocate is a MemoryError in CPython; only a count that
+    ; does not fit an index is an OverflowError.  list and bytes have said so
+    ; since they were written; tuple sent both cases to the one label.
+    RAISE exc_MemoryError_type, ""
 .trep_overflow:
     RAISE exc_OverflowError_type, "too many items for tuple repetition"
 END_FUNC tuple_repeat
