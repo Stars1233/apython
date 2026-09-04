@@ -114,8 +114,16 @@ DEF_FUNC tuple_new
     ; Check: if tuple came from pool, ob_type is already set from previous use
     ; For fresh alloc, gc_alloc sets ob_type. We can skip gc_track for pooled.
     ; Pooled tuples were gc_untracked in dealloc, so we must gc_track them again.
+    ;
+    ; ...except an EMPTY one, which holds nothing and so can be part of no
+    ; cycle.  CPython does not track it either: `gc.is_tracked(())` is False
+    ; there and was True here, and walking every empty tuple in the heap on
+    ; every collection buys nothing.
+    test r12, r12
+    jz .tn_untracked
     mov rdi, rbx
     call gc_track
+.tn_untracked:
 
     mov rax, rbx
     pop r12

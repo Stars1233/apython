@@ -63,6 +63,11 @@ global gc_debug
 gc_debug:       dq 0
 global gc_garbage_list
 gc_garbage_list: dq 0
+; Three counters per generation -- collections, collected, uncollectable --
+; which is what gc.get_stats() answers with.
+global gc_stat_counters
+gc_stat_counters: times 9 dq 0
+
 global gc_collecting        ; eval_exception_unwind resets this: a raising
                             ; __del__ during a collection longjmps out and
                             ; would otherwise latch it on for good
@@ -844,6 +849,17 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     ; Clear collecting flag
     mov qword [rel gc_collecting], 0
     mov rax, [rbp - GCG_FOUND]
+
+    ; What gc.get_stats() reports: how many collections have run in this
+    ; generation and how many objects they freed.  Nothing counted before,
+    ; and there was nothing to read them.  "uncollectable" stays zero: an
+    ; object this collector cannot free is one with a __del__ in a cycle,
+    ; which CPython has not treated as uncollectable since 3.4 either.
+    mov ecx, [rbp - GCG_GEN]
+    imul rcx, rcx, 24
+    lea rdx, [rel gc_stat_counters]
+    inc qword [rdx + rcx]
+    add [rdx + rcx + 8], rax
 
     pop r15
     pop r14

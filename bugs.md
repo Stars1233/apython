@@ -109,20 +109,6 @@ than lying — but they are ordinary Python that does not work:
   were registered; what is left is per-method, and CPython's own wordings
   there are inconsistent between clinic-generated and hand-written methods.
 
-- **`gc` has no `get_referrers`, `freeze`/`unfreeze` or `get_stats`.**
-  `get_referrers` needs a reverse edge nothing records -- CPython finds it by
-  traversing every tracked object and asking whether it points at the
-  argument, which this could do too and which is O(heap) per call.  The
-  freeze family and `get_stats` are about machinery this collector does not
-  have: there is no permanent generation and no per-pass statistics.
-
-- **Two of CPython's tracking optimizations are absent, and both are
-  visible.**  CPython untracks a dict whose contents are all untrackable, so
-  `gc.is_tracked({})` is False there and True here; and a dict whose keys are
-  all strings shares its key table, so `gc.get_referents` on one answers with
-  the values only, where this answers with the keys as well.  Both are
-  conservative in the safe direction -- more is tracked, more is reported.
-
 - **Crafted `.pyc` and `_sre` bytecode are trusted.**  Marshal validates
   offsets but not types, so a `co_consts` slot holding an int is
   dereferenced by `eval_frame`; `frame_new` adds two `.pyc` fields in 32

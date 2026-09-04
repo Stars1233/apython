@@ -54,8 +54,11 @@ DEF_FUNC dict_new
     mov rsi, DICT_INIT_CAP
     call dict_alloc_tables
 
-    mov rdi, rbx
-    call gc_track
+    ; NOT tracked yet.  A dict whose contents are all untrackable cannot be
+    ; part of a cycle, and CPython does not track one: `gc.is_tracked({})` is
+    ; False there and was True here.  dict_maybe_track puts it in a
+    ; generation the moment something trackable goes in, which is the only
+    ; way it can become part of one.
     mov rax, rbx
     pop rbx
     leave
@@ -556,6 +559,67 @@ DS_DICT  equ 8
 DS_KEY   equ 16
 DS_VAL   equ 24
 DS_FRAME equ 32             ; + 3 pushes = 56, not 16-aligned
+;; ============================================================================
+;; dict_maybe_track(rdi = the dict, rsi = a key Value, rdx = a value Value)
+;;
+;; CPython's _PyDict_MaybeUntrack, from the other end: it untracks during a
+;; collection, and this never tracks in the first place until there is a
+;; reason to.  Either is what makes `gc.is_tracked({})` and
+;; `gc.is_tracked({1: 2})` False -- a dict of numbers and strings cannot be
+;; part of a cycle, so walking it during every collection buys nothing.
+;;
+;; "Trackable" is CPython's _PyObject_GC_MAY_BE_TRACKED: an immediate is not,
+;; a str or bytes is not, and a tuple counts only while it is tracked itself.
+;; gc_track is idempotent, so this is safe to call on every insertion.
+;; ============================================================================
+DEF_FUNC dict_maybe_track
+    push rbx
+    mov rbx, rdi
+    cmp qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_next], 0
+    jne .dmt_done               ; already in a generation
+    push rdx                    ; the value, across the key's test
+    mov rdi, rsi
+    call dict_value_trackable
+    pop rdi                     ; the value
+    test eax, eax
+    jnz .dmt_track
+    call dict_value_trackable
+    test eax, eax
+    jz .dmt_done
+.dmt_track:
+    mov rdi, rbx
+    extern gc_track
+    call gc_track
+.dmt_done:
+    pop rbx
+    leave
+    ret
+END_FUNC dict_maybe_track
+
+;; dict_value_trackable(rdi = a Value) -> eax = 1 when the collector could
+;; ever have to walk into it
+DEF_FUNC_BARE dict_value_trackable
+    xor eax, eax
+    V_TEST_PTR rdi, rcx
+    ja .dvt_no                  ; an immediate is not an object
+    test rdi, rdi
+    jz .dvt_no
+    mov rcx, [rdi + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .dvt_no                  ; a str, a bytes, None, a bool
+    ; A tuple is trackable only while it is tracked: an untracked one holds
+    ; nothing the collector could reach, and CPython says the same.
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    jne .dvt_yes
+    cmp qword [rdi - GC_HEAD_SIZE + PyGC_Head.gc_next], 0
+    je .dvt_no
+.dvt_yes:
+    mov eax, 1
+.dvt_no:
+    ret
+END_FUNC dict_value_trackable
+
 DEF_FUNC dict_set, DS_FRAME
     push rbx
     push r12
@@ -563,6 +627,12 @@ DEF_FUNC dict_set, DS_FRAME
     mov [rbp - DS_DICT], rdi
     mov [rbp - DS_KEY], rsi
     mov [rbp - DS_VAL], rdx
+
+    ; Anything trackable going in is what makes the dict itself trackable.
+    call dict_maybe_track
+    mov rdi, [rbp - DS_DICT]
+    mov rsi, [rbp - DS_KEY]
+    mov rdx, [rbp - DS_VAL]
 
     call dict_lookup            ; rax = index or -1, rdx = slot, r8 = hash
     mov rbx, [rbp - DS_DICT]

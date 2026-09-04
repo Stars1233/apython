@@ -120,6 +120,22 @@ the reasoning rather than from scratch.
   the type to move it to.  Every one of those attributes reads correctly
   through the class; it is only `sorted(C.__dict__)` that differs.
 
+- **A dict does not share its key table, so `gc.get_referents` reports its
+  keys.**  CPython gives a dict whose keys are all strings a shared key table
+  that the dict does not own, so its `tp_traverse` does not visit the keys and
+  `gc.get_referents({"a": 1})` answers with the values alone.  Here the keys
+  are the dict's own and are reported, which is what the traverse honestly
+  walks.  Sharing key tables is a whole second dict layout, and the number it
+  would buy is a report about the layout rather than about the program.
+
+- **`gc.freeze()` moves nothing.**  CPython's permanent generation exists so
+  that a program can freeze everything alive after startup and stop the
+  collector dirtying those pages -- which matters to a forking server and to
+  nothing else.  There is no permanent generation here; `freeze()` runs a
+  full collection, `get_freeze_count()` stays at zero, and `unfreeze()` has
+  nothing to undo, which is exactly what a program calling the pair in
+  sequence would see either way.
+
 ## Interpreter structure
 
 - **C code here cannot catch a Python exception.**  `raise_exception`
