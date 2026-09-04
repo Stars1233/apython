@@ -266,6 +266,15 @@ DEF_FUNC eval_frame
     ; from its own stack, so the links stay consistent as frames unwind.
     mov rax, [rel eval_saved_r12]
     mov [r12 + PyFrame.prev_frame], rax
+    ; And where the caller was when it made this call.  eval_saved_rbx still
+    ; holds its IP here -- this frame's own does not go in until below -- so
+    ; sys._getframe(1).f_lineno can answer for a frame that is not the one
+    ; running.
+    test rax, rax
+    jz .ef_no_caller
+    mov rcx, [rel eval_saved_rbx]
+    mov [rax + PyFrame.call_ip], rcx
+.ef_no_caller:
     mov [rel eval_saved_r12], r12
     ; Save machine stack pointer for exception unwind cleanup
     mov [rel eval_base_rsp], rsp

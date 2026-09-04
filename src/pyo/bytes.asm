@@ -2761,9 +2761,15 @@ DEF_FUNC byteslike_source, BLS_FRAME
     cmp rax, rcx
     je .bls_count_obj
     ; bytes(N(3)) for an int subclass is bytes(3): CPython takes any index
-    ; here, and the wrapper is unwrapped on the way to the count.
+    ; here, and the wrapper is unwrapped on the way to the count.  bool is
+    ; an int too, and a static type, so it carries no subclass flag --
+    ; bytes(True) was "'bool' object is not iterable".
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
     jnz .bls_count_obj
+    extern bool_type
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
+    je .bls_count_obj
     extern str_type
 extern codec_error_id
 extern exc_LookupError_type

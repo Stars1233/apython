@@ -141,8 +141,25 @@ DEF_FUNC frameobj_new, FON_FRAME
     mov rdi, [rbx + PyFrameObject.f_code]
     test rdi, rdi
     jz .fon_done
+    ; Where the frame is NOW: the innermost one is the interpreter's, whose
+    ; IP lives in eval_saved_rbx; an outer one was left at the call it made,
+    ; recorded in call_ip; a suspended generator's is instr_ptr.  Reading
+    ; only instr_ptr answered 0 for every running frame, so f_lineno was 0
+    ; and f_lasti -1 for all of them.
     mov rcx, [rbp - FON_FRAME_IN]
+    extern eval_saved_r12
+    mov rax, [rel eval_saved_r12]
+    cmp rax, rcx
+    jne .fon_not_current
+    extern eval_saved_rbx
+    mov rsi, [rel eval_saved_rbx]
+    jmp .fon_have_ip
+.fon_not_current:
+    mov rsi, [rcx + PyFrame.call_ip]
+    test rsi, rsi
+    jnz .fon_have_ip
     mov rsi, [rcx + PyFrame.instr_ptr]
+.fon_have_ip:
     test rsi, rsi
     jz .fon_done
     lea rax, [rdi + PyCodeObject.co_code]

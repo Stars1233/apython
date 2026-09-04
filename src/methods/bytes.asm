@@ -221,7 +221,12 @@ DEF_FUNC bytes_fromhex_impl, BFH_FRAME
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
-    jne .bfh_type
+    je .bfh_have_str
+    ; A str SUBCLASS is a str here, as everywhere: its characters are at the
+    ; same offset, and CPython takes one.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .bfh_type
+.bfh_have_str:
     mov [rbp - BFH_SRC], rdi
     mov rax, [rdi + PyStrObject.ob_size]
     mov [rbp - BFH_N], rax
@@ -306,11 +311,46 @@ DEF_FUNC bytes_fromhex_impl, BFH_FRAME
     add rsp, 8
     pop rax
 
-    ; bytearray.fromhex answers a bytearray; the class comes in as args[0].
+    ; bytearray.fromhex answers a bytearray; the class comes in as args[0],
+    ; and a SUBCLASS of either answers an instance of itself -- fromhex is a
+    ; classmethod, and CPython's builds whatever it was called on.
     mov rcx, [rbp - BFH_TYPE]
     lea rdx, [rel bytearray_type]
     cmp rcx, rdx
-    jne .bfh_return
+    je .bfh_as_bytearray
+    V_TEST_PTR rcx, rdx
+    ja .bfh_return
+    test rcx, rcx
+    jz .bfh_return
+    mov rdx, [rcx + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_BYTEARRAY_SUBCLASS
+    jnz .bfh_as_subclass
+    test rdx, TYPE_FLAG_BYTES_SUBCLASS
+    jz .bfh_return
+.bfh_as_subclass:
+    ; type(hexdigits) -- the ordinary constructor, which knows how to build a
+    ; subclass of either.
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - BFH_TYPE]
+    lea rsi, [rsp + 8]
+    mov edx, 1
+    extern type_call
+    call type_call
+    V_UNPACK rax, rdx
+    mov rcx, rax
+    add rsp, 8
+    pop rdi
+    push rcx
+    sub rsp, 8
+    call obj_decref
+    add rsp, 8
+    pop rax
+    test rax, rax
+    jz .bfh_nomem
+    leave
+    ret
+.bfh_as_bytearray:
     push rax
     sub rsp, 8
     lea rdi, [rel bytearray_type]

@@ -1027,7 +1027,13 @@ struc PyFrame
     .return_offset: resd 1  ; +64: return offset
     .nlocalsplus:   resd 1  ; +68: number of locals + cells + frees
     .func_obj:      resq 1  ; +72: ptr to function object (for closures)
-    .localsplus:            ; +80: Value array (variable size)
+    .call_ip:       resq 1  ; +80: where this frame was when it called into
+                            ;      the next one -- what f_lineno reads for a
+                            ;      frame that is not the innermost.  instr_ptr
+                            ;      cannot carry it: non-zero there means the
+                            ;      frame is SUSPENDED, and func_call reads it
+                            ;      to decide whether to free the frame.
+    .localsplus:            ; +88: Value array (variable size)
 endstruc
 
 FRAME_HEADER_SIZE equ PyFrame.localsplus

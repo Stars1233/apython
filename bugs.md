@@ -190,6 +190,15 @@ one-line fix.
   with CPython's choice of which subexpression each opcode belongs to, which
   is not obvious and is not written down anywhere but its compiler.
 
+- **A frame object is a snapshot, so `f_lineno` is where the frame was when
+  it was taken.**  CPython's is a live view onto a frame that is still
+  running, and reports where it is when the attribute is READ:
+  `f = sys._getframe()` on one line and `f.f_lineno` on the next answers the
+  second line there and the first here.  Everything that reads it immediately
+  -- which is every use in the stdlib -- agrees.  Making it live means the
+  frame object holding the PyFrame rather than copying it, and the PyFrame
+  outliving the call.
+
 - **A `str` subclass cannot declare `__slots__`.**  CPython accepts it; here
   it is a TypeError, worded as CPython words the ones it does refuse
   (`nonempty __slots__ not supported for subtype of 'str'`).  A str keeps its

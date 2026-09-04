@@ -177,6 +177,7 @@ test_format_float_spec
 test_format_map
 test_format
 test_format_spec
+test_frame_lineno
 test_frames_and_time
 test_frozenset_descriptors
 test_frozenset
