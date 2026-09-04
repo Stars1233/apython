@@ -182,3 +182,22 @@ need it; they are not here either.
 Changing it means the cell: a `.type_params` cellvar in the wrapper scope,
 `LOAD_CLOSURE` into the class body's own closure, and `INTRINSIC_SUBSCRIPT_GENERIC`
 between the body and the `__build_class__` call.
+
+## A builtin method bound to an instance is a `method`
+
+`"x".upper` is a `builtin_function_or_method` in CPython and a `method` here.
+Both are callable, both carry `__self__`, both repr as
+`<built-in method upper of str object at 0x...>`, and both answer the same
+`__name__` and `__qualname__`; what differs is `type()`.
+
+CPython binds a builtin by making a copy of the descriptor with its receiver
+stored inside it, which is why the type does not change.  Here the ordinary
+bound-method object does the work, which is one object type instead of two
+and one calling convention instead of two -- `method_call` prepends `im_self`
+and dispatches through `im_func`'s `tp_call`, exactly as it does for a Python
+function.
+
+Changing it means a `func_self` field on `PyBuiltinObject`, a bound/unbound
+distinction in `builtin_func_call`, and a second repr; the gain is the name
+`type()` prints.  This is the same choice recorded above about having one
+builtin callable type where CPython has four.

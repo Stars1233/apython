@@ -188,11 +188,22 @@ DEF_FUNC method_getattr, MG_FRAME
     test eax, eax
     jz .mg_self
 
+    ; The underlying callable decides which getattr answers: func_getattr
+    ; reads a PyFunctionObject's own dict, and a builtin does not have one.
     mov rdi, [rbp - MG_SELF]
     mov rdi, [rdi + PyMethodObject.im_func]
     mov rsi, [rbp - MG_NAME]    ; the comparison above clobbered it
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel builtin_func_type]
+    cmp rax, rcx
+    je .mg_builtin
     extern func_getattr
     call func_getattr           ; already returns a Value
+    leave
+    ret
+.mg_builtin:
+    extern builtin_func_getattr
+    call builtin_func_getattr
     leave
     ret
 

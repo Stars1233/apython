@@ -297,6 +297,107 @@ DEF_FUNC_BARE builtin_func_call
 END_FUNC builtin_func_call
 
 ;; ============================================================================
+;; builtin_func_getattr(rdi = the builtin, rsi = a name str) -> rax = a Value,
+;; or 0 when there is no such attribute
+;;
+;; __name__, __qualname__ and __module__.  The stdlib asks for the first two
+;; by name -- statistics decorates with functools and reads f.__name__, and
+;; anything that builds a wrapper does the same -- and a builtin had no
+;; tp_getattr at all, so the lookup fell through to a type-dict search that
+;; answered nothing.
+;;
+;; __qualname__ is "str.upper" for a method and just the name for a plain
+;; function, which is the distinction func_owner already records.  __module__
+;; is "builtins" for a plain builtin and None for a method, as CPython's is.
+;; ============================================================================
+BFG_SELF  equ 8
+BFG_NAME  equ 16
+BFG_BUF   equ 208
+BFG_FRAME equ 208           ; + 1 push = 216... one word more to land right
+global builtin_func_getattr
+DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov [rbp - BFG_SELF], rdi
+    mov [rbp - BFG_NAME], rsi
+
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__name__"
+    call ap_strcmp
+    test eax, eax
+    jz .bfg_name
+
+    mov rdi, [rbp - BFG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "__qualname__"
+    call ap_strcmp
+    test eax, eax
+    jz .bfg_qualname
+
+    mov rdi, [rbp - BFG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "__module__"
+    call ap_strcmp
+    test eax, eax
+    jz .bfg_module
+
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.bfg_name:
+    mov rax, [rbx + PyBuiltinObject.func_name]
+    test rax, rax
+    jz .bfg_none
+    INCREF rax
+    pop rbx
+    leave
+    ret
+
+.bfg_qualname:
+    ; A method is qualified by the type that owns it.
+    cmp qword [rbx + PyBuiltinObject.func_owner], 0
+    je .bfg_name
+    lea rdi, [rbp - BFG_BUF]
+    mov rsi, [rbx + PyBuiltinObject.func_owner]
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "."
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbx + PyBuiltinObject.func_name]
+    test rsi, rsi
+    jz .bfg_qual_done
+    add rsi, PyStrObject.data
+    call rbt_append_cstr
+.bfg_qual_done:
+    lea rdi, [rbp - BFG_BUF]
+    call str_from_cstr_heap
+    pop rbx
+    leave
+    ret
+
+.bfg_module:
+    ; CPython gives a plain builtin "builtins" and a method None.
+    cmp qword [rbx + PyBuiltinObject.func_owner], 0
+    jne .bfg_none
+    CSTRING rdi, "builtins"
+    call str_from_cstr_heap
+    pop rbx
+    leave
+    ret
+
+.bfg_none:
+    lea rax, [rel none_singleton]
+    INCREF rax
+    pop rbx
+    leave
+    ret
+END_FUNC builtin_func_getattr
+
+;; ============================================================================
 ;; builtin_func_dealloc(PyObject *self)
 ;; Free the builtin function wrapper
 ;; ============================================================================
@@ -3266,7 +3367,7 @@ builtin_func_type:
     dq builtin_func_repr        ; tp_str
     dq 0                        ; tp_hash
     dq builtin_func_call        ; tp_call
-    dq 0                        ; tp_getattr
+    dq builtin_func_getattr     ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter

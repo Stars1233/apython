@@ -39,6 +39,7 @@ test_bool_arith
 test_bool
 test_builtin_arity
 test_builtin_dunder_str
+test_builtin_func_attrs
 test_builtin_kwargs
 test_builtins_extra
 test_builtins
@@ -212,6 +213,7 @@ test_getattr_immediate
 test_getattr_raises
 test_getset_descriptors
 test_getset_receiver
+test_hashlib_digests
 test_hash_protocol
 test_immediate_operands
 test_imp_module

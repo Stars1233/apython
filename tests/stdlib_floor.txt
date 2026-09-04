@@ -38,6 +38,7 @@ ok enum
 ok filecmp
 ok fileinput
 ok fnmatch
+ok fractions
 ok ftplib
 ok functools
 ok __future__
@@ -81,6 +82,7 @@ ok pathlib
 ok __phello__
 ok pickle
 ok pickletools
+ok pipes
 ok platform
 ok poplib
 ok posixpath
@@ -95,10 +97,12 @@ ok _pyio
 ok _pylong
 ok queue
 ok quopri
+ok random
 ok re
 ok reprlib
 ok runpy
 ok sched
+ok secrets
 ok selectors
 ok shelve
 ok shlex
@@ -109,6 +113,7 @@ ok sndhdr
 ok socket
 ok socketserver
 ok stat
+ok statistics
 ok string
 ok struct
 ok sunau
@@ -116,6 +121,7 @@ ok sysconfig
 ok tabnanny
 ok tarfile
 ok telnetlib
+ok tempfile
 ok textwrap
 ok this
 ok threading

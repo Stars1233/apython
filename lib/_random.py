@@ -19,10 +19,22 @@ class Random:
 
     __slots__ = ("_mt", "_mti", "_gauss_next")
 
-    def __init__(self, x=None):
+    def __new__(cls, x=None):
+        """The state is built HERE, not in __init__.
+
+        CPython's is a C type whose state belongs to the object rather than
+        to any Python-level constructor, and random.Random -- which
+        subclasses it -- overrides __init__ and calls self.seed(x) without
+        ever chaining to ours.  Building the state in __init__ meant that
+        subclass had none, and seeding it raised.
+        """
+        self = super().__new__(cls)
         self._mt = [0] * _N
         self._mti = _N + 1
         self._gauss_next = None
+        return self
+
+    def __init__(self, x=None):
         self.seed(x)
 
     # -- seeding ---------------------------------------------------------
