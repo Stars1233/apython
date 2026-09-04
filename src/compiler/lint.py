@@ -386,6 +386,7 @@ GENERATED = {
     'src/compiler/tables.asm',
     'src/compiler/unicodename.asm',
     'src/compiler/unicodecase.asm',
+    'src/compiler/prule.asm',
 }
 
 SIZE_CAP = 100 * 1024

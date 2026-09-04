@@ -502,6 +502,19 @@ LEX_TABSIZE    equ 8
 ; was opened.  Past this the depth still counts; only the position is lost.
 LEX_MAX_BRACKET equ 200
 
+; PRule.flags
+PR_CHAIN    equ 0x01     ; a comparison operator: folds into one n-ary node
+
+struc PRule
+    .prefix: resq 1      ; fn(Comp*) -> node index, or 0 if not a prefix
+    .infix:  resq 1      ; fn(Comp*, node left) -> node index, or 0
+    .lbp:    resb 1      ; left binding power; 0 means "not an infix operator"
+    .rbp:    resb 1      ; the power its handler recurses at
+    .aux:    resb 1      ; NB_* / CMP_* / UOP_* payload
+    .flags:  resb 1      ; PR_*
+    .pad:    resd 1
+endstruc
+
 struc Lexer
     .cur:          resq 1   ; +0   read cursor into comp.src
     .end:          resq 1   ; +8   one past the last source byte

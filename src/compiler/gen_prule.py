@@ -131,7 +131,7 @@ align 8
 prule_table:"""
 
 def main():
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'parse.asm')
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'prule.asm')
     src = open(path).read()
 
     out = [HEADER]
@@ -145,8 +145,7 @@ def main():
     block = "\n".join(out)
 
     start = src.index('%s\n;; prule_table' % ('%s' % (';; ' + '=' * 76)))
-    end = src.index('\nASM_INIT')
-    m = type('M', (), {'start': lambda self: start, 'end': lambda self: end})()
+    end = src.index('\nglobal prule_table')
     src = src[:start] + block + "\n" + src[end:]
     # Write and rename, the way the Makefile does for the other two
     # generators: a truncate-then-write leaves parse.asm empty if this dies

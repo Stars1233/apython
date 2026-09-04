@@ -253,10 +253,11 @@ f-strings, async, comprehensions, PEP 695 type parameters.
 | `compiler.inc` | token kinds, AST kinds, binding powers, `Buf`/`Comp`/`CompUnit`/`Instr` |
 | `tables.asm` | **generated** — char classes, keywords, operators, opcode metadata |
 | `gen_tables.py` | regenerates `tables.asm` from CPython 3.12's `opcode`/`dis` |
-| `gen_prule.py` | regenerates the expression grammar table inside `parse.asm` |
+| `gen_prule.py` | regenerates `prule.asm`, the expression grammar table |
 | `lex.asm` | tokenizer: indentation, operators, names, numbers, strings |
 | `ast.asm` | 32-byte nodes in a `Buf`, addressed by u32 index, and the growable `Buf` / bump `Arena` they live in |
-| `parse.asm` | Pratt expression parser + `prule_table`, the precedence grammar |
+| `parse.asm` | Pratt expression parser and its prefix/infix handlers |
+| `prule.asm` | **generated** -- `prule_table`, the precedence grammar |
 | `parse_stmt.asm` | statements, and the soft keywords `match` and `type` |
 | `pattern.asm` | `match` patterns |
 | `fstring.asm` | f-string fields, lexed as spans of the same source |

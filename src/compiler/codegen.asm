@@ -855,13 +855,47 @@ DEF_FUNC cg_expr, CE_FRAME
     ret
 
 .unsupported:
+    ; A starred expression reaches here when it is in a place no emitter takes
+    ; it -- `x = *a`, which CPython refuses by name.  Everything else is a
+    ; node kind with no emitter at all, which is this compiler's own gap and
+    ; says so.  Either way the position is the node's: it was 0 before, and a
+    ; syntax error on line 0 is not a location.
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov r8d, [rax + AstNode.col]
+    push rcx
+    push r8
+    movzx eax, byte [rax + AstNode.kind]
+    push rax
+    mov rdi, rbx
+    mov esi, r13d
+    extern ast_span_at
+    call ast_span_at
+    pop rdx                             ; the kind
+    pop r8
+    pop rcx
+    mov r9d, ecx
+    lea r10d, [r8d + 1]
+    test rax, rax
+    jz .cgu_no_span
+    cmp dword [rax + AstSpan.end_lineno], -1
+    je .cgu_no_span
+    mov r9d, [rax + AstSpan.end_lineno]
+    mov r10d, [rax + AstSpan.end_col]
+.cgu_no_span:
+    push rdx
+    CSTRING rdx, "this expression is not supported yet"
+    pop rax
+    cmp eax, AST_STARRED
+    jne .cgu_have_msg
+    CSTRING rdx, "can't use starred expression here"
+.cgu_have_msg:
     mov rdi, rbx
     lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "this expression is not supported yet"
-    mov rax, r13
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    extern comp_error_span
+    call comp_error_span
     xor eax, eax
     pop r13
     pop r12

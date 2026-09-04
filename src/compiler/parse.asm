@@ -68,18 +68,8 @@ extern exc_SyntaxError_type
 ;; ============================================================================
 ; The binding powers live in compiler.inc: pattern.asm needs them too.
 
-; PRule.flags
-PR_CHAIN    equ 0x01     ; a comparison operator: folds into one n-ary node
-
-struc PRule
-    .prefix: resq 1      ; fn(Comp*) -> node index, or 0 if not a prefix
-    .infix:  resq 1      ; fn(Comp*, node left) -> node index, or 0
-    .lbp:    resb 1      ; left binding power; 0 means "not an infix operator"
-    .rbp:    resb 1      ; the power its handler recurses at
-    .aux:    resb 1      ; NB_* / CMP_* / UOP_* payload
-    .flags:  resb 1      ; PR_*
-    .pad:    resd 1
-endstruc                 ; 24
+; PRule and PR_* live in compiler.inc: prule.asm holds the table.
+                 ; 24
 
 ; --- Named frame-layout constants ---
 PE_MINBP equ 16
@@ -733,7 +723,8 @@ PFU_LINE  equ 16
 PFU_OP    equ 24
 PFU_RBP   equ 32
 PFU_FRAME equ 40         ; + 1 push = 48
-DEF_FUNC_LOCAL pf_unary, PFU_FRAME
+global pf_unary
+DEF_FUNC pf_unary, PFU_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -803,7 +794,8 @@ IB_LINE  equ 24
 IB_OP    equ 32
 IB_RBP   equ 40
 IB_FRAME equ 40          ; + 1 push = 48
-DEF_FUNC_LOCAL in_binop, IB_FRAME
+global in_binop
+DEF_FUNC in_binop, IB_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - IB_LEFT], rsi
@@ -852,7 +844,8 @@ IO_OP    equ 32
 IO_MARK  equ 40
 IO_NODE  equ 48
 IO_FRAME equ 56          ; + 1 push = 64
-DEF_FUNC_LOCAL in_boolop, IO_FRAME
+global in_boolop
+DEF_FUNC in_boolop, IO_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - IO_LEFT], rsi
@@ -947,7 +940,8 @@ IT_TEST  equ 32
 IT_ELSE  equ 40
 IT_NODE  equ 48
 IT_FRAME equ 56          ; + 1 push = 64
-DEF_FUNC_LOCAL in_ternary, IT_FRAME
+global in_ternary
+DEF_FUNC in_ternary, IT_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - IT_BODY], rsi
@@ -970,11 +964,41 @@ DEF_FUNC_LOCAL in_ternary, IT_FRAME
     mov [rbp - IT_TEST], rax
 
     mov rdi, rbx
-    mov esi, TOK_ELSE
-    CSTRING rdx, "expected 'else' after conditional expression"
-    call par_expect
-    test eax, eax
-    jz .fail
+    call par_kind
+    cmp eax, TOK_ELSE
+    je .it_have_else
+    ; CPython names the construct as `if` and spans the whole conditional --
+    ; from the body it was given to where the test ended -- rather than
+    ; pointing at the token that should have been `else`.
+    mov rdi, rbx
+    mov rsi, [rbp - IT_BODY]
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov r8d, [rax + AstNode.col]
+    push rcx
+    push r8
+    mov rdi, rbx
+    mov esi, [rbp - IT_TEST]
+    call ast_span_at
+    pop r8
+    pop rcx
+    mov r9d, ecx
+    lea r10d, [r8d + 1]
+    test rax, rax
+    jz .it_no_span
+    cmp dword [rax + AstSpan.end_lineno], -1
+    je .it_no_span
+    mov r9d, [rax + AstSpan.end_lineno]
+    mov r10d, [rax + AstSpan.end_col]
+.it_no_span:
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "expected 'else' after 'if' expression"
+    call comp_error_span
+    jmp .fail
+.it_have_else:
+    mov rdi, rbx
+    call par_advance
 
     mov rdi, rbx
     mov esi, BP_WALRUS
@@ -1020,7 +1044,8 @@ IC_LINE  equ 24
 IC_MARK  equ 32
 IC_NODE  equ 40
 IC_FRAME equ 48          ; + 2 pushes = 64
-DEF_FUNC_LOCAL in_compare, IC_FRAME
+global in_compare
+DEF_FUNC in_compare, IC_FRAME
     push rbx
     push r12
     mov rbx, rdi
@@ -1192,7 +1217,8 @@ END_FUNC par_cmpop
 ;; pf_number(Comp *c) -> node
 PFN_LINE  equ 16
 PFN_FRAME equ 24         ; + 1 push = 32
-DEF_FUNC_LOCAL pf_number, PFN_FRAME
+global pf_number
+DEF_FUNC pf_number, PFN_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -1226,7 +1252,8 @@ DEF_FUNC_LOCAL pf_number, PFN_FRAME
 END_FUNC pf_number
 
 ;; pf_const(Comp *c) -> node   -- True, False, None share one handler
-DEF_FUNC_LOCAL pf_const, PFN_FRAME
+global pf_const
+DEF_FUNC pf_const, PFN_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -1273,7 +1300,8 @@ END_FUNC pf_const
 PFM_LINE  equ 16
 PFM_TOK   equ 24
 PFM_FRAME equ 24         ; + 1 push = 32
-DEF_FUNC_LOCAL pf_name, PFM_FRAME
+global pf_name
+DEF_FUNC pf_name, PFM_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -1777,7 +1805,8 @@ PS2_LINE  equ 16
 PS2_BYTES equ 24
 PS2_BUF   equ 64         ; a Buf lives here
 PS2_FRAME equ 72         ; + 1 push = 80
-DEF_FUNC_LOCAL pf_string, PS2_FRAME
+global pf_string
+DEF_FUNC pf_string, PS2_FRAME
     push rbx
     mov rbx, rdi
 
@@ -2129,7 +2158,8 @@ PG_LINE  equ 16
 PG_MARK  equ 24
 PG_COMMA equ 32
 PG_FRAME equ 40          ; + 1 push = 48
-DEF_FUNC_LOCAL pf_group, PG_FRAME
+global pf_group
+DEF_FUNC pf_group, PG_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -2219,7 +2249,8 @@ END_FUNC pf_group
 ;; the first element, so the element is parsed once and the shape decided
 ;; afterwards.
 ;; ============================================================================
-DEF_FUNC_LOCAL pf_list, PG_FRAME
+global pf_list
+DEF_FUNC pf_list, PG_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -2324,7 +2355,8 @@ PD_ISDICT equ 32
 PD_KEY    equ 40
 PD_VALUE  equ 48
 PD_FRAME equ 56          ; + 1 push = 64
-DEF_FUNC_LOCAL pf_dictset, PD_FRAME
+global pf_dictset
+DEF_FUNC pf_dictset, PD_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -2519,7 +2551,8 @@ END_FUNC pf_dictset
 PST_LINE  equ 16
 PST_KIND  equ 24
 PST_FRAME equ 24         ; + 1 push = 32
-DEF_FUNC_LOCAL pf_starred, PST_FRAME
+global pf_starred
+DEF_FUNC pf_starred, PST_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -2567,7 +2600,8 @@ END_FUNC pf_starred
 IA_VAL   equ 16
 IA_LINE  equ 24
 IA_FRAME equ 24          ; + 1 push = 32
-DEF_FUNC_LOCAL in_attr, IA_FRAME
+global in_attr
+DEF_FUNC in_attr, IA_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - IA_VAL], rsi
@@ -2743,7 +2777,8 @@ IS_IDX   equ 32
 IS_MARK  equ 40
 IS_ILINE equ 48           ; the first index item, where an implicit tuple starts
 IS_FRAME equ 56           ; + 1 push = 64
-DEF_FUNC_LOCAL in_subscript, IS_FRAME
+global in_subscript
+DEF_FUNC in_subscript, IS_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - IS_VAL], rsi
@@ -2848,7 +2883,8 @@ ICL_NAME  equ 40
 ICL_GEN   equ 48         ; a bare genexp argument, which ends at the call's ')'
 ICL_KWLINE equ 56        ; where one keyword argument's own name is
 ICL_FRAME equ 72         ; + 1 push = 80
-DEF_FUNC_LOCAL in_call, ICL_FRAME
+global in_call
+DEF_FUNC in_call, ICL_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - ICL_FUNC], rsi
@@ -3043,7 +3079,8 @@ PLM_LINE  equ 16
 PLM_ARGS  equ 24
 PLM_NODE  equ 32
 PLM_FRAME equ 40          ; + 1 push = 48
-DEF_FUNC_LOCAL pf_lambda, PLM_FRAME
+global pf_lambda
+DEF_FUNC pf_lambda, PLM_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -3353,7 +3390,8 @@ PY_FIRST equ 24
 PY_MARK  equ 32
 PY_VLINE equ 40          ; where the yielded value begins, past the keyword
 PY_FRAME equ 56          ; + 1 push = 64
-DEF_FUNC_LOCAL pf_yield, PY_FRAME
+global pf_yield
+DEF_FUNC pf_yield, PY_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -3501,7 +3539,8 @@ END_FUNC pf_yield
 ;; ============================================================================
 PAW_LINE  equ 8
 PAW_FRAME equ 24          ; + 1 push = 24
-DEF_FUNC_LOCAL pf_await, PAW_FRAME
+global pf_await
+DEF_FUNC pf_await, PAW_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -3543,7 +3582,8 @@ END_FUNC pf_await
 IW_LINE  equ 8
 IW_LEFT  equ 16
 IW_FRAME equ 24           ; + 1 push = 32
-DEF_FUNC_LOCAL in_walrus, IW_FRAME
+global in_walrus
+DEF_FUNC in_walrus, IW_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - IW_LEFT], rsi
@@ -3586,302 +3626,6 @@ DEF_FUNC_LOCAL in_walrus, IW_FRAME
     leave
     ret
 END_FUNC in_walrus
-
-section .rodata
-
-;; ============================================================================
-;; prule_table - the expression grammar, one row per token kind.
-;;
-;; GENERATED.  Edit ROWS in src/compiler/gen_prule.py and re-run it.
-;;
-;; Reading a row: `prefix` runs when the token starts an expression, `infix`
-;; when it follows one.  lbp is how tightly the token binds to what is already
-;; parsed -- 0 means it is not an infix operator and therefore ends the
-;; expression.  rbp is the minimum its handler recurses at, which is what
-;; encodes associativity: equal to lbp is left-associative, one below is
-;; right-associative.
-;;
-;; A comma is deliberately absent.  Tuples are built by the callers that
-;; actually permit them, because a comma in this table would silently swallow
-;; call arguments, subscripts and assignment targets.
-;; ============================================================================
-align 8
-prule_table:
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_ENDMARKER
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_NEWLINE
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_INDENT
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_DEDENT
-    dd 0
-    dq pf_name     , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_NAME
-    dd 0
-    dq pf_number   , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_NUMBER
-    dd 0
-    dq pf_string   , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_STRING -- consumes a whole run: adjacent literals concatenate
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_FSTRING
-    dd 0
-    dq pf_group    , in_call     
-    db BP_POSTFIX , BP_POSTFIX , 0                 , 0           ; TOK_LPAR -- group or tuple; as an infix, a call
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_RPAR
-    dd 0
-    dq pf_list     , in_subscript
-    db BP_POSTFIX , BP_POSTFIX , 0                 , 0           ; TOK_LSQB
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_RSQB
-    dd 0
-    dq pf_dictset  , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_LBRACE
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_RBRACE
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_COLON
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_COMMA
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_SEMI
-    dd 0
-    dq 0           , in_attr     
-    db BP_POSTFIX , BP_POSTFIX , 0                 , 0           ; TOK_DOT
-    dd 0
-    dq pf_const    , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_ELLIPSIS
-    dd 0
-    dq pf_unary    , in_binop    
-    db BP_ARITH   , BP_ARITH   , NB_ADD            , 0           ; TOK_PLUS -- aux is the BINARY op; pf_unary reads the token, not aux
-    dd 0
-    dq pf_unary    , in_binop    
-    db BP_ARITH   , BP_ARITH   , NB_SUBTRACT       , 0           ; TOK_MINUS
-    dd 0
-    dq pf_starred  , in_binop    
-    db BP_TERM    , BP_TERM    , NB_MULTIPLY       , 0           ; TOK_STAR
-    dd 0
-    dq pf_starred  , in_binop    
-    db BP_POWER   , BP_UNARY   , NB_POWER          , 0           ; TOK_DOUBLESTAR -- rbp one level BELOW lbp: right-associative, and its RHS takes a unary
-    dd 0
-    dq 0           , in_binop    
-    db BP_TERM    , BP_TERM    , NB_TRUE_DIVIDE    , 0           ; TOK_SLASH
-    dd 0
-    dq 0           , in_binop    
-    db BP_TERM    , BP_TERM    , NB_FLOOR_DIVIDE   , 0           ; TOK_DOUBLESLASH
-    dd 0
-    dq 0           , in_binop    
-    db BP_TERM    , BP_TERM    , NB_REMAINDER      , 0           ; TOK_PERCENT
-    dd 0
-    dq 0           , in_binop    
-    db BP_TERM    , BP_TERM    , NB_MATRIX_MULTIPLY, 0           ; TOK_AT
-    dd 0
-    dq 0           , in_binop    
-    db BP_BITOR   , BP_BITOR   , NB_OR             , 0           ; TOK_VBAR
-    dd 0
-    dq 0           , in_binop    
-    db BP_BITAND  , BP_BITAND  , NB_AND            , 0           ; TOK_AMPER
-    dd 0
-    dq 0           , in_binop    
-    db BP_BITXOR  , BP_BITXOR  , NB_XOR            , 0           ; TOK_CIRCUMFLEX
-    dd 0
-    dq pf_unary    , 0           
-    db BP_NONE    , BP_UNARY   , UOP_INVERT        , 0           ; TOK_TILDE
-    dd 0
-    dq 0           , in_binop    
-    db BP_SHIFT   , BP_SHIFT   , NB_LSHIFT         , 0           ; TOK_LEFTSHIFT
-    dd 0
-    dq 0           , in_binop    
-    db BP_SHIFT   , BP_SHIFT   , NB_RSHIFT         , 0           ; TOK_RIGHTSHIFT
-    dd 0
-    dq 0           , in_compare  
-    db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_LESS
-    dd 0
-    dq 0           , in_compare  
-    db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_GREATER
-    dd 0
-    dq 0           , in_compare  
-    db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_LESSEQUAL
-    dd 0
-    dq 0           , in_compare  
-    db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_GREATEREQUAL
-    dd 0
-    dq 0           , in_compare  
-    db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_EQEQUAL
-    dd 0
-    dq 0           , in_compare  
-    db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_NOTEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_EQUAL
-    dd 0
-    dq 0           , in_walrus   
-    db BP_WALRUS  , BP_LAMBDA  , 0                 , 0           ; TOK_COLONEQUAL -- right-associative, and its RHS may be a lambda but not a ternary
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_RARROW
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_PLUSEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_MINEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_STAREQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_DOUBLESTAREQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_SLASHEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_DOUBLESLASHEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_PERCENTEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_ATEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_VBAREQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_AMPEREQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_CIRCUMFLEXEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_LEFTSHIFTEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_RIGHTSHIFTEQUAL
-    dd 0
-    dq pf_const    , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_FALSE
-    dd 0
-    dq pf_const    , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_NONE
-    dd 0
-    dq pf_const    , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_TRUE
-    dd 0
-    dq 0           , in_boolop   
-    db BP_AND     , BP_AND     , 0                 , 0           ; TOK_AND
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_AS
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_ASSERT
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_ASYNC
-    dd 0
-    dq pf_await    , 0           
-    db BP_NONE    , BP_AWAIT   , 0                 , 0           ; TOK_AWAIT -- operand is a primary: BP_AWAIT sits between `**` and postfix
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_BREAK
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_CLASS
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_CONTINUE
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_DEF
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_DEL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_ELIF
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_ELSE
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_EXCEPT
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_FINALLY
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_FOR
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_FROM
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_GLOBAL
-    dd 0
-    dq 0           , in_ternary  
-    db BP_TERNARY , BP_TERNARY , 0                 , 0           ; TOK_IF
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_IMPORT
-    dd 0
-    dq 0           , in_compare  
-    db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_IN
-    dd 0
-    dq 0           , in_compare  
-    db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_IS
-    dd 0
-    dq pf_lambda   , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_LAMBDA -- body one level below the ternary: `lambda: a, b` is still a tuple
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_NONLOCAL
-    dd 0
-    dq pf_unary    , in_compare  
-    db BP_COMPARE , BP_NOT     , UOP_NOT           , PR_CHAIN    ; TOK_NOT -- prefix `not x`; as an infix it can only start `not in`
-    dd 0
-    dq 0           , in_boolop   
-    db BP_OR      , BP_OR      , 0                 , 0           ; TOK_OR
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_PASS
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_RAISE
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_RETURN
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_TRY
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_WHILE
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_WITH
-    dd 0
-    dq pf_yield    , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_YIELD -- an expression, not a statement: `x = yield v` receives from send()
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_TYPE_COMMENT
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_TYPE_IGNORE
-    dd 0
+extern prule_table
 
 ASM_INIT
