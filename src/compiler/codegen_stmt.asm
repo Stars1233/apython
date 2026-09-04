@@ -976,10 +976,15 @@ DEF_FUNC_LOCAL cg_s_annassign, CST_FRAME
     test eax, eax
     jz .fail
 
-    ; A simple name is recorded; anything else is evaluated and dropped.
+    ; A simple name is recorded; anything else is evaluated and dropped.  A
+    ; PARENTHESISED name is not simple either -- `(x): int = 1` records
+    ; nothing in CPython -- and the parser leaves that bit in the node's
+    ; subkind, since (x) and x are otherwise the same Name node.
     mov rdi, rbx
     mov rsi, r13
     call ast_at
+    cmp byte [rax + AstNode.subkind], 0
+    jne .ann_discard
     mov edx, [rax + AstNode.a]
     mov rdi, rbx
     mov rsi, rdx

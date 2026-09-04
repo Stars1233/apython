@@ -340,8 +340,15 @@ def _b_augassign(r, p):
 
 
 def _b_annassign(r, p):
+    """`simple` is "a bare, unparenthesised identifier", and not a node kind.
+
+    Every target shape but one is answerable from the target itself; `(x)` and
+    `x` are the identical Name node, because a parenthesised expression IS the
+    expression.  The parser puts that one bit in the subkind, which this node
+    has no other use for.
+    """
     target = _node(r[A])
-    simple = 1 if isinstance(target, _ast.Name) else 0
+    simple = 1 if isinstance(target, _ast.Name) and not r[SUB] else 0
     return _ast.AnnAssign(target, _node(r[B]), _opt(r[C]), simple, **p)
 
 

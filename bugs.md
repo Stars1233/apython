@@ -158,13 +158,12 @@ one-line fix.
   tree for that reason and no other.  Moving it means the symbol table and the
   code generator mangling instead, where CPython does it.
 
-- **The parser records two things CPython's AST carries and this one
-  cannot.**  Visible now that `ast.parse` exists, and both are the parser's,
-  not `_ast`'s: PEP 695 type parameters are skipped, so `TypeAlias`,
-  `TypeVar`, `ParamSpec` and `TypeVarTuple` never appear, and
-  `AnnAssign.simple` is always 1 because whether the target was parenthesised
-  is not stored.  `type_comment` is permanently None for a different reason:
-  there are no type comments.
+- **PEP 695 type parameters are skipped, so `TypeAlias`, `TypeVar`,
+  `ParamSpec` and `TypeVarTuple` never appear in the AST.**  The parser
+  accepts the syntax by counting brackets and discarding what is inside, so
+  `type X = int` is indistinguishable from `X = int` in the tree and
+  `def f[T]()` reads as `def f()`.  `type_comment` is permanently None for a
+  different reason: there are no type comments.
 
 - **`_thread` is a single-threaded stand-in.**  `lib/_thread.py` gives
   `get_ident` a constant, makes locks uncontended, and raises from

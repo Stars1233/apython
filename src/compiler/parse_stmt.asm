@@ -229,13 +229,21 @@ PE2_LINE  equ 24
 PE2_MARK  equ 32
 PE2_OP    equ 40
 PE2_NODE  equ 48
-PE2_FRAME equ 56         ; + 1 push = 64
+PE2_PAREN equ 56         ; 1 when the statement began with '(' -- see .annassign
+PE2_FRAME equ 72         ; + 1 push = 80
 DEF_FUNC par_expr_stmt, PE2_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
     TOK_POS rax
     mov [rbp - PE2_LINE], rcx
+    ; Whether the statement began with '(', which is the whole of what
+    ; AnnAssign.simple asks -- see .annassign.
+    xor ecx, ecx
+    movzx edx, word [rax + Token.kind]
+    cmp edx, TOK_LPAR
+    sete cl
+    mov [rbp - PE2_PAREN], rcx
 
     mov rdi, rbx
     call par_exprlist_stmt              ; an expression, or a bare tuple
@@ -384,9 +392,16 @@ DEF_FUNC par_expr_stmt, PE2_FRAME
     jz .fail
     mov [rbp - PE2_OP], rax
 
+    ; subkind = 1 means "the target was parenthesised", which is CPython's
+    ; AnnAssign.simple = 0.  `(x): int` and `x: int` produce the identical
+    ; Name node -- pf_group hands back the inner one untouched -- so the one
+    ; bit has to come from the token stream, and the statement's first token
+    ; is the whole answer.  It is not only ast.dump: `simple` is what decides
+    ; whether the annotation is RECORDED, so `(x): int = 1` was writing
+    ; __annotations__['x'] where CPython writes nothing.
     mov rdi, rbx
     mov esi, AST_ANNASSIGN
-    xor edx, edx
+    mov rdx, [rbp - PE2_PAREN]
     mov rcx, [rbp - PE2_LINE]
     mov r8, [rbp - PE2_FIRST]
     mov r9, [rbp - PE2_OP]

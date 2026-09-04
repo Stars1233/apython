@@ -12,11 +12,9 @@
 # The positions are compared too, with include_attributes=True: all four of
 # lineno, col_offset, end_lineno and end_col_offset.
 #
-# Four things are left out because the parser, not this, is what is missing:
-# a return annotation (`def f() -> int`) and the type-parameter syntax, which
-# it reads and discards; the empty literal CPython puts after the last field
-# of a nested format spec; and whether an annotated target was parenthesised,
-# which is AnnAssign.simple.  All four are in bugs.md.
+# One thing is left out because the parser, not this, is what is missing: the
+# PEP 695 type-parameter syntax, which it reads and discards.  It is in
+# bugs.md.
 
 import ast
 

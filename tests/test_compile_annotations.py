@@ -69,3 +69,38 @@ print("__annotations__" in Bare.__dict__)
 ns2 = {}
 exec("if True:\n    a: int = 1\n", ns2)
 print(sorted(ns2["__annotations__"]))
+
+
+# `simple` -- a bare, UNPARENTHESISED identifier -- is what decides whether an
+# annotation is recorded, and `(x)` is the same Name node as `x`, so the bit
+# has to come from the parser.  Without it `(y): int = 2` put y in
+# __annotations__, where CPython evaluates the annotation and drops it.
+print("=== a parenthesised target is not simple ===")
+ns3 = {}
+exec("a: int = 1\n(b): int = 2\nc: str\n(d): str\ne.f: int = 3\n"
+     "g[0]: int = 4\n", {"e": type('E', (), {})(), "g": {}}, ns3)
+print(sorted(k for k in ns3.get("__annotations__", {})))
+
+
+class Ann:
+    p: int = 1
+    (q): int = 2
+    r: str
+    (s): str
+
+
+print(sorted(Ann.__annotations__))
+print(Ann.p, Ann.q)
+
+# The annotation is still EVALUATED, whether or not it is recorded.
+seen = []
+
+
+def note(x):
+    seen.append(x)
+    return int
+
+
+ns4 = {}
+exec("(m): note('paren') = 1\nn: note('bare') = 2\n", {"note": note}, ns4)
+print(seen, sorted(ns4["__annotations__"]))
