@@ -2104,6 +2104,12 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     test eax, eax
     jz .tga_return_bases
 
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__base__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_base
+
     ; The instance layout, as CPython reports it.  These are getsets on the
     ; metatype in CPython, so they are data descriptors and win over anything
     ; a class body puts under the same name -- hence the check here, ahead of
@@ -2230,6 +2236,26 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     jmp .tga_mro_incref
 .tga_mro_done:
     mov rax, r12
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.tga_return_base:
+    ; The one base a class's layout comes from.  `object.__base__` is None,
+    ; which is also the answer for any other type with no tp_base.
+    mov rax, [rbp - TGA_ORIGIN]
+    mov rax, [rax + PyTypeObject.tp_base]
+    test rax, rax
+    jnz .tga_return_object
+    extern none_singleton
+    lea rax, [rel none_singleton]
+.tga_return_object:
+    mov rdi, rax
+    push rax
+    call obj_incref
+    pop rax
     mov edx, TAG_PTR
     pop r12
     pop rbx

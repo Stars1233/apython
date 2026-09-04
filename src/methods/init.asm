@@ -1628,6 +1628,16 @@ DEF_FUNC methods_init
     extern type_method_subclasses
     ADD_FN mn___subclasses__, type_method_subclasses
 
+    ; type.mro(), which abc and every ABCMeta subclass calls, and the getsets
+    ; the attributes themselves are answered through -- `C.__mro__` worked
+    ; already, `type.__dict__['__mro__']` did not, and inspect wants the
+    ; second.
+    extern type_method_mro
+    ADD_FN_N mn_mro, type_method_mro, 1, 1
+    extern type_dict_add_attrs
+    mov rdi, rbx
+    call type_dict_add_attrs
+
     lea rax, [rel type_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -2596,6 +2606,7 @@ mn___isub__: db "__isub__", 0
 mn___ixor__: db "__ixor__", 0
 mn___imul__: db "__imul__", 0
 mn___subclasses__: db "__subclasses__", 0
+mn_mro:            db "mro", 0
 mn___add__:     db "__add__", 0
 mn___radd__: db "__radd__", 0
 mn___sub__: db "__sub__", 0

@@ -11,6 +11,7 @@ ok ast
 ok base64
 ok bisect
 ok calendar
+ok cgi
 ok chunk
 ok cmd
 ok code
@@ -66,6 +67,7 @@ ok lib2to3
 ok linecache
 ok locale
 ok logging
+ok mailbox
 ok mailcap
 ok _markupbase
 ok mimetypes
@@ -111,9 +113,13 @@ ok shlex
 ok shutil
 ok site
 ok _sitebuiltins
+ok smtplib
 ok sndhdr
 ok socket
 ok socketserver
+ok sre_compile
+ok sre_constants
+ok sre_parse
 ok stat
 ok statistics
 ok string

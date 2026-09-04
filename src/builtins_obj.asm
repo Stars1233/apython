@@ -23,6 +23,7 @@ extern obj_incref
 extern obj_decref
 extern type_is_subtype
 extern raise_exception
+extern dunder_name_obj
 extern obj_getattr_opt
 extern exc_new
 extern current_exception
@@ -2649,7 +2650,9 @@ END_FUNC builtin_format_fn
 ;; ============================================================================
 extern eval_saved_r12
 global builtin_vars_fn
-VR_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+VR_OBJ   equ 8
+VR_EXC   equ 16
+VR_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC builtin_vars_fn, VR_FRAME
 
     test rsi, rsi
@@ -2658,20 +2661,22 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     jne .vars_nargs_error
 
     ; vars(obj): return obj.__dict__
+    mov rax, [rdi]
+    mov [rbp - VR_OBJ], rax     ; kept for the general path below
     V_TEST_PTR_M [rdi], rax   ; args[0] a pointer?
-    ja .vars_no_dict
+    ja .vars_ask
 
     mov rdi, [rdi]            ; obj pointer
     ; Try inst_dict (user-defined class instances)
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_flags]
     test ecx, TYPE_FLAG_HEAPTYPE
-    jz .vars_no_dict
+    jz .vars_ask
 
     ; A __slots__ class has no __dict__, so vars() has nothing to answer with:
     ; CPython's TypeError, rather than the empty dict the arm below invents.
     test rcx, TYPE_FLAG_HAS_SLOTS
-    jnz .vars_no_dict
+    jnz .vars_ask
 
     ; User instance: get the instance dict.  The offset is the type's, not a
     ; constant -- a dict, list or str subclass puts its __dict__ past its own
@@ -2679,7 +2684,7 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     ; inside the base object's header.  For a populated dict subclass that
     ; word is a live pointer, which this then increfs and returned as a dict:
     ; vars(D()) after a single d['a'] = 1 was a segfault.
-    LOAD_INST_DICT rax, rdi, .vars_empty_dict
+    LOAD_INST_DICT rax, rdi, .vars_ask
     test rax, rax
     jz .vars_empty_dict
     INCREF rax
@@ -2705,12 +2710,59 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     leave
     ret
 
+.vars_ask:
+    ; Everything the fast path above does not recognise -- a module, a class,
+    ; a function, an instance of a builtin type -- still has a __dict__ if it
+    ; has one at all, and CPython's vars() is nothing but PyObject_GetAttr for
+    ; that name.  Reading it the ordinary way is also what makes a
+    ; __getattr__ that supplies one work, and it is what `vars(some_module)`
+    ; needs: sre_constants builds its module namespace out of one.
+    DUNDER_EXC_SAVE [rbp - VR_EXC]
+    lea rdi, [rel vars_dict_name]
+    call dunder_name_obj
+    test rax, rax
+    jz .vars_no_dict
+    mov rsi, rax
+    mov rdi, [rbp - VR_OBJ]
+    call obj_getattr_opt
+    test rax, rax
+    jz .vars_ask_failed
+    leave
+    ret
+
+.vars_ask_failed:
+    ; An AttributeError here means "no __dict__", which is the TypeError
+    ; below; anything else is a real failure and must not be reworded.
+    DUNDER_RAISED [rbp - VR_EXC], .vars_ask_raised
+    jmp .vars_no_dict
+.vars_ask_raised:
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .vars_no_dict
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel exc_AttributeError_type]
+    call type_is_subtype
+    test eax, eax
+    jz .vars_propagate
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    call obj_decref
+    jmp .vars_no_dict
+.vars_propagate:
+    xor eax, eax
+    leave
+    ret
+
 .vars_no_dict:
     RAISE exc_TypeError_type, "vars() argument must have __dict__ attribute"
 
 .vars_nargs_error:
     RAISE exc_TypeError_type, "vars() takes at most 1 argument"
 END_FUNC builtin_vars_fn
+
+section .rodata
+vars_dict_name: db "__dict__", 0
+section .text
 
 ;; ============================================================================
 ;; builtin_delattr_fn(args, nargs) - delattr(obj, name)
