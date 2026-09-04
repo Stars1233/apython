@@ -116,10 +116,6 @@ STYLE.md, listed so the gap is a known quantity rather than a surprise to
 whoever copies a neighbouring file.  Counts are deliberately absent -- grep
 gives a current one, and a number written here is wrong by the next commit.
 
-- **`src/pyo/class.asm` is over CLAUDE.md's 100k limit for a hand-written
-  file.**  It holds the metatype, the instance and the bound method, and the
-  seam between them is not as clean as the one bytes.asm had.
-
 - **Functions with no separator or docblock at all**, and, among those that
   have one, docblocks with no `->` signature line.  The signature is the only
   part of a function's contract that nothing checks, so its absence is a real

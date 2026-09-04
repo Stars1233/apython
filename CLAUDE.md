@@ -172,6 +172,7 @@ working it; several have drifted.
 ## Source Layout
 
 No hand-written file exceeds 100k bytes; only generated asm may.
+`src/compiler/lint.py` checks it.
 
 - `src/eval.asm` — Bytecode dispatch loop (256-entry jump table), the
   exception unwinder, and `raise_exception`
@@ -187,7 +188,10 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   basenames with `src/pyo/` on purpose: `methods/dict.asm` is dict's methods,
   `pyo/dict.asm` is dict itself
 - `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func,
-  class, iter, singleton, bytes, bytearray, memoryview, code)
+  class, iter, singleton, bytes, bytearray, memoryview, code).  `class.asm` is
+  the metatype, the instance and attribute access; `instance_alloc.asm` is
+  where an instance comes from, including the constructors a subclass of a
+  builtin needs; `method.asm` is the bound method
 - `src/marshal.asm` — .pyc marshal deserializer, and the .pyc file reader
 - `src/main.asm` — argument parsing, startup order, and the `-t`/`--dis` modes
 - `src/import.asm` — the import system: finders, `sys.modules`, packages

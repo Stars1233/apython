@@ -379,6 +379,39 @@ def check_frame_offsets(files):
                             "name it with an equ constant"))
     return bad
 
+# Files whose contents a generator writes.  CLAUDE.md's size cap is about what
+# a person has to read and edit, so these are exempt -- gen_unicodename.py's
+# output is one table and nobody navigates it by hand.
+GENERATED = {
+    'src/compiler/tables.asm',
+    'src/compiler/unicodename.asm',
+    'src/compiler/unicodecase.asm',
+}
+
+SIZE_CAP = 100 * 1024
+
+
+def check_file_size(files):
+    """No hand-written .asm over CLAUDE.md's cap.
+
+    class.asm reached 116k holding the metatype, the instance, the bound
+    method and the builtin-subclass constructors, and the cost was not
+    aesthetic: nothing in it could be found without grep, and the seams
+    between those four were invisible until someone went looking for them.
+    """
+    bad = []
+    for path in files:
+        if path in GENERATED:
+            continue
+        n = os.path.getsize(path)
+        if n > SIZE_CAP:
+            bad.append((path, 0,
+                        "%d bytes, over the %dk cap for a hand-written file"
+                        % (n, SIZE_CAP // 1024),
+                        "split it along a seam it already has"))
+    return bad
+
+
 def check_separators(files):
     """The heavy separator is `;; ` plus 76 `=`, exactly 79 columns.
 
@@ -551,7 +584,7 @@ def main():
                 + check_rel(everything) + check_markers(everything)
                 + check_exports(everything)
                 + check_frame_offsets(everything)
-                + check_separators(everything)
+                + check_separators(everything) + check_file_size(everything)
                 + check_text(everything) + check_guards(headers)
                 + check_type_tables(everything, nfields)
                 + check_alignment(everything) + check_tailjumps(scoped)

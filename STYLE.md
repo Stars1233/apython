@@ -29,6 +29,7 @@ These run over **every** hand-written `.asm` in the tree:
 | A `global X` has a definition of `X` in the same file | `check_exports` | error |
 | No raw `[rbp +- N]`; frame slots carry named `equ` constants | `check_frame_offsets` | error |
 | Heavy separators are `;;` and 76 `=`, 79 columns | `check_separators` | error |
+| No hand-written .asm over 100k bytes | `check_file_size` | error |
 
 | `(frame + 8*pushes + a prologue's own `sub rsp`) % 16 == 0` in any function containing a `call` | `check_alignment` | error |
 
