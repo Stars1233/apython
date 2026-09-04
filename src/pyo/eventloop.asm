@@ -18,6 +18,10 @@
 
 extern bool_true
 extern bool_false
+extern coro_type
+extern gen_type
+extern exc_TypeError_type
+extern set_exception
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -133,6 +137,29 @@ END_FUNC eventloop_teardown
 DEF_FUNC task_new
     push rbx
 
+    ; The argument is stepped with gen_send, which reads PyGenObject fields
+    ; off it -- so it has to BE one.  Nothing checked: `gather("hello")` and a
+    ; nested gather() both wrapped whatever they were given and crashed on the
+    ; first step, several stack frames from where the mistake was made.
+    ; Coroutines, generators and async generators are the three that can be
+    ; sent to; a task or a future is recognised by the callers before they get
+    ; here.
+    V_TEST_PTR rdi, rax
+    ja .tn_not_awaitable
+    test rdi, rdi
+    jz .tn_not_awaitable
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel coro_type]
+    cmp rax, rcx
+    je .tn_ok
+    lea rcx, [rel gen_type]
+    cmp rax, rcx
+    je .tn_ok
+    extern async_gen_type
+    lea rcx, [rel async_gen_type]
+    cmp rax, rcx
+    jne .tn_not_awaitable
+.tn_ok:
     mov rbx, rdi               ; save coro
 
     mov edi, AsyncTask_size
@@ -174,6 +201,16 @@ DEF_FUNC task_new
     call gc_track
     mov rax, rbx
 
+    pop rbx
+    leave
+    ret
+
+.tn_not_awaitable:
+    ; SET_EXC and 0, not RAISE: every caller checks for the NULL and releases
+    ; what it is holding, and a builtin that abandons its C frame leaks it.
+    SET_EXC exc_TypeError_type, \
+            "An asyncio.Future, a coroutine or an awaitable is required"
+    xor eax, eax
     pop rbx
     leave
     ret

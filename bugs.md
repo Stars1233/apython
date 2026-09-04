@@ -78,6 +78,14 @@ one-line fix.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
+- **A gather cannot be nested inside another.**  `gather(gather(...))` is a
+  TypeError here and `[[3]]` in CPython, where a gather returns a future and
+  ensure_future takes it as it stands.  The awaitable this returns is not a
+  task and cannot be stepped like one, so wrapping it means wrapping an
+  arbitrary awaitable in a coroutine, which is what `ensure_future` does and
+  what task_new has no way to do.  Until this commit it was a segfault
+  rather than a refusal.
+
 - **asyncio's stream layer is a stub, and now an unnecessary one.**
   `src/pyo/asyncio_streams.asm` predates any socket support: it hard-codes
   127.0.0.1 and ignores the `host` argument it is given, discards what

@@ -31,6 +31,7 @@ extern none_singleton
 extern raise_exception
 extern raise_exception_obj
 extern exc_TypeError_type
+extern exc_ValueError_type
 extern exc_RuntimeError_type
 extern exc_TimeoutError_type
 extern type_type
@@ -75,9 +76,12 @@ DEF_FUNC asyncio_run_func, AR_FRAME
     ; Initialize event loop
     call eventloop_init
 
-    ; Create root task
+    ; Create root task.  task_new answers 0 for anything that cannot be sent
+    ; to, with the TypeError already recorded.
     mov rdi, rbx
     call task_new
+    test rax, rax
+    jz .ar_not_coro
     mov r12, rax               ; r12 = root task
 
     ; Run the event loop
@@ -119,11 +123,20 @@ DEF_FUNC asyncio_run_func, AR_FRAME
     extern raise_exception_obj
     jmp raise_exception_obj     ; takes the reference; does not return
 
+.ar_not_coro:
+    ; The loop was initialised above; leave it as it was found.  CPython's
+    ; runner raises ValueError here where everything else raises TypeError,
+    ; so the TypeError task_new recorded is replaced rather than propagated.
+    call eventloop_teardown
+    pop r12
+    pop rbx
+    RAISE exc_ValueError_type, "a coroutine was expected"
+
 .ar_error:
     RAISE exc_TypeError_type, "asyncio.run() takes exactly 1 argument"
 
 .ar_type_error:
-    RAISE exc_TypeError_type, "asyncio.run() requires a coroutine"
+    RAISE exc_ValueError_type, "a coroutine was expected"
 
 .ar_reentrant:
     RAISE exc_RuntimeError_type, "asyncio.run() cannot be called from a running event loop"
@@ -251,6 +264,8 @@ DEF_FUNC asyncio_wait_for_func, WF_FRAME
     ; Create inner task from coro
     mov rdi, [rdi]             ; coro = args[0] payload
     call task_new
+    test rax, rax
+    jz .wf_failed
     mov [rbp - WF_INNER], rax  ; save inner task
 
     ; Enqueue inner task on ready queue
@@ -309,6 +324,15 @@ DEF_FUNC asyncio_wait_for_func, WF_FRAME
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.wf_failed:
+    ; task_new recorded the TypeError; the saved args are still on the stack.
+    add rsp, 8
+    pop rbx
+    xor eax, eax
+    xor edx, edx
+    leave
     ret
 
 .wf_error:
@@ -433,6 +457,8 @@ DEF_FUNC asyncio_create_task_func, ACT_FRAME
 
     mov rdi, [rdi]             ; coro = args[0]
     call task_new
+    test rax, rax
+    jz .act_failed
     mov [rbp - ACT_TASK], rax  ; save task (stack-aligned)
 
     ; Enqueue the new task
@@ -443,6 +469,12 @@ DEF_FUNC asyncio_create_task_func, ACT_FRAME
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.act_failed:
+    xor eax, eax
+    xor edx, edx
+    leave
     ret
 
 .act_error:
