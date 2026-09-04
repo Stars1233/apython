@@ -41,23 +41,16 @@ class AST:
         for name, value in kwargs.items():
             setattr(self, name, value)
 
-    def __repr__(self):
-        parts = []
-        for name in self._fields:
-            try:
-                parts.append("%s=%r" % (name, getattr(self, name)))
-            except AttributeError:
-                pass
-        return "%s(%s)" % (type(self).__name__, ", ".join(parts))
-
 
 class alias(AST):
+    __module__ = "ast"
     _fields = ('name', 'asname')
     _attributes = ('lineno', 'col_offset', 'end_lineno', 'end_col_offset')
     asname = None
 
 
 class arg(AST):
+    __module__ = "ast"
     _fields = ('arg', 'annotation', 'type_comment')
     _attributes = ('lineno', 'col_offset', 'end_lineno', 'end_col_offset')
     annotation = None
@@ -65,168 +58,194 @@ class arg(AST):
 
 
 class arguments(AST):
+    __module__ = "ast"
     _fields = ('posonlyargs', 'args', 'vararg', 'kwonlyargs', 'kw_defaults', 'kwarg', 'defaults')
     vararg = None
     kwarg = None
 
 
 class boolop(AST):
-    pass
+    __module__ = "ast"
 
 
 class And(boolop):
-    pass
+    __module__ = "ast"
 
 
 class Or(boolop):
-    pass
+    __module__ = "ast"
 
 
 class cmpop(AST):
-    pass
+    __module__ = "ast"
 
 
 class Eq(cmpop):
-    pass
+    __module__ = "ast"
 
 
 class Gt(cmpop):
-    pass
+    __module__ = "ast"
 
 
 class GtE(cmpop):
-    pass
+    __module__ = "ast"
 
 
 class In(cmpop):
-    pass
+    __module__ = "ast"
 
 
 class Is(cmpop):
-    pass
+    __module__ = "ast"
 
 
 class IsNot(cmpop):
-    pass
+    __module__ = "ast"
 
 
 class Lt(cmpop):
-    pass
+    __module__ = "ast"
 
 
 class LtE(cmpop):
-    pass
+    __module__ = "ast"
 
 
 class NotEq(cmpop):
-    pass
+    __module__ = "ast"
 
 
 class NotIn(cmpop):
-    pass
+    __module__ = "ast"
 
 
 class comprehension(AST):
+    __module__ = "ast"
     _fields = ('target', 'iter', 'ifs', 'is_async')
 
 
 class excepthandler(AST):
+    __module__ = "ast"
     _attributes = ('lineno', 'col_offset', 'end_lineno', 'end_col_offset')
 
 
 class ExceptHandler(excepthandler):
+    __module__ = "ast"
     _fields = ('type', 'name', 'body')
     type = None
     name = None
 
 
 class expr(AST):
+    __module__ = "ast"
     _attributes = ('lineno', 'col_offset', 'end_lineno', 'end_col_offset')
 
 
 class Attribute(expr):
+    __module__ = "ast"
     _fields = ('value', 'attr', 'ctx')
 
 
 class Await(expr):
+    __module__ = "ast"
     _fields = ('value',)
 
 
 class BinOp(expr):
+    __module__ = "ast"
     _fields = ('left', 'op', 'right')
 
 
 class BoolOp(expr):
+    __module__ = "ast"
     _fields = ('op', 'values')
 
 
 class Call(expr):
+    __module__ = "ast"
     _fields = ('func', 'args', 'keywords')
 
 
 class Compare(expr):
+    __module__ = "ast"
     _fields = ('left', 'ops', 'comparators')
 
 
 class Constant(expr):
+    __module__ = "ast"
     _fields = ('value', 'kind')
     kind = None
 
 
 class Dict(expr):
+    __module__ = "ast"
     _fields = ('keys', 'values')
 
 
 class DictComp(expr):
+    __module__ = "ast"
     _fields = ('key', 'value', 'generators')
 
 
 class FormattedValue(expr):
+    __module__ = "ast"
     _fields = ('value', 'conversion', 'format_spec')
     format_spec = None
 
 
 class GeneratorExp(expr):
+    __module__ = "ast"
     _fields = ('elt', 'generators')
 
 
 class IfExp(expr):
+    __module__ = "ast"
     _fields = ('test', 'body', 'orelse')
 
 
 class JoinedStr(expr):
+    __module__ = "ast"
     _fields = ('values',)
 
 
 class Lambda(expr):
+    __module__ = "ast"
     _fields = ('args', 'body')
 
 
 class List(expr):
+    __module__ = "ast"
     _fields = ('elts', 'ctx')
 
 
 class ListComp(expr):
+    __module__ = "ast"
     _fields = ('elt', 'generators')
 
 
 class Name(expr):
+    __module__ = "ast"
     _fields = ('id', 'ctx')
 
 
 class NamedExpr(expr):
+    __module__ = "ast"
     _fields = ('target', 'value')
 
 
 class Set(expr):
+    __module__ = "ast"
     _fields = ('elts',)
 
 
 class SetComp(expr):
+    __module__ = "ast"
     _fields = ('elt', 'generators')
 
 
 class Slice(expr):
+    __module__ = "ast"
     _fields = ('lower', 'upper', 'step')
     lower = None
     upper = None
@@ -234,351 +253,404 @@ class Slice(expr):
 
 
 class Starred(expr):
+    __module__ = "ast"
     _fields = ('value', 'ctx')
 
 
 class Subscript(expr):
+    __module__ = "ast"
     _fields = ('value', 'slice', 'ctx')
 
 
 class Tuple(expr):
+    __module__ = "ast"
     _fields = ('elts', 'ctx')
 
 
 class UnaryOp(expr):
+    __module__ = "ast"
     _fields = ('op', 'operand')
 
 
 class Yield(expr):
+    __module__ = "ast"
     _fields = ('value',)
     value = None
 
 
 class YieldFrom(expr):
+    __module__ = "ast"
     _fields = ('value',)
 
 
 class expr_context(AST):
-    pass
+    __module__ = "ast"
 
 
 class Del(expr_context):
-    pass
+    __module__ = "ast"
 
 
 class Load(expr_context):
-    pass
+    __module__ = "ast"
 
 
 class Store(expr_context):
-    pass
+    __module__ = "ast"
 
 
 class keyword(AST):
+    __module__ = "ast"
     _fields = ('arg', 'value')
     _attributes = ('lineno', 'col_offset', 'end_lineno', 'end_col_offset')
     arg = None
 
 
 class match_case(AST):
+    __module__ = "ast"
     _fields = ('pattern', 'guard', 'body')
     guard = None
 
 
 class mod(AST):
-    pass
+    __module__ = "ast"
 
 
 class Expression(mod):
+    __module__ = "ast"
     _fields = ('body',)
 
 
 class FunctionType(mod):
+    __module__ = "ast"
     _fields = ('argtypes', 'returns')
 
 
 class Interactive(mod):
+    __module__ = "ast"
     _fields = ('body',)
 
 
 class Module(mod):
+    __module__ = "ast"
     _fields = ('body', 'type_ignores')
 
 
 class operator(AST):
-    pass
+    __module__ = "ast"
 
 
 class Add(operator):
-    pass
+    __module__ = "ast"
 
 
 class BitAnd(operator):
-    pass
+    __module__ = "ast"
 
 
 class BitOr(operator):
-    pass
+    __module__ = "ast"
 
 
 class BitXor(operator):
-    pass
+    __module__ = "ast"
 
 
 class Div(operator):
-    pass
+    __module__ = "ast"
 
 
 class FloorDiv(operator):
-    pass
+    __module__ = "ast"
 
 
 class LShift(operator):
-    pass
+    __module__ = "ast"
 
 
 class MatMult(operator):
-    pass
+    __module__ = "ast"
 
 
 class Mod(operator):
-    pass
+    __module__ = "ast"
 
 
 class Mult(operator):
-    pass
+    __module__ = "ast"
 
 
 class Pow(operator):
-    pass
+    __module__ = "ast"
 
 
 class RShift(operator):
-    pass
+    __module__ = "ast"
 
 
 class Sub(operator):
-    pass
+    __module__ = "ast"
 
 
 class pattern(AST):
+    __module__ = "ast"
     _attributes = ('lineno', 'col_offset', 'end_lineno', 'end_col_offset')
 
 
 class MatchAs(pattern):
+    __module__ = "ast"
     _fields = ('pattern', 'name')
     pattern = None
     name = None
 
 
 class MatchClass(pattern):
+    __module__ = "ast"
     _fields = ('cls', 'patterns', 'kwd_attrs', 'kwd_patterns')
 
 
 class MatchMapping(pattern):
+    __module__ = "ast"
     _fields = ('keys', 'patterns', 'rest')
     rest = None
 
 
 class MatchOr(pattern):
+    __module__ = "ast"
     _fields = ('patterns',)
 
 
 class MatchSequence(pattern):
+    __module__ = "ast"
     _fields = ('patterns',)
 
 
 class MatchSingleton(pattern):
+    __module__ = "ast"
     _fields = ('value',)
 
 
 class MatchStar(pattern):
+    __module__ = "ast"
     _fields = ('name',)
     name = None
 
 
 class MatchValue(pattern):
+    __module__ = "ast"
     _fields = ('value',)
 
 
 class stmt(AST):
+    __module__ = "ast"
     _attributes = ('lineno', 'col_offset', 'end_lineno', 'end_col_offset')
 
 
 class AnnAssign(stmt):
+    __module__ = "ast"
     _fields = ('target', 'annotation', 'value', 'simple')
     value = None
 
 
 class Assert(stmt):
+    __module__ = "ast"
     _fields = ('test', 'msg')
     msg = None
 
 
 class Assign(stmt):
+    __module__ = "ast"
     _fields = ('targets', 'value', 'type_comment')
     type_comment = None
 
 
 class AsyncFor(stmt):
+    __module__ = "ast"
     _fields = ('target', 'iter', 'body', 'orelse', 'type_comment')
     type_comment = None
 
 
 class AsyncFunctionDef(stmt):
+    __module__ = "ast"
     _fields = ('name', 'args', 'body', 'decorator_list', 'returns', 'type_comment', 'type_params')
     returns = None
     type_comment = None
 
 
 class AsyncWith(stmt):
+    __module__ = "ast"
     _fields = ('items', 'body', 'type_comment')
     type_comment = None
 
 
 class AugAssign(stmt):
+    __module__ = "ast"
     _fields = ('target', 'op', 'value')
 
 
 class Break(stmt):
-    pass
+    __module__ = "ast"
 
 
 class ClassDef(stmt):
+    __module__ = "ast"
     _fields = ('name', 'bases', 'keywords', 'body', 'decorator_list', 'type_params')
 
 
 class Continue(stmt):
-    pass
+    __module__ = "ast"
 
 
 class Delete(stmt):
+    __module__ = "ast"
     _fields = ('targets',)
 
 
 class Expr(stmt):
+    __module__ = "ast"
     _fields = ('value',)
 
 
 class For(stmt):
+    __module__ = "ast"
     _fields = ('target', 'iter', 'body', 'orelse', 'type_comment')
     type_comment = None
 
 
 class FunctionDef(stmt):
+    __module__ = "ast"
     _fields = ('name', 'args', 'body', 'decorator_list', 'returns', 'type_comment', 'type_params')
     returns = None
     type_comment = None
 
 
 class Global(stmt):
+    __module__ = "ast"
     _fields = ('names',)
 
 
 class If(stmt):
+    __module__ = "ast"
     _fields = ('test', 'body', 'orelse')
 
 
 class Import(stmt):
+    __module__ = "ast"
     _fields = ('names',)
 
 
 class ImportFrom(stmt):
+    __module__ = "ast"
     _fields = ('module', 'names', 'level')
     module = None
     level = None
 
 
 class Match(stmt):
+    __module__ = "ast"
     _fields = ('subject', 'cases')
 
 
 class Nonlocal(stmt):
+    __module__ = "ast"
     _fields = ('names',)
 
 
 class Pass(stmt):
-    pass
+    __module__ = "ast"
 
 
 class Raise(stmt):
+    __module__ = "ast"
     _fields = ('exc', 'cause')
     exc = None
     cause = None
 
 
 class Return(stmt):
+    __module__ = "ast"
     _fields = ('value',)
     value = None
 
 
 class Try(stmt):
+    __module__ = "ast"
     _fields = ('body', 'handlers', 'orelse', 'finalbody')
 
 
 class TryStar(stmt):
+    __module__ = "ast"
     _fields = ('body', 'handlers', 'orelse', 'finalbody')
 
 
 class TypeAlias(stmt):
+    __module__ = "ast"
     _fields = ('name', 'type_params', 'value')
 
 
 class While(stmt):
+    __module__ = "ast"
     _fields = ('test', 'body', 'orelse')
 
 
 class With(stmt):
+    __module__ = "ast"
     _fields = ('items', 'body', 'type_comment')
     type_comment = None
 
 
 class type_ignore(AST):
-    pass
+    __module__ = "ast"
 
 
 class TypeIgnore(type_ignore):
+    __module__ = "ast"
     _fields = ('lineno', 'tag')
 
 
 class type_param(AST):
+    __module__ = "ast"
     _attributes = ('lineno', 'col_offset', 'end_lineno', 'end_col_offset')
 
 
 class ParamSpec(type_param):
+    __module__ = "ast"
     _fields = ('name',)
 
 
 class TypeVar(type_param):
+    __module__ = "ast"
     _fields = ('name', 'bound')
     bound = None
 
 
 class TypeVarTuple(type_param):
+    __module__ = "ast"
     _fields = ('name',)
 
 
 class unaryop(AST):
-    pass
+    __module__ = "ast"
 
 
 class Invert(unaryop):
-    pass
+    __module__ = "ast"
 
 
 class Not(unaryop):
-    pass
+    __module__ = "ast"
 
 
 class UAdd(unaryop):
-    pass
+    __module__ = "ast"
 
 
 class USub(unaryop):
-    pass
+    __module__ = "ast"
 
 
 class withitem(AST):
+    __module__ = "ast"
     _fields = ('context_expr', 'optional_vars')
     optional_vars = None
 

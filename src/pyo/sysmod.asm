@@ -1002,6 +1002,12 @@ DEF_FUNC sys_module_init, 32
     SYS_ADD_FUNC_ALIAS sys_unraisablehook_func, sm_unraisablehook, \
                        sm_dunder_unraisablehook
     SYS_ADD_FUNC sys_exc_info_func, sm_exc_info
+    ; audit() and addaudithook() do nothing: there are no audit hooks here,
+    ; and with none installed CPython's audit() is a no-op too.  os.walk,
+    ; os.listdir and half of shutil call audit() unconditionally, and an
+    ; AttributeError from it stopped them.
+    SYS_ADD_FUNC sys_audit_func, sm_audit
+    SYS_ADD_FUNC sys_audit_func, sm_addaudithook
 
     ; --- sys._getframe / sys._getframemodulename ---
     ;
@@ -1313,6 +1319,19 @@ DEF_FUNC sys_getfsencodeerrors_func
     ret
 END_FUNC sys_getfsencodeerrors_func
 
+;; sys.audit(event, *args) / sys.addaudithook(hook) -> None
+;;
+;; No hooks, so nothing to run.  Both are here because the stdlib calls
+;; audit() on the way into any number of ordinary operations and does not
+;; guard it.
+;; ============================================================================
+DEF_FUNC sys_audit_func
+    LOAD_NONE rax
+    leave
+    ret
+END_FUNC sys_audit_func
+
+;; ============================================================================
 ;; sys.getfilesystemencoding() -> 'utf-8'
 DEF_FUNC sys_getfsencoding_func
     lea rdi, [rel sm_utf8]
@@ -1425,6 +1444,8 @@ sm_cache_tag:    db "cache_tag", 0
 sm_cache_tag_val: db "cpython-312", 0
 sm_warnoptions:  db "warnoptions", 0
 sm_builtin_module_names: db "builtin_module_names", 0
+sm_audit:         db "audit", 0
+sm_addaudithook:  db "addaudithook", 0
 sm_getfsencoding: db "getfilesystemencoding", 0
 sm_getfsencodeerrors: db "getfilesystemencodeerrors", 0
 sm_surrogateescape: db "surrogateescape", 0

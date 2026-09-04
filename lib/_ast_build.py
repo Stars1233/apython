@@ -49,18 +49,21 @@ ARGUMENTS, ARG, MATCH, EXTRA, DECORATED = range(68, 73)
 K, SUB, LINE, COL, ELINE, ECOL, A, B, C, CH = range(10)
 
 # --- subkind tables --------------------------------------------------------
-CTX = (_ast.Load, _ast.Store, _ast.Del)
-UNARY = (_ast.UAdd, _ast.USub, _ast.Invert, _ast.Not)
-BOOL = (_ast.And, _ast.Or)
-CMP = (_ast.Lt, _ast.LtE, _ast.Eq, _ast.NotEq, _ast.Gt, _ast.GtE,
-       _ast.In, _ast.NotIn, _ast.Is, _ast.IsNot)
+# One instance each, not one per node: CPython's parser shares them, so every
+# Load in a tree is the same object and `node.ctx is ast.Load()` is False for
+# a fresh one but True between two nodes.
+CTX = (_ast.Load(), _ast.Store(), _ast.Del())
+UNARY = (_ast.UAdd(), _ast.USub(), _ast.Invert(), _ast.Not())
+BOOL = (_ast.And(), _ast.Or())
+CMP = (_ast.Lt(), _ast.LtE(), _ast.Eq(), _ast.NotEq(), _ast.Gt(), _ast.GtE(),
+       _ast.In(), _ast.NotIn(), _ast.Is(), _ast.IsNot())
 
 # BINARY_OP's own argument numbering, from src/include/opcodes.inc.  The
 # in-place codes are the same operators thirteen higher, which is what
 # augmented assignment stores.
-BINOPS = (_ast.Add, _ast.BitAnd, _ast.FloorDiv, _ast.LShift, _ast.MatMult,
-          _ast.Mult, _ast.Mod, _ast.BitOr, _ast.Pow, _ast.RShift, _ast.Sub,
-          _ast.Div, _ast.BitXor)
+BINOPS = (_ast.Add(), _ast.BitAnd(), _ast.FloorDiv(), _ast.LShift(),
+          _ast.MatMult(), _ast.Mult(), _ast.Mod(), _ast.BitOr(), _ast.Pow(),
+          _ast.RShift(), _ast.Sub(), _ast.Div(), _ast.BitXor())
 
 
 # A node whose source starts with one of its children rather than with the
@@ -69,11 +72,14 @@ BINOPS = (_ast.Add, _ast.BitAnd, _ast.FloorDiv, _ast.LShift, _ast.MatMult,
 # the operator: `a + 1` gave the BinOp the column of the `+`, where CPython
 # gives it the column of `a`.  The value is which raw slot the leftmost
 # component is in.
+# The expression parser stamps every infix node with the token its production
+# began at, so BinOp, Call, Attribute and the rest arrive correct -- including
+# the parentheses around a left operand, which is where CPython's position for
+# them is.  What is left here are the STATEMENT forms, built by a parser that
+# has only the statement's own keyword position to hand.
 LEFT_START = {
-    BINOP: A, COMPARE: A, ATTRIBUTE: A, SUBSCRIPT: A, CALL: A,
-    NAMEDEXPR: A, AUGASSIGN: A, ANNASSIGN: A, WITHITEM: A,
-    IFEXP: B,                   # `x if y else z` starts at x, which is .b
-    BOOLOP: CH, ASSIGN: CH,     # and these start with their first child
+    AUGASSIGN: A, ANNASSIGN: A, WITHITEM: A,
+    ASSIGN: CH,                 # starts with its first target
 }
 
 
@@ -129,25 +135,25 @@ def _b_const(r, p):
 
 
 def _b_name(r, p):
-    return _ast.Name(r[A], CTX[r[SUB]](), **p)
+    return _ast.Name(r[A], CTX[r[SUB]], **p)
 
 
 def _b_binop(r, p):
-    return _ast.BinOp(_node(r[A]), BINOPS[r[SUB]](), _node(r[B]), **p)
+    return _ast.BinOp(_node(r[A]), BINOPS[r[SUB]], _node(r[B]), **p)
 
 
 def _b_unaryop(r, p):
-    return _ast.UnaryOp(UNARY[r[SUB]](), _node(r[A]), **p)
+    return _ast.UnaryOp(UNARY[r[SUB]], _node(r[A]), **p)
 
 
 def _b_boolop(r, p):
-    return _ast.BoolOp(BOOL[r[SUB]](), _each(r[CH]), **p)
+    return _ast.BoolOp(BOOL[r[SUB]], _each(r[CH]), **p)
 
 
 def _b_compare(r, p):
     ops, operands = [], []
     for i in range(0, len(r[CH]), 2):
-        ops.append(CMP[r[CH][i]]())
+        ops.append(CMP[r[CH][i]])
         operands.append(_node(r[CH][i + 1]))
     return _ast.Compare(_node(r[A]), ops, operands, **p)
 
@@ -161,11 +167,11 @@ def _b_lambda(r, p):
 
 
 def _b_tuple(r, p):
-    return _ast.Tuple(_each(r[CH]), CTX[r[SUB]](), **p)
+    return _ast.Tuple(_each(r[CH]), CTX[r[SUB]], **p)
 
 
 def _b_list(r, p):
-    return _ast.List(_each(r[CH]), CTX[r[SUB]](), **p)
+    return _ast.List(_each(r[CH]), CTX[r[SUB]], **p)
 
 
 def _b_set(r, p):
@@ -217,11 +223,11 @@ def _kwlist(raw):
 
 
 def _b_attribute(r, p):
-    return _ast.Attribute(_node(r[A]), r[B], CTX[r[SUB]](), **p)
+    return _ast.Attribute(_node(r[A]), r[B], CTX[r[SUB]], **p)
 
 
 def _b_subscript(r, p):
-    return _ast.Subscript(_node(r[A]), _node(r[B]), CTX[r[SUB]](), **p)
+    return _ast.Subscript(_node(r[A]), _node(r[B]), CTX[r[SUB]], **p)
 
 
 def _b_slice(r, p):
@@ -229,7 +235,7 @@ def _b_slice(r, p):
 
 
 def _b_starred(r, p):
-    return _ast.Starred(_node(r[A]), _ast.Load(), **p)
+    return _ast.Starred(_node(r[A]), CTX[r[SUB]], **p)
 
 
 def _b_keyword(r, p):
@@ -253,7 +259,30 @@ def _b_await(r, p):
 
 
 def _b_joinedstr(r, p):
-    return _ast.JoinedStr(_each(r[CH]), **p)
+    """Adjacent literal pieces are ONE Constant, as CPython's parser gives it.
+
+    A run of implicitly concatenated f-strings is lexed here one token at a
+    time, so `f'a' f'b'` arrives as two literal pieces; CPython's parser
+    accumulates the text and emits a single Constant spanning both.  Merging
+    them here rather than in the tokenizer keeps the run loop simple, and the
+    bytecode is the same either way -- only the tree differs.
+    """
+    out = []
+    for piece in _each(r[CH]):
+        if (out and isinstance(piece, _ast.Constant)
+                and isinstance(out[-1], _ast.Constant)
+                and isinstance(piece.value, str)
+                and isinstance(out[-1].value, str)):
+            last = out[-1]
+            merged = _ast.Constant(
+                last.value + piece.value, None,
+                lineno=last.lineno, col_offset=last.col_offset,
+                end_lineno=piece.end_lineno,
+                end_col_offset=piece.end_col_offset)
+            out[-1] = merged
+        else:
+            out.append(piece)
+    return _ast.JoinedStr(out, **p)
 
 
 # The conversion, which apython numbers 0..3 and CPython spells as -1 or the
@@ -307,7 +336,7 @@ def _b_augassign(r, p):
     op = r[SUB]
     if op >= 13:
         op -= 13                # the in-place codes are the same operators
-    return _ast.AugAssign(_node(r[A]), BINOPS[op](), _node(r[B]), **p)
+    return _ast.AugAssign(_node(r[A]), BINOPS[op], _node(r[B]), **p)
 
 
 def _b_annassign(r, p):

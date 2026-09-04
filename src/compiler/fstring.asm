@@ -62,13 +62,42 @@ section .text
 ;; pointers instead, against the line start the caller carries down.
 ;; ============================================================================
 DEF_FUNC_BARE fs_pos
-    mov rax, rsi
+    call fs_walk                ; rsi = line delta, rdx = the line's start
+    mov rax, rcx
     sub rax, rdx
     shl rax, 32
     mov edi, edi
+    add edi, esi                ; the line, plus the newlines walked over
     or  rax, rdi
     ret
 END_FUNC fs_pos
+
+;; ============================================================================
+;; fs_walk(rsi = a pointer into the string, rdx = where its first line begins)
+;;   -> rcx = rsi, rsi = how many newlines are behind it, rdx = the start of
+;;      the line it is on
+;;
+;; A triple-quoted f-string spans lines, and every piece of it is on the line
+;; its own newlines put it on.  Both halves of a position need the same walk.
+;; ============================================================================
+DEF_FUNC_BARE fs_walk
+    mov rcx, rsi
+    mov rsi, rdx                ; scan cursor
+    xor eax, eax                ; newlines seen
+.fw_loop:
+    cmp rsi, rcx
+    jae .fw_done
+    cmp byte [rsi], 10
+    jne .fw_next
+    inc eax
+    lea rdx, [rsi + 1]          ; the line starts after it
+.fw_next:
+    inc rsi
+    jmp .fw_loop
+.fw_done:
+    mov esi, eax
+    ret
+END_FUNC fs_walk
 
 ;; ============================================================================
 ;; fs_end(rdi = Comp*, esi = a node, edx = the line, rcx = just past the node,
@@ -78,9 +107,17 @@ END_FUNC fs_pos
 DEF_FUNC_LOCAL fs_end
     push rbx
     push r12
+    push rdi
+    push rsi
     mov r12d, edx
+    mov rsi, rcx
+    mov rdx, r8
+    call fs_walk                ; rsi = line delta, rdx = the line's start
+    add r12d, esi
     mov rbx, rcx
-    sub rbx, r8
+    sub rbx, rdx
+    pop rsi
+    pop rdi
     call ast_span_at
     test rax, rax
     jz .out
@@ -596,6 +633,7 @@ DEF_FUNC par_fstring_field, FF_FRAME
     mov rdx, [rbp - FF_EEND]
     mov rcx, [rbp - FF_LINE]
     mov r8, [rbp - FF_WSEND]
+    mov r9, [rbp - FF_LBASE]
     call par_fstring_debug_text
     test rax, rax
     jz .fail
@@ -829,7 +867,8 @@ DEF_FUNC par_fstring_spec, FSP_FRAME
 END_FUNC par_fstring_spec
 
 ;; ============================================================================
-;; par_fstring_debug_text(Comp *c, const char *start, const char *end, int line)
+;; par_fstring_debug_text(Comp *c, const char *start, const char *end,
+;;                        int line, const char *wsend, const char *line_start)
 ;;   -> rax = an AST_CONST holding "<source>=", or 0
 ;; What `f"{x=}"` prints before the value.
 ;; ============================================================================
@@ -837,8 +876,10 @@ FD_START equ 16
 FD_END   equ 24
 FD_LINE  equ 32
 FD_WSEND equ 40           ; end of the spaces after the `=`
-FD_BUF   equ 88           ; a Buf lives here, so it comes last
-DEF_FUNC par_fstring_debug_text, 96
+FD_LBASE equ 48           ; where the f-string's line begins
+FD_NODE  equ 56
+FD_BUF   equ 96           ; a Buf lives here, so it comes last
+DEF_FUNC par_fstring_debug_text, 128    ; the Buf at FD_BUF is 32 of it
     push rbx
     push r12
     mov rbx, rdi
@@ -846,6 +887,7 @@ DEF_FUNC par_fstring_debug_text, 96
     mov [rbp - FD_END], rdx
     mov [rbp - FD_LINE], rcx
     mov [rbp - FD_WSEND], r8
+    mov [rbp - FD_LBASE], r9
     lea rdi, [rbp - FD_BUF]
     mov esi, 1
     call buf_init
@@ -883,13 +925,28 @@ DEF_FUNC par_fstring_debug_text, 96
     mov rsi, rax
     call ast_obj
     mov r8, rax
+    mov [rbp - FD_NODE], rax
+    ; The text CPython emits for `{x=}` is at the expression, not at the
+    ; string: it spans `x=` and whatever spaces follow, which is exactly the
+    ; source this copied.
+    mov rdi, [rbp - FD_LINE]
+    mov rsi, [rbp - FD_START]
+    mov rdx, [rbp - FD_LBASE]
+    call fs_pos
+    mov rcx, rax
+    mov r8, [rbp - FD_NODE]
     mov rdi, rbx
     mov esi, AST_CONST
     xor edx, edx
-    mov rcx, [rbp - FD_LINE]
     xor r9d, r9d
     call ast_make
     mov r12, rax
+    mov rdi, rbx
+    mov esi, eax
+    mov rdx, [rbp - FD_LINE]
+    mov rcx, [rbp - FD_WSEND]
+    mov r8, [rbp - FD_LBASE]
+    call fs_end
     lea rdi, [rbp - FD_BUF]
     call buf_free
     mov rax, r12

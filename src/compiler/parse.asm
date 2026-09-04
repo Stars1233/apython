@@ -85,7 +85,8 @@ endstruc                 ; 24
 PE_MINBP equ 16
 PE_LEFT  equ 24
 PE_RULE  equ 32
-PE_FRAME equ 40          ; + 1 push = 48
+PE_START equ 40          ; the token this expression begins at
+PE_FRAME equ 56          ; + 1 push = 64
 
 section .text
 
@@ -207,6 +208,15 @@ DEF_FUNC par_expr, PE_FRAME
     cmp dword [rbx + Comp.depth], COMP_MAX_DEPTH
     jae .too_deep
 
+    ; Where the whole expression begins.  An infix node is built when its
+    ; operator is reached, so ast_make stamps it with the operator's position
+    ; -- but CPython's is the first TOKEN of the production, which is the
+    ; start of the left operand INCLUDING any parentheses around it:
+    ; `(a - b) | c` is at the '(', not at `a`, and `(lambda: 1)()` is at the
+    ; '(' rather than at `lambda`.  Every infix result is restamped from here.
+    mov eax, [rbx + Comp.tok_idx]
+    mov [rbp - PE_START], rax
+
     mov rdi, rbx
     call par_kind
     lea rcx, [rel prule_table]
@@ -242,6 +252,11 @@ DEF_FUNC par_expr, PE_FRAME
     mov [rbp - PE_LEFT], rax
     test rax, rax
     jz .fail
+    mov rdi, rbx
+    mov esi, eax
+    mov edx, [rbp - PE_START]
+    extern ast_start_at
+    call ast_start_at
     jmp .loop
 
 .done:
@@ -1655,6 +1670,7 @@ END_FUNC par_run_has_fstring
 ;; ============================================================================
 PFA_TOK   equ 16
 PFA_MARK  equ 24
+PFA_NODE  equ 32
 PFA_BUF   equ 64
 PFA_FRAME equ 72          ; + 1 push = 80
 DEF_FUNC par_fstring_piece_any, PFA_FRAME
@@ -1694,8 +1710,19 @@ DEF_FUNC par_fstring_piece_any, PFA_FRAME
     xor edx, edx
     xor r9d, r9d
     call ast_make
+    ; The piece ends at its OWN token, and the cursor is still on it -- this
+    ; runs before par_advance, so the default end came from the token BEFORE
+    ; it.  In `f'a {x} ' 'b'` that put the second piece's end back on the
+    ; first piece's line.
+    mov [rbp - PFA_NODE], rax
     mov rdi, rbx
-    mov rsi, rax
+    mov esi, eax
+    mov edx, [rbx + Comp.tok_idx]
+    inc edx
+    extern ast_end_at
+    call ast_end_at
+    mov rdi, rbx
+    mov rsi, [rbp - PFA_NODE]
     call ast_push
     lea rdi, [rbp - PFA_BUF]
     call buf_free
@@ -3064,7 +3091,8 @@ PY_LINE  equ 8
 PY_KIND  equ 16
 PY_FIRST equ 24
 PY_MARK  equ 32
-PY_FRAME equ 40          ; + 1 push = 48
+PY_VLINE equ 40          ; where the yielded value begins, past the keyword
+PY_FRAME equ 56          ; + 1 push = 64
 DEF_FUNC_LOCAL pf_yield, PY_FRAME
     push rbx
     mov rbx, rdi
@@ -3102,6 +3130,12 @@ DEF_FUNC_LOCAL pf_yield, PY_FRAME
     cmp eax, TOK_DEDENT
     je .bare
 
+    ; Where the value starts, for the tuple below: `yield a, b` puts the
+    ; tuple at `a`, not at `yield`.
+    mov rdi, rbx
+    call par_peek
+    TOK_POS rax
+    mov [rbp - PY_VLINE], rcx
     mov rdi, rbx
     mov esi, BP_WALRUS
     call par_expr
@@ -3155,7 +3189,7 @@ DEF_FUNC_LOCAL pf_yield, PY_FRAME
 .tuple_done:
     mov rdi, rbx
     mov esi, AST_TUPLE
-    mov rdx, [rbp - PY_LINE]
+    mov rdx, [rbp - PY_VLINE]
     mov rcx, [rbp - PY_MARK]
     call par_finish_list
     test rax, rax

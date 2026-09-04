@@ -149,6 +149,15 @@ one-line fix.
   so `e.msg` is an AttributeError and `str(e)` is the bare message.  Every
   tool that reports a syntax error reads at least `.lineno`.
 
+- **Private names are already mangled in the AST.**  `self.__x` inside
+  `class C` reads back from `ast.parse` as `_C__x`, where CPython's tree keeps
+  `__x` and mangles in the compiler.  It is where the mangling happens: the
+  parser does it, in `comp_intern_name`, so the name reaches the AST already
+  rewritten -- attributes, parameters, and every other identifier in a class
+  body.  Seven files in this repository's own corpus differ from CPython's
+  tree for that reason and no other.  Moving it means the symbol table and the
+  code generator mangling instead, where CPython does it.
+
 - **The parser records two things CPython's AST carries and this one
   cannot.**  Visible now that `ast.parse` exists, and both are the parser's,
   not `_ast`'s: PEP 695 type parameters are skipped, so `TypeAlias`,

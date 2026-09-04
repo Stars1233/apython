@@ -1231,6 +1231,11 @@ DEF_FUNC_LOCAL ps_from, PFR_FRAME
     jmp .build
 
 .star_import:
+    ; The alias is at the '*', not at `from` -- the same rule as a named one.
+    mov rdi, rbx
+    call par_peek
+    TOK_POS rax
+    mov [rbp - PK_ALINE], rcx
     mov rdi, rbx
     call par_advance
     ; A star import is an alias with no name at all; codegen recognises it by
@@ -1238,7 +1243,7 @@ DEF_FUNC_LOCAL ps_from, PFR_FRAME
     mov rdi, rbx
     mov esi, AST_ALIAS
     mov edx, 1                          ; subkind 1 marks the star form
-    mov rcx, [rbp - PK_LINE]
+    mov rcx, [rbp - PK_ALINE]
     xor r8d, r8d
     xor r9d, r9d
     call ast_make

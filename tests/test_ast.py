@@ -229,3 +229,44 @@ for bad in ["1 +", "def", "class 1:", "for x in: pass"]:
         # Only the type: SyntaxError carries none of CPython's .msg,
         # .filename, .lineno or .offset attributes here -- see bugs.md.
         print(repr(bad), type(e).__name__)
+
+print("=== positions that a whole file finds and a snippet does not ===")
+# Every one of these came out of diffing ast.dump(include_attributes=True)
+# over this repository's own lib/ and tests/ against CPython's.
+WHOLE = [
+    'x = """a\nb"""\n',
+    'def f():\n    """Doc\n    over lines\n    """\n    return 1\n',
+    "s = '''one\ntwo\nthree'''\n",
+    'x = f"""val {1 +\n 2} end"""\n',
+    'x = (a - b) | c\n',
+    'y = (lambda: 1)()\n',
+    'z = (a + b).bit_length()\n',
+    'w = (a, b)[0]\n',
+    'def g():\n    yield a, b\n',
+    'def h():\n    yield from (a, b)\n',
+    'from m import *\n',
+    'q = f"{a} " "plain"\n',
+    'r = ("one "\n     f"{two} "\n     "three")\n',
+    'print(f"{x=}")\n',
+    'print(f"{x = }")\n',
+    'print(f"{x!r:>{w}}")\n',
+    'a, *b = [1, 2, 3]\n',
+    '[c, *d] = [1, 2]\n',
+    '(e, *f), g = (1, 2), 3\n',
+    'for h, *i in [[1, 2]]:\n    pass\n',
+    'del a[0], b.c\n',
+    'with (open("f") as x, open("g") as y):\n    pass\n',
+]
+for src in WHOLE:
+    print(repr(src), ast.dump(ast.parse(src), include_attributes=True))
+
+# The context and operator nodes are shared, one instance each, as CPython's
+# parser shares them.
+tree = ast.parse("a, *b = c[d].e + f\n")
+ctxs = [n.ctx for n in ast.walk(tree) if hasattr(n, "ctx")]
+print("distinct ctx objects:", len(set(id(c) for c in ctxs)))
+print("ctx kinds:", sorted(set(type(c).__name__ for c in ctxs)))
+
+# CPython 3.12's AST nodes have object's repr, and say `ast`, not `_ast`.
+print(repr(ast.parse("x = 1").body[0]).split(" object at ")[0])
+print(ast.Assign.__module__, ast.AST.__module__, ast.Load.__module__)

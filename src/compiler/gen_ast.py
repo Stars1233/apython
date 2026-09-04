@@ -106,15 +106,9 @@ w("            setattr(self, name, value)")
 w("        for name, value in kwargs.items():")
 w("            setattr(self, name, value)")
 w("")
-w("    def __repr__(self):")
-w("        parts = []")
-w("        for name in self._fields:")
-w("            try:")
-w('                parts.append("%s=%r" % (name, getattr(self, name)))')
-w("            except AttributeError:")
-w("                pass")
-w('        return "%s(%s)" % (type(self).__name__, ", ".join(parts))')
-w("")
+# No __repr__: CPython 3.12's AST nodes use object's, and `print(node)` says
+# <ast.Assign object at 0x...>.  One that prints the fields is 3.13's, and a
+# nicety here would be a difference anything comparing output would see.
 w("")
 
 for cls in classes:
@@ -122,7 +116,11 @@ for cls in classes:
         continue
     base = cls.__bases__[0]
     w("class %s(%s):" % (cls.__name__, base.__name__))
-    body = []
+    # CPython's are all `ast`, including in the default repr of a node --
+    # <ast.Assign object at ...>.  A class defined here would otherwise say
+    # _ast, which is where the module really is and not what anything
+    # comparing output expects.
+    body = ['    __module__ = "ast"']
     if cls._fields != base._fields:
         body.append("    _fields = %r" % (cls._fields,))
     attrs = getattr(cls, "_attributes", ())
@@ -135,7 +133,7 @@ for cls in classes:
     for name in cls._fields:
         if getattr(cls, name, _MISSING) is None:
             body.append("    %s = None" % name)
-    out.extend(body or ["    pass"])
+    out.extend(body)
     w("")
     w("")
 

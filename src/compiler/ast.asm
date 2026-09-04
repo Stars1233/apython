@@ -80,11 +80,34 @@ DEF_FUNC_LOCAL ast_span_from
     je .ash_back
     cmp r9d, TOK_ENDMARKER
     je .ash_back
+    ; A token is one line long, except when it is not: a triple-quoted string
+    ; carries its START line and a length that runs past it, and adding that
+    ; length to its column put every docstring's end on the wrong line at a
+    ; column past the end of the file's longest line.  The newlines in the
+    ; token's own text are what the end is measured from.
     mov eax, [rcx + Token.lineno]
+    mov r9d, [rcx + Token.col]
+    add r9d, [rcx + Token.len]      ; the one-line answer
+    mov r10, [rcx + Token.start]
+    mov r11d, [rcx + Token.len]
+    test r11d, r11d
+    jz .ash_have_end
+    xor edx, edx                    ; index
+.ash_scan:
+    cmp edx, r11d
+    jae .ash_have_end
+    cmp byte [r10 + rdx], 10
+    jne .ash_scan_next
+    inc eax                         ; one more line
+    mov r9d, r11d
+    sub r9d, edx
+    dec r9d                         ; bytes after this newline
+.ash_scan_next:
+    inc edx
+    jmp .ash_scan
+.ash_have_end:
     mov [rsi + AstSpan.end_lineno], eax
-    mov eax, [rcx + Token.col]
-    add eax, [rcx + Token.len]
-    mov [rsi + AstSpan.end_col], eax
+    mov [rsi + AstSpan.end_col], r9d
     leave
     ret
 .ash_none:
@@ -132,6 +155,35 @@ DEF_FUNC_BARE ast_end_here
     mov edx, [rdi + Comp.tok_idx]
     jmp ast_end_at
 END_FUNC ast_end_here
+
+;; ============================================================================
+;; ast_start_at(rdi = Comp*, esi = a node index, edx = a token index) -- move
+;; that node's START to where that token is.  For a node built when its
+;; operator was reached, whose production began earlier: CPython's position
+;; for an infix expression is its first token, parentheses included.
+;; ============================================================================
+global ast_start_at
+DEF_FUNC ast_start_at
+    mov rax, [rdi + Comp.tokens + Buf.len]
+    cmp rdx, rax
+    jae .asa_out
+    mov rax, [rdi + Comp.tokens + Buf.data]
+    shl rdx, TOKEN_SHIFT
+    add rdx, rax                ; the token
+    mov rax, [rdi + Comp.nodes + Buf.len]
+    cmp rsi, rax
+    jae .asa_out
+    mov rax, [rdi + Comp.nodes + Buf.data]
+    shl rsi, AST_SHIFT
+    add rsi, rax                ; the node
+    mov eax, [rdx + Token.lineno]
+    mov [rsi + AstNode.lineno], eax
+    mov eax, [rdx + Token.col]
+    mov [rsi + AstNode.col], eax
+.asa_out:
+    leave
+    ret
+END_FUNC ast_start_at
 
 ;; ============================================================================
 ;; ast_span_at(rdi = Comp*, esi = a node index) -> rax = AstSpan*, or 0
