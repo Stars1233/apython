@@ -1324,9 +1324,48 @@ END_FUNC exc_getattr
 ; exc_setattr(PyExceptionObject *exc, PyStrObject *name, PyObject *value, int value_tag)
 ; Store a custom attribute on an exception object using exc_dict.
 ; rdi = exc, rsi = name, rdx = value, ecx = value_tag
-DEF_FUNC exc_setattr
+ESA_VAL   equ 8
+ESA_TAG   equ 16
+ESA_FRAME equ 32            ; + 2 pushes = 48
+DEF_FUNC exc_setattr, ESA_FRAME
     push rbx
+    push r12
     mov rbx, rdi            ; exc
+    mov r12, rsi            ; the name
+    mov [rbp - ESA_VAL], rdx
+    mov [rbp - ESA_TAG], rcx
+
+    ; Four names are fields of the object, not entries in its dict, and
+    ; exc_getattr reads them from the fields.  Writing them to the dict left
+    ; the assignment invisible: `e.__cause__ = other` read back as None, and
+    ; the report the traceback printer produced had no cause chain in it.
+    ; `raise x from y` goes through the fields directly, which is why only the
+    ; hand-written form was affected.
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__cause__"
+    call ap_strcmp
+    test eax, eax
+    jz .esa_cause
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__context__"
+    call ap_strcmp
+    test eax, eax
+    jz .esa_context
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__traceback__"
+    call ap_strcmp
+    test eax, eax
+    jz .esa_tb
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__suppress_context__"
+    call ap_strcmp
+    test eax, eax
+    jz .esa_suppress
+    ; ap_strcmp clobbers the argument registers, so the value and its tag come
+    ; back from the frame.
+    mov rsi, r12
+    mov rdx, [rbp - ESA_VAL]
+    mov rcx, [rbp - ESA_TAG]
 
     ; Create exc_dict if needed
     mov rax, [rbx + PyExceptionObject.exc_dict]
@@ -1348,9 +1387,75 @@ DEF_FUNC exc_setattr
     xor eax, eax            ; return 0 (success)
     xor edx, edx
 
+    pop r12
     pop rbx
     leave
     ret
+
+    ; Each field holds a strong reference, and None means "none of it": the
+    ; report walks a NULL field, not a None one.
+.esa_cause:
+    mov esi, PyExceptionObject.exc_cause
+    ; `raise x from y` also sets __suppress_context__, and so does assigning
+    ; to __cause__ -- CPython's cause setter does both.
+    mov qword [rbx + PyExceptionObject.exc_suppress], 1
+    jmp .esa_field
+.esa_context:
+    mov esi, PyExceptionObject.exc_context
+    jmp .esa_field
+.esa_tb:
+    mov esi, PyExceptionObject.exc_tb
+.esa_field:
+    mov rdx, [rbp - ESA_VAL]
+    lea rcx, [rel none_singleton]
+    cmp rdx, rcx
+    jne .esa_field_store
+    xor edx, edx            ; None clears it
+.esa_field_store:
+    mov r12, rdx
+    test r12, r12
+    jz .esa_field_swap
+    mov rdi, r12
+    push rsi
+    call obj_incref
+    pop rsi
+.esa_field_swap:
+    mov rdi, [rbx + rsi]
+    mov [rbx + rsi], r12
+    test rdi, rdi
+    jz .esa_field_done
+    call obj_decref
+.esa_field_done:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.esa_suppress:
+    ; CPython's setter takes a bool and nothing else, down to the wording.
+    mov rdi, [rbp - ESA_VAL]
+    lea rcx, [rel bool_true]
+    cmp rdi, rcx
+    je .esa_suppress_true
+    lea rcx, [rel bool_false]
+    cmp rdi, rcx
+    jne .esa_suppress_bad
+    xor eax, eax
+    jmp .esa_suppress_store
+.esa_suppress_true:
+    mov eax, 1
+.esa_suppress_store:
+    mov [rbx + PyExceptionObject.exc_suppress], rax
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+.esa_suppress_bad:
+    RAISE exc_TypeError_type, "attribute value type must be bool"
 END_FUNC exc_setattr
 
 ; exc_isinstance(PyExceptionObject *exc, PyTypeObject *type) -> int (0/1)
@@ -2561,7 +2666,11 @@ exc_metatype:
     dq 0                    ; tp_clear
     dq 0 ; tp_dictoffset
 
-exc_meta_name: db "exception_metatype", 0
+; The metatype is implementation detail -- it exists so an exception class can
+; carry a tp_call of its own -- and it says `type`, as user_type_metatype
+; already did.  Naming itself made `type(ValueError)` print
+; <class 'exception_metatype'> where CPython prints <class 'type'>.
+exc_meta_name: db "type", 0
 
 ; Traceback type object (immortal)
 align 8

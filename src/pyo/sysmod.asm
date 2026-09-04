@@ -1376,6 +1376,9 @@ END_FUNC sys_intern_func
 
 section .rodata
 
+seh_not_exc_msg:
+    db "TypeError: print_exception(): Exception expected for value, ", 0
+seh_not_exc_end: db " found", 10, 0
 sm_sys:          db "sys", 0
 sm_modules:      db "modules", 0
 sm_path:         db "path", 0
@@ -1482,16 +1485,50 @@ DEF_FUNC sys_excepthook_func
     cmp rsi, 3
     jl .seh_args
     mov rdi, [rdi + 8]          ; args[1], the exception
-    V_TEST_PTR rdi, rax
-    ja .seh_bad
-    test rdi, rdi
+    ; "is a pointer" is not "is an exception": None is a pointer too, and
+    ; `sys.excepthook(*sys.exc_info())` outside an except block passes three
+    ; of them.  traceback_print read the exception's own fields off it.
+    push rdi
+    extern value_type
+    call value_type             ; a Value, which may be an immediate
+    pop rdi
+    test rax, rax
     jz .seh_bad
+    push rdi
+    push rax
+    mov rdi, rax
+    extern exc_BaseException_type
+    lea rsi, [rel exc_BaseException_type]
+    extern type_is_subtype
+    call type_is_subtype
+    pop rsi                     ; the type
+    pop rdi                     ; the value
+    test eax, eax
+    jz .seh_not_exc
     extern traceback_print
     call traceback_print
     LOAD_NONE rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+.seh_not_exc:
+    ; CPython REPORTS this rather than raising it -- the hook is what runs
+    ; when there is nothing left to catch anything, so it prints the TypeError
+    ; on stderr and returns.  Same text, same place.  rsi = the type.
+    push rsi
+    extern tb_write_cstr
+    lea rdi, [rel seh_not_exc_msg]
+    call tb_write_cstr
+    pop rdi
+    mov rdi, [rdi + PyTypeObject.tp_name]
+    call tb_write_cstr
+    lea rdi, [rel seh_not_exc_end]
+    call tb_write_cstr
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
     ret
 .seh_bad:
     RAISE exc_TypeError_type, "excepthook(): Exception expected for value"
