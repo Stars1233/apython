@@ -270,3 +270,20 @@ print("ctx kinds:", sorted(set(type(c).__name__ for c in ctxs)))
 # CPython 3.12's AST nodes have object's repr, and say `ast`, not `_ast`.
 print(repr(ast.parse("x = 1").body[0]).split(" object at ")[0])
 print(ast.Assign.__module__, ast.AST.__module__, ast.Load.__module__)
+
+print("=== unparse, over the same constructs ===")
+# ast.unparse is a headline ast API and did not run at all until lib's
+# contextlib stopped being a stand-in whose contextmanager was a class -- a
+# class does not bind as a method, so `self.delimit(...)` inside the unparser
+# lost its self.  The round trip is a second oracle over the whole node model:
+# a field the parser fills in wrongly usually survives ast.dump and does not
+# survive being written back out and re-parsed.
+for src in EXPRS:
+    print(repr(src), "->", ast.unparse(ast.parse(src, mode="eval")))
+for src in STMTS:
+    out = ast.unparse(ast.parse(src))
+    print(repr(src), "->", repr(out))
+    # And what it writes must parse back to the same tree.
+    again = ast.unparse(ast.parse(out))
+    if again != out:
+        print("   NOT STABLE:", repr(again))

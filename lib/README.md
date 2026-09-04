@@ -14,9 +14,9 @@ repository (`../LICENSE`).
 
 | Origin | Files |
 |---|---|
-| CPython, unmodified | `abc.py`, `ast.py`, `_collections_abc.py`, `collections/abc.py`, `copyreg.py`, `enum.py`, `functools.py`, `genericpath.py`, `os.py`, `posixpath.py`, `re/`, `reprlib.py`, `selectors.py`, `socket.py`, `stat.py`, `types.py` |
+| CPython, unmodified | `abc.py`, `ast.py`, `_collections_abc.py`, `collections/abc.py`, `contextlib.py`, `copyreg.py`, `enum.py`, `functools.py`, `genericpath.py`, `os.py`, `posixpath.py`, `re/`, `reprlib.py`, `selectors.py`, `socket.py`, `stat.py`, `types.py` |
 | Generated from CPython | `_ast.py` |
-| CPython, modified for apython | `__future__.py`, `collections/`, `contextlib.py`, `copy.py`, `io.py`, `operator.py`, `pickle.py`, `string.py`, `unittest/`, `warnings.py`, `test/` |
+| CPython, modified for apython | `__future__.py`, `collections/`, `copy.py`, `io.py`, `operator.py`, `pickle.py`, `string.py`, `unittest/`, `warnings.py`, `test/` |
 | Written for apython | `_ast_build.py`, `atexit.py`, `binascii.py`, `_codecs.py`, `_collections.py`, `_contextvars.py`, `_io.py`, `itertools.py`, `_operator.py`, `_random.py`, `select.py`, `_socket.py`, `_string.py`, `_struct.py`, `_thread.py`, `_tokenize.py` |
 
 `re/` is the wrapper around the `_sre` engine, which is assembly.  It comes
@@ -60,3 +60,12 @@ and with them `os.py` and the four modules it needs -- `stat`, `posixpath`,
 `import os`.  IPv6, `sendmsg`/`recvmsg` and a real resolver are deliberately
 absent: `getaddrinfo` answers for dotted quads and for the names in
 `/etc/hosts`, and Lib/socket.py guards the rest with `hasattr`.
+
+`contextlib.py` was a stand-in until `functools`, `types` and
+`collections.abc` were all here; CPython's own file needs nothing else, and
+the stand-in was wrong in a way that mattered: its `contextmanager` was a
+CLASS, and a class instance is not a descriptor, so a decorated METHOD never
+bound its `self`.  `ast.unparse` is written on `with self.delimit("(", ")")`
+and could not run at all.  The real file also brings `ExitStack`,
+`suppress`, `closing`, `nullcontext` and the async half, none of which the
+stand-in had.
