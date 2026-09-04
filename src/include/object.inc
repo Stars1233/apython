@@ -597,6 +597,17 @@ struc AsyncTask
 endstruc
 
 ; Sleep awaitable object (for asyncio.sleep)
+; The awaitable _asynciocore.wait_fd() hands back: it yields the IO_WAIT
+; sentinel once, which suspends the running task on the descriptor, and is
+; exhausted after that.  The Python stream layer is built on it.
+struc IOWaitAwaitable
+    .ob_refcnt:  resq 1  ; +0
+    .ob_type:    resq 1  ; +8
+    .fd_events:  resq 1  ; +16: fd | (poll mask << 32), the sentinel payload
+    .yielded:    resd 1  ; +24: 0 = not yet, 1 = done
+    .pad:        resd 1  ; +28
+endstruc
+
 struc SleepAwaitable
     .ob_refcnt: resq 1  ; +0
     .ob_type:   resq 1  ; +8
@@ -648,22 +659,6 @@ struc WaitForAwaitable
     .gi_return_value: resq 1  ; +48: result Value (matches PyGenObject offset)
 endstruc
 
-; Async stream reader
-struc AsyncStreamReader
-    .ob_refcnt: resq 1  ; +0
-    .ob_type:   resq 1  ; +8
-    .fd:        resd 1  ; +16: socket file descriptor
-    .eof:       resd 1  ; +20: 1 = EOF reached
-endstruc
-
-; Async stream writer
-struc AsyncStreamWriter
-    .ob_refcnt: resq 1  ; +0
-    .ob_type:   resq 1  ; +8
-    .fd:        resd 1  ; +16: socket file descriptor
-    .closed:    resd 1  ; +20: 1 = closed
-endstruc
-
 ; ReadAwaitable — awaitable for stream.read(n)
 struc ReadAwaitable
     .ob_refcnt: resq 1  ; +0
@@ -691,22 +686,6 @@ struc DrainAwaitable
     .ob_type:   resq 1  ; +8
     .fd:        resd 1  ; +16: socket fd
     .yielded:   resd 1  ; +20: 0=not yet, 1=done
-endstruc
-
-; ConnectAwaitable — awaitable for open_connection
-struc ConnectAwaitable
-    .ob_refcnt: resq 1  ; +0
-    .ob_type:   resq 1  ; +8
-    .fd:        resd 1  ; +16: socket fd (already connected)
-    .yielded:   resd 1  ; +20: 0=not yet, 1=done
-endstruc
-
-; AcceptAwaitable — awaitable for start_server (non-blocking accept)
-struc AcceptAwaitable
-    .ob_refcnt:  resq 1  ; +0
-    .ob_type:    resq 1  ; +8
-    .listen_fd:  resd 1  ; +16: listening socket fd
-    .yielded:    resd 1  ; +20: 0=not yet, 1=done
 endstruc
 
 ; AsyncGenASend — wrapper returned by async_gen.__anext__()

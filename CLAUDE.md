@@ -198,6 +198,11 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   constant table, taking and returning sockaddrs as opaque bytes.  The socket
   type, the address packing and `select` are `lib/_socket.py` and
   `lib/select.py`, the same split as `_iocore`/`lib/_io.py`
+- `src/pyo/asyncmod.asm` — the `_asynciocore` module: the task type, the
+  event loop, `run`, `sleep`, `gather`, `wait_for`, `create_task`, and
+  `wait_fd`, the one primitive the stream layer needs.  `lib/asyncio.py` is
+  the other half, and the streams are Python over `lib/_socket.py` -- the
+  same split as `_iocore`/`lib/_io.py`
 - `src/itertools.asm` — the *iterator builtins* (`enumerate`, `zip`, `map`,
   `filter`, `reversed`, `sorted`, `chain`, `get_iterator`), not the `itertools`
   module, which is `lib/itertools.py`

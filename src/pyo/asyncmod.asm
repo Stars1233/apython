@@ -47,10 +47,6 @@ extern eventloop
 extern ready_enqueue
 extern list_new
 extern list_append
-extern asyncio_open_connection_func
-extern asyncio_start_server_func
-extern stream_reader_type
-extern stream_writer_type
 
 ; SleepAwaitable type methods
 
@@ -261,6 +257,95 @@ DEF_FUNC_BARE sleep_awaitable_traverse
     xor eax, eax
     ret
 END_FUNC sleep_awaitable_traverse
+
+;; ============================================================================
+;; asyncio_wait_fd_func(args, nargs) -- _asynciocore.wait_fd(fd, events)
+;;
+;; The primitive the Python stream layer is built on: an awaitable that
+;; suspends the running task until a descriptor is ready, and answers None.
+;; task_step already understands the IO_WAIT sentinel -- it is what
+;; src/pyo/asyncio_streams.asm yielded from four hand-written awaitables of
+;; its own -- so exposing it is all the event loop owes lib/asyncio.py.
+;;
+;; events is the poll mask: 1 for readable, 4 for writable, which is what the
+;; two backends submit and what CPython's add_reader/add_writer split into.
+;; ============================================================================
+AWF_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+DEF_FUNC asyncio_wait_fd_func, AWF_FRAME
+    push rbx
+    cmp rsi, 2
+    jne .awf_error
+
+    mov rax, [rdi]              ; fd
+    V_IS_INT rax, rcx
+    jb .awf_type_error
+    V_TO_I64 rax
+    test rax, rax
+    js .awf_value_error
+    mov rbx, rax
+    and rbx, 0xFFFFFFFF
+
+    mov rax, [rdi + 8]          ; the poll mask
+    V_IS_INT rax, rcx
+    jb .awf_type_error
+    V_TO_I64 rax
+    shl rax, 32
+    or rbx, rax
+
+    mov edi, IOWaitAwaitable_size
+    lea rsi, [rel io_wait_awaitable_type]
+    call gc_alloc               ; sets ob_refcnt and ob_type
+    mov [rax + IOWaitAwaitable.fd_events], rbx
+    mov dword [rax + IOWaitAwaitable.yielded], 0
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
+
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.awf_error:
+    RAISE exc_TypeError_type, "wait_fd() takes exactly 2 arguments"
+.awf_type_error:
+    RAISE exc_TypeError_type, "wait_fd() arguments must be int"
+.awf_value_error:
+    extern exc_ValueError_type
+    RAISE exc_ValueError_type, "wait_fd() fd must not be negative"
+END_FUNC asyncio_wait_fd_func
+
+DEF_FUNC_BARE io_wait_awaitable_iter_self
+    inc qword [rdi + PyObject.ob_refcnt]
+    mov rax, rdi
+    ret
+END_FUNC io_wait_awaitable_iter_self
+
+;; First call: yield the IO_WAIT sentinel, which suspends the task on the
+;; descriptor.  Second: exhausted, with None as the value -- readiness is the
+;; whole answer, and what to do about it is the caller's business.
+DEF_FUNC_BARE io_wait_awaitable_iternext
+    cmp dword [rdi + IOWaitAwaitable.yielded], 0
+    jne .iwa_done
+    mov dword [rdi + IOWaitAwaitable.yielded], 1
+    mov rax, [rdi + IOWaitAwaitable.fd_events]
+    or rax, [rel v_iowait_lo]
+    ret
+.iwa_done:
+    RET_NULL
+    ret
+END_FUNC io_wait_awaitable_iternext
+
+DEF_FUNC_BARE io_wait_awaitable_dealloc
+    jmp gc_dealloc              ; tail call; nothing to release
+END_FUNC io_wait_awaitable_dealloc
+
+DEF_FUNC_BARE io_wait_awaitable_traverse
+    xor eax, eax
+    ret
+END_FUNC io_wait_awaitable_traverse
 
 ;; ============================================================================
 ;; asyncio_wait_for_func(args, nargs) — asyncio.wait_for(coro, timeout)
@@ -1118,29 +1203,13 @@ DEF_FUNC asyncio_module_create
     pop rdi
     call obj_decref
 
-    ; asyncio.open_connection
-    lea rdi, [rel asyncio_open_connection_func]
-    lea rsi, [rel am_open_connection]
+    ; _asynciocore.wait_fd -- the one primitive lib/asyncio.py's stream layer
+    ; needs from the loop: suspend this task until a descriptor is ready.
+    lea rdi, [rel asyncio_wait_fd_func]
+    lea rsi, [rel am_wait_fd]
     call builtin_func_new
     push rax
-    lea rdi, [rel am_open_connection]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
-
-    ; asyncio.start_server
-    lea rdi, [rel asyncio_start_server_func]
-    lea rsi, [rel am_start_server]
-    call builtin_func_new
-    push rax
-    lea rdi, [rel am_start_server]
+    lea rdi, [rel am_wait_fd]
     call str_from_cstr_heap
     push rax
     mov rdi, r12
@@ -1188,28 +1257,6 @@ DEF_FUNC asyncio_module_create
     pop rdi
     call obj_decref
 
-    ; asyncio.StreamReader (type)
-    lea rdi, [rel am_stream_reader]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    lea rdx, [rel stream_reader_type]
-    call dict_set
-    pop rdi
-    call obj_decref
-
-    ; asyncio.StreamWriter (type)
-    lea rdi, [rel am_stream_writer]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    lea rdx, [rel stream_writer_type]
-    call dict_set
-    pop rdi
-    call obj_decref
-
     ; Create module object
     lea rdi, [rel am_asyncio]
     call str_from_cstr_heap
@@ -1237,26 +1284,55 @@ section .rodata
 align 8
 async_1e9: dq 0x41cdcd6500000000   ; 1e9 as IEEE 754 double
 
-am_asyncio:          db "asyncio", 0
+am_asyncio:          db "_asynciocore", 0
 am_run:              db "run", 0
 am_sleep:            db "sleep", 0
 am_create_task:      db "create_task", 0
 am_gather:           db "gather", 0
 am_get_running_loop: db "get_running_loop", 0
-am_open_connection:  db "open_connection", 0
-am_start_server:     db "start_server", 0
 am_wait_for:         db "wait_for", 0
+am_wait_fd:          db "wait_fd", 0
 am_cancelled_error:  db "CancelledError", 0
 am_timeout_error:    db "TimeoutError", 0
 am_task:             db "Task", 0
-am_stream_reader:    db "StreamReader", 0
-am_stream_writer:    db "StreamWriter", 0
 
+io_wait_awaitable_name: db "IOWaitAwaitable", 0
 sleep_awaitable_name: db "SleepAwaitable", 0
 gather_awaitable_name: db "_GatherAwaitable", 0
 wait_for_awaitable_name: db "WaitForAwaitable", 0
 
 section .data
+
+align 8
+io_wait_awaitable_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq io_wait_awaitable_name   ; tp_name
+    dq IOWaitAwaitable_size     ; tp_basicsize
+    dq io_wait_awaitable_dealloc ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq io_wait_awaitable_iter_self ; tp_iter
+    dq io_wait_awaitable_iternext  ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq TYPE_FLAG_HAVE_GC        ; tp_flags
+    dq 0                        ; tp_bases
+    dq io_wait_awaitable_traverse ; tp_traverse
+    dq 0                        ; tp_clear
+    dq 0                        ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 align 8
 sleep_awaitable_type:

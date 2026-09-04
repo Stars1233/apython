@@ -7,7 +7,6 @@ ok aifc
 ok _aix_support
 ok argparse
 ok ast
-ok asyncio
 ok base64
 ok bisect
 ok calendar

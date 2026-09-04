@@ -23,6 +23,7 @@ test_async_gen_sleep
 test_async_iterator_protocol
 test_async_many_tasks
 test_async_run
+test_async_streams
 test_async_tasks
 test_async_wait_for
 test_async_with

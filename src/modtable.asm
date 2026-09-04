@@ -39,7 +39,7 @@ section .rodata
 bm_n_builtins: db "builtins", 0
 bm_n_sys:      db "sys", 0
 bm_n_time:     db "time", 0
-bm_n_asyncio:  db "asyncio", 0
+bm_n_asyncio:  db "_asynciocore", 0
 bm_n_sre:      db "_sre", 0
 bm_n_abc:      db "_abc", 0
 bm_n_errno:    db "errno", 0
@@ -57,11 +57,11 @@ global builtin_module_table
 ; rows that would -- sys and builtins -- are wired before the loop runs.
 builtin_module_table:
     dq bm_n_abc,      abc_module_create
+    dq bm_n_asyncio,  asyncio_module_create
     dq bm_n_io,       io_module_create
     dq bm_n_socket,   socket_module_create
     dq bm_n_sre,      sre_module_create
     dq bm_n_weakref,  weakref_module_create
-    dq bm_n_asyncio,  asyncio_module_create
     dq bm_n_builtins, 0                 ; wraps builtins_dict_global
     dq bm_n_errno,    errno_module_create
     dq bm_n_gc,       gc_module_create

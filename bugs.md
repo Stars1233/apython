@@ -73,16 +73,6 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **asyncio's stream layer is a stub, and now an unnecessary one.**
-  `src/pyo/asyncio_streams.asm` predates any socket support: it hard-codes
-  127.0.0.1 and ignores the `host` argument it is given, discards what
-  `connect` returns, reads into a fixed stack buffer, hands back a `str`
-  where CPython hands back `bytes`, and raises OSErrors built from fixed
-  strings with no errno -- so `except ConnectionRefusedError` cannot catch
-  one.  It has no test.  There is a real socket layer under it now
-  (`_socketcore`, `lib/_socket.py`), and the stream types should be rewritten
-  on top of it rather than on raw syscalls of their own.
-
 - **A classmethod on a builtin type reprs as a bound method.**  Ordinary
   methods, slot wrappers and getsets all name themselves and their owner now;
   `int.from_bytes`, `float.fromhex` and `str.maketrans` are wrapped in a
