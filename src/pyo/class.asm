@@ -3386,7 +3386,6 @@ tga_name_str:       db "__name__", 0
 method_name_str:    db "method", 0
 object_name_str:    db "object", 0
 user_type_name_str: db "type", 0
-super_name_str:     db "super", 0
 
 ; user_type_metatype - metatype for user-defined classes
 ; When accessing Foo.x, we go through Foo->ob_type->tp_getattr = type_getattr
@@ -3464,16 +3463,6 @@ object_type:
     dq instance_clear                        ; tp_clear
     dq 0           ; tp_dictoffset
 
-; super_type - placeholder for the 'super' builtin
-; LOAD_SUPER_ATTR pops and discards this; it just needs to be loadable.
-align 8
-global super_type
-super_type:
-    dq 1                        ; ob_refcnt (immortal)
-    dq super_type               ; ob_type (self-referential)
-    dq super_name_str           ; tp_name
-    dq TYPE_OBJECT_SIZE         ; tp_basicsize
-    times 23 dq 0               ; remaining tp_* fields
 
 ; method_type - type descriptor for bound methods
 align 8

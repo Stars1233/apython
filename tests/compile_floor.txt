@@ -374,6 +374,7 @@ test_subclasses
 test_subclass_item_slots
 test_sum_protocol
 test_super_descriptors
+test_super_object
 test_syntax_error_args
 test_syntax_error_location
 test_syntax_error_offset

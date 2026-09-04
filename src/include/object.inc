@@ -458,6 +458,20 @@ struc PyCellObject
     .ob_ref:    resq 1    ; +16: contained Value (0 if empty)
 endstruc
 
+; super object (src/pyo/super.asm).  CPython's three fields, and the same
+; names for them: __thisclass__ is where the MRO search starts FROM, __self__
+; is the instance the result binds to, and __self_class__ is whose MRO is
+; searched.  The third is not redundant -- it is the whole point of super in a
+; diamond, where the class after B in type(self).__mro__ is a sibling of B and
+; not one of its bases at all.
+struc PySuperObject
+    .ob_refcnt:   resq 1  ; +0
+    .ob_type:     resq 1  ; +8
+    .su_type:     resq 1  ; +16: __thisclass__, owned
+    .su_obj:      resq 1  ; +24: __self__, owned, or 0 for super(B)
+    .su_obj_type: resq 1  ; +32: __self_class__, owned, or 0
+endstruc
+
 ; Bound method
 struc PyMethodObject
     .ob_refcnt: resq 1

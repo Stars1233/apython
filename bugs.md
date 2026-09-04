@@ -14,20 +14,21 @@ reasoning that chose them and what changing one would cost.
 
 ## Correctness
 
-- **`super` is not an object.**  The zero- and two-argument forms both work
-  written as `super(...).attr`, because the compiler emits `LOAD_SUPER_ATTR`
-  for exactly that shape and the opcode does the MRO walk itself.  What does
-  not exist is a super *object*: `s = super()` and `s = super(B, self)` both
-  raise "object is not callable", because `super_type` is a placeholder with
-  no `tp_call`, no `tp_new` and no fields -- a stand-in that
-  `LOAD_SUPER_ATTR` pops and discards.  Anything that stores one, passes one,
-  or reaches it through `getattr` fails.  `super(B, B).m` also answers a
-  bound method where CPython answers the plain function.
+- **Comprehensions are not inlined, so PEP 709's effects are missing.**
+  CPython 3.12 runs a list, dict or set comprehension in the *enclosing*
+  frame; here each still gets a code object and a frame of its own.  Three
+  things follow.  `sys._getframe().f_code.co_name` inside one answers
+  `<listcomp>` rather than the enclosing function's name, and a traceback
+  through one has an extra entry.  A name the enclosing scope can see but did
+  not make a cell -- `__class__` is the one that matters -- is a NameError
+  inside the comprehension, so `[super().m() for _ in r]` in a method works
+  under CPython and does not here.  And the comprehension's own iteration
+  variable does not leak, which is the one part that already matches, because
+  our version has a scope to keep it in.
 
-  The fix is a real three-field type and a `tp_getattr` doing the walk that
-  `op_load_super_attr` already does inline, plus the frame introspection the
-  zero-argument form needs: CPython reads the `__class__` cell and the first
-  positional argument out of the calling frame.
+  Inlining means the comprehension's locals becoming the enclosing function's,
+  with the shadowed ones saved and restored around it, which is a symbol-table
+  change as much as a codegen one.
 
 - **`str.encode` and `bytes.decode` know only utf-8, ascii and latin-1.**
   Any other name is a LookupError, where CPython would find the codec through
