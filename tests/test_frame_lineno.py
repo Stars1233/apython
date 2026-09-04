@@ -105,7 +105,9 @@ except ValueError:
     tb = sys.exc_info()[2]
     while tb.tb_next is not None:
         tb = tb.tb_next
-    print("tb_lasti", tb.tb_lasti)
+    # Not the value: the offset depends on which compiler produced the
+    # bytecode, and this file is run from source as well as from a .pyc.
+    print("tb_lasti in range:", 0 < tb.tb_lasti < 200)
     print("frame agrees:", tb.tb_frame.f_lasti == tb.tb_lasti)
     print("even:", tb.tb_lasti % 2 == 0)
     print("line", tb.tb_lineno)
