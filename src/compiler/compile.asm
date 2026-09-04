@@ -50,6 +50,7 @@ extern str_new_heap
 
 extern asm_assemble
 extern ast_obj
+extern ast_at
 extern ast_obj_at
 extern cg_const
 extern cg_emit
@@ -468,6 +469,20 @@ DEF_FUNC compile_ast_raw, CAR_FRAME
     je .car_parse_eval
     mov rdi, rbx
     call par_module
+    test rax, rax
+    jz .car_failed
+    ; "single" is exec with a different root: CPython's is Interactive, whose
+    ; body is a statement list exactly as Module's is, so the node the parser
+    ; already built only needs its kind changed.  Nothing compiles this tree,
+    ; so the kind is never dispatched on.
+    cmp qword [rbp - CAR_MODE], CMODE_SINGLE
+    jne .car_parsed
+    push rax
+    mov rdi, rbx
+    mov esi, eax
+    call ast_at
+    mov byte [rax + AstNode.kind], AST_INTERACTIVE
+    pop rax
     jmp .car_parsed
 .car_parse_eval:
     mov rdi, rbx
@@ -2000,7 +2015,8 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     jne .bad_mode
 
     ; "eval", "exec" or "single".  Interactive echo is not reproducible here --
-    ; apython has no PRINT_EXPR -- so "single" compiles as "exec".
+    ; apython has no PRINT_EXPR -- so "single" compiles as "exec", and differs
+    ; only in the AST root PyCF_ONLY_AST hands back.
     mov ecx, CMODE_EXEC
     cmp qword [r13 + PyStrObject.ob_size], 4
     jne .check_single
@@ -2022,6 +2038,7 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     mov eax, [r13 + PyStrObject.data + 2]
     cmp eax, 'ngle'
     jne .unsupported_mode
+    mov ecx, CMODE_SINGLE
 .have_mode:
     mov [rbp - CO_MODE], rcx
     lea rdi, [rbx + PyStrObject.data]

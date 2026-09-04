@@ -273,6 +273,8 @@ AST_PAT_KEYWORD equ 79   ; a=obj index (name) b=pattern
 AST_PAT_OR      equ 80   ; clist=alternatives
 AST_PAT_AS      equ 81   ; a=pattern (0 = wildcard) b=obj index (name)
 
+AST_INTERACTIVE equ 82   ; clist=body    (the "single" mode root); produced
+                         ; only by compile_ast_raw, never compiled
 AST_COUNT       equ 88
 
 ; AstNode.subkind for expression context
@@ -409,9 +411,13 @@ struc CompErr
     .pad:    resd 1  ; +28
 endstruc
 
-; Compilation modes, matching CPython's start symbols.
+; Compilation modes, matching CPython's start symbols.  SINGLE compiles
+; exactly as EXEC -- there is no PRINT_EXPR here, so the interactive echo is
+; not reproducible -- and differs only in the root node the AST gets, which is
+; the one thing about it that IS observable.
 CMODE_EXEC   equ 0
 CMODE_EVAL   equ 1
+CMODE_SINGLE equ 2
 
 ; The parser's own recursion guard.  apython's recursion_depth counts Python
 ; frames only, so deeply nested parentheses would otherwise blow the machine

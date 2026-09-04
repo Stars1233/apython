@@ -44,6 +44,7 @@ FUNCTIONDEF, CLASSDEF, TRY, HANDLER, WITH, WITHITEM = range(62, 68)
 ARGUMENTS, ARG, MATCH, EXTRA, DECORATED = range(68, 73)
 (CASE, PAT_VALUE, PAT_CAPTURE, PAT_SEQUENCE, PAT_MAPPING, PAT_CLASS,
  PAT_KEYWORD, PAT_OR, PAT_AS) = range(73, 82)
+INTERACTIVE = 82
 
 # Raw tuple slots.
 K, SUB, LINE, COL, ELINE, ECOL, A, B, C, CH = range(10)
@@ -324,6 +325,12 @@ def _b_expression(r, p):
     return _ast.Expression(_node(r[A]))
 
 
+def _b_interactive(r, p):
+    # mode="single".  Module's body and Interactive's are the same list; the
+    # parser hands back the one node with a different kind on it.
+    return _ast.Interactive(_each(r[CH]))
+
+
 def _b_expr_stmt(r, p):
     return _ast.Expr(_node(r[A]), **p)
 
@@ -562,7 +569,8 @@ BUILDERS = {
     FORMATTEDVALUE: _b_formattedvalue, LISTCOMP: _b_listcomp,
     SETCOMP: _b_setcomp, DICTCOMP: _b_dictcomp, GENEXP: _b_genexp,
     COMPREHENSION: _b_comprehension,
-    MODULE: _b_module, EXPRESSION: _b_expression, EXPR_STMT: _b_expr_stmt,
+    MODULE: _b_module, EXPRESSION: _b_expression, INTERACTIVE: _b_interactive,
+    EXPR_STMT: _b_expr_stmt,
     ASSIGN: _b_assign, AUGASSIGN: _b_augassign, ANNASSIGN: _b_annassign,
     IF: _b_if, WHILE: _b_while, FOR: _b_for, PASS: _b_pass, BREAK: _b_break,
     CONTINUE: _b_continue, RETURN: _b_return, DELETE: _b_delete,

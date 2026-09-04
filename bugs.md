@@ -158,6 +158,16 @@ one-line fix.
   tree for that reason and no other.  Moving it means the symbol table and the
   code generator mangling instead, where CPython does it.
 
+- **`ast.parse` is missing two of its arguments and one of its modes.**
+  `type_comments=True` collects nothing, because the tokenizer discards
+  comments and has nowhere to put a `# type:` one; `mode="func_type"` is a
+  ValueError, because there is no `(int, str) -> bool` start symbol; and
+  `mode="single"` accepts more than CPython's does -- its grammar is
+  `NEWLINE | simple_stmt | compound_stmt NEWLINE`, so `def f(): pass` without
+  a trailing newline and the empty string are both syntax errors there and
+  are accepted here.  The tree `single` produces is right: it is
+  `Interactive`, and it compiles as `exec` does.
+
 - **PEP 695 type parameters are skipped, so `TypeAlias`, `TypeVar`,
   `ParamSpec` and `TypeVarTuple` never appear in the AST.**  The parser
   accepts the syntax by counting brackets and discarding what is inside, so

@@ -269,6 +269,25 @@ print("ctx kinds:", sorted(set(type(c).__name__ for c in ctxs)))
 print(repr(ast.parse("x = 1").body[0]).split(" object at ")[0])
 print(ast.Assign.__module__, ast.AST.__module__, ast.Load.__module__)
 
+print("=== mode='single' has a root of its own ===")
+# CPython's is Interactive, whose body is a statement list exactly as Module's
+# is; this answered Module.  What single mode ACCEPTS is a narrower grammar
+# there than here -- `def f(): pass` without a trailing newline, and the empty
+# string, are syntax errors in CPython and not here -- which is in bugs.md, so
+# every case below is one both interpreters take.
+for src in ["x = 1", "1 + 2", "def f(): pass\n", "if x:\n    pass\n",
+            "x = 1; y = 2", "class C: pass\n", "while 0: pass\n"]:
+    tree = ast.parse(src, mode="single")
+    print(repr(src), type(tree).__name__, ast.dump(tree))
+print(ast.dump(compile("x = 1", "<s>", "single", ast.PyCF_ONLY_AST),
+               include_attributes=True))
+print(type(ast.parse("x = 1")).__name__,
+      type(ast.parse("x", mode="eval")).__name__)
+# And it still COMPILES, as exec does.
+_ns = {}
+exec(compile("single_mode_result = 41 + 1", "<s>", "single"), _ns)
+print(_ns["single_mode_result"])
+
 print("=== unparse, over the same constructs ===")
 # ast.unparse is a headline ast API and did not run at all until lib's
 # contextlib stopped being a stand-in whose contextmanager was a class -- a
