@@ -138,6 +138,188 @@ DEF_FUNC_BARE par_advance
 END_FUNC par_advance
 
 ;; ============================================================================
+;; par_target_noun(rdi = Comp*, esi = an expression node) -> rax = the noun
+;; CPython names it by in "cannot assign to X"
+;;
+;; CPython's _PyPegen_get_expr_name.  The noun is not decoration: it is the
+;; only part of the message that says WHICH of several targets on a line was
+;; the bad one.  Anything not listed is an "expression", as it is there.
+;; ============================================================================
+global par_target_noun
+DEF_FUNC par_target_noun, 16       ; + 0 pushes = 16, 16-aligned
+    call ast_at
+    movzx eax, byte [rax + AstNode.kind]
+    cmp eax, AST_CONST
+    je .tn_literal
+    cmp eax, AST_JOINEDSTR
+    je .tn_fstring
+    cmp eax, AST_CALL
+    je .tn_call
+    cmp eax, AST_LAMBDA
+    je .tn_lambda
+    cmp eax, AST_COMPARE
+    je .tn_comparison
+    cmp eax, AST_IFEXP
+    je .tn_conditional
+    cmp eax, AST_LISTCOMP
+    je .tn_listcomp
+    cmp eax, AST_SETCOMP
+    je .tn_setcomp
+    cmp eax, AST_DICTCOMP
+    je .tn_dictcomp
+    cmp eax, AST_GENEXP
+    je .tn_genexp
+    cmp eax, AST_DICT
+    je .tn_dict
+    cmp eax, AST_SET
+    je .tn_set
+    cmp eax, AST_YIELD
+    je .tn_yield
+    cmp eax, AST_YIELDFROM
+    je .tn_yield
+    cmp eax, AST_AWAIT
+    je .tn_await
+    cmp eax, AST_BOOLOP
+    je .tn_expression
+    CSTRING rax, "expression"
+    leave
+    ret
+.tn_literal:
+    CSTRING rax, "literal"
+    leave
+    ret
+.tn_fstring:
+    CSTRING rax, "f-string expression"
+    leave
+    ret
+.tn_call:
+    CSTRING rax, "function call"
+    leave
+    ret
+.tn_lambda:
+    CSTRING rax, "lambda"
+    leave
+    ret
+.tn_comparison:
+    CSTRING rax, "comparison"
+    leave
+    ret
+.tn_conditional:
+    CSTRING rax, "conditional expression"
+    leave
+    ret
+.tn_listcomp:
+    CSTRING rax, "list comprehension"
+    leave
+    ret
+.tn_setcomp:
+    CSTRING rax, "set comprehension"
+    leave
+    ret
+.tn_dictcomp:
+    CSTRING rax, "dict comprehension"
+    leave
+    ret
+.tn_genexp:
+    CSTRING rax, "generator expression"
+    leave
+    ret
+.tn_dict:
+    CSTRING rax, "dict literal"
+    leave
+    ret
+.tn_set:
+    CSTRING rax, "set display"
+    leave
+    ret
+.tn_yield:
+    CSTRING rax, "yield expression"
+    leave
+    ret
+.tn_await:
+    CSTRING rax, "await expression"
+    leave
+    ret
+.tn_expression:
+    CSTRING rax, "expression"
+    leave
+    ret
+END_FUNC par_target_noun
+
+;; ============================================================================
+;; par_bad_target(rdi = Comp*, esi = the offending target node,
+;;                rdx = the tail, or 0 for none) -> rax = 0
+;;
+;; "cannot assign to literal here. Maybe you meant '==' instead of '='?" --
+;; CPython's wording, and CPython's span, which covers the target rather than
+;; pointing at whatever token the parser had reached when it noticed.
+;; ============================================================================
+PBT_COMP equ 8
+PBT_NODE equ 16
+PBT_TAIL equ 24
+PBT_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+global par_bad_target
+DEF_FUNC par_bad_target, PBT_FRAME
+    mov [rbp - PBT_COMP], rdi
+    mov [rbp - PBT_NODE], rsi
+    mov [rbp - PBT_TAIL], rdx
+
+    extern comp_msg_start
+    extern comp_msg_cstr
+    call comp_msg_start
+    push rax                    ; the buffer, which becomes the message
+    mov rdi, rax
+    CSTRING rsi, "cannot assign to "
+    call comp_msg_cstr
+    push rax
+    mov rdi, [rbp - PBT_COMP]
+    mov esi, [rbp - PBT_NODE]
+    call par_target_noun
+    mov rsi, rax
+    pop rdi
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rbp - PBT_TAIL]
+    test rsi, rsi
+    jnz .pbt_tail
+    CSTRING rsi, ""
+.pbt_tail:
+    call comp_msg_cstr
+
+    ; The span: the target's own start, and its end from the span table.
+    mov rdi, [rbp - PBT_COMP]
+    mov esi, [rbp - PBT_NODE]
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov r8d, [rax + AstNode.col]
+    push rcx
+    push r8
+    mov rdi, [rbp - PBT_COMP]
+    mov esi, [rbp - PBT_NODE]
+    extern ast_span_at
+    call ast_span_at
+    pop r8
+    pop rcx
+    mov r9d, ecx
+    lea r10d, [r8d + 1]
+    test rax, rax
+    jz .pbt_span
+    cmp dword [rax + AstSpan.end_lineno], -1
+    je .pbt_span
+    mov r9d, [rax + AstSpan.end_lineno]
+    mov r10d, [rax + AstSpan.end_col]
+.pbt_span:
+    pop rdx                     ; the message
+    mov rdi, [rbp - PBT_COMP]
+    lea rsi, [rel exc_SyntaxError_type]
+    extern comp_error_span
+    call comp_error_span
+    xor eax, eax
+    leave
+    ret
+END_FUNC par_bad_target
+
+;; ============================================================================
 ;; par_syntax_error(Comp *c, const char *msg) -> rax = 0
 ;; Stamps the message with the current token's position.
 ;; ============================================================================

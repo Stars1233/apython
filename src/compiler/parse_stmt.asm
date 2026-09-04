@@ -31,6 +31,9 @@ extern exc_SyntaxError_type
 extern comp_msg_start
 extern comp_msg_cstr
 extern ap_strcmp
+extern par_bad_target
+extern comp_msg_i64
+extern comp_error_span
 extern comp_error
 extern comp_intern
 extern buf_free
@@ -235,6 +238,7 @@ PE2_MARK  equ 32
 PE2_OP    equ 40
 PE2_NODE  equ 48
 PE2_PAREN equ 56         ; 1 when the statement began with '(' -- see .annassign
+PE2_BAD   equ 64         ; the target an assignment was refused for
 PE2_FRAME equ 72         ; + 1 push = 80
 DEF_FUNC par_expr_stmt, PE2_FRAME
     push rbx
@@ -316,6 +320,7 @@ DEF_FUNC par_expr_stmt, PE2_FRAME
     push rdx
     mov rax, [rbx + Comp.pending + Buf.data]
     mov esi, [rax + rdx*4]
+    mov [rbp - PE2_BAD], rsi
     mov rdi, rbx
     mov edx, CTX_STORE
     call ast_set_ctx
@@ -350,6 +355,7 @@ DEF_FUNC par_expr_stmt, PE2_FRAME
     call par_advance                    ; consume the operator
     mov rdi, rbx
     mov rsi, [rbp - PE2_FIRST]
+    mov [rbp - PE2_BAD], rsi
     mov edx, CTX_STORE
     call ast_set_ctx
     test eax, eax
@@ -386,6 +392,7 @@ DEF_FUNC par_expr_stmt, PE2_FRAME
     call par_advance                    ; consume ':'
     mov rdi, rbx
     mov rsi, [rbp - PE2_FIRST]
+    mov [rbp - PE2_BAD], rsi
     mov edx, CTX_STORE
     call ast_set_ctx
     test eax, eax
@@ -442,9 +449,13 @@ DEF_FUNC par_expr_stmt, PE2_FRAME
     ret
 
 .bad_target:
+    ; CPython names the kind of thing that cannot be a target, spans the
+    ; target itself, and -- because an `=` where `==` was meant is the usual
+    ; cause -- says so.
     mov rdi, rbx
-    CSTRING rsi, "cannot assign to that expression"
-    call par_syntax_error
+    mov esi, [rbp - PE2_BAD]
+    CSTRING rdx, " here. Maybe you meant '==' instead of '='?"
+    call par_bad_target
     jmp .fail
 .bad_aug_target:
     mov rdi, rbx
@@ -1291,6 +1302,92 @@ DEF_FUNC_LOCAL ps_from, PFR_FRAME
     ret
 END_FUNC ps_from
 
+
+;; ============================================================================
+;; SUITE_FOR text, line -- what an indented block is expected AFTER
+;;
+;; CPython says "expected an indented block after 'if' statement on line 3",
+;; and the statement is the one thing par_suite cannot see: it is called from
+;; fourteen places and takes only a Comp*.  Two file-local words carry it,
+;; which is safe because par_suite reads them before it can descend into a
+;; nested suite that would overwrite them.
+;; ============================================================================
+%macro SUITE_FOR 2              ; %1 = the text, %2 = a source of the line
+    CSTRING rax, %1
+    mov [rel psu_what], rax
+    mov eax, %2
+    mov [rel psu_line], eax
+%endmacro
+
+;; SUITE_FOR_HERE text -- the same, for a clause that is its own statement.
+;; `else`, `except` and `finally` are blamed on THEIR line, not on the line
+;; the `if` or the `try` opened on, so the line comes from the token the
+;; parser is looking at.  Clobbers rax and rdi; rbx must be the Comp*.
+%macro SUITE_FOR_HERE 1
+    mov rdi, rbx
+    call par_peek
+    mov eax, [rax + Token.lineno]
+    mov [rel psu_line], eax
+    CSTRING rax, %1
+    mov [rel psu_what], rax
+%endmacro
+
+section .bss
+psu_what: resq 1
+psu_line: resd 1
+psu_pad:  resd 1
+section .text
+
+;; ============================================================================
+;; psu_no_block(Comp *c) -> rax = 0, always
+;;
+;; "expected an indented block after <what> on line <n>", spanning the token
+;; that turned up instead -- CPython covers the whole of it, not its first
+;; character.
+;; ============================================================================
+PNB_COMP equ 8
+PNB_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL psu_no_block, PNB_FRAME
+    mov [rbp - PNB_COMP], rdi
+    call comp_msg_start
+    push rax
+    mov rdi, rax
+    CSTRING rsi, "expected an indented block"
+    call comp_msg_cstr
+    cmp qword [rel psu_what], 0
+    je .pnb_done
+    mov rdi, rax
+    CSTRING rsi, " after "
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rel psu_what]
+    call comp_msg_cstr
+    mov rdi, rax
+    CSTRING rsi, " on line "
+    call comp_msg_cstr
+    mov rdi, rax
+    mov esi, [rel psu_line]
+    call comp_msg_i64
+.pnb_done:
+    pop rdx                     ; the message
+
+    mov rdi, [rbp - PNB_COMP]
+    push rdx
+    call par_peek
+    pop rdx
+    mov ecx, [rax + Token.lineno]
+    mov r8d, [rax + Token.col]
+    mov r9d, ecx
+    mov r10d, [rax + Token.len]
+    add r10d, r8d               ; the end of the token, not the next column
+    mov rdi, [rbp - PNB_COMP]
+    lea rsi, [rel exc_SyntaxError_type]
+    call comp_error_span
+    xor eax, eax
+    leave
+    ret
+END_FUNC psu_no_block
+
 ;; ============================================================================
 ;; par_suite(Comp *c) -> rax = an AST_BLOCK node, 0 on error
 ;;
@@ -1335,11 +1432,15 @@ DEF_FUNC par_suite, PSU_FRAME
     mov rdi, rbx
     call par_advance                    ; the NEWLINE
     mov rdi, rbx
-    mov esi, TOK_INDENT
-    CSTRING rdx, "expected an indented block"
-    call par_expect
-    test eax, eax
-    jz .fail
+    call par_kind
+    cmp eax, TOK_INDENT
+    je .have_indent
+    mov rdi, rbx
+    call psu_no_block
+    jmp .fail
+.have_indent:
+    mov rdi, rbx
+    call par_advance
 .stmts:
     mov rdi, rbx
     call par_kind
@@ -1471,6 +1572,7 @@ DEF_FUNC_LOCAL ps_if, PIF_FRAME
     jz .fail
     mov [rbp - PIF_TEST], rax
 
+    SUITE_FOR "'if' statement", dword [rbp - PIF_LINE]
     mov rdi, rbx
     call par_suite
     test rax, rax
@@ -1485,6 +1587,7 @@ DEF_FUNC_LOCAL ps_if, PIF_FRAME
     cmp eax, TOK_ELSE
     jne .build
 
+    SUITE_FOR_HERE "'else' statement"
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
@@ -1559,6 +1662,7 @@ DEF_FUNC_LOCAL ps_while, PIF_FRAME
     jz .fail
     mov [rbp - PIF_TEST], rax
 
+    SUITE_FOR "'while' statement", dword [rbp - PIF_LINE]
     mov rdi, rbx
     call par_suite
     test rax, rax
@@ -1570,6 +1674,7 @@ DEF_FUNC_LOCAL ps_while, PIF_FRAME
     call par_kind
     cmp eax, TOK_ELSE
     jne .build
+    SUITE_FOR_HERE "'else' statement"
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
@@ -1637,6 +1742,7 @@ DEF_FUNC_LOCAL ps_for, PIF_FRAME
     jz .fail
     mov [rbp - PIF_NODE], rax           ; the iterable
 
+    SUITE_FOR "'for' statement", dword [rbp - PIF_LINE]
     mov rdi, rbx
     call par_suite
     test rax, rax
@@ -1648,6 +1754,7 @@ DEF_FUNC_LOCAL ps_for, PIF_FRAME
     call par_kind
     cmp eax, TOK_ELSE
     jne .build
+    SUITE_FOR_HERE "'else' statement"
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
@@ -2362,6 +2469,7 @@ DEF_FUNC_LOCAL ps_def, PDF_FRAME
     mov rdi, rbx
     call ast_mark
     mov [rbp - PDF_MARK], rax
+    SUITE_FOR "function definition", dword [rbp - PDF_LINE]
     mov rdi, rbx
     call par_suite_into
     test eax, eax
@@ -2426,11 +2534,15 @@ DEF_FUNC par_suite_into, 8
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
-    mov esi, TOK_INDENT
-    CSTRING rdx, "expected an indented block"
-    call par_expect
-    test eax, eax
-    jz .fail
+    call par_kind
+    cmp eax, TOK_INDENT
+    je .have_indent
+    mov rdi, rbx
+    call psu_no_block
+    jmp .fail
+.have_indent:
+    mov rdi, rbx
+    call par_advance
 .stmts:
     mov rdi, rbx
     call par_kind
@@ -2934,6 +3046,7 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     mov rdi, rbx
     call ast_mark
     mov [rbp - PT2_MARK], rax
+    SUITE_FOR "'try' statement", dword [rbp - PT2_LINE]
     mov rdi, rbx
     call par_suite_into
     test eax, eax
@@ -3005,6 +3118,7 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     mov rdi, rbx
     call ast_mark
     mov [rbp - PT2_BODY], rax
+    SUITE_FOR "'except' statement", dword [rbp - PT2_HLINE]
     mov rdi, rbx
     call par_suite_into
     test eax, eax
@@ -3044,6 +3158,7 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     call par_kind
     cmp eax, TOK_ELSE
     jne .finally_clause
+    SUITE_FOR_HERE "'else' statement"
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
@@ -3057,6 +3172,7 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     call par_kind
     cmp eax, TOK_FINALLY
     jne .check
+    SUITE_FOR_HERE "'finally' statement"
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
@@ -3223,6 +3339,7 @@ DEF_FUNC_LOCAL ps_with, PT2_FRAME
     mov qword [rbp - PT2_PAREN], 0
 
 .with_body:
+    SUITE_FOR "'with' statement", dword [rbp - PT2_LINE]
     mov rdi, rbx
     call par_suite
     test rax, rax
@@ -3327,6 +3444,7 @@ DEF_FUNC_LOCAL ps_class, PC_FRAME
     call ast_obj_at
     mov [rbx + Comp.private], rax
 
+    SUITE_FOR "class definition", dword [rbp - PC_LINE]
     mov rdi, rbx
     call par_suite_into
     push rax
