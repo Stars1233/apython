@@ -1153,7 +1153,17 @@ DEF_FUNC set_method_issubset
     jne .smss_error
 
     mov r14, [rdi]          ; self
-    mov r15, [rdi + 8]     ; other
+    ; The three predicates take any iterable, as the four builders beside them
+    ; do: `{1}.issubset([1])` read a list's header as a hash table.  It found
+    ; nothing occupied -- so issubset answered True for anything and isdisjoint
+    ; answered True for everything -- and a two-element list made the probe run
+    ; off the end of a table it had measured wrong, into "set: hash table
+    ; full", which is a fatal_error and not an exception.
+    mov rdi, [rdi + 8]
+    call set_coerce_operand
+    test rax, rax
+    jz .smss_fail
+    mov r15, rax            ; owned: the set itself, or one built from it
 
     mov r12, [r14 + PyDictObject.entries]
     mov r13, [r14 + PyDictObject.capacity]
@@ -1182,6 +1192,8 @@ DEF_FUNC set_method_issubset
     jmp .smss_loop
 
 .smss_true:
+    mov rdi, r15
+    call obj_decref
     RET_TRUE
     pop r15
     pop r14
@@ -1194,6 +1206,8 @@ DEF_FUNC set_method_issubset
 
 .smss_false:
     pop rcx                 ; balance the push in loop
+    mov rdi, r15
+    call obj_decref
     RET_FALSE
     pop r15
     pop r14
@@ -1202,6 +1216,17 @@ DEF_FUNC set_method_issubset
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.smss_fail:
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .smss_error:
@@ -1223,8 +1248,12 @@ DEF_FUNC set_method_issuperset
     cmp rsi, 2
     jne .smis_error
 
-    mov r14, [rdi + 8]     ; other (iterate this)
     mov r15, [rdi]          ; self (check contains)
+    mov rdi, [rdi + 8]     ; other (iterate this); see issubset above
+    call set_coerce_operand
+    test rax, rax
+    jz .smis_fail
+    mov r14, rax            ; owned
 
     mov r12, [r14 + PyDictObject.entries]
     mov r13, [r14 + PyDictObject.capacity]
@@ -1253,6 +1282,8 @@ DEF_FUNC set_method_issuperset
     jmp .smis_loop
 
 .smis_true:
+    mov rdi, r14
+    call obj_decref
     RET_TRUE
     pop r15
     pop r14
@@ -1265,6 +1296,8 @@ DEF_FUNC set_method_issuperset
 
 .smis_false:
     pop rcx
+    mov rdi, r14
+    call obj_decref
     RET_FALSE
     pop r15
     pop r14
@@ -1273,6 +1306,17 @@ DEF_FUNC set_method_issuperset
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.smis_fail:
+    xor eax, eax
+    xor edx, edx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .smis_error:
@@ -1295,7 +1339,11 @@ DEF_FUNC set_method_isdisjoint
     jne .smdj_error
 
     mov r14, [rdi]          ; self
-    mov r15, [rdi + 8]     ; other
+    mov rdi, [rdi + 8]     ; other; see issubset above
+    call set_coerce_operand
+    test rax, rax
+    jz .smdj_fail
+    mov r15, rax            ; owned
 
     mov r12, [r14 + PyDictObject.entries]
     mov r13, [r14 + PyDictObject.capacity]
@@ -1324,6 +1372,8 @@ DEF_FUNC set_method_isdisjoint
     jmp .smdj_loop
 
 .smdj_true:
+    mov rdi, r15
+    call obj_decref
     RET_TRUE
     pop r15
     pop r14
@@ -1336,6 +1386,8 @@ DEF_FUNC set_method_isdisjoint
 
 .smdj_false:
     pop rcx
+    mov rdi, r15
+    call obj_decref
     RET_FALSE
     pop r15
     pop r14
@@ -1344,6 +1396,17 @@ DEF_FUNC set_method_isdisjoint
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.smdj_fail:
+    xor eax, eax
+    xor edx, edx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .smdj_error:
