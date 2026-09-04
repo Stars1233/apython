@@ -63,16 +63,18 @@ section .text
 ;; Exception-related opcode handlers (inline in eval.asm for access to globals)
 ;; ============================================================================
 
-; op_push_exc_info (35) - Push exception info for try/except
-; TOS has the exception. Save the handled-exception state, install the new one.
-; Stack effect: exc -> prev_exc, exc
-;
-; The whole of the saved state is one word on the value stack, with None
-; standing for "nothing was being handled".  The global's reference goes with
-; it, so the stack slot owns it until POP_EXCEPT hands it back -- which is why
-; a generator suspended inside an except block keeps the caller's exception
-; alive on its own stack, and why frame_free releasing that stack is what
-; releases it if the generator never resumes.
+;; ============================================================================
+;; op_push_exc_info (35) - Push exception info for try/except
+;; TOS has the exception. Save the handled-exception state, install the new one.
+;; Stack effect: exc -> prev_exc, exc
+;;
+;; The whole of the saved state is one word on the value stack, with None
+;; standing for "nothing was being handled".  The global's reference goes with
+;; it, so the stack slot owns it until POP_EXCEPT hands it back -- which is why
+;; a generator suspended inside an except block keeps the caller's exception
+;; alive on its own stack, and why frame_free releasing that stack is what
+;; releases it if the generator never resumes.
+;; ============================================================================
 DEF_FUNC_BARE op_push_exc_info
     ; TOS = new exception
     VPOP rax                 ; rax = new exception
@@ -95,8 +97,10 @@ DEF_FUNC_BARE op_push_exc_info
     DISPATCH
 END_FUNC op_push_exc_info
 
-; op_pop_except (89) - Restore the previous handled-exception state
-; TOS = the exception to restore
+;; ============================================================================
+;; op_pop_except (89) - Restore the previous handled-exception state
+;; TOS = the exception to restore
+;; ============================================================================
 DEF_FUNC_BARE op_pop_except
     VPOP rax                 ; rax = exception to restore
 
@@ -122,9 +126,11 @@ DEF_FUNC_BARE op_pop_except
     DISPATCH
 END_FUNC op_pop_except
 
-; op_check_exc_match (36) - Check if exception matches a type
-; TOS = type to match against, TOS1 = exception
-; Push True/False, don't pop the exception
+;; ============================================================================
+;; op_check_exc_match (36) - Check if exception matches a type
+;; TOS = type to match against, TOS1 = exception
+;; Push True/False, don't pop the exception
+;; ============================================================================
 DEF_FUNC_BARE op_check_exc_match
     VPOP rsi                 ; rsi = type to match
     VPEEK rdi                ; rdi = exception (don't pop)
@@ -354,10 +360,12 @@ DEF_FUNC op_check_eg_match, CEM_FRAME
     DISPATCH
 END_FUNC op_check_eg_match
 
-; op_raise_varargs (130) - Raise an exception
-; arg 0: reraise current exception
-; arg 1: raise TOS
-; arg 2: raise TOS1 from TOS (chaining, simplified)
+;; ============================================================================
+;; op_raise_varargs (130) - Raise an exception
+;; arg 0: reraise current exception
+;; arg 1: raise TOS
+;; arg 2: raise TOS1 from TOS (chaining, simplified)
+;; ============================================================================
 DEF_FUNC_BARE op_raise_varargs
     cmp ecx, 0
     je .reraise
@@ -518,8 +526,10 @@ DEF_FUNC_BARE op_raise_varargs
     jmp .raise_exc_obj
 END_FUNC op_raise_varargs
 
-; op_reraise (119) - Re-raise the current exception
-; TOS = exception to re-raise
+;; ============================================================================
+;; op_reraise (119) - Re-raise the current exception
+;; TOS = exception to re-raise
+;; ============================================================================
 DEF_FUNC_BARE op_reraise
     ; Pop the exception from value stack
     VPOP_VAL rdi, r8

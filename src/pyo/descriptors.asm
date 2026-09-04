@@ -3126,7 +3126,9 @@ section .text
 ;; file is the only place that knows which of its fields are owned.
 ;; ============================================================================
 
-; ---- staticmethod_traverse / classmethod_traverse / property_traverse ----
+;; ============================================================================
+;; ---- staticmethod_traverse / classmethod_traverse / property_traverse ----
+;; ============================================================================
 DEF_FUNC staticmethod_traverse
     mov rdi, [rdi + PyStaticMethodObject.sm_callable]
     VISIT_PTR rdi

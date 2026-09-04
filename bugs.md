@@ -116,8 +116,11 @@ STYLE.md, listed so the gap is a known quantity rather than a surprise to
 whoever copies a neighbouring file.  Counts are deliberately absent -- grep
 gives a current one, and a number written here is wrong by the next commit.
 
-- **Functions with no separator or docblock at all**, and, among those that
-  have one, docblocks with no `->` signature line.  The signature is the only
-  part of a function's contract that nothing checks, so its absence is a real
-  gap rather than a cosmetic one.  This is the one item here a script cannot
-  finish: writing a signature means reading what the function actually returns.
+- **Functions with no docblock at all**, and, among those that have one,
+  docblocks with no `->` signature line.  The signature is the only part of a
+  function's contract that nothing checks, so its absence is a real gap rather
+  than a cosmetic one.  This is the one item here a script cannot finish:
+  writing a signature means reading what the function actually returns.  It is
+  measured now rather than estimated -- `tests/docblock_floor.txt` holds the
+  count per file and `lint.py`'s `check_docblocks` fails when one goes above
+  it, so what is left can only shrink.

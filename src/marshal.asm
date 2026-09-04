@@ -73,10 +73,10 @@ extern obj_incref
 ; Initial capacity for the reference list
 MARSHAL_REFS_INIT_CAP equ 64
 
-;--------------------------------------------------------------------------
-; marshal_read_byte() -> byte in al
-; Read one byte from marshal_buf[marshal_pos], increment marshal_pos.
-;--------------------------------------------------------------------------
+;; ============================================================================
+;; marshal_read_byte() -> byte in al
+;; Read one byte from marshal_buf[marshal_pos], increment marshal_pos.
+;; ============================================================================
 DEF_FUNC marshal_read_byte
 
     mov rax, [rel marshal_pos]
@@ -95,10 +95,10 @@ mread_byte_eof:
     lea rdi, [rel marshal_err_eof]
     call fatal_error
 
-;--------------------------------------------------------------------------
-; marshal_read_long() -> int32 in eax
-; Read 4 bytes little-endian from buffer.
-;--------------------------------------------------------------------------
+;; ============================================================================
+;; marshal_read_long() -> int32 in eax
+;; Read 4 bytes little-endian from buffer.
+;; ============================================================================
 DEF_FUNC marshal_read_long
 
     mov rax, [rel marshal_pos]
@@ -118,10 +118,10 @@ mread_long_eof:
     lea rdi, [rel marshal_err_eof]
     call fatal_error
 
-;--------------------------------------------------------------------------
-; marshal_read_long64() -> int64 in rax
-; Read 8 bytes little-endian from buffer.
-;--------------------------------------------------------------------------
+;; ============================================================================
+;; marshal_read_long64() -> int64 in rax
+;; Read 8 bytes little-endian from buffer.
+;; ============================================================================
 DEF_FUNC marshal_read_long64
 
     mov rax, [rel marshal_pos]
@@ -141,10 +141,10 @@ mread_long64_eof:
     lea rdi, [rel marshal_err_eof]
     call fatal_error
 
-;--------------------------------------------------------------------------
-; marshal_read_bytes(int64_t n) -> pointer to bytes in buffer (rax)
-; Returns pointer to current position in buffer, advances pos by n.
-;--------------------------------------------------------------------------
+;; ============================================================================
+;; marshal_read_bytes(int64_t n) -> pointer to bytes in buffer (rax)
+;; Returns pointer to current position in buffer, advances pos by n.
+;; ============================================================================
 DEF_FUNC marshal_read_bytes
 
     mov rsi, rdi               ; rsi = n
@@ -165,9 +165,9 @@ mread_bytes_eof:
     lea rdi, [rel marshal_err_eof]
     call fatal_error
 
-;--------------------------------------------------------------------------
-; marshal_init_refs() - Initialize the reference list
-;--------------------------------------------------------------------------
+;; ============================================================================
+;; marshal_init_refs() - Initialize the reference list
+;; ============================================================================
 DEF_FUNC marshal_init_refs
 
     mov qword [rel marshal_ref_count], 0
@@ -187,9 +187,9 @@ DEF_FUNC marshal_init_refs
     ret
 END_FUNC marshal_init_refs
 
-;--------------------------------------------------------------------------
-; marshal_add_ref(rdi=payload, rsi=tag) - Add fat value to reference list
-;--------------------------------------------------------------------------
+;; ============================================================================
+;; marshal_add_ref(rdi=payload, rsi=tag) - Add fat value to reference list
+;; ============================================================================
 DEF_FUNC marshal_add_ref
     push rbx
     push r12
@@ -228,10 +228,10 @@ DEF_FUNC marshal_add_ref
     ret
 END_FUNC marshal_add_ref
 
-;--------------------------------------------------------------------------
-; marshal_cleanup_refs() - DECREF all refs and reset count
-; Called after marshal_read_object completes to release refs array ownership.
-;--------------------------------------------------------------------------
+;; ============================================================================
+;; marshal_cleanup_refs() - DECREF all refs and reset count
+;; Called after marshal_read_object completes to release refs array ownership.
+;; ============================================================================
 DEF_FUNC marshal_cleanup_refs
     push rbx
     push r12
@@ -259,15 +259,15 @@ DEF_FUNC marshal_cleanup_refs
     ret
 END_FUNC marshal_cleanup_refs
 
-;--------------------------------------------------------------------------
-; marshal_read_object() -> rax = Value
-; Main marshal deserialization dispatcher.
-;
-; Register convention within this function and its handlers:
-;   rbx = type code (without FLAG_REF)
-;   r12 = FLAG_REF indicator (0 or 1)
-; Both are callee-saved and pushed in the prologue.
-;--------------------------------------------------------------------------
+;; ============================================================================
+;; marshal_read_object() -> rax = Value
+;; Main marshal deserialization dispatcher.
+;;
+;; Register convention within this function and its handlers:
+;; rbx = type code (without FLAG_REF)
+;; r12 = FLAG_REF indicator (0 or 1)
+;; Both are callee-saved and pushed in the prologue.
+;; ============================================================================
 DEF_FUNC marshal_read_object
     push rbx
     push r12
@@ -1431,9 +1431,11 @@ STAT_ST_SIZE    equ 48          ; offset of st_size
 ; open flags
 O_RDONLY        equ 0
 
-; pyc_read_file(const char *filename) -> PyObject*
-; Opens a .pyc file, reads it into memory, validates the header,
-; and returns the code object via marshal_read_object.
+;; ============================================================================
+;; pyc_read_file(const char *filename) -> PyObject*
+;; Opens a .pyc file, reads it into memory, validates the header,
+;; and returns the code object via marshal_read_object.
+;; ============================================================================
 DEF_FUNC pyc_read_file
     push rbx
     push r12

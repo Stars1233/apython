@@ -344,8 +344,10 @@ DEF_FUNC eval_frame
     ; Fall through to eval_dispatch
 END_FUNC eval_frame
 
-; eval_dispatch - Main dispatch point
-; Reads the next opcode and arg, advances rbx, and jumps to the handler.
+;; ============================================================================
+;; eval_dispatch - Main dispatch point
+;; Reads the next opcode and arg, advances rbx, and jumps to the handler.
+;; ============================================================================
 align 16
 DEF_FUNC_BARE eval_dispatch
     DISPATCH
@@ -371,8 +373,10 @@ DEF_FUNC_BARE eval_trace_thunk
     jmp [rdx + rax*8]
 END_FUNC eval_trace_thunk
 
-; eval_return - Return from eval_frame
-; rax contains the return value. Restores callee-saved regs and returns.
+;; ============================================================================
+;; eval_return - Return from eval_frame
+;; rax contains the return value. Restores callee-saved regs and returns.
+;; ============================================================================
 DEF_FUNC_BARE eval_return
     dec qword [rel recursion_depth]
     ; Restore caller's eval globals (reverse of save order)
@@ -497,11 +501,13 @@ END_FUNC trace_print_opcode
 ;; Exception unwind mechanism
 ;; ============================================================================
 
-; eval_exception_unwind - Called when an exception is raised
-; The exception object must already be stored in [current_exception].
-; This routine searches the exception table for a handler. If found,
-; it adjusts the value stack and jumps to the handler. If not found,
-; it returns NULL from eval_frame to propagate to the caller.
+;; ============================================================================
+;; eval_exception_unwind - Called when an exception is raised
+;; The exception object must already be stored in [current_exception].
+;; This routine searches the exception table for a handler. If found,
+;; it adjusts the value stack and jumps to the handler. If not found,
+;; it returns NULL from eval_frame to propagate to the caller.
+;; ============================================================================
 DEF_FUNC_BARE eval_exception_unwind
     ; eval_base_rsp lives in .bss, so it is 0 before the first eval_frame and
     ; again after the last one -- during startup, and during the shutdown
@@ -745,17 +751,19 @@ DEF_FUNC exc_install, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 END_FUNC exc_install
 
-; raise_exception(PyTypeObject *type, const char *msg_cstr)
-; Create an exception from a C string and begin unwinding.
-; Callable from opcode handlers - uses eval loop registers.
-; set_exception(rdi = exception type, rsi = message C string)
-;
-; raise_exception's first half, without the unwind.  raise_exception tail-jumps
-; into eval_exception_unwind, which abandons the C stack -- so a helper that
-; holds an owned reference cannot raise and still release it, and every one
-; that tried leaked.  A helper whose contract already says "0 (or -1) with an
-; exception pending" uses this instead and returns normally, leaving the
-; unwinding to the interpreter frame that called it.
+;; ============================================================================
+;; raise_exception(PyTypeObject *type, const char *msg_cstr)
+;; Create an exception from a C string and begin unwinding.
+;; Callable from opcode handlers - uses eval loop registers.
+;; set_exception(rdi = exception type, rsi = message C string)
+;;
+;; raise_exception's first half, without the unwind.  raise_exception tail-jumps
+;; into eval_exception_unwind, which abandons the C stack -- so a helper that
+;; holds an owned reference cannot raise and still release it, and every one
+;; that tried leaked.  A helper whose contract already says "0 (or -1) with an
+;; exception pending" uses this instead and returns normally, leaving the
+;; unwinding to the interpreter frame that called it.
+;; ============================================================================
 DEF_FUNC set_exception
     call exc_from_cstr
     mov rdi, rax
@@ -772,9 +780,11 @@ DEF_FUNC raise_exception
     jmp eval_exception_unwind
 END_FUNC raise_exception
 
-; raise_exception_obj(PyExceptionObject *exc)
-; Set exception and begin unwinding.
-; Takes ownership of the exc reference (caller must pass an owned ref).
+;; ============================================================================
+;; raise_exception_obj(PyExceptionObject *exc)
+;; Set exception and begin unwinding.
+;; Takes ownership of the exc reference (caller must pass an owned ref).
+;; ============================================================================
 DEF_FUNC raise_exception_obj
     call exc_install
     leave

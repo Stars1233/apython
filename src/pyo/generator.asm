@@ -1874,7 +1874,9 @@ section .text
 ;; file is the only place that knows which of its fields are owned.
 ;; ============================================================================
 
-; ---- gen_traverse / gen_clear ----
+;; ============================================================================
+;; ---- gen_traverse / gen_clear ----
+;; ============================================================================
 DEF_FUNC gen_traverse
     push rbx
     push r12

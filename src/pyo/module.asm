@@ -625,7 +625,9 @@ section .text
 ;; file is the only place that knows which of its fields are owned.
 ;; ============================================================================
 
-; ---- module_traverse / module_clear ----
+;; ============================================================================
+;; ---- module_traverse / module_clear ----
+;; ============================================================================
 DEF_FUNC module_traverse
     push rbx
     mov rbx, rdi

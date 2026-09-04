@@ -2220,7 +2220,9 @@ section .text
 ;; file is the only place that knows which of its fields are owned.
 ;; ============================================================================
 
-; ---- dict_traverse / dict_clear ----
+;; ============================================================================
+;; ---- dict_traverse / dict_clear ----
+;; ============================================================================
 
 DEF_FUNC dict_traverse
     push rbx

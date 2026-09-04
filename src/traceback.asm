@@ -79,7 +79,9 @@ DEF_FUNC_BARE tb_read_varint
     ret
 END_FUNC tb_read_varint
 
-; tb_read_svarint -- zig-zag signed varint; result in ecx.
+;; ============================================================================
+;; tb_read_svarint -- zig-zag signed varint; result in ecx.
+;; ============================================================================
 DEF_FUNC_BARE tb_read_svarint
     call tb_read_varint
     mov r11d, ecx
@@ -406,7 +408,9 @@ DEF_FUNC_BARE tb_write
     jmp sys_write
 END_FUNC tb_write
 
-; tb_write_cstr(rdi = NUL-terminated string)
+;; ============================================================================
+;; tb_write_cstr(rdi = NUL-terminated string)
+;; ============================================================================
 DEF_FUNC tb_write_cstr, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
@@ -425,7 +429,9 @@ DEF_FUNC tb_write_cstr, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 END_FUNC tb_write_cstr
 
-; tb_write_str(rdi = PyStrObject* or NULL) -- writes nothing for a non-str
+;; ============================================================================
+;; tb_write_str(rdi = PyStrObject* or NULL) -- writes nothing for a non-str
+;; ============================================================================
 DEF_FUNC tb_write_str
     test rdi, rdi
     jz .ws_out
@@ -441,7 +447,9 @@ DEF_FUNC tb_write_str
     ret
 END_FUNC tb_write_str
 
-; tb_write_dec(rdi = signed value)
+;; ============================================================================
+;; tb_write_dec(rdi = signed value)
+;; ============================================================================
 TD_BUF   equ 32
 TD_FRAME equ 48             ; + 0 pushes = 48
 DEF_FUNC tb_write_dec, TD_FRAME
@@ -1465,7 +1473,9 @@ DEF_FUNC tb_write_source, TS_FRAME
     ret
 END_FUNC tb_write_source
 
-; tb_print_repeated(rdi = run length) -- the elision line CPython prints
+;; ============================================================================
+;; tb_print_repeated(rdi = run length) -- the elision line CPython prints
+;; ============================================================================
 DEF_FUNC tb_print_repeated, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     lea rbx, [rdi - TB_RECURSIVE_CUTOFF]
@@ -1785,9 +1795,11 @@ DEF_FUNC traceback_print
     ret
 END_FUNC traceback_print
 
-; tb_print_one(rsi = exception) -- the body; tb_seen guards against a cycle in
-; the __cause__ / __context__ chain, which `raise e from e` otherwise turns
-; into unbounded recursion.
+;; ============================================================================
+;; tb_print_one(rsi = exception) -- the body; tb_seen guards against a cycle in
+;; the __cause__ / __context__ chain, which `raise e from e` otherwise turns
+;; into unbounded recursion.
+;; ============================================================================
 DEF_FUNC tb_print_one, TP_FRAME
     push rbx
     mov rdi, rsi
@@ -2195,14 +2207,16 @@ section .text
 
 section .text
 
-; exc_table_find_handler(PyCodeObject *code, int bytecode_offset_halfwords)
-;   -> rax = handler target (in halfwords), rdx = stack depth, rcx = push_lasti
-;   -> rax = -1 if no handler found
-;
-; bytecode_offset_halfwords = (rbx - &code.co_code) / 2
-;
-; rdi = code object
-; esi = bytecode offset in instruction units (halfwords, i.e., 2-byte units)
+;; ============================================================================
+;; exc_table_find_handler(PyCodeObject *code, int bytecode_offset_halfwords)
+;; -> rax = handler target (in halfwords), rdx = stack depth, rcx = push_lasti
+;; -> rax = -1 if no handler found
+;;
+;; bytecode_offset_halfwords = (rbx - &code.co_code) / 2
+;;
+;; rdi = code object
+;; esi = bytecode offset in instruction units (halfwords, i.e., 2-byte units)
+;; ============================================================================
 DEF_FUNC exc_table_find_handler, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12

@@ -1573,7 +1573,9 @@ section .text
 ;; file is the only place that knows which of its fields are owned.
 ;; ============================================================================
 
-; ---- func_traverse / func_clear ----
+;; ============================================================================
+;; ---- func_traverse / func_clear ----
+;; ============================================================================
 DEF_FUNC func_traverse
     push rbx
     mov rbx, rdi
@@ -1649,7 +1651,9 @@ DEF_FUNC func_clear, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 END_FUNC func_clear
 
-; ---- cell_traverse / cell_clear ----
+;; ============================================================================
+;; ---- cell_traverse / cell_clear ----
+;; ============================================================================
 DEF_FUNC cell_traverse
     push rbx
     mov rbx, rdi

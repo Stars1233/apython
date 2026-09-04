@@ -40,8 +40,10 @@ extern str_type
 extern bool_type
 extern none_type
 
-; tuple_new(int64_t size) -> PyTupleObject*
-; Allocate a tuple with room for 'size' fat items (16 bytes each), zero-filled
+;; ============================================================================
+;; tuple_new(int64_t size) -> PyTupleObject*
+;; Allocate a tuple with room for 'size' fat items (16 bytes each), zero-filled
+;; ============================================================================
 DEF_FUNC tuple_new
     push rbx
     push r12
@@ -132,8 +134,10 @@ DEF_FUNC tuple_new
     ret
 END_FUNC tuple_new
 
-; tuple_getitem(PyTupleObject *tuple, int64_t index) -> (rax=payload, rdx=tag)
-; sq_item: Return fat tuple element with bounds check and INCREF_VAL
+;; ============================================================================
+;; tuple_getitem(PyTupleObject *tuple, int64_t index) -> (rax=payload, rdx=tag)
+;; sq_item: Return fat tuple element with bounds check and INCREF_VAL
+;; ============================================================================
 DEF_FUNC_BARE tuple_getitem
     ; Handle negative index
     test rsi, rsi
@@ -153,9 +157,11 @@ DEF_FUNC_BARE tuple_getitem
     RAISE exc_IndexError_type, "tuple index out of range"
 END_FUNC tuple_getitem
 
-; tuple_subscript(PyTupleObject *tuple, PyObject *key) -> rax = Value
-; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
-; Returns (rax=payload, edx=tag) fat value
+;; ============================================================================
+;; tuple_subscript(PyTupleObject *tuple, PyObject *key) -> rax = Value
+;; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
+;; Returns (rax=payload, edx=tag) fat value
+;; ============================================================================
 DEF_FUNC tuple_subscript
     V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
     push rbx
@@ -195,8 +201,10 @@ DEF_FUNC tuple_subscript
     RAISE exc_TypeError_type, "tuple indices must be integers or slices"
 END_FUNC tuple_subscript
 
-; tuple_len(PyTupleObject *tuple) -> int64_t
-; Return tuple->ob_size
+;; ============================================================================
+;; tuple_len(PyTupleObject *tuple) -> int64_t
+;; Return tuple->ob_size
+;; ============================================================================
 DEF_FUNC_BARE tuple_len
     mov rax, [rdi + PyTupleObject.ob_size]
     ret
@@ -284,9 +292,11 @@ END_FUNC tuple_dealloc
 ; tuple_repr is in src/repr.asm
 extern tuple_repr
 
-; tuple_hash(PyObject *self) -> int64
-; Combines item hashes using a simple multiply-xor scheme
-; TAG_SMALLINT: hash = payload. TAG_PTR: obj_hash(payload).
+;; ============================================================================
+;; tuple_hash(PyObject *self) -> int64
+;; Combines item hashes using a simple multiply-xor scheme
+;; TAG_SMALLINT: hash = payload. TAG_PTR: obj_hash(payload).
+;; ============================================================================
 DEF_FUNC tuple_hash
     push rbx
     push r12
@@ -1365,7 +1375,9 @@ section .text
 ;; file is the only place that knows which of its fields are owned.
 ;; ============================================================================
 
-; ---- tuple_traverse / tuple_clear ----
+;; ============================================================================
+;; ---- tuple_traverse / tuple_clear ----
+;; ============================================================================
 DEF_FUNC tuple_traverse
     push rbx
     push r12

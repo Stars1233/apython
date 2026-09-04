@@ -31,11 +31,13 @@ extern sys_modules_dict
 extern sys_module_obj
 extern sys_write
 
-; main(int argc, char **argv) -> int
-; The 8 pads the five pushes to a 16-aligned rsp.  main holds argc and argv in
-; r14/r15 across the whole compile, so a source file with a float literal
-; reaches glibc's strtod from here -- and that is one of the few call paths out
-; of this codebase that actually uses aligned SSE.
+;; ============================================================================
+;; main(int argc, char **argv) -> int
+;; The 8 pads the five pushes to a 16-aligned rsp.  main holds argc and argv in
+;; r14/r15 across the whole compile, so a source file with a float literal
+;; reaches glibc's strtod from here -- and that is one of the few call paths out
+;; of this codebase that actually uses aligned SSE.
+;; ============================================================================
 DEF_FUNC main, 8
     push rbx
     push r12

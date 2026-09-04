@@ -910,8 +910,10 @@ DEF_FUNC codec_id, CI_FRAME
     ret
 END_FUNC codec_id
 
-; str_from_cstr_heap(const char *cstr) -> (rax=PyStrObject*, edx=TAG_PTR)
-; Always heap-allocates. For struct fields that need a real pointer.
+;; ============================================================================
+;; str_from_cstr_heap(const char *cstr) -> (rax=PyStrObject*, edx=TAG_PTR)
+;; Always heap-allocates. For struct fields that need a real pointer.
+;; ============================================================================
 DEF_FUNC str_from_cstr_heap
     push rbx
     push r12
@@ -955,14 +957,18 @@ DEF_FUNC str_from_cstr_heap
     ret
 END_FUNC str_from_cstr_heap
 
-; str_from_cstr(const char *cstr) -> (rax=payload, edx=tag)
-; Creates a string from a C string. Always returns heap TAG_PTR.
+;; ============================================================================
+;; str_from_cstr(const char *cstr) -> (rax=payload, edx=tag)
+;; Creates a string from a C string. Always returns heap TAG_PTR.
+;; ============================================================================
 DEF_FUNC_BARE str_from_cstr
     jmp str_from_cstr_heap
 END_FUNC str_from_cstr
 
-; str_new_heap(const char *data, int64_t len) -> (rax=PyStrObject*, edx=TAG_PTR)
-; Always heap-allocates. For struct fields and internal use.
+;; ============================================================================
+;; str_new_heap(const char *data, int64_t len) -> (rax=PyStrObject*, edx=TAG_PTR)
+;; Always heap-allocates. For struct fields and internal use.
+;; ============================================================================
 DEF_FUNC str_new_heap, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
@@ -1004,13 +1010,17 @@ DEF_FUNC str_new_heap, 8            ; 3 pushes, so rsp is 16-aligned
     ret
 END_FUNC str_new_heap
 
-; str_new(const char *data, int64_t len) -> (rax=payload, edx=tag)
-; Creates a string from data with given length. Always returns heap TAG_PTR.
+;; ============================================================================
+;; str_new(const char *data, int64_t len) -> (rax=payload, edx=tag)
+;; Creates a string from data with given length. Always returns heap TAG_PTR.
+;; ============================================================================
 DEF_FUNC_BARE str_new
     jmp str_new_heap         ; tail-call heap path
 END_FUNC str_new
 
-; str_dealloc(PyObject *self)
+;; ============================================================================
+;; str_dealloc(PyObject *self)
+;; ============================================================================
 DEF_FUNC_BARE str_dealloc
     ; String data is inline, just free the object
     jmp ap_free

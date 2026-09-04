@@ -1063,7 +1063,9 @@ END_FUNC import_source_path
 ;; On failure returns 0.
 ;; ============================================================================
 
-; Frame layout for import_search_dirs
+;; ============================================================================
+;; Frame layout for import_search_dirs
+;; ============================================================================
 SD_DIRS     equ 8             ; dirs list
 SD_LEAF     equ 16            ; leaf cstr
 SD_LEAFLEN  equ 24            ; leaf length

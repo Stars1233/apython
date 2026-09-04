@@ -396,7 +396,9 @@ method_type:
 
 section .text
 
-; ---- method_traverse / method_clear ----
+;; ============================================================================
+;; ---- method_traverse / method_clear ----
+;; ============================================================================
 DEF_FUNC method_traverse
     push rbx
     mov rbx, rdi

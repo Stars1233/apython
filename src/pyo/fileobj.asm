@@ -446,7 +446,9 @@ DEF_FUNC fileobj_seekable
 END_FUNC fileobj_seekable
 
 ;; ============================================================================
-; fileobj_enter(args, nargs) -> the file itself
+;; ============================================================================
+;; fileobj_enter(args, nargs) -> the file itself
+;; ============================================================================
 DEF_FUNC fileobj_enter
     mov rax, [rdi]
     inc qword [rax + PyObject.ob_refcnt]
@@ -456,7 +458,9 @@ DEF_FUNC fileobj_enter
     ret
 END_FUNC fileobj_enter
 
-; fileobj_exit(args, nargs) -> False, after closing
+;; ============================================================================
+;; fileobj_exit(args, nargs) -> False, after closing
+;; ============================================================================
 DEF_FUNC fileobj_exit
     call fileobj_close_method
     ; The result is None; __exit__ answers False so an exception propagates.

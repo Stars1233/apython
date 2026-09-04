@@ -30,6 +30,7 @@ These run over **every** hand-written `.asm` in the tree:
 | No raw `[rbp +- N]`; frame slots carry named `equ` constants | `check_frame_offsets` | error |
 | Heavy separators are `;;` and 76 `=`, 79 columns | `check_separators` | error |
 | No hand-written .asm over 100k bytes | `check_file_size` | error |
+| Every function has a docblock, with a `->` signature line | `check_docblocks` | ratchet |
 
 | `(frame + 8*pushes + a prologue's own `sub rsp`) % 16 == 0` in any function containing a `call` | `check_alignment` | error |
 
@@ -40,6 +41,13 @@ These are scoped to `src/compiler/*.asm` plus `src/main.asm`:
 | A tail `jmp` to another global function comes only from `DEF_FUNC_BARE` | `check_tailjumps` | error |
 | Every `ret` pops an exact mirror of the entry pushes | `check_callee_saved` | error |
 | `rbx`, `r12`-`r15` are never written without being pushed first | `check_saved_writes` | error |
+
+`check_docblocks` is the one ratchet rather than an error: it counts, per
+file, the functions with no docblock and the docblocks with no `->` line, and
+fails when a file goes above `tests/docblock_floor.txt`.  Writing a signature
+means reading what the function actually returns, so the debt is paid down
+rather than fixed in one pass; lower a row with `python3
+src/compiler/lint.py --record-docblocks` in the commit that earns it.
 
 **Why the split.**  The tree-wide checks had zero violations when they were
 turned on, so they cost nothing and now cannot regress.  `check_alignment`

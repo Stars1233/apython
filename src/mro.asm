@@ -75,9 +75,11 @@ DEF_FUNC_BARE type_mro_next
     ret
 END_FUNC type_mro_next
 
-; type_check_is_class(rdi = Value) -> eax 0/1
-; True when the value is a type object: its metatype is type_type,
-; user_type_metatype or exc_metatype.
+;; ============================================================================
+;; type_check_is_class(rdi = Value) -> eax 0/1
+;; True when the value is a type object: its metatype is type_type,
+;; user_type_metatype or exc_metatype.
+;; ============================================================================
 DEF_FUNC_BARE type_check_is_class
     V_TEST_PTR rdi, rax
     ja .tc_no

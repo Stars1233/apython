@@ -1593,8 +1593,10 @@ section .text
 ;; file is the only place that knows which of its fields are owned.
 ;; ============================================================================
 
-; ---- set_traverse / set_clear ----
-; Set entries are 24 bytes (hash+key+key_tag_qword), distinct from DictEntry (32 bytes).
+;; ============================================================================
+;; ---- set_traverse / set_clear ----
+;; Set entries are 24 bytes (hash+key+key_tag_qword), distinct from DictEntry (32 bytes).
+;; ============================================================================
 SET_ENTRY_SIZE_GC    equ 16
 SET_ENTRY_KEY_GC     equ 8
 

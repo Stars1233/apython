@@ -175,7 +175,9 @@ END_FUNC smallint_to_pyint
 ;; Parse integer from string with given base (0 = auto-detect, 2-36).
 ;; Handles leading/trailing whitespace, sign, 0b/0o/0x prefixes, underscores.
 ;; ============================================================================
-; Frame layout for int_from_cstr_base
+;; ============================================================================
+;; Frame layout for int_from_cstr_base
+;; ============================================================================
 IB_SRC    equ 8          ; original string ptr
 IB_BASE   equ 16         ; resolved base
 IB_SIGN   equ 24         ; 0 = positive, 1 = negative

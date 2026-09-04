@@ -2359,7 +2359,9 @@ section .text
 ;             tp_clear(rdi=obj)
 ; The VISIT_* macros use r14 as the callback.
 
-; ---- list_traverse / list_clear ----
+;; ============================================================================
+;; ---- list_traverse / list_clear ----
+;; ============================================================================
 DEF_FUNC list_traverse
     push rbx
     push r12

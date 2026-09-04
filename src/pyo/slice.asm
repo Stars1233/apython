@@ -777,7 +777,9 @@ section .text
 ;; file is the only place that knows which of its fields are owned.
 ;; ============================================================================
 
-; ---- slice_traverse / slice_clear ----
+;; ============================================================================
+;; ---- slice_traverse / slice_clear ----
+;; ============================================================================
 DEF_FUNC slice_traverse
     push rbx
     mov rbx, rdi

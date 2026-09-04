@@ -234,8 +234,10 @@ DEF_FUNC code_spec_clear
     ret
 END_FUNC code_spec_clear
 
-; code_dealloc(PyObject *self)
-; Free code object and decref contained objects
+;; ============================================================================
+;; code_dealloc(PyObject *self)
+;; Free code object and decref contained objects
+;; ============================================================================
 DEF_FUNC code_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
@@ -317,14 +319,18 @@ DEF_FUNC code_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     ret
 END_FUNC code_dealloc
 
-; code_repr(PyObject *self) -> PyStrObject*
+;; ============================================================================
+;; code_repr(PyObject *self) -> PyStrObject*
+;; ============================================================================
 DEF_FUNC_BARE code_repr
     lea rdi, [rel code_repr_str]
     jmp str_from_cstr
 END_FUNC code_repr
 
-; code_getattr(PyCodeObject *self, PyObject *name) -> (rax, edx) or NULL
-; rdi = code object, rsi = name string
+;; ============================================================================
+;; code_getattr(PyCodeObject *self, PyObject *name) -> (rax, edx) or NULL
+;; rdi = code object, rsi = name string
+;; ============================================================================
 DEF_FUNC code_getattr
     push rbx
     push r12

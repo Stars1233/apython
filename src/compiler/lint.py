@@ -412,6 +412,88 @@ def check_file_size(files):
     return bad
 
 
+DOCBLOCK_FLOOR = 'tests/docblock_floor.txt'
+
+
+def docblock_debt(path):
+    """(functions with no docblock, docblocks with no `->` signature line).
+
+    A docblock is the heavy separator block immediately above the DEF_FUNC,
+    reached past whatever frame-layout `equ` constants sit between the two --
+    STYLE.md puts them there on purpose, so they must not break the
+    association.
+    """
+    lines = open(path).read().split('\n')
+    nodoc = nosig = 0
+    for i, L in enumerate(lines):
+        if not re.match(r'^DEF_FUNC(?:_LOCAL|_BARE)?\s+\w+', L):
+            continue
+        j = i - 1
+        while j >= 0 and (re.match(r'^\w+\s+equ\s', lines[j])
+                          or not lines[j].strip()
+                          or re.match(r'^\s*(?:extern|global|align)\s', lines[j])):
+            j -= 1
+        if j < 0 or not lines[j].startswith(';;'):
+            nodoc += 1
+            continue
+        k = j
+        while k >= 0 and lines[k].startswith(';;'):
+            k -= 1
+        if '->' not in '\n'.join(lines[k + 1:j + 1]):
+            nosig += 1
+    return nodoc, nosig
+
+
+def check_docblocks(files):
+    """A ratchet, not a rule: no file may lose ground against the floor.
+
+    The signature line is the only part of a function's contract that nothing
+    else checks -- a wrong register in one is invisible until someone writes a
+    caller from it -- so its absence is a real gap rather than a cosmetic one.
+    Writing one means reading what the function actually returns, which is why
+    this is a floor being paid down rather than an error from the start.  Lower
+    it with `python3 src/compiler/lint.py --record-docblocks` in the commit
+    that earns it.
+    """
+    floor = {}
+    try:
+        for line in open(DOCBLOCK_FLOOR):
+            line = line.split('#')[0].strip()
+            if line:
+                p, n = line.rsplit(None, 1)
+                floor[p] = int(n)
+    except FileNotFoundError:
+        return []
+    bad = []
+    for path in files:
+        if path in GENERATED:
+            continue
+        n = sum(docblock_debt(path))
+        want = floor.get(path, 0)
+        if n > want:
+            bad.append((path, 0,
+                        "%d function(s) with no docblock or no `->` signature,"
+                        " floor is %d" % (n, want),
+                        "write the missing ones, or lower the floor knowingly"))
+    return bad
+
+
+def record_docblocks(files):
+    """Rewrite the floor file from what the tree is today."""
+    rows = [(p, sum(docblock_debt(p))) for p in files if p not in GENERATED]
+    rows = [(p, n) for p, n in rows if n]
+    with open(DOCBLOCK_FLOOR, 'w') as fh:
+        fh.write("# Functions with no docblock, or a docblock with no `->`\n"
+                 "# signature line, per file.  A ratchet: lint fails when a\n"
+                 "# file goes above its number.  Lower one with\n"
+                 "#   python3 src/compiler/lint.py --record-docblocks\n"
+                 "# in the commit that earns it; a row at zero is dropped.\n")
+        for path, n in rows:
+            fh.write("%-38s %d\n" % (path, n))
+    print("docblock floor: %d file(s), %d function(s)"
+          % (len(rows), sum(n for _, n in rows)))
+
+
 def check_separators(files):
     """The heavy separator is `;; ` plus 76 `=`, exactly 79 columns.
 
@@ -559,6 +641,9 @@ def all_asm():
 
 def main():
     os.chdir(ROOT)
+    if '--record-docblocks' in sys.argv:
+        record_docblocks(all_asm())
+        return 0
     # Some checks are scoped to src/compiler plus src/main.asm: main holds argc
     # and argv across compile_source, and DEF_FUNC main + 5 pushes enters
     # glibc's strtod misaligned on any source file with a float literal.  The
@@ -584,7 +669,7 @@ def main():
                 + check_rel(everything) + check_markers(everything)
                 + check_exports(everything)
                 + check_frame_offsets(everything)
-                + check_separators(everything) + check_file_size(everything)
+                + check_separators(everything) + check_file_size(everything) + check_docblocks(everything)
                 + check_text(everything) + check_guards(headers)
                 + check_type_tables(everything, nfields)
                 + check_alignment(everything) + check_tailjumps(scoped)
