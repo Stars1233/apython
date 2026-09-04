@@ -374,7 +374,12 @@ DEF_FUNC_BARE op_raise_varargs
     ; does not return here
 
 .do_reraise:
-    ; current_exception is already set, just unwind
+    ; current_exception is already set, just unwind.  No traceback entry: a
+    ; bare `raise` re-raises what this frame is already in the traceback for,
+    ; and CPython's RAISE_VARARGS 0 goes straight to the unwind rather than
+    ; through the label that records one.  Without this every re-raise added
+    ; a second entry for the same frame, pointing at the `raise` line.
+    mov byte [rel tb_suppress_frame], 1
     jmp eval_exception_unwind
 
 .raise_exc:

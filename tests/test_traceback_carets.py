@@ -110,10 +110,26 @@ print(attempt(nested))
 
 # And now the same shapes uncaught, chained, so the rendered report is what
 # gets compared.
+# A non-ASCII identifier is part of a name like any other.  The anchor scan
+# classified every byte at or above 0x80 as an operator, so the caret row
+# under `ä / b` covered the whole expression instead of anchoring on the `/`;
+# and the name scan stopped on the same byte without advancing, so correcting
+# the classification alone made the scan spin there forever.
+def divide_unicode(ä, b):
+    return ä / b
+
+
+def subscript_unicode(seq, ïndex):
+    return seq[ïndex]
+
+
 try:
     subscript([1, 2, 3], 9)
 except IndexError as first:
     try:
         nested()
     except ZeroDivisionError as second:
-        multiline(None)
+        try:
+            divide_unicode(1, 0)
+        except ZeroDivisionError as third:
+            subscript_unicode([1], 9)

@@ -806,7 +806,12 @@ DEF_FUNC tb_anchors, AN_FRAME
     cmp al, '}'
     je .an_close
 
-    ; a name, or a string prefix
+    ; a name, or a string prefix.  A byte at or above 0x80 is part of a
+    ; non-ASCII identifier -- `ä / b` is a division like any other -- and
+    ; falling through to .an_operator for it made the whole expression the
+    ; caret span rather than anchoring on the operator.
+    cmp al, 0x80
+    jae .an_name
     cmp al, '_'
     je .an_name
     or al, 0x20
@@ -931,6 +936,10 @@ DEF_FUNC tb_anchors, AN_FRAME
     cmp rdx, r12
     jae .an_name_done
     movzx eax, byte [rbx + rdx]
+    cmp al, 0x80
+    jae .an_name_next           ; a continuation or lead byte of a non-ASCII
+                                ; identifier; stopping here left the cursor
+                                ; where it was and the scan spun forever
     cmp al, '_'
     je .an_name_next
     cmp al, '0'
