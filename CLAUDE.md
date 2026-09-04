@@ -187,6 +187,11 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   `init`, which registers them all into each type's `tp_dict`.  These share
   basenames with `src/pyo/` on purpose: `methods/dict.asm` is dict's methods,
   `pyo/dict.asm` is dict itself
+- `lib/_imp.py` and `lib/_warnings.py` — the import system's own primitives
+  and the warning machinery's C half, which CPython's `importlib._bootstrap`
+  is written against.  Neither needs to be assembly: one thread means the
+  import lock is a counter, there are no frozen or extension modules, and
+  `source_hash` is CPython's siphash13 in Python
 - `lib/_typing.py` — the objects PEP 695's syntax builds: TypeVar, ParamSpec,
   TypeVarTuple, TypeAliasType and Generic.  Reached from the
   `CALL_INTRINSIC_1`/`_2` handlers in `src/opcodes/match.asm`, the same split
@@ -196,7 +201,8 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   the metatype, the instance and attribute access; `instance_alloc.asm` is
   where an instance comes from, including the constructors a subclass of a
   builtin needs; `method.asm` is the bound method
-- `src/marshal.asm` — .pyc marshal deserializer, and the .pyc file reader
+- `src/marshal.asm` — .pyc marshal deserializer, the .pyc file reader, and
+  the `marshal` module `importlib` calls `loads` on
 - `src/main.asm` — argument parsing, startup order, and the `-t`/`--dis` modes
 - `src/import.asm` — the import system: finders, `sys.modules`, packages
 - `src/iomod.asm` — the `_iocore` module: the four `_IOBase` types the rest

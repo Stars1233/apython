@@ -42,20 +42,20 @@ reasoning that chose them and what changing one would cost.
   approximates: it needs a code point's Unicode NAME, and the table that
   resolves `\N{...}` at compile time indexes the other way.
 
-- **Missing C modules.**  The ranking here used to be by how often each was
-  the FIRST import to fail, which is not the same as how many modules each
-  blocks: twelve of the thirteen that stopped at `_ast` import
-  `importlib.machinery` a few lines later.  Measured by what actually stands
-  in the way, over CPython 3.12's 196: `_imp` (with `marshal` and
-  `_warnings`) 27, `_hashlib` and the `_sha*`/`_md5` family, `array`,
-  `_typing`, `_posixsubprocess`, `_signal`, `_csv`, `pyexpat`, then a long
-  tail of one apiece.
+- **Missing C modules.**  The ranking here is by what actually stands in the
+  way rather than by which import fails first -- the two are not the same,
+  and `_imp` was reached by twelve modules a few lines after some other
+  import that looked like the blocker.  `_imp`, `marshal`, `_warnings` and
+  `_typing` are there now, and `importlib` with them; over CPython 3.12's
+  196 what remains is the `_sha*`/`_md5` family behind `hashlib` (9, through
+  `random`), `_posixsubprocess` (6), `_signal` (2), then `array`, `_csv`,
+  `zlib`, `unicodedata`, `_ssl`, `pyexpat` and a long tail of one apiece.
   (`_io` is not among them: `src/iomod.asm` supplies `_iocore` and
   `lib/_io.py` assembles both halves under the name `_io`.  `_socket` and
   `select` are the same split over `_socketcore`.  Neither are `math`,
   `_collections`, `_struct`, `_random`, `_contextvars`, `_string`,
   `_tokenize`, `_operator`, `binascii`, `atexit` and `_ast`, which are
-  there.)  `make check-stdlib` gives the current figure: 129 of 196.
+  there.)  `make check-stdlib` gives the current figure: 137 of 196.
 
   `hashlib` imports but has no digests, because every one of them is a C
   module here as well.

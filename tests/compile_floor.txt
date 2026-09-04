@@ -214,6 +214,7 @@ test_getset_descriptors
 test_getset_receiver
 test_hash_protocol
 test_immediate_operands
+test_imp_module
 test_import_errors
 test_import_from
 test_import_kwargs
@@ -257,6 +258,7 @@ test_maketrans
 test_map_multi
 test_mappingproxy_call
 test_marshal_interned
+test_marshal_module
 test_match_class
 test_match_mapping_types
 test_match

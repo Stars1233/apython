@@ -33,6 +33,10 @@ MARSHAL_TYPE_CODE             equ 0x63  ; 'c'
 MARSHAL_MAX_SLOTS             equ 1000000
 MARSHAL_TYPE_UNICODE          equ 0x75  ; 'u'
 MARSHAL_TYPE_SET              equ 0x3c  ; '<'
+; A .pyc never holds a mutable constant, so the reader did not need these
+; until `marshal` became a module a program can call.
+MARSHAL_TYPE_LIST             equ 0x5b  ; '['
+MARSHAL_TYPE_DICT             equ 0x7b  ; '{'
 MARSHAL_TYPE_FROZENSET        equ 0x3e  ; '>'
 MARSHAL_TYPE_ASCII            equ 0x61  ; 'a'
 MARSHAL_TYPE_ASCII_INTERNED   equ 0x41  ; 'A'
@@ -340,6 +344,10 @@ DEF_FUNC marshal_read_object
     je mdo_frozenset
     cmp ebx, MARSHAL_TYPE_SET
     je mdo_set
+    cmp ebx, MARSHAL_TYPE_LIST
+    je mdo_list
+    cmp ebx, MARSHAL_TYPE_DICT
+    je mdo_dict
 
     ; Unknown type
     lea rdi, [rel marshal_err_unknown]
@@ -1289,6 +1297,163 @@ END_FUNC marshal_require_strtuple
 extern set_new
 extern set_add
 
+;; A list: the same shape as a tuple, and like a set it has to reserve its
+;; ref slot before its elements are read, or a list holding itself would name
+;; a slot that is not there yet.
+mdo_list:
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 16                ; [rsp+0] = saved FLAG_REF, [rsp+8] = ref index
+
+    mov [rsp + 0], r12
+    test r12d, r12d
+    jz .mlist_no_reserve
+    xor edi, edi
+    xor esi, esi
+    call marshal_add_ref
+    mov rax, [rel marshal_ref_count]
+    dec rax
+    mov [rsp + 8], rax
+.mlist_no_reserve:
+
+    call marshal_read_long
+    mov r13d, eax
+    xor edi, edi
+    extern list_new
+    call list_new
+    mov r14, rax
+
+    xor r15d, r15d
+.mlist_loop:
+    cmp r15, r13
+    jge .mlist_done
+    push r13
+    push r14
+    push r15
+    call marshal_read_object
+    pop r15
+    pop r14
+    pop r13
+    push r13
+    push r14
+    push r15
+    push rdx
+    push rax
+    mov rdi, r14
+    mov rsi, rax
+    V_PACK rsi, rdx
+    extern list_append
+    call list_append
+    pop rdi
+    pop rsi
+    DECREF_VAL rdi, rsi        ; list_append took its own reference
+    pop r15
+    pop r14
+    pop r13
+    inc r15
+    jmp .mlist_loop
+
+.mlist_done:
+    mov rax, [rsp + 0]
+    test eax, eax
+    jz .mlist_no_fixup
+    mov rax, [rsp + 8]
+    mov rcx, [rel marshal_refs]
+    mov [rcx + rax*8], r14
+    mov rdi, r14
+    call obj_incref
+.mlist_no_fixup:
+    mov rax, r14
+    mov edx, TAG_PTR
+    add rsp, 16
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    xor r12d, r12d
+    jmp mfinish
+
+;; A dict: key/value pairs until a NULL type byte, which is how the format
+;; ends one -- there is no count.
+mdo_dict:
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 16
+
+    mov [rsp + 0], r12
+    test r12d, r12d
+    jz .mdict_no_reserve
+    xor edi, edi
+    xor esi, esi
+    call marshal_add_ref
+    mov rax, [rel marshal_ref_count]
+    dec rax
+    mov [rsp + 8], rax
+.mdict_no_reserve:
+
+    extern dict_new
+    call dict_new
+    mov r14, rax
+
+.mdict_loop:
+    ; A NULL type byte ends the dict.  Peek rather than read: the key's own
+    ; reader has to see its type byte.
+    mov rax, [rel marshal_pos]
+    cmp rax, [rel marshal_len]
+    jge .mdict_done
+    mov rcx, [rel marshal_buf]
+    movzx eax, byte [rcx + rax]
+    and eax, ~MARSHAL_FLAG_REF
+    cmp eax, MARSHAL_TYPE_NULL
+    jne .mdict_pair
+    inc qword [rel marshal_pos]
+    jmp .mdict_done
+.mdict_pair:
+    push r13
+    push r14
+    call marshal_read_object
+    V_PACK rax, rdx
+    mov r15, rax               ; the key
+    call marshal_read_object
+    V_PACK rax, rdx
+    mov r13, rax               ; the value
+    mov rdi, [rsp]             ; the dict
+    mov rsi, r15
+    mov rdx, r13
+    extern dict_set
+    call dict_set
+    mov rdi, r15
+    DECREF_V rdi, rcx          ; dict_set took its own references
+    mov rdi, r13
+    DECREF_V rdi, rcx
+    pop r14
+    pop r13
+    jmp .mdict_loop
+
+.mdict_done:
+    mov rax, [rsp + 0]
+    test eax, eax
+    jz .mdict_no_fixup
+    mov rax, [rsp + 8]
+    mov rcx, [rel marshal_refs]
+    mov [rcx + rax*8], r14
+    mov rdi, r14
+    call obj_incref
+.mdict_no_fixup:
+    mov rax, r14
+    mov edx, TAG_PTR
+    add rsp, 16
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    xor r12d, r12d
+    jmp mfinish
+
 mdo_set:
     push 0                     ; flag: 0 = set_type
     jmp mdo_set_common
@@ -1564,3 +1729,190 @@ pyc_err_stat:  db "pyc: cannot stat file", 0
 pyc_err_small: db "pyc: file too small for header", 0
 pyc_err_read:  db "pyc: failed to read file", 0
 pyc_err_magic: db "pyc: invalid magic number (expected Python 3.12)", 0
+
+section .text
+
+;; ============================================================================
+;; The `marshal` module: loads() over the reader above.
+;;
+;; The reader exists because a .pyc is marshalled, and importlib -- which
+;; twenty-one modules of CPython's Lib/ reach for -- calls marshal.loads on
+;; the bytes it read from one.  This is the same reader, driven from Python
+;; rather than from the import system, with the globals saved and restored
+;; around it the way import_from_file does: a marshalled stream can hold a
+;; code object whose own constants marshal, and the reader is not reentrant.
+;;
+;; dumps() is not here.  Writing the format means writing every type CPython
+;; can marshal, and the only caller that would want it is importlib's .pyc
+;; WRITER -- which this interpreter never reaches, because it caches through
+;; its own loader.
+;; ============================================================================
+extern raise_exception
+extern exc_ValueError_type
+extern exc_TypeError_type
+extern bytes_like_ptr_len
+extern module_new
+extern dict_set
+extern str_from_cstr_heap
+extern obj_decref
+extern builtin_func_new
+extern str_type
+
+;; ============================================================================
+;; marshal_loads_fn(rdi = args, rsi = nargs) -> rax = the object the stream
+;; names, as a Value, or does not return
+;; ============================================================================
+ML_SAVE   equ 56            ; six saved marshal globals
+ML_DATA   equ 64
+ML_LEN    equ 72
+ML_FRAME  equ 96            ; + 1 push = 104... one word more to land right
+DEF_FUNC marshal_loads_fn, 104          ; + 1 push = 112, 16-aligned
+    push rbx
+    cmp rsi, 1
+    jne .mlf_arity
+    mov rdi, [rdi]
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .mlf_type
+    mov [rbp - ML_DATA], rax
+    mov [rbp - ML_LEN], r10
+
+    ; Park the reader's state: a nested marshal is possible, and an import
+    ; may already be using it.
+    mov rax, [rel marshal_buf]
+    mov [rbp - ML_SAVE], rax
+    mov rax, [rel marshal_pos]
+    mov [rbp - ML_SAVE + 8], rax
+    mov rax, [rel marshal_len]
+    mov [rbp - ML_SAVE + 16], rax
+    mov rax, [rel marshal_refs]
+    mov [rbp - ML_SAVE + 24], rax
+    mov rax, [rel marshal_ref_count]
+    mov [rbp - ML_SAVE + 32], rax
+    mov rax, [rel marshal_ref_cap]
+    mov [rbp - ML_SAVE + 40], rax
+
+    mov rax, [rbp - ML_DATA]
+    mov [rel marshal_buf], rax
+    mov qword [rel marshal_pos], 0
+    mov rax, [rbp - ML_LEN]
+    mov [rel marshal_len], rax
+    mov qword [rel marshal_refs], 0
+    mov qword [rel marshal_ref_count], 0
+    mov qword [rel marshal_ref_cap], 0
+    call marshal_init_refs
+
+    call marshal_read_object
+    ; The reader answers the old (payload, tag) pair, not a Value: its own
+    ; callers V_PACK each element as they store it.
+    V_PACK rax, rdx
+    mov rbx, rax
+
+    ; The refs array owns a reference to everything the stream named; give
+    ; them back, then free the array, exactly as pyc_read_file does.
+    extern marshal_cleanup_refs
+    call marshal_cleanup_refs
+    mov rdi, [rel marshal_refs]
+    test rdi, rdi
+    jz .mlf_no_refs
+    call ap_free
+.mlf_no_refs:
+    mov rax, [rbp - ML_SAVE]
+    mov [rel marshal_buf], rax
+    mov rax, [rbp - ML_SAVE + 8]
+    mov [rel marshal_pos], rax
+    mov rax, [rbp - ML_SAVE + 16]
+    mov [rel marshal_len], rax
+    mov rax, [rbp - ML_SAVE + 24]
+    mov [rel marshal_refs], rax
+    mov rax, [rbp - ML_SAVE + 32]
+    mov [rel marshal_ref_count], rax
+    mov rax, [rbp - ML_SAVE + 40]
+    mov [rel marshal_ref_cap], rax
+
+    test rbx, rbx
+    jz .mlf_bad
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+
+.mlf_bad:
+    RAISE exc_ValueError_type, "bad marshal data"
+.mlf_type:
+    RAISE exc_TypeError_type, "a bytes-like object is required"
+.mlf_arity:
+    RAISE exc_TypeError_type, "loads() takes exactly one argument"
+END_FUNC marshal_loads_fn
+
+;; ============================================================================
+;; marshal_module_init() -> rax = the `marshal` module, owned, or 0
+;; ============================================================================
+MMI_MOD   equ 8
+MMI_FRAME equ 16            ; + 1 push = 24... one word more to land right
+global marshal_module_init
+DEF_FUNC marshal_module_init, 24        ; + 1 push = 32, 16-aligned
+    push rbx
+    ; module_new takes a name STRING and a dict, not a C string.
+    CSTRING rdi, "marshal"
+    call str_from_cstr_heap
+    test rax, rax
+    jz .mmi_fail
+    push rax
+    mov rdi, rax
+    xor esi, esi                        ; module_new makes the dict
+    call module_new
+    mov rbx, rax
+    pop rdi
+    push rbx
+    call obj_decref
+    pop rbx
+    test rbx, rbx
+    jz .mmi_fail
+    mov [rbp - MMI_MOD], rbx
+
+    lea rdi, [rel marshal_loads_fn]
+    CSTRING rsi, "loads"
+    call builtin_func_new
+    test rax, rax
+    jz .mmi_fail
+    push rax
+    CSTRING rdi, "loads"
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    ; CPython's `version` is 4, and importlib compares against it.
+    mov rdi, 4
+    extern int_from_i64
+    call int_from_i64
+    V_PACK rax, rdx
+    push rax
+    CSTRING rdi, "version"
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    add rsp, 8
+
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+.mmi_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC marshal_module_init
