@@ -63,7 +63,7 @@ $(shell mkdir -p build; printf '%s\n' '$(NASMFLAGS)' | cmp -s - $(FLAGSTAMP) \
 # Python compiler for tests
 PYTHON = python3
 
-.PHONY: all clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-re check-source lib-pyc
+.PHONY: all clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-re check-source check-pyc lib-pyc
 
 all: $(TARGET) lib-pyc
 
@@ -108,6 +108,13 @@ clean:
 # Test target: compile .py to .pyc, run both python3 and apython, diff
 check: $(TARGET) lib-pyc
 	@bash tests/run_tests.sh
+	@bash tests/pyc_probe.sh
+
+# A malformed .pyc has to be refused rather than run.  Not a tests/test_*.py:
+# the point is what happens when the interpreter is HANDED a file, which a
+# program running inside one cannot ask.
+check-pyc: $(TARGET)
+	@bash tests/pyc_probe.sh
 
 # Run the whole test corpus through our own compiler rather than CPython's:
 # apython is handed the .py and compiles it itself.  Ratchets against

@@ -148,9 +148,17 @@ DEF_FUNC frame_new
     mov r14, rcx            ; r14 = locals
 
     ; Calculate frame size: FRAME_HEADER_SIZE + (nlocalsplus + stacksize) * 8
+    ;
+    ; In 64 bits.  The two fields are 32-bit and came out of a .pyc, so adding
+    ; them in 32 bits let a crafted pair near 2^31 wrap to a small total: the
+    ; frame was allocated far too short and the value stack ran off the end of
+    ; it.  The marshal reader now caps each field, and this is the other half
+    ; -- frame_new is also reached from the compiler, which produces its own
+    ; numbers, so the arithmetic has to be right on its own.
     mov eax, [rbx + PyCodeObject.co_nlocalsplus]
-    add eax, [rbx + PyCodeObject.co_stacksize]
-    mov r15d, eax           ; r15d = nlocalsplus + stacksize (total slots)
+    mov ecx, [rbx + PyCodeObject.co_stacksize]
+    add rax, rcx
+    mov r15, rax            ; r15 = nlocalsplus + stacksize (total slots)
     shl rax, 3              ; * 8 bytes per slot (payload only)
     add rax, FRAME_HEADER_SIZE
     mov rdi, rax
@@ -265,10 +273,13 @@ DEF_FUNC frame_free
     call obj_decref
 .no_exc_state:
 
-    ; Calculate frame size for pool return
+    ; Calculate frame size for pool return.  The same 64-bit add frame_new
+    ; makes, and it has to be the same or the pool is handed a size the block
+    ; was never allocated at.
     mov rdi, [rbx + PyFrame.code]
     mov eax, [rdi + PyCodeObject.co_nlocalsplus]
-    add eax, [rdi + PyCodeObject.co_stacksize]
+    mov ecx, [rdi + PyCodeObject.co_stacksize]
+    add rax, rcx
     shl rax, 3
     add rax, FRAME_HEADER_SIZE
 

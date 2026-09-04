@@ -308,6 +308,7 @@ test_property_callables
 test_property_doc
 test_property
 test_property_raises
+test_pyc_hardening
 test_raise_cause
 test_raise_from
 test_range_protocol

@@ -26,6 +26,11 @@ MARSHAL_TYPE_INTERNED         equ 0x74  ; 't'
 MARSHAL_TYPE_REF              equ 0x72  ; 'r'
 MARSHAL_TYPE_TUPLE            equ 0x28  ; '('
 MARSHAL_TYPE_CODE             equ 0x63  ; 'c'
+; The most slots a frame will be built for.  frame_new adds co_nlocalsplus and
+; co_stacksize in 32 bits, so a crafted pair near 2^31 wrapped to a small
+; total and the frame came out far too short; the value stack then ran off the
+; end of it.  No compiler produces a million of either.
+MARSHAL_MAX_SLOTS             equ 1000000
 MARSHAL_TYPE_UNICODE          equ 0x75  ; 'u'
 MARSHAL_TYPE_SET              equ 0x3c  ; '<'
 MARSHAL_TYPE_FROZENSET        equ 0x3e  ; '>'
@@ -52,6 +57,9 @@ extern bytes_from_data
 extern ap_malloc
 extern gc_alloc
 extern ap_free
+extern str_type
+extern bytes_type
+extern tuple_type
 extern obj_dealloc
 extern ap_realloc
 extern __gmpz_init
@@ -946,36 +954,96 @@ mdo_code:
 
     call marshal_read_object   ; co_code (bytes object)
     mov [rsp + 16], rax
+    cmp edx, TAG_PTR
+    jne .code_bad_field         ; a field that came back as an immediate is not an object
 
     call marshal_read_object   ; co_consts (tuple)
     mov [rsp + 24], rax
+    cmp edx, TAG_PTR
+    jne .code_bad_field         ; a field that came back as an immediate is not an object
 
     call marshal_read_object   ; co_names (tuple)
     mov [rsp + 32], rax
+    cmp edx, TAG_PTR
+    jne .code_bad_field         ; a field that came back as an immediate is not an object
 
     call marshal_read_object   ; co_localsplusnames (tuple)
     mov [rsp + 40], rax
+    cmp edx, TAG_PTR
+    jne .code_bad_field         ; a field that came back as an immediate is not an object
 
     call marshal_read_object   ; co_localspluskinds (bytes)
     mov [rsp + 48], rax
+    cmp edx, TAG_PTR
+    jne .code_bad_field         ; a field that came back as an immediate is not an object
 
     call marshal_read_object   ; co_filename (str)
     mov [rsp + 56], rax
+    cmp edx, TAG_PTR
+    jne .code_bad_field         ; a field that came back as an immediate is not an object
 
     call marshal_read_object   ; co_name (str)
     mov [rsp + 64], rax
+    cmp edx, TAG_PTR
+    jne .code_bad_field         ; a field that came back as an immediate is not an object
 
     call marshal_read_object   ; co_qualname (str)
     mov [rsp + 72], rax
+    cmp edx, TAG_PTR
+    jne .code_bad_field         ; a field that came back as an immediate is not an object
 
     call marshal_read_long     ; co_firstlineno
     mov [rsp + 116], eax
 
     call marshal_read_object   ; co_linetable (bytes)
     mov [rsp + 80], rax
+    cmp edx, TAG_PTR
+    jne .code_bad_field         ; a field that came back as an immediate is not an object
 
     call marshal_read_object   ; co_exceptiontable (bytes)
     mov [rsp + 88], rax
+    cmp edx, TAG_PTR
+    jne .code_bad_field         ; a field that came back as an immediate is not an object
+
+    ; Every field has to BE what the interpreter will read it as.  Marshal
+    ; checked offsets and lengths and never types, so a crafted .pyc could
+    ; hand co_names a tuple of ints and eval_frame would dereference one as a
+    ; PyStrObject, or hand co_code an int and the dispatcher would jump
+    ; through it.  A .pyc is not a trusted format -- it is a file on disk,
+    ; often written by something other than the program running it -- so the
+    ; reader refuses rather than the eval loop crashing.
+    ;
+    ; The tag was checked as each field was read, above: these slots hold the
+    ; PAYLOAD only, so an immediate would look like a small pointer here.
+    mov rdi, [rsp + 16]
+    call marshal_require_bytes  ; co_code
+    mov rdi, [rsp + 24]
+    call marshal_require_tuple  ; co_consts: the ITEMS may be anything
+    mov rdi, [rsp + 32]
+    call marshal_require_strtuple   ; co_names
+    mov rdi, [rsp + 40]
+    call marshal_require_strtuple   ; co_localsplusnames
+    mov rdi, [rsp + 48]
+    call marshal_require_bytes  ; co_localspluskinds
+    mov rdi, [rsp + 56]
+    call marshal_require_str    ; co_filename
+    mov rdi, [rsp + 64]
+    call marshal_require_str    ; co_name
+    mov rdi, [rsp + 72]
+    call marshal_require_str    ; co_qualname
+    mov rdi, [rsp + 80]
+    call marshal_require_bytes  ; co_linetable
+    mov rdi, [rsp + 88]
+    call marshal_require_bytes  ; co_exceptiontable
+
+    ; And the two counts the frame allocator multiplies out.  frame_new adds
+    ; them in 32 bits, so a pair near 2^31 wrapped to a small total and the
+    ; frame was allocated far too short; the value stack then ran off the end
+    ; of it.  A code object with more than a million slots is not one a
+    ; compiler produced.
+    mov eax, [rsp + 8]          ; co_stacksize
+    cmp eax, MARSHAL_MAX_SLOTS
+    ja .code_bad_slots
 
     ; Compute bytecode length from the co_code bytes object
     mov rax, [rsp + 16]        ; co_code bytes object
@@ -985,6 +1053,13 @@ mdo_code:
     jmp .code_have_len
 .code_zero_len:
     xor r14d, r14d
+    jmp .code_have_len
+.code_bad_slots:
+    lea rdi, [rel marshal_err_slots]
+    call fatal_error
+.code_bad_field:
+    lea rdi, [rel marshal_err_field]
+    call fatal_error
 .code_have_len:
 
     ; Allocate PyCodeObject: fixed header + bytecode.
@@ -1122,6 +1197,92 @@ mdo_code:
 END_FUNC marshal_read_object
 
 ;--------------------------------------------------------------------------
+; marshal_require_{str,bytes,tuple,strtuple}(rdi = a field just read)
+;
+; A .pyc is a file on disk, and often not one written by the program running
+; it.  The reader checked offsets and lengths and never types, so a crafted
+; stream could hand co_names a tuple of ints and eval_frame would dereference
+; one as a PyStrObject, or hand co_code an int and the dispatcher would jump
+; through it.  Every field the interpreter later reads without asking is
+; checked here instead.
+;
+; fatal_error rather than an exception, as the unknown-type arm above does:
+; this runs before any interpreter frame exists, so there is nothing to raise
+; into.
+;--------------------------------------------------------------------------
+DEF_FUNC_LOCAL marshal_require_str
+    V_TEST_PTR rdi, rax
+    ja .mrs_bad
+    test rdi, rdi
+    jz .mrs_bad
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .mrs_bad
+    leave
+    ret
+.mrs_bad:
+    lea rdi, [rel marshal_err_field]
+    call fatal_error
+END_FUNC marshal_require_str
+
+DEF_FUNC_LOCAL marshal_require_bytes
+    V_TEST_PTR rdi, rax
+    ja .mrb_bad
+    test rdi, rdi
+    jz .mrb_bad
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    jne .mrb_bad
+    leave
+    ret
+.mrb_bad:
+    lea rdi, [rel marshal_err_field]
+    call fatal_error
+END_FUNC marshal_require_bytes
+
+DEF_FUNC_LOCAL marshal_require_tuple
+    V_TEST_PTR rdi, rax
+    ja .mrt_bad
+    test rdi, rdi
+    jz .mrt_bad
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    jne .mrt_bad
+    leave
+    ret
+.mrt_bad:
+    lea rdi, [rel marshal_err_field]
+    call fatal_error
+END_FUNC marshal_require_tuple
+
+;; A tuple, and every item in it a str: co_names and co_localsplusnames are
+;; indexed by the opcodes and read as strings without a check.
+DEF_FUNC_LOCAL marshal_require_strtuple
+    push rbx
+    push r12
+    mov rbx, rdi
+    call marshal_require_tuple
+    mov r12, [rbx + PyTupleObject.ob_size]
+    mov rbx, [rbx + PyTupleObject.ob_item]
+.mrst_loop:
+    test r12, r12
+    jz .mrst_done
+    mov rdi, [rbx]
+    call marshal_require_str
+    add rbx, 8
+    dec r12
+    jmp .mrst_loop
+.mrst_done:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC marshal_require_strtuple
+
+;--------------------------------------------------------------------------
 ; TYPE_FROZENSET / TYPE_SET handler: 4-byte count, then N objects
 ; Deserialized as a set object (PyDictObject layout with set_type)
 ;--------------------------------------------------------------------------
@@ -1245,6 +1406,8 @@ marshal_ref_cap:   resq 1     ; capacity of ref array
 section .rodata
 marshal_err_eof:     db "marshal: unexpected end of data", 0
 marshal_err_unknown: db "marshal: unknown type code", 0
+marshal_err_field:   db "marshal: code object field of the wrong type", 0
+marshal_err_slots:   db "marshal: code object wants an impossible number of slots", 0
 marshal_err_ref_oob: db "marshal: reference index out of bounds", 0
 
 ;; ============================================================================

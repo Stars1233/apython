@@ -1635,10 +1635,17 @@ END_FUNC sre_state_reset_marks
 ;; sre_state_set_mark(SRE_State* state, i64 mark_id, i64 pos)
 ;; Set a mark (group boundary) in the state.
 ;; ============================================================================
+SRE_MAX_MARKS equ 4096
 DEF_FUNC sre_state_set_mark
     ; rdi = state, rsi = mark_id, rdx = pos
     push rbx
     mov rbx, rdi
+
+    ; A group index out of a crafted pattern is unbounded, and growing to
+    ; twice it asks the allocator for whatever it says.  No compiled pattern
+    ; has a thousand groups; CPython's own limit is 100 in a single pattern.
+    cmp rsi, SRE_MAX_MARKS
+    jae .mark_refuse
 
     ; Ensure marks array is large enough
     mov rcx, [rbx + SRE_State.marks_count]
@@ -1704,6 +1711,14 @@ DEF_FUNC sre_state_set_mark
     mov [rbx + SRE_State.lastindex], rax
 
 .done:
+    pop rbx
+    leave
+    ret
+
+.mark_refuse:
+    ; Nothing to set, and nothing to say: a match either succeeds or does
+    ; not, and this one will not.  The engine treats an unset mark as -1
+    ; already, so leaving it alone is the same answer as never reaching here.
     pop rbx
     leave
     ret
@@ -1785,6 +1800,25 @@ DEF_FUNC sre_match, SM_MFRAME
     inc dword [r12 + SRE_State.match_depth]
 
 .dispatch:
+    ; The program counter has to be inside the pattern.  The opcode was
+    ; bounded and the pc never was, so a crafted program whose last word is
+    ; not SUCCESS or FAILURE simply walked off the end of the code array and
+    ; kept dispatching on whatever followed it.  _sre.compile() does not
+    ; validate its input -- that is the private API test_sre.py feeds by hand,
+    ; and the one CPython segfaults on -- so the engine has to.
+    mov rax, [r12 + SRE_State.pattern]
+    test rax, rax
+    jz .pc_unchecked            ; no pattern object: an internal sub-match
+    mov rcx, [rax + SRE_PatternObject.code]
+    mov rdx, [rax + SRE_PatternObject.code_len]
+    shl rdx, 2                  ; words to bytes
+    add rdx, rcx                ; one past the end
+    cmp rbx, rcx
+    jb .op_failure
+    cmp rbx, rdx
+    jae .op_failure
+.pc_unchecked:
+
     mov eax, [rbx]             ; opcode
     add rbx, 4                 ; advance past opcode
 

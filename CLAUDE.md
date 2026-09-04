@@ -13,7 +13,8 @@ through `src/compiler/`, or `.pyc` through the marshal reader.
 ```bash
 make              # build ./apython
 make clean        # remove build/ and apython
-make check        # full test suite: compile .py→.pyc, diff python3 vs ./apython output
+make check        # full test suite: compile .py→.pyc, diff python3 vs ./apython output,
+                  #   then tests/pyc_probe.sh over a set of crafted .pyc files
 make check-cpython # CPython stdlib unit tests (harder, more thorough)
 make check-stdlib # how much of a CPython 3.12 Lib/ imports; a ratchet
 make check-source # the whole corpus compiled by OUR compiler; a ratchet

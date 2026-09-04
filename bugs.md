@@ -109,12 +109,6 @@ than lying — but they are ordinary Python that does not work:
   were registered; what is left is per-method, and CPython's own wordings
   there are inconsistent between clinic-generated and hand-written methods.
 
-- **Crafted `.pyc` and `_sre` bytecode are trusted.**  Marshal validates
-  offsets but not types, so a `co_consts` slot holding an int is
-  dereferenced by `eval_frame`; `frame_new` adds two `.pyc` fields in 32
-  bits; `sre_match` bounds the opcode but not its operands.  This is an
-  attacker model rather than breakage, and is a separate track.
-
 ## Style debt
 
 Everything here assembles and runs.  These are places the tree does not follow
