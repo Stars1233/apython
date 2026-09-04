@@ -69,11 +69,11 @@ extern sys_getsockname
 extern sys_getpeername
 extern sys_shutdown
 extern sys_socketpair
+extern sys_poll
 extern sys_close
 extern sys_dup
 extern sys_fcntl
 extern sys_uname
-extern poll
 
 ;; ============================================================================
 ;; SOCK_CHECK reg -- the kernel returns -errno in [-4095, -1].  Same test as
@@ -1165,10 +1165,13 @@ DEF_FUNC sock_poll_fn, 56
     jmp .spl_fill
 
 .spl_ready:
+    ; sys_poll, not glibc's poll: the wrapper answers -1 in eax and leaves the
+    ; reason in errno, so the -4095 test below could never fire and an error
+    ; came back as an array of zero revents -- "nothing is ready", forever.
     mov rdi, [rbp - SPL_FDS]
     mov rsi, [rbp - SPL_N]
     mov edx, [rbp - SPL_TMO]
-    call poll
+    call sys_poll
     cmp rax, -4095
     jb .spl_polled
     push rax

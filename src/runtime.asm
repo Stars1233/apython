@@ -36,6 +36,7 @@ SYS_connect         equ 42
 SYS_accept4         equ 288
 SYS_sendto          equ 44
 SYS_recvfrom        equ 45
+SYS_poll            equ 7
 SYS_bind            equ 49
 SYS_listen          equ 50
 SYS_getsockname     equ 51
@@ -469,6 +470,15 @@ DEF_FUNC_BARE sys_getpeername
     syscall
     ret
 END_FUNC sys_getpeername
+
+; sys_poll(struct pollfd *fds, nfds_t n, int timeout_ms) -> int
+; The syscall rather than glibc's wrapper: this returns -errno, where the
+; wrapper returns -1 in a 32-bit register and leaves the reason in errno.
+DEF_FUNC_BARE sys_poll
+    mov rax, SYS_poll
+    syscall
+    ret
+END_FUNC sys_poll
 
 ; sys_shutdown(fd, how) -> int
 DEF_FUNC_BARE sys_shutdown
