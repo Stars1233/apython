@@ -78,6 +78,17 @@ one-line fix.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
+- **`sys.exc_info()` is empty after an `await` inside an `except` block.**
+  CPython saves a frame's exception state and puts it back when the frame
+  resumes; the state here is one global plus a copy on the value stack that
+  POP_EXCEPT restores, and a suspended frame has no way to reinstate its own.
+  So inside `except E: ... await f(); sys.exc_info()` the handler's exception
+  reads as None from the await onwards -- `raise` with no argument in that
+  position, and any logging that reads exc_info(), see nothing.  Everything
+  either side of the await is right, and the exception is still caught: it is
+  only the *ambient* state that is lost.  Fixing it means the exception state
+  moving onto the frame.
+
 - **A gather cannot be nested inside another.**  `gather(gather(...))` is a
   TypeError here and `[[3]]` in CPython, where a gather returns a future and
   ensure_future takes it as it stands.  The awaitable this returns is not a

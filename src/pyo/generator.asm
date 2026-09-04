@@ -920,8 +920,16 @@ DEF_FUNC gen_send
     ; be overwritten by the caller's saved one -- gen_iternext was fixed for
     ; this; the identical block here was not, so send() after a raise gave
     ; StopIteration instead of the exception.
-    cmp qword [rel current_exception], 0
-    jne .gsend_raised
+    ;
+    ; A raise is a NULL result, not a set current_exception.  Reading the
+    ; global cannot tell a raise from a body SUSPENDED inside an except
+    ; block, whose PUSH_EXC_INFO leaves the global set at the yield: the
+    ; caller's exception state was then dropped and the body's handled one
+    ; left in its place, so every await inside an except block leaked that
+    ; exception to the event loop, and the interpreter reported it at exit.
+    ; gen_iternext's copy of this block already says so.
+    test rax, rax
+    jz .gsend_raised
     mov [rel current_exception], rcx
     jmp .gsend_settled
 .gsend_raised:

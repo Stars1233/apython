@@ -11,6 +11,7 @@ test_async_argument_types
 test_async_await
 test_async_cancel
 test_async_coro
+test_async_except_state
 test_async_for
 test_async_gather
 test_async_gc

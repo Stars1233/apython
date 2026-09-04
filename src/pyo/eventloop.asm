@@ -473,7 +473,8 @@ END_FUNC ready_dequeue
 ;; Resume the task's coroutine via gen_send. Dispatch on result tag.
 ;; ============================================================================
 TS_TASK  equ 8
-TS_FRAME equ 8              ; + 2 pushes = 24, not 16-aligned
+TS_EXC   equ 16             ; current_exception before the step
+TS_FRAME equ 32             ; + 2 pushes = 48, 16-aligned
 DEF_FUNC task_step, TS_FRAME
     push rbx
     push r12
@@ -488,6 +489,14 @@ DEF_FUNC task_step, TS_FRAME
     ; Check if cancelled
     cmp dword [rbx + AsyncTask.cancelling], 1
     je .ts_cancel
+
+    ; current_exception is also the exception being HANDLED: it stays set for
+    ; the length of an except block, so "is one pending afterwards?" cannot
+    ; mean "did the coroutine raise?".  A task that finished inside a live
+    ; handler -- `except E: return await f()` -- adopted that exception and
+    ; took its reference, and asyncio.run re-raised what the coroutine had
+    ; already caught.  Snapshot it and compare.
+    DUNDER_EXC_SAVE [rbp - TS_EXC]
 
     ; gen_send(coro, send_value, send_tag)
     mov rdi, [rbx + AsyncTask.coro]
@@ -658,6 +667,8 @@ DEF_FUNC task_step, TS_FRAME
     mov rax, [rel current_exception]
     test rax, rax
     jz .ts_finished_value
+    cmp rax, [rbp - TS_EXC]
+    je .ts_finished_value       ; the one already being handled
 
     ; Move it, owned: raise_exception_obj took over its caller's reference,
     ; so the global holds exactly one and the task takes it over in turn.
@@ -692,10 +703,14 @@ DEF_FUNC task_step, TS_FRAME
     ; gen_throw may have left it in current_exception, or coro caught it
     test edx, edx
     jnz .ts_cancel_caught
-    ; Exception propagated (NULL return) — grab from current_exception
+    ; Exception propagated (NULL return) — grab from current_exception, and
+    ; for the same reason as above, only if it is not the one that was
+    ; already being handled when the step began.
     mov rax, [rel current_exception]
     test rax, rax
     jz .ts_cancel_no_exc
+    cmp rax, [rbp - TS_EXC]
+    je .ts_cancel_no_exc
     INCREF rax
     mov [rbx + AsyncTask.exception], rax
     ; Clear current_exception
