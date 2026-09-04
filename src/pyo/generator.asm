@@ -280,7 +280,7 @@ END_FUNC gen_iternext
 ;; rdi = async generator
 ;; Returns: (rax=AsyncGenASend*, edx=TAG_PTR)
 ;; ============================================================================
-DEF_FUNC async_gen_iternext
+DEF_FUNC async_gen_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi               ; rbx = async generator
 
@@ -559,7 +559,7 @@ END_FUNC ags_iter_self
 ;; INTRINSIC_ASYNC_GEN_WRAP.  See AsyncGenWrapped in object.inc for why the box
 ;; exists at all.
 ;; ============================================================================
-DEF_FUNC async_gen_wrap_value
+DEF_FUNC async_gen_wrap_value, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov edi, AsyncGenWrapped_size
@@ -573,7 +573,7 @@ DEF_FUNC async_gen_wrap_value
     ret
 END_FUNC async_gen_wrap_value
 
-DEF_FUNC agw_dealloc
+DEF_FUNC agw_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + AsyncGenWrapped.agw_value]
@@ -589,7 +589,7 @@ END_FUNC agw_dealloc
 ;; ags_dealloc(AsyncGenASend *self)
 ;; Free the wrapper: DECREF stored value and async generator, then free.
 ;; ============================================================================
-DEF_FUNC ags_dealloc
+DEF_FUNC ags_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -627,7 +627,7 @@ END_FUNC ags_dealloc
 ;; instance_dealloc reports one from __del__, and nothing jumps.
 ;; ============================================================================
 GDC_GEN   equ 8
-GDC_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+GDC_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC_LOCAL gen_dealloc_close, GDC_FRAME
     push rbx
     mov rbx, rdi
@@ -793,7 +793,7 @@ END_FUNC gen_iter_self
 ;; naming only the kind.
 ;; ============================================================================
 GRP_KIND  equ 8
-GRP_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+GRP_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC_LOCAL gen_repr_kind, GRP_FRAME
     push rbx
     mov rbx, rdi
@@ -983,7 +983,7 @@ END_FUNC gen_send
 ;; rdi = generator, rsi = exc_type (PyTypeObject*)
 ;; ============================================================================
 GT_SAVED_EXC equ 24    ; the caller's pending exception, put aside
-GT_FRAME equ 32             ; + 3 pushes = 56, not 16-aligned
+GT_FRAME equ 40            ; + 3 pushes = 64, 16-aligned
 DEF_FUNC gen_throw, GT_FRAME
     push rbx
     push r12
@@ -1143,7 +1143,7 @@ END_FUNC gen_throw
 ;; rdi = generator
 ;; ============================================================================
 GC_GEN   equ 8
-GC_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+GC_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC gen_close, GC_FRAME
     push rbx
     mov rbx, rdi
@@ -1547,7 +1547,7 @@ END_FUNC async_gen_getattr
 
 ;; _gen_send_impl(args, nargs) — gen.send(value)
 global _gen_send_impl
-DEF_FUNC _gen_send_impl
+DEF_FUNC _gen_send_impl, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     cmp rsi, 2
@@ -1616,7 +1616,7 @@ END_FUNC _gen_close_impl
 ;; _gen_throw_impl(args, nargs) — gen.throw(exc_type)
 global _gen_throw_impl
 global _gen_throw_impl
-DEF_FUNC _gen_throw_impl
+DEF_FUNC _gen_throw_impl, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     cmp rsi, 2
@@ -1955,7 +1955,7 @@ DEF_FUNC gen_traverse
     ret
 END_FUNC gen_traverse
 
-DEF_FUNC gen_clear
+DEF_FUNC gen_clear, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 

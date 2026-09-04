@@ -124,7 +124,7 @@ DEF_FUNC_LOCAL sm_add_str, SAS_FRAME
     ret
 END_FUNC sm_add_str
 
-DEF_FUNC sys_module_init, 32
+DEF_FUNC sys_module_init, 40
     push rbx
     push r12
     push r13

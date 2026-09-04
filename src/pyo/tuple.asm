@@ -211,7 +211,7 @@ TUPLE_POOL_MAX equ 16
 TUPLE_POOL_HEAD  equ 0
 TUPLE_POOL_COUNT equ 8
 
-DEF_FUNC tuple_dealloc
+DEF_FUNC tuple_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -362,7 +362,7 @@ DEF_FUNC tuple_getslice
     push r13
     push r14
     push r15
-    sub rsp, 16                ; [rbp - TGS_LEN]=slicelength, [rbp - TGS_NEW]=newtuple, align
+    sub rsp, 24                ; [rbp - TGS_LEN]=slicelength, [rbp - TGS_NEW]=newtuple, align
 
     mov rbx, rdi               ; tuple
     mov r12, rsi               ; slice
@@ -465,7 +465,7 @@ DEF_FUNC tuple_getslice
 .tgs_done:
     mov rax, [rbp - TGS_NEW]
 
-    add rsp, 16
+    add rsp, 24
     pop r15
     pop r14
     pop r13
@@ -481,7 +481,7 @@ END_FUNC tuple_getslice
 ;; Linear scan with identity then __eq__.
 ;; ============================================================================
 TCN_IDX   equ 8
-TCN_FRAME equ 16            ; + 3 pushes = 40, not 16-aligned
+TCN_FRAME equ 24            ; + 3 pushes = 48, 16-aligned
 DEF_FUNC tuple_contains, TCN_FRAME
     push rbx
     push r12
@@ -747,7 +747,7 @@ TRC_RIGHT    equ 16
 TRC_OP       equ 24
 TRC_IDX      equ 32
 TRC_MINLEN   equ 40
-TRC_FRAME    equ 40         ; + 0 pushes = 40, not 16-aligned
+TRC_FRAME    equ 48            ; + 0 pushes = 48, 16-aligned
 
 ; Comparing two structures that reach each other -- a=[]; a.append(a);
 ; b=[]; b.append(b); a==b -- recursed until the machine stack ran out; the

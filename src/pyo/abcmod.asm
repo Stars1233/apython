@@ -69,7 +69,7 @@ section .text
 ;; Reads the class's own tp_dict.  Borrowed; the caller does not own it.
 ;; ============================================================================
 AG_CLS   equ 8
-AG_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+AG_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC_LOCAL abc_state_get, AG_FRAME
     push rbx
     mov [rbp - AG_CLS], rdi
@@ -104,7 +104,7 @@ END_FUNC abc_state_get
 ;; ============================================================================
 AS_CLS   equ 8
 AS_VAL   equ 16
-AS_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+AS_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC_LOCAL abc_state_set, AS_FRAME
     push rbx
     mov [rbp - AS_CLS], rdi
@@ -136,7 +136,7 @@ END_FUNC abc_state_set
 ;; ============================================================================
 AF_CLS   equ 8
 AF_NAME  equ 16
-AF_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+AF_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC_LOCAL abc_fresh_set, AF_FRAME
     push rbx
     mov [rbp - AF_CLS], rdi
@@ -170,7 +170,7 @@ END_FUNC abc_fresh_set
 ;; special comparison, and a weakref hashes as its referent does.  A class
 ;; that cannot carry one is held strongly, as everything was.
 ;; ============================================================================
-DEF_FUNC abc_ref
+DEF_FUNC abc_ref, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     V_TEST_PTR rdi, rax
@@ -284,7 +284,7 @@ END_FUNC abc_getattr
 ;; ============================================================================
 ;; abc_is_abstract(rdi = value Value) -> eax 0/1
 ;; ============================================================================
-DEF_FUNC_LOCAL abc_is_abstract, 16
+DEF_FUNC_LOCAL abc_is_abstract, 24
     push rbx
     CSTRING rsi, "__isabstractmethod__"
     push rdi
@@ -483,7 +483,7 @@ END_FUNC abc_init_func
 ;; The builtin, so a registered class that is itself an ABC gets its own
 ;; __subclasscheck__ consulted.
 ;; ============================================================================
-DEF_FUNC_LOCAL abc_call_issubclass, 16
+DEF_FUNC_LOCAL abc_call_issubclass, 24
     push rbx
     sub rsp, 16
     mov [rsp], rdi
@@ -1267,7 +1267,7 @@ END_FUNC abc_reset_caches_func
 ;; Module construction
 ;; ============================================================================
 
-ABC_FRAME equ 8             ; + 2 pushes = 24, not 16-aligned
+ABC_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
 DEF_FUNC abc_module_create, ABC_FRAME
     push rbx
     push r12

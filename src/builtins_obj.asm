@@ -615,7 +615,7 @@ section .text
 ;; 11. builtin_next_fn(args, nargs) - next(x)
 ;; ============================================================================
 NX_EXC   equ 8              ; current_exception before __next__ ran
-NX_FRAME equ 16
+NX_FRAME equ 24            ; + 1 push = 32, 16-aligned
 
 DEF_FUNC builtin_next_fn, NX_FRAME
     push rbx
@@ -1182,7 +1182,7 @@ END_FUNC builtin_max
 ;; pending.  With no key= it is the value itself, INCREF'd, so both loops hold
 ;; an owned key either way and release it the same.  Reads minmax_impl's frame
 ;; through rbp, so it lives only inside it.
-DEF_FUNC_LOCAL mm_key_of
+DEF_FUNC_LOCAL mm_key_of, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, [rbp]                  ; minmax_impl's rbp
     mov rax, [rbx - MM_KEY]
@@ -1524,7 +1524,7 @@ END_FUNC minmax_impl
 ;; 17. builtin_getattr(args, nargs) - getattr(obj, name[, default])
 ;; ============================================================================
 GA_EXC    equ 8              ; current_exception before the lookup
-DEF_FUNC builtin_getattr, 24
+DEF_FUNC builtin_getattr, 32
     push rbx
     push r12
     mov rbx, rdi
@@ -1993,7 +1993,7 @@ END_FUNC dir_default
 BD_OBJ    equ 8       ; the object, as a Value
 BD_SORT   equ 24      ; END of the two-Value args buffer for extend and sort
 BD_EXC    equ 32      ; current_exception before __dir__ was called
-BD_FRAME  equ 40          ; + 1 push = 48, 16-aligned
+BD_FRAME  equ 48            ; + 0 pushes = 48, 16-aligned
 
 DEF_FUNC builtin_dir, BD_FRAME
     DUNDER_EXC_SAVE [rbp - BD_EXC]
@@ -2649,7 +2649,7 @@ END_FUNC builtin_format_fn
 ;; ============================================================================
 extern eval_saved_r12
 global builtin_vars_fn
-VR_FRAME equ 8              ; + 0 pushes = 8, not 16-aligned
+VR_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 DEF_FUNC builtin_vars_fn, VR_FRAME
 
     test rsi, rsi
@@ -2825,7 +2825,7 @@ AN_ITER    equ 8
 AN_DEFAULT equ 16
 AN_DEFTAG  equ 24
 AN_NARGS   equ 32
-AN_FRAME   equ 40           ; + 0 pushes = 40, not 16-aligned
+AN_FRAME   equ 48            ; + 0 pushes = 48, 16-aligned
 DEF_FUNC builtin_anext_fn, AN_FRAME
 
     cmp rsi, 1

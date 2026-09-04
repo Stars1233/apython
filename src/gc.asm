@@ -203,7 +203,7 @@ END_FUNC gc_alloc
 ;; gc_track(rdi=obj)
 ;; Add object to gen0 tracking list. May trigger collection.
 ;; ============================================================================
-DEF_FUNC gc_track
+DEF_FUNC gc_track, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi               ; save obj
 
@@ -287,7 +287,7 @@ END_FUNC gc_untrack
 ;; If TYPE_FLAG_HAVE_GC is set: untrack + free at obj - GC_HEAD_SIZE
 ;; Otherwise: plain ap_free(obj) (for objects allocated without GC head)
 ;; ============================================================================
-DEF_FUNC gc_dealloc
+DEF_FUNC gc_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -405,7 +405,7 @@ END_FUNC gcd_puts
 
 ;; gcd_putu(rdi = unsigned) -- decimal, right-to-left into the frame
 GCU_END   equ 8             ; one past the last digit
-GCU_FRAME equ 40            ; + 0 pushes = 40, 32 bytes of digits below it
+GCU_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
 DEF_FUNC_LOCAL gcd_putu, GCU_FRAME
     mov rax, rdi
     lea rcx, [rbp - GCU_END]
@@ -429,7 +429,7 @@ END_FUNC gcd_putu
 
 ;; gcd_putp(rdi = pointer) -- "0x" and lowercase hex
 GCP_END   equ 8
-GCP_FRAME equ 40            ; + 0 pushes = 40
+GCP_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
 DEF_FUNC_LOCAL gcd_putp, GCP_FRAME
     mov rax, rdi
     lea rcx, [rbp - GCP_END]
@@ -460,7 +460,7 @@ END_FUNC gcd_putp
 
 ;; gcd_report(rdi = obj, rsi = "collectable" or "unreachable" cstr)
 ;;   gc: <msg> <typename 0xADDR>
-DEF_FUNC_LOCAL gcd_report, 8                        ; + 2 pushes = 24
+DEF_FUNC_LOCAL gcd_report, 16                        ; + 2 pushes = 24
     push rbx
     push r12
     mov rbx, rdi
@@ -508,7 +508,7 @@ GCG_GEN     equ 8
 GCG_YOUNG   equ 24    ; 16-byte PyGC_Head sentinel on stack (next+prev)
 GCG_UNREACH equ 40    ; 16-byte PyGC_Head sentinel on stack
 GCG_FOUND   equ 56    ; how many unreachable objects this pass cleared
-GCG_FRAME   equ 64          ; + 5 pushes = 104
+GCG_FRAME   equ 72            ; + 5 pushes = 112, 16-aligned
 
 global gc_collect_gen
 DEF_FUNC gc_collect_gen, GCG_FRAME
@@ -908,7 +908,7 @@ END_FUNC gc_visit_decref
 ;; gc_visit_reachable(rdi=obj)
 ;; Visit callback for Phase 4: if obj is in unreachable set, move to reachable
 ;; ============================================================================
-DEF_FUNC gc_visit_reachable
+DEF_FUNC gc_visit_reachable, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     ; Check if this object's type has HAVE_GC flag (non-GC objects have no GC head)

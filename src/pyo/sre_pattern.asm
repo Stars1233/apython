@@ -52,7 +52,7 @@ extern sre_match_new
 ;; ============================================================================
 ;; sre_pattern_dealloc(PyObject* self)
 ;; ============================================================================
-DEF_FUNC sre_pattern_dealloc
+DEF_FUNC sre_pattern_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -320,7 +320,7 @@ END_FUNC sre_pattern_match_method
 ;; ============================================================================
 ;; sre_pattern_search_method(self, args, nargs)
 ;; ============================================================================
-DEF_FUNC sre_pattern_search_method
+DEF_FUNC sre_pattern_search_method, 8            ; 3 pushes, so rsp is 16-aligned
     ; rdi = args (fat array), rsi = nargs
     push rbx
     push r12
@@ -369,7 +369,7 @@ END_FUNC sre_pattern_search_method
 ;; ============================================================================
 ;; sre_pattern_fullmatch_method(self, args, nargs)
 ;; ============================================================================
-DEF_FUNC sre_pattern_fullmatch_method
+DEF_FUNC sre_pattern_fullmatch_method, 8            ; 3 pushes, so rsp is 16-aligned
     ; rdi = args (fat array), rsi = nargs
     push rbx
     push r12
@@ -2181,7 +2181,7 @@ END_FUNC sre_pattern_copy_method
 ;; ============================================================================
 extern str_hash
 
-DEF_FUNC sre_pattern_hash
+DEF_FUNC sre_pattern_hash, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi               ; self
 
@@ -2297,7 +2297,7 @@ END_FUNC sre_pattern_richcompare
 ;; Pattern.finditer(string, pos=0, endpos=sys.maxsize)
 ;; Returns an SRE_Scanner iterator.
 ;; ============================================================================
-DEF_FUNC sre_pattern_finditer_method
+DEF_FUNC sre_pattern_finditer_method, 8            ; 3 pushes, so rsp is 16-aligned
     ; rdi = args (fat array), rsi = nargs
     push rbx
     push r12
@@ -2376,7 +2376,7 @@ END_FUNC sre_pattern_finditer_method
 ;; sre_scanner_new(rdi=pattern, rsi=string, rdx=pos, rcx=endpos) -> rax
 ;; Allocates and initializes an SRE_ScannerObject.
 ;; ============================================================================
-DEF_FUNC sre_scanner_new
+DEF_FUNC sre_scanner_new, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -2420,7 +2420,7 @@ END_FUNC sre_scanner_new
 ;; ============================================================================
 ;; sre_scanner_dealloc(rdi=self)
 ;; ============================================================================
-DEF_FUNC sre_scanner_dealloc
+DEF_FUNC sre_scanner_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 

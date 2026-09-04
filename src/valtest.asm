@@ -95,7 +95,7 @@ section .text
 ;; ============================================================================
 ;; value_selftest() -> rax: 0 on success, else the failing case id
 ;; ============================================================================
-DEF_FUNC value_selftest
+DEF_FUNC value_selftest, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -330,7 +330,7 @@ END_FUNC value_selftest
 ;;
 ;; Runs value_selftest and reports the outcome on stdout.
 ;; ============================================================================
-DEF_FUNC value_selftest_main
+DEF_FUNC value_selftest_main, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     call value_selftest
     mov rbx, rax

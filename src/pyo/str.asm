@@ -163,7 +163,7 @@ END_FUNC str_count_codepoints
 ;; ============================================================================
 ;; str_set_length(rdi = PyStrObject*) -- fill ob_length from the bytes.
 ;; ============================================================================
-DEF_FUNC str_set_length
+DEF_FUNC str_set_length, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rsi, [rbx + PyStrObject.ob_size]
@@ -576,7 +576,7 @@ CVP_ENC    equ 16
 CVP_ERR    equ 24
 CVP_DIR    equ 32
 CVP_ARGS   equ 56           ; three Values, the tp_call argument array
-CVP_FRAME  equ 64           ; 56 used + 8 pad = 64, 16-aligned
+CVP_FRAME  equ 72            ; + 1 push = 80, 16-aligned
 global codec_via_python
 DEF_FUNC codec_via_python, CVP_FRAME
     push rbx
@@ -761,7 +761,7 @@ END_FUNC codec_via_python
 ;; of "utf-16".
 ;; ============================================================================
 CUE_MSG   equ 264
-CUE_FRAME equ 272           ; 264 used + 8 pad = 272, 16-aligned
+CUE_FRAME equ 280            ; + 1 push = 288, 16-aligned
 global codec_unknown_encoding
 DEF_FUNC codec_unknown_encoding, CUE_FRAME
     push rbx
@@ -799,7 +799,7 @@ END_FUNC codec_unknown_encoding
 ;; ============================================================================
 CI_BUF   equ 48
 CI_MSG   equ 240            ; the "unknown encoding: x" message, built in place
-CI_FRAME equ 256            ; + 1 push = 264, not 16-aligned
+CI_FRAME equ 264            ; + 1 push = 272, 16-aligned
 DEF_FUNC codec_id, CI_FRAME
     push rbx
     ; ap_strcmp compares eight bytes at a time, so the buffer has to be zeroed
@@ -963,7 +963,7 @@ END_FUNC str_from_cstr
 
 ; str_new_heap(const char *data, int64_t len) -> (rax=PyStrObject*, edx=TAG_PTR)
 ; Always heap-allocates. For struct fields and internal use.
-DEF_FUNC str_new_heap
+DEF_FUNC str_new_heap, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1020,7 +1020,7 @@ END_FUNC str_dealloc
 ;; str_repr(PyObject *self) -> PyObject*
 ;; Returns string with surrounding single quotes: 'hello'
 ;; ============================================================================
-DEF_FUNC str_repr
+DEF_FUNC str_repr, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -3012,7 +3012,7 @@ END_FUNC str_len
 ;; str_getitem(PyObject *self, int64_t index) -> rax = Value
 ;; sq_item: return single-char string at index
 ;; ============================================================================
-DEF_FUNC str_getitem
+DEF_FUNC str_getitem, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -3301,7 +3301,7 @@ extern iter_self
 ;; str_tp_iter(PyStrObject *self) -> PyStrIterObject*
 ;; tp_iter for str type: create a new string iterator
 ;; ============================================================================
-DEF_FUNC str_tp_iter
+DEF_FUNC str_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi               ; save str
@@ -3326,7 +3326,7 @@ END_FUNC str_tp_iter
 ;; str_iter_next(PyStrIterObject *self) -> PyObject* or NULL
 ;; Return next character as a 1-char string, or NULL if exhausted
 ;; ============================================================================
-DEF_FUNC str_iter_next
+DEF_FUNC str_iter_next, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi                                      ; self (iter)
@@ -3368,7 +3368,7 @@ END_FUNC str_iter_next
 
 ;; str_iter_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC str_iter_dealloc
+DEF_FUNC str_iter_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 

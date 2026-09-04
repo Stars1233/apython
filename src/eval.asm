@@ -724,7 +724,7 @@ END_FUNC eval_exception_unwind
 ;; so it is both the context and ours to release.  That happens when something
 ;; raises while the unwinder is running a finalizer, and nothing else.
 ;; ============================================================================
-DEF_FUNC exc_install
+DEF_FUNC exc_install, 8            ; 1 pushes, so rsp is 16-aligned
     push rdi
     mov rsi, [rel current_exception]
     test rsi, rsi

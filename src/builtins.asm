@@ -128,7 +128,7 @@ section .text
 ;; builtin_func_new(void *func_ptr, const char *name_cstr) -> PyBuiltinObject*
 ;; Create a new builtin function wrapper object
 ;; ============================================================================
-DEF_FUNC builtin_func_new
+DEF_FUNC builtin_func_new, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -285,7 +285,7 @@ END_FUNC builtin_func_call
 ;; builtin_func_dealloc(PyObject *self)
 ;; Free the builtin function wrapper
 ;; ============================================================================
-DEF_FUNC_LOCAL builtin_func_dealloc
+DEF_FUNC_LOCAL builtin_func_dealloc, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -317,7 +317,7 @@ END_FUNC builtin_func_dealloc
 ;; are three different CPython types.
 ;; ============================================================================
 BFR_BUF   equ 264           ; the composed repr; two 80-char names plus text
-BFR_FRAME equ 272           ; + 1 push = 280, not 16-aligned
+BFR_FRAME equ 280            ; + 1 push = 288, 16-aligned
 extern rbt_append_cstr
 DEF_FUNC_LOCAL builtin_func_repr, BFR_FRAME
     push rbx
@@ -580,7 +580,7 @@ END_FUNC builtin_func_dunder_get
 ;; where str, bytes, tuple and range answer both from a slot.
 ;; ============================================================================
 BKO_TYPE  equ 8
-BKO_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+BKO_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC_LOCAL builtin_kind_of, BKO_FRAME
     push rbx
     mov [rbp - BKO_TYPE], rdi
@@ -830,7 +830,7 @@ PR_END       equ 24    ; end string ptr (0 = default "\n")
 PR_END_TAG   equ 32    ; end tag
 PR_FILE_FD   equ 40    ; file descriptor (1 = stdout)
 PR_FLUSH     equ 48    ; the flush= keyword, once it means something
-PR_FRAME     equ 4160  ; total frame size (64 + 4096)
+PR_FRAME     equ 4168            ; + 5 pushes = 4208, 16-aligned
 
 extern kw_names_pending
 extern ap_strcmp
@@ -1201,7 +1201,7 @@ END_FUNC builtin_print
 ;; builtin, and falls back to the sequence and mapping length slots.
 ;; ============================================================================
 LEN_EXC   equ 8
-LEN_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+LEN_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC builtin_len, LEN_FRAME
     push rbx
 
@@ -1322,7 +1322,7 @@ END_FUNC builtin_len
 ;; builtin_range(PyObject **args, int64_t nargs) -> rax = Value
 ;; range(stop) or range(start, stop) or range(start, stop, step)
 ;; ============================================================================
-DEF_FUNC builtin_range
+DEF_FUNC builtin_range, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1682,7 +1682,7 @@ END_FUNC builtin_isinstance
 ;; Walks the full tp_base chain for inheritance.
 ;; Supports tuple second arg: issubclass(cls, (type1, type2, ...))
 ;; ============================================================================
-DEF_FUNC builtin_issubclass
+DEF_FUNC builtin_issubclass, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -2074,7 +2074,7 @@ END_FUNC builtin_float
 ;; ============================================================================
 ABS_DICT equ 8
 ABS_KEY  equ 16
-ABS_FRAME equ 24            ; + 2 pushes = 40, not 16-aligned
+ABS_FRAME equ 32            ; + 2 pushes = 48, 16-aligned
 DEF_FUNC_LOCAL add_builtin_str, ABS_FRAME
     push rbx
     push r12
@@ -2139,7 +2139,7 @@ END_FUNC add_builtin_type
 ;; builtins_init() -> PyDictObject*
 ;; Create and populate the builtins dictionary
 ;; ============================================================================
-DEF_FUNC builtins_init
+DEF_FUNC builtins_init, 8            ; 1 push, so rsp is 16-aligned
     push rbx
 
     ; Initialize iterator types (patches list/tuple tp_iter)

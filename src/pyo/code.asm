@@ -88,7 +88,7 @@ END_FUNC code_traverse
 ;; the two localsplus tables through r14 and the frame -- clearing those out
 ;; from under a frame that is still unwinding would be worse than the cycle.
 global code_clear
-DEF_FUNC code_clear
+DEF_FUNC code_clear, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyCodeObject.co_consts]
@@ -236,7 +236,7 @@ END_FUNC code_spec_clear
 
 ; code_dealloc(PyObject *self)
 ; Free code object and decref contained objects
-DEF_FUNC code_dealloc
+DEF_FUNC code_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13

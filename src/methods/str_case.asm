@@ -213,7 +213,7 @@ SDA_BUF   equ 16
 SDA_OUT   equ 24
 SDA_POS   equ 32
 SDA_LEN   equ 40
-SDA_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+SDA_FRAME equ 56            ; + 1 push = 64, 16-aligned
 
 global str_decimal_ascii
 DEF_FUNC str_decimal_ascii, SDA_FRAME

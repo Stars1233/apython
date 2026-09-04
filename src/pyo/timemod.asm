@@ -581,7 +581,7 @@ TM_SIZE   equ 56
 ;; ============================================================================
 TFS_TM    equ 8
 TFS_OBJ   equ 16
-TFS_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+TFS_FRAME equ 40            ; + 1 push = 48, 16-aligned
 DEF_FUNC_LOCAL time_fill_struct, TFS_FRAME
     push rbx
     mov [rbp - TFS_TM], rdi
@@ -672,7 +672,7 @@ TRS_SEQ   equ 8
 TRS_TM    equ 16
 TRS_I     equ 24
 TRS_NAME  equ 32
-TRS_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+TRS_FRAME equ 56            ; + 1 push = 64, 16-aligned
 DEF_FUNC_LOCAL time_read_struct, TRS_FRAME
     push rbx
     mov [rbp - TRS_SEQ], rdi

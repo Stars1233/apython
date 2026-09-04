@@ -1580,7 +1580,7 @@ END_FUNC sre_empty
 ;; sre_state_fini(SRE_State* state)
 ;; Clean up match state.
 ;; ============================================================================
-DEF_FUNC sre_state_fini
+DEF_FUNC sre_state_fini, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -1636,7 +1636,7 @@ END_FUNC sre_state_reset_marks
 ;; Set a mark (group boundary) in the state.
 ;; ============================================================================
 SRE_MAX_MARKS equ 4096
-DEF_FUNC sre_state_set_mark
+DEF_FUNC sre_state_set_mark, 8            ; 1 pushes, so rsp is 16-aligned
     ; rdi = state, rsi = mark_id, rdx = pos
     push rbx
     mov rbx, rdi
@@ -1776,7 +1776,7 @@ SM_PATTERN   equ 16
 SM_TOPLEVEL  equ 24
 SM_LASTPOS   equ 32     ; the repeat's last_pos, kept across a body attempt
 SM_COUNT     equ 40     ; MAX_UNTIL's ctx->count, kept across a body attempt
-SM_MFRAME    equ 96
+SM_MFRAME    equ 104            ; + 5 pushes = 144, 16-aligned
 
 DEF_FUNC sre_match, SM_MFRAME
     push rbx
@@ -3380,7 +3380,7 @@ END_FUNC sre_match
 ;; sre_save_marks(SRE_State* state) -> void*
 ;; Save marks snapshot for backtracking. Returns malloc'd buffer.
 ;; ============================================================================
-DEF_FUNC sre_save_marks
+DEF_FUNC sre_save_marks, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi               ; state
 
@@ -3497,7 +3497,7 @@ END_FUNC sre_restore_marks
 ;; sre_search(SRE_State* state) -> 0/1
 ;; Linear scan: try sre_match at each position from pos to endpos.
 ;; ============================================================================
-DEF_FUNC sre_search, 32
+DEF_FUNC sre_search, 40
     push rbx
     push r12
     push r13

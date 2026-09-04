@@ -166,7 +166,7 @@ DEF_FUNC task_is_generator
     ret
 END_FUNC task_is_generator
 
-DEF_FUNC task_new
+DEF_FUNC task_new, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     ; What a task can step.  A coroutine, a generator or an async generator is
@@ -260,7 +260,7 @@ END_FUNC task_new
 ;; ============================================================================
 ;; task_dealloc(AsyncTask *self)
 ;; ============================================================================
-DEF_FUNC task_dealloc
+DEF_FUNC task_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -826,7 +826,7 @@ END_FUNC task_step
 ;; task_wake_waiters(AsyncTask *task)
 ;; Iterate waiters, set their send_value to task's result, enqueue them.
 ;; ============================================================================
-DEF_FUNC task_wake_waiters
+DEF_FUNC task_wake_waiters, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -969,7 +969,7 @@ END_FUNC task_add_waiter
 ;; Returns when root_task completes.
 ;; ============================================================================
 ER_ROOT equ 8
-ER_FRAME equ 8              ; + 2 pushes = 24, not 16-aligned
+ER_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
 section .bss
 global eventloop_root_exception
 eventloop_root_exception: resq 1    ; the root task's exception, owned, or 0

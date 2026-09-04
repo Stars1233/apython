@@ -1133,7 +1133,7 @@ PRN_DST   equ 16
 PRN_SPTR  equ 24
 PRN_SOWN  equ 32            ; what each posix_path_arg asked us to release
 PRN_DOWN  equ 40
-PRN_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+PRN_FRAME equ 56            ; + 1 push = 64, 16-aligned
 
 DEF_FUNC posix_rename, PRN_FRAME
     push rbx
@@ -1211,7 +1211,7 @@ PSL_DST   equ 16
 PSL_SPTR  equ 24
 PSL_SOWN  equ 32
 PSL_DOWN  equ 40
-PSL_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+PSL_FRAME equ 56            ; + 1 push = 64, 16-aligned
 
 DEF_FUNC posix_symlink, PSL_FRAME
     push rbx
@@ -1427,7 +1427,7 @@ END_FUNC posix_open
 ;; raw bits, and posix.close("x") read PyStrObject.ob_length as the number --
 ;; 1 for a one-character string -- and closed stdout, silently.
 ;; ============================================================================
-DEF_FUNC posix_int_arg
+DEF_FUNC posix_int_arg, 8            ; 1 pushes, so rsp is 16-aligned
     push rdi
     V_UNPACK rdi, rdx
     call int_is_integer
@@ -1469,7 +1469,6 @@ END_FUNC posix_int_arg
 DEF_FUNC posix_raise_typename
     push rbx
     push r12
-    sub rsp, 8
     mov rbx, rdi
     mov r12, rdx
     lea rdi, [rel pm_msgbuf]
@@ -1934,7 +1933,7 @@ END_FUNC posix_ftruncate
 PTR_PATH  equ 8
 PTR_OWNED equ 16
 PTR_LEN   equ 24
-PTR_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+PTR_FRAME equ 40            ; + 1 push = 48, 16-aligned
 DEF_FUNC posix_truncate, PTR_FRAME
     push rbx
     cmp rsi, 2
@@ -1979,7 +1978,7 @@ PLK_SOWN  equ 16
 PLK_SPTR  equ 24
 PLK_DST   equ 32
 PLK_DOWN  equ 40
-PLK_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+PLK_FRAME equ 56            ; + 1 push = 64, 16-aligned
 DEF_FUNC posix_link, PLK_FRAME
     push rbx
     cmp rsi, 2
@@ -2056,7 +2055,7 @@ PCH_PATH  equ 8
 PCH_OWNED equ 16
 PCH_UID   equ 24
 PCH_GID   equ 32
-PCH_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+PCH_FRAME equ 56            ; + 1 push = 64, 16-aligned
 DEF_FUNC posix_chown, PCH_FRAME
     push rbx
     cmp rsi, 3
@@ -2182,7 +2181,7 @@ END_FUNC posix_dup2
 PUT_PATH  equ 8
 PUT_OWNED equ 16
 PUT_TIMES equ 48            ; two struct timespec, 16 bytes each
-PUT_FRAME equ 64            ; + 1 push = 72, not 16-aligned
+PUT_FRAME equ 72            ; + 1 push = 80, 16-aligned
 DEF_FUNC posix_utime, PUT_FRAME
     push rbx
     test rsi, rsi

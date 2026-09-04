@@ -217,6 +217,15 @@ def check_alignment(files):
     bad = []
     for path in files:
         src = open(path).read()
+        # Every plain `NAME equ <arithmetic>` in the file, so a prologue's own
+        # `sub rsp, SOME_SIZE` can be evaluated below.
+        consts = {}
+        for cm in re.finditer(r'^(\w+)\s+equ\s+(.+?)\s*(?:;.*)?$', src, re.M):
+            try:
+                consts[cm.group(1)] = eval(cm.group(2), {"__builtins__": {}},
+                                           dict(consts))
+            except Exception:
+                pass
         # `.` matches a newline under re.S, so a trailing `;.*` comment used to
         # swallow the rest of the file: a DEF_FUNC whose declaration carried a
         # comment took everything to the last END_FUNC as its body, and 87 of
@@ -225,6 +234,9 @@ def check_alignment(files):
         for m in re.finditer(r'^(DEF_FUNC(?:_LOCAL)?)\s+(\w+)(?:\s*,\s*([^\s;]+))?[^\n]*$(.*?)^END_FUNC',
                              src, re.M | re.S):
             name, frame, body = m.group(2), m.group(3), m.group(4)
+            if '%' in m.group(0).split('\n')[0]:
+                continue        # inside a %macro: the name is a parameter, and
+                                # its prologue may be conditional
             if not re.search(r'^\s*call\s', body, re.M):
                 continue
             n = 0
@@ -247,6 +259,9 @@ def check_alignment(files):
             if ann:
                 p = int(ann.group(1))
             else:
+                # Pushes and a `sub rsp` may come in either order -- a few
+                # prologues carve their slots first -- so both are counted
+                # until the first instruction that is neither.
                 p = 0
                 for line in body.strip().splitlines():
                     s = line.split(';')[0].strip()
@@ -254,12 +269,41 @@ def check_alignment(files):
                         continue        # a preprocessor directive, not code
                     if s.startswith('push '):
                         p += 1
+                    elif re.match(r'^sub\s+rsp\s*,', s):
+                        continue        # measured as `extra` below
                     else:
                         break
-            if (n + 8 * p) % 16:
+            # A prologue that carves its own space after the pushes counts
+            # too, and a few do: pyc_read_file reserves a struct stat that way
+            # and addresses it relative to rbp, so its DEF_FUNC frame is 0 and
+            # its rsp is nonetheless aligned.  Growing the DEF_FUNC frame of
+            # such a function is not the fix -- it moves rsp without moving
+            # the rbp-relative buffer, which then overlaps the saved
+            # registers.
+            extra = 0
+            for line in body.strip().splitlines():
+                s = line.split(';')[0].strip()
+                if not s or s.startswith('%'):
+                    continue
+                if s.startswith('push '):
+                    continue        # already counted above
+                sub = re.match(r'^sub\s+rsp\s*,\s*(.+)$', s)
+                if not sub:
+                    break
+                try:
+                    extra += eval(sub.group(1), {"__builtins__": {}},
+                                  dict(consts))
+                except Exception:
+                    extra = None
+                    break
+            if extra is None:
+                continue                # symbolic; not ours to judge
+            if (n + 8 * p + extra) % 16:
                 bad.append((path, 0,
-                            "rsp misaligned at calls in %s (frame %d + %d pushes)" % (name, n, p),
-                            "make the frame %d bytes" % (n + (16 - (n + 8 * p) % 16))))
+                            "rsp misaligned at calls in %s (frame %d + %d pushes%s)"
+                            % (name, n, p, " + sub rsp, %d" % extra if extra else ""),
+                            "make the frame %d bytes"
+                            % (n + (16 - (n + 8 * p + extra) % 16))))
     return bad
 
 REGS = frozenset(
@@ -510,7 +554,7 @@ def main():
                 + check_separators(everything)
                 + check_text(everything) + check_guards(headers)
                 + check_type_tables(everything, nfields)
-                + check_alignment(scoped) + check_tailjumps(scoped)
+                + check_alignment(everything) + check_tailjumps(scoped)
                 + check_callee_saved(scoped) + check_saved_writes(scoped))
     for path, n, what, detail in problems:
         where = "%s:%d" % (path, n) if n else path

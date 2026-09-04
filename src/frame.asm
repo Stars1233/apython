@@ -135,7 +135,7 @@ END_FUNC frame_pool_put
 ; frame_new(PyCodeObject *code, PyObject *globals, PyObject *builtins, PyObject *locals) -> PyFrame*
 ; Allocates and initializes a new execution frame.
 ; rdi = code, rsi = globals, rdx = builtins, rcx = locals
-DEF_FUNC frame_new
+DEF_FUNC frame_new, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -218,7 +218,7 @@ END_FUNC frame_new
 ; frame_free(PyFrame *frame)
 ; XDECREF all non-NULL localsplus entries, then free the frame.
 ; rdi = frame
-DEF_FUNC frame_free
+DEF_FUNC frame_free, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13

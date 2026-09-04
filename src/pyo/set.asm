@@ -352,7 +352,7 @@ END_FUNC set_find_slot
 ;; set_resize(set)
 ;; Double capacity and rehash all entries
 ;; ============================================================================
-DEF_FUNC_LOCAL set_resize
+DEF_FUNC_LOCAL set_resize, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -560,7 +560,7 @@ END_FUNC set_contains
 SRC_SELF  equ 8
 SRC_OTHER equ 16
 SRC_OP    equ 24
-SRC_FRAME equ 24            ; + 0 pushes = 24, not 16-aligned
+SRC_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC set_richcompare, SRC_FRAME
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, r8            ; right Value -> (payload, tag)
@@ -1021,7 +1021,7 @@ END_FUNC set_len
 ;; Create a new set iterator.
 ;; rdi = set
 ;; ============================================================================
-DEF_FUNC set_tp_iter
+DEF_FUNC set_tp_iter, 8            ; 1 push, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi               ; save set
@@ -1090,7 +1090,7 @@ END_FUNC set_iter_next
 ;; ============================================================================
 ;; set_iter_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL set_iter_dealloc
+DEF_FUNC_LOCAL set_iter_dealloc, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 

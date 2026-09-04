@@ -393,9 +393,12 @@ Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 byt
   zero-extends. `src/compiler/lint.py` checks this.
 - **A call made with `rsp` misaligned.** After `DEF_FUNC`'s `push rbp`, a
   `sub rsp, N` and P register pushes, the SysV ABI wants `(N + 8*P) % 16 == 0`.
-  Much of `src/` predates this and violates it harmlessly, but the compiler
-  calls `strtod`, and glibc's float paths do use aligned SSE. `src/compiler/lint.py`
-  checks it; pad the frame rather than the push list.
+  The compiler calls `strtod` and the numeric builtins reach GMP, and glibc's
+  float paths do use aligned SSE. `src/compiler/lint.py` checks it tree-wide;
+  pad the frame rather than the push list. A prologue that carves its own
+  space after the pushes is the exception: growing its `DEF_FUNC` frame moves
+  `rsp` without moving the buffer it addresses off `rbp`, so change the
+  `sub rsp` and every matching `add rsp` together instead.
 - **A frame slot overlapping a struct in the same frame.** A hand-picked
   `equ` for a large struct silently overlaps the scalar slots above it the
   first time the struct grows, and the symptom is one field reading as garbage.

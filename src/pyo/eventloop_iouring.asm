@@ -388,7 +388,7 @@ END_FUNC uring_submit_timeout
 ;; ============================================================================
 ;; uring_submit_poll(AsyncTask *task, int fd, int events)
 ;; ============================================================================
-DEF_FUNC uring_submit_poll
+DEF_FUNC uring_submit_poll, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -419,7 +419,7 @@ END_FUNC uring_submit_poll
 ;; ============================================================================
 ;; uring_cancel_io(AsyncTask *task)
 ;; ============================================================================
-DEF_FUNC uring_cancel_io
+DEF_FUNC uring_cancel_io, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 

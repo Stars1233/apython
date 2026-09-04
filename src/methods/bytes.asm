@@ -634,7 +634,7 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     ud2
 END_FUNC bytes_method_affix
 
-DEF_FUNC_LOCAL baf_append_quoted_typename   ; (rdi = dest, rsi = a Value)
+DEF_FUNC_LOCAL baf_append_quoted_typename, 8      ; 1 push, so rsp is 16-aligned   ; (rdi = dest, rsi = a Value)
     push rbx
     mov rbx, rdi
     mov byte [rbx], 0x27        ; an apostrophe
@@ -2058,7 +2058,7 @@ BJ_TOTAL  equ 24
 BJ_BUF    equ 32
 BJ_WPOS   equ 40
 BJ_TMP    equ 48        ; materialised sequence, owned, or 0
-BJ_FRAME  equ 64            ; + 5 pushes = 104, not 16-aligned
+BJ_FRAME  equ 72            ; + 5 pushes = 112, 16-aligned
 
 ; Release the sequence bytes.join() materialised for itself, if it made one.
 %macro BJ_RELEASE_TMP 0
@@ -2309,7 +2309,6 @@ END_FUNC bj_append_cstr
 DEF_FUNC_LOCAL bj_append_i64    ; (rdi = prefix cstr, rsi = n) -> rax = the NUL
     push rbx
     push r12
-    sub rsp, 8
     mov r12, rsi
     mov rsi, rdi
     lea rdi, [rel bj_msgbuf]
@@ -2330,7 +2329,6 @@ DEF_FUNC_LOCAL bj_append_i64    ; (rdi = prefix cstr, rsi = n) -> rax = the NUL
     mov rdi, rbx
     mov rsi, r8
     call bj_append_cstr
-    add rsp, 8
     pop r12
     pop rbx
     leave
@@ -2516,7 +2514,7 @@ DEF_FUNC bytearray_shared_call, 72
 END_FUNC bytearray_shared_call
 
 ;; bytearray_from_bytes(rdi = a bytes, borrowed) -> rax = a new bytearray
-DEF_FUNC bytearray_from_bytes
+DEF_FUNC bytearray_from_bytes, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     V_TEST_PTR rdi, rax

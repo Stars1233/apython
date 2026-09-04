@@ -1178,7 +1178,7 @@ END_FUNC func_getattr
 ;; string "<function>".
 ;; rdi = function object
 ;; ============================================================================
-DEF_FUNC func_repr
+DEF_FUNC func_repr, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rax, [rbx + PyFuncObject.func_qualname]
@@ -1501,7 +1501,7 @@ END_FUNC cell_new
 ;; ============================================================================
 ;; cell_dealloc(PyCellObject *self)
 ;; ============================================================================
-DEF_FUNC cell_dealloc
+DEF_FUNC cell_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -1602,7 +1602,7 @@ DEF_FUNC func_traverse
     ret
 END_FUNC func_traverse
 
-DEF_FUNC func_clear
+DEF_FUNC func_clear, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 

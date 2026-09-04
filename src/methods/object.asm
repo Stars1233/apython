@@ -783,7 +783,7 @@ DEF_FUNC_BARE dunder_operand_is_int
 END_FUNC dunder_operand_is_int
 
 global dunder_operand_is_real
-DEF_FUNC dunder_operand_is_real
+DEF_FUNC dunder_operand_is_real, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     V_IS_FLOAT rdi, rax

@@ -1734,7 +1734,7 @@ END_FUNC type_apply_hash_rule
 TWI_TYPE  equ 8
 TWI_DICT  equ 16
 TWI_KEY   equ 24
-TWI_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+TWI_FRAME equ 40            ; + 1 push = 48, 16-aligned
 DEF_FUNC_LOCAL type_wrap_implicit_classmethods, TWI_FRAME
     push rbx
     mov [rbp - TWI_TYPE], rdi
@@ -2170,7 +2170,7 @@ DEF_FUNC_BARE bc_normalize_metatype
     ret
 END_FUNC bc_normalize_metatype
 
-DEF_FUNC builtin___build_class__
+DEF_FUNC builtin___build_class__, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13

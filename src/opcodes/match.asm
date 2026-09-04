@@ -917,7 +917,7 @@ MC_MATCHARGS equ 48
 MC_IDX       equ 56
 MC_SUBJ_TAG  equ 64
 MC_ORIGIN    equ 72   ; the subject's type, for the __match_args__ walk
-MC_FRAME     equ 88         ; + 0 pushes = 88, not 16-aligned
+MC_FRAME     equ 96            ; + 0 pushes = 96, 16-aligned
 
 extern str_type
 

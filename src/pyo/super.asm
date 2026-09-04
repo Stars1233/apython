@@ -824,7 +824,7 @@ END_FUNC super_repr
 ;; bound one holds its instance, which is how a super stored on that instance
 ;; makes a cycle the collector has to be able to see.
 ;; ============================================================================
-DEF_FUNC_LOCAL super_dealloc
+DEF_FUNC_LOCAL super_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PySuperObject.su_type]

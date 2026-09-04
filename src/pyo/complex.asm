@@ -1174,7 +1174,7 @@ END_FUNC complex_cdiv_raw
 ;; ============================================================================
 CR_SELF  equ 8
 CR_BUF   equ 128            ; 112 bytes: two 24-byte reprs plus "(", "+", "j)"
-CR_FRAME equ 128            ; + 1 push = 136, not 16-aligned
+CR_FRAME equ 136            ; + 1 push = 144, 16-aligned
 DEF_FUNC complex_repr, CR_FRAME
     push rbx
     mov [rbp - CR_SELF], rdi
@@ -1294,7 +1294,7 @@ END_FUNC complex_repr_append
 ;; NaN here (a pre-existing choice), so ours is stable -- no test may print it.
 ;; ============================================================================
 CH_IMAG  equ 8
-CH_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+CH_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC complex_hash, CH_FRAME
     push rbx
     mov rax, [rdi + PyComplexObject.cval_imag]

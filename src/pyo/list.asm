@@ -103,7 +103,7 @@ END_FUNC list_new
 ;; list_copy(PyListObject *src) -> PyListObject* (shallow copy)
 ;; Creates a new list with same items, INCREFs each.
 ;; ============================================================================
-DEF_FUNC list_copy
+DEF_FUNC list_copy, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -154,7 +154,7 @@ END_FUNC list_copy
 ;; list_append(rdi=list, rsi=item Value)
 ;; Append item, growing if needed.  INCREFs the item.
 ;; ============================================================================
-DEF_FUNC list_append
+DEF_FUNC list_append, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1194,7 +1194,7 @@ END_FUNC list_contains
 ;; list_dealloc(PyObject *self)
 ;; DECREF all items, free items array, free or pool list header
 ;; ============================================================================
-DEF_FUNC list_dealloc
+DEF_FUNC list_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1653,7 +1653,7 @@ END_FUNC list_repeat
 LIC_SELF   equ 8
 LIC_ITER   equ 16
 LIC_EXC    equ 24           ; current_exception before the iteration started
-LIC_FRAME  equ 24           ; + 3 pushes = 48, 16-aligned
+LIC_FRAME  equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC list_inplace_concat, LIC_FRAME
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
@@ -1800,7 +1800,7 @@ END_FUNC list_inplace_concat
 ;; Returns (left, TAG_PTR) — same object.
 ;; ============================================================================
 LIR_OLDSIZE equ 16
-LIR_FRAME   equ 16          ; + 0 pushes = 16
+LIR_FRAME   equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC list_inplace_repeat, LIR_FRAME
     ; The count must be an integer.  int_to_i64 below reads its argument as a
     ; PyIntObject, so `a = [1]; a *= "x"` used to read a PyStrObject's header

@@ -265,7 +265,7 @@ END_FUNC gc_mod_set_threshold
 ;; ============================================================================
 GGO_LIST  equ 8
 GGO_GEN   equ 16
-GGO_FRAME equ 32            ; + 1 push = 40
+GGO_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
 DEF_FUNC gc_mod_get_objects, GGO_FRAME
     push rbx
@@ -493,7 +493,7 @@ END_FUNC gc_mod_get_freeze_count
 GGS_LIST  equ 8
 GGS_DICT  equ 16
 GGS_I     equ 24
-GGS_FRAME equ 32            ; 24 used + 8 pad = 32, 16-aligned
+GGS_FRAME equ 40            ; + 1 push = 48, 16-aligned
 DEF_FUNC gc_mod_get_stats, GGS_FRAME
     push rbx
     xor edi, edi
@@ -608,7 +608,7 @@ section .data
 gm_referents_out: dq 0
 section .text
 
-DEF_FUNC_LOCAL gm_visit_append
+DEF_FUNC_LOCAL gm_visit_append, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rel gm_referents_out]
@@ -874,7 +874,7 @@ END_FUNC gc_module_create
 ;; gm_add_empty_list(rdi = dict, rsi = name cstr)
 GME_LIST  equ 8
 GME_KEY   equ 16
-GME_FRAME equ 24            ; + 2 pushes = 40
+GME_FRAME equ 32            ; + 2 pushes = 48, 16-aligned
 
 DEF_FUNC_LOCAL gm_add_empty_list, GME_FRAME
     push rbx

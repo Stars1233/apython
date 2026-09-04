@@ -32,7 +32,7 @@ extern builtin_func_new
 ;; tp_call for staticmethod_type. Creates a staticmethod wrapper.
 ;; rdi = staticmethod_type (ignored), rsi = args, rdx = nargs
 ;; ============================================================================
-DEF_FUNC staticmethod_construct
+DEF_FUNC staticmethod_construct, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     cmp rdx, 1
@@ -67,7 +67,7 @@ END_FUNC staticmethod_construct
 ;; ============================================================================
 ;; staticmethod_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL staticmethod_dealloc
+DEF_FUNC_LOCAL staticmethod_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -88,7 +88,7 @@ END_FUNC staticmethod_dealloc
 ;; rdi = classmethod_type (ignored), rsi = args, rdx = nargs
 ;; ============================================================================
 global classmethod_construct
-DEF_FUNC classmethod_construct
+DEF_FUNC classmethod_construct, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     cmp rdx, 1
@@ -123,7 +123,7 @@ END_FUNC classmethod_construct
 ;; ============================================================================
 ;; classmethod_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL classmethod_dealloc
+DEF_FUNC_LOCAL classmethod_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -345,7 +345,7 @@ END_FUNC property_construct
 ;; ============================================================================
 ;; property_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL property_dealloc
+DEF_FUNC_LOCAL property_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -568,7 +568,7 @@ END_FUNC _get_prop_deleter_builtin
 ;; args[0] = property (self from bound method), args[1] = func
 ;; Returns new property with same fget/fdel, new fset
 ;; ============================================================================
-DEF_FUNC _prop_setter_impl
+DEF_FUNC _prop_setter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     ; args[0] = property, args[1] = new fset
@@ -611,7 +611,7 @@ END_FUNC _prop_setter_impl
 ;; _prop_getter_impl(args, nargs) — property.getter(func)
 ;; Returns new property with new fget, same fset/fdel
 ;; ============================================================================
-DEF_FUNC _prop_getter_impl
+DEF_FUNC _prop_getter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     cmp rsi, 2
@@ -654,7 +654,7 @@ END_FUNC _prop_getter_impl
 ;; _prop_deleter_impl(args, nargs) — property.deleter(func)
 ;; Returns new property with same fget/fset, new fdel
 ;; ============================================================================
-DEF_FUNC _prop_deleter_impl
+DEF_FUNC _prop_deleter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     cmp rsi, 2
@@ -808,7 +808,7 @@ END_FUNC property_descr_set
 ;; rdx = the class it belongs to, borrowed -- the type owns the dict that owns
 ;; this, and only the repr reads it.
 ;; ============================================================================
-DEF_FUNC member_descr_new
+DEF_FUNC member_descr_new, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -842,7 +842,7 @@ END_FUNC member_descr_new
 ;; says neither which slot nor whose.
 ;; ============================================================================
 MDR_BUF   equ 272
-MDR_FRAME equ 288           ; 272 used + 16 pad = 288, 16-aligned
+MDR_FRAME equ 296            ; + 1 push = 304, 16-aligned
 DEF_FUNC_LOCAL member_descr_repr, MDR_FRAME
     push rbx
     mov rbx, rdi
@@ -879,7 +879,7 @@ DEF_FUNC_LOCAL member_descr_repr, MDR_FRAME
 END_FUNC member_descr_repr
 
 ;; member_descr_dealloc(PyMemberDescrObject *self)
-DEF_FUNC member_descr_dealloc
+DEF_FUNC member_descr_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -951,7 +951,7 @@ DEF_FUNC mappingproxy_construct
     RAISE exc_TypeError_type, "mappingproxy() argument must be a mapping, not a sequence"
 END_FUNC mappingproxy_construct
 
-DEF_FUNC mappingproxy_new
+DEF_FUNC mappingproxy_new, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi                    ; the dict
     mov edi, PyMappingProxyObject_size
@@ -969,7 +969,7 @@ DEF_FUNC mappingproxy_new
     ret
 END_FUNC mappingproxy_new
 
-DEF_FUNC_LOCAL mappingproxy_dealloc
+DEF_FUNC_LOCAL mappingproxy_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyMappingProxyObject.mp_mapping]
@@ -1083,7 +1083,7 @@ END_FUNC mappingproxy_getattr
 ;; exposes func.__code__ and the co_* fields, and types.py takes
 ;; GetSetDescriptorType straight off one of them.
 ;; ============================================================================
-DEF_FUNC getset_descr_new
+DEF_FUNC getset_descr_new, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1220,7 +1220,7 @@ END_FUNC getset_descr_dunder_delete
 ;;
 ;; The middle the repr and the not-writable message share.
 ;; ============================================================================
-DEF_FUNC_LOCAL getset_descr_compose
+DEF_FUNC_LOCAL getset_descr_compose, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1435,7 +1435,7 @@ DEF_FUNC getset_descr_set, GDS_FRAME
     ud2
 END_FUNC getset_descr_set
 
-DEF_FUNC_LOCAL getset_descr_dealloc
+DEF_FUNC_LOCAL getset_descr_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyGetSetDescrObject.gs_name]
@@ -1486,7 +1486,7 @@ DEF_FUNC generic_alias_new
     ret
 END_FUNC generic_alias_new
 
-DEF_FUNC_LOCAL generic_alias_dealloc
+DEF_FUNC_LOCAL generic_alias_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyGenericAliasObject.ga_origin]
@@ -1526,7 +1526,7 @@ END_FUNC generic_alias_class_getitem
 ;; repr: "list[int]" -- origin name, then the argument's repr.
 GAR_BUF   equ 264
 GAR_SELF  equ 272
-GAR_FRAME equ 288           ; + 5 pushes = 328, not 16-aligned
+GAR_FRAME equ 296            ; + 5 pushes = 336, 16-aligned
 DEF_FUNC generic_alias_repr, GAR_FRAME
     push rbx
     push r12
@@ -1716,7 +1716,7 @@ END_FUNC generic_alias_call
 
 ;; __origin__ / __args__
 GAG_NAME  equ 8
-GAG_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+GAG_FRAME equ 24            ; + 1 push = 32, 16-aligned
 
 DEF_FUNC generic_alias_getattr, GAG_FRAME
     push rbx
@@ -1800,7 +1800,7 @@ END_FUNC generic_alias_getattr
 ;;   -> rax = new length
 ;; The display form used inside a generic alias or a union: a type shows as
 ;; its unqualified name, Ellipsis as "...", anything else as its repr.
-DEF_FUNC ga_emit_name
+DEF_FUNC ga_emit_name, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -2077,7 +2077,7 @@ END_FUNC union_type_or
 ;; and union_type carried neither a tp_getattr nor a tp_dict, so it answered
 ;; AttributeError while the tuple sat in ga_args.
 ;; ============================================================================
-DEF_FUNC union_getattr
+DEF_FUNC union_getattr, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     lea rdi, [rsi + PyStrObject.data]
@@ -2133,7 +2133,7 @@ END_FUNC union_operand_ok
 ;; repr: "int | str"
 UR_BUF   equ 264
 UR_SELF  equ 272
-UR_FRAME equ 288            ; + 5 pushes = 328, not 16-aligned
+UR_FRAME equ 296            ; + 5 pushes = 336, 16-aligned
 DEF_FUNC union_repr, UR_FRAME
     push rbx
     push r12
@@ -2204,7 +2204,7 @@ section .text
 ;; One function serves both wrappers -- sm_callable and cm_callable are the
 ;; same slot -- so both type tables point straight at it.
 ;; ============================================================================
-DEF_FUNC descr_func_attr
+DEF_FUNC descr_func_attr, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     lea rdi, [rsi + PyStrObject.data]
@@ -2280,7 +2280,7 @@ DEF_FUNC staticmethod_dunder_get
     ret
 END_FUNC staticmethod_dunder_get
 
-DEF_FUNC classmethod_dunder_get
+DEF_FUNC classmethod_dunder_get, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, [rdi]
     mov rbx, [rbx + PyClassMethodObject.cm_callable]
@@ -2382,7 +2382,7 @@ DEF_FUNC property_dunder_set, PDS2_FRAME
     RAISE exc_TypeError_type, "__set__() takes exactly 2 arguments"
 END_FUNC property_dunder_set
 
-DEF_FUNC property_dunder_delete
+DEF_FUNC property_dunder_delete, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     cmp rsi, 2
     jl .pdd_no_deleter
@@ -2428,7 +2428,7 @@ section .text
 ;; ============================================================================
 PSA_SELF  equ 8
 PSA_VAL   equ 16
-PSA_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+PSA_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC_LOCAL property_setattr, PSA_FRAME
     push rbx
     mov rbx, rdi
@@ -3134,7 +3134,7 @@ DEF_FUNC staticmethod_traverse
     ret
 END_FUNC staticmethod_traverse
 
-DEF_FUNC staticmethod_clear
+DEF_FUNC staticmethod_clear, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyStaticMethodObject.sm_callable]
@@ -3155,7 +3155,7 @@ DEF_FUNC classmethod_traverse
     ret
 END_FUNC classmethod_traverse
 
-DEF_FUNC classmethod_clear
+DEF_FUNC classmethod_clear, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyClassMethodObject.cm_callable]

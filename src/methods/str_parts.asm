@@ -83,7 +83,7 @@ END_FUNC str_method_istitle
 ;; ============================================================================
 PT_SELF   equ 8
 PT_SEP    equ 16
-PT_FRAME  equ 16            ; + 3 pushes = 40, not 16-aligned
+PT_FRAME  equ 24            ; + 3 pushes = 48, 16-aligned
 DEF_FUNC str_method_partition, PT_FRAME
     push rbx
     push r12
@@ -763,7 +763,7 @@ TRN_LEN   equ 80            ; a bounded table's length, or -1
 TRN_CHLEN equ 88            ; how many bytes the current character occupies
 TRN_HEAP  equ 96            ; 1 when the table is a user class: ask __getitem__
                             ; through dunder_call_2, which comes back
-TRN_FRAME equ 104           ; + 2 pushes = 120, 16-aligned
+TRN_FRAME equ 112            ; + 2 pushes = 128, 16-aligned
 
 extern bytearray_type
 extern bytes_type
@@ -1965,7 +1965,7 @@ SRE_CP    equ 8
 SRE_POS   equ 16
 SRE_NAME  equ 24
 SRE_LIMIT equ 32
-SRE_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+SRE_FRAME equ 56            ; + 1 push = 64, 16-aligned
 DEF_FUNC_LOCAL str_raise_encode_error, SRE_FRAME
     push rbx
     mov [rbp - SRE_CP], rdi
@@ -2070,7 +2070,7 @@ SRU_LIMIT equ 24
 SRU_NAME  equ 32
 SRU_CP    equ 40
 SRU_SPAN  equ 48
-SRU_FRAME equ 64            ; + 1 push = 72, not 16-aligned
+SRU_FRAME equ 72            ; + 1 push = 80, 16-aligned
 DEF_FUNC_LOCAL se_report_unencodable, SRU_FRAME
     push rbx
     mov [rbp - SRU_STR], rdi

@@ -73,7 +73,7 @@ itertools_iter_self:
 ;; Leaves other exceptions (ZeroDivisionError etc.) for callers to propagate.
 ;; ============================================================================
 extern dunder_next
-DEF_FUNC call_iternext
+DEF_FUNC call_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rax, [rdi + PyObject.ob_type]
     mov rcx, rax
@@ -185,7 +185,7 @@ section .rodata
 gi_not_iterable_msg: db "'", 1, "' object is not iterable", 0
 section .text
 
-DEF_FUNC get_iterator_opt
+DEF_FUNC get_iterator_opt, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     ; rdi = obj payload, esi = obj tag
 
@@ -331,7 +331,7 @@ EN_NPOS    equ 16
 EN_START   equ 24
 EN_ITER    equ 32     ; local: iterable pointer
 EN_ITERTAG equ 40     ; local: iterable tag
-EN_FRAME   equ 48           ; + 3 pushes = 72, not 16-aligned
+EN_FRAME   equ 56            ; + 3 pushes = 80, 16-aligned
 DEF_FUNC builtin_enumerate, EN_FRAME
     push rbx
     push r12
@@ -548,7 +548,7 @@ DEF_FUNC builtin_enumerate, EN_FRAME
 END_FUNC builtin_enumerate
 
 ;; enumerate_iternext(self) -> PyObject* (2-tuple) or NULL
-DEF_FUNC_LOCAL enumerate_iternext
+DEF_FUNC_LOCAL enumerate_iternext, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -628,7 +628,7 @@ DEF_FUNC_LOCAL filter_traverse
     ret
 END_FUNC filter_traverse
 
-DEF_FUNC_LOCAL filter_clear
+DEF_FUNC_LOCAL filter_clear, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + IT_FIELD1]
@@ -673,7 +673,7 @@ DEF_FUNC_LOCAL iters_array_traverse
     ret
 END_FUNC iters_array_traverse
 
-DEF_FUNC_LOCAL iters_array_clear
+DEF_FUNC_LOCAL iters_array_clear, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -736,7 +736,7 @@ DEF_FUNC_LOCAL map_traverse
     ret
 END_FUNC map_traverse
 
-DEF_FUNC_LOCAL map_clear
+DEF_FUNC_LOCAL map_clear, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -774,7 +774,7 @@ DEF_FUNC_LOCAL map_clear
     ret
 END_FUNC map_clear
 
-DEF_FUNC_LOCAL enumerate_dealloc
+DEF_FUNC_LOCAL enumerate_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -964,7 +964,7 @@ DEF_FUNC builtin_zip, ZP_FRAME
 END_FUNC builtin_zip
 
 ;; zip_iternext(self) -> PyObject* (tuple) or NULL
-DEF_FUNC_LOCAL zip_iternext
+DEF_FUNC_LOCAL zip_iternext, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1102,7 +1102,7 @@ DEF_FUNC_LOCAL zip_iternext
 END_FUNC zip_iternext
 
 ;; zip_dealloc(self)
-DEF_FUNC_LOCAL zip_dealloc
+DEF_FUNC_LOCAL zip_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1341,7 +1341,7 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
 END_FUNC map_iternext
 
 ;; map_dealloc(self)
-DEF_FUNC_LOCAL map_dealloc
+DEF_FUNC_LOCAL map_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1386,7 +1386,7 @@ END_FUNC map_dealloc
 
 ;; builtin_filter(args, nargs) -> FilterIterObject*
 ;; nargs=2: filter(func_or_none, iterable)
-DEF_FUNC builtin_filter
+DEF_FUNC builtin_filter, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1547,7 +1547,7 @@ DEF_FUNC_LOCAL filter_iternext
 END_FUNC filter_iternext
 
 ;; filter_dealloc(self)
-DEF_FUNC_LOCAL filter_dealloc
+DEF_FUNC_LOCAL filter_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -1579,7 +1579,7 @@ END_FUNC filter_dealloc
 ;; nargs=1: reversed(sequence)
 extern dunder_call_1
 
-DEF_FUNC builtin_reversed
+DEF_FUNC builtin_reversed, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1759,7 +1759,7 @@ section .text
 END_FUNC builtin_reversed
 
 ;; reversed_iternext(self) -> rax = Value or NULL
-DEF_FUNC_LOCAL reversed_iternext
+DEF_FUNC_LOCAL reversed_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi            ; self
@@ -1814,7 +1814,7 @@ DEF_FUNC_LOCAL reversed_iternext
 END_FUNC reversed_iternext
 
 ;; reversed_dealloc(self)
-DEF_FUNC_LOCAL reversed_dealloc
+DEF_FUNC_LOCAL reversed_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -2032,7 +2032,7 @@ END_FUNC reversed_type_call
 
 ;; seq_iter_new(rdi=obj) -> seq_iter_type instance
 ;; obj must be INCREFed by caller (we take ownership)
-DEF_FUNC seq_iter_new
+DEF_FUNC seq_iter_new, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi                   ; save obj
 
@@ -2183,7 +2183,7 @@ DEF_FUNC_LOCAL callable_iter_traverse
     ret
 END_FUNC callable_iter_traverse
 
-DEF_FUNC_LOCAL callable_iter_clear
+DEF_FUNC_LOCAL callable_iter_clear, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + CI_CALL]
@@ -2200,7 +2200,7 @@ DEF_FUNC_LOCAL callable_iter_clear
     ret
 END_FUNC callable_iter_clear
 
-DEF_FUNC_LOCAL callable_iter_dealloc
+DEF_FUNC_LOCAL callable_iter_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     call callable_iter_clear    ; drops the callable and the sentinel
@@ -2216,7 +2216,7 @@ END_FUNC callable_iter_dealloc
 ;; seq_iter_iternext(self) -> (rax=payload, edx=tag) or NULL
 ;; Calls self.it_obj.__getitem__(self.it_index); catches IndexError as exhaustion.
 SI_EXC   equ 8
-SI_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+SI_FRAME equ 24            ; + 1 push = 32, 16-aligned
 
 DEF_FUNC_LOCAL seq_iter_iternext, SI_FRAME
     push rbx
@@ -2291,7 +2291,7 @@ DEF_FUNC_LOCAL seq_iter_iternext, SI_FRAME
 END_FUNC seq_iter_iternext
 
 ;; seq_iter_dealloc(self)
-DEF_FUNC_LOCAL seq_iter_dealloc
+DEF_FUNC_LOCAL seq_iter_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -2414,7 +2414,7 @@ END_FUNC builtin_chain
 ;; chain_iternext(self) -> (rax=payload, edx=tag) or NULL
 ;; Tries current sub-iterator; on exhaustion advances to next.
 CHI_EXC   equ 8
-CHI_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+CHI_FRAME equ 24            ; + 1 push = 32, 16-aligned
 
 DEF_FUNC_LOCAL chain_iternext, CHI_FRAME
     push rbx
@@ -2461,7 +2461,7 @@ DEF_FUNC_LOCAL chain_iternext, CHI_FRAME
 END_FUNC chain_iternext
 
 ;; chain_dealloc(self)
-DEF_FUNC_LOCAL chain_dealloc
+DEF_FUNC_LOCAL chain_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13

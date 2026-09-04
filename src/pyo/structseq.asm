@@ -628,7 +628,6 @@ END_FUNC structseq_type_new
 DEF_FUNC structseq_raise_length
     push rbx
     push r12
-    sub rsp, 8
     mov rbx, rsi
     mov r12, rdx
     mov rsi, [rdi + PyTypeObject.tp_name]

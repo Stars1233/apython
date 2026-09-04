@@ -771,7 +771,7 @@ extern free
 extern realloc
 ; ap_malloc(size_t size) -> void*
 ; Allocates memory, fatal error on failure
-DEF_FUNC ap_malloc
+DEF_FUNC ap_malloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi            ; save size
     call malloc wrt ..plt
@@ -797,7 +797,7 @@ END_FUNC ap_free
 
 ; ap_realloc(void *ptr, size_t size) -> void*
 ; Reallocates memory, fatal error on failure
-DEF_FUNC ap_realloc
+DEF_FUNC ap_realloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rsi            ; save size for error case
     call realloc wrt ..plt
@@ -825,7 +825,7 @@ section .text
 
 ; fatal_error(const char *msg)
 ; Prints "Error: <msg>\n" to stderr and exits with code 1. Never returns.
-DEF_FUNC fatal_error
+DEF_FUNC fatal_error, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi            ; save msg
 

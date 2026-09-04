@@ -211,7 +211,7 @@ END_FUNC builtin_abs
 ;; ============================================================================
 ;; builtin_divmod(args, nargs) - divmod(a, b) -> (a // b, a % b)
 ;; ============================================================================
-DEF_FUNC builtin_divmod
+DEF_FUNC builtin_divmod, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -482,7 +482,7 @@ END_FUNC divmod_is_zero
 
 ; tp_call wrappers: shift (type, args, nargs) → (args, nargs)
 global int_type_call
-ITC_FRAME  equ 8            ; + 0 pushes = 8, not 16-aligned
+ITC_FRAME  equ 16            ; + 0 pushes = 16, 16-aligned
 DEF_FUNC int_type_call, ITC_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     mov rdi, rsi
@@ -1906,7 +1906,7 @@ RND_X      equ 8              ; x payload
 RND_XTAG   equ 16             ; x tag
 RND_ND     equ 24             ; ndigits as int64
 RND_SAVE   equ 32             ; scratch across a call
-RND_FRAME  equ 48             ; + 1 push = 56, not 16-aligned
+RND_FRAME  equ 56            ; + 1 push = 64, 16-aligned
 DEF_FUNC builtin_round_fn, RND_FRAME
     push rbx
 

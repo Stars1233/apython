@@ -635,7 +635,7 @@ END_FUNC float_format_spec
 ;; and an equal float landed in different dict slots.
 FH_EXP   equ 8
 FH_M     equ 16
-FH_FRAME equ 32             ; + 3 pushes = 56, not 16-aligned
+FH_FRAME equ 40            ; + 3 pushes = 64, 16-aligned
 DEF_FUNC float_hash, FH_FRAME
     push rbx
     push r12
@@ -1889,7 +1889,7 @@ END_FUNC fc_wide_int
 ;; ============================================================================
 FIV_D     equ 8
 FIV_TMP   equ 32            ; an mpz_t
-FIV_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+FIV_FRAME equ 56            ; + 1 push = 64, 16-aligned
 DEF_FUNC_LOCAL fc_int_vs_double, FIV_FRAME
     push rbx
     movsd [rbp - FIV_D], xmm0

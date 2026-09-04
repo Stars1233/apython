@@ -240,7 +240,7 @@ END_FUNC io_text_encoding_fn
 IMC_ENT   equ 8
 IMC_KEY   equ 16
 IMC_BASE  equ 24
-IMC_FRAME equ 32            ; + 3 pushes = 56, not 16-aligned
+IMC_FRAME equ 40            ; + 3 pushes = 64, 16-aligned
 
 %macro IO_ADD_OBJ 2         ; %1 = name symbol, %2 = an owned object in a reg
     mov [rbp - IMC_ENT], %2
@@ -543,7 +543,7 @@ END_FUNC io_raise_typename
 ;; The same, with the name in quotes.  CPython is not consistent about it --
 ;; "must be str, not int" but "a bytes-like object is required, not 'str'" --
 ;; and the wording is what a caller sees, so both forms are here.
-DEF_FUNC io_raise_typename_q
+DEF_FUNC io_raise_typename_q, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -626,7 +626,6 @@ END_FUNC io_copy_bounded
 DEF_FUNC io_raise_number
     push rbx
     push r12
-    sub rsp, 8
     mov rbx, rdi
     mov r12, rdx
     lea rdi, [rel io_msgbuf]
@@ -1462,7 +1461,7 @@ END_FUNC fileio_readinto_fn
 ;; readinto() writes through its argument, so a bytes is not acceptable even
 ;; though bytes_like_ptr_len would happily hand back its data.
 ;; ============================================================================
-DEF_FUNC_LOCAL fileio_writable_buffer
+DEF_FUNC_LOCAL fileio_writable_buffer, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     V_TEST_PTR rdi, rax
@@ -1985,19 +1984,19 @@ END_FUNC fileio_repr_fn
 DEF_FUNC_LOCAL fileio_str_append
     push rbx
     push r12
-    sub rsp, 8
+    sub rsp, 16
     mov rbx, rdi
     mov r12, rsi
     mov rdi, [rbx]
     call str_concat
-    push rax
+    mov [rsp], rax
     mov rdi, [rbx]
     call obj_decref
     mov rdi, r12
     call obj_decref
-    pop rax
+    mov rax, [rsp]
     mov [rbx], rax
-    add rsp, 8
+    add rsp, 16
     pop r12
     pop rbx
     leave
@@ -2111,7 +2110,7 @@ DEF_FUNC fileio_traverse
     ret
 END_FUNC fileio_traverse
 
-DEF_FUNC fileio_clear
+DEF_FUNC fileio_clear, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyFileIOObject.inst_dict]
@@ -2138,7 +2137,7 @@ DEF_FUNC fileio_clear
     ret
 END_FUNC fileio_clear
 
-DEF_FUNC_LOCAL fileio_dealloc
+DEF_FUNC_LOCAL fileio_dealloc, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     test qword [rbx + PyFileIOObject.fio_flags], FIO_OPEN
@@ -2276,7 +2275,7 @@ END_FUNC io_add_property
 MFI_BASES equ 8
 MFI_NS    equ 16
 MFI_NAME  equ 24
-MFI_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+MFI_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
 DEF_FUNC_LOCAL io_make_fileio, MFI_FRAME
     push rbx
@@ -2409,7 +2408,7 @@ END_FUNC bytesio_closed_error
 DEF_FUNC_LOCAL bytesio_reserve
     push rbx
     push r12
-    sub rsp, 8
+    sub rsp, 16
     mov rbx, rdi
     mov r12, rsi
     ; ap_realloc calls fatal_error rather than returning NULL, so a size that
@@ -2434,23 +2433,23 @@ DEF_FUNC_LOCAL bytesio_reserve
 .bre_have_cap:
     mov rdi, [rbx + PyBytesIOObject.bio_buf]
     mov rsi, rax
-    push rax
+    mov [rsp], rax
     call ap_realloc
-    pop rcx
+    mov rcx, [rsp]
     test rax, rax
     jz .bre_fail
     mov [rbx + PyBytesIOObject.bio_buf], rax
     mov [rbx + PyBytesIOObject.bio_cap], rcx
 .bre_ok:
     mov eax, 1
-    add rsp, 8
+    add rsp, 16
     pop r12
     pop rbx
     leave
     ret
 .bre_fail:
     xor eax, eax
-    add rsp, 8
+    add rsp, 16
     pop r12
     pop rbx
     leave
@@ -3222,7 +3221,7 @@ DEF_FUNC bytesio_traverse
     ret
 END_FUNC bytesio_traverse
 
-DEF_FUNC bytesio_clear
+DEF_FUNC bytesio_clear, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyBytesIOObject.inst_dict]
@@ -3237,7 +3236,7 @@ DEF_FUNC bytesio_clear
     ret
 END_FUNC bytesio_clear
 
-DEF_FUNC_LOCAL bytesio_dealloc
+DEF_FUNC_LOCAL bytesio_dealloc, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyBytesIOObject.bio_buf]
@@ -3262,7 +3261,7 @@ END_FUNC bytesio_dealloc
 MBI_BASES equ 8
 MBI_NS    equ 16
 MBI_NAME  equ 24
-MBI_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+MBI_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
 DEF_FUNC_LOCAL io_make_bytesio, MBI_FRAME
     push rbx

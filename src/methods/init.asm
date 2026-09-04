@@ -357,7 +357,7 @@ DEF_FUNC_LOCAL dict_add_none, DAN_FRAME
     ret
 END_FUNC dict_add_none
 
-DEF_FUNC dict_add_builtin_func
+DEF_FUNC dict_add_builtin_func, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -454,7 +454,7 @@ END_FUNC dict_add_getset
 ;; Like dict_add_builtin_func but sets arg count bounds.
 ;; ============================================================================
 extern builtin_func_new_checked
-DEF_FUNC_LOCAL add_method_to_dict_checked
+DEF_FUNC_LOCAL add_method_to_dict_checked, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -558,7 +558,7 @@ END_FUNC add_staticmethod
 ;; as the type's __new__, wrapped so it is not bound to the instance.
 extern staticmethod_construct
 extern staticmethod_type
-DEF_FUNC_LOCAL add_new_staticmethod
+DEF_FUNC_LOCAL add_new_staticmethod, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13

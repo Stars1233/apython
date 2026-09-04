@@ -24,7 +24,7 @@ extern builtin_func_new
 ;; ============================================================================
 ;; fileobj_new(int fd, const char *name_cstr, const char *mode_cstr) -> PyFileObject*
 ;; ============================================================================
-DEF_FUNC fileobj_new
+DEF_FUNC fileobj_new, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -88,7 +88,7 @@ END_FUNC fileobj_new
 ;; ============================================================================
 ;; fileobj_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL fileobj_dealloc
+DEF_FUNC_LOCAL fileobj_dealloc, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -243,7 +243,7 @@ END_FUNC fileobj_emit
 ;; unbuffered file, where there never is any.
 ;; ============================================================================
 global fileobj_drain
-DEF_FUNC fileobj_drain
+DEF_FUNC fileobj_drain, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdx, [rbx + PyFileObject.file_len]

@@ -247,7 +247,7 @@ END_FUNC eg_type_call
 ;; eg_dealloc(PyExceptionGroupObject *eg)
 ;; Free exception group and DECREF all fields.
 ;; ============================================================================
-DEF_FUNC eg_dealloc
+DEF_FUNC eg_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -389,7 +389,7 @@ EGS_MLIST    equ 24
 EGS_RLIST    equ 32
 EGS_IDX      equ 40
 EGS_COUNT    equ 48
-EGS_FRAME    equ 48         ; + 3 pushes = 72, not 16-aligned
+EGS_FRAME    equ 56            ; + 3 pushes = 80, 16-aligned
 DEF_FUNC eg_split, EGS_FRAME
     push rbx
     push r12

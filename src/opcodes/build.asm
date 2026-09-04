@@ -84,7 +84,7 @@ BSLC_SLICE equ 32
 BSLC_STAG  equ 40    ; start tag
 BSLC_PTAG  equ 48    ; stop tag
 BSLC_OTAG  equ 56    ; obj tag
-BSLC_FRAME equ 56           ; + 0 pushes = 56, not 16-aligned
+BSLC_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
 
 ; op_store_slice: rbp-frame layout [rbp - ...]
 SSLC_START equ 8
@@ -96,7 +96,7 @@ SSLC_STAG  equ 48    ; start tag
 SSLC_PTAG  equ 56    ; stop tag
 SSLC_OTAG  equ 64    ; obj tag
 SSLC_VTAG  equ 72    ; value tag
-SSLC_FRAME equ 72           ; + 0 pushes = 72, not 16-aligned
+SSLC_FRAME equ 80            ; + 0 pushes = 80, 16-aligned
 
 ; op_map_add: 2-operand push layout [rsp+...]
 MA_VAL   equ 0     ; value (TOS, pushed last)
@@ -2151,7 +2151,7 @@ END_FUNC op_store_slice
 ;; TOS = value, TOS1 = key
 ;; dict is at stack[-(ecx+2)] relative to current TOS (before pops)
 ;; ============================================================================
-DEF_FUNC op_map_add
+DEF_FUNC op_map_add, 8            ; 1 pushes, so rsp is 16-aligned
     push rcx                   ; save oparg
 
     VPOP_VAL rdx, r8           ; rdx = value (TOS), r8 = value tag

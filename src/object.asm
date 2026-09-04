@@ -1237,7 +1237,7 @@ DEF_FUNC rbt_append_cstr
     ret
 END_FUNC rbt_append_cstr
 
-DEF_FUNC_LOCAL rbt_typename     ; (rdi = dest, rsi = a Value) -> rax = the NUL
+DEF_FUNC_LOCAL rbt_typename, 8            ; 1 push, so rsp is 16-aligned     ; (rdi = dest, rsi = a Value) -> rax = the NUL
     push rbx
     mov rbx, rdi
     mov rdi, rsi
@@ -1342,7 +1342,7 @@ END_FUNC msg_append_hex2
 ;; ============================================================================
 MAE_DEST equ 8
 MAE_CP   equ 16
-MAE_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+MAE_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
 DEF_FUNC msg_append_escaped_cp, MAE_FRAME
     push rbx
@@ -1660,7 +1660,7 @@ END_FUNC raise_no_attribute
 ;; ============================================================================
 OGA_OBJ   equ 8
 OGA_NAME  equ 16
-OGA_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+OGA_FRAME equ 40            ; + 1 push = 48, 16-aligned
 DEF_FUNC obj_generic_attr, OGA_FRAME
     push rbx
     mov [rbp - OGA_OBJ], rdi

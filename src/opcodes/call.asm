@@ -425,7 +425,7 @@ CFX_KWNAMES equ 104      ; kw_names tuple
 CFX_RETTAG  equ 112      ; return tag from tp_call
 CFX_TEMP    equ 120      ; temp args buffer for fat tuple extraction
 CFX_FUNC_TAG equ 128     ; func tag for SmallInt check
-CFX_FRAME2  equ 136      ; new frame size (manual push, so offset from rbp-16)
+CFX_FRAME2  equ 144      ; new frame size (manual push, so offset from rbp-16)
 
 DEF_FUNC op_call_function_ex
     push rbx                        ; save (clobbered by eval convention save)

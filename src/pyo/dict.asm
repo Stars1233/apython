@@ -37,7 +37,7 @@ extern tuple_type
 ;; dict_new() -> PyDictObject*
 ;; Allocate a new empty dict with initial capacity 8
 ;; ============================================================================
-DEF_FUNC dict_new
+DEF_FUNC dict_new, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     ; Header
     mov edi, PyDictObject_size
@@ -70,7 +70,7 @@ END_FUNC dict_new
 ;; Allocates the dense entry array (zeroed, so the unused tail reads as empty)
 ;; and the sparse index array (all DICT_IX_EMPTY).  Sets .capacity.
 ;; ============================================================================
-DEF_FUNC dict_alloc_tables
+DEF_FUNC dict_alloc_tables, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -112,7 +112,7 @@ END_FUNC dict_alloc_tables
 extern kw_names_pending
 extern dict_method_update
 
-DEF_FUNC dict_type_call
+DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -324,7 +324,7 @@ END_FUNC dict_keys_equal
 ;; dict_get(rdi=dict, rsi=key Value) -> rax = value Value, or 0 when absent
 ;; Linear probing lookup
 ;; ============================================================================
-DEF_FUNC dict_get, 8
+DEF_FUNC dict_get, 16
     push rbx
     push r12
     mov rbx, rdi                ; the dict; rdi does not survive the call
@@ -358,7 +358,7 @@ DL_HASH  equ 24
 DL_MASK  equ 32
 DL_SLOT  equ 40
 DL_FREE  equ 48
-DL_FRAME equ 64             ; + 3 pushes = 88, not 16-aligned
+DL_FRAME equ 72            ; + 3 pushes = 96, 16-aligned
 DEF_FUNC dict_lookup, DL_FRAME
     push rbx
     push r12
@@ -469,7 +469,7 @@ END_FUNC dict_get_index
 DR_DICT  equ 8
 DR_OLDE  equ 16
 DR_OLDN  equ 24
-DR_FRAME equ 32             ; + 3 pushes = 56, not 16-aligned
+DR_FRAME equ 40            ; + 3 pushes = 64, 16-aligned
 DEF_FUNC dict_resize, DR_FRAME
     push rbx
     push r12
@@ -558,7 +558,7 @@ END_FUNC dict_resize
 DS_DICT  equ 8
 DS_KEY   equ 16
 DS_VAL   equ 24
-DS_FRAME equ 32             ; + 3 pushes = 56, not 16-aligned
+DS_FRAME equ 40            ; + 3 pushes = 64, 16-aligned
 ;; ============================================================================
 ;; dict_maybe_track(rdi = the dict, rsi = a key Value, rdx = a value Value)
 ;;
@@ -572,7 +572,7 @@ DS_FRAME equ 32             ; + 3 pushes = 56, not 16-aligned
 ;; a str or bytes is not, and a tuple counts only while it is tracked itself.
 ;; gc_track is idempotent, so this is safe to call on every insertion.
 ;; ============================================================================
-DEF_FUNC dict_maybe_track
+DEF_FUNC dict_maybe_track, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     cmp qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_next], 0
@@ -707,7 +707,7 @@ END_FUNC dict_set
 ;; dict_dealloc(PyObject *self)
 ;; Free all entries, then free dict
 ;; ============================================================================
-DEF_FUNC dict_dealloc
+DEF_FUNC dict_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -764,7 +764,7 @@ dict_len:
 ;; dict_subscript(rdi=dict, rsi=key, edx=key_tag) -> (rax=value, edx=value_tag)
 ;; mp_subscript: look up key, raise KeyError if not found
 ;; ============================================================================
-DEF_FUNC dict_subscript
+DEF_FUNC dict_subscript, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rsi               ; save the key Value for the error message
@@ -892,7 +892,7 @@ extern dict_repr
 ;; Create a new dict key iterator.
 ;; rdi = dict
 ;; ============================================================================
-DEF_FUNC dict_tp_iter
+DEF_FUNC dict_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi               ; save dict
@@ -1022,7 +1022,7 @@ END_FUNC dict_iter_next
 ;; ============================================================================
 ;; dict_iter_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL dict_iter_dealloc
+DEF_FUNC_LOCAL dict_iter_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -1074,7 +1074,7 @@ END_FUNC dict_contains
 ;; dict_view_new(rdi=dict, rsi=kind, rdx=type_ptr) -> PyDictViewObject*
 ;; Create a new dict view. kind: 0=keys, 1=values, 2=items
 ;; ============================================================================
-DEF_FUNC dict_view_new
+DEF_FUNC dict_view_new, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1110,7 +1110,7 @@ END_FUNC dict_view_new
 ;; ============================================================================
 ;; dict_view_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL dict_view_dealloc
+DEF_FUNC_LOCAL dict_view_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 

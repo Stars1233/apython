@@ -407,7 +407,7 @@ DEF_FUNC_BARE tb_write
 END_FUNC tb_write
 
 ; tb_write_cstr(rdi = NUL-terminated string)
-DEF_FUNC tb_write_cstr
+DEF_FUNC tb_write_cstr, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     xor ecx, ecx
@@ -739,7 +739,7 @@ AN_LEN   equ 32             ; its length, 1 or 2
 AN_DISQ  equ 40             ; the segment cannot be a BinOp or Subscript
 AN_SOPEN equ 48             ; `[` of the last depth-0 subscript, or -1
 AN_SCLOSE equ 56            ; its `]`, or -1
-AN_FRAME equ 64             ; + 5 pushes = 104
+AN_FRAME equ 72            ; + 5 pushes = 112, 16-aligned
 
 ; Precedence, lowest binding first.  Only the binary operators appear.
 AN_P_OR   equ 1
@@ -1466,7 +1466,7 @@ DEF_FUNC tb_write_source, TS_FRAME
 END_FUNC tb_write_source
 
 ; tb_print_repeated(rdi = run length) -- the elision line CPython prints
-DEF_FUNC tb_print_repeated
+DEF_FUNC tb_print_repeated, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     lea rbx, [rdi - TB_RECURSIVE_CUTOFF]
     CSTRING rdi, "  [Previous line repeated "
@@ -1605,7 +1605,7 @@ TPH_HOOK  equ 24
 TPH_ARG   equ 32
 TPH_SAVED equ 40
 TPH_ARGV  equ 56            ; one Value
-TPH_FRAME equ 64            ; + 1 push = 72
+TPH_FRAME equ 72            ; + 1 push = 80, 16-aligned
 
 global traceback_print_unraisable
 DEF_FUNC traceback_print_unraisable, TPH_FRAME
@@ -1773,7 +1773,7 @@ TP_TMP   equ 24
 TP_LASTC equ 32          ; code object of the previous entry
 TP_LASTL equ 40          ; line number of the previous entry
 TP_CNT   equ 48          ; length of the current run of identical entries
-TP_FRAME equ 64             ; + 1 push = 72, not 16-aligned
+TP_FRAME equ 72            ; + 1 push = 80, 16-aligned
 TB_RECURSIVE_CUTOFF equ 3
 TB_SEEN_MAX equ 64
 DEF_FUNC traceback_print
@@ -2203,7 +2203,7 @@ section .text
 ;
 ; rdi = code object
 ; esi = bytecode offset in instruction units (halfwords, i.e., 2-byte units)
-DEF_FUNC exc_table_find_handler
+DEF_FUNC exc_table_find_handler, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13

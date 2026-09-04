@@ -62,7 +62,7 @@ section .text
 ;; Constructor: memoryview(bytes_obj)
 ;; ============================================================================
 global memoryview_type_call
-MV_FRAME equ 8              ; + 0 pushes = 8, not 16-aligned
+MV_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 DEF_FUNC memoryview_type_call, MV_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     cmp rdx, 1
@@ -178,7 +178,7 @@ END_FUNC memoryview_type_call
 
 
 ;; Proper dealloc:
-DEF_FUNC memoryview_dealloc_proper
+DEF_FUNC memoryview_dealloc_proper, 8            ; 1 pushes, so rsp is 16-aligned
     push rdi                           ; save self
     mov rdi, [rdi + PyMemoryViewObject.mv_source]
     test rdi, rdi
@@ -248,7 +248,7 @@ END_FUNC memoryview_item_value
 ;; cannot, because the value would change under the table.  This answered
 ;; "unhashable type: 'memoryview'" for both, which is neither.
 ;; ============================================================================
-DEF_FUNC memoryview_hash
+DEF_FUNC memoryview_hash, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     call memoryview_check
@@ -916,7 +916,7 @@ END_FUNC memoryview_method_tolist
 ;; failed -- and _pyio iterates a view in more than one place.  The index is
 ;; checked against the current length each time, as the bytes iterator does.
 ;; ============================================================================
-DEF_FUNC memoryview_tp_iter
+DEF_FUNC memoryview_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     call memoryview_check

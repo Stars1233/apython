@@ -212,7 +212,7 @@ END_FUNC tuple_method_index
 ;; ============================================================================
 TCT_IDX   equ 8
 TCT_COUNT equ 16
-TCT_FRAME equ 16            ; + 3 pushes = 40, not 16-aligned
+TCT_FRAME equ 24            ; + 3 pushes = 48, 16-aligned
 DEF_FUNC tuple_method_count, TCT_FRAME
     push rbx
     push r12

@@ -45,7 +45,7 @@ DEF_FUNC iter_traverse_one
 END_FUNC iter_traverse_one
 
 global iter_clear_one
-DEF_FUNC iter_clear_one
+DEF_FUNC iter_clear_one, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyListIterObject.it_seq]
@@ -59,7 +59,7 @@ DEF_FUNC iter_clear_one
     ret
 END_FUNC iter_clear_one
 
-DEF_FUNC list_iter_new
+DEF_FUNC list_iter_new, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi               ; save list
@@ -127,7 +127,7 @@ END_FUNC list_iter_next
 ;; ============================================================================
 ;; list_iter_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL list_iter_dealloc
+DEF_FUNC_LOCAL list_iter_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -171,7 +171,7 @@ END_FUNC list_tp_iter
 ;; tuple_iter_new(PyTupleObject *tuple) -> PyTupleIterObject*
 ;; Create a new tuple iterator
 ;; ============================================================================
-DEF_FUNC tuple_iter_new
+DEF_FUNC tuple_iter_new, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi
@@ -221,7 +221,7 @@ END_FUNC tuple_iter_next
 ;; ============================================================================
 ;; tuple_iter_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL tuple_iter_dealloc
+DEF_FUNC_LOCAL tuple_iter_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -248,7 +248,7 @@ END_FUNC tuple_tp_iter
 ;; range_new(int64_t start, int64_t stop, int64_t step) -> PyRangeObject*
 ;; Create a range SEQUENCE object (reusable; tp_iter creates fresh iterators)
 ;; ============================================================================
-DEF_FUNC range_new
+DEF_FUNC range_new, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi               ; start
@@ -339,7 +339,7 @@ END_FUNC range_iter_self
 ;; range_obj_tp_iter(PyRangeObject *self) -> PyRangeIterObject*
 ;; Creates a NEW range iterator from the range sequence object.
 ;; ============================================================================
-DEF_FUNC range_obj_tp_iter
+DEF_FUNC range_obj_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi               ; save range object
 
@@ -533,7 +533,7 @@ END_FUNC range_obj_mp_subscript
 ;; range_obj_reversed: __reversed__ for range objects
 ;; Returns a new range_iterator that iterates in reverse.
 ;; ============================================================================
-DEF_FUNC range_obj_reversed
+DEF_FUNC range_obj_reversed, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi               ; self = range object
 
@@ -612,7 +612,7 @@ END_FUNC range_obj_reversed
 ;; other -- range(0) == range(5, 3) -- a one-element range ignores its step,
 ;; and only from two elements up does the step matter.  So range(0, 3, 1)
 ;; == range(3) even though the objects differ.
-DEF_FUNC range_obj_richcompare
+DEF_FUNC range_obj_richcompare, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -695,7 +695,7 @@ END_FUNC range_obj_richcompare
 ;; step once there are two.  CPython hashes the tuple (len, start, step) with
 ;; None standing in for the fields that do not count; the mixing here is the
 ;; same shape without building the tuple.
-ROH_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+ROH_FRAME equ 40            ; + 1 push = 48, 16-aligned
 DEF_FUNC range_obj_hash, ROH_FRAME
     push rbx
     mov rbx, rdi
@@ -755,7 +755,7 @@ END_FUNC range_index_of
 
 ;; range_arg_i64(rdi = a Value, rsi = out) -> eax = 1 and [rsi] = the number,
 ;; or eax = 0 when the value is not an integer at all.
-DEF_FUNC range_arg_i64
+DEF_FUNC range_arg_i64, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rsi
     V_IS_INT rdi, rax
@@ -797,7 +797,7 @@ END_FUNC range_arg_i64
 
 ;; range_method_index(args, nargs) -> the index of the value
 RMI_VAL   equ 8
-RMI_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+RMI_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC range_method_index, RMI_FRAME
     push rbx
     cmp rsi, 2
@@ -858,7 +858,7 @@ END_FUNC range_raise_not_in
 
 ;; range_method_count(args, nargs) -> 1 when the value is in the range, else 0
 RMC_VAL   equ 8
-RMC_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+RMC_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC range_method_count, RMC_FRAME
     push rbx
     cmp rsi, 2

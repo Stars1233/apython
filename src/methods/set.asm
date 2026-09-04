@@ -316,7 +316,7 @@ END_FUNC set_method_copy
 ;; set_method_union(args, nargs) -> new set = self | other
 ;; args[0]=self, args[1]=other (iterable)
 ;; ============================================================================
-DEF_FUNC_LOCAL set_binop_union
+DEF_FUNC_LOCAL set_binop_union, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -435,7 +435,7 @@ END_FUNC set_binop_union
 ;; ============================================================================
 SU_SELF   equ 8
 SU_TMP    equ 16        ; materialised sequence, owned, or 0
-SU_FRAME  equ 32            ; + 3 pushes = 56, not 16-aligned
+SU_FRAME  equ 40            ; + 3 pushes = 64, 16-aligned
 
 DEF_FUNC_LOCAL set_update_one, SU_FRAME
     push rbx
@@ -541,7 +541,7 @@ END_FUNC set_update_one
 ;; set_method_intersection(args, nargs) -> new set = self & other
 ;; args[0]=self, args[1]=other
 ;; ============================================================================
-DEF_FUNC_LOCAL set_binop_intersection
+DEF_FUNC_LOCAL set_binop_intersection, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -639,7 +639,7 @@ END_FUNC set_binop_intersection
 ;; set_method_difference(args, nargs) -> new set = self - other
 ;; args[0]=self, args[1]=other
 ;; ============================================================================
-DEF_FUNC_LOCAL set_binop_difference
+DEF_FUNC_LOCAL set_binop_difference, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1008,7 +1008,7 @@ sn_symmetric_difference:        db "symmetric_difference", 0
 sn_symmetric_difference_update: db "symmetric_difference_update", 0
 section .text
 
-DEF_FUNC set_method_symmetric_difference
+DEF_FUNC set_method_symmetric_difference, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1142,7 +1142,7 @@ END_FUNC set_method_symmetric_difference
 ;; args[0]=self, args[1]=other
 ;; True if every element of self is in other.
 ;; ============================================================================
-DEF_FUNC set_method_issubset
+DEF_FUNC set_method_issubset, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1238,7 +1238,7 @@ END_FUNC set_method_issubset
 ;; args[0]=self, args[1]=other
 ;; True if every element of other is in self.
 ;; ============================================================================
-DEF_FUNC set_method_issuperset
+DEF_FUNC set_method_issuperset, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1328,7 +1328,7 @@ END_FUNC set_method_issuperset
 ;; args[0]=self, args[1]=other
 ;; True if self and other have no common elements.
 ;; ============================================================================
-DEF_FUNC set_method_isdisjoint
+DEF_FUNC set_method_isdisjoint, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13

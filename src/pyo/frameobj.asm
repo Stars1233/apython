@@ -80,7 +80,7 @@ section .text
 ;; ============================================================================
 FON_FRAME_IN equ 8
 FON_OBJ      equ 16
-FON_FRAME    equ 32            ; + 1 push = 40, not 16-aligned
+FON_FRAME    equ 40            ; + 1 push = 48, 16-aligned
 DEF_FUNC frameobj_new, FON_FRAME
     push rbx
     mov [rbp - FON_FRAME_IN], rdi
@@ -260,7 +260,7 @@ END_FUNC frameobj_from_code
 SGF_DEPTH equ 8
 SGF_HEAD  equ 16
 SGF_PREV  equ 24
-SGF_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+SGF_FRAME equ 40            ; + 1 push = 48, 16-aligned
 DEF_FUNC sys_getframe_func, SGF_FRAME
     push rbx
     mov qword [rbp - SGF_DEPTH], 0
@@ -340,7 +340,7 @@ END_FUNC sys_getframe_func
 ;; What warnings._deprecated actually wants; CPython added it in 3.12 for
 ;; exactly this, so the common case need not build a frame object at all.
 ;; ============================================================================
-SGM_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+SGM_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC sys_getframemodulename_func, SGM_FRAME
     push rbx
     xor ecx, ecx
@@ -405,7 +405,7 @@ END_FUNC sys_getframemodulename_func
 ;; ============================================================================
 ;; The frame snapshot's own behaviour.
 ;; ============================================================================
-DEF_FUNC frameobj_dealloc
+DEF_FUNC frameobj_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     FRAMEOBJ_DROP f_back

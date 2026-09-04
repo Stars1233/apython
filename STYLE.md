@@ -30,19 +30,21 @@ These run over **every** hand-written `.asm` in the tree:
 | No raw `[rbp +- N]`; frame slots carry named `equ` constants | `check_frame_offsets` | error |
 | Heavy separators are `;;` and 76 `=`, 79 columns | `check_separators` | error |
 
+| `(frame + 8*pushes + a prologue's own `sub rsp`) % 16 == 0` in any function containing a `call` | `check_alignment` | error |
+
 These are scoped to `src/compiler/*.asm` plus `src/main.asm`:
 
 | Rule | Check | Severity |
 |------|-------|----------|
-| `(frame + 8*pushes) % 16 == 0` in any function containing a `call` | `check_alignment` | error |
 | A tail `jmp` to another global function comes only from `DEF_FUNC_BARE` | `check_tailjumps` | error |
 | Every `ret` pops an exact mirror of the entry pushes | `check_callee_saved` | error |
 | `rbx`, `r12`-`r15` are never written without being pushed first | `check_saved_writes` | error |
 
 **Why the split.**  The tree-wide checks had zero violations when they were
-turned on, so they cost nothing and now cannot regress.  The scoped ones do
-not: much of `src/` violates the alignment rule harmlessly, a good deal of it
-confuses `check_callee_saved`'s walker, and most tail-jumps there go to
+turned on, so they cost nothing and now cannot regress.  `check_alignment`
+joined them by having its debt paid off rather than by starting clean.  The
+remaining scoped ones do not: a good deal of `src/` confuses
+`check_callee_saved`'s walker, and most tail-jumps there go to
 `eval_exception_unwind`, which never returns — those are allowlisted in
 `NORETURN`, and the handful that remain are real.  Paying that down is what
 would let the scoped checks widen.  Everywhere the checks do not reach, the
@@ -368,11 +370,20 @@ The SysV ABI wants `rsp` 16-byte aligned at every `call`.  After `DEF_FUNC`'s
 ```
 
 **Pad the frame, not the push list** — the pushes are there because the values
-are needed.  Much of `src/` predates this rule and violates it harmlessly, but
-anything that reaches libc must obey it: `src/compiler/` calls `strtod`, and glibc's
-float paths use aligned SSE stores.
+are needed.  Anything that reaches libc must obey this: `src/compiler/` calls
+`strtod` and the numeric builtins reach GMP, and glibc's float paths use
+aligned SSE stores.  The rest of the tree obeys it too, and `check_alignment`
+runs over all of it.
 
-Two mechanics worth knowing:
+A prologue that carves its own space after the pushes counts toward the sum,
+and growing its `DEF_FUNC` frame is **not** the way to align it: that moves
+`rsp` without moving the buffer the function addresses relative to `rbp`, and
+the buffer then overlaps the saved registers.  `pyc_read_file` reserves a
+`struct stat` exactly that way.  Change the `sub rsp` and every matching
+`add rsp` together, or -- where the space was only ever a pad an even push
+count does not need -- delete it.
+
+Three mechanics worth knowing:
 
 - `; lint: pushes=N` on the `DEF_FUNC` line overrides the counted push run, for
   a function whose alignment is set up on a path lint cannot see.  Nothing in

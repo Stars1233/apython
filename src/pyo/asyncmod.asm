@@ -146,7 +146,7 @@ END_FUNC asyncio_run_func
 ;; asyncio_sleep(args, nargs) — asyncio.sleep(delay)
 ;; Returns a SleepAwaitable.
 ;; ============================================================================
-DEF_FUNC asyncio_sleep_func
+DEF_FUNC asyncio_sleep_func, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     cmp rsi, 1
@@ -270,7 +270,7 @@ END_FUNC sleep_awaitable_traverse
 ;; events is the poll mask: 1 for readable, 4 for writable, which is what the
 ;; two backends submit and what CPython's add_reader/add_writer split into.
 ;; ============================================================================
-AWF_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+AWF_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC asyncio_wait_fd_func, AWF_FRAME
     push rbx
     cmp rsi, 2
@@ -353,7 +353,7 @@ END_FUNC io_wait_awaitable_traverse
 ;; ============================================================================
 WF_INNER equ 8
 WF_DELAY equ 16
-WF_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+WF_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC asyncio_wait_for_func, WF_FRAME
     push rbx
 
@@ -568,7 +568,7 @@ DEF_FUNC wait_for_awaitable_traverse
     ret
 END_FUNC wait_for_awaitable_traverse
 
-DEF_FUNC wait_for_awaitable_clear
+DEF_FUNC wait_for_awaitable_clear, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + WaitForAwaitable.inner_task]
@@ -651,7 +651,7 @@ AGF_ARGS  equ 16
 AGF_NARGS equ 24
 AGF_RETEX equ 32
 AGF_IDX   equ 40
-AGF_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+AGF_FRAME equ 56            ; + 1 push = 64, 16-aligned
 DEF_FUNC asyncio_gather_func, AGF_FRAME
     push rbx
     mov [rbp - AGF_ARGS], rdi
@@ -959,7 +959,7 @@ DEF_FUNC gather_awaitable_iternext, GAI_FRAME
 END_FUNC gather_awaitable_iternext
 
 GAD_I     equ 8
-GAD_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+GAD_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC gather_awaitable_dealloc, GAD_FRAME
     push rbx
     mov rbx, rdi

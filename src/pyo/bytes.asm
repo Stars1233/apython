@@ -97,7 +97,7 @@ END_FUNC bytes_new
 ;; bytes_from_data(const void *data, int64_t size) -> PyBytesObject*
 ;; Allocate a bytes object and copy data into it
 ;; ============================================================================
-DEF_FUNC bytes_from_data
+DEF_FUNC bytes_from_data, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -445,7 +445,7 @@ DEF_FUNC bytes_repr
     ret
 END_FUNC bytes_repr
 
-DEF_FUNC bytearray_repr
+DEF_FUNC bytearray_repr, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     call bytearray_data
@@ -459,7 +459,7 @@ DEF_FUNC bytearray_repr
 END_FUNC bytearray_repr
 
 BRI_BUF   equ 1024          ; render buffer, on the stack
-DEF_FUNC_LOCAL bytes_repr_impl, 1024
+DEF_FUNC_LOCAL bytes_repr_impl, 1032
     push rbx
     push r12
     push r13
@@ -764,7 +764,7 @@ BRD_SPAN  equ 16
 BRD_SELF  equ 24
 BRD_CODEC equ 32
 BRD_REASON equ 40
-BRD_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+BRD_FRAME equ 56            ; + 1 push = 64, 16-aligned
 
 DEF_FUNC bytes_raise_decode_error, BRD_FRAME
     push rbx
@@ -1552,7 +1552,7 @@ END_FUNC _get_bytes_decode_builtin
 ;; bytes_tp_iter(PyBytesObject *self) -> PyBytesIterObject*
 ;; Create an iterator for bytes
 ;; ============================================================================
-DEF_FUNC bytes_tp_iter
+DEF_FUNC bytes_tp_iter, 8            ; 1 push, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi               ; save bytes obj
@@ -1601,7 +1601,7 @@ END_FUNC bytes_iter_next
 ;; ============================================================================
 ;; bytes_iter_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC bytes_iter_dealloc
+DEF_FUNC bytes_iter_dealloc, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -1641,7 +1641,7 @@ extern bool_false
 ;; The two keep their data in different places -- bytes inline, bytearray out
 ;; of line -- so anything that reads both goes through here.
 ;; ============================================================================
-DEF_FUNC bytes_like_ptr_len
+DEF_FUNC bytes_like_ptr_len, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     ; A Value, which may be an int or a float immediate -- sq_concat and
     ; tp_richcompare are both called with whatever the other operand was.
@@ -2376,7 +2376,7 @@ END_FUNC bytes_mod
 ;; ============================================================================
 BMOD_ARGS  equ 8
 BMOD_TMP   equ 16
-BMOD_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+BMOD_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
 DEF_FUNC bytearray_mod, BMOD_FRAME
     push rbx
@@ -3095,7 +3095,7 @@ END_FUNC byteslike_source
 BTC_TYPE  equ 8
 BTC_BUF   equ 16
 BTC_LEN   equ 24
-BTC_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+BTC_FRAME equ 40            ; + 1 push = 48, 16-aligned
 DEF_FUNC bytes_type_call, BTC_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     push rbx

@@ -59,7 +59,7 @@ extern exc_ExceptionGroup_type
 ; msg_str is INCREFed. type is stored but not INCREFed (types are immortal).
 ; rdx = msg_tag (TAG_PTR for heap objs, TAG_SMALLINT for ints, 0 for NULL).
 EN_EXC equ 8
-EN_FRAME equ 16             ; + 3 pushes = 40, not 16-aligned
+EN_FRAME equ 24            ; + 3 pushes = 48, 16-aligned
 DEF_FUNC exc_new, EN_FRAME
     push rbx
     push r12
@@ -222,7 +222,7 @@ END_FUNC set_key_error
 
 ; exc_from_cstr(PyTypeObject *type, const char *msg) -> PyExceptionObject*
 ; Creates exception with a C string message (converted to PyStrObject).
-DEF_FUNC exc_from_cstr
+DEF_FUNC exc_from_cstr, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi            ; save type
@@ -251,7 +251,7 @@ END_FUNC exc_from_cstr
 
 ; exc_dealloc(PyExceptionObject *exc)
 ; Free exception and DECREF its fields.
-DEF_FUNC exc_dealloc
+DEF_FUNC exc_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi
@@ -310,7 +310,7 @@ END_FUNC exc_dealloc
 ER_EXC   equ 8
 ER_POS   equ 16
 ER_BUF   equ 528         ; 512 bytes, [rbp-528, rbp-16)
-ER_FRAME equ 544            ; + 3 pushes = 568, not 16-aligned
+ER_FRAME equ 552            ; + 3 pushes = 576, 16-aligned
 DEF_FUNC exc_repr, ER_FRAME
     push rbx
     push r12
@@ -404,7 +404,7 @@ END_FUNC exc_repr
 ;; exc_is_syntax(PyObject *exc) -> eax = 1 when it is a SyntaxError carrying a
 ;; location: args == (msg, (filename, lineno, offset, text)).
 ;; ============================================================================
-DEF_FUNC exc_is_syntax
+DEF_FUNC exc_is_syntax, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     lea rsi, [rel exc_SyntaxError_type]
@@ -756,7 +756,7 @@ END_FUNC oserror_str
 ;; oserror_field(rdi = name cstr) -> rax = the Value, or 0 when absent or None
 ;; Reads [rbp - OSS_DICT] from oserror_str's frame, so it is local to it.
 ;; ============================================================================
-DEF_FUNC_LOCAL oserror_field
+DEF_FUNC_LOCAL oserror_field, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, [rbp]                  ; oserror_str's rbp
     call str_from_cstr_heap
@@ -836,7 +836,7 @@ END_FUNC oserror_append
 ; exc_str(PyExceptionObject *exc) -> PyObject* (string)
 ; Returns the message string, or type name if no message.
 ES_EXC   equ 8
-ES_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+ES_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC exc_str, ES_FRAME
     push rbx
     mov rbx, rdi
@@ -1007,7 +1007,7 @@ UES_ARGS  equ 16
 UES_START equ 24
 UES_END   equ 32
 UES_BUF   equ 288           ; the sentence, built in place
-UES_FRAME equ 288           ; + 1 push = 296, not 16-aligned
+UES_FRAME equ 296            ; + 1 push = 304, 16-aligned
 
 extern rbt_append_cstr
 extern msg_append_i64
@@ -1973,7 +1973,7 @@ ETC_FRAME equ 48            ; + 2 pushes = 64, 16-byte aligned
 ;; ============================================================================
 EMI_SELF  equ 8
 EMI_TUP   equ 16
-EMI_FRAME equ 32            ; + 1 push = 40
+EMI_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
 DEF_FUNC exc_method_init, EMI_FRAME
     push rbx
@@ -2032,7 +2032,7 @@ END_FUNC exc_method_init
 ;; ============================================================================
 EIM_KEY   equ 8
 EIM_FN    equ 16
-EIM_FRAME equ 32            ; + 1 push = 40
+EIM_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
 global exc_install_methods
 DEF_FUNC exc_install_methods, EIM_FRAME
@@ -2286,7 +2286,7 @@ END_FUNC exc_type_call
 
 ;; exc_kw_family(rdi = the type) -> rax = 0 none, 1 AttributeError,
 ;;                                       2 ImportError
-DEF_FUNC_LOCAL exc_kw_family
+DEF_FUNC_LOCAL exc_kw_family, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     lea rsi, [rel exc_AttributeError_type]
@@ -3265,7 +3265,7 @@ DEF_FUNC exc_traverse
     ret
 END_FUNC exc_traverse
 
-DEF_FUNC exc_clear_gc
+DEF_FUNC exc_clear_gc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 

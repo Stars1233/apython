@@ -72,14 +72,14 @@ IF_EXC      equ 88           ; current_exception on entry (see .import_error)
 IF_POS      equ 96           ; byte position while walking a dotted name
 IF_PARENT   equ 104          ; the module the next component hangs off
 IF_LEAF     equ 112          ; the module the walk has reached
-IF_FRAME    equ 128         ; + 5 pushes = 168, not 16-aligned
+IF_FRAME    equ 136            ; + 5 pushes = 176, 16-aligned
 
 ; --- import_find_and_load frame layout ---
 ; path_component buffer lives on stack below frame locals
 FL_NAME     equ 8            ; name_str (PyObject*)
 FL_LEAF     equ 16           ; leaf name cstr ptr
 FL_LEAFLEN  equ 24           ; leaf name length
-FL_FRAME    equ 48          ; + 5 pushes = 88, not 16-aligned
+FL_FRAME    equ 56            ; + 5 pushes = 96, 16-aligned
 FL_STKSZ    equ 4096         ; stack buffer for path component
 
 ; Path buffer size

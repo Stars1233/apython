@@ -89,7 +89,7 @@ END_FUNC sub_table_refresh
 ;; _abc_subclasscheck reads it directly for step 6, which is why it is global.
 ;; ============================================================================
 global sub_list_for_type
-DEF_FUNC sub_list_for_type
+DEF_FUNC sub_list_for_type, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rax, [rel subclass_table]

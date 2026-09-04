@@ -116,17 +116,6 @@ STYLE.md, listed so the gap is a known quantity rather than a surprise to
 whoever copies a neighbouring file.  Counts are deliberately absent -- grep
 gives a current one, and a number written here is wrong by the next commit.
 
-- **Frames whose `rsp` is not 16-byte aligned at a `call`.**  Every
-  `XX_FRAME equ` now carries the arithmetic in a trailing comment, and writing
-  those out is what made the scale visible: a good many say
-  `not 16-aligned`, and `src/compiler/lint.py`'s `check_alignment` flags several
-  times that number again in functions whose frame size is a literal rather
-  than a named constant.  Mostly harmless -- the SysV requirement bites at a
-  `call` into libc, and most of these never reach one -- but `builtin_int_fn`,
-  `builtin_round_fn` and `builtin_pow_fn` all reach GMP, whose float paths use
-  aligned SSE.  This is the debt that keeps `check_alignment` scoped to
-  `src/compiler/` plus `src/main.asm` instead of running tree-wide.
-
 - **`src/pyo/class.asm` is over CLAUDE.md's 100k limit for a hand-written
   file.**  It holds the metatype, the instance and the bound method, and the
   seam between them is not as clean as the one bytes.asm had.

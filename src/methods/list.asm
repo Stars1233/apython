@@ -72,7 +72,7 @@ END_FUNC list_method_append
 ;; list_method_pop(args, nargs) -> removed item
 ;; args[0]=self, optionally args[1]=index (default: last)
 ;; ============================================================================
-DEF_FUNC list_method_pop
+DEF_FUNC list_method_pop, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1365,7 +1365,7 @@ LI_IDX    equ 32
 LI_SIZE   equ 40
 LI_ARGS   equ 48   ; save args pointer
 LI_NARGS  equ 56   ; save nargs
-LI_FRAME  equ 56            ; + 2 pushes = 72, not 16-aligned
+LI_FRAME  equ 64            ; + 2 pushes = 80, 16-aligned
 DEF_FUNC list_method_index, LI_FRAME
     push rbx
     push r12
@@ -1478,7 +1478,7 @@ END_FUNC list_method_index
 ;; args[0]=self, args[1]=value
 ;; ============================================================================
 LC_IDX    equ 8
-LC_FRAME  equ 8             ; + 4 pushes = 40, not 16-aligned
+LC_FRAME  equ 16            ; + 4 pushes = 48, 16-aligned
 
 DEF_FUNC list_method_count, LC_FRAME
     push rbx
@@ -1534,7 +1534,7 @@ END_FUNC list_method_count
 ;; list_method_copy(args, nargs) -> new list (shallow copy)
 ;; args[0]=self
 ;; ============================================================================
-DEF_FUNC list_method_copy
+DEF_FUNC list_method_copy, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1709,7 +1709,7 @@ extern tuple_sub_fill
 extern set_sub_fill
 extern frozenset_type
 extern type_is_subtype
-DEF_FUNC container_dunder_new
+DEF_FUNC container_dunder_new, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -2010,7 +2010,7 @@ END_FUNC list_method_extend
 ;; args[0]=self, args[1]=value
 ;; Removes first occurrence of value. Raises ValueError if not found.
 ;; ============================================================================
-DEF_FUNC list_method_remove
+DEF_FUNC list_method_remove, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -2095,7 +2095,7 @@ END_FUNC list_method_remove
 ;; args[0]=self
 ;; ============================================================================
 extern reversed_iter_type
-DEF_FUNC list_method_reversed
+DEF_FUNC list_method_reversed, 8            ; 1 push, so rsp is 16-aligned
     push rbx
 
     mov rbx, [rdi]            ; self (list)

@@ -274,7 +274,7 @@ END_FUNC str_sub_new
 ;; ============================================================================
 TSF_INST  equ 8
 TSF_TMP   equ 16
-TSF_FRAME equ 32            ; + 3 pushes = 56, not 16-aligned
+TSF_FRAME equ 40            ; + 3 pushes = 64, 16-aligned
 
 DEF_FUNC tuple_sub_fill, TSF_FRAME
     push rbx
@@ -334,7 +334,7 @@ DEF_FUNC tuple_sub_fill, TSF_FRAME
     ret
 END_FUNC tuple_sub_fill
 
-DEF_FUNC builtin_sub_init_base
+DEF_FUNC builtin_sub_init_base, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rax, [rbx + PyObject.ob_type]
@@ -515,7 +515,7 @@ END_FUNC instance_new
 ;; ============================================================================
 IG_NAME   equ 8
 IG_ORIGIN equ 16        ; the type the MRO walk started from
-IG_FRAME  equ 32            ; + 3 pushes = 56, not 16-aligned
+IG_FRAME  equ 40            ; + 3 pushes = 64, 16-aligned
 DEF_FUNC instance_getattr, IG_FRAME
     push rbx
     push r12
@@ -1427,7 +1427,7 @@ END_FUNC instance_dealloc
 ;; Dealloc for heap-type subclasses of builtin types (bytes, bytearray, etc.)
 ;; These don't have inst_dict — just DECREF the type and free.
 ;; ============================================================================
-DEF_FUNC builtin_sub_dealloc
+DEF_FUNC builtin_sub_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -1478,7 +1478,7 @@ DEF_FUNC_LOCAL base_slot
 END_FUNC base_slot
 
 IR_EXC   equ 8
-IR_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+IR_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC instance_repr, IR_FRAME
     push rbx
     mov rbx, rdi
@@ -1573,7 +1573,7 @@ END_FUNC instance_repr
 IRD_OBJ   equ 8
 IRD_MOD   equ 16
 IRD_NAME  equ 24
-IRD_FRAME equ 32            ; + 1 push = 40
+IRD_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
 DEF_FUNC_LOCAL instance_repr_default, IRD_FRAME
     push rbx
@@ -1667,7 +1667,7 @@ END_FUNC instance_repr_default
 ;; rdi = instance
 ;; ============================================================================
 IS_EXC   equ 8
-IS_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+IS_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC instance_str, IS_FRAME
     push rbx
     mov rbx, rdi
@@ -3081,7 +3081,7 @@ END_FUNC method_call
 ;; method_dealloc(PyObject *self)
 ;; Free a bound method, DECREF func and self.
 ;; ============================================================================
-DEF_FUNC_LOCAL method_dealloc
+DEF_FUNC_LOCAL method_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi
@@ -3378,7 +3378,7 @@ DEF_FUNC type_traverse
 END_FUNC type_traverse
 
 global type_clear
-DEF_FUNC type_clear
+DEF_FUNC type_clear, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyTypeObject.tp_dict]
@@ -3398,7 +3398,7 @@ DEF_FUNC type_clear
     ret
 END_FUNC type_clear
 
-DEF_FUNC user_type_dealloc
+DEF_FUNC user_type_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi                ; rbx = type object
 
@@ -3611,7 +3611,7 @@ DEF_FUNC method_traverse
     ret
 END_FUNC method_traverse
 
-DEF_FUNC method_clear
+DEF_FUNC method_clear, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -3776,7 +3776,7 @@ DEF_FUNC instance_traverse
     ret
 END_FUNC instance_traverse
 
-DEF_FUNC instance_clear
+DEF_FUNC instance_clear, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
