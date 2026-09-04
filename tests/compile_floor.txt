@@ -4,6 +4,7 @@
 # from here that starts matching should be added in the same commit.
 test_abc
 test_abc_spoofed_class
+test_abc_weakrefs
 test_abstract_and_str_subclass
 test_arithmetic
 test_ast_mangling

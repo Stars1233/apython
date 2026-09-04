@@ -42,12 +42,6 @@ reasoning that chose them and what changing one would cost.
   approximates: it needs a code point's Unicode NAME, and the table that
   resolves `\N{...}` at compile time indexes the other way.
 
-- **The `_abc` registry and caches hold strong references.**  CPython uses
-  weak ones, so a class registered against an ABC can be collected and the
-  ABC's caches shrink; here a registered class lives as long as the ABC.
-  Registries are process-lifetime and small in practice.  Revisit if
-  `_weakref` lands.
-
 - **Missing C modules.**  The ranking here used to be by how often each was
   the FIRST import to fail, which is not the same as how many modules each
   blocks: twelve of the thirteen that stopped at `_ast` import

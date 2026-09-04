@@ -231,6 +231,19 @@ WM_OBJ   equ 16
 WM_CB    equ 24
 WM_REF   equ 32
 WM_FRAME equ 48             ; + 1 push = 56, not 16-aligned
+;; weakref_make_shared(rdi = the referent) -> rax = the shared weakref, or 0.
+;; The no-callback form, which is the one that is shared, reached by name for
+;; a caller that wants what a set can hold on a class's behalf.
+global weakref_make_shared
+DEF_FUNC weakref_make_shared
+    mov rsi, rdi
+    lea rdi, [rel weakref_type]
+    xor edx, edx
+    call weakref_make
+    leave
+    ret
+END_FUNC weakref_make_shared
+
 DEF_FUNC_LOCAL weakref_make, WM_FRAME
     push rbx
     mov [rbp - WM_TYPE], rdi
