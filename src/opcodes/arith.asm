@@ -586,12 +586,12 @@ DEF_FUNC_BARE op_binary_op
     jz .binop_no_left_wrapper
     cmp r11d, 2
     je .binop_subclass_raised
-    ; rax is already a Value.
-    add rsp, 32                 ; drop the four saved operand words
-    VPUSH rax
-    add rbx, 2                  ; BINARY_OP has one CACHE entry
-    DISPATCH
+    ; rax is already a Value; .binop_have_result owes it the two DECREFs the
+    ; operands came off the stack with.
+    mov edx, TAG_PTR
+    jmp .binop_have_result
 .binop_subclass_raised:
+    ; See .cmp_subclass_raised: the unwinder releases the operands.
     add rsp, 32
     jmp eval_exception_unwind
 .binop_no_left_wrapper:
@@ -1621,11 +1621,15 @@ section .text
     jz .cmp_no_subclass_first
     cmp edx, 2
     je .cmp_subclass_raised
-    add rsp, 32                 ; drop the four saved operand words
-    VPUSH rax
-    add rbx, 2                  ; COMPARE_OP has one CACHE entry
-    DISPATCH
+    ; Both operands came off the value stack owning a reference, so this exit
+    ; owes the same two DECREFs every other one does.  Dropping the saved
+    ; words without them leaked an object per comparison, which is invisible
+    ; until something has a __del__.
+    mov edx, TAG_PTR
+    jmp .cmp_do_call_result
 .cmp_subclass_raised:
+    ; No DECREFs here: the unwinder cleans up from eval_saved_r13, which is
+    ; where the stack was BEFORE these two came off it, so it releases them.
     add rsp, 32
     jmp eval_exception_unwind
 .cmp_no_subclass_first:
