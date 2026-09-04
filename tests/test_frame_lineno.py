@@ -86,3 +86,28 @@ def deep():
 
 print(deep())
 print("done")
+
+# f_lasti and tb_lasti are BYTE offsets into co_code, as CPython's are; the
+# line and column tables are indexed in code units, and the two were being
+# reported in those.  A traceback's is exact -- it names the instruction that
+# raised -- where a frame's is a snapshot taken during the call, so only its
+# unit is comparable.
+print("=== lasti ===")
+
+
+def raises():
+    raise ValueError("for the traceback")
+
+
+try:
+    raises()
+except ValueError:
+    tb = sys.exc_info()[2]
+    while tb.tb_next is not None:
+        tb = tb.tb_next
+    print("tb_lasti", tb.tb_lasti)
+    print("frame agrees:", tb.tb_frame.f_lasti == tb.tb_lasti)
+    print("even:", tb.tb_lasti % 2 == 0)
+    print("line", tb.tb_lineno)
+print("f_lasti even:", sys._getframe().f_lasti % 2 == 0)
+print("lasti done")

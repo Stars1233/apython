@@ -2497,7 +2497,12 @@ DEF_FUNC traceback_getattr
     ret
 
 .tb_get_lasti:
+    ; Stored in code units, which is what the line and column tables are
+    ; indexed by; CPython's attribute is a BYTE offset into co_code, and
+    ; anything that indexes co_code with it -- dis, traceback -- reads it
+    ; that way.
     mov rax, [rbx + PyTracebackObject.tb_lasti]
+    add rax, rax
     mov edx, TAG_SMALLINT
     pop r12
     pop rbx

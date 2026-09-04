@@ -165,10 +165,10 @@ DEF_FUNC frameobj_new, FON_FRAME
     lea rax, [rdi + PyCodeObject.co_code]
     sub rsi, rax                ; the byte offset
     js .fon_done
-    mov rax, rsi
-    shr rax, 1                  ; code units are two bytes
-    mov [rbx + PyFrameObject.f_lasti], rax
-    mov rsi, rax
+    ; f_lasti is a BYTE offset into co_code, as CPython's is; the line table
+    ; is indexed in code units, so the two are kept apart here.
+    mov [rbx + PyFrameObject.f_lasti], rsi
+    shr rsi, 1                  ; code units are two bytes
     call code_addr2line
     mov [rbx + PyFrameObject.f_lineno], rax
 
@@ -222,7 +222,10 @@ DEF_FUNC frameobj_from_code, FFC_FRAME
 .ffc_no_code:
     mov rcx, [rbp - FFC_LINE]
     mov [rax + PyFrameObject.f_lineno], rcx
+    ; The caller passes code units, as the traceback stores them; the
+    ; attribute is a byte offset, as CPython's is.
     mov rcx, [rbp - FFC_LASTI]
+    add rcx, rcx
     mov [rax + PyFrameObject.f_lasti], rcx
 
     call dict_new
