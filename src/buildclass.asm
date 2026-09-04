@@ -28,6 +28,11 @@ extern build_class_pending
 extern current_exception
 extern eval_frame
 extern frame_new
+extern ap_malloc
+extern ap_free
+extern ap_memcpy
+extern str_new_heap
+extern str_type
 extern frame_free
 extern instance_dealloc
 extern instance_repr
@@ -267,6 +272,112 @@ DEF_FUNC type_apply_set_name, TSN_FRAME
 END_FUNC type_apply_set_name
 
 ;; ============================================================================
+;; type_mangle_name(rdi = the name, rsi = the class name) -> rax = an OWNED
+;;                  reference: a new string when it mangles, the argument with
+;;                  one more reference when it does not
+;;
+;; CPython's rule, and the same one comp_intern_name applies at compile time:
+;; two leading underscores, not two trailing ones, and the class name with its
+;; own leading underscores stripped -- an all-underscore class name mangles
+;; nothing.  Both have to agree, or a slot and the code that uses it name
+;; different things.
+;; ============================================================================
+TMN_NAME  equ 8
+TMN_CLS   equ 16
+TMN_BUF   equ 24
+TMN_LEN   equ 32
+TMN_FRAME equ 48                ; 32 used + 16 pad = 48, 16-aligned
+global type_mangle_name
+DEF_FUNC type_mangle_name, TMN_FRAME
+    push rbx
+    push r12
+    mov [rbp - TMN_NAME], rdi
+    mov [rbp - TMN_CLS], rsi
+
+    test rsi, rsi
+    jz .tmn_plain
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .tmn_plain
+    mov rax, [rdi + PyObject.ob_type]
+    cmp rax, rcx
+    jne .tmn_plain
+
+    mov rdx, [rdi + PyStrObject.ob_size]
+    cmp rdx, 2
+    jl .tmn_plain
+    cmp byte [rdi + PyStrObject.data], '_'
+    jne .tmn_plain
+    cmp byte [rdi + PyStrObject.data + 1], '_'
+    jne .tmn_plain
+    ; ...but not one that also ends in two underscores.
+    cmp rdx, 4
+    jl .tmn_mangle
+    cmp byte [rdi + PyStrObject.data + rdx - 1], '_'
+    jne .tmn_mangle
+    cmp byte [rdi + PyStrObject.data + rdx - 2], '_'
+    je .tmn_plain
+
+.tmn_mangle:
+    ; Strip the class name's own leading underscores.
+    mov rsi, [rbp - TMN_CLS]
+    lea rbx, [rsi + PyStrObject.data]
+    mov r12, [rsi + PyStrObject.ob_size]
+.tmn_strip:
+    test r12, r12
+    jz .tmn_plain               ; nothing but underscores: no mangling
+    cmp byte [rbx], '_'
+    jne .tmn_stripped
+    inc rbx
+    dec r12
+    jmp .tmn_strip
+.tmn_stripped:
+
+    ; "_" + the stripped class name + the name
+    mov rdi, [rbp - TMN_NAME]
+    mov rax, [rdi + PyStrObject.ob_size]
+    lea rdi, [rax + r12 + 2]
+    mov [rbp - TMN_LEN], rdi
+    call ap_malloc
+    test rax, rax
+    jz .tmn_plain
+    mov [rbp - TMN_BUF], rax
+    mov byte [rax], '_'
+    lea rdi, [rax + 1]
+    mov rsi, rbx
+    mov rdx, r12
+    call ap_memcpy
+    mov rdi, [rbp - TMN_BUF]
+    lea rdi, [rdi + r12 + 1]
+    mov rsi, [rbp - TMN_NAME]
+    mov rdx, [rsi + PyStrObject.ob_size]
+    lea rsi, [rsi + PyStrObject.data]
+    call ap_memcpy
+    mov rdi, [rbp - TMN_BUF]
+    mov rsi, [rbp - TMN_NAME]
+    mov rsi, [rsi + PyStrObject.ob_size]
+    lea rsi, [rsi + r12 + 1]
+    call str_new_heap           ; -> rax = PyStrObject*, refcount 1
+    push rax
+    mov rdi, [rbp - TMN_BUF]
+    call ap_free
+    pop rax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.tmn_plain:
+    mov rax, [rbp - TMN_NAME]
+    INCREF rax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC type_mangle_name
+
+;; ============================================================================
 ;; type_from_parts(rdi = name str, rsi = bases tuple or NULL, rdx = namespace dict)
 ;;   -> rax = the new type object, one strong reference
 ;;
@@ -344,12 +455,13 @@ DEF_FUNC type_from_parts
     push r13
     push r14
     push r15
-    sub rsp, 40             ; the epilogue's `add rsp` must match this
+    sub rsp, 56             ; the epilogue's `add rsp` must match this
 
 TFP_BASE  equ 48            ; the layout base: the widest of the bases
 TFP_BASES equ 56            ; the bases tuple, or NULL
 TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
 TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
+TFP_SLOT1 equ 80            ; a one-tuple built for `__slots__ = 'name'`, owned
     mov r14, rdi                ; class name str
     mov r15, rdx                ; namespace dict, becomes tp_dict
     mov [rbp - TFP_BASES], rsi
@@ -764,6 +876,7 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
 
     ; === Parse __slots__ from class_dict ===
     ; r12=type, r15=class_dict, [rbp - TFP_BASE]=base_class
+    mov qword [rbp - TFP_SLOT1], 0
     lea rdi, [rel bc_slots_name]
     call str_from_cstr_heap
     push rax                        ; save __slots__ str
@@ -780,7 +893,7 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     test edx, edx
     jz .bc_no_slots
 
-    ; Must be TAG_PTR and a tuple or list
+    ; Must be TAG_PTR and a tuple, a list, or a single string
     cmp edx, TAG_PTR
     jne .bc_no_slots
     extern tuple_type
@@ -791,7 +904,27 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     je .bc_slots_tuple
     lea rdx, [rel list_type]
     cmp rcx, rdx
+    je .bc_slots_tuple
+    ; `__slots__ = 'name'` declares exactly one, and is the form a class with
+    ; a single slot is usually written with.  Wrap it, so the loop below sees
+    ; one shape; the wrapper is released at .bc_no_slots, which every exit
+    ; from the slot code passes through.
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
     jne .bc_no_slots
+    push rax
+    mov edi, 1
+    call tuple_new
+    pop rcx
+    test rax, rax
+    jz .bc_no_slots
+    mov [rbp - TFP_SLOT1], rax
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov [rdx], rcx
+    push rax
+    mov rdi, rcx
+    call obj_incref
+    pop rax
 
     ; rax = slots list — get size and item pointers (same layout as tuple for ob_size/ob_item)
 .bc_slots_tuple:
@@ -866,22 +999,38 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     shl rax, 3
     add rdi, rax                   ; offset
 
+    ; A private slot name is mangled, exactly as a private name written in the
+    ; class body is.  CPython's type_new does it here, leaving __slots__
+    ; itself as the tuple the class wrote; skipping it meant the descriptor
+    ; was `__x` where every use of it compiles to `_C__x`, so
+    ; `__slots__ = ('__x',)` and `self.__x = 5` never met.  The dict key is
+    ; the load-bearing half -- attribute lookup finds a descriptor by key --
+    ; and md_name is mangled with it so __set_name__ and the repr agree.
+    push rdi                       ; the offset, across the call
+    mov rdi, rcx                   ; the name as written
+    mov rsi, r14                   ; the class name
+    call type_mangle_name          ; -> rax, owned
+    mov rcx, rax
+    pop rdi                        ; the offset
+
     ; Create descriptor: member_descr_new(offset, name_str)
     mov rsi, rcx                   ; name string
-    push rcx                       ; save name for dict_set
+    push rcx                       ; the name: the dict key, then ours to drop
     INCREF rsi                     ; descriptor takes ownership
     extern member_descr_new
     call member_descr_new          ; rax = new descriptor
 
     ; Add to class_dict: dict_set(dict, name, descriptor, TAG_PTR, TAG_PTR)
     mov rdi, r15                   ; class_dict
-    pop rsi                        ; name (key)
+    mov rsi, [rsp]                 ; name (key)
     mov rdx, rax                   ; descriptor (value)
     push rax                       ; save descriptor for DECREF
     call dict_set
 
     ; DECREF our ref on descriptor (dict now owns one via INCREF in dict_set)
     pop rdi
+    call obj_decref
+    pop rdi                        ; and on the name, which dict_set copied
     call obj_decref
 
 .bc_slot_skip:
@@ -893,6 +1042,14 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     pop rdi                        ; clean base_basicsize
 
 .bc_no_slots:
+    ; The wrapper built for a single-string __slots__, if there was one.  The
+    ; descriptors hold their own references to the name.
+    mov rdi, [rbp - TFP_SLOT1]
+    test rdi, rdi
+    jz .bc_slot1_done
+    mov qword [rbp - TFP_SLOT1], 0
+    call obj_decref
+.bc_slot1_done:
 
     ; Look up "__init__" in class_dict for tp_init
     lea rdi, [rel bc_init_name]
@@ -1278,7 +1435,7 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     mov qword [rel build_class_pending], 0
     mov rax, r12
 
-    add rsp, 40                 ; must match the sub in the prologue
+    add rsp, 56                 ; must match the sub in the prologue
     pop r15
     pop r14
     pop r13
@@ -1294,7 +1451,7 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     mov rdi, r12
     call obj_decref
     xor eax, eax
-    add rsp, 40                 ; must match the sub in the prologue
+    add rsp, 56                 ; must match the sub in the prologue
     pop r15
     pop r14
     pop r13

@@ -331,6 +331,7 @@ test_slice_assign
 test_slice_compare
 test_slice_indices
 test_slicing
+test_slots_mangling
 test_slots
 test_slots_suppression
 test_smallint_identity

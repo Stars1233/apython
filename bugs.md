@@ -100,13 +100,6 @@ reasoning that chose them and what changing one would cost.
   token or to the subexpression the message is about.  `CompErr` has the two
   fields for a narrower answer; nothing records one yet.
 
-- **`__slots__` names are not mangled.**  `class C: __slots__ = ('__x',)`
-  then `self.__x = 5` is an AttributeError here: CPython's `type_new` mangles
-  each slot name as it builds the member descriptor -- leaving `__slots__`
-  itself as written -- and `type_from_parts` builds them raw, so the
-  descriptor is `__x` where every use of it compiles to `_C__x`.  A legal
-  program that CPython runs and this does not.
-
 - **`ast.parse` is missing two of its arguments and one of its modes.**
   `type_comments=True` collects nothing, because the tokenizer discards
   comments and has nowhere to put a `# type:` one; `mode="func_type"` is a
