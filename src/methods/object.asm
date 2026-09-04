@@ -1236,6 +1236,12 @@ DEF_FUNC_LOCAL object_collect_slots, OCS_FRAME
     mov rax, [rbp - OCS_WALK]
     test rax, rax
     jz .ocs_done
+    ; Only a CLASS has __slots__.  A builtin's tp_dict holds member
+    ; descriptors of its own -- func_type has one for __globals__ -- and
+    ; taking those for slots made `f.__getstate__()` on a function answer a
+    ; dict holding the whole module namespace.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .ocs_next_type
     ; Not rbx: that is the eval loop's bytecode IP, and this function does
     ; not save it.
     mov rdx, [rax + PyTypeObject.tp_dict]

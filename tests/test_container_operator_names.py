@@ -107,3 +107,43 @@ print("dict |=:", sorted(d))
 ba = bytearray(b"a")
 ba += b"b"
 print("bytearray +=:", bytes(ba))
+
+
+# __getstate__ collects a class's __slots__, and only those.  It scanned every
+# type in the MRO for member descriptors, so a BUILTIN's own -- func_type has
+# one for __globals__ -- were taken for slots: `f.__getstate__()` on a
+# function answered a dict holding the whole module namespace.
+print("=== getstate over slots and builtins ===")
+
+
+def a_function():
+    pass
+
+
+class Slotted:
+    __slots__ = ("a", "b")
+
+
+class Derived(Slotted):
+    __slots__ = ("c",)
+
+
+class Plain:
+    pass
+
+
+print(a_function.__getstate__())
+print(len.__getstate__())
+print((1).__getstate__(), "x".__getstate__(), [].__getstate__())
+print(Slotted().__getstate__())
+s = Slotted()
+s.a = 1
+print(s.__getstate__())
+d = Derived()
+d.a = 1
+d.c = 3
+print(d.__getstate__())
+p = Plain()
+print(p.__getstate__())
+p.x = 2
+print(p.__getstate__())
