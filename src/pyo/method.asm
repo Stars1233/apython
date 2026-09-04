@@ -188,6 +188,16 @@ DEF_FUNC method_getattr, MG_FRAME
     test eax, eax
     jz .mg_self
 
+    ; `__func__` is the method's own too, and delegating it asked the function
+    ; for an attribute of its own name -- which a plain function does not
+    ; have.  inspect.signature() of a bound method is written on it.
+    mov rsi, [rbp - MG_NAME]
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__func__"
+    call ap_strcmp
+    test eax, eax
+    jz .mg_func
+
     ; The underlying callable decides which getattr answers: func_getattr
     ; reads a PyFunctionObject's own dict, and a builtin does not have one.
     mov rdi, [rbp - MG_SELF]
@@ -212,6 +222,20 @@ DEF_FUNC method_getattr, MG_FRAME
     mov rax, [rbp - MG_SELF]
     mov rax, [rax + PyMethodObject.im_self]
     INCREF_V rax, rcx
+    leave
+    ret
+
+.mg_func:
+    mov rax, [rbp - MG_SELF]
+    mov rax, [rax + PyMethodObject.im_func]
+    test rax, rax
+    jz .mg_no_func
+    mov rdi, rax
+    push rax
+    extern obj_incref
+    call obj_incref
+    pop rax
+.mg_no_func:
     leave
     ret
 END_FUNC method_getattr

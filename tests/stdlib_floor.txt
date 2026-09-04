@@ -96,6 +96,7 @@ ok poplib
 ok posixpath
 ok pprint
 ok profile
+ok pstats
 ok _py_abc
 ok pyclbr
 ok py_compile
@@ -129,6 +130,7 @@ ok sre_parse
 ok stat
 ok statistics
 ok string
+ok _strptime
 ok struct
 ok subprocess
 ok sunau

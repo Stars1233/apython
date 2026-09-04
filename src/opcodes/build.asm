@@ -182,15 +182,15 @@ DEF_FUNC_BARE op_binary_subscr
     mov rdi, [rsp+8]              ; obj
     cmp qword [rsp+24], TAG_SMALLINT  ; obj tag
     je .try_getitem_dunder
+    ; "Is this object a class?" is TYPE_FLAG_METATYPE on its type, not a
+    ; comparison against the two metatypes this tree happens to ship: a class
+    ; built by a metaclass of its own answers no to those.  os.PathLike is one
+    ; -- an ABC -- and `os.PathLike[str]` was "object is not subscriptable".
     mov rax, [rdi + PyObject.ob_type]
-    extern user_type_metatype
-    extern type_type
-    lea rcx, [rel user_type_metatype]
-    cmp rax, rcx
-    je .try_class_getitem
-    lea rcx, [rel type_type]
-    cmp rax, rcx
-    je .try_class_getitem
+    test rax, rax
+    jz .try_getitem_dunder
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jnz .try_class_getitem
 
 .try_getitem_dunder:
     ; Try __getitem__ on heaptype
@@ -258,7 +258,35 @@ DEF_FUNC_BARE op_binary_subscr
     jmp .subscr_done
 
 .subscr_error:
-    RAISE exc_TypeError_type, "object is not subscriptable"
+    ; CPython names what was subscripted, and names a class differently from
+    ; an instance: "type 'C' is not subscriptable" against "'C' object is not
+    ; subscriptable".  A program reads the first to tell a missing
+    ; __class_getitem__ from a missing __getitem__.
+    ; The slot holds a PAYLOAD and its tag separately, not a Value: testing
+    ; the payload with V_TEST_PTR calls the int 1 a pointer and dereferences
+    ; it.  The tag is what says which it is.
+    mov rdi, [rsp + BSUB_OBJ]
+    cmp qword [rsp + BSUB_OTAG], TAG_PTR
+    jne .sub_err_instance
+    test rdi, rdi
+    jz .sub_err_instance
+    mov rax, [rdi + PyObject.ob_type]
+    test rax, rax
+    jz .sub_err_instance
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .sub_err_instance
+    mov rsi, rdi
+    extern raise_type_error_with_typename
+    CSTRING rdi, `type '\x01' is not subscriptable`
+    call raise_type_error_with_typename
+.sub_err_instance:
+    mov rax, [rsp + BSUB_OBJ]
+    mov rdx, [rsp + BSUB_OTAG]
+    V_PACK rax, rdx
+    mov rsi, rax
+    extern raise_type_error_with_name
+    CSTRING rdi, `'\x01' object is not subscriptable`
+    call raise_type_error_with_name
 
 .subscr_done:
     ; rax = result payload, rdx = result tag

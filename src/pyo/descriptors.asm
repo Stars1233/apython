@@ -1115,6 +1115,113 @@ DEF_FUNC getset_descr_new, 8            ; 3 pushes, so rsp is 16-aligned
 END_FUNC getset_descr_new
 
 ;; ============================================================================
+;; getset_descr_getattr(rdi = the descriptor, rsi = name str) -> Value, or 0
+;;
+;; __name__, __qualname__ and __objclass__, which is what a descriptor is
+;; asked for once it has been fished out of a type's dict by name.  inspect's
+;; _shadowed_dict reads `class_dict.__name__ == "__dict__"` off exactly this
+;; object, and an AttributeError there stopped pydoc, pstats and everything
+;; through them.
+;; ============================================================================
+GDA_SELF  equ 8
+GDA_FRAME equ 16            ; + 0 pushes = 16
+DEF_FUNC_LOCAL getset_descr_getattr, GDA_FRAME
+    mov [rbp - GDA_SELF], rdi
+    test rsi, rsi
+    jz .gda_miss
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .gda_miss
+
+    lea rdi, [rsi + PyStrObject.data]
+    push rsi
+    CSTRING rsi, "__name__"
+    call ap_strcmp
+    pop rsi
+    test eax, eax
+    jz .gda_name
+
+    lea rdi, [rsi + PyStrObject.data]
+    push rsi
+    CSTRING rsi, "__qualname__"
+    call ap_strcmp
+    pop rsi
+    test eax, eax
+    jz .gda_qualname
+
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__objclass__"
+    call ap_strcmp
+    test eax, eax
+    jz .gda_objclass
+.gda_miss:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+
+.gda_name:
+    mov rax, [rbp - GDA_SELF]
+    mov rax, [rax + PyGetSetDescrObject.gs_name]
+    test rax, rax
+    jz .gda_miss
+    mov rdi, rax
+    push rax
+    call obj_incref
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.gda_qualname:
+    ; "type.__mro__": the owning type's name, then the attribute's.
+    mov rax, [rbp - GDA_SELF]
+    mov rcx, [rax + PyGetSetDescrObject.gs_owner]
+    test rcx, rcx
+    jz .gda_name
+    mov rax, [rax + PyGetSetDescrObject.gs_name]
+    test rax, rax
+    jz .gda_miss
+    lea rdi, [rel gda_buf]
+    mov rsi, [rcx + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "."
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rcx, [rbp - GDA_SELF]
+    mov rsi, [rcx + PyGetSetDescrObject.gs_name]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    lea rdi, [rel gda_buf]
+    call str_from_cstr
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.gda_objclass:
+    mov rax, [rbp - GDA_SELF]
+    mov rax, [rax + PyGetSetDescrObject.gs_owner]
+    test rax, rax
+    jz .gda_miss
+    mov rdi, rax
+    push rax
+    call obj_incref
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC getset_descr_getattr
+
+section .bss
+gda_buf: resb 320
+section .text
+
+;; ============================================================================
 ;; getset_descr_repr(rdi = the descriptor) -> PyStrObject*
 ;;
 ;; "<attribute 'real' of 'int' objects>", as CPython words it.  tp_repr was 0,
@@ -1507,6 +1614,37 @@ DEF_FUNC_LOCAL generic_alias_dealloc, 8            ; 1 pushes, so rsp is 16-alig
     ret
 END_FUNC generic_alias_dealloc
 
+;; ============================================================================
+;; generic_alias_construct(rdi = type, rsi = args, rdx = nargs)
+;;   -> rax = a new GenericAlias, rdx = TAG_PTR
+;;
+;; tp_new for generic_alias_type: types.GenericAlias(origin, args).
+;;
+;; The type had no constructor, so `GenericAlias(list, str)` fell through to
+;; the ordinary class-construction path: it allocated a GC-headed block, left
+;; ga_origin and ga_args holding whatever was there, and then freed it with
+;; this type's tp_dealloc -- a plain free at the object address rather than at
+;; the GC head, which glibc reports as a double free.  os.PathLike is written
+;; `__class_getitem__ = classmethod(GenericAlias)`, so `os.PathLike[str]` was
+;; the crash; importlib.resources is one line of it.
+;; ============================================================================
+DEF_FUNC generic_alias_construct
+    cmp rdx, 2
+    jne .gac_error
+    mov rdi, [rsi]              ; the origin
+    mov rsi, [rsi + 8]          ; the argument, whatever it is
+    V_TEST_PTR rdi, rax
+    ja .gac_error
+    test rdi, rdi
+    jz .gac_error
+    call generic_alias_new
+    mov edx, TAG_PTR            ; a constructor returns the (payload, tag) pair
+    leave
+    ret
+.gac_error:
+    RAISE exc_TypeError_type, "GenericAlias expected 2 arguments"
+END_FUNC generic_alias_construct
+
 ;; The builtin registered as __class_getitem__ on each container type.
 ;; args[0] = cls, args[1] = the subscript.
 DEF_FUNC generic_alias_class_getitem
@@ -1542,26 +1680,12 @@ DEF_FUNC generic_alias_repr, GAR_FRAME
     test rax, rax
     jz .gar_open
     mov rsi, [rax + PyObject.ob_type]
-    extern type_type
-    lea rcx, [rel type_type]
-    cmp rsi, rcx
-    je .gar_have_name
-    extern user_type_metatype
-    lea rcx, [rel user_type_metatype]
-    cmp rsi, rcx
-    jne .gar_open
-.gar_have_name:
-    mov rsi, [rax + PyTypeObject.tp_name]
-.gar_name:
-    movzx eax, byte [rsi]
-    test al, al
+    test rsi, rsi
     jz .gar_open
-    inc rsi
-    cmp r13, 100
-    jae .gar_open
-    mov [rbx + r13], al
-    inc r13
-    jmp .gar_name
+    test qword [rsi + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .gar_open
+    mov rdi, rax
+    call .gar_qualified
 
 .gar_open:
     mov byte [rbx + r13], '['
@@ -1625,38 +1749,12 @@ DEF_FUNC generic_alias_repr, GAR_FRAME
     test rdi, rdi
     jz .geo_repr
     mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel type_type]
-    cmp rax, rcx
-    je .geo_typename
-    lea rcx, [rel user_type_metatype]
-    cmp rax, rcx
-    jne .geo_repr
-.geo_typename:
-    mov rsi, [rdi + PyTypeObject.tp_name]
-    mov rdi, rsi
-    xor ecx, ecx
-.geo_last_dot:
-    movzx eax, byte [rsi + rcx]
-    test al, al
-    jz .geo_name_start
-    cmp al, '.'
-    jne .geo_dot_next
-    lea rdi, [rsi + rcx + 1]
-.geo_dot_next:
-    inc rcx
-    jmp .geo_last_dot
-.geo_name_start:
-    mov rsi, rdi
-.geo_name_copy:
-    movzx eax, byte [rsi]
-    test al, al
-    jz .geo_done
-    inc rsi
-    cmp r13, GAR_BUF - 8
-    jae .geo_done
-    mov [rbx + r13], al
-    inc r13
-    jmp .geo_name_copy
+    test rax, rax
+    jz .geo_repr
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .geo_repr
+    call .gar_qualified
+    jmp .geo_done
 
 .geo_repr:
     call obj_repr
@@ -1684,6 +1782,145 @@ DEF_FUNC generic_alias_repr, GAR_FRAME
     pop r15
     pop r14
     pop r12
+    ret
+
+
+;; .gar_qualified(rdi = a class) -- append "module.QualName" to rbx at r13.
+;;
+;; CPython writes an alias's origin and its type arguments the way it writes a
+;; class in an annotation: qualified by module, with "builtins" left off, and
+;; using __qualname__ so a nested class keeps its "Outer.Inner".  Only the
+;; bare tp_name was written, which for a class built by a metaclass of its own
+;; -- every ABC, and os.PathLike is one -- was not reached at all, because the
+;; test for "is this a class?" was a comparison against the two metatypes this
+;; tree ships rather than TYPE_FLAG_METATYPE.
+.gar_qualified:
+    push r12
+    push r14
+    push r15
+    mov r12, rdi                    ; the class
+    mov r14, [rdi + PyTypeObject.tp_dict]
+
+    ; --- the module, unless it is "builtins" ---
+    test r14, r14
+    jz .gq_module_from_name
+    CSTRING rdi, "__module__"
+    call str_from_cstr
+    mov rsi, rax
+    mov rdi, r14
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .gq_module_from_name
+    cmp edx, TAG_PTR
+    jne .gq_module_from_name
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .gq_module_from_name
+    lea rsi, [rax + PyStrObject.data]
+    mov rdi, rsi
+    CSTRING rsi, "builtins"
+    push rdi
+    call ap_strcmp
+    pop rsi
+    test eax, eax
+    jz .gq_qualname                 ; "builtins" is left off
+    call .gq_copy_cstr
+    mov byte [rbx + r13], '.'
+    inc r13
+    jmp .gq_qualname
+
+.gq_module_from_name:
+    ; A static type records no __module__; its tp_name carries the dotted
+    ; prefix instead -- "types.GenericAlias" -- and everything else is a
+    ; builtin, which prints unqualified either way.
+    mov rsi, [r12 + PyTypeObject.tp_name]
+    xor ecx, ecx
+    xor r15, r15                    ; length of the prefix, 0 for none
+.gq_scan:
+    movzx eax, byte [rsi + rcx]
+    test al, al
+    jz .gq_scanned
+    cmp al, '.'
+    jne .gq_scan_next
+    lea r15, [rcx + 1]
+.gq_scan_next:
+    inc rcx
+    jmp .gq_scan
+.gq_scanned:
+    test r15, r15
+    jz .gq_qualname
+    xor ecx, ecx
+.gq_prefix:
+    cmp rcx, r15
+    jge .gq_qualname
+    cmp r13, GAR_BUF - 8
+    jae .gq_qualname
+    movzx eax, byte [rsi + rcx]
+    mov [rbx + r13], al
+    inc r13
+    inc rcx
+    jmp .gq_prefix
+
+.gq_qualname:
+    test r14, r14
+    jz .gq_from_tp_name
+    CSTRING rdi, "__qualname__"
+    call str_from_cstr
+    mov rsi, rax
+    mov rdi, r14
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .gq_from_tp_name
+    cmp edx, TAG_PTR
+    jne .gq_from_tp_name
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .gq_from_tp_name
+    lea rsi, [rax + PyStrObject.data]
+    call .gq_copy_cstr
+    jmp .gq_done
+
+.gq_from_tp_name:
+    ; The last dotted component: "types.GenericAlias" prints "GenericAlias",
+    ; the prefix having gone in as the module above.
+    mov rsi, [r12 + PyTypeObject.tp_name]
+    mov rdi, rsi
+    xor ecx, ecx
+.gq_last_dot:
+    movzx eax, byte [rsi + rcx]
+    test al, al
+    jz .gq_tail
+    cmp al, '.'
+    jne .gq_dot_next
+    lea rdi, [rsi + rcx + 1]
+.gq_dot_next:
+    inc rcx
+    jmp .gq_last_dot
+.gq_tail:
+    mov rsi, rdi
+    call .gq_copy_cstr
+.gq_done:
+    pop r15
+    pop r14
+    pop r12
+    ret
+
+;; .gq_copy_cstr(rsi = a NUL-terminated string) -- append it, bounded.
+.gq_copy_cstr:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .gq_copied
+    inc rsi
+    cmp r13, GAR_BUF - 8
+    jae .gq_copied
+    mov [rbx + r13], al
+    inc r13
+    jmp .gq_copy_cstr
+.gq_copied:
     ret
 
 .gar_close:
@@ -3082,7 +3319,7 @@ generic_alias_type:
     dq 0                            ; tp_iter
     dq 0                            ; tp_iternext
     dq 0                            ; tp_init
-    dq 0                            ; tp_new
+    dq generic_alias_construct      ; tp_new
     dq generic_alias_as_number      ; tp_as_number
     dq 0                            ; tp_as_sequence
     dq 0                            ; tp_as_mapping
@@ -3111,7 +3348,7 @@ getset_descr_type:
     dq getset_descr_repr            ; tp_str
     dq 0                            ; tp_hash
     dq 0                            ; tp_call
-    dq 0                            ; tp_getattr
+    dq getset_descr_getattr         ; tp_getattr
     dq 0                            ; tp_setattr
     dq 0                            ; tp_richcompare
     dq 0                            ; tp_iter

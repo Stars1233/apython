@@ -37,6 +37,38 @@ extern strftime
 extern ap_free
 extern ap_strlen
 extern int_to_i64
+extern obj_dealloc
+extern tuple_new
+
+;; ============================================================================
+;; tm_add_int(rdi = the value, rsi = its name as a C string) -> void
+;; One int in the module dict, with the dict in r12 as everything here has it.
+;; ============================================================================
+TAI_VAL   equ 8
+TAI_NAME  equ 16
+TAI_OBJ   equ 24
+TAI_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC_LOCAL tm_add_int, TAI_FRAME
+    mov [rbp - TAI_VAL], rdi
+    mov [rbp - TAI_NAME], rsi
+    extern int_from_i64
+    call int_from_i64
+    V_PACK rax, rdx
+    mov [rbp - TAI_OBJ], rax
+    mov rdi, [rbp - TAI_NAME]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, [rbp - TAI_OBJ]
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, [rbp - TAI_OBJ]
+    DECREF_V rdi, rsi
+    leave
+    ret
+END_FUNC tm_add_int
 
 ;; TIME_ADD_FUNC impl, name -- the module dict is in r12, so this is
 ;; MODULE_ADD_FUNC by another name; it is spelled out here because the file
@@ -353,6 +385,66 @@ DEF_FUNC time_module_create
     TIME_ADD_FUNC time_asctime_func,   tm_asctime
     TIME_ADD_FUNC time_ctime_func,     tm_ctime
 
+    ; --- tzname / timezone / altzone / daylight ---
+    ;
+    ; The four glibc sets from $TZ, and _strptime reads tzname
+    ; unconditionally at import.  tzset() is what fills them; localtime_r
+    ; calls it too, but not before this runs.
+    extern tzset
+    call tzset
+    extern tzname
+    extern timezone
+    extern daylight
+    lea rax, [rel tzname]
+    mov rdi, [rax]
+    call str_from_cstr_heap
+    push rax
+    lea rax, [rel tzname]
+    mov rdi, [rax + 8]
+    call str_from_cstr_heap
+    push rax
+    mov edi, 2
+    call tuple_new
+    mov rcx, [rax + PyTupleObject.ob_item]
+    pop rdx
+    mov [rcx + 8], rdx
+    pop rdx
+    mov [rcx], rdx
+    push rax
+    lea rdi, [rel tm_tzname]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    ; The offset west of UTC in seconds, as CPython reports it: `timezone` is
+    ; standard time, `altzone` is the same less an hour when the zone has DST,
+    ; and `daylight` says whether it has any.
+    lea rax, [rel timezone]
+    mov rdi, [rax]
+    lea rsi, [rel tm_timezone]
+    call tm_add_int
+    lea rax, [rel timezone]
+    mov rdi, [rax]
+    lea rcx, [rel daylight]
+    mov ecx, [rcx]
+    test ecx, ecx
+    jz .ti_no_dst
+    sub rdi, 3600
+.ti_no_dst:
+    lea rsi, [rel tm_altzone]
+    call tm_add_int
+    lea rax, [rel daylight]
+    movsxd rdi, dword [rax]
+    lea rsi, [rel tm_daylight]
+    call tm_add_int
+
     lea rdi, [rel struct_time_type]
     call structseq_init_type
     lea rax, [rel struct_time_type]
@@ -482,6 +574,10 @@ tm_mktime:       db "mktime", 0
 tm_strftime:     db "strftime", 0
 tm_asctime:      db "asctime", 0
 tm_ctime:        db "ctime", 0
+tm_tzname:       db "tzname", 0
+tm_timezone:     db "timezone", 0
+tm_altzone:      db "altzone", 0
+tm_daylight:     db "daylight", 0
 tm_struct_time:  db "struct_time", 0
 
 ; --- struct_time ---

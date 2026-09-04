@@ -207,6 +207,7 @@ test_generator_close_on_drop
 test_generator_close_throw
 test_generator_frame
 test_generators
+test_generic_alias_ctor
 test_generic_alias_value
 test_gen_return2
 test_gen_return
