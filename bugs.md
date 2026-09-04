@@ -29,20 +29,41 @@ reasoning that chose them and what changing one would cost.
       import typing
       EOF
 
-  segfaults in `gc_visit_decref`, having freed `typing._C`, `enum.EnumCheck`,
-  `re.RegexFlag` and `typing.SupportsInt` during a collection inside
-  `type_apply_set_name`.  Every edge `type_traverse` reports is one the class
-  owns -- `mro_compute` increfs each MRO entry, `type_from_parts` increfs
-  `tp_base` and the bases tuple, and `user_type_dealloc` releases all four --
-  so the fault is an accounting error elsewhere that the extra edges expose.
-  Narrowing it: the crash goes away if `type_traverse` skips `tp_mro`, or if
-  `tuple_traverse` reports nothing, or if the collector is off during
-  `type_from_parts`, and no other `tp_traverse` in the tree makes any
-  difference.  So it lives in the type/MRO-tuple cycle.  Until it is found,
-  `src/buildclass.asm` leaves a metatype's traverse and clear inherited, which
-  is at least self-consistent; `tp_dealloc` is `user_type_dealloc`, which is a
-  separate correctness fix and is unaffected.
+  segfaults in `gc_visit_decref`, and valgrind shows the freed block being
+  read by `op_load_fast` -- a class that a frame still had in a local.
 
+  What is measured so far:
+
+  - Every edge `type_traverse` reports is one the class owns.  `mro_compute`
+    increfs each MRO entry, `type_from_parts` increfs `tp_base` and the bases
+    tuple, and `user_type_dealloc` releases all four.  So it is not a plain
+    over-report.
+  - The crash goes away if `type_traverse` skips `tp_mro`, or if
+    `tuple_traverse` reports nothing, or if the collector is off during
+    `type_from_parts`.  No other `tp_traverse` in the tree makes any
+    difference.  So it lives in the cycle between a class and its own MRO
+    tuple.
+  - It is the DEALLOC that does the damage, not the clear: installing
+    `type_clear` alone changes nothing, and installing `type_traverse` alone
+    reproduces it.
+  - Each class the collector takes has an `ob_refcnt` of exactly 2 when it is
+    classified, and both referrers are traversed containers, so its gc_refs
+    reaches 0 by the collector's own arithmetic.  The classes are named:
+    `typing.SupportsInt`, `re.RegexFlag`, `enum.EnumCheck`, `typing._C`.
+  - The unreachable set they end up in is tiny and self-contained -- the
+    class, its bases tuple and its MRO tuple -- while the collection as a
+    whole starts phase 4 with 101 roots against 7293 candidates and rescues
+    all but a handful.  So the rescue walk works; these few are never reached
+    from a root.
+
+  What is not known is which reference is missing from the refcount, or which
+  container reports an edge it does not hold.  A referrer dump -- traverse
+  every tracked object looking for one specific target, and report whether
+  each referrer was classified reachable -- is the measurement that would say.
+
+  Until it is found, `src/buildclass.asm` leaves a metatype's traverse and
+  clear inherited, which is at least self-consistent; `tp_dealloc` is
+  `user_type_dealloc`, which is a separate correctness fix and is unaffected.
   The cost of leaving it is a leak: a class is in a cycle with its own MRO
   tuple, so only the collector can free it, and a collector that does not
   report the edge cannot.  A metaclass-made class that goes out of scope stays
