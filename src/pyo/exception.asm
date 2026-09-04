@@ -1574,6 +1574,13 @@ DEF_FUNC exc_install_methods, EIM_FRAME
     call obj_decref
     mov rdi, [rbp - EIM_FN]
     call obj_decref
+    ; Stamp the owner on it, which is what makes builtin_func_call check the
+    ; receiver.  Without it `BaseException.__init__([], 'a')` wrote a tuple
+    ; into a list's 57th byte -- exc_args' offset -- and released whatever
+    ; word was there.
+    lea rdi, [rel exc_BaseException_type]
+    extern type_stamp_methods
+    call type_stamp_methods
 .eim_out:
     pop rbx
     leave

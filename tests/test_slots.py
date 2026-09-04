@@ -279,3 +279,52 @@ print(show("delete twice", lambda: delattr(d, "z")))
 print(show("delete never-set", lambda: delattr(d, "never")))
 d.z = 9
 print(d.z, d.k, sorted(vars(d)))
+
+
+# A subtype of int, bytes or tuple cannot carry slots: int wraps its value
+# rather than embedding it, and the other two keep their data inline, so a
+# slot laid out at the base's basicsize lands past the allocation.  `class
+# N(int): __slots__ = ('tag',)` put the member at offset 48 of a 32-byte
+# object, and writing it was a wild store.  CPython refuses the class; so does
+# this now, with the same wording.
+print("=== slots on a variable-size builtin ===")
+for base in ("int", "bytes", "tuple", "float", "list", "dict",
+             "set", "frozenset", "bytearray"):
+    for decl in ("('tag',)", "()", "['a', 'b']"):
+        src = "class X(%s):\n    __slots__ = %s\n" % (base, decl)
+        try:
+            ns = {}
+            exec(src, ns)
+            print(base, decl, "built")
+        except TypeError as e:
+            print(base, decl, "->", e)
+
+# An empty __slots__ is not "nonempty", and is accepted everywhere.
+class EmptyInt(int):
+    __slots__ = ()
+
+
+print(EmptyInt(7) + 1, EmptyInt(7).__class__.__name__)
+
+try:
+    class Deeper(tuple):
+        class_body_runs = True
+        __slots__ = ("x",)
+except TypeError as e:
+    print("nested:", e)
+
+# str is the one CPython accepts and this does not -- our str subclass keeps
+# its characters inline and its dict at the tail, so there is nowhere to put a
+# fixed-offset slot.  Refusing is the divergence; writing over the characters
+# was the alternative, and it was a SIGSEGV.  Either answer passes here, which
+# is why this asks whether the outcome was SAFE rather than what it was;
+# bugs.md carries the divergence itself.
+try:
+    class MyStr(str):
+        __slots__ = ("s",)
+    m = MyStr("hi")
+    m.s = "attached"
+    safe = str(m) == "hi" and m.s == "attached"
+except TypeError:
+    safe = True
+print("str slots handled safely:", safe)

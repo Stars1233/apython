@@ -349,6 +349,7 @@ DEF_FUNC type_from_parts
 TFP_BASE  equ 48            ; the layout base: the widest of the bases
 TFP_BASES equ 56            ; the bases tuple, or NULL
 TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
+TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     mov r14, rdi                ; class name str
     mov r15, rdx                ; namespace dict, becomes tp_dict
     mov [rbp - TFP_BASES], rsi
@@ -466,6 +467,66 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
 .tfp_layout_conflict:
     RAISE exc_TypeError_type, "multiple bases have instance lay-out conflict"
 .tfp_layout_ok:
+    ; A subtype of int, str, bytes or tuple cannot carry slots.  int wraps its
+    ; value rather than embedding it and the other three keep their data
+    ; inline, so a slot laid out at the base's basicsize lands inside that
+    ; data or past the allocation entirely -- `class N(int): __slots__ =
+    ; ('tag',)` put the member at offset 48 of a 32-byte object, and a str
+    ; subclass wrote its slot over its own characters.  Both were a SIGSEGV.
+    ;
+    ; CPython refuses int, bytes and tuple with this wording and accepts str,
+    ; whose subtype layout is not ours; refusing str too is a divergence, and
+    ; it is in bugs.md.
+    mov rdi, [rbp - TFP_BASE]
+    test rdi, rdi
+    jz .tfp_slots_ok
+    call bc_solid_base
+    mov r13, rax
+    lea rcx, [rel int_type]
+    cmp r13, rcx
+    je .tfp_slots_check
+    extern bytes_type
+    lea rcx, [rel bytes_type]
+    cmp r13, rcx
+    je .tfp_slots_check
+    extern str_type
+    lea rcx, [rel str_type]
+    cmp r13, rcx
+    je .tfp_slots_check
+    lea rcx, [rel tuple_type]
+    cmp r13, rcx
+    jne .tfp_slots_ok
+.tfp_slots_check:
+    lea rdi, [rel bc_slots_name]
+    call str_from_cstr_heap
+    mov rbx, rax
+    mov rdi, r15
+    mov rsi, rax
+    call dict_get
+    V_UNPACK rax, rdx
+    mov r12, rax
+    mov [rbp - TFP_SLOTV], rdx
+    mov rdi, rbx
+    call obj_decref
+    cmp qword [rbp - TFP_SLOTV], TAG_PTR
+    jne .tfp_slots_ok
+    test r12, r12
+    jz .tfp_slots_ok
+    mov rcx, [r12 + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    je .tfp_slots_size
+    lea rdx, [rel list_type]
+    cmp rcx, rdx
+    jne .tfp_slots_ok
+.tfp_slots_size:
+    cmp qword [r12 + PyTupleObject.ob_size], 0
+    je .tfp_slots_ok
+    lea rdi, [rel bc_slots_unsupported]
+    mov rsi, r13
+    extern raise_type_error_with_typename
+    call raise_type_error_with_typename
+.tfp_slots_ok:
     mov rax, [rbp - TFP_BASE]
     mov rdx, r15                ; restore namespace (scan clobbered rdx)
 
@@ -2323,5 +2384,7 @@ bc_module_name: db "__module__", 0
 bc_dunder_name_name: db "__name__", 0
 bc_classcell_name: db "__classcell__", 0
 bc_slots_name: db "__slots__", 0
+bc_slots_unsupported:
+    db "nonempty __slots__ not supported for subtype of '", 1, "'", 0
 bc_new_name:          db "__new__", 0
 section .text

@@ -162,6 +162,16 @@ one-line fix.
   with CPython's choice of which subexpression each opcode belongs to, which
   is not obvious and is not written down anywhere but its compiler.
 
+- **A `str` subclass cannot declare `__slots__`.**  CPython accepts it; here
+  it is a TypeError, worded as CPython words the ones it does refuse
+  (`nonempty __slots__ not supported for subtype of 'str'`).  A str keeps its
+  characters inline and a subclass keeps its dict at the tail past them, so a
+  slot at a fixed offset lands on the characters -- it wrote over its own data
+  and then crashed.  int, bytes and tuple are refused for the same reason and
+  CPython refuses those too; str is the one that differs.  Making it work
+  means slots at the tail, which is a layout change reaching
+  `instance_dealloc`, `instance_traverse` and the member descriptors.
+
 - **No managed dicts, so the layout attributes differ for any class that has
   an instance `__dict__`.**  CPython 3.12 keeps a class's instance dict in a
   slot before the object rather than in the object, and reports that as
