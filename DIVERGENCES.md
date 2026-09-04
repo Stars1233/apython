@@ -201,3 +201,20 @@ Changing it means a `func_self` field on `PyBuiltinObject`, a bound/unbound
 distinction in `builtin_func_call`, and a second repr; the gain is the name
 `type()` prints.  This is the same choice recorded above about having one
 builtin callable type where CPython has four.
+
+## `subprocess` runs a child without close_fds, signals or credentials
+
+`_posixsubprocess.fork_exec` takes CPython's twenty-two arguments and honours
+the ones that decide what the child IS: the executable list, the three pipes,
+the working directory, `start_new_session` and `preexec_fn`.  Seven it accepts
+and drops -- `close_fds`, `restore_signals`, `process_group`, `gid`, `gids`,
+`uid` and `umask` -- because this interpreter has no signal handlers to
+restore, no credential syscalls, and no way to enumerate the open descriptors
+that `close_fds` would close.
+
+A caller that asked for one of them gets a child that ran without it rather
+than a failure, which is the choice worth recording: `subprocess.run` with
+the defaults works, and a program that relies on `close_fds=True` to keep a
+descriptor out of the child does not get what it asked for.  Closing the
+three pipes it knows about is done; the rest would need /proc or a
+close_range syscall.

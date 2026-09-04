@@ -430,8 +430,14 @@ def docblock_debt(path):
         if not re.match(r'^DEF_FUNC(?:_LOCAL|_BARE)?\s+\w+', L):
             continue
         j = i - 1
+        # Walk back over the frame-layout constants STYLE.md puts between the
+        # docblock and the DEF_FUNC, and over a single-semicolon comment on
+        # one of them -- an `equ` that needs explaining is still part of the
+        # layout block, not a docblock of its own.
         while j >= 0 and (re.match(r'^\w+\s+equ\s', lines[j])
                           or not lines[j].strip()
+                          or re.match(r'^\s*;[^;]', lines[j])
+                          or lines[j].strip() == ';'
                           or re.match(r'^\s*(?:extern|global|align)\s', lines[j])):
             j -= 1
         if j < 0 or not lines[j].startswith(';;'):

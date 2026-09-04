@@ -79,6 +79,11 @@ SYS_fchmod          equ 91
 SYS_fsync           equ 74
 SYS_dup2            equ 33
 SYS_utimensat       equ 280
+SYS_fork            equ 57
+SYS_execve          equ 59
+SYS_exit            equ 60
+SYS_kill            equ 62
+SYS_setsid          equ 112
 
 ;; ============================================================================
 ;; sys_write(int fd, const void *buf, size_t len) -> ssize_t
@@ -1063,3 +1068,53 @@ err_newline: db 10
 err_op_prefix: db "Error: unimplemented opcode "
 err_op_prefix_len equ $ - err_op_prefix
 list_modified_msg: db "list modified during sort", 0
+
+section .text
+
+;; ============================================================================
+;; sys_fork(void) -> pid_t
+;; ============================================================================
+DEF_FUNC_BARE sys_fork
+    mov rax, SYS_fork
+    syscall
+    ret
+END_FUNC sys_fork
+
+;; ============================================================================
+;; sys_execve(const char *path, char *const argv[], char *const envp[]) -> int
+;; Only ever returns on failure.
+;; ============================================================================
+DEF_FUNC_BARE sys_execve
+    mov rax, SYS_execve
+    syscall
+    ret
+END_FUNC sys_execve
+
+;; ============================================================================
+;; sys_exit_now(int code) -> noreturn
+;; The bare _exit: no flush, no atexit, which is what a forked child that
+;; failed to exec must call rather than unwinding through the parent's state.
+;; ============================================================================
+DEF_FUNC_BARE sys_exit_now
+    mov rax, SYS_exit
+    syscall
+    ud2
+END_FUNC sys_exit_now
+
+;; ============================================================================
+;; sys_kill(pid_t pid, int sig) -> int
+;; ============================================================================
+DEF_FUNC_BARE sys_kill
+    mov rax, SYS_kill
+    syscall
+    ret
+END_FUNC sys_kill
+
+;; ============================================================================
+;; sys_setsid(void) -> pid_t
+;; ============================================================================
+DEF_FUNC_BARE sys_setsid
+    mov rax, SYS_setsid
+    syscall
+    ret
+END_FUNC sys_setsid

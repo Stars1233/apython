@@ -113,6 +113,21 @@ extern sys_link
 extern sys_chown
 extern sys_fchmod
 extern sys_fsync
+extern posix_fork
+extern posix_execv
+extern posix_exit_now
+extern posix_kill
+extern posix_setsid
+extern posix_register_at_fork
+extern pm_atfork_before
+extern pm_atfork_parent
+extern pm_atfork_child
+extern list_type
+extern sys_fork
+extern sys_execve
+extern sys_exit_now
+extern sys_kill
+extern sys_setsid
 extern sys_dup2
 extern sys_utimensat
 extern tuple_type
@@ -960,7 +975,8 @@ PRM_ARG   equ 16
 PRM_POS   equ 24
 PRM_BUF   equ 208
 PRM_FRAME equ 208           ; + 0 pushes = 208, 16-aligned
-DEF_FUNC_LOCAL posix_raise_missing, PRM_FRAME
+global posix_raise_missing
+DEF_FUNC posix_raise_missing, PRM_FRAME
     mov [rbp - PRM_FUNC], rdi
     mov [rbp - PRM_ARG], rsi
     mov [rbp - PRM_POS], rdx
@@ -2172,7 +2188,16 @@ DEF_FUNC posix_dup2, 16
 .pd2_argerr:
     PM_MISSING "dup2", "fd2", 2
 END_FUNC posix_dup2
-
+;;
+;; The argv array is built on the machine stack rather than the heap: this
+;; runs in a freshly forked child, where the allocator's locks belong to a
+;; thread that no longer exists.  There is one thread here, so that is
+;; theatre -- but the array has to outlive nothing, and the stack is where it
+;; naturally goes.
+;; ============================================================================
+; The vector grows UPWARD from its base, so its slot is the DEEPEST one --
+; naming it 32 put the first pointer over PXV_ARGS and the second over
+; PXV_PATH.
 ;; posix.utime(path, times=None)
 ;;
 ;; utimensat is the only member of the family Linux still keeps.  A NULL
@@ -2993,6 +3018,24 @@ DEF_FUNC posix_module_create, 40
     MODULE_ADD_FUNC posix_fchmod, pm_n_fchmod
     MODULE_ADD_FUNC posix_fsync, pm_n_fsync
     MODULE_ADD_FUNC posix_dup2, pm_n_dup2
+    ; The three fork-hook lists.  Built here rather than lazily so that
+    ; register_at_fork and fork can both assume they exist.
+    xor edi, edi
+    call list_new
+    mov [rel pm_atfork_before], rax
+    xor edi, edi
+    call list_new
+    mov [rel pm_atfork_parent], rax
+    xor edi, edi
+    call list_new
+    mov [rel pm_atfork_child], rax
+
+    MODULE_ADD_FUNC posix_fork, pm_n_fork
+    MODULE_ADD_FUNC posix_register_at_fork, pm_n_reg_at_fork
+    MODULE_ADD_FUNC posix_execv, pm_n_execv
+    MODULE_ADD_FUNC posix_exit_now, pm_n_exit_now
+    MODULE_ADD_FUNC posix_kill, pm_n_kill
+    MODULE_ADD_FUNC posix_setsid, pm_n_setsid
     MODULE_ADD_FUNC posix_utime, pm_n_utime
     MODULE_ADD_FUNC posix_get_inheritable, pm_n_get_inheritable
     MODULE_ADD_FUNC posix_set_inheritable, pm_n_set_inheritable
@@ -3156,6 +3199,12 @@ pm_n_chown:      db "chown", 0
 pm_n_fchmod:     db "fchmod", 0
 pm_n_fsync:      db "fsync", 0
 pm_n_dup2:       db "dup2", 0
+pm_n_fork:       db "fork", 0
+pm_n_reg_at_fork: db "register_at_fork", 0
+pm_n_execv:      db "execv", 0
+pm_n_exit_now:   db "_exit", 0
+pm_n_kill:       db "kill", 0
+pm_n_setsid:     db "setsid", 0
 pm_n_utime:      db "utime", 0
 pm_n_get_inheritable: db "get_inheritable", 0
 pm_n_set_inheritable: db "set_inheritable", 0
@@ -3409,3 +3458,4 @@ terminal_size_type:
 section .rodata
 align 8
 psr_1e9: dq 0x41cdcd6500000000     ; 1e9 as IEEE 754 double
+

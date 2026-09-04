@@ -5,6 +5,7 @@ crash_ceiling 0
 ok abc
 ok aifc
 ok _aix_support
+ok antigravity
 ok argparse
 ok ast
 ok base64
@@ -54,6 +55,7 @@ ok hmac
 ok html
 ok http
 ok idlelib
+ok imaplib
 ok imghdr
 ok importlib
 ok io
@@ -116,6 +118,7 @@ ok stat
 ok statistics
 ok string
 ok struct
+ok subprocess
 ok sunau
 ok sysconfig
 ok tabnanny
@@ -135,10 +138,12 @@ ok types
 ok urllib
 ok uu
 ok uuid
+ok venv
 ok warnings
 ok wave
 ok weakref
 ok _weakrefset
+ok webbrowser
 ok wsgiref
 ok xdrlib
 ok xml

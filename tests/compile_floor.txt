@@ -309,6 +309,7 @@ test_phase6
 test_posix_files
 test_posix_more
 test_posix_pathlike
+test_posix_process
 test_posix
 test_pow_dunder
 test_pow
