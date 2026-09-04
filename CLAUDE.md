@@ -161,6 +161,13 @@ are migration scaffolding: the tags (`TAG_NULL`, `TAG_SMALLINT`, `TAG_FLOAT`,
 `TAG_PTR`, …) survive only inside functions that have not been converted yet,
 and at the boundaries between converted and unconverted code.
 
+## Bugs and divergences
+
+`bugs.md` is what is still wrong.  `DIVERGENCES.md` is what differs from
+CPython on purpose, with the reasoning and the cost of changing it -- a
+behaviour recorded there is not a bug to fix.  Reproduce an entry before
+working it; several have drifted.
+
 ## Source Layout
 
 No hand-written file exceeds 100k bytes; only generated asm may.

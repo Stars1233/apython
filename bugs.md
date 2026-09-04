@@ -7,6 +7,11 @@ Every entry below was reproduced against the current build.  Each says what
 the difference from CPython 3.12 is and, where it is known, why it is not a
 one-line fix.
 
+Divergences that are *deliberate* -- the `posix` subset, the absence of managed
+dicts, a single-threaded `_thread`, the three recorded-oracle tests, and the
+rest -- are not bugs and are not here.  They live in `DIVERGENCES.md`, with the
+reasoning that chose them and what changing one would cost.
+
 ## Correctness
 
 - **`__context__` is not set across `await SOME_TASK`** where the task
@@ -44,14 +49,6 @@ one-line fix.
   ABC's caches shrink; here a registered class lives as long as the ABC.
   Registries are process-lifetime and small in practice.  Revisit if
   `_weakref` lands.
-
-- **`posix` is a subset, and a deliberate one.**  The file, directory and
-  process calls `os.py` and `os.path` reach for are there, along with
-  `environ`, `stat_result`, `error` and the O_*/W* constants -- enough that
-  CPython's own `os.py` imports and works.  What is not: `scandir` and
-  `DirEntry`, `fork`, `execv`, and the whole `*at` family.
-  `_have_functions` is an empty list, which is the honest answer -- no
-  `dir_fd=` support -- and os.py reads it to build `supports_dir_fd`.
 
 - **Missing C modules.**  The ranking here used to be by how often each was
   the FIRST import to fail, which is not the same as how many modules each
@@ -107,33 +104,6 @@ one-line fix.
   (`_socketcore`, `lib/_socket.py`), and the stream types should be rewritten
   on top of it rather than on raw syscalls of their own.
 
-- **`collections.deque` is list-backed, and two itertools functions
-  materialise.**  CPython's deque is a block-linked list, so `appendleft` and
-  `popleft` are O(1) there and O(n) here; `itertools.groupby` materialises
-  each group rather than sharing the source iterator, and `tee` materialises
-  the source.  Every observable answer matches for a finite iterable.
-
-- **bytearray's read-only methods copy.**  bytes keeps its data inline and
-  bytearray keeps it out of line, so the shared method bodies cannot read a
-  bytearray directly; each wrapper builds a temporary bytes, runs the bytes
-  body and releases it.  Correct, and cheap for a scratch buffer, but it is
-  an allocation per call -- worth threading a (pointer, length) pair through
-  the bodies if bytearray ever becomes hot.
-
-- **C code here cannot catch a Python exception.**  `raise_exception`
-  tail-jumps into `eval_exception_unwind`, which resumes the eval loop from
-  saved globals rather than returning through the C stack, so a `call` to a
-  slot that raises never comes back.  `str.translate` gets around it by
-  reaching a heaptype table through `dunder_call_2`, which does return; the
-  general limit stands, and is why the `bytes %` leak below cannot be fixed
-  by catching.
-
-- **`sys.getfilesystemencoding()` always answers `'utf-8'`.**  PEP 540's
-  locale handling does not exist, and neither does the `surrogateescape`
-  error handler, so a filename or environment value that is not valid UTF-8
-  does not survive a decode/encode round trip, where CPython preserves it.
-  The entry above is the other half of why.
-
 - **A classmethod on a builtin type reprs as a bound method.**  Ordinary
   methods, slot wrappers and getsets all name themselves and their owner now;
   `int.from_bytes`, `float.fromhex` and `str.maketrans` are wrapped in a
@@ -182,33 +152,10 @@ one-line fix.
   and kill the interpreter.)  `type_comment` is permanently None for a
   different reason: there are no type comments.
 
-- **`_thread` is a single-threaded stand-in.**  `lib/_thread.py` gives
-  `get_ident` a constant, makes locks uncontended, and raises from
-  `start_new_thread`.  Everything in the stdlib that only takes a lock works;
-  anything that expects a second thread does not.
-
 - **A module's `__file__` is the `.pyc` it was loaded from, where CPython's is
   the `.py`.**  Visible in the attribute and in `repr(module)`, which prints
   it.  CPython records the source path even when it executes a cached
   bytecode file, and derives the cache path from it when it needs to.
-
-
-  Half of what that needs is now there: every AST node carries all four of
-  CPython's positions, and `tests/test_ast.py` diffs them against CPython's
-  own `ast.dump(include_attributes=True)`.  What is left is two more fields
-  on `Instr`, the start and end columns at all 300-odd `cg_emit` call sites,
-  and form 14 in `asm_linetable` -- and then the spans would have to agree
-  with CPython's choice of which subexpression each opcode belongs to, which
-  is not obvious and is not written down anywhere but its compiler.
-
-- **A frame object is a snapshot, so `f_lineno` is where the frame was when
-  it was taken.**  CPython's is a live view onto a frame that is still
-  running, and reports where it is when the attribute is READ:
-  `f = sys._getframe()` on one line and `f.f_lineno` on the next answers the
-  second line there and the first here.  Everything that reads it immediately
-  -- which is every use in the stdlib -- agrees.  Making it live means the
-  frame object holding the PyFrame rather than copying it, and the PyFrame
-  outliving the call.
 
 - **A `str` subclass cannot declare `__slots__`.**  CPython accepts it; here
   it is a TypeError, worded as CPython words the ones it does refuse
@@ -220,39 +167,10 @@ one-line fix.
   means slots at the tail, which is a layout change reaching
   `instance_dealloc`, `instance_traverse` and the member descriptors.
 
-- **No managed dicts, so the layout attributes differ for any class that has
-  an instance `__dict__`.**  CPython 3.12 keeps a class's instance dict in a
-  slot before the object rather than in the object, and reports that as
-  `__dictoffset__ == -1` and `__weakrefoffset__ == -32`; the header itself is
-  then 16 bytes.  Here the dict is a word inside the instance, so
-  `class A: pass` reports a positive `__dictoffset__` and a header one word
-  wider.  A `__slots__` class has no dict of its own and matches CPython
-  exactly.
-
-  Nothing in Python reads these except code that is measuring the layout, and
-  a managed dict is a whole allocation strategy -- the values are honest about
-  the layout apython actually has.
-
 ## Missing pieces
 
 These are absences rather than wrong answers — the interpreter raises rather
 than lying — but they are ordinary Python that does not work:
-
-- **The unwinder's one-reference invariant is real; the drop it caused is
-  not reproducible.**  `raise_exception_obj` takes over its caller's
-  reference rather than adding one, so `current_exception` usually holds
-  exactly one -- and `eval_exception_unwind` runs arbitrary finalizers while
-  that is true, releasing the value stack before it is done with the global.
-  This file used to record a concrete drop: `current_exception` pointing at
-  an object whose `ob_refcnt` was already 0, reproducible with an `async for`
-  over a hand-written `__anext__` that raises.  It no longer happens.  That
-  repro is clean, valgrind is clean over the async suite, and a gdb watch for
-  `current_exception != 0 && ob_refcnt <= 0` at `instance_dealloc`'s entry
-  gets no hits across the corpus.  `gen_dealloc` held the pending exception
-  borrowed in a register across `gen_dealloc_close`, which is the shape that
-  could produce it, and takes a reference now.  `instance_dealloc`'s refcount
-  check stays: it is two instructions, and the invariant it guards is one a
-  future caller can break again.
 
 - **`bytes % args` leaks its temporary when the format is malformed.**  The
   work is done by handing a decoded copy of the format and the arguments to
@@ -291,7 +209,6 @@ than lying — but they are ordinary Python that does not work:
   and only an `except` block counts.  Visible in the report for a generator
   whose cleanup raises: the GeneratorExit appears as context.
 
-
 ## Robustness
 
 - **A builtin registered with no argument counts accepts extras silently.**
@@ -308,25 +225,6 @@ than lying — but they are ordinary Python that does not work:
   safe direction: an untracked holder's reference is not subtracted, so a
   task it holds looks reachable and is never freed early.
 
-- **Weak references live in a side table, not in the object, so
-  `__weakrefoffset__` is 0 everywhere.**  The links are kept in one dict keyed
-  by the referent's address and `obj_dealloc` consults it, which works and is
-  tested; what it cannot do is answer CPython's question, because there is no
-  offset to report.
-
-  Putting the head in the object is not the 95-line edit it looks like.  The
-  `PyTypeObject` field is the easy part.  The word itself has to go in the
-  *instances* of all seventeen static types CPython lets you weak-reference --
-  set, frozenset, type and both metatypes, function, builtin, method,
-  generator, coroutine, async generator, module, memoryview, code, file,
-  BytesIO, Task -- which means a field on each of those structs, a zeroing
-  store at each of their forty-odd allocation sites, a release in each
-  dealloc, and, because `type` is one of them, a second new `PyTypeObject`
-  field and another pass over all 94 tables.  A missed zeroing store is a
-  garbage pointer walked as a list.  The whole of it buys one number that
-  still would not match CPython's, since the basicsizes it is an offset into
-  differ anyway.
-
 - **`gc` has no `get_referrers`, `freeze`/`unfreeze` or `get_stats`.**
   `get_referrers` needs a reverse edge nothing records -- CPython finds it by
   traversing every tracked object and asking whether it points at the
@@ -341,41 +239,11 @@ than lying — but they are ordinary Python that does not work:
   the values only, where this answers with the keys as well.  Both are
   conservative in the safe direction -- more is tracked, more is reported.
 
-
-- **`s += x` in a loop is O(n^2)**: `str_concat` always allocates, and
-  `src/opcodes/arith.asm` routes `NB_INPLACE_ADD` to the same `sq_concat`, so
-  each step copies the whole accumulated string.  CPython's ceval resizes in
-  place when the left operand's refcount is 1.  Measured, though, the two are
-  level: repeated appends cost the same here as under CPython 3.12, because
-  that optimization does not fire for the ordinary module-level accumulator
-  either.  Doing it would make apython faster than
-  CPython on this shape rather than close a gap, and it needs the eval loop to
-  give up its stack reference before the concat, so it is recorded rather than
-  done.
-
 - **Crafted `.pyc` and `_sre` bytecode are trusted.**  Marshal validates
   offsets but not types, so a `co_consts` slot holding an int is
   dereferenced by `eval_frame`; `frame_new` adds two `.pyc` fields in 32
   bits; `sre_match` bounds the opcode but not its operands.  This is an
   attacker model rather than breakage, and is a separate track.
-
-## Test infrastructure
-
-Three tests compare against a recorded transcript in `tests/expected/` rather
-than against CPython, because CPython cannot serve as an oracle for them:
-
-- `test_sre.py` feeds hand-written SRE bytecode to `_sre.compile()`, a
-  private API that does not validate its input; CPython segfaults on the
-  group pattern it uses.
-- `test_traceback_carets.py` and `test_unraisable.py` both let an exception
-  be reported on stderr, and the report names the file: CPython absolutizes
-  the path of a script it runs directly and a run from a `.pyc` does not.
-  `test_unraisable.py` also prints on both streams, which the two interpreters
-  interleave differently -- see the buffering entry above.  Every line of both
-  was compared against CPython modulo those two before it was recorded.
-
-Any *new* recorded-oracle test needs the same justification, or it risks
-blessing a divergence instead of catching it.
 
 ## Style debt
 
