@@ -1162,10 +1162,35 @@ DEF_FUNC_BARE object_method_delattr
     jmp builtin_delattr_fn      ; a NULL value through tp_setattr is a delete
 END_FUNC object_method_delattr
 
+
+;; ============================================================================
+;; object_method_getattribute(args, nargs) -- object.__getattribute__(o, name)
+;;
+;; The ordinary resolution, with the object's own __getattribute__ NOT run: a
+;; user's almost always ends in `return object.__getattribute__(self, attr)`,
+;; and letting that re-enter the hook is an infinite regress.  CPython gets
+;; this from slot dispatch, where calling object's slot cannot reach the
+;; subclass's; here the object is named in a global that the first
+;; instance_getattr for it consumes.
+;; ============================================================================
+OGA2_FRAME equ 16           ; + 0 pushes = 16
 global object_method_getattribute
-DEF_FUNC_BARE object_method_getattribute
+DEF_FUNC object_method_getattribute, OGA2_FRAME
     extern builtin_getattr
-    jmp builtin_getattr         ; with two arguments it raises, as it should
+    extern instance_getattr_skip
+    cmp rsi, 2
+    jne .omg_plain
+    mov rax, [rdi]
+    V_TEST_PTR rax, rcx
+    ja .omg_plain
+    test rax, rax
+    jz .omg_plain
+    mov [rel instance_getattr_skip], rax
+.omg_plain:
+    call builtin_getattr        ; with the wrong count it raises, as it should
+    mov qword [rel instance_getattr_skip], 0
+    leave
+    ret
 END_FUNC object_method_getattribute
 
 ;; object.__getstate__(self) -> self.__dict__, the pair (dict, slots), or None

@@ -18,6 +18,16 @@ other.
 """
 
 
+def _idfunc(x):
+    """-> its argument, unchanged.
+
+    typing.py assigns it as `_SpecialForm.__call__`, so that `Any(x)` is x.
+    CPython's is a C function taking exactly one argument, and the message a
+    program sees when it is called wrong is that arity's.
+    """
+    return x
+
+
 class TypeVar:
     """A type variable: `T` in `def f[T](x: T) -> T`.
 

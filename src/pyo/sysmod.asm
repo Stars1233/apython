@@ -445,6 +445,26 @@ DEF_FUNC sys_module_init, 40
     mov rdx, r15
     call sm_add_str
 
+    ; --- sys.platlibdir ---
+    ; The directory name a platform puts its libraries in: "lib" everywhere
+    ; but the 64-bit RPM layouts, which use "lib64".  sysconfig reads it
+    ; unconditionally while building _CONFIG_VARS, so without it pydoc, cgitb
+    ; and everything downstream of them stopped at an AttributeError.
+    lea rdi, [rel sm_platlibdir]
+    lea rsi, [rel sm_lib]
+    mov rdx, r15
+    call sm_add_str
+
+    ; --- sys.abiflags ---
+    ; The suffix a CPython build puts on its library names -- "d" for a debug
+    ; build, empty for an ordinary one.  sysconfig interpolates it into the
+    ; name of the _sysconfigdata module it looks for, so its absence stopped
+    ; the same imports platlibdir did, one line further on.
+    lea rdi, [rel sm_abiflags]
+    lea rsi, [rel sm_empty]
+    mov rdx, r15
+    call sm_add_str
+
     ; --- sys.copyright ---
     ; site.py reads it to build the `copyright` banner, unconditionally, so
     ; without it `import site` was an AttributeError.  Ours carries both
@@ -1499,6 +1519,9 @@ sm_prefix:       db "prefix", 0
 sm_exec_prefix:  db "exec_prefix", 0
 sm_base_prefix:      db "base_prefix", 0
 sm_base_exec_prefix: db "base_exec_prefix", 0
+sm_platlibdir:   db "platlibdir", 0
+sm_abiflags:     db "abiflags", 0
+sm_lib:          db "lib", 0
 sm_copyright:        db "copyright", 0
 sm_copyright_text:
     db "Copyright (c) 2026 Jeff Garzik.", 10

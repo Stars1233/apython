@@ -14,6 +14,42 @@ reasoning that chose them and what changing one would cost.
 
 ## Correctness
 
+- **The collector frees live classes when a metaclass-made class is walked as
+  a class.**  A class whose metatype is a metaclass of the user's own is
+  traversed by the metatype's `tp_traverse`, and that is `instance_traverse`
+  -- the generic heaptype one, which walks the instance's slot region.  It
+  should be `type_traverse`, which reports the four references a class
+  actually holds: `tp_dict`, `tp_base`, `tp_bases` and `tp_mro`.  Installing
+  it makes the collector free classes that are still live, and the next
+  collection reads the freed block:
+
+      PYTHONPATH=$CPYTHON_LIB ./apython -  <<'EOF'
+      import gc
+      gc.set_threshold(1, 1, 1)
+      import typing
+      EOF
+
+  segfaults in `gc_visit_decref`, having freed `typing._C`, `enum.EnumCheck`,
+  `re.RegexFlag` and `typing.SupportsInt` during a collection inside
+  `type_apply_set_name`.  Every edge `type_traverse` reports is one the class
+  owns -- `mro_compute` increfs each MRO entry, `type_from_parts` increfs
+  `tp_base` and the bases tuple, and `user_type_dealloc` releases all four --
+  so the fault is an accounting error elsewhere that the extra edges expose.
+  Narrowing it: the crash goes away if `type_traverse` skips `tp_mro`, or if
+  `tuple_traverse` reports nothing, or if the collector is off during
+  `type_from_parts`, and no other `tp_traverse` in the tree makes any
+  difference.  So it lives in the type/MRO-tuple cycle.  Until it is found,
+  `src/buildclass.asm` leaves a metatype's traverse and clear inherited, which
+  is at least self-consistent; `tp_dealloc` is `user_type_dealloc`, which is a
+  separate correctness fix and is unaffected.
+
+  The cost of leaving it is a leak: a class is in a cycle with its own MRO
+  tuple, so only the collector can free it, and a collector that does not
+  report the edge cannot.  A metaclass-made class that goes out of scope stays
+  in memory and in its bases' `__subclasses__()`.
+  `tests/test_set_name_metatype.py` covers what IS guaranteed -- the survivors
+  are intact and valgrind is quiet -- rather than how many are left.
+
 - **Missing C modules.**  The ranking here is by what actually stands in the
   way rather than by which import fails first -- the two are not the same,
   and `_imp` was reached by twelve modules a few lines after some other

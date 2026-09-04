@@ -90,6 +90,7 @@ ok __phello__
 ok pickle
 ok pickletools
 ok pipes
+ok pkgutil
 ok platform
 ok poplib
 ok posixpath
@@ -143,10 +144,12 @@ ok _threading_local
 ok timeit
 ok token
 ok tokenize
+ok tomllib
 ok trace
 ok traceback
 ok turtledemo
 ok types
+ok typing
 ok urllib
 ok uu
 ok uuid

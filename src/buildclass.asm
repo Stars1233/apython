@@ -1253,18 +1253,20 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     ; it from its bases and free a type's fields -- not walk it as an ordinary
     ; instance.  The dealloc used is the object's TYPE's, and a class built by
     ; a metaclass of the user's own has that metaclass as its type, so the
-    ; generic heaptype trio here would free a class the wrong way: the block
-    ; went back to the allocator with the GC's list and the base's subclass
-    ; list still pointing into it.
+    ; generic heaptype dealloc freed a class the wrong way: the block went
+    ; back to the allocator with the GC's list and the base's subclass list
+    ; still pointing into it.
+    ;
+    ; tp_traverse and tp_clear are deliberately NOT changed to match.  They
+    ; should be -- a class ought to be walked as a class -- but installing
+    ; type_traverse here makes the collector free classes that are still
+    ; live, which is the collector-accounting entry in bugs.md.  Every edge
+    ; type_traverse reports is one the class owns, so the fault is elsewhere;
+    ; until it is found, a metaclass-made class keeps being walked and
+    ; cleared the way it always was, which is at least self-consistent.
     extern user_type_dealloc
-    extern type_traverse
-    extern type_clear
     lea rax, [rel user_type_dealloc]
     mov [r12 + PyTypeObject.tp_dealloc], rax
-    lea rax, [rel type_traverse]
-    mov [r12 + PyTypeObject.tp_traverse], rax
-    lea rax, [rel type_clear]
-    mov [r12 + PyTypeObject.tp_clear], rax
 .bc_not_metatype:
 
     ; If base is an exception type, inherit exception-compatible methods
@@ -2288,59 +2290,39 @@ BCL_OKWV  equ 72
 .bc_base_copy:
     lea rcx, [r9 + 2]
     cmp rcx, rsi
-    jge .bc_no_base
+    jge .bc_bases_written
     mov rdx, [rbx + rcx*8]
-    ; A base must be a class.  `class C(1)` used to store and INCREF the
-    ; integer, and mro_compute then walked tp_base off it.
+    mov [r8 + r9*8], rdx
     push rsi
     push r8
     push r9
-    push rdx
-    mov rdi, rdx
-    extern type_check_is_class
-    call type_check_is_class
-    pop rdx
+    INCREF_V rdx, rcx
     pop r9
     pop r8
     pop rsi
-    test eax, eax
-    jnz .bc_base_ok
+    inc r9
+    jmp .bc_base_copy
 
-    ; PEP 560: a base that is not a class may still say which classes it
-    ; stands for.  `class C[T]` puts Generic[T] here, and typing's Protocol
-    ; and every generic alias arrive the same way; each answers a tuple from
-    ; __mro_entries__, and CPython splices that in.  Only a one-element
-    ; answer is spliced here, which covers every use in this tree and in
-    ; typing -- a longer one would change the tuple's length under a loop
-    ; that has already sized it.
-    push rsi
-    push r8
-    push r9
-    mov rdi, rdx
-    mov rsi, [rbp - BCL_BASES]
-    call bc_mro_entry
-    pop r9
-    pop r8
-    pop rsi
+.bc_bases_written:
+    ; PEP 560 runs over the bases AS WRITTEN.  `__mro_entries__` is handed the
+    ; whole original tuple -- typing's NamedTuple asserts it can find itself
+    ; in there -- so the tuple has to be complete before any of them is
+    ; replaced, which is why this is a second pass and not part of the copy.
+    mov rdi, [rbp - BCL_BASES]
+    call bc_resolve_bases
     test rax, rax
-    jz .build_class_base_error
-    mov rdx, rax
-    mov [r8 + r9*8], rdx
-    inc r9
-    jmp .bc_base_copy
+    jz .bc_bases_failed
+    mov rcx, [rbp - BCL_BASES]
+    mov [rbp - BCL_BASES], rax
+    mov rdi, rcx
+    call obj_decref
+    jmp .bc_no_base
 
-.bc_base_ok:
-    mov [r8 + r9*8], rdx
-    push rsi
-    push r8
-    push r9
-    mov rdi, rdx
-    call obj_incref
-    pop r9
-    pop r8
-    pop rsi
-    inc r9
-    jmp .bc_base_copy
+.bc_bases_failed:
+    mov rdi, [rbp - BCL_BASES]
+    mov qword [rbp - BCL_BASES], 0
+    call obj_decref
+    jmp .build_class_base_error
 
 .bc_no_base:
 
@@ -2661,6 +2643,110 @@ BCL_OKWV  equ 72
 .build_class_base_error:
     RAISE exc_TypeError_type, "bases must be types"
 END_FUNC builtin___build_class__
+
+;; ============================================================================
+;; bc_resolve_bases(rdi = the bases as written) -> rax = the bases to use
+;;
+;; CPython's update_bases.  Every base that is already a class stands for
+;; itself; anything else is asked what it stands for, and is handed the
+;; ORIGINAL tuple -- unchanged, however many replacements have happened
+;; already -- because that is what the answer may be computed from.
+;;
+;; Returns an owned reference: the original tuple, increfed, when nothing
+;; needed replacing, or a fresh one.  0 with no exception means some base is
+;; neither a class nor able to name one, which the caller reports.
+;; ============================================================================
+BRB_ORIG equ 8
+BRB_OUT  equ 16
+BRB_N    equ 24
+BRB_FRAME equ 32            ; + 2 pushes = 48, 16-aligned
+DEF_FUNC_LOCAL bc_resolve_bases, BRB_FRAME
+    push rbx
+    push r12
+    mov [rbp - BRB_ORIG], rdi
+    mov rax, [rdi + PyTupleObject.ob_size]
+    mov [rbp - BRB_N], rax
+    mov qword [rbp - BRB_OUT], 0
+
+    ; A first pass that only asks: is any of them not a class?  The common
+    ; case allocates nothing.
+    xor ebx, ebx
+.brb_scan:
+    cmp rbx, [rbp - BRB_N]
+    jge .brb_all_classes
+    mov rax, [rbp - BRB_ORIG]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rdi, [rax + rbx*8]
+    call type_check_is_class
+    test eax, eax
+    jz .brb_needs_work
+    inc rbx
+    jmp .brb_scan
+
+.brb_all_classes:
+    mov rax, [rbp - BRB_ORIG]
+    mov rdi, rax
+    push rax
+    call obj_incref
+    pop rax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.brb_needs_work:
+    mov rdi, [rbp - BRB_N]
+    call tuple_new
+    test rax, rax
+    jz .brb_fail
+    mov [rbp - BRB_OUT], rax
+    xor rbx, rbx
+.brb_fill:
+    cmp rbx, [rbp - BRB_N]
+    jge .brb_done
+    mov rax, [rbp - BRB_ORIG]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov r12, [rax + rbx*8]
+    mov rdi, r12
+    call type_check_is_class
+    test eax, eax
+    jz .brb_ask
+    mov rdi, r12
+    call obj_incref
+    mov rax, [rbp - BRB_OUT]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov [rax + rbx*8], r12
+    inc rbx
+    jmp .brb_fill
+.brb_ask:
+    mov rdi, r12
+    mov rsi, [rbp - BRB_ORIG]
+    call bc_mro_entry
+    test rax, rax
+    jz .brb_fail_out
+    mov rcx, [rbp - BRB_OUT]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx + rbx*8], rax      ; bc_mro_entry hands over its reference
+    inc rbx
+    jmp .brb_fill
+
+.brb_done:
+    mov rax, [rbp - BRB_OUT]
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.brb_fail_out:
+    mov rdi, [rbp - BRB_OUT]
+    call obj_decref
+.brb_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC bc_resolve_bases
 
 ;; ============================================================================
 ;; bc_mro_entry(rdi = a base that is not a class, rsi = the bases tuple)

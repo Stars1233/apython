@@ -2610,6 +2610,34 @@ DEF_FUNC type_repr, TR_FRAME
     inc r12
 
 .tr_name:
+    ; CPython's repr uses __qualname__, not __name__: a nested class prints
+    ; "<class 'M.Inner'>", and a class RENAMED through __name__ keeps the
+    ; qualname it was built with.  Only a heaptype records one; a static type
+    ; falls through to tp_name, which is the same string.
+    mov rax, [rbp - TR_TYPE]
+    mov rdi, [rax + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .tr_name_from_tp
+    mov [rbp - TR_LEN], rdi
+    CSTRING rdi, "__qualname__"
+    call str_from_cstr
+    mov rsi, rax
+    mov rdi, [rbp - TR_LEN]
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .tr_name_from_tp
+    cmp edx, TAG_PTR
+    jne .tr_name_from_tp
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .tr_name_from_tp
+    cmp qword [rax + PyStrObject.ob_size], 0
+    je .tr_name_from_tp
+    lea rsi, [rax + PyStrObject.data]
+    jmp .tr_name_loop
+.tr_name_from_tp:
     mov rax, [rbp - TR_TYPE]
     mov rsi, [rax + PyTypeObject.tp_name]
 .tr_name_loop:

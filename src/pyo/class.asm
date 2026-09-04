@@ -29,6 +29,8 @@ extern type_type
 extern kw_names_pending
 extern eval_exception_unwind
 extern dunder_lookup
+extern dunder_call_2
+extern builtin_func_type
 extern current_exception
 extern dict_type
 extern tuple_type
@@ -45,13 +47,101 @@ extern classmethod_type
 extern property_type
 
 ;; ============================================================================
-;; instance_getattr(PyInstanceObject *self, PyObject *name) -> rax = Value
-;; Look up an attribute on an instance.
+;; instance_getattr(rdi = instance, rsi = name str) -> rax = Value, or 0
+;;
+;; tp_getattr for a heaptype instance, and the entry point of the whole
+;; attribute protocol -- which means `__getattribute__` first.  A class that
+;; defines one intercepts EVERY access, found or not: `c.x` runs it even when
+;; x is a plain class attribute.  It used to be ignored entirely, so the only
+;; time a user's ran was when the name was also missing and __getattr__ would
+;; have run anyway.
+;;
+;; object's own is the one every class inherits, and calling it would be an
+;; infinite regress, so it is recognised and skipped -- and
+;; object.__getattribute__, which a user's almost always delegates to, enters
+;; at instance_getattr_default below to skip the hook the same way CPython's
+;; slot dispatch does.
+;; ============================================================================
+IGA_SELF  equ 8
+IGA_NAME  equ 16
+IGA_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC instance_getattr, IGA_FRAME
+    mov qword [rel attr_error_pending], 0
+    mov [rbp - IGA_SELF], rdi
+    mov [rbp - IGA_NAME], rsi
+    test rdi, rdi
+    jz .iga_default
+    mov rax, [rdi + PyObject.ob_type]
+    test rax, rax
+    jz .iga_default
+    ; object.__getattribute__ delegating back is not the hook running again:
+    ; it asks for the ordinary resolution, and it says so by naming the object
+    ; it is asking about.  CPython gets this from slot dispatch -- calling
+    ; object's slot cannot reach the subclass's -- and this is the same thing
+    ; said explicitly.
+    mov rax, [rel instance_getattr_skip]
+    cmp rax, rdi
+    jne .iga_hook
+    mov qword [rel instance_getattr_skip], 0
+    jmp .iga_default
+.iga_hook:
+    mov rdi, [rdi + PyObject.ob_type]
+    lea rsi, [rel ig_getattribute_name]
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .iga_default
+    cmp edx, TAG_PTR
+    jne .iga_default
+    ; object's own is a builtin wrapping object_method_getattribute.  Anything
+    ; else is a definition, and definitions run.
+    mov rcx, [rax + PyObject.ob_type]
+    lea r8, [rel builtin_func_type]
+    cmp rcx, r8
+    jne .iga_call
+    extern object_method_getattribute
+    lea r8, [rel object_method_getattribute]
+    cmp [rax + PyBuiltinObject.func_ptr], r8
+    je .iga_default
+.iga_call:
+    mov rdi, [rbp - IGA_SELF]
+    mov rsi, [rbp - IGA_NAME]
+    lea rdx, [rel ig_getattribute_name]
+    mov ecx, TAG_PTR
+    call dunder_call_2          ; a (payload, tag) pair, not a Value
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .iga_raised
+    leave
+    V_PACK rax, rdx
+    ret
+.iga_raised:
+    ; Whatever __getattribute__ raised is the answer, including a KeyError or
+    ; a TypeError.  Returning NULL bare would let raise_no_attribute replace
+    ; it with a generic AttributeError; the flag is how instance_getattr
+    ; already hands one over.
+    cmp qword [rel current_exception], 0
+    je .iga_raised_bare
+    mov qword [rel attr_error_pending], 1
+.iga_raised_bare:
+    xor eax, eax
+    leave
+    ret
+.iga_default:
+    mov rdi, [rbp - IGA_SELF]
+    mov rsi, [rbp - IGA_NAME]
+    leave
+    jmp instance_getattr_default
+END_FUNC instance_getattr
+
+;; ============================================================================
+;; instance_getattr_default(PyInstanceObject *self, PyObject *name) -> Value
+;; Look up an attribute on an instance, without the __getattribute__ hook.
 ;; 1. Check self->inst_dict — return raw value
 ;; 2. If not found, check type->tp_dict (walk tp_base chain)
 ;; 3. If found in type dict and callable, create bound method
 ;; 4. If found, INCREF and return
-;; 5. If not found, return NULL
+;; 5. If not found, __getattr__, then AttributeError
 ;;
 ;; rdi = instance, rsi = name (PyStrObject*)
 ;; Returns: owned reference to attribute value, or NULL
@@ -59,7 +149,8 @@ extern property_type
 IG_NAME   equ 8
 IG_ORIGIN equ 16        ; the type the MRO walk started from
 IG_FRAME  equ 40            ; + 3 pushes = 64, 16-aligned
-DEF_FUNC instance_getattr, IG_FRAME
+global instance_getattr_default
+DEF_FUNC instance_getattr_default, IG_FRAME
     push rbx
     push r12
     push r13
@@ -240,6 +331,27 @@ DEF_FUNC instance_getattr, IG_FRAME
     call raise_no_attribute
 
 .not_found:
+    ; __class__ and __dict__ are part of ordinary resolution, not of the hook:
+    ; CPython answers them from getsets on the type, so a class that defines
+    ; __getattr__ never sees either name.  Asking the hook first made
+    ; `self.__dict__` INSIDE a __getattr__ re-enter it -- which is how
+    ; typing.py's _BaseGenericAlias.__getattr__ is written, and it recursed
+    ; until the stack ran out, taking the whole typing module with it.
+    mov rdi, rbx
+    mov rsi, [rbp - IG_NAME]
+    extern obj_generic_attr
+    call obj_generic_attr
+    test rax, rax
+    jz .ig_ask_getattr
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.ig_ask_getattr:
     ; Ordinary lookup missed.  __getattr__ is Python's hook for exactly that
     ; -- it runs only when normal resolution fails -- and it was never
     ; consulted, so a class defining it got a bare AttributeError.
@@ -356,7 +468,7 @@ DEF_FUNC instance_getattr, IG_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
-END_FUNC instance_getattr
+END_FUNC instance_getattr_default
 
 ;; ============================================================================
 ;; instance_setattr(PyInstanceObject *self, PyObject *name, PyObject *value)
@@ -548,8 +660,31 @@ DEF_FUNC type_setattr
     push rbx
     push rcx                    ; keep the stack aligned
 
-    ; Ensure tp_dict exists
+    ; --- __name__ renames the class ---
+    ; A class's name is tp_name, not a dict entry, so `C.__name__ = "x"` set a
+    ; key nothing ever read and the class kept its old name.  typing.py
+    ; renames two classes and then registers them in sys.modules UNDER THE
+    ; NEW NAME -- so `sys.modules["re"]` became typing's deprecated `re`
+    ; class, and the next `import re` handed a class to everything that
+    ; wanted the module.
     mov rbx, rdi
+    test rsi, rsi
+    jz .ts_not_name
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .ts_not_name
+    lea rdi, [rsi + PyStrObject.data]
+    push rsi
+    push rdx
+    CSTRING rsi, "__name__"
+    call ap_strcmp
+    pop rdx
+    pop rsi
+    test eax, eax
+    jz .ts_rename
+.ts_not_name:
+    mov rdi, rbx
     mov rdi, [rbx + PyTypeObject.tp_dict]
     test rdi, rdi
     jnz .ts_have_dict
@@ -583,6 +718,45 @@ DEF_FUNC type_setattr
     pop rbx
     leave
     ret
+
+.ts_rename:
+    ; tp_name points into a PyStrObject's data, and the type owns a reference
+    ; to that string -- user_type_dealloc recovers it the same way.  So a
+    ; rename is: take the new one, point at its data, drop the old.
+    mov rax, rdx
+    test rax, rax
+    jz .ts_rename_bad
+    V_TEST_PTR rax, rcx
+    ja .ts_rename_bad
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdi, [rel str_type]
+    cmp rcx, rdi
+    jne .ts_rename_bad
+    mov rcx, [rbx + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_HEAPTYPE
+    jz .ts_rename_static
+    mov rdi, rax
+    push rax
+    call obj_incref
+    pop rax
+    mov rcx, [rbx + PyTypeObject.tp_name]
+    lea rdx, [rax + PyStrObject.data]
+    mov [rbx + PyTypeObject.tp_name], rdx
+    test rcx, rcx
+    jz .ts_rename_done
+    sub rcx, PyStrObject.data
+    mov rdi, rcx
+    call obj_decref
+.ts_rename_done:
+    xor eax, eax
+    pop rcx
+    pop rbx
+    leave
+    ret
+.ts_rename_static:
+    RAISE exc_TypeError_type, "cannot set __name__ of a built-in type"
+.ts_rename_bad:
+    RAISE exc_TypeError_type, "can only assign string to __name__"
 END_FUNC type_setattr
 
 ;; ============================================================================
@@ -2400,8 +2574,13 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
 .tga_return_name:
     ; __name__ is the last dotted component of tp_name: CPython stores
     ; "types.GenericAlias" but reports "GenericAlias", keeping the qualified
-    ; form for the repr.
+    ; form for the repr.  That rule is the STATIC one; a heaptype answers its
+    ; whole name, which is how a class renamed to "typing.re" reports the
+    ; dotted form CPython's does.
     mov rdi, [r12 + PyTypeObject.tp_name]
+    mov rcx, [r12 + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_HEAPTYPE
+    jnz .tga_name_done
     mov rsi, rdi
     xor ecx, ecx
 .tga_name_scan:
@@ -2689,6 +2868,15 @@ END_FUNC user_type_dealloc
 ;; ============================================================================
 section .rodata
 ig_getattr_name: db "__getattr__", 0
+ig_getattribute_name: db "__getattribute__", 0
+
+section .data
+align 8
+;; The object object.__getattribute__ is currently resolving for, or 0.  Set
+;; around its call and consumed by the first instance_getattr that sees it.
+global instance_getattr_skip
+instance_getattr_skip: dq 0
+section .rodata
 id_del_ignored_msg: db "Exception ignored in __del__", 10
 id_del_ignored_len equ $ - id_del_ignored_msg
 section .data

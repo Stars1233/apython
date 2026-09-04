@@ -211,6 +211,7 @@ test_generic_alias_value
 test_gen_return2
 test_gen_return
 test_getattr_descriptors
+test_getattr_generic_order
 test_getattr_immediate
 test_getattr_raises
 test_getset_descriptors
