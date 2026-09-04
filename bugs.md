@@ -45,20 +45,18 @@ reasoning that chose them and what changing one would cost.
 - **Missing C modules.**  The ranking here is by what actually stands in the
   way rather than by which import fails first -- the two are not the same,
   and `_imp` was reached by twelve modules a few lines after some other
-  import that looked like the blocker.  `_imp`, `marshal`, `_warnings` and
-  `_typing` are there now, and `importlib` with them; over CPython 3.12's
-  196 what remains is the `_sha*`/`_md5` family behind `hashlib` (9, through
-  `random`), `_posixsubprocess` (6), `_signal` (2), then `array`, `_csv`,
-  `zlib`, `unicodedata`, `_ssl`, `pyexpat` and a long tail of one apiece.
+  import that looked like the blocker.  `_imp`, `marshal`, `_warnings`,
+  `_typing`, the `_sha*`/`_md5` family and `_posixsubprocess` are there now,
+  and `importlib`, `hashlib`, `random` and `subprocess` with them.  What is
+  left blocks one or two modules apiece and is genuinely C: `_signal` and
+  `termios` (2 each), then `zlib`, `unicodedata`, `_tracemalloc`,
+  `_symtable`, `_ssl`, `_sqlite3`, `_crypt`, `pyexpat` and `_tkinter`.
   (`_io` is not among them: `src/iomod.asm` supplies `_iocore` and
   `lib/_io.py` assembles both halves under the name `_io`.  `_socket` and
   `select` are the same split over `_socketcore`.  Neither are `math`,
   `_collections`, `_struct`, `_random`, `_contextvars`, `_string`,
   `_tokenize`, `_operator`, `binascii`, `atexit` and `_ast`, which are
-  there.)  `make check-stdlib` gives the current figure: 137 of 196.
-
-  `hashlib` imports but has no digests, because every one of them is a C
-  module here as well.
+  there.)  `make check-stdlib` gives the current figure: 148 of 196.
 
   `math`'s `gamma`, `lgamma`, the n-ary `hypot` and `sumprod` round
   differently from CPython's, which uses its own Lanczos approximation and
