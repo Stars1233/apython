@@ -97,6 +97,46 @@ e = Boom()
 del e
 print("survived a raising hook")
 
+# Neither report walks a chain.  CPython reaches for PyTraceBack_Print rather
+# than the display routine an uncaught exception goes through, so a __cause__
+# or a __context__ the exception really carries is not printed -- one
+# exception, not three paragraphs.  The chain is still ON the exception: a
+# hook of one's own can read __context__ and see it.
+class ChainedHook:
+    def __repr__(self):
+        return "<the chaining hook>"
+
+    def __call__(self, unraisable):
+        try:
+            raise KeyError("first")
+        except KeyError as exc:
+            raise ValueError("second") from exc
+
+
+sys.unraisablehook = ChainedHook()
+e = Boom()
+del e
+print("survived a chaining hook")
+
+
+def context_hook(unraisable):
+    print("context seen by a hook:", repr(unraisable.exc_value.__context__))
+
+
+sys.unraisablehook = context_hook
+
+
+def chained_gen():
+    try:
+        yield 1
+    finally:
+        raise RuntimeError("cleanup")
+
+
+g = chained_gen()
+next(g)
+del g
+
 # And putting the default back restores the printed report.
 sys.unraisablehook = old
 print(old is sys.__unraisablehook__)

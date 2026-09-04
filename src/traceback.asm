@@ -1492,7 +1492,12 @@ END_FUNC tb_print_repeated
 ;;                            of, or 0)
 ;;
 ;; What CPython's _PyErr_WriteUnraisableMsg prints: a line naming the object,
-;; then the exception's own report.  A __del__ that raises and a cleanup in a
+;; then the exception's own report -- its traceback and its message, and
+;; nothing else.  It reaches for PyTraceBack_Print rather than the display
+;; routine an uncaught exception goes through, so a __cause__ or a __context__
+;; is not walked here even though the exception carries one.  A generator
+;; dropped inside a `finally` that raises has GeneratorExit as its context in
+;; both interpreters; only this report ever showed it.  A __del__ that raises and a cleanup in a
 ;; dropped generator both reach it -- neither has a caller left to hand the
 ;; exception to, and both used to print a single line that named the kind of
 ;; failure and nothing else, so which object, which line and which exception
@@ -1517,7 +1522,9 @@ DEF_FUNC traceback_unraisable_default, TPU_FRAME
     mov rsi, [rbp - TPU_OBJ]
     call tb_unraisable_name
     mov rdi, [rbp - TPU_EXC]
+    mov qword [rel tb_chain_suppress], 1
     call traceback_print
+    mov qword [rel tb_chain_suppress], 0
     leave
     ret
 END_FUNC traceback_unraisable_default
@@ -1720,7 +1727,10 @@ DEF_FUNC traceback_print_unraisable, TPH_FRAME
     call tb_unraisable_name
     pop rdi
     push rdi
+    ; One exception, no chain -- the same rule as the default hook below.
+    mov qword [rel tb_chain_suppress], 1
     call traceback_print
+    mov qword [rel tb_chain_suppress], 0
     pop rdi
     call obj_decref
 .tph_no_exc:
@@ -1803,6 +1813,10 @@ DEF_FUNC tb_print_one, TP_FRAME
     inc rcx
     mov [rel tb_seen_n], rcx
 .tp_seen_done:
+
+    ; The unraisable hook reports one exception, not a chain -- see the flag.
+    cmp qword [rel tb_chain_suppress], 0
+    jne .tp_header
 
     ; A __cause__ or __context__ is reported first, then the linking sentence.
     mov rax, [rdi + PyExceptionObject.exc_cause]
@@ -2170,6 +2184,9 @@ END_FUNC tb_syntax_header
 section .bss
 tb_seen:   resq TB_SEEN_MAX
 tb_seen_n: resq 1
+; Set while the default unraisable hook is printing: CPython's hook reports
+; the exception on its own, with no __cause__ / __context__ chain.
+tb_chain_suppress: resq 1
 section .text
 
 ;; ============================================================================

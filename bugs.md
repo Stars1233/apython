@@ -202,13 +202,6 @@ than lying — but they are ordinary Python that does not work:
   while it is also printing, which is why two of them compare against a
   recorded transcript.
 
-- **An exception raised while another is being handled by a `finally` gets a
-  `__context__` where CPython gives it none.**  `current_exception` is also
-  the exception being handled, and a `finally` body runs with it set, so a
-  raise there chains it.  CPython's exception stack distinguishes the two,
-  and only an `except` block counts.  Visible in the report for a generator
-  whose cleanup raises: the GeneratorExit appears as context.
-
 ## Robustness
 
 - **A builtin registered with no argument counts accepts extras silently.**

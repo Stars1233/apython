@@ -7,5 +7,12 @@ Traceback (most recent call last):
     raise KeyError("hook failed")
 KeyError: 'hook failed'
 survived a raising hook
+Exception ignored in sys.unraisablehook: <the chaining hook>
+Traceback (most recent call last):
+  File "tests/test_unraisable.py", line 113, in __call__
+    raise ValueError("second") from exc
+ValueError: second
+survived a chaining hook
+context seen by a hook: GeneratorExit()
 True
 done
