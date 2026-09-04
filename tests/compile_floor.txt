@@ -343,6 +343,7 @@ test_sequence_iteration
 test_set_fatval
 test_set_inplace
 test_set_methods
+test_set_name_metatype
 test_set_name
 test_set_ops
 test_sets

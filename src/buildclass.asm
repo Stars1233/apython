@@ -1249,6 +1249,22 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     extern type_number_methods
     lea rax, [rel type_number_methods]
     mov [r12 + PyTypeObject.tp_as_number], rax
+    ; A metatype's INSTANCES are classes, so releasing one has to unregister
+    ; it from its bases and free a type's fields -- not walk it as an ordinary
+    ; instance.  The dealloc used is the object's TYPE's, and a class built by
+    ; a metaclass of the user's own has that metaclass as its type, so the
+    ; generic heaptype trio here would free a class the wrong way: the block
+    ; went back to the allocator with the GC's list and the base's subclass
+    ; list still pointing into it.
+    extern user_type_dealloc
+    extern type_traverse
+    extern type_clear
+    lea rax, [rel user_type_dealloc]
+    mov [r12 + PyTypeObject.tp_dealloc], rax
+    lea rax, [rel type_traverse]
+    mov [r12 + PyTypeObject.tp_traverse], rax
+    lea rax, [rel type_clear]
+    mov [r12 + PyTypeObject.tp_clear], rax
 .bc_not_metatype:
 
     ; If base is an exception type, inherit exception-compatible methods

@@ -121,3 +121,35 @@ try:
         h = Boom()
 except RuntimeError as e:
     print("RuntimeError", e)
+
+
+print("--- a class built by a metaclass is released as a class ---")
+#
+# The dealloc that runs is the object's TYPE's, and that type is the
+# metaclass, so a metatype has to carry a type's lifecycle slots or the block
+# goes back to the allocator with the GC's list and each base's subclass list
+# still pointing into it.
+import gc
+
+
+class Held(metaclass=Meta):
+    pass
+
+
+before = len(object.__subclasses__())
+for i in range(20):
+    made = Meta("Gone%d" % i, (Held,), {"x": Desc()})
+    del made
+gc.collect()
+print(len(Held.__subclasses__()))
+print(len(object.__subclasses__()) == before)
+
+seen.clear()
+for i in range(5):
+    try:
+        Meta("Bad%d" % i, (Held,), {"b": Boom()})
+    except RuntimeError:
+        pass
+gc.collect()
+print(len(Held.__subclasses__()), seen == [])
+print("survived")
