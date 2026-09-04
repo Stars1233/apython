@@ -120,6 +120,7 @@ test_defaults
 test_del_and_gc_state
 test_del_dict
 test_del_during_unwind
+test_delete_name
 test_delete
 test_del
 test_deopt_extended_arg

@@ -2422,16 +2422,22 @@ DEF_FUNC_BARE op_delete_name
     shl ecx, 3                ; payload array: 8-byte stride
     LOAD_CO_NAMES rsi
     mov rsi, [rsi + rcx]      ; name
-    ; Try locals first
+    ; The frame's locals, and ONLY those when it has some: CPython's
+    ; DELETE_NAME is a delete from f_locals and a NameError when it misses.
+    ; Falling through to globals meant `class C: del g` deleting a module
+    ; global -- silently, and leaving nothing behind to say so.  A frame with
+    ; no locals dict of its own is the module case, where the two are the
+    ; same mapping anyway.
     mov rdi, [r12 + PyFrame.locals]
     test rdi, rdi
     jz .dn_globals
     push rsi
     extern dict_del_opt
-    call dict_del_opt          ; a miss must FALL THROUGH to globals, not raise
+    call dict_del_opt
     pop rsi
     test eax, eax
     jz .dn_ok                  ; found and deleted
+    jmp .dn_error
 .dn_globals:
     mov rdi, [r12 + PyFrame.globals]
     push rsi
