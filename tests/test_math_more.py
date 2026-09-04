@@ -52,3 +52,30 @@ t("dist lists", lambda: math.dist([0.0,0.0],[3.0,4.0]))
 t("dist mismatch", lambda: math.dist((1,),(1,2)))
 t("dist neg", lambda: math.dist((-1,-2),(2,2)))
 t("dist ints", lambda: math.dist((0,0),(1,1)))
+
+# The scale in isclose is max(|a|, |b|), and the difference has to survive the
+# conversion of an explicit rel_tol without landing in the slot `a` is in --
+# it did, so the scale became max(|b|, |a - b|) and this was False.  The
+# default-tolerance form never went through that path, which is why every case
+# above passed.
+t("isclose rel scale", lambda: math.isclose(100.0, 99.0, rel_tol=0.01))
+t("isclose rel scale2", lambda: math.isclose(1000.0, 999.0, rel_tol=0.01))
+t("isclose rel just under", lambda: math.isclose(100.0, 98.0, rel_tol=0.01))
+t("isclose both given", lambda: math.isclose(1.0, 1.05, rel_tol=0.01, abs_tol=0.1))
+t("isclose both order", lambda: math.isclose(1.0, 1.05, abs_tol=0.1, rel_tol=0.01))
+t("isclose abs wins", lambda: math.isclose(100.0, 99.0, rel_tol=0.0, abs_tol=2.0))
+t("isclose rel zero", lambda: math.isclose(0.0, 0.0, rel_tol=0.5))
+t("isclose negatives", lambda: math.isclose(-100.0, -99.0, rel_tol=0.01))
+t("isclose swapped", lambda: math.isclose(99.0, 100.0, rel_tol=0.01))
+t("isclose rel bad", lambda: math.isclose(1.0, 1.0, rel_tol="x"))
+t("isclose abs bad", lambda: math.isclose(1.0, 1.0, abs_tol=None))
+t("isclose rel neg", lambda: math.isclose(1.0, 1.0, rel_tol=-1.0))
+
+# ulp's type error names the argument, which means keeping it: the message
+# used to read the slot the converted double goes in, before anything had
+# been written there.
+t("ulp str", lambda: math.ulp("abc"))
+t("ulp none", lambda: math.ulp(None))
+t("ulp list", lambda: math.ulp([1.0]))
+t("ulp int", lambda: math.ulp(1))
+t("ulp bool", lambda: math.ulp(True))

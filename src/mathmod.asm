@@ -1355,11 +1355,16 @@ END_FUNC math_perm
 ;; overflows to infinity and the step has to be taken downward instead.
 ;; ============================================================================
 MUL_X     equ 8
-MUL_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+MUL_OBJ   equ 16            ; the argument, for the type error
+MUL_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC math_ulp, MUL_FRAME
     cmp rsi, 1
     jne .mul_args
     mov rdi, [rdi]
+    ; The argument, kept for the error message.  MUL_X is written only once
+    ; the conversion has succeeded -- and with the double, not the object --
+    ; so the message read uninitialised stack as a Value.
+    mov [rbp - MUL_OBJ], rdi
     call math_to_double
     test eax, eax
     jz .mul_type
@@ -1402,8 +1407,8 @@ DEF_FUNC math_ulp, MUL_FRAME
     V_PACK rax, rdx
     ret
 .mul_type:
-    mov rsi, [rbp - MUL_X]
-    CSTRING rdi, `must be real number, not '\x01'`
+    mov rsi, [rbp - MUL_OBJ]
+    CSTRING rdi, `must be real number, not \x01`
     call raise_type_error_with_name
 .mul_args:
     lea rdi, [rel mm_n_ulp]
@@ -1596,8 +1601,10 @@ END_FUNC math_prod
 ;; ============================================================================
 MIC_A     equ 8
 MIC_B     equ 16
-MIC_KWOUT equ 32            ; two slots: rel_tol, abs_tol
-MIC_FRAME equ 48            ; + 0 pushes = 48
+MIC_KWOUT equ 32            ; two slots: rel_tol and abs_tol, at -32 and -24
+MIC_REL   equ 40            ; both tolerances, converted
+MIC_ABS   equ 48
+MIC_FRAME equ 64            ; + 0 pushes = 64
 DEF_FUNC math_isclose, MIC_FRAME
     mov qword [rbp - MIC_KWOUT], 0
     mov qword [rbp - MIC_KWOUT + 8], 0
@@ -1626,6 +1633,42 @@ DEF_FUNC math_isclose, MIC_FRAME
     add rsp, 16
     movsd [rbp - MIC_B], xmm0
 
+    ; Both tolerances are converted and range-checked BEFORE anything is
+    ; decided, which is the order CPython's argument clinic gives it:
+    ; isclose(1.0, 1.0, rel_tol="x") is a TypeError, not True, and a negative
+    ; tolerance is a ValueError even when the two values are equal.
+    mov rdi, [rbp - MIC_KWOUT]
+    test rdi, rdi
+    jz .mic_default_rel
+    mov [rbp - MIC_REL], rdi    ; the object, for the message if it is not one
+    call math_to_double
+    test eax, eax
+    jz .mic_type_tol
+    jmp .mic_have_rel
+.mic_default_rel:
+    movsd xmm0, [rel mm_default_rel_tol]
+.mic_have_rel:
+    movsd [rbp - MIC_REL], xmm0
+
+    mov rdi, [rbp - MIC_KWOUT + 8]
+    test rdi, rdi
+    jz .mic_default_abs
+    mov [rbp - MIC_ABS], rdi
+    call math_to_double
+    test eax, eax
+    jz .mic_type_tol
+    jmp .mic_have_abs
+.mic_default_abs:
+    xorpd xmm0, xmm0
+.mic_have_abs:
+    movsd [rbp - MIC_ABS], xmm0
+
+    xorpd xmm1, xmm1
+    ucomisd xmm1, [rbp - MIC_REL]
+    ja .mic_negative_tol        ; 0 > rel_tol
+    ucomisd xmm1, [rbp - MIC_ABS]
+    ja .mic_negative_tol
+
     ; Equal is close, and that arm also settles two infinities of the
     ; same sign; an infinity against anything else never is.
     movsd xmm0, [rbp - MIC_A]
@@ -1642,50 +1685,21 @@ DEF_FUNC math_isclose, MIC_FRAME
     ucomisd xmm0, [rel mm_inf]
     je .mic_false
 
-    ; |a - b| <= max(rel_tol * max(|a|, |b|), abs_tol)
+    ; |a - b| <= max(rel_tol * max(|a|, |b|), abs_tol).  Nothing below calls
+    ; anything, so the working values stay in registers.
     movsd xmm0, [rbp - MIC_A]
     subsd xmm0, [rbp - MIC_B]
     andpd xmm0, [rel mm_absmask]
     movsd xmm3, xmm0            ; the difference
 
-    mov rdi, [rbp - MIC_KWOUT]
-    test rdi, rdi
-    jz .mic_default_rel
-    push rax
-    movsd [rbp - MIC_A], xmm3
-    call math_to_double
-    test eax, eax
-    jz .mic_type_tol
-    pop rax
-    movsd xmm3, [rbp - MIC_A]
-    jmp .mic_have_rel
-.mic_default_rel:
-    movsd xmm0, [rel mm_default_rel_tol]
-.mic_have_rel:
-    movsd xmm4, xmm0            ; rel_tol
-
     movsd xmm1, [rbp - MIC_B]
     andpd xmm1, [rel mm_absmask]
     movsd xmm2, [rbp - MIC_A]
     andpd xmm2, [rel mm_absmask]
-    maxsd xmm1, xmm2
-    mulsd xmm4, xmm1            ; rel_tol * max(|a|, |b|)
-
-    mov rdi, [rbp - MIC_KWOUT + 8]
-    test rdi, rdi
-    jz .mic_default_abs
-    movsd [rbp - MIC_A], xmm3
-    movsd [rbp - MIC_B], xmm4
-    call math_to_double
-    test eax, eax
-    jz .mic_type_tol
-    movsd xmm3, [rbp - MIC_A]
-    movsd xmm4, [rbp - MIC_B]
-    jmp .mic_have_abs
-.mic_default_abs:
-    xorpd xmm0, xmm0
-.mic_have_abs:
-    maxsd xmm4, xmm0
+    maxsd xmm1, xmm2            ; max(|a|, |b|)
+    movsd xmm4, [rbp - MIC_REL]
+    mulsd xmm4, xmm1
+    maxsd xmm4, [rbp - MIC_ABS]
     ucomisd xmm3, xmm4
     jbe .mic_true
 .mic_false:
@@ -1702,7 +1716,12 @@ DEF_FUNC math_isclose, MIC_FRAME
     add rsp, 16
     RAISE exc_TypeError_type, "must be real number"
 .mic_type_tol:
-    RAISE exc_TypeError_type, "must be real number"
+    ; rdi still holds the tolerance that would not convert.
+    mov rsi, rdi
+    CSTRING rdi, `must be real number, not \x01`
+    call raise_type_error_with_name
+.mic_negative_tol:
+    RAISE exc_ValueError_type, "tolerances must be non-negative"
 .mic_args:
     RAISE exc_TypeError_type, "isclose() takes exactly 2 positional arguments"
 END_FUNC math_isclose
