@@ -1254,11 +1254,13 @@ DEF_FUNC comp_attach_location, AL_FRAME
     mov ecx, [rbx + Comp.err + CompErr.end_lineno]
     V_PACK_I64 rcx, rsi
     mov [rdx + 32], rcx
+    ; end_col is NOT clamped the way col is.  CPython's own end_offset is 0
+    ; for every "was never closed" and -1 for "expected 'except' or 'finally'
+    ; block", and a program that reads e.end_offset should see what CPython's
+    ; would give it.  Nothing draws a caret from this one -- tb_write_carets
+    ; and the syntax-error header both work from the offset -- so a negative
+    ; here cannot become four billion spaces the way a negative col could.
     movsxd rcx, dword [rbx + Comp.err + CompErr.end_col]
-    test rcx, rcx
-    jns .end_col_ok
-    xor ecx, ecx
-.end_col_ok:
     inc rcx
     V_PACK_I64 rcx, rsi
     mov [rdx + 40], rcx
@@ -1540,29 +1542,96 @@ DEF_FUNC_LOCAL par_single_check, PSC_FRAME
 END_FUNC par_single_check
 
 ;; ============================================================================
+;; comp_msg_start() -> rax = the message buffer, empty
+;; comp_msg_cstr(rdi = a position in it, rsi = text) -> rax = the new position
+;; comp_msg_i64(rdi = a position in it, rsi = a number) -> rax = likewise
+;;
+;; Some of CPython's syntax errors name something the source decides: the line
+;; a string literal was detected on, the digit that is wrong for a base, the
+;; statement an indented block was expected after.  CompErr.msg is a borrowed
+;; `const char *`, so those need storage that outlives the compile -- and one
+;; static buffer is enough, because the FIRST error wins and is consumed once,
+;; by comp_set_pending, before the compiler is entered again.
+;; ============================================================================
+;; ============================================================================
+;; comp_msg_start() -> rax = the message buffer, emptied
+;; ============================================================================
+DEF_FUNC_BARE comp_msg_start
+    lea rax, [rel comp_msgbuf]
+    mov byte [rax], 0
+    ret
+END_FUNC comp_msg_start
+
+;; ============================================================================
+;; comp_msg_cstr(rdi = a position in the buffer, rsi = text) -> rax = the NUL
+;; it wrote, which is where the next piece goes
+;; ============================================================================
+extern rbt_append_cstr
+DEF_FUNC comp_msg_cstr
+    call rbt_append_cstr
+    leave
+    ret
+END_FUNC comp_msg_cstr
+
+;; ============================================================================
+;; comp_msg_i64(rdi = a position in the buffer, rsi = a number) -> rax = the
+;; NUL it wrote
+;; ============================================================================
+extern msg_append_i64
+DEF_FUNC comp_msg_i64
+    call msg_append_i64
+    leave
+    ret
+END_FUNC comp_msg_i64
+
+section .bss
+comp_msgbuf: resb 256
+section .text
+
+;; ============================================================================
 ;; comp_error(Comp *c, PyTypeObject *type, const char *msg, int lineno, int col)
 ;;   -> rax = 0, always, so callers can `jmp comp_error`-style tail into it and
 ;;      return the failure value in one go.
+;;
+;; The span defaults to the one character the error points at.  Where CPython's
+;; is wider -- a whole token, or the subexpression a message is about -- the
+;; caller says so with comp_error_span.
 ;; ============================================================================
 DEF_FUNC_BARE comp_error
+    push r9
+    push r10
+    mov r9d, ecx
+    lea r10d, [r8d + 1]
+    call comp_error_span
+    pop r10
+    pop r9
+    ret
+END_FUNC comp_error
+
+;; ============================================================================
+;; comp_error_span(Comp *c, PyTypeObject *type, const char *msg, int lineno,
+;;                 int col, int end_lineno, int end_col) -> rax = 0, always
+;;
+;; The five fields a SyntaxError carries, all of them.  CPython's spans are not
+;; all one character wide and not all forward: "expected 'except' or 'finally'
+;; block" ends at column -1, meaning the end of the line, and every "was never
+;; closed" ends at 0.  Both are passed through rather than normalised, because
+;; a program that reads e.end_offset sees what CPython's would give it.
+;; ============================================================================
+DEF_FUNC_BARE comp_error_span
     cmp dword [rdi + Comp.err + CompErr.set], 0
     jne .already
     mov [rdi + Comp.err + CompErr.type], rsi
     mov [rdi + Comp.err + CompErr.msg], rdx
     mov [rdi + Comp.err + CompErr.lineno], ecx
     mov [rdi + Comp.err + CompErr.col], r8d
-    ; The span defaults to the one character the error points at.  CPython's
-    ; is sometimes wider -- a whole token, or the subexpression a message is
-    ; about -- and nothing here knows which yet, so this says the narrowest
-    ; true thing rather than guessing.
-    mov [rdi + Comp.err + CompErr.end_lineno], ecx
-    inc r8d
-    mov [rdi + Comp.err + CompErr.end_col], r8d
+    mov [rdi + Comp.err + CompErr.end_lineno], r9d
+    mov [rdi + Comp.err + CompErr.end_col], r10d
     mov dword [rdi + Comp.err + CompErr.set], 1
 .already:
     xor eax, eax
     ret
-END_FUNC comp_error
+END_FUNC comp_error_span
 
 ;; ============================================================================
 ;; comp_failed(Comp *c) -> rax = non-zero once an error has been recorded

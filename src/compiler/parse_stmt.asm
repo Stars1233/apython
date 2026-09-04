@@ -27,6 +27,10 @@ extern ast_obj
 extern ast_obj_at
 extern ast_push
 extern ast_set_ctx
+extern exc_SyntaxError_type
+extern comp_msg_start
+extern comp_msg_cstr
+extern ap_strcmp
 extern comp_error
 extern comp_intern
 extern buf_free
@@ -733,7 +737,7 @@ DEF_FUNC_LOCAL ps_scope, PK2_FRAME
     ret
 .need_name:
     mov rdi, rbx
-    CSTRING rsi, "expected a name"
+    CSTRING rsi, "invalid syntax"
     call par_syntax_error
 .fail:
     xor eax, eax
@@ -956,7 +960,7 @@ DEF_FUNC par_dotted_name, PDN_FRAME
     ret
 .need_name:
     mov rdi, rbx
-    CSTRING rsi, "expected a module name"
+    CSTRING rsi, "invalid syntax"
     call par_syntax_error
 .fail:
     lea rdi, [rbp - PDN_BUF]
@@ -996,7 +1000,7 @@ DEF_FUNC par_name_obj, 8
     ret
 .bad:
     mov rdi, rbx
-    CSTRING rsi, "expected a name"
+    CSTRING rsi, "invalid syntax"
     call par_syntax_error
 .fail:
     xor eax, eax
@@ -1786,7 +1790,9 @@ PP_STAR   equ 64
 PP_VARARG equ 72
 PP_VARKW  equ 80
 PP_NODE   equ 88
-PP_FRAME  equ 88          ; + 1 push = 96
+PP_DEFLT  equ 96          ; have we passed a parameter with a default?
+PP_BAD    equ 104         ; the parameter an error is about
+PP_FRAME  equ 120         ; + 1 push = 128, 16-aligned
 DEF_FUNC par_params, PP_FRAME
     push rbx
     mov rbx, rdi
@@ -1803,6 +1809,7 @@ DEF_FUNC par_params, PP_FRAME
     mov qword [rbp - PP_STAR], 0        ; have we passed the * marker?
     mov qword [rbp - PP_VARARG], 0
     mov qword [rbp - PP_VARKW], 0
+    mov qword [rbp - PP_DEFLT], 0
 
 .loop:
     mov rdi, rbx
@@ -1812,6 +1819,12 @@ DEF_FUNC par_params, PP_FRAME
     cmp eax, TOK_ENDMARKER
     je .build
 
+    ; `**kwargs` is the last thing a parameter list may hold.
+    cmp qword [rbp - PP_VARKW], 0
+    je .not_after_varkw
+    CSTRING rdx, "arguments cannot follow var-keyword argument"
+    jmp .param_error
+.not_after_varkw:
     cmp eax, TOK_SLASH
     je .posonly_marker
     cmp eax, TOK_STAR
@@ -1829,19 +1842,74 @@ DEF_FUNC par_params, PP_FRAME
     call par_param_here
     test rax, rax
     jz .fail
+    mov [rbp - PP_BAD], rax
+    push rax
     mov rdi, rbx
     mov rsi, rax
+    mov rdx, [rbp - PP_MARK]
+    mov rcx, [rbp - PP_VARARG]
+    mov r8, [rbp - PP_VARKW]
+    call pp_duplicate
+    test rax, rax
+    jnz .dup_param
+    pop rsi
+    push rsi
+    mov rdi, rbx
     call ast_push
+    pop rsi
     cmp qword [rbp - PP_STAR], 0
     je .count_pos
     inc qword [rbp - PP_NKW]
     jmp .comma
 .count_pos:
+    ; A default makes every positional parameter after it optional, so one
+    ; without a default cannot follow.  Keyword-only parameters are exempt:
+    ; `def f(*, a=1, b)` is legal, because they are named at the call.
+    mov rdi, rbx
+    mov rsi, [rbp - PP_BAD]
+    call ast_at
+    cmp dword [rax + AstNode.c], 0
+    je .no_default
+    mov qword [rbp - PP_DEFLT], 1
+    jmp .counted
+.no_default:
+    cmp qword [rbp - PP_DEFLT], 0
+    je .counted
+    CSTRING rdx, "parameter without a default follows parameter with a default"
+    jmp .param_error_prev
+.counted:
     inc qword [rbp - PP_NPOS]
     jmp .comma
 
+.dup_param:
+    ; "duplicate argument 'a' in function definition", blamed at the repeat.
+    ; rax is the name pp_duplicate found, a str in the object arena.
+    push rax
+    call comp_msg_start
+    push rax                    ; the buffer, which becomes the message
+    mov rdi, rax
+    CSTRING rsi, "duplicate argument '"
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rsp + 8]
+    add rsi, PyStrObject.data
+    call comp_msg_cstr
+    mov rdi, rax
+    CSTRING rsi, "' in function definition"
+    call comp_msg_cstr
+    pop rdx                     ; the message
+    add rsp, 8                  ; the name
+    jmp .param_error_prev
+
 .posonly_marker:
-    ; Everything so far was positional-only.
+    ; `/` marks the end of the positional-only run, so it cannot come after
+    ; the `*` that ends the positional one.
+    cmp qword [rbp - PP_STAR], 0
+    je .posonly_ok
+    CSTRING rdx, "/ must be ahead of *"
+    jmp .param_error
+.posonly_ok:
+    ; Everything so far was positional-any.
     mov rax, [rbp - PP_NPOS]
     mov [rbp - PP_POSONLY], rax
     mov rdi, rbx
@@ -1868,7 +1936,18 @@ DEF_FUNC par_params, PP_FRAME
     call par_param_here
     test rax, rax
     jz .fail
-    mov [rbp - PP_VARARG], rax
+    mov [rbp - PP_BAD], rax
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, [rbp - PP_MARK]
+    xor ecx, ecx
+    mov r8, [rbp - PP_VARKW]
+    call pp_duplicate
+    pop rcx
+    test rax, rax
+    jnz .dup_param
+    mov [rbp - PP_VARARG], rcx
     jmp .comma
 
 .varkw:
@@ -1883,7 +1962,18 @@ DEF_FUNC par_params, PP_FRAME
     call par_param_here
     test rax, rax
     jz .fail
-    mov [rbp - PP_VARKW], rax
+    mov [rbp - PP_BAD], rax
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, [rbp - PP_MARK]
+    mov rcx, [rbp - PP_VARARG]
+    xor r8d, r8d
+    call pp_duplicate
+    pop rcx
+    test rax, rax
+    jnz .dup_param
+    mov [rbp - PP_VARKW], rcx
     jmp .comma
 
 .comma:
@@ -1896,6 +1986,18 @@ DEF_FUNC par_params, PP_FRAME
     jmp .loop
 
 .build:
+    ; A bare `*` separates the positional parameters from the keyword-only
+    ; ones, so there has to BE a keyword-only one: `def f(*): pass` is a
+    ; SyntaxError, and was accepted here.
+    cmp qword [rbp - PP_STAR], 0
+    je .build_ok
+    cmp qword [rbp - PP_VARARG], 0
+    jne .build_ok
+    cmp qword [rbp - PP_NKW], 0
+    jne .build_ok
+    CSTRING rdx, "named arguments must follow bare *"
+    jmp .param_error
+.build_ok:
     mov rdi, rbx
     mov esi, AST_ARGUMENTS
     mov rdx, [rbp - PP_LINE]
@@ -1936,12 +2038,148 @@ DEF_FUNC par_params, PP_FRAME
     pop rbx
     leave
     ret
+;; rdx = the message, PP_BAD = the parameter it is about.  The parser is
+;; already past that parameter, and CPython blames the parameter itself, so
+;; the position comes off its node rather than off the cursor.
+.param_error_prev:
+    push rdx
+    mov rdi, rbx
+    mov rsi, [rbp - PP_BAD]
+    call ast_at
+    mov r8d, [rax + AstNode.col]
+    mov ecx, [rax + AstNode.lineno]
+    pop rdx
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    call comp_error
+    jmp .fail
+
+;; rdx = the message.  CPython blames the token the list has reached, and
+;; gives it a one-character span, which is comp_error's default.
+.param_error:
+    push rdx
+    mov rdi, rbx
+    call par_peek
+    mov r8d, [rax + Token.col]
+    mov ecx, [rax + Token.lineno]
+    pop rdx
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    call comp_error
 .fail:
     xor eax, eax
     pop rbx
     leave
     ret
 END_FUNC par_params
+
+;; ============================================================================
+;; pp_duplicate(rdi = Comp*, rsi = a new AST_ARG node, rdx = the pending-stack
+;;              mark, rcx = the *args node or 0, r8 = the **kwargs node or 0)
+;;   -> rax = the name str it repeats, or 0
+;;
+;; `def f(a, a)` is a SyntaxError, and every name in the list counts -- the
+;; starred ones included, so `def f(a, *a)` is one too.  The comparison is on
+;; the characters: the object arena holds a str per occurrence rather than one
+;; per distinct name, so two `a`s are two objects.
+;; ============================================================================
+PD_COMP   equ 8
+PD_NAME   equ 16
+PD_MARK   equ 24
+PD_VARARG equ 32
+PD_VARKW  equ 40
+PD_I      equ 48
+PD_FRAME  equ 48            ; + 2 pushes = 64, 16-aligned
+DEF_FUNC_LOCAL pp_duplicate, PD_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov [rbp - PD_COMP], rdi
+    mov [rbp - PD_MARK], rdx
+    mov [rbp - PD_VARARG], rcx
+    mov [rbp - PD_VARKW], r8
+
+    mov rdi, rbx
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov r12, rax                        ; the new parameter's name
+    mov [rbp - PD_NAME], rax
+
+    mov rcx, [rbp - PD_VARARG]
+    test rcx, rcx
+    jz .pd_no_vararg
+    mov rsi, rcx
+    call .pd_name_of
+    call .pd_same
+    test eax, eax
+    jnz .pd_found
+.pd_no_vararg:
+    mov rcx, [rbp - PD_VARKW]
+    test rcx, rcx
+    jz .pd_no_varkw
+    mov rsi, rcx
+    call .pd_name_of
+    call .pd_same
+    test eax, eax
+    jnz .pd_found
+.pd_no_varkw:
+    mov rax, [rbp - PD_MARK]
+    mov [rbp - PD_I], rax
+.pd_loop:
+    mov rdi, [rbp - PD_COMP]
+    mov rcx, [rbp - PD_I]
+    cmp rcx, [rdi + Comp.pending + Buf.len]
+    jge .pd_none
+    mov rax, [rdi + Comp.pending + Buf.data]
+    mov esi, [rax + rcx*4]
+    call .pd_name_of
+    call .pd_same
+    test eax, eax
+    jnz .pd_found
+    inc qword [rbp - PD_I]
+    jmp .pd_loop
+
+.pd_found:
+    mov rax, [rbp - PD_NAME]
+    pop r12
+    pop rbx
+    leave
+    ret
+.pd_none:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+; Local: is the str in rax the same NAME as the one in r12?  The arena holds
+; one object per occurrence, not one per distinct name, so this compares the
+; characters.
+.pd_same:
+    test rax, rax
+    jz .pd_same_no
+    lea rdi, [rax + PyStrObject.data]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jnz .pd_same_no
+    mov eax, 1
+    ret
+.pd_same_no:
+    xor eax, eax
+    ret
+
+; Local: the name object of the AST_ARG node whose index is in esi.
+.pd_name_of:
+    mov rdi, [rbp - PD_COMP]
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, [rbp - PD_COMP]
+    call ast_obj_at
+    ret
+END_FUNC pp_duplicate
 
 ;; ============================================================================
 ;; par_one_param(Comp *c) -> rax = an AST_ARG node, 0 on error

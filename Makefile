@@ -63,7 +63,7 @@ $(shell mkdir -p build; printf '%s\n' '$(NASMFLAGS)' | cmp -s - $(FLAGSTAMP) \
 # Python compiler for tests
 PYTHON = python3
 
-.PHONY: all clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-re check-source check-pyc check-arity lib-pyc
+.PHONY: all clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-re check-source check-pyc check-arity check-syntax lib-pyc
 
 all: $(TARGET) lib-pyc
 
@@ -110,6 +110,7 @@ check: $(TARGET) lib-pyc
 	@bash tests/run_tests.sh
 	@bash tests/pyc_probe.sh
 	@bash tests/arity_probe.sh
+	@bash tests/syntax_probe.sh
 
 # A malformed .pyc has to be refused rather than run.  Not a tests/test_*.py:
 # the point is what happens when the interpreter is HANDED a file, which a
@@ -122,6 +123,13 @@ check-pyc: $(TARGET)
 # tests/arity_floor.txt.
 check-arity: $(TARGET)
 	@bash tests/arity_probe.sh
+
+# A syntax error's message and its five location fields, against CPython's,
+# over tests/syntax_corpus.txt.  Ratchets against tests/syntax_floor.txt;
+# `bash tests/syntax_probe.sh --show` prints what still differs.
+check-syntax: $(TARGET)
+	@bash tests/syntax_probe.sh
+	@bash tests/syntax_probe.sh
 
 # Run the whole test corpus through our own compiler rather than CPython's:
 # apython is handed the .py and compiles it itself.  Ratchets against

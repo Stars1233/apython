@@ -21,6 +21,10 @@
 %include "compiler.inc"
 
 extern buf_reserve
+extern comp_msg_start
+extern comp_msg_cstr
+extern comp_msg_i64
+extern comp_error_span
 extern comp_error
 
 extern cc_table
@@ -859,11 +863,31 @@ DEF_FUNC lex_run, LR_FRAME
     jnz .string_ok
     mov r8, r15
     sub r8, [r14 + Lexer.line_start]    ; the column, before rdx is claimed
+    push r8
+    ; CPython names the line the scan gave up on, which for a triple-quoted
+    ; literal is not the line the token started on, and ends the span where it
+    ; begins rather than one character later.
+    call comp_msg_start
+    push rax                    ; the buffer, which is the message
+    mov rdi, rax
+    CSTRING rsi, "unterminated string literal (detected at line "
+    call comp_msg_cstr
+    mov rdi, rax
+    mov esi, [r14 + Lexer.lineno]
+    mov rax, [rbp - LR_STRNL]
+    add rsi, rax
+    call comp_msg_i64
+    mov rdi, rax
+    CSTRING rsi, ")"
+    call comp_msg_cstr
+    pop rdx                     ; the message
+    pop r8
     mov rdi, rbx
     lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "unterminated string literal"
     mov ecx, [r14 + Lexer.lineno]
-    call comp_error
+    mov r9d, ecx
+    mov r10d, r8d               ; end_offset == offset, as CPython's is
+    call comp_error_span
     jmp .fail
 .string_ok:
     mov rdi, rbx

@@ -393,6 +393,8 @@ DEF_FUNC sym_visit, SV_FRAME
     je .mark_generator
     cmp eax, AST_AWAIT
     je .mark_coroutine
+    cmp eax, AST_RETURN
+    je .check_return
     cmp eax, AST_FOR
     je .maybe_async
     cmp eax, AST_WITH
@@ -758,8 +760,66 @@ DEF_FUNC sym_visit, SV_FRAME
     mov rdi, rbx
     mov rsi, r12
     call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_FUNCTION
+    je .mg_ok
+    cmp dword [rax + Scope.kind], SCOPE_LAMBDA
+    je .mg_ok
+    ; A comprehension has a scope of its own here and CPython inlines it, so
+    ; a yield inside one is still the enclosing block's -- and outside a
+    ; function it is still an error, which the walk to the module finds.
+    cmp dword [rax + Scope.kind], SCOPE_COMP
+    je .mg_ok
+    CSTRING rdx, "'yield' outside function"
+    jmp .out_of_scope
+.mg_ok:
     or dword [rax + Scope.flags], SCF_GENERATOR
     jmp .children
+
+;; A `return`, a `yield` or an `await` outside a function is a SyntaxError,
+;; and the span CPython gives is the whole statement rather than its first
+;; token.  The three share everything but the wording.
+.check_return:
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_FUNCTION
+    je .children
+    cmp dword [rax + Scope.kind], SCOPE_LAMBDA
+    je .children
+    CSTRING rdx, "'return' outside function"
+.out_of_scope:
+    ; rdx = the message.  The node's own start, and its end from the span
+    ; table -- an end of -1 means it was never recorded, and then the span
+    ; falls back to the one character comp_error would have given.
+    push rdx
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov r8d, [rax + AstNode.col]
+    push rcx
+    push r8
+    mov rdi, rbx
+    mov esi, r13d
+    extern ast_span_at
+    call ast_span_at
+    pop r8
+    pop rcx
+    mov r9d, ecx
+    lea r10d, [r8d + 1]
+    test rax, rax
+    jz .oos_have_span
+    cmp dword [rax + AstSpan.end_lineno], -1
+    je .oos_have_span
+    mov r9d, [rax + AstSpan.end_lineno]
+    mov r10d, [rax + AstSpan.end_col]
+.oos_have_span:
+    pop rdx
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    extern comp_error_span
+    call comp_error_span
+    jmp .fail
 
 ;; `await` makes the enclosing block a coroutine, exactly as `yield` makes it a
 ;; generator.  A block that has both is an async generator; the two flags are
@@ -768,6 +828,15 @@ DEF_FUNC sym_visit, SV_FRAME
     mov rdi, rbx
     mov rsi, r12
     call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_FUNCTION
+    je .mc_ok
+    cmp dword [rax + Scope.kind], SCOPE_LAMBDA
+    je .mc_ok
+    cmp dword [rax + Scope.kind], SCOPE_COMP
+    je .mc_ok
+    CSTRING rdx, "'await' outside function"
+    jmp .out_of_scope
+.mc_ok:
     or dword [rax + Scope.flags], SCF_COROUTINE
     jmp .children
 

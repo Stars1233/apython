@@ -2338,7 +2338,7 @@ DEF_FUNC_LOCAL in_attr, IA_FRAME
     ret
 .need_name:
     mov rdi, rbx
-    CSTRING rsi, "expected an attribute name after '.'"
+    CSTRING rsi, "invalid syntax"
     call par_syntax_error
 .fail:
     xor eax, eax
