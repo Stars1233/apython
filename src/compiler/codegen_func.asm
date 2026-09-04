@@ -33,6 +33,7 @@ extern cg_unit_free
 extern cg_unit_init
 extern comp_error
 extern cg_unwind_finallys
+extern obj_incref
 extern comp_intern_cstr
 extern obj_decref
 extern str_from_cstr_heap
@@ -1183,6 +1184,19 @@ DEF_FUNC cg_s_functiondef, CSF_FRAME
     mov [rbp - CSF_LINE], rcx
     mov [r12 + CompUnit.curline], ecx
 
+    ; PEP 695: `def f[T]` is the def wrapped in a nullary function that binds
+    ; T and hands back the result.  cg_generic_wrap emits both the wrapper and
+    ; the call, and answers 0 when there are no brackets at all.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    xor ecx, ecx                        ; not a class
+    call cg_generic_wrap
+    cmp rax, -1
+    je .fail
+    test rax, rax
+    jnz .csf_bind
+
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
@@ -1191,6 +1205,7 @@ DEF_FUNC cg_s_functiondef, CSF_FRAME
     test eax, eax
     jz .fail
 
+.csf_bind:
     ; Bind the function to its name in the defining scope.
     mov rdi, rbx
     mov rsi, r13
@@ -1464,9 +1479,19 @@ DEF_FUNC cg_s_classdef, CSF_FRAME
     mov rbx, rdi
     mov r12, rsi
     mov r13, rdx
+    mov ecx, 1                          ; a class
+    call cg_generic_wrap
+    cmp rax, -1
+    je .fail
+    test rax, rax
+    jnz .csc_bind
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
     call cg_class_value
     test eax, eax
     jz .fail
+.csc_bind:
     mov rdi, rbx
     mov rsi, r13
     call ast_at
@@ -1820,3 +1845,736 @@ cg_doc_dunder:      db "__doc__", 0
 cg_lambda_name: db "<lambda>", 0
 
 ASM_INIT
+
+section .text
+
+;; ============================================================================
+;; cg_generic_wrap(Comp *c, CompUnit *u, uint32_t node, int is_class)
+;;   -> rax = 1 when it emitted a wrapper, 0 when there are no type parameters
+;;      (and -1 on error)
+;;
+;;     PUSH_NULL
+;;     LOAD_CONST <generic parameters of f>
+;;     MAKE_FUNCTION
+;;     CALL 0
+;;
+;; PEP 695 wraps a `def f[T]` or a `class C[T]` in a nullary function that
+;; binds the parameters and returns the thing it defined.  That is what gives
+;; the def a scope in which T exists -- so a default, an annotation or a base
+;; may name one -- and what sets __type_params__ without any statement doing
+;; it.  The parameters are ordinary locals of that wrapper, cells when
+;; something inside reaches them.
+;; ============================================================================
+CGW_LINE  equ 32
+CGW_SCOPE equ 40
+CGW_CODE  equ 48
+CGW_NAME  equ 56
+CGW_CLASS equ 64
+CGW_TP    equ 72
+CGW_UNIT2 equ 96 + CompUnit_size
+CGW_FRAME equ ((CGW_UNIT2 + 15) / 16) * 16 + 8      ; + 3 pushes = 16-aligned
+global cg_generic_wrap
+DEF_FUNC cg_generic_wrap, CGW_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov [rbp - CGW_CLASS], rcx
+
+    mov rdi, rbx
+    mov esi, r13d
+    extern ast_typeparams_at
+    call ast_typeparams_at
+    test eax, eax
+    jz .cgw_none
+    mov [rbp - CGW_TP], rax
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CGW_LINE], rcx
+    mov [r12 + CompUnit.curline], ecx
+
+    mov rdi, rbx
+    mov rsi, [rbp - CGW_TP]
+    call ast_at
+    movzx ecx, word [rax + AstNode.flags]
+    mov [rbp - CGW_SCOPE], rcx
+
+    ; The wrapper's name is CPython's: "<generic parameters of f>".  A def and
+    ; a class hold theirs as an object index; a type alias holds an AST_NAME
+    ; node, whose own .a is the index.
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    cmp byte [rax + AstNode.kind], AST_TYPEALIAS
+    jne .cgw_have_name_idx
+    mov rdi, rbx
+    call ast_at
+    mov esi, [rax + AstNode.a]
+.cgw_have_name_idx:
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdi, rax
+    call cg_generic_name
+    test rax, rax
+    jz .cgw_fail
+    mov [rbp - CGW_NAME], rax
+
+    mov rax, [rbp - CGW_SCOPE]
+    mov [rbx + Comp.cur_scope], eax
+    mov rdi, rbx
+    mov rsi, [rbp - CGW_SCOPE]
+    xor edx, edx
+    extern sym_finalize
+    call sym_finalize
+    test eax, eax
+    jz .cgw_free_name
+
+    mov rdi, rbx
+    lea rsi, [rbp - CGW_UNIT2]
+    mov rdx, r13
+    mov rcx, [rbp - CGW_NAME]
+    mov r8, [rbp - CGW_CLASS]
+    call cg_generic_body
+    mov [rbp - CGW_CODE], rax
+    test rax, rax
+    jz .cgw_free_name
+    mov rdi, rbx
+    mov rsi, rax
+    extern ast_obj
+    call ast_obj
+    mov rdi, [rbp - CGW_NAME]
+    call obj_decref
+
+    ; Back outside for the call that runs it.
+    mov eax, [r12 + CompUnit.scope]
+    mov [rbx + Comp.cur_scope], eax
+
+    mov rdi, r12
+    mov esi, OP_PUSH_NULL
+    xor edx, edx
+    mov rcx, [rbp - CGW_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CGW_SCOPE]
+    mov rcx, [rbp - CGW_LINE]
+    extern cg_closure_tuple
+    call cg_closure_tuple
+    cmp rax, -1
+    je .cgw_fail
+    mov [rbp - CGW_SCOPE], rax          ; the MAKE_FUNCTION flags
+
+    mov rdi, r12
+    mov rsi, [rbp - CGW_CODE]
+    call cg_const
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CGW_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_MAKE_FUNCTION
+    mov rdx, [rbp - CGW_SCOPE]
+    mov rcx, [rbp - CGW_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_CALL
+    xor edx, edx
+    mov rcx, [rbp - CGW_LINE]
+    call cg_emit
+
+    mov eax, 1
+    jmp .cgw_ret
+.cgw_none:
+    xor eax, eax
+    jmp .cgw_ret
+.cgw_free_name:
+    mov rdi, [rbp - CGW_NAME]
+    call obj_decref
+.cgw_fail:
+    mov rax, -1
+.cgw_ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_generic_wrap
+
+;; ============================================================================
+;; cg_generic_name(rdi = the def's or class's name str)
+;;   -> rax = "<generic parameters of NAME>", owned, or 0
+;; ============================================================================
+CGN_BUF   equ 208
+CGN_FRAME equ 216           ; + 1 push = 224, 16-aligned
+DEF_FUNC_LOCAL cg_generic_name, CGN_FRAME
+    push rbx
+    mov rbx, rdi
+    lea rdi, [rbp - CGN_BUF]
+    CSTRING rsi, "<generic parameters of "
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rbx + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, ">"
+    call rbt_append_cstr
+    lea rdi, [rbp - CGN_BUF]
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    pop rbx
+    leave
+    ret
+END_FUNC cg_generic_name
+
+;; ============================================================================
+;; cg_generic_body(Comp *c, CompUnit *u, uint32_t node, PyStrObject *name,
+;;                 int is_class) -> PyCodeObject*, or 0
+;;
+;;     RESUME 0
+;;     for each parameter:
+;;         LOAD_CONST 'T'
+;;         [LOAD_CONST <thunk>; MAKE_FUNCTION; CALL_INTRINSIC_2 2 or 3]
+;;         [CALL_INTRINSIC_1 7, 8 or 9]
+;;         COPY 1; <store T>
+;;     BUILD_TUPLE n
+;;     <the def or the class>
+;;     SWAP 2; CALL_INTRINSIC_2 4          a function takes its parameters
+;;     COPY 1; SWAP 3; SWAP 2; STORE_ATTR  a class is given them by name
+;;     RETURN_VALUE
+;;
+;; The two differ because CPython's class form threads the tuple through a
+;; cell so the class BODY can see it and pass Generic[T] as a base.  Nothing
+;; here consumes Generic, so the tuple is set on the finished class instead --
+;; which gives the same __type_params__ and leaves the MRO without the extra
+;; base.  DIVERGENCES.md records that.
+;; ============================================================================
+CGB_LINE  equ 32
+CGB_SCOPE equ 40
+CGB_CODE  equ 48
+CGB_NAME  equ 56
+CGB_CLASS equ 64
+CGB_TP    equ 72
+CGB_I     equ 80
+CGB_N     equ 88
+CGB_PARAM equ 96
+CGB_NAMEOBJ equ 104         ; the alias's own name, for INTRINSIC_TYPEALIAS
+CGB_FRAME equ 120           ; + 3 pushes = 144, 16-aligned
+DEF_FUNC_LOCAL cg_generic_body, CGB_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    mov [rbp - CGB_NAME], rcx
+    mov [rbp - CGB_CLASS], r8
+    mov qword [rbp - CGB_NAMEOBJ], 0
+    cmp r8, 2
+    jne .cgb_not_alias
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov [rbp - CGB_NAMEOBJ], rax
+.cgb_not_alias:
+
+    mov rdi, rbx
+    mov esi, r13d
+    call ast_typeparams_at
+    mov [rbp - CGB_TP], rax
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CGB_LINE], rcx
+
+    mov rdi, rbx
+    mov rsi, [rbp - CGB_TP]
+    call ast_at
+    movzx ecx, word [rax + AstNode.flags]
+    mov [rbp - CGB_SCOPE], rcx
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - CGB_N], rcx
+    mov qword [rbp - CGB_I], 0
+
+    mov rdi, r12
+    mov rsi, [rbx + Comp.filename]
+    mov rdx, [rbp - CGB_NAME]
+    extern cg_unit_init
+    call cg_unit_init
+    mov rax, [rbp - CGB_SCOPE]
+    mov [r12 + CompUnit.scope], eax
+    mov [r12 + CompUnit.comp], rbx
+    mov rax, [rbp - CGB_LINE]
+    mov [r12 + CompUnit.firstline], eax
+    mov [r12 + CompUnit.curline], eax
+    mov dword [r12 + CompUnit.flags], CO_OPTIMIZED | CO_NEWLOCALS | CO_NESTED
+
+    ; The same prologue every other nested unit gets: MAKE_CELL for each cell
+    ; this scope owns, COPY_FREE_VARS for the ones it borrows.  Without it a
+    ; STORE_DEREF writes through a slot that was never boxed.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CGB_SCOPE]
+    extern cg_cell_prologue
+    call cg_cell_prologue
+    test eax, eax
+    jz .cgb_fail
+
+    mov rdi, r12
+    mov esi, OP_RESUME
+    xor edx, edx
+    mov rcx, [rbp - CGB_LINE]
+    call cg_emit
+
+.cgb_loop:
+    mov rcx, [rbp - CGB_I]
+    cmp rcx, [rbp - CGB_N]
+    jge .cgb_built
+    mov rdi, rbx
+    mov rsi, [rbp - CGB_TP]
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CGB_I]
+    mov rdi, rbx
+    call ast_child
+    mov [rbp - CGB_PARAM], rax
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, rax
+    call cg_typeparam
+    test eax, eax
+    jz .cgb_fail
+    inc qword [rbp - CGB_I]
+    jmp .cgb_loop
+
+.cgb_built:
+    mov rdi, r12
+    mov esi, OP_BUILD_TUPLE
+    mov rdx, [rbp - CGB_N]
+    mov rcx, [rbp - CGB_LINE]
+    call cg_emit
+
+    ; The def, the class or the alias itself, emitted into this unit rather
+    ; than the one outside -- which is the whole point of the wrapper.
+    cmp qword [rbp - CGB_CLASS], 2
+    je .cgb_alias
+    cmp qword [rbp - CGB_CLASS], 0
+    jne .cgb_class
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    xor ecx, ecx                        ; not a lambda
+    call cg_function
+    test eax, eax
+    jz .cgb_fail
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov edx, 2
+    mov rcx, [rbp - CGB_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_CALL_INTRINSIC_2
+    mov edx, 4                          ; SET_FUNCTION_TYPE_PARAMS
+    mov rcx, [rbp - CGB_LINE]
+    call cg_emit
+    jmp .cgb_return
+
+.cgb_class:
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call cg_class_value
+    test eax, eax
+    jz .cgb_fail
+    ; [params, cls] -> [cls, params, cls] -> STORE_ATTR leaves [cls]
+    mov rdi, r12
+    mov esi, OP_COPY
+    mov edx, 1
+    mov rcx, [rbp - CGB_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov edx, 3
+    mov rcx, [rbp - CGB_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov edx, 2
+    mov rcx, [rbp - CGB_LINE]
+    call cg_emit
+    mov rdi, rbx
+    lea rsi, [rel cg_type_params_name]
+    call comp_intern_cstr
+    test rax, rax
+    jz .cgb_fail
+    mov rdi, r12
+    mov rsi, rax
+    call cg_name
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_STORE_ATTR
+    mov rcx, [rbp - CGB_LINE]
+    call cg_emit
+    jmp .cgb_return
+
+.cgb_alias:
+    ; [params] -> [name, params, valuefunc] -> BUILD_TUPLE 3.  The name goes
+    ; UNDER the tuple, so it is rotated in rather than pushed first: the
+    ; parameters had to be built before anything could name them.
+    mov rdi, r12
+    mov rsi, [rbp - CGB_NAMEOBJ]
+    INCREF rsi
+    call cg_const
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CGB_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov edx, 2
+    mov rcx, [rbp - CGB_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    extern cg_typealias_func
+    call cg_typealias_func
+    test eax, eax
+    jz .cgb_fail
+
+    mov rdi, r12
+    mov esi, OP_BUILD_TUPLE
+    mov edx, 3
+    mov rcx, [rbp - CGB_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_CALL_INTRINSIC_1
+    mov edx, 11                         ; INTRINSIC_TYPEALIAS
+    mov rcx, [rbp - CGB_LINE]
+    call cg_emit
+
+.cgb_return:
+    mov rdi, r12
+    mov esi, OP_RETURN_VALUE
+    xor edx, edx
+    mov rcx, [rbp - CGB_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    mov rsi, r12
+    extern asm_assemble
+    call asm_assemble
+    mov [rbp - CGB_CODE], rax
+    mov rdi, r12
+    extern cg_unit_free
+    call cg_unit_free
+    mov rax, [rbp - CGB_CODE]
+    jmp .cgb_ret
+.cgb_fail:
+    mov rdi, r12
+    call cg_unit_free
+    xor eax, eax
+.cgb_ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_generic_body
+
+;; ============================================================================
+;; cg_typeparam(Comp *c, CompUnit *u, uint32_t node) -> 1 ok, 0 error
+;;
+;;     LOAD_CONST 'T'
+;;     [LOAD_CONST <bound thunk>; MAKE_FUNCTION; CALL_INTRINSIC_2 2 or 3]
+;;     [CALL_INTRINSIC_1 7, 8 or 9]
+;;     COPY 1
+;;     <store T>
+;;
+;; One type parameter, left on the stack and also bound in the wrapper so the
+;; def below can name it.  A bound is a nullary function rather than an
+;; expression, so `def f[T: S, S]` may name a parameter declared after it --
+;; the same laziness a type alias's value has, and for the same reason.
+;; ============================================================================
+CTP_LINE  equ 32
+CTP_NAME  equ 40
+CTP_BOUND equ 48
+CTP_KIND  equ 56
+CTP_CODE  equ 64
+CTP_SCOPE equ 72            ; the bound thunk's scope, for its closure
+CTP_UNIT2 equ 96 + CompUnit_size
+CTP_FRAME equ ((CTP_UNIT2 + 15) / 16) * 16 + 8      ; + 3 pushes = 16-aligned
+DEF_FUNC_LOCAL cg_typeparam, CTP_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CTP_LINE], rcx
+    mov [r12 + CompUnit.curline], ecx
+    movzx ecx, byte [rax + AstNode.kind]
+    mov [rbp - CTP_KIND], rcx
+    movzx ecx, word [rax + AstNode.flags]
+    mov [rbp - CTP_SCOPE], rcx
+    mov ecx, [rax + AstNode.b]
+    mov [rbp - CTP_BOUND], rcx
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov [rbp - CTP_NAME], rax
+
+    ; LOAD_CONST 'T'
+    mov rdi, r12
+    mov rsi, [rbp - CTP_NAME]
+    INCREF rsi
+    call cg_const
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CTP_LINE]
+    call cg_emit
+
+    cmp qword [rbp - CTP_BOUND], 0
+    je .ctp_plain
+
+    ; The bound, as a nullary function compiled in its own scope.
+    mov rdi, rbx
+    lea rsi, [rbp - CTP_UNIT2]
+    mov rdx, r13
+    call cg_bound_thunk
+    mov [rbp - CTP_CODE], rax
+    test rax, rax
+    jz .ctp_fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj
+
+    ; A bound may name a parameter declared after it, which makes that
+    ; parameter a cell of the wrapper and the thunk a closure over it -- so
+    ; the closure tuple is built before the code constant, as MAKE_FUNCTION
+    ; wants, and the flags come from it.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CTP_SCOPE]
+    mov rcx, [rbp - CTP_LINE]
+    call cg_closure_tuple
+    cmp rax, -1
+    je .ctp_fail
+    push rax
+    mov rdi, r12
+    mov rsi, [rbp - CTP_CODE]
+    call cg_const
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CTP_LINE]
+    call cg_emit
+    pop rdx
+    mov rdi, r12
+    mov esi, OP_MAKE_FUNCTION
+    mov rcx, [rbp - CTP_LINE]
+    call cg_emit
+
+    ; A tuple literal is a constraint list; anything else is a bound.  That is
+    ; the same test CPython makes, and it is syntactic: `T: (int, str)` names
+    ; two alternatives, `T: Tuple[int, str]` names one bound.
+    mov rdi, rbx
+    mov rsi, [rbp - CTP_BOUND]
+    call ast_at
+    mov edx, 2                          ; TYPEVAR_WITH_BOUND
+    cmp byte [rax + AstNode.kind], AST_TUPLE
+    jne .ctp_have_sel
+    mov edx, 3                          ; TYPEVAR_WITH_CONSTRAINTS
+.ctp_have_sel:
+    mov rdi, r12
+    mov esi, OP_CALL_INTRINSIC_2
+    mov rcx, [rbp - CTP_LINE]
+    call cg_emit
+    jmp .ctp_bind
+
+.ctp_plain:
+    mov edx, 7                          ; INTRINSIC_TYPEVAR
+    cmp qword [rbp - CTP_KIND], AST_PARAMSPEC
+    jne .ctp_not_paramspec
+    mov edx, 8
+.ctp_not_paramspec:
+    cmp qword [rbp - CTP_KIND], AST_TYPEVARTUPLE
+    jne .ctp_have_one
+    mov edx, 9
+.ctp_have_one:
+    mov rdi, r12
+    mov esi, OP_CALL_INTRINSIC_1
+    mov rcx, [rbp - CTP_LINE]
+    call cg_emit
+
+.ctp_bind:
+    ; The parameter stays on the stack for BUILD_TUPLE and is also bound, so
+    ; the def below -- and any bound after it -- can name it.
+    mov rdi, r12
+    mov esi, OP_COPY
+    mov edx, 1
+    mov rcx, [rbp - CTP_LINE]
+    call cg_emit
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CTP_NAME]
+    mov ecx, CTX_STORE
+    xor r8d, r8d
+    call cg_nameop
+    test eax, eax
+    jz .ctp_fail
+    mov eax, 1
+    jmp .ctp_ret
+.ctp_fail:
+    xor eax, eax
+.ctp_ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_typeparam
+
+;; ============================================================================
+;; cg_bound_thunk(Comp *c, CompUnit *u, uint32_t node) -> PyCodeObject*, or 0
+;;
+;;     RESUME 0; <the bound>; RETURN_VALUE
+;;
+;; A nullary function named after the parameter, which is what a traceback
+;; through a bound that raises shows.
+;; ============================================================================
+CBT_LINE  equ 32
+CBT_SCOPE equ 40
+CBT_CODE  equ 48
+CBT_NAME  equ 56
+CBT_FRAME equ 72            ; + 3 pushes = 96, 16-aligned
+DEF_FUNC_LOCAL cg_bound_thunk, CBT_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CBT_LINE], rcx
+    movzx ecx, word [rax + AstNode.flags]
+    mov [rbp - CBT_SCOPE], rcx
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov [rbp - CBT_NAME], rax
+    mov rdi, rax
+    call obj_incref
+
+    mov rax, [rbp - CBT_SCOPE]
+    mov [rbx + Comp.cur_scope], eax
+    mov rdi, rbx
+    mov rsi, [rbp - CBT_SCOPE]
+    xor edx, edx
+    call sym_finalize
+    test eax, eax
+    jz .cbt_fail_name
+
+    mov rdi, r12
+    mov rsi, [rbx + Comp.filename]
+    mov rdx, [rbp - CBT_NAME]
+    call cg_unit_init
+    mov rax, [rbp - CBT_SCOPE]
+    mov [r12 + CompUnit.scope], eax
+    mov [r12 + CompUnit.comp], rbx
+    mov rax, [rbp - CBT_LINE]
+    mov [r12 + CompUnit.firstline], eax
+    mov [r12 + CompUnit.curline], eax
+    mov dword [r12 + CompUnit.flags], CO_OPTIMIZED | CO_NEWLOCALS | CO_NESTED
+
+    ; The same prologue every other nested unit gets: MAKE_CELL for each cell
+    ; this scope owns, COPY_FREE_VARS for the ones it borrows.  Without it a
+    ; STORE_DEREF writes through a slot that was never boxed.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CBT_SCOPE]
+    extern cg_cell_prologue
+    call cg_cell_prologue
+    test eax, eax
+    jz .cbt_fail
+
+    mov rdi, r12
+    mov esi, OP_RESUME
+    xor edx, edx
+    mov rcx, [rbp - CBT_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.b]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .cbt_fail
+
+    mov rdi, r12
+    mov esi, OP_RETURN_VALUE
+    xor edx, edx
+    mov rcx, [rbp - CBT_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    mov rsi, r12
+    call asm_assemble
+    mov [rbp - CBT_CODE], rax
+    mov rdi, r12
+    call cg_unit_free
+    mov rdi, [rbp - CBT_NAME]
+    call obj_decref
+    ; The enclosing scope is the wrapper's; the caller put it there.
+    mov rax, [rbp - CBT_CODE]
+    jmp .cbt_ret
+.cbt_fail:
+    mov rdi, r12
+    call cg_unit_free
+.cbt_fail_name:
+    mov rdi, [rbp - CBT_NAME]
+    call obj_decref
+    xor eax, eax
+.cbt_ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_bound_thunk
+
+section .rodata
+cg_type_params_name: db "__type_params__", 0
+section .text

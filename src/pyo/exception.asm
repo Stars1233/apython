@@ -18,6 +18,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern type_number_methods
 
 extern ap_malloc
 extern gc_alloc
@@ -3064,7 +3065,9 @@ exc_metatype:
     dq 0                    ; tp_iternext
     dq 0                    ; tp_init
     dq 0                    ; tp_new
-    dq 0                    ; tp_as_number
+    dq type_number_methods      ; tp_as_number -- `C | None` builds a
+                                ; union, and a class's `|` is its
+                                ; METATYPE's slot, not its own
     dq 0                    ; tp_as_sequence
     dq 0                    ; tp_as_mapping
     ; tp_base — `type`, because this IS a metatype and a metatype is a kind of

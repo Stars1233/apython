@@ -164,3 +164,21 @@ than against CPython, because CPython cannot serve as an oracle for them:
 
 Any *new* recorded-oracle test needs the same justification, or it risks
 blessing a divergence instead of catching it.
+
+## A generic class has no `Generic` base
+
+`class C[T]` gives C its `__type_params__`, and everything a program can ask
+about the parameters answers what CPython's does.  What it does not do is put
+`Generic[T]` in the class's bases: CPython threads the parameter tuple through
+a cell so the class BODY can see it and pass `Generic[T]` as an extra base, so
+`C.__mro__` there is `(C, Generic, object)` and here it is `(C, object)`.
+
+Nothing in this tree consumes `Generic` -- it exists in `lib/_typing.py` for
+the intrinsic that builds `Generic[T]`, and nothing subscripts it for a
+purpose -- so the cell and the extra base would be machinery with no reader.
+`typing.Protocol` and the parts of `typing` that walk a generic's MRO would
+need it; they are not here either.
+
+Changing it means the cell: a `.type_params` cellvar in the wrapper scope,
+`LOAD_CLOSURE` into the class body's own closure, and `INTRINSIC_SUBSCRIPT_GENERIC`
+between the body and the `__build_class__` call.

@@ -395,6 +395,8 @@ DEF_FUNC sym_visit, SV_FRAME
     je .mark_coroutine
     cmp eax, AST_RETURN
     je .check_return
+    cmp eax, AST_TYPEALIAS
+    je .typealias
     cmp eax, AST_FOR
     je .maybe_async
     cmp eax, AST_WITH
@@ -665,6 +667,19 @@ DEF_FUNC sym_visit, SV_FRAME
     mov rsi, r12
     mov ecx, DEF_LOCAL
     call sym_add
+
+    ; PEP 695: `def f[T](...)` puts the whole def inside a scope of its own
+    ; that binds T, so the defaults and the annotations can name it.  That
+    ; scope goes BETWEEN this one and the function's, and everything below
+    ; then treats it as the enclosing scope.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call sym_enter_typeparams
+    test eax, eax
+    jz .fail
+    mov r12, rax                        ; the wrapper, or the scope we had
+
     ; The defaults belong to the enclosing scope, so visit the parameter list
     ; here before descending.
     mov rdi, rbx
@@ -678,6 +693,34 @@ DEF_FUNC sym_visit, SV_FRAME
     mov rdx, r13
     mov ecx, SCOPE_FUNCTION
     call sym_enter_function
+    jmp .ret
+
+.typealias:
+    ; `type X = V`.  The NAME binds in this scope; the VALUE does not belong
+    ; to it at all -- PEP 695 evaluates it lazily, inside a function of its
+    ; own, which is what lets an alias name another defined further down and
+    ; lets `type Tree = int | list[Tree]` refer to itself.  So the value gets
+    ; a scope, and this one only learns the name.
+    mov rax, [rbp - SV_NPTR]
+    mov edx, [rax + AstNode.a]          ; the target, an AST_NAME
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    test eax, eax
+    jz .fail
+    ; `type Y[T] = ...` binds T in a scope of its own, between this one and
+    ; the value's -- which is what lets the value name it.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call sym_enter_typeparams
+    test eax, eax
+    jz .fail
+    mov r12, rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call sym_enter_typealias
     jmp .ret
 
 .comprehension:
@@ -720,6 +763,17 @@ DEF_FUNC sym_visit, SV_FRAME
     mov rsi, r12
     mov ecx, DEF_LOCAL
     call sym_add
+
+    ; `class C[T](Base[T])` binds T in a scope of its own, and the bases are
+    ; evaluated inside it -- which is the only way one may name a parameter.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call sym_enter_typeparams
+    test eax, eax
+    jz .fail
+    mov r12, rax
+
     ; The bases and keywords are evaluated in the enclosing scope.
     mov rdi, rbx
     mov rsi, r13
@@ -2487,6 +2541,178 @@ DEF_FUNC sym_note_super, SNS_FRAME
     leave
     ret
 END_FUNC sym_note_super
+
+;; ============================================================================
+;; sym_enter_typeparams(Comp *c, uint32_t parent, uint32_t node)
+;;   -> rax = the scope the def or class should be built in, or 0 on error
+;;
+;; PEP 695 wraps a `def f[T]` or a `class C[T]` in a hidden function scope
+;; that binds T, which is what lets a default, an annotation, a bound or a
+;; base name it.  When there are no brackets there is nothing to wrap, and the
+;; parent comes straight back -- which is the only path anything but a generic
+;; def takes.
+;;
+;; The wrapper's scope index goes on the AST_TYPEPARAMS node, the one place
+;; that exists exactly when a wrapper is needed.
+;; ============================================================================
+STP_PARENT equ 16
+STP_NODE   equ 24
+STP_TP     equ 32
+STP_SCOPE  equ 40
+STP_I      equ 48
+STP_N      equ 56
+STP_FRAME  equ 72           ; + 3 pushes = 96, 16-aligned
+DEF_FUNC sym_enter_typeparams, STP_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov [rbp - STP_PARENT], rsi
+    mov [rbp - STP_NODE], rdx
+
+    mov rdi, rbx
+    mov esi, edx
+    extern ast_typeparams_at
+    call ast_typeparams_at
+    test eax, eax
+    jz .stp_none
+    mov [rbp - STP_TP], rax
+
+    mov rdi, rbx
+    mov rsi, [rbp - STP_PARENT]
+    mov edx, SCOPE_FUNCTION
+    mov rcx, [rbp - STP_TP]
+    call sym_new
+    mov r12, rax
+    mov [rbp - STP_SCOPE], rax
+    mov rdi, rbx
+    mov rsi, [rbp - STP_TP]
+    call ast_at
+    mov [rax + AstNode.flags], r12w
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - STP_N], rcx
+    mov qword [rbp - STP_I], 0
+
+.stp_loop:
+    mov rcx, [rbp - STP_I]
+    cmp rcx, [rbp - STP_N]
+    jge .stp_done
+    mov rdi, rbx
+    mov rsi, [rbp - STP_TP]
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - STP_I]
+    mov rdi, rbx
+    call ast_child
+    mov r13, rax
+
+    ; The parameter's own name binds in the wrapper.
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, DEF_LOCAL
+    call sym_add
+
+    ; A bound or a constraint tuple is a lazy thunk of its own, compiled as a
+    ; nullary function inside the wrapper -- which is what lets `def f[T: S,
+    ; S]` name a parameter declared after it.  The thunk's scope index goes on
+    ; the parameter node.
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.b]
+    test edx, edx
+    jz .stp_next
+    mov rdi, rbx
+    mov rsi, r12
+    mov edx, SCOPE_FUNCTION
+    mov rcx, r13
+    call sym_new
+    push rax
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    pop rcx
+    mov [rax + AstNode.flags], cx
+    push rcx
+    mov edx, [rax + AstNode.b]
+    mov rdi, rbx
+    mov rsi, rcx
+    call sym_visit
+    pop rcx
+    test eax, eax
+    jz .stp_fail
+.stp_next:
+    inc qword [rbp - STP_I]
+    jmp .stp_loop
+
+.stp_done:
+    mov rax, [rbp - STP_SCOPE]
+    jmp .stp_ret
+.stp_none:
+    mov rax, [rbp - STP_PARENT]
+    jmp .stp_ret
+.stp_fail:
+    xor eax, eax
+.stp_ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC sym_enter_typeparams
+
+;; ============================================================================
+;; sym_enter_typealias(Comp *c, uint32_t parent, uint32_t node) -> 1 ok, 0
+;;
+;; The scope an alias's VALUE is evaluated in.  It is a function scope with no
+;; parameters: CPython gives it the alias's own name and calls it from
+;; TypeAliasType.__value__ the first time anything reads it.  A `type X[T]`
+;; puts its parameters in a scope above this one; that is not built here,
+;; because nothing generates one yet.
+;; ============================================================================
+SET_PARENT equ 16
+SET_NODE   equ 24
+SET_FRAME  equ 32           ; + 3 pushes = 56... one word more to land right
+DEF_FUNC sym_enter_typealias, 40            ; + 3 pushes = 64, 16-aligned
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov [rbp - SET_PARENT], rsi
+    mov r13, rdx
+    mov [rbp - SET_NODE], rdx
+
+    mov rdi, rbx
+    mov rsi, [rbp - SET_PARENT]
+    mov edx, SCOPE_FUNCTION
+    mov rcx, r13
+    call sym_new
+    mov r12, rax
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov [rax + AstNode.flags], r12w
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.b]          ; the value
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC sym_enter_typealias
 
 ;; ============================================================================
 ;; sym_enter_comp(Comp *c, uint32_t parent, uint32_t node) -> 1 ok, 0 error

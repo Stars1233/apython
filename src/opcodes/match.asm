@@ -145,15 +145,58 @@ DEF_FUNC_BARE op_call_intrinsic_1
     cmp ecx, 6
     je .ci1_list_to_tuple
 
+    ; PEP 695: 7 = TYPEVAR, 8 = PARAMSPEC, 9 = TYPEVARTUPLE,
+    ; 10 = SUBSCRIPT_GENERIC, 11 = TYPEALIAS.  Each takes what is on the stack
+    ; and answers the object lib/_typing.py builds from it.
+    cmp ecx, 7
+    je .ci1_typevar
+    cmp ecx, 8
+    je .ci1_paramspec
+    cmp ecx, 9
+    je .ci1_typevartuple
+    cmp ecx, 10
+    je .ci1_subscript_generic
+    cmp ecx, 11
+    je .ci1_typealias
+
     ; Anything else is a real program reaching an intrinsic this interpreter
-    ; does not have -- the PEP 695 family (7, 10, 11) is the live example, and
-    ; a CPython .pyc holding `type X = int` used to kill the process here.
-    ; A SystemError naming the selector is what CPython raises for an
-    ; intrinsic it cannot dispatch, and it leaves the program able to report
-    ; it.  TOS is left where it is: the unwinder empties the stack.
+    ; does not have.  A SystemError naming the selector is what CPython raises
+    ; for an intrinsic it cannot dispatch, and it leaves the program able to
+    ; report it.  TOS is left where it is: the unwinder empties the stack.
     CSTRING rdi, "CALL_INTRINSIC_1 selector"
     mov esi, ecx
     jmp ci_unsupported
+
+.ci1_typevar:
+    CSTRING rdi, "_typevar"
+    jmp .ci1_typing_one
+.ci1_paramspec:
+    CSTRING rdi, "_paramspec"
+    jmp .ci1_typing_one
+.ci1_typevartuple:
+    CSTRING rdi, "_typevartuple"
+    jmp .ci1_typing_one
+.ci1_subscript_generic:
+    CSTRING rdi, "_subscript_generic"
+    jmp .ci1_typing_one
+.ci1_typealias:
+    CSTRING rdi, "_typealias"
+.ci1_typing_one:
+    VPOP rsi
+    push rsi
+    xor edx, edx
+    call typing_call
+    pop rdi
+    test rax, rax
+    jz .ci1_typing_failed
+    push rax
+    DECREF_V rdi, rcx
+    pop rax
+    VPUSH rax
+    DISPATCH
+.ci1_typing_failed:
+    DECREF_V rdi, rcx
+    jmp eval_exception_unwind
 
 
 ;; INTRINSIC_IMPORT_STAR (arg=2): import * from module
@@ -1191,12 +1234,54 @@ DEF_FUNC_BARE op_call_intrinsic_2
     cmp ecx, 1
     je .ci2_prep_reraise
 
-    ; The rest are the PEP 695 constructors (2, 3, 4), which this interpreter
-    ; does not have.  Dropping one operand and keeping the other silently
-    ; produced a wrong TypeVar rather than an error; say so instead.
+    ; PEP 695: 2 = TYPEVAR_WITH_BOUND, 3 = TYPEVAR_WITH_CONSTRAINTS,
+    ; 4 = SET_FUNCTION_TYPE_PARAMS.  Both operands go through.
+    cmp ecx, 2
+    je .ci2_typevar_bound
+    cmp ecx, 3
+    je .ci2_typevar_constraints
+    cmp ecx, 4
+    je .ci2_set_type_params
+
     CSTRING rdi, "CALL_INTRINSIC_2 selector"
     mov esi, ecx
     jmp ci_unsupported
+
+.ci2_typevar_bound:
+    CSTRING rdi, "_typevar_with_bound"
+    jmp .ci2_typing_two
+.ci2_typevar_constraints:
+    CSTRING rdi, "_typevar_with_constraints"
+    jmp .ci2_typing_two
+.ci2_set_type_params:
+    CSTRING rdi, "_set_function_type_params"
+.ci2_typing_two:
+    VPOP rdx                    ; TOS  = the second argument
+    VPOP rsi                    ; TOS1 = the first
+    push rsi
+    push rdx
+    call typing_call
+    pop rdx
+    pop rsi
+    test rax, rax
+    jz .ci2_typing_failed
+    push rax
+    mov rdi, rsi
+    DECREF_V rdi, rcx
+    mov rdi, [rsp]
+    pop rax
+    push rax
+    mov rdi, rdx
+    DECREF_V rdi, rcx
+    pop rax
+    VPUSH rax
+    DISPATCH
+.ci2_typing_failed:
+    mov rdi, rsi
+    DECREF_V rdi, rcx
+    mov rdi, rdx
+    DECREF_V rdi, rcx
+    jmp eval_exception_unwind
 
 .ci2_prep_reraise:
     ; INTRINSIC_PREP_RERAISE_STAR: TOS = exc_list, TOS1 = orig_exc
@@ -1207,3 +1292,111 @@ DEF_FUNC_BARE op_call_intrinsic_2
     VPUSH_PTR rax
     DISPATCH
 END_FUNC op_call_intrinsic_2
+
+;; ============================================================================
+;; typing_call(rdi = a function name in _typing, rsi = a Value, rdx = a second
+;;             Value or 0 for a one-argument call)
+;;   -> rax = the result as a Value, or 0 with an exception pending
+;;
+;; PEP 695's intrinsics build TypeVar, ParamSpec, TypeVarTuple and
+;; TypeAliasType objects.  None of them needs to be assembly -- they are small
+;; objects with a repr, a few read-only attributes, and a value that is not
+;; evaluated until it is read -- so they are `lib/_typing.py`, and this is how
+;; the bytecode reaches it.  The split is _iocore/_io's and _socketcore/
+;; _socket's; the bridge is codec_via_python's, down to parking
+;; kw_names_pending across an import that runs whole module bodies.
+;;
+;; The module object is cached rather than each function: there are seven
+;; entry points, and a dict lookup per intrinsic is cheaper than seven cached
+;; pointers to keep in step.
+;; ============================================================================
+TYC_NAME  equ 8
+TYC_A     equ 16
+TYC_B     equ 24
+TYC_FN    equ 32
+TYC_ARGS  equ 56            ; two Values, the tp_call argument array
+TYC_FRAME equ 72            ; + 1 push = 80, 16-aligned
+DEF_FUNC_LOCAL typing_call, TYC_FRAME
+    push rbx
+    mov [rbp - TYC_NAME], rdi
+    mov [rbp - TYC_A], rsi
+    mov [rbp - TYC_B], rdx
+
+    mov rbx, [rel typing_module]
+    test rbx, rbx
+    jnz .tyc_have_module
+
+    extern kw_names_pending
+    mov rax, [rel kw_names_pending]
+    push rax
+    mov qword [rel kw_names_pending], 0
+
+    CSTRING rdi, "_typing"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    extern import_module
+    call import_module
+    mov rbx, rax
+    pop rdi
+    extern obj_decref
+    call obj_decref
+
+    pop rax
+    mov [rel kw_names_pending], rax
+    test rbx, rbx
+    jz .tyc_failed
+    mov [rel typing_module], rbx        ; the reference the module table holds
+
+.tyc_have_module:
+    mov rdi, [rbp - TYC_NAME]
+    call str_from_cstr_heap
+    test rax, rax
+    jz .tyc_failed
+    push rax
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    extern dict_get
+    call dict_get
+    mov [rbp - TYC_FN], rax
+    pop rdi
+    call obj_decref
+    cmp qword [rbp - TYC_FN], 0
+    je .tyc_missing
+
+    mov rax, [rbp - TYC_A]
+    mov [rbp - TYC_ARGS], rax
+    mov edx, 1
+    mov rax, [rbp - TYC_B]
+    test rax, rax
+    jz .tyc_one
+    mov [rbp - TYC_ARGS + 8], rax
+    mov edx, 2
+.tyc_one:
+    mov rdi, [rbp - TYC_FN]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz .tyc_missing
+    lea rsi, [rbp - TYC_ARGS]
+    call rax
+    pop rbx
+    leave
+    ret
+
+.tyc_missing:
+    RAISE exc_SystemError_type, "_typing is missing a PEP 695 constructor"
+.tyc_failed:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC typing_call
+
+section .data
+; The _typing module, imported on the first PEP 695 intrinsic and kept.
+typing_module: dq 0
+section .text

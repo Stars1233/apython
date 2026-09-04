@@ -15,6 +15,14 @@
 %include "value.inc"
 %include "opcodes.inc"
 %include "compiler.inc"
+extern sym_finalize
+extern ast_obj
+extern cg_closure_tuple
+extern obj_incref
+extern cg_unit_init
+extern asm_assemble
+extern cg_unit_free
+extern obj_decref
 
 extern ast_at
 extern ast_child
@@ -550,16 +558,33 @@ DEF_FUNC_LOCAL cg_s_assign, CST_FRAME
     ret
 END_FUNC cg_s_assign
 
-;; cg_s_typealias - `type X = V`, and `type X[T] = V`
+;; ============================================================================
+;; cg_s_typealias(Comp *c, CompUnit *u, uint32_t node) -> 1 ok, 0 error
 ;;
-;; Lowered to the assignment `X = V`, which is what the parser used to build
-;; directly.  CPython's TypeAlias is not an assignment: X becomes a
-;; TypeAliasType whose value is evaluated lazily, inside a scope where the
-;; type parameters are bound.  There is no such type here and nothing that
-;; would observe one, since annotations are never evaluated; the difference is
-;; in bugs.md, and the tree now says what was written either way.
-CTA_LINE  equ 8
-CTA_FRAME equ 24            ; + 3 pushes = 48, 16-byte aligned
+;;     LOAD_CONST 'X'
+;;     LOAD_CONST None                 the type parameters, when there are none
+;;     LOAD_CONST <code X>; MAKE_FUNCTION
+;;     BUILD_TUPLE 3
+;;     CALL_INTRINSIC_1 11             INTRINSIC_TYPEALIAS
+;;     <store X>
+;;
+;; The value is a nested function rather than an expression, and that is the
+;; whole point of the statement form: TypeAliasType.__value__ calls it the
+;; first time anything reads it, so an alias may name another defined further
+;; down and `type Tree = int | list[Tree]` can refer to itself.  It used to be
+;; lowered to the assignment `X = V`, which evaluated the value eagerly and
+;; left X as the value rather than as an alias.
+;;
+;; `type X[T] = V` still lowers its parameters away: CPython wraps the whole
+;; statement in a second scope that binds them as cells, and nothing here
+;; generates one.  The value function is built either way.
+;; ============================================================================
+CTA_LINE  equ 32
+CTA_SCOPE equ 40
+CTA_CODE  equ 48
+CTA_NAME  equ 56
+CTA_UNIT2 equ 80 + CompUnit_size
+CTA_FRAME equ ((CTA_UNIT2 + 15) / 16) * 16 + 8      ; + 3 pushes = 16-aligned
 DEF_FUNC_LOCAL cg_s_typealias, CTA_FRAME
     push rbx
     push r12
@@ -568,16 +593,121 @@ DEF_FUNC_LOCAL cg_s_typealias, CTA_FRAME
     mov r12, rsi
     mov r13, rdx
 
+    ; `type Y[T] = ...` goes through the same wrapper a generic def does,
+    ; which is what binds T for the value to name.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    mov ecx, 2                          ; an alias
+    extern cg_generic_wrap
+    call cg_generic_wrap
+    cmp rax, -1
+    je .cta_fail
+    test rax, rax
+    jnz .cta_store
+
     mov rdi, rbx
     mov rsi, r13
     call ast_at
-    mov edx, [rax + AstNode.b]          ; the value
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CTA_LINE], rcx
+    mov [r12 + CompUnit.curline], ecx
+    movzx ecx, word [rax + AstNode.flags]
+    mov [rbp - CTA_SCOPE], rcx
+
+    ; The alias's name, as a constant and as the value function's co_name.
     mov rdi, rbx
-    mov rsi, r12
-    call cg_expr
+    mov rsi, r13
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_at
+    mov esi, [rax + AstNode.a]          ; the AST_NAME's object index
+    mov rdi, rbx
+    call ast_obj_at
+    mov [rbp - CTA_NAME], rax
+
+    ; Settle the value scope's layout before emitting into it.
+    mov rax, [rbp - CTA_SCOPE]
+    mov [rbx + Comp.cur_scope], eax
+    mov rdi, rbx
+    mov rsi, [rbp - CTA_SCOPE]
+    xor edx, edx
+    call sym_finalize
     test eax, eax
     jz .cta_fail
 
+    mov rdi, rbx
+    lea rsi, [rbp - CTA_UNIT2]
+    mov rdx, r13
+    call cg_typealias_value
+    mov [rbp - CTA_CODE], rax
+    test rax, rax
+    jz .cta_fail
+    ; CompUnit.consts holds a BORROWED pointer, so the arena owns this one.
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj
+
+    ; Back in the enclosing scope for the three constants and the call.
+    mov eax, [r12 + CompUnit.scope]
+    mov [rbx + Comp.cur_scope], eax
+
+    mov rdi, r12
+    mov rsi, [rbp - CTA_NAME]
+    INCREF rsi
+    call cg_const
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CTA_LINE]
+    call cg_emit
+
+    extern none_singleton
+    lea rsi, [rel none_singleton]
+    INCREF rsi
+    mov rdi, r12
+    call cg_const
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CTA_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CTA_SCOPE]
+    mov rcx, [rbp - CTA_LINE]
+    call cg_closure_tuple
+    cmp rax, -1
+    je .cta_fail
+    push rax
+    mov rdi, r12
+    mov rsi, [rbp - CTA_CODE]
+    call cg_const
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CTA_LINE]
+    call cg_emit
+    pop rdx
+    mov rdi, r12
+    mov esi, OP_MAKE_FUNCTION
+    mov rcx, [rbp - CTA_LINE]
+    call cg_emit
+
+    mov rdi, r12
+    mov esi, OP_BUILD_TUPLE
+    mov edx, 3
+    mov rcx, [rbp - CTA_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_CALL_INTRINSIC_1
+    mov edx, 11                         ; INTRINSIC_TYPEALIAS
+    mov rcx, [rbp - CTA_LINE]
+    call cg_emit
+
+.cta_store:
     mov rdi, rbx
     mov rsi, r13
     call ast_at
@@ -595,6 +725,204 @@ DEF_FUNC_LOCAL cg_s_typealias, CTA_FRAME
     leave
     ret
 END_FUNC cg_s_typealias
+
+;; ============================================================================
+;; cg_typealias_func(Comp *c, CompUnit *u, uint32_t node) -> 1 ok, 0 error
+;;
+;;     LOAD_CONST <code X>; MAKE_FUNCTION [closure]
+;;
+;; The value function alone, for the generic form: the wrapper has already put
+;; the name and the parameter tuple on the stack, and this completes the three
+;; INTRINSIC_TYPEALIAS takes.  The closure matters here and not in the plain
+;; form -- the value names the parameters, which are the wrapper's cells.
+;; ============================================================================
+CTF_LINE  equ 32
+CTF_SCOPE equ 40
+CTF_CODE  equ 48
+CTF_UNIT2 equ 72 + CompUnit_size
+CTF_FRAME equ ((CTF_UNIT2 + 15) / 16) * 16 + 8      ; + 3 pushes = 16-aligned
+global cg_typealias_func
+DEF_FUNC cg_typealias_func, CTF_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CTF_LINE], rcx
+    movzx ecx, word [rax + AstNode.flags]
+    mov [rbp - CTF_SCOPE], rcx
+
+    mov rax, [rbp - CTF_SCOPE]
+    mov [rbx + Comp.cur_scope], eax
+    mov rdi, rbx
+    mov rsi, [rbp - CTF_SCOPE]
+    xor edx, edx
+    call sym_finalize
+    test eax, eax
+    jz .ctf_fail
+
+    mov rdi, rbx
+    lea rsi, [rbp - CTF_UNIT2]
+    mov rdx, r13
+    call cg_typealias_value
+    mov [rbp - CTF_CODE], rax
+    test rax, rax
+    jz .ctf_fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj
+
+    mov eax, [r12 + CompUnit.scope]
+    mov [rbx + Comp.cur_scope], eax
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CTF_SCOPE]
+    mov rcx, [rbp - CTF_LINE]
+    call cg_closure_tuple
+    cmp rax, -1
+    je .ctf_fail
+    push rax
+    mov rdi, r12
+    mov rsi, [rbp - CTF_CODE]
+    call cg_const
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CTF_LINE]
+    call cg_emit
+    pop rdx
+    mov rdi, r12
+    mov esi, OP_MAKE_FUNCTION
+    mov rcx, [rbp - CTF_LINE]
+    call cg_emit
+    mov eax, 1
+    jmp .ctf_ret
+.ctf_fail:
+    xor eax, eax
+.ctf_ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_typealias_func
+
+;; ============================================================================
+;; cg_typealias_value(Comp *c, CompUnit *u, uint32_t node) -> PyCodeObject*, 0
+;;
+;;     RESUME 0
+;;     <value>
+;;     RETURN_VALUE
+;;
+;; A nullary function whose co_name is the alias's own, which is what a
+;; traceback through a lazily evaluated alias shows.
+;; ============================================================================
+CTV_LINE  equ 32
+CTV_SCOPE equ 40
+CTV_CODE  equ 48
+CTV_NAME  equ 56
+CTV_FRAME equ 72            ; + 3 pushes = 96, 16-aligned
+DEF_FUNC_LOCAL cg_typealias_value, CTV_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CTV_LINE], rcx
+    movzx ecx, word [rax + AstNode.flags]
+    mov [rbp - CTV_SCOPE], rcx
+
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov [rbp - CTV_NAME], rax
+    mov rdi, rax
+    call obj_incref
+
+    mov rdi, r12
+    mov rsi, [rbx + Comp.filename]
+    mov rdx, [rbp - CTV_NAME]
+    call cg_unit_init
+    mov rax, [rbp - CTV_SCOPE]
+    mov [r12 + CompUnit.scope], eax
+    mov [r12 + CompUnit.comp], rbx
+    mov rax, [rbp - CTV_LINE]
+    mov [r12 + CompUnit.firstline], eax
+    mov [r12 + CompUnit.curline], eax
+    mov dword [r12 + CompUnit.flags], CO_OPTIMIZED | CO_NEWLOCALS | CO_NESTED
+
+    ; The same prologue every other nested unit gets: MAKE_CELL for each cell
+    ; this scope owns, COPY_FREE_VARS for the ones it borrows.  Without it a
+    ; STORE_DEREF writes through a slot that was never boxed.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CTV_SCOPE]
+    extern cg_cell_prologue
+    call cg_cell_prologue
+    test eax, eax
+    jz .ctv_fail
+
+    mov rdi, r12
+    mov esi, OP_RESUME
+    xor edx, edx
+    mov rcx, [rbp - CTV_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.b]          ; the value expression
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .ctv_fail
+
+    mov rdi, r12
+    mov esi, OP_RETURN_VALUE
+    xor edx, edx
+    mov rcx, [rbp - CTV_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    mov rsi, r12
+    call asm_assemble
+    mov [rbp - CTV_CODE], rax
+    mov rdi, r12
+    call cg_unit_free
+    mov rdi, [rbp - CTV_NAME]
+    call obj_decref
+    mov rax, [rbp - CTV_CODE]
+    jmp .ctv_ret
+.ctv_fail:
+    mov rdi, r12
+    call cg_unit_free
+    mov rdi, [rbp - CTV_NAME]
+    call obj_decref
+    xor eax, eax
+.ctv_ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_typealias_value
 
 ;; cg_s_augassign - `a += b`
 ;;

@@ -6,6 +6,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern str_type
 
 extern current_exception
 extern kw_names_pending
@@ -1839,15 +1840,74 @@ DEF_FUNC ga_emit_name, 8            ; 3 pushes, so rsp is 16-aligned
     ja .gen_repr
     test r12, r12
     jz .gen_repr
+    ; Any class, whichever metatype made it -- a class built by a metaclass of
+    ; its own is still a class, and comparing ob_type against the two
+    ; metatypes this tree ships answered no for it.
     mov rax, [r12 + PyObject.ob_type]
-    lea rcx, [rel type_type]
-    cmp rax, rcx
-    je .gen_typename
-    lea rcx, [rel user_type_metatype]
-    cmp rax, rcx
-    jne .gen_repr
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .gen_repr
 
 .gen_typename:
+    ; CPython qualifies a class with its module here as it does in a repr:
+    ; `__main__.C | None`, and `int | None` for anything in builtins.  The
+    ; module comes from the type's dict, and the name is what follows the
+    ; last dot of tp_name -- a builtin whose tp_name already carries its
+    ; module would otherwise be printed with it twice.
+    mov rdi, [r12 + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .gen_no_module
+    push rdi
+    CSTRING rdi, "__module__"
+    extern str_from_cstr
+    call str_from_cstr
+    pop rdi
+    test rax, rax
+    jz .gen_no_module
+    mov rsi, rax
+    extern dict_get
+    call dict_get
+    test rax, rax
+    jz .gen_no_module
+    V_TEST_PTR rax, rcx
+    ja .gen_no_module
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .gen_no_module
+    mov rcx, [rax + PyStrObject.ob_size]
+    test rcx, rcx
+    jz .gen_no_module
+    lea rdi, [rax + PyStrObject.data]
+    cmp rcx, 8
+    jne .gen_copy_module
+    push rax
+    push rcx
+    CSTRING rsi, "builtins"
+    call ap_strcmp
+    pop rcx
+    pop rax
+    test eax, eax
+    jz .gen_no_module           ; builtins is left off, as CPython leaves it
+    lea rdi, [rax + PyStrObject.data]
+.gen_copy_module:
+    xor edx, edx
+.gen_mod_loop:
+    cmp rdx, rcx
+    jge .gen_mod_done
+    cmp r13, 240
+    jae .gen_mod_done
+    mov al, [rdi + rdx]
+    mov [rbx + r13], al
+    inc r13
+    inc rdx
+    jmp .gen_mod_loop
+.gen_mod_done:
+    cmp r13, 240
+    jae .gen_no_module
+    mov byte [rbx + r13], '.'
+    inc r13
+
+.gen_no_module:
     mov rsi, [r12 + PyTypeObject.tp_name]
     mov rdi, rsi
     xor ecx, ecx
@@ -2103,19 +2163,30 @@ DEF_FUNC union_getattr, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 END_FUNC union_getattr
 
+;; ============================================================================
+;; union_operand_ok(rdi = a Value) -> eax = 1 when `|` may build a union of it
+;;
+;; CPython's is_unionable: a class, an existing union, a generic alias, or
+;; None.  Two of the four were missing.  A class built by a metaclass of its
+;; own is still a class, and asking whether its ob_type is one of the two
+;; metatypes this tree ships answers no for it -- TYPE_FLAG_METATYPE is the
+;; question that does not depend on which metatype made it.  And a generic
+;; alias is what every modern annotation is written with: `list[int] | None`
+;; is the shape, and `type Tree = int | list[Tree]` is the reason PEP 695's
+;; lazy evaluation exists.
+;; ============================================================================
 DEF_FUNC_BARE union_operand_ok
     V_TEST_PTR rdi, rax
     ja .uok_no
     test rdi, rdi
     jz .uok_no
     mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel type_type]
-    cmp rax, rcx
-    je .uok_yes
-    lea rcx, [rel user_type_metatype]
-    cmp rax, rcx
-    je .uok_yes
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jnz .uok_yes
     lea rcx, [rel union_type]
+    cmp rax, rcx
+    je .uok_yes
+    lea rcx, [rel generic_alias_type]
     cmp rax, rcx
     je .uok_yes
     extern none_singleton
@@ -2852,6 +2923,14 @@ union_number_methods:
     dq union_type_or                ; nb_or (+120)
     times 20 dq 0
 
+; A generic alias is unionable too, so `list[int] | None` needs the slot on
+; the LEFT operand's type as well as on the right's.
+align 8
+generic_alias_as_number:
+    times 15 dq 0
+    dq union_type_or                ; nb_or (+120)
+    times 20 dq 0
+
 align 8
 ga_name_str: db "types.GenericAlias", 0
 
@@ -3004,7 +3083,7 @@ generic_alias_type:
     dq 0                            ; tp_iternext
     dq 0                            ; tp_init
     dq 0                            ; tp_new
-    dq 0                            ; tp_as_number
+    dq generic_alias_as_number      ; tp_as_number
     dq 0                            ; tp_as_sequence
     dq 0                            ; tp_as_mapping
     dq 0                            ; tp_base

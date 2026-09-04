@@ -187,6 +187,10 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   `init`, which registers them all into each type's `tp_dict`.  These share
   basenames with `src/pyo/` on purpose: `methods/dict.asm` is dict's methods,
   `pyo/dict.asm` is dict itself
+- `lib/_typing.py` — the objects PEP 695's syntax builds: TypeVar, ParamSpec,
+  TypeVarTuple, TypeAliasType and Generic.  Reached from the
+  `CALL_INTRINSIC_1`/`_2` handlers in `src/opcodes/match.asm`, the same split
+  `_iocore`/`_io` and `_socketcore`/`_socket` use
 - `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func,
   class, iter, singleton, bytes, bytearray, memoryview, code).  `class.asm` is
   the metatype, the instance and attribute access; `instance_alloc.asm` is

@@ -293,6 +293,7 @@ test_operand_types
 test_ordereddict
 test_ordering_typeerror
 test_oserror
+test_pep695
 test_percent_and_ior
 test_percent_errors
 test_percent_format
@@ -414,6 +415,7 @@ test_unicode_numbers
 test_unicode_predicates
 test_unicode
 test_union_flatten
+test_union_generic_alias
 test_union_hash
 test_unpack_dict
 test_unpack_refcount

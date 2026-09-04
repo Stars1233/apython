@@ -1228,6 +1228,12 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     ; And say so in a bit, so that "is this object a class?" is one test
     ; rather than a comparison against the two metatypes we happen to ship.
     or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    ; `C | None` for a class C is the METATYPE's nb_or, so a metaclass of a
+    ; user's own has to carry type's numeric slots -- without them, only
+    ; classes made by the two metatypes this tree ships could form a union.
+    extern type_number_methods
+    lea rax, [rel type_number_methods]
+    mov [r12 + PyTypeObject.tp_as_number], rax
 .bc_not_metatype:
 
     ; If base is an exception type, inherit exception-compatible methods
@@ -2257,7 +2263,32 @@ BCL_OKWV  equ 72
     pop r8
     pop rsi
     test eax, eax
+    jnz .bc_base_ok
+
+    ; PEP 560: a base that is not a class may still say which classes it
+    ; stands for.  `class C[T]` puts Generic[T] here, and typing's Protocol
+    ; and every generic alias arrive the same way; each answers a tuple from
+    ; __mro_entries__, and CPython splices that in.  Only a one-element
+    ; answer is spliced here, which covers every use in this tree and in
+    ; typing -- a longer one would change the tuple's length under a loop
+    ; that has already sized it.
+    push rsi
+    push r8
+    push r9
+    mov rdi, rdx
+    mov rsi, [rbp - BCL_BASES]
+    call bc_mro_entry
+    pop r9
+    pop r8
+    pop rsi
+    test rax, rax
     jz .build_class_base_error
+    mov rdx, rax
+    mov [r8 + r9*8], rdx
+    inc r9
+    jmp .bc_base_copy
+
+.bc_base_ok:
     mov [r8 + r9*8], rdx
     push rsi
     push r8
@@ -2589,6 +2620,122 @@ BCL_OKWV  equ 72
 .build_class_base_error:
     RAISE exc_TypeError_type, "bases must be types"
 END_FUNC builtin___build_class__
+
+;; ============================================================================
+;; bc_mro_entry(rdi = a base that is not a class, rsi = the bases tuple)
+;;   -> rax = the single class it stands for, owned, or 0
+;;
+;; PEP 560's __mro_entries__.  `class C[T]` compiles to a base of Generic[T],
+;; which is not a type; the object answers a one-element tuple naming the
+;; class that should stand in its place.  A longer answer is refused rather
+;; than mis-spliced: the tuple this fills was sized before the call, and
+;; nothing in this tree or in typing returns more than one.
+;; ============================================================================
+BME_BASES equ 8
+BME_RES   equ 16
+BME_ARG   equ 24
+BME_FRAME equ 32            ; + 1 push = 40... one word more to land right
+DEF_FUNC_LOCAL bc_mro_entry, 40             ; + 1 push = 48, 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov [rbp - BME_BASES], rsi
+
+    V_TEST_PTR rbx, rax
+    ja .bme_no
+    test rbx, rbx
+    jz .bme_no
+
+    CSTRING rdi, "__mro_entries__"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    test rax, rax
+    jz .bme_no
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    pop rdi
+    push rax
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .bme_clear_and_no
+    mov [rbp - BME_RES], rax
+
+    mov rax, [rbp - BME_BASES]
+    mov [rbp - BME_ARG], rax
+    mov rdi, [rbp - BME_RES]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz .bme_release
+    lea rsi, [rbp - BME_ARG]
+    mov edx, 1
+    call rax
+    push rax
+    mov rdi, [rbp - BME_RES]
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .bme_no
+
+    ; A tuple of exactly one class, and nothing else.
+    mov rbx, rax
+    V_TEST_PTR rbx, rax
+    ja .bme_drop
+    lea rcx, [rel tuple_type]
+    cmp [rbx + PyObject.ob_type], rcx
+    jne .bme_drop
+    cmp qword [rbx + PyTupleObject.ob_size], 1
+    jne .bme_drop
+    mov rax, [rbx + PyTupleObject.ob_item]
+    mov rax, [rax]
+    push rax
+    mov rdi, rax
+    call obj_incref
+    mov rdi, rbx
+    call obj_decref
+    pop rax
+    push rax
+    mov rdi, rax
+    call type_check_is_class
+    pop rdx
+    test eax, eax
+    jz .bme_drop_one
+    mov rax, rdx
+    pop rbx
+    leave
+    ret
+
+.bme_drop_one:
+    mov rdi, rdx
+    call obj_decref
+    jmp .bme_no
+.bme_drop:
+    mov rdi, rbx
+    call obj_decref
+    jmp .bme_no
+.bme_release:
+    mov rdi, [rbp - BME_RES]
+    call obj_decref
+    jmp .bme_no
+.bme_clear_and_no:
+    ; A missing attribute is not an error here: the caller reports "bases must
+    ; be types", which is what CPython says for an object that has no
+    ; __mro_entries__ either.
+    extern current_exception
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .bme_no
+    mov qword [rel current_exception], 0
+    call obj_decref
+.bme_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC bc_mro_entry
 section .rodata
 bc_prepare_name: db "__prepare__", 0
 tsn_name: db "__set_name__", 0
