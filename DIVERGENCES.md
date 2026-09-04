@@ -121,10 +121,10 @@ than against CPython, because CPython cannot serve as an oracle for them:
 - `test_traceback_carets.py` and `test_unraisable.py` both let an exception
   be reported on stderr, and the report names the file: CPython absolutizes
   the path of a script it runs directly and a run from a `.pyc` does not.
-  `test_unraisable.py` also prints on both streams, which the two interpreters
-  interleave differently -- see the stdout buffering entry in `bugs.md`.
-  Every line of both was compared against CPython modulo those two before it
-  was recorded.
+  That is now the only difference between them and CPython.  stdout is
+  block-buffered here as it is there, and flushed before an uncaught
+  exception's report, so the two streams interleave the same way; every
+  other line of both matches CPython 3.12 byte for byte.
 
 Any *new* recorded-oracle test needs the same justification, or it risks
 blessing a divergence instead of catching it.
