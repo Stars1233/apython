@@ -658,16 +658,22 @@ END_FUNC bytes_method_endswith
 BC_SELF   equ 8
 BC_SUB    equ 16
 BC_ONE    equ 56            ; a one-byte bytes header, for an int needle
-BC_FRAME  equ 64            ; + 0 pushes = 64
+BC_ARGS   equ 64
+BC_NARGS  equ 72
+BC_FRAME  equ 80            ; + 0 pushes = 80
 
 DEF_FUNC bytes_method_count, BC_FRAME
     cmp rsi, 2
-    jne .bc_error
+    jl .bc_noargs
+    cmp rsi, 4
+    jg .bc_error
 
     mov rax, [rdi]              ; self
     mov rcx, [rdi + 8]         ; sub
     mov [rbp - BC_SELF], rax
     mov [rbp - BC_SUB], rcx
+    mov [rbp - BC_ARGS], rdi
+    mov [rbp - BC_NARGS], rsi
     BYTES_NEEDLE BC_SUB, BC_ONE
 
     ; Both sides through bytes_like_ptr_len: a bytearray argument was read
@@ -691,17 +697,72 @@ DEF_FUNC bytes_method_count, BC_FRAME
     mov [rbp - BC_SUB], rax
     mov r9, r10                 ; sub_len
 
-    ; If sub_len == 0: count = self_len + 1
+    ; count(sub[, start[, end]]), the same range arguments find() takes.
+    ; Without them `re.error` could not build its message: it counts newlines
+    ; up to the offending position, and the three-argument call raised a
+    ; TypeError inside the constructor, so a bad pattern reported a raw tuple
+    ; instead of "bad escape \q at position 0".
+    xor r11d, r11d              ; start = 0
+    cmp qword [rbp - BC_NARGS], 3
+    jl .bc_have_range
+    push r8
+    push r9
+    mov rdi, [rbp - BC_ARGS]
+    mov rdi, [rdi + 16]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    pop r9
+    pop r8
+    mov r11, rax
+    test r11, r11
+    jns .bc_start_ok
+    add r11, r8                 ; a negative start counts from the end
+    jns .bc_start_ok
+    xor r11d, r11d
+.bc_start_ok:
+    cmp r11, r8
+    ja .bc_zero
+    cmp qword [rbp - BC_NARGS], 4
+    jl .bc_have_range
+    push r8
+    push r9
+    push r11
+    sub rsp, 8
+    mov rdi, [rbp - BC_ARGS]
+    mov rdi, [rdi + 24]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    add rsp, 8
+    pop r11
+    pop r9
+    pop r8
+    test rax, rax
+    jns .bc_end_ok
+    add rax, r8
+    jns .bc_end_ok
+    xor eax, eax
+.bc_end_ok:
+    cmp rax, r8
+    jbe .bc_end_clamped
+    mov rax, r8
+.bc_end_clamped:
+    mov r8, rax                 ; the scan stops here
+    cmp r11, r8
+    ja .bc_zero
+
+.bc_have_range:
+    ; If sub_len == 0: one match at every position in the range, plus one
     test r9, r9
     jz .bc_empty_sub
 
-    ; If sub_len > self_len: count = 0
-    cmp r9, r8
+    ; If sub_len > what is left: count = 0
+    mov rax, r8
+    sub rax, r11
+    cmp r9, rax
     ja .bc_zero
 
     ; Scan
     xor r10d, r10d              ; count = 0
-    xor r11d, r11d              ; offset = 0
 
 .bc_loop:
     mov rax, r8
@@ -742,7 +803,9 @@ DEF_FUNC bytes_method_count, BC_FRAME
     ret
 
 .bc_empty_sub:
-    lea rax, [r8 + 1]
+    mov rax, r8
+    sub rax, r11
+    inc rax
     RET_TAG_SMALLINT
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -758,7 +821,9 @@ DEF_FUNC bytes_method_count, BC_FRAME
 .bc_type:
     RAISE exc_TypeError_type, "a bytes-like object is required"
 .bc_error:
-    RAISE exc_TypeError_type, "count() takes exactly one argument"
+    RAISE exc_TypeError_type, "count() takes at most 3 arguments"
+.bc_noargs:
+    RAISE exc_TypeError_type, "count() takes at least 1 argument (0 given)"
 END_FUNC bytes_method_count
 
 

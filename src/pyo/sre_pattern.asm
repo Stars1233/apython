@@ -1130,11 +1130,16 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov rdi, r14
     call obj_decref
 
-    ; Concat replacement with result.  str_concat itself rejects a non-str.
+    ; Concat replacement with result.  sre_concat rejects anything that is
+    ; not a string of the pattern's kind -- except None, which CPython's own
+    ; sub() treats as "replace with nothing" rather than as an error.
     pop rsi                    ; (alignment copy)
     pop rsi                    ; the replacement Value
     push rsi                   ; save for DECREF
     push rsi                   ; alignment
+    lea rax, [rel none_singleton]
+    cmp rsi, rax
+    je .sub_repl_none
     mov rdi, [rbp - SUB_RESULT]
     push rdi
     push rsi
@@ -1152,6 +1157,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     pop rax
     mov [rbp - SUB_RESULT], rax
 
+.sub_repl_none:
     ; DECREF replacement string from tp_call
     pop rax
     pop rax

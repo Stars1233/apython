@@ -1459,43 +1459,76 @@ END_FUNC sre_new_slice
 ;; ============================================================================
 SCC_A     equ 8
 SCC_B     equ 16
-SCC_FRAME equ 32            ; + 0 pushes = 32
+SCC_ADATA equ 24
+SCC_ALEN  equ 32
+SCC_BDATA equ 40
+SCC_BLEN  equ 48
+SCC_OUT   equ 56
+SCC_FRAME equ 64            ; + 0 pushes = 64
 global sre_concat
 DEF_FUNC sre_concat, SCC_FRAME
     test edx, edx
     jnz .scc_bytes
+    ; str_concat's message is the one `'a' + 5` gets; CPython reports this
+    ; from the join that assembles the result, and names the item.
+    mov [rbp - SCC_B], rsi
+    V_TEST_PTR rsi, rax
+    ja .scc_str_type_error
+    test rsi, rsi
+    jz .scc_str_type_error
+    mov rax, [rsi + PyObject.ob_type]
+    extern str_type
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .scc_str_type_error
     extern str_concat
     call str_concat
     leave
     ret
+.scc_str_type_error:
+    mov rsi, [rbp - SCC_B]
+    lea rdi, [rel scc_notstr]
+    extern raise_type_error_with_name
+    call raise_type_error_with_name     ; does not return
 .scc_bytes:
+    ; Both operands used to be dereferenced as bytes objects, and one of them
+    ; is whatever a callable replacement returned: `re.sub(b'a', lambda m: 5,
+    ; b'aba')` read PyBytesObject.ob_size off an int immediate.  The str arm
+    ; delegates its check to str_concat; this one makes its own -- and takes
+    ; the data through bytes_like_ptr_len, which is what lets a bytearray
+    ; replacement work, as it does in CPython.
     mov [rbp - SCC_A], rdi
     mov [rbp - SCC_B], rsi
-    mov rdi, [rdi + PyBytesObject.ob_size]
-    add rdi, [rsi + PyBytesObject.ob_size]
+    extern bytes_like_ptr_len
+    call bytes_like_ptr_len     ; rdi, the left
+    test ecx, ecx
+    jz .scc_type_error
+    mov [rbp - SCC_ADATA], rax
+    mov [rbp - SCC_ALEN], r10
+    mov rdi, [rbp - SCC_B]
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .scc_type_error
+    mov [rbp - SCC_BDATA], rax
+    mov [rbp - SCC_BLEN], r10
+
+    mov rdi, [rbp - SCC_ALEN]
+    add rdi, [rbp - SCC_BLEN]
     call bytes_new
     test rax, rax
     jz .scc_fail
-    push rax
-    sub rsp, 8
+    mov [rbp - SCC_OUT], rax
     lea rdi, [rax + PyBytesObject.data]
-    mov rcx, [rbp - SCC_A]
-    lea rsi, [rcx + PyBytesObject.data]
-    mov rdx, [rcx + PyBytesObject.ob_size]
+    mov rsi, [rbp - SCC_ADATA]
+    mov rdx, [rbp - SCC_ALEN]
     call ap_memcpy
-    add rsp, 8
-    pop rax
-    push rax
-    sub rsp, 8
-    mov rcx, [rbp - SCC_A]
+    mov rax, [rbp - SCC_OUT]
     lea rdi, [rax + PyBytesObject.data]
-    add rdi, [rcx + PyBytesObject.ob_size]
-    mov rcx, [rbp - SCC_B]
-    lea rsi, [rcx + PyBytesObject.data]
-    mov rdx, [rcx + PyBytesObject.ob_size]
+    add rdi, [rbp - SCC_ALEN]
+    mov rsi, [rbp - SCC_BDATA]
+    mov rdx, [rbp - SCC_BLEN]
     call ap_memcpy
-    add rsp, 8
-    pop rax
+    mov rax, [rbp - SCC_OUT]
     mov edx, TAG_PTR
     leave
     ret
@@ -1504,7 +1537,22 @@ DEF_FUNC sre_concat, SCC_FRAME
     xor edx, edx
     leave
     ret
+.scc_type_error:
+    ; CPython reports this from the join that builds the result, naming the
+    ; offending type: "sequence item 0: expected a bytes-like object, int
+    ; found".  The item index is not knowable here; the rest is.
+    mov rsi, [rbp - SCC_B]
+    lea rdi, [rel scc_notbytes]
+    extern raise_type_error_with_name
+    call raise_type_error_with_name     ; does not return
 END_FUNC sre_concat
+
+section .rodata
+scc_notbytes:
+    db "sequence item 0: expected a bytes-like object, ", 1, " found", 0
+scc_notstr:
+    db "sequence item 0: expected str instance, ", 1, " found", 0
+section .text
 
 ;; ============================================================================
 ;; sre_empty(edx = 1 for bytes) -> rax = "" or b"", edx = TAG_PTR
@@ -2799,11 +2847,21 @@ DEF_FUNC sre_match, SM_MFRAME
     cmp r13, [r15 + SRE_RepeatContext.last_pos]
     je .op_failure
 
-    ; One more iteration of the body, with last_pos saved across it.
+    ; One more iteration of the body, with last_pos AND the group marks saved
+    ; across it -- CPython's MIN_UNTIL_3 does LASTMARK_SAVE/LASTMARK_RESTORE,
+    ; and MAX_UNTIL here already does.  Without the marks a failed lazy
+    ; iteration left half-written ones behind, so a group could end up with
+    ; start > end: `(a)(a?)+?a+?` on 'aab' reported span(2) == (2, 1), and
+    ; group(2) then asked for a slice of length -1.
     mov [r15 + SRE_RepeatContext.count], rax
     mov rdx, [r15 + SRE_RepeatContext.last_pos]
     mov [rbp - SM_LASTPOS], rdx
     mov [r15 + SRE_RepeatContext.last_pos], r13
+
+    mov rdi, r12
+    call sre_save_marks
+    push rax
+    sub rsp, 8
 
     mov [r12 + SRE_State.str_pos], r13
     mov rdi, r12
@@ -2813,13 +2871,25 @@ DEF_FUNC sre_match, SM_MFRAME
                                    ; the SUCCESS it reaches the pattern's own
     call sre_match
     test eax, eax
-    jnz .miu_body_ok            ; see .mu_body_success: no write on this path
+    jnz .miu_body_matched       ; see .mu_body_success: no write on this path
+    add rsp, 8
+    pop rdi
+    push rdi
+    mov rsi, r12
+    call sre_restore_marks
+    pop rdi
+    call ap_free
     mov rdx, [rbp - SM_LASTPOS]
     mov [r15 + SRE_RepeatContext.last_pos], rdx
     mov rax, [rbp - SM_COUNT]
     dec rax
     mov [r15 + SRE_RepeatContext.count], rax
     jmp .op_failure
+.miu_body_matched:
+    add rsp, 8
+    pop rdi
+    call ap_free
+    jmp .miu_body_ok
 
 .miu_required_body:
     ; count < min: the body is not optional here, and no guard applies.

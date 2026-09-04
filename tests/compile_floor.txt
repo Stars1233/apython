@@ -308,6 +308,7 @@ test_relative_import
 test_re_module
 test_re_opcodes
 test_repr
+test_re_review
 test_review_regressions
 test_richcompare_bool
 test_richcompare_byname

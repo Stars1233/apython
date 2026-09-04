@@ -259,6 +259,45 @@ DEF_FUNC_BARE sre_match_bool
 END_FUNC sre_match_bool
 
 ;; ============================================================================
+;; match_data_base(rdi = the match) -> rax = the subject's data, rdx = its
+;; length in bytes
+;;
+;; str_begin is cached at match time and a MUTABLE subject moves: a bytearray
+;; that is cleared and refilled leaves the match pointing into freed memory.
+;; The subject itself is held by the match, so the pointer is taken from it
+;; here, every time.
+;; ============================================================================
+DEF_FUNC_LOCAL match_data_base
+    mov rax, [rdi + SRE_MatchObject.string]
+    test rax, rax
+    jz .mdb_cached
+    push rdi
+    sub rsp, 8
+    mov rdi, rax
+    extern bytes_like_ptr_len
+    call bytes_like_ptr_len     ; rax = data, r10 = length, ecx = 1
+    add rsp, 8
+    pop rdi
+    test ecx, ecx
+    jz .mdb_str
+    mov rdx, r10
+    leave
+    ret
+.mdb_str:
+    ; A str: its data is inline and cannot move.
+    mov rax, [rdi + SRE_MatchObject.string]
+    mov rdx, [rax + PyStrObject.ob_size]
+    add rax, PyStrObject.data
+    leave
+    ret
+.mdb_cached:
+    mov rax, [rdi + SRE_MatchObject.str_begin]
+    xor edx, edx
+    leave
+    ret
+END_FUNC match_data_base
+
+;; ============================================================================
 ;; Helper: get substring for a group index
 ;; sre_match_get_group_str(SRE_MatchObject* self, i64 group_idx) -> (rax, edx)
 ;; Returns string for the group, or (0, TAG_NONE) if unmatched.
@@ -309,8 +348,16 @@ DEF_FUNC sre_match_get_group_str
     jmp .group_scan_ascii
 
 .group_ascii:
-    ; ASCII mode: byte index = codepoint index
-    mov rdi, [rbx + SRE_MatchObject.str_begin]
+    ; ASCII mode: byte index = codepoint index.
+    ;
+    ; The data pointer is re-derived from the subject rather than taken from
+    ; the cached str_begin: a bytearray subject reallocates when it is
+    ; resized and the match outlives that, so `m = re.search(b'w(or)ld', ba)`
+    ; followed by `ba.clear()` read freed memory.  CPython answers from the
+    ; live buffer at the saved offsets, which is what this now does.
+    mov rdi, rbx
+    call match_data_base        ; rax = data, rdx = length
+    mov rdi, rax
     add rdi, r12
     mov rsi, r13
     sub rsi, r12
@@ -349,8 +396,15 @@ DEF_FUNC sre_match_get_group_str
     call sre_utf8_codepoint_to_byte
     ; rax = end byte offset, r14 = start byte offset
 
-    ; Create substring from byte offsets
-    mov rdi, [rbx + SRE_MatchObject.str_begin]
+    ; Create substring from byte offsets, from the live data -- see the note
+    ; at .group_ascii.
+    push rax
+    sub rsp, 8
+    mov rdi, rbx
+    call match_data_base
+    add rsp, 8
+    mov rdi, rax
+    pop rax
     add rdi, r14
     mov rsi, rax
     sub rsi, r14

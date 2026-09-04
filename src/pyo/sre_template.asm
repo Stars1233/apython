@@ -578,9 +578,15 @@ DEF_FUNC sre_template_parse, TP_FRAME
 .tp_gref_byname:
     ; A name that is not an identifier never had a chance of being a group:
     ; CPython says so rather than calling it unknown.
+    ; A byte at or above 0x80 is part of a non-ASCII identifier, which Python
+    ; allows: `(?P<\u00e9>a)` is a legal group name.  Only the ASCII range is
+    ; classified here; anything else is left to the groupindex lookup, which
+    ; is the real answer to whether the name exists.
     mov r8, [rbp - TP_NAMEP]
     add r8, [rbp - TP_DATA]
     movzx eax, byte [r8]
+    cmp al, 0x80
+    jae .tp_name_head_ok
     cmp al, '_'
     je .tp_name_head_ok
     mov cl, al
@@ -595,6 +601,8 @@ DEF_FUNC sre_template_parse, TP_FRAME
     cmp r11, [rbp - TP_NAMEL]
     jge .tp_name_ok
     movzx eax, byte [r8 + r11]
+    cmp al, 0x80
+    jae .tp_name_next
     cmp al, '_'
     je .tp_name_next
     cmp al, '0'
@@ -618,10 +626,14 @@ DEF_FUNC sre_template_parse, TP_FRAME
     test rdi, rdi
     jz .tp_unknown_name
     mov [rbp - TP_SCRATCH], rdi
+    ; The key is a str even for a bytes pattern: groupindex is built by
+    ; lib/re, whose names are str whatever the pattern is made of.  Slicing
+    ; it as bytes made `re.sub(b'(?P<a>a)', rb'[\g<a>]', b'a')` an
+    ; IndexError for a group that was right there.
     mov rdi, [rbp - TP_DATA]
     add rdi, r9
     mov rsi, r10
-    mov edx, [rbp - TP_ISBYTES]
+    xor edx, edx
     call sre_new_slice
     test rax, rax
     jz .tp_oom
@@ -661,6 +673,11 @@ DEF_FUNC sre_template_parse, TP_FRAME
 .tp_emit_cp:
     cmp eax, 0x80
     jb .tp_emit
+    ; In a BYTES template an escape is one raw byte, not a code point:
+    ; `re.sub(b'(a)', b'\\377', b'a')` is b'\xff', where UTF-8 encoding it
+    ; gave b'\xc3\xbf'.  The str template is the one that encodes.
+    cmp qword [rbp - TP_ISBYTES], 0
+    jne .tp_emit
     push rax
     shr eax, 6
     or  al, 0xC0
