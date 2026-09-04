@@ -744,9 +744,6 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; If attr came from type dict and is callable, create bound method
     cmp qword [rbp - LA_FROM_TYPE], 0
     je .la_simple_push
-    ; Can only create bound methods for pointer self (method_new INCREFs self)
-    cmp qword [rbp - LA_OBJ_TAG], TAG_PTR
-    jne .la_nonptr_type_attr
     mov rax, [rbp - LA_ATTR]
     cmp qword [rbp - LA_ATTR_TAG], TAG_PTR
     jne .la_simple_push         ; not a heap pointer
@@ -755,9 +752,16 @@ DEF_FUNC op_load_attr, LA_FRAME
     test rcx, rcx
     jz .la_simple_push
 
-    ; Create bound method(func=attr, self=obj)
+    ; Create bound method(func=attr, self=obj).  im_self is a Value, so an
+    ; immediate binds like anything else: `(7).bit_length` used to be the
+    ; unbound descriptor, which answered `<method 'bit_length' of 'int'
+    ; objects>` where CPython has a bound method, had no __self__, and --
+    ; once the arity bounds were registered -- refused its own zero-argument
+    ; call because the receiver it was never given did not count.
     mov rdi, [rbp - LA_ATTR]   ; func
     mov rsi, [rbp - LA_OBJ]    ; self
+    mov rdx, [rbp - LA_OBJ_TAG]
+    V_PACK rsi, rdx
     call method_new
     VPUSH_PTR rax
 
@@ -768,14 +772,6 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_OBJ]
     mov rsi, [rbp - LA_OBJ_TAG]
     DECREF_VAL rdi, rsi         ; a payload, not necessarily a pointer
-    jmp .la_done
-
-.la_nonptr_type_attr:
-    ; Non-pointer self (SmallInt, Float, etc.) — push attr without binding
-    ; No obj_decref needed for non-pointer self (no TAG_RC_BIT)
-    mov rax, [rbp - LA_ATTR]
-    mov rdx, [rbp - LA_ATTR_TAG]
-    VPUSH_VAL rax, rdx
     jmp .la_done
 
 .la_simple_push:

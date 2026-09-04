@@ -34,9 +34,9 @@ its `Lib/` (default `~/tmp/repo/cpython/Lib`).  It compares against
 `tests/stdlib_floor.txt` and fails when a module that used to import stops, or
 when a new one crashes.  Raise the floor with
 `bash tests/stdlib_probe.sh --record` in the commit that earns it.
-`make check` runs every `tests/test_*.py`, and reports more results than there
-are files because the async tests run against the default, poll and io_uring
-backends; `make check-cpython` runs everything under `tests/cpython/`, none of
+`make check` runs every `tests/test_*.py`, then `tests/pyc_probe.sh` and
+`tests/arity_probe.sh`; it reports more results than there are files because
+the async tests run against the default, poll and io_uring backends; `make check-cpython` runs everything under `tests/cpython/`, none of
 it tolerated as failing.
 
 `make check-source` and `make check-cpython-source` hand apython the `.py`

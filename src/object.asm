@@ -839,17 +839,24 @@ END_FUNC raise_wrapper_arity
 
 ;; ============================================================================
 ;; raise_builtin_arity(rdi = the PyBuiltinObject, rsi = the count given,
-;;                     rdx = the count wanted) -- neither counts self
+;;                     rdx = the count wanted, ecx = 0 too few / 1 too many)
+;;                     -- neither count includes self; does not return
 ;;
 ;; CPython's shapes, which differ by whether the method takes a fixed number:
 ;;   list.append() takes exactly one argument (2 given)
 ;;   str.upper() takes no arguments (1 given)
 ;;   hex() takes at most 2 arguments (3 given)
+;;   endswith() takes at least 1 argument (0 given)
 ;;   expected 0 arguments, got 1            <- a slot wrapper
+;;
+;; A method with a range says "at most" when it was given too many and "at
+;; least" when too few; reading the direction off min != max alone reported
+;; "at most 1 arguments (0 given)", which is both wrong and self-contradictory.
 ;; ============================================================================
 RBA_DESC  equ 8
 RBA_GOT   equ 16
 RBA_WANT  equ 24
+RBA_OVER  equ 32            ; 1 = too many, 0 = too few
 RBA_BUF   equ 240
 RBA_FRAME equ 240           ; + 0 pushes = 240, 16-aligned
 global raise_builtin_arity
@@ -857,6 +864,7 @@ DEF_FUNC raise_builtin_arity, RBA_FRAME
     mov [rbp - RBA_DESC], rdi
     mov [rbp - RBA_GOT], rsi
     mov [rbp - RBA_WANT], rdx
+    mov [rbp - RBA_OVER], rcx
 
     ; A slot wrapper has its own wording, and never names itself.
     cmp qword [rdi + PyBuiltinObject.func_kind], BUILTIN_KIND_WRAPPER
@@ -908,13 +916,22 @@ DEF_FUNC raise_builtin_arity, RBA_FRAME
     CSTRING rsi, "() takes no arguments ("
     jmp .rba_tail
 .rba_range:
+    cmp qword [rbp - RBA_OVER], 0
+    jne .rba_range_over
+    CSTRING rsi, "() takes at least "
+    jmp .rba_range_count
+.rba_range_over:
     CSTRING rsi, "() takes at most "
+.rba_range_count:
     call rbt_append_cstr
     mov rdi, rax
     mov rsi, [rbp - RBA_WANT]
     call msg_append_i64
     mov rdi, rax
     CSTRING rsi, " arguments ("
+    cmp qword [rbp - RBA_WANT], 1
+    jne .rba_tail
+    CSTRING rsi, " argument ("
 .rba_tail:
     call rbt_append_cstr
     mov rdi, rax

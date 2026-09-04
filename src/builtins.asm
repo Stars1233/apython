@@ -194,20 +194,6 @@ END_FUNC builtin_func_new_checked
 ;; ============================================================================
 DEF_FUNC_BARE builtin_func_call
     ; self = rdi, args = rsi, nargs = rdx
-    ; Check min_args (0 = no check)
-    mov rcx, [rdi + PyBuiltinObject.min_args]
-    test rcx, rcx
-    jz .bfc_no_min_check
-    cmp rdx, rcx
-    jl .bfc_too_few
-.bfc_no_min_check:
-    ; Check max_args (-1 = no check)
-    mov rcx, [rdi + PyBuiltinObject.max_args]
-    cmp rcx, -1
-    je .bfc_no_max_check
-    cmp rdx, rcx
-    jg .bfc_too_many
-.bfc_no_max_check:
     ; A method descriptor reached UNBOUND has to be handed one of its own
     ; type's instances.  Nothing checked, so `list.append((1, 2), 9)` read a
     ; tuple's header as a list's and tried to grow it -- "Fatal: out of
@@ -247,6 +233,31 @@ DEF_FUNC_BARE builtin_func_call
     pop rdi
 
 .bfc_receiver_ok:
+    ; The bounds are positional counts, and a keyword argument arrives in the
+    ; same array with its name in kw_names_pending -- so `(-2).to_bytes(2,
+    ; "big", signed=True)` is three by nargs and two by the signature.  Only
+    ; the positional ones are counted; a method that takes no keywords at all
+    ; still says so itself, as it did before any of this.
+    mov r8, rdx
+    mov rcx, [rel kw_names_pending]
+    test rcx, rcx
+    jz .bfc_have_npos
+    sub r8, [rcx + PyTupleObject.ob_size]
+.bfc_have_npos:
+    ; Check min_args (0 = no check)
+    mov rcx, [rdi + PyBuiltinObject.min_args]
+    test rcx, rcx
+    jz .bfc_no_min_check
+    cmp r8, rcx
+    jl .bfc_too_few
+.bfc_no_min_check:
+    ; Check max_args (-1 = no check)
+    mov rcx, [rdi + PyBuiltinObject.max_args]
+    cmp rcx, -1
+    je .bfc_no_max_check
+    cmp r8, rcx
+    jg .bfc_too_many
+.bfc_no_max_check:
     ; Extract func_ptr from self
     mov rax, [rdi + PyBuiltinObject.func_ptr]
     ; Call func_ptr(args, nargs) — builtins return a Value, so this stays a
@@ -269,14 +280,18 @@ DEF_FUNC_BARE builtin_func_call
     ; said "function takes at most N arguments" -- with a literal N, and
     ; naming neither the method nor what it was actually given.
     mov rcx, [rdi + PyBuiltinObject.min_args]
+    xor r9d, r9d                ; too few
     jmp .bfc_arity
 .bfc_too_many:
     mov rcx, [rdi + PyBuiltinObject.max_args]
+    mov r9d, 1
 .bfc_arity:
+    mov rdx, r8                 ; the positional count, which is what is wrong
     dec rcx                     ; self counts in neither number
     dec rdx
     mov rsi, rdx
     mov rdx, rcx
+    mov rcx, r9                 ; which way it was wrong
     extern raise_builtin_arity
     jmp raise_builtin_arity     ; rdi = the descriptor; does not return
 END_FUNC builtin_func_call

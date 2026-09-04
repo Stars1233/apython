@@ -512,13 +512,23 @@ BAF_NAME  equ 40
 BAF_I     equ 48
 BAF_N     equ 56
 BAF_BAD   equ 64            ; the element the message names, for a tuple
-BAF_FRAME equ 80            ; + 0 pushes = 80
+BAF_ARGS  equ 72
+BAF_NARGS equ 80
+BAF_FRAME equ 96            ; + 0 pushes = 96, 16-aligned
 
 DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
-    cmp rsi, 2
-    jne .baf_argerr
-    mov [rbp - BAF_END], rdx
+    ; The name goes in FIRST: .baf_argerr reads it, and storing it after the
+    ; count check meant every refusal composed its message from an
+    ; uninitialised frame slot -- whatever bytes happened to be there,
+    ; machine code included.
     mov [rbp - BAF_NAME], rcx
+    mov [rbp - BAF_ARGS], rdi
+    mov [rbp - BAF_NARGS], rsi
+    cmp rsi, 2
+    jl .baf_argerr
+    cmp rsi, 4
+    jg .baf_argerr
+    mov [rbp - BAF_END], rdx
     mov rax, [rdi + 8]
     mov [rbp - BAF_ARG], rax
 
@@ -530,6 +540,60 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     jz .baf_self_type
     mov [rbp - BAF_SELF], rax
     mov [rbp - BAF_SLEN], r10
+
+    ; startswith(affix[, start[, end]]), the same window find() takes: the
+    ; comparison runs against self[start:end], so a suffix is anchored at the
+    ; window's end rather than the string's.
+    xor r11d, r11d                          ; start = 0
+    mov r8, r10                             ; end = len
+    cmp qword [rbp - BAF_NARGS], 3
+    jl .baf_window
+    mov rdi, [rbp - BAF_ARGS]
+    mov rdi, [rdi + 16]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov r11, rax
+    mov r8, [rbp - BAF_SLEN]
+    test r11, r11
+    jns .baf_start_ok
+    add r11, r8                             ; a negative start counts from the end
+    jns .baf_start_ok
+    xor r11d, r11d
+.baf_start_ok:
+    cmp r11, r8
+    jbe .baf_start_clamped
+    mov r11, r8
+.baf_start_clamped:
+    cmp qword [rbp - BAF_NARGS], 4
+    jl .baf_window
+    push r11
+    mov rdi, [rbp - BAF_ARGS]
+    mov rdi, [rdi + 24]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    pop r11
+    mov rcx, [rbp - BAF_SLEN]
+    test rax, rax
+    jns .baf_end_ok
+    add rax, rcx
+    jns .baf_end_ok
+    xor eax, eax
+.baf_end_ok:
+    cmp rax, rcx
+    jbe .baf_end_clamped
+    mov rax, rcx
+.baf_end_clamped:
+    mov r8, rax
+.baf_window:
+    ; An end before the start is an empty window, not a negative length.
+    cmp r8, r11
+    jge .baf_window_len
+    mov r8, r11
+.baf_window_len:
+    sub r8, r11
+    add r11, [rbp - BAF_SELF]
+    mov [rbp - BAF_SELF], r11
+    mov [rbp - BAF_SLEN], r8
 
     mov rdi, [rbp - BAF_ARG]
     V_TEST_PTR rdi, rax
@@ -622,11 +686,24 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     call raise_exception
     ud2
 .baf_argerr:
+    ; CPython counts the affix and the window, not self: "takes at least 1
+    ; argument (0 given)" and "takes at most 3 arguments (4 given)".
     lea rdi, [rel bj_msgbuf]
     mov rsi, [rbp - BAF_NAME]
     call bj_append_cstr
     mov rdi, rax
-    lea rsi, [rel baf_msg_args]
+    lea rsi, [rel baf_msg_few]
+    cmp qword [rbp - BAF_NARGS], 2
+    jl .baf_argerr_text
+    lea rsi, [rel baf_msg_many]
+.baf_argerr_text:
+    call bj_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - BAF_NARGS]
+    dec rsi
+    call bj_append_i64
+    mov rdi, rax
+    lea rsi, [rel baf_msg_given]
     call bj_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel bj_msgbuf]
@@ -2353,7 +2430,9 @@ bj_name_int:     db "int", 0
 baf_name_startswith: db "startswith", 0
 baf_name_endswith:   db "endswith", 0
 baf_msg_first:   db " first arg must be bytes or a tuple of bytes, not ", 0
-baf_msg_args:    db "() takes exactly one argument", 0
+baf_msg_few:     db "() takes at least 1 argument (", 0
+baf_msg_many:    db "() takes at most 3 arguments (", 0
+baf_msg_given:   db " given)", 0
 baf_msg_item:    db "a bytes-like object is required, not ", 0
 
 section .bss

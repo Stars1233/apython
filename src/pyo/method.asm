@@ -166,15 +166,41 @@ DEF_FUNC_LOCAL method_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
 END_FUNC method_dealloc
 
 ;; ============================================================================
-;; method_getattr(PyMethodObject *self, PyObject *name) -> PyObject* or NULL
-;; Delegate attribute lookup to the underlying im_func.
-;; rdi = bound method, rsi = name
+;; method_getattr(rdi = bound method, rsi = name str) -> rax = Value, or NULL
+;;
+;; `__self__` and `__func__` are the bound method's own two attributes and
+;; are answered here; everything else is the underlying function's.  Both
+;; used to be delegated, and `"x".upper.__self__` reached func_getattr with a
+;; builtin in hand and came back with something that was not an object --
+;; a SIGSEGV on printing it.
 ;; ============================================================================
-DEF_FUNC method_getattr
-    ; Delegate to the underlying function's getattr
+MG_SELF  equ 8
+MG_NAME  equ 16
+MG_FRAME equ 32             ; + 0 pushes = 32, 16-aligned
+DEF_FUNC method_getattr, MG_FRAME
+    mov [rbp - MG_SELF], rdi
+    mov [rbp - MG_NAME], rsi
+
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__self__"
+    extern ap_strcmp
+    call ap_strcmp
+    test eax, eax
+    jz .mg_self
+
+    mov rdi, [rbp - MG_SELF]
     mov rdi, [rdi + PyMethodObject.im_func]
+    mov rsi, [rbp - MG_NAME]    ; the comparison above clobbered it
     extern func_getattr
     call func_getattr           ; already returns a Value
+    leave
+    ret
+
+.mg_self:
+    ; im_self is a Value, so an immediate receiver comes back as itself.
+    mov rax, [rbp - MG_SELF]
+    mov rax, [rax + PyMethodObject.im_self]
+    INCREF_V rax, rcx
     leave
     ret
 END_FUNC method_getattr
@@ -210,8 +236,12 @@ DEF_FUNC method_repr, MR_FRAME
     cmp rcx, rdx
     jne .mr_ordinary
     cmp qword [rax + PyBuiltinObject.func_kind], BUILTIN_KIND_ON_TYPE
-    jne .mr_ordinary
-    jmp mr_builtin_classmethod
+    je mr_builtin_classmethod
+    ; A builtin bound to an INSTANCE is CPython's third form:
+    ; "<built-in method upper of str object at 0x...>".  It read as
+    ; "<bound method upper of 'x'>" -- which is the form for a Python
+    ; function, and the wrong one for a method the interpreter supplies.
+    jmp mr_builtin_instance
 
 .mr_ordinary:
     CSTRING rsi, "<bound method "
@@ -325,10 +355,72 @@ DEF_FUNC method_repr, MR_FRAME
 ;; The classmethod form, out of line: it shares nothing with the loop above
 ;; but the frame it is written into.  rbp is method_repr's; rbx and r12 are
 ;; still pushed, and the epilogue below is method_repr's own.
+;; ============================================================================
+;; mr_builtin_instance -> rax = the str, an out-of-line arm of method_repr
+;;
+;; "<built-in method NAME of TYPE object at 0xADDR>", where TYPE is the
+;; receiver's type -- not the descriptor's owner, so a subclass's instance
+;; names the subclass, as CPython's does.
+;; ============================================================================
+mr_builtin_instance:
+    lea rdi, [rbp - MR_BUF]
+    CSTRING rsi, "<built-in method "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rcx, [rbp - MR_SELF]
+    mov rcx, [rcx + PyMethodObject.im_func]
+    mov rsi, [rcx + PyBuiltinObject.func_name]
+    test rsi, rsi
+    jz .mrbi_no_name
+    add rsi, PyStrObject.data
+    call rbt_append_cstr
+.mrbi_no_name:
+    mov rdi, rax
+    CSTRING rsi, " of "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rcx, [rbp - MR_SELF]
+    mov rcx, [rcx + PyMethodObject.im_self]
+    push rdi
+    mov rdi, rcx
+    extern value_type
+    call value_type
+    pop rdi
+    test rax, rax
+    jz .mrbi_no_type
+    mov rsi, [rax + PyTypeObject.tp_name]
+    call rbt_append_cstr
+.mrbi_no_type:
+    mov rdi, rax
+    CSTRING rsi, " object"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - MR_SELF]
+    mov rsi, [rsi + PyMethodObject.im_self]
+    ; The address CPython prints is what id() answers, and for an immediate
+    ; id() answers the NUMBER -- so a bound method of 7 must say 0x7 and not
+    ; the encoded word, whose high bits are the tag.
+    V_TEST_PTR rsi, rax
+    jbe .mrbi_addr
+    V_TO_I64 rsi
+.mrbi_addr:
+    call obj_repr_address       ; writes " at 0xADDR>"
+    lea rdi, [rbp - MR_BUF]
+    call str_from_cstr
+    pop r12
+    pop rbx
+    leave
+    ret
+
+;; ============================================================================
+;; mr_builtin_classmethod -> rax = the str, an out-of-line arm of method_repr
+;;
+;; "<built-in method NAME of type object at 0xADDR>", for a builtin bound to
+;; a CLASS rather than to an instance.
+;; ============================================================================
 mr_builtin_classmethod:
     lea rdi, [rbp - MR_BUF]
     CSTRING rsi, "<built-in method "
-    extern rbt_append_cstr
     call rbt_append_cstr
     mov rdi, rax
     mov rcx, [rbp - MR_SELF]
@@ -345,10 +437,8 @@ mr_builtin_classmethod:
     mov rdi, rax
     mov rsi, [rbp - MR_SELF]
     mov rsi, [rsi + PyMethodObject.im_self]
-    extern obj_repr_address
     call obj_repr_address       ; writes " at 0xADDR>"
     lea rdi, [rbp - MR_BUF]
-    extern str_from_cstr
     call str_from_cstr
     pop r12
     pop rbx
