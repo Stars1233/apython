@@ -159,6 +159,7 @@ test_exception_metatype
 test_exceptions
 test_exception_str_repr
 test_except_star
+test_exc_state_frame
 test_exec_builtins_value
 test_extended_slice
 test_fileio

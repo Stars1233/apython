@@ -1033,7 +1033,15 @@ struc PyFrame
                             ;      cannot carry it: non-zero there means the
                             ;      frame is SUSPENDED, and func_call reads it
                             ;      to decide whether to free the frame.
-    .localsplus:            ; +88: Value array (variable size)
+    .exc_state:     resq 1  ; +88: the exception this frame is HANDLING while
+                            ;      it is suspended, owned, or 0.  Only a
+                            ;      generator or coroutine ever has one: an
+                            ;      ordinary frame shares the caller's, which
+                            ;      is what handled_exception already holds,
+                            ;      and returns before anything else can run.
+                            ;      gen_send swaps it with the global around
+                            ;      each resume -- CPython's gi_exc_state.
+    .localsplus:            ; +96: Value array (variable size)
 endstruc
 
 FRAME_HEADER_SIZE equ PyFrame.localsplus

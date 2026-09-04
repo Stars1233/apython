@@ -184,55 +184,29 @@ DEF_FUNC gen_iternext
 
     ; Resume execution
     mov rdi, r12
-    ; A generator is its own execution context: an exception it is in the
-    ; middle of handling must not leak into the caller.  PUSH_EXC_INFO sets
-    ; current_exception and POP_EXCEPT clears it, but a generator that yields
-    ; from inside an except block never reaches its POP_EXCEPT -- so the
-    ; caller was left with the exception still pending, and the interpreter
-    ; reported it at exit.  Its own POP_EXCEPT restores from the value stack
-    ; when it resumes, so nothing is lost by putting the caller's back.
+    ; A generator is its own execution context, and two globals say so in
+    ; different ways.  handled_exception -- what an except block installed --
+    ; is swapped between the global and PyFrame.exc_state by eval_frame and
+    ; eval_return, so a generator suspended inside a handler carries that
+    ; state across the suspension and the caller gets its own back.  Nothing
+    ; here has to do anything about it.
     ;
-    ; The caller's exception is left IN PLACE for the duration rather than
-    ; cleared, because that is what a raise inside the body chains to.
-    ; Clearing it meant `next(it)` from inside an except block produced an
-    ; exception with __context__ of None -- and `await` goes through here
-    ; too, so every awaited exception lost its context the same way.
-    ; A raise is a NULL result, not a set current_exception: the async
-    ; generator's copy of this below already says so, and reading the global
-    ; instead cannot tell a raise from a body suspended inside an except.
+    ; current_exception is the other one: an exception in FLIGHT.  It is
+    ; cleared for the duration of the resume so that a NULL result means the
+    ; body raised and nothing else, and put back if it did not.
     push rax
     mov rax, [rel current_exception]
     push rax
-    test rax, rax
-    jz .gs_no_saved
-    INCREF rax                  ; ours for the duration of the resume
-.gs_no_saved:
+    mov qword [rel current_exception], 0
     call eval_frame
     pop rcx
     test rax, rax
     jz .gs_gen_raised
-    ; It did not raise.  Put the caller's back, dropping whatever the body
-    ; left set -- which is its own business and lives on its value stack.
-    cmp rcx, [rel current_exception]
-    je .gs_drop_extra
-    push rax
-    push rdx
-    mov rdi, [rel current_exception]
-    mov [rel current_exception], rcx    ; takes over our reference
-    test rdi, rdi
-    jz .gs_put_back
-    call obj_decref
-.gs_put_back:
-    pop rdx
-    pop rax
+    mov [rel current_exception], rcx    ; takes over the saved reference
     jmp .gs_exc_settled
-.gs_drop_extra:
-    ; Already in place; only the extra reference has to go.
 .gs_gen_raised:
-    ; The body raised.  The new exception is the result and already carries
-    ; the caller's as its __context__; raise_exception_obj released the
-    ; global's own reference to it, so ours is the one left to drop.
-    ;
+    ; The body raised, and that exception is the result.  The caller's, if it
+    ; had one, is ours to drop: the global gave up its reference above.
     test rcx, rcx
     jz .gs_exc_settled
     push rax
@@ -377,13 +351,16 @@ DEF_FUNC ags_iternext
 
     ; Resume execution of the async generator
     mov rdi, [r12 + PyGenObject.gi_frame]
-    ; A generator is its own execution context: an exception it is in the
-    ; middle of handling must not leak into the caller.  PUSH_EXC_INFO sets
-    ; current_exception and POP_EXCEPT clears it, but a generator that yields
-    ; from inside an except block never reaches its POP_EXCEPT -- so the
-    ; caller was left with the exception still pending, and the interpreter
-    ; reported it at exit.  Its own POP_EXCEPT restores from the value stack
-    ; when it resumes, so nothing is lost by putting the caller's back.
+    ; A generator is its own execution context, and two globals say so in
+    ; different ways.  handled_exception -- what an except block installed --
+    ; is swapped between the global and PyFrame.exc_state by eval_frame and
+    ; eval_return, so a generator suspended inside a handler carries that
+    ; state across the suspension and the caller gets its own back.  Nothing
+    ; here has to do anything about it.
+    ;
+    ; current_exception is the other one: an exception in FLIGHT.  It is
+    ; cleared for the duration of the resume so that a NULL result means the
+    ; body raised and nothing else, and put back if it did not.
     push rax
     mov rax, [rel current_exception]
     push rax
@@ -391,11 +368,7 @@ DEF_FUNC ags_iternext
     call eval_frame
     pop rcx
     ; An exception the async generator body raised is the result, and
-    ; restoring over it ended the iteration silently.  A RAISE is a NULL
-    ; result, though, not a set current_exception: the comment above is
-    ; explicit that a generator suspended inside an except block leaves that
-    ; global set on purpose, and reading it as "the body raised" made an
-    ; `async for` over such a generator re-raise what it had already caught.
+    ; restoring over it ended the iteration silently.
     test rax, rax
     jz .agsend_raised
     mov [rel current_exception], rcx
@@ -903,13 +876,16 @@ DEF_FUNC gen_send
 
     ; Resume execution
     mov rdi, r12
-    ; A generator is its own execution context: an exception it is in the
-    ; middle of handling must not leak into the caller.  PUSH_EXC_INFO sets
-    ; current_exception and POP_EXCEPT clears it, but a generator that yields
-    ; from inside an except block never reaches its POP_EXCEPT -- so the
-    ; caller was left with the exception still pending, and the interpreter
-    ; reported it at exit.  Its own POP_EXCEPT restores from the value stack
-    ; when it resumes, so nothing is lost by putting the caller's back.
+    ; A generator is its own execution context, and two globals say so in
+    ; different ways.  handled_exception -- what an except block installed --
+    ; is swapped between the global and PyFrame.exc_state by eval_frame and
+    ; eval_return, so a generator suspended inside a handler carries that
+    ; state across the suspension and the caller gets its own back.  Nothing
+    ; here has to do anything about it.
+    ;
+    ; current_exception is the other one: an exception in FLIGHT.  It is
+    ; cleared for the duration of the resume so that a NULL result means the
+    ; body raised and nothing else, and put back if it did not.
     push rax
     mov rax, [rel current_exception]
     push rax
@@ -920,14 +896,6 @@ DEF_FUNC gen_send
     ; be overwritten by the caller's saved one -- gen_iternext was fixed for
     ; this; the identical block here was not, so send() after a raise gave
     ; StopIteration instead of the exception.
-    ;
-    ; A raise is a NULL result, not a set current_exception.  Reading the
-    ; global cannot tell a raise from a body SUSPENDED inside an except
-    ; block, whose PUSH_EXC_INFO leaves the global set at the yield: the
-    ; caller's exception state was then dropped and the body's handled one
-    ; left in its place, so every await inside an except block leaked that
-    ; exception to the event loop, and the interpreter reported it at exit.
-    ; gen_iternext's copy of this block already says so.
     test rax, rax
     jz .gsend_raised
     mov [rel current_exception], rcx
@@ -1132,10 +1100,9 @@ DEF_FUNC gen_throw, GT_FRAME
     ret
 
 .gt_yielded:
-    ; The generator is suspended, perhaps inside an except block where
-    ; PUSH_EXC_INFO has set current_exception.  That state belongs to the
-    ; generator, not the caller: its own POP_EXCEPT restores it from the
-    ; value stack when it resumes.
+    ; The generator is suspended.  Whatever it is handling went into its
+    ; frame's exc_state on the way out of eval_return; what goes back here is
+    ; the caller's in-flight exception, put aside before the throw.
     mov rcx, [rbp - GT_SAVED_EXC]
     mov [rel current_exception], rcx
     mov rax, r12

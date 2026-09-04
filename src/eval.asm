@@ -251,9 +251,38 @@ DEF_FUNC eval_frame
     ; refcounting.
     mov rax, [rel kw_names_pending]
     push rax
-    sub rsp, 8                  ; keep the push list even: the ABI wants rsp
-                                ; 16-aligned at the calls this frame makes
     mov qword [rel kw_names_pending], 0
+
+    ; The exception being HANDLED is scoped to the frame as well, and takes
+    ; the slot the alignment pad used to occupy, so the push list stays even.
+    ;
+    ; Two rules, and both are CPython's.  A frame that is handling nothing
+    ; SHARES its caller's, which is what makes `except E: f()` give a raise
+    ; inside f a __context__ of E -- CPython reaches the same answer by
+    ; walking previous_item until it finds one that is set.  A frame that has
+    ; its own -- only a generator or coroutine can, by suspending inside an
+    ; except block -- swaps it in here and back out in eval_return.
+    ;
+    ; The references are moved rather than counted wherever a slot gives one
+    ; up in the same breath as another takes it, so nothing here can call
+    ; obj_decref: eval_return runs with this frame's globals half restored,
+    ; and a __del__ reached from there would run in a state that is neither
+    ; frame's.
+    mov rax, [r12 + PyFrame.exc_state]
+    test rax, rax
+    jnz .ef_own_exc
+    mov rax, [rel handled_exception]        ; shared: keep it, count it
+    test rax, rax
+    jz .ef_exc_pushed
+    INCREF rax
+    jmp .ef_exc_pushed
+.ef_own_exc:
+    mov qword [r12 + PyFrame.exc_state], 0
+    mov r11, [rel handled_exception]        ; ours to hold for the duration
+    mov [rel handled_exception], rax        ; the frame's reference moves in
+    mov rax, r11
+.ef_exc_pushed:
+    push rax
 
     ; Set globals for this frame
     mov [rel eval_co_consts], r14
@@ -348,7 +377,20 @@ DEF_FUNC_BARE eval_return
     dec qword [rel recursion_depth]
     ; Restore caller's eval globals (reverse of save order)
     ; Use rcx as scratch — rdx holds return tag (fat value protocol)
-    add rsp, 8                  ; the alignment pad pushed with kw_names
+
+    ; The handled exception, out of the global and into the frame; the
+    ; caller's, back.  Unconditional, and every reference moves: the frame
+    ; takes the global's, the global takes the one this frame's entry put on
+    ; the machine stack.  A generator picks its own up again on the next
+    ; resume, and for a frame that will not be resumed frame_free releases it.
+    ;
+    ; r12 is the frame on all three ways in -- a return, a yield, and the
+    ; unwinder's .no_handler, which restores it from eval_saved_r12 first.
+    pop rcx
+    mov r11, [rel handled_exception]
+    mov [r12 + PyFrame.exc_state], r11
+    mov [rel handled_exception], rcx
+
     pop rcx
     mov [rel kw_names_pending], rcx
     pop rcx
@@ -666,6 +708,43 @@ extern exc_RecursionError_type
     jmp eval_return
 END_FUNC eval_exception_unwind
 
+;; ============================================================================
+;; exc_install(rdi = the new exception, an OWNED reference) -> void
+;;
+;; Chains __context__ and makes it the exception in flight.  The one place
+;; that rule is written down; four call sites had a copy of it.
+;;
+;; The context is the exception being HANDLED, which is CPython's rule and is
+;; why handled_exception exists as a word of its own.  It stays installed --
+;; the `except` block it belongs to is still running and its POP_EXCEPT will
+;; take it down -- so it is borrowed here, and exc_set_context takes the
+;; reference it keeps.
+;;
+;; An exception already in flight is a different matter: it is being replaced,
+;; so it is both the context and ours to release.  That happens when something
+;; raises while the unwinder is running a finalizer, and nothing else.
+;; ============================================================================
+DEF_FUNC exc_install
+    push rdi
+    mov rsi, [rel current_exception]
+    test rsi, rsi
+    jnz .ei_replace
+    mov rsi, [rel handled_exception]
+    test rsi, rsi
+    jz .ei_done
+    call exc_set_context        ; rdi = new, rsi = context (borrowed)
+    jmp .ei_done
+.ei_replace:
+    call exc_set_context
+    mov rdi, [rel current_exception]
+    call obj_decref
+.ei_done:
+    pop rdi
+    mov [rel current_exception], rdi
+    leave
+    ret
+END_FUNC exc_install
+
 ; raise_exception(PyTypeObject *type, const char *msg_cstr)
 ; Create an exception from a C string and begin unwinding.
 ; Callable from opcode handlers - uses eval loop registers.
@@ -679,41 +758,16 @@ END_FUNC eval_exception_unwind
 ; unwinding to the interpreter frame that called it.
 DEF_FUNC set_exception
     call exc_from_cstr
-
-    push rax
-    mov rsi, [rel current_exception]
-    test rsi, rsi
-    jz .se_no_prev
     mov rdi, rax
-    call exc_set_context
-    mov rdi, [rel current_exception]
-    call obj_decref
-.se_no_prev:
-    pop rax
-    mov [rel current_exception], rax
+    call exc_install
     leave
     ret
 END_FUNC set_exception
 
 DEF_FUNC raise_exception
-
-    ; Create exception: exc_from_cstr(type, msg)
     call exc_from_cstr
-    ; rax = exception object
-
-    ; Store in current_exception, chaining onto whatever is being handled.
-    push rax
-    mov rsi, [rel current_exception]
-    test rsi, rsi
-    jz .no_prev
     mov rdi, rax
-    call exc_set_context
-    mov rdi, [rel current_exception]
-    call obj_decref
-.no_prev:
-    pop rax
-    mov [rel current_exception], rax
-
+    call exc_install
     leave
     jmp eval_exception_unwind
 END_FUNC raise_exception
@@ -722,22 +776,7 @@ END_FUNC raise_exception
 ; Set exception and begin unwinding.
 ; Takes ownership of the exc reference (caller must pass an owned ref).
 DEF_FUNC raise_exception_obj
-
-    ; Implicit chaining: current_exception is the exception being handled when
-    ; we are inside an `except` block (op_pop_except clears it on the way out),
-    ; which is exactly CPython's rule for __context__.
-    push rdi
-    mov rsi, [rel current_exception]
-    test rsi, rsi
-    jz .no_prev2
-    call exc_set_context
-
-    mov rdi, [rel current_exception]
-    call obj_decref
-.no_prev2:
-    pop rdi
-    mov [rel current_exception], rdi
-
+    call exc_install
     leave
     jmp eval_exception_unwind
 END_FUNC raise_exception_obj
@@ -1213,7 +1252,16 @@ opcode_table:
 ;; ============================================================================
 section .bss
 global current_exception
-current_exception: resq 1    ; PyExceptionObject* or NULL
+current_exception: resq 1    ; PyExceptionObject* or NULL -- IN FLIGHT
+;; The exception being HANDLED: what an `except` block installed and what
+;; POP_EXCEPT takes down again, CPython's tstate->exc_info->exc_value.  It is
+;; a separate word from current_exception because the two answer different
+;; questions -- "is one in flight?" and "which one is this code handling?" --
+;; and a single word could only ever answer one of them.  sys.exc_info() reads
+;; this, a bare `raise` re-raises it, and an implicit __context__ chains to it.
+;; A generator swaps its own in and out around each resume (PyFrame.exc_state).
+global handled_exception
+handled_exception: resq 1    ; PyExceptionObject* or NULL -- BEING HANDLED
 eval_base_rsp: resq 1        ; machine stack pointer at eval dispatch level
 global tb_suppress_frame
 tb_suppress_frame: resb 1    ; 1 = the next unwind adds no traceback entry

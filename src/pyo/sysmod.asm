@@ -1645,13 +1645,17 @@ END_FUNC sys_unraisablehook_func
 ;; ============================================================================
 ;; sys.exc_info() -> (type, value, traceback), or (None, None, None)
 ;;
-;; The exception being handled, which is what current_exception holds for the
-;; length of an except block.  threading reads it to report a thread that
-;; died, and CPython's contextlib and unittest both use it.
+;; The exception being handled -- handled_exception, which an except block
+;; installs and POP_EXCEPT takes down, and which a generator carries across a
+;; suspension in PyFrame.exc_state.  Reading current_exception here answered
+;; None from an `await` inside a handler onwards, and answered an exception
+;; that was merely in flight in places where nothing was being handled at all.
+;; threading reads it to report a thread that died, and CPython's contextlib
+;; and unittest both use it.
 ;; ============================================================================
 DEF_FUNC sys_exc_info_func
-    extern current_exception
-    mov rax, [rel current_exception]
+    extern handled_exception
+    mov rax, [rel handled_exception]
     test rax, rax
     jz .sei_none
     push rax

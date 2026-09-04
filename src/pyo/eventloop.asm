@@ -490,12 +490,15 @@ DEF_FUNC task_step, TS_FRAME
     cmp dword [rbx + AsyncTask.cancelling], 1
     je .ts_cancel
 
-    ; current_exception is also the exception being HANDLED: it stays set for
-    ; the length of an except block, so "is one pending afterwards?" cannot
-    ; mean "did the coroutine raise?".  A task that finished inside a live
-    ; handler -- `except E: return await f()` -- adopted that exception and
-    ; took its reference, and asyncio.run re-raised what the coroutine had
-    ; already caught.  Snapshot it and compare.
+    ; gen_send hands back a NULL tag for a return and for a raise alike, so
+    ; the exception is what tells them apart -- and the answer has to be "one
+    ; that was not already there".  It matters less than it did, now that
+    ; current_exception means only "in flight" and the exception an except
+    ; block is HANDLING lives in handled_exception: a task that finished
+    ; inside a live handler no longer adopts that exception and re-raises out
+    ; of asyncio.run what the coroutine had already caught.  The snapshot
+    ; stays because it costs two instructions and is the honest test: it is
+    ; still possible to reach here with something in flight.
     DUNDER_EXC_SAVE [rbp - TS_EXC]
 
     ; gen_send(coro, send_value, send_tag)
@@ -668,7 +671,7 @@ DEF_FUNC task_step, TS_FRAME
     test rax, rax
     jz .ts_finished_value
     cmp rax, [rbp - TS_EXC]
-    je .ts_finished_value       ; the one already being handled
+    je .ts_finished_value       ; the one that was already in flight
 
     ; Move it, owned: raise_exception_obj took over its caller's reference,
     ; so the global holds exactly one and the task takes it over in turn.
@@ -705,7 +708,7 @@ DEF_FUNC task_step, TS_FRAME
     jnz .ts_cancel_caught
     ; Exception propagated (NULL return) — grab from current_exception, and
     ; for the same reason as above, only if it is not the one that was
-    ; already being handled when the step began.
+    ; already in flight when the step began.
     mov rax, [rel current_exception]
     test rax, rax
     jz .ts_cancel_no_exc

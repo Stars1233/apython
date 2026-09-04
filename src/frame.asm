@@ -12,6 +12,7 @@
 extern ap_malloc
 extern ap_free
 extern obj_dealloc
+extern obj_decref
 
 ; Pool constants
 POOL_CLASS_0  equ 256
@@ -166,6 +167,11 @@ DEF_FUNC frame_new
     mov qword [r11 + PyFrame.instr_ptr], 0
     mov qword [r11 + PyFrame.stack_ptr], 0
     mov dword [r11 + PyFrame.return_offset], 0
+    ; The pool hands back memory it did not zero, so a field that is read
+    ; before it is written has to be initialised here.  exc_state is XDECREFd
+    ; by frame_free, which makes a stale pointer a free of someone else's
+    ; object rather than a wrong answer.
+    mov qword [r11 + PyFrame.exc_state], 0
 
     ; Set nlocalsplus and func_obj
     mov ecx, [rbx + PyCodeObject.co_nlocalsplus]
@@ -250,6 +256,15 @@ DEF_FUNC frame_free
     jmp .stack_loop
 
 .free_frame:
+    ; A generator abandoned inside an except block still holds the exception
+    ; it was handling, swapped out of the global by its last suspension.
+    mov rdi, [rbx + PyFrame.exc_state]
+    test rdi, rdi
+    jz .no_exc_state
+    mov qword [rbx + PyFrame.exc_state], 0
+    call obj_decref
+.no_exc_state:
+
     ; Calculate frame size for pool return
     mov rdi, [rbx + PyFrame.code]
     mov eax, [rdi + PyCodeObject.co_nlocalsplus]

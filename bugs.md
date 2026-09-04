@@ -14,16 +14,6 @@ reasoning that chose them and what changing one would cost.
 
 ## Correctness
 
-- **`__context__` is not set across `await SOME_TASK`** where the task
-  raised.  `current_exception` is a single global and task switching does not
-  follow it, so the exception the awaiting coroutine was handling is not what
-  is current when the task's exception is re-raised.  The other two shapes --
-  a generator resume, and `await` on a coroutine -- are right.
-
-  The fix is a per-task exception state.  It was tried, and it needs
-  `task_step` to tell a raise from a `return` out of an except block, which
-  it currently cannot: both leave `current_exception` set.
-
 - **`super` is not an object.**  The zero- and two-argument forms both work
   written as `super(...).attr`, because the compiler emits `LOAD_SUPER_ATTR`
   for exactly that shape and the opcode does the MRO walk itself.  What does
@@ -74,17 +64,6 @@ reasoning that chose them and what changing one would cost.
   shares `hypot`'s routine and so shares the note.  `fsum` is exact: it is
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
-
-- **`sys.exc_info()` is empty after an `await` inside an `except` block.**
-  CPython saves a frame's exception state and puts it back when the frame
-  resumes; the state here is one global plus a copy on the value stack that
-  POP_EXCEPT restores, and a suspended frame has no way to reinstate its own.
-  So inside `except E: ... await f(); sys.exc_info()` the handler's exception
-  reads as None from the await onwards -- `raise` with no argument in that
-  position, and any logging that reads exc_info(), see nothing.  Everything
-  either side of the await is right, and the exception is still caught: it is
-  only the *ambient* state that is lost.  Fixing it means the exception state
-  moving onto the frame.
 
 - **A gather cannot be nested inside another.**  `gather(gather(...))` is a
   TypeError here and `[[3]]` in CPython, where a gather returns a future and
