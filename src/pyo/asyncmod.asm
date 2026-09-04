@@ -18,6 +18,8 @@ extern obj_is_true
 extern task_type
 extern ap_malloc
 extern gc_alloc
+extern gc_track
+extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern obj_incref
@@ -34,6 +36,8 @@ extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_RuntimeError_type
 extern exc_TimeoutError_type
+extern exc_CancelledError_type
+extern task_type
 extern type_type
 extern task_new
 extern eventloop_init
@@ -189,12 +193,17 @@ DEF_FUNC asyncio_sleep_func
 .as_create:
     ; Allocate SleepAwaitable
     mov edi, SleepAwaitable_size
-    call ap_malloc
-    mov qword [rax + SleepAwaitable.ob_refcnt], 1
-    lea rcx, [rel sleep_awaitable_type]
-    mov [rax + SleepAwaitable.ob_type], rcx
+    lea rsi, [rel sleep_awaitable_type]
+    call gc_alloc               ; sets ob_refcnt and ob_type
     mov [rax + SleepAwaitable.delay_ns], rbx
     mov dword [rax + SleepAwaitable.yielded], 0
+    ; gc_track only once the fields are written, for the reason code_new
+    ; gives: tracking can trigger a collection, and a traverse would walk
+    ; whatever the allocator left behind.
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
 
     mov edx, TAG_PTR
     pop rbx
@@ -241,9 +250,17 @@ END_FUNC sleep_awaitable_iternext
 ;; sleep_awaitable_dealloc
 ;; ============================================================================
 DEF_FUNC_BARE sleep_awaitable_dealloc
-    ; Simple object with no refs to DECREF
-    jmp ap_free                ; tail call
+    ; No references to release, but it is GC-tracked, so it comes off the
+    ; collector's list before its memory goes back.
+    jmp gc_dealloc             ; tail call
 END_FUNC sleep_awaitable_dealloc
+
+;; A tracked type must have a traverse, even when there is nothing to visit:
+;; the collector calls it on every object it holds.
+DEF_FUNC_BARE sleep_awaitable_traverse
+    xor eax, eax
+    ret
+END_FUNC sleep_awaitable_traverse
 
 ;; ============================================================================
 ;; asyncio_wait_for_func(args, nargs) — asyncio.wait_for(coro, timeout)
@@ -308,10 +325,8 @@ DEF_FUNC asyncio_wait_for_func, WF_FRAME
 
     ; Allocate WaitForAwaitable
     mov edi, WaitForAwaitable_size
-    call ap_malloc
-    mov qword [rax + WaitForAwaitable.ob_refcnt], 1
-    lea rcx, [rel wait_for_awaitable_type]
-    mov [rax + WaitForAwaitable.ob_type], rcx
+    lea rsi, [rel wait_for_awaitable_type]
+    call gc_alloc               ; sets ob_refcnt and ob_type
     mov rcx, [rbp - WF_INNER]
     mov [rax + WaitForAwaitable.inner_task], rcx  ; transfer ownership (task_new ref)
     mov rcx, [rbp - WF_DELAY]
@@ -319,6 +334,10 @@ DEF_FUNC asyncio_wait_for_func, WF_FRAME
     mov dword [rax + WaitForAwaitable.state], 0
     mov qword [rax + WaitForAwaitable.unused], 0
     mov qword [rax + WaitForAwaitable.gi_return_value], 0
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
 
     mov edx, TAG_PTR
     pop rbx
@@ -443,8 +462,43 @@ DEF_FUNC_BARE wait_for_awaitable_dealloc
     V_UNPACK rax, rdx
     XDECREF_VAL rax, rdx
     pop rdi
-    jmp ap_free                ; tail call
+    jmp gc_dealloc             ; tail call
 END_FUNC wait_for_awaitable_dealloc
+
+;; wait_for_awaitable_traverse / _clear -- the inner task and the result.  A
+;; coroutine's frame can hold the wait_for that is holding its task, which is
+;; the cycle this makes visible.
+DEF_FUNC wait_for_awaitable_traverse
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    mov rdi, [rbx + WaitForAwaitable.inner_task]
+    VISIT_PTR rdi
+    mov rdi, [rbx + WaitForAwaitable.gi_return_value]
+    VISIT_V rdi, rsi
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC wait_for_awaitable_traverse
+
+DEF_FUNC wait_for_awaitable_clear
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + WaitForAwaitable.inner_task]
+    mov qword [rbx + WaitForAwaitable.inner_task], 0
+    test rdi, rdi
+    jz .wfac_value
+    call obj_decref
+.wfac_value:
+    mov rdi, [rbx + WaitForAwaitable.gi_return_value]
+    mov qword [rbx + WaitForAwaitable.gi_return_value], 0
+    XDECREF_V rdi, rcx
+    pop rbx
+    leave
+    ret
+END_FUNC wait_for_awaitable_clear
 
 ;; ============================================================================
 ;; asyncio_create_task(args, nargs) — asyncio.create_task(coro)
@@ -455,7 +509,16 @@ DEF_FUNC asyncio_create_task_func, ACT_FRAME
     cmp rsi, 1
     jne .act_error
 
+    ; A coroutine, and only a coroutine: CPython's create_task refuses
+    ; anything else with this wording, and task_new is broader than that
+    ; because gather needs it to be.
     mov rdi, [rdi]             ; coro = args[0]
+    push rdi
+    extern task_is_generator
+    call task_is_generator
+    pop rdi
+    test eax, eax
+    jz .act_not_coro
     call task_new
     test rax, rax
     jz .act_failed
@@ -476,6 +539,13 @@ DEF_FUNC asyncio_create_task_func, ACT_FRAME
     xor edx, edx
     leave
     ret
+
+.act_not_coro:
+    mov rsi, rdi                ; the value, before CSTRING takes rdi
+    CSTRING rdi, `a coroutine was expected, got \x01`
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
+    ud2
 
 .act_error:
     RAISE exc_TypeError_type, "asyncio.create_task() takes exactly 1 argument"
@@ -595,12 +665,10 @@ DEF_FUNC asyncio_gather_func, AGF_FRAME
 
 .ag_done:
     mov edi, GatherAwaitable_size
-    call ap_malloc
+    lea rsi, [rel gather_awaitable_type]
+    call gc_alloc               ; sets ob_refcnt and ob_type
     test rax, rax
     jz .ag_failed
-    mov qword [rax + GatherAwaitable.ob_refcnt], 1
-    lea rcx, [rel gather_awaitable_type]
-    mov [rax + GatherAwaitable.ob_type], rcx
     mov [rax + GatherAwaitable.ga_tasks], rbx   ; takes over the array
     mov rcx, [rbp - AGF_NARGS]
     mov [rax + GatherAwaitable.ga_count], rcx
@@ -609,6 +677,10 @@ DEF_FUNC asyncio_gather_func, AGF_FRAME
     mov [rax + GatherAwaitable.ga_flags], rcx
     mov qword [rax + GatherAwaitable.ga_state], 0
     mov qword [rax + GatherAwaitable.gi_return_value], 0
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
     mov edx, TAG_PTR
     pop rbx
     leave
@@ -760,6 +832,14 @@ DEF_FUNC gather_awaitable_iternext, GAI_FRAME
     jmp .gai_append
 
 .gai_propagate:
+    ; Set it and RETURN, rather than unwinding from here.  Both callers know
+    ; what a NULL with an exception pending means -- op_send propagates it
+    ; into the awaiting coroutine's frame, task_step records it on the task
+    ; -- and raise_exception_obj knows neither: it tail-jumps into the
+    ; unwinder, which resumes whatever eval frame is current.  From op_send
+    ; that is the right one; from task_step it is asyncio.run's caller, so a
+    ; nested gather's exception blew straight past the `except` that was
+    ; awaiting it.
     add rsp, 8
     pop rdi
     call obj_decref             ; the partial results list
@@ -768,7 +848,8 @@ DEF_FUNC gather_awaitable_iternext, GAI_FRAME
     mov rax, [rax + rcx*8]
     mov rdi, [rax + AsyncTask.exception]
     INCREF rdi
-    call raise_exception_obj
+    extern exc_install
+    call exc_install
     xor eax, eax
     leave
     ret
@@ -819,11 +900,84 @@ DEF_FUNC gather_awaitable_dealloc, GAD_FRAME
     mov qword [rbx + GatherAwaitable.gi_return_value], 0
     XDECREF_V rdi, rcx
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
     pop rbx
     leave
     ret
 END_FUNC gather_awaitable_dealloc
+
+;; gather_awaitable_traverse / _clear.  ga_tasks is a raw AsyncTask*[] rather
+;; than a list, and stays one -- but every entry is a counted reference, so
+;; the collector has to be shown them or the tasks look reachable from
+;; nowhere and a cycle through the gather never collects.
+GAT_I     equ 8
+GAT_FRAME equ 32            ; 8 used + 24 pad = 32, 16-aligned
+DEF_FUNC gather_awaitable_traverse, GAT_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14                    ; four pushes keep rsp 16-aligned at the call
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, [rbx + GatherAwaitable.ga_tasks]
+    test r13, r13
+    jz .gat_value
+    mov qword [rbp - GAT_I], 0
+.gat_loop:
+    mov rcx, [rbp - GAT_I]
+    cmp rcx, [rbx + GatherAwaitable.ga_count]
+    jge .gat_value
+    mov rdi, [r13 + rcx*8]
+    VISIT_PTR rdi
+    inc qword [rbp - GAT_I]
+    jmp .gat_loop
+.gat_value:
+    mov rdi, [rbx + GatherAwaitable.gi_return_value]
+    VISIT_V rdi, rsi
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC gather_awaitable_traverse
+
+GAC_I     equ 8
+GAC_FRAME equ 32            ; 8 used + 24 pad = 32, 16-aligned
+DEF_FUNC gather_awaitable_clear, GAC_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, [rbx + GatherAwaitable.ga_tasks]
+    test r12, r12
+    jz .gac_value
+    mov qword [rbp - GAC_I], 0
+.gac_loop:
+    mov rcx, [rbp - GAC_I]
+    cmp rcx, [rbx + GatherAwaitable.ga_count]
+    jge .gac_free
+    mov rdi, [r12 + rcx*8]
+    mov qword [r12 + rcx*8], 0
+    test rdi, rdi
+    jz .gac_next
+    call obj_decref
+.gac_next:
+    inc qword [rbp - GAC_I]
+    jmp .gac_loop
+.gac_free:
+    mov rdi, [rbx + GatherAwaitable.ga_tasks]
+    mov qword [rbx + GatherAwaitable.ga_tasks], 0
+    mov qword [rbx + GatherAwaitable.ga_count], 0
+    call ap_free
+.gac_value:
+    mov rdi, [rbx + GatherAwaitable.gi_return_value]
+    mov qword [rbx + GatherAwaitable.gi_return_value], 0
+    XDECREF_V rdi, rcx
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC gather_awaitable_clear
 
 ;; ============================================================================
 ;; asyncio_get_running_loop(args, nargs)
@@ -998,6 +1152,42 @@ DEF_FUNC asyncio_module_create
     pop rdi
     call obj_decref
 
+    ; asyncio.CancelledError and asyncio.TimeoutError.  They are what a caller
+    ; writes in an `except`, so a module that raises them and does not export
+    ; them cannot be used: `except asyncio.TimeoutError` was an AttributeError
+    ; on the line that was meant to catch the timeout.  In 3.12 both are the
+    ; builtins, aliased here exactly as CPython's asyncio aliases them.
+    lea rdi, [rel am_cancelled_error]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r12
+    mov rsi, rax
+    lea rdx, [rel exc_CancelledError_type]
+    call dict_set
+    pop rdi
+    call obj_decref
+
+    lea rdi, [rel am_timeout_error]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r12
+    mov rsi, rax
+    lea rdx, [rel exc_TimeoutError_type]
+    call dict_set
+    pop rdi
+    call obj_decref
+
+    ; asyncio.Task (type), so isinstance(t, asyncio.Task) can be asked
+    lea rdi, [rel am_task]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r12
+    mov rsi, rax
+    lea rdx, [rel task_type]
+    call dict_set
+    pop rdi
+    call obj_decref
+
     ; asyncio.StreamReader (type)
     lea rdi, [rel am_stream_reader]
     call str_from_cstr_heap
@@ -1056,6 +1246,9 @@ am_get_running_loop: db "get_running_loop", 0
 am_open_connection:  db "open_connection", 0
 am_start_server:     db "start_server", 0
 am_wait_for:         db "wait_for", 0
+am_cancelled_error:  db "CancelledError", 0
+am_timeout_error:    db "TimeoutError", 0
+am_task:             db "Task", 0
 am_stream_reader:    db "StreamReader", 0
 am_stream_writer:    db "StreamWriter", 0
 
@@ -1089,9 +1282,9 @@ sleep_awaitable_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
+    dq sleep_awaitable_traverse                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
@@ -1121,10 +1314,10 @@ gather_awaitable_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq gather_awaitable_traverse                        ; tp_traverse
+    dq gather_awaitable_clear                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
 
@@ -1153,9 +1346,9 @@ wait_for_awaitable_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq wait_for_awaitable_traverse                        ; tp_traverse
+    dq wait_for_awaitable_clear                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots

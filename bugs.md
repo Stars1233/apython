@@ -73,14 +73,6 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **A gather cannot be nested inside another.**  `gather(gather(...))` is a
-  TypeError here and `[[3]]` in CPython, where a gather returns a future and
-  ensure_future takes it as it stands.  The awaitable this returns is not a
-  task and cannot be stepped like one, so wrapping it means wrapping an
-  arbitrary awaitable in a coroutine, which is what `ensure_future` does and
-  what task_new has no way to do.  Until this commit it was a segfault
-  rather than a refusal.
-
 - **asyncio's stream layer is a stub, and now an unnecessary one.**
   `src/pyo/asyncio_streams.asm` predates any socket support: it hard-codes
   127.0.0.1 and ignores the `host` argument it is given, discards what
@@ -171,14 +163,6 @@ than lying — but they are ordinary Python that does not work:
   machinery reports CPython's counted wording wherever `min_args`/`max_args`
   were registered; what is left is per-method, and CPython's own wordings
   there are inconsistent between clinic-generated and hand-written methods.
-
-- **The three async awaitable types are not GC-tracked.**
-  `WaitForAwaitable`, `GatherAwaitable` and `SleepAwaitable` are ap_malloc'd
-  with no `TYPE_FLAG_HAVE_GC` and no traverse, so a cycle through one of them
-  never collects.  `Task` itself is tracked now, and the awaitables keep
-  counted references to the tasks they hold, which is conservative in the
-  safe direction: an untracked holder's reference is not subtracted, so a
-  task it holds looks reachable and is never freed early.
 
 - **`gc` has no `get_referrers`, `freeze`/`unfreeze` or `get_stats`.**
   `get_referrers` needs a reverse edge nothing records -- CPython finds it by
