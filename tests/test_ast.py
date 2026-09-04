@@ -14,6 +14,25 @@
 
 import ast
 
+
+def dump(tree, **kw):
+    """ast.dump, with one CPython patch-release difference normalised away.
+
+    A format spec that ends with a replacement field -- `f"{a:{w}}"` -- carried
+    a trailing `Constant(value='')` in its JoinedStr up to CPython 3.12.3, and
+    does not in 3.12.14; this parser reproduces the older shape, which is what
+    the local python3 answers.  An empty piece says nothing either way, so both
+    sides drop them and everything else is still compared exactly.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            node.values = [v for v in node.values
+                           if not (isinstance(v, ast.Constant)
+                                   and isinstance(v.value, str)
+                                   and v.value == "")]
+    return ast.dump(tree, **kw)
+
+
 EXPRS = [
     "1 + 2", "a - b * c", "x // y % z", "a ** b ** c", "a | b ^ c & d",
     "a << 1 >> 2", "a @ b", "-x", "+x", "~x", "not x", "a and b or c",
@@ -97,19 +116,19 @@ STMTS = [
 
 print("=== expressions, in eval mode ===")
 for src in EXPRS:
-    print(repr(src), ast.dump(ast.parse(src, mode="eval")))
+    print(repr(src), dump(ast.parse(src, mode="eval")))
 
 print("=== statements, in exec mode ===")
 for src in STMTS:
-    print(repr(src), ast.dump(ast.parse(src)))
+    print(repr(src), dump(ast.parse(src)))
 
 print("=== the same expressions as statements ===")
 for src in EXPRS[:20]:
-    print(repr(src), ast.dump(ast.parse(src)))
+    print(repr(src), dump(ast.parse(src)))
 
 print("=== compile() takes the flag positionally and by keyword ===")
-print(ast.dump(compile("1+1", "<s>", "eval", ast.PyCF_ONLY_AST)))
-print(ast.dump(compile("1+1", "<s>", "eval", flags=ast.PyCF_ONLY_AST)))
+print(dump(compile("1+1", "<s>", "eval", ast.PyCF_ONLY_AST)))
+print(dump(compile("1+1", "<s>", "eval", flags=ast.PyCF_ONLY_AST)))
 print(type(compile("1+1", "<s>", "eval")).__name__)
 print(ast.PyCF_ONLY_AST)
 
@@ -223,7 +242,7 @@ POS = [
     "x = [\n    1,\n]",
 ]
 for src in POS:
-    print(repr(src), ast.dump(ast.parse(src), include_attributes=True))
+    print(repr(src), dump(ast.parse(src), include_attributes=True))
 
 print("=== a syntax error is still a syntax error ===")
 for bad in ["1 +", "def", "class 1:", "for x in: pass"]:
@@ -236,7 +255,7 @@ for bad in ["1 +", "def", "class 1:", "for x in: pass"]:
         print(repr(bad), type(e).__name__)
 
 print("=== positions that a whole file finds and a snippet does not ===")
-# Every one of these came out of diffing ast.dump(include_attributes=True)
+# Every one of these came out of diffing dump(include_attributes=True)
 # over this repository's own lib/ and tests/ against CPython's.
 WHOLE = [
     'x = """a\nb"""\n',
@@ -263,7 +282,7 @@ WHOLE = [
     'with (open("f") as x, open("g") as y):\n    pass\n',
 ]
 for src in WHOLE:
-    print(repr(src), ast.dump(ast.parse(src), include_attributes=True))
+    print(repr(src), dump(ast.parse(src), include_attributes=True))
 
 # The context and operator nodes are shared, one instance each, as CPython's
 # parser shares them.
@@ -285,8 +304,8 @@ print("=== mode='single' has a root of its own ===")
 for src in ["x = 1", "1 + 2", "def f(): pass\n", "if x:\n    pass\n",
             "x = 1; y = 2", "class C: pass\n", "while 0: pass\n"]:
     tree = ast.parse(src, mode="single")
-    print(repr(src), type(tree).__name__, ast.dump(tree))
-print(ast.dump(compile("x = 1", "<s>", "single", ast.PyCF_ONLY_AST),
+    print(repr(src), type(tree).__name__, dump(tree))
+print(dump(compile("x = 1", "<s>", "single", ast.PyCF_ONLY_AST),
                include_attributes=True))
 print(type(ast.parse("x = 1")).__name__,
       type(ast.parse("x", mode="eval")).__name__)
@@ -318,7 +337,7 @@ print("=== PEP 695, with every position ===")
 # positions: a TypeVarTuple starts at its `*`, not at the name.
 for src in ["def f[T, *Ts, **P](x): pass", "class C[T: (int, str)]: pass",
             "type X[T: int] = list[T]", "type X = int"]:
-    print(repr(src), ast.dump(ast.parse(src), include_attributes=True))
+    print(repr(src), dump(ast.parse(src), include_attributes=True))
 
 for src in ["def f[](): pass", "def f[1](): pass", "class C[T,,]: pass",
             "type X[] = int", "def f[T:](): pass", "def f[*](): pass",
@@ -333,4 +352,4 @@ for src in ["def f[](): pass", "def f[1](): pass", "class C[T,,]: pass",
 # A trailing comma is allowed, and `type` stays a soft keyword.
 for src in ["def f[T,](): pass", "class C[*Ts,]: pass", "type X[T,] = T",
             "type = 1", "type(x)", "type.mro", "x = type"]:
-    print(repr(src), ast.dump(ast.parse(src)))
+    print(repr(src), dump(ast.parse(src)))

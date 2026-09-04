@@ -90,9 +90,20 @@ class BadEq:
 
 t("bad __eq__", lambda: list(iter(lambda: BadEq(), 0)))
 
-# Argument checking.
-t("not callable", lambda: iter(5, 0))
-t("none callable", lambda: iter(None, 0))
+# Argument checking.  The wording of the "must be callable" message is not
+# stable across CPython patch releases -- 3.12.3 says
+# "iter(object, sentinel): object must be callable" and 3.12.14 says
+# "iter(v, w): v must be callable" -- so these two check the type and the
+# gist rather than the text.
+def tc(label, fn):
+    try:
+        print(label, "=>", repr(fn()))
+    except BaseException as e:
+        print(label, "!!", type(e).__name__, "must be callable" in str(e))
+
+
+tc("not callable", lambda: iter(5, 0))
+tc("none callable", lambda: iter(None, 0))
 t("three args", lambda: iter(1, 2, 3))
 t("no args", lambda: iter())
 

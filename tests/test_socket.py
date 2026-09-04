@@ -218,7 +218,11 @@ print(_socket.gethostbyname("localhost"))
 print(_socket.gethostbyname("127.0.0.1"))
 print(len(_socket.gethostname()) > 0)
 print(_socket.getaddrinfo("127.0.0.1", 80, 0, _socket.SOCK_STREAM))
-print(_socket.getaddrinfo("localhost", "http", _socket.AF_INET, _socket.SOCK_STREAM))
+# A resolver may answer the same address more than once -- some hosts list
+# `localhost` twice, and CPython returns one entry per answer where this
+# returns one per socket type -- so compare the distinct answers.
+print(sorted(set(_socket.getaddrinfo("localhost", "http", _socket.AF_INET,
+                                     _socket.SOCK_STREAM))))
 # AF_INET explicitly: CPython answers for IPv6 as well, and this does not.
 print(_socket.getaddrinfo(None, 8080, _socket.AF_INET, _socket.SOCK_STREAM, 0,
                           _socket.AI_PASSIVE))
