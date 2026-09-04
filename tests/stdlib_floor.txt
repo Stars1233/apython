@@ -9,6 +9,7 @@ ok antigravity
 ok argparse
 ok ast
 ok base64
+ok bdb
 ok bisect
 ok calendar
 ok cgi
@@ -29,6 +30,7 @@ ok contextlib
 ok contextvars
 ok copy
 ok copyreg
+ok dataclasses
 ok datetime
 ok dbm
 ok decimal
@@ -59,6 +61,7 @@ ok idlelib
 ok imaplib
 ok imghdr
 ok importlib
+ok inspect
 ok io
 ok ipaddress
 ok json
@@ -90,6 +93,7 @@ ok pipes
 ok platform
 ok poplib
 ok posixpath
+ok pprint
 ok profile
 ok _py_abc
 ok pyclbr
@@ -104,6 +108,7 @@ ok quopri
 ok random
 ok re
 ok reprlib
+ok rlcompleter
 ok runpy
 ok sched
 ok secrets
@@ -138,6 +143,7 @@ ok _threading_local
 ok timeit
 ok token
 ok tokenize
+ok trace
 ok traceback
 ok turtledemo
 ok types

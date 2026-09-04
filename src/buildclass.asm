@@ -97,11 +97,16 @@ DEF_FUNC type_method_new
     pop rdi
     mov rsi, [rbx + 16]
     mov rdx, [rbx + 24]
+    ; The metatype is whatever __new__ was handed, not the default, and it has
+    ; to be on the class before its descriptors' __set_name__ run -- which is
+    ; inside type_from_parts.
+    mov [rel class_metatype_pending], r12
     call type_from_parts
+    mov qword [rel class_metatype_pending], 0
     test rax, rax
     jz .tmn_failed                  ; a __set_name__ raised, and it is pending
 
-    ; The metatype is whatever __new__ was handed, not the default.
+    ; Stamped already unless type_from_parts bailed before reaching it.
     mov [rax + PyObject.ob_type], r12
     mov edx, TAG_PTR
     pop r12
@@ -400,6 +405,16 @@ global class_kwnames_pending
 class_kwnames_pending: dq 0
 global class_kwvalues_pending
 class_kwvalues_pending: dq 0
+
+; The metatype `type.__new__(mcls, ...)` was handed.  It used to be stamped on
+; the finished class by type_method_new, AFTER type_from_parts had already run
+; every descriptor's __set_name__ -- so a __set_name__ saw an owner whose type
+; was the default metatype, and `cls.__members__` inside one was an
+; AttributeError.  enum.py is written exactly that way, so fourteen stdlib
+; modules stopped there.  Set around the call and cleared by it, the same
+; convention class_kwnames_pending uses.
+global class_metatype_pending
+class_metatype_pending: dq 0
 
 section .text
 
@@ -1485,6 +1500,16 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     extern subclass_register
     mov rdi, r12
     call subclass_register
+
+    ; The metatype, if type.__new__ was handed one, BEFORE __set_name__ runs:
+    ; a descriptor is entitled to read an attribute the metaclass supplies off
+    ; the owner it is given.
+    mov rax, [rel class_metatype_pending]
+    test rax, rax
+    jz .tfp_default_metatype
+    mov [r12 + PyObject.ob_type], rax
+    mov qword [rel class_metatype_pending], 0
+.tfp_default_metatype:
 
     ; Now that the class exists, tell every descriptor in it what it is called.
     mov rdi, r12
