@@ -1437,6 +1437,10 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     call obj_decref
     mov rdi, [rbp - LSA_SELF]
     call obj_decref
+    ; DISPATCH saved the stack top as it was BEFORE this handler popped its
+    ; three operands, and the unwinder cleans up from there -- so raising
+    ; without republishing r13 releases those three a second time.
+    mov [rel eval_saved_r13], r13
     RAISE exc_AttributeError_type, "super: attribute not found"
 
 .lsa_found:
@@ -1556,6 +1560,9 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     jmp .lsa_done
 
 .lsa_propagate:
+    ; As at .lsa_not_found: the unwinder starts from eval_saved_r13, which is
+    ; where the stack was before the three operands came off it.
+    mov [rel eval_saved_r13], r13
     leave
     extern eval_exception_unwind
     jmp eval_exception_unwind

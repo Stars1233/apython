@@ -131,3 +131,51 @@ print(e.value)
 print(e.value_as_argument())
 print(e.value_in_a_list())
 print(sorted([e.value, d.prop_base]))
+
+
+# A super() lookup that fails, or a getter reached through one that raises,
+# has already taken its three operands off the value stack -- and DISPATCH
+# saved the stack top as it was before that.  Raising without republishing it
+# hands those three slots to the unwinder a second time: `free(): invalid
+# pointer` from the first of these, and a use-after-free from the second.
+
+class F(A):
+    def missing(self):
+        try:
+            return super().nosuchattribute
+        except AttributeError:
+            return "no attribute"
+
+    def missing_mid_expression(self, x, y):
+        try:
+            return (x, y, super().nosuchattribute)
+        except AttributeError:
+            return "no attribute, mid expression"
+
+
+class G(A):
+    @property
+    def raises(self):
+        raise ValueError("from the getter")
+
+
+class H(G):
+    def read(self):
+        try:
+            return super().raises
+        except ValueError as e:
+            return "getter raised: " + str(e)
+
+    def read_mid_expression(self, x, y):
+        try:
+            return (x, y, super().raises)
+        except ValueError:
+            return "getter raised, mid expression"
+
+
+f = F()
+h = H()
+for _ in range(4):
+    print(f.missing(), "|", f.missing_mid_expression(1, 2))
+    print(h.read(), "|", h.read_mid_expression(3, 4))
+print("still alive")
