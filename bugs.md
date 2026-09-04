@@ -14,18 +14,6 @@ reasoning that chose them and what changing one would cost.
 
 ## Correctness
 
-- **No `encodings` package, so the registry finds only what this tree ships.**
-  `str.encode` and `bytes.decode` reach the registry now, and the registry has
-  what `lib/_codecs.py` can express without a table: utf-8 and its BOM'd form,
-  ascii, latin-1, the six UTF-16 and UTF-32 forms, the two escape codecs, and
-  their aliases.  CPython's `encodings/` is two hundred modules, most of them
-  a 256-entry mapping, and this ships none of them -- so `cp1252`,
-  `iso-8859-15`, `koi8-r` and the rest are a LookupError unless a CPython
-  `Lib/` is on the path, in which case `encodings.search_function` finds them
-  and they work.  `namereplace` is the one error handler that only
-  approximates: it needs a code point's Unicode NAME, and the table that
-  resolves `\N{...}` at compile time indexes the other way.
-
 - **Missing C modules.**  The ranking here is by what actually stands in the
   way rather than by which import fails first -- the two are not the same,
   and `_imp` was reached by twelve modules a few lines after some other

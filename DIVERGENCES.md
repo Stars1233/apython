@@ -243,3 +243,31 @@ say both; expressing it would mean a per-use classification, which is a
 larger change than the one effect it buys.  What is left is the co_name a
 program reads from inside a module-level comprehension, and one extra
 traceback entry through one.
+
+## The codecs that are neither a table nor a state machine
+
+`encodings/` here is one module and one generated table file rather than
+CPython's two hundred modules, and it answers for every codec that is a flat
+256-entry mapping: the cpNNN and iso8859-N pages, koi8, the mac_* family,
+tis-620, the EBCDIC cp037 group.  `_codecs` answers for the ones that are a
+state machine instead -- utf-8 and its BOM'd form, ascii, latin-1, the six
+fixed-width UTF-16 and UTF-32 forms, utf-7, the two escape codecs.  Between
+them that is every text encoding CPython ships except three groups:
+
+- **The multi-byte CJK codecs** -- cp932, cp949, cp950, big5, big5hkscs,
+  gbk, gb2312, gb18030, euc_jp, euc_kr, shift_jis and their variants, and the
+  iso2022 family.  CPython implements these in C over megabytes of generated
+  mapping tables; expressing them here would mean generating the same tables
+  as Python source, which is a far larger artefact than the rest of this tree
+  put together, for codecs nothing in the test corpus asks for.
+- **The transform codecs** -- base64_codec, hex_codec, quopri_codec,
+  uu_codec, rot_13, zlib_codec, bz2_codec.  These are bytes-to-bytes and are
+  not text encodings: CPython refuses `"x".encode("base64")` too.  Reaching
+  them means `codecs.encode`, and `codecs` is not here either; two of them
+  additionally need zlib and bz2, which are not.
+- **punycode, idna and mbcs.**  idna needs `unicodedata`'s nameprep tables,
+  which are the same argument as the CJK ones; punycode exists only to serve
+  idna; mbcs and oem are Windows-only and absent on any Linux CPython too.
+
+An unknown codec is a LookupError with CPython's wording, so a program that
+catches one behaves the same either way.

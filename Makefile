@@ -82,6 +82,7 @@ regen:
 	mv src/compiler/unicodecase.asm.new src/compiler/unicodecase.asm
 	$(PYTHON) src/compiler/gen_ast.py > lib/_ast.py.new
 	mv lib/_ast.py.new lib/_ast.py
+	$(PYTHON) src/compiler/gen_encodings.py lib/encodings
 
 $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
