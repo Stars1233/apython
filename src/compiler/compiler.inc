@@ -497,6 +497,12 @@ struc Comp
     .children:  resb Buf_size       ; u32[] committed child lists
     .pending:   resb Buf_size       ; u32[] LIFO scratch for lists under construction
     .objs:      resb Buf_size       ; PyObject*[], owned
+    .rawnames:  resb Buf_size       ; u32[], parallel to .objs: for an
+                                    ; identifier that private-name mangling
+                                    ; rewrote, the obj index of the name as it
+                                    ; was WRITTEN.  0 for everything else.
+                                    ; The compiler uses the mangled name; the
+                                    ; AST reports this one, as CPython's does
     .scopes:    resb Buf_size       ; Scope[]; index 0 reserved
     .cur_unit:  resq 1              ; the CompUnit being emitted into
     .cur_scope: resd 1

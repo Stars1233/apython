@@ -210,6 +210,9 @@ DEF_FUNC comp_init, CI_FRAME
     lea rdi, [rbx + Comp.objs]
     mov esi, 8
     call buf_init
+    lea rdi, [rbx + Comp.rawnames]
+    mov esi, 4
+    call buf_init
     lea rdi, [rbx + Comp.scopes]
     mov esi, Scope_size
     call buf_init
@@ -237,6 +240,12 @@ DEF_FUNC comp_init, CI_FRAME
     mov esi, 1
     call buf_reserve
     mov qword [rax], 0
+    ; rawnames is indexed by the same number and grows with objs in ast_obj,
+    ; so slot 0 is reserved here too.
+    lea rdi, [rbx + Comp.rawnames]
+    mov esi, 1
+    call buf_reserve
+    mov dword [rax], 0
 
     pop rbx
     leave
@@ -278,6 +287,8 @@ DEF_FUNC comp_free, 8
     call buf_free
     lea rdi, [rbx + Comp.objs]
     call buf_free
+    lea rdi, [rbx + Comp.rawnames]
+    call buf_free
     lea rdi, [rbx + Comp.pending]
     call buf_free
     lea rdi, [rbx + Comp.spans]
@@ -316,6 +327,80 @@ END_FUNC comp_free
 DEF_FUNC_BARE comp_intern
     jmp str_new_heap
 END_FUNC comp_intern
+
+
+;; ============================================================================
+;; comp_name_obj(Comp *c, const char *s, int64_t len) -> rax = obj index, 0 on
+;; failure
+;;
+;; Every identifier in the tree goes through here: intern it with private-name
+;; mangling applied, hand it to the object arena, and -- when the mangling
+;; actually rewrote it -- record the name as it was WRITTEN alongside.
+;;
+;; The compiler wants the mangled name and the AST wants the source one.
+;; CPython gets both by mangling later, in the symbol table and the code
+;; generator; here the class is only in hand while the parser is inside its
+;; body, so the mangling has to happen now and the other half is kept rather
+;; than recomputed.  Without it `self.__x` inside `class C` read back from
+;; ast.parse as `_C__x`.
+;;
+;; Mangling always lengthens -- it prepends `_` and at least one character of
+;; the class name -- so the two are told apart by the length alone.
+;; ============================================================================
+CNO_COMP  equ 8
+CNO_STR   equ 16
+CNO_LEN   equ 24
+CNO_IDX   equ 32
+CNO_FRAME equ 48            ; + 0 pushes = 48
+global comp_name_obj
+DEF_FUNC comp_name_obj, CNO_FRAME
+    mov [rbp - CNO_COMP], rdi
+    mov [rbp - CNO_STR], rsi
+    mov [rbp - CNO_LEN], rdx
+
+    call comp_intern_name
+    test rax, rax
+    jz .cno_fail
+    mov rsi, rax
+    mov rdi, [rbp - CNO_COMP]
+    call ast_obj                ; takes ownership
+    test rax, rax
+    jz .cno_fail
+    mov [rbp - CNO_IDX], rax
+
+    ; Did it mangle?  The interned string is longer than the source text
+    ; exactly when it did.
+    mov rdi, [rbp - CNO_COMP]
+    mov esi, eax
+    call ast_obj_at             ; borrowed
+    mov rcx, [rax + PyStrObject.ob_size]
+    cmp rcx, [rbp - CNO_LEN]
+    je .cno_done
+
+    mov rdi, [rbp - CNO_STR]
+    mov rsi, [rbp - CNO_LEN]
+    call comp_intern
+    test rax, rax
+    jz .cno_done                ; the mangled name alone is still usable
+    mov rsi, rax
+    mov rdi, [rbp - CNO_COMP]
+    call ast_obj
+    test rax, rax
+    jz .cno_done
+    mov rdx, [rbp - CNO_COMP]
+    mov rcx, [rdx + Comp.rawnames + Buf.data]
+    mov rdx, [rbp - CNO_IDX]
+    mov [rcx + rdx*4], eax
+
+.cno_done:
+    mov rax, [rbp - CNO_IDX]
+    leave
+    ret
+.cno_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC comp_name_obj
 
 ;; ============================================================================
 ;; comp_set_pending(Comp *c)

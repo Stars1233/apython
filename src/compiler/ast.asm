@@ -382,12 +382,35 @@ DEF_FUNC ast_obj, 8            ; the 8 pads the push to a 16-aligned rsp
     mov rbx, rdi
     lea rdi, [rbx + Comp.objs]
     call buf_push_ptr
+    ; rawnames is indexed by the same number, so it grows here and nowhere
+    ; else: a zero for every object, overwritten only by comp_name_obj for the
+    ; identifiers mangling rewrote.
+    lea rdi, [rbx + Comp.rawnames]
+    xor esi, esi
+    call buf_push_u32
     mov rax, [rbx + Comp.objs + Buf.len]
     dec rax
     pop rbx
     leave
     ret
 END_FUNC ast_obj
+
+;; ============================================================================
+;; ast_rawname_at(Comp *c, uint32_t idx) -> rax = the obj index of the name as
+;; it was written, or 0
+;; ============================================================================
+global ast_rawname_at
+DEF_FUNC_BARE ast_rawname_at
+    mov rax, [rdi + Comp.rawnames + Buf.len]
+    cmp rsi, rax
+    jae .arn_none
+    mov rax, [rdi + Comp.rawnames + Buf.data]
+    mov eax, [rax + rsi*4]
+    ret
+.arn_none:
+    xor eax, eax
+    ret
+END_FUNC ast_rawname_at
 
 ;; ============================================================================
 ;; ast_obj_at(Comp *c, uint32_t idx) -> rax = the borrowed Value

@@ -705,12 +705,9 @@ DEF_FUNC_LOCAL ps_scope, PK2_FRAME
     ; and interning it raw here bound a different name from the one every use
     ; of it resolved to, silently.
     mov rdi, rbx
-    call comp_intern_name
+    call comp_name_obj
     test rax, rax
     jz .fail
-    mov rdi, rbx
-    mov rsi, rax
-    call ast_obj
     mov rdi, rbx
     mov rsi, rax
     call ast_push
@@ -879,12 +876,9 @@ DEF_FUNC_LOCAL par_bound_name, PBN_FRAME
     jmp .scan
 .have:
     mov rdi, rbx
-    call comp_intern_name               ; an owned, mangled PyStrObject*
+    call comp_name_obj                  ; mangled, with the source name kept
     test rax, rax
     jz .fail
-    mov rdi, rbx
-    mov rsi, rax
-    call ast_obj                        ; the arena takes ownership
     pop rbx
     leave
     ret
@@ -988,13 +982,10 @@ DEF_FUNC par_name_obj, 8
     mov rdi, rbx
     mov rsi, [rax + Token.start]
     mov edx, [rax + Token.len]
-    extern comp_intern_name
-    call comp_intern_name
+    extern comp_name_obj
+    call comp_name_obj
     test rax, rax
     jz .fail
-    mov rdi, rbx
-    mov rsi, rax
-    call ast_obj
     push rax
     mov rdi, rbx
     call par_advance

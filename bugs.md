@@ -149,14 +149,12 @@ one-line fix.
   so `e.msg` is an AttributeError and `str(e)` is the bare message.  Every
   tool that reports a syntax error reads at least `.lineno`.
 
-- **Private names are already mangled in the AST.**  `self.__x` inside
-  `class C` reads back from `ast.parse` as `_C__x`, where CPython's tree keeps
-  `__x` and mangles in the compiler.  It is where the mangling happens: the
-  parser does it, in `comp_intern_name`, so the name reaches the AST already
-  rewritten -- attributes, parameters, and every other identifier in a class
-  body.  Seven files in this repository's own corpus differ from CPython's
-  tree for that reason and no other.  Moving it means the symbol table and the
-  code generator mangling instead, where CPython does it.
+- **`__slots__` names are not mangled.**  `class C: __slots__ = ('__x',)`
+  then `self.__x = 5` is an AttributeError here: CPython's `type_new` mangles
+  each slot name as it builds the member descriptor -- leaving `__slots__`
+  itself as written -- and `type_from_parts` builds them raw, so the
+  descriptor is `__x` where every use of it compiles to `_C__x`.  A legal
+  program that CPython runs and this does not.
 
 - **`ast.parse` is missing two of its arguments and one of its modes.**
   `type_comments=True` collects nothing, because the tokenizer discards

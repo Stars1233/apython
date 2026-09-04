@@ -126,7 +126,18 @@ DEF_FUNC_LOCAL ar_field, ARF_FRAME
     mov rcx, [rax + Comp.objs + Buf.len]
     cmp rbx, rcx
     jae .arf_none
+    ; The name as it was WRITTEN, when private-name mangling rewrote it.  The
+    ; compiler wants `_C__x` and this tree wants `__x`, which is what CPython's
+    ; carries -- it mangles later, where the class is still in hand.
     mov rdi, rax
+    mov esi, ebx
+    extern ast_rawname_at
+    call ast_rawname_at
+    test eax, eax
+    jz .arf_obj_have
+    mov ebx, eax
+.arf_obj_have:
+    mov rdi, [rbp - ARF_COMP]
     mov esi, ebx
     call ast_obj_at             ; a BORROWED Value: comp_free releases the table
     INCREF_V rax, rcx

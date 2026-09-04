@@ -1018,13 +1018,10 @@ DEF_FUNC_LOCAL pf_name, PFM_FRAME
     mov rdi, rbx
     mov rsi, [rax + Token.start]
     mov edx, [rax + Token.len]
-    extern comp_intern_name
-    call comp_intern_name               ; -> an owned PyStrObject*, mangled
+    extern comp_name_obj
+    call comp_name_obj                  ; mangled, with the source name kept
     test rax, rax
     jz .fail
-    mov rdi, rbx
-    mov rsi, rax
-    call ast_obj
     mov r8, rax
     mov rdi, rbx
     call par_advance
@@ -2323,12 +2320,9 @@ DEF_FUNC_LOCAL in_attr, IA_FRAME
     mov rdi, rbx
     mov rsi, [rax + Token.start]
     mov edx, [rax + Token.len]
-    call comp_intern_name               ; an attribute name mangles too
+    call comp_name_obj                  ; an attribute name mangles too
     test rax, rax
     jz .fail
-    mov rdi, rbx
-    mov rsi, rax
-    call ast_obj
     mov r9, rax
     mov rdi, rbx
     call par_advance

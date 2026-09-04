@@ -79,7 +79,7 @@ BINOPS = (_ast.Add(), _ast.BitAnd(), _ast.FloorDiv(), _ast.LShift(),
 # them is.  What is left here are the STATEMENT forms, built by a parser that
 # has only the statement's own keyword position to hand.
 LEFT_START = {
-    AUGASSIGN: A, ANNASSIGN: A, WITHITEM: A,
+    AUGASSIGN: A, WITHITEM: A,
     ASSIGN: CH,                 # starts with its first target
 }
 
