@@ -288,7 +288,12 @@ def _pack_addr(family, address):
             path = address.encode("utf-8")
         else:
             path = bytes(address)
-        return bytes([AF_UNIX & 0xFF, 0]) + path + bytes(1)
+        # A filesystem path is NUL-terminated; an ABSTRACT name -- one that
+        # begins with a NUL -- is not, and its length is what delimits it, so
+        # a terminator there would make it a different name.
+        if path[:1] != b"\x00":
+            path = path + bytes(1)
+        return bytes([AF_UNIX & 0xFF, 0]) + path
     raise OSError("unsupported address family %r" % (family,))
 
 
@@ -322,7 +327,10 @@ class socket:
 
     def __init__(self, family=AF_INET, type=SOCK_STREAM, proto=0, fileno=None):
         if fileno is None:
-            self._fd = _c.socket(family, type, proto)
+            # SOCK_CLOEXEC, as CPython does: a descriptor Python opens is
+            # non-inheritable by default (PEP 446), so it does not survive
+            # into a child process.  The bit is not part of .type.
+            self._fd = _c.socket(family, type | SOCK_CLOEXEC, proto)
         else:
             self._fd = int(fileno)
         self._family = family

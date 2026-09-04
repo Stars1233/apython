@@ -50,6 +50,18 @@ w.flush()
 print("through the file", cli.recv(64))
 w.close()
 
+print("=== descriptors are not inherited ===")
+# PEP 446: every descriptor Python opens is non-inheritable, which for a
+# socket means SOCK_CLOEXEC at creation and on accept.
+probe = socket.socket()
+print("socket", probe.get_inheritable())
+probe.bind(("127.0.0.1", 0))
+probe.listen(1)
+pc = socket.create_connection(probe.getsockname())
+pconn, _ = probe.accept()
+print("accepted", pconn.get_inheritable())
+pc.close(); pconn.close(); probe.close()
+
 print("=== context manager and repr ===")
 with socket.socket() as tmp:
     print("in with", tmp.fileno() >= 0)

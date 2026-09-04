@@ -92,6 +92,14 @@ extern sys_uname
 ; The largest sockaddr this file ever handles: sockaddr_un is 110 bytes.
 SOCKADDR_MAX equ 128
 
+; The largest single recv this will attempt.  ap_malloc is fatal on failure,
+; so a size that cannot be met has to be refused rather than tried; list
+; repetition draws the same line in the same place.
+SOCK_MAX_RECV equ 0x10000000
+
+; O_CLOEXEC for a socket, which is where the accept path needs it.
+SOCK_CLOEXEC equ 0o2000000
+
 F_GETFL equ 3
 F_SETFL equ 4
 O_NONBLOCK equ 0o4000
@@ -414,12 +422,15 @@ DEF_FUNC sock_accept_fn, SAC_FRAME
     call sk_int_arg
     mov rbx, rax
     mov dword [rbp - SAC_LEN], SOCKADDR_MAX
+    ; SOCK_CLOEXEC: every descriptor Python opens is non-inheritable by
+    ; default (PEP 446), and an accepted socket that survives an exec is a
+    ; listening server's descriptor in somebody else's process.
     mov rdi, rbx
     mov rsi, rbp
     sub rsi, SAC_BUF
     mov rdx, rbp
     sub rdx, SAC_LEN
-    xor ecx, ecx
+    mov ecx, SOCK_CLOEXEC
     call sys_accept4
     SOCK_CHECK rax
     mov [rbp - SAC_FD], rax
@@ -603,6 +614,8 @@ DEF_FUNC_LOCAL sock_recv_common, SRC_FRAME
     call sk_int_arg
     test rax, rax
     js .src_negative
+    cmp rax, SOCK_MAX_RECV
+    ja .src_toobig
     mov [rbp - SRC_N], rax
     mov rdi, [rbx + 16]
     call sk_int_arg
@@ -659,6 +672,12 @@ DEF_FUNC_LOCAL sock_recv_common, SRC_FRAME
     ret
 .src_negative:
     RAISE exc_ValueError_type, "negative buffersize in recv"
+.src_toobig:
+    ; ap_malloc is fatal on failure by design, so an absurd size has to be
+    ; refused before it is asked for: `sock.recv(1 << 62)` killed the process
+    ; with "Fatal: out of memory" where CPython raises MemoryError.
+    extern exc_MemoryError_type
+    RAISE exc_MemoryError_type, ""
 .src_fail:
     xor eax, eax
     pop rbx
@@ -700,6 +719,8 @@ DEF_FUNC sock_recvfrom_fn, SRF_FRAME
     call sk_int_arg
     test rax, rax
     js .srf_negative
+    cmp rax, SOCK_MAX_RECV
+    ja .srf_toobig
     mov [rbp - SRF_N], rax
     mov rdi, [rbx + 16]
     call sk_int_arg
@@ -776,6 +797,8 @@ DEF_FUNC sock_recvfrom_fn, SRF_FRAME
     ret
 .srf_negative:
     RAISE exc_ValueError_type, "negative buffersize in recvfrom"
+.srf_toobig:
+    RAISE exc_MemoryError_type, ""
 .srf_fail:
     xor eax, eax
     pop rbx
@@ -1300,10 +1323,12 @@ DEF_FUNC socket_module_create, SMC_FRAME
     mov rbx, rax
     mov rdi, rax
     mov rsi, [rbp - SMC_DICT]
-    call module_new
+    call module_new             ; takes a reference of its own
     push rax
     mov rdi, rbx
     call obj_decref
+    mov rdi, [rbp - SMC_DICT]
+    call obj_decref             ; ours, now that the module holds one
     pop rax
     pop r12
     pop rbx

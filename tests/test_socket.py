@@ -162,6 +162,37 @@ print("pair names", p.getsockname(), q.getpeername())
 p.close()
 q.close()
 
+print("=== an absurd read is refused, not fatal ===")
+big = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM, 0)
+for n in (1 << 62, 1 << 40):
+    try:
+        big.recv(n)
+        print("accepted", n)
+    except MemoryError:
+        print("MemoryError")
+    except OSError as e:
+        print("OSError", type(e).__name__)
+try:
+    big.recv(-1)
+except ValueError:
+    print("negative refused")
+big.close()
+
+print("=== an abstract AF_UNIX name has no terminator ===")
+import posix as _p
+abstract = b"\0apython_test_%d" % _p.getpid()
+au = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM, 0)
+au.bind(abstract)
+au.listen(1)
+print("abstract bound", au.getsockname() == abstract)
+ac = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM, 0)
+ac.connect(abstract)
+afd, _ = au._accept()
+aconn = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM, 0, fileno=afd)
+ac.send(b"abstract")
+print("abstract recv", aconn.recv(16))
+ac.close(); aconn.close(); au.close()
+
 print("=== unix sockets ===")
 import posix
 path = "/tmp/apython_test_socket_%d" % posix.getpid()
