@@ -365,6 +365,7 @@ test_str_mod_subclass
 test_str_predicates
 test_str_search
 test_str_subclass_dict
+test_str_subclass_slots
 test_str_translate_mapping
 test_str_translate
 test_struct_binascii

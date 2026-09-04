@@ -1277,7 +1277,8 @@ DEF_FUNC_LOCAL object_collect_slots, OCS_FRAME
     ; A member descriptor: read the word it names.  0 means never assigned.
     mov rcx, [rax + PyMemberDescrObject.md_offset]
     mov rdi, [rbp - OCS_SELF]
-    mov rdx, [rdi + rcx]
+    SLOT_ADDR rsi, rdi, rcx
+    mov rdx, [rsi]
     test rdx, rdx
     jz .ocs_next_entry
 
@@ -1294,11 +1295,12 @@ DEF_FUNC_LOCAL object_collect_slots, OCS_FRAME
     add rsp, 8
     pop rax
 
-    mov rdi, [rbp - OCS_DICT]
-    mov rsi, [rax + PyMemberDescrObject.md_name]
     mov rcx, [rax + PyMemberDescrObject.md_offset]
     mov rdx, [rbp - OCS_SELF]
-    mov rdx, [rdx + rcx]
+    SLOT_ADDR rdi, rdx, rcx
+    mov rdx, [rdi]
+    mov rsi, [rax + PyMemberDescrObject.md_name]
+    mov rdi, [rbp - OCS_DICT]
     extern dict_set
     call dict_set
 

@@ -616,6 +616,26 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
 ; with a negative offset.
 TP_DICT_AT_TAIL equ -1
 
+; SLOT_ADDR dest, inst, off -- the address of a __slots__ word.
+;
+; A non-negative md_offset is a byte offset from the object's start, which is
+; every ordinary class.  A NEGATIVE one is a tail slot: a str subclass keeps
+; its characters inline, so there is no fixed offset past the header to lay a
+; slot at, and its slots follow the tail dict word instead.  -1 is the first,
+; -2 the second, so the address is the tail plus 8 * -off.
+%macro SLOT_ADDR 3              ; %1 = dest, %2 = instance, %3 = md_offset
+    test %3, %3
+    js %%tail
+    lea %1, [%2 + %3]
+    jmp %%done
+%%tail:
+    INST_DICT_TAIL %1, %2
+    neg %3
+    lea %1, [%1 + %3*8]
+    neg %3
+%%done:
+%endmacro
+
 ; INST_DICT_TAIL dest, inst -- address of the tail dict pointer.
 ; str and bytes both keep eight spare bytes past their data (the NUL a str is
 ; padded with, the terminator bytes_type_call writes), so the dict sits one

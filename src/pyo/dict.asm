@@ -1883,6 +1883,7 @@ dict_type:
     dq dict_traverse                        ; tp_traverse
     dq dict_clear_gc                        ; tp_clear
     dq 0          ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; Dict key iterator type
 align 8
@@ -1915,6 +1916,7 @@ dict_iter_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; The values and items iterators differ from the keys iterator in nothing
 ; but their name, which is what `type(iter(d.items())).__name__` answers
@@ -1950,6 +1952,7 @@ dict_value_iter_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 align 8
 global dict_item_iter_type
@@ -1981,6 +1984,7 @@ dict_item_iter_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; Dict reverse key iterator type
 align 8
@@ -2013,6 +2017,7 @@ dict_rev_iter_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; Dict keys view sequence methods (len + contains)
 align 8
@@ -2069,6 +2074,7 @@ dict_keys_view_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; Dict values view type
 align 8
@@ -2101,6 +2107,7 @@ dict_values_view_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; Dict items view type
 align 8
@@ -2133,6 +2140,7 @@ dict_items_view_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 section .text
 

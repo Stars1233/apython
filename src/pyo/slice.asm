@@ -767,6 +767,7 @@ slice_type:
     dq slice_traverse                        ; tp_traverse
     dq slice_clear_gc                        ; tp_clear
     dq 0           ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 section .text
 

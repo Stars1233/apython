@@ -179,8 +179,15 @@ DEF_FUNC str_sub_new, SSN_FRAME
 
 .ssn_have_src:
     ; header + length + 8, matching str_new_heap's padding for the 8-byte
-    ; comparisons ap_strcmp does, + 8 more for the tail __dict__ pointer
+    ; comparisons ap_strcmp does, + 8 more for the tail __dict__ pointer, and
+    ; one word per __slots__ entry after that.  A str subclass has nowhere
+    ; else to put a slot: its characters are inline, so a fixed offset past
+    ; the header lands on them.
+    mov rdi, [rbp - SSN_TYPE]
+    mov rcx, [rdi + PyTypeObject.tp_tailslots]
+    shl rcx, 3
     lea rdi, [r12 + PyStrObject.data + 16]
+    add rdi, rcx
     mov rsi, [rbp - SSN_TYPE]
     extern gc_alloc
     call gc_alloc                   ; sets ob_refcnt and ob_type
@@ -188,7 +195,17 @@ DEF_FUNC str_sub_new, SSN_FRAME
     mov qword [rax + PyStrObject.ob_hash], -1
     mov [rax + PyStrObject.ob_length], r12   ; corrected after the copy
     mov qword [rax + PyStrObject.data + r12], 0
-    mov qword [rax + PyStrObject.data + r12 + 8], 0     ; the tail __dict__
+    ; The tail __dict__ and every tail slot start empty.  gc_alloc does not
+    ; zero, and a slot read before it is written is a Value either way.
+    mov rcx, [rbp - SSN_TYPE]
+    mov rcx, [rcx + PyTypeObject.tp_tailslots]
+    inc rcx                         ; the dict word, then the slots
+    lea rdx, [rax + PyStrObject.data + r12 + 8]
+.ssn_zero_tail:
+    mov qword [rdx], 0
+    add rdx, 8
+    dec rcx
+    jnz .ssn_zero_tail
 
     test rbx, rbx
     jz .ssn_no_copy
@@ -627,10 +644,11 @@ DEF_FUNC instance_getattr, IG_FRAME
     ret
 
 .found_slot:
-    ; Member descriptor found — read value from instance at fixed offset
+    ; Member descriptor found — read the value out of the instance
     ; r13 = member descriptor, rbx = instance
     mov rcx, [r13 + PyMemberDescrObject.md_offset]
-    mov rax, [rbx + rcx]       ; slot Value
+    SLOT_ADDR rdx, rbx, rcx
+    mov rax, [rdx]             ; slot Value
     test rax, rax
     jz .slot_not_set            ; 0 = slot not set → AttributeError
     INCREF_V rax, rdx
@@ -884,18 +902,19 @@ DEF_FUNC instance_setattr
 
 .sa_member:
 
-    ; Member descriptor! Write value to slot offset
+    ; Member descriptor! Write the value into the slot
     mov rcx, [r9 + PyMemberDescrObject.md_offset]
+    SLOT_ADDR rdx, rbx, rcx
 
     ; XDECREF old value at slot
-    push rcx
-    mov rdi, [rbx + rcx]       ; old Value
+    push rdx
+    mov rdi, [rdx]             ; old Value
     XDECREF_V rdi, rsi
-    pop rcx
+    pop rdx
 
     ; INCREF the new value and store it
     INCREF_V r13, r14
-    mov [rbx + rcx], r13
+    mov [rdx], r13
 
     pop r14
     pop r13
@@ -1240,6 +1259,25 @@ DEF_FUNC instance_dealloc, ID_FRAME
     jmp .slot_decref_loop
 .id_slots_done:
     pop r13
+
+    ; And the slots that live at the TAIL, which a str subclass's do: past
+    ; the characters and past the word the tail __dict__ occupies.  They are
+    ; not in the header at all, so the walk above cannot reach them.
+    mov rax, [rbx + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_tailslots]
+    test rcx, rcx
+    jz .id_tail_done
+    INST_DICT_TAIL r12, rbx
+    lea r12, [r12 + rcx*8]      ; the last one; downwards, as above
+.id_tail_loop:
+    push rcx
+    mov rdi, [r12]
+    XDECREF_V rdi, rsi
+    pop rcx
+    sub r12, 8
+    dec rcx
+    jnz .id_tail_loop
+.id_tail_done:
 
 .no_slots:
     pop r12
@@ -3421,6 +3459,7 @@ user_type_metatype:
     dq type_traverse            ; tp_traverse
     dq type_clear               ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; object_type - base type for all Python objects
 ; Used as explicit base class: class Foo(object): pass
@@ -3462,6 +3501,7 @@ object_type:
     dq instance_traverse                        ; tp_traverse
     dq instance_clear                        ; tp_clear
     dq 0           ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 
 ; method_type - type descriptor for bound methods
@@ -3495,6 +3535,7 @@ method_type:
     dq method_traverse                        ; tp_traverse
     dq method_clear                        ; tp_clear
     dq 0         ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 section .text
 
@@ -3659,6 +3700,23 @@ DEF_FUNC instance_traverse
     jnz .slot_loop
 
 .done:
+    ; And the slots at the TAIL, which a str subclass's are: past the
+    ; characters and past the word the tail __dict__ occupies.  Nothing in
+    ; the header walk above can reach them, so a cycle through one was never
+    ; collectable.
+    mov rax, [rbx + PyObject.ob_type]
+    mov r13, [rax + PyTypeObject.tp_tailslots]
+    test r13, r13
+    jz .it_tail_done
+    INST_DICT_TAIL r12, rbx
+    add r12, 8                  ; past the dict word
+.it_tail_loop:
+    mov rdi, [r12]
+    VISIT_V rdi, rsi
+    add r12, 8
+    dec r13
+    jnz .it_tail_loop
+.it_tail_done:
     pop r15
     pop r13
     pop r12

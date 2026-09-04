@@ -336,6 +336,7 @@ module_type:
     dq module_traverse                        ; tp_traverse
     dq module_clear_gc                        ; tp_clear
     dq 0            ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ;; ============================================================================
 ;; (was src/pyo/namespace.asm)
@@ -614,6 +615,7 @@ namespace_type:
     dq 0                            ; tp_traverse
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 section .text
 

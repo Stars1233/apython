@@ -1450,6 +1450,7 @@ func_type:
     dq func_traverse                        ; tp_traverse
     dq func_clear                        ; tp_clear
     dq 0       ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ;; ============================================================================
 ;; (was src/pyo/cell.asm)
@@ -1562,6 +1563,7 @@ cell_type:
     dq cell_traverse                        ; tp_traverse
     dq cell_clear                        ; tp_clear
     dq 0       ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 section .text
 

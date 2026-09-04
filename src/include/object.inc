@@ -774,6 +774,15 @@ struc PyTypeObject
     ; is gc_alloc'd and zero-filled, so a static table that predates this
     ; field cannot be misread.
     .tp_dictoffset:  resq 1  ; +208
+    ; How many __slots__ words live at the TAIL of an instance, past the data
+    ; and past the tail dict word.  Only a str subclass has any: it keeps its
+    ; characters inline, so there is no fixed offset past the header to lay a
+    ; slot at -- one put there writes over the string's own bytes.  The count
+    ; is cumulative, so a subclass's own slots start at its base's count, and
+    ; a member descriptor addresses one with a NEGATIVE md_offset.  Zero for
+    ; every other type, which is what a static table that predates the field
+    ; reads as.
+    .tp_tailslots:   resq 1  ; +216
 endstruc
 
 TYPE_OBJECT_SIZE equ PyTypeObject_size

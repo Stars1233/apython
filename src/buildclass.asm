@@ -462,6 +462,7 @@ TFP_BASES equ 56            ; the bases tuple, or NULL
 TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
 TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
 TFP_SLOT1 equ 80            ; a one-tuple built for `__slots__ = 'name'`, owned
+TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov r14, rdi                ; class name str
     mov r15, rdx                ; namespace dict, becomes tp_dict
     mov [rbp - TFP_BASES], rsi
@@ -579,16 +580,18 @@ TFP_SLOT1 equ 80            ; a one-tuple built for `__slots__ = 'name'`, owned
 .tfp_layout_conflict:
     RAISE exc_TypeError_type, "multiple bases have instance lay-out conflict"
 .tfp_layout_ok:
-    ; A subtype of int, str, bytes or tuple cannot carry slots.  int wraps its
-    ; value rather than embedding it and the other three keep their data
+    ; A subtype of int, bytes or tuple cannot carry slots.  int wraps its
+    ; value rather than embedding it and the other two keep their data
     ; inline, so a slot laid out at the base's basicsize lands inside that
     ; data or past the allocation entirely -- `class N(int): __slots__ =
-    ; ('tag',)` put the member at offset 48 of a 32-byte object, and a str
-    ; subclass wrote its slot over its own characters.  Both were a SIGSEGV.
+    ; ('tag',)` put the member at offset 48 of a 32-byte object, and a bytes
+    ; subclass would write its slot over its own bytes.  Both are a SIGSEGV,
+    ; and CPython refuses all three with this wording.
     ;
-    ; CPython refuses int, bytes and tuple with this wording and accepts str,
-    ; whose subtype layout is not ours; refusing str too is a divergence, and
-    ; it is in bugs.md.
+    ; str is the one CPython accepts, and it is accepted here now: its slots
+    ; go at the TAIL of the instance, past the characters and past the dict
+    ; word, which is the same place its __dict__ already lives.  See
+    ; tp_tailslots.
     mov rdi, [rbp - TFP_BASE]
     test rdi, rdi
     jz .tfp_slots_ok
@@ -602,9 +605,6 @@ TFP_SLOT1 equ 80            ; a one-tuple built for `__slots__ = 'name'`, owned
     cmp r13, rcx
     je .tfp_slots_check
     extern str_type
-    lea rcx, [rel str_type]
-    cmp r13, rcx
-    je .tfp_slots_check
     lea rcx, [rel tuple_type]
     cmp r13, rcx
     jne .tfp_slots_ok
@@ -674,6 +674,12 @@ TFP_SLOT1 equ 80            ; a one-tuple built for `__slots__ = 'name'`, owned
     mov rax, [rbp - TFP_BASE]               ; base class
     test rax, rax
     jz .bc_layout_done
+    ; Tail slots are inherited whether or not this class declares any of its
+    ; own: they are part of the instance's size, and a subclass that reserved
+    ; none of them would allocate short and let its base's slots write past
+    ; the end.  The __slots__ code below adds to this.
+    mov rcx, [rax + PyTypeObject.tp_tailslots]
+    mov [r12 + PyTypeObject.tp_tailslots], rcx
     ; If the base already has a dict slot -- another heaptype, or an int
     ; subclass -- share it rather than adding a second one, which would
     ; collide with whatever the base put there.
@@ -943,7 +949,46 @@ TFP_SLOT1 equ 80            ; a one-tuple built for `__slots__ = 'name'`, owned
     call bc_drop_dict_word
     jmp .bc_no_slots
 .bc_have_slots:
+    mov qword [rbp - TFP_TAIL], 0
 
+    ; A str subclass keeps its characters inline, so there is no fixed offset
+    ; past the header to lay a slot at: one put there writes over the string's
+    ; own bytes, which is why this used to be refused outright.  Its slots go
+    ; at the TAIL instead, past the data and past the word the tail __dict__
+    ; occupies, and a member descriptor addresses one with a negative offset.
+    ; tp_tailslots counts them cumulatively, so a subclass's own start where
+    ; its base's stop.
+    mov rax, [rbp - TFP_BASE]
+    test rax, rax
+    jz .bc_slots_not_tail
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .bc_slots_not_tail
+    mov qword [rbp - TFP_TAIL], 1
+    ; __slots__ suppresses the dict only when no base already provides one,
+    ; exactly as for an ordinary class: `class V(U)` where U is a plain str
+    ; subclass keeps U's tail dict and must still take arbitrary attributes.
+    ; The tail word is reserved either way, so the slot indices past it do
+    ; not depend on which case this is.
+    push rax
+    call bc_base_has_dict
+    pop rcx
+    test eax, eax
+    jnz .bc_tail_keep_dict
+    or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+    mov qword [r12 + PyTypeObject.tp_dictoffset], 0
+.bc_tail_keep_dict:
+    mov rax, rcx
+    mov rdi, [rax + PyTypeObject.tp_tailslots]
+    mov rcx, rdi
+    add rcx, r13
+    mov [r12 + PyTypeObject.tp_tailslots], rcx
+    ; The loop below wants a base to count from; here it is -(1 + inherited),
+    ; and each slot is one LOWER, because the offsets run negative.
+    neg rdi
+    dec rdi
+    jmp .bc_have_basic
+
+.bc_slots_not_tail:
     ; Where the slots start.  A class that declares __slots__ and inherits no
     ; dict has none of its own, so the dict word comes out of the layout and
     ; the slots take its place -- which is the layout CPython has, and eight
@@ -958,16 +1003,17 @@ TFP_SLOT1 equ 80            ; a one-tuple built for `__slots__ = 'name'`, owned
     or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
     call bc_drop_dict_word
     mov rdi, [r12 + PyTypeObject.tp_basicsize]
-    jmp .bc_have_basic
+    jmp .bc_slots_bump
 .bc_slots_share_dict:
     mov rdi, [r12 + PyTypeObject.tp_basicsize]
-.bc_have_basic:
+.bc_slots_bump:
     ; rdi = base_basicsize
     ; Set tp_basicsize = base_basicsize + nslots * 8 (one Value per slot)
     mov rax, r13
     shl rax, 3                      ; nslots * 8
     add rax, rdi                    ; + base_basicsize
     mov [r12 + PyTypeObject.tp_basicsize], rax
+.bc_have_basic:
 
     ; TYPE_FLAG_HAS_SLOTS says "this class has NO instance dict", and it is
     ; set above, before the layout is decided, because it is what decides it.
@@ -993,11 +1039,20 @@ TFP_SLOT1 equ 80            ; a one-tuple built for `__slots__ = 'name'`, owned
     cmp r8d, TAG_PTR
     jne .bc_slot_skip               ; skip non-string slots
 
-    ; Compute offset = base_basicsize + i * 8
+    ; Compute the descriptor's offset: base_basicsize + i*8 for an ordinary
+    ; class, and -(1 + inherited) - i for a str subclass, whose slots are at
+    ; the tail and are addressed by a negative offset.
+    cmp qword [rbp - TFP_TAIL], 0
+    jne .bc_slot_tail_off
     mov rdi, [rsp + 8]             ; base_basicsize
     mov rax, [rsp]                 ; i
     shl rax, 3
     add rdi, rax                   ; offset
+    jmp .bc_slot_have_off
+.bc_slot_tail_off:
+    mov rdi, [rsp + 8]             ; -(1 + inherited tail slots)
+    sub rdi, [rsp]                 ; ... one lower per slot
+.bc_slot_have_off:
 
     ; A private slot name is mangled, exactly as a private name written in the
     ; class body is.  CPython's type_new does it here, leaving __slots__

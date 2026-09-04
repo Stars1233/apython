@@ -130,16 +130,6 @@ reasoning that chose them and what changing one would cost.
   it.  CPython records the source path even when it executes a cached
   bytecode file, and derives the cache path from it when it needs to.
 
-- **A `str` subclass cannot declare `__slots__`.**  CPython accepts it; here
-  it is a TypeError, worded as CPython words the ones it does refuse
-  (`nonempty __slots__ not supported for subtype of 'str'`).  A str keeps its
-  characters inline and a subclass keeps its dict at the tail past them, so a
-  slot at a fixed offset lands on the characters -- it wrote over its own data
-  and then crashed.  int, bytes and tuple are refused for the same reason and
-  CPython refuses those too; str is the one that differs.  Making it work
-  means slots at the tail, which is a layout change reaching
-  `instance_dealloc`, `instance_traverse` and the member descriptors.
-
 ## Missing pieces
 
 These are absences rather than wrong answers — the interpreter raises rather

@@ -839,6 +839,7 @@ exc_BaseExceptionGroup_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; ExceptionGroup type — base = BaseExceptionGroup (also inherits from Exception)
 align 8
@@ -871,6 +872,7 @@ exc_ExceptionGroup_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ;; ExceptionGroup is the one builtin with two bases: BaseExceptionGroup for
 ;; the group machinery and Exception so that `except Exception` catches it.

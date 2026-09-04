@@ -3188,6 +3188,7 @@ bytes_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; bytes_iter type object
 align 8
@@ -3219,6 +3220,7 @@ bytes_iter_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 section .rodata
 
