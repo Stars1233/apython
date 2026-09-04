@@ -139,13 +139,6 @@ than lying — but they are ordinary Python that does not work:
   `bytes()`, comparison, `hex`, `tolist`, and the write path.  Nothing in
   `_pyio` asks for one, so the field is not there yet.
 
-- **stdout is not block-buffered when it is not a terminal.**  CPython's is,
-  so a program that writes to both streams through a pipe sees all its
-  `print()` output after everything on stderr; here the two interleave as
-  they were written.  Visible in any test that lets an exception be reported
-  while it is also printing, which is why two of them compare against a
-  recorded transcript.
-
 ## Robustness
 
 - **A builtin registered with no argument counts accepts extras silently.**

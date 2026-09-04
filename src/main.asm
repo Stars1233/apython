@@ -340,6 +340,16 @@ DEF_FUNC main, 8
 
     ; Print the traceback and the exception, CPython's shape.
     extern traceback_print
+    ; Whatever is waiting on stdout goes out before the report does.  CPython
+    ; flushes both streams in flush_io() on its way into the display routine,
+    ; and it is what puts a program's output ahead of the traceback that ended
+    ; it rather than after: the two streams are buffered differently, so
+    ; without this the order through a pipe came out inverted.  The unraisable
+    ; hook does NOT do it -- CPython's does not either.
+    push rdi
+    extern fileobj_flush_std
+    call fileobj_flush_std
+    pop rdi
     call traceback_print
 
     ; DECREF the exception object before exiting
@@ -427,6 +437,13 @@ DEF_FUNC main, 8
     xor ebx, ebx
 
 .exit_cleanup:
+    ; Whatever is still waiting in stdout's buffer goes out first, and before
+    ; the collection below: a __del__ that prints has to reach the same
+    ; stream, in order, and a buffer abandoned at exit is output that was
+    ; produced and never seen.
+    extern fileobj_flush_std
+    call fileobj_flush_std
+
     ; Break sys.modules cycle: sys_modules_dict -> sys module -> sys_dict
     ;   -> "modules" entry -> sys_modules_dict
     ; NULL out sys_module.mod_dict and DECREF the old dict twice:
@@ -503,6 +520,16 @@ DEF_FUNC main, 8
     mov rdi, [rel current_exception]
     test rdi, rdi
     jz .load_failed_plain
+    ; Whatever is waiting on stdout goes out before the report does.  CPython
+    ; flushes both streams in flush_io() on its way into the display routine,
+    ; and it is what puts a program's output ahead of the traceback that ended
+    ; it rather than after: the two streams are buffered differently, so
+    ; without this the order through a pipe came out inverted.  The unraisable
+    ; hook does NOT do it -- CPython's does not either.
+    push rdi
+    extern fileobj_flush_std
+    call fileobj_flush_std
+    pop rdi
     call traceback_print
     mov rdi, [rel current_exception]
     call obj_decref

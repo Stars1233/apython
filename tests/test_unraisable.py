@@ -1,13 +1,13 @@
 # sys.unraisablehook -- what the interpreter calls for an exception that
 # cannot be propagated.
 #
-# This file compares against a recorded transcript, for two reasons that have
-# nothing to do with the hook.  The report names a file, and CPython
+# This file compares against a recorded transcript, for ONE reason that has
+# nothing to do with the hook: the report names a file, and CPython
 # absolutizes the path of a script it runs directly where a run from a .pyc
-# does not; and CPython block-buffers stdout when it is not a terminal, so its
-# print() output all arrives after the stderr report rather than around it.
-# Every line was compared against CPython 3.12 modulo those two before the
-# transcript was recorded.
+# does not.  Every other line matches CPython 3.12 byte for byte -- the second
+# reason, that CPython block-buffers stdout when it is not a terminal and so
+# ordered the two streams differently, is gone: stdout is buffered here now
+# too.
 #
 # There are two of those: a __del__ that raises, and a cleanup that raises in
 # a generator being finalised.  Neither has a caller left to hand the

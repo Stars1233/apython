@@ -15,9 +15,10 @@
 # for a reason that has nothing to do with the carets: CPython absolutizes the
 # path of a script it runs directly, so its report says
 # "/home/.../tests/test_traceback_carets.py" where a run from the .pyc says
-# "tests/test_traceback_carets.py".  Every other line of the three reports,
-# caret rows included, was compared against CPython 3.12 byte for byte before
-# the transcript was recorded.
+# "tests/test_traceback_carets.py".  That is now the ONLY difference -- every
+# other line of the three reports, caret rows included, matches CPython 3.12
+# byte for byte, the print() output ahead of them included, because stdout is
+# block-buffered here as it is there and flushed before the report.
 #
 # Note that a frame whose location covers the whole stripped line gets no
 # caret row at all -- underlining a line with itself says nothing -- which is

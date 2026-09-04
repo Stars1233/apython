@@ -23,6 +23,7 @@ extern ap_malloc
 extern ap_free
 extern raise_exception
 extern sys_write
+extern fileobj_write_fd
 extern range_new
 extern int_to_i64
 extern obj_as_index
@@ -767,7 +768,8 @@ PR_SEP_TAG   equ 16    ; sep tag
 PR_END       equ 24    ; end string ptr (0 = default "\n")
 PR_END_TAG   equ 32    ; end tag
 PR_FILE_FD   equ 40    ; file descriptor (1 = stdout)
-PR_FRAME     equ 4144  ; total frame size (48 + 4096)
+PR_FLUSH     equ 48    ; the flush= keyword, once it means something
+PR_FRAME     equ 4160  ; total frame size (64 + 4096)
 
 extern kw_names_pending
 extern ap_strcmp
@@ -788,6 +790,7 @@ DEF_FUNC builtin_print, PR_FRAME
     mov qword [rbp - PR_SEP], 0       ; NULL = default " "
     mov qword [rbp - PR_END], 0       ; NULL = default "\n"
     mov qword [rbp - PR_FILE_FD], 1   ; stdout
+    mov qword [rbp - PR_FLUSH], 0
 
     ; Check for keyword arguments
     mov rax, [rel kw_names_pending]
@@ -849,7 +852,7 @@ DEF_FUNC builtin_print, PR_FRAME
     pop r10
     jz .print_kw_file
 
-    ; Check "flush" — accept but ignore
+    ; Check "flush"
     push r10
     push r11
     lea rdi, [r10 + PyStrObject.data]
@@ -858,7 +861,7 @@ DEF_FUNC builtin_print, PR_FRAME
     test eax, eax
     pop r11
     pop r10
-    jz .print_kw_next
+    jz .print_kw_flush
 
     ; Unknown keyword — skip (be lenient)
     jmp .print_kw_next
@@ -875,6 +878,20 @@ DEF_FUNC builtin_print, PR_FRAME
     V_UNPACK rax, rdx
     mov [rbp - PR_END], rax
     mov [rbp - PR_END_TAG], rdx
+    jmp .print_kw_next
+
+.print_kw_flush:
+    ; It was accepted and ignored, which cost nothing while stdout was
+    ; unbuffered and costs the whole point of the keyword now that it is not.
+    mov rax, [rbx + r11]
+    extern obj_is_true
+    push rcx
+    push r9
+    mov rdi, rax
+    call obj_is_true
+    pop r9
+    pop rcx
+    mov [rbp - PR_FLUSH], rax
     jmp .print_kw_next
 
 .print_kw_file:
@@ -993,14 +1010,14 @@ align 16
     mov rdi, [rbp - PR_FILE_FD]
     lea rsi, [rbp - PR_FRAME]
     mov rdx, r15
-    call sys_write
+    call fileobj_write_fd
     xor r15d, r15d
 .print_sep_write:
     mov rax, [rbp - PR_SEP]
     mov rdi, [rbp - PR_FILE_FD]
     lea rsi, [rax + PyStrObject.data]
     mov rdx, [rax + PyStrObject.ob_size]
-    call sys_write
+    call fileobj_write_fd
     jmp .print_loop
 
 .print_default_sep_fallback:
@@ -1016,7 +1033,7 @@ align 16
     mov edi, 1                  ; fd = stdout
     lea rsi, [rbp - PR_FRAME]      ; buf
     mov rdx, r15                ; len
-    call sys_write
+    call fileobj_write_fd
     xor r15d, r15d              ; reset offset
 
 .write_direct:
@@ -1024,7 +1041,7 @@ align 16
     mov edi, 1                  ; fd = stdout
     lea rsi, [r14 + PyStrObject.data]
     mov rdx, [r14 + PyStrObject.ob_size]  ; len
-    call sys_write
+    call fileobj_write_fd
 
     ; DECREF the string representation (known TAG_PTR heap string;
     ; r9 tag was clobbered by sys_write calls above)
@@ -1075,14 +1092,14 @@ align 16
     mov rdi, [rbp - PR_FILE_FD]
     lea rsi, [rbp - PR_FRAME]
     mov rdx, r15
-    call sys_write
+    call fileobj_write_fd
     xor r15d, r15d
 .print_end_write:
     mov rax, [rbp - PR_END]
     mov rdi, [rbp - PR_FILE_FD]
     lea rsi, [rax + PyStrObject.data]
     mov rdx, [rax + PyStrObject.ob_size]
-    call sys_write
+    call fileobj_write_fd
     jmp .print_do_flush
 
 .print_default_end:
@@ -1094,7 +1111,13 @@ align 16
     mov rdi, [rbp - PR_FILE_FD]  ; fd (1 = stdout)
     lea rsi, [rbp - PR_FRAME]      ; buf
     mov rdx, r15                ; len
-    call sys_write
+    call fileobj_write_fd
+
+    cmp qword [rbp - PR_FLUSH], 0
+    je .print_no_flush
+    extern fileobj_flush_std
+    call fileobj_flush_std
+.print_no_flush:
 
     ; Return None (with INCREF)
     lea rax, [rel none_singleton]

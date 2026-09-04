@@ -354,6 +354,7 @@ test_sre_groupdict_refcount
 test_sre
 test_stdlib_glue
 test_stdlib_shims
+test_stdout_buffering
 test_str_case
 test_str_decode
 test_strfmt

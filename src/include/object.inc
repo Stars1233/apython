@@ -519,12 +519,21 @@ struc PyGenObject
 endstruc
 
 ; File object (for sys.stdout, sys.stderr, sys.stdin)
+; The buffer is what makes a redirected stdout arrive in blocks rather than a
+; write per print(), which is CPython's behaviour and is observable: a program
+; writing to both streams through a pipe sees ALL of its print() output after
+; everything on stderr, because only one of the two is buffered.
+FILE_BUFSZ equ 8192
+
 struc PyFileObject
     .ob_refcnt:   resq 1  ; +0
     .ob_type:     resq 1  ; +8
     .file_fd:     resq 1  ; +16: OS file descriptor
     .file_name:   resq 1  ; +24: name string ('<stdout>' etc)
     .file_mode:   resq 1  ; +32: mode string ('w', 'r')
+    .file_buffered: resq 1 ; +40: 1 = accumulate; 0 = one write per call
+    .file_len:    resq 1  ; +48: bytes waiting in .file_buf
+    .file_buf:    resb FILE_BUFSZ  ; +56
 endstruc
 
 ; _io.FileIO.  The first three fields are PyInstanceObject's, because FileIO
