@@ -383,8 +383,16 @@ struc Instr
     .oparg:   resd 1  ; +4   literal oparg, or a label id when IF_LABELARG
     .line:    resd 1  ; +8   source line; 0 = no location
     .offset:  resd 1  ; +12  code-unit offset, filled by the sizing fixpoint
-endstruc                  ; 16 -> index by shl 4
-INSTR_SHIFT equ 4
+    ; The rest of the location, so that the line table can carry columns and a
+    ; traceback rendered from OUR bytecode gets its caret row.  .col is -1 when
+    ; the instruction has only a line, which is what every emitter that
+    ; attributes an instruction to some other line than the node's produces.
+    .end_line: resd 1 ; +16
+    .col:      resd 1 ; +20  a BYTE offset into the line, zero-based
+    .end_col:  resd 1 ; +24
+    .pad:      resd 1 ; +28
+endstruc                  ; 32 -> index by shl 5
+INSTR_SHIFT equ 5
 
 IF_LABELARG  equ 0x01   ; .oparg names a label, resolve it to a delta
 IF_JREL_FWD  equ 0x02   ; delta = target - (offset + size)
@@ -595,7 +603,15 @@ struc CompUnit
     .nlocals:   resd 1
     .stacksize: resd 1
     .firstline: resd 1
+    ; The location the emitters are currently generating for.  cg_expr and
+    ; cg_stmt set all four from the node before dispatching and restore them
+    ; after, so an emitter that says nothing about where it is inherits its
+    ; statement's position rather than the last one anybody happened to write.
     .curline:   resd 1
+    .curend:    resd 1
+    .curcol:    resd 1
+    .curendcol: resd 1
+    .pad5:      resd 1
     .name:      resq 1          ; PyStrObject*, borrowed
     .qualname:  resq 1
     .filename:  resq 1

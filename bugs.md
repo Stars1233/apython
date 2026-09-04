@@ -192,11 +192,6 @@ one-line fix.
   it.  CPython records the source path even when it executes a cached
   bytecode file, and derives the cache path from it when it needs to.
 
-- **Our own compiler records no columns, so a traceback from a `.py` has no
-  caret line.**  The renderer draws one whenever the location table has
-  columns, and a `.pyc` CPython produced always does -- the reports match
-  byte for byte there.  `asm_linetable` emits only form 13, "no columns", so
-  running the same file from source loses the caret row.
 
   Half of what that needs is now there: every AST node carries all four of
   CPython's positions, and `tests/test_ast.py` diffs them against CPython's

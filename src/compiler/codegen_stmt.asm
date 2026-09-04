@@ -30,6 +30,7 @@ extern cg_loop_pop
 extern cg_loop_push
 extern cg_loop_top
 extern cg_expr
+extern cg_set_loc
 extern cg_label_bind
 extern cg_label_new
 extern cg_name
@@ -58,7 +59,12 @@ CST_I     equ 40
 CST_N     equ 48
 CST_TMP   equ 56
 CST_TMP2  equ 64
-CST_FRAME equ 72          ; + 3 pushes = 96
+CST_SLINE equ 72          ; the caller's location, saved field by field across
+CST_SEND  equ 76          ; the emitter this statement dispatches to
+CST_SCOL  equ 80
+CST_SECOL equ 84
+CST_FN    equ 96
+CST_FRAME equ 104         ; + 3 pushes = 128
 
 section .text
 
@@ -86,10 +92,36 @@ DEF_FUNC cg_stmt, CST_FRAME
     test rax, rax
     jz .unsupported
     mov [rbx + Comp.cur_unit], r12
+
+    ; The statement's own position, restored on the way out, so that anything
+    ; emitted after a nested expression is attributed to the statement again.
+    ; The four fields are contiguous, so the save is two qwords.
+    mov ecx, [r12 + CompUnit.curline]
+    mov [rbp - CST_SLINE], ecx
+    mov ecx, [r12 + CompUnit.curend]
+    mov [rbp - CST_SEND], ecx
+    mov ecx, [r12 + CompUnit.curcol]
+    mov [rbp - CST_SCOL], ecx
+    mov ecx, [r12 + CompUnit.curendcol]
+    mov [rbp - CST_SECOL], ecx
+    mov [rbp - CST_FN], rax
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
-    call rax
+    call cg_set_loc
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call qword [rbp - CST_FN]
+    mov ecx, [rbp - CST_SLINE]
+    mov [r12 + CompUnit.curline], ecx
+    mov ecx, [rbp - CST_SEND]
+    mov [r12 + CompUnit.curend], ecx
+    mov ecx, [rbp - CST_SCOL]
+    mov [r12 + CompUnit.curcol], ecx
+    mov ecx, [rbp - CST_SECOL]
+    mov [r12 + CompUnit.curendcol], ecx
     jmp .ret
 
 .unsupported:
@@ -206,13 +238,18 @@ DEF_FUNC cg_store, CSV_FRAME
     jmp .bad
 
 .name:
+    ; A store is attributed to its target, not to the statement around it:
+    ; that is where CPython draws the caret when the store itself raises.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call cg_set_loc
     mov rax, [rbp - CSV_NPTR]
     mov esi, [rax + AstNode.a]
     mov rdi, rbx
     call ast_obj_at
     mov rdx, rax
     mov rcx, [rbp - CSV_LINE]
-    mov [r12 + CompUnit.curline], ecx
     mov rdi, rbx
     mov rsi, r12
     mov ecx, CTX_STORE
@@ -239,7 +276,14 @@ DEF_FUNC cg_store, CSV_FRAME
     mov rdi, r12
     mov rsi, rax
     call cg_name
-    mov rdx, rax
+    push rax
+    push rax                            ; twice, to keep rsp 16-byte aligned
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call cg_set_loc
+    pop rdx
+    pop rdx
     mov rdi, r12
     mov esi, OP_STORE_ATTR
     mov rcx, [rbp - CSV_LINE]
@@ -263,6 +307,10 @@ DEF_FUNC cg_store, CSV_FRAME
     call cg_expr
     test eax, eax
     jz .fail
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call cg_set_loc
     mov rdi, r12
     mov esi, OP_STORE_SUBSCR
     xor edx, edx

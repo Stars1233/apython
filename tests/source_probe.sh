@@ -26,11 +26,10 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
 
 # Files whose output is legitimately different depending on which compiler
 # produced the bytecode, and so cannot be a differential test of anything.
-# Traceback text is one of the things in that band: CPython's location table
-# carries per-instruction columns and ours does not, so a report rendered from
-# our own bytecode has no caret rows under it.  That is a real gap, recorded
-# in bugs.md, but it is not the compiler getting an answer wrong.
-SKIP="test_traceback_carets"
+# The list is empty: test_traceback_carets was on it because our location
+# table carried no columns, so a report rendered from our own bytecode had no
+# caret rows.  It emits the long form now and the two reports match.
+SKIP=""
 
 # The skip list is itself ratcheted: a name here that no longer needs to be
 # is a skip that has outlived its reason, and a list nothing checks grows
