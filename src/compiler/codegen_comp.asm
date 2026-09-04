@@ -17,6 +17,11 @@
 %include "value.inc"
 %include "opcodes.inc"
 %include "compiler.inc"
+extern buf_init
+extern buf_free
+extern buf_push_u32
+extern ast_obj_at
+extern sym_lp_index
 
 extern asm_assemble
 extern ast_at
@@ -84,6 +89,19 @@ DEF_FUNC cg_e_comprehension, CM2_FRAME
     mov [rbp - CM2_SCOPE], rcx
     movzx ecx, byte [rax + AstNode.kind]
     mov [rbp - CM2_KIND], rcx
+
+    ; PEP 709: when sym_enter_comp put the comprehension in the enclosing
+    ; scope rather than one of its own, it is emitted inline -- no code
+    ; object, no call, no frame.
+    mov eax, [r12 + CompUnit.scope]
+    cmp rax, [rbp - CM2_SCOPE]
+    jne .not_inlined
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call cg_comp_inline
+    jmp .ret
+.not_inlined:
 
     ; Settle the comprehension scope's layout before emitting into it.
     mov rax, [rbp - CM2_SCOPE]
@@ -364,11 +382,13 @@ DEF_FUNC cg_comp_body, CB2_FRAME
     call cg_emit
 .no_accum:
 
-    ; The clauses, nested innermost-last.
+    ; The clauses, nested innermost-last.  This is the nested-function form,
+    ; so the outermost iterator is the parameter rather than the stack.
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
     xor ecx, ecx
+    xor r8d, r8d
     call cg_comp_clause
     test eax, eax
     jz .fail
@@ -419,10 +439,14 @@ DEF_FUNC cg_comp_body, CB2_FRAME
 END_FUNC cg_comp_body
 
 ;; ============================================================================
-;; cg_comp_clause(Comp *c, CompUnit *u, uint32_t node, uint64_t i)
-;;   -> 1 ok, 0 error
+;; cg_comp_clause(Comp *c, CompUnit *u, uint32_t node, uint64_t i,
+;;                int on_stack) -> 1 ok, 0 error
 ;; One `for` clause, with the remaining ones -- and finally the element --
 ;; nested inside it.
+;;
+;; `on_stack` says where the OUTERMOST iterator comes from: a nested
+;; comprehension is a function and takes it as the parameter `.0`, an inlined
+;; one has it on the stack already.  It only matters for clause 0.
 ;; ============================================================================
 CC5_I     equ 32
 CC5_LINE  equ 40
@@ -434,6 +458,7 @@ CC5_J     equ 80
 CC5_KIND  equ 88
 CC5_CONT  equ 96
 CC5_ASYNC equ 104
+CC5_STACK equ 112         ; is the outermost iterator already on the stack?
 CC5_FRAME equ 120         ; + 3 pushes = 144
 DEF_FUNC cg_comp_clause, CC5_FRAME
     push rbx
@@ -443,6 +468,7 @@ DEF_FUNC cg_comp_clause, CC5_FRAME
     mov r12, rsi
     mov r13, rdx
     mov [rbp - CC5_I], rcx
+    mov [rbp - CC5_STACK], r8
 
     mov rdi, rbx
     mov rsi, r13
@@ -481,10 +507,13 @@ DEF_FUNC cg_comp_clause, CC5_FRAME
     movzx ecx, byte [rax + AstNode.subkind]
     mov [rbp - CC5_ASYNC], rcx
 
-    ; The outermost iterable arrives as the parameter; the rest are evaluated
-    ; here, one loop deeper each time.
+    ; The outermost iterable arrives as the parameter -- or is already on the
+    ; stack, for an inlined comprehension; the rest are evaluated here, one
+    ; loop deeper each time.
     cmp qword [rbp - CC5_I], 0
     jne .inner_iter
+    cmp qword [rbp - CC5_STACK], 0
+    jne .loop_top
     mov rdi, rbx
     lea rsi, [rel cm_dot_zero]
     call comp_intern_cstr
@@ -615,6 +644,7 @@ DEF_FUNC cg_comp_clause, CC5_FRAME
     mov rdx, r13
     mov rcx, [rbp - CC5_I]
     inc rcx
+    mov r8, [rbp - CC5_STACK]
     call cg_comp_clause
     test eax, eax
     jz .fail
@@ -1063,3 +1093,469 @@ cm_genexpr:  db "<genexpr>", 0
 cm_dot_zero: db ".0", 0
 
 ASM_INIT
+
+section .text
+
+;; ============================================================================
+;; cg_comp_inline(Comp *c, CompUnit *u, uint32_t node) -> 1 ok, 0 error
+;;
+;;     <outermost iterable>; GET_ITER
+;;     LOAD_FAST_AND_CLEAR t        for each name the comprehension binds
+;;     SWAP n+1                     the iterator back on top
+;;     BUILD_LIST 0                 (or BUILD_SET / BUILD_MAP)
+;;     SWAP 2                       the accumulator under it
+;;     <the clauses, and the element>
+;;     SWAP n+1; STORE_FAST t...    the shadowed values back
+;;   over:
+;;     ...
+;;   restore:                       covering the loop
+;;     SWAP 2; POP_TOP; SWAP n+1; STORE_FAST t...; RERAISE 0
+;;
+;; PEP 709's shape, and CPython's instruction for instruction.  The saving is
+;; the whole of it: the comprehension's targets are the enclosing function's
+;; locals now, so one that shadows a real local has to put it back -- on the
+;; way out AND on the way out through an exception, which is what the handler
+;; is for.
+;; ============================================================================
+CCI_LINE  equ 32
+CCI_KIND  equ 40
+CCI_N     equ 48
+CCI_I     equ 56
+CCI_REST  equ 64
+CCI_OVER  equ 72
+CCI_ASYNC equ 80
+; A struct's slot names its LOWEST address, so it goes below every scalar --
+; naming it 48 put its three fields over CCI_KIND and CCI_LINE, and the
+; comprehension came out as whatever kind the Buf's length happened to be.
+CCI_NAMES equ 88 + Buf_size
+CCI_FRAME equ ((CCI_NAMES + 15) / 16) * 16 + 8   ; + 3 pushes = 16-aligned
+DEF_FUNC_LOCAL cg_comp_inline, CCI_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CCI_LINE], rcx
+    mov [r12 + CompUnit.curline], ecx
+    movzx ecx, byte [rax + AstNode.kind]
+    mov [rbp - CCI_KIND], rcx
+
+    ; The names it binds, in source order.
+    lea rdi, [rbp - CCI_NAMES]
+    mov esi, 4
+    call buf_init
+    mov rdi, rbx
+    mov rsi, r13
+    lea rdx, [rbp - CCI_NAMES]
+    call cg_comp_target_names
+    test eax, eax
+    jz .cci_fail
+    mov rax, [rbp - CCI_NAMES + Buf.len]
+    mov [rbp - CCI_N], rax
+
+    ; The outermost iterable, in this scope.
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov rsi, rax
+    xor edx, edx
+    mov rdi, rbx
+    call ast_child
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    movzx ecx, byte [rax + AstNode.subkind]
+    mov [rbp - CCI_ASYNC], rcx
+    mov edx, [rax + AstNode.b]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .cci_fail
+    mov esi, OP_GET_ITER
+    cmp qword [rbp - CCI_ASYNC], 0
+    je .cci_sync
+    mov esi, OP_GET_AITER
+.cci_sync:
+    mov rdi, r12
+    xor edx, edx
+    mov rcx, [rbp - CCI_LINE]
+    call cg_emit
+
+    ; Save whatever the targets shadow, then bring the iterator back up.
+    mov qword [rbp - CCI_I], 0
+.cci_save_loop:
+    mov rcx, [rbp - CCI_I]
+    cmp rcx, [rbp - CCI_N]
+    jge .cci_saved
+    mov rdi, rbx
+    mov rsi, r12
+    lea rdx, [rbp - CCI_NAMES]
+    call cci_name_index
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_FAST_AND_CLEAR
+    mov rcx, [rbp - CCI_LINE]
+    call cg_emit
+    inc qword [rbp - CCI_I]
+    jmp .cci_save_loop
+.cci_saved:
+    cmp qword [rbp - CCI_N], 0
+    je .cci_build
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov rdx, [rbp - CCI_N]
+    inc rdx
+    mov rcx, [rbp - CCI_LINE]
+    call cg_emit
+
+.cci_build:
+    mov esi, OP_BUILD_LIST
+    cmp qword [rbp - CCI_KIND], AST_SETCOMP
+    jne .cci_not_set
+    mov esi, OP_BUILD_SET
+    jmp .cci_have_build
+.cci_not_set:
+    cmp qword [rbp - CCI_KIND], AST_DICTCOMP
+    jne .cci_have_build
+    mov esi, OP_BUILD_MAP
+.cci_have_build:
+    mov rdi, r12
+    xor edx, edx
+    mov rcx, [rbp - CCI_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov edx, 2
+    mov rcx, [rbp - CCI_LINE]
+    call cg_emit
+
+    ; The loop, covered by the handler that puts the shadowed values back.
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - CCI_REST], rax
+    mov rdi, r12
+    call cg_label_new
+    mov [rbp - CCI_OVER], rax
+
+    cmp qword [rbp - CCI_N], 0
+    je .cci_body
+    mov rdi, r12
+    mov rsi, [rbp - CCI_REST]
+    xor edx, edx
+    call cg_push_handler
+    ; The ITERATOR is on the stack where the region opens, and the handler
+    ; unwinds it away before it puts the saved names back -- so the region's
+    ; depth is one below the depth the loop body runs at.
+    mov eax, [r12 + CompUnit.cur_handler]
+    mov rdx, [r12 + CompUnit.handlers + Buf.data]
+    imul rax, rax, Handler_size
+    mov dword [rdx + rax + Handler.bias], 1
+.cci_body:
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    xor ecx, ecx                        ; the first clause
+    mov r8d, 1                          ; the iterator is already on the stack
+    call cg_comp_clause
+    test eax, eax
+    jz .cci_fail
+    cmp qword [rbp - CCI_N], 0
+    je .cci_done
+    mov rdi, r12
+    call cg_pop_handler
+
+    ; The ordinary way out.
+    mov rdi, rbx
+    mov rsi, r12
+    lea rdx, [rbp - CCI_NAMES]
+    mov rcx, [rbp - CCI_LINE]
+    call cci_restore
+    mov rdi, r12
+    mov esi, OP_JUMP_FORWARD
+    mov rdx, [rbp - CCI_OVER]
+    mov rcx, [rbp - CCI_LINE]
+    call cg_emit_jump
+
+    ; And the way out through an exception: the same restore, then reraise.
+    mov rdi, r12
+    mov rsi, [rbp - CCI_REST]
+    call cg_label_bind
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov edx, 2
+    mov rcx, [rbp - CCI_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov esi, OP_POP_TOP
+    xor edx, edx
+    mov rcx, [rbp - CCI_LINE]
+    call cg_emit
+    mov rdi, rbx
+    mov rsi, r12
+    lea rdx, [rbp - CCI_NAMES]
+    mov rcx, [rbp - CCI_LINE]
+    call cci_restore
+    mov rdi, r12
+    mov esi, OP_RERAISE
+    xor edx, edx
+    mov rcx, [rbp - CCI_LINE]
+    call cg_emit
+    mov rdi, r12
+    mov rsi, [rbp - CCI_OVER]
+    call cg_label_bind
+
+.cci_done:
+    lea rdi, [rbp - CCI_NAMES]
+    call buf_free
+    mov eax, 1
+    jmp .cci_ret
+.cci_fail:
+    lea rdi, [rbp - CCI_NAMES]
+    call buf_free
+    xor eax, eax
+.cci_ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+END_FUNC cg_comp_inline
+
+;; ============================================================================
+;; cci_restore(Comp *c, CompUnit *u, Buf *names, uint64_t line) -> 1, always
+;;
+;; SWAP n+1, then STORE_FAST each saved name in reverse.  Emitted twice --
+;; once on the ordinary way out of the loop and once in its handler -- and the
+;; two must agree instruction for instruction, or the depths would not.
+;; ============================================================================
+CCR_NAMES equ 32
+CCR_LINE  equ 40
+CCR_I     equ 48
+CCR_FRAME equ 56            ; + 3 pushes = 80, 16-aligned
+DEF_FUNC_LOCAL cci_restore, CCR_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov [rbp - CCR_NAMES], rdx
+    mov [rbp - CCR_LINE], rcx
+
+    mov rdi, r12
+    mov esi, OP_SWAP
+    mov r13, [rbp - CCR_NAMES]
+    mov rdx, [r13 + Buf.len]
+    inc rdx
+    mov rcx, [rbp - CCR_LINE]
+    call cg_emit
+    mov rax, [r13 + Buf.len]
+    mov [rbp - CCR_I], rax
+.ccr_loop:
+    cmp qword [rbp - CCR_I], 0
+    jle .ccr_done
+    dec qword [rbp - CCR_I]
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CCR_NAMES]
+    mov rcx, [rbp - CCR_I]
+    call cci_name_index
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_STORE_FAST
+    mov rcx, [rbp - CCR_LINE]
+    call cg_emit
+    jmp .ccr_loop
+.ccr_done:
+    mov eax, 1
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cci_restore
+
+;; ============================================================================
+;; cci_name_index(Comp *c, CompUnit *u, Buf *names, uint64_t i)
+;;   -> rax = the localsplus index of the i'th saved name
+;; ============================================================================
+DEF_FUNC_LOCAL cci_name_index, 32       ; + 2 pushes = 48, 16-aligned
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    mov rax, [rdx + Buf.data]
+    mov esi, [rax + rcx*4]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdx, rax
+    mov rdi, rbx
+    mov esi, [r12 + CompUnit.scope]
+    call sym_lp_index
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cci_name_index
+
+;; ============================================================================
+;; cg_comp_target_names(Comp *c, uint32_t node, Buf *out) -> 1 ok, 0 error
+;;
+;; The obj indices of every name a comprehension's `for` clauses bind, in
+;; source order and without repeats.  These are the ones the inlined form has
+;; to save and restore; a walrus inside the comprehension is NOT among them,
+;; because PEP 572 says it binds in the enclosing scope and stays bound.
+;; ============================================================================
+CTN_OUT   equ 32
+CTN_I     equ 40
+CTN_N     equ 48
+CTN_FRAME equ 56            ; + 3 pushes = 80, 16-aligned
+DEF_FUNC_LOCAL cg_comp_target_names, CTN_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r13, rsi
+    mov [rbp - CTN_OUT], rdx
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - CTN_N], rcx
+    mov qword [rbp - CTN_I], 0
+.ctn_loop:
+    mov rcx, [rbp - CTN_I]
+    cmp rcx, [rbp - CTN_N]
+    jge .ctn_done
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CTN_I]
+    mov rdi, rbx
+    call ast_child
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov edx, [rax + AstNode.a]          ; the clause's target
+    mov rdi, rbx
+    mov rsi, [rbp - CTN_OUT]
+    call ctn_walk
+    test eax, eax
+    jz .ctn_fail
+    inc qword [rbp - CTN_I]
+    jmp .ctn_loop
+.ctn_done:
+    mov eax, 1
+    jmp .ctn_ret
+.ctn_fail:
+    xor eax, eax
+.ctn_ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+END_FUNC cg_comp_target_names
+
+;; ============================================================================
+;; ctn_walk(Comp *c, Buf *out, uint32_t node) -> 1 ok, 0 error
+;;
+;; The names of one target, which may be a Name, or a Tuple or List of them,
+;; nested to any depth, or a Starred wrapping any of those.
+;; ============================================================================
+CTW_OUT   equ 8
+CTW_NODE  equ 16
+CTW_I     equ 24
+CTW_N     equ 32
+CTW_FRAME equ 40            ; + 2 pushes = 56... one word more to land right
+DEF_FUNC_LOCAL ctn_walk, 48             ; + 2 pushes = 64, 16-aligned
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov [rbp - CTW_OUT], rsi
+    mov [rbp - CTW_NODE], rdx
+    test edx, edx
+    jz .ctw_ok
+    mov rdi, rbx
+    mov rsi, rdx
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_NAME
+    je .ctw_name
+    cmp ecx, AST_STARRED
+    je .ctw_starred
+    cmp ecx, AST_TUPLE
+    je .ctw_seq
+    cmp ecx, AST_LIST
+    je .ctw_seq
+    jmp .ctw_ok
+
+.ctw_name:
+    mov r12d, [rax + AstNode.a]
+    ; Skip one already seen: `for x in a for x in b` binds x once.
+    mov rdi, [rbp - CTW_OUT]
+    mov rcx, [rdi + Buf.len]
+    mov rax, [rdi + Buf.data]
+    xor edx, edx
+.ctw_seen:
+    cmp rdx, rcx
+    jge .ctw_add
+    cmp [rax + rdx*4], r12d
+    je .ctw_ok
+    inc rdx
+    jmp .ctw_seen
+.ctw_add:
+    mov rdi, [rbp - CTW_OUT]
+    mov esi, r12d
+    call buf_push_u32
+    jmp .ctw_ok
+
+.ctw_starred:
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, [rbp - CTW_OUT]
+    call ctn_walk
+    jmp .ctw_ret
+
+.ctw_seq:
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - CTW_N], rcx
+    mov qword [rbp - CTW_I], 0
+.ctw_seq_loop:
+    mov rcx, [rbp - CTW_I]
+    cmp rcx, [rbp - CTW_N]
+    jge .ctw_ok
+    mov rdi, rbx
+    mov rsi, [rbp - CTW_NODE]
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CTW_I]
+    mov rdi, rbx
+    call ast_child
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, [rbp - CTW_OUT]
+    call ctn_walk
+    test eax, eax
+    jz .ctw_ret
+    inc qword [rbp - CTW_I]
+    jmp .ctw_seq_loop
+
+.ctw_ok:
+    mov eax, 1
+.ctw_ret:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC ctn_walk

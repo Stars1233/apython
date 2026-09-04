@@ -118,6 +118,7 @@ test_complex_constructor
 test_complex_format
 test_complex_literals
 test_complex
+test_comprehension_inline
 test_container_dunders
 test_container_operator_names
 test_contains_fallback

@@ -2744,8 +2744,23 @@ END_FUNC sym_enter_typealias
 
 ;; ============================================================================
 ;; sym_enter_comp(Comp *c, uint32_t parent, uint32_t node) -> 1 ok, 0 error
-;; The comprehension's own scope: one parameter named `.0` for the outermost
-;; iterable, then the targets, conditions and element.
+;;
+;; PEP 709: a list, set or dict comprehension has no scope of its own.  Its
+;; targets, conditions and element belong to the block it is written in, and
+;; the code generator saves and restores whatever they shadow.  That is what
+;; makes `sys._getframe().f_code.co_name` inside one answer the enclosing
+;; function's name, keeps a traceback from growing an entry, and lets
+;; `[super().m() for _ in r]` work -- `__class__` is a free variable of the
+;; method, and a comprehension with a frame of its own could not see it.
+;;
+;; Two keep a scope.  A GENERATOR expression has to: its body runs later,
+;; from a frame of its own.  And a comprehension written at module or class
+;; scope does too, because the saving needs the target to be a FAST local and
+;; nothing at those scopes is one -- DIVERGENCES.md records that.
+;;
+;; So this either makes a scope and gives it the implicit `.0` parameter the
+;; outermost iterable arrives in, or uses the parent's and gives it nothing:
+;; an inlined comprehension takes its iterator from the stack.
 ;; ============================================================================
 SEC_PARENT equ 16
 SEC_NODE  equ 24
@@ -2763,6 +2778,24 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     mov r13, rdx
     mov [rbp - SEC_NODE], rdx
 
+    ; A generator expression keeps its scope; so does a comprehension whose
+    ; enclosing block has no fast locals to save into.
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    cmp byte [rax + AstNode.kind], AST_GENEXP
+    je .sec_own_scope
+    mov rdi, rbx
+    mov rsi, [rbp - SEC_PARENT]
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_FUNCTION
+    je .sec_inlined
+    cmp dword [rax + Scope.kind], SCOPE_LAMBDA
+    je .sec_inlined
+    cmp dword [rax + Scope.kind], SCOPE_COMP
+    je .sec_inlined
+
+.sec_own_scope:
     mov rdi, rbx
     mov rsi, [rbp - SEC_PARENT]
     mov edx, SCOPE_COMP
@@ -2774,6 +2807,16 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     mov rsi, r13
     call ast_at
     mov [rax + AstNode.flags], r12w
+    jmp .sec_have_scope
+
+.sec_inlined:
+    mov r12, [rbp - SEC_PARENT]
+    mov [rbp - SEC_SCOPE], r12
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov [rax + AstNode.flags], r12w
+.sec_have_scope:
 
     ; `async def` is a property of the block itself, not of anything inside it,
     ; so it is stamped here rather than discovered by the walk.
@@ -2788,7 +2831,11 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     or dword [rax + Scope.flags], SCF_COROUTINE
 .not_async:
 
-    ; The implicit parameter.  CPython calls it `.0`, which no source can name.
+    ; The implicit parameter, for a scope of its own only.  CPython calls it
+    ; `.0`, which no source can name; an inlined comprehension has no
+    ; parameter because it has no call.
+    cmp r12, [rbp - SEC_PARENT]
+    je .sec_no_dot_zero
     mov rdi, rbx
     lea rsi, [rel sym_dot_zero]
     call comp_intern_cstr
@@ -2799,6 +2846,7 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     mov rsi, r12
     mov ecx, DEF_PARAM | DEF_LOCAL
     call sym_add
+.sec_no_dot_zero:
 
     mov rdi, rbx
     mov rsi, r13

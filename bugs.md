@@ -14,22 +14,6 @@ reasoning that chose them and what changing one would cost.
 
 ## Correctness
 
-- **Comprehensions are not inlined, so PEP 709's effects are missing.**
-  CPython 3.12 runs a list, dict or set comprehension in the *enclosing*
-  frame; here each still gets a code object and a frame of its own.  Three
-  things follow.  `sys._getframe().f_code.co_name` inside one answers
-  `<listcomp>` rather than the enclosing function's name, and a traceback
-  through one has an extra entry.  A name the enclosing scope can see but did
-  not make a cell -- `__class__` is the one that matters -- is a NameError
-  inside the comprehension, so `[super().m() for _ in r]` in a method works
-  under CPython and does not here.  And the comprehension's own iteration
-  variable does not leak, which is the one part that already matches, because
-  our version has a scope to keep it in.
-
-  Inlining means the comprehension's locals becoming the enclosing function's,
-  with the shadowed ones saved and restored around it, which is a symbol-table
-  change as much as a codegen one.
-
 - **No `encodings` package, so the registry finds only what this tree ships.**
   `str.encode` and `bytes.decode` reach the registry now, and the registry has
   what `lib/_codecs.py` can express without a table: utf-8 and its BOM'd form,
