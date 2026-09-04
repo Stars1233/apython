@@ -20,6 +20,7 @@ extern sys_execve
 extern sys_exit_now
 extern sys_kill
 extern sys_setsid
+extern sys_close_range
 extern posix_int_arg
 extern posix_path_arg
 extern posix_raise_missing
@@ -28,6 +29,7 @@ extern none_singleton
 extern list_new
 extern list_append
 extern list_type
+extern dict_type
 extern tuple_type
 extern str_type
 extern ap_strcmp
@@ -43,6 +45,7 @@ global posix_execv
 global posix_exit_now
 global posix_kill
 global posix_setsid
+global posix_close_range
 global posix_register_at_fork
 global pm_atfork_before
 global pm_atfork_parent
@@ -328,6 +331,49 @@ END_FUNC posix_kill
 
 
 ;; ============================================================================
+;; posix.closerange(fd_low, fd_high) -> None
+;;
+;; Shuts every descriptor in [fd_low, fd_high), which is CPython's half-open
+;; span -- the close_range syscall's is inclusive, so the top is stepped down
+;; by one.  A forked child cannot safely walk /proc to find what it inherited,
+;; and `subprocess` asks for close_fds by DEFAULT, so without this every open
+;; file, socket and pipe in the parent leaks into the child.
+;;
+;; Errors are swallowed, as CPython's is: closing a descriptor that was never
+;; open is the ordinary case, not a failure.
+;; ============================================================================
+DEF_FUNC posix_close_range, 16
+    cmp rsi, 2
+    jl .pcr_argerr
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx]
+    call posix_int_arg
+    push rax
+    push rax
+    mov rdi, [rbx + 8]
+    call posix_int_arg
+    mov rsi, rax
+    pop rdi
+    pop rdi
+    dec rsi                             ; CPython's top is exclusive
+    cmp rsi, rdi
+    jl .pcr_empty
+    xor edx, edx
+    call sys_close_range
+.pcr_empty:
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.pcr_argerr:
+    PM_MISSING "closerange", "fd_high", 2
+END_FUNC posix_close_range
+
+;; ============================================================================
 ;; posix.setsid() -> the new session id
 ;; ============================================================================
 DEF_FUNC posix_setsid
@@ -341,6 +387,7 @@ END_FUNC posix_setsid
 
 ;; ============================================================================
 ;; posix.execv(path, args) -> does not return on success
+;; posix.execve(path, args, env) -> likewise, with the environment given
 ;;
 ;; The argv array is built on the machine stack rather than the heap: this
 ;; runs in a freshly forked child, where the allocator's locks belong to a
@@ -348,22 +395,31 @@ END_FUNC posix_setsid
 ;; theatre -- but the array has to outlive nothing, and the stack is where it
 ;; naturally goes.
 ;;
-;; The child inherits this process's environment, which glibc already keeps
-;; as the NULL-terminated array execve wants.
+;; Without a third argument the child inherits this process's environment,
+;; which glibc already keeps as the NULL-terminated array execve wants.  With
+;; one it gets exactly that list and nothing else -- which is the whole point
+;; of `subprocess.run(env=...)`, and dropping it would hand the child every
+;; variable the caller was trying to keep from it.
 ;; ============================================================================
 PXV_PATH  equ 8
 PXV_ARGS  equ 16
 PXV_N     equ 24
+PXV_NARGS equ 40
 PXV_MAX   equ 256
 ; The vector grows UPWARD from its base, so its slot is the DEEPEST one --
 ; naming it 32 put the first pointer over PXV_ARGS and the second over
 ; PXV_PATH.
-PXV_VEC   equ 32 + (PXV_MAX + 1) * 8
-PXV_FRAME equ ((PXV_VEC + 15) / 16) * 16
+; Two vectors: argv, then envp above it.  Each grows UPWARD from its base, so
+; each slot names the DEEPEST word -- naming argv's 32 put its first pointer
+; over PXV_ARGS and its second over PXV_PATH.
+PXV_VEC   equ 48 + (PXV_MAX + 1) * 8
+PXV_ENV   equ PXV_VEC + (PXV_MAX + 1) * 8
+PXV_FRAME equ ((PXV_ENV + 15) / 16) * 16
 DEF_FUNC posix_execv, PXV_FRAME
     push rbx
     cmp rsi, 2
     jl .pxv_argerr
+    mov [rbp - PXV_NARGS], rsi
     mov rbx, rdi
 
     mov rdi, [rbx]
@@ -374,48 +430,24 @@ DEF_FUNC posix_execv, PXV_FRAME
     jz .pxv_fail
     mov [rbp - PXV_PATH], rax
 
-    mov rax, [rbx + 8]
-    V_TEST_PTR rax, rcx
-    ja .pxv_seqerr
-    mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel list_type]
-    cmp rcx, rdx
-    je .pxv_have_seq
-    lea rdx, [rel tuple_type]
-    cmp rcx, rdx
-    jne .pxv_seqerr
-.pxv_have_seq:
-    mov [rbp - PXV_ARGS], rax
-    mov rcx, [rax + PyTupleObject.ob_size]  ; list and tuple agree here
-    cmp rcx, PXV_MAX
-    jae .pxv_toomany
-    mov [rbp - PXV_N], rcx
+    mov rdi, [rbx + 8]
+    lea rsi, [rbp - PXV_VEC]
+    call pxv_string_vector
+    test rax, rax
+    jz .pxv_fail
 
-    xor r10d, r10d
-.pxv_loop:
-    cmp r10, [rbp - PXV_N]
-    jge .pxv_done
-    mov rax, [rbp - PXV_ARGS]
-    mov rax, [rax + PyTupleObject.ob_item]
-    mov rdi, [rax + r10*8]
-    V_TEST_PTR rdi, rcx
-    ja .pxv_seqerr
-    mov rcx, [rdi + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .pxv_seqerr
-    add rdi, PyStrObject.data
-    lea rax, [rbp - PXV_VEC]
-    mov [rax + r10*8], rdi
-    inc r10
-    jmp .pxv_loop
-.pxv_done:
-    lea rax, [rbp - PXV_VEC]
-    mov qword [rax + r10*8], 0
-
-    ; The child inherits this process's environment, which glibc already
-    ; keeps as the NULL-terminated array execve wants.
+    ; The environment: the caller's when there is one, this process's when
+    ; there is not.
     mov rdx, [rel environ]
+    cmp qword [rbp - PXV_NARGS], 3
+    jl .pxv_have_env
+    mov rdi, [rbx + 16]
+    lea rsi, [rbp - PXV_ENV]
+    call pxv_env_vector
+    test rax, rax
+    jz .pxv_fail
+    lea rdx, [rbp - PXV_ENV]
+.pxv_have_env:
     mov rdi, [rbp - PXV_PATH]
     lea rsi, [rbp - PXV_VEC]
     call sys_execve
@@ -434,3 +466,216 @@ DEF_FUNC posix_execv, PXV_FRAME
 .pxv_argerr:
     PM_MISSING "execv", "args", 2
 END_FUNC posix_execv
+
+;; ============================================================================
+;; pxv_string_vector(rdi = a list or tuple of str, rsi = where to build it)
+;;   -> rax = 1, or 0 with a TypeError or ValueError pending
+;;
+;; A NULL-terminated char*[] pointing INTO the strings, which is what execve
+;; takes.  Nothing is copied: the strings outlive the call, because the call
+;; either replaces the process or fails.
+;; ============================================================================
+PSV_SEQ   equ 8
+PSV_OUT   equ 16
+PSV_N     equ 24
+PSV_FRAME equ 32            ; + 1 push = 40... one word more to land right
+DEF_FUNC_LOCAL pxv_string_vector, 40    ; + 1 push = 48, 16-aligned
+    push rbx
+    mov [rbp - PSV_OUT], rsi
+    mov rax, rdi
+    V_TEST_PTR rax, rcx
+    ja .psv_seqerr
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel list_type]
+    cmp rcx, rdx
+    je .psv_have_seq
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    jne .psv_seqerr
+.psv_have_seq:
+    mov [rbp - PSV_SEQ], rax
+    mov rcx, [rax + PyTupleObject.ob_size]  ; list and tuple agree here
+    cmp rcx, PXV_MAX
+    jae .psv_toomany
+    mov [rbp - PSV_N], rcx
+
+    xor r10d, r10d
+.psv_loop:
+    cmp r10, [rbp - PSV_N]
+    jge .psv_done
+    mov rax, [rbp - PSV_SEQ]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rdi, [rax + r10*8]
+    V_TEST_PTR rdi, rcx
+    ja .psv_seqerr
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .psv_seqerr
+    add rdi, PyStrObject.data
+    mov rax, [rbp - PSV_OUT]
+    mov [rax + r10*8], rdi
+    inc r10
+    jmp .psv_loop
+.psv_done:
+    mov rax, [rbp - PSV_OUT]
+    mov qword [rax + r10*8], 0
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.psv_seqerr:
+    RAISE exc_TypeError_type, "execv() takes a sequence of strings"
+.psv_toomany:
+    RAISE exc_ValueError_type, "execv() was given too many strings"
+END_FUNC pxv_string_vector
+
+;; ============================================================================
+;; pxv_env_vector(rdi = a mapping or a sequence of "K=V" strings,
+;;                rsi = where to build it) -> rax = 1, or 0 with an exception
+;;
+;; CPython's execve takes a MAPPING, and the strings it hands the kernel are
+;; "key=value" pairs it builds itself.  _posixsubprocess already has that list
+;; form -- subprocess.py assembles it -- so both are accepted, and a dict is
+;; flattened into a scratch buffer here.
+;;
+;; The buffer is fixed because this may run in a freshly forked child, where
+;; allocating is the one thing a program is told not to do.  Overflowing it is
+;; a refusal rather than a truncation: a child that ran with HALF an
+;; environment is worse than one that did not run.
+;; ============================================================================
+PEV_MAP   equ 8
+PEV_OUT   equ 16
+PEV_N     equ 24
+PEV_POS   equ 32
+PEV_I     equ 40
+PEV_FRAME equ 64            ; + 2 pushes = 80, 16-aligned
+DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov [rbp - PEV_MAP], rdi
+    mov [rbp - PEV_OUT], rsi
+
+    V_TEST_PTR rbx, rax
+    ja .pev_bad
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    jne .pev_sequence
+
+    mov qword [rbp - PEV_POS], 0
+    mov qword [rbp - PEV_I], 0
+    mov rax, [rbx + PyDictObject.ob_size]
+    cmp rax, PXV_MAX
+    jae .pev_toomany
+    xor r12d, r12d                      ; how many pointers are written
+.pev_loop:
+    mov rcx, [rbp - PEV_I]
+    cmp rcx, [rbx + PyDictObject.capacity]
+    jge .pev_done
+    mov rax, [rbx + PyDictObject.entries]
+    imul rdx, rcx, DictEntry_size
+    mov rdi, [rax + rdx + DictEntry.key]
+    test rdi, rdi
+    jz .pev_next                        ; empty, or a tombstone
+    mov rsi, [rax + rdx + DictEntry.value]
+
+    V_TEST_PTR rdi, rcx
+    ja .pev_bad
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rax, [rel str_type]
+    cmp rcx, rax
+    jne .pev_bad
+    V_TEST_PTR rsi, rcx
+    ja .pev_bad
+    mov rcx, [rsi + PyObject.ob_type]
+    cmp rcx, rax
+    jne .pev_bad
+
+    ; This entry's text starts where the buffer has got to.
+    mov rax, [rbp - PEV_OUT]
+    mov rcx, [rbp - PEV_POS]
+    lea rdx, [rel pxv_envbuf]
+    add rdx, rcx
+    mov [rax + r12*8], rdx
+    inc r12
+
+    push rsi
+    add rdi, PyStrObject.data
+    call pev_append
+    pop rsi
+    test eax, eax
+    jz .pev_full
+    mov rcx, [rbp - PEV_POS]
+    lea rdx, [rel pxv_envbuf]
+    mov byte [rdx + rcx], '='
+    inc qword [rbp - PEV_POS]
+    mov rdi, rsi
+    add rdi, PyStrObject.data
+    call pev_append
+    test eax, eax
+    jz .pev_full
+    mov rcx, [rbp - PEV_POS]
+    lea rdx, [rel pxv_envbuf]
+    mov byte [rdx + rcx], 0
+    inc qword [rbp - PEV_POS]
+.pev_next:
+    inc qword [rbp - PEV_I]
+    jmp .pev_loop
+.pev_done:
+    mov rax, [rbp - PEV_OUT]
+    mov qword [rax + r12*8], 0
+    mov eax, 1
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.pev_sequence:
+    mov rdi, rbx
+    mov rsi, [rbp - PEV_OUT]
+    call pxv_string_vector
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.pev_bad:
+    RAISE exc_TypeError_type, \
+        "execve() arg 3 must be a mapping of str to str"
+.pev_toomany:
+.pev_full:
+    RAISE exc_ValueError_type, "execve() environment is too large"
+
+; Local: append a NUL-terminated string to the scratch buffer, advancing
+; PEV_POS in this frame.  eax = 0 when it would not fit.
+.pev_append_body:
+pev_append:
+    mov rcx, [rbp - PEV_POS]
+    lea rdx, [rel pxv_envbuf]
+.pea_loop:
+    cmp rcx, PXV_ENVBUF - 2
+    jae .pea_full
+    movzx eax, byte [rdi]
+    test al, al
+    jz .pea_done
+    mov [rdx + rcx], al
+    inc rcx
+    inc rdi
+    jmp .pea_loop
+.pea_done:
+    mov [rbp - PEV_POS], rcx
+    mov eax, 1
+    ret
+.pea_full:
+    xor eax, eax
+    ret
+END_FUNC pxv_env_vector
+
+PXV_ENVBUF equ 65536
+
+section .bss
+; The environment a dict is flattened into.  Fixed, because this may run in a
+; freshly forked child where allocating is the one thing not to do.
+pxv_envbuf: resb PXV_ENVBUF

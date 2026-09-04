@@ -202,19 +202,19 @@ distinction in `builtin_func_call`, and a second repr; the gain is the name
 `type()` prints.  This is the same choice recorded above about having one
 builtin callable type where CPython has four.
 
-## `subprocess` runs a child without close_fds, signals or credentials
+## `subprocess` cannot change the child's credentials, and says so
 
-`_posixsubprocess.fork_exec` takes CPython's twenty-two arguments and honours
-the ones that decide what the child IS: the executable list, the three pipes,
-the working directory, `start_new_session` and `preexec_fn`.  Seven it accepts
-and drops -- `close_fds`, `restore_signals`, `process_group`, `gid`, `gids`,
-`uid` and `umask` -- because this interpreter has no signal handlers to
-restore, no credential syscalls, and no way to enumerate the open descriptors
-that `close_fds` would close.
+`_posixsubprocess.fork_exec` takes CPython's twenty-two arguments.  The ones
+that decide what the child sees are honoured: the executable list, the three
+pipes, the working directory, the environment, `close_fds`,
+`start_new_session` and `preexec_fn`.  `restore_signals` is honoured by
+having nothing to restore -- this interpreter installs no handlers, so a
+child starts with the dispositions it inherited, which is what the flag asks
+for.
 
-A caller that asked for one of them gets a child that ran without it rather
-than a failure, which is the choice worth recording: `subprocess.run` with
-the defaults works, and a program that relies on `close_fds=True` to keep a
-descriptor out of the child does not get what it asked for.  Closing the
-three pipes it knows about is done; the rest would need /proc or a
-close_range syscall.
+The five to do with credentials -- `uid`, `gid`, `gids`, `umask` and
+`process_group` -- raise `NotImplementedError`.  That is the divergence, and
+it is deliberate: there are no setuid, setgid or setpgid syscalls here, and a
+caller who passed `user=` to drop privileges must not be handed a child that
+quietly kept them.  Refusing to run is the safe answer; running as root when
+asked not to is not.

@@ -84,6 +84,7 @@ SYS_execve          equ 59
 SYS_exit            equ 60
 SYS_kill            equ 62
 SYS_setsid          equ 112
+SYS_close_range     equ 436
 
 ;; ============================================================================
 ;; sys_write(int fd, const void *buf, size_t len) -> ssize_t
@@ -1100,6 +1101,17 @@ DEF_FUNC_BARE sys_exit_now
     syscall
     ud2
 END_FUNC sys_exit_now
+
+;; ============================================================================
+;; sys_close_range(unsigned first, unsigned last, int flags) -> int
+;; Linux 5.9.  The only way to shut every inherited descriptor without
+;; enumerating /proc, which is what a forked child cannot safely read.
+;; ============================================================================
+DEF_FUNC_BARE sys_close_range
+    mov rax, SYS_close_range
+    syscall
+    ret
+END_FUNC sys_close_range
 
 ;; ============================================================================
 ;; sys_kill(pid_t pid, int sig) -> int

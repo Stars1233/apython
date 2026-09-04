@@ -115,6 +115,7 @@ extern sys_fchmod
 extern sys_fsync
 extern posix_fork
 extern posix_execv
+extern posix_close_range
 extern posix_exit_now
 extern posix_kill
 extern posix_setsid
@@ -3033,6 +3034,10 @@ DEF_FUNC posix_module_create, 40
     MODULE_ADD_FUNC posix_fork, pm_n_fork
     MODULE_ADD_FUNC posix_register_at_fork, pm_n_reg_at_fork
     MODULE_ADD_FUNC posix_execv, pm_n_execv
+    ; execve is the same function: it takes the environment as a third
+    ; argument, and execv is that call with the argument left off.
+    MODULE_ADD_FUNC posix_execv, pm_n_execve
+    MODULE_ADD_FUNC posix_close_range, pm_n_close_range
     MODULE_ADD_FUNC posix_exit_now, pm_n_exit_now
     MODULE_ADD_FUNC posix_kill, pm_n_kill
     MODULE_ADD_FUNC posix_setsid, pm_n_setsid
@@ -3202,6 +3207,8 @@ pm_n_dup2:       db "dup2", 0
 pm_n_fork:       db "fork", 0
 pm_n_reg_at_fork: db "register_at_fork", 0
 pm_n_execv:      db "execv", 0
+pm_n_execve:     db "execve", 0
+pm_n_close_range: db "closerange", 0
 pm_n_exit_now:   db "_exit", 0
 pm_n_kill:       db "kill", 0
 pm_n_setsid:     db "setsid", 0

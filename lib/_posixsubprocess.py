@@ -8,20 +8,35 @@ this does after the fork is a syscall.
 
 `subprocess` calls one function, `fork_exec`, and reads the result the same
 way CPython's does: the child writes an exception to the error pipe and
-_exits, the parent reads it and re-raises.  Seven modules of CPython's Lib/
-stop at this import.
+_exits, the parent reads it and re-raises.
+
+The arguments that are NOT honoured raise rather than being ignored.  That is
+the whole rule here: a caller who asked to drop privileges, or to run with a
+scrubbed environment, must not be handed a child that quietly did neither.
 """
 
 import posix
+
+# What `subprocess` may ask for that this interpreter cannot do.  Each is
+# refused by name rather than dropped: silently running a child as root when
+# `user=` said otherwise, or with the parent's environment when `env=` said
+# otherwise, is worse than not running it at all.
+_UNSUPPORTED = (
+    ("uid", "user="),
+    ("gid", "group="),
+    ("gids", "extra_groups="),
+    ("umask", "umask="),
+    ("process_group", "process_group="),
+)
 
 
 def _write_error(errpipe_write, exc_type, errno_num, what):
     """The child's half of the error protocol.
 
-    CPython's format is `OSError:<errno>:<message>` on one line, with a
-    leading "OSError" for the class subprocess re-raises.  Anything that goes
-    wrong writing it is dropped: the child is about to _exit, and the parent
-    will report a bare failure rather than nothing.
+    CPython's format is `<class>:<errno>:<message>` on one line, and
+    subprocess.py splits on the colons.  Anything that goes wrong writing it
+    is dropped: the child is about to _exit, and the parent will report a
+    bare failure rather than nothing.
     """
     try:
         msg = ("%s:%d:%s" % (exc_type, errno_num, what)).encode("utf-8",
@@ -29,6 +44,24 @@ def _write_error(errpipe_write, exc_type, errno_num, what):
         posix.write(errpipe_write, msg)
     except Exception:
         pass
+
+
+def _close_inherited(fds_to_keep):
+    """Shut every descriptor above 2 that is not on the keep list.
+
+    `subprocess` asks for this by DEFAULT, and without it every open file,
+    socket and pipe in the parent is inherited by the child -- which is the
+    thing close_fds exists to prevent.  close_range takes an inclusive span,
+    so the keep list is walked in order and the gaps between are closed.
+    """
+    keep = sorted(set(int(fd) for fd in (fds_to_keep or ())) | {0, 1, 2})
+    low = 3
+    for fd in keep:
+        if fd >= low:
+            if fd > low:
+                posix.closerange(low, fd)
+            low = fd + 1
+    posix.closerange(low, 0x7FFFFFFF)
 
 
 def fork_exec(args, executable_list, close_fds, fds_to_keep, cwd, env_list,
@@ -39,12 +72,22 @@ def fork_exec(args, executable_list, close_fds, fds_to_keep, cwd, env_list,
     """Fork, wire the three pipes up, and exec.  Answers the child's pid.
 
     The arguments are CPython's, in CPython's order, because subprocess.py
-    passes them positionally.  Several are accepted and ignored, and each
-    says so where it is dropped.
+    passes them positionally.
     """
     if args is None:
         raise ValueError("no args to exec")
+    for value, spelling in _UNSUPPORTED:
+        got = locals()[value]
+        if got is not None and got != -1:
+            raise NotImplementedError(
+                "%s is not supported: this interpreter has no way to change "
+                "the child's credentials, and running it without the change "
+                "would not be what was asked for" % (spelling,))
     argv = [a if isinstance(a, bytes) else _fsencode(a) for a in args]
+    envv = None
+    if env_list is not None:
+        envv = [e.decode("utf-8", "surrogateescape") if isinstance(e, bytes)
+                else e for e in env_list]
 
     pid = posix.fork()
     if pid != 0:
@@ -57,38 +100,41 @@ def fork_exec(args, executable_list, close_fds, fds_to_keep, cwd, env_list,
         for src, dst in ((p2cread, 0), (c2pwrite, 1), (errwrite, 2)):
             if src is not None and src != -1 and src != dst:
                 posix.dup2(src, dst)
-        if c2pwrite != -1 and errwrite != -1 and errwrite == c2pwrite:
-            pass
-        for fd in (p2cread, p2cwrite, c2pread, c2pwrite, errread, errwrite):
-            if fd is not None and fd != -1 and fd > 2:
-                try:
-                    posix.close(fd)
-                except OSError:
-                    pass
+
+        if close_fds:
+            _close_inherited(tuple(fds_to_keep or ()) + (errpipe_write,))
+        else:
+            for fd in (p2cread, p2cwrite, c2pread, c2pwrite, errread, errwrite):
+                if fd is not None and fd != -1 and fd > 2 and fd != errpipe_write:
+                    try:
+                        posix.close(fd)
+                    except OSError:
+                        pass
 
         if start_new_session:
             posix.setsid()
         if cwd is not None:
             posix.chdir(cwd if isinstance(cwd, str) else cwd.decode("utf-8"))
 
-        # close_fds, restore_signals, process_group, gid, gids, uid, umask
-        # and preexec_fn are accepted and dropped: this interpreter has no
-        # signal handlers to restore, no credential syscalls, and no way to
-        # enumerate open descriptors.  A caller that asked for one of them
-        # gets a child that ran without it rather than a failure, which is
-        # what DIVERGENCES.md records.
+        # restore_signals is honoured by having nothing to restore: this
+        # interpreter installs no handlers, so a child starts with the
+        # dispositions it inherited, which is what the flag asks for.
         if preexec_fn is not None:
             preexec_fn()
 
+        last = OSError(2, "No such file or directory")
         for exe in (executable_list or ()):
             path = exe if isinstance(exe, str) else exe.decode("utf-8",
                                                               "surrogateescape")
             names = [a.decode("utf-8", "surrogateescape") for a in argv]
             try:
-                posix.execv(path, names)
+                if envv is None:
+                    posix.execv(path, names)
+                else:
+                    posix.execve(path, names, envv)
             except OSError as e:
                 last = e
-        raise last if executable_list else OSError(2, "no executable given")
+        raise last
     except BaseException as e:
         errno_num = getattr(e, "errno", 0) or 0
         _write_error(errpipe_write, type(e).__name__, errno_num, str(e))

@@ -395,6 +395,7 @@ test_subclass_binop
 test_subclass_contains
 test_subclasses
 test_subclass_item_slots
+test_subprocess_child
 test_sum_protocol
 test_super_descriptors
 test_super_object
