@@ -38,6 +38,7 @@ extern ast_end_here
 extern ast_mark
 extern ast_obj
 extern ast_push
+extern comp_msg_i64
 extern comp_error
 
 extern ap_free
@@ -1452,8 +1453,9 @@ DEF_FUNC_BARE par_hexval
 END_FUNC par_hexval
 
 ;; ============================================================================
-;; par_escape_one(Comp *c, Buf *out, const char *p, const char *end, int bytes)
-;;   -> rax = the position just past the escape, or 0 on error
+;; par_escape_one(Comp *c, Buf *out, const char *p, const char *end, int bytes,
+;;                 const char *content) -> rax = the position just past the
+;;                 escape, or 0 on error
 ;;
 ;; `p` points at the character AFTER the backslash.  Factored out of
 ;; par_string_body so that the literal parts of an f-string get the same
@@ -1466,7 +1468,10 @@ PSE_P     equ 24
 PSE_END   equ 32
 PSE_BYTES equ 40
 PSE_ACC   equ 48
-PSE_FRAME equ 72          ; + 3 pushes = 96
+PSE_CONT  equ 56          ; where the literal's content starts, for the message
+PSE_ESC   equ 64          ; and where THIS escape's backslash is
+PSE_WANT  equ 72          ; how many hex digits it wanted, for the message
+PSE_FRAME equ 88          ; + 3 pushes = 112, 16-aligned
 DEF_FUNC par_escape_one, PSE_FRAME
     push rbx
     push r12
@@ -1474,6 +1479,10 @@ DEF_FUNC par_escape_one, PSE_FRAME
     mov rbx, rdi
     mov [rbp - PSE_COMP], rdi
     mov [rbp - PSE_OUT], rsi
+    mov [rbp - PSE_CONT], r9
+    lea rax, [rdx - 1]                  ; the backslash itself
+    mov [rbp - PSE_ESC], rax
+    mov qword [rbp - PSE_WANT], 2
     mov [rbp - PSE_P], rdx
     mov [rbp - PSE_END], rcx
     mov [rbp - PSE_BYTES], r8
@@ -1614,9 +1623,16 @@ DEF_FUNC par_escape_one, PSE_FRAME
     call par_utf8_emit
     jmp .pe_done
 .named_unknown:
+    ; r12 is one past the closing brace; the escape began two bytes before
+    ; the `N`, which is what PSE_P pointed at on the way in.
     mov rdi, rbx
-    CSTRING rsi, "unknown Unicode character name"
-    call par_syntax_error
+    mov rsi, [rbp - PSE_CONT]
+    mov rdx, [rbp - PSE_ESC]
+    mov rcx, r12
+    sub rcx, rdx                        ; the escape's length
+    CSTRING r8, "unknown Unicode character name"
+    mov r9, [rbp - PSE_BYTES]
+    call par_escape_error
     xor eax, eax
     pop r13
     pop r12
@@ -1633,6 +1649,7 @@ DEF_FUNC par_escape_one, PSE_FRAME
 .e_hex8:
     mov r13d, 8
 .hex_common:
+    mov [rbp - PSE_WANT], r13
     ; \u and \U have no meaning in a bytes literal; only \x does.
     cmp r13d, 2
     je .hex_go
@@ -1678,9 +1695,26 @@ DEF_FUNC par_escape_one, PSE_FRAME
     leave
     ret
 .pe_bad:
+    ; CPython's wording is the codec's, wrapped, and it names the escape it
+    ; could not finish: \x wants two hex digits, \u four, \U eight.  The
+    ; span it reports is the escape as WRITTEN -- the backslash, the letter
+    ; and whatever digits were there -- which PSE_P has already walked to.
     mov rdi, rbx
-    CSTRING rsi, "invalid escape sequence in string literal"
-    call par_syntax_error
+    mov rsi, [rbp - PSE_CONT]
+    mov rdx, [rbp - PSE_ESC]
+    mov rcx, [rbp - PSE_P]
+    sub rcx, rdx
+    CSTRING r8, "truncated \xXX escape"
+    cmp qword [rbp - PSE_WANT], 4
+    jne .pe_bad_not_u
+    CSTRING r8, "truncated \uXXXX escape"
+.pe_bad_not_u:
+    cmp qword [rbp - PSE_WANT], 8
+    jne .pe_bad_have_why
+    CSTRING r8, "truncated \UXXXXXXXX escape"
+.pe_bad_have_why:
+    mov r9, [rbp - PSE_BYTES]
+    call par_escape_error
     xor eax, eax
     pop r13
     pop r12
@@ -1707,6 +1741,7 @@ PB_P     equ 32
 PB_END   equ 40
 PB_RAW   equ 48
 PB_BYTES equ 56
+PB_CONTENT equ 64        ; the first byte after the opening quotes
 PB_FRAME equ 72          ; + 3 pushes = 96
 DEF_FUNC par_string_body, PB_FRAME
     push rbx
@@ -1756,6 +1791,7 @@ DEF_FUNC par_string_body, PB_FRAME
     add r12, rdx
     sub r13, rdx                        ; drop the closing quote run
     mov [rbp - PB_P], r12
+    mov [rbp - PB_CONTENT], r12
     mov [rbp - PB_END], r13
 
 .loop:
@@ -1789,6 +1825,7 @@ DEF_FUNC par_string_body, PB_FRAME
     inc rdx                             ; past the backslash
     mov rcx, [rbp - PB_END]
     mov r8, [rbp - PB_BYTES]
+    mov r9, [rbp - PB_CONTENT]
     call par_escape_one
     test rax, rax
     jz .failed
@@ -3823,3 +3860,89 @@ DEF_FUNC_BARE par_last_pushed
     xor eax, eax
     ret
 END_FUNC par_last_pushed
+
+;; ============================================================================
+;; par_escape_error(rdi = Comp*, rsi = the literal's content, rdx = the
+;;                  backslash, rcx = the escape's length, r8 = the reason,
+;;                  r9 = non-zero for a bytes literal) -> rax = 0, always
+;;
+;; CPython does not report a bad escape itself: it hands the literal to the
+;; unicode_escape codec and wraps whatever that says, so the message names the
+;; codec, the position WITHIN the literal, and the codec's own reason --
+;;   (unicode error) 'unicodeescape' codec can't decode bytes in position 0-7:
+;;   unknown Unicode character name
+;; A bytes literal goes through a different path and gets a different shape:
+;;   (value error) invalid \x escape at position 0
+;; The span is the whole string token either way, which is what the parser is
+;; looking at when this is called.
+;; ============================================================================
+PEE_COMP  equ 8
+PEE_POS   equ 16
+PEE_LEN   equ 24
+PEE_WHY   equ 32
+PEE_BYTES equ 40
+PEE_FRAME equ 48            ; + 1 push = 56... one word more to land right
+DEF_FUNC_LOCAL par_escape_error, 56     ; + 1 push = 64, 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PEE_COMP], rdi
+    sub rdx, rsi
+    mov [rbp - PEE_POS], rdx            ; the position within the content
+    mov [rbp - PEE_LEN], rcx
+    mov [rbp - PEE_WHY], r8
+    mov [rbp - PEE_BYTES], r9
+
+    call comp_msg_start
+    push rax
+    mov rdi, rax
+    cmp qword [rbp - PEE_BYTES], 0
+    jne .pee_bytes
+    CSTRING rsi, "(unicode error) 'unicodeescape' codec can't decode bytes in position "
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rbp - PEE_POS]
+    call comp_msg_i64
+    mov rdi, rax
+    CSTRING rsi, "-"
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rbp - PEE_POS]
+    add rsi, [rbp - PEE_LEN]
+    dec rsi
+    call comp_msg_i64
+    mov rdi, rax
+    CSTRING rsi, ": "
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rbp - PEE_WHY]
+    call comp_msg_cstr
+    jmp .pee_have_msg
+
+.pee_bytes:
+    CSTRING rsi, "(value error) invalid \x escape at position "
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rbp - PEE_POS]
+    call comp_msg_i64
+
+.pee_have_msg:
+    pop rdx                             ; the message
+
+    ; The span is the whole string token, which is the one the parser is on.
+    push rdx
+    mov rdi, rbx
+    call par_peek
+    pop rdx
+    mov ecx, [rax + Token.lineno]
+    mov r8d, [rax + Token.col]
+    mov r9d, ecx
+    mov r10d, [rax + Token.len]
+    add r10d, r8d
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    call comp_error_span
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_escape_error

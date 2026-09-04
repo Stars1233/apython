@@ -225,6 +225,7 @@ DEF_FUNC par_fstring_pieces, FS2_FRAME
     inc rdx                             ; past the backslash
     mov rcx, [rbp - FS2_END]
     xor r8d, r8d                        ; an f-string is never bytes
+    mov r9, [rbp - FS2_PSTART]
     extern par_escape_one
     call par_escape_one
     test rax, rax
