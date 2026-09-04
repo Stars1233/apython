@@ -17,6 +17,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern obj_is_true
 %include "opcodes.inc"
 
 
@@ -817,11 +818,15 @@ DEF_FUNC bytes_method_splitlines, BSL_FRAME
     jg .bsl_args
     mov r15, rdi                ; args
 
+    ; keepends is a truth value, not an index: CPython takes anything and
+    ; asks whether it is true, so splitlines("x") splits with the ends kept
+    ; rather than raising about a str.
     mov qword [rbp - BSL_KEEP], 0
     cmp rsi, 2
     jl .bsl_have_keep
     mov rdi, [r15 + 8]
-    call bs_arg_i64
+    call obj_is_true
+    movsx rax, eax
     mov [rbp - BSL_KEEP], rax
 .bsl_have_keep:
 

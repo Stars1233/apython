@@ -218,6 +218,7 @@ test_import_from
 test_import_kwargs
 test_import_module
 test_import_sys
+test_index_arguments
 test_inheritance
 test_init_raises
 test_init_subclass_kwargs
@@ -303,6 +304,7 @@ test_posix_files
 test_posix_more
 test_posix_pathlike
 test_posix
+test_pow_dunder
 test_pow
 test_prepare_raises
 test_print_file

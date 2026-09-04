@@ -6,6 +6,8 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern obj_as_index
+extern obj_as_slice_index
 %include "opcodes.inc"
 
 ; External functions
@@ -95,7 +97,7 @@ DEF_FUNC list_method_pop, 8            ; 3 pushes, so rsp is 16-aligned
 .pop_idx:
     mov rdi, [rax + 8]    ; args[1]
     V_UNPACK rdi, rdx       ; args[1]
-    call int_to_i64
+    call obj_as_index       ; an index, so __index__ counts and a str does not
     mov r13, rax
 
     ; Handle negative index
@@ -165,7 +167,7 @@ DEF_FUNC list_method_insert
     ; Get index
     mov rdi, [rax + 8]     ; args[1] payload (16B stride)
     V_UNPACK rdi, rdx       ; args[1]
-    call int_to_i64
+    call obj_as_index       ; an index, so __index__ counts and a str does not
     mov r12, rax            ; index
 
     pop rax
@@ -1392,7 +1394,7 @@ DEF_FUNC list_method_index, LI_FRAME
     mov rax, [rbp - LI_ARGS]
     mov rdi, [rax + 16]      ; args[2] payload
     V_UNPACK rdi, rdx       ; args[2]
-    call int_to_i64
+    call obj_as_slice_index
     ; Handle negative start
     test rax, rax
     jns .li_start_pos
@@ -1410,7 +1412,7 @@ DEF_FUNC list_method_index, LI_FRAME
     mov rax, [rbp - LI_ARGS]
     mov rdi, [rax + 24]      ; args[3] payload
     V_UNPACK rdi, rdx       ; args[3]
-    call int_to_i64
+    call obj_as_slice_index
     ; Handle negative stop
     test rax, rax
     jns .li_stop_pos

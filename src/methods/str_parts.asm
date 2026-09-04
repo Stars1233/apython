@@ -335,7 +335,7 @@ DEF_FUNC str_method_expandtabs, ET_FRAME
     mov rax, rdi
     mov rdi, [rax + 8]
     V_UNPACK rdi, rdx       ; args[1]
-    call int_to_i64
+    call obj_as_index       ; a tabsize is an index, and names its own type
     mov r13, rax
 .et_have_tab:
     mov [rbp - ET_TAB], r13

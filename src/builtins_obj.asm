@@ -2732,16 +2732,19 @@ DEF_FUNC builtin_delattr_fn, DA2_FRAME
     mov rax, [rdi + 8]       ; name payload
     mov [rbp - DA2_NAME], rax
 
-    ; obj must be a heap pointer
+    ; An immediate has no attributes at all, and neither does a type with no
+    ; tp_setattr -- but that is an AttributeError naming the type and the
+    ; name, exactly as `del x.y` gives, not a complaint about delattr's own
+    ; first argument.
     V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
-    ja .da2_type_error
+    ja .da2_no_attr
 
     ; Get type and tp_setattr
     mov rdi, [rbp - DA2_OBJ]
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_setattr]
     test rax, rax
-    jz .da2_attr_error
+    jz .da2_no_attr
 
     ; Call tp_setattr(obj, name, NULL=delete)
     mov rdi, [rbp - DA2_OBJ]
@@ -2770,11 +2773,12 @@ DEF_FUNC builtin_delattr_fn, DA2_FRAME
     V_PACK rax, rdx
     ret
 
-.da2_type_error:
-    RAISE exc_TypeError_type, "delattr: first argument must be an object"
-
-.da2_attr_error:
-    RAISE exc_AttributeError_type, "object does not support attribute deletion"
+.da2_no_attr:
+    mov rdi, [rbp - DA2_OBJ]
+    mov rsi, [rbp - DA2_NAME]
+    mov edx, 1
+    extern raise_no_attribute
+    call raise_no_attribute     ; does not return
 
 .da2_nargs_error:
     RAISE exc_TypeError_type, "delattr() takes exactly 2 arguments"

@@ -3,6 +3,8 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "opcodes.inc"
+extern obj_richcompare_bool
 
 extern ap_malloc
 extern gc_alloc
@@ -794,6 +796,83 @@ DEF_FUNC range_arg_i64, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     ret
 END_FUNC range_arg_i64
+;; ============================================================================
+;; range_obj_sq_contains(rdi = the range, rsi = a Value) -> eax = 0 or 1
+;;
+;; `x in range(n)` is arithmetic, not a walk: range_index_of already answers
+;; where a value would sit, and -1 for one that is not a member.  Without the
+;; slot, `x in r` fell through to CONTAINS_OP's iterating fallback -- correct
+;; but O(n) -- and `r.__contains__(x)` raised, because generic_method_contains
+;; has nothing to call.  Anything that is not an integer is compared the slow
+;; way, as CPython does, so `1.0 in range(3)` is still True.
+;; ============================================================================
+RSC_VAL   equ 8
+RSC_SELF  equ 16
+RSC_ARG   equ 24             ; the argument as a Value, for the walk below
+RSC_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC_LOCAL range_obj_sq_contains, RSC_FRAME
+    mov [rbp - RSC_SELF], rdi
+    mov [rbp - RSC_ARG], rsi
+    mov rdi, rsi
+    lea rsi, [rbp - RSC_VAL]
+    call range_arg_i64
+    test eax, eax
+    jz .rsc_walk
+    mov rdi, [rbp - RSC_SELF]
+    mov rsi, [rbp - RSC_VAL]
+    call range_index_of
+    cmp rax, -1
+    je .rsc_no
+    mov eax, 1
+    leave
+    ret
+
+.rsc_walk:
+    ; Not an integer.  A float or a bool can still equal a member, and
+    ; CPython answers by walking.
+    push rbx
+    push r12
+    push r13
+    sub rsp, 8                  ; 3 pushes + this = 32, so rsp stays aligned
+    mov r13, [rbp - RSC_ARG]    ; range_arg_i64 clobbered rsi
+    mov rbx, [rbp - RSC_SELF]
+    mov rdi, rbx
+    call range_obj_sq_length
+    mov r12, rax                ; the count
+.rsc_loop:
+    test r12, r12
+    jle .rsc_walk_no
+    dec r12
+    mov rdi, rbx
+    mov rsi, r12
+    call range_obj_sq_item      ; returns a Value
+    mov rdi, rax
+    mov rsi, r13
+    mov edx, CMP_EQ
+    call obj_richcompare_bool
+    test eax, eax
+    jg .rsc_walk_yes
+    js .rsc_walk_no             ; the comparison raised; leave it pending
+    jmp .rsc_loop
+.rsc_walk_yes:
+    mov eax, 1
+    jmp .rsc_walk_done
+.rsc_walk_no:
+    xor eax, eax
+.rsc_walk_done:
+    add rsp, 8
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.rsc_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC range_obj_sq_contains
+
 
 ;; range_method_index(args, nargs) -> the index of the value
 RMI_VAL   equ 8
@@ -1248,6 +1327,6 @@ range_obj_seq_methods:
     dq 0                        ; sq_repeat
     dq range_obj_sq_item        ; sq_item
     dq 0                        ; sq_ass_item
-    dq 0                        ; sq_contains
+    dq range_obj_sq_contains    ; sq_contains
     dq 0                        ; sq_inplace_concat
     dq 0                        ; sq_inplace_repeat

@@ -563,6 +563,38 @@ DEF_FUNC obj_str
     leave
     ret
 END_FUNC obj_str
+;; ============================================================================
+;; obj_as_slice_index(rdi = payload, edx = tag) -> rax = the i64, or does not
+;; return
+;;
+;; obj_as_index with CPython's other wording.  The start and stop of
+;; list.index and tuple.index are slice bounds, and CPython blames them as
+;; such -- "slice indices must be integers or have an __index__ method" --
+;; where a tabsize or a repetition count gets "'str' object cannot be
+;; interpreted as an integer".  The acceptance test is the same one
+;; obj_as_index applies; only the refusal differs, so this decides and hands
+;; over.
+;; ============================================================================
+global obj_as_slice_index
+DEF_FUNC obj_as_slice_index
+    cmp edx, TAG_SMALLINT
+    je .oasi_ok
+    cmp edx, TAG_PTR
+    jne .oasi_bad
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz .oasi_bad
+    cmp qword [rax + PyNumberMethods.nb_index], 0
+    je .oasi_bad
+.oasi_ok:
+    leave
+    jmp obj_as_index
+.oasi_bad:
+    RAISE exc_TypeError_type, \
+        "slice indices must be integers or have an __index__ method"
+END_FUNC obj_as_slice_index
+
 
 ;; ============================================================================
 ;; obj_as_index(rdi = payload, edx = tag) -> rax = int64

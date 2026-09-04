@@ -738,10 +738,19 @@ DEF_FUNC_LOCAL set_add_operator_methods, SAOM_FRAME
 END_FUNC set_add_operator_methods
 
 ;; ADD_CLASSMETHOD name, impl -- the dict is in rbx, as everywhere else here.
+;; ADD_CLASSMETHOD_N name, impl, min, max -- the same, with argument-count
+;; bounds.  A classmethod took none, so `float.fromhex()` reached an
+;; implementation that reads args[1] and read past the array.
 %macro ADD_CLASSMETHOD 2
+    ADD_CLASSMETHOD_N %1, %2, 0, -1
+%endmacro
+
+%macro ADD_CLASSMETHOD_N 4
     lea rdi, [rel %2]
     lea rsi, [rel %1]
-    call builtin_func_new
+    mov rdx, %3
+    mov rcx, %4
+    call builtin_func_new_checked
     push rax
     mov edi, PyClassMethodObject_size
     lea rsi, [rel classmethod_type]
@@ -1188,35 +1197,7 @@ DEF_FUNC methods_init
     ADD_FN_N mn___reversed__, dict_reversed, 1, 1
 
     ; Add fromkeys as classmethod
-    lea rdi, [rel dict_classmethod_fromkeys]
-    lea rsi, [rel mn_fromkeys]
-    call builtin_func_new
-    push rax
-
-    mov edi, PyClassMethodObject_size
-    lea rsi, [rel classmethod_type]
-    call gc_alloc
-    pop rcx
-    mov [rax + PyClassMethodObject.cm_callable], rcx
-    push rax
-    mov rdi, rax
-    call gc_track
-    pop rax
-    push rax
-
-    lea rdi, [rel mn_fromkeys]
-    call str_from_cstr_heap
-    push rax
-
-    mov rdi, rbx
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    call dict_set
-
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
+    ADD_CLASSMETHOD_N mn_fromkeys, dict_classmethod_fromkeys, 2, 3
 
     mov rdi, rbx
     lea rsi, [rel container_dunder_new]
@@ -1493,10 +1474,8 @@ DEF_FUNC methods_init
     ; __init__, __str__ and __repr__ so the base type is introspectable
     ADD_FN mn___init__, object_method_init
 
-    ADD_FN mn___str__, object_method_str
-
-    ADD_FN mn___repr__, object_method_repr
-
+    ADD_FN_N mn___str__, object_method_str, 1, 1
+    ADD_FN_N mn___repr__, object_method_repr, 1, 1
     ; The rest of what object supplies by name.  types.py and enum both ask
     ; whether a class overrode one of these, which means asking object for its
     ; own first.
@@ -1517,8 +1496,7 @@ DEF_FUNC methods_init
     pop rdi
     call obj_decref
 
-    ADD_FN mn___sizeof__, object_method_sizeof
-
+    ADD_FN_N mn___sizeof__, object_method_sizeof, 1, 1
     ; A classmethod: `super().__init_subclass__()` is how every real one ends.
     lea rdi, [rel object_method_init_subclass]
     lea rsi, [rel mn___init_subclass__]
@@ -1544,40 +1522,36 @@ DEF_FUNC methods_init
     mov rdi, r12
     call obj_decref
 
-    ADD_FN mn___dir__, object_method_dir
-
+    ADD_FN_N mn___dir__, object_method_dir, 1, 1
     ADD_FN mn___reduce__, object_method_reduce
 
     ADD_FN mn___reduce_ex__, object_method_reduce
 
     ; The comparisons, which every class inherits and the stdlib binds by
     ; name: `__ne__ = MutableMapping.__ne__` reaches object's.
-    ADD_FN mn___eq__, object_method_eq
-    ADD_FN mn___ne__, object_method_ne
-    ADD_FN mn___hash__, object_method_hash
-
+    ADD_FN_N mn___eq__, object_method_eq, 2, 2
+    ADD_FN_N mn___ne__, object_method_ne, 2, 2
+    ADD_FN_N mn___hash__, object_method_hash, 1, 1
     ; The ordering four, which answer NotImplemented.  They are safe for the
     ; same reason __eq__ is: type_install_slots installs no wrapper over a
     ; dunder that came from a type which is not a heaptype, and object is
     ; not, so a builtin subclass keeps its base's comparison rather than
     ; object's.
     extern object_method_lt
-    ADD_FN mn___lt__, object_method_lt
+    ADD_FN_N mn___lt__, object_method_lt, 2, 2
     extern object_method_le
-    ADD_FN mn___le__, object_method_le
+    ADD_FN_N mn___le__, object_method_le, 2, 2
     extern object_method_gt
-    ADD_FN mn___gt__, object_method_gt
+    ADD_FN_N mn___gt__, object_method_gt, 2, 2
     extern object_method_ge
-    ADD_FN mn___ge__, object_method_ge
-
+    ADD_FN_N mn___ge__, object_method_ge, 2, 2
     ; The generic attribute dunders, and the two hooks.  All five were
     ; absent, and every type inherits them -- abcmod has been looking for
     ; __subclasshook__ since it was written and silently finding nothing.
-    ADD_FN mn___setattr__, object_method_setattr
-    ADD_FN mn___delattr__, object_method_delattr
-    ADD_FN mn___getattribute__, object_method_getattribute
-    ADD_FN mn___getstate__, object_method_getstate
-
+    ADD_FN_N mn___setattr__, object_method_setattr, 3, 3
+    ADD_FN_N mn___delattr__, object_method_delattr, 2, 2
+    ADD_FN_N mn___getattribute__, object_method_getattribute, 2, 2
+    ADD_FN_N mn___getstate__, object_method_getstate, 1, 1
     ; __subclasshook__ is a classmethod: it takes the class explicitly.
     lea rdi, [rel object_method_subclasshook]
     lea rsi, [rel mn___subclasshook__]
@@ -2075,35 +2049,7 @@ DEF_FUNC methods_init
 
 
     ; Add fromhex as classmethod
-    lea rdi, [rel float_classmethod_fromhex]
-    lea rsi, [rel mn_fromhex]
-    call builtin_func_new
-    push rax
-
-    mov edi, PyClassMethodObject_size
-    lea rsi, [rel classmethod_type]
-    call gc_alloc
-    pop rcx
-    mov [rax + PyClassMethodObject.cm_callable], rcx
-    push rax
-    mov rdi, rax
-    call gc_track
-    pop rax
-    push rax
-
-    lea rdi, [rel mn_fromhex]
-    call str_from_cstr_heap
-    push rax
-
-    mov rdi, rbx
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    call dict_set
-
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
+    ADD_CLASSMETHOD_N mn_fromhex, float_classmethod_fromhex, 2, 2
 
     ADD_FN_N mn___format__, builtin_method_format, 2, 2
 
@@ -2204,7 +2150,7 @@ DEF_FUNC methods_init
     ; And its inverse, which binascii.unhexlify needs -- and binascii is what
     ; base64, quopri, uu and plistlib come in behind.
     extern bytes_fromhex_impl
-    ADD_CLASSMETHOD mn_fromhex, bytes_fromhex_impl
+    ADD_CLASSMETHOD_N mn_fromhex, bytes_fromhex_impl, 2, 2
 
     ADD_FN_N mn_startswith, bytes_method_startswith, 2, 4
 
@@ -2347,7 +2293,7 @@ DEF_FUNC methods_init
 
     ; The same classmethod: it reads the class it was called on and answers a
     ; bytearray when that is bytearray.
-    ADD_CLASSMETHOD mn_fromhex, bytes_fromhex_impl
+    ADD_CLASSMETHOD_N mn_fromhex, bytes_fromhex_impl, 2, 2
     ADD_FN_N mn_startswith, ba_shared_startswith, 2, 4
     ADD_FN_N mn_endswith, ba_shared_endswith, 2, 4
     ADD_FN_N mn_count, ba_shared_count, 2, 4

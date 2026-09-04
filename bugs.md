@@ -96,30 +96,6 @@ reasoning that chose them and what changing one would cost.
   and kill the interpreter.)  `type_comment` is permanently None for a
   different reason: there are no type comments.
 
-## Missing pieces
-
-These are absences rather than wrong answers — the interpreter raises rather
-than lying — but they are ordinary Python that does not work:
-
-## Robustness
-
-- **A builtin registered with no argument counts accepts extras silently.**
-  Most of them do refuse now: `tests/arity_probe.sh` calls every method of
-  every builtin type with 0 to 3 arguments and compares against CPython on
-  whether the call was refused, and the registrations came from that oracle
-  rather than from a rule.  It runs inside `make check` and ratchets against
-  `tests/arity_floor.txt`, so what is left is measured.
-
-  What is left is the slot wrappers and a handful of methods.  `list.__repr__(1)`
-  and `dict.__str__(1, 2)` run where CPython refuses -- a wrapper installed
-  from a dunder carries no bounds -- as does `x.__getattribute__("a", "b")`.
-  `int.__pow__(2, 5)` is refused where CPython takes the modulus, and
-  `str.expandtabs(4)` where CPython takes the tab width.  CPython's own
-  wordings are inconsistent between clinic-generated and hand-written methods
-  ("str.zfill() takes exactly one argument" against "startswith() takes at
-  least 1 argument"), so the probe compares only whether a call was refused;
-  the text is not, and ours always names the type.
-
 ## Style debt
 
 Everything here assembles and runs.  These are places the tree does not follow

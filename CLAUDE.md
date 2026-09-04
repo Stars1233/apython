@@ -426,6 +426,14 @@ Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 byt
   dealloc zeroes the raw fields before delegating.  A subclass of such a type
   cannot declare `__slots__`: they would land in the same words.
 
+- **An argument that is an index, taken with `int_to_i64`.** It reads
+  `PyIntObject.compact` off whatever it is handed, so `"a\tb".expandtabs("x")`
+  read a str's header as a number. `obj_as_index` is the funnel: it names the
+  type and it takes anything with `__index__`. A slice bound wants
+  `obj_as_slice_index`, which is the same test and CPython's other wording.
+  A truth value -- `splitlines(keepends)` -- is neither, and wants
+  `obj_is_true`.
+
 - **A builtin `__next__` that raises StopIteration with `RAISE`.**  `RAISE`
   tail-jumps into the unwinder, and a builtin has no Python frame of its own
   to stop at, so the StopIteration unwinds straight past `slot_tp_iternext`

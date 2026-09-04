@@ -819,12 +819,29 @@ END_FUNC dunder_operand_is_real
 ; The one frame slot these need: the exception pending before the slot ran.
 DB_EXC   equ 8
 DB_RHS   equ 16     ; the right operand, parked across the receiver check
-DB_FRAME equ 32
+; The three-argument form (pow with a modulus) rebuilds its argument array
+; here, so a reflected dunder can swap the base and the exponent.  An
+; argument array runs upward, so the three slots descend: DB_A0 is the lowest
+; address and therefore args[0].
+DB_A0    equ 40
+DB_A1    equ 32
+DB_A2    equ 24
+DB_FRAME equ 48             ; + 0 pushes = 48, 16-aligned
 
-%macro DEF_DUNDER_BINARY 5-6 0      ; %1 prefix, %2 suffix, %3 nb_ field, %4 reflected, %5 operand check
+;; %7, when given, is a three-argument form: pow() takes a modulus, and
+;; `int.__pow__(5, 3)` is `pow(2, 5, 3)`.  It takes (args, nargs) as a builtin
+;; does, so the reflected case has only to swap the first two before the call.
+%macro DEF_DUNDER_BINARY 5-8 0, 0, 0 ; %1 prefix, %2 suffix, %3 nb_ field, %4 reflected, %5 operand check, %6 self check, %7 3-arg form, %8 check the operand in it
 DEF_FUNC %1_dunder_%2, DB_FRAME
+%ifnum %7
     cmp rsi, 2
     jne %%bad
+%else
+    cmp rsi, 3
+    je %%three
+    cmp rsi, 2
+    jne %%bad
+%endif
 %if %4
     mov rsi, [rdi]              ; self is the right operand
     mov rdi, [rdi + 8]
@@ -903,8 +920,41 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
 %%out:
     leave
     ret
+%ifnnum %7
+%%three:
+%if %8
+    ; int's slot declines a non-int operand before it ever looks at the
+    ; modulus, so the dunder answers NotImplemented -- but float's checks the
+    ; modulus first and raises, which is why only one of them tests here.
+    ; The other operand is args[1] on both sides; self is args[0] either way.
+    push rdi
+    mov rdi, [rdi + 8]
+    call %5
+    pop rdi
+    test eax, eax
+    jz %%notimpl
+%endif
+%if %4
+    ; Reflected: self is the BASE's right operand, so the pair swaps.
+    mov rax, [rdi]              ; self
+    mov rcx, [rdi + 8]          ; the base
+    mov [rbp - DB_A0], rcx
+    mov [rbp - DB_A1], rax
+    mov rax, [rdi + 16]         ; the modulus
+    mov [rbp - DB_A2], rax
+    lea rdi, [rbp - DB_A0]
+%endif
+    mov esi, 3
+    extern %7
+    call %7
+    leave
+    ret
+%endif
 %%bad:
-    ; CPython reports both counts, and counts self in neither.
+    ; CPython reports both counts, and counts self in neither.  Its wording
+    ; for a wrapper that takes a RANGE is different again (" expected at most
+    ; 2 arguments, got 3", the leading space its own); ours reports the count
+    ; it wanted, which bugs.md records among the wordings that differ.
     dec rsi                     ; rsi is still nargs on this path
     mov edi, 1
     extern raise_wrapper_arity
@@ -1050,7 +1100,7 @@ DEF_DUNDER_BINARY int, sub, nb_subtract, 0, dunder_operand_is_int
 DEF_DUNDER_BINARY int, mul, nb_multiply, 0, dunder_operand_is_int
 DEF_DUNDER_BINARY int, mod, nb_remainder, 0, dunder_operand_is_int
 DEF_DUNDER_DIVMOD int, divmod, 0, dunder_operand_is_int
-DEF_DUNDER_BINARY int, pow, nb_power, 0, dunder_operand_is_int
+DEF_DUNDER_BINARY int, pow, nb_power, 0, dunder_operand_is_int, 0, builtin_pow_fn, 1
 DEF_DUNDER_BINARY int, lshift, nb_lshift, 0, dunder_operand_is_int
 DEF_DUNDER_BINARY int, rshift, nb_rshift, 0, dunder_operand_is_int
 DEF_DUNDER_BINARY int, and, nb_and, 0, dunder_operand_is_int
@@ -1063,7 +1113,7 @@ DEF_DUNDER_BINARY int, rsub, nb_subtract, 1, dunder_operand_is_int
 DEF_DUNDER_BINARY int, rmul, nb_multiply, 1, dunder_operand_is_int
 DEF_DUNDER_BINARY int, rmod, nb_remainder, 1, dunder_operand_is_int
 DEF_DUNDER_DIVMOD int, rdivmod, 1, dunder_operand_is_int
-DEF_DUNDER_BINARY int, rpow, nb_power, 1, dunder_operand_is_int
+DEF_DUNDER_BINARY int, rpow, nb_power, 1, dunder_operand_is_int, 0, builtin_pow_fn, 1
 DEF_DUNDER_BINARY int, rlshift, nb_lshift, 1, dunder_operand_is_int
 DEF_DUNDER_BINARY int, rrshift, nb_rshift, 1, dunder_operand_is_int
 DEF_DUNDER_BINARY int, rand, nb_and, 1, dunder_operand_is_int
@@ -1078,7 +1128,7 @@ DEF_DUNDER_BINARY float, sub, nb_subtract, 0, dunder_operand_is_real
 DEF_DUNDER_BINARY float, mul, nb_multiply, 0, dunder_operand_is_real
 DEF_DUNDER_BINARY float, mod, nb_remainder, 0, dunder_operand_is_real
 DEF_DUNDER_DIVMOD float, divmod, 0, dunder_operand_is_real
-DEF_DUNDER_BINARY float, pow, nb_power, 0, dunder_operand_is_real
+DEF_DUNDER_BINARY float, pow, nb_power, 0, dunder_operand_is_real, 0, builtin_pow_fn
 DEF_DUNDER_BINARY float, floordiv, nb_floor_divide, 0, dunder_operand_is_real
 DEF_DUNDER_BINARY float, truediv, nb_true_divide, 0, dunder_operand_is_real
 DEF_DUNDER_BINARY float, radd, nb_add, 1, dunder_operand_is_real
@@ -1086,7 +1136,7 @@ DEF_DUNDER_BINARY float, rsub, nb_subtract, 1, dunder_operand_is_real
 DEF_DUNDER_BINARY float, rmul, nb_multiply, 1, dunder_operand_is_real
 DEF_DUNDER_BINARY float, rmod, nb_remainder, 1, dunder_operand_is_real
 DEF_DUNDER_DIVMOD float, rdivmod, 1, dunder_operand_is_real
-DEF_DUNDER_BINARY float, rpow, nb_power, 1, dunder_operand_is_real
+DEF_DUNDER_BINARY float, rpow, nb_power, 1, dunder_operand_is_real, 0, builtin_pow_fn
 DEF_DUNDER_BINARY float, rfloordiv, nb_floor_divide, 1, dunder_operand_is_real
 DEF_DUNDER_BINARY float, rtruediv, nb_true_divide, 1, dunder_operand_is_real
 
