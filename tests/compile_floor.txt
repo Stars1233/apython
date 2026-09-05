@@ -104,6 +104,7 @@ test_compile_match_scope
 test_compile_mixed_string
 test_compile_multiline_col
 test_compile_named_escape
+test_compile_numbers
 test_compile_operators
 test_compile_pep695
 test_compile_precedence
