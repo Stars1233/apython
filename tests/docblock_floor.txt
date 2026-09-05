@@ -5,8 +5,7 @@
 # in the commit that earns it; a row at zero is dropped.
 src/buildclass.asm                     6
 src/builtins.asm                       8
-src/builtins_num.asm                   15
-src/builtins_obj.asm                   32
+src/builtins_num.asm                   12
 src/compiler/assemble.asm              8
 src/compiler/ast.asm                   14
 src/compiler/codegen.asm               23
@@ -27,10 +26,9 @@ src/gc.asm                             13
 src/gcmod.asm                          19
 src/import.asm                         4
 src/iomod.asm                          52
-src/itertools.asm                      22
+src/itertools.asm                      21
 src/marshal.asm                        7
 src/mathmod.asm                        17
-src/methods/bytes.asm                  66
 src/methods/bytes_str.asm              18
 src/methods/dict.asm                   3
 src/methods/init.asm                   10
@@ -56,11 +54,11 @@ src/posixmod.asm                       25
 src/pyo/abcmod.asm                     4
 src/pyo/asyncmod.asm                   26
 src/pyo/bytearray.asm                  19
-src/pyo/bytes.asm                      18
+src/pyo/bytes.asm                      17
 src/pyo/class.asm                      10
 src/pyo/code.asm                       6
 src/pyo/complex.asm                    9
-src/pyo/descriptors.asm                45
+src/pyo/descriptors.asm                43
 src/pyo/dict.asm                       11
 src/pyo/eventloop.asm                  19
 src/pyo/eventloop_iouring.asm          6

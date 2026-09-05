@@ -64,370 +64,14 @@ extern type_type
 extern user_type_metatype
 extern dict_new
 
-;; ============================================================================
-;; 1. builtin_abs(args, nargs) - abs(x)
-;; ============================================================================
-
-; --- moved to a sibling file by the split ---
+; --- builtin_abs and the str() constructor moved to sibling files by the
+; --- two splits this file has had.
 
 section .text
 
-DEF_FUNC_BARE str_type_call
-    mov rdi, rsi
-    mov rsi, rdx
-    jmp builtin_str_fn
-END_FUNC str_type_call
-
 ;; ============================================================================
-;; 3. builtin_str_fn(args, nargs) - str(x[, encoding[, errors]])
-;;
-;; The decoding form was missing outright: `str(b, "utf-8")` was
-;; "str() takes at most 1 argument".  CPython's re/_parser.py uses it, which
-;; is what kept glob and fnmatch from importing.
-;;
-;; It is the one builtin whose second argument changes what the first one
-;; means: with an encoding, str() is a decode and takes a bytes-like object
-;; only -- str("a", "utf-8") is an error, not a copy.
-;; ============================================================================
-SB_OBJ   equ 8
-SB_ENC   equ 16
-SB_ERR   equ 24
-SB_NPOS  equ 32
-SB_NKW   equ 40
-SB_ARGS  equ 48
-SB_ARGV  equ 80          ; the three-slot array handed to decode:
-                         ; [-80] self, [-72] encoding, [-64] errors
-SB_FRAME equ 96          ; + 0 pushes = 96
-
-DEF_FUNC builtin_str_fn, SB_FRAME
-    mov qword [rbp - SB_OBJ], 0
-    mov qword [rbp - SB_ENC], 0
-    mov qword [rbp - SB_ERR], 0
-    mov [rbp - SB_ARGS], rdi
-    mov [rbp - SB_NPOS], rsi
-    mov qword [rbp - SB_NKW], 0
-
-    ; Keyword arguments arrive as trailing positional slots, named by
-    ; kw_names_pending.  str's three names are object, encoding and errors.
-    mov rax, [rel kw_names_pending]
-    test rax, rax
-    jz .str_bind_positional
-    mov qword [rel kw_names_pending], 0     ; consumed, however this ends
-    mov rcx, [rax + PyTupleObject.ob_size]
-    mov [rbp - SB_NKW], rcx
-    sub qword [rbp - SB_NPOS], rcx
-
-    xor r9d, r9d
-.str_kw_loop:
-    cmp r9, [rbp - SB_NKW]
-    jge .str_bind_positional
-    mov r10, [rax + PyTupleObject.ob_item]
-    mov r10, [r10 + r9*8]                   ; the keyword's name
-    mov r11, [rbp - SB_ARGS]
-    mov rcx, [rbp - SB_NPOS]
-    add rcx, r9
-    mov r11, [r11 + rcx*8]                  ; the value that goes with it
-
-    push rax
-    push r9
-    push r11
-    sub rsp, 8
-    lea rdi, [r10 + PyStrObject.data]
-    CSTRING rsi, "object"
-    call ap_strcmp
-    test eax, eax
-    jz .str_kw_object
-    lea rdi, [r10 + PyStrObject.data]
-    CSTRING rsi, "encoding"
-    call ap_strcmp
-    test eax, eax
-    jz .str_kw_encoding
-    lea rdi, [r10 + PyStrObject.data]
-    CSTRING rsi, "errors"
-    call ap_strcmp
-    test eax, eax
-    jz .str_kw_errors
-    add rsp, 8
-    pop r11
-    pop r9
-    pop rax
-    lea rdi, [r10 + PyStrObject.data]
-    call str_raise_bad_keyword
-.str_kw_object:
-    mov rcx, [rsp + 8]
-    mov [rbp - SB_OBJ], rcx
-    jmp .str_kw_next
-.str_kw_encoding:
-    mov rcx, [rsp + 8]
-    mov [rbp - SB_ENC], rcx
-    jmp .str_kw_next
-.str_kw_errors:
-    mov rcx, [rsp + 8]
-    mov [rbp - SB_ERR], rcx
-.str_kw_next:
-    add rsp, 8
-    pop r11
-    pop r9
-    pop rax
-    inc r9
-    jmp .str_kw_loop
-
-.str_bind_positional:
-    ; The positional slots fill object, encoding and errors in that order.
-    mov rcx, [rbp - SB_NPOS]
-    cmp rcx, 3
-    jg .str_too_many
-    mov rdi, [rbp - SB_ARGS]
-    test rcx, rcx
-    jle .str_bound
-    mov rax, [rdi]
-    mov [rbp - SB_OBJ], rax
-    cmp rcx, 2
-    jl .str_bound
-    mov rax, [rdi + 8]
-    mov [rbp - SB_ENC], rax
-    cmp rcx, 3
-    jl .str_bound
-    mov rax, [rdi + 16]
-    mov [rbp - SB_ERR], rax
-
-.str_bound:
-    ; No encoding and no errors is the ordinary str(): str() is "", and
-    ; str(x) is x's __str__.
-    cmp qword [rbp - SB_ENC], 0
-    jne .str_decode
-    cmp qword [rbp - SB_ERR], 0
-    jne .str_decode
-    cmp qword [rbp - SB_OBJ], 0
-    je .str_no_args
-    mov rdi, [rbp - SB_OBJ]
-    call obj_str
-    leave
-    ret
-
-.str_no_args:
-    CSTRING rdi, ""
-    call str_from_cstr
-    leave
-    ret
-
-.str_decode:
-    ; With an encoding, str() decodes -- and takes a bytes-like object only.
-    ; str() with errors= and no object is still "", as CPython's is.
-    cmp qword [rbp - SB_OBJ], 0
-    je .str_no_args
-    mov rdi, [rbp - SB_OBJ]
-    V_TEST_PTR rdi, rax
-    ja .str_not_bytes
-    test rdi, rdi
-    jz .str_not_bytes
-    mov rax, [rdi + PyObject.ob_type]
-
-    lea rcx, [rel str_type]
-    cmp rax, rcx
-    je .str_decoding_str
-    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
-    jnz .str_decoding_str
-
-    ; Default the encoding to utf-8, which is what CPython does when only
-    ; errors= was given.
-    cmp qword [rbp - SB_ENC], 0
-    jne .str_have_enc
-    push rax
-    CSTRING rdi, "utf-8"
-    call str_from_cstr
-    mov [rbp - SB_ENC], rax
-    pop rax
-    ; The temporary is dropped below, once the decode has read it.
-.str_have_enc:
-    ; CPython checks both here and names str(), not the decode underneath.
-    push rax
-    sub rsp, 8
-    mov rdi, [rbp - SB_ENC]
-    CSTRING rsi, "encoding"
-    call str_require_str_arg
-    mov rdi, [rbp - SB_ERR]
-    CSTRING rsi, "errors"
-    call str_require_str_arg
-    add rsp, 8
-    pop rax
-
-    mov rcx, [rbp - SB_OBJ]
-    mov [rbp - SB_ARGV], rcx
-    mov rcx, [rbp - SB_ENC]
-    mov [rbp - SB_ARGV + 8], rcx
-    mov rcx, [rbp - SB_ERR]
-    mov [rbp - SB_ARGV + 16], rcx
-    mov esi, 2
-    cmp qword [rbp - SB_ERR], 0
-    je .str_argc_set
-    mov esi, 3
-.str_argc_set:
-    lea rdi, [rbp - SB_ARGV]
-
-    lea rcx, [rel bytes_type]
-    cmp rax, rcx
-    je .str_call_bytes
-    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
-    jnz .str_call_bytes
-    lea rcx, [rel bytearray_type]
-    cmp rax, rcx
-    je .str_call_bytearray
-    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTEARRAY_SUBCLASS
-    jnz .str_call_bytearray
-    lea rcx, [rel memoryview_type]
-    cmp rax, rcx
-    je .str_call_memoryview
-    jmp .str_not_bytes
-
-.str_call_bytes:
-    call _bytes_decode_impl
-    leave
-    ret
-.str_call_bytearray:
-    call ba_shared_decode
-    leave
-    ret
-.str_call_memoryview:
-    ; A memoryview has no decode of its own; CPython's str() reads its buffer.
-    ; Copying it to a bytes first is the same answer for the contiguous views
-    ; this build can make.
-    push rdi
-    push rsi
-    lea rsi, [rbp - SB_ARGV]
-    mov edx, 1
-    lea rdi, [rel bytes_type]
-    call bytes_type_call
-    pop rsi
-    pop rdi
-    test rax, rax
-    jz .str_failed
-    mov [rbp - SB_ARGV], rax
-    push rax
-    sub rsp, 8
-    lea rdi, [rbp - SB_ARGV]
-    call _bytes_decode_impl
-    add rsp, 8
-    pop rdi
-    push rax
-    call obj_decref
-    pop rax
-    leave
-    ret
-.str_failed:
-    xor eax, eax
-    leave
-    ret
-
-.str_decoding_str:
-    RAISE exc_TypeError_type, "decoding str is not supported"
-.str_not_bytes:
-    mov rsi, [rbp - SB_OBJ]
-    lea rdi, [rel str_decode_needs_bytes]
-    call raise_type_error_with_name
-.str_too_many:
-    mov rsi, [rbp - SB_NPOS]
-    add rsi, [rbp - SB_NKW]
-    lea rdi, [rel str_too_many_msg]
-    CSTRING rdx, " given)"
-    call raise_type_error_counted
-END_FUNC builtin_str_fn
-
-;; ============================================================================
-;; str_require_str_arg(rdi = the argument, or 0 when it was not given,
-;;                     rsi = the parameter's name)
-;; Raises "str() argument 'encoding' must be str, not int", CPython's wording.
-;; ============================================================================
-SRA_NAME  equ 8
-SRA_ARG   equ 16
-SRA_BUF   equ 176
-SRA_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
-DEF_FUNC_LOCAL str_require_str_arg, SRA_FRAME
-    test rdi, rdi
-    jz .sras_ok                 ; not given at all
-    mov [rbp - SRA_ARG], rdi
-    mov [rbp - SRA_NAME], rsi
-    V_TEST_PTR rdi, rax
-    ja .sras_bad
-    mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel str_type]
-    cmp rax, rcx
-    je .sras_ok
-    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
-    jnz .sras_ok
-.sras_bad:
-    lea rdi, [rbp - SRA_BUF]
-    CSTRING rsi, "str() argument '"
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, [rbp - SRA_NAME]
-    call rbt_append_cstr
-    mov rdi, rax
-    CSTRING rsi, "' must be str, not "
-    call rbt_append_cstr
-    mov rdi, rax
-    push rax
-    mov rdi, [rbp - SRA_ARG]
-    call value_type
-    test rax, rax
-    jz .sras_unknown
-    ; CPython's _PyArg_BadArgument writes "None" and not "NoneType".
-    extern none_type
-    lea rcx, [rel none_type]
-    cmp rax, rcx
-    je .sras_none
-    mov rsi, [rax + PyTypeObject.tp_name]
-    jmp .sras_named
-.sras_none:
-    CSTRING rsi, "None"
-    jmp .sras_named
-.sras_unknown:
-    CSTRING rsi, "object"
-.sras_named:
-    pop rdi
-    call rbt_append_cstr
-    lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rbp - SRA_BUF]
-    call raise_exception
-.sras_ok:
-    leave
-    ret
-END_FUNC str_require_str_arg
-
-
-;; ============================================================================
-;; str_raise_bad_keyword(rdi = the keyword's name, as a C string)
-;; "'foo' is an invalid keyword argument for str()".
-;; ============================================================================
-SRK_NAME  equ 8
-SRK_BUF   equ 176
-SRK_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
-DEF_FUNC_LOCAL str_raise_bad_keyword, SRK_FRAME
-    mov [rbp - SRK_NAME], rdi
-    lea rdi, [rbp - SRK_BUF]
-    CSTRING rsi, "'"
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, [rbp - SRK_NAME]
-    call rbt_append_cstr
-    mov rdi, rax
-    CSTRING rsi, "' is an invalid keyword argument for str()"
-    call rbt_append_cstr
-    lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rbp - SRK_BUF]
-    call raise_exception
-END_FUNC str_raise_bad_keyword
-
-section .rodata
-str_too_many_msg: db "str() takes at most 3 arguments (", 0
-section .text
-
-section .rodata
-str_decode_needs_bytes: db "decoding to str: need a bytes-like object, ", 1, " found", 0
-section .text
-
-;; ============================================================================
-;; 7. builtin_id(args, nargs) - id(x)
+;; 7. builtin_id(rdi = args, rsi = nargs) - id(x)
+;;   -> rax = Value
 ;; ============================================================================
 DEF_FUNC builtin_id
 
@@ -455,7 +99,8 @@ DEF_FUNC builtin_id
 END_FUNC builtin_id
 
 ;; ============================================================================
-;; 8. builtin_hash_fn(args, nargs) - hash(x)
+;; 8. builtin_hash_fn(rdi = args, rsi = nargs) - hash(x)
+;;   -> rax = Value
 ;;
 ;; obj_hash and nothing else.  This used to reimplement the dispatch -- int
 ;; immediate, float immediate, else tp_hash -- and raise when tp_hash was 0.
@@ -484,7 +129,8 @@ DEF_FUNC builtin_hash_fn
 END_FUNC builtin_hash_fn
 
 ;; ============================================================================
-;; 9. builtin_callable(args, nargs) - callable(x)
+;; 9. builtin_callable(rdi = args, rsi = nargs) - callable(x)
+;;   -> rax = Value
 ;; ============================================================================
 DEF_FUNC builtin_callable
 
@@ -563,7 +209,8 @@ DEF_FUNC builtin_callable
 END_FUNC builtin_callable
 
 ;; ============================================================================
-;; 10. builtin_iter_fn(args, nargs) - iter(x)
+;; 10. builtin_iter_fn(rdi = args, rsi = nargs) - iter(x)
+;;   -> rax = Value
 ;; ============================================================================
 DEF_FUNC builtin_iter_fn
 
@@ -624,7 +271,8 @@ iter_few_msg:   db "iter expected at least 1 argument, got ", 0
 section .text
 
 ;; ============================================================================
-;; 11. builtin_next_fn(args, nargs) - next(x)
+;; 11. builtin_next_fn(rdi = args, rsi = nargs) - next(x)
+;;   -> rax = Value
 ;; ============================================================================
 NX_EXC   equ 8              ; current_exception before __next__ ran
 ; args[0] as it arrived, for the refusal: CPython names the type, and this
@@ -820,7 +468,8 @@ DEF_FUNC builtin_next_fn, NX_FRAME
 END_FUNC builtin_next_fn
 
 ;; ============================================================================
-;; 12. builtin_any(args, nargs) - any(iterable)
+;; 12. builtin_any(rdi = args, rsi = nargs) - any(iterable)
+;;   -> rax = Value
 ;; ============================================================================
 ANY_EXC   equ 8             ; current_exception before the iteration started
 ; args[0] as it arrived: the refusal said "argument is not iterable" and
@@ -929,7 +578,8 @@ DEF_FUNC builtin_any, ANY_FRAME
 END_FUNC builtin_any
 
 ;; ============================================================================
-;; 13. builtin_all(args, nargs) - all(iterable)
+;; 13. builtin_all(rdi = args, rsi = nargs) - all(iterable)
+;;   -> rax = Value
 ;; ============================================================================
 ALL_EXC   equ 8             ; current_exception before the iteration started
 ; args[0] as it arrived: the refusal said "argument is not iterable" and
@@ -1037,7 +687,8 @@ DEF_FUNC builtin_all, ALL_FRAME
 END_FUNC builtin_all
 
 ;; ============================================================================
-;; 14. builtin_sum(args, nargs) - sum(iterable[, start])
+;; 14. builtin_sum(rdi = args, rsi = nargs) - sum(iterable[, start])
+;;   -> rax = Value
 ;; ============================================================================
 ;; Every addition goes through obj_binary_op, the whole numeric protocol.
 ;; This used to pick between int_add and float_add on the two operands' tags
@@ -1204,7 +855,8 @@ DEF_FUNC builtin_sum, SM_FRAME
 END_FUNC builtin_sum
 
 ;; ============================================================================
-;; 15-16. builtin_min / builtin_max
+;; 15-16. builtin_min / builtin_max(rdi = args, rsi = nargs)
+;;   -> rax = Value
 ;; ============================================================================
 ; Shared implementation: minmax_impl(args, nargs, cmp_op)
 ;   rdi = args (Value[]), rsi = nargs, edx = cmp_op (PY_LT for min, PY_GT for max)
@@ -1241,6 +893,10 @@ DEF_FUNC_BARE builtin_min
     jmp minmax_impl
 END_FUNC builtin_min
 
+;; ============================================================================
+;; builtin_max(rdi = args, rsi = nargs) -> rax = Value
+;; The other half of the pair above, selecting PY_GT instead.
+;; ============================================================================
 DEF_FUNC_BARE builtin_max
     mov edx, PY_GT                 ; PY_GT = 4
     jmp minmax_impl
@@ -1278,6 +934,12 @@ DEF_FUNC_LOCAL mm_key_of, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 END_FUNC mm_key_of
 
+;; ============================================================================
+;; minmax_impl(rdi = args, rsi = nargs, edx = the comparison op)
+;;   -> rax = Value
+;; Both builtins, in one body: the op is the only thing that differs, and
+;; key= and default= are keyword-only for either of them.
+;; ============================================================================
 DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     push rbx
     push r12
@@ -1634,6 +1296,11 @@ DEF_FUNC_LOCAL attr_require_name, ARN_FRAME
     jmp raise_type_error_with_name
 END_FUNC attr_require_name
 
+;; ============================================================================
+;; builtin_getattr(rdi = args, rsi = nargs) -> rax = Value
+;; getattr(obj, name[, default]): the default is answered only for an
+;; AttributeError, so anything else the lookup raises still propagates.
+;; ============================================================================
 DEF_FUNC builtin_getattr, 32
     push rbx
     push r12
@@ -1733,7 +1400,8 @@ DEF_FUNC builtin_getattr, 32
 END_FUNC builtin_getattr
 
 ;; ============================================================================
-;; 18. builtin_hasattr(args, nargs) - hasattr(obj, name)
+;; 18. builtin_hasattr(rdi = args, rsi = nargs) - hasattr(obj, name)
+;;   -> rax = Value
 ;; ============================================================================
 HA_EXC    equ 8              ; current_exception before the lookup
 DEF_FUNC builtin_hasattr, 24
@@ -1798,7 +1466,8 @@ DEF_FUNC builtin_hasattr, 24
 END_FUNC builtin_hasattr
 
 ;; ============================================================================
-;; 19. builtin_setattr(args, nargs) - setattr(obj, name, value)
+;; 19. builtin_setattr(rdi = args, rsi = nargs) - setattr(obj, name, value)
+;;   -> rax = Value
 ;; ============================================================================
 SETA_EXC equ 16     ; the exception pending before tp_setattr ran
 
@@ -1871,7 +1540,8 @@ DEF_FUNC builtin_setattr
 END_FUNC builtin_setattr
 
 ;; ============================================================================
-;; builtin_globals(args, nargs) - globals()
+;; builtin_globals(rdi = args, rsi = nargs) - globals()
+;;   -> rax = Value
 ;; Returns the globals dict of the current frame.
 ;; ============================================================================
 DEF_FUNC builtin_globals
@@ -1895,7 +1565,8 @@ DEF_FUNC builtin_globals
 END_FUNC builtin_globals
 
 ;; ============================================================================
-;; builtin_locals(args, nargs) - locals()
+;; builtin_locals(rdi = args, rsi = nargs) - locals()
+;;   -> rax = Value
 ;; Returns the locals dict if available, otherwise globals.
 ;; In module scope, locals() == globals().
 ;; In class body, returns the class dict.
@@ -2124,7 +1795,8 @@ DEF_FUNC dir_default, DD_FRAME
 END_FUNC dir_default
 
 ;; ============================================================================
-;; builtin_dir(args, nargs) - dir(obj)
+;; builtin_dir(rdi = args, rsi = nargs) - dir(obj)
+;;   -> rax = Value
 ;;
 ;; CPython's PyObject_Dir: ask the object's own __dir__, then sort what comes
 ;; back.  object.__dir__ is registered and calls dir_default, so an object
@@ -2292,7 +1964,8 @@ fmt_dunder_name: db "__format__", 0
 section .text
 
 ;; ============================================================================
-;; builtin_input_fn(args, nargs) - input([prompt])
+;; builtin_input_fn(rdi = args, rsi = nargs) - input([prompt])
+;;   -> rax = Value
 ;; 0 args: read line from stdin
 ;; 1 arg: print prompt, then read line
 ;; ============================================================================
@@ -2375,7 +2048,8 @@ global builtin_open_fn
 OPN_FRAME equ 32            ; + 3 pushes = 56, not 16-aligned
 
 ;; ============================================================================
-;; open_reject_dir(rdi = fd, rsi = filename str) -- returns, or raises
+;; open_reject_dir(rdi = fd, rsi = filename str)
+;;   -> returns, or raises IsADirectoryError
 ;;
 ;; Linux lets open(2) succeed on a directory; it is read(2) that fails with
 ;; EISDIR, so open("/tmp") used to hand back a file object that failed later
@@ -2409,8 +2083,19 @@ DEF_FUNC_LOCAL open_reject_dir, ORD_FRAME
     ret
 END_FUNC open_reject_dir
 
+section .data
+align 8
+builtin_open_impl: dq 0
+
+section .rodata
+bo_mod_name:  db "_io", 0
+bo_attr_name: db "open", 0
+
+section .text
+
 ;; ============================================================================
-;; builtin_open_fn(args, nargs) -> the stream _pyio.open builds
+;; builtin_open_fn(rdi = args, rsi = nargs) -> rax = Value, the stream
+;;   _io.open builds
 ;;
 ;; open() is _io.open in CPython, and the same thing here: the whole stack --
 ;; buffering, text decoding, universal newlines -- lives above FileIO and
@@ -2426,16 +2111,6 @@ END_FUNC open_reject_dir
 ;; values in the same array, with the names in kw_names_pending, and that is
 ;; exactly what the callee expects -- so this must NOT consume the global.
 ;; ============================================================================
-section .data
-align 8
-builtin_open_impl: dq 0
-
-section .rodata
-bo_mod_name:  db "_io", 0
-bo_attr_name: db "open", 0
-
-section .text
-
 DEF_FUNC builtin_open_fn
     push rbx
     push r12
@@ -2514,7 +2189,8 @@ DEF_FUNC builtin_open_fn
 END_FUNC builtin_open_fn
 
 ;; ============================================================================
-;; builtin_ascii_fn(args, nargs) - ascii(obj)
+;; builtin_ascii_fn(rdi = args, rsi = nargs) - ascii(obj)
+;;   -> rax = Value
 ;; Like repr() but escapes non-ASCII characters to \xNN / \uNNNN / \UNNNNNNNN
 ;; ============================================================================
 global builtin_ascii_fn
@@ -2677,7 +2353,8 @@ section .text
 END_FUNC builtin_ascii_fn
 
 ;; ============================================================================
-;; builtin_format_fn(args, nargs) - format(value[, format_spec])
+;; builtin_format_fn(rdi = args, rsi = nargs) - format(value[, format_spec])
+;;   -> rax = Value
 ;; Calls value.__format__(format_spec) or str(value) if no __format__
 ;; ============================================================================
 global builtin_format_fn
@@ -2821,7 +2498,8 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
 END_FUNC builtin_format_fn
 
 ;; ============================================================================
-;; builtin_vars_fn(args, nargs) - vars([obj])
+;; builtin_vars_fn(rdi = args, rsi = nargs) - vars([obj])
+;;   -> rax = Value
 ;; 0 args: returns frame locals dict (same as locals())
 ;; 1 arg: returns obj.__dict__
 ;; ============================================================================
@@ -2945,7 +2623,8 @@ vars_dict_name: db "__dict__", 0
 section .text
 
 ;; ============================================================================
-;; builtin_delattr_fn(args, nargs) - delattr(obj, name)
+;; builtin_delattr_fn(rdi = args, rsi = nargs) - delattr(obj, name)
+;;   -> rax = Value
 ;; Calls tp_setattr(obj, name, NULL) to delete
 ;; ============================================================================
 global builtin_delattr_fn
@@ -3026,7 +2705,8 @@ DEF_FUNC builtin_delattr_fn, DA2_FRAME
 END_FUNC builtin_delattr_fn
 
 ;; ============================================================================
-;; builtin_aiter_fn(args, nargs) - aiter(async_iterable)
+;; builtin_aiter_fn(rdi = args, rsi = nargs) - aiter(async_iterable)
+;;   -> rax = Value
 ;; Calls tp_iter on the async iterable
 ;; ============================================================================
 AIT_ARG   equ 8             ; the argument, for the message
@@ -3085,7 +2765,8 @@ DEF_FUNC builtin_aiter_fn, AIT_FRAME
 END_FUNC builtin_aiter_fn
 
 ;; ============================================================================
-;; builtin_anext_fn(args, nargs) - anext(async_iterator[, default])
+;; builtin_anext_fn(rdi = args, rsi = nargs) - anext(async_iterator[, default])
+;;   -> rax = Value
 ;; Calls tp_iternext; on StopAsyncIteration returns default
 ;; ============================================================================
 extern current_exception
@@ -3187,8 +2868,9 @@ DEF_FUNC builtin_anext_fn, AN_FRAME
 END_FUNC builtin_anext_fn
 
 ;; ============================================================================
-;; builtin_import_fn(args, nargs) - __import__(name, globals, locals,
-;;                                             fromlist, level)
+;; builtin_import_fn(rdi = args, rsi = nargs) - __import__(name, globals,
+;;                                     locals, fromlist, level)
+;;   -> rax = Value
 ;;
 ;; fromlist decides WHICH module comes back: empty or None gives the top-level
 ;; package, non-empty gives the module actually named.  Ignoring it returned
@@ -3480,7 +3162,8 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
 END_FUNC builtin_import_fn
 
 ;; ============================================================================
-;; builtin_breakpoint(args, nargs) - breakpoint() stub (no-op)
+;; builtin_breakpoint(rdi = args, rsi = nargs) - breakpoint() stub (no-op)
+;;   -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE builtin_breakpoint
     ; No-op: return None
