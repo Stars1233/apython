@@ -2146,6 +2146,45 @@ DEF_FUNC exc_install_methods, EIM_FRAME
     ret
 END_FUNC exc_install_methods
 
+;; ============================================================================
+;; exc_user_init(rdi = an exception type) -> rax = its own __init__, or 0
+;;
+;; The Python `__init__` a class in the exception hierarchy defines, found
+;; along the MRO because it is inherited: `class F(E): pass` runs E's.  A
+;; builtin's is the default and does not count -- BaseException's is what
+;; stores .args, and it is what refuses keywords.
+;; ============================================================================
+global exc_user_init
+DEF_FUNC exc_user_init, 8            ; 1 push, so rsp is 16-aligned
+    push rbx
+    mov rbx, rdi
+    test rdi, rdi
+    jz .eui_none
+    lea rsi, [rel exc_init_name]
+    extern dunder_lookup
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .eui_none
+    cmp edx, TAG_PTR
+    jne .eui_none
+    test rax, rax
+    jz .eui_none
+    mov rcx, [rax + PyObject.ob_type]
+    extern builtin_func_type
+    lea rdx, [rel builtin_func_type]
+    cmp rcx, rdx
+    je .eui_none                ; a builtin: the default, not a definition
+    pop rbx
+    leave
+    ret
+.eui_none:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC exc_user_init
+
 DEF_FUNC exc_type_call, ETC_FRAME
     push rbx
     push r12
@@ -2155,6 +2194,9 @@ DEF_FUNC exc_type_call, ETC_FRAME
     mov [rbp - ETC_NARGS], rdx
     mov qword [rbp - ETC_KW1], 0
     mov qword [rbp - ETC_KW2], 0
+    ; The family is read again at .done, and the user-__init__ path below
+    ; reaches it without going through exc_kw_family.
+    mov qword [rbp - ETC_KWFAM], 0
 
     ; ------------------------------------------------------------------
     ; Keyword arguments.  AttributeError and ImportError each carry two
@@ -2168,6 +2210,24 @@ DEF_FUNC exc_type_call, ETC_FRAME
     ; They are the only builtin exceptions that take keywords; every other
     ; one answers "takes no keyword arguments", as CPython's does.
     ; ------------------------------------------------------------------
+    ; A class that defines its own __init__ takes whatever keywords that
+    ; __init__ takes, and type_call runs it after this returns.  Consuming
+    ; kw_names_pending here, and refusing the keywords before that runs, made
+    ; every user exception with a keyword parameter unconstructible.  Only
+    ; the count comes off, so .args holds the positionals; the names stay
+    ; pending for the __init__ call.
+    mov rdi, rbx
+    call exc_user_init
+    test rax, rax
+    jz .etc_no_user_init
+    mov r12, [rel kw_names_pending]
+    test r12, r12
+    jz .etc_kw_done
+    mov rcx, [r12 + PyTupleObject.ob_size]
+    sub [rbp - ETC_NARGS], rcx
+    jmp .etc_kw_done
+.etc_no_user_init:
+
     mov rdi, rbx
     call exc_kw_family
     mov [rbp - ETC_KWFAM], rax
@@ -2973,6 +3033,7 @@ exc_metatype:
 ; already did.  Naming itself made `type(ValueError)` print
 ; <class 'exception_metatype'> where CPython prints <class 'type'>.
 exc_meta_name: db "type", 0
+exc_init_name: db "__init__", 0
 
 
 ; Macro to define an exception type singleton

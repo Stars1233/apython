@@ -1464,6 +1464,8 @@ TC_NEW_TAG  equ 56              ; saved __new__ result tag
 ; reaches __init__ with the keyword values as extra positional arguments, and
 ; that is how a metaclass with class keywords fails.
 TC_KWNAMES  equ 64
+; The __init__ an exception subclass runs, found along its MRO.
+TC_EXCINIT  equ 72
 
 ;; ============================================================================
 ;; tc_winner_metatype(rdi = args) -> rax = the metatype to delegate to, or 0
@@ -2092,9 +2094,14 @@ DEF_FUNC type_call
     ; rax = exception object (PyExceptionObject)
     mov r14, rax                ; r14 = instance
 
-    ; Check if type has __init__ in its dict (for custom exception __init__)
-    mov rdi, [rbx + PyTypeObject.tp_init]
-    test rdi, rdi
+    ; The __init__ to run, found along the MRO rather than in this type's own
+    ; slot: it is inherited, and `class F(E): pass` runs E's.  tp_init is set
+    ; only from the class's OWN body, so a subclass of a subclass ran none.
+    extern exc_user_init
+    mov rdi, rbx
+    call exc_user_init
+    mov [rbp - TC_EXCINIT], rax
+    test rax, rax
     jz .exc_sub_no_init
 
     ; Build args: (instance, *original_args) using 16-byte fat value stride
@@ -2118,12 +2125,12 @@ DEF_FUNC type_call
     jmp .exc_sub_copy_args
 .exc_sub_args_copied:
     ; Get __init__'s tp_call
-    mov rdi, [rbx + PyTypeObject.tp_init]
+    mov rdi, [rbp - TC_EXCINIT]
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
     jz .exc_sub_init_cleanup
-    mov rdi, [rbx + PyTypeObject.tp_init]
+    mov rdi, [rbp - TC_EXCINIT]
     mov rsi, r15
     lea rdx, [r13 + 1]
     call rax
