@@ -1655,6 +1655,22 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     lea r8, [rel tuple_type]
     cmp rax, r8
     je .isinstance_tuple
+    ; A parameterized generic has its own refusal in CPython, and saying only
+    ; that it is not a type buries which of the two mistakes it was.
+    extern generic_alias_type
+    lea r8, [rel generic_alias_type]
+    cmp rax, r8
+    je .isinstance_generic
+    ; A union is its members, and isinstance over one is isinstance over
+    ; them: CPython treats `int | str` exactly as it treats `(int, str)`.
+    ; The message here has always said "or a union"; nothing accepted one.
+    extern union_type
+    lea r8, [rel union_type]
+    cmp rax, r8
+    jne .isinstance_not_union
+    mov rcx, [rcx + PyGenericAliasObject.ga_args]
+    jmp .isinstance_tuple
+.isinstance_not_union:
     ; Any class, including one built by a user metaclass.
     push rcx
     push rdx
@@ -1721,6 +1737,43 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     push rsi
     push rsi                   ; keep the stack 16-byte aligned
     mov rdi, [rsi + r8*8]      ; the class from the tuple
+    ; ...and inside it too: a union expands to its args tuple, so
+    ; `isinstance(1, list[int] | None)` arrives here as (list[int], None).
+    V_TEST_PTR rdi, rax
+    ja .isinstance_tuple_not_generic
+    test rdi, rdi
+    jz .isinstance_tuple_not_generic
+    mov rax, [rdi + PyObject.ob_type]
+    lea rax, [rax]
+    lea r8, [rel generic_alias_type]
+    cmp rax, r8
+    je .isinstance_generic_in_tuple
+    ; A union INSIDE the tuple: ask again, which is what CPython's recursion
+    ; into a tuple's elements amounts to.  This loop is flat, so a union
+    ; element matched nothing and `isinstance(1, (int | str, bytes))` was
+    ; False.
+    lea r8, [rel union_type]
+    cmp rax, r8
+    jne .isinstance_tuple_not_generic
+    mov r9, rdi
+    sub rsp, 16
+    mov rax, [rbp - ISI_OBJ]
+    mov [rsp], rax
+    mov [rsp + 8], r9
+    mov rdi, rsp
+    mov esi, 2
+    call builtin_isinstance
+    add rsp, 16
+    V_UNPACK rax, rdx
+    lea rcx, [rel bool_true]
+    cmp rax, rcx
+    sete al
+    movzx eax, al
+    jmp .isinstance_tuple_verdict
+.isinstance_tuple_not_generic:
+    mov r8, [rsp + 16]
+    mov rsi, [rsp]
+    mov rdi, [rsi + r8*8]
     mov rsi, [rbp - ISI_OBJ]   ; the object
     CSTRING rdx, "__instancecheck__"
     call type_custom_check
@@ -1786,6 +1839,12 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
 .isi_nothing:
     ret
 
+.isinstance_generic_in_tuple:
+    add rsp, 32                 ; the four words the loop pushed
+.isinstance_generic:
+    RAISE exc_TypeError_type, \
+          "isinstance() argument 2 cannot be a parameterized generic"
+
 .isinstance_type_error:
     RAISE exc_TypeError_type, "isinstance() arg 2 must be a type, a tuple of types, or a union"
 
@@ -1834,6 +1893,17 @@ DEF_FUNC builtin_issubclass, 8            ; 3 pushes, so rsp is 16-aligned
     lea r10, [rel tuple_type]
     cmp rax, r10
     je .issubclass_tuple
+    lea r10, [rel generic_alias_type]
+    cmp rax, r10
+    je .issubclass_generic
+    ; A union is its members, exactly as a tuple of them would be.  The
+    ; message here has always said "or a union"; nothing accepted one.
+    lea r10, [rel union_type]
+    cmp rax, r10
+    jne .issubclass_not_union
+    mov rcx, [rcx + PyGenericAliasObject.ga_args]
+    jmp .issubclass_tuple
+.issubclass_not_union:
     ; Validate second arg is a type
     push rcx
     push rdx
@@ -1931,6 +2001,9 @@ DEF_FUNC builtin_issubclass, 8            ; 3 pushes, so rsp is 16-aligned
 
 .issubclass_arg2_error:
     RAISE exc_TypeError_type, "issubclass() arg 2 must be a class, a tuple of classes, or a union"
+.issubclass_generic:
+    RAISE exc_TypeError_type, \
+          "issubclass() argument 2 cannot be a parameterized generic"
 
 .issubclass_error:
     RAISE exc_TypeError_type, "issubclass() takes 2 arguments"

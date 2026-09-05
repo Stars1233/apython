@@ -39,12 +39,6 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **PEP 646's starred annotation is refused.**  `def g[T, *Ts](a: T, *rest:
-  *Ts)` is "can't use starred expression here": the parser takes `*Ts` in the
-  type-parameter list, which is where the shape was added, and not in an
-  annotation, where it also belongs.  The rest of PEP 695 works, decorated
-  and undecorated alike.
-
 - **The tokenizer cannot warn.**  CPython emits a SyntaxWarning for a number
   that ends against a keyword -- `1if True else 2` compiles, and says so.
   This compiles it silently: the compiler runs before there is an interpreter
