@@ -13,7 +13,8 @@ through `src/compiler/`, or `.pyc` through the marshal reader.
 ```bash
 make              # build ./apython
 make clean        # remove build/ and apython
-make check        # full test suite: compile .py→.pyc, diff python3 vs ./apython output
+make check        # full test suite: compile .py→.pyc, diff python3 vs ./apython output,
+                  #   then tests/pyc_probe.sh over a set of crafted .pyc files
 make check-cpython # CPython stdlib unit tests (harder, more thorough)
 make check-stdlib # how much of a CPython 3.12 Lib/ imports; a ratchet
 make check-source # the whole corpus compiled by OUR compiler; a ratchet
@@ -33,9 +34,9 @@ its `Lib/` (default `~/tmp/repo/cpython/Lib`).  It compares against
 `tests/stdlib_floor.txt` and fails when a module that used to import stops, or
 when a new one crashes.  Raise the floor with
 `bash tests/stdlib_probe.sh --record` in the commit that earns it.
-`make check` runs every `tests/test_*.py`, and reports more results than there
-are files because the async tests run against the default, poll and io_uring
-backends; `make check-cpython` runs everything under `tests/cpython/`, none of
+`make check` runs every `tests/test_*.py`, then `tests/pyc_probe.sh` and
+`tests/arity_probe.sh`; it reports more results than there are files because
+the async tests run against the default, poll and io_uring backends; `make check-cpython` runs everything under `tests/cpython/`, none of
 it tolerated as failing.
 
 `make check-source` and `make check-cpython-source` hand apython the `.py`
@@ -161,9 +162,17 @@ are migration scaffolding: the tags (`TAG_NULL`, `TAG_SMALLINT`, `TAG_FLOAT`,
 `TAG_PTR`, …) survive only inside functions that have not been converted yet,
 and at the boundaries between converted and unconverted code.
 
+## Bugs and divergences
+
+`bugs.md` is what is still wrong.  `DIVERGENCES.md` is what differs from
+CPython on purpose, with the reasoning and the cost of changing it -- a
+behaviour recorded there is not a bug to fix.  Reproduce an entry before
+working it; several have drifted.
+
 ## Source Layout
 
 No hand-written file exceeds 100k bytes; only generated asm may.
+`src/compiler/lint.py` checks it.
 
 - `src/eval.asm` — Bytecode dispatch loop (256-entry jump table), the
   exception unwinder, and `raise_exception`
@@ -178,19 +187,41 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   `init`, which registers them all into each type's `tp_dict`.  These share
   basenames with `src/pyo/` on purpose: `methods/dict.asm` is dict's methods,
   `pyo/dict.asm` is dict itself
+- `lib/_imp.py` and `lib/_warnings.py` — the import system's own primitives
+  and the warning machinery's C half, which CPython's `importlib._bootstrap`
+  is written against.  Neither needs to be assembly: one thread means the
+  import lock is a counter, there are no frozen or extension modules, and
+  `source_hash` is CPython's siphash13 in Python
+- `lib/_typing.py` — the objects PEP 695's syntax builds: TypeVar, ParamSpec,
+  TypeVarTuple, TypeAliasType and Generic.  Reached from the
+  `CALL_INTRINSIC_1`/`_2` handlers in `src/opcodes/match.asm`, the same split
+  `_iocore`/`_io` and `_socketcore`/`_socket` use
 - `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func,
-  class, iter, singleton, bytes, bytearray, memoryview, code)
-- `src/marshal.asm` — .pyc marshal deserializer, and the .pyc file reader
+  class, iter, singleton, bytes, bytearray, memoryview, code).  `class.asm` is
+  the metatype, the instance and attribute access; `instance_alloc.asm` is
+  where an instance comes from, including the constructors a subclass of a
+  builtin needs; `method.asm` is the bound method
+- `src/marshal.asm` — .pyc marshal deserializer, the .pyc file reader, and
+  the `marshal` module `importlib` calls `loads` on
 - `src/main.asm` — argument parsing, startup order, and the `-t`/`--dis` modes
 - `src/import.asm` — the import system: finders, `sys.modules`, packages
 - `src/iomod.asm` — the `_iocore` module: the four `_IOBase` types the rest
   of the I/O stack subclasses, `UnsupportedOperation`, `FileIO` and `BytesIO`.
   The buffering and text layers are `lib/_io.py`, which assembles both halves
   under the name `_io`
+- `src/posixmod.asm` / `src/posixproc.asm` — the `posix` module: the file and
+  directory syscalls in the first, and everything that makes a second process
+  -- fork, execv, _exit, kill, setsid and PEP 3143's fork hooks -- in the
+  second.  `lib/_posixsubprocess.py` builds `subprocess`'s fork_exec on them
 - `src/socketmod.asm` — the `_socketcore` module: the socket syscalls and the
   constant table, taking and returning sockaddrs as opaque bytes.  The socket
   type, the address packing and `select` are `lib/_socket.py` and
   `lib/select.py`, the same split as `_iocore`/`lib/_io.py`
+- `src/pyo/asyncmod.asm` — the `_asynciocore` module: the task type, the
+  event loop, `run`, `sleep`, `gather`, `wait_for`, `create_task`, and
+  `wait_fd`, the one primitive the stream layer needs.  `lib/asyncio.py` is
+  the other half, and the streams are Python over `lib/_socket.py` -- the
+  same split as `_iocore`/`lib/_io.py`
 - `src/itertools.asm` — the *iterator builtins* (`enumerate`, `zip`, `map`,
   `filter`, `reversed`, `sorted`, `chain`, `get_iterator`), not the `itertools`
   module, which is `lib/itertools.py`
@@ -232,10 +263,11 @@ f-strings, async, comprehensions, PEP 695 type parameters.
 | `compiler.inc` | token kinds, AST kinds, binding powers, `Buf`/`Comp`/`CompUnit`/`Instr` |
 | `tables.asm` | **generated** — char classes, keywords, operators, opcode metadata |
 | `gen_tables.py` | regenerates `tables.asm` from CPython 3.12's `opcode`/`dis` |
-| `gen_prule.py` | regenerates the expression grammar table inside `parse.asm` |
+| `gen_prule.py` | regenerates `prule.asm`, the expression grammar table |
 | `lex.asm` | tokenizer: indentation, operators, names, numbers, strings |
 | `ast.asm` | 32-byte nodes in a `Buf`, addressed by u32 index, and the growable `Buf` / bump `Arena` they live in |
-| `parse.asm` | Pratt expression parser + `prule_table`, the precedence grammar |
+| `parse.asm` | Pratt expression parser and its prefix/infix handlers |
+| `prule.asm` | **generated** -- `prule_table`, the precedence grammar |
 | `parse_stmt.asm` | statements, and the soft keywords `match` and `type` |
 | `pattern.asm` | `match` patterns |
 | `fstring.asm` | f-string fields, lexed as spans of the same source |
@@ -270,7 +302,9 @@ never needs Python -- and `gen_tables.py` refuses to run on anything but CPython
 
 **Gates:** `make check-source` and `make check-cpython-source` (both corpora
 compiled by this compiler and diffed against `python3` — where nearly every bug
-below was found), `./apython --selftest-compile`, `python3 src/compiler/lint.py`,
+below was found), `tests/syntax_probe.sh` (every field of a SyntaxError, over
+`tests/syntax_corpus.txt`, against CPython's; `--show` prints what differs),
+`./apython --selftest-compile`, `python3 src/compiler/lint.py`,
 and the `tests/test_compile_*.py` files.  All but the two `-source` targets run
 inside `make check`.
 
@@ -371,7 +405,7 @@ Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 byt
 - **Raw payload use after conversion:** once a slot holds a Value, reading it and using it as an int or as raw double bits needs `V_TO_I64` / `V_TO_F64` first. Pointers are the exception — a pointer is its own Value — which is why pointer-only code survived the conversion untouched and non-pointer code did not.
 - **Shadowing a builtin base's slot:** a dunder that `object` itself supplies is not a definition.  `type_install_slots` skips them (`slot_is_object_default`), or a tuple subclass would compare by identity instead of by contents.  The same technique keeps `instance_repr`/`instance_str` from picking up `object.__repr__` ahead of a builtin base's
 - **Boxing in V_PACK:** `V_PACK` on a TAG_SMALLINT outside ±2^50 allocates a heap int. That is correct but it is an allocation, and the returned reference is owned — do not pack a borrowed integer payload and drop it.
-- **`current_exception` is also the exception *being handled*.** It stays set for the length of an `except` block, so `cmp qword [rel current_exception], 0` cannot mean "did that call raise?". Snapshot it before the call and compare (`DUNDER_EXC_SAVE` / `DUNDER_RAISED`), or a loop inside a handler re-raises what the handler caught.
+- **Two exception globals, and they answer different questions.** `current_exception` is the one *in flight*; `handled_exception` is the one an `except` block is *handling*, which `PUSH_EXC_INFO` installs and `POP_EXCEPT` takes down. `sys.exc_info()`, a bare `raise` and an implicit `__context__` all read the second. `eval_frame`/`eval_return` swap `handled_exception` with `PyFrame.exc_state` around every frame, so a frame handling nothing shares its caller's and a suspended generator carries its own. Snapshotting `current_exception` before a call (`DUNDER_EXC_SAVE` / `DUNDER_RAISED` / `EXC_RAISED_SINCE`) is still the right way to ask "did that raise?", because `call_iternext` legitimately clears a StopIteration.
 - **Following `tp_base` to resolve an attribute or answer a subclass question.** With multiple inheritance the answer lives on the MRO: use `MRO_NEXT walker, origin` (or `type_is_subtype`), keeping the type the search *started from* as the origin. A static type has no `tp_mro`, and for it `MRO_NEXT` still yields `tp_base`, so single-inheritance code reads the same.
 - **Writing through an inherited method table.** `type_from_parts` gives a builtin subclass its base's `tp_as_number` / `tp_as_sequence` / `tp_as_mapping` *pointer*. Writing a slot through it patches the builtin's own static table for the whole process; `slot_ensure_table` copies first. The same shape applies to anything else inherited by pointer.
 - **A 64-bit read of a 4-byte struct field.** `mov rdx, [rsi + Token.len]`
@@ -380,9 +414,12 @@ Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 byt
   zero-extends. `src/compiler/lint.py` checks this.
 - **A call made with `rsp` misaligned.** After `DEF_FUNC`'s `push rbp`, a
   `sub rsp, N` and P register pushes, the SysV ABI wants `(N + 8*P) % 16 == 0`.
-  Much of `src/` predates this and violates it harmlessly, but the compiler
-  calls `strtod`, and glibc's float paths do use aligned SSE. `src/compiler/lint.py`
-  checks it; pad the frame rather than the push list.
+  The compiler calls `strtod` and the numeric builtins reach GMP, and glibc's
+  float paths do use aligned SSE. `src/compiler/lint.py` checks it tree-wide;
+  pad the frame rather than the push list. A prologue that carves its own
+  space after the pushes is the exception: growing its `DEF_FUNC` frame moves
+  `rsp` without moving the buffer it addresses off `rbp`, so change the
+  `sub rsp` and every matching `add rsp` together instead.
 - **A frame slot overlapping a struct in the same frame.** A hand-picked
   `equ` for a large struct silently overlaps the scalar slots above it the
   first time the struct grows, and the symptom is one field reading as garbage.
@@ -390,7 +427,7 @@ Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 byt
 - **Following a node's `a`/`b`/`c` without asking what kind it is.** The node and object arenas overlap freely, so a generic walk that visits a field holding an *object* index lands on an unrelated node. `sym_visit` keeps an exclusion list; `cg_has_annotation` recurses only into the compound statements whose fields really are blocks. A `for/else` is the other half of the same trap: it hides its else block in `clist` with `nchild` at 0, where no child-list walk reaches it.
 - **Leaving a block early must emit its cleanup outside that block's own region.** The exception table is built from a per-instruction handler stamp, so the `__exit__` a `return` emits carries whatever stamp is current — the with's own, unless the unwinder sets it to the enclosing one first. Each entry on the block stack records that enclosing handler for exactly this. A `return` also leaves every enclosing *loop*, whose iterator is on the stack under the return value.
 - **A borrowed pointer in `CompUnit.names` or `.consts`.** Both hold borrowed references; the object arena owns them. A string interned at the call site and released leaves a dangling pointer whose symptom is a wild jump inside `dict_lookup` at run time, and a code object never handed to the arena is simply never freed. `comp_intern_cstr` and `comp_intern_keep` are the way in.
-- **A variable-size builtin whose subclass gets a fixed-offset `__dict__`.** str and bytes keep their data inline, so a dict at the base's `tp_basicsize` lands *inside* it. They get `TP_DICT_AT_TAIL`; bytearray and memoryview, which can move or borrow their storage, get none at all — but still need `tp_basicsize` set, or the dealloc slot walk reads a negative count.
+- **A variable-size builtin whose subclass gets a fixed-offset `__dict__` or `__slots__`.** str and bytes keep their data inline, so a dict at the base's `tp_basicsize` lands *inside* it. They get `TP_DICT_AT_TAIL`; bytearray and memoryview, which can move or borrow their storage, get none at all — but still need `tp_basicsize` set, or the dealloc slot walk reads a negative count. A str subclass's `__slots__` go at the tail for the same reason, counted by `tp_tailslots` and addressed by a NEGATIVE `md_offset`; int, bytes and tuple subclasses refuse slots outright, as CPython's do.
 - **Asking "is this object a class?" by comparing metatypes.** `ob_type is user_type_metatype` is false for a class built by a metaclass of its own, so a classmethod reached through such a class bound the *metaclass*. Test `TYPE_FLAG_METATYPE` on the object's type instead; it is set on `type`, on the two metatypes we ship, and on any class deriving from `type`.
 - **An empty `bases` tuple is not the same as no bases.** `type(n, (), d)` substituted `object`; the metaclass paths did not, and those classes got an MRO of just `[C]` — not even instances of `object`. Invisible until a merge needs the `object` that anchors the end.
 - **A builtin's behaviour that lives only in a slot.** The stdlib asks questions by name: `hasattr(f, '__get__')` decides whether something is a descriptor, `member_type.__str__ is object.__str__` decides whether a type defines its own `str()`. A slot with no matching entry in `tp_dict` answers those wrong. When adding one, the thunk must call the *defining* type's slot, not the argument's, or a subclass re-dispatches into itself.
@@ -405,6 +442,14 @@ Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 byt
   `_io.BytesIO` give the type its own `tp_traverse` and `tp_clear`, and their
   dealloc zeroes the raw fields before delegating.  A subclass of such a type
   cannot declare `__slots__`: they would land in the same words.
+
+- **An argument that is an index, taken with `int_to_i64`.** It reads
+  `PyIntObject.compact` off whatever it is handed, so `"a\tb".expandtabs("x")`
+  read a str's header as a number. `obj_as_index` is the funnel: it names the
+  type and it takes anything with `__index__`. A slice bound wants
+  `obj_as_slice_index`, which is the same test and CPython's other wording.
+  A truth value -- `splitlines(keepends)` -- is neither, and wants
+  `obj_is_true`.
 
 - **A builtin `__next__` that raises StopIteration with `RAISE`.**  `RAISE`
   tail-jumps into the unwinder, and a builtin has no Python frame of its own

@@ -683,7 +683,7 @@ FIB_LEN   equ 144
 FIB_NEG   equ 152
 FIB_HEAP  equ 160        ; heap digit buffer to free, or 0 (wide values)
 FIB_OUTSZ equ 168        ; bytes reserved for the assembled output
-FIB_FRAME equ 192           ; + 5 pushes = 232, not 16-aligned
+FIB_FRAME equ 200            ; + 5 pushes = 240, 16-aligned
 
 DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     push rbx

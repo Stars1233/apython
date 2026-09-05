@@ -12,6 +12,7 @@
 extern ap_malloc
 extern ap_free
 extern obj_dealloc
+extern obj_decref
 
 ; Pool constants
 POOL_CLASS_0  equ 256
@@ -131,10 +132,12 @@ DEF_FUNC frame_pool_put
     jmp ap_free                ; tail call (rdi already set)
 END_FUNC frame_pool_put
 
-; frame_new(PyCodeObject *code, PyObject *globals, PyObject *builtins, PyObject *locals) -> PyFrame*
-; Allocates and initializes a new execution frame.
-; rdi = code, rsi = globals, rdx = builtins, rcx = locals
-DEF_FUNC frame_new
+;; ============================================================================
+;; frame_new(PyCodeObject *code, PyObject *globals, PyObject *builtins, PyObject *locals) -> PyFrame*
+;; Allocates and initializes a new execution frame.
+;; rdi = code, rsi = globals, rdx = builtins, rcx = locals
+;; ============================================================================
+DEF_FUNC frame_new, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -147,9 +150,17 @@ DEF_FUNC frame_new
     mov r14, rcx            ; r14 = locals
 
     ; Calculate frame size: FRAME_HEADER_SIZE + (nlocalsplus + stacksize) * 8
+    ;
+    ; In 64 bits.  The two fields are 32-bit and came out of a .pyc, so adding
+    ; them in 32 bits let a crafted pair near 2^31 wrap to a small total: the
+    ; frame was allocated far too short and the value stack ran off the end of
+    ; it.  The marshal reader now caps each field, and this is the other half
+    ; -- frame_new is also reached from the compiler, which produces its own
+    ; numbers, so the arithmetic has to be right on its own.
     mov eax, [rbx + PyCodeObject.co_nlocalsplus]
-    add eax, [rbx + PyCodeObject.co_stacksize]
-    mov r15d, eax           ; r15d = nlocalsplus + stacksize (total slots)
+    mov ecx, [rbx + PyCodeObject.co_stacksize]
+    add rax, rcx
+    mov r15, rax            ; r15 = nlocalsplus + stacksize (total slots)
     shl rax, 3              ; * 8 bytes per slot (payload only)
     add rax, FRAME_HEADER_SIZE
     mov rdi, rax
@@ -166,6 +177,11 @@ DEF_FUNC frame_new
     mov qword [r11 + PyFrame.instr_ptr], 0
     mov qword [r11 + PyFrame.stack_ptr], 0
     mov dword [r11 + PyFrame.return_offset], 0
+    ; The pool hands back memory it did not zero, so a field that is read
+    ; before it is written has to be initialised here.  exc_state is XDECREFd
+    ; by frame_free, which makes a stale pointer a free of someone else's
+    ; object rather than a wrong answer.
+    mov qword [r11 + PyFrame.exc_state], 0
 
     ; Set nlocalsplus and func_obj
     mov ecx, [rbx + PyCodeObject.co_nlocalsplus]
@@ -201,10 +217,12 @@ DEF_FUNC frame_new
     ret
 END_FUNC frame_new
 
-; frame_free(PyFrame *frame)
-; XDECREF all non-NULL localsplus entries, then free the frame.
-; rdi = frame
-DEF_FUNC frame_free
+;; ============================================================================
+;; frame_free(PyFrame *frame)
+;; XDECREF all non-NULL localsplus entries, then free the frame.
+;; rdi = frame
+;; ============================================================================
+DEF_FUNC frame_free, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -250,10 +268,22 @@ DEF_FUNC frame_free
     jmp .stack_loop
 
 .free_frame:
-    ; Calculate frame size for pool return
+    ; A generator abandoned inside an except block still holds the exception
+    ; it was handling, swapped out of the global by its last suspension.
+    mov rdi, [rbx + PyFrame.exc_state]
+    test rdi, rdi
+    jz .no_exc_state
+    mov qword [rbx + PyFrame.exc_state], 0
+    call obj_decref
+.no_exc_state:
+
+    ; Calculate frame size for pool return.  The same 64-bit add frame_new
+    ; makes, and it has to be the same or the pool is handed a size the block
+    ; was never allocated at.
     mov rdi, [rbx + PyFrame.code]
     mov eax, [rdi + PyCodeObject.co_nlocalsplus]
-    add eax, [rdi + PyCodeObject.co_stacksize]
+    mov ecx, [rdi + PyCodeObject.co_stacksize]
+    add rax, rcx
     shl rax, 3
     add rax, FRAME_HEADER_SIZE
 

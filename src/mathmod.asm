@@ -861,7 +861,7 @@ DEF_FUNC_LOCAL math_int_result
 END_FUNC math_int_result
 
 ;; math_new_mpz() -> rax = a fresh GMP-backed PyIntObject, refcount 1
-DEF_FUNC_LOCAL math_new_mpz
+DEF_FUNC_LOCAL math_new_mpz, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov edi, PyIntObject_size
     call ap_malloc

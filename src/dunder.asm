@@ -350,7 +350,7 @@ END_FUNC dunder_call_2
 ;; r8d = arg2 tag (use TAG_PTR if arg2 is always a heap ptr).
 ;; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
 ;; ============================================================================
-DEF_FUNC dunder_call_3
+DEF_FUNC dunder_call_3, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13

@@ -97,7 +97,7 @@ END_FUNC bytes_new
 ;; bytes_from_data(const void *data, int64_t size) -> PyBytesObject*
 ;; Allocate a bytes object and copy data into it
 ;; ============================================================================
-DEF_FUNC bytes_from_data
+DEF_FUNC bytes_from_data, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -445,7 +445,7 @@ DEF_FUNC bytes_repr
     ret
 END_FUNC bytes_repr
 
-DEF_FUNC bytearray_repr
+DEF_FUNC bytearray_repr, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     call bytearray_data
@@ -459,7 +459,7 @@ DEF_FUNC bytearray_repr
 END_FUNC bytearray_repr
 
 BRI_BUF   equ 1024          ; render buffer, on the stack
-DEF_FUNC_LOCAL bytes_repr_impl, 1024
+DEF_FUNC_LOCAL bytes_repr_impl, 1032
     push rbx
     push r12
     push r13
@@ -704,6 +704,7 @@ BD_WHY    equ 40            ; which of the three malformations
 BD_ERRID  equ 48            ; 1 = ignore, 2 = replace
 BD_READ   equ 56            ; the read cursor, while rebuilding
 BD_SPAN   equ 64            ; how many bytes the bad subpart covers
+BD_ENC    equ 72            ; the encoding argument, for the Python path
 BD_FRAME  equ 80            ; + 2 pushes = 96, 16-aligned
 ;; ============================================================================
 ;; bytes_utf8_check(rdi = data, rsi = length) -> rax = the index of the first
@@ -763,7 +764,7 @@ BRD_SPAN  equ 16
 BRD_SELF  equ 24
 BRD_CODEC equ 32
 BRD_REASON equ 40
-BRD_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+BRD_FRAME equ 56            ; + 1 push = 64, 16-aligned
 
 DEF_FUNC bytes_raise_decode_error, BRD_FRAME
     push rbx
@@ -1214,9 +1215,12 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
 .bd_default_enc:
     xor eax, eax
 .bd_have_enc:
+    mov [rbp - BD_ENC], rax
     mov rdi, rax
     extern codec_id
     call codec_id
+    cmp eax, -1
+    je .bd_python               ; not one of the three: ask the registry
     cmp eax, 1
     je .bd_ascii
     cmp eax, 2
@@ -1353,22 +1357,30 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
 
 .bd_nomem:
     RAISE exc_MemoryError_type, "out of memory"
+.bd_python:
+    ; Everything this file cannot do itself: an encoding the registry has to
+    ; find, and an error handler that is not one of the three built in here.
+    ; The second is reached only once a malformation has been found, which is
+    ; where CPython looks a handler up as well.
+    mov rdi, [rbp - BD_SELF]
+    mov rsi, [rbp - BD_ENC]
+    mov rdx, [rbp - BD_ERRORS]
+    mov ecx, 1                  ; decode
+    extern codec_via_python
+    call codec_via_python
+    pop r12
+    pop rbx
+    leave
+    test edx, edx
+    jz .bd_python_failed
+    V_PACK rax, rdx
+    ret
+.bd_python_failed:
+    xor eax, eax
+    ret
+
 .bd_bad_errors:
-    ; The name is the useful half: "unknown error handler name" leaves the
-    ; caller to guess which of their arguments was wrong.
-    lea rdi, [rel bd_msgbuf]
-    lea rsi, [rel bd_msg_handler]
-    call bd_copy
-    mov rdi, rax
-    mov rsi, [rbp - BD_ERRORS]
-    lea rsi, [rsi + PyStrObject.data]
-    call bd_copy
-    mov byte [rax], 0x27        ; the closing quote
-    mov byte [rax + 1], 0
-    lea rdi, [rel exc_LookupError_type]
-    lea rsi, [rel bd_msgbuf]
-    call raise_exception
-    ud2
+    jmp .bd_python
 
 .bd_ascii:
     xor ecx, ecx
@@ -1540,7 +1552,7 @@ END_FUNC _get_bytes_decode_builtin
 ;; bytes_tp_iter(PyBytesObject *self) -> PyBytesIterObject*
 ;; Create an iterator for bytes
 ;; ============================================================================
-DEF_FUNC bytes_tp_iter
+DEF_FUNC bytes_tp_iter, 8            ; 1 push, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi               ; save bytes obj
@@ -1589,7 +1601,7 @@ END_FUNC bytes_iter_next
 ;; ============================================================================
 ;; bytes_iter_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC bytes_iter_dealloc
+DEF_FUNC bytes_iter_dealloc, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -1629,7 +1641,7 @@ extern bool_false
 ;; The two keep their data in different places -- bytes inline, bytearray out
 ;; of line -- so anything that reads both goes through here.
 ;; ============================================================================
-DEF_FUNC bytes_like_ptr_len
+DEF_FUNC bytes_like_ptr_len, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     ; A Value, which may be an int or a float immediate -- sq_concat and
     ; tp_richcompare are both called with whatever the other operand was.
@@ -1687,6 +1699,12 @@ DEF_FUNC bytes_like_ptr_len
     mov rax, [rdi + PyMemoryViewObject.mv_buf]
     cmp rax, MV_RELEASED
     je .bpl_no
+    ; A strided view has no contiguous run to point at: mv_buf is its first
+    ; item and the rest are mv_stride items apart, in either direction.  It
+    ; declines here and is materialised by the one caller that can --
+    ; memoryview's own tp_richcompare, which copies before it compares.
+    cmp qword [rdi + PyMemoryViewObject.mv_stride], 1
+    jne .bpl_no
     mov r10, [rdi + PyMemoryViewObject.mv_len]
 .bpl_yes:
     mov ecx, 1
@@ -2237,16 +2255,20 @@ DEF_FUNC bytes_mod, BM_FRAME
     mov rdi, rbx               ; temp str
     mov rsi, [rbp-BM_ARGS]    ; args, a Value -- str_mod is a slot and unpacks
     mov edx, 1                 ; and this one is a BYTES format
+    mov ecx, 1                 ; report by RETURNING: see below
     extern str_mod_impl
     call str_mod_impl
     mov r12, rax               ; r12 = result str Value (a str is a pointer)
 
-    ; DECREF temp fmt str
+    ; DECREF temp fmt str.  This is the whole reason str_mod_impl is asked to
+    ; return rather than raise: a raise abandons the C stack, so the decoded
+    ; copy of the format above was leaked once per malformed `b"%d" % (1, 2)`
+    ; -- and putting it somewhere the unwinder frees would be worse, since an
+    ; argument's __str__ can run Python and a raise caught inside it would
+    ; free a buffer str_mod_impl is still reading.
     mov rdi, rbx
     DECREF_REG rdi
 
-    ; str_mod raises rather than declining, but a NULL here would be read as a
-    ; PyStrObject below, so refuse it rather than trusting the callee.
     test r12, r12
     jz .bm_failed
 
@@ -2313,7 +2335,23 @@ DEF_FUNC bytes_mod, BM_FRAME
     ret
 
 .bm_failed:
-    ; str_mod left an exception pending; propagate the NULL Value.
+    ; str_mod_impl recorded the error rather than raising it, so that the
+    ; temporary above could be released; now that it has been, the exception
+    ; goes on its way.  Returning the NULL instead would be read as "this
+    ; slot declines" -- a number slot has no other way to say NULL -- and the
+    ; interpreter would report "unsupported operand type(s) for %" over the
+    ; top of the real message.
+    extern current_exception
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .bm_failed_no_exc
+    mov qword [rel current_exception], 0
+    pop r12
+    pop rbx
+    leave
+    extern raise_exception_obj
+    jmp raise_exception_obj     ; takes the reference, does not return
+.bm_failed_no_exc:
     xor eax, eax
     pop r12
     pop rbx
@@ -2338,7 +2376,7 @@ END_FUNC bytes_mod
 ;; ============================================================================
 BMOD_ARGS  equ 8
 BMOD_TMP   equ 16
-BMOD_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+BMOD_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
 DEF_FUNC bytearray_mod, BMOD_FRAME
     push rbx
@@ -2756,6 +2794,9 @@ DEF_FUNC byteslike_source, BLS_FRAME
     lea rcx, [rel bytearray_type]
     cmp rax, rcx
     je .bls_copy_bytearray
+    lea rcx, [rel memoryview_type]
+    cmp rax, rcx
+    je .bls_copy_view
     extern int_type
     lea rcx, [rel int_type]
     cmp rax, rcx
@@ -2824,10 +2865,25 @@ extern str_set_length
     mov rbx, [rdi + PyByteArrayObject.ob_size]
     call bytearray_data
     mov r12, rax
+    jmp .bls_copy
+
+.bls_copy_view:
+    ; A memoryview used to fall through to the iterable path, which takes one
+    ; byte per ITEM -- so bytes(m.cast('I')) was "bytes must be in range(0,
+    ; 256)" for a view whose items are four bytes wide, and a strided view
+    ; has no contiguous run to read at all.  memoryview_as_bytes answers
+    ; both: it lays the items out end to end, which is what bytes() means.
+    extern memoryview_as_bytes
+    call memoryview_as_bytes
+    test rax, rax
+    jz .bls_empty
+    mov [rbp - BLS_LIST], rax   ; released below, with the list's arm
+    mov rbx, [rax + PyBytesObject.ob_size]
+    lea r12, [rax + PyBytesObject.data]
 
 .bls_copy:
     test rbx, rbx
-    jz .bls_empty
+    jz .bls_copy_empty
     lea rdi, [rbx + 8]
     call ap_malloc
     push rax
@@ -2838,10 +2894,28 @@ extern str_set_length
     pop rax
     mov qword [rax + rbx], 0
     mov rdx, rbx
+    push rax
+    push rdx
+    mov rdi, [rbp - BLS_LIST]   ; the memoryview's temporary, if there was one
+    test rdi, rdi
+    jz .bls_copy_no_temp
+    mov qword [rbp - BLS_LIST], 0
+    call obj_decref
+.bls_copy_no_temp:
+    pop rdx
+    pop rax
     pop r12
     pop rbx
     leave
     ret
+
+.bls_copy_empty:
+    mov rdi, [rbp - BLS_LIST]
+    test rdi, rdi
+    jz .bls_empty
+    mov qword [rbp - BLS_LIST], 0
+    call obj_decref
+    jmp .bls_empty
 
     ; Any other iterable: materialise it as a list, then take one byte per
     ; item.  Going through list() rather than the iterator protocol directly
@@ -3021,7 +3095,7 @@ END_FUNC byteslike_source
 BTC_TYPE  equ 8
 BTC_BUF   equ 16
 BTC_LEN   equ 24
-BTC_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+BTC_FRAME equ 40            ; + 1 push = 48, 16-aligned
 DEF_FUNC bytes_type_call, BTC_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     push rbx
@@ -3188,6 +3262,7 @@ bytes_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; bytes_iter type object
 align 8
@@ -3219,6 +3294,7 @@ bytes_iter_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 section .rodata
 

@@ -16,6 +16,11 @@ extern obj_dealloc
 extern obj_incref
 extern str_from_cstr
 extern type_type
+extern kw_names_pending
+extern obj_as_index
+extern bytes_type
+extern tuple_type
+extern str_type
 ; code objects are not GC-tracked (allocated by marshal via ap_malloc)
 
 ; --- code_new frame layout ---
@@ -88,7 +93,7 @@ END_FUNC code_traverse
 ;; the two localsplus tables through r14 and the frame -- clearing those out
 ;; from under a frame that is still unwinding would be worse than the cycle.
 global code_clear
-DEF_FUNC code_clear
+DEF_FUNC code_clear, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyCodeObject.co_consts]
@@ -234,9 +239,11 @@ DEF_FUNC code_spec_clear
     ret
 END_FUNC code_spec_clear
 
-; code_dealloc(PyObject *self)
-; Free code object and decref contained objects
-DEF_FUNC code_dealloc
+;; ============================================================================
+;; code_dealloc(PyObject *self)
+;; Free code object and decref contained objects
+;; ============================================================================
+DEF_FUNC code_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -317,14 +324,18 @@ DEF_FUNC code_dealloc
     ret
 END_FUNC code_dealloc
 
-; code_repr(PyObject *self) -> PyStrObject*
+;; ============================================================================
+;; code_repr(PyObject *self) -> PyStrObject*
+;; ============================================================================
 DEF_FUNC_BARE code_repr
     lea rdi, [rel code_repr_str]
     jmp str_from_cstr
 END_FUNC code_repr
 
-; code_getattr(PyCodeObject *self, PyObject *name) -> (rax, edx) or NULL
-; rdi = code object, rsi = name string
+;; ============================================================================
+;; code_getattr(PyCodeObject *self, PyObject *name) -> (rax, edx) or NULL
+;; rdi = code object, rsi = name string
+;; ============================================================================
 DEF_FUNC code_getattr
     push rbx
     push r12
@@ -359,6 +370,13 @@ DEF_FUNC code_getattr
     call ap_strcmp
     test eax, eax
     jz .return_positions
+
+    ; Check for replace
+    lea rdi, [rel cr_attr_replace]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_replace
 
     ; Everything else is a straight field read.  Only three of the seventeen
     ; co_* were reachable from Python, which is most of what inspect,
@@ -417,6 +435,19 @@ DEF_FUNC code_getattr
     pop rbx
     leave
     V_PACK rax, rdx             ; return one Value
+    ret
+
+.return_replace:
+    ; Bound too, for the same reason: `co.replace` names its own code object.
+    call _get_co_replace_builtin
+    mov rdi, rax
+    mov rsi, rbx
+    call method_new
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
     ret
 
 .return_positions:
@@ -637,12 +668,331 @@ code_type:
     dq code_traverse    ; tp_traverse
     dq code_clear       ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
+
+section .rodata
+;; The keyword names code.replace() takes, each with the CodeSpec field it
+;; writes and how to read it.  Kinds: 0 int, 1 tuple, 2 str, 3 bytes, 4 the
+;; bytecode itself, which is a length and a borrowed pointer rather than a
+;; stored reference.
+CRK_INT   equ 0
+CRK_TUPLE equ 1
+CRK_STR   equ 2
+CRK_BYTES equ 3
+CRK_CODE  equ 4
+
+cr_n_argcount:       db "co_argcount", 0
+cr_n_posonlyargcount: db "co_posonlyargcount", 0
+cr_n_kwonlyargcount: db "co_kwonlyargcount", 0
+cr_n_nlocals:        db "co_nlocals", 0
+cr_n_stacksize:      db "co_stacksize", 0
+cr_n_flags:          db "co_flags", 0
+cr_n_firstlineno:    db "co_firstlineno", 0
+cr_n_consts:         db "co_consts", 0
+cr_n_names:          db "co_names", 0
+cr_n_filename:       db "co_filename", 0
+cr_n_name:           db "co_name", 0
+cr_n_qualname:       db "co_qualname", 0
+cr_n_linetable:      db "co_linetable", 0
+cr_n_exceptiontable: db "co_exceptiontable", 0
+cr_n_code:           db "co_code", 0
+
+align 8
+;; name, CodeSpec offset, kind
+cr_field_table:
+    dq cr_n_argcount,        CodeSpec.argcount,        CRK_INT
+    dq cr_n_posonlyargcount, CodeSpec.posonlyargcount, CRK_INT
+    dq cr_n_kwonlyargcount,  CodeSpec.kwonlyargcount,  CRK_INT
+    dq cr_n_nlocals,         CodeSpec.nlocals,         CRK_INT
+    dq cr_n_stacksize,       CodeSpec.stacksize,       CRK_INT
+    dq cr_n_flags,           CodeSpec.flags,           CRK_INT
+    dq cr_n_firstlineno,     CodeSpec.firstlineno,     CRK_INT
+    dq cr_n_consts,          CodeSpec.consts,          CRK_TUPLE
+    dq cr_n_names,           CodeSpec.names,           CRK_TUPLE
+    dq cr_n_filename,        CodeSpec.filename,        CRK_STR
+    dq cr_n_name,            CodeSpec.name,            CRK_STR
+    dq cr_n_qualname,        CodeSpec.qualname,        CRK_STR
+    dq cr_n_linetable,       CodeSpec.linetable,       CRK_BYTES
+    dq cr_n_exceptiontable,  CodeSpec.exceptiontable,  CRK_BYTES
+    dq cr_n_code,            0,                        CRK_CODE
+    dq 0, 0, 0
+CR_ROW equ 24
+
+cr_attr_replace: db "replace", 0
 
 section .bss
 _co_positions_cache: resq 1
+_co_replace_cache: resq 1
 
 section .text
+
+;; ============================================================================
+;; _get_co_replace_builtin() -> rax = the one builtin behind code.replace
+;;
+;; Built on first use and kept: `co.replace` is a bound method made fresh for
+;; each code object, but the callable underneath it is the same one.
+;; ============================================================================
+DEF_FUNC_LOCAL _get_co_replace_builtin
+    mov rax, [rel _co_replace_cache]
+    test rax, rax
+    jnz .ret
+    lea rdi, [rel code_method_replace]
+    lea rsi, [rel cr_attr_replace]
+    extern builtin_func_new
+    call builtin_func_new
+    mov [rel _co_replace_cache], rax
+.ret:
+    leave
+    ret
+END_FUNC _get_co_replace_builtin
+
+;; ============================================================================
+;; code_method_replace(args, nargs)
+;;   -> rax = a new PyCodeObject with some fields changed, rdx = TAG_PTR
+;;
+;;
+;; `co.replace(co_flags=...)`, which is how types.coroutine marks a generator
+;; function as a coroutine -- and so how asyncio gets imported at all.  Every
+;; argument is keyword-only, as CPython's is; what is not named is copied.
+;;
+;; co_varnames, co_freevars and co_cellvars are refused rather than silently
+;; ignored: this code object keeps one localsplusnames tuple with a parallel
+;; kinds string, so replacing one of the three means rebuilding both, and a
+;; caller that changes them without changing the bytecode has broken the
+;; object anyway.  DIVERGENCES.md records it.
+;; ============================================================================
+CR_ARGS   equ 8
+CR_NARGS  equ 16
+CR_KW     equ 24
+CR_NKW    equ 32
+CR_I      equ 40
+CR_SRC    equ 48
+CR_OFF    equ 56          ; the CodeSpec offset the current keyword writes
+CR_SPEC   equ 64 + CodeSpec_size
+CR_FRAME  equ ((CR_SPEC + 15) / 16) * 16 + 8    ; + 3 pushes = 16-aligned
+global code_method_replace
+DEF_FUNC code_method_replace, CR_FRAME
+    push rbx
+    push r12
+    push r13
+    mov [rbp - CR_ARGS], rdi
+    mov [rbp - CR_NARGS], rsi
+    mov qword [rbp - CR_KW], 0
+    mov qword [rbp - CR_NKW], 0
+
+    ; The keywords, and how many of the arguments are actually positional.
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .cr_no_kw
+    mov qword [rel kw_names_pending], 0
+    mov [rbp - CR_KW], rax
+    mov rcx, [rax + PyTupleObject.ob_size]
+    mov [rbp - CR_NKW], rcx
+    sub [rbp - CR_NARGS], rcx
+.cr_no_kw:
+    cmp qword [rbp - CR_NARGS], 1
+    jne .cr_positional
+
+    mov rax, [rbp - CR_ARGS]
+    mov rax, [rax]
+    mov [rbp - CR_SRC], rax
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel code_type]
+    cmp rcx, rdx
+    jne .cr_positional
+
+    ; --- the spec, filled from the source; code_new steals what is in it ---
+    lea rdi, [rbp - CR_SPEC]
+    xor esi, esi
+    mov edx, CodeSpec_size
+    call ap_memset
+    mov rbx, [rbp - CR_SRC]
+    lea r12, [rbp - CR_SPEC]
+
+    lea rax, [rbx + PyCodeObject.co_code]
+    mov [r12 + CodeSpec.code_bytes], rax
+    movsxd rax, dword [rbx + PyCodeObject.co_code_len]
+    mov [r12 + CodeSpec.code_len], rax
+    mov eax, [rbx + PyCodeObject.co_argcount]
+    mov [r12 + CodeSpec.argcount], eax
+    mov eax, [rbx + PyCodeObject.co_posonlyargcount]
+    mov [r12 + CodeSpec.posonlyargcount], eax
+    mov eax, [rbx + PyCodeObject.co_kwonlyargcount]
+    mov [r12 + CodeSpec.kwonlyargcount], eax
+    mov eax, [rbx + PyCodeObject.co_nlocals]
+    mov [r12 + CodeSpec.nlocals], eax
+    mov eax, [rbx + PyCodeObject.co_stacksize]
+    mov [r12 + CodeSpec.stacksize], eax
+    mov eax, [rbx + PyCodeObject.co_flags]
+    mov [r12 + CodeSpec.flags], eax
+    mov eax, [rbx + PyCodeObject.co_firstlineno]
+    mov [r12 + CodeSpec.firstlineno], eax
+
+    ; consts through exceptiontable sit in the same order in both structs,
+    ; 24 bytes apart; linetable does not -- PyCodeObject keeps it past two
+    ; 32-bit fields -- so it is copied on its own rather than by the stride.
+    mov r13, CodeSpec.consts
+.cr_copy_objs:
+    cmp r13, CodeSpec.exceptiontable
+    ja .cr_copied
+    mov rdi, [rbx + (PyCodeObject.co_consts - CodeSpec.consts) + r13]
+    mov [r12 + r13], rdi
+    test rdi, rdi
+    jz .cr_copy_next
+    call obj_incref
+.cr_copy_next:
+    add r13, 8
+    jmp .cr_copy_objs
+.cr_copied:
+    mov rdi, [rbx + PyCodeObject.co_linetable]
+    mov [r12 + CodeSpec.linetable], rdi
+    test rdi, rdi
+    jz .cr_no_linetable
+    call obj_incref
+.cr_no_linetable:
+
+    ; --- the keywords, one at a time ---
+    mov qword [rbp - CR_I], 0
+.cr_kw_loop:
+    mov rax, [rbp - CR_I]
+    cmp rax, [rbp - CR_NKW]
+    jae .cr_build
+    mov rcx, [rbp - CR_KW]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov r13, [rcx + rax*8]              ; the keyword's name
+    mov rcx, [rbp - CR_NARGS]
+    add rcx, rax
+    mov rdx, [rbp - CR_ARGS]
+    mov rbx, [rdx + rcx*8]              ; the value, as a Value
+    lea r8, [rel cr_field_table]
+.cr_scan:
+    mov rdi, [r8]
+    test rdi, rdi
+    jz .cr_unknown_kw
+    push r8
+    lea rsi, [r13 + PyStrObject.data]
+    call ap_strcmp
+    pop r8
+    test eax, eax
+    jz .cr_apply
+    add r8, CR_ROW
+    jmp .cr_scan
+
+.cr_apply:
+    mov r9, [r8 + 8]                    ; the CodeSpec offset
+    mov [rbp - CR_OFF], r9
+    mov r10, [r8 + 16]                  ; the kind
+    lea r12, [rbp - CR_SPEC]
+    cmp r10, CRK_INT
+    je .cr_set_int
+    cmp r10, CRK_CODE
+    je .cr_set_code
+    ; every other kind is one object reference, type-checked first
+    mov rdi, rbx
+    V_TEST_PTR rdi, rax
+    ja .cr_bad_type
+    test rdi, rdi
+    jz .cr_bad_type
+    mov rax, [rdi + PyObject.ob_type]
+    cmp r10, CRK_TUPLE
+    jne .cr_chk_str
+    lea rcx, [rel tuple_type]
+    jmp .cr_chk_cmp
+.cr_chk_str:
+    cmp r10, CRK_STR
+    jne .cr_chk_bytes
+    lea rcx, [rel str_type]
+    jmp .cr_chk_cmp
+.cr_chk_bytes:
+    lea rcx, [rel bytes_type]
+.cr_chk_cmp:
+    cmp rax, rcx
+    jne .cr_bad_type
+    call obj_incref
+    lea r12, [rbp - CR_SPEC]
+    mov r9, [rbp - CR_OFF]
+    mov rax, [r12 + r9]
+    mov [r12 + r9], rbx
+    test rax, rax
+    jz .cr_kw_next
+    mov rdi, rax
+    call obj_decref
+    jmp .cr_kw_next
+
+.cr_set_int:
+    mov rdi, rbx
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    lea r12, [rbp - CR_SPEC]
+    mov r9, [rbp - CR_OFF]
+    mov [r12 + r9], eax
+    jmp .cr_kw_next
+
+.cr_set_code:
+    mov rdi, rbx
+    V_TEST_PTR rdi, rax
+    ja .cr_bad_type
+    test rdi, rdi
+    jz .cr_bad_type
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    jne .cr_bad_type
+    lea rax, [rdi + PyBytesObject.data]
+    mov [r12 + CodeSpec.code_bytes], rax
+    mov rax, [rdi + PyBytesObject.ob_size]
+    mov [r12 + CodeSpec.code_len], rax
+
+.cr_kw_next:
+    inc qword [rbp - CR_I]
+    jmp .cr_kw_loop
+
+.cr_build:
+    lea rdi, [rbp - CR_SPEC]
+    call code_new
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.cr_unknown_kw:
+    ; The three that cannot be replaced are named separately, because "no
+    ; such keyword" would be a lie about them.
+    lea rdi, [r13 + PyStrObject.data]
+    CSTRING rsi, "co_varnames"
+    call ap_strcmp
+    test eax, eax
+    jz .cr_refused
+    lea rdi, [r13 + PyStrObject.data]
+    CSTRING rsi, "co_freevars"
+    call ap_strcmp
+    test eax, eax
+    jz .cr_refused
+    lea rdi, [r13 + PyStrObject.data]
+    CSTRING rsi, "co_cellvars"
+    call ap_strcmp
+    test eax, eax
+    jz .cr_refused
+    lea rdi, [rbp - CR_SPEC]
+    call code_spec_clear
+    RAISE exc_TypeError_type, "replace() got an unexpected keyword argument"
+.cr_refused:
+    lea rdi, [rbp - CR_SPEC]
+    call code_spec_clear
+    RAISE exc_TypeError_type, \
+        "replace() cannot change co_varnames, co_freevars or co_cellvars"
+.cr_bad_type:
+    lea rdi, [rbp - CR_SPEC]
+    call code_spec_clear
+    RAISE exc_TypeError_type, "replace() got the wrong type for a field"
+.cr_positional:
+    RAISE exc_TypeError_type, "replace() takes no positional arguments"
+END_FUNC code_method_replace
+
 DEF_FUNC_LOCAL _get_co_positions_builtin
     mov rax, [rel _co_positions_cache]
     test rax, rax

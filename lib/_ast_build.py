@@ -46,9 +46,10 @@ ARGUMENTS, ARG, MATCH, EXTRA, DECORATED = range(68, 73)
  PAT_KEYWORD, PAT_OR, PAT_AS) = range(73, 82)
 INTERACTIVE = 82
 TYPEALIAS, TYPEPARAMS, TYPEVAR, PARAMSPEC, TYPEVARTUPLE = range(83, 88)
+FUNCTIONTYPE = 88
 
 # Raw tuple slots.
-K, SUB, LINE, COL, ELINE, ECOL, A, B, C, CH, TP = range(11)
+K, SUB, LINE, COL, ELINE, ECOL, A, B, C, CH, TP, TC = range(12)
 
 # --- subkind tables --------------------------------------------------------
 # One instance each, not one per node: CPython's parser shares them, so every
@@ -319,7 +320,11 @@ def _b_comprehension(r, p):
 
 
 def _b_module(r, p):
-    return _ast.Module(_each(r[CH]), [])
+    # A Module has no type comment, so the raw row's slot 11 carries the
+    # file's `# type: ignore` list instead -- pairs of (lineno, tag), which is
+    # what CPython's Module.type_ignores holds as TypeIgnore nodes.
+    ignores = [_ast.TypeIgnore(n, t) for n, t in (r[TC] or ())]
+    return _ast.Module(_each(r[CH]), ignores)
 
 
 def _b_expression(r, p):
@@ -343,6 +348,14 @@ def _b_typevartuple(r, p):
     return _ast.TypeVarTuple(r[A], **p)
 
 
+def _b_functiontype(r, p):
+    # mode="func_type".  `(...) -> bool` has no argument types at all, and
+    # CPython answers argtypes=[Constant(Ellipsis)] for it -- so an empty
+    # child list is that, not an empty signature.
+    args = _each(r[CH])
+    return _ast.FunctionType(args, _node(r[A]))
+
+
 def _b_interactive(r, p):
     # mode="single".  Module's body and Interactive's are the same list; the
     # parser hands back the one node with a different kind on it.
@@ -354,7 +367,7 @@ def _b_expr_stmt(r, p):
 
 
 def _b_assign(r, p):
-    return _ast.Assign(_each(r[CH]), _node(r[B]), None, **p)
+    return _ast.Assign(_each(r[CH]), _node(r[B]), r[TC], **p)
 
 
 def _b_augassign(r, p):
@@ -388,7 +401,7 @@ def _b_while(r, p):
 def _b_for(r, p):
     cls = _ast.AsyncFor if r[SUB] else _ast.For
     return cls(_node(r[A]), _node(r[B]), _stmts(r[C]), _stmts(r[CH]),
-               None, **p)
+               r[TC], **p)
 
 
 def _b_pass(r, p):
@@ -453,7 +466,7 @@ def _b_handler(r, p):
 
 def _b_with(r, p):
     cls = _ast.AsyncWith if r[SUB] else _ast.With
-    return cls(_each(r[CH]), _stmts(r[A]), None, **p)
+    return cls(_each(r[CH]), _stmts(r[A]), r[TC], **p)
 
 
 def _b_withitem(r, p):
@@ -461,7 +474,7 @@ def _b_withitem(r, p):
 
 
 def _b_arg(r, p):
-    return _ast.arg(r[A], _opt(r[B]), None, **p)
+    return _ast.arg(r[A], _opt(r[B]), r[TC], **p)
 
 
 def _b_match(r, p):
@@ -538,7 +551,7 @@ def _type_params(raw):
 
 def _b_functiondef(r, p):
     cls = _ast.AsyncFunctionDef if r[SUB] else _ast.FunctionDef
-    return cls(r[A], _arguments(r[B]), _each(r[CH]), [], _node(r[C]), None,
+    return cls(r[A], _arguments(r[B]), _each(r[CH]), [], _node(r[C]), r[TC],
                _type_params(r[TP]), **p)
 
 
@@ -597,6 +610,7 @@ BUILDERS = {
     SETCOMP: _b_setcomp, DICTCOMP: _b_dictcomp, GENEXP: _b_genexp,
     COMPREHENSION: _b_comprehension,
     MODULE: _b_module, EXPRESSION: _b_expression, INTERACTIVE: _b_interactive,
+    FUNCTIONTYPE: _b_functiontype,
     TYPEALIAS: _b_typealias, TYPEVAR: _b_typevar, PARAMSPEC: _b_paramspec,
     TYPEVARTUPLE: _b_typevartuple,
     EXPR_STMT: _b_expr_stmt,

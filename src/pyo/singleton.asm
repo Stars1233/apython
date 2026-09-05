@@ -29,8 +29,10 @@ extern int_type
 extern int_compare
 extern type_type
 
-; bool_repr(PyObject *self) -> PyObject*
-; Returns "True" or "False" string
+;; ============================================================================
+;; bool_repr(PyObject *self) -> PyObject*
+;; Returns "True" or "False" string
+;; ============================================================================
 DEF_FUNC bool_repr
     ; Check if this is True or False
     lea rax, [rel bool_true]
@@ -47,8 +49,10 @@ DEF_FUNC bool_repr
     ret
 END_FUNC bool_repr
 
-; bool_hash(PyObject *self) -> int64
-; True -> 1, False -> 0
+;; ============================================================================
+;; bool_hash(PyObject *self) -> int64
+;; True -> 1, False -> 0
+;; ============================================================================
 DEF_FUNC_BARE bool_hash
     lea rax, [rel bool_true]
     cmp rdi, rax
@@ -60,8 +64,10 @@ DEF_FUNC_BARE bool_hash
     ret
 END_FUNC bool_hash
 
-; bool_bool(PyObject *self) -> int
-; True -> 1, False -> 0
+;; ============================================================================
+;; bool_bool(PyObject *self) -> int
+;; True -> 1, False -> 0
+;; ============================================================================
 DEF_FUNC_BARE bool_bool
     lea rax, [rel bool_true]
     cmp rdi, rax
@@ -73,8 +79,10 @@ DEF_FUNC_BARE bool_bool
     ret
 END_FUNC bool_bool
 
-; bool_from_int(int value) -> PyObject*
-; Returns True if value != 0, else False
+;; ============================================================================
+;; bool_from_int(int value) -> PyObject*
+;; Returns True if value != 0, else False
+;; ============================================================================
 DEF_FUNC_BARE bool_from_int
     test edi, edi
     jnz .true
@@ -146,11 +154,13 @@ BOOL_BITWISE bool_xor, int_xor
 ;; know we're called from bool's number methods, so tag is TAG_BOOL)
 ;; ============================================================================
 
-; bool_positive: +False -> 0, +True -> 1
-; True and False are ordinary heap singletons, so rdi is a pointer -- not the
-; 0/1 payload this used to be handed before the value representation changed.
-; Nothing called it until __pos__ started reaching real slots, which is why
-; the stale convention went unnoticed.
+;; ============================================================================
+;; bool_positive: +False -> 0, +True -> 1
+;; True and False are ordinary heap singletons, so rdi is a pointer -- not the
+;; 0/1 payload this used to be handed before the value representation changed.
+;; Nothing called it until __pos__ started reaching real slots, which is why
+;; the stale convention went unnoticed.
+;; ============================================================================
 DEF_FUNC_BARE bool_positive
     lea rcx, [rel bool_true]
     xor eax, eax
@@ -160,7 +170,9 @@ DEF_FUNC_BARE bool_positive
     ret
 END_FUNC bool_positive
 
-; bool_absolute: abs(False) -> 0, abs(True) -> 1
+;; ============================================================================
+;; bool_absolute: abs(False) -> 0, abs(True) -> 1
+;; ============================================================================
 DEF_FUNC_BARE bool_absolute
     lea rcx, [rel bool_true]
     xor eax, eax
@@ -352,6 +364,7 @@ bool_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; True singleton - has embedded mpz_t value of 1
 align 8
@@ -414,22 +427,28 @@ section .text
 extern str_from_cstr
 extern type_type
 
-; none_repr(PyObject *self) -> PyObject*
-; Returns a new string "None"
+;; ============================================================================
+;; none_repr(PyObject *self) -> PyObject*
+;; Returns a new string "None"
+;; ============================================================================
 DEF_FUNC_BARE none_repr
     lea rdi, [rel none_str]
     jmp str_from_cstr
 END_FUNC none_repr
 
-; none_hash(PyObject *self) -> int64
-; Returns a fixed hash value for None
+;; ============================================================================
+;; none_hash(PyObject *self) -> int64
+;; Returns a fixed hash value for None
+;; ============================================================================
 DEF_FUNC_BARE none_hash
     mov rax, 0x48fa9b36     ; arbitrary fixed hash
     ret
 END_FUNC none_hash
 
-; none_bool(PyObject *self) -> int
-; None is always falsy
+;; ============================================================================
+;; none_bool(PyObject *self) -> int
+;; None is always falsy
+;; ============================================================================
 DEF_FUNC_BARE none_bool
     xor eax, eax
     ret
@@ -511,6 +530,7 @@ none_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; None singleton - immortal object, never freed
 align 8
@@ -524,7 +544,9 @@ none_singleton:
 ;; ============================================================================
 
 section .text
-; notimpl_repr(PyObject *self) -> PyObject*
+;; ============================================================================
+;; notimpl_repr(PyObject *self) -> PyObject*
+;; ============================================================================
 DEF_FUNC_BARE notimpl_repr
     lea rdi, [rel notimpl_repr_str]
     jmp str_from_cstr
@@ -565,6 +587,7 @@ notimpl_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; NotImplemented singleton - immortal object, never freed
 align 8
@@ -578,7 +601,9 @@ notimpl_singleton:
 ;; ============================================================================
 
 section .text
-; ellipsis_repr(PyObject *self) -> PyObject*
+;; ============================================================================
+;; ellipsis_repr(PyObject *self) -> PyObject*
+;; ============================================================================
 DEF_FUNC_BARE ellipsis_repr
     lea rdi, [rel ellipsis_repr_str]
     jmp str_from_cstr
@@ -619,6 +644,7 @@ ellipsis_type:
     dq 0                    ; tp_traverse
     dq 0                    ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; Ellipsis singleton - immortal object, never freed
 align 8

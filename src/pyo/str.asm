@@ -163,7 +163,7 @@ END_FUNC str_count_codepoints
 ;; ============================================================================
 ;; str_set_length(rdi = PyStrObject*) -- fill ob_length from the bytes.
 ;; ============================================================================
-DEF_FUNC str_set_length
+DEF_FUNC str_set_length, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rsi, [rbx + PyStrObject.ob_size]
@@ -551,15 +551,255 @@ DEF_FUNC codec_error_id, CEI_FRAME
 END_FUNC codec_error_id
 
 ;; ============================================================================
-;; codec_id(rdi = encoding str, or 0 for the default) -> eax
-;;   0 = utf-8, 1 = ascii, 2 = latin-1.  Raises LookupError for anything else.
+;; codec_via_python(rdi = the object, a Value; rsi = the encoding str or 0;
+;;                  rdx = the errors argument, a Value, or 0;
+;;                  ecx = 0 to encode, 1 to decode)
+;;   -> rax = payload, rdx = tag; (0, 0) with an exception pending on failure
 ;;
-;; The three codecs the interpreter can do itself.  Everything else goes
-;; through the codecs module, which is Python and cannot be reached from here.
+;; Everything the interpreter cannot spell itself.  `_codecs` is Python -- it
+;; holds the registry, the cache, CPython's normalizestring, the search
+;; functions and the six error handlers -- and this is how a builtin method
+;; reaches it: lazily import the module, pull `encode` or `decode` out of its
+;; dict, cache the callable for the process's life, and call it.
+;;
+;; The pattern is builtin_open_fn's, down to parking kw_names_pending across
+;; the import: an import runs whole module bodies, and the keyword names of
+;; the call that got us here are not theirs.  The import cannot happen at
+;; startup, which is the other half of why it is done here and not there.
+;;
+;; A codec written in Python can itself call str.encode, so this has to be
+;; re-entrant; it is, because the only state it keeps is the two cached
+;; callables and neither is mutated after the first call.
+;; ============================================================================
+CVP_OBJ    equ 8
+CVP_ENC    equ 16
+CVP_ERR    equ 24
+CVP_DIR    equ 32
+CVP_ARGS   equ 56           ; three Values, the tp_call argument array
+CVP_FRAME  equ 72            ; + 1 push = 80, 16-aligned
+global codec_via_python
+DEF_FUNC codec_via_python, CVP_FRAME
+    push rbx
+    mov [rbp - CVP_OBJ], rdi
+    mov [rbp - CVP_ENC], rsi
+    mov [rbp - CVP_ERR], rdx
+    mov [rbp - CVP_DIR], rcx
+
+    test ecx, ecx
+    jz .cvp_encode
+    mov rbx, [rel codec_decode_impl]
+    jmp .cvp_have_impl
+.cvp_encode:
+    mov rbx, [rel codec_encode_impl]
+.cvp_have_impl:
+    test rbx, rbx
+    jnz .cvp_call
+
+    extern kw_names_pending
+    mov rax, [rel kw_names_pending]
+    push rax
+    mov qword [rel kw_names_pending], 0
+
+    CSTRING rdi, "_codecs"
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    extern import_module
+    call import_module
+    mov rbx, rax
+    pop rdi
+    call obj_decref
+    test rbx, rbx
+    jz .cvp_import_failed
+
+    ; Both callables come out at once: the module is imported either way, and
+    ; caching only the one asked for means importing again for the other.
+    push rbx
+    CSTRING rdi, "encode"
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    call dict_get
+    mov rbx, rax
+    pop rdi
+    call obj_decref
+    test rbx, rbx
+    jz .cvp_missing
+    mov rdi, rbx
+    call obj_incref
+    mov [rel codec_encode_impl], rbx
+    pop rbx
+
+    push rbx
+    CSTRING rdi, "decode"
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    call dict_get
+    mov rbx, rax
+    pop rdi
+    call obj_decref
+    test rbx, rbx
+    jz .cvp_missing
+    mov rdi, rbx
+    call obj_incref
+    mov [rel codec_decode_impl], rbx
+    pop rbx
+
+    pop rax
+    mov [rel kw_names_pending], rax
+
+    cmp qword [rbp - CVP_DIR], 0
+    je .cvp_pick_encode
+    mov rbx, [rel codec_decode_impl]
+    jmp .cvp_call
+.cvp_pick_encode:
+    mov rbx, [rel codec_encode_impl]
+
+.cvp_call:
+    ; args = (obj, encoding, errors).  The two defaults are the ones CPython
+    ; gives the same call, and they are built here rather than kept as
+    ; constants because a str is a heap object.
+    mov rax, [rbp - CVP_OBJ]
+    mov [rbp - CVP_ARGS], rax
+
+    mov rax, [rbp - CVP_ENC]
+    test rax, rax
+    jnz .cvp_have_enc
+    CSTRING rdi, "utf-8"
+    call str_from_cstr_heap
+    mov [rbp - CVP_ENC], rax    ; ours to release below
+    mov [rbp - CVP_ARGS + 8], rax
+    jmp .cvp_errors
+.cvp_have_enc:
+    mov [rbp - CVP_ARGS + 8], rax
+    mov qword [rbp - CVP_ENC], 0    ; borrowed: nothing to release
+
+.cvp_errors:
+    mov rax, [rbp - CVP_ERR]
+    test rax, rax
+    jz .cvp_default_err
+    extern none_singleton
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .cvp_default_err
+    mov [rbp - CVP_ARGS + 16], rax
+    mov qword [rbp - CVP_ERR], 0
+    jmp .cvp_invoke
+.cvp_default_err:
+    CSTRING rdi, "strict"
+    call str_from_cstr_heap
+    mov [rbp - CVP_ERR], rax
+    mov [rbp - CVP_ARGS + 16], rax
+
+.cvp_invoke:
+    mov rax, [rbx + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_call]
+    test rcx, rcx
+    jz .cvp_missing_call
+    mov rdi, rbx
+    lea rsi, [rbp - CVP_ARGS]
+    mov edx, 3
+    call rcx
+    V_UNPACK rax, rdx
+
+.cvp_release:
+    push rax
+    push rdx
+    mov rdi, [rbp - CVP_ENC]
+    test rdi, rdi
+    jz .cvp_no_enc_ref
+    call obj_decref
+.cvp_no_enc_ref:
+    mov rdi, [rbp - CVP_ERR]
+    test rdi, rdi
+    jz .cvp_no_err_ref
+    call obj_decref
+.cvp_no_err_ref:
+    pop rdx
+    pop rax
+    pop rbx
+    leave
+    ret
+
+.cvp_missing_call:
+    extern exc_TypeError_type
+    SET_EXC exc_TypeError_type, "_codecs.encode is not callable"
+    xor eax, eax
+    xor edx, edx
+    jmp .cvp_release
+
+.cvp_missing:
+    pop rbx
+    add rsp, 8                  ; the parked keyword names
+.cvp_import_failed:
+    ; import_module leaves its own exception pending; if it somehow did not,
+    ; say what was being looked for.
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    jne .cvp_failed_pending
+    extern exc_LookupError_type
+    SET_EXC exc_LookupError_type, "unknown encoding"
+.cvp_failed_pending:
+    xor eax, eax
+    xor edx, edx
+    mov qword [rbp - CVP_ENC], 0
+    mov qword [rbp - CVP_ERR], 0
+    pop rbx
+    leave
+    ret
+END_FUNC codec_via_python
+
+;; ============================================================================
+;; codec_unknown_encoding(rdi = the encoding str, or 0) -- sets the LookupError
+;; CPython raises, naming the encoding AS WRITTEN.  codec_id normalises before
+;; it compares, and reporting the normalised form said "utf_16" for a lookup
+;; of "utf-16".
+;; ============================================================================
+CUE_MSG   equ 264
+CUE_FRAME equ 280            ; + 1 push = 288, 16-aligned
+global codec_unknown_encoding
+DEF_FUNC codec_unknown_encoding, CUE_FRAME
+    push rbx
+    mov rbx, rdi
+    lea rdi, [rbp - CUE_MSG]
+    CSTRING rsi, "unknown encoding: "
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    test rbx, rbx
+    jz .cue_raise
+    mov rdi, rax
+    lea rsi, [rbx + PyStrObject.data]
+    call rbt_append_cstr
+.cue_raise:
+    extern exc_LookupError_type
+    lea rdi, [rel exc_LookupError_type]
+    lea rsi, [rbp - CUE_MSG]
+    extern set_exception
+    call set_exception
+    pop rbx
+    leave
+    ret
+END_FUNC codec_unknown_encoding
+
+;; ============================================================================
+;; codec_id(rdi = encoding str, or 0 for the default) -> eax
+;;   0 = utf-8, 1 = ascii, 2 = latin-1, -1 = something else
+;;
+;; The three codecs the interpreter can do itself.  Anything else is the
+;; registry's business: codec_via_python hands the whole call to
+;; `_codecs.encode` / `_codecs.decode`, which is where the search functions,
+;; the cache and the error handlers all live.  This used to raise LookupError
+;; here instead, so a name the registry would have found was refused before
+;; anyone asked it.
 ;; ============================================================================
 CI_BUF   equ 48
 CI_MSG   equ 240            ; the "unknown encoding: x" message, built in place
-CI_FRAME equ 256            ; + 1 push = 264, not 16-aligned
+CI_FRAME equ 264            ; + 1 push = 272, 16-aligned
 DEF_FUNC codec_id, CI_FRAME
     push rbx
     ; ap_strcmp compares eight bytes at a time, so the buffer has to be zeroed
@@ -664,23 +904,16 @@ DEF_FUNC codec_id, CI_FRAME
     leave
     ret
 .ci_unknown:
-    ; CPython names the encoding it could not find, which is the whole of
-    ; what the caller needs to know.
-    lea rdi, [rbp - CI_MSG]
-    CSTRING rsi, "unknown encoding: "
-    extern rbt_append_cstr
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, rbx
-    call rbt_append_cstr
-    extern exc_LookupError_type
-    lea rdi, [rel exc_LookupError_type]
-    lea rsi, [rbp - CI_MSG]
-    call raise_exception
+    mov eax, -1
+    pop rbx
+    leave
+    ret
 END_FUNC codec_id
 
-; str_from_cstr_heap(const char *cstr) -> (rax=PyStrObject*, edx=TAG_PTR)
-; Always heap-allocates. For struct fields that need a real pointer.
+;; ============================================================================
+;; str_from_cstr_heap(const char *cstr) -> (rax=PyStrObject*, edx=TAG_PTR)
+;; Always heap-allocates. For struct fields that need a real pointer.
+;; ============================================================================
 DEF_FUNC str_from_cstr_heap
     push rbx
     push r12
@@ -724,15 +957,19 @@ DEF_FUNC str_from_cstr_heap
     ret
 END_FUNC str_from_cstr_heap
 
-; str_from_cstr(const char *cstr) -> (rax=payload, edx=tag)
-; Creates a string from a C string. Always returns heap TAG_PTR.
+;; ============================================================================
+;; str_from_cstr(const char *cstr) -> (rax=payload, edx=tag)
+;; Creates a string from a C string. Always returns heap TAG_PTR.
+;; ============================================================================
 DEF_FUNC_BARE str_from_cstr
     jmp str_from_cstr_heap
 END_FUNC str_from_cstr
 
-; str_new_heap(const char *data, int64_t len) -> (rax=PyStrObject*, edx=TAG_PTR)
-; Always heap-allocates. For struct fields and internal use.
-DEF_FUNC str_new_heap
+;; ============================================================================
+;; str_new_heap(const char *data, int64_t len) -> (rax=PyStrObject*, edx=TAG_PTR)
+;; Always heap-allocates. For struct fields and internal use.
+;; ============================================================================
+DEF_FUNC str_new_heap, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -773,13 +1010,17 @@ DEF_FUNC str_new_heap
     ret
 END_FUNC str_new_heap
 
-; str_new(const char *data, int64_t len) -> (rax=payload, edx=tag)
-; Creates a string from data with given length. Always returns heap TAG_PTR.
+;; ============================================================================
+;; str_new(const char *data, int64_t len) -> (rax=payload, edx=tag)
+;; Creates a string from data with given length. Always returns heap TAG_PTR.
+;; ============================================================================
 DEF_FUNC_BARE str_new
     jmp str_new_heap         ; tail-call heap path
 END_FUNC str_new
 
-; str_dealloc(PyObject *self)
+;; ============================================================================
+;; str_dealloc(PyObject *self)
+;; ============================================================================
 DEF_FUNC_BARE str_dealloc
     ; String data is inline, just free the object
     jmp ap_free
@@ -789,7 +1030,7 @@ END_FUNC str_dealloc
 ;; str_repr(PyObject *self) -> PyObject*
 ;; Returns string with surrounding single quotes: 'hello'
 ;; ============================================================================
-DEF_FUNC str_repr
+DEF_FUNC str_repr, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1032,6 +1273,11 @@ DEF_FUNC str_repr
 END_FUNC str_repr
 
 section .rodata
+; The conversion characters `%` accepts, in CPython's order.  %b is bytes'
+; alone; everything else is common to both.
+sm_convs:       db "diouxXeEfFgGcrsa%", 0
+sm_convs_bytes: db "diouxXeEfFgGcrsab%", 0
+
 sr_hexdigits: db "0123456789abcdef"
 
 section .text
@@ -1325,13 +1571,21 @@ SM_OWNVAL  equ 168
 SM_ISMAP   equ 176       ; the right operand is a mapping: %(name)s, no arity check
 SM_SPECCH  equ 184       ; the conversion as format() spells it: i and u are d
 SM_ISBYTES equ 192       ; formatting a BYTES: %s means bytes, %r means b'x'
+; Report a failure by RETURNING 0 with the exception set, rather than by
+; raising.  bytes_mod asks for this: it holds a decoded copy of the format and
+; a raise abandons the C stack, so the copy was leaked once per malformed
+; `b"%d" % (1, 2)`.  The nb_remainder slot cannot use it -- a NULL from a
+; number slot means "declined", and the interpreter would then look for a
+; dunder instead of reporting the error.
+SM_NORAISE equ 248
 SM_KEYOBJ  equ 200       ; the %(name)s key, for the message when it is missing
 SM_STARW   equ 208       ; a '*' width taken from the argument list
 SM_STARWON equ 216       ; ...and whether there was one
 SM_STARP   equ 224       ; a '*' precision, likewise
 SM_STARPON equ 232
 SM_SAWDOT  equ 240       ; the spec copier's cursor has passed the '.'
-SM_FRAME   equ 256          ; + 0 pushes = 256
+SM_FRAME   equ 256          ; + 0 pushes = 256; SM_NORAISE at 248 is the
+                            ; last slot, and the frame is full
 
 ;; str_mod is the nb_remainder slot.  str_mod_impl is what bytes_mod calls, with
 ;; the flag that changes what half the conversions mean: %s on a bytes REQUIRES
@@ -1341,6 +1595,7 @@ SM_FRAME   equ 256          ; + 0 pushes = 256
 ;; cannot express any of that -- the conversion is only known here, so the
 ;; argument is converted here.
 DEF_FUNC_BARE str_mod
+    xor ecx, ecx                ; the slot raises; only bytes_mod does not
     xor edx, edx
     jmp str_mod_impl
 END_FUNC str_mod
@@ -1348,6 +1603,7 @@ END_FUNC str_mod
 global str_mod_impl
 DEF_FUNC str_mod_impl, SM_FRAME
     mov [rbp-SM_ISBYTES], rdx
+    mov [rbp-SM_NORAISE], rcx
     BINOP_REQUIRE_LEFT str_type, TYPE_FLAG_STR_SUBCLASS, 1
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
@@ -1654,7 +1910,9 @@ DEF_FUNC str_mod_impl, SM_FRAME
     pop rcx
     ret
 .sm_star_bad:
-    RAISE exc_TypeError_type, "* wants int"
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "* wants int"
+    jmp .sm_error
 
 .sm_dispatch:
     ; In bytes mode every conversion takes the spec path, so the argument is
@@ -1740,12 +1998,10 @@ DEF_FUNC str_mod_impl, SM_FRAME
     je .sm_str                 ; %f: use str() for now (float.__str__)
     cmp al, 'x'
     je .sm_hex
-    ; Unknown: just output the char
-    mov byte [r13 + r14], '%'
-    inc r14
-    mov [r13 + r14], al
-    inc r14
-    jmp .sm_loop
+    ; Unknown: CPython raises rather than echoing it.
+    movzx edi, al
+    lea rsi, [rcx - 1]
+    jmp .sm_bad_conv
 
 .sm_percent:
     mov byte [r13 + r14], '%'
@@ -1993,7 +2249,9 @@ DEF_FUNC str_mod_impl, SM_FRAME
     ; Past the end of the argument list.  Substituting None here quietly
     ; formatted a missing argument as "None"; the format string is wrong and
     ; Python says so.
-    RAISE exc_TypeError_type, "not enough arguments for format string"
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "not enough arguments for format string"
+    jmp .sm_error
 
 ;; .sm_ensure_cap — ensure buffer can hold rdi bytes total
 ;; rdi = required capacity. Preserves r14, r15, rbx, r12. Updates r13.
@@ -2049,19 +2307,128 @@ DEF_FUNC str_mod_impl, SM_FRAME
     leave
     ret
 .sm_too_many:
-    RAISE exc_TypeError_type, "not all arguments converted during string formatting"
+    ; "bytes formatting" when that is what it is: bytes_mod goes through this
+    ; function, and the message it produced named the wrong type.
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "not all arguments converted during string formatting"
+    cmp qword [rbp-SM_ISBYTES], 0
+    je .sm_error
+    CSTRING rsi, "not all arguments converted during bytes formatting"
+    jmp .sm_error
 
 .sm_key_unterminated:
-    RAISE exc_ValueError_type, "incomplete format key"
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "incomplete format key"
+    jmp .sm_error
+
+;; .sm_bad_conv(rdi = the conversion character, rsi = its index) -- CPython's
+;; wording, which names the character twice and says where it was.  Reached
+;; from both dispatchers: the spec path validates against the table, and the
+;; direct path used to print an unknown conversion LITERALLY and consume no
+;; argument, so "%z" % (1,) answered "%z" and then complained about a leftover
+;; argument.
+.sm_bad_conv:
+    push rdi
+    push rsi
+    lea rdi, [rel sm_convbuf]
+    CSTRING rsi, "unsupported format character '"
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rcx, [rsp + 8]
+    mov [rax], cl
+    inc rax
+    mov rdi, rax
+    CSTRING rsi, "' (0x"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rsp + 8]
+    extern msg_append_hex2
+    call msg_append_hex2
+    mov rdi, rax
+    CSTRING rsi, ") at index "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rsp]
+    extern msg_append_i64
+    call msg_append_i64
+    mov byte [rax], 0
+    add rsp, 16
+    lea rdi, [rel exc_ValueError_type]
+    lea rsi, [rel sm_convbuf]
+    jmp .sm_error
 
 .sm_key_error:
     ; CPython names the key that was missing, as an ordinary dict lookup does.
     ; A fixed message said only that one was.  The key object was released
     ; just above, so this re-reads it -- it is still allocated, and its only
     ; use here is the message.
-    mov rdi, [rbp-SM_KEYOBJ]
-    extern raise_key_error
-    call raise_key_error
+    lea rsp, [rbp - SM_FRAME - 40]      ; as .sm_error does, and for the same
+    mov rdi, [rbp-SM_KEYOBJ]           ; reason
+    extern set_key_error
+    call set_key_error
+    mov rdi, [rbp-SM_BUF]
+    test rdi, rdi
+    jz .sm_ke_freed
+    mov qword [rbp-SM_BUF], 0
+    call ap_free
+.sm_ke_freed:
+    cmp qword [rbp-SM_NORAISE], 0
+    jne .sm_error_ret           ; the caller reads the pending exception
+    extern current_exception
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    extern raise_exception_obj
+    jmp raise_exception_obj     ; takes the reference, does not return
+
+;; The one way out.  rdi = the exception type, rsi = the message; the buffer
+;; goes back either way, because a raise abandons this frame and the free
+;; below with it.
+.sm_error:
+    ; Some of these sites are subroutines of this function, reached with a
+    ; `call` -- so the return address is still on the stack, and popping the
+    ; five saved registers over it put a return address in r15.  RAISE could
+    ; ignore that, because it abandoned the whole stack; returning cannot.
+    lea rsp, [rbp - SM_FRAME - 40]      ; the five pushes, and nothing else
+    cmp qword [rbp-SM_NORAISE], 0
+    jne .sm_error_set
+    push rdi
+    push rsi
+    mov rdi, [rbp-SM_BUF]
+    test rdi, rdi
+    jz .sm_error_freed
+    mov qword [rbp-SM_BUF], 0
+    call ap_free
+.sm_error_freed:
+    pop rsi
+    pop rdi
+    extern raise_exception
+    call raise_exception        ; does not return
+    ud2
+.sm_error_set:
+    extern set_exception
+    call set_exception
+.sm_error_installed:
+    mov rdi, [rbp-SM_BUF]
+    test rdi, rdi
+    jz .sm_error_ret
+    mov qword [rbp-SM_BUF], 0
+    call ap_free
+.sm_error_ret:
+    xor eax, eax
+    xor edx, edx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 ;; Format one directive through format_apply_spec.  On entry SM_POS is the
 ;; index of the conversion character and SM_SPECST the start of the flags;
 ;; on exit SM_POS is just past it.  r13 (buffer), r14 (output position),
@@ -2074,6 +2441,35 @@ DEF_FUNC str_mod_impl, SM_FRAME
     ; %i and %u are %d's spellings; format() knows only the one.  SM_CONV
     ; keeps the original, because the error messages name it.
     mov [rbp-SM_SPECCH], r9
+
+    ; The conversions % understands.  Anything else was accepted and then
+    ; formatted as though it had been %s, so `b"%z" % (1,)` answered b"1"
+    ; where CPython raises and names the character.  %b is bytes' alone.
+    push r8
+    push r9
+    lea rsi, [rel sm_convs]
+    cmp qword [rbp-SM_ISBYTES], 0
+    je .sm_sc_check
+    lea rsi, [rel sm_convs_bytes]
+.sm_sc_check:
+    movzx ecx, r9b
+.sm_sc_scan:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .sm_sc_bad
+    cmp eax, ecx
+    je .sm_sc_known
+    inc rsi
+    jmp .sm_sc_scan
+.sm_sc_bad:
+    mov rdi, [rsp]              ; the conversion character
+    mov rsi, [rsp + 8]          ; its index in the format
+    add rsp, 16
+    jmp .sm_bad_conv
+.sm_sc_known:
+    pop r9
+    pop r8
+
     cmp r9b, 'i'
     je .sm_sc_as_d
     cmp r9b, 'u'
@@ -2626,7 +3022,7 @@ END_FUNC str_len
 ;; str_getitem(PyObject *self, int64_t index) -> rax = Value
 ;; sq_item: return single-char string at index
 ;; ============================================================================
-DEF_FUNC str_getitem
+DEF_FUNC str_getitem, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -2915,7 +3311,7 @@ extern iter_self
 ;; str_tp_iter(PyStrObject *self) -> PyStrIterObject*
 ;; tp_iter for str type: create a new string iterator
 ;; ============================================================================
-DEF_FUNC str_tp_iter
+DEF_FUNC str_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi               ; save str
@@ -2940,7 +3336,7 @@ END_FUNC str_tp_iter
 ;; str_iter_next(PyStrIterObject *self) -> PyObject* or NULL
 ;; Return next character as a 1-char string, or NULL if exhausted
 ;; ============================================================================
-DEF_FUNC str_iter_next
+DEF_FUNC str_iter_next, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi                                      ; self (iter)
@@ -2982,7 +3378,7 @@ END_FUNC str_iter_next
 
 ;; str_iter_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC str_iter_dealloc
+DEF_FUNC str_iter_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -3098,6 +3494,7 @@ str_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; str_iter type data
 align 8
@@ -3132,3 +3529,14 @@ str_iter_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
+
+
+section .data
+align 8
+codec_encode_impl: dq 0
+codec_decode_impl: dq 0
+
+section .bss
+; The "unsupported format character" message, built in place.
+sm_convbuf: resb 128

@@ -153,7 +153,7 @@ END_FUNC dict_method_items
 ;; dict_method_pop(args, nargs) -> value
 ;; args[0]=self, args[1]=key, optionally args[2]=default
 ;; ============================================================================
-DEF_FUNC dict_method_pop
+DEF_FUNC dict_method_pop, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -584,7 +584,7 @@ END_FUNC dict_method_update
 ;; dict_method_setdefault(args, nargs) -> value
 ;; args[0]=self, args[1]=key, args[2]=default (optional, default=None)
 ;; ============================================================================
-DEF_FUNC dict_method_setdefault
+DEF_FUNC dict_method_setdefault, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13

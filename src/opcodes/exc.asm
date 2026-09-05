@@ -25,6 +25,7 @@ extern eval_saved_rbx
 extern eval_saved_r13
 
 extern current_exception
+extern handled_exception
 
 extern eg_is_base_exception_group
 
@@ -62,15 +63,24 @@ section .text
 ;; Exception-related opcode handlers (inline in eval.asm for access to globals)
 ;; ============================================================================
 
-; op_push_exc_info (35) - Push exception info for try/except
-; TOS has the exception. Save current exception state, install new one.
-; Stack effect: exc -> prev_exc, exc
+;; ============================================================================
+;; op_push_exc_info (35) - Push exception info for try/except
+;; TOS has the exception. Save the handled-exception state, install the new one.
+;; Stack effect: exc -> prev_exc, exc
+;;
+;; The whole of the saved state is one word on the value stack, with None
+;; standing for "nothing was being handled".  The global's reference goes with
+;; it, so the stack slot owns it until POP_EXCEPT hands it back -- which is why
+;; a generator suspended inside an except block keeps the caller's exception
+;; alive on its own stack, and why frame_free releasing that stack is what
+;; releases it if the generator never resumes.
+;; ============================================================================
 DEF_FUNC_BARE op_push_exc_info
     ; TOS = new exception
     VPOP rax                 ; rax = new exception
 
-    ; Push the previous current_exception (or None if NULL)
-    mov rdx, [rel current_exception]
+    ; Push the previous handled_exception (or None if NULL)
+    mov rdx, [rel handled_exception]
     test rdx, rdx
     jnz .have_prev
     lea rdx, [rel none_singleton]
@@ -78,45 +88,49 @@ DEF_FUNC_BARE op_push_exc_info
 .have_prev:
     VPUSH_PTR rdx            ; push prev_exc
 
-    ; Set new exception as current and push it too
+    ; Set new exception as handled and push it too
     ; INCREF for the value stack copy
     INCREF rax
-    mov [rel current_exception], rax
+    mov [rel handled_exception], rax
     VPUSH_PTR rax            ; push new exc
 
     DISPATCH
 END_FUNC op_push_exc_info
 
-; op_pop_except (89) - Restore previous exception state
-; TOS = the exception to restore as current
+;; ============================================================================
+;; op_pop_except (89) - Restore the previous handled-exception state
+;; TOS = the exception to restore
+;; ============================================================================
 DEF_FUNC_BARE op_pop_except
     VPOP rax                 ; rax = exception to restore
 
-    ; XDECREF old current_exception
+    ; XDECREF old handled_exception
     push rax
-    mov rdi, [rel current_exception]
+    mov rdi, [rel handled_exception]
     test rdi, rdi
     jz .no_old
     call obj_decref
 .no_old:
     pop rax
 
-    ; Set restored exception as current (or NULL if None)
+    ; Set restored exception as handled (or NULL if None)
     lea rdx, [rel none_singleton]
     cmp rax, rdx
     jne .set_exc
-    ; It's None - set current to NULL and DECREF the None
-    mov qword [rel current_exception], 0
+    ; It's None - set handled to NULL and DECREF the None
+    mov qword [rel handled_exception], 0
     DECREF rax
     DISPATCH
 .set_exc:
-    mov [rel current_exception], rax
+    mov [rel handled_exception], rax
     DISPATCH
 END_FUNC op_pop_except
 
-; op_check_exc_match (36) - Check if exception matches a type
-; TOS = type to match against, TOS1 = exception
-; Push True/False, don't pop the exception
+;; ============================================================================
+;; op_check_exc_match (36) - Check if exception matches a type
+;; TOS = type to match against, TOS1 = exception
+;; Push True/False, don't pop the exception
+;; ============================================================================
 DEF_FUNC_BARE op_check_exc_match
     VPOP rsi                 ; rsi = type to match
     VPEEK rdi                ; rdi = exception (don't pop)
@@ -346,10 +360,12 @@ DEF_FUNC op_check_eg_match, CEM_FRAME
     DISPATCH
 END_FUNC op_check_eg_match
 
-; op_raise_varargs (130) - Raise an exception
-; arg 0: reraise current exception
-; arg 1: raise TOS
-; arg 2: raise TOS1 from TOS (chaining, simplified)
+;; ============================================================================
+;; op_raise_varargs (130) - Raise an exception
+;; arg 0: reraise current exception
+;; arg 1: raise TOS
+;; arg 2: raise TOS1 from TOS (chaining, simplified)
+;; ============================================================================
 DEF_FUNC_BARE op_raise_varargs
     cmp ecx, 0
     je .reraise
@@ -364,21 +380,33 @@ DEF_FUNC_BARE op_raise_varargs
     call fatal_error
 
 .reraise:
-    ; Re-raise current exception
-    mov rax, [rel current_exception]
+    ; A bare `raise` re-raises the exception being HANDLED, not one in flight:
+    ; it is only legal inside an except block, and what it names is that
+    ; block's exception.  Reading current_exception instead made it a
+    ; RuntimeError everywhere the handler had suspended and come back --
+    ; across an `await`, most visibly.
+    mov rax, [rel handled_exception]
     test rax, rax
     jnz .do_reraise
-    ; No current exception - raise RuntimeError
+    ; Nothing is being handled - raise RuntimeError
     extern exc_RuntimeError_type
     RAISE exc_RuntimeError_type, "No active exception to re-raise"
     ; does not return here
 
 .do_reraise:
-    ; current_exception is already set, just unwind.  No traceback entry: a
-    ; bare `raise` re-raises what this frame is already in the traceback for,
-    ; and CPython's RAISE_VARARGS 0 goes straight to the unwind rather than
-    ; through the label that records one.  Without this every re-raise added
-    ; a second entry for the same frame, pointing at the `raise` line.
+    ; It stays installed -- the handler is still running -- so the in-flight
+    ; copy needs a reference of its own.  No traceback entry: a bare `raise`
+    ; re-raises what this frame is already in the traceback for, and CPython's
+    ; RAISE_VARARGS 0 goes straight to the unwind rather than through the
+    ; label that records one.  Without this every re-raise added a second
+    ; entry for the same frame, pointing at the `raise` line.
+    INCREF rax
+    mov rdi, [rel current_exception]
+    mov [rel current_exception], rax
+    test rdi, rdi
+    jz .do_reraise_go
+    call obj_decref
+.do_reraise_go:
     mov byte [rel tb_suppress_frame], 1
     jmp eval_exception_unwind
 
@@ -445,19 +473,10 @@ DEF_FUNC_BARE op_raise_varargs
     jmp .raise_exc_obj
 
 .raise_exc_obj:
-    ; rdi = exception object
-    ; Store as current_exception, chaining onto the one being handled.
-    push rdi
-    mov rsi, [rel current_exception]
-    test rsi, rsi
-    jz .no_prev_raise
-    call exc_set_context
-    mov rdi, [rel current_exception]
-    call obj_decref
-.no_prev_raise:
-    pop rdi
-    mov [rel current_exception], rdi
-    ; Don't DECREF rdi - we transferred ownership from value stack to current_exception
+    ; rdi = exception object, owned -- the value stack's reference, which
+    ; exc_install takes over along with the __context__ rule.
+    extern exc_install
+    call exc_install
     jmp eval_exception_unwind
 
 .raise_bad:
@@ -507,8 +526,10 @@ DEF_FUNC_BARE op_raise_varargs
     jmp .raise_exc_obj
 END_FUNC op_raise_varargs
 
-; op_reraise (119) - Re-raise the current exception
-; TOS = exception to re-raise
+;; ============================================================================
+;; op_reraise (119) - Re-raise the current exception
+;; TOS = exception to re-raise
+;; ============================================================================
 DEF_FUNC_BARE op_reraise
     ; Pop the exception from value stack
     VPOP_VAL rdi, r8

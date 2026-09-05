@@ -79,7 +79,9 @@ DEF_FUNC_BARE tb_read_varint
     ret
 END_FUNC tb_read_varint
 
-; tb_read_svarint -- zig-zag signed varint; result in ecx.
+;; ============================================================================
+;; tb_read_svarint -- zig-zag signed varint; result in ecx.
+;; ============================================================================
 DEF_FUNC_BARE tb_read_svarint
     call tb_read_varint
     mov r11d, ecx
@@ -406,8 +408,10 @@ DEF_FUNC_BARE tb_write
     jmp sys_write
 END_FUNC tb_write
 
-; tb_write_cstr(rdi = NUL-terminated string)
-DEF_FUNC tb_write_cstr
+;; ============================================================================
+;; tb_write_cstr(rdi = NUL-terminated string)
+;; ============================================================================
+DEF_FUNC tb_write_cstr, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     xor ecx, ecx
@@ -425,7 +429,9 @@ DEF_FUNC tb_write_cstr
     ret
 END_FUNC tb_write_cstr
 
-; tb_write_str(rdi = PyStrObject* or NULL) -- writes nothing for a non-str
+;; ============================================================================
+;; tb_write_str(rdi = PyStrObject* or NULL) -- writes nothing for a non-str
+;; ============================================================================
 DEF_FUNC tb_write_str
     test rdi, rdi
     jz .ws_out
@@ -441,7 +447,9 @@ DEF_FUNC tb_write_str
     ret
 END_FUNC tb_write_str
 
-; tb_write_dec(rdi = signed value)
+;; ============================================================================
+;; tb_write_dec(rdi = signed value)
+;; ============================================================================
 TD_BUF   equ 32
 TD_FRAME equ 48             ; + 0 pushes = 48
 DEF_FUNC tb_write_dec, TD_FRAME
@@ -739,7 +747,7 @@ AN_LEN   equ 32             ; its length, 1 or 2
 AN_DISQ  equ 40             ; the segment cannot be a BinOp or Subscript
 AN_SOPEN equ 48             ; `[` of the last depth-0 subscript, or -1
 AN_SCLOSE equ 56            ; its `]`, or -1
-AN_FRAME equ 64             ; + 5 pushes = 104
+AN_FRAME equ 72            ; + 5 pushes = 112, 16-aligned
 
 ; Precedence, lowest binding first.  Only the binary operators appear.
 AN_P_OR   equ 1
@@ -1465,8 +1473,10 @@ DEF_FUNC tb_write_source, TS_FRAME
     ret
 END_FUNC tb_write_source
 
-; tb_print_repeated(rdi = run length) -- the elision line CPython prints
-DEF_FUNC tb_print_repeated
+;; ============================================================================
+;; tb_print_repeated(rdi = run length) -- the elision line CPython prints
+;; ============================================================================
+DEF_FUNC tb_print_repeated, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     lea rbx, [rdi - TB_RECURSIVE_CUTOFF]
     CSTRING rdi, "  [Previous line repeated "
@@ -1492,7 +1502,12 @@ END_FUNC tb_print_repeated
 ;;                            of, or 0)
 ;;
 ;; What CPython's _PyErr_WriteUnraisableMsg prints: a line naming the object,
-;; then the exception's own report.  A __del__ that raises and a cleanup in a
+;; then the exception's own report -- its traceback and its message, and
+;; nothing else.  It reaches for PyTraceBack_Print rather than the display
+;; routine an uncaught exception goes through, so a __cause__ or a __context__
+;; is not walked here even though the exception carries one.  A generator
+;; dropped inside a `finally` that raises has GeneratorExit as its context in
+;; both interpreters; only this report ever showed it.  A __del__ that raises and a cleanup in a
 ;; dropped generator both reach it -- neither has a caller left to hand the
 ;; exception to, and both used to print a single line that named the kind of
 ;; failure and nothing else, so which object, which line and which exception
@@ -1517,7 +1532,9 @@ DEF_FUNC traceback_unraisable_default, TPU_FRAME
     mov rsi, [rbp - TPU_OBJ]
     call tb_unraisable_name
     mov rdi, [rbp - TPU_EXC]
+    mov qword [rel tb_chain_suppress], 1
     call traceback_print
+    mov qword [rel tb_chain_suppress], 0
     leave
     ret
 END_FUNC traceback_unraisable_default
@@ -1598,7 +1615,7 @@ TPH_HOOK  equ 24
 TPH_ARG   equ 32
 TPH_SAVED equ 40
 TPH_ARGV  equ 56            ; one Value
-TPH_FRAME equ 64            ; + 1 push = 72
+TPH_FRAME equ 72            ; + 1 push = 80, 16-aligned
 
 global traceback_print_unraisable
 DEF_FUNC traceback_print_unraisable, TPH_FRAME
@@ -1720,7 +1737,10 @@ DEF_FUNC traceback_print_unraisable, TPH_FRAME
     call tb_unraisable_name
     pop rdi
     push rdi
+    ; One exception, no chain -- the same rule as the default hook below.
+    mov qword [rel tb_chain_suppress], 1
     call traceback_print
+    mov qword [rel tb_chain_suppress], 0
     pop rdi
     call obj_decref
 .tph_no_exc:
@@ -1763,7 +1783,7 @@ TP_TMP   equ 24
 TP_LASTC equ 32          ; code object of the previous entry
 TP_LASTL equ 40          ; line number of the previous entry
 TP_CNT   equ 48          ; length of the current run of identical entries
-TP_FRAME equ 64             ; + 1 push = 72, not 16-aligned
+TP_FRAME equ 72            ; + 1 push = 80, 16-aligned
 TB_RECURSIVE_CUTOFF equ 3
 TB_SEEN_MAX equ 64
 DEF_FUNC traceback_print
@@ -1775,9 +1795,11 @@ DEF_FUNC traceback_print
     ret
 END_FUNC traceback_print
 
-; tb_print_one(rsi = exception) -- the body; tb_seen guards against a cycle in
-; the __cause__ / __context__ chain, which `raise e from e` otherwise turns
-; into unbounded recursion.
+;; ============================================================================
+;; tb_print_one(rsi = exception) -- the body; tb_seen guards against a cycle in
+;; the __cause__ / __context__ chain, which `raise e from e` otherwise turns
+;; into unbounded recursion.
+;; ============================================================================
 DEF_FUNC tb_print_one, TP_FRAME
     push rbx
     mov rdi, rsi
@@ -1803,6 +1825,10 @@ DEF_FUNC tb_print_one, TP_FRAME
     inc rcx
     mov [rel tb_seen_n], rcx
 .tp_seen_done:
+
+    ; The unraisable hook reports one exception, not a chain -- see the flag.
+    cmp qword [rel tb_chain_suppress], 0
+    jne .tp_header
 
     ; A __cause__ or __context__ is reported first, then the linking sentence.
     mov rax, [rdi + PyExceptionObject.exc_cause]
@@ -2170,6 +2196,9 @@ END_FUNC tb_syntax_header
 section .bss
 tb_seen:   resq TB_SEEN_MAX
 tb_seen_n: resq 1
+; Set while the default unraisable hook is printing: CPython's hook reports
+; the exception on its own, with no __cause__ / __context__ chain.
+tb_chain_suppress: resq 1
 section .text
 
 ;; ============================================================================
@@ -2178,15 +2207,17 @@ section .text
 
 section .text
 
-; exc_table_find_handler(PyCodeObject *code, int bytecode_offset_halfwords)
-;   -> rax = handler target (in halfwords), rdx = stack depth, rcx = push_lasti
-;   -> rax = -1 if no handler found
-;
-; bytecode_offset_halfwords = (rbx - &code.co_code) / 2
-;
-; rdi = code object
-; esi = bytecode offset in instruction units (halfwords, i.e., 2-byte units)
-DEF_FUNC exc_table_find_handler
+;; ============================================================================
+;; exc_table_find_handler(PyCodeObject *code, int bytecode_offset_halfwords)
+;; -> rax = handler target (in halfwords), rdx = stack depth, rcx = push_lasti
+;; -> rax = -1 if no handler found
+;;
+;; bytecode_offset_halfwords = (rbx - &code.co_code) / 2
+;;
+;; rdi = code object
+;; esi = bytecode offset in instruction units (halfwords, i.e., 2-byte units)
+;; ============================================================================
+DEF_FUNC exc_table_find_handler, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13

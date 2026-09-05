@@ -69,6 +69,7 @@ if 'posix' in _names:
     __all__.extend(_get_exports_list(posix))
     del posix
 
+
 elif 'nt' in _names:
     name = 'nt'
     linesep = '\r\n'

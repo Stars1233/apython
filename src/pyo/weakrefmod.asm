@@ -88,7 +88,7 @@ END_FUNC weakref_table_get
 ;; ============================================================================
 ;; weakref_chain(rdi = referent) -> rax = the list of references, or 0
 ;; ============================================================================
-DEF_FUNC_LOCAL weakref_chain
+DEF_FUNC_LOCAL weakref_chain, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rax, [rel weakref_table]
@@ -230,7 +230,20 @@ WM_TYPE  equ 8
 WM_OBJ   equ 16
 WM_CB    equ 24
 WM_REF   equ 32
-WM_FRAME equ 48             ; + 1 push = 56, not 16-aligned
+WM_FRAME equ 56            ; + 1 push = 64, 16-aligned
+;; weakref_make_shared(rdi = the referent) -> rax = the shared weakref, or 0.
+;; The no-callback form, which is the one that is shared, reached by name for
+;; a caller that wants what a set can hold on a class's behalf.
+global weakref_make_shared
+DEF_FUNC weakref_make_shared
+    mov rsi, rdi
+    lea rdi, [rel weakref_type]
+    xor edx, edx
+    call weakref_make
+    leave
+    ret
+END_FUNC weakref_make_shared
+
 DEF_FUNC_LOCAL weakref_make, WM_FRAME
     push rbx
     mov [rbp - WM_TYPE], rdi
@@ -340,7 +353,7 @@ END_FUNC weakref_make
 ;; ============================================================================
 ;; ref_dealloc / ref_call / ref_repr / ref_hash / ref_richcompare
 ;; ============================================================================
-DEF_FUNC_LOCAL ref_dealloc
+DEF_FUNC_LOCAL ref_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyWeakRefObject.wr_callback]
@@ -437,7 +450,7 @@ END_FUNC ref_repr
 ; A live reference hashes as its referent and caches the result, so it keeps
 ; the same hash after the referent dies -- which is what lets a WeakSet find
 ; and discard a dead entry.
-DEF_FUNC_LOCAL ref_hash
+DEF_FUNC_LOCAL ref_hash, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rax, [rbx + PyWeakRefObject.wr_hash]
@@ -535,7 +548,7 @@ END_FUNC ref_richcompare
 ;; file header), so there is no offset to test.  This answers the same
 ;; question from the type instead.
 ;; ============================================================================
-DEF_FUNC weakref_check_referent
+DEF_FUNC weakref_check_referent, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     ; An immediate is an int or a float, and CPython refuses both -- but it
     ; names the type, so resolve it rather than falling into a generic
@@ -621,7 +634,7 @@ section .text
 ;; the chain has the word, every type below it inherits one.
 ;; ============================================================================
 WRR_ADDS  equ 8
-WRR_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+WRR_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC weakref_referenceable, WRR_FRAME
     push rbx
     mov rbx, rdi
@@ -740,7 +753,7 @@ DEF_FUNC_LOCAL proxy_referent
     RAISE exc_TypeError_type, "weakly-referenced object no longer exists"
 END_FUNC proxy_referent
 
-DEF_FUNC proxy_getattr
+DEF_FUNC proxy_getattr, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rsi
     call proxy_referent
@@ -998,7 +1011,7 @@ END_FUNC wr_remove_dead_func
     call obj_decref
 %endmacro
 
-WRM_FRAME equ 8             ; + 2 pushes = 24, not 16-aligned
+WRM_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
 DEF_FUNC weakref_module_create, WRM_FRAME
     push rbx
     push r12
@@ -1078,6 +1091,7 @@ weakref_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 align 8
 global proxy_type
@@ -1109,6 +1123,7 @@ proxy_type:
     dq 0
     dq 0
     dq 0
+    dq 0                        ; tp_tailslots
 
 align 8
 global callableproxy_type
@@ -1140,6 +1155,7 @@ callableproxy_type:
     dq 0
     dq 0
     dq 0
+    dq 0                        ; tp_tailslots
 
 section .rodata
 wrm_name:              db "_weakref", 0

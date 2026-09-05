@@ -38,6 +38,7 @@ extern ast_end_here
 extern ast_mark
 extern ast_obj
 extern ast_push
+extern comp_msg_i64
 extern comp_error
 
 extern ap_free
@@ -68,18 +69,8 @@ extern exc_SyntaxError_type
 ;; ============================================================================
 ; The binding powers live in compiler.inc: pattern.asm needs them too.
 
-; PRule.flags
-PR_CHAIN    equ 0x01     ; a comparison operator: folds into one n-ary node
-
-struc PRule
-    .prefix: resq 1      ; fn(Comp*) -> node index, or 0 if not a prefix
-    .infix:  resq 1      ; fn(Comp*, node left) -> node index, or 0
-    .lbp:    resb 1      ; left binding power; 0 means "not an infix operator"
-    .rbp:    resb 1      ; the power its handler recurses at
-    .aux:    resb 1      ; NB_* / CMP_* / UOP_* payload
-    .flags:  resb 1      ; PR_*
-    .pad:    resd 1
-endstruc                 ; 24
+; PRule and PR_* live in compiler.inc: prule.asm holds the table.
+                 ; 24
 
 ; --- Named frame-layout constants ---
 PE_MINBP equ 16
@@ -138,6 +129,188 @@ DEF_FUNC_BARE par_advance
 END_FUNC par_advance
 
 ;; ============================================================================
+;; par_target_noun(rdi = Comp*, esi = an expression node) -> rax = the noun
+;; CPython names it by in "cannot assign to X"
+;;
+;; CPython's _PyPegen_get_expr_name.  The noun is not decoration: it is the
+;; only part of the message that says WHICH of several targets on a line was
+;; the bad one.  Anything not listed is an "expression", as it is there.
+;; ============================================================================
+global par_target_noun
+DEF_FUNC par_target_noun, 16       ; + 0 pushes = 16, 16-aligned
+    call ast_at
+    movzx eax, byte [rax + AstNode.kind]
+    cmp eax, AST_CONST
+    je .tn_literal
+    cmp eax, AST_JOINEDSTR
+    je .tn_fstring
+    cmp eax, AST_CALL
+    je .tn_call
+    cmp eax, AST_LAMBDA
+    je .tn_lambda
+    cmp eax, AST_COMPARE
+    je .tn_comparison
+    cmp eax, AST_IFEXP
+    je .tn_conditional
+    cmp eax, AST_LISTCOMP
+    je .tn_listcomp
+    cmp eax, AST_SETCOMP
+    je .tn_setcomp
+    cmp eax, AST_DICTCOMP
+    je .tn_dictcomp
+    cmp eax, AST_GENEXP
+    je .tn_genexp
+    cmp eax, AST_DICT
+    je .tn_dict
+    cmp eax, AST_SET
+    je .tn_set
+    cmp eax, AST_YIELD
+    je .tn_yield
+    cmp eax, AST_YIELDFROM
+    je .tn_yield
+    cmp eax, AST_AWAIT
+    je .tn_await
+    cmp eax, AST_BOOLOP
+    je .tn_expression
+    CSTRING rax, "expression"
+    leave
+    ret
+.tn_literal:
+    CSTRING rax, "literal"
+    leave
+    ret
+.tn_fstring:
+    CSTRING rax, "f-string expression"
+    leave
+    ret
+.tn_call:
+    CSTRING rax, "function call"
+    leave
+    ret
+.tn_lambda:
+    CSTRING rax, "lambda"
+    leave
+    ret
+.tn_comparison:
+    CSTRING rax, "comparison"
+    leave
+    ret
+.tn_conditional:
+    CSTRING rax, "conditional expression"
+    leave
+    ret
+.tn_listcomp:
+    CSTRING rax, "list comprehension"
+    leave
+    ret
+.tn_setcomp:
+    CSTRING rax, "set comprehension"
+    leave
+    ret
+.tn_dictcomp:
+    CSTRING rax, "dict comprehension"
+    leave
+    ret
+.tn_genexp:
+    CSTRING rax, "generator expression"
+    leave
+    ret
+.tn_dict:
+    CSTRING rax, "dict literal"
+    leave
+    ret
+.tn_set:
+    CSTRING rax, "set display"
+    leave
+    ret
+.tn_yield:
+    CSTRING rax, "yield expression"
+    leave
+    ret
+.tn_await:
+    CSTRING rax, "await expression"
+    leave
+    ret
+.tn_expression:
+    CSTRING rax, "expression"
+    leave
+    ret
+END_FUNC par_target_noun
+
+;; ============================================================================
+;; par_bad_target(rdi = Comp*, esi = the offending target node,
+;;                rdx = the tail, or 0 for none) -> rax = 0
+;;
+;; "cannot assign to literal here. Maybe you meant '==' instead of '='?" --
+;; CPython's wording, and CPython's span, which covers the target rather than
+;; pointing at whatever token the parser had reached when it noticed.
+;; ============================================================================
+PBT_COMP equ 8
+PBT_NODE equ 16
+PBT_TAIL equ 24
+PBT_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+global par_bad_target
+DEF_FUNC par_bad_target, PBT_FRAME
+    mov [rbp - PBT_COMP], rdi
+    mov [rbp - PBT_NODE], rsi
+    mov [rbp - PBT_TAIL], rdx
+
+    extern comp_msg_start
+    extern comp_msg_cstr
+    call comp_msg_start
+    push rax                    ; the buffer, which becomes the message
+    mov rdi, rax
+    CSTRING rsi, "cannot assign to "
+    call comp_msg_cstr
+    push rax
+    mov rdi, [rbp - PBT_COMP]
+    mov esi, [rbp - PBT_NODE]
+    call par_target_noun
+    mov rsi, rax
+    pop rdi
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rbp - PBT_TAIL]
+    test rsi, rsi
+    jnz .pbt_tail
+    CSTRING rsi, ""
+.pbt_tail:
+    call comp_msg_cstr
+
+    ; The span: the target's own start, and its end from the span table.
+    mov rdi, [rbp - PBT_COMP]
+    mov esi, [rbp - PBT_NODE]
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov r8d, [rax + AstNode.col]
+    push rcx
+    push r8
+    mov rdi, [rbp - PBT_COMP]
+    mov esi, [rbp - PBT_NODE]
+    extern ast_span_at
+    call ast_span_at
+    pop r8
+    pop rcx
+    mov r9d, ecx
+    lea r10d, [r8d + 1]
+    test rax, rax
+    jz .pbt_span
+    cmp dword [rax + AstSpan.end_lineno], -1
+    je .pbt_span
+    mov r9d, [rax + AstSpan.end_lineno]
+    mov r10d, [rax + AstSpan.end_col]
+.pbt_span:
+    pop rdx                     ; the message
+    mov rdi, [rbp - PBT_COMP]
+    lea rsi, [rel exc_SyntaxError_type]
+    extern comp_error_span
+    call comp_error_span
+    xor eax, eax
+    leave
+    ret
+END_FUNC par_bad_target
+
+;; ============================================================================
 ;; par_syntax_error(Comp *c, const char *msg) -> rax = 0
 ;; Stamps the message with the current token's position.
 ;; ============================================================================
@@ -147,6 +320,33 @@ DEF_FUNC par_syntax_error, PS_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - PS_MSG], rsi
+
+    ; A bracket still open when the input runs out is the error, whatever the
+    ; site thought it was looking for -- CPython's tokenizer reports it and
+    ; its parser never gets a chance to say anything else.  The converse
+    ; matters too: `class C(object: pass` never closes its paren either, and
+    ; CPython says "invalid syntax" there because its parser fails at the
+    ; colon before the tokenizer reaches the end.
+    ; A NEWLINE counts as the end here too: inside brackets they are
+    ; suppressed, so one reached with the depth still up is the synthetic one
+    ; the lexer emits at EOF.
+    call par_kind
+    cmp eax, TOK_ENDMARKER
+    je .ps_at_end
+    cmp eax, TOK_NEWLINE
+    jne .ps_here
+.ps_at_end:
+    cmp dword [rbx + Comp.lex + Lexer.paren_depth], 0
+    je .ps_here
+    mov rdi, rbx
+    call par_unclosed
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.ps_here:
+    mov rdi, rbx
     call par_peek
     TOK_POS rax
     mov r8d, [rax + Token.col]
@@ -189,6 +389,63 @@ DEF_FUNC par_expect, PX_FRAME
     leave
     ret
 END_FUNC par_expect
+
+;; ============================================================================
+;; par_unclosed(Comp *c) -> rax = 0, always
+;;
+;; "'(' was never closed", at the innermost bracket still open when the input
+;; ran out.  CPython's end_offset for it is 0 rather than the column after,
+;; which is why comp_error_span exists.
+;; ============================================================================
+PU_BUF   equ 72
+PU_FRAME equ 88             ; + 1 push = 96, 16-aligned
+DEF_FUNC par_unclosed, PU_FRAME
+    push rbx
+    mov rbx, rdi
+
+    mov ecx, [rbx + Comp.lex + Lexer.paren_depth]
+    dec ecx                             ; the innermost
+    cmp ecx, LEX_MAX_BRACKET
+    jae .pu_generic
+    movzx edx, byte [rbx + Comp.lex + Lexer.open_ch + rcx]
+    push rcx
+    push rdx
+    call comp_msg_start
+    push rax
+    mov rdi, rax
+    CSTRING rsi, "'"
+    call comp_msg_cstr
+    mov rcx, [rsp + 8]                  ; the bracket character
+    mov [rax], cl
+    mov byte [rax + 1], 0
+    lea rdi, [rax + 1]
+    CSTRING rsi, "' was never closed"
+    call comp_msg_cstr
+    pop rdx                             ; the message
+    add rsp, 8                          ; the character
+    pop rcx                             ; the index
+
+    mov r8d, [rbx + Comp.lex + Lexer.open_col + rcx*4]
+    mov ecx, [rbx + Comp.lex + Lexer.open_line + rcx*4]
+    mov r9d, ecx
+    mov r10d, -1                        ; CPython's end_offset here is 0
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    call comp_error_span
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.pu_generic:
+    mov rdi, rbx
+    CSTRING rsi, "invalid syntax"
+    call par_syntax_error
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_unclosed
 
 ;; ============================================================================
 ;; par_expr(Comp *c, int min_bp) -> rax = node index, 0 on error
@@ -467,7 +724,8 @@ PFU_LINE  equ 16
 PFU_OP    equ 24
 PFU_RBP   equ 32
 PFU_FRAME equ 40         ; + 1 push = 48
-DEF_FUNC_LOCAL pf_unary, PFU_FRAME
+global pf_unary
+DEF_FUNC pf_unary, PFU_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -537,7 +795,8 @@ IB_LINE  equ 24
 IB_OP    equ 32
 IB_RBP   equ 40
 IB_FRAME equ 40          ; + 1 push = 48
-DEF_FUNC_LOCAL in_binop, IB_FRAME
+global in_binop
+DEF_FUNC in_binop, IB_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - IB_LEFT], rsi
@@ -560,6 +819,33 @@ DEF_FUNC_LOCAL in_binop, IB_FRAME
     test rax, rax
     jz .fail
     mov r9, rax
+
+    ; A starred expression is not an operand: `1 +* 2` is CPython's plain
+    ; "invalid syntax" at the star.  The check belongs here rather than where
+    ; the star is parsed, because the contexts that DO take one -- `[*a]`,
+    ; `f(*a)`, `for a, *b in z` -- reach it at every binding power there is.
+    push r9
+    mov rdi, rbx
+    mov esi, r9d
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_STARRED
+    je .ib_bad_star
+    cmp ecx, AST_DOUBLESTARRED
+    je .ib_bad_star
+    pop r9
+    jmp .ib_build
+.ib_bad_star:
+    mov ecx, [rax + AstNode.lineno]
+    mov r8d, [rax + AstNode.col]
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "invalid syntax"
+    call comp_error
+    pop r9
+    jmp .fail
+
+.ib_build:
     mov rdi, rbx
     mov esi, AST_BINOP
     mov rdx, [rbp - IB_OP]
@@ -586,7 +872,8 @@ IO_OP    equ 32
 IO_MARK  equ 40
 IO_NODE  equ 48
 IO_FRAME equ 56          ; + 1 push = 64
-DEF_FUNC_LOCAL in_boolop, IO_FRAME
+global in_boolop
+DEF_FUNC in_boolop, IO_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - IO_LEFT], rsi
@@ -681,7 +968,8 @@ IT_TEST  equ 32
 IT_ELSE  equ 40
 IT_NODE  equ 48
 IT_FRAME equ 56          ; + 1 push = 64
-DEF_FUNC_LOCAL in_ternary, IT_FRAME
+global in_ternary
+DEF_FUNC in_ternary, IT_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - IT_BODY], rsi
@@ -704,11 +992,41 @@ DEF_FUNC_LOCAL in_ternary, IT_FRAME
     mov [rbp - IT_TEST], rax
 
     mov rdi, rbx
-    mov esi, TOK_ELSE
-    CSTRING rdx, "expected 'else' after conditional expression"
-    call par_expect
-    test eax, eax
-    jz .fail
+    call par_kind
+    cmp eax, TOK_ELSE
+    je .it_have_else
+    ; CPython names the construct as `if` and spans the whole conditional --
+    ; from the body it was given to where the test ended -- rather than
+    ; pointing at the token that should have been `else`.
+    mov rdi, rbx
+    mov rsi, [rbp - IT_BODY]
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov r8d, [rax + AstNode.col]
+    push rcx
+    push r8
+    mov rdi, rbx
+    mov esi, [rbp - IT_TEST]
+    call ast_span_at
+    pop r8
+    pop rcx
+    mov r9d, ecx
+    lea r10d, [r8d + 1]
+    test rax, rax
+    jz .it_no_span
+    cmp dword [rax + AstSpan.end_lineno], -1
+    je .it_no_span
+    mov r9d, [rax + AstSpan.end_lineno]
+    mov r10d, [rax + AstSpan.end_col]
+.it_no_span:
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "expected 'else' after 'if' expression"
+    call comp_error_span
+    jmp .fail
+.it_have_else:
+    mov rdi, rbx
+    call par_advance
 
     mov rdi, rbx
     mov esi, BP_WALRUS
@@ -754,7 +1072,8 @@ IC_LINE  equ 24
 IC_MARK  equ 32
 IC_NODE  equ 40
 IC_FRAME equ 48          ; + 2 pushes = 64
-DEF_FUNC_LOCAL in_compare, IC_FRAME
+global in_compare
+DEF_FUNC in_compare, IC_FRAME
     push rbx
     push r12
     mov rbx, rdi
@@ -926,7 +1245,8 @@ END_FUNC par_cmpop
 ;; pf_number(Comp *c) -> node
 PFN_LINE  equ 16
 PFN_FRAME equ 24         ; + 1 push = 32
-DEF_FUNC_LOCAL pf_number, PFN_FRAME
+global pf_number
+DEF_FUNC pf_number, PFN_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -960,7 +1280,8 @@ DEF_FUNC_LOCAL pf_number, PFN_FRAME
 END_FUNC pf_number
 
 ;; pf_const(Comp *c) -> node   -- True, False, None share one handler
-DEF_FUNC_LOCAL pf_const, PFN_FRAME
+global pf_const
+DEF_FUNC pf_const, PFN_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -1007,7 +1328,8 @@ END_FUNC pf_const
 PFM_LINE  equ 16
 PFM_TOK   equ 24
 PFM_FRAME equ 24         ; + 1 push = 32
-DEF_FUNC_LOCAL pf_name, PFM_FRAME
+global pf_name
+DEF_FUNC pf_name, PFM_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -1131,8 +1453,9 @@ DEF_FUNC_BARE par_hexval
 END_FUNC par_hexval
 
 ;; ============================================================================
-;; par_escape_one(Comp *c, Buf *out, const char *p, const char *end, int bytes)
-;;   -> rax = the position just past the escape, or 0 on error
+;; par_escape_one(Comp *c, Buf *out, const char *p, const char *end, int bytes,
+;;                 const char *content) -> rax = the position just past the
+;;                 escape, or 0 on error
 ;;
 ;; `p` points at the character AFTER the backslash.  Factored out of
 ;; par_string_body so that the literal parts of an f-string get the same
@@ -1145,7 +1468,10 @@ PSE_P     equ 24
 PSE_END   equ 32
 PSE_BYTES equ 40
 PSE_ACC   equ 48
-PSE_FRAME equ 72          ; + 3 pushes = 96
+PSE_CONT  equ 56          ; where the literal's content starts, for the message
+PSE_ESC   equ 64          ; and where THIS escape's backslash is
+PSE_WANT  equ 72          ; how many hex digits it wanted, for the message
+PSE_FRAME equ 88          ; + 3 pushes = 112, 16-aligned
 DEF_FUNC par_escape_one, PSE_FRAME
     push rbx
     push r12
@@ -1153,6 +1479,10 @@ DEF_FUNC par_escape_one, PSE_FRAME
     mov rbx, rdi
     mov [rbp - PSE_COMP], rdi
     mov [rbp - PSE_OUT], rsi
+    mov [rbp - PSE_CONT], r9
+    lea rax, [rdx - 1]                  ; the backslash itself
+    mov [rbp - PSE_ESC], rax
+    mov qword [rbp - PSE_WANT], 2
     mov [rbp - PSE_P], rdx
     mov [rbp - PSE_END], rcx
     mov [rbp - PSE_BYTES], r8
@@ -1293,9 +1623,16 @@ DEF_FUNC par_escape_one, PSE_FRAME
     call par_utf8_emit
     jmp .pe_done
 .named_unknown:
+    ; r12 is one past the closing brace; the escape began two bytes before
+    ; the `N`, which is what PSE_P pointed at on the way in.
     mov rdi, rbx
-    CSTRING rsi, "unknown Unicode character name"
-    call par_syntax_error
+    mov rsi, [rbp - PSE_CONT]
+    mov rdx, [rbp - PSE_ESC]
+    mov rcx, r12
+    sub rcx, rdx                        ; the escape's length
+    CSTRING r8, "unknown Unicode character name"
+    mov r9, [rbp - PSE_BYTES]
+    call par_escape_error
     xor eax, eax
     pop r13
     pop r12
@@ -1312,6 +1649,7 @@ DEF_FUNC par_escape_one, PSE_FRAME
 .e_hex8:
     mov r13d, 8
 .hex_common:
+    mov [rbp - PSE_WANT], r13
     ; \u and \U have no meaning in a bytes literal; only \x does.
     cmp r13d, 2
     je .hex_go
@@ -1357,9 +1695,26 @@ DEF_FUNC par_escape_one, PSE_FRAME
     leave
     ret
 .pe_bad:
+    ; CPython's wording is the codec's, wrapped, and it names the escape it
+    ; could not finish: \x wants two hex digits, \u four, \U eight.  The
+    ; span it reports is the escape as WRITTEN -- the backslash, the letter
+    ; and whatever digits were there -- which PSE_P has already walked to.
     mov rdi, rbx
-    CSTRING rsi, "invalid escape sequence in string literal"
-    call par_syntax_error
+    mov rsi, [rbp - PSE_CONT]
+    mov rdx, [rbp - PSE_ESC]
+    mov rcx, [rbp - PSE_P]
+    sub rcx, rdx
+    CSTRING r8, "truncated \xXX escape"
+    cmp qword [rbp - PSE_WANT], 4
+    jne .pe_bad_not_u
+    CSTRING r8, "truncated \uXXXX escape"
+.pe_bad_not_u:
+    cmp qword [rbp - PSE_WANT], 8
+    jne .pe_bad_have_why
+    CSTRING r8, "truncated \UXXXXXXXX escape"
+.pe_bad_have_why:
+    mov r9, [rbp - PSE_BYTES]
+    call par_escape_error
     xor eax, eax
     pop r13
     pop r12
@@ -1386,6 +1741,7 @@ PB_P     equ 32
 PB_END   equ 40
 PB_RAW   equ 48
 PB_BYTES equ 56
+PB_CONTENT equ 64        ; the first byte after the opening quotes
 PB_FRAME equ 72          ; + 3 pushes = 96
 DEF_FUNC par_string_body, PB_FRAME
     push rbx
@@ -1435,6 +1791,7 @@ DEF_FUNC par_string_body, PB_FRAME
     add r12, rdx
     sub r13, rdx                        ; drop the closing quote run
     mov [rbp - PB_P], r12
+    mov [rbp - PB_CONTENT], r12
     mov [rbp - PB_END], r13
 
 .loop:
@@ -1468,6 +1825,7 @@ DEF_FUNC par_string_body, PB_FRAME
     inc rdx                             ; past the backslash
     mov rcx, [rbp - PB_END]
     mov r8, [rbp - PB_BYTES]
+    mov r9, [rbp - PB_CONTENT]
     call par_escape_one
     test rax, rax
     jz .failed
@@ -1511,7 +1869,8 @@ PS2_LINE  equ 16
 PS2_BYTES equ 24
 PS2_BUF   equ 64         ; a Buf lives here
 PS2_FRAME equ 72         ; + 1 push = 80
-DEF_FUNC_LOCAL pf_string, PS2_FRAME
+global pf_string
+DEF_FUNC pf_string, PS2_FRAME
     push rbx
     mov rbx, rdi
 
@@ -1793,14 +2152,26 @@ DEF_FUNC par_exprlist, PL_FRAME
     call par_expr
     test rax, rax
     jz .fail
+    push rax
     mov rdi, rbx
     mov rsi, rax
     call ast_push
+    pop rsi
 
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_COMMA
-    jne .done
+    je .pl_comma
+    ; Two expressions with nothing between them: `f(a b)`.  CPython guesses
+    ; what was meant, and spans both.
+    push rsi
+    mov rdi, rbx
+    call par_forgot_comma
+    pop rsi
+    test eax, eax
+    jnz .fail
+    jmp .done
+.pl_comma:
     mov rdx, [rbp - PL_FLAG]
     mov qword [rdx], 1
     mov rdi, rbx
@@ -1863,7 +2234,8 @@ PG_LINE  equ 16
 PG_MARK  equ 24
 PG_COMMA equ 32
 PG_FRAME equ 40          ; + 1 push = 48
-DEF_FUNC_LOCAL pf_group, PG_FRAME
+global pf_group
+DEF_FUNC pf_group, PG_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -1909,7 +2281,7 @@ DEF_FUNC_LOCAL pf_group, PG_FRAME
 
     mov rdi, rbx
     mov esi, TOK_RPAR
-    CSTRING rdx, "'(' was never closed"
+    CSTRING rdx, "invalid syntax"
     call par_expect
     test eax, eax
     jz .fail
@@ -1953,7 +2325,8 @@ END_FUNC pf_group
 ;; the first element, so the element is parsed once and the shape decided
 ;; afterwards.
 ;; ============================================================================
-DEF_FUNC_LOCAL pf_list, PG_FRAME
+global pf_list
+DEF_FUNC pf_list, PG_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -1993,7 +2366,16 @@ DEF_FUNC_LOCAL pf_list, PG_FRAME
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_COMMA
-    jne .close
+    je .comma_ok
+    mov rdi, rbx
+    call par_last_pushed
+    mov rsi, rax
+    mov rdi, rbx
+    call par_forgot_comma
+    test eax, eax
+    jnz .fail
+    jmp .close
+.comma_ok:
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
@@ -2013,7 +2395,7 @@ DEF_FUNC_LOCAL pf_list, PG_FRAME
 .close:
     mov rdi, rbx
     mov esi, TOK_RSQB
-    CSTRING rdx, "'[' was never closed"
+    CSTRING rdx, "invalid syntax"
     call par_expect
     test eax, eax
     jz .fail
@@ -2058,7 +2440,8 @@ PD_ISDICT equ 32
 PD_KEY    equ 40
 PD_VALUE  equ 48
 PD_FRAME equ 56          ; + 1 push = 64
-DEF_FUNC_LOCAL pf_dictset, PD_FRAME
+global pf_dictset
+DEF_FUNC pf_dictset, PD_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -2116,7 +2499,28 @@ DEF_FUNC_LOCAL pf_dictset, PD_FRAME
 .dict_first:
     mov [rbp - PD_KEY], r8
     mov rdi, rbx
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov r8d, [rax + Token.col]
+    push rcx
+    push r8
+    mov rdi, rbx
     call par_advance                    ; consume ':'
+    ; CPython names what is missing rather than saying "invalid syntax", and
+    ; blames the colon it should have followed.
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_RBRACE
+    jne .dict_value
+    pop r8
+    pop rcx
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "expression expected after dictionary key and ':'"
+    call comp_error
+    jmp .fail
+.dict_value:
+    add rsp, 16
     mov rdi, rbx
     mov esi, BP_NONE
     call par_expr
@@ -2152,7 +2556,16 @@ DEF_FUNC_LOCAL pf_dictset, PD_FRAME
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_COMMA
-    jne .close
+    je .comma_ok
+    mov rdi, rbx
+    call par_last_pushed
+    mov rsi, rax
+    mov rdi, rbx
+    call par_forgot_comma
+    test eax, eax
+    jnz .fail
+    jmp .close
+.comma_ok:
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
@@ -2221,7 +2634,7 @@ DEF_FUNC_LOCAL pf_dictset, PD_FRAME
 .close:
     mov rdi, rbx
     mov esi, TOK_RBRACE
-    CSTRING rdx, "'{' was never closed"
+    CSTRING rdx, "invalid syntax"
     call par_expect
     test eax, eax
     jz .fail
@@ -2253,7 +2666,8 @@ END_FUNC pf_dictset
 PST_LINE  equ 16
 PST_KIND  equ 24
 PST_FRAME equ 24         ; + 1 push = 32
-DEF_FUNC_LOCAL pf_starred, PST_FRAME
+global pf_starred
+DEF_FUNC pf_starred, PST_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -2274,6 +2688,18 @@ DEF_FUNC_LOCAL pf_starred, PST_FRAME
     ; the `in` of a for statement, so `for a, *b in z` had no loop keyword left
     ; -- while `for *a, b in z` parsed, because there the star was not the
     ; element the `in` followed.
+    ; A star with nothing after it: `f(*)`.  CPython refuses it by name, and
+    ; capitalises it, which nothing else in its messages does.
+    call par_kind
+    cmp eax, TOK_RPAR
+    je .pst_bare
+    cmp eax, TOK_RSQB
+    je .pst_bare
+    cmp eax, TOK_RBRACE
+    je .pst_bare
+    cmp eax, TOK_COMMA
+    je .pst_bare
+    mov rdi, rbx
     mov esi, BP_STAROP
     call par_expr
     test rax, rax
@@ -2288,6 +2714,20 @@ DEF_FUNC_LOCAL pf_starred, PST_FRAME
     pop rbx
     leave
     ret
+.pst_bare:
+    ; `f(*)` is CPython's "Invalid star expression", capital and all; `f(**)`
+    ; and `{**}` are only "invalid syntax", so the wording follows which of
+    ; the two stars this was.  A trailing comma -- `x = *,` -- is the plain
+    ; message too.
+    mov rdi, rbx
+    CSTRING rsi, "invalid syntax"
+    cmp qword [rbp - PST_KIND], AST_STARRED
+    jne .pst_say
+    cmp eax, TOK_COMMA
+    je .pst_say
+    CSTRING rsi, "Invalid star expression"
+.pst_say:
+    call par_syntax_error
 .fail:
     xor eax, eax
     pop rbx
@@ -2301,7 +2741,8 @@ END_FUNC pf_starred
 IA_VAL   equ 16
 IA_LINE  equ 24
 IA_FRAME equ 24          ; + 1 push = 32
-DEF_FUNC_LOCAL in_attr, IA_FRAME
+global in_attr
+DEF_FUNC in_attr, IA_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - IA_VAL], rsi
@@ -2338,7 +2779,7 @@ DEF_FUNC_LOCAL in_attr, IA_FRAME
     ret
 .need_name:
     mov rdi, rbx
-    CSTRING rsi, "expected an attribute name after '.'"
+    CSTRING rsi, "invalid syntax"
     call par_syntax_error
 .fail:
     xor eax, eax
@@ -2477,7 +2918,8 @@ IS_IDX   equ 32
 IS_MARK  equ 40
 IS_ILINE equ 48           ; the first index item, where an implicit tuple starts
 IS_FRAME equ 56           ; + 1 push = 64
-DEF_FUNC_LOCAL in_subscript, IS_FRAME
+global in_subscript
+DEF_FUNC in_subscript, IS_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - IS_VAL], rsi
@@ -2544,7 +2986,7 @@ DEF_FUNC_LOCAL in_subscript, IS_FRAME
 .close:
     mov rdi, rbx
     mov esi, TOK_RSQB
-    CSTRING rdx, "'[' was never closed"
+    CSTRING rdx, "invalid syntax"
     call par_expect
     test eax, eax
     jz .fail
@@ -2582,7 +3024,8 @@ ICL_NAME  equ 40
 ICL_GEN   equ 48         ; a bare genexp argument, which ends at the call's ')'
 ICL_KWLINE equ 56        ; where one keyword argument's own name is
 ICL_FRAME equ 72         ; + 1 push = 80
-DEF_FUNC_LOCAL in_call, ICL_FRAME
+global in_call
+DEF_FUNC in_call, ICL_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - ICL_FUNC], rsi
@@ -2685,7 +3128,16 @@ DEF_FUNC_LOCAL in_call, ICL_FRAME
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_COMMA
-    jne .close
+    je .comma_ok
+    mov rdi, rbx
+    call par_last_pushed
+    mov rsi, rax
+    mov rdi, rbx
+    call par_forgot_comma
+    test eax, eax
+    jnz .fail
+    jmp .close
+.comma_ok:
     mov rdi, rbx
     call par_advance
     jmp .arg_loop
@@ -2693,7 +3145,7 @@ DEF_FUNC_LOCAL in_call, ICL_FRAME
 .close:
     mov rdi, rbx
     mov esi, TOK_RPAR
-    CSTRING rdx, "'(' was never closed"
+    CSTRING rdx, "invalid syntax"
     call par_expect
     test eax, eax
     jz .fail
@@ -2777,7 +3229,8 @@ PLM_LINE  equ 16
 PLM_ARGS  equ 24
 PLM_NODE  equ 32
 PLM_FRAME equ 40          ; + 1 push = 48
-DEF_FUNC_LOCAL pf_lambda, PLM_FRAME
+global pf_lambda
+DEF_FUNC pf_lambda, PLM_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -2983,7 +3436,7 @@ DEF_FUNC par_comprehension, PCM_FRAME
     je .done
     mov rdi, rbx
     mov rsi, [rbp - PCM_CLOSE]
-    CSTRING rdx, "the comprehension was never closed"
+    CSTRING rdx, "invalid syntax"
     call par_expect
     test eax, eax
     jz .fail
@@ -3087,7 +3540,8 @@ PY_FIRST equ 24
 PY_MARK  equ 32
 PY_VLINE equ 40          ; where the yielded value begins, past the keyword
 PY_FRAME equ 56          ; + 1 push = 64
-DEF_FUNC_LOCAL pf_yield, PY_FRAME
+global pf_yield
+DEF_FUNC pf_yield, PY_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -3235,7 +3689,8 @@ END_FUNC pf_yield
 ;; ============================================================================
 PAW_LINE  equ 8
 PAW_FRAME equ 24          ; + 1 push = 24
-DEF_FUNC_LOCAL pf_await, PAW_FRAME
+global pf_await
+DEF_FUNC pf_await, PAW_FRAME
     push rbx
     mov rbx, rdi
     call par_peek
@@ -3277,7 +3732,8 @@ END_FUNC pf_await
 IW_LINE  equ 8
 IW_LEFT  equ 16
 IW_FRAME equ 24           ; + 1 push = 32
-DEF_FUNC_LOCAL in_walrus, IW_FRAME
+global in_walrus
+DEF_FUNC in_walrus, IW_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - IW_LEFT], rsi
@@ -3320,296 +3776,173 @@ DEF_FUNC_LOCAL in_walrus, IW_FRAME
     leave
     ret
 END_FUNC in_walrus
-
-section .rodata
-
-;; ============================================================================
-;; prule_table - the expression grammar, one row per token kind.
-;;
-;; GENERATED.  Edit ROWS in src/compiler/gen_prule.py and re-run it.
-;;
-;; Reading a row: `prefix` runs when the token starts an expression, `infix`
-;; when it follows one.  lbp is how tightly the token binds to what is already
-;; parsed -- 0 means it is not an infix operator and therefore ends the
-;; expression.  rbp is the minimum its handler recurses at, which is what
-;; encodes associativity: equal to lbp is left-associative, one below is
-;; right-associative.
-;;
-;; A comma is deliberately absent.  Tuples are built by the callers that
-;; actually permit them, because a comma in this table would silently swallow
-;; call arguments, subscripts and assignment targets.
-;; ============================================================================
-align 8
-prule_table:
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_ENDMARKER
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_NEWLINE
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_INDENT
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_DEDENT
-    dd 0
-    dq pf_name     , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_NAME
-    dd 0
-    dq pf_number   , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_NUMBER
-    dd 0
-    dq pf_string   , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_STRING -- consumes a whole run: adjacent literals concatenate
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_FSTRING
-    dd 0
-    dq pf_group    , in_call     
-    db BP_POSTFIX , BP_POSTFIX , 0                 , 0           ; TOK_LPAR -- group or tuple; as an infix, a call
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_RPAR
-    dd 0
-    dq pf_list     , in_subscript
-    db BP_POSTFIX , BP_POSTFIX , 0                 , 0           ; TOK_LSQB
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_RSQB
-    dd 0
-    dq pf_dictset  , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_LBRACE
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_RBRACE
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_COLON
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_COMMA
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_SEMI
-    dd 0
-    dq 0           , in_attr     
-    db BP_POSTFIX , BP_POSTFIX , 0                 , 0           ; TOK_DOT
-    dd 0
-    dq pf_const    , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_ELLIPSIS
-    dd 0
-    dq pf_unary    , in_binop    
-    db BP_ARITH   , BP_ARITH   , NB_ADD            , 0           ; TOK_PLUS -- aux is the BINARY op; pf_unary reads the token, not aux
-    dd 0
-    dq pf_unary    , in_binop    
-    db BP_ARITH   , BP_ARITH   , NB_SUBTRACT       , 0           ; TOK_MINUS
-    dd 0
-    dq pf_starred  , in_binop    
-    db BP_TERM    , BP_TERM    , NB_MULTIPLY       , 0           ; TOK_STAR
-    dd 0
-    dq pf_starred  , in_binop    
-    db BP_POWER   , BP_UNARY   , NB_POWER          , 0           ; TOK_DOUBLESTAR -- rbp one level BELOW lbp: right-associative, and its RHS takes a unary
-    dd 0
-    dq 0           , in_binop    
-    db BP_TERM    , BP_TERM    , NB_TRUE_DIVIDE    , 0           ; TOK_SLASH
-    dd 0
-    dq 0           , in_binop    
-    db BP_TERM    , BP_TERM    , NB_FLOOR_DIVIDE   , 0           ; TOK_DOUBLESLASH
-    dd 0
-    dq 0           , in_binop    
-    db BP_TERM    , BP_TERM    , NB_REMAINDER      , 0           ; TOK_PERCENT
-    dd 0
-    dq 0           , in_binop    
-    db BP_TERM    , BP_TERM    , NB_MATRIX_MULTIPLY, 0           ; TOK_AT
-    dd 0
-    dq 0           , in_binop    
-    db BP_BITOR   , BP_BITOR   , NB_OR             , 0           ; TOK_VBAR
-    dd 0
-    dq 0           , in_binop    
-    db BP_BITAND  , BP_BITAND  , NB_AND            , 0           ; TOK_AMPER
-    dd 0
-    dq 0           , in_binop    
-    db BP_BITXOR  , BP_BITXOR  , NB_XOR            , 0           ; TOK_CIRCUMFLEX
-    dd 0
-    dq pf_unary    , 0           
-    db BP_NONE    , BP_UNARY   , UOP_INVERT        , 0           ; TOK_TILDE
-    dd 0
-    dq 0           , in_binop    
-    db BP_SHIFT   , BP_SHIFT   , NB_LSHIFT         , 0           ; TOK_LEFTSHIFT
-    dd 0
-    dq 0           , in_binop    
-    db BP_SHIFT   , BP_SHIFT   , NB_RSHIFT         , 0           ; TOK_RIGHTSHIFT
-    dd 0
-    dq 0           , in_compare  
-    db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_LESS
-    dd 0
-    dq 0           , in_compare  
-    db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_GREATER
-    dd 0
-    dq 0           , in_compare  
-    db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_LESSEQUAL
-    dd 0
-    dq 0           , in_compare  
-    db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_GREATEREQUAL
-    dd 0
-    dq 0           , in_compare  
-    db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_EQEQUAL
-    dd 0
-    dq 0           , in_compare  
-    db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_NOTEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_EQUAL
-    dd 0
-    dq 0           , in_walrus   
-    db BP_WALRUS  , BP_LAMBDA  , 0                 , 0           ; TOK_COLONEQUAL -- right-associative, and its RHS may be a lambda but not a ternary
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_RARROW
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_PLUSEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_MINEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_STAREQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_DOUBLESTAREQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_SLASHEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_DOUBLESLASHEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_PERCENTEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_ATEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_VBAREQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_AMPEREQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_CIRCUMFLEXEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_LEFTSHIFTEQUAL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_RIGHTSHIFTEQUAL
-    dd 0
-    dq pf_const    , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_FALSE
-    dd 0
-    dq pf_const    , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_NONE
-    dd 0
-    dq pf_const    , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_TRUE
-    dd 0
-    dq 0           , in_boolop   
-    db BP_AND     , BP_AND     , 0                 , 0           ; TOK_AND
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_AS
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_ASSERT
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_ASYNC
-    dd 0
-    dq pf_await    , 0           
-    db BP_NONE    , BP_AWAIT   , 0                 , 0           ; TOK_AWAIT -- operand is a primary: BP_AWAIT sits between `**` and postfix
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_BREAK
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_CLASS
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_CONTINUE
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_DEF
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_DEL
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_ELIF
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_ELSE
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_EXCEPT
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_FINALLY
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_FOR
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_FROM
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_GLOBAL
-    dd 0
-    dq 0           , in_ternary  
-    db BP_TERNARY , BP_TERNARY , 0                 , 0           ; TOK_IF
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_IMPORT
-    dd 0
-    dq 0           , in_compare  
-    db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_IN
-    dd 0
-    dq 0           , in_compare  
-    db BP_COMPARE , BP_COMPARE , 0                 , PR_CHAIN    ; TOK_IS
-    dd 0
-    dq pf_lambda   , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_LAMBDA -- body one level below the ternary: `lambda: a, b` is still a tuple
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_NONLOCAL
-    dd 0
-    dq pf_unary    , in_compare  
-    db BP_COMPARE , BP_NOT     , UOP_NOT           , PR_CHAIN    ; TOK_NOT -- prefix `not x`; as an infix it can only start `not in`
-    dd 0
-    dq 0           , in_boolop   
-    db BP_OR      , BP_OR      , 0                 , 0           ; TOK_OR
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_PASS
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_RAISE
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_RETURN
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_TRY
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_WHILE
-    dd 0
-    dq 0           , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_WITH
-    dd 0
-    dq pf_yield    , 0           
-    db BP_NONE    , BP_NONE    , 0                 , 0           ; TOK_YIELD -- an expression, not a statement: `x = yield v` receives from send()
-    dd 0
+extern prule_table
 
 ASM_INIT
+
+section .text
+
+;; ============================================================================
+;; par_forgot_comma(rdi = Comp*, rsi = the element just parsed)
+;;   -> rax = 1 when it reported one, 0 when this is not that shape
+;;
+;; "invalid syntax. Perhaps you forgot a comma?", CPython's guess when one
+;; expression in a bracketed list is followed straight by another.  The test
+;; is whether the token that follows could START an expression, which is
+;; exactly what prule_table's prefix column says.  The span runs from the
+;; element to the end of that token, as CPython's does.
+;; ============================================================================
+PFC_COMP  equ 8
+PFC_NODE  equ 16
+PFC_LINE  equ 24
+PFC_COL   equ 32
+PFC_FRAME equ 40            ; + 1 push = 48, 16-aligned
+global par_forgot_comma
+DEF_FUNC par_forgot_comma, PFC_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PFC_COMP], rdi
+    mov [rbp - PFC_NODE], rsi
+
+    call par_kind
+    lea rcx, [rel prule_table]
+    imul rax, rax, PRule_size
+    cmp qword [rcx + rax + PRule.prefix], 0
+    je .pfc_no
+
+    mov rdi, rbx
+    mov rsi, [rbp - PFC_NODE]
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - PFC_LINE], ecx
+    mov ecx, [rax + AstNode.col]
+    mov [rbp - PFC_COL], ecx
+
+    mov rdi, rbx
+    call par_peek
+    mov r9d, [rax + Token.lineno]
+    mov r10d, [rax + Token.col]
+    add r10d, [rax + Token.len]
+    mov ecx, [rbp - PFC_LINE]
+    mov r8d, [rbp - PFC_COL]
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "invalid syntax. Perhaps you forgot a comma?"
+    call comp_error_span
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.pfc_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_forgot_comma
+
+;; ============================================================================
+;; par_last_pushed(rdi = Comp*) -> rax = the node most recently pushed onto the
+;; pending stack, or 0 when it is empty
+;;
+;; The element a "forgot a comma" message should span from.  Reading it back
+;; is what lets the three bracketed loops share the check without each one
+;; keeping the node in a register across the push.
+;; ============================================================================
+global par_last_pushed
+DEF_FUNC_BARE par_last_pushed
+    mov rcx, [rdi + Comp.pending + Buf.len]
+    test rcx, rcx
+    jz .plp_none
+    mov rax, [rdi + Comp.pending + Buf.data]
+    mov eax, [rax + rcx*4 - 4]
+    ret
+.plp_none:
+    xor eax, eax
+    ret
+END_FUNC par_last_pushed
+
+;; ============================================================================
+;; par_escape_error(rdi = Comp*, rsi = the literal's content, rdx = the
+;;                  backslash, rcx = the escape's length, r8 = the reason,
+;;                  r9 = non-zero for a bytes literal) -> rax = 0, always
+;;
+;; CPython does not report a bad escape itself: it hands the literal to the
+;; unicode_escape codec and wraps whatever that says, so the message names the
+;; codec, the position WITHIN the literal, and the codec's own reason --
+;;   (unicode error) 'unicodeescape' codec can't decode bytes in position 0-7:
+;;   unknown Unicode character name
+;; A bytes literal goes through a different path and gets a different shape:
+;;   (value error) invalid \x escape at position 0
+;; The span is the whole string token either way, which is what the parser is
+;; looking at when this is called.
+;; ============================================================================
+PEE_COMP  equ 8
+PEE_POS   equ 16
+PEE_LEN   equ 24
+PEE_WHY   equ 32
+PEE_BYTES equ 40
+PEE_FRAME equ 48            ; + 1 push = 56... one word more to land right
+DEF_FUNC_LOCAL par_escape_error, 56     ; + 1 push = 64, 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PEE_COMP], rdi
+    sub rdx, rsi
+    mov [rbp - PEE_POS], rdx            ; the position within the content
+    mov [rbp - PEE_LEN], rcx
+    mov [rbp - PEE_WHY], r8
+    mov [rbp - PEE_BYTES], r9
+
+    call comp_msg_start
+    push rax
+    mov rdi, rax
+    cmp qword [rbp - PEE_BYTES], 0
+    jne .pee_bytes
+    CSTRING rsi, "(unicode error) 'unicodeescape' codec can't decode bytes in position "
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rbp - PEE_POS]
+    call comp_msg_i64
+    mov rdi, rax
+    CSTRING rsi, "-"
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rbp - PEE_POS]
+    add rsi, [rbp - PEE_LEN]
+    dec rsi
+    call comp_msg_i64
+    mov rdi, rax
+    CSTRING rsi, ": "
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rbp - PEE_WHY]
+    call comp_msg_cstr
+    jmp .pee_have_msg
+
+.pee_bytes:
+    CSTRING rsi, "(value error) invalid \x escape at position "
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rbp - PEE_POS]
+    call comp_msg_i64
+
+.pee_have_msg:
+    pop rdx                             ; the message
+
+    ; The span is the whole string token, which is the one the parser is on.
+    push rdx
+    mov rdi, rbx
+    call par_peek
+    pop rdx
+    mov ecx, [rax + Token.lineno]
+    mov r8d, [rax + Token.col]
+    mov r9d, ecx
+    mov r10d, [rax + Token.len]
+    add r10d, r8d
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    call comp_error_span
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_escape_error

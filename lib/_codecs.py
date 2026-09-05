@@ -48,21 +48,81 @@ def _bootstrap():
     In CPython this happens in C, inside the first lookup: the interpreter
     imports the `encodings` package and registers its search function ahead of
     anything the program registers itself.  Doing it lazily is what keeps the
-    circle from closing -- `encodings` imports `codecs`, which imports this
-    module.  Without it `_search_functions` stayed empty and every lookup
-    raised LookupError, including the utf-8 one that TextIOWrapper starts from.
+    circle from closing -- `encodings` imports this module.  Without it
+    `_search_functions` stayed empty and every lookup raised LookupError,
+    including the utf-8 one that TextIOWrapper starts from.
     """
     global _bootstrapped
     if _bootstrapped:
         return
     _bootstrapped = True
+    # `encodings` answers only for the codecs that are a 256-entry table, and
+    # returns None for the rest, so the order between the two is a matter of
+    # which is asked first and not of which wins.  It goes in front because
+    # that is where CPython's registry init puts it.
+    _search_functions.append(_builtin_search)
     try:
         import encodings
     except ImportError:
-        # encodings is CPython's own Python package, not something apython
-        # ships; without it the registry holds only what a program registers.
+        # Not fatal: without the package the registry still holds whatever a
+        # program registers, plus the tableless codecs below.
         return
     _search_functions.insert(0, encodings.search_function)
+
+
+class _CodecInfo(tuple):
+    """codecs.CodecInfo without the codecs module.
+
+    lookup() checks the shape -- a 4-tuple -- and everything downstream of it
+    reaches for .encode and .decode by name, so a plain tuple will not do.
+    """
+
+    def __new__(cls, encode, decode, name):
+        self = tuple.__new__(cls, (encode, decode, None, None))
+        self.encode = encode
+        self.decode = decode
+        self.name = name
+        return self
+
+
+class _Whole:
+    """A stateless decoder called on a complete bytes object.
+
+    The decoders here take a `final` flag, because an incremental decoder
+    hands them arbitrary chunks and a truncated character at the end of one is
+    not an error.  A CodecInfo's `decode` is the other case: it is given the
+    whole input, so a truncated character at the end of THAT is an error, and
+    CPython's registered decoders pass final=True for exactly this reason --
+    `b"+A".decode("utf-7")` raises where `_codecs.utf_7_decode(b"+A")` does
+    not.  Not a descriptor, for the reason _Builtin is not.
+    """
+
+    __slots__ = ("_fn",)
+
+    def __init__(self, fn):
+        self._fn = fn
+
+    def __call__(self, data, errors=None):
+        return self._fn(data, errors, True)
+
+
+def _builtin_search(name):
+    """The codecs this module implements itself: the ones that are not a table.
+
+    utf-8 and its BOM'd form, ascii, latin-1, the six fixed-width UTF-16 and
+    UTF-32 forms, utf-7, and the two escape codecs.  Everything else CPython
+    ships that this tree has is a 256-entry decoding table, and those live in
+    `encodings/`, which is consulted first.
+    """
+    key = _ALIASES.get(name, name)
+    entry = _BUILTIN_CODECS.get(key)
+    if entry is None:
+        return None
+    # The name a CodecInfo reports is the one CPython's own encodings module
+    # registers -- 'utf-8', not the 'utf_8' the lookup normalised to -- and
+    # TextIOWrapper.encoding is read from it.
+    return _CodecInfo(entry[0], _Whole(entry[1]),
+                      _BUILTIN_NAMES.get(key, key))
 
 
 def lookup(encoding):
@@ -113,9 +173,12 @@ def xmlcharrefreplace_errors(exc):
 
 
 def backslashreplace_errors(exc):
+    # A decode error's .object is bytes, and iterating bytes gives ints; an
+    # encode error's is a str.  Both reach here, and CPython escapes each byte
+    # of the first and each character of the second.
     parts = []
-    for ch in exc.object[exc.start:exc.end]:
-        n = ord(ch)
+    for item in exc.object[exc.start:exc.end]:
+        n = item if isinstance(item, int) else ord(item)
         if n > 0xFFFF:
             parts.append("\\U%08x" % n)
         elif n > 0xFF:
@@ -219,52 +282,132 @@ def _utf_8_decode(data, errors=None, final=False):
                     b = b[:i]
                 break
             i -= 1                  # a continuation byte: keep walking back
-    return (b.decode("utf-8", errors or "strict"), len(b))
+    errors = errors or "strict"
+    if errors in ("strict", "ignore", "replace"):
+        return (b.decode("utf-8", errors), len(b))
+    return (_utf_8_decode_handled(b, errors), len(b))
+
+
+def _utf_8_decode_handled(b, errors):
+    """UTF-8 decoding for the handlers bytes.decode does not know itself.
+
+    It cannot delegate: the assembly fast path sends an unknown handler name
+    back here, so `b.decode("utf-8", errors)` with one of these would be an
+    infinite recursion between the two.  It decodes in strict mode instead --
+    which the fast path does do -- and drives the handler over each run the
+    strict pass rejects, which is what CPython's decoder does too.
+    """
+    out = []
+    i = 0
+    n = len(b)
+    handler = lookup_error(errors)
+    while i < n:
+        try:
+            out.append(bytes(b[i:]).decode("utf-8", "strict"))
+            break
+        except UnicodeDecodeError as exc:
+            out.append(bytes(b[i:i + exc.start]).decode("utf-8", "strict"))
+            start = i + exc.start
+            end = i + exc.end
+            replacement, resume = handler(
+                UnicodeDecodeError("utf-8", bytes(b), start, end, exc.reason))
+            if resume < 0:
+                resume += n
+            if resume <= start or resume > n:
+                raise IndexError("position %d from error handler out of bounds"
+                                 % resume)
+            out.append(replacement)
+            i = resume
+    return "".join(out)
 
 
 utf_8_decode = _Builtin(_utf_8_decode)
 utf_8_encode = _Builtin(utf_8_encode)
 
 
-def ascii_encode(s, errors=None):
-    out = []
-    for ch in s:
-        if ord(ch) > 127:
-            if errors in (None, "strict"):
-                raise UnicodeEncodeError(
-                    "ascii", s, 0, len(s), "ordinal not in range(128)")
-            if errors == "ignore":
-                continue
-            out.append("?")
+def _encode_charset(codec, s, errors, limit, reason):
+    """Encode a str whose characters must all be below `limit`.
+
+    This is where the error handlers actually run.  CPython hands a handler
+    the whole RUN of consecutive unencodable characters and lets it say where
+    to resume, which is what makes backslashreplace produce one escape per
+    character and xmlcharrefreplace one entity per character rather than one
+    for the run.  The str.encode fast path in assembly knows only strict,
+    ignore and replace; anything else -- and every strict failure, so that the
+    exception carries its five fields -- arrives here.
+    """
+    errors = errors or "strict"
+    out = bytearray()
+    i = 0
+    n = len(s)
+    while i < n:
+        o = ord(s[i])
+        if o < limit:
+            out.append(o)
+            i += 1
+            continue
+        j = i
+        while j < n and ord(s[j]) >= limit:
+            j += 1
+        exc = UnicodeEncodeError(codec, s, i, j, reason)
+        replacement, resume = lookup_error(errors)(exc)
+        if resume < 0:
+            resume += n
+        if resume <= i or resume > n:
+            raise IndexError("position %d from error handler out of bounds"
+                             % resume)
+        if isinstance(replacement, (bytes, bytearray)):
+            out.extend(replacement)
         else:
-            out.append(ch)
-    return ("".join(out).encode(), len(s))
+            for ch in replacement:
+                v = ord(ch)
+                if v >= limit:
+                    raise UnicodeEncodeError(codec, s, i, j, reason)
+                out.append(v)
+        i = resume
+    return (bytes(out), n)
+
+
+def _decode_charset(codec, data, errors, limit, reason):
+    """The mirror image: every byte at or above `limit` is undecodable."""
+    b = _as_bytes(data)
+    errors = errors or "strict"
+    out = []
+    i = 0
+    n = len(b)
+    while i < n:
+        if b[i] < limit:
+            out.append(chr(b[i]))
+            i += 1
+            continue
+        j = i
+        while j < n and b[j] >= limit:
+            j += 1
+        exc = UnicodeDecodeError(codec, b, i, j, reason)
+        replacement, resume = lookup_error(errors)(exc)
+        if resume < 0:
+            resume += n
+        if resume <= i or resume > n:
+            raise IndexError("position %d from error handler out of bounds"
+                             % resume)
+        out.append(replacement)
+        i = resume
+    return ("".join(out), n)
+
+
+def ascii_encode(s, errors=None):
+    return _encode_charset("ascii", s, errors, 128,
+                           "ordinal not in range(128)")
 
 
 def ascii_decode(data, errors=None, final=False):
-    b = _as_bytes(data)
-    for byte in b:
-        if byte > 127:
-            if errors in (None, "strict"):
-                raise UnicodeDecodeError(
-                    "ascii", b, 0, len(b), "ordinal not in range(128)")
-    return ("".join(chr(x) for x in b if x <= 127), len(b))
+    return _decode_charset("ascii", data, errors, 128,
+                           "ordinal not in range(128)")
 
 
 def latin_1_encode(s, errors=None):
-    out = []
-    for ch in s:
-        n = ord(ch)
-        if n > 255:
-            if errors in (None, "strict"):
-                raise UnicodeEncodeError(
-                    "latin-1", s, 0, len(s), "ordinal not in range(256)")
-            if errors == "ignore":
-                continue
-            out.append(63)
-        else:
-            out.append(n)
-    return (bytes(out), len(s))
+    return _encode_charset("latin-1", s, errors, 256,
+                           "ordinal not in range(256)")
 
 
 def latin_1_decode(data, errors=None, final=False):
@@ -286,35 +429,101 @@ def charmap_build(decoding_table):
     return table
 
 
+def _charmap_get(mapping, byte):
+    """-> the character byte `byte` decodes to, or None if it decodes to none.
+
+    A decoding table is a 256-character str, and CPython marks a hole in one
+    with U+FFFE; a mapping may also be a dict, where a hole is a missing key
+    or an explicit None.
+    """
+    if isinstance(mapping, str):
+        if byte >= len(mapping):
+            return None
+        ch = mapping[byte]
+    else:
+        ch = mapping.get(byte)
+    if ch is None or ch == "\ufffe":
+        return None
+    return ch
+
+
 def charmap_decode(data, errors=None, mapping=None):
+    """-> (str, bytes consumed) for `data` read through `mapping`.
+
+    Unlike the encode direction, which hands the handler a whole run, CPython's
+    charmap decoder reports ONE byte at a time: `b"a\x81\x8dz"` under 'replace'
+    gives two replacement characters, not one.  A handler may still say where
+    to resume and skip the rest of a run itself.
+    """
     b = _as_bytes(data)
     if mapping is None:
         return latin_1_decode(b, errors)
+    errors = errors or "strict"
     out = []
-    for byte in b:
-        ch = mapping[byte] if not isinstance(mapping, dict) else mapping.get(byte)
-        if ch is None or ch == "￾":
-            if errors in (None, "strict"):
-                raise UnicodeDecodeError(
-                    "charmap", b, 0, len(b), "character maps to <undefined>")
+    i = 0
+    n = len(b)
+    while i < n:
+        ch = _charmap_get(mapping, b[i])
+        if ch is not None:
+            out.append(ch)
+            i += 1
             continue
-        out.append(ch)
-    return ("".join(out), len(b))
+        j = i + 1
+        exc = UnicodeDecodeError("charmap", b, i, j,
+                                 "character maps to <undefined>")
+        replacement, resume = lookup_error(errors)(exc)
+        if resume < 0:
+            resume += n
+        if resume <= i or resume > n:
+            raise IndexError("position %d from error handler out of bounds"
+                             % resume)
+        out.append(replacement)
+        i = resume
+    return ("".join(out), n)
 
 
 def charmap_encode(s, errors=None, mapping=None):
+    """-> (bytes, characters consumed) for `s` written through `mapping`.
+
+    `mapping` is the {code point: byte} dict charmap_build makes.  A handler's
+    str replacement goes back through the same mapping, so a character the
+    replacement cannot spell either is a hard failure rather than a silent
+    hole.
+    """
     if mapping is None:
         return latin_1_encode(s, errors)
-    out = []
-    for ch in s:
-        v = mapping.get(ord(ch)) if isinstance(mapping, dict) else None
-        if v is None:
-            if errors in (None, "strict"):
-                raise UnicodeEncodeError(
-                    "charmap", s, 0, len(s), "character maps to <undefined>")
+    errors = errors or "strict"
+    out = bytearray()
+    i = 0
+    n = len(s)
+    while i < n:
+        v = mapping.get(ord(s[i]))
+        if v is not None:
+            out.append(v)
+            i += 1
             continue
-        out.append(v)
-    return (bytes(out), len(s))
+        j = i
+        while j < n and mapping.get(ord(s[j])) is None:
+            j += 1
+        exc = UnicodeEncodeError("charmap", s, i, j,
+                                 "character maps to <undefined>")
+        replacement, resume = lookup_error(errors)(exc)
+        if resume < 0:
+            resume += n
+        if resume <= i or resume > n:
+            raise IndexError("position %d from error handler out of bounds"
+                             % resume)
+        if isinstance(replacement, (bytes, bytearray)):
+            out.extend(replacement)
+        else:
+            for ch in replacement:
+                v = mapping.get(ord(ch))
+                if v is None:
+                    raise UnicodeEncodeError("charmap", s, i, j,
+                                             "character maps to <undefined>")
+                out.append(v)
+        i = resume
+    return (bytes(out), n)
 
 
 def readbuffer_encode(data, errors=None):
@@ -402,9 +611,381 @@ raw_unicode_escape_encode = escape_encode
 raw_unicode_escape_decode = escape_decode
 
 
+# --- utf-7 -----------------------------------------------------------------
+#
+# RFC 2152: ASCII passes through, everything else goes into a modified base64
+# run between '+' and '-'.  The run is over UTF-16 code UNITS, so a character
+# above the BMP becomes a surrogate pair inside it -- which is why the
+# accumulator here is 16 bits wide and not 21.
+
+_U7_B64 = ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+_U7_FROM = {}
+for _i, _c in enumerate(_U7_B64):
+    _U7_FROM[ord(_c)] = _i
+del _i, _c
+
+# Everything below 128 except these is written out as itself.  The set is
+# CPython's: RFC 2152's set D and set O, plus tab, newline and return, less
+# '+' (which starts a run), '\\', '~' and the C0 controls.
+_U7_INDIRECT = frozenset(range(0, 9)) | frozenset((11, 12)) | \
+    frozenset(range(14, 32)) | frozenset((ord("+"), ord("\\"),
+                                          ord("~"), 127))
+
+
+def _u7_direct(o):
+    """-> True if code point `o` is written to a utf-7 stream as itself."""
+    return o < 128 and o not in _U7_INDIRECT
+
+
+def utf_7_encode(s, errors=None):
+    """-> (bytes, characters consumed): `s` as RFC 2152 modified UTF-7.
+
+    The closing '-' is written only when the character that follows the run
+    would otherwise be read as part of it -- a base64 character, or a '-'.
+    Anything else ends the run implicitly, which is why 'a\u2603]' comes out
+    '+JgM]' and not '+JgM-]'.
+    """
+    out = bytearray()
+    bits = 0
+    acc = 0
+    shifted = False
+    for ch in s:
+        o = ord(ch)
+        if shifted:
+            if _u7_direct(o):
+                if bits:
+                    out.append(ord(_U7_B64[(acc << (6 - bits)) & 0x3F]))
+                    bits = 0
+                    acc = 0
+                shifted = False
+                if o == 0x2D or chr(o) in _U7_B64:
+                    out.append(0x2D)
+                out.append(o)
+                continue
+        elif o == 0x2B:               # '+' outside a run is written '+-'
+            out += b"+-"
+            continue
+        elif _u7_direct(o):
+            out.append(o)
+            continue
+        else:
+            out.append(0x2B)
+            shifted = True
+            bits = 0
+            acc = 0
+        units = (o,)
+        if o > 0xFFFF:
+            o -= 0x10000
+            units = (0xD800 + (o >> 10), 0xDC00 + (o & 0x3FF))
+        for u in units:
+            acc = (acc << 16) | u
+            bits += 16
+            while bits >= 6:
+                bits -= 6
+                out.append(ord(_U7_B64[(acc >> bits) & 0x3F]))
+            acc &= (1 << bits) - 1
+    if shifted:
+        if bits:
+            out.append(ord(_U7_B64[(acc << (6 - bits)) & 0x3F]))
+        out.append(0x2D)
+    return (bytes(out), len(s))
+
+
+def utf_7_decode(data, errors=None, final=False):
+    """-> (str, bytes consumed) for a UTF-7 stream.
+
+    A run that is still open when the data ends is an error only when `final`;
+    otherwise the caller keeps the tail, so report consuming only up to where
+    the run began.  A run that ends badly reports from the '+' that opened it
+    through the character that closed it, which is CPython's span and not the
+    one byte that noticed.
+    """
+    b = _as_bytes(data)
+    errors = errors or "strict"
+    out = []
+    n = len(b)
+    i = 0
+    shifted = False
+    shift_start = 0
+    seen = 0
+    bits = 0
+    acc = 0
+    surrogate = 0
+
+    def fail(start, end, reason):
+        """-> where to resume, having appended whatever the handler gave."""
+        exc = UnicodeDecodeError("utf7", b, start, end, reason)
+        replacement, resume = lookup_error(errors)(exc)
+        if resume < 0:
+            resume += n
+        if resume < 0 or resume > n:
+            raise IndexError("position %d from error handler out of bounds"
+                             % resume)
+        out.append(replacement)
+        return resume
+
+    while i < n:
+        c = b[i]
+        if shifted:
+            if c in _U7_FROM:
+                acc = (acc << 6) | _U7_FROM[c]
+                bits += 6
+                seen += 1
+                i += 1
+                if bits >= 16:
+                    bits -= 16
+                    unit = (acc >> bits) & 0xFFFF
+                    acc &= (1 << bits) - 1
+                    if surrogate:
+                        if 0xDC00 <= unit <= 0xDFFF:
+                            out.append(chr(0x10000
+                                           + ((surrogate - 0xD800) << 10)
+                                           + (unit - 0xDC00)))
+                            surrogate = 0
+                            continue
+                        out.append(chr(surrogate))
+                        surrogate = 0
+                    if 0xD800 <= unit <= 0xDBFF:
+                        surrogate = unit
+                    else:
+                        out.append(chr(unit))
+                continue
+            # Anything else closes the run.  '-' is absorbed; anything else is
+            # read again outside it -- unless the run was bad, in which case
+            # the span reported covers it.
+            shifted = False
+            if bits >= 6:
+                i = fail(shift_start, i + 1,
+                         "partial character in shift sequence")
+            elif bits and acc:
+                i = fail(shift_start, i + 1,
+                         "non-zero padding bits in shift sequence")
+            elif not seen:
+                i = fail(shift_start, i + 1, "ill-formed sequence")
+            else:
+                if surrogate and c < 128:
+                    out.append(chr(surrogate))
+                if c == 0x2D:
+                    i += 1
+            surrogate = 0
+            bits = 0
+            acc = 0
+            continue
+        if c == 0x2B:
+            if i + 1 < n and b[i + 1] == 0x2D:
+                out.append("+")
+                i += 2
+                continue
+            shifted = True
+            shift_start = i
+            seen = 0
+            bits = 0
+            acc = 0
+            surrogate = 0
+            i += 1
+            continue
+        if c < 128:
+            out.append(chr(c))
+            i += 1
+            continue
+        i = fail(i, i + 1, "unexpected special character")
+
+    if shifted:
+        if not final:
+            return ("".join(out), shift_start)
+        if surrogate or bits >= 6 or (bits and acc):
+            fail(shift_start, n, "unterminated shift sequence")
+    return ("".join(out), n)
+
+
+
 def encode(obj, encoding="utf-8", errors="strict"):
     return lookup(encoding).encode(obj, errors)[0]
 
 
 def decode(obj, encoding="utf-8", errors="strict"):
     return lookup(encoding).decode(obj, errors)[0]
+
+
+# --- the codecs the built-in search function offers -------------------------
+#
+# The ones that are not a 256-entry table, which is what makes them belong
+# here rather than in `encodings/`: the three the assembly already does, the
+# BOM'd form of utf-8, the fixed-width UTF families, and utf-7, which is a
+# state machine over modified base64 rather than a mapping.
+
+def utf_8_sig_encode(s, errors=None):
+    return (b"\xef\xbb\xbf" + s.encode("utf-8", errors or "strict"), len(s))
+
+
+def utf_8_sig_decode(data, errors=None, final=False):
+    b = _as_bytes(data)
+    if b[:3] == b"\xef\xbb\xbf":
+        b = b[3:]
+    return (b.decode("utf-8", errors or "strict"), len(b))
+
+
+def _utf_n_encode(s, errors, width, big):
+    out = bytearray()
+    for ch in s:
+        n = ord(ch)
+        if width == 2:
+            if n > 0xFFFF:
+                n -= 0x10000
+                hi = 0xD800 + (n >> 10)
+                lo = 0xDC00 + (n & 0x3FF)
+                units = (hi, lo)
+            else:
+                units = (n,)
+            for u in units:
+                if big:
+                    out.append(u >> 8)
+                    out.append(u & 0xFF)
+                else:
+                    out.append(u & 0xFF)
+                    out.append(u >> 8)
+        else:
+            b = [n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, (n >> 24) & 0xFF]
+            if big:
+                b.reverse()
+            out.extend(b)
+    return (bytes(out), len(s))
+
+
+def _utf_n_decode(data, errors, width, big, codec):
+    b = _as_bytes(data)
+    if len(b) % width:
+        raise UnicodeDecodeError(codec, b, len(b) - len(b) % width, len(b),
+                                 "truncated data")
+    out = []
+    i = 0
+    while i < len(b):
+        chunk = b[i:i + width]
+        if big:
+            chunk = bytes(reversed(chunk))
+        n = 0
+        for k in range(width - 1, -1, -1):
+            n = (n << 8) | chunk[k]
+        if width == 2 and 0xD800 <= n < 0xDC00 and i + 4 <= len(b):
+            nxt = b[i + 2:i + 4]
+            if big:
+                nxt = bytes(reversed(nxt))
+            lo = nxt[0] | (nxt[1] << 8)
+            if 0xDC00 <= lo < 0xE000:
+                n = 0x10000 + ((n - 0xD800) << 10) + (lo - 0xDC00)
+                i += 2
+        out.append(chr(n))
+        i += width
+    return ("".join(out), len(b))
+
+
+def utf_16_le_encode(s, errors=None):
+    return _utf_n_encode(s, errors, 2, False)
+
+
+def utf_16_be_encode(s, errors=None):
+    return _utf_n_encode(s, errors, 2, True)
+
+
+def utf_16_le_decode(data, errors=None, final=False):
+    return _utf_n_decode(data, errors, 2, False, "utf-16-le")
+
+
+def utf_16_be_decode(data, errors=None, final=False):
+    return _utf_n_decode(data, errors, 2, True, "utf-16-be")
+
+
+def utf_16_encode(s, errors=None):
+    body, n = _utf_n_encode(s, errors, 2, False)
+    return (b"\xff\xfe" + body, n)
+
+
+def utf_16_decode(data, errors=None, final=False):
+    b = _as_bytes(data)
+    if b[:2] == b"\xff\xfe":
+        return _utf_n_decode(b[2:], errors, 2, False, "utf-16")
+    if b[:2] == b"\xfe\xff":
+        return _utf_n_decode(b[2:], errors, 2, True, "utf-16")
+    return _utf_n_decode(b, errors, 2, False, "utf-16")
+
+
+def utf_32_le_encode(s, errors=None):
+    return _utf_n_encode(s, errors, 4, False)
+
+
+def utf_32_be_encode(s, errors=None):
+    return _utf_n_encode(s, errors, 4, True)
+
+
+def utf_32_le_decode(data, errors=None, final=False):
+    return _utf_n_decode(data, errors, 4, False, "utf-32-le")
+
+
+def utf_32_be_decode(data, errors=None, final=False):
+    return _utf_n_decode(data, errors, 4, True, "utf-32-be")
+
+
+def utf_32_encode(s, errors=None):
+    body, n = _utf_n_encode(s, errors, 4, False)
+    return (b"\xff\xfe\x00\x00" + body, n)
+
+
+def utf_32_decode(data, errors=None, final=False):
+    b = _as_bytes(data)
+    if b[:4] == b"\xff\xfe\x00\x00":
+        return _utf_n_decode(b[4:], errors, 4, False, "utf-32")
+    if b[:4] == b"\x00\x00\xfe\xff":
+        return _utf_n_decode(b[4:], errors, 4, True, "utf-32")
+    return _utf_n_decode(b, errors, 4, False, "utf-32")
+
+
+_BUILTIN_CODECS = {
+    "utf_8": (utf_8_encode, utf_8_decode),
+    "utf_8_sig": (utf_8_sig_encode, utf_8_sig_decode),
+    "ascii": (ascii_encode, ascii_decode),
+    "latin_1": (latin_1_encode, latin_1_decode),
+    "utf_16": (utf_16_encode, utf_16_decode),
+    "utf_16_le": (utf_16_le_encode, utf_16_le_decode),
+    "utf_16_be": (utf_16_be_encode, utf_16_be_decode),
+    "utf_32": (utf_32_encode, utf_32_decode),
+    "utf_32_le": (utf_32_le_encode, utf_32_le_decode),
+    "utf_32_be": (utf_32_be_encode, utf_32_be_decode),
+    "utf_7": (utf_7_encode, utf_7_decode),
+    "unicode_escape": (unicode_escape_encode, unicode_escape_decode),
+    "raw_unicode_escape": (raw_unicode_escape_encode,
+                           raw_unicode_escape_decode),
+}
+
+# What each of them answers to.  CPython's encodings/latin_1.py registers
+# itself as 'iso8859-1', not as 'latin_1'.
+_BUILTIN_NAMES = {
+    "utf_8": "utf-8", "utf_8_sig": "utf-8-sig",
+    "latin_1": "iso8859-1",
+    "utf_16": "utf-16", "utf_16_le": "utf-16-le", "utf_16_be": "utf-16-be",
+    "utf_32": "utf-32", "utf_32_le": "utf-32-le", "utf_32_be": "utf-32-be",
+    "utf_7": "utf-7",
+    "unicode_escape": "unicode-escape",
+    "raw_unicode_escape": "raw-unicode-escape",
+}
+
+# The aliases CPython's encodings.aliases carries for those codecs.
+_ALIASES = {
+    "u8": "utf_8", "utf": "utf_8", "utf8": "utf_8", "cp65001": "utf_8",
+    "utf8_ucs2": "utf_8", "utf8_ucs4": "utf_8",
+    "utf_8_sig": "utf_8_sig",
+    "us_ascii": "ascii", "us": "ascii", "ansi_x3.4_1968": "ascii",
+    "ansi_x3_4_1968": "ascii", "646": "ascii", "ibm367": "ascii",
+    "latin": "latin_1", "latin1": "latin_1", "l1": "latin_1",
+    "iso_8859_1": "latin_1", "iso8859_1": "latin_1", "8859": "latin_1",
+    "cp819": "latin_1", "ibm819": "latin_1", "iso_ir_100": "latin_1",
+    "iso_8859_1_1987": "latin_1",
+    "u7": "utf_7", "utf7": "utf_7", "unicode_1_1_utf_7": "utf_7",
+    "u16": "utf_16", "utf16": "utf_16",
+    "unicodelittleunmarked": "utf_16_le", "utf_16le": "utf_16_le",
+    "unicodebigunmarked": "utf_16_be", "utf_16be": "utf_16_be",
+    "u32": "utf_32", "utf32": "utf_32",
+    "utf_32le": "utf_32_le", "utf_32be": "utf_32_be",
+    "unicode_internal": "utf_32_le",
+    "unicodeescape": "unicode_escape",
+    "rawunicodeescape": "raw_unicode_escape",
+}

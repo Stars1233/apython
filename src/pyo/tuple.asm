@@ -40,8 +40,10 @@ extern str_type
 extern bool_type
 extern none_type
 
-; tuple_new(int64_t size) -> PyTupleObject*
-; Allocate a tuple with room for 'size' fat items (16 bytes each), zero-filled
+;; ============================================================================
+;; tuple_new(int64_t size) -> PyTupleObject*
+;; Allocate a tuple with room for 'size' fat items (16 bytes each), zero-filled
+;; ============================================================================
 DEF_FUNC tuple_new
     push rbx
     push r12
@@ -114,8 +116,16 @@ DEF_FUNC tuple_new
     ; Check: if tuple came from pool, ob_type is already set from previous use
     ; For fresh alloc, gc_alloc sets ob_type. We can skip gc_track for pooled.
     ; Pooled tuples were gc_untracked in dealloc, so we must gc_track them again.
+    ;
+    ; ...except an EMPTY one, which holds nothing and so can be part of no
+    ; cycle.  CPython does not track it either: `gc.is_tracked(())` is False
+    ; there and was True here, and walking every empty tuple in the heap on
+    ; every collection buys nothing.
+    test r12, r12
+    jz .tn_untracked
     mov rdi, rbx
     call gc_track
+.tn_untracked:
 
     mov rax, rbx
     pop r12
@@ -124,8 +134,10 @@ DEF_FUNC tuple_new
     ret
 END_FUNC tuple_new
 
-; tuple_getitem(PyTupleObject *tuple, int64_t index) -> (rax=payload, rdx=tag)
-; sq_item: Return fat tuple element with bounds check and INCREF_VAL
+;; ============================================================================
+;; tuple_getitem(PyTupleObject *tuple, int64_t index) -> (rax=payload, rdx=tag)
+;; sq_item: Return fat tuple element with bounds check and INCREF_VAL
+;; ============================================================================
 DEF_FUNC_BARE tuple_getitem
     ; Handle negative index
     test rsi, rsi
@@ -145,9 +157,11 @@ DEF_FUNC_BARE tuple_getitem
     RAISE exc_IndexError_type, "tuple index out of range"
 END_FUNC tuple_getitem
 
-; tuple_subscript(PyTupleObject *tuple, PyObject *key) -> rax = Value
-; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
-; Returns (rax=payload, edx=tag) fat value
+;; ============================================================================
+;; tuple_subscript(PyTupleObject *tuple, PyObject *key) -> rax = Value
+;; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
+;; Returns (rax=payload, edx=tag) fat value
+;; ============================================================================
 DEF_FUNC tuple_subscript
     V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
     push rbx
@@ -187,8 +201,10 @@ DEF_FUNC tuple_subscript
     RAISE exc_TypeError_type, "tuple indices must be integers or slices"
 END_FUNC tuple_subscript
 
-; tuple_len(PyTupleObject *tuple) -> int64_t
-; Return tuple->ob_size
+;; ============================================================================
+;; tuple_len(PyTupleObject *tuple) -> int64_t
+;; Return tuple->ob_size
+;; ============================================================================
 DEF_FUNC_BARE tuple_len
     mov rax, [rdi + PyTupleObject.ob_size]
     ret
@@ -203,7 +219,7 @@ TUPLE_POOL_MAX equ 16
 TUPLE_POOL_HEAD  equ 0
 TUPLE_POOL_COUNT equ 8
 
-DEF_FUNC tuple_dealloc
+DEF_FUNC tuple_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -276,9 +292,11 @@ END_FUNC tuple_dealloc
 ; tuple_repr is in src/repr.asm
 extern tuple_repr
 
-; tuple_hash(PyObject *self) -> int64
-; Combines item hashes using a simple multiply-xor scheme
-; TAG_SMALLINT: hash = payload. TAG_PTR: obj_hash(payload).
+;; ============================================================================
+;; tuple_hash(PyObject *self) -> int64
+;; Combines item hashes using a simple multiply-xor scheme
+;; TAG_SMALLINT: hash = payload. TAG_PTR: obj_hash(payload).
+;; ============================================================================
 DEF_FUNC tuple_hash
     push rbx
     push r12
@@ -354,7 +372,7 @@ DEF_FUNC tuple_getslice
     push r13
     push r14
     push r15
-    sub rsp, 16                ; [rbp - TGS_LEN]=slicelength, [rbp - TGS_NEW]=newtuple, align
+    sub rsp, 24                ; [rbp - TGS_LEN]=slicelength, [rbp - TGS_NEW]=newtuple, align
 
     mov rbx, rdi               ; tuple
     mov r12, rsi               ; slice
@@ -457,7 +475,7 @@ DEF_FUNC tuple_getslice
 .tgs_done:
     mov rax, [rbp - TGS_NEW]
 
-    add rsp, 16
+    add rsp, 24
     pop r15
     pop r14
     pop r13
@@ -473,7 +491,7 @@ END_FUNC tuple_getslice
 ;; Linear scan with identity then __eq__.
 ;; ============================================================================
 TCN_IDX   equ 8
-TCN_FRAME equ 16            ; + 3 pushes = 40, not 16-aligned
+TCN_FRAME equ 24            ; + 3 pushes = 48, 16-aligned
 DEF_FUNC tuple_contains, TCN_FRAME
     push rbx
     push r12
@@ -739,7 +757,7 @@ TRC_RIGHT    equ 16
 TRC_OP       equ 24
 TRC_IDX      equ 32
 TRC_MINLEN   equ 40
-TRC_FRAME    equ 40         ; + 0 pushes = 40, not 16-aligned
+TRC_FRAME    equ 48            ; + 0 pushes = 48, 16-aligned
 
 ; Comparing two structures that reach each other -- a=[]; a.append(a);
 ; b=[]; b.append(b); a==b -- recursed until the machine stack ran out; the
@@ -1347,6 +1365,7 @@ tuple_type:
     dq tuple_traverse                        ; tp_traverse
     dq tuple_clear                        ; tp_clear
     dq 0        ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 section .text
 
@@ -1356,7 +1375,9 @@ section .text
 ;; file is the only place that knows which of its fields are owned.
 ;; ============================================================================
 
-; ---- tuple_traverse / tuple_clear ----
+;; ============================================================================
+;; ---- tuple_traverse / tuple_clear ----
+;; ============================================================================
 DEF_FUNC tuple_traverse
     push rbx
     push r12

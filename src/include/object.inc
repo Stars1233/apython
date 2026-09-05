@@ -131,6 +131,13 @@ struc PyMemoryViewObject
     .mv_itemsize: resq 1  ; +40: bytes per item, 1 unless cast()
     .mv_format:   resq 1  ; +48: the one-character format, as a C string
     .mv_readonly: resq 1  ; +56: 1 for a view over bytes
+    ; The step between items, in ITEMS, signed.  1 for every view that comes
+    ; from a buffer or from a contiguous slice; anything else is what `mv[::2]`
+    ; and `mv[::-1]` produce, and mv_buf then points at the FIRST item of the
+    ; view rather than at the lowest address in it.  MV_ITEM_ADDR is the one
+    ; place that knows, and mv_stride == 1 is what `c_contiguous` answers and
+    ; what anything handing the raw pointer to a syscall has to insist on.
+    .mv_stride:   resq 1  ; +64
 endstruc
 
 ; A released memoryview: mv_buf is 0 and every operation raises.  The source
@@ -251,6 +258,14 @@ struc PyFuncObject
                             ;      function: f.__dict__ stays empty until
                             ;      something else is assigned, and
                             ;      functools.wraps sets exactly these two.
+    ; +88: __annotations__.  MAKE_FUNCTION hands it over as a TUPLE of
+    ; alternating name and value, which is what the compiler builds and what
+    ; costs nothing when nobody asks; reading the attribute turns it into a
+    ; dict and stores that back, so the conversion happens once.  NULL means
+    ; the function was written without any, and reading it then makes an
+    ; empty dict -- which CPython also stores, since `f.__annotations__['x']
+    ; = int` has to stick.
+    .func_annotations: resq 1
 endstruc
 
 ; Code object
@@ -362,8 +377,14 @@ endstruc
 struc PyMemberDescrObject
     .ob_refcnt: resq 1  ; +0
     .ob_type:   resq 1  ; +8
-    .md_offset: resq 1  ; +16: byte offset in instance for slot payload
+    ; The byte offset of the slot within an instance.  NEGATIVE for a slot at
+    ; the instance's TAIL, which is where a str subclass's go; SLOT_ADDR is
+    ; the one place that knows.
+    .md_offset: resq 1  ; +16
     .md_name:   resq 1  ; +24: ptr to slot name (PyStrObject*, owned)
+    ; The class it was built for, borrowed -- the type owns the dict that
+    ; owns this.  Only the repr reads it: "<member 'x' of 'S' objects>".
+    .md_owner:  resq 1  ; +32
 endstruc
 
 ; Class instance object
@@ -458,6 +479,20 @@ struc PyCellObject
     .ob_ref:    resq 1    ; +16: contained Value (0 if empty)
 endstruc
 
+; super object (src/pyo/super.asm).  CPython's three fields, and the same
+; names for them: __thisclass__ is where the MRO search starts FROM, __self__
+; is the instance the result binds to, and __self_class__ is whose MRO is
+; searched.  The third is not redundant -- it is the whole point of super in a
+; diamond, where the class after B in type(self).__mro__ is a sibling of B and
+; not one of its bases at all.
+struc PySuperObject
+    .ob_refcnt:   resq 1  ; +0
+    .ob_type:     resq 1  ; +8
+    .su_type:     resq 1  ; +16: __thisclass__, owned
+    .su_obj:      resq 1  ; +24: __self__, owned, or 0 for super(B)
+    .su_obj_type: resq 1  ; +32: __self_class__, owned, or 0
+endstruc
+
 ; Bound method
 struc PyMethodObject
     .ob_refcnt: resq 1
@@ -505,12 +540,21 @@ struc PyGenObject
 endstruc
 
 ; File object (for sys.stdout, sys.stderr, sys.stdin)
+; The buffer is what makes a redirected stdout arrive in blocks rather than a
+; write per print(), which is CPython's behaviour and is observable: a program
+; writing to both streams through a pipe sees ALL of its print() output after
+; everything on stderr, because only one of the two is buffered.
+FILE_BUFSZ equ 8192
+
 struc PyFileObject
     .ob_refcnt:   resq 1  ; +0
     .ob_type:     resq 1  ; +8
     .file_fd:     resq 1  ; +16: OS file descriptor
     .file_name:   resq 1  ; +24: name string ('<stdout>' etc)
     .file_mode:   resq 1  ; +32: mode string ('w', 'r')
+    .file_buffered: resq 1 ; +40: 1 = accumulate; 0 = one write per call
+    .file_len:    resq 1  ; +48: bytes waiting in .file_buf
+    .file_buf:    resb FILE_BUFSZ  ; +56
 endstruc
 
 ; _io.FileIO.  The first three fields are PyInstanceObject's, because FileIO
@@ -583,6 +627,17 @@ struc AsyncTask
 endstruc
 
 ; Sleep awaitable object (for asyncio.sleep)
+; The awaitable _asynciocore.wait_fd() hands back: it yields the IO_WAIT
+; sentinel once, which suspends the running task on the descriptor, and is
+; exhausted after that.  The Python stream layer is built on it.
+struc IOWaitAwaitable
+    .ob_refcnt:  resq 1  ; +0
+    .ob_type:    resq 1  ; +8
+    .fd_events:  resq 1  ; +16: fd | (poll mask << 32), the sentinel payload
+    .yielded:    resd 1  ; +24: 0 = not yet, 1 = done
+    .pad:        resd 1  ; +28
+endstruc
+
 struc SleepAwaitable
     .ob_refcnt: resq 1  ; +0
     .ob_type:   resq 1  ; +8
@@ -634,22 +689,6 @@ struc WaitForAwaitable
     .gi_return_value: resq 1  ; +48: result Value (matches PyGenObject offset)
 endstruc
 
-; Async stream reader
-struc AsyncStreamReader
-    .ob_refcnt: resq 1  ; +0
-    .ob_type:   resq 1  ; +8
-    .fd:        resd 1  ; +16: socket file descriptor
-    .eof:       resd 1  ; +20: 1 = EOF reached
-endstruc
-
-; Async stream writer
-struc AsyncStreamWriter
-    .ob_refcnt: resq 1  ; +0
-    .ob_type:   resq 1  ; +8
-    .fd:        resd 1  ; +16: socket file descriptor
-    .closed:    resd 1  ; +20: 1 = closed
-endstruc
-
 ; ReadAwaitable — awaitable for stream.read(n)
 struc ReadAwaitable
     .ob_refcnt: resq 1  ; +0
@@ -677,22 +716,6 @@ struc DrainAwaitable
     .ob_type:   resq 1  ; +8
     .fd:        resd 1  ; +16: socket fd
     .yielded:   resd 1  ; +20: 0=not yet, 1=done
-endstruc
-
-; ConnectAwaitable — awaitable for open_connection
-struc ConnectAwaitable
-    .ob_refcnt: resq 1  ; +0
-    .ob_type:   resq 1  ; +8
-    .fd:        resd 1  ; +16: socket fd (already connected)
-    .yielded:   resd 1  ; +20: 0=not yet, 1=done
-endstruc
-
-; AcceptAwaitable — awaitable for start_server (non-blocking accept)
-struc AcceptAwaitable
-    .ob_refcnt:  resq 1  ; +0
-    .ob_type:    resq 1  ; +8
-    .listen_fd:  resd 1  ; +16: listening socket fd
-    .yielded:    resd 1  ; +20: 0=not yet, 1=done
 endstruc
 
 ; AsyncGenASend — wrapper returned by async_gen.__anext__()
@@ -760,6 +783,15 @@ struc PyTypeObject
     ; is gc_alloc'd and zero-filled, so a static table that predates this
     ; field cannot be misread.
     .tp_dictoffset:  resq 1  ; +208
+    ; How many __slots__ words live at the TAIL of an instance, past the data
+    ; and past the tail dict word.  Only a str subclass has any: it keeps its
+    ; characters inline, so there is no fixed offset past the header to lay a
+    ; slot at -- one put there writes over the string's own bytes.  The count
+    ; is cumulative, so a subclass's own slots start at its base's count, and
+    ; a member descriptor addresses one with a NEGATIVE md_offset.  Zero for
+    ; every other type, which is what a static table that predates the field
+    ; reads as.
+    .tp_tailslots:   resq 1  ; +216
 endstruc
 
 TYPE_OBJECT_SIZE equ PyTypeObject_size
@@ -1033,7 +1065,15 @@ struc PyFrame
                             ;      cannot carry it: non-zero there means the
                             ;      frame is SUSPENDED, and func_call reads it
                             ;      to decide whether to free the frame.
-    .localsplus:            ; +88: Value array (variable size)
+    .exc_state:     resq 1  ; +88: the exception this frame is HANDLING while
+                            ;      it is suspended, owned, or 0.  Only a
+                            ;      generator or coroutine ever has one: an
+                            ;      ordinary frame shares the caller's, which
+                            ;      is what handled_exception already holds,
+                            ;      and returns before anything else can run.
+                            ;      gen_send swaps it with the global around
+                            ;      each resume -- CPython's gi_exc_state.
+    .localsplus:            ; +96: Value array (variable size)
 endstruc
 
 FRAME_HEADER_SIZE equ PyFrame.localsplus
@@ -1157,6 +1197,13 @@ endstruc
 BUILTIN_KIND_FUNCTION equ 0
 BUILTIN_KIND_METHOD   equ 1
 BUILTIN_KIND_WRAPPER  equ 2
+; Wrapped in a classmethod or a staticmethod, so it belongs to the TYPE
+; rather than to an instance: int.from_bytes, float.fromhex, dict.fromkeys,
+; str.maketrans.  CPython's METH_CLASS and METH_STATIC both repr this way --
+; "<built-in method from_bytes of type object at 0x...>" -- and the receiver
+; check in builtin_func_call has to leave them alone, since what arrives is a
+; class or nothing at all rather than one of the owner's instances.
+BUILTIN_KIND_ON_TYPE equ 3
 
 ;; ============================================================================
 ;; The GC header, and the traverse helpers

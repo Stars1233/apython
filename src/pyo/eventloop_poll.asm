@@ -70,7 +70,7 @@ END_FUNC poll_init
 ;; ============================================================================
 POLL_FIRST_CAP equ 64
 
-DEF_FUNC_LOCAL poll_grow_timers
+DEF_FUNC_LOCAL poll_grow_timers, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov ebx, [rel timer_cap]
     cmp ebx, [rel timer_count]
@@ -316,7 +316,7 @@ END_FUNC poll_submit_poll_fd
 ;; poll_cancel_io(AsyncTask *task)
 ;; Remove task from poll arrays and timer heap.
 ;; ============================================================================
-DEF_FUNC poll_cancel_io
+DEF_FUNC poll_cancel_io, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi               ; task to cancel
 
@@ -414,7 +414,7 @@ END_FUNC poll_cancel_io
 ;; poll_wait_and_drain()
 ;; Compute min timeout from timer heap, call poll(), process results.
 ;; ============================================================================
-DEF_FUNC poll_wait_and_drain
+DEF_FUNC poll_wait_and_drain, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13

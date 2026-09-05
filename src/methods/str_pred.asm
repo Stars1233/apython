@@ -9,6 +9,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern obj_as_index
 %include "opcodes.inc"
 
 
@@ -429,7 +430,7 @@ PA_LEN    equ 16            ; length in bytes, for the copies
 PA_ARGS   equ 24
 PA_NARGS  equ 32
 PA_CPLEN  equ 40            ; length in code points, which is what a width means
-PA_FRAME  equ 48            ; + 3 pushes = 72, not 16-aligned
+PA_FRAME  equ 56            ; + 3 pushes = 80, 16-aligned
 DEF_FUNC str_method_center, PA_FRAME
     push rbx
     push r12
@@ -449,7 +450,8 @@ DEF_FUNC str_method_center, PA_FRAME
     mov rax, rdi
     mov rdi, [rax + 8]                 ; args[1] payload
     V_UNPACK rdi, rdx       ; args[1]
-    call int_to_i64
+    call obj_as_index       ; a width is an index, and may be any
+                            ; object with __index__ -- not only an int
     mov r13, rax                         ; r13 = width
 
     ; Get fillchar (default ' ')
@@ -552,7 +554,8 @@ DEF_FUNC str_method_ljust, PA_FRAME
     mov rax, [rbp - PA_ARGS]
     mov rdi, [rax + 8]
     V_UNPACK rdi, rdx       ; args[1]
-    call int_to_i64
+    call obj_as_index       ; a width is an index, and may be any
+                            ; object with __index__ -- not only an int
     mov r13, rax
 
     ; Get fillchar
@@ -643,7 +646,8 @@ DEF_FUNC str_method_rjust, PA_FRAME
     mov rax, [rbp - PA_ARGS]
     mov rdi, [rax + 8]
     V_UNPACK rdi, rdx       ; args[1]
-    call int_to_i64
+    call obj_as_index       ; a width is an index, and may be any
+                            ; object with __index__ -- not only an int
     mov r13, rax
 
     mov ecx, ' '
@@ -734,7 +738,8 @@ DEF_FUNC str_method_zfill, PA_FRAME
     mov rax, [rbp - PA_ARGS]
     mov rdi, [rax + 8]
     V_UNPACK rdi, rdx       ; args[1]
-    call int_to_i64
+    call obj_as_index       ; a width is an index, and may be any
+                            ; object with __index__ -- not only an int
     mov r13, rax                         ; width
 
     cmp r13, [rbp - PA_CPLEN]

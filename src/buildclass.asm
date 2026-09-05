@@ -28,6 +28,11 @@ extern build_class_pending
 extern current_exception
 extern eval_frame
 extern frame_new
+extern ap_malloc
+extern ap_free
+extern ap_memcpy
+extern str_new_heap
+extern str_type
 extern frame_free
 extern instance_dealloc
 extern instance_repr
@@ -92,11 +97,16 @@ DEF_FUNC type_method_new
     pop rdi
     mov rsi, [rbx + 16]
     mov rdx, [rbx + 24]
+    ; The metatype is whatever __new__ was handed, not the default, and it has
+    ; to be on the class before its descriptors' __set_name__ run -- which is
+    ; inside type_from_parts.
+    mov [rel class_metatype_pending], r12
     call type_from_parts
+    mov qword [rel class_metatype_pending], 0
     test rax, rax
     jz .tmn_failed                  ; a __set_name__ raised, and it is pending
 
-    ; The metatype is whatever __new__ was handed, not the default.
+    ; Stamped already unless type_from_parts bailed before reaching it.
     mov [rax + PyObject.ob_type], r12
     mov edx, TAG_PTR
     pop r12
@@ -267,6 +277,112 @@ DEF_FUNC type_apply_set_name, TSN_FRAME
 END_FUNC type_apply_set_name
 
 ;; ============================================================================
+;; type_mangle_name(rdi = the name, rsi = the class name) -> rax = an OWNED
+;;                  reference: a new string when it mangles, the argument with
+;;                  one more reference when it does not
+;;
+;; CPython's rule, and the same one comp_intern_name applies at compile time:
+;; two leading underscores, not two trailing ones, and the class name with its
+;; own leading underscores stripped -- an all-underscore class name mangles
+;; nothing.  Both have to agree, or a slot and the code that uses it name
+;; different things.
+;; ============================================================================
+TMN_NAME  equ 8
+TMN_CLS   equ 16
+TMN_BUF   equ 24
+TMN_LEN   equ 32
+TMN_FRAME equ 48                ; 32 used + 16 pad = 48, 16-aligned
+global type_mangle_name
+DEF_FUNC type_mangle_name, TMN_FRAME
+    push rbx
+    push r12
+    mov [rbp - TMN_NAME], rdi
+    mov [rbp - TMN_CLS], rsi
+
+    test rsi, rsi
+    jz .tmn_plain
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .tmn_plain
+    mov rax, [rdi + PyObject.ob_type]
+    cmp rax, rcx
+    jne .tmn_plain
+
+    mov rdx, [rdi + PyStrObject.ob_size]
+    cmp rdx, 2
+    jl .tmn_plain
+    cmp byte [rdi + PyStrObject.data], '_'
+    jne .tmn_plain
+    cmp byte [rdi + PyStrObject.data + 1], '_'
+    jne .tmn_plain
+    ; ...but not one that also ends in two underscores.
+    cmp rdx, 4
+    jl .tmn_mangle
+    cmp byte [rdi + PyStrObject.data + rdx - 1], '_'
+    jne .tmn_mangle
+    cmp byte [rdi + PyStrObject.data + rdx - 2], '_'
+    je .tmn_plain
+
+.tmn_mangle:
+    ; Strip the class name's own leading underscores.
+    mov rsi, [rbp - TMN_CLS]
+    lea rbx, [rsi + PyStrObject.data]
+    mov r12, [rsi + PyStrObject.ob_size]
+.tmn_strip:
+    test r12, r12
+    jz .tmn_plain               ; nothing but underscores: no mangling
+    cmp byte [rbx], '_'
+    jne .tmn_stripped
+    inc rbx
+    dec r12
+    jmp .tmn_strip
+.tmn_stripped:
+
+    ; "_" + the stripped class name + the name
+    mov rdi, [rbp - TMN_NAME]
+    mov rax, [rdi + PyStrObject.ob_size]
+    lea rdi, [rax + r12 + 2]
+    mov [rbp - TMN_LEN], rdi
+    call ap_malloc
+    test rax, rax
+    jz .tmn_plain
+    mov [rbp - TMN_BUF], rax
+    mov byte [rax], '_'
+    lea rdi, [rax + 1]
+    mov rsi, rbx
+    mov rdx, r12
+    call ap_memcpy
+    mov rdi, [rbp - TMN_BUF]
+    lea rdi, [rdi + r12 + 1]
+    mov rsi, [rbp - TMN_NAME]
+    mov rdx, [rsi + PyStrObject.ob_size]
+    lea rsi, [rsi + PyStrObject.data]
+    call ap_memcpy
+    mov rdi, [rbp - TMN_BUF]
+    mov rsi, [rbp - TMN_NAME]
+    mov rsi, [rsi + PyStrObject.ob_size]
+    lea rsi, [rsi + r12 + 1]
+    call str_new_heap           ; -> rax = PyStrObject*, refcount 1
+    push rax
+    mov rdi, [rbp - TMN_BUF]
+    call ap_free
+    pop rax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.tmn_plain:
+    mov rax, [rbp - TMN_NAME]
+    INCREF rax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC type_mangle_name
+
+;; ============================================================================
 ;; type_from_parts(rdi = name str, rsi = bases tuple or NULL, rdx = namespace dict)
 ;;   -> rax = the new type object, one strong reference
 ;;
@@ -289,6 +405,16 @@ global class_kwnames_pending
 class_kwnames_pending: dq 0
 global class_kwvalues_pending
 class_kwvalues_pending: dq 0
+
+; The metatype `type.__new__(mcls, ...)` was handed.  It used to be stamped on
+; the finished class by type_method_new, AFTER type_from_parts had already run
+; every descriptor's __set_name__ -- so a __set_name__ saw an owner whose type
+; was the default metatype, and `cls.__members__` inside one was an
+; AttributeError.  enum.py is written exactly that way, so fourteen stdlib
+; modules stopped there.  Set around the call and cleared by it, the same
+; convention class_kwnames_pending uses.
+global class_metatype_pending
+class_metatype_pending: dq 0
 
 section .text
 
@@ -344,12 +470,14 @@ DEF_FUNC type_from_parts
     push r13
     push r14
     push r15
-    sub rsp, 40             ; the epilogue's `add rsp` must match this
+    sub rsp, 56             ; the epilogue's `add rsp` must match this
 
 TFP_BASE  equ 48            ; the layout base: the widest of the bases
 TFP_BASES equ 56            ; the bases tuple, or NULL
 TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
 TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
+TFP_SLOT1 equ 80            ; a one-tuple built for `__slots__ = 'name'`, owned
+TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov r14, rdi                ; class name str
     mov r15, rdx                ; namespace dict, becomes tp_dict
     mov [rbp - TFP_BASES], rsi
@@ -467,16 +595,18 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
 .tfp_layout_conflict:
     RAISE exc_TypeError_type, "multiple bases have instance lay-out conflict"
 .tfp_layout_ok:
-    ; A subtype of int, str, bytes or tuple cannot carry slots.  int wraps its
-    ; value rather than embedding it and the other three keep their data
+    ; A subtype of int, bytes or tuple cannot carry slots.  int wraps its
+    ; value rather than embedding it and the other two keep their data
     ; inline, so a slot laid out at the base's basicsize lands inside that
     ; data or past the allocation entirely -- `class N(int): __slots__ =
-    ; ('tag',)` put the member at offset 48 of a 32-byte object, and a str
-    ; subclass wrote its slot over its own characters.  Both were a SIGSEGV.
+    ; ('tag',)` put the member at offset 48 of a 32-byte object, and a bytes
+    ; subclass would write its slot over its own bytes.  Both are a SIGSEGV,
+    ; and CPython refuses all three with this wording.
     ;
-    ; CPython refuses int, bytes and tuple with this wording and accepts str,
-    ; whose subtype layout is not ours; refusing str too is a divergence, and
-    ; it is in bugs.md.
+    ; str is the one CPython accepts, and it is accepted here now: its slots
+    ; go at the TAIL of the instance, past the characters and past the dict
+    ; word, which is the same place its __dict__ already lives.  See
+    ; tp_tailslots.
     mov rdi, [rbp - TFP_BASE]
     test rdi, rdi
     jz .tfp_slots_ok
@@ -490,9 +620,6 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     cmp r13, rcx
     je .tfp_slots_check
     extern str_type
-    lea rcx, [rel str_type]
-    cmp r13, rcx
-    je .tfp_slots_check
     lea rcx, [rel tuple_type]
     cmp r13, rcx
     jne .tfp_slots_ok
@@ -562,6 +689,12 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     mov rax, [rbp - TFP_BASE]               ; base class
     test rax, rax
     jz .bc_layout_done
+    ; Tail slots are inherited whether or not this class declares any of its
+    ; own: they are part of the instance's size, and a subclass that reserved
+    ; none of them would allocate short and let its base's slots write past
+    ; the end.  The __slots__ code below adds to this.
+    mov rcx, [rax + PyTypeObject.tp_tailslots]
+    mov [r12 + PyTypeObject.tp_tailslots], rcx
     ; If the base already has a dict slot -- another heaptype, or an int
     ; subclass -- share it rather than adding a second one, which would
     ; collide with whatever the base put there.
@@ -764,6 +897,7 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
 
     ; === Parse __slots__ from class_dict ===
     ; r12=type, r15=class_dict, [rbp - TFP_BASE]=base_class
+    mov qword [rbp - TFP_SLOT1], 0
     lea rdi, [rel bc_slots_name]
     call str_from_cstr_heap
     push rax                        ; save __slots__ str
@@ -780,7 +914,7 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     test edx, edx
     jz .bc_no_slots
 
-    ; Must be TAG_PTR and a tuple or list
+    ; Must be TAG_PTR and a tuple, a list, or a single string
     cmp edx, TAG_PTR
     jne .bc_no_slots
     extern tuple_type
@@ -791,7 +925,27 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     je .bc_slots_tuple
     lea rdx, [rel list_type]
     cmp rcx, rdx
+    je .bc_slots_tuple
+    ; `__slots__ = 'name'` declares exactly one, and is the form a class with
+    ; a single slot is usually written with.  Wrap it, so the loop below sees
+    ; one shape; the wrapper is released at .bc_no_slots, which every exit
+    ; from the slot code passes through.
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
     jne .bc_no_slots
+    push rax
+    mov edi, 1
+    call tuple_new
+    pop rcx
+    test rax, rax
+    jz .bc_no_slots
+    mov [rbp - TFP_SLOT1], rax
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov [rdx], rcx
+    push rax
+    mov rdi, rcx
+    call obj_incref
+    pop rax
 
     ; rax = slots list — get size and item pointers (same layout as tuple for ob_size/ob_item)
 .bc_slots_tuple:
@@ -810,7 +964,46 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     call bc_drop_dict_word
     jmp .bc_no_slots
 .bc_have_slots:
+    mov qword [rbp - TFP_TAIL], 0
 
+    ; A str subclass keeps its characters inline, so there is no fixed offset
+    ; past the header to lay a slot at: one put there writes over the string's
+    ; own bytes, which is why this used to be refused outright.  Its slots go
+    ; at the TAIL instead, past the data and past the word the tail __dict__
+    ; occupies, and a member descriptor addresses one with a negative offset.
+    ; tp_tailslots counts them cumulatively, so a subclass's own start where
+    ; its base's stop.
+    mov rax, [rbp - TFP_BASE]
+    test rax, rax
+    jz .bc_slots_not_tail
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .bc_slots_not_tail
+    mov qword [rbp - TFP_TAIL], 1
+    ; __slots__ suppresses the dict only when no base already provides one,
+    ; exactly as for an ordinary class: `class V(U)` where U is a plain str
+    ; subclass keeps U's tail dict and must still take arbitrary attributes.
+    ; The tail word is reserved either way, so the slot indices past it do
+    ; not depend on which case this is.
+    push rax
+    call bc_base_has_dict
+    pop rcx
+    test eax, eax
+    jnz .bc_tail_keep_dict
+    or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+    mov qword [r12 + PyTypeObject.tp_dictoffset], 0
+.bc_tail_keep_dict:
+    mov rax, rcx
+    mov rdi, [rax + PyTypeObject.tp_tailslots]
+    mov rcx, rdi
+    add rcx, r13
+    mov [r12 + PyTypeObject.tp_tailslots], rcx
+    ; The loop below wants a base to count from; here it is -(1 + inherited),
+    ; and each slot is one LOWER, because the offsets run negative.
+    neg rdi
+    dec rdi
+    jmp .bc_have_basic
+
+.bc_slots_not_tail:
     ; Where the slots start.  A class that declares __slots__ and inherits no
     ; dict has none of its own, so the dict word comes out of the layout and
     ; the slots take its place -- which is the layout CPython has, and eight
@@ -825,16 +1018,17 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
     call bc_drop_dict_word
     mov rdi, [r12 + PyTypeObject.tp_basicsize]
-    jmp .bc_have_basic
+    jmp .bc_slots_bump
 .bc_slots_share_dict:
     mov rdi, [r12 + PyTypeObject.tp_basicsize]
-.bc_have_basic:
+.bc_slots_bump:
     ; rdi = base_basicsize
     ; Set tp_basicsize = base_basicsize + nslots * 8 (one Value per slot)
     mov rax, r13
     shl rax, 3                      ; nslots * 8
     add rax, rdi                    ; + base_basicsize
     mov [r12 + PyTypeObject.tp_basicsize], rax
+.bc_have_basic:
 
     ; TYPE_FLAG_HAS_SLOTS says "this class has NO instance dict", and it is
     ; set above, before the layout is decided, because it is what decides it.
@@ -860,28 +1054,54 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     cmp r8d, TAG_PTR
     jne .bc_slot_skip               ; skip non-string slots
 
-    ; Compute offset = base_basicsize + i * 8
+    ; Compute the descriptor's offset: base_basicsize + i*8 for an ordinary
+    ; class, and -(1 + inherited) - i for a str subclass, whose slots are at
+    ; the tail and are addressed by a negative offset.
+    cmp qword [rbp - TFP_TAIL], 0
+    jne .bc_slot_tail_off
     mov rdi, [rsp + 8]             ; base_basicsize
     mov rax, [rsp]                 ; i
     shl rax, 3
     add rdi, rax                   ; offset
+    jmp .bc_slot_have_off
+.bc_slot_tail_off:
+    mov rdi, [rsp + 8]             ; -(1 + inherited tail slots)
+    sub rdi, [rsp]                 ; ... one lower per slot
+.bc_slot_have_off:
 
-    ; Create descriptor: member_descr_new(offset, name_str)
+    ; A private slot name is mangled, exactly as a private name written in the
+    ; class body is.  CPython's type_new does it here, leaving __slots__
+    ; itself as the tuple the class wrote; skipping it meant the descriptor
+    ; was `__x` where every use of it compiles to `_C__x`, so
+    ; `__slots__ = ('__x',)` and `self.__x = 5` never met.  The dict key is
+    ; the load-bearing half -- attribute lookup finds a descriptor by key --
+    ; and md_name is mangled with it so __set_name__ and the repr agree.
+    push rdi                       ; the offset, across the call
+    mov rdi, rcx                   ; the name as written
+    mov rsi, r14                   ; the class name
+    call type_mangle_name          ; -> rax, owned
+    mov rcx, rax
+    pop rdi                        ; the offset
+
+    ; Create descriptor: member_descr_new(offset, name_str, owner)
     mov rsi, rcx                   ; name string
-    push rcx                       ; save name for dict_set
+    push rcx                       ; the name: the dict key, then ours to drop
     INCREF rsi                     ; descriptor takes ownership
+    mov rdx, r12                   ; the class, for the repr
     extern member_descr_new
     call member_descr_new          ; rax = new descriptor
 
     ; Add to class_dict: dict_set(dict, name, descriptor, TAG_PTR, TAG_PTR)
     mov rdi, r15                   ; class_dict
-    pop rsi                        ; name (key)
+    mov rsi, [rsp]                 ; name (key)
     mov rdx, rax                   ; descriptor (value)
     push rax                       ; save descriptor for DECREF
     call dict_set
 
     ; DECREF our ref on descriptor (dict now owns one via INCREF in dict_set)
     pop rdi
+    call obj_decref
+    pop rdi                        ; and on the name, which dict_set copied
     call obj_decref
 
 .bc_slot_skip:
@@ -893,6 +1113,14 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     pop rdi                        ; clean base_basicsize
 
 .bc_no_slots:
+    ; The wrapper built for a single-string __slots__, if there was one.  The
+    ; descriptors hold their own references to the name.
+    mov rdi, [rbp - TFP_SLOT1]
+    test rdi, rdi
+    jz .bc_slot1_done
+    mov qword [rbp - TFP_SLOT1], 0
+    call obj_decref
+.bc_slot1_done:
 
     ; Look up "__init__" in class_dict for tp_init
     lea rdi, [rel bc_init_name]
@@ -1015,6 +1243,35 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     ; And say so in a bit, so that "is this object a class?" is one test
     ; rather than a comparison against the two metatypes we happen to ship.
     or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    ; `C | None` for a class C is the METATYPE's nb_or, so a metaclass of a
+    ; user's own has to carry type's numeric slots -- without them, only
+    ; classes made by the two metatypes this tree ships could form a union.
+    extern type_number_methods
+    lea rax, [rel type_number_methods]
+    mov [r12 + PyTypeObject.tp_as_number], rax
+    ; A metatype's INSTANCES are classes, so releasing one has to unregister
+    ; it from its bases and free a type's fields -- not walk it as an ordinary
+    ; instance.  The dealloc used is the object's TYPE's, and a class built by
+    ; a metaclass of the user's own has that metaclass as its type, so the
+    ; generic heaptype dealloc freed a class the wrong way: the block went
+    ; back to the allocator with the GC's list and the base's subclass list
+    ; still pointing into it.
+    ;
+    ; And walked and cleared as one too, or the collector cannot break the
+    ; cycle a class makes with its own MRO tuple -- which is the only thing
+    ; that ever frees one, since the tuple's first element is the class.  The
+    ; generic heaptype traverse reports none of a type's four references, so
+    ; such a class simply accumulated, in memory and in its bases'
+    ; __subclasses__().
+    extern user_type_dealloc
+    extern type_traverse
+    extern type_clear
+    lea rax, [rel user_type_dealloc]
+    mov [r12 + PyTypeObject.tp_dealloc], rax
+    lea rax, [rel type_traverse]
+    mov [r12 + PyTypeObject.tp_traverse], rax
+    lea rax, [rel type_clear]
+    mov [r12 + PyTypeObject.tp_clear], rax
 .bc_not_metatype:
 
     ; If base is an exception type, inherit exception-compatible methods
@@ -1267,6 +1524,16 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     mov rdi, r12
     call subclass_register
 
+    ; The metatype, if type.__new__ was handed one, BEFORE __set_name__ runs:
+    ; a descriptor is entitled to read an attribute the metaclass supplies off
+    ; the owner it is given.
+    mov rax, [rel class_metatype_pending]
+    test rax, rax
+    jz .tfp_default_metatype
+    mov [r12 + PyObject.ob_type], rax
+    mov qword [rel class_metatype_pending], 0
+.tfp_default_metatype:
+
     ; Now that the class exists, tell every descriptor in it what it is called.
     mov rdi, r12
     mov rsi, r15
@@ -1278,7 +1545,7 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     mov qword [rel build_class_pending], 0
     mov rax, r12
 
-    add rsp, 40                 ; must match the sub in the prologue
+    add rsp, 56                 ; must match the sub in the prologue
     pop r15
     pop r14
     pop r13
@@ -1294,7 +1561,7 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
     mov rdi, r12
     call obj_decref
     xor eax, eax
-    add rsp, 40                 ; must match the sub in the prologue
+    add rsp, 56                 ; must match the sub in the prologue
     pop r15
     pop r14
     pop r13
@@ -1521,7 +1788,7 @@ END_FUNC type_apply_hash_rule
 TWI_TYPE  equ 8
 TWI_DICT  equ 16
 TWI_KEY   equ 24
-TWI_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+TWI_FRAME equ 40            ; + 1 push = 48, 16-aligned
 DEF_FUNC_LOCAL type_wrap_implicit_classmethods, TWI_FRAME
     push rbx
     mov [rbp - TWI_TYPE], rdi
@@ -1957,7 +2224,7 @@ DEF_FUNC_BARE bc_normalize_metatype
     ret
 END_FUNC bc_normalize_metatype
 
-DEF_FUNC builtin___build_class__
+DEF_FUNC builtin___build_class__, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -2028,34 +2295,39 @@ BCL_OKWV  equ 72
 .bc_base_copy:
     lea rcx, [r9 + 2]
     cmp rcx, rsi
-    jge .bc_no_base
+    jge .bc_bases_written
     mov rdx, [rbx + rcx*8]
-    ; A base must be a class.  `class C(1)` used to store and INCREF the
-    ; integer, and mro_compute then walked tp_base off it.
-    push rsi
-    push r8
-    push r9
-    push rdx
-    mov rdi, rdx
-    extern type_check_is_class
-    call type_check_is_class
-    pop rdx
-    pop r9
-    pop r8
-    pop rsi
-    test eax, eax
-    jz .build_class_base_error
     mov [r8 + r9*8], rdx
     push rsi
     push r8
     push r9
-    mov rdi, rdx
-    call obj_incref
+    INCREF_V rdx, rcx
     pop r9
     pop r8
     pop rsi
     inc r9
     jmp .bc_base_copy
+
+.bc_bases_written:
+    ; PEP 560 runs over the bases AS WRITTEN.  `__mro_entries__` is handed the
+    ; whole original tuple -- typing's NamedTuple asserts it can find itself
+    ; in there -- so the tuple has to be complete before any of them is
+    ; replaced, which is why this is a second pass and not part of the copy.
+    mov rdi, [rbp - BCL_BASES]
+    call bc_resolve_bases
+    test rax, rax
+    jz .bc_bases_failed
+    mov rcx, [rbp - BCL_BASES]
+    mov [rbp - BCL_BASES], rax
+    mov rdi, rcx
+    call obj_decref
+    jmp .bc_no_base
+
+.bc_bases_failed:
+    mov rdi, [rbp - BCL_BASES]
+    mov qword [rbp - BCL_BASES], 0
+    call obj_decref
+    jmp .build_class_base_error
 
 .bc_no_base:
 
@@ -2376,6 +2648,226 @@ BCL_OKWV  equ 72
 .build_class_base_error:
     RAISE exc_TypeError_type, "bases must be types"
 END_FUNC builtin___build_class__
+
+;; ============================================================================
+;; bc_resolve_bases(rdi = the bases as written) -> rax = the bases to use
+;;
+;; CPython's update_bases.  Every base that is already a class stands for
+;; itself; anything else is asked what it stands for, and is handed the
+;; ORIGINAL tuple -- unchanged, however many replacements have happened
+;; already -- because that is what the answer may be computed from.
+;;
+;; Returns an owned reference: the original tuple, increfed, when nothing
+;; needed replacing, or a fresh one.  0 with no exception means some base is
+;; neither a class nor able to name one, which the caller reports.
+;; ============================================================================
+BRB_ORIG equ 8
+BRB_OUT  equ 16
+BRB_N    equ 24
+BRB_FRAME equ 32            ; + 2 pushes = 48, 16-aligned
+DEF_FUNC_LOCAL bc_resolve_bases, BRB_FRAME
+    push rbx
+    push r12
+    mov [rbp - BRB_ORIG], rdi
+    mov rax, [rdi + PyTupleObject.ob_size]
+    mov [rbp - BRB_N], rax
+    mov qword [rbp - BRB_OUT], 0
+
+    ; A first pass that only asks: is any of them not a class?  The common
+    ; case allocates nothing.
+    xor ebx, ebx
+.brb_scan:
+    cmp rbx, [rbp - BRB_N]
+    jge .brb_all_classes
+    mov rax, [rbp - BRB_ORIG]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rdi, [rax + rbx*8]
+    call type_check_is_class
+    test eax, eax
+    jz .brb_needs_work
+    inc rbx
+    jmp .brb_scan
+
+.brb_all_classes:
+    mov rax, [rbp - BRB_ORIG]
+    mov rdi, rax
+    push rax
+    call obj_incref
+    pop rax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.brb_needs_work:
+    mov rdi, [rbp - BRB_N]
+    call tuple_new
+    test rax, rax
+    jz .brb_fail
+    mov [rbp - BRB_OUT], rax
+    xor rbx, rbx
+.brb_fill:
+    cmp rbx, [rbp - BRB_N]
+    jge .brb_done
+    mov rax, [rbp - BRB_ORIG]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov r12, [rax + rbx*8]
+    mov rdi, r12
+    call type_check_is_class
+    test eax, eax
+    jz .brb_ask
+    mov rdi, r12
+    call obj_incref
+    mov rax, [rbp - BRB_OUT]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov [rax + rbx*8], r12
+    inc rbx
+    jmp .brb_fill
+.brb_ask:
+    mov rdi, r12
+    mov rsi, [rbp - BRB_ORIG]
+    call bc_mro_entry
+    test rax, rax
+    jz .brb_fail_out
+    mov rcx, [rbp - BRB_OUT]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx + rbx*8], rax      ; bc_mro_entry hands over its reference
+    inc rbx
+    jmp .brb_fill
+
+.brb_done:
+    mov rax, [rbp - BRB_OUT]
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.brb_fail_out:
+    mov rdi, [rbp - BRB_OUT]
+    call obj_decref
+.brb_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC bc_resolve_bases
+
+;; ============================================================================
+;; bc_mro_entry(rdi = a base that is not a class, rsi = the bases tuple)
+;;   -> rax = the single class it stands for, owned, or 0
+;;
+;; PEP 560's __mro_entries__.  `class C[T]` compiles to a base of Generic[T],
+;; which is not a type; the object answers a one-element tuple naming the
+;; class that should stand in its place.  A longer answer is refused rather
+;; than mis-spliced: the tuple this fills was sized before the call, and
+;; nothing in this tree or in typing returns more than one.
+;; ============================================================================
+BME_BASES equ 8
+BME_RES   equ 16
+BME_ARG   equ 24
+BME_FRAME equ 32            ; + 1 push = 40... one word more to land right
+DEF_FUNC_LOCAL bc_mro_entry, 40             ; + 1 push = 48, 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov [rbp - BME_BASES], rsi
+
+    V_TEST_PTR rbx, rax
+    ja .bme_no
+    test rbx, rbx
+    jz .bme_no
+
+    CSTRING rdi, "__mro_entries__"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    test rax, rax
+    jz .bme_no
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    pop rdi
+    push rax
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .bme_clear_and_no
+    mov [rbp - BME_RES], rax
+
+    mov rax, [rbp - BME_BASES]
+    mov [rbp - BME_ARG], rax
+    mov rdi, [rbp - BME_RES]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz .bme_release
+    lea rsi, [rbp - BME_ARG]
+    mov edx, 1
+    call rax
+    push rax
+    mov rdi, [rbp - BME_RES]
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .bme_no
+
+    ; A tuple of exactly one class, and nothing else.
+    mov rbx, rax
+    V_TEST_PTR rbx, rax
+    ja .bme_drop
+    lea rcx, [rel tuple_type]
+    cmp [rbx + PyObject.ob_type], rcx
+    jne .bme_drop
+    cmp qword [rbx + PyTupleObject.ob_size], 1
+    jne .bme_drop
+    mov rax, [rbx + PyTupleObject.ob_item]
+    mov rax, [rax]
+    push rax
+    mov rdi, rax
+    call obj_incref
+    mov rdi, rbx
+    call obj_decref
+    pop rax
+    push rax
+    mov rdi, rax
+    call type_check_is_class
+    pop rdx
+    test eax, eax
+    jz .bme_drop_one
+    mov rax, rdx
+    pop rbx
+    leave
+    ret
+
+.bme_drop_one:
+    mov rdi, rdx
+    call obj_decref
+    jmp .bme_no
+.bme_drop:
+    mov rdi, rbx
+    call obj_decref
+    jmp .bme_no
+.bme_release:
+    mov rdi, [rbp - BME_RES]
+    call obj_decref
+    jmp .bme_no
+.bme_clear_and_no:
+    ; A missing attribute is not an error here: the caller reports "bases must
+    ; be types", which is what CPython says for an object that has no
+    ; __mro_entries__ either.
+    extern current_exception
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .bme_no
+    mov qword [rel current_exception], 0
+    call obj_decref
+.bme_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC bc_mro_entry
 section .rodata
 bc_prepare_name: db "__prepare__", 0
 tsn_name: db "__set_name__", 0

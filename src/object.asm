@@ -29,9 +29,11 @@ extern type_setattr
 extern type_call
 
 
-; obj_incref(PyObject *obj)
-; Increment reference count; NULL-safe.
-; Callers must only pass heap pointers (not SmallInts).
+;; ============================================================================
+;; obj_incref(PyObject *obj)
+;; Increment reference count; NULL-safe.
+;; Callers must only pass heap pointers (not SmallInts).
+;; ============================================================================
 DEF_FUNC_BARE obj_incref
     test rdi, rdi
     jz .skip
@@ -40,9 +42,11 @@ DEF_FUNC_BARE obj_incref
     ret
 END_FUNC obj_incref
 
-; obj_decref(PyObject *obj)
-; Decrement reference count; deallocate if zero; NULL-safe.
-; Callers must only pass heap pointers (not SmallInts).
+;; ============================================================================
+;; obj_decref(PyObject *obj)
+;; Decrement reference count; deallocate if zero; NULL-safe.
+;; Callers must only pass heap pointers (not SmallInts).
+;; ============================================================================
 DEF_FUNC_BARE obj_decref
     test rdi, rdi
     jz .skip
@@ -77,8 +81,10 @@ trash_later:   resq 1
 
 section .text
 
-; obj_dealloc(PyObject *obj)
-; Calls type's tp_dealloc if present, else just frees
+;; ============================================================================
+;; obj_dealloc(PyObject *obj)
+;; Calls type's tp_dealloc if present, else just frees
+;; ============================================================================
 DEF_FUNC_BARE obj_dealloc
 
     push rbp
@@ -174,8 +180,10 @@ DEF_FUNC_BARE obj_dealloc
     ret
 END_FUNC obj_dealloc
 
-; obj_repr(rdi=value) -> PyObject* (string)
-; Decodes the Value, then dispatches: int immediate → int_repr, pointer → tp_repr.
+;; ============================================================================
+;; obj_repr(rdi=value) -> PyObject* (string)
+;; Decodes the Value, then dispatches: int immediate → int_repr, pointer → tp_repr.
+;; ============================================================================
 DEF_FUNC obj_repr
     V_UNPACK rdi, rsi
 
@@ -261,13 +269,15 @@ DEF_FUNC obj_repr
     ret
 END_FUNC obj_repr
 
-; obj_default_repr(rdi = a PyTypeObject*, rsi = the object)
-;   -> rax = PyStrObject* "<name object at 0x...>"
-;
-; The repr a type with no tp_repr gets, and object.__repr__'s own answer.  Its
-; own function because the instance repr wants the same shape, and because
-; rbt_buf is shared with the TypeError composer -- neither can be live across
-; the other.
+;; ============================================================================
+;; obj_default_repr(rdi = a PyTypeObject*, rsi = the object)
+;; -> rax = PyStrObject* "<name object at 0x...>"
+;;
+;; The repr a type with no tp_repr gets, and object.__repr__'s own answer.  Its
+;; own function because the instance repr wants the same shape, and because
+;; rbt_buf is shared with the TypeError composer -- neither can be live across
+;; the other.
+;; ============================================================================
 global obj_default_repr
 DEF_FUNC obj_default_repr
     push rbx
@@ -298,13 +308,15 @@ DEF_FUNC obj_default_repr
     ret
 END_FUNC obj_default_repr
 
-; obj_default_repr_named(rdi = the object, rsi = a module cstr or 0,
-;                        rdx = the type's name cstr)
-;   -> rax = PyStrObject* "<module.name object at 0x...>"
-;
-; What object.__repr__ answers for a class defined in Python.  CPython leaves
-; the module out when it is "builtins", which is the same rule that makes
-; `repr(iter({1}))` say "set_iterator" and not "builtins.set_iterator".
+;; ============================================================================
+;; obj_default_repr_named(rdi = the object, rsi = a module cstr or 0,
+;; rdx = the type's name cstr)
+;; -> rax = PyStrObject* "<module.name object at 0x...>"
+;;
+;; What object.__repr__ answers for a class defined in Python.  CPython leaves
+;; the module out when it is "builtins", which is the same rule that makes
+;; `repr(iter({1}))` say "set_iterator" and not "builtins.set_iterator".
+;; ============================================================================
 global obj_default_repr_named
 ODN_OBJ  equ 8
 ODN_MOD  equ 16
@@ -342,11 +354,13 @@ DEF_FUNC obj_default_repr_named, ODN_FRAME
     ret
 END_FUNC obj_default_repr_named
 
-; obj_repr_named_at(rdi = the object, rsi = a prefix cstr, rdx = a name cstr
-;                   or 0) -> rax = PyStrObject* "<prefix name at 0x...>"
-;
-; The shape a function, a generator, a coroutine and an async generator all
-; have.  With no name it is just "<prefix at 0x...>".
+;; ============================================================================
+;; obj_repr_named_at(rdi = the object, rsi = a prefix cstr, rdx = a name cstr
+;; or 0) -> rax = PyStrObject* "<prefix name at 0x...>"
+;;
+;; The shape a function, a generator, a coroutine and an async generator all
+;; have.  With no name it is just "<prefix at 0x...>".
+;; ============================================================================
 global obj_repr_named_at
 ORN_OBJ  equ 8
 ORN_NAME equ 16
@@ -381,10 +395,12 @@ DEF_FUNC obj_repr_named_at, ORN_FRAME
     ret
 END_FUNC obj_repr_named_at
 
-; obj_repr_buf(rdi = the first cstr) -> rax = a cursor into the shared repr
-; buffer, with that string already in it.  Append with rbt_append_cstr and
-; finish with obj_repr_buf_str; the buffer is shared with the TypeError
-; composer, so nothing may be live across the two.
+;; ============================================================================
+;; obj_repr_buf(rdi = the first cstr) -> rax = a cursor into the shared repr
+;; buffer, with that string already in it.  Append with rbt_append_cstr and
+;; finish with obj_repr_buf_str; the buffer is shared with the TypeError
+;; composer, so nothing may be live across the two.
+;; ============================================================================
 global obj_repr_buf
 DEF_FUNC obj_repr_buf
     mov rsi, rdi
@@ -394,7 +410,9 @@ DEF_FUNC obj_repr_buf
     ret
 END_FUNC obj_repr_buf
 
-; obj_repr_buf_str() -> rax = the buffer as a str
+;; ============================================================================
+;; obj_repr_buf_str() -> rax = the buffer as a str
+;; ============================================================================
 global obj_repr_buf_str
 DEF_FUNC obj_repr_buf_str
     lea rdi, [rel rbt_buf]
@@ -403,11 +421,13 @@ DEF_FUNC obj_repr_buf_str
     ret
 END_FUNC obj_repr_buf_str
 
-; obj_repr_address(rdi = cursor into rbt_buf, rsi = the object)
-;   -> rax = the new cursor, having written " at 0xADDR>"
-;
-; CPython formats the address with %p, which on glibc is "0x" and lowercase
-; hex with no leading zeroes.  Every default repr in the tree ends this way.
+;; ============================================================================
+;; obj_repr_address(rdi = cursor into rbt_buf, rsi = the object)
+;; -> rax = the new cursor, having written " at 0xADDR>"
+;;
+;; CPython formats the address with %p, which on glibc is "0x" and lowercase
+;; hex with no leading zeroes.  Every default repr in the tree ends this way.
+;; ============================================================================
 global obj_repr_address
 DEF_FUNC obj_repr_address
     push rbx
@@ -452,9 +472,11 @@ DEF_FUNC obj_repr_address
     ret
 END_FUNC obj_repr_address
 
-; obj_str(rdi=value) -> PyObject* (string)
-; Decodes the Value, then dispatches: int immediate → int_repr, pointer → tp_str
-; falling back to tp_repr.
+;; ============================================================================
+;; obj_str(rdi=value) -> PyObject* (string)
+;; Decodes the Value, then dispatches: int immediate → int_repr, pointer → tp_str
+;; falling back to tp_repr.
+;; ============================================================================
 DEF_FUNC obj_str
     V_UNPACK rdi, rsi
     push rbx
@@ -541,18 +563,52 @@ DEF_FUNC obj_str
     leave
     ret
 END_FUNC obj_str
+;; ============================================================================
+;; obj_as_slice_index(rdi = payload, edx = tag) -> rax = the i64, or does not
+;; return
+;;
+;; obj_as_index with CPython's other wording.  The start and stop of
+;; list.index and tuple.index are slice bounds, and CPython blames them as
+;; such -- "slice indices must be integers or have an __index__ method" --
+;; where a tabsize or a repetition count gets "'str' object cannot be
+;; interpreted as an integer".  The acceptance test is the same one
+;; obj_as_index applies; only the refusal differs, so this decides and hands
+;; over.
+;; ============================================================================
+global obj_as_slice_index
+DEF_FUNC obj_as_slice_index
+    cmp edx, TAG_SMALLINT
+    je .oasi_ok
+    cmp edx, TAG_PTR
+    jne .oasi_bad
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_number]
+    test rax, rax
+    jz .oasi_bad
+    cmp qword [rax + PyNumberMethods.nb_index], 0
+    je .oasi_bad
+.oasi_ok:
+    leave
+    jmp obj_as_index
+.oasi_bad:
+    RAISE exc_TypeError_type, \
+        "slice indices must be integers or have an __index__ method"
+END_FUNC obj_as_slice_index
 
-; obj_as_index(rdi = payload, edx = tag) -> rax = int64
-;
-; Convert a Value to a C index, or raise TypeError.  Callers used to hand
-; whatever they were given straight to int_to_i64, which reads
-; PyIntObject.compact unconditionally: a float's payload is raw IEEE bits, so
-; range(1.5) dereferenced 0x3ff8000000000000, and None's fields decoded as a
-; garbage length, so range(None) hung.
-;
-; Takes the same (payload, tag) pair as int_to_i64 so a call site changes by
-; one word.  This is where the __index__ protocol belongs once heaptypes
-; carry real slots.
+
+;; ============================================================================
+;; obj_as_index(rdi = payload, edx = tag) -> rax = int64
+;;
+;; Convert a Value to a C index, or raise TypeError.  Callers used to hand
+;; whatever they were given straight to int_to_i64, which reads
+;; PyIntObject.compact unconditionally: a float's payload is raw IEEE bits, so
+;; range(1.5) dereferenced 0x3ff8000000000000, and None's fields decoded as a
+;; garbage length, so range(None) hung.
+;;
+;; Takes the same (payload, tag) pair as int_to_i64 so a call site changes by
+;; one word.  This is where the __index__ protocol belongs once heaptypes
+;; carry real slots.
+;; ============================================================================
 DEF_FUNC obj_as_index
     cmp edx, TAG_SMALLINT
     je .oai_immediate
@@ -815,17 +871,24 @@ END_FUNC raise_wrapper_arity
 
 ;; ============================================================================
 ;; raise_builtin_arity(rdi = the PyBuiltinObject, rsi = the count given,
-;;                     rdx = the count wanted) -- neither counts self
+;;                     rdx = the count wanted, ecx = 0 too few / 1 too many)
+;;                     -- neither count includes self; does not return
 ;;
 ;; CPython's shapes, which differ by whether the method takes a fixed number:
 ;;   list.append() takes exactly one argument (2 given)
 ;;   str.upper() takes no arguments (1 given)
 ;;   hex() takes at most 2 arguments (3 given)
+;;   endswith() takes at least 1 argument (0 given)
 ;;   expected 0 arguments, got 1            <- a slot wrapper
+;;
+;; A method with a range says "at most" when it was given too many and "at
+;; least" when too few; reading the direction off min != max alone reported
+;; "at most 1 arguments (0 given)", which is both wrong and self-contradictory.
 ;; ============================================================================
 RBA_DESC  equ 8
 RBA_GOT   equ 16
 RBA_WANT  equ 24
+RBA_OVER  equ 32            ; 1 = too many, 0 = too few
 RBA_BUF   equ 240
 RBA_FRAME equ 240           ; + 0 pushes = 240, 16-aligned
 global raise_builtin_arity
@@ -833,6 +896,7 @@ DEF_FUNC raise_builtin_arity, RBA_FRAME
     mov [rbp - RBA_DESC], rdi
     mov [rbp - RBA_GOT], rsi
     mov [rbp - RBA_WANT], rdx
+    mov [rbp - RBA_OVER], rcx
 
     ; A slot wrapper has its own wording, and never names itself.
     cmp qword [rdi + PyBuiltinObject.func_kind], BUILTIN_KIND_WRAPPER
@@ -884,13 +948,22 @@ DEF_FUNC raise_builtin_arity, RBA_FRAME
     CSTRING rsi, "() takes no arguments ("
     jmp .rba_tail
 .rba_range:
+    cmp qword [rbp - RBA_OVER], 0
+    jne .rba_range_over
+    CSTRING rsi, "() takes at least "
+    jmp .rba_range_count
+.rba_range_over:
     CSTRING rsi, "() takes at most "
+.rba_range_count:
     call rbt_append_cstr
     mov rdi, rax
     mov rsi, [rbp - RBA_WANT]
     call msg_append_i64
     mov rdi, rax
     CSTRING rsi, " arguments ("
+    cmp qword [rbp - RBA_WANT], 1
+    jne .rba_tail
+    CSTRING rsi, " argument ("
 .rba_tail:
     call rbt_append_cstr
     mov rdi, rax
@@ -908,12 +981,14 @@ section .rodata
 oai_not_an_index: db "'", 1, "' object cannot be interpreted as an integer", 0
 section .text
 
-; value_number_methods(rdi = payload, edx = tag) -> rax = PyNumberMethods*, or 0
-;
-; Resolve a Value's numeric protocol table, immediates included.  Callers that
-; want an arithmetic slot need this rather than assuming int: builtin_divmod
-; called int_floordiv unconditionally, so divmod(1.5, 1.5) crashed even though
-; 1.5 // 1.5 has always worked.
+;; ============================================================================
+;; value_number_methods(rdi = payload, edx = tag) -> rax = PyNumberMethods*, or 0
+;;
+;; Resolve a Value's numeric protocol table, immediates included.  Callers that
+;; want an arithmetic slot need this rather than assuming int: builtin_divmod
+;; called int_floordiv unconditionally, so divmod(1.5, 1.5) crashed even though
+;; 1.5 // 1.5 has always worked.
+;; ============================================================================
 DEF_FUNC_BARE value_number_methods
     cmp edx, TAG_SMALLINT
     je .vnm_int
@@ -937,10 +1012,12 @@ DEF_FUNC_BARE value_number_methods
     ret
 END_FUNC value_number_methods
 
-; value_type(rdi = Value) -> rax = PyTypeObject*, or 0 for a NULL Value
-;
-; Resolve a Value's type, immediates included.  Several places open-code this
-; three-way test; having it once keeps them from disagreeing.
+;; ============================================================================
+;; value_type(rdi = Value) -> rax = PyTypeObject*, or 0 for a NULL Value
+;;
+;; Resolve a Value's type, immediates included.  Several places open-code this
+;; three-way test; having it once keeps them from disagreeing.
+;; ============================================================================
 DEF_FUNC_BARE value_type
     V_IS_INT rdi, rax
     jae .vt_int
@@ -1010,10 +1087,12 @@ DEF_FUNC raise_type_error_with_name
     jmp rtn_compose
 END_FUNC raise_type_error_with_name
 
-; raise_type_error_with_typename(rdi = the same template, rsi = a type object)
-; For a caller that has released the object it is complaining about and kept
-; only its type -- the object is gone by then, and reading ob_type off freed
-; memory is exactly the bug this message is reporting.
+;; ============================================================================
+;; raise_type_error_with_typename(rdi = the same template, rsi = a type object)
+;; For a caller that has released the object it is complaining about and kept
+;; only its type -- the object is gone by then, and reading ob_type off freed
+;; memory is exactly the bug this message is reporting.
+;; ============================================================================
 DEF_FUNC raise_type_error_with_typename
     push rbx
     push r12
@@ -1059,32 +1138,34 @@ rtn_compose:
     ud2
 END_FUNC raise_type_error_with_typename
 
-; dunder_require_self(rdi = self Value, rsi = the type whose method this is,
-;                     rdx = a second acceptable type, or 0,
-;                     rcx = the descriptor's own name, or 0)
-;   -> rax = the self Value, unchanged; does not return if the type is wrong
-;
-; A dunder reached BY NAME is handed whatever the caller passed, and the slot
-; behind it decodes self without asking: int.__neg__(2.5) gives int's
-; nb_negative a float, str.__getitem__(5, 0) gives str's subscript an
-; integer, and each is a wild pointer rather than an error.  Registering
-; these names is what made the calls reachable at all, so every generator of
-; one has to ask this first.
-;
-; CPython words it "descriptor '__neg__' requires a 'int' object but received
-; a 'float'".  The generators know their own suffix, so they pass it and the
-; message reads as CPython's; a caller with nothing to say passes 0 and gets
-; the two type names alone.
-;
-; A subclass is accepted: int.__neg__(D(2)) for class D(int) is how a
-; subclass reaches the base's operator, and is the reason this is
-; type_is_subtype rather than a pointer compare.
-;
-; The second type is for the pairs that genuinely share one function.  set
-; and frozenset are registered from one table -- they are siblings, neither a
-; subtype of the other -- so set_dunder_len has to answer for both.  The
-; eight set operators used to need it too, and no longer do: each type
-; carries its own bodies now.
+;; ============================================================================
+;; dunder_require_self(rdi = self Value, rsi = the type whose method this is,
+;; rdx = a second acceptable type, or 0,
+;; rcx = the descriptor's own name, or 0)
+;; -> rax = the self Value, unchanged; does not return if the type is wrong
+;;
+;; A dunder reached BY NAME is handed whatever the caller passed, and the slot
+;; behind it decodes self without asking: int.__neg__(2.5) gives int's
+;; nb_negative a float, str.__getitem__(5, 0) gives str's subscript an
+;; integer, and each is a wild pointer rather than an error.  Registering
+;; these names is what made the calls reachable at all, so every generator of
+;; one has to ask this first.
+;;
+;; CPython words it "descriptor '__neg__' requires a 'int' object but received
+;; a 'float'".  The generators know their own suffix, so they pass it and the
+;; message reads as CPython's; a caller with nothing to say passes 0 and gets
+;; the two type names alone.
+;;
+;; A subclass is accepted: int.__neg__(D(2)) for class D(int) is how a
+;; subclass reaches the base's operator, and is the reason this is
+;; type_is_subtype rather than a pointer compare.
+;;
+;; The second type is for the pairs that genuinely share one function.  set
+;; and frozenset are registered from one table -- they are siblings, neither a
+;; subtype of the other -- so set_dunder_len has to answer for both.  The
+;; eight set operators used to need it too, and no longer do: each type
+;; carries its own bodies now.
+;; ============================================================================
 DRS_SELF  equ 8
 DRS_TYPE  equ 16
 DRS_ALT   equ 24
@@ -1159,11 +1240,13 @@ DEF_FUNC dunder_require_self, DRS_FRAME
     ud2
 END_FUNC dunder_require_self
 
-; raise_binop_type_error(rdi = left Value, rsi = right Value,
-;                        rdx = prefix C string) -> never returns
-; "<prefix>: 'int' and 'complex'", which is how CPython words every binary
-; operator's TypeError.  With two operands the bare prefix does not say which
-; one was wrong.
+;; ============================================================================
+;; raise_binop_type_error(rdi = left Value, rsi = right Value,
+;; rdx = prefix C string) -> never returns
+;; "<prefix>: 'int' and 'complex'", which is how CPython words every binary
+;; operator's TypeError.  With two operands the bare prefix does not say which
+;; one was wrong.
+;; ============================================================================
 RBT_LEFT  equ 8
 RBT_RIGHT equ 16
 RBT_OPEN  equ 24
@@ -1174,12 +1257,14 @@ DEF_FUNC_BARE raise_binop_type_error
     jmp raise_binop_type_error_ex
 END_FUNC raise_binop_type_error
 
-; raise_binop_type_error_ex(rdi = left Value, rsi = right Value,
-;                           rdx = prefix C string, rcx = opener C string)
-;   -> never returns
-; The opener is what sits between the prefix and the first type name.  A
-; binary operator wants ": '", and COMPARE_OP wants " of '", because CPython
-; words that one "'<' not supported between instances of 'int' and 'str'".
+;; ============================================================================
+;; raise_binop_type_error_ex(rdi = left Value, rsi = right Value,
+;; rdx = prefix C string, rcx = opener C string)
+;; -> never returns
+;; The opener is what sits between the prefix and the first type name.  A
+;; binary operator wants ": '", and COMPARE_OP wants " of '", because CPython
+;; words that one "'<' not supported between instances of 'int' and 'str'".
+;; ============================================================================
 DEF_FUNC raise_binop_type_error_ex, RBT_FRAME
     push rbx
     mov [rbp - RBT_LEFT], rdi
@@ -1237,7 +1322,7 @@ DEF_FUNC rbt_append_cstr
     ret
 END_FUNC rbt_append_cstr
 
-DEF_FUNC_LOCAL rbt_typename     ; (rdi = dest, rsi = a Value) -> rax = the NUL
+DEF_FUNC_LOCAL rbt_typename, 8            ; 1 push, so rsp is 16-aligned     ; (rdi = dest, rsi = a Value) -> rax = the NUL
     push rbx
     mov rbx, rdi
     mov rdi, rsi
@@ -1342,7 +1427,7 @@ END_FUNC msg_append_hex2
 ;; ============================================================================
 MAE_DEST equ 8
 MAE_CP   equ 16
-MAE_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+MAE_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
 DEF_FUNC msg_append_escaped_cp, MAE_FRAME
     push rbx
@@ -1411,13 +1496,15 @@ DEF_FUNC msg_append_escaped_cp, MAE_FRAME
     ret
 END_FUNC msg_append_escaped_cp
 
-; raise_value_error_with_repr(rdi = prefix C string, rsi = the object Value)
-;   -> never returns
-;
-; ValueError("<prefix><repr(obj)>"), which CPython writes as "%s: %R".  int's
-; own copy of this is inline and stays there, because its prefix carries the
-; base; float's message had simply lost the value it could not convert, and
-; complex's underscore rule needs the same shape.
+;; ============================================================================
+;; raise_value_error_with_repr(rdi = prefix C string, rsi = the object Value)
+;; -> never returns
+;;
+;; ValueError("<prefix><repr(obj)>"), which CPython writes as "%s: %R".  int's
+;; own copy of this is inline and stays there, because its prefix carries the
+;; base; float's message had simply lost the value it could not convert, and
+;; complex's underscore rule needs the same shape.
+;; ============================================================================
 RVR_PREFIX equ 8
 RVR_OBJ    equ 16
 RVR_REPR   equ 24
@@ -1483,8 +1570,10 @@ attr_error_pending: resq 1
 rtn_buf: resb RTN_BUFSZ
 section .text
 
-; seq_repeat_check_count(rsi = count Value) -- raises TypeError unless the
-; count is an int (or a bool, which is one).  Does not return on failure.
+;; ============================================================================
+;; seq_repeat_check_count(rsi = count Value) -- raises TypeError unless the
+;; count is an int (or a bool, which is one).  Does not return on failure.
+;; ============================================================================
 DEF_FUNC_BARE seq_repeat_check_count
     V_IS_INT rsi, rax
     jae .src_ok
@@ -1509,9 +1598,11 @@ DEF_FUNC_BARE seq_repeat_check_count
     ret
 END_FUNC seq_repeat_check_count
 
-; raise_no_attribute(rdi = object Value, rsi = attribute-name str, edx = 1 for
-; a set, 0 for a get) -- raises the AttributeError CPython raises.  Does not
-; return.
+;; ============================================================================
+;; raise_no_attribute(rdi = object Value, rsi = attribute-name str, edx = 1 for
+;; a set, 0 for a get) -- raises the AttributeError CPython raises.  Does not
+;; return.
+;; ============================================================================
 RNA_NAME equ 16
 RNA_FRAME equ 16            ; + 2 pushes = 32
 extern str_type
@@ -1660,7 +1751,7 @@ END_FUNC raise_no_attribute
 ;; ============================================================================
 OGA_OBJ   equ 8
 OGA_NAME  equ 16
-OGA_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+OGA_FRAME equ 40            ; + 1 push = 48, 16-aligned
 DEF_FUNC obj_generic_attr, OGA_FRAME
     push rbx
     mov [rbp - OGA_OBJ], rdi
@@ -1740,19 +1831,21 @@ DEF_FUNC obj_generic_attr, OGA_FRAME
     ret
 END_FUNC obj_generic_attr
 
-; obj_richcompare_bool(rdi = left Value, rsi = right Value, edx = op)
-;   -> eax = 1 (true), 0 (false), or -1 (an exception is pending)
-;
-; CPython's PyObject_RichCompareBool, which is what every container search
-; uses and what none of them used here.  Nine sites open-coded a comparison
-; and treated a NULL result as "not equal" -- but NULL means either
-; NotImplemented, in which case the reflected operand and then identity must
-; be tried, or that the comparison raised, in which case it must propagate.
-; None of them read current_exception, so a raising __eq__ inside `x in list`
-; silently answered False.
-;
-; The identity shortcut comes first, as in CPython: a container holding an
-; object finds it even if its __eq__ is broken or raises.
+;; ============================================================================
+;; obj_richcompare_bool(rdi = left Value, rsi = right Value, edx = op)
+;; -> eax = 1 (true), 0 (false), or -1 (an exception is pending)
+;;
+;; CPython's PyObject_RichCompareBool, which is what every container search
+;; uses and what none of them used here.  Nine sites open-coded a comparison
+;; and treated a NULL result as "not equal" -- but NULL means either
+;; NotImplemented, in which case the reflected operand and then identity must
+;; be tried, or that the comparison raised, in which case it must propagate.
+;; None of them read current_exception, so a raising __eq__ inside `x in list`
+;; silently answered False.
+;;
+;; The identity shortcut comes first, as in CPython: a container holding an
+;; object finds it even if its __eq__ is broken or raises.
+;; ============================================================================
 ORB_LEFT  equ 8
 ORB_RIGHT equ 16
 ORB_OP    equ 24
@@ -1880,20 +1973,22 @@ DEF_FUNC obj_richcompare_bool, ORB_FRAME
     ret
 END_FUNC obj_richcompare_bool
 
-; obj_binary_op(rdi = left Value, rsi = right Value, edx = op index, 0..12)
-;   -> rax = result Value, or 0 with an exception pending
-;
-; CPython's PyNumber_Add and its siblings, made callable.  The whole protocol
-; lived inside op_binary_op, which pops from r13 and leaves through DISPATCH,
-; so no builtin could reach it: sum() hardcoded int_add/float_add and
-; min()/max() hardcoded a type ladder.  Both then read a declining slot's NULL
-; Value as the answer, and a NULL on the value stack surfaces as a failure in
-; whatever runs next -- sum([1j, 2j]) reported "build_string expects str".
-;
-; The order is binary_op1's: the left type's slot, the right type's same slot,
-; then the sequence fallback, then the dunder pair on a heaptype, then
-; TypeError.  Only the non-inplace half, 0..12; nothing that reduces a
-; sequence needs the other one.
+;; ============================================================================
+;; obj_binary_op(rdi = left Value, rsi = right Value, edx = op index, 0..12)
+;; -> rax = result Value, or 0 with an exception pending
+;;
+;; CPython's PyNumber_Add and its siblings, made callable.  The whole protocol
+;; lived inside op_binary_op, which pops from r13 and leaves through DISPATCH,
+;; so no builtin could reach it: sum() hardcoded int_add/float_add and
+;; min()/max() hardcoded a type ladder.  Both then read a declining slot's NULL
+;; Value as the answer, and a NULL on the value stack surfaces as a failure in
+;; whatever runs next -- sum([1j, 2j]) reported "build_string expects str".
+;;
+;; The order is binary_op1's: the left type's slot, the right type's same slot,
+;; then the sequence fallback, then the dunder pair on a heaptype, then
+;; TypeError.  Only the non-inplace half, 0..12; nothing that reduces a
+;; sequence needs the other one.
+;; ============================================================================
 OBO_LEFT  equ 8
 OBO_RIGHT equ 16
 OBO_OP    equ 24
@@ -2083,11 +2178,13 @@ orb_swap_table:
     dd PY_LE                    ; PY_GE
 section .text
 
-; hash_not_implemented(rdi = the object) -> never returns
-; Used as tp_hash for unhashable types (dict, list, set, bytearray), and
-; installed on a class that defines __eq__ without __hash__ or sets
-; __hash__ = None.  Raises TypeError("unhashable type: 'list'") -- it used to
-; name nothing, which is the one thing the message is for.
+;; ============================================================================
+;; hash_not_implemented(rdi = the object) -> never returns
+;; Used as tp_hash for unhashable types (dict, list, set, bytearray), and
+;; installed on a class that defines __eq__ without __hash__ or sets
+;; __hash__ = None.  Raises TypeError("unhashable type: 'list'") -- it used to
+;; name nothing, which is the one thing the message is for.
+;; ============================================================================
 global hash_not_implemented
 DEF_FUNC hash_not_implemented
     extern raise_exception
@@ -2110,22 +2207,26 @@ DEF_FUNC hash_not_implemented
     ud2
 END_FUNC hash_not_implemented
 
-; object_hash(rdi = the object, edx = its tag) -> int64
-;
-; object.__hash__: the address, which is CPython's default for any object
-; that does not define one.  object_type.tp_hash was 0, and tp_hash is
-; inherited -- so every instance, every plain class, every function, module,
-; iterator and object() had none, and hash() on one raised TypeError.  dict
-; and set did not notice because obj_hash falls back to the address itself;
-; only the hash() builtin, which reads tp_hash directly, could see it.
+;; ============================================================================
+;; object_hash(rdi = the object, edx = its tag) -> int64
+;;
+;; object.__hash__: the address, which is CPython's default for any object
+;; that does not define one.  object_type.tp_hash was 0, and tp_hash is
+;; inherited -- so every instance, every plain class, every function, module,
+;; iterator and object() had none, and hash() on one raised TypeError.  dict
+;; and set did not notice because obj_hash falls back to the address itself;
+;; only the hash() builtin, which reads tp_hash directly, could see it.
+;; ============================================================================
 global object_hash
 DEF_FUNC_BARE object_hash
     mov rax, rdi
     ret
 END_FUNC object_hash
 
-; obj_hash(rdi=value) -> int64
-; Decodes the Value, then dispatches: int immediate → int_hash_i64, pointer → tp_hash.
+;; ============================================================================
+;; obj_hash(rdi=value) -> int64
+;; Decodes the Value, then dispatches: int immediate → int_hash_i64, pointer → tp_hash.
+;; ============================================================================
 DEF_FUNC obj_hash
     V_UNPACK rdi, rsi
 
@@ -2187,8 +2288,10 @@ DEF_FUNC obj_hash
     ret
 END_FUNC obj_hash
 
-; obj_is_true(rdi=value) -> int (0 or 1)
-; Decodes the Value, then dispatches: int immediate → value != 0, pointer → type-based.
+;; ============================================================================
+;; obj_is_true(rdi=value) -> int (0 or 1)
+;; Decodes the Value, then dispatches: int immediate → value != 0, pointer → type-based.
+;; ============================================================================
 DEF_FUNC_BARE obj_is_true
     V_UNPACK rdi, rsi
 
@@ -2507,6 +2610,34 @@ DEF_FUNC type_repr, TR_FRAME
     inc r12
 
 .tr_name:
+    ; CPython's repr uses __qualname__, not __name__: a nested class prints
+    ; "<class 'M.Inner'>", and a class RENAMED through __name__ keeps the
+    ; qualname it was built with.  Only a heaptype records one; a static type
+    ; falls through to tp_name, which is the same string.
+    mov rax, [rbp - TR_TYPE]
+    mov rdi, [rax + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .tr_name_from_tp
+    mov [rbp - TR_LEN], rdi
+    CSTRING rdi, "__qualname__"
+    call str_from_cstr
+    mov rsi, rax
+    mov rdi, [rbp - TR_LEN]
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .tr_name_from_tp
+    cmp edx, TAG_PTR
+    jne .tr_name_from_tp
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .tr_name_from_tp
+    cmp qword [rax + PyStrObject.ob_size], 0
+    je .tr_name_from_tp
+    lea rsi, [rax + PyStrObject.data]
+    jmp .tr_name_loop
+.tr_name_from_tp:
     mov rax, [rbp - TR_TYPE]
     mov rsi, [rax + PyTypeObject.tp_name]
 .tr_name_loop:
@@ -2586,3 +2717,4 @@ type_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots

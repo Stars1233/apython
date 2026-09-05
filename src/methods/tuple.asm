@@ -8,6 +8,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern obj_as_slice_index
 
 extern tuple_type
 extern bool_false
@@ -127,7 +128,7 @@ DEF_FUNC tuple_method_index, 16
     push rcx
     mov rdi, [rax + 16]      ; args[2] payload
     V_UNPACK rdi, rdx       ; args[2]
-    call int_to_i64
+    call obj_as_slice_index
     pop rcx
     mov rcx, rax
     ; Handle negative start
@@ -146,7 +147,7 @@ DEF_FUNC tuple_method_index, 16
     push rcx
     mov rdi, [rax + 24]      ; args[3] payload
     V_UNPACK rdi, rdx       ; args[3]
-    call int_to_i64
+    call obj_as_slice_index
     pop rcx
     ; Handle negative stop
     test rax, rax
@@ -212,7 +213,7 @@ END_FUNC tuple_method_index
 ;; ============================================================================
 TCT_IDX   equ 8
 TCT_COUNT equ 16
-TCT_FRAME equ 16            ; + 3 pushes = 40, not 16-aligned
+TCT_FRAME equ 24            ; + 3 pushes = 48, 16-aligned
 DEF_FUNC tuple_method_count, TCT_FRAME
     push rbx
     push r12

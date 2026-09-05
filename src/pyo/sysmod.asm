@@ -9,6 +9,7 @@ extern ap_strlen
 extern obj_decref
 extern obj_incref
 extern obj_dealloc
+extern ap_strcmp
 extern str_from_cstr_heap
 extern str_new
 extern str_type
@@ -86,6 +87,58 @@ extern raise_exception
 
 
 ;; ============================================================================
+;; sm_sort_names(rdi = a tuple of str) -> nothing; sorts it in place, by bytes
+;;
+;; An insertion sort over thirty-odd names, which is what it takes to keep
+;; sys.builtin_module_names in CPython's order once two tables feed it.
+;; ============================================================================
+SSN_TUP   equ 8
+SSN_N     equ 16
+SSN_I     equ 24
+SSN_J     equ 32
+SSN_FRAME equ 48            ; + 1 push = 56... one word more to land right
+DEF_FUNC_LOCAL sm_sort_names, 56        ; + 1 push = 64, 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov [rbp - SSN_TUP], rdi
+    mov rax, [rdi + PyTupleObject.ob_size]
+    mov [rbp - SSN_N], rax
+    mov qword [rbp - SSN_I], 1
+.ssn_outer:
+    mov rax, [rbp - SSN_I]
+    cmp rax, [rbp - SSN_N]
+    jge .ssn_done
+    mov [rbp - SSN_J], rax
+.ssn_inner:
+    cmp qword [rbp - SSN_J], 0
+    jle .ssn_next
+    mov rcx, [rbx + PyTupleObject.ob_item]
+    mov rdx, [rbp - SSN_J]
+    mov rdi, [rcx + rdx*8 - 8]
+    mov rsi, [rcx + rdx*8]
+    add rdi, PyStrObject.data
+    add rsi, PyStrObject.data
+    call ap_strcmp
+    test eax, eax
+    jle .ssn_next
+    mov rcx, [rbx + PyTupleObject.ob_item]
+    mov rdx, [rbp - SSN_J]
+    mov rdi, [rcx + rdx*8 - 8]
+    mov rsi, [rcx + rdx*8]
+    mov [rcx + rdx*8 - 8], rsi
+    mov [rcx + rdx*8], rdi
+    dec qword [rbp - SSN_J]
+    jmp .ssn_inner
+.ssn_next:
+    inc qword [rbp - SSN_I]
+    jmp .ssn_outer
+.ssn_done:
+    pop rbx
+    leave
+    ret
+END_FUNC sm_sort_names
+
+;; ============================================================================
 ;; sys_module_init(int argc, char **argv) -> void
 ;; Initialize the sys module and register it in sys.modules
 ;; ============================================================================
@@ -124,7 +177,7 @@ DEF_FUNC_LOCAL sm_add_str, SAS_FRAME
     ret
 END_FUNC sm_add_str
 
-DEF_FUNC sys_module_init, 32
+DEF_FUNC sys_module_init, 40
     push rbx
     push r12
     push r13
@@ -392,6 +445,26 @@ DEF_FUNC sys_module_init, 32
     mov rdx, r15
     call sm_add_str
 
+    ; --- sys.platlibdir ---
+    ; The directory name a platform puts its libraries in: "lib" everywhere
+    ; but the 64-bit RPM layouts, which use "lib64".  sysconfig reads it
+    ; unconditionally while building _CONFIG_VARS, so without it pydoc, cgitb
+    ; and everything downstream of them stopped at an AttributeError.
+    lea rdi, [rel sm_platlibdir]
+    lea rsi, [rel sm_lib]
+    mov rdx, r15
+    call sm_add_str
+
+    ; --- sys.abiflags ---
+    ; The suffix a CPython build puts on its library names -- "d" for a debug
+    ; build, empty for an ordinary one.  sysconfig interpolates it into the
+    ; name of the _sysconfigdata module it looks for, so its absence stopped
+    ; the same imports platlibdir did, one line further on.
+    lea rdi, [rel sm_abiflags]
+    lea rsi, [rel sm_empty]
+    mov rdx, r15
+    call sm_add_str
+
     ; --- sys.copyright ---
     ; site.py reads it to build the `copyright` banner, unconditionally, so
     ; without it `import site` was an AttributeError.  Ours carries both
@@ -596,15 +669,23 @@ DEF_FUNC sys_module_init, 32
     ; from.  It used to be a hand-written array here, and it had never grown
     ; `asyncio` or `errno` -- so a module sitting in sys.modules was absent
     ; from the list os.py gates its platform import on.
+    ;
+    ; The list also carries the modules this tree supplies from lib/ in place
+    ; of a CPython builtin.  From a program's point of view they ARE built in
+    ; -- the interpreter finds them with no path entry, and nothing on
+    ; sys.path shadows one -- and CPython's own importlib._bootstrap tests
+    ; this list by name before it will load `_thread` or `_warnings`, which
+    ; is what twenty-one modules of its Lib/ stop at.
     extern builtin_module_table
     extern builtin_module_count
     mov rdi, [rel builtin_module_count]
+    add rdi, SM_SUPPLIED_COUNT
     call tuple_new
     mov [rbp - SMI_TMP], rax
     xor r13d, r13d
 .sm_bmn_loop:
     cmp r13, [rel builtin_module_count]
-    jge .sm_bmn_done
+    jge .sm_bmn_supplied
     lea rax, [rel builtin_module_table]
     mov rcx, r13
     shl rcx, 4                              ; BuiltinModule_size
@@ -615,7 +696,27 @@ DEF_FUNC sys_module_init, 32
     mov [rcx + r13*8], rax
     inc r13
     jmp .sm_bmn_loop
+.sm_bmn_supplied:
+    xor r12d, r12d
+.sm_bmn_sup_loop:
+    cmp r12, SM_SUPPLIED_COUNT
+    jge .sm_bmn_done
+    lea rax, [rel sm_supplied_names]
+    mov rdi, [rax + r12*8]
+    call str_from_cstr_heap
+    mov rcx, [rbp - SMI_TMP]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx + r13*8], rax
+    inc r13
+    inc r12
+    jmp .sm_bmn_sup_loop
 .sm_bmn_done:
+    ; CPython's is sorted, and a program may rely on that -- so the two
+    ; tables are concatenated and then sorted, rather than each being kept in
+    ; order against the other.
+    mov rdi, [rbp - SMI_TMP]
+    call sm_sort_names
+
     lea rdi, [rel sm_builtin_module_names]
     call str_from_cstr_heap
     push rax
@@ -1418,6 +1519,9 @@ sm_prefix:       db "prefix", 0
 sm_exec_prefix:  db "exec_prefix", 0
 sm_base_prefix:      db "base_prefix", 0
 sm_base_exec_prefix: db "base_exec_prefix", 0
+sm_platlibdir:   db "platlibdir", 0
+sm_abiflags:     db "abiflags", 0
+sm_lib:          db "lib", 0
 sm_copyright:        db "copyright", 0
 sm_copyright_text:
     db "Copyright (c) 2026 Jeff Garzik.", 10
@@ -1444,6 +1548,32 @@ sm_cache_tag:    db "cache_tag", 0
 sm_cache_tag_val: db "cpython-312", 0
 sm_warnoptions:  db "warnoptions", 0
 sm_builtin_module_names: db "builtin_module_names", 0
+
+; The CPython builtins this tree supplies from lib/ instead.  Each is found
+; with no path entry, so saying it is built in is what a program observes.
+sm_n_thread:      db "_thread", 0
+sm_n_warnings:    db "_warnings", 0
+sm_n_imp:         db "_imp", 0
+sm_n_codecs:      db "_codecs", 0
+sm_n_collections: db "_collections", 0
+sm_n_operator:    db "_operator", 0
+sm_n_string:      db "_string", 0
+sm_n_random:      db "_random", 0
+sm_n_contextvars: db "_contextvars", 0
+sm_n_typing:      db "_typing", 0
+sm_n_atexit:      db "atexit", 0
+sm_n_binascii:    db "binascii", 0
+sm_n_itertools:   db "itertools", 0
+sm_n_tokenize:    db "_tokenize", 0
+sm_n_ast:         db "_ast", 0
+sm_n_struct:      db "_struct", 0
+align 8
+sm_supplied_names:
+    dq sm_n_thread, sm_n_warnings, sm_n_imp, sm_n_codecs, sm_n_collections
+    dq sm_n_operator, sm_n_string, sm_n_random, sm_n_contextvars, sm_n_typing
+    dq sm_n_atexit, sm_n_binascii, sm_n_itertools, sm_n_tokenize, sm_n_ast
+    dq sm_n_struct
+SM_SUPPLIED_COUNT equ 16
 sm_audit:         db "audit", 0
 sm_addaudithook:  db "addaudithook", 0
 sm_getfsencoding: db "getfilesystemencoding", 0
@@ -1645,13 +1775,17 @@ END_FUNC sys_unraisablehook_func
 ;; ============================================================================
 ;; sys.exc_info() -> (type, value, traceback), or (None, None, None)
 ;;
-;; The exception being handled, which is what current_exception holds for the
-;; length of an except block.  threading reads it to report a thread that
-;; died, and CPython's contextlib and unittest both use it.
+;; The exception being handled -- handled_exception, which an except block
+;; installs and POP_EXCEPT takes down, and which a generator carries across a
+;; suspension in PyFrame.exc_state.  Reading current_exception here answered
+;; None from an `await` inside a handler onwards, and answered an exception
+;; that was merely in flight in places where nothing was being handled at all.
+;; threading reads it to report a thread that died, and CPython's contextlib
+;; and unittest both use it.
 ;; ============================================================================
 DEF_FUNC sys_exc_info_func
-    extern current_exception
-    mov rax, [rel current_exception]
+    extern handled_exception
+    mov rax, [rel handled_exception]
     test rax, rax
     jz .sei_none
     push rax

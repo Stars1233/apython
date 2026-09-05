@@ -134,16 +134,56 @@ END_FUNC eventloop_teardown
 ;; Allocate and initialize a new async task.
 ;; ============================================================================
 
-DEF_FUNC task_new
+extern async_gen_type
+
+;; ============================================================================
+;; task_is_generator(rdi = the object a task holds) -> eax = 1 when gen_send
+;; can drive it, 0 when it has to go through tp_iternext.
+;; ============================================================================
+global task_is_generator
+DEF_FUNC task_is_generator
+    xor eax, eax
+    ; A Value, not a pointer: create_task(2.5) hands over a NaN-boxed float,
+    ; and reading ob_type off one dereferences the number.
+    V_TEST_PTR rdi, rcx
+    ja .tig_no
+    test rdi, rdi
+    jz .tig_no
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rdx, [rel coro_type]
+    cmp rcx, rdx
+    je .tig_yes
+    lea rdx, [rel gen_type]
+    cmp rcx, rdx
+    je .tig_yes
+    lea rdx, [rel async_gen_type]
+    cmp rcx, rdx
+    jne .tig_no
+.tig_yes:
+    mov eax, 1
+.tig_no:
+    leave
+    ret
+END_FUNC task_is_generator
+
+DEF_FUNC task_new, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
-    ; The argument is stepped with gen_send, which reads PyGenObject fields
-    ; off it -- so it has to BE one.  Nothing checked: `gather("hello")` and a
-    ; nested gather() both wrapped whatever they were given and crashed on the
-    ; first step, several stack frames from where the mistake was made.
-    ; Coroutines, generators and async generators are the three that can be
-    ; sent to; a task or a future is recognised by the callers before they get
-    ; here.
+    ; What a task can step.  A coroutine, a generator or an async generator is
+    ; driven with gen_send, which reads PyGenObject fields off it -- so those
+    ; three have to BE one, and nothing checked: `gather("hello")` wrapped
+    ; whatever it was given and crashed on the first step, several stack
+    ; frames from where the mistake was made.
+    ;
+    ; Anything else with a tp_iternext is driven through that instead, which
+    ; is how a nested gather works: gather() hands back a GatherAwaitable,
+    ; which is not a generator and cannot be sent to, and wrapping one meant
+    ; wrapping an arbitrary awaitable in a coroutine -- which is what
+    ; CPython's ensure_future does and what there is no way to do from here.
+    ; Stepping it directly needs no coroutine: op_send already drives that
+    ; object through tp_iternext when a coroutine awaits one, and its
+    ; gi_return_value sits at the offset PyGenObject keeps it at, which is
+    ; the whole reason that field is where it is.
     V_TEST_PTR rdi, rax
     ja .tn_not_awaitable
     test rdi, rdi
@@ -155,10 +195,11 @@ DEF_FUNC task_new
     lea rcx, [rel gen_type]
     cmp rax, rcx
     je .tn_ok
-    extern async_gen_type
     lea rcx, [rel async_gen_type]
     cmp rax, rcx
-    jne .tn_not_awaitable
+    je .tn_ok
+    cmp qword [rax + PyTypeObject.tp_iternext], 0
+    je .tn_not_awaitable
 .tn_ok:
     mov rbx, rdi               ; save coro
 
@@ -219,7 +260,7 @@ END_FUNC task_new
 ;; ============================================================================
 ;; task_dealloc(AsyncTask *self)
 ;; ============================================================================
-DEF_FUNC task_dealloc
+DEF_FUNC task_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -486,23 +527,46 @@ DEF_FUNC task_step, TS_FRAME
     cmp dword [rbx + AsyncTask.done], 1
     je .ts_ret
 
+    ; The snapshot goes in BEFORE the cancel test, not after it: .ts_cancel
+    ; compares against it too, and jumping there first read a slot nothing
+    ; had written -- whatever the stack happened to hold, compared against a
+    ; live exception.  Valgrind says so on every cancelled task.
+    ;
+    ; gen_send hands back a NULL tag for a return and for a raise alike, so
+    ; the exception is what tells them apart -- and the answer has to be "one
+    ; that was not already there".  It matters less than it did, now that
+    ; current_exception means only "in flight" and the exception an except
+    ; block is HANDLING lives in handled_exception: a task that finished
+    ; inside a live handler no longer adopts that exception and re-raises out
+    ; of asyncio.run what the coroutine had already caught.  The snapshot
+    ; stays because it costs two instructions and is the honest test: it is
+    ; still possible to reach here with something in flight.
+    DUNDER_EXC_SAVE [rbp - TS_EXC]
+
     ; Check if cancelled
     cmp dword [rbx + AsyncTask.cancelling], 1
     je .ts_cancel
 
-    ; current_exception is also the exception being HANDLED: it stays set for
-    ; the length of an except block, so "is one pending afterwards?" cannot
-    ; mean "did the coroutine raise?".  A task that finished inside a live
-    ; handler -- `except E: return await f()` -- adopted that exception and
-    ; took its reference, and asyncio.run re-raised what the coroutine had
-    ; already caught.  Snapshot it and compare.
-    DUNDER_EXC_SAVE [rbp - TS_EXC]
-
-    ; gen_send(coro, send_value, send_tag)
+    ; A generator is sent to; anything else with a tp_iternext is stepped
+    ; through that.  task_new is what decides which, and this is the mirror
+    ; of it -- a value cannot be sent INTO a plain awaitable, and none of
+    ; them wants one: a gather resumes from its own state.
+    mov rdi, [rbx + AsyncTask.coro]
+    call task_is_generator
+    test eax, eax
+    jz .ts_step_iternext
     mov rdi, [rbx + AsyncTask.coro]
     mov rsi, [rbx + AsyncTask.send_value]   ; already a Value
     call gen_send
     V_UNPACK rax, rdx          ; gen_send returns a Value
+    jmp .ts_stepped
+.ts_step_iternext:
+    mov rdi, [rbx + AsyncTask.coro]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    call rax
+    V_UNPACK rax, rdx          ; tp_iternext answers a Value too
+.ts_stepped:
 
     ; Check for exhaustion (NULL tag = coroutine returned)
     test edx, edx
@@ -668,7 +732,7 @@ DEF_FUNC task_step, TS_FRAME
     test rax, rax
     jz .ts_finished_value
     cmp rax, [rbp - TS_EXC]
-    je .ts_finished_value       ; the one already being handled
+    je .ts_finished_value       ; the one that was already in flight
 
     ; Move it, owned: raise_exception_obj took over its caller's reference,
     ; so the global holds exactly one and the task takes it over in turn.
@@ -694,6 +758,16 @@ DEF_FUNC task_step, TS_FRAME
     jmp .ts_ret
 
 .ts_cancel:
+    ; A plain awaitable cannot be thrown into: gen_throw reads PyGenObject
+    ; fields off whatever it is handed, and a GatherAwaitable is not one.
+    ; There is nothing to unwind in it either -- it holds tasks, and each of
+    ; those is cancelled in its own right -- so the CancelledError is simply
+    ; recorded, which is where the throw would have arrived anyway.
+    mov rdi, [rbx + AsyncTask.coro]
+    call task_is_generator
+    test eax, eax
+    jz .ts_cancel_no_exc
+
     ; Throw CancelledError into coroutine
     mov rdi, [rbx + AsyncTask.coro]
     lea rsi, [rel exc_CancelledError_type]
@@ -705,7 +779,7 @@ DEF_FUNC task_step, TS_FRAME
     jnz .ts_cancel_caught
     ; Exception propagated (NULL return) — grab from current_exception, and
     ; for the same reason as above, only if it is not the one that was
-    ; already being handled when the step began.
+    ; already in flight when the step began.
     mov rax, [rel current_exception]
     test rax, rax
     jz .ts_cancel_no_exc
@@ -752,7 +826,7 @@ END_FUNC task_step
 ;; task_wake_waiters(AsyncTask *task)
 ;; Iterate waiters, set their send_value to task's result, enqueue them.
 ;; ============================================================================
-DEF_FUNC task_wake_waiters
+DEF_FUNC task_wake_waiters, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -895,7 +969,7 @@ END_FUNC task_add_waiter
 ;; Returns when root_task completes.
 ;; ============================================================================
 ER_ROOT equ 8
-ER_FRAME equ 8              ; + 2 pushes = 24, not 16-aligned
+ER_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
 section .bss
 global eventloop_root_exception
 eventloop_root_exception: resq 1    ; the root task's exception, owned, or 0
@@ -1296,6 +1370,7 @@ task_type:
     dq task_traverse            ; tp_traverse
     dq task_clear               ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 section .bss
 align 8

@@ -37,6 +37,7 @@ extern exc_ValueError_type
 
 extern gc_collect_gen
 extern gc_walk_generation
+extern gc_stat_counters
 extern gc_enabled
 extern gc_debug
 extern gc_garbage_list
@@ -264,7 +265,7 @@ END_FUNC gc_mod_set_threshold
 ;; ============================================================================
 GGO_LIST  equ 8
 GGO_GEN   equ 16
-GGO_FRAME equ 32            ; + 1 push = 40
+GGO_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
 DEF_FUNC gc_mod_get_objects, GGO_FRAME
     push rbx
@@ -320,6 +321,251 @@ DEF_FUNC gc_mod_get_objects, GGO_FRAME
 END_FUNC gc_mod_get_objects
 
 ;; ============================================================================
+;; get_referrers(*objs) -> everything that refers to any of the arguments
+;;
+;; No edge is recorded in the other direction, and CPython records none
+;; either: it walks every tracked object and asks whether that one points at
+;; the argument, which is O(heap) per call and is what this does.  The
+;; traverse is the only thing that knows an object's edges, so the walk hangs
+;; a filter off the same gm_referents_out hook get_referents uses.
+;; ============================================================================
+GGF_ARGS  equ 8
+GGF_NARGS equ 16
+GGF_LIST  equ 24
+GGF_ALL   equ 32            ; every tracked object, from gc_walk_generation
+GGF_I     equ 40
+GGF_FRAME equ 48            ; 40 used + 8 pad = 48, 16-aligned
+DEF_FUNC gc_mod_get_referrers, GGF_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14                    ; four pushes keep rsp 16-aligned at the calls
+    mov [rbp - GGF_ARGS], rdi
+    mov [rbp - GGF_NARGS], rsi
+
+    xor edi, edi
+    call list_new
+    mov [rbp - GGF_LIST], rax
+    xor edi, edi
+    call list_new
+    mov [rbp - GGF_ALL], rax
+
+    ; Every tracked object, in every generation.
+    xor ebx, ebx
+.ggf_gen_loop:
+    cmp rbx, 3
+    jge .ggf_have_all
+    mov rdi, rbx
+    mov rsi, [rbp - GGF_ALL]
+    call gc_walk_generation
+    inc rbx
+    jmp .ggf_gen_loop
+.ggf_have_all:
+
+    mov qword [rbp - GGF_I], 0
+.ggf_scan:
+    mov rax, [rbp - GGF_ALL]
+    mov rcx, [rbp - GGF_I]
+    cmp rcx, [rax + PyListObject.ob_size]
+    jge .ggf_done
+    mov rax, [rax + PyListObject.ob_item]
+    mov r12, [rax + rcx*8]      ; the candidate referrer
+    inc qword [rbp - GGF_I]
+
+    V_TEST_PTR r12, rax
+    ja .ggf_scan
+    ; The two lists this call made are not answers about anything.
+    cmp r12, [rbp - GGF_LIST]
+    je .ggf_scan
+    cmp r12, [rbp - GGF_ALL]
+    je .ggf_scan
+    mov rax, [r12 + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_traverse]
+    test rax, rax
+    jz .ggf_scan
+
+    ; Collect its edges, then look for any of the arguments among them.
+    xor edi, edi
+    call list_new
+    mov r13, rax
+    mov rax, [rel gm_referents_out]
+    push rax
+    mov [rel gm_referents_out], r13
+    ; The visit callback goes in r14, which is what VISIT_PTR calls -- and
+    ; r14 is where the argument index lives below, so it is reloaded there.
+    mov rdi, r12
+    lea r14, [rel gm_visit_append]
+    mov rax, [r12 + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_traverse]
+    call rax
+    pop rax
+    mov [rel gm_referents_out], rax
+
+    xor r14d, r14d              ; argument index
+.ggf_arg_loop:
+    cmp r14, [rbp - GGF_NARGS]
+    jge .ggf_edges_done
+    mov rax, [rbp - GGF_ARGS]
+    mov rcx, [rax + r14*8]      ; the argument, as a Value
+    xor eax, eax                ; edge index
+.ggf_edge_loop:
+    cmp rax, [r13 + PyListObject.ob_size]
+    jge .ggf_next_arg
+    mov rdx, [r13 + PyListObject.ob_item]
+    cmp [rdx + rax*8], rcx
+    je .ggf_hit
+    inc rax
+    jmp .ggf_edge_loop
+.ggf_next_arg:
+    inc r14
+    jmp .ggf_arg_loop
+.ggf_hit:
+    mov rdi, [rbp - GGF_LIST]
+    mov rsi, r12
+    call list_append
+.ggf_edges_done:
+    mov rdi, r13
+    call obj_decref
+    jmp .ggf_scan
+
+.ggf_done:
+    mov rdi, [rbp - GGF_ALL]
+    call obj_decref
+    mov rax, [rbp - GGF_LIST]
+    mov edx, TAG_PTR
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC gc_mod_get_referrers
+
+;; ============================================================================
+;; freeze() / unfreeze() / get_freeze_count()
+;;
+;; CPython's permanent generation: freeze() moves everything tracked into a
+;; list the collector never walks, which is what a program does after startup
+;; so that a fork's copy-on-write pages are not dirtied by refcount writes on
+;; objects that will never be collected anyway.  There is no permanent
+;; generation here, and adding one is a collector change rather than a module
+;; one -- but the three functions exist and are honest: freeze() moves nothing
+;; and says so by leaving the count at zero, which is exactly what a program
+;; that calls unfreeze() straight after would see.
+;; ============================================================================
+DEF_FUNC gc_mod_freeze
+    ; A full collection first, which is what CPython's freeze() effectively
+    ; leaves behind: everything unreachable is gone, and what is left would
+    ; have been the permanent generation's contents.
+    mov edi, 2
+    extern gc_collect_gen
+    call gc_collect_gen
+    RET_NONE
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC gc_mod_freeze
+
+DEF_FUNC gc_mod_unfreeze
+    RET_NONE
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC gc_mod_unfreeze
+
+DEF_FUNC gc_mod_get_freeze_count
+    xor eax, eax
+    RET_TAG_SMALLINT
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC gc_mod_get_freeze_count
+
+;; ============================================================================
+;; get_stats() -> one dict per generation
+;;
+;; CPython's three keys, counted per generation: how many collections have run
+;; there, how many objects they freed, and how many they could not.  Nothing
+;; was counted before, so the collector keeps three counters per generation
+;; now and this reads them.
+;; ============================================================================
+GGS_LIST  equ 8
+GGS_DICT  equ 16
+GGS_I     equ 24
+GGS_FRAME equ 40            ; + 1 push = 48, 16-aligned
+DEF_FUNC gc_mod_get_stats, GGS_FRAME
+    push rbx
+    xor edi, edi
+    call list_new
+    mov [rbp - GGS_LIST], rax
+    mov qword [rbp - GGS_I], 0
+.ggs_loop:
+    cmp qword [rbp - GGS_I], 3
+    jge .ggs_done
+    extern dict_new
+    call dict_new
+    mov [rbp - GGS_DICT], rax
+    mov rbx, [rbp - GGS_I]
+    imul rbx, 24                ; three counters per generation
+
+    mov rdi, [rbp - GGS_DICT]
+    CSTRING rsi, "collections"
+    lea rax, [rel gc_stat_counters]
+    mov rdx, [rax + rbx]
+    call gm_stat_put
+    mov rdi, [rbp - GGS_DICT]
+    CSTRING rsi, "collected"
+    lea rax, [rel gc_stat_counters]
+    mov rdx, [rax + rbx + 8]
+    call gm_stat_put
+    mov rdi, [rbp - GGS_DICT]
+    CSTRING rsi, "uncollectable"
+    lea rax, [rel gc_stat_counters]
+    mov rdx, [rax + rbx + 16]
+    call gm_stat_put
+
+    mov rdi, [rbp - GGS_LIST]
+    mov rsi, [rbp - GGS_DICT]
+    call list_append
+    mov rdi, [rbp - GGS_DICT]
+    call obj_decref
+    inc qword [rbp - GGS_I]
+    jmp .ggs_loop
+.ggs_done:
+    mov rax, [rbp - GGS_LIST]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC gc_mod_get_stats
+
+;; gm_stat_put(rdi = dict, rsi = key cstr, rdx = an int64)
+DEF_FUNC_LOCAL gm_stat_put
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rdx
+    mov rdi, rsi
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, r12
+    V_PACK_I64 rdx, rcx
+    extern dict_set
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC gm_stat_put
+
+;; ============================================================================
 ;; is_tracked(obj)
 ;;
 ;; An immediate -- an int, a float, None -- is not an object at all here, so
@@ -362,7 +608,7 @@ section .data
 gm_referents_out: dq 0
 section .text
 
-DEF_FUNC_LOCAL gm_visit_append
+DEF_FUNC_LOCAL gm_visit_append, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rel gm_referents_out]
@@ -501,6 +747,7 @@ DEF_FUNC gc_module_create, GMC_FRAME
     mov [rbp - GMC_DICT], rax
 
     mov rdi, rax
+    mov rdi, [rbp - GMC_DICT]
     lea rsi, [rel gm_n_collect]
     lea rdx, [rel gc_mod_collect]
     call gm_add
@@ -540,6 +787,27 @@ DEF_FUNC gc_module_create, GMC_FRAME
     lea rsi, [rel gm_n_get_referents]
     lea rdx, [rel gc_mod_get_referents]
     call gm_add
+    mov rdi, [rbp - GMC_DICT]
+    lea rsi, [rel gm_n_get_referrers]
+    lea rdx, [rel gc_mod_get_referrers]
+    call gm_add
+    mov rdi, [rbp - GMC_DICT]
+    lea rsi, [rel gm_n_freeze]
+    lea rdx, [rel gc_mod_freeze]
+    call gm_add
+    mov rdi, [rbp - GMC_DICT]
+    lea rsi, [rel gm_n_unfreeze]
+    lea rdx, [rel gc_mod_unfreeze]
+    call gm_add
+    mov rdi, [rbp - GMC_DICT]
+    lea rsi, [rel gm_n_get_freeze_count]
+    lea rdx, [rel gc_mod_get_freeze_count]
+    call gm_add
+    mov rdi, [rbp - GMC_DICT]
+    lea rsi, [rel gm_n_get_stats]
+    lea rdx, [rel gc_mod_get_stats]
+    call gm_add
+
     mov rdi, [rbp - GMC_DICT]
     lea rsi, [rel gm_n_set_debug]
     lea rdx, [rel gc_mod_set_debug]
@@ -606,7 +874,7 @@ END_FUNC gc_module_create
 ;; gm_add_empty_list(rdi = dict, rsi = name cstr)
 GME_LIST  equ 8
 GME_KEY   equ 16
-GME_FRAME equ 24            ; + 2 pushes = 40
+GME_FRAME equ 32            ; + 2 pushes = 48, 16-aligned
 
 DEF_FUNC_LOCAL gm_add_empty_list, GME_FRAME
     push rbx
@@ -678,6 +946,11 @@ gm_n_callbacks:     db "callbacks", 0
 gm_n_get_objects:   db "get_objects", 0
 gm_n_is_tracked:    db "is_tracked", 0
 gm_n_get_referents: db "get_referents", 0
+gm_n_get_referrers: db "get_referrers", 0
+gm_n_freeze:        db "freeze", 0
+gm_n_unfreeze:      db "unfreeze", 0
+gm_n_get_freeze_count: db "get_freeze_count", 0
+gm_n_get_stats:     db "get_stats", 0
 gm_n_set_debug:     db "set_debug", 0
 gm_n_get_debug:     db "get_debug", 0
 gm_n_d_stats:       db "DEBUG_STATS", 0

@@ -1,11 +1,15 @@
 # What asyncio does with an argument it cannot run.
 #
 # task_new steps its argument with gen_send, which reads PyGenObject fields
-# off it -- so it has to be a coroutine, a generator or an async generator.
+# off it -- so a coroutine, a generator or an async generator has to BE one.
 # Nothing checked: `gather("hello")` wrapped the string and crashed on the
 # first step, several frames from the mistake, and so did every other entry
-# point that wraps a coroutine.  A nested gather crashed the same way, and is
-# refused here rather than accepted, which is a divergence bugs.md carries.
+# point that wraps a coroutine.
+#
+# A task drives anything else with a tp_iternext through that instead, which
+# is what lets a gather hold a gather -- but a float has no tp_iternext and
+# is not a pointer either, and the test for "is this a generator?" has to
+# know that before it reads a type off it.
 
 import asyncio
 async def w(n):

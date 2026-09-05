@@ -133,7 +133,9 @@ repr_pop:
 RB_PTR   equ 8              ; the buffer
 RB_USED  equ 16             ; bytes of content written
 RB_CAP   equ 24             ; bytes allocated
-RB_FRAME equ 24             ; + 3 pushes = 48
+RB_FRAME equ 32            ; + 4 pushes = 64, 16-aligned
+; list and tuple keep one callee-saved register fewer than dict and set.
+RB_FRAME3 equ 40           ; + 3 pushes = 64, 16-aligned
 
 ; buf_ensure_space(needed)
 ; Ensures buf has at least 'needed' more bytes available.
@@ -170,7 +172,7 @@ RB_FRAME equ 24             ; + 3 pushes = 48
 ;; list_repr(PyListObject *self) -> PyStrObject*
 ;; Returns string like "[1, 2, 3]"
 ;; ============================================================================
-DEF_FUNC list_repr, RB_FRAME                ; buf ptr, used, capacity
+DEF_FUNC list_repr, RB_FRAME3               ; buf ptr, used, capacity
     push rbx                   ; self
     push r12                   ; index
     push r13                   ; count
@@ -306,7 +308,7 @@ END_FUNC list_repr
 ;; tuple_repr(PyTupleObject *self) -> PyStrObject*
 ;; Returns string like "(1, 2, 3)" or "(1,)" for single-element
 ;; ============================================================================
-DEF_FUNC tuple_repr, RB_FRAME
+DEF_FUNC tuple_repr, RB_FRAME3
     push rbx
     push r12
     push r13

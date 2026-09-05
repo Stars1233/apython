@@ -6,6 +6,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern str_type
 
 extern current_exception
 extern kw_names_pending
@@ -32,7 +33,7 @@ extern builtin_func_new
 ;; tp_call for staticmethod_type. Creates a staticmethod wrapper.
 ;; rdi = staticmethod_type (ignored), rsi = args, rdx = nargs
 ;; ============================================================================
-DEF_FUNC staticmethod_construct
+DEF_FUNC staticmethod_construct, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     cmp rdx, 1
@@ -67,7 +68,7 @@ END_FUNC staticmethod_construct
 ;; ============================================================================
 ;; staticmethod_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL staticmethod_dealloc
+DEF_FUNC_LOCAL staticmethod_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -88,7 +89,7 @@ END_FUNC staticmethod_dealloc
 ;; rdi = classmethod_type (ignored), rsi = args, rdx = nargs
 ;; ============================================================================
 global classmethod_construct
-DEF_FUNC classmethod_construct
+DEF_FUNC classmethod_construct, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     cmp rdx, 1
@@ -123,7 +124,7 @@ END_FUNC classmethod_construct
 ;; ============================================================================
 ;; classmethod_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL classmethod_dealloc
+DEF_FUNC_LOCAL classmethod_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -345,7 +346,7 @@ END_FUNC property_construct
 ;; ============================================================================
 ;; property_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL property_dealloc
+DEF_FUNC_LOCAL property_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -568,7 +569,7 @@ END_FUNC _get_prop_deleter_builtin
 ;; args[0] = property (self from bound method), args[1] = func
 ;; Returns new property with same fget/fdel, new fset
 ;; ============================================================================
-DEF_FUNC _prop_setter_impl
+DEF_FUNC _prop_setter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     ; args[0] = property, args[1] = new fset
@@ -611,7 +612,7 @@ END_FUNC _prop_setter_impl
 ;; _prop_getter_impl(args, nargs) — property.getter(func)
 ;; Returns new property with new fget, same fset/fdel
 ;; ============================================================================
-DEF_FUNC _prop_getter_impl
+DEF_FUNC _prop_getter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     cmp rsi, 2
@@ -654,7 +655,7 @@ END_FUNC _prop_getter_impl
 ;; _prop_deleter_impl(args, nargs) — property.deleter(func)
 ;; Returns new property with same fget/fset, new fdel
 ;; ============================================================================
-DEF_FUNC _prop_deleter_impl
+DEF_FUNC _prop_deleter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     cmp rsi, 2
@@ -804,14 +805,18 @@ END_FUNC property_descr_set
 ;; ============================================================================
 ;; member_descr_new(i64 offset, PyStrObject *name) -> PyMemberDescrObject*
 ;; Create a member descriptor for a __slots__ slot.
-;; rdi = byte offset in instance, rsi = slot name (INCREF'd, ownership taken)
+;; rdi = byte offset in instance, rsi = slot name (INCREF'd, ownership taken),
+;; rdx = the class it belongs to, borrowed -- the type owns the dict that owns
+;; this, and only the repr reads it.
 ;; ============================================================================
-DEF_FUNC member_descr_new
+DEF_FUNC member_descr_new, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
+    push r13
 
     mov rbx, rdi            ; offset
     mov r12, rsi            ; name str
+    mov r13, rdx            ; the owning class
 
     mov edi, PyMemberDescrObject_size
     call ap_malloc
@@ -821,15 +826,61 @@ DEF_FUNC member_descr_new
     mov [rax + PyMemberDescrObject.ob_type], rcx
     mov [rax + PyMemberDescrObject.md_offset], rbx
     mov [rax + PyMemberDescrObject.md_name], r12
+    mov [rax + PyMemberDescrObject.md_owner], r13
 
+    pop r13
     pop r12
     pop rbx
     leave
     ret
 END_FUNC member_descr_new
 
+;; ============================================================================
+;; member_descr_repr(rdi = the descriptor) -> "<member 'x' of 'S' objects>"
+;;
+;; CPython's wording, and the same shape a method descriptor's repr has.  It
+;; used to fall through to object's, which prints the type and an address and
+;; says neither which slot nor whose.
+;; ============================================================================
+MDR_BUF   equ 272
+MDR_FRAME equ 296            ; + 1 push = 304, 16-aligned
+DEF_FUNC_LOCAL member_descr_repr, MDR_FRAME
+    push rbx
+    mov rbx, rdi
+    lea rdi, [rbp - MDR_BUF]
+    CSTRING rsi, "<member '"
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbx + PyMemberDescrObject.md_name]
+    test rsi, rsi
+    jz .mdr_no_name
+    add rsi, PyStrObject.data
+    call rbt_append_cstr
+.mdr_no_name:
+    mov rdi, rax
+    CSTRING rsi, "' of '"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbx + PyMemberDescrObject.md_owner]
+    test rsi, rsi
+    jz .mdr_no_owner
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    call rbt_append_cstr
+.mdr_no_owner:
+    mov rdi, rax
+    CSTRING rsi, "' objects>"
+    call rbt_append_cstr
+    lea rdi, [rbp - MDR_BUF]
+    extern str_from_cstr
+    call str_from_cstr
+    pop rbx
+    leave
+    ret
+END_FUNC member_descr_repr
+
 ;; member_descr_dealloc(PyMemberDescrObject *self)
-DEF_FUNC member_descr_dealloc
+DEF_FUNC member_descr_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -901,7 +952,7 @@ DEF_FUNC mappingproxy_construct
     RAISE exc_TypeError_type, "mappingproxy() argument must be a mapping, not a sequence"
 END_FUNC mappingproxy_construct
 
-DEF_FUNC mappingproxy_new
+DEF_FUNC mappingproxy_new, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi                    ; the dict
     mov edi, PyMappingProxyObject_size
@@ -919,7 +970,7 @@ DEF_FUNC mappingproxy_new
     ret
 END_FUNC mappingproxy_new
 
-DEF_FUNC_LOCAL mappingproxy_dealloc
+DEF_FUNC_LOCAL mappingproxy_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyMappingProxyObject.mp_mapping]
@@ -1033,7 +1084,7 @@ END_FUNC mappingproxy_getattr
 ;; exposes func.__code__ and the co_* fields, and types.py takes
 ;; GetSetDescriptorType straight off one of them.
 ;; ============================================================================
-DEF_FUNC getset_descr_new
+DEF_FUNC getset_descr_new, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1062,6 +1113,113 @@ DEF_FUNC getset_descr_new
     leave
     ret
 END_FUNC getset_descr_new
+
+;; ============================================================================
+;; getset_descr_getattr(rdi = the descriptor, rsi = name str) -> Value, or 0
+;;
+;; __name__, __qualname__ and __objclass__, which is what a descriptor is
+;; asked for once it has been fished out of a type's dict by name.  inspect's
+;; _shadowed_dict reads `class_dict.__name__ == "__dict__"` off exactly this
+;; object, and an AttributeError there stopped pydoc, pstats and everything
+;; through them.
+;; ============================================================================
+GDA_SELF  equ 8
+GDA_FRAME equ 16            ; + 0 pushes = 16
+DEF_FUNC_LOCAL getset_descr_getattr, GDA_FRAME
+    mov [rbp - GDA_SELF], rdi
+    test rsi, rsi
+    jz .gda_miss
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .gda_miss
+
+    lea rdi, [rsi + PyStrObject.data]
+    push rsi
+    CSTRING rsi, "__name__"
+    call ap_strcmp
+    pop rsi
+    test eax, eax
+    jz .gda_name
+
+    lea rdi, [rsi + PyStrObject.data]
+    push rsi
+    CSTRING rsi, "__qualname__"
+    call ap_strcmp
+    pop rsi
+    test eax, eax
+    jz .gda_qualname
+
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__objclass__"
+    call ap_strcmp
+    test eax, eax
+    jz .gda_objclass
+.gda_miss:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+
+.gda_name:
+    mov rax, [rbp - GDA_SELF]
+    mov rax, [rax + PyGetSetDescrObject.gs_name]
+    test rax, rax
+    jz .gda_miss
+    mov rdi, rax
+    push rax
+    call obj_incref
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.gda_qualname:
+    ; "type.__mro__": the owning type's name, then the attribute's.
+    mov rax, [rbp - GDA_SELF]
+    mov rcx, [rax + PyGetSetDescrObject.gs_owner]
+    test rcx, rcx
+    jz .gda_name
+    mov rax, [rax + PyGetSetDescrObject.gs_name]
+    test rax, rax
+    jz .gda_miss
+    lea rdi, [rel gda_buf]
+    mov rsi, [rcx + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "."
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rcx, [rbp - GDA_SELF]
+    mov rsi, [rcx + PyGetSetDescrObject.gs_name]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    lea rdi, [rel gda_buf]
+    call str_from_cstr
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.gda_objclass:
+    mov rax, [rbp - GDA_SELF]
+    mov rax, [rax + PyGetSetDescrObject.gs_owner]
+    test rax, rax
+    jz .gda_miss
+    mov rdi, rax
+    push rax
+    call obj_incref
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC getset_descr_getattr
+
+section .bss
+gda_buf: resb 320
+section .text
 
 ;; ============================================================================
 ;; getset_descr_repr(rdi = the descriptor) -> PyStrObject*
@@ -1170,7 +1328,7 @@ END_FUNC getset_descr_dunder_delete
 ;;
 ;; The middle the repr and the not-writable message share.
 ;; ============================================================================
-DEF_FUNC_LOCAL getset_descr_compose
+DEF_FUNC_LOCAL getset_descr_compose, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1385,7 +1543,7 @@ DEF_FUNC getset_descr_set, GDS_FRAME
     ud2
 END_FUNC getset_descr_set
 
-DEF_FUNC_LOCAL getset_descr_dealloc
+DEF_FUNC_LOCAL getset_descr_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyGetSetDescrObject.gs_name]
@@ -1436,7 +1594,7 @@ DEF_FUNC generic_alias_new
     ret
 END_FUNC generic_alias_new
 
-DEF_FUNC_LOCAL generic_alias_dealloc
+DEF_FUNC_LOCAL generic_alias_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyGenericAliasObject.ga_origin]
@@ -1455,6 +1613,37 @@ DEF_FUNC_LOCAL generic_alias_dealloc
     leave
     ret
 END_FUNC generic_alias_dealloc
+
+;; ============================================================================
+;; generic_alias_construct(rdi = type, rsi = args, rdx = nargs)
+;;   -> rax = a new GenericAlias, rdx = TAG_PTR
+;;
+;; tp_new for generic_alias_type: types.GenericAlias(origin, args).
+;;
+;; The type had no constructor, so `GenericAlias(list, str)` fell through to
+;; the ordinary class-construction path: it allocated a GC-headed block, left
+;; ga_origin and ga_args holding whatever was there, and then freed it with
+;; this type's tp_dealloc -- a plain free at the object address rather than at
+;; the GC head, which glibc reports as a double free.  os.PathLike is written
+;; `__class_getitem__ = classmethod(GenericAlias)`, so `os.PathLike[str]` was
+;; the crash; importlib.resources is one line of it.
+;; ============================================================================
+DEF_FUNC generic_alias_construct
+    cmp rdx, 2
+    jne .gac_error
+    mov rdi, [rsi]              ; the origin
+    mov rsi, [rsi + 8]          ; the argument, whatever it is
+    V_TEST_PTR rdi, rax
+    ja .gac_error
+    test rdi, rdi
+    jz .gac_error
+    call generic_alias_new
+    mov edx, TAG_PTR            ; a constructor returns the (payload, tag) pair
+    leave
+    ret
+.gac_error:
+    RAISE exc_TypeError_type, "GenericAlias expected 2 arguments"
+END_FUNC generic_alias_construct
 
 ;; The builtin registered as __class_getitem__ on each container type.
 ;; args[0] = cls, args[1] = the subscript.
@@ -1476,7 +1665,7 @@ END_FUNC generic_alias_class_getitem
 ;; repr: "list[int]" -- origin name, then the argument's repr.
 GAR_BUF   equ 264
 GAR_SELF  equ 272
-GAR_FRAME equ 288           ; + 5 pushes = 328, not 16-aligned
+GAR_FRAME equ 296            ; + 5 pushes = 336, 16-aligned
 DEF_FUNC generic_alias_repr, GAR_FRAME
     push rbx
     push r12
@@ -1491,26 +1680,12 @@ DEF_FUNC generic_alias_repr, GAR_FRAME
     test rax, rax
     jz .gar_open
     mov rsi, [rax + PyObject.ob_type]
-    extern type_type
-    lea rcx, [rel type_type]
-    cmp rsi, rcx
-    je .gar_have_name
-    extern user_type_metatype
-    lea rcx, [rel user_type_metatype]
-    cmp rsi, rcx
-    jne .gar_open
-.gar_have_name:
-    mov rsi, [rax + PyTypeObject.tp_name]
-.gar_name:
-    movzx eax, byte [rsi]
-    test al, al
+    test rsi, rsi
     jz .gar_open
-    inc rsi
-    cmp r13, 100
-    jae .gar_open
-    mov [rbx + r13], al
-    inc r13
-    jmp .gar_name
+    test qword [rsi + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .gar_open
+    mov rdi, rax
+    call .gar_qualified
 
 .gar_open:
     mov byte [rbx + r13], '['
@@ -1574,38 +1749,12 @@ DEF_FUNC generic_alias_repr, GAR_FRAME
     test rdi, rdi
     jz .geo_repr
     mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel type_type]
-    cmp rax, rcx
-    je .geo_typename
-    lea rcx, [rel user_type_metatype]
-    cmp rax, rcx
-    jne .geo_repr
-.geo_typename:
-    mov rsi, [rdi + PyTypeObject.tp_name]
-    mov rdi, rsi
-    xor ecx, ecx
-.geo_last_dot:
-    movzx eax, byte [rsi + rcx]
-    test al, al
-    jz .geo_name_start
-    cmp al, '.'
-    jne .geo_dot_next
-    lea rdi, [rsi + rcx + 1]
-.geo_dot_next:
-    inc rcx
-    jmp .geo_last_dot
-.geo_name_start:
-    mov rsi, rdi
-.geo_name_copy:
-    movzx eax, byte [rsi]
-    test al, al
-    jz .geo_done
-    inc rsi
-    cmp r13, GAR_BUF - 8
-    jae .geo_done
-    mov [rbx + r13], al
-    inc r13
-    jmp .geo_name_copy
+    test rax, rax
+    jz .geo_repr
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .geo_repr
+    call .gar_qualified
+    jmp .geo_done
 
 .geo_repr:
     call obj_repr
@@ -1633,6 +1782,145 @@ DEF_FUNC generic_alias_repr, GAR_FRAME
     pop r15
     pop r14
     pop r12
+    ret
+
+
+;; .gar_qualified(rdi = a class) -- append "module.QualName" to rbx at r13.
+;;
+;; CPython writes an alias's origin and its type arguments the way it writes a
+;; class in an annotation: qualified by module, with "builtins" left off, and
+;; using __qualname__ so a nested class keeps its "Outer.Inner".  Only the
+;; bare tp_name was written, which for a class built by a metaclass of its own
+;; -- every ABC, and os.PathLike is one -- was not reached at all, because the
+;; test for "is this a class?" was a comparison against the two metatypes this
+;; tree ships rather than TYPE_FLAG_METATYPE.
+.gar_qualified:
+    push r12
+    push r14
+    push r15
+    mov r12, rdi                    ; the class
+    mov r14, [rdi + PyTypeObject.tp_dict]
+
+    ; --- the module, unless it is "builtins" ---
+    test r14, r14
+    jz .gq_module_from_name
+    CSTRING rdi, "__module__"
+    call str_from_cstr
+    mov rsi, rax
+    mov rdi, r14
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .gq_module_from_name
+    cmp edx, TAG_PTR
+    jne .gq_module_from_name
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .gq_module_from_name
+    lea rsi, [rax + PyStrObject.data]
+    mov rdi, rsi
+    CSTRING rsi, "builtins"
+    push rdi
+    call ap_strcmp
+    pop rsi
+    test eax, eax
+    jz .gq_qualname                 ; "builtins" is left off
+    call .gq_copy_cstr
+    mov byte [rbx + r13], '.'
+    inc r13
+    jmp .gq_qualname
+
+.gq_module_from_name:
+    ; A static type records no __module__; its tp_name carries the dotted
+    ; prefix instead -- "types.GenericAlias" -- and everything else is a
+    ; builtin, which prints unqualified either way.
+    mov rsi, [r12 + PyTypeObject.tp_name]
+    xor ecx, ecx
+    xor r15, r15                    ; length of the prefix, 0 for none
+.gq_scan:
+    movzx eax, byte [rsi + rcx]
+    test al, al
+    jz .gq_scanned
+    cmp al, '.'
+    jne .gq_scan_next
+    lea r15, [rcx + 1]
+.gq_scan_next:
+    inc rcx
+    jmp .gq_scan
+.gq_scanned:
+    test r15, r15
+    jz .gq_qualname
+    xor ecx, ecx
+.gq_prefix:
+    cmp rcx, r15
+    jge .gq_qualname
+    cmp r13, GAR_BUF - 8
+    jae .gq_qualname
+    movzx eax, byte [rsi + rcx]
+    mov [rbx + r13], al
+    inc r13
+    inc rcx
+    jmp .gq_prefix
+
+.gq_qualname:
+    test r14, r14
+    jz .gq_from_tp_name
+    CSTRING rdi, "__qualname__"
+    call str_from_cstr
+    mov rsi, rax
+    mov rdi, r14
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .gq_from_tp_name
+    cmp edx, TAG_PTR
+    jne .gq_from_tp_name
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .gq_from_tp_name
+    lea rsi, [rax + PyStrObject.data]
+    call .gq_copy_cstr
+    jmp .gq_done
+
+.gq_from_tp_name:
+    ; The last dotted component: "types.GenericAlias" prints "GenericAlias",
+    ; the prefix having gone in as the module above.
+    mov rsi, [r12 + PyTypeObject.tp_name]
+    mov rdi, rsi
+    xor ecx, ecx
+.gq_last_dot:
+    movzx eax, byte [rsi + rcx]
+    test al, al
+    jz .gq_tail
+    cmp al, '.'
+    jne .gq_dot_next
+    lea rdi, [rsi + rcx + 1]
+.gq_dot_next:
+    inc rcx
+    jmp .gq_last_dot
+.gq_tail:
+    mov rsi, rdi
+    call .gq_copy_cstr
+.gq_done:
+    pop r15
+    pop r14
+    pop r12
+    ret
+
+;; .gq_copy_cstr(rsi = a NUL-terminated string) -- append it, bounded.
+.gq_copy_cstr:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .gq_copied
+    inc rsi
+    cmp r13, GAR_BUF - 8
+    jae .gq_copied
+    mov [rbx + r13], al
+    inc r13
+    jmp .gq_copy_cstr
+.gq_copied:
     ret
 
 .gar_close:
@@ -1666,7 +1954,7 @@ END_FUNC generic_alias_call
 
 ;; __origin__ / __args__
 GAG_NAME  equ 8
-GAG_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+GAG_FRAME equ 24            ; + 1 push = 32, 16-aligned
 
 DEF_FUNC generic_alias_getattr, GAG_FRAME
     push rbx
@@ -1750,7 +2038,7 @@ END_FUNC generic_alias_getattr
 ;;   -> rax = new length
 ;; The display form used inside a generic alias or a union: a type shows as
 ;; its unqualified name, Ellipsis as "...", anything else as its repr.
-DEF_FUNC ga_emit_name
+DEF_FUNC ga_emit_name, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1789,15 +2077,74 @@ DEF_FUNC ga_emit_name
     ja .gen_repr
     test r12, r12
     jz .gen_repr
+    ; Any class, whichever metatype made it -- a class built by a metaclass of
+    ; its own is still a class, and comparing ob_type against the two
+    ; metatypes this tree ships answered no for it.
     mov rax, [r12 + PyObject.ob_type]
-    lea rcx, [rel type_type]
-    cmp rax, rcx
-    je .gen_typename
-    lea rcx, [rel user_type_metatype]
-    cmp rax, rcx
-    jne .gen_repr
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .gen_repr
 
 .gen_typename:
+    ; CPython qualifies a class with its module here as it does in a repr:
+    ; `__main__.C | None`, and `int | None` for anything in builtins.  The
+    ; module comes from the type's dict, and the name is what follows the
+    ; last dot of tp_name -- a builtin whose tp_name already carries its
+    ; module would otherwise be printed with it twice.
+    mov rdi, [r12 + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .gen_no_module
+    push rdi
+    CSTRING rdi, "__module__"
+    extern str_from_cstr
+    call str_from_cstr
+    pop rdi
+    test rax, rax
+    jz .gen_no_module
+    mov rsi, rax
+    extern dict_get
+    call dict_get
+    test rax, rax
+    jz .gen_no_module
+    V_TEST_PTR rax, rcx
+    ja .gen_no_module
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .gen_no_module
+    mov rcx, [rax + PyStrObject.ob_size]
+    test rcx, rcx
+    jz .gen_no_module
+    lea rdi, [rax + PyStrObject.data]
+    cmp rcx, 8
+    jne .gen_copy_module
+    push rax
+    push rcx
+    CSTRING rsi, "builtins"
+    call ap_strcmp
+    pop rcx
+    pop rax
+    test eax, eax
+    jz .gen_no_module           ; builtins is left off, as CPython leaves it
+    lea rdi, [rax + PyStrObject.data]
+.gen_copy_module:
+    xor edx, edx
+.gen_mod_loop:
+    cmp rdx, rcx
+    jge .gen_mod_done
+    cmp r13, 240
+    jae .gen_mod_done
+    mov al, [rdi + rdx]
+    mov [rbx + r13], al
+    inc r13
+    inc rdx
+    jmp .gen_mod_loop
+.gen_mod_done:
+    cmp r13, 240
+    jae .gen_no_module
+    mov byte [rbx + r13], '.'
+    inc r13
+
+.gen_no_module:
     mov rsi, [r12 + PyTypeObject.tp_name]
     mov rdi, rsi
     xor ecx, ecx
@@ -2027,7 +2374,7 @@ END_FUNC union_type_or
 ;; and union_type carried neither a tp_getattr nor a tp_dict, so it answered
 ;; AttributeError while the tuple sat in ga_args.
 ;; ============================================================================
-DEF_FUNC union_getattr
+DEF_FUNC union_getattr, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     lea rdi, [rsi + PyStrObject.data]
@@ -2053,19 +2400,30 @@ DEF_FUNC union_getattr
     ret
 END_FUNC union_getattr
 
+;; ============================================================================
+;; union_operand_ok(rdi = a Value) -> eax = 1 when `|` may build a union of it
+;;
+;; CPython's is_unionable: a class, an existing union, a generic alias, or
+;; None.  Two of the four were missing.  A class built by a metaclass of its
+;; own is still a class, and asking whether its ob_type is one of the two
+;; metatypes this tree ships answers no for it -- TYPE_FLAG_METATYPE is the
+;; question that does not depend on which metatype made it.  And a generic
+;; alias is what every modern annotation is written with: `list[int] | None`
+;; is the shape, and `type Tree = int | list[Tree]` is the reason PEP 695's
+;; lazy evaluation exists.
+;; ============================================================================
 DEF_FUNC_BARE union_operand_ok
     V_TEST_PTR rdi, rax
     ja .uok_no
     test rdi, rdi
     jz .uok_no
     mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel type_type]
-    cmp rax, rcx
-    je .uok_yes
-    lea rcx, [rel user_type_metatype]
-    cmp rax, rcx
-    je .uok_yes
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jnz .uok_yes
     lea rcx, [rel union_type]
+    cmp rax, rcx
+    je .uok_yes
+    lea rcx, [rel generic_alias_type]
     cmp rax, rcx
     je .uok_yes
     extern none_singleton
@@ -2083,7 +2441,7 @@ END_FUNC union_operand_ok
 ;; repr: "int | str"
 UR_BUF   equ 264
 UR_SELF  equ 272
-UR_FRAME equ 288            ; + 5 pushes = 328, not 16-aligned
+UR_FRAME equ 296            ; + 5 pushes = 336, 16-aligned
 DEF_FUNC union_repr, UR_FRAME
     push rbx
     push r12
@@ -2154,7 +2512,7 @@ section .text
 ;; One function serves both wrappers -- sm_callable and cm_callable are the
 ;; same slot -- so both type tables point straight at it.
 ;; ============================================================================
-DEF_FUNC descr_func_attr
+DEF_FUNC descr_func_attr, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     lea rdi, [rsi + PyStrObject.data]
@@ -2230,7 +2588,7 @@ DEF_FUNC staticmethod_dunder_get
     ret
 END_FUNC staticmethod_dunder_get
 
-DEF_FUNC classmethod_dunder_get
+DEF_FUNC classmethod_dunder_get, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, [rdi]
     mov rbx, [rbx + PyClassMethodObject.cm_callable]
@@ -2332,7 +2690,7 @@ DEF_FUNC property_dunder_set, PDS2_FRAME
     RAISE exc_TypeError_type, "__set__() takes exactly 2 arguments"
 END_FUNC property_dunder_set
 
-DEF_FUNC property_dunder_delete
+DEF_FUNC property_dunder_delete, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     cmp rsi, 2
     jl .pdd_no_deleter
@@ -2378,7 +2736,7 @@ section .text
 ;; ============================================================================
 PSA_SELF  equ 8
 PSA_VAL   equ 16
-PSA_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+PSA_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC_LOCAL property_setattr, PSA_FRAME
     push rbx
     mov rbx, rdi
@@ -2452,6 +2810,7 @@ staticmethod_type:
     dq staticmethod_traverse                        ; tp_traverse
     dq staticmethod_clear                        ; tp_clear
     dq 0               ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; classmethod_type - type descriptor for classmethod wrapper
 align 8
@@ -2484,6 +2843,7 @@ classmethod_type:
     dq classmethod_traverse                        ; tp_traverse
     dq classmethod_clear                        ; tp_clear
     dq 0              ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; property_type - type descriptor for property descriptor
 align 8
@@ -2516,6 +2876,7 @@ property_type:
     dq property_traverse                        ; tp_traverse
     dq property_clear                        ; tp_clear
     dq 0           ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; member_descr_type - type descriptor for __slots__ member descriptors
 md_name_str: db "member_descriptor", 0
@@ -2527,7 +2888,7 @@ member_descr_type:
     dq md_name_str                  ; tp_name
     dq PyMemberDescrObject_size     ; tp_basicsize
     dq member_descr_dealloc         ; tp_dealloc
-    dq 0                            ; tp_repr
+    dq member_descr_repr            ; tp_repr
     dq 0                            ; tp_str
     dq 0                            ; tp_hash
     dq 0                            ; tp_call
@@ -2549,6 +2910,7 @@ member_descr_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 align 8
 u_name_str: db "types.UnionType", 0
@@ -2583,6 +2945,7 @@ union_type:
     dq 0                            ; tp_traverse
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 
 section .text
@@ -2797,6 +3160,14 @@ union_number_methods:
     dq union_type_or                ; nb_or (+120)
     times 20 dq 0
 
+; A generic alias is unionable too, so `list[int] | None` needs the slot on
+; the LEFT operand's type as well as on the right's.
+align 8
+generic_alias_as_number:
+    times 15 dq 0
+    dq union_type_or                ; nb_or (+120)
+    times 20 dq 0
+
 align 8
 ga_name_str: db "types.GenericAlias", 0
 
@@ -2948,8 +3319,8 @@ generic_alias_type:
     dq 0                            ; tp_iter
     dq 0                            ; tp_iternext
     dq 0                            ; tp_init
-    dq 0                            ; tp_new
-    dq 0                            ; tp_as_number
+    dq generic_alias_construct      ; tp_new
+    dq generic_alias_as_number      ; tp_as_number
     dq 0                            ; tp_as_sequence
     dq 0                            ; tp_as_mapping
     dq 0                            ; tp_base
@@ -2960,6 +3331,7 @@ generic_alias_type:
     dq 0                            ; tp_traverse
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 align 8
 gsd_name_str: db "getset_descriptor", 0
@@ -2976,7 +3348,7 @@ getset_descr_type:
     dq getset_descr_repr            ; tp_str
     dq 0                            ; tp_hash
     dq 0                            ; tp_call
-    dq 0                            ; tp_getattr
+    dq getset_descr_getattr         ; tp_getattr
     dq 0                            ; tp_setattr
     dq 0                            ; tp_richcompare
     dq 0                            ; tp_iter
@@ -2994,6 +3366,7 @@ getset_descr_type:
     dq 0                            ; tp_traverse
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 align 8
 mp_name_str: db "mappingproxy", 0
@@ -3028,6 +3401,7 @@ mappingproxy_type:
     dq 0                            ; tp_traverse
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 align 8
 mappingproxy_seq_methods:
@@ -3068,7 +3442,9 @@ section .text
 ;; file is the only place that knows which of its fields are owned.
 ;; ============================================================================
 
-; ---- staticmethod_traverse / classmethod_traverse / property_traverse ----
+;; ============================================================================
+;; ---- staticmethod_traverse / classmethod_traverse / property_traverse ----
+;; ============================================================================
 DEF_FUNC staticmethod_traverse
     mov rdi, [rdi + PyStaticMethodObject.sm_callable]
     VISIT_PTR rdi
@@ -3076,7 +3452,7 @@ DEF_FUNC staticmethod_traverse
     ret
 END_FUNC staticmethod_traverse
 
-DEF_FUNC staticmethod_clear
+DEF_FUNC staticmethod_clear, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyStaticMethodObject.sm_callable]
@@ -3097,7 +3473,7 @@ DEF_FUNC classmethod_traverse
     ret
 END_FUNC classmethod_traverse
 
-DEF_FUNC classmethod_clear
+DEF_FUNC classmethod_clear, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyClassMethodObject.cm_callable]

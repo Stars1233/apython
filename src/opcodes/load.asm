@@ -744,9 +744,6 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; If attr came from type dict and is callable, create bound method
     cmp qword [rbp - LA_FROM_TYPE], 0
     je .la_simple_push
-    ; Can only create bound methods for pointer self (method_new INCREFs self)
-    cmp qword [rbp - LA_OBJ_TAG], TAG_PTR
-    jne .la_nonptr_type_attr
     mov rax, [rbp - LA_ATTR]
     cmp qword [rbp - LA_ATTR_TAG], TAG_PTR
     jne .la_simple_push         ; not a heap pointer
@@ -755,9 +752,16 @@ DEF_FUNC op_load_attr, LA_FRAME
     test rcx, rcx
     jz .la_simple_push
 
-    ; Create bound method(func=attr, self=obj)
+    ; Create bound method(func=attr, self=obj).  im_self is a Value, so an
+    ; immediate binds like anything else: `(7).bit_length` used to be the
+    ; unbound descriptor, which answered `<method 'bit_length' of 'int'
+    ; objects>` where CPython has a bound method, had no __self__, and --
+    ; once the arity bounds were registered -- refused its own zero-argument
+    ; call because the receiver it was never given did not count.
     mov rdi, [rbp - LA_ATTR]   ; func
     mov rsi, [rbp - LA_OBJ]    ; self
+    mov rdx, [rbp - LA_OBJ_TAG]
+    V_PACK rsi, rdx
     call method_new
     VPUSH_PTR rax
 
@@ -768,14 +772,6 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_OBJ]
     mov rsi, [rbp - LA_OBJ_TAG]
     DECREF_VAL rdi, rsi         ; a payload, not necessarily a pointer
-    jmp .la_done
-
-.la_nonptr_type_attr:
-    ; Non-pointer self (SmallInt, Float, etc.) — push attr without binding
-    ; No obj_decref needed for non-pointer self (no TAG_RC_BIT)
-    mov rax, [rbp - LA_ATTR]
-    mov rdx, [rbp - LA_ATTR_TAG]
-    VPUSH_VAL rax, rdx
     jmp .la_done
 
 .la_simple_push:
@@ -858,6 +854,16 @@ DEF_FUNC op_load_attr, LA_FRAME
     cmp rax, rcx
     je .la_not_method
     lea rcx, [rel staticmethod_type]
+    cmp rax, rcx
+    je .la_not_method
+    ; And a super, whose tp_getattr has already done the whole descriptor
+    ; protocol against __self__ -- `super().s` on a staticmethod comes back
+    ; as the plain function, and binding the SUPER OBJECT to it as self made
+    ; `super().s()` a TypeError about an argument nobody wrote.  This is the
+    ; shape CPython avoids wholesale: _PyObject_GetMethod reports "not a
+    ; method" for any type with a tp_getattro of its own.
+    extern super_type
+    lea rcx, [rel super_type]
     cmp rax, rcx
     je .la_not_method
     jmp .la_method_push            ; built-in tp_getattr → [func, self]
@@ -1402,7 +1408,37 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rax, [rbp - LSA_CLASS]
 .lsa_have_origin:
     mov [rbp - LSA_ORIGIN], rax
-    mov rdi, rax
+
+    ; The attribute form is super_lookup, which is also what a super OBJECT's
+    ; tp_getattr calls -- the descriptor rules live in one place, and the two
+    ; cannot answer differently.  The method form below keeps arms of its own,
+    ; because it pushes two values and leaves a function unbound on purpose.
+    cmp qword [rbp - LSA_FLAG], 0
+    jne .lsa_method_walk
+    mov rdi, [rbp - LSA_CLASS]
+    mov rsi, [rbp - LSA_SELF]
+    mov rdx, [rbp - LSA_ORIGIN]
+    mov rcx, [rbp - LSA_NAME]
+    lea r8, [rbp - LSA_BIND]        ; LSA_BIND is unused on this path
+    extern super_lookup
+    call super_lookup
+    SAVE_FAT_RESULT
+    mov rdi, [rbp - LSA_CLASS]
+    call obj_decref
+    mov rdi, [rbp - LSA_SELF]
+    call obj_decref
+    RESTORE_FAT_RESULT
+    test edx, edx
+    jz .lsa_attr_failed
+    VPUSH_VAL rax, rdx
+    jmp .lsa_done
+.lsa_attr_failed:
+    cmp qword [rbp - LSA_BIND], 0
+    jne .lsa_absent                 ; nothing on the MRO has the name
+    jmp .lsa_propagate              ; a property getter raised
+
+.lsa_method_walk:
+    mov rdi, [rbp - LSA_ORIGIN]
     mov rsi, [rbp - LSA_CLASS]
     extern type_mro_next
     call type_mro_next
@@ -1437,11 +1473,20 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     call obj_decref
     mov rdi, [rbp - LSA_SELF]
     call obj_decref
+.lsa_absent:
+    ; CPython's wording names the attribute; ours said only "super: attribute
+    ; not found", which is the same information minus the one part a reader
+    ; needs.  The super OBJECT reaches the same sentence through the generic
+    ; getattr path, which has a type to name.
+    mov rdi, [rbp - LSA_NAME]
+    extern super_no_attribute
+    call super_no_attribute
     ; DISPATCH saved the stack top as it was BEFORE this handler popped its
     ; three operands, and the unwinder cleans up from there -- so raising
     ; without republishing r13 releases those three a second time.
     mov [rel eval_saved_r13], r13
-    RAISE exc_AttributeError_type, "super: attribute not found"
+    leave
+    jmp eval_exception_unwind
 
 .lsa_found:
     ; rax = attribute value, rdx = tag (from dict_get)

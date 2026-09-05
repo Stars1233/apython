@@ -109,7 +109,7 @@ END_FUNC module_new
 ;; ============================================================================
 ;; module_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL module_dealloc
+DEF_FUNC_LOCAL module_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -215,7 +215,7 @@ END_FUNC module_setattr
 ;; CPython's is the .py -- a difference in that attribute, not in this.
 ;; ============================================================================
 MR_FILE  equ 8
-MR_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+MR_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC module_repr, MR_FRAME
     push rbx
     mov rbx, rdi
@@ -336,6 +336,7 @@ module_type:
     dq module_traverse                        ; tp_traverse
     dq module_clear_gc                        ; tp_clear
     dq 0            ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ;; ============================================================================
 ;; (was src/pyo/namespace.asm)
@@ -365,7 +366,7 @@ section .text
 ;; ============================================================================
 ;; namespace_new() -> PySimpleNamespaceObject* with a fresh dict
 ;; ============================================================================
-DEF_FUNC namespace_new
+DEF_FUNC namespace_new, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov edi, PySimpleNamespaceObject_size
     call ap_malloc
@@ -403,7 +404,7 @@ DEF_FUNC namespace_set
     ret
 END_FUNC namespace_set
 
-DEF_FUNC_LOCAL namespace_dealloc
+DEF_FUNC_LOCAL namespace_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PySimpleNamespaceObject.ns_dict]
@@ -419,7 +420,7 @@ DEF_FUNC_LOCAL namespace_dealloc
 END_FUNC namespace_dealloc
 
 ;; namespace_getattr(rdi = self, rsi = name) -> Value or NULL
-DEF_FUNC namespace_getattr
+DEF_FUNC namespace_getattr, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     cmp qword [rdi + PySimpleNamespaceObject.ns_dict], 0
@@ -614,6 +615,7 @@ namespace_type:
     dq 0                            ; tp_traverse
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 section .text
 
@@ -623,7 +625,9 @@ section .text
 ;; file is the only place that knows which of its fields are owned.
 ;; ============================================================================
 
-; ---- module_traverse / module_clear ----
+;; ============================================================================
+;; ---- module_traverse / module_clear ----
+;; ============================================================================
 DEF_FUNC module_traverse
     push rbx
     mov rbx, rdi
@@ -638,7 +642,7 @@ DEF_FUNC module_traverse
     ret
 END_FUNC module_traverse
 
-DEF_FUNC module_clear_gc
+DEF_FUNC module_clear_gc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 

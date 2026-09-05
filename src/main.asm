@@ -31,11 +31,13 @@ extern sys_modules_dict
 extern sys_module_obj
 extern sys_write
 
-; main(int argc, char **argv) -> int
-; The 8 pads the five pushes to a 16-aligned rsp.  main holds argc and argv in
-; r14/r15 across the whole compile, so a source file with a float literal
-; reaches glibc's strtod from here -- and that is one of the few call paths out
-; of this codebase that actually uses aligned SSE.
+;; ============================================================================
+;; main(int argc, char **argv) -> int
+;; The 8 pads the five pushes to a 16-aligned rsp.  main holds argc and argv in
+;; r14/r15 across the whole compile, so a source file with a float literal
+;; reaches glibc's strtod from here -- and that is one of the few call paths out
+;; of this codebase that actually uses aligned SSE.
+;; ============================================================================
 DEF_FUNC main, 8
     push rbx
     push r12
@@ -221,6 +223,13 @@ DEF_FUNC main, 8
     mov rsi, r15                ; argv
     call import_init
 
+    ; SIGINT raises KeyboardInterrupt rather than killing the process where it
+    ; stands, which is what every `except KeyboardInterrupt` in the stdlib is
+    ; written against.  After import_init, because it builds a builtin
+    ; function object and the type machinery has to be up.
+    extern signal_default_init
+    call signal_default_init
+
     ; Set sys.path[0] to script directory
     mov rdi, rbx                ; pyc filename
     call sys_path_add_script_dir
@@ -340,6 +349,16 @@ DEF_FUNC main, 8
 
     ; Print the traceback and the exception, CPython's shape.
     extern traceback_print
+    ; Whatever is waiting on stdout goes out before the report does.  CPython
+    ; flushes both streams in flush_io() on its way into the display routine,
+    ; and it is what puts a program's output ahead of the traceback that ended
+    ; it rather than after: the two streams are buffered differently, so
+    ; without this the order through a pipe came out inverted.  The unraisable
+    ; hook does NOT do it -- CPython's does not either.
+    push rdi
+    extern fileobj_flush_std
+    call fileobj_flush_std
+    pop rdi
     call traceback_print
 
     ; DECREF the exception object before exiting
@@ -427,6 +446,13 @@ DEF_FUNC main, 8
     xor ebx, ebx
 
 .exit_cleanup:
+    ; Whatever is still waiting in stdout's buffer goes out first, and before
+    ; the collection below: a __del__ that prints has to reach the same
+    ; stream, in order, and a buffer abandoned at exit is output that was
+    ; produced and never seen.
+    extern fileobj_flush_std
+    call fileobj_flush_std
+
     ; Break sys.modules cycle: sys_modules_dict -> sys module -> sys_dict
     ;   -> "modules" entry -> sys_modules_dict
     ; NULL out sys_module.mod_dict and DECREF the old dict twice:
@@ -503,6 +529,16 @@ DEF_FUNC main, 8
     mov rdi, [rel current_exception]
     test rdi, rdi
     jz .load_failed_plain
+    ; Whatever is waiting on stdout goes out before the report does.  CPython
+    ; flushes both streams in flush_io() on its way into the display routine,
+    ; and it is what puts a program's output ahead of the traceback that ended
+    ; it rather than after: the two streams are buffered differently, so
+    ; without this the order through a pipe came out inverted.  The unraisable
+    ; hook does NOT do it -- CPython's does not either.
+    push rdi
+    extern fileobj_flush_std
+    call fileobj_flush_std
+    pop rdi
     call traceback_print
     mov rdi, [rel current_exception]
     call obj_decref

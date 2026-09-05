@@ -56,7 +56,7 @@ BA_TYPE  equ 8
 BA_BUF   equ 16
 BA_LEN   equ 24
 BA_SIZE  equ 32
-BA_FRAME equ 48             ; + 1 push = 56, not 16-aligned
+BA_FRAME equ 56            ; + 1 push = 64, 16-aligned
 DEF_FUNC bytearray_type_call, BA_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     push rbx
@@ -1674,7 +1674,7 @@ END_FUNC bytearray_export_released
 ;; ============================================================================
 ;; The buffer is a separate allocation now, so freeing the object is not
 ;; enough.  ob_bytes is NULL for an object whose constructor failed part way.
-DEF_FUNC bytearray_dealloc
+DEF_FUNC bytearray_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyByteArrayObject.ob_bytes]
@@ -1704,7 +1704,7 @@ END_FUNC bytearray_len
 ;; bytes iterator; the index is checked against the current length each time,
 ;; so a bytearray that shrinks under the iterator just ends early.
 ;; ============================================================================
-DEF_FUNC bytearray_tp_iter
+DEF_FUNC bytearray_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov edi, PyBytesIterObject_size
@@ -1742,7 +1742,7 @@ DEF_FUNC bytearray_iter_self
     ret
 END_FUNC bytearray_iter_self
 
-DEF_FUNC bytearray_iter_dealloc
+DEF_FUNC bytearray_iter_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyBytesIterObject.it_seq]
@@ -1829,6 +1829,7 @@ bytearray_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; What bytearray_data hands back when ob_bytes is NULL, so no reader has to
 ; test for it.
@@ -1872,6 +1873,7 @@ memoryview_iter_type:
     dq 0                            ; tp_traverse
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 align 8
 global bytearray_iter_type
@@ -1903,6 +1905,7 @@ bytearray_iter_type:
     dq 0                            ; tp_traverse
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 section .rodata
 ; The extended-slice assignment's two-part message, and the constructor's.

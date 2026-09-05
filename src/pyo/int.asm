@@ -175,7 +175,9 @@ END_FUNC smallint_to_pyint
 ;; Parse integer from string with given base (0 = auto-detect, 2-36).
 ;; Handles leading/trailing whitespace, sign, 0b/0o/0x prefixes, underscores.
 ;; ============================================================================
-; Frame layout for int_from_cstr_base
+;; ============================================================================
+;; Frame layout for int_from_cstr_base
+;; ============================================================================
 IB_SRC    equ 8          ; original string ptr
 IB_BASE   equ 16         ; resolved base
 IB_SIGN   equ 24         ; 0 = positive, 1 = negative
@@ -2524,7 +2526,7 @@ END_FUNC int_invert
 ;; produces.  The operators that always compute through GMP -- shift and power
 ;; -- hand their result through this on the way out.
 ;; ============================================================================
-DEF_FUNC int_shrink
+DEF_FUNC int_shrink, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     cmp qword [rbx + PyIntObject.compact], 0
@@ -2765,7 +2767,7 @@ END_FUNC int_rshift
 ;; ============================================================================
 IPW_ETAG  equ 8             ; the exponent's tag, across the GMP calls
 IPW_BASED equ 16            ; the base as a double, likewise
-IPW_FRAME equ 24            ; + 4 pushes = 8 + 24 + 32 = 64, 16-aligned
+IPW_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC int_power, IPW_FRAME
     call int_binop_unpack       ; rdi/edx = base, rsi/ecx = exponent, both ints
     test eax, eax
@@ -3140,7 +3142,7 @@ END_FUNC int_get_denominator
 ;; builtin_abs's own inline path, so the slot -- and `(-5).__abs__()` with it
 ;; -- was simply absent.
 ;; ============================================================================
-DEF_FUNC int_abs
+DEF_FUNC int_abs, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi                ; the operand, as it arrived
     V_UNPACK rdi, rdx
@@ -3277,3 +3279,4 @@ int_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots

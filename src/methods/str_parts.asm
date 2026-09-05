@@ -83,7 +83,7 @@ END_FUNC str_method_istitle
 ;; ============================================================================
 PT_SELF   equ 8
 PT_SEP    equ 16
-PT_FRAME  equ 16            ; + 3 pushes = 40, not 16-aligned
+PT_FRAME  equ 24            ; + 3 pushes = 48, 16-aligned
 DEF_FUNC str_method_partition, PT_FRAME
     push rbx
     push r12
@@ -335,7 +335,7 @@ DEF_FUNC str_method_expandtabs, ET_FRAME
     mov rax, rdi
     mov rdi, [rax + 8]
     V_UNPACK rdi, rdx       ; args[1]
-    call int_to_i64
+    call obj_as_index       ; a tabsize is an index, and names its own type
     mov r13, rax
 .et_have_tab:
     mov [rbp - ET_TAB], r13
@@ -763,7 +763,7 @@ TRN_LEN   equ 80            ; a bounded table's length, or -1
 TRN_CHLEN equ 88            ; how many bytes the current character occupies
 TRN_HEAP  equ 96            ; 1 when the table is a user class: ask __getitem__
                             ; through dunder_call_2, which comes back
-TRN_FRAME equ 104           ; + 2 pushes = 120, 16-aligned
+TRN_FRAME equ 112            ; + 2 pushes = 128, 16-aligned
 
 extern bytearray_type
 extern bytes_type
@@ -1622,7 +1622,8 @@ SE_EID   equ 48             ; 0 strict, 1 ignore, 2 replace
 SE_ARGS  equ 56
 SE_NARGS equ 64
 SE_CURSOR equ 72            ; the source cursor, across codec_error_id
-SE_FRAME equ 80             ; + 2 pushes = 96
+SE_ENC   equ 80             ; the encoding argument, for the Python path
+SE_FRAME equ 96             ; + 2 pushes = 112
 DEF_FUNC str_method_encode, SE_FRAME
     push rbx
     push r12
@@ -1667,9 +1668,34 @@ DEF_FUNC str_method_encode, SE_FRAME
     mov rcx, [rcx + 16]
     mov [rbp - SE_ERRS], rcx
 .se_no_errors:
+    ; The type is checked here rather than on the error path, which is where
+    ; CPython checks it: "abc".encode("utf-8", 5) is a TypeError there and
+    ; answered b'abc' here, because a clean string never looked at errors= at
+    ; all.  bytes.decode has had the same check for a while.
+    mov rdi, [rbp - SE_ERRS]
+    test rdi, rdi
+    jz .se_errs_ok
+    V_TEST_PTR rdi, rcx
+    ja .se_bad_errtype
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    je .se_errs_ok
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .se_errs_ok
+.se_bad_errtype:
+    CSTRING rdi, `encode() argument 'errors' must be str, not \x01`
+    mov rsi, [rbp - SE_ERRS]
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
+    ud2
+.se_errs_ok:
+    mov [rbp - SE_ENC], rax
     mov rdi, rax
     extern codec_id
     call codec_id
+    cmp eax, -1
+    je .se_python               ; not one of the three: ask the registry
     cmp eax, 1
     je .se_ascii
     cmp eax, 2
@@ -1725,11 +1751,7 @@ DEF_FUNC str_method_encode, SE_FRAME
     mov [rbp - SE_EID], rax
     test eax, eax
     jnz .se_ascii_handled
-    mov rdi, [rbp - SE_SELF]
-    mov rsi, [rbp - SE_CURSOR]
-    mov rdx, 128
-    lea rcx, [rel see_ascii_name]
-    call se_report_unencodable  ; does not return
+    jmp .se_python              ; strict: lib/_codecs raises it, with fields
 
 .se_ascii_handled:
     ; One byte out per code point at most, so the code point count is an upper
@@ -1790,9 +1812,32 @@ DEF_FUNC str_method_encode, SE_FRAME
     V_PACK rax, rdx
     ret
 
+.se_python:
+    ; Everything this file cannot do itself: an encoding the registry has to
+    ; find, and an error handler that is not one of the three built in here.
+    ; The second is reached only once something has actually failed to
+    ; encode, which is also when CPython looks a handler up -- "ab".encode(
+    ; "ascii", "bogus") succeeds there and here.  Re-encoding the whole
+    ; string from Python is the price of arriving in the middle.
+    mov rdi, [rbp - SE_SELF]
+    mov rsi, [rbp - SE_ENC]
+    mov rdx, [rbp - SE_ERRS]
+    xor ecx, ecx                ; encode
+    extern codec_via_python
+    call codec_via_python
+    pop r12
+    pop rbx
+    leave
+    test edx, edx
+    jz .se_python_failed
+    V_PACK rax, rdx
+    ret
+.se_python_failed:
+    xor eax, eax
+    ret
+
 .se_bad_errors:
-    extern exc_LookupError_type
-    RAISE exc_LookupError_type, "unknown error handler name"
+    jmp .se_python
 
 .se_latin1:
     ; One byte per code point, for the code points that fit in one.  A
@@ -1873,11 +1918,7 @@ DEF_FUNC str_method_encode, SE_FRAME
     jmp .se_l1_loop
 
 .se_l1_strict:
-    mov rdi, [rbp - SE_SELF]
-    mov rsi, rcx
-    mov rdx, 256
-    lea rcx, [rel see_latin1_name]
-    call se_report_unencodable  ; does not return
+    jmp .se_python              ; strict: lib/_codecs raises it, with fields
 
 .se_l1_done:
     mov rax, [rbp - SE_OUT]
@@ -1924,7 +1965,7 @@ SRE_CP    equ 8
 SRE_POS   equ 16
 SRE_NAME  equ 24
 SRE_LIMIT equ 32
-SRE_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+SRE_FRAME equ 56            ; + 1 push = 64, 16-aligned
 DEF_FUNC_LOCAL str_raise_encode_error, SRE_FRAME
     push rbx
     mov [rbp - SRE_CP], rdi
@@ -2029,7 +2070,7 @@ SRU_LIMIT equ 24
 SRU_NAME  equ 32
 SRU_CP    equ 40
 SRU_SPAN  equ 48
-SRU_FRAME equ 64            ; + 1 push = 72, not 16-aligned
+SRU_FRAME equ 72            ; + 1 push = 80, 16-aligned
 DEF_FUNC_LOCAL se_report_unencodable, SRU_FRAME
     push rbx
     mov [rbp - SRU_STR], rdi

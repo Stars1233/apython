@@ -54,7 +54,8 @@ MF_CLOSURE equ 24
 MF_DEFAULTS equ 32
 MF_KWDEFS  equ 40
 MF_CTAG    equ 48
-MF_FRAME   equ 48           ; + 0 pushes = 48
+MF_ANNOS   equ 56
+MF_FRAME   equ 64           ; + 0 pushes = 64
 
 ; op_call_function_ex locals (manual frame, push rbx; push r12; sub rsp, 48)
 CFX_FUNC    equ 32
@@ -325,7 +326,7 @@ END_FUNC op_call
 ;; Stack order (when flags set, bottom to top):
 ;;   defaults tuple (if flag 0x01)
 ;;   kwdefaults dict (if flag 0x02)
-;;   annotations (if flag 0x04) - ignored
+;;   annotations (if flag 0x04) - a tuple of alternating name and value
 ;;   closure tuple (if flag 0x08)
 ;;   code_obj (always on top)
 ;; ============================================================================
@@ -335,6 +336,7 @@ DEF_FUNC op_make_function, MF_FRAME
     mov qword [rbp - MF_CLOSURE], 0          ; closure = NULL default
     mov qword [rbp - MF_DEFAULTS], 0          ; defaults = NULL default
     mov qword [rbp - MF_KWDEFS], 0          ; kwdefaults = NULL default
+    mov qword [rbp - MF_ANNOS], 0           ; annotations = NULL default
 
     ; Pop code object from value stack (always TOS)
     VPOP_VAL rdi, rax
@@ -350,12 +352,15 @@ DEF_FUNC op_make_function, MF_FRAME
     mov [rbp - MF_CLOSURE], rax              ; save closure tuple
 .mf_no_closure:
 
-    ; annotations (0x04) - pop and discard
+    ; annotations (0x04) - pop and save (transfer ownership to func).  It was
+    ; popped and thrown away, so every function in the process reported no
+    ; __annotations__ at all -- and functools.singledispatch's `@register` on
+    ; an annotated function reads exactly that to find the type to dispatch
+    ; on, which is how one missing attribute stopped importlib.resources.
     test ecx, MAKE_FUNC_ANNOTATIONS
     jz .mf_no_annotations
     VPOP rdi
-    DECREF_V rdi, rsi
-    mov ecx, [rbp - MF_FLAGS]              ; reload flags (DECREF clobbers ecx)
+    mov [rbp - MF_ANNOS], rdi
 .mf_no_annotations:
 
     ; kwdefaults (0x02) - pop and save (transfer ownership to func)
@@ -389,6 +394,10 @@ DEF_FUNC op_make_function, MF_FRAME
     ; Set kwdefaults if present (transfer ownership, no INCREF needed)
     mov rcx, [rbp - MF_KWDEFS]
     mov [rax + PyFuncObject.func_kwdefaults], rcx
+
+    ; Set annotations if present (transfer ownership, no INCREF needed)
+    mov rcx, [rbp - MF_ANNOS]
+    mov [rax + PyFuncObject.func_annotations], rcx
 
     ; Save func obj, DECREF the code object (tag-aware)
     push rax
@@ -425,7 +434,7 @@ CFX_KWNAMES equ 104      ; kw_names tuple
 CFX_RETTAG  equ 112      ; return tag from tp_call
 CFX_TEMP    equ 120      ; temp args buffer for fat tuple extraction
 CFX_FUNC_TAG equ 128     ; func tag for SmallInt check
-CFX_FRAME2  equ 136      ; new frame size (manual push, so offset from rbp-16)
+CFX_FRAME2  equ 144      ; new frame size (manual push, so offset from rbp-16)
 
 DEF_FUNC op_call_function_ex
     push rbx                        ; save (clobbered by eval convention save)

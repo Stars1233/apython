@@ -113,6 +113,22 @@ extern sys_link
 extern sys_chown
 extern sys_fchmod
 extern sys_fsync
+extern posix_fork
+extern posix_execv
+extern posix_close_range
+extern posix_exit_now
+extern posix_kill
+extern posix_setsid
+extern posix_register_at_fork
+extern pm_atfork_before
+extern pm_atfork_parent
+extern pm_atfork_child
+extern list_type
+extern sys_fork
+extern sys_execve
+extern sys_exit_now
+extern sys_kill
+extern sys_setsid
 extern sys_dup2
 extern sys_utimensat
 extern tuple_type
@@ -960,7 +976,8 @@ PRM_ARG   equ 16
 PRM_POS   equ 24
 PRM_BUF   equ 208
 PRM_FRAME equ 208           ; + 0 pushes = 208, 16-aligned
-DEF_FUNC_LOCAL posix_raise_missing, PRM_FRAME
+global posix_raise_missing
+DEF_FUNC posix_raise_missing, PRM_FRAME
     mov [rbp - PRM_FUNC], rdi
     mov [rbp - PRM_ARG], rsi
     mov [rbp - PRM_POS], rdx
@@ -1133,7 +1150,7 @@ PRN_DST   equ 16
 PRN_SPTR  equ 24
 PRN_SOWN  equ 32            ; what each posix_path_arg asked us to release
 PRN_DOWN  equ 40
-PRN_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+PRN_FRAME equ 56            ; + 1 push = 64, 16-aligned
 
 DEF_FUNC posix_rename, PRN_FRAME
     push rbx
@@ -1211,7 +1228,7 @@ PSL_DST   equ 16
 PSL_SPTR  equ 24
 PSL_SOWN  equ 32
 PSL_DOWN  equ 40
-PSL_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+PSL_FRAME equ 56            ; + 1 push = 64, 16-aligned
 
 DEF_FUNC posix_symlink, PSL_FRAME
     push rbx
@@ -1427,7 +1444,7 @@ END_FUNC posix_open
 ;; raw bits, and posix.close("x") read PyStrObject.ob_length as the number --
 ;; 1 for a one-character string -- and closed stdout, silently.
 ;; ============================================================================
-DEF_FUNC posix_int_arg
+DEF_FUNC posix_int_arg, 8            ; 1 pushes, so rsp is 16-aligned
     push rdi
     V_UNPACK rdi, rdx
     call int_is_integer
@@ -1469,7 +1486,6 @@ END_FUNC posix_int_arg
 DEF_FUNC posix_raise_typename
     push rbx
     push r12
-    sub rsp, 8
     mov rbx, rdi
     mov r12, rdx
     lea rdi, [rel pm_msgbuf]
@@ -1934,7 +1950,7 @@ END_FUNC posix_ftruncate
 PTR_PATH  equ 8
 PTR_OWNED equ 16
 PTR_LEN   equ 24
-PTR_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+PTR_FRAME equ 40            ; + 1 push = 48, 16-aligned
 DEF_FUNC posix_truncate, PTR_FRAME
     push rbx
     cmp rsi, 2
@@ -1979,7 +1995,7 @@ PLK_SOWN  equ 16
 PLK_SPTR  equ 24
 PLK_DST   equ 32
 PLK_DOWN  equ 40
-PLK_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+PLK_FRAME equ 56            ; + 1 push = 64, 16-aligned
 DEF_FUNC posix_link, PLK_FRAME
     push rbx
     cmp rsi, 2
@@ -2056,7 +2072,7 @@ PCH_PATH  equ 8
 PCH_OWNED equ 16
 PCH_UID   equ 24
 PCH_GID   equ 32
-PCH_FRAME equ 48            ; + 1 push = 56, not 16-aligned
+PCH_FRAME equ 56            ; + 1 push = 64, 16-aligned
 DEF_FUNC posix_chown, PCH_FRAME
     push rbx
     cmp rsi, 3
@@ -2173,7 +2189,16 @@ DEF_FUNC posix_dup2, 16
 .pd2_argerr:
     PM_MISSING "dup2", "fd2", 2
 END_FUNC posix_dup2
-
+;;
+;; The argv array is built on the machine stack rather than the heap: this
+;; runs in a freshly forked child, where the allocator's locks belong to a
+;; thread that no longer exists.  There is one thread here, so that is
+;; theatre -- but the array has to outlive nothing, and the stack is where it
+;; naturally goes.
+;; ============================================================================
+; The vector grows UPWARD from its base, so its slot is the DEEPEST one --
+; naming it 32 put the first pointer over PXV_ARGS and the second over
+; PXV_PATH.
 ;; posix.utime(path, times=None)
 ;;
 ;; utimensat is the only member of the family Linux still keeps.  A NULL
@@ -2182,7 +2207,7 @@ END_FUNC posix_dup2
 PUT_PATH  equ 8
 PUT_OWNED equ 16
 PUT_TIMES equ 48            ; two struct timespec, 16 bytes each
-PUT_FRAME equ 64            ; + 1 push = 72, not 16-aligned
+PUT_FRAME equ 72            ; + 1 push = 80, 16-aligned
 DEF_FUNC posix_utime, PUT_FRAME
     push rbx
     test rsi, rsi
@@ -2994,6 +3019,28 @@ DEF_FUNC posix_module_create, 40
     MODULE_ADD_FUNC posix_fchmod, pm_n_fchmod
     MODULE_ADD_FUNC posix_fsync, pm_n_fsync
     MODULE_ADD_FUNC posix_dup2, pm_n_dup2
+    ; The three fork-hook lists.  Built here rather than lazily so that
+    ; register_at_fork and fork can both assume they exist.
+    xor edi, edi
+    call list_new
+    mov [rel pm_atfork_before], rax
+    xor edi, edi
+    call list_new
+    mov [rel pm_atfork_parent], rax
+    xor edi, edi
+    call list_new
+    mov [rel pm_atfork_child], rax
+
+    MODULE_ADD_FUNC posix_fork, pm_n_fork
+    MODULE_ADD_FUNC posix_register_at_fork, pm_n_reg_at_fork
+    MODULE_ADD_FUNC posix_execv, pm_n_execv
+    ; execve is the same function: it takes the environment as a third
+    ; argument, and execv is that call with the argument left off.
+    MODULE_ADD_FUNC posix_execv, pm_n_execve
+    MODULE_ADD_FUNC posix_close_range, pm_n_close_range
+    MODULE_ADD_FUNC posix_exit_now, pm_n_exit_now
+    MODULE_ADD_FUNC posix_kill, pm_n_kill
+    MODULE_ADD_FUNC posix_setsid, pm_n_setsid
     MODULE_ADD_FUNC posix_utime, pm_n_utime
     MODULE_ADD_FUNC posix_get_inheritable, pm_n_get_inheritable
     MODULE_ADD_FUNC posix_set_inheritable, pm_n_set_inheritable
@@ -3157,6 +3204,14 @@ pm_n_chown:      db "chown", 0
 pm_n_fchmod:     db "fchmod", 0
 pm_n_fsync:      db "fsync", 0
 pm_n_dup2:       db "dup2", 0
+pm_n_fork:       db "fork", 0
+pm_n_reg_at_fork: db "register_at_fork", 0
+pm_n_execv:      db "execv", 0
+pm_n_execve:     db "execve", 0
+pm_n_close_range: db "closerange", 0
+pm_n_exit_now:   db "_exit", 0
+pm_n_kill:       db "kill", 0
+pm_n_setsid:     db "setsid", 0
 pm_n_utime:      db "utime", 0
 pm_n_get_inheritable: db "get_inheritable", 0
 pm_n_set_inheritable: db "set_inheritable", 0
@@ -3338,6 +3393,7 @@ stat_result_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
+    dq 0                        ; tp_tailslots
     dq sr_desc                  ; STRUCTSEQ_DESC
 
 align 8
@@ -3370,6 +3426,7 @@ uname_result_type:
     dq 0
     dq 0
     dq 0
+    dq 0                        ; tp_tailslots
     dq un_desc                  ; STRUCTSEQ_DESC, one qword past the type
 
 align 8
@@ -3402,8 +3459,10 @@ terminal_size_type:
     dq 0
     dq 0
     dq 0
+    dq 0                        ; tp_tailslots
     dq ts_desc                  ; STRUCTSEQ_DESC, one qword past the type
 
 section .rodata
 align 8
 psr_1e9: dq 0x41cdcd6500000000     ; 1e9 as IEEE 754 double
+

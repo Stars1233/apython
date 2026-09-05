@@ -27,6 +27,18 @@ extern ast_obj
 extern ast_obj_at
 extern ast_push
 extern ast_set_ctx
+extern exc_SyntaxError_type
+extern comp_msg_start
+extern comp_msg_cstr
+extern ap_strcmp
+extern par_bad_target
+extern comp_msg_i64
+extern comp_error_span
+extern ast_take_typecomment
+extern ast_park_typecomment
+extern ast_claim_typecomment
+extern exc_IndentationError_type
+extern ast_span_at
 extern comp_error
 extern comp_intern
 extern buf_free
@@ -75,11 +87,30 @@ DEF_FUNC par_module, PM_FRAME
     call par_kind
     cmp eax, TOK_ENDMARKER
     je .done
+    ; An INDENT where a statement should start is an indentation error, not a
+    ; grammar one, and CPython says so: "unexpected indent", at the first
+    ; non-blank column and running to the end of the line.
+    cmp eax, TOK_INDENT
+    je .bad_indent
     cmp eax, TOK_NEWLINE
     jne .stmt
     mov rdi, rbx
     call par_advance
     jmp .loop
+
+.bad_indent:
+    mov rdi, rbx
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov r8d, [rax + Token.col]
+    mov r9d, ecx
+    mov r10d, -2                        ; CPython's end_offset here is -1
+    mov rdi, rbx
+    lea rsi, [rel exc_IndentationError_type]
+    CSTRING rdx, "unexpected indent"
+    call comp_error_span
+    jmp .fail
+
 .stmt:
     ; par_statement_any, not par_simple_stmts: a compound statement consumes
     ; its own suite and the DEDENT that ends it, so there is no NEWLINE left
@@ -111,14 +142,18 @@ END_FUNC par_module
 ;; One logical line: `stmt (';' stmt)* NEWLINE`, each pushed onto the pending
 ;; stack for whatever list is being built.
 ;; ============================================================================
-DEF_FUNC par_simple_stmts, 8
+PSS_STMT  equ 8
+PSS_FRAME equ 16            ; + 1 push = 24... one word more to land right
+DEF_FUNC par_simple_stmts, 24           ; + 1 push = 32, 16-aligned
     push rbx
     mov rbx, rdi
+    mov qword [rbp - PSS_STMT], 0
 .loop:
     mov rdi, rbx
     call par_statement
     test eax, eax
     jz .fail
+    mov [rbp - PSS_STMT], rax
     mov rdi, rbx
     mov rsi, rax
     call ast_push
@@ -143,6 +178,21 @@ DEF_FUNC par_simple_stmts, 8
     call par_kind
     cmp eax, TOK_ENDMARKER
     je .ok
+    ; Python 2's print and exec are the one shape CPython guesses at:
+    ; `print 'hi'` gets "Missing parentheses in call to 'print'. Did you mean
+    ; print(...)?", spanning the whole line.  It is worth the special case
+    ; because the statement is otherwise a bare name followed by nonsense,
+    ; and the message a beginner needs is not "invalid syntax".
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_NEWLINE
+    je .pss_have_newline
+    mov rdi, rbx
+    mov rsi, [rbp - PSS_STMT]
+    call pss_py2_statement
+    test eax, eax
+    jnz .fail
+.pss_have_newline:
     mov rdi, rbx
     mov esi, TOK_NEWLINE
     CSTRING rdx, "invalid syntax"
@@ -160,6 +210,104 @@ DEF_FUNC par_simple_stmts, 8
     leave
     ret
 END_FUNC par_simple_stmts
+
+;; ============================================================================
+;; pss_py2_statement(Comp *c, uint32_t stmt) -> rax = 1 when it reported a
+;; Python 2 print or exec statement, 0 when this is not one
+;;
+;; `print 'hi'` parses as the bare name `print` and then stops, because a
+;; string does not follow a name.  CPython recognises exactly that shape and
+;; says what to do about it, spanning from the name to the end of the line.
+;; ============================================================================
+PPS_COMP  equ 8
+PPS_STMT  equ 16
+PPS_NAME  equ 24
+PPS_FRAME equ 32            ; + 1 push = 40... one more word to land right
+DEF_FUNC_LOCAL pss_py2_statement, 40    ; + 1 push = 48, 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PPS_COMP], rdi
+    mov [rbp - PPS_STMT], rsi
+    test rsi, rsi
+    jz .pps_no
+
+    ; The statement has to be an expression statement holding a bare name.
+    mov rdi, rbx
+    mov rsi, [rbp - PPS_STMT]
+    call ast_at
+    cmp byte [rax + AstNode.kind], AST_EXPR_STMT
+    jne .pps_no
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_at
+    cmp byte [rax + AstNode.kind], AST_NAME
+    jne .pps_no
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - PPS_NAME], rcx
+    mov r8d, [rax + AstNode.col]
+    mov [rbp - PPS_NAME + 4], r8d
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    test rax, rax
+    jz .pps_no
+    mov rbx, rax
+
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "print"
+    call ap_strcmp
+    test eax, eax
+    jz .pps_report
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "exec"
+    call ap_strcmp
+    test eax, eax
+    jnz .pps_no
+
+.pps_report:
+    ; "Missing parentheses in call to 'print'. Did you mean print(...)?",
+    ; from the name to the end of the line.
+    call comp_msg_start
+    push rax
+    mov rdi, rax
+    CSTRING rsi, "Missing parentheses in call to '"
+    call comp_msg_cstr
+    mov rdi, rax
+    lea rsi, [rbx + PyStrObject.data]
+    call comp_msg_cstr
+    mov rdi, rax
+    CSTRING rsi, "'. Did you mean "
+    call comp_msg_cstr
+    mov rdi, rax
+    lea rsi, [rbx + PyStrObject.data]
+    call comp_msg_cstr
+    mov rdi, rax
+    CSTRING rsi, "(...)?"
+    call comp_msg_cstr
+    pop rdx
+
+    ; The span ends where the token that follows the name does, which for a
+    ; whole `print 'hi'` is the end of the line.
+    mov rdi, [rbp - PPS_COMP]
+    call par_peek
+    mov r9d, [rax + Token.lineno]
+    mov r10d, [rax + Token.col]
+    add r10d, [rax + Token.len]
+    mov ecx, [rbp - PPS_NAME]
+    mov r8d, [rbp - PPS_NAME + 4]
+    mov rdi, [rbp - PPS_COMP]
+    lea rsi, [rel exc_SyntaxError_type]
+    call comp_error_span
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.pps_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC pss_py2_statement
 
 ;; ============================================================================
 ;; par_statement(Comp *c) -> rax = a statement node, 0 on error
@@ -231,6 +379,7 @@ PE2_MARK  equ 32
 PE2_OP    equ 40
 PE2_NODE  equ 48
 PE2_PAREN equ 56         ; 1 when the statement began with '(' -- see .annassign
+PE2_BAD   equ 64         ; the target an assignment was refused for
 PE2_FRAME equ 72         ; + 1 push = 80
 DEF_FUNC par_expr_stmt, PE2_FRAME
     push rbx
@@ -312,6 +461,7 @@ DEF_FUNC par_expr_stmt, PE2_FRAME
     push rdx
     mov rax, [rbx + Comp.pending + Buf.data]
     mov esi, [rax + rdx*4]
+    mov [rbp - PE2_BAD], rsi
     mov rdi, rbx
     mov edx, CTX_STORE
     call ast_set_ctx
@@ -335,6 +485,11 @@ DEF_FUNC par_expr_stmt, PE2_FRAME
     call ast_at
     mov rdx, [rbp - PE2_FIRST]
     mov [rax + AstNode.b], edx          ; the value
+    ; `x = 1  # type: int`.  The comment token sits between the value and the
+    ; NEWLINE, which is where the tokenizer found it.
+    mov rdi, rbx
+    mov rsi, [rbp - PE2_NODE]
+    call ast_take_typecomment
     mov rax, [rbp - PE2_NODE]
     pop rbx
     leave
@@ -346,6 +501,7 @@ DEF_FUNC par_expr_stmt, PE2_FRAME
     call par_advance                    ; consume the operator
     mov rdi, rbx
     mov rsi, [rbp - PE2_FIRST]
+    mov [rbp - PE2_BAD], rsi
     mov edx, CTX_STORE
     call ast_set_ctx
     test eax, eax
@@ -382,6 +538,7 @@ DEF_FUNC par_expr_stmt, PE2_FRAME
     call par_advance                    ; consume ':'
     mov rdi, rbx
     mov rsi, [rbp - PE2_FIRST]
+    mov [rbp - PE2_BAD], rsi
     mov edx, CTX_STORE
     call ast_set_ctx
     test eax, eax
@@ -438,9 +595,13 @@ DEF_FUNC par_expr_stmt, PE2_FRAME
     ret
 
 .bad_target:
+    ; CPython names the kind of thing that cannot be a target, spans the
+    ; target itself, and -- because an `=` where `==` was meant is the usual
+    ; cause -- says so.
     mov rdi, rbx
-    CSTRING rsi, "cannot assign to that expression"
-    call par_syntax_error
+    mov esi, [rbp - PE2_BAD]
+    CSTRING rdx, " here. Maybe you meant '==' instead of '='?"
+    call par_bad_target
     jmp .fail
 .bad_aug_target:
     mov rdi, rbx
@@ -733,7 +894,7 @@ DEF_FUNC_LOCAL ps_scope, PK2_FRAME
     ret
 .need_name:
     mov rdi, rbx
-    CSTRING rsi, "expected a name"
+    CSTRING rsi, "invalid syntax"
     call par_syntax_error
 .fail:
     xor eax, eax
@@ -956,7 +1117,7 @@ DEF_FUNC par_dotted_name, PDN_FRAME
     ret
 .need_name:
     mov rdi, rbx
-    CSTRING rsi, "expected a module name"
+    CSTRING rsi, "invalid syntax"
     call par_syntax_error
 .fail:
     lea rdi, [rbp - PDN_BUF]
@@ -996,7 +1157,7 @@ DEF_FUNC par_name_obj, 8
     ret
 .bad:
     mov rdi, rbx
-    CSTRING rsi, "expected a name"
+    CSTRING rsi, "invalid syntax"
     call par_syntax_error
 .fail:
     xor eax, eax
@@ -1287,6 +1448,92 @@ DEF_FUNC_LOCAL ps_from, PFR_FRAME
     ret
 END_FUNC ps_from
 
+
+;; ============================================================================
+;; SUITE_FOR text, line -- what an indented block is expected AFTER
+;;
+;; CPython says "expected an indented block after 'if' statement on line 3",
+;; and the statement is the one thing par_suite cannot see: it is called from
+;; fourteen places and takes only a Comp*.  Two file-local words carry it,
+;; which is safe because par_suite reads them before it can descend into a
+;; nested suite that would overwrite them.
+;; ============================================================================
+%macro SUITE_FOR 2              ; %1 = the text, %2 = a source of the line
+    CSTRING rax, %1
+    mov [rel psu_what], rax
+    mov eax, %2
+    mov [rel psu_line], eax
+%endmacro
+
+;; SUITE_FOR_HERE text -- the same, for a clause that is its own statement.
+;; `else`, `except` and `finally` are blamed on THEIR line, not on the line
+;; the `if` or the `try` opened on, so the line comes from the token the
+;; parser is looking at.  Clobbers rax and rdi; rbx must be the Comp*.
+%macro SUITE_FOR_HERE 1
+    mov rdi, rbx
+    call par_peek
+    mov eax, [rax + Token.lineno]
+    mov [rel psu_line], eax
+    CSTRING rax, %1
+    mov [rel psu_what], rax
+%endmacro
+
+section .bss
+psu_what: resq 1
+psu_line: resd 1
+psu_pad:  resd 1
+section .text
+
+;; ============================================================================
+;; psu_no_block(Comp *c) -> rax = 0, always
+;;
+;; "expected an indented block after <what> on line <n>", spanning the token
+;; that turned up instead -- CPython covers the whole of it, not its first
+;; character.
+;; ============================================================================
+PNB_COMP equ 8
+PNB_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL psu_no_block, PNB_FRAME
+    mov [rbp - PNB_COMP], rdi
+    call comp_msg_start
+    push rax
+    mov rdi, rax
+    CSTRING rsi, "expected an indented block"
+    call comp_msg_cstr
+    cmp qword [rel psu_what], 0
+    je .pnb_done
+    mov rdi, rax
+    CSTRING rsi, " after "
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rel psu_what]
+    call comp_msg_cstr
+    mov rdi, rax
+    CSTRING rsi, " on line "
+    call comp_msg_cstr
+    mov rdi, rax
+    mov esi, [rel psu_line]
+    call comp_msg_i64
+.pnb_done:
+    pop rdx                     ; the message
+
+    mov rdi, [rbp - PNB_COMP]
+    push rdx
+    call par_peek
+    pop rdx
+    mov ecx, [rax + Token.lineno]
+    mov r8d, [rax + Token.col]
+    mov r9d, ecx
+    mov r10d, [rax + Token.len]
+    add r10d, r8d               ; the end of the token, not the next column
+    mov rdi, [rbp - PNB_COMP]
+    lea rsi, [rel exc_SyntaxError_type]
+    call comp_error_span
+    xor eax, eax
+    leave
+    ret
+END_FUNC psu_no_block
+
 ;; ============================================================================
 ;; par_suite(Comp *c) -> rax = an AST_BLOCK node, 0 on error
 ;;
@@ -1310,6 +1557,10 @@ DEF_FUNC par_suite, PSU_FRAME
     call par_expect
     test eax, eax
     jz .fail
+    ; `for x in y:  # type: int` -- the comment belongs to the statement, and
+    ; the statement's node does not exist yet.
+    mov rdi, rbx
+    call ast_park_typecomment
 
     mov rdi, rbx
     call ast_mark
@@ -1330,12 +1581,22 @@ DEF_FUNC par_suite, PSU_FRAME
 .block:
     mov rdi, rbx
     call par_advance                    ; the NEWLINE
+    ; A `# type:` comment on its own line sits between the NEWLINE and the
+    ; INDENT, and belongs to the statement whose suite this is.  Only the
+    ; first is taken, so an inline one on the header wins -- as CPython's
+    ; grammar makes it.
     mov rdi, rbx
-    mov esi, TOK_INDENT
-    CSTRING rdx, "expected an indented block"
-    call par_expect
-    test eax, eax
-    jz .fail
+    call ast_park_typecomment
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_INDENT
+    je .have_indent
+    mov rdi, rbx
+    call psu_no_block
+    jmp .fail
+.have_indent:
+    mov rdi, rbx
+    call par_advance
 .stmts:
     mov rdi, rbx
     call par_kind
@@ -1467,6 +1728,7 @@ DEF_FUNC_LOCAL ps_if, PIF_FRAME
     jz .fail
     mov [rbp - PIF_TEST], rax
 
+    SUITE_FOR "'if' statement", dword [rbp - PIF_LINE]
     mov rdi, rbx
     call par_suite
     test rax, rax
@@ -1481,6 +1743,7 @@ DEF_FUNC_LOCAL ps_if, PIF_FRAME
     cmp eax, TOK_ELSE
     jne .build
 
+    SUITE_FOR_HERE "'else' statement"
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
@@ -1555,6 +1818,7 @@ DEF_FUNC_LOCAL ps_while, PIF_FRAME
     jz .fail
     mov [rbp - PIF_TEST], rax
 
+    SUITE_FOR "'while' statement", dword [rbp - PIF_LINE]
     mov rdi, rbx
     call par_suite
     test rax, rax
@@ -1566,6 +1830,7 @@ DEF_FUNC_LOCAL ps_while, PIF_FRAME
     call par_kind
     cmp eax, TOK_ELSE
     jne .build
+    SUITE_FOR_HERE "'else' statement"
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
@@ -1633,6 +1898,7 @@ DEF_FUNC_LOCAL ps_for, PIF_FRAME
     jz .fail
     mov [rbp - PIF_NODE], rax           ; the iterable
 
+    SUITE_FOR "'for' statement", dword [rbp - PIF_LINE]
     mov rdi, rbx
     call par_suite
     test rax, rax
@@ -1644,6 +1910,7 @@ DEF_FUNC_LOCAL ps_for, PIF_FRAME
     call par_kind
     cmp eax, TOK_ELSE
     jne .build
+    SUITE_FOR_HERE "'else' statement"
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
@@ -1668,6 +1935,9 @@ DEF_FUNC_LOCAL ps_for, PIF_FRAME
     mov [rax + AstNode.c], edx          ; c = body block
     mov rdx, [rbp - PIF_ELSE]
     mov [rax + AstNode.clist], edx      ; clist doubles as the else block here
+    mov rdi, rbx
+    mov rsi, [rbp - PIF_MARK]
+    call ast_claim_typecomment
     mov rax, [rbp - PIF_MARK]
     pop rbx
     leave
@@ -1786,7 +2056,9 @@ PP_STAR   equ 64
 PP_VARARG equ 72
 PP_VARKW  equ 80
 PP_NODE   equ 88
-PP_FRAME  equ 88          ; + 1 push = 96
+PP_DEFLT  equ 96          ; have we passed a parameter with a default?
+PP_BAD    equ 104         ; the parameter an error is about
+PP_FRAME  equ 120         ; + 1 push = 128, 16-aligned
 DEF_FUNC par_params, PP_FRAME
     push rbx
     mov rbx, rdi
@@ -1803,6 +2075,8 @@ DEF_FUNC par_params, PP_FRAME
     mov qword [rbp - PP_STAR], 0        ; have we passed the * marker?
     mov qword [rbp - PP_VARARG], 0
     mov qword [rbp - PP_VARKW], 0
+    mov qword [rbp - PP_DEFLT], 0
+    mov qword [rbp - PP_BAD], 0
 
 .loop:
     mov rdi, rbx
@@ -1812,6 +2086,12 @@ DEF_FUNC par_params, PP_FRAME
     cmp eax, TOK_ENDMARKER
     je .build
 
+    ; `**kwargs` is the last thing a parameter list may hold.
+    cmp qword [rbp - PP_VARKW], 0
+    je .not_after_varkw
+    CSTRING rdx, "arguments cannot follow var-keyword argument"
+    jmp .param_error
+.not_after_varkw:
     cmp eax, TOK_SLASH
     je .posonly_marker
     cmp eax, TOK_STAR
@@ -1829,19 +2109,74 @@ DEF_FUNC par_params, PP_FRAME
     call par_param_here
     test rax, rax
     jz .fail
+    mov [rbp - PP_BAD], rax
+    push rax
     mov rdi, rbx
     mov rsi, rax
+    mov rdx, [rbp - PP_MARK]
+    mov rcx, [rbp - PP_VARARG]
+    mov r8, [rbp - PP_VARKW]
+    call pp_duplicate
+    test rax, rax
+    jnz .dup_param
+    pop rsi
+    push rsi
+    mov rdi, rbx
     call ast_push
+    pop rsi
     cmp qword [rbp - PP_STAR], 0
     je .count_pos
     inc qword [rbp - PP_NKW]
     jmp .comma
 .count_pos:
+    ; A default makes every positional parameter after it optional, so one
+    ; without a default cannot follow.  Keyword-only parameters are exempt:
+    ; `def f(*, a=1, b)` is legal, because they are named at the call.
+    mov rdi, rbx
+    mov rsi, [rbp - PP_BAD]
+    call ast_at
+    cmp dword [rax + AstNode.c], 0
+    je .no_default
+    mov qword [rbp - PP_DEFLT], 1
+    jmp .counted
+.no_default:
+    cmp qword [rbp - PP_DEFLT], 0
+    je .counted
+    CSTRING rdx, "parameter without a default follows parameter with a default"
+    jmp .param_error_prev
+.counted:
     inc qword [rbp - PP_NPOS]
     jmp .comma
 
+.dup_param:
+    ; "duplicate argument 'a' in function definition", blamed at the repeat.
+    ; rax is the name pp_duplicate found, a str in the object arena.
+    push rax
+    call comp_msg_start
+    push rax                    ; the buffer, which becomes the message
+    mov rdi, rax
+    CSTRING rsi, "duplicate argument '"
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rsp + 8]
+    add rsi, PyStrObject.data
+    call comp_msg_cstr
+    mov rdi, rax
+    CSTRING rsi, "' in function definition"
+    call comp_msg_cstr
+    pop rdx                     ; the message
+    add rsp, 8                  ; the name
+    jmp .param_error_prev
+
 .posonly_marker:
-    ; Everything so far was positional-only.
+    ; `/` marks the end of the positional-only run, so it cannot come after
+    ; the `*` that ends the positional one.
+    cmp qword [rbp - PP_STAR], 0
+    je .posonly_ok
+    CSTRING rdx, "/ must be ahead of *"
+    jmp .param_error
+.posonly_ok:
+    ; Everything so far was positional-any.
     mov rax, [rbp - PP_NPOS]
     mov [rbp - PP_POSONLY], rax
     mov rdi, rbx
@@ -1868,7 +2203,18 @@ DEF_FUNC par_params, PP_FRAME
     call par_param_here
     test rax, rax
     jz .fail
-    mov [rbp - PP_VARARG], rax
+    mov [rbp - PP_BAD], rax
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, [rbp - PP_MARK]
+    xor ecx, ecx
+    mov r8, [rbp - PP_VARKW]
+    call pp_duplicate
+    pop rcx
+    test rax, rax
+    jnz .dup_param
+    mov [rbp - PP_VARARG], rcx
     jmp .comma
 
 .varkw:
@@ -1883,7 +2229,18 @@ DEF_FUNC par_params, PP_FRAME
     call par_param_here
     test rax, rax
     jz .fail
-    mov [rbp - PP_VARKW], rax
+    mov [rbp - PP_BAD], rax
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, [rbp - PP_MARK]
+    mov rcx, [rbp - PP_VARARG]
+    xor r8d, r8d
+    call pp_duplicate
+    pop rcx
+    test rax, rax
+    jnz .dup_param
+    mov [rbp - PP_VARKW], rcx
     jmp .comma
 
 .comma:
@@ -1893,9 +2250,29 @@ DEF_FUNC par_params, PP_FRAME
     jne .build
     mov rdi, rbx
     call par_advance
+    ; `def g(a,  # type: int` -- the comment follows the comma and belongs to
+    ; the parameter before it, which PP_BAD is already holding.
+    cmp qword [rbp - PP_BAD], 0
+    je .comma_no_tc
+    mov rdi, rbx
+    mov rsi, [rbp - PP_BAD]
+    call ast_take_typecomment
+.comma_no_tc:
     jmp .loop
 
 .build:
+    ; A bare `*` separates the positional parameters from the keyword-only
+    ; ones, so there has to BE a keyword-only one: `def f(*): pass` is a
+    ; SyntaxError, and was accepted here.
+    cmp qword [rbp - PP_STAR], 0
+    je .build_ok
+    cmp qword [rbp - PP_VARARG], 0
+    jne .build_ok
+    cmp qword [rbp - PP_NKW], 0
+    jne .build_ok
+    CSTRING rdx, "named arguments must follow bare *"
+    jmp .param_error
+.build_ok:
     mov rdi, rbx
     mov esi, AST_ARGUMENTS
     mov rdx, [rbp - PP_LINE]
@@ -1936,12 +2313,148 @@ DEF_FUNC par_params, PP_FRAME
     pop rbx
     leave
     ret
+;; rdx = the message, PP_BAD = the parameter it is about.  The parser is
+;; already past that parameter, and CPython blames the parameter itself, so
+;; the position comes off its node rather than off the cursor.
+.param_error_prev:
+    push rdx
+    mov rdi, rbx
+    mov rsi, [rbp - PP_BAD]
+    call ast_at
+    mov r8d, [rax + AstNode.col]
+    mov ecx, [rax + AstNode.lineno]
+    pop rdx
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    call comp_error
+    jmp .fail
+
+;; rdx = the message.  CPython blames the token the list has reached, and
+;; gives it a one-character span, which is comp_error's default.
+.param_error:
+    push rdx
+    mov rdi, rbx
+    call par_peek
+    mov r8d, [rax + Token.col]
+    mov ecx, [rax + Token.lineno]
+    pop rdx
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    call comp_error
 .fail:
     xor eax, eax
     pop rbx
     leave
     ret
 END_FUNC par_params
+
+;; ============================================================================
+;; pp_duplicate(rdi = Comp*, rsi = a new AST_ARG node, rdx = the pending-stack
+;;              mark, rcx = the *args node or 0, r8 = the **kwargs node or 0)
+;;   -> rax = the name str it repeats, or 0
+;;
+;; `def f(a, a)` is a SyntaxError, and every name in the list counts -- the
+;; starred ones included, so `def f(a, *a)` is one too.  The comparison is on
+;; the characters: the object arena holds a str per occurrence rather than one
+;; per distinct name, so two `a`s are two objects.
+;; ============================================================================
+PD_COMP   equ 8
+PD_NAME   equ 16
+PD_MARK   equ 24
+PD_VARARG equ 32
+PD_VARKW  equ 40
+PD_I      equ 48
+PD_FRAME  equ 48            ; + 2 pushes = 64, 16-aligned
+DEF_FUNC_LOCAL pp_duplicate, PD_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov [rbp - PD_COMP], rdi
+    mov [rbp - PD_MARK], rdx
+    mov [rbp - PD_VARARG], rcx
+    mov [rbp - PD_VARKW], r8
+
+    mov rdi, rbx
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov r12, rax                        ; the new parameter's name
+    mov [rbp - PD_NAME], rax
+
+    mov rcx, [rbp - PD_VARARG]
+    test rcx, rcx
+    jz .pd_no_vararg
+    mov rsi, rcx
+    call .pd_name_of
+    call .pd_same
+    test eax, eax
+    jnz .pd_found
+.pd_no_vararg:
+    mov rcx, [rbp - PD_VARKW]
+    test rcx, rcx
+    jz .pd_no_varkw
+    mov rsi, rcx
+    call .pd_name_of
+    call .pd_same
+    test eax, eax
+    jnz .pd_found
+.pd_no_varkw:
+    mov rax, [rbp - PD_MARK]
+    mov [rbp - PD_I], rax
+.pd_loop:
+    mov rdi, [rbp - PD_COMP]
+    mov rcx, [rbp - PD_I]
+    cmp rcx, [rdi + Comp.pending + Buf.len]
+    jge .pd_none
+    mov rax, [rdi + Comp.pending + Buf.data]
+    mov esi, [rax + rcx*4]
+    call .pd_name_of
+    call .pd_same
+    test eax, eax
+    jnz .pd_found
+    inc qword [rbp - PD_I]
+    jmp .pd_loop
+
+.pd_found:
+    mov rax, [rbp - PD_NAME]
+    pop r12
+    pop rbx
+    leave
+    ret
+.pd_none:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+; Local: is the str in rax the same NAME as the one in r12?  The arena holds
+; one object per occurrence, not one per distinct name, so this compares the
+; characters.
+.pd_same:
+    test rax, rax
+    jz .pd_same_no
+    lea rdi, [rax + PyStrObject.data]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jnz .pd_same_no
+    mov eax, 1
+    ret
+.pd_same_no:
+    xor eax, eax
+    ret
+
+; Local: the name object of the AST_ARG node whose index is in esi.
+.pd_name_of:
+    mov rdi, [rbp - PD_COMP]
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, [rbp - PD_COMP]
+    call ast_obj_at
+    ret
+END_FUNC pp_duplicate
 
 ;; ============================================================================
 ;; par_one_param(Comp *c) -> rax = an AST_ARG node, 0 on error
@@ -2059,7 +2572,8 @@ PDF_MARK  equ 40
 PDF_NODE  equ 48
 PDF_RET   equ 56          ; the return annotation, kept but never generated
 PDF_TP    equ 64          ; the PEP 695 type parameters, likewise
-PDF_FRAME equ 72          ; + 1 push = 80
+PDF_ARROW equ 72          ; the `->`'s line and column, for "expected ':'"
+PDF_FRAME equ 88          ; + 1 push = 96, 16-aligned
 DEF_FUNC_LOCAL ps_def, PDF_FRAME
     push rbx
     mov rbx, rdi
@@ -2100,18 +2614,40 @@ DEF_FUNC_LOCAL ps_def, PDF_FRAME
     test eax, eax
     jz .fail
 
-    ; A return annotation is parsed and kept on the node, but never generated:
-    ; apython's MAKE_FUNCTION drops annotations anyway, so evaluating one would
-    ; only add a side effect that CPython has and we cannot honour.  Neither
-    ; the symbol table nor the code generator looks at `.c`; `_ast` does, and
-    ; reports it as `returns`.
+    ; `.c` is the return annotation.  cg_annotations emits it under the name
+    ; "return", sym_visit_defaults classifies the names in it -- both in the
+    ; enclosing scope, where it is evaluated -- and `_ast` reports it as
+    ; `returns`.
     mov qword [rbp - PDF_RET], 0
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_RARROW
     jne .suite
+    ; `def f(x) -> : pass` -- CPython treats the whole `-> expr` as optional
+    ; and, finding no expression, asks for the colon AT THE ARROW rather than
+    ; blaming whatever followed it.
+    mov rdi, rbx
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov [rbp - PDF_ARROW], ecx
+    mov ecx, [rax + Token.col]
+    mov [rbp - PDF_ARROW + 4], ecx
     mov rdi, rbx
     call par_advance
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COLON
+    jne .pdf_ann
+    mov ecx, [rbp - PDF_ARROW]
+    mov r8d, [rbp - PDF_ARROW + 4]
+    mov r9d, ecx
+    lea r10d, [r8d + 2]                 ; the arrow is two characters
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "expected ':'"
+    call comp_error_span
+    jmp .fail
+.pdf_ann:
     mov rdi, rbx
     mov esi, BP_NONE
     call par_expr
@@ -2124,6 +2660,7 @@ DEF_FUNC_LOCAL ps_def, PDF_FRAME
     mov rdi, rbx
     call ast_mark
     mov [rbp - PDF_MARK], rax
+    SUITE_FOR "function definition", dword [rbp - PDF_LINE]
     mov rdi, rbx
     call par_suite_into
     test eax, eax
@@ -2151,6 +2688,9 @@ DEF_FUNC_LOCAL ps_def, PDF_FRAME
     mov esi, [rbp - PDF_NODE]
     mov edx, [rbp - PDF_TP]
     call ast_set_typeparams
+    mov rdi, rbx
+    mov rsi, [rbp - PDF_NODE]
+    call ast_claim_typecomment
     mov rax, [rbp - PDF_NODE]
     pop rbx
     leave
@@ -2175,6 +2715,10 @@ DEF_FUNC par_suite_into, 8
     call par_expect
     test eax, eax
     jz .fail
+    ; `for x in y:  # type: int` -- the comment belongs to the statement, and
+    ; the statement's node does not exist yet.
+    mov rdi, rbx
+    call ast_park_typecomment
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_NEWLINE
@@ -2187,12 +2731,22 @@ DEF_FUNC par_suite_into, 8
 .block:
     mov rdi, rbx
     call par_advance
+    ; A `# type:` comment on its own line sits between the NEWLINE and the
+    ; INDENT, and belongs to the statement whose suite this is.  Only the
+    ; first is taken, so an inline one on the header wins -- as CPython's
+    ; grammar makes it.
     mov rdi, rbx
-    mov esi, TOK_INDENT
-    CSTRING rdx, "expected an indented block"
-    call par_expect
-    test eax, eax
-    jz .fail
+    call ast_park_typecomment
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_INDENT
+    je .have_indent
+    mov rdi, rbx
+    call psu_no_block
+    jmp .fail
+.have_indent:
+    mov rdi, rbx
+    call par_advance
 .stmts:
     mov rdi, rbx
     call par_kind
@@ -2696,6 +3250,7 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     mov rdi, rbx
     call ast_mark
     mov [rbp - PT2_MARK], rax
+    SUITE_FOR "'try' statement", dword [rbp - PT2_LINE]
     mov rdi, rbx
     call par_suite_into
     test eax, eax
@@ -2767,6 +3322,7 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     mov rdi, rbx
     call ast_mark
     mov [rbp - PT2_BODY], rax
+    SUITE_FOR "'except' statement", dword [rbp - PT2_HLINE]
     mov rdi, rbx
     call par_suite_into
     test eax, eax
@@ -2806,6 +3362,7 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     call par_kind
     cmp eax, TOK_ELSE
     jne .finally_clause
+    SUITE_FOR_HERE "'else' statement"
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
@@ -2819,6 +3376,7 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     call par_kind
     cmp eax, TOK_FINALLY
     jne .check
+    SUITE_FOR_HERE "'finally' statement"
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
@@ -2832,8 +3390,27 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     jne .build
     cmp qword [rbp - PT2_FIN], 0
     jne .build
+    ; CPython blames the END of the try's body -- the place a handler should
+    ; have followed -- and runs the span to the end of that line.
     mov rdi, rbx
-    CSTRING rsi, "try statement must have except or finally"
+    mov esi, [rbp - PT2_BODY]
+    call ast_span_at
+    test rax, rax
+    jz .try_no_span
+    cmp dword [rax + AstSpan.end_lineno], -1
+    je .try_no_span
+    mov ecx, [rax + AstSpan.end_lineno]
+    mov r8d, [rax + AstSpan.end_col]
+    mov r9d, ecx
+    mov r10d, -2                        ; CPython's end_offset here is -1
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "expected 'except' or 'finally' block"
+    call comp_error_span
+    jmp .fail
+.try_no_span:
+    mov rdi, rbx
+    CSTRING rsi, "expected 'except' or 'finally' block"
     call par_syntax_error
     jmp .fail
 
@@ -2985,6 +3562,7 @@ DEF_FUNC_LOCAL ps_with, PT2_FRAME
     mov qword [rbp - PT2_PAREN], 0
 
 .with_body:
+    SUITE_FOR "'with' statement", dword [rbp - PT2_LINE]
     mov rdi, rbx
     call par_suite
     test rax, rax
@@ -2996,6 +3574,11 @@ DEF_FUNC_LOCAL ps_with, PT2_FRAME
     mov rdx, [rbp - PT2_LINE]
     mov rcx, [rbp - PT2_MARK]
     call par_finish_list
+    push rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_claim_typecomment
+    pop rax
     test rax, rax
     jz .fail
     mov [rbp - PT2_NODE], rax
@@ -3089,6 +3672,7 @@ DEF_FUNC_LOCAL ps_class, PC_FRAME
     call ast_obj_at
     mov [rbx + Comp.private], rax
 
+    SUITE_FOR "class definition", dword [rbp - PC_LINE]
     mov rdi, rbx
     call par_suite_into
     push rax

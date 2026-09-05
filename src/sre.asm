@@ -1580,7 +1580,7 @@ END_FUNC sre_empty
 ;; sre_state_fini(SRE_State* state)
 ;; Clean up match state.
 ;; ============================================================================
-DEF_FUNC sre_state_fini
+DEF_FUNC sre_state_fini, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -1635,10 +1635,17 @@ END_FUNC sre_state_reset_marks
 ;; sre_state_set_mark(SRE_State* state, i64 mark_id, i64 pos)
 ;; Set a mark (group boundary) in the state.
 ;; ============================================================================
-DEF_FUNC sre_state_set_mark
+SRE_MAX_MARKS equ 4096
+DEF_FUNC sre_state_set_mark, 8            ; 1 pushes, so rsp is 16-aligned
     ; rdi = state, rsi = mark_id, rdx = pos
     push rbx
     mov rbx, rdi
+
+    ; A group index out of a crafted pattern is unbounded, and growing to
+    ; twice it asks the allocator for whatever it says.  No compiled pattern
+    ; has a thousand groups; CPython's own limit is 100 in a single pattern.
+    cmp rsi, SRE_MAX_MARKS
+    jae .mark_refuse
 
     ; Ensure marks array is large enough
     mov rcx, [rbx + SRE_State.marks_count]
@@ -1707,6 +1714,14 @@ DEF_FUNC sre_state_set_mark
     pop rbx
     leave
     ret
+
+.mark_refuse:
+    ; Nothing to set, and nothing to say: a match either succeeds or does
+    ; not, and this one will not.  The engine treats an unset mark as -1
+    ; already, so leaving it alone is the same answer as never reaching here.
+    pop rbx
+    leave
+    ret
 END_FUNC sre_state_set_mark
 
 ;; ============================================================================
@@ -1761,7 +1776,7 @@ SM_PATTERN   equ 16
 SM_TOPLEVEL  equ 24
 SM_LASTPOS   equ 32     ; the repeat's last_pos, kept across a body attempt
 SM_COUNT     equ 40     ; MAX_UNTIL's ctx->count, kept across a body attempt
-SM_MFRAME    equ 96
+SM_MFRAME    equ 104            ; + 5 pushes = 144, 16-aligned
 
 DEF_FUNC sre_match, SM_MFRAME
     push rbx
@@ -1785,6 +1800,25 @@ DEF_FUNC sre_match, SM_MFRAME
     inc dword [r12 + SRE_State.match_depth]
 
 .dispatch:
+    ; The program counter has to be inside the pattern.  The opcode was
+    ; bounded and the pc never was, so a crafted program whose last word is
+    ; not SUCCESS or FAILURE simply walked off the end of the code array and
+    ; kept dispatching on whatever followed it.  _sre.compile() does not
+    ; validate its input -- that is the private API test_sre.py feeds by hand,
+    ; and the one CPython segfaults on -- so the engine has to.
+    mov rax, [r12 + SRE_State.pattern]
+    test rax, rax
+    jz .pc_unchecked            ; no pattern object: an internal sub-match
+    mov rcx, [rax + SRE_PatternObject.code]
+    mov rdx, [rax + SRE_PatternObject.code_len]
+    shl rdx, 2                  ; words to bytes
+    add rdx, rcx                ; one past the end
+    cmp rbx, rcx
+    jb .op_failure
+    cmp rbx, rdx
+    jae .op_failure
+.pc_unchecked:
+
     mov eax, [rbx]             ; opcode
     add rbx, 4                 ; advance past opcode
 
@@ -3346,7 +3380,7 @@ END_FUNC sre_match
 ;; sre_save_marks(SRE_State* state) -> void*
 ;; Save marks snapshot for backtracking. Returns malloc'd buffer.
 ;; ============================================================================
-DEF_FUNC sre_save_marks
+DEF_FUNC sre_save_marks, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi               ; state
 
@@ -3463,7 +3497,7 @@ END_FUNC sre_restore_marks
 ;; sre_search(SRE_State* state) -> 0/1
 ;; Linear scan: try sre_match at each position from pos to endpos.
 ;; ============================================================================
-DEF_FUNC sre_search, 32
+DEF_FUNC sre_search, 40
     push rbx
     push r12
     push r13

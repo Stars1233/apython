@@ -36,6 +36,7 @@ extern buf_init
 extern buf_push_u8
 extern buf_reserve
 extern exc_SyntaxError_type
+extern ast_child
 extern exc_IndentationError_type
 extern exc_TabError_type
 extern tuple_new
@@ -65,6 +66,10 @@ extern obj_decref
 extern par_expect
 extern par_expr
 extern par_module
+extern par_peek
+extern ast_mark
+extern ast_push
+extern par_finish_list
 extern cg_body
 extern par_kind
 extern par_advance
@@ -216,6 +221,14 @@ DEF_FUNC comp_init, CI_FRAME
     lea rdi, [rbx + Comp.typeparams]
     mov esi, 4
     call buf_init
+    lea rdi, [rbx + Comp.typecomments]
+    mov esi, 4
+    call buf_init
+    lea rdi, [rbx + Comp.typeignores]
+    mov esi, 4
+    call buf_init
+    mov dword [rbx + Comp.want_tc], 0
+    mov dword [rbx + Comp.pending_tc], 0
     lea rdi, [rbx + Comp.scopes]
     mov esi, Scope_size
     call buf_init
@@ -238,6 +251,10 @@ DEF_FUNC comp_init, CI_FRAME
     ; And its type-parameter slot: typeparams is indexed by node number too,
     ; and ast_make only ever appends for a node it makes itself.
     lea rdi, [rbx + Comp.typeparams]
+    mov esi, 1
+    call buf_reserve
+    mov dword [rax], 0
+    lea rdi, [rbx + Comp.typecomments]
     mov esi, 1
     call buf_reserve
     mov dword [rax], 0
@@ -299,6 +316,10 @@ DEF_FUNC comp_free, 8
     lea rdi, [rbx + Comp.rawnames]
     call buf_free
     lea rdi, [rbx + Comp.typeparams]
+    call buf_free
+    lea rdi, [rbx + Comp.typecomments]
+    call buf_free
+    lea rdi, [rbx + Comp.typeignores]
     call buf_free
     lea rdi, [rbx + Comp.pending]
     call buf_free
@@ -509,9 +530,135 @@ DEF_FUNC par_eval_root, 16      ; + 2 pushes = 32
 END_FUNC par_eval_root
 
 ;; ============================================================================
+;; par_func_type_root(Comp *c) -> rax = an AST_FUNCTIONTYPE node, 0 on error
+;;
+;; The "func_type" start symbol: `(int, str) -> bool`, or `(...) -> bool` for
+;; a signature whose arguments are not spelled out.  It is the type comment a
+;; stub file carries, and the only mode whose grammar is not a subset of the
+;; module's -- a bare `->` is not an expression anywhere else.
 ;; ============================================================================
-;; compile_ast_raw(const char *src, i64 len, PyStrObject *filename, int mode)
-;;   -> rax = the raw tree, or 0 with the exception already pending
+PFT_MARK  equ 16
+PFT_RET   equ 24
+PFT_LINE  equ 32
+PFT_FRAME equ 40            ; + 2 pushes = 56... one word more to land right
+DEF_FUNC par_func_type_root, 48         ; + 2 pushes = 64, 16-aligned
+    push rbx
+    push r12
+    mov rbx, rdi
+
+    call par_peek
+    TOK_POS rax
+    mov [rbp - PFT_LINE], rcx
+
+    mov rdi, rbx
+    mov esi, TOK_LPAR
+    CSTRING rdx, "invalid syntax"
+    call par_expect
+    test eax, eax
+    jz .pft_fail
+
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PFT_MARK], rax
+
+    ; `(...)` means "any arguments"; CPython answers an empty argtypes list
+    ; with an Ellipsis constant in it, which ast.dump shows as [Constant(...)].
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_RPAR
+    je .pft_args_done
+
+.pft_arg_loop:
+    mov rdi, rbx
+    mov esi, 0                          ; BP_NONE
+    call par_expr
+    test rax, rax
+    jz .pft_fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_push
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COMMA
+    jne .pft_args_done
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_RPAR
+    je .pft_args_done
+    jmp .pft_arg_loop
+
+.pft_args_done:
+    mov rdi, rbx
+    mov esi, TOK_RPAR
+    CSTRING rdx, "invalid syntax"
+    call par_expect
+    test eax, eax
+    jz .pft_fail
+
+    mov rdi, rbx
+    mov esi, TOK_RARROW
+    CSTRING rdx, "invalid syntax"
+    call par_expect
+    test eax, eax
+    jz .pft_fail
+
+    mov rdi, rbx
+    mov esi, 0                          ; BP_NONE
+    call par_expr
+    test rax, rax
+    jz .pft_fail
+    mov [rbp - PFT_RET], rax
+
+.pft_skip_newlines:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_NEWLINE
+    jne .pft_at_end
+    mov rdi, rbx
+    call par_advance
+    jmp .pft_skip_newlines
+
+.pft_at_end:
+    mov rdi, rbx
+    mov esi, TOK_ENDMARKER
+    CSTRING rdx, "invalid syntax"
+    call par_expect
+    test eax, eax
+    jz .pft_fail
+
+    mov rdi, rbx
+    mov esi, AST_FUNCTIONTYPE
+    mov rdx, [rbp - PFT_LINE]
+    mov rcx, [rbp - PFT_MARK]
+    call par_finish_list
+    test rax, rax
+    jz .pft_fail
+    mov r12, rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov edx, [rbp - PFT_RET]
+    mov [rax + AstNode.a], edx          ; the return type
+    mov rax, r12
+    pop r12
+    pop rbx
+    leave
+    ret
+.pft_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC par_func_type_root
+
+;; ============================================================================
+;; ============================================================================
+;; compile_ast_raw(const char *src, i64 len, PyStrObject *filename, int mode,
+;;                  int want_type_comments) -> rax = the raw tree, or 0 with
+;;                  the exception already pending
 ;;
 ;; compile_source's sibling, stopping where the AST is complete.  It runs
 ;; comp_init, the lexer and the parser, hands the arena to ar_node, and then
@@ -530,6 +677,7 @@ CAR_MODE  equ 32
 CAR_ROOT  equ 40
 CAR_TREE  equ 48
 CAR_COMP  equ 56
+CAR_WANTTC equ 64           ; PyCF_TYPE_COMMENTS
 CAR_FRAME equ 72            ; + 1 push = 80, 16-byte aligned
 
 global compile_ast_raw
@@ -539,6 +687,7 @@ DEF_FUNC compile_ast_raw, CAR_FRAME
     mov [rbp - CAR_LEN], rsi
     mov [rbp - CAR_FILE], rdx
     mov [rbp - CAR_MODE], rcx
+    mov [rbp - CAR_WANTTC], r8
     mov qword [rbp - CAR_TREE], 0
 
     mov edi, Comp_size
@@ -552,6 +701,8 @@ DEF_FUNC compile_ast_raw, CAR_FRAME
     mov rcx, [rbp - CAR_FILE]
     mov r8, [rbp - CAR_MODE]
     call comp_init
+    mov rax, [rbp - CAR_WANTTC]
+    mov [rbx + Comp.want_tc], eax
 
     mov rdi, rbx
     xor esi, esi                        ; the whole source
@@ -563,6 +714,8 @@ DEF_FUNC compile_ast_raw, CAR_FRAME
 
     cmp qword [rbp - CAR_MODE], CMODE_EVAL
     je .car_parse_eval
+    cmp qword [rbp - CAR_MODE], CMODE_FUNC_TYPE
+    je .car_parse_func_type
     mov rdi, rbx
     call par_module
     test rax, rax
@@ -578,8 +731,20 @@ DEF_FUNC compile_ast_raw, CAR_FRAME
     mov esi, eax
     call ast_at
     mov byte [rax + AstNode.kind], AST_INTERACTIVE
+    mov rdi, rbx
+    mov rsi, rax
+    call par_single_check
     pop rax
+    test eax, eax
+    jz .car_failed
     jmp .car_parsed
+.car_parse_func_type:
+    mov rdi, rbx
+    call par_func_type_root
+    test rax, rax
+    jz .car_failed
+    jmp .car_parsed
+
 .car_parse_eval:
     mov rdi, rbx
     call par_eval_root
@@ -685,6 +850,24 @@ DEF_FUNC compile_source, CS_FRAME
     je .parse_eval
     mov rdi, rbx
     call par_module
+    test rax, rax
+    jz .parsed
+    cmp qword [rbp - CS_MODE], CMODE_SINGLE
+    jne .parsed
+    ; `single` is exec with a narrower start symbol; par_single_check is what
+    ; enforces the narrowing, and compile_ast_raw applies it to the tree it
+    ; hands back for the same reason.
+    push rax
+    mov rdi, rbx
+    mov esi, eax
+    call ast_at
+    mov rdi, rbx
+    mov rsi, rax
+    call par_single_check
+    pop rcx
+    test eax, eax
+    jz .failed
+    mov rax, rcx
     jmp .parsed
 .parse_eval:
     mov rdi, rbx
@@ -1230,11 +1413,13 @@ DEF_FUNC comp_attach_location, AL_FRAME
     mov ecx, [rbx + Comp.err + CompErr.end_lineno]
     V_PACK_I64 rcx, rsi
     mov [rdx + 32], rcx
+    ; end_col is NOT clamped the way col is.  CPython's own end_offset is 0
+    ; for every "was never closed" and -1 for "expected 'except' or 'finally'
+    ; block", and a program that reads e.end_offset should see what CPython's
+    ; would give it.  Nothing draws a caret from this one -- tb_write_carets
+    ; and the syntax-error header both work from the offset -- so a negative
+    ; here cannot become four billion spaces the way a negative col could.
     movsxd rcx, dword [rbx + Comp.err + CompErr.end_col]
-    test rcx, rcx
-    jns .end_col_ok
-    xor ecx, ecx
-.end_col_ok:
     inc rcx
     V_PACK_I64 rcx, rsi
     mov [rdx + 40], rcx
@@ -1349,29 +1534,263 @@ section .text
 section .text
 
 ;; ============================================================================
+;; par_single_check(Comp *c, AstNode *root) -> rax = 1 ok, 0 with an error set
+;;
+;; CPython's `single` start symbol is `NEWLINE | simple_stmt | compound_stmt
+;; NEWLINE`, and this ran the full module grammar and then relabelled the
+;; root -- so it accepted three things CPython refuses, and the tree it built
+;; for them was fine.  Nothing else here notices, which is why this is a
+;; check rather than a second parser.
+;;
+;;   * nothing at all.  "" and "\n" and "# comment\n" are all a SyntaxError
+;;     there, despite NEWLINE being one of the three alternatives.
+;;   * more than one statement, which has a message of its own.
+;;   * a compound statement whose last suite is on the same line as its
+;;     header, without a trailing newline: `def f(): pass` is an error and
+;;     `def f(): pass\n` is not, and so are `if 1: pass` and
+;;     `if 1:\n pass\nelse: pass`, where the LAST line is the inline one.
+;;     The tokenizer's NEWLINE is what CPython is really testing for; the
+;;     readable equivalent is that the last non-blank line is indented, which
+;;     is what an inline suite is not.
+;; ============================================================================
+PSC_COMP  equ 8
+PSC_ROOT  equ 16
+PSC_COMPOUND equ 24         ; is the FIRST statement a compound one?
+PSC_FRAME equ 40            ; 24 used + 16 pad = 40, + 1 push = 16-aligned
+DEF_FUNC_LOCAL par_single_check, PSC_FRAME
+    push rbx
+    mov [rbp - PSC_COMP], rdi
+    mov [rbp - PSC_ROOT], rsi
+    mov rbx, rsi                    ; the Interactive root
+    mov qword [rbp - PSC_COMPOUND], 0
+
+    mov ecx, [rbx + AstNode.nchild]
+    test ecx, ecx
+    jz .psc_empty
+
+    ; Is the first statement a compound one?  Which of the two messages a
+    ; second statement gets depends on it: CPython's grammar fails at the
+    ; parse for `compound_stmt` followed by anything, and only reaches its
+    ; "multiple statements" check for a simple one.
+    mov rdi, [rbp - PSC_COMP]
+    mov rsi, rbx
+    xor edx, edx
+    call ast_child
+    mov rdi, [rbp - PSC_COMP]
+    mov esi, eax
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_IF
+    je .psc_is_compound
+    cmp ecx, AST_WHILE
+    je .psc_is_compound
+    cmp ecx, AST_FOR
+    je .psc_is_compound
+    cmp ecx, AST_TRY
+    je .psc_is_compound
+    cmp ecx, AST_WITH
+    je .psc_is_compound
+    cmp ecx, AST_FUNCTIONDEF
+    je .psc_is_compound
+    cmp ecx, AST_CLASSDEF
+    je .psc_is_compound
+    cmp ecx, AST_MATCH
+    jne .psc_have_kind
+.psc_is_compound:
+    mov qword [rbp - PSC_COMPOUND], 1
+.psc_have_kind:
+
+    mov ecx, [rbx + AstNode.nchild]
+    cmp ecx, 1
+    jbe .psc_one
+
+    ; More than one node is still ONE statement when they are the halves of a
+    ; `;`-separated simple_stmt: `x=1; y=2` is a single statement to that
+    ; grammar and two children to this parser.  What CPython refuses is a
+    ; second LOGICAL line, so the test is whether they all start on one.
+    mov r9d, ecx                    ; the count
+    xor r10d, r10d                  ; i
+    mov r11d, -1                    ; the first child's line
+.psc_line_loop:
+    cmp r10d, r9d
+    jge .psc_ok
+    push r9
+    push r10
+    push r11
+    sub rsp, 8
+    mov rdi, [rbp - PSC_COMP]
+    mov rsi, rbx
+    mov edx, r10d
+    call ast_child
+    mov rdi, [rbp - PSC_COMP]
+    mov esi, eax
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    add rsp, 8
+    pop r11
+    pop r10
+    pop r9
+    cmp r11d, -1
+    jne .psc_line_cmp
+    mov r11d, ecx
+.psc_line_cmp:
+    cmp r11d, ecx
+    jne .psc_multiple
+    inc r10d
+    jmp .psc_line_loop
+
+.psc_one:
+    cmp qword [rbp - PSC_COMPOUND], 0
+    je .psc_ok
+
+    ; A trailing newline settles it.
+    mov rdi, [rbp - PSC_COMP]
+    mov rsi, [rdi + Comp.src]
+    mov rcx, [rdi + Comp.srclen]
+    test rcx, rcx
+    jz .psc_empty
+    cmp byte [rsi + rcx - 1], 10
+    je .psc_ok
+    ; Otherwise the last non-blank line has to be indented, which an inline
+    ; suite is not: `if 1:\n pass` ends on an indented line and is legal,
+    ; `if 1: pass` and `if 1:\n pass\nelse: pass` do not and are not.
+.psc_back:
+    dec rcx
+    jz .psc_invalid                 ; the whole source is one line
+    cmp byte [rsi + rcx - 1], 10
+    jne .psc_back
+    movzx eax, byte [rsi + rcx]
+    cmp al, ' '
+    je .psc_ok
+    cmp al, 9                       ; tab
+    je .psc_ok
+    jmp .psc_invalid
+
+.psc_ok:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+
+.psc_multiple:
+    cmp qword [rbp - PSC_COMPOUND], 0
+    jne .psc_invalid
+    mov rdi, [rbp - PSC_COMP]
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "multiple statements found while compiling a single statement"
+    mov ecx, 1
+    xor r8d, r8d
+    call comp_error
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.psc_empty:
+.psc_invalid:
+    mov rdi, [rbp - PSC_COMP]
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "invalid syntax"
+    mov ecx, 1
+    xor r8d, r8d
+    call comp_error
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC par_single_check
+
+;; ============================================================================
+;; comp_msg_start() -> rax = the message buffer, empty
+;; comp_msg_cstr(rdi = a position in it, rsi = text) -> rax = the new position
+;; comp_msg_i64(rdi = a position in it, rsi = a number) -> rax = likewise
+;;
+;; Some of CPython's syntax errors name something the source decides: the line
+;; a string literal was detected on, the digit that is wrong for a base, the
+;; statement an indented block was expected after.  CompErr.msg is a borrowed
+;; `const char *`, so those need storage that outlives the compile -- and one
+;; static buffer is enough, because the FIRST error wins and is consumed once,
+;; by comp_set_pending, before the compiler is entered again.
+;; ============================================================================
+;; ============================================================================
+;; comp_msg_start() -> rax = the message buffer, emptied
+;; ============================================================================
+DEF_FUNC_BARE comp_msg_start
+    lea rax, [rel comp_msgbuf]
+    mov byte [rax], 0
+    ret
+END_FUNC comp_msg_start
+
+;; ============================================================================
+;; comp_msg_cstr(rdi = a position in the buffer, rsi = text) -> rax = the NUL
+;; it wrote, which is where the next piece goes
+;; ============================================================================
+extern rbt_append_cstr
+DEF_FUNC comp_msg_cstr
+    call rbt_append_cstr
+    leave
+    ret
+END_FUNC comp_msg_cstr
+
+;; ============================================================================
+;; comp_msg_i64(rdi = a position in the buffer, rsi = a number) -> rax = the
+;; NUL it wrote
+;; ============================================================================
+extern msg_append_i64
+DEF_FUNC comp_msg_i64
+    call msg_append_i64
+    leave
+    ret
+END_FUNC comp_msg_i64
+
+section .bss
+comp_msgbuf: resb 256
+section .text
+
+;; ============================================================================
 ;; comp_error(Comp *c, PyTypeObject *type, const char *msg, int lineno, int col)
 ;;   -> rax = 0, always, so callers can `jmp comp_error`-style tail into it and
 ;;      return the failure value in one go.
+;;
+;; The span defaults to the one character the error points at.  Where CPython's
+;; is wider -- a whole token, or the subexpression a message is about -- the
+;; caller says so with comp_error_span.
 ;; ============================================================================
 DEF_FUNC_BARE comp_error
+    push r9
+    push r10
+    mov r9d, ecx
+    lea r10d, [r8d + 1]
+    call comp_error_span
+    pop r10
+    pop r9
+    ret
+END_FUNC comp_error
+
+;; ============================================================================
+;; comp_error_span(Comp *c, PyTypeObject *type, const char *msg, int lineno,
+;;                 int col, int end_lineno, int end_col) -> rax = 0, always
+;;
+;; The five fields a SyntaxError carries, all of them.  CPython's spans are not
+;; all one character wide and not all forward: "expected 'except' or 'finally'
+;; block" ends at column -1, meaning the end of the line, and every "was never
+;; closed" ends at 0.  Both are passed through rather than normalised, because
+;; a program that reads e.end_offset sees what CPython's would give it.
+;; ============================================================================
+DEF_FUNC_BARE comp_error_span
     cmp dword [rdi + Comp.err + CompErr.set], 0
     jne .already
     mov [rdi + Comp.err + CompErr.type], rsi
     mov [rdi + Comp.err + CompErr.msg], rdx
     mov [rdi + Comp.err + CompErr.lineno], ecx
     mov [rdi + Comp.err + CompErr.col], r8d
-    ; The span defaults to the one character the error points at.  CPython's
-    ; is sometimes wider -- a whole token, or the subexpression a message is
-    ; about -- and nothing here knows which yet, so this says the narrowest
-    ; true thing rather than guessing.
-    mov [rdi + Comp.err + CompErr.end_lineno], ecx
-    inc r8d
-    mov [rdi + Comp.err + CompErr.end_col], r8d
+    mov [rdi + Comp.err + CompErr.end_lineno], r9d
+    mov [rdi + Comp.err + CompErr.end_col], r10d
     mov dword [rdi + Comp.err + CompErr.set], 1
 .already:
     xor eax, eax
     ret
-END_FUNC comp_error
+END_FUNC comp_error_span
 
 ;; ============================================================================
 ;; comp_failed(Comp *c) -> rax = non-zero once an error has been recorded
@@ -1964,6 +2383,7 @@ section .rodata
 co_ast_mod:  db "_ast", 0
 co_ast_attr: db "_from_raw", 0
 PYCF_ONLY_AST equ 0x400
+PYCF_TYPE_COMMENTS equ 0x1000
 section .text
 
 CAB_KEY   equ 8             ; the name being looked up
@@ -2147,6 +2567,18 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     mov ecx, CMODE_EVAL
     jmp .have_mode
 .check_single:
+    cmp qword [r13 + PyStrObject.ob_size], 9
+    jne .check_single6
+    ; "func_type": `(int, str) -> bool`, the stub-file signature form.
+    mov eax, [r13 + PyStrObject.data]
+    cmp eax, 'func'
+    jne .unsupported_mode
+    mov eax, [r13 + PyStrObject.data + 5]
+    cmp eax, 'type'
+    jne .unsupported_mode
+    mov ecx, CMODE_FUNC_TYPE
+    jmp .have_mode
+.check_single6:
     cmp qword [r13 + PyStrObject.ob_size], 6
     jne .unsupported_mode
     mov eax, [r13 + PyStrObject.data]
@@ -2185,6 +2617,11 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     ; The parse tree, not a code object.  _ast is imported here rather than at
     ; startup for the reason builtin_open_fn gives about _io: builtins are
     ; built before the import system can run.
+    xor r8d, r8d
+    test qword [rbp - CO_FLAGS], PYCF_TYPE_COMMENTS
+    jz .co_no_tc
+    mov r8d, 1
+.co_no_tc:
     call compile_ast_raw
     test rax, rax
     jz .propagate

@@ -79,8 +79,20 @@ SYS_fchmod          equ 91
 SYS_fsync           equ 74
 SYS_dup2            equ 33
 SYS_utimensat       equ 280
+SYS_fork            equ 57
+SYS_execve          equ 59
+SYS_exit            equ 60
+SYS_kill            equ 62
+SYS_setsid          equ 112
+SYS_close_range     equ 436
+SYS_rt_sigaction    equ 13
+SYS_rt_sigprocmask  equ 14
+SYS_alarm           equ 37
+SYS_pause           equ 34
 
-; sys_write(int fd, const void *buf, size_t len) -> ssize_t
+;; ============================================================================
+;; sys_write(int fd, const void *buf, size_t len) -> ssize_t
+;; ============================================================================
 DEF_FUNC_BARE sys_write
     mov rax, SYS_write
     ; rdi=fd, rsi=buf, rdx=len already in place
@@ -88,7 +100,9 @@ DEF_FUNC_BARE sys_write
     ret
 END_FUNC sys_write
 
-; sys_read(int fd, void *buf, size_t len) -> ssize_t
+;; ============================================================================
+;; sys_read(int fd, void *buf, size_t len) -> ssize_t
+;; ============================================================================
 DEF_FUNC_BARE sys_read
     mov rax, SYS_read
     ; rdi=fd, rsi=buf, rdx=len already in place
@@ -96,7 +110,9 @@ DEF_FUNC_BARE sys_read
     ret
 END_FUNC sys_read
 
-; sys_open(const char *path, int flags, int mode) -> int fd
+;; ============================================================================
+;; sys_open(const char *path, int flags, int mode) -> int fd
+;; ============================================================================
 DEF_FUNC_BARE sys_open
     mov rax, SYS_open
     ; rdi=path, rsi=flags, rdx=mode already in place
@@ -104,7 +120,9 @@ DEF_FUNC_BARE sys_open
     ret
 END_FUNC sys_open
 
-; sys_close(int fd) -> int
+;; ============================================================================
+;; sys_close(int fd) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_close
     mov rax, SYS_close
     ; rdi=fd already in place
@@ -112,7 +130,9 @@ DEF_FUNC_BARE sys_close
     ret
 END_FUNC sys_close
 
-; sys_fstat(int fd, struct stat *buf) -> int
+;; ============================================================================
+;; sys_fstat(int fd, struct stat *buf) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_fstat
     mov rax, SYS_fstat
     ; rdi=fd, rsi=buf already in place
@@ -131,77 +151,99 @@ END_FUNC sys_fstat
 ;; and r11 -- so `mov r10, rcx` has to come before it, never after.
 ;; ---------------------------------------------------------------------------
 
-; sys_stat(const char *path, struct stat *buf) -> int
+;; ============================================================================
+;; sys_stat(const char *path, struct stat *buf) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_stat
     mov rax, SYS_stat
     syscall
     ret
 END_FUNC sys_stat
 
-; sys_lstat(const char *path, struct stat *buf) -> int
+;; ============================================================================
+;; sys_lstat(const char *path, struct stat *buf) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_lstat
     mov rax, SYS_lstat
     syscall
     ret
 END_FUNC sys_lstat
 
-; sys_lseek(int fd, off_t off, int whence) -> off_t
+;; ============================================================================
+;; sys_lseek(int fd, off_t off, int whence) -> off_t
+;; ============================================================================
 DEF_FUNC_BARE sys_lseek
     mov rax, SYS_lseek
     syscall
     ret
 END_FUNC sys_lseek
 
-; sys_dup(int fd) -> int
+;; ============================================================================
+;; sys_dup(int fd) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_dup
     mov rax, SYS_dup
     syscall
     ret
 END_FUNC sys_dup
 
-; sys_getpid(void) -> pid_t
+;; ============================================================================
+;; sys_getpid(void) -> pid_t
+;; ============================================================================
 DEF_FUNC_BARE sys_getpid
     mov rax, SYS_getpid
     syscall
     ret
 END_FUNC sys_getpid
 
-; sys_getcwd(char *buf, size_t size) -> long (the length including the NUL)
+;; ============================================================================
+;; sys_getcwd(char *buf, size_t size) -> long (the length including the NUL)
+;; ============================================================================
 DEF_FUNC_BARE sys_getcwd
     mov rax, SYS_getcwd
     syscall
     ret
 END_FUNC sys_getcwd
 
-; sys_mkdir(const char *path, mode_t mode) -> int
+;; ============================================================================
+;; sys_mkdir(const char *path, mode_t mode) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_mkdir
     mov rax, SYS_mkdir
     syscall
     ret
 END_FUNC sys_mkdir
 
-; sys_rmdir(const char *path) -> int
+;; ============================================================================
+;; sys_rmdir(const char *path) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_rmdir
     mov rax, SYS_rmdir
     syscall
     ret
 END_FUNC sys_rmdir
 
-; sys_unlink(const char *path) -> int
+;; ============================================================================
+;; sys_unlink(const char *path) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_unlink
     mov rax, SYS_unlink
     syscall
     ret
 END_FUNC sys_unlink
 
-; sys_rename(const char *old, const char *new) -> int
+;; ============================================================================
+;; sys_rename(const char *old, const char *new) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_rename
     mov rax, SYS_rename
     syscall
     ret
 END_FUNC sys_rename
 
-; sys_symlink(const char *target, const char *linkpath) -> int
+;; ============================================================================
+;; sys_symlink(const char *target, const char *linkpath) -> int
+;; ============================================================================
 global sys_symlink
 DEF_FUNC_BARE sys_symlink
     mov rax, SYS_symlink
@@ -209,65 +251,83 @@ DEF_FUNC_BARE sys_symlink
     ret
 END_FUNC sys_symlink
 
-; sys_readlink(const char *path, char *buf, size_t size) -> ssize_t
+;; ============================================================================
+;; sys_readlink(const char *path, char *buf, size_t size) -> ssize_t
+;; ============================================================================
 DEF_FUNC_BARE sys_readlink
     mov rax, SYS_readlink
     syscall
     ret
 END_FUNC sys_readlink
 
-; sys_chmod(const char *path, mode_t mode) -> int
+;; ============================================================================
+;; sys_chmod(const char *path, mode_t mode) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_chmod
     mov rax, SYS_chmod
     syscall
     ret
 END_FUNC sys_chmod
 
-; sys_access(const char *path, int mode) -> int
+;; ============================================================================
+;; sys_access(const char *path, int mode) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_access
     mov rax, SYS_access
     syscall
     ret
 END_FUNC sys_access
 
-; sys_umask(mode_t mask) -> mode_t (the previous one)
+;; ============================================================================
+;; sys_umask(mode_t mask) -> mode_t (the previous one)
+;; ============================================================================
 DEF_FUNC_BARE sys_umask
     mov rax, SYS_umask
     syscall
     ret
 END_FUNC sys_umask
 
-; sys_pipe2(int fds[2], int flags) -> int
+;; ============================================================================
+;; sys_pipe2(int fds[2], int flags) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_pipe2
     mov rax, SYS_pipe2
     syscall
     ret
 END_FUNC sys_pipe2
 
-; sys_getdents64(int fd, void *dirp, unsigned count) -> int bytes read
+;; ============================================================================
+;; sys_getdents64(int fd, void *dirp, unsigned count) -> int bytes read
+;; ============================================================================
 DEF_FUNC_BARE sys_getdents64
     mov rax, SYS_getdents64
     syscall
     ret
 END_FUNC sys_getdents64
 
-; sys_getrandom(void *buf, size_t len, unsigned flags) -> ssize_t
+;; ============================================================================
+;; sys_getrandom(void *buf, size_t len, unsigned flags) -> ssize_t
+;; ============================================================================
 DEF_FUNC_BARE sys_getrandom
     mov rax, SYS_getrandom
     syscall
     ret
 END_FUNC sys_getrandom
 
-; sys_ftruncate(int fd, off_t length) -> int
+;; ============================================================================
+;; sys_ftruncate(int fd, off_t length) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_ftruncate
     mov rax, SYS_ftruncate
     syscall
     ret
 END_FUNC sys_ftruncate
 
-; The eight the posix module was short of.  Each is the bare syscall; the
-; argument checking and the OSError live in src/posixmod.asm.
-; sys_chdir(const char *path) -> int
+;; ============================================================================
+;; The eight the posix module was short of.  Each is the bare syscall; the
+;; argument checking and the OSError live in src/posixmod.asm.
+;; sys_chdir(const char *path) -> int
+;; ============================================================================
 global sys_chdir
 DEF_FUNC_BARE sys_chdir
     mov rax, SYS_chdir
@@ -275,7 +335,9 @@ DEF_FUNC_BARE sys_chdir
     ret
 END_FUNC sys_chdir
 
-; sys_truncate(const char *path, off_t length) -> int
+;; ============================================================================
+;; sys_truncate(const char *path, off_t length) -> int
+;; ============================================================================
 global sys_truncate
 DEF_FUNC_BARE sys_truncate
     mov rax, SYS_truncate
@@ -283,7 +345,9 @@ DEF_FUNC_BARE sys_truncate
     ret
 END_FUNC sys_truncate
 
-; sys_link(const char *old, const char *new) -> int
+;; ============================================================================
+;; sys_link(const char *old, const char *new) -> int
+;; ============================================================================
 global sys_link
 DEF_FUNC_BARE sys_link
     mov rax, SYS_link
@@ -291,7 +355,9 @@ DEF_FUNC_BARE sys_link
     ret
 END_FUNC sys_link
 
-; sys_chown(const char *path, uid_t uid, gid_t gid) -> int
+;; ============================================================================
+;; sys_chown(const char *path, uid_t uid, gid_t gid) -> int
+;; ============================================================================
 global sys_chown
 DEF_FUNC_BARE sys_chown
     mov rax, SYS_chown
@@ -299,7 +365,9 @@ DEF_FUNC_BARE sys_chown
     ret
 END_FUNC sys_chown
 
-; sys_fchmod(int fd, mode_t mode) -> int
+;; ============================================================================
+;; sys_fchmod(int fd, mode_t mode) -> int
+;; ============================================================================
 global sys_fchmod
 DEF_FUNC_BARE sys_fchmod
     mov rax, SYS_fchmod
@@ -307,7 +375,9 @@ DEF_FUNC_BARE sys_fchmod
     ret
 END_FUNC sys_fchmod
 
-; sys_fsync(int fd) -> int
+;; ============================================================================
+;; sys_fsync(int fd) -> int
+;; ============================================================================
 global sys_fsync
 DEF_FUNC_BARE sys_fsync
     mov rax, SYS_fsync
@@ -315,7 +385,9 @@ DEF_FUNC_BARE sys_fsync
     ret
 END_FUNC sys_fsync
 
-; sys_dup2(int oldfd, int newfd) -> int
+;; ============================================================================
+;; sys_dup2(int oldfd, int newfd) -> int
+;; ============================================================================
 global sys_dup2
 DEF_FUNC_BARE sys_dup2
     mov rax, SYS_dup2
@@ -323,10 +395,12 @@ DEF_FUNC_BARE sys_dup2
     ret
 END_FUNC sys_dup2
 
-; sys_utimensat(int dirfd, const char *path, const struct timespec times[2],
-;               int flags) -> int
-; utime(path, times) goes through this: utimensat is the only one of the
-; family Linux still keeps, and AT_FDCWD with a NULL times means "now".
+;; ============================================================================
+;; sys_utimensat(int dirfd, const char *path, const struct timespec times[2],
+;; int flags) -> int
+;; utime(path, times) goes through this: utimensat is the only one of the
+;; family Linux still keeps, and AT_FDCWD with a NULL times means "now".
+;; ============================================================================
 global sys_utimensat
 DEF_FUNC_BARE sys_utimensat
     mov r10, rcx                ; the fourth syscall argument is r10, not rcx
@@ -335,14 +409,18 @@ DEF_FUNC_BARE sys_utimensat
     ret
 END_FUNC sys_utimensat
 
-; sys_uname(struct utsname *buf) -> int
+;; ============================================================================
+;; sys_uname(struct utsname *buf) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_uname
     mov rax, SYS_uname
     syscall
     ret
 END_FUNC sys_uname
 
-; sys_wait4(pid_t pid, int *status, int options, struct rusage *ru) -> pid_t
+;; ============================================================================
+;; sys_wait4(pid_t pid, int *status, int options, struct rusage *ru) -> pid_t
+;; ============================================================================
 DEF_FUNC_BARE sys_wait4
     mov rax, SYS_wait4
     mov r10, rcx               ; 4th arg -- and syscall clobbers rcx, so first
@@ -350,7 +428,9 @@ DEF_FUNC_BARE sys_wait4
     ret
 END_FUNC sys_wait4
 
-; sys_exit(int code) -> noreturn
+;; ============================================================================
+;; sys_exit(int code) -> noreturn
+;; ============================================================================
 DEF_FUNC_BARE sys_exit
     mov rax, SYS_exit_group
     ; rdi=code already in place
@@ -359,7 +439,9 @@ DEF_FUNC_BARE sys_exit
     hlt
 END_FUNC sys_exit
 
-; sys_mmap(addr, len, prot, flags, fd, offset) -> void*
+;; ============================================================================
+;; sys_mmap(addr, len, prot, flags, fd, offset) -> void*
+;; ============================================================================
 DEF_FUNC_BARE sys_mmap
     mov rax, SYS_mmap
     mov r10, rcx               ; Linux syscall: 4th arg in r10, not rcx
@@ -367,21 +449,27 @@ DEF_FUNC_BARE sys_mmap
     ret
 END_FUNC sys_mmap
 
-; sys_munmap(addr, len) -> int
+;; ============================================================================
+;; sys_munmap(addr, len) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_munmap
     mov rax, SYS_munmap
     syscall
     ret
 END_FUNC sys_munmap
 
-; sys_io_uring_setup(entries, params*) -> int fd
+;; ============================================================================
+;; sys_io_uring_setup(entries, params*) -> int fd
+;; ============================================================================
 DEF_FUNC_BARE sys_io_uring_setup
     mov rax, SYS_io_uring_setup
     syscall
     ret
 END_FUNC sys_io_uring_setup
 
-; sys_io_uring_enter(fd, to_submit, min_complete, flags, sig, sigsz) -> int
+;; ============================================================================
+;; sys_io_uring_enter(fd, to_submit, min_complete, flags, sig, sigsz) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_io_uring_enter
     mov rax, SYS_io_uring_enter
     mov r10, rcx               ; 4th arg
@@ -389,28 +477,36 @@ DEF_FUNC_BARE sys_io_uring_enter
     ret
 END_FUNC sys_io_uring_enter
 
-; sys_socket(domain, type, protocol) -> int fd
+;; ============================================================================
+;; sys_socket(domain, type, protocol) -> int fd
+;; ============================================================================
 DEF_FUNC_BARE sys_socket
     mov rax, SYS_socket
     syscall
     ret
 END_FUNC sys_socket
 
-; sys_bind(fd, addr*, addrlen) -> int
+;; ============================================================================
+;; sys_bind(fd, addr*, addrlen) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_bind
     mov rax, SYS_bind
     syscall
     ret
 END_FUNC sys_bind
 
-; sys_listen(fd, backlog) -> int
+;; ============================================================================
+;; sys_listen(fd, backlog) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_listen
     mov rax, SYS_listen
     syscall
     ret
 END_FUNC sys_listen
 
-; sys_accept4(fd, addr*, addrlen*, flags) -> int
+;; ============================================================================
+;; sys_accept4(fd, addr*, addrlen*, flags) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_accept4
     mov rax, SYS_accept4
     mov r10, rcx               ; 4th arg
@@ -418,14 +514,18 @@ DEF_FUNC_BARE sys_accept4
     ret
 END_FUNC sys_accept4
 
-; sys_connect(fd, addr*, addrlen) -> int
+;; ============================================================================
+;; sys_connect(fd, addr*, addrlen) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_connect
     mov rax, SYS_connect
     syscall
     ret
 END_FUNC sys_connect
 
-; sys_sendto(fd, buf, len, flags, dest_addr*, addrlen) -> ssize_t
+;; ============================================================================
+;; sys_sendto(fd, buf, len, flags, dest_addr*, addrlen) -> ssize_t
+;; ============================================================================
 DEF_FUNC_BARE sys_sendto
     mov rax, SYS_sendto
     mov r10, rcx               ; 4th arg
@@ -433,7 +533,9 @@ DEF_FUNC_BARE sys_sendto
     ret
 END_FUNC sys_sendto
 
-; sys_recvfrom(fd, buf, len, flags, src_addr*, addrlen*) -> ssize_t
+;; ============================================================================
+;; sys_recvfrom(fd, buf, len, flags, src_addr*, addrlen*) -> ssize_t
+;; ============================================================================
 DEF_FUNC_BARE sys_recvfrom
     mov rax, SYS_recvfrom
     mov r10, rcx               ; 4th arg
@@ -441,7 +543,9 @@ DEF_FUNC_BARE sys_recvfrom
     ret
 END_FUNC sys_recvfrom
 
-; sys_setsockopt(fd, level, optname, optval*, optlen) -> int
+;; ============================================================================
+;; sys_setsockopt(fd, level, optname, optval*, optlen) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_setsockopt
     mov rax, SYS_setsockopt
     mov r10, rcx               ; 4th arg
@@ -449,7 +553,9 @@ DEF_FUNC_BARE sys_setsockopt
     ret
 END_FUNC sys_setsockopt
 
-; sys_getsockopt(fd, level, optname, optval*, optlen*) -> int
+;; ============================================================================
+;; sys_getsockopt(fd, level, optname, optval*, optlen*) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_getsockopt
     mov rax, SYS_getsockopt
     mov r10, rcx               ; 4th arg
@@ -457,37 +563,47 @@ DEF_FUNC_BARE sys_getsockopt
     ret
 END_FUNC sys_getsockopt
 
-; sys_getsockname(fd, addr*, addrlen*) -> int
+;; ============================================================================
+;; sys_getsockname(fd, addr*, addrlen*) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_getsockname
     mov rax, SYS_getsockname
     syscall
     ret
 END_FUNC sys_getsockname
 
-; sys_getpeername(fd, addr*, addrlen*) -> int
+;; ============================================================================
+;; sys_getpeername(fd, addr*, addrlen*) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_getpeername
     mov rax, SYS_getpeername
     syscall
     ret
 END_FUNC sys_getpeername
 
-; sys_poll(struct pollfd *fds, nfds_t n, int timeout_ms) -> int
-; The syscall rather than glibc's wrapper: this returns -errno, where the
-; wrapper returns -1 in a 32-bit register and leaves the reason in errno.
+;; ============================================================================
+;; sys_poll(struct pollfd *fds, nfds_t n, int timeout_ms) -> int
+;; The syscall rather than glibc's wrapper: this returns -errno, where the
+;; wrapper returns -1 in a 32-bit register and leaves the reason in errno.
+;; ============================================================================
 DEF_FUNC_BARE sys_poll
     mov rax, SYS_poll
     syscall
     ret
 END_FUNC sys_poll
 
-; sys_shutdown(fd, how) -> int
+;; ============================================================================
+;; sys_shutdown(fd, how) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_shutdown
     mov rax, SYS_shutdown
     syscall
     ret
 END_FUNC sys_shutdown
 
-; sys_socketpair(domain, type, protocol, int sv[2]) -> int
+;; ============================================================================
+;; sys_socketpair(domain, type, protocol, int sv[2]) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_socketpair
     mov rax, SYS_socketpair
     mov r10, rcx               ; 4th arg
@@ -496,14 +612,18 @@ DEF_FUNC_BARE sys_socketpair
 END_FUNC sys_socketpair
 
 
-; sys_fcntl(fd, cmd, arg) -> int
+;; ============================================================================
+;; sys_fcntl(fd, cmd, arg) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_fcntl
     mov rax, SYS_fcntl
     syscall
     ret
 END_FUNC sys_fcntl
 
-; sys_ioctl(fd, request, arg) -> int
+;; ============================================================================
+;; sys_ioctl(fd, request, arg) -> int
+;; ============================================================================
 DEF_FUNC_BARE sys_ioctl
     mov rax, SYS_ioctl
     syscall
@@ -520,7 +640,9 @@ section .text
 ; Replaces libc memcpy and memset
 ; Uses rep movsb / rep stosb (optimal on ERMS-capable CPUs, Ivy Bridge+)
 
-; ap_memcpy(void *dst, const void *src, size_t n) -> void *dst
+;; ============================================================================
+;; ap_memcpy(void *dst, const void *src, size_t n) -> void *dst
+;; ============================================================================
 DEF_FUNC_BARE ap_memcpy
     mov rax, rdi            ; save dst for return
     mov rcx, rdx            ; rcx = count
@@ -528,7 +650,9 @@ DEF_FUNC_BARE ap_memcpy
     ret
 END_FUNC ap_memcpy
 
-; ap_memset(void *dst, int val, size_t n) -> void *dst
+;; ============================================================================
+;; ap_memset(void *dst, int val, size_t n) -> void *dst
+;; ============================================================================
 DEF_FUNC_BARE ap_memset
     mov r8, rdi             ; save dst for return
     mov al, sil             ; val (byte)
@@ -538,9 +662,11 @@ DEF_FUNC_BARE ap_memset
     ret
 END_FUNC ap_memset
 
-; ap_memmove(void *dst, const void *src, size_t n) -> void *dst
-; Handles overlapping regions. n must be a multiple of 8.
-; Forward: rep movsq (fast). Backward: manual qword loop (avoids std penalty).
+;; ============================================================================
+;; ap_memmove(void *dst, const void *src, size_t n) -> void *dst
+;; Handles overlapping regions. n must be a multiple of 8.
+;; Forward: rep movsq (fast). Backward: manual qword loop (avoids std penalty).
+;; ============================================================================
 DEF_FUNC_BARE ap_memmove
     mov rax, rdi            ; save dst for return
     mov rcx, rdx            ; rcx = byte count
@@ -570,8 +696,10 @@ DEF_FUNC_BARE ap_memmove
     ret
 END_FUNC ap_memmove
 
-; ap_memcmp(const void *s1, const void *s2, size_t n) -> int
-; Returns 0 if equal, <0 if s1<s2, >0 if s1>s2
+;; ============================================================================
+;; ap_memcmp(const void *s1, const void *s2, size_t n) -> int
+;; Returns 0 if equal, <0 if s1<s2, >0 if s1>s2
+;; ============================================================================
 DEF_FUNC_BARE ap_memcmp
     mov rcx, rdx            ; rcx = count
     repe cmpsb              ; rdi=s1, rsi=s2
@@ -594,8 +722,10 @@ section .text
 
 ; Replaces libc strlen, strcmp, strstr
 
-; ap_strlen(const char *s) -> size_t
-; Uses repne scasb (fast on modern x86-64 with FAST_SHORT_REP)
+;; ============================================================================
+;; ap_strlen(const char *s) -> size_t
+;; Uses repne scasb (fast on modern x86-64 with FAST_SHORT_REP)
+;; ============================================================================
 DEF_FUNC_BARE ap_strlen
     mov rdi, rdi            ; s already in rdi
     xor eax, eax            ; search for NUL byte
@@ -607,13 +737,15 @@ DEF_FUNC_BARE ap_strlen
     ret
 END_FUNC ap_strlen
 
-; ap_strcmp(const char *a, const char *b) -> int
-; 8-byte fast path with byte-at-a-time fallback, returns <0 / 0 / >0
-;
-; Safety: reading 8 bytes at a time is safe because all callers compare
-; PyStrObject.data which is inline after the header. Object allocation
-; always provides >=8 bytes past .data even for 1-char strings, due to
-; minimum object size and alignment.
+;; ============================================================================
+;; ap_strcmp(const char *a, const char *b) -> int
+;; 8-byte fast path with byte-at-a-time fallback, returns <0 / 0 / >0
+;;
+;; Safety: reading 8 bytes at a time is safe because all callers compare
+;; PyStrObject.data which is inline after the header. Object allocation
+;; always provides >=8 bytes past .data even for 1-char strings, due to
+;; minimum object size and alignment.
+;; ============================================================================
 DEF_FUNC_BARE ap_strcmp
     ; rdi = a, rsi = b
 .fast8:
@@ -769,9 +901,11 @@ section .text
 extern malloc
 extern free
 extern realloc
-; ap_malloc(size_t size) -> void*
-; Allocates memory, fatal error on failure
-DEF_FUNC ap_malloc
+;; ============================================================================
+;; ap_malloc(size_t size) -> void*
+;; Allocates memory, fatal error on failure
+;; ============================================================================
+DEF_FUNC ap_malloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi            ; save size
     call malloc wrt ..plt
@@ -785,8 +919,10 @@ DEF_FUNC ap_malloc
     call fatal_error        ; never returns
 END_FUNC ap_malloc
 
-; ap_free(void *ptr)
-; Frees memory; NULL-safe
+;; ============================================================================
+;; ap_free(void *ptr)
+;; Frees memory; NULL-safe
+;; ============================================================================
 DEF_FUNC_BARE ap_free
     test rdi, rdi
     jz .null
@@ -795,9 +931,11 @@ DEF_FUNC_BARE ap_free
     ret
 END_FUNC ap_free
 
-; ap_realloc(void *ptr, size_t size) -> void*
-; Reallocates memory, fatal error on failure
-DEF_FUNC ap_realloc
+;; ============================================================================
+;; ap_realloc(void *ptr, size_t size) -> void*
+;; Reallocates memory, fatal error on failure
+;; ============================================================================
+DEF_FUNC ap_realloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rsi            ; save size for error case
     call realloc wrt ..plt
@@ -823,9 +961,11 @@ section .text
 
 ; Uses raw Linux syscalls instead of libc stdio
 
-; fatal_error(const char *msg)
-; Prints "Error: <msg>\n" to stderr and exits with code 1. Never returns.
-DEF_FUNC fatal_error
+;; ============================================================================
+;; fatal_error(const char *msg)
+;; Prints "Error: <msg>\n" to stderr and exits with code 1. Never returns.
+;; ============================================================================
+DEF_FUNC fatal_error, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi            ; save msg
 
@@ -863,8 +1003,10 @@ DEF_FUNC fatal_error
 END_FUNC fatal_error
 
 
-; error_unimplemented_opcode(int opcode)
-; Reports unimplemented bytecode opcode and exits
+;; ============================================================================
+;; error_unimplemented_opcode(int opcode)
+;; Reports unimplemented bytecode opcode and exits
+;; ============================================================================
 EUO_END   equ 1              ; one past the digits: holds the newline
 DEF_FUNC error_unimplemented_opcode, 32             ; space for decimal digits
 
@@ -912,9 +1054,11 @@ DEF_FUNC error_unimplemented_opcode, 32             ; space for decimal digits
     call sys_exit
 END_FUNC error_unimplemented_opcode
 
-; list_sorting_error - raise ValueError when list is mutated during sort
-; Called when ob_item == NULL (list is being sorted)
-; Does not return - jumps to exception unwinder
+;; ============================================================================
+;; list_sorting_error - raise ValueError when list is mutated during sort
+;; Called when ob_item == NULL (list is being sorted)
+;; Does not return - jumps to exception unwinder
+;; ============================================================================
 DEF_FUNC_BARE list_sorting_error
     extern exc_ValueError_type
     lea rdi, [rel exc_ValueError_type]
@@ -929,3 +1073,86 @@ err_newline: db 10
 err_op_prefix: db "Error: unimplemented opcode "
 err_op_prefix_len equ $ - err_op_prefix
 list_modified_msg: db "list modified during sort", 0
+
+section .text
+
+;; ============================================================================
+;; sys_fork(void) -> pid_t
+;; ============================================================================
+DEF_FUNC_BARE sys_fork
+    mov rax, SYS_fork
+    syscall
+    ret
+END_FUNC sys_fork
+
+;; ============================================================================
+;; sys_execve(const char *path, char *const argv[], char *const envp[]) -> int
+;; Only ever returns on failure.
+;; ============================================================================
+DEF_FUNC_BARE sys_execve
+    mov rax, SYS_execve
+    syscall
+    ret
+END_FUNC sys_execve
+
+;; ============================================================================
+;; sys_exit_now(int code) -> noreturn
+;; The bare _exit: no flush, no atexit, which is what a forked child that
+;; failed to exec must call rather than unwinding through the parent's state.
+;; ============================================================================
+DEF_FUNC_BARE sys_exit_now
+    mov rax, SYS_exit
+    syscall
+    ud2
+END_FUNC sys_exit_now
+
+;; ============================================================================
+;; sys_close_range(unsigned first, unsigned last, int flags) -> int
+;; Linux 5.9.  The only way to shut every inherited descriptor without
+;; enumerating /proc, which is what a forked child cannot safely read.
+;; ============================================================================
+DEF_FUNC_BARE sys_close_range
+    mov rax, SYS_close_range
+    syscall
+    ret
+END_FUNC sys_close_range
+
+;; ============================================================================
+;; sys_kill(pid_t pid, int sig) -> int
+;; ============================================================================
+DEF_FUNC_BARE sys_kill
+    mov rax, SYS_kill
+    syscall
+    ret
+END_FUNC sys_kill
+
+;; ============================================================================
+;; sys_alarm(unsigned int seconds) -> unsigned int
+;; The seconds left on the previous alarm, or 0 when there was none.
+;; ============================================================================
+global sys_alarm
+DEF_FUNC_BARE sys_alarm
+    mov rax, SYS_alarm
+    syscall
+    ret
+END_FUNC sys_alarm
+
+;; ============================================================================
+;; sys_pause(void) -> int
+;; Blocks until a signal is delivered; always -EINTR when it returns.
+;; ============================================================================
+global sys_pause
+DEF_FUNC_BARE sys_pause
+    mov rax, SYS_pause
+    syscall
+    ret
+END_FUNC sys_pause
+
+;; ============================================================================
+;; sys_setsid(void) -> pid_t
+;; ============================================================================
+DEF_FUNC_BARE sys_setsid
+    mov rax, SYS_setsid
+    syscall
+    ret
+END_FUNC sys_setsid

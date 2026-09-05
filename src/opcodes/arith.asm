@@ -88,9 +88,11 @@ section .text
 ;; Pops right (b) then left (a), dispatches through type's tp_as_number.
 ;; Followed by 1 CACHE entry (2 bytes) that must be skipped.
 ;; ============================================================================
-; binop_is_number(rdi = payload, rsi = tag) -> eax 0/1
-; True for the three things float arithmetic may be coerced with: an int
-; immediate, a float immediate, and a heap int or bool.
+;; ============================================================================
+;; binop_is_number(rdi = payload, rsi = tag) -> eax 0/1
+;; True for the three things float arithmetic may be coerced with: an int
+;; immediate, a float immediate, and a heap int or bool.
+;; ============================================================================
 DEF_FUNC_BARE binop_is_number
     cmp rsi, TAG_SMALLINT
     je .bn_yes

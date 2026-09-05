@@ -209,7 +209,7 @@ END_FUNC sre_match_new
 ;; ============================================================================
 ;; sre_match_dealloc(PyObject* self)
 ;; ============================================================================
-DEF_FUNC sre_match_dealloc
+DEF_FUNC sre_match_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -481,7 +481,7 @@ END_FUNC sre_match_resolve_group_idx
 ;; group(n) returns nth group.
 ;; group(a, b, ...) returns tuple.
 ;; ============================================================================
-DEF_FUNC sre_match_group_method
+DEF_FUNC sre_match_group_method, 8            ; 3 pushes, so rsp is 16-aligned
     ; rdi = args (fat array), rsi = nargs
     push rbx
     push r12
@@ -577,7 +577,7 @@ END_FUNC sre_match_group_method
 ;; ============================================================================
 GS_DEFAULT     equ 8
 GS_DEFAULT_TAG equ 16
-GS_FRAME       equ 16       ; + 5 pushes = 56, not 16-aligned
+GS_FRAME       equ 24            ; + 5 pushes = 64, 16-aligned
 
 DEF_FUNC sre_match_groups_method, GS_FRAME
     ; rdi = args (fat array), rsi = nargs
@@ -679,7 +679,7 @@ END_FUNC sre_match_groups_method
 ;; sre_match_start_method(self, args, nargs)
 ;; start(group=0)
 ;; ============================================================================
-DEF_FUNC sre_match_start_method
+DEF_FUNC sre_match_start_method, 8            ; 1 pushes, so rsp is 16-aligned
     ; rdi = args (fat array), rsi = nargs
     push rbx
     mov rbx, [rdi]             ; self = args[0] payload
@@ -723,7 +723,7 @@ END_FUNC sre_match_start_method
 ;; sre_match_end_method(self, args, nargs)
 ;; end(group=0)
 ;; ============================================================================
-DEF_FUNC sre_match_end_method
+DEF_FUNC sre_match_end_method, 8            ; 1 pushes, so rsp is 16-aligned
     ; rdi = args (fat array), rsi = nargs
     push rbx
     mov rbx, [rdi]             ; self = args[0] payload
@@ -836,7 +836,7 @@ GD_IDX         equ 32
 GD_CAP         equ 40
 GD_DEFAULT     equ 48
 GD_DEFAULT_TAG equ 56
-GD_FRAME       equ 56       ; + 4 pushes = 88, not 16-aligned
+GD_FRAME       equ 64            ; + 4 pushes = 96, 16-aligned
 
 DEF_FUNC sre_match_groupdict_method, GD_FRAME
     ; rdi = args (fat array), rsi = nargs
@@ -1487,6 +1487,7 @@ sre_match_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 section .rodata
 sm_type_name:      db "re.Match", 0

@@ -37,7 +37,7 @@ extern tuple_type
 ;; dict_new() -> PyDictObject*
 ;; Allocate a new empty dict with initial capacity 8
 ;; ============================================================================
-DEF_FUNC dict_new
+DEF_FUNC dict_new, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     ; Header
     mov edi, PyDictObject_size
@@ -54,8 +54,11 @@ DEF_FUNC dict_new
     mov rsi, DICT_INIT_CAP
     call dict_alloc_tables
 
-    mov rdi, rbx
-    call gc_track
+    ; NOT tracked yet.  A dict whose contents are all untrackable cannot be
+    ; part of a cycle, and CPython does not track one: `gc.is_tracked({})` is
+    ; False there and was True here.  dict_maybe_track puts it in a
+    ; generation the moment something trackable goes in, which is the only
+    ; way it can become part of one.
     mov rax, rbx
     pop rbx
     leave
@@ -67,7 +70,7 @@ END_FUNC dict_new
 ;; Allocates the dense entry array (zeroed, so the unused tail reads as empty)
 ;; and the sparse index array (all DICT_IX_EMPTY).  Sets .capacity.
 ;; ============================================================================
-DEF_FUNC dict_alloc_tables
+DEF_FUNC dict_alloc_tables, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -109,7 +112,7 @@ END_FUNC dict_alloc_tables
 extern kw_names_pending
 extern dict_method_update
 
-DEF_FUNC dict_type_call
+DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -321,7 +324,7 @@ END_FUNC dict_keys_equal
 ;; dict_get(rdi=dict, rsi=key Value) -> rax = value Value, or 0 when absent
 ;; Linear probing lookup
 ;; ============================================================================
-DEF_FUNC dict_get, 8
+DEF_FUNC dict_get, 16
     push rbx
     push r12
     mov rbx, rdi                ; the dict; rdi does not survive the call
@@ -355,7 +358,7 @@ DL_HASH  equ 24
 DL_MASK  equ 32
 DL_SLOT  equ 40
 DL_FREE  equ 48
-DL_FRAME equ 64             ; + 3 pushes = 88, not 16-aligned
+DL_FRAME equ 72            ; + 3 pushes = 96, 16-aligned
 DEF_FUNC dict_lookup, DL_FRAME
     push rbx
     push r12
@@ -466,7 +469,7 @@ END_FUNC dict_get_index
 DR_DICT  equ 8
 DR_OLDE  equ 16
 DR_OLDN  equ 24
-DR_FRAME equ 32             ; + 3 pushes = 56, not 16-aligned
+DR_FRAME equ 40            ; + 3 pushes = 64, 16-aligned
 DEF_FUNC dict_resize, DR_FRAME
     push rbx
     push r12
@@ -555,7 +558,68 @@ END_FUNC dict_resize
 DS_DICT  equ 8
 DS_KEY   equ 16
 DS_VAL   equ 24
-DS_FRAME equ 32             ; + 3 pushes = 56, not 16-aligned
+DS_FRAME equ 40            ; + 3 pushes = 64, 16-aligned
+;; ============================================================================
+;; dict_maybe_track(rdi = the dict, rsi = a key Value, rdx = a value Value)
+;;
+;; CPython's _PyDict_MaybeUntrack, from the other end: it untracks during a
+;; collection, and this never tracks in the first place until there is a
+;; reason to.  Either is what makes `gc.is_tracked({})` and
+;; `gc.is_tracked({1: 2})` False -- a dict of numbers and strings cannot be
+;; part of a cycle, so walking it during every collection buys nothing.
+;;
+;; "Trackable" is CPython's _PyObject_GC_MAY_BE_TRACKED: an immediate is not,
+;; a str or bytes is not, and a tuple counts only while it is tracked itself.
+;; gc_track is idempotent, so this is safe to call on every insertion.
+;; ============================================================================
+DEF_FUNC dict_maybe_track, 8            ; 1 pushes, so rsp is 16-aligned
+    push rbx
+    mov rbx, rdi
+    cmp qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_next], 0
+    jne .dmt_done               ; already in a generation
+    push rdx                    ; the value, across the key's test
+    mov rdi, rsi
+    call dict_value_trackable
+    pop rdi                     ; the value
+    test eax, eax
+    jnz .dmt_track
+    call dict_value_trackable
+    test eax, eax
+    jz .dmt_done
+.dmt_track:
+    mov rdi, rbx
+    extern gc_track
+    call gc_track
+.dmt_done:
+    pop rbx
+    leave
+    ret
+END_FUNC dict_maybe_track
+
+;; dict_value_trackable(rdi = a Value) -> eax = 1 when the collector could
+;; ever have to walk into it
+DEF_FUNC_BARE dict_value_trackable
+    xor eax, eax
+    V_TEST_PTR rdi, rcx
+    ja .dvt_no                  ; an immediate is not an object
+    test rdi, rdi
+    jz .dvt_no
+    mov rcx, [rdi + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .dvt_no                  ; a str, a bytes, None, a bool
+    ; A tuple is trackable only while it is tracked: an untracked one holds
+    ; nothing the collector could reach, and CPython says the same.
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    jne .dvt_yes
+    cmp qword [rdi - GC_HEAD_SIZE + PyGC_Head.gc_next], 0
+    je .dvt_no
+.dvt_yes:
+    mov eax, 1
+.dvt_no:
+    ret
+END_FUNC dict_value_trackable
+
 DEF_FUNC dict_set, DS_FRAME
     push rbx
     push r12
@@ -563,6 +627,12 @@ DEF_FUNC dict_set, DS_FRAME
     mov [rbp - DS_DICT], rdi
     mov [rbp - DS_KEY], rsi
     mov [rbp - DS_VAL], rdx
+
+    ; Anything trackable going in is what makes the dict itself trackable.
+    call dict_maybe_track
+    mov rdi, [rbp - DS_DICT]
+    mov rsi, [rbp - DS_KEY]
+    mov rdx, [rbp - DS_VAL]
 
     call dict_lookup            ; rax = index or -1, rdx = slot, r8 = hash
     mov rbx, [rbp - DS_DICT]
@@ -637,7 +707,7 @@ END_FUNC dict_set
 ;; dict_dealloc(PyObject *self)
 ;; Free all entries, then free dict
 ;; ============================================================================
-DEF_FUNC dict_dealloc
+DEF_FUNC dict_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -694,7 +764,7 @@ dict_len:
 ;; dict_subscript(rdi=dict, rsi=key, edx=key_tag) -> (rax=value, edx=value_tag)
 ;; mp_subscript: look up key, raise KeyError if not found
 ;; ============================================================================
-DEF_FUNC dict_subscript
+DEF_FUNC dict_subscript, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rsi               ; save the key Value for the error message
@@ -822,7 +892,7 @@ extern dict_repr
 ;; Create a new dict key iterator.
 ;; rdi = dict
 ;; ============================================================================
-DEF_FUNC dict_tp_iter
+DEF_FUNC dict_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi               ; save dict
@@ -952,7 +1022,7 @@ END_FUNC dict_iter_next
 ;; ============================================================================
 ;; dict_iter_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL dict_iter_dealloc
+DEF_FUNC_LOCAL dict_iter_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -1004,7 +1074,7 @@ END_FUNC dict_contains
 ;; dict_view_new(rdi=dict, rsi=kind, rdx=type_ptr) -> PyDictViewObject*
 ;; Create a new dict view. kind: 0=keys, 1=values, 2=items
 ;; ============================================================================
-DEF_FUNC dict_view_new
+DEF_FUNC dict_view_new, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1040,7 +1110,7 @@ END_FUNC dict_view_new
 ;; ============================================================================
 ;; dict_view_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL dict_view_dealloc
+DEF_FUNC_LOCAL dict_view_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -1883,6 +1953,7 @@ dict_type:
     dq dict_traverse                        ; tp_traverse
     dq dict_clear_gc                        ; tp_clear
     dq 0          ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; Dict key iterator type
 align 8
@@ -1915,6 +1986,7 @@ dict_iter_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; The values and items iterators differ from the keys iterator in nothing
 ; but their name, which is what `type(iter(d.items())).__name__` answers
@@ -1950,6 +2022,7 @@ dict_value_iter_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 align 8
 global dict_item_iter_type
@@ -1981,6 +2054,7 @@ dict_item_iter_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; Dict reverse key iterator type
 align 8
@@ -2013,6 +2087,7 @@ dict_rev_iter_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; Dict keys view sequence methods (len + contains)
 align 8
@@ -2069,6 +2144,7 @@ dict_keys_view_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; Dict values view type
 align 8
@@ -2101,6 +2177,7 @@ dict_values_view_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; Dict items view type
 align 8
@@ -2133,6 +2210,7 @@ dict_items_view_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 section .text
 
@@ -2142,7 +2220,9 @@ section .text
 ;; file is the only place that knows which of its fields are owned.
 ;; ============================================================================
 
-; ---- dict_traverse / dict_clear ----
+;; ============================================================================
+;; ---- dict_traverse / dict_clear ----
+;; ============================================================================
 
 DEF_FUNC dict_traverse
     push rbx

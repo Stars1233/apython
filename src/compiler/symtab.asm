@@ -32,6 +32,8 @@ extern buf_free
 extern buf_init
 extern buf_push_ptr
 extern buf_reserve
+extern comp_msg_start
+extern comp_msg_cstr
 extern comp_error
 extern comp_intern_cstr
 
@@ -393,6 +395,10 @@ DEF_FUNC sym_visit, SV_FRAME
     je .mark_generator
     cmp eax, AST_AWAIT
     je .mark_coroutine
+    cmp eax, AST_RETURN
+    je .check_return
+    cmp eax, AST_TYPEALIAS
+    je .typealias
     cmp eax, AST_FOR
     je .maybe_async
     cmp eax, AST_WITH
@@ -428,6 +434,17 @@ DEF_FUNC sym_visit, SV_FRAME
     mov r8d, DEF_GLOBAL
     jmp .decl_common
 .nonlocal_decl:
+    ; A module has nothing to be nonlocal TO, and CPython says so before it
+    ; looks at any name -- spanning the whole statement, as the other
+    ; declaration errors do.
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_MODULE
+    jne .nonlocal_ok
+    CSTRING rdx, "nonlocal declaration not allowed at module level"
+    jmp .out_of_scope
+.nonlocal_ok:
     mov r8d, DEF_NONLOCAL
 .decl_common:
     mov [rbp - SV_KIND], r8
@@ -663,11 +680,25 @@ DEF_FUNC sym_visit, SV_FRAME
     mov rsi, r12
     mov ecx, DEF_LOCAL
     call sym_add
-    ; The defaults belong to the enclosing scope, so visit the parameter list
-    ; here before descending.
+
+    ; PEP 695: `def f[T](...)` puts the whole def inside a scope of its own
+    ; that binds T, so the defaults and the annotations can name it.  That
+    ; scope goes BETWEEN this one and the function's, and everything below
+    ; then treats it as the enclosing scope.
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
+    call sym_enter_typeparams
+    test eax, eax
+    jz .fail
+    mov r12, rax                        ; the wrapper, or the scope we had
+
+    ; The defaults and the annotations belong to the enclosing scope, so visit
+    ; the parameter list here before descending.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    mov ecx, 1                          ; a def: it may annotate
     call sym_visit_defaults
     test eax, eax
     jz .fail
@@ -676,6 +707,34 @@ DEF_FUNC sym_visit, SV_FRAME
     mov rdx, r13
     mov ecx, SCOPE_FUNCTION
     call sym_enter_function
+    jmp .ret
+
+.typealias:
+    ; `type X = V`.  The NAME binds in this scope; the VALUE does not belong
+    ; to it at all -- PEP 695 evaluates it lazily, inside a function of its
+    ; own, which is what lets an alias name another defined further down and
+    ; lets `type Tree = int | list[Tree]` refer to itself.  So the value gets
+    ; a scope, and this one only learns the name.
+    mov rax, [rbp - SV_NPTR]
+    mov edx, [rax + AstNode.a]          ; the target, an AST_NAME
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    test eax, eax
+    jz .fail
+    ; `type Y[T] = ...` binds T in a scope of its own, between this one and
+    ; the value's -- which is what lets the value name it.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call sym_enter_typeparams
+    test eax, eax
+    jz .fail
+    mov r12, rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call sym_enter_typealias
     jmp .ret
 
 .comprehension:
@@ -718,6 +777,17 @@ DEF_FUNC sym_visit, SV_FRAME
     mov rsi, r12
     mov ecx, DEF_LOCAL
     call sym_add
+
+    ; `class C[T](Base[T])` binds T in a scope of its own, and the bases are
+    ; evaluated inside it -- which is the only way one may name a parameter.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call sym_enter_typeparams
+    test eax, eax
+    jz .fail
+    mov r12, rax
+
     ; The bases and keywords are evaluated in the enclosing scope.
     mov rdi, rbx
     mov rsi, r13
@@ -742,6 +812,7 @@ DEF_FUNC sym_visit, SV_FRAME
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
+    xor ecx, ecx                        ; a lambda annotates nothing
     call sym_visit_defaults
     test eax, eax
     jz .fail
@@ -758,8 +829,66 @@ DEF_FUNC sym_visit, SV_FRAME
     mov rdi, rbx
     mov rsi, r12
     call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_FUNCTION
+    je .mg_ok
+    cmp dword [rax + Scope.kind], SCOPE_LAMBDA
+    je .mg_ok
+    ; A comprehension has a scope of its own here and CPython inlines it, so
+    ; a yield inside one is still the enclosing block's -- and outside a
+    ; function it is still an error, which the walk to the module finds.
+    cmp dword [rax + Scope.kind], SCOPE_COMP
+    je .mg_ok
+    CSTRING rdx, "'yield' outside function"
+    jmp .out_of_scope
+.mg_ok:
     or dword [rax + Scope.flags], SCF_GENERATOR
     jmp .children
+
+;; A `return`, a `yield` or an `await` outside a function is a SyntaxError,
+;; and the span CPython gives is the whole statement rather than its first
+;; token.  The three share everything but the wording.
+.check_return:
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_FUNCTION
+    je .children
+    cmp dword [rax + Scope.kind], SCOPE_LAMBDA
+    je .children
+    CSTRING rdx, "'return' outside function"
+.out_of_scope:
+    ; rdx = the message.  The node's own start, and its end from the span
+    ; table -- an end of -1 means it was never recorded, and then the span
+    ; falls back to the one character comp_error would have given.
+    push rdx
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov r8d, [rax + AstNode.col]
+    push rcx
+    push r8
+    mov rdi, rbx
+    mov esi, r13d
+    extern ast_span_at
+    call ast_span_at
+    pop r8
+    pop rcx
+    mov r9d, ecx
+    lea r10d, [r8d + 1]
+    test rax, rax
+    jz .oos_have_span
+    cmp dword [rax + AstSpan.end_lineno], -1
+    je .oos_have_span
+    mov r9d, [rax + AstSpan.end_lineno]
+    mov r10d, [rax + AstSpan.end_col]
+.oos_have_span:
+    pop rdx
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    extern comp_error_span
+    call comp_error_span
+    jmp .fail
 
 ;; `await` makes the enclosing block a coroutine, exactly as `yield` makes it a
 ;; generator.  A block that has both is an async generator; the two flags are
@@ -768,6 +897,15 @@ DEF_FUNC sym_visit, SV_FRAME
     mov rdi, rbx
     mov rsi, r12
     call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_FUNCTION
+    je .mc_ok
+    cmp dword [rax + Scope.kind], SCOPE_LAMBDA
+    je .mc_ok
+    cmp dword [rax + Scope.kind], SCOPE_COMP
+    je .mc_ok
+    CSTRING rdx, "'await' outside function"
+    jmp .out_of_scope
+.mc_ok:
     or dword [rax + Scope.flags], SCF_COROUTINE
     jmp .children
 
@@ -977,15 +1115,24 @@ DEF_FUNC sym_visit, SV_FRAME
 END_FUNC sym_visit
 
 ;; ============================================================================
-;; sym_visit_defaults(Comp *c, uint32_t scope, uint32_t fn) -> 1 ok, 0 error
+;; sym_visit_defaults(Comp *c, uint32_t scope, uint32_t fn, int annotated)
+;;   -> 1 ok, 0 error
+;;
 ;; Default values and annotations are evaluated in the ENCLOSING scope, at the
 ;; point the function is defined -- which is why `def f(x=n)` captures n's value
-;; then rather than at call time.
+;; then rather than at call time.  Only the defaults were visited, so a name
+;; used ONLY in an annotation was never classified: `def inner(x: T)` nested
+;; two deep read T as a global rather than as the enclosing function's local,
+;; and reported it undefined.
+;;
+;; `annotated` is 0 for a lambda, which cannot annotate anything and keeps its
+;; body in the `.c` a def uses for the return annotation.
 ;; ============================================================================
 SD_I     equ 32
 SD_N     equ 40
 SD_ARGS  equ 48
-SD_FRAME equ 56          ; + 3 pushes = 80
+SD_ANN   equ 56
+SD_FRAME equ 72          ; + 3 pushes = 96
 DEF_FUNC sym_visit_defaults, SD_FRAME
     push rbx
     push r12
@@ -993,6 +1140,7 @@ DEF_FUNC sym_visit_defaults, SD_FRAME
     mov rbx, rdi
     mov r12, rsi
     mov r13, rdx
+    mov [rbp - SD_ANN], rcx
 
     mov rdi, rbx
     mov rsi, r13
@@ -1000,7 +1148,7 @@ DEF_FUNC sym_visit_defaults, SD_FRAME
     mov ecx, [rax + AstNode.b]          ; the AST_ARGUMENTS node
     mov [rbp - SD_ARGS], rcx
     test ecx, ecx
-    jz .ok
+    jz .stars
     mov rdi, rbx
     mov rsi, rcx
     call ast_at
@@ -1010,7 +1158,7 @@ DEF_FUNC sym_visit_defaults, SD_FRAME
 .loop:
     mov rax, [rbp - SD_I]
     cmp rax, [rbp - SD_N]
-    jae .ok
+    jae .stars
     mov rdi, rbx
     mov rsi, [rbp - SD_ARGS]
     call ast_at
@@ -1023,6 +1171,30 @@ DEF_FUNC sym_visit_defaults, SD_FRAME
     call ast_at
     mov edx, [rax + AstNode.c]          ; the default expression
     test edx, edx
+    jz .child_ann
+    push rax
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    pop rcx
+    test eax, eax
+    jz .fail
+.child_ann:
+    ; and its annotation, which is evaluated in the same place
+    cmp qword [rbp - SD_ANN], 0
+    je .next
+    mov rdi, rbx
+    mov rsi, [rbp - SD_ARGS]
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - SD_I]
+    mov rdi, rbx
+    call ast_child
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov edx, [rax + AstNode.b]
+    test edx, edx
     jz .next
     mov rdi, rbx
     mov rsi, r12
@@ -1032,9 +1204,67 @@ DEF_FUNC sym_visit_defaults, SD_FRAME
 .next:
     inc qword [rbp - SD_I]
     jmp .loop
+
+.stars:
+    ; *args and **kwargs hang off the arguments node rather than the child
+    ; list, and their annotations are evaluated here too; so is the return
+    ; annotation, which is the def's own `.c`.
+    cmp qword [rbp - SD_ANN], 0
+    je .ok
+    mov rax, [rbp - SD_ARGS]
+    test rax, rax
+    jz .ret_ann
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov ecx, [rax + AstNode.b]          ; *args
+    mov [rbp - SD_N], rcx
+    mov ecx, [rax + AstNode.c]          ; **kwargs
+    mov [rbp - SD_I], rcx
+    mov rdx, [rbp - SD_N]
+    call .star_ann
+    test eax, eax
+    jz .fail
+    mov rdx, [rbp - SD_I]
+    call .star_ann
+    test eax, eax
+    jz .fail
+.ret_ann:
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.c]
+    test edx, edx
+    jz .ok
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    test eax, eax
+    jz .fail
 .ok:
     mov eax, 1
     jmp .ret
+
+;; Local: the annotation of one starred parameter node in rdx, if it has one.
+.star_ann:
+    sub rsp, 8
+    test rdx, rdx
+    jz .sa_ok
+    mov rdi, rbx
+    mov rsi, rdx
+    call ast_at
+    mov edx, [rax + AstNode.b]
+    test edx, edx
+    jz .sa_ok
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    add rsp, 8
+    ret
+.sa_ok:
+    mov eax, 1
+    add rsp, 8
+    ret
 .fail:
     xor eax, eax
 .ret:
@@ -1551,20 +1781,35 @@ DEF_FUNC sym_classify, SCL_FRAME
     ret
 
 .both:
-    mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "name is nonlocal and global"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
-    xor eax, eax
-    pop rbx
-    leave
-    ret
+    CSTRING rax, "name '"
+    CSTRING rcx, "' is nonlocal and global"
+    jmp .name_error
 .no_binding:
+    CSTRING rax, "no binding for nonlocal '"
+    CSTRING rcx, "' found"
+.name_error:
+    ; CPython names the name in both: "no binding for nonlocal 'x' found".
+    ; The position is the scope's, not the declaration's -- by the time a
+    ; scope is classified its statements are long parsed, and CPython's
+    ; symtable keeps a per-name one this does not.
+    push rcx                            ; [rsp + 16] once the buffer is pushed
+    push rax                            ; [rsp + 8]
+    call comp_msg_start
+    push rax                            ; the buffer, which is the message
+    mov rdi, rax
+    mov rsi, [rsp + 8]
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SCL_NAME]
+    add rsi, PyStrObject.data
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rsp + 16]
+    call comp_msg_cstr
+    pop rdx                             ; the message
+    add rsp, 16                         ; the two halves
     mov rdi, rbx
     lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "no binding for nonlocal found"
     xor ecx, ecx
     xor r8d, r8d
     call comp_error
@@ -2420,9 +2665,196 @@ DEF_FUNC sym_note_super, SNS_FRAME
 END_FUNC sym_note_super
 
 ;; ============================================================================
+;; sym_enter_typeparams(Comp *c, uint32_t parent, uint32_t node)
+;;   -> rax = the scope the def or class should be built in, or 0 on error
+;;
+;; PEP 695 wraps a `def f[T]` or a `class C[T]` in a hidden function scope
+;; that binds T, which is what lets a default, an annotation, a bound or a
+;; base name it.  When there are no brackets there is nothing to wrap, and the
+;; parent comes straight back -- which is the only path anything but a generic
+;; def takes.
+;;
+;; The wrapper's scope index goes on the AST_TYPEPARAMS node, the one place
+;; that exists exactly when a wrapper is needed.
+;; ============================================================================
+STP_PARENT equ 16
+STP_NODE   equ 24
+STP_TP     equ 32
+STP_SCOPE  equ 40
+STP_I      equ 48
+STP_N      equ 56
+STP_FRAME  equ 72           ; + 3 pushes = 96, 16-aligned
+DEF_FUNC sym_enter_typeparams, STP_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov [rbp - STP_PARENT], rsi
+    mov [rbp - STP_NODE], rdx
+
+    mov rdi, rbx
+    mov esi, edx
+    extern ast_typeparams_at
+    call ast_typeparams_at
+    test eax, eax
+    jz .stp_none
+    mov [rbp - STP_TP], rax
+
+    mov rdi, rbx
+    mov rsi, [rbp - STP_PARENT]
+    mov edx, SCOPE_FUNCTION
+    mov rcx, [rbp - STP_TP]
+    call sym_new
+    mov r12, rax
+    mov [rbp - STP_SCOPE], rax
+    mov rdi, rbx
+    mov rsi, [rbp - STP_TP]
+    call ast_at
+    mov [rax + AstNode.flags], r12w
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - STP_N], rcx
+    mov qword [rbp - STP_I], 0
+
+.stp_loop:
+    mov rcx, [rbp - STP_I]
+    cmp rcx, [rbp - STP_N]
+    jge .stp_done
+    mov rdi, rbx
+    mov rsi, [rbp - STP_TP]
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - STP_I]
+    mov rdi, rbx
+    call ast_child
+    mov r13, rax
+
+    ; The parameter's own name binds in the wrapper.
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, r12
+    mov ecx, DEF_LOCAL
+    call sym_add
+
+    ; A bound or a constraint tuple is a lazy thunk of its own, compiled as a
+    ; nullary function inside the wrapper -- which is what lets `def f[T: S,
+    ; S]` name a parameter declared after it.  The thunk's scope index goes on
+    ; the parameter node.
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.b]
+    test edx, edx
+    jz .stp_next
+    mov rdi, rbx
+    mov rsi, r12
+    mov edx, SCOPE_FUNCTION
+    mov rcx, r13
+    call sym_new
+    push rax
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    pop rcx
+    mov [rax + AstNode.flags], cx
+    push rcx
+    mov edx, [rax + AstNode.b]
+    mov rdi, rbx
+    mov rsi, rcx
+    call sym_visit
+    pop rcx
+    test eax, eax
+    jz .stp_fail
+.stp_next:
+    inc qword [rbp - STP_I]
+    jmp .stp_loop
+
+.stp_done:
+    mov rax, [rbp - STP_SCOPE]
+    jmp .stp_ret
+.stp_none:
+    mov rax, [rbp - STP_PARENT]
+    jmp .stp_ret
+.stp_fail:
+    xor eax, eax
+.stp_ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC sym_enter_typeparams
+
+;; ============================================================================
+;; sym_enter_typealias(Comp *c, uint32_t parent, uint32_t node) -> 1 ok, 0
+;;
+;; The scope an alias's VALUE is evaluated in.  It is a function scope with no
+;; parameters: CPython gives it the alias's own name and calls it from
+;; TypeAliasType.__value__ the first time anything reads it.  A `type X[T]`
+;; puts its parameters in a scope above this one; that is not built here,
+;; because nothing generates one yet.
+;; ============================================================================
+SET_PARENT equ 16
+SET_NODE   equ 24
+SET_FRAME  equ 32           ; + 3 pushes = 56... one word more to land right
+DEF_FUNC sym_enter_typealias, 40            ; + 3 pushes = 64, 16-aligned
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov [rbp - SET_PARENT], rsi
+    mov r13, rdx
+    mov [rbp - SET_NODE], rdx
+
+    mov rdi, rbx
+    mov rsi, [rbp - SET_PARENT]
+    mov edx, SCOPE_FUNCTION
+    mov rcx, r13
+    call sym_new
+    mov r12, rax
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov [rax + AstNode.flags], r12w
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.b]          ; the value
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC sym_enter_typealias
+
+;; ============================================================================
 ;; sym_enter_comp(Comp *c, uint32_t parent, uint32_t node) -> 1 ok, 0 error
-;; The comprehension's own scope: one parameter named `.0` for the outermost
-;; iterable, then the targets, conditions and element.
+;;
+;; PEP 709: a list, set or dict comprehension has no scope of its own.  Its
+;; targets, conditions and element belong to the block it is written in, and
+;; the code generator saves and restores whatever they shadow.  That is what
+;; makes `sys._getframe().f_code.co_name` inside one answer the enclosing
+;; function's name, keeps a traceback from growing an entry, and lets
+;; `[super().m() for _ in r]` work -- `__class__` is a free variable of the
+;; method, and a comprehension with a frame of its own could not see it.
+;;
+;; Two keep a scope.  A GENERATOR expression has to: its body runs later,
+;; from a frame of its own.  And a comprehension written at module or class
+;; scope does too, because the saving needs the target to be a FAST local and
+;; nothing at those scopes is one -- DIVERGENCES.md records that.
+;;
+;; So this either makes a scope and gives it the implicit `.0` parameter the
+;; outermost iterable arrives in, or uses the parent's and gives it nothing:
+;; an inlined comprehension takes its iterator from the stack.
 ;; ============================================================================
 SEC_PARENT equ 16
 SEC_NODE  equ 24
@@ -2440,6 +2872,24 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     mov r13, rdx
     mov [rbp - SEC_NODE], rdx
 
+    ; A generator expression keeps its scope; so does a comprehension whose
+    ; enclosing block has no fast locals to save into.
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    cmp byte [rax + AstNode.kind], AST_GENEXP
+    je .sec_own_scope
+    mov rdi, rbx
+    mov rsi, [rbp - SEC_PARENT]
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_FUNCTION
+    je .sec_inlined
+    cmp dword [rax + Scope.kind], SCOPE_LAMBDA
+    je .sec_inlined
+    cmp dword [rax + Scope.kind], SCOPE_COMP
+    je .sec_inlined
+
+.sec_own_scope:
     mov rdi, rbx
     mov rsi, [rbp - SEC_PARENT]
     mov edx, SCOPE_COMP
@@ -2451,6 +2901,16 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     mov rsi, r13
     call ast_at
     mov [rax + AstNode.flags], r12w
+    jmp .sec_have_scope
+
+.sec_inlined:
+    mov r12, [rbp - SEC_PARENT]
+    mov [rbp - SEC_SCOPE], r12
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov [rax + AstNode.flags], r12w
+.sec_have_scope:
 
     ; `async def` is a property of the block itself, not of anything inside it,
     ; so it is stamped here rather than discovered by the walk.
@@ -2465,7 +2925,11 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     or dword [rax + Scope.flags], SCF_COROUTINE
 .not_async:
 
-    ; The implicit parameter.  CPython calls it `.0`, which no source can name.
+    ; The implicit parameter, for a scope of its own only.  CPython calls it
+    ; `.0`, which no source can name; an inlined comprehension has no
+    ; parameter because it has no call.
+    cmp r12, [rbp - SEC_PARENT]
+    je .sec_no_dot_zero
     mov rdi, rbx
     lea rsi, [rel sym_dot_zero]
     call comp_intern_cstr
@@ -2476,6 +2940,7 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     mov rsi, r12
     mov ecx, DEF_PARAM | DEF_LOCAL
     call sym_add
+.sec_no_dot_zero:
 
     mov rdi, rbx
     mov rsi, r13

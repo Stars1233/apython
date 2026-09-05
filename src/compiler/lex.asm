@@ -21,6 +21,10 @@
 %include "compiler.inc"
 
 extern buf_reserve
+extern comp_msg_start
+extern comp_msg_cstr
+extern comp_msg_i64
+extern comp_error_span
 extern comp_error
 
 extern cc_table
@@ -512,6 +516,14 @@ DEF_FUNC lex_run, LR_FRAME
     jae .eof
     cmp byte [r12], '#'
     jne .bl_at_eol
+    ; A `# type:` comment on a line of its own is the form a function
+    ; signature takes: `def f(a, b):` then `# type: (int, str) -> bool`.  The
+    ; token is emitted BETWEEN the NEWLINE and the INDENT, which is where
+    ; CPython's grammar looks for it, and the line still counts as blank so
+    ; the indentation stack is untouched.
+    call .sub_type_comment
+    test eax, eax
+    jnz .bl_at_eol                      ; r12 is at the end of the line already
 .bl_comment:
     inc r12
     cmp r12, r13
@@ -586,6 +598,104 @@ DEF_FUNC lex_run, LR_FRAME
 
 .comment:
     ; Run to the end of the line, leaving the newline itself for .newline.
+    ;
+    ; A `# type: ...` comment is a token of its own when PyCF_TYPE_COMMENTS
+    ; asked for one -- the only comment this lexer ever emits.  It is
+    ; recognised here rather than in the parser because the parser never sees
+    ; a comment at all: everything else about them is that they are skipped.
+    call .sub_type_comment
+    test eax, eax
+    jnz .scan                           ; r12 is at the end of the line already
+    jmp .comment_loop
+
+; .sub_type_comment - r12 points at a '#'.  Emit a TOK_TYPE_COMMENT or a
+; TOK_TYPE_IGNORE for it if this is one and the flag asked for them, leaving
+; r12 at the end of the line.  Falls through harmlessly otherwise.
+.sub_type_comment:
+    cmp dword [rbx + Comp.want_tc], 0
+    je .tc_no
+    mov rax, r12
+    inc rax                             ; past the '#'
+.tc_blanks:
+    cmp rax, r13
+    jae .tc_no
+    cmp byte [rax], ' '
+    jne .tc_have_word
+    inc rax
+    jmp .tc_blanks
+.tc_have_word:
+    lea rcx, [rax + 5]
+    cmp rcx, r13
+    ja .tc_no
+    cmp dword [rax], 'type'
+    jne .tc_no
+    cmp byte [rax + 4], ':'
+    jne .tc_no
+    add rax, 5
+.tc_skip_blanks:
+    cmp rax, r13
+    jae .tc_emit
+    cmp byte [rax], ' '
+    jne .tc_emit
+    inc rax
+    jmp .tc_skip_blanks
+.tc_emit:
+    ; "ignore" -- as a whole word -- makes this an ignore rather than a type,
+    ; and CPython keeps the rest of the line as its tag.
+    mov esi, TOK_TYPE_COMMENT
+    lea rcx, [rax + 6]
+    cmp rcx, r13
+    ja .tc_have_kind
+    cmp dword [rax], 'igno'
+    jne .tc_have_kind
+    cmp word [rax + 4], 're'
+    jne .tc_have_kind
+    ; The word has to end there: `# type: ignoreme` is an ordinary comment.
+    cmp rcx, r13
+    jae .tc_is_ignore
+    push rax
+    lea rax, [rel cc_table]
+    movzx edx, byte [rcx]
+    test byte [rax + rdx], CC_IDCONT
+    pop rax
+    jnz .tc_have_kind
+.tc_is_ignore:
+    mov esi, TOK_TYPE_IGNORE
+    mov rax, rcx                        ; the tag is what follows the word
+.tc_have_kind:
+    ; rax is the first byte of the text.  Find the end of the line for its
+    ; length, then leave r12 there so the newline is still the parser's.
+    push rsi
+    mov rcx, rax
+.tc_end:
+    cmp rcx, r13
+    jae .tc_have_end
+    movzx edx, byte [rcx]
+    cmp dl, 10
+    je .tc_have_end
+    cmp dl, 13
+    je .tc_have_end
+    inc rcx
+    jmp .tc_end
+.tc_have_end:
+    push rcx
+    push rax
+    mov rdi, rbx
+    mov rsi, [rsp + 16]                 ; the kind chosen above
+    mov rdx, rax
+    sub rcx, rax
+    xor r8d, r8d
+    call lex_emit
+    pop rax
+    pop rcx
+    add rsp, 8                          ; the kind
+    mov r12, rcx
+    mov eax, 1
+    ret
+.tc_no:
+    xor eax, eax
+    ret
+
 .comment_loop:
     cmp r12, r13
     jae .scan
@@ -830,6 +940,9 @@ DEF_FUNC lex_run, LR_FRAME
     inc r12
 
 .num_done:
+    call .sub_num_check
+    test eax, eax
+    jz .fail
     mov rdi, rbx
     mov esi, TOK_NUMBER
     mov rdx, r15
@@ -838,6 +951,214 @@ DEF_FUNC lex_run, LR_FRAME
     mov r8, [rbp - LR_FLAGS]
     call lex_emit
     jmp .scan
+
+; .sub_num_check - is the number that was just scanned actually one?
+;   r15 = its first byte, r12 = one past its last, r13 = end of input.
+;   -> eax = 1 when it is, or 0 with the error recorded.
+;
+; The scan is permissive on purpose -- it takes hex digits for every radix and
+; underscores anywhere -- so the four things CPython refuses are decided here,
+; where the whole token is in hand.  Each carries CPython's own wording and
+; its own column, which is the offending CHARACTER for three of them and the
+; start of the literal for the fourth.
+.sub_num_check:
+    push rbx
+    push r14
+    push r15
+    push r12
+    sub rsp, 8
+
+    ; A radix literal's digits have to suit its radix.  The scan takes hex
+    ; digits whatever the prefix, so `0b2` and `0o9` arrive here whole -- and
+    ; with nothing after them, which is why this comes before the check for a
+    ; trailing character.
+    cmp byte [r15], '0'
+    jne .snc_not_radix_digits
+    lea rax, [r15 + 2]
+    cmp rax, r12
+    ja .snc_not_radix_digits
+    movzx eax, byte [r15 + 1]
+    or eax, 0x20
+    mov qword [rsp], 2
+    cmp al, 'b'
+    je .snc_scan_digits
+    mov qword [rsp], 8
+    cmp al, 'o'
+    je .snc_scan_digits
+    jmp .snc_not_radix_digits   ; hex takes every digit the scan took
+.snc_scan_digits:
+    lea rcx, [r15 + 2]
+.snc_digit_loop:
+    cmp rcx, r12
+    jae .snc_not_radix_digits
+    movzx eax, byte [rcx]
+    cmp al, '_'
+    je .snc_digit_next
+    sub eax, '0'
+    cmp rax, [rsp]
+    jb .snc_digit_next
+    ; Out of range for the base -- and so is any letter, which subtracting
+    ; '0' leaves above it.
+    mov r15, rcx
+    cmp qword [rsp], 2
+    je .snc_binary
+    jmp .snc_octal
+.snc_digit_next:
+    inc rcx
+    jmp .snc_digit_loop
+.snc_not_radix_digits:
+
+    ; A trailing underscore: `1_` is not a number.  It is the last byte of the
+    ; token, and it is what CPython blames.
+    cmp byte [r12 - 1], '_'
+    jne .snc_no_trailing
+    lea r15, [r12 - 1]
+    CSTRING rax, "invalid decimal literal"
+    jmp .snc_at_r15
+
+.snc_no_trailing:
+    ; An identifier character straight after the literal.  `1e` is the shape
+    ; that reaches here as a bare `1` followed by a name, and CPython blames
+    ; the literal rather than the letter; every other trailing character is
+    ; blamed where it stands.
+    cmp r12, r13
+    jae .snc_leading_zero
+    lea rcx, [rel cc_table]
+    movzx eax, byte [r12]
+    test byte [rcx + rax], CC_IDCONT
+    jz .snc_leading_zero
+
+    ; Which literal was it?  A radix prefix names its base and its bad digit.
+    cmp byte [r15], '0'
+    jne .snc_not_radix
+    lea rax, [r15 + 1]
+    cmp rax, r12
+    jae .snc_not_radix
+    movzx eax, byte [r15 + 1]
+    or eax, 0x20
+    mov r15, r12                ; the character after it is the bad one
+    cmp al, 'b'
+    je .snc_binary
+    cmp al, 'o'
+    je .snc_octal
+    cmp al, 'x'
+    je .snc_hex
+.snc_not_radix:
+    test qword [rbp - LR_FLAGS], TF_NUM_IMAG
+    jz .snc_decimal_junk
+    ; `1j2`: the literal ended at the `j`, and that is where CPython points.
+    lea r15, [r12 - 1]
+    CSTRING rax, "invalid imaginary literal"
+    jmp .snc_at_r15
+.snc_decimal_junk:
+    ; `1e`, `1if`, `2and`: CPython spans the literal itself, from its start.
+    CSTRING rax, "invalid decimal literal"
+    jmp .snc_at_r15
+
+.snc_binary:
+    CSTRING rax, "binary"
+    jmp .snc_radix_msg
+.snc_octal:
+    CSTRING rax, "octal"
+    jmp .snc_radix_msg
+.snc_hex:
+    CSTRING rax, "hexadecimal"
+.snc_radix_msg:
+    ; "invalid digit '2' in binary literal", at the character that is wrong.
+    push rax
+    call comp_msg_start
+    push rax
+    mov rdi, rax
+    CSTRING rsi, "invalid digit '"
+    call comp_msg_cstr
+    movzx ecx, byte [r15]
+    mov [rax], cl
+    mov byte [rax + 1], 0
+    lea rdi, [rax + 1]
+    CSTRING rsi, "' in "
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rsp + 8]
+    call comp_msg_cstr
+    mov rdi, rax
+    CSTRING rsi, " literal"
+    call comp_msg_cstr
+    pop rax                     ; the buffer
+    add rsp, 8                  ; the base's name
+    jmp .snc_at_r15
+
+.snc_leading_zero:
+    ; `08`: a decimal integer may not have a leading zero, and CPython spans
+    ; the whole literal rather than one character of it.
+    test qword [rbp - LR_FLAGS], TF_NUM_FLOAT | TF_NUM_IMAG
+    jnz .snc_ok
+    cmp byte [r15], '0'
+    jne .snc_ok
+    lea rax, [r15 + 1]
+    cmp rax, r12
+    jae .snc_ok                 ; a lone 0
+    ; 0x/0o/0b are radix prefixes, and 00000 is still zero.
+    movzx ecx, byte [r15 + 1]
+    or ecx, 0x20
+    cmp cl, 'b'
+    je .snc_ok
+    cmp cl, 'o'
+    je .snc_ok
+    cmp cl, 'x'
+    je .snc_ok
+    mov rcx, r15
+.snc_zero_loop:
+    cmp rcx, r12
+    jae .snc_ok                 ; every digit was a zero
+    movzx eax, byte [rcx]
+    cmp al, '0'
+    jne .snc_leading_bad
+    inc rcx
+    jmp .snc_zero_loop
+.snc_leading_bad:
+    cmp al, '_'
+    je .snc_ok
+    CSTRING rax, \
+        "leading zeros in decimal integer literals are not permitted; use an 0o prefix for octal integers"
+    ; The span runs from the literal's start to its end, unlike the three
+    ; above, whose end is where they begin.
+    mov rdx, rax
+    mov r8, r15
+    sub r8, [r14 + Lexer.line_start]
+    mov ecx, [r14 + Lexer.lineno]
+    mov r9d, ecx
+    mov r10, r12
+    sub r10, [r14 + Lexer.line_start]
+    dec r10d
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    call comp_error_span
+    jmp .snc_fail
+
+.snc_at_r15:
+    ; rax = the message, r15 = the character it is about.  CPython's span for
+    ; all three of these ends where it begins.
+    mov rdx, rax
+    mov r8, r15
+    sub r8, [r14 + Lexer.line_start]
+    mov ecx, [r14 + Lexer.lineno]
+    mov r9d, ecx
+    mov r10d, r8d
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    call comp_error_span
+.snc_fail:
+    xor eax, eax
+    jmp .snc_ret
+.snc_ok:
+    mov eax, 1
+.snc_ret:
+    add rsp, 8
+    pop r12
+    pop r15
+    pop r14
+    pop rbx
+    ret
 
 ;; --- string literals -------------------------------------------------------
 .string_plain:
@@ -859,11 +1180,31 @@ DEF_FUNC lex_run, LR_FRAME
     jnz .string_ok
     mov r8, r15
     sub r8, [r14 + Lexer.line_start]    ; the column, before rdx is claimed
+    push r8
+    ; CPython names the line the scan gave up on, which for a triple-quoted
+    ; literal is not the line the token started on, and ends the span where it
+    ; begins rather than one character later.
+    call comp_msg_start
+    push rax                    ; the buffer, which is the message
+    mov rdi, rax
+    CSTRING rsi, "unterminated string literal (detected at line "
+    call comp_msg_cstr
+    mov rdi, rax
+    mov esi, [r14 + Lexer.lineno]
+    mov rax, [rbp - LR_STRNL]
+    add rsi, rax
+    call comp_msg_i64
+    mov rdi, rax
+    CSTRING rsi, ")"
+    call comp_msg_cstr
+    pop rdx                     ; the message
+    pop r8
     mov rdi, rbx
     lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "unterminated string literal"
     mov ecx, [r14 + Lexer.lineno]
-    call comp_error
+    mov r9d, ecx
+    mov r10d, r8d               ; end_offset == offset, as CPython's is
+    call comp_error_span
     jmp .fail
 .string_ok:
     mov rdi, rbx
@@ -909,6 +1250,18 @@ DEF_FUNC lex_run, LR_FRAME
     je .op_close
     jmp .op_emit
 .op_open:
+    ; Remember where it was opened, for the "never closed" message.
+    mov ecx, [r14 + Lexer.paren_depth]
+    cmp ecx, LEX_MAX_BRACKET
+    jae .op_open_deep
+    movzx edx, byte [r15]
+    mov [r14 + Lexer.open_ch + rcx], dl
+    mov edx, [r14 + Lexer.lineno]
+    mov [r14 + Lexer.open_line + rcx*4], edx
+    mov rdx, r15
+    sub rdx, [r14 + Lexer.line_start]
+    mov [r14 + Lexer.open_col + rcx*4], edx
+.op_open_deep:
     inc dword [r14 + Lexer.paren_depth]
     jmp .op_emit
 .op_close:

@@ -18,6 +18,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern type_number_methods
 
 extern ap_malloc
 extern gc_alloc
@@ -54,12 +55,14 @@ extern eg_dealloc
 extern exc_BaseExceptionGroup_type
 extern exc_ExceptionGroup_type
 
-; exc_new(PyTypeObject *type, PyObject *msg_str, int msg_tag) -> PyExceptionObject*
-; Creates a new exception with given type and message string.
-; msg_str is INCREFed. type is stored but not INCREFed (types are immortal).
-; rdx = msg_tag (TAG_PTR for heap objs, TAG_SMALLINT for ints, 0 for NULL).
+;; ============================================================================
+;; exc_new(PyTypeObject *type, PyObject *msg_str, int msg_tag) -> PyExceptionObject*
+;; Creates a new exception with given type and message string.
+;; msg_str is INCREFed. type is stored but not INCREFed (types are immortal).
+;; rdx = msg_tag (TAG_PTR for heap objs, TAG_SMALLINT for ints, 0 for NULL).
+;; ============================================================================
 EN_EXC equ 8
-EN_FRAME equ 16             ; + 3 pushes = 40, not 16-aligned
+EN_FRAME equ 24            ; + 3 pushes = 48, 16-aligned
 DEF_FUNC exc_new, EN_FRAME
     push rbx
     push r12
@@ -115,9 +118,11 @@ DEF_FUNC exc_new, EN_FRAME
     ret
 END_FUNC exc_new
 
-; exc_is_exception(rdi = object) -> eax 0/1
-; True when the object is an instance of BaseException, i.e. when reading
-; PyExceptionObject.exc_context off it is defined.
+;; ============================================================================
+;; exc_is_exception(rdi = object) -> eax 0/1
+;; True when the object is an instance of BaseException, i.e. when reading
+;; PyExceptionObject.exc_context off it is defined.
+;; ============================================================================
 DEF_FUNC_BARE exc_is_exception
     V_TEST_PTR rdi, rax
     ja .nope
@@ -132,10 +137,12 @@ DEF_FUNC_BARE exc_is_exception
     ret
 END_FUNC exc_is_exception
 
-; exc_set_context(rdi = new exception, rsi = exception being handled)
-; Implements CPython's implicit chaining: the exception raised while another
-; is being handled gets that one as its __context__.  The chain is first
-; scanned for `new` so a re-raise cannot make it point at itself.
+;; ============================================================================
+;; exc_set_context(rdi = new exception, rsi = exception being handled)
+;; Implements CPython's implicit chaining: the exception raised while another
+;; is being handled gets that one as its __context__.  The chain is first
+;; scanned for `new` so a re-raise cannot make it point at itself.
+;; ============================================================================
 ESC_NEW equ 8
 ESC_OLD equ 16
 ESC_FRAME equ 16            ; + 0 pushes = 16
@@ -193,22 +200,42 @@ DEF_FUNC exc_set_context, ESC_FRAME
     ret
 END_FUNC exc_set_context
 
-; raise_key_error(rdi = key Value) -- does not return.
-; CPython reports the missing key itself as the exception's single argument,
-; so that KeyError('k') and str(e) == "'k'" carry which key was absent.
+;; ============================================================================
+;; raise_key_error(rdi = key Value) -- does not return.
+;; CPython reports the missing key itself as the exception's single argument,
+;; so that KeyError('k') and str(e) == "'k'" carry which key was absent.
+;; ============================================================================
 DEF_FUNC raise_key_error
+    extern current_exception
+    call set_key_error
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    call raise_exception_obj
+    ud2
+END_FUNC raise_key_error
+
+;; ============================================================================
+;; set_key_error(rdi = key Value) -- the same KeyError, RECORDED rather than
+;; raised, for a caller that has a C stack it still has to unwind by hand.
+;; ============================================================================
+global set_key_error
+DEF_FUNC set_key_error
     mov rsi, rdi                ; exc_new takes the message as a Value
     lea rdi, [rel exc_KeyError_type]
     xor edx, edx
     call exc_new
     mov rdi, rax
-    call raise_exception_obj
-    ud2
-END_FUNC raise_key_error
+    extern exc_install
+    call exc_install
+    leave
+    ret
+END_FUNC set_key_error
 
-; exc_from_cstr(PyTypeObject *type, const char *msg) -> PyExceptionObject*
-; Creates exception with a C string message (converted to PyStrObject).
-DEF_FUNC exc_from_cstr
+;; ============================================================================
+;; exc_from_cstr(PyTypeObject *type, const char *msg) -> PyExceptionObject*
+;; Creates exception with a C string message (converted to PyStrObject).
+;; ============================================================================
+DEF_FUNC exc_from_cstr, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi            ; save type
@@ -235,9 +262,11 @@ DEF_FUNC exc_from_cstr
     ret
 END_FUNC exc_from_cstr
 
-; exc_dealloc(PyExceptionObject *exc)
-; Free exception and DECREF its fields.
-DEF_FUNC exc_dealloc
+;; ============================================================================
+;; exc_dealloc(PyExceptionObject *exc)
+;; Free exception and DECREF its fields.
+;; ============================================================================
+DEF_FUNC exc_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi
@@ -291,12 +320,14 @@ DEF_FUNC exc_dealloc
     ret
 END_FUNC exc_dealloc
 
-; exc_repr(PyExceptionObject *exc) -> PyObject* (string)
-; Returns "TypeName(msg)" or just "TypeName()" if no message.
+;; ============================================================================
+;; exc_repr(PyExceptionObject *exc) -> PyObject* (string)
+;; Returns "TypeName(msg)" or just "TypeName()" if no message.
+;; ============================================================================
 ER_EXC   equ 8
 ER_POS   equ 16
 ER_BUF   equ 528         ; 512 bytes, [rbp-528, rbp-16)
-ER_FRAME equ 544            ; + 3 pushes = 568, not 16-aligned
+ER_FRAME equ 552            ; + 3 pushes = 576, 16-aligned
 DEF_FUNC exc_repr, ER_FRAME
     push rbx
     push r12
@@ -390,7 +421,7 @@ END_FUNC exc_repr
 ;; exc_is_syntax(PyObject *exc) -> eax = 1 when it is a SyntaxError carrying a
 ;; location: args == (msg, (filename, lineno, offset, text)).
 ;; ============================================================================
-DEF_FUNC exc_is_syntax
+DEF_FUNC exc_is_syntax, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     lea rsi, [rel exc_SyntaxError_type]
@@ -742,7 +773,7 @@ END_FUNC oserror_str
 ;; oserror_field(rdi = name cstr) -> rax = the Value, or 0 when absent or None
 ;; Reads [rbp - OSS_DICT] from oserror_str's frame, so it is local to it.
 ;; ============================================================================
-DEF_FUNC_LOCAL oserror_field
+DEF_FUNC_LOCAL oserror_field, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, [rbp]                  ; oserror_str's rbp
     call str_from_cstr_heap
@@ -819,10 +850,12 @@ DEF_FUNC_LOCAL oserror_append, OSA_FRAME
 END_FUNC oserror_append
 
 
-; exc_str(PyExceptionObject *exc) -> PyObject* (string)
-; Returns the message string, or type name if no message.
+;; ============================================================================
+;; exc_str(PyExceptionObject *exc) -> PyObject* (string)
+;; Returns the message string, or type name if no message.
+;; ============================================================================
 ES_EXC   equ 8
-ES_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+ES_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC exc_str, ES_FRAME
     push rbx
     mov rbx, rdi
@@ -993,7 +1026,7 @@ UES_ARGS  equ 16
 UES_START equ 24
 UES_END   equ 32
 UES_BUF   equ 288           ; the sentence, built in place
-UES_FRAME equ 288           ; + 1 push = 296, not 16-aligned
+UES_FRAME equ 296            ; + 1 push = 304, 16-aligned
 
 extern rbt_append_cstr
 extern msg_append_i64
@@ -1168,8 +1201,10 @@ DEF_FUNC unicode_error_str, UES_FRAME
     ret
 END_FUNC unicode_error_str
 
-; exc_getattr(PyExceptionObject *exc, PyStrObject *name) -> PyObject* or NULL
-; Handle attribute access on exception objects: args, __context__, __cause__, etc.
+;; ============================================================================
+;; exc_getattr(PyExceptionObject *exc, PyStrObject *name) -> PyObject* or NULL
+;; Handle attribute access on exception objects: args, __context__, __cause__, etc.
+;; ============================================================================
 DEF_FUNC exc_getattr
     push rbx
     push r12
@@ -1236,6 +1271,80 @@ DEF_FUNC exc_getattr
     call ap_strcmp
     test eax, eax
     jz .get_value
+
+    ; UnicodeEncodeError's and UnicodeDecodeError's five, which are their
+    ; whole point: an error handler is given the exception and reads the span
+    ; it has to replace out of it.  They are not fields either -- args is
+    ; (encoding, object, start, end, reason), which is the shape both the
+    ; message builder and lib/_codecs already assume -- so reading them back
+    ; out keeps one source of truth and needs no five-argument constructor.
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "encoding"
+    mov r14d, 0
+    call ap_strcmp
+    test eax, eax
+    jz .uni_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "object"
+    mov r14d, 1
+    call ap_strcmp
+    test eax, eax
+    jz .uni_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "start"
+    mov r14d, 2
+    call ap_strcmp
+    test eax, eax
+    jz .uni_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "end"
+    mov r14d, 3
+    call ap_strcmp
+    test eax, eax
+    jz .uni_attr
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "reason"
+    mov r14d, 4
+    call ap_strcmp
+    test eax, eax
+    jz .uni_attr
+    jmp .not_unicode_attr
+
+.uni_attr:
+    mov rdi, rbx
+
+    lea rsi, [rel exc_UnicodeError_type]
+    call exc_isinstance
+    test eax, eax
+    jz .not_unicode_attr
+    ; An explicit assignment wins, as it does for SyntaxError's.
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    test rdi, rdi
+    jz .uni_from_args
+    mov rsi, r12
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz .found_in_dict
+.uni_from_args:
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    test rax, rax
+    jz .return_none
+    movsxd rcx, r14d
+    cmp [rax + PyTupleObject.ob_size], rcx
+    jle .return_none
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rax, [rdx + rcx*8]
+    INCREF_V rax, rdx
+    V_UNPACK rax, rdx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.not_unicode_attr:
 
     ; SyntaxError's seven attributes.  They are not fields: they live in the
     ; args tuple CPython puts them in -- args = (msg, (filename, lineno,
@@ -1613,9 +1722,11 @@ DEF_FUNC exc_getattr
     ret
 END_FUNC exc_getattr
 
-; exc_setattr(PyExceptionObject *exc, PyStrObject *name, PyObject *value, int value_tag)
-; Store a custom attribute on an exception object using exc_dict.
-; rdi = exc, rsi = name, rdx = value, ecx = value_tag
+;; ============================================================================
+;; exc_setattr(PyExceptionObject *exc, PyStrObject *name, PyObject *value, int value_tag)
+;; Store a custom attribute on an exception object using exc_dict.
+;; rdi = exc, rsi = name, rdx = value, ecx = value_tag
+;; ============================================================================
 ESA_VAL   equ 8
 ESA_TAG   equ 16
 ESA_FRAME equ 32            ; + 2 pushes = 48
@@ -1750,9 +1861,11 @@ DEF_FUNC exc_setattr, ESA_FRAME
     RAISE exc_TypeError_type, "attribute value type must be bool"
 END_FUNC exc_setattr
 
-; exc_isinstance(PyExceptionObject *exc, PyTypeObject *type) -> int (0/1)
-; Check if exception is an instance of type, walking tp_base chain.
-; If type is a tuple, checks each element.
+;; ============================================================================
+;; exc_isinstance(PyExceptionObject *exc, PyTypeObject *type) -> int (0/1)
+;; Check if exception is an instance of type, walking tp_base chain.
+;; If type is a tuple, checks each element.
+;; ============================================================================
 extern tuple_type
 DEF_FUNC_BARE exc_isinstance
     ; rdi = exc, rsi = target type (or tuple of types)
@@ -1828,9 +1941,11 @@ DEF_FUNC_BARE exc_isinstance
     ret
 END_FUNC exc_isinstance
 
-; type_is_exc_subclass(PyTypeObject *type) -> int (0/1)
-; Walk tp_base chain checking for a type with tp_dealloc == exc_dealloc.
-; Detects user-defined exception classes (e.g., class MyError(Exception): pass)
+;; ============================================================================
+;; type_is_exc_subclass(PyTypeObject *type) -> int (0/1)
+;; Walk tp_base chain checking for a type with tp_dealloc == exc_dealloc.
+;; Detects user-defined exception classes (e.g., class MyError(Exception): pass)
+;; ============================================================================
 DEF_FUNC_BARE type_is_exc_subclass
     lea rdx, [rel exc_dealloc]
     lea rcx, [rel eg_dealloc]
@@ -1885,7 +2000,7 @@ ETC_FRAME equ 48            ; + 2 pushes = 64, 16-byte aligned
 ;; ============================================================================
 EMI_SELF  equ 8
 EMI_TUP   equ 16
-EMI_FRAME equ 32            ; + 1 push = 40
+EMI_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
 DEF_FUNC exc_method_init, EMI_FRAME
     push rbx
@@ -1944,7 +2059,7 @@ END_FUNC exc_method_init
 ;; ============================================================================
 EIM_KEY   equ 8
 EIM_FN    equ 16
-EIM_FRAME equ 32            ; + 1 push = 40
+EIM_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
 global exc_install_methods
 DEF_FUNC exc_install_methods, EIM_FRAME
@@ -2198,7 +2313,7 @@ END_FUNC exc_type_call
 
 ;; exc_kw_family(rdi = the type) -> rax = 0 none, 1 AttributeError,
 ;;                                       2 ImportError
-DEF_FUNC_LOCAL exc_kw_family
+DEF_FUNC_LOCAL exc_kw_family, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     lea rsi, [rel exc_AttributeError_type]
@@ -2656,8 +2771,10 @@ END_FUNC raise_oserror_build
 ;; Traceback support
 ;; ============================================================================
 
-; traceback_new() -> PyTracebackObject*
-; Allocates a new traceback with tb_next=NULL, tb_lineno=0.
+;; ============================================================================
+;; traceback_new() -> PyTracebackObject*
+;; Allocates a new traceback with tb_next=NULL, tb_lineno=0.
+;; ============================================================================
 DEF_FUNC traceback_new
     mov edi, PyTracebackObject_size
     call ap_malloc
@@ -2672,8 +2789,10 @@ DEF_FUNC traceback_new
     ret
 END_FUNC traceback_new
 
-; traceback_dealloc(PyTracebackObject *tb)
-; XDECREF tb_next, free self.
+;; ============================================================================
+;; traceback_dealloc(PyTracebackObject *tb)
+;; XDECREF tb_next, free self.
+;; ============================================================================
 DEF_FUNC traceback_dealloc
     push rbx
     push r12
@@ -2704,8 +2823,10 @@ DEF_FUNC traceback_dealloc
     ret
 END_FUNC traceback_dealloc
 
-; traceback_getattr(PyTracebackObject *tb, PyStrObject *name) -> (rax, edx)
-; Handles tb_lineno, tb_next, tb_frame attributes.
+;; ============================================================================
+;; traceback_getattr(PyTracebackObject *tb, PyStrObject *name) -> (rax, edx)
+;; Handles tb_lineno, tb_next, tb_frame attributes.
+;; ============================================================================
 DEF_FUNC traceback_getattr
     push rbx
     push r12
@@ -2944,7 +3065,9 @@ exc_metatype:
     dq 0                    ; tp_iternext
     dq 0                    ; tp_init
     dq 0                    ; tp_new
-    dq 0                    ; tp_as_number
+    dq type_number_methods      ; tp_as_number -- `C | None` builds a
+                                ; union, and a class's `|` is its
+                                ; METATYPE's slot, not its own
     dq 0                    ; tp_as_sequence
     dq 0                    ; tp_as_mapping
     ; tp_base — `type`, because this IS a metatype and a metatype is a kind of
@@ -2962,6 +3085,7 @@ exc_metatype:
     dq 0                    ; tp_traverse
     dq 0                    ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; The metatype is implementation detail -- it exists so an exception class can
 ; carry a tp_call of its own -- and it says `type`, as user_type_metatype
@@ -3000,6 +3124,7 @@ traceback_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 tb_type_name: db "traceback", 0
 
 ; Macro to define an exception type singleton
@@ -3035,6 +3160,7 @@ global %1
     dq exc_traverse         ; tp_traverse
     dq exc_clear_gc         ; tp_clear
     dq 0         ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 %endmacro
 
 ; Define all exception types
@@ -3150,7 +3276,9 @@ section .text
 ;; file is the only place that knows which of its fields are owned.
 ;; ============================================================================
 
-; ---- exc_traverse / exc_clear ----
+;; ============================================================================
+;; ---- exc_traverse / exc_clear ----
+;; ============================================================================
 DEF_FUNC exc_traverse
     push rbx
     mov rbx, rdi
@@ -3174,7 +3302,7 @@ DEF_FUNC exc_traverse
     ret
 END_FUNC exc_traverse
 
-DEF_FUNC exc_clear_gc
+DEF_FUNC exc_clear_gc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 

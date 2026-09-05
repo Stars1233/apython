@@ -84,7 +84,7 @@ BSLC_SLICE equ 32
 BSLC_STAG  equ 40    ; start tag
 BSLC_PTAG  equ 48    ; stop tag
 BSLC_OTAG  equ 56    ; obj tag
-BSLC_FRAME equ 56           ; + 0 pushes = 56, not 16-aligned
+BSLC_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
 
 ; op_store_slice: rbp-frame layout [rbp - ...]
 SSLC_START equ 8
@@ -96,7 +96,7 @@ SSLC_STAG  equ 48    ; start tag
 SSLC_PTAG  equ 56    ; stop tag
 SSLC_OTAG  equ 64    ; obj tag
 SSLC_VTAG  equ 72    ; value tag
-SSLC_FRAME equ 72           ; + 0 pushes = 72, not 16-aligned
+SSLC_FRAME equ 80            ; + 0 pushes = 80, 16-aligned
 
 ; op_map_add: 2-operand push layout [rsp+...]
 MA_VAL   equ 0     ; value (TOS, pushed last)
@@ -182,15 +182,15 @@ DEF_FUNC_BARE op_binary_subscr
     mov rdi, [rsp+8]              ; obj
     cmp qword [rsp+24], TAG_SMALLINT  ; obj tag
     je .try_getitem_dunder
+    ; "Is this object a class?" is TYPE_FLAG_METATYPE on its type, not a
+    ; comparison against the two metatypes this tree happens to ship: a class
+    ; built by a metaclass of its own answers no to those.  os.PathLike is one
+    ; -- an ABC -- and `os.PathLike[str]` was "object is not subscriptable".
     mov rax, [rdi + PyObject.ob_type]
-    extern user_type_metatype
-    extern type_type
-    lea rcx, [rel user_type_metatype]
-    cmp rax, rcx
-    je .try_class_getitem
-    lea rcx, [rel type_type]
-    cmp rax, rcx
-    je .try_class_getitem
+    test rax, rax
+    jz .try_getitem_dunder
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jnz .try_class_getitem
 
 .try_getitem_dunder:
     ; Try __getitem__ on heaptype
@@ -258,7 +258,35 @@ DEF_FUNC_BARE op_binary_subscr
     jmp .subscr_done
 
 .subscr_error:
-    RAISE exc_TypeError_type, "object is not subscriptable"
+    ; CPython names what was subscripted, and names a class differently from
+    ; an instance: "type 'C' is not subscriptable" against "'C' object is not
+    ; subscriptable".  A program reads the first to tell a missing
+    ; __class_getitem__ from a missing __getitem__.
+    ; The slot holds a PAYLOAD and its tag separately, not a Value: testing
+    ; the payload with V_TEST_PTR calls the int 1 a pointer and dereferences
+    ; it.  The tag is what says which it is.
+    mov rdi, [rsp + BSUB_OBJ]
+    cmp qword [rsp + BSUB_OTAG], TAG_PTR
+    jne .sub_err_instance
+    test rdi, rdi
+    jz .sub_err_instance
+    mov rax, [rdi + PyObject.ob_type]
+    test rax, rax
+    jz .sub_err_instance
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .sub_err_instance
+    mov rsi, rdi
+    extern raise_type_error_with_typename
+    CSTRING rdi, `type '\x01' is not subscriptable`
+    call raise_type_error_with_typename
+.sub_err_instance:
+    mov rax, [rsp + BSUB_OBJ]
+    mov rdx, [rsp + BSUB_OTAG]
+    V_PACK rax, rdx
+    mov rsi, rax
+    extern raise_type_error_with_name
+    CSTRING rdi, `'\x01' object is not subscriptable`
+    call raise_type_error_with_name
 
 .subscr_done:
     ; rax = result payload, rdx = result tag
@@ -2151,7 +2179,7 @@ END_FUNC op_store_slice
 ;; TOS = value, TOS1 = key
 ;; dict is at stack[-(ecx+2)] relative to current TOS (before pops)
 ;; ============================================================================
-DEF_FUNC op_map_add
+DEF_FUNC op_map_add, 8            ; 1 pushes, so rsp is 16-aligned
     push rcx                   ; save oparg
 
     VPOP_VAL rdx, r8           ; rdx = value (TOS), r8 = value tag

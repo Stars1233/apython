@@ -3,6 +3,8 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "opcodes.inc"
+extern obj_richcompare_bool
 
 extern ap_malloc
 extern gc_alloc
@@ -45,7 +47,7 @@ DEF_FUNC iter_traverse_one
 END_FUNC iter_traverse_one
 
 global iter_clear_one
-DEF_FUNC iter_clear_one
+DEF_FUNC iter_clear_one, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyListIterObject.it_seq]
@@ -59,7 +61,7 @@ DEF_FUNC iter_clear_one
     ret
 END_FUNC iter_clear_one
 
-DEF_FUNC list_iter_new
+DEF_FUNC list_iter_new, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi               ; save list
@@ -127,7 +129,7 @@ END_FUNC list_iter_next
 ;; ============================================================================
 ;; list_iter_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL list_iter_dealloc
+DEF_FUNC_LOCAL list_iter_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -171,7 +173,7 @@ END_FUNC list_tp_iter
 ;; tuple_iter_new(PyTupleObject *tuple) -> PyTupleIterObject*
 ;; Create a new tuple iterator
 ;; ============================================================================
-DEF_FUNC tuple_iter_new
+DEF_FUNC tuple_iter_new, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi
@@ -221,7 +223,7 @@ END_FUNC tuple_iter_next
 ;; ============================================================================
 ;; tuple_iter_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL tuple_iter_dealloc
+DEF_FUNC_LOCAL tuple_iter_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -248,7 +250,7 @@ END_FUNC tuple_tp_iter
 ;; range_new(int64_t start, int64_t stop, int64_t step) -> PyRangeObject*
 ;; Create a range SEQUENCE object (reusable; tp_iter creates fresh iterators)
 ;; ============================================================================
-DEF_FUNC range_new
+DEF_FUNC range_new, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi               ; start
@@ -339,7 +341,7 @@ END_FUNC range_iter_self
 ;; range_obj_tp_iter(PyRangeObject *self) -> PyRangeIterObject*
 ;; Creates a NEW range iterator from the range sequence object.
 ;; ============================================================================
-DEF_FUNC range_obj_tp_iter
+DEF_FUNC range_obj_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi               ; save range object
 
@@ -533,7 +535,7 @@ END_FUNC range_obj_mp_subscript
 ;; range_obj_reversed: __reversed__ for range objects
 ;; Returns a new range_iterator that iterates in reverse.
 ;; ============================================================================
-DEF_FUNC range_obj_reversed
+DEF_FUNC range_obj_reversed, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi               ; self = range object
 
@@ -612,7 +614,7 @@ END_FUNC range_obj_reversed
 ;; other -- range(0) == range(5, 3) -- a one-element range ignores its step,
 ;; and only from two elements up does the step matter.  So range(0, 3, 1)
 ;; == range(3) even though the objects differ.
-DEF_FUNC range_obj_richcompare
+DEF_FUNC range_obj_richcompare, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -695,7 +697,7 @@ END_FUNC range_obj_richcompare
 ;; step once there are two.  CPython hashes the tuple (len, start, step) with
 ;; None standing in for the fields that do not count; the mixing here is the
 ;; same shape without building the tuple.
-ROH_FRAME equ 32            ; + 1 push = 40, not 16-aligned
+ROH_FRAME equ 40            ; + 1 push = 48, 16-aligned
 DEF_FUNC range_obj_hash, ROH_FRAME
     push rbx
     mov rbx, rdi
@@ -755,7 +757,7 @@ END_FUNC range_index_of
 
 ;; range_arg_i64(rdi = a Value, rsi = out) -> eax = 1 and [rsi] = the number,
 ;; or eax = 0 when the value is not an integer at all.
-DEF_FUNC range_arg_i64
+DEF_FUNC range_arg_i64, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rsi
     V_IS_INT rdi, rax
@@ -794,10 +796,87 @@ DEF_FUNC range_arg_i64
     leave
     ret
 END_FUNC range_arg_i64
+;; ============================================================================
+;; range_obj_sq_contains(rdi = the range, rsi = a Value) -> eax = 0 or 1
+;;
+;; `x in range(n)` is arithmetic, not a walk: range_index_of already answers
+;; where a value would sit, and -1 for one that is not a member.  Without the
+;; slot, `x in r` fell through to CONTAINS_OP's iterating fallback -- correct
+;; but O(n) -- and `r.__contains__(x)` raised, because generic_method_contains
+;; has nothing to call.  Anything that is not an integer is compared the slow
+;; way, as CPython does, so `1.0 in range(3)` is still True.
+;; ============================================================================
+RSC_VAL   equ 8
+RSC_SELF  equ 16
+RSC_ARG   equ 24             ; the argument as a Value, for the walk below
+RSC_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC_LOCAL range_obj_sq_contains, RSC_FRAME
+    mov [rbp - RSC_SELF], rdi
+    mov [rbp - RSC_ARG], rsi
+    mov rdi, rsi
+    lea rsi, [rbp - RSC_VAL]
+    call range_arg_i64
+    test eax, eax
+    jz .rsc_walk
+    mov rdi, [rbp - RSC_SELF]
+    mov rsi, [rbp - RSC_VAL]
+    call range_index_of
+    cmp rax, -1
+    je .rsc_no
+    mov eax, 1
+    leave
+    ret
+
+.rsc_walk:
+    ; Not an integer.  A float or a bool can still equal a member, and
+    ; CPython answers by walking.
+    push rbx
+    push r12
+    push r13
+    sub rsp, 8                  ; 3 pushes + this = 32, so rsp stays aligned
+    mov r13, [rbp - RSC_ARG]    ; range_arg_i64 clobbered rsi
+    mov rbx, [rbp - RSC_SELF]
+    mov rdi, rbx
+    call range_obj_sq_length
+    mov r12, rax                ; the count
+.rsc_loop:
+    test r12, r12
+    jle .rsc_walk_no
+    dec r12
+    mov rdi, rbx
+    mov rsi, r12
+    call range_obj_sq_item      ; returns a Value
+    mov rdi, rax
+    mov rsi, r13
+    mov edx, CMP_EQ
+    call obj_richcompare_bool
+    test eax, eax
+    jg .rsc_walk_yes
+    js .rsc_walk_no             ; the comparison raised; leave it pending
+    jmp .rsc_loop
+.rsc_walk_yes:
+    mov eax, 1
+    jmp .rsc_walk_done
+.rsc_walk_no:
+    xor eax, eax
+.rsc_walk_done:
+    add rsp, 8
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.rsc_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC range_obj_sq_contains
+
 
 ;; range_method_index(args, nargs) -> the index of the value
 RMI_VAL   equ 8
-RMI_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+RMI_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC range_method_index, RMI_FRAME
     push rbx
     cmp rsi, 2
@@ -858,7 +937,7 @@ END_FUNC range_raise_not_in
 
 ;; range_method_count(args, nargs) -> 1 when the value is in the range, else 0
 RMC_VAL   equ 8
-RMC_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+RMC_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC range_method_count, RMC_FRAME
     push rbx
     cmp rsi, 2
@@ -1132,6 +1211,7 @@ list_iter_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; Tuple iterator type
 align 8
@@ -1164,6 +1244,7 @@ tuple_iter_type:
     dq iter_traverse_one                        ; tp_traverse
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; Range iterator type
 align 8
@@ -1196,6 +1277,7 @@ range_iter_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; Range object type (reusable sequence, creates fresh iterators)
 align 8
@@ -1229,6 +1311,7 @@ range_obj_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; Range object sequence methods
 align 8
@@ -1244,6 +1327,6 @@ range_obj_seq_methods:
     dq 0                        ; sq_repeat
     dq range_obj_sq_item        ; sq_item
     dq 0                        ; sq_ass_item
-    dq 0                        ; sq_contains
+    dq range_obj_sq_contains    ; sq_contains
     dq 0                        ; sq_inplace_concat
     dq 0                        ; sq_inplace_repeat

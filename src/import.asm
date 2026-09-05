@@ -8,6 +8,8 @@ extern ap_malloc
 extern ap_free
 extern ap_memcpy
 extern ap_strlen
+extern ap_strcmp
+extern ap_memcmp
 extern obj_decref
 extern obj_incref
 extern obj_dealloc
@@ -34,6 +36,8 @@ extern code_from_path
 extern path_is_source
 extern sys_open
 extern sys_close
+extern sys_read
+extern sys_stat
 
 ; Marshal globals (save/restore across nested loads)
 extern marshal_buf
@@ -70,14 +74,14 @@ IF_EXC      equ 88           ; current_exception on entry (see .import_error)
 IF_POS      equ 96           ; byte position while walking a dotted name
 IF_PARENT   equ 104          ; the module the next component hangs off
 IF_LEAF     equ 112          ; the module the walk has reached
-IF_FRAME    equ 128         ; + 5 pushes = 168, not 16-aligned
+IF_FRAME    equ 136            ; + 5 pushes = 176, 16-aligned
 
 ; --- import_find_and_load frame layout ---
 ; path_component buffer lives on stack below frame locals
 FL_NAME     equ 8            ; name_str (PyObject*)
 FL_LEAF     equ 16           ; leaf name cstr ptr
 FL_LEAFLEN  equ 24           ; leaf name length
-FL_FRAME    equ 48          ; + 5 pushes = 88, not 16-aligned
+FL_FRAME    equ 56            ; + 5 pushes = 96, 16-aligned
 FL_STKSZ    equ 4096         ; stack buffer for path component
 
 ; Path buffer size
@@ -940,6 +944,215 @@ DEF_FUNC import_find_and_load, FL_FRAME
 END_FUNC import_find_and_load
 
 ;; ============================================================================
+;; sd_pyc_ok(rdi = an open fd on a .pyc, rsi = its path) -> rax = the fd when
+;;   the .pyc may be used, eax = 0 when it may not.  Closes the fd and returns
+;;   0 for a .pyc whose source has been edited since it was written, so the
+;;   search falls through to the next pattern and, in the end, to the source.
+;; ============================================================================
+SPO_FD    equ 8
+SPO_FRAME equ 16            ; + 0 pushes = 16
+DEF_FUNC_LOCAL sd_pyc_ok, SPO_FRAME
+    mov [rbp - SPO_FD], rdi
+    call pyc_is_stale
+    test eax, eax
+    jnz .spo_stale
+    mov rax, [rbp - SPO_FD]
+    leave
+    ret
+.spo_stale:
+    mov rdi, [rbp - SPO_FD]
+    call sys_close
+    xor eax, eax
+    leave
+    ret
+END_FUNC sd_pyc_ok
+
+;; ============================================================================
+;; pyc_is_stale(rdi = an OPEN fd on the .pyc, rsi = its path) -> eax = 1 when
+;;   the source beside it has been edited since it was written
+;;
+;; A .pyc records the source's mtime and size in its header, and CPython
+;; refuses one whose source no longer matches -- otherwise editing a module
+;; and running it again silently runs the old code, which is what happened
+;; here.  The check only applies to the timestamp form: a hash-based .pyc
+;; (flags bit 0) records a hash instead, and an unchecked one is meant to be
+;; taken on trust.  A .pyc with no source beside it is CPython's sourceless
+;; form and is always fresh.
+;;
+;; The fd is left where it was: this reads the header and seeks back.
+;; ============================================================================
+PIS_FD    equ 8
+PIS_HDR   equ 24            ; the 16-byte header
+PIS_STAT  equ 24 + 144      ; STAT_SIZE
+PIS_FRAME equ ((PIS_STAT + 15) / 16) * 16 + 8   ; + 1 push = 16-aligned
+DEF_FUNC_LOCAL pyc_is_stale, PIS_FRAME
+    push rbx
+    mov [rbp - PIS_FD], rdi
+    mov rbx, rsi
+
+    ; The source it was built from, if the name says there is one.
+    mov rdi, rbx
+    call import_source_path
+    cmp rax, rbx
+    je .pis_fresh               ; sourceless: nothing to compare against
+    mov rdi, rax
+    lea rsi, [rbp - PIS_STAT]
+    call sys_stat
+    test rax, rax
+    js .pis_fresh               ; the source is gone; the .pyc stands alone
+
+    ; The header: magic, flags, mtime, size.
+    mov rdi, [rbp - PIS_FD]
+    lea rsi, [rbp - PIS_HDR]
+    mov edx, 16
+    call sys_read
+    push rax
+    mov rdi, [rbp - PIS_FD]
+    xor esi, esi
+    xor edx, edx
+    extern sys_lseek
+    call sys_lseek              ; back to the start, for the real reader
+    pop rax
+    cmp rax, 16
+    jne .pis_fresh
+
+    mov eax, [rbp - PIS_HDR + 4]
+    test eax, 1
+    jnz .pis_fresh              ; hash-based: not a timestamp to compare
+
+    mov eax, [rbp - PIS_HDR + 8]        ; the source mtime it recorded
+    mov ecx, [rbp - PIS_STAT + 88]      ; st_mtime, low 32 bits
+    cmp eax, ecx
+    jne .pis_stale
+    mov eax, [rbp - PIS_HDR + 12]       ; and its size
+    mov ecx, [rbp - PIS_STAT + 48]      ; st_size, low 32 bits
+    cmp eax, ecx
+    jne .pis_stale
+.pis_fresh:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.pis_stale:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC pyc_is_stale
+
+;; ============================================================================
+;; import_source_path(rdi = the path a search matched) -> rax = the path to
+;;   record as __file__, which is rdi itself unless it is a __pycache__ entry
+;;
+;; "<dir>/__pycache__/<name>.cpython-312.pyc" becomes "<dir>/<name>.py".  The
+;; other two cache shapes the search tries -- a bare "<name>.cpython-312.pyc"
+;; beside the source, and a package's __init__ -- are handled by the same
+;; rewrite, since both keep the name in the last component.  A .pyc that is
+;; NOT in a __pycache__ directory is CPython's sourceless form, whose
+;; __file__ is the .pyc, so it is left alone.
+;;
+;; The answer is written into a buffer of its own: the caller's path is the
+;; one the code object was loaded from and is still needed.
+;; ============================================================================
+global import_source_path
+DEF_FUNC import_source_path
+    push rbx
+    push r12
+    push r13
+    push r14                    ; four pushes keep rsp 16-aligned at the call
+    mov rbx, rdi
+
+    ; It has to end in ".cpython-312.pyc".
+    mov rdi, rbx
+    call ap_strlen
+    mov r12, rax                ; the length
+    cmp r12, 16 + 13            ; the suffix, plus the shortest marker
+    jb .isp_keep
+    ; ap_memcmp with an explicit length, not ap_strcmp: that one compares
+    ; eight bytes at a time and reads past the terminator, and the path here
+    ; sits in a heap buffer whose tail was never written.  Valgrind says so.
+    lea rdi, [rbx + r12 - 16]
+    lea rsi, [rel isp_suffix]
+    mov edx, 16
+    call ap_memcmp
+    test eax, eax
+    jnz .isp_keep
+
+    ; ...and contain "/__pycache__/" somewhere before the last component.
+    xor r13, r13                ; the index of the marker, once found
+    mov r14, -1
+.isp_scan:
+    lea rax, [r13 + 13]
+    cmp rax, r12
+    ja .isp_scanned
+    push r13
+    lea rdi, [rbx + r13]
+    lea rsi, [rel isp_marker]
+    mov edx, 13
+    call ap_memcmp
+    pop r13
+    test eax, eax
+    jnz .isp_scan_next
+    mov r14, r13
+.isp_scan_next:
+    inc r13
+    jmp .isp_scan
+.isp_scanned:
+    cmp r14, -1
+    je .isp_keep
+
+    ; <dir> is everything before the marker; <name> is between the marker's
+    ; trailing slash and the suffix.
+    lea rax, [r14 + 13]         ; the first byte of <name>
+    lea rcx, [r12 - 16]         ; one past its last
+    cmp rcx, rax
+    jbe .isp_keep
+    sub rcx, rax                ; the name's length
+    lea rdx, [r14 + rcx + 4]    ; <dir> + '/' + <name> + ".py" + NUL
+    cmp rdx, ISP_BUFSZ
+    jae .isp_keep
+
+    lea rdi, [rel isp_buf]
+    mov rsi, rbx
+    mov rdx, r14
+    push rcx
+    push rax
+    call ap_memcpy              ; <dir>, without the trailing slash
+    pop rax
+    pop rcx
+    lea rdi, [rel isp_buf]
+    add rdi, r14
+    mov byte [rdi], '/'
+    inc rdi
+    lea rsi, [rbx + rax]
+    mov rdx, rcx
+    push rcx
+    call ap_memcpy
+    pop rcx
+    lea rdi, [rel isp_buf]
+    add rdi, r14
+    add rdi, rcx
+    inc rdi
+    mov dword [rdi], `.py\0`
+    lea rax, [rel isp_buf]
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.isp_keep:
+    mov rax, rbx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC import_source_path
+
+;; ============================================================================
 ;; import_search_dirs(PyListObject *dirs, const char *leaf, int64_t leaf_len) -> int
 ;; Search a list of directory strings for a module named 'leaf'.
 ;; Tries: <dir>/<leaf>/__pycache__/__init__.cpython-312.pyc (package)
@@ -949,7 +1162,9 @@ END_FUNC import_find_and_load
 ;; On failure returns 0.
 ;; ============================================================================
 
-; Frame layout for import_search_dirs
+;; ============================================================================
+;; Frame layout for import_search_dirs
+;; ============================================================================
 SD_DIRS     equ 8             ; dirs list
 SD_LEAF     equ 16            ; leaf cstr
 SD_LEAFLEN  equ 24            ; leaf length
@@ -1048,8 +1263,14 @@ DEF_FUNC import_search_dirs, SD_FRAME
     xor edx, edx
     call sys_open
     test rax, rax
-    jns .sd_found_package
+    js .sd_p2
+    mov rdi, rax
+    mov rsi, r12
+    call sd_pyc_ok
+    test eax, eax
+    jnz .sd_found_package
 
+.sd_p2:
     ; --- Pattern 2: <dir>/__pycache__/<leaf>.cpython-312.pyc ---
     ; Rebuild from dir offset (r13 already has dir+slash offset)
     ; Re-read r13 from dir
@@ -1090,8 +1311,14 @@ DEF_FUNC import_search_dirs, SD_FRAME
     xor edx, edx
     call sys_open
     test rax, rax
-    jns .sd_found_module
+    js .sd_p3
+    mov rdi, rax
+    mov rsi, r12
+    call sd_pyc_ok
+    test eax, eax
+    jnz .sd_found_module
 
+.sd_p3:
     ; --- Pattern 3: <dir>/<leaf>.cpython-312.pyc ---
     mov r13, [rbx + PyStrObject.ob_size]
     test r13, r13
@@ -1122,8 +1349,14 @@ DEF_FUNC import_search_dirs, SD_FRAME
     xor edx, edx
     call sys_open
     test rax, rax
-    jns .sd_found_module
+    js .sd_p4
+    mov rdi, rax
+    mov rsi, r12
+    call sd_pyc_ok
+    test eax, eax
+    jnz .sd_found_module
 
+.sd_p4:
     ; --- Pattern 4: <dir>/<leaf>/__init__.py (a package, from source) ---
     ; The source patterns come last, so a .pyc that is already there still
     ; wins and nothing an existing user has changes behaviour.
@@ -1336,7 +1569,13 @@ DEF_FUNC import_search_syspath, SS_FRAME
     xor edx, edx
     call sys_open
     test rax, rax
-    jns .ss_found_package
+    js .ss_after_pyc0
+    mov rdi, rax
+    mov rsi, r12
+    call sd_pyc_ok
+    test eax, eax
+    jnz .ss_found_package
+.ss_after_pyc0:
 
     ; --- Pattern 2: <dir>/__pycache__/<leaf>.cpython-312.pyc ---
     mov r13, [rbx + PyStrObject.ob_size]
@@ -1372,7 +1611,13 @@ DEF_FUNC import_search_syspath, SS_FRAME
     xor edx, edx
     call sys_open
     test rax, rax
-    jns .ss_found_module
+    js .ss_after_pyc1
+    mov rdi, rax
+    mov rsi, r12
+    call sd_pyc_ok
+    test eax, eax
+    jnz .ss_found_module
+.ss_after_pyc1:
 
     ; --- Pattern 3: <dir>/<leaf>.cpython-312.pyc ---
     mov r13, [rbx + PyStrObject.ob_size]
@@ -1401,7 +1646,13 @@ DEF_FUNC import_search_syspath, SS_FRAME
     xor edx, edx
     call sys_open
     test rax, rax
-    jns .ss_found_module
+    js .ss_after_pyc2
+    mov rdi, rax
+    mov rsi, r12
+    call sd_pyc_ok
+    test eax, eax
+    jnz .ss_found_module
+.ss_after_pyc2:
 
     ; --- Pattern 4: <dir>/<full>/__init__.py (a package, from source) ---
     mov r13, [rbx + PyStrObject.ob_size]
@@ -1577,7 +1828,16 @@ DEF_FUNC import_load_module, IF_FRAME
     call obj_decref
 
     ; Set __file__
+    ;
+    ; The SOURCE path, not the cache file the code actually came out of.
+    ; CPython records the .py even when it executes a cached .pyc -- it is
+    ; what a module's repr prints, what inspect.getsource opens, and what a
+    ; traceback through the module names -- and this recorded whichever file
+    ; the search matched, so every import through __pycache__ answered
+    ; ".../__pycache__/m.cpython-312.pyc".
     mov rdi, r12                ; path cstr
+    call import_source_path     ; -> the .py, or r12 unchanged
+    mov rdi, rax
     call str_from_cstr_heap
     push rax                    ; file str
     lea rdi, [rel im_dunder_file]
@@ -1914,6 +2174,14 @@ im_pkg_py_suffix_len   equ $ - im_pkg_py_suffix - 1
 
 im_py_suffix:          db ".py", 0
 im_py_suffix_len       equ $ - im_py_suffix - 1
+
+section .rodata
+isp_suffix: db ".cpython-312.pyc", 0
+isp_marker: db "/__pycache__/", 0
+
+section .bss
+ISP_BUFSZ equ 4096
+isp_buf: resb ISP_BUFSZ
 
 section .bss
 import_path_buf_ptr: resq 1    ; malloc'd path buffer (lazy-allocated)

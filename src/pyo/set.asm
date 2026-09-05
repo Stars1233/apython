@@ -352,7 +352,7 @@ END_FUNC set_find_slot
 ;; set_resize(set)
 ;; Double capacity and rehash all entries
 ;; ============================================================================
-DEF_FUNC_LOCAL set_resize
+DEF_FUNC_LOCAL set_resize, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -560,7 +560,7 @@ END_FUNC set_contains
 SRC_SELF  equ 8
 SRC_OTHER equ 16
 SRC_OP    equ 24
-SRC_FRAME equ 24            ; + 0 pushes = 24, not 16-aligned
+SRC_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC set_richcompare, SRC_FRAME
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, r8            ; right Value -> (payload, tag)
@@ -1021,7 +1021,7 @@ END_FUNC set_len
 ;; Create a new set iterator.
 ;; rdi = set
 ;; ============================================================================
-DEF_FUNC set_tp_iter
+DEF_FUNC set_tp_iter, 8            ; 1 push, so rsp is 16-aligned
     push rbx
 
     mov rbx, rdi               ; save set
@@ -1090,7 +1090,7 @@ END_FUNC set_iter_next
 ;; ============================================================================
 ;; set_iter_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL set_iter_dealloc
+DEF_FUNC_LOCAL set_iter_dealloc, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -1517,6 +1517,7 @@ set_type:
     dq set_traverse                        ; tp_traverse
     dq set_clear_gc                        ; tp_clear
     dq 0         ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; Frozenset type object
 align 8
@@ -1549,6 +1550,7 @@ frozenset_type:
     dq set_traverse                        ; tp_traverse
     dq set_clear_gc                        ; tp_clear
     dq 0         ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; Set iterator type
 align 8
@@ -1581,6 +1583,7 @@ set_iter_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 section .text
 
@@ -1590,8 +1593,10 @@ section .text
 ;; file is the only place that knows which of its fields are owned.
 ;; ============================================================================
 
-; ---- set_traverse / set_clear ----
-; Set entries are 24 bytes (hash+key+key_tag_qword), distinct from DictEntry (32 bytes).
+;; ============================================================================
+;; ---- set_traverse / set_clear ----
+;; Set entries are 24 bytes (hash+key+key_tag_qword), distinct from DictEntry (32 bytes).
+;; ============================================================================
 SET_ENTRY_SIZE_GC    equ 16
 SET_ENTRY_KEY_GC     equ 8
 

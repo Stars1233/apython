@@ -33,13 +33,15 @@ extern io_module_create
 extern gc_module_create
 extern math_module_create
 extern socket_module_create
+extern marshal_module_init
+extern signal_module_create
 
 section .rodata
 
 bm_n_builtins: db "builtins", 0
 bm_n_sys:      db "sys", 0
 bm_n_time:     db "time", 0
-bm_n_asyncio:  db "asyncio", 0
+bm_n_asyncio:  db "_asynciocore", 0
 bm_n_sre:      db "_sre", 0
 bm_n_abc:      db "_abc", 0
 bm_n_errno:    db "errno", 0
@@ -49,6 +51,8 @@ bm_n_io:       db "_iocore", 0
 bm_n_gc:       db "gc", 0
 bm_n_math:     db "math", 0
 bm_n_socket:   db "_socketcore", 0
+bm_n_marshal:  db "marshal", 0
+bm_n_signal:   db "_signal", 0
 
 align 8
 global builtin_module_table
@@ -57,14 +61,16 @@ global builtin_module_table
 ; rows that would -- sys and builtins -- are wired before the loop runs.
 builtin_module_table:
     dq bm_n_abc,      abc_module_create
+    dq bm_n_asyncio,  asyncio_module_create
     dq bm_n_io,       io_module_create
     dq bm_n_socket,   socket_module_create
+    dq bm_n_signal,   signal_module_create
     dq bm_n_sre,      sre_module_create
     dq bm_n_weakref,  weakref_module_create
-    dq bm_n_asyncio,  asyncio_module_create
     dq bm_n_builtins, 0                 ; wraps builtins_dict_global
     dq bm_n_errno,    errno_module_create
     dq bm_n_gc,       gc_module_create
+    dq bm_n_marshal,  marshal_module_init
     dq bm_n_math,     math_module_create
     dq bm_n_posix,    posix_module_create
     dq bm_n_sys,      0                 ; built by sys_module_init

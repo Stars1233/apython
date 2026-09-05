@@ -18,12 +18,13 @@ extern bool_false
 extern type_type
 extern sys_write
 extern sys_close
+extern ap_memcpy
 extern builtin_func_new
 
 ;; ============================================================================
 ;; fileobj_new(int fd, const char *name_cstr, const char *mode_cstr) -> PyFileObject*
 ;; ============================================================================
-DEF_FUNC fileobj_new
+DEF_FUNC fileobj_new, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -43,6 +44,26 @@ DEF_FUNC fileobj_new
     lea rax, [rel file_type]
     mov [rdi + PyObject.ob_type], rax
     mov [rdi + PyFileObject.file_fd], rbx
+    mov qword [rdi + PyFileObject.file_len], 0
+
+    ; Block-buffered when it is not a terminal, which is CPython's rule and
+    ; the only one that is observable: a terminal wants each line as it is
+    ; produced, and a pipe or a file wants whole blocks.  stderr is never
+    ; buffered -- CPython's is line-buffered and everything written to it is
+    ; already a whole line -- so the interleaving a program sees through a
+    ; pipe is stderr first and stdout at the end, which is what CPython
+    ; shows and what this did not.
+    mov qword [rdi + PyFileObject.file_buffered], 0
+    cmp rbx, 1
+    jne .fn_unbuffered
+    push rdi
+    mov rdi, rbx
+    call fileobj_fd_isatty
+    pop rdi
+    test eax, eax
+    jnz .fn_unbuffered
+    mov qword [rdi + PyFileObject.file_buffered], 1
+.fn_unbuffered:
 
     ; Create name string (heap — stored in single-qword struct field)
     mov rdi, r12
@@ -67,7 +88,7 @@ END_FUNC fileobj_new
 ;; ============================================================================
 ;; fileobj_dealloc(PyObject *self)
 ;; ============================================================================
-DEF_FUNC_LOCAL fileobj_dealloc
+DEF_FUNC_LOCAL fileobj_dealloc, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -137,19 +158,14 @@ DEF_FUNC fileobj_write
     cmp rcx, rdx
     jne .write_type_error
 
-    ; Get fd
-    mov rcx, [rdi + PyFileObject.file_fd]
-
     ; Heap string: get data + length
     lea rdx, [rsi + PyStrObject.data]
     mov r8, [rsi + PyStrObject.ob_size]
 
-    ; sys_write(fd, buf, len)
     push r8                     ; save length for return
-    mov rdi, rcx                ; fd
     mov rsi, rdx                ; buf
     mov rdx, r8                 ; len
-    call sys_write
+    call fileobj_emit           ; rdi = self, rsi = buf, rdx = len
     pop rdi                     ; length
 
     ; Return char count as int
@@ -168,10 +184,157 @@ DEF_FUNC fileobj_write
 END_FUNC fileobj_write
 
 ;; ============================================================================
+;; fileobj_emit(rdi = self, rsi = data, rdx = length)
+;;
+;; One write, or a buffered one.  Anything longer than the buffer goes
+;; straight out behind whatever is already waiting, which keeps the order
+;; right without growing the buffer for a single large write.
+;; ============================================================================
+FE_SELF  equ 8
+FE_DATA  equ 16
+FE_LEN   equ 24
+FE_FRAME equ 32             ; 24 used + 8 pad = 32, 16-aligned
+DEF_FUNC fileobj_emit, FE_FRAME
+    mov [rbp - FE_SELF], rdi
+    mov [rbp - FE_DATA], rsi
+    mov [rbp - FE_LEN], rdx
+
+    cmp qword [rdi + PyFileObject.file_buffered], 0
+    je .fe_direct
+
+    ; Would it fit?  If not, drain first, and then take the straight path if
+    ; it still would not.
+    mov rax, [rdi + PyFileObject.file_len]
+    add rax, rdx
+    cmp rax, FILE_BUFSZ
+    jbe .fe_append
+    call fileobj_drain
+    mov rdi, [rbp - FE_SELF]
+    mov rdx, [rbp - FE_LEN]
+    cmp rdx, FILE_BUFSZ
+    ja .fe_direct
+
+.fe_append:
+    mov rdi, [rbp - FE_SELF]
+    mov rax, [rdi + PyFileObject.file_len]
+    lea rdi, [rdi + PyFileObject.file_buf]
+    add rdi, rax
+    mov rsi, [rbp - FE_DATA]
+    mov rdx, [rbp - FE_LEN]
+    call ap_memcpy
+    mov rdi, [rbp - FE_SELF]
+    mov rax, [rbp - FE_LEN]
+    add [rdi + PyFileObject.file_len], rax
+    leave
+    ret
+
+.fe_direct:
+    mov rdi, [rbp - FE_SELF]
+    mov rdi, [rdi + PyFileObject.file_fd]
+    mov rsi, [rbp - FE_DATA]
+    mov rdx, [rbp - FE_LEN]
+    call sys_write
+    leave
+    ret
+END_FUNC fileobj_emit
+
+;; ============================================================================
+;; fileobj_drain(rdi = self) -- write out whatever is waiting.  Safe on an
+;; unbuffered file, where there never is any.
+;; ============================================================================
+global fileobj_drain
+DEF_FUNC fileobj_drain, 8            ; 1 push, so rsp is 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov rdx, [rbx + PyFileObject.file_len]
+    test rdx, rdx
+    jz .fd_done
+    mov qword [rbx + PyFileObject.file_len], 0
+    mov rdi, [rbx + PyFileObject.file_fd]
+    lea rsi, [rbx + PyFileObject.file_buf]
+    call sys_write
+.fd_done:
+    pop rbx
+    leave
+    ret
+END_FUNC fileobj_drain
+
+;; ============================================================================
+;; fileobj_write_fd(rdi = fd, rsi = data, rdx = length)
+;;
+;; What print() writes through.  print assembles a line in a stack buffer and
+;; hands it to a descriptor rather than to a file object -- the `file=`
+;; keyword is read as an fd -- so this is where the two meet: a write to the
+;; descriptor sys.stdout owns goes through its buffer, and anything else goes
+;; straight out.  Without it print bypassed the buffer entirely and the
+;; interleaving was unchanged.
+;; ============================================================================
+WFD_FD   equ 8
+WFD_BUF  equ 16
+WFD_LEN  equ 24
+WFD_FRAME equ 32            ; 24 used + 8 pad = 32, 16-aligned
+global fileobj_write_fd
+DEF_FUNC fileobj_write_fd, WFD_FRAME
+    mov [rbp - WFD_FD], rdi
+    mov [rbp - WFD_BUF], rsi
+    mov [rbp - WFD_LEN], rdx
+
+    extern sys_stdout_obj
+    mov rax, [rel sys_stdout_obj]
+    test rax, rax
+    jz .wfd_direct
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel file_type]
+    cmp rcx, rdx
+    jne .wfd_direct             ; sys.stdout was replaced by a Python object
+    cmp qword [rax + PyFileObject.file_buffered], 0
+    je .wfd_direct
+    cmp rdi, [rax + PyFileObject.file_fd]
+    jne .wfd_direct
+
+    mov rdi, rax
+    mov rsi, [rbp - WFD_BUF]
+    mov rdx, [rbp - WFD_LEN]
+    call fileobj_emit
+    leave
+    ret
+
+.wfd_direct:
+    mov rdi, [rbp - WFD_FD]
+    mov rsi, [rbp - WFD_BUF]
+    mov rdx, [rbp - WFD_LEN]
+    call sys_write
+    leave
+    ret
+END_FUNC fileobj_write_fd
+
+;; ============================================================================
+;; fileobj_flush_std() -- drain sys.stdout, wherever the interpreter is about
+;; to write somewhere else or stop.  Called at exit, and before anything is
+;; read from stdin.
+;; ============================================================================
+global fileobj_flush_std
+DEF_FUNC fileobj_flush_std
+    extern sys_stdout_obj
+    mov rdi, [rel sys_stdout_obj]
+    test rdi, rdi
+    jz .ffs_done
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel file_type]
+    cmp rax, rcx
+    jne .ffs_done               ; sys.stdout was replaced by a Python object
+    call fileobj_drain
+.ffs_done:
+    leave
+    ret
+END_FUNC fileobj_flush_std
+
+;; ============================================================================
 ;; fileobj_flush(PyObject **args, int64_t nargs) -> rax = Value
-;; No-op for unbuffered I/O
 ;; ============================================================================
 DEF_FUNC fileobj_flush
+    mov rdi, [rdi]              ; self
+    call fileobj_drain
     RET_NONE
     leave                       ; then read it as an int tag and biased the
     V_PACK rax, rdx             ; singleton pointer into a large integer
@@ -197,15 +360,31 @@ END_FUNC fileobj_fileno
 ;; ============================================================================
 IAT_BUF   equ 72          ; struct termios is 60 bytes
 IAT_FRAME equ 80            ; + 0 pushes = 80
-DEF_FUNC fileobj_isatty, IAT_FRAME
-    mov rax, [rdi]              ; self
-    mov rdi, [rax + PyFileObject.file_fd]
+
+;; fileobj_fd_isatty(rdi = fd) -> eax = 1 when it is a terminal.  The same
+;; question fileobj_new asks to decide whether to buffer.
+DEF_FUNC fileobj_fd_isatty, IAT_FRAME
     mov esi, 0x5401             ; TCGETS
     lea rdx, [rbp - IAT_BUF]
     extern sys_ioctl
     call sys_ioctl
     test rax, rax
-    jns .is_tty
+    js .fdi_no
+    mov eax, 1
+    leave
+    ret
+.fdi_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC fileobj_fd_isatty
+
+DEF_FUNC fileobj_isatty, IAT_FRAME
+    mov rax, [rdi]              ; self
+    mov rdi, [rax + PyFileObject.file_fd]
+    call fileobj_fd_isatty
+    test eax, eax
+    jnz .is_tty
     RET_FALSE
     leave                       ; then read it as an int tag and biased the
     V_PACK rax, rdx             ; singleton pointer into a large integer
@@ -267,7 +446,9 @@ DEF_FUNC fileobj_seekable
 END_FUNC fileobj_seekable
 
 ;; ============================================================================
-; fileobj_enter(args, nargs) -> the file itself
+;; ============================================================================
+;; fileobj_enter(args, nargs) -> the file itself
+;; ============================================================================
 DEF_FUNC fileobj_enter
     mov rax, [rdi]
     inc qword [rax + PyObject.ob_refcnt]
@@ -277,7 +458,9 @@ DEF_FUNC fileobj_enter
     ret
 END_FUNC fileobj_enter
 
-; fileobj_exit(args, nargs) -> False, after closing
+;; ============================================================================
+;; fileobj_exit(args, nargs) -> False, after closing
+;; ============================================================================
 DEF_FUNC fileobj_exit
     call fileobj_close_method
     ; The result is None; __exit__ answers False so an exception propagates.
@@ -315,6 +498,14 @@ extern sys_read
 
 FR_FRAME equ 8208  ; 8192 buf + 16 overhead
 DEF_FUNC fileobj_read, FR_FRAME
+    ; Anything waiting on stdout goes out before anything is read: a prompt
+    ; written with print() and then read against has to be visible first,
+    ; which is why CPython flushes stdout at the same point.
+    push rdi
+    push rsi
+    call fileobj_flush_std
+    pop rsi
+    pop rdi
     push rbx
     push r12
 
@@ -358,6 +549,14 @@ END_FUNC fileobj_read
 ;; ============================================================================
 FRL_FRAME equ 8208          ; + 3 pushes = 8232, not 16-aligned
 DEF_FUNC fileobj_readline, FRL_FRAME
+    ; Anything waiting on stdout goes out before anything is read: a prompt
+    ; written with print() and then read against has to be visible first,
+    ; which is why CPython flushes stdout at the same point.
+    push rdi
+    push rsi
+    call fileobj_flush_std
+    pop rsi
+    pop rdi
     push rbx
     push r12
     push r13
@@ -776,3 +975,4 @@ file_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots

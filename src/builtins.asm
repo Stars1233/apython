@@ -23,6 +23,7 @@ extern ap_malloc
 extern ap_free
 extern raise_exception
 extern sys_write
+extern fileobj_write_fd
 extern range_new
 extern int_to_i64
 extern obj_as_index
@@ -127,7 +128,7 @@ section .text
 ;; builtin_func_new(void *func_ptr, const char *name_cstr) -> PyBuiltinObject*
 ;; Create a new builtin function wrapper object
 ;; ============================================================================
-DEF_FUNC builtin_func_new
+DEF_FUNC builtin_func_new, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -193,20 +194,6 @@ END_FUNC builtin_func_new_checked
 ;; ============================================================================
 DEF_FUNC_BARE builtin_func_call
     ; self = rdi, args = rsi, nargs = rdx
-    ; Check min_args (0 = no check)
-    mov rcx, [rdi + PyBuiltinObject.min_args]
-    test rcx, rcx
-    jz .bfc_no_min_check
-    cmp rdx, rcx
-    jl .bfc_too_few
-.bfc_no_min_check:
-    ; Check max_args (-1 = no check)
-    mov rcx, [rdi + PyBuiltinObject.max_args]
-    cmp rcx, -1
-    je .bfc_no_max_check
-    cmp rdx, rcx
-    jg .bfc_too_many
-.bfc_no_max_check:
     ; A method descriptor reached UNBOUND has to be handed one of its own
     ; type's instances.  Nothing checked, so `list.append((1, 2), 9)` read a
     ; tuple's header as a list's and tried to grow it -- "Fatal: out of
@@ -220,6 +207,8 @@ DEF_FUNC_BARE builtin_func_call
     mov rcx, [rdi + PyBuiltinObject.func_owner]
     test rcx, rcx
     jz .bfc_receiver_ok
+    cmp qword [rdi + PyBuiltinObject.func_kind], BUILTIN_KIND_ON_TYPE
+    je .bfc_receiver_ok         ; its receiver is a class, not an instance
     test rdx, rdx
     jz .bfc_receiver_ok         ; no arguments at all: the arity check ruled
     push rdi
@@ -244,6 +233,31 @@ DEF_FUNC_BARE builtin_func_call
     pop rdi
 
 .bfc_receiver_ok:
+    ; The bounds are positional counts, and a keyword argument arrives in the
+    ; same array with its name in kw_names_pending -- so `(-2).to_bytes(2,
+    ; "big", signed=True)` is three by nargs and two by the signature.  Only
+    ; the positional ones are counted; a method that takes no keywords at all
+    ; still says so itself, as it did before any of this.
+    mov r8, rdx
+    mov rcx, [rel kw_names_pending]
+    test rcx, rcx
+    jz .bfc_have_npos
+    sub r8, [rcx + PyTupleObject.ob_size]
+.bfc_have_npos:
+    ; Check min_args (0 = no check)
+    mov rcx, [rdi + PyBuiltinObject.min_args]
+    test rcx, rcx
+    jz .bfc_no_min_check
+    cmp r8, rcx
+    jl .bfc_too_few
+.bfc_no_min_check:
+    ; Check max_args (-1 = no check)
+    mov rcx, [rdi + PyBuiltinObject.max_args]
+    cmp rcx, -1
+    je .bfc_no_max_check
+    cmp r8, rcx
+    jg .bfc_too_many
+.bfc_no_max_check:
     ; Extract func_ptr from self
     mov rax, [rdi + PyBuiltinObject.func_ptr]
     ; Call func_ptr(args, nargs) — builtins return a Value, so this stays a
@@ -266,23 +280,128 @@ DEF_FUNC_BARE builtin_func_call
     ; said "function takes at most N arguments" -- with a literal N, and
     ; naming neither the method nor what it was actually given.
     mov rcx, [rdi + PyBuiltinObject.min_args]
+    xor r9d, r9d                ; too few
     jmp .bfc_arity
 .bfc_too_many:
     mov rcx, [rdi + PyBuiltinObject.max_args]
+    mov r9d, 1
 .bfc_arity:
+    mov rdx, r8                 ; the positional count, which is what is wrong
     dec rcx                     ; self counts in neither number
     dec rdx
     mov rsi, rdx
     mov rdx, rcx
+    mov rcx, r9                 ; which way it was wrong
     extern raise_builtin_arity
     jmp raise_builtin_arity     ; rdi = the descriptor; does not return
 END_FUNC builtin_func_call
 
 ;; ============================================================================
+;; builtin_func_getattr(rdi = the builtin, rsi = a name str) -> rax = a Value,
+;; or 0 when there is no such attribute
+;;
+;; __name__, __qualname__ and __module__.  The stdlib asks for the first two
+;; by name -- statistics decorates with functools and reads f.__name__, and
+;; anything that builds a wrapper does the same -- and a builtin had no
+;; tp_getattr at all, so the lookup fell through to a type-dict search that
+;; answered nothing.
+;;
+;; __qualname__ is "str.upper" for a method and just the name for a plain
+;; function, which is the distinction func_owner already records.  __module__
+;; is "builtins" for a plain builtin and None for a method, as CPython's is.
+;; ============================================================================
+BFG_SELF  equ 8
+BFG_NAME  equ 16
+BFG_BUF   equ 208
+BFG_FRAME equ 208           ; + 1 push = 216... one word more to land right
+global builtin_func_getattr
+DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov [rbp - BFG_SELF], rdi
+    mov [rbp - BFG_NAME], rsi
+
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__name__"
+    call ap_strcmp
+    test eax, eax
+    jz .bfg_name
+
+    mov rdi, [rbp - BFG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "__qualname__"
+    call ap_strcmp
+    test eax, eax
+    jz .bfg_qualname
+
+    mov rdi, [rbp - BFG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "__module__"
+    call ap_strcmp
+    test eax, eax
+    jz .bfg_module
+
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.bfg_name:
+    mov rax, [rbx + PyBuiltinObject.func_name]
+    test rax, rax
+    jz .bfg_none
+    INCREF rax
+    pop rbx
+    leave
+    ret
+
+.bfg_qualname:
+    ; A method is qualified by the type that owns it.
+    cmp qword [rbx + PyBuiltinObject.func_owner], 0
+    je .bfg_name
+    lea rdi, [rbp - BFG_BUF]
+    mov rsi, [rbx + PyBuiltinObject.func_owner]
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "."
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbx + PyBuiltinObject.func_name]
+    test rsi, rsi
+    jz .bfg_qual_done
+    add rsi, PyStrObject.data
+    call rbt_append_cstr
+.bfg_qual_done:
+    lea rdi, [rbp - BFG_BUF]
+    call str_from_cstr_heap
+    pop rbx
+    leave
+    ret
+
+.bfg_module:
+    ; CPython gives a plain builtin "builtins" and a method None.
+    cmp qword [rbx + PyBuiltinObject.func_owner], 0
+    jne .bfg_none
+    CSTRING rdi, "builtins"
+    call str_from_cstr_heap
+    pop rbx
+    leave
+    ret
+
+.bfg_none:
+    lea rax, [rel none_singleton]
+    INCREF rax
+    pop rbx
+    leave
+    ret
+END_FUNC builtin_func_getattr
+
+;; ============================================================================
 ;; builtin_func_dealloc(PyObject *self)
 ;; Free the builtin function wrapper
 ;; ============================================================================
-DEF_FUNC_LOCAL builtin_func_dealloc
+DEF_FUNC_LOCAL builtin_func_dealloc, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -314,7 +433,7 @@ END_FUNC builtin_func_dealloc
 ;; are three different CPython types.
 ;; ============================================================================
 BFR_BUF   equ 264           ; the composed repr; two 80-char names plus text
-BFR_FRAME equ 272           ; + 1 push = 280, not 16-aligned
+BFR_FRAME equ 280            ; + 1 push = 288, 16-aligned
 extern rbt_append_cstr
 DEF_FUNC_LOCAL builtin_func_repr, BFR_FRAME
     push rbx
@@ -327,6 +446,12 @@ DEF_FUNC_LOCAL builtin_func_repr, BFR_FRAME
     mov rcx, [rbx + PyBuiltinObject.func_owner]
     test rcx, rcx
     jz .plain
+
+    ; A classmethod's or staticmethod's callable, reached without binding:
+    ; "<built-in method maketrans of type object at 0x...>", naming the type
+    ; it was found on.  method_repr has the same form for the bound case.
+    cmp qword [rbx + PyBuiltinObject.func_kind], BUILTIN_KIND_ON_TYPE
+    je .on_type
 
     ; "<method '" or "<slot wrapper '"
     lea rdi, [rbp - BFR_BUF]
@@ -350,6 +475,27 @@ DEF_FUNC_LOCAL builtin_func_repr, BFR_FRAME
     mov rdi, rax
     lea rsi, [rel bfr_objects]
     call rbt_append_cstr
+    lea rdi, [rbp - BFR_BUF]
+    call str_from_cstr
+    pop rbx
+    leave
+    ret
+
+.on_type:
+    lea rdi, [rbp - BFR_BUF]
+    lea rsi, [rel bfr_on_type_open]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbx + PyBuiltinObject.func_name]
+    add rsi, PyStrObject.data
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel bfr_of_type_object]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbx + PyBuiltinObject.func_owner]
+    extern obj_repr_address
+    call obj_repr_address       ; writes " at 0xADDR>"
     lea rdi, [rbp - BFR_BUF]
     call str_from_cstr
     pop rbx
@@ -431,6 +577,14 @@ DEF_FUNC type_stamp_methods, TSM_FRAME
     lea r9, [rel getset_descr_type]
     cmp [rax + PyObject.ob_type], r9
     je .tsm_getset
+    extern classmethod_type
+    lea r9, [rel classmethod_type]
+    cmp [rax + PyObject.ob_type], r9
+    je .tsm_on_type
+    extern staticmethod_type
+    lea r9, [rel staticmethod_type]
+    cmp [rax + PyObject.ob_type], r9
+    je .tsm_on_type
     lea r9, [rel builtin_func_type]
     cmp [rax + PyObject.ob_type], r9
     jne .tsm_next
@@ -453,6 +607,28 @@ DEF_FUNC type_stamp_methods, TSM_FRAME
     pop rcx
     mov r12, [rbx + PyDictObject.entries]
     jmp .tsm_next
+.tsm_on_type:
+    ; int.from_bytes, float.fromhex, dict.fromkeys and str.maketrans are
+    ; builtins wrapped in a classmethod or a staticmethod, and skipping the
+    ; wrapper left the builtin inside unstamped -- so a bound one reprd as
+    ; "<bound method from_bytes of <class 'int'>>" and an unbound one as
+    ; "<built-in function maketrans>", where CPython says "<built-in method
+    ; from_bytes of type object at 0x...>" for both.  Reach through and stamp
+    ; the callable.  The two wrappers keep cm_callable and sm_callable at the
+    ; same offset, which is why one arm serves both.
+    mov rdx, [rax + PyClassMethodObject.cm_callable]
+    test rdx, rdx
+    jz .tsm_next
+    lea r9, [rel builtin_func_type]
+    cmp [rdx + PyObject.ob_type], r9
+    jne .tsm_next
+    cmp qword [rdx + PyBuiltinObject.func_owner], 0
+    jne .tsm_next
+    mov r9, [rbp - TSM_TYPE]
+    mov [rdx + PyBuiltinObject.func_owner], r9
+    mov qword [rdx + PyBuiltinObject.func_kind], BUILTIN_KIND_ON_TYPE
+    jmp .tsm_next
+
 .tsm_getset:
     ; A getset carries its owner for the same reason, and for the same repr.
     cmp qword [rax + PyGetSetDescrObject.gs_owner], 0
@@ -520,7 +696,7 @@ END_FUNC builtin_func_dunder_get
 ;; where str, bytes, tuple and range answer both from a slot.
 ;; ============================================================================
 BKO_TYPE  equ 8
-BKO_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+BKO_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC_LOCAL builtin_kind_of, BKO_FRAME
     push rbx
     mov [rbp - BKO_TYPE], rdi
@@ -749,6 +925,8 @@ extern list_type
 section .rodata
 builtin_func_repr_unknown_str: db "<built-in function>", 0
 bfr_function_open: db "<built-in function ", 0
+bfr_on_type_open:  db "<built-in method ", 0
+bfr_of_type_object: db " of type object", 0
 bfr_method_open:   db "<method '", 0
 bfr_wrapper_open:  db "<slot wrapper '", 0
 bfr_of:            db "' of '", 0
@@ -767,7 +945,8 @@ PR_SEP_TAG   equ 16    ; sep tag
 PR_END       equ 24    ; end string ptr (0 = default "\n")
 PR_END_TAG   equ 32    ; end tag
 PR_FILE_FD   equ 40    ; file descriptor (1 = stdout)
-PR_FRAME     equ 4144  ; total frame size (48 + 4096)
+PR_FLUSH     equ 48    ; the flush= keyword, once it means something
+PR_FRAME     equ 4168            ; + 5 pushes = 4208, 16-aligned
 
 extern kw_names_pending
 extern ap_strcmp
@@ -788,6 +967,7 @@ DEF_FUNC builtin_print, PR_FRAME
     mov qword [rbp - PR_SEP], 0       ; NULL = default " "
     mov qword [rbp - PR_END], 0       ; NULL = default "\n"
     mov qword [rbp - PR_FILE_FD], 1   ; stdout
+    mov qword [rbp - PR_FLUSH], 0
 
     ; Check for keyword arguments
     mov rax, [rel kw_names_pending]
@@ -849,7 +1029,7 @@ DEF_FUNC builtin_print, PR_FRAME
     pop r10
     jz .print_kw_file
 
-    ; Check "flush" — accept but ignore
+    ; Check "flush"
     push r10
     push r11
     lea rdi, [r10 + PyStrObject.data]
@@ -858,7 +1038,7 @@ DEF_FUNC builtin_print, PR_FRAME
     test eax, eax
     pop r11
     pop r10
-    jz .print_kw_next
+    jz .print_kw_flush
 
     ; Unknown keyword — skip (be lenient)
     jmp .print_kw_next
@@ -875,6 +1055,20 @@ DEF_FUNC builtin_print, PR_FRAME
     V_UNPACK rax, rdx
     mov [rbp - PR_END], rax
     mov [rbp - PR_END_TAG], rdx
+    jmp .print_kw_next
+
+.print_kw_flush:
+    ; It was accepted and ignored, which cost nothing while stdout was
+    ; unbuffered and costs the whole point of the keyword now that it is not.
+    mov rax, [rbx + r11]
+    extern obj_is_true
+    push rcx
+    push r9
+    mov rdi, rax
+    call obj_is_true
+    pop r9
+    pop rcx
+    mov [rbp - PR_FLUSH], rax
     jmp .print_kw_next
 
 .print_kw_file:
@@ -993,14 +1187,14 @@ align 16
     mov rdi, [rbp - PR_FILE_FD]
     lea rsi, [rbp - PR_FRAME]
     mov rdx, r15
-    call sys_write
+    call fileobj_write_fd
     xor r15d, r15d
 .print_sep_write:
     mov rax, [rbp - PR_SEP]
     mov rdi, [rbp - PR_FILE_FD]
     lea rsi, [rax + PyStrObject.data]
     mov rdx, [rax + PyStrObject.ob_size]
-    call sys_write
+    call fileobj_write_fd
     jmp .print_loop
 
 .print_default_sep_fallback:
@@ -1016,7 +1210,7 @@ align 16
     mov edi, 1                  ; fd = stdout
     lea rsi, [rbp - PR_FRAME]      ; buf
     mov rdx, r15                ; len
-    call sys_write
+    call fileobj_write_fd
     xor r15d, r15d              ; reset offset
 
 .write_direct:
@@ -1024,7 +1218,7 @@ align 16
     mov edi, 1                  ; fd = stdout
     lea rsi, [r14 + PyStrObject.data]
     mov rdx, [r14 + PyStrObject.ob_size]  ; len
-    call sys_write
+    call fileobj_write_fd
 
     ; DECREF the string representation (known TAG_PTR heap string;
     ; r9 tag was clobbered by sys_write calls above)
@@ -1075,14 +1269,14 @@ align 16
     mov rdi, [rbp - PR_FILE_FD]
     lea rsi, [rbp - PR_FRAME]
     mov rdx, r15
-    call sys_write
+    call fileobj_write_fd
     xor r15d, r15d
 .print_end_write:
     mov rax, [rbp - PR_END]
     mov rdi, [rbp - PR_FILE_FD]
     lea rsi, [rax + PyStrObject.data]
     mov rdx, [rax + PyStrObject.ob_size]
-    call sys_write
+    call fileobj_write_fd
     jmp .print_do_flush
 
 .print_default_end:
@@ -1094,7 +1288,13 @@ align 16
     mov rdi, [rbp - PR_FILE_FD]  ; fd (1 = stdout)
     lea rsi, [rbp - PR_FRAME]      ; buf
     mov rdx, r15                ; len
-    call sys_write
+    call fileobj_write_fd
+
+    cmp qword [rbp - PR_FLUSH], 0
+    je .print_no_flush
+    extern fileobj_flush_std
+    call fileobj_flush_std
+.print_no_flush:
 
     ; Return None (with INCREF)
     lea rax, [rel none_singleton]
@@ -1117,7 +1317,7 @@ END_FUNC builtin_print
 ;; builtin, and falls back to the sequence and mapping length slots.
 ;; ============================================================================
 LEN_EXC   equ 8
-LEN_FRAME equ 16            ; + 1 push = 24, not 16-aligned
+LEN_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC builtin_len, LEN_FRAME
     push rbx
 
@@ -1238,7 +1438,7 @@ END_FUNC builtin_len
 ;; builtin_range(PyObject **args, int64_t nargs) -> rax = Value
 ;; range(stop) or range(start, stop) or range(start, stop, step)
 ;; ============================================================================
-DEF_FUNC builtin_range
+DEF_FUNC builtin_range, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1598,7 +1798,7 @@ END_FUNC builtin_isinstance
 ;; Walks the full tp_base chain for inheritance.
 ;; Supports tuple second arg: issubclass(cls, (type1, type2, ...))
 ;; ============================================================================
-DEF_FUNC builtin_issubclass
+DEF_FUNC builtin_issubclass, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1990,7 +2190,7 @@ END_FUNC builtin_float
 ;; ============================================================================
 ABS_DICT equ 8
 ABS_KEY  equ 16
-ABS_FRAME equ 24            ; + 2 pushes = 40, not 16-aligned
+ABS_FRAME equ 32            ; + 2 pushes = 48, 16-aligned
 DEF_FUNC_LOCAL add_builtin_str, ABS_FRAME
     push rbx
     push r12
@@ -2055,7 +2255,7 @@ END_FUNC add_builtin_type
 ;; builtins_init() -> PyDictObject*
 ;; Create and populate the builtins dictionary
 ;; ============================================================================
-DEF_FUNC builtins_init
+DEF_FUNC builtins_init, 8            ; 1 push, so rsp is 16-aligned
     push rbx
 
     ; Initialize iterator types (patches list/tuple tp_iter)
@@ -3167,7 +3367,7 @@ builtin_func_type:
     dq builtin_func_repr        ; tp_str
     dq 0                        ; tp_hash
     dq builtin_func_call        ; tp_call
-    dq 0                        ; tp_getattr
+    dq builtin_func_getattr     ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
@@ -3185,3 +3385,4 @@ builtin_func_type:
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots

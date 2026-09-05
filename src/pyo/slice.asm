@@ -34,7 +34,7 @@ extern ap_strcmp
 ;; slice_new(PyObject *start, PyObject *stop, PyObject *step) -> PySliceObject*
 ;; INCREFs all three args. Caller should pass none_singleton for missing values.
 ;; ============================================================================
-DEF_FUNC slice_new
+DEF_FUNC slice_new, 8            ; 5 pushes, so rsp is 16-aligned
     ; rdi=start, rsi=stop, rdx=step, ecx=start_tag, r8d=stop_tag, r9d=step_tag
     push rbx
     push r12
@@ -101,7 +101,7 @@ END_FUNC slice_new
 ;; ============================================================================
 SLICE_POOL_MAX equ 16
 
-DEF_FUNC slice_dealloc
+DEF_FUNC slice_dealloc, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
@@ -243,7 +243,7 @@ END_FUNC slice_hash
 ;; ============================================================================
 ;; slice_repr(PySliceObject *self) -> PyStrObject*
 ;; ============================================================================
-DEF_FUNC slice_repr
+DEF_FUNC slice_repr, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -665,7 +665,7 @@ DEF_SLICE_GETTER step
 ;; slice(stop), slice(start, stop), slice(start, stop, step)
 ;; rdi = self (slice_type), rsi = args (16-byte fat slots), rdx = nargs
 ;; ============================================================================
-DEF_FUNC slice_type_call
+DEF_FUNC slice_type_call, 8            ; 1 push, so rsp is 16-aligned
     push rbx
 
     mov rbx, rsi               ; rbx = args ptr
@@ -767,6 +767,7 @@ slice_type:
     dq slice_traverse                        ; tp_traverse
     dq slice_clear_gc                        ; tp_clear
     dq 0           ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 section .text
 
@@ -776,7 +777,9 @@ section .text
 ;; file is the only place that knows which of its fields are owned.
 ;; ============================================================================
 
-; ---- slice_traverse / slice_clear ----
+;; ============================================================================
+;; ---- slice_traverse / slice_clear ----
+;; ============================================================================
 DEF_FUNC slice_traverse
     push rbx
     mov rbx, rdi

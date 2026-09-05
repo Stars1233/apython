@@ -69,7 +69,7 @@ section .text
 ;; Reads the class's own tp_dict.  Borrowed; the caller does not own it.
 ;; ============================================================================
 AG_CLS   equ 8
-AG_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+AG_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC_LOCAL abc_state_get, AG_FRAME
     push rbx
     mov [rbp - AG_CLS], rdi
@@ -104,7 +104,7 @@ END_FUNC abc_state_get
 ;; ============================================================================
 AS_CLS   equ 8
 AS_VAL   equ 16
-AS_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+AS_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC_LOCAL abc_state_set, AS_FRAME
     push rbx
     mov [rbp - AS_CLS], rdi
@@ -136,7 +136,7 @@ END_FUNC abc_state_set
 ;; ============================================================================
 AF_CLS   equ 8
 AF_NAME  equ 16
-AF_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+AF_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC_LOCAL abc_fresh_set, AF_FRAME
     push rbx
     mov [rbp - AF_CLS], rdi
@@ -154,6 +154,78 @@ DEF_FUNC_LOCAL abc_fresh_set, AF_FRAME
     leave
     ret
 END_FUNC abc_fresh_set
+
+;; ============================================================================
+;; abc_ref(rdi = a class) -> rax = an OWNED reference to what the registry and
+;;   the caches hold for it
+;;
+;; A weak reference, which is what CPython's `_abc` keeps in its WeakSets: a
+;; class registered against an ABC, or merely asked about once, used to live
+;; as long as the ABC did.  Registries are process-lifetime, so that is a leak
+;; with no upper bound on what it holds -- a class, its dict, its methods, and
+;; whatever those close over.
+;;
+;; A ref with no callback is SHARED, so the same class always yields the same
+;; object: a set lookup finds what a registration put there without any
+;; special comparison, and a weakref hashes as its referent does.  A class
+;; that cannot carry one is held strongly, as everything was.
+;; ============================================================================
+DEF_FUNC abc_ref, 8            ; 1 pushes, so rsp is 16-aligned
+    push rbx
+    mov rbx, rdi
+    V_TEST_PTR rdi, rax
+    ja .ar_strong
+    test rdi, rdi
+    jz .ar_strong
+    mov rdi, [rbx + PyObject.ob_type]
+    extern weakref_referenceable
+    call weakref_referenceable
+    test eax, eax
+    jz .ar_strong
+    extern weakref_make_shared
+    mov rdi, rbx
+    call weakref_make_shared
+    test rax, rax
+    jz .ar_strong
+    pop rbx
+    leave
+    ret
+.ar_strong:
+    mov rax, rbx
+    V_TEST_PTR rax, rcx
+    ja .ar_done
+    test rax, rax
+    jz .ar_done
+    INCREF rax
+.ar_done:
+    pop rbx
+    leave
+    ret
+END_FUNC abc_ref
+
+;; ============================================================================
+;; abc_deref(rdi = what a set holds) -> rax = the class, borrowed, or 0 when
+;;   the weak reference has gone dead
+;; ============================================================================
+DEF_FUNC_BARE abc_deref
+    V_TEST_PTR rdi, rax
+    ja .ad_none
+    test rdi, rdi
+    jz .ad_none
+    mov rax, [rdi + PyObject.ob_type]
+    extern weakref_type
+    lea rcx, [rel weakref_type]
+    cmp rax, rcx
+    jne .ad_itself
+    mov rax, [rdi + PyWeakRefObject.wr_object]
+    ret
+.ad_itself:
+    mov rax, rdi
+    ret
+.ad_none:
+    xor eax, eax
+    ret
+END_FUNC abc_deref
 
 ;; ============================================================================
 ;; get_cache_token() -> int
@@ -212,7 +284,7 @@ END_FUNC abc_getattr
 ;; ============================================================================
 ;; abc_is_abstract(rdi = value Value) -> eax 0/1
 ;; ============================================================================
-DEF_FUNC_LOCAL abc_is_abstract, 16
+DEF_FUNC_LOCAL abc_is_abstract, 24
     push rbx
     CSTRING rsi, "__isabstractmethod__"
     push rdi
@@ -411,7 +483,7 @@ END_FUNC abc_init_func
 ;; The builtin, so a registered class that is itself an ABC gets its own
 ;; __subclasscheck__ consulted.
 ;; ============================================================================
-DEF_FUNC_LOCAL abc_call_issubclass, 16
+DEF_FUNC_LOCAL abc_call_issubclass, 24
     push rbx
     sub rsp, 16
     mov [rsp], rdi
@@ -466,7 +538,18 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     jz .no_state
     mov rdi, rax
     mov rsi, [rbp - SC_SUB]
+    push rdi
+    mov rdi, rsi
+    call abc_ref                ; what the set holds: a weak reference
+    pop rdi
+    push rax
+    mov rsi, rax
     call set_contains
+    push rax
+    mov rdi, [rsp + 8]
+    call obj_decref
+    pop rax
+    add rsp, 8
     test eax, eax
     jnz .yes
 
@@ -497,7 +580,18 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     jz .hook
     mov rdi, rax
     mov rsi, [rbp - SC_SUB]
+    push rdi
+    mov rdi, rsi
+    call abc_ref
+    pop rdi
+    push rax
+    mov rsi, rax
     call set_contains
+    push rax
+    mov rdi, [rsp + 8]
+    call obj_decref
+    pop rax
+    add rsp, 8
     test eax, eax
     jnz .no
 
@@ -615,7 +709,10 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     ja .reg_loop
     test rdi, rdi
     jz .reg_loop
-    mov rsi, rdi                ; the registered class
+    call abc_deref              ; a weak reference, unless it could not be one
+    test rax, rax
+    jz .reg_loop                ; the registered class has been collected
+    mov rsi, rax                ; the registered class
     mov rdi, [rbp - SC_SUB]
     call abc_call_issubclass
     cmp eax, -1
@@ -658,8 +755,15 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     mov rdi, [rbp - SC_CACHE]
     test rdi, rdi
     jz .yes
-    mov rsi, [rbp - SC_SUB]
+    push rdi
+    mov rdi, [rbp - SC_SUB]
+    call abc_ref
+    pop rdi
+    push rax
+    mov rsi, rax
     call set_add
+    pop rdi
+    call obj_decref
 .yes:
     mov eax, 1
     pop r12
@@ -671,8 +775,15 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     mov rdi, [rbp - SC_NEG]
     test rdi, rdi
     jz .no
-    mov rsi, [rbp - SC_SUB]
+    push rdi
+    mov rdi, [rbp - SC_SUB]
+    call abc_ref
+    pop rdi
+    push rax
+    mov rsi, rax
     call set_add
+    pop rdi
+    call obj_decref
 .no:
     xor eax, eax
     pop r12
@@ -942,7 +1053,18 @@ DEF_FUNC abc_instancecheck_func, IC_FRAME
     jz .full
     mov rdi, rax
     mov rsi, [rbp - IC_SUB]
+    push rdi
+    mov rdi, rsi
+    call abc_ref
+    pop rdi
+    push rax
+    mov rsi, rax
     call set_contains
+    push rax
+    mov rdi, [rsp + 8]
+    call obj_decref
+    pop rax
+    add rsp, 8
     test eax, eax
     jnz .true
 
@@ -1033,8 +1155,15 @@ DEF_FUNC abc_register_func, RG_FRAME
     test rax, rax
     jz .done
     mov rdi, rax
-    mov rsi, [rbp - RG_SUB]
+    push rdi
+    mov rdi, [rbp - RG_SUB]
+    call abc_ref
+    pop rdi
+    push rax
+    mov rsi, rax
     call set_add
+    pop rdi
+    call obj_decref
     inc qword [rel abc_invalidation_counter]
 
 .done:
@@ -1138,7 +1267,7 @@ END_FUNC abc_reset_caches_func
 ;; Module construction
 ;; ============================================================================
 
-ABC_FRAME equ 8             ; + 2 pushes = 24, not 16-aligned
+ABC_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
 DEF_FUNC abc_module_create, ABC_FRAME
     push rbx
     push r12

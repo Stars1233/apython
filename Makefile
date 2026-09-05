@@ -63,7 +63,7 @@ $(shell mkdir -p build; printf '%s\n' '$(NASMFLAGS)' | cmp -s - $(FLAGSTAMP) \
 # Python compiler for tests
 PYTHON = python3
 
-.PHONY: all clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-re check-source lib-pyc
+.PHONY: all clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-re check-source check-pyc check-arity check-syntax lib-pyc
 
 all: $(TARGET) lib-pyc
 
@@ -82,6 +82,7 @@ regen:
 	mv src/compiler/unicodecase.asm.new src/compiler/unicodecase.asm
 	$(PYTHON) src/compiler/gen_ast.py > lib/_ast.py.new
 	mv lib/_ast.py.new lib/_ast.py
+	$(PYTHON) src/compiler/gen_encodings.py lib/encodings
 
 $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
@@ -108,6 +109,28 @@ clean:
 # Test target: compile .py to .pyc, run both python3 and apython, diff
 check: $(TARGET) lib-pyc
 	@bash tests/run_tests.sh
+	@bash tests/pyc_probe.sh
+	@bash tests/arity_probe.sh
+	@bash tests/syntax_probe.sh
+
+# A malformed .pyc has to be refused rather than run.  Not a tests/test_*.py:
+# the point is what happens when the interpreter is HANDED a file, which a
+# program running inside one cannot ask.
+check-pyc: $(TARGET)
+	@bash tests/pyc_probe.sh
+
+# Every method of every builtin type, called with 0..3 arguments and compared
+# against CPython on whether the call was refused.  Ratchets against
+# tests/arity_floor.txt.
+check-arity: $(TARGET)
+	@bash tests/arity_probe.sh
+
+# A syntax error's message and its five location fields, against CPython's,
+# over tests/syntax_corpus.txt.  Ratchets against tests/syntax_floor.txt;
+# `bash tests/syntax_probe.sh --show` prints what still differs.
+check-syntax: $(TARGET)
+	@bash tests/syntax_probe.sh
+	@bash tests/syntax_probe.sh
 
 # Run the whole test corpus through our own compiler rather than CPython's:
 # apython is handed the .py and compiles it itself.  Ratchets against

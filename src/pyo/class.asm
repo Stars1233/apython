@@ -3,503 +3,154 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern type_number_methods
 
-extern ap_malloc
 extern gc_alloc
 extern gc_track
 extern gc_dealloc
 extern ap_free
 extern obj_decref
-extern obj_incref
 extern obj_dealloc
+extern raise_exception
+extern none_singleton
+extern obj_incref
 extern dict_new
 extern dict_get
 extern dict_set
 extern str_from_cstr
 extern str_from_cstr_heap
 extern ap_strcmp
-extern rbt_append_cstr
 extern type_repr
-extern fatal_error
-extern raise_exception
 extern attr_error_pending
 extern exc_AttributeError_type
 extern exc_TypeError_type
 extern func_type
 extern type_type
-extern tuple_type_call
 extern kw_names_pending
-extern ap_memcpy
 extern eval_exception_unwind
-extern none_singleton
 extern dunder_lookup
-extern sys_write
+extern dunder_call_2
+extern builtin_func_type
 extern current_exception
 extern dict_type
 extern tuple_type
 extern int_type
 extern str_type
 extern staticmethod_type
+extern method_new
+extern instance_new
+extern int_sub_new
+extern str_sub_new
+extern tuple_sub_fill
+extern builtin_sub_init_base
 extern classmethod_type
 extern property_type
-extern eval_frame
-extern frame_free
 
 ;; ============================================================================
-;; instance_new(PyTypeObject *type) -> PyInstanceObject*
-;; Allocate a new instance of the given class type.
-;; rdi = type (the class)
-;; Returns: new instance with refcnt=1, ob_type=type, inst_dict=new dict
-;; ============================================================================
-;; ============================================================================
-;; builtin_sub_init_base(rdi = instance)
+;; instance_getattr(rdi = instance, rsi = name str) -> rax = Value, or 0
 ;;
-;; Give the embedded base portion of a builtin-container subclass a valid
-;; empty state.  instance_new zeroes the body, which is already a correct
-;; empty tuple, but list and dict want a real backing array -- a NULL
-;; ob_item is how list marks "currently being sorted", so the first
-;; l.append() on a fresh subclass instance reported "list modified during
-;; sort".
-;; ============================================================================
-
-;; ============================================================================
-;; int_sub_new(rdi = type, rsi = args, rdx = nargs) -> (rax, rdx) value pair
+;; tp_getattr for a heaptype instance, and the entry point of the whole
+;; attribute protocol -- which means `__getattribute__` first.  A class that
+;; defines one intercepts EVERY access, found or not: `c.x` runs it even when
+;; x is a plain class attribute.  It used to be ignored entirely, so the only
+;; time a user's ran was when the name was also missing and __getattr__ would
+;; have run anyway.
 ;;
-;; An int, or an instance of an int subclass carrying one.  It is what
-;; `int(...)` does for such a type, reachable as a function so that
-;; `int.__new__(cls, v)` can build the instance WITHOUT going back through
-;; cls.__new__ -- which is how enum makes its members, and would otherwise
-;; recurse forever.
+;; object's own is the one every class inherits, and calling it would be an
+;; infinite regress, so it is recognised and skipped -- and
+;; object.__getattribute__, which a user's almost always delegates to, enters
+;; at instance_getattr_default below to skip the hook the same way CPython's
+;; slot dispatch does.
 ;; ============================================================================
-ISN_TYPE  equ 8
-ISN_VAL   equ 16
-ISN_TAG   equ 24
-ISN_FRAME equ 32          ; + 2 pushes = 48
-DEF_FUNC int_sub_new, ISN_FRAME
-    push rbx
-    push r12
-    mov [rbp - ISN_TYPE], rdi
-    mov rdi, rsi
-    mov rsi, rdx
-    extern builtin_int_fn
-    call builtin_int_fn
-    test edx, edx
-    jz .isn_fail
-    mov [rbp - ISN_VAL], rax
-    mov [rbp - ISN_TAG], rdx
-
-    ; int itself takes the bare value; a subclass wraps it.
-    mov rbx, [rbp - ISN_TYPE]
-    lea rcx, [rel int_type]
-    cmp rbx, rcx
-    je .isn_bare
-
-    mov edi, PyIntSubclassObject_size
-    mov rsi, rbx
-    call gc_alloc
-    mov r12, rax
-    mov qword [r12 + PyIntSubclassObject.inst_dict], 0
-    mov rax, [rbp - ISN_VAL]
-    mov rdx, [rbp - ISN_TAG]
-    V_PACK rax, rdx
-    mov [r12 + PyIntSubclassObject.int_value], rax   ; the reference transfers
-    mov rdi, rbx
-    INCREF rdi
-    mov rdi, r12
-    call gc_track
-    mov rax, r12
-    mov edx, TAG_PTR
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.isn_bare:
-    mov rax, [rbp - ISN_VAL]
-    mov rdx, [rbp - ISN_TAG]
-    pop r12
-    pop rbx
-    leave
-    ret
-.isn_fail:
-    xor eax, eax
-    xor edx, edx
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC int_sub_new
-
-;; ============================================================================
-;; str_sub_new(rdi = subclass type, rsi = args, rdx = nargs) -> instance
-;;
-;; A str keeps its characters inline, so its instances are variable-size and
-;; instance_new -- which allocates exactly tp_basicsize -- cannot make one.
-;; A str subclass therefore has to be built here, from the argument, the way
-;; str's own constructor would.  Without this the instance was an empty
-;; string of the right type, so CustomStr("100") was "".
-;;
-;; The instance carries a __dict__ at its tail, past the data and its padding,
-;; because there is no fixed offset past inline data to put one at.  The extra
-;; word is allocated here and tp_dictoffset says TP_DICT_AT_TAIL.
-;; ============================================================================
-SSN_TYPE  equ 8
-SSN_SRC   equ 16
-SSN_FRAME equ 32            ; + 2 pushes = 48
-
-DEF_FUNC str_sub_new, SSN_FRAME
-    push rbx
-    push r12
-
-    mov [rbp - SSN_TYPE], rdi
-    mov qword [rbp - SSN_SRC], 0
-    test rdx, rdx
-    jz .ssn_empty
-
-    ; str(x) of the arguments gives a plain str to copy from.  This called
-    ; obj_str on args[0] and ignored the rest, so a str subclass could not be
-    ; built from the DECODING form: S(b"abc", "utf-8") came out as the repr
-    ; "b'abc'".  builtin_str_fn is the whole of str(), keyword arguments
-    ; included, and its one-argument case is the same obj_str.
-    mov rdi, rsi
-    mov rsi, rdx
-    extern builtin_str_fn
-    call builtin_str_fn
+IGA_SELF  equ 8
+IGA_NAME  equ 16
+IGA_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC instance_getattr, IGA_FRAME
+    mov qword [rel attr_error_pending], 0
+    mov [rbp - IGA_SELF], rdi
+    mov [rbp - IGA_NAME], rsi
+    test rdi, rdi
+    jz .iga_default
+    mov rax, [rdi + PyObject.ob_type]
+    test rax, rax
+    jz .iga_default
+    ; object.__getattribute__ delegating back is not the hook running again:
+    ; it asks for the ordinary resolution, and it says so by naming the object
+    ; it is asking about.  CPython gets this from slot dispatch -- calling
+    ; object's slot cannot reach the subclass's -- and this is the same thing
+    ; said explicitly.
+    mov rax, [rel instance_getattr_skip]
+    cmp rax, rdi
+    jne .iga_hook
+    mov qword [rel instance_getattr_skip], 0
+    jmp .iga_default
+.iga_hook:
+    mov rdi, [rdi + PyObject.ob_type]
+    lea rsi, [rel ig_getattribute_name]
+    call dunder_lookup
     V_UNPACK rax, rdx
     test edx, edx
-    jz .ssn_failed
-    mov [rbp - SSN_SRC], rax
-    mov rbx, rax
-    mov r12, [rbx + PyStrObject.ob_size]
-    jmp .ssn_have_src
-
-.ssn_empty:
-    xor ebx, ebx
-    xor r12d, r12d
-
-.ssn_have_src:
-    ; header + length + 8, matching str_new_heap's padding for the 8-byte
-    ; comparisons ap_strcmp does, + 8 more for the tail __dict__ pointer
-    lea rdi, [r12 + PyStrObject.data + 16]
-    mov rsi, [rbp - SSN_TYPE]
-    extern gc_alloc
-    call gc_alloc                   ; sets ob_refcnt and ob_type
-    mov [rax + PyStrObject.ob_size], r12
-    mov qword [rax + PyStrObject.ob_hash], -1
-    mov [rax + PyStrObject.ob_length], r12   ; corrected after the copy
-    mov qword [rax + PyStrObject.data + r12], 0
-    mov qword [rax + PyStrObject.data + r12 + 8], 0     ; the tail __dict__
-
-    test rbx, rbx
-    jz .ssn_no_copy
-    push rax
-    lea rdi, [rax + PyStrObject.data]
-    lea rsi, [rbx + PyStrObject.data]
-    mov rdx, r12
-    call ap_memcpy
-    mov rdi, [rsp]
-    extern str_set_length
-    call str_set_length
-    mov rdi, [rbp - SSN_SRC]
-    call obj_decref
-    pop rax
-
-.ssn_no_copy:
-    ; The tail __dict__, unless __slots__ suppresses it.  It is created here
-    ; rather than lazily so that every consumer of LOAD_INST_DICT can keep
-    ; reading a NULL as "this family has no dict at all".  SSN_SRC is dead by
-    ; now -- the copy path decref'd it.
-    mov [rbp - SSN_SRC], rax
-    mov rdi, [rbp - SSN_TYPE]
-    mov rcx, [rdi + PyTypeObject.tp_flags]
-    test rcx, TYPE_FLAG_HAS_SLOTS
-    jnz .ssn_no_tail_dict
-    cmp qword [rdi + PyTypeObject.tp_dictoffset], TP_DICT_AT_TAIL
-    jne .ssn_no_tail_dict
-    extern dict_new
-    call dict_new
-    mov rdx, [rbp - SSN_SRC]
-    INST_DICT_TAIL rcx, rdx
-    mov [rcx], rax
-.ssn_no_tail_dict:
-    mov rax, [rbp - SSN_SRC]
-
-    ; gc_alloc does not INCREF the type it stamps into ob_type.
-    push rax
-    mov rdi, [rbp - SSN_TYPE]
-    call obj_incref
-    pop rax
-    mov rdi, rax
-    push rax
-    extern gc_track
-    call gc_track
-    pop rax
-    pop r12
-    pop rbx
+    jz .iga_default
+    cmp edx, TAG_PTR
+    jne .iga_default
+    ; object's own is a builtin wrapping object_method_getattribute.  Anything
+    ; else is a definition, and definitions run.
+    mov rcx, [rax + PyObject.ob_type]
+    lea r8, [rel builtin_func_type]
+    cmp rcx, r8
+    jne .iga_call
+    extern object_method_getattribute
+    lea r8, [rel object_method_getattribute]
+    cmp [rax + PyBuiltinObject.func_ptr], r8
+    je .iga_default
+.iga_call:
+    mov rdi, [rbp - IGA_SELF]
+    mov rsi, [rbp - IGA_NAME]
+    lea rdx, [rel ig_getattribute_name]
+    mov ecx, TAG_PTR
+    call dunder_call_2          ; a (payload, tag) pair, not a Value
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .iga_raised
     leave
+    V_PACK rax, rdx
     ret
-
-.ssn_failed:
+.iga_raised:
+    ; Whatever __getattribute__ raised is the answer, including a KeyError or
+    ; a TypeError.  Returning NULL bare would let raise_no_attribute replace
+    ; it with a generic AttributeError; the flag is how instance_getattr
+    ; already hands one over.
+    cmp qword [rel current_exception], 0
+    je .iga_raised_bare
+    mov qword [rel attr_error_pending], 1
+.iga_raised_bare:
     xor eax, eax
-    pop r12
-    pop rbx
     leave
     ret
-END_FUNC str_sub_new
-
-;; ============================================================================
-;; tuple_sub_fill(rdi = instance, rsi = args, rdx = nargs)
-;;
-;; A tuple is immutable and has no __init__, so a subclass cannot be filled
-;; after the fact the way list, dict and set are -- the contents have to be
-;; put in at construction, which is what tuple.__new__ does.  Without this a
-;; tuple subclass was always empty.
-;; ============================================================================
-TSF_INST  equ 8
-TSF_TMP   equ 16
-TSF_FRAME equ 32            ; + 3 pushes = 56, not 16-aligned
-
-DEF_FUNC tuple_sub_fill, TSF_FRAME
-    push rbx
-    push r12
-    push r13
-
-    mov [rbp - TSF_INST], rdi
-    mov qword [rbp - TSF_TMP], 0
-    mov qword [rdi + PyTupleObject.ob_hash], -1
-    test rdx, rdx
-    jz .tsf_done                ; Sub() is the empty tuple
-
-    ; Materialise the argument, so any iterable works.
-    push rsi
-    lea rdi, [rel tuple_type]
-    mov edx, 1
-    pop rsi
-    call tuple_type_call
-    mov [rbp - TSF_TMP], rax
-    mov rbx, rax
-    mov r12, [rbx + PyTupleObject.ob_size]
-    test r12, r12
-    jz .tsf_release
-
-    ; Own copy of the item array: the temporary is about to be released.
-    mov rdi, r12
-    shl rdi, 3
-    call ap_malloc
-    mov r13, rax
-    mov rcx, [rbp - TSF_INST]
-    mov [rcx + PyTupleObject.ob_item], r13
-    mov [rcx + PyTupleObject.ob_size], r12
-
-    xor ecx, ecx
-.tsf_copy:
-    cmp rcx, r12
-    jge .tsf_release
-    mov rax, [rbx + PyTupleObject.ob_item]
-    mov rdi, [rax + rcx * 8]
-    mov [r13 + rcx * 8], rdi
-    push rcx
-    INCREF_V rdi, rax
-    pop rcx
-    inc rcx
-    jmp .tsf_copy
-
-.tsf_release:
-    mov rdi, [rbp - TSF_TMP]
-    mov qword [rbp - TSF_TMP], 0
-    call obj_decref
-
-.tsf_done:
-    pop r13
-    pop r12
-    pop rbx
+.iga_default:
+    mov rdi, [rbp - IGA_SELF]
+    mov rsi, [rbp - IGA_NAME]
     leave
-    ret
-END_FUNC tuple_sub_fill
-
-DEF_FUNC builtin_sub_init_base
-    push rbx
-    mov rbx, rdi
-    mov rax, [rbx + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_flags]
-
-    test rax, TYPE_FLAG_LIST_SUBCLASS
-    jnz .bsib_list
-    test rax, TYPE_FLAG_DICT_SUBCLASS | TYPE_FLAG_SET_SUBCLASS
-    jnz .bsib_dict
-    jmp .bsib_done              ; tuple: zeroed is already an empty tuple
-
-.bsib_list:
-    mov edi, 4 * 8
-    call ap_malloc
-    mov [rbx + PyListObject.ob_item], rax
-    mov qword [rbx + PyListObject.allocated], 4
-    jmp .bsib_done
-
-.bsib_dict:
-    ; A dict now owns two arrays, and a set only one -- so let the dict's own
-    ; allocator build them rather than hand-rolling a header that would be
-    ; missing dk_indices.
-    mov rdi, rbx
-    mov rax, [rbx + PyObject.ob_type]
-    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_SET_SUBCLASS
-    jnz .bsib_set_table
-    mov rsi, DICT_INIT_CAP
-    extern dict_alloc_tables
-    call dict_alloc_tables
-    mov qword [rbx + PyDictObject.dk_nentries], 0
-    jmp .bsib_done
-
-.bsib_set_table:
-    ; A set keeps the old single-array layout.
-    mov edi, DICT_INIT_CAP * DICT_ENTRY_SIZE
-    call ap_malloc
-    mov [rbx + PyDictObject.entries], rax
-    mov rdi, rax
-    mov ecx, DICT_INIT_CAP * DICT_ENTRY_SIZE / 8
-    xor eax, eax
-    rep stosq
-    mov qword [rbx + PyDictObject.capacity], DICT_INIT_CAP
-
-.bsib_done:
-    pop rbx
-    leave
-    ret
-END_FUNC builtin_sub_init_base
+    jmp instance_getattr_default
+END_FUNC instance_getattr
 
 ;; ============================================================================
-;; builtin_sub_alloc(rdi = type) -> rax = a zeroed instance
-;;
-;; The allocation half of a builtin constructor that has to honour the type it
-;; was handed.  float and complex keep their value inline, exactly as int and
-;; str do, so a subclass of either cannot come from instance_new -- the base's
-;; own constructor builds it, and this is the only part that differs between
-;; the base and a subclass.
-;;
-;; A heaptype always carries TYPE_FLAG_HAVE_GC, so it has to come from
-;; gc_alloc and be tracked.  complex itself does not: it owns nothing, and
-;; gc_alloc hands back raw + GC_HEAD_SIZE, which obj_dealloc's plain-free path
-;; would give ap_free unshifted.  Both branches are here so a caller cannot
-;; pick the wrong one.
-;;
-;; Everything past the header is zeroed, the tail __dict__ slot included: a
-;; subclass instance is reachable before its __init__ has run, and the
-;; collector reads tp_dictoffset on the way past.
-;; ============================================================================
-BSA_TYPE  equ 8
-BSA_SAVE  equ 16
-BSA_FRAME equ 16            ; + 0 pushes = 16
-
-DEF_FUNC builtin_sub_alloc, BSA_FRAME
-    mov [rbp - BSA_TYPE], rdi
-    mov rsi, [rdi + PyTypeObject.tp_basicsize]
-    test qword [rdi + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
-    jz .bsa_plain
-    mov rdi, rsi
-    mov rsi, [rbp - BSA_TYPE]
-    call gc_alloc               ; sets ob_refcnt and ob_type itself
-    jmp .bsa_zero
-.bsa_plain:
-    mov rdi, rsi
-    call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
-    mov rcx, [rbp - BSA_TYPE]
-    mov [rax + PyObject.ob_type], rcx
-
-.bsa_zero:
-    mov rcx, [rbp - BSA_TYPE]
-    mov rcx, [rcx + PyTypeObject.tp_basicsize]
-    lea rdx, [rax + PyObject_size]
-    sub rcx, PyObject_size
-.bsa_zero_loop:
-    cmp rcx, 8
-    jb .bsa_zeroed
-    mov qword [rdx], 0
-    add rdx, 8
-    sub rcx, 8
-    jmp .bsa_zero_loop
-
-.bsa_zeroed:
-    ; The instance holds a reference to its type, as every instance does.
-    mov rcx, [rbp - BSA_TYPE]
-    inc qword [rcx + PyObject.ob_refcnt]
-    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
-    jz .bsa_done
-    mov [rbp - BSA_SAVE], rax
-    mov rdi, rax
-    call gc_track               ; may collect, which is why the body is zeroed
-    mov rax, [rbp - BSA_SAVE]
-.bsa_done:
-    leave
-    ret
-END_FUNC builtin_sub_alloc
-
-DEF_FUNC instance_new
-    push rbx
-    push r12
-
-    mov rbx, rdi                ; rbx = type
-
-    ; Allocate using tp_basicsize (GC-tracked, supports __slots__)
-    mov rdi, [rbx + PyTypeObject.tp_basicsize]
-    push rdi                    ; save size for zero-fill
-    mov rsi, rbx                ; type
-    call gc_alloc
-    mov r12, rax                ; r12 = instance (ob_refcnt=1, ob_type set)
-
-    ; Zero-fill body past header (handles slot init to TAG_NULL)
-    pop rcx                     ; size in bytes
-    sub rcx, OBJ_HEADER_SIZE
-    jle .skip_zero
-    lea rdi, [r12 + OBJ_HEADER_SIZE]
-    shr rcx, 3
-    xor eax, eax
-    rep stosq
-.skip_zero:
-
-    ; INCREF type (stored in ob_type)
-    mov rdi, rbx
-    call obj_incref
-
-    ; Create inst_dict only if class doesn't have __slots__ (or has __dict__ in __slots__)
-    mov rax, [rbx + PyTypeObject.tp_flags]
-    test rax, TYPE_FLAG_HAS_SLOTS
-    jnz .in_no_dict              ; __slots__ suppresses inst_dict
-
-    cmp qword [rbx + PyTypeObject.tp_dictoffset], 0
-    je .in_no_dict              ; this family's instances carry no dict
-    cmp qword [rbx + PyTypeObject.tp_dictoffset], TP_DICT_AT_TAIL
-    je .in_no_dict              ; a tail dict belongs to str_sub_new, not here
-    call dict_new
-    STORE_INST_DICT r12, rax, rcx, .in_no_dict
-
-.in_no_dict:
-    mov rdi, r12
-    call gc_track
-
-    mov rax, r12                ; return instance
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC instance_new
-
-;; ============================================================================
-;; instance_getattr(PyInstanceObject *self, PyObject *name) -> rax = Value
-;; Look up an attribute on an instance.
+;; instance_getattr_default(PyInstanceObject *self, PyObject *name) -> Value
+;; Look up an attribute on an instance, without the __getattribute__ hook.
 ;; 1. Check self->inst_dict — return raw value
 ;; 2. If not found, check type->tp_dict (walk tp_base chain)
 ;; 3. If found in type dict and callable, create bound method
 ;; 4. If found, INCREF and return
-;; 5. If not found, return NULL
+;; 5. If not found, __getattr__, then AttributeError
 ;;
 ;; rdi = instance, rsi = name (PyStrObject*)
 ;; Returns: owned reference to attribute value, or NULL
 ;; ============================================================================
 IG_NAME   equ 8
 IG_ORIGIN equ 16        ; the type the MRO walk started from
-IG_FRAME  equ 32            ; + 3 pushes = 56, not 16-aligned
-DEF_FUNC instance_getattr, IG_FRAME
+IG_FRAME  equ 40            ; + 3 pushes = 64, 16-aligned
+global instance_getattr_default
+DEF_FUNC instance_getattr_default, IG_FRAME
     push rbx
     push r12
     push r13
@@ -627,10 +278,11 @@ DEF_FUNC instance_getattr, IG_FRAME
     ret
 
 .found_slot:
-    ; Member descriptor found — read value from instance at fixed offset
+    ; Member descriptor found — read the value out of the instance
     ; r13 = member descriptor, rbx = instance
     mov rcx, [r13 + PyMemberDescrObject.md_offset]
-    mov rax, [rbx + rcx]       ; slot Value
+    SLOT_ADDR rdx, rbx, rcx
+    mov rax, [rdx]             ; slot Value
     test rax, rax
     jz .slot_not_set            ; 0 = slot not set → AttributeError
     INCREF_V rax, rdx
@@ -679,6 +331,27 @@ DEF_FUNC instance_getattr, IG_FRAME
     call raise_no_attribute
 
 .not_found:
+    ; __class__ and __dict__ are part of ordinary resolution, not of the hook:
+    ; CPython answers them from getsets on the type, so a class that defines
+    ; __getattr__ never sees either name.  Asking the hook first made
+    ; `self.__dict__` INSIDE a __getattr__ re-enter it -- which is how
+    ; typing.py's _BaseGenericAlias.__getattr__ is written, and it recursed
+    ; until the stack ran out, taking the whole typing module with it.
+    mov rdi, rbx
+    mov rsi, [rbp - IG_NAME]
+    extern obj_generic_attr
+    call obj_generic_attr
+    test rax, rax
+    jz .ig_ask_getattr
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.ig_ask_getattr:
     ; Ordinary lookup missed.  __getattr__ is Python's hook for exactly that
     ; -- it runs only when normal resolution fails -- and it was never
     ; consulted, so a class defining it got a bare AttributeError.
@@ -795,7 +468,7 @@ DEF_FUNC instance_getattr, IG_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
-END_FUNC instance_getattr
+END_FUNC instance_getattr_default
 
 ;; ============================================================================
 ;; instance_setattr(PyInstanceObject *self, PyObject *name, PyObject *value)
@@ -884,18 +557,19 @@ DEF_FUNC instance_setattr
 
 .sa_member:
 
-    ; Member descriptor! Write value to slot offset
+    ; Member descriptor! Write the value into the slot
     mov rcx, [r9 + PyMemberDescrObject.md_offset]
+    SLOT_ADDR rdx, rbx, rcx
 
     ; XDECREF old value at slot
-    push rcx
-    mov rdi, [rbx + rcx]       ; old Value
+    push rdx
+    mov rdi, [rdx]             ; old Value
     XDECREF_V rdi, rsi
-    pop rcx
+    pop rdx
 
     ; INCREF the new value and store it
     INCREF_V r13, r14
-    mov [rbx + rcx], r13
+    mov [rdx], r13
 
     pop r14
     pop r13
@@ -986,8 +660,31 @@ DEF_FUNC type_setattr
     push rbx
     push rcx                    ; keep the stack aligned
 
-    ; Ensure tp_dict exists
+    ; --- __name__ renames the class ---
+    ; A class's name is tp_name, not a dict entry, so `C.__name__ = "x"` set a
+    ; key nothing ever read and the class kept its old name.  typing.py
+    ; renames two classes and then registers them in sys.modules UNDER THE
+    ; NEW NAME -- so `sys.modules["re"]` became typing's deprecated `re`
+    ; class, and the next `import re` handed a class to everything that
+    ; wanted the module.
     mov rbx, rdi
+    test rsi, rsi
+    jz .ts_not_name
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .ts_not_name
+    lea rdi, [rsi + PyStrObject.data]
+    push rsi
+    push rdx
+    CSTRING rsi, "__name__"
+    call ap_strcmp
+    pop rdx
+    pop rsi
+    test eax, eax
+    jz .ts_rename
+.ts_not_name:
+    mov rdi, rbx
     mov rdi, [rbx + PyTypeObject.tp_dict]
     test rdi, rdi
     jnz .ts_have_dict
@@ -1021,6 +718,45 @@ DEF_FUNC type_setattr
     pop rbx
     leave
     ret
+
+.ts_rename:
+    ; tp_name points into a PyStrObject's data, and the type owns a reference
+    ; to that string -- user_type_dealloc recovers it the same way.  So a
+    ; rename is: take the new one, point at its data, drop the old.
+    mov rax, rdx
+    test rax, rax
+    jz .ts_rename_bad
+    V_TEST_PTR rax, rcx
+    ja .ts_rename_bad
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdi, [rel str_type]
+    cmp rcx, rdi
+    jne .ts_rename_bad
+    mov rcx, [rbx + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_HEAPTYPE
+    jz .ts_rename_static
+    mov rdi, rax
+    push rax
+    call obj_incref
+    pop rax
+    mov rcx, [rbx + PyTypeObject.tp_name]
+    lea rdx, [rax + PyStrObject.data]
+    mov [rbx + PyTypeObject.tp_name], rdx
+    test rcx, rcx
+    jz .ts_rename_done
+    sub rcx, PyStrObject.data
+    mov rdi, rcx
+    call obj_decref
+.ts_rename_done:
+    xor eax, eax
+    pop rcx
+    pop rbx
+    leave
+    ret
+.ts_rename_static:
+    RAISE exc_TypeError_type, "cannot set __name__ of a built-in type"
+.ts_rename_bad:
+    RAISE exc_TypeError_type, "can only assign string to __name__"
 END_FUNC type_setattr
 
 ;; ============================================================================
@@ -1241,6 +977,25 @@ DEF_FUNC instance_dealloc, ID_FRAME
 .id_slots_done:
     pop r13
 
+    ; And the slots that live at the TAIL, which a str subclass's do: past
+    ; the characters and past the word the tail __dict__ occupies.  They are
+    ; not in the header at all, so the walk above cannot reach them.
+    mov rax, [rbx + PyObject.ob_type]
+    mov rcx, [rax + PyTypeObject.tp_tailslots]
+    test rcx, rcx
+    jz .id_tail_done
+    INST_DICT_TAIL r12, rbx
+    lea r12, [r12 + rcx*8]      ; the last one; downwards, as above
+.id_tail_loop:
+    push rcx
+    mov rdi, [r12]
+    XDECREF_V rdi, rsi
+    pop rcx
+    sub r12, 8
+    dec rcx
+    jnz .id_tail_loop
+.id_tail_done:
+
 .no_slots:
     pop r12
 
@@ -1385,31 +1140,6 @@ END_FUNC instance_dealloc
 
 
 ;; ============================================================================
-;; builtin_sub_dealloc(PyObject *self)
-;; Dealloc for heap-type subclasses of builtin types (bytes, bytearray, etc.)
-;; These don't have inst_dict — just DECREF the type and free.
-;; ============================================================================
-DEF_FUNC builtin_sub_dealloc
-    push rbx
-    mov rbx, rdi
-
-    ; Save ob_type before freeing (gc_dealloc reads ob_type)
-    push qword [rbx + PyObject.ob_type]
-
-    ; Free the object (may be GC-tracked) — must happen before type DECREF
-    mov rdi, rbx
-    call gc_dealloc
-
-    ; DECREF ob_type (the class) AFTER freeing the object
-    pop rdi
-    call obj_decref
-
-    pop rbx
-    leave
-    ret
-END_FUNC builtin_sub_dealloc
-
-;; ============================================================================
 ;; instance_repr(PyObject *self) -> PyStrObject*
 ;; Try __repr__ dunder, fall back to "<instance>".
 ;; rdi = instance
@@ -1440,7 +1170,7 @@ DEF_FUNC_LOCAL base_slot
 END_FUNC base_slot
 
 IR_EXC   equ 8
-IR_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+IR_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC instance_repr, IR_FRAME
     push rbx
     mov rbx, rdi
@@ -1535,7 +1265,7 @@ END_FUNC instance_repr
 IRD_OBJ   equ 8
 IRD_MOD   equ 16
 IRD_NAME  equ 24
-IRD_FRAME equ 32            ; + 1 push = 40
+IRD_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
 DEF_FUNC_LOCAL instance_repr_default, IRD_FRAME
     push rbx
@@ -1629,7 +1359,7 @@ END_FUNC instance_repr_default
 ;; rdi = instance
 ;; ============================================================================
 IS_EXC   equ 8
-IS_FRAME equ 16             ; + 1 push = 24, not 16-aligned
+IS_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC instance_str, IS_FRAME
     push rbx
     mov rbx, rdi
@@ -2548,6 +2278,12 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     test eax, eax
     jz .tga_return_bases
 
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__base__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_base
+
     ; The instance layout, as CPython reports it.  These are getsets on the
     ; metatype in CPython, so they are data descriptors and win over anything
     ; a class body puts under the same name -- hence the check here, ahead of
@@ -2674,6 +2410,26 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     jmp .tga_mro_incref
 .tga_mro_done:
     mov rax, r12
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.tga_return_base:
+    ; The one base a class's layout comes from.  `object.__base__` is None,
+    ; which is also the answer for any other type with no tp_base.
+    mov rax, [rbp - TGA_ORIGIN]
+    mov rax, [rax + PyTypeObject.tp_base]
+    test rax, rax
+    jnz .tga_return_object
+    extern none_singleton
+    lea rax, [rel none_singleton]
+.tga_return_object:
+    mov rdi, rax
+    push rax
+    call obj_incref
+    pop rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -2818,8 +2574,13 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
 .tga_return_name:
     ; __name__ is the last dotted component of tp_name: CPython stores
     ; "types.GenericAlias" but reports "GenericAlias", keeping the qualified
-    ; form for the repr.
+    ; form for the repr.  That rule is the STATIC one; a heaptype answers its
+    ; whole name, which is how a class renamed to "typing.re" reports the
+    ; dotted form CPython's does.
     mov rdi, [r12 + PyTypeObject.tp_name]
+    mov rcx, [r12 + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_HEAPTYPE
+    jnz .tga_name_done
     mov rsi, rdi
     xor ecx, ecx
 .tga_name_scan:
@@ -2935,273 +2696,6 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
 END_FUNC type_getattr_meta
 
 ;; ============================================================================
-;; method_new(func, self) -> PyMethodObject*
-;; Create a bound method wrapping func+self.
-;; rdi = func (callable), rsi = self (instance)
-;; ============================================================================
-DEF_FUNC method_new
-    push rbx
-    push r12
-
-    mov rbx, rdi                ; func
-    mov r12, rsi                ; self
-
-    mov edi, PyMethodObject_size
-    lea rsi, [rel method_type]
-    call gc_alloc
-    ; ob_refcnt=1, ob_type set by gc_alloc
-    mov [rax + PyMethodObject.im_func], rbx
-    mov [rax + PyMethodObject.im_self], r12
-
-    ; INCREF func and self.  im_self is a Value, not necessarily a pointer:
-    ; binding a builtin method to an immediate int is what `getattr(5,
-    ; "bit_length")` asks for, and an unguarded incref would treat the encoded
-    ; number as an address.
-    push rax
-    mov rdi, rbx
-    call obj_incref
-    INCREF_V r12, rax
-
-    ; Track in GC
-    mov rdi, [rsp]
-    call gc_track
-    pop rax
-
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC method_new
-
-;; ============================================================================
-;; method_call(self_method, args, nargs) -> rax = Value
-;; Call a bound method: prepend im_self to args, dispatch to im_func's tp_call.
-;; rdi = PyMethodObject*, rsi = args, rdx = nargs
-;; ============================================================================
-DEF_FUNC_LOCAL method_call
-    push rbx
-    push r12
-    push r13
-    push r14
-
-    mov rbx, rdi                ; method obj
-    mov r12, rsi                ; original args
-    mov r13, rdx                ; original nargs
-
-    ; Allocate new args array: (nargs+1) * 16 (fat values)
-    lea rdi, [rdx + 1]
-    shl rdi, 4
-    call ap_malloc
-    mov r14, rax                ; new args array
-
-    ; new_args[0] = im_self (a pointer is its own Value)
-    mov rcx, [rbx + PyMethodObject.im_self]
-    mov [r14], rcx
-
-    ; Copy original args to new_args[1..] (16-byte stride)
-    xor ecx, ecx
-.mc_copy:
-    cmp rcx, r13
-    jge .mc_copy_done
-    mov rax, rcx
-    shl rax, 3                  ; one Value per slot
-    mov rdx, [r12 + rax]
-    lea r9, [rcx + 1]
-    shl r9, 3                   ; dest slot (offset by one for self)
-    mov [r14 + r9], rdx
-    inc rcx
-    jmp .mc_copy
-.mc_copy_done:
-
-    ; Call im_func's tp_call(im_func, new_args, nargs+1)
-    mov rdi, [rbx + PyMethodObject.im_func]
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_call]
-    mov rsi, r14
-    lea rdx, [r13 + 1]
-    call rax
-    V_UNPACK rax, rdx           ; tp_call returns a Value
-    push rax                    ; save result payload
-    push rdx                    ; save result tag
-
-    ; Free temp args array
-    mov rdi, r14
-    call ap_free
-
-    pop rdx                     ; restore result tag
-    pop rax                     ; restore result payload
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; tp_call returns one Value
-    ret
-END_FUNC method_call
-
-;; ============================================================================
-;; method_dealloc(PyObject *self)
-;; Free a bound method, DECREF func and self.
-;; ============================================================================
-DEF_FUNC_LOCAL method_dealloc
-    push rbx
-
-    mov rbx, rdi
-
-    mov rdi, [rbx + PyMethodObject.im_func]
-    call obj_decref
-    mov rdi, [rbx + PyMethodObject.im_self]
-    XDECREF_V rdi, rsi
-    mov rdi, rbx
-    call gc_dealloc
-
-    pop rbx
-    leave
-    ret
-END_FUNC method_dealloc
-
-;; ============================================================================
-;; method_getattr(PyMethodObject *self, PyObject *name) -> PyObject* or NULL
-;; Delegate attribute lookup to the underlying im_func.
-;; rdi = bound method, rsi = name
-;; ============================================================================
-DEF_FUNC method_getattr
-    ; Delegate to the underlying function's getattr
-    mov rdi, [rdi + PyMethodObject.im_func]
-    extern func_getattr
-    call func_getattr           ; already returns a Value
-    leave
-    ret
-END_FUNC method_getattr
-
-
-;; ============================================================================
-;; method_repr(PyMethodObject *self) -> str
-;; "<bound method Qual of <self repr>>".  Bound methods had no tp_repr at all,
-;; so printing one produced nothing printable.
-;; ============================================================================
-MR_SELF  equ 8
-MR_LEN   equ 16
-MR_BUF   equ 1048
-MR_FRAME equ 1056           ; + 2 pushes = 1072
-DEF_FUNC method_repr, MR_FRAME
-    push rbx
-    push r12
-    mov [rbp - MR_SELF], rdi
-    lea rbx, [rbp - MR_BUF]
-    xor r12d, r12d
-
-    CSTRING rsi, "<bound method "
-.mr_pre:
-    movzx eax, byte [rsi]
-    test al, al
-    jz .mr_qual
-    inc rsi
-    mov [rbx + r12], al
-    inc r12
-    jmp .mr_pre
-
-.mr_qual:
-    ; the function's __qualname__, or its __name__ if it has none
-    mov rax, [rbp - MR_SELF]
-    mov rax, [rax + PyMethodObject.im_func]
-    test rax, rax
-    jz .mr_of
-    ; A qualified name is what CPython shows; the code object carries one,
-    ; and a builtin has only its own name field.
-    mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel func_type]
-    cmp rcx, rdx
-    jne .mr_builtin_name
-    mov rdi, [rax + PyFuncObject.func_code]
-    test rdi, rdi
-    jz .mr_of
-    mov rdi, [rdi + PyCodeObject.co_qualname]
-    test rdi, rdi
-    jnz .mr_copy_name
-    mov rax, [rbp - MR_SELF]
-    mov rax, [rax + PyMethodObject.im_func]
-    mov rdi, [rax + PyFuncObject.func_name]
-    test rdi, rdi
-    jz .mr_of
-    jmp .mr_copy_name
-.mr_builtin_name:
-    mov rdi, [rax + PyBuiltinObject.func_name]
-    test rdi, rdi
-    jz .mr_of
-.mr_copy_name:
-    mov rcx, [rdi + PyStrObject.ob_size]
-    lea rsi, [rdi + PyStrObject.data]
-    xor edx, edx
-.mr_name_loop:
-    cmp rdx, rcx
-    jge .mr_of
-    cmp r12, MR_BUF - 64
-    jae .mr_of
-    movzx eax, byte [rsi + rdx]
-    mov [rbx + r12], al
-    inc r12
-    inc rdx
-    jmp .mr_name_loop
-
-.mr_of:
-    CSTRING rsi, " of "
-.mr_of_loop:
-    movzx eax, byte [rsi]
-    test al, al
-    jz .mr_self_repr
-    inc rsi
-    mov [rbx + r12], al
-    inc r12
-    jmp .mr_of_loop
-
-.mr_self_repr:
-    mov rax, [rbp - MR_SELF]
-    mov rdi, [rax + PyMethodObject.im_self]
-    test rdi, rdi
-    jz .mr_close
-    ; obj_repr takes a Value, which is what im_self holds.
-    mov [rbp - MR_LEN], r12
-    extern obj_repr
-    call obj_repr
-    V_UNPACK rax, rdx
-    test rax, rax
-    jz .mr_close
-    mov r12, [rbp - MR_LEN]
-    mov rcx, [rax + PyStrObject.ob_size]
-    lea rsi, [rax + PyStrObject.data]
-    xor edx, edx
-.mr_self_loop:
-    cmp rdx, rcx
-    jge .mr_self_done
-    cmp r12, MR_BUF - 8
-    jae .mr_self_done
-    push rax
-    movzx eax, byte [rsi + rdx]
-    mov [rbx + r12], al
-    pop rax
-    inc r12
-    inc rdx
-    jmp .mr_self_loop
-.mr_self_done:
-    mov rdi, rax
-    call obj_decref
-
-.mr_close:
-    mov byte [rbx + r12], '>'
-    inc r12
-    mov rdi, rbx
-    mov rsi, r12
-    extern str_new_heap
-    call str_new_heap
-    mov edx, TAG_PTR
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC method_repr
-
-;; ============================================================================
 ;; object_type_call(args, nargs) -> PyObject*
 ;; object() returns a bare instance of object_type
 ;; ============================================================================
@@ -3289,7 +2783,7 @@ DEF_FUNC type_traverse
 END_FUNC type_traverse
 
 global type_clear
-DEF_FUNC type_clear
+DEF_FUNC type_clear, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyTypeObject.tp_dict]
@@ -3309,7 +2803,7 @@ DEF_FUNC type_clear
     ret
 END_FUNC type_clear
 
-DEF_FUNC user_type_dealloc
+DEF_FUNC user_type_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi                ; rbx = type object
 
@@ -3374,6 +2868,15 @@ END_FUNC user_type_dealloc
 ;; ============================================================================
 section .rodata
 ig_getattr_name: db "__getattr__", 0
+ig_getattribute_name: db "__getattribute__", 0
+
+section .data
+align 8
+;; The object object.__getattribute__ is currently resolving for, or 0.  Set
+;; around its call and consumed by the first instance_getattr that sees it.
+global instance_getattr_skip
+instance_getattr_skip: dq 0
+section .rodata
 id_del_ignored_msg: db "Exception ignored in __del__", 10
 id_del_ignored_len equ $ - id_del_ignored_msg
 section .data
@@ -3383,10 +2886,8 @@ init_name_cstr:     db "__init__", 0
 tc_abstract_name: db "__abstractmethods__", 0
 new_name_cstr:      db "__new__", 0
 tga_name_str:       db "__name__", 0
-method_name_str:    db "method", 0
 object_name_str:    db "object", 0
 user_type_name_str: db "type", 0
-super_name_str:     db "super", 0
 
 ; user_type_metatype - metatype for user-defined classes
 ; When accessing Foo.x, we go through Foo->ob_type->tp_getattr = type_getattr
@@ -3411,7 +2912,9 @@ user_type_metatype:
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
     dq 0                        ; tp_new
-    dq 0                        ; tp_as_number
+    dq type_number_methods      ; tp_as_number -- `C | None` builds a
+                                ; union, and a class's `|` is its
+                                ; METATYPE's slot, not its own
     dq 0                        ; tp_as_sequence
     dq 0                        ; tp_as_mapping
     dq type_type                ; tp_base — metatype inherits from type
@@ -3422,6 +2925,7 @@ user_type_metatype:
     dq type_traverse            ; tp_traverse
     dq type_clear               ; tp_clear
     dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
 ; object_type - base type for all Python objects
 ; Used as explicit base class: class Foo(object): pass
@@ -3463,49 +2967,8 @@ object_type:
     dq instance_traverse                        ; tp_traverse
     dq instance_clear                        ; tp_clear
     dq 0           ; tp_dictoffset
+    dq 0                        ; tp_tailslots
 
-; super_type - placeholder for the 'super' builtin
-; LOAD_SUPER_ATTR pops and discards this; it just needs to be loadable.
-align 8
-global super_type
-super_type:
-    dq 1                        ; ob_refcnt (immortal)
-    dq super_type               ; ob_type (self-referential)
-    dq super_name_str           ; tp_name
-    dq TYPE_OBJECT_SIZE         ; tp_basicsize
-    times 23 dq 0               ; remaining tp_* fields
-
-; method_type - type descriptor for bound methods
-align 8
-global method_type
-method_type:
-    dq 1                        ; ob_refcnt (immortal)
-    dq type_type                ; ob_type
-    dq method_name_str          ; tp_name
-    dq PyMethodObject_size      ; tp_basicsize
-    dq method_dealloc           ; tp_dealloc
-    dq method_repr              ; tp_repr
-    dq method_repr              ; tp_str
-    dq 0                        ; tp_hash
-    dq method_call              ; tp_call
-    dq method_getattr           ; tp_getattr
-    dq 0                        ; tp_setattr
-    dq 0                        ; tp_richcompare
-    dq 0                        ; tp_iter
-    dq 0                        ; tp_iternext
-    dq 0                        ; tp_init
-    dq 0                        ; tp_new
-    dq 0                        ; tp_as_number
-    dq 0                        ; tp_as_sequence
-    dq 0                        ; tp_as_mapping
-    dq 0                        ; tp_base
-    dq 0                        ; tp_dict
-    dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
-    dq 0                        ; tp_bases
-    dq method_traverse                        ; tp_traverse
-    dq method_clear                        ; tp_clear
-    dq 0         ; tp_dictoffset
 
 section .text
 
@@ -3514,41 +2977,6 @@ section .text
 ;; holding the reference graph of every type in the system; a type's own
 ;; file is the only place that knows which of its fields are owned.
 ;; ============================================================================
-
-; ---- method_traverse / method_clear ----
-DEF_FUNC method_traverse
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + PyMethodObject.im_func]
-    VISIT_PTR rdi
-    mov rdi, [rbx + PyMethodObject.im_self]
-    VISIT_V rdi, rsi            ; a Value: an immediate self is not an address
-
-    pop rbx
-    leave
-    ret
-END_FUNC method_traverse
-
-DEF_FUNC method_clear
-    push rbx
-    mov rbx, rdi
-
-    mov rdi, [rbx + PyMethodObject.im_func]
-    mov qword [rbx + PyMethodObject.im_func], 0
-    test rdi, rdi
-    jz .no_func
-    call obj_decref
-.no_func:
-    mov rdi, [rbx + PyMethodObject.im_self]
-    mov qword [rbx + PyMethodObject.im_self], 0
-    XDECREF_V rdi, rsi
-.no_self:
-
-    pop rbx
-    leave
-    ret
-END_FUNC method_clear
 
 ; ---- instance_traverse / instance_clear ----
 ;; ============================================================================
@@ -3670,6 +3098,23 @@ DEF_FUNC instance_traverse
     jnz .slot_loop
 
 .done:
+    ; And the slots at the TAIL, which a str subclass's are: past the
+    ; characters and past the word the tail __dict__ occupies.  Nothing in
+    ; the header walk above can reach them, so a cycle through one was never
+    ; collectable.
+    mov rax, [rbx + PyObject.ob_type]
+    mov r13, [rax + PyTypeObject.tp_tailslots]
+    test r13, r13
+    jz .it_tail_done
+    INST_DICT_TAIL r12, rbx
+    add r12, 8                  ; past the dict word
+.it_tail_loop:
+    mov rdi, [r12]
+    VISIT_V rdi, rsi
+    add r12, 8
+    dec r13
+    jnz .it_tail_loop
+.it_tail_done:
     pop r15
     pop r13
     pop r12
@@ -3678,7 +3123,7 @@ DEF_FUNC instance_traverse
     ret
 END_FUNC instance_traverse
 
-DEF_FUNC instance_clear
+DEF_FUNC instance_clear, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 

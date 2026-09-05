@@ -211,7 +211,7 @@ END_FUNC builtin_abs
 ;; ============================================================================
 ;; builtin_divmod(args, nargs) - divmod(a, b) -> (a // b, a % b)
 ;; ============================================================================
-DEF_FUNC builtin_divmod
+DEF_FUNC builtin_divmod, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -482,7 +482,7 @@ END_FUNC divmod_is_zero
 
 ; tp_call wrappers: shift (type, args, nargs) → (args, nargs)
 global int_type_call
-ITC_FRAME  equ 8            ; + 0 pushes = 8, not 16-aligned
+ITC_FRAME  equ 16            ; + 0 pushes = 16, 16-aligned
 DEF_FUNC int_type_call, ITC_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     mov rdi, rsi
@@ -872,6 +872,11 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jmp .int_ret
 
 .int_from_memoryview:
+    ; int(memoryview) — copy the viewed bytes and parse.  A strided view has
+    ; no contiguous run, and a number is not what one is for; CPython's own
+    ; int() over a non-contiguous view raises through the buffer protocol.
+    cmp qword [rbx + PyMemoryViewObject.mv_stride], 1
+    jne .int_type_error
     ; int(memoryview) — copy the viewed bytes and parse
     mov [rbp - BI_OBJ], rbx
     mov qword [rbp - BI_BASE], 10
@@ -1229,7 +1234,12 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jmp .int_ret
 
 .int_type_error:
-    RAISE exc_TypeError_type, "int() argument must be a string or a number, not"
+    ; CPython's wording names the type, and this one ended on "not " with
+    ; nothing after it -- the one word a reader needs.
+    mov rsi, rbx                ; the argument, as a Value
+    CSTRING rdi, `int() argument must be a string, a bytes-like object or a real number, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .int_error:
     RAISE exc_TypeError_type, "int() takes at most 2 arguments"
@@ -1896,7 +1906,7 @@ RND_X      equ 8              ; x payload
 RND_XTAG   equ 16             ; x tag
 RND_ND     equ 24             ; ndigits as int64
 RND_SAVE   equ 32             ; scratch across a call
-RND_FRAME  equ 48             ; + 1 push = 56, not 16-aligned
+RND_FRAME  equ 56            ; + 1 push = 64, 16-aligned
 DEF_FUNC builtin_round_fn, RND_FRAME
     push rbx
 

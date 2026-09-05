@@ -113,7 +113,7 @@ section .text
 ;; reads a float's payload as a pointer, so a descriptor of 0.5 would be
 ;; whatever those bits point at.
 ;; ============================================================================
-DEF_FUNC_LOCAL sk_int_arg
+DEF_FUNC_LOCAL sk_int_arg, 8            ; 1 pushes, so rsp is 16-aligned
     push rdi
     V_UNPACK rdi, rdx
     call int_is_integer
@@ -156,7 +156,7 @@ DEF_FUNC_LOCAL sk_bytes_arg
     RAISE exc_TypeError_type, "a bytes-like object is required"
 END_FUNC sk_bytes_arg
 
-DEF_FUNC_LOCAL sk_wbuf_arg
+DEF_FUNC_LOCAL sk_wbuf_arg, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     V_TEST_PTR rdi, rax
@@ -1027,7 +1027,7 @@ END_FUNC sock_socketpair_fn
 ;; set_blocking(fd, flag) / get_blocking(fd) -- O_NONBLOCK through fcntl,
 ;; which is where a socket's blocking mode actually lives.
 ;; ============================================================================
-DEF_FUNC sock_set_blocking_fn, 24
+DEF_FUNC sock_set_blocking_fn, 32
     cmp rsi, 2
     jl .sbk_args
     push rbx

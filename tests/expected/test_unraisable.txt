@@ -1,11 +1,18 @@
-[('ValueError', 'delfail', True, None, 'function'), ('RuntimeError', 'genfail', True, None, 'generator')]
-True ('delfail',) None __del__
-5
 Exception ignored in sys.unraisablehook: <the bad hook>
 Traceback (most recent call last):
   File "tests/test_unraisable.py", line 92, in __call__
     raise KeyError("hook failed")
 KeyError: 'hook failed'
+Exception ignored in sys.unraisablehook: <the chaining hook>
+Traceback (most recent call last):
+  File "tests/test_unraisable.py", line 113, in __call__
+    raise ValueError("second") from exc
+ValueError: second
+[('ValueError', 'delfail', True, None, 'function'), ('RuntimeError', 'genfail', True, None, 'generator')]
+True ('delfail',) None __del__
+5
 survived a raising hook
+survived a chaining hook
+context seen by a hook: GeneratorExit()
 True
 done

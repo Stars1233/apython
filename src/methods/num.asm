@@ -93,7 +93,7 @@ END_FUNC int_method_self_to_i64
 ;; truncates: (2**70).bit_count() was 2 and (2**70+3).to_bytes(16,'big') was
 ;; sixteen bytes of which only the low eight were the number.
 ;; ============================================================================
-DEF_FUNC num_self_to_mpz
+DEF_FUNC num_self_to_mpz, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rsi                ; the destination mpz_t
 
@@ -1506,7 +1506,7 @@ END_FUNC float_method_hex
 ;; Parses hex float string and returns TAG_FLOAT.
 ;; ============================================================================
 FFH_STR   equ 8
-FFH_FRAME equ 16            ; + 3 pushes = 40, not 16-aligned
+FFH_FRAME equ 24            ; + 3 pushes = 48, 16-aligned
 
 DEF_FUNC float_classmethod_fromhex, FFH_FRAME
     push rbx

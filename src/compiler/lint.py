@@ -217,6 +217,15 @@ def check_alignment(files):
     bad = []
     for path in files:
         src = open(path).read()
+        # Every plain `NAME equ <arithmetic>` in the file, so a prologue's own
+        # `sub rsp, SOME_SIZE` can be evaluated below.
+        consts = {}
+        for cm in re.finditer(r'^(\w+)\s+equ\s+(.+?)\s*(?:;.*)?$', src, re.M):
+            try:
+                consts[cm.group(1)] = eval(cm.group(2), {"__builtins__": {}},
+                                           dict(consts))
+            except Exception:
+                pass
         # `.` matches a newline under re.S, so a trailing `;.*` comment used to
         # swallow the rest of the file: a DEF_FUNC whose declaration carried a
         # comment took everything to the last END_FUNC as its body, and 87 of
@@ -225,6 +234,9 @@ def check_alignment(files):
         for m in re.finditer(r'^(DEF_FUNC(?:_LOCAL)?)\s+(\w+)(?:\s*,\s*([^\s;]+))?[^\n]*$(.*?)^END_FUNC',
                              src, re.M | re.S):
             name, frame, body = m.group(2), m.group(3), m.group(4)
+            if '%' in m.group(0).split('\n')[0]:
+                continue        # inside a %macro: the name is a parameter, and
+                                # its prologue may be conditional
             if not re.search(r'^\s*call\s', body, re.M):
                 continue
             n = 0
@@ -247,6 +259,9 @@ def check_alignment(files):
             if ann:
                 p = int(ann.group(1))
             else:
+                # Pushes and a `sub rsp` may come in either order -- a few
+                # prologues carve their slots first -- so both are counted
+                # until the first instruction that is neither.
                 p = 0
                 for line in body.strip().splitlines():
                     s = line.split(';')[0].strip()
@@ -254,12 +269,41 @@ def check_alignment(files):
                         continue        # a preprocessor directive, not code
                     if s.startswith('push '):
                         p += 1
+                    elif re.match(r'^sub\s+rsp\s*,', s):
+                        continue        # measured as `extra` below
                     else:
                         break
-            if (n + 8 * p) % 16:
+            # A prologue that carves its own space after the pushes counts
+            # too, and a few do: pyc_read_file reserves a struct stat that way
+            # and addresses it relative to rbp, so its DEF_FUNC frame is 0 and
+            # its rsp is nonetheless aligned.  Growing the DEF_FUNC frame of
+            # such a function is not the fix -- it moves rsp without moving
+            # the rbp-relative buffer, which then overlaps the saved
+            # registers.
+            extra = 0
+            for line in body.strip().splitlines():
+                s = line.split(';')[0].strip()
+                if not s or s.startswith('%'):
+                    continue
+                if s.startswith('push '):
+                    continue        # already counted above
+                sub = re.match(r'^sub\s+rsp\s*,\s*(.+)$', s)
+                if not sub:
+                    break
+                try:
+                    extra += eval(sub.group(1), {"__builtins__": {}},
+                                  dict(consts))
+                except Exception:
+                    extra = None
+                    break
+            if extra is None:
+                continue                # symbolic; not ours to judge
+            if (n + 8 * p + extra) % 16:
                 bad.append((path, 0,
-                            "rsp misaligned at calls in %s (frame %d + %d pushes)" % (name, n, p),
-                            "make the frame %d bytes" % (n + (16 - (n + 8 * p) % 16))))
+                            "rsp misaligned at calls in %s (frame %d + %d pushes%s)"
+                            % (name, n, p, " + sub rsp, %d" % extra if extra else ""),
+                            "make the frame %d bytes"
+                            % (n + (16 - (n + 8 * p + extra) % 16))))
     return bad
 
 REGS = frozenset(
@@ -334,6 +378,128 @@ def check_frame_offsets(files):
                 bad.append((path, n, "raw frame offset %s" % m.group(0),
                             "name it with an equ constant"))
     return bad
+
+# Files whose contents a generator writes.  CLAUDE.md's size cap is about what
+# a person has to read and edit, so these are exempt -- gen_unicodename.py's
+# output is one table and nobody navigates it by hand.
+GENERATED = {
+    'src/compiler/tables.asm',
+    'src/compiler/unicodename.asm',
+    'src/compiler/unicodecase.asm',
+    'src/compiler/prule.asm',
+}
+
+SIZE_CAP = 100 * 1024
+
+
+def check_file_size(files):
+    """No hand-written .asm over CLAUDE.md's cap.
+
+    class.asm reached 116k holding the metatype, the instance, the bound
+    method and the builtin-subclass constructors, and the cost was not
+    aesthetic: nothing in it could be found without grep, and the seams
+    between those four were invisible until someone went looking for them.
+    """
+    bad = []
+    for path in files:
+        if path in GENERATED:
+            continue
+        n = os.path.getsize(path)
+        if n > SIZE_CAP:
+            bad.append((path, 0,
+                        "%d bytes, over the %dk cap for a hand-written file"
+                        % (n, SIZE_CAP // 1024),
+                        "split it along a seam it already has"))
+    return bad
+
+
+DOCBLOCK_FLOOR = 'tests/docblock_floor.txt'
+
+
+def docblock_debt(path):
+    """(functions with no docblock, docblocks with no `->` signature line).
+
+    A docblock is the heavy separator block immediately above the DEF_FUNC,
+    reached past whatever frame-layout `equ` constants sit between the two --
+    STYLE.md puts them there on purpose, so they must not break the
+    association.
+    """
+    lines = open(path).read().split('\n')
+    nodoc = nosig = 0
+    for i, L in enumerate(lines):
+        if not re.match(r'^DEF_FUNC(?:_LOCAL|_BARE)?\s+\w+', L):
+            continue
+        j = i - 1
+        # Walk back over the frame-layout constants STYLE.md puts between the
+        # docblock and the DEF_FUNC, and over a single-semicolon comment on
+        # one of them -- an `equ` that needs explaining is still part of the
+        # layout block, not a docblock of its own.
+        while j >= 0 and (re.match(r'^\w+\s+equ\s', lines[j])
+                          or not lines[j].strip()
+                          or re.match(r'^\s*;[^;]', lines[j])
+                          or lines[j].strip() == ';'
+                          or re.match(r'^\s*(?:extern|global|align)\s', lines[j])):
+            j -= 1
+        if j < 0 or not lines[j].startswith(';;'):
+            nodoc += 1
+            continue
+        k = j
+        while k >= 0 and lines[k].startswith(';;'):
+            k -= 1
+        if '->' not in '\n'.join(lines[k + 1:j + 1]):
+            nosig += 1
+    return nodoc, nosig
+
+
+def check_docblocks(files):
+    """A ratchet, not a rule: no file may lose ground against the floor.
+
+    The signature line is the only part of a function's contract that nothing
+    else checks -- a wrong register in one is invisible until someone writes a
+    caller from it -- so its absence is a real gap rather than a cosmetic one.
+    Writing one means reading what the function actually returns, which is why
+    this is a floor being paid down rather than an error from the start.  Lower
+    it with `python3 src/compiler/lint.py --record-docblocks` in the commit
+    that earns it.
+    """
+    floor = {}
+    try:
+        for line in open(DOCBLOCK_FLOOR):
+            line = line.split('#')[0].strip()
+            if line:
+                p, n = line.rsplit(None, 1)
+                floor[p] = int(n)
+    except FileNotFoundError:
+        return []
+    bad = []
+    for path in files:
+        if path in GENERATED:
+            continue
+        n = sum(docblock_debt(path))
+        want = floor.get(path, 0)
+        if n > want:
+            bad.append((path, 0,
+                        "%d function(s) with no docblock or no `->` signature,"
+                        " floor is %d" % (n, want),
+                        "write the missing ones, or lower the floor knowingly"))
+    return bad
+
+
+def record_docblocks(files):
+    """Rewrite the floor file from what the tree is today."""
+    rows = [(p, sum(docblock_debt(p))) for p in files if p not in GENERATED]
+    rows = [(p, n) for p, n in rows if n]
+    with open(DOCBLOCK_FLOOR, 'w') as fh:
+        fh.write("# Functions with no docblock, or a docblock with no `->`\n"
+                 "# signature line, per file.  A ratchet: lint fails when a\n"
+                 "# file goes above its number.  Lower one with\n"
+                 "#   python3 src/compiler/lint.py --record-docblocks\n"
+                 "# in the commit that earns it; a row at zero is dropped.\n")
+        for path, n in rows:
+            fh.write("%-38s %d\n" % (path, n))
+    print("docblock floor: %d file(s), %d function(s)"
+          % (len(rows), sum(n for _, n in rows)))
+
 
 def check_separators(files):
     """The heavy separator is `;; ` plus 76 `=`, exactly 79 columns.
@@ -482,6 +648,9 @@ def all_asm():
 
 def main():
     os.chdir(ROOT)
+    if '--record-docblocks' in sys.argv:
+        record_docblocks(all_asm())
+        return 0
     # Some checks are scoped to src/compiler plus src/main.asm: main holds argc
     # and argv across compile_source, and DEF_FUNC main + 5 pushes enters
     # glibc's strtod misaligned on any source file with a float literal.  The
@@ -507,10 +676,10 @@ def main():
                 + check_rel(everything) + check_markers(everything)
                 + check_exports(everything)
                 + check_frame_offsets(everything)
-                + check_separators(everything)
+                + check_separators(everything) + check_file_size(everything) + check_docblocks(everything)
                 + check_text(everything) + check_guards(headers)
                 + check_type_tables(everything, nfields)
-                + check_alignment(scoped) + check_tailjumps(scoped)
+                + check_alignment(everything) + check_tailjumps(scoped)
                 + check_callee_saved(scoped) + check_saved_writes(scoped))
     for path, n, what, detail in problems:
         where = "%s:%d" % (path, n) if n else path

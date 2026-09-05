@@ -6,6 +6,8 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern obj_as_index
+extern obj_as_slice_index
 %include "opcodes.inc"
 
 ; External functions
@@ -72,7 +74,7 @@ END_FUNC list_method_append
 ;; list_method_pop(args, nargs) -> removed item
 ;; args[0]=self, optionally args[1]=index (default: last)
 ;; ============================================================================
-DEF_FUNC list_method_pop
+DEF_FUNC list_method_pop, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -95,7 +97,7 @@ DEF_FUNC list_method_pop
 .pop_idx:
     mov rdi, [rax + 8]    ; args[1]
     V_UNPACK rdi, rdx       ; args[1]
-    call int_to_i64
+    call obj_as_index       ; an index, so __index__ counts and a str does not
     mov r13, rax
 
     ; Handle negative index
@@ -165,7 +167,7 @@ DEF_FUNC list_method_insert
     ; Get index
     mov rdi, [rax + 8]     ; args[1] payload (16B stride)
     V_UNPACK rdi, rdx       ; args[1]
-    call int_to_i64
+    call obj_as_index       ; an index, so __index__ counts and a str does not
     mov r12, rax            ; index
 
     pop rax
@@ -1365,7 +1367,7 @@ LI_IDX    equ 32
 LI_SIZE   equ 40
 LI_ARGS   equ 48   ; save args pointer
 LI_NARGS  equ 56   ; save nargs
-LI_FRAME  equ 56            ; + 2 pushes = 72, not 16-aligned
+LI_FRAME  equ 64            ; + 2 pushes = 80, 16-aligned
 DEF_FUNC list_method_index, LI_FRAME
     push rbx
     push r12
@@ -1392,7 +1394,7 @@ DEF_FUNC list_method_index, LI_FRAME
     mov rax, [rbp - LI_ARGS]
     mov rdi, [rax + 16]      ; args[2] payload
     V_UNPACK rdi, rdx       ; args[2]
-    call int_to_i64
+    call obj_as_slice_index
     ; Handle negative start
     test rax, rax
     jns .li_start_pos
@@ -1410,7 +1412,7 @@ DEF_FUNC list_method_index, LI_FRAME
     mov rax, [rbp - LI_ARGS]
     mov rdi, [rax + 24]      ; args[3] payload
     V_UNPACK rdi, rdx       ; args[3]
-    call int_to_i64
+    call obj_as_slice_index
     ; Handle negative stop
     test rax, rax
     jns .li_stop_pos
@@ -1478,7 +1480,7 @@ END_FUNC list_method_index
 ;; args[0]=self, args[1]=value
 ;; ============================================================================
 LC_IDX    equ 8
-LC_FRAME  equ 8             ; + 4 pushes = 40, not 16-aligned
+LC_FRAME  equ 16            ; + 4 pushes = 48, 16-aligned
 
 DEF_FUNC list_method_count, LC_FRAME
     push rbx
@@ -1534,7 +1536,7 @@ END_FUNC list_method_count
 ;; list_method_copy(args, nargs) -> new list (shallow copy)
 ;; args[0]=self
 ;; ============================================================================
-DEF_FUNC list_method_copy
+DEF_FUNC list_method_copy, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1709,7 +1711,7 @@ extern tuple_sub_fill
 extern set_sub_fill
 extern frozenset_type
 extern type_is_subtype
-DEF_FUNC container_dunder_new
+DEF_FUNC container_dunder_new, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -2010,7 +2012,7 @@ END_FUNC list_method_extend
 ;; args[0]=self, args[1]=value
 ;; Removes first occurrence of value. Raises ValueError if not found.
 ;; ============================================================================
-DEF_FUNC list_method_remove
+DEF_FUNC list_method_remove, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -2095,7 +2097,7 @@ END_FUNC list_method_remove
 ;; args[0]=self
 ;; ============================================================================
 extern reversed_iter_type
-DEF_FUNC list_method_reversed
+DEF_FUNC list_method_reversed, 8            ; 1 push, so rsp is 16-aligned
     push rbx
 
     mov rbx, [rdi]            ; self (list)

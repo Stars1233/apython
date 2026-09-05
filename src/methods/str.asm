@@ -322,8 +322,11 @@ AFF_NARGS equ 16
 AFF_WPTR  equ 40            ; the 3-word window str_search_window fills
 AFF_WLEN  equ 32
 AFF_WOFF  equ 24
-AFF_FRAME equ 56            ; + 5 pushes = 96
-DEF_FUNC_LOCAL str_startswith_one, AFF_FRAME
+AFF_FRAME equ 64            ; + 4 pushes = 96, 16-aligned
+; startswith keeps three callee-saved registers where endswith keeps four,
+; so it needs one more word of frame to land on the same boundary.
+AFF_FRAME3 equ 72           ; + 3 pushes = 96, 16-aligned
+DEF_FUNC_LOCAL str_startswith_one, AFF_FRAME3
     push rbx
     push r12
     push r13
@@ -918,7 +921,7 @@ DEF_FUNC str_method_join
     push r13
     push r14
     push r15
-    sub rsp, 48             ; 4 locals + alignment pad
+    sub rsp, 56             ; 4 locals, and the pad five pushes need
 
     ; Load separator
     mov r15, rdi             ; save args ptr (r15 free until later)
@@ -1042,7 +1045,7 @@ DEF_FUNC str_method_join
 
     pop rax
     mov edx, TAG_PTR
-    add rsp, 48
+    add rsp, 56
     pop r15
     pop r14
     pop r13
@@ -1061,7 +1064,7 @@ DEF_FUNC str_method_join
     lea rdi, [rel empty_str_cstr]
     call str_from_cstr_heap
     mov edx, TAG_PTR
-    add rsp, 48
+    add rsp, 56
     pop r15
     pop r14
     pop r13
@@ -1424,7 +1427,7 @@ END_FUNC str_method_split
 ;; ============================================================================
 ;; fmtbuf_append(rdi = &{buf, used, cap}, rsi = data, rdx = length)
 ;; ============================================================================
-DEF_FUNC_LOCAL fmtbuf_append
+DEF_FUNC_LOCAL fmtbuf_append, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -1485,7 +1488,7 @@ SF_CONV   equ 88
 SF_SSTART equ 96
 SF_SEND   equ 104
 SF_VALUE  equ 112
-SF_FRAME  equ 128           ; + 5 pushes = 168, not 16-aligned
+SF_FRAME  equ 136            ; + 5 pushes = 176, 16-aligned
 DEF_FUNC str_method_format, SF_FRAME
     push rbx
     push r12
@@ -2255,7 +2258,7 @@ FM_MAP    equ 16
 FM_BUF    equ 24
 FM_USED   equ 32
 FM_CAP    equ 40
-FM_FRAME  equ 48            ; + 5 pushes = 88, not 16-aligned
+FM_FRAME  equ 56            ; + 5 pushes = 96, 16-aligned
 
 DEF_FUNC str_method_format_map, FM_FRAME
     push rbx
