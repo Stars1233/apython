@@ -200,7 +200,9 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   class, iter, singleton, bytes, bytearray, memoryview, code).  `class.asm` is
   the metatype, the instance and attribute access; `instance_alloc.asm` is
   where an instance comes from, including the constructors a subclass of a
-  builtin needs; `method.asm` is the bound method
+  builtin needs; `method.asm` is the bound method; `str_mod.asm` is the `%`
+  operator, for str and for bytes both -- the conversion is only known there,
+  so the argument is converted there
 - `src/marshal.asm` — .pyc marshal deserializer, the .pyc file reader, and
   the `marshal` module `importlib` calls `loads` on
 - `src/main.asm` — argument parsing, startup order, and the `-t`/`--dis` modes

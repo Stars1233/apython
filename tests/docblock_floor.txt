@@ -85,7 +85,7 @@ src/pyo/slice.asm                      4
 src/pyo/sre_match.asm                  7
 src/pyo/sre_pattern.asm                15
 src/pyo/sre_template.asm               1
-src/pyo/str.asm                        6
+src/pyo/str.asm                        4
 src/pyo/structseq.asm                  7
 src/pyo/subclasses.asm                 4
 src/pyo/super.asm                      5
