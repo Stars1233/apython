@@ -1,6 +1,7 @@
 ; pyo/dict.asm - Dict type implementation
 ; Open-addressing hash table with linear probing
 
+%include "opcodes.inc"
 %include "macros.inc"
 %include "object.inc"
 
@@ -2108,6 +2109,27 @@ dict_keys_view_seq_methods:
     dq 0                        ; sq_inplace_concat
     dq 0                        ; sq_inplace_repeat
 
+; The number methods every view shares: the four set operators.
+align 8
+dict_view_num_methods:
+    dq 0                    ; nb_add
+    dq dict_view_nb_sub     ; nb_subtract
+    dq 0                    ; nb_multiply
+    dq 0                    ; nb_remainder
+    dq 0                    ; nb_divmod
+    dq 0                    ; nb_power
+    dq 0                    ; nb_negative
+    dq 0                    ; nb_positive
+    dq 0                    ; nb_absolute
+    dq 0                    ; nb_bool
+    dq 0                    ; nb_invert
+    dq 0                    ; nb_lshift
+    dq 0                    ; nb_rshift
+    dq dict_view_nb_and     ; nb_and
+    dq dict_view_nb_xor     ; nb_xor
+    dq dict_view_nb_or      ; nb_or
+    times PyNumberMethods_size / 8 - 16 dq 0
+
 ; Dict view sequence methods (for len(), values/items views)
 align 8
 dict_view_sequence_methods:
@@ -2135,12 +2157,12 @@ dict_keys_view_type:
     dq 0                        ; tp_call
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
-    dq 0                        ; tp_richcompare
+    dq dict_view_richcompare    ; tp_richcompare
     dq dict_view_iter           ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
     dq 0                        ; tp_new
-    dq 0                        ; tp_as_number
+    dq dict_view_num_methods    ; tp_as_number
     dq dict_keys_view_seq_methods ; tp_as_sequence (with sq_contains)
     dq 0                        ; tp_as_mapping
     dq 0                        ; tp_base
@@ -2168,12 +2190,12 @@ dict_values_view_type:
     dq 0                        ; tp_call
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
-    dq 0                        ; tp_richcompare
+    dq dict_view_richcompare    ; tp_richcompare
     dq dict_view_iter           ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
     dq 0                        ; tp_new
-    dq 0                        ; tp_as_number
+    dq dict_view_num_methods    ; tp_as_number
     dq dict_view_sequence_methods ; tp_as_sequence
     dq 0                        ; tp_as_mapping
     dq 0                        ; tp_base
@@ -2201,12 +2223,12 @@ dict_items_view_type:
     dq 0                        ; tp_call
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
-    dq 0                        ; tp_richcompare
+    dq dict_view_richcompare    ; tp_richcompare
     dq dict_view_iter           ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
     dq 0                        ; tp_new
-    dq 0                        ; tp_as_number
+    dq dict_view_num_methods    ; tp_as_number
     dq dict_view_sequence_methods ; tp_as_sequence
     dq 0                        ; tp_as_mapping
     dq 0                        ; tp_base
@@ -2220,6 +2242,192 @@ dict_items_view_type:
     dq 0                        ; tp_tailslots
 
 section .text
+
+;; ============================================================================
+;; dict_view_to_set(rdi = a Value) -> rax = a set Value, owned, or 0
+;;
+;; Both operands of a view's set operations become sets first.  A set or a
+;; frozenset is kept as it is; anything else is built into one, which is
+;; what makes `d.keys() - ["a"]` work where `{"a"} - ["a"]` does not: a
+;; view's operators take any iterable, as CPython's do.
+;; ============================================================================
+DVS_ARG   equ 8
+DVS_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL dict_view_to_set, DVS_FRAME
+    mov [rbp - DVS_ARG], rdi
+    V_TEST_PTR rdi, rax
+    ja .dvs_build
+    test rdi, rdi
+    jz .dvs_build
+    mov rax, [rdi + PyObject.ob_type]
+    extern set_type
+    lea rcx, [rel set_type]
+    cmp rax, rcx
+    je .dvs_keep
+    extern frozenset_type
+    lea rcx, [rel frozenset_type]
+    cmp rax, rcx
+    jne .dvs_build
+.dvs_keep:
+    mov rax, [rbp - DVS_ARG]
+    INCREF_V rax, rcx
+    leave
+    ret
+.dvs_build:
+    lea rsi, [rbp - DVS_ARG]
+    lea rdi, [rel set_type]
+    mov edx, 1
+    extern set_type_call
+    call set_type_call
+    V_UNPACK rax, rdx
+    leave
+    ret
+END_FUNC dict_view_to_set
+
+;; ============================================================================
+;; dict_view_binop(rdi = left Value, rsi = right Value, edx = op index)
+;;   -> rax = Value, or 0 with an exception pending
+;;
+;; A view is set-like, and CPython gives it the four set operators.  Both
+;; sides become sets and the set's own slot does the work.
+;; ============================================================================
+DVB_OP    equ 8
+DVB_LEFT  equ 16
+DVB_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC_LOCAL dict_view_binop, DVB_FRAME
+    mov [rbp - DVB_OP], rdx
+    push rsi
+    push rsi
+    call dict_view_to_set
+    pop rsi
+    pop rsi
+    test rax, rax
+    jz .dvb_fail
+    mov [rbp - DVB_LEFT], rax
+    mov rdi, rsi
+    call dict_view_to_set
+    test rax, rax
+    jz .dvb_fail_left
+    mov rsi, rax
+    mov rdi, [rbp - DVB_LEFT]
+    mov edx, [rbp - DVB_OP]
+    extern obj_binary_op
+    call obj_binary_op          ; consumes both
+    leave
+    ret
+.dvb_fail_left:
+    mov rdi, [rbp - DVB_LEFT]
+    DECREF_V rdi, rcx
+.dvb_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC dict_view_binop
+
+%macro DEF_VIEW_BINOP 2
+;; ============================================================================
+;; dict_view_<op>(rdi = left Value, rsi = right Value) -> rax = Value, or 0
+;; One of the four set operators, named for the slot it fills.
+;; ============================================================================
+DEF_FUNC_LOCAL dict_view_%1, 8      ; + 0 pushes = 16, 16-aligned
+    mov edx, %2
+    call dict_view_binop
+    leave
+    ret
+END_FUNC dict_view_%1
+%endmacro
+
+;; The four, each naming the set slot it ends up in.
+DEF_VIEW_BINOP nb_sub, NB_SUBTRACT
+DEF_VIEW_BINOP nb_and, NB_AND
+DEF_VIEW_BINOP nb_or,  NB_OR
+DEF_VIEW_BINOP nb_xor, NB_XOR
+
+;; ============================================================================
+;; dict_view_richcompare(rdi = self, rsi = other, edx = op) -> rax = Value
+;;
+;; A view compares as the set of what it holds, which is how `d.keys() ==
+;; {"a"}` is True in CPython.  Only against something set-like: a view
+;; compared with a list is unequal rather than an error.
+;; ============================================================================
+DVR_OP    equ 8
+DVR_LEFT  equ 16
+DVR_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC_LOCAL dict_view_richcompare, DVR_FRAME
+    mov [rbp - DVR_OP], rdx
+    ; The other side has to be set-like: a view or a set.  Anything else is
+    ; NotImplemented, which for == falls back to identity.
+    V_TEST_PTR rsi, rax
+    ja .dvr_notimpl
+    test rsi, rsi
+    jz .dvr_notimpl
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel set_type]
+    cmp rax, rcx
+    je .dvr_ok
+    lea rcx, [rel frozenset_type]
+    cmp rax, rcx
+    je .dvr_ok
+    lea rcx, [rel dict_keys_view_type]
+    cmp rax, rcx
+    je .dvr_ok
+    lea rcx, [rel dict_items_view_type]
+    cmp rax, rcx
+    je .dvr_ok
+    lea rcx, [rel dict_values_view_type]
+    cmp rax, rcx
+    jne .dvr_notimpl
+.dvr_ok:
+    push rsi
+    push rsi
+    call dict_view_to_set
+    pop rsi
+    pop rsi
+    test rax, rax
+    jz .dvr_fail
+    mov [rbp - DVR_LEFT], rax
+    mov rdi, rsi
+    call dict_view_to_set
+    test rax, rax
+    jz .dvr_fail_left
+    mov rsi, rax
+    mov rdi, [rbp - DVR_LEFT]
+    push rsi
+    push rdi
+    mov edx, [rbp - DVR_OP]
+    extern obj_richcompare_bool
+    call obj_richcompare_bool
+    pop rdi
+    push rax
+    DECREF_V rdi, rcx
+    mov rdi, [rsp + 8]
+    DECREF_V rdi, rcx
+    pop rax
+    add rsp, 8
+    test eax, eax
+    js .dvr_fail                ; the comparison itself raised
+    jz .dvr_false
+    lea rax, [rel bool_true]
+    jmp .dvr_answer
+.dvr_false:
+    lea rax, [rel bool_false]
+.dvr_answer:
+    inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+.dvr_fail_left:
+    mov rdi, [rbp - DVR_LEFT]
+    DECREF_V rdi, rcx
+.dvr_fail:
+    xor eax, eax
+    leave
+    ret
+.dvr_notimpl:
+    xor eax, eax
+    leave
+    ret
+END_FUNC dict_view_richcompare
+
 
 ;; ============================================================================
 ;; GC traverse and clear.  These lived in gc.asm, which left the collector

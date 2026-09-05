@@ -133,6 +133,7 @@ test_container_operator_names
 test_contains_fallback
 test_control_flow
 test_crash_regressions
+test_csv
 test_decode_errors
 test_deep_dealloc
 test_default_repr
@@ -160,6 +161,7 @@ test_dict_order
 test_dicts
 test_dict_update_mapping
 test_dict_update_raises
+test_dict_view_set
 test_dict_views
 test_dir
 test_dunder_protocols

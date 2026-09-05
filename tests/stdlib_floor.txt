@@ -31,6 +31,7 @@ ok contextlib
 ok contextvars
 ok copy
 ok copyreg
+ok csv
 ok dataclasses
 ok datetime
 ok dbm
