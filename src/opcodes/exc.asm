@@ -79,6 +79,11 @@ DEF_FUNC_BARE op_push_exc_info
     ; TOS = new exception
     VPOP rax                 ; rax = new exception
 
+    ; One more exception this frame is handling and has not put down.  What
+    ; eval_return reads to decide whether the frame keeps the global on its
+    ; way out, or merely gives back the one it borrowed from its caller.
+    inc dword [r12 + PyFrame.exc_depth]
+
     ; Push the previous handled_exception (or None if NULL)
     mov rdx, [rel handled_exception]
     test rdx, rdx
@@ -103,6 +108,7 @@ END_FUNC op_push_exc_info
 ;; ============================================================================
 DEF_FUNC_BARE op_pop_except
     VPOP rax                 ; rax = exception to restore
+    dec dword [r12 + PyFrame.exc_depth]
 
     ; XDECREF old handled_exception
     push rax

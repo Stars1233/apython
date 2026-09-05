@@ -1056,7 +1056,14 @@ struc PyFrame
     .instr_ptr:     resq 1  ; +40: saved bytecode pointer
     .stack_ptr:     resq 1  ; +48: saved value stack pointer
     .stack_base:    resq 1  ; +56: ptr to bottom of the value stack
-    .return_offset: resd 1  ; +64: return offset
+    ; How many PUSH_EXC_INFOs this frame has executed and not yet popped.
+    ; Zero means the frame is handling nothing of its own and merely SHARES
+    ; its caller's exception; anything else means it has one, and .exc_state
+    ; below is where eval_return parks it.  Only a generator or coroutine can
+    ; suspend with this non-zero, which is the whole reason it is on the frame
+    ; and not in a register.  (This word was .return_offset, written once by
+    ; frame_new and never read.)
+    .exc_depth:     resd 1  ; +64: unpopped PUSH_EXC_INFO count
     .nlocalsplus:   resd 1  ; +68: number of locals + cells + frees
     .func_obj:      resq 1  ; +72: ptr to function object (for closures)
     .call_ip:       resq 1  ; +80: where this frame was when it called into
