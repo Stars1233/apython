@@ -39,13 +39,6 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **The tokenizer cannot warn.**  CPython emits a SyntaxWarning for a number
-  that ends against a keyword -- `1if True else 2` compiles, and says so.
-  This compiles it silently: the compiler runs before there is an interpreter
-  frame to warn from, which is the same reason it may not raise.  What is
-  missing is the deferred channel the error protocol already has, applied to
-  warnings.
-
 - **`range` clamps a bound wider than an index.**  Its three bounds are int64
   fields where CPython holds objects, so `range(1 << 1000)` is representable
   there and not here -- `_collections_abc` builds one at import to name the

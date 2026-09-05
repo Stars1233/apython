@@ -437,6 +437,19 @@ OM_NOFALL    equ 0x08   ; control does not fall through
 ;; Compiler error codes.  Every compiler function returns 0/NULL on failure
 ;; with comp.err_set non-zero; nothing here raises.
 ;; ===========================================================================
+; A warning the compiler wants emitted once there is an interpreter to emit
+; it from.  CPython's tokenizer warns where this one may not: it runs before
+; any Python frame exists, which is the same reason it may not raise.  They
+; are recorded here and handed to warnings.warn_explicit at the end, which
+; takes a filename and a line rather than reading them off a frame.
+COMP_WARN_TEXT equ 96
+struc CompWarn
+    .msg:    resb COMP_WARN_TEXT  ; the message, COPIED: some are composed
+    .lineno: resd 1
+    .pad:    resd 1
+endstruc
+COMP_MAX_WARNS equ 16
+
 struc CompErr
     .type:   resq 1  ; +0  exception type object
     .msg:    resq 1  ; +8  const char*
@@ -592,6 +605,9 @@ struc Comp
                                     ; is the For's, and the For node does not
                                     ; exist until its body has been parsed
     .err:       resb CompErr_size
+    .warn_n:    resd 1              ; how many of .warns are filled
+    .warn_pad:  resd 1
+    .warns:     resb CompWarn_size * COMP_MAX_WARNS
     .lex:       resb Lexer_size
 endstruc
 

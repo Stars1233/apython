@@ -1184,9 +1184,9 @@ DEF_FUNC lex_run, LR_FRAME
     ; -- and they turn up in real code, because a formatter that strips
     ; spaces produces them.
     ;
-    ; The warning is the one part not reproduced: the compiler runs before
-    ; there is an interpreter frame to warn from, which is the same reason it
-    ; may not raise.
+    ; The warning is recorded rather than emitted: the compiler runs before
+    ; there is an interpreter frame, which is the same reason it may not
+    ; raise.  comp_emit_warnings hands the lot to warn_explicit at the end.
     movzx eax, byte [r12]
     cmp al, 'i'
     jne .snc_kw_table
@@ -1197,11 +1197,11 @@ DEF_FUNC lex_run, LR_FRAME
     jae .snc_kw_no
     movzx eax, byte [rcx]
     cmp al, 'f'
-    je .snc_leading_zero
+    je .snc_kw_warn
     cmp al, 'n'
-    je .snc_leading_zero
+    je .snc_kw_warn
     cmp al, 's'
-    je .snc_leading_zero
+    je .snc_kw_warn
     jmp .snc_kw_no
 
 .snc_kw_table:
@@ -1228,12 +1228,52 @@ DEF_FUNC lex_run, LR_FRAME
 .snc_kw_end:
     lea rcx, [r12 + rdx]
     cmp rcx, r13
-    jae .snc_leading_zero       ; the source ends with it
+    jae .snc_kw_warn            ; the source ends with it
     lea rax, [rel cc_table]
     movzx edx, byte [rcx]
     test byte [rax + rdx], CC_IDCONT
-    jz .snc_leading_zero
+    jz .snc_kw_warn
     jmp .snc_kw_loop
+
+.snc_kw_warn:
+    ; CPython's tokenizer ends the number at the letter and WARNS, with the
+    ; same wording the error would have carried: "invalid decimal literal"
+    ; for `1if True else 2` and "invalid hexadecimal literal" for `0x1if`.
+    push r12
+    push r13
+    CSTRING rax, "invalid decimal literal"
+    cmp byte [r15], '0'
+    jne .snc_kww_have
+    lea rcx, [r15 + 1]
+    cmp rcx, r12
+    jae .snc_kww_have
+    movzx ecx, byte [r15 + 1]
+    or ecx, 0x20
+    cmp cl, 'b'
+    je .snc_kww_bin
+    cmp cl, 'o'
+    je .snc_kww_oct
+    cmp cl, 'x'
+    je .snc_kww_hex
+    jmp .snc_kww_have
+.snc_kww_bin:
+    CSTRING rax, "invalid binary literal"
+    jmp .snc_kww_have
+.snc_kww_oct:
+    CSTRING rax, "invalid octal literal"
+    jmp .snc_kww_have
+.snc_kww_hex:
+    CSTRING rax, "invalid hexadecimal literal"
+.snc_kww_have:
+    mov rdi, rbx
+    mov rsi, rax
+    mov edx, [r14 + Lexer.lineno]
+    extern comp_warn
+    call comp_warn
+    pop r13
+    pop r12
+    jmp .snc_leading_zero
+
 .snc_kw_no:
 
     ; Which literal was it?  A radix prefix names its base, and blames the

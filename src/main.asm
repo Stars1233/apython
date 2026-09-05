@@ -230,6 +230,12 @@ DEF_FUNC main, 8
     extern signal_default_init
     call signal_default_init
 
+    ; The SyntaxWarnings the compile recorded, now that there is an
+    ; interpreter to emit them from: code_from_path above runs before
+    ; builtins_init and import_init, so nothing could be imported then.
+    extern comp_flush_warnings
+    call comp_flush_warnings
+
     ; Set sys.path[0] to script directory
     mov rdi, rbx                ; pyc filename
     call sys_path_add_script_dir

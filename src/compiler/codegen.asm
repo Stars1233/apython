@@ -1303,6 +1303,220 @@ END_FUNC cg_e_ifexp
 ;; The dance keeps the operand that is about to be reused underneath the result
 ;; of the comparison just made, so `a < b < c` evaluates b exactly once -- which
 ;; is the whole reason a chain is one node rather than a fold.
+section .bss
+cwil_buf: resb 128
+section .text
+
+;; ============================================================================
+;; ============================================================================
+;; cg_check_compare(Comp *c, uint32_t node, int lineno) -> nothing
+;;
+;; CPython's check_compare: over each (op, operand) pair, an `is` or `is not`
+;; against a literal gets one warning, naming the left operand if that is the
+;; literal and the right otherwise.  It returns after the first, so a chain
+;; warns once however many of its comparisons qualify.
+;; ============================================================================
+CCC_C     equ 8
+CCC_NODE  equ 16
+CCC_LINE  equ 24
+CCC_LEFT  equ 32
+CCC_I     equ 40
+CCC_N     equ 48
+CCC_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
+DEF_FUNC_LOCAL cg_check_compare, CCC_FRAME
+    mov [rbp - CCC_C], rdi
+    mov [rbp - CCC_NODE], rsi
+    mov [rbp - CCC_LINE], rdx
+    call ast_at
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - CCC_N], rcx
+    mov edx, [rax + AstNode.a]
+    mov [rbp - CCC_LEFT], rdx
+    mov qword [rbp - CCC_I], 0
+.ccc_loop:
+    mov rax, [rbp - CCC_I]
+    cmp rax, [rbp - CCC_N]
+    jae .ccc_done
+    mov rdi, [rbp - CCC_C]
+    mov rsi, [rbp - CCC_NODE]
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CCC_I]
+    shl rdx, 1
+    mov rdi, [rbp - CCC_C]
+    call ast_child
+    push rax                            ; the operator
+    mov rdi, [rbp - CCC_C]
+    mov rsi, [rbp - CCC_NODE]
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CCC_I]
+    shl rdx, 1
+    inc rdx
+    mov rdi, [rbp - CCC_C]
+    call ast_child
+    pop rcx
+    push rax                            ; the right operand
+    push rcx                            ; the operator
+    cmp rcx, CMPOP_IS
+    je .ccc_is
+    cmp rcx, CMPOP_ISNOT
+    jne .ccc_next
+.ccc_is:
+    mov rdi, [rbp - CCC_C]
+    mov rsi, rcx
+    mov rdx, [rbp - CCC_LEFT]
+    mov rcx, [rbp - CCC_LINE]
+    call cg_warn_is_literal
+    test eax, eax
+    jnz .ccc_stop
+    mov rdi, [rbp - CCC_C]
+    mov rsi, [rsp]                      ; the operator
+    mov rdx, [rsp + 8]                  ; the right operand
+    mov rcx, [rbp - CCC_LINE]
+    call cg_warn_is_literal
+    test eax, eax
+    jnz .ccc_stop
+.ccc_next:
+    pop rcx
+    pop rax
+    mov [rbp - CCC_LEFT], rax
+    inc qword [rbp - CCC_I]
+    jmp .ccc_loop
+.ccc_stop:
+    add rsp, 16
+.ccc_done:
+    leave
+    ret
+END_FUNC cg_check_compare
+
+;; cg_warn_is_literal(Comp *c, int op, uint32_t node, int lineno)
+;;   -> eax = 1 if it warned, 0 if the operand is not a literal
+;;
+;; CPython's check_is_arg: `x is 1` compares identity where almost everyone
+;; means equality, so it warns and names the literal's type.  None, True,
+;; False and Ellipsis are the identities `is` is FOR, and say nothing.
+;; ============================================================================
+CWIL_C     equ 8
+CWIL_OP    equ 16
+CWIL_LINE  equ 24
+CWIL_NODE  equ 32
+CWIL_I     equ 40
+CWIL_FRAME equ 56           ; + 1 push = 64, 16-aligned
+DEF_FUNC_LOCAL cg_warn_is_literal, CWIL_FRAME
+    push rbx
+    mov [rbp - CWIL_C], rdi
+    mov [rbp - CWIL_OP], rsi
+    mov [rbp - CWIL_LINE], rcx
+    mov rsi, rdx
+    mov [rbp - CWIL_NODE], rdx
+    call ast_at
+    ; A tuple display of constants is a constant in CPython -- its folder
+    ; settles `()` and `(1,)` before the check runs -- and nothing folds
+    ; here, so the shape is recognised instead.
+    cmp byte [rax + AstNode.kind], AST_TUPLE
+    je .cwil_tuple
+    cmp byte [rax + AstNode.kind], AST_CONST
+    jne .cwil_no
+    mov edx, [rax + AstNode.a]
+    mov rdi, [rbp - CWIL_C]
+    mov rsi, rdx
+    call ast_obj_at
+    ; The arena holds Values, so an immediate is its own type.
+    V_IS_INT rax, rcx
+    jae .cwil_int
+    V_IS_FLOAT rax, rcx
+    jbe .cwil_float
+    test rax, rax
+    jz .cwil_no
+    mov rax, [rax + PyObject.ob_type]
+    ; None, True and False are what `is` exists for.
+    extern none_type
+    lea rcx, [rel none_type]
+    cmp rax, rcx
+    je .cwil_no
+    extern bool_type
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
+    je .cwil_no
+    extern ellipsis_type
+    lea rcx, [rel ellipsis_type]
+    cmp rax, rcx
+    je .cwil_no
+    mov rbx, [rax + PyTypeObject.tp_name]
+    jmp .cwil_have_name
+.cwil_tuple:
+    ; ...and only when every element is one: `(x,)` is not a constant.
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - CWIL_I], rcx
+    xor edx, edx
+.cwil_tuple_loop:
+    cmp rdx, [rbp - CWIL_I]
+    jae .cwil_tuple_ok
+    push rdx
+    mov rdi, [rbp - CWIL_C]
+    mov rsi, [rbp - CWIL_NODE]
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rsp]
+    mov rdi, [rbp - CWIL_C]
+    call ast_child
+    mov rsi, rax
+    mov rdi, [rbp - CWIL_C]
+    call ast_at
+    pop rdx
+    cmp byte [rax + AstNode.kind], AST_CONST
+    jne .cwil_no
+    inc rdx
+    jmp .cwil_tuple_loop
+.cwil_tuple_ok:
+    CSTRING rbx, "tuple"
+    jmp .cwil_have_name
+
+.cwil_int:
+    CSTRING rbx, "int"
+    jmp .cwil_have_name
+.cwil_float:
+    CSTRING rbx, "float"
+.cwil_have_name:
+    lea rdi, [rel cwil_buf]
+    cmp qword [rbp - CWIL_OP], CMPOP_IS
+    je .cwil_is
+    CSTRING rsi, `"is not" with '`
+    jmp .cwil_open
+.cwil_is:
+    CSTRING rsi, `"is" with '`
+.cwil_open:
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, rbx
+    call rbt_append_cstr
+    mov rdi, rax
+    cmp qword [rbp - CWIL_OP], CMPOP_IS
+    je .cwil_tail_is
+    CSTRING rsi, `' literal. Did you mean "!="?`
+    jmp .cwil_tail
+.cwil_tail_is:
+    CSTRING rsi, `' literal. Did you mean "=="?`
+.cwil_tail:
+    call rbt_append_cstr
+    mov rdi, [rbp - CWIL_C]
+    lea rsi, [rel cwil_buf]
+    mov rdx, [rbp - CWIL_LINE]
+    extern comp_warn
+    call comp_warn
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.cwil_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC cg_warn_is_literal
+
 DEF_FUNC_LOCAL cg_e_compare, CB_FRAME
     push rbx
     push r12
@@ -1318,6 +1532,18 @@ DEF_FUNC_LOCAL cg_e_compare, CB_FRAME
     mov [rbp - CB_N], rcx
     mov ecx, [rax + AstNode.lineno]
     mov [rbp - CB_LINE], rcx
+
+    ; `x is 1` compares identity where almost everyone means equality, and
+    ; CPython warns.  Done over the whole comparison before anything is
+    ; emitted, so a chained one is covered by the same pass.
+    mov rdi, rbx
+    mov rsi, r13
+    mov rdx, [rbp - CB_LINE]
+    call cg_check_compare
+
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
     mov edx, [rax + AstNode.a]
     mov rdi, rbx
     mov rsi, r12

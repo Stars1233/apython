@@ -37,6 +37,10 @@
 #     co_flags, co_varnames ordering.
 #   - Traceback text, where the line and column tables differ.
 #   - The wording and position of a compile-time error.
+#   - A compile-time WARNING.  CPython emits SyntaxWarnings while compiling,
+#     so its .pyc was built with them already reported and the run is silent;
+#     compiling the same file here reports them now.  Both are right, and
+#     summarize() drops them for the same reason it drops elapsed times.
 #
 # A newly differing file must be triaged against that list before it is treated
 # as a regression.  If it turns out to be one of these, leave it off the floor
@@ -67,7 +71,8 @@ TESTS=$(sed -n '/^CPYTHON_TESTS = /,/^$/p' Makefile | tr -d '\\' | sed 's/CPYTHO
 # runners for reasons that are not divergence.
 # Elapsed times legitimately differ between two runs of the same code.
 summarize() {
-    sed 's/ in [0-9.]*s$//'
+    sed 's/ in [0-9.]*s$//' \
+        | awk '/: SyntaxWarning: /{skip=1; next} skip{skip=0; next} {print}'
 }
 
 ok=""
