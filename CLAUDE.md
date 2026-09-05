@@ -237,7 +237,8 @@ No hand-written file exceeds 100k bytes; only generated asm may.
 - `src/valtest.asm` — `--selftest-value`
 - `src/builtins.asm` — `PyBuiltinObject`, the core builtins, and `builtins_init`
 - `src/builtins_num.asm` / `src/builtins_obj.asm` — the numeric builtins, and the
-  object/iteration/IO builtins
+  object/iteration/IO builtins; `src/builtins_pow.asm` is `pow()` and the
+  modular exponentiation GMP does for its three-argument form
 - `src/buildclass.asm` — `type.__new__`, `type_from_parts`, `__build_class__`
 - `src/slots.asm` — Installs slot wrappers on a heaptype from the dunders it defines
 - `src/mro.asm` — C3 linearization, `type_mro_next`, `type_is_subtype`
