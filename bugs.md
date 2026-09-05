@@ -56,10 +56,23 @@ reasoning that chose them and what changing one would cost.
     all but a handful.  So the rescue walk works; these few are never reached
     from a root.
 
-  What is not known is which reference is missing from the refcount, or which
-  container reports an edge it does not hold.  A referrer dump -- traverse
-  every tracked object looking for one specific target, and report whether
-  each referrer was classified reachable -- is the measurement that would say.
+  - The referrer dump says what the search was waiting for.  Traversing every
+    tracked object looking for one of these classes finds exactly ONE
+    referrer -- its own MRO tuple, itself in the unreachable set -- and none
+    at all among the reachable ones or in the generations outside the
+    collection.  So by refcount these really are garbage: a class and its MRO
+    tuple pointing only at each other, which is what a two-object cycle looks
+    like, and collecting it is right.
+
+  Which turns the question around.  The classification is sound, and so is
+  `type_traverse`; what is wrong is that something still reaches the class
+  after it is freed -- `op_load_fast` out of a frame local in one trace, a
+  dict_traverse in another -- through a reference that was never counted.  A
+  missing INCREF somewhere on the path that hands a class to a local or a
+  dict, invisible for as long as these cycles are never collected, which is
+  exactly what the inherited `instance_traverse` guarantees.  Finding it means
+  catching the store: break on the class's address being written, or record
+  every refcount change to it.
 
   Until it is found, `src/buildclass.asm` leaves a metatype's traverse and
   clear inherited, which is at least self-consistent; `tp_dealloc` is
