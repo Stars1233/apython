@@ -31,6 +31,7 @@ extern int_type
 extern eval_exception_unwind
 extern obj_richcompare_bool
 extern obj_as_index
+extern obj_as_index_seq
 extern recursion_limit
 extern c_recursion_depth
 extern exc_RecursionError_type
@@ -304,7 +305,7 @@ DEF_FUNC list_subscript
     cmp edx, TAG_SMALLINT
     je .ls_smallint
     cmp edx, TAG_PTR            ; a float key is neither: classify
-    jne .ls_type_error          ; fully before dereferencing, or raw
+    jne .ls_index                ; fully before dereferencing, or raw
                                 ; f64 bits get used as an address
     ; Check if key is a slice
     mov rax, [rsi + PyObject.ob_type]
@@ -312,11 +313,14 @@ DEF_FUNC list_subscript
     cmp rax, rcx
     je .ls_slice
 
-    ; obj_as_index covers int, bool, an int subclass and __index__, and
-    ; raises for anything else.
+.ls_index:
+    ; obj_as_index_seq covers int, bool, an int subclass and __index__, and
+    ; refuses anything else in the container's own words -- one message for
+    ; a float key and a different one for None was two paths saying the same
+    ; thing differently, and neither named the type.
     mov rdi, rsi
-    mov edx, TAG_PTR
-    call obj_as_index
+    lea rsi, [rel ls_index_msg]
+    call obj_as_index_seq
     mov rsi, rax
     jmp .ls_do_getitem
 
@@ -344,9 +348,11 @@ DEF_FUNC list_subscript
     V_PACK rax, rdx             ; return one Value
     ret
 
-.ls_type_error:
-    RAISE exc_TypeError_type, "list indices must be integers or slices"
 END_FUNC list_subscript
+
+section .rodata
+ls_index_msg: db `list indices must be integers or slices, not \x01`, 0
+section .text
 
 ;; ============================================================================
 ;; list_ass_subscript(rdi=list, rsi=key Value, rdx=value Value)
@@ -378,31 +384,25 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     cmp ecx, TAG_SMALLINT
     je .las_int                ; SmallInt -> int path
     cmp ecx, TAG_PTR           ; a float key is neither: classify fully
-    jne .las_key_type_error    ; before dereferencing, or its raw f64 bits
+    jne .las_int               ; before dereferencing, or its raw f64 bits
                                ; get used as an address -- a[1.5] = 9 was a
                                ; segfault, while a[1.5] already raised
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel slice_type]
     cmp rax, rcx
     je .las_slice
-    ; A bool is an int here too, as it is on the read path
-    REQUIRE_INT_TYPE rax, rcx, .las_key_type_error
-    ; An int subclass WRAPS an int rather than being one, so its value has to
-    ; be unwrapped before it can be read -- and the macro above has just
-    ; clobbered the register the tag was in, so the tag is restated here.
-    extern int_unwrap
-    mov rdi, rsi
-    mov edx, TAG_PTR
-    call int_unwrap
-    call int_to_i64
-    mov rsi, rax
-    jmp .las_have_key
+    mov ecx, TAG_PTR           ; the compare just above clobbered the tag
 
 .las_int:
-    ; Convert key to i64
+    ; obj_as_index_seq, not int_to_i64: it takes a bool, an int subclass and
+    ; anything with __index__, refuses the rest in the container's own
+    ; words, and does not truncate an int too wide for an index -- so
+    ; `x[2**70] = 1` assigned to x[0] rather than raising.
     mov rdi, rsi
-    mov edx, ecx              ; key tag for int_to_i64
-    call int_to_i64
+    mov edx, ecx              ; the key's tag
+    lea rsi, [rel ls_index_msg]
+    extern obj_as_index_seq
+    call obj_as_index_seq
     mov rsi, rax
 .las_have_key:
 
@@ -1114,9 +1114,6 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     extern raise_exception
     call raise_exception
     ud2
-
-.las_key_type_error:
-    RAISE exc_TypeError_type, "list indices must be integers or slices"
 
 .las_type_error:
     extern exc_TypeError_type

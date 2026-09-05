@@ -31,6 +31,7 @@ extern int_type
 extern eval_exception_unwind
 extern obj_richcompare_bool
 extern obj_as_index
+extern obj_as_index_seq
 extern recursion_limit
 extern c_recursion_depth
 extern exc_RecursionError_type
@@ -172,7 +173,7 @@ DEF_FUNC tuple_subscript
     cmp edx, TAG_SMALLINT
     je .ts_int                 ; SmallInt -> int path
     cmp edx, TAG_PTR            ; a float key is neither: classify
-    jne .ts_type_error          ; fully before dereferencing, or raw
+    jne .ts_int                 ; fully before dereferencing, or raw
                                 ; f64 bits get used as an address
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel slice_type]
@@ -181,7 +182,8 @@ DEF_FUNC tuple_subscript
 
 .ts_int:
     mov rdi, rsi               ; key
-    call obj_as_index          ; int, bool, int subclass or __index__
+    lea rsi, [rel ts_index_msg] ; ...and the refusal names the container
+    call obj_as_index_seq          ; int, bool, int subclass or __index__
     mov rsi, rax               ; index
     mov rdi, rbx
     call tuple_getitem         ; already returns a Value
@@ -198,9 +200,11 @@ DEF_FUNC tuple_subscript
     V_PACK rax, rdx             ; return one Value
     ret
 
-.ts_type_error:
-    RAISE exc_TypeError_type, "tuple indices must be integers or slices"
 END_FUNC tuple_subscript
+
+section .rodata
+ts_index_msg: db `tuple indices must be integers or slices, not \x01`, 0
+section .text
 
 ;; ============================================================================
 ;; tuple_len(PyTupleObject *tuple) -> int64_t

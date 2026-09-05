@@ -620,11 +620,18 @@ END_FUNC obj_as_slice_index
 ;; an ordinary range -- _collections_abc builds one at import, to name the
 ;; type its iterator has.
 ;; ============================================================================
-OAI_MODE  equ 8             ; 0 = refuse what will not fit, 1 = clamp to it
-OAI_FRAME equ 16            ; + 0 pushes = 16-aligned
+OAI_MODE  equ 8             ; 0 = refuse what will not fit, 1 = clamp to it,
+                            ; 2 = refuse it as a SEQUENCE index
+; The template a non-index is refused with, or 0 for the generic one.  A
+; subscript says "list indices must be integers or slices, not float" and
+; names the container as well as the key.
+OAI_MSG   equ 16
+OAI_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC obj_as_index, OAI_FRAME
     mov qword [rbp - OAI_MODE], 0
+    xor esi, esi
 oai_body:
+    mov [rbp - OAI_MSG], rsi
     cmp edx, TAG_SMALLINT
     je .oai_immediate
     cmp edx, TAG_PTR
@@ -700,10 +707,18 @@ oai_body:
     ret
 
 .oai_too_wide:
-    cmp qword [rbp - OAI_MODE], 0
-    jne .oai_clamp
+    cmp qword [rbp - OAI_MODE], 1
+    je .oai_clamp
+    cmp qword [rbp - OAI_MODE], 2
+    je .oai_too_wide_seq
     extern exc_OverflowError_type
     RAISE exc_OverflowError_type, "Python int too large to convert to C ssize_t"
+.oai_too_wide_seq:
+    ; CPython passes the exception TYPE to PyNumber_AsSsize_t, and every
+    ; sequence subscript passes IndexError: `[1][2**70]` is an IndexError
+    ; there, not an OverflowError, and the sentence is a different one.
+    extern exc_IndexError_type
+    RAISE exc_IndexError_type, "cannot fit 'int' into an index-sized integer"
 .oai_clamp:
     ; A slice bound past either end is that end, which is what CPython's
     ; _PyEval_SliceIndex does.  The sign is the mpz's: a heap int this wide
@@ -731,9 +746,25 @@ oai_body:
     ; to be rebuilt from the (payload, tag) pair the caller passed.
     mov rsi, rdi
     V_PACK rsi, rdx
+    mov rdi, [rbp - OAI_MSG]
+    test rdi, rdi
+    jnz raise_type_error_with_name
     lea rdi, [rel oai_not_an_index]
     jmp raise_type_error_with_name
 END_FUNC obj_as_index
+
+;; ============================================================================
+;; obj_as_index_seq(rdi = payload, edx = tag, rsi = the refusal's template,
+;;                  whose \x01 stands for the key's type, or 0)
+;;   -> rax = int64
+;; The same, refusing a too-wide int as a sequence subscript does: an
+;; IndexError naming the index, not an OverflowError naming a C type.
+;; ============================================================================
+global obj_as_index_seq
+DEF_FUNC obj_as_index_seq, OAI_FRAME
+    mov qword [rbp - OAI_MODE], 2
+    jmp oai_body
+END_FUNC obj_as_index_seq
 
 ;; ============================================================================
 ;; obj_as_index_clamped(rdi = payload, edx = tag) -> rax = int64
@@ -742,6 +773,7 @@ END_FUNC obj_as_index
 global obj_as_index_clamped
 DEF_FUNC obj_as_index_clamped, OAI_FRAME
     mov qword [rbp - OAI_MODE], 1
+    xor esi, esi
     jmp oai_body
 END_FUNC obj_as_index_clamped
 

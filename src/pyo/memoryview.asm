@@ -1208,9 +1208,11 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     REQUIRE_INT_TYPE rax, rcx, .ms_type_error   ; unconditionally
     mov rdi, rsi
     mov edx, TAG_PTR
-    extern int_unwrap
-    call int_unwrap                     ; an int subclass wraps its value
-    call int_to_i64
+    ; obj_as_index_seq, not int_to_i64: that truncates through
+    ; __gmpz_get_si, so `memoryview(b"ab")[2**70]` answered the first byte.
+    lea rsi, [rel ms_index_msg]
+    extern obj_as_index_seq
+    call obj_as_index_seq
     mov rsi, rax
     jmp .ms_int_index
 
@@ -1223,6 +1225,10 @@ DEF_FUNC memoryview_subscript, MS_FRAME
 .ms_type_error:
     RAISE exc_TypeError_type, "memoryview: invalid slice key"
 END_FUNC memoryview_subscript
+
+section .rodata
+ms_index_msg: db "memoryview: invalid slice key", 0
+section .text
 
 ;; ============================================================================
 ;; memoryview_nitems(rdi = self) -> rax = the length in ITEMS

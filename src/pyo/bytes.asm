@@ -46,6 +46,7 @@ extern exc_ValueError_type
 extern exc_NotImplementedError_type
 extern int_type
 extern obj_as_index
+extern obj_as_index_seq
 extern bool_type
 extern int_to_i64
 extern slice_type
@@ -191,7 +192,7 @@ DEF_FUNC bytes_subscript
     cmp edx, TAG_SMALLINT
     je .bs_int                 ; SmallInt → int path
     cmp edx, TAG_PTR            ; a float key is neither: classify
-    jne .bs_type_error          ; fully before dereferencing, or raw
+    jne .bs_int                 ; fully before dereferencing, or raw
                                 ; f64 bits get used as an address
     mov rax, [r12 + PyObject.ob_type]
     lea rcx, [rel slice_type]
@@ -202,7 +203,8 @@ DEF_FUNC bytes_subscript
     ; obj_as_index covers int, bool, an int subclass and __index__, and
     ; raises for anything else.
     mov rdi, r12
-    call obj_as_index
+    lea rsi, [rel bs_index_msg]
+    call obj_as_index_seq
     ; Call bytes_getitem
     mov rdi, rbx
     mov rsi, rax
@@ -319,9 +321,11 @@ DEF_FUNC bytes_subscript
     V_PACK rax, rdx             ; return one Value
     ret
 
-.bs_type_error:
-    RAISE exc_TypeError_type, "byte indices must be integers or slices"
 END_FUNC bytes_subscript
+
+section .rodata
+bs_index_msg: db `byte indices must be integers or slices, not \x01`, 0
+section .text
 
 ;; ============================================================================
 ;; bytes_contains(PyBytesObject *self, PyObject *value) -> int (0/1)

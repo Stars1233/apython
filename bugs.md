@@ -54,13 +54,6 @@ reasoning that chose them and what changing one would cost.
   where CPython raises, and `type(iter(range(1 << 1000)))` is
   `range_iterator` where CPython has a second type for the wide case.
 
-- **Two index refusals carry the wrong wording.**  A subscript too wide for
-  an index is an OverflowError here and an IndexError in CPython, and
-  `chr(2**70)` names a C ssize_t where CPython names a C int.  Both used to
-  be silent wrong ANSWERS -- obj_as_index truncated -- so this is what is
-  left of that; obj_as_index is one funnel and each caller's exception is its
-  own.
-
 - **Functions with no docblock at all**, and, among those that have one,
   docblocks with no `->` signature line.  The signature is the only part of a
   function's contract that nothing checks, so its absence is a real gap rather

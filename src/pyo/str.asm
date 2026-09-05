@@ -21,6 +21,7 @@ extern exc_IndexError_type
 extern exc_TypeError_type
 extern int_type
 extern obj_as_index
+extern obj_as_index_seq
 extern int_fits_i64
 extern exc_OverflowError_type
 extern exc_MemoryError_type
@@ -1715,7 +1716,7 @@ DEF_FUNC str_subscript
     cmp edx, TAG_SMALLINT
     je .ss_int               ; SmallInt -> int path
     cmp edx, TAG_PTR            ; a float key is neither: classify
-    jne .ss_type_error          ; fully before dereferencing, or raw
+    jne .ss_int                 ; fully before dereferencing, or raw
                                 ; f64 bits get used as an address
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel slice_type]
@@ -1727,7 +1728,8 @@ DEF_FUNC str_subscript
     ; raises for anything else -- int_to_i64 would read PyIntObject.compact
     ; off whatever it was given.
     mov rdi, rsi
-    call obj_as_index
+    lea rsi, [rel ss_index_msg] ; ...and the refusal names the key's type
+    call obj_as_index_seq
     mov rsi, rax
 
     ; Call str_getitem — already returns a Value
@@ -1747,9 +1749,11 @@ DEF_FUNC str_subscript
     V_PACK rax, rdx             ; return one Value
     ret
 
-.ss_type_error:
-    RAISE exc_TypeError_type, "string indices must be integers"
 END_FUNC str_subscript
+
+section .rodata
+ss_index_msg: db `string indices must be integers, not '\x01'`, 0
+section .text
 
 ;; ============================================================================
 ;; str_contains(rdi=self, rsi=substr Value) -> int (0/1)

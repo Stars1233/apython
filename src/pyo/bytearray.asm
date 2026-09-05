@@ -28,6 +28,7 @@ extern int_is_integer
 extern memoryview_iter_next
 extern none_singleton
 extern obj_as_index
+extern obj_as_index_seq
 extern seq_repeat_check_count
 extern set_exception
 extern slice_indices
@@ -397,7 +398,8 @@ DEF_FUNC bytearray_subscript, BSU_FRAME
 .bsu_int:
     mov rdi, [rbp - BSU_KEY]
     mov rdx, [rbp - BSU_KEYTAG]
-    call obj_as_index
+    lea rsi, [rel bsu_index_msg]
+    call obj_as_index_seq
     mov rcx, [rbp - BSU_SELF]
     mov rdx, [rcx + PyByteArrayObject.ob_size]
     test rax, rax
@@ -465,6 +467,10 @@ DEF_FUNC bytearray_subscript, BSU_FRAME
 .bsu_range:
     RAISE exc_IndexError_type, "bytearray index out of range"
 END_FUNC bytearray_subscript
+
+section .rodata
+bsu_index_msg: db `bytearray indices must be integers or slices, not \x01`, 0
+section .text
 
 ;; ============================================================================
 ;; slice_length(rdi = start, rsi = stop, rcx = step) -> rax = element count
@@ -545,7 +551,9 @@ DEF_FUNC bytearray_ass_subscript, 104
 .bas_int:
     mov rdi, [rbp - BAS_KEY]
     mov rdx, [rbp - BAS_KTAG]
-    call obj_as_index
+    lea rsi, [rel bsu_index_msg]
+    extern obj_as_index_seq
+    call obj_as_index_seq
     mov rbx, rax
     mov rcx, [rbp - BAS_SELF]
     mov rdx, [rcx + PyByteArrayObject.ob_size]
