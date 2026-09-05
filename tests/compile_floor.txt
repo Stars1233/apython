@@ -263,6 +263,7 @@ test_int_deprecations
 test_int_from_bytes
 test_int_methods
 test_int_nan_compare
+test_int_parse_fast
 test_int_pow_negative
 test_introspection
 test_int_shift_pow

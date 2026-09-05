@@ -421,6 +421,73 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     mov qword [rbp - IB_BASE], 10
 .base_resolved:
 
+    ; ------------------------------------------------------------------
+    ; Fast path: an ordinary run of ASCII digits that fits an int64.
+    ;
+    ; The general path below allocates a cleaned copy of the string, then a
+    ; PyIntObject, then an mpz, calls __gmpz_set_str, and finally asks
+    ; __gmpz_get_si and __gmpz_cmp_si whether the answer would have fitted an
+    ; int64 all along -- before freeing all three again.  int("5") did every
+    ; one of those; malloc and free alone were 23% of an int(str) loop.
+    ;
+    ; This loop reads the source in place and allocates nothing.  It declines
+    ; to the general path on ANYTHING it is not sure of -- an underscore, a
+    ; Unicode digit, trailing whitespace, a digit out of range for the base,
+    ; an empty string, more than 64 digits, or an int64 overflow -- so the
+    ; general path remains the only place the error wording and the awkward
+    ; cases are written down.
+    ;
+    ; The digit limit needs no check here: sys.set_int_max_str_digits refuses
+    ; anything between 1 and 639, so a number of 64 digits or fewer is under
+    ; every limit that can be set.
+    mov rsi, [rbp - IB_SRC]
+    mov r9, [rbp - IB_BASE]
+    cmp r9, 36
+    ja .fast_decline
+    cmp r9, 2
+    jb .fast_decline
+    xor eax, eax                ; the accumulating magnitude
+    xor r10d, r10d              ; how many digits have been taken
+.fast_digit_loop:
+    movzx ecx, byte [rsi]
+    test cl, cl
+    jz .fast_digits_done
+    cmp r10d, 64
+    jae .fast_decline           ; long enough that the limit could matter
+    mov edx, ecx
+    sub edx, '0'
+    cmp edx, 9
+    jbe .fast_have_digit
+    ; A letter, in either case.  Anything else -- '_', a space, a UTF-8 lead
+    ; byte -- lands above 25 here and declines.
+    or ecx, 0x20
+    mov edx, ecx
+    sub edx, 'a'
+    cmp edx, 25
+    ja .fast_decline
+    add edx, 10
+.fast_have_digit:
+    cmp rdx, r9
+    jae .fast_decline           ; not a digit in THIS base
+    imul rax, r9
+    jo .fast_decline
+    add rax, rdx
+    jo .fast_decline
+    inc r10d
+    inc rsi
+    jmp .fast_digit_loop
+.fast_digits_done:
+    test r10d, r10d
+    jz .fast_decline            ; nothing but a sign
+    cmp qword [rbp - IB_SIGN], 0
+    je .fast_positive
+    neg rax
+.fast_positive:
+    RET_TAG_SMALLINT
+    leave
+    ret
+.fast_decline:
+
     ; Step 4: Allocate buffer for cleaned string (strip underscores + trailing ws)
     ; First calculate length
     mov rdi, [rbp - IB_SRC]
