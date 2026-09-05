@@ -261,6 +261,7 @@ test_int_deprecations
 test_int_from_bytes
 test_int_methods
 test_introspection
+test_int_shift_pow
 test_int_subclass_index
 test_int_subclass_methods
 test_int_subclass_new

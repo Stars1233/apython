@@ -2653,6 +2653,41 @@ DEF_FUNC int_lshift
     test r13, r13
     js .neg_shift
 
+    ; An int64 shift, when the result provably still fits one.  Without this
+    ; `1 << 3` cost two ap_mallocs (a temporary for the left operand and the
+    ; result), two __gmpz_inits, a __gmpz_mul_2exp and an int_shrink that then
+    ; asked GMP whether the answer fit a long after all.  int_rshift has had
+    ; its `sar` arm all along; this is the other half.
+    ;
+    ; The overflow test is the standard one: shift left, shift arithmetically
+    ; back, and compare.  Bits that fell off the top do not come back, so a
+    ; mismatch is exactly "this needed more than 64 bits".  It is correct for a
+    ; negative left operand too, which is why the shift back is `sar` and not
+    ; `shr`.  A count of 64 or more cannot be reasoned about this way -- `shl`
+    ; masks it to 6 bits -- so it goes to GMP.
+    cmp r14d, TAG_SMALLINT
+    jne .lshift_wide
+    cmp r13, 63
+    jae .lshift_wide
+    mov rax, rbx
+    mov rcx, r13
+    mov rdx, rax
+    shl rdx, cl
+    mov rsi, rdx
+    sar rsi, cl
+    cmp rsi, rax
+    jne .lshift_wide       ; bits were lost: GMP has to do it
+    mov rax, rdx
+    RET_TAG_SMALLINT
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.lshift_wide:
     ; Convert left to GMP if needed
     xor ecx, ecx           ; flag: converted
     cmp r14d, TAG_SMALLINT
@@ -2879,6 +2914,47 @@ DEF_FUNC int_power, IPW_FRAME
     test r13, r13
     js .neg_exp
 
+    ; Repeated squaring in int64, while it fits.  Without this `i ** 2` cost
+    ; two ap_mallocs, two __gmpz_inits, a __gmpz_pow_ui and an int_shrink --
+    ; malloc and free were 32% of an `i ** 2` loop.
+    ;
+    ; Every imul is checked, and a bail lands in the GMP path below with the
+    ; base and exponent untouched in rbx/r13, so nothing has to be undone.
+    ; The base is squared only when another bit remains, so an overflow in the
+    ; final squaring -- whose value would never have been used -- cannot send a
+    ; result that fitted to GMP.
+    cmp r14d, TAG_SMALLINT
+    jne .pow_wide
+    cmp r13, 64
+    jae .pow_wide          ; any base but 0 and +-1 overflows well before this,
+                           ; and GMP settles those three quickly
+    mov rax, 1             ; result
+    mov rsi, rbx           ; b, the running square
+    mov rdi, r13           ; e, the remaining exponent
+.pow_loop:
+    test rdi, rdi
+    jz .pow_fits
+    test dil, 1
+    jz .pow_square
+    imul rax, rsi
+    jo .pow_wide
+.pow_square:
+    shr rdi, 1
+    jz .pow_fits
+    imul rsi, rsi
+    jo .pow_wide
+    jmp .pow_loop
+.pow_fits:
+    RET_TAG_SMALLINT
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.pow_wide:
     ; Convert base to GMP if needed
     ; r14d = base_tag from int_unwrap
     xor ecx, ecx
