@@ -1037,7 +1037,18 @@ DEF_FUNC raise_wrapper_arity, RWA_FRAME
     mov [rbp - RWA_WANT], rdi
     mov [rbp - RWA_GOT], rsi
     lea rdi, [rbp - RWA_BUF]
+    ; CPython has two helpers here and they differ by one space.  Most
+    ; wrappers use check_num_args -- "expected 1 argument, got 0" -- while
+    ; the __setitem__/__delitem__ shape goes through PyArg_UnpackTuple with
+    ; an EMPTY function name, and that format leaves the gap where the name
+    ; would have been.
+    test edx, edx
+    jz .rwa_no_gap
+    CSTRING rsi, " expected "
+    jmp .rwa_opened
+.rwa_no_gap:
     CSTRING rsi, "expected "
+.rwa_opened:
     call rbt_append_cstr
     mov rdi, rax
     mov rsi, [rbp - RWA_WANT]
@@ -1091,7 +1102,32 @@ DEF_FUNC raise_builtin_arity, RBA_FRAME
     ; A slot wrapper has its own wording, and never names itself.
     cmp qword [rdi + PyBuiltinObject.func_kind], BUILTIN_KIND_WRAPPER
     jne .rba_method
-    mov rdi, rdx
+    ; ...except that the two-argument item wrappers go through CPython's
+    ; OTHER helper, whose format leaves a gap for the name it was given
+    ; empty.  __setitem__ and __delitem__ are the pair.
+    mov rsi, [rdi + PyBuiltinObject.func_name]
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__setitem__"
+    push rdx
+    call ap_strcmp
+    pop rdx
+    test eax, eax
+    jz .rba_wrapper_gap
+    mov rcx, [rbp - RBA_DESC]
+    mov rsi, [rcx + PyBuiltinObject.func_name]
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__delitem__"
+    push rdx
+    call ap_strcmp
+    pop rdx
+    test eax, eax
+    jz .rba_wrapper_gap
+    xor edx, edx
+    jmp .rba_wrapper
+.rba_wrapper_gap:
+    mov edx, 1
+.rba_wrapper:
+    mov rdi, [rbp - RBA_WANT]
     mov rsi, [rbp - RBA_GOT]
     jmp raise_wrapper_arity
 
@@ -1793,7 +1829,8 @@ RVR_PREFIX equ 8
 RVR_OBJ    equ 16
 RVR_REPR   equ 24
 RVR_FULL   equ 32
-RVR_FRAME  equ 32           ; + 0 pushes = 32
+RVR_SUFFIX equ 40           ; the text after the repr, or 0
+RVR_FRAME  equ 48           ; + 0 pushes = 48, 16-aligned
 
 extern str_from_cstr_heap
 extern str_concat
@@ -1802,6 +1839,9 @@ extern exc_ValueError_type
 extern raise_exception_obj
 
 DEF_FUNC raise_value_error_with_repr, RVR_FRAME
+    xor edx, edx
+rvr_body:
+    mov [rbp - RVR_SUFFIX], rdx
     mov [rbp - RVR_OBJ], rsi
     call str_from_cstr_heap         ; rdi still holds the prefix
     mov [rbp - RVR_PREFIX], rax
@@ -1830,6 +1870,26 @@ DEF_FUNC raise_value_error_with_repr, RVR_FRAME
     mov rdi, [rbp - RVR_REPR]
     call obj_decref
 
+    ; ...and the tail, when the repr goes in the MIDDLE: CPython's
+    ; "None is not in list" puts it first and the sentence after.
+    cmp qword [rbp - RVR_SUFFIX], 0
+    je .rvr_no_suffix
+    mov rdi, [rbp - RVR_SUFFIX]
+    call str_from_cstr_heap
+    mov [rbp - RVR_REPR], rax
+    mov rdi, [rbp - RVR_FULL]
+    mov rsi, rax
+    mov ecx, TAG_PTR
+    call str_concat
+    push rax
+    mov rdi, [rbp - RVR_FULL]
+    call obj_decref
+    mov rdi, [rbp - RVR_REPR]
+    call obj_decref
+    pop rax
+    mov [rbp - RVR_FULL], rax
+.rvr_no_suffix:
+
     lea rdi, [rel exc_ValueError_type]
     mov rsi, [rbp - RVR_FULL]
     mov edx, TAG_PTR
@@ -1842,6 +1902,17 @@ DEF_FUNC raise_value_error_with_repr, RVR_FRAME
     leave
     jmp raise_exception_obj         ; chains and unwinds; takes the reference
 END_FUNC raise_value_error_with_repr
+
+;; ============================================================================
+;; raise_value_error_with_repr2(rdi = prefix, rsi = the object Value,
+;;                              rdx = the text after the repr)
+;;   -> does not return
+;; The same, with the repr in the middle: "None is not in list".
+;; ============================================================================
+global raise_value_error_with_repr2
+DEF_FUNC raise_value_error_with_repr2, RVR_FRAME
+    jmp rvr_body
+END_FUNC raise_value_error_with_repr2
 
 section .bss
 ; Set by instance_getattr when __getattr__ raised an AttributeError and it

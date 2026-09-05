@@ -183,6 +183,8 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   `async`, `import`
 - `src/methods/*.asm` — Builtin type methods, one file per type: `str`,
   `str_pred`, `str_parts`, `list`, `tuple`, `dict`, `set`, `num`, `bytes`,
+  `bytearray_methods` (bytearray's share of bytes' bodies, each run over a
+  temporary bytes),
   `object` (object's own dunders plus the `DEF_DUNDER_*` generators), and
   `init`, which registers them all into each type's `tp_dict`.  These share
   basenames with `src/pyo/` on purpose: `methods/dict.asm` is dict's methods,

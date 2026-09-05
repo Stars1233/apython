@@ -969,7 +969,13 @@ DEF_FUNC bytearray_contains, BCT_FRAME
     jmp .bct_byte_loop
 
 .bct_object:
-    ; A bytes-like: look for the subsequence.
+    ; A bytes-like: look for the subsequence.  byteslike_source is the
+    ; CONSTRUCTOR's rule and its refusal says "cannot convert ... to
+    ; bytearray"; membership asks for a bytes-like and says so.
+    mov rdi, [rbp - BCT_VAL]
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .bct_arg_type
     lea rdi, [rbp - BCT_VAL]
     mov esi, 1
     lea rdx, [rel bytearray_range_msg]
@@ -1032,6 +1038,11 @@ DEF_FUNC bytearray_contains, BCT_FRAME
     ret
 .bct_range:
     RAISE exc_ValueError_type, "byte must be in range(0, 256)"
+.bct_arg_type:
+    mov rsi, [rbp - BCT_VAL]
+    CSTRING rdi, `a bytes-like object is required, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .bct_type_error:
     RAISE exc_TypeError_type, "a bytes-like object is required"
 END_FUNC bytearray_contains
@@ -1464,7 +1475,13 @@ DEF_FUNC bytearray_concat, BAO_FRAME
     leave
     ret
 .bco_not_impl:
-    ; A NULL Value is NotImplemented, so the protocol tries the other side.
+    ; CPython's bytearray_concat RAISES rather than declining, and names
+    ; both types: "can't concat NoneType to bytearray".  Declining left the
+    ; generic operand message, which says nothing about bytearray's rule.
+    mov rsi, [rbp - BAO_ARG]
+    CSTRING rdi, `can't concat \x01 to bytearray`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .bco_fail:
     xor eax, eax
     xor edx, edx
@@ -1587,6 +1604,13 @@ DEF_FUNC bytearray_inplace_concat, BAO_FRAME
     leave
     ret
 .bic2_not_impl:
+    ; The same refusal sq_concat gives, and for the same reason: declining
+    ; leaves the generic operand message, which says nothing about
+    ; bytearray's rule.
+    mov rsi, [rbp - BAO_ARG]
+    CSTRING rdi, `can't concat \x01 to bytearray`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .bic2_fail:
     xor eax, eax
     xor edx, edx

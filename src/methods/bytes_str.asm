@@ -993,6 +993,7 @@ DEF_FUNC bytes_method_translate, BTR_FRAME
     lea rcx, [rel none_singleton]   ; a borrowed compare: LOAD_NONE increfs
     cmp rdi, rcx
     je .btr_have_table
+    mov [rbp - BTR_TABLE], rdi      ; the object, for the refusal below
     call bytes_like_ptr_len
     test ecx, ecx
     jz .btr_table_type
@@ -1076,7 +1077,11 @@ DEF_FUNC bytes_method_translate, BTR_FRAME
 .btr_type:
     RAISE exc_TypeError_type, "a bytes-like object is required"
 .btr_table_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required, not 'str'"
+    ; The type it actually got: this named 'str' whatever was passed.
+    mov rsi, [rbp - BTR_TABLE]
+    CSTRING rdi, `a bytes-like object is required, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .btr_table_len:
     RAISE exc_ValueError_type, "translation table must be 256 characters long"
 .btr_del_type:
@@ -1098,9 +1103,11 @@ BMT_FROM  equ 8
 BMT_FLEN  equ 16
 BMT_TO    equ 24
 BMT_OBJ   equ 32
+BMT_NARGS equ 40            ; the count, for the arity refusal
 BMT_FRAME equ 48            ; + 0 pushes = 48
 
 DEF_FUNC bytes_staticmethod_maketrans, BMT_FRAME
+    mov [rbp - BMT_NARGS], rsi
     cmp rsi, 2
     jne .bmt_args
     mov r8, rdi
@@ -1164,7 +1171,11 @@ DEF_FUNC bytes_staticmethod_maketrans, BMT_FRAME
 .bmt_len:
     RAISE exc_ValueError_type, "maketrans arguments must have same length"
 .bmt_args:
-    RAISE exc_TypeError_type, "maketrans() takes exactly two arguments"
+    mov rsi, [rbp - BMT_NARGS]
+    CSTRING rdi, "maketrans expected 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 .bmt_oom:
     RAISE exc_MemoryError_type, "out of memory"
 END_FUNC bytes_staticmethod_maketrans
@@ -1182,6 +1193,7 @@ BRA_ARGS  equ 8
 BRA_DATA  equ 16
 BRA_LEN   equ 24
 BRA_MODE  equ 32
+BRA_AFFIX equ 40            ; the affix object, for the refusal
 BRA_FRAME equ 48            ; + 0 pushes = 48
 
 DEF_FUNC bytes_affix_impl, BRA_FRAME
@@ -1192,6 +1204,7 @@ DEF_FUNC bytes_affix_impl, BRA_FRAME
 
     mov rdi, [rbp - BRA_ARGS]
     mov rdi, [rdi + 8]
+    mov [rbp - BRA_AFFIX], rdi      ; the object, for the refusal below
     call bytes_like_ptr_len
     test ecx, ecx
     jz .bra_affix_type
@@ -1249,7 +1262,10 @@ DEF_FUNC bytes_affix_impl, BRA_FRAME
 .bra_type:
     RAISE exc_TypeError_type, "a bytes-like object is required"
 .bra_affix_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required, not 'str'"
+    mov rsi, [rbp - BRA_AFFIX]
+    CSTRING rdi, `a bytes-like object is required, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .bra_args:
     RAISE exc_TypeError_type, "takes exactly one argument"
 .bra_oom:

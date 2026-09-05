@@ -42,6 +42,27 @@ CASES = [
     # an empty encoding name is unknown, not the default
     '"abc".encode("")', 'b"abc".decode("")', '"abc".encode("nope")',
     'b"abc".decode("nope")', '"abc".encode()', 'b"abc".decode()',
+
+    # ...and what the second pass over the sweep turned up
+    'b"abc".hex(b"x")', 'b"abc".hex(bytearray(b"x"))',
+    'b"abc".count(None)', 'b"abc".find(1.5)', 'b"abc".index([])',
+    'b"abc".rfind({})', 'b"abc".rindex(set())', 'b"abc".count(b"a")',
+    'b"abc".strip(1)', 'b"abc".lstrip(None)', 'b"abc".rstrip([])',
+    'b"abc".partition(None)', 'b"abc".rpartition(1)', 'b"abc".strip(b"a")',
+    'b"abc".split(1)', 'b"abc".rsplit(None)', 'b"a b".split(None)',
+    'b"abc".replace(1, b"x")', 'b"abc".replace(b"a", 1)',
+    'b"abc".removeprefix(None)', 'b"abc".removesuffix(1)',
+    'b"abc".translate(1)', 'b"abc".translate(None)',
+    'b"abc".startswith(1.5)', 'b"abc".endswith(1.5)',
+    'b"-".join(None)', 'b"-".join(1)', 'b"-".join([b"a", b"b"])',
+    'b"abc".maketrans(1)', 'b"abc".maketrans(1, 2, 3)',
+    '[1].index(None)', '[1, 2].index(3)', '["a"].index("b")',
+    'bytearray(b"a") + None', 'bytearray(b"a").__iadd__(None)',
+    'bytearray(b"a") + b"b"', 'None in bytearray(b"a")',
+    'b"a" in bytearray(b"ab")', '[1] in bytearray(b"a")',
+    'set().copy(1)', 'frozenset().copy(1)', '{1}.copy()',
+    '[1].__setitem__(1)', '{1: 2}.__setitem__(1)',
+    'bytearray(b"a").__setitem__(1)', '(1).__eq__()', '"a".__len__(1)',
 ]
 for expr in CASES:
     try:

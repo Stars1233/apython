@@ -74,7 +74,7 @@ src/pyo/instance_alloc.asm             4
 src/pyo/int.asm                        2
 src/pyo/iter.asm                       12
 src/pyo/list.asm                       7
-src/pyo/memoryview.asm                 18
+src/pyo/memoryview.asm                 17
 src/pyo/method.asm                     3
 src/pyo/module.asm                     5
 src/pyo/set.asm                        7

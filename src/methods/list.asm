@@ -1474,7 +1474,12 @@ DEF_FUNC list_method_index, LI_FRAME
     jmp eval_exception_unwind
 
 .index_not_found:
-    RAISE exc_ValueError_type, "x not in list"
+    ; CPython names the value it could not find, through its repr.
+    mov rsi, [rbp - LI_VPAY]
+    CSTRING rdx, " is not in list"
+    CSTRING rdi, ""
+    extern raise_value_error_with_repr2
+    jmp raise_value_error_with_repr2
 END_FUNC list_method_index
 
 ;; ============================================================================

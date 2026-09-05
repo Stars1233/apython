@@ -313,6 +313,17 @@ extern tuple_method_index
     call dict_add_builtin_func
 %endmacro
 
+; The same with an explicit dict, for the shared blocks that keep theirs in
+; a frame slot rather than in rbx.
+%macro ADD_FN_DN 5
+    mov rdi, [rbp - %1]
+    lea rsi, [rel %2]
+    lea rdx, [rel %3]
+    mov rcx, %4
+    mov r8, %5
+    call add_method_to_dict_checked
+%endmacro
+
 %macro ADD_FN_N 4
     mov rdi, rbx
     lea rsi, [rel %1]
@@ -668,7 +679,7 @@ SASM_FRAME equ 16           ; + 0 pushes = 16, 16-aligned
 DEF_FUNC_LOCAL set_add_shared_methods, SASM_FRAME
     mov [rbp - SASM_DICT], rdi
 
-    ADD_FN_D SASM_DICT, mn_copy, set_method_copy
+    ADD_FN_DN SASM_DICT, mn_copy, set_method_copy, 1, 1
 
     ADD_FN_D SASM_DICT, mn_union, set_method_union
 
