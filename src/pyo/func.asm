@@ -167,6 +167,51 @@ DEF_FUNC func_call
     ; (does not return)
 .args_count_ok:
 
+    ; === The shape almost every call has ===
+    ; N positional arguments, exactly filling N parameters: no keywords, no
+    ; *args, no **kwargs, no keyword-only parameters.  The six binder phases
+    ; below all reduce to the copy loop for it, and two of them reload
+    ; func_code from memory to decide they have nothing to do.  Phase 6.5 is
+    ; worse than nothing here: it walks the very slots the copy loop just
+    ; filled, to check that they are filled.
+    ;
+    ; Defaults need no test.  Every parameter has an argument, so a default
+    ; could not apply to one.
+    ;
+    ; rdi = func_code, eax = co_argcount, ecx = positional_count.
+    cmp qword [rsp+0], 0
+    jne .general_binder                 ; keywords were passed
+    cmp ecx, eax
+    jne .general_binder                 ; not an exact fill
+    cmp dword [rdi + PyCodeObject.co_kwonlyargcount], 0
+    jne .general_binder
+    test dword [rdi + PyCodeObject.co_flags], CO_VARARGS | CO_VARKEYWORDS
+    jnz .general_binder
+
+    extern builtins_dict_global
+    mov rdx, [rel builtins_dict_global]
+    mov rsi, [rbx + PyFuncObject.func_globals]
+    xor ecx, ecx
+    call frame_new                      ; rdi is already func_code
+    mov r12, rax
+    mov [r12 + PyFrame.func_obj], rbx
+
+    mov ecx, r15d                       ; nargs, and every parameter's argument
+    test ecx, ecx
+    jz .args_valid
+    xor eax, eax
+.fast_bind:
+    mov r8, rax
+    shl r8, 3                           ; localsplus at 8-byte stride
+    mov rdx, [r14 + r8]
+    INCREF_V rdx, r9
+    mov [r12 + PyFrame.localsplus + r8], rdx
+    inc eax
+    cmp eax, ecx
+    jb .fast_bind
+    jmp .args_valid
+
+.general_binder:
     ; Get builtins from global (avoids r12 caller-frame assumption)
     extern builtins_dict_global
     mov rdx, [rel builtins_dict_global]
