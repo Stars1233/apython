@@ -309,8 +309,13 @@ DEF_FUNC format_apply_spec, FS_FRAME
     lea r15, [rel str_type]         ; a str subclass has str's layout
     jmp .fs_family_done
 .fs_bool:
-    ; bool formats as an int, which is what CPython does: format(True, "d")
-    ; is "1".  Its value is a singleton, not an int, so it is unwrapped too.
+    ; A COMPLETELY empty spec is object.__format__, which is str(): CPython
+    ; makes format(True) "True" and format(True, ">5") "    1", and this
+    ; took the int path either way -- so f"{True}" printed 1.
+    cmp qword [rbp - FS_SPECLEN], 0
+    je .fs_body_str
+    ; Otherwise bool formats as an int, which is what CPython does:
+    ; format(True, "d") is "1".  Its value is a singleton, not an int, so it is unwrapped too.
     ; tp_flags is loaded BEFORE the jump here, because this falls straight
     ; into a test of rdx and nothing else on this path writes it -- it held
     ; whatever the caller had left in it.

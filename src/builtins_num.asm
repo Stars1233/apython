@@ -202,7 +202,10 @@ DEF_FUNC builtin_abs
     ret
 
 .abs_type_error:
-    RAISE exc_TypeError_type, "bad operand type for abs()"
+    mov rsi, rbx
+    CSTRING rdi, `bad operand type for abs(): '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .abs_error:
     CSTRING rdx, " given)"
@@ -1579,11 +1582,37 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     call str_from_cstr_heap
     mov [rsp + 48], rax
 
-    ; Get repr of original object (always a heap ptr)
+    ; Get repr of original object (always a heap ptr).  CPython renders a
+    ; bytearray argument as the BYTES it holds -- int(bytearray(b"x"))
+    ; reports b'x' -- so a temporary stands in for it.
+    mov rdi, [rbp - BI_OBJ]
+    mov rax, [rdi + PyObject.ob_type]
+    extern bytearray_type
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    jne .ile_repr_src
+    mov rsi, [rdi + PyByteArrayObject.ob_size]
+    mov rdi, [rdi + PyByteArrayObject.ob_bytes]
+    extern bytes_from_data
+    call bytes_from_data
+    test rax, rax
+    jz .ile_no_repr
+    mov [rsp + 56], rax
+    mov rdi, rax
+    call obj_repr
+    push rax
+    mov rdi, [rsp + 64]         ; the temporary bytes, under the pushed repr
+    call obj_decref
+    pop rax
+    test rax, rax
+    jnz .ile_have_repr
+    jmp .ile_no_repr
+.ile_repr_src:
     mov rdi, [rbp - BI_OBJ]
     call obj_repr
     test rax, rax
     jnz .ile_have_repr
+.ile_no_repr:
     CSTRING rdi, "???"
     call str_from_cstr_heap
     jmp .ile_repr_ready
@@ -1812,10 +1841,34 @@ DEF_FUNC builtin_chr, 16
     ; through __gmpz_get_si and answered a character.  obj_as_index is the
     ; funnel: it names the type, it takes anything with an __index__, and it
     ; refuses what will not fit an index.
+    ; ...and a width that will not fit is CPython's "C int" here, not the
+    ; "C ssize_t" a subscript reports: chr takes an int, not an index.  Only
+    ; a heap int can be that wide, and obj_as_index below refuses everything
+    ; that is not a number at all.
+    V_TEST_PTR rdi, rax
+    ja .chr_have_value
+    test rdi, rdi
+    jz .chr_have_value
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    jne .chr_have_value
+    push rdi
+    mov edx, TAG_PTR
+    extern int_fits_i64
+    call int_fits_i64
+    pop rdi
+    test eax, eax
+    jz .chr_too_wide
+.chr_have_value:
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
 
+    cmp rax, 0x7fffffff
+    jg .chr_too_wide
+    cmp rax, -0x80000000
+    jl .chr_too_wide
     cmp rax, 0
     jl .chr_range_error
     cmp rax, 0x10ffff
@@ -1908,6 +1961,9 @@ DEF_FUNC builtin_chr, 16
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.chr_too_wide:
+    extern exc_OverflowError_type
+    RAISE exc_OverflowError_type, "Python int too large to convert to C int"
 .chr_range_error:
     RAISE exc_ValueError_type, "chr() arg not in range(0x110000)"
 

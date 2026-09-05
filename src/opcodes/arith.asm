@@ -2302,6 +2302,7 @@ cmp_msg_quote:  db "'", 0
 cmp_msg_tail:   db "' not supported between instances", 0
 global binop_msg_prefix
 binop_msg_prefix: db "unsupported operand type(s) for ", 0
+global cmp_msg_open
 cmp_msg_open:     db " of '", 0
 section .data
 

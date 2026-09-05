@@ -545,6 +545,24 @@ DEF_FUNC builtin_enumerate, EN_FRAME
 
 .enum_type_error:
     mov qword [rel kw_names_pending], 0
+    ; CPython builds the iterator before it looks at start=, so an argument
+    ; that is wrong in both ways is reported as the iterable it is not:
+    ; enumerate(True, True) is "'bool' object is not iterable" there.
+    mov rdi, [rbp - EN_ITER]
+    test rdi, rdi
+    jnz .enum_te_have_iterable
+    mov rax, [rbp - EN_ARGS]
+    mov rdi, [rax]
+    V_UNPACK rdi, rsi
+    mov [rbp - EN_ITER], rdi
+    mov [rbp - EN_ITERTAG], rsi
+.enum_te_have_iterable:
+    mov rdi, [rbp - EN_ITER]
+    mov rsi, [rbp - EN_ITERTAG]
+    call get_iterator                   ; raises if it is not one
+    mov rdi, rax
+    V_UNPACK rdi, rdx
+    call obj_decref
     mov rsi, [rbp - EN_BADVAL]
     CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
     extern raise_type_error_with_name

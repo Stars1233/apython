@@ -2252,7 +2252,15 @@ DEF_FUNC obj_richcompare_bool, ORB_FRAME
     ; COMPARE_OP and by list.sort, and min()/max() go through this one.
     lea rax, [rel orb_unorderable_msgs]
     movsxd rdx, edx
-    mov rsi, [rax + rdx*8]
+    mov rdx, [rax + rdx*8]
+    ; ...and both types, which is the rest of CPython's sentence.  min() and
+    ; max() come through here, and said only that it was not supported.
+    mov rdi, [rbp - ORB_LEFT]
+    mov rsi, [rbp - ORB_RIGHT]
+    extern cmp_msg_open
+    lea rcx, [rel cmp_msg_open]
+    call compose_binop_type_error
+    mov rsi, rax
     lea rdi, [rel exc_TypeError_type]
     ; set_exception, not raise_exception: this function holds a reference to
     ; both operands, and an unwind from here abandons the C stack and leaks

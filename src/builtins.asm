@@ -1434,7 +1434,10 @@ DEF_FUNC builtin_len, LEN_FRAME
     jmp raise_type_error_counted
 
 .len_type_error:
-    RAISE exc_TypeError_type, "object has no len()"
+    mov rsi, rbx                ; args[0], live throughout
+    CSTRING rdi, `object of type '\x01' has no len()`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC builtin_len
 
 ;; ============================================================================
@@ -1815,7 +1818,9 @@ END_FUNC builtin_isinstance
 ;; Walks the full tp_base chain for inheritance.
 ;; Supports tuple second arg: issubclass(cls, (type1, type2, ...))
 ;; ============================================================================
-DEF_FUNC builtin_issubclass, 8            ; 3 pushes, so rsp is 16-aligned
+ISC_CLS   equ 8         ; args[0] as a Value, for the recursion over a tuple
+ISC_FRAME equ 24            ; + 3 pushes = 48, 16-aligned
+DEF_FUNC builtin_issubclass, ISC_FRAME
     push rbx
     push r12
     push r13
@@ -1824,10 +1829,24 @@ DEF_FUNC builtin_issubclass, 8            ; 3 pushes, so rsp is 16-aligned
     jne .issubclass_error
 
     mov rdx, [rdi]             ; rdx = args[0] = cls
+    mov [rbp - ISC_CLS], rdx   ; the Value, which the payload below is not
     V_UNPACK rdx, r8
     mov rcx, [rdi + 8]         ; rcx = args[1] = parent
     V_UNPACK rcx, r9
 
+    ; The SECOND argument decides first.  CPython's PyObject_IsSubclass
+    ; takes the tuple branch before it looks at the first argument at all,
+    ; so `issubclass((), ())` is False there -- the empty tuple runs out of
+    ; members before anything is checked -- and was an error here.  Each
+    ; member's recursion validates the first argument in its own right.
+    cmp r9d, TAG_PTR
+    jne .issubclass_check_arg1
+    mov rax, [rcx + PyObject.ob_type]
+    lea r10, [rel tuple_type]
+    cmp rax, r10
+    je .issubclass_tuple
+
+.issubclass_check_arg1:
     ; Validate first arg is a type.  A user metaclass makes its instances
     ; classes too, so this is a subtype test, not three pointer compares.
     cmp r8d, TAG_PTR
@@ -1843,13 +1862,11 @@ DEF_FUNC builtin_issubclass, 8            ; 3 pushes, so rsp is 16-aligned
     test eax, eax
     jz .issubclass_arg1_error
 
-    ; Check if second arg is a tuple
+    ; Only now is a non-class second argument an error of its own, and
+    ; type_check_is_class clobbered the type read above.
     cmp r9d, TAG_PTR
     jne .issubclass_arg2_error
     mov rax, [rcx + PyObject.ob_type]
-    lea r10, [rel tuple_type]
-    cmp rax, r10
-    je .issubclass_tuple
     lea r10, [rel generic_alias_type]
     cmp rax, r10
     je .issubclass_generic
@@ -1912,7 +1929,8 @@ DEF_FUNC builtin_issubclass, 8            ; 3 pushes, so rsp is 16-aligned
     ; element that is not a class was read as one.
     mov rdi, [rsi + r8*8]      ; the element, a Value
     sub rsp, 16
-    mov [rsp], r12             ; cls
+    mov rax, [rbp - ISC_CLS]
+    mov [rsp], rax             ; cls, as the Value it arrived as
     mov [rsp + 8], rdi
     mov rdi, rsp
     mov esi, 2

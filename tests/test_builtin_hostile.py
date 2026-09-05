@@ -122,6 +122,16 @@ MESSAGES = [
  "dict([iter([1,2])])", "list(enumerate([9],2))",
  "isinstance(1,((str,),(int,)))", "issubclass(bool,((str,),(int,)))",
  "isinstance(1,(str,int|bytes))", "BaseExceptionGroup('m',range(2))",
+ # ...and the ones the second pass over the sweep's answers turned up
+ "abs(None)", "abs([])", "len(None)", "len(1.5)", "len(object())",
+ "set(None)", "set(1)", "frozenset(1.5)", "min(None,None)", "max({},{})",
+ "sorted([None,1])", "bytes(None)", "bytes(1.5)", "bytes(object())",
+ "bytearray(None)", "bytearray(1+2j)", "bytes(2**70)", "bytearray(2**70)",
+ "bytearray(-(2**70))", "chr(2**70)", "chr(-2**70)", "chr(2**35)",
+ "int(bytearray(b'x'))", "int(bytearray(b'1x'),16)",
+ "issubclass((),())", "issubclass(1,(int,))", "issubclass(int,())",
+ "enumerate(True,True)", "enumerate(1,2)",
+ "format(True)", "format(True,'>5')", "format(True,'d')", "format(False)",
 ]
 for expr in MESSAGES:
     try:

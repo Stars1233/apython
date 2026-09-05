@@ -998,7 +998,10 @@ DEF_FUNC set_type_call, STC_FRAME
     call obj_decref
 
 .stc_not_iterable:
-    RAISE exc_TypeError_type, "set() argument is not iterable"
+    mov rsi, r12                ; args[0]: the iterator never replaced it
+    CSTRING rdi, `'\x01' object is not iterable`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .stc_error:
     mov rsi, rdx
@@ -1221,7 +1224,9 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     mov rdi, rbx
     call obj_decref
 .ftc_not_iterable:
-    RAISE exc_TypeError_type, "frozenset() argument is not iterable"
+    mov rsi, r12                ; args[0]: the iterator never replaced it
+    CSTRING rdi, `'\x01' object is not iterable`
+    jmp raise_type_error_with_name
 .ftc_error:
     mov rsi, rdx
     CSTRING rdi, "frozenset expected at most 1 argument, got "

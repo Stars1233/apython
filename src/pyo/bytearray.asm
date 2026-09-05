@@ -66,6 +66,7 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     lea rdx, [rel bytearray_range_msg]
     lea rcx, [rel bytearray_enc_msg]
     lea r8, [rel bytearray_arity_msg]
+    lea r9, [rel bytearray_conv_msg]
     call byteslike_source
     mov [rbp - BA_BUF], rax
     mov [rbp - BA_LEN], rdx
@@ -639,6 +640,7 @@ DEF_FUNC bytearray_ass_subscript, 104
     lea rdx, [rel bytearray_range_msg]
     lea rcx, [rel bytearray_enc_msg]
     lea r8, [rel bytearray_arity_msg]
+    lea r9, [rel bytearray_conv_msg]
     call byteslike_source
     mov [rbp - BAS_SRC], rax
     mov [rbp - BAS_SLEN], rdx
@@ -954,6 +956,7 @@ DEF_FUNC bytearray_contains, BCT_FRAME
     lea rdx, [rel bytearray_range_msg]
     lea rcx, [rel bytearray_enc_msg]
     lea r8, [rel bytearray_arity_msg]
+    lea r9, [rel bytearray_conv_msg]
     call byteslike_source
     mov [rbp - BCT_SRC], rax
     mov [rbp - BCT_SLEN], rdx
@@ -1079,6 +1082,7 @@ DEF_FUNC bytearray_extend_from, BAM_FRAME
     lea rdx, [rel bytearray_range_msg]
     lea rcx, [rel bytearray_enc_msg]
     lea r8, [rel bytearray_arity_msg]
+    lea r9, [rel bytearray_conv_msg]
     call byteslike_source
     mov [rbp - BAM_SRC], rax
     mov [rbp - BAM_SLEN], rdx
@@ -1936,3 +1940,4 @@ bas_msg_size: db "attempt to assign bytes of size ", 0
 bas_msg_to:   db " to extended slice of size ", 0
 bytearray_enc_msg: db `bytearray() argument 'encoding' must be str, not \x01`, 0
 bytearray_arity_msg: db "bytearray() takes at most 3 arguments (", 0
+bytearray_conv_msg: db `cannot convert '\x01' object to bytearray`, 0

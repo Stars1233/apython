@@ -2741,7 +2741,10 @@ BLS_ENCMSG equ 64
 ; The arity refusal's prefix, which names the constructor: both come
 ; through here and CPython says "bytes()" or "bytearray()".
 BLS_ARITY equ 72
-BLS_FRAME equ 80            ; + 2 pushes = 96
+; "cannot convert '\x01' object to bytes", which likewise names one or
+; the other constructor.
+BLS_CONVMSG equ 80
+BLS_FRAME equ 96            ; + 2 pushes = 112, 16-aligned
 DEF_FUNC byteslike_source, BLS_FRAME
     push rbx
     push r12
@@ -2749,6 +2752,7 @@ DEF_FUNC byteslike_source, BLS_FRAME
     mov [rbp - BLS_RANGEMSG], rdx
     mov [rbp - BLS_ENCMSG], rcx
     mov [rbp - BLS_ARITY], r8
+    mov [rbp - BLS_CONVMSG], r9
     mov [rbp - BLS_NARGS], rsi
     mov qword [rbp - BLS_LIST], 0
     mov qword [rbp - BLS_BUF], 0
@@ -2813,6 +2817,15 @@ extern str_set_length
     mov rbx, rdi
     jmp .bls_count_have
 .bls_count_obj:
+    mov edx, TAG_PTR
+    ; A count that does not fit is an OverflowError, not a truncation:
+    ; bytes(2**70) answered b"" and bytearray(-(2**70)) "negative count".
+    push rdi
+    extern int_fits_i64
+    call int_fits_i64
+    pop rdi
+    test eax, eax
+    jz .bls_count_overflow
     mov edx, TAG_PTR
     call int_to_i64
     mov rbx, rax
@@ -2900,6 +2913,16 @@ extern str_set_length
     ; item.  Going through list() rather than the iterator protocol directly
     ; keeps __iter__/__next__ on heap types working for free.
 .bls_iterable:
+    ; A non-iterable has CPython's own wording here -- "cannot convert 'X'
+    ; object to bytes" -- and list() below would report it as not iterable.
+    extern get_iterator_opt
+    mov rsi, TAG_PTR
+    call get_iterator_opt
+    test rax, rax
+    jz .bls_bad_type
+    V_UNPACK rax, rdx
+    mov rdi, rax
+    call obj_decref
     extern list_type
     extern list_type_call
     lea rdi, [rel list_type]
@@ -3053,6 +3076,10 @@ extern str_set_length
     leave
     ret
 
+.bls_count_overflow:
+    extern exc_OverflowError_type
+    RAISE exc_OverflowError_type, \
+          "cannot fit 'int' into an index-sized integer"
 .bls_negative:
     RAISE exc_ValueError_type, "negative count"
 .bls_enc_no_str:
@@ -3074,7 +3101,11 @@ extern str_set_length
     extern raise_type_error_counted
     jmp raise_type_error_counted
 .bls_bad_type:
-    RAISE exc_TypeError_type, "cannot convert this object to bytes"
+    mov rdi, [rbp - BLS_ARGS]
+    mov rsi, [rdi]
+    mov rdi, [rbp - BLS_CONVMSG]
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC byteslike_source
 
 BTC_TYPE  equ 8
@@ -3090,6 +3121,7 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     lea rdx, [rel bytes_range_msg]
     lea rcx, [rel bytes_enc_msg]
     lea r8, [rel bytes_arity_msg]
+    lea r9, [rel bytes_conv_msg]
     call byteslike_source
     mov [rbp - BTC_BUF], rax
     mov [rbp - BTC_LEN], rdx
@@ -3315,5 +3347,6 @@ bytearray_range_msg: db "byte must be in range(0, 256)", 0
 ; The \x01 is raise_type_error_with_name's placeholder for the argument's type.
 bytes_enc_msg: db `bytes() argument 'encoding' must be str, not \x01`, 0
 bytes_arity_msg: db "bytes() takes at most 3 arguments (", 0
+bytes_conv_msg: db `cannot convert '\x01' object to bytes`, 0
 bytearray_enc_msg: db `bytearray() argument 'encoding' must be str, not \x01`, 0
 
