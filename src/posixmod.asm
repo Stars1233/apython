@@ -1873,6 +1873,124 @@ DEF_FUNC posix_umask, 16
 END_FUNC posix_umask
 
 ;; ============================================================================
+;; posix.ioctl(fd, request, arg=0) -> bytes, or the call's own result
+;;
+;; The one syscall a terminal is configured through.  CPython puts it in
+;; fcntl and termios is written against it in C; here termios is Python, the
+;; way _socket and select are, so the raw call is what has to exist.
+;;
+;; A bytes-like arg is copied into a writable buffer, handed to the kernel
+;; and given back -- which is how TCGETS answers, since ioctl writes through
+;; the pointer.  An integer arg is passed by value and the call's own return
+;; value comes back.
+;; ============================================================================
+PIO_BUF   equ 264           ; the 256-byte buffer, ending here
+PIO_FD    equ 272           ; below it, so neither can grow into the other
+PIO_LEN   equ 280
+PIO_FRAME equ 288           ; + 2 pushes = 304, 16-aligned
+PIO_MAX   equ 256
+
+DEF_FUNC posix_ioctl, PIO_FRAME
+    cmp rsi, 2
+    jb .pio_argerr
+    cmp rsi, 3
+    ja .pio_argerr
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+
+    mov rdi, [rbx]
+    call posix_int_arg
+    mov [rbp - PIO_FD], rax         ; the fd, across the next conversion
+    mov rdi, [rbx + 8]
+    call posix_int_arg
+    mov r11, rax                    ; the request
+
+    cmp r12, 3
+    jb .pio_int_arg
+    mov rdi, [rbx + 16]
+    V_TEST_PTR rdi, rax
+    ja .pio_int_arg                 ; an immediate: an integer argument
+    test rdi, rdi
+    jz .pio_int_arg
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .pio_bytes
+    extern bytearray_type
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    jne .pio_int_arg
+    mov rsi, [rdi + PyByteArrayObject.ob_bytes]
+    mov rdx, [rdi + PyByteArrayObject.ob_size]
+    jmp .pio_have_buf
+.pio_bytes:
+    lea rsi, [rdi + PyBytesObject.data]
+    mov rdx, [rdi + PyBytesObject.ob_size]
+.pio_have_buf:
+    cmp rdx, PIO_MAX
+    ja .pio_too_big
+    mov [rbp - PIO_LEN], rdx
+    push r11
+    push r11                        ; two pushes: rsp keeps its alignment
+    lea rdi, [rbp - PIO_BUF]
+    extern ap_memcpy
+    call ap_memcpy
+    pop r11
+    pop r11
+
+    mov rdi, [rbp - PIO_FD]
+    mov rsi, r11
+    lea rdx, [rbp - PIO_BUF]
+    call sys_ioctl
+    test rax, rax
+    js .pio_failed
+    lea rdi, [rbp - PIO_BUF]
+    mov rsi, [rbp - PIO_LEN]
+    extern bytes_from_data
+    call bytes_from_data
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.pio_int_arg:
+    xor edx, edx
+    cmp r12, 3
+    jb .pio_call
+    mov rdi, [rbx + 16]
+    call posix_int_arg
+    mov rdx, rax
+.pio_call:
+    mov rdi, [rbp - PIO_FD]
+    mov rsi, r11
+    call sys_ioctl
+    test rax, rax
+    js .pio_failed
+    mov edx, TAG_SMALLINT
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.pio_failed:
+    neg eax
+    mov edi, eax
+    xor esi, esi
+    extern raise_oserror
+    call raise_oserror
+.pio_too_big:
+    pop r12
+    pop rbx
+    RAISE exc_ValueError_type, "ioctl buffer is too long"
+.pio_argerr:
+    RAISE exc_TypeError_type, "ioctl() takes 2 or 3 arguments"
+END_FUNC posix_ioctl
+
+;; ============================================================================
 ;; posix.isatty(fd) -> bool
 ;;
 ;; Asks the kernel with TCGETS.  Assuming fd <= 2 is a terminal answers True
@@ -3010,6 +3128,7 @@ DEF_FUNC posix_module_create, 40
     MODULE_ADD_FUNC posix_getpid, pm_n_getpid
     MODULE_ADD_FUNC posix_umask, pm_n_umask
     MODULE_ADD_FUNC posix_isatty, pm_n_isatty
+    MODULE_ADD_FUNC posix_ioctl, pm_n_ioctl
     MODULE_ADD_FUNC posix_ftruncate, pm_n_ftruncate
     MODULE_ADD_FUNC posix_chdir, pm_n_chdir
     MODULE_ADD_FUNC posix_truncate, pm_n_truncate
@@ -3195,6 +3314,7 @@ pm_msg_not:      db ", not ", 0
 pm_msg_fspath:   db ".__fspath__() to return str or bytes, not ", 0
 pm_n_umask:      db "umask", 0
 pm_n_isatty:     db "isatty", 0
+pm_n_ioctl:      db "ioctl", 0
 pm_n_ftruncate:  db "ftruncate", 0
 pm_n_chdir:      db "chdir", 0
 pm_n_truncate:   db "truncate", 0

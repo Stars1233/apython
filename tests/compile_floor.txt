@@ -432,6 +432,7 @@ test_syntax_error_offset
 test_sys_argv
 test_sys_attrs
 test_sys_exit
+test_termios
 test_time_module
 test_traceback_carets
 test_traceback

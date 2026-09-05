@@ -22,7 +22,7 @@ reasoning that chose them and what changing one would cost.
   and `importlib`, `hashlib`, `random` and `subprocess` with them.  So is
   `_signal`, with delivery at the top of a loop the way CPython's is, and
   `doctest`, `pdb`, `unittest` and `signal` with it.  What is left blocks one or two modules
-  apiece and is genuinely C: `termios` (2), then `zlib`, `unicodedata`,
+  apiece and is genuinely C: `zlib`, `unicodedata`,
   `_tracemalloc`, `_symtable`, `_ssl`, `_sqlite3`, `_crypt`, `_lzma`, `_bz2`,
   `_ctypes`, `_curses`, `pyexpat` and `_tkinter`.
   (`_io` is not among them: `src/iomod.asm` supplies `_iocore` and
@@ -30,7 +30,9 @@ reasoning that chose them and what changing one would cost.
   `select` are the same split over `_socketcore`.  Neither are `math`,
   `_collections`, `_struct`, `_random`, `_contextvars`, `_string`,
   `_tokenize`, `_operator`, `binascii`, `atexit` and `_ast`, which are
-  there.)  `make check-stdlib` gives the current figure: 170 of 196.
+  there, and so is `termios`: `lib/termios.py` over one raw `posix.ioctl`,
+  the same split `_socket` and `select` use.)  `make check-stdlib` gives the
+  current figure: 172 of 196.
 
   `math`'s `gamma`, `lgamma`, the n-ary `hypot` and `sumprod` round
   differently from CPython's, which uses its own Lanczos approximation and

@@ -100,6 +100,7 @@ ok posixpath
 ok pprint
 ok profile
 ok pstats
+ok pty
 ok _py_abc
 ok pyclbr
 ok py_compile
@@ -153,6 +154,7 @@ ok tokenize
 ok tomllib
 ok trace
 ok traceback
+ok tty
 ok turtledemo
 ok types
 ok typing
