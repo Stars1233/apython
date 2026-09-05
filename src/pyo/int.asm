@@ -1222,16 +1222,33 @@ DEF_FUNC_BARE int_add
     jne .gmp_path
 
     ; Both SmallInt: decode and add
+    ; The tag has to be saved BEFORE rcx is clobbered.  .gmp_path is reached
+    ; two ways -- from the tag checks above, where ecx is the right operand's
+    ; TAG, and from the `jo` below, where `mov rcx, rsi` has just made it the
+    ; right operand's PAYLOAD.  Entering with a payload made .gmp_path's
+    ; `push rcx ; save right_tag` save the wrong thing, so `cmp ecx,
+    ; TAG_SMALLINT` failed, smallint_to_pyint was never called, and the raw
+    ; integer was dereferenced as a PyIntObject*.
+    ;
+    ; `s = s + 2**49` in a loop segfaulted the moment the accumulator crossed
+    ; 2**63 and took this path.  TAG_SMALLINT is 1, so an addend whose low 32
+    ; bits happened to equal 1 passed the broken comparison -- which is why
+    ; `s += 1` was fine and every other step was not.  int_mul already does it
+    ; this way; add and sub did not.
     mov rax, rdi
+    push rcx                ; save right_tag (ecx) before clobber
     mov rcx, rsi
     add rax, rcx
-    jo .gmp_path            ; overflow, fall back to GMP
+    jo .gmp_path_pop        ; overflow, fall back to GMP
+    add rsp, 8              ; discard saved right_tag
 
     ; Result fits: encode as SmallInt
     RET_TAG_SMALLINT
     V_PACK rax, rdx             ; return one Value
     ret
 
+.gmp_path_pop:
+    pop rcx                 ; restore right_tag
 .gmp_path:
     push rbp
     mov rbp, rsp
@@ -1318,14 +1335,31 @@ DEF_FUNC_BARE int_sub
     cmp ecx, TAG_SMALLINT
     jne .gmp_path
 
+    ; The tag has to be saved BEFORE rcx is clobbered.  .gmp_path is reached
+    ; two ways -- from the tag checks above, where ecx is the right operand's
+    ; TAG, and from the `jo` below, where `mov rcx, rsi` has just made it the
+    ; right operand's PAYLOAD.  Entering with a payload made .gmp_path's
+    ; `push rcx ; save right_tag` save the wrong thing, so `cmp ecx,
+    ; TAG_SMALLINT` failed, smallint_to_pyint was never called, and the raw
+    ; integer was dereferenced as a PyIntObject*.
+    ;
+    ; `s = s + 2**49` in a loop segfaulted the moment the accumulator crossed
+    ; 2**63 and took this path.  TAG_SMALLINT is 1, so an addend whose low 32
+    ; bits happened to equal 1 passed the broken comparison -- which is why
+    ; `s += 1` was fine and every other step was not.  int_mul already does it
+    ; this way; add and sub did not.
     mov rax, rdi
+    push rcx                ; save right_tag (ecx) before clobber
     mov rcx, rsi
     sub rax, rcx
-    jo .gmp_path
+    jo .gmp_path_pop
+    add rsp, 8              ; discard saved right_tag
     RET_TAG_SMALLINT
     V_PACK rax, rdx             ; return one Value
     ret
 
+.gmp_path_pop:
+    pop rcx                 ; restore right_tag
 .gmp_path:
     push rbp
     mov rbp, rsp

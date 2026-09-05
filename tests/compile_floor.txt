@@ -256,6 +256,7 @@ test_instance_layout
 test_int_bases_and_float_spec
 test_int_bytes
 test_int_bytes_wide
+test_int_crossing
 test_int_deprecations
 test_int_from_bytes
 test_int_methods
