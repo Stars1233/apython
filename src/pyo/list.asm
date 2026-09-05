@@ -2002,6 +2002,28 @@ DEF_FUNC list_type_call, LTC_FRAME
     mov [rbp - LTC_LIST], rax
     mov rbx, rax            ; rbx = new list
 
+    ; A length the source cannot report is a failure, not a hint to skip:
+    ; CPython asks PyObject_LengthHint first, so `list(range(1 << 70))`
+    ; raises the OverflowError its __len__ raises rather than looping until
+    ; the machine runs out of memory.
+    mov rdi, [r12]
+    V_TEST_PTR rdi, rax
+    ja .ltc_no_length
+    test rdi, rdi
+    jz .ltc_no_length
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .ltc_no_length
+    mov rax, [rax + PySequenceMethods.sq_length]
+    test rax, rax
+    jz .ltc_no_length
+    mov rdi, [r12]
+    call rax
+    cmp rax, 0
+    jl .ltc_length_failed
+.ltc_no_length:
+
     ; Get iterator from arg (supports heaptypes with __iter__)
     mov rdi, [r12]          ; args[0]
     V_UNPACK rdi, rsi
@@ -2076,6 +2098,18 @@ DEF_FUNC list_type_call, LTC_FRAME
 .ltc_not_iterable:
     extern exc_TypeError_type
     RAISE exc_TypeError_type, "list() argument must be an iterable"
+
+.ltc_length_failed:
+    ; sq_length answered -1 and left an exception; hand it on.
+    mov rdi, [rbp - LTC_LIST]
+    call obj_decref
+    xor eax, eax
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .ltc_error:
     mov rsi, r13

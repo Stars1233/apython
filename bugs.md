@@ -39,14 +39,6 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **`range` clamps a bound wider than an index.**  Its three bounds are int64
-  fields where CPython holds objects, so `range(1 << 1000)` is representable
-  there and not here -- `_collections_abc` builds one at import to name the
-  type its iterator has, and refusing it takes the standard library with it,
-  so the bound is clamped.  `len(range(2**70))` therefore answers 2**63 - 1
-  where CPython raises, and `type(iter(range(1 << 1000)))` is
-  `range_iterator` where CPython has a second type for the wide case.
-
 - **Functions with no docblock at all**, and, among those that have one,
   docblocks with no `->` signature line.  The signature is the only part of a
   function's contract that nothing checks, so its absence is a real gap rather

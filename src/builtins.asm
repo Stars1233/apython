@@ -25,6 +25,7 @@ extern raise_exception
 extern sys_write
 extern fileobj_write_fd
 extern range_new
+extern range_new_v
 extern int_to_i64
 extern obj_as_index
 extern obj_as_index_clamped
@@ -1441,6 +1442,53 @@ DEF_FUNC builtin_len, LEN_FRAME
 END_FUNC builtin_len
 
 ;; ============================================================================
+;; range_arg_value(rdi = an argument Value) -> rax = an int Value, owned
+;;
+;; What a range bound is: an int, or anything with __index__, kept AS an
+;; object.  The bounds used to go through obj_as_index_clamped, which is an
+;; int64 and saturates -- so `range(1 << 1000)` was range(0, 2**63 - 1),
+;; where CPython's is an ordinary range over an ordinary int.  Clamping was
+;; not a choice either: _collections_abc builds one at import to name the
+;; type its iterator has, so refusing it takes the standard library with it.
+;;
+;; A plain int is handed back as it stands, with a reference taken.  Anything
+;; else goes through __index__, whose result is already owned.
+;; ============================================================================
+RAV_ARG   equ 8
+RAV_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL range_arg_value, RAV_FRAME
+    mov [rbp - RAV_ARG], rdi
+    V_IS_INT rdi, rax
+    jae .rav_keep
+    V_TEST_PTR rdi, rax
+    ja .rav_index               ; a float: __index__ will refuse it by name
+    test rdi, rdi
+    jz .rav_index
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    jne .rav_index
+.rav_keep:
+    mov rdi, [rbp - RAV_ARG]
+    INCREF_V rdi, rax
+    mov rax, rdi
+    leave
+    ret
+.rav_index:
+    ; obj_as_index refuses everything that is not an index, by name, and
+    ; unwraps an int subclass; its int64 is discarded and the OBJECT taken.
+    ; A bound wider than an int64 has no int64 to check, so the refusal has
+    ; to come from the type rather than from the width -- which is what
+    ; nb_index answers.
+    mov rdi, [rbp - RAV_ARG]
+    V_UNPACK rdi, rdx
+    extern obj_as_index_object
+    call obj_as_index_object
+    leave
+    ret
+END_FUNC range_arg_value
+
+;; ============================================================================
 ;; builtin_range(PyObject **args, int64_t nargs) -> rax = Value
 ;; range(stop) or range(start, stop) or range(start, stop, step)
 ;; ============================================================================
@@ -1464,57 +1512,50 @@ DEF_FUNC builtin_range, 8            ; 3 pushes, so rsp is 16-aligned
 .range_1:
     ; range(stop): start=0, stop=args[0], step=1
     mov rdi, [rbx]             ; args[0]
-    V_UNPACK rdi, rdx
-    call obj_as_index_clamped ; raises for a non-integer, rather than
-                           ; decoding its payload as one
-    mov rsi, rax               ; stop
-    xor edi, edi               ; start = 0
-    mov edx, 1                 ; step = 1
-    call range_new
+    call range_arg_value       ; an int Value, owned; raises otherwise
+    mov rsi, rax
+    xor edi, edi
+    V_PACK_I64 rdi, rdx        ; start = 0
+    mov edx, 1
+    V_PACK_I64 rdx, rcx        ; step = 1
+    call range_new_v
     jmp .range_done
 
 .range_2:
     ; range(start, stop): step=1
     mov rdi, [rbx]             ; args[0]
-    V_UNPACK rdi, rdx
-    call obj_as_index_clamped ; raises for a non-integer, rather than
-                           ; decoding its payload as one
+    call range_arg_value
     mov r13, rax               ; start
-    mov rdi, [rbx + 8]
-    V_UNPACK rdi, rdx       ; args[1]
-    call obj_as_index_clamped ; raises for a non-integer, rather than
-                           ; decoding its payload as one
+    mov rdi, [rbx + 8]         ; args[1]
+    call range_arg_value
     mov rsi, rax               ; stop
     mov rdi, r13               ; start
-    mov edx, 1                 ; step = 1
-    call range_new
+    mov edx, 1
+    V_PACK_I64 rdx, rcx        ; step = 1
+    call range_new_v
     jmp .range_done
 
 .range_3:
     ; range(start, stop, step)
     mov rdi, [rbx]             ; args[0]
-    V_UNPACK rdi, rdx
-    call obj_as_index_clamped ; raises for a non-integer, rather than
-                           ; decoding its payload as one
+    call range_arg_value
     push rax                   ; start
-    mov rdi, [rbx + 8]
-    V_UNPACK rdi, rdx       ; args[1]
-    call obj_as_index_clamped ; raises for a non-integer, rather than
-                           ; decoding its payload as one
+    mov rdi, [rbx + 8]         ; args[1]
+    call range_arg_value
     push rax                   ; stop
-    mov rdi, [rbx + 16]
-    V_UNPACK rdi, rdx       ; args[2]
-    call obj_as_index_clamped ; raises for a non-integer, rather than
-                           ; decoding its payload as one
+    mov rdi, [rbx + 16]        ; args[2]
+    call range_arg_value
     mov rdx, rax               ; step
     ; A zero step makes range_obj_sq_length divide by zero and makes
     ; range_iter_next advance by nothing, so len(range(0,5,0)) was SIGFPE
     ; and `for i in range(0,5,0)` hung.
-    test rdx, rdx
-    jz .range_zero_step
+    xor ecx, ecx
+    V_PACK_I64 rcx, r8
+    cmp rdx, rcx
+    je .range_zero_step
     pop rsi                    ; stop
     pop rdi                    ; start
-    call range_new
+    call range_new_v
     jmp .range_done
 
 .range_zero_step:

@@ -754,6 +754,73 @@ oai_body:
 END_FUNC obj_as_index
 
 ;; ============================================================================
+;; obj_as_index_object(rdi = payload, edx = tag) -> rax = an int Value, owned
+;;
+;; The same refusal as obj_as_index, answering the OBJECT rather than an
+;; int64.  For a caller whose CPython counterpart keeps the object: range's
+;; three bounds, which are ints there and were int64s here, so
+;; `range(1 << 1000)` had nowhere to put its stop.
+;; ============================================================================
+OAO_ARG   equ 8
+OAO_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+global obj_as_index_object
+DEF_FUNC obj_as_index_object, OAO_FRAME
+    ; The tag first: V_PACK below clobbers the register it is in.
+    mov ecx, edx
+    mov rax, rdi
+    V_PACK rax, rdx
+    mov [rbp - OAO_ARG], rax
+    mov edx, ecx
+    cmp edx, TAG_SMALLINT
+    je .oao_keep
+    cmp edx, TAG_PTR
+    jne .oao_refuse
+    extern int_unwrap
+    call int_unwrap             ; an int subclass wraps a real int, and
+                                ; answers in the same pair it was handed
+    cmp edx, TAG_SMALLINT
+    je .oao_unwrapped
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_INT_TYPE rax, rcx, .oao_dunder
+.oao_unwrapped:
+    mov rax, rdi
+    V_PACK rax, rdx
+    INCREF_V rax, rcx
+    leave
+    ret
+.oao_keep:
+    mov rax, [rbp - OAO_ARG]
+    leave
+    ret
+.oao_dunder:
+    mov rax, [rbp - OAO_ARG]
+    V_TEST_PTR rax, rcx
+    ja .oao_refuse
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_number]
+    test rcx, rcx
+    jz .oao_refuse
+    mov rcx, [rcx + PyNumberMethods.nb_index]
+    test rcx, rcx
+    jz .oao_refuse
+    mov rdi, rax
+    call rcx                    ; nb_index returns an owned Value
+    test rax, rax
+    jz .oao_zero
+    leave
+    ret
+.oao_zero:
+    xor eax, eax
+    leave
+    ret
+.oao_refuse:
+    ; obj_as_index's own wording, which names the type.
+    mov rsi, [rbp - OAO_ARG]
+    lea rdi, [rel oai_not_an_index]
+    jmp raise_type_error_with_name
+END_FUNC obj_as_index_object
+
+;; ============================================================================
 ;; obj_as_index_seq(rdi = payload, edx = tag, rsi = the refusal's template,
 ;;                  whose \x01 stands for the key's type, or 0)
 ;;   -> rax = int64

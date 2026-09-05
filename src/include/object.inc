@@ -444,12 +444,22 @@ struc PyDictViewObject
     .dv_kind:   resq 1    ; +24: 0=keys, 1=values, 2=items
 endstruc
 
+; A range holds its three bounds twice: as raw int64s, which every operation
+; on an ordinary range uses, and as Values, which are what the bounds really
+; are.  CPython's are objects, so `range(1 << 1000)` is an ordinary range
+; there; the int64s cannot hold that, and .wide says so.  Every operation
+; checks .wide and takes a slower path built on the Values when it is set.
+; The three Values are OWNED references -- a wide bound is a heap int.
 struc PyRangeObject
     .ob_refcnt: resq 1
     .ob_type:   resq 1
-    .start:     resq 1    ; +16: start value (raw i64)
-    .stop:      resq 1    ; +24: stop value (raw i64)
-    .step:      resq 1    ; +32: step value (raw i64)
+    .start:     resq 1    ; +16: start value (raw i64), exact unless .wide
+    .stop:      resq 1    ; +24: stop value (raw i64), exact unless .wide
+    .step:      resq 1    ; +32: step value (raw i64), exact unless .wide
+    .vstart:    resq 1    ; +40: the same three as Values, always exact
+    .vstop:     resq 1    ; +48
+    .vstep:     resq 1    ; +56
+    .wide:      resq 1    ; +64: 1 when a bound does not fit an int64
 endstruc
 
 struc PyRangeIterObject
@@ -458,6 +468,19 @@ struc PyRangeIterObject
     .it_current: resq 1   ; +16: current value
     .it_stop:    resq 1   ; +24: stop value
     .it_step:    resq 1   ; +32: step value
+endstruc
+
+; The iterator over a range whose bounds do not fit an int64.  CPython has a
+; second type for exactly this case and calls it longrange_iterator, and
+; type(iter(range(1 << 1000))) is how a program can tell.  The three fields
+; are owned Values, and .it_len counts DOWN, as CPython's does: a wide range
+; has no int64 length to compare against.
+struc PyLongRangeIterObject
+    .ob_refcnt: resq 1
+    .ob_type:   resq 1
+    .it_current: resq 1   ; +16: the next value to yield
+    .it_step:    resq 1   ; +24
+    .it_len:     resq 1   ; +32: how many are left
 endstruc
 
 struc PyBytesIterObject
