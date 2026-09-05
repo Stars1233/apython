@@ -2275,6 +2275,15 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rdi, [rbp - SA_OBJ]       ; obj
     mov rcx, [rdi + PyObject.ob_type]  ; rcx = type (walks chain)
 
+    ; ...but only when there is one to find.  This walk cost a dict_get per
+    ; MRO entry on EVERY store, and instance_setattr walks the same MRO again
+    ; straight afterwards -- five dict operations to put a key in an instance
+    ; dict.  The flag is the same one the load side uses, maintained by
+    ; type_refresh_attr_flags, and a class with no data descriptor in its MRO
+    ; cannot have a property or a __set__ to find here.
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_MRO_HAS_DATA_DESCR
+    jz .sa_no_property
+
 .sa_walk_mro:
     test rcx, rcx
     jz .sa_no_property

@@ -786,6 +786,11 @@ DEF_FUNC instance_setattr
     ; Walk the type's MRO looking for a member descriptor (slot)
     mov rax, [rbx + PyObject.ob_type]
     mov r14, rax                ; origin of the walk
+    ; A slot, a property and a getset are all data descriptors, so the flag
+    ; that says none of them is in this MRO says this walk will find nothing.
+    ; op_store_attr just walked the same MRO for the same reason.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_MRO_HAS_DATA_DESCR
+    jz .sa_no_slot
 .sa_walk:
     mov rdi, [rax + PyTypeObject.tp_dict]
     test rdi, rdi
