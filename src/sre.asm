@@ -2208,6 +2208,24 @@ DEF_FUNC sre_match, SM_MFRAME
     mov r14, rbx               ; r14 = ptr to first offset
 
 .branch_loop:
+    ; r14 is a program counter of its own, and the guard at .dispatch bounds
+    ; rbx only.  A crafted BRANCH offset walks this one off the end of the
+    ; code array and the read below is where it lands -- the same hole the
+    ; dispatch guard was written to close, in the one place that does not go
+    ; through it.
+    mov rax, [r12 + SRE_State.pattern]
+    test rax, rax
+    jz .branch_pc_ok
+    mov rcx, [rax + SRE_PatternObject.code]
+    mov rdx, [rax + SRE_PatternObject.code_len]
+    shl rdx, 2
+    add rdx, rcx                ; one past the end
+    cmp r14, rcx
+    jb .op_failure
+    lea rax, [r14 + 4]          ; the offset word has to be inside as well
+    cmp rax, rdx
+    ja .op_failure
+.branch_pc_ok:
     mov eax, [r14]             ; offset (0 = end of branches)
     test eax, eax
     jz .op_failure             ; no more branches
