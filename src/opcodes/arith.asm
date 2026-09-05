@@ -573,8 +573,8 @@ DEF_FUNC_BARE op_binary_op
     cmp ecx, 21                ; NB_INPLACE_POWER
     je .binop_try_smallint_pow
 
-    ; Everything the ladder did not match -- true divide, matrix multiply --
-    ; is the generic protocol's.  This jump is load-bearing: the arms below sit
+    ; Everything the ladder did not match -- matrix multiply -- is the
+    ; generic protocol's.  This jump is load-bearing: the arms below sit
     ; between here and .binop_generic, so falling through reaches the AND arm
     ; and `i << 3` quietly computed `i & 3`.
     jmp .binop_generic
@@ -739,6 +739,25 @@ DEF_FUNC_BARE op_binary_op
     jae .binop_generic
     mov byte [rbx - 2], 232
     VPUSH_INT rax, r15
+    add rbx, 2
+    DISPATCH
+
+.binop_try_smallint_truediv:
+    ; Reached only from .binop_try_float_truediv, which has already
+    ; established that both operands are integer immediates.
+    test rsi, rsi
+    jz .binop_generic          ; zero divisor: the generic path raises
+    ; Both immediates are inside +-2^50, so both convert to a double EXACTLY,
+    ; and IEEE division of two exact doubles is correctly rounded -- the same
+    ; answer CPython's long_true_divide works out the long way.  Neither
+    ; overflow nor a subnormal is reachable: the quotient is between 2^-50
+    ; and 2^50 in magnitude.
+    cvtsi2sd xmm0, rdi
+    cvtsi2sd xmm1, rsi
+    divsd xmm0, xmm1
+    movq rax, xmm0
+    mov byte [rbx - 2], 233
+    VPUSH_FLOAT rax, r15
     add rbx, 2
     DISPATCH
 
@@ -1657,6 +1676,15 @@ DEF_FUNC_BARE op_binary_op
     DISPATCH
 
 .binop_try_float_truediv:
+    ; Two integers belong to the INT arm: FLOAT_PAIR_OR_DEOPT refuses that pair
+    ; on purpose -- answering it as floats would be right here and wrong for
+    ; every other operator that shares the macro -- so it has to be picked off
+    ; before the macro sees it, or `i / 7` goes to the generic path forever.
+    cmp r9d, TAG_SMALLINT
+    jne .binop_tfd_not_int_pair
+    cmp r8d, TAG_SMALLINT
+    je .binop_try_smallint_truediv
+.binop_tfd_not_int_pair:
     FLOAT_PAIR_OR_DEOPT .binop_generic
     ; A zero divisor has to raise, and the generic path is what raises.
     ; ucomisd sets ZF for UNORDERED too, so parity is consulted first: a NaN

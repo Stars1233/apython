@@ -272,6 +272,7 @@ test_int_str_unicode_sign
 test_int_subclass_index
 test_int_subclass_methods
 test_int_subclass_new
+test_int_truediv_spec
 test_io_module
 test_io_prereqs
 test_io
@@ -442,6 +443,7 @@ test_subclasses
 test_subclass_item_slots
 test_subprocess_child
 test_sum_compensated
+test_sum_int_fast
 test_sum_protocol
 test_super_descriptors
 test_super_object

@@ -527,6 +527,35 @@ DEF_FUNC_BARE op_binary_op_pow_int
 END_FUNC op_binary_op_pow_int
 
 ;; ============================================================================
+;; op_binary_op_truediv_int (233) -> nothing; pushes the quotient, a float
+;;
+;; Guards: both operands immediates and a non-zero divisor.  Both are inside
+;; +-2^50, so each converts to a double exactly, and IEEE division of two
+;; exact doubles is correctly rounded -- the same answer CPython's
+;; long_true_divide reaches by scaling and rounding by hand.  The quotient is
+;; between 2^-50 and 2^50 in magnitude, so neither an overflow nor a
+;; subnormal is reachable.
+;; ============================================================================
+DEF_FUNC_BARE op_binary_op_truediv_int
+    INT_PAIR_OR_DEOPT .tdiv_int_deopt
+    sub rax, [rel v_int_bias]
+    jz .tdiv_int_deopt          ; zero divisor: let the generic path raise
+    sub rdx, [rel v_int_bias]
+    cvtsi2sd xmm0, rdx
+    cvtsi2sd xmm1, rax
+    divsd xmm0, xmm1
+    movq rax, xmm0
+    V_FROM_F64 rax, rdx
+    VREPLACE2 rax
+    add rbx, 2                 ; skip CACHE
+    DISPATCH
+.tdiv_int_deopt:
+    mov byte [rbx - 2], 122
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_binary_op_truediv_int
+
+;; ============================================================================
 ;; op_compare_op_float (223) -> nothing; pushes the bool and dispatches
 ;;
 ;; The float comparison superinstructions (223, 224, 225).
