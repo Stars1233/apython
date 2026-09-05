@@ -1752,6 +1752,13 @@ DEF_FUNC float_compare, FC_FRAME
     mov rdi, [rbp - FC_RSAVE]
     mov esi, [rbp - FC_RTAG]
     call float_to_f64
+    ; A NaN is unordered against everything, this int included.  The double
+    ; path below reaches that conclusion from ucomisd's parity flag; this one
+    ; has to ask, because fc_int_vs_double compares in GMP and __gmpz_set_d is
+    ; undefined for a NaN.  Its +-inf shortcuts do not catch one either: a NaN
+    ; is unordered against both infinities, so neither `je` fires.
+    ucomisd xmm0, xmm0
+    jp .unordered
     mov rdi, [rbp - FC_LSAVE]
     mov esi, [rbp - FC_LTAG]
     call fc_int_vs_double
@@ -1762,6 +1769,8 @@ DEF_FUNC float_compare, FC_FRAME
     mov rdi, [rbp - FC_LSAVE]
     mov esi, [rbp - FC_LTAG]
     call float_to_f64
+    ucomisd xmm0, xmm0
+    jp .unordered
     mov rdi, [rbp - FC_RSAVE]
     mov esi, [rbp - FC_RTAG]
     call fc_int_vs_double
@@ -1949,7 +1958,8 @@ DEF_FUNC_LOCAL fc_int_vs_double, 104
     mov qword [rbp - FIV_HAVE], 0
     movsd xmm0, [rbp - FIV_D]
 
-    ; An infinity compares by sign alone; NaN never gets here.
+    ; An infinity compares by sign alone.  A NaN cannot get here: both
+    ; callers test the double for one first, because GMP has no answer for it.
     movsd xmm1, [rel pos_inf]
     ucomisd xmm0, xmm1
     je .fiv_minus                ; every finite int is below +inf

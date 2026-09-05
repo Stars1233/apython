@@ -112,11 +112,8 @@ def all_six(a, b):
     return (a < b, a <= b, a == b, a != b, a > b, a >= b)
 
 
-# NaN against a WIDE int is left out on purpose: it answers wrongly today,
-# in the generic float/int comparison and not in anything specialized here.
-# tests/test_int_nan_compare.py is where that lives.
 OTHERS = [1, 0, -1, 2 ** 60, -(2 ** 60), 2 ** 200, 1.5, -0.5, float("inf"),
-          True, False, "x"]
+          float("nan"), True, False, "x"]
 
 for a in OTHERS:
     for b in OTHERS:
