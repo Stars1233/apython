@@ -294,6 +294,9 @@ BHS_ARG   equ 8             ; the argument, for the refusal below
 BHS_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 DEF_FUNC_LOCAL bh_sep_char, BHS_FRAME
     mov [rbp - BHS_ARG], rdi
+    ; CPython's order: the LENGTH first, whatever the type, then the type.
+    ; So a one-element list is "sep must be str or bytes." and a two-element
+    ; one is "sep must be length 1.".
     V_TEST_PTR rdi, rax
     ja .bsc_no_len
     test rdi, rdi
@@ -302,11 +305,31 @@ DEF_FUNC_LOCAL bh_sep_char, BHS_FRAME
     lea rcx, [rel str_type]
     cmp rax, rcx
     je .bsc_str
-    ; A BYTES separator is accepted too: CPython takes either, and only a
-    ; bytearray gets the "str or bytes" refusal.
     lea rcx, [rel bytes_type]
     cmp rax, rcx
-    jne .bsc_no_len
+    je .bsc_bytes
+    ; Neither: it still has to HAVE a length of one before the type is the
+    ; complaint.  sq_length or mp_length is what len() itself reads.
+    mov rcx, [rax + PyTypeObject.tp_as_sequence]
+    test rcx, rcx
+    jz .bsc_try_mapping
+    mov rcx, [rcx + PySequenceMethods.sq_length]
+    test rcx, rcx
+    jnz .bsc_measure
+.bsc_try_mapping:
+    mov rcx, [rax + PyTypeObject.tp_as_mapping]
+    test rcx, rcx
+    jz .bsc_no_len
+    mov rcx, [rcx + PyMappingMethods.mp_length]
+    test rcx, rcx
+    jz .bsc_no_len
+.bsc_measure:
+    call rcx
+    cmp rax, 1
+    jne .bsc_bad_len
+    RAISE exc_TypeError_type, "sep must be str or bytes."
+
+.bsc_bytes:
     mov rcx, [rdi + PyBytesObject.ob_size]
     cmp rcx, 1
     jne .bsc_bad_len
@@ -319,27 +342,14 @@ DEF_FUNC_LOCAL bh_sep_char, BHS_FRAME
     jne .bsc_bad_len
     movzx eax, byte [rdi + PyStrObject.data]
     cmp al, 0x7f
-    ja .bsc_bad_len             ; one code point, but not one byte
+    ja .bsc_not_ascii           ; one code point, but not one byte
     leave
     ret
+.bsc_not_ascii:
+    RAISE exc_ValueError_type, "sep must be ASCII."
 .bsc_bad_len:
-    extern exc_ValueError_type
     RAISE exc_ValueError_type, "sep must be length 1."
 .bsc_no_len:
-    ; A bytearray has a length but is not accepted, and CPython says which
-    ; two types are.
-    mov rsi, [rbp - BHS_ARG]
-    V_TEST_PTR rsi, rax
-    ja .bsc_generic
-    test rsi, rsi
-    jz .bsc_generic
-    mov rax, [rsi + PyObject.ob_type]
-    extern bytearray_type
-    lea rcx, [rel bytearray_type]
-    cmp rax, rcx
-    jne .bsc_generic
-    RAISE exc_TypeError_type, "sep must be str or bytes."
-.bsc_generic:
     mov rsi, [rbp - BHS_ARG]
     CSTRING rdi, `object of type '\x01' has no len()`
     extern raise_type_error_with_name

@@ -1217,6 +1217,11 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     jmp .bd_have_enc
 .bd_have_enc:
     mov [rbp - BD_ENC], rax
+    ; Empty input is the empty string whatever the encoding was called:
+    ; CPython's PyUnicode_Decode answers before it resolves the codec, so
+    ; `b"".decode("nope")` is '' rather than a LookupError.
+    test r12, r12
+    jz .bd_empty
     mov rdi, rax
     extern codec_id
     call codec_id
@@ -1527,6 +1532,18 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     lea rsi, [rel bd_msgbuf]
     call raise_exception
     ud2
+.bd_empty:
+    CSTRING rdi, ""
+    xor esi, esi
+    extern str_new_heap
+    call str_new_heap
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
 .bd_too_many:
     RAISE exc_TypeError_type, "decode() takes at most 2 arguments"
 

@@ -2,10 +2,17 @@
 # shape, and what it ANSWERS diffed against CPython.
 #
 # tests/arity_probe.sh already asks whether a call is refused; this asks what
-# it says and what it returns.  The difference found eight wrong answers that
+# it says and what it returns.  The difference found eleven wrong answers that
 # a refusal test cannot see: hex() ignoring its separator, `7 << (1 << 70)`
-# answering 7, `set() in {1, 2}` raising where CPython answers False, and a
-# refusal that named no type at all.
+# answering 7, `set() in {1, 2}` raising where CPython answers False,
+# `b"".decode("nope")` raising where CPython short-circuits on empty input,
+# and a refusal that named no type at all.
+#
+# What is left after it is CPython's own inconsistency between its
+# clinic-generated and hand-written wordings -- `str.replace` says "replace
+# expected at least 2 arguments, got 1" where `str.upper` says
+# "str.upper() takes no arguments (1 given)" -- plus set iteration order,
+# which is nobody's to match.
 
 CASES = [
     # bytes.hex's separator and grouping, which were accepted and ignored
@@ -63,6 +70,12 @@ CASES = [
     'set().copy(1)', 'frozenset().copy(1)', '{1}.copy()',
     '[1].__setitem__(1)', '{1: 2}.__setitem__(1)',
     'bytearray(b"a").__setitem__(1)', '(1).__eq__()', '"a".__len__(1)',
+    'set().__len__(1)', 'set().__iter__(1)',
+    'b"abc".hex([1])', 'b"abc".hex([1, 2])', 'b"abc".hex({})',
+    'b"abc".hex(bytearray(b"xy"))', 'b"abc".hex("\u00e9")',
+    'b"abc".hex(memoryview(b"x"))',
+    'b"".decode("")', 'b"".decode("nope")', 'bytearray(b"").decode("nope")',
+    'b"".decode()', 'b"abc".decode("latin-1")',
 ]
 for expr in CASES:
     try:

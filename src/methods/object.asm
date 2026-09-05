@@ -486,6 +486,7 @@ DEF_FUNC %1_dunder_%2
     ; CPython reports both counts, and counts self in neither.
     dec rsi                     ; rsi is still nargs on this path
     xor edi, edi
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC %1_dunder_%2
@@ -535,6 +536,7 @@ DEF_FUNC %1_dunder_len
 %%arity:
     dec rsi
     xor edi, edi
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 %%bad:
@@ -578,6 +580,7 @@ DEF_FUNC %1_dunder_iter
 %%arity:
     dec rsi
     xor edi, edi
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 %%bad:
@@ -646,6 +649,7 @@ DEF_FUNC %1_dunder_%2
     ; CPython reports both counts, and counts self in neither.
     dec rsi                     ; rsi is still nargs on this path
     xor edi, edi
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC %1_dunder_%2
@@ -1054,6 +1058,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     ; it wanted, which bugs.md records among the wordings that differ.
     dec rsi                     ; rsi is still nargs on this path
     mov edi, 1
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC %1_dunder_%2
@@ -1125,6 +1130,7 @@ DEF_FUNC %1_dunder_%2, 16
     ; CPython reports both counts, and counts self in neither.
     dec rsi                     ; rsi is still nargs on this path
     mov edi, 1
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC %1_dunder_%2
@@ -1167,6 +1173,7 @@ DEF_FUNC %1_dunder_bool
     ; CPython reports both counts, and counts self in neither.
     dec rsi                     ; rsi is still nargs on this path
     xor edi, edi
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC %1_dunder_bool
@@ -1631,6 +1638,7 @@ DEF_FUNC int_dunder_bool
     ; CPython reports both counts, and counts self in neither.
     dec rsi
     xor edi, edi
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC int_dunder_bool
@@ -1700,6 +1708,7 @@ DEF_FUNC object_method_%1
     ; CPython reports both counts, and counts self in neither.
     dec rsi                     ; rsi is still nargs on this path
     xor edi, edi
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC object_method_%1
@@ -1944,6 +1953,7 @@ DEF_FUNC %1_dunder_hash
 %%bad:
     dec rsi
     xor edi, edi
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC %1_dunder_hash
@@ -2006,6 +2016,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     ; CPython reports both counts, and counts self in neither.
     dec rsi                     ; rsi is still nargs on this path
     mov edi, 1
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC %1_dunder_%2
