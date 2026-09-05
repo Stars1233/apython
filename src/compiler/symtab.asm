@@ -2872,22 +2872,21 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     mov r13, rdx
     mov [rbp - SEC_NODE], rdx
 
-    ; A generator expression keeps its scope; so does a comprehension whose
-    ; enclosing block has no fast locals to save into.
+    ; Every comprehension gets a scope of its own, generator expression or
+    ; not.  PEP 709 inlines the three eager kinds into the block they are
+    ; written in, and that was done here -- but inlining needs the target to
+    ; be a fast local of the ENCLOSING scope while every other meaning of
+    ; that name stays what it was, and CPython gets that by giving one name
+    ; two storages at once.  This symbol table classifies a name once per
+    ; scope, so binding the target in the parent redefined it for the whole
+    ; block: `[i for i in r]` beside any other `i` took the other one over,
+    ; a target the parent declared `global` had no slot to be saved into at
+    ; all, and one captured by a nested lambda became a cell that
+    ; LOAD_FAST_AND_CLEAR then wrote through as if it were not.  Two of the
+    ; three were segfaults.  DIVERGENCES.md records what is left.
     mov rdi, rbx
     mov rsi, r13
     call ast_at
-    cmp byte [rax + AstNode.kind], AST_GENEXP
-    je .sec_own_scope
-    mov rdi, rbx
-    mov rsi, [rbp - SEC_PARENT]
-    call sym_at
-    cmp dword [rax + Scope.kind], SCOPE_FUNCTION
-    je .sec_inlined
-    cmp dword [rax + Scope.kind], SCOPE_LAMBDA
-    je .sec_inlined
-    cmp dword [rax + Scope.kind], SCOPE_COMP
-    je .sec_inlined
 
 .sec_own_scope:
     mov rdi, rbx
@@ -2897,15 +2896,6 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     call sym_new
     mov r12, rax
     mov [rbp - SEC_SCOPE], rax
-    mov rdi, rbx
-    mov rsi, r13
-    call ast_at
-    mov [rax + AstNode.flags], r12w
-    jmp .sec_have_scope
-
-.sec_inlined:
-    mov r12, [rbp - SEC_PARENT]
-    mov [rbp - SEC_SCOPE], r12
     mov rdi, rbx
     mov rsi, r13
     call ast_at
@@ -2925,11 +2915,9 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     or dword [rax + Scope.flags], SCF_COROUTINE
 .not_async:
 
-    ; The implicit parameter, for a scope of its own only.  CPython calls it
-    ; `.0`, which no source can name; an inlined comprehension has no
-    ; parameter because it has no call.
-    cmp r12, [rbp - SEC_PARENT]
-    je .sec_no_dot_zero
+    ; The implicit parameter.  CPython calls it `.0`, which no source can
+    ; name; the outermost iterable is evaluated in the enclosing scope and
+    ; handed in through it.
     mov rdi, rbx
     lea rsi, [rel sym_dot_zero]
     call comp_intern_cstr
@@ -2940,7 +2928,6 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     mov rsi, r12
     mov ecx, DEF_PARAM | DEF_LOCAL
     call sym_add
-.sec_no_dot_zero:
 
     mov rdi, rbx
     mov rsi, r13
