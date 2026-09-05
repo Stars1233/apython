@@ -3012,31 +3012,26 @@ DEF_FUNC int_power, IPW_FRAME
     ; an infinity, so the reciprocal came out 0.0.
     ;
     ; float_pow answers all of it, and is the only place the IEEE corners are
-    ; written down.  Both operands go through GMP's mpz_get_d, which does not
-    ; truncate the way mpz_get_si does -- an exponent past int64 used to come
-    ; back with the wrong magnitude and sometimes the wrong sign.
-    cmp r14d, TAG_SMALLINT
-    je .neg_exp_smallint
-    INT_NEED_MPZ rbx
-    lea rdi, [rbx + PyIntObject.mpz]
-    call __gmpz_get_d wrt ..plt
-    jmp .neg_exp_have_base
-.neg_exp_smallint:
-    mov rax, rbx
-    cvtsi2sd xmm0, rax
-.neg_exp_have_base:
-    ; The exponent: r13 holds it when it fit an int64, and otherwise the
-    ; original object still does.
-    movsd [rbp - IPW_BASED], xmm0   ; r13 still holds the exponent
-    cmp dword [rbp - IPW_ETAG], TAG_SMALLINT
-    je .neg_exp_exp_small
-    INT_NEED_MPZ r12
-    lea rdi, [r12 + PyIntObject.mpz]
-    call __gmpz_get_d wrt ..plt
-    jmp .neg_exp_have_exp
-.neg_exp_exp_small:
-    cvtsi2sd xmm0, r13
-.neg_exp_have_exp:
+    ; written down.
+    ;
+    ; Both operands become doubles through float_to_f64, which is where the
+    ; CORRECT conversion lives: it renders the integer to a decimal string and
+    ; lets strtod round it to nearest even, as CPython's PyLong_AsDouble does.
+    ; This path used GMP's mpz_get_d, which TRUNCATES toward zero, so an
+    ; integer sitting between two doubles picked the lower neighbour and the
+    ; reciprocal of the wrong neighbour is a different float: (10**30) ** -1
+    ; answered 1e-30 where CPython says 9.999999999999999e-31.  float_to_f64
+    ; also handles an exponent past int64 without the magnitude and sign
+    ; damage mpz_get_si would do.
+    mov rdi, rbx
+    mov esi, r14d
+    extern float_to_f64
+    call float_to_f64
+    movsd [rbp - IPW_BASED], xmm0
+    ; The exponent, as the object rather than the int64 r13 holds when it fit.
+    mov rdi, r12
+    mov esi, dword [rbp - IPW_ETAG]
+    call float_to_f64
     movq rsi, xmm0
     V_FROM_F64 rsi, rax
     mov rdi, [rbp - IPW_BASED]
