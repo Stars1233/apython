@@ -4,7 +4,7 @@
 %include "macros.inc"
 %include "object.inc"
 extern type_number_methods
-extern type_refresh_getattribute_flag
+extern type_refresh_attr_flags
 
 extern gc_alloc
 extern gc_track
@@ -129,7 +129,7 @@ DEF_FUNC type_setattr
     ; Without it `Base.__getattribute__ = f` would leave an already-built D
     ; saying "no override" and the hook would silently never run.
     mov rdi, rbx
-    call type_refresh_getattribute_flag
+    call type_refresh_attr_flags
 .ts_done:
 
     pop rbx
