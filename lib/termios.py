@@ -269,6 +269,20 @@ def _u32(b, off):
     return b[off] | (b[off + 1] << 8) | (b[off + 2] << 16) | (b[off + 3] << 24)
 
 
+def _flagint(v):
+    """What PyLong_AsLong accepts for the six flag fields: an int, or
+    something with __index__.  A str or a float is a TypeError there, and
+    silently accepting one here would write a garbage flag word.  The wording
+    is PyNumber_Index's, which is what the caller sees from CPython."""
+    if isinstance(v, int):
+        return v
+    idx = getattr(type(v), "__index__", None)
+    if idx is None:
+        raise TypeError("%r object cannot be interpreted as an integer"
+                        % type(v).__name__)
+    return idx(v)
+
+
 def _p32(v):
     v &= 0xFFFFFFFF
     return bytes((v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, (v >> 24) & 0xFF))
@@ -296,27 +310,49 @@ def tcgetattr(fd):
 
 
 def tcsetattr(fd, when, attributes):
-    if when not in (TCSANOW, TCSADRAIN, TCSAFLUSH):
-        raise error("tcsetattr: bad when value")
-    if len(attributes) != 7:
+    # The order of these checks is observable, so it is CPython's
+    # (Modules/termios.c, termios_tcsetattr_impl) rather than the one that
+    # reads most naturally:
+    #
+    #   1. the attributes list, 2. tcgetattr on the fd, 3. the six flag
+    #   fields, 4. the cc list, 5. the ioctl, which is what rejects `when`.
+    #
+    # Two of the steps only differ because of an earlier one.  `tcsetattr` on
+    # a CLOSED fd with a bad `when` reports EBADF from step 2, not a complaint
+    # about `when`; and a short cc list is a TypeError only on a real
+    # terminal, because on anything else step 2 has already failed with
+    # ENOTTY.  Both are in tests/test_termios.py, and the second is only
+    # reachable when the suite runs with a tty on fd 0 -- which is why this
+    # went unnoticed: piped, step 2 masks it.
+    if not isinstance(attributes, list) or len(attributes) != 7:
         raise TypeError("tcsetattr, arg 3: must be 7 element list")
+
+    # CPython reads the current attributes first so the fields it does not
+    # model survive the round trip.  We rebuild the struct from raw bytes for
+    # the same reason, and it doubles as the fd check.
+    out = bytearray(_ioctl(fd, _TCGETS, bytes(_SIZE)))
+
     iflag, oflag, cflag, lflag, ispeed, ospeed, cc = attributes
-    # A short cc list is not checked here, as CPython's is not: the missing
-    # entries are simply zero and the kernel gets the struct either way.
-    out = bytearray(_SIZE)
-    out[0:4] = _p32(iflag)
-    out[4:8] = _p32(oflag)
-    out[8:12] = _p32(cflag)
-    out[12:16] = _p32(lflag)
-    out[16] = 0                 # c_line, which nothing here sets
-    for i in range(min(len(cc), NCCS)):
+    out[0:4] = _p32(_flagint(iflag))
+    out[4:8] = _p32(_flagint(oflag))
+    out[8:12] = _p32(_flagint(cflag))
+    out[12:16] = _p32(_flagint(lflag))
+
+    if not isinstance(cc, list) or len(cc) != NCCS:
+        raise TypeError(
+            "tcsetattr: attributes[6] must be %d element list" % NCCS)
+    for i in range(NCCS):
         v = cc[i]
         if isinstance(v, int):
             out[17 + i] = v & 0xFF
         else:
             out[17 + i] = v[0] if len(v) else 0
-    out[52:56] = _p32(ispeed)
-    out[56:60] = _p32(ospeed)
+    out[52:56] = _p32(_flagint(ispeed))
+    out[56:60] = _p32(_flagint(ospeed))
+    # CPython lets tcsetattr(3) reject a bad `when`; the errno it returns is
+    # EINVAL, so that is what this reports rather than a message of its own.
+    if when not in (TCSANOW, TCSADRAIN, TCSAFLUSH):
+        raise error(22, "Invalid argument")
     _ioctl(fd, _TCSETS[when], bytes(out))
 
 
