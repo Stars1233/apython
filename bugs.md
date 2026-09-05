@@ -73,13 +73,6 @@ reasoning that chose them and what changing one would cost.
   left of that; obj_as_index is one funnel and each caller's exception is its
   own.
 
-- **`asyncio`'s stream tests fail under `INT_STRESS=1`.**  A loopback echo
-  ends in `ConnectionResetError` when every integer of magnitude 8 or more is
-  a heap object.  It is not a wrong answer anywhere obvious -- the ordinary
-  build passes, and so does `test_socket` under the same stress -- so the
-  fault is in something the stream layer does with a boxed integer that the
-  socket layer does not.
-
 - **Functions with no docblock at all**, and, among those that have one,
   docblocks with no `->` signature line.  The signature is the only part of a
   function's contract that nothing checks, so its absence is a real gap rather

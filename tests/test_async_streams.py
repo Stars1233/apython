@@ -151,6 +151,17 @@ async def main():
 
     print("concurrent     ",
           await asyncio.gather(talk(b"one"), talk(b"two"), talk(b"three")))
+
+    # Enough at once that the descriptors climb well past the small ones.
+    # _asynciocore.wait_fd tested its arguments with V_IS_INT, which is true
+    # only for an int IMMEDIATE, so a descriptor on the heap was refused as
+    # "arguments must be int" -- and the refusal reached the caller as a
+    # connection reset, because that is what the far end sees when this one
+    # stops reading.  In an ordinary build a descriptor is an immediate up to
+    # 2**50, so only INT_STRESS=1 reaches it; the count here is what makes
+    # the shape visible at all.
+    many = await asyncio.gather(*[talk(b"n%d" % i) for i in range(8)])
+    print("eight at once  ", sorted(many))
     server.close()
     await server.wait_closed()
 
