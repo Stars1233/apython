@@ -1514,6 +1514,21 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov qword [rel class_metatype_pending], 0
 .tfp_default_metatype:
 
+    ; Record it against each of its bases, so type.__subclasses__ can answer.
+    ; Borrowed, and dropped again by user_type_dealloc, so the list only ever
+    ; holds live classes -- which is what CPython's weak-referenced
+    ; tp_subclasses amounts to.
+    ;
+    ; BEFORE any user code runs, for the same reason the metatype above is:
+    ; __init_subclass__ can read Base.__subclasses__() and CPython's already
+    ; lists the class being created.  It also has to be before anything that
+    ; can cache against a base, or the class would sit outside the walk that
+    ; invalidates such a cache with no way back in.  Only tp_bases is needed,
+    ; and that has been set since the layout was decided.
+    extern subclass_register
+    mov rdi, r12
+    call subclass_register
+
     ; Call parent's __init_subclass__ if present
     mov rax, [rbp - TFP_BASE]          ; base class
     test rax, rax
@@ -1589,14 +1604,6 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     extern gc_track
     mov rdi, r12
     call gc_track
-
-    ; Record it against each of its bases, so type.__subclasses__ can answer.
-    ; Borrowed, and dropped again by user_type_dealloc, so the list only ever
-    ; holds live classes -- which is what CPython's weak-referenced
-    ; tp_subclasses amounts to.
-    extern subclass_register
-    mov rdi, r12
-    call subclass_register
 
     ; Now that the class exists, tell every descriptor in it what it is called.
     mov rdi, r12

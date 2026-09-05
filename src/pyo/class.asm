@@ -660,6 +660,17 @@ DEF_FUNC type_setattr
     push rbx
     push rcx                    ; keep the stack aligned
 
+    ; --- a static type is immutable ---
+    ; `str.foo = 1` used to succeed and put a key in str's own tp_dict, for
+    ; every process-wide str from then on.  CPython refuses: only a heaptype
+    ; is writable, everything else is Py_TPFLAGS_IMMUTABLETYPE.  The check has
+    ; to be ahead of the __name__ rename below, which has its own narrower
+    ; version of it, and ahead of the tp_dict allocation, which would
+    ; otherwise hand a static type a dict just to reject the write into it.
+    mov rax, [rdi + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_HEAPTYPE
+    jz .ts_immutable
+
     ; --- __name__ renames the class ---
     ; A class's name is tp_name, not a dict entry, so `C.__name__ = "x"` set a
     ; key nothing ever read and the class kept its old name.  typing.py
@@ -753,11 +764,69 @@ DEF_FUNC type_setattr
     pop rbx
     leave
     ret
+.ts_immutable:
+    ; "cannot set 'foo' attribute of immutable type 'str'".  Both halves are
+    ; the caller's, so the message is built rather than named.  CPython says
+    ; "set" for a delete too -- its check is ahead of the point where the two
+    ; part company -- so this does not look at the value.
+    mov rbx, rdi                        ; the type
+    lea r8, [rel ts_imm_buf]
+    xor ecx, ecx
+    CSTRING r9, "cannot set '"
+    call ts_imm_append
+    ; the attribute name
+    xor r9d, r9d
+    test rsi, rsi
+    jz .ts_imm_after_name
+    mov rax, [rsi + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rax, rdx
+    jne .ts_imm_after_name
+    lea r9, [rsi + PyStrObject.data]
+.ts_imm_after_name:
+    call ts_imm_append
+    CSTRING r9, "' attribute of immutable type '"
+    call ts_imm_append
+    mov r9, [rbx + PyTypeObject.tp_name]
+    call ts_imm_append
+    CSTRING r9, "'"
+    call ts_imm_append
+    mov byte [r8 + rcx], 0
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel ts_imm_buf]
+    call raise_exception
+
 .ts_rename_static:
     RAISE exc_TypeError_type, "cannot set __name__ of a built-in type"
 .ts_rename_bad:
     RAISE exc_TypeError_type, "can only assign string to __name__"
 END_FUNC type_setattr
+
+;; ============================================================================
+;; ts_imm_append(r8 = buffer, rcx = length, r9 = NUL-terminated source or 0)
+;;   -> rcx advanced past what was copied
+;;
+;; The one piece of string building type_setattr's refusal needs.  Everything
+;; else it touches is caller-saved and it is on a path that ends in a raise,
+;; so it keeps to r8/rcx/r9 and clobbers only rax.
+;; ============================================================================
+DEF_FUNC_LOCAL ts_imm_append
+    test r9, r9
+    jz .tia_done
+.tia_loop:
+    movzx eax, byte [r9]
+    test al, al
+    jz .tia_done
+    cmp rcx, TS_IMM_BUFSZ - 2
+    jae .tia_done
+    mov [r8 + rcx], al
+    inc rcx
+    inc r9
+    jmp .tia_loop
+.tia_done:
+    leave
+    ret
+END_FUNC ts_imm_append
 
 ;; ============================================================================
 ;; instance_dealloc(PyObject *self)
@@ -2889,6 +2958,12 @@ instance_getattr_skip: dq 0
 section .rodata
 id_del_ignored_msg: db "Exception ignored in __del__", 10
 id_del_ignored_len equ $ - id_del_ignored_msg
+section .bss
+align 8
+;; Where type_setattr builds its refusal for a static type.  A raise follows
+;; immediately, so nothing outlives the call.
+TS_IMM_BUFSZ equ 256
+ts_imm_buf: resb TS_IMM_BUFSZ
 section .data
 
 instance_repr_cstr: db "<instance>", 0

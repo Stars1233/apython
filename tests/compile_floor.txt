@@ -445,6 +445,7 @@ test_tuples
 test_type_comments
 test_type_constructors
 test_type_dict
+test_type_immutable_and_subclasses
 test_type_layout
 test_type_metatype
 test_type_repr
