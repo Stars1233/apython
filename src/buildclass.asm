@@ -1440,6 +1440,20 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov rsi, r15
     call type_wrap_implicit_classmethods
 
+    ; The metatype, if type.__new__ was handed one, and BEFORE any user code
+    ; runs -- __init_subclass__ below and __set_name__ further down alike.  A
+    ; descriptor is entitled to read an attribute the metaclass supplies off
+    ; the owner it is given; and the global is a REGISTRATION, so it has to be
+    ; put down before anything that might build a class of its own picks it
+    ; up.  It used to be stamped after __init_subclass__, and a class defined
+    ; inside one came out with the outer class's metaclass.
+    mov rax, [rel class_metatype_pending]
+    test rax, rax
+    jz .tfp_default_metatype
+    mov [r12 + PyObject.ob_type], rax
+    mov qword [rel class_metatype_pending], 0
+.tfp_default_metatype:
+
     ; Call parent's __init_subclass__ if present
     mov rax, [rbp - TFP_BASE]          ; base class
     test rax, rax
@@ -1523,16 +1537,6 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     extern subclass_register
     mov rdi, r12
     call subclass_register
-
-    ; The metatype, if type.__new__ was handed one, BEFORE __set_name__ runs:
-    ; a descriptor is entitled to read an attribute the metaclass supplies off
-    ; the owner it is given.
-    mov rax, [rel class_metatype_pending]
-    test rax, rax
-    jz .tfp_default_metatype
-    mov [r12 + PyObject.ob_type], rax
-    mov qword [rel class_metatype_pending], 0
-.tfp_default_metatype:
 
     ; Now that the class exists, tell every descriptor in it what it is called.
     mov rdi, r12
