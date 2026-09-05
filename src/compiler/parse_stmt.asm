@@ -83,6 +83,12 @@ DEF_FUNC par_module, PM_FRAME
     mov [rbp - PM_MARK], rax
 
 .loop:
+    ; A `# type: ignore` on a line of its own is recorded and skipped wherever
+    ; it appears -- including after the last statement, where par_statement is
+    ; never reached again.
+    mov rdi, rbx
+    extern ast_take_typeignore
+    call ast_take_typeignore
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_ENDMARKER
@@ -315,6 +321,13 @@ END_FUNC pss_py2_statement
 DEF_FUNC par_statement, 8
     push rbx
     mov rbx, rdi
+    ; A `# type: ignore` on a line of its own reaches statement position,
+    ; where nothing else will take it: ast_take_typecomment collects one only
+    ; when a statement precedes it.  CPython records it on the Module wherever
+    ; it appears, so record it here and carry on to the real statement.
+    extern ast_take_typeignore
+    call ast_take_typeignore
+    mov rdi, rbx
     call par_kind
     ; `match` is a soft keyword, so it arrives as a NAME and cannot be in
     ; stmt_table: only its context tells it from a variable of the same name.
@@ -3917,6 +3930,18 @@ stmt_table:
     dq ps_while                ; 87 TOK_WHILE
     dq ps_with                 ; 88 TOK_WITH
     dq 0            ; 89 TOK_YIELD
+    dq 0            ; 90 TOK_TYPE_COMMENT
+    dq 0            ; 91 TOK_TYPE_IGNORE
+stmt_table_end:
+
+;; The dispatch above bounds against TOK_COUNT, so the table has to have that
+;; many rows -- and it did not: the two type-comment tokens were added to the
+;; token set without rows here, so a `# type:` comment in statement position
+;; read past the end and called whatever followed it.  Nothing catches a
+;; short table at run time, so the assembler catches it here.
+%if (stmt_table_end - stmt_table) / 8 != TOK_COUNT
+    %error "stmt_table must have one row per token kind"
+%endif
 
 section .rodata
 

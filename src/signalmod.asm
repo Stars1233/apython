@@ -139,10 +139,17 @@ END_FUNC signal_install
 ;; next pass rather than being lost.
 ;; ============================================================================
 SRP_I     equ 8
-SRP_ARGS  equ 32            ; two Values: the number and the frame
-SRP_FRAME equ 48            ; + 1 push = 56... one more to land right
+SRP_FN    equ 16            ; the handler being called
+; The two-Value argument array.  A slot names its LOWEST address and the
+; array grows UPWARD toward rbp, so args[0] is [rbp - SRP_ARGS] and args[1]
+; is eight bytes above it -- and nothing else may live in either.  Putting
+; the callable at SRP_ARGS+8 made it args[1]: every handler was called with
+; itself as the frame, and the None meant for the frame went one word past
+; the array.
+SRP_ARGS  equ 32
+SRP_FRAME equ 40            ; + 1 push = 48, 16-aligned
 global signal_run_pending
-DEF_FUNC signal_run_pending, 40             ; + 1 push = 48, 16-aligned
+DEF_FUNC signal_run_pending, SRP_FRAME
     push rbx
     mov qword [rel signal_any_pending], 0
     mov ebx, 1
@@ -162,26 +169,37 @@ DEF_FUNC signal_run_pending, 40             ; + 1 push = 48, 16-aligned
     ; the flag -- but one may have replaced a handler after the flag was set.
     V_TEST_PTR rax, rcx
     ja .srp_next
-    mov [rbp - SRP_ARGS + 8], rax           ; keep the callable
+    mov [rbp - SRP_FN], rax                 ; keep the handler
     mov rdi, rbx
     call int_from_i64
     V_PACK rax, rdx
     mov [rbp - SRP_ARGS], rax               ; args[0] = the signal number
-    ; args[1] is the interrupted frame.  CPython passes the frame object; the
-    ; frame this loop is running is in eval_saved_r12, and a handler that
-    ; ignores it -- which every handler in the stdlib does -- cannot tell the
-    ; difference between that and None.
+
+    ; args[1] is the interrupted frame, and it has to be a real one: pdb's
+    ; sigint_handler stores it, and traceback.print_stack(frame) walks it.
+    ; It is the frame this loop is running in, which is what eval_saved_r12
+    ; holds -- the same one sys._getframe() answers with.
+    mov rdi, [rel eval_saved_r12]
+    test rdi, rdi
+    jz .srp_no_frame
+    extern frameobj_new
+    call frameobj_new
+    test rax, rax
+    jnz .srp_have_frame
+.srp_no_frame:
     lea rax, [rel none_singleton]
     INCREF rax
-    mov [rbp - SRP_ARGS + 8 + 8], rax       ; args[1]
-    mov rdi, [rbp - SRP_ARGS + 8]
+.srp_have_frame:
+    mov [rbp - SRP_ARGS + 8], rax           ; args[1]
+
+    mov rdi, [rbp - SRP_FN]
     lea rsi, [rbp - SRP_ARGS]
     mov edx, 2
     call obj_call_n
     push rax
     mov rax, [rbp - SRP_ARGS]
     DECREF_V rax, rcx
-    mov rdi, [rbp - SRP_ARGS + 8 + 8]
+    mov rdi, [rbp - SRP_ARGS + 8]
     call obj_decref
     pop rax
     test rax, rax

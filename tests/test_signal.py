@@ -26,10 +26,12 @@ print(signal.getsignal(signal.SIGTERM))
 
 print("--- installing one, and running it ---")
 seen = []
+frames = []
 
 
 def handler(signum, frame):
     seen.append(int(signum))
+    frames.append(frame)
 
 
 previous = signal.signal(signal.SIGUSR1, handler)
@@ -40,6 +42,28 @@ os.kill(os.getpid(), signal.SIGUSR1)
 for _ in range(3):
     pass
 print("delivered:", seen)
+
+print("--- the handler is given the interrupted frame ---")
+#
+# CPython passes the frame the signal interrupted, and it has to be a real
+# one: pdb's sigint_handler keeps it and traceback.print_stack(frame) walks
+# it.  A two-Value argument array grows UPWARD from its slot, so getting the
+# layout wrong handed the handler ITSELF as the frame.
+print(type(frames[-1]).__name__)
+print(frames[-1].f_code.co_name, frames[-1] is handler)
+print(hasattr(frames[-1], "f_lineno"), hasattr(frames[-1], "f_globals"))
+
+
+def from_a_function():
+    seen.clear()
+    frames.clear()
+    signal.raise_signal(signal.SIGUSR1)
+    for _ in range(3):
+        pass
+    return frames[-1].f_code.co_name
+
+
+print(from_a_function())
 
 print("--- raise_signal reaches the same place ---")
 seen.clear()

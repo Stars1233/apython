@@ -66,7 +66,7 @@ src/pyo/eventloop.asm                  19
 src/pyo/eventloop_iouring.asm          6
 src/pyo/eventloop_poll.asm             8
 src/pyo/exc_group.asm                  1
-src/pyo/exception.asm                  14
+src/pyo/exception.asm                  13
 src/pyo/fileobj.asm                    7
 src/pyo/float.asm                      12
 src/pyo/frameobj.asm                   3

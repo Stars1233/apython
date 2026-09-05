@@ -421,6 +421,7 @@ test_traceback_carets
 test_traceback
 test_tuple_identity
 test_tuples
+test_type_comments
 test_type_constructors
 test_type_dict
 test_type_layout

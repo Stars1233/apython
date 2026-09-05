@@ -54,6 +54,10 @@ LR_STRNL equ 40          ; lines a string literal spanned, not applied yet
 LR_STRLS equ 48          ; where the last of those lines starts
 LR_FRAME equ 56          ; + 5 pushes = 96
 
+section .bss
+;; Set around .sub_type_comment: was the `#` the first thing on its line?
+lex_tc_own_line: resb 1
+
 section .text
 
 ;; ============================================================================
@@ -521,6 +525,7 @@ DEF_FUNC lex_run, LR_FRAME
     ; token is emitted BETWEEN the NEWLINE and the INDENT, which is where
     ; CPython's grammar looks for it, and the line still counts as blank so
     ; the indentation stack is untouched.
+    mov byte [rel lex_tc_own_line], 1
     call .sub_type_comment
     test eax, eax
     jnz .bl_at_eol                      ; r12 is at the end of the line already
@@ -603,6 +608,7 @@ DEF_FUNC lex_run, LR_FRAME
     ; asked for one -- the only comment this lexer ever emits.  It is
     ; recognised here rather than in the parser because the parser never sees
     ; a comment at all: everything else about them is that they are skipped.
+    mov byte [rel lex_tc_own_line], 0
     call .sub_type_comment
     test eax, eax
     jnz .scan                           ; r12 is at the end of the line already
@@ -678,6 +684,38 @@ DEF_FUNC lex_run, LR_FRAME
     inc rcx
     jmp .tc_end
 .tc_have_end:
+    ; A `# type: ignore` on a line of ITS OWN carries the line terminator in
+    ; its tag; one after a statement does not, and a `# type: <sig>` comment
+    ; never does whichever line it is on.  CPython's tokenizer gets that from
+    ; which terminator follows -- an NL it has already absorbed, against a
+    ; NEWLINE token of its own -- and `ast.parse` reports the difference in
+    ; TypeIgnore.tag.
+    cmp qword [rsp], TOK_TYPE_IGNORE    ; the kind, pushed above
+    jne .tc_no_eol
+    cmp byte [rel lex_tc_own_line], 0
+    je .tc_no_eol
+    cmp rcx, r13
+    jae .tc_no_eol
+    movzx edx, byte [rcx]
+    cmp dl, 10
+    jne .tc_no_eol
+    inc rcx                             ; the newline belongs to the tag
+    push rcx
+    push rax
+    mov rdi, rbx
+    mov rsi, [rsp + 16]
+    mov rdx, rax
+    sub rcx, rax
+    xor r8d, r8d
+    call lex_emit
+    pop rax
+    pop rcx
+    add rsp, 8
+    dec rcx                             ; but not to the scan: .newline wants it
+    mov r12, rcx
+    mov eax, 1
+    ret
+.tc_no_eol:
     push rcx
     push rax
     mov rdi, rbx

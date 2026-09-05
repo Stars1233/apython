@@ -80,6 +80,39 @@ try:
 except TypeError as e:
     print("TypeError", e)
 
+# The closure tuple belongs to the FUNCTION and COPY_FREE_VARS copies it into
+# the frame by the NEW code's count, so a code object that closes over more
+# names reads past the tuple.  CPython refuses the pair; so does this.
+
+
+def one_free():
+    a = 1
+
+    def inner():
+        return a
+
+    return inner
+
+
+def two_free():
+    a, b = 1, 2
+
+    def inner():
+        return a + b
+
+    return inner
+
+
+for target_fn, source_fn in ((one_free(), two_free()),
+                             (two_free(), one_free()),
+                             (sample, two_free())):
+    try:
+        target_fn.__code__ = source_fn.__code__
+        print("accepted")
+    except ValueError as e:
+        print("ValueError", e)
+print(one_free()(), two_free()())
+
 print("--- and the function still works after all that ---")
 print(sample(2), sample.__code__.co_name, sample.__doc__)
 print("done")
