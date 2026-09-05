@@ -183,6 +183,8 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   `async`, `import`
 - `src/methods/*.asm` — Builtin type methods, one file per type: `str`,
   `str_pred`, `str_parts`, `list`, `tuple`, `dict`, `set`, `num`, `bytes`,
+  `bytearray_methods` (bytearray's share of bytes' bodies, each run over a
+  temporary bytes),
   `object` (object's own dunders plus the `DEF_DUNDER_*` generators), and
   `init`, which registers them all into each type's `tp_dict`.  These share
   basenames with `src/pyo/` on purpose: `methods/dict.asm` is dict's methods,
@@ -200,7 +202,9 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   class, iter, singleton, bytes, bytearray, memoryview, code).  `class.asm` is
   the metatype, the instance and attribute access; `instance_alloc.asm` is
   where an instance comes from, including the constructors a subclass of a
-  builtin needs; `method.asm` is the bound method
+  builtin needs; `method.asm` is the bound method; `str_mod.asm` is the `%`
+  operator, for str and for bytes both -- the conversion is only known there,
+  so the argument is converted there
 - `src/marshal.asm` — .pyc marshal deserializer, the .pyc file reader, and
   the `marshal` module `importlib` calls `loads` on
 - `src/main.asm` — argument parsing, startup order, and the `-t`/`--dis` modes
@@ -234,8 +238,10 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   wrapper; the pattern and match objects live in `src/pyo/`
 - `src/valtest.asm` — `--selftest-value`
 - `src/builtins.asm` — `PyBuiltinObject`, the core builtins, and `builtins_init`
-- `src/builtins_num.asm` / `src/builtins_obj.asm` — the numeric builtins, and the
-  object/iteration/IO builtins
+- `src/builtins_num.asm` / `src/builtins_obj.asm` / `src/builtins_str.asm` —
+  the numeric builtins, the object/iteration/IO builtins, and `str()` with the
+  three-argument decode form; `src/builtins_pow.asm` is `pow()` and the
+  modular exponentiation GMP does for its three-argument form
 - `src/buildclass.asm` — `type.__new__`, `type_from_parts`, `__build_class__`
 - `src/slots.asm` — Installs slot wrappers on a heaptype from the dunders it defines
 - `src/mro.asm` — C3 linearization, `type_mro_next`, `type_is_subtype`

@@ -331,6 +331,9 @@ EN_NPOS    equ 16
 EN_START   equ 24
 EN_ITER    equ 32     ; local: iterable pointer
 EN_ITERTAG equ 40     ; local: iterable tag
+; The start= argument as it arrived, for the message when it is not an
+; integer: the refusal named no type at all, and carried a literal %s.
+EN_BADVAL  equ 48
 EN_FRAME   equ 56            ; + 3 pushes = 80, 16-aligned
 DEF_FUNC builtin_enumerate, EN_FRAME
     push rbx
@@ -367,6 +370,7 @@ DEF_FUNC builtin_enumerate, EN_FRAME
 
     ; start = int(args[1])  (positional)
     mov rdi, [rbx + 8]
+    mov [rbp - EN_BADVAL], rdi
     V_UNPACK rdi, rdx       ; args[1]
     cmp edx, TAG_SMALLINT
     jne .enum_type_error
@@ -428,6 +432,7 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     push r9
     mov rbx, [rbp - EN_ARGS]
     mov rdi, [rbx + r11]           ; the value Value
+    mov [rbp - EN_BADVAL], rdi
     V_UNPACK rdi, rdx
     cmp edx, TAG_SMALLINT
     jne .enum_type_error
@@ -540,7 +545,28 @@ DEF_FUNC builtin_enumerate, EN_FRAME
 
 .enum_type_error:
     mov qword [rel kw_names_pending], 0
-    RAISE exc_TypeError_type, "'%s' object cannot be interpreted as an integer"
+    ; CPython builds the iterator before it looks at start=, so an argument
+    ; that is wrong in both ways is reported as the iterable it is not:
+    ; enumerate(True, True) is "'bool' object is not iterable" there.
+    mov rdi, [rbp - EN_ITER]
+    test rdi, rdi
+    jnz .enum_te_have_iterable
+    mov rax, [rbp - EN_ARGS]
+    mov rdi, [rax]
+    V_UNPACK rdi, rsi
+    mov [rbp - EN_ITER], rdi
+    mov [rbp - EN_ITERTAG], rsi
+.enum_te_have_iterable:
+    mov rdi, [rbp - EN_ITER]
+    mov rsi, [rbp - EN_ITERTAG]
+    call get_iterator                   ; raises if it is not one
+    mov rdi, rax
+    V_UNPACK rdi, rdx
+    call obj_decref
+    mov rsi, [rbp - EN_BADVAL]
+    CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .enum_error:
     mov qword [rel kw_names_pending], 0
@@ -594,7 +620,7 @@ END_FUNC enumerate_iternext
 ;; ============================================================================
 ;; The traverse/clear pairs for the wrapper iterators.
 ;;
-;; enumerate, zip, map, filter, reversed and chain all came from ap_malloc
+;; enumerate, zip, map, filter and reversed all came from ap_malloc
 ;; with tp_flags 0, so a cycle through one leaked: `a = []; z = zip(a, a);
 ;; a.append(z)` collected nothing where CPython collects six objects.  The
 ;; simple container iterators were tracked earlier and share one pair, because
@@ -607,7 +633,6 @@ END_FUNC enumerate_iternext
 ;;   filter  two owned pointers, and the first is legitimately NULL for
 ;;           filter(None, xs), so a clear must not read 0 as "already done"
 ;;   zip     an ap_malloc'd array of iterators, walked by a count
-;;   chain   the same shape at the same offsets, so the same pair serves it
 ;;   map     an array as well, plus a Value -- not a pointer -- for the
 ;;           function, which needs VISIT_V and DECREF_V rather than the
 ;;           pointer forms
@@ -620,7 +645,10 @@ DEF_FUNC_LOCAL filter_traverse
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + IT_FIELD1]  ; the function, or NULL for filter(None, xs)
+    V_TEST_PTR rdi, rax         ; a Value: only a pointer is the collector's
+    ja .ft_iter
     VISIT_PTR rdi
+.ft_iter:
     mov rdi, [rbx + IT_FIELD2]
     VISIT_PTR rdi
     pop rbx
@@ -635,7 +663,7 @@ DEF_FUNC_LOCAL filter_clear, 8            ; 1 pushes, so rsp is 16-aligned
     test rdi, rdi
     jz .fc_iter
     mov qword [rbx + IT_FIELD1], 0
-    call obj_decref
+    XDECREF_V rdi, rax
 .fc_iter:
     mov rdi, [rbx + IT_FIELD2]
     test rdi, rdi
@@ -648,7 +676,7 @@ DEF_FUNC_LOCAL filter_clear, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 END_FUNC filter_clear
 
-;; zip and chain: an iterator array at +16 walked by a count at +24.
+;; zip: an iterator array at +16 walked by a count at +24.
 DEF_FUNC_LOCAL iters_array_traverse
     push rbx
     push r12
@@ -1220,7 +1248,7 @@ DEF_FUNC builtin_map
     ret
 
 .map_error:
-    RAISE exc_TypeError_type, "map() requires at least 2 arguments"
+    RAISE exc_TypeError_type, "map() must have at least two arguments."
 END_FUNC builtin_map
 
 ;; map_iternext(self) -> rax = Value or NULL
@@ -1270,14 +1298,17 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     jmp .map_next_loop
 
 .map_call_func:
-    ; Call func(item1, item2, ...): tp_call(func, args, count)
-    mov rdi, [rbx + MAP_FUNC]       ; func
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_call]
+    ; obj_call_n, not the tp_call slot: `map(0, [1])` read a small integer's
+    ; Value as a type pointer, and a type with no tp_call called through a
+    ; NULL.  CPython refuses it here, on the first next(), and names it.  A
+    ; failure comes back as a NULL Value, which the arguments are released
+    ; around exactly as a result is.
+    mov rdi, [rbx + MAP_FUNC]       ; func, as a Value
     mov rsi, [rbp - MI_ARGS]         ; args pointer
     mov rdx, r14                     ; nargs = count
-    call rax
-    V_UNPACK rax, rdx           ; tp_call returns a Value
+    extern obj_call_n
+    call obj_call_n
+    V_UNPACK rax, rdx
     push rax                         ; save result payload
     push rdx                         ; save result tag
 
@@ -1403,8 +1434,11 @@ DEF_FUNC builtin_filter, 8            ; 3 pushes, so rsp is 16-aligned
     cmp r13, rax
     je .filter_none_func
 
-    ; INCREF func
-    INCREF r13
+    ; A VALUE, not a pointer: `filter(0, xs)` is an ordinary call -- CPython
+    ; refuses the 0 on the first next(), not here -- and INCREF on a small
+    ; integer's Value writes through the number.
+    mov rax, r13
+    INCREF_V rax, rcx
     jmp .filter_get_iter
 
 .filter_none_func:
@@ -1440,7 +1474,10 @@ DEF_FUNC builtin_filter, 8            ; 3 pushes, so rsp is 16-aligned
     ret
 
 .filter_error:
-    RAISE exc_TypeError_type, "filter() requires exactly 2 arguments"
+    CSTRING rdi, "filter expected 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_filter
 
 ;; filter_iternext(self) -> rax = Value or NULL
@@ -1471,20 +1508,24 @@ DEF_FUNC_LOCAL filter_iternext
     test r14, r14
     jz .filter_identity
 
-    ; Call func(item) and test truthiness of result
+    ; Call func(item) and test truthiness of result.  obj_call_n, not the
+    ; tp_call slot: `filter(0, [1])` read a small integer's Value as a type
+    ; pointer, and a type with no tp_call called through a NULL.  CPython
+    ; refuses it here, on the first next(), and names it.
     sub rsp, 16             ; one Value; 16 keeps rsp aligned
     mov rax, [rsp + 16]     ; item tag (pushed above)
     mov rcx, r13
     V_PACK rcx, rax         ; args[0] = item
     mov [rsp], rcx
-    mov rdi, r14             ; func
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_call]
+    mov rdi, r14             ; func, as a Value
     mov rsi, rsp             ; &args[0]
     mov edx, 1
-    call rax
-    V_UNPACK rax, rdx           ; tp_call returns a Value
+    extern obj_call_n
+    call obj_call_n
     add rsp, 16             ; pop args
+    test rax, rax
+    jz .filter_call_failed
+    V_UNPACK rax, rdx
     mov r14, rax             ; r14 = result payload
     mov r15, rdx             ; r15 = result tag
 
@@ -1536,6 +1577,20 @@ DEF_FUNC_LOCAL filter_iternext
     leave
     ret
 
+.filter_call_failed:
+    ; The exception is recorded; release the item and hand NULL back, which
+    ; is what a raising iternext looks like.
+    pop rsi                  ; the item tag
+    mov rdi, r13
+    DECREF_VAL rdi, rsi
+    RET_NULL
+    pop r15
+    pop r14
+    pop r13
+    pop rbx
+    leave
+    ret
+
 .filter_exhausted:
     RET_NULL
     pop r15
@@ -1551,11 +1606,11 @@ DEF_FUNC_LOCAL filter_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
-    ; DECREF func (if not NULL)
+    ; DECREF func (if not NULL).  A Value, so a non-pointer is nobody's.
     mov rdi, [rbx + IT_FIELD1]
     test rdi, rdi
     jz .filter_dealloc_iter
-    call obj_decref
+    XDECREF_V rdi, rax
 
 .filter_dealloc_iter:
     ; DECREF iterator
@@ -1749,7 +1804,10 @@ section .text
     ret
 
 .rev_error:
-    RAISE exc_TypeError_type, "reversed() takes exactly 1 argument"
+    CSTRING rdi, "reversed expected 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 
 .rev_type_error:
     mov rsi, r12
@@ -1852,6 +1910,19 @@ DEF_FUNC builtin_sorted, SO_FRAME
 
     mov [rbp - SO_ARGS], rdi    ; save original args
     mov [rbp - SO_NARGS], rsi   ; save original nargs
+
+    ; key= and reverse= are keyword-only, so exactly one POSITIONAL argument
+    ; is allowed -- the keyword values arrive in the same array and have to
+    ; be discounted.  `sorted([], 1)` sorted the [] and dropped the 1.
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .sorted_npos_is_nargs
+    mov rax, [rax + PyTupleObject.ob_size]
+.sorted_npos_is_nargs:
+    neg rax
+    add rax, rsi                ; positional count
+    cmp rax, 1
+    jne .sorted_error
 
     ; Get iterator from args[0]
     mov rax, rdi
@@ -1959,7 +2030,12 @@ DEF_FUNC builtin_sorted, SO_FRAME
     ret
 
 .sorted_error:
-    RAISE exc_TypeError_type, "sorted() requires exactly 1 argument"
+    mov qword [rel kw_names_pending], 0
+    mov rsi, rax
+    CSTRING rdi, "sorted expected 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 .sorted_sort_raised:
     mov rdi, r12                ; the list we built and were about to return
     call obj_decref
@@ -2310,196 +2386,6 @@ DEF_FUNC_LOCAL seq_iter_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
 END_FUNC seq_iter_dealloc
 
 ;; ============================================================================
-;; CHAIN
-;; ============================================================================
-;; ChainIterObject: +0 refcnt, +8 type, +16 it_iters, +24 it_count, +32 it_idx (40B)
-;; Iterates through multiple iterables sequentially.
-
-%define CHAIN_ITERS     16     ; pointer to iterator* array
-%define CHAIN_COUNT     24     ; number of iterators
-%define CHAIN_IDX       32     ; current iterator index
-%define CHAIN_OBJ_SIZE  40
-
-;; builtin_chain(args, nargs) -> ChainIterObject*
-;; chain(*iterables)
-DEF_FUNC builtin_chain
-    push rbx
-    push r12
-    push r13
-    push r14
-
-    mov rbx, rdi            ; args (fat 16B-stride array)
-    mov r12, rsi            ; nargs
-
-    ; Handle zero args: chain() returns empty iterator
-    test r12, r12
-    jz .chain_zero
-
-    ; Allocate array of iterator pointers: nargs * 8
-    lea rdi, [r12 * 8]
-    call ap_malloc
-    mov r13, rax             ; r13 = iterator array
-
-    ; For each arg, get its iterator
-    xor r14d, r14d          ; i = 0
-.chain_iter_loop:
-    cmp r14, r12
-    jge .chain_create
-
-    mov rax, r14
-    shl rax, 3                  ; one Value per slot
-    mov rdi, [rbx + rax]        ; args[i]
-    V_UNPACK rdi, rsi
-    push r13
-    push r14
-    call get_iterator
-    pop r14
-    pop r13
-    mov [r13 + r14 * 8], rax    ; store iterator
-
-    inc r14
-    jmp .chain_iter_loop
-
-.chain_create:
-    ; Allocate ChainIterObject (40 bytes)
-    mov edi, CHAIN_OBJ_SIZE
-    lea rsi, [rel chain_iter_type]
-    call gc_alloc
-
-    mov [rax + CHAIN_ITERS], r13       ; it_iters (array ptr)
-    mov [rax + CHAIN_COUNT], r12       ; it_count
-    mov qword [rax + CHAIN_IDX], 0     ; start at index 0
-    ; gc_track only after every field is set: it can trigger a
-    ; collection, and the traverse would walk uninitialised words.
-    push rax
-    mov rdi, rax
-    call gc_track
-    pop rax
-    mov edx, TAG_PTR
-
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.chain_zero:
-    ; Create a chain with 0 iterators (will immediately exhaust)
-    mov edi, CHAIN_OBJ_SIZE
-    lea rsi, [rel chain_iter_type]
-    call gc_alloc
-
-    mov qword [rax + CHAIN_ITERS], 0   ; NULL iters array
-    mov qword [rax + CHAIN_COUNT], 0   ; 0 iterators
-    mov qword [rax + CHAIN_IDX], 0
-    ; gc_track only after every field is set: it can trigger a
-    ; collection, and the traverse would walk uninitialised words.
-    push rax
-    mov rdi, rax
-    call gc_track
-    pop rax
-    mov edx, TAG_PTR
-
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-END_FUNC builtin_chain
-
-;; chain_iternext(self) -> (rax=payload, edx=tag) or NULL
-;; Tries current sub-iterator; on exhaustion advances to next.
-CHI_EXC   equ 8
-CHI_FRAME equ 24            ; + 1 push = 32, 16-aligned
-
-DEF_FUNC_LOCAL chain_iternext, CHI_FRAME
-    push rbx
-
-    mov rbx, rdi            ; self
-    ; The same snapshot the other iterators take: inside an `except` block a
-    ; bare test read the handled exception as "this sub-iterator failed", and
-    ; chain stopped at the first one.
-    DUNDER_EXC_SAVE [rbp - CHI_EXC]
-
-.chain_retry:
-    ; Load current index and count
-    mov rcx, [rbx + CHAIN_IDX]
-    cmp rcx, [rbx + CHAIN_COUNT]
-    jge .chain_exhausted
-
-    ; Get current iterator: iters[idx]
-    mov rax, [rbx + CHAIN_ITERS]
-    mov rdi, [rax + rcx * 8]
-
-    ; Call iternext via helper (handles __next__, clears StopIteration)
-    call call_iternext
-    test rax, rax
-    jnz .chain_got_value
-
-    ; call_iternext clears StopIteration automatically.
-    ; Check for other exceptions — those must propagate.
-    EXC_RAISED_SINCE [rbp - CHI_EXC], rax, .chain_exhausted
-
-    ; Normal exhaustion — advance to next iterator
-    inc qword [rbx + CHAIN_IDX]
-    jmp .chain_retry
-
-.chain_got_value:
-    pop rbx
-    leave
-    ret
-
-.chain_exhausted:
-    RET_NULL
-    pop rbx
-    leave
-    ret
-END_FUNC chain_iternext
-
-;; chain_dealloc(self)
-DEF_FUNC_LOCAL chain_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
-    push rbx
-    push r12
-    push r13
-    mov rbx, rdi
-
-    ; DECREF each iterator in array
-    mov r12, [rbx + CHAIN_COUNT]
-    mov r13, [rbx + CHAIN_ITERS]
-    test r13, r13
-    jz .chain_dealloc_free     ; NULL iters (zero-arg chain)
-
-    xor ecx, ecx
-.chain_dealloc_loop:
-    cmp rcx, r12
-    jge .chain_free_array
-    push rcx
-    mov rdi, [r13 + rcx * 8]
-    call obj_decref
-    pop rcx
-    inc rcx
-    jmp .chain_dealloc_loop
-
-.chain_free_array:
-    mov rdi, r13
-    call ap_free
-
-.chain_dealloc_free:
-    mov rdi, rbx
-    call gc_dealloc
-
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC chain_dealloc
-
-;; ============================================================================
 ;; Data section - type name strings and type objects
 ;; ============================================================================
 section .data
@@ -2511,7 +2397,6 @@ filter_iter_name:    db "filter", 0
 reversed_iter_name:  db "reversed", 0
 seq_iter_name:       db "iterator", 0
 callable_iter_name:  db "callable_iterator", 0
-chain_iter_name:     db "itertools.chain", 0
 
 ; Enumerate iterator type
 align 8
@@ -2744,35 +2629,3 @@ reversed_iter_type:
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
 
-; Chain iterator type
-align 8
-global chain_iter_type
-chain_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
-    dq type_type                ; ob_type
-    dq chain_iter_name          ; tp_name
-    dq CHAIN_OBJ_SIZE           ; tp_basicsize
-    dq chain_dealloc            ; tp_dealloc
-    dq 0                        ; tp_repr
-    dq 0                        ; tp_str
-    dq 0                        ; tp_hash
-    dq 0                        ; tp_call
-    dq 0                        ; tp_getattr
-    dq 0                        ; tp_setattr
-    dq 0                        ; tp_richcompare
-    dq itertools_iter_self      ; tp_iter
-    dq chain_iternext           ; tp_iternext
-    dq 0                        ; tp_init
-    dq 0                        ; tp_new
-    dq 0                        ; tp_as_number
-    dq 0                        ; tp_as_sequence
-    dq 0                        ; tp_as_mapping
-    dq 0                        ; tp_base
-    dq 0                        ; tp_dict
-    dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC        ; tp_flags
-    dq 0                        ; tp_bases
-    dq iters_array_traverse                        ; tp_traverse
-    dq iters_array_clear                        ; tp_clear
-    dq 0 ; tp_dictoffset
-    dq 0                        ; tp_tailslots

@@ -527,50 +527,17 @@ DEF_FUNC list_method_sort, LS_FRAME
     sub rsp, 16                    ; one Value; 16 keeps rsp aligned
     mov [rsp], rdi                 ; args[0] = item
 
-    ; Get key function's tp_call
+    ; The key, through obj_call_n: it takes a function, a builtin, a type or
+    ; an instance with a __call__, and refuses anything else BY NAME.  The
+    ; three-way tp_call dance that used to be here read a non-pointer key's
+    ; Value as a type pointer -- `sorted([1, 2], key=0)` -- and called
+    ; through a NULL tp_call for a type that has none.
     mov rdi, [rbp - LS_KEY]
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_call]
-    test rax, rax
-    jz .sort_key_try_meta
-
-    ; tp_call(rdi=callable, rsi=args, rdx=nargs)
-    mov rsi, rsp                   ; args ptr → &[item]
+    mov rsi, rsp                   ; args ptr -> &[item]
     mov edx, 1                     ; nargs = 1
-    call rax
-    V_UNPACK rax, rdx           ; tp_call returns a Value
-    jmp .sort_key_store
-
-.sort_key_try_meta:
-    ; tp_call NULL — check if heaptype instance with __call__
-    mov rdi, [rbp - LS_KEY]
-    mov rax, [rdi + PyObject.ob_type]
-    mov rdx, [rax + PyTypeObject.tp_flags]
-    test rdx, TYPE_FLAG_HEAPTYPE
-    jz .sort_key_meta_builtin
-
-    ; Heaptype instance: use __call__(key, item) via dunder_call_2
-    mov rsi, [rsp]                 ; the item Value
-    V_UNPACK rsi, rcx
-    extern dunder_call
-    lea rdx, [rel dunder_call]
-    extern dunder_call_2
-    call dunder_call_2
-    V_UNPACK rax, rdx           ; returns a Value
-    jmp .sort_key_store
-
-.sort_key_meta_builtin:
-    ; Built-in type: try metatype's tp_call (e.g., for type objects used as key)
-    mov rdi, [rbp - LS_KEY]
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyObject.ob_type]  ; metatype
-    mov rax, [rax + PyTypeObject.tp_call]
-    test rax, rax
-    jz .sort_key_error
-    mov rsi, rsp
-    mov edx, 1
-    call rax
-    V_UNPACK rax, rdx           ; tp_call returns a Value
+    extern obj_call_n
+    call obj_call_n
+    V_UNPACK rax, rdx
 
 .sort_key_store:
     add rsp, 16                    ; pop item from stack
@@ -1123,6 +1090,18 @@ DEF_FUNC list_method_sort, LS_FRAME
     call ap_free
     jmp .sort_done
 
+.sort_trivial_raised:
+    xor eax, eax
+    xor edx, edx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
 .sort_cleanup_keys:
     ; Error during key computation — DECREF computed keys and free
     mov r14, [rbp - LS_KSRC]
@@ -1147,6 +1126,29 @@ DEF_FUNC list_method_sort, LS_FRAME
     EXC_RAISED_SINCE [rbp - LS_EXC], rax, .sort_error_return
 
 .sort_trivial_done:
+    ; n < 2 and nothing to sort -- but the KEY still runs, once per element.
+    ; CPython computes them before it looks at the length, so `sorted([1],
+    ; key=0)` is a TypeError there and was [1] here, and a key that raises
+    ; was not called at all.
+    cmp qword [rbp - LS_KEY], 0
+    jz .sort_trivial_no_key
+    cmp qword [rbp - LS_N], 1
+    jne .sort_trivial_no_key
+    mov rax, [rbx + PyListObject.ob_item]
+    test rax, rax
+    jz .sort_trivial_no_key
+    mov rdi, [rax]                 ; items[0], a Value
+    sub rsp, 16
+    mov [rsp], rdi
+    mov rdi, [rbp - LS_KEY]
+    mov rsi, rsp
+    mov edx, 1
+    call obj_call_n
+    add rsp, 16
+    test rax, rax
+    jz .sort_trivial_raised
+    XDECREF_V rax, rcx             ; only whether it could be computed
+.sort_trivial_no_key:
     ; n < 2, no sort needed, return None
     RET_NONE
     pop r15
@@ -1472,7 +1474,12 @@ DEF_FUNC list_method_index, LI_FRAME
     jmp eval_exception_unwind
 
 .index_not_found:
-    RAISE exc_ValueError_type, "x not in list"
+    ; CPython names the value it could not find, through its repr.
+    mov rsi, [rbp - LI_VPAY]
+    CSTRING rdx, " is not in list"
+    CSTRING rdi, ""
+    extern raise_value_error_with_repr2
+    jmp raise_value_error_with_repr2
 END_FUNC list_method_index
 
 ;; ============================================================================
@@ -1686,9 +1693,12 @@ END_FUNC list_dunder_len
 extern list_inplace_concat
 DEF_FUNC_BARE list_dunder_iadd
     REQUIRE_SELF_BARE list_type, "__iadd__"
+    ; Both operands go through as VALUES: list_inplace_concat unpacks them
+    ; itself, and unpacking here first left an immediate's payload where a
+    ; Value belonged -- `[1].__iadd__(0)` named no type at all, because the
+    ; payload of 0 is 0 and nothing has that type.
     mov rax, [rdi]          ; self
-    mov rsi, [rdi + 8]     ; other payload
-    V_UNPACK rsi, rcx       ; args[1]
+    mov rsi, [rdi + 8]      ; other
     mov rdi, rax
     jmp list_inplace_concat
 END_FUNC list_dunder_iadd

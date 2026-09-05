@@ -46,7 +46,18 @@ BO_RIGHT equ 0
 BO_RTAG  equ 8
 BO_LEFT  equ 16
 BO_LTAG  equ 24
-BO_SIZE  equ 32
+; The op index, pushed under the operands so the four offsets above are what
+; they always were.  It lived in r9d, which is caller-saved: the reflected
+; dunder call clobbers it, and that is the path every unsupported pair ends
+; up on -- so the message read binary_op_symbols[0] and every operator in the
+; interpreter reported itself as '+'.
+BO_OP    equ 40
+BO_SIZE  equ 48
+; op_compare_op saves the same four words in the same order and needs no op
+; index -- its own is in a register nothing calls across.  It had shared
+; BO_SIZE, so widening that one would have discarded two words it never
+; pushed.
+CO_SIZE  equ 32
 
 ; A dunder that answers the NotImplemented singleton is DECLINING, exactly as
 ; a slot declines with a NULL Value -- the protocol is supposed to move on to
@@ -525,6 +536,8 @@ DEF_FUNC_BARE op_binary_op
 .binop_generic:
     ; Save operands + tags for DECREF after call (push on machine stack)
     ; Stack layout: [rsp+BO_RIGHT], [rsp+BO_RTAG], [rsp+BO_LEFT], [rsp+BO_LTAG]
+    push rcx                   ; the op index, for the error path at the end
+    push rcx                   ; ...and a pad, so the push list stays even
     push r9                    ; save left tag
     push rdi                   ; save left
     push r8                    ; save right tag
@@ -1269,6 +1282,8 @@ DEF_FUNC_BARE op_binary_op
     jmp .binop_have_result
 
 .binop_no_method:
+    ; Whatever the last call left in r9.
+    mov r9d, [rsp + BO_OP]
     ; A sequence multiplied by something that is not an index gets CPython's
     ; own wording, which names only the offending count: "can't multiply
     ; sequence by non-int of type 'float'".
@@ -1277,23 +1292,28 @@ DEF_FUNC_BARE op_binary_op
     cmp r9d, 18                 ; NB_INPLACE_MULTIPLY
     jne .bnm_generic
 .bnm_mul:
-    mov rdi, [rsp + BO_RIGHT]
-    mov rcx, [rsp + BO_RTAG]
+    ; The LEFT operand is asked first, which is the order CPython's
+    ; PyNumber_Multiply asks in: whichever side has sq_repeat is the
+    ; sequence, and the OTHER one is the count the message names.  Asking the
+    ; right first names the wrong operand whenever both are sequences, and
+    ; `bytearray(b"ab") * "3"` said the bytearray was the non-int.
+    mov rdi, [rsp + BO_LEFT]
+    mov rcx, [rsp + BO_LTAG]
     cmp rcx, TAG_PTR
-    jne .bnm_mul_try_left
+    jne .bnm_mul_try_right
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_sequence]
     test rax, rax
-    jz .bnm_mul_try_left
+    jz .bnm_mul_try_right
     cmp qword [rax + PySequenceMethods.sq_repeat], 0
-    je .bnm_mul_try_left
-    mov rdi, [rsp + BO_LEFT]    ; the right is the sequence, so the left is
-    mov rdx, [rsp + BO_LTAG]    ; the count that is not an index
+    je .bnm_mul_try_right
+    mov rdi, [rsp + BO_RIGHT]   ; the left is the sequence, so the right is
+    mov rdx, [rsp + BO_RTAG]    ; the count that is not an index
     VALUE_FOR_TYPE rdi, rdx
     jmp .bnm_mul_msg
-.bnm_mul_try_left:
-    mov rdi, [rsp + BO_LEFT]
-    mov rcx, [rsp + BO_LTAG]
+.bnm_mul_try_right:
+    mov rdi, [rsp + BO_RIGHT]
+    mov rcx, [rsp + BO_RTAG]
     cmp rcx, TAG_PTR
     jne .bnm_generic
     mov rax, [rdi + PyObject.ob_type]
@@ -1302,8 +1322,8 @@ DEF_FUNC_BARE op_binary_op
     jz .bnm_generic
     cmp qword [rax + PySequenceMethods.sq_repeat], 0
     je .bnm_generic
-    mov rdi, [rsp + BO_RIGHT]
-    mov rdx, [rsp + BO_RTAG]
+    mov rdi, [rsp + BO_LEFT]
+    mov rdx, [rsp + BO_LTAG]
     VALUE_FOR_TYPE rdi, rdx
 .bnm_mul_msg:
     mov rsi, rdi
@@ -1809,7 +1829,7 @@ section .text
     mov rsi, [rsp + 16 + BO_LTAG]
     DECREF_VAL rdi, rsi
     RESTORE_FAT_RESULT
-    add rsp, BO_SIZE           ; discard saved operands + tags
+    add rsp, CO_SIZE           ; discard saved operands + tags
 
     ; Push result
     VPUSH_VAL rax, rdx
@@ -1968,7 +1988,7 @@ section .text
     mov rsi, [rsp + BO_RIGHT]
     mov rdx, [rsp + BO_RTAG]
     VALUE_FOR_TYPE rsi, rdx
-    add rsp, BO_SIZE
+    add rsp, CO_SIZE
     sub rsp, 64
     mov [rsp + 48], rdi
     mov [rsp + 56], rsi
@@ -2016,7 +2036,7 @@ section .text
     mov rdi, [rsp + BO_RIGHT]
     mov rsi, [rsp + BO_RTAG]
     DECREF_VAL rdi, rsi
-    add rsp, BO_SIZE
+    add rsp, CO_SIZE
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
     VPUSH_PTR rax
@@ -2030,7 +2050,7 @@ section .text
     mov rdi, [rsp + BO_RIGHT]
     mov rsi, [rsp + BO_RTAG]
     DECREF_VAL rdi, rsi
-    add rsp, BO_SIZE
+    add rsp, CO_SIZE
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
     VPUSH_PTR rax
@@ -2280,7 +2300,9 @@ bops_ixor:      db "^=", 0
 bops_unknown:   db "?", 0
 cmp_msg_quote:  db "'", 0
 cmp_msg_tail:   db "' not supported between instances", 0
+global binop_msg_prefix
 binop_msg_prefix: db "unsupported operand type(s) for ", 0
+global cmp_msg_open
 cmp_msg_open:     db " of '", 0
 section .data
 

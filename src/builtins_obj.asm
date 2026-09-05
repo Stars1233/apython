@@ -64,362 +64,14 @@ extern type_type
 extern user_type_metatype
 extern dict_new
 
-;; ============================================================================
-;; 1. builtin_abs(args, nargs) - abs(x)
-;; ============================================================================
-
-; --- moved to a sibling file by the split ---
+; --- builtin_abs and the str() constructor moved to sibling files by the
+; --- two splits this file has had.
 
 section .text
 
-DEF_FUNC_BARE str_type_call
-    mov rdi, rsi
-    mov rsi, rdx
-    jmp builtin_str_fn
-END_FUNC str_type_call
-
 ;; ============================================================================
-;; 3. builtin_str_fn(args, nargs) - str(x[, encoding[, errors]])
-;;
-;; The decoding form was missing outright: `str(b, "utf-8")` was
-;; "str() takes at most 1 argument".  CPython's re/_parser.py uses it, which
-;; is what kept glob and fnmatch from importing.
-;;
-;; It is the one builtin whose second argument changes what the first one
-;; means: with an encoding, str() is a decode and takes a bytes-like object
-;; only -- str("a", "utf-8") is an error, not a copy.
-;; ============================================================================
-SB_OBJ   equ 8
-SB_ENC   equ 16
-SB_ERR   equ 24
-SB_NPOS  equ 32
-SB_NKW   equ 40
-SB_ARGS  equ 48
-SB_ARGV  equ 80          ; the three-slot array handed to decode:
-                         ; [-80] self, [-72] encoding, [-64] errors
-SB_FRAME equ 96          ; + 0 pushes = 96
-
-DEF_FUNC builtin_str_fn, SB_FRAME
-    mov qword [rbp - SB_OBJ], 0
-    mov qword [rbp - SB_ENC], 0
-    mov qword [rbp - SB_ERR], 0
-    mov [rbp - SB_ARGS], rdi
-    mov [rbp - SB_NPOS], rsi
-    mov qword [rbp - SB_NKW], 0
-
-    ; Keyword arguments arrive as trailing positional slots, named by
-    ; kw_names_pending.  str's three names are object, encoding and errors.
-    mov rax, [rel kw_names_pending]
-    test rax, rax
-    jz .str_bind_positional
-    mov qword [rel kw_names_pending], 0     ; consumed, however this ends
-    mov rcx, [rax + PyTupleObject.ob_size]
-    mov [rbp - SB_NKW], rcx
-    sub qword [rbp - SB_NPOS], rcx
-
-    xor r9d, r9d
-.str_kw_loop:
-    cmp r9, [rbp - SB_NKW]
-    jge .str_bind_positional
-    mov r10, [rax + PyTupleObject.ob_item]
-    mov r10, [r10 + r9*8]                   ; the keyword's name
-    mov r11, [rbp - SB_ARGS]
-    mov rcx, [rbp - SB_NPOS]
-    add rcx, r9
-    mov r11, [r11 + rcx*8]                  ; the value that goes with it
-
-    push rax
-    push r9
-    push r11
-    sub rsp, 8
-    lea rdi, [r10 + PyStrObject.data]
-    CSTRING rsi, "object"
-    call ap_strcmp
-    test eax, eax
-    jz .str_kw_object
-    lea rdi, [r10 + PyStrObject.data]
-    CSTRING rsi, "encoding"
-    call ap_strcmp
-    test eax, eax
-    jz .str_kw_encoding
-    lea rdi, [r10 + PyStrObject.data]
-    CSTRING rsi, "errors"
-    call ap_strcmp
-    test eax, eax
-    jz .str_kw_errors
-    add rsp, 8
-    pop r11
-    pop r9
-    pop rax
-    lea rdi, [r10 + PyStrObject.data]
-    call str_raise_bad_keyword
-.str_kw_object:
-    mov rcx, [rsp + 8]
-    mov [rbp - SB_OBJ], rcx
-    jmp .str_kw_next
-.str_kw_encoding:
-    mov rcx, [rsp + 8]
-    mov [rbp - SB_ENC], rcx
-    jmp .str_kw_next
-.str_kw_errors:
-    mov rcx, [rsp + 8]
-    mov [rbp - SB_ERR], rcx
-.str_kw_next:
-    add rsp, 8
-    pop r11
-    pop r9
-    pop rax
-    inc r9
-    jmp .str_kw_loop
-
-.str_bind_positional:
-    ; The positional slots fill object, encoding and errors in that order.
-    mov rcx, [rbp - SB_NPOS]
-    cmp rcx, 3
-    jg .str_too_many
-    mov rdi, [rbp - SB_ARGS]
-    test rcx, rcx
-    jle .str_bound
-    mov rax, [rdi]
-    mov [rbp - SB_OBJ], rax
-    cmp rcx, 2
-    jl .str_bound
-    mov rax, [rdi + 8]
-    mov [rbp - SB_ENC], rax
-    cmp rcx, 3
-    jl .str_bound
-    mov rax, [rdi + 16]
-    mov [rbp - SB_ERR], rax
-
-.str_bound:
-    ; No encoding and no errors is the ordinary str(): str() is "", and
-    ; str(x) is x's __str__.
-    cmp qword [rbp - SB_ENC], 0
-    jne .str_decode
-    cmp qword [rbp - SB_ERR], 0
-    jne .str_decode
-    cmp qword [rbp - SB_OBJ], 0
-    je .str_no_args
-    mov rdi, [rbp - SB_OBJ]
-    call obj_str
-    leave
-    ret
-
-.str_no_args:
-    CSTRING rdi, ""
-    call str_from_cstr
-    leave
-    ret
-
-.str_decode:
-    ; With an encoding, str() decodes -- and takes a bytes-like object only.
-    ; str() with errors= and no object is still "", as CPython's is.
-    cmp qword [rbp - SB_OBJ], 0
-    je .str_no_args
-    mov rdi, [rbp - SB_OBJ]
-    V_TEST_PTR rdi, rax
-    ja .str_not_bytes
-    test rdi, rdi
-    jz .str_not_bytes
-    mov rax, [rdi + PyObject.ob_type]
-
-    lea rcx, [rel str_type]
-    cmp rax, rcx
-    je .str_decoding_str
-    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
-    jnz .str_decoding_str
-
-    ; Default the encoding to utf-8, which is what CPython does when only
-    ; errors= was given.
-    cmp qword [rbp - SB_ENC], 0
-    jne .str_have_enc
-    push rax
-    CSTRING rdi, "utf-8"
-    call str_from_cstr
-    mov [rbp - SB_ENC], rax
-    pop rax
-    ; The temporary is dropped below, once the decode has read it.
-.str_have_enc:
-    ; CPython checks both here and names str(), not the decode underneath.
-    push rax
-    sub rsp, 8
-    mov rdi, [rbp - SB_ENC]
-    CSTRING rsi, "encoding"
-    call str_require_str_arg
-    mov rdi, [rbp - SB_ERR]
-    CSTRING rsi, "errors"
-    call str_require_str_arg
-    add rsp, 8
-    pop rax
-
-    mov rcx, [rbp - SB_OBJ]
-    mov [rbp - SB_ARGV], rcx
-    mov rcx, [rbp - SB_ENC]
-    mov [rbp - SB_ARGV + 8], rcx
-    mov rcx, [rbp - SB_ERR]
-    mov [rbp - SB_ARGV + 16], rcx
-    mov esi, 2
-    cmp qword [rbp - SB_ERR], 0
-    je .str_argc_set
-    mov esi, 3
-.str_argc_set:
-    lea rdi, [rbp - SB_ARGV]
-
-    lea rcx, [rel bytes_type]
-    cmp rax, rcx
-    je .str_call_bytes
-    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
-    jnz .str_call_bytes
-    lea rcx, [rel bytearray_type]
-    cmp rax, rcx
-    je .str_call_bytearray
-    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTEARRAY_SUBCLASS
-    jnz .str_call_bytearray
-    lea rcx, [rel memoryview_type]
-    cmp rax, rcx
-    je .str_call_memoryview
-    jmp .str_not_bytes
-
-.str_call_bytes:
-    call _bytes_decode_impl
-    leave
-    ret
-.str_call_bytearray:
-    call ba_shared_decode
-    leave
-    ret
-.str_call_memoryview:
-    ; A memoryview has no decode of its own; CPython's str() reads its buffer.
-    ; Copying it to a bytes first is the same answer for the contiguous views
-    ; this build can make.
-    push rdi
-    push rsi
-    lea rsi, [rbp - SB_ARGV]
-    mov edx, 1
-    lea rdi, [rel bytes_type]
-    call bytes_type_call
-    pop rsi
-    pop rdi
-    test rax, rax
-    jz .str_failed
-    mov [rbp - SB_ARGV], rax
-    push rax
-    sub rsp, 8
-    lea rdi, [rbp - SB_ARGV]
-    call _bytes_decode_impl
-    add rsp, 8
-    pop rdi
-    push rax
-    call obj_decref
-    pop rax
-    leave
-    ret
-.str_failed:
-    xor eax, eax
-    leave
-    ret
-
-.str_decoding_str:
-    RAISE exc_TypeError_type, "decoding str is not supported"
-.str_not_bytes:
-    mov rsi, [rbp - SB_OBJ]
-    lea rdi, [rel str_decode_needs_bytes]
-    call raise_type_error_with_name
-.str_too_many:
-    mov rsi, [rbp - SB_NPOS]
-    add rsi, [rbp - SB_NKW]
-    lea rdi, [rel str_too_many_msg]
-    CSTRING rdx, " given)"
-    call raise_type_error_counted
-END_FUNC builtin_str_fn
-
-;; ============================================================================
-;; str_require_str_arg(rdi = the argument, or 0 when it was not given,
-;;                     rsi = the parameter's name)
-;; Raises "str() argument 'encoding' must be str, not int", CPython's wording.
-;; ============================================================================
-SRA_NAME  equ 8
-SRA_ARG   equ 16
-SRA_BUF   equ 176
-SRA_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
-DEF_FUNC_LOCAL str_require_str_arg, SRA_FRAME
-    test rdi, rdi
-    jz .sras_ok                 ; not given at all
-    mov [rbp - SRA_ARG], rdi
-    mov [rbp - SRA_NAME], rsi
-    V_TEST_PTR rdi, rax
-    ja .sras_bad
-    mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel str_type]
-    cmp rax, rcx
-    je .sras_ok
-    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
-    jnz .sras_ok
-.sras_bad:
-    lea rdi, [rbp - SRA_BUF]
-    CSTRING rsi, "str() argument '"
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, [rbp - SRA_NAME]
-    call rbt_append_cstr
-    mov rdi, rax
-    CSTRING rsi, "' must be str, not "
-    call rbt_append_cstr
-    mov rdi, rax
-    push rax
-    mov rdi, [rbp - SRA_ARG]
-    call value_type
-    test rax, rax
-    jz .sras_unknown
-    mov rsi, [rax + PyTypeObject.tp_name]
-    jmp .sras_named
-.sras_unknown:
-    CSTRING rsi, "object"
-.sras_named:
-    pop rdi
-    call rbt_append_cstr
-    lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rbp - SRA_BUF]
-    call raise_exception
-.sras_ok:
-    leave
-    ret
-END_FUNC str_require_str_arg
-
-
-;; ============================================================================
-;; str_raise_bad_keyword(rdi = the keyword's name, as a C string)
-;; "'foo' is an invalid keyword argument for str()".
-;; ============================================================================
-SRK_NAME  equ 8
-SRK_BUF   equ 176
-SRK_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
-DEF_FUNC_LOCAL str_raise_bad_keyword, SRK_FRAME
-    mov [rbp - SRK_NAME], rdi
-    lea rdi, [rbp - SRK_BUF]
-    CSTRING rsi, "'"
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, [rbp - SRK_NAME]
-    call rbt_append_cstr
-    mov rdi, rax
-    CSTRING rsi, "' is an invalid keyword argument for str()"
-    call rbt_append_cstr
-    lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rbp - SRK_BUF]
-    call raise_exception
-END_FUNC str_raise_bad_keyword
-
-section .rodata
-str_too_many_msg: db "str() takes at most 3 arguments (", 0
-section .text
-
-section .rodata
-str_decode_needs_bytes: db "decoding to str: need a bytes-like object, ", 1, " found", 0
-section .text
-
-;; ============================================================================
-;; 7. builtin_id(args, nargs) - id(x)
+;; 7. builtin_id(rdi = args, rsi = nargs) - id(x)
+;;   -> rax = Value
 ;; ============================================================================
 DEF_FUNC builtin_id
 
@@ -447,7 +99,8 @@ DEF_FUNC builtin_id
 END_FUNC builtin_id
 
 ;; ============================================================================
-;; 8. builtin_hash_fn(args, nargs) - hash(x)
+;; 8. builtin_hash_fn(rdi = args, rsi = nargs) - hash(x)
+;;   -> rax = Value
 ;;
 ;; obj_hash and nothing else.  This used to reimplement the dispatch -- int
 ;; immediate, float immediate, else tp_hash -- and raise when tp_hash was 0.
@@ -476,7 +129,8 @@ DEF_FUNC builtin_hash_fn
 END_FUNC builtin_hash_fn
 
 ;; ============================================================================
-;; 9. builtin_callable(args, nargs) - callable(x)
+;; 9. builtin_callable(rdi = args, rsi = nargs) - callable(x)
+;;   -> rax = Value
 ;; ============================================================================
 DEF_FUNC builtin_callable
 
@@ -548,11 +202,15 @@ DEF_FUNC builtin_callable
     ret
 
 .callable_error:
-    RAISE exc_TypeError_type, "callable() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "callable() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_callable
 
 ;; ============================================================================
-;; 10. builtin_iter_fn(args, nargs) - iter(x)
+;; 10. builtin_iter_fn(rdi = args, rsi = nargs) - iter(x)
+;;   -> rax = Value
 ;; ============================================================================
 DEF_FUNC builtin_iter_fn
 
@@ -613,9 +271,13 @@ iter_few_msg:   db "iter expected at least 1 argument, got ", 0
 section .text
 
 ;; ============================================================================
-;; 11. builtin_next_fn(args, nargs) - next(x)
+;; 11. builtin_next_fn(rdi = args, rsi = nargs) - next(x)
+;;   -> rax = Value
 ;; ============================================================================
 NX_EXC   equ 8              ; current_exception before __next__ ran
+; args[0] as it arrived, for the refusal: CPython names the type, and this
+; said only "object is not an iterator".
+NX_ARG   equ 16
 NX_FRAME equ 24            ; + 1 push = 32, 16-aligned
 
 DEF_FUNC builtin_next_fn, NX_FRAME
@@ -626,10 +288,14 @@ DEF_FUNC builtin_next_fn, NX_FRAME
     je .next_one_arg
     cmp rsi, 2
     je .next_two_args
+    test rsi, rsi
+    jz .next_too_few
     jmp .next_error
 
 .next_two_args:
     ; next(iterator, default) — return default on StopIteration
+    mov rax, [rdi]
+    mov [rbp - NX_ARG], rax        ; the refusal below names its type
     push qword [rdi + 8]           ; save the default Value
     push qword [rdi + 8]           ; keep rsp 16-byte aligned
     ; Fall through to same iterator logic, but with default on stack
@@ -688,6 +354,8 @@ DEF_FUNC builtin_next_fn, NX_FRAME
     jmp .next_type_error
 
 .next_one_arg:
+    mov rax, [rdi]
+    mov [rbp - NX_ARG], rax
 
     V_TEST_INT_M [rdi], r11      ; args[0] an int immediate?
     jae .next_type_error
@@ -760,7 +428,15 @@ DEF_FUNC builtin_next_fn, NX_FRAME
     ; Get generator's return value for StopIteration (already a Value)
     mov rsi, [rbx + PyGenObject.gi_return_value]
     test rsi, rsi
-    jnz .next_stop_with_val
+    jz .next_stop_no_val
+    ; A generator that returns None raises a BARE StopIteration in CPython --
+    ; args is (), so str(e) is "" and the traceback says "StopIteration" and
+    ; not "StopIteration: None".  gi_return_value holds the None singleton
+    ; for such a generator, which is not the same as holding nothing.
+    lea rax, [rel none_singleton]
+    cmp rsi, rax
+    jne .next_stop_with_val
+    xor esi, esi
 .next_stop_no_val:
     ; No argument, not None: CPython's next() over an exhausted iterator
     ; raises a bare StopIteration, whose str() is '' -- passing the None
@@ -774,17 +450,32 @@ DEF_FUNC builtin_next_fn, NX_FRAME
     call raise_exception_obj
 
 .next_type_error:
-    RAISE exc_TypeError_type, "object is not an iterator"
+    mov rsi, [rbp - NX_ARG]
+    CSTRING rdi, `'\x01' object is not an iterator`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+
+.next_too_few:
+    CSTRING rdi, "next expected at least 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 
 .next_error:
-    RAISE exc_TypeError_type, "next() takes exactly one argument"
+    CSTRING rdi, "next expected at most 2 arguments, got "
+    xor edx, edx
+    jmp raise_type_error_counted
 END_FUNC builtin_next_fn
 
 ;; ============================================================================
-;; 12. builtin_any(args, nargs) - any(iterable)
+;; 12. builtin_any(rdi = args, rsi = nargs) - any(iterable)
+;;   -> rax = Value
 ;; ============================================================================
 ANY_EXC   equ 8             ; current_exception before the iteration started
-ANY_FRAME equ 16            ; + 4 pushes = 48, 16-aligned
+; args[0] as it arrived: the refusal said "argument is not iterable" and
+; CPython names the type.
+ANY_ARG   equ 16
+ANY_FRAME equ 32            ; + 4 pushes = 64, 16-aligned
 
 DEF_FUNC builtin_any, ANY_FRAME
     push rbx
@@ -795,6 +486,8 @@ DEF_FUNC builtin_any, ANY_FRAME
     cmp rsi, 1
     jne .any_error
 
+    mov rax, [rdi]
+    mov [rbp - ANY_ARG], rax
     V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
     ja .any_type_error
     mov rdi, [rdi]
@@ -873,17 +566,26 @@ DEF_FUNC builtin_any, ANY_FRAME
     ret
 
 .any_type_error:
-    RAISE exc_TypeError_type, "argument is not iterable"
+    mov rsi, [rbp - ANY_ARG]
+    CSTRING rdi, `'\x01' object is not iterable`
+    jmp raise_type_error_with_name
 
 .any_error:
-    RAISE exc_TypeError_type, "any() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "any() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_any
 
 ;; ============================================================================
-;; 13. builtin_all(args, nargs) - all(iterable)
+;; 13. builtin_all(rdi = args, rsi = nargs) - all(iterable)
+;;   -> rax = Value
 ;; ============================================================================
 ALL_EXC   equ 8             ; current_exception before the iteration started
-ALL_FRAME equ 16            ; + 4 pushes = 48, 16-aligned
+; args[0] as it arrived: the refusal said "argument is not iterable" and
+; CPython names the type.
+ALL_ARG   equ 16
+ALL_FRAME equ 32            ; + 4 pushes = 64, 16-aligned
 
 DEF_FUNC builtin_all, ALL_FRAME
     push rbx
@@ -894,6 +596,8 @@ DEF_FUNC builtin_all, ALL_FRAME
     cmp rsi, 1
     jne .all_error
 
+    mov rax, [rdi]
+    mov [rbp - ALL_ARG], rax
     V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
     ja .all_type_error
     mov rdi, [rdi]
@@ -971,14 +675,20 @@ DEF_FUNC builtin_all, ALL_FRAME
     ret
 
 .all_type_error:
-    RAISE exc_TypeError_type, "argument is not iterable"
+    mov rsi, [rbp - ALL_ARG]
+    CSTRING rdi, `'\x01' object is not iterable`
+    jmp raise_type_error_with_name
 
 .all_error:
-    RAISE exc_TypeError_type, "all() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "all() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_all
 
 ;; ============================================================================
-;; 14. builtin_sum(args, nargs) - sum(iterable[, start])
+;; 14. builtin_sum(rdi = args, rsi = nargs) - sum(iterable[, start])
+;;   -> rax = Value
 ;; ============================================================================
 ;; Every addition goes through obj_binary_op, the whole numeric protocol.
 ;; This used to pick between int_add and float_add on the two operands' tags
@@ -1005,7 +715,7 @@ DEF_FUNC builtin_sum, SM_FRAME
     push r12
 
     cmp rsi, 1
-    jb .sum_error
+    jb .sum_too_few
     cmp rsi, 2
     ja .sum_error
 
@@ -1132,12 +842,21 @@ DEF_FUNC builtin_sum, SM_FRAME
     DECREF_V rdi, rdx
     RAISE exc_TypeError_type, "sum() can't sum bytearray [use b''.join(seq) instead]"
 
+.sum_too_few:
+    CSTRING rdx, " given)"
+    CSTRING rdi, "sum() takes at least 1 positional argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+
 .sum_error:
-    RAISE exc_TypeError_type, "sum expected 1-2 arguments"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "sum() takes at most 2 arguments ("
+    jmp raise_type_error_counted
 END_FUNC builtin_sum
 
 ;; ============================================================================
-;; 15-16. builtin_min / builtin_max
+;; 15-16. builtin_min / builtin_max(rdi = args, rsi = nargs)
+;;   -> rax = Value
 ;; ============================================================================
 ; Shared implementation: minmax_impl(args, nargs, cmp_op)
 ;   rdi = args (Value[]), rsi = nargs, edx = cmp_op (PY_LT for min, PY_GT for max)
@@ -1174,6 +893,10 @@ DEF_FUNC_BARE builtin_min
     jmp minmax_impl
 END_FUNC builtin_min
 
+;; ============================================================================
+;; builtin_max(rdi = args, rsi = nargs) -> rax = Value
+;; The other half of the pair above, selecting PY_GT instead.
+;; ============================================================================
 DEF_FUNC_BARE builtin_max
     mov edx, PY_GT                 ; PY_GT = 4
     jmp minmax_impl
@@ -1211,6 +934,12 @@ DEF_FUNC_LOCAL mm_key_of, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 END_FUNC mm_key_of
 
+;; ============================================================================
+;; minmax_impl(rdi = args, rsi = nargs, edx = the comparison op)
+;;   -> rax = Value
+;; Both builtins, in one body: the op is the only thing that differs, and
+;; key= and default= are keyword-only for either of them.
+;; ============================================================================
 DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     push rbx
     push r12
@@ -1518,13 +1247,60 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     call raise_type_error_with_name
 
 .mm_error:
-    RAISE exc_TypeError_type, "min()/max() expected at least 1 argument"
+    ; CPython names the one that was called, and says how many it got.
+    mov rsi, [rbp - MM_NPOS]
+    cmp dword [rbp - MM_OP], PY_GT
+    je .mm_error_max
+    CSTRING rdi, "min expected at least 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+.mm_error_max:
+    CSTRING rdi, "max expected at least 1 argument, got "
+    xor edx, edx
+    jmp raise_type_error_counted
 END_FUNC minmax_impl
 
 ;; ============================================================================
 ;; 17. builtin_getattr(args, nargs) - getattr(obj, name[, default])
 ;; ============================================================================
 GA_EXC    equ 8              ; current_exception before the lookup
+;; ============================================================================
+;; attr_require_name(rdi = the name argument, a Value) -> returns, or raises
+;;
+;; getattr, setattr, delattr and hasattr all read the name as a PyStrObject
+;; without asking what it is: `getattr(x, 0)` read a small integer's Value as
+;; one.  CPython refuses the type by name, and quotes it.
+;; ============================================================================
+ARN_ARG   equ 8
+ARN_FRAME equ 16            ; + 0 pushes = 16-aligned
+DEF_FUNC_LOCAL attr_require_name, ARN_FRAME
+    mov [rbp - ARN_ARG], rdi
+    V_TEST_PTR rdi, rax
+    ja .arn_bad
+    test rdi, rdi
+    jz .arn_bad
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .arn_ok
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .arn_bad
+.arn_ok:
+    leave
+    ret
+.arn_bad:
+    mov rsi, [rbp - ARN_ARG]
+    CSTRING rdi, `attribute name must be string, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+END_FUNC attr_require_name
+
+;; ============================================================================
+;; builtin_getattr(rdi = args, rsi = nargs) -> rax = Value
+;; getattr(obj, name[, default]): the default is answered only for an
+;; AttributeError, so anything else the lookup raises still propagates.
+;; ============================================================================
 DEF_FUNC builtin_getattr, 32
     push rbx
     push r12
@@ -1532,13 +1308,15 @@ DEF_FUNC builtin_getattr, 32
     mov r12, rsi
 
     cmp r12, 2
-    jb .getattr_error
+    jb .getattr_too_few
     cmp r12, 3
     ja .getattr_error
 
     ; One lookup, with the descriptor protocol run over it -- the same answer
     ; `obj.name` gives.  Doing it by hand here is what made getattr() hand back
     ; the property object instead of calling it.
+    mov rdi, [rbx + 8]
+    call attr_require_name
     DUNDER_EXC_SAVE [rbp - GA_EXC]
     mov rdi, [rbx]                 ; args[0], as a Value
     mov rsi, [rbx + 8]             ; args[1], the name
@@ -1607,12 +1385,23 @@ DEF_FUNC builtin_getattr, 32
     extern raise_no_attribute
     call raise_no_attribute
 
+.getattr_too_few:
+    mov rsi, r12
+    CSTRING rdi, "getattr expected at least 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+
 .getattr_error:
-    RAISE exc_TypeError_type, "getattr expected 2 or 3 arguments"
+    mov rsi, r12
+    CSTRING rdi, "getattr expected at most 3 arguments, got "
+    xor edx, edx
+    jmp raise_type_error_counted
 END_FUNC builtin_getattr
 
 ;; ============================================================================
-;; 18. builtin_hasattr(args, nargs) - hasattr(obj, name)
+;; 18. builtin_hasattr(rdi = args, rsi = nargs) - hasattr(obj, name)
+;;   -> rax = Value
 ;; ============================================================================
 HA_EXC    equ 8              ; current_exception before the lookup
 DEF_FUNC builtin_hasattr, 24
@@ -1624,6 +1413,8 @@ DEF_FUNC builtin_hasattr, 24
     ; The same lookup getattr() does, so the two cannot disagree about what
     ; exists.  A getter that raises propagates rather than reading as absent,
     ; which is what CPython does for anything but an AttributeError.
+    mov rdi, [rbx + 8]
+    call attr_require_name
     DUNDER_EXC_SAVE [rbp - HA_EXC]
     mov rdi, [rbx]
     mov rsi, [rbx + 8]
@@ -1668,11 +1459,15 @@ DEF_FUNC builtin_hasattr, 24
     leave
     ret
 .hasattr_error:
-    RAISE exc_TypeError_type, "hasattr expected 2 arguments"
+    CSTRING rdi, "hasattr expected 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_hasattr
 
 ;; ============================================================================
-;; 19. builtin_setattr(args, nargs) - setattr(obj, name, value)
+;; 19. builtin_setattr(rdi = args, rsi = nargs) - setattr(obj, name, value)
+;;   -> rax = Value
 ;; ============================================================================
 SETA_EXC equ 16     ; the exception pending before tp_setattr ran
 
@@ -1685,6 +1480,9 @@ DEF_FUNC builtin_setattr
     jne .setattr_error
 
     mov rbx, rdi
+
+    mov rdi, [rbx + 8]           ; the name, before anything reads it as one
+    call attr_require_name
 
     V_TEST_PTR_M [rbx], r11      ; args[0] a pointer?
     ja .setattr_no_attr
@@ -1735,11 +1533,15 @@ DEF_FUNC builtin_setattr
     call raise_no_attribute
 
 .setattr_error:
-    RAISE exc_TypeError_type, "setattr() takes exactly 3 arguments"
+    CSTRING rdi, "setattr expected 3 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_setattr
 
 ;; ============================================================================
-;; builtin_globals(args, nargs) - globals()
+;; builtin_globals(rdi = args, rsi = nargs) - globals()
+;;   -> rax = Value
 ;; Returns the globals dict of the current frame.
 ;; ============================================================================
 DEF_FUNC builtin_globals
@@ -1756,11 +1558,15 @@ DEF_FUNC builtin_globals
     ret
 
 .globals_error:
-    RAISE exc_TypeError_type, "globals() takes no arguments"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "globals() takes no arguments ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_globals
 
 ;; ============================================================================
-;; builtin_locals(args, nargs) - locals()
+;; builtin_locals(rdi = args, rsi = nargs) - locals()
+;;   -> rax = Value
 ;; Returns the locals dict if available, otherwise globals.
 ;; In module scope, locals() == globals().
 ;; In class body, returns the class dict.
@@ -1807,7 +1613,10 @@ DEF_FUNC builtin_locals
     ret
 
 .locals_error:
-    RAISE exc_TypeError_type, "locals() takes no arguments"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "locals() takes no arguments ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_locals
 
 ;; ============================================================================
@@ -1889,11 +1698,14 @@ DEF_FUNC dir_default, DD_FRAME
     jmp .dd_walk_chain
 
 .dd_module:
+    ; A module's names are its dict's and nothing else -- not even __class__,
+    ; which CPython's module___dir___impl does not add and which the shared
+    ; exit below does.  `dir(sys)` carried one name CPython's did not.
     mov rdi, [rax + PyModuleObject.mod_dict]
     test rdi, rdi
-    jz .dd_done
+    jz .dd_finish
     call .dd_add_keys
-    jmp .dd_done
+    jmp .dd_finish
 
 .dd_from_type:
     ; obj IS a type: list its own MRO
@@ -1932,6 +1744,7 @@ DEF_FUNC dir_default, DD_FRAME
     mov rdi, r12
     call obj_decref
 
+.dd_finish:
     mov rax, rbx
     mov edx, TAG_PTR
     pop r13
@@ -1982,7 +1795,8 @@ DEF_FUNC dir_default, DD_FRAME
 END_FUNC dir_default
 
 ;; ============================================================================
-;; builtin_dir(args, nargs) - dir(obj)
+;; builtin_dir(rdi = args, rsi = nargs) - dir(obj)
+;;   -> rax = Value
 ;;
 ;; CPython's PyObject_Dir: ask the object's own __dir__, then sort what comes
 ;; back.  object.__dir__ is registered and calls dir_default, so an object
@@ -2132,7 +1946,10 @@ DEF_FUNC builtin_dir, BD_FRAME
     ret
 
 .bd_error:
-    RAISE exc_TypeError_type, "dir() takes exactly 1 argument"
+    CSTRING rdi, "dir expected at most 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_dir
 
 section .rodata
@@ -2147,7 +1964,8 @@ fmt_dunder_name: db "__format__", 0
 section .text
 
 ;; ============================================================================
-;; builtin_input_fn(args, nargs) - input([prompt])
+;; builtin_input_fn(rdi = args, rsi = nargs) - input([prompt])
+;;   -> rax = Value
 ;; 0 args: read line from stdin
 ;; 1 arg: print prompt, then read line
 ;; ============================================================================
@@ -2230,7 +2048,8 @@ global builtin_open_fn
 OPN_FRAME equ 32            ; + 3 pushes = 56, not 16-aligned
 
 ;; ============================================================================
-;; open_reject_dir(rdi = fd, rsi = filename str) -- returns, or raises
+;; open_reject_dir(rdi = fd, rsi = filename str)
+;;   -> returns, or raises IsADirectoryError
 ;;
 ;; Linux lets open(2) succeed on a directory; it is read(2) that fails with
 ;; EISDIR, so open("/tmp") used to hand back a file object that failed later
@@ -2264,8 +2083,19 @@ DEF_FUNC_LOCAL open_reject_dir, ORD_FRAME
     ret
 END_FUNC open_reject_dir
 
+section .data
+align 8
+builtin_open_impl: dq 0
+
+section .rodata
+bo_mod_name:  db "_io", 0
+bo_attr_name: db "open", 0
+
+section .text
+
 ;; ============================================================================
-;; builtin_open_fn(args, nargs) -> the stream _pyio.open builds
+;; builtin_open_fn(rdi = args, rsi = nargs) -> rax = Value, the stream
+;;   _io.open builds
 ;;
 ;; open() is _io.open in CPython, and the same thing here: the whole stack --
 ;; buffering, text decoding, universal newlines -- lives above FileIO and
@@ -2281,16 +2111,6 @@ END_FUNC open_reject_dir
 ;; values in the same array, with the names in kw_names_pending, and that is
 ;; exactly what the callee expects -- so this must NOT consume the global.
 ;; ============================================================================
-section .data
-align 8
-builtin_open_impl: dq 0
-
-section .rodata
-bo_mod_name:  db "_io", 0
-bo_attr_name: db "open", 0
-
-section .text
-
 DEF_FUNC builtin_open_fn
     push rbx
     push r12
@@ -2369,7 +2189,8 @@ DEF_FUNC builtin_open_fn
 END_FUNC builtin_open_fn
 
 ;; ============================================================================
-;; builtin_ascii_fn(args, nargs) - ascii(obj)
+;; builtin_ascii_fn(rdi = args, rsi = nargs) - ascii(obj)
+;;   -> rax = Value
 ;; Like repr() but escapes non-ASCII characters to \xNN / \uNNNN / \UNNNNNNNN
 ;; ============================================================================
 global builtin_ascii_fn
@@ -2522,14 +2343,18 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     ret
 
 .aa_nargs_error:
-    RAISE exc_TypeError_type, "ascii() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "ascii() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 section .rodata
 aa_hexdigits: db "0123456789abcdef"
 section .text
 END_FUNC builtin_ascii_fn
 
 ;; ============================================================================
-;; builtin_format_fn(args, nargs) - format(value[, format_spec])
+;; builtin_format_fn(rdi = args, rsi = nargs) - format(value[, format_spec])
+;;   -> rax = Value
 ;; Calls value.__format__(format_spec) or str(value) if no __format__
 ;; ============================================================================
 global builtin_format_fn
@@ -2539,7 +2364,7 @@ FMT_FRAME   equ 32          ; + 0 pushes = 32
 DEF_FUNC builtin_format_fn, FMT_FRAME
 
     cmp rsi, 1
-    jb .fmt_nargs_error
+    jb .fmt_too_few
     cmp rsi, 2
     ja .fmt_nargs_error
 
@@ -2557,6 +2382,19 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     jb .fmt_empty_spec
     mov rax, [rdi + 8]
     mov [rbp - FMT_SPEC], rax
+    ; The spec is read as a PyStrObject below, so it has to BE one: `format
+    ; (0, 0)` read a small integer's Value as one.  CPython names the
+    ; argument and the type it got.
+    V_TEST_PTR rax, rcx
+    ja .fmt_spec_error
+    test rax, rax
+    jz .fmt_spec_error
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    je .fmt_have_spec
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .fmt_spec_error
     jmp .fmt_have_spec
 
 .fmt_empty_spec:
@@ -2639,12 +2477,29 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.fmt_too_few:
+    ; rsi is still nargs at both of these.
+    CSTRING rdi, "format expected at least 1 argument, got "
+    xor edx, edx
+    jmp raise_type_error_counted
+
 .fmt_nargs_error:
-    RAISE exc_TypeError_type, "format() takes 1 or 2 arguments"
+    CSTRING rdi, "format expected at most 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+
+.fmt_spec_error:
+    pop rbx
+    mov rsi, [rbp - FMT_SPEC]
+    CSTRING rdi, `format() argument 2 must be str, not \x02`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC builtin_format_fn
 
 ;; ============================================================================
-;; builtin_vars_fn(args, nargs) - vars([obj])
+;; builtin_vars_fn(rdi = args, rsi = nargs) - vars([obj])
+;;   -> rax = Value
 ;; 0 args: returns frame locals dict (same as locals())
 ;; 1 arg: returns obj.__dict__
 ;; ============================================================================
@@ -2757,7 +2612,10 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     RAISE exc_TypeError_type, "vars() argument must have __dict__ attribute"
 
 .vars_nargs_error:
-    RAISE exc_TypeError_type, "vars() takes at most 1 argument"
+    CSTRING rdi, "vars expected at most 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_vars_fn
 
 section .rodata
@@ -2765,7 +2623,8 @@ vars_dict_name: db "__dict__", 0
 section .text
 
 ;; ============================================================================
-;; builtin_delattr_fn(args, nargs) - delattr(obj, name)
+;; builtin_delattr_fn(rdi = args, rsi = nargs) - delattr(obj, name)
+;;   -> rax = Value
 ;; Calls tp_setattr(obj, name, NULL) to delete
 ;; ============================================================================
 global builtin_delattr_fn
@@ -2783,6 +2642,12 @@ DEF_FUNC builtin_delattr_fn, DA2_FRAME
     mov [rbp - DA2_OBJ], rax
     mov rax, [rdi + 8]       ; name payload
     mov [rbp - DA2_NAME], rax
+    push rdi
+    sub rsp, 8
+    mov rdi, rax
+    call attr_require_name
+    add rsp, 8
+    pop rdi
 
     ; An immediate has no attributes at all, and neither does a type with no
     ; tp_setattr -- but that is an AttributeError naming the type and the
@@ -2833,25 +2698,46 @@ DEF_FUNC builtin_delattr_fn, DA2_FRAME
     call raise_no_attribute     ; does not return
 
 .da2_nargs_error:
-    RAISE exc_TypeError_type, "delattr() takes exactly 2 arguments"
+    CSTRING rdi, "delattr expected 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_delattr_fn
 
 ;; ============================================================================
-;; builtin_aiter_fn(args, nargs) - aiter(async_iterable)
+;; builtin_aiter_fn(rdi = args, rsi = nargs) - aiter(async_iterable)
+;;   -> rax = Value
 ;; Calls tp_iter on the async iterable
 ;; ============================================================================
-DEF_FUNC builtin_aiter_fn
+AIT_ARG   equ 8             ; the argument, for the message
+AIT_NARGS equ 16
+AIT_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC builtin_aiter_fn, AIT_FRAME
+    mov [rbp - AIT_NARGS], rsi
 
     cmp rsi, 1
     jne .aiter_nargs_error
 
     ; Get the object
     mov rdi, [rdi]            ; args[0]
+    mov [rbp - AIT_ARG], rdi
 
     ; Must be a heap pointer
     V_TEST_PTR rdi, rsi
     ja .aiter_type_error
+    test rdi, rdi
+    jz .aiter_type_error
 
+    ; __aiter__, not __iter__: a list has a tp_iter and is not an async
+    ; iterable at all, so `aiter([])` answered its ordinary list_iterator.
+    push rdi
+    extern dunder_lookup
+    mov rdi, [rdi + PyObject.ob_type]
+    CSTRING rsi, "__aiter__"
+    call dunder_lookup
+    pop rdi
+    test edx, edx
+    jz .aiter_type_error
     ; Call tp_iter
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iter]
@@ -2865,14 +2751,22 @@ DEF_FUNC builtin_aiter_fn
     ret
 
 .aiter_type_error:
-    RAISE exc_TypeError_type, "object is not an async iterable"
+    mov rsi, [rbp - AIT_ARG]
+    CSTRING rdi, `'\x01' object is not an async iterable`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .aiter_nargs_error:
-    RAISE exc_TypeError_type, "aiter() takes exactly 1 argument"
+    mov rsi, [rbp - AIT_NARGS]
+    CSTRING rdi, "aiter() takes exactly one argument ("
+    CSTRING rdx, " given)"
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_aiter_fn
 
 ;; ============================================================================
-;; builtin_anext_fn(args, nargs) - anext(async_iterator[, default])
+;; builtin_anext_fn(rdi = args, rsi = nargs) - anext(async_iterator[, default])
+;;   -> rax = Value
 ;; Calls tp_iternext; on StopAsyncIteration returns default
 ;; ============================================================================
 extern current_exception
@@ -2884,16 +2778,21 @@ AN_NARGS   equ 32
 AN_FRAME   equ 48            ; + 0 pushes = 48, 16-aligned
 DEF_FUNC builtin_anext_fn, AN_FRAME
 
+    mov [rbp - AN_NARGS], rsi
     cmp rsi, 1
     jb .an_nargs_error
     cmp rsi, 2
     ja .an_nargs_error
 
-    mov [rbp - AN_NARGS], rsi
 
-    ; Save iterator
+    ; Save iterator.  Its ob_type is read below without asking whether it is
+    ; a pointer at all, so `anext(0)` read a small integer's Value as one.
     mov rax, [rdi]
     mov [rbp - AN_ITER], rax
+    V_TEST_PTR rax, rcx
+    ja .an_type_error
+    test rax, rax
+    jz .an_type_error
 
     ; Save default if present
     cmp rsi, 2
@@ -2947,15 +2846,31 @@ DEF_FUNC builtin_anext_fn, AN_FRAME
     ret
 
 .an_type_error:
-    RAISE exc_TypeError_type, "object is not an async iterator"
+    mov rsi, [rbp - AN_ITER]
+    CSTRING rdi, `'\x01' object is not an async iterator`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .an_nargs_error:
-    RAISE exc_TypeError_type, "anext() takes 1 or 2 arguments"
+    ; CPython's two, with the count: it words the low bound and the high one
+    ; differently, and a program greps the text.
+    mov rsi, [rbp - AN_NARGS]
+    cmp rsi, 1
+    jge .an_too_many
+    CSTRING rdi, "anext expected at least 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+.an_too_many:
+    CSTRING rdi, "anext expected at most 2 arguments, got "
+    xor edx, edx
+    jmp raise_type_error_counted
 END_FUNC builtin_anext_fn
 
 ;; ============================================================================
-;; builtin_import_fn(args, nargs) - __import__(name, globals, locals,
-;;                                             fromlist, level)
+;; builtin_import_fn(rdi = args, rsi = nargs) - __import__(name, globals,
+;;                                     locals, fromlist, level)
+;;   -> rax = Value
 ;;
 ;; fromlist decides WHICH module comes back: empty or None gives the top-level
 ;; package, non-empty gives the module actually named.  Ignoring it returned
@@ -3247,7 +3162,8 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
 END_FUNC builtin_import_fn
 
 ;; ============================================================================
-;; builtin_breakpoint(args, nargs) - breakpoint() stub (no-op)
+;; builtin_breakpoint(rdi = args, rsi = nargs) - breakpoint() stub (no-op)
+;;   -> rax = Value
 ;; ============================================================================
 DEF_FUNC_BARE builtin_breakpoint
     ; No-op: return None

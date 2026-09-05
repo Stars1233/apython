@@ -270,25 +270,33 @@ END_FUNC sleep_awaitable_traverse
 ;; events is the poll mask: 1 for readable, 4 for writable, which is what the
 ;; two backends submit and what CPython's add_reader/add_writer split into.
 ;; ============================================================================
-AWF_FRAME equ 24            ; + 1 push = 32, 16-aligned
-DEF_FUNC asyncio_wait_fd_func, AWF_FRAME
+AWF_ARGS  equ 24            ; the args array, across the two conversions
+AWF_FRAME equ 32            ; + 1 push = 40... one word more to land right
+DEF_FUNC asyncio_wait_fd_func, 40           ; + 1 push = 48, 16-aligned
     push rbx
     cmp rsi, 2
     jne .awf_error
 
-    mov rax, [rdi]              ; fd
-    V_IS_INT rax, rcx
-    jb .awf_type_error
-    V_TO_I64 rax
+    ; Both arguments through obj_as_index rather than V_IS_INT: that macro is
+    ; true only for an int IMMEDIATE, so a descriptor on the heap -- which is
+    ; every descriptor at all under INT_STRESS=1, and any descriptor past
+    ; 2**50 otherwise -- was refused as "arguments must be int".  Three
+    ; concurrent connections is enough to reach fd 8, which is where the
+    ; stress build starts boxing.
+    mov [rbp - AWF_ARGS], rdi   ; a frame slot, not a push: everything below
+    mov rdi, [rdi]              ; makes calls, and a lone push would put each
+    V_UNPACK rdi, rdx           ; of them eight bytes out of alignment
+    extern obj_as_index
+    call obj_as_index
     test rax, rax
     js .awf_value_error
     mov rbx, rax
     and rbx, 0xFFFFFFFF
 
-    mov rax, [rdi + 8]          ; the poll mask
-    V_IS_INT rax, rcx
-    jb .awf_type_error
-    V_TO_I64 rax
+    mov rdi, [rbp - AWF_ARGS]
+    mov rdi, [rdi + 8]          ; the poll mask
+    V_UNPACK rdi, rdx
+    call obj_as_index
     shl rax, 32
     or rbx, rax
 

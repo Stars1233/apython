@@ -219,30 +219,48 @@ caller who passed `user=` to drop privileges must not be handed a child that
 quietly kept them.  Refusing to run is the safe answer; running as root when
 asked not to is not.
 
-## A comprehension at module or class scope keeps a frame
+## A comprehension keeps a frame of its own
 
 PEP 709 inlines a list, set or dict comprehension into the block it is
-written in, and that is what happens here inside a function or a lambda:
-`sys._getframe().f_code.co_name` answers the enclosing function's name, a
-traceback grows no extra entry, and `[super().m() for _ in r]` works because
-`__class__` is the method's own free variable.  A generator expression is not
-inlined -- PEP 709 does not inline one either, because its body runs later
-from a frame of its own.
+written in.  This does not: every comprehension gets a code object, a call
+and a frame, which is what CPython did through 3.11.
 
-At MODULE and CLASS scope the comprehension still becomes a nested function.
-Inlining needs the target to be a fast local, and CPython gets that by giving
-one name two storages at once: for
+It was inlined for a while, and taken out again because it cannot be done
+correctly on a symbol table that classifies a name once per scope.  Inlining
+needs the target to be a fast local of the ENCLOSING scope while every other
+meaning of that name stays what it was, and CPython gets that by giving one
+name two storages at once: for
 
     x = 5
     y = [x for x in range(3)]
 
-its module code object has `x` in co_varnames AND in co_names -- a global for
-the outer binding, a fast slot for the comprehension -- and decides which at
-each USE.  This symbol table classifies a name once per scope, so it cannot
-say both; expressing it would mean a per-use classification, which is a
-larger change than the one effect it buys.  What is left is the co_name a
-program reads from inside a module-level comprehension, and one extra
-traceback entry through one.
+its module code object carries `x` in co_varnames AND in co_names, and
+decides which at each USE.  Saying only one of those redefined the name for
+the whole block, and three things followed -- `[i for i in r]` beside any
+other `i` took the other one over and left it unbound; a target the block
+declared `global` had no fast slot for LOAD_FAST_AND_CLEAR to name, so the
+oparg was -1; and a target captured by a nested lambda became a cell that
+LOAD_FAST_AND_CLEAR then wrote through as though it were not.  Two of those
+were segfaults, in the most ordinary comprehension there is.  Expressing it
+properly means a per-USE classification, which is a larger change than the
+effects it buys.
+
+What it costs, and all it costs:
+
+- `sys._getframe().f_code.co_name` read from inside one answers `<listcomp>`
+  rather than the enclosing function's name, and a traceback through one has
+  an extra entry.
+- Zero-argument `super()` inside one raises NameError, because a nested
+  function has neither `__class__` as a free variable nor the method's
+  `self` as its first argument -- the first argument is the implicit `.0`.
+  CPython 3.11 raised the same error for the same reason.  `super(C, self)`
+  works.
+
+Everything else about a comprehension matches, including that the target
+does not leak, that the outermost iterable is evaluated in the enclosing
+scope, and that a generator expression keeps its own frame in both.
+`tests/test_comprehension_inline.py` pins the pair, so the day the symbol
+table can hold two storages there is something to measure against.
 
 ## The codecs that are neither a table nor a state machine
 

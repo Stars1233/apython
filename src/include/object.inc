@@ -343,6 +343,10 @@ struc PyGenericAliasObject
     .ob_type:   resq 1  ; +8
     .ga_origin: resq 1  ; +16: the type being subscripted (owned)
     .ga_args:   resq 1  ; +24: the argument, a tuple if it was one (owned)
+    ; PEP 646's `*tuple[int, str]`: iterating a GenericAlias yields one item,
+    ; a copy of it with this set.  It reprs with a leading star, answers
+    ; __unpacked__ True, and is what an annotation of that shape holds.
+    .ga_starred: resq 1 ; +32
 endstruc
 
 ; A getset descriptor: a named pair of C accessors living in a type's dict.
@@ -440,12 +444,22 @@ struc PyDictViewObject
     .dv_kind:   resq 1    ; +24: 0=keys, 1=values, 2=items
 endstruc
 
+; A range holds its three bounds twice: as raw int64s, which every operation
+; on an ordinary range uses, and as Values, which are what the bounds really
+; are.  CPython's are objects, so `range(1 << 1000)` is an ordinary range
+; there; the int64s cannot hold that, and .wide says so.  Every operation
+; checks .wide and takes a slower path built on the Values when it is set.
+; The three Values are OWNED references -- a wide bound is a heap int.
 struc PyRangeObject
     .ob_refcnt: resq 1
     .ob_type:   resq 1
-    .start:     resq 1    ; +16: start value (raw i64)
-    .stop:      resq 1    ; +24: stop value (raw i64)
-    .step:      resq 1    ; +32: step value (raw i64)
+    .start:     resq 1    ; +16: start value (raw i64), exact unless .wide
+    .stop:      resq 1    ; +24: stop value (raw i64), exact unless .wide
+    .step:      resq 1    ; +32: step value (raw i64), exact unless .wide
+    .vstart:    resq 1    ; +40: the same three as Values, always exact
+    .vstop:     resq 1    ; +48
+    .vstep:     resq 1    ; +56
+    .wide:      resq 1    ; +64: 1 when a bound does not fit an int64
 endstruc
 
 struc PyRangeIterObject
@@ -454,6 +468,19 @@ struc PyRangeIterObject
     .it_current: resq 1   ; +16: current value
     .it_stop:    resq 1   ; +24: stop value
     .it_step:    resq 1   ; +32: step value
+endstruc
+
+; The iterator over a range whose bounds do not fit an int64.  CPython has a
+; second type for exactly this case and calls it longrange_iterator, and
+; type(iter(range(1 << 1000))) is how a program can tell.  The three fields
+; are owned Values, and .it_len counts DOWN, as CPython's does: a wide range
+; has no int64 length to compare against.
+struc PyLongRangeIterObject
+    .ob_refcnt: resq 1
+    .ob_type:   resq 1
+    .it_current: resq 1   ; +16: the next value to yield
+    .it_step:    resq 1   ; +24
+    .it_len:     resq 1   ; +32: how many are left
 endstruc
 
 struc PyBytesIterObject
@@ -1056,7 +1083,14 @@ struc PyFrame
     .instr_ptr:     resq 1  ; +40: saved bytecode pointer
     .stack_ptr:     resq 1  ; +48: saved value stack pointer
     .stack_base:    resq 1  ; +56: ptr to bottom of the value stack
-    .return_offset: resd 1  ; +64: return offset
+    ; How many PUSH_EXC_INFOs this frame has executed and not yet popped.
+    ; Zero means the frame is handling nothing of its own and merely SHARES
+    ; its caller's exception; anything else means it has one, and .exc_state
+    ; below is where eval_return parks it.  Only a generator or coroutine can
+    ; suspend with this non-zero, which is the whole reason it is on the frame
+    ; and not in a register.  (This word was .return_offset, written once by
+    ; frame_new and never read.)
+    .exc_depth:     resd 1  ; +64: unpopped PUSH_EXC_INFO count
     .nlocalsplus:   resd 1  ; +68: number of locals + cells + frees
     .func_obj:      resq 1  ; +72: ptr to function object (for closures)
     .call_ip:       resq 1  ; +80: where this frame was when it called into

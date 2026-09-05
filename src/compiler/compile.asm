@@ -980,6 +980,22 @@ DEF_FUNC compile_source, CS_FRAME
     jz .failed
 
 .cleanup:
+    ; The warnings the tokenizer recorded, emitted now that the code object
+    ; exists and there is an interpreter to emit them from.  Only on success:
+    ; a compile that failed has an exception of its own pending, and a
+    ; warning raised over it would replace it.  A filter set to "error" turns
+    ; one into a raise, and then this compile fails with it.
+    cmp qword [rbp - CS_CODE], 0
+    je .cleanup_free
+    mov rdi, rbx
+    call comp_emit_warnings
+    test eax, eax
+    jnz .cleanup_free
+    mov rdi, [rbp - CS_CODE]
+    call obj_decref
+    mov qword [rbp - CS_CODE], 0
+
+.cleanup_free:
     mov rdi, r12
     call cg_unit_free
     mov rdi, [rbp - CS_UNIT + CompUnit.name]
@@ -1745,7 +1761,388 @@ END_FUNC comp_msg_i64
 
 section .bss
 comp_msgbuf: resb 256
+cew_warn_explicit: resq 1   ; warnings.warn_explicit, imported once
+cpw_n:     resd 1           ; warnings recorded before the interpreter existed
+cpw_pad:   resd 1
+cpw_file:  resq 1           ; the filename they belong to, owned
+cpw_warns: resb CompWarn_size * COMP_MAX_WARNS
 section .text
+
+;; ============================================================================
+;; comp_warn(Comp *c, const char *msg, int lineno) -> nothing
+;;
+;; Record a SyntaxWarning for comp_emit_warnings to raise once the compile is
+;; over.  Nothing here may call into Python: `./apython foo.py` compiles
+;; before any frame exists, which is why the error protocol defers too.  Past
+;; COMP_MAX_WARNS the rest are dropped -- CPython emits one per occurrence,
+;; and a file with sixteen of these has been told.
+;; ============================================================================
+global comp_warn
+DEF_FUNC_BARE comp_warn
+    mov eax, [rdi + Comp.warn_n]
+    cmp eax, COMP_MAX_WARNS
+    jae .cw_full
+    lea rcx, [rdi + Comp.warns]
+    imul r8d, eax, CompWarn_size
+    add rcx, r8
+    mov [rcx + CompWarn.lineno], edx
+    inc eax
+    mov [rdi + Comp.warn_n], eax
+    ; The text is copied, not pointed at: cg_warn_is_literal composes its
+    ; message into a shared buffer that the next one would overwrite.
+    xor edx, edx
+.cw_copy:
+    cmp edx, COMP_WARN_TEXT - 1
+    jae .cw_end
+    movzx eax, byte [rsi + rdx]
+    mov [rcx + CompWarn.msg + rdx], al
+    test al, al
+    jz .cw_full
+    inc edx
+    jmp .cw_copy
+.cw_end:
+    mov byte [rcx + CompWarn.msg + rdx], 0
+.cw_full:
+    ret
+END_FUNC comp_warn
+
+;; ============================================================================
+;; comp_emit_warnings(Comp *c) -> rax = 1, or 0 with an exception pending
+;;
+;; warnings.warn_explicit(msg, SyntaxWarning, filename, lineno), once per
+;; recorded warning.  That entry point takes the position rather than reading
+;; it off a frame, which is exactly why CPython's compiler uses it too -- and
+;; it is why this can run at all here.  A filter set to "error" turns the
+;; warning into a raise, and then the compile fails with it.
+;;
+;; The module is imported lazily and cached, as builtin_open_fn does for _io:
+;; importing warnings from comp_init would run Python before main() is ready.
+;; ============================================================================
+CEW_C     equ 8
+CEW_FN    equ 16
+CEW_MOD   equ 24
+CEW_ARGS  equ 64            ; four Values, ending here
+CEW_FRAME equ 72            ; + 1 push = 80, 16-aligned
+global comp_emit_warnings
+DEF_FUNC comp_emit_warnings, CEW_FRAME
+    push rbx
+    mov [rbp - CEW_C], rdi
+    mov ebx, [rdi + Comp.warn_n]
+    test ebx, ebx
+    jz .cew_none
+
+    ; Nothing can be imported before import_init has run, and
+    ; `./apython foo.py` compiles first: sys.modules is the flag for it.
+    ; A warning recorded that early is held in a process-global queue and
+    ; flushed by main once the interpreter is up.
+    extern sys_modules_dict
+    cmp qword [rel sys_modules_dict], 0
+    je .cew_defer
+
+    call cew_lookup_warn_explicit
+    test rax, rax
+    jz .cew_failed
+.cew_have_fn:
+    mov [rbp - CEW_FN], rax
+
+    xor ebx, ebx
+.cew_loop:
+    mov rdi, [rbp - CEW_C]
+    cmp ebx, [rdi + Comp.warn_n]
+    jae .cew_none
+
+    lea rcx, [rdi + Comp.warns]
+    imul eax, ebx, CompWarn_size
+    add rcx, rax
+    push rcx
+    lea rdi, [rcx + CompWarn.msg]
+    call str_from_cstr_heap
+    pop rcx
+    test rax, rax
+    jz .cew_failed
+    mov [rbp - CEW_ARGS], rax
+    extern exc_SyntaxWarning_type
+    lea rax, [rel exc_SyntaxWarning_type]
+    mov [rbp - CEW_ARGS + 8], rax
+    mov rdi, [rbp - CEW_C]
+    mov rax, [rdi + Comp.filename]
+    mov [rbp - CEW_ARGS + 16], rax
+    mov eax, [rcx + CompWarn.lineno]
+    V_PACK_I64 rax, rdx
+    mov [rbp - CEW_ARGS + 24], rax
+
+    mov rdi, [rbp - CEW_FN]
+    lea rsi, [rbp - CEW_ARGS]
+    mov edx, 4
+    extern obj_call_n
+    call obj_call_n
+    push rax
+    mov rdi, [rbp - CEW_ARGS]
+    extern obj_decref
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .cew_raised
+    XDECREF_V rax, rcx
+    inc ebx
+    jmp .cew_loop
+
+.cew_none:
+    mov rdi, [rbp - CEW_C]
+    mov dword [rdi + Comp.warn_n], 0
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+
+.cew_defer:
+    ; Move what is recorded to the process-global queue, keeping the
+    ; filename alive: the Comp is about to be freed.
+    mov rdi, [rbp - CEW_C]
+    call comp_defer_warnings
+    jmp .cew_none
+
+.cew_failed:
+    ; The warning could not be emitted, which is not the program's fault:
+    ; drop it and let the compile succeed.  Anything the import left pending
+    ; goes with it.
+    extern current_exception
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .cew_none
+    mov qword [rel current_exception], 0
+    mov rdi, rax
+    call obj_decref
+    jmp .cew_none
+
+.cew_raised:
+    ; A filter set to "error" turned it into a raise.  CPython replaces the
+    ; SyntaxWarning with a SyntaxError carrying the same text, so what the
+    ; programmer sees is a compile error with a caret, not a warning class
+    ; escaping from compile().
+    mov rdi, [rbp - CEW_C]
+    mov dword [rdi + Comp.warn_n], 0
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .cew_raised_done
+    mov rdi, rax
+    mov rsi, [rax + PyObject.ob_type]
+    extern exc_SyntaxWarning_type
+    lea rax, [rel exc_SyntaxWarning_type]
+    mov rdi, rsi
+    mov rsi, rax
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jz .cew_raised_done
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    call obj_decref
+    ; The record ebx stopped at is the one that raised.
+    mov rdi, [rbp - CEW_C]
+    lea rcx, [rdi + Comp.warns]
+    imul eax, ebx, CompWarn_size
+    add rcx, rax
+    lea rdx, [rcx + CompWarn.msg]
+    mov ecx, [rcx + CompWarn.lineno]
+    lea rsi, [rel exc_SyntaxError_type]
+    xor r8d, r8d
+    call comp_error
+    mov rdi, [rbp - CEW_C]
+    call comp_set_pending
+.cew_raised_done:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC comp_emit_warnings
+
+;; ============================================================================
+;; comp_defer_warnings(Comp *c) -> nothing
+;;
+;; The process-global half of the channel.  `./apython foo.py` compiles
+;; before import_init has run, so there is no `warnings` to call and no
+;; sys.modules to find it in; what the tokenizer recorded is moved here and
+;; main flushes it once the interpreter is up.  The filename is kept alive
+;; because the Comp that owned it is freed on the way out.
+;; ============================================================================
+global comp_defer_warnings
+DEF_FUNC_BARE comp_defer_warnings
+    push rbx
+    mov rbx, rdi
+    mov ecx, [rbx + Comp.warn_n]
+    test ecx, ecx
+    jz .cdw_done
+    cmp qword [rel cpw_file], 0
+    jne .cdw_done               ; one file's worth is all this ever needs
+    mov rax, [rbx + Comp.filename]
+    test rax, rax
+    jz .cdw_done
+    mov [rel cpw_file], rax
+    inc qword [rax + PyObject.ob_refcnt]
+    xor edx, edx
+.cdw_copy:
+    cmp edx, ecx
+    jae .cdw_stored
+    imul r8d, edx, CompWarn_size
+    lea rsi, [rbx + Comp.warns]
+    add rsi, r8
+    lea rdi, [rel cpw_warns]
+    add rdi, r8
+    push rdx
+    push rcx
+    mov edx, CompWarn_size
+    extern ap_memcpy
+    call ap_memcpy
+    pop rcx
+    pop rdx
+    inc edx
+    jmp .cdw_copy
+.cdw_stored:
+    mov [rel cpw_n], ecx
+.cdw_done:
+    pop rbx
+    ret
+END_FUNC comp_defer_warnings
+
+;; ============================================================================
+;; comp_flush_warnings() -> nothing
+;;
+;; Emit what comp_defer_warnings put aside, and forget it either way.  Called
+;; from main once import_init has run, and harmless before that: the queue is
+;; empty unless a compile already happened, and sys.modules says whether
+;; anything can be imported yet.
+;; ============================================================================
+CFW_ARGS  equ 32            ; four Values, ending here
+CFW_FN    equ 40
+CFW_FRAME equ 56            ; + 1 push = 64, 16-aligned
+global comp_flush_warnings
+DEF_FUNC comp_flush_warnings, CFW_FRAME
+    push rbx
+    cmp dword [rel cpw_n], 0
+    je .cfw_done
+    cmp qword [rel sys_modules_dict], 0
+    je .cfw_done
+
+    mov rdi, [rel cpw_file]
+    call cew_lookup_warn_explicit
+    test rax, rax
+    jz .cfw_drop
+    mov [rbp - CFW_FN], rax
+
+    xor ebx, ebx
+.cfw_loop:
+    cmp ebx, [rel cpw_n]
+    jae .cfw_drop
+    lea rcx, [rel cpw_warns]
+    imul eax, ebx, CompWarn_size
+    add rcx, rax
+    push rcx
+    lea rdi, [rcx + CompWarn.msg]
+    call str_from_cstr_heap
+    pop rcx
+    test rax, rax
+    jz .cfw_drop
+    mov [rbp - CFW_ARGS], rax
+    lea rax, [rel exc_SyntaxWarning_type]
+    mov [rbp - CFW_ARGS + 8], rax
+    mov rax, [rel cpw_file]
+    mov [rbp - CFW_ARGS + 16], rax
+    mov eax, [rcx + CompWarn.lineno]
+    V_PACK_I64 rax, rdx
+    mov [rbp - CFW_ARGS + 24], rax
+
+    mov rdi, [rbp - CFW_FN]
+    lea rsi, [rbp - CFW_ARGS]
+    mov edx, 4
+    call obj_call_n
+    push rax
+    mov rdi, [rbp - CFW_ARGS]
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .cfw_drop                ; a filter set to "error" raised it
+    XDECREF_V rax, rcx
+    inc ebx
+    jmp .cfw_loop
+
+.cfw_drop:
+    mov dword [rel cpw_n], 0
+    mov rdi, [rel cpw_file]
+    test rdi, rdi
+    jz .cfw_done
+    mov qword [rel cpw_file], 0
+    call obj_decref
+.cfw_done:
+    pop rbx
+    leave
+    ret
+END_FUNC comp_flush_warnings
+
+;; ============================================================================
+;; cew_lookup_warn_explicit() -> rax = warnings.warn_explicit, or 0
+;; Imported once and cached for the process, the way builtin_open_fn caches
+;; _io's opener: importing it any earlier runs a module body.
+;; ============================================================================
+CLW_TMP   equ 8
+CLW_MOD   equ 16
+CLW_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC_LOCAL cew_lookup_warn_explicit, CLW_FRAME
+    mov rax, [rel cew_warn_explicit]
+    test rax, rax
+    jnz .clw_done
+
+    CSTRING rdi, "_warnings"
+    call str_from_cstr_heap
+    test rax, rax
+    jz .clw_none
+    mov [rbp - CLW_TMP], rax
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    call import_module
+    mov [rbp - CLW_MOD], rax
+    mov rdi, [rbp - CLW_TMP]
+    call obj_decref
+    cmp qword [rbp - CLW_MOD], 0
+    je .clw_none
+
+    CSTRING rdi, "warn_explicit"
+    call str_from_cstr_heap
+    test rax, rax
+    jz .clw_none
+    mov [rbp - CLW_TMP], rax
+    mov rdi, [rbp - CLW_MOD]
+    mov rdi, [rdi + PyModuleObject.mod_dict]
+    mov rsi, rax
+    call dict_get
+    mov [rbp - CLW_MOD], rax
+    mov rdi, [rbp - CLW_TMP]
+    call obj_decref
+    mov rax, [rbp - CLW_MOD]
+    test rax, rax
+    jz .clw_none
+    mov rdi, rax
+    call obj_incref             ; the cache holds it for the process
+    mov rax, [rbp - CLW_MOD]
+    mov [rel cew_warn_explicit], rax
+.clw_done:
+    leave
+    ret
+.clw_none:
+    ; Nothing could be imported.  Clear whatever the attempt left pending:
+    ; a warning that cannot be emitted is not the program's error.
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .clw_zero
+    mov qword [rel current_exception], 0
+    mov rdi, rax
+    call obj_decref
+.clw_zero:
+    xor eax, eax
+    leave
+    ret
+END_FUNC cew_lookup_warn_explicit
 
 ;; ============================================================================
 ;; comp_error(Comp *c, PyTypeObject *type, const char *msg, int lineno, int col)

@@ -252,7 +252,10 @@ END_FUNC time_time_func
 TSL_SEC   equ 16
 TSL_NSEC  equ 8
 TSL_ARG   equ 24            ; the argument Value, kept for the overflow message
-TSL_FRAME equ 32            ; + 0 pushes = 32
+; What nanosleep did NOT sleep, when a signal cut it short.  The two words
+; are a struct timespec and grow upward, so the slot names the lower of them.
+TSL_REM   equ 40
+TSL_FRAME equ 48            ; + 0 pushes = 48
 DEF_FUNC time_sleep_func, TSL_FRAME
     cmp rsi, 1
     jne .sleep_error
@@ -306,17 +309,47 @@ DEF_FUNC time_sleep_func, TSL_FRAME
     cvttsd2si rax, xmm0
     mov [rbp - TSL_NSEC], rax
 
+    ; PEP 475: a signal interrupts the SYSCALL, not the sleep.  CPython runs
+    ; whatever arrived and then sleeps out the remainder, and only a handler
+    ; that raises ends it early.  This passed no remainder and never retried,
+    ; so an alarm during a two-second sleep returned after one -- and the
+    ; handler did not run either, because nothing on the way out looked at
+    ; the pending flag.
+.sleep_again:
     mov eax, 35                 ; __NR_nanosleep
     lea rdi, [rbp - TSL_SEC]
-    xor esi, esi
+    lea rsi, [rbp - TSL_REM]
     syscall
+    cmp rax, -4                 ; -EINTR
+    jne .sleep_finished
+    extern signal_run_pending
+    call signal_run_pending
+    test eax, eax
+    jnz .sleep_handler_raised
+    mov rax, [rbp - TSL_REM]
+    mov [rbp - TSL_SEC], rax
+    mov rax, [rbp - TSL_REM + 8]
+    mov [rbp - TSL_NSEC], rax
+    ; A remainder of zero is a sleep that finished; retrying would be a
+    ; nanosleep(0) that returns at once, which is harmless but pointless.
+    or rax, [rbp - TSL_SEC]
+    jnz .sleep_again
 
+.sleep_finished:
     extern none_singleton
     lea rax, [rel none_singleton]
     INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx
+    ret
+
+.sleep_handler_raised:
+    ; The handler raised, and that is the answer: a NULL Value with the
+    ; exception recorded, which is what signal_run_pending leaves behind.
+    xor eax, eax
+    xor edx, edx
+    leave
     ret
 
 .sleep_type_error:

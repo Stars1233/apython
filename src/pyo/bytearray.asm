@@ -28,6 +28,7 @@ extern int_is_integer
 extern memoryview_iter_next
 extern none_singleton
 extern obj_as_index
+extern obj_as_index_seq
 extern seq_repeat_check_count
 extern set_exception
 extern slice_indices
@@ -65,6 +66,8 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     mov rsi, rdx
     lea rdx, [rel bytearray_range_msg]
     lea rcx, [rel bytearray_enc_msg]
+    lea r8, [rel bytearray_arity_msg]
+    lea r9, [rel bytearray_conv_msg]
     call byteslike_source
     mov [rbp - BA_BUF], rax
     mov [rbp - BA_LEN], rdx
@@ -395,7 +398,8 @@ DEF_FUNC bytearray_subscript, BSU_FRAME
 .bsu_int:
     mov rdi, [rbp - BSU_KEY]
     mov rdx, [rbp - BSU_KEYTAG]
-    call obj_as_index
+    lea rsi, [rel bsu_index_msg]
+    call obj_as_index_seq
     mov rcx, [rbp - BSU_SELF]
     mov rdx, [rcx + PyByteArrayObject.ob_size]
     test rax, rax
@@ -463,6 +467,10 @@ DEF_FUNC bytearray_subscript, BSU_FRAME
 .bsu_range:
     RAISE exc_IndexError_type, "bytearray index out of range"
 END_FUNC bytearray_subscript
+
+section .rodata
+bsu_index_msg: db `bytearray indices must be integers or slices, not \x01`, 0
+section .text
 
 ;; ============================================================================
 ;; slice_length(rdi = start, rsi = stop, rcx = step) -> rax = element count
@@ -543,7 +551,9 @@ DEF_FUNC bytearray_ass_subscript, 104
 .bas_int:
     mov rdi, [rbp - BAS_KEY]
     mov rdx, [rbp - BAS_KTAG]
-    call obj_as_index
+    lea rsi, [rel bsu_index_msg]
+    extern obj_as_index_seq
+    call obj_as_index_seq
     mov rbx, rax
     mov rcx, [rbp - BAS_SELF]
     mov rdx, [rcx + PyByteArrayObject.ob_size]
@@ -637,6 +647,8 @@ DEF_FUNC bytearray_ass_subscript, 104
     mov esi, 1
     lea rdx, [rel bytearray_range_msg]
     lea rcx, [rel bytearray_enc_msg]
+    lea r8, [rel bytearray_arity_msg]
+    lea r9, [rel bytearray_conv_msg]
     call byteslike_source
     mov [rbp - BAS_SRC], rax
     mov [rbp - BAS_SLEN], rdx
@@ -923,6 +935,17 @@ DEF_FUNC bytearray_contains, BCT_FRAME
     call int_is_integer
     test eax, eax
     jz .bct_object
+    ; A width obj_as_index would refuse as an index is simply out of range
+    ; for a byte, and CPython says so rather than naming a C type.
+    mov rdi, [rbp - BCT_VAL]
+    V_UNPACK rdi, rdx
+    cmp edx, TAG_PTR
+    jne .bct_narrow
+    extern int_fits_i64
+    call int_fits_i64
+    test eax, eax
+    jz .bct_range
+.bct_narrow:
     mov rdi, [rbp - BCT_VAL]
     V_UNPACK rdi, rdx
     call obj_as_index
@@ -946,11 +969,19 @@ DEF_FUNC bytearray_contains, BCT_FRAME
     jmp .bct_byte_loop
 
 .bct_object:
-    ; A bytes-like: look for the subsequence.
+    ; A bytes-like: look for the subsequence.  byteslike_source is the
+    ; CONSTRUCTOR's rule and its refusal says "cannot convert ... to
+    ; bytearray"; membership asks for a bytes-like and says so.
+    mov rdi, [rbp - BCT_VAL]
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .bct_arg_type
     lea rdi, [rbp - BCT_VAL]
     mov esi, 1
     lea rdx, [rel bytearray_range_msg]
     lea rcx, [rel bytearray_enc_msg]
+    lea r8, [rel bytearray_arity_msg]
+    lea r9, [rel bytearray_conv_msg]
     call byteslike_source
     mov [rbp - BCT_SRC], rax
     mov [rbp - BCT_SLEN], rdx
@@ -1007,6 +1038,11 @@ DEF_FUNC bytearray_contains, BCT_FRAME
     ret
 .bct_range:
     RAISE exc_ValueError_type, "byte must be in range(0, 256)"
+.bct_arg_type:
+    mov rsi, [rbp - BCT_VAL]
+    CSTRING rdi, `a bytes-like object is required, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .bct_type_error:
     RAISE exc_TypeError_type, "a bytes-like object is required"
 END_FUNC bytearray_contains
@@ -1075,6 +1111,8 @@ DEF_FUNC bytearray_extend_from, BAM_FRAME
     mov esi, 1
     lea rdx, [rel bytearray_range_msg]
     lea rcx, [rel bytearray_enc_msg]
+    lea r8, [rel bytearray_arity_msg]
+    lea r9, [rel bytearray_conv_msg]
     call byteslike_source
     mov [rbp - BAM_SRC], rax
     mov [rbp - BAM_SLEN], rdx
@@ -1437,7 +1475,13 @@ DEF_FUNC bytearray_concat, BAO_FRAME
     leave
     ret
 .bco_not_impl:
-    ; A NULL Value is NotImplemented, so the protocol tries the other side.
+    ; CPython's bytearray_concat RAISES rather than declining, and names
+    ; both types: "can't concat NoneType to bytearray".  Declining left the
+    ; generic operand message, which says nothing about bytearray's rule.
+    mov rsi, [rbp - BAO_ARG]
+    CSTRING rdi, `can't concat \x01 to bytearray`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .bco_fail:
     xor eax, eax
     xor edx, edx
@@ -1447,6 +1491,7 @@ END_FUNC bytearray_concat
 
 DEF_FUNC bytearray_repeat, BAO_FRAME
     mov [rbp - BAO_SELF], rdi
+    mov [rbp - BAO_ARG], rsi        ; the count Value, across binop_is_count
     ; sq_repeat is handed two VALUES, not a count -- op_binary_op packs both
     ; operands before the call, as bytes_repeat's own V_UNPACK shows.
     ;
@@ -1457,22 +1502,17 @@ DEF_FUNC bytearray_repeat, BAO_FRAME
     ; how bytearray(b'x') * (2**70) answered bytearray(b''); and the product
     ; was neither checked for overflow nor capped, so bytearray(b'xy') *
     ; (2**40) went to the allocator and aborted the process.
-    mov [rbp - BAO_ARG], rsi        ; the count, still a Value
-    call seq_repeat_check_count     ; rsi = the count; raises for a non-int
-
-    mov rdi, [rbp - BAO_ARG]
-    V_UNPACK rdi, rdx
-    push rdi
-    push rdx
-    extern int_fits_i64
-    call int_fits_i64
-    pop rdx
-    pop rdi
+    ; Not a count at all: DECLINE rather than raise, so the protocol carries
+    ; on to the right operand's __rmul__, as the other four sequences do.
+    mov rdi, rsi
+    extern binop_is_count
+    call binop_is_count
     test eax, eax
-    jz .brp_overflow
-    extern int_to_i64
-    call int_to_i64
-    mov rsi, rax
+    jz .brp_fail
+    mov rsi, [rbp - BAO_ARG]
+    extern seq_repeat_count
+    call seq_repeat_count           ; takes __index__, and refuses a count
+    mov rsi, rax                    ; too big to be an index
 
     mov rdi, [rbp - BAO_SELF]
     mov rdx, [rdi + PyByteArrayObject.ob_size]
@@ -1484,8 +1524,8 @@ DEF_FUNC bytearray_repeat, BAO_FRAME
 .brp_count_ok:
     mov [rbp - BAO_ARG], rax
     imul rax, rdx
-    jo .brp_overflow
-    cmp rax, 0x10000000
+    jo .brp_toobig              ; as sq_inplace_repeat: the COUNT is what
+    cmp rax, 0x10000000         ; OverflowError is for, and it was checked
     ja .brp_toobig
     mov rsi, rax
     xor edi, edi
@@ -1564,6 +1604,13 @@ DEF_FUNC bytearray_inplace_concat, BAO_FRAME
     leave
     ret
 .bic2_not_impl:
+    ; The same refusal sq_concat gives, and for the same reason: declining
+    ; leaves the generic operand message, which says nothing about
+    ; bytearray's rule.
+    mov rsi, [rbp - BAO_ARG]
+    CSTRING rdi, `can't concat \x01 to bytearray`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .bic2_fail:
     xor eax, eax
     xor edx, edx
@@ -1574,9 +1621,18 @@ END_FUNC bytearray_inplace_concat
 DEF_FUNC bytearray_inplace_repeat, BAO_FRAME
     mov [rbp - BAO_SELF], rdi
     BA_REFUSE_IF_EXPORTED rdi   ; its shrink-to-0 arm ignores the resize result
-    mov rdi, rsi                ; a Value, as in bytearray_repeat
-    V_UNPACK rdi, rdx
-    call obj_as_index
+    ; The same funnel sq_repeat uses.  obj_as_index took anything with an
+    ; __index__ but truncated a count past 2^63, so `b *= 2**64` emptied the
+    ; bytearray, and it named the argument rather than saying what a count
+    ; has to be.  A decline, so `b *= R()` still reaches R.__rmul__.
+    mov [rbp - BAO_ARG], rsi
+    mov rdi, rsi
+    extern binop_is_count
+    call binop_is_count
+    test eax, eax
+    jz .bir_fail
+    mov rsi, [rbp - BAO_ARG]
+    call seq_repeat_count
     mov rsi, rax
     mov [rbp - BAO_ARG], rsi
     mov rdi, [rbp - BAO_SELF]
@@ -1592,6 +1648,17 @@ DEF_FUNC bytearray_inplace_repeat, BAO_FRAME
 .bir_grow:
     mov rax, rsi
     imul rax, rdx
+    ; The two checks sq_repeat has and this did not.  bytearray_resize hands
+    ; the size to ap_malloc, which does not answer failure -- it calls
+    ; fatal_error -- so `bytearray(b"ab") *= 2**40` printed "Fatal: out of
+    ; memory" and ended the process where every other repetition in the tree
+    ; raises MemoryError.
+    ; A product that overflows is a MemoryError, not an OverflowError:
+    ; CPython keeps OverflowError for a COUNT that will not fit an index,
+    ; which obj_as_index above has already refused.
+    jo .bir_toobig
+    cmp rax, 0x10000000
+    ja .bir_toobig
     mov rdi, [rbp - BAO_SELF]
     mov rsi, rax
     call bytearray_resize
@@ -1627,6 +1694,8 @@ DEF_FUNC bytearray_inplace_repeat, BAO_FRAME
     xor edx, edx
     leave
     ret
+.bir_toobig:
+    RAISE exc_MemoryError_type, ""
 END_FUNC bytearray_inplace_repeat
 
 
@@ -1913,3 +1982,5 @@ section .rodata
 bas_msg_size: db "attempt to assign bytes of size ", 0
 bas_msg_to:   db " to extended slice of size ", 0
 bytearray_enc_msg: db `bytearray() argument 'encoding' must be str, not \x01`, 0
+bytearray_arity_msg: db "bytearray() takes at most 3 arguments (", 0
+bytearray_conv_msg: db `cannot convert '\x01' object to bytearray`, 0

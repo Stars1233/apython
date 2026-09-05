@@ -83,6 +83,12 @@ DEF_FUNC par_module, PM_FRAME
     mov [rbp - PM_MARK], rax
 
 .loop:
+    ; A `# type: ignore` on a line of its own is recorded and skipped wherever
+    ; it appears -- including after the last statement, where par_statement is
+    ; never reached again.
+    mov rdi, rbx
+    extern ast_take_typeignore
+    call ast_take_typeignore
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_ENDMARKER
@@ -315,6 +321,13 @@ END_FUNC pss_py2_statement
 DEF_FUNC par_statement, 8
     push rbx
     mov rbx, rdi
+    ; A `# type: ignore` on a line of its own reaches statement position,
+    ; where nothing else will take it: ast_take_typecomment collects one only
+    ; when a statement precedes it.  CPython records it on the Module wherever
+    ; it appears, so record it here and carry on to the real statement.
+    extern ast_take_typeignore
+    call ast_take_typeignore
+    mov rdi, rbx
     call par_kind
     ; `match` is a soft keyword, so it arrives as a NAME and cannot be in
     ; stmt_table: only its context tells it from a variable of the same name.
@@ -2194,8 +2207,10 @@ DEF_FUNC par_params, PP_FRAME
     je .comma
     cmp rax, [rbp - PP_CLOSE]
     je .build
+    ; 2, not 1: this is the *args parameter, and PEP 646 lets ITS annotation
+    ; be starred -- `def g(*rest: *Ts)` -- where no other parameter's may be.
     mov rdi, rbx
-    mov rsi, 1
+    mov rsi, 2
     cmp qword [rbp - PP_CLOSE], TOK_COLON
     jne .ann_ok2
     xor esi, esi
@@ -2466,12 +2481,13 @@ POP_ANN   equ 32
 POP_DEF   equ 40
 POP_NODE  equ 48
 POP_END   equ 56          ; the token cursor where the parameter itself ends
-POP_FRAME equ 64          ; + 2 pushes = 80
+POP_FRAME equ 72          ; + 3 pushes = 96, 16-aligned
 DEF_FUNC par_one_param, POP_FRAME
     push rbx
     push r12
+    push r13
     mov rbx, rdi
-    mov r12, rsi                        ; annotations allowed?
+    mov r12, rsi                        ; 0 none, 1 allowed, 2 star allowed
     call par_peek
     TOK_POS rax
     mov [rbp - POP_LINE], rcx
@@ -2495,11 +2511,39 @@ DEF_FUNC par_one_param, POP_FRAME
     jne .no_ann
     mov rdi, rbx
     call par_advance
+
+    ; PEP 646: the *args parameter's annotation may itself be starred, and
+    ; `*Ts` is the whole reason a TypeVarTuple exists.  par_expr will not
+    ; take a leading `*`, so the star is consumed here and the expression
+    ; wrapped, exactly as CPython's star_annotation rule has it.
+    xor r13d, r13d
+    cmp r12, 2
+    jne .ann_expr
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_STAR
+    jne .ann_expr
+    mov rdi, rbx
+    call par_advance
+    mov r13d, 1
+.ann_expr:
     mov rdi, rbx
     mov esi, BP_NONE
     call par_expr
     test rax, rax
     jz .fail
+    test r13d, r13d
+    jz .ann_plain
+    mov r8d, eax                        ; a = the expression
+    mov rdi, rbx
+    mov esi, AST_STARRED
+    xor edx, edx
+    mov rcx, [rbp - POP_LINE]
+    xor r9d, r9d
+    call ast_make
+    test rax, rax
+    jz .fail
+.ann_plain:
     mov [rbp - POP_ANN], rax
 .no_ann:
     ; A parameter ends at its name, or at its annotation; the default that
@@ -2539,12 +2583,14 @@ DEF_FUNC par_one_param, POP_FRAME
     mov edx, [rbp - POP_END]
     call ast_end_at
     mov rax, [rbp - POP_NODE]
+    pop r13
     pop r12
     pop rbx
     leave
     ret
 .fail:
     xor eax, eax
+    pop r13
     pop r12
     pop rbx
     leave
@@ -3917,6 +3963,18 @@ stmt_table:
     dq ps_while                ; 87 TOK_WHILE
     dq ps_with                 ; 88 TOK_WITH
     dq 0            ; 89 TOK_YIELD
+    dq 0            ; 90 TOK_TYPE_COMMENT
+    dq 0            ; 91 TOK_TYPE_IGNORE
+stmt_table_end:
+
+;; The dispatch above bounds against TOK_COUNT, so the table has to have that
+;; many rows -- and it did not: the two type-comment tokens were added to the
+;; token set without rows here, so a `# type:` comment in statement position
+;; read past the end and called whatever followed it.  Nothing catches a
+;; short table at run time, so the assembler catches it here.
+%if (stmt_table_end - stmt_table) / 8 != TOK_COUNT
+    %error "stmt_table must have one row per token kind"
+%endif
 
 section .rodata
 

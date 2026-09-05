@@ -95,3 +95,40 @@ check("a big subclass", lambda: (lambda x: (x.real == 2 ** 51,
 for _ in range(20000):
     _ = big.real
 print("many reads".ljust(34), repr(True))
+
+
+# An int SUBCLASS wraps an int rather than being one -- buildclass gives it a
+# PyInstanceObject layout -- so the fields of a PyIntObject are past the end
+# of it.  float_compare read .compact there to decide whether a comparison
+# needed GMP: an out-of-bounds read, and a wrong answer whenever the byte that
+# happened to follow said "no".  `I(2**60 + 1) == float(I(2**60 + 1))` came
+# out True, where the float has rounded and CPython says False.
+print("=== an int subclass against a float ===")
+
+
+class I(int):
+    pass
+
+
+for a, b in ((I(2 ** 60 + 1), 1.5), (1.5, I(2 ** 60 + 1)),
+             (I(3), 2.5), (2.5, I(3)),
+             (I(2 ** 80), 1e30), (1e30, I(2 ** 80)),
+             (I(2 ** 60 + 1), float(2 ** 60 + 1)),
+             (float(2 ** 60 + 1), I(2 ** 60 + 1)),
+             (I(0), 0.0), (I(-(2 ** 60)), -1e18),
+             (I(2 ** 53), float(2 ** 53)), (I(2 ** 53 + 1), float(2 ** 53))):
+    print("%-24s %-24s %s %s %s %s %s" % (repr(a)[:22], repr(b)[:22],
+                                          a < b, a > b, a == b, a <= b, a >= b))
+
+print(sorted([I(2 ** 60 + 1), 1.5, I(3), 2.5, float(2 ** 60 + 1)]))
+
+
+class F(float):
+    pass
+
+
+print("=== and a float subclass against an int ===")
+for a, b in ((F(1.5), 2), (2, F(1.5)), (F(1e30), 2 ** 80), (2 ** 80, F(1e30)),
+             (F(0.0), I(0)), (I(0), F(0.0))):
+    print("%-16s %-16s %s %s %s" % (repr(a)[:14], repr(b)[:14],
+                                    a < b, a == b, a > b))

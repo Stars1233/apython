@@ -1741,6 +1741,7 @@ DEF_FUNC float_compare, FC_FRAME
     mov esi, [rbp - FC_RTAG]
     call float_to_f64
     mov rdi, [rbp - FC_LSAVE]
+    mov esi, [rbp - FC_LTAG]
     call fc_int_vs_double
     mov r8d, eax
     jmp .float_cmp_dispatch
@@ -1750,6 +1751,7 @@ DEF_FUNC float_compare, FC_FRAME
     mov esi, [rbp - FC_LTAG]
     call float_to_f64
     mov rdi, [rbp - FC_RSAVE]
+    mov esi, [rbp - FC_RTAG]
     call fc_int_vs_double
     neg eax                     ; the comparison was made the other way round
     mov r8d, eax
@@ -1857,6 +1859,19 @@ DEF_FUNC_LOCAL fc_wide_int
     je .fcw_int
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_INT_SUBCLASS
     jz .fcw_no
+    ; An int subclass WRAPS an int rather than being one -- buildclass gives
+    ; it a PyInstanceObject layout -- so .compact is past the end of the
+    ; object.  Reading it there was an out-of-bounds read AND a wrong answer:
+    ; whatever byte followed decided whether the comparison went through GMP,
+    ; so `I(2**60 + 1) == float(I(2**60 + 1))` came out True where the float
+    ; has rounded and CPython says False.
+    extern int_unwrap
+    mov edx, esi
+    call int_unwrap
+    cmp edx, TAG_SMALLINT
+    je .fcw_no                  ; an immediate int is inside +-2^50
+    test rdi, rdi
+    jz .fcw_no
 .fcw_int:
     cmp qword [rdi + PyIntObject.compact], 0
     je .fcw_yes                 ; GMP-backed: always wider than a double
@@ -1879,21 +1894,35 @@ DEF_FUNC_LOCAL fc_wide_int
 END_FUNC fc_wide_int
 
 ;; ============================================================================
-;; fc_int_vs_double(rdi = the int (a heap int), xmm0 = the double)
+;; fc_int_vs_double(rdi = the int's payload, esi = its tag, xmm0 = the double)
 ;;   -> eax = -1, 0 or 1 for int < d, int == d, int > d
 ;;
 ;; Exactly, in GMP: the double's integer part is set into an mpz -- mpz_set_d
 ;; truncates toward zero, which is what is wanted -- and the fraction breaks
 ;; a tie.  A NaN or an infinity never reaches here; float_compare's ucomisd
 ;; arm handles those.
+;;
+;; The int arrives as a Value pair and is unwrapped HERE.  An int subclass
+;; wraps an int rather than being one, so it has no mpz of its own; and a
+;; compact heap int flattens to an immediate, which has no fields at all --
+;; unwrapping in the caller and passing the result on as a pointer was a
+;; dereference of the number itself.
 ;; ============================================================================
 FIV_D     equ 8
-FIV_TMP   equ 32            ; an mpz_t
-FIV_FRAME equ 56            ; + 1 push = 64, 16-aligned
-DEF_FUNC_LOCAL fc_int_vs_double, FIV_FRAME
+FIV_TAG   equ 16
+FIV_TMP   equ 48            ; an mpz_t
+FIV_INT   equ 80            ; a second, for an immediate that has no mpz
+FIV_HAVE  equ 88            ; ...and whether it was initialised
+FIV_FRAME equ 96            ; + 1 push = 104... one more word to land right
+DEF_FUNC_LOCAL fc_int_vs_double, 104
     push rbx
     movsd [rbp - FIV_D], xmm0
+    mov edx, esi
+    call int_unwrap
+    mov [rbp - FIV_TAG], rdx
     mov rbx, rdi
+    mov qword [rbp - FIV_HAVE], 0
+    movsd xmm0, [rbp - FIV_D]
 
     ; An infinity compares by sign alone; NaN never gets here.
     movsd xmm1, [rel pos_inf]
@@ -1911,8 +1940,21 @@ DEF_FUNC_LOCAL fc_int_vs_double, FIV_FRAME
     extern __gmpz_set_d
     call __gmpz_set_d wrt ..plt  ; truncates toward zero
 
+    cmp dword [rbp - FIV_TAG], TAG_SMALLINT
+    je .fiv_int_immediate
     INT_NEED_MPZ rbx
     lea rdi, [rbx + PyIntObject.mpz]
+    jmp .fiv_have_int
+.fiv_int_immediate:
+    mov qword [rbp - FIV_HAVE], 1
+    lea rdi, [rbp - FIV_INT]
+    call __gmpz_init wrt ..plt
+    lea rdi, [rbp - FIV_INT]
+    mov rsi, rbx
+    extern __gmpz_set_si
+    call __gmpz_set_si wrt ..plt
+    lea rdi, [rbp - FIV_INT]
+.fiv_have_int:
     lea rsi, [rbp - FIV_TMP]
     extern __gmpz_cmp
     call __gmpz_cmp wrt ..plt
@@ -1921,6 +1963,11 @@ DEF_FUNC_LOCAL fc_int_vs_double, FIV_FRAME
     lea rdi, [rbp - FIV_TMP]
     extern __gmpz_clear
     call __gmpz_clear wrt ..plt
+    cmp qword [rbp - FIV_HAVE], 0
+    je .fiv_no_int_mpz
+    lea rdi, [rbp - FIV_INT]
+    call __gmpz_clear wrt ..plt
+.fiv_no_int_mpz:
     pop r8
     test r8d, r8d
     jl .fiv_minus

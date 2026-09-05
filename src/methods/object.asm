@@ -300,12 +300,51 @@ END_FUNC object_method_reduce
 
 ;; ============================================================================
 extern str_from_cstr
-DEF_FUNC object_method_init
-    ; object.__init__(self, ...) accepts anything and does nothing.
+OMI_SELF  equ 8
+OMI_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC object_method_init, OMI_FRAME
+    ; object.__init__(self, ...) does nothing -- but it does not accept
+    ; anything either.  CPython's object_init refuses excess arguments
+    ; unless the other half of the construction is overridden, so a class
+    ; that defines neither __new__ nor __init__ cannot be handed any.
+    cmp rsi, 1
+    jbe .omi_done
+    mov rax, [rdi]              ; self, a Value
+    V_TEST_PTR rax, rcx
+    ja .omi_done
+    test rax, rax
+    jz .omi_done
+    mov rdi, [rax + PyObject.ob_type]
+    mov [rbp - OMI_SELF], rdi
+    extern init_dunder_cstr
+    lea rsi, [rel init_dunder_cstr]
+    mov edx, PyTypeObject.tp_init
+    extern type_defines_dunder
+    call type_defines_dunder
+    test eax, eax
+    jnz .omi_own_init
+    mov rdi, [rbp - OMI_SELF]
+    extern new_dunder_cstr
+    lea rsi, [rel new_dunder_cstr]
+    mov edx, PyTypeObject.tp_new
+    call type_defines_dunder
+    test eax, eax
+    jz .omi_no_args
+.omi_done:
     RET_NONE
     leave
     V_PACK rax, rdx
     ret
+
+.omi_own_init:
+    RAISE exc_TypeError_type, \
+          "object.__init__() takes exactly one argument (the instance to initialize)"
+.omi_no_args:
+    mov rsi, [rbp - OMI_SELF]
+    CSTRING rdi, \
+        `\x01.__init__() takes exactly one argument (the instance to initialize)`
+    extern raise_type_error_with_typename
+    jmp raise_type_error_with_typename
 END_FUNC object_method_init
 
 DEF_FUNC object_method_str
@@ -447,6 +486,7 @@ DEF_FUNC %1_dunder_%2
     ; CPython reports both counts, and counts self in neither.
     dec rsi                     ; rsi is still nargs on this path
     xor edi, edi
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC %1_dunder_%2
@@ -496,6 +536,7 @@ DEF_FUNC %1_dunder_len
 %%arity:
     dec rsi
     xor edi, edi
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 %%bad:
@@ -539,6 +580,7 @@ DEF_FUNC %1_dunder_iter
 %%arity:
     dec rsi
     xor edi, edi
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 %%bad:
@@ -607,6 +649,7 @@ DEF_FUNC %1_dunder_%2
     ; CPython reports both counts, and counts self in neither.
     dec rsi                     ; rsi is still nargs on this path
     xor edi, edi
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC %1_dunder_%2
@@ -654,6 +697,18 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     jnz %%out
     EXC_RAISED_SINCE [rbp - DB_EXC], rcx, %%out
 %if %0 >= 4
+%ifidn %4,count
+    ; A repetition whose count is not an index.  The OPERATOR words this as
+    ; "can't multiply sequence by non-int of type 'str'"; the dunder called by
+    ; name says what the count itself had to be, and CPython draws the same
+    ; line.  The slots decline rather than raise so that `[1] * R()` can still
+    ; reach R.__rmul__, and without this the decline came out of the dunder as
+    ; a bare "unsupported operand type" -- or, where the dunder tail-jumps
+    ; into the slot, as a NULL that bound nothing at all.
+    mov rsi, [rbp - DB_RHS]
+    extern seq_repeat_not_index
+    jmp seq_repeat_not_index
+%else
     ; The implementation declined the pair without raising.  Called by name,
     ; that has to read as NotImplemented so the caller can try the reflected
     ; form; only the operator machinery turns a decline into a TypeError.
@@ -662,6 +717,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     INCREF rax
     leave
     ret
+%endif
 %endif
 %%bad:
     RAISE exc_TypeError_type, "unsupported operand type"
@@ -674,7 +730,8 @@ END_FUNC %1_dunder_%2
 ;; The reflected sequence form: self is the RIGHT operand, and the slot is
 ;; called with the operands the way it expects them.  `2 * L` reaches
 ;; list.__rmul__(L, 2), and sq_repeat wants (L, 2).
-%macro DEF_SEQ_RDUNDER 3        ; %1 prefix, %2 suffix, %3 implementation
+%macro DEF_SEQ_RDUNDER 3-4      ; %1 prefix, %2 suffix, %3 implementation,
+                                ; %4 = count: a decline is a bad count
 DEF_FUNC %1_dunder_%2, DB_FRAME
     cmp rsi, 2
     jne %%bad
@@ -694,6 +751,11 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     test rax, rax
     jnz %%out
     EXC_RAISED_SINCE [rbp - DB_EXC], rcx, %%out
+%if %0 >= 4
+    mov rsi, [rbp - DB_RHS]
+    extern seq_repeat_not_index
+    jmp seq_repeat_not_index
+%endif
 %%bad:
     RAISE exc_TypeError_type, "unsupported operand type"
 %%out:
@@ -815,6 +877,45 @@ DEF_FUNC dunder_operand_is_real, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     ret
 END_FUNC dunder_operand_is_real
+
+;; ============================================================================
+;; dunder_operand_is_complex(rdi = the other operand, a Value) -> eax = 1 when
+;;   complex's binary dunders will take it
+;;
+;; A complex, or anything real.  The whole family was absent from complex's
+;; tp_dict -- the operators worked through the slots, but
+;; `hasattr(complex(1,2), "__add__")` was False, and the numeric tower asks by
+;; name.
+;; ============================================================================
+global dunder_operand_is_complex
+DEF_FUNC dunder_operand_is_complex, 8            ; 1 push, so rsp is 16-aligned
+    push rbx
+    mov rbx, rdi
+    V_TEST_PTR rdi, rax
+    ja .doic_real
+    test rdi, rdi
+    jz .doic_real
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel complex_type]
+    cmp rax, rcx
+    je .doic_yes
+    mov rdi, rax
+    lea rsi, [rel complex_type]
+    call type_is_subtype
+    test eax, eax
+    jnz .doic_yes
+.doic_real:
+    mov rdi, rbx
+    call dunder_operand_is_real
+    pop rbx
+    leave
+    ret
+.doic_yes:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC dunder_operand_is_complex
 
 ; The one frame slot these need: the exception pending before the slot ran.
 DB_EXC   equ 8
@@ -957,6 +1058,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     ; it wanted, which bugs.md records among the wordings that differ.
     dec rsi                     ; rsi is still nargs on this path
     mov edi, 1
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC %1_dunder_%2
@@ -1028,6 +1130,7 @@ DEF_FUNC %1_dunder_%2, 16
     ; CPython reports both counts, and counts self in neither.
     dec rsi                     ; rsi is still nargs on this path
     mov edi, 1
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC %1_dunder_%2
@@ -1070,6 +1173,7 @@ DEF_FUNC %1_dunder_bool
     ; CPython reports both counts, and counts self in neither.
     dec rsi                     ; rsi is still nargs on this path
     xor edi, edi
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC %1_dunder_bool
@@ -1139,6 +1243,27 @@ DEF_DUNDER_DIVMOD float, rdivmod, 1, dunder_operand_is_real
 DEF_DUNDER_BINARY float, rpow, nb_power, 1, dunder_operand_is_real, 0, builtin_pow_fn
 DEF_DUNDER_BINARY float, rfloordiv, nb_floor_divide, 1, dunder_operand_is_real
 DEF_DUNDER_BINARY float, rtruediv, nb_true_divide, 1, dunder_operand_is_real
+
+;; complex.  Its operators went through the slots and nothing else, so
+;; `complex(1,2).__add__` did not exist -- and a class that dispatches on
+;; NotImplemented, as the numeric tower does, cannot ask a type that has no
+;; __add__ to try.  There is no floordiv or mod: complex has neither.
+DEF_DUNDER_BINARY complex, add, nb_add, 0, dunder_operand_is_complex
+DEF_DUNDER_BINARY complex, sub, nb_subtract, 0, dunder_operand_is_complex
+DEF_DUNDER_BINARY complex, mul, nb_multiply, 0, dunder_operand_is_complex
+DEF_DUNDER_BINARY complex, truediv, nb_true_divide, 0, dunder_operand_is_complex
+; The operand is checked before the modulus, as int's is: complex's slot
+; declines a non-complex operand outright, so `z.__pow__("x", 0)` is
+; NotImplemented rather than a complaint about the modulus.
+DEF_DUNDER_BINARY complex, pow, nb_power, 0, dunder_operand_is_complex, 0, builtin_pow_fn, 1
+DEF_DUNDER_BINARY complex, radd, nb_add, 1, dunder_operand_is_complex
+DEF_DUNDER_BINARY complex, rsub, nb_subtract, 1, dunder_operand_is_complex
+DEF_DUNDER_BINARY complex, rmul, nb_multiply, 1, dunder_operand_is_complex
+DEF_DUNDER_BINARY complex, rtruediv, nb_true_divide, 1, dunder_operand_is_complex
+DEF_DUNDER_BINARY complex, rpow, nb_power, 1, dunder_operand_is_complex, 0, builtin_pow_fn, 1
+DEF_DUNDER_UNARY complex, neg, nb_negative
+DEF_DUNDER_UNARY complex, pos, nb_positive
+DEF_DUNDER_UNARY complex, abs, nb_absolute
 
 ;; ============================================================================
 ;; object's generic attribute dunders, and the two hooks
@@ -1419,27 +1544,27 @@ END_FUNC object_method_subclasshook
 ;; refuses, so those get the thunk; an nb_ slot declines with NULL and has to
 ;; answer NotImplemented, so those get the DEF_DUNDER_BINARY shape.
 DEF_SEQ_DUNDER  list, add,   list_concat
-DEF_SEQ_DUNDER  list, mul,   list_repeat
-DEF_SEQ_RDUNDER list, rmul,  list_repeat
-DEF_SEQ_DUNDER  list, imul,  list_inplace_repeat
+DEF_SEQ_DUNDER  list, mul,   list_repeat, count
+DEF_SEQ_RDUNDER list, rmul,  list_repeat, count
+DEF_SEQ_DUNDER  list, imul,  list_inplace_repeat, count
 
 DEF_SEQ_DUNDER  str, add,      str_concat
-DEF_SEQ_DUNDER  str, mul,      str_repeat
-DEF_SEQ_RDUNDER str, rmul,     str_repeat
+DEF_SEQ_DUNDER  str, mul,      str_repeat, count
+DEF_SEQ_RDUNDER str, rmul,     str_repeat, count
 DEF_SEQ_DUNDER  str, mod,      str_mod
 DEF_SEQ_DUNDER  str, getitem,  str_subscript
 
 DEF_SEQ_DUNDER  bytes, add,     bytes_concat
-DEF_SEQ_DUNDER  bytes, mul,     bytes_repeat
-DEF_SEQ_RDUNDER bytes, rmul,    bytes_repeat
+DEF_SEQ_DUNDER  bytes, mul,     bytes_repeat, count
+DEF_SEQ_RDUNDER bytes, rmul,    bytes_repeat, count
 DEF_SEQ_DUNDER  bytes, mod,     bytes_mod
 DEF_SEQ_DUNDER  bytes, getitem, bytes_subscript
 
 DEF_SEQ_DUNDER  bytearray, add,   bytearray_concat
-DEF_SEQ_DUNDER  bytearray, mul,   bytearray_repeat
-DEF_SEQ_RDUNDER bytearray, rmul,  bytearray_repeat
+DEF_SEQ_DUNDER  bytearray, mul,   bytearray_repeat, count
+DEF_SEQ_RDUNDER bytearray, rmul,  bytearray_repeat, count
 DEF_SEQ_DUNDER  bytearray, iadd,  bytearray_inplace_concat
-DEF_SEQ_DUNDER  bytearray, imul,  bytearray_inplace_repeat
+DEF_SEQ_DUNDER  bytearray, imul,  bytearray_inplace_repeat, count
 DEF_SEQ_DUNDER  bytearray, mod,   bytearray_mod
 
 ;; The reflected `%` forms answer NotImplemented for anything that is not a
@@ -1513,6 +1638,7 @@ DEF_FUNC int_dunder_bool
     ; CPython reports both counts, and counts self in neither.
     dec rsi
     xor edi, edi
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC int_dunder_bool
@@ -1582,6 +1708,7 @@ DEF_FUNC object_method_%1
     ; CPython reports both counts, and counts self in neither.
     dec rsi                     ; rsi is still nargs on this path
     xor edi, edi
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC object_method_%1
@@ -1826,6 +1953,7 @@ DEF_FUNC %1_dunder_hash
 %%bad:
     dec rsi
     xor edi, edi
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC %1_dunder_hash
@@ -1888,6 +2016,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     ; CPython reports both counts, and counts self in neither.
     dec rsi                     ; rsi is still nargs on this path
     mov edi, 1
+    xor edx, edx                ; check_num_args' wording, with no gap
     extern raise_wrapper_arity
     call raise_wrapper_arity
 END_FUNC %1_dunder_%2

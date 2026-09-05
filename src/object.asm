@@ -19,6 +19,7 @@ extern int_type
 extern current_exception
 extern eval_saved_r13
 extern eval_exception_unwind
+extern int_promote_mpz
 extern int_to_i64
 extern float_type
 extern float_repr
@@ -576,7 +577,7 @@ END_FUNC obj_str
 ;; over.
 ;; ============================================================================
 global obj_as_slice_index
-DEF_FUNC obj_as_slice_index
+DEF_FUNC obj_as_slice_index, OAI_FRAME
     cmp edx, TAG_SMALLINT
     je .oasi_ok
     cmp edx, TAG_PTR
@@ -588,8 +589,10 @@ DEF_FUNC obj_as_slice_index
     cmp qword [rax + PyNumberMethods.nb_index], 0
     je .oasi_bad
 .oasi_ok:
+    ; The same body, in clamping mode: `[1,2,3][2**70:]` is [] in CPython,
+    ; not an error, because a bound past the end is the end.
     leave
-    jmp obj_as_index
+    jmp obj_as_index_clamped
 .oasi_bad:
     RAISE exc_TypeError_type, \
         "slice indices must be integers or have an __index__ method"
@@ -608,8 +611,27 @@ END_FUNC obj_as_slice_index
 ;; Takes the same (payload, tag) pair as int_to_i64 so a call site changes by
 ;; one word.  This is where the __index__ protocol belongs once heaptypes
 ;; carry real slots.
+;;
+;; obj_as_index_clamped, below, is the same body with an int too wide for an
+;; index coming back as the nearest end rather than raising.  For a caller
+;; whose field IS an int64 and whose CPython counterpart holds an object: a
+;; slice bound, because `[1,2,3][2**70:]` is [] there and not an error, and
+;; range, which keeps its three bounds in int64s where `range(1 << 1000)` is
+;; an ordinary range -- _collections_abc builds one at import, to name the
+;; type its iterator has.
 ;; ============================================================================
-DEF_FUNC obj_as_index
+OAI_MODE  equ 8             ; 0 = refuse what will not fit, 1 = clamp to it,
+                            ; 2 = refuse it as a SEQUENCE index
+; The template a non-index is refused with, or 0 for the generic one.  A
+; subscript says "list indices must be integers or slices, not float" and
+; names the container as well as the key.
+OAI_MSG   equ 16
+OAI_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC obj_as_index, OAI_FRAME
+    mov qword [rbp - OAI_MODE], 0
+    xor esi, esi
+oai_body:
+    mov [rbp - OAI_MSG], rsi
     cmp edx, TAG_SMALLINT
     je .oai_immediate
     cmp edx, TAG_PTR
@@ -625,9 +647,7 @@ DEF_FUNC obj_as_index
     je .oai_immediate
     mov rax, [rdi + PyObject.ob_type]
     REQUIRE_INT_TYPE rax, rcx, .oai_try_dunder
-    call int_to_i64
-    leave
-    ret
+    jmp .oai_to_i64
 
 .oai_immediate:
     mov rax, rdi
@@ -660,14 +680,59 @@ DEF_FUNC obj_as_index
     call int_unwrap             ; __index__ may itself return an int subclass
     cmp edx, TAG_SMALLINT
     je .oai_dunder_immediate
-    call int_to_i64
-    leave
-    ret
+    jmp .oai_to_i64
 .oai_dunder_immediate:
     mov rax, rdi
     leave
     ret
 .oai_dunder_done:
+    leave
+    ret
+
+;; A heap int, which may be wider than an index.  int_to_i64 truncates
+;; through __gmpz_get_si, so `[1][2**70]` answered [1]'s first element and
+;; `chr(2**70)` answered "\x00" -- a wrong ANSWER, not a refusal.  CPython
+;; raises here; a SLICE bound is the exception, and clamps.
+.oai_to_i64:
+    push rdi
+    push rdx
+    extern int_fits_i64
+    call int_fits_i64
+    pop rdx
+    pop rdi
+    test eax, eax
+    jz .oai_too_wide
+    call int_to_i64
+    leave
+    ret
+
+.oai_too_wide:
+    cmp qword [rbp - OAI_MODE], 1
+    je .oai_clamp
+    cmp qword [rbp - OAI_MODE], 2
+    je .oai_too_wide_seq
+    extern exc_OverflowError_type
+    RAISE exc_OverflowError_type, "Python int too large to convert to C ssize_t"
+.oai_too_wide_seq:
+    ; CPython passes the exception TYPE to PyNumber_AsSsize_t, and every
+    ; sequence subscript passes IndexError: `[1][2**70]` is an IndexError
+    ; there, not an OverflowError, and the sentence is a different one.
+    extern exc_IndexError_type
+    RAISE exc_IndexError_type, "cannot fit 'int' into an index-sized integer"
+.oai_clamp:
+    ; A slice bound past either end is that end, which is what CPython's
+    ; _PyEval_SliceIndex does.  The sign is the mpz's: a heap int this wide
+    ; always has one.
+    INT_NEED_MPZ rdi
+    lea rdi, [rdi + PyIntObject.mpz]
+    extern __gmpz_cmp_si
+    xor esi, esi
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    mov rax, 0x7FFFFFFFFFFFFFFF
+    jns .oai_clamped
+    mov rax, 0x8000000000000000
+.oai_clamped:
     leave
     ret
 
@@ -681,9 +746,103 @@ DEF_FUNC obj_as_index
     ; to be rebuilt from the (payload, tag) pair the caller passed.
     mov rsi, rdi
     V_PACK rsi, rdx
+    mov rdi, [rbp - OAI_MSG]
+    test rdi, rdi
+    jnz raise_type_error_with_name
     lea rdi, [rel oai_not_an_index]
     jmp raise_type_error_with_name
 END_FUNC obj_as_index
+
+;; ============================================================================
+;; obj_as_index_object(rdi = payload, edx = tag) -> rax = an int Value, owned
+;;
+;; The same refusal as obj_as_index, answering the OBJECT rather than an
+;; int64.  For a caller whose CPython counterpart keeps the object: range's
+;; three bounds, which are ints there and were int64s here, so
+;; `range(1 << 1000)` had nowhere to put its stop.
+;; ============================================================================
+OAO_ARG   equ 8
+OAO_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+global obj_as_index_object
+DEF_FUNC obj_as_index_object, OAO_FRAME
+    ; The tag first: V_PACK below clobbers the register it is in.
+    mov ecx, edx
+    mov rax, rdi
+    V_PACK rax, rdx
+    mov [rbp - OAO_ARG], rax
+    mov edx, ecx
+    cmp edx, TAG_SMALLINT
+    je .oao_keep
+    cmp edx, TAG_PTR
+    jne .oao_refuse
+    extern int_unwrap
+    call int_unwrap             ; an int subclass wraps a real int, and
+                                ; answers in the same pair it was handed
+    cmp edx, TAG_SMALLINT
+    je .oao_unwrapped
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_INT_TYPE rax, rcx, .oao_dunder
+.oao_unwrapped:
+    mov rax, rdi
+    V_PACK rax, rdx
+    INCREF_V rax, rcx
+    leave
+    ret
+.oao_keep:
+    mov rax, [rbp - OAO_ARG]
+    leave
+    ret
+.oao_dunder:
+    mov rax, [rbp - OAO_ARG]
+    V_TEST_PTR rax, rcx
+    ja .oao_refuse
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_number]
+    test rcx, rcx
+    jz .oao_refuse
+    mov rcx, [rcx + PyNumberMethods.nb_index]
+    test rcx, rcx
+    jz .oao_refuse
+    mov rdi, rax
+    call rcx                    ; nb_index returns an owned Value
+    test rax, rax
+    jz .oao_zero
+    leave
+    ret
+.oao_zero:
+    xor eax, eax
+    leave
+    ret
+.oao_refuse:
+    ; obj_as_index's own wording, which names the type.
+    mov rsi, [rbp - OAO_ARG]
+    lea rdi, [rel oai_not_an_index]
+    jmp raise_type_error_with_name
+END_FUNC obj_as_index_object
+
+;; ============================================================================
+;; obj_as_index_seq(rdi = payload, edx = tag, rsi = the refusal's template,
+;;                  whose \x01 stands for the key's type, or 0)
+;;   -> rax = int64
+;; The same, refusing a too-wide int as a sequence subscript does: an
+;; IndexError naming the index, not an OverflowError naming a C type.
+;; ============================================================================
+global obj_as_index_seq
+DEF_FUNC obj_as_index_seq, OAI_FRAME
+    mov qword [rbp - OAI_MODE], 2
+    jmp oai_body
+END_FUNC obj_as_index_seq
+
+;; ============================================================================
+;; obj_as_index_clamped(rdi = payload, edx = tag) -> rax = int64
+;; The same, clamping instead of refusing.  See obj_as_index above.
+;; ============================================================================
+global obj_as_index_clamped
+DEF_FUNC obj_as_index_clamped, OAI_FRAME
+    mov qword [rbp - OAI_MODE], 1
+    xor esi, esi
+    jmp oai_body
+END_FUNC obj_as_index_clamped
 
 ;; ============================================================================
 ;; raise_type_error_counted(rdi = the text before the number, rsi = the count,
@@ -717,6 +876,37 @@ DEF_FUNC raise_type_error_counted, RTC_FRAME
     lea rsi, [rbp - RTC_BUF]
     call raise_exception
 END_FUNC raise_type_error_counted
+
+;; ============================================================================
+;; raise_value_error_counted(rdi = the text before the number, rsi = the
+;;                           count, rdx = the text after it, or 0)
+;;   -> does not return: the composed message is raised as a ValueError
+;;
+;; The same composition as raise_type_error_counted, for the messages that
+;; are ValueErrors: "Item 0 of second argument (exceptions) is not an
+;; exception".
+;; ============================================================================
+global raise_value_error_counted
+DEF_FUNC raise_value_error_counted, RTC_FRAME
+    mov [rbp - RTC_N], rsi
+    mov [rbp - RTC_TAIL], rdx
+    mov rsi, rdi
+    lea rdi, [rbp - RTC_BUF]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RTC_N]
+    call msg_append_i64
+    cmp qword [rbp - RTC_TAIL], 0
+    je .rvc_raise
+    mov rdi, rax
+    mov rsi, [rbp - RTC_TAIL]
+    call rbt_append_cstr
+.rvc_raise:
+    extern exc_ValueError_type
+    lea rdi, [rel exc_ValueError_type]
+    lea rsi, [rbp - RTC_BUF]
+    call raise_exception
+END_FUNC raise_value_error_counted
 
 ;; ============================================================================
 ;; raise_final_base(rdi = the type's name, as a C string) -- does not return
@@ -847,7 +1037,18 @@ DEF_FUNC raise_wrapper_arity, RWA_FRAME
     mov [rbp - RWA_WANT], rdi
     mov [rbp - RWA_GOT], rsi
     lea rdi, [rbp - RWA_BUF]
+    ; CPython has two helpers here and they differ by one space.  Most
+    ; wrappers use check_num_args -- "expected 1 argument, got 0" -- while
+    ; the __setitem__/__delitem__ shape goes through PyArg_UnpackTuple with
+    ; an EMPTY function name, and that format leaves the gap where the name
+    ; would have been.
+    test edx, edx
+    jz .rwa_no_gap
+    CSTRING rsi, " expected "
+    jmp .rwa_opened
+.rwa_no_gap:
     CSTRING rsi, "expected "
+.rwa_opened:
     call rbt_append_cstr
     mov rdi, rax
     mov rsi, [rbp - RWA_WANT]
@@ -901,7 +1102,32 @@ DEF_FUNC raise_builtin_arity, RBA_FRAME
     ; A slot wrapper has its own wording, and never names itself.
     cmp qword [rdi + PyBuiltinObject.func_kind], BUILTIN_KIND_WRAPPER
     jne .rba_method
-    mov rdi, rdx
+    ; ...except that the two-argument item wrappers go through CPython's
+    ; OTHER helper, whose format leaves a gap for the name it was given
+    ; empty.  __setitem__ and __delitem__ are the pair.
+    mov rsi, [rdi + PyBuiltinObject.func_name]
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__setitem__"
+    push rdx
+    call ap_strcmp
+    pop rdx
+    test eax, eax
+    jz .rba_wrapper_gap
+    mov rcx, [rbp - RBA_DESC]
+    mov rsi, [rcx + PyBuiltinObject.func_name]
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__delitem__"
+    push rdx
+    call ap_strcmp
+    pop rdx
+    test eax, eax
+    jz .rba_wrapper_gap
+    xor edx, edx
+    jmp .rba_wrapper
+.rba_wrapper_gap:
+    mov edx, 1
+.rba_wrapper:
+    mov rdi, [rbp - RBA_WANT]
     mov rsi, [rbp - RBA_GOT]
     jmp raise_wrapper_arity
 
@@ -1052,7 +1278,11 @@ END_FUNC value_type
 ;                            written as \x01, rsi = Value whose type to name)
 ; Composes the message into a static buffer and raises TypeError.  Does not
 ; return.
-RTN_BUFSZ equ 160
+; Wide enough for the longest message that goes through it, which is now a
+; deprecation rather than an error: CPython's "__index__ returned non-int
+; (type bool).  The ability to return an instance of a strict subclass of int
+; is deprecated..." is 155 characters before the type name goes in.
+RTN_BUFSZ equ 256
 
 section .rodata
 rbt_open:    db ": '", 0
@@ -1072,6 +1302,7 @@ drs_after_name: db "' ", 0
 drs_requires: db "requires a '", 0
 drs_middle:  db "' object but received a '", 0
 mah_digits:  db "0123456789abcdef", 0
+tnm_none:    db "None", 0
 
 section .bss
 rbt_buf: resb 320   ; two 80-char type names plus the prefix and separators
@@ -1099,44 +1330,85 @@ DEF_FUNC raise_type_error_with_typename
     mov rbx, rdi
     mov r12, rsi
 rtn_compose:
-
-    lea rdi, [rel rtn_buf]
-    xor ecx, ecx
-.rtn_copy:
-    movzx eax, byte [rbx]
-    test al, al
-    jz .rtn_end
-    inc rbx
-    cmp al, 1
-    je .rtn_insert
-    cmp rcx, RTN_BUFSZ - 2
-    jae .rtn_copy
-    mov [rdi + rcx], al
-    inc rcx
-    jmp .rtn_copy
-.rtn_insert:
-    test r12, r12
-    jz .rtn_copy
-    mov rsi, [r12 + PyTypeObject.tp_name]
-.rtn_name:
-    movzx eax, byte [rsi]
-    test al, al
-    jz .rtn_copy
-    inc rsi
-    cmp rcx, RTN_BUFSZ - 2
-    jae .rtn_copy
-    mov [rdi + rcx], al
-    inc rcx
-    jmp .rtn_name
-.rtn_end:
-    mov byte [rdi + rcx], 0
+    mov rdi, rbx
+    mov rsi, r12
+    call type_name_message
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel rtn_buf]
+    mov rsi, rax
     extern exc_TypeError_type
     extern raise_exception
     call raise_exception
     ud2
 END_FUNC raise_type_error_with_typename
+
+;; ============================================================================
+;; type_name_message(rdi = a template whose \x01 stands for a type name and
+;;                   whose \x02 stands for the same but "None" for NoneType,
+;;                   rsi = the type object, or 0 to leave the marker out)
+;;   -> rax = the composed C string, in a shared static buffer
+;;
+;; The composition the two raisers above have always done, given a name of
+;; its own because a WARNING wants it too: CPython's "__index__ returned
+;; non-int (type bool)." names the type the same way its errors do.  The
+;; buffer is shared and overwritten on every call, so the string is only good
+;; until the next one -- which is all a raise or a warn needs.
+;;
+;; The \x02 form is CPython's _PyArg_BadArgument rule: that helper prints
+;; "None" rather than "NoneType", so "format() argument 2 must be str, not
+;; None" reads as it does there while every message built from a plain tp_name
+;; keeps saying NoneType.
+;; ============================================================================
+global type_name_message
+DEF_FUNC type_name_message
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    lea rdi, [rel rtn_buf]
+    xor ecx, ecx
+.tnm_copy:
+    movzx eax, byte [rbx]
+    test al, al
+    jz .tnm_end
+    inc rbx
+    cmp al, 1
+    je .tnm_insert
+    cmp al, 2
+    je .tnm_insert_arg
+    cmp rcx, RTN_BUFSZ - 2
+    jae .tnm_copy
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .tnm_copy
+.tnm_insert_arg:
+    extern none_type
+    lea rax, [rel none_type]
+    cmp r12, rax
+    jne .tnm_insert
+    lea rsi, [rel tnm_none]
+    jmp .tnm_name
+.tnm_insert:
+    test r12, r12
+    jz .tnm_copy
+    mov rsi, [r12 + PyTypeObject.tp_name]
+.tnm_name:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .tnm_copy
+    inc rsi
+    cmp rcx, RTN_BUFSZ - 2
+    jae .tnm_copy
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .tnm_name
+.tnm_end:
+    mov byte [rdi + rcx], 0
+    lea rax, [rel rtn_buf]
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC type_name_message
 
 ;; ============================================================================
 ;; dunder_require_self(rdi = self Value, rsi = the type whose method this is,
@@ -1256,6 +1528,54 @@ DEF_FUNC_BARE raise_binop_type_error
     lea rcx, [rel rbt_open]     ; the default opener, ": '"
     jmp raise_binop_type_error_ex
 END_FUNC raise_binop_type_error
+
+;; ============================================================================
+;; compose_binop_type_error(rdi = left Value, rsi = right Value,
+;;                          rdx = the prefix, rcx = the text before the first
+;;                          type name, or 0 for the usual ": '")
+;;   -> rax = the composed C string, in the shared rbt_buf
+;;
+;; The composition raise_binop_type_error_ex does, without the raise.  A
+;; caller that still has two references to release cannot unwind from where
+;; it notices, so it sets the exception instead -- and was reporting the bare
+;; "unsupported operand type(s)", with neither the operator nor the types.
+;; ============================================================================
+global compose_binop_type_error
+DEF_FUNC compose_binop_type_error, RBT_FRAME
+    push rbx
+    mov [rbp - RBT_LEFT], rdi
+    mov [rbp - RBT_RIGHT], rsi
+    mov rbx, rdx
+    test rcx, rcx
+    jnz .cbt_have_open
+    lea rcx, [rel rbt_open]
+.cbt_have_open:
+    mov [rbp - RBT_OPEN], rcx
+
+    lea rdi, [rel rbt_buf]
+    mov rsi, rbx
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RBT_OPEN]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RBT_LEFT]
+    call rbt_typename
+    mov rdi, rax
+    lea rsi, [rel rbt_and]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RBT_RIGHT]
+    call rbt_typename
+    mov rdi, rax
+    lea rsi, [rel rbt_close]
+    call rbt_append_cstr
+
+    lea rax, [rel rbt_buf]
+    pop rbx
+    leave
+    ret
+END_FUNC compose_binop_type_error
 
 ;; ============================================================================
 ;; raise_binop_type_error_ex(rdi = left Value, rsi = right Value,
@@ -1509,7 +1829,8 @@ RVR_PREFIX equ 8
 RVR_OBJ    equ 16
 RVR_REPR   equ 24
 RVR_FULL   equ 32
-RVR_FRAME  equ 32           ; + 0 pushes = 32
+RVR_SUFFIX equ 40           ; the text after the repr, or 0
+RVR_FRAME  equ 48           ; + 0 pushes = 48, 16-aligned
 
 extern str_from_cstr_heap
 extern str_concat
@@ -1518,6 +1839,9 @@ extern exc_ValueError_type
 extern raise_exception_obj
 
 DEF_FUNC raise_value_error_with_repr, RVR_FRAME
+    xor edx, edx
+rvr_body:
+    mov [rbp - RVR_SUFFIX], rdx
     mov [rbp - RVR_OBJ], rsi
     call str_from_cstr_heap         ; rdi still holds the prefix
     mov [rbp - RVR_PREFIX], rax
@@ -1546,6 +1870,26 @@ DEF_FUNC raise_value_error_with_repr, RVR_FRAME
     mov rdi, [rbp - RVR_REPR]
     call obj_decref
 
+    ; ...and the tail, when the repr goes in the MIDDLE: CPython's
+    ; "None is not in list" puts it first and the sentence after.
+    cmp qword [rbp - RVR_SUFFIX], 0
+    je .rvr_no_suffix
+    mov rdi, [rbp - RVR_SUFFIX]
+    call str_from_cstr_heap
+    mov [rbp - RVR_REPR], rax
+    mov rdi, [rbp - RVR_FULL]
+    mov rsi, rax
+    mov ecx, TAG_PTR
+    call str_concat
+    push rax
+    mov rdi, [rbp - RVR_FULL]
+    call obj_decref
+    mov rdi, [rbp - RVR_REPR]
+    call obj_decref
+    pop rax
+    mov [rbp - RVR_FULL], rax
+.rvr_no_suffix:
+
     lea rdi, [rel exc_ValueError_type]
     mov rsi, [rbp - RVR_FULL]
     mov edx, TAG_PTR
@@ -1559,6 +1903,17 @@ DEF_FUNC raise_value_error_with_repr, RVR_FRAME
     jmp raise_exception_obj         ; chains and unwinds; takes the reference
 END_FUNC raise_value_error_with_repr
 
+;; ============================================================================
+;; raise_value_error_with_repr2(rdi = prefix, rsi = the object Value,
+;;                              rdx = the text after the repr)
+;;   -> does not return
+;; The same, with the repr in the middle: "None is not in list".
+;; ============================================================================
+global raise_value_error_with_repr2
+DEF_FUNC raise_value_error_with_repr2, RVR_FRAME
+    jmp rvr_body
+END_FUNC raise_value_error_with_repr2
+
 section .bss
 ; Set by instance_getattr when __getattr__ raised an AttributeError and it
 ; handed the exception back rather than unwinding.  Cleared on entry to every
@@ -1571,12 +1926,88 @@ rtn_buf: resb RTN_BUFSZ
 section .text
 
 ;; ============================================================================
-;; seq_repeat_check_count(rsi = count Value) -- raises TypeError unless the
-;; count is an int (or a bool, which is one).  Does not return on failure.
+;; seq_repeat_not_index(rsi = the count that was not one) -- does not return
+;;
+;; What __mul__, __rmul__ and __imul__ say when called by name and handed
+;; something that is not an index.  The OPERATOR words the same refusal
+;; differently -- "can't multiply sequence by non-int of type 'str'" -- and
+;; CPython draws exactly that line, because the two go through different
+;; code: the operator through sequence_repeat, the dunder through the
+;; wrapper's own PyNumber_AsSsize_t.
 ;; ============================================================================
-DEF_FUNC_BARE seq_repeat_check_count
+DEF_FUNC seq_repeat_not_index
+    CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
+    jmp raise_type_error_with_name
+END_FUNC seq_repeat_not_index
+
+;; ============================================================================
+;; binop_is_count(rdi = a Value) -> eax = 1 when it could be a repetition count
+;;
+;; An int, a bool, an int subclass, or anything with an __index__.  Every
+;; sq_repeat and sq_inplace_repeat asks this BEFORE seq_repeat_count, because
+;; the answer decides between declining and raising -- and declining is what
+;; lets the right operand's __rmul__ be asked at all.  `[1] * R()`, for an R
+;; with an __rmul__ and nothing else, is R.__rmul__([1]) in CPython; here the
+;; sequence's own slot raised first and the reflected dunder was never
+;; reached.
+;; ============================================================================
+DEF_FUNC_BARE binop_is_count
+    mov eax, 1
+    V_IS_INT rdi, rcx
+    jae .bic_yes
+    V_TEST_PTR rdi, rcx
+    ja .bic_no
+    test rdi, rdi
+    jz .bic_no
+    mov rcx, [rdi + PyObject.ob_type]
+    test rcx, rcx
+    jz .bic_no
+    lea rdx, [rel int_type]
+    cmp rcx, rdx
+    je .bic_yes
+    lea rdx, [rel bool_type]
+    cmp rcx, rdx
+    je .bic_yes
+    mov rdx, [rcx + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_INT_SUBCLASS
+    jnz .bic_yes
+    mov rcx, [rcx + PyTypeObject.tp_as_number]
+    test rcx, rcx
+    jz .bic_no
+    cmp qword [rcx + PyNumberMethods.nb_index], 0
+    je .bic_no
+.bic_yes:
+    ret
+.bic_no:
+    xor eax, eax
+    ret
+END_FUNC binop_is_count
+
+;; ============================================================================
+;; seq_repeat_count(rsi = the count, a Value) -> rax = the count as an i64
+;;
+;; Every sequence's sq_repeat and sq_inplace_repeat comes through here, which
+;; is CPython's sequence_repeat: PyNumber_Check decides whether the argument
+;; is a count at all, and PyNumber_AsSsize_t turns it into one.  Two things
+;; follow from the second, and neither was done.  __index__ counts -- `[1] *
+;; Index()` is a list of three in CPython and was a TypeError here.  And a
+;; value too big for an index is an OverflowError naming the int, where every
+;; caller used to run its own int_fits_i64 and report in terms of the
+;; sequence: "too many items for list repetition" against CPython's "cannot
+;; fit 'int' into an index-sized integer".  The in-place pair did not even do
+;; that -- they took the count through obj_as_index, which truncates, so
+;; `b *= 2**64` emptied the bytearray instead of refusing.
+;;
+;; Does not return on failure.
+;; ============================================================================
+SRC_ARG   equ 8             ; the count as the caller passed it, for the message
+SRC_HELD  equ 16            ; an __index__ result, owned across the conversion
+SRC_FRAME equ 32            ; + 0 pushes = 16-aligned
+DEF_FUNC seq_repeat_count, SRC_FRAME
+    mov [rbp - SRC_ARG], rsi
+    mov qword [rbp - SRC_HELD], 0
     V_IS_INT rsi, rax
-    jae .src_ok
+    jae .src_have_int
     V_TEST_PTR rsi, rax
     ja .src_bad
     test rsi, rsi
@@ -1584,19 +2015,78 @@ DEF_FUNC_BARE seq_repeat_check_count
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel int_type]
     cmp rax, rcx
-    je .src_ok
+    je .src_have_int
     lea rcx, [rel bool_type]
     cmp rax, rcx
-    je .src_ok
-    mov rax, [rax + PyTypeObject.tp_flags]
-    test rax, TYPE_FLAG_INT_SUBCLASS
-    jnz .src_ok
+    je .src_have_int
+    mov rcx, [rax + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_INT_SUBCLASS
+    jnz .src_have_int
+
+    ; Not an int.  __index__ makes it one, exactly where a subscript would.
+    mov rcx, [rax + PyTypeObject.tp_as_number]
+    test rcx, rcx
+    jz .src_bad
+    mov rcx, [rcx + PyNumberMethods.nb_index]
+    test rcx, rcx
+    jz .src_bad
+    mov rdi, rsi
+    call rcx                    ; nb_index answers a Value
+    test rax, rax
+    jz .src_bad
+    mov [rbp - SRC_HELD], rax
+    mov rsi, rax
+    ; and it has to BE an int; one level only, as obj_as_index does it.
+    V_IS_INT rsi, rax
+    jae .src_have_int
+    V_TEST_PTR rsi, rax
+    ja .src_bad_index
+    mov rax, [rsi + PyObject.ob_type]
+    REQUIRE_INT_TYPE rax, rcx, .src_bad_index
+
+.src_have_int:
+    mov rdi, rsi
+    V_UNPACK rdi, rdx
+    push rdi
+    push rdx
+    extern int_fits_i64
+    call int_fits_i64
+    pop rdx
+    pop rdi
+    test eax, eax
+    jz .src_overflow
+    extern int_to_i64
+    call int_to_i64
+    mov [rbp - SRC_ARG], rax    ; the answer, across the release below
+    call .src_release
+    mov rax, [rbp - SRC_ARG]
+    leave
+    ret
+
+;; Give back the __index__ result, if there was one.  Every exit needs it and
+;; three of the four are raises, which do not come back here.
+.src_release:
+    mov rdi, [rbp - SRC_HELD]
+    test rdi, rdi
+    jz .src_release_done
+    mov qword [rbp - SRC_HELD], 0
+    XDECREF_V rdi, rax
+.src_release_done:
+    ret
+
+.src_bad_index:
+    call .src_release
+    RAISE exc_TypeError_type, "__index__ returned non-int"
+.src_overflow:
+    call .src_release
+    extern exc_OverflowError_type
+    RAISE exc_OverflowError_type, "cannot fit 'int' into an index-sized integer"
 .src_bad:
+    call .src_release
+    mov rsi, [rbp - SRC_ARG]
     CSTRING rdi, `can't multiply sequence by non-int of type '\x01'`
     jmp raise_type_error_with_name
-.src_ok:
-    ret
-END_FUNC seq_repeat_check_count
+END_FUNC seq_repeat_count
 
 ;; ============================================================================
 ;; raise_no_attribute(rdi = object Value, rsi = attribute-name str, edx = 1 for
@@ -1932,7 +2422,15 @@ DEF_FUNC obj_richcompare_bool, ORB_FRAME
     ; COMPARE_OP and by list.sort, and min()/max() go through this one.
     lea rax, [rel orb_unorderable_msgs]
     movsxd rdx, edx
-    mov rsi, [rax + rdx*8]
+    mov rdx, [rax + rdx*8]
+    ; ...and both types, which is the rest of CPython's sentence.  min() and
+    ; max() come through here, and said only that it was not supported.
+    mov rdi, [rbp - ORB_LEFT]
+    mov rsi, [rbp - ORB_RIGHT]
+    extern cmp_msg_open
+    lea rcx, [rel cmp_msg_open]
+    call compose_binop_type_error
+    mov rsi, rax
     lea rdi, [rel exc_TypeError_type]
     ; set_exception, not raise_exception: this function holds a reference to
     ; both operands, and an unwind from here abandons the C stack and leaks
@@ -2138,8 +2636,35 @@ DEF_FUNC obj_binary_op, OBO_FRAME
 
 .obo_unsupported:
     ; SET_EXC, not RAISE: .obo_done below still has to release both operands,
-    ; and an unwind from here would never reach it.
-    SET_EXC exc_TypeError_type, "unsupported operand type(s)"
+    ; and an unwind from here would never reach it.  The message names the
+    ; operator and both types, as CPython's does -- it was the bare prefix,
+    ; so `sum([1, "a"])` said nothing about what it could not add.
+    mov rcx, [rbp - OBO_OP]
+    cmp rcx, 26
+    jb .obo_have_op
+    xor ecx, ecx
+.obo_have_op:
+    extern binary_op_symbols
+    lea rax, [rel binary_op_symbols]
+    mov rcx, [rax + rcx*8]
+    mov [rbp - OBO_OFF], rcx    ; the offset slot is finished with
+    sub rsp, 128                ; the prefix and the operator, as one string
+    mov rdi, rsp
+    extern binop_msg_prefix
+    lea rsi, [rel binop_msg_prefix]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - OBO_OFF]
+    call rbt_append_cstr
+    mov rdi, [rbp - OBO_LEFT]
+    mov rsi, [rbp - OBO_RIGHT]
+    mov rdx, rsp
+    xor ecx, ecx                ; the default ": '" before the first name
+    call compose_binop_type_error
+    mov rsi, rax
+    lea rdi, [rel exc_TypeError_type]
+    call set_exception
+    add rsp, 128
     jmp .obo_error
 
 .obo_error:

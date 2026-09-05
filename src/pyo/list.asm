@@ -31,6 +31,7 @@ extern int_type
 extern eval_exception_unwind
 extern obj_richcompare_bool
 extern obj_as_index
+extern obj_as_index_seq
 extern recursion_limit
 extern c_recursion_depth
 extern exc_RecursionError_type
@@ -304,7 +305,7 @@ DEF_FUNC list_subscript
     cmp edx, TAG_SMALLINT
     je .ls_smallint
     cmp edx, TAG_PTR            ; a float key is neither: classify
-    jne .ls_type_error          ; fully before dereferencing, or raw
+    jne .ls_index                ; fully before dereferencing, or raw
                                 ; f64 bits get used as an address
     ; Check if key is a slice
     mov rax, [rsi + PyObject.ob_type]
@@ -312,11 +313,14 @@ DEF_FUNC list_subscript
     cmp rax, rcx
     je .ls_slice
 
-    ; obj_as_index covers int, bool, an int subclass and __index__, and
-    ; raises for anything else.
+.ls_index:
+    ; obj_as_index_seq covers int, bool, an int subclass and __index__, and
+    ; refuses anything else in the container's own words -- one message for
+    ; a float key and a different one for None was two paths saying the same
+    ; thing differently, and neither named the type.
     mov rdi, rsi
-    mov edx, TAG_PTR
-    call obj_as_index
+    lea rsi, [rel ls_index_msg]
+    call obj_as_index_seq
     mov rsi, rax
     jmp .ls_do_getitem
 
@@ -344,9 +348,11 @@ DEF_FUNC list_subscript
     V_PACK rax, rdx             ; return one Value
     ret
 
-.ls_type_error:
-    RAISE exc_TypeError_type, "list indices must be integers or slices"
 END_FUNC list_subscript
+
+section .rodata
+ls_index_msg: db `list indices must be integers or slices, not \x01`, 0
+section .text
 
 ;; ============================================================================
 ;; list_ass_subscript(rdi=list, rsi=key Value, rdx=value Value)
@@ -378,31 +384,25 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     cmp ecx, TAG_SMALLINT
     je .las_int                ; SmallInt -> int path
     cmp ecx, TAG_PTR           ; a float key is neither: classify fully
-    jne .las_key_type_error    ; before dereferencing, or its raw f64 bits
+    jne .las_int               ; before dereferencing, or its raw f64 bits
                                ; get used as an address -- a[1.5] = 9 was a
                                ; segfault, while a[1.5] already raised
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel slice_type]
     cmp rax, rcx
     je .las_slice
-    ; A bool is an int here too, as it is on the read path
-    REQUIRE_INT_TYPE rax, rcx, .las_key_type_error
-    ; An int subclass WRAPS an int rather than being one, so its value has to
-    ; be unwrapped before it can be read -- and the macro above has just
-    ; clobbered the register the tag was in, so the tag is restated here.
-    extern int_unwrap
-    mov rdi, rsi
-    mov edx, TAG_PTR
-    call int_unwrap
-    call int_to_i64
-    mov rsi, rax
-    jmp .las_have_key
+    mov ecx, TAG_PTR           ; the compare just above clobbered the tag
 
 .las_int:
-    ; Convert key to i64
+    ; obj_as_index_seq, not int_to_i64: it takes a bool, an int subclass and
+    ; anything with __index__, refuses the rest in the container's own
+    ; words, and does not truncate an int too wide for an index -- so
+    ; `x[2**70] = 1` assigned to x[0] rather than raising.
     mov rdi, rsi
-    mov edx, ecx              ; key tag for int_to_i64
-    call int_to_i64
+    mov edx, ecx              ; the key's tag
+    lea rsi, [rel ls_index_msg]
+    extern obj_as_index_seq
+    call obj_as_index_seq
     mov rsi, rax
 .las_have_key:
 
@@ -1115,9 +1115,6 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     call raise_exception
     ud2
 
-.las_key_type_error:
-    RAISE exc_TypeError_type, "list indices must be integers or slices"
-
 .las_type_error:
     extern exc_TypeError_type
     add rsp, 8
@@ -1557,24 +1554,23 @@ DEF_FUNC list_repeat
     ; The count must be an index.  int_fits_i64 and int_to_i64 both read
     ; PyIntObject fields, so a str or a float count was dereferenced as one:
     ; "a" * "2" segfaulted and [1] * None reported an OverflowError.
-    push rdi
-    push rdx
     mov rsi, rdi
     mov rcx, rdx
     V_PACK rsi, rcx
-    extern seq_repeat_check_count
-    call seq_repeat_check_count
-    pop rdx
-    pop rdi
-    push rdi
-    push rdx
-    call int_fits_i64
-    pop rdx
-    pop rdi
+    ; Not a count at all: DECLINE rather than raise, so the protocol carries
+    ; on to the right operand's __rmul__.  This raised, and `[1] * R()` for an
+    ; R with an __rmul__ never reached it.  op_binary_op words the failure
+    ; when nothing else answers either.
+    mov rdi, rsi
+    push rsi
+    extern binop_is_count
+    call binop_is_count
+    pop rsi
     test eax, eax
-    jz .rep_overflow
-    call int_to_i64
-    mov r12, rax             ; r12 = repeat count
+    jz .rep_decline
+    extern seq_repeat_count
+    call seq_repeat_count    ; __index__ counts, and one too big to be an
+    mov r12, rax             ; index is refused rather than truncated
 
     ; Clamp negative to 0
     test r12, r12
@@ -1635,6 +1631,15 @@ DEF_FUNC list_repeat
     V_PACK rax, rdx             ; return one Value
     ret
 
+.rep_decline:
+    xor eax, eax
+    xor edx, edx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 .rep_toobig:
     ; Too large to allocate is a MemoryError in CPython; only a count that
     ; does not fit an index is an OverflowError.
@@ -1653,8 +1658,13 @@ END_FUNC list_repeat
 LIC_SELF   equ 8
 LIC_ITER   equ 16
 LIC_EXC    equ 24           ; current_exception before the iteration started
-LIC_FRAME  equ 32            ; + 0 pushes = 32, 16-aligned
+; The right operand as it ARRIVED.  The refusal names its type, and the
+; (payload, tag) pair it was unpacked into does not survive the fast paths:
+; .lic_list reuses r13 for a length, so the tag read there was a size.
+LIC_RIGHT  equ 32
+LIC_FRAME  equ 48            ; + 0 pushes = 48, 16-aligned
 DEF_FUNC list_inplace_concat, LIC_FRAME
+    mov [rbp - LIC_RIGHT], rsi
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
@@ -1782,14 +1792,14 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     jmp eval_exception_unwind
 
 .lic_type_error:
-    ; The right operand's payload survives in r12; its tag does not always --
-    ; REQUIRE_*_TYPE uses rcx as scratch -- so the pointer case is recovered
-    ; from the payload itself, which is its own Value.
-    mov rdi, r12
-    mov rsi, r13
-    VALUE_FOR_TYPE rdi, rsi
-    mov rsi, rdi
-    CSTRING rdi, `can only concatenate list (not "\x01") to list`
+    ; `L += x` is L.extend(x), so what it needs of x is that it be ITERABLE --
+    ; and that is what CPython says when it is not: "'N' object is not
+    ; iterable".  The concatenation wording belongs to `L + x`, where the
+    ; right operand has to be a list and not merely iterable; this reported
+    ; the wrong requirement for the wrong operator.
+    ;
+    mov rsi, [rbp - LIC_RIGHT]
+    CSTRING rdi, `'\x01' object is not iterable`
     extern raise_type_error_with_name
     call raise_type_error_with_name
 END_FUNC list_inplace_concat
@@ -1802,19 +1812,28 @@ END_FUNC list_inplace_concat
 LIR_OLDSIZE equ 16
 LIR_FRAME   equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC list_inplace_repeat, LIR_FRAME
-    ; The count must be an integer.  int_to_i64 below reads its argument as a
-    ; PyIntObject, so `a = [1]; a *= "x"` used to read a PyStrObject's header
-    ; as an int and repeat the list that many times.  Checked before the
-    ; pushes, so the decline is a bare leave/ret.
-    push rdi                    ; save the left Value (int_is_integer is a leaf,
-    mov rdi, rsi                ; so the odd rsp across the call is harmless)
+    ; The count must be an integer, or something with an __index__: `[1] *
+    ; Index()` is a list of three in CPython and this declined it, and the
+    ; caller then reported the failure as an unsupported `*`.  Anything else
+    ; still declines, so a right operand with an __rmul__ of its own is still
+    ; asked -- which is the order CPython's PyNumber_InPlaceMultiply keeps.
+    ; Checked before the pushes, so the decline is a bare leave/ret.
+    push rdi                    ; save the left Value (both are leaves, so the
+    mov rdi, rsi                ; odd rsp across the calls is harmless)
     V_UNPACK rdi, rdx           ; right Value -> (payload, tag)
     call int_is_integer
     pop rdi
     test eax, eax
+    jnz .lir_have_count
+    push rdi
+    mov rdi, rsi
+    extern binop_is_count
+    call binop_is_count
+    pop rdi
+    test eax, eax
     jz .lir_decline
+.lir_have_count:
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13
@@ -1823,13 +1842,11 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
     je list_sorting_error
-    mov r12, rsi              ; right payload
-    mov r13, rcx              ; right_tag
 
-    ; Convert right to i64 count
-    mov rdi, r12
-    mov edx, r13d             ; int_to_i64 expects tag in edx
-    call int_to_i64
+    ; The same funnel sq_repeat uses.  int_to_i64 truncated, so `a *= 2**64`
+    ; emptied the list instead of refusing.
+    extern seq_repeat_count
+    call seq_repeat_count
     mov r12, rax              ; r12 = count
 
     ; Handle count <= 0: clear list
@@ -1849,9 +1866,12 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     ; Grow items array: new_cap = old_size * count
     mov r13, rax              ; r13 = old_size
     imul rax, r12             ; rax = old_size * count = new_size
-    jo .lir_overflow           ; signed overflow → OverflowError
+    ; As sq_repeat: a product too big to allocate is a MemoryError, and
+    ; OverflowError is kept for a COUNT that will not fit an index -- which
+    ; seq_repeat_count above has already refused.
+    jo .lir_toobig
     cmp rax, 0x10000000        ; 256M items limit
-    ja .lir_overflow
+    ja .lir_toobig
     push rax                  ; save new_size
 
     ; Realloc payloads
@@ -1930,9 +1950,9 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
-.lir_overflow:
-    extern exc_OverflowError_type
-    RAISE exc_OverflowError_type, "too many items for list repetition"
+.lir_toobig:
+    extern exc_MemoryError_type
+    RAISE exc_MemoryError_type, ""
 .lir_decline:
     ; Reached before the pushes, so there is no mirror to unwind.
     xor eax, eax                ; NULL Value = NotImplemented
@@ -1980,6 +2000,28 @@ DEF_FUNC list_type_call, LTC_FRAME
     call list_new
     mov [rbp - LTC_LIST], rax
     mov rbx, rax            ; rbx = new list
+
+    ; A length the source cannot report is a failure, not a hint to skip:
+    ; CPython asks PyObject_LengthHint first, so `list(range(1 << 70))`
+    ; raises the OverflowError its __len__ raises rather than looping until
+    ; the machine runs out of memory.
+    mov rdi, [r12]
+    V_TEST_PTR rdi, rax
+    ja .ltc_no_length
+    test rdi, rdi
+    jz .ltc_no_length
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .ltc_no_length
+    mov rax, [rax + PySequenceMethods.sq_length]
+    test rax, rax
+    jz .ltc_no_length
+    mov rdi, [r12]
+    call rax
+    cmp rax, 0
+    jl .ltc_length_failed
+.ltc_no_length:
 
     ; Get iterator from arg (supports heaptypes with __iter__)
     mov rdi, [r12]          ; args[0]
@@ -2056,8 +2098,24 @@ DEF_FUNC list_type_call, LTC_FRAME
     extern exc_TypeError_type
     RAISE exc_TypeError_type, "list() argument must be an iterable"
 
+.ltc_length_failed:
+    ; sq_length answered -1 and left an exception; hand it on.
+    mov rdi, [rbp - LTC_LIST]
+    call obj_decref
+    xor eax, eax
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
 .ltc_error:
-    RAISE exc_TypeError_type, "list expected at most 1 argument"
+    mov rsi, r13
+    CSTRING rdi, "list expected at most 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 
 .ltc_kwarg_error:
     ; Clear kw_names_pending to avoid stale state

@@ -155,6 +155,22 @@ for good in (b"", b"a", b"ab", b"abc", b"abcd", b"hello world",
     enc = binascii.b2a_base64(good)
     print(len(good), enc[:16], binascii.a2b_base64(enc) == good)
 
+# A pad sequence that completes a quad ends the DECODE, not just the quad:
+# everything after it is not input any more.  That is what makes several
+# base64 lines concatenated decode to only the first, and treating '=' as a
+# character to skip gave b'YQ==YWJj' as b'a\x06\x16&'.  strict_mode has four
+# more refusals of its own, all of them about where the padding is.
+print("=== base64 padding ends the decode ===")
+for case in (b"YQ==YWJj", b"YWI=YQ==", b"YWJjZA==YWJj", b"YQ==\nYWJj\n",
+             b"YQ==garbage", b"Y Q = =", b"====YQ==", b"YQ=\n=", b"YQ=!=",
+             b"YQ!=", b"=", b"!!!!", b"A" * 5, b"A" * 6, b"A" * 7, b"+/+/"):
+    for strict in (False, True):
+        try:
+            answer = repr(binascii.a2b_base64(case, strict_mode=strict))
+        except binascii.Error as e:
+            answer = "Error: %s" % (e,)
+        print("%-16r %-5s %s" % (case, strict, answer))
+
 print("=== quoted-printable ===")
 for case in (b"", b"a", b"a" * 80, b"a" * 200, b"trailing ", b"tab\t",
              b"line\nnext ", b"=", b"\xff", b"a b\tc",

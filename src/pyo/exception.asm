@@ -18,6 +18,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern traceback_type
 extern type_number_methods
 
 extern ap_malloc
@@ -1729,6 +1730,7 @@ END_FUNC exc_getattr
 ;; ============================================================================
 ESA_VAL   equ 8
 ESA_TAG   equ 16
+ESA_ISTB  equ 24            ; the field takes a traceback, not an exception
 ESA_FRAME equ 32            ; + 2 pushes = 48
 DEF_FUNC exc_setattr, ESA_FRAME
     push rbx
@@ -1808,12 +1810,44 @@ DEF_FUNC exc_setattr, ESA_FRAME
     jmp .esa_field
 .esa_tb:
     mov esi, PyExceptionObject.exc_tb
+    mov qword [rbp - ESA_ISTB], 1
+    jmp .esa_field_typed
 .esa_field:
+    mov qword [rbp - ESA_ISTB], 0
+.esa_field_typed:
     mov rdx, [rbp - ESA_VAL]
     lea rcx, [rel none_singleton]
     cmp rdx, rcx
-    jne .esa_field_store
+    jne .esa_field_check
     xor edx, edx            ; None clears it
+    jmp .esa_field_store
+.esa_field_check:
+    ; All three take None or one particular kind of object, and nothing else.
+    ; Only None was being tested for, so the INCREF below dereferenced an
+    ; int -- `e.__cause__ = 5` was a segfault where CPython raises TypeError.
+    mov rdi, rdx
+    V_TEST_PTR rdi, rax
+    ja .esa_field_bad
+    test rdi, rdi
+    jz .esa_field_bad
+    mov rax, [rdi + PyObject.ob_type]
+    cmp qword [rbp - ESA_ISTB], 0
+    jne .esa_field_tb_check
+    push rsi
+    push rdx
+    mov rdi, rax
+    lea rsi, [rel exc_BaseException_type]
+    extern type_is_subtype
+    call type_is_subtype
+    pop rdx
+    pop rsi
+    test eax, eax
+    jz .esa_field_bad
+    jmp .esa_field_store
+.esa_field_tb_check:
+    lea rcx, [rel traceback_type]
+    cmp rax, rcx
+    jne .esa_field_bad
 .esa_field_store:
     mov r12, rdx
     test r12, r12
@@ -1835,6 +1869,19 @@ DEF_FUNC exc_setattr, ESA_FRAME
     pop rbx
     leave
     ret
+
+.esa_field_bad:
+    cmp qword [rbp - ESA_ISTB], 0
+    jne .esa_field_bad_tb
+    cmp esi, PyExceptionObject.exc_cause
+    jne .esa_field_bad_context
+    RAISE exc_TypeError_type, \
+        "exception cause must be None or derive from BaseException"
+.esa_field_bad_context:
+    RAISE exc_TypeError_type, \
+        "exception context must be None or derive from BaseException"
+.esa_field_bad_tb:
+    RAISE exc_TypeError_type, "__traceback__ must be a traceback or None"
 
 .esa_suppress:
     ; CPython's setter takes a bool and nothing else, down to the wording.
@@ -2099,6 +2146,45 @@ DEF_FUNC exc_install_methods, EIM_FRAME
     ret
 END_FUNC exc_install_methods
 
+;; ============================================================================
+;; exc_user_init(rdi = an exception type) -> rax = its own __init__, or 0
+;;
+;; The Python `__init__` a class in the exception hierarchy defines, found
+;; along the MRO because it is inherited: `class F(E): pass` runs E's.  A
+;; builtin's is the default and does not count -- BaseException's is what
+;; stores .args, and it is what refuses keywords.
+;; ============================================================================
+global exc_user_init
+DEF_FUNC exc_user_init, 8            ; 1 push, so rsp is 16-aligned
+    push rbx
+    mov rbx, rdi
+    test rdi, rdi
+    jz .eui_none
+    lea rsi, [rel exc_init_name]
+    extern dunder_lookup
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .eui_none
+    cmp edx, TAG_PTR
+    jne .eui_none
+    test rax, rax
+    jz .eui_none
+    mov rcx, [rax + PyObject.ob_type]
+    extern builtin_func_type
+    lea rdx, [rel builtin_func_type]
+    cmp rcx, rdx
+    je .eui_none                ; a builtin: the default, not a definition
+    pop rbx
+    leave
+    ret
+.eui_none:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC exc_user_init
+
 DEF_FUNC exc_type_call, ETC_FRAME
     push rbx
     push r12
@@ -2108,6 +2194,9 @@ DEF_FUNC exc_type_call, ETC_FRAME
     mov [rbp - ETC_NARGS], rdx
     mov qword [rbp - ETC_KW1], 0
     mov qword [rbp - ETC_KW2], 0
+    ; The family is read again at .done, and the user-__init__ path below
+    ; reaches it without going through exc_kw_family.
+    mov qword [rbp - ETC_KWFAM], 0
 
     ; ------------------------------------------------------------------
     ; Keyword arguments.  AttributeError and ImportError each carry two
@@ -2121,6 +2210,24 @@ DEF_FUNC exc_type_call, ETC_FRAME
     ; They are the only builtin exceptions that take keywords; every other
     ; one answers "takes no keyword arguments", as CPython's does.
     ; ------------------------------------------------------------------
+    ; A class that defines its own __init__ takes whatever keywords that
+    ; __init__ takes, and type_call runs it after this returns.  Consuming
+    ; kw_names_pending here, and refusing the keywords before that runs, made
+    ; every user exception with a keyword parameter unconstructible.  Only
+    ; the count comes off, so .args holds the positionals; the names stay
+    ; pending for the __init__ call.
+    mov rdi, rbx
+    call exc_user_init
+    test rax, rax
+    jz .etc_no_user_init
+    mov r12, [rel kw_names_pending]
+    test r12, r12
+    jz .etc_kw_done
+    mov rcx, [r12 + PyTupleObject.ob_size]
+    sub [rbp - ETC_NARGS], rcx
+    jmp .etc_kw_done
+.etc_no_user_init:
+
     mov rdi, rbx
     call exc_kw_family
     mov [rbp - ETC_KWFAM], rax
@@ -2767,172 +2874,6 @@ END_FUNC raise_oserror_build
 
 
 
-;; ============================================================================
-;; Traceback support
-;; ============================================================================
-
-;; ============================================================================
-;; traceback_new() -> PyTracebackObject*
-;; Allocates a new traceback with tb_next=NULL, tb_lineno=0.
-;; ============================================================================
-DEF_FUNC traceback_new
-    mov edi, PyTracebackObject_size
-    call ap_malloc
-    mov qword [rax + PyTracebackObject.ob_refcnt], 1
-    lea rcx, [rel traceback_type]
-    mov [rax + PyTracebackObject.ob_type], rcx
-    mov qword [rax + PyTracebackObject.tb_next], 0
-    mov qword [rax + PyTracebackObject.tb_lineno], 0
-    mov qword [rax + PyTracebackObject.tb_code], 0
-    mov qword [rax + PyTracebackObject.tb_lasti], 0
-    leave
-    ret
-END_FUNC traceback_new
-
-;; ============================================================================
-;; traceback_dealloc(PyTracebackObject *tb)
-;; XDECREF tb_next, free self.
-;; ============================================================================
-DEF_FUNC traceback_dealloc
-    push rbx
-    push r12
-    mov rbx, rdi
-.td_node:
-    ; Iterative, not recursive: a traceback chain is as deep as the call
-    ; stack was, and freeing it recursively would overflow on exactly the
-    ; deep-recursion case that produced it.
-    mov rdi, [rbx + PyTracebackObject.tb_code]
-    test rdi, rdi
-    jz .td_no_code
-    mov qword [rbx + PyTracebackObject.tb_code], 0
-    call obj_decref
-.td_no_code:
-    mov r12, [rbx + PyTracebackObject.tb_next]
-    mov rdi, rbx
-    call ap_free
-    test r12, r12
-    jz .td_done
-    dec qword [r12 + PyTracebackObject.ob_refcnt]
-    jnz .td_done                   ; still referenced elsewhere
-    mov rbx, r12
-    jmp .td_node
-.td_done:
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC traceback_dealloc
-
-;; ============================================================================
-;; traceback_getattr(PyTracebackObject *tb, PyStrObject *name) -> (rax, edx)
-;; Handles tb_lineno, tb_next, tb_frame attributes.
-;; ============================================================================
-DEF_FUNC traceback_getattr
-    push rbx
-    push r12
-
-    mov rbx, rdi            ; tb
-    mov r12, rsi            ; name str
-
-    ; Check "tb_lineno"
-    lea rdi, [r12 + PyStrObject.data]
-    CSTRING rsi, "tb_lineno"
-    call ap_strcmp
-    test eax, eax
-    jz .tb_get_lineno
-
-    ; Check "tb_next"
-    lea rdi, [r12 + PyStrObject.data]
-    CSTRING rsi, "tb_next"
-    call ap_strcmp
-    test eax, eax
-    jz .tb_get_next
-
-    ; Check "tb_frame"
-    lea rdi, [r12 + PyStrObject.data]
-    CSTRING rsi, "tb_frame"
-    call ap_strcmp
-    test eax, eax
-    jz .tb_get_frame
-
-    ; Check "tb_lasti"
-    lea rdi, [r12 + PyStrObject.data]
-    CSTRING rsi, "tb_lasti"
-    call ap_strcmp
-    test eax, eax
-    jz .tb_get_lasti
-
-    ; Not found
-    RET_NULL
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; return one Value
-    ret
-
-.tb_get_lineno:
-    mov rax, [rbx + PyTracebackObject.tb_lineno]
-    mov edx, TAG_SMALLINT
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; return one Value
-    ret
-
-.tb_get_next:
-    mov rax, [rbx + PyTracebackObject.tb_next]
-    test rax, rax
-    jz .tb_return_none
-    INCREF rax
-    mov edx, TAG_PTR
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; return one Value
-    ret
-
-.tb_get_frame:
-    ; A snapshot built from what the entry records.  This answered None, and
-    ; CPython's traceback.py reads tb_frame.f_code on every entry -- so
-    ; importing anything that formats a traceback died on the None.
-    mov rdi, [rbx + PyTracebackObject.tb_code]
-    mov rsi, [rbx + PyTracebackObject.tb_lineno]
-    mov rdx, [rbx + PyTracebackObject.tb_lasti]
-    extern frameobj_from_code
-    call frameobj_from_code
-    test rax, rax
-    jz .tb_return_none
-    mov edx, TAG_PTR
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx
-    ret
-
-.tb_get_lasti:
-    ; Stored in code units, which is what the line and column tables are
-    ; indexed by; CPython's attribute is a BYTE offset into co_code, and
-    ; anything that indexes co_code with it -- dis, traceback -- reads it
-    ; that way.
-    mov rax, [rbx + PyTracebackObject.tb_lasti]
-    add rax, rax
-    mov edx, TAG_SMALLINT
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx
-    ret
-
-.tb_return_none:
-    lea rax, [rel none_singleton]
-    INCREF rax
-    mov edx, TAG_PTR
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; return one Value
-    ret
-END_FUNC traceback_getattr
 
 ;; ============================================================================
 ;; Data section - Exception type objects and name strings
@@ -3092,40 +3033,8 @@ exc_metatype:
 ; already did.  Naming itself made `type(ValueError)` print
 ; <class 'exception_metatype'> where CPython prints <class 'type'>.
 exc_meta_name: db "type", 0
+exc_init_name: db "__init__", 0
 
-; Traceback type object (immortal)
-align 8
-global traceback_type
-traceback_type:
-    dq 1                    ; ob_refcnt (immortal)
-    dq type_type            ; ob_type
-    dq tb_type_name         ; tp_name
-    dq PyTracebackObject_size ; tp_basicsize
-    dq traceback_dealloc    ; tp_dealloc
-    dq 0                    ; tp_repr
-    dq 0                    ; tp_str
-    dq 0                    ; tp_hash
-    dq 0                    ; tp_call
-    dq traceback_getattr    ; tp_getattr
-    dq 0                    ; tp_setattr
-    dq 0                    ; tp_richcompare
-    dq 0                    ; tp_iter
-    dq 0                    ; tp_iternext
-    dq 0                    ; tp_init
-    dq 0                    ; tp_new
-    dq 0                    ; tp_as_number
-    dq 0                    ; tp_as_sequence
-    dq 0                    ; tp_as_mapping
-    dq 0                    ; tp_base
-    dq 0                    ; tp_dict
-    dq 0                    ; tp_mro
-    dq 0                    ; tp_flags
-    dq 0                    ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
-    dq 0 ; tp_dictoffset
-    dq 0                        ; tp_tailslots
-tb_type_name: db "traceback", 0
 
 ; Macro to define an exception type singleton
 ; %1 = label, %2 = name string, %3 = tp_base (or 0)

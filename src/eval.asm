@@ -248,7 +248,9 @@ DEF_FUNC eval_frame
     mov rax, [rel build_class_pending]
     push rax
     ; One pad, because the push list has to stay even: everything below it
-    ; would otherwise make its calls 8 bytes out of alignment.
+    ; would otherwise make its calls 8 bytes out of alignment.  eval_return
+    ; also uses the slot, to carry an exception past the restore that has to
+    ; be released after it rather than during it.
     sub rsp, 8
     mov qword [rel cfex_temp_pending], 0
     mov qword [rel cfex_merged_pending], 0
@@ -278,11 +280,19 @@ DEF_FUNC eval_frame
     ; its own -- only a generator or coroutine can, by suspending inside an
     ; except block -- swaps it in here and back out in eval_return.
     ;
+    ; Which of the two it is, is PyFrame.exc_depth: the number of
+    ; PUSH_EXC_INFOs this frame has run and not popped.  Answering it from
+    ; the global instead -- "did it change?" -- is wrong twice over: an
+    ; except block that catches the object its caller is already handling
+    ; does not change it, and a generator that pops one it pushed BEFORE the
+    ; suspension leaves the global holding an exception that is nobody's.
+    ;
     ; The references are moved rather than counted wherever a slot gives one
-    ; up in the same breath as another takes it, so nothing here can call
-    ; obj_decref: eval_return runs with this frame's globals half restored,
-    ; and a __del__ reached from there would run in a state that is neither
-    ; frame's.
+    ; up in the same breath as another takes it.  The one exception is the
+    ; shared case, which counts -- the frame may hand the global's own
+    ; reference to a PUSH_EXC_INFO of its own and then die without the
+    ; matching POP_EXCEPT -- and eval_return gives that count back once the
+    ; caller's state is whole again, never in the middle of restoring it.
     mov rax, [r12 + PyFrame.exc_state]
     test rax, rax
     jnz .ef_own_exc
@@ -397,22 +407,35 @@ DEF_FUNC_BARE eval_return
     ; Restore caller's eval globals (reverse of save order)
     ; Use rcx as scratch — rdx holds return tag (fat value protocol)
 
-    ; The handled exception, out of the global and into the frame; the
-    ; caller's, back.  Unconditional, and every reference moves: the frame
-    ; takes the global's, the global takes the one this frame's entry put on
-    ; the machine stack.  A generator picks its own up again on the next
-    ; resume, and for a frame that will not be resumed frame_free releases it.
+    ; The handled exception: the caller's goes back into the global, and the
+    ; frame keeps what was there only if it has an except block still open --
+    ; PyFrame.exc_depth non-zero.  A generator picks that up again on its
+    ; next resume, and if it is never resumed frame_free releases it.
+    ;
+    ; Keeping it unconditionally was wrong, and quietly: a generator first
+    ; advanced from inside an `except` block was handling nothing of its own,
+    ; but took a copy of its caller's on the way out and re-installed it on
+    ; every later resume.  sys.exc_info() answered ValueError long after the
+    ; except block that raised it had ended.
     ;
     ; r12 is the frame on all three ways in -- a return, a yield, and the
     ; unwinder's .no_handler, which restores it from eval_saved_r12 first.
     pop rcx
     mov r11, [rel handled_exception]
-    mov [r12 + PyFrame.exc_state], r11
     mov [rel handled_exception], rcx
+    mov qword [rsp + 8], 0      ; the pad, standing in for "nothing to release"
+    cmp dword [r12 + PyFrame.exc_depth], 0
+    jne .er_exc_own
+    mov qword [r12 + PyFrame.exc_state], 0
+    mov [rsp + 8], r11          ; the count this frame's entry took, given back
+    jmp .er_exc_done            ; below, once the caller's state is whole
+.er_exc_own:
+    mov [r12 + PyFrame.exc_state], r11
+.er_exc_done:
 
     pop rcx
     mov [rel kw_names_pending], rcx
-    add rsp, 8                  ; the alignment pad pushed beside it
+    pop r11                     ; the pad: an exception to release, or 0
     pop rcx
     mov [rel build_class_pending], rcx
     pop rcx
@@ -434,6 +457,21 @@ DEF_FUNC_BARE eval_return
     pop rcx
     mov [rel eval_saved_rbx], rcx
     RESTORE_EVAL_REGS
+    test r11, r11
+    jnz .er_release
+    pop rbp
+    ret
+.er_release:
+    ; Everything is the caller's again -- rbx, r12, r13, the globals -- so a
+    ; __del__ reached from this DECREF runs exactly where the caller's next
+    ; opcode would.  Doing it any earlier would run it in a state that is
+    ; neither frame's.  rax and rdx are the return value.
+    push rax
+    push rdx                    ; two pushes: rsp keeps its alignment
+    mov rdi, r11
+    call obj_decref
+    pop rdx
+    pop rax
     pop rbp
     ret
 END_FUNC eval_return

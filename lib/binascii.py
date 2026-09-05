@@ -85,49 +85,71 @@ def b2a_base64(data, *, newline=True):
 
 
 def a2b_base64(data, *, strict_mode=False):
+    """Decode base64, following CPython's binascii.c state for state.
+
+    The one thing that is not obvious from the outside: a pad sequence that
+    completes a quad ends the DECODE, not just the quad.  `a2b_base64
+    (b'YQ==YWJj')` is b'a', and the second group is never looked at -- which
+    is what makes a concatenation of several base64 lines decode to only its
+    first.  Treating '=' as a character to skip decoded all of them, and
+    b'YQ==YWJj' came back as b'a\\x06\\x16&'.
+
+    The counting is CPython's too: a quad is carried one character at a time
+    in `leftchar`, and the error at the end depends on how many characters of
+    a quad were left over, not on how many pads followed them.
+    """
     data = _as_bytes(data)
     if strict_mode and data[:1] == b"=":
         raise Error("Leading padding not allowed")
     out = bytearray()
-    quad = []
-    padding = 0
-    for ch in data:
-        if ch == 0x3d:           # '='
-            padding += 1
+    padding_started = False
+    quad_pos = 0
+    leftchar = 0
+    pads = 0
+    for i, ch in enumerate(data):
+        if ch == 0x3d:                          # '='
+            padding_started = True
+            if strict_mode and quad_pos == 0:
+                raise Error("Excess padding not allowed")
+            pads += 1
+            if quad_pos >= 2 and quad_pos + pads >= 4:
+                # The quad is already decoded; everything after it is not
+                # input any more.
+                if strict_mode and i + 1 < len(data):
+                    raise Error("Excess data after padding")
+                return bytes(out)
             continue
         idx = _B64_INDEX.get(ch)
         if idx is None:
             if strict_mode:
                 raise Error("Only base64 data is allowed")
             continue
-        if padding and strict_mode:
+        if strict_mode and padding_started:
             raise Error("Discontinuous padding not allowed")
-        quad.append(idx)
-        if len(quad) == 4:
-            v = (quad[0] << 18) | (quad[1] << 12) | (quad[2] << 6) | quad[3]
-            out.append((v >> 16) & 0xff)
-            out.append((v >> 8) & 0xff)
-            out.append(v & 0xff)
-            quad = []
-    if len(quad) == 1:
+        pads = 0
+        if quad_pos == 0:
+            quad_pos = 1
+            leftchar = idx
+        elif quad_pos == 1:
+            quad_pos = 2
+            out.append(((leftchar << 2) | (idx >> 4)) & 0xff)
+            leftchar = idx & 0x0f
+        elif quad_pos == 2:
+            quad_pos = 3
+            out.append(((leftchar << 4) | (idx >> 2)) & 0xff)
+            leftchar = idx & 0x03
+        else:
+            quad_pos = 0
+            out.append(((leftchar << 6) | idx) & 0xff)
+            leftchar = 0
+    if quad_pos == 1:
+        # The count CPython reports is of DATA characters, worked back out of
+        # how many bytes were written, not of the characters left over.
         raise Error("Invalid base64-encoded string: number of data characters "
                     "(%d) cannot be 1 more than a multiple of 4"
-                    % (len(quad),))
-    # The input has to END on a group boundary, padding included: `a2b_base64
-    # (b'ab')` is an error and not b'i'.  A group of two needs two '=' after
-    # it and a group of three needs one; anything less is truncated input,
-    # which is what "Incorrect padding" means.
-    if len(quad) == 2 and padding < 2:
+                    % (len(out) // 3 * 4 + 1,))
+    if quad_pos != 0:
         raise Error("Incorrect padding")
-    if len(quad) == 3 and padding < 1:
-        raise Error("Incorrect padding")
-    if len(quad) == 2:
-        v = (quad[0] << 18) | (quad[1] << 12)
-        out.append((v >> 16) & 0xff)
-    elif len(quad) == 3:
-        v = (quad[0] << 18) | (quad[1] << 12) | (quad[2] << 6)
-        out.append((v >> 16) & 0xff)
-        out.append((v >> 8) & 0xff)
     return bytes(out)
 
 

@@ -26,10 +26,12 @@ print(signal.getsignal(signal.SIGTERM))
 
 print("--- installing one, and running it ---")
 seen = []
+frames = []
 
 
 def handler(signum, frame):
     seen.append(int(signum))
+    frames.append(frame)
 
 
 previous = signal.signal(signal.SIGUSR1, handler)
@@ -40,6 +42,28 @@ os.kill(os.getpid(), signal.SIGUSR1)
 for _ in range(3):
     pass
 print("delivered:", seen)
+
+print("--- the handler is given the interrupted frame ---")
+#
+# CPython passes the frame the signal interrupted, and it has to be a real
+# one: pdb's sigint_handler keeps it and traceback.print_stack(frame) walks
+# it.  A two-Value argument array grows UPWARD from its slot, so getting the
+# layout wrong handed the handler ITSELF as the frame.
+print(type(frames[-1]).__name__)
+print(frames[-1].f_code.co_name, frames[-1] is handler)
+print(hasattr(frames[-1], "f_lineno"), hasattr(frames[-1], "f_globals"))
+
+
+def from_a_function():
+    seen.clear()
+    frames.clear()
+    signal.raise_signal(signal.SIGUSR1)
+    for _ in range(3):
+        pass
+    return frames[-1].f_code.co_name
+
+
+print(from_a_function())
 
 print("--- raise_signal reaches the same place ---")
 seen.clear()
@@ -145,6 +169,107 @@ signal.alarm(100)
 left = signal.alarm(0)
 print(0 < left <= 100)
 print(signal.alarm(0))
+
+print("--- a signal interrupts the syscall, not the sleep ---")
+# PEP 475.  nanosleep came back with EINTR and time.sleep took that for the
+# end of the sleep: an alarm one second into a two-second sleep returned after
+# one, and the handler did not run either, because nothing on the way out
+# looked at the pending flag.  CPython runs what arrived and sleeps out the
+# remainder.
+import time
+
+fired = []
+
+
+def note(sig, frame):
+    fired.append(sig)
+
+
+signal.signal(signal.SIGALRM, note)
+signal.alarm(1)
+start = time.time()
+time.sleep(2.0)
+took = time.time() - start
+print("handler ran", fired == [signal.SIGALRM], "slept it out", took >= 1.9)
+
+
+def boom(sig, frame):
+    raise KeyboardInterrupt("from the handler")
+
+
+# ...and a handler that RAISES ends it, which is how Ctrl-C gets out of a
+# long sleep.
+signal.signal(signal.SIGALRM, boom)
+signal.alarm(1)
+start = time.time()
+try:
+    time.sleep(3.0)
+    print("slept through, which is wrong")
+except KeyboardInterrupt as e:
+    print("interrupted:", e, "early:", time.time() - start < 2.5)
+
+signal.signal(signal.SIGALRM, signal.SIG_DFL)
+signal.alarm(0)
+
+# An ordinary sleep is unchanged, and so are the arguments it refuses.
+start = time.time()
+time.sleep(0.05)
+print("plain sleep", time.time() - start >= 0.04)
+for bad in (-1, float("nan"), float("inf"), 10 ** 30):
+    try:
+        time.sleep(bad)
+        print("%-20r accepted" % (bad,))
+    except Exception as e:
+        print("%-20r %s: %s" % (bad, type(e).__name__, e))
+
+print("--- the interval timers ---")
+# signal.alarm takes whole seconds and nothing else, so a test that wants a
+# sub-second alarm -- which is most of the ones that test signal delivery at
+# all -- had nothing to reach for.  setitimer and getitimer were not there.
+print(sorted(n for n in ("setitimer", "getitimer", "ItimerError",
+                         "ITIMER_REAL", "ITIMER_VIRTUAL", "ITIMER_PROF")
+             if hasattr(signal, n)))
+print(signal.ITIMER_REAL, signal.ITIMER_VIRTUAL, signal.ITIMER_PROF,
+      issubclass(signal.ItimerError, OSError))
+
+ticked = []
+
+
+def tick(sig, frame):
+    ticked.append(sig)
+
+
+signal.signal(signal.SIGALRM, tick)
+print("idle     ", signal.getitimer(signal.ITIMER_REAL))
+print("replaced ", signal.setitimer(signal.ITIMER_REAL, 0.05))
+armed = signal.getitimer(signal.ITIMER_REAL)
+print("armed    ", 0 < armed[0] <= 0.05, armed[1])
+start = time.time()
+while not ticked and time.time() - start < 3.0:
+    pass
+print("fired    ", ticked == [signal.SIGALRM], time.time() - start < 2.0)
+print("spent    ", signal.getitimer(signal.ITIMER_REAL))
+print("disarmed ", signal.setitimer(signal.ITIMER_REAL, 0.0),
+      signal.getitimer(signal.ITIMER_REAL))
+signal.signal(signal.SIGALRM, signal.SIG_DFL)
+
+print("--- and what they refuse ---")
+for label, fn in (("getitimer()", lambda: signal.getitimer()),
+                  ("getitimer(99)", lambda: signal.getitimer(99)),
+                  ("getitimer(-1)", lambda: signal.getitimer(-1)),
+                  ("getitimer('x')", lambda: signal.getitimer("x")),
+                  ("setitimer()", lambda: signal.setitimer()),
+                  ("setitimer(0)", lambda: signal.setitimer(0)),
+                  ("setitimer(0,1,2,3)", lambda: signal.setitimer(0, 1, 2, 3)),
+                  ("setitimer(0,-1)", lambda: signal.setitimer(0, -1)),
+                  ("setitimer(0,nan)", lambda: signal.setitimer(0, float("nan"))),
+                  ("setitimer(0,'x')", lambda: signal.setitimer(0, "x")),
+                  ("setitimer(0,None)", lambda: signal.setitimer(0, None)),
+                  ("setitimer(99,1)", lambda: signal.setitimer(99, 1))):
+    try:
+        print("%-20s %r" % (label, fn()))
+    except Exception as e:
+        print("%-20s %s: %s" % (label, type(e).__name__, e))
 
 signal.signal(signal.SIGUSR1, signal.SIG_DFL)
 signal.signal(signal.SIGUSR2, signal.SIG_DFL)

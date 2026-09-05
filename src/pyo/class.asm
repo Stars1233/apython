@@ -1464,6 +1464,38 @@ TC_NEW_TAG  equ 56              ; saved __new__ result tag
 ; reaches __init__ with the keyword values as extra positional arguments, and
 ; that is how a metaclass with class keywords fails.
 TC_KWNAMES  equ 64
+; The __init__ an exception subclass runs, found along its MRO.
+TC_EXCINIT  equ 72
+; Whether the instance came from object's own __new__.  CPython's object_new
+; refuses excess arguments when neither __new__ nor __init__ is overridden --
+; `class A: pass` then `A(1)` -- and answering that needs to know which of the
+; two halves was the default.
+TC_PLAIN    equ 80
+
+; Refuse arguments this construction has nowhere to put: object's own
+; __new__ on one side and object's own __init__ on the other means CPython's
+; object_new raises rather than dropping them, so `class A: pass` makes
+; `A(1)` a TypeError.  rbx is the type, r13 the positional count, and the
+; keyword names saved at the top -- __new__ consumes the global -- stand for
+; the rest.  Written out at both sites rather than called, so that neither
+; has to reason about what a return address does to rsp.
+%macro TC_REFUSE_EXTRA_ARGS 1
+    cmp qword [rbp - TC_PLAIN], 0
+    je %%ok
+    test r13, r13
+    jnz %%refuse
+    mov rax, [rbp - TC_KWNAMES]
+    test rax, rax
+    jz %%ok
+    cmp qword [rax + PyTupleObject.ob_size], 0
+    je %%ok
+%%refuse:
+    mov rsi, rbx
+    CSTRING rdi, `\x01() takes no arguments`
+    extern raise_type_error_with_typename
+    call raise_type_error_with_typename     ; does not return
+%%ok:
+%endmacro
 
 ;; ============================================================================
 ;; tc_winner_metatype(rdi = args) -> rax = the metatype to delegate to, or 0
@@ -1551,7 +1583,12 @@ DEF_FUNC type_call
     cmp edx, 3
     jge .type_three_arg         ; the extra arguments are class keywords
     cmp edx, 1
-    jne .not_type_self
+    je .type_one_arg
+    ; type() and type(a, b) are neither form.  Falling through to tp_new
+    ; reported it as `type.__new__() takes at least 3 arguments`, which
+    ; names a method the caller did not write.
+    RAISE exc_TypeError_type, "type() takes 1 or 3 arguments"
+.type_one_arg:
     ; type(x) → return type of x
     mov rax, [rsi]          ; args[0] payload
     V_TEST_INT_M [rsi], r11      ; args[0] an int immediate?
@@ -1712,6 +1749,7 @@ DEF_FUNC type_call
     mov rax, [rel kw_names_pending]
     mov [rbp - TC_KWNAMES], rax
     mov qword [rbp - TC_NEW_TAG], TAG_PTR  ; default return tag
+    mov qword [rbp - TC_PLAIN], 0
 
     mov rbx, rdi                ; rbx = type
     mov r12, rsi                ; r12 = args
@@ -1832,6 +1870,7 @@ DEF_FUNC type_call
     lea rcx, [rel type_call]
     cmp rax, rcx
     je .tc_plain_new
+    extern object_type_call
     lea rcx, [rel object_type_call]
     cmp rax, rcx
     je .tc_plain_new
@@ -1847,6 +1886,7 @@ DEF_FUNC type_call
 
 .tc_plain_new:
     ; Default: instance_new(type)
+    mov qword [rbp - TC_PLAIN], 1
     mov rdi, rbx
     call instance_new
     mov r14, rax                ; r14 = instance
@@ -1971,9 +2011,23 @@ DEF_FUNC type_call
     ; __init__ not found anywhere — DECREF name string, skip
     mov rdi, r15
     call obj_decref
+    TC_REFUSE_EXTRA_ARGS 0
     jmp .no_init
 
 .init_found:
+    ; Found where?  object's own __init__ is not a definition, and with
+    ; object's __new__ on the other side CPython refuses the arguments
+    ; outright rather than dropping them: `class A: pass` makes `A(1)` a
+    ; TypeError there and made a silent A here.
+    lea rdx, [rel object_type]
+    cmp rcx, rdx
+    jne .init_is_defined
+    push rax
+    push rax                    ; two pushes: rsp keeps its alignment
+    TC_REFUSE_EXTRA_ARGS 0
+    pop rax
+    pop rax
+.init_is_defined:
     mov rbx, rax                ; rbx = __init__ func
 
     ; DECREF the "__init__" string (no longer needed)
@@ -2092,9 +2146,14 @@ DEF_FUNC type_call
     ; rax = exception object (PyExceptionObject)
     mov r14, rax                ; r14 = instance
 
-    ; Check if type has __init__ in its dict (for custom exception __init__)
-    mov rdi, [rbx + PyTypeObject.tp_init]
-    test rdi, rdi
+    ; The __init__ to run, found along the MRO rather than in this type's own
+    ; slot: it is inherited, and `class F(E): pass` runs E's.  tp_init is set
+    ; only from the class's OWN body, so a subclass of a subclass ran none.
+    extern exc_user_init
+    mov rdi, rbx
+    call exc_user_init
+    mov [rbp - TC_EXCINIT], rax
+    test rax, rax
     jz .exc_sub_no_init
 
     ; Build args: (instance, *original_args) using 16-byte fat value stride
@@ -2118,12 +2177,12 @@ DEF_FUNC type_call
     jmp .exc_sub_copy_args
 .exc_sub_args_copied:
     ; Get __init__'s tp_call
-    mov rdi, [rbx + PyTypeObject.tp_init]
+    mov rdi, [rbp - TC_EXCINIT]
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
     jz .exc_sub_init_cleanup
-    mov rdi, [rbx + PyTypeObject.tp_init]
+    mov rdi, [rbp - TC_EXCINIT]
     mov rsi, r15
     lea rdx, [r13 + 1]
     call rax
@@ -2696,55 +2755,6 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
 END_FUNC type_getattr_meta
 
 ;; ============================================================================
-;; object_type_call(args, nargs) -> PyObject*
-;; object() returns a bare instance of object_type
-;; ============================================================================
-DEF_FUNC_BARE object_type_call
-    ; Create a bare instance with object_type (gc_alloc since HAVE_GC)
-    push rbp
-    mov rbp, rsp
-    mov edi, OBJ_HEADER_SIZE
-    lea rsi, [rel object_type]
-    call gc_alloc
-
-    ; gc_alloc does not INCREF the type it stamps into ob_type, and
-    ; instance_dealloc DECREFs it -- so without this the reference count of
-    ; object_type itself went down by one for every object() that died.  It
-    ; starts at 1, so the FIRST such instance took it to zero and handed
-    ; &object_type, a .data address, to ap_free: the heap was corrupted from
-    ; then on, and the crash landed in whatever allocated next.
-    ; instance_new and slots_new both INCREF here for the same reason.
-    push rax
-    lea rdi, [rel object_type]
-    call obj_incref
-    pop rax
-
-    ; Track in GC
-    push rax
-    mov rdi, rax
-    call gc_track
-    pop rax
-    mov edx, TAG_PTR
-    pop rbp
-    ret
-END_FUNC object_type_call
-
-;; ============================================================================
-;; object_new_fn(args, nargs) -> instance
-;; Implements object.__new__(cls) — creates a bare instance of cls.
-;; args[0] = cls (the type to instantiate)
-;; ============================================================================
-DEF_FUNC object_new_fn
-    ; args[0] = cls
-    mov rdi, [rdi]              ; cls payload (PyTypeObject*)
-    call instance_new
-    mov edx, TAG_PTR
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-END_FUNC object_new_fn
-
-;; ============================================================================
 ;; user_type_dealloc(PyTypeObject *type)
 ;; Deallocator for user-defined heap types (created by __build_class__).
 ;; Frees tp_dict, tp_name string, and the type object itself.
@@ -2882,8 +2892,12 @@ id_del_ignored_len equ $ - id_del_ignored_msg
 section .data
 
 instance_repr_cstr: db "<instance>", 0
+global init_dunder_cstr
+init_dunder_cstr:
 init_name_cstr:     db "__init__", 0
 tc_abstract_name: db "__abstractmethods__", 0
+global new_dunder_cstr
+new_dunder_cstr:
 new_name_cstr:      db "__new__", 0
 tga_name_str:       db "__name__", 0
 object_name_str:    db "object", 0

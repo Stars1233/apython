@@ -62,12 +62,14 @@ section .text
 ;; Constructor: memoryview(bytes_obj)
 ;; ============================================================================
 global memoryview_type_call
+MV_ARG   equ 8              ; args[0] as it arrived, for the refusal
 MV_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 DEF_FUNC memoryview_type_call, MV_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     cmp rdx, 1
-    jne .mv_error
+    jne .mv_nargs_error
     mov rdi, [rsi]                     ; arg0 payload
+    mov [rbp - MV_ARG], rdi
     ; Must be a bytes-like object (reject all non-pointer tags)
     V_TEST_PTR_M [rsi], r11      ; args[0] a pointer?
     ja .mv_error
@@ -172,8 +174,18 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     leave
     ret
 
+.mv_nargs_error:
+    mov rsi, rdx
+    CSTRING rdx, " given)"
+    CSTRING rdi, "memoryview() takes at most 1 argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+
 .mv_error:
-    RAISE exc_TypeError_type, "memoryview: a bytes-like object is required"
+    mov rsi, [rbp - MV_ARG]
+    CSTRING rdi, `memoryview: a bytes-like object is required, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC memoryview_type_call
 
 
@@ -587,7 +599,10 @@ DEF_FUNC memoryview_getattr, MVG_FRAME
     ret
 
 .mvg_strides:
-    ; Contiguous, so the stride is the item size.
+    ; The distance between items, in BYTES: the item size times the view's own
+    ; stride, which an extended slice sets.  Reporting the item size alone
+    ; made `memoryview(b)[::2].strides` (1,) where CPython says (2,) -- and
+    ; the whole point of the field is to say how far apart the items are.
     mov rdi, [rbp - MVG_SELF]
     call memoryview_check
     mov edi, 1
@@ -597,6 +612,7 @@ DEF_FUNC memoryview_getattr, MVG_FRAME
     mov [rbp - MVG_NAME], rax
     mov rdi, [rbp - MVG_SELF]
     mov rax, [rdi + PyMemoryViewObject.mv_itemsize]
+    imul rax, [rdi + PyMemoryViewObject.mv_stride]
     V_PACK_I64 rax, rcx
     mov rcx, [rbp - MVG_NAME]
     mov rcx, [rcx + PyTupleObject.ob_item]
@@ -672,6 +688,42 @@ DEF_FUNC memoryview_method_tobytes, MVM_FRAME
 .mvt_argerr:
     RAISE exc_TypeError_type, "tobytes() takes no arguments"
 END_FUNC memoryview_method_tobytes
+
+;; ============================================================================
+;; memoryview_method_toreadonly(rdi = args Value[], rsi = nargs)
+;;   -> (rax = a read-only view over the same window, rdx = TAG_PTR)
+;;
+;; _pyio hands a caller a view of its buffer this way, and without it the
+;; caller could write through it.  The copy is memoryview(memoryview)'s, with
+;; the one field changed.
+;; ============================================================================
+DEF_FUNC memoryview_method_toreadonly, MVM_FRAME
+    test rsi, rsi
+    jz .mvro_argerr
+    mov rdi, [rdi]
+    mov [rbp - MVM_SELF], rdi
+    call memoryview_check
+    mov rdi, [rbp - MVM_SELF]
+    mov rsi, rdi
+    lea rdi, [rel memoryview_type]
+    mov rdx, 1                  ; nargs
+    lea rsi, [rbp - MVM_SELF]
+    call memoryview_type_call
+    V_UNPACK rax, rdx
+    test rax, rax
+    jz .mvro_fail
+    mov qword [rax + PyMemoryViewObject.mv_readonly], 1
+    mov edx, TAG_PTR
+    leave
+    ret
+.mvro_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+.mvro_argerr:
+    RAISE exc_TypeError_type, "toreadonly() takes no arguments"
+END_FUNC memoryview_method_toreadonly
 
 DEF_FUNC memoryview_method_release, MVM_FRAME
     test rsi, rsi
@@ -933,34 +985,66 @@ DEF_FUNC memoryview_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 END_FUNC memoryview_tp_iter
 
-;; memoryview.hex() -- through a temporary bytes, as bytearray's read-only
-;; methods do, for the same reason: bytes_method_hex reads a bytes layout.
+;; ============================================================================
+;; memoryview_method_hex(rdi = args, rsi = nargs) -> rax = Value
+;;
+;; Through a temporary bytes, as bytearray's read-only methods do, for the
+;; same reason: bytes_method_hex reads a bytes layout.  The separator and
+;; the group size go through with it -- they were dropped here, so
+;; `memoryview(b"abcd").hex(":")` answered without any separators.
+;; ============================================================================
 MVH_TMP   equ 8
-MVH_FRAME equ 16            ; + 0 pushes = 16
+MVH_ARGS  equ 40            ; three Values: the temporary bytes and the two
+                            ; optional arguments, ending here
+MVH_NARGS equ 48
+MVH_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
 
 DEF_FUNC memoryview_method_hex, MVH_FRAME
     test rsi, rsi
     jz .mvh_argerr
+    cmp rsi, 3
+    ja .mvh_too_many
+    lea rdx, [rsi - 1]          ; how many beyond self
+    lea rsi, [rdi + 8]          ; and where they start
     mov rdi, [rdi]
+    push rsi
+    push rdx
     call memoryview_check
+    pop rdx
+    pop rsi
     call memoryview_method_hex_self
     leave
     ret
 .mvh_argerr:
     RAISE exc_TypeError_type, "hex() takes no arguments"
+.mvh_too_many:
+    RAISE exc_TypeError_type, "hex() takes at most 2 arguments"
 END_FUNC memoryview_method_hex
 
 DEF_FUNC memoryview_method_hex_self, MVH_FRAME
+    ; rdi = the memoryview, rsi = the arguments beyond self, rdx = how many.
+    mov [rbp - MVH_NARGS], rdx
+    xor eax, eax
+    cmp rdx, 1
+    jb .mvhs_have_extra
+    mov rax, [rsi]
+.mvhs_have_extra:
+    mov [rbp - MVH_ARGS + 8], rax
+    xor eax, eax
+    cmp rdx, 2
+    jb .mvhs_have_extra2
+    mov rax, [rsi + 8]
+.mvhs_have_extra2:
+    mov [rbp - MVH_ARGS + 16], rax
     call memoryview_as_bytes
     test rax, rax
     jz .mvhs_fail
     mov [rbp - MVH_TMP], rax
-    sub rsp, 16
-    mov [rsp], rax
-    mov rdi, rsp
-    mov esi, 1
+    mov [rbp - MVH_ARGS], rax
+    lea rdi, [rbp - MVH_ARGS]
+    mov rsi, [rbp - MVH_NARGS]
+    inc rsi                     ; plus the temporary bytes standing in for self
     call bytes_method_hex
-    add rsp, 16
     push rax
     push rax
     mov rdi, [rbp - MVH_TMP]
@@ -1156,9 +1240,11 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     REQUIRE_INT_TYPE rax, rcx, .ms_type_error   ; unconditionally
     mov rdi, rsi
     mov edx, TAG_PTR
-    extern int_unwrap
-    call int_unwrap                     ; an int subclass wraps its value
-    call int_to_i64
+    ; obj_as_index_seq, not int_to_i64: that truncates through
+    ; __gmpz_get_si, so `memoryview(b"ab")[2**70]` answered the first byte.
+    lea rsi, [rel ms_index_msg]
+    extern obj_as_index_seq
+    call obj_as_index_seq
     mov rsi, rax
     jmp .ms_int_index
 
@@ -1171,6 +1257,10 @@ DEF_FUNC memoryview_subscript, MS_FRAME
 .ms_type_error:
     RAISE exc_TypeError_type, "memoryview: invalid slice key"
 END_FUNC memoryview_subscript
+
+section .rodata
+ms_index_msg: db "memoryview: invalid slice key", 0
+section .text
 
 ;; ============================================================================
 ;; memoryview_nitems(rdi = self) -> rax = the length in ITEMS

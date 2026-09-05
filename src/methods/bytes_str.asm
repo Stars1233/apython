@@ -472,9 +472,9 @@ DEF_FUNC bytes_just_impl, BJU_FRAME
     mov rdi, [rdi + 16]
     call bytes_like_ptr_len
     test ecx, ecx
-    jz .bju_fill_type
+    jz .bju_fill_bad
     cmp r10, 1
-    jne .bju_fill_len
+    jne .bju_fill_bad
     movzx ecx, byte [rax]
     mov [rbp - BJU_FILL], rcx
 .bju_have_fill:
@@ -547,15 +547,58 @@ DEF_FUNC bytes_just_impl, BJU_FRAME
 
 .bju_type:
     RAISE exc_TypeError_type, "a bytes-like object is required"
-.bju_fill_type:
-    RAISE exc_TypeError_type, "fill character must be a byte string of length 1"
-.bju_fill_len:
-    RAISE exc_TypeError_type, "fill character must be exactly one byte long"
+.bju_fill_bad:
+    ; CPython names the method and the type it was handed: "center() argument
+    ; 2 must be a byte string of length 1, not int".  Both halves were
+    ; missing, and the two wordings this had drew a line -- wrong type
+    ; against wrong length -- that CPython does not.
+    mov rax, [rbp - BJU_MODE]
+    lea rdi, [rel bju_msg_ljust]
+    test rax, rax
+    jz .bju_fill_msg
+    lea rdi, [rel bju_msg_rjust]
+    cmp rax, 1
+    je .bju_fill_msg
+    lea rdi, [rel bju_msg_center]
+.bju_fill_msg:
+    mov rsi, [rbp - BJU_ARGS]
+    mov rsi, [rsi + 16]
+    extern none_singleton
+    lea rcx, [rel none_singleton]
+    cmp rsi, rcx
+    je .bju_fill_none           ; the clinic says "None", not "NoneType"
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+.bju_fill_none:
+    ; The same three messages with the type name already in them; the
+    ; composer would have written NoneType.
+    mov rax, [rbp - BJU_MODE]
+    lea rsi, [rel bju_msg_ljust_none]
+    test rax, rax
+    jz .bju_fill_none_raise
+    lea rsi, [rel bju_msg_rjust_none]
+    cmp rax, 1
+    je .bju_fill_none_raise
+    lea rsi, [rel bju_msg_center_none]
+.bju_fill_none_raise:
+    lea rdi, [rel exc_TypeError_type]
+    extern raise_exception
+    call raise_exception
+    ud2
 .bju_args:
     RAISE exc_TypeError_type, "takes at least 1 argument"
 .bju_oom:
     RAISE exc_MemoryError_type, "out of memory"
 END_FUNC bytes_just_impl
+
+section .rodata
+bju_msg_ljust:  db `ljust() argument 2 must be a byte string of length 1, not \x01`, 0
+bju_msg_rjust:  db `rjust() argument 2 must be a byte string of length 1, not \x01`, 0
+bju_msg_center: db `center() argument 2 must be a byte string of length 1, not \x01`, 0
+bju_msg_ljust_none:  db "ljust() argument 2 must be a byte string of length 1, not None", 0
+bju_msg_rjust_none:  db "rjust() argument 2 must be a byte string of length 1, not None", 0
+bju_msg_center_none: db "center() argument 2 must be a byte string of length 1, not None", 0
+section .text
 
 DEF_FUNC_BARE bytes_method_ljust
     xor edx, edx
@@ -684,8 +727,10 @@ DEF_FUNC bytes_method_expandtabs, BET_FRAME
     jl .bet_have_tabs
     mov rdi, [rbp - BET_ARGS]
     mov rdi, [rdi + 8]
-    call bs_arg_i64
-    mov [rbp - BET_TABS], rax
+    mov esi, 1                  ; a tabsize is a C int in CPython, and it
+    extern str_pad_width        ; says so when handed one that will not fit;
+    call str_pad_width          ; bs_arg_i64 truncated, so 2**31 tabs became
+    mov [rbp - BET_TABS], rax   ; the low half of one
 .bet_have_tabs:
 
     ; Walk one: the size.
@@ -948,6 +993,7 @@ DEF_FUNC bytes_method_translate, BTR_FRAME
     lea rcx, [rel none_singleton]   ; a borrowed compare: LOAD_NONE increfs
     cmp rdi, rcx
     je .btr_have_table
+    mov [rbp - BTR_TABLE], rdi      ; the object, for the refusal below
     call bytes_like_ptr_len
     test ecx, ecx
     jz .btr_table_type
@@ -1031,7 +1077,11 @@ DEF_FUNC bytes_method_translate, BTR_FRAME
 .btr_type:
     RAISE exc_TypeError_type, "a bytes-like object is required"
 .btr_table_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required, not 'str'"
+    ; The type it actually got: this named 'str' whatever was passed.
+    mov rsi, [rbp - BTR_TABLE]
+    CSTRING rdi, `a bytes-like object is required, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .btr_table_len:
     RAISE exc_ValueError_type, "translation table must be 256 characters long"
 .btr_del_type:
@@ -1053,9 +1103,11 @@ BMT_FROM  equ 8
 BMT_FLEN  equ 16
 BMT_TO    equ 24
 BMT_OBJ   equ 32
+BMT_NARGS equ 40            ; the count, for the arity refusal
 BMT_FRAME equ 48            ; + 0 pushes = 48
 
 DEF_FUNC bytes_staticmethod_maketrans, BMT_FRAME
+    mov [rbp - BMT_NARGS], rsi
     cmp rsi, 2
     jne .bmt_args
     mov r8, rdi
@@ -1119,7 +1171,11 @@ DEF_FUNC bytes_staticmethod_maketrans, BMT_FRAME
 .bmt_len:
     RAISE exc_ValueError_type, "maketrans arguments must have same length"
 .bmt_args:
-    RAISE exc_TypeError_type, "maketrans() takes exactly two arguments"
+    mov rsi, [rbp - BMT_NARGS]
+    CSTRING rdi, "maketrans expected 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 .bmt_oom:
     RAISE exc_MemoryError_type, "out of memory"
 END_FUNC bytes_staticmethod_maketrans
@@ -1137,6 +1193,7 @@ BRA_ARGS  equ 8
 BRA_DATA  equ 16
 BRA_LEN   equ 24
 BRA_MODE  equ 32
+BRA_AFFIX equ 40            ; the affix object, for the refusal
 BRA_FRAME equ 48            ; + 0 pushes = 48
 
 DEF_FUNC bytes_affix_impl, BRA_FRAME
@@ -1147,6 +1204,7 @@ DEF_FUNC bytes_affix_impl, BRA_FRAME
 
     mov rdi, [rbp - BRA_ARGS]
     mov rdi, [rdi + 8]
+    mov [rbp - BRA_AFFIX], rdi      ; the object, for the refusal below
     call bytes_like_ptr_len
     test ecx, ecx
     jz .bra_affix_type
@@ -1204,7 +1262,10 @@ DEF_FUNC bytes_affix_impl, BRA_FRAME
 .bra_type:
     RAISE exc_TypeError_type, "a bytes-like object is required"
 .bra_affix_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required, not 'str'"
+    mov rsi, [rbp - BRA_AFFIX]
+    CSTRING rdi, `a bytes-like object is required, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .bra_args:
     RAISE exc_TypeError_type, "takes exactly one argument"
 .bra_oom:

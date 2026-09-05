@@ -68,6 +68,24 @@ def survives(label, fn):
 
 survives("a mark with a wild index",
          lambda: _sre.compile("", 0, [MARK, 1 << 40, SUCCESS], 0, {}, ()).match("a"))
+# A BRANCH keeps a program counter of its own, and the guard that bounds the
+# dispatching one does not reach it: it is advanced by an offset read straight
+# out of the program, scaled by four, and dereferenced.  CPython's validator
+# refuses all three of these, so only the first agrees on the answer -- the
+# other two go through survives(), which asks the question this file is really
+# about.
+BRANCH = 7
+check("a branch off the end",
+      lambda: _sre.compile("x", 0,
+                           [BRANCH, 4294967295, 32, 2, 136, 2, 0, 0, 32, 0, 236, 2],
+                           2, {}, ()).match("aab") is not None)
+survives("a branch with a huge offset",
+         lambda: _sre.compile("x", 0, [BRANCH, 1 << 30, SUCCESS, 0, SUCCESS],
+                              0, {}, ()).match("a"))
+survives("a well-formed branch",
+         lambda: _sre.compile("x", 0, [BRANCH, 3, ANY, SUCCESS, 0, SUCCESS],
+                              0, {}, ()).match("a"))
+
 survives("a mark with a big index",
          lambda: _sre.compile("", 0, [MARK, 100000, SUCCESS], 0, {}, ()).match("a"))
 

@@ -27,6 +27,8 @@ extern dict_type
 extern code_type
 extern type_type
 extern exc_TypeError_type
+extern exc_ValueError_type
+extern rbt_append_cstr
 extern raise_exception
 
 ;; ============================================================================
@@ -694,7 +696,15 @@ END_FUNC func_dealloc
 ;; Lazily creates func_dict on first use.
 ;; rdi = function, rsi = name, rdx = value
 ;; ============================================================================
-DEF_FUNC func_setattr
+section .bss
+;; Where the __code__ mismatch message is composed.
+sc_msgbuf: resb 256
+section .text
+
+SC_WANT equ 8             ; free variables the new code object needs
+SC_HAVE equ 16            ; free variables the function's closure has
+SC_FRAME equ 16           ; + 4 pushes = 48, 16-aligned
+DEF_FUNC func_setattr, SC_FRAME
     push rbx
     push r12
     push r13
@@ -819,6 +829,25 @@ DEF_FUNC func_setattr
     lea rcx, [rel code_type]
     cmp rax, rcx
     jne .sc_type
+
+    ; And one that closes over the same number of names.  The closure tuple
+    ; belongs to the FUNCTION and COPY_FREE_VARS copies it into the frame by
+    ; the new code's count, so a code object with more free variables reads
+    ; past the tuple and increfs whatever is after it.  CPython checks the
+    ; two counts and refuses; so does this, with its wording.
+    mov rdi, r13
+    call func_free_count
+    mov [rbp - SC_WANT], rax
+    mov qword [rbp - SC_HAVE], 0
+    mov rdi, [rbx + PyFuncObject.func_code]
+    test rdi, rdi
+    jz .sc_counts_ok
+    call func_free_count
+    mov [rbp - SC_HAVE], rax
+    cmp rax, [rbp - SC_WANT]
+    jne .sc_freevars
+.sc_counts_ok:
+    mov rdi, r13
     call obj_incref
     mov rax, [rbx + PyFuncObject.func_code]
     mov [rbx + PyFuncObject.func_code], r13
@@ -836,6 +865,36 @@ DEF_FUNC func_setattr
     ret
 .sc_type:
     RAISE exc_TypeError_type, "__code__ must be set to a code object"
+.sc_freevars:
+    ; CPython names the function and both counts, which is the whole of what
+    ; makes the message actionable: "k() requires a code object with 1 free
+    ; vars, not 2".
+    lea rdi, [rel sc_msgbuf]
+    mov rsi, [rbx + PyFuncObject.func_name]
+    test rsi, rsi
+    jz .scf_no_name
+    lea rsi, [rsi + PyStrObject.data]
+    jmp .scf_have_name
+.scf_no_name:
+    CSTRING rsi, "function"
+.scf_have_name:
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "() requires a code object with "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SC_HAVE]
+    call sc_append_num
+    mov rdi, rax
+    CSTRING rsi, " free vars, not "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SC_WANT]
+    call sc_append_num
+    lea rsi, [rel sc_msgbuf]
+    lea rdi, [rel exc_ValueError_type]
+    call raise_exception
+    ud2
 
 .set_annotations:
     ; A mapping, as CPython requires; what it stores is whatever it is given,
@@ -935,6 +994,60 @@ DEF_FUNC func_setattr
     leave
     ret
 END_FUNC func_setattr
+
+
+;; ============================================================================
+;; sc_append_num(rdi = dest, rsi = a small count) -> rax = the NUL it wrote
+;; Decimal, for the __code__ message; the counts are small by construction.
+;; ============================================================================
+SAN_END   equ 8            ; the NUL the digits are written back from
+SAN_FRAME equ 32           ; + 0 pushes = 32, 16-aligned
+DEF_FUNC_LOCAL sc_append_num, SAN_FRAME
+    mov rax, rsi
+    lea rcx, [rbp - SAN_END]
+    mov byte [rcx], 0
+.san_loop:
+    xor edx, edx
+    mov r8, 10
+    div r8
+    add dl, '0'
+    dec rcx
+    mov [rcx], dl
+    test rax, rax
+    jnz .san_loop
+    mov rsi, rcx
+    call rbt_append_cstr
+    leave
+    ret
+END_FUNC sc_append_num
+
+;; ============================================================================
+;; func_free_count(rdi = a code object) -> rax = how many free variables it has
+;;
+;; The count CO_FAST_FREE marks in co_localspluskinds, which is what
+;; COPY_FREE_VARS copies out of the function's closure tuple.
+;; ============================================================================
+DEF_FUNC_LOCAL func_free_count
+    xor eax, eax
+    mov rcx, [rdi + PyCodeObject.co_localspluskinds]
+    test rcx, rcx
+    jz .ffc_done
+    mov rsi, [rcx + PyBytesObject.ob_size]
+    xor edx, edx
+.ffc_scan:
+    cmp rdx, rsi
+    jae .ffc_done
+    movzx r8d, byte [rcx + PyBytesObject.data + rdx]
+    test r8d, CO_FAST_FREE
+    jz .ffc_next
+    inc rax
+.ffc_next:
+    inc rdx
+    jmp .ffc_scan
+.ffc_done:
+    leave
+    ret
+END_FUNC func_free_count
 
 ;; ============================================================================
 ;; func_getattr(PyFuncObject *self, PyObject *name) -> PyObject* or NULL

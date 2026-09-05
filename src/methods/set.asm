@@ -309,6 +309,8 @@ DEF_FUNC set_method_copy
     ret
 
 .smcp_error:
+    ; Unreachable now that copy is registered with its arity: the shared
+    ; path names the type, "set.copy() takes no arguments (1 given)".
     RAISE exc_TypeError_type, "copy() takes no arguments"
 END_FUNC set_method_copy
 

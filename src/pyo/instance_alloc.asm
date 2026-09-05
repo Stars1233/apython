@@ -18,6 +18,15 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern object_type
+extern exc_TypeError_type
+extern raise_exception
+extern str_from_cstr_heap
+extern type_call
+extern dict_get
+extern raise_type_error_with_typename
+extern new_dunder_cstr
+extern init_dunder_cstr
 extern ap_malloc
 extern ap_memcpy
 extern gc_alloc
@@ -525,3 +534,172 @@ DEF_FUNC builtin_sub_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     ret
 END_FUNC builtin_sub_dealloc
+
+
+;; ============================================================================
+;; object_type_call(args, nargs) -> PyObject*
+;; object() returns a bare instance of object_type
+;; ============================================================================
+DEF_FUNC_BARE object_type_call
+    ; Create a bare instance with object_type (gc_alloc since HAVE_GC)
+    push rbp
+    mov rbp, rsp
+    ; object() takes nothing.  It accepted anything and dropped it, so
+    ; `object(1)` was an object rather than the TypeError CPython raises.
+    ; This sits in object's tp_new, so the count is in edx -- rsi is the
+    ; argument array.
+    test edx, edx
+    jnz .otc_no_args
+    mov edi, OBJ_HEADER_SIZE
+    lea rsi, [rel object_type]
+    call gc_alloc
+
+    ; gc_alloc does not INCREF the type it stamps into ob_type, and
+    ; instance_dealloc DECREFs it -- so without this the reference count of
+    ; object_type itself went down by one for every object() that died.  It
+    ; starts at 1, so the FIRST such instance took it to zero and handed
+    ; &object_type, a .data address, to ap_free: the heap was corrupted from
+    ; then on, and the crash landed in whatever allocated next.
+    ; instance_new and slots_new both INCREF here for the same reason.
+    push rax
+    lea rdi, [rel object_type]
+    call obj_incref
+    pop rax
+
+    ; Track in GC
+    push rax
+    mov rdi, rax
+    call gc_track
+    pop rax
+    mov edx, TAG_PTR
+    pop rbp
+    ret
+
+.otc_no_args:
+    RAISE exc_TypeError_type, "object() takes no arguments"
+END_FUNC object_type_call
+
+;; ============================================================================
+;; type_defines_dunder(rdi = a type, rsi = the name as a C string,
+;;                     edx = the PyTypeObject slot that stands for it, or 0)
+;;   -> eax = 1 if some class BEFORE object on the MRO defines it, else 0
+;;
+;; What CPython asks as `type->tp_new != object_new`.  object's own entry is
+;; not a definition: it is the default the question is trying to distinguish
+;; from, so the walk stops there.
+;;
+;; A builtin defines its constructor in a SLOT and not in its dict -- bytes
+;; has a tp_new and no `__new__` key -- so the slot is asked as well, and a
+;; subclass inherits it by pointer.  Passing 0 for it asks the dict alone.
+;; ============================================================================
+TDD_TYPE  equ 8
+TDD_NAME  equ 16
+TDD_SLOT  equ 24
+TDD_FRAME equ 40            ; + 1 push = 48, 16-aligned
+global type_defines_dunder
+DEF_FUNC type_defines_dunder, TDD_FRAME
+    push rbx
+    mov [rbp - TDD_TYPE], rdi
+    movsxd rdx, edx
+    mov [rbp - TDD_SLOT], rdx
+    mov rdi, rsi
+    call str_from_cstr_heap
+    mov [rbp - TDD_NAME], rax
+    mov rbx, [rbp - TDD_TYPE]
+.tdd_walk:
+    test rbx, rbx
+    jz .tdd_no
+    lea rax, [rel object_type]
+    cmp rbx, rax
+    je .tdd_no
+
+    ; The slot first: a builtin defines its constructor there and not in its
+    ; dict, and a subclass of one inherits it by pointer.
+    mov rdx, [rbp - TDD_SLOT]
+    test rdx, rdx
+    jz .tdd_dict
+    mov rax, [rbx + rdx]
+    test rax, rax
+    jz .tdd_dict
+    lea rcx, [rel object_type_call]
+    cmp rax, rcx
+    je .tdd_dict
+    lea rcx, [rel type_call]
+    cmp rax, rcx
+    je .tdd_dict
+    extern object_method_init
+    lea rcx, [rel object_method_init]
+    cmp rax, rcx
+    je .tdd_dict
+    jmp .tdd_yes
+
+.tdd_dict:
+    mov rdi, [rbx + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .tdd_next
+    mov rsi, [rbp - TDD_NAME]
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx               ; the tag: a hit may be a false-looking payload
+    jnz .tdd_yes
+.tdd_next:
+    MRO_NEXT rbx, [rbp - TDD_TYPE]
+    jmp .tdd_walk
+.tdd_yes:
+    mov rdi, [rbp - TDD_NAME]
+    call obj_decref
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.tdd_no:
+    mov rdi, [rbp - TDD_NAME]
+    call obj_decref
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC type_defines_dunder
+
+;; ============================================================================
+;; object_new_fn(args, nargs) -> instance
+;; Implements object.__new__(cls) — creates a bare instance of cls.
+;; args[0] = cls (the type to instantiate)
+;; ============================================================================
+ONF_TYPE  equ 8
+ONF_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC object_new_fn, ONF_FRAME
+    ; args[0] = cls
+    mov rdi, [rdi]              ; cls payload (PyTypeObject*)
+    mov [rbp - ONF_TYPE], rdi
+    ; Excess arguments are CPython's object_new error, not something to
+    ; drop: a class that overrides neither half has nowhere to put them.
+    cmp rsi, 1
+    jbe .onf_build
+    lea rsi, [rel new_dunder_cstr]
+    mov edx, PyTypeObject.tp_new
+    call type_defines_dunder
+    test eax, eax
+    jnz .onf_own_new
+    mov rdi, [rbp - ONF_TYPE]
+    lea rsi, [rel init_dunder_cstr]
+    mov edx, PyTypeObject.tp_init
+    call type_defines_dunder
+    test eax, eax
+    jz .onf_no_args
+.onf_build:
+    mov rdi, [rbp - ONF_TYPE]
+    call instance_new
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.onf_own_new:
+    RAISE exc_TypeError_type, \
+          "object.__new__() takes exactly one argument (the type to instantiate)"
+.onf_no_args:
+    mov rsi, [rbp - ONF_TYPE]
+    CSTRING rdi, `\x01() takes no arguments`
+    jmp raise_type_error_with_typename
+END_FUNC object_new_fn

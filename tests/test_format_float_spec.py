@@ -40,3 +40,45 @@ print(repr(format(complex(1, 2), "")), repr(format(complex(inf, 1), "")))
 # The int conversions are unaffected by any of this.
 print(format(255, "x"), format(255, "X"), format(255, "b"), format(255, "o"))
 print(format(1234, ","), format(1234, "e"), format(1234, "E"), format(1234, "G"))
+
+
+# The '%' type is 'f' applied to a hundred times the value, with a '%' on the
+# end.  Neither half was done: the letter reached the renderer, matched none
+# of its six, and fell to the %g default -- so format(1/3, ".2%") was "0.33",
+# which is neither the right number nor carrying the sign that says what it
+# is.
+print("=== the percent type ===")
+for v in (1.0 / 3.0, -1.0 / 3.0, 0.0, 1.0, 1e-9, 123.456, -2.5,
+          float("inf"), float("nan")):
+    row = []
+    for spec in ("%", ".0%", ".2%", "+.2%", "10.2%", "<12.1%", "=+12.2%"):
+        row.append(format(v, spec))
+    print("%-8s %s" % (repr(v)[:8], " | ".join(row)))
+
+# A precision is however many digits it takes.  Three was the most this could
+# write, and rather than say so it quietly used 999 instead: format(1.0,
+# ".5000f") came back one thousand places long.
+print("=== a precision wider than three digits ===")
+for p in (0, 1, 9, 10, 99, 100, 999, 1000, 1001, 2000, 5000):
+    s = format(1.0 / 3.0, ".%df" % p)
+    print("%-5d %d %s" % (p, len(s), s[:12]))
+    if ("%%.%df" % p) % (1.0 / 3.0) != s:
+        print("   ...but %% disagrees")
+
+# And the limits of one.  CPython's precision is a C int and it says so; a
+# width or precision so large that nothing can be allocated for it is a
+# MemoryError there, and used to be "Fatal: out of memory" and a dead process
+# here.  The exact threshold is not compared -- CPython will spend two
+# gigabytes on a field of spaces and this refuses at a quarter of one -- only
+# the shapes that are errors on both sides.
+print("=== limits ===")
+for label, fn in (
+        ("precision > INT_MAX", lambda: format(1.0, ".2147483648f")),
+        ("precision digits overflow", lambda: format(1.0, ".%df" % (10 ** 20))),
+        ("width digits overflow", lambda: format(1.0, "%dg" % (10 ** 20))),
+        ("%% star precision", lambda: "%.*f" % (2 ** 31, 1.0)),
+        ("%% literal precision", lambda: "%.99999999999999f" % 1.0)):
+    try:
+        print("%-26s %r" % (label, fn()[:20]))
+    except Exception as e:
+        print("%-26s %s: %s" % (label, type(e).__name__, e))

@@ -564,7 +564,9 @@ CA_NPOS    equ 64
 CA_POSONLY equ 72
 CA_NKW     equ 80
 CA_ANN     equ 88          ; the annotation node .one_param is working on
-CA_FRAME   equ 104         ; + 3 pushes = 128
+CA_STAR    equ 96          ; ...and whether it was a PEP 646 `*Ts`
+CA_STAROK  equ 104         ; and whether this parameter is allowed one
+CA_FRAME   equ 120         ; + 3 pushes = 144
 DEF_FUNC cg_annotations, CA_FRAME
     push rbx
     push r12
@@ -619,6 +621,7 @@ DEF_FUNC cg_annotations, CA_FRAME
     test ecx, ecx
     jz .no_vararg
     mov rdi, rcx
+    mov esi, 1                          ; only *args may carry `*Ts`
     call .one_param
     test eax, eax
     js .fail
@@ -641,6 +644,7 @@ DEF_FUNC cg_annotations, CA_FRAME
     test ecx, ecx
     jz .ret_ann
     mov rdi, rcx
+    xor esi, esi
     call .one_param
     test eax, eax
     js .fail
@@ -707,6 +711,7 @@ DEF_FUNC cg_annotations, CA_FRAME
     mov rdi, rbx
     call ast_child
     mov rdi, rax
+    xor esi, esi
     call .one_param
     test eax, eax
     js .cs_fail
@@ -726,6 +731,7 @@ DEF_FUNC cg_annotations, CA_FRAME
 ;; and counts the pair in r12.  -1 on error.
 .one_param:
     sub rsp, 8
+    mov [rbp - CA_STAROK], rsi
     mov r13, rdi
     mov rdi, rbx
     mov rsi, r13
@@ -751,16 +757,58 @@ DEF_FUNC cg_annotations, CA_FRAME
     mov esi, OP_LOAD_CONST
     mov rcx, [rbp - CA_LINE]
     call cg_emit
-    ; then the annotation itself
+    ; then the annotation itself.  PEP 646's `*Ts` is a Starred node here, and
+    ; CPython compiles it as the expression followed by UNPACK_SEQUENCE 1 --
+    ; a TypeVarTuple's __iter__ yields Unpack[Ts], which is the value that
+    ; belongs in __annotations__.  Nothing unwrapped it, so cg_expr saw a
+    ; Starred where none is allowed and called it a syntax error.
+    mov rdi, rbx
+    mov rsi, [rbp - CA_ANN]
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_STARRED
+    jne .op_plain_ann
+    cmp qword [rbp - CA_STAROK], 0
+    je .op_star_refused
+    mov ecx, [rax + AstNode.a]
+    mov [rbp - CA_ANN], rcx
+    mov qword [rbp - CA_STAR], 1
+    jmp .op_emit_ann
+.op_plain_ann:
+    mov qword [rbp - CA_STAR], 0
+.op_emit_ann:
     mov rdx, [rbp - CA_ANN]
     mov rdi, rbx
     mov rsi, [rbp - CA_UNIT]
     call cg_expr
     test eax, eax
     jz .op_fail
+    cmp qword [rbp - CA_STAR], 0
+    je .op_ann_done
+    mov rdi, [rbp - CA_UNIT]
+    mov esi, OP_UNPACK_SEQUENCE
+    mov edx, 1
+    mov rcx, [rbp - CA_LINE]
+    call cg_emit
+.op_ann_done:
     inc r12
 .op_none:
     xor eax, eax
+    add rsp, 8
+    ret
+
+.op_star_refused:
+    ; Only *args may carry one; anywhere else `*x` is not an annotation.
+    ; par_expr takes a starred expression in plenty of places, so the
+    ; refusal has to be here rather than in the parser.
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "invalid syntax"
+    mov ecx, [rbp - CA_LINE]
+    xor r8d, r8d
+    extern comp_error
+    call comp_error
+    mov eax, -1
     add rsp, 8
     ret
 .op_fail:
@@ -1842,6 +1890,23 @@ DEF_FUNC cg_s_decorated, CD3_FRAME
     cmp eax, AST_CLASSDEF
     je .class_target
 
+    ; PEP 695 brackets go on before the decorators do: `@dec def f[T]` is the
+    ; decorator applied to what the type-parameter wrapper returns, and it is
+    ; inside that wrapper that T exists.  cg_s_functiondef and cg_s_classdef
+    ; both ask first; this path did not, so an annotation naming a parameter
+    ; of a DECORATED def was compiled in a scope where the name is not bound.
+    ; The wrapper leaves its result on the stack, exactly where cg_function
+    ; would have left the function.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CD3_TGT]
+    xor ecx, ecx                        ; not a class
+    call cg_generic_wrap
+    cmp rax, -1
+    je .fail
+    test rax, rax
+    jnz .fn_name
+
     mov rdi, rbx
     mov rsi, r12
     mov rdx, [rbp - CD3_TGT]
@@ -1849,6 +1914,7 @@ DEF_FUNC cg_s_decorated, CD3_FRAME
     call cg_function
     test eax, eax
     jz .fail
+.fn_name:
     mov rdi, rbx
     mov rsi, [rbp - CD3_TGT]
     call ast_at
@@ -1862,9 +1928,20 @@ DEF_FUNC cg_s_decorated, CD3_FRAME
     mov rdi, rbx
     mov rsi, r12
     mov rdx, [rbp - CD3_TGT]
+    mov ecx, 1                          ; a class
+    call cg_generic_wrap
+    cmp rax, -1
+    je .fail
+    test rax, rax
+    jnz .class_name
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CD3_TGT]
     call cg_class_value
     test eax, eax
     jz .fail
+.class_name:
     mov rdi, rbx
     mov rsi, [rbp - CD3_TGT]
     call ast_at

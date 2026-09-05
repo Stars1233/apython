@@ -20,6 +20,7 @@ extern memoryview_method_release
 extern memoryview_method_enter
 extern memoryview_method_exit
 extern memoryview_method_hex
+extern memoryview_method_toreadonly
 extern memoryview_dunder_getitem
 extern memoryview_dunder_setitem
 extern memoryview_dunder_len
@@ -310,6 +311,17 @@ extern tuple_method_index
     lea rsi, [rel %2]
     lea rdx, [rel %3]
     call dict_add_builtin_func
+%endmacro
+
+; The same with an explicit dict, for the shared blocks that keep theirs in
+; a frame slot rather than in rbx.
+%macro ADD_FN_DN 5
+    mov rdi, [rbp - %1]
+    lea rsi, [rel %2]
+    lea rdx, [rel %3]
+    mov rcx, %4
+    mov r8, %5
+    call add_method_to_dict_checked
 %endmacro
 
 %macro ADD_FN_N 4
@@ -667,7 +679,7 @@ SASM_FRAME equ 16           ; + 0 pushes = 16, 16-aligned
 DEF_FUNC_LOCAL set_add_shared_methods, SASM_FRAME
     mov [rbp - SASM_DICT], rdi
 
-    ADD_FN_D SASM_DICT, mn_copy, set_method_copy
+    ADD_FN_DN SASM_DICT, mn_copy, set_method_copy, 1, 1
 
     ADD_FN_D SASM_DICT, mn_union, set_method_union
 
@@ -1081,6 +1093,24 @@ DEF_FUNC methods_init
     mov rdi, rax
     call type_stamp_methods
     ; INCREF the dict (type holds ref; dict_new gave us refcnt=1, which we keep)
+
+    ;; --- the async generator's own two names ---
+    ;; It had a getattr of its own and no tp_dict at all, so `hasattr(g,
+    ;; "__aiter__")` was False -- and aiter() and anext(), which ask for
+    ;; those names, refused a genuine async generator.
+    call dict_new
+    mov rbx, rax
+
+    extern async_gen_dunder_aiter
+    ADD_FN_N mn___aiter__, async_gen_dunder_aiter, 1, 1
+    extern async_gen_dunder_anext
+    ADD_FN_N mn___anext__, async_gen_dunder_anext, 1, 1
+
+    extern async_gen_type
+    lea rax, [rel async_gen_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
 
     ;; --- list methods (with arg count validation) ---
     call dict_new
@@ -1613,8 +1643,13 @@ DEF_FUNC methods_init
     mov rdi, r12
     call obj_decref
 
-    mov rdi, rbx
-    call add_class_getitem
+    extern type_method_init
+    ADD_FN mn___init__, type_method_init
+
+    ; No add_class_getitem here: `type[int]` is a special case in CPython's
+    ; PyObject_GetItem, taken before any lookup, and type carries no
+    ; __class_getitem__ of its own -- hasattr(type, "__class_getitem__") is
+    ; False there.  op_binary_subscr has the same special case.
 
     ; bool is a static subclass of int -- the only one in the tree -- so it
     ; never went through type_from_parts and had nothing to register it.
@@ -2017,6 +2052,37 @@ DEF_FUNC methods_init
     extern complex_dunder_bool
     ADD_FN_N mn___bool__, complex_dunder_bool, 1, 1
 
+    ;; The binary family, forward and reflected, and the unary three.  They
+    ;; went through the slots and nothing else, so `complex(1,2).__add__` did
+    ;; not exist -- and a class that dispatches on NotImplemented, as the
+    ;; numeric tower does, cannot ask a type that has no __add__ to try.
+    extern complex_dunder_add
+    ADD_FN_N mn___add__, complex_dunder_add, 2, 2
+    extern complex_dunder_sub
+    ADD_FN_N mn___sub__, complex_dunder_sub, 2, 2
+    extern complex_dunder_mul
+    ADD_FN_N mn___mul__, complex_dunder_mul, 2, 2
+    extern complex_dunder_truediv
+    ADD_FN_N mn___truediv__, complex_dunder_truediv, 2, 2
+    extern complex_dunder_pow
+    ADD_FN_N mn___pow__, complex_dunder_pow, 2, 3
+    extern complex_dunder_radd
+    ADD_FN_N mn___radd__, complex_dunder_radd, 2, 2
+    extern complex_dunder_rsub
+    ADD_FN_N mn___rsub__, complex_dunder_rsub, 2, 2
+    extern complex_dunder_rmul
+    ADD_FN_N mn___rmul__, complex_dunder_rmul, 2, 2
+    extern complex_dunder_rtruediv
+    ADD_FN_N mn___rtruediv__, complex_dunder_rtruediv, 2, 2
+    extern complex_dunder_rpow
+    ADD_FN_N mn___rpow__, complex_dunder_rpow, 2, 3
+    extern complex_dunder_neg
+    ADD_FN_N mn___neg__, complex_dunder_neg, 1, 1
+    extern complex_dunder_pos
+    ADD_FN_N mn___pos__, complex_dunder_pos, 1, 1
+    extern complex_dunder_abs
+    ADD_FN_N mn___abs__, complex_dunder_abs, 1, 1
+
     lea rax, [rel complex_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -2156,6 +2222,13 @@ DEF_FUNC methods_init
     ADD_FN_N mn___repr__, bytes_dunder_repr, 1, 1
 
     ADD_FN_N mn_hex, bytes_method_hex, 1, 3
+
+    ; decode lived in bytes_getattr, which answered the UNBOUND builtin: `m =
+    ; b.decode` gave a function with no self attached, and `m()` read
+    ; whatever args[0] happened to be as the bytes object.  Registered like
+    ; every other method, it binds.
+    extern _bytes_decode_impl
+    ADD_FN_N mn_decode, _bytes_decode_impl, 1, 3
 
     ; And its inverse, which binascii.unhexlify needs -- and binascii is what
     ; base64, quopri, uu and plistlib come in behind.
@@ -2411,6 +2484,7 @@ DEF_FUNC methods_init
     mov rbx, rax
     ADD_FN_N mn_tobytes, memoryview_method_tobytes, 1, 2
     ADD_FN_N mn_tolist, memoryview_method_tolist, 1, 1
+    ADD_FN_N mn_toreadonly, memoryview_method_toreadonly, 1, 1
     ADD_FN_N mn_cast, memoryview_method_cast, 1, 3
     ADD_FN_N mn_release, memoryview_method_release, 1, 1
     ADD_FN_N mn___enter__, memoryview_method_enter, 1, 1
@@ -2541,6 +2615,9 @@ mn_fromhex:     db "fromhex", 0
 mn_decode:            db "decode", 0
 mn_tobytes:          db "tobytes", 0
 mn_tolist:           db "tolist", 0
+mn___aiter__:        db "__aiter__", 0
+mn___anext__:        db "__anext__", 0
+mn_toreadonly:       db "toreadonly", 0
 mn_cast:             db "cast", 0
 mn_release:          db "release", 0
 mn___enter__:        db "__enter__", 0

@@ -25,8 +25,10 @@ extern raise_exception
 extern sys_write
 extern fileobj_write_fd
 extern range_new
+extern range_new_v
 extern int_to_i64
 extern obj_as_index
+extern obj_as_index_clamped
 extern init_iter_types
 extern obj_repr
 extern ap_memcpy
@@ -73,7 +75,6 @@ extern builtin_setattr
 
 ; Iterator builtins (in itertools.asm)
 extern builtin_sorted
-extern builtin_chain
 extern builtin_globals
 extern builtin_locals
 extern builtin_dir
@@ -1428,11 +1429,64 @@ DEF_FUNC builtin_len, LEN_FRAME
     ret
 
 .len_error:
-    RAISE exc_TypeError_type, "len() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "len() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 
 .len_type_error:
-    RAISE exc_TypeError_type, "object has no len()"
+    mov rsi, rbx                ; args[0], live throughout
+    CSTRING rdi, `object of type '\x01' has no len()`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC builtin_len
+
+;; ============================================================================
+;; range_arg_value(rdi = an argument Value) -> rax = an int Value, owned
+;;
+;; What a range bound is: an int, or anything with __index__, kept AS an
+;; object.  The bounds used to go through obj_as_index_clamped, which is an
+;; int64 and saturates -- so `range(1 << 1000)` was range(0, 2**63 - 1),
+;; where CPython's is an ordinary range over an ordinary int.  Clamping was
+;; not a choice either: _collections_abc builds one at import to name the
+;; type its iterator has, so refusing it takes the standard library with it.
+;;
+;; A plain int is handed back as it stands, with a reference taken.  Anything
+;; else goes through __index__, whose result is already owned.
+;; ============================================================================
+RAV_ARG   equ 8
+RAV_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL range_arg_value, RAV_FRAME
+    mov [rbp - RAV_ARG], rdi
+    V_IS_INT rdi, rax
+    jae .rav_keep
+    V_TEST_PTR rdi, rax
+    ja .rav_index               ; a float: __index__ will refuse it by name
+    test rdi, rdi
+    jz .rav_index
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    jne .rav_index
+.rav_keep:
+    mov rdi, [rbp - RAV_ARG]
+    INCREF_V rdi, rax
+    mov rax, rdi
+    leave
+    ret
+.rav_index:
+    ; obj_as_index refuses everything that is not an index, by name, and
+    ; unwraps an int subclass; its int64 is discarded and the OBJECT taken.
+    ; A bound wider than an int64 has no int64 to check, so the refusal has
+    ; to come from the type rather than from the width -- which is what
+    ; nb_index answers.
+    mov rdi, [rbp - RAV_ARG]
+    V_UNPACK rdi, rdx
+    extern obj_as_index_object
+    call obj_as_index_object
+    leave
+    ret
+END_FUNC range_arg_value
 
 ;; ============================================================================
 ;; builtin_range(PyObject **args, int64_t nargs) -> rax = Value
@@ -1458,57 +1512,50 @@ DEF_FUNC builtin_range, 8            ; 3 pushes, so rsp is 16-aligned
 .range_1:
     ; range(stop): start=0, stop=args[0], step=1
     mov rdi, [rbx]             ; args[0]
-    V_UNPACK rdi, rdx
-    call obj_as_index      ; raises for a non-integer, rather than
-                           ; decoding its payload as one
-    mov rsi, rax               ; stop
-    xor edi, edi               ; start = 0
-    mov edx, 1                 ; step = 1
-    call range_new
+    call range_arg_value       ; an int Value, owned; raises otherwise
+    mov rsi, rax
+    xor edi, edi
+    V_PACK_I64 rdi, rdx        ; start = 0
+    mov edx, 1
+    V_PACK_I64 rdx, rcx        ; step = 1
+    call range_new_v
     jmp .range_done
 
 .range_2:
     ; range(start, stop): step=1
     mov rdi, [rbx]             ; args[0]
-    V_UNPACK rdi, rdx
-    call obj_as_index      ; raises for a non-integer, rather than
-                           ; decoding its payload as one
+    call range_arg_value
     mov r13, rax               ; start
-    mov rdi, [rbx + 8]
-    V_UNPACK rdi, rdx       ; args[1]
-    call obj_as_index      ; raises for a non-integer, rather than
-                           ; decoding its payload as one
+    mov rdi, [rbx + 8]         ; args[1]
+    call range_arg_value
     mov rsi, rax               ; stop
     mov rdi, r13               ; start
-    mov edx, 1                 ; step = 1
-    call range_new
+    mov edx, 1
+    V_PACK_I64 rdx, rcx        ; step = 1
+    call range_new_v
     jmp .range_done
 
 .range_3:
     ; range(start, stop, step)
     mov rdi, [rbx]             ; args[0]
-    V_UNPACK rdi, rdx
-    call obj_as_index      ; raises for a non-integer, rather than
-                           ; decoding its payload as one
+    call range_arg_value
     push rax                   ; start
-    mov rdi, [rbx + 8]
-    V_UNPACK rdi, rdx       ; args[1]
-    call obj_as_index      ; raises for a non-integer, rather than
-                           ; decoding its payload as one
+    mov rdi, [rbx + 8]         ; args[1]
+    call range_arg_value
     push rax                   ; stop
-    mov rdi, [rbx + 16]
-    V_UNPACK rdi, rdx       ; args[2]
-    call obj_as_index      ; raises for a non-integer, rather than
-                           ; decoding its payload as one
+    mov rdi, [rbx + 16]        ; args[2]
+    call range_arg_value
     mov rdx, rax               ; step
     ; A zero step makes range_obj_sq_length divide by zero and makes
     ; range_iter_next advance by nothing, so len(range(0,5,0)) was SIGFPE
     ; and `for i in range(0,5,0)` hung.
-    test rdx, rdx
-    jz .range_zero_step
+    xor ecx, ecx
+    V_PACK_I64 rcx, r8
+    cmp rdx, rcx
+    je .range_zero_step
     pop rsi                    ; stop
     pop rdi                    ; start
-    call range_new
+    call range_new_v
     jmp .range_done
 
 .range_zero_step:
@@ -1654,6 +1701,22 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     lea r8, [rel tuple_type]
     cmp rax, r8
     je .isinstance_tuple
+    ; A parameterized generic has its own refusal in CPython, and saying only
+    ; that it is not a type buries which of the two mistakes it was.
+    extern generic_alias_type
+    lea r8, [rel generic_alias_type]
+    cmp rax, r8
+    je .isinstance_generic
+    ; A union is its members, and isinstance over one is isinstance over
+    ; them: CPython treats `int | str` exactly as it treats `(int, str)`.
+    ; The message here has always said "or a union"; nothing accepted one.
+    extern union_type
+    lea r8, [rel union_type]
+    cmp rax, r8
+    jne .isinstance_not_union
+    mov rcx, [rcx + PyGenericAliasObject.ga_args]
+    jmp .isinstance_tuple
+.isinstance_not_union:
     ; Any class, including one built by a user metaclass.
     push rcx
     push rdx
@@ -1719,40 +1782,31 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     push r8
     push rsi
     push rsi                   ; keep the stack 16-byte aligned
-    mov rdi, [rsi + r8*8]      ; the class from the tuple
-    mov rsi, [rbp - ISI_OBJ]   ; the object
-    CSTRING rdx, "__instancecheck__"
-    call type_custom_check
-    cmp eax, -1
-    jne .isinstance_tuple_verdict
-    mov rsi, [rsp]             ; the saved payload array
-    mov r8, [rsp + 16]
-    mov rdi, r12               ; obj's type
-    mov rsi, [rsi + r8*8]      ; type from tuple
-    push rsi
-    push rsi
-    call type_is_subtype
+    ; Ask again with the element as the second argument, rather than
+    ; testing it here.  CPython recurses over a tuple's elements, so a
+    ; nested tuple, a union, a parameterized generic and a non-class all
+    ; get the answer -- or the refusal -- they get at the top level.  The
+    ; flat loop that used to be here read a non-class element's Value as a
+    ; type pointer: `isinstance(1, (1,))` was a segfault.
+    mov rdi, [rsi + r8*8]      ; the element, a Value
+    sub rsp, 16
+    mov rax, [rbp - ISI_OBJ]
+    mov [rsp], rax
+    mov [rsp + 8], rdi
+    mov rdi, rsp
+    mov esi, 2
+    call builtin_isinstance
+    add rsp, 16
+    V_UNPACK rax, rdx
+    lea rcx, [rel bool_true]
+    cmp rax, rcx
     pop rsi
     pop rsi
-    test eax, eax
-    jnz .isinstance_tuple_verdict
-    mov rdi, [rbp - ISI_DECL]  ; ...and then what the object says it is
-    test rdi, rdi
-    jz .isinstance_tuple_verdict
-    call type_is_subtype
-.isinstance_tuple_verdict:
-    pop rsi
-    pop rsi
-    test eax, eax
-    jnz .isinstance_tuple_match
     pop r8
     pop rcx
+    je .isinstance_true
     inc r8
     jmp .isinstance_tuple_loop
-
-.isinstance_tuple_match:
-    add rsp, 16                ; pop saved r8, rcx
-    jmp .isinstance_true
 
 .isinstance_false:
     call .isi_release_declared
@@ -1785,11 +1839,18 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
 .isi_nothing:
     ret
 
+.isinstance_generic:
+    RAISE exc_TypeError_type, \
+          "isinstance() argument 2 cannot be a parameterized generic"
+
 .isinstance_type_error:
     RAISE exc_TypeError_type, "isinstance() arg 2 must be a type, a tuple of types, or a union"
 
 .isinstance_error:
-    RAISE exc_TypeError_type, "isinstance() takes 2 arguments"
+    CSTRING rdi, "isinstance expected 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_isinstance
 
 ;; ============================================================================
@@ -1798,7 +1859,9 @@ END_FUNC builtin_isinstance
 ;; Walks the full tp_base chain for inheritance.
 ;; Supports tuple second arg: issubclass(cls, (type1, type2, ...))
 ;; ============================================================================
-DEF_FUNC builtin_issubclass, 8            ; 3 pushes, so rsp is 16-aligned
+ISC_CLS   equ 8         ; args[0] as a Value, for the recursion over a tuple
+ISC_FRAME equ 24            ; + 3 pushes = 48, 16-aligned
+DEF_FUNC builtin_issubclass, ISC_FRAME
     push rbx
     push r12
     push r13
@@ -1807,10 +1870,24 @@ DEF_FUNC builtin_issubclass, 8            ; 3 pushes, so rsp is 16-aligned
     jne .issubclass_error
 
     mov rdx, [rdi]             ; rdx = args[0] = cls
+    mov [rbp - ISC_CLS], rdx   ; the Value, which the payload below is not
     V_UNPACK rdx, r8
     mov rcx, [rdi + 8]         ; rcx = args[1] = parent
     V_UNPACK rcx, r9
 
+    ; The SECOND argument decides first.  CPython's PyObject_IsSubclass
+    ; takes the tuple branch before it looks at the first argument at all,
+    ; so `issubclass((), ())` is False there -- the empty tuple runs out of
+    ; members before anything is checked -- and was an error here.  Each
+    ; member's recursion validates the first argument in its own right.
+    cmp r9d, TAG_PTR
+    jne .issubclass_check_arg1
+    mov rax, [rcx + PyObject.ob_type]
+    lea r10, [rel tuple_type]
+    cmp rax, r10
+    je .issubclass_tuple
+
+.issubclass_check_arg1:
     ; Validate first arg is a type.  A user metaclass makes its instances
     ; classes too, so this is a subtype test, not three pointer compares.
     cmp r8d, TAG_PTR
@@ -1826,13 +1903,22 @@ DEF_FUNC builtin_issubclass, 8            ; 3 pushes, so rsp is 16-aligned
     test eax, eax
     jz .issubclass_arg1_error
 
-    ; Check if second arg is a tuple
+    ; Only now is a non-class second argument an error of its own, and
+    ; type_check_is_class clobbered the type read above.
     cmp r9d, TAG_PTR
     jne .issubclass_arg2_error
     mov rax, [rcx + PyObject.ob_type]
-    lea r10, [rel tuple_type]
+    lea r10, [rel generic_alias_type]
     cmp rax, r10
-    je .issubclass_tuple
+    je .issubclass_generic
+    ; A union is its members, exactly as a tuple of them would be.  The
+    ; message here has always said "or a union"; nothing accepted one.
+    lea r10, [rel union_type]
+    cmp rax, r10
+    jne .issubclass_not_union
+    mov rcx, [rcx + PyGenericAliasObject.ga_args]
+    jmp .issubclass_tuple
+.issubclass_not_union:
     ; Validate second arg is a type
     push rcx
     push rdx
@@ -1880,28 +1966,25 @@ DEF_FUNC builtin_issubclass, 8            ; 3 pushes, so rsp is 16-aligned
     jge .issubclass_false
     push rsi
     push r8
-    mov rdi, [rsi + r8*8]      ; the parent from the tuple
-    mov rsi, r12               ; cls
-    CSTRING rdx, "__subclasscheck__"
-    call type_custom_check
-    cmp eax, -1
-    jne .issubclass_tuple_verdict
-    mov rax, [rsp + 8]         ; the saved payload array
-    mov r8, [rsp]
-    mov rdi, r12               ; cls
-    mov rsi, [rax + r8*8]      ; type from tuple
-    call type_is_subtype
-.issubclass_tuple_verdict:
-    test eax, eax
-    jnz .issubclass_tuple_match
+    ; The same recursion as isinstance's, and for the same reason: an
+    ; element that is not a class was read as one.
+    mov rdi, [rsi + r8*8]      ; the element, a Value
+    sub rsp, 16
+    mov rax, [rbp - ISC_CLS]
+    mov [rsp], rax             ; cls, as the Value it arrived as
+    mov [rsp + 8], rdi
+    mov rdi, rsp
+    mov esi, 2
+    call builtin_issubclass
+    add rsp, 16
+    V_UNPACK rax, rdx
+    lea rcx, [rel bool_true]
+    cmp rax, rcx
     pop r8
     pop rsi
+    je .issubclass_true
     inc r8
     jmp .issubclass_tuple_loop
-
-.issubclass_tuple_match:
-    add rsp, 16               ; pop saved r8, rsi
-    jmp .issubclass_true
 
 .issubclass_false:
     lea rax, [rel bool_false]
@@ -1930,9 +2013,15 @@ DEF_FUNC builtin_issubclass, 8            ; 3 pushes, so rsp is 16-aligned
 
 .issubclass_arg2_error:
     RAISE exc_TypeError_type, "issubclass() arg 2 must be a class, a tuple of classes, or a union"
+.issubclass_generic:
+    RAISE exc_TypeError_type, \
+          "issubclass() argument 2 cannot be a parameterized generic"
 
 .issubclass_error:
-    RAISE exc_TypeError_type, "issubclass() takes 2 arguments"
+    CSTRING rdi, "issubclass expected 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_issubclass
 
 ;; ============================================================================
@@ -1952,7 +2041,10 @@ DEF_FUNC builtin_repr
     ret
 
 .repr_error:
-    RAISE exc_TypeError_type, "repr() takes 1 argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "repr() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_repr
 
 ;; ============================================================================
@@ -1988,7 +2080,10 @@ DEF_FUNC builtin_bool
     ret
 
 .bool_error:
-    RAISE exc_TypeError_type, "bool() takes at most 1 argument"
+    CSTRING rdi, "bool expected at most 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_bool
 
 ;; ============================================================================
@@ -2027,6 +2122,16 @@ DEF_FUNC builtin_float, BF_FRAME
     lea rcx, [rel str_type]
     cmp rax, rcx
     je .float_from_str
+    ; bytes and bytearray parse as numeric strings in CPython, and were
+    ; refused outright here: float(b"1.5") was a TypeError.
+    extern bytes_type
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .float_from_bytes
+    extern bytearray_type
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .float_from_bytearray
 
     ; A class defining __float__ now carries nb_float; float_to_f64 below
     ; knows nothing about it and returned 0.0 for such an object.
@@ -2078,6 +2183,22 @@ DEF_FUNC builtin_float, BF_FRAME
     mov edx, TAG_FLOAT
     leave
     ret
+
+.float_from_bytes:
+    mov [rbp - BF_OBJ], rdi
+    mov qword [rbp - BF_XLAT], 0
+    mov rax, [rdi + PyBytesObject.ob_size]
+    mov [rbp - BF_XLEN], rax
+    lea rdi, [rdi + PyBytesObject.data]
+    jmp .float_str_have_data
+
+.float_from_bytearray:
+    mov [rbp - BF_OBJ], rdi
+    mov qword [rbp - BF_XLAT], 0
+    mov rax, [rdi + PyByteArrayObject.ob_size]
+    mov [rbp - BF_XLEN], rax
+    mov rdi, [rdi + PyByteArrayObject.ob_bytes]
+    jmp .float_str_have_data
 
 .float_from_str:
     ; rdi = PyStrObject*. Parse string → double via strtod.
@@ -2176,7 +2297,10 @@ DEF_FUNC builtin_float, BF_FRAME
     ret
 
 .float_error:
-    RAISE exc_TypeError_type, "float() takes at most 1 argument"
+    CSTRING rdi, "float expected at most 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_float
 
 
@@ -2513,11 +2637,6 @@ DEF_FUNC builtins_init, 8            ; 1 push, so rsp is 16-aligned
     call dict_add_builtin_func
 
     mov rdi, rbx
-    lea rsi, [rel bi_name_chain]
-    lea rdx, [rel builtin_chain]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
     lea rsi, [rel bi_name_globals]
     lea rdx, [rel builtin_globals]
     call dict_add_builtin_func
@@ -2757,11 +2876,6 @@ DEF_FUNC builtins_init, 8            ; 1 push, so rsp is 16-aligned
     mov rdi, rbx
     lea rsi, [rel bi_name_ExceptionGroup]
     lea rdx, [rel exc_ExceptionGroup_type]
-    call add_exc_type_builtin
-
-    mov rdi, rbx
-    lea rsi, [rel bi_name_CancelledError]
-    lea rdx, [rel exc_CancelledError_type]
     call add_exc_type_builtin
 
     mov rdi, rbx
@@ -3233,7 +3347,6 @@ bi_name_filter:       db "filter", 0
 bi_name_reversed:     db "reversed", 0
 isi_class_attr:  db "__class__", 0
 bi_name_sorted:       db "sorted", 0
-bi_name_chain:        db "chain", 0
 bi_name_divmod:       db "divmod", 0
 bi_name_globals:      db "globals", 0
 bi_name_locals:       db "locals", 0
@@ -3285,7 +3398,6 @@ bi_name_DeprecationWarning: db "DeprecationWarning", 0
 bi_name_UserWarning:       db "UserWarning", 0
 bi_name_BaseExceptionGroup: db "BaseExceptionGroup", 0
 bi_name_ExceptionGroup:    db "ExceptionGroup", 0
-bi_name_CancelledError:    db "CancelledError", 0
 bi_name_StopAsyncIteration: db "StopAsyncIteration", 0
 bi_name_TimeoutError:      db "TimeoutError", 0
 bi_name_GeneratorExit:     db "GeneratorExit", 0

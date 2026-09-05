@@ -72,6 +72,18 @@ section .text
     call int_is_integer
     test eax, eax
     jz %%done                   ; a bytes-like: leave it alone
+    ; A width obj_as_index would refuse as an index is simply out of range
+    ; for a byte, and CPython says so: `b"abc".find(1 << 70)` is a
+    ; ValueError there and was an OverflowError about a C type here.
+    mov rdi, [rbp - %1]
+    V_UNPACK rdi, rdx
+    cmp edx, TAG_PTR
+    jne %%narrow
+    extern int_fits_i64
+    call int_fits_i64
+    test eax, eax
+    jz %%range
+%%narrow:
     mov rdi, [rbp - %1]
     V_UNPACK rdi, rdx
     call obj_as_index
@@ -99,26 +111,74 @@ section .text
 ;; ############################################################################
 
 ;; ============================================================================
-;; bytes_method_hex(args, nargs) -> str
-;; Converts bytes to hex string like b'\xab\xcd'.hex() -> 'abcd'
+;; bytes_method_hex(rdi = args, rsi = nargs) -> rax = Value
+;;
+;; b'\xab\xcd'.hex() -> 'abcd', and with a separator every group of
+;; bytes_per_sep bytes is joined by it: b"abcd".hex(":") is '61:62:63:64'
+;; and b"abcd".hex(":", 2) is '6162:6364'.  Both arguments were accepted and
+;; then IGNORED, which is a wrong answer rather than a missing feature.
 ;; ============================================================================
 extern bytes_type
 BH_SELF   equ 8
 BH_BUF    equ 16
 BH_HEXLEN equ 24
-BH_FRAME  equ 32            ; + 0 pushes = 32
+BH_SEP    equ 32            ; the separator character, or -1 for none
+BH_GROUP  equ 40            ; bytes per separator, always positive
+BH_FROMRIGHT equ 48         ; 1 when the grouping counts from the right
+BH_FRAME  equ 64            ; + 0 pushes = 64, 16-aligned
 
 DEF_FUNC bytes_method_hex, BH_FRAME
     mov rax, [rdi]              ; self = bytes obj ptr
     mov [rbp - BH_SELF], rax
+    mov qword [rbp - BH_SEP], -1
+    mov qword [rbp - BH_GROUP], 1
+    mov qword [rbp - BH_FROMRIGHT], 0
+
+    cmp rsi, 2
+    jl .bh_no_sep
+    push rdi
+    push rsi
+    mov rdi, [rdi + 8]
+    call bh_sep_char             ; raises for anything but a 1-char str
+    pop rsi
+    pop rdi
+    mov [rbp - BH_SEP], rax
+    cmp rsi, 3
+    jl .bh_no_sep
+    mov rdi, [rdi + 16]
+    V_UNPACK rdi, rdx
+    extern obj_as_index
+    call obj_as_index
+    ; A POSITIVE group counts from the right and a negative one from the
+    ; left, which is only the same when the length divides: b"abcde"
+    ; groups as 61-6263-6465 one way and 6162-6364-65 the other.  Zero
+    ; means no separator at all.
+    test rax, rax
+    jnz .bh_group_nonzero
+    mov qword [rbp - BH_SEP], -1
+    jmp .bh_no_sep
+.bh_group_nonzero:
+    jns .bh_group_right
+    neg rax
+    mov [rbp - BH_GROUP], rax
+    jmp .bh_no_sep
+.bh_group_right:
+    mov [rbp - BH_GROUP], rax
+    mov qword [rbp - BH_FROMRIGHT], 1
+.bh_no_sep:
 
     ; Get length
+    mov rax, [rbp - BH_SELF]
     mov rcx, [rax + PyBytesObject.ob_size]
     test rcx, rcx
     jz .bh_empty
 
-    ; Allocate temp buffer for hex chars: 2 chars per byte
+    ; Allocate temp buffer: 2 chars per byte, plus a separator between groups
     lea rdi, [rcx * 2]
+    cmp qword [rbp - BH_SEP], 0
+    jl .bh_sized
+    add rdi, rcx                ; at most one separator per byte
+.bh_sized:
     mov [rbp - BH_HEXLEN], rdi
     call ap_malloc
     mov [rbp - BH_BUF], rax
@@ -133,6 +193,32 @@ DEF_FUNC bytes_method_hex, BH_FRAME
 .bh_loop:
     cmp r8, rcx
     jge .bh_done
+    ; The separator goes before every group but the first.
+    cmp qword [rbp - BH_SEP], 0
+    jl .bh_no_group_sep
+    test r8, r8
+    jz .bh_no_group_sep
+    push rax
+    push rdx
+    push rcx
+    ; Counting from the right means measuring the distance to the END.
+    mov rax, r8
+    cmp qword [rbp - BH_FROMRIGHT], 0
+    je .bh_from_left
+    mov rax, rcx
+    sub rax, r8
+.bh_from_left:
+    xor edx, edx
+    div qword [rbp - BH_GROUP]
+    test rdx, rdx
+    pop rcx
+    pop rdx
+    pop rax
+    jnz .bh_no_group_sep
+    mov r9, [rbp - BH_SEP]
+    mov [rdi], r9b
+    inc rdi
+.bh_no_group_sep:
     movzx eax, byte [rsi + r8]
 
     ; High nibble
@@ -164,9 +250,11 @@ DEF_FUNC bytes_method_hex, BH_FRAME
     jmp .bh_loop
 
 .bh_done:
-    ; Create string from temp buffer
+    ; Create string from temp buffer -- the length is what was WRITTEN, which
+    ; with a separator is less than the buffer.
+    mov rsi, rdi
+    sub rsi, [rbp - BH_BUF]
     mov rdi, [rbp - BH_BUF]
-    mov rsi, [rbp - BH_HEXLEN]
     call str_new_heap
     push rax                    ; save result
 
@@ -189,9 +277,89 @@ DEF_FUNC bytes_method_hex, BH_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+
+.bh_group_zero:
+    extern exc_ValueError_type
+    RAISE exc_ValueError_type, "bytes_per_sep must be non-zero"
 END_FUNC bytes_method_hex
 
 ;; ============================================================================
+;; bh_sep_char(rdi = the separator argument, a Value) -> rax = the character
+;;
+;; CPython asks for its length first, so a non-string is "object of type 'X'
+;; has no len()" rather than a message about separators, and only a
+;; one-character string is accepted.
+;; ============================================================================
+BHS_ARG   equ 8             ; the argument, for the refusal below
+BHS_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL bh_sep_char, BHS_FRAME
+    mov [rbp - BHS_ARG], rdi
+    ; CPython's order: the LENGTH first, whatever the type, then the type.
+    ; So a one-element list is "sep must be str or bytes." and a two-element
+    ; one is "sep must be length 1.".
+    V_TEST_PTR rdi, rax
+    ja .bsc_no_len
+    test rdi, rdi
+    jz .bsc_no_len
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .bsc_str
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .bsc_bytes
+    ; Neither: it still has to HAVE a length of one before the type is the
+    ; complaint.  sq_length or mp_length is what len() itself reads.
+    mov rcx, [rax + PyTypeObject.tp_as_sequence]
+    test rcx, rcx
+    jz .bsc_try_mapping
+    mov rcx, [rcx + PySequenceMethods.sq_length]
+    test rcx, rcx
+    jnz .bsc_measure
+.bsc_try_mapping:
+    mov rcx, [rax + PyTypeObject.tp_as_mapping]
+    test rcx, rcx
+    jz .bsc_no_len
+    mov rcx, [rcx + PyMappingMethods.mp_length]
+    test rcx, rcx
+    jz .bsc_no_len
+.bsc_measure:
+    call rcx
+    cmp rax, 1
+    jne .bsc_bad_len
+    RAISE exc_TypeError_type, "sep must be str or bytes."
+
+.bsc_bytes:
+    mov rcx, [rdi + PyBytesObject.ob_size]
+    cmp rcx, 1
+    jne .bsc_bad_len
+    movzx eax, byte [rdi + PyBytesObject.data]
+    leave
+    ret
+.bsc_str:
+    mov rcx, [rdi + PyStrObject.ob_length]
+    cmp rcx, 1
+    jne .bsc_bad_len
+    movzx eax, byte [rdi + PyStrObject.data]
+    cmp al, 0x7f
+    ja .bsc_not_ascii           ; one code point, but not one byte
+    leave
+    ret
+.bsc_not_ascii:
+    RAISE exc_ValueError_type, "sep must be ASCII."
+.bsc_bad_len:
+    RAISE exc_ValueError_type, "sep must be length 1."
+.bsc_no_len:
+    mov rsi, [rbp - BHS_ARG]
+    CSTRING rdi, `object of type '\x01' has no len()`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+END_FUNC bh_sep_char
+
+;; ============================================================================
+;; bytes_fromhex_impl(rdi = args, rsi = nargs) -> rax = Value
+;;   args[0] is the class it was reached through, args[1] the string
+;;
 ;; bytes.fromhex(s) / bytearray.fromhex(s) -- a classmethod on both.
 ;;
 ;; hex() was here and its inverse was not, which is the half that
@@ -394,7 +562,7 @@ DEF_FUNC bytes_fromhex_impl, BFH_FRAME
     ret
 .bfh_type:
     mov rsi, rdi
-    CSTRING rdi, `fromhex() argument must be str, not \x01`
+    CSTRING rdi, `fromhex() argument must be str, not \x02`
     extern raise_type_error_with_name
     call raise_type_error_with_name
 .bfh_args:
@@ -429,7 +597,8 @@ DEF_FUNC_BARE bfh_digit
     ret
 END_FUNC bfh_digit
 
-;; bfh_raise_position(rsi = the character index) -- does not return
+;; bfh_raise_position(rsi = the character index)
+;;   -> does not return: the position is raised as a ValueError
 BRP_POS   equ 8
 BRP_BUF   equ 176
 BRP_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
@@ -711,6 +880,11 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     ud2
 END_FUNC bytes_method_affix
 
+;; ============================================================================
+;; baf_append_quoted_typename(rdi = dest, rsi = a Value)
+;;   -> rax = the NUL it wrote
+;; The type name in apostrophes, which is how CPython quotes it.
+;; ============================================================================
 DEF_FUNC_LOCAL baf_append_quoted_typename, 8      ; 1 push, so rsp is 16-aligned   ; (rdi = dest, rsi = a Value)
     push rbx
     mov rbx, rdi
@@ -725,17 +899,28 @@ DEF_FUNC_LOCAL baf_append_quoted_typename, 8      ; 1 push, so rsp is 16-aligned
     ret
 END_FUNC baf_append_quoted_typename
 
-DEF_FUNC_LOCAL baf_append_typename  ; (rdi = dest, rsi = a Value) -> rax
-    V_TEST_PTR rsi, rax
-    ja .bat2_int
-    test rsi, rsi
-    jz .bat2_int
-    mov rsi, [rsi + PyObject.ob_type]
-    mov rsi, [rsi + PyTypeObject.tp_name]
+;; ============================================================================
+;; baf_append_typename(rdi = dest, rsi = a Value) -> rax = the NUL it wrote
+;; The type name alone, taken from the Value rather than from a pointer:
+;; an immediate has a type too.
+;; ============================================================================
+BAT_DEST  equ 8             ; the buffer, across the type lookup
+BAT_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL baf_append_typename, BAT_FRAME
+    ; value_type, not a pointer test: an immediate has a type too, and
+    ; assuming every non-pointer was an int named a float "int".
+    mov [rbp - BAT_DEST], rdi
+    mov rdi, rsi
+    extern value_type
+    call value_type
+    test rax, rax
+    jz .bat2_unknown
+    mov rsi, [rax + PyTypeObject.tp_name]
     jmp .bat2_have
-.bat2_int:
+.bat2_unknown:
     lea rsi, [rel bj_name_int]
 .bat2_have:
+    mov rdi, [rbp - BAT_DEST]
     call bj_append_cstr
     leave
     ret
@@ -810,7 +995,7 @@ DEF_FUNC bytes_method_count, BC_FRAME
     add rsp, 8
     pop r8
     test ecx, ecx
-    jz .bc_type
+    jz .bc_arg_type
     mov [rbp - BC_SUB], rax
     mov r9, r10                 ; sub_len
 
@@ -935,6 +1120,14 @@ DEF_FUNC bytes_method_count, BC_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.bc_arg_type:
+    ; count() takes an integer as well, so CPython's refusal says so -- and
+    ; it names what it got, which this said nothing about.
+    mov rsi, [rbp - BC_SUB]
+    CSTRING rdi, \
+        `argument should be integer or bytes-like object, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .bc_type:
     RAISE exc_TypeError_type, "a bytes-like object is required"
 .bc_error:
@@ -1000,7 +1193,7 @@ DEF_FUNC bytes_find_impl, BF_FRAME
     mov rdi, [rbp - BF_SUB]
     call bytes_like_ptr_len
     test ecx, ecx
-    jz .bf_type
+    jz .bf_arg_type
     mov [rbp - BF_SUB], rax
     mov [rbp - BF_NLEN], r10
 
@@ -1151,6 +1344,12 @@ DEF_FUNC bytes_find_impl, BF_FRAME
     V_PACK rax, rdx
     ret
 
+.bf_arg_type:
+    mov rsi, [rbp - BF_SUB]
+    CSTRING rdi, \
+        `argument should be integer or bytes-like object, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .bf_type:
     RAISE exc_TypeError_type, "a bytes-like object is required"
 .bf_error:
@@ -1158,8 +1357,10 @@ DEF_FUNC bytes_find_impl, BF_FRAME
 END_FUNC bytes_find_impl
 
 ;; ============================================================================
+;; bytes_method_find(rdi = args, rsi = nargs) -> rax = Value
+;;
 ;; find / rfind / index / rindex, which differ only in direction and in what a
-;; miss answers.
+;; miss answers.  This one scans from the left and answers -1 for a miss.
 ;; ============================================================================
 DEF_FUNC_BARE bytes_method_find
     xor edx, edx
@@ -1167,18 +1368,30 @@ DEF_FUNC_BARE bytes_method_find
     jmp bytes_find_impl
 END_FUNC bytes_method_find
 
+;; ============================================================================
+;; bytes_method_rfind(rdi = args, rsi = nargs) -> rax = Value
+;; find from the right; -1 for a miss.
+;; ============================================================================
 DEF_FUNC_BARE bytes_method_rfind
     mov edx, 1
     xor ecx, ecx
     jmp bytes_find_impl
 END_FUNC bytes_method_rfind
 
+;; ============================================================================
+;; bytes_method_index(rdi = args, rsi = nargs) -> rax = Value
+;; find from the left; a miss is a ValueError rather than -1.
+;; ============================================================================
 DEF_FUNC_BARE bytes_method_index
     xor edx, edx
     mov ecx, 1
     jmp bytes_find_impl
 END_FUNC bytes_method_index
 
+;; ============================================================================
+;; bytes_method_rindex(rdi = args, rsi = nargs) -> rax = Value
+;; find from the right; a miss is a ValueError rather than -1.
+;; ============================================================================
 DEF_FUNC_BARE bytes_method_rindex
     mov edx, 1
     mov ecx, 1
@@ -1188,6 +1401,7 @@ END_FUNC bytes_method_rindex
 ;; ============================================================================
 ;; bytes_strip_impl(rdi = args, rsi = nargs, edx = mode)
 ;;   mode 0 = both ends, 1 = left only, 2 = right only
+;;   -> rax = Value
 ;;
 ;; strip([chars]): with no argument, ASCII whitespace; with one, every byte in
 ;; it, as a set.  bytes had none of the three.
@@ -1225,10 +1439,11 @@ DEF_FUNC bytes_strip_impl, BST_FRAME
     LOAD_NONE rcx
     cmp rax, rcx
     je .bst_have_chars
+    mov [rbp - BST_CHARS], rax          ; the object, for the refusal below
     mov rdi, rax
     call bytes_like_ptr_len
     test ecx, ecx
-    jz .bst_type
+    jz .bst_arg_type
     mov [rbp - BST_CHARS], rax
     mov [rbp - BST_CLEN], r10
 
@@ -1274,6 +1489,11 @@ DEF_FUNC bytes_strip_impl, BST_FRAME
     V_PACK rax, rdx
     ret
 
+.bst_arg_type:
+    mov rsi, [rbp - BST_CHARS]
+    CSTRING rdi, `a bytes-like object is required, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .bst_type:
     RAISE exc_TypeError_type, "a bytes-like object is required"
 .bst_error:
@@ -1323,16 +1543,28 @@ DEF_FUNC_BARE bst_in_set
     ret
 END_FUNC bst_in_set
 
+;; ============================================================================
+;; bytes_method_strip(rdi = args, rsi = nargs) -> rax = Value
+;; strip both ends.
+;; ============================================================================
 DEF_FUNC_BARE bytes_method_strip
     xor edx, edx
     jmp bytes_strip_impl
 END_FUNC bytes_method_strip
 
+;; ============================================================================
+;; bytes_method_lstrip(rdi = args, rsi = nargs) -> rax = Value
+;; strip the left end only.
+;; ============================================================================
 DEF_FUNC_BARE bytes_method_lstrip
     mov edx, 1
     jmp bytes_strip_impl
 END_FUNC bytes_method_lstrip
 
+;; ============================================================================
+;; bytes_method_rstrip(rdi = args, rsi = nargs) -> rax = Value
+;; strip the right end only.
+;; ============================================================================
 DEF_FUNC_BARE bytes_method_rstrip
     mov edx, 2
     jmp bytes_strip_impl
@@ -1369,11 +1601,13 @@ DEF_FUNC bytes_partition_impl, BPT_FRAME
     mov [rbp - BPT_SELF], rax
     mov [rbp - BPT_SLEN], r10
     push rdi
-    mov rdi, [rdi + 8]
+    mov rax, [rdi + 8]
+    mov [rbp - BPT_SEP], rax            ; the object, for the refusal below
+    mov rdi, rax
     call bytes_like_ptr_len
     pop rdi
     test ecx, ecx
-    jz .bpt_type
+    jz .bpt_arg_type
     mov [rbp - BPT_SEP], rax
     mov [rbp - BPT_NLEN], r10
     test r10, r10
@@ -1498,17 +1732,30 @@ DEF_FUNC bytes_partition_impl, BPT_FRAME
 
 .bpt_empty_sep:
     RAISE exc_ValueError_type, "empty separator"
+.bpt_arg_type:
+    mov rsi, [rbp - BPT_SEP]
+    CSTRING rdi, `a bytes-like object is required, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .bpt_type:
     RAISE exc_TypeError_type, "a bytes-like object is required"
 .bpt_error:
     RAISE exc_TypeError_type, "partition() takes exactly one argument"
 END_FUNC bytes_partition_impl
 
+;; ============================================================================
+;; bytes_method_partition(rdi = args, rsi = nargs) -> rax = Value
+;; split at the FIRST occurrence, into a three-element tuple.
+;; ============================================================================
 DEF_FUNC_BARE bytes_method_partition
     xor edx, edx
     jmp bytes_partition_impl
 END_FUNC bytes_method_partition
 
+;; ============================================================================
+;; bytes_method_rpartition(rdi = args, rsi = nargs) -> rax = Value
+;; split at the LAST occurrence, into a three-element tuple.
+;; ============================================================================
 DEF_FUNC_BARE bytes_method_rpartition
     mov edx, 1
     jmp bytes_partition_impl
@@ -1561,13 +1808,13 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     mov rdi, [rbp - BR_OLD]
     call bytes_like_ptr_len
     test ecx, ecx
-    jz .br_type
+    jz .br_old_type
     mov [rbp - BR_OLD], rax
     mov r15, r10                            ; old_len
     mov rdi, [rbp - BR_NEW]
     call bytes_like_ptr_len
     test ecx, ecx
-    jz .br_type
+    jz .br_new_type
     mov [rbp - BR_NEW], rax
     mov [rbp - BR_NEWLEN], r10
 
@@ -1705,6 +1952,15 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.br_old_type:
+    mov rsi, [rbp - BR_OLD]
+    jmp .br_arg_type
+.br_new_type:
+    mov rsi, [rbp - BR_NEW]
+.br_arg_type:
+    CSTRING rdi, `a bytes-like object is required, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .br_type:
     RAISE exc_TypeError_type, "a bytes-like object is required"
 .br_error:
@@ -1722,6 +1978,7 @@ END_FUNC bytes_method_replace
 BSP_SEPLEN equ 8
 BSP_MAX    equ 16           ; splits left, or negative for "no limit"
 BSP_RIGHT  equ 24           ; 1 for rsplit
+BSP_SEP    equ 32           ; the separator object, for the refusal
 BSP_FRAME  equ 40           ; + 5 pushes = 80, 16-aligned
 
 DEF_FUNC bytes_split_impl, BSP_FRAME
@@ -1777,11 +2034,12 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
     push r12
     sub rsp, 8
     mov rdi, [rdi + 8]
+    mov [rbp - BSP_SEP], rdi
     call bytes_like_ptr_len
     add rsp, 8
     pop r12
     test ecx, ecx
-    jz .bsp_type
+    jz .bsp_arg_type
     mov r15, rax                ; separator data
     mov [rbp - BSP_SEPLEN], r10 ; the slot, not rbp-8: that is the saved rbx
     jmp .bsp_by_sep
@@ -2108,18 +2366,28 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
 .bsp_empty_sep:
     RAISE exc_ValueError_type, "empty separator"
 
+.bsp_arg_type:
+    mov rsi, [rbp - BSP_SEP]
+    CSTRING rdi, `a bytes-like object is required, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .bsp_type:
     RAISE exc_TypeError_type, "a bytes-like object is required"
 END_FUNC bytes_split_impl
 
 ;; ============================================================================
-;; bytes_method_split(args, nargs) / bytes_method_rsplit(args, nargs)
+;; bytes_method_split(rdi = args, rsi = nargs) -> rax = Value
+;; The left-to-right half of the pair; bytes_method_rsplit is the other.
 ;; ============================================================================
 DEF_FUNC_BARE bytes_method_split
     xor edx, edx                ; scan from the left
     jmp bytes_split_impl
 END_FUNC bytes_method_split
 
+;; ============================================================================
+;; bytes_method_rsplit(rdi = args, rsi = nargs) -> rax = Value
+;; split scanning from the right, which is what a maxsplit makes visible.
+;; ============================================================================
 DEF_FUNC_BARE bytes_method_rsplit
     mov edx, 1                  ; scan from the right
     jmp bytes_split_impl
@@ -2147,6 +2415,11 @@ BJ_FRAME  equ 72            ; + 5 pushes = 112, 16-aligned
 %%no_tmp:
 %endmacro
 
+;; ============================================================================
+;; bytes_method_join(rdi = args, rsi = nargs) -> rax = Value
+;; b.join(iterable): every item has to be bytes-like, and the refusal
+;; names the one that was not and where it sat.
+;; ============================================================================
 DEF_FUNC bytes_method_join, BJ_FRAME
     push rbx
     push r12
@@ -2177,6 +2450,24 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     cmp rdx, r8
     je .bj_seq_ready
 .bj_materialise:
+    ; CPython's own wording for a non-iterable here is "can only join an
+    ; iterable", not the generic one tuple() would raise, so the question is
+    ; asked before the tuple is built.
+    push rdi
+    mov rdi, [rdi + 8]
+    V_TEST_PTR rdi, rax
+    ja .bj_not_iterable_pop
+    test rdi, rdi
+    jz .bj_not_iterable_pop
+    mov esi, TAG_PTR
+    extern get_iterator_opt
+    call get_iterator_opt
+    test rax, rax
+    jz .bj_not_iterable_pop
+    V_UNPACK rax, rdx
+    mov rdi, rax
+    call obj_decref
+    pop rdi
     lea rsi, [rdi + 8]          ; &args[1]; rdi is still the args pointer
     lea rdi, [rel tuple_type]
     mov edx, 1
@@ -2358,14 +2649,22 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     call raise_exception
     ud2
 
+.bj_not_iterable_pop:
+    add rsp, 8
+    RAISE exc_TypeError_type, "can only join an iterable"
+
 .bj_item_error:
     BJ_RELEASE_TMP
     RAISE exc_TypeError_type, "sequence item: expected a bytes-like object"
 END_FUNC bytes_method_join
 
+;; ============================================================================
+;; bj_append_cstr(rdi = dest, rsi = src) -> rax = the NUL it wrote
+;;
 ;; The three pieces of join's message, kept apart from the scan loop so that
 ;; the loop stays a loop.
-DEF_FUNC_LOCAL bj_append_cstr   ; (rdi = dest, rsi = src) -> rax = the NUL
+;; ============================================================================
+DEF_FUNC_LOCAL bj_append_cstr
     xor ecx, ecx
 .bac_loop:
     cmp rcx, 100
@@ -2383,6 +2682,10 @@ DEF_FUNC_LOCAL bj_append_cstr   ; (rdi = dest, rsi = src) -> rax = the NUL
     ret
 END_FUNC bj_append_cstr
 
+;; ============================================================================
+;; bj_append_i64(rdi = dest, rsi = the number) -> rax = the NUL it wrote
+;; The index in join's refusal, appended in decimal.
+;; ============================================================================
 DEF_FUNC_LOCAL bj_append_i64    ; (rdi = prefix cstr, rsi = n) -> rax = the NUL
     push rbx
     push r12
@@ -2412,6 +2715,10 @@ DEF_FUNC_LOCAL bj_append_i64    ; (rdi = prefix cstr, rsi = n) -> rax = the NUL
     ret
 END_FUNC bj_append_i64
 
+;; ============================================================================
+;; bj_append_typename(rdi = dest, rsi = a Value) -> rax = the NUL it wrote
+;; ", found" and the offending item's type, for join's refusal.
+;; ============================================================================
 DEF_FUNC_LOCAL bj_append_typename   ; (rdi = dest, rsi = a type name) -> rax
     call bj_append_cstr
     mov rdi, rax
@@ -2444,582 +2751,3 @@ empty_str_cstr: db 0
 
 section .text
 
-;; ============================================================================
-;; bytearray's share of bytes' read-only methods.
-;;
-;; bytes keeps its data inline and bytearray keeps it out of line, so the
-;; bytes bodies cannot read a bytearray directly.  Rather than thread a
-;; (pointer, length) pair through sixty-odd read sites in two files -- churn
-;; on the hot, well-tested type for the benefit of the scratch one -- each
-;; wrapper builds a temporary bytes, runs the bytes body on it and releases
-;; it.  A bytearray is a scratch buffer by definition; the copy is cheap
-;; against the risk of that refactor, and it is the sort of thing to revisit
-;; only if bytearray ever becomes hot.
-;;
-;; Some of these answer with a bytes-like where CPython answers with a
-;; bytearray, so the result is converted back where it should be.
-;; ============================================================================
-BSC_ARGS  equ 8
-BSC_NARGS equ 16
-BSC_TMP   equ 24            ; the temporary bytes standing in for self
-BSC_COPY  equ 32            ; the argument array with args[0] replaced
-BSC_RES   equ 40
-BSC_FRAME equ 64            ; + 1 push = 72... see the DEF_FUNC below
-
-;; bytearray_shared_call(rdi = args, rsi = nargs, rdx = the bytes body,
-;;                       ecx = 0 raw / 1 wrap a bytes-like / 2 wrap a list)
-;;   -> the body's Value
-DEF_FUNC bytearray_shared_call, 72
-    push rbx
-    mov [rbp - BSC_ARGS], rdi
-    mov [rbp - BSC_NARGS], rsi
-    mov [rbp - BSC_RES], rdx
-    mov rbx, rcx                ; the wrap mode
-
-    test rsi, rsi
-    jz .bsc_bad
-    mov rdi, [rdi]              ; self
-    mov r8, [rdi + PyByteArrayObject.ob_size]
-    push r8
-    call bytearray_data
-    pop r8
-    mov rdi, rax
-    mov rsi, r8
-    call bytes_from_data
-    test rax, rax
-    jz .bsc_oom
-    mov [rbp - BSC_TMP], rax
-
-    ; Copy the arguments, with args[0] swapped for the temporary.  Eight
-    ; slots is more than any of these methods takes.
-    mov rcx, [rbp - BSC_NARGS]
-    cmp rcx, 8
-    ja .bsc_bad_free
-    sub rsp, 64
-    mov [rbp - BSC_COPY], rsp
-    mov rax, [rbp - BSC_TMP]
-    mov [rsp], rax
-    mov rsi, [rbp - BSC_ARGS]
-    mov edx, 1
-.bsc_copy_loop:
-    cmp rdx, rcx
-    jge .bsc_copied
-    mov rax, [rsi + rdx*8]
-    mov [rsp + rdx*8], rax
-    inc rdx
-    jmp .bsc_copy_loop
-.bsc_copied:
-    mov rdi, rsp
-    mov rsi, [rbp - BSC_NARGS]
-    call qword [rbp - BSC_RES]
-    add rsp, 64
-    mov [rbp - BSC_RES], rax
-
-    mov rdi, [rbp - BSC_TMP]
-    call obj_decref
-
-    mov rax, [rbp - BSC_RES]
-    test rax, rax
-    jz .bsc_out                 ; it raised, or answered NULL
-    cmp rbx, 1
-    je .bsc_wrap_one
-    cmp rbx, 2
-    je .bsc_wrap_list
-.bsc_out:
-    pop rbx
-    leave
-    ret
-
-.bsc_wrap_one:
-    ; A bytes result becomes a bytearray, as CPython's does -- and the bytes
-    ; the body made is released, which it was not.
-    mov [rbp - BSC_RES], rax
-    mov rdi, rax
-    call bytearray_from_bytes
-    mov [rbp - BSC_TMP], rax
-    mov rdi, [rbp - BSC_RES]
-    call obj_decref
-    mov rax, [rbp - BSC_TMP]
-    pop rbx
-    leave
-    ret
-
-.bsc_wrap_list:
-    ; Every element of the list, likewise.
-    mov [rbp - BSC_RES], rax
-    mov rcx, [rax + PyListObject.ob_size]
-    xor esi, esi
-.bsc_wrap_loop:
-    cmp rsi, rcx
-    jge .bsc_wrapped
-    mov rax, [rbp - BSC_RES]
-    mov rax, [rax + PyListObject.ob_item]
-    mov rdi, [rax + rsi*8]
-    push rsi
-    push rcx
-    call bytearray_from_bytes
-    pop rcx
-    pop rsi
-    test rax, rax
-    jz .bsc_wrapped
-    mov rdx, [rbp - BSC_RES]
-    mov rdx, [rdx + PyListObject.ob_item]
-    push rax
-    push rsi
-    mov rdi, [rdx + rsi*8]
-    call obj_decref             ; the bytes the body made
-    pop rsi
-    pop rax
-    mov rdx, [rbp - BSC_RES]
-    mov rdx, [rdx + PyListObject.ob_item]
-    mov [rdx + rsi*8], rax
-    mov rcx, [rbp - BSC_RES]
-    mov rcx, [rcx + PyListObject.ob_size]
-    inc rsi
-    jmp .bsc_wrap_loop
-.bsc_wrapped:
-    mov rax, [rbp - BSC_RES]
-    pop rbx
-    leave
-    ret
-
-.bsc_bad_free:
-    mov rdi, [rbp - BSC_TMP]
-    call obj_decref
-.bsc_bad:
-    RAISE exc_TypeError_type, "descriptor requires a bytearray object"
-.bsc_oom:
-    RAISE exc_MemoryError_type, "out of memory"
-END_FUNC bytearray_shared_call
-
-;; bytearray_from_bytes(rdi = a bytes, borrowed) -> rax = a new bytearray
-DEF_FUNC bytearray_from_bytes, 8            ; 1 pushes, so rsp is 16-aligned
-    push rbx
-    mov rbx, rdi
-    V_TEST_PTR rdi, rax
-    ja .bfb_passthrough
-    mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel bytes_type]
-    cmp rax, rcx
-    jne .bfb_passthrough        ; not a bytes: hand it back untouched
-    mov rsi, [rbx + PyBytesObject.ob_size]
-    lea rdi, [rbx + PyBytesObject.data]
-    call bytearray_new
-    pop rbx
-    leave
-    ret
-.bfb_passthrough:
-    mov rax, rbx
-    pop rbx
-    leave
-    ret
-END_FUNC bytearray_from_bytes
-
-DEF_FUNC ba_shared_hex
-    lea rdx, [rel bytes_method_hex]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_hex
-
-DEF_FUNC ba_shared_startswith
-    lea rdx, [rel bytes_method_startswith]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_startswith
-
-DEF_FUNC ba_shared_endswith
-    lea rdx, [rel bytes_method_endswith]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_endswith
-
-DEF_FUNC ba_shared_count
-    lea rdx, [rel bytes_method_count]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_count
-
-DEF_FUNC ba_shared_find
-    lea rdx, [rel bytes_method_find]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_find
-
-DEF_FUNC ba_shared_decode
-    lea rdx, [rel _bytes_decode_impl]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_decode
-
-DEF_FUNC ba_shared_replace
-    lea rdx, [rel bytes_method_replace]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_replace
-
-DEF_FUNC ba_shared_split
-    lea rdx, [rel bytes_method_split]
-    mov ecx, 2
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_split
-
-DEF_FUNC ba_shared_rsplit
-    lea rdx, [rel bytes_method_rsplit]
-    mov ecx, 2
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_rsplit
-
-DEF_FUNC ba_shared_rfind
-    lea rdx, [rel bytes_method_rfind]
-    xor ecx, ecx
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_rfind
-
-DEF_FUNC ba_shared_index
-    lea rdx, [rel bytes_method_index]
-    xor ecx, ecx
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_index
-
-DEF_FUNC ba_shared_rindex
-    lea rdx, [rel bytes_method_rindex]
-    xor ecx, ecx
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_rindex
-
-DEF_FUNC ba_shared_strip
-    lea rdx, [rel bytes_method_strip]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_strip
-
-DEF_FUNC ba_shared_lstrip
-    lea rdx, [rel bytes_method_lstrip]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_lstrip
-
-DEF_FUNC ba_shared_rstrip
-    lea rdx, [rel bytes_method_rstrip]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_rstrip
-
-DEF_FUNC ba_shared_partition
-    lea rdx, [rel bytes_method_partition]
-    mov ecx, 2
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_partition
-
-DEF_FUNC ba_shared_rpartition
-    lea rdx, [rel bytes_method_rpartition]
-    mov ecx, 2
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_rpartition
-
-DEF_FUNC ba_shared_join
-    lea rdx, [rel bytes_method_join]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_join
-
-;; The slots, reachable by name.  __setitem__ and __delitem__ especially:
-;; CPython's own code calls them directly, and `del b[i]` compiles to
-;; DELETE_SUBSCR but `b.__delitem__(i)` does not.
-DEF_FUNC bytearray_dunder_len
-    REQUIRE_SELF bytearray_type, "__len__"
-    test rsi, rsi
-    jz .badl_bad
-    mov rdi, [rdi]
-    mov rax, [rdi + PyByteArrayObject.ob_size]
-    V_PACK_I64 rax, rcx
-    mov edx, TAG_PTR
-    leave
-    ret
-.badl_bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
-END_FUNC bytearray_dunder_len
-
-DEF_FUNC bytearray_dunder_iter
-    REQUIRE_SELF bytearray_type, "__iter__"
-    test rsi, rsi
-    jz .badi_bad
-    mov rdi, [rdi]
-    call bytearray_tp_iter
-    mov edx, TAG_PTR
-    leave
-    ret
-.badi_bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
-END_FUNC bytearray_dunder_iter
-
-DEF_FUNC bytearray_dunder_getitem
-    REQUIRE_SELF bytearray_type, "__getitem__"
-    cmp rsi, 2
-    jne .badg_bad
-    mov rsi, [rdi + 8]
-    mov rdi, [rdi]
-    call bytearray_subscript
-    mov edx, TAG_PTR
-    leave
-    ret
-.badg_bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
-END_FUNC bytearray_dunder_getitem
-
-DEF_FUNC bytearray_dunder_setitem
-    REQUIRE_SELF bytearray_type, "__setitem__"
-    cmp rsi, 3
-    jne .bads_bad
-    mov rdx, [rdi + 16]
-    mov rsi, [rdi + 8]
-    mov rdi, [rdi]
-    call bytearray_ass_subscript
-    LOAD_NONE rax
-    mov edx, TAG_PTR
-    leave
-    ret
-.bads_bad:
-    RAISE exc_TypeError_type, "expected exactly two arguments"
-END_FUNC bytearray_dunder_setitem
-
-DEF_FUNC bytearray_dunder_delitem
-    REQUIRE_SELF bytearray_type, "__delitem__"
-    cmp rsi, 2
-    jne .badd_bad
-    mov rsi, [rdi + 8]
-    mov rdi, [rdi]
-    xor edx, edx                ; a NULL value Value means delete
-    call bytearray_ass_subscript
-    LOAD_NONE rax
-    mov edx, TAG_PTR
-    leave
-    ret
-.badd_bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
-END_FUNC bytearray_dunder_delitem
-
-DEF_FUNC bytearray_dunder_contains
-    REQUIRE_SELF bytearray_type, "__contains__"
-    cmp rsi, 2
-    jne .badc_bad
-    mov rsi, [rdi + 8]
-    mov rdi, [rdi]
-    call bytearray_contains
-    test eax, eax
-    jz .badc_false
-    lea rax, [rel bool_true]
-    jmp .badc_out
-.badc_false:
-    lea rax, [rel bool_false]
-.badc_out:
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
-    leave
-    ret
-.badc_bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
-END_FUNC bytearray_dunder_contains
-
-;; ============================================================================
-;; bytearray's share of the string-shaped methods in methods/bytes_str.asm.
-;;
-;; Same shape as the trampolines above: the bytes body runs on a temporary
-;; bytes and the wrap mode says what the answer has to become -- a bytearray
-;; for the ones that build a new buffer, a list of bytearrays for splitlines,
-;; and nothing at all for the predicates, which answer with a bool.
-;; ============================================================================
-
-DEF_FUNC ba_shared_upper
-    extern bytes_method_upper
-    lea rdx, [rel bytes_method_upper]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_upper
-
-DEF_FUNC ba_shared_lower
-    extern bytes_method_lower
-    lea rdx, [rel bytes_method_lower]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_lower
-
-DEF_FUNC ba_shared_swapcase
-    extern bytes_method_swapcase
-    lea rdx, [rel bytes_method_swapcase]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_swapcase
-
-DEF_FUNC ba_shared_capitalize
-    extern bytes_method_capitalize
-    lea rdx, [rel bytes_method_capitalize]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_capitalize
-
-DEF_FUNC ba_shared_title
-    extern bytes_method_title
-    lea rdx, [rel bytes_method_title]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_title
-
-DEF_FUNC ba_shared_isalpha
-    extern bytes_method_isalpha
-    lea rdx, [rel bytes_method_isalpha]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_isalpha
-
-DEF_FUNC ba_shared_isdigit
-    extern bytes_method_isdigit
-    lea rdx, [rel bytes_method_isdigit]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_isdigit
-
-DEF_FUNC ba_shared_isspace
-    extern bytes_method_isspace
-    lea rdx, [rel bytes_method_isspace]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_isspace
-
-DEF_FUNC ba_shared_isalnum
-    extern bytes_method_isalnum
-    lea rdx, [rel bytes_method_isalnum]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_isalnum
-
-DEF_FUNC ba_shared_isascii
-    extern bytes_method_isascii
-    lea rdx, [rel bytes_method_isascii]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_isascii
-
-DEF_FUNC ba_shared_isupper
-    extern bytes_method_isupper
-    lea rdx, [rel bytes_method_isupper]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_isupper
-
-DEF_FUNC ba_shared_islower
-    extern bytes_method_islower
-    lea rdx, [rel bytes_method_islower]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_islower
-
-DEF_FUNC ba_shared_istitle
-    extern bytes_method_istitle
-    lea rdx, [rel bytes_method_istitle]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_istitle
-
-DEF_FUNC ba_shared_ljust
-    extern bytes_method_ljust
-    lea rdx, [rel bytes_method_ljust]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_ljust
-
-DEF_FUNC ba_shared_rjust
-    extern bytes_method_rjust
-    lea rdx, [rel bytes_method_rjust]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_rjust
-
-DEF_FUNC ba_shared_center
-    extern bytes_method_center
-    lea rdx, [rel bytes_method_center]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_center
-
-DEF_FUNC ba_shared_zfill
-    extern bytes_method_zfill
-    lea rdx, [rel bytes_method_zfill]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_zfill
-
-DEF_FUNC ba_shared_expandtabs
-    extern bytes_method_expandtabs
-    lea rdx, [rel bytes_method_expandtabs]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_expandtabs
-
-DEF_FUNC ba_shared_translate
-    extern bytes_method_translate
-    lea rdx, [rel bytes_method_translate]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_translate
-
-DEF_FUNC ba_shared_splitlines
-    extern bytes_method_splitlines
-    lea rdx, [rel bytes_method_splitlines]
-    mov ecx, 2
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_splitlines
-
-DEF_FUNC ba_shared_removeprefix
-    extern bytes_method_removeprefix
-    lea rdx, [rel bytes_method_removeprefix]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_removeprefix
-
-DEF_FUNC ba_shared_removesuffix
-    extern bytes_method_removesuffix
-    lea rdx, [rel bytes_method_removesuffix]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_removesuffix

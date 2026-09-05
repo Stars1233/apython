@@ -313,7 +313,14 @@ DEF_FUNC op_call, CL_FRAME
     jmp eval_exception_unwind
 
 .not_callable:
-    RAISE exc_TypeError_type, "object is not callable"
+    ; CPython names the type: "'int' object is not callable" is what tells a
+    ; caller WHICH of its values was not a function.
+    mov rsi, [rbp - CL_CALLABLE]
+    mov rcx, [rbp - CL_CALL_TAG]
+    V_PACK rsi, rcx
+    CSTRING rdi, `'\x01' object is not callable`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
     ; does not return
 END_FUNC op_call
 
@@ -728,7 +735,12 @@ DEF_FUNC op_call_function_ex
     jmp eval_exception_unwind
 
 .cfex_not_callable:
-    RAISE exc_TypeError_type, "object is not callable"
+    mov rsi, [rbp - CFX_FUNC]
+    mov rcx, [rbp - CFX_FUNC_TAG]
+    V_PACK rsi, rcx
+    CSTRING rdi, `'\x01' object is not callable`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC op_call_function_ex
 
 ;; ============================================================================

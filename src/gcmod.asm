@@ -623,11 +623,17 @@ GGR_LIST  equ 8
 GGR_ARGS  equ 16
 GGR_NARGS equ 24
 GGR_SAVED equ 32
-GGR_FRAME equ 48            ; + 2 pushes = 64
+GGR_FRAME equ 40            ; + 3 pushes = 64
 
 DEF_FUNC gc_mod_get_referents, GGR_FRAME
     push rbx
     push r12
+    ; r14 is the visit callback the VISIT_* macros call through, and it is
+    ; CALLEE-SAVED: writing it without saving hands the caller a different
+    ; one back.  map_iternext keeps its count there, so
+    ; `list(map(gc.get_referents, ...))` returned into a wild address.
+    ; get_referrers beside this one saves it; this did not.
+    push r14
     mov [rbp - GGR_ARGS], rdi
     mov [rbp - GGR_NARGS], rsi
     xor edi, edi
@@ -661,6 +667,7 @@ DEF_FUNC gc_mod_get_referents, GGR_FRAME
     mov [rel gm_referents_out], rax
     mov rax, [rbp - GGR_LIST]
     mov edx, TAG_PTR
+    pop r14
     pop r12
     pop rbx
     leave

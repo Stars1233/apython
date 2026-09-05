@@ -202,10 +202,16 @@ DEF_FUNC builtin_abs
     ret
 
 .abs_type_error:
-    RAISE exc_TypeError_type, "bad operand type for abs()"
+    mov rsi, rbx
+    CSTRING rdi, `bad operand type for abs(): '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .abs_error:
-    RAISE exc_TypeError_type, "abs() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "abs() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_abs
 
 ;; ============================================================================
@@ -391,7 +397,10 @@ DEF_FUNC builtin_divmod, 8            ; 5 pushes, so rsp is 16-aligned
     ret
 
 .divmod_error:
-    RAISE exc_TypeError_type, "divmod expected 2 arguments"
+    CSTRING rdi, "divmod expected 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 
 .divmod_pop_type_error:
     add rsp, 8                  ; the quotient tag pushed above
@@ -610,6 +619,9 @@ BI_ORIGIN equ 40       ; the argument's type, for the bytes-family MRO walk
 BI_XLAT   equ 64       ; a Unicode-to-ASCII copy of the argument, or 0
 BI_DATA   equ 72       ; the bytes actually parsed: that copy, or the original
 BI_XLEN   equ 80       ; and its length, which strlen cannot recover
+BI_DUNDER equ 56       ; which of __int__/__index__/__trunc__ was called, so
+                       ; the deprecation for a strict-int-subclass result can
+                       ; name it the way CPython does
 BI_LEN    equ 48       ; the source length: bytes and bytearray keep it in
                        ; different fields, so the shared tail cannot re-read it
 BI_FRAME  equ 88            ; + 1 push = 96, 16-byte aligned
@@ -933,6 +945,8 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .int_from_int_sub_extract ; no __int__, extract int_value
+    lea rcx, [rel int_dunder_int_msg]
+    mov [rbp - BI_DUNDER], rcx  ; which dunder the deprecation names
     ; Call __int__(self) — rax = func (borrowed ref)
     mov rcx, [rax + PyObject.ob_type]
     mov rcx, [rcx + PyTypeObject.tp_call]
@@ -959,10 +973,10 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     je .int_ret                  ; exact int — OK
     lea r8, [rel bool_type]
     cmp rcx, r8
-    je .int_convert_bool_result  ; bool → convert to plain int
+    je .int_subclass_result      ; bool is a strict subclass of int
     mov r8, [rcx + PyTypeObject.tp_flags]
     test r8, TYPE_FLAG_INT_SUBCLASS
-    jnz .int_ret                 ; int subclass — OK for now
+    jnz .int_subclass_result     ; deprecated, and converted to an exact int
     ; __int__ returned non-int
     mov rdi, rax
     call obj_decref
@@ -986,16 +1000,24 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     call dunder_lookup
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
-    jnz .int_call_dunder
+    jz .int_try_index
+    lea rcx, [rel int_dunder_int_msg]
+    mov [rbp - BI_DUNDER], rcx
+    jmp .int_call_dunder
 
+.int_try_index:
     ; Try __index__ protocol
     mov rdi, [rbx + PyObject.ob_type]
     CSTRING rsi, "__index__"
     call dunder_lookup
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
-    jnz .int_call_dunder
+    jz .int_try_trunc
+    lea rcx, [rel int_dunder_index_msg]
+    mov [rbp - BI_DUNDER], rcx
+    jmp .int_call_dunder
 
+.int_try_trunc:
     ; Try __trunc__ protocol
     mov rdi, [rbx + PyObject.ob_type]
     CSTRING rsi, "__trunc__"
@@ -1005,6 +1027,12 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jnz .int_call_dunder_trunc
 
     jmp .int_type_error
+
+.int_trunc_warn_raised:
+    ; warn() raised, which is what a filter set to "error" does.  The
+    ; exception is already recorded; unwind with it.
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
 
 .int_call_dunder:
     ; rax = func (borrowed ref), rbx = self
@@ -1033,17 +1061,68 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     je .int_ret                  ; exact int — OK
     lea r8, [rel bool_type]
     cmp rcx, r8
-    je .int_convert_bool_result  ; bool → convert to plain int
+    je .int_subclass_result      ; bool is a strict subclass of int
     mov r8, [rcx + PyTypeObject.tp_flags]
     test r8, TYPE_FLAG_INT_SUBCLASS
-    jnz .int_ret                 ; int subclass — OK
+    jnz .int_subclass_result
     ; Not int-like
     mov rdi, rax
     call obj_decref
     RAISE exc_TypeError_type, "__int__ returned non-int"
 
+.int_subclass_result:
+    ; CPython accepts a strict subclass of int here and DEPRECATES it, naming
+    ; the dunder and the type: "__index__ returned non-int (type bool).  The
+    ; ability to return an instance of a strict subclass of int is
+    ; deprecated...".  Nothing warned, so a test that turns the deprecation
+    ; into an error saw nothing to turn.
+    mov [rbp - BI_ARGS], rax        ; the result, across the warning
+    mov [rbp - BI_BASE], rdx
+    mov rdi, [rbp - BI_DUNDER]
+    mov rsi, rcx                    ; the result's type
+    extern type_name_message
+    call type_name_message
+    mov rdi, rax
+    call deprecation_warn
+    test eax, eax
+    jz .int_trunc_warn_raised
+    mov rax, [rbp - BI_ARGS]
+    mov rdx, [rbp - BI_BASE]
+    lea rcx, [rel bool_type]
+    cmp [rax + PyObject.ob_type], rcx
+    je .int_convert_bool_result
+
+    ; ...and the value comes back as an EXACT int.  CPython converts it;
+    ; handing the subclass instance straight back made int(x) answer
+    ; something whose type is not int.
+    mov rdi, rax
+    mov rax, [rdi + PyIntSubclassObject.int_value]
+    V_UNPACK rax, rdx
+    cmp edx, TAG_SMALLINT
+    je .int_sub_have
+    INCREF rax
+.int_sub_have:
+    mov [rbp - BI_XLAT], rax        ; the extracted value, across the release
+    mov [rbp - BI_XLEN], rdx
+    mov rdi, [rbp - BI_ARGS]        ; the subclass instance
+    call obj_decref
+    mov rax, [rbp - BI_XLAT]
+    mov rdx, [rbp - BI_XLEN]
+    jmp .int_ret
+
 .int_call_dunder_trunc:
     ; rax = __trunc__ func, rbx = self
+    ; CPython 3.12 warns before it does this, and a suite that turns warnings
+    ; into errors reads that as the deprecation firing.  The warning has to
+    ; come first: the filter may make it raise, and then __trunc__ must not
+    ; have run.
+    push rax
+    lea rdi, [rel int_trunc_deprecated]
+    call deprecation_warn
+    test eax, eax
+    pop rax
+    jz .int_trunc_warn_raised
+
     ; Call __trunc__(self); result must be int-like or have __index__
     ; CPython 3.12: tries __index__ on result, but NOT __int__
     mov rcx, [rax + PyObject.ob_type]
@@ -1436,7 +1515,11 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jmp .int_base_parse_error
 
 .int_base_type_error:
-    RAISE exc_TypeError_type, "int() second arg must be an integer"
+    mov rsi, [rbp - BI_ARGS]
+    mov rsi, [rsi + 8]
+    CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .int_base_type_error_str:
     RAISE exc_TypeError_type, "int() can't convert non-string with explicit base"
@@ -1499,11 +1582,37 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     call str_from_cstr_heap
     mov [rsp + 48], rax
 
-    ; Get repr of original object (always a heap ptr)
+    ; Get repr of original object (always a heap ptr).  CPython renders a
+    ; bytearray argument as the BYTES it holds -- int(bytearray(b"x"))
+    ; reports b'x' -- so a temporary stands in for it.
+    mov rdi, [rbp - BI_OBJ]
+    mov rax, [rdi + PyObject.ob_type]
+    extern bytearray_type
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    jne .ile_repr_src
+    mov rsi, [rdi + PyByteArrayObject.ob_size]
+    mov rdi, [rdi + PyByteArrayObject.ob_bytes]
+    extern bytes_from_data
+    call bytes_from_data
+    test rax, rax
+    jz .ile_no_repr
+    mov [rsp + 56], rax
+    mov rdi, rax
+    call obj_repr
+    push rax
+    mov rdi, [rsp + 64]         ; the temporary bytes, under the pushed repr
+    call obj_decref
+    pop rax
+    test rax, rax
+    jnz .ile_have_repr
+    jmp .ile_no_repr
+.ile_repr_src:
     mov rdi, [rbp - BI_OBJ]
     call obj_repr
     test rax, rax
     jnz .ile_have_repr
+.ile_no_repr:
     CSTRING rdi, "???"
     call str_from_cstr_heap
     jmp .ile_repr_ready
@@ -1560,20 +1669,56 @@ END_FUNC builtin_int_fn
 ;; ============================================================================
 ;; 4. builtin_ord(args, nargs) - ord(c)
 ;; ============================================================================
-DEF_FUNC builtin_ord
+ORD_ARG   equ 8             ; args[0] as it arrived, for both refusals
+ORD_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC builtin_ord, ORD_FRAME
 
     cmp rsi, 1
     jne .ord_nargs_error
 
-    V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
+    mov rax, [rdi]
+    mov [rbp - ORD_ARG], rax
+    V_TEST_PTR rax, r11          ; args[0] a pointer?
     ja .ord_type_error
+    test rax, rax
+    jz .ord_type_error
 
-    mov rdi, [rdi]                 ; args[0] payload
+    mov rdi, rax                   ; args[0] payload
 
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
-    jne .ord_type_error
+    je .ord_is_str
+    ; bytes and bytearray are one byte each in CPython's ord(), and were a
+    ; TypeError here: `ord(b"x")` is 120 there and refused by name here.
+    extern bytes_type
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .ord_bytes
+    extern bytearray_type
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .ord_bytearray
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .ord_is_str
+    jmp .ord_type_error
+
+.ord_bytes:
+    mov rcx, [rdi + PyBytesObject.ob_size]
+    cmp rcx, 1
+    jne .ord_len_error
+    movzx eax, byte [rdi + PyBytesObject.data]
+    jmp .ord_done
+
+.ord_bytearray:
+    mov rcx, [rdi + PyByteArrayObject.ob_size]
+    cmp rcx, 1
+    jne .ord_len_error
+    mov rax, [rdi + PyByteArrayObject.ob_bytes]
+    movzx eax, byte [rax]
+    jmp .ord_done
+
+.ord_is_str:
 
     ; A string is stored as UTF-8, so one character can be up to four bytes.
     ; Requiring ob_size == 1 made ord(chr(233)) a TypeError.
@@ -1644,13 +1789,40 @@ DEF_FUNC builtin_ord
     ret
 
 .ord_type_error:
-    RAISE exc_TypeError_type, "ord() expected string of length 1"
+    mov rsi, [rbp - ORD_ARG]
+    CSTRING rdi, `ord() expected string of length 1, but \x01 found`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .ord_len_error:
-    RAISE exc_TypeError_type, "ord() expected a character"
+    ; CPython counts CODE POINTS for a str and bytes for the other two, and
+    ; says how many it got: "expected a character, but string of length 2".
+    mov rdi, [rbp - ORD_ARG]
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .ord_len_bytes
+    mov rsi, [rdi + PyStrObject.ob_length]
+    jmp .ord_len_raise
+.ord_len_bytes:
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    jne .ord_len_size
+    mov rsi, [rdi + PyByteArrayObject.ob_size]
+    jmp .ord_len_raise
+.ord_len_size:
+    mov rsi, [rdi + PyBytesObject.ob_size]
+.ord_len_raise:
+    CSTRING rdx, " found"
+    CSTRING rdi, "ord() expected a character, but string of length "
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 
 .ord_nargs_error:
-    RAISE exc_TypeError_type, "ord() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "ord() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_ord
 
 ;; ============================================================================
@@ -1664,9 +1836,39 @@ DEF_FUNC builtin_chr, 16
 
     mov rdi, [rdi]            ; args[0]
 
+    ; int_to_i64 reads PyIntObject.compact off whatever it is handed, so
+    ; chr(1.5) dereferenced a float's raw bits and chr(2**70) truncated
+    ; through __gmpz_get_si and answered a character.  obj_as_index is the
+    ; funnel: it names the type, it takes anything with an __index__, and it
+    ; refuses what will not fit an index.
+    ; ...and a width that will not fit is CPython's "C int" here, not the
+    ; "C ssize_t" a subscript reports: chr takes an int, not an index.  Only
+    ; a heap int can be that wide, and obj_as_index below refuses everything
+    ; that is not a number at all.
+    V_TEST_PTR rdi, rax
+    ja .chr_have_value
+    test rdi, rdi
+    jz .chr_have_value
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    jne .chr_have_value
+    push rdi
+    mov edx, TAG_PTR
+    extern int_fits_i64
+    call int_fits_i64
+    pop rdi
+    test eax, eax
+    jz .chr_too_wide
+.chr_have_value:
     V_UNPACK rdi, rdx
-    call int_to_i64
+    extern obj_as_index
+    call obj_as_index
 
+    cmp rax, 0x7fffffff
+    jg .chr_too_wide
+    cmp rax, -0x80000000
+    jl .chr_too_wide
     cmp rax, 0
     jl .chr_range_error
     cmp rax, 0x10ffff
@@ -1759,11 +1961,17 @@ DEF_FUNC builtin_chr, 16
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.chr_too_wide:
+    extern exc_OverflowError_type
+    RAISE exc_OverflowError_type, "Python int too large to convert to C int"
 .chr_range_error:
     RAISE exc_ValueError_type, "chr() arg not in range(0x110000)"
 
 .chr_nargs_error:
-    RAISE exc_TypeError_type, "chr() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "chr() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_chr
 
 ;; ============================================================================
@@ -1855,7 +2063,10 @@ DEF_FUNC builtin_hex, HEXB_FRAME
     ret
 
 .hex_nargs_error:
-    RAISE exc_TypeError_type, "hex() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "hex() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_hex
 
 ; builtin_eval_fn used to live here: a stub that parsed a single integer
@@ -2323,426 +2534,6 @@ DEF_FUNC_LOCAL int_round_to_power10, IRP_FRAME
     ret
 END_FUNC int_round_to_power10
 
-;; ============================================================================
-;; builtin_pow_fn(args, nargs) - pow(base, exp[, mod])
-;; 2 args: base ** exp
-;; 3 args: pow(base, exp, mod) — modular exponentiation
-;; ============================================================================
-global builtin_pow_fn
-POW_BASE equ 8
-POW_BTAG equ 16
-POW_EXP  equ 24
-POW_ETAG equ 32
-POW_MOD  equ 40
-POW_MTAG equ 48
-POW_MB   equ 80             ; four mpz_t, 16 bytes each
-POW_MEXP equ 96
-POW_MMOD equ 112
-POW_MRES equ 128
-POW_FRAME equ 136           ; + 3 pushes = 8 + 136 + 24 = 168, 16-aligned
-DEF_FUNC builtin_pow_fn, POW_FRAME
-    push rbx
-    push r12
-    push r13
-
-    cmp rsi, 2
-    je .pow_two
-    cmp rsi, 3
-    je .pow_three
-    jmp .pow_error
-
-.pow_two:
-    ; pow(base, exp) — extract operands and delegate to int_power/float path
-    mov rax, [rdi]          ; args[0] = base
-    V_UNPACK rax, rcx
-    mov rbx, [rdi + 8]      ; args[1] = exp
-    V_UNPACK rbx, r8
-
-    ; Both integers?  Delegate to int_power, which handles SmallInt, heap
-    ; ints and int subclasses (and GMP overflow) itself.
-    extern int_is_integer
-    mov [rbp - POW_BTAG], rcx
-    mov [rbp - POW_ETAG], r8
-    mov r12, rax                ; base payload
-    mov r13, rbx                ; exp payload
-    mov rdi, rax
-    mov edx, ecx
-    call int_is_integer
-    test eax, eax
-    jz .pow_reload_float
-    mov rdi, r13
-    mov edx, [rbp - POW_ETAG]
-    call int_is_integer
-    test eax, eax
-    jz .pow_reload_float
-    mov rax, r12
-    mov rbx, r13
-    mov ecx, [rbp - POW_BTAG]
-    mov r8d, [rbp - POW_ETAG]
-    jmp .pow_two_int
-.pow_reload_float:
-    ; Not two integers.  Everything else goes through obj_binary_op, the same
-    ; protocol `base ** exp` uses, so pow() answers whatever the operator
-    ; answers -- for float subclasses, for complex, and for any class with
-    ; __pow__.  The hand-rolled float path that used to be here tested
-    ; `ob_type == float_type` exactly and knew nothing of complex, so
-    ; pow(F(2.0), 2) raised where F(2.0) ** 2 worked, and pow(1+2j, 2) raised
-    ; where (1+2j) ** 2 worked.
-    mov rdi, r12
-    mov esi, [rbp - POW_BTAG]
-    V_PACK rdi, rsi
-    mov rsi, r13
-    mov edx, [rbp - POW_ETAG]
-    V_PACK rsi, rdx
-    mov edx, NB_POWER
-    extern obj_binary_op
-    call obj_binary_op
-    test rax, rax
-    jz .pow_propagate
-    V_UNPACK rax, rdx
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.pow_propagate:
-    xor eax, eax                ; a NULL Value, with the exception pending
-    xor edx, edx
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-.pow_two_int:
-
-    ; int ** int — call int_power(base, exp, base_tag, exp_tag)
-    extern int_power
-    mov rdi, rax            ; base payload
-    mov rsi, rbx            ; exp payload
-    mov edx, ecx            ; base tag (TAG_SMALLINT)
-    mov ecx, r8d            ; exp tag (TAG_SMALLINT)
-    V_PACK rdi, rdx
-    V_PACK rsi, rcx
-    call int_power
-    V_UNPACK rax, rdx       ; int_power returns a Value
-    ; rax = result payload, edx = result tag
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-; The hand-rolled float path that used to live here is gone with it: one
-; implementation of `**` rather than two that disagreed about what a float is.
-
-.pow_three:
-    ; pow(base, exp, mod) -- modular exponentiation, in GMP.
-    ;
-    ; It used to be an int64 square-and-multiply, so every operand had to be
-    ; an immediate: pow(2, 10**20, 7) and pow(10**30, 3, 10**7) were both
-    ; "pow() arguments must be numeric".  It also rejected a negative
-    ; exponent outright, where CPython since 3.8 answers the modular
-    ; INVERSE, and it tested the exponent's sign before the modulus, so
-    ; pow(2, -1, 0) named the wrong argument.
-    extern int_unwrap
-    mov r13, rdi                ; args array
-    mov rdi, [r13]
-    V_UNPACK rdi, rdx
-    call int_unwrap
-    mov [rbp - POW_BASE], rdi
-    mov [rbp - POW_BTAG], rdx
-    mov rdi, [r13 + 8]
-    V_UNPACK rdi, rdx
-    call int_unwrap
-    mov [rbp - POW_EXP], rdi
-    mov [rbp - POW_ETAG], rdx
-    mov rdi, [r13 + 16]
-    V_UNPACK rdi, rdx
-    call int_unwrap
-    mov [rbp - POW_MOD], rdi
-    mov [rbp - POW_MTAG], rdx
-
-    ; A base that is not an int is asked for its own three-argument __pow__,
-    ; which is how pow(x, y, z) works on a class that defines one.  Nothing
-    ; consulted it, so every such call was "pow() arguments must be numeric".
-    mov rdi, [rbp - POW_BASE]
-    mov esi, [rbp - POW_BTAG]
-    call pow_is_int_operand
-    test eax, eax
-    jz .pow_three_dunder
-
-    ; With an int base, all three have to be ints, and CPython words that
-    ; refusal specifically.
-    mov rdi, [rbp - POW_EXP]
-    mov esi, [rbp - POW_ETAG]
-    call pow_is_int_operand
-    test eax, eax
-    jz .pow_not_all_ints
-    mov rdi, [rbp - POW_MOD]
-    mov esi, [rbp - POW_MTAG]
-    call pow_is_int_operand
-    test eax, eax
-    jz .pow_not_all_ints
-
-    ; Into GMP.  The modulus is checked FIRST: pow(2, -1, 0) is about the
-    ; third argument, not the second.
-    lea rdi, [rbp - POW_MB]
-    call __gmpz_init wrt ..plt
-    lea rdi, [rbp - POW_MEXP]
-    call __gmpz_init wrt ..plt
-    lea rdi, [rbp - POW_MMOD]
-    call __gmpz_init wrt ..plt
-    lea rdi, [rbp - POW_MRES]
-    call __gmpz_init wrt ..plt
-
-    lea rdi, [rbp - POW_MB]
-    mov rsi, [rbp - POW_BASE]
-    mov edx, [rbp - POW_BTAG]
-    call pow_load_mpz
-    lea rdi, [rbp - POW_MEXP]
-    mov rsi, [rbp - POW_EXP]
-    mov edx, [rbp - POW_ETAG]
-    call pow_load_mpz
-    lea rdi, [rbp - POW_MMOD]
-    mov rsi, [rbp - POW_MOD]
-    mov edx, [rbp - POW_MTAG]
-    call pow_load_mpz
-
-    lea rdi, [rbp - POW_MMOD]
-    xor esi, esi
-    call __gmpz_cmp_si wrt ..plt
-    test eax, eax
-    jz .pow_zero_mod
-
-    lea rdi, [rbp - POW_MEXP]
-    xor esi, esi
-    call __gmpz_cmp_si wrt ..plt
-    test eax, eax
-    js .pow_mod_inverse
-
-    lea rdi, [rbp - POW_MRES]
-    lea rsi, [rbp - POW_MB]
-    lea rdx, [rbp - POW_MEXP]
-    lea rcx, [rbp - POW_MMOD]
-    call __gmpz_powm wrt ..plt
-    jmp .pow_mod_sign
-
-.pow_mod_inverse:
-    ; A negative exponent: invert the base, then raise the inverse to |exp|.
-    lea rdi, [rbp - POW_MRES]
-    lea rsi, [rbp - POW_MB]
-    lea rdx, [rbp - POW_MMOD]
-    call __gmpz_invert wrt ..plt
-    test eax, eax
-    jz .pow_not_invertible
-    lea rdi, [rbp - POW_MEXP]
-    lea rsi, [rbp - POW_MEXP]
-    call __gmpz_neg wrt ..plt
-    lea rdi, [rbp - POW_MRES]
-    lea rsi, [rbp - POW_MRES]
-    lea rdx, [rbp - POW_MEXP]
-    lea rcx, [rbp - POW_MMOD]
-    call __gmpz_powm wrt ..plt
-
-.pow_mod_sign:
-    ; GMP's powm answers in [0, |mod|); Python's result carries the sign of
-    ; the modulus, so a negative modulus needs the representative shifted
-    ; down by |mod| unless the result is already zero.
-    lea rdi, [rbp - POW_MMOD]
-    xor esi, esi
-    call __gmpz_cmp_si wrt ..plt
-    test eax, eax
-    jns .pow_mod_build
-    lea rdi, [rbp - POW_MRES]
-    xor esi, esi
-    call __gmpz_cmp_si wrt ..plt
-    test eax, eax
-    jz .pow_mod_build
-    lea rdi, [rbp - POW_MRES]
-    lea rsi, [rbp - POW_MRES]
-    lea rdx, [rbp - POW_MMOD]
-    call __gmpz_add wrt ..plt
-
-.pow_mod_build:
-    mov edi, PyIntObject_size
-    call ap_malloc
-    mov rbx, rax
-    mov qword [rbx + PyObject.ob_refcnt], 1
-    lea rcx, [rel int_type]
-    mov [rbx + PyObject.ob_type], rcx
-    mov qword [rbx + PyIntObject.compact], 0
-    INT_NEED_MPZ rbx
-    lea rdi, [rbx + PyIntObject.mpz]
-    call __gmpz_init wrt ..plt
-    lea rdi, [rbx + PyIntObject.mpz]
-    lea rsi, [rbp - POW_MRES]
-    call __gmpz_set wrt ..plt
-    call pow_clear_mpz
-    mov rdi, rbx
-    call int_shrink
-    mov edx, TAG_PTR
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.pow_three_dunder:
-    ; __pow__(self, exp, mod).  No nb_ slot can carry a third operand, so the
-    ; name is looked up and called directly.
-    mov rdi, [rbp - POW_BASE]
-    cmp dword [rbp - POW_BTAG], TAG_PTR
-    jne .pow_not_all_ints
-    mov rdi, [rdi + PyObject.ob_type]
-    CSTRING rsi, "__pow__"
-    extern dunder_lookup
-    call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
-    jz .pow_not_all_ints
-    test edx, TAG_RC_BIT
-    jz .pow_not_all_ints
-    mov r12, rax                ; the function
-
-    mov rax, [r12 + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_call]
-    test rax, rax
-    jz .pow_not_all_ints
-
-    sub rsp, 32                 ; 3 Values, padded to keep rsp 16-aligned
-    mov rdi, [rbp - POW_BASE]
-    mov esi, [rbp - POW_BTAG]
-    V_PACK rdi, rsi
-    mov [rsp], rdi
-    mov rdi, [rbp - POW_EXP]
-    mov esi, [rbp - POW_ETAG]
-    V_PACK rdi, rsi
-    mov [rsp + 8], rdi
-    mov rdi, [rbp - POW_MOD]
-    mov esi, [rbp - POW_MTAG]
-    V_PACK rdi, rsi
-    mov [rsp + 16], rdi
-    mov rdi, r12
-    mov rsi, rsp
-    mov edx, 3
-    call rax
-    add rsp, 32
-    V_UNPACK rax, rdx
-    test edx, edx
-    jz .pow_propagate
-    ; NotImplemented from a by-name call means the type declined the pair.
-    extern notimpl_singleton
-    lea rcx, [rel notimpl_singleton]
-    cmp rax, rcx
-    je .pow_not_all_ints
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.pow_not_all_ints:
-    RAISE exc_TypeError_type, "pow() 3rd argument not allowed unless all arguments are integers"
-
-.pow_not_invertible:
-    call pow_clear_mpz
-    RAISE exc_ValueError_type, "base is not invertible for the given modulus"
-
-.pow_zero_mod:
-    call pow_clear_mpz
-    RAISE exc_ValueError_type, "pow() 3rd argument cannot be 0"
-
-.pow_error:
-    RAISE exc_TypeError_type, "pow() takes 2 or 3 arguments"
-
-.pow_type_error:
-    RAISE exc_TypeError_type, "pow() arguments must be numeric"
-END_FUNC builtin_pow_fn
-
-;; ============================================================================
-;; pow_is_int_operand(rdi = payload, esi = tag) -> eax = 1 when it is an int
-;;
-;; int_unwrap has already flattened bool, a compact heap int and an int
-;; subclass to TAG_SMALLINT; what is left as a pointer is either a GMP-backed
-;; int or something that is not an int at all, so the type has to be read.
-;; ============================================================================
-DEF_FUNC_LOCAL pow_is_int_operand
-    cmp esi, TAG_SMALLINT
-    je .poi_yes
-    cmp esi, TAG_PTR
-    jne .poi_no
-    lea rax, [rel int_type]
-    cmp [rdi + PyObject.ob_type], rax
-    jne .poi_no
-.poi_yes:
-    mov eax, 1
-    leave
-    ret
-.poi_no:
-    xor eax, eax
-    leave
-    ret
-END_FUNC pow_is_int_operand
-
-;; ============================================================================
-;; pow_load_mpz(rdi = an initialised mpz_t, rsi = payload, edx = tag)
-;; Sets the mpz from an int in either representation.
-;; ============================================================================
-DEF_FUNC_LOCAL pow_load_mpz
-    cmp edx, TAG_SMALLINT
-    je .plm_small
-    mov rax, rsi
-    lea rcx, [rel int_type]
-    cmp [rax + PyObject.ob_type], rcx
-    jne .plm_bad
-    push rdi
-    sub rsp, 8
-    INT_NEED_MPZ rax
-    add rsp, 8
-    pop rdi
-    mov rax, rsi
-    add rax, PyIntObject.mpz
-    mov rsi, rax
-    call __gmpz_set wrt ..plt
-    leave
-    ret
-.plm_small:
-    call __gmpz_set_si wrt ..plt
-    leave
-    ret
-.plm_bad:
-    RAISE exc_TypeError_type, "pow() arguments must be numeric"
-END_FUNC pow_load_mpz
-
-;; ============================================================================
-;; pow_clear_mpz() -- releases the four mpz_t in builtin_pow_fn's frame.
-;;
-;; Reads its CALLER's frame through the saved rbp, because DEF_FUNC gives it
-;; one of its own.  Four calls in a row otherwise, at every exit and at both
-;; raises.
-;; ============================================================================
-DEF_FUNC_LOCAL pow_clear_mpz
-    push rbx
-    sub rsp, 8
-    mov rbx, [rbp]              ; the caller's rbp
-    lea rdi, [rbx - POW_MB]
-    call __gmpz_clear wrt ..plt
-    lea rdi, [rbx - POW_MEXP]
-    call __gmpz_clear wrt ..plt
-    lea rdi, [rbx - POW_MMOD]
-    call __gmpz_clear wrt ..plt
-    lea rdi, [rbx - POW_MRES]
-    call __gmpz_clear wrt ..plt
-    add rsp, 8
-    pop rbx
-    leave
-    ret
-END_FUNC pow_clear_mpz
 
 ;; ============================================================================
 ;; builtin_bin(args, nargs) - bin(x)
@@ -2835,7 +2626,10 @@ DEF_FUNC builtin_bin, BINB_FRAME
     ret
 
 .bin_nargs_error:
-    RAISE exc_TypeError_type, "bin() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "bin() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_bin
 
 ;; ============================================================================
@@ -2929,7 +2723,10 @@ DEF_FUNC builtin_oct, OCTB_FRAME
     ret
 
 .oct_nargs_error:
-    RAISE exc_TypeError_type, "oct() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "oct() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_oct
 
 ; const_one is read by round() and pow(); it lived in a .rodata block shared
@@ -3293,7 +3090,153 @@ DEF_FUNC builtin_complex, BCX_FRAME
     RAISE exc_TypeError_type, "complex() second arg can't be a string"
 
 .bcx_argcount:
-    RAISE exc_TypeError_type, "complex() takes at most 2 arguments"
+    mov rsi, [rbp - BCX_NARGS]
+    CSTRING rdx, " given)"
+    CSTRING rdi, "complex() takes at most 2 arguments ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_complex
 
 
+
+section .data
+align 8
+dw_warn_impl: dq 0
+
+section .rodata
+dw_mod_name:  db "_warnings", 0
+dw_attr_name: db "warn", 0
+int_trunc_deprecated: db "The delegation of int() to __trunc__ is deprecated.", 0
+; The \x01 is where type_name_message puts the type's name.
+int_dunder_int_msg:   db `__int__ returned non-int (type \x01).  The ability to return an instance of a strict subclass of int is deprecated, and may be removed in a future version of Python.`, 0
+int_dunder_index_msg: db `__index__ returned non-int (type \x01).  The ability to return an instance of a strict subclass of int is deprecated, and may be removed in a future version of Python.`, 0
+int_dunder_trunc_msg: db `__trunc__ returned non-int (type \x01).  The ability to return an instance of a strict subclass of int is deprecated, and may be removed in a future version of Python.`, 0
+
+section .text
+;; ============================================================================
+;; deprecation_warn(rdi = the message, a C string) -> eax = 1 ok, 0 raised
+;;
+;; The one place assembly raises a Python warning.  CPython's int() warns when
+;; it falls back to __trunc__ -- "The delegation of int() to __trunc__ is
+;; deprecated" -- and a test suite that turns warnings into errors reads that
+;; as the deprecation firing.  Nothing here warned at all, so `int(x)` for an
+;; x with only a __trunc__ was silent.
+;;
+;; `_warnings` is imported lazily and cached, the way builtin_open_fn reaches
+;; `_io`: the module is Python, and importing it at startup would run a module
+;; body before there is an interpreter to run it in.  A filter set to "error"
+;; makes warn() raise, which is a real answer and is passed on; anything else
+;; going wrong is swallowed, because a warning that cannot be shown must not
+;; become the caller's problem.
+;; ============================================================================
+
+extern import_module
+extern dict_get
+extern obj_call_n
+extern exc_DeprecationWarning_type
+extern current_exception
+
+DW_ARGS  equ 24             ; two Values: the message and the category
+DW_MSG   equ 32
+DW_KW    equ 40             ; the parked kw_names_pending
+DW_TMP   equ 48             ; whatever is being held across a call
+DW_FRAME equ 56             ; + 1 push = 64, 16-aligned
+global deprecation_warn
+DEF_FUNC deprecation_warn, DW_FRAME
+    push rbx
+    mov rbx, rdi
+
+    cmp qword [rel dw_warn_impl], 0
+    jne .dw_have
+
+    ; The pending keyword names belong to whatever call is in flight, not to
+    ; the import that is about to run a module body.  A frame slot, not a
+    ; push: everything below makes calls, and a lone push would put every one
+    ; of them eight bytes out of alignment.
+    mov rax, [rel kw_names_pending]
+    mov [rbp - DW_KW], rax
+    mov qword [rel kw_names_pending], 0
+
+    lea rdi, [rel dw_mod_name]
+    call str_from_cstr_heap
+    mov [rbp - DW_TMP], rax
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    call import_module
+    mov [rbp - DW_ARGS], rax        ; the module, across the release
+    mov rdi, [rbp - DW_TMP]
+    call obj_decref
+    cmp qword [rbp - DW_ARGS], 0
+    je .dw_no_module
+
+    lea rdi, [rel dw_attr_name]
+    call str_from_cstr_heap
+    mov [rbp - DW_TMP], rax
+    mov rdi, [rbp - DW_ARGS]
+    mov rdi, [rdi + PyModuleObject.mod_dict]
+    mov rsi, rax
+    call dict_get
+    mov [rbp - DW_MSG], rax         ; the function, across the release
+    mov rdi, [rbp - DW_TMP]
+    call obj_decref
+    mov rax, [rbp - DW_MSG]
+    test rax, rax
+    jz .dw_no_module
+    mov rdi, rax
+    call obj_incref                 ; the cache holds it for the process
+    mov rax, [rbp - DW_MSG]
+    mov [rel dw_warn_impl], rax
+
+    mov rax, [rbp - DW_KW]
+    mov [rel kw_names_pending], rax
+
+.dw_have:
+    mov rdi, rbx
+    call str_from_cstr_heap
+    mov [rbp - DW_MSG], rax
+    mov [rbp - DW_ARGS], rax
+    lea rax, [rel exc_DeprecationWarning_type]
+    mov [rbp - DW_ARGS + 8], rax
+
+    mov rdi, [rel dw_warn_impl]
+    lea rsi, [rbp - DW_ARGS]
+    mov edx, 2
+    call obj_call_n
+    mov [rbp - DW_TMP], rax
+
+    mov rdi, [rbp - DW_MSG]
+    call obj_decref
+    mov rax, [rbp - DW_TMP]
+    test rax, rax
+    jz .dw_raised
+    XDECREF_V rax, rcx
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+
+.dw_raised:
+    ; warn() raised -- a filter set to "error" does exactly that -- and the
+    ; exception is the caller's to propagate.
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.dw_no_module:
+    ; No _warnings, or no warn in it: say nothing rather than fail.  An
+    ; import that raised has to be cleared, or the next opcode would find it.
+    mov rax, [rbp - DW_KW]
+    mov [rel kw_names_pending], rax
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .dw_no_module_done
+    mov qword [rel current_exception], 0
+    call obj_decref
+.dw_no_module_done:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC deprecation_warn

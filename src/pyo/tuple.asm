@@ -4,6 +4,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern exc_TypeError_type
 extern bool_true
 extern bool_false
 extern ap_malloc
@@ -30,6 +31,7 @@ extern int_type
 extern eval_exception_unwind
 extern obj_richcompare_bool
 extern obj_as_index
+extern obj_as_index_seq
 extern recursion_limit
 extern c_recursion_depth
 extern exc_RecursionError_type
@@ -171,7 +173,7 @@ DEF_FUNC tuple_subscript
     cmp edx, TAG_SMALLINT
     je .ts_int                 ; SmallInt -> int path
     cmp edx, TAG_PTR            ; a float key is neither: classify
-    jne .ts_type_error          ; fully before dereferencing, or raw
+    jne .ts_int                 ; fully before dereferencing, or raw
                                 ; f64 bits get used as an address
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel slice_type]
@@ -180,7 +182,8 @@ DEF_FUNC tuple_subscript
 
 .ts_int:
     mov rdi, rsi               ; key
-    call obj_as_index          ; int, bool, int subclass or __index__
+    lea rsi, [rel ts_index_msg] ; ...and the refusal names the container
+    call obj_as_index_seq          ; int, bool, int subclass or __index__
     mov rsi, rax               ; index
     mov rdi, rbx
     call tuple_getitem         ; already returns a Value
@@ -197,9 +200,11 @@ DEF_FUNC tuple_subscript
     V_PACK rax, rdx             ; return one Value
     ret
 
-.ts_type_error:
-    RAISE exc_TypeError_type, "tuple indices must be integers or slices"
 END_FUNC tuple_subscript
+
+section .rodata
+ts_index_msg: db `tuple indices must be integers or slices, not \x01`, 0
+section .text
 
 ;; ============================================================================
 ;; tuple_len(PyTupleObject *tuple) -> int64_t
@@ -650,24 +655,23 @@ DEF_FUNC tuple_repeat
     ; The count must be an index.  int_fits_i64 and int_to_i64 both read
     ; PyIntObject fields, so a str or a float count was dereferenced as one:
     ; "a" * "2" segfaulted and [1] * None reported an OverflowError.
-    push rdi
-    push rdx
     mov rsi, rdi
     mov rcx, rdx
     V_PACK rsi, rcx
-    extern seq_repeat_check_count
-    call seq_repeat_check_count
-    pop rdx
-    pop rdi
-    push rdi
-    push rdx
-    call int_fits_i64
-    pop rdx
-    pop rdi
+    ; Not a count at all: DECLINE rather than raise, so the protocol carries
+    ; on to the right operand's __rmul__.  This raised, and `x * R()` for an R
+    ; with an __rmul__ never reached it.  op_binary_op words the failure when
+    ; nothing else answers either.
+    mov rdi, rsi
+    push rsi
+    extern binop_is_count
+    call binop_is_count
+    pop rsi
     test eax, eax
-    jz .trep_overflow
-    call int_to_i64
-    mov r12, rax             ; r12 = repeat count
+    jz .trep_decline
+    extern seq_repeat_count
+    call seq_repeat_count    ; __index__ counts, and one too big to be an
+    mov r12, rax             ; index is refused rather than truncated
 
     test r12, r12
     jg .rep_positive
@@ -743,6 +747,15 @@ DEF_FUNC tuple_repeat
     ; does not fit an index is an OverflowError.  list and bytes have said so
     ; since they were written; tuple sent both cases to the one label.
     RAISE exc_MemoryError_type, ""
+.trep_decline:
+    xor eax, eax
+    xor edx, edx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 .trep_overflow:
     RAISE exc_OverflowError_type, "too many items for tuple repetition"
 END_FUNC tuple_repeat
@@ -1294,8 +1307,11 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     ret
 
 .ttc_error:
-    extern exc_TypeError_type
-    RAISE exc_TypeError_type, "tuple expected at most 1 argument"
+    mov rsi, r13
+    CSTRING rdi, "tuple expected at most 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC tuple_type_call
 
 section .data

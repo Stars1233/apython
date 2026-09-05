@@ -139,10 +139,17 @@ END_FUNC signal_install
 ;; next pass rather than being lost.
 ;; ============================================================================
 SRP_I     equ 8
-SRP_ARGS  equ 32            ; two Values: the number and the frame
-SRP_FRAME equ 48            ; + 1 push = 56... one more to land right
+SRP_FN    equ 16            ; the handler being called
+; The two-Value argument array.  A slot names its LOWEST address and the
+; array grows UPWARD toward rbp, so args[0] is [rbp - SRP_ARGS] and args[1]
+; is eight bytes above it -- and nothing else may live in either.  Putting
+; the callable at SRP_ARGS+8 made it args[1]: every handler was called with
+; itself as the frame, and the None meant for the frame went one word past
+; the array.
+SRP_ARGS  equ 32
+SRP_FRAME equ 40            ; + 1 push = 48, 16-aligned
 global signal_run_pending
-DEF_FUNC signal_run_pending, 40             ; + 1 push = 48, 16-aligned
+DEF_FUNC signal_run_pending, SRP_FRAME
     push rbx
     mov qword [rel signal_any_pending], 0
     mov ebx, 1
@@ -162,26 +169,37 @@ DEF_FUNC signal_run_pending, 40             ; + 1 push = 48, 16-aligned
     ; the flag -- but one may have replaced a handler after the flag was set.
     V_TEST_PTR rax, rcx
     ja .srp_next
-    mov [rbp - SRP_ARGS + 8], rax           ; keep the callable
+    mov [rbp - SRP_FN], rax                 ; keep the handler
     mov rdi, rbx
     call int_from_i64
     V_PACK rax, rdx
     mov [rbp - SRP_ARGS], rax               ; args[0] = the signal number
-    ; args[1] is the interrupted frame.  CPython passes the frame object; the
-    ; frame this loop is running is in eval_saved_r12, and a handler that
-    ; ignores it -- which every handler in the stdlib does -- cannot tell the
-    ; difference between that and None.
+
+    ; args[1] is the interrupted frame, and it has to be a real one: pdb's
+    ; sigint_handler stores it, and traceback.print_stack(frame) walks it.
+    ; It is the frame this loop is running in, which is what eval_saved_r12
+    ; holds -- the same one sys._getframe() answers with.
+    mov rdi, [rel eval_saved_r12]
+    test rdi, rdi
+    jz .srp_no_frame
+    extern frameobj_new
+    call frameobj_new
+    test rax, rax
+    jnz .srp_have_frame
+.srp_no_frame:
     lea rax, [rel none_singleton]
     INCREF rax
-    mov [rbp - SRP_ARGS + 8 + 8], rax       ; args[1]
-    mov rdi, [rbp - SRP_ARGS + 8]
+.srp_have_frame:
+    mov [rbp - SRP_ARGS + 8], rax           ; args[1]
+
+    mov rdi, [rbp - SRP_FN]
     lea rsi, [rbp - SRP_ARGS]
     mov edx, 2
     call obj_call_n
     push rax
     mov rax, [rbp - SRP_ARGS]
     DECREF_V rax, rcx
-    mov rdi, [rbp - SRP_ARGS + 8 + 8]
+    mov rdi, [rbp - SRP_ARGS + 8]
     call obj_decref
     pop rax
     test rax, rax
@@ -558,6 +576,8 @@ DEF_FUNC signal_module_create, SM_FRAME
     MODULE_ADD_FUNC signal_method_alarm,    signal_s_alarm
     MODULE_ADD_FUNC signal_method_pause,    signal_s_pause
     MODULE_ADD_FUNC signal_method_strsignal, signal_s_strsignal
+    MODULE_ADD_FUNC signal_method_setitimer, signal_s_setitimer
+    MODULE_ADD_FUNC signal_method_getitimer, signal_s_getitimer
 
     lea rdi, [rel signal_s_name]
     call str_from_cstr_heap
@@ -574,6 +594,225 @@ DEF_FUNC signal_module_create, SM_FRAME
     leave
     ret
 END_FUNC signal_module_create
+
+
+;; ============================================================================
+;; sig_seconds_to_timeval(rdi = a Value in seconds, rsi = where the timeval
+;;                        goes) -> void, or raises
+;;
+;; The whole seconds and the microseconds, as setitimer wants them.  A
+;; negative or non-numeric value is CPython's ValueError/TypeError.
+;; ============================================================================
+STV_PTR   equ 8
+STV_ARG   equ 16            ; the argument itself, for the message
+STV_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC_LOCAL sig_seconds_to_timeval, STV_FRAME
+    mov [rbp - STV_PTR], rsi
+    mov [rbp - STV_ARG], rdi
+    V_UNPACK rdi, rsi
+    push rdi
+    push rsi
+    extern float_binop_accepts
+    call float_binop_accepts
+    pop rsi
+    pop rdi
+    test eax, eax
+    jz .stv_type
+    extern float_to_f64
+    call float_to_f64           ; seconds, as a double
+
+    ; NaN is not a delay; a NEGATIVE one is left to the kernel, which refuses
+    ; it with EINVAL -- CPython does the same, and the ItimerError that comes
+    ; back is not the ValueError a check here would give.
+    ucomisd xmm0, xmm0
+    jp .stv_value
+
+    roundsd xmm1, xmm0, 1       ; floor
+    subsd xmm0, xmm1
+    cvttsd2si rax, xmm1
+    mov rcx, [rbp - STV_PTR]
+    mov [rcx], rax              ; tv_sec
+    mulsd xmm0, [rel sig_1e6]
+    cvttsd2si rax, xmm0
+    mov [rcx + 8], rax          ; tv_usec
+    leave
+    ret
+.stv_type:
+    ; CPython's wording, from the same conversion an index goes through.
+    mov rsi, [rbp - STV_ARG]
+    CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+.stv_value:
+    RAISE exc_ValueError_type, "Invalid value NaN (not a number)"
+END_FUNC sig_seconds_to_timeval
+
+;; ============================================================================
+;; sig_itimerval_tuple(rdi = a struct itimerval) -> rax = (delay, interval),
+;;   both floats, or 0
+;;
+;; CPython's order is the VALUE first and the interval second, which is the
+;; other way round from the struct's own.
+;; ============================================================================
+SIT_BUF   equ 8
+SIT_TUP   equ 16
+SIT_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC_LOCAL sig_itimerval_tuple, SIT_FRAME
+    mov [rbp - SIT_BUF], rdi
+    mov edi, 2
+    extern tuple_new
+    call tuple_new
+    test rax, rax
+    jz .sitt_fail
+    mov [rbp - SIT_TUP], rax
+
+    mov rcx, [rbp - SIT_BUF]
+    lea rdi, [rcx + 16]         ; it_value
+    call sig_timeval_seconds
+    mov rcx, [rbp - SIT_TUP]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx], rax
+
+    mov rcx, [rbp - SIT_BUF]
+    mov rdi, rcx                ; it_interval
+    call sig_timeval_seconds
+    mov rcx, [rbp - SIT_TUP]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx + 8], rax
+
+    mov rax, [rbp - SIT_TUP]
+.sitt_fail:
+    leave
+    ret
+END_FUNC sig_itimerval_tuple
+
+;; ============================================================================
+;; sig_timeval_seconds(rdi = a struct timeval) -> rax = it, as a float Value
+;; ============================================================================
+DEF_FUNC_LOCAL sig_timeval_seconds
+    cvtsi2sd xmm0, qword [rdi]
+    cvtsi2sd xmm1, qword [rdi + 8]
+    divsd xmm1, [rel sig_1e6]
+    addsd xmm0, xmm1
+    movq rax, xmm0
+    V_FROM_F64 rax, rcx
+    leave
+    ret
+END_FUNC sig_timeval_seconds
+
+;; ============================================================================
+;; signal_method_setitimer(args, nargs) -> the timer that was there before,
+;;   as (delay, interval)
+;;
+;; signal.alarm takes whole seconds and nothing else, so a test that wants a
+;; sub-second alarm -- which is most of the ones that test signal delivery at
+;; all -- had nothing to reach for.
+;; ============================================================================
+SSI_NEW   equ 32            ; struct itimerval: interval, then value
+SSI_OLD   equ 64
+SSI_FRAME equ 80            ; + 0 pushes = 80
+global signal_method_setitimer
+DEF_FUNC signal_method_setitimer, SSI_FRAME
+    cmp rsi, 2
+    jl .ssi_argerr
+    cmp rsi, 3
+    jg .ssi_argerr
+    push rsi
+    push rdi
+
+    ; it_interval, args[2] when it is there
+    xor eax, eax
+    mov [rbp - SSI_NEW], rax
+    mov [rbp - SSI_NEW + 8], rax
+    cmp qword [rsp + 8], 3
+    jl .ssi_have_interval
+    mov rdi, [rsp]
+    mov rdi, [rdi + 16]
+    lea rsi, [rbp - SSI_NEW]
+    call sig_seconds_to_timeval
+.ssi_have_interval:
+
+    ; it_value, args[1]
+    mov rdi, [rsp]
+    mov rdi, [rdi + 8]
+    lea rsi, [rbp - SSI_NEW + 16]
+    call sig_seconds_to_timeval
+
+    mov rdi, [rsp]
+    mov rdi, [rdi]              ; which
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov rdi, rax
+    add rsp, 16
+
+    mov eax, 38                 ; __NR_setitimer
+    lea rsi, [rbp - SSI_NEW]
+    lea rdx, [rbp - SSI_OLD]
+    syscall
+    test rax, rax
+    js .ssi_oserror
+
+    lea rdi, [rbp - SSI_OLD]
+    call sig_itimerval_tuple
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.ssi_oserror:
+    neg rax
+    mov rdi, rax
+    xor esi, esi                ; no filename: raise_oserror reads one
+    call raise_oserror
+.ssi_argerr:
+    ; CPython's two, which name the bound that was missed and the count.
+    cmp rsi, 2
+    jge .ssi_too_many
+    extern raise_type_error_counted
+    CSTRING rdi, "setitimer expected at least 2 arguments, got "
+    xor edx, edx
+    jmp raise_type_error_counted
+.ssi_too_many:
+    CSTRING rdi, "setitimer expected at most 3 arguments, got "
+    xor edx, edx
+    jmp raise_type_error_counted
+END_FUNC signal_method_setitimer
+
+;; ============================================================================
+;; signal_method_getitimer(args, nargs) -> (delay, interval) for one timer
+;; ============================================================================
+SGI_CUR   equ 32
+SGI_FRAME equ 48            ; + 0 pushes = 48
+global signal_method_getitimer
+DEF_FUNC signal_method_getitimer, SGI_FRAME
+    cmp rsi, 1
+    jne .sgi_argerr
+    mov rdi, [rdi]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    mov rdi, rax
+    mov eax, 36                 ; __NR_getitimer
+    lea rsi, [rbp - SGI_CUR]
+    syscall
+    test rax, rax
+    js .sgi_oserror
+    lea rdi, [rbp - SGI_CUR]
+    call sig_itimerval_tuple
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.sgi_oserror:
+    neg rax
+    mov rdi, rax
+    xor esi, esi                ; no filename: raise_oserror reads one
+    call raise_oserror
+.sgi_argerr:
+    extern raise_type_error_counted
+    CSTRING rdi, "_signal.getitimer() takes exactly one argument ("
+    CSTRING rdx, " given)"
+    jmp raise_type_error_counted
+END_FUNC signal_method_getitimer
 
 ;; ============================================================================
 ;; sm_add_int_named(rdi = the value; rbx = the row) -> void
@@ -611,6 +850,11 @@ signal_s_raise_signal: db "raise_signal", 0
 signal_s_alarm:     db "alarm", 0
 signal_s_pause:     db "pause", 0
 signal_s_strsignal: db "strsignal", 0
+signal_s_setitimer: db "setitimer", 0
+signal_s_getitimer: db "getitimer", 0
+
+align 8
+sig_1e6: dq 1000000.0
 
 sig_c_SIG_DFL: db "SIG_DFL", 0
 sig_c_SIG_IGN: db "SIG_IGN", 0

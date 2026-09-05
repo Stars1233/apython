@@ -39,3 +39,51 @@ class C(metaclass=Meta):
 
 show("C | None", lambda: C | None)
 show("C | list[int]", lambda: C | list[int])
+
+
+# isinstance and issubclass said "or a union" in their refusals and accepted
+# none: `isinstance(1, int | str)` was a TypeError.  A union is its members,
+# exactly as a tuple of them would be -- including inside a tuple, where this
+# loop is flat and CPython's recursion is not.
+#
+# A parameterized generic is its own refusal in CPython, and saying only that
+# it is not a type buries which of the two mistakes it was.
+print("=== a union as the second argument ===")
+
+
+class B:
+    pass
+
+
+class D(B):
+    pass
+
+
+def show(label, fn):
+    try:
+        print("%-38s %r" % (label, fn()))
+    except Exception as e:
+        print("%-38s %s: %s" % (label, type(e).__name__, e))
+
+
+for label, fn in (
+        ("isinstance(1, int|str)", lambda: isinstance(1, int | str)),
+        ("isinstance('a', int|str)", lambda: isinstance("a", int | str)),
+        ("isinstance(1.5, int|str)", lambda: isinstance(1.5, int | str)),
+        ("isinstance(None, int|None)", lambda: isinstance(None, int | None)),
+        ("isinstance(D(), B|int)", lambda: isinstance(D(), B | int)),
+        ("isinstance(1, int|str|float)", lambda: isinstance(1, int | str | float)),
+        ("isinstance(True, int|str)", lambda: isinstance(True, int | str)),
+        ("issubclass(D, B|int)", lambda: issubclass(D, B | int)),
+        ("issubclass(int, str|float)", lambda: issubclass(int, str | float)),
+        ("issubclass(bool, int|str)", lambda: issubclass(bool, int | str)),
+        ("nested in a tuple", lambda: isinstance(1, (int | str, bytes))),
+        ("nested, no match", lambda: isinstance(1.5, (int | str, bytes))),
+        ("nested, second", lambda: isinstance(b"x", (int | str, bytes))),
+        ("isinstance(1, list[int])", lambda: isinstance(1, list[int])),
+        ("issubclass(list, list[int])", lambda: issubclass(list, list[int])),
+        ("generic in a tuple", lambda: isinstance(1, (list[int],))),
+        ("generic in a union", lambda: isinstance(1, list[int] | None)),
+        ("isinstance(1, 5)", lambda: isinstance(1, 5)),
+        ("issubclass(int, 5)", lambda: issubclass(int, 5))):
+    show(label, fn)

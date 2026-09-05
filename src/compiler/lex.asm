@@ -54,6 +54,10 @@ LR_STRNL equ 40          ; lines a string literal spanned, not applied yet
 LR_STRLS equ 48          ; where the last of those lines starts
 LR_FRAME equ 56          ; + 5 pushes = 96
 
+section .bss
+;; Set around .sub_type_comment: was the `#` the first thing on its line?
+lex_tc_own_line: resb 1
+
 section .text
 
 ;; ============================================================================
@@ -521,6 +525,7 @@ DEF_FUNC lex_run, LR_FRAME
     ; token is emitted BETWEEN the NEWLINE and the INDENT, which is where
     ; CPython's grammar looks for it, and the line still counts as blank so
     ; the indentation stack is untouched.
+    mov byte [rel lex_tc_own_line], 1
     call .sub_type_comment
     test eax, eax
     jnz .bl_at_eol                      ; r12 is at the end of the line already
@@ -603,6 +608,7 @@ DEF_FUNC lex_run, LR_FRAME
     ; asked for one -- the only comment this lexer ever emits.  It is
     ; recognised here rather than in the parser because the parser never sees
     ; a comment at all: everything else about them is that they are skipped.
+    mov byte [rel lex_tc_own_line], 0
     call .sub_type_comment
     test eax, eax
     jnz .scan                           ; r12 is at the end of the line already
@@ -678,6 +684,38 @@ DEF_FUNC lex_run, LR_FRAME
     inc rcx
     jmp .tc_end
 .tc_have_end:
+    ; A `# type: ignore` on a line of ITS OWN carries the line terminator in
+    ; its tag; one after a statement does not, and a `# type: <sig>` comment
+    ; never does whichever line it is on.  CPython's tokenizer gets that from
+    ; which terminator follows -- an NL it has already absorbed, against a
+    ; NEWLINE token of its own -- and `ast.parse` reports the difference in
+    ; TypeIgnore.tag.
+    cmp qword [rsp], TOK_TYPE_IGNORE    ; the kind, pushed above
+    jne .tc_no_eol
+    cmp byte [rel lex_tc_own_line], 0
+    je .tc_no_eol
+    cmp rcx, r13
+    jae .tc_no_eol
+    movzx edx, byte [rcx]
+    cmp dl, 10
+    jne .tc_no_eol
+    inc rcx                             ; the newline belongs to the tag
+    push rcx
+    push rax
+    mov rdi, rbx
+    mov rsi, [rsp + 16]
+    mov rdx, rax
+    sub rcx, rax
+    xor r8d, r8d
+    call lex_emit
+    pop rax
+    pop rcx
+    add rsp, 8
+    dec rcx                             ; but not to the scan: .newline wants it
+    mov r12, rcx
+    mov eax, 1
+    ret
+.tc_no_eol:
     push rcx
     push rax
     mov rdi, rbx
@@ -954,7 +992,9 @@ DEF_FUNC lex_run, LR_FRAME
 
 ; .sub_num_check - is the number that was just scanned actually one?
 ;   r15 = its first byte, r12 = one past its last, r13 = end of input.
-;   -> eax = 1 when it is, or 0 with the error recorded.
+;   -> eax = 1 when it is, or 0 with the error recorded.  r12 may come back
+;      SHORTER: the scan takes hex digits whatever the radix, so `0b1and 2`
+;      arrives as `0b1a` and the literal really ends at the `a`.
 ;
 ; The scan is permissive on purpose -- it takes hex digits for every radix and
 ; underscores anywhere -- so the four things CPython refuses are decided here,
@@ -965,7 +1005,7 @@ DEF_FUNC lex_run, LR_FRAME
     push rbx
     push r14
     push r15
-    push r12
+    push r13                    ; r12 is an in/out now; r13 keeps the count
     sub rsp, 8
 
     ; A radix literal's digits have to suit its radix.  The scan takes hex
@@ -995,26 +1035,135 @@ DEF_FUNC lex_run, LR_FRAME
     cmp al, '_'
     je .snc_digit_next
     sub eax, '0'
+    cmp eax, 10
+    jae .snc_radix_ends         ; a letter: the literal stopped before it
     cmp rax, [rsp]
     jb .snc_digit_next
-    ; Out of range for the base -- and so is any letter, which subtracting
-    ; '0' leaves above it.
+    ; A DIGIT out of range for the base.  CPython names it -- "invalid digit
+    ; '2' in binary literal" -- and keeps "invalid binary literal" for a
+    ; letter, which is not a digit of any base and so ends the literal.
     mov r15, rcx
     cmp qword [rsp], 2
     je .snc_binary
     jmp .snc_octal
+
+.snc_radix_ends:
+    ; The scan takes hex digits whatever the prefix, so `0b1and` came in as
+    ; `0b1a`; the literal is `0b1` and the rest is the tail, which the checks
+    ; below judge -- including the keyword lookahead that makes `0b1and 2`
+    ; the number 1 and the operator, as CPython has it.
+    mov r12, rcx
 .snc_digit_next:
     inc rcx
     jmp .snc_digit_loop
 .snc_not_radix_digits:
 
+    ; A radix prefix with no digits behind it: `0x`, `0b_`, `0o1_`.  CPython
+    ; names the base -- "invalid hexadecimal literal" -- and this let the
+    ; token through for the parser to call an "invalid numeric literal",
+    ; which names neither the base nor the reason.
+    cmp byte [r15], '0'
+    jne .snc_not_empty_radix
+    lea rax, [r15 + 1]
+    cmp rax, r12
+    jae .snc_not_empty_radix
+    movzx eax, byte [r15 + 1]
+    or eax, 0x20
+    cmp al, 'b'
+    je .snc_radix_digits_needed
+    cmp al, 'o'
+    je .snc_radix_digits_needed
+    cmp al, 'x'
+    jne .snc_not_empty_radix
+.snc_radix_digits_needed:
+    ; The last character has to be a digit; an underscore may separate them
+    ; but may not end them, and there has to be at least one.
+    lea rax, [r15 + 2]
+    cmp rax, r12
+    jae .snc_empty_radix        ; the prefix and nothing else
+    cmp byte [r12 - 1], '_'
+    jne .snc_not_empty_radix
+.snc_empty_radix:
+    movzx eax, byte [r15 + 1]
+    or eax, 0x20
+    cmp al, 'b'
+    je .snc_bad_binary
+    cmp al, 'o'
+    je .snc_bad_octal
+    jmp .snc_bad_hex
+
+.snc_not_empty_radix:
     ; A trailing underscore: `1_` is not a number.  It is the last byte of the
     ; token, and it is what CPython blames.
     cmp byte [r12 - 1], '_'
-    jne .snc_no_trailing
+    jne .snc_underscores
     lea r15, [r12 - 1]
     CSTRING rax, "invalid decimal literal"
     jmp .snc_at_r15
+
+.snc_underscores:
+
+    ; An underscore has to SEPARATE digits: `1__2` and `12__` are not numbers,
+    ; and CPython points at the underscore that is not followed by one.  The
+    ; scan takes underscores anywhere, so this is where they are judged; the
+    ; parser used to see the token, fail to convert it, and call it an
+    ; "invalid numeric literal", which names neither the reason nor the base.
+    ;
+    ; The radix cases are already gone -- the check above wants the last
+    ; character to be a digit -- so what is left is decimal, and hex, whose
+    ; digits are the ones the permissive scan takes anyway.
+    mov rcx, r15
+.snc_us_loop:
+    cmp rcx, r12
+    jae .snc_no_trailing
+    cmp byte [rcx], '_'
+    jne .snc_us_next
+    lea rax, [rcx + 1]
+    cmp rax, r12
+    jae .snc_us_bad             ; nothing after it at all
+    movzx eax, byte [rax]
+    lea rdx, [rel cc_table]
+    test byte [rdx + rax], CC_DIGIT
+    jnz .snc_us_next
+    ; A hex literal's digits include a-f, which CC_DIGIT does not.
+    cmp byte [r15], '0'
+    jne .snc_us_bad
+    lea rdx, [r15 + 1]
+    cmp rdx, r12
+    jae .snc_us_bad
+    movzx edx, byte [r15 + 1]
+    or edx, 0x20
+    cmp dl, 'x'
+    jne .snc_us_bad
+    or eax, 0x20
+    cmp al, 'a'
+    jb .snc_us_bad
+    cmp al, 'f'
+    jbe .snc_us_next
+.snc_us_bad:
+    ; The column is the underscore, and the wording names the base: `0b1__0`
+    ; is an invalid BINARY literal, not a decimal one.
+    mov rax, r15
+    mov r15, rcx
+    cmp byte [rax], '0'
+    jne .snc_us_decimal
+    lea rdx, [rax + 1]
+    cmp rdx, r12
+    jae .snc_us_decimal
+    movzx edx, byte [rax + 1]
+    or edx, 0x20
+    cmp dl, 'b'
+    je .snc_bad_binary
+    cmp dl, 'o'
+    je .snc_bad_octal
+    cmp dl, 'x'
+    je .snc_bad_hex
+.snc_us_decimal:
+    CSTRING rax, "invalid decimal literal"
+    jmp .snc_at_r15
+.snc_us_next:
+    inc rcx
+    jmp .snc_us_loop
 
 .snc_no_trailing:
     ; An identifier character straight after the literal.  `1e` is the shape
@@ -1028,7 +1177,109 @@ DEF_FUNC lex_run, LR_FRAME
     test byte [rcx + rax], CC_IDCONT
     jz .snc_leading_zero
 
-    ; Which literal was it?  A radix prefix names its base and its bad digit.
+    ; ...unless what follows is one of the keywords that can come after an
+    ; expression.  `1if True else 2` is 1 in CPython, and so are `1and 2`,
+    ; `[1for i in x]` and `0x1if True else 2`; its tokenizer ends the number
+    ; at the letter and warns rather than refusing.  This refused all of them
+    ; -- and they turn up in real code, because a formatter that strips
+    ; spaces produces them.
+    ;
+    ; The warning is recorded rather than emitted: the compiler runs before
+    ; there is an interpreter frame, which is the same reason it may not
+    ; raise.  comp_emit_warnings hands the lot to warn_explicit at the end.
+    movzx eax, byte [r12]
+    cmp al, 'i'
+    jne .snc_kw_table
+    ; if, in and is: CPython looks at the pair and no further, so `1ifx` is
+    ; the number 1 and the name `ifx`, and the error comes from the parser.
+    lea rcx, [r12 + 1]
+    cmp rcx, r13
+    jae .snc_kw_no
+    movzx eax, byte [rcx]
+    cmp al, 'f'
+    je .snc_kw_warn
+    cmp al, 'n'
+    je .snc_kw_warn
+    cmp al, 's'
+    je .snc_kw_warn
+    jmp .snc_kw_no
+
+.snc_kw_table:
+    ; The rest have to match whole, and not be the start of a longer name:
+    ; `1andx` is an error where `1and x` is not.
+    lea rsi, [rel snc_num_keywords]
+.snc_kw_loop:
+    mov rdi, [rsi]
+    test rdi, rdi
+    jz .snc_kw_no
+    add rsi, 8
+    xor edx, edx
+.snc_kw_char:
+    movzx eax, byte [rdi + rdx]
+    test al, al
+    jz .snc_kw_end
+    lea rcx, [r12 + rdx]
+    cmp rcx, r13
+    jae .snc_kw_loop
+    cmp al, [rcx]
+    jne .snc_kw_loop
+    inc rdx
+    jmp .snc_kw_char
+.snc_kw_end:
+    lea rcx, [r12 + rdx]
+    cmp rcx, r13
+    jae .snc_kw_warn            ; the source ends with it
+    lea rax, [rel cc_table]
+    movzx edx, byte [rcx]
+    test byte [rax + rdx], CC_IDCONT
+    jz .snc_kw_warn
+    jmp .snc_kw_loop
+
+.snc_kw_warn:
+    ; CPython's tokenizer ends the number at the letter and WARNS, with the
+    ; same wording the error would have carried: "invalid decimal literal"
+    ; for `1if True else 2` and "invalid hexadecimal literal" for `0x1if`.
+    push r12
+    push r13
+    CSTRING rax, "invalid decimal literal"
+    cmp byte [r15], '0'
+    jne .snc_kww_have
+    lea rcx, [r15 + 1]
+    cmp rcx, r12
+    jae .snc_kww_have
+    movzx ecx, byte [r15 + 1]
+    or ecx, 0x20
+    cmp cl, 'b'
+    je .snc_kww_bin
+    cmp cl, 'o'
+    je .snc_kww_oct
+    cmp cl, 'x'
+    je .snc_kww_hex
+    jmp .snc_kww_have
+.snc_kww_bin:
+    CSTRING rax, "invalid binary literal"
+    jmp .snc_kww_have
+.snc_kww_oct:
+    CSTRING rax, "invalid octal literal"
+    jmp .snc_kww_have
+.snc_kww_hex:
+    CSTRING rax, "invalid hexadecimal literal"
+.snc_kww_have:
+    mov rdi, rbx
+    mov rsi, rax
+    mov edx, [r14 + Lexer.lineno]
+    extern comp_warn
+    call comp_warn
+    pop r13
+    pop r12
+    jmp .snc_leading_zero
+
+.snc_kw_no:
+
+    ; Which literal was it?  A radix prefix names its base, and blames the
+    ; literal rather than the character: CPython's "invalid hexadecimal
+    ; literal" for `0x1z`, against "invalid digit '2' in binary literal" for
+    ; a digit that is a digit but not one of that base's.
     cmp byte [r15], '0'
     jne .snc_not_radix
     lea rax, [r15 + 1]
@@ -1036,13 +1287,12 @@ DEF_FUNC lex_run, LR_FRAME
     jae .snc_not_radix
     movzx eax, byte [r15 + 1]
     or eax, 0x20
-    mov r15, r12                ; the character after it is the bad one
     cmp al, 'b'
-    je .snc_binary
+    je .snc_bad_binary
     cmp al, 'o'
-    je .snc_octal
+    je .snc_bad_octal
     cmp al, 'x'
-    je .snc_hex
+    je .snc_bad_hex
 .snc_not_radix:
     test qword [rbp - LR_FLAGS], TF_NUM_IMAG
     jz .snc_decimal_junk
@@ -1053,6 +1303,16 @@ DEF_FUNC lex_run, LR_FRAME
 .snc_decimal_junk:
     ; `1e`, `1if`, `2and`: CPython spans the literal itself, from its start.
     CSTRING rax, "invalid decimal literal"
+    jmp .snc_at_r15
+
+.snc_bad_binary:
+    CSTRING rax, "invalid binary literal"
+    jmp .snc_at_r15
+.snc_bad_octal:
+    CSTRING rax, "invalid octal literal"
+    jmp .snc_at_r15
+.snc_bad_hex:
+    CSTRING rax, "invalid hexadecimal literal"
     jmp .snc_at_r15
 
 .snc_binary:
@@ -1154,7 +1414,7 @@ DEF_FUNC lex_run, LR_FRAME
     mov eax, 1
 .snc_ret:
     add rsp, 8
-    pop r12
+    pop r13
     pop r15
     pop r14
     pop rbx
@@ -1451,3 +1711,18 @@ DEF_FUNC lex_run, LR_FRAME
     leave
     ret
 END_FUNC lex_run
+
+; The keywords a number may end against.  CPython's tokenizer takes `if`, `in`
+; and `is` from the first two characters and these five whole; anything else
+; after a literal is an error.
+section .rodata
+snc_kw_and:  db "and", 0
+snc_kw_else: db "else", 0
+snc_kw_for:  db "for", 0
+snc_kw_not:  db "not", 0
+snc_kw_or:   db "or", 0
+align 8
+snc_num_keywords:
+    dq snc_kw_and, snc_kw_else, snc_kw_for, snc_kw_not, snc_kw_or, 0
+
+section .text

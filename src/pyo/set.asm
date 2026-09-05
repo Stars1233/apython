@@ -514,14 +514,44 @@ DEF_FUNC set_add
 END_FUNC set_add
 
 ;; ============================================================================
-;; set_contains(set, key) -> int (0/1)
-;; Check if key is in the set
+;; set_contains(rdi = the set, rsi = the key Value) -> eax = 0 or 1
+;;
+;; A SET is unhashable, but `set() in {1, 2}` is False in CPython rather
+;; than a TypeError: its set_contains retries with a frozenset built from
+;; the key, because that is the only thing the set could be holding.  A
+;; frozenset built here is the same test done up front.
 ;; ============================================================================
-DEF_FUNC set_contains
+SCT_TMP   equ 8             ; the frozenset standing in for a set key, or 0
+SCT_KEY   equ 16            ; the key Value being looked up
+SCT_FRAME equ 32            ; + 4 pushes = 64, 16-aligned
+DEF_FUNC set_contains, SCT_FRAME
     push rbx
     push r12
     push r13
     push r14
+
+    mov qword [rbp - SCT_TMP], 0
+    V_TEST_PTR rsi, rax
+    ja .sct_not_set
+    test rsi, rsi
+    jz .sct_not_set
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel set_type]
+    cmp rax, rcx
+    jne .sct_not_set
+    mov [rbp - SCT_KEY], rsi
+    push rdi
+    lea rsi, [rbp - SCT_KEY]
+    lea rdi, [rel frozenset_type]
+    mov edx, 1
+    call frozenset_type_call
+    pop rdi
+    V_UNPACK rax, rdx
+    test rax, rax
+    jz .sct_failed
+    mov [rbp - SCT_TMP], rax
+    mov rsi, rax
+.sct_not_set:
 
     V_UNPACK rsi, rdx           ; decode the key Value
     mov rbx, rdi                ; set
@@ -545,12 +575,29 @@ DEF_FUNC set_contains
 
     mov eax, edx                ; return 1 if found, 0 if not
 
+    ; The frozenset built for a set key, if there was one.
+    mov rdi, [rbp - SCT_TMP]
+    test rdi, rdi
+    jz .sct_out
+    push rax
+    call obj_decref
+    pop rax
+.sct_out:
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
     ret
+.sct_failed:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
 END_FUNC set_contains
 
 ;; ============================================================================
@@ -998,10 +1045,17 @@ DEF_FUNC set_type_call, STC_FRAME
     call obj_decref
 
 .stc_not_iterable:
-    RAISE exc_TypeError_type, "set() argument is not iterable"
+    mov rsi, r12                ; args[0]: the iterator never replaced it
+    CSTRING rdi, `'\x01' object is not iterable`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .stc_error:
-    RAISE exc_TypeError_type, "set() takes at most 1 argument"
+    mov rsi, rdx
+    CSTRING rdi, "set expected at most 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC set_type_call
 
 ; set_repr is in src/repr.asm
@@ -1217,9 +1271,15 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     mov rdi, rbx
     call obj_decref
 .ftc_not_iterable:
-    RAISE exc_TypeError_type, "frozenset() argument is not iterable"
+    mov rsi, r12                ; args[0]: the iterator never replaced it
+    CSTRING rdi, `'\x01' object is not iterable`
+    jmp raise_type_error_with_name
 .ftc_error:
-    RAISE exc_TypeError_type, "frozenset() takes at most 1 argument"
+    mov rsi, rdx
+    CSTRING rdi, "frozenset expected at most 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC frozenset_type_call
 
 

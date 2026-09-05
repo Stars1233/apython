@@ -1513,8 +1513,15 @@ DEF_FUNC float_classmethod_fromhex, FFH_FRAME
     push r12
     push r13
 
-    ; Get string arg
-    mov rcx, [rdi + 8]            ; args[1] payload
+    ; Get string arg.  Read as a PyStrObject whatever it was, so
+    ; `float.fromhex(0)` read a small integer's Value as a pointer and died,
+    ; and every other type came back as "invalid hexadecimal floating-point
+    ; string" where CPython refuses the TYPE.
+    mov rdi, [rdi + 8]            ; args[1]
+    extern str_require_str
+    CSTRING rsi, "bad argument type for built-in operation"
+    call str_require_str
+    mov rcx, rax
     mov [rbp - FFH_STR], rcx
     lea r12, [rcx + PyStrObject.data]  ; r12 = string data
 

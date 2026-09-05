@@ -156,3 +156,83 @@ for i in range(5):
 gc.collect()
 print(len(Held.__subclasses__()), seen == [])
 print("survived")
+
+
+# The metatype is a REGISTRATION -- a global that type_from_parts leaves for
+# the class it is building -- and it has to be put down before anything that
+# might build a class of its own picks it up.  It was stamped AFTER
+# __init_subclass__ ran, so a class defined inside one came out with the outer
+# class's metaclass instead of `type`.
+print("=== a class built while another is being built ===")
+
+
+class Meta(type):
+    pass
+
+
+made = []
+
+
+class Base(metaclass=Meta):
+    def __init_subclass__(cls, **kw):
+        class Inner:
+            pass
+
+        made.append(("init_subclass", type(Inner).__name__))
+        super().__init_subclass__(**kw)
+
+
+class Child(Base):
+    pass
+
+
+print(type(Child).__name__, type(Base).__name__, made)
+
+
+class Named:
+    def __set_name__(self, owner, name):
+        class Inner2:
+            pass
+
+        made.append(("set_name", type(Inner2).__name__, type(owner).__name__))
+
+
+class WithDescr(metaclass=Meta):
+    d = Named()
+
+
+print(type(WithDescr).__name__, made[-1])
+
+
+class Meta2(type):
+    def __init__(cls, *a, **kw):
+        class Inner3:
+            pass
+
+        made.append(("meta init", type(Inner3).__name__))
+        super().__init__(*a, **kw)
+
+
+class UsesMeta2(metaclass=Meta2):
+    pass
+
+
+print(type(UsesMeta2).__name__, made[-1])
+
+
+# ...and nesting one metaclass inside another still gives each its own.
+class MetaA(type):
+    def __init__(cls, *a, **kw):
+        class Deep(metaclass=Meta):
+            pass
+
+        made.append(("deep", type(Deep).__name__))
+        super().__init__(*a, **kw)
+
+
+class UsesMetaA(metaclass=MetaA):
+    pass
+
+
+print(type(UsesMetaA).__name__, made[-1])
+print("metatypes done")

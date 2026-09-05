@@ -176,7 +176,7 @@ DEF_FUNC frame_new, 8            ; 5 pushes, so rsp is 16-aligned
     mov [r11 + PyFrame.locals], r14
     mov qword [r11 + PyFrame.instr_ptr], 0
     mov qword [r11 + PyFrame.stack_ptr], 0
-    mov dword [r11 + PyFrame.return_offset], 0
+    mov dword [r11 + PyFrame.exc_depth], 0
     ; The pool hands back memory it did not zero, so a field that is read
     ; before it is written has to be initialised here.  exc_state is XDECREFd
     ; by frame_free, which makes a stale pointer a free of someone else's

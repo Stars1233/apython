@@ -23,6 +23,7 @@ extern io_buffer_acquired
 extern ap_memcmp
 extern ap_memmove
 extern exc_MemoryError_type
+extern int_fits_i64
 extern exc_BufferError_type
 extern set_exception
 extern ap_realloc
@@ -36,6 +37,7 @@ extern ap_memcpy
 extern type_type
 extern obj_incref
 extern obj_decref
+extern none_singleton
 extern obj_dealloc
 extern raise_exception
 extern exc_IndexError_type
@@ -44,12 +46,12 @@ extern exc_ValueError_type
 extern exc_NotImplementedError_type
 extern int_type
 extern obj_as_index
+extern obj_as_index_seq
 extern bool_type
 extern int_to_i64
 extern slice_type
 extern slice_indices
 extern ap_strcmp
-extern builtin_func_new
 
 extern bytearray_data
 extern bytearray_empty_data
@@ -190,7 +192,7 @@ DEF_FUNC bytes_subscript
     cmp edx, TAG_SMALLINT
     je .bs_int                 ; SmallInt → int path
     cmp edx, TAG_PTR            ; a float key is neither: classify
-    jne .bs_type_error          ; fully before dereferencing, or raw
+    jne .bs_int                 ; fully before dereferencing, or raw
                                 ; f64 bits get used as an address
     mov rax, [r12 + PyObject.ob_type]
     lea rcx, [rel slice_type]
@@ -201,7 +203,8 @@ DEF_FUNC bytes_subscript
     ; obj_as_index covers int, bool, an int subclass and __index__, and
     ; raises for anything else.
     mov rdi, r12
-    call obj_as_index
+    lea rsi, [rel bs_index_msg]
+    call obj_as_index_seq
     ; Call bytes_getitem
     mov rdi, rbx
     mov rsi, rax
@@ -318,15 +321,20 @@ DEF_FUNC bytes_subscript
     V_PACK rax, rdx             ; return one Value
     ret
 
-.bs_type_error:
-    RAISE exc_TypeError_type, "byte indices must be integers or slices"
 END_FUNC bytes_subscript
+
+section .rodata
+bs_index_msg: db `byte indices must be integers or slices, not \x01`, 0
+section .text
 
 ;; ============================================================================
 ;; bytes_contains(PyBytesObject *self, PyObject *value) -> int (0/1)
 ;; sq_contains: check if byte value is in bytes
 ;; ============================================================================
-DEF_FUNC bytes_contains
+BCN_ARG   equ 8             ; the operand as it arrived, for the refusal
+BCN_FRAME equ 48            ; + 4 pushes = 80, 16-aligned
+DEF_FUNC bytes_contains, BCN_FRAME
+    mov [rbp - BCN_ARG], rsi
     V_UNPACK rsi, rdx           ; decode the operand Value
     push rbx
     push r12
@@ -355,6 +363,21 @@ DEF_FUNC bytes_contains
     mov edx, TAG_SMALLINT
 .bc_byte:
     mov rdi, rsi                ; int_to_i64 takes the payload plus the tag
+    ; ...and int_to_i64 TRUNCATES a wide one through __gmpz_get_si, so
+    ; `(1 << 70) in b"abc"` answered False rather than raising: a number
+    ; that does not fit is certainly not a byte.
+    cmp edx, TAG_PTR
+    jne .bc_have_int
+    push rsi
+    push rdx
+    extern int_fits_i64
+    call int_fits_i64
+    pop rdx
+    pop rsi
+    test eax, eax
+    jz .bc_range_error
+    mov rdi, rsi
+.bc_have_int:
     call int_to_i64             ; in edx, not a packed Value
     ; A byte value outside 0..255 can never be present, and CPython raises
     ; for it rather than answering False.
@@ -421,7 +444,10 @@ DEF_FUNC bytes_contains
     ret
 
 .bc_type_error:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    mov rsi, [rbp - BCN_ARG]
+    CSTRING rdi, `a bytes-like object is required, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .bc_range_error:
     RAISE exc_ValueError_type, "byte must be in range(0, 256)"
@@ -655,35 +681,14 @@ END_FUNC bytes_repr_impl
 ;; Attribute lookup for bytes: handles decode, hex, etc.
 ;; ============================================================================
 DEF_FUNC bytes_getattr
-    push rbx
-    push r12
-
-    mov rbx, rdi               ; self
-    mov r12, rsi               ; name
-
-    lea rdi, [r12 + PyStrObject.data]
-
-    ; Check "decode"
-    CSTRING rsi, "decode"
-    call ap_strcmp
-    test eax, eax
-    jz .bga_decode
-
-    ; Not found
+    ; Nothing of its own.  There used to be a "decode" arm here that answered
+    ; the UNBOUND builtin -- no self attached -- and it ran ahead of the
+    ; tp_dict entry that decode has had since methods_init registered it.  A
+    ; direct `b.decode()` went through LOAD_METHOD and found the dict; `m =
+    ; b.decode` went through LOAD_ATTR and found this, so `m()` read whatever
+    ; args[0] happened to be as the bytes object.  Every shape that reaches a
+    ; builtin through a bound method did the same: `b.decode(*args)` too.
     RET_NULL
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; return one Value
-    ret
-
-.bga_decode:
-    call _get_bytes_decode_builtin
-    mov rdi, rax
-    call obj_incref
-    mov edx, TAG_PTR
-    pop r12
-    pop rbx
     leave
     V_PACK rax, rdx             ; return one Value
     ret
@@ -1192,17 +1197,15 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     mov r12, [rbx + PyBytesObject.ob_size]
 
     ; decode([encoding[, errors]]).  An encoding that is not a str is a
-    ; TypeError in CPython, not a silent fall back to utf-8.
+    ; TypeError in CPython, not a silent fall back to utf-8 -- and None is
+    ; not a str: `b"ab".decode(None)` is refused there and was taken here as
+    ; "use the default".
     cmp rsi, 3
     jg .bd_too_many
     xor eax, eax
     cmp rsi, 2
     jl .bd_have_enc
     mov rax, [rdi + 8]
-    extern none_singleton
-    lea rcx, [rel none_singleton]
-    cmp rax, rcx
-    je .bd_default_enc
     V_TEST_PTR rax, rcx
     ja .bd_bad_enc
     test rax, rax
@@ -1212,10 +1215,13 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     cmp rcx, rdx
     jne .bd_bad_enc
     jmp .bd_have_enc
-.bd_default_enc:
-    xor eax, eax
 .bd_have_enc:
     mov [rbp - BD_ENC], rax
+    ; Empty input is the empty string whatever the encoding was called:
+    ; CPython's PyUnicode_Decode answers before it resolves the codec, so
+    ; `b"".decode("nope")` is '' rather than a LookupError.
+    test r12, r12
+    jz .bd_empty
     mov rdi, rax
     extern codec_id
     call codec_id
@@ -1512,10 +1518,32 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     ret
 
 .bd_bad_enc:
-    extern raise_type_error_with_name
-    mov rsi, rax
-    CSTRING rdi, `decode() argument 'encoding' must be str, not \x01`
-    call raise_type_error_with_name
+    ; Composed rather than handed to raise_type_error_with_name, because
+    ; CPython's argument clinic writes "not None" here where the tp_name is
+    ; "NoneType" -- and it is the clinic's wording a program greps for.
+    push rax
+    lea rdi, [rel bd_msgbuf]
+    lea rsi, [rel bd_msg_enctype]
+    call bd_copy
+    pop rsi
+    mov rdi, rax
+    call bd_append_typename
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel bd_msgbuf]
+    call raise_exception
+    ud2
+.bd_empty:
+    CSTRING rdi, ""
+    xor esi, esi
+    extern str_new_heap
+    call str_new_heap
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
 .bd_too_many:
     RAISE exc_TypeError_type, "decode() takes at most 2 arguments"
 
@@ -1532,21 +1560,6 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     ud2
 END_FUNC _bytes_decode_impl
 
-;; ============================================================================
-;; Lazy-init helper for bytes.decode builtin
-;; ============================================================================
-DEF_FUNC_LOCAL _get_bytes_decode_builtin
-    mov rax, [rel _bytes_decode_cache]
-    test rax, rax
-    jnz .ret
-    lea rdi, [rel _bytes_decode_impl]
-    CSTRING rsi, "decode"
-    call builtin_func_new
-    mov [rel _bytes_decode_cache], rax
-.ret:
-    leave
-    ret
-END_FUNC _get_bytes_decode_builtin
 
 ;; ============================================================================
 ;; bytes_tp_iter(PyBytesObject *self) -> PyBytesIterObject*
@@ -1833,9 +1846,6 @@ bytes_name_str: db "bytes", 0
 bytes_iter_name_str: db "bytes_iterator", 0
 hex_digits: db "0123456789abcdef"
 
-; Cached builtin for bytes.decode
-align 8
-_bytes_decode_cache: dq 0
 
 ; bytes sequence methods
 align 8
@@ -2586,22 +2596,20 @@ DEF_FUNC bytes_repeat
     mov r14, rsi
 
     mov rsi, r14
-    extern seq_repeat_check_count
-    call seq_repeat_check_count
-
-    mov rdi, r14
-    V_UNPACK rdi, rdx
-    push rdi
-    push rdx
-    extern int_fits_i64
-    call int_fits_i64
-    pop rdx
-    pop rdi
+    ; Not a count at all: DECLINE rather than raise, so the protocol carries
+    ; on to the right operand's __rmul__.  This raised, and `x * R()` for an R
+    ; with an __rmul__ never reached it.  op_binary_op words the failure when
+    ; nothing else answers either.
+    mov rdi, rsi
+    push rsi
+    extern binop_is_count
+    call binop_is_count
+    pop rsi
     test eax, eax
-    jz .brep_overflow
-    extern int_to_i64
-    call int_to_i64
-    mov r12, rax
+    jz .brep_decline
+    extern seq_repeat_count
+    call seq_repeat_count    ; __index__ counts, and one too big to be an
+    mov r12, rax             ; index is refused rather than truncated
     test r12, r12
     jg .brep_positive
     xor r12d, r12d
@@ -2648,6 +2656,15 @@ DEF_FUNC bytes_repeat
     leave
     ret
 
+.brep_decline:
+    xor eax, eax
+    xor edx, edx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 .brep_toobig:
     ; Too large to allocate is a MemoryError in CPython; only a count that
     ; does not fit an index is an OverflowError.
@@ -2763,13 +2780,21 @@ BLS_BUF   equ 32
 BLS_LIST  equ 40
 BLS_TMP   equ 48
 BLS_ENCMSG equ 64
-BLS_FRAME equ 80            ; + 2 pushes = 96
+; The arity refusal's prefix, which names the constructor: both come
+; through here and CPython says "bytes()" or "bytearray()".
+BLS_ARITY equ 72
+; "cannot convert '\x01' object to bytes", which likewise names one or
+; the other constructor.
+BLS_CONVMSG equ 80
+BLS_FRAME equ 96            ; + 2 pushes = 112, 16-aligned
 DEF_FUNC byteslike_source, BLS_FRAME
     push rbx
     push r12
     mov [rbp - BLS_ARGS], rdi
     mov [rbp - BLS_RANGEMSG], rdx
     mov [rbp - BLS_ENCMSG], rcx
+    mov [rbp - BLS_ARITY], r8
+    mov [rbp - BLS_CONVMSG], r9
     mov [rbp - BLS_NARGS], rsi
     mov qword [rbp - BLS_LIST], 0
     mov qword [rbp - BLS_BUF], 0
@@ -2834,6 +2859,15 @@ extern str_set_length
     mov rbx, rdi
     jmp .bls_count_have
 .bls_count_obj:
+    mov edx, TAG_PTR
+    ; A count that does not fit is an OverflowError, not a truncation:
+    ; bytes(2**70) answered b"" and bytearray(-(2**70)) "negative count".
+    push rdi
+    extern int_fits_i64
+    call int_fits_i64
+    pop rdi
+    test eax, eax
+    jz .bls_count_overflow
     mov edx, TAG_PTR
     call int_to_i64
     mov rbx, rax
@@ -2921,6 +2955,16 @@ extern str_set_length
     ; item.  Going through list() rather than the iterator protocol directly
     ; keeps __iter__/__next__ on heap types working for free.
 .bls_iterable:
+    ; A non-iterable has CPython's own wording here -- "cannot convert 'X'
+    ; object to bytes" -- and list() below would report it as not iterable.
+    extern get_iterator_opt
+    mov rsi, TAG_PTR
+    call get_iterator_opt
+    test rax, rax
+    jz .bls_bad_type
+    V_UNPACK rax, rdx
+    mov rdi, rax
+    call obj_decref
     extern list_type
     extern list_type_call
     lea rdi, [rel list_type]
@@ -3074,6 +3118,10 @@ extern str_set_length
     leave
     ret
 
+.bls_count_overflow:
+    extern exc_OverflowError_type
+    RAISE exc_OverflowError_type, \
+          "cannot fit 'int' into an index-sized integer"
 .bls_negative:
     RAISE exc_ValueError_type, "negative count"
 .bls_enc_no_str:
@@ -3087,9 +3135,19 @@ extern str_set_length
 .bls_need_encoding:
     RAISE exc_TypeError_type, "string argument without an encoding"
 .bls_too_many:
-    RAISE exc_TypeError_type, "encoding and errors arguments are not supported"
+    ; Which constructor this is comes from the range message the caller set:
+    ; both go through byteslike_source, and CPython names each.
+    mov rsi, [rbp - BLS_NARGS]
+    CSTRING rdx, " given)"
+    mov rdi, [rbp - BLS_ARITY]
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 .bls_bad_type:
-    RAISE exc_TypeError_type, "cannot convert this object to bytes"
+    mov rdi, [rbp - BLS_ARGS]
+    mov rsi, [rdi]
+    mov rdi, [rbp - BLS_CONVMSG]
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC byteslike_source
 
 BTC_TYPE  equ 8
@@ -3104,6 +3162,8 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     mov rsi, rdx
     lea rdx, [rel bytes_range_msg]
     lea rcx, [rel bytes_enc_msg]
+    lea r8, [rel bytes_arity_msg]
+    lea r9, [rel bytes_conv_msg]
     call byteslike_source
     mov [rbp - BTC_BUF], rax
     mov [rbp - BTC_LEN], rdx
@@ -3309,6 +3369,7 @@ bd_msg_bytes:     db " codec can't decode bytes in position ", 0
 bd_msg_dash:      db "-", 0
 bd_msg_handler:   db "unknown error handler name '", 0
 bd_msg_errtype:   db "decode() argument 'errors' must be str, not ", 0
+bd_msg_enctype:   db "decode() argument 'encoding' must be str, not ", 0
 bd_reason_start:  db "invalid start byte", 0
 bd_reason_cont:   db "invalid continuation byte", 0
 bd_reason_end:    db "unexpected end of data", 0
@@ -3327,5 +3388,7 @@ global bytearray_range_msg
 bytearray_range_msg: db "byte must be in range(0, 256)", 0
 ; The \x01 is raise_type_error_with_name's placeholder for the argument's type.
 bytes_enc_msg: db `bytes() argument 'encoding' must be str, not \x01`, 0
+bytes_arity_msg: db "bytes() takes at most 3 arguments (", 0
+bytes_conv_msg: db `cannot convert '\x01' object to bytes`, 0
 bytearray_enc_msg: db `bytearray() argument 'encoding' must be str, not \x01`, 0
 

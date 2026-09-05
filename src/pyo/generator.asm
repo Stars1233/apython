@@ -1641,8 +1641,17 @@ DEF_FUNC _gen_throw_impl, 8            ; 1 pushes, so rsp is 16-aligned
     lea rdi, [rel exc_StopIteration_type]
     mov rsi, [rbx + PyGenObject.gi_return_value]   ; already a Value
     test rsi, rsi
-    jnz .gti_have_val
-    lea rsi, [rel none_singleton]
+    jz .gti_no_val
+    ; A generator that returns None raises a BARE StopIteration in CPython --
+    ; args is (), so str(e) is "" and the traceback says "StopIteration" and
+    ; not "StopIteration: None".  gi_return_value holds the None singleton
+    ; for such a generator, which is not the same as holding nothing.
+    lea rax, [rel none_singleton]
+    cmp rsi, rax
+    jne .gti_have_val
+    xor esi, esi
+.gti_no_val:
+    xor esi, esi
 .gti_have_val:
     call exc_new
     mov rdi, rax
@@ -1983,3 +1992,49 @@ END_FUNC gen_clear
 section .rodata
 gd_ignored_msg: db "Exception ignored in: generator cleanup", 10, 0
 gd_ignored_len  equ $ - gd_ignored_msg - 1
+
+section .text
+
+;; ============================================================================
+;; async_gen_dunder_aiter(rdi = args Value[], rsi = nargs)
+;;   -> (rax = args[0], rdx = TAG_PTR) -- an async generator is its own
+;;      async iterator
+;;
+;; CPython's async_generator carries __aiter__ and __anext__ by name, and
+;; aiter()/anext() and `async for` all ask for them.  This type had a getattr
+;; of its own and no tp_dict at all, so `hasattr(g, "__aiter__")` was False
+;; and aiter(g) refused a genuine async generator.
+;; ============================================================================
+global async_gen_dunder_aiter
+DEF_FUNC async_gen_dunder_aiter
+    test rsi, rsi
+    jz .agda_error
+    mov rax, [rdi]
+    push rax
+    mov rdi, rax
+    call obj_incref
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.agda_error:
+    RAISE exc_TypeError_type, "__aiter__() takes exactly one argument"
+END_FUNC async_gen_dunder_aiter
+
+;; ============================================================================
+;; async_gen_dunder_anext(rdi = args Value[], rsi = nargs)
+;;   -> the awaitable the next value comes from, as tp_iternext gives it
+;; ============================================================================
+global async_gen_dunder_anext
+DEF_FUNC async_gen_dunder_anext
+    test rsi, rsi
+    jz .agdn_error
+    mov rdi, [rdi]
+    call async_gen_iternext
+    leave
+    V_PACK rax, rdx
+    ret
+.agdn_error:
+    RAISE exc_TypeError_type, "__anext__() takes exactly one argument"
+END_FUNC async_gen_dunder_anext
