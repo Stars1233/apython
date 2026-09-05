@@ -538,6 +538,15 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     cmp r8b, '_'
     je .copy_underscore
 
+    ; A SECOND sign.  One leading sign was stripped in step 2; anything after
+    ; that is not a digit in any base, and __gmpz_set_str -- which this buffer
+    ; is handed to -- would happily parse a sign of its own.  int("+-1")
+    ; answered -1.
+    cmp r8b, '+'
+    je .parse_error
+    cmp r8b, '-'
+    je .parse_error
+
     ; Check for Unicode digit (multi-byte UTF-8)
     cmp r8b, 0xd9
     je .copy_digit_arabic
