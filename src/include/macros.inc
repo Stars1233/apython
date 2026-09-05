@@ -835,3 +835,48 @@ ASM_INIT
 %endmacro
 
 %endif ; MACROS_INC
+
+;; ============================================================================
+;; FLOAT_PAIR_OR_DEOPT label -- xmm0 = left, xmm1 = right, or jump to `label`
+;;
+;; Accepts a float on both sides, or a float on one side and an INTEGER
+;; IMMEDIATE on the other.  r9d/r8d are the left/right tags and rdi/rsi the
+;; payloads, as VPOP_VAL leaves them.
+;;
+;; Mixed int/float had no fast arm anywhere: `x * 2` and `2 * x` both took the
+;; whole generic protocol on EVERY execution, with nothing ever rewritten --
+;; binop_left_wrapper, binop_subclass_first, binop_is_number, and then
+;; float_mul, which runs float_binop_accepts and float_to_f64 twice each.
+;; Around two hundred instructions to reach one cvtsi2sd and one mulsd.
+;; CPython does not specialize this either; its binary-op specializer rejects
+;; `!Py_IS_TYPE(lhs, Py_TYPE(rhs))` before it ever looks at float.
+;;
+;; TWO INTEGERS ARE REFUSED.  That pair belongs to the integer opcode, and
+;; answering it here would produce a float where Python produces an int.
+;;
+;; Safe in a specialized handler for the same reason the both-float form is:
+;; neither a TAG_FLOAT nor a TAG_SMALLINT immediate can be a heaptype
+;; instance, so no user __add__ on a float or int subclass is bypassed.
+;; ============================================================================
+%macro FLOAT_PAIR_OR_DEOPT 1
+    cmp r9d, TAG_FLOAT
+    je %%left_float
+    cmp r9d, TAG_SMALLINT
+    jne %1
+    cmp r8d, TAG_FLOAT
+    jne %1                      ; int against a non-float: not this opcode
+    cvtsi2sd xmm0, rdi
+    movq xmm1, rsi
+    jmp %%ready
+%%left_float:
+    movq xmm0, rdi
+    cmp r8d, TAG_FLOAT
+    je %%right_float
+    cmp r8d, TAG_SMALLINT
+    jne %1
+    cvtsi2sd xmm1, rsi
+    jmp %%ready
+%%right_float:
+    movq xmm1, rsi
+%%ready:
+%endmacro

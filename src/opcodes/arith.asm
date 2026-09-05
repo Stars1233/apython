@@ -20,52 +20,6 @@
 
 section .text
 
-;; ============================================================================
-;; FLOAT_PAIR_OR_DEOPT label -- xmm0 = left, xmm1 = right, or jump to `label`
-;;
-;; Accepts a float on both sides, or a float on one side and an INTEGER
-;; IMMEDIATE on the other.  r9d/r8d are the left/right tags and rdi/rsi the
-;; payloads, as VPOP_VAL leaves them.
-;;
-;; Mixed int/float had no fast arm anywhere: `x * 2` and `2 * x` both took the
-;; whole generic protocol on EVERY execution, with nothing ever rewritten --
-;; binop_left_wrapper, binop_subclass_first, binop_is_number, and then
-;; float_mul, which runs float_binop_accepts and float_to_f64 twice each.
-;; Around two hundred instructions to reach one cvtsi2sd and one mulsd.
-;; CPython does not specialize this either; its binary-op specializer rejects
-;; `!Py_IS_TYPE(lhs, Py_TYPE(rhs))` before it ever looks at float.
-;;
-;; TWO INTEGERS ARE REFUSED.  That pair belongs to the integer opcode, and
-;; answering it here would produce a float where Python produces an int.
-;;
-;; Safe in a specialized handler for the same reason the both-float form is:
-;; neither a TAG_FLOAT nor a TAG_SMALLINT immediate can be a heaptype
-;; instance, so no user __add__ on a float or int subclass is bypassed.
-;; ============================================================================
-%macro FLOAT_PAIR_OR_DEOPT 1
-    cmp r9d, TAG_FLOAT
-    je %%left_float
-    cmp r9d, TAG_SMALLINT
-    jne %1
-    cmp r8d, TAG_FLOAT
-    jne %1                      ; int against a non-float: not this opcode
-    cvtsi2sd xmm0, rdi
-    movq xmm1, rsi
-    jmp %%ready
-%%left_float:
-    movq xmm0, rdi
-    cmp r8d, TAG_FLOAT
-    je %%right_float
-    cmp r8d, TAG_SMALLINT
-    jne %1
-    cvtsi2sd xmm1, rsi
-    jmp %%ready
-%%right_float:
-    movq xmm1, rsi
-%%ready:
-%endmacro
-
-
 extern int_is_integer
 extern eval_dispatch
 extern obj_is_true
@@ -578,6 +532,105 @@ DEF_FUNC_BARE op_binary_op
     je .binop_try_smallint_fdiv
     cmp ecx, 15                ; NB_INPLACE_FLOOR_DIVIDE
     je .binop_try_smallint_fdiv
+
+    ; Fast path: SmallInt remainder (NB_REMAINDER=6, NB_INPLACE_REMAINDER=19).
+    ; This was not in the ladder at all, so `i % 7` went straight to the
+    ; generic protocol and reached int_mod's own int64 arm three calls deep.
+    cmp ecx, 6                 ; NB_REMAINDER
+    je .binop_try_smallint_mod
+    cmp ecx, 19                ; NB_INPLACE_REMAINDER
+    je .binop_try_smallint_mod
+
+    ; Fast path: SmallInt bitwise.  int_and/int_or/int_xor have had int64 arms
+    ; all along; they were just reached through the whole generic protocol.
+    cmp ecx, 1                 ; NB_AND
+    je .binop_try_smallint_and
+    cmp ecx, 14                ; NB_INPLACE_AND
+    je .binop_try_smallint_and
+    cmp ecx, 7                 ; NB_OR
+    je .binop_try_smallint_or
+    cmp ecx, 20                ; NB_INPLACE_OR
+    je .binop_try_smallint_or
+    cmp ecx, 12                ; NB_XOR
+    je .binop_try_smallint_xor
+    cmp ecx, 25                ; NB_INPLACE_XOR
+    je .binop_try_smallint_xor
+
+    ; Everything the ladder did not match -- power, the shifts, matrix
+    ; multiply -- is the generic protocol's.  This jump is load-bearing: the
+    ; arms below sit between here and .binop_generic, so falling through
+    ; reaches the AND arm and `i << 3` quietly computed `i & 3`.
+    jmp .binop_generic
+
+;; ============================================================================
+;; The bitwise and remainder arms of op_binary_op.
+;;
+;; AND, OR and XOR of two immediates cannot leave the immediate range: a value
+;; in [-2^50, 2^50) has bits 50..63 all equal to its sign bit, and a bitwise op
+;; on two such values leaves those bits uniform too.  So there is no overflow
+;; case to fall out of -- unlike add, subtract and multiply.
+;; ============================================================================
+.binop_try_smallint_and:
+    cmp r9d, TAG_SMALLINT
+    jne .binop_generic
+    cmp r8d, TAG_SMALLINT
+    jne .binop_generic
+    mov rax, rdi
+    and rax, rsi
+    mov byte [rbx - 2], 226
+    VPUSH_INT rax, r15
+    add rbx, 2
+    DISPATCH
+
+.binop_try_smallint_or:
+    cmp r9d, TAG_SMALLINT
+    jne .binop_generic
+    cmp r8d, TAG_SMALLINT
+    jne .binop_generic
+    mov rax, rdi
+    or rax, rsi
+    mov byte [rbx - 2], 227
+    VPUSH_INT rax, r15
+    add rbx, 2
+    DISPATCH
+
+.binop_try_smallint_xor:
+    cmp r9d, TAG_SMALLINT
+    jne .binop_generic
+    cmp r8d, TAG_SMALLINT
+    jne .binop_generic
+    mov rax, rdi
+    xor rax, rsi
+    mov byte [rbx - 2], 228
+    VPUSH_INT rax, r15
+    add rbx, 2
+    DISPATCH
+
+.binop_try_smallint_mod:
+    cmp r9d, TAG_SMALLINT
+    jne .binop_generic
+    cmp r8d, TAG_SMALLINT
+    jne .binop_generic
+    test rsi, rsi
+    jz .binop_generic          ; zero divisor: the generic path raises
+    mov rax, rdi
+    cqo
+    idiv rsi                   ; rdx = remainder, carrying the DIVIDEND's sign
+    ; Python's % takes the sign of the DIVISOR, C's takes the dividend's, so
+    ; a remainder that disagrees with the divisor gets the divisor added.  The
+    ; result's magnitude is below the divisor's, so it stays an immediate.
+    test rdx, rdx
+    jz .binop_mod_done
+    mov rcx, rdx
+    xor rcx, rsi
+    jns .binop_mod_done        ; signs already agree
+    add rdx, rsi
+.binop_mod_done:
+    mov rax, rdx
+    mov byte [rbx - 2], 229
+    VPUSH_INT rax, r15
+    add rbx, 2
+    DISPATCH
 
 .binop_generic:
     ; Save operands + tags for DECREF after call (push on machine stack)
@@ -2363,682 +2416,3 @@ cmp_msg_open:     db " of '", 0
 section .data
 
 section .text
-
-;; ============================================================================
-;; op_binary_op_add_int - Specialized SmallInt add (opcode 211)
-;;
-;; Guard: both TOS and TOS1 must be SmallInt (tag-based).
-;; On guard failure: deopt back to BINARY_OP (122).
-;; Followed by 1 CACHE entry (2 bytes).
-;; ============================================================================
-DEF_FUNC_BARE op_binary_op_add_int
-    VPOP_VAL rsi, r8            ; right + tag
-    VPOP_VAL rdi, r9            ; left + tag
-    ; Guard: both SmallInt (tag-based)
-    cmp r9d, TAG_SMALLINT
-    jne .add_int_deopt_repush
-    cmp r8d, TAG_SMALLINT
-    jne .add_int_deopt_repush
-    ; Add, check overflow
-    mov rax, rdi
-    mov rdx, rsi
-    add rax, rdx
-    jo .add_int_deopt_repush
-    ; Encode as SmallInt
-    VPUSH_INT rax, r15
-    add rbx, 2                 ; skip CACHE
-    DISPATCH
-.add_int_deopt_repush:
-    ; Overflow: re-push operands and deopt
-    VPUSH_VAL rdi, r9
-    VPUSH_VAL rsi, r8
-.add_int_deopt:
-    ; Rewrite opcode back to BINARY_OP (122) and re-execute.
-    ;
-    ; Rewinding rbx is only safe because BINARY_OP and COMPARE_OP arguments are
-    ; small -- an operator index, and a comparison plus its mask -- so neither
-    ; is ever preceded by EXTENDED_ARG.  The deopts that carry a real offset or
-    ; a name index cannot do this; see .fir_deopt in opcodes/build.asm.
-    mov byte [rbx - 2], 122
-    sub rbx, 2
-    DISPATCH
-END_FUNC op_binary_op_add_int
-
-;; ============================================================================
-;; op_binary_op_sub_int - Specialized SmallInt subtract (opcode 212)
-;;
-;; Guard: both TOS and TOS1 must be SmallInt (tag-based).
-;; On guard failure: deopt back to BINARY_OP (122).
-;; Followed by 1 CACHE entry (2 bytes).
-;; ============================================================================
-DEF_FUNC_BARE op_binary_op_sub_int
-    VPOP_VAL rsi, r8            ; right + tag
-    VPOP_VAL rdi, r9            ; left + tag
-    ; Guard: both SmallInt (tag-based)
-    cmp r9d, TAG_SMALLINT
-    jne .sub_int_deopt_repush
-    cmp r8d, TAG_SMALLINT
-    jne .sub_int_deopt_repush
-    ; Sub, check overflow
-    mov rax, rdi
-    mov rdx, rsi
-    sub rax, rdx
-    jo .sub_int_deopt_repush
-    ; Encode as SmallInt
-    VPUSH_INT rax, r15
-    add rbx, 2                 ; skip CACHE
-    DISPATCH
-.sub_int_deopt_repush:
-    ; Overflow or type mismatch: re-push operands and deopt
-    VPUSH_VAL rdi, r9
-    VPUSH_VAL rsi, r8
-.sub_int_deopt:
-    ; Rewrite opcode back to BINARY_OP (122)
-    mov byte [rbx - 2], 122
-    sub rbx, 2                 ; back up to re-execute as BINARY_OP
-    DISPATCH
-END_FUNC op_binary_op_sub_int
-
-;; ============================================================================
-;; op_binary_op_add_float - Specialized float add (opcode 217)
-;;
-;; Guard: both TOS and TOS1 must be TAG_FLOAT.
-;; On guard failure: deopt back to BINARY_OP (122).
-;; Followed by 1 CACHE entry (2 bytes).
-;; ============================================================================
-DEF_FUNC_BARE op_binary_op_add_float
-    VPOP_VAL rsi, r8            ; right + tag
-    VPOP_VAL rdi, r9            ; left + tag
-    FLOAT_PAIR_OR_DEOPT .add_float_deopt_repush
-    addsd xmm0, xmm1
-    movq rax, xmm0
-    VPUSH_FLOAT rax, r15
-    add rbx, 2                 ; skip CACHE
-    DISPATCH
-.add_float_deopt_repush:
-    VUNDROP 2
-.add_float_deopt:
-    mov byte [rbx - 2], 122
-    sub rbx, 2
-    DISPATCH
-END_FUNC op_binary_op_add_float
-
-;; ============================================================================
-;; op_binary_op_sub_float - Specialized float subtract (opcode 218)
-;; ============================================================================
-DEF_FUNC_BARE op_binary_op_sub_float
-    VPOP_VAL rsi, r8            ; right + tag
-    VPOP_VAL rdi, r9            ; left + tag
-    FLOAT_PAIR_OR_DEOPT .sub_float_deopt_repush
-    subsd xmm0, xmm1
-    movq rax, xmm0
-    VPUSH_FLOAT rax, r15
-    add rbx, 2                 ; skip CACHE
-    DISPATCH
-.sub_float_deopt_repush:
-    VUNDROP 2
-.sub_float_deopt:
-    mov byte [rbx - 2], 122
-    sub rbx, 2
-    DISPATCH
-END_FUNC op_binary_op_sub_float
-
-;; ============================================================================
-;; op_binary_op_mul_float - Specialized float multiply (opcode 219)
-;; ============================================================================
-DEF_FUNC_BARE op_binary_op_mul_float
-    VPOP_VAL rsi, r8            ; right + tag
-    VPOP_VAL rdi, r9            ; left + tag
-    FLOAT_PAIR_OR_DEOPT .mul_float_deopt_repush
-    mulsd xmm0, xmm1
-    movq rax, xmm0
-    VPUSH_FLOAT rax, r15
-    add rbx, 2                 ; skip CACHE
-    DISPATCH
-.mul_float_deopt_repush:
-    VUNDROP 2
-.mul_float_deopt:
-    mov byte [rbx - 2], 122
-    sub rbx, 2
-    DISPATCH
-END_FUNC op_binary_op_mul_float
-
-;; ============================================================================
-;; op_binary_op_truediv_float - Specialized float truediv (opcode 220)
-;; ============================================================================
-DEF_FUNC_BARE op_binary_op_truediv_float
-    VPOP_VAL rsi, r8            ; right + tag
-    VPOP_VAL rdi, r9            ; left + tag
-    FLOAT_PAIR_OR_DEOPT .truediv_float_deopt_repush
-    ; A zero divisor deopts, so the generic path raises ZeroDivisionError.
-    ; ucomisd sets ZF for UNORDERED as well, so parity is tested first: a NaN
-    ; divisor took the deopt, which answers nan correctly but also rewrote the
-    ; site back to BINARY_OP for good, so one nan in a loop cost the
-    ; specialization for the rest of the run.
-    xorpd xmm2, xmm2
-    ucomisd xmm1, xmm2
-    jp .tfd_nonzero
-    je .truediv_float_deopt_repush
-.tfd_nonzero:
-    divsd xmm0, xmm1
-    movq rax, xmm0
-    VPUSH_FLOAT rax, r15
-    add rbx, 2                 ; skip CACHE
-    DISPATCH
-.truediv_float_deopt_repush:
-    VUNDROP 2
-.truediv_float_deopt:
-    mov byte [rbx - 2], 122
-    sub rbx, 2
-    DISPATCH
-END_FUNC op_binary_op_truediv_float
-
-;; ============================================================================
-;; op_binary_op_mul_int - Specialized SmallInt multiply (opcode 221)
-;;
-;; Guard: both TOS and TOS1 must be SmallInt.
-;; On guard failure: deopt back to BINARY_OP (122).
-;; Followed by 1 CACHE entry (2 bytes).
-;; ============================================================================
-DEF_FUNC_BARE op_binary_op_mul_int
-    VPOP_VAL rsi, r8            ; right + tag
-    VPOP_VAL rdi, r9            ; left + tag
-    cmp r9d, TAG_SMALLINT
-    jne .mul_int_deopt_repush
-    cmp r8d, TAG_SMALLINT
-    jne .mul_int_deopt_repush
-    mov rax, rdi
-    imul rsi
-    jo .mul_int_deopt_repush_vals
-    VPUSH_INT rax, r15
-    add rbx, 2                 ; skip CACHE
-    DISPATCH
-.mul_int_deopt_repush_vals:
-    ; imul clobbered rax/rdx, use saved values
-    VPUSH_VAL rdi, r9
-    VPUSH_VAL rsi, r8
-    jmp .mul_int_deopt
-.mul_int_deopt_repush:
-    VUNDROP 2
-.mul_int_deopt:
-    mov byte [rbx - 2], 122
-    sub rbx, 2
-    DISPATCH
-END_FUNC op_binary_op_mul_int
-
-;; ============================================================================
-;; op_binary_op_floordiv_int - Specialized SmallInt floor divide (opcode 222)
-;;
-;; Guard: both TOS and TOS1 must be SmallInt, right != 0.
-;; On guard failure: deopt back to BINARY_OP (122).
-;; Followed by 1 CACHE entry (2 bytes).
-;; ============================================================================
-DEF_FUNC_BARE op_binary_op_floordiv_int
-    VPOP_VAL rsi, r8            ; right + tag
-    VPOP_VAL rdi, r9            ; left + tag
-    ; Guard: both SmallInt
-    cmp r9d, TAG_SMALLINT
-    jne .fdiv_int_deopt_repush
-    cmp r8d, TAG_SMALLINT
-    jne .fdiv_int_deopt_repush
-    ; Guard: right != 0
-    test rsi, rsi
-    jz .fdiv_int_deopt_repush
-    ; Floor divide
-    mov rax, rdi
-    cqo
-    idiv rsi                    ; rax=quotient, rdx=remainder
-    ; Floor: if remainder != 0 and signs differ, subtract 1
-    test rdx, rdx
-    jz .fdiv_int_exact
-    mov rcx, rdi
-    xor rcx, rsi
-    jns .fdiv_int_exact         ; same sign → truncation == floor
-    dec rax
-.fdiv_int_exact:
-    VPUSH_INT rax, r15
-    add rbx, 2                 ; skip CACHE
-    DISPATCH
-.fdiv_int_deopt_repush:
-    VUNDROP 2
-.fdiv_int_deopt:
-    mov byte [rbx - 2], 122
-    sub rbx, 2
-    DISPATCH
-END_FUNC op_binary_op_floordiv_int
-
-;; ============================================================================
-;; op_compare_op_int - Specialized SmallInt comparison (opcode 209)
-;;
-;; Guard: both TOS and TOS1 must be SmallInt (tag-based).
-;; On guard failure: deopt back to COMPARE_OP (107).
-;; ecx = arg (comparison op = arg >> 4)
-;; Followed by 1 CACHE entry (2 bytes).
-;; ============================================================================
-DEF_FUNC_BARE op_compare_op_int
-    shr ecx, 4                 ; ecx = comparison op (0-5)
-    VPOP_VAL rsi, r8            ; right + tag
-    VPOP_VAL rdi, r9            ; left + tag
-    ; Guard: both SmallInt (tag-based)
-    cmp r9d, TAG_SMALLINT
-    jne .cmp_int_deopt_repush
-    cmp r8d, TAG_SMALLINT
-    jne .cmp_int_deopt_repush
-    ; Compare
-    cmp rdi, rsi               ; flags survive LEA + jmp [mem]
-    lea r8, [rel .ci_setcc_table]
-    jmp [r8 + rcx*8]          ; 1 indirect branch on comparison op
-
-.ci_set_lt:
-    setl al
-    jmp .ci_push_bool
-.ci_set_le:
-    setle al
-    jmp .ci_push_bool
-.ci_set_eq:
-    sete al
-    jmp .ci_push_bool
-.ci_set_ne:
-    setne al
-    jmp .ci_push_bool
-.ci_set_gt:
-    setg al
-    jmp .ci_push_bool
-.ci_set_ge:
-    setge al
-    ; fall through to .ci_push_bool
-
-.ci_push_bool:
-    movzx eax, al             ; eax = 0 or 1
-    VPUSH_BOOL rax             ; (0/1, TAG_BOOL) — no INCREF needed
-    add rbx, 2                ; skip CACHE
-    DISPATCH
-
-section .data
-align 8
-.ci_setcc_table:
-    dq .ci_set_lt              ; PY_LT = 0
-    dq .ci_set_le              ; PY_LE = 1
-    dq .ci_set_eq              ; PY_EQ = 2
-    dq .ci_set_ne              ; PY_NE = 3
-    dq .ci_set_gt              ; PY_GT = 4
-    dq .ci_set_ge              ; PY_GE = 5
-section .text
-.cmp_int_deopt_repush:
-    ; Re-push operands (slots still intact — just restore stack pointer)
-    VUNDROP 2
-.cmp_int_deopt:
-    ; Rewrite back to COMPARE_OP (107) and re-execute
-    mov byte [rbx - 2], 107
-    sub rbx, 2
-    DISPATCH
-END_FUNC op_compare_op_int
-
-;; ============================================================================
-;; op_compare_op_float (223) -> nothing; pushes the bool and dispatches
-;;
-;; The float comparison superinstructions (223, 224, 225).
-;;
-;; op_compare_op had a both-SmallInt arm and nothing else, so a pair of float
-;; immediates fell through to the general protocol: float_binop_accepts, then
-;; float_compare, which calls float_binop_accepts twice more, fc_wide_int
-;; twice and float_to_f64 twice -- about nine calls and four pack/unpack round
-;; trips to reach one ucomisd.  It was the only float operation not already
-;; ahead of CPython.
-;;
-;; These read the two Values straight off the stack and guard on the raw
-;; high16, so nothing is unpacked into a (payload, tag) pair and re-packed;
-;; the deopt is therefore just a rewrite, with the operands still in place.
-;;
-;; NaN is the one thing the integer forms do not have to think about.
-;; `ucomisd` reports unordered as ZF=1, PF=1, CF=1, so `seta`/`setae` are
-;; already false for it, while `setb`/`setbe`/`sete` would each be wrongly
-;; true and `setne` wrongly false.  Those four are corrected with the parity
-;; flag: AND with `setnp` for the three that must become false, OR with
-;; `setp` for the one that must become true.
-;; ============================================================================
-DEF_FUNC_BARE op_compare_op_float
-    shr ecx, 4                  ; ecx = PY_LT/LE/EQ/NE/GT/GE (0-5)
-    V_TEST_F64_M [r13 - 8], rax
-    ja .cf_deopt
-    V_TEST_F64_M [r13 - 16], rax
-    ja .cf_deopt
-    mov rsi, [r13 - 8]          ; right
-    mov rdi, [r13 - 16]         ; left
-    V_TO_F64 rsi
-    V_TO_F64 rdi
-    movq xmm1, rsi
-    movq xmm0, rdi
-    sub r13, 16                 ; both consumed; immediates own nothing
-    ucomisd xmm0, xmm1
-    lea r8, [rel .cf_setcc_table]
-    jmp [r8 + rcx*8]            ; LEA and jmp [mem] leave the flags alone
-
-.cf_lt:
-    setb al
-    setnp dl
-    and al, dl
-    jmp .cf_push
-.cf_le:
-    setbe al
-    setnp dl
-    and al, dl
-    jmp .cf_push
-.cf_eq:
-    sete al
-    setnp dl
-    and al, dl
-    jmp .cf_push
-.cf_ne:
-    setne al
-    setp dl
-    or al, dl
-    jmp .cf_push
-.cf_gt:
-    seta al                     ; false for unordered already
-    jmp .cf_push
-.cf_ge:
-    setae al                    ; likewise
-.cf_push:
-    movzx eax, al
-    VPUSH_BOOL rax
-    add rbx, 2                  ; skip CACHE
-    DISPATCH
-
-section .data
-align 8
-.cf_setcc_table:
-    dq .cf_lt
-    dq .cf_le
-    dq .cf_eq
-    dq .cf_ne
-    dq .cf_gt
-    dq .cf_ge
-section .text
-.cf_deopt:
-    ; Nothing was popped, so there is nothing to put back.
-    mov byte [rbx - 2], 107     ; COMPARE_OP
-    sub rbx, 2
-    DISPATCH
-END_FUNC op_compare_op_float
-
-;; ============================================================================
-;; op_compare_op_float_jump_false (224) -> nothing; branches and dispatches
-;;
-;; COMPARE_OP_FLOAT fused with the POP_JUMP_IF_FALSE that follows.  No bool
-;; object is built at all: the flags decide the branch directly.
-;; ============================================================================
-DEF_FUNC_BARE op_compare_op_float_jump_false
-    shr ecx, 4
-    V_TEST_F64_M [r13 - 8], rax
-    ja .cfjf_deopt
-    V_TEST_F64_M [r13 - 16], rax
-    ja .cfjf_deopt
-    movzx r9d, byte [rbx + 3]   ; the POP_JUMP_IF_FALSE argument
-    mov rsi, [r13 - 8]
-    mov rdi, [r13 - 16]
-    V_TO_F64 rsi
-    V_TO_F64 rdi
-    movq xmm1, rsi
-    movq xmm0, rdi
-    sub r13, 16
-    ucomisd xmm0, xmm1
-    lea r8, [rel .cfjf_setcc_table]
-    jmp [r8 + rcx*8]
-
-.cfjf_lt:
-    setb al
-    setnp dl
-    and al, dl
-    jmp .cfjf_branch
-.cfjf_le:
-    setbe al
-    setnp dl
-    and al, dl
-    jmp .cfjf_branch
-.cfjf_eq:
-    sete al
-    setnp dl
-    and al, dl
-    jmp .cfjf_branch
-.cfjf_ne:
-    setne al
-    setp dl
-    or al, dl
-    jmp .cfjf_branch
-.cfjf_gt:
-    seta al
-    jmp .cfjf_branch
-.cfjf_ge:
-    setae al
-.cfjf_branch:
-    add rbx, 4                  ; CACHE (2) + POP_JUMP_IF_FALSE (2)
-    test al, al
-    jnz .cfjf_no_jump
-    lea rbx, [rbx + r9*2]
-.cfjf_no_jump:
-    DISPATCH
-
-section .data
-align 8
-.cfjf_setcc_table:
-    dq .cfjf_lt
-    dq .cfjf_le
-    dq .cfjf_eq
-    dq .cfjf_ne
-    dq .cfjf_gt
-    dq .cfjf_ge
-section .text
-.cfjf_deopt:
-    mov byte [rbx - 2], 107
-    sub rbx, 2
-    DISPATCH
-END_FUNC op_compare_op_float_jump_false
-
-;; ============================================================================
-;; op_compare_op_float_jump_true (225) -> nothing; branches and dispatches
-;;
-;; The same fused with POP_JUMP_IF_TRUE, so the branch is taken when the
-;; comparison holds rather than when it does not.
-;; ============================================================================
-DEF_FUNC_BARE op_compare_op_float_jump_true
-    shr ecx, 4
-    V_TEST_F64_M [r13 - 8], rax
-    ja .cfjt_deopt
-    V_TEST_F64_M [r13 - 16], rax
-    ja .cfjt_deopt
-    movzx r9d, byte [rbx + 3]
-    mov rsi, [r13 - 8]
-    mov rdi, [r13 - 16]
-    V_TO_F64 rsi
-    V_TO_F64 rdi
-    movq xmm1, rsi
-    movq xmm0, rdi
-    sub r13, 16
-    ucomisd xmm0, xmm1
-    lea r8, [rel .cfjt_setcc_table]
-    jmp [r8 + rcx*8]
-
-.cfjt_lt:
-    setb al
-    setnp dl
-    and al, dl
-    jmp .cfjt_branch
-.cfjt_le:
-    setbe al
-    setnp dl
-    and al, dl
-    jmp .cfjt_branch
-.cfjt_eq:
-    sete al
-    setnp dl
-    and al, dl
-    jmp .cfjt_branch
-.cfjt_ne:
-    setne al
-    setp dl
-    or al, dl
-    jmp .cfjt_branch
-.cfjt_gt:
-    seta al
-    jmp .cfjt_branch
-.cfjt_ge:
-    setae al
-.cfjt_branch:
-    add rbx, 4
-    test al, al
-    jz .cfjt_no_jump            ; falsy -> do not jump (POP_JUMP_IF_TRUE)
-    lea rbx, [rbx + r9*2]
-.cfjt_no_jump:
-    DISPATCH
-
-section .data
-align 8
-.cfjt_setcc_table:
-    dq .cfjt_lt
-    dq .cfjt_le
-    dq .cfjt_eq
-    dq .cfjt_ne
-    dq .cfjt_gt
-    dq .cfjt_ge
-section .text
-.cfjt_deopt:
-    mov byte [rbx - 2], 107
-    sub rbx, 2
-    DISPATCH
-END_FUNC op_compare_op_float_jump_true
-
-;; ============================================================================
-;; op_compare_op_int_jump_false - Fused COMPARE_OP_INT + POP_JUMP_IF_FALSE (215)
-;;
-;; Guard: both TOS and TOS1 must be SmallInt.
-;; On guard failure: deopt back to COMPARE_OP (107).
-;; ecx = arg (comparison op = arg >> 4).
-;; Followed by 1 CACHE entry (2 bytes), then POP_JUMP_IF_FALSE (2 bytes).
-;; ============================================================================
-DEF_FUNC_BARE op_compare_op_int_jump_false
-    shr ecx, 4                 ; ecx = comparison op (0-5)
-    VPOP_VAL rsi, r8            ; right + tag
-    VPOP_VAL rdi, r9            ; left + tag
-    ; Guard: both SmallInt
-    cmp r9d, TAG_SMALLINT
-    jne .cijf_deopt_repush
-    cmp r8d, TAG_SMALLINT
-    jne .cijf_deopt_repush
-    ; Read jump target from POP_JUMP_IF_FALSE arg (at rbx+3)
-    movzx r8d, byte [rbx + 3]
-    ; Compare
-    cmp rdi, rsi
-    lea r9, [rel .cijf_setcc_table]
-    jmp [r9 + rcx*8]
-
-.cijf_lt:
-    setl al
-    jmp .cijf_branch
-.cijf_le:
-    setle al
-    jmp .cijf_branch
-.cijf_eq:
-    sete al
-    jmp .cijf_branch
-.cijf_ne:
-    setne al
-    jmp .cijf_branch
-.cijf_gt:
-    setg al
-    jmp .cijf_branch
-.cijf_ge:
-    setge al
-    ; fall through
-.cijf_branch:
-    ; Skip CACHE (2) + POP_JUMP_IF_FALSE (2) = 4 bytes
-    add rbx, 4
-    test al, al
-    jnz .cijf_no_jump          ; truthy → don't jump (POP_JUMP_IF_FALSE)
-    lea rbx, [rbx + r8*2]     ; jump (r8 = target offset)
-.cijf_no_jump:
-    DISPATCH
-
-section .data
-align 8
-.cijf_setcc_table:
-    dq .cijf_lt                ; PY_LT = 0
-    dq .cijf_le                ; PY_LE = 1
-    dq .cijf_eq                ; PY_EQ = 2
-    dq .cijf_ne                ; PY_NE = 3
-    dq .cijf_gt                ; PY_GT = 4
-    dq .cijf_ge                ; PY_GE = 5
-section .text
-
-.cijf_deopt_repush:
-    VUNDROP 2
-    mov byte [rbx - 2], 107   ; deopt to COMPARE_OP
-    sub rbx, 2
-    DISPATCH
-END_FUNC op_compare_op_int_jump_false
-
-;; ============================================================================
-;; op_compare_op_int_jump_true - Fused COMPARE_OP_INT + POP_JUMP_IF_TRUE (216)
-;;
-;; Same as above but jumps when comparison is TRUE.
-;; ============================================================================
-DEF_FUNC_BARE op_compare_op_int_jump_true
-    shr ecx, 4                 ; ecx = comparison op (0-5)
-    VPOP_VAL rsi, r8            ; right + tag
-    VPOP_VAL rdi, r9            ; left + tag
-    ; Guard: both SmallInt
-    cmp r9d, TAG_SMALLINT
-    jne .cijt_deopt_repush
-    cmp r8d, TAG_SMALLINT
-    jne .cijt_deopt_repush
-    ; Read jump target from POP_JUMP_IF_TRUE arg (at rbx+3)
-    movzx r8d, byte [rbx + 3]
-    ; Compare
-    cmp rdi, rsi
-    lea r9, [rel .cijt_setcc_table]
-    jmp [r9 + rcx*8]
-
-.cijt_lt:
-    setl al
-    jmp .cijt_branch
-.cijt_le:
-    setle al
-    jmp .cijt_branch
-.cijt_eq:
-    sete al
-    jmp .cijt_branch
-.cijt_ne:
-    setne al
-    jmp .cijt_branch
-.cijt_gt:
-    setg al
-    jmp .cijt_branch
-.cijt_ge:
-    setge al
-    ; fall through
-.cijt_branch:
-    ; Skip CACHE (2) + POP_JUMP_IF_TRUE (2) = 4 bytes
-    add rbx, 4
-    test al, al
-    jz .cijt_no_jump           ; falsy → don't jump (POP_JUMP_IF_TRUE)
-    lea rbx, [rbx + r8*2]     ; jump (r8 = target offset)
-.cijt_no_jump:
-    DISPATCH
-
-section .data
-align 8
-.cijt_setcc_table:
-    dq .cijt_lt                ; PY_LT = 0
-    dq .cijt_le                ; PY_LE = 1
-    dq .cijt_eq                ; PY_EQ = 2
-    dq .cijt_ne                ; PY_NE = 3
-    dq .cijt_gt                ; PY_GT = 4
-    dq .cijt_ge                ; PY_GE = 5
-section .text
-
-.cijt_deopt_repush:
-    VUNDROP 2
-    mov byte [rbx - 2], 107   ; deopt to COMPARE_OP
-    sub rbx, 2
-    DISPATCH
-END_FUNC op_compare_op_int_jump_true

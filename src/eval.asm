@@ -18,6 +18,10 @@ extern op_load_global
 extern op_load_global_module
 extern op_load_global_builtin
 extern op_load_attr_method
+extern op_binary_op_and_int
+extern op_binary_op_or_int
+extern op_binary_op_xor_int
+extern op_binary_op_mod_int
 extern op_compare_op_float
 extern op_compare_op_float_jump_false
 extern op_compare_op_float_jump_true
@@ -1285,10 +1289,10 @@ opcode_table:
     dq op_compare_op_float   ; 223 = COMPARE_OP_FLOAT (IC)
     dq op_compare_op_float_jump_false ; 224 = fused with POP_JUMP_IF_FALSE
     dq op_compare_op_float_jump_true  ; 225 = fused with POP_JUMP_IF_TRUE
-    dq op_unimplemented      ; 226
-    dq op_unimplemented      ; 227
-    dq op_unimplemented      ; 228
-    dq op_unimplemented      ; 229
+    dq op_binary_op_and_int  ; 226 = BINARY_OP_AND_INT (specialized)
+    dq op_binary_op_or_int   ; 227 = BINARY_OP_OR_INT (specialized)
+    dq op_binary_op_xor_int  ; 228 = BINARY_OP_XOR_INT (specialized)
+    dq op_binary_op_mod_int  ; 229 = BINARY_OP_REMAINDER_INT (specialized)
     dq op_unimplemented      ; 230
     dq op_unimplemented      ; 231
     dq op_unimplemented      ; 232
