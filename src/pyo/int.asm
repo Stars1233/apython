@@ -127,6 +127,58 @@ DEF_FUNC int_promote_mpz
 END_FUNC int_promote_mpz
 
 ;; ============================================================================
+;; int_alloc_raw() -> rax = PyIntObject_size bytes, uninitialised
+;;
+;; Every heap integer in this file comes from here, and int_dealloc hands the
+;; block back rather than to free().
+;;
+;; A heap integer is the shortest-lived object this interpreter makes.  A loop
+;; whose accumulator has grown past +-2^50 allocates one per iteration and
+;; frees the previous one immediately, so glibc's malloc and free were 29.7% of
+;; such a loop -- more than GMP and the interpreter's own arithmetic together.
+;; The size is fixed and the type is fixed, so the general allocator is being
+;; asked a question with one answer.
+;;
+;; CPython has no int freelist, but it does not need one: every object below
+;; 512 bytes comes from pymalloc, which is a per-size-class free list already.
+;; This is that, for the one size class that matters here.
+;;
+;; The block is handed back RAW.  A caller that wants a compact integer sets
+;; .compact itself and a caller that wants a GMP-backed one clears it and
+;; calls __gmpz_init, exactly as when this was ap_malloc.  Nothing may assume
+;; a recycled block's mpz is live: int_dealloc clears it before recycling.
+;;
+;; The cap keeps a program that builds a large list of big integers and then
+;; drops it from holding the memory: past INT_FREELIST_MAX blocks the rest go
+;; back to libc.
+;;
+;; Building with -DNO_INT_FREELIST turns this into a plain ap_malloc, which is
+;; what to do when running under valgrind: a recycled block is not a freed one,
+;; so a use-after-free on an integer is invisible while the list is on.
+;; ============================================================================
+INT_FREELIST_MAX equ 256
+
+DEF_FUNC_BARE int_alloc_raw
+%ifndef NO_INT_FREELIST
+    mov rax, [rel int_freelist]
+    test rax, rax
+    jz .ial_malloc
+    ; The block is dead, so its refcount word is free to hold the next link.
+    mov rcx, [rax + PyObject.ob_refcnt]
+    mov [rel int_freelist], rcx
+    dec qword [rel int_freelist_count]
+    ret
+.ial_malloc:
+%endif
+    push rbp
+    mov rbp, rsp
+    mov edi, PyIntObject_size
+    call ap_malloc
+    leave
+    ret
+END_FUNC int_alloc_raw
+
+;; ============================================================================
 ;; int_new_compact(int64_t val) -> rax: PyIntObject*
 ;; Heap integer with no GMP init and no limb allocation.
 ;; ============================================================================
@@ -134,8 +186,7 @@ DEF_FUNC int_new_compact
     push rbx
     push r12
     mov rbx, rdi
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
@@ -778,8 +829,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
 
 .gmp_parse:
     ; Allocate PyIntObject
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     mov [rbp - IB_OBJ], rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -1355,8 +1405,7 @@ DEF_FUNC_BARE int_add
     or r13b, 2              ; flag: b was converted
 .b_ready:
     ; Allocate result
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax                ; save result ptr
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -1463,8 +1512,7 @@ DEF_FUNC_BARE int_sub
     mov r12, rax
     or r13b, 2
 .b_ready:
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -1557,8 +1605,7 @@ DEF_FUNC_BARE int_mul
     mov r12, rax
     or r13b, 2
 .b_ready:
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -1670,8 +1717,7 @@ DEF_FUNC_BARE int_floordiv
     test eax, eax
     jz .gmp_zdiv_error
 
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -1797,8 +1843,7 @@ DEF_FUNC_BARE int_mod
     test eax, eax
     jz .gmp_mod_zdiv_error
 
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -1881,8 +1926,7 @@ DEF_FUNC_BARE int_neg
     push rbx
     push r12
     mov rbx, rdi
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     mov r12, rax
     mov qword [r12 + PyObject.ob_refcnt], 1
     lea rax, [rel int_type]
@@ -2307,6 +2351,21 @@ DEF_FUNC_BARE int_dealloc
     lea rdi, [rbx + PyIntObject.mpz]
     call __gmpz_clear wrt ..plt
 .compact:
+%ifndef NO_INT_FREELIST
+    ; Back to the free list rather than to libc.  The mpz has been cleared
+    ; above when there was one, so the block is as raw as a fresh malloc.
+    mov rax, [rel int_freelist_count]
+    cmp rax, INT_FREELIST_MAX
+    jae .really_free
+    mov rcx, [rel int_freelist]
+    mov [rbx + PyObject.ob_refcnt], rcx     ; the dead refcount is the link
+    mov [rel int_freelist], rbx
+    inc qword [rel int_freelist_count]
+    pop rbx
+    pop rbp
+    ret
+.really_free:
+%endif
     mov rdi, rbx
     call ap_free
     pop rbx
@@ -2364,8 +2423,7 @@ DEF_FUNC_BARE int_and
     mov r12, rax
     or r13b, 2
 .b_ok:
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -2452,8 +2510,7 @@ DEF_FUNC_BARE int_or
     mov r12, rax
     or r13b, 2
 .b_ok:
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -2541,8 +2598,7 @@ DEF_FUNC_BARE int_xor
     mov r12, rax
     or r13b, 2
 .b_ok:
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -2595,8 +2651,7 @@ DEF_FUNC_BARE int_invert
     mov rbp, rsp
     push rbx
     mov rbx, rdi
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -2774,8 +2829,7 @@ DEF_FUNC int_lshift
     mov cl, 1
 .a_gmp:
     push rcx
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -2895,8 +2949,7 @@ DEF_FUNC int_rshift
     ret
 
 .gmp_path:
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -3042,8 +3095,7 @@ DEF_FUNC int_power, IPW_FRAME
     mov cl, 1
 .base_gmp:
     push rcx
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -3495,3 +3547,9 @@ int_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+
+section .bss
+;; The free list int_alloc_raw pops from and int_dealloc pushes onto.  A block
+;; on it is dead: its refcount word holds the link to the next one.
+int_freelist:       resq 1
+int_freelist_count: resq 1

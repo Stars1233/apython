@@ -260,6 +260,7 @@ test_int_bytes_wide
 test_int_compare_spec
 test_int_crossing
 test_int_deprecations
+test_int_freelist
 test_int_from_bytes
 test_int_methods
 test_int_nan_compare
