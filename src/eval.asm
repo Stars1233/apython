@@ -236,9 +236,24 @@ DEF_FUNC eval_frame
     push rax
     mov rax, [rel cfex_kwnames_pending]
     push rax
+    ; build_class_pending is the same kind of registration, and was the one
+    ; left unscoped.  type_from_parts records the half-built class in it so
+    ; that a raise which longjmps past its C frame can still release it --
+    ; and a raise inside a NESTED frame unwinds only to that frame, leaving
+    ; the construction's C frame alive.  Dropping a generator that never ran
+    ; to exhaustion is exactly such a raise: closing one throws GeneratorExit
+    ; in, which runs a frame of its own and unwinds out of it.  So a class
+    ; whose parent's __init_subclass__ abandoned a generator came out of
+    ; construction with a refcount one short.
+    mov rax, [rel build_class_pending]
+    push rax
+    ; One pad, because the push list has to stay even: everything below it
+    ; would otherwise make its calls 8 bytes out of alignment.
+    sub rsp, 8
     mov qword [rel cfex_temp_pending], 0
     mov qword [rel cfex_merged_pending], 0
     mov qword [rel cfex_kwnames_pending], 0
+    mov qword [rel build_class_pending], 0
 
     ; KW_NAMES is per-call-site state: it names the keywords of the ONE call
     ; that follows it, and the callee is meant to consume it.  A builtin that
@@ -397,6 +412,9 @@ DEF_FUNC_BARE eval_return
 
     pop rcx
     mov [rel kw_names_pending], rcx
+    add rsp, 8                  ; the alignment pad pushed beside it
+    pop rcx
+    mov [rel build_class_pending], rcx
     pop rcx
     mov [rel cfex_kwnames_pending], rcx
     pop rcx

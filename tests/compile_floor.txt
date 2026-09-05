@@ -229,6 +229,7 @@ test_import_sys
 test_index_arguments
 test_inheritance
 test_init_raises
+test_init_subclass_generator
 test_init_subclass_kwargs
 test_instance_layout
 test_int_bases_and_float_spec

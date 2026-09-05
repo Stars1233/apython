@@ -1257,16 +1257,21 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     ; back to the allocator with the GC's list and the base's subclass list
     ; still pointing into it.
     ;
-    ; tp_traverse and tp_clear are deliberately NOT changed to match.  They
-    ; should be -- a class ought to be walked as a class -- but installing
-    ; type_traverse here makes the collector free classes that are still
-    ; live, which is the collector-accounting entry in bugs.md.  Every edge
-    ; type_traverse reports is one the class owns, so the fault is elsewhere;
-    ; until it is found, a metaclass-made class keeps being walked and
-    ; cleared the way it always was, which is at least self-consistent.
+    ; And walked and cleared as one too, or the collector cannot break the
+    ; cycle a class makes with its own MRO tuple -- which is the only thing
+    ; that ever frees one, since the tuple's first element is the class.  The
+    ; generic heaptype traverse reports none of a type's four references, so
+    ; such a class simply accumulated, in memory and in its bases'
+    ; __subclasses__().
     extern user_type_dealloc
+    extern type_traverse
+    extern type_clear
     lea rax, [rel user_type_dealloc]
     mov [r12 + PyTypeObject.tp_dealloc], rax
+    lea rax, [rel type_traverse]
+    mov [r12 + PyTypeObject.tp_traverse], rax
+    lea rax, [rel type_clear]
+    mov [r12 + PyTypeObject.tp_clear], rax
 .bc_not_metatype:
 
     ; If base is an exception type, inherit exception-compatible methods

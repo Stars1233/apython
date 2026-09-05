@@ -136,21 +136,16 @@ class Held(metaclass=Meta):
     pass
 
 
-# A class is in a cycle with its own MRO tuple, so it is the collector that
-# has to free it -- and for a metaclass-made class the collector cannot yet,
-# which bugs.md records.  What is tested here is that whatever IS freed is
-# freed correctly: the run survives, every surviving subclass is intact, and
-# valgrind is quiet.  How many are left is the leak, not the bug this covers.
-made_names = []
+# A class is in a cycle with its own MRO tuple -- the tuple's first element
+# is the class -- so the collector is the only thing that ever frees one, and
+# a metatype has to carry a type's traverse and clear for it to be able to.
+before = len(object.__subclasses__())
 for i in range(20):
     made = Meta("Gone%d" % i, (Held,), {"x": Desc()})
-    made_names.append(made.__name__)
     del made
 gc.collect()
-print(made_names[0], made_names[-1])
-print(all(c.__name__.startswith("Gone") for c in Held.__subclasses__()))
-print(all(type(c) is Meta and c.tag.startswith("from-")
-          for c in Held.__subclasses__()))
+print(len(Held.__subclasses__()))
+print(len(object.__subclasses__()) == before)
 
 seen.clear()
 for i in range(5):
@@ -159,6 +154,5 @@ for i in range(5):
     except RuntimeError:
         pass
 gc.collect()
-print(seen == [], all(not c.__name__.startswith("Bad")
-                      for c in Held.__subclasses__()))
+print(len(Held.__subclasses__()), seen == [])
 print("survived")
