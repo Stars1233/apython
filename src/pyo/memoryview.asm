@@ -587,7 +587,10 @@ DEF_FUNC memoryview_getattr, MVG_FRAME
     ret
 
 .mvg_strides:
-    ; Contiguous, so the stride is the item size.
+    ; The distance between items, in BYTES: the item size times the view's own
+    ; stride, which an extended slice sets.  Reporting the item size alone
+    ; made `memoryview(b)[::2].strides` (1,) where CPython says (2,) -- and
+    ; the whole point of the field is to say how far apart the items are.
     mov rdi, [rbp - MVG_SELF]
     call memoryview_check
     mov edi, 1
@@ -597,6 +600,7 @@ DEF_FUNC memoryview_getattr, MVG_FRAME
     mov [rbp - MVG_NAME], rax
     mov rdi, [rbp - MVG_SELF]
     mov rax, [rdi + PyMemoryViewObject.mv_itemsize]
+    imul rax, [rdi + PyMemoryViewObject.mv_stride]
     V_PACK_I64 rax, rcx
     mov rcx, [rbp - MVG_NAME]
     mov rcx, [rcx + PyTupleObject.ob_item]
@@ -672,6 +676,42 @@ DEF_FUNC memoryview_method_tobytes, MVM_FRAME
 .mvt_argerr:
     RAISE exc_TypeError_type, "tobytes() takes no arguments"
 END_FUNC memoryview_method_tobytes
+
+;; ============================================================================
+;; memoryview_method_toreadonly(rdi = args Value[], rsi = nargs)
+;;   -> (rax = a read-only view over the same window, rdx = TAG_PTR)
+;;
+;; _pyio hands a caller a view of its buffer this way, and without it the
+;; caller could write through it.  The copy is memoryview(memoryview)'s, with
+;; the one field changed.
+;; ============================================================================
+DEF_FUNC memoryview_method_toreadonly, MVM_FRAME
+    test rsi, rsi
+    jz .mvro_argerr
+    mov rdi, [rdi]
+    mov [rbp - MVM_SELF], rdi
+    call memoryview_check
+    mov rdi, [rbp - MVM_SELF]
+    mov rsi, rdi
+    lea rdi, [rel memoryview_type]
+    mov rdx, 1                  ; nargs
+    lea rsi, [rbp - MVM_SELF]
+    call memoryview_type_call
+    V_UNPACK rax, rdx
+    test rax, rax
+    jz .mvro_fail
+    mov qword [rax + PyMemoryViewObject.mv_readonly], 1
+    mov edx, TAG_PTR
+    leave
+    ret
+.mvro_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+.mvro_argerr:
+    RAISE exc_TypeError_type, "toreadonly() takes no arguments"
+END_FUNC memoryview_method_toreadonly
 
 DEF_FUNC memoryview_method_release, MVM_FRAME
     test rsi, rsi

@@ -20,6 +20,7 @@ extern memoryview_method_release
 extern memoryview_method_enter
 extern memoryview_method_exit
 extern memoryview_method_hex
+extern memoryview_method_toreadonly
 extern memoryview_dunder_getitem
 extern memoryview_dunder_setitem
 extern memoryview_dunder_len
@@ -2413,6 +2414,7 @@ DEF_FUNC methods_init
     mov rbx, rax
     ADD_FN_N mn_tobytes, memoryview_method_tobytes, 1, 2
     ADD_FN_N mn_tolist, memoryview_method_tolist, 1, 1
+    ADD_FN_N mn_toreadonly, memoryview_method_toreadonly, 1, 1
     ADD_FN_N mn_cast, memoryview_method_cast, 1, 3
     ADD_FN_N mn_release, memoryview_method_release, 1, 1
     ADD_FN_N mn___enter__, memoryview_method_enter, 1, 1
@@ -2543,6 +2545,7 @@ mn_fromhex:     db "fromhex", 0
 mn_decode:            db "decode", 0
 mn_tobytes:          db "tobytes", 0
 mn_tolist:           db "tolist", 0
+mn_toreadonly:       db "toreadonly", 0
 mn_cast:             db "cast", 0
 mn_release:          db "release", 0
 mn___enter__:        db "__enter__", 0
