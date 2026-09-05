@@ -59,6 +59,9 @@ FS_SPECLEN equ 104       ; length of the spec as given
 FS_OWNED  equ 112        ; a box V_PACK made for a wide int subclass, or 0
 FS_FRAME  equ 120           ; + 5 pushes = 160, 16-aligned
 
+; The widest field this will build.  See .fs_after_width.
+FS_MAX_WIDTH equ 0x10000000
+
 ;; ============================================================================
 ;; format_apply_spec(rdi = value Value, rsi = spec str) -> Value (a str)
 ;; ============================================================================
@@ -173,11 +176,22 @@ DEF_FUNC format_apply_spec, FS_FRAME
     cmp cl, '9'
     ja .fs_after_width
     imul r15, r15, 10
+    jo .fs_too_many_digits
     sub rcx, '0'
     add r15, rcx
+    jo .fs_too_many_digits
     inc r14
     jmp .fs_width_loop
 .fs_after_width:
+    ; A width is padding, and padding is a buffer.  CPython has no cap and
+    ; simply asks the allocator, which answers MemoryError; ap_malloc has no
+    ; way to answer at all -- it calls fatal_error -- so `"%*d" % (2**40, 5)`
+    ; printed "Fatal: out of memory" and ended the process.  The cap is
+    ; list_repeat's, 256M, and the divergence it buys is a MemoryError where
+    ; CPython would have spent a quarter of a gigabyte building a field of
+    ; spaces.
+    cmp r15, FS_MAX_WIDTH
+    ja .fs_width_too_big
     mov [rbp - FS_WIDTH], r15
 
     ; ---- [grouping] --------------------------------------------------------
@@ -209,11 +223,23 @@ DEF_FUNC format_apply_spec, FS_FRAME
     cmp cl, '9'
     ja .fs_prec_done
     imul r15, r15, 10
+    jo .fs_too_many_digits
     sub rcx, '0'
     add r15, rcx
+    jo .fs_too_many_digits
     inc r14
     jmp .fs_prec_loop
 .fs_prec_done:
+    ; CPython's precision is a C int, and it says so.
+    cmp r15, 0x7FFFFFFF
+    ja .fs_prec_too_big
+    ; And a precision is a buffer, the same as a width: float_format_spec
+    ; renders through snprintf, whose answer is an int, and a precision near
+    ; INT_MAX makes it return -1 rather than a length.  The cap is the width's
+    ; and the divergence is the same shape -- a MemoryError where CPython
+    ; would have spent two gigabytes on decimal places.
+    cmp r15, FS_MAX_WIDTH
+    ja .fs_width_too_big
     mov [rbp - FS_PREC], r15
 
 .fs_after_prec:
@@ -461,6 +487,13 @@ DEF_FUNC format_apply_spec, FS_FRAME
     mov [rbp - FS_BODY], rax
     jmp .fs_pad
 
+.fs_too_many_digits:
+    RAISE exc_ValueError_type, "Too many decimal digits in format string"
+.fs_prec_too_big:
+    RAISE exc_ValueError_type, "precision too big"
+.fs_width_too_big:
+    extern exc_MemoryError_type
+    RAISE exc_MemoryError_type, ""
 .fs_complex_zero_pad:
     RAISE exc_ValueError_type, "Zero padding is not allowed in complex format specifier"
 .fs_complex_equals_align:
@@ -989,9 +1022,14 @@ END_FUNC format_int_body
 ;; render a double to a precision and a type letter, then leaves padding to
 ;; the caller.
 ;; ============================================================================
-FFB_SPEC  equ 8          ; the synthesised ".<prec><type>" spec
-FFB_ADDDOT equ 16        ; 1 when an empty type needs its ".0" put back
-FFB_FRAME equ 48            ; + 2 pushes = 64
+FFB_ADDDOT equ 8         ; 1 when an empty type needs its ".0" put back
+FFB_PCT   equ 16         ; 1 when the type letter was '%'
+; The synthesised ".<prec><type>" spec.  32 bytes, because the precision is
+; whatever fits a C int and that is ten digits; four used to be assumed, and
+; the cap that kept it to three was the reason format(1.0, ".5000f") came back
+; with a thousand decimal places instead of five thousand.
+FFB_SPEC  equ 48
+FFB_FRAME equ 64            ; + 2 pushes = 80, 16-aligned
 
 DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     push rbx
@@ -1011,6 +1049,22 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     movq rdi, xmm0                      ; raw double bits
 
 .ffb_have_double:
+    ; The '%' type is 'f' applied to a hundred times the value, with a '%'
+    ; put on the end.  Neither half was done: the letter reached
+    ; float_format_spec, matched none of its six, and fell to the %g default,
+    ; so format(1/3, ".2%") was "0.33" -- not the right number, and not
+    ; carrying the sign that says what it is.
+    mov qword [rbp - FFB_PCT], 0
+    mov rax, [r12 - FS_TYPE]
+    cmp rax, '%'
+    jne .ffb_not_pct
+    mov qword [rbp - FFB_PCT], 1
+    mov qword [r12 - FS_TYPE], 'f'      ; and 'f' pads the same way '%' does
+    movq xmm0, rdi
+    mulsd xmm0, [rel ffb_hundred]
+    movq rdi, xmm0
+.ffb_not_pct:
+
     ; An empty type letter is repr, not %g.  format_float_body used to write a
     ; one-byte spec "r" on the strength of a comment claiming
     ; float_format_spec had a repr default; it has none, so the letter was
@@ -1061,47 +1115,31 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
 .ffb_have_prec:
     mov byte [rbx], '.'
     mov ecx, 1
-    ; CPython caps a float precision well below this; anything past three
-    ; digits is not representable in the underlying formatter either.  Two
-    ; digits used to be assumed, so ".100f" became ".10" plus a stray '0'
-    ; that was read as the type letter.
-    cmp rax, 999
-    jle .ffb_prec_ok
-    mov rax, 999
-.ffb_prec_ok:
+    ; However many digits it takes.  float_format_spec renders through
+    ; snprintf and falls back to a heap buffer of whatever size snprintf
+    ; names, so the number here is the only limit -- and the spec parser has
+    ; already refused anything that does not fit a C int.  Three digits used
+    ; to be all this could write, and rather than say so it silently used 999
+    ; instead: format(1.0, ".5000f") came back one thousand places long.
     mov r8, rax
-    mov r9, 100
+    mov r9, 10
+    xor r10d, r10d                      ; digits on the machine stack
+.ffb_prec_split:
     xor edx, edx
     mov rax, r8
-    div r9                              ; rax = hundreds, rdx = rest
-    test rax, rax
-    jz .ffb_prec_tens
-    add al, '0'
+    div r9                              ; rax = quotient, rdx = digit
+    mov r8, rax
+    add rdx, '0'
+    push rdx
+    inc r10
+    test r8, r8
+    jnz .ffb_prec_split
+.ffb_prec_emit:                         ; least significant went on last
+    pop rax
     mov [rbx + rcx], al
     inc rcx
-    mov r11d, 1                         ; a leading digit was emitted
-    jmp .ffb_prec_have_h
-.ffb_prec_tens:
-    xor r11d, r11d
-.ffb_prec_have_h:
-    mov rax, rdx
-    xor edx, edx
-    mov r9, 10
-    div r9                              ; rax = tens, rdx = units
-    mov r10, rdx                        ; keep the units
-    test rax, rax
-    jnz .ffb_prec_emit_tens
-    test r11d, r11d
-    jz .ffb_one_digit
-.ffb_prec_emit_tens:
-    add al, '0'
-    mov [rbx + rcx], al
-    inc rcx
-.ffb_one_digit:
-    mov rax, r10
-    add al, '0'
-    mov [rbx + rcx], al
-    inc rcx
+    dec r10
+    jnz .ffb_prec_emit
 .ffb_no_prec:
     mov rax, [r12 - FS_TYPE]
     test rax, rax
@@ -1116,6 +1154,8 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     call float_format_spec
     V_UNPACK rax, rdx
 
+    cmp qword [rbp - FFB_PCT], 0
+    jne .ffb_add_pct
     cmp qword [rbp - FFB_ADDDOT], 0
     je .ffb_have_string
 
@@ -1164,6 +1204,23 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     mov byte [rax + PyStrObject.data + rcx], '.'
     mov byte [rax + PyStrObject.data + rcx + 1], '0'
     mov byte [rax + PyStrObject.data + rcx + 2], 0
+    push rax
+    mov rdi, rbx
+    call obj_decref
+    pop rax
+
+    jmp .ffb_have_string
+
+.ffb_add_pct:
+    ; The '%' on the end.  It goes over the NUL that terminates the rendered
+    ; body -- a str always has one -- and str_new_heap copies from there with
+    ; an explicit length, so the body is released untouched a line later.
+    mov rbx, rax
+    mov rcx, [rbx + PyStrObject.ob_size]
+    mov byte [rbx + PyStrObject.data + rcx], '%'
+    lea rdi, [rbx + PyStrObject.data]
+    lea rsi, [rcx + 1]
+    call str_new_heap
     push rax
     mov rdi, rbx
     call obj_decref
@@ -1636,6 +1693,8 @@ DEF_FUNC fmt_percent_coerce, FPC_FRAME
     call raise_type_error_with_name
 
 section .rodata
+align 8
+ffb_hundred:     dq 100.0
 fpc_name_index:  db "__index__", 0
 fpc_name_float:  db "__float__", 0
 fpc_msg_real:    db ` format: a real number is required, not \x01`, 0

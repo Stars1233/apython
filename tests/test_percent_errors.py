@@ -65,3 +65,24 @@ check("str", lambda: "%s-%d-%05.2f" % ("a", 5, 1.5))
 check("bytes repr", lambda: b"%r" % (b"x",))
 check("bytes char", lambda: b"%c" % (65,))
 print("done")
+
+
+# `%%` is a literal percent, and CPython recognises it before any flag, width
+# or precision has been read.  A '%' that turns up as the conversion letter
+# AFTER them is neither a literal nor a conversion: "%.2%" is an unsupported
+# format character, and used to come back here as a formatted number with a
+# percent sign on it.
+print("=== percent is a literal, not a conversion ===")
+for fmt, args in (("%%", ()), ("%d%%", (5,)), ("100%%", ()), ("%%%%", ()),
+                  ("%(a)s%%", {"a": 1}), ("%%%s", (1,)),
+                  ("%.2%", (0.5,)), ("%5%", (1,)), ("%-5.2%", (1,)),
+                  ("% %", (1,)), ("%*%", (3, 1))):
+    try:
+        print("%-10r %r" % (fmt, fmt % args))
+    except Exception as e:
+        print("%-10r %s: %s" % (fmt, type(e).__name__, e))
+for fmt, args in ((b"%%", ()), (b"%d%%", (5,)), (b"%.2%", (5,))):
+    try:
+        print("%-10r %r" % (fmt, fmt % args))
+    except Exception as e:
+        print("%-10r %s: %s" % (fmt, type(e).__name__, e))
