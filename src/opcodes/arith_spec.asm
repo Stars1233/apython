@@ -422,6 +422,111 @@ DEF_FUNC_BARE op_binary_op_mod_int
 END_FUNC op_binary_op_mod_int
 
 ;; ============================================================================
+;; op_binary_op_lshift_int (230) -> nothing; pushes the result and dispatches
+;;
+;; Guards: both operands immediates, a shift count in [0, 51), and no bits
+;; lost off the top.  A count of 51 or more cannot fit even a left operand of
+;; 1, and a negative one raises, so both go to the generic path.
+;;
+;; The loss check shifts the answer arithmetically back and compares: bits
+;; that fell off the top do not come back, and `sar` restores a negative left
+;; operand correctly too.  A shift that survives it can still be outside
+;; +-2^50, so the immediate range is checked after.
+;; ============================================================================
+DEF_FUNC_BARE op_binary_op_lshift_int
+    INT_PAIR_OR_DEOPT .lsh_int_deopt
+    sub rax, [rel v_int_bias]   ; the shift count
+    cmp rax, V_INT_SHIFT + 1
+    jae .lsh_int_deopt
+    sub rdx, [rel v_int_bias]   ; the left operand
+    mov rcx, rax
+    mov r8, rdx
+    shl rdx, cl
+    mov rsi, rdx
+    sar rsi, cl
+    cmp rsi, r8
+    jne .lsh_int_deopt          ; bits fell off the top
+    V_FROM_I64 rdx, rax, .lsh_int_deopt
+    VREPLACE2 rdx
+    add rbx, 2                 ; skip CACHE
+    DISPATCH
+.lsh_int_deopt:
+    mov byte [rbx - 2], 122
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_binary_op_lshift_int
+
+;; ============================================================================
+;; op_binary_op_rshift_int (231) -> nothing; pushes the result and dispatches
+;;
+;; Guards: both operands immediates and a shift count in [0, 64).  `sar`
+;; floors, which is what Python's `>>` does, and the result cannot leave the
+;; immediate range because its magnitude never exceeds the left operand's.
+;; ============================================================================
+DEF_FUNC_BARE op_binary_op_rshift_int
+    INT_PAIR_OR_DEOPT .rsh_int_deopt
+    sub rax, [rel v_int_bias]   ; the shift count
+    cmp rax, 64
+    jae .rsh_int_deopt          ; negative (which raises), or 64 and up
+    sub rdx, [rel v_int_bias]
+    mov rcx, rax
+    sar rdx, cl
+    add rdx, [rel v_int_bias]
+    VREPLACE2 rdx
+    add rbx, 2                 ; skip CACHE
+    DISPATCH
+.rsh_int_deopt:
+    mov byte [rbx - 2], 122
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_binary_op_rshift_int
+
+;; ============================================================================
+;; op_binary_op_pow_int (232) -> nothing; pushes the result and dispatches
+;;
+;; Guards: both operands immediates, a non-negative exponent below 64, and no
+;; overflow in the squaring.  A negative exponent answers a float and belongs
+;; to the generic path; CPython specializes `**` for nothing at all.
+;;
+;; The base is squared only while another exponent bit remains, so an overflow
+;; in a squaring whose value would never have been used cannot send a result
+;; that fitted to GMP.
+;; ============================================================================
+DEF_FUNC_BARE op_binary_op_pow_int
+    INT_PAIR_OR_DEOPT .pow_int_deopt
+    sub rax, [rel v_int_bias]   ; the exponent
+    js .pow_int_deopt
+    cmp rax, 64
+    jae .pow_int_deopt
+    sub rdx, [rel v_int_bias]   ; the base
+    mov rsi, rdx                ; b, the running square
+    mov rcx, rax                ; e, the remaining exponent
+    mov rax, 1                  ; the running result
+.pow_int_loop:
+    test rcx, rcx
+    jz .pow_int_fits
+    test cl, 1
+    jz .pow_int_square
+    imul rax, rsi
+    jo .pow_int_deopt
+.pow_int_square:
+    shr rcx, 1
+    jz .pow_int_fits
+    imul rsi, rsi
+    jo .pow_int_deopt
+    jmp .pow_int_loop
+.pow_int_fits:
+    V_FROM_I64 rax, rdx, .pow_int_deopt
+    VREPLACE2 rax
+    add rbx, 2                 ; skip CACHE
+    DISPATCH
+.pow_int_deopt:
+    mov byte [rbx - 2], 122
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_binary_op_pow_int
+
+;; ============================================================================
 ;; op_compare_op_float (223) -> nothing; pushes the bool and dispatches
 ;;
 ;; The float comparison superinstructions (223, 224, 225).

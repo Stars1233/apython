@@ -556,10 +556,27 @@ DEF_FUNC_BARE op_binary_op
     cmp ecx, 25                ; NB_INPLACE_XOR
     je .binop_try_smallint_xor
 
-    ; Everything the ladder did not match -- power, the shifts, matrix
-    ; multiply -- is the generic protocol's.  This jump is load-bearing: the
-    ; arms below sit between here and .binop_generic, so falling through
-    ; reaches the AND arm and `i << 3` quietly computed `i & 3`.
+    ; Fast path: SmallInt shifts and power.  int_lshift, int_rshift and
+    ; int_power grew int64 arms of their own, but reaching them still cost the
+    ; whole generic protocol -- 45% of a shift loop and 33% of a power loop
+    ; went on getting there.
+    cmp ecx, 3                 ; NB_LSHIFT
+    je .binop_try_smallint_lshift
+    cmp ecx, 16                ; NB_INPLACE_LSHIFT
+    je .binop_try_smallint_lshift
+    cmp ecx, 9                 ; NB_RSHIFT
+    je .binop_try_smallint_rshift
+    cmp ecx, 22                ; NB_INPLACE_RSHIFT
+    je .binop_try_smallint_rshift
+    cmp ecx, 8                 ; NB_POWER
+    je .binop_try_smallint_pow
+    cmp ecx, 21                ; NB_INPLACE_POWER
+    je .binop_try_smallint_pow
+
+    ; Everything the ladder did not match -- true divide, matrix multiply --
+    ; is the generic protocol's.  This jump is load-bearing: the arms below sit
+    ; between here and .binop_generic, so falling through reaches the AND arm
+    ; and `i << 3` quietly computed `i & 3`.
     jmp .binop_generic
 
 ;; ============================================================================
@@ -628,6 +645,99 @@ DEF_FUNC_BARE op_binary_op
 .binop_mod_done:
     mov rax, rdx
     mov byte [rbx - 2], 229
+    VPUSH_INT rax, r15
+    add rbx, 2
+    DISPATCH
+
+;; ============================================================================
+;; The shift and power arms of op_binary_op.
+;;
+;; Each declines to the generic path rather than specializing when the answer
+;; would not fit an immediate, so a site that overflows once stays generic
+;; instead of rewriting itself into an opcode that must immediately deopt.
+;; ============================================================================
+.binop_try_smallint_lshift:
+    cmp r9d, TAG_SMALLINT
+    jne .binop_generic
+    cmp r8d, TAG_SMALLINT
+    jne .binop_generic
+    cmp rsi, V_INT_SHIFT + 1
+    jae .binop_generic         ; unsigned: catches a negative count, which
+                               ; raises, and any count that cannot fit
+    mov r10, rcx               ; the op index, which cl is about to take
+    mov rcx, rsi
+    mov rax, rdi
+    shl rax, cl
+    mov rdx, rax
+    sar rdx, cl                ; bits that fell off the top do not come back,
+                               ; and `sar` brings a negative one back too
+    mov rcx, r10               ; restore before any exit
+    cmp rdx, rdi
+    jne .binop_generic
+    mov rdx, rax
+    sar rdx, V_INT_SHIFT
+    inc rdx
+    cmp rdx, 2
+    jae .binop_generic         ; fits an int64 but not an immediate
+    mov byte [rbx - 2], 230
+    VPUSH_INT rax, r15
+    add rbx, 2
+    DISPATCH
+
+.binop_try_smallint_rshift:
+    cmp r9d, TAG_SMALLINT
+    jne .binop_generic
+    cmp r8d, TAG_SMALLINT
+    jne .binop_generic
+    cmp rsi, 64
+    jae .binop_generic         ; a negative count raises; 64 and up answer
+                               ; 0 or -1, which GMP settles rarely enough
+    mov r10, rcx
+    mov rcx, rsi
+    mov rax, rdi
+    sar rax, cl                ; already floors, which is what Python wants
+    mov rcx, r10
+    ; |result| <= |left| < 2^50, so it is always an immediate.
+    mov byte [rbx - 2], 231
+    VPUSH_INT rax, r15
+    add rbx, 2
+    DISPATCH
+
+.binop_try_smallint_pow:
+    cmp r9d, TAG_SMALLINT
+    jne .binop_generic
+    cmp r8d, TAG_SMALLINT
+    jne .binop_generic
+    test rsi, rsi
+    js .binop_generic          ; a negative exponent answers a float
+    cmp rsi, 64
+    jae .binop_generic         ; any base but 0 and +-1 overflows long before
+    ; Repeated squaring, checked at every step.  The base is squared only
+    ; while another exponent bit remains, so an overflow in a squaring whose
+    ; value would never be used cannot send a result that fitted to GMP.
+    mov rax, 1                 ; the running result
+    mov r10, rdi               ; b, the running square
+    mov r11, rsi               ; e, the remaining exponent
+.binop_pow_loop:
+    test r11, r11
+    jz .binop_pow_fits
+    test r11b, 1
+    jz .binop_pow_square
+    imul rax, r10
+    jo .binop_generic
+.binop_pow_square:
+    shr r11, 1
+    jz .binop_pow_fits
+    imul r10, r10
+    jo .binop_generic
+    jmp .binop_pow_loop
+.binop_pow_fits:
+    mov rdx, rax
+    sar rdx, V_INT_SHIFT
+    inc rdx
+    cmp rdx, 2
+    jae .binop_generic
+    mov byte [rbx - 2], 232
     VPUSH_INT rax, r15
     add rbx, 2
     DISPATCH

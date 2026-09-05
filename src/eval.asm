@@ -120,6 +120,9 @@ extern op_binary_op_mul_float
 extern op_binary_op_truediv_float
 extern op_binary_op_mul_int
 extern op_binary_op_floordiv_int
+extern op_binary_op_lshift_int
+extern op_binary_op_rshift_int
+extern op_binary_op_pow_int
 extern op_for_iter_list
 extern op_for_iter_range
 
@@ -1293,9 +1296,9 @@ opcode_table:
     dq op_binary_op_or_int   ; 227 = BINARY_OP_OR_INT (specialized)
     dq op_binary_op_xor_int  ; 228 = BINARY_OP_XOR_INT (specialized)
     dq op_binary_op_mod_int  ; 229 = BINARY_OP_REMAINDER_INT (specialized)
-    dq op_unimplemented      ; 230
-    dq op_unimplemented      ; 231
-    dq op_unimplemented      ; 232
+    dq op_binary_op_lshift_int ; 230 = BINARY_OP_LSHIFT_INT (specialized)
+    dq op_binary_op_rshift_int ; 231 = BINARY_OP_RSHIFT_INT (specialized)
+    dq op_binary_op_pow_int  ; 232 = BINARY_OP_POWER_INT (specialized)
     dq op_unimplemented      ; 233
     dq op_unimplemented      ; 234
     dq op_unimplemented      ; 235
