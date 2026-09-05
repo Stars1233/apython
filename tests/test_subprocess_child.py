@@ -82,3 +82,49 @@ for field, value in (("uid", 0), ("gid", 0), ("gids", [0]), ("umask", 0o22),
         print(field, "was ACCEPTED")
     except Exception:
         print(field, "refused")
+
+print()
+print("-- and the errno the child reports is the errno the caller sees")
+# The child writes `<class>:<errno>:<message>` down the error pipe and
+# subprocess.py reads the middle field with int(hex_errno, 16).  Writing it in
+# decimal is not a smaller mistake than writing the wrong number: EACCES, 13,
+# arrived as 19, which is ENODEV.  This drives fork_exec directly, because
+# subprocess itself is CPython's Lib/ and not part of this tree.
+import errno
+import os
+
+path = "/tmp/apython-noexec-probe"
+with open(path, "w") as fh:
+    fh.write("#!/bin/sh\nexit 0\n")
+os.chmod(path, 0o644)
+
+# CPython's fork_exec takes a twenty-third argument, allow_vfork; ours gives
+# it a default, so passing it positionally satisfies both.
+ORDER23 = ORDER + ("allow_vfork",)
+
+for target, want in ((path, errno.EACCES),
+                     ("/tmp/apython-no-such-file-probe", errno.ENOENT)):
+    r, w = posix.pipe()
+    kw = dict(BASE, allow_vfork=False)
+    kw["args"] = [target]
+    kw["executable_list"] = [target.encode()]
+    kw["errpipe_read"] = r
+    kw["errpipe_write"] = w
+    pid = _posixsubprocess.fork_exec(*[kw[n] for n in ORDER23])
+    posix.close(w)
+    blob = b""
+    while True:
+        chunk = posix.read(r, 4096)
+        if not chunk:
+            break
+        blob += chunk
+    posix.close(r)
+    posix.waitpid(pid, 0)
+    # The class name is not compared: CPython's child writes OSError and
+    # this one writes the subclass it actually raised, and subprocess.py
+    # picks the class from the errno regardless.
+    _name, hex_errno, _rest = blob.split(b":", 2)
+    got = int(hex_errno, 16)
+    print("%-14s %s %s" % (errno.errorcode[want], got == want,
+                           errno.errorcode.get(got)))
+os.unlink(path)

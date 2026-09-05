@@ -33,13 +33,16 @@ _UNSUPPORTED = (
 def _write_error(errpipe_write, exc_type, errno_num, what):
     """The child's half of the error protocol.
 
-    CPython's format is `<class>:<errno>:<message>` on one line, and
-    subprocess.py splits on the colons.  Anything that goes wrong writing it
-    is dropped: the child is about to _exit, and the parent will report a
-    bare failure rather than nothing.
+    CPython's format is `<class>:<hex errno>:<message>` on one line, and
+    subprocess.py splits on the colons and reads the middle field with
+    `int(hex_errno, 16)`.  Writing it in decimal is not a smaller mistake
+    than writing the wrong number: EACCES, 13, came back to the caller as 19,
+    which is ENODEV.  Anything that goes wrong writing it is dropped: the
+    child is about to _exit, and the parent will report a bare failure rather
+    than nothing.
     """
     try:
-        msg = ("%s:%d:%s" % (exc_type, errno_num, what)).encode("utf-8",
+        msg = ("%s:%x:%s" % (exc_type, errno_num, what)).encode("utf-8",
                                                                 "replace")
         posix.write(errpipe_write, msg)
     except Exception:
