@@ -1613,8 +1613,10 @@ DEF_FUNC methods_init
     mov rdi, r12
     call obj_decref
 
-    mov rdi, rbx
-    call add_class_getitem
+    ; No add_class_getitem here: `type[int]` is a special case in CPython's
+    ; PyObject_GetItem, taken before any lookup, and type carries no
+    ; __class_getitem__ of its own -- hasattr(type, "__class_getitem__") is
+    ; False there.  op_binary_subscr has the same special case.
 
     ; bool is a static subclass of int -- the only one in the tree -- so it
     ; never went through type_from_parts and had nothing to register it.

@@ -24,6 +24,7 @@ extern raise_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern int_to_i64
+extern type_type
 extern tuple_new
 extern list_new
 extern list_append
@@ -213,6 +214,25 @@ DEF_FUNC_BARE op_binary_subscr
     jmp .subscr_error
 
 .try_class_getitem:
+    ; `type[int]` is a special case in CPython, taken before any lookup, and
+    ; type itself carries no __class_getitem__ -- hasattr(type,
+    ; "__class_getitem__") is False there and it is not in type.__dict__.
+    ; Registering one to make the subscript work made both answer yes, which
+    ; is what typing and the ABCs read to decide whether something is
+    ; subscriptable at all.
+    mov rdi, [rsp+8]
+    lea rax, [rel type_type]
+    cmp rdi, rax
+    jne .cgi_lookup
+    mov rsi, [rsp]                  ; the key
+    mov rcx, [rsp + 16]
+    V_PACK rsi, rcx
+    extern generic_alias_new
+    call generic_alias_new
+    mov edx, TAG_PTR
+    jmp .subscr_done
+
+.cgi_lookup:
     ; obj is a type — look up __class_getitem__ in its tp_dict (walk MRO)
     ; Stack: [rsp]=key, [rsp+8]=obj
     extern dunder_lookup
