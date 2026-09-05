@@ -62,12 +62,14 @@ section .text
 ;; Constructor: memoryview(bytes_obj)
 ;; ============================================================================
 global memoryview_type_call
+MV_ARG   equ 8              ; args[0] as it arrived, for the refusal
 MV_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 DEF_FUNC memoryview_type_call, MV_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     cmp rdx, 1
-    jne .mv_error
+    jne .mv_nargs_error
     mov rdi, [rsi]                     ; arg0 payload
+    mov [rbp - MV_ARG], rdi
     ; Must be a bytes-like object (reject all non-pointer tags)
     V_TEST_PTR_M [rsi], r11      ; args[0] a pointer?
     ja .mv_error
@@ -172,8 +174,18 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     leave
     ret
 
+.mv_nargs_error:
+    mov rsi, rdx
+    CSTRING rdx, " given)"
+    CSTRING rdi, "memoryview() takes at most 1 argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+
 .mv_error:
-    RAISE exc_TypeError_type, "memoryview: a bytes-like object is required"
+    mov rsi, [rbp - MV_ARG]
+    CSTRING rdi, `memoryview: a bytes-like object is required, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC memoryview_type_call
 
 

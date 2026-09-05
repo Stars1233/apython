@@ -205,7 +205,10 @@ DEF_FUNC builtin_abs
     RAISE exc_TypeError_type, "bad operand type for abs()"
 
 .abs_error:
-    RAISE exc_TypeError_type, "abs() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "abs() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_abs
 
 ;; ============================================================================
@@ -391,7 +394,10 @@ DEF_FUNC builtin_divmod, 8            ; 5 pushes, so rsp is 16-aligned
     ret
 
 .divmod_error:
-    RAISE exc_TypeError_type, "divmod expected 2 arguments"
+    CSTRING rdi, "divmod expected 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 
 .divmod_pop_type_error:
     add rsp, 8                  ; the quotient tag pushed above
@@ -1506,7 +1512,11 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jmp .int_base_parse_error
 
 .int_base_type_error:
-    RAISE exc_TypeError_type, "int() second arg must be an integer"
+    mov rsi, [rbp - BI_ARGS]
+    mov rsi, [rsi + 8]
+    CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .int_base_type_error_str:
     RAISE exc_TypeError_type, "int() can't convert non-string with explicit base"
@@ -1630,20 +1640,56 @@ END_FUNC builtin_int_fn
 ;; ============================================================================
 ;; 4. builtin_ord(args, nargs) - ord(c)
 ;; ============================================================================
-DEF_FUNC builtin_ord
+ORD_ARG   equ 8             ; args[0] as it arrived, for both refusals
+ORD_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC builtin_ord, ORD_FRAME
 
     cmp rsi, 1
     jne .ord_nargs_error
 
-    V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
+    mov rax, [rdi]
+    mov [rbp - ORD_ARG], rax
+    V_TEST_PTR rax, r11          ; args[0] a pointer?
     ja .ord_type_error
+    test rax, rax
+    jz .ord_type_error
 
-    mov rdi, [rdi]                 ; args[0] payload
+    mov rdi, rax                   ; args[0] payload
 
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
-    jne .ord_type_error
+    je .ord_is_str
+    ; bytes and bytearray are one byte each in CPython's ord(), and were a
+    ; TypeError here: `ord(b"x")` is 120 there and refused by name here.
+    extern bytes_type
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .ord_bytes
+    extern bytearray_type
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .ord_bytearray
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .ord_is_str
+    jmp .ord_type_error
+
+.ord_bytes:
+    mov rcx, [rdi + PyBytesObject.ob_size]
+    cmp rcx, 1
+    jne .ord_len_error
+    movzx eax, byte [rdi + PyBytesObject.data]
+    jmp .ord_done
+
+.ord_bytearray:
+    mov rcx, [rdi + PyByteArrayObject.ob_size]
+    cmp rcx, 1
+    jne .ord_len_error
+    mov rax, [rdi + PyByteArrayObject.ob_bytes]
+    movzx eax, byte [rax]
+    jmp .ord_done
+
+.ord_is_str:
 
     ; A string is stored as UTF-8, so one character can be up to four bytes.
     ; Requiring ob_size == 1 made ord(chr(233)) a TypeError.
@@ -1714,13 +1760,40 @@ DEF_FUNC builtin_ord
     ret
 
 .ord_type_error:
-    RAISE exc_TypeError_type, "ord() expected string of length 1"
+    mov rsi, [rbp - ORD_ARG]
+    CSTRING rdi, `ord() expected string of length 1, but \x01 found`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .ord_len_error:
-    RAISE exc_TypeError_type, "ord() expected a character"
+    ; CPython counts CODE POINTS for a str and bytes for the other two, and
+    ; says how many it got: "expected a character, but string of length 2".
+    mov rdi, [rbp - ORD_ARG]
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .ord_len_bytes
+    mov rsi, [rdi + PyStrObject.ob_length]
+    jmp .ord_len_raise
+.ord_len_bytes:
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    jne .ord_len_size
+    mov rsi, [rdi + PyByteArrayObject.ob_size]
+    jmp .ord_len_raise
+.ord_len_size:
+    mov rsi, [rdi + PyBytesObject.ob_size]
+.ord_len_raise:
+    CSTRING rdx, " found"
+    CSTRING rdi, "ord() expected a character, but string of length "
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 
 .ord_nargs_error:
-    RAISE exc_TypeError_type, "ord() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "ord() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_ord
 
 ;; ============================================================================
@@ -1839,7 +1912,10 @@ DEF_FUNC builtin_chr, 16
     RAISE exc_ValueError_type, "chr() arg not in range(0x110000)"
 
 .chr_nargs_error:
-    RAISE exc_TypeError_type, "chr() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "chr() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_chr
 
 ;; ============================================================================
@@ -1931,7 +2007,10 @@ DEF_FUNC builtin_hex, HEXB_FRAME
     ret
 
 .hex_nargs_error:
-    RAISE exc_TypeError_type, "hex() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "hex() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_hex
 
 ; builtin_eval_fn used to live here: a stub that parsed a single integer
@@ -2491,7 +2570,10 @@ DEF_FUNC builtin_bin, BINB_FRAME
     ret
 
 .bin_nargs_error:
-    RAISE exc_TypeError_type, "bin() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "bin() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_bin
 
 ;; ============================================================================
@@ -2585,7 +2667,10 @@ DEF_FUNC builtin_oct, OCTB_FRAME
     ret
 
 .oct_nargs_error:
-    RAISE exc_TypeError_type, "oct() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "oct() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_oct
 
 ; const_one is read by round() and pow(); it lived in a .rodata block shared
@@ -2949,7 +3034,11 @@ DEF_FUNC builtin_complex, BCX_FRAME
     RAISE exc_TypeError_type, "complex() second arg can't be a string"
 
 .bcx_argcount:
-    RAISE exc_TypeError_type, "complex() takes at most 2 arguments"
+    mov rsi, [rbp - BCX_NARGS]
+    CSTRING rdx, " given)"
+    CSTRING rdi, "complex() takes at most 2 arguments ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_complex
 
 

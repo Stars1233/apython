@@ -343,7 +343,11 @@ DEF_FUNC property_construct
     ret
 
 .pc_error:
-    RAISE exc_TypeError_type, "property expected 1 to 4 arguments"
+    mov rsi, r12
+    CSTRING rdx, " given)"
+    CSTRING rdi, "property() takes at most 4 arguments ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 
 .pc_dup_error:
     RAISE exc_TypeError_type, "property() got multiple values for an argument"

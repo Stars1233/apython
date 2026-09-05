@@ -371,9 +371,35 @@ DEF_FUNC format_apply_spec, FS_FRAME
 
 .fs_bad_numeric_type:
     ; A numeric type letter on a non-number: format("abc", "f") converted the
-    ; string through float_to_f64 and printed 0.000000.
+    ; string through float_to_f64 and printed 0.000000.  CPython names both
+    ; the code and the type, and this named neither.
+    jmp .fs_unknown_code
+
+.fs_unknown_code:
+    ; "Unknown format code 'x' for object of type 'str'" -- the code is one
+    ; character, so the buffer is built here rather than in a raiser.
+    sub rsp, 128
+    mov rdi, rsp
+    CSTRING rsi, "Unknown format code '"
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rcx, [rbp - FS_TYPE]
+    mov [rax], cl
+    mov byte [rax + 1], 0
+    lea rdi, [rax + 1]
+    CSTRING rsi, "' for object of type '"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [r15 + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "'"
+    call rbt_append_cstr
     extern exc_ValueError_type
-    RAISE exc_ValueError_type, "Unknown format code for object of type 'str'"
+    lea rdi, [rel exc_ValueError_type]
+    mov rsi, rsp
+    extern raise_exception
+    call raise_exception
     ud2
 
 .fs_unsupported:
@@ -404,8 +430,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
     je .fs_body_complex
     cmp rcx, 'n'
     je .fs_body_complex
-    extern exc_ValueError_type
-    RAISE exc_ValueError_type, "Unknown format code for object of type 'complex'"
+    jmp .fs_unknown_code
 .fs_typed_not_complex:
     ; A numeric type letter needs a number.
     cmp rcx, 's'

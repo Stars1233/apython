@@ -1428,7 +1428,10 @@ DEF_FUNC builtin_len, LEN_FRAME
     ret
 
 .len_error:
-    RAISE exc_TypeError_type, "len() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "len() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 
 .len_type_error:
     RAISE exc_TypeError_type, "object has no len()"
@@ -1800,7 +1803,10 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     RAISE exc_TypeError_type, "isinstance() arg 2 must be a type, a tuple of types, or a union"
 
 .isinstance_error:
-    RAISE exc_TypeError_type, "isinstance() takes 2 arguments"
+    CSTRING rdi, "isinstance expected 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_isinstance
 
 ;; ============================================================================
@@ -1953,7 +1959,10 @@ DEF_FUNC builtin_issubclass, 8            ; 3 pushes, so rsp is 16-aligned
           "issubclass() argument 2 cannot be a parameterized generic"
 
 .issubclass_error:
-    RAISE exc_TypeError_type, "issubclass() takes 2 arguments"
+    CSTRING rdi, "issubclass expected 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_issubclass
 
 ;; ============================================================================
@@ -1973,7 +1982,10 @@ DEF_FUNC builtin_repr
     ret
 
 .repr_error:
-    RAISE exc_TypeError_type, "repr() takes 1 argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "repr() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_repr
 
 ;; ============================================================================
@@ -2009,7 +2021,10 @@ DEF_FUNC builtin_bool
     ret
 
 .bool_error:
-    RAISE exc_TypeError_type, "bool() takes at most 1 argument"
+    CSTRING rdi, "bool expected at most 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_bool
 
 ;; ============================================================================
@@ -2048,6 +2063,16 @@ DEF_FUNC builtin_float, BF_FRAME
     lea rcx, [rel str_type]
     cmp rax, rcx
     je .float_from_str
+    ; bytes and bytearray parse as numeric strings in CPython, and were
+    ; refused outright here: float(b"1.5") was a TypeError.
+    extern bytes_type
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .float_from_bytes
+    extern bytearray_type
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .float_from_bytearray
 
     ; A class defining __float__ now carries nb_float; float_to_f64 below
     ; knows nothing about it and returned 0.0 for such an object.
@@ -2099,6 +2124,22 @@ DEF_FUNC builtin_float, BF_FRAME
     mov edx, TAG_FLOAT
     leave
     ret
+
+.float_from_bytes:
+    mov [rbp - BF_OBJ], rdi
+    mov qword [rbp - BF_XLAT], 0
+    mov rax, [rdi + PyBytesObject.ob_size]
+    mov [rbp - BF_XLEN], rax
+    lea rdi, [rdi + PyBytesObject.data]
+    jmp .float_str_have_data
+
+.float_from_bytearray:
+    mov [rbp - BF_OBJ], rdi
+    mov qword [rbp - BF_XLAT], 0
+    mov rax, [rdi + PyByteArrayObject.ob_size]
+    mov [rbp - BF_XLEN], rax
+    mov rdi, [rdi + PyByteArrayObject.ob_bytes]
+    jmp .float_str_have_data
 
 .float_from_str:
     ; rdi = PyStrObject*. Parse string → double via strtod.
@@ -2197,7 +2238,10 @@ DEF_FUNC builtin_float, BF_FRAME
     ret
 
 .float_error:
-    RAISE exc_TypeError_type, "float() takes at most 1 argument"
+    CSTRING rdi, "float expected at most 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_float
 
 

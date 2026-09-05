@@ -676,6 +676,8 @@ DEF_FUNC slice_type_call, 8            ; 1 push, so rsp is 16-aligned
     je .stc_two
     cmp rdx, 3
     je .stc_three
+    test rdx, rdx
+    jz .stc_too_few
     jmp .stc_error
 
 .stc_one:
@@ -719,8 +721,18 @@ DEF_FUNC slice_type_call, 8            ; 1 push, so rsp is 16-aligned
     leave
     ret
 
+.stc_too_few:
+    xor esi, esi
+    CSTRING rdi, "slice expected at least 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+
 .stc_error:
-    RAISE exc_TypeError_type, "slice() takes 1 to 3 arguments"
+    mov rsi, rdx
+    CSTRING rdi, "slice expected at most 3 arguments, got "
+    xor edx, edx
+    jmp raise_type_error_counted
 END_FUNC slice_type_call
 
 ;; ============================================================================

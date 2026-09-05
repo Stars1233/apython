@@ -1583,7 +1583,12 @@ DEF_FUNC type_call
     cmp edx, 3
     jge .type_three_arg         ; the extra arguments are class keywords
     cmp edx, 1
-    jne .not_type_self
+    je .type_one_arg
+    ; type() and type(a, b) are neither form.  Falling through to tp_new
+    ; reported it as `type.__new__() takes at least 3 arguments`, which
+    ; names a method the caller did not write.
+    RAISE exc_TypeError_type, "type() takes 1 or 3 arguments"
+.type_one_arg:
     ; type(x) → return type of x
     mov rax, [rsi]          ; args[0] payload
     V_TEST_INT_M [rsi], r11      ; args[0] an int immediate?

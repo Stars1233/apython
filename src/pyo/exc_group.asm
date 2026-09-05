@@ -135,7 +135,8 @@ EGC_TYPE  equ 8
 EGC_ARGS  equ 16
 EGC_NARGS equ 24
 EGC_ORIG  equ 32            ; the sequence as it was passed, for .args
-EGC_FRAME equ 40            ; + 3 pushes = 64, 16-aligned
+EGC_SEQV  equ 40            ; scratch Value, so &it can be an args array
+EGC_FRAME equ 56            ; + 3 pushes = 80, 16-aligned
 DEF_FUNC eg_type_call, EGC_FRAME
     push rbx
     push r12
@@ -184,7 +185,7 @@ DEF_FUNC eg_type_call, EGC_FRAME
     ; Check if excs is a list — convert to tuple
     lea rcx, [rel list_type]
     cmp rax, rcx
-    jne .bad_excs
+    jne .other_sequence
 
     ; Convert list to tuple
     mov rcx, [r12 + PyListObject.ob_size]
@@ -216,6 +217,43 @@ DEF_FUNC eg_type_call, EGC_FRAME
 .list_done:
     mov r12, r13            ; r12 = exc_tuple (owned, refcnt=1)
     jmp .check_nonempty
+
+.other_sequence:
+    ; CPython builds the tuple with PySequence_Tuple, so a str, a range or a
+    ; generator is a sequence of members and is judged one member at a time.
+    ; Refusing everything but tuple and list here made
+    ; `BaseExceptionGroup("m", "x")` a TypeError about the sequence, where
+    ; CPython reports Item 0 instead.
+    mov rdi, r12
+    extern get_iterator_opt
+    mov esi, TAG_PTR
+    call get_iterator_opt
+    test rax, rax
+    jz .bad_excs
+    V_UNPACK rax, rdx
+    mov rdi, rax
+    call obj_decref
+    mov [rbp - EGC_SEQV], r12
+    lea rsi, [rbp - EGC_SEQV]
+    extern tuple_type
+    lea rdi, [rel tuple_type]
+    mov edx, 1
+    extern tuple_type_call
+    call tuple_type_call
+    V_UNPACK rax, rdx
+    test rax, rax
+    jz .egc_propagate
+    mov r12, rax
+    jmp .check_nonempty
+
+.egc_propagate:
+    xor eax, eax
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .have_tuple:
     ; Tuple — INCREF since eg_new will INCREF again, we need our own ref

@@ -140,7 +140,7 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
 
     ; dict(arg) - one positional arg (may also have kwargs)
     cmp r13, 1
-    jne .dtc_error
+    jne .dtc_nargs_error
 
     ; Check if arg is a dict
     mov rdi, [rbx]             ; args[0]
@@ -291,6 +291,13 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
     pop rbx
     leave
     ret
+
+.dtc_nargs_error:
+    mov rsi, r13
+    CSTRING rdi, "dict expected at most 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 
 .dtc_error:
     extern exc_TypeError_type

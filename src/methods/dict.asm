@@ -515,6 +515,22 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov rax, [r12 + PyTupleObject.ob_item]
     mov rax, [rax + r14 * 8]
     mov [rbp - DU_PAIRV], rax
+    ; An element that is not iterable at all has CPython's own message,
+    ; naming which element it was.  Left to tuple() below it came back as
+    ; "'int' object is not iterable", which says nothing about the dict.
+    mov rdi, rax
+    V_TEST_PTR rdi, rcx
+    ja .du_not_a_sequence
+    test rdi, rdi
+    jz .du_not_a_sequence
+    mov esi, TAG_PTR
+    extern get_iterator_opt
+    call get_iterator_opt
+    test rax, rax
+    jz .du_not_a_sequence
+    V_UNPACK rax, rdx
+    mov rdi, rax
+    call obj_decref
     ; Materialise the pair too, so any two-element iterable is accepted.
     lea rsi, [rbp - DU_PAIRV]
     lea rdi, [rel tuple_type]
@@ -572,9 +588,37 @@ DEF_FUNC dict_method_update, DU_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.du_bad_pair:
+.du_not_a_sequence:
     call .du_release
-    RAISE exc_ValueError_type, "dictionary update sequence element has length != 2"
+    mov rsi, r14
+    CSTRING rdx, " to a sequence"
+    CSTRING rdi, "cannot convert dictionary update sequence element #"
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+
+.du_bad_pair:
+    ; "element #0 has length 3; 2 is required": two numbers, so the first
+    ; goes into a buffer here and raise_value_error_counted appends the
+    ; second.
+    mov r13, [rax + PyTupleObject.ob_size]
+    call .du_release
+    sub rsp, 128
+    mov rdi, rsp
+    CSTRING rsi, "dictionary update sequence element #"
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, r14
+    extern msg_append_i64
+    call msg_append_i64
+    mov rdi, rax
+    CSTRING rsi, " has length "
+    call rbt_append_cstr
+    mov rdi, rsp
+    mov rsi, r13
+    CSTRING rdx, "; 2 is required"
+    extern raise_value_error_counted
+    jmp raise_value_error_counted
 
 .du_too_many:
     RAISE exc_TypeError_type, "update expected at most 1 argument"

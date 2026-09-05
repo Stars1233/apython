@@ -331,6 +331,9 @@ EN_NPOS    equ 16
 EN_START   equ 24
 EN_ITER    equ 32     ; local: iterable pointer
 EN_ITERTAG equ 40     ; local: iterable tag
+; The start= argument as it arrived, for the message when it is not an
+; integer: the refusal named no type at all, and carried a literal %s.
+EN_BADVAL  equ 48
 EN_FRAME   equ 56            ; + 3 pushes = 80, 16-aligned
 DEF_FUNC builtin_enumerate, EN_FRAME
     push rbx
@@ -367,6 +370,7 @@ DEF_FUNC builtin_enumerate, EN_FRAME
 
     ; start = int(args[1])  (positional)
     mov rdi, [rbx + 8]
+    mov [rbp - EN_BADVAL], rdi
     V_UNPACK rdi, rdx       ; args[1]
     cmp edx, TAG_SMALLINT
     jne .enum_type_error
@@ -428,6 +432,7 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     push r9
     mov rbx, [rbp - EN_ARGS]
     mov rdi, [rbx + r11]           ; the value Value
+    mov [rbp - EN_BADVAL], rdi
     V_UNPACK rdi, rdx
     cmp edx, TAG_SMALLINT
     jne .enum_type_error
@@ -540,7 +545,10 @@ DEF_FUNC builtin_enumerate, EN_FRAME
 
 .enum_type_error:
     mov qword [rel kw_names_pending], 0
-    RAISE exc_TypeError_type, "'%s' object cannot be interpreted as an integer"
+    mov rsi, [rbp - EN_BADVAL]
+    CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .enum_error:
     mov qword [rel kw_names_pending], 0
@@ -1222,7 +1230,7 @@ DEF_FUNC builtin_map
     ret
 
 .map_error:
-    RAISE exc_TypeError_type, "map() requires at least 2 arguments"
+    RAISE exc_TypeError_type, "map() must have at least two arguments."
 END_FUNC builtin_map
 
 ;; map_iternext(self) -> rax = Value or NULL
@@ -1448,7 +1456,10 @@ DEF_FUNC builtin_filter, 8            ; 3 pushes, so rsp is 16-aligned
     ret
 
 .filter_error:
-    RAISE exc_TypeError_type, "filter() requires exactly 2 arguments"
+    CSTRING rdi, "filter expected 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_filter
 
 ;; filter_iternext(self) -> rax = Value or NULL
@@ -1775,7 +1786,10 @@ section .text
     ret
 
 .rev_error:
-    RAISE exc_TypeError_type, "reversed() takes exactly 1 argument"
+    CSTRING rdi, "reversed expected 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 
 .rev_type_error:
     mov rsi, r12
@@ -1878,6 +1892,19 @@ DEF_FUNC builtin_sorted, SO_FRAME
 
     mov [rbp - SO_ARGS], rdi    ; save original args
     mov [rbp - SO_NARGS], rsi   ; save original nargs
+
+    ; key= and reverse= are keyword-only, so exactly one POSITIONAL argument
+    ; is allowed -- the keyword values arrive in the same array and have to
+    ; be discounted.  `sorted([], 1)` sorted the [] and dropped the 1.
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .sorted_npos_is_nargs
+    mov rax, [rax + PyTupleObject.ob_size]
+.sorted_npos_is_nargs:
+    neg rax
+    add rax, rsi                ; positional count
+    cmp rax, 1
+    jne .sorted_error
 
     ; Get iterator from args[0]
     mov rax, rdi
@@ -1985,7 +2012,12 @@ DEF_FUNC builtin_sorted, SO_FRAME
     ret
 
 .sorted_error:
-    RAISE exc_TypeError_type, "sorted() requires exactly 1 argument"
+    mov qword [rel kw_names_pending], 0
+    mov rsi, rax
+    CSTRING rdi, "sorted expected 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 .sorted_sort_raised:
     mov rdi, r12                ; the list we built and were about to return
     call obj_decref

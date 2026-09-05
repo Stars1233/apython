@@ -1001,7 +1001,11 @@ DEF_FUNC set_type_call, STC_FRAME
     RAISE exc_TypeError_type, "set() argument is not iterable"
 
 .stc_error:
-    RAISE exc_TypeError_type, "set() takes at most 1 argument"
+    mov rsi, rdx
+    CSTRING rdi, "set expected at most 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC set_type_call
 
 ; set_repr is in src/repr.asm
@@ -1219,7 +1223,11 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
 .ftc_not_iterable:
     RAISE exc_TypeError_type, "frozenset() argument is not iterable"
 .ftc_error:
-    RAISE exc_TypeError_type, "frozenset() takes at most 1 argument"
+    mov rsi, rdx
+    CSTRING rdi, "frozenset expected at most 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC frozenset_type_call
 
 

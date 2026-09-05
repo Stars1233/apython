@@ -91,3 +91,40 @@ try:
     format(1, "", 2)
 except TypeError as e:
     print("format ->", e)
+
+# The messages these refusals carry, which CPython words precisely and this
+# tree used to word approximately.  Each line is diffed against CPython.
+MESSAGES = [
+ "abs()", "abs(1,2)", "chr(1,2)", "hex(1,2)", "bin(1,2)", "oct(1,2)",
+ "ord(1,2)", "divmod(1)", "divmod(1,2,3)", "callable(1,2)", "next()",
+ "next(1,2,3)", "any([],1)", "all([],1)", "ascii(1,2)", "globals(1)",
+ "locals(1)", "dir(1,2)", "vars(1,2)", "delattr(1)", "setattr(1,2)",
+ "hasattr(1)", "len()", "len(1,2)", "isinstance(1)", "issubclass(1)",
+ "filter(1)", "reversed(1,2)", "map(1)", "repr(1,2)", "getattr(1)",
+ "getattr(1,2,3,4)", "sum()", "sum(1,2,3)", "min()", "max()",
+ "bool(1,2)", "dict(1,2)", "float(1,2)", "frozenset(1,2)", "list(1,2)",
+ "set(1,2)", "tuple(1,2)", "memoryview(1,2)", "memoryview(1)",
+ "type(1,2)", "type()", "slice()", "slice(1,2,3,4)", "sorted([],1)",
+ "sorted([1],2,3)", "complex(1,2,3)", "property(1,2,3,4,5)",
+ "bytes(1,2,3,4)", "bytearray(1,2,3,4)",
+ # ...and the ones that name a type or a count rather than a rule
+ "next(1)", "all(1)", "any(1.5)", "enumerate([],1.5)", "enumerate([],'x')",
+ "ord(0)", "ord('')", "ord(b'')", "ord([])", "ord(b'ab')", "ord(None)",
+ "int(1,'x')", "int('x',2.5)", "str(b'x',None)", "str(b'x',0)",
+ "dict([1])", "dict([(1,2,3)])", "format(1,0)", "format('a','x')",
+ "format(1+2j,'d')", "format(1,'','')", "format()",
+ "isinstance(1,(1,))", "issubclass(int,(1,))",
+ "BaseExceptionGroup('m','')", "BaseExceptionGroup('m','x')",
+ "BaseExceptionGroup('m',0)", "sum([1,'a'])", "sum([{},'a'])",
+ # ...and the answers that were wrong rather than badly worded
+ "ord(b'x')", "ord(bytearray(b'x'))", "float(b'1.5')",
+ "float(bytearray(b'2.5'))", "float(b'x')", "sorted([1],key=str)",
+ "dict([iter([1,2])])", "list(enumerate([9],2))",
+ "isinstance(1,((str,),(int,)))", "issubclass(bool,((str,),(int,)))",
+ "isinstance(1,(str,int|bytes))", "BaseExceptionGroup('m',range(2))",
+]
+for expr in MESSAGES:
+    try:
+        print(expr, "->", repr(eval(expr))[:60])
+    except BaseException as exc:
+        print(expr, "->", type(exc).__name__, exc)

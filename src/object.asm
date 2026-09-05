@@ -1395,6 +1395,54 @@ DEF_FUNC_BARE raise_binop_type_error
 END_FUNC raise_binop_type_error
 
 ;; ============================================================================
+;; compose_binop_type_error(rdi = left Value, rsi = right Value,
+;;                          rdx = the prefix, rcx = the text before the first
+;;                          type name, or 0 for the usual ": '")
+;;   -> rax = the composed C string, in the shared rbt_buf
+;;
+;; The composition raise_binop_type_error_ex does, without the raise.  A
+;; caller that still has two references to release cannot unwind from where
+;; it notices, so it sets the exception instead -- and was reporting the bare
+;; "unsupported operand type(s)", with neither the operator nor the types.
+;; ============================================================================
+global compose_binop_type_error
+DEF_FUNC compose_binop_type_error, RBT_FRAME
+    push rbx
+    mov [rbp - RBT_LEFT], rdi
+    mov [rbp - RBT_RIGHT], rsi
+    mov rbx, rdx
+    test rcx, rcx
+    jnz .cbt_have_open
+    lea rcx, [rel rbt_open]
+.cbt_have_open:
+    mov [rbp - RBT_OPEN], rcx
+
+    lea rdi, [rel rbt_buf]
+    mov rsi, rbx
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RBT_OPEN]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RBT_LEFT]
+    call rbt_typename
+    mov rdi, rax
+    lea rsi, [rel rbt_and]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RBT_RIGHT]
+    call rbt_typename
+    mov rdi, rax
+    lea rsi, [rel rbt_close]
+    call rbt_append_cstr
+
+    lea rax, [rel rbt_buf]
+    pop rbx
+    leave
+    ret
+END_FUNC compose_binop_type_error
+
+;; ============================================================================
 ;; raise_binop_type_error_ex(rdi = left Value, rsi = right Value,
 ;; rdx = prefix C string, rcx = opener C string)
 ;; -> never returns
@@ -2410,8 +2458,35 @@ DEF_FUNC obj_binary_op, OBO_FRAME
 
 .obo_unsupported:
     ; SET_EXC, not RAISE: .obo_done below still has to release both operands,
-    ; and an unwind from here would never reach it.
-    SET_EXC exc_TypeError_type, "unsupported operand type(s)"
+    ; and an unwind from here would never reach it.  The message names the
+    ; operator and both types, as CPython's does -- it was the bare prefix,
+    ; so `sum([1, "a"])` said nothing about what it could not add.
+    mov rcx, [rbp - OBO_OP]
+    cmp rcx, 26
+    jb .obo_have_op
+    xor ecx, ecx
+.obo_have_op:
+    extern binary_op_symbols
+    lea rax, [rel binary_op_symbols]
+    mov rcx, [rax + rcx*8]
+    mov [rbp - OBO_OFF], rcx    ; the offset slot is finished with
+    sub rsp, 128                ; the prefix and the operator, as one string
+    mov rdi, rsp
+    extern binop_msg_prefix
+    lea rsi, [rel binop_msg_prefix]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - OBO_OFF]
+    call rbt_append_cstr
+    mov rdi, [rbp - OBO_LEFT]
+    mov rsi, [rbp - OBO_RIGHT]
+    mov rdx, rsp
+    xor ecx, ecx                ; the default ": '" before the first name
+    call compose_binop_type_error
+    mov rsi, rax
+    lea rdi, [rel exc_TypeError_type]
+    call set_exception
+    add rsp, 128
     jmp .obo_error
 
 .obo_error:

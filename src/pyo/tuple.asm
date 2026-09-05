@@ -4,6 +4,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern exc_TypeError_type
 extern bool_true
 extern bool_false
 extern ap_malloc
@@ -1302,8 +1303,11 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     ret
 
 .ttc_error:
-    extern exc_TypeError_type
-    RAISE exc_TypeError_type, "tuple expected at most 1 argument"
+    mov rsi, r13
+    CSTRING rdi, "tuple expected at most 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC tuple_type_call
 
 section .data

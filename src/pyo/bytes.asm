@@ -2738,6 +2738,9 @@ BLS_BUF   equ 32
 BLS_LIST  equ 40
 BLS_TMP   equ 48
 BLS_ENCMSG equ 64
+; The arity refusal's prefix, which names the constructor: both come
+; through here and CPython says "bytes()" or "bytearray()".
+BLS_ARITY equ 72
 BLS_FRAME equ 80            ; + 2 pushes = 96
 DEF_FUNC byteslike_source, BLS_FRAME
     push rbx
@@ -2745,6 +2748,7 @@ DEF_FUNC byteslike_source, BLS_FRAME
     mov [rbp - BLS_ARGS], rdi
     mov [rbp - BLS_RANGEMSG], rdx
     mov [rbp - BLS_ENCMSG], rcx
+    mov [rbp - BLS_ARITY], r8
     mov [rbp - BLS_NARGS], rsi
     mov qword [rbp - BLS_LIST], 0
     mov qword [rbp - BLS_BUF], 0
@@ -3062,7 +3066,13 @@ extern str_set_length
 .bls_need_encoding:
     RAISE exc_TypeError_type, "string argument without an encoding"
 .bls_too_many:
-    RAISE exc_TypeError_type, "encoding and errors arguments are not supported"
+    ; Which constructor this is comes from the range message the caller set:
+    ; both go through byteslike_source, and CPython names each.
+    mov rsi, [rbp - BLS_NARGS]
+    CSTRING rdx, " given)"
+    mov rdi, [rbp - BLS_ARITY]
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 .bls_bad_type:
     RAISE exc_TypeError_type, "cannot convert this object to bytes"
 END_FUNC byteslike_source
@@ -3079,6 +3089,7 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     mov rsi, rdx
     lea rdx, [rel bytes_range_msg]
     lea rcx, [rel bytes_enc_msg]
+    lea r8, [rel bytes_arity_msg]
     call byteslike_source
     mov [rbp - BTC_BUF], rax
     mov [rbp - BTC_LEN], rdx
@@ -3303,5 +3314,6 @@ global bytearray_range_msg
 bytearray_range_msg: db "byte must be in range(0, 256)", 0
 ; The \x01 is raise_type_error_with_name's placeholder for the argument's type.
 bytes_enc_msg: db `bytes() argument 'encoding' must be str, not \x01`, 0
+bytes_arity_msg: db "bytes() takes at most 3 arguments (", 0
 bytearray_enc_msg: db `bytearray() argument 'encoding' must be str, not \x01`, 0
 

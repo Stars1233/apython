@@ -371,7 +371,15 @@ DEF_FUNC_LOCAL str_require_str_arg, SRA_FRAME
     call value_type
     test rax, rax
     jz .sras_unknown
+    ; CPython's _PyArg_BadArgument writes "None" and not "NoneType".
+    extern none_type
+    lea rcx, [rel none_type]
+    cmp rax, rcx
+    je .sras_none
     mov rsi, [rax + PyTypeObject.tp_name]
+    jmp .sras_named
+.sras_none:
+    CSTRING rsi, "None"
     jmp .sras_named
 .sras_unknown:
     CSTRING rsi, "object"
@@ -548,7 +556,10 @@ DEF_FUNC builtin_callable
     ret
 
 .callable_error:
-    RAISE exc_TypeError_type, "callable() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "callable() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_callable
 
 ;; ============================================================================
@@ -616,6 +627,9 @@ section .text
 ;; 11. builtin_next_fn(args, nargs) - next(x)
 ;; ============================================================================
 NX_EXC   equ 8              ; current_exception before __next__ ran
+; args[0] as it arrived, for the refusal: CPython names the type, and this
+; said only "object is not an iterator".
+NX_ARG   equ 16
 NX_FRAME equ 24            ; + 1 push = 32, 16-aligned
 
 DEF_FUNC builtin_next_fn, NX_FRAME
@@ -626,10 +640,14 @@ DEF_FUNC builtin_next_fn, NX_FRAME
     je .next_one_arg
     cmp rsi, 2
     je .next_two_args
+    test rsi, rsi
+    jz .next_too_few
     jmp .next_error
 
 .next_two_args:
     ; next(iterator, default) — return default on StopIteration
+    mov rax, [rdi]
+    mov [rbp - NX_ARG], rax        ; the refusal below names its type
     push qword [rdi + 8]           ; save the default Value
     push qword [rdi + 8]           ; keep rsp 16-byte aligned
     ; Fall through to same iterator logic, but with default on stack
@@ -688,6 +706,8 @@ DEF_FUNC builtin_next_fn, NX_FRAME
     jmp .next_type_error
 
 .next_one_arg:
+    mov rax, [rdi]
+    mov [rbp - NX_ARG], rax
 
     V_TEST_INT_M [rdi], r11      ; args[0] an int immediate?
     jae .next_type_error
@@ -782,17 +802,31 @@ DEF_FUNC builtin_next_fn, NX_FRAME
     call raise_exception_obj
 
 .next_type_error:
-    RAISE exc_TypeError_type, "object is not an iterator"
+    mov rsi, [rbp - NX_ARG]
+    CSTRING rdi, `'\x01' object is not an iterator`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+
+.next_too_few:
+    CSTRING rdi, "next expected at least 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 
 .next_error:
-    RAISE exc_TypeError_type, "next() takes exactly one argument"
+    CSTRING rdi, "next expected at most 2 arguments, got "
+    xor edx, edx
+    jmp raise_type_error_counted
 END_FUNC builtin_next_fn
 
 ;; ============================================================================
 ;; 12. builtin_any(args, nargs) - any(iterable)
 ;; ============================================================================
 ANY_EXC   equ 8             ; current_exception before the iteration started
-ANY_FRAME equ 16            ; + 4 pushes = 48, 16-aligned
+; args[0] as it arrived: the refusal said "argument is not iterable" and
+; CPython names the type.
+ANY_ARG   equ 16
+ANY_FRAME equ 32            ; + 4 pushes = 64, 16-aligned
 
 DEF_FUNC builtin_any, ANY_FRAME
     push rbx
@@ -803,6 +837,8 @@ DEF_FUNC builtin_any, ANY_FRAME
     cmp rsi, 1
     jne .any_error
 
+    mov rax, [rdi]
+    mov [rbp - ANY_ARG], rax
     V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
     ja .any_type_error
     mov rdi, [rdi]
@@ -881,17 +917,25 @@ DEF_FUNC builtin_any, ANY_FRAME
     ret
 
 .any_type_error:
-    RAISE exc_TypeError_type, "argument is not iterable"
+    mov rsi, [rbp - ANY_ARG]
+    CSTRING rdi, `'\x01' object is not iterable`
+    jmp raise_type_error_with_name
 
 .any_error:
-    RAISE exc_TypeError_type, "any() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "any() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_any
 
 ;; ============================================================================
 ;; 13. builtin_all(args, nargs) - all(iterable)
 ;; ============================================================================
 ALL_EXC   equ 8             ; current_exception before the iteration started
-ALL_FRAME equ 16            ; + 4 pushes = 48, 16-aligned
+; args[0] as it arrived: the refusal said "argument is not iterable" and
+; CPython names the type.
+ALL_ARG   equ 16
+ALL_FRAME equ 32            ; + 4 pushes = 64, 16-aligned
 
 DEF_FUNC builtin_all, ALL_FRAME
     push rbx
@@ -902,6 +946,8 @@ DEF_FUNC builtin_all, ALL_FRAME
     cmp rsi, 1
     jne .all_error
 
+    mov rax, [rdi]
+    mov [rbp - ALL_ARG], rax
     V_TEST_PTR_M [rdi], r11      ; args[0] a pointer?
     ja .all_type_error
     mov rdi, [rdi]
@@ -979,10 +1025,15 @@ DEF_FUNC builtin_all, ALL_FRAME
     ret
 
 .all_type_error:
-    RAISE exc_TypeError_type, "argument is not iterable"
+    mov rsi, [rbp - ALL_ARG]
+    CSTRING rdi, `'\x01' object is not iterable`
+    jmp raise_type_error_with_name
 
 .all_error:
-    RAISE exc_TypeError_type, "all() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "all() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_all
 
 ;; ============================================================================
@@ -1013,7 +1064,7 @@ DEF_FUNC builtin_sum, SM_FRAME
     push r12
 
     cmp rsi, 1
-    jb .sum_error
+    jb .sum_too_few
     cmp rsi, 2
     ja .sum_error
 
@@ -1140,8 +1191,16 @@ DEF_FUNC builtin_sum, SM_FRAME
     DECREF_V rdi, rdx
     RAISE exc_TypeError_type, "sum() can't sum bytearray [use b''.join(seq) instead]"
 
+.sum_too_few:
+    CSTRING rdx, " given)"
+    CSTRING rdi, "sum() takes at least 1 positional argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+
 .sum_error:
-    RAISE exc_TypeError_type, "sum expected 1-2 arguments"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "sum() takes at most 2 arguments ("
+    jmp raise_type_error_counted
 END_FUNC builtin_sum
 
 ;; ============================================================================
@@ -1526,7 +1585,18 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     call raise_type_error_with_name
 
 .mm_error:
-    RAISE exc_TypeError_type, "min()/max() expected at least 1 argument"
+    ; CPython names the one that was called, and says how many it got.
+    mov rsi, [rbp - MM_NPOS]
+    cmp dword [rbp - MM_OP], PY_GT
+    je .mm_error_max
+    CSTRING rdi, "min expected at least 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+.mm_error_max:
+    CSTRING rdi, "max expected at least 1 argument, got "
+    xor edx, edx
+    jmp raise_type_error_counted
 END_FUNC minmax_impl
 
 ;; ============================================================================
@@ -1571,7 +1641,7 @@ DEF_FUNC builtin_getattr, 32
     mov r12, rsi
 
     cmp r12, 2
-    jb .getattr_error
+    jb .getattr_too_few
     cmp r12, 3
     ja .getattr_error
 
@@ -1648,8 +1718,18 @@ DEF_FUNC builtin_getattr, 32
     extern raise_no_attribute
     call raise_no_attribute
 
+.getattr_too_few:
+    mov rsi, r12
+    CSTRING rdi, "getattr expected at least 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+
 .getattr_error:
-    RAISE exc_TypeError_type, "getattr expected 2 or 3 arguments"
+    mov rsi, r12
+    CSTRING rdi, "getattr expected at most 3 arguments, got "
+    xor edx, edx
+    jmp raise_type_error_counted
 END_FUNC builtin_getattr
 
 ;; ============================================================================
@@ -1711,7 +1791,10 @@ DEF_FUNC builtin_hasattr, 24
     leave
     ret
 .hasattr_error:
-    RAISE exc_TypeError_type, "hasattr expected 2 arguments"
+    CSTRING rdi, "hasattr expected 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_hasattr
 
 ;; ============================================================================
@@ -1781,7 +1864,10 @@ DEF_FUNC builtin_setattr
     call raise_no_attribute
 
 .setattr_error:
-    RAISE exc_TypeError_type, "setattr() takes exactly 3 arguments"
+    CSTRING rdi, "setattr expected 3 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_setattr
 
 ;; ============================================================================
@@ -1802,7 +1888,10 @@ DEF_FUNC builtin_globals
     ret
 
 .globals_error:
-    RAISE exc_TypeError_type, "globals() takes no arguments"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "globals() takes no arguments ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_globals
 
 ;; ============================================================================
@@ -1853,7 +1942,10 @@ DEF_FUNC builtin_locals
     ret
 
 .locals_error:
-    RAISE exc_TypeError_type, "locals() takes no arguments"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "locals() takes no arguments ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_locals
 
 ;; ============================================================================
@@ -2182,7 +2274,10 @@ DEF_FUNC builtin_dir, BD_FRAME
     ret
 
 .bd_error:
-    RAISE exc_TypeError_type, "dir() takes exactly 1 argument"
+    CSTRING rdi, "dir expected at most 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_dir
 
 section .rodata
@@ -2572,7 +2667,10 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     ret
 
 .aa_nargs_error:
-    RAISE exc_TypeError_type, "ascii() takes exactly one argument"
+    CSTRING rdx, " given)"
+    CSTRING rdi, "ascii() takes exactly one argument ("
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 section .rodata
 aa_hexdigits: db "0123456789abcdef"
 section .text
@@ -2836,7 +2934,10 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     RAISE exc_TypeError_type, "vars() argument must have __dict__ attribute"
 
 .vars_nargs_error:
-    RAISE exc_TypeError_type, "vars() takes at most 1 argument"
+    CSTRING rdi, "vars expected at most 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_vars_fn
 
 section .rodata
@@ -2918,7 +3019,10 @@ DEF_FUNC builtin_delattr_fn, DA2_FRAME
     call raise_no_attribute     ; does not return
 
 .da2_nargs_error:
-    RAISE exc_TypeError_type, "delattr() takes exactly 2 arguments"
+    CSTRING rdi, "delattr expected 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_delattr_fn
 
 ;; ============================================================================

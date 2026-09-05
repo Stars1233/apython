@@ -2081,7 +2081,11 @@ DEF_FUNC list_type_call, LTC_FRAME
     RAISE exc_TypeError_type, "list() argument must be an iterable"
 
 .ltc_error:
-    RAISE exc_TypeError_type, "list expected at most 1 argument"
+    mov rsi, r13
+    CSTRING rdi, "list expected at most 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 
 .ltc_kwarg_error:
     ; Clear kw_names_pending to avoid stale state
