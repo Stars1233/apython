@@ -1571,12 +1571,88 @@ rtn_buf: resb RTN_BUFSZ
 section .text
 
 ;; ============================================================================
-;; seq_repeat_check_count(rsi = count Value) -- raises TypeError unless the
-;; count is an int (or a bool, which is one).  Does not return on failure.
+;; seq_repeat_not_index(rsi = the count that was not one) -- does not return
+;;
+;; What __mul__, __rmul__ and __imul__ say when called by name and handed
+;; something that is not an index.  The OPERATOR words the same refusal
+;; differently -- "can't multiply sequence by non-int of type 'str'" -- and
+;; CPython draws exactly that line, because the two go through different
+;; code: the operator through sequence_repeat, the dunder through the
+;; wrapper's own PyNumber_AsSsize_t.
 ;; ============================================================================
-DEF_FUNC_BARE seq_repeat_check_count
+DEF_FUNC seq_repeat_not_index
+    CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
+    jmp raise_type_error_with_name
+END_FUNC seq_repeat_not_index
+
+;; ============================================================================
+;; binop_is_count(rdi = a Value) -> eax = 1 when it could be a repetition count
+;;
+;; An int, a bool, an int subclass, or anything with an __index__.  Every
+;; sq_repeat and sq_inplace_repeat asks this BEFORE seq_repeat_count, because
+;; the answer decides between declining and raising -- and declining is what
+;; lets the right operand's __rmul__ be asked at all.  `[1] * R()`, for an R
+;; with an __rmul__ and nothing else, is R.__rmul__([1]) in CPython; here the
+;; sequence's own slot raised first and the reflected dunder was never
+;; reached.
+;; ============================================================================
+DEF_FUNC_BARE binop_is_count
+    mov eax, 1
+    V_IS_INT rdi, rcx
+    jae .bic_yes
+    V_TEST_PTR rdi, rcx
+    ja .bic_no
+    test rdi, rdi
+    jz .bic_no
+    mov rcx, [rdi + PyObject.ob_type]
+    test rcx, rcx
+    jz .bic_no
+    lea rdx, [rel int_type]
+    cmp rcx, rdx
+    je .bic_yes
+    lea rdx, [rel bool_type]
+    cmp rcx, rdx
+    je .bic_yes
+    mov rdx, [rcx + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_INT_SUBCLASS
+    jnz .bic_yes
+    mov rcx, [rcx + PyTypeObject.tp_as_number]
+    test rcx, rcx
+    jz .bic_no
+    cmp qword [rcx + PyNumberMethods.nb_index], 0
+    je .bic_no
+.bic_yes:
+    ret
+.bic_no:
+    xor eax, eax
+    ret
+END_FUNC binop_is_count
+
+;; ============================================================================
+;; seq_repeat_count(rsi = the count, a Value) -> rax = the count as an i64
+;;
+;; Every sequence's sq_repeat and sq_inplace_repeat comes through here, which
+;; is CPython's sequence_repeat: PyNumber_Check decides whether the argument
+;; is a count at all, and PyNumber_AsSsize_t turns it into one.  Two things
+;; follow from the second, and neither was done.  __index__ counts -- `[1] *
+;; Index()` is a list of three in CPython and was a TypeError here.  And a
+;; value too big for an index is an OverflowError naming the int, where every
+;; caller used to run its own int_fits_i64 and report in terms of the
+;; sequence: "too many items for list repetition" against CPython's "cannot
+;; fit 'int' into an index-sized integer".  The in-place pair did not even do
+;; that -- they took the count through obj_as_index, which truncates, so
+;; `b *= 2**64` emptied the bytearray instead of refusing.
+;;
+;; Does not return on failure.
+;; ============================================================================
+SRC_ARG   equ 8             ; the count as the caller passed it, for the message
+SRC_HELD  equ 16            ; an __index__ result, owned across the conversion
+SRC_FRAME equ 32            ; + 0 pushes = 16-aligned
+DEF_FUNC seq_repeat_count, SRC_FRAME
+    mov [rbp - SRC_ARG], rsi
+    mov qword [rbp - SRC_HELD], 0
     V_IS_INT rsi, rax
-    jae .src_ok
+    jae .src_have_int
     V_TEST_PTR rsi, rax
     ja .src_bad
     test rsi, rsi
@@ -1584,19 +1660,78 @@ DEF_FUNC_BARE seq_repeat_check_count
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel int_type]
     cmp rax, rcx
-    je .src_ok
+    je .src_have_int
     lea rcx, [rel bool_type]
     cmp rax, rcx
-    je .src_ok
-    mov rax, [rax + PyTypeObject.tp_flags]
-    test rax, TYPE_FLAG_INT_SUBCLASS
-    jnz .src_ok
+    je .src_have_int
+    mov rcx, [rax + PyTypeObject.tp_flags]
+    test rcx, TYPE_FLAG_INT_SUBCLASS
+    jnz .src_have_int
+
+    ; Not an int.  __index__ makes it one, exactly where a subscript would.
+    mov rcx, [rax + PyTypeObject.tp_as_number]
+    test rcx, rcx
+    jz .src_bad
+    mov rcx, [rcx + PyNumberMethods.nb_index]
+    test rcx, rcx
+    jz .src_bad
+    mov rdi, rsi
+    call rcx                    ; nb_index answers a Value
+    test rax, rax
+    jz .src_bad
+    mov [rbp - SRC_HELD], rax
+    mov rsi, rax
+    ; and it has to BE an int; one level only, as obj_as_index does it.
+    V_IS_INT rsi, rax
+    jae .src_have_int
+    V_TEST_PTR rsi, rax
+    ja .src_bad_index
+    mov rax, [rsi + PyObject.ob_type]
+    REQUIRE_INT_TYPE rax, rcx, .src_bad_index
+
+.src_have_int:
+    mov rdi, rsi
+    V_UNPACK rdi, rdx
+    push rdi
+    push rdx
+    extern int_fits_i64
+    call int_fits_i64
+    pop rdx
+    pop rdi
+    test eax, eax
+    jz .src_overflow
+    extern int_to_i64
+    call int_to_i64
+    mov [rbp - SRC_ARG], rax    ; the answer, across the release below
+    call .src_release
+    mov rax, [rbp - SRC_ARG]
+    leave
+    ret
+
+;; Give back the __index__ result, if there was one.  Every exit needs it and
+;; three of the four are raises, which do not come back here.
+.src_release:
+    mov rdi, [rbp - SRC_HELD]
+    test rdi, rdi
+    jz .src_release_done
+    mov qword [rbp - SRC_HELD], 0
+    XDECREF_V rdi, rax
+.src_release_done:
+    ret
+
+.src_bad_index:
+    call .src_release
+    RAISE exc_TypeError_type, "__index__ returned non-int"
+.src_overflow:
+    call .src_release
+    extern exc_OverflowError_type
+    RAISE exc_OverflowError_type, "cannot fit 'int' into an index-sized integer"
 .src_bad:
+    call .src_release
+    mov rsi, [rbp - SRC_ARG]
     CSTRING rdi, `can't multiply sequence by non-int of type '\x01'`
     jmp raise_type_error_with_name
-.src_ok:
-    ret
-END_FUNC seq_repeat_check_count
+END_FUNC seq_repeat_count
 
 ;; ============================================================================
 ;; raise_no_attribute(rdi = object Value, rsi = attribute-name str, edx = 1 for

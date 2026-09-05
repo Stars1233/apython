@@ -1557,24 +1557,23 @@ DEF_FUNC list_repeat
     ; The count must be an index.  int_fits_i64 and int_to_i64 both read
     ; PyIntObject fields, so a str or a float count was dereferenced as one:
     ; "a" * "2" segfaulted and [1] * None reported an OverflowError.
-    push rdi
-    push rdx
     mov rsi, rdi
     mov rcx, rdx
     V_PACK rsi, rcx
-    extern seq_repeat_check_count
-    call seq_repeat_check_count
-    pop rdx
-    pop rdi
-    push rdi
-    push rdx
-    call int_fits_i64
-    pop rdx
-    pop rdi
+    ; Not a count at all: DECLINE rather than raise, so the protocol carries
+    ; on to the right operand's __rmul__.  This raised, and `[1] * R()` for an
+    ; R with an __rmul__ never reached it.  op_binary_op words the failure
+    ; when nothing else answers either.
+    mov rdi, rsi
+    push rsi
+    extern binop_is_count
+    call binop_is_count
+    pop rsi
     test eax, eax
-    jz .rep_overflow
-    call int_to_i64
-    mov r12, rax             ; r12 = repeat count
+    jz .rep_decline
+    extern seq_repeat_count
+    call seq_repeat_count    ; __index__ counts, and one too big to be an
+    mov r12, rax             ; index is refused rather than truncated
 
     ; Clamp negative to 0
     test r12, r12
@@ -1635,6 +1634,15 @@ DEF_FUNC list_repeat
     V_PACK rax, rdx             ; return one Value
     ret
 
+.rep_decline:
+    xor eax, eax
+    xor edx, edx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 .rep_toobig:
     ; Too large to allocate is a MemoryError in CPython; only a count that
     ; does not fit an index is an OverflowError.
@@ -1782,6 +1790,12 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     jmp eval_exception_unwind
 
 .lic_type_error:
+    ; `L += x` is L.extend(x), so what it needs of x is that it be ITERABLE --
+    ; and that is what CPython says when it is not: "'N' object is not
+    ; iterable".  The concatenation wording belongs to `L + x`, where the
+    ; right operand has to be a list and not merely iterable; this reported
+    ; the wrong requirement for the wrong operator.
+    ;
     ; The right operand's payload survives in r12; its tag does not always --
     ; REQUIRE_*_TYPE uses rcx as scratch -- so the pointer case is recovered
     ; from the payload itself, which is its own Value.
@@ -1789,7 +1803,7 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     mov rsi, r13
     VALUE_FOR_TYPE rdi, rsi
     mov rsi, rdi
-    CSTRING rdi, `can only concatenate list (not "\x01") to list`
+    CSTRING rdi, `'\x01' object is not iterable`
     extern raise_type_error_with_name
     call raise_type_error_with_name
 END_FUNC list_inplace_concat
@@ -1802,19 +1816,28 @@ END_FUNC list_inplace_concat
 LIR_OLDSIZE equ 16
 LIR_FRAME   equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC list_inplace_repeat, LIR_FRAME
-    ; The count must be an integer.  int_to_i64 below reads its argument as a
-    ; PyIntObject, so `a = [1]; a *= "x"` used to read a PyStrObject's header
-    ; as an int and repeat the list that many times.  Checked before the
-    ; pushes, so the decline is a bare leave/ret.
-    push rdi                    ; save the left Value (int_is_integer is a leaf,
-    mov rdi, rsi                ; so the odd rsp across the call is harmless)
+    ; The count must be an integer, or something with an __index__: `[1] *
+    ; Index()` is a list of three in CPython and this declined it, and the
+    ; caller then reported the failure as an unsupported `*`.  Anything else
+    ; still declines, so a right operand with an __rmul__ of its own is still
+    ; asked -- which is the order CPython's PyNumber_InPlaceMultiply keeps.
+    ; Checked before the pushes, so the decline is a bare leave/ret.
+    push rdi                    ; save the left Value (both are leaves, so the
+    mov rdi, rsi                ; odd rsp across the calls is harmless)
     V_UNPACK rdi, rdx           ; right Value -> (payload, tag)
     call int_is_integer
     pop rdi
     test eax, eax
+    jnz .lir_have_count
+    push rdi
+    mov rdi, rsi
+    extern binop_is_count
+    call binop_is_count
+    pop rdi
+    test eax, eax
     jz .lir_decline
+.lir_have_count:
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
-    V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
     push r12
     push r13
@@ -1823,13 +1846,11 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
     je list_sorting_error
-    mov r12, rsi              ; right payload
-    mov r13, rcx              ; right_tag
 
-    ; Convert right to i64 count
-    mov rdi, r12
-    mov edx, r13d             ; int_to_i64 expects tag in edx
-    call int_to_i64
+    ; The same funnel sq_repeat uses.  int_to_i64 truncated, so `a *= 2**64`
+    ; emptied the list instead of refusing.
+    extern seq_repeat_count
+    call seq_repeat_count
     mov r12, rax              ; r12 = count
 
     ; Handle count <= 0: clear list
@@ -1849,9 +1870,12 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     ; Grow items array: new_cap = old_size * count
     mov r13, rax              ; r13 = old_size
     imul rax, r12             ; rax = old_size * count = new_size
-    jo .lir_overflow           ; signed overflow → OverflowError
+    ; As sq_repeat: a product too big to allocate is a MemoryError, and
+    ; OverflowError is kept for a COUNT that will not fit an index -- which
+    ; seq_repeat_count above has already refused.
+    jo .lir_toobig
     cmp rax, 0x10000000        ; 256M items limit
-    ja .lir_overflow
+    ja .lir_toobig
     push rax                  ; save new_size
 
     ; Realloc payloads
@@ -1930,9 +1954,9 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
-.lir_overflow:
-    extern exc_OverflowError_type
-    RAISE exc_OverflowError_type, "too many items for list repetition"
+.lir_toobig:
+    extern exc_MemoryError_type
+    RAISE exc_MemoryError_type, ""
 .lir_decline:
     ; Reached before the pushes, so there is no mirror to unwind.
     xor eax, eax                ; NULL Value = NotImplemented

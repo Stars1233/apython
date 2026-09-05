@@ -23,6 +23,7 @@ extern io_buffer_acquired
 extern ap_memcmp
 extern ap_memmove
 extern exc_MemoryError_type
+extern int_fits_i64
 extern exc_BufferError_type
 extern set_exception
 extern ap_realloc
@@ -2586,22 +2587,20 @@ DEF_FUNC bytes_repeat
     mov r14, rsi
 
     mov rsi, r14
-    extern seq_repeat_check_count
-    call seq_repeat_check_count
-
-    mov rdi, r14
-    V_UNPACK rdi, rdx
-    push rdi
-    push rdx
-    extern int_fits_i64
-    call int_fits_i64
-    pop rdx
-    pop rdi
+    ; Not a count at all: DECLINE rather than raise, so the protocol carries
+    ; on to the right operand's __rmul__.  This raised, and `x * R()` for an R
+    ; with an __rmul__ never reached it.  op_binary_op words the failure when
+    ; nothing else answers either.
+    mov rdi, rsi
+    push rsi
+    extern binop_is_count
+    call binop_is_count
+    pop rsi
     test eax, eax
-    jz .brep_overflow
-    extern int_to_i64
-    call int_to_i64
-    mov r12, rax
+    jz .brep_decline
+    extern seq_repeat_count
+    call seq_repeat_count    ; __index__ counts, and one too big to be an
+    mov r12, rax             ; index is refused rather than truncated
     test r12, r12
     jg .brep_positive
     xor r12d, r12d
@@ -2648,6 +2647,15 @@ DEF_FUNC bytes_repeat
     leave
     ret
 
+.brep_decline:
+    xor eax, eax
+    xor edx, edx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 .brep_toobig:
     ; Too large to allocate is a MemoryError in CPython; only a count that
     ; does not fit an index is an OverflowError.

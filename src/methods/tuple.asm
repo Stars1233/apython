@@ -32,6 +32,7 @@ extern tuple_concat
 extern tuple_contains
 
 extern tuple_repeat
+extern seq_repeat_not_index
 
 extern tuple_subscript
 
@@ -83,12 +84,23 @@ DEF_FUNC_BARE tuple_dunder_add
     jmp tuple_concat
 END_FUNC tuple_dunder_add
 
+;; tuple_repeat DECLINES a count that is not an index -- it answers a NULL
+;; Value, so that `(1,) * R()` can still reach R.__rmul__ -- and a tail jump
+;; would have handed that NULL back as the dunder's own answer: `x = (1,)
+;; .__mul__("x")` raised nothing and bound nothing, and the NameError came
+;; from the next line.  Both call, and turn the decline into the refusal
+;; CPython's wrapper gives.
 DEF_FUNC_BARE tuple_dunder_mul
     REQUIRE_SELF_BARE tuple_type, "__mul__"
     mov rax, [rdi]
     mov rsi, [rdi + 8]
     mov rdi, rax
-    jmp tuple_repeat
+    push rsi                    ; one push: rsp is 16-aligned at the call
+    call tuple_repeat
+    pop rsi
+    test rax, rax
+    jz seq_repeat_not_index
+    ret
 END_FUNC tuple_dunder_mul
 
 ;; __rmul__ has the operands the other way round, and tuple_repeat wants the
@@ -98,7 +110,12 @@ DEF_FUNC_BARE tuple_dunder_rmul
     mov rax, [rdi]
     mov rsi, [rdi + 8]
     mov rdi, rax
-    jmp tuple_repeat
+    push rsi
+    call tuple_repeat
+    pop rsi
+    test rax, rax
+    jz seq_repeat_not_index
+    ret
 END_FUNC tuple_dunder_rmul
 
 ;; ============================================================================

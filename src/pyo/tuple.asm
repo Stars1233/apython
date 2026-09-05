@@ -650,24 +650,23 @@ DEF_FUNC tuple_repeat
     ; The count must be an index.  int_fits_i64 and int_to_i64 both read
     ; PyIntObject fields, so a str or a float count was dereferenced as one:
     ; "a" * "2" segfaulted and [1] * None reported an OverflowError.
-    push rdi
-    push rdx
     mov rsi, rdi
     mov rcx, rdx
     V_PACK rsi, rcx
-    extern seq_repeat_check_count
-    call seq_repeat_check_count
-    pop rdx
-    pop rdi
-    push rdi
-    push rdx
-    call int_fits_i64
-    pop rdx
-    pop rdi
+    ; Not a count at all: DECLINE rather than raise, so the protocol carries
+    ; on to the right operand's __rmul__.  This raised, and `x * R()` for an R
+    ; with an __rmul__ never reached it.  op_binary_op words the failure when
+    ; nothing else answers either.
+    mov rdi, rsi
+    push rsi
+    extern binop_is_count
+    call binop_is_count
+    pop rsi
     test eax, eax
-    jz .trep_overflow
-    call int_to_i64
-    mov r12, rax             ; r12 = repeat count
+    jz .trep_decline
+    extern seq_repeat_count
+    call seq_repeat_count    ; __index__ counts, and one too big to be an
+    mov r12, rax             ; index is refused rather than truncated
 
     test r12, r12
     jg .rep_positive
@@ -743,6 +742,15 @@ DEF_FUNC tuple_repeat
     ; does not fit an index is an OverflowError.  list and bytes have said so
     ; since they were written; tuple sent both cases to the one label.
     RAISE exc_MemoryError_type, ""
+.trep_decline:
+    xor eax, eax
+    xor edx, edx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 .trep_overflow:
     RAISE exc_OverflowError_type, "too many items for tuple repetition"
 END_FUNC tuple_repeat

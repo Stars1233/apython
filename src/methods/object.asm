@@ -654,6 +654,18 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     jnz %%out
     EXC_RAISED_SINCE [rbp - DB_EXC], rcx, %%out
 %if %0 >= 4
+%ifidn %4,count
+    ; A repetition whose count is not an index.  The OPERATOR words this as
+    ; "can't multiply sequence by non-int of type 'str'"; the dunder called by
+    ; name says what the count itself had to be, and CPython draws the same
+    ; line.  The slots decline rather than raise so that `[1] * R()` can still
+    ; reach R.__rmul__, and without this the decline came out of the dunder as
+    ; a bare "unsupported operand type" -- or, where the dunder tail-jumps
+    ; into the slot, as a NULL that bound nothing at all.
+    mov rsi, [rbp - DB_RHS]
+    extern seq_repeat_not_index
+    jmp seq_repeat_not_index
+%else
     ; The implementation declined the pair without raising.  Called by name,
     ; that has to read as NotImplemented so the caller can try the reflected
     ; form; only the operator machinery turns a decline into a TypeError.
@@ -662,6 +674,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     INCREF rax
     leave
     ret
+%endif
 %endif
 %%bad:
     RAISE exc_TypeError_type, "unsupported operand type"
@@ -674,7 +687,8 @@ END_FUNC %1_dunder_%2
 ;; The reflected sequence form: self is the RIGHT operand, and the slot is
 ;; called with the operands the way it expects them.  `2 * L` reaches
 ;; list.__rmul__(L, 2), and sq_repeat wants (L, 2).
-%macro DEF_SEQ_RDUNDER 3        ; %1 prefix, %2 suffix, %3 implementation
+%macro DEF_SEQ_RDUNDER 3-4      ; %1 prefix, %2 suffix, %3 implementation,
+                                ; %4 = count: a decline is a bad count
 DEF_FUNC %1_dunder_%2, DB_FRAME
     cmp rsi, 2
     jne %%bad
@@ -694,6 +708,11 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     test rax, rax
     jnz %%out
     EXC_RAISED_SINCE [rbp - DB_EXC], rcx, %%out
+%if %0 >= 4
+    mov rsi, [rbp - DB_RHS]
+    extern seq_repeat_not_index
+    jmp seq_repeat_not_index
+%endif
 %%bad:
     RAISE exc_TypeError_type, "unsupported operand type"
 %%out:
@@ -1419,27 +1438,27 @@ END_FUNC object_method_subclasshook
 ;; refuses, so those get the thunk; an nb_ slot declines with NULL and has to
 ;; answer NotImplemented, so those get the DEF_DUNDER_BINARY shape.
 DEF_SEQ_DUNDER  list, add,   list_concat
-DEF_SEQ_DUNDER  list, mul,   list_repeat
-DEF_SEQ_RDUNDER list, rmul,  list_repeat
-DEF_SEQ_DUNDER  list, imul,  list_inplace_repeat
+DEF_SEQ_DUNDER  list, mul,   list_repeat, count
+DEF_SEQ_RDUNDER list, rmul,  list_repeat, count
+DEF_SEQ_DUNDER  list, imul,  list_inplace_repeat, count
 
 DEF_SEQ_DUNDER  str, add,      str_concat
-DEF_SEQ_DUNDER  str, mul,      str_repeat
-DEF_SEQ_RDUNDER str, rmul,     str_repeat
+DEF_SEQ_DUNDER  str, mul,      str_repeat, count
+DEF_SEQ_RDUNDER str, rmul,     str_repeat, count
 DEF_SEQ_DUNDER  str, mod,      str_mod
 DEF_SEQ_DUNDER  str, getitem,  str_subscript
 
 DEF_SEQ_DUNDER  bytes, add,     bytes_concat
-DEF_SEQ_DUNDER  bytes, mul,     bytes_repeat
-DEF_SEQ_RDUNDER bytes, rmul,    bytes_repeat
+DEF_SEQ_DUNDER  bytes, mul,     bytes_repeat, count
+DEF_SEQ_RDUNDER bytes, rmul,    bytes_repeat, count
 DEF_SEQ_DUNDER  bytes, mod,     bytes_mod
 DEF_SEQ_DUNDER  bytes, getitem, bytes_subscript
 
 DEF_SEQ_DUNDER  bytearray, add,   bytearray_concat
-DEF_SEQ_DUNDER  bytearray, mul,   bytearray_repeat
-DEF_SEQ_RDUNDER bytearray, rmul,  bytearray_repeat
+DEF_SEQ_DUNDER  bytearray, mul,   bytearray_repeat, count
+DEF_SEQ_RDUNDER bytearray, rmul,  bytearray_repeat, count
 DEF_SEQ_DUNDER  bytearray, iadd,  bytearray_inplace_concat
-DEF_SEQ_DUNDER  bytearray, imul,  bytearray_inplace_repeat
+DEF_SEQ_DUNDER  bytearray, imul,  bytearray_inplace_repeat, count
 DEF_SEQ_DUNDER  bytearray, mod,   bytearray_mod
 
 ;; The reflected `%` forms answer NotImplemented for anything that is not a

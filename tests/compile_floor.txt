@@ -46,6 +46,7 @@ test_builtins_extra
 test_builtins
 test_builtin_subclass
 test_bytearray
+test_bytearray_repeat
 test_bytes_affix_range
 test_bytes_bytearray_args
 test_bytes_bytearray_repr
@@ -306,6 +307,7 @@ test_oop
 test_open_errors
 test_open
 test_operand_types
+test_operator_messages
 test_ordereddict
 test_ordering_typeerror
 test_oserror

@@ -1447,6 +1447,7 @@ END_FUNC bytearray_concat
 
 DEF_FUNC bytearray_repeat, BAO_FRAME
     mov [rbp - BAO_SELF], rdi
+    mov [rbp - BAO_ARG], rsi        ; the count Value, across binop_is_count
     ; sq_repeat is handed two VALUES, not a count -- op_binary_op packs both
     ; operands before the call, as bytes_repeat's own V_UNPACK shows.
     ;
@@ -1457,22 +1458,17 @@ DEF_FUNC bytearray_repeat, BAO_FRAME
     ; how bytearray(b'x') * (2**70) answered bytearray(b''); and the product
     ; was neither checked for overflow nor capped, so bytearray(b'xy') *
     ; (2**40) went to the allocator and aborted the process.
-    mov [rbp - BAO_ARG], rsi        ; the count, still a Value
-    call seq_repeat_check_count     ; rsi = the count; raises for a non-int
-
-    mov rdi, [rbp - BAO_ARG]
-    V_UNPACK rdi, rdx
-    push rdi
-    push rdx
-    extern int_fits_i64
-    call int_fits_i64
-    pop rdx
-    pop rdi
+    ; Not a count at all: DECLINE rather than raise, so the protocol carries
+    ; on to the right operand's __rmul__, as the other four sequences do.
+    mov rdi, rsi
+    extern binop_is_count
+    call binop_is_count
     test eax, eax
-    jz .brp_overflow
-    extern int_to_i64
-    call int_to_i64
-    mov rsi, rax
+    jz .brp_fail
+    mov rsi, [rbp - BAO_ARG]
+    extern seq_repeat_count
+    call seq_repeat_count           ; takes __index__, and refuses a count
+    mov rsi, rax                    ; too big to be an index
 
     mov rdi, [rbp - BAO_SELF]
     mov rdx, [rdi + PyByteArrayObject.ob_size]
@@ -1484,8 +1480,8 @@ DEF_FUNC bytearray_repeat, BAO_FRAME
 .brp_count_ok:
     mov [rbp - BAO_ARG], rax
     imul rax, rdx
-    jo .brp_overflow
-    cmp rax, 0x10000000
+    jo .brp_toobig              ; as sq_inplace_repeat: the COUNT is what
+    cmp rax, 0x10000000         ; OverflowError is for, and it was checked
     ja .brp_toobig
     mov rsi, rax
     xor edi, edi
@@ -1574,9 +1570,18 @@ END_FUNC bytearray_inplace_concat
 DEF_FUNC bytearray_inplace_repeat, BAO_FRAME
     mov [rbp - BAO_SELF], rdi
     BA_REFUSE_IF_EXPORTED rdi   ; its shrink-to-0 arm ignores the resize result
-    mov rdi, rsi                ; a Value, as in bytearray_repeat
-    V_UNPACK rdi, rdx
-    call obj_as_index
+    ; The same funnel sq_repeat uses.  obj_as_index took anything with an
+    ; __index__ but truncated a count past 2^63, so `b *= 2**64` emptied the
+    ; bytearray, and it named the argument rather than saying what a count
+    ; has to be.  A decline, so `b *= R()` still reaches R.__rmul__.
+    mov [rbp - BAO_ARG], rsi
+    mov rdi, rsi
+    extern binop_is_count
+    call binop_is_count
+    test eax, eax
+    jz .bir_fail
+    mov rsi, [rbp - BAO_ARG]
+    call seq_repeat_count
     mov rsi, rax
     mov [rbp - BAO_ARG], rsi
     mov rdi, [rbp - BAO_SELF]
@@ -1592,6 +1597,17 @@ DEF_FUNC bytearray_inplace_repeat, BAO_FRAME
 .bir_grow:
     mov rax, rsi
     imul rax, rdx
+    ; The two checks sq_repeat has and this did not.  bytearray_resize hands
+    ; the size to ap_malloc, which does not answer failure -- it calls
+    ; fatal_error -- so `bytearray(b"ab") *= 2**40` printed "Fatal: out of
+    ; memory" and ended the process where every other repetition in the tree
+    ; raises MemoryError.
+    ; A product that overflows is a MemoryError, not an OverflowError:
+    ; CPython keeps OverflowError for a COUNT that will not fit an index,
+    ; which obj_as_index above has already refused.
+    jo .bir_toobig
+    cmp rax, 0x10000000
+    ja .bir_toobig
     mov rdi, [rbp - BAO_SELF]
     mov rsi, rax
     call bytearray_resize
@@ -1627,6 +1643,8 @@ DEF_FUNC bytearray_inplace_repeat, BAO_FRAME
     xor edx, edx
     leave
     ret
+.bir_toobig:
+    RAISE exc_MemoryError_type, ""
 END_FUNC bytearray_inplace_repeat
 
 
