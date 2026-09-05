@@ -57,6 +57,7 @@ CF_LINE   equ 40
 CF_ARGS   equ 48
 CF_CODE   equ 56
 CF_I      equ 72
+CF_RET    equ 80          ; the return annotation node, or 0
 CF_FLAGS  equ 88
 CF_UNIT   equ 96 + CompUnit_size
 CF_FRAME  equ ((CF_UNIT + 15) / 16) * 16 + 8      ; + 3 pushes = 16-aligned
@@ -294,6 +295,31 @@ DEF_FUNC cg_function, CF_FRAME
     je .fail
     mov [rbp - CF_I], rax               ; the MAKE_FUNCTION flag bits so far
 
+    ; --- annotations, also in the enclosing scope, and also before the
+    ;     closure: the opcode fixes the order its operands are pushed in ---
+    ; A lambda has neither annotated parameters nor a return annotation, and
+    ; its `.c` is the body expression rather than an annotation -- reading it
+    ; as one compiled the body into the ENCLOSING scope, where its parameters
+    ; are not in scope at all.
+    xor edx, edx
+    cmp qword [rbp - CF_FLAGS], 0
+    jne .cf_have_ret
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.c]          ; the return annotation, or 0
+.cf_have_ret:
+    mov [rbp - CF_RET], rdx
+    mov rdi, rbx
+    mov rsi, [rbp - CF_PARENT]
+    mov rdx, [rbp - CF_ARGS]
+    mov rcx, [rbp - CF_RET]
+    mov r8, [rbp - CF_LINE]
+    call cg_annotations
+    cmp rax, -1
+    je .fail
+    or [rbp - CF_I], rax
+
     ; --- the closure tuple, if the body captured anything ---
     mov rdi, rbx
     mov rsi, [rbp - CF_PARENT]
@@ -512,6 +538,236 @@ DEF_FUNC cg_defaults, CD2_FRAME
     add rsp, 8
     ret
 END_FUNC cg_defaults
+
+;; ============================================================================
+;; cg_annotations(Comp *c, CompUnit *u, uint32_t args, uint32_t returns,
+;;                int line) -> rax = MAKE_FUNCTION bits, or -1 on error
+;;
+;; PEP 3107's annotations, as the flat tuple MAKE_FUNCTION takes: name,
+;; value, name, value, and "return" last if there is a return annotation.
+;; They are evaluated HERE, in the defining scope, exactly as defaults are --
+;; `def f(x: T)` reads T at def time, not at call time.
+;;
+;; The order is CPython's, and it is observable: __annotations__ is a dict, so
+;; `list(f.__annotations__)` reports it.  Regular positional parameters come
+;; first, THEN the positional-only ones, then *args, then keyword-only, then
+;; **kwargs -- which is the order compiler_visit_annotations walks them in,
+;; and not the order they are written in.
+;; ============================================================================
+CA_UNIT    equ 16
+CA_ARGS    equ 24
+CA_RET     equ 32
+CA_LINE    equ 40
+CA_I       equ 48
+CA_STOP    equ 56
+CA_NPOS    equ 64
+CA_POSONLY equ 72
+CA_NKW     equ 80
+CA_ANN     equ 88          ; the annotation node .one_param is working on
+CA_FRAME   equ 104         ; + 3 pushes = 128
+DEF_FUNC cg_annotations, CA_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov [rbp - CA_UNIT], rsi
+    mov [rbp - CA_ARGS], rdx
+    mov [rbp - CA_RET], rcx
+    mov [rbp - CA_LINE], r8
+    xor r12d, r12d                      ; how many name/value pairs so far
+
+    cmp qword [rbp - CA_ARGS], 0
+    je .ret_ann
+
+    ; The counts, from the AST_EXTRA node hanging off the arguments node.
+    mov rdi, rbx
+    mov rsi, [rbp - CA_ARGS]
+    call ast_at
+    mov ecx, [rax + AstNode.a]          ; the AST_EXTRA node
+    mov rdi, rbx
+    mov rsi, rcx
+    call ast_at
+    mov ecx, [rax + AstNode.a]
+    mov [rbp - CA_NPOS], rcx
+    mov ecx, [rax + AstNode.b]
+    mov [rbp - CA_POSONLY], rcx
+    mov ecx, [rax + AstNode.c]
+    mov [rbp - CA_NKW], rcx
+
+    ; --- the regular positional parameters, [posonly, npos) ---
+    mov rax, [rbp - CA_POSONLY]
+    mov [rbp - CA_I], rax
+    mov rax, [rbp - CA_NPOS]
+    mov [rbp - CA_STOP], rax
+    call .child_span
+    test eax, eax
+    js .fail
+
+    ; --- then the positional-only ones, [0, posonly) ---
+    mov qword [rbp - CA_I], 0
+    mov rax, [rbp - CA_POSONLY]
+    mov [rbp - CA_STOP], rax
+    call .child_span
+    test eax, eax
+    js .fail
+
+    ; --- *args, which hangs off .b rather than the child list ---
+    mov rdi, rbx
+    mov rsi, [rbp - CA_ARGS]
+    call ast_at
+    mov ecx, [rax + AstNode.b]
+    test ecx, ecx
+    jz .no_vararg
+    mov rdi, rcx
+    call .one_param
+    test eax, eax
+    js .fail
+.no_vararg:
+
+    ; --- the keyword-only parameters, [npos, npos + nkw) ---
+    mov rax, [rbp - CA_NPOS]
+    mov [rbp - CA_I], rax
+    add rax, [rbp - CA_NKW]
+    mov [rbp - CA_STOP], rax
+    call .child_span
+    test eax, eax
+    js .fail
+
+    ; --- **kwargs, off .c ---
+    mov rdi, rbx
+    mov rsi, [rbp - CA_ARGS]
+    call ast_at
+    mov ecx, [rax + AstNode.c]
+    test ecx, ecx
+    jz .ret_ann
+    mov rdi, rcx
+    call .one_param
+    test eax, eax
+    js .fail
+
+.ret_ann:
+    ; --- and the return annotation, under the name "return" ---
+    cmp qword [rbp - CA_RET], 0
+    je .finish
+    mov rdi, rbx
+    CSTRING rsi, "return"
+    call comp_intern_cstr
+    test rax, rax
+    jz .fail
+    mov rdi, [rbp - CA_UNIT]
+    mov rsi, rax
+    call cg_const
+    mov rdx, rax
+    mov rdi, [rbp - CA_UNIT]
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CA_LINE]
+    call cg_emit
+    mov rdx, [rbp - CA_RET]
+    mov rdi, rbx
+    mov rsi, [rbp - CA_UNIT]
+    call cg_expr
+    test eax, eax
+    jz .fail
+    inc r12
+
+.finish:
+    test r12, r12
+    jz .none
+    lea rdx, [r12 + r12]                ; one name and one value each
+    mov rdi, [rbp - CA_UNIT]
+    mov esi, OP_BUILD_TUPLE
+    mov rcx, [rbp - CA_LINE]
+    call cg_emit
+    mov eax, MAKE_FUNC_ANNOTATIONS
+    jmp .ret
+.none:
+    xor eax, eax
+    jmp .ret
+.fail:
+    mov rax, -1
+.ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+;; Local: every parameter in [CA_I, CA_STOP) of the child list.  -1 on error.
+.child_span:
+    sub rsp, 8
+.cs_loop:
+    mov rax, [rbp - CA_I]
+    cmp rax, [rbp - CA_STOP]
+    jae .cs_done
+    mov rdi, rbx
+    mov rsi, [rbp - CA_ARGS]
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CA_I]
+    mov rdi, rbx
+    call ast_child
+    mov rdi, rax
+    call .one_param
+    test eax, eax
+    js .cs_fail
+    inc qword [rbp - CA_I]
+    jmp .cs_loop
+.cs_done:
+    xor eax, eax
+    add rsp, 8
+    ret
+.cs_fail:
+    mov rax, -1
+    add rsp, 8
+    ret
+
+;; Local: one AST_ARG node in rdi.  Emits nothing when it carries no
+;; annotation; otherwise LOAD_CONST <name>, then the annotation expression,
+;; and counts the pair in r12.  -1 on error.
+.one_param:
+    sub rsp, 8
+    mov r13, rdi
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov ecx, [rax + AstNode.b]          ; the annotation, or 0
+    test ecx, ecx
+    jz .op_none
+    ; A frame slot rather than a push: a push here would leave rsp 8 out of
+    ; alignment across the four calls below.
+    mov [rbp - CA_ANN], rcx
+    ; the parameter's name, as a constant
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov rdi, [rbp - CA_UNIT]
+    mov rsi, rax
+    call cg_const
+    mov rdx, rax
+    mov rdi, [rbp - CA_UNIT]
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CA_LINE]
+    call cg_emit
+    ; then the annotation itself
+    mov rdx, [rbp - CA_ANN]
+    mov rdi, rbx
+    mov rsi, [rbp - CA_UNIT]
+    call cg_expr
+    test eax, eax
+    jz .op_fail
+    inc r12
+.op_none:
+    xor eax, eax
+    add rsp, 8
+    ret
+.op_fail:
+    mov rax, -1
+    add rsp, 8
+    ret
+END_FUNC cg_annotations
 
 ;; ============================================================================
 ;; cg_closure_tuple(Comp *c, CompUnit *u, uint32_t scope, int line)

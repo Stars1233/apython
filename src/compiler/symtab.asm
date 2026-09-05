@@ -693,11 +693,12 @@ DEF_FUNC sym_visit, SV_FRAME
     jz .fail
     mov r12, rax                        ; the wrapper, or the scope we had
 
-    ; The defaults belong to the enclosing scope, so visit the parameter list
-    ; here before descending.
+    ; The defaults and the annotations belong to the enclosing scope, so visit
+    ; the parameter list here before descending.
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
+    mov ecx, 1                          ; a def: it may annotate
     call sym_visit_defaults
     test eax, eax
     jz .fail
@@ -811,6 +812,7 @@ DEF_FUNC sym_visit, SV_FRAME
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
+    xor ecx, ecx                        ; a lambda annotates nothing
     call sym_visit_defaults
     test eax, eax
     jz .fail
@@ -1113,15 +1115,24 @@ DEF_FUNC sym_visit, SV_FRAME
 END_FUNC sym_visit
 
 ;; ============================================================================
-;; sym_visit_defaults(Comp *c, uint32_t scope, uint32_t fn) -> 1 ok, 0 error
+;; sym_visit_defaults(Comp *c, uint32_t scope, uint32_t fn, int annotated)
+;;   -> 1 ok, 0 error
+;;
 ;; Default values and annotations are evaluated in the ENCLOSING scope, at the
 ;; point the function is defined -- which is why `def f(x=n)` captures n's value
-;; then rather than at call time.
+;; then rather than at call time.  Only the defaults were visited, so a name
+;; used ONLY in an annotation was never classified: `def inner(x: T)` nested
+;; two deep read T as a global rather than as the enclosing function's local,
+;; and reported it undefined.
+;;
+;; `annotated` is 0 for a lambda, which cannot annotate anything and keeps its
+;; body in the `.c` a def uses for the return annotation.
 ;; ============================================================================
 SD_I     equ 32
 SD_N     equ 40
 SD_ARGS  equ 48
-SD_FRAME equ 56          ; + 3 pushes = 80
+SD_ANN   equ 56
+SD_FRAME equ 72          ; + 3 pushes = 96
 DEF_FUNC sym_visit_defaults, SD_FRAME
     push rbx
     push r12
@@ -1129,6 +1140,7 @@ DEF_FUNC sym_visit_defaults, SD_FRAME
     mov rbx, rdi
     mov r12, rsi
     mov r13, rdx
+    mov [rbp - SD_ANN], rcx
 
     mov rdi, rbx
     mov rsi, r13
@@ -1136,7 +1148,7 @@ DEF_FUNC sym_visit_defaults, SD_FRAME
     mov ecx, [rax + AstNode.b]          ; the AST_ARGUMENTS node
     mov [rbp - SD_ARGS], rcx
     test ecx, ecx
-    jz .ok
+    jz .stars
     mov rdi, rbx
     mov rsi, rcx
     call ast_at
@@ -1146,7 +1158,7 @@ DEF_FUNC sym_visit_defaults, SD_FRAME
 .loop:
     mov rax, [rbp - SD_I]
     cmp rax, [rbp - SD_N]
-    jae .ok
+    jae .stars
     mov rdi, rbx
     mov rsi, [rbp - SD_ARGS]
     call ast_at
@@ -1159,6 +1171,30 @@ DEF_FUNC sym_visit_defaults, SD_FRAME
     call ast_at
     mov edx, [rax + AstNode.c]          ; the default expression
     test edx, edx
+    jz .child_ann
+    push rax
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    pop rcx
+    test eax, eax
+    jz .fail
+.child_ann:
+    ; and its annotation, which is evaluated in the same place
+    cmp qword [rbp - SD_ANN], 0
+    je .next
+    mov rdi, rbx
+    mov rsi, [rbp - SD_ARGS]
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - SD_I]
+    mov rdi, rbx
+    call ast_child
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov edx, [rax + AstNode.b]
+    test edx, edx
     jz .next
     mov rdi, rbx
     mov rsi, r12
@@ -1168,9 +1204,67 @@ DEF_FUNC sym_visit_defaults, SD_FRAME
 .next:
     inc qword [rbp - SD_I]
     jmp .loop
+
+.stars:
+    ; *args and **kwargs hang off the arguments node rather than the child
+    ; list, and their annotations are evaluated here too; so is the return
+    ; annotation, which is the def's own `.c`.
+    cmp qword [rbp - SD_ANN], 0
+    je .ok
+    mov rax, [rbp - SD_ARGS]
+    test rax, rax
+    jz .ret_ann
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    mov ecx, [rax + AstNode.b]          ; *args
+    mov [rbp - SD_N], rcx
+    mov ecx, [rax + AstNode.c]          ; **kwargs
+    mov [rbp - SD_I], rcx
+    mov rdx, [rbp - SD_N]
+    call .star_ann
+    test eax, eax
+    jz .fail
+    mov rdx, [rbp - SD_I]
+    call .star_ann
+    test eax, eax
+    jz .fail
+.ret_ann:
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    mov edx, [rax + AstNode.c]
+    test edx, edx
+    jz .ok
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    test eax, eax
+    jz .fail
 .ok:
     mov eax, 1
     jmp .ret
+
+;; Local: the annotation of one starred parameter node in rdx, if it has one.
+.star_ann:
+    sub rsp, 8
+    test rdx, rdx
+    jz .sa_ok
+    mov rdi, rbx
+    mov rsi, rdx
+    call ast_at
+    mov edx, [rax + AstNode.b]
+    test edx, edx
+    jz .sa_ok
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_visit
+    add rsp, 8
+    ret
+.sa_ok:
+    mov eax, 1
+    add rsp, 8
+    ret
 .fail:
     xor eax, eax
 .ret:

@@ -22,6 +22,8 @@ extern eval_frame
 extern frame_new
 extern frame_free
 extern tuple_new
+extern tuple_type
+extern dict_type
 extern type_type
 extern exc_TypeError_type
 extern raise_exception
@@ -75,6 +77,8 @@ DEF_FUNC func_new
     ; an assignment fills them in, and it must not land in func_dict.
     mov qword [r13 + PyFuncObject.func_qualname], 0
     mov qword [r13 + PyFuncObject.func_doc], 0
+    ; No annotations until MAKE_FUNCTION hands some over.
+    mov qword [r13 + PyFuncObject.func_annotations], 0
 
     mov rdi, r13
     call gc_track
@@ -667,6 +671,11 @@ DEF_FUNC func_dealloc
     jz .no_func_doc
     DECREF_V rdi, rcx
 .no_func_doc:
+    mov rdi, [rbx + PyFuncObject.func_annotations]
+    test rdi, rdi
+    jz .no_func_annos
+    call obj_decref
+.no_func_annos:
 
     ; Free the function object itself (GC-aware)
     mov rdi, rbx
@@ -727,6 +736,15 @@ DEF_FUNC func_setattr
     test eax, eax
     jz .set_doc
 
+    ; So does __annotations__, and it has to go in the field rather than the
+    ; dict: func_getattr answers from the field, so an assignment that landed
+    ; in func_dict read back as the annotations the def was written with.
+    lea rdi, [rel fn_attr_annotations]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .set_annotations
+
     ; Check if func_dict exists
     mov rdi, [rbx + PyFuncObject.func_dict]
     test rdi, rdi
@@ -778,6 +796,37 @@ DEF_FUNC func_setattr
     ret
 .sq_type:
     RAISE exc_TypeError_type, "__qualname__ must be set to a string object"
+
+.set_annotations:
+    ; A mapping, as CPython requires; what it stores is whatever it is given,
+    ; and func_getattr only folds a TUPLE, so a dict assigned here comes back
+    ; unchanged.
+    test r13, r13
+    jz .sa_type
+    mov rdi, r13
+    V_TEST_PTR rdi, rax
+    ja .sa_type
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    jne .sa_type
+    INCREF_V r13, rax
+    mov rax, [rbx + PyFuncObject.func_annotations]
+    mov [rbx + PyFuncObject.func_annotations], r13
+    test rax, rax
+    jz .sa_done
+    mov rdi, rax
+    call obj_decref
+.sa_done:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.sa_type:
+    RAISE exc_TypeError_type, "__annotations__ must be set to a dict object"
 
 .set_doc:
     ; __doc__ takes anything, including None, as CPython's does.
@@ -925,6 +974,13 @@ DEF_FUNC func_getattr
     test eax, eax
     jz .return_module
 
+    ; Check for __annotations__
+    lea rdi, [rel fn_attr_annotations]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_annotations
+
     ; Check for __dict__
     lea rdi, [rel fn_attr_dict]
     lea rsi, [r12 + PyStrObject.data]
@@ -990,6 +1046,67 @@ DEF_FUNC func_getattr
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+
+.return_annotations:
+    ; MAKE_FUNCTION hands them over as a TUPLE of alternating name and value,
+    ; which is what the compiler builds and what costs nothing when nobody
+    ; asks.  Reading the attribute is where it becomes a dict, and the dict
+    ; is stored back: `f.__annotations__["x"] = int` has to stick, and
+    ; typing.get_type_hints reads it more than once.
+    ;
+    ; r13/r14/r15 are the caller's; this arm is the only one here that needs
+    ; more than rbx and r12, so it saves and restores them itself.
+    mov rax, [rbx + PyFuncObject.func_annotations]
+    test rax, rax
+    jz .fa_make_empty
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    jne .return_ptr_attr        ; folded already
+    push r13
+    push r14
+    push r15
+    mov r13, rax                ; the tuple
+    call dict_new
+    test rax, rax
+    jz .fa_failed
+    mov r14, rax                ; the dict
+    xor r15d, r15d
+.fa_pair:
+    mov rax, [r13 + PyTupleObject.ob_size]
+    lea rcx, [r15 + 1]
+    cmp rcx, rax
+    jge .fa_folded
+    mov rax, [r13 + PyTupleObject.ob_item]
+    mov rsi, [rax + r15*8]      ; the name
+    mov rdx, [rax + r15*8 + 8]  ; the value
+    mov rdi, r14
+    call dict_set
+    add r15, 2
+    jmp .fa_pair
+.fa_folded:
+    mov [rbx + PyFuncObject.func_annotations], r14
+    mov rdi, r13
+    call obj_decref             ; the tuple, replaced by the dict
+    mov rax, r14
+    pop r15
+    pop r14
+    pop r13
+    jmp .return_ptr_attr
+.fa_failed:
+    pop r15
+    pop r14
+    pop r13
+    jmp .not_found
+
+.fa_make_empty:
+    ; A function written without annotations still answers a dict, and the
+    ; same dict every time, because assigning into it is ordinary Python.
+    call dict_new
+    test rax, rax
+    jz .not_found
+    mov [rbx + PyFuncObject.func_annotations], rax
+    jmp .return_ptr_attr
 
 .return_dict:
     mov rax, [rbx + PyFuncObject.func_dict]
@@ -1408,6 +1525,7 @@ section .data
 func_name_str:  db "function", 0
 func_repr_str:  db "function", 0
 fn_attr_name:   db "__name__", 0
+fn_attr_annotations: db "__annotations__", 0
 fn_attr_dict:   db "__dict__", 0
 fn_attr_code:   db "__code__", 0
 fn_attr_kwdefaults: db "__kwdefaults__", 0
@@ -1598,6 +1716,8 @@ DEF_FUNC func_traverse
     VISIT_V rax, rcx
     mov rax, [rbx + PyFuncObject.func_doc]
     VISIT_V rax, rcx
+    mov rdi, [rbx + PyFuncObject.func_annotations]
+    VISIT_PTR rdi
 
     pop rbx
     leave
@@ -1645,6 +1765,12 @@ DEF_FUNC func_clear, 8            ; 1 pushes, so rsp is 16-aligned
     jz .no_fdoc
     DECREF_V rdi, rcx
 .no_fdoc:
+    mov rdi, [rbx + PyFuncObject.func_annotations]
+    mov qword [rbx + PyFuncObject.func_annotations], 0
+    test rdi, rdi
+    jz .no_fannos
+    call obj_decref
+.no_fannos:
 
     pop rbx
     leave

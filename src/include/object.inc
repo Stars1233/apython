@@ -258,6 +258,14 @@ struc PyFuncObject
                             ;      function: f.__dict__ stays empty until
                             ;      something else is assigned, and
                             ;      functools.wraps sets exactly these two.
+    ; +88: __annotations__.  MAKE_FUNCTION hands it over as a TUPLE of
+    ; alternating name and value, which is what the compiler builds and what
+    ; costs nothing when nobody asks; reading the attribute turns it into a
+    ; dict and stores that back, so the conversion happens once.  NULL means
+    ; the function was written without any, and reading it then makes an
+    ; empty dict -- which CPython also stores, since `f.__annotations__['x']
+    ; = int` has to stick.
+    .func_annotations: resq 1
 endstruc
 
 ; Code object

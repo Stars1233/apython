@@ -2614,11 +2614,10 @@ DEF_FUNC_LOCAL ps_def, PDF_FRAME
     test eax, eax
     jz .fail
 
-    ; A return annotation is parsed and kept on the node, but never generated:
-    ; apython's MAKE_FUNCTION drops annotations anyway, so evaluating one would
-    ; only add a side effect that CPython has and we cannot honour.  Neither
-    ; the symbol table nor the code generator looks at `.c`; `_ast` does, and
-    ; reports it as `returns`.
+    ; `.c` is the return annotation.  cg_annotations emits it under the name
+    ; "return", sym_visit_defaults classifies the names in it -- both in the
+    ; enclosing scope, where it is evaluated -- and `_ast` reports it as
+    ; `returns`.
     mov qword [rbp - PDF_RET], 0
     mov rdi, rbx
     call par_kind
