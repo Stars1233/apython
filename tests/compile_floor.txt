@@ -241,6 +241,7 @@ test_instance_layout
 test_int_bases_and_float_spec
 test_int_bytes
 test_int_bytes_wide
+test_int_deprecations
 test_int_from_bytes
 test_int_methods
 test_introspection
@@ -445,7 +446,9 @@ test_union_hash
 test_unpack_dict
 test_unpack_refcount
 test_unraisable
+test_utf16_utf32
 test_value_typeconfusion
+test_warnings
 test_weakref
 test_weakref_types
 test_wrong_answers

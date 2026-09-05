@@ -1052,7 +1052,11 @@ END_FUNC value_type
 ;                            written as \x01, rsi = Value whose type to name)
 ; Composes the message into a static buffer and raises TypeError.  Does not
 ; return.
-RTN_BUFSZ equ 160
+; Wide enough for the longest message that goes through it, which is now a
+; deprecation rather than an error: CPython's "__index__ returned non-int
+; (type bool).  The ability to return an instance of a strict subclass of int
+; is deprecated..." is 155 characters before the type name goes in.
+RTN_BUFSZ equ 256
 
 section .rodata
 rbt_open:    db ": '", 0
@@ -1099,44 +1103,70 @@ DEF_FUNC raise_type_error_with_typename
     mov rbx, rdi
     mov r12, rsi
 rtn_compose:
-
-    lea rdi, [rel rtn_buf]
-    xor ecx, ecx
-.rtn_copy:
-    movzx eax, byte [rbx]
-    test al, al
-    jz .rtn_end
-    inc rbx
-    cmp al, 1
-    je .rtn_insert
-    cmp rcx, RTN_BUFSZ - 2
-    jae .rtn_copy
-    mov [rdi + rcx], al
-    inc rcx
-    jmp .rtn_copy
-.rtn_insert:
-    test r12, r12
-    jz .rtn_copy
-    mov rsi, [r12 + PyTypeObject.tp_name]
-.rtn_name:
-    movzx eax, byte [rsi]
-    test al, al
-    jz .rtn_copy
-    inc rsi
-    cmp rcx, RTN_BUFSZ - 2
-    jae .rtn_copy
-    mov [rdi + rcx], al
-    inc rcx
-    jmp .rtn_name
-.rtn_end:
-    mov byte [rdi + rcx], 0
+    mov rdi, rbx
+    mov rsi, r12
+    call type_name_message
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel rtn_buf]
+    mov rsi, rax
     extern exc_TypeError_type
     extern raise_exception
     call raise_exception
     ud2
 END_FUNC raise_type_error_with_typename
+
+;; ============================================================================
+;; type_name_message(rdi = a template whose \x01 stands for a type name,
+;;                   rsi = the type object, or 0 to leave the \x01 out)
+;;   -> rax = the composed C string, in a shared static buffer
+;;
+;; The composition the two raisers above have always done, given a name of
+;; its own because a WARNING wants it too: CPython's "__index__ returned
+;; non-int (type bool)." names the type the same way its errors do.  The
+;; buffer is shared and overwritten on every call, so the string is only good
+;; until the next one -- which is all a raise or a warn needs.
+;; ============================================================================
+global type_name_message
+DEF_FUNC type_name_message
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    lea rdi, [rel rtn_buf]
+    xor ecx, ecx
+.tnm_copy:
+    movzx eax, byte [rbx]
+    test al, al
+    jz .tnm_end
+    inc rbx
+    cmp al, 1
+    je .tnm_insert
+    cmp rcx, RTN_BUFSZ - 2
+    jae .tnm_copy
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .tnm_copy
+.tnm_insert:
+    test r12, r12
+    jz .tnm_copy
+    mov rsi, [r12 + PyTypeObject.tp_name]
+.tnm_name:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .tnm_copy
+    inc rsi
+    cmp rcx, RTN_BUFSZ - 2
+    jae .tnm_copy
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .tnm_name
+.tnm_end:
+    mov byte [rdi + rcx], 0
+    lea rax, [rel rtn_buf]
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC type_name_message
 
 ;; ============================================================================
 ;; dunder_require_self(rdi = self Value, rsi = the type whose method this is,

@@ -610,6 +610,9 @@ BI_ORIGIN equ 40       ; the argument's type, for the bytes-family MRO walk
 BI_XLAT   equ 64       ; a Unicode-to-ASCII copy of the argument, or 0
 BI_DATA   equ 72       ; the bytes actually parsed: that copy, or the original
 BI_XLEN   equ 80       ; and its length, which strlen cannot recover
+BI_DUNDER equ 56       ; which of __int__/__index__/__trunc__ was called, so
+                       ; the deprecation for a strict-int-subclass result can
+                       ; name it the way CPython does
 BI_LEN    equ 48       ; the source length: bytes and bytearray keep it in
                        ; different fields, so the shared tail cannot re-read it
 BI_FRAME  equ 88            ; + 1 push = 96, 16-byte aligned
@@ -933,6 +936,8 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .int_from_int_sub_extract ; no __int__, extract int_value
+    lea rcx, [rel int_dunder_int_msg]
+    mov [rbp - BI_DUNDER], rcx  ; which dunder the deprecation names
     ; Call __int__(self) — rax = func (borrowed ref)
     mov rcx, [rax + PyObject.ob_type]
     mov rcx, [rcx + PyTypeObject.tp_call]
@@ -959,10 +964,10 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     je .int_ret                  ; exact int — OK
     lea r8, [rel bool_type]
     cmp rcx, r8
-    je .int_convert_bool_result  ; bool → convert to plain int
+    je .int_subclass_result      ; bool is a strict subclass of int
     mov r8, [rcx + PyTypeObject.tp_flags]
     test r8, TYPE_FLAG_INT_SUBCLASS
-    jnz .int_ret                 ; int subclass — OK for now
+    jnz .int_subclass_result     ; deprecated, and converted to an exact int
     ; __int__ returned non-int
     mov rdi, rax
     call obj_decref
@@ -986,16 +991,24 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     call dunder_lookup
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
-    jnz .int_call_dunder
+    jz .int_try_index
+    lea rcx, [rel int_dunder_int_msg]
+    mov [rbp - BI_DUNDER], rcx
+    jmp .int_call_dunder
 
+.int_try_index:
     ; Try __index__ protocol
     mov rdi, [rbx + PyObject.ob_type]
     CSTRING rsi, "__index__"
     call dunder_lookup
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
-    jnz .int_call_dunder
+    jz .int_try_trunc
+    lea rcx, [rel int_dunder_index_msg]
+    mov [rbp - BI_DUNDER], rcx
+    jmp .int_call_dunder
 
+.int_try_trunc:
     ; Try __trunc__ protocol
     mov rdi, [rbx + PyObject.ob_type]
     CSTRING rsi, "__trunc__"
@@ -1005,6 +1018,12 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jnz .int_call_dunder_trunc
 
     jmp .int_type_error
+
+.int_trunc_warn_raised:
+    ; warn() raised, which is what a filter set to "error" does.  The
+    ; exception is already recorded; unwind with it.
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
 
 .int_call_dunder:
     ; rax = func (borrowed ref), rbx = self
@@ -1033,17 +1052,68 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     je .int_ret                  ; exact int — OK
     lea r8, [rel bool_type]
     cmp rcx, r8
-    je .int_convert_bool_result  ; bool → convert to plain int
+    je .int_subclass_result      ; bool is a strict subclass of int
     mov r8, [rcx + PyTypeObject.tp_flags]
     test r8, TYPE_FLAG_INT_SUBCLASS
-    jnz .int_ret                 ; int subclass — OK
+    jnz .int_subclass_result
     ; Not int-like
     mov rdi, rax
     call obj_decref
     RAISE exc_TypeError_type, "__int__ returned non-int"
 
+.int_subclass_result:
+    ; CPython accepts a strict subclass of int here and DEPRECATES it, naming
+    ; the dunder and the type: "__index__ returned non-int (type bool).  The
+    ; ability to return an instance of a strict subclass of int is
+    ; deprecated...".  Nothing warned, so a test that turns the deprecation
+    ; into an error saw nothing to turn.
+    mov [rbp - BI_ARGS], rax        ; the result, across the warning
+    mov [rbp - BI_BASE], rdx
+    mov rdi, [rbp - BI_DUNDER]
+    mov rsi, rcx                    ; the result's type
+    extern type_name_message
+    call type_name_message
+    mov rdi, rax
+    call deprecation_warn
+    test eax, eax
+    jz .int_trunc_warn_raised
+    mov rax, [rbp - BI_ARGS]
+    mov rdx, [rbp - BI_BASE]
+    lea rcx, [rel bool_type]
+    cmp [rax + PyObject.ob_type], rcx
+    je .int_convert_bool_result
+
+    ; ...and the value comes back as an EXACT int.  CPython converts it;
+    ; handing the subclass instance straight back made int(x) answer
+    ; something whose type is not int.
+    mov rdi, rax
+    mov rax, [rdi + PyIntSubclassObject.int_value]
+    V_UNPACK rax, rdx
+    cmp edx, TAG_SMALLINT
+    je .int_sub_have
+    INCREF rax
+.int_sub_have:
+    mov [rbp - BI_XLAT], rax        ; the extracted value, across the release
+    mov [rbp - BI_XLEN], rdx
+    mov rdi, [rbp - BI_ARGS]        ; the subclass instance
+    call obj_decref
+    mov rax, [rbp - BI_XLAT]
+    mov rdx, [rbp - BI_XLEN]
+    jmp .int_ret
+
 .int_call_dunder_trunc:
     ; rax = __trunc__ func, rbx = self
+    ; CPython 3.12 warns before it does this, and a suite that turns warnings
+    ; into errors reads that as the deprecation firing.  The warning has to
+    ; come first: the filter may make it raise, and then __trunc__ must not
+    ; have run.
+    push rax
+    lea rdi, [rel int_trunc_deprecated]
+    call deprecation_warn
+    test eax, eax
+    pop rax
+    jz .int_trunc_warn_raised
+
     ; Call __trunc__(self); result must be int-like or have __index__
     ; CPython 3.12: tries __index__ on result, but NOT __int__
     mov rcx, [rax + PyObject.ob_type]
@@ -3297,3 +3367,145 @@ DEF_FUNC builtin_complex, BCX_FRAME
 END_FUNC builtin_complex
 
 
+
+section .data
+align 8
+dw_warn_impl: dq 0
+
+section .rodata
+dw_mod_name:  db "_warnings", 0
+dw_attr_name: db "warn", 0
+int_trunc_deprecated: db "The delegation of int() to __trunc__ is deprecated.", 0
+; The \x01 is where type_name_message puts the type's name.
+int_dunder_int_msg:   db `__int__ returned non-int (type \x01).  The ability to return an instance of a strict subclass of int is deprecated, and may be removed in a future version of Python.`, 0
+int_dunder_index_msg: db `__index__ returned non-int (type \x01).  The ability to return an instance of a strict subclass of int is deprecated, and may be removed in a future version of Python.`, 0
+int_dunder_trunc_msg: db `__trunc__ returned non-int (type \x01).  The ability to return an instance of a strict subclass of int is deprecated, and may be removed in a future version of Python.`, 0
+
+section .text
+;; ============================================================================
+;; deprecation_warn(rdi = the message, a C string) -> eax = 1 ok, 0 raised
+;;
+;; The one place assembly raises a Python warning.  CPython's int() warns when
+;; it falls back to __trunc__ -- "The delegation of int() to __trunc__ is
+;; deprecated" -- and a test suite that turns warnings into errors reads that
+;; as the deprecation firing.  Nothing here warned at all, so `int(x)` for an
+;; x with only a __trunc__ was silent.
+;;
+;; `_warnings` is imported lazily and cached, the way builtin_open_fn reaches
+;; `_io`: the module is Python, and importing it at startup would run a module
+;; body before there is an interpreter to run it in.  A filter set to "error"
+;; makes warn() raise, which is a real answer and is passed on; anything else
+;; going wrong is swallowed, because a warning that cannot be shown must not
+;; become the caller's problem.
+;; ============================================================================
+
+extern import_module
+extern dict_get
+extern obj_call_n
+extern exc_DeprecationWarning_type
+extern current_exception
+
+DW_ARGS  equ 24             ; two Values: the message and the category
+DW_MSG   equ 32
+DW_KW    equ 40             ; the parked kw_names_pending
+DW_TMP   equ 48             ; whatever is being held across a call
+DW_FRAME equ 56             ; + 1 push = 64, 16-aligned
+global deprecation_warn
+DEF_FUNC deprecation_warn, DW_FRAME
+    push rbx
+    mov rbx, rdi
+
+    cmp qword [rel dw_warn_impl], 0
+    jne .dw_have
+
+    ; The pending keyword names belong to whatever call is in flight, not to
+    ; the import that is about to run a module body.  A frame slot, not a
+    ; push: everything below makes calls, and a lone push would put every one
+    ; of them eight bytes out of alignment.
+    mov rax, [rel kw_names_pending]
+    mov [rbp - DW_KW], rax
+    mov qword [rel kw_names_pending], 0
+
+    lea rdi, [rel dw_mod_name]
+    call str_from_cstr_heap
+    mov [rbp - DW_TMP], rax
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    call import_module
+    mov [rbp - DW_ARGS], rax        ; the module, across the release
+    mov rdi, [rbp - DW_TMP]
+    call obj_decref
+    cmp qword [rbp - DW_ARGS], 0
+    je .dw_no_module
+
+    lea rdi, [rel dw_attr_name]
+    call str_from_cstr_heap
+    mov [rbp - DW_TMP], rax
+    mov rdi, [rbp - DW_ARGS]
+    mov rdi, [rdi + PyModuleObject.mod_dict]
+    mov rsi, rax
+    call dict_get
+    mov [rbp - DW_MSG], rax         ; the function, across the release
+    mov rdi, [rbp - DW_TMP]
+    call obj_decref
+    mov rax, [rbp - DW_MSG]
+    test rax, rax
+    jz .dw_no_module
+    mov rdi, rax
+    call obj_incref                 ; the cache holds it for the process
+    mov rax, [rbp - DW_MSG]
+    mov [rel dw_warn_impl], rax
+
+    mov rax, [rbp - DW_KW]
+    mov [rel kw_names_pending], rax
+
+.dw_have:
+    mov rdi, rbx
+    call str_from_cstr_heap
+    mov [rbp - DW_MSG], rax
+    mov [rbp - DW_ARGS], rax
+    lea rax, [rel exc_DeprecationWarning_type]
+    mov [rbp - DW_ARGS + 8], rax
+
+    mov rdi, [rel dw_warn_impl]
+    lea rsi, [rbp - DW_ARGS]
+    mov edx, 2
+    call obj_call_n
+    mov [rbp - DW_TMP], rax
+
+    mov rdi, [rbp - DW_MSG]
+    call obj_decref
+    mov rax, [rbp - DW_TMP]
+    test rax, rax
+    jz .dw_raised
+    XDECREF_V rax, rcx
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+
+.dw_raised:
+    ; warn() raised -- a filter set to "error" does exactly that -- and the
+    ; exception is the caller's to propagate.
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.dw_no_module:
+    ; No _warnings, or no warn in it: say nothing rather than fail.  An
+    ; import that raised has to be cleared, or the next opcode would find it.
+    mov rax, [rbp - DW_KW]
+    mov [rel kw_names_pending], rax
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .dw_no_module_done
+    mov qword [rel current_exception], 0
+    call obj_decref
+.dw_no_module_done:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC deprecation_warn
