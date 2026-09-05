@@ -77,6 +77,49 @@ extern obj_incref
 ; Initial capacity for the reference list
 MARSHAL_REFS_INIT_CAP equ 64
 
+; What marshal_error holds.
+MARSHAL_ERR_NONE equ 0
+MARSHAL_ERR_EOF  equ 1          ; the stream stopped early: EOFError
+MARSHAL_ERR_BAD  equ 2          ; it says something impossible: ValueError
+MARSHAL_ERR_OBJ  equ 3          ; it stopped where an object was due: EOFError
+
+; How much machine stack a nested read is allowed to reach down into.  The
+; reader recurses once per level of nesting and a stream can nest as deeply as
+; it likes, so `marshal.loads(b"(\x01\x00\x00\x00" * 200000)` walked the C
+; stack off its end.  Measuring rsp against a floor set by the entry point
+; costs one compare per object and needs no counter to keep balanced across
+; the handlers' several exits.
+MARSHAL_STACK_ROOM equ 1024 * 1024
+
+;; ============================================================================
+;; marshal_fail(rdi = the fatal message, esi = MARSHAL_ERR_*) -> rax = 0
+;;
+;; A .pyc is read before there is an interpreter frame to raise into, so a
+;; malformed one is fatal and always was.  marshal.loads() is different: it is
+;; an ordinary call inside a running program, handed bytes that program chose,
+;; and CPython answers it with EOFError or ValueError.  It sets marshal_soft,
+;; and then every refusal in this file records itself here and unwinds instead
+;; of taking the process down.
+;;
+;; The first failure is the one kept: everything after it is the reader
+;; reading zeros on its way out.
+;; ============================================================================
+DEF_FUNC_LOCAL marshal_fail
+    cmp qword [rel marshal_soft], 0
+    je .mf_fatal
+    cmp qword [rel marshal_error], MARSHAL_ERR_NONE
+    jne .mf_done
+    movsx rsi, esi
+    mov [rel marshal_error], rsi
+.mf_done:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+.mf_fatal:
+    call fatal_error
+END_FUNC marshal_fail
+
 ;; ============================================================================
 ;; marshal_read_byte() -> byte in al
 ;; Read one byte from marshal_buf[marshal_pos], increment marshal_pos.
@@ -97,7 +140,11 @@ END_FUNC marshal_read_byte
 
 mread_byte_eof:
     lea rdi, [rel marshal_err_eof]
-    call fatal_error
+    mov esi, MARSHAL_ERR_EOF
+    call marshal_fail
+    xor eax, eax
+    leave
+    ret
 
 ;; ============================================================================
 ;; marshal_read_long() -> int32 in eax
@@ -120,7 +167,11 @@ END_FUNC marshal_read_long
 
 mread_long_eof:
     lea rdi, [rel marshal_err_eof]
-    call fatal_error
+    mov esi, MARSHAL_ERR_EOF
+    call marshal_fail
+    xor eax, eax
+    leave
+    ret
 
 ;; ============================================================================
 ;; marshal_read_long64() -> int64 in rax
@@ -143,7 +194,11 @@ END_FUNC marshal_read_long64
 
 mread_long64_eof:
     lea rdi, [rel marshal_err_eof]
-    call fatal_error
+    mov esi, MARSHAL_ERR_EOF
+    call marshal_fail
+    xor eax, eax
+    leave
+    ret
 
 ;; ============================================================================
 ;; marshal_read_bytes(int64_t n) -> pointer to bytes in buffer (rax)
@@ -167,7 +222,11 @@ END_FUNC marshal_read_bytes
 
 mread_bytes_eof:
     lea rdi, [rel marshal_err_eof]
-    call fatal_error
+    mov esi, MARSHAL_ERR_EOF
+    call marshal_fail
+    xor eax, eax
+    leave
+    ret
 
 ;; ============================================================================
 ;; marshal_init_refs() - Initialize the reference list
@@ -264,6 +323,33 @@ DEF_FUNC marshal_cleanup_refs
 END_FUNC marshal_cleanup_refs
 
 ;; ============================================================================
+;; marshal_count_ok(rdi = a container's element count) -> rax = that count, or
+;; 0 with a refusal recorded
+;;
+;; Every object in the stream is at least one byte, so a container claiming
+;; more elements than there are bytes left is claiming something the stream
+;; cannot hold.  Without this a count of 0xFFFFFFFF asked list_new for four
+;; billion slots before reading the first element, and a refusal recorded
+;; part way through left the arm's loop counting down from four billion.
+;; ============================================================================
+DEF_FUNC_LOCAL marshal_count_ok
+    mov rax, [rel marshal_len]
+    sub rax, [rel marshal_pos]
+    cmp rdi, rax
+    ja .mco_short
+    mov rax, rdi
+    leave
+    ret
+.mco_short:
+    lea rdi, [rel marshal_err_eof]
+    mov esi, MARSHAL_ERR_EOF
+    call marshal_fail
+    xor eax, eax
+    leave
+    ret
+END_FUNC marshal_count_ok
+
+;; ============================================================================
 ;; marshal_read_object() -> rax = Value
 ;; Main marshal deserialization dispatcher.
 ;;
@@ -276,8 +362,26 @@ DEF_FUNC marshal_read_object
     push rbx
     push r12
 
-    ; Read type byte
+    ; A failure already recorded: unwind without reading anything more.  The
+    ; handlers below go on calling this for their children, and they have to
+    ; get an answer rather than a second refusal.
+    cmp qword [rel marshal_error], MARSHAL_ERR_NONE
+    jne mdo_soft_fail
+
+    ; And the machine stack, which nesting is what spends.  The floor is set
+    ; by whichever entry point is reading; zero, meaning nobody set one, is
+    ; below every real rsp and so never fires.
+    cmp rsp, [rel marshal_rsp_floor]
+    jb mdo_too_deep
+
+    ; Read type byte.  Nothing was recorded before this read -- the guard
+    ; above saw to that -- so if something is now, this read is what stopped,
+    ; and CPython words that one case differently.
     call marshal_read_byte
+    cmp qword [rel marshal_error], MARSHAL_ERR_EOF
+    je mdo_eof_at_object
+    cmp qword [rel marshal_error], MARSHAL_ERR_NONE
+    jne mdo_soft_fail
     movzx eax, al
     mov ebx, eax               ; ebx = full type byte
 
@@ -351,12 +455,41 @@ DEF_FUNC marshal_read_object
 
     ; Unknown type
     lea rdi, [rel marshal_err_unknown]
-    call fatal_error
+    mov esi, MARSHAL_ERR_BAD
+    call marshal_fail
+    jmp mdo_soft_fail
 
 ;--------------------------------------------------------------------------
 ; mfinish: common epilogue for marshal_read_object
 ; rax = the result payload, rdx = tag, r12 = FLAG_REF flag
 ;--------------------------------------------------------------------------
+; The way out for a refusal that has already been recorded: no result, and
+; nothing of this object's to release, because nothing of it was built.
+mdo_soft_fail:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+mdo_eof_at_object:
+    mov qword [rel marshal_error], MARSHAL_ERR_OBJ
+    jmp mdo_soft_fail
+
+mdo_too_deep:
+    lea rdi, [rel marshal_err_deep]
+    mov esi, MARSHAL_ERR_BAD
+    call marshal_fail
+    jmp mdo_soft_fail
+
+; The four length-then-bytes arms, which push r12 and r13 of their own before
+; the length can fail to be there.
+mdo_str_fail:
+    pop r13
+    pop r12
+    jmp mdo_soft_fail
+
 mfinish:
     ; If FLAG_REF was set, add to reference list
     test r12d, r12d
@@ -442,7 +575,9 @@ mdo_long:
     push r13
     push r14
     push r15
-    sub rsp, 16                ; [rsp+0] = digit index, [rsp+8] = shift amount
+    ; 24, not the 16 the two slots need: three pushes and 16 leave rsp eight
+    ; bytes out of 16-alignment, and this arm calls into GMP.
+    sub rsp, 24                ; [rsp+0] = digit index, [rsp+8] = shift amount
 
     call marshal_read_long     ; eax = ndigits (signed)
     movsx r13, eax             ; r13 = ndigits (sign-extended)
@@ -453,6 +588,12 @@ mdo_long:
     jns .long_pos
     neg r14                    ; r14 = |ndigits|
 .long_pos:
+    ; Two bytes a digit, so that many bytes have to be there.  Zero on
+    ; refusal, which is a digit loop that does not run.
+    lea rdi, [r14 + r14]
+    call marshal_count_ok
+    shr rax, 1
+    mov r14, rax
 
     ; If |ndigits| > 4, use GMP path (>60 bits, may overflow int64)
     cmp r14, 4
@@ -498,7 +639,7 @@ mdo_long:
     mov rdi, r15
     call int_from_i64
 
-    add rsp, 16
+    add rsp, 24
     pop r15
     pop r14
     pop r13
@@ -577,7 +718,7 @@ mdo_long:
     ; Clear temp
     mov rdi, rsp
     call __gmpz_clear wrt ..plt
-    add rsp, 16
+    add rsp, 16                ; the temp mpz, not the arm's own frame
 
     ; Advance
     add qword [rsp + 8], 15
@@ -596,7 +737,7 @@ mdo_long:
 .long_gmp_not_neg:
     mov rax, r15
     mov edx, TAG_PTR
-    add rsp, 16
+    add rsp, 24
     pop r15
     pop r14
     pop r13
@@ -650,7 +791,9 @@ mdo_short_ascii:
     movzx r13d, al             ; r13 = length
 
     mov rdi, r13
-    call marshal_read_bytes    ; rax = pointer to string data in buffer
+    call marshal_read_bytes
+    test rax, rax
+    jz mdo_str_fail    ; rax = pointer to string data in buffer
     mov rdi, rax               ; data ptr
     mov rsi, r13               ; length
     call str_new_heap          ; always heap — co_names readers expect TAG_PTR
@@ -671,7 +814,9 @@ mdo_ascii:
     mov r13d, eax              ; r13 = length (unsigned)
 
     mov rdi, r13
-    call marshal_read_bytes    ; rax = pointer to string data
+    call marshal_read_bytes
+    test rax, rax
+    jz mdo_str_fail    ; rax = pointer to string data
     mov rdi, rax               ; data ptr
     mov rsi, r13               ; length
     call str_new_heap          ; always heap — co_names readers expect TAG_PTR
@@ -692,7 +837,9 @@ mdo_unicode:
     mov r13d, eax              ; r13 = length (unsigned)
 
     mov rdi, r13
-    call marshal_read_bytes    ; rax = pointer to data
+    call marshal_read_bytes
+    test rax, rax
+    jz mdo_str_fail    ; rax = pointer to data
     mov rdi, rax               ; data ptr
     mov rsi, r13               ; length
     call str_new_heap          ; always heap — co_names readers expect TAG_PTR
@@ -713,7 +860,9 @@ mdo_bytes:
     mov r13d, eax              ; r13 = length (unsigned)
 
     mov rdi, r13
-    call marshal_read_bytes    ; rax = pointer to data
+    call marshal_read_bytes
+    test rax, rax
+    jz mdo_str_fail    ; rax = pointer to data
     mov rdi, rax               ; data ptr
     mov rsi, r13               ; length
     call bytes_from_data
@@ -748,6 +897,9 @@ mdo_small_tuple:
 
     call marshal_read_byte     ; al = count
     movzx r13d, al             ; r13 = count
+    mov rdi, r13
+    call marshal_count_ok      ; more elements than bytes left is no stream
+    mov r13, rax
 
     ; Allocate tuple
     mov rdi, r13
@@ -757,6 +909,10 @@ mdo_small_tuple:
     ; Read elements
     xor r15d, r15d             ; r15 = index
 .stuple_loop:
+    ; A refusal already recorded means every read below returns nothing and
+    ; consumes nothing, so this loop would never reach its end.
+    cmp qword [rel marshal_error], MARSHAL_ERR_NONE
+    jne .stuple_done
     cmp r15, r13
     jge .stuple_done
     push r13
@@ -820,6 +976,9 @@ mdo_tuple:
 
     call marshal_read_long     ; eax = count
     mov r13d, eax              ; r13 = count (unsigned)
+    mov rdi, r13
+    call marshal_count_ok      ; more elements than bytes left is no stream
+    mov r13, rax
 
     ; Allocate tuple
     mov rdi, r13
@@ -829,6 +988,10 @@ mdo_tuple:
     ; Read elements
     xor r15d, r15d             ; r15 = index
 .tuple_loop:
+    ; A refusal already recorded means every read below returns nothing and
+    ; consumes nothing, so this loop would never reach its end.
+    cmp qword [rel marshal_error], MARSHAL_ERR_NONE
+    jne .tuple_done
     cmp r15, r13
     jge .tuple_done
     push r13
@@ -886,7 +1049,9 @@ mdo_ref:
 
 mdo_ref_oob:
     lea rdi, [rel marshal_err_ref_oob]
-    call fatal_error
+    mov esi, MARSHAL_ERR_BAD
+    call marshal_fail
+    jmp mdo_soft_fail
 
 ;--------------------------------------------------------------------------
 ; TYPE_CODE handler: read all code object fields
@@ -903,7 +1068,7 @@ mdo_ref_oob:
 ;                co_linetable, co_exceptiontable
 ;   1 x long: co_firstlineno (between co_qualname and co_linetable)
 ;
-; Stack frame layout (relative to rsp after sub rsp, 128):
+; Stack frame layout (relative to rsp after sub rsp, 136):
 ;   [rsp +  0] co_argcount (4 bytes)
 ;   [rsp +  4] co_kwonlyargcount (4 bytes)
 ;   [rsp +  8] co_stacksize (4 bytes)
@@ -922,13 +1087,33 @@ mdo_ref_oob:
 ;   [rsp +104] ref index placeholder (8 bytes, used only if FLAG_REF)
 ;   [rsp +112] co_posonlyargcount (4 bytes)
 ;   [rsp +116] co_firstlineno (4 bytes)
-; Total: 120 bytes needed, using 128 for alignment.
+;   [rsp +120] the failure path's cursor over the ten object slots
+; Total: 128 bytes needed, using 136 so rsp is 16-aligned at the arm's calls.
 ;--------------------------------------------------------------------------
 mdo_code:
     push r13                   ; r13 = code object pointer (after alloc)
     push r14                   ; r14 = bytecode length
     push r15                   ; r15 = scratch
-    sub rsp, 128               ; local storage
+    ; 136, not the 120 the layout needs: three pushes and a 128-byte block
+    ; leave rsp eight bytes out of 16-alignment, and everything this arm
+    ; calls -- gc_alloc, ap_memcpy, and the nested marshal_read_object that
+    ; reads a code object out of co_consts -- was called that way.
+    sub rsp, 136               ; local storage
+
+    ; The ten object slots, before anything can leave the arm early: the
+    ; failure path releases every one that is set, and an unread slot holds
+    ; whatever the last call left on the stack.
+    xor eax, eax
+    mov [rsp + 16], rax
+    mov [rsp + 24], rax
+    mov [rsp + 32], rax
+    mov [rsp + 40], rax
+    mov [rsp + 48], rax
+    mov [rsp + 56], rax
+    mov [rsp + 64], rax
+    mov [rsp + 72], rax
+    mov [rsp + 80], rax
+    mov [rsp + 88], rax
 
     ; Save FLAG_REF (r12) in our local frame
     mov [rsp + 96], r12
@@ -960,58 +1145,68 @@ mdo_code:
     call marshal_read_long     ; co_flags
     mov [rsp + 12], eax
 
-    call marshal_read_object   ; co_code (bytes object)
-    mov [rsp + 16], rax
+    call marshal_read_object   ; co_code
     cmp edx, TAG_PTR
-    jne .code_bad_field         ; a field that came back as an immediate is not an object
+    jne .code_bad_field         ; an immediate is not an object, and
+    mov [rsp + 16], rax         ; the slot must never hold one: the
+                                ; failure path releases what it finds
 
-    call marshal_read_object   ; co_consts (tuple)
-    mov [rsp + 24], rax
+    call marshal_read_object   ; co_consts
     cmp edx, TAG_PTR
-    jne .code_bad_field         ; a field that came back as an immediate is not an object
+    jne .code_bad_field         ; an immediate is not an object, and
+    mov [rsp + 24], rax         ; the slot must never hold one: the
+                                ; failure path releases what it finds
 
-    call marshal_read_object   ; co_names (tuple)
-    mov [rsp + 32], rax
+    call marshal_read_object   ; co_names
     cmp edx, TAG_PTR
-    jne .code_bad_field         ; a field that came back as an immediate is not an object
+    jne .code_bad_field         ; an immediate is not an object, and
+    mov [rsp + 32], rax         ; the slot must never hold one: the
+                                ; failure path releases what it finds
 
-    call marshal_read_object   ; co_localsplusnames (tuple)
-    mov [rsp + 40], rax
+    call marshal_read_object   ; co_localsplusnames
     cmp edx, TAG_PTR
-    jne .code_bad_field         ; a field that came back as an immediate is not an object
+    jne .code_bad_field         ; an immediate is not an object, and
+    mov [rsp + 40], rax         ; the slot must never hold one: the
+                                ; failure path releases what it finds
 
-    call marshal_read_object   ; co_localspluskinds (bytes)
-    mov [rsp + 48], rax
+    call marshal_read_object   ; co_localspluskinds
     cmp edx, TAG_PTR
-    jne .code_bad_field         ; a field that came back as an immediate is not an object
+    jne .code_bad_field         ; an immediate is not an object, and
+    mov [rsp + 48], rax         ; the slot must never hold one: the
+                                ; failure path releases what it finds
 
-    call marshal_read_object   ; co_filename (str)
-    mov [rsp + 56], rax
+    call marshal_read_object   ; co_filename
     cmp edx, TAG_PTR
-    jne .code_bad_field         ; a field that came back as an immediate is not an object
+    jne .code_bad_field         ; an immediate is not an object, and
+    mov [rsp + 56], rax         ; the slot must never hold one: the
+                                ; failure path releases what it finds
 
-    call marshal_read_object   ; co_name (str)
-    mov [rsp + 64], rax
+    call marshal_read_object   ; co_name
     cmp edx, TAG_PTR
-    jne .code_bad_field         ; a field that came back as an immediate is not an object
+    jne .code_bad_field         ; an immediate is not an object, and
+    mov [rsp + 64], rax         ; the slot must never hold one: the
+                                ; failure path releases what it finds
 
-    call marshal_read_object   ; co_qualname (str)
-    mov [rsp + 72], rax
+    call marshal_read_object   ; co_qualname
     cmp edx, TAG_PTR
-    jne .code_bad_field         ; a field that came back as an immediate is not an object
+    jne .code_bad_field         ; an immediate is not an object, and
+    mov [rsp + 72], rax         ; the slot must never hold one: the
+                                ; failure path releases what it finds
 
     call marshal_read_long     ; co_firstlineno
     mov [rsp + 116], eax
 
-    call marshal_read_object   ; co_linetable (bytes)
-    mov [rsp + 80], rax
+    call marshal_read_object   ; co_linetable
     cmp edx, TAG_PTR
-    jne .code_bad_field         ; a field that came back as an immediate is not an object
+    jne .code_bad_field         ; an immediate is not an object, and
+    mov [rsp + 80], rax         ; the slot must never hold one: the
+                                ; failure path releases what it finds
 
-    call marshal_read_object   ; co_exceptiontable (bytes)
-    mov [rsp + 88], rax
+    call marshal_read_object   ; co_exceptiontable
     cmp edx, TAG_PTR
-    jne .code_bad_field         ; a field that came back as an immediate is not an object
+    jne .code_bad_field         ; an immediate is not an object, and
+    mov [rsp + 88], rax         ; the slot must never hold one: the
+                                ; failure path releases what it finds
 
     ; Every field has to BE what the interpreter will read it as.  Marshal
     ; checked offsets and lengths and never types, so a crafted .pyc could
@@ -1064,10 +1259,45 @@ mdo_code:
     jmp .code_have_len
 .code_bad_slots:
     lea rdi, [rel marshal_err_slots]
-    call fatal_error
+    mov esi, MARSHAL_ERR_BAD
+    call marshal_fail
+    jmp .code_soft_fail
 .code_bad_field:
     lea rdi, [rel marshal_err_field]
-    call fatal_error
+    mov esi, MARSHAL_ERR_BAD
+    call marshal_fail
+    ; fall through
+
+    ; Give back the fields read so far.  Each is a counted reference of this
+    ; arm's own -- marshal_add_ref takes its own where FLAG_REF asked for one
+    ; -- so this is the same release the finished code object's fields get,
+    ; only without the code object.  The ref placeholder stays NULL, which
+    ; marshal_cleanup_refs already skips.
+.code_soft_fail:
+    mov qword [rsp + 120], 16   ; the cursor, in a spare slot: a push here
+.code_free_loop:                ; would put obj_decref 8 bytes out of true
+    mov rax, [rsp + 120]
+    mov rdi, [rsp + rax]
+    test rdi, rdi
+    jz .code_free_next
+    mov qword [rsp + rax], 0
+    call obj_decref
+.code_free_next:
+    mov rax, [rsp + 120]
+    add rax, 8
+    mov [rsp + 120], rax
+    cmp rax, 96
+    jb .code_free_loop
+    xor eax, eax
+    xor edx, edx
+    add rsp, 136
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 .code_have_len:
 
     ; Allocate PyCodeObject: fixed header + bytecode.
@@ -1190,7 +1420,7 @@ mdo_code:
     mov rax, r13               ; return code object
     mov edx, TAG_PTR
 
-    add rsp, 128
+    add rsp, 136
     pop r15
     pop r14
     pop r13
@@ -1320,6 +1550,9 @@ mdo_list:
 
     call marshal_read_long
     mov r13d, eax
+    mov rdi, r13
+    call marshal_count_ok      ; more elements than bytes left is no stream
+    mov r13, rax
     xor edi, edi
     extern list_new
     call list_new
@@ -1327,6 +1560,10 @@ mdo_list:
 
     xor r15d, r15d
 .mlist_loop:
+    ; A refusal already recorded means every read below returns nothing and
+    ; consumes nothing, so this loop would never reach its end.
+    cmp qword [rel marshal_error], MARSHAL_ERR_NONE
+    jne .mlist_done
     cmp r15, r13
     jge .mlist_done
     push r13
@@ -1400,6 +1637,10 @@ mdo_dict:
     mov r14, rax
 
 .mdict_loop:
+    ; A refusal already recorded means every read below returns nothing and
+    ; consumes nothing, so this loop would never reach its end.
+    cmp qword [rel marshal_error], MARSHAL_ERR_NONE
+    jne .mdict_done
     ; A NULL type byte ends the dict.  Peek rather than read: the key's own
     ; reader has to see its type byte.
     mov rax, [rel marshal_pos]
@@ -1480,6 +1721,9 @@ mdo_set_common:
 
     call marshal_read_long     ; eax = count
     mov r13d, eax              ; r13 = count (unsigned)
+    mov rdi, r13
+    call marshal_count_ok      ; more elements than bytes left is no stream
+    mov r13, rax
 
     ; Allocate set
     call set_new
@@ -1488,6 +1732,10 @@ mdo_set_common:
     ; Read elements and add them
     xor r15d, r15d             ; r15 = index
 .fset_loop:
+    ; A refusal already recorded means every read below returns nothing and
+    ; consumes nothing, so this loop would never reach its end.
+    cmp qword [rel marshal_error], MARSHAL_ERR_NONE
+    jne .fset_done
     cmp r15, r13
     jge .fset_done
     push r13
@@ -1564,6 +1812,11 @@ marshal_len:       resq 1     ; total data length
 marshal_refs:      resq 1     ; pointer to PyObject* array
 marshal_ref_count: resq 1     ; number of refs stored
 marshal_ref_cap:   resq 1     ; capacity of ref array
+; Set by marshal.loads(), which has a frame to raise into; clear for the .pyc
+; reader, which runs before there is one.
+marshal_soft:      resq 1     ; refuse softly rather than fatally
+marshal_error:     resq 1     ; MARSHAL_ERR_*, the first refusal recorded
+marshal_rsp_floor: resq 1     ; how far down the machine stack nesting may go
 
 ;--------------------------------------------------------------------------
 ; Read-only data: error messages
@@ -1574,6 +1827,7 @@ marshal_err_unknown: db "marshal: unknown type code", 0
 marshal_err_field:   db "marshal: code object field of the wrong type", 0
 marshal_err_slots:   db "marshal: code object wants an impossible number of slots", 0
 marshal_err_ref_oob: db "marshal: reference index out of bounds", 0
+marshal_err_deep:    db "marshal: nesting too deep", 0
 
 ;; ============================================================================
 ;; (was src/pyc.asm)
@@ -1749,6 +2003,7 @@ section .text
 ;; ============================================================================
 extern raise_exception
 extern exc_ValueError_type
+extern exc_EOFError_type
 extern exc_TypeError_type
 extern bytes_like_ptr_len
 extern module_new
@@ -1762,11 +2017,11 @@ extern str_type
 ;; marshal_loads_fn(rdi = args, rsi = nargs) -> rax = the object the stream
 ;; names, as a Value, or does not return
 ;; ============================================================================
-ML_SAVE   equ 56            ; six saved marshal globals
-ML_DATA   equ 64
-ML_LEN    equ 72
-ML_FRAME  equ 96            ; + 1 push = 104... one word more to land right
-DEF_FUNC marshal_loads_fn, 104          ; + 1 push = 112, 16-aligned
+ML_DATA   equ 8
+ML_LEN    equ 16
+ML_SAVE   equ 96            ; nine saved marshal globals, rbp-96 up to rbp-32
+ML_FRAME  equ 104           ; + 1 push = 112, 16-aligned
+DEF_FUNC marshal_loads_fn, ML_FRAME
     push rbx
     cmp rsi, 1
     jne .mlf_arity
@@ -1791,6 +2046,12 @@ DEF_FUNC marshal_loads_fn, 104          ; + 1 push = 112, 16-aligned
     mov [rbp - ML_SAVE + 32], rax
     mov rax, [rel marshal_ref_cap]
     mov [rbp - ML_SAVE + 40], rax
+    mov rax, [rel marshal_soft]
+    mov [rbp - ML_SAVE + 48], rax
+    mov rax, [rel marshal_error]
+    mov [rbp - ML_SAVE + 56], rax
+    mov rax, [rel marshal_rsp_floor]
+    mov [rbp - ML_SAVE + 64], rax
 
     mov rax, [rbp - ML_DATA]
     mov [rel marshal_buf], rax
@@ -1800,6 +2061,15 @@ DEF_FUNC marshal_loads_fn, 104          ; + 1 push = 112, 16-aligned
     mov qword [rel marshal_refs], 0
     mov qword [rel marshal_ref_count], 0
     mov qword [rel marshal_ref_cap], 0
+
+    ; Refuse softly from here: there is a frame to raise into, and the bytes
+    ; came from the program rather than from a file the interpreter opened
+    ; before it had one.
+    mov qword [rel marshal_soft], 1
+    mov qword [rel marshal_error], MARSHAL_ERR_NONE
+    mov rax, rsp
+    sub rax, MARSHAL_STACK_ROOM
+    mov [rel marshal_rsp_floor], rax
     call marshal_init_refs
 
     call marshal_read_object
@@ -1829,7 +2099,17 @@ DEF_FUNC marshal_loads_fn, 104          ; + 1 push = 112, 16-aligned
     mov [rel marshal_ref_count], rax
     mov rax, [rbp - ML_SAVE + 40]
     mov [rel marshal_ref_cap], rax
+    mov rax, [rel marshal_error]
+    mov [rbp - ML_DATA], rax    ; which refusal, before the caller's is back
+    mov rax, [rbp - ML_SAVE + 48]
+    mov [rel marshal_soft], rax
+    mov rax, [rbp - ML_SAVE + 56]
+    mov [rel marshal_error], rax
+    mov rax, [rbp - ML_SAVE + 64]
+    mov [rel marshal_rsp_floor], rax
 
+    cmp qword [rbp - ML_DATA], MARSHAL_ERR_NONE
+    jne .mlf_refused
     test rbx, rbx
     jz .mlf_bad
     mov rax, rbx
@@ -1837,8 +2117,26 @@ DEF_FUNC marshal_loads_fn, 104          ; + 1 push = 112, 16-aligned
     leave
     ret
 
+.mlf_refused:
+    ; A refusal does not always come back as nothing: a truncated `i` is a
+    ; whole int as far as the arm that read it is concerned, and it is the
+    ; recorded refusal, not the shape, that says the stream was no good.
+    ; Whatever was built out of it goes back first.
+    XDECREF_V rbx, rax
+
+    ; CPython's three answers, and none of them used to be reachable: every
+    ; refusal in the reader called fatal_error, so marshal.loads(b"") printed
+    ; a message and took the process with it.
+    cmp qword [rbp - ML_DATA], MARSHAL_ERR_EOF
+    je .mlf_eof
+    cmp qword [rbp - ML_DATA], MARSHAL_ERR_OBJ
+    je .mlf_eof_obj
 .mlf_bad:
     RAISE exc_ValueError_type, "bad marshal data"
+.mlf_eof:
+    RAISE exc_EOFError_type, "marshal data too short"
+.mlf_eof_obj:
+    RAISE exc_EOFError_type, "EOF read where object expected"
 .mlf_type:
     RAISE exc_TypeError_type, "a bytes-like object is required"
 .mlf_arity:

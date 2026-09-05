@@ -269,6 +269,7 @@ test_lists
 test_maketrans
 test_map_multi
 test_mappingproxy_call
+test_marshal_hostile
 test_marshal_interned
 test_marshal_module
 test_match_class
