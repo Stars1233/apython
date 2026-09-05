@@ -1842,6 +1842,23 @@ DEF_FUNC cg_s_decorated, CD3_FRAME
     cmp eax, AST_CLASSDEF
     je .class_target
 
+    ; PEP 695 brackets go on before the decorators do: `@dec def f[T]` is the
+    ; decorator applied to what the type-parameter wrapper returns, and it is
+    ; inside that wrapper that T exists.  cg_s_functiondef and cg_s_classdef
+    ; both ask first; this path did not, so an annotation naming a parameter
+    ; of a DECORATED def was compiled in a scope where the name is not bound.
+    ; The wrapper leaves its result on the stack, exactly where cg_function
+    ; would have left the function.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CD3_TGT]
+    xor ecx, ecx                        ; not a class
+    call cg_generic_wrap
+    cmp rax, -1
+    je .fail
+    test rax, rax
+    jnz .fn_name
+
     mov rdi, rbx
     mov rsi, r12
     mov rdx, [rbp - CD3_TGT]
@@ -1849,6 +1866,7 @@ DEF_FUNC cg_s_decorated, CD3_FRAME
     call cg_function
     test eax, eax
     jz .fail
+.fn_name:
     mov rdi, rbx
     mov rsi, [rbp - CD3_TGT]
     call ast_at
@@ -1862,9 +1880,20 @@ DEF_FUNC cg_s_decorated, CD3_FRAME
     mov rdi, rbx
     mov rsi, r12
     mov rdx, [rbp - CD3_TGT]
+    mov ecx, 1                          ; a class
+    call cg_generic_wrap
+    cmp rax, -1
+    je .fail
+    test rax, rax
+    jnz .class_name
+
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CD3_TGT]
     call cg_class_value
     test eax, eax
     jz .fail
+.class_name:
     mov rdi, rbx
     mov rsi, [rbp - CD3_TGT]
     call ast_at

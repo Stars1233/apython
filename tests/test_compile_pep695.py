@@ -73,3 +73,56 @@ for good in ["def f[T,](): pass", "class C[*Ts,]: pass", "type X[T,] = T",
              "def f[T: (int, str)](): pass", "async def f[T, **P](): pass"]:
     compile(good, "<t>", "exec")
     print("accepted:", good)
+
+
+# Decorators go on OUTSIDE the type-parameter scope: `@dec def f[T]` is the
+# decorator applied to what the wrapper returns, and the annotations are
+# compiled inside the wrapper, where T is bound.  The decorated path built the
+# function directly and skipped the wrapper, so an annotation naming a
+# parameter raised NameError at definition time -- and __type_params__ came
+# out empty for a decorated class.
+DECORATED = '''
+calls = []
+
+
+def dec(x):
+    calls.append(getattr(x, "__name__", x))
+    return x
+
+
+def twice(x):
+    calls.append("twice")
+    return x
+
+
+@dec
+def f[T](x: T) -> T:
+    return x
+
+
+@dec
+@twice
+def g[T, *Ts, **P](a: T, *rest: T) -> T:
+    return a
+
+
+@dec
+class C[T]:
+    def m(self, x: T) -> T:
+        return x
+
+
+@dec
+class D[T](dict):
+    pass
+
+
+print(f(3), g(4, 5, 6))
+print(f.__type_params__, g.__type_params__)
+print(C.__type_params__, D.__type_params__)
+print(C().m("s"), issubclass(D, dict))
+print(f.__annotations__, C.m.__annotations__)
+print(calls)
+'''
+ns = {}
+exec(compile(DECORATED, "<t>", "exec"), ns)
