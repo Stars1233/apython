@@ -1641,8 +1641,17 @@ DEF_FUNC _gen_throw_impl, 8            ; 1 pushes, so rsp is 16-aligned
     lea rdi, [rel exc_StopIteration_type]
     mov rsi, [rbx + PyGenObject.gi_return_value]   ; already a Value
     test rsi, rsi
-    jnz .gti_have_val
-    lea rsi, [rel none_singleton]
+    jz .gti_no_val
+    ; A generator that returns None raises a BARE StopIteration in CPython --
+    ; args is (), so str(e) is "" and the traceback says "StopIteration" and
+    ; not "StopIteration: None".  gi_return_value holds the None singleton
+    ; for such a generator, which is not the same as holding nothing.
+    lea rax, [rel none_singleton]
+    cmp rsi, rax
+    jne .gti_have_val
+    xor esi, esi
+.gti_no_val:
+    xor esi, esi
 .gti_have_val:
     call exc_new
     mov rdi, rax

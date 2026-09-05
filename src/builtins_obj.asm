@@ -760,7 +760,15 @@ DEF_FUNC builtin_next_fn, NX_FRAME
     ; Get generator's return value for StopIteration (already a Value)
     mov rsi, [rbx + PyGenObject.gi_return_value]
     test rsi, rsi
-    jnz .next_stop_with_val
+    jz .next_stop_no_val
+    ; A generator that returns None raises a BARE StopIteration in CPython --
+    ; args is (), so str(e) is "" and the traceback says "StopIteration" and
+    ; not "StopIteration: None".  gi_return_value holds the None singleton
+    ; for such a generator, which is not the same as holding nothing.
+    lea rax, [rel none_singleton]
+    cmp rsi, rax
+    jne .next_stop_with_val
+    xor esi, esi
 .next_stop_no_val:
     ; No argument, not None: CPython's next() over an exhausted iterator
     ; raises a bare StopIteration, whose str() is '' -- passing the None
