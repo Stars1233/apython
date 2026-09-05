@@ -331,7 +331,10 @@ section .text
 ;; bytes_contains(PyBytesObject *self, PyObject *value) -> int (0/1)
 ;; sq_contains: check if byte value is in bytes
 ;; ============================================================================
-DEF_FUNC bytes_contains
+BCN_ARG   equ 8             ; the operand as it arrived, for the refusal
+BCN_FRAME equ 48            ; + 4 pushes = 80, 16-aligned
+DEF_FUNC bytes_contains, BCN_FRAME
+    mov [rbp - BCN_ARG], rsi
     V_UNPACK rsi, rdx           ; decode the operand Value
     push rbx
     push r12
@@ -360,6 +363,21 @@ DEF_FUNC bytes_contains
     mov edx, TAG_SMALLINT
 .bc_byte:
     mov rdi, rsi                ; int_to_i64 takes the payload plus the tag
+    ; ...and int_to_i64 TRUNCATES a wide one through __gmpz_get_si, so
+    ; `(1 << 70) in b"abc"` answered False rather than raising: a number
+    ; that does not fit is certainly not a byte.
+    cmp edx, TAG_PTR
+    jne .bc_have_int
+    push rsi
+    push rdx
+    extern int_fits_i64
+    call int_fits_i64
+    pop rdx
+    pop rsi
+    test eax, eax
+    jz .bc_range_error
+    mov rdi, rsi
+.bc_have_int:
     call int_to_i64             ; in edx, not a packed Value
     ; A byte value outside 0..255 can never be present, and CPython raises
     ; for it rather than answering False.
@@ -426,7 +444,10 @@ DEF_FUNC bytes_contains
     ret
 
 .bc_type_error:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    mov rsi, [rbp - BCN_ARG]
+    CSTRING rdi, `a bytes-like object is required, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .bc_range_error:
     RAISE exc_ValueError_type, "byte must be in range(0, 256)"

@@ -1688,9 +1688,12 @@ END_FUNC list_dunder_len
 extern list_inplace_concat
 DEF_FUNC_BARE list_dunder_iadd
     REQUIRE_SELF_BARE list_type, "__iadd__"
+    ; Both operands go through as VALUES: list_inplace_concat unpacks them
+    ; itself, and unpacking here first left an immediate's payload where a
+    ; Value belonged -- `[1].__iadd__(0)` named no type at all, because the
+    ; payload of 0 is 0 and nothing has that type.
     mov rax, [rdi]          ; self
-    mov rsi, [rdi + 8]     ; other payload
-    V_UNPACK rsi, rcx       ; args[1]
+    mov rsi, [rdi + 8]      ; other
     mov rdi, rax
     jmp list_inplace_concat
 END_FUNC list_dunder_iadd

@@ -1658,8 +1658,13 @@ END_FUNC list_repeat
 LIC_SELF   equ 8
 LIC_ITER   equ 16
 LIC_EXC    equ 24           ; current_exception before the iteration started
-LIC_FRAME  equ 32            ; + 0 pushes = 32, 16-aligned
+; The right operand as it ARRIVED.  The refusal names its type, and the
+; (payload, tag) pair it was unpacked into does not survive the fast paths:
+; .lic_list reuses r13 for a length, so the tag read there was a size.
+LIC_RIGHT  equ 32
+LIC_FRAME  equ 48            ; + 0 pushes = 48, 16-aligned
 DEF_FUNC list_inplace_concat, LIC_FRAME
+    mov [rbp - LIC_RIGHT], rsi
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
     push rbx
@@ -1793,13 +1798,7 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     ; right operand has to be a list and not merely iterable; this reported
     ; the wrong requirement for the wrong operator.
     ;
-    ; The right operand's payload survives in r12; its tag does not always --
-    ; REQUIRE_*_TYPE uses rcx as scratch -- so the pointer case is recovered
-    ; from the payload itself, which is its own Value.
-    mov rdi, r12
-    mov rsi, r13
-    VALUE_FOR_TYPE rdi, rsi
-    mov rsi, rdi
+    mov rsi, [rbp - LIC_RIGHT]
     CSTRING rdi, `'\x01' object is not iterable`
     extern raise_type_error_with_name
     call raise_type_error_with_name

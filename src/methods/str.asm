@@ -128,6 +128,13 @@ DEF_FUNC_BARE strip_char_matches
     ret
 END_FUNC strip_char_matches
 
+section .rodata
+ssi_name_strip:  db "strip", 0
+ssi_name_lstrip: db "lstrip", 0
+ssi_name_rstrip: db "rstrip", 0
+ssi_arg_msg:     db " arg must be None or str", 0
+section .text
+
 ;; ============================================================================
 ;; str_strip_impl(rdi = args, rsi = nargs, edx = mode) -> Value
 ;; mode: bit 0 = strip the left, bit 1 = strip the right.
@@ -135,7 +142,10 @@ END_FUNC strip_char_matches
 SSI_CHARS equ 8
 SSI_CLEN  equ 16
 SSI_MODE  equ 24
-SSI_FRAME equ 32            ; + 4 pushes = 64
+; Which of the three this is, so the refusal can name it: CPython says
+; "lstrip arg must be None or str", not "strip".
+SSI_NAME  equ 32
+SSI_FRAME equ 48            ; + 4 pushes = 80, 16-aligned
 
 DEF_FUNC_LOCAL str_strip_impl, SSI_FRAME
     push rbx
@@ -144,6 +154,17 @@ DEF_FUNC_LOCAL str_strip_impl, SSI_FRAME
     push r14
 
     mov [rbp - SSI_MODE], rdx
+    ; The name comes from the mode: 3 = strip, 1 = lstrip, 2 = rstrip.
+    lea rax, [rel ssi_name_strip]
+    cmp rdx, 1
+    jne .ssi_not_l
+    lea rax, [rel ssi_name_lstrip]
+.ssi_not_l:
+    cmp rdx, 2
+    jne .ssi_not_r
+    lea rax, [rel ssi_name_rstrip]
+.ssi_not_r:
+    mov [rbp - SSI_NAME], rax
     mov qword [rbp - SSI_CHARS], 0
     mov qword [rbp - SSI_CLEN], 0
 
@@ -153,6 +174,10 @@ DEF_FUNC_LOCAL str_strip_impl, SSI_FRAME
     cmp rsi, 2
     jl .ssi_have_chars
     mov rax, [rdi + 8]          ; the chars argument
+    ; None is the DEFAULT, not a refusal: `" a ".strip(None)` is " a ".strip()
+    ; in CPython and was a TypeError here.
+    IS_NONE rax, rcx
+    je .ssi_have_chars
     V_TEST_PTR rax, rcx
     ja .ssi_type_error
     mov rcx, [rax + PyObject.ob_type]
@@ -211,7 +236,20 @@ DEF_FUNC_LOCAL str_strip_impl, SSI_FRAME
     ret
 
 .ssi_type_error:
-    RAISE exc_TypeError_type, "strip arg must be None or str"
+    mov rdi, [rbp - SSI_NAME]
+    lea rsi, [rel ssi_arg_msg]
+    sub rsp, 128
+    mov rdi, rsp
+    mov rsi, [rbp - SSI_NAME]
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel ssi_arg_msg]
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    mov rsi, rsp
+    extern raise_exception
+    call raise_exception
 END_FUNC str_strip_impl
 
 ;; ============================================================================

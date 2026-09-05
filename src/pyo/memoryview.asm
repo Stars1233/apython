@@ -985,34 +985,66 @@ DEF_FUNC memoryview_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 END_FUNC memoryview_tp_iter
 
-;; memoryview.hex() -- through a temporary bytes, as bytearray's read-only
-;; methods do, for the same reason: bytes_method_hex reads a bytes layout.
+;; ============================================================================
+;; memoryview_method_hex(rdi = args, rsi = nargs) -> rax = Value
+;;
+;; Through a temporary bytes, as bytearray's read-only methods do, for the
+;; same reason: bytes_method_hex reads a bytes layout.  The separator and
+;; the group size go through with it -- they were dropped here, so
+;; `memoryview(b"abcd").hex(":")` answered without any separators.
+;; ============================================================================
 MVH_TMP   equ 8
-MVH_FRAME equ 16            ; + 0 pushes = 16
+MVH_ARGS  equ 40            ; three Values: the temporary bytes and the two
+                            ; optional arguments, ending here
+MVH_NARGS equ 48
+MVH_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
 
 DEF_FUNC memoryview_method_hex, MVH_FRAME
     test rsi, rsi
     jz .mvh_argerr
+    cmp rsi, 3
+    ja .mvh_too_many
+    lea rdx, [rsi - 1]          ; how many beyond self
+    lea rsi, [rdi + 8]          ; and where they start
     mov rdi, [rdi]
+    push rsi
+    push rdx
     call memoryview_check
+    pop rdx
+    pop rsi
     call memoryview_method_hex_self
     leave
     ret
 .mvh_argerr:
     RAISE exc_TypeError_type, "hex() takes no arguments"
+.mvh_too_many:
+    RAISE exc_TypeError_type, "hex() takes at most 2 arguments"
 END_FUNC memoryview_method_hex
 
 DEF_FUNC memoryview_method_hex_self, MVH_FRAME
+    ; rdi = the memoryview, rsi = the arguments beyond self, rdx = how many.
+    mov [rbp - MVH_NARGS], rdx
+    xor eax, eax
+    cmp rdx, 1
+    jb .mvhs_have_extra
+    mov rax, [rsi]
+.mvhs_have_extra:
+    mov [rbp - MVH_ARGS + 8], rax
+    xor eax, eax
+    cmp rdx, 2
+    jb .mvhs_have_extra2
+    mov rax, [rsi + 8]
+.mvhs_have_extra2:
+    mov [rbp - MVH_ARGS + 16], rax
     call memoryview_as_bytes
     test rax, rax
     jz .mvhs_fail
     mov [rbp - MVH_TMP], rax
-    sub rsp, 16
-    mov [rsp], rax
-    mov rdi, rsp
-    mov esi, 1
+    mov [rbp - MVH_ARGS], rax
+    lea rdi, [rbp - MVH_ARGS]
+    mov rsi, [rbp - MVH_NARGS]
+    inc rsi                     ; plus the temporary bytes standing in for self
     call bytes_method_hex
-    add rsp, 16
     push rax
     push rax
     mov rdi, [rbp - MVH_TMP]

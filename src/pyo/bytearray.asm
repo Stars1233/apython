@@ -935,6 +935,17 @@ DEF_FUNC bytearray_contains, BCT_FRAME
     call int_is_integer
     test eax, eax
     jz .bct_object
+    ; A width obj_as_index would refuse as an index is simply out of range
+    ; for a byte, and CPython says so rather than naming a C type.
+    mov rdi, [rbp - BCT_VAL]
+    V_UNPACK rdi, rdx
+    cmp edx, TAG_PTR
+    jne .bct_narrow
+    extern int_fits_i64
+    call int_fits_i64
+    test eax, eax
+    jz .bct_range
+.bct_narrow:
     mov rdi, [rbp - BCT_VAL]
     V_UNPACK rdi, rdx
     call obj_as_index

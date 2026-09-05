@@ -2597,9 +2597,17 @@ DEF_FUNC int_lshift
     ; Get shift amount as int64
     cmp ecx, TAG_SMALLINT
     je .shift_smallint
-    ; GMP right operand: get as int64
+    ; GMP right operand: get as int64.  __gmpz_get_si TRUNCATES, so a shift
+    ; count that does not fit answered the left operand unchanged; CPython
+    ; refuses it.
     INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
+    push rdi
+    extern __gmpz_fits_slong_p
+    call __gmpz_fits_slong_p wrt ..plt
+    pop rdi
+    test eax, eax
+    jz .shift_too_wide
     call __gmpz_get_si wrt ..plt
     mov r13, rax
     jmp .have_shift
@@ -2660,6 +2668,10 @@ DEF_FUNC int_lshift
 
 .neg_shift:
     RAISE exc_ValueError_type, "negative shift count"
+.shift_too_wide:
+    extern exc_OverflowError_type
+    RAISE exc_OverflowError_type, "too many digits in integer"
+
 END_FUNC int_lshift
 
 ;; ============================================================================
@@ -2686,8 +2698,18 @@ DEF_FUNC int_rshift
     ; Get shift amount
     cmp ecx, TAG_SMALLINT
     je .shift_smallint
+    ; __gmpz_get_si TRUNCATES, so a shift count that does not fit answered
+    ; the left operand unchanged.  For a RIGHT shift CPython does not
+    ; refuse it: everything has been shifted out, so the answer is 0 or -1
+    ; by the sign.
     INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
+    push rdi
+    extern __gmpz_fits_slong_p
+    call __gmpz_fits_slong_p wrt ..plt
+    pop rdi
+    test eax, eax
+    jz .rshift_all_out
     call __gmpz_get_si wrt ..plt
     mov r13, rax
     jmp .have_shift
@@ -2759,6 +2781,18 @@ DEF_FUNC int_rshift
 
 .neg_shift:
     RAISE exc_ValueError_type, "negative shift count"
+.rshift_all_out:
+    ; A shift wider than any integer: the sign is all that survives.  The
+    ; count itself may be negative, and that is still a ValueError.
+    lea rdi, [r12 + PyIntObject.mpz]
+    xor esi, esi
+    extern __gmpz_cmp_si
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    js .neg_shift
+    mov r13, 0x7FFFFFFFFFFFFFFF
+    jmp .have_shift
+
 END_FUNC int_rshift
 
 ;; ============================================================================

@@ -293,6 +293,7 @@ test_memoryview_stride
 test_metaclass_prepare
 test_metaclass
 test_metaclass_resolution
+test_method_hostile
 test_methods
 test_misc_ops
 test_module_attr_call

@@ -820,8 +820,11 @@ DEF_FUNC codec_id, CI_FRAME
     cmp rax, rcx
     jne .ci_unknown
     mov rcx, [rdi + PyStrObject.ob_size]
+    ; The EMPTY string is not utf-8, it is an unknown encoding: only the
+    ; absence of an argument means the default.  `"a".encode("")` came back
+    ; as b"a" where CPython raises LookupError.
     test rcx, rcx
-    jz .ci_utf8
+    jz .ci_unknown
     cmp rcx, 31
     ja .ci_unknown
 
@@ -1759,7 +1762,10 @@ section .text
 ;; str_contains(rdi=self, rsi=substr Value) -> int (0/1)
 ;; sq_contains: check if substr is in self using strstr
 ;; ============================================================================
-DEF_FUNC str_contains
+SC_ARG    equ 8             ; the operand as it arrived, for the refusal
+SC_FRAME  equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC str_contains, SC_FRAME
+    mov [rbp - SC_ARG], rsi
     V_UNPACK rsi, rdx           ; decode the operand Value
 
     ; Validate substr is a string (TAG_PTR with ob_type == str_type)
@@ -1784,9 +1790,11 @@ DEF_FUNC str_contains
     ret
 
 .str_contains_type_error:
-    extern exc_TypeError_type
-    extern raise_exception
-    RAISE exc_TypeError_type, "'in <string>' requires string as left operand"
+    mov rsi, [rbp - SC_ARG]
+    CSTRING rdi, \
+        `'in <string>' requires string as left operand, not \x01`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC str_contains
 
 ;; ============================================================================

@@ -72,6 +72,18 @@ section .text
     call int_is_integer
     test eax, eax
     jz %%done                   ; a bytes-like: leave it alone
+    ; A width obj_as_index would refuse as an index is simply out of range
+    ; for a byte, and CPython says so: `b"abc".find(1 << 70)` is a
+    ; ValueError there and was an OverflowError about a C type here.
+    mov rdi, [rbp - %1]
+    V_UNPACK rdi, rdx
+    cmp edx, TAG_PTR
+    jne %%narrow
+    extern int_fits_i64
+    call int_fits_i64
+    test eax, eax
+    jz %%range
+%%narrow:
     mov rdi, [rbp - %1]
     V_UNPACK rdi, rdx
     call obj_as_index
@@ -99,26 +111,74 @@ section .text
 ;; ############################################################################
 
 ;; ============================================================================
-;; bytes_method_hex(args, nargs) -> str
-;; Converts bytes to hex string like b'\xab\xcd'.hex() -> 'abcd'
+;; bytes_method_hex(rdi = args, rsi = nargs) -> rax = Value
+;;
+;; b'\xab\xcd'.hex() -> 'abcd', and with a separator every group of
+;; bytes_per_sep bytes is joined by it: b"abcd".hex(":") is '61:62:63:64'
+;; and b"abcd".hex(":", 2) is '6162:6364'.  Both arguments were accepted and
+;; then IGNORED, which is a wrong answer rather than a missing feature.
 ;; ============================================================================
 extern bytes_type
 BH_SELF   equ 8
 BH_BUF    equ 16
 BH_HEXLEN equ 24
-BH_FRAME  equ 32            ; + 0 pushes = 32
+BH_SEP    equ 32            ; the separator character, or -1 for none
+BH_GROUP  equ 40            ; bytes per separator, always positive
+BH_FROMRIGHT equ 48         ; 1 when the grouping counts from the right
+BH_FRAME  equ 64            ; + 0 pushes = 64, 16-aligned
 
 DEF_FUNC bytes_method_hex, BH_FRAME
     mov rax, [rdi]              ; self = bytes obj ptr
     mov [rbp - BH_SELF], rax
+    mov qword [rbp - BH_SEP], -1
+    mov qword [rbp - BH_GROUP], 1
+    mov qword [rbp - BH_FROMRIGHT], 0
+
+    cmp rsi, 2
+    jl .bh_no_sep
+    push rdi
+    push rsi
+    mov rdi, [rdi + 8]
+    call bh_sep_char             ; raises for anything but a 1-char str
+    pop rsi
+    pop rdi
+    mov [rbp - BH_SEP], rax
+    cmp rsi, 3
+    jl .bh_no_sep
+    mov rdi, [rdi + 16]
+    V_UNPACK rdi, rdx
+    extern obj_as_index
+    call obj_as_index
+    ; A POSITIVE group counts from the right and a negative one from the
+    ; left, which is only the same when the length divides: b"abcde"
+    ; groups as 61-6263-6465 one way and 6162-6364-65 the other.  Zero
+    ; means no separator at all.
+    test rax, rax
+    jnz .bh_group_nonzero
+    mov qword [rbp - BH_SEP], -1
+    jmp .bh_no_sep
+.bh_group_nonzero:
+    jns .bh_group_right
+    neg rax
+    mov [rbp - BH_GROUP], rax
+    jmp .bh_no_sep
+.bh_group_right:
+    mov [rbp - BH_GROUP], rax
+    mov qword [rbp - BH_FROMRIGHT], 1
+.bh_no_sep:
 
     ; Get length
+    mov rax, [rbp - BH_SELF]
     mov rcx, [rax + PyBytesObject.ob_size]
     test rcx, rcx
     jz .bh_empty
 
-    ; Allocate temp buffer for hex chars: 2 chars per byte
+    ; Allocate temp buffer: 2 chars per byte, plus a separator between groups
     lea rdi, [rcx * 2]
+    cmp qword [rbp - BH_SEP], 0
+    jl .bh_sized
+    add rdi, rcx                ; at most one separator per byte
+.bh_sized:
     mov [rbp - BH_HEXLEN], rdi
     call ap_malloc
     mov [rbp - BH_BUF], rax
@@ -133,6 +193,32 @@ DEF_FUNC bytes_method_hex, BH_FRAME
 .bh_loop:
     cmp r8, rcx
     jge .bh_done
+    ; The separator goes before every group but the first.
+    cmp qword [rbp - BH_SEP], 0
+    jl .bh_no_group_sep
+    test r8, r8
+    jz .bh_no_group_sep
+    push rax
+    push rdx
+    push rcx
+    ; Counting from the right means measuring the distance to the END.
+    mov rax, r8
+    cmp qword [rbp - BH_FROMRIGHT], 0
+    je .bh_from_left
+    mov rax, rcx
+    sub rax, r8
+.bh_from_left:
+    xor edx, edx
+    div qword [rbp - BH_GROUP]
+    test rdx, rdx
+    pop rcx
+    pop rdx
+    pop rax
+    jnz .bh_no_group_sep
+    mov r9, [rbp - BH_SEP]
+    mov [rdi], r9b
+    inc rdi
+.bh_no_group_sep:
     movzx eax, byte [rsi + r8]
 
     ; High nibble
@@ -164,9 +250,11 @@ DEF_FUNC bytes_method_hex, BH_FRAME
     jmp .bh_loop
 
 .bh_done:
-    ; Create string from temp buffer
+    ; Create string from temp buffer -- the length is what was WRITTEN, which
+    ; with a separator is less than the buffer.
+    mov rsi, rdi
+    sub rsi, [rbp - BH_BUF]
     mov rdi, [rbp - BH_BUF]
-    mov rsi, [rbp - BH_HEXLEN]
     call str_new_heap
     push rax                    ; save result
 
@@ -189,7 +277,48 @@ DEF_FUNC bytes_method_hex, BH_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+
+.bh_group_zero:
+    extern exc_ValueError_type
+    RAISE exc_ValueError_type, "bytes_per_sep must be non-zero"
 END_FUNC bytes_method_hex
+
+;; ============================================================================
+;; bh_sep_char(rdi = the separator argument, a Value) -> rax = the character
+;;
+;; CPython asks for its length first, so a non-string is "object of type 'X'
+;; has no len()" rather than a message about separators, and only a
+;; one-character string is accepted.
+;; ============================================================================
+BHS_ARG   equ 8             ; the argument, for the refusal below
+BHS_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL bh_sep_char, BHS_FRAME
+    mov [rbp - BHS_ARG], rdi
+    V_TEST_PTR rdi, rax
+    ja .bsc_no_len
+    test rdi, rdi
+    jz .bsc_no_len
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .bsc_no_len
+    mov rcx, [rdi + PyStrObject.ob_length]
+    cmp rcx, 1
+    jne .bsc_bad_len
+    movzx eax, byte [rdi + PyStrObject.data]
+    cmp al, 0x7f
+    ja .bsc_bad_len             ; one code point, but not one byte
+    leave
+    ret
+.bsc_bad_len:
+    extern exc_ValueError_type
+    RAISE exc_ValueError_type, "sep must be length 1."
+.bsc_no_len:
+    mov rsi, [rbp - BHS_ARG]
+    CSTRING rdi, `object of type '\x01' has no len()`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+END_FUNC bh_sep_char
 
 ;; ============================================================================
 ;; bytes_fromhex_impl(rdi = args, rsi = nargs) -> rax = Value
