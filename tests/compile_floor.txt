@@ -67,6 +67,7 @@ test_codecs
 test_codecs_registry_bridge
 test_codecs_registry
 test_code_gc
+test_code_replace
 test_comparisons
 test_compile_annotation_scan
 test_compile_annotations
@@ -226,6 +227,7 @@ test_import_errors
 test_import_from
 test_import_kwargs
 test_import_module
+test_import_submodule_binding
 test_import_sys
 test_index_arguments
 test_inheritance
@@ -326,6 +328,7 @@ test_property_doc
 test_property
 test_property_raises
 test_pyc_hardening
+test_pyc_staleness
 test_raise_cause
 test_raise_from
 test_range_protocol

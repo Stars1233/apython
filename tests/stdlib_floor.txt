@@ -8,6 +8,7 @@ ok _aix_support
 ok antigravity
 ok argparse
 ok ast
+ok asyncio
 ok base64
 ok bdb
 ok bisect

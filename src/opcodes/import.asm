@@ -140,13 +140,16 @@ END_FUNC op_import_name
 ;; as a submodule (CPython submodule fallback).
 ;; ============================================================================
 extern dict_get
+extern dict_set
+extern obj_incref
 extern str_from_cstr_heap
 extern str_concat
 extern import_find_and_load
 
 IF_ATTR  equ 8
 IF2_MOD  equ 16
-IF2_FRAME equ 16            ; + 0 pushes = 16
+IF2_SUB  equ 24             ; the submodule the fallback loaded
+IF2_FRAME equ 32            ; + 0 pushes = 32
 
 DEF_FUNC op_import_from, IF2_FRAME
     ; Get attribute name from co_names[ecx] (payload array: 8-byte stride)
@@ -266,8 +269,29 @@ DEF_FUNC op_import_from, IF2_FRAME
 
     test rax, rax
     jz .if_error
+    mov [rbp - IF2_SUB], rax
 
-    ; Got the submodule — push it
+    ; Bind it on the package under its bare name.  That is what makes
+    ; `from . import x` inside one submodule leave `x` visible in the package
+    ; itself -- a package's __init__ shares its globals with the module
+    ; object, so CPython's setattr on the parent is the whole mechanism.
+    ; asyncio's __init__ reads `coroutines.__all__` having written nothing but
+    ; `from .coroutines import *`, and it is base_events, imported one line
+    ; earlier, that actually pulled coroutines in.
+    mov rdi, [rbp - IF2_MOD]
+    mov rdi, [rdi + PyModuleObject.mod_dict]
+    test rdi, rdi
+    jz .if_sub_no_dict
+    mov rsi, [rbp - IF_ATTR]
+    mov rdx, [rbp - IF2_SUB]
+    call dict_set
+.if_sub_no_dict:
+
+    ; import_find_and_load hands back a BORROWED reference -- sys.modules owns
+    ; it -- and the value stack owns what it holds.
+    mov rdi, [rbp - IF2_SUB]
+    call obj_incref
+    mov rax, [rbp - IF2_SUB]
     VPUSH_PTR rax
     leave
     DISPATCH

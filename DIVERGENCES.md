@@ -271,3 +271,23 @@ them that is every text encoding CPython ships except three groups:
 
 An unknown codec is a LookupError with CPython's wording, so a program that
 catches one behaves the same either way.
+
+## code.replace() cannot change co_varnames, co_freevars or co_cellvars
+
+Every other field CPython's `code.replace()` accepts is here: the seven
+counts and flags, the bytecode, the constants and names, the three strings,
+and the two side tables.  The three that are refused are the ones this code
+object does not store.  CPython keeps `co_varnames`, `co_cellvars` and
+`co_freevars` as three tuples; this keeps one `co_localsplusnames` with a
+parallel `co_localspluskinds` string saying which of the three each name is,
+which is the 3.11 layout and what the frame's `localsplus` is addressed by.
+Replacing one of the three therefore means rebuilding both, and validating
+that the result still describes the same frame.
+
+Nothing in CPython's own standard library replaces them -- `types.coroutine`
+changes `co_flags`, and that is the only use of `replace()` the library
+makes -- and a caller that changes a variable name without changing the
+bytecode that addresses it has broken the code object either way.  They raise
+a TypeError naming all three rather than "unexpected keyword argument", so
+the message says what is missing rather than pretending the field does not
+exist.

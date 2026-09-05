@@ -24,6 +24,7 @@ extern frame_free
 extern tuple_new
 extern tuple_type
 extern dict_type
+extern code_type
 extern type_type
 extern exc_TypeError_type
 extern raise_exception
@@ -745,6 +746,15 @@ DEF_FUNC func_setattr
     test eax, eax
     jz .set_annotations
 
+    ; And __code__, which is how a decorator rewrites a function's body:
+    ; `func.__code__ = co.replace(co_flags=...)` is types.coroutine, and the
+    ; whole of asyncio is behind it.
+    lea rdi, [rel fn_attr_code]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .set_code
+
     ; Check if func_dict exists
     mov rdi, [rbx + PyFuncObject.func_dict]
     test rdi, rdi
@@ -796,6 +806,36 @@ DEF_FUNC func_setattr
     ret
 .sq_type:
     RAISE exc_TypeError_type, "__qualname__ must be set to a string object"
+
+.set_code:
+    ; A code object, and only a code object: everything that reads func_code
+    ; reads its fields without checking.
+    test r13, r13
+    jz .sc_type
+    mov rdi, r13
+    V_TEST_PTR rdi, rax
+    ja .sc_type
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel code_type]
+    cmp rax, rcx
+    jne .sc_type
+    call obj_incref
+    mov rax, [rbx + PyFuncObject.func_code]
+    mov [rbx + PyFuncObject.func_code], r13
+    test rax, rax
+    jz .sc_done
+    mov rdi, rax
+    call obj_decref
+.sc_done:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.sc_type:
+    RAISE exc_TypeError_type, "__code__ must be set to a code object"
 
 .set_annotations:
     ; A mapping, as CPython requires; what it stores is whatever it is given,

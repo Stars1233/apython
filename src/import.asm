@@ -36,6 +36,8 @@ extern code_from_path
 extern path_is_source
 extern sys_open
 extern sys_close
+extern sys_read
+extern sys_stat
 
 ; Marshal globals (save/restore across nested loads)
 extern marshal_buf
@@ -942,6 +944,103 @@ DEF_FUNC import_find_and_load, FL_FRAME
 END_FUNC import_find_and_load
 
 ;; ============================================================================
+;; sd_pyc_ok(rdi = an open fd on a .pyc, rsi = its path) -> rax = the fd when
+;;   the .pyc may be used, eax = 0 when it may not.  Closes the fd and returns
+;;   0 for a .pyc whose source has been edited since it was written, so the
+;;   search falls through to the next pattern and, in the end, to the source.
+;; ============================================================================
+SPO_FD    equ 8
+SPO_FRAME equ 16            ; + 0 pushes = 16
+DEF_FUNC_LOCAL sd_pyc_ok, SPO_FRAME
+    mov [rbp - SPO_FD], rdi
+    call pyc_is_stale
+    test eax, eax
+    jnz .spo_stale
+    mov rax, [rbp - SPO_FD]
+    leave
+    ret
+.spo_stale:
+    mov rdi, [rbp - SPO_FD]
+    call sys_close
+    xor eax, eax
+    leave
+    ret
+END_FUNC sd_pyc_ok
+
+;; ============================================================================
+;; pyc_is_stale(rdi = an OPEN fd on the .pyc, rsi = its path) -> eax = 1 when
+;;   the source beside it has been edited since it was written
+;;
+;; A .pyc records the source's mtime and size in its header, and CPython
+;; refuses one whose source no longer matches -- otherwise editing a module
+;; and running it again silently runs the old code, which is what happened
+;; here.  The check only applies to the timestamp form: a hash-based .pyc
+;; (flags bit 0) records a hash instead, and an unchecked one is meant to be
+;; taken on trust.  A .pyc with no source beside it is CPython's sourceless
+;; form and is always fresh.
+;;
+;; The fd is left where it was: this reads the header and seeks back.
+;; ============================================================================
+PIS_FD    equ 8
+PIS_HDR   equ 24            ; the 16-byte header
+PIS_STAT  equ 24 + 144      ; STAT_SIZE
+PIS_FRAME equ ((PIS_STAT + 15) / 16) * 16 + 8   ; + 1 push = 16-aligned
+DEF_FUNC_LOCAL pyc_is_stale, PIS_FRAME
+    push rbx
+    mov [rbp - PIS_FD], rdi
+    mov rbx, rsi
+
+    ; The source it was built from, if the name says there is one.
+    mov rdi, rbx
+    call import_source_path
+    cmp rax, rbx
+    je .pis_fresh               ; sourceless: nothing to compare against
+    mov rdi, rax
+    lea rsi, [rbp - PIS_STAT]
+    call sys_stat
+    test rax, rax
+    js .pis_fresh               ; the source is gone; the .pyc stands alone
+
+    ; The header: magic, flags, mtime, size.
+    mov rdi, [rbp - PIS_FD]
+    lea rsi, [rbp - PIS_HDR]
+    mov edx, 16
+    call sys_read
+    push rax
+    mov rdi, [rbp - PIS_FD]
+    xor esi, esi
+    xor edx, edx
+    extern sys_lseek
+    call sys_lseek              ; back to the start, for the real reader
+    pop rax
+    cmp rax, 16
+    jne .pis_fresh
+
+    mov eax, [rbp - PIS_HDR + 4]
+    test eax, 1
+    jnz .pis_fresh              ; hash-based: not a timestamp to compare
+
+    mov eax, [rbp - PIS_HDR + 8]        ; the source mtime it recorded
+    mov ecx, [rbp - PIS_STAT + 88]      ; st_mtime, low 32 bits
+    cmp eax, ecx
+    jne .pis_stale
+    mov eax, [rbp - PIS_HDR + 12]       ; and its size
+    mov ecx, [rbp - PIS_STAT + 48]      ; st_size, low 32 bits
+    cmp eax, ecx
+    jne .pis_stale
+.pis_fresh:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.pis_stale:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC pyc_is_stale
+
+;; ============================================================================
 ;; import_source_path(rdi = the path a search matched) -> rax = the path to
 ;;   record as __file__, which is rdi itself unless it is a __pycache__ entry
 ;;
@@ -1164,8 +1263,14 @@ DEF_FUNC import_search_dirs, SD_FRAME
     xor edx, edx
     call sys_open
     test rax, rax
-    jns .sd_found_package
+    js .sd_p2
+    mov rdi, rax
+    mov rsi, r12
+    call sd_pyc_ok
+    test eax, eax
+    jnz .sd_found_package
 
+.sd_p2:
     ; --- Pattern 2: <dir>/__pycache__/<leaf>.cpython-312.pyc ---
     ; Rebuild from dir offset (r13 already has dir+slash offset)
     ; Re-read r13 from dir
@@ -1206,8 +1311,14 @@ DEF_FUNC import_search_dirs, SD_FRAME
     xor edx, edx
     call sys_open
     test rax, rax
-    jns .sd_found_module
+    js .sd_p3
+    mov rdi, rax
+    mov rsi, r12
+    call sd_pyc_ok
+    test eax, eax
+    jnz .sd_found_module
 
+.sd_p3:
     ; --- Pattern 3: <dir>/<leaf>.cpython-312.pyc ---
     mov r13, [rbx + PyStrObject.ob_size]
     test r13, r13
@@ -1238,8 +1349,14 @@ DEF_FUNC import_search_dirs, SD_FRAME
     xor edx, edx
     call sys_open
     test rax, rax
-    jns .sd_found_module
+    js .sd_p4
+    mov rdi, rax
+    mov rsi, r12
+    call sd_pyc_ok
+    test eax, eax
+    jnz .sd_found_module
 
+.sd_p4:
     ; --- Pattern 4: <dir>/<leaf>/__init__.py (a package, from source) ---
     ; The source patterns come last, so a .pyc that is already there still
     ; wins and nothing an existing user has changes behaviour.
@@ -1452,7 +1569,13 @@ DEF_FUNC import_search_syspath, SS_FRAME
     xor edx, edx
     call sys_open
     test rax, rax
-    jns .ss_found_package
+    js .ss_after_pyc0
+    mov rdi, rax
+    mov rsi, r12
+    call sd_pyc_ok
+    test eax, eax
+    jnz .ss_found_package
+.ss_after_pyc0:
 
     ; --- Pattern 2: <dir>/__pycache__/<leaf>.cpython-312.pyc ---
     mov r13, [rbx + PyStrObject.ob_size]
@@ -1488,7 +1611,13 @@ DEF_FUNC import_search_syspath, SS_FRAME
     xor edx, edx
     call sys_open
     test rax, rax
-    jns .ss_found_module
+    js .ss_after_pyc1
+    mov rdi, rax
+    mov rsi, r12
+    call sd_pyc_ok
+    test eax, eax
+    jnz .ss_found_module
+.ss_after_pyc1:
 
     ; --- Pattern 3: <dir>/<leaf>.cpython-312.pyc ---
     mov r13, [rbx + PyStrObject.ob_size]
@@ -1517,7 +1646,13 @@ DEF_FUNC import_search_syspath, SS_FRAME
     xor edx, edx
     call sys_open
     test rax, rax
-    jns .ss_found_module
+    js .ss_after_pyc2
+    mov rdi, rax
+    mov rsi, r12
+    call sd_pyc_ok
+    test eax, eax
+    jnz .ss_found_module
+.ss_after_pyc2:
 
     ; --- Pattern 4: <dir>/<full>/__init__.py (a package, from source) ---
     mov r13, [rbx + PyStrObject.ob_size]
