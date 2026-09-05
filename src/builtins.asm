@@ -27,6 +27,7 @@ extern fileobj_write_fd
 extern range_new
 extern int_to_i64
 extern obj_as_index
+extern obj_as_index_clamped
 extern init_iter_types
 extern obj_repr
 extern ap_memcpy
@@ -1459,7 +1460,7 @@ DEF_FUNC builtin_range, 8            ; 3 pushes, so rsp is 16-aligned
     ; range(stop): start=0, stop=args[0], step=1
     mov rdi, [rbx]             ; args[0]
     V_UNPACK rdi, rdx
-    call obj_as_index      ; raises for a non-integer, rather than
+    call obj_as_index_clamped ; raises for a non-integer, rather than
                            ; decoding its payload as one
     mov rsi, rax               ; stop
     xor edi, edi               ; start = 0
@@ -1471,12 +1472,12 @@ DEF_FUNC builtin_range, 8            ; 3 pushes, so rsp is 16-aligned
     ; range(start, stop): step=1
     mov rdi, [rbx]             ; args[0]
     V_UNPACK rdi, rdx
-    call obj_as_index      ; raises for a non-integer, rather than
+    call obj_as_index_clamped ; raises for a non-integer, rather than
                            ; decoding its payload as one
     mov r13, rax               ; start
     mov rdi, [rbx + 8]
     V_UNPACK rdi, rdx       ; args[1]
-    call obj_as_index      ; raises for a non-integer, rather than
+    call obj_as_index_clamped ; raises for a non-integer, rather than
                            ; decoding its payload as one
     mov rsi, rax               ; stop
     mov rdi, r13               ; start
@@ -1488,17 +1489,17 @@ DEF_FUNC builtin_range, 8            ; 3 pushes, so rsp is 16-aligned
     ; range(start, stop, step)
     mov rdi, [rbx]             ; args[0]
     V_UNPACK rdi, rdx
-    call obj_as_index      ; raises for a non-integer, rather than
+    call obj_as_index_clamped ; raises for a non-integer, rather than
                            ; decoding its payload as one
     push rax                   ; start
     mov rdi, [rbx + 8]
     V_UNPACK rdi, rdx       ; args[1]
-    call obj_as_index      ; raises for a non-integer, rather than
+    call obj_as_index_clamped ; raises for a non-integer, rather than
                            ; decoding its payload as one
     push rax                   ; stop
     mov rdi, [rbx + 16]
     V_UNPACK rdi, rdx       ; args[2]
-    call obj_as_index      ; raises for a non-integer, rather than
+    call obj_as_index_clamped ; raises for a non-integer, rather than
                            ; decoding its payload as one
     mov rdx, rax               ; step
     ; A zero step makes range_obj_sq_length divide by zero and makes

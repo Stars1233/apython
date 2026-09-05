@@ -1734,8 +1734,14 @@ DEF_FUNC builtin_chr, 16
 
     mov rdi, [rdi]            ; args[0]
 
+    ; int_to_i64 reads PyIntObject.compact off whatever it is handed, so
+    ; chr(1.5) dereferenced a float's raw bits and chr(2**70) truncated
+    ; through __gmpz_get_si and answered a character.  obj_as_index is the
+    ; funnel: it names the type, it takes anything with an __index__, and it
+    ; refuses what will not fit an index.
     V_UNPACK rdi, rdx
-    call int_to_i64
+    extern obj_as_index
+    call obj_as_index
 
     cmp rax, 0
     jl .chr_range_error

@@ -1450,27 +1450,26 @@ DEF_FUNC posix_int_arg, 8            ; 1 pushes, so rsp is 16-aligned
     call int_is_integer
     test eax, eax
     jz .pia_bad
+    ; The width check comes FIRST.  A descriptor of 2**64 + 3 truncated to 3
+    ; and posix.close() closed someone else's file; obj_as_index refuses such
+    ; a value itself now, but it words the refusal for an index -- and a
+    ; descriptor is a C int, which is how CPython words this one.
     pop rdi
     push rdi
     V_UNPACK rdi, rdx
-    call obj_as_index
-    ; obj_as_index truncates a GMP-backed integer to 64 bits, so a descriptor
-    ; of 2**64 + 3 arrived as 3 and posix.close() closed someone else's file
-    ; -- the same silent wrong-descriptor failure the type check above was
-    ; added to stop, reached with an int instead of a str.
-    pop rdi
-    push rax
-    sub rsp, 8
-    V_UNPACK rdi, rdx
+    push rdi
+    push rdx
     call int_fits_i64
-    add rsp, 8
+    pop rdx
+    pop rdi
     test eax, eax
     jz .pia_range
-    pop rax
+    call obj_as_index
+    pop rdi
     leave
     ret
 .pia_range:
-    pop rax
+    pop rdi
     RAISE exc_OverflowError_type, "Python int too large to convert to C int"
 .pia_bad:
     pop rdi

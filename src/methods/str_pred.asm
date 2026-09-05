@@ -155,7 +155,12 @@ DEF_FUNC str_method_count, CNT_FRAME
     ret
 
 .count_type_error:
-    RAISE exc_TypeError_type, "must be str, not other type"
+    ; The offending object is still in rax: neither the tag test nor
+    ; REQUIRE_STR_TYPE touches it, and CPython names its type.
+    mov rsi, rax
+    CSTRING rdi, `must be str, not \x01`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC str_method_count
 
 ;; ============================================================================

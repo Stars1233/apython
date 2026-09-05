@@ -19,6 +19,7 @@ extern int_type
 extern current_exception
 extern eval_saved_r13
 extern eval_exception_unwind
+extern int_promote_mpz
 extern int_to_i64
 extern float_type
 extern float_repr
@@ -576,7 +577,7 @@ END_FUNC obj_str
 ;; over.
 ;; ============================================================================
 global obj_as_slice_index
-DEF_FUNC obj_as_slice_index
+DEF_FUNC obj_as_slice_index, OAI_FRAME
     cmp edx, TAG_SMALLINT
     je .oasi_ok
     cmp edx, TAG_PTR
@@ -588,8 +589,10 @@ DEF_FUNC obj_as_slice_index
     cmp qword [rax + PyNumberMethods.nb_index], 0
     je .oasi_bad
 .oasi_ok:
+    ; The same body, in clamping mode: `[1,2,3][2**70:]` is [] in CPython,
+    ; not an error, because a bound past the end is the end.
     leave
-    jmp obj_as_index
+    jmp obj_as_index_clamped
 .oasi_bad:
     RAISE exc_TypeError_type, \
         "slice indices must be integers or have an __index__ method"
@@ -608,8 +611,20 @@ END_FUNC obj_as_slice_index
 ;; Takes the same (payload, tag) pair as int_to_i64 so a call site changes by
 ;; one word.  This is where the __index__ protocol belongs once heaptypes
 ;; carry real slots.
+;;
+;; obj_as_index_clamped, below, is the same body with an int too wide for an
+;; index coming back as the nearest end rather than raising.  For a caller
+;; whose field IS an int64 and whose CPython counterpart holds an object: a
+;; slice bound, because `[1,2,3][2**70:]` is [] there and not an error, and
+;; range, which keeps its three bounds in int64s where `range(1 << 1000)` is
+;; an ordinary range -- _collections_abc builds one at import, to name the
+;; type its iterator has.
 ;; ============================================================================
-DEF_FUNC obj_as_index
+OAI_MODE  equ 8             ; 0 = refuse what will not fit, 1 = clamp to it
+OAI_FRAME equ 16            ; + 0 pushes = 16-aligned
+DEF_FUNC obj_as_index, OAI_FRAME
+    mov qword [rbp - OAI_MODE], 0
+oai_body:
     cmp edx, TAG_SMALLINT
     je .oai_immediate
     cmp edx, TAG_PTR
@@ -625,9 +640,7 @@ DEF_FUNC obj_as_index
     je .oai_immediate
     mov rax, [rdi + PyObject.ob_type]
     REQUIRE_INT_TYPE rax, rcx, .oai_try_dunder
-    call int_to_i64
-    leave
-    ret
+    jmp .oai_to_i64
 
 .oai_immediate:
     mov rax, rdi
@@ -660,14 +673,51 @@ DEF_FUNC obj_as_index
     call int_unwrap             ; __index__ may itself return an int subclass
     cmp edx, TAG_SMALLINT
     je .oai_dunder_immediate
-    call int_to_i64
-    leave
-    ret
+    jmp .oai_to_i64
 .oai_dunder_immediate:
     mov rax, rdi
     leave
     ret
 .oai_dunder_done:
+    leave
+    ret
+
+;; A heap int, which may be wider than an index.  int_to_i64 truncates
+;; through __gmpz_get_si, so `[1][2**70]` answered [1]'s first element and
+;; `chr(2**70)` answered "\x00" -- a wrong ANSWER, not a refusal.  CPython
+;; raises here; a SLICE bound is the exception, and clamps.
+.oai_to_i64:
+    push rdi
+    push rdx
+    extern int_fits_i64
+    call int_fits_i64
+    pop rdx
+    pop rdi
+    test eax, eax
+    jz .oai_too_wide
+    call int_to_i64
+    leave
+    ret
+
+.oai_too_wide:
+    cmp qword [rbp - OAI_MODE], 0
+    jne .oai_clamp
+    extern exc_OverflowError_type
+    RAISE exc_OverflowError_type, "Python int too large to convert to C ssize_t"
+.oai_clamp:
+    ; A slice bound past either end is that end, which is what CPython's
+    ; _PyEval_SliceIndex does.  The sign is the mpz's: a heap int this wide
+    ; always has one.
+    INT_NEED_MPZ rdi
+    lea rdi, [rdi + PyIntObject.mpz]
+    extern __gmpz_cmp_si
+    xor esi, esi
+    call __gmpz_cmp_si wrt ..plt
+    test eax, eax
+    mov rax, 0x7FFFFFFFFFFFFFFF
+    jns .oai_clamped
+    mov rax, 0x8000000000000000
+.oai_clamped:
     leave
     ret
 
@@ -684,6 +734,16 @@ DEF_FUNC obj_as_index
     lea rdi, [rel oai_not_an_index]
     jmp raise_type_error_with_name
 END_FUNC obj_as_index
+
+;; ============================================================================
+;; obj_as_index_clamped(rdi = payload, edx = tag) -> rax = int64
+;; The same, clamping instead of refusing.  See obj_as_index above.
+;; ============================================================================
+global obj_as_index_clamped
+DEF_FUNC obj_as_index_clamped, OAI_FRAME
+    mov qword [rbp - OAI_MODE], 1
+    jmp oai_body
+END_FUNC obj_as_index_clamped
 
 ;; ============================================================================
 ;; raise_type_error_counted(rdi = the text before the number, rsi = the count,

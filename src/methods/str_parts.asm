@@ -1588,7 +1588,10 @@ DEF_FUNC str_method_removeprefix
     ret
 
 .rp_type_error:
-    RAISE exc_TypeError_type, "must be str, not other type"
+    mov rsi, rax                ; still the argument: neither check touches it
+    CSTRING rdi, `removeprefix() argument must be str, not \x01`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC str_method_removeprefix
 
 ;; ============================================================================
@@ -1664,7 +1667,10 @@ DEF_FUNC str_method_removesuffix
     ret
 
 .rs_type_error:
-    RAISE exc_TypeError_type, "must be str, not other type"
+    mov rsi, rax                ; still the argument: neither check touches it
+    CSTRING rdi, `removesuffix() argument must be str, not \x01`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC str_method_removesuffix
 
 ;; ============================================================================

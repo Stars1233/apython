@@ -240,22 +240,37 @@ SAD_NARGS equ 16
 SAD_FN    equ 24
 SAD_TUP   equ 32
 SAD_IDX   equ 40
-SAD_FRAME equ 48            ; + 0 pushes = 48
+SAD_NAME  equ 48            ; the message for an argument that is neither
+SAD_FRAME equ 64            ; + 0 pushes = 64
 
 DEF_FUNC_LOCAL str_affix_dispatch, SAD_FRAME
     mov [rbp - SAD_ARGS], rdi
     mov [rbp - SAD_NARGS], rsi
     mov [rbp - SAD_FN], rdx
+    mov [rbp - SAD_NAME], rcx
 
     cmp rsi, 2
     jl .sad_single
     mov rax, [rdi + 8]
     V_TEST_PTR rax, rcx
-    ja .sad_single
+    ja .sad_first_arg
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel tuple_type]
     cmp rcx, rdx
-    jne .sad_single
+    je .sad_have_tuple
+    ; Neither a tuple nor -- as far as this can tell -- a str.  The helper
+    ; below checks that, but its message is the one for a TUPLE'S ELEMENT;
+    ; CPython words the argument itself differently, and this is where the
+    ; two can still be told apart.
+    REQUIRE_STR_TYPE rcx, rdx, .sad_first_arg
+    jmp .sad_single
+.sad_first_arg:
+    mov rsi, [rbp - SAD_ARGS]
+    mov rsi, [rsi + 8]
+    mov rdi, [rbp - SAD_NAME]
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+.sad_have_tuple:
 
     mov [rbp - SAD_TUP], rax
     mov qword [rbp - SAD_IDX], 0
@@ -404,13 +419,26 @@ DEF_FUNC_LOCAL str_startswith_one, AFF_FRAME3
     ret
 
 .sw_type_error:
-    RAISE exc_TypeError_type, "must be str, not other type"
+    ; CPython names the type and says which of the two shapes was wrong: the
+    ; dispatcher hands a tuple's elements here one at a time, so this is the
+    ; element wording, and the dispatcher itself has the other.
+    mov rsi, [rbp - AFF_ARGS]
+    mov rsi, [rsi + 8]
+    CSTRING rdi, `tuple for startswith must only contain str, not \x01`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC str_startswith_one
 
 DEF_FUNC_BARE str_method_startswith
     lea rdx, [rel str_startswith_one]
+    lea rcx, [rel sad_msg_startswith]
     jmp str_affix_dispatch
 END_FUNC str_method_startswith
+
+section .rodata
+sad_msg_startswith: db `startswith first arg must be str or a tuple of str, not \x01`, 0
+sad_msg_endswith:   db `endswith first arg must be str or a tuple of str, not \x01`, 0
+section .text
 
 ;; ============================================================================
 ;; str_method_endswith(args, nargs) -> bool_true/bool_false
@@ -494,11 +522,19 @@ DEF_FUNC_LOCAL str_endswith_one, AFF_FRAME
     ret
 
 .ew_type_error:
-    RAISE exc_TypeError_type, "must be str, not other type"
+    ; CPython names the type and says which of the two shapes was wrong: the
+    ; dispatcher hands a tuple's elements here one at a time, so this is the
+    ; element wording, and the dispatcher itself has the other.
+    mov rsi, [rbp - AFF_ARGS]
+    mov rsi, [rsi + 8]
+    CSTRING rdi, `tuple for endswith must only contain str, not \x01`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC str_endswith_one
 
 DEF_FUNC_BARE str_method_endswith
     lea rdx, [rel str_endswith_one]
+    lea rcx, [rel sad_msg_endswith]
     jmp str_affix_dispatch
 END_FUNC str_method_endswith
 
@@ -591,7 +627,11 @@ DEF_FUNC str_find_impl, FND_FRAME
     RAISE exc_ValueError_type, "substring not found"
 
 .find_type_error:
-    RAISE exc_TypeError_type, "must be str, not other type"
+    mov rsi, [rbp - AFF_ARGS]
+    mov rsi, [rsi + 8]
+    CSTRING rdi, `must be str, not \x01`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC str_find_impl
 
 DEF_FUNC_BARE str_method_find
@@ -622,16 +662,16 @@ DEF_FUNC str_method_replace
     ; Validate args[1] is a string
     mov rax, [rdi + 8]         ; args[1]
     V_TEST_PTR rax, rcx
-    ja .repl_type_error
+    ja .repl_type_error1
     mov rcx, [rax + PyObject.ob_type]
-    REQUIRE_STR_TYPE rcx, rdx, .repl_type_error
+    REQUIRE_STR_TYPE rcx, rdx, .repl_type_error1
 
     ; Validate args[2] is a string
     mov rax, [rdi + 16]         ; args[2]
     V_TEST_PTR rax, rcx
-    ja .repl_type_error
+    ja .repl_type_error2
     mov rcx, [rax + PyObject.ob_type]
-    REQUIRE_STR_TYPE rcx, rdx, .repl_type_error
+    REQUIRE_STR_TYPE rcx, rdx, .repl_type_error2
 
     ; The third argument caps how many replacements happen, and was ignored:
     ; "aXbXc".replace("X", "-", 1) replaced both.  A negative count means
@@ -888,8 +928,18 @@ DEF_FUNC str_method_replace
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.repl_type_error:
-    RAISE exc_TypeError_type, "must be str, not other type"
+.repl_type_error1:
+    ; The offending object is still in rax: neither the tag test nor
+    ; REQUIRE_STR_TYPE touches it.  CPython names it, and says WHICH
+    ; argument.
+    mov rsi, rax
+    CSTRING rdi, `replace() argument 1 must be str, not \x01`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+.repl_type_error2:
+    mov rsi, rax
+    CSTRING rdi, `replace() argument 2 must be str, not \x01`
+    jmp raise_type_error_with_name
 END_FUNC str_method_replace
 
 ;; ============================================================================
@@ -944,10 +994,25 @@ DEF_FUNC str_method_join
     cmp rax, rcx
     je .join_seq_ready
 .join_materialise:
+    ; A non-iterable is join's own refusal, not the iterator protocol's:
+    ; CPython says "can only join an iterable" where tuple() would say
+    ; "'int' object is not iterable".
+    mov rdi, [r15 + 8]
+    V_UNPACK rdi, rsi
+    push rdi
+    push rsi
+    extern get_iterator_opt
+    call get_iterator_opt       ; 0 when there is no iterator to be had
+    pop rsi
+    pop rdi
+    test rax, rax
+    jz .join_not_iterable
+    mov rdi, rax
+    call obj_decref             ; only the answer was wanted
     lea rdi, [rel tuple_type]
     lea rsi, [r15 + 8]
     mov edx, 1
-    call tuple_type_call        ; raises for a non-iterable, as CPython does
+    call tuple_type_call
     mov [rbp - SJ_TMP], rax
     mov r12, rax
 .join_seq_ready:
@@ -1074,12 +1139,39 @@ DEF_FUNC str_method_join
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.join_not_iterable:
+    mov rdi, rbx
+    call obj_decref             ; the separator this borrowed
+    RAISE exc_TypeError_type, "can only join an iterable"
+
 .join_type_error:
-    pop rcx                 ; clean up pushed index from len_loop
+    ; "sequence item 0: expected str instance, int found" -- CPython names the
+    ; item AND its type, and this said neither.  The item's Value is in rax
+    ; and the index on the machine stack; the tail is composed first, into a
+    ; buffer raise_type_error_counted does not use.
+    pop rcx                 ; the pushed index from len_loop
+    ; The item as it is STORED -- a Value -- read back through the index,
+    ; because the unpacked pair is gone and the temporary tuple is about to
+    ; be.
+    mov rax, [r12 + PyListObject.ob_item]
+    mov rax, [rax + rcx * 8]
+    push rcx
+    push rax
     mov rdi, rbx
     call obj_decref         ; DECREF owned separator
     JOIN_RELEASE_TMP
-    RAISE exc_TypeError_type, "sequence item: expected str instance"
+    pop rdi                 ; the offending item
+    extern value_type
+    call value_type
+    mov rsi, rax
+    CSTRING rdi, `: expected str instance, \x01 found`
+    extern type_name_message
+    call type_name_message
+    mov rdx, rax
+    pop rsi                 ; the index
+    CSTRING rdi, "sequence item "
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC str_method_join
 
 ;; ============================================================================
@@ -1376,7 +1468,10 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     RAISE exc_ValueError_type, "empty separator"
 
 .spi_type_error:
-    RAISE exc_TypeError_type, "must be str or None, not other type"
+    mov rsi, rax
+    CSTRING rdi, `must be str or None, not \x01`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 ;; Append a piece (rdi = data, rsi = length) to the result list.
 .spi_emit:
