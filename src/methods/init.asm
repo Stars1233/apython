@@ -2020,6 +2020,37 @@ DEF_FUNC methods_init
     extern complex_dunder_bool
     ADD_FN_N mn___bool__, complex_dunder_bool, 1, 1
 
+    ;; The binary family, forward and reflected, and the unary three.  They
+    ;; went through the slots and nothing else, so `complex(1,2).__add__` did
+    ;; not exist -- and a class that dispatches on NotImplemented, as the
+    ;; numeric tower does, cannot ask a type that has no __add__ to try.
+    extern complex_dunder_add
+    ADD_FN_N mn___add__, complex_dunder_add, 2, 2
+    extern complex_dunder_sub
+    ADD_FN_N mn___sub__, complex_dunder_sub, 2, 2
+    extern complex_dunder_mul
+    ADD_FN_N mn___mul__, complex_dunder_mul, 2, 2
+    extern complex_dunder_truediv
+    ADD_FN_N mn___truediv__, complex_dunder_truediv, 2, 2
+    extern complex_dunder_pow
+    ADD_FN_N mn___pow__, complex_dunder_pow, 2, 3
+    extern complex_dunder_radd
+    ADD_FN_N mn___radd__, complex_dunder_radd, 2, 2
+    extern complex_dunder_rsub
+    ADD_FN_N mn___rsub__, complex_dunder_rsub, 2, 2
+    extern complex_dunder_rmul
+    ADD_FN_N mn___rmul__, complex_dunder_rmul, 2, 2
+    extern complex_dunder_rtruediv
+    ADD_FN_N mn___rtruediv__, complex_dunder_rtruediv, 2, 2
+    extern complex_dunder_rpow
+    ADD_FN_N mn___rpow__, complex_dunder_rpow, 2, 3
+    extern complex_dunder_neg
+    ADD_FN_N mn___neg__, complex_dunder_neg, 1, 1
+    extern complex_dunder_pos
+    ADD_FN_N mn___pos__, complex_dunder_pos, 1, 1
+    extern complex_dunder_abs
+    ADD_FN_N mn___abs__, complex_dunder_abs, 1, 1
+
     lea rax, [rel complex_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -2159,6 +2190,13 @@ DEF_FUNC methods_init
     ADD_FN_N mn___repr__, bytes_dunder_repr, 1, 1
 
     ADD_FN_N mn_hex, bytes_method_hex, 1, 3
+
+    ; decode lived in bytes_getattr, which answered the UNBOUND builtin: `m =
+    ; b.decode` gave a function with no self attached, and `m()` read
+    ; whatever args[0] happened to be as the bytes object.  Registered like
+    ; every other method, it binds.
+    extern _bytes_decode_impl
+    ADD_FN_N mn_decode, _bytes_decode_impl, 1, 3
 
     ; And its inverse, which binascii.unhexlify needs -- and binascii is what
     ; base64, quopri, uu and plistlib come in behind.

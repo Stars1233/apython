@@ -31,6 +31,7 @@ test_async_tasks
 test_async_wait_for
 test_async_with
 test_await_raises
+test_bad_arguments
 test_binary_dunders
 test_binop_calls_once
 test_binop_matrix
@@ -397,6 +398,7 @@ test_str_format
 test_strings2
 test_strings
 test_str_is
+test_str_justify
 test_str_maketrans
 test_str_methods_extra
 test_str_methods_fix

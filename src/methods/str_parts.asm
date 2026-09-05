@@ -78,6 +78,44 @@ DEF_FUNC str_method_istitle
 END_FUNC str_method_istitle
 
 ;; ============================================================================
+;; str_require_str(rdi = an argument, a Value; rsi = a message whose \x01 is
+;;                 where the argument's type name goes)
+;;   -> rax = the argument, as a str object; does not return otherwise
+;;
+;; The separator of partition and rpartition was read as a PyStrObject
+;; without asking: `"abc".partition(0)` read a small integer's Value as a
+;; pointer and died, and `"abc".partition(None)` measured the None
+;; singleton's header as a length.
+;; ============================================================================
+SRS_ARG   equ 8
+SRS_MSG   equ 16
+SRS_FRAME equ 32            ; + 0 pushes = 16-aligned
+DEF_FUNC str_require_str, SRS_FRAME
+    mov [rbp - SRS_ARG], rdi
+    mov [rbp - SRS_MSG], rsi
+    V_TEST_PTR rdi, rax
+    ja .srs_bad
+    test rdi, rdi
+    jz .srs_bad
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .srs_ok
+    mov rax, [rax + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_STR_SUBCLASS
+    jz .srs_bad
+.srs_ok:
+    mov rax, rdi
+    leave
+    ret
+.srs_bad:
+    mov rsi, [rbp - SRS_ARG]
+    mov rdi, [rbp - SRS_MSG]
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+END_FUNC str_require_str
+
+;; ============================================================================
 ;; str_method_partition(args, nargs) -> 3-tuple (before, sep, after)
 ;; args[0]=self, args[1]=sep
 ;; ============================================================================
@@ -90,8 +128,14 @@ DEF_FUNC str_method_partition, PT_FRAME
     push r13
 
     mov rbx, [rdi]           ; self
-    mov r12, [rdi + 8]      ; sep
     mov [rbp - PT_SELF], rbx
+    mov rdi, [rdi + 8]      ; sep
+    CSTRING rsi, `must be str, not \x01`
+    call str_require_str
+    mov r12, rax
+    cmp qword [r12 + PyStrObject.ob_size], 0
+    je .part_empty_sep
+    mov rbx, [rbp - PT_SELF]
     mov [rbp - PT_SEP], r12
 
     ; Find sep in self.  Length-aware: ap_strstr stopped at the first NUL.
@@ -187,6 +231,9 @@ DEF_FUNC str_method_partition, PT_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.part_empty_sep:
+    extern exc_ValueError_type
+    RAISE exc_ValueError_type, "empty separator"
 END_FUNC str_method_partition
 
 ;; ============================================================================
@@ -199,8 +246,14 @@ DEF_FUNC str_method_rpartition, PT_FRAME
     push r13
 
     mov rbx, [rdi]           ; self
-    mov r12, [rdi + 8]      ; sep
     mov [rbp - PT_SELF], rbx
+    mov rdi, [rdi + 8]      ; sep
+    CSTRING rsi, `must be str, not \x01`
+    call str_require_str
+    mov r12, rax
+    cmp qword [r12 + PyStrObject.ob_size], 0
+    je .rpart_empty_sep
+    mov rbx, [rbp - PT_SELF]
     mov [rbp - PT_SEP], r12
 
     ; Search from right: find last occurrence
@@ -309,6 +362,8 @@ DEF_FUNC str_method_rpartition, PT_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.rpart_empty_sep:
+    RAISE exc_ValueError_type, "empty separator"
 END_FUNC str_method_rpartition
 
 ;; ============================================================================
@@ -333,9 +388,10 @@ DEF_FUNC str_method_expandtabs, ET_FRAME
     cmp rsi, 2
     jl .et_have_tab
     mov rax, rdi
-    mov rdi, [rax + 8]
-    V_UNPACK rdi, rdx       ; args[1]
-    call obj_as_index       ; a tabsize is an index, and names its own type
+    mov rdi, [rax + 8]      ; args[1]
+    mov esi, 1              ; a tabsize is a C int in CPython, and it says so
+    extern str_pad_width    ; when handed one that will not fit; obj_as_index
+    call str_pad_width      ; alone truncated, so 2**70 tabs became none
     mov r13, rax
 .et_have_tab:
     mov [rbp - ET_TAB], r13
@@ -359,9 +415,12 @@ DEF_FUNC str_method_expandtabs, ET_FRAME
     inc rcx
     jmp .et_len_loop
 .et_len_tab:
-    ; spaces = tabsize - (col % tabsize)
+    ; spaces = tabsize - (col % tabsize).  A NON-POSITIVE tabsize drops the
+    ; tab, which is what CPython does; only zero was tested for, so
+    ; "a\tb".expandtabs(-1) went into an unsigned div by 0xFFFF...FF and
+    ; came out with a pad count that the buffer could not hold.
     test r13, r13
-    jz .et_len_tab_zero
+    jle .et_len_tab_zero
     mov rax, r14
     xor edx, edx
     div r13                  ; rdx = col % tabsize
@@ -409,7 +468,7 @@ DEF_FUNC str_method_expandtabs, ET_FRAME
     jmp .et_fill_loop
 .et_fill_tab:
     test r13, r13
-    jz .et_fill_tab_skip
+    jle .et_fill_tab_skip       ; non-positive: the tab is dropped
     mov rax, r14
     xor edx, edx
     div r13
@@ -1643,11 +1702,9 @@ DEF_FUNC str_method_encode, SE_FRAME
     xor eax, eax
     cmp rsi, 2
     jl .se_have_enc
+    ; None is not a str either: `"a".encode(None)` is refused in CPython and
+    ; was taken here as "use the default".
     mov rax, [rdi + 8]
-    extern none_singleton
-    lea rcx, [rel none_singleton]
-    cmp rax, rcx
-    je .se_default_enc
     V_TEST_PTR rax, rcx
     ja .se_bad_enc
     test rax, rax
@@ -1656,9 +1713,6 @@ DEF_FUNC str_method_encode, SE_FRAME
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .se_bad_enc
-    jmp .se_have_enc
-.se_default_enc:
-    xor eax, eax
 .se_have_enc:
     ; args[2] = errors.  It was never read at all: SE_ERRS stayed 0, so every
     ; failure was strict whatever was asked for.
@@ -1684,11 +1738,17 @@ DEF_FUNC str_method_encode, SE_FRAME
     test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
     jnz .se_errs_ok
 .se_bad_errtype:
-    CSTRING rdi, `encode() argument 'errors' must be str, not \x01`
     mov rsi, [rbp - SE_ERRS]
+    lea rcx, [rel none_singleton]
+    cmp rsi, rcx
+    je .se_bad_errtype_none     ; the clinic says "None", not "NoneType"
+    CSTRING rdi, `encode() argument 'errors' must be str, not \x01`
     extern raise_type_error_with_name
     call raise_type_error_with_name
     ud2
+.se_bad_errtype_none:
+    RAISE exc_TypeError_type, \
+          "encode() argument 'errors' must be str, not None"
 .se_errs_ok:
     mov [rbp - SE_ENC], rax
     mov rdi, rax
@@ -1934,10 +1994,19 @@ DEF_FUNC str_method_encode, SE_FRAME
     ret
 
 .se_bad_enc:
+    ; "not None" where the tp_name is "NoneType": CPython's argument clinic
+    ; words it that way, and it is the clinic's wording a program greps for.
+    mov rsi, rax
+    extern none_singleton
+    lea rcx, [rel none_singleton]
+    cmp rsi, rcx
+    je .se_bad_enc_none
     extern raise_type_error_with_name
     CSTRING rdi, `encode() argument 'encoding' must be str, not \x01`
-    mov rsi, rax
     call raise_type_error_with_name
+.se_bad_enc_none:
+    RAISE exc_TypeError_type, \
+          "encode() argument 'encoding' must be str, not None"
 .se_too_many:
     RAISE exc_TypeError_type, "encode() takes at most 2 arguments"
 

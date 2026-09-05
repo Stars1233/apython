@@ -87,3 +87,51 @@ z = 1+2j
 print(z.real, z.imag, z.conjugate(), (0j).conjugate())
 print(z.__complex__() == z, z.__getnewargs__())
 print(type(z).__name__, repr(complex))
+
+
+# The binary family went through the SLOTS and nothing else, so
+# `complex(1,2).__add__` did not exist.  A slot with no matching entry in
+# tp_dict answers the wrong thing to everything that asks by name -- and the
+# numeric tower asks by name, because a class that dispatches on
+# NotImplemented cannot ask a type that has no __add__ to try.
+print("=== the dunders exist ===")
+z = complex(3, 4)
+print([n for n in ("__add__", "__sub__", "__mul__", "__truediv__", "__pow__",
+                   "__radd__", "__rsub__", "__rmul__", "__rtruediv__",
+                   "__rpow__", "__neg__", "__pos__", "__abs__", "__bool__",
+                   "__eq__", "__hash__") if hasattr(z, n)])
+
+print("=== and answer what the operators do ===")
+print(z.__add__(1), z.__add__(1.5), z.__add__(complex(1, 1)))
+print(z.__radd__(1), z.__rsub__(1), z.__rmul__(2), z.__rtruediv__(1))
+print(z.__neg__(), z.__pos__(), z.__abs__(), z.__bool__())
+print(z.__pow__(2), z.__rpow__(2), complex(0).__bool__())
+
+# ...and decline what the operator would hand on to the other side.
+print("=== NotImplemented, not a wrong answer ===")
+for bad in ("x", None, [], b"x"):
+    print("%-6r %r %r %r" % (bad, z.__add__(bad), z.__mul__(bad),
+                             z.__radd__(bad)))
+
+print("=== called by name off the type ===")
+print(complex.__add__(z, 1), complex.__neg__(z))
+try:
+    complex.__add__(1, z)
+except TypeError as e:
+    print("wrong self ->", type(e).__name__)
+
+print("=== pow with a modulus ===")
+# complex is decided in pow() itself and not by its __pow__: CPython's answer
+# for a modulus is ValueError, and complex.__pow__ is the generated
+# three-argument wrapper, which calls pow() -- so looking it up would be a
+# recursion with no floor.
+for args in (("x", 0), (2, 3), (2,)):
+    try:
+        print(args, complex(1, 2).__pow__(*args))
+    except Exception as e:
+        print(args, type(e).__name__, e)
+for args in ((complex(1, 2), 2, 3), (complex(1, 2), 2)):
+    try:
+        print(len(args), pow(*args))
+    except Exception as e:
+        print(len(args), type(e).__name__, e)

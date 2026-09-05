@@ -36,6 +36,19 @@ extern str_type
 
 ; --- moved to a sibling file by the split ---
 
+section .data
+align 8
+; The default fill for center, ljust and rjust: a str of one space, so the
+; builder always has a str object to copy from rather than a bare byte.
+; Static, and never released -- nothing hands it out.
+str_pad_space:
+    dq 1                        ; ob_refcnt
+    dq str_type                 ; ob_type
+    dq 1                        ; ob_size, in bytes
+    dq -1                       ; ob_hash
+    dq 1                        ; ob_length, in code points
+    db " ", 0, 0, 0, 0, 0, 0, 0
+
 section .text
 
 ;; ============================================================================
@@ -422,6 +435,200 @@ DEF_FUNC str_method_casefold
 END_FUNC str_method_casefold
 
 ;; ============================================================================
+;; str_fill_char(rdi = the fillchar argument, a Value) -> rax = it, as a str
+;;
+;; CPython's rule for center, ljust and rjust: exactly one character, and a
+;; str.  Neither half was checked -- the byte at the object's PyStrObject.data
+;; offset was read whatever the object was, so `"abc".center(0, 0)` read a
+;; small integer's Value as a pointer and died, `"abc".center(10, "xy")`
+;; padded with 'x', and `"abc".center(10, None)` padded with whatever byte sat
+;; at that offset in the None singleton.
+;;
+;; Does not return on failure.
+;; ============================================================================
+SFC_ARG   equ 8
+SFC_FRAME equ 16            ; + 0 pushes = 16-aligned
+DEF_FUNC str_fill_char, SFC_FRAME
+    mov [rbp - SFC_ARG], rdi
+    V_TEST_PTR rdi, rax
+    ja .sfc_not_str
+    test rdi, rdi
+    jz .sfc_not_str
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .sfc_have_str
+    mov rax, [rax + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_STR_SUBCLASS
+    jz .sfc_not_str
+.sfc_have_str:
+    cmp qword [rdi + PyStrObject.ob_length], 1
+    jne .sfc_bad_length
+    mov rax, rdi
+    leave
+    ret
+
+.sfc_not_str:
+    mov rsi, [rbp - SFC_ARG]
+    CSTRING rdi, `The fill character must be a unicode character, not \x01`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+.sfc_bad_length:
+    RAISE exc_TypeError_type, \
+          "The fill character must be exactly one character long"
+END_FUNC str_fill_char
+
+;; ============================================================================
+;; str_pad_width(rdi = the width argument, a Value; esi = 0 for a value that
+;;               has to fit a C ssize_t, 1 for one that has to fit a C int)
+;;   -> rax = it, as an i64
+;;
+;; A width is an index, and may be any object with __index__ -- but it also
+;; has to FIT one: obj_as_index truncates, so `"abc".center(2**70)` came back
+;; as "abc" where CPython raises.  The two limits are CPython's own, and it
+;; words them apart: a width is an ssize_t and expandtabs' tabsize an int.
+;; ============================================================================
+SPW_ARG   equ 8
+SPW_MODE  equ 16
+SPW_FRAME equ 32            ; + 0 pushes = 16-aligned
+DEF_FUNC str_pad_width, SPW_FRAME
+    mov [rbp - SPW_MODE], rsi
+    mov [rbp - SPW_ARG], rdi
+    extern int_is_integer
+    V_UNPACK rdi, rdx
+    push rdi
+    push rdx
+    call int_is_integer
+    pop rdx
+    pop rdi
+    test eax, eax
+    jz .spw_index
+    extern int_fits_i64
+    push rdi
+    push rdx
+    call int_fits_i64
+    pop rdx
+    pop rdi
+    test eax, eax
+    jz .spw_overflow
+.spw_index:
+    mov rdi, [rbp - SPW_ARG]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    cmp qword [rbp - SPW_MODE], 0
+    je .spw_done
+    cmp rax, 0x7FFFFFFF
+    jg .spw_overflow
+    cmp rax, -0x80000000
+    jl .spw_overflow
+.spw_done:
+    leave
+    ret
+.spw_overflow:
+    extern exc_OverflowError_type
+    cmp qword [rbp - SPW_MODE], 0
+    jne .spw_overflow_int
+    RAISE exc_OverflowError_type, "Python int too large to convert to C ssize_t"
+.spw_overflow_int:
+    RAISE exc_OverflowError_type, "Python int too large to convert to C int"
+END_FUNC str_pad_width
+
+;; ============================================================================
+;; str_pad_build(rdi = the string, rsi = pad characters on the left,
+;;               rdx = pad characters on the right, rcx = the fill, a str)
+;;   -> (rax = the padded string, rdx = TAG_PTR), or 0 on failure
+;;
+;; One builder for center, ljust and rjust.  Each used to memset its own
+;; buffer with a single BYTE, so a fill outside ASCII -- `"abc".center(10,
+;; "\u00e9")`, which CPython pads with e-acute -- wrote the first byte of its
+;; UTF-8 ten times and produced a string that is not valid UTF-8 at all.
+;; ============================================================================
+SPB_SELF  equ 8
+SPB_LEFT  equ 16
+SPB_RIGHT equ 24
+SPB_FILL  equ 32
+SPB_OUT   equ 40
+SPB_FRAME equ 56            ; + 1 push = 64, 16-aligned
+DEF_FUNC str_pad_build, SPB_FRAME
+    push rbx
+    mov [rbp - SPB_SELF], rdi
+    mov [rbp - SPB_LEFT], rsi
+    mov [rbp - SPB_RIGHT], rdx
+    mov [rbp - SPB_FILL], rcx
+
+    ; bytes = self's bytes + (left + right) * the fill's bytes
+    mov rax, [rbp - SPB_LEFT]
+    add rax, [rbp - SPB_RIGHT]
+    mov rcx, [rbp - SPB_FILL]
+    imul rax, [rcx + PyStrObject.ob_size]
+    add rax, [rdi + PyStrObject.ob_size]
+    mov rbx, rax                    ; rbx = the byte count
+
+    lea rdi, [rbx + PyStrObject.data + 1]
+    call ap_malloc
+    mov [rbp - SPB_OUT], rax
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel str_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + PyStrObject.ob_hash], -1
+    mov [rax + PyStrObject.ob_size], rbx
+    ; The length in CODE POINTS is the padding plus the string's own, which
+    ; is not the byte count once the fill is outside ASCII.
+    mov rcx, [rbp - SPB_LEFT]
+    add rcx, [rbp - SPB_RIGHT]
+    mov rdx, [rbp - SPB_SELF]
+    add rcx, [rdx + PyStrObject.ob_length]
+    mov [rax + PyStrObject.ob_length], rcx
+    mov byte [rax + PyStrObject.data + rbx], 0
+
+    lea rbx, [rax + PyStrObject.data]   ; rbx = the write cursor
+    mov rsi, [rbp - SPB_LEFT]
+.spb_left_loop:
+    test rsi, rsi
+    jz .spb_left_done
+    push rsi
+    mov rdi, rbx
+    mov rcx, [rbp - SPB_FILL]
+    lea rsi, [rcx + PyStrObject.data]
+    mov rdx, [rcx + PyStrObject.ob_size]
+    add rbx, rdx
+    call ap_memcpy
+    pop rsi
+    dec rsi
+    jmp .spb_left_loop
+.spb_left_done:
+
+    mov rdi, rbx
+    mov rcx, [rbp - SPB_SELF]
+    lea rsi, [rcx + PyStrObject.data]
+    mov rdx, [rcx + PyStrObject.ob_size]
+    add rbx, rdx
+    call ap_memcpy
+
+    mov rsi, [rbp - SPB_RIGHT]
+.spb_right_loop:
+    test rsi, rsi
+    jz .spb_right_done
+    push rsi
+    mov rdi, rbx
+    mov rcx, [rbp - SPB_FILL]
+    lea rsi, [rcx + PyStrObject.data]
+    mov rdx, [rcx + PyStrObject.ob_size]
+    add rbx, rdx
+    call ap_memcpy
+    pop rsi
+    dec rsi
+    jmp .spb_right_loop
+.spb_right_done:
+
+    mov rax, [rbp - SPB_OUT]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+END_FUNC str_pad_build
+
+;; ============================================================================
 ;; str_method_center(args, nargs) -> new centered string
 ;; args[0]=self, args[1]=width, args[2]=fillchar (optional, default ' ')
 ;; ============================================================================
@@ -439,76 +646,40 @@ DEF_FUNC str_method_center, PA_FRAME
     mov [rbp - PA_ARGS], rdi
     mov [rbp - PA_NARGS], rsi
     mov rbx, [rdi]                      ; self
-    mov r12, [rbx + PyStrObject.ob_size]; self_len
     mov [rbp - PA_SELF], rbx
-    mov [rbp - PA_LEN], r12
     mov rax, [rbx + PyStrObject.ob_length]
     mov [rbp - PA_CPLEN], rax
 
-    ; Get width
-    mov rdi, [rbp - PA_ARGS]
-    mov rax, rdi
-    mov rdi, [rax + 8]                 ; args[1] payload
-    V_UNPACK rdi, rdx       ; args[1]
-    call obj_as_index       ; a width is an index, and may be any
-                            ; object with __index__ -- not only an int
-    mov r13, rax                         ; r13 = width
+    mov rax, [rbp - PA_ARGS]
+    mov rdi, [rax + 8]                  ; args[1], the width
+    extern str_pad_width
+    xor esi, esi                        ; a width has to fit a C ssize_t
+    call str_pad_width
+    mov r13, rax
 
-    ; Get fillchar (default ' ')
-    mov ecx, ' '
+    ; The fill, which has to be one character and a str.  Reading a byte off
+    ; whatever object arrived is what made `"abc".center(0, 0)` a segfault.
+    lea r12, [rel str_pad_space]
     cmp qword [rbp - PA_NARGS], 3
     jl .center_have_fill
     mov rax, [rbp - PA_ARGS]
-    mov rdx, [rax + 16]                 ; args[2] payload (char str)
-    movzx ecx, byte [rdx + PyStrObject.data]
+    mov rdi, [rax + 16]                 ; args[2]
+    extern str_fill_char
+    call str_fill_char
+    mov r12, rax
 .center_have_fill:
-    ; A width counts characters, so it is compared against the code point
-    ; length; what has to be allocated is that many characters' worth of
-    ; bytes -- the padding, which is ASCII, plus whatever the string occupies.
-    cmp r13, [rbp - PA_CPLEN]
+
+    sub r13, [rbp - PA_CPLEN]           ; the padding, in characters
     jle .center_return_self
-    sub r13, [rbp - PA_CPLEN]
-    add r13, r12
 
-    ; Allocate new string of size width
-    mov rdi, r13
-    push rcx                             ; save fillchar
-    call ap_malloc
-    pop rcx
-    mov rbx, rax                         ; rbx = new string buffer (raw)
-    ; Fill entire buffer with fillchar
-    push rcx
-    mov rdi, rbx
-    movzx esi, cl
-    mov rdx, r13
-    call ap_memset
-    pop rcx
-
-    ; Now create proper str object: str_new_heap(data, len)
-    mov rdi, rbx
+    mov rdi, [rbp - PA_SELF]
     mov rsi, r13
-    call str_new_heap
-    push rax                             ; save new str
-
-    ; Free temp buffer
-    mov rdi, rbx
-    call ap_free
-    pop r13                              ; r13 = new str
-
-    ; Copy self data into center position
-    mov rbx, [rbp - PA_SELF]
-    mov r12, [rbp - PA_LEN]
-    mov rax, [rbp - PA_LEN]
-    mov rcx, [r13 + PyStrObject.ob_size]
-    sub rcx, rax                         ; pad = width - len
-    shr rcx, 1                           ; left_pad = pad / 2
-    lea rdi, [r13 + PyStrObject.data + rcx]
-    lea rsi, [rbx + PyStrObject.data]
-    mov rdx, r12
-    call ap_memcpy
-
-    mov rax, r13
-    mov edx, TAG_PTR
+    shr rsi, 1                          ; CPython puts the odd one on the RIGHT
+    mov rdx, r13
+    sub rdx, rsi
+    mov rcx, r12
+    extern str_pad_build
+    call str_pad_build
     pop r13
     pop r12
     pop rbx
@@ -517,11 +688,9 @@ DEF_FUNC str_method_center, PA_FRAME
     ret
 
 .center_return_self:
-    ; Return copy of self
     mov rbx, [rbp - PA_SELF]
-    mov r12, [rbp - PA_LEN]
     lea rdi, [rbx + PyStrObject.data]
-    mov rsi, r12
+    mov rsi, [rbx + PyStrObject.ob_size]
     call str_new_heap
     mov edx, TAG_PTR
     pop r13
@@ -543,68 +712,39 @@ DEF_FUNC str_method_ljust, PA_FRAME
 
     mov [rbp - PA_ARGS], rdi
     mov [rbp - PA_NARGS], rsi
-    mov rbx, [rdi]
-    mov r12, [rbx + PyStrObject.ob_size]
+    mov rbx, [rdi]                      ; self
     mov [rbp - PA_SELF], rbx
-    mov [rbp - PA_LEN], r12
     mov rax, [rbx + PyStrObject.ob_length]
     mov [rbp - PA_CPLEN], rax
 
-    ; Get width
     mov rax, [rbp - PA_ARGS]
-    mov rdi, [rax + 8]
-    V_UNPACK rdi, rdx       ; args[1]
-    call obj_as_index       ; a width is an index, and may be any
-                            ; object with __index__ -- not only an int
+    mov rdi, [rax + 8]                  ; args[1], the width
+    extern str_pad_width
+    xor esi, esi                        ; a width has to fit a C ssize_t
+    call str_pad_width
     mov r13, rax
 
-    ; Get fillchar
-    mov ecx, ' '
+    ; The fill, which has to be one character and a str.  Reading a byte off
+    ; whatever object arrived is what made `"abc".ljust(0, 0)` a segfault.
+    lea r12, [rel str_pad_space]
     cmp qword [rbp - PA_NARGS], 3
     jl .ljust_have_fill
     mov rax, [rbp - PA_ARGS]
-    mov rdx, [rax + 16]
-    V_UNPACK rdx, rax       ; args[2]
-    test rax, rax
-    js .ljust_fill_ss
-    movzx ecx, byte [rdx + PyStrObject.data]
-    jmp .ljust_have_fill
-.ljust_fill_ss:
-    movzx ecx, dl
+    mov rdi, [rax + 16]                 ; args[2]
+    extern str_fill_char
+    call str_fill_char
+    mov r12, rax
 .ljust_have_fill:
-    cmp r13, [rbp - PA_CPLEN]
+
+    sub r13, [rbp - PA_CPLEN]           ; the padding, in characters
     jle .ljust_return_self
-    sub r13, [rbp - PA_CPLEN]
-    add r13, r12
 
-    ; Allocate, fill, copy self at start
-    mov rdi, r13
-    push rcx
-    call ap_malloc
-    pop rcx
-    mov rbx, rax
-    mov rdi, rbx
-    movzx esi, cl
+    mov rdi, [rbp - PA_SELF]
+    xor esi, esi
     mov rdx, r13
-    call ap_memset
-    mov rdi, rbx
-    mov rsi, r13
-    call str_new_heap
-    push rax
-    mov rdi, rbx
-    call ap_free
-    pop r13
-
-    ; Copy self at position 0
-    mov rbx, [rbp - PA_SELF]
-    mov r12, [rbp - PA_LEN]
-    lea rdi, [r13 + PyStrObject.data]
-    lea rsi, [rbx + PyStrObject.data]
-    mov rdx, r12
-    call ap_memcpy
-
-    mov rax, r13
-    mov edx, TAG_PTR
+    mov rcx, r12
+    extern str_pad_build
+    call str_pad_build
     pop r13
     pop r12
     pop rbx
@@ -615,7 +755,7 @@ DEF_FUNC str_method_ljust, PA_FRAME
 .ljust_return_self:
     mov rbx, [rbp - PA_SELF]
     lea rdi, [rbx + PyStrObject.data]
-    mov rsi, [rbp - PA_LEN]
+    mov rsi, [rbx + PyStrObject.ob_size]
     call str_new_heap
     mov edx, TAG_PTR
     pop r13
@@ -636,67 +776,39 @@ DEF_FUNC str_method_rjust, PA_FRAME
 
     mov [rbp - PA_ARGS], rdi
     mov [rbp - PA_NARGS], rsi
-    mov rbx, [rdi]
-    mov r12, [rbx + PyStrObject.ob_size]
+    mov rbx, [rdi]                      ; self
     mov [rbp - PA_SELF], rbx
-    mov [rbp - PA_LEN], r12
     mov rax, [rbx + PyStrObject.ob_length]
     mov [rbp - PA_CPLEN], rax
 
     mov rax, [rbp - PA_ARGS]
-    mov rdi, [rax + 8]
-    V_UNPACK rdi, rdx       ; args[1]
-    call obj_as_index       ; a width is an index, and may be any
-                            ; object with __index__ -- not only an int
+    mov rdi, [rax + 8]                  ; args[1], the width
+    extern str_pad_width
+    xor esi, esi                        ; a width has to fit a C ssize_t
+    call str_pad_width
     mov r13, rax
 
-    mov ecx, ' '
+    ; The fill, which has to be one character and a str.  Reading a byte off
+    ; whatever object arrived is what made `"abc".rjust(0, 0)` a segfault.
+    lea r12, [rel str_pad_space]
     cmp qword [rbp - PA_NARGS], 3
     jl .rjust_have_fill
     mov rax, [rbp - PA_ARGS]
-    mov rdx, [rax + 16]
-    V_UNPACK rdx, rax       ; args[2]
-    test rax, rax
-    js .rjust_fill_ss
-    movzx ecx, byte [rdx + PyStrObject.data]
-    jmp .rjust_have_fill
-.rjust_fill_ss:
-    movzx ecx, dl
+    mov rdi, [rax + 16]                 ; args[2]
+    extern str_fill_char
+    call str_fill_char
+    mov r12, rax
 .rjust_have_fill:
-    cmp r13, [rbp - PA_CPLEN]
+
+    sub r13, [rbp - PA_CPLEN]           ; the padding, in characters
     jle .rjust_return_self
-    sub r13, [rbp - PA_CPLEN]
-    add r13, r12
 
-    mov rdi, r13
-    push rcx
-    call ap_malloc
-    pop rcx
-    mov rbx, rax
-    mov rdi, rbx
-    movzx esi, cl
-    mov rdx, r13
-    call ap_memset
-    mov rdi, rbx
+    mov rdi, [rbp - PA_SELF]
     mov rsi, r13
-    call str_new_heap
-    push rax
-    mov rdi, rbx
-    call ap_free
-    pop r13
-
-    ; Copy self at end (offset = width - len)
-    mov rbx, [rbp - PA_SELF]
-    mov r12, [rbp - PA_LEN]
-    mov rcx, [r13 + PyStrObject.ob_size]
-    sub rcx, r12
-    lea rdi, [r13 + PyStrObject.data + rcx]
-    lea rsi, [rbx + PyStrObject.data]
-    mov rdx, r12
-    call ap_memcpy
-
-    mov rax, r13
-    mov edx, TAG_PTR
+    xor edx, edx
+    mov rcx, r12
+    extern str_pad_build
+    call str_pad_build
     pop r13
     pop r12
     pop rbx
@@ -707,7 +819,7 @@ DEF_FUNC str_method_rjust, PA_FRAME
 .rjust_return_self:
     mov rbx, [rbp - PA_SELF]
     lea rdi, [rbx + PyStrObject.data]
-    mov rsi, [rbp - PA_LEN]
+    mov rsi, [rbx + PyStrObject.ob_size]
     call str_new_heap
     mov edx, TAG_PTR
     pop r13
@@ -736,11 +848,10 @@ DEF_FUNC str_method_zfill, PA_FRAME
     mov [rbp - PA_CPLEN], rax
 
     mov rax, [rbp - PA_ARGS]
-    mov rdi, [rax + 8]
-    V_UNPACK rdi, rdx       ; args[1]
-    call obj_as_index       ; a width is an index, and may be any
-                            ; object with __index__ -- not only an int
-    mov r13, rax                         ; width
+    mov rdi, [rax + 8]                  ; args[1], the width
+    xor esi, esi
+    call str_pad_width                  ; an index, and one that FITS one:
+    mov r13, rax                        ; obj_as_index alone truncates
 
     cmp r13, [rbp - PA_CPLEN]
     jle .zfill_return_self

@@ -37,6 +37,7 @@ extern ap_memcpy
 extern type_type
 extern obj_incref
 extern obj_decref
+extern none_singleton
 extern obj_dealloc
 extern raise_exception
 extern exc_IndexError_type
@@ -50,7 +51,6 @@ extern int_to_i64
 extern slice_type
 extern slice_indices
 extern ap_strcmp
-extern builtin_func_new
 
 extern bytearray_data
 extern bytearray_empty_data
@@ -656,35 +656,14 @@ END_FUNC bytes_repr_impl
 ;; Attribute lookup for bytes: handles decode, hex, etc.
 ;; ============================================================================
 DEF_FUNC bytes_getattr
-    push rbx
-    push r12
-
-    mov rbx, rdi               ; self
-    mov r12, rsi               ; name
-
-    lea rdi, [r12 + PyStrObject.data]
-
-    ; Check "decode"
-    CSTRING rsi, "decode"
-    call ap_strcmp
-    test eax, eax
-    jz .bga_decode
-
-    ; Not found
+    ; Nothing of its own.  There used to be a "decode" arm here that answered
+    ; the UNBOUND builtin -- no self attached -- and it ran ahead of the
+    ; tp_dict entry that decode has had since methods_init registered it.  A
+    ; direct `b.decode()` went through LOAD_METHOD and found the dict; `m =
+    ; b.decode` went through LOAD_ATTR and found this, so `m()` read whatever
+    ; args[0] happened to be as the bytes object.  Every shape that reaches a
+    ; builtin through a bound method did the same: `b.decode(*args)` too.
     RET_NULL
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; return one Value
-    ret
-
-.bga_decode:
-    call _get_bytes_decode_builtin
-    mov rdi, rax
-    call obj_incref
-    mov edx, TAG_PTR
-    pop r12
-    pop rbx
     leave
     V_PACK rax, rdx             ; return one Value
     ret
@@ -1193,17 +1172,15 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     mov r12, [rbx + PyBytesObject.ob_size]
 
     ; decode([encoding[, errors]]).  An encoding that is not a str is a
-    ; TypeError in CPython, not a silent fall back to utf-8.
+    ; TypeError in CPython, not a silent fall back to utf-8 -- and None is
+    ; not a str: `b"ab".decode(None)` is refused there and was taken here as
+    ; "use the default".
     cmp rsi, 3
     jg .bd_too_many
     xor eax, eax
     cmp rsi, 2
     jl .bd_have_enc
     mov rax, [rdi + 8]
-    extern none_singleton
-    lea rcx, [rel none_singleton]
-    cmp rax, rcx
-    je .bd_default_enc
     V_TEST_PTR rax, rcx
     ja .bd_bad_enc
     test rax, rax
@@ -1213,8 +1190,6 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     cmp rcx, rdx
     jne .bd_bad_enc
     jmp .bd_have_enc
-.bd_default_enc:
-    xor eax, eax
 .bd_have_enc:
     mov [rbp - BD_ENC], rax
     mov rdi, rax
@@ -1513,10 +1488,20 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     ret
 
 .bd_bad_enc:
-    extern raise_type_error_with_name
-    mov rsi, rax
-    CSTRING rdi, `decode() argument 'encoding' must be str, not \x01`
-    call raise_type_error_with_name
+    ; Composed rather than handed to raise_type_error_with_name, because
+    ; CPython's argument clinic writes "not None" here where the tp_name is
+    ; "NoneType" -- and it is the clinic's wording a program greps for.
+    push rax
+    lea rdi, [rel bd_msgbuf]
+    lea rsi, [rel bd_msg_enctype]
+    call bd_copy
+    pop rsi
+    mov rdi, rax
+    call bd_append_typename
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel bd_msgbuf]
+    call raise_exception
+    ud2
 .bd_too_many:
     RAISE exc_TypeError_type, "decode() takes at most 2 arguments"
 
@@ -1533,21 +1518,6 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     ud2
 END_FUNC _bytes_decode_impl
 
-;; ============================================================================
-;; Lazy-init helper for bytes.decode builtin
-;; ============================================================================
-DEF_FUNC_LOCAL _get_bytes_decode_builtin
-    mov rax, [rel _bytes_decode_cache]
-    test rax, rax
-    jnz .ret
-    lea rdi, [rel _bytes_decode_impl]
-    CSTRING rsi, "decode"
-    call builtin_func_new
-    mov [rel _bytes_decode_cache], rax
-.ret:
-    leave
-    ret
-END_FUNC _get_bytes_decode_builtin
 
 ;; ============================================================================
 ;; bytes_tp_iter(PyBytesObject *self) -> PyBytesIterObject*
@@ -1834,9 +1804,6 @@ bytes_name_str: db "bytes", 0
 bytes_iter_name_str: db "bytes_iterator", 0
 hex_digits: db "0123456789abcdef"
 
-; Cached builtin for bytes.decode
-align 8
-_bytes_decode_cache: dq 0
 
 ; bytes sequence methods
 align 8
@@ -3317,6 +3284,7 @@ bd_msg_bytes:     db " codec can't decode bytes in position ", 0
 bd_msg_dash:      db "-", 0
 bd_msg_handler:   db "unknown error handler name '", 0
 bd_msg_errtype:   db "decode() argument 'errors' must be str, not ", 0
+bd_msg_enctype:   db "decode() argument 'encoding' must be str, not ", 0
 bd_reason_start:  db "invalid start byte", 0
 bd_reason_cont:   db "invalid continuation byte", 0
 bd_reason_end:    db "unexpected end of data", 0
