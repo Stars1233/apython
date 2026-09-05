@@ -39,12 +39,6 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **`signal.setitimer` and `signal.getitimer` are not there.**  `alarm` is,
-  and `sleep` sits out an interrupted syscall the way PEP 475 asks, so what
-  is missing is the interval timers themselves -- three syscalls and the
-  `struct itimerval` they take.  A test that wants a sub-second alarm reaches
-  for these; `signal.alarm` only takes whole seconds.
-
 - **PEP 646's starred annotation is refused.**  `def g[T, *Ts](a: T, *rest:
   *Ts)` is "can't use starred expression here": the parser takes `*Ts` in the
   type-parameter list, which is where the shape was added, and not in an

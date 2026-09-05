@@ -19,6 +19,42 @@ from enum import IntEnum as _IntEnum
 
 _globals = globals()
 
+
+class itimer_error(OSError):
+    """What setitimer and getitimer raise for a `which` the kernel refuses.
+
+    CPython's _signal defines it and exports it as ItimerError; the two
+    functions here raise a plain OSError, so this narrows it rather than the
+    other way round -- code that catches ItimerError still catches, and code
+    that catches OSError still does too.
+    """
+
+
+ItimerError = itimer_error
+del _globals["itimer_error"]        # CPython exports only the capitalised name
+
+
+def setitimer(*args):
+    """Arm one of the three interval timers, and answer the one replaced.
+
+    _signal's raises OSError for a `which` the kernel refuses; CPython's
+    raises ItimerError, which is a subclass of it, so this narrows rather
+    than widens -- both catches still catch.  The arguments pass through
+    untouched so that _signal's own arity message is the one that shows.
+    """
+    try:
+        return _signal.setitimer(*args)
+    except OSError as exc:
+        raise ItimerError(*exc.args) from None
+
+
+def getitimer(*args):
+    """-> (delay, interval) for one of the three timers."""
+    try:
+        return _signal.getitimer(*args)
+    except OSError as exc:
+        raise ItimerError(*exc.args) from None
+
 _IntEnum._convert_(
     "Signals", __name__,
     lambda name: name.isupper() and name.startswith("SIG")

@@ -222,6 +222,55 @@ for bad in (-1, float("nan"), float("inf"), 10 ** 30):
     except Exception as e:
         print("%-20r %s: %s" % (bad, type(e).__name__, e))
 
+print("--- the interval timers ---")
+# signal.alarm takes whole seconds and nothing else, so a test that wants a
+# sub-second alarm -- which is most of the ones that test signal delivery at
+# all -- had nothing to reach for.  setitimer and getitimer were not there.
+print(sorted(n for n in ("setitimer", "getitimer", "ItimerError",
+                         "ITIMER_REAL", "ITIMER_VIRTUAL", "ITIMER_PROF")
+             if hasattr(signal, n)))
+print(signal.ITIMER_REAL, signal.ITIMER_VIRTUAL, signal.ITIMER_PROF,
+      issubclass(signal.ItimerError, OSError))
+
+ticked = []
+
+
+def tick(sig, frame):
+    ticked.append(sig)
+
+
+signal.signal(signal.SIGALRM, tick)
+print("idle     ", signal.getitimer(signal.ITIMER_REAL))
+print("replaced ", signal.setitimer(signal.ITIMER_REAL, 0.05))
+armed = signal.getitimer(signal.ITIMER_REAL)
+print("armed    ", 0 < armed[0] <= 0.05, armed[1])
+start = time.time()
+while not ticked and time.time() - start < 3.0:
+    pass
+print("fired    ", ticked == [signal.SIGALRM], time.time() - start < 2.0)
+print("spent    ", signal.getitimer(signal.ITIMER_REAL))
+print("disarmed ", signal.setitimer(signal.ITIMER_REAL, 0.0),
+      signal.getitimer(signal.ITIMER_REAL))
+signal.signal(signal.SIGALRM, signal.SIG_DFL)
+
+print("--- and what they refuse ---")
+for label, fn in (("getitimer()", lambda: signal.getitimer()),
+                  ("getitimer(99)", lambda: signal.getitimer(99)),
+                  ("getitimer(-1)", lambda: signal.getitimer(-1)),
+                  ("getitimer('x')", lambda: signal.getitimer("x")),
+                  ("setitimer()", lambda: signal.setitimer()),
+                  ("setitimer(0)", lambda: signal.setitimer(0)),
+                  ("setitimer(0,1,2,3)", lambda: signal.setitimer(0, 1, 2, 3)),
+                  ("setitimer(0,-1)", lambda: signal.setitimer(0, -1)),
+                  ("setitimer(0,nan)", lambda: signal.setitimer(0, float("nan"))),
+                  ("setitimer(0,'x')", lambda: signal.setitimer(0, "x")),
+                  ("setitimer(0,None)", lambda: signal.setitimer(0, None)),
+                  ("setitimer(99,1)", lambda: signal.setitimer(99, 1))):
+    try:
+        print("%-20s %r" % (label, fn()))
+    except Exception as e:
+        print("%-20s %s: %s" % (label, type(e).__name__, e))
+
 signal.signal(signal.SIGUSR1, signal.SIG_DFL)
 signal.signal(signal.SIGUSR2, signal.SIG_DFL)
 print("done")
