@@ -14,14 +14,46 @@ reasoning that chose them and what changing one would cost.
 
 ## Correctness
 
-- **The collector frees live classes when a metaclass-made class is walked as
-  a class.**  A class whose metatype is a metaclass of the user's own is
-  traversed by the metatype's `tp_traverse`, and that is `instance_traverse`
-  -- the generic heaptype one, which walks the instance's slot region.  It
-  should be `type_traverse`, which reports the four references a class
-  actually holds: `tp_dict`, `tp_base`, `tp_bases` and `tp_mro`.  Installing
-  it makes the collector free classes that are still live, and the next
-  collection reads the freed block:
+- **A class loses a reference when `__init_subclass__` drops an unfinished
+  generator.**  Reduced from a collector crash, and independent of the
+  collector: it happens with `gc.disable()`.
+
+      class Base:
+          def __init_subclass__(cls, **kw):
+              g = (_ for _ in range(3))
+              del g                      # never iterated
+
+      class D(Base):
+          pass                           # D's refcount is now one too low
+
+  Measured at the call site in `type_from_parts`: the class has an
+  `ob_refcnt` of 2 immediately before `__init_subclass__` is invoked and 1
+  immediately after.  Every other class comes back with what it went in with.
+
+  The conditions are exact, and each was measured:
+
+  - The generator must NOT run to exhaustion.  `list(genexpr)`, `sum(...)`,
+    `max(...)` are all fine; `any(...)` and `all(...)` that short-circuit,
+    `next(g)` and then abandoning it, `g.close()`, and a generator that is
+    created and never touched all lose one.  A list comprehension in the same
+    place is fine.  So it is the GeneratorExit path -- `gen_dealloc` ->
+    `gen_dealloc_close` -> `gen_throw` -> a nested `eval_frame`.
+  - Keeping the generator alive past the call (stashing it in a global) loses
+    nothing, so the loss is at the generator's destruction.
+  - It does not need to be the same frame: a helper called from
+    `__init_subclass__` that drops the generator loses the reference just the
+    same, and `del cls` first does not prevent it.
+  - The same function called ordinarily from Python -- as a `sorted(key=...)`
+    callback, through `map`, or plainly -- loses nothing.  So the path that
+    matters is `bc_call_kw` -> `obj_call_n` -> `func_call`, which is how
+    `type_from_parts` invokes the hook, with args[0] a borrowed slot pushed
+    by SPUSH_PTR.
+
+  It stays invisible because a class is in a cycle with its own MRO tuple, so
+  a refcount one short still never reaches zero -- and the collector, which
+  would notice, cannot break that cycle: a metaclass-made class inherits
+  `instance_traverse` rather than `type_traverse`.  Installing the right
+  traverse in `src/buildclass.asm` is what makes it fatal.  With it,
 
       PYTHONPATH=$CPYTHON_LIB ./apython -  <<'EOF'
       import gc
@@ -29,60 +61,18 @@ reasoning that chose them and what changing one would cost.
       import typing
       EOF
 
-  segfaults in `gc_visit_decref`, and valgrind shows the freed block being
-  read by `op_load_fast` -- a class that a frame still had in a local.
+  segfaults in `gc_visit_decref`, and valgrind shows the freed class being
+  read by `op_load_fast`.  Everything the collector does there is correct: a
+  referrer dump finds exactly one referrer for each class it takes -- the
+  class's own MRO tuple -- so by refcount they really are garbage.  They are
+  garbage only because of the missing reference.
 
-  What is measured so far:
-
-  - Every edge `type_traverse` reports is one the class owns.  `mro_compute`
-    increfs each MRO entry, `type_from_parts` increfs `tp_base` and the bases
-    tuple, and `user_type_dealloc` releases all four.  So it is not a plain
-    over-report.
-  - The crash goes away if `type_traverse` skips `tp_mro`, or if
-    `tuple_traverse` reports nothing, or if the collector is off during
-    `type_from_parts`.  No other `tp_traverse` in the tree makes any
-    difference.  So it lives in the cycle between a class and its own MRO
-    tuple.
-  - It is the DEALLOC that does the damage, not the clear: installing
-    `type_clear` alone changes nothing, and installing `type_traverse` alone
-    reproduces it.
-  - Each class the collector takes has an `ob_refcnt` of exactly 2 when it is
-    classified, and both referrers are traversed containers, so its gc_refs
-    reaches 0 by the collector's own arithmetic.  The classes are named:
-    `typing.SupportsInt`, `re.RegexFlag`, `enum.EnumCheck`, `typing._C`.
-  - The unreachable set they end up in is tiny and self-contained -- the
-    class, its bases tuple and its MRO tuple -- while the collection as a
-    whole starts phase 4 with 101 roots against 7293 candidates and rescues
-    all but a handful.  So the rescue walk works; these few are never reached
-    from a root.
-
-  - The referrer dump says what the search was waiting for.  Traversing every
-    tracked object looking for one of these classes finds exactly ONE
-    referrer -- its own MRO tuple, itself in the unreachable set -- and none
-    at all among the reachable ones or in the generations outside the
-    collection.  So by refcount these really are garbage: a class and its MRO
-    tuple pointing only at each other, which is what a two-object cycle looks
-    like, and collecting it is right.
-
-  Which turns the question around.  The classification is sound, and so is
-  `type_traverse`; what is wrong is that something still reaches the class
-  after it is freed -- `op_load_fast` out of a frame local in one trace, a
-  dict_traverse in another -- through a reference that was never counted.  A
-  missing INCREF somewhere on the path that hands a class to a local or a
-  dict, invisible for as long as these cycles are never collected, which is
-  exactly what the inherited `instance_traverse` guarantees.  Finding it means
-  catching the store: break on the class's address being written, or record
-  every refcount change to it.
-
-  Until it is found, `src/buildclass.asm` leaves a metatype's traverse and
-  clear inherited, which is at least self-consistent; `tp_dealloc` is
-  `user_type_dealloc`, which is a separate correctness fix and is unaffected.
-  The cost of leaving it is a leak: a class is in a cycle with its own MRO
-  tuple, so only the collector can free it, and a collector that does not
-  report the edge cannot.  A metaclass-made class that goes out of scope stays
-  in memory and in its bases' `__subclasses__()`.
-  `tests/test_set_name_metatype.py` covers what IS guaranteed -- the survivors
-  are intact and valgrind is quiet -- rather than how many are left.
+  So the order is: fix the reference, then install the traverse and the
+  matching clear beside the `tp_dealloc` that is already there.  Until then a
+  metaclass-made class leaks: it stays in memory and in its bases'
+  `__subclasses__()`.  `tests/test_set_name_metatype.py` covers what IS
+  guaranteed -- the survivors are intact and valgrind is quiet -- rather than
+  how many are left.
 
 - **Missing C modules.**  The ranking here is by what actually stands in the
   way rather than by which import fails first -- the two are not the same,
