@@ -7,8 +7,8 @@
 ; attribute access in a Python program goes through, and the part worth
 ; reading on its own.
 ;
-; type_refresh_getattribute_flag lives here too: it is the cold half of the
-; hook check, and it answers the same question the hot half asks.
+; type_refresh_attr_flags lives here too: it is the cold half of both hot
+; checks, and it answers the same questions they ask.
 
 %include "macros.inc"
 %include "object.inc"
@@ -55,6 +55,8 @@ extern tuple_sub_fill
 extern builtin_sub_init_base
 extern classmethod_type
 extern property_type
+extern member_descr_type
+extern getset_descr_type
 
 ; Kept in class.asm, which also uses them
 extern base_slot
@@ -159,21 +161,127 @@ DEF_FUNC instance_getattr, IGA_FRAME
 END_FUNC instance_getattr
 
 ;; ============================================================================
-;; type_refresh_getattribute_flag(rdi = a heaptype) -> nothing
+;; attr_is_data_descr(rdi = a Value) -> eax = 1 if it is a DATA descriptor
 ;;
-;; Ask, once, the question instance_getattr used to ask on every access: does
-;; anything in this type's MRO define a __getattribute__ that is not object's?
-;; Record it in TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN.
+;; CPython's rule is "its type defines __set__ or __delete__".  The three
+;; builtin descriptor types are answered by identity; a user descriptor costs
+;; two MRO walks, but only ever on the cold path that fills in a type's flags.
 ;;
-;; The answer is inherited, so it is pushed down every subclass.  That is the
-;; whole reason the direct-subclass table has to be populated before any user
-;; code runs -- a class registered later would sit outside this walk and keep
-;; a stale bit forever.
+;; staticmethod, classmethod and a plain function are deliberately NOT data
+;; descriptors: they lose to an entry in the instance dict, and that is the
+;; whole distinction this exists to draw.
+;; ============================================================================
+DEF_FUNC attr_is_data_descr, 8   ; 1 push below, so rsp stays 16-aligned
+    push rbx
+    V_TEST_PTR rdi, rax
+    ja .aidd_no                 ; an immediate is not a descriptor
+    test rdi, rdi
+    jz .aidd_no
+    mov rbx, [rdi + PyObject.ob_type]
+    test rbx, rbx
+    jz .aidd_no
+
+    lea rax, [rel member_descr_type]
+    cmp rbx, rax
+    je .aidd_yes
+    lea rax, [rel getset_descr_type]
+    cmp rbx, rax
+    je .aidd_yes
+    lea rax, [rel property_type]
+    cmp rbx, rax
+    je .aidd_yes
+
+    ; Anything else is one only if its own type says so.
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .aidd_no
+    mov rdi, rbx
+    CSTRING rsi, "__set__"
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz .aidd_yes
+    mov rdi, rbx
+    CSTRING rsi, "__delete__"
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz .aidd_yes
+
+.aidd_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.aidd_yes:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC attr_is_data_descr
+
+;; ============================================================================
+;; dict_has_data_descr(rdi = a dict) -> eax = 1 if any value is a data descr
+;;
+;; The dense entries array, holes skipped -- the same walk dict.copy() makes.
+;; ============================================================================
+DEF_FUNC dict_has_data_descr
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov rbx, rdi
+    mov r13, [rbx + PyDictObject.capacity]
+    xor r14d, r14d
+.dhdd_loop:
+    cmp r14, r13
+    jge .dhdd_no
+    mov rax, [rbx + PyDictObject.entries]
+    imul rcx, r14, DICT_ENTRY_SIZE
+    add rax, rcx
+    mov r12, [rax + DictEntry.key]
+    test r12, r12
+    jz .dhdd_next
+    mov rdi, [rax + DictEntry.value]
+    call attr_is_data_descr
+    test eax, eax
+    jnz .dhdd_yes
+.dhdd_next:
+    inc r14
+    jmp .dhdd_loop
+.dhdd_no:
+    xor eax, eax
+    jmp .dhdd_out
+.dhdd_yes:
+    mov eax, 1
+.dhdd_out:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_has_data_descr
+
+;; ============================================================================
+;; type_refresh_attr_flags(rdi = a heaptype) -> nothing
+;;
+;; Ask, once, the two questions instance_getattr's fast path is not allowed to
+;; ask per access:
+;;
+;;   - does anything in this MRO define a __getattribute__ that is not
+;;     object's?                      TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN
+;;   - does anything in this MRO keep a DATA descriptor in its dict?
+;;                                    TYPE_FLAG_MRO_HAS_DATA_DESCR
+;;
+;; Both answers are inherited, so both are pushed down every subclass.  That
+;; is the whole reason the direct-subclass table has to be populated before
+;; any user code runs -- a class registered later would sit outside this walk
+;; and keep a stale bit forever.
 ;;
 ;; Called at class creation and from type_setattr.  Both are cold; this walks
 ;; the MRO and allocates nothing.
 ;; ============================================================================
-DEF_FUNC type_refresh_getattribute_flag
+DEF_FUNC type_refresh_attr_flags
     push rbx
     push r12
     push r13
@@ -206,6 +314,28 @@ DEF_FUNC type_refresh_getattribute_flag
     not rax
     and [rbx + PyTypeObject.tp_flags], rax
 
+    ; --- and the data-descriptor bit ---
+    ; The MRO's dicts, scanned for anything a data descriptor could be.  Cold,
+    ; and the answer saves the hot path an MRO walk per attribute access.
+    mov rax, TYPE_FLAG_MRO_HAS_DATA_DESCR
+    not rax
+    and [rbx + PyTypeObject.tp_flags], rax
+    mov r12, rbx                        ; the MRO walker
+.trg_mro:
+    test r12, r12
+    jz .trg_children
+    mov rdi, [r12 + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .trg_mro_next
+    call dict_has_data_descr
+    test eax, eax
+    jz .trg_mro_next
+    or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_MRO_HAS_DATA_DESCR
+    jmp .trg_children
+.trg_mro_next:
+    MRO_NEXT r12, rbx
+    jmp .trg_mro
+
 .trg_children:
     mov rdi, rbx
     call sub_list_for_type
@@ -222,7 +352,7 @@ DEF_FUNC type_refresh_getattribute_flag
     mov rdi, [r12 + r14*8]
     test rdi, rdi
     jz .trg_next
-    call type_refresh_getattribute_flag
+    call type_refresh_attr_flags
 .trg_next:
     inc r14
     jmp .trg_loop
@@ -234,7 +364,7 @@ DEF_FUNC type_refresh_getattribute_flag
     pop rbx
     leave
     ret
-END_FUNC type_refresh_getattribute_flag
+END_FUNC type_refresh_attr_flags
 
 ;; ============================================================================
 ;; instance_getattr_default(PyInstanceObject *self, PyObject *name) -> Value
@@ -250,6 +380,7 @@ END_FUNC type_refresh_getattribute_flag
 ;; ============================================================================
 IG_NAME   equ 8
 IG_ORIGIN equ 16        ; the type the MRO walk started from
+IG_DESCR1 equ 24        ; 1 when the MRO was consulted BEFORE the dict
 IG_FRAME  equ 40            ; + 3 pushes = 64, 16-aligned
 global instance_getattr_default
 DEF_FUNC instance_getattr_default, IG_FRAME
@@ -261,6 +392,18 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     mov rbx, rdi                ; rbx = self (instance)
     mov r12, rsi                ; r12 = name
     mov [rbp - IG_NAME], rsi    ; r12 is reused as scratch further down
+    mov qword [rbp - IG_DESCR1], 0
+
+    ; A DATA descriptor outranks the instance dict and a non-data one does
+    ; not, so the correct order is MRO first -- and the fast order is instance
+    ; dict first, which is what an ordinary `self.x` wants.  The flag says
+    ; which classes actually need the slow order.  Almost none do.
+    mov rax, [rbx + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_MRO_HAS_DATA_DESCR
+    jz .inst_dict_first
+    mov qword [rbp - IG_DESCR1], 1
+    jmp .check_type_dict
+.inst_dict_first:
 
     ; Check self's instance dict first; a type may have none at all.
     LOAD_INST_DICT rdi, rbx, .check_type_dict
@@ -295,6 +438,19 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     test rcx, rcx
     jnz .walk_mro
 
+    ; Nothing in the MRO.  On the descriptor-first order that leaves the
+    ; instance dict still unread.
+    cmp qword [rbp - IG_DESCR1], 0
+    je .not_found
+    mov qword [rbp - IG_DESCR1], 0
+    LOAD_INST_DICT rdi, rbx, .not_found
+    test rdi, rdi
+    jz .not_found
+    mov rsi, [rbp - IG_NAME]
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz .found_inst
     jmp .not_found
 
 .found_inst:
@@ -312,6 +468,43 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     ret
 
 .found_type:
+    ; On the descriptor-first order the instance dict has not been consulted
+    ; yet, and it outranks everything here except a data descriptor.
+    cmp qword [rbp - IG_DESCR1], 0
+    je .found_type_dispatch
+    mov qword [rbp - IG_DESCR1], 0      ; ask once
+    ; rax/rdx are an unpacked (payload, tag) pair here, not a Value: only a
+    ; TAG_PTR payload is an address, and only an address can be a descriptor.
+    cmp rdx, TAG_PTR
+    jne .ft_beaten_by_inst
+    push rax
+    push rdx
+    mov rdi, rax
+    call attr_is_data_descr
+    pop rdx
+    pop rdi
+    test eax, eax
+    mov rax, rdi
+    jnz .found_type_dispatch            ; data descriptor: it wins
+.ft_beaten_by_inst:
+    ; Not one.  If the instance has the name, that is the answer.
+    push rax
+    push rdx
+    LOAD_INST_DICT rdi, rbx, .ft_no_inst
+    test rdi, rdi
+    jz .ft_no_inst
+    mov rsi, [rbp - IG_NAME]
+    call dict_get
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .ft_no_inst
+    add rsp, 16                         ; drop the saved type-dict answer
+    jmp .found_inst
+.ft_no_inst:
+    pop rdx
+    pop rax
+
+.found_type_dispatch:
     ; Found in type dict — handle method binding.
     ; Descriptors (staticmethod, classmethod, property) are returned as-is
     ; for LOAD_ATTR to unwrap, since LOAD_ATTR knows the push convention.

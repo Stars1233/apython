@@ -1045,6 +1045,17 @@ TYPE_FLAG_HAVE_GC      equ 0x0004
 ; written to, so it is computed at class creation and refreshed by
 ; type_setattr -- down through every subclass, since the answer is inherited.
 TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN equ 0x0008
+; Some type in this type's MRO keeps a DATA descriptor -- a property, a
+; __slots__ member, a getset, or anything whose own type defines __set__ or
+; __delete__ -- in its dict.
+;
+; A data descriptor outranks the instance dict, and a non-data one does not.
+; Resolving that needs the MRO consulted BEFORE the instance dict, which is
+; the opposite of the order that is fast: an ordinary `self.x` wants the
+; instance dict hit on the first lookup.  The bit says which order is correct,
+; so a class with no data descriptors -- almost all of them -- keeps the fast
+; one.  Maintained beside TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN.
+TYPE_FLAG_MRO_HAS_DATA_DESCR equ 0x0010
 TYPE_FLAG_INT_SUBCLASS equ 0x0100
 TYPE_FLAG_STR_SUBCLASS equ 0x0200
 TYPE_FLAG_LIST_SUBCLASS equ 0x0400
