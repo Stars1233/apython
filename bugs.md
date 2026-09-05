@@ -41,6 +41,53 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
+- **A reflected dunder on a subclass of a builtin loses to the builtin's own
+  slot.**  `1 + m`, for a `class MyFloat(float)` defining only `__radd__`,
+  answers `3.0` where CPython answers `MyFloat.__radd__`; `2 * MyFloatM(3.0)`
+  is the same shape.  int's `nb_add` declines the float subclass, and the
+  right operand's slot is tried next -- but MyFloat INHERITS `float_add`, so
+  that succeeds and the user's `__radd__` is never consulted.
+
+  `src/slots.asm` installs a wrapper for `__add__` and not for `__radd__` on
+  its own, on the stated ground that `op_binary_op`'s reflected-dunder arm
+  serves that direction.  It does, for a class with no inherited numeric slot
+  at all -- `1 + Plain()` is right -- and cannot for a builtin's subclass,
+  where the inherited slot answers first.  CPython's `slot_nb_add` exists on
+  such a type precisely because `__radd__` was defined, and notices that
+  `self` is the right operand.
+
+  The rule already exists here in `binop_subclass_first`, which is why
+  `1 + MyInt(2)` IS right: MyInt is a subclass of int, so the reflected arm
+  runs before either slot.  MyFloat is not a subclass of int, so nothing
+  reaches it.
+
+- **`obj_binary_op` does not implement the subclass-first rule at all.**
+  `sum([1, 2, MyInt(3)])` for an int subclass defining `__radd__` answers `6`
+  where CPython answers `MyInt.__radd__`, and `1 + MyInt(3)` answers correctly
+  -- the two go through different functions.  `op_binary_op` calls
+  `binop_subclass_first` before either slot; `obj_binary_op`, which every
+  builtin that adds two objects uses, goes straight to the left type's slot.
+
+  `binop_subclass_first` is file-local to `src/opcodes/arith.asm` and takes
+  `(payload, tag)` pairs rather than Values, and it needs the reflected
+  dunder's name, which `obj_binary_op` has no table for.  Sharing it means
+  exporting it, converting at the boundary, and giving `binary_op_offsets` a
+  parallel column of reflected names.
+
+- **`int / int` double-rounds when either operand is wider than a double.**
+  `(10**30) / 7` answers `1.4285714285714283e+29` where CPython answers
+  `1.4285714285714285e+29`, and `1 / 10**30` is out by an ulp the same way.
+  `int_true_divide` converts each operand to a double and divides, which
+  rounds twice; CPython's `long_true_divide` computes the quotient of the two
+  exact integers to 54 bits and rounds once.
+
+  Operands inside +-2^50 are unaffected and take a specialized opcode: each
+  converts exactly, so the single division rounding is the only one.  The fix
+  is a GMP `mpz_tdiv_qr` at a scale chosen from the two bit lengths, then one
+  round-half-even using the remainder as the sticky bit -- along with the
+  `OverflowError` CPython raises when the quotient is too large for a double,
+  which this does not raise either.
+
 - **Functions with no docblock at all**, and, among those that have one,
   docblocks with no `->` signature line.  The signature is the only part of a
   function's contract that nothing checks, so its absence is a real gap rather
