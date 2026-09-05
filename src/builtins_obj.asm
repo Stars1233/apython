@@ -819,6 +819,32 @@ DEF_FUNC builtin_sum, SM_FRAME
     cmp qword [rbp - SM_PHASE], 1
     je .sum_compensated
 
+    ; Both the total and the item an integer immediate?  Then the addition is
+    ; three instructions on the Values themselves.  Everything below is the
+    ; general numeric protocol -- obj_binary_op, int_binop_unpack twice,
+    ; int_add -- and over a list of ordinary integers that was 45% of sum().
+    ; CPython has the same fast path, keeping a Py_ssize_t running total that
+    ; bails on overflow (bltinmodule.c); this bails into the protocol instead,
+    ; so there is only one place that knows how to add.
+    ;
+    ; Safe whether the phase is 0 or 2.  An immediate is never a heaptype
+    ; instance, so no __add__ or __radd__ is bypassed, and it owns nothing, so
+    ; neither side needs a DECREF.  A float total fails the first test, which
+    ; is why the phase does not have to be consulted again.
+    mov rax, [rbp - SM_ACC]
+    cmp rax, [rel v_int_lo]
+    jb .sum_generic_pair
+    mov rdx, [rbp - SM_ITEM]
+    cmp rdx, [rel v_int_lo]
+    jb .sum_generic_pair
+    add rax, rdx
+    sub rax, [rel v_int_bias]
+    cmp rax, [rel v_int_lo]
+    jb .sum_generic_pair        ; past +-2^50: the protocol boxes it properly
+    mov [rbp - SM_ACC], rax
+    jmp .sum_loop
+
+.sum_generic_pair:
     mov rdi, [rbp - SM_ACC]
 .sum_generic_add:
     mov rsi, [rbp - SM_ITEM]
