@@ -274,10 +274,22 @@ DEF_FUNC float_repr
 .repr_loop:
     mov qword [rbp - FR_BUMP], 0
 .repr_try:
+    ; "%.*e", not "%.*g".  %g STRIPS TRAILING ZEROS, so asking it for sixteen
+    ; digits of 6.256509672447191e-148 gives "6.25650967244719e-148" -- fifteen
+    ; digits, because the sixteenth is a zero it threw away.  fr_bump_last then
+    ; carried the '9' instead of that zero and produced "...4472", so neither
+    ; candidate was the "...47191" that round-trips, and the search fell
+    ; through to seventeen digits.  CPython prints sixteen.  Four of the 2098
+    ; powers of two came out wrong this way.
+    ;
+    ; %e keeps the zero, which is the digit the bump has to land on.  It is
+    ; also the form .repr_found re-renders below, so the candidate that is
+    ; validated here is now the same string that is measured there.
     lea rdi, [rbp - FR_BUF]   ; buf
     mov esi, 48                ; bufsz
-    lea rdx, [rel fmt_g]      ; "%.*g"
-    mov ecx, [rbp - FR_PREC]  ; prec
+    lea rdx, [rel fmt_e]      ; "%.*e"
+    mov ecx, [rbp - FR_PREC]  ; significant digits
+    dec ecx                    ; %e counts digits AFTER the point
     movsd xmm0, [rbp - FR_VAL] ; value
     mov eax, 1                ; 1 xmm register used
     call snprintf wrt ..plt

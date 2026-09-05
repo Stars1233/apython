@@ -191,6 +191,7 @@ test_fileio
 test_final_types
 test_float_big_int
 test_float_complex_subclass
+test_float_format_diff
 test_float_fromhex
 test_float_methods
 test_float_nan_ops

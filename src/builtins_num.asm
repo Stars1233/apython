@@ -3240,3 +3240,101 @@ DEF_FUNC deprecation_warn, DW_FRAME
     leave
     ret
 END_FUNC deprecation_warn
+
+;; ============================================================================
+;; float_str_clean(rdi = NUL-terminated text, rsi = its length)
+;;     (builtin_float's, in builtins.asm, which is at the file-size cap)
+;;     -> rax = the text to hand strtod, or 0 when it is not a float at all
+;;        rdx = 1 when rax is an ap_malloc'd copy the caller has to free
+;;
+;; Two things glibc's strtod and CPython's float() disagree about:
+;;
+;;   - strtod accepts C99 HEX FLOATS, so float("0x1.8p+1") answered 3.0 and
+;;     float("0x10") answered 16.0, where CPython raises ValueError -- only
+;;     float.fromhex reads that spelling.  No decimal float, and neither
+;;     "inf"/"infinity" nor "nan", contains an x, so the letter is the test.
+;;
+;;   - strtod rejects PEP 515 UNDERSCORES, so float("1_000.5") raised where
+;;     CPython answers 1000.5.  The rule is that an underscore stands BETWEEN
+;;     TWO DIGITS: "1_.0", "1e_10", "1e1_", "_1" and "1__0" are all errors,
+;;     while "1_0e1_0", ".5_5" and "5_5." are fine.  strtod is then handed a
+;;     copy with them removed.
+;; ============================================================================
+DEF_FUNC float_str_clean          ; 4 pushes, so rsp stays 16-aligned
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov rbx, rdi
+    mov r12, rsi
+
+    xor r13d, r13d              ; an underscore was seen
+    xor ecx, ecx
+.fsc_scan:
+    cmp rcx, r12
+    jae .fsc_scanned
+    movzx eax, byte [rbx + rcx]
+    cmp al, 'x'
+    je .fsc_reject
+    cmp al, 'X'
+    je .fsc_reject
+    cmp al, '_'
+    jne .fsc_next
+    mov r13d, 1
+    test rcx, rcx
+    jz .fsc_reject              ; nothing before it
+    movzx eax, byte [rbx + rcx - 1]
+    sub al, '0'
+    cmp al, 9
+    ja .fsc_reject              ; what precedes it is not a digit
+    lea rax, [rcx + 1]
+    cmp rax, r12
+    jae .fsc_reject             ; nothing after it
+    movzx eax, byte [rbx + rcx + 1]
+    sub al, '0'
+    cmp al, 9
+    ja .fsc_reject              ; what follows it is not a digit
+.fsc_next:
+    inc rcx
+    jmp .fsc_scan
+
+.fsc_scanned:
+    test r13d, r13d
+    jnz .fsc_copy
+    mov rax, rbx                ; nothing to remove
+    xor edx, edx
+    jmp .fsc_out
+
+.fsc_copy:
+    lea rdi, [r12 + 1]
+    call ap_malloc
+    mov r14, rax
+    xor ecx, ecx                ; source index
+    xor esi, esi                ; destination index
+.fsc_copy_loop:
+    cmp rcx, r12
+    jae .fsc_copy_done
+    movzx eax, byte [rbx + rcx]
+    inc rcx
+    cmp al, '_'
+    je .fsc_copy_loop
+    mov [r14 + rsi], al
+    inc rsi
+    jmp .fsc_copy_loop
+.fsc_copy_done:
+    mov byte [r14 + rsi], 0
+    mov rax, r14
+    mov edx, 1
+    jmp .fsc_out
+
+.fsc_reject:
+    xor eax, eax
+    xor edx, edx
+.fsc_out:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC float_str_clean
