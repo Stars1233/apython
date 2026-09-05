@@ -1590,6 +1590,35 @@ align 8
 section .text
 
 .cmp_slow_path:
+    ; Both float: specialize, the same way the SmallInt arm above does, and
+    ; fuse with the jump that follows when there is one.  This has to come
+    ; before the general protocol below, but it is safe there for the reason
+    ; the arithmetic superinstructions are: a TAG_FLOAT immediate is never a
+    ; heaptype instance, so no user __lt__ can be bypassed.
+    cmp r9d, TAG_FLOAT
+    jne .cmp_slow_real
+    cmp r8d, TAG_FLOAT
+    jne .cmp_slow_real
+    cmp byte [rbx + 2], 114     ; POP_JUMP_IF_FALSE
+    je .cmp_spec_float_jf
+    cmp byte [rbx + 2], 115     ; POP_JUMP_IF_TRUE
+    je .cmp_spec_float_jt
+    mov byte [rbx - 2], 223
+    jmp .cmp_float_rerun
+.cmp_spec_float_jf:
+    mov byte [rbx - 2], 224
+    jmp .cmp_float_rerun
+.cmp_spec_float_jt:
+    mov byte [rbx - 2], 225
+.cmp_float_rerun:
+    ; The operands are still on the stack -- VPOP_VAL only moved r13 -- so
+    ; putting it back and re-dispatching runs the new opcode on them.  The
+    ; argument is wide-safe here: COMPARE_OP never carries an EXTENDED_ARG.
+    VUNDROP 2
+    sub rbx, 2
+    DISPATCH
+
+.cmp_slow_real:
     ; Save operands + tags and comparison op
     ; Stack layout: [rsp+BO_RIGHT], [rsp+BO_RTAG], [rsp+BO_LEFT], [rsp+BO_LTAG]
     push r9                    ; save left tag
@@ -2631,6 +2660,240 @@ section .text
     sub rbx, 2
     DISPATCH
 END_FUNC op_compare_op_int
+
+;; ============================================================================
+;; op_compare_op_float (223) -> nothing; pushes the bool and dispatches
+;;
+;; The float comparison superinstructions (223, 224, 225).
+;;
+;; op_compare_op had a both-SmallInt arm and nothing else, so a pair of float
+;; immediates fell through to the general protocol: float_binop_accepts, then
+;; float_compare, which calls float_binop_accepts twice more, fc_wide_int
+;; twice and float_to_f64 twice -- about nine calls and four pack/unpack round
+;; trips to reach one ucomisd.  It was the only float operation not already
+;; ahead of CPython.
+;;
+;; These read the two Values straight off the stack and guard on the raw
+;; high16, so nothing is unpacked into a (payload, tag) pair and re-packed;
+;; the deopt is therefore just a rewrite, with the operands still in place.
+;;
+;; NaN is the one thing the integer forms do not have to think about.
+;; `ucomisd` reports unordered as ZF=1, PF=1, CF=1, so `seta`/`setae` are
+;; already false for it, while `setb`/`setbe`/`sete` would each be wrongly
+;; true and `setne` wrongly false.  Those four are corrected with the parity
+;; flag: AND with `setnp` for the three that must become false, OR with
+;; `setp` for the one that must become true.
+;; ============================================================================
+DEF_FUNC_BARE op_compare_op_float
+    shr ecx, 4                  ; ecx = PY_LT/LE/EQ/NE/GT/GE (0-5)
+    V_TEST_F64_M [r13 - 8], rax
+    ja .cf_deopt
+    V_TEST_F64_M [r13 - 16], rax
+    ja .cf_deopt
+    mov rsi, [r13 - 8]          ; right
+    mov rdi, [r13 - 16]         ; left
+    V_TO_F64 rsi
+    V_TO_F64 rdi
+    movq xmm1, rsi
+    movq xmm0, rdi
+    sub r13, 16                 ; both consumed; immediates own nothing
+    ucomisd xmm0, xmm1
+    lea r8, [rel .cf_setcc_table]
+    jmp [r8 + rcx*8]            ; LEA and jmp [mem] leave the flags alone
+
+.cf_lt:
+    setb al
+    setnp dl
+    and al, dl
+    jmp .cf_push
+.cf_le:
+    setbe al
+    setnp dl
+    and al, dl
+    jmp .cf_push
+.cf_eq:
+    sete al
+    setnp dl
+    and al, dl
+    jmp .cf_push
+.cf_ne:
+    setne al
+    setp dl
+    or al, dl
+    jmp .cf_push
+.cf_gt:
+    seta al                     ; false for unordered already
+    jmp .cf_push
+.cf_ge:
+    setae al                    ; likewise
+.cf_push:
+    movzx eax, al
+    VPUSH_BOOL rax
+    add rbx, 2                  ; skip CACHE
+    DISPATCH
+
+section .data
+align 8
+.cf_setcc_table:
+    dq .cf_lt
+    dq .cf_le
+    dq .cf_eq
+    dq .cf_ne
+    dq .cf_gt
+    dq .cf_ge
+section .text
+.cf_deopt:
+    ; Nothing was popped, so there is nothing to put back.
+    mov byte [rbx - 2], 107     ; COMPARE_OP
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_compare_op_float
+
+;; ============================================================================
+;; op_compare_op_float_jump_false (224) -> nothing; branches and dispatches
+;;
+;; COMPARE_OP_FLOAT fused with the POP_JUMP_IF_FALSE that follows.  No bool
+;; object is built at all: the flags decide the branch directly.
+;; ============================================================================
+DEF_FUNC_BARE op_compare_op_float_jump_false
+    shr ecx, 4
+    V_TEST_F64_M [r13 - 8], rax
+    ja .cfjf_deopt
+    V_TEST_F64_M [r13 - 16], rax
+    ja .cfjf_deopt
+    movzx r9d, byte [rbx + 3]   ; the POP_JUMP_IF_FALSE argument
+    mov rsi, [r13 - 8]
+    mov rdi, [r13 - 16]
+    V_TO_F64 rsi
+    V_TO_F64 rdi
+    movq xmm1, rsi
+    movq xmm0, rdi
+    sub r13, 16
+    ucomisd xmm0, xmm1
+    lea r8, [rel .cfjf_setcc_table]
+    jmp [r8 + rcx*8]
+
+.cfjf_lt:
+    setb al
+    setnp dl
+    and al, dl
+    jmp .cfjf_branch
+.cfjf_le:
+    setbe al
+    setnp dl
+    and al, dl
+    jmp .cfjf_branch
+.cfjf_eq:
+    sete al
+    setnp dl
+    and al, dl
+    jmp .cfjf_branch
+.cfjf_ne:
+    setne al
+    setp dl
+    or al, dl
+    jmp .cfjf_branch
+.cfjf_gt:
+    seta al
+    jmp .cfjf_branch
+.cfjf_ge:
+    setae al
+.cfjf_branch:
+    add rbx, 4                  ; CACHE (2) + POP_JUMP_IF_FALSE (2)
+    test al, al
+    jnz .cfjf_no_jump
+    lea rbx, [rbx + r9*2]
+.cfjf_no_jump:
+    DISPATCH
+
+section .data
+align 8
+.cfjf_setcc_table:
+    dq .cfjf_lt
+    dq .cfjf_le
+    dq .cfjf_eq
+    dq .cfjf_ne
+    dq .cfjf_gt
+    dq .cfjf_ge
+section .text
+.cfjf_deopt:
+    mov byte [rbx - 2], 107
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_compare_op_float_jump_false
+
+;; ============================================================================
+;; op_compare_op_float_jump_true (225) -> nothing; branches and dispatches
+;;
+;; The same fused with POP_JUMP_IF_TRUE, so the branch is taken when the
+;; comparison holds rather than when it does not.
+;; ============================================================================
+DEF_FUNC_BARE op_compare_op_float_jump_true
+    shr ecx, 4
+    V_TEST_F64_M [r13 - 8], rax
+    ja .cfjt_deopt
+    V_TEST_F64_M [r13 - 16], rax
+    ja .cfjt_deopt
+    movzx r9d, byte [rbx + 3]
+    mov rsi, [r13 - 8]
+    mov rdi, [r13 - 16]
+    V_TO_F64 rsi
+    V_TO_F64 rdi
+    movq xmm1, rsi
+    movq xmm0, rdi
+    sub r13, 16
+    ucomisd xmm0, xmm1
+    lea r8, [rel .cfjt_setcc_table]
+    jmp [r8 + rcx*8]
+
+.cfjt_lt:
+    setb al
+    setnp dl
+    and al, dl
+    jmp .cfjt_branch
+.cfjt_le:
+    setbe al
+    setnp dl
+    and al, dl
+    jmp .cfjt_branch
+.cfjt_eq:
+    sete al
+    setnp dl
+    and al, dl
+    jmp .cfjt_branch
+.cfjt_ne:
+    setne al
+    setp dl
+    or al, dl
+    jmp .cfjt_branch
+.cfjt_gt:
+    seta al
+    jmp .cfjt_branch
+.cfjt_ge:
+    setae al
+.cfjt_branch:
+    add rbx, 4
+    test al, al
+    jz .cfjt_no_jump            ; falsy -> do not jump (POP_JUMP_IF_TRUE)
+    lea rbx, [rbx + r9*2]
+.cfjt_no_jump:
+    DISPATCH
+
+section .data
+align 8
+.cfjt_setcc_table:
+    dq .cfjt_lt
+    dq .cfjt_le
+    dq .cfjt_eq
+    dq .cfjt_ne
+    dq .cfjt_gt
+    dq .cfjt_ge
+section .text
+.cfjt_deopt:
+    mov byte [rbx - 2], 107
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_compare_op_float_jump_true
 
 ;; ============================================================================
 ;; op_compare_op_int_jump_false - Fused COMPARE_OP_INT + POP_JUMP_IF_FALSE (215)
