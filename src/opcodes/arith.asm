@@ -20,6 +20,52 @@
 
 section .text
 
+;; ============================================================================
+;; FLOAT_PAIR_OR_DEOPT label -- xmm0 = left, xmm1 = right, or jump to `label`
+;;
+;; Accepts a float on both sides, or a float on one side and an INTEGER
+;; IMMEDIATE on the other.  r9d/r8d are the left/right tags and rdi/rsi the
+;; payloads, as VPOP_VAL leaves them.
+;;
+;; Mixed int/float had no fast arm anywhere: `x * 2` and `2 * x` both took the
+;; whole generic protocol on EVERY execution, with nothing ever rewritten --
+;; binop_left_wrapper, binop_subclass_first, binop_is_number, and then
+;; float_mul, which runs float_binop_accepts and float_to_f64 twice each.
+;; Around two hundred instructions to reach one cvtsi2sd and one mulsd.
+;; CPython does not specialize this either; its binary-op specializer rejects
+;; `!Py_IS_TYPE(lhs, Py_TYPE(rhs))` before it ever looks at float.
+;;
+;; TWO INTEGERS ARE REFUSED.  That pair belongs to the integer opcode, and
+;; answering it here would produce a float where Python produces an int.
+;;
+;; Safe in a specialized handler for the same reason the both-float form is:
+;; neither a TAG_FLOAT nor a TAG_SMALLINT immediate can be a heaptype
+;; instance, so no user __add__ on a float or int subclass is bypassed.
+;; ============================================================================
+%macro FLOAT_PAIR_OR_DEOPT 1
+    cmp r9d, TAG_FLOAT
+    je %%left_float
+    cmp r9d, TAG_SMALLINT
+    jne %1
+    cmp r8d, TAG_FLOAT
+    jne %1                      ; int against a non-float: not this opcode
+    cvtsi2sd xmm0, rdi
+    movq xmm1, rsi
+    jmp %%ready
+%%left_float:
+    movq xmm0, rdi
+    cmp r8d, TAG_FLOAT
+    je %%right_float
+    cmp r8d, TAG_SMALLINT
+    jne %1
+    cvtsi2sd xmm1, rsi
+    jmp %%ready
+%%right_float:
+    movq xmm1, rsi
+%%ready:
+%endmacro
+
+
 extern int_is_integer
 extern eval_dispatch
 extern obj_is_true
@@ -1372,7 +1418,7 @@ DEF_FUNC_BARE op_binary_op
     cmp r9d, TAG_SMALLINT
     jne .binop_try_float_add
     cmp r8d, TAG_SMALLINT
-    jne .binop_generic
+    jne .binop_try_float_add     ; an int against a float is the mixed arm's
 
     ; Both SmallInt: decode, add, check overflow
     mov rax, rdi
@@ -1386,14 +1432,8 @@ DEF_FUNC_BARE op_binary_op
     DISPATCH
 
 .binop_try_float_add:
-    cmp r9d, TAG_FLOAT
-    jne .binop_generic
-    cmp r8d, TAG_FLOAT
-    jne .binop_generic
-    ; Both float: inline add
-    mov byte [rbx - 2], 217   ; BINARY_OP_ADD_FLOAT
-    movq xmm0, rdi
-    movq xmm1, rsi
+    FLOAT_PAIR_OR_DEOPT .binop_generic
+    mov byte [rbx - 2], 217
     addsd xmm0, xmm1
     movq rax, xmm0
     VPUSH_FLOAT rax, r15
@@ -1405,7 +1445,7 @@ DEF_FUNC_BARE op_binary_op
     cmp r9d, TAG_SMALLINT
     jne .binop_try_float_sub
     cmp r8d, TAG_SMALLINT
-    jne .binop_generic
+    jne .binop_try_float_sub     ; an int against a float is the mixed arm's
 
     ; Both SmallInt: decode, subtract, check overflow
     mov rax, rdi
@@ -1419,14 +1459,8 @@ DEF_FUNC_BARE op_binary_op
     DISPATCH
 
 .binop_try_float_sub:
-    cmp r9d, TAG_FLOAT
-    jne .binop_generic
-    cmp r8d, TAG_FLOAT
-    jne .binop_generic
-    ; Both float: inline sub
-    mov byte [rbx - 2], 218   ; BINARY_OP_SUB_FLOAT
-    movq xmm0, rdi
-    movq xmm1, rsi
+    FLOAT_PAIR_OR_DEOPT .binop_generic
+    mov byte [rbx - 2], 218
     subsd xmm0, xmm1
     movq rax, xmm0
     VPUSH_FLOAT rax, r15
@@ -1438,7 +1472,7 @@ DEF_FUNC_BARE op_binary_op
     cmp r9d, TAG_SMALLINT
     jne .binop_try_float_mul
     cmp r8d, TAG_SMALLINT
-    jne .binop_generic
+    jne .binop_try_float_mul     ; an int against a float is the mixed arm's
 
     ; Both SmallInt: multiply, check overflow
     mov rax, rdi
@@ -1451,14 +1485,8 @@ DEF_FUNC_BARE op_binary_op
     DISPATCH
 
 .binop_try_float_mul:
-    cmp r9d, TAG_FLOAT
-    jne .binop_generic
-    cmp r8d, TAG_FLOAT
-    jne .binop_generic
-    ; Both float: inline mul
-    mov byte [rbx - 2], 219   ; BINARY_OP_MUL_FLOAT
-    movq xmm0, rdi
-    movq xmm1, rsi
+    FLOAT_PAIR_OR_DEOPT .binop_generic
+    mov byte [rbx - 2], 219
     mulsd xmm0, xmm1
     movq rax, xmm0
     VPUSH_FLOAT rax, r15
@@ -1466,18 +1494,17 @@ DEF_FUNC_BARE op_binary_op
     DISPATCH
 
 .binop_try_float_truediv:
-    cmp r9d, TAG_FLOAT
-    jne .binop_generic
-    cmp r8d, TAG_FLOAT
-    jne .binop_generic
-    ; Both float: check for division by zero
-    movq xmm1, rsi
+    FLOAT_PAIR_OR_DEOPT .binop_generic
+    ; A zero divisor has to raise, and the generic path is what raises.
+    ; ucomisd sets ZF for UNORDERED too, so parity is consulted first: a NaN
+    ; divisor is not a zero one, and treating it as one refused to specialize
+    ; the site for the rest of the program.
     xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
-    je .binop_generic          ; zero divisor → generic path raises ZeroDivisionError
-    ; Inline truediv
+    jp .binop_tfd_nonzero
+    je .binop_generic
+.binop_tfd_nonzero:
     mov byte [rbx - 2], 220   ; BINARY_OP_TRUEDIV_FLOAT
-    movq xmm0, rdi
     divsd xmm0, xmm1
     movq rax, xmm0
     VPUSH_FLOAT rax, r15
@@ -2422,12 +2449,7 @@ END_FUNC op_binary_op_sub_int
 DEF_FUNC_BARE op_binary_op_add_float
     VPOP_VAL rsi, r8            ; right + tag
     VPOP_VAL rdi, r9            ; left + tag
-    cmp r9d, TAG_FLOAT
-    jne .add_float_deopt_repush
-    cmp r8d, TAG_FLOAT
-    jne .add_float_deopt_repush
-    movq xmm0, rdi
-    movq xmm1, rsi
+    FLOAT_PAIR_OR_DEOPT .add_float_deopt_repush
     addsd xmm0, xmm1
     movq rax, xmm0
     VPUSH_FLOAT rax, r15
@@ -2447,12 +2469,7 @@ END_FUNC op_binary_op_add_float
 DEF_FUNC_BARE op_binary_op_sub_float
     VPOP_VAL rsi, r8            ; right + tag
     VPOP_VAL rdi, r9            ; left + tag
-    cmp r9d, TAG_FLOAT
-    jne .sub_float_deopt_repush
-    cmp r8d, TAG_FLOAT
-    jne .sub_float_deopt_repush
-    movq xmm0, rdi
-    movq xmm1, rsi
+    FLOAT_PAIR_OR_DEOPT .sub_float_deopt_repush
     subsd xmm0, xmm1
     movq rax, xmm0
     VPUSH_FLOAT rax, r15
@@ -2472,12 +2489,7 @@ END_FUNC op_binary_op_sub_float
 DEF_FUNC_BARE op_binary_op_mul_float
     VPOP_VAL rsi, r8            ; right + tag
     VPOP_VAL rdi, r9            ; left + tag
-    cmp r9d, TAG_FLOAT
-    jne .mul_float_deopt_repush
-    cmp r8d, TAG_FLOAT
-    jne .mul_float_deopt_repush
-    movq xmm0, rdi
-    movq xmm1, rsi
+    FLOAT_PAIR_OR_DEOPT .mul_float_deopt_repush
     mulsd xmm0, xmm1
     movq rax, xmm0
     VPUSH_FLOAT rax, r15
@@ -2497,16 +2509,17 @@ END_FUNC op_binary_op_mul_float
 DEF_FUNC_BARE op_binary_op_truediv_float
     VPOP_VAL rsi, r8            ; right + tag
     VPOP_VAL rdi, r9            ; left + tag
-    cmp r9d, TAG_FLOAT
-    jne .truediv_float_deopt_repush
-    cmp r8d, TAG_FLOAT
-    jne .truediv_float_deopt_repush
-    ; Check for division by zero
-    movq xmm1, rsi
+    FLOAT_PAIR_OR_DEOPT .truediv_float_deopt_repush
+    ; A zero divisor deopts, so the generic path raises ZeroDivisionError.
+    ; ucomisd sets ZF for UNORDERED as well, so parity is tested first: a NaN
+    ; divisor took the deopt, which answers nan correctly but also rewrote the
+    ; site back to BINARY_OP for good, so one nan in a loop cost the
+    ; specialization for the rest of the run.
     xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
-    je .truediv_float_deopt_repush  ; zero divisor → deopt to generic (raises ZeroDivisionError)
-    movq xmm0, rdi
+    jp .tfd_nonzero
+    je .truediv_float_deopt_repush
+.tfd_nonzero:
     divsd xmm0, xmm1
     movq rax, xmm0
     VPUSH_FLOAT rax, r15

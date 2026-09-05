@@ -194,6 +194,7 @@ test_float_compare_spec
 test_float_complex_subclass
 test_float_format_diff
 test_float_fromhex
+test_float_int_mixed
 test_float_methods
 test_float_nan_ops
 test_float
