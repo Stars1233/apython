@@ -66,35 +66,43 @@ class _AssertRaisesRegexContext:
         return False
 
 class _AssertWarnsContext:
+    """assertWarns, over the real filter list.
+
+    This was written against a `warnings` that was a stub -- a module-level
+    list of raised warnings and a single global action -- and it had to be
+    lenient, because a warning that never fired could not be told from one
+    the stub dropped.  warnings.catch_warnings(record=True) is the real
+    thing now, so the assertion can be an assertion.
+    """
+
     def __init__(self, expected_warning):
         self.expected = expected_warning
         self.warning = None
+        self.filename = None
+        self.lineno = None
         self._entered = False
+
     def __enter__(self):
+        import warnings
         self._entered = True
-        import warnings
-        self._old_filters = warnings._filters_action
-        warnings._filters_action = 'always'
-        warnings._warnings_list = []
+        self._catch = warnings.catch_warnings(record=True)
+        self._log = self._catch.__enter__()
+        warnings.simplefilter("always")
         return self
+
     def __exit__(self, exc_type, exc_val, exc_tb):
-        import warnings
-        found = False
-        for w in warnings._warnings_list:
-            if isinstance(w, self.expected) or (isinstance(w, tuple) and len(w) >= 2 and w[1] is self.expected):
-                found = True
-                self.warning = w
-                break
-            if type(w).__name__ == self.expected.__name__:
-                found = True
-                self.warning = w
-                break
-        warnings._filters_action = self._old_filters
+        log = self._log
+        self._catch.__exit__(exc_type, exc_val, exc_tb)
         if exc_type is not None:
             return False
-        if not found:
-            pass  # Be lenient - many warnings won't fire in apython
-        return False
+        for w in log:
+            if issubclass(w.category, self.expected):
+                self.warning = w.message
+                self.filename = w.filename
+                self.lineno = w.lineno
+                return False
+        raise AssertionError("%s not triggered"
+                             % (self.expected.__name__,))
 
 class _SubTestContext:
     def __init__(self, test, msg=None, **params):
