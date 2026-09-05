@@ -1533,6 +1533,37 @@ END_FUNC minmax_impl
 ;; 17. builtin_getattr(args, nargs) - getattr(obj, name[, default])
 ;; ============================================================================
 GA_EXC    equ 8              ; current_exception before the lookup
+;; ============================================================================
+;; attr_require_name(rdi = the name argument, a Value) -> returns, or raises
+;;
+;; getattr, setattr, delattr and hasattr all read the name as a PyStrObject
+;; without asking what it is: `getattr(x, 0)` read a small integer's Value as
+;; one.  CPython refuses the type by name, and quotes it.
+;; ============================================================================
+ARN_ARG   equ 8
+ARN_FRAME equ 16            ; + 0 pushes = 16-aligned
+DEF_FUNC_LOCAL attr_require_name, ARN_FRAME
+    mov [rbp - ARN_ARG], rdi
+    V_TEST_PTR rdi, rax
+    ja .arn_bad
+    test rdi, rdi
+    jz .arn_bad
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .arn_ok
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .arn_bad
+.arn_ok:
+    leave
+    ret
+.arn_bad:
+    mov rsi, [rbp - ARN_ARG]
+    CSTRING rdi, `attribute name must be string, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+END_FUNC attr_require_name
+
 DEF_FUNC builtin_getattr, 32
     push rbx
     push r12
@@ -1547,6 +1578,8 @@ DEF_FUNC builtin_getattr, 32
     ; One lookup, with the descriptor protocol run over it -- the same answer
     ; `obj.name` gives.  Doing it by hand here is what made getattr() hand back
     ; the property object instead of calling it.
+    mov rdi, [rbx + 8]
+    call attr_require_name
     DUNDER_EXC_SAVE [rbp - GA_EXC]
     mov rdi, [rbx]                 ; args[0], as a Value
     mov rsi, [rbx + 8]             ; args[1], the name
@@ -1632,6 +1665,8 @@ DEF_FUNC builtin_hasattr, 24
     ; The same lookup getattr() does, so the two cannot disagree about what
     ; exists.  A getter that raises propagates rather than reading as absent,
     ; which is what CPython does for anything but an AttributeError.
+    mov rdi, [rbx + 8]
+    call attr_require_name
     DUNDER_EXC_SAVE [rbp - HA_EXC]
     mov rdi, [rbx]
     mov rsi, [rbx + 8]
@@ -1693,6 +1728,9 @@ DEF_FUNC builtin_setattr
     jne .setattr_error
 
     mov rbx, rdi
+
+    mov rdi, [rbx + 8]           ; the name, before anything reads it as one
+    call attr_require_name
 
     V_TEST_PTR_M [rbx], r11      ; args[0] a pointer?
     ja .setattr_no_attr
@@ -1897,11 +1935,14 @@ DEF_FUNC dir_default, DD_FRAME
     jmp .dd_walk_chain
 
 .dd_module:
+    ; A module's names are its dict's and nothing else -- not even __class__,
+    ; which CPython's module___dir___impl does not add and which the shared
+    ; exit below does.  `dir(sys)` carried one name CPython's did not.
     mov rdi, [rax + PyModuleObject.mod_dict]
     test rdi, rdi
-    jz .dd_done
+    jz .dd_finish
     call .dd_add_keys
-    jmp .dd_done
+    jmp .dd_finish
 
 .dd_from_type:
     ; obj IS a type: list its own MRO
@@ -1940,6 +1981,7 @@ DEF_FUNC dir_default, DD_FRAME
     mov rdi, r12
     call obj_decref
 
+.dd_finish:
     mov rax, rbx
     mov edx, TAG_PTR
     pop r13
@@ -2547,7 +2589,7 @@ FMT_FRAME   equ 32          ; + 0 pushes = 32
 DEF_FUNC builtin_format_fn, FMT_FRAME
 
     cmp rsi, 1
-    jb .fmt_nargs_error
+    jb .fmt_too_few
     cmp rsi, 2
     ja .fmt_nargs_error
 
@@ -2565,6 +2607,19 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     jb .fmt_empty_spec
     mov rax, [rdi + 8]
     mov [rbp - FMT_SPEC], rax
+    ; The spec is read as a PyStrObject below, so it has to BE one: `format
+    ; (0, 0)` read a small integer's Value as one.  CPython names the
+    ; argument and the type it got.
+    V_TEST_PTR rax, rcx
+    ja .fmt_spec_error
+    test rax, rax
+    jz .fmt_spec_error
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    je .fmt_have_spec
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .fmt_spec_error
     jmp .fmt_have_spec
 
 .fmt_empty_spec:
@@ -2647,8 +2702,24 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.fmt_too_few:
+    ; rsi is still nargs at both of these.
+    CSTRING rdi, "format expected at least 1 argument, got "
+    xor edx, edx
+    jmp raise_type_error_counted
+
 .fmt_nargs_error:
-    RAISE exc_TypeError_type, "format() takes 1 or 2 arguments"
+    CSTRING rdi, "format expected at most 2 arguments, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+
+.fmt_spec_error:
+    pop rbx
+    mov rsi, [rbp - FMT_SPEC]
+    CSTRING rdi, `format() argument 2 must be str, not \x02`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC builtin_format_fn
 
 ;; ============================================================================
@@ -2791,6 +2862,12 @@ DEF_FUNC builtin_delattr_fn, DA2_FRAME
     mov [rbp - DA2_OBJ], rax
     mov rax, [rdi + 8]       ; name payload
     mov [rbp - DA2_NAME], rax
+    push rdi
+    sub rsp, 8
+    mov rdi, rax
+    call attr_require_name
+    add rsp, 8
+    pop rdi
 
     ; An immediate has no attributes at all, and neither does a type with no
     ; tp_setattr -- but that is an AttributeError naming the type and the
@@ -2848,18 +2925,35 @@ END_FUNC builtin_delattr_fn
 ;; builtin_aiter_fn(args, nargs) - aiter(async_iterable)
 ;; Calls tp_iter on the async iterable
 ;; ============================================================================
-DEF_FUNC builtin_aiter_fn
+AIT_ARG   equ 8             ; the argument, for the message
+AIT_NARGS equ 16
+AIT_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC builtin_aiter_fn, AIT_FRAME
+    mov [rbp - AIT_NARGS], rsi
 
     cmp rsi, 1
     jne .aiter_nargs_error
 
     ; Get the object
     mov rdi, [rdi]            ; args[0]
+    mov [rbp - AIT_ARG], rdi
 
     ; Must be a heap pointer
     V_TEST_PTR rdi, rsi
     ja .aiter_type_error
+    test rdi, rdi
+    jz .aiter_type_error
 
+    ; __aiter__, not __iter__: a list has a tp_iter and is not an async
+    ; iterable at all, so `aiter([])` answered its ordinary list_iterator.
+    push rdi
+    extern dunder_lookup
+    mov rdi, [rdi + PyObject.ob_type]
+    CSTRING rsi, "__aiter__"
+    call dunder_lookup
+    pop rdi
+    test edx, edx
+    jz .aiter_type_error
     ; Call tp_iter
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iter]
@@ -2873,10 +2967,17 @@ DEF_FUNC builtin_aiter_fn
     ret
 
 .aiter_type_error:
-    RAISE exc_TypeError_type, "object is not an async iterable"
+    mov rsi, [rbp - AIT_ARG]
+    CSTRING rdi, `'\x01' object is not an async iterable`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .aiter_nargs_error:
-    RAISE exc_TypeError_type, "aiter() takes exactly 1 argument"
+    mov rsi, [rbp - AIT_NARGS]
+    CSTRING rdi, "aiter() takes exactly one argument ("
+    CSTRING rdx, " given)"
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC builtin_aiter_fn
 
 ;; ============================================================================
@@ -2892,16 +2993,21 @@ AN_NARGS   equ 32
 AN_FRAME   equ 48            ; + 0 pushes = 48, 16-aligned
 DEF_FUNC builtin_anext_fn, AN_FRAME
 
+    mov [rbp - AN_NARGS], rsi
     cmp rsi, 1
     jb .an_nargs_error
     cmp rsi, 2
     ja .an_nargs_error
 
-    mov [rbp - AN_NARGS], rsi
 
-    ; Save iterator
+    ; Save iterator.  Its ob_type is read below without asking whether it is
+    ; a pointer at all, so `anext(0)` read a small integer's Value as one.
     mov rax, [rdi]
     mov [rbp - AN_ITER], rax
+    V_TEST_PTR rax, rcx
+    ja .an_type_error
+    test rax, rax
+    jz .an_type_error
 
     ; Save default if present
     cmp rsi, 2
@@ -2955,10 +3061,25 @@ DEF_FUNC builtin_anext_fn, AN_FRAME
     ret
 
 .an_type_error:
-    RAISE exc_TypeError_type, "object is not an async iterator"
+    mov rsi, [rbp - AN_ITER]
+    CSTRING rdi, `'\x01' object is not an async iterator`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .an_nargs_error:
-    RAISE exc_TypeError_type, "anext() takes 1 or 2 arguments"
+    ; CPython's two, with the count: it words the low bound and the high one
+    ; differently, and a program greps the text.
+    mov rsi, [rbp - AN_NARGS]
+    cmp rsi, 1
+    jge .an_too_many
+    CSTRING rdi, "anext expected at least 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+.an_too_many:
+    CSTRING rdi, "anext expected at most 2 arguments, got "
+    xor edx, edx
+    jmp raise_type_error_counted
 END_FUNC builtin_anext_fn
 
 ;; ============================================================================

@@ -127,6 +127,33 @@ DEF_FUNC type_method_new
     RAISE exc_TypeError_type, "type.__new__() takes at least 3 arguments"
 END_FUNC type_method_new
 
+;; ============================================================================
+;; type.__init__(cls, ...) -> None
+;;
+;; A no-op, as CPython's type_init is -- but a REGISTERED one.  `type` had no
+;; __init__ in its dict, so a metaclass ending in `super().__init__(name,
+;; bases, ns)` walked past it to object's, which now refuses arguments it
+;; has nowhere to put.  CPython takes one or three besides the class.
+;; ============================================================================
+DEF_FUNC type_method_init
+    ; One or three besides the class.  A builtin here is handed its keyword
+    ; values as further positional arguments, and a metaclass ending in
+    ; `super().__init__(name, bases, ns, **kwds)` is the shape that matters,
+    ; so four or more is taken as the three-argument form with keywords.
+    cmp rsi, 2
+    je .tmi_ok
+    cmp rsi, 4
+    jae .tmi_ok
+    jmp .tmi_error
+.tmi_ok:
+    RET_NONE
+    leave
+    V_PACK rax, rdx
+    ret
+.tmi_error:
+    RAISE exc_TypeError_type, "type.__init__() takes 1 or 3 arguments"
+END_FUNC type_method_init
+
 
 ;; ============================================================================
 ;; type_apply_set_name(PyTypeObject *cls, PyDictObject *ns)
@@ -2338,6 +2365,31 @@ BCL_OKWV  equ 72
     mov r13, [rbx]          ; r13 = body_func (args[0])
     mov r14, [rbx + 8]     ; r14 = class_name (args[1])
 
+    ; Neither was checked, and both are dereferenced below: a function's code
+    ; object off args[0], a str's characters off args[1].  `__build_class__
+    ; (None, None)` read the None singleton's header as a code pointer.
+    ; CPython names each refusal separately, and `class` statements never
+    ; reach either -- this is the builtin called by hand.
+    V_TEST_PTR r13, rax
+    ja .bc_func_error
+    test r13, r13
+    jz .bc_func_error
+    mov rax, [r13 + PyObject.ob_type]
+    lea rcx, [rel func_type]
+    cmp rax, rcx
+    jne .bc_func_error
+    V_TEST_PTR r14, rax
+    ja .bc_name_error
+    test r14, r14
+    jz .bc_name_error
+    mov rax, [r14 + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .bc_name_ok
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .bc_name_error
+.bc_name_ok:
+
     ; A metaclass is inherited: `class D(C)` where type(C) is M gives D the
     ; metatype M as well.  CPython's rule is a winner among the explicit
     ; metaclass and every base's type -- the one that is a subclass of all the
@@ -2620,7 +2672,13 @@ BCL_OKWV  equ 72
 
 
 .build_class_error:
-    RAISE exc_TypeError_type, "__build_class__ requires 2+ arguments"
+    RAISE exc_TypeError_type, "__build_class__: not enough arguments"
+
+.bc_func_error:
+    RAISE exc_TypeError_type, "__build_class__: func must be a function"
+
+.bc_name_error:
+    RAISE exc_TypeError_type, "__build_class__: name is not a string"
 
 .bc_prepare_failed:
     ; __prepare__ raised.  Release the fallback namespace and the bases and

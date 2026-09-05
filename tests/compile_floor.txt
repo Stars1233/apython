@@ -6,6 +6,7 @@ test_abc
 test_abc_spoofed_class
 test_abc_weakrefs
 test_abstract_and_str_subclass
+test_aiter_anext
 test_annotations
 test_argument_messages
 test_arithmetic
@@ -43,6 +44,7 @@ test_bool
 test_builtin_arity
 test_builtin_dunder_str
 test_builtin_func_attrs
+test_builtin_hostile
 test_builtin_kwargs
 test_builtins_extra
 test_builtins

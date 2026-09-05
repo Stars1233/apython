@@ -1,8 +1,36 @@
 # itertools - adapted from CPython for apython
 
-# chain is a native builtin (registered in __builtins__)
-# Pull it into module namespace so 'from itertools import chain' works
-chain = chain
+class chain:
+    """chain(*iterables) -- each iterable in turn, as one iterator.
+
+    This was a native builtin, which put the bare name `chain` in
+    builtins where CPython has no such name.  In Python it is also a
+    class rather than a function, so `from_iterable` has somewhere to
+    live and the repr reads as CPython's.
+    """
+
+    def __init__(self, *iterables):
+        self._source = iter(iterables)
+        self._current = None
+
+    @classmethod
+    def from_iterable(cls, iterable):
+        self = cls.__new__(cls)
+        self._source = iter(iterable)
+        self._current = None
+        return self
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        while True:
+            if self._current is not None:
+                try:
+                    return next(self._current)
+                except StopIteration:
+                    self._current = None
+            self._current = iter(next(self._source))
 
 
 def islice(iterable, *args):

@@ -1992,3 +1992,49 @@ END_FUNC gen_clear
 section .rodata
 gd_ignored_msg: db "Exception ignored in: generator cleanup", 10, 0
 gd_ignored_len  equ $ - gd_ignored_msg - 1
+
+section .text
+
+;; ============================================================================
+;; async_gen_dunder_aiter(rdi = args Value[], rsi = nargs)
+;;   -> (rax = args[0], rdx = TAG_PTR) -- an async generator is its own
+;;      async iterator
+;;
+;; CPython's async_generator carries __aiter__ and __anext__ by name, and
+;; aiter()/anext() and `async for` all ask for them.  This type had a getattr
+;; of its own and no tp_dict at all, so `hasattr(g, "__aiter__")` was False
+;; and aiter(g) refused a genuine async generator.
+;; ============================================================================
+global async_gen_dunder_aiter
+DEF_FUNC async_gen_dunder_aiter
+    test rsi, rsi
+    jz .agda_error
+    mov rax, [rdi]
+    push rax
+    mov rdi, rax
+    call obj_incref
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.agda_error:
+    RAISE exc_TypeError_type, "__aiter__() takes exactly one argument"
+END_FUNC async_gen_dunder_aiter
+
+;; ============================================================================
+;; async_gen_dunder_anext(rdi = args Value[], rsi = nargs)
+;;   -> the awaitable the next value comes from, as tp_iternext gives it
+;; ============================================================================
+global async_gen_dunder_anext
+DEF_FUNC async_gen_dunder_anext
+    test rsi, rsi
+    jz .agdn_error
+    mov rdi, [rdi]
+    call async_gen_iternext
+    leave
+    V_PACK rax, rdx
+    ret
+.agdn_error:
+    RAISE exc_TypeError_type, "__anext__() takes exactly one argument"
+END_FUNC async_gen_dunder_anext

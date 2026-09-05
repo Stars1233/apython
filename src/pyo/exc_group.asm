@@ -37,6 +37,7 @@ extern obj_dealloc
 extern obj_incref
 extern raise_exception
 extern tuple_new
+extern str_type
 extern tuple_type
 extern type_type
 
@@ -133,7 +134,8 @@ END_FUNC eg_new
 EGC_TYPE  equ 8
 EGC_ARGS  equ 16
 EGC_NARGS equ 24
-EGC_FRAME equ 24            ; + 3 pushes = 48
+EGC_ORIG  equ 32            ; the sequence as it was passed, for .args
+EGC_FRAME equ 40            ; + 3 pushes = 64, 16-aligned
 DEF_FUNC eg_type_call, EGC_FRAME
     push rbx
     push r12
@@ -150,6 +152,28 @@ DEF_FUNC eg_type_call, EGC_FRAME
     ; args[0] = msg (must be str), args[1] = excs (list or tuple)
     mov rbx, [rsi]          ; msg
     mov r12, [rsi + 8]     ; excs
+    mov [rbp - EGC_ORIG], r12
+
+    ; The message has to BE a str, and CPython says which argument and what
+    ; it got.  Nothing checked, so eg_new stored whatever it was handed.
+    V_TEST_PTR rbx, rax
+    ja .bad_msg
+    test rbx, rbx
+    jz .bad_msg
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .msg_ok
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .bad_msg
+.msg_ok:
+
+    ; ...and the sequence has to be a POINTER before its type can be read.
+    ; `BaseExceptionGroup("x", 0)` read a small integer's Value as one.
+    V_TEST_PTR r12, rax
+    ja .bad_excs
+    test r12, r12
+    jz .bad_excs
 
     ; Check if excs is a tuple already
     mov rax, [r12 + PyObject.ob_type]
@@ -204,6 +228,91 @@ DEF_FUNC eg_type_call, EGC_FRAME
     test rcx, rcx
     jz .empty_excs_decref
 
+    ; Every member has to be an exception, and CPython says which one is not.
+    ; And the CLASS depends on them: BaseExceptionGroup narrows to
+    ; ExceptionGroup when they all derive from Exception, and ExceptionGroup
+    ; refuses one that does not.
+    mov r13, [r12 + PyTupleObject.ob_item]
+    mov rcx, [r12 + PyTupleObject.ob_size]
+    xor edx, edx
+    mov r8d, 1                  ; all of them are Exceptions, so far
+.egc_member_loop:
+    cmp rdx, rcx
+    jge .egc_members_ok
+    mov rdi, [r13 + rdx*8]
+    V_TEST_PTR rdi, rax
+    ja .egc_bad_member
+    test rdi, rdi
+    jz .egc_bad_member
+    mov rax, [rdi + PyObject.ob_type]
+    push rcx
+    push rdx
+    push r8
+    push rdi
+    mov rdi, rax
+    lea rsi, [rel exc_BaseException_type]
+    extern type_is_subtype
+    call type_is_subtype
+    pop rdi
+    pop r8
+    pop rdx
+    pop rcx
+    test eax, eax
+    jz .egc_bad_member
+    mov rax, [rdi + PyObject.ob_type]
+    push rcx
+    push rdx
+    push r8
+    push r8
+    mov rdi, rax
+    lea rsi, [rel exc_Exception_type]
+    call type_is_subtype
+    pop r8
+    pop r8
+    pop rdx
+    pop rcx
+    test eax, eax
+    jnz .egc_member_next
+    xor r8d, r8d                ; one of them is a bare BaseException
+.egc_member_next:
+    inc rdx
+    jmp .egc_member_loop
+
+.egc_bad_member:
+    push rdx                    ; the index; obj_decref keeps nothing
+    push rdx
+    mov rdi, r12
+    call obj_decref
+    pop rsi
+    pop rsi
+    CSTRING rdi, "Item "
+    CSTRING rdx, " of second argument (exceptions) is not an exception"
+    extern exc_ValueError_type
+    extern raise_value_error_counted
+    jmp raise_value_error_counted
+
+.egc_members_ok:
+    mov rdi, [rbp - EGC_TYPE]
+    lea rax, [rel exc_ExceptionGroup_type]
+    cmp rdi, rax
+    jne .egc_not_eg
+    test r8d, r8d
+    jnz .egc_have_type
+    ; ExceptionGroup will not hold one.
+    mov rdi, r12
+    call obj_decref
+    RAISE exc_TypeError_type, \
+          "Cannot nest BaseExceptions in an ExceptionGroup"
+.egc_not_eg:
+    lea rax, [rel exc_BaseExceptionGroup_type]
+    cmp rdi, rax
+    jne .egc_have_type
+    test r8d, r8d
+    jz .egc_have_type
+    lea rdi, [rel exc_ExceptionGroup_type]   ; all Exceptions: narrow to it
+.egc_have_type:
+    mov [rbp - EGC_TYPE], rdi
+
     ; Call eg_new(type, msg, exc_tuple)
     mov rdi, [rbp - EGC_TYPE]
     mov rsi, rbx            ; msg
@@ -217,6 +326,25 @@ DEF_FUNC eg_type_call, EGC_FRAME
     call obj_decref
     pop rax
 
+    ; .args holds the sequence AS PASSED, not the tuple this made of it:
+    ; `BaseExceptionGroup("x", [e]).args` is ('x', [e]) in CPython, and
+    ; .exceptions is the tuple.
+    mov rcx, [rax + PyExceptionGroupObject.exc_args]
+    test rcx, rcx
+    jz .egc_no_args
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rdx, [rcx + 8]
+    mov r8, [rbp - EGC_ORIG]
+    mov [rcx + 8], r8
+    push rax
+    mov rdi, r8
+    call obj_incref
+    mov rdi, [rsp]
+    mov rdi, rdx
+    call obj_decref
+    pop rax
+.egc_no_args:
+
     mov edx, TAG_PTR
     pop r13
     pop r12
@@ -225,10 +353,22 @@ DEF_FUNC eg_type_call, EGC_FRAME
     ret
 
 .bad_nargs:
-    RAISE exc_TypeError_type, "ExceptionGroup requires exactly 2 arguments"
+    ; CPython's wording, with the count it was given.
+    mov rsi, [rbp - EGC_NARGS]
+    CSTRING rdi, "BaseExceptionGroup.__new__() takes exactly 2 arguments ("
+    CSTRING rdx, " given)"
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+
+.bad_msg:
+    mov rsi, rbx
+    CSTRING rdi, \
+        `BaseExceptionGroup.__new__() argument 1 must be str, not \x02`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .bad_excs:
-    RAISE exc_TypeError_type, "second argument must be a sequence of exceptions"
+    RAISE exc_TypeError_type, "second argument (exceptions) must be a sequence"
 
 .empty_excs:
     RAISE exc_ValueError_type, "second argument (exceptions) must be a non-empty sequence"

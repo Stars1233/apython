@@ -506,7 +506,12 @@ DEF_FUNC obj_call_n, OCN_FRAME
     jmp .ret
 
 .not_callable:
-    RAISE exc_TypeError_type, "object is not callable"
+    ; CPython names the type: "'int' object is not callable" is what tells a
+    ; caller WHICH of its values was not a function.
+    mov rsi, rbx
+    CSTRING rdi, `'\x01' object is not callable`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .ret:
     pop r13
     pop r12

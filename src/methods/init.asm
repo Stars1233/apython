@@ -1083,6 +1083,24 @@ DEF_FUNC methods_init
     call type_stamp_methods
     ; INCREF the dict (type holds ref; dict_new gave us refcnt=1, which we keep)
 
+    ;; --- the async generator's own two names ---
+    ;; It had a getattr of its own and no tp_dict at all, so `hasattr(g,
+    ;; "__aiter__")` was False -- and aiter() and anext(), which ask for
+    ;; those names, refused a genuine async generator.
+    call dict_new
+    mov rbx, rax
+
+    extern async_gen_dunder_aiter
+    ADD_FN_N mn___aiter__, async_gen_dunder_aiter, 1, 1
+    extern async_gen_dunder_anext
+    ADD_FN_N mn___anext__, async_gen_dunder_anext, 1, 1
+
+    extern async_gen_type
+    lea rax, [rel async_gen_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
     ;; --- list methods (with arg count validation) ---
     call dict_new
     mov rbx, rax
@@ -1613,6 +1631,9 @@ DEF_FUNC methods_init
     call obj_decref
     mov rdi, r12
     call obj_decref
+
+    extern type_method_init
+    ADD_FN mn___init__, type_method_init
 
     ; No add_class_getitem here: `type[int]` is a special case in CPython's
     ; PyObject_GetItem, taken before any lookup, and type carries no
@@ -2583,6 +2604,8 @@ mn_fromhex:     db "fromhex", 0
 mn_decode:            db "decode", 0
 mn_tobytes:          db "tobytes", 0
 mn_tolist:           db "tolist", 0
+mn___aiter__:        db "__aiter__", 0
+mn___anext__:        db "__anext__", 0
 mn_toreadonly:       db "toreadonly", 0
 mn_cast:             db "cast", 0
 mn_release:          db "release", 0

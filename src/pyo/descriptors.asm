@@ -48,10 +48,10 @@ DEF_FUNC staticmethod_construct, 8            ; 1 pushes, so rsp is 16-aligned
     ; ob_refcnt=1, ob_type set
     mov [rax + PyStaticMethodObject.sm_callable], rbx
 
-    ; INCREF func
+    ; A VALUE, as classmethod's is: `staticmethod(0)` is an ordinary call.
     push rax
-    mov rdi, rbx
-    call obj_incref
+    mov rax, rbx
+    INCREF_V rax, rcx
     mov rdi, [rsp]
     call gc_track
     pop rax
@@ -62,7 +62,11 @@ DEF_FUNC staticmethod_construct, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 
 .sm_error:
-    RAISE exc_TypeError_type, "staticmethod expected 1 argument"
+    mov rsi, rdx
+    CSTRING rdi, "staticmethod expected 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC staticmethod_construct
 
 ;; ============================================================================
@@ -73,7 +77,7 @@ DEF_FUNC_LOCAL staticmethod_dealloc, 8            ; 1 pushes, so rsp is 16-align
     mov rbx, rdi
 
     mov rdi, [rbx + PyStaticMethodObject.sm_callable]
-    call obj_decref
+    XDECREF_V rdi, rax
 
     mov rdi, rbx
     call gc_dealloc
@@ -104,10 +108,11 @@ DEF_FUNC classmethod_construct, 8            ; 1 pushes, so rsp is 16-aligned
     ; ob_refcnt=1, ob_type set
     mov [rax + PyClassMethodObject.cm_callable], rbx
 
-    ; INCREF func
+    ; A VALUE, not a pointer: `classmethod(0)` is an ordinary call and
+    ; obj_incref on a small integer's Value writes through the number.
     push rax
-    mov rdi, rbx
-    call obj_incref
+    mov rax, rbx
+    INCREF_V rax, rcx
     mov rdi, [rsp]
     call gc_track
     pop rax
@@ -118,7 +123,11 @@ DEF_FUNC classmethod_construct, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 
 .cm_error:
-    RAISE exc_TypeError_type, "classmethod expected 1 argument"
+    mov rsi, rdx
+    CSTRING rdi, "classmethod expected 1 argument, got "
+    xor edx, edx
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
 END_FUNC classmethod_construct
 
 ;; ============================================================================
@@ -129,7 +138,7 @@ DEF_FUNC_LOCAL classmethod_dealloc, 8            ; 1 pushes, so rsp is 16-aligne
     mov rbx, rdi
 
     mov rdi, [rbx + PyClassMethodObject.cm_callable]
-    call obj_decref
+    XDECREF_V rdi, rax
 
     mov rdi, rbx
     call gc_dealloc
@@ -3048,7 +3057,10 @@ section .text
 ;; ============================================================================
 DEF_FUNC staticmethod_traverse
     mov rdi, [rdi + PyStaticMethodObject.sm_callable]
+    V_TEST_PTR rdi, rax         ; a Value: only a pointer is the collector's
+    ja .smt_done
     VISIT_PTR rdi
+.smt_done:
     leave
     ret
 END_FUNC staticmethod_traverse
@@ -3069,7 +3081,10 @@ END_FUNC staticmethod_clear
 
 DEF_FUNC classmethod_traverse
     mov rdi, [rdi + PyClassMethodObject.cm_callable]
+    V_TEST_PTR rdi, rax         ; a Value: only a pointer is the collector's
+    ja .cmt_done
     VISIT_PTR rdi
+.cmt_done:
     leave
     ret
 END_FUNC classmethod_traverse

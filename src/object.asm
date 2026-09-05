@@ -779,6 +779,37 @@ DEF_FUNC raise_type_error_counted, RTC_FRAME
 END_FUNC raise_type_error_counted
 
 ;; ============================================================================
+;; raise_value_error_counted(rdi = the text before the number, rsi = the
+;;                           count, rdx = the text after it, or 0)
+;;   -> does not return: the composed message is raised as a ValueError
+;;
+;; The same composition as raise_type_error_counted, for the messages that
+;; are ValueErrors: "Item 0 of second argument (exceptions) is not an
+;; exception".
+;; ============================================================================
+global raise_value_error_counted
+DEF_FUNC raise_value_error_counted, RTC_FRAME
+    mov [rbp - RTC_N], rsi
+    mov [rbp - RTC_TAIL], rdx
+    mov rsi, rdi
+    lea rdi, [rbp - RTC_BUF]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RTC_N]
+    call msg_append_i64
+    cmp qword [rbp - RTC_TAIL], 0
+    je .rvc_raise
+    mov rdi, rax
+    mov rsi, [rbp - RTC_TAIL]
+    call rbt_append_cstr
+.rvc_raise:
+    extern exc_ValueError_type
+    lea rdi, [rel exc_ValueError_type]
+    lea rsi, [rbp - RTC_BUF]
+    call raise_exception
+END_FUNC raise_value_error_counted
+
+;; ============================================================================
 ;; raise_final_base(rdi = the type's name, as a C string) -- does not return
 ;;
 ;; "type 'bool' is not an acceptable base type", for a type CPython gives no
@@ -1136,6 +1167,7 @@ drs_after_name: db "' ", 0
 drs_requires: db "requires a '", 0
 drs_middle:  db "' object but received a '", 0
 mah_digits:  db "0123456789abcdef", 0
+tnm_none:    db "None", 0
 
 section .bss
 rbt_buf: resb 320   ; two 80-char type names plus the prefix and separators
@@ -1175,8 +1207,9 @@ rtn_compose:
 END_FUNC raise_type_error_with_typename
 
 ;; ============================================================================
-;; type_name_message(rdi = a template whose \x01 stands for a type name,
-;;                   rsi = the type object, or 0 to leave the \x01 out)
+;; type_name_message(rdi = a template whose \x01 stands for a type name and
+;;                   whose \x02 stands for the same but "None" for NoneType,
+;;                   rsi = the type object, or 0 to leave the marker out)
 ;;   -> rax = the composed C string, in a shared static buffer
 ;;
 ;; The composition the two raisers above have always done, given a name of
@@ -1184,6 +1217,11 @@ END_FUNC raise_type_error_with_typename
 ;; non-int (type bool)." names the type the same way its errors do.  The
 ;; buffer is shared and overwritten on every call, so the string is only good
 ;; until the next one -- which is all a raise or a warn needs.
+;;
+;; The \x02 form is CPython's _PyArg_BadArgument rule: that helper prints
+;; "None" rather than "NoneType", so "format() argument 2 must be str, not
+;; None" reads as it does there while every message built from a plain tp_name
+;; keeps saying NoneType.
 ;; ============================================================================
 global type_name_message
 DEF_FUNC type_name_message
@@ -1200,11 +1238,20 @@ DEF_FUNC type_name_message
     inc rbx
     cmp al, 1
     je .tnm_insert
+    cmp al, 2
+    je .tnm_insert_arg
     cmp rcx, RTN_BUFSZ - 2
     jae .tnm_copy
     mov [rdi + rcx], al
     inc rcx
     jmp .tnm_copy
+.tnm_insert_arg:
+    extern none_type
+    lea rax, [rel none_type]
+    cmp r12, rax
+    jne .tnm_insert
+    lea rsi, [rel tnm_none]
+    jmp .tnm_name
 .tnm_insert:
     test r12, r12
     jz .tnm_copy

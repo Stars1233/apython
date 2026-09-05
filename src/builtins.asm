@@ -74,7 +74,6 @@ extern builtin_setattr
 
 ; Iterator builtins (in itertools.asm)
 extern builtin_sorted
-extern builtin_chain
 extern builtin_globals
 extern builtin_locals
 extern builtin_dir
@@ -1736,30 +1735,17 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     push r8
     push rsi
     push rsi                   ; keep the stack 16-byte aligned
-    mov rdi, [rsi + r8*8]      ; the class from the tuple
-    ; ...and inside it too: a union expands to its args tuple, so
-    ; `isinstance(1, list[int] | None)` arrives here as (list[int], None).
-    V_TEST_PTR rdi, rax
-    ja .isinstance_tuple_not_generic
-    test rdi, rdi
-    jz .isinstance_tuple_not_generic
-    mov rax, [rdi + PyObject.ob_type]
-    lea rax, [rax]
-    lea r8, [rel generic_alias_type]
-    cmp rax, r8
-    je .isinstance_generic_in_tuple
-    ; A union INSIDE the tuple: ask again, which is what CPython's recursion
-    ; into a tuple's elements amounts to.  This loop is flat, so a union
-    ; element matched nothing and `isinstance(1, (int | str, bytes))` was
-    ; False.
-    lea r8, [rel union_type]
-    cmp rax, r8
-    jne .isinstance_tuple_not_generic
-    mov r9, rdi
+    ; Ask again with the element as the second argument, rather than
+    ; testing it here.  CPython recurses over a tuple's elements, so a
+    ; nested tuple, a union, a parameterized generic and a non-class all
+    ; get the answer -- or the refusal -- they get at the top level.  The
+    ; flat loop that used to be here read a non-class element's Value as a
+    ; type pointer: `isinstance(1, (1,))` was a segfault.
+    mov rdi, [rsi + r8*8]      ; the element, a Value
     sub rsp, 16
     mov rax, [rbp - ISI_OBJ]
     mov [rsp], rax
-    mov [rsp + 8], r9
+    mov [rsp + 8], rdi
     mov rdi, rsp
     mov esi, 2
     call builtin_isinstance
@@ -1767,46 +1753,13 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     V_UNPACK rax, rdx
     lea rcx, [rel bool_true]
     cmp rax, rcx
-    sete al
-    movzx eax, al
-    jmp .isinstance_tuple_verdict
-.isinstance_tuple_not_generic:
-    mov r8, [rsp + 16]
-    mov rsi, [rsp]
-    mov rdi, [rsi + r8*8]
-    mov rsi, [rbp - ISI_OBJ]   ; the object
-    CSTRING rdx, "__instancecheck__"
-    call type_custom_check
-    cmp eax, -1
-    jne .isinstance_tuple_verdict
-    mov rsi, [rsp]             ; the saved payload array
-    mov r8, [rsp + 16]
-    mov rdi, r12               ; obj's type
-    mov rsi, [rsi + r8*8]      ; type from tuple
-    push rsi
-    push rsi
-    call type_is_subtype
     pop rsi
     pop rsi
-    test eax, eax
-    jnz .isinstance_tuple_verdict
-    mov rdi, [rbp - ISI_DECL]  ; ...and then what the object says it is
-    test rdi, rdi
-    jz .isinstance_tuple_verdict
-    call type_is_subtype
-.isinstance_tuple_verdict:
-    pop rsi
-    pop rsi
-    test eax, eax
-    jnz .isinstance_tuple_match
     pop r8
     pop rcx
+    je .isinstance_true
     inc r8
     jmp .isinstance_tuple_loop
-
-.isinstance_tuple_match:
-    add rsp, 16                ; pop saved r8, rcx
-    jmp .isinstance_true
 
 .isinstance_false:
     call .isi_release_declared
@@ -1839,8 +1792,6 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
 .isi_nothing:
     ret
 
-.isinstance_generic_in_tuple:
-    add rsp, 32                 ; the four words the loop pushed
 .isinstance_generic:
     RAISE exc_TypeError_type, \
           "isinstance() argument 2 cannot be a parameterized generic"
@@ -1951,28 +1902,24 @@ DEF_FUNC builtin_issubclass, 8            ; 3 pushes, so rsp is 16-aligned
     jge .issubclass_false
     push rsi
     push r8
-    mov rdi, [rsi + r8*8]      ; the parent from the tuple
-    mov rsi, r12               ; cls
-    CSTRING rdx, "__subclasscheck__"
-    call type_custom_check
-    cmp eax, -1
-    jne .issubclass_tuple_verdict
-    mov rax, [rsp + 8]         ; the saved payload array
-    mov r8, [rsp]
-    mov rdi, r12               ; cls
-    mov rsi, [rax + r8*8]      ; type from tuple
-    call type_is_subtype
-.issubclass_tuple_verdict:
-    test eax, eax
-    jnz .issubclass_tuple_match
+    ; The same recursion as isinstance's, and for the same reason: an
+    ; element that is not a class was read as one.
+    mov rdi, [rsi + r8*8]      ; the element, a Value
+    sub rsp, 16
+    mov [rsp], r12             ; cls
+    mov [rsp + 8], rdi
+    mov rdi, rsp
+    mov esi, 2
+    call builtin_issubclass
+    add rsp, 16
+    V_UNPACK rax, rdx
+    lea rcx, [rel bool_true]
+    cmp rax, rcx
     pop r8
     pop rsi
+    je .issubclass_true
     inc r8
     jmp .issubclass_tuple_loop
-
-.issubclass_tuple_match:
-    add rsp, 16               ; pop saved r8, rsi
-    jmp .issubclass_true
 
 .issubclass_false:
     lea rax, [rel bool_false]
@@ -2587,11 +2534,6 @@ DEF_FUNC builtins_init, 8            ; 1 push, so rsp is 16-aligned
     call dict_add_builtin_func
 
     mov rdi, rbx
-    lea rsi, [rel bi_name_chain]
-    lea rdx, [rel builtin_chain]
-    call dict_add_builtin_func
-
-    mov rdi, rbx
     lea rsi, [rel bi_name_globals]
     lea rdx, [rel builtin_globals]
     call dict_add_builtin_func
@@ -2831,11 +2773,6 @@ DEF_FUNC builtins_init, 8            ; 1 push, so rsp is 16-aligned
     mov rdi, rbx
     lea rsi, [rel bi_name_ExceptionGroup]
     lea rdx, [rel exc_ExceptionGroup_type]
-    call add_exc_type_builtin
-
-    mov rdi, rbx
-    lea rsi, [rel bi_name_CancelledError]
-    lea rdx, [rel exc_CancelledError_type]
     call add_exc_type_builtin
 
     mov rdi, rbx
@@ -3307,7 +3244,6 @@ bi_name_filter:       db "filter", 0
 bi_name_reversed:     db "reversed", 0
 isi_class_attr:  db "__class__", 0
 bi_name_sorted:       db "sorted", 0
-bi_name_chain:        db "chain", 0
 bi_name_divmod:       db "divmod", 0
 bi_name_globals:      db "globals", 0
 bi_name_locals:       db "locals", 0
@@ -3359,7 +3295,6 @@ bi_name_DeprecationWarning: db "DeprecationWarning", 0
 bi_name_UserWarning:       db "UserWarning", 0
 bi_name_BaseExceptionGroup: db "BaseExceptionGroup", 0
 bi_name_ExceptionGroup:    db "ExceptionGroup", 0
-bi_name_CancelledError:    db "CancelledError", 0
 bi_name_StopAsyncIteration: db "StopAsyncIteration", 0
 bi_name_TimeoutError:      db "TimeoutError", 0
 bi_name_GeneratorExit:     db "GeneratorExit", 0

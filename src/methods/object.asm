@@ -300,12 +300,51 @@ END_FUNC object_method_reduce
 
 ;; ============================================================================
 extern str_from_cstr
-DEF_FUNC object_method_init
-    ; object.__init__(self, ...) accepts anything and does nothing.
+OMI_SELF  equ 8
+OMI_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC object_method_init, OMI_FRAME
+    ; object.__init__(self, ...) does nothing -- but it does not accept
+    ; anything either.  CPython's object_init refuses excess arguments
+    ; unless the other half of the construction is overridden, so a class
+    ; that defines neither __new__ nor __init__ cannot be handed any.
+    cmp rsi, 1
+    jbe .omi_done
+    mov rax, [rdi]              ; self, a Value
+    V_TEST_PTR rax, rcx
+    ja .omi_done
+    test rax, rax
+    jz .omi_done
+    mov rdi, [rax + PyObject.ob_type]
+    mov [rbp - OMI_SELF], rdi
+    extern init_dunder_cstr
+    lea rsi, [rel init_dunder_cstr]
+    mov edx, PyTypeObject.tp_init
+    extern type_defines_dunder
+    call type_defines_dunder
+    test eax, eax
+    jnz .omi_own_init
+    mov rdi, [rbp - OMI_SELF]
+    extern new_dunder_cstr
+    lea rsi, [rel new_dunder_cstr]
+    mov edx, PyTypeObject.tp_new
+    call type_defines_dunder
+    test eax, eax
+    jz .omi_no_args
+.omi_done:
     RET_NONE
     leave
     V_PACK rax, rdx
     ret
+
+.omi_own_init:
+    RAISE exc_TypeError_type, \
+          "object.__init__() takes exactly one argument (the instance to initialize)"
+.omi_no_args:
+    mov rsi, [rbp - OMI_SELF]
+    CSTRING rdi, \
+        `\x01.__init__() takes exactly one argument (the instance to initialize)`
+    extern raise_type_error_with_typename
+    jmp raise_type_error_with_typename
 END_FUNC object_method_init
 
 DEF_FUNC object_method_str
