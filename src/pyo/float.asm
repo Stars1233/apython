@@ -1881,13 +1881,26 @@ DEF_FUNC_LOCAL fc_wide_int
     mov edx, esi
     call int_unwrap
     cmp edx, TAG_SMALLINT
-    je .fcw_no                  ; an immediate int is inside +-2^50
+    je .fcw_flat                ; NOT necessarily inside +-2^50 -- see below
     test rdi, rdi
     jz .fcw_no
 .fcw_int:
     cmp qword [rdi + PyIntObject.compact], 0
     je .fcw_yes                 ; GMP-backed: always wider than a double
     mov rax, [rdi + PyIntObject.ival]
+    jmp .fcw_magnitude
+
+.fcw_flat:
+    ; int_unwrap hands back TAG_SMALLINT for a COMPACT HEAP INT as well as for
+    ; a true immediate, and a compact heap int covers the whole int64 range --
+    ; not just +-2^50.  Treating that tag as "small enough for a double to be
+    ; exact" answered `I(2**60 + 1) == float(...)` with True inside list.sort,
+    ; which calls float_compare directly, while the ordinary comparison path
+    ; got it right.  It only showed once 2**60 started arriving compact rather
+    ; than GMP-backed; the magnitude has to be checked either way.
+    mov rax, rdi
+
+.fcw_magnitude:
     mov rcx, rax
     sar rcx, 63
     xor rax, rcx
