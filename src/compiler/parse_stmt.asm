@@ -2207,8 +2207,10 @@ DEF_FUNC par_params, PP_FRAME
     je .comma
     cmp rax, [rbp - PP_CLOSE]
     je .build
+    ; 2, not 1: this is the *args parameter, and PEP 646 lets ITS annotation
+    ; be starred -- `def g(*rest: *Ts)` -- where no other parameter's may be.
     mov rdi, rbx
-    mov rsi, 1
+    mov rsi, 2
     cmp qword [rbp - PP_CLOSE], TOK_COLON
     jne .ann_ok2
     xor esi, esi
@@ -2479,12 +2481,13 @@ POP_ANN   equ 32
 POP_DEF   equ 40
 POP_NODE  equ 48
 POP_END   equ 56          ; the token cursor where the parameter itself ends
-POP_FRAME equ 64          ; + 2 pushes = 80
+POP_FRAME equ 72          ; + 3 pushes = 96, 16-aligned
 DEF_FUNC par_one_param, POP_FRAME
     push rbx
     push r12
+    push r13
     mov rbx, rdi
-    mov r12, rsi                        ; annotations allowed?
+    mov r12, rsi                        ; 0 none, 1 allowed, 2 star allowed
     call par_peek
     TOK_POS rax
     mov [rbp - POP_LINE], rcx
@@ -2508,11 +2511,39 @@ DEF_FUNC par_one_param, POP_FRAME
     jne .no_ann
     mov rdi, rbx
     call par_advance
+
+    ; PEP 646: the *args parameter's annotation may itself be starred, and
+    ; `*Ts` is the whole reason a TypeVarTuple exists.  par_expr will not
+    ; take a leading `*`, so the star is consumed here and the expression
+    ; wrapped, exactly as CPython's star_annotation rule has it.
+    xor r13d, r13d
+    cmp r12, 2
+    jne .ann_expr
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_STAR
+    jne .ann_expr
+    mov rdi, rbx
+    call par_advance
+    mov r13d, 1
+.ann_expr:
     mov rdi, rbx
     mov esi, BP_NONE
     call par_expr
     test rax, rax
     jz .fail
+    test r13d, r13d
+    jz .ann_plain
+    mov r8d, eax                        ; a = the expression
+    mov rdi, rbx
+    mov esi, AST_STARRED
+    xor edx, edx
+    mov rcx, [rbp - POP_LINE]
+    xor r9d, r9d
+    call ast_make
+    test rax, rax
+    jz .fail
+.ann_plain:
     mov [rbp - POP_ANN], rax
 .no_ann:
     ; A parameter ends at its name, or at its annotation; the default that
@@ -2552,12 +2583,14 @@ DEF_FUNC par_one_param, POP_FRAME
     mov edx, [rbp - POP_END]
     call ast_end_at
     mov rax, [rbp - POP_NODE]
+    pop r13
     pop r12
     pop rbx
     leave
     ret
 .fail:
     xor eax, eax
+    pop r13
     pop r12
     pop rbx
     leave

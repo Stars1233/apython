@@ -230,7 +230,21 @@ class Unpack:
         self.__typing_unpacked_tuple_args__ = arg
 
     def __repr__(self):
-        return "*%r" % (self.__typing_unpacked_tuple_args__,)
+        # typing.Unpack[Ts], which is what CPython's _UnpackGenericAlias
+        # prints and what turns up in __annotations__.  "*Ts" is how the
+        # SOURCE spells it, and is the repr of an unpacked GenericAlias
+        # rather than of this.
+        return "typing.Unpack[%s]" % (
+            getattr(self.__typing_unpacked_tuple_args__, "__name__", None)
+            or repr(self.__typing_unpacked_tuple_args__),)
+
+    def __eq__(self, other):
+        return (isinstance(other, Unpack)
+                and self.__typing_unpacked_tuple_args__
+                == other.__typing_unpacked_tuple_args__)
+
+    def __hash__(self):
+        return hash(("Unpack", id(self.__typing_unpacked_tuple_args__)))
 
 
 class TypeAliasType:

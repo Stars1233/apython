@@ -721,10 +721,28 @@ LFDOD_FRAME equ 16          ; + 0 pushes = 16
 DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
     mov [rbp - LFDOD_ARG], ecx    ; save arg (localsplus index)
 
-    ; Get name from co_names (payload array: 8-byte stride)
+    ; The name is co_localsplusnames[arg], which is what the argument INDEXES.
+    ; It used to come from co_names at the same index -- a different tuple
+    ; entirely -- so a class body that reads a closure variable read whatever
+    ; name happened to sit there: `class C[T]` with an annotation of T got
+    ; co_names[1], which is `__module__`, and the annotation came out as
+    ; '__main__'.
+    mov rax, [r12 + PyFrame.code]
+    mov rax, [rax + PyCodeObject.co_localsplusnames]
+    test rax, rax
+    jz .lfdod_name_fallback
+    movsxd rcx, ecx
+    cmp rcx, [rax + PyTupleObject.ob_size]
+    jae .lfdod_name_fallback
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rsi, [rax + rcx*8]
+    jmp .lfdod_have_name
+.lfdod_name_fallback:
+    mov ecx, [rbp - LFDOD_ARG]
     shl ecx, 3
     LOAD_CO_NAMES rsi
     mov rsi, [rsi + rcx]          ; name string
+.lfdod_have_name:
 
     ; Pop dict from TOS
     VPOP_VAL rdi, r8

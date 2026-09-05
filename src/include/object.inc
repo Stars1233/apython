@@ -343,6 +343,10 @@ struc PyGenericAliasObject
     .ob_type:   resq 1  ; +8
     .ga_origin: resq 1  ; +16: the type being subscripted (owned)
     .ga_args:   resq 1  ; +24: the argument, a tuple if it was one (owned)
+    ; PEP 646's `*tuple[int, str]`: iterating a GenericAlias yields one item,
+    ; a copy of it with this set.  It reprs with a leading star, answers
+    ; __unpacked__ True, and is what an annotation of that shape holds.
+    .ga_starred: resq 1 ; +32
 endstruc
 
 ; A getset descriptor: a named pair of C accessors living in a type's dict.
