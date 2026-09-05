@@ -852,31 +852,97 @@ def _utf_n_encode(s, errors, width, big):
     return (bytes(out), len(s))
 
 
-def _utf_n_decode(data, errors, width, big, codec):
-    b = _as_bytes(data)
-    if len(b) % width:
-        raise UnicodeDecodeError(codec, b, len(b) - len(b) % width, len(b),
-                                 "truncated data")
+def _utf_n_decode(data, errors, width, big, codec, offset=0):
+    """Decode UTF-16 or UTF-32, running the error handler on every refusal.
+
+    Only a truncated tail was detected at all, and it RAISED rather than
+    consulting `errors` -- so `b"\x00".decode("utf-16", "replace")` was a
+    UnicodeDecodeError where CPython answers a replacement character, and a
+    lone surrogate or a code point past 0x10FFFF was silently turned into a
+    character no str should hold.
+
+    `offset` is how many bytes of BOM were taken before this was called: the
+    positions in the exception, and the count returned, are of the WHOLE
+    input, which is what the caller passed and what a handler will index.
+    """
+    b = bytes(_as_bytes(data))
+    errors = errors or "strict"
     out = []
     i = 0
-    while i < len(b):
+    n = len(b)
+    # The exception carries the bytes the CALLER passed, BOM included, so a
+    # handler that indexes exc.object sees what it was given.
+    whole = b if not offset else _bom_prefix(width, big) + b
+
+    def fail(start, end, reason):
+        """The handler decides; a strict one raises out of here."""
+        exc = UnicodeDecodeError(codec, whole, start + offset, end + offset,
+                                 reason)
+        replacement, resume = lookup_error(errors)(exc)
+        if resume < 0:
+            resume += n + offset
+        resume -= offset
+        if resume <= start or resume > n:
+            raise IndexError("position %d from error handler out of bounds"
+                             % (resume + offset,))
+        return replacement, resume
+
+    while i < n:
+        if n - i < width:
+            replacement, i = fail(i, n, "truncated data")
+            out.append(replacement)
+            continue
         chunk = b[i:i + width]
         if big:
             chunk = bytes(reversed(chunk))
-        n = 0
+        v = 0
         for k in range(width - 1, -1, -1):
-            n = (n << 8) | chunk[k]
-        if width == 2 and 0xD800 <= n < 0xDC00 and i + 4 <= len(b):
-            nxt = b[i + 2:i + 4]
-            if big:
-                nxt = bytes(reversed(nxt))
-            lo = nxt[0] | (nxt[1] << 8)
-            if 0xDC00 <= lo < 0xE000:
-                n = 0x10000 + ((n - 0xD800) << 10) + (lo - 0xDC00)
-                i += 2
-        out.append(chr(n))
+            v = (v << 8) | chunk[k]
+        if width == 2:
+            if 0xD800 <= v < 0xDC00:
+                if i + 4 > n:
+                    replacement, i = fail(i, i + 2, "unexpected end of data")
+                    out.append(replacement)
+                    continue
+                nxt = b[i + 2:i + 4]
+                if big:
+                    nxt = bytes(reversed(nxt))
+                lo = nxt[0] | (nxt[1] << 8)
+                if not (0xDC00 <= lo < 0xE000):
+                    replacement, i = fail(i, i + 2,
+                                          "illegal UTF-16 surrogate")
+                    out.append(replacement)
+                    continue
+                v = 0x10000 + ((v - 0xD800) << 10) + (lo - 0xDC00)
+                out.append(chr(v))
+                i += 4
+                continue
+            if 0xDC00 <= v < 0xE000:
+                replacement, i = fail(i, i + 2, "illegal encoding")
+                out.append(replacement)
+                continue
+        else:
+            if v > 0x10FFFF:
+                replacement, i = fail(i, i + 4,
+                                      "code point not in range(0x110000)")
+                out.append(replacement)
+                continue
+            if 0xD800 <= v < 0xE000:
+                replacement, i = fail(
+                    i, i + 4,
+                    "code point in surrogate code point "
+                    "range(0xd800, 0xe000)")
+                out.append(replacement)
+                continue
+        out.append(chr(v))
         i += width
-    return ("".join(out), len(b))
+    return ("".join(out), n + offset)
+
+
+def _bom_prefix(width, big):
+    if width == 2:
+        return b"\xfe\xff" if big else b"\xff\xfe"
+    return b"\x00\x00\xfe\xff" if big else b"\xff\xfe\x00\x00"
 
 
 def utf_16_le_encode(s, errors=None):
@@ -901,12 +967,14 @@ def utf_16_encode(s, errors=None):
 
 
 def utf_16_decode(data, errors=None, final=False):
+    # The exception names the endianness the BOM resolved to -- CPython
+    # reports 'utf-16-le' for a little-endian stream, not 'utf-16'.
     b = _as_bytes(data)
     if b[:2] == b"\xff\xfe":
-        return _utf_n_decode(b[2:], errors, 2, False, "utf-16")
+        return _utf_n_decode(b[2:], errors, 2, False, "utf-16-le", 2)
     if b[:2] == b"\xfe\xff":
-        return _utf_n_decode(b[2:], errors, 2, True, "utf-16")
-    return _utf_n_decode(b, errors, 2, False, "utf-16")
+        return _utf_n_decode(b[2:], errors, 2, True, "utf-16-be", 2)
+    return _utf_n_decode(b, errors, 2, False, "utf-16-le")
 
 
 def utf_32_le_encode(s, errors=None):
@@ -933,10 +1001,10 @@ def utf_32_encode(s, errors=None):
 def utf_32_decode(data, errors=None, final=False):
     b = _as_bytes(data)
     if b[:4] == b"\xff\xfe\x00\x00":
-        return _utf_n_decode(b[4:], errors, 4, False, "utf-32")
+        return _utf_n_decode(b[4:], errors, 4, False, "utf-32-le", 4)
     if b[:4] == b"\x00\x00\xfe\xff":
-        return _utf_n_decode(b[4:], errors, 4, True, "utf-32")
-    return _utf_n_decode(b, errors, 4, False, "utf-32")
+        return _utf_n_decode(b[4:], errors, 4, True, "utf-32-be", 4)
+    return _utf_n_decode(b, errors, 4, False, "utf-32-le")
 
 
 _BUILTIN_CODECS = {
