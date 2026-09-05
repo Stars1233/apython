@@ -67,6 +67,60 @@ DEF_FUNC dict_new, 8            ; 1 pushes, so rsp is 16-aligned
 END_FUNC dict_new
 
 ;; ============================================================================
+;; dict_copy_shallow(rdi = src dict) -> rax = a new dict, or 0
+;;
+;; The entries walk is over the DENSE array, so insertion order survives the
+;; copy; `key == 0` skips a hole.  dict_set takes its own references, so the
+;; result owns everything it holds and the source is left untouched.
+;;
+;; dict.copy() is this, and so is the namespace copy type_from_parts makes:
+;; a class must not keep the caller's dict as its tp_dict, or `ns['x'] = 1`
+;; after `type(n, b, ns)` would edit the live class.
+;; ============================================================================
+DEF_FUNC dict_copy_shallow      ; 4 pushes, so rsp stays 16-aligned
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, rdi                ; src
+    call dict_new
+    test rax, rax
+    jz .dcs_out
+    mov r12, rax                ; dst
+
+    mov r13, [rbx + PyDictObject.capacity]
+    xor r14d, r14d
+
+.dcs_loop:
+    cmp r14, r13
+    jge .dcs_done
+    mov rax, [rbx + PyDictObject.entries]
+    imul rcx, r14, DICT_ENTRY_SIZE
+    add rax, rcx
+    mov rdi, [rax + DictEntry.key]
+    test rdi, rdi
+    jz .dcs_next
+    mov rdx, [rax + DictEntry.value]
+    mov rsi, rdi
+    mov rdi, r12
+    call dict_set
+.dcs_next:
+    inc r14
+    jmp .dcs_loop
+
+.dcs_done:
+    mov rax, r12
+.dcs_out:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_copy_shallow
+
+;; ============================================================================
 ;; dict_alloc_tables(rdi = dict, rsi = capacity)
 ;; Allocates the dense entry array (zeroed, so the unused tail reads as empty)
 ;; and the sparse index array (all DICT_IX_EMPTY).  Sets .capacity.

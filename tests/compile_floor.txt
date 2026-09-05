@@ -66,6 +66,7 @@ test_bytes_subclass_dict
 test_call_ex
 test_classes
 test_classmethod_metaclass
+test_class_namespace_copy
 test_closures
 test_codec_args
 test_codecs
