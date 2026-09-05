@@ -1529,6 +1529,13 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov rdi, r12
     call subclass_register
 
+    ; Does anything in this MRO define a __getattribute__ of its own?  Asked
+    ; once, here, instead of on every attribute access.  tp_mro, tp_dict and
+    ; tp_bases are all set by now, which is all it reads.
+    extern type_refresh_getattribute_flag
+    mov rdi, r12
+    call type_refresh_getattribute_flag
+
     ; Call parent's __init_subclass__ if present
     mov rax, [rbp - TFP_BASE]          ; base class
     test rax, rax

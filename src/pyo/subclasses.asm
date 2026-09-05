@@ -49,11 +49,7 @@ extern raise_exception
 extern exc_TypeError_type
 extern type_check_is_class
 
-struc SubList
-    .count:    resq 1
-    .capacity: resq 1
-    .items:    resq 1       ; ap_malloc'd PyTypeObject*[capacity]
-endstruc
+; SubList lives in object.inc, with every other struct.
 
 SUBLIST_INITIAL equ 4
 
