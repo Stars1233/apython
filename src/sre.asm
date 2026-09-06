@@ -1036,12 +1036,20 @@ END_FUNC sre_uni_isword
 
 ;; ============================================================================
 ;; sre_state_init(SRE_State* state, SRE_PatternObject* pattern,
-;;                PyStrObject* string, i64 pos, i64 endpos)
+;;                PyStrObject* string, i64 pos, i64 endpos,
+;;                SRE_CpCache* cache) -> void
 ;; Initialize match state for a string.
+;;
+;; cache may be NULL, and is for callers that init a state repeatedly over the
+;; same subject -- the scanner behind finditer is the only one.  A non-ASCII
+;; subject has to be decoded to u32 for random access, which is O(len); with a
+;; cache that happens once and every later state borrows the result.  NULL
+;; means decode and own, which is what every other caller wants.
 ;; ============================================================================
 SSI_ENDPOS   equ 8       ; endpos (ASCII path); reused as state ptr (Unicode path)
 SSI_BYTELEN  equ 16      ; byte length (Unicode path only)
 SSI_UENDPOS  equ 24      ; endpos saved before clobber (Unicode path only)
+SSI_CACHE    equ 32      ; SRE_CpCache*, or 0
 SSI_FRAME    equ 48         ; + 4 pushes = 80
 
 DEF_FUNC sre_state_init, SSI_FRAME
@@ -1055,6 +1063,7 @@ DEF_FUNC sre_state_init, SSI_FRAME
     mov r13, rdx               ; string
     mov r14, rcx               ; pos
     mov [rbp - SSI_ENDPOS], r8 ; save endpos
+    mov [rbp - SSI_CACHE], r9  ; save the codepoint cache, or 0
 
     ; Zero out the state
     mov rdi, rbx
@@ -1164,6 +1173,28 @@ DEF_FUNC sre_state_init, SSI_FRAME
 
 .need_unicode:
     mov dword [rbx + SRE_State.charsize], 4
+
+    ; A cache already holding this subject's decode?  Borrow it: the scanner
+    ; that owns the cache outlives every state built from it, and the subject
+    ; is an immutable str, so the buffer can neither dangle nor go stale.
+    ; r8 carries the codepoint count into the endpos clamp on both paths.
+    mov rax, [rbp - SSI_CACHE]
+    test rax, rax
+    jz .nu_decode
+    mov rdx, [rax + SRE_CpCache.buf]
+    test rdx, rdx
+    jz .nu_decode
+    mov [rbx + SRE_State.codepoint_buf], rdx
+    mov r8, [rax + SRE_CpCache.len]
+    ; .utf8_clamp reads endpos from SSI_UENDPOS, which only the decode path
+    ; below writes -- it moves endpos there because it needs SSI_ENDPOS for
+    ; the state pointer.  Nothing has been clobbered on this path, so just
+    ; put it where the clamp looks.
+    mov rax, [rbp - SSI_ENDPOS]
+    mov [rbp - SSI_UENDPOS], rax
+    jmp .utf8_clamp            ; owns_cpbuf stays 0: the cache owns it
+
+.nu_decode:
     ; UTF-8 decode to u32 codepoint array
     mov rdi, [rbx + SRE_State.str_begin]
     mov rsi, [r13 + PyStrObject.ob_size]
@@ -1249,6 +1280,19 @@ DEF_FUNC sre_state_init, SSI_FRAME
     jmp .utf8_decode
 
 .utf8_done:
+    ; r8 is the full codepoint count, before any endpos clamp -- which is what
+    ; the cache must hold, since endpos narrows a single match and the next
+    ; one may not narrow at all.
+    mov qword [rbx + SRE_State.owns_cpbuf], 1
+    mov rax, [rbp - SSI_CACHE]
+    test rax, rax
+    jz .utf8_clamp
+    mov rdx, [rbx + SRE_State.codepoint_buf]
+    mov [rax + SRE_CpCache.buf], rdx
+    mov [rax + SRE_CpCache.len], r8
+    mov qword [rbx + SRE_State.owns_cpbuf], 0   ; the cache owns it now
+
+.utf8_clamp:
     ; Clamp codepoint_len with endpos
     mov rcx, [rbp - SSI_UENDPOS] ; endpos (saved before clobber)
     cmp rcx, 0
@@ -1586,7 +1630,10 @@ DEF_FUNC sre_state_fini, 8            ; 1 pushes, so rsp is 16-aligned
     call ap_free
 .no_marks:
 
-    ; Free codepoint buffer
+    ; Free the codepoint buffer, unless it is borrowed from a cache that
+    ; outlives this state.
+    cmp qword [rbx + SRE_State.owns_cpbuf], 0
+    je .no_cp
     mov rdi, [rbx + SRE_State.codepoint_buf]
     test rdi, rdi
     jz .no_cp

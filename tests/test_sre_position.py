@@ -104,6 +104,48 @@ print([mo.group() for mo in re.finditer(r"\d+", mixed)])
 it = re.finditer(r"\d+", mixed)
 print(len(list(it)), list(it))
 
+# --- the scanner's decode cache ----------------------------------------------
+#
+# A scanner holds its subject's u32 decode across iterations instead of
+# rebuilding it per step.  The cache stores the UNCLAMPED length, so anything
+# that narrows a single match must still measure against the whole string.
+
+uni = "".join("é%d中" % (i % 10) for i in range(12))
+print(len(uni), repr(uni[:9]))
+
+# pattern.finditer with explicit pos/endpos, which the cached length must not
+# override in either direction
+up = re.compile(r"\d")
+for pos, endpos in ((0, len(uni)), (3, 9), (0, 0), (5, 5), (9, 3), (0, 10**6)):
+    print(pos, endpos, [(m.span(), m.group()) for m in up.finditer(uni, pos, endpos)])
+
+# two scanners over the same string, interleaved: each owns its own cache
+a = up.finditer(uni)
+b = up.finditer(uni)
+print([(next(a).span(), next(b).span()) for _ in range(3)])
+print(next(a).span(), sum(1 for _ in b))
+
+# the scanner's own search() method, which builds a state the same way
+# finditer does and shares the same cache.  match() is not probed here: a
+# failing scanner.match() ends the scan in CPython and does not in this tree,
+# which bugs.md carries and which has nothing to do with the cache -- it
+# reproduces identically on an ASCII subject, where no cache is built at all.
+sc = up.scanner(uni)
+print(span_of(sc.search()), span_of(sc.search()), span_of(sc.search()))
+
+# a cached scanner interleaved with plain matches on the same string, which
+# take the uncached path
+it2 = up.finditer(uni)
+print(next(it2).span(), up.search(uni, 5).span(), next(it2).span(),
+      up.match(uni, 1).span() if up.match(uni, 1) else None)
+
+# the same subject scanned after the first scanner is gone
+del a, b, it2
+print([m.span() for m in up.finditer(uni)][:4])
+
+# an ASCII scanner never fills the cache at all
+print([m.span() for m in up.finditer("a1b2c3")])
+
 # findall / sub / split, which init once and reset per iteration
 print(re.findall(r"\d+", mixed))
 print(re.sub(r"\d+", "#", mixed))
