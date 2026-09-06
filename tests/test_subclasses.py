@@ -112,3 +112,20 @@ class MetaChild(MetaBase):
 
 
 print(sorted(c.__name__ for c in MetaBase.__subclasses__()))
+
+# __subclasses__() in a loop.
+#
+# list_new takes a CAPACITY, and this call site left rdi holding whatever the
+# preceding type_check_is_class had put there -- an address.  So every call
+# allocated and touched a list of hundreds of millions of slots, and the size
+# varied run to run because ASLR moved the address.  It cost `make check-source`
+# 22GB of peak RSS and got the CI runner OOM-killed.
+#
+# Nothing about the RESULT was wrong, so only the cost can catch it: under the
+# bug this loop allocates and zeroes gigabytes per iteration.
+total = 0
+for _ in range(3000):
+    total += len(Base.__subclasses__())
+    total += len(int.__subclasses__())
+    total += len(Shape.__subclasses__())
+print("repeated calls:", total > 0, len(Base.__subclasses__()) >= 2)
