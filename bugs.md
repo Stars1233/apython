@@ -44,6 +44,78 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
+- **An exception raised inside `__exit__`, while another is in flight,
+  segfaults.**  Four lines, no stdlib:
+
+  ```python
+  class CM:
+      def __enter__(self): return self
+      def __exit__(self, et, ev, tb): raise ValueError("from exit")
+  with CM():
+      raise TypeError("inner")
+  ```
+
+  CPython raises the ValueError with the TypeError as its `__context__`.  This
+  tree dies with SIGSEGV in `obj_is_true` (`src/object.asm:2921`), reached from
+  `op_pop_jump_if_true` (`src/opcodes/flow.asm:187`) -- a garbage Value on the
+  stack, so the unwinder and the with-block's cleanup disagree about how far
+  to pop.  Any exception does it; `ev.nosuch` inside `__exit__` is the same
+  crash.
+
+  This is what actually stands between apython and CPython's own test suite.
+  `unittest`'s `assertRaises` calls `traceback.clear_frames` in its `__exit__`,
+  and `frame.clear()` does not exist here, so the AttributeError that follows
+  lands in exactly this shape -- and `assertRaises` is in nearly every test
+  CPython ships.  `frame.clear()` is worth adding on its own, but it is the
+  smaller half.
+
+- **`\b` and `\B` are ASCII-only.**  `re.search(r"\b\d+\b", "eee42")` with
+  non-ASCII letters in place of the e's finds `42`, where CPython finds nothing
+  because those letters are word characters.  `\B\d` is wrong the same way and
+  `re.search(r"\bX\b", "x X y")` with a non-ASCII X finds nothing.  `\w`
+  itself is already right -- `sre_uni_isword` (`src/sre.asm`) exists and
+  answers correctly -- so this is the `AT` handlers not using it.
+
+- **A non-ASCII subject is re-decoded on every `pattern.match(s, pos)`.**  The
+  engine indexes code points, so a non-ASCII subject is decoded to u32 before
+  matching, and that is O(len).  A scanner caches it (`SRE_CpCache`, so
+  `finditer` decodes once), but a hand-written `pattern.match(s, pos)` loop has
+  no scanner and pays per call -- and `json.decoder` is written exactly that
+  way.  Caching it would have to hang off the string itself, since nothing else
+  in that loop outlives one call; that is a `PyStrObject` change, which is why
+  the scanner got one and this did not.
+
+- **`type_install_slots` never clears a slot it has filled.**  `del C.__iter__`
+  leaves `tp_iter` pointing at the wrapper, which then finds no dunder and
+  answers `RuntimeError: slot wrapper failed without an exception` where CPython
+  says `'A' object is not iterable`.  `del C.__len__` is the same, and so is
+  `del C.__call__`, which additionally leaves `callable()` answering True.  The
+  fix is not simply "clear on `.skip`": that path is also taken when a *builtin*
+  base supplies the dunder, and there the slot must be left exactly as
+  `type_from_parts` set it.
+
+- **A dunder set to `None` empties the slot, which is wrong for `__call__`.**
+  `type_install_slots` skips any dunder explicitly `None`, so the protocol is
+  disabled -- right for `__iter__` and `__hash__`, and what Python documents.
+  CPython does not extend it to `__call__`: `class C: __call__ = None` leaves
+  `callable(C())` True and fails inside the call with `'NoneType' object is not
+  callable`, where this tree answers `callable()` False and `'C' object is not
+  callable`.  Ours is the more coherent pair; it is still a difference.
+
+- **No builtin type carries `__call__` in its `tp_dict`.**
+  `hasattr(len, '__call__')` is False, and so is `hasattr(int, '__call__')` and
+  `hasattr(staticmethod(len), '__call__')`, though all three are callable and
+  answer `callable()` True.  This is the recorded "a builtin's behaviour that
+  lives only in a slot" pattern: the stdlib asks by name, and `__call__` is one
+  of the names it asks about.  Instances of classes written in Python are fine
+  -- their `__call__` is a real dict entry.
+
+- **A scanner keeps scanning after a failed `match()`.**  CPython ends the scan
+  there: `p.scanner(s).match()` returning None makes every later `match()` and
+  `search()` on that scanner return None too.  Here the scanner carries on, so
+  `sc.match(); sc.search()` finds the first match where CPython finds nothing.
+  Independent of the subject's encoding -- it reproduces on pure ASCII.
+
 - **A read-only property's AttributeError has CPython 3.10's wording.**
   `Plain().r = 2` says `can't set attribute` where CPython 3.12 says
   `property 'r' of 'Plain' object has no setter`, and the deleter case is the
