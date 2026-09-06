@@ -442,6 +442,7 @@ test_str_mod_subclass
 test_str_predicates
 test_str_search_primitives
 test_str_search
+test_str_split_spec
 test_str_subclass_dict
 test_str_subclass_slots
 test_str_translate_mapping

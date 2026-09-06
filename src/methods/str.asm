@@ -88,6 +88,37 @@ DEF_FUNC str_method_lower
 END_FUNC str_method_lower
 
 ;; ============================================================================
+section .rodata
+;; One byte per possible byte value: 1 when it is whitespace as str.split()
+;; and str.strip() understand the term, 0 otherwise.  It replaces a six-way
+;; compare ladder that ran once per character of the haystack, reached through
+;; a call.  The set is the ASCII one -- tab, newline, vertical tab, form feed,
+;; carriage return and space -- which is what the code it replaces tested; the
+;; wider Unicode spaces are not, and cannot be: U+0085 and U+00A0 are two
+;; bytes each in UTF-8, so no byte table can see them.  What the table DOES
+;; add over the ladder it replaces is the four ASCII separators \x1c-\x1f,
+;; which CPython's str.split() and str.strip() treat as whitespace and which
+;; the ladder had simply left out.  bugs.md records the rest.
+global str_ws_class
+str_ws_class:
+    db 0,0,0,0,0,0,0,0,0,1,1,1,1,1,0,0
+    db 0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1
+    db 1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+section .text
+
 ;; ============================================================================
 ;; strip_char_matches(dil = byte, rsi = chars data or 0, rdx = chars len)
 ;;   -> eax = 1 when the byte should be stripped
@@ -109,18 +140,10 @@ DEF_FUNC_BARE strip_char_matches
     jmp .scm_loop
 
 .scm_whitespace:
-    cmp dil, ' '
-    je .scm_yes
-    cmp dil, 9                  ; tab
-    je .scm_yes
-    cmp dil, 10                 ; newline
-    je .scm_yes
-    cmp dil, 13                 ; carriage return
-    je .scm_yes
-    cmp dil, 11                 ; vertical tab
-    je .scm_yes
-    cmp dil, 12                 ; form feed
-    je .scm_yes
+    lea rcx, [rel str_ws_class]
+    movzx eax, dil
+    movzx eax, byte [rcx + rax]
+    ret
 .scm_no:
     xor eax, eax
     ret
@@ -1267,7 +1290,8 @@ SPI_MAX    equ 32        ; remaining splits allowed, -1 for no limit
 SPI_LIST   equ 40
 SPI_RIGHT  equ 48
 SPI_LEN    equ 56
-SPI_FRAME  equ 64           ; + 4 pushes = 96
+SPI_ASCII  equ 64           ; the haystack is ASCII, so every piece is too
+SPI_FRAME  equ 80           ; + 4 pushes = 112, still 16-aligned
 
 DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     push rbx
@@ -1314,6 +1338,17 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     mov [rbp - SPI_MAX], rax
 
 .spi_ready:
+    ; If the haystack is ASCII then so is every piece of it, and each piece's
+    ; code-point count is its byte count.  Without this every piece went
+    ; through str_new_heap -> str_set_length -> str_count_codepoints, whose
+    ; ASCII probe is cheap per byte and expensive per CALL -- pieces are short,
+    ; and it was 11% of a split.
+    mov rax, [rbx + PyStrObject.ob_size]
+    xor ecx, ecx
+    cmp rax, [rbx + PyStrObject.ob_length]
+    sete cl
+    mov [rbp - SPI_ASCII], rcx
+
     xor edi, edi
     call list_new
     mov [rbp - SPI_LIST], rax
@@ -1329,22 +1364,23 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
 .spi_sep_loop:
     cmp qword [rbp - SPI_MAX], 0
     je .spi_sep_tail
-    mov r13, r12                    ; scan position
 .spi_sep_scan:
-    mov rax, [rbp - SPI_LEN]
-    sub rax, [rbp - SPI_SEPLEN]
-    cmp r13, rax
-    jg .spi_sep_tail
-    mov rdi, rbx
-    lea rdi, [rdi + PyStrObject.data]
-    add rdi, r13
-    mov rsi, [rbp - SPI_SEP]
-    mov rdx, [rbp - SPI_SEPLEN]
-    call ap_memcmp
-    test eax, eax
-    jz .spi_sep_hit
-    inc r13
-    jmp .spi_sep_scan
+    ; One search per PIECE.  This was an ap_memcmp call for every byte offset
+    ; of the haystack: a call, with a primitive's fixed startup, to compare
+    ; bytes that almost never match.  ap_memfind scans for the separator's
+    ; first byte eight at a time and only compares the rest on a candidate.
+    lea rdi, [rbx + PyStrObject.data]
+    add rdi, r12
+    mov rsi, [rbp - SPI_LEN]
+    sub rsi, r12
+    mov rdx, [rbp - SPI_SEP]
+    mov rcx, [rbp - SPI_SEPLEN]
+    call ap_memfind
+    test rax, rax
+    jz .spi_sep_tail
+    lea rcx, [rbx + PyStrObject.data]
+    sub rax, rcx
+    mov r13, rax                    ; byte offset of the separator
 
 .spi_sep_hit:
     mov r14, r13
@@ -1419,12 +1455,10 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     ; skip leading whitespace
     cmp r12, [rbp - SPI_LEN]
     jge .spi_done
-    movzx edi, byte [rbx + PyStrObject.data + r12]
-    xor esi, esi
-    xor edx, edx
-    call strip_char_matches
-    test eax, eax
-    jz .spi_ws_piece
+    movzx eax, byte [rbx + PyStrObject.data + r12]
+    lea rcx, [rel str_ws_class]
+    cmp byte [rcx + rax], 0
+    je .spi_ws_piece
     inc r12
     jmp .spi_ws_loop
 
@@ -1448,12 +1482,10 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
 .spi_ws_find_end:
     cmp r13, [rbp - SPI_LEN]
     jge .spi_ws_emit
-    movzx edi, byte [rbx + PyStrObject.data + r13]
-    xor esi, esi
-    xor edx, edx
-    call strip_char_matches
-    test eax, eax
-    jnz .spi_ws_emit
+    movzx eax, byte [rbx + PyStrObject.data + r13]
+    lea rcx, [rel str_ws_class]
+    cmp byte [rcx + rax], 0
+    jne .spi_ws_emit
     inc r13
     jmp .spi_ws_find_end
 .spi_ws_emit:
@@ -1476,12 +1508,10 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     ; skip trailing whitespace
     test r12, r12
     jle .spi_done
-    movzx edi, byte [rbx + PyStrObject.data + r12 - 1]
-    xor esi, esi
-    xor edx, edx
-    call strip_char_matches
-    test eax, eax
-    jz .spi_wsr_piece
+    movzx eax, byte [rbx + PyStrObject.data + r12 - 1]
+    lea rcx, [rel str_ws_class]
+    cmp byte [rcx + rax], 0
+    je .spi_wsr_piece
     dec r12
     jmp .spi_wsr_loop
 
@@ -1503,12 +1533,10 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
 .spi_wsr_find:
     test r13, r13
     jle .spi_wsr_emit
-    movzx edi, byte [rbx + PyStrObject.data + r13 - 1]
-    xor esi, esi
-    xor edx, edx
-    call strip_char_matches
-    test eax, eax
-    jnz .spi_wsr_emit
+    movzx eax, byte [rbx + PyStrObject.data + r13 - 1]
+    lea rcx, [rel str_ws_class]
+    cmp byte [rcx + rax], 0
+    jne .spi_wsr_emit
     dec r13
     jmp .spi_wsr_find
 .spi_wsr_emit:
@@ -1544,10 +1572,32 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     jmp raise_type_error_with_name
 
 ;; Append a piece (rdi = data, rsi = length) to the result list.
+;; A piece, as a new str.  rdi = its bytes, rsi = its length.
+.spi_piece:
+    cmp qword [rbp - SPI_ASCII], 0
+    je .spi_piece_general
+    ; This is reached by `call`, so rsp is 8 past aligned on entry and the
+    ; push counts below are ODD where a function's would be even.
+    push rdi                    ; source
+    push rsi                    ; length
+    push rsi                    ; pad
+    mov rdi, rsi                ; bytes and code points are the same number
+    call str_alloc_bytes
+    pop rdx                     ; pad
+    pop rdx                     ; length
+    pop rsi                     ; source
+    push rax
+    lea rdi, [rax + PyStrObject.data]
+    call ap_memcpy
+    pop rax
+    ret
+.spi_piece_general:
+    jmp str_new_heap
+
 .spi_emit:
     push r12
     push r13
-    call str_new_heap
+    call .spi_piece
     push rax
     mov rdi, [rbp - SPI_LIST]
     mov rsi, rax
@@ -1563,7 +1613,7 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
 .spi_emit_front:
     push r12
     push r13
-    call str_new_heap
+    call .spi_piece
     ; list.insert(0, piece), through the method's own args-array interface
     sub rsp, 32
     mov rcx, [rbp - SPI_LIST]

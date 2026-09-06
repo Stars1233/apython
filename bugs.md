@@ -88,6 +88,21 @@ reasoning that chose them and what changing one would cost.
   comparison, and run the reflected slot first when it is.  `tests/test_dict_str_keys.py`
   has the case written out and says why it is not asserted there.
 
+- **`split()`, `strip()` and friends do not see the non-ASCII whitespace.**
+  CPython splits on U+0085, U+00A0, U+2028, U+2029, U+3000 and the U+2000
+  block as readily as on a space: `"a\xa0b".split()` is `['a', 'b']` there and
+  `['a\xa0b']` here, and `"\xa0mid\xa0".strip()` is `'mid'` there and
+  unchanged here.  The four ASCII separators `\x1c`-`\x1f` were missing for
+  the same reason until 2026-09-06 and are now in `str_ws_class`.
+
+  A byte table cannot close the rest: every one of those characters is two or
+  three bytes in UTF-8, so the scan loops in `str_split_impl` and
+  `str_strip_impl` would have to decode code points rather than walk bytes.
+  The shape that fits is the one `str_case_map` already uses -- an ASCII fast
+  path over bytes, chosen by `ob_size == ob_length`, and a decoding loop
+  behind it.  `splitlines` has its own, different set (it takes `\x1c` and
+  U+2028 but not `\x1f` or U+00A0) and the same gap.
+
 - **`int / int` double-rounds when either operand is wider than a double.**
   `(10**30) / 7` answers `1.4285714285714283e+29` where CPython answers
   `1.4285714285714285e+29`, and `1 / 10**30` is out by an ulp the same way.
