@@ -1002,3 +1002,54 @@ ASM_INIT
     sub r13, 8
     mov [r13 - 8], %1
 %endmacro
+
+;; ============================================================================
+;; STR_PAIR_OR_DEOPT left, right, label
+;;
+;; Continue only when both Values are EXACT strs; jump to `label` otherwise.
+;; Both arguments must really be VALUES.  Handed a (payload, tag) pair's
+;; payload instead, a small int arrives as the bare number and passes the
+;; pointer test, and the type load then dereferences it.
+;; Clobbers r10.  It deliberately does NOT touch rcx: at the specialization
+;; site rcx still holds the BINARY_OP operator index that .binop_generic needs
+;; on the way out, and at a specialized handler's deopt rcx is the oparg.
+;; ============================================================================
+%macro STR_PAIR_OR_DEOPT 3      ; %1 = left, %2 = right, %3 = deopt label
+    V_TEST_PTR %1, r10
+    ja %3
+    test %1, %1
+    jz %3
+    V_TEST_PTR %2, r10
+    ja %3
+    test %2, %2
+    jz %3
+    lea r10, [rel str_type]
+    cmp [%1 + PyObject.ob_type], r10
+    jne %3
+    cmp [%2 + PyObject.ob_type], r10
+    jne %3
+%endmacro
+
+;; ============================================================================
+;; INPLACE_ADD_TARGET_OR_DEOPT left, label
+;;
+;; Continue only when the string in %1 can be appended to where it stands:
+;; the next instruction is the STORE_FAST that will consume the result, that
+;; local still holds this very object, this stack slot and that local are its
+;; only two references, and it has never been hashed.
+;;
+;; rbx is past the 2-byte instruction word, so the CACHE is at [rbx] and the
+;; instruction after it at [rbx + 2].  Clobbers r10 and r11, and not rcx.
+;; ============================================================================
+%macro INPLACE_ADD_TARGET_OR_DEOPT 2    ; %1 = left, %2 = deopt label
+    cmp byte [rbx + 2], 125             ; STORE_FAST
+    jne %2
+    movzx r11d, byte [rbx + 3]
+    mov r10, [r12 + PyFrame.localsplus + r11*8]
+    cmp %1, r10
+    jne %2
+    cmp qword [%1 + PyObject.ob_refcnt], 2
+    jne %2
+    cmp qword [%1 + PyStrObject.ob_hash], -1
+    jne %2
+%endmacro

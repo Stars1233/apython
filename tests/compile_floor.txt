@@ -432,6 +432,7 @@ test_strfmt
 test_str_format
 test_strings2
 test_strings
+test_str_inplace_add
 test_str_is
 test_str_justify
 test_str_maketrans

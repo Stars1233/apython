@@ -20,6 +20,7 @@
 
 section .text
 
+extern str_type
 extern int_is_integer
 extern eval_dispatch
 extern obj_is_true
@@ -1614,13 +1615,41 @@ DEF_FUNC_BARE op_binary_op
     DISPATCH
 
 .binop_try_float_add:
-    FLOAT_PAIR_OR_DEOPT .binop_generic
+    FLOAT_PAIR_OR_DEOPT .binop_try_str_add
     mov byte [rbx - 2], 217
     addsd xmm0, xmm1
     movq rax, xmm0
     VPUSH_FLOAT rax, r15
     add rbx, 2
     DISPATCH
+
+.binop_try_str_add:
+    ; `s = s + t` and `s += t` into a local.  Every other arm here answers the
+    ; operation; this one only decides that the operands have the shape
+    ; BINARY_OP_INPLACE_ADD_UNICODE wants and lets the generic path do the
+    ; work this once, exactly as CPython's specializer does.
+    ;
+    ; The guards it can check now are checked now, including the two that
+    ; change from one execution to the next -- the refcount and the hash.  A
+    ; loop that hashes its accumulator every iteration would otherwise
+    ; specialize and deopt forever, writing an opcode byte twice a turn.
+    ; op_binary_op still works in (payload, tag) pairs, so the operands here
+    ; are NOT Values and STR_PAIR_OR_DEOPT must not be used on them: a small
+    ; int arrives as the bare number 1, which passes a pointer test and is
+    ; then dereferenced.  The tags answer the same question exactly.
+    cmp r9d, TAG_PTR
+    jne .binop_generic
+    cmp r8d, TAG_PTR
+    jne .binop_generic
+    lea r10, [rel str_type]
+    cmp [rdi + PyObject.ob_type], r10
+    jne .binop_generic
+    cmp [rsi + PyObject.ob_type], r10
+    jne .binop_generic
+    ; A pointer is its own Value, so the target test needs no conversion.
+    INPLACE_ADD_TARGET_OR_DEOPT rdi, .binop_generic
+    mov byte [rbx - 2], 234
+    jmp .binop_generic
 
 .binop_try_smallint_sub:
     ; Check both TAG_SMALLINT

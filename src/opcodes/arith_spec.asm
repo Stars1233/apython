@@ -24,6 +24,10 @@
 extern eval_saved_rbx
 extern eval_saved_r13
 extern opcode_dispatch_table
+extern str_type
+extern obj_dealloc
+extern ap_realloc
+extern ap_memcpy
 extern bool_true
 extern bool_false
 extern op_binary_op
@@ -733,3 +737,94 @@ DEF_FUNC_BARE op_compare_op_int_jump_true
     sub rbx, 2
     DISPATCH
 END_FUNC op_compare_op_int_jump_true
+
+;; ============================================================================
+;; op_binary_op_inplace_add_unicode (234) -> nothing; appends and dispatches
+;;
+;; `s = s + t` and `s += t` where s is a local.  Building a new string each
+;; time makes an accumulation loop quadratic; appending into the one the local
+;; already holds makes it amortized linear, because realloc grows in place
+;; when it can.  This is CPython's BINARY_OP_INPLACE_ADD_UNICODE.
+;;
+;; It swallows the STORE_FAST that follows it, which is what makes the whole
+;; thing legal: the local is the only owner left after the stack reference is
+;; dropped, so the object can be resized where it stands and the store the
+;; STORE_FAST would have done has already happened.
+;;
+;; Guards, all of them load-bearing:
+;;   - both operands are EXACT str.  A subclass may override __add__, and
+;;     resizing one would not give it its own type back anyway.
+;;   - the next instruction really is the STORE_FAST this was specialized
+;;     for, and its local still holds the left operand.  The bytecode can be
+;;     reached by a jump, and the specializer only ever saw one path to it.
+;;   - refcount is exactly 2: this stack slot and that local, and nothing
+;;     else.  `s += s` pushes s twice and so arrives at 3, which is the
+;;     answer that keeps it correct.
+;;   - ob_hash is -1.  A string that has ever been hashed may be sitting in
+;;     some dict's bucket or some set, and the bucket describes bytes that
+;;     are about to change.  This one is easy to leave out and impossible to
+;;     find afterwards.
+;;
+;; Followed by 1 CACHE entry, then the 2-byte STORE_FAST: rbx advances by 4.
+;; ============================================================================
+DEF_FUNC_BARE op_binary_op_inplace_add_unicode
+    mov rax, [r13 - 16]         ; left
+    mov rdx, [r13 - 8]          ; right
+    STR_PAIR_OR_DEOPT rax, rdx, .biau_deopt
+    INPLACE_ADD_TARGET_OR_DEOPT rax, .biau_deopt
+
+    ; --- append in place -----------------------------------------------
+    ; The right operand has to survive both calls, and r15 is the handler
+    ; scratch register that does.
+    mov r15, rdx
+    mov rdi, rax
+    mov rsi, [rax + PyStrObject.ob_size]
+    add rsi, [rdx + PyStrObject.ob_size]
+    add rsi, PyStrObject.data + 8       ; header, and the readers' padding
+    call ap_realloc                     ; fatal on failure; never returns 0
+
+    ; realloc may have moved the object, and its header still describes the
+    ; string as it was -- which is exactly what the copy offset needs.
+    push rax
+    push rax                            ; two slots: rsp stays 16-aligned
+    mov rcx, [rax + PyStrObject.ob_size]
+    lea rdi, [rax + PyStrObject.data + rcx]
+    lea rsi, [r15 + PyStrObject.data]
+    mov rdx, [r15 + PyStrObject.ob_size]
+    call ap_memcpy
+    pop rax
+    pop rax
+
+    ; Both lengths are additions.  Concatenating whole strings concatenates
+    ; their code points, so nothing is rescanned.
+    mov rcx, [r15 + PyStrObject.ob_size]
+    add [rax + PyStrObject.ob_size], rcx
+    mov rcx, [r15 + PyStrObject.ob_length]
+    add [rax + PyStrObject.ob_length], rcx
+    mov rcx, [rax + PyStrObject.ob_size]
+    mov qword [rax + PyStrObject.data + rcx], 0
+    ; ob_hash stays -1; the guard above is what says it already was.
+
+    ; The local is the owner and the object may have moved, so it is the local
+    ; that has to be rewritten -- which is the store the STORE_FAST would have
+    ; made.  Its reference is the same one, relocated: no refcount change.
+    movzx ecx, byte [rbx + 3]
+    mov [r12 + PyFrame.localsplus + rcx*8], rax
+    ; The stack's own reference to the left operand goes away.  It was 2 and
+    ; the local holds the other, so this can never reach zero.
+    dec qword [rax + PyObject.ob_refcnt]
+
+    sub r13, 16                 ; both operands leave the stack
+    DECREF_V r15, rcx
+    add rbx, 4                  ; the CACHE, and the STORE_FAST just performed
+    DISPATCH
+
+.biau_deopt:
+    ; Rewrite to BINARY_OP (122) and re-execute.  Nothing has been popped and
+    ; nothing has been written; the guards are all reads.  Rewinding rbx is
+    ; safe here for the same reason it is for the int arms: a BINARY_OP
+    ; argument is an operator index and is never preceded by EXTENDED_ARG.
+    mov byte [rbx - 2], 122
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_binary_op_inplace_add_unicode

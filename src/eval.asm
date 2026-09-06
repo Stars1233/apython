@@ -125,6 +125,7 @@ extern op_binary_op_lshift_int
 extern op_binary_op_rshift_int
 extern op_binary_op_pow_int
 extern op_binary_op_truediv_int
+extern op_binary_op_inplace_add_unicode
 extern op_for_iter_list
 extern op_for_iter_range
 
@@ -1302,7 +1303,7 @@ opcode_table:
     dq op_binary_op_rshift_int ; 231 = BINARY_OP_RSHIFT_INT (specialized)
     dq op_binary_op_pow_int  ; 232 = BINARY_OP_POWER_INT (specialized)
     dq op_binary_op_truediv_int ; 233 = BINARY_OP_TRUEDIV_INT (specialized)
-    dq op_unimplemented      ; 234
+    dq op_binary_op_inplace_add_unicode ; 234 = BINARY_OP_INPLACE_ADD_UNICODE
     dq op_unimplemented      ; 235
     dq op_unimplemented      ; 236
     dq op_unimplemented      ; 237
