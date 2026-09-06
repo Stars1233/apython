@@ -1,7 +1,7 @@
 # The errno module: every name, its number, and errorcode's inverse mapping.
 #
 # These are Linux x86-64 kernel ABI constants, written out in
-# src/errnomod.asm rather than generated at build time.  This file is what
+# src/modules/errno.asm rather than generated at build time.  This file is what
 # makes that safe: run_tests.sh diffs our stdout against the system CPython's,
 # so a mistyped number cannot survive a test run.
 #

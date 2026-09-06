@@ -198,6 +198,11 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   TypeVarTuple, TypeAliasType and Generic.  Reached from the
   `CALL_INTRINSIC_1`/`_2` handlers in `src/opcodes/match.asm`, the same split
   `_iocore`/`_io` and `_socketcore`/`_socket` use
+- `src/modules/*.asm` — one file per built-in module, named for the module:
+  `errno.asm`, `gc.asm`, `io.asm`, `math.asm`, `posix.asm` (+ `posixproc.asm`),
+  `signal.asm`, `socket.asm`, `sre.asm`, `zlib.asm`.  `table.asm` is the list
+  every one of them is registered from -- `import_init` and
+  `sys.builtin_module_names` both read it, and they used to disagree
 - `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func,
   class, iter, singleton, bytes, bytearray, memoryview, code).  `class.asm` is
   the metatype, the instance and attribute access; `instance_alloc.asm` is
@@ -209,20 +214,20 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   the `marshal` module `importlib` calls `loads` on
 - `src/main.asm` — argument parsing, startup order, and the `-t`/`--dis` modes
 - `src/import.asm` — the import system: finders, `sys.modules`, packages
-- `src/iomod.asm` — the `_iocore` module: the four `_IOBase` types the rest
+- `src/modules/io.asm` — the `_iocore` module: the four `_IOBase` types the rest
   of the I/O stack subclasses, `UnsupportedOperation`, `FileIO` and `BytesIO`.
   The buffering and text layers are `lib/_io.py`, which assembles both halves
   under the name `_io`
-- `src/posixmod.asm` / `src/posixproc.asm` — the `posix` module: the file and
+- `src/modules/posix.asm` / `src/modules/posixproc.asm` — the `posix` module: the file and
   directory syscalls in the first, and everything that makes a second process
   -- fork, execv, _exit, kill, setsid and PEP 3143's fork hooks -- in the
   second.  `lib/_posixsubprocess.py` builds `subprocess`'s fork_exec on them
-- `src/zlibmod.asm` — the `_zlibcore` module: libz's z_stream, the output
+- `src/modules/zlib.asm` — the `_zlibcore` module: libz's z_stream, the output
   buffer that grows while deflate writes into it, and the handle table.  A
   shim over `-lz`, on the precedent `-lgmp` set; `lib/zlib.py` is the module
   surface -- the Compress and Decompress objects, the constants, `zlib.error`
   and every default -- so each core call takes fixed positional arguments
-- `src/socketmod.asm` — the `_socketcore` module: the socket syscalls and the
+- `src/modules/socket.asm` — the `_socketcore` module: the socket syscalls and the
   constant table, taking and returning sockaddrs as opaque bytes.  The socket
   type, the address packing and `select` are `lib/_socket.py` and
   `lib/select.py`, the same split as `_iocore`/`lib/_io.py`
@@ -239,7 +244,7 @@ No hand-written file exceeds 100k bytes; only generated asm may.
 - `src/repr.asm` — the container reprs and the recursion stack they share
 - `src/gc.asm` — the generational collector.  Each type's `tp_traverse` and
   `tp_clear` live with the type, in `src/pyo/*.asm`
-- `src/sre.asm` / `src/sre_module.asm` — the regex engine and its module
+- `src/sre.asm` / `src/modules/sre.asm` — the regex engine and its module
   wrapper; the pattern and match objects live in `src/pyo/`
 - `src/valtest.asm` — `--selftest-value`
 - `src/builtins.asm` — `PyBuiltinObject`, the core builtins, and `builtins_init`

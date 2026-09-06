@@ -28,7 +28,7 @@ reasoning that chose them and what changing one would cost.
   C: `unicodedata`, `_tracemalloc`, `_symtable`, `_ssl`, `_sqlite3`,
   `_crypt`, `_lzma`, `_bz2`, `_ctypes`, `_curses`, `pyexpat` and
   `_tkinter`.
-  (`_io` is not among them: `src/iomod.asm` supplies `_iocore` and
+  (`_io` is not among them: `src/modules/io.asm` supplies `_iocore` and
   `lib/_io.py` assembles both halves under the name `_io`.  `_socket` and
   `select` are the same split over `_socketcore`.  Neither are `math`,
   `_collections`, `_struct`, `_random`, `_contextvars`, `_string`,
