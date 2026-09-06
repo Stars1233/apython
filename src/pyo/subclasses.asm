@@ -49,11 +49,7 @@ extern raise_exception
 extern exc_TypeError_type
 extern type_check_is_class
 
-struc SubList
-    .count:    resq 1
-    .capacity: resq 1
-    .items:    resq 1       ; ap_malloc'd PyTypeObject*[capacity]
-endstruc
+; SubList lives in object.inc, with every other struct.
 
 SUBLIST_INITIAL equ 4
 
@@ -360,6 +356,12 @@ DEF_FUNC type_method_subclasses, TMS_FRAME
     test eax, eax
     jz .tms_type
 
+    ; list_new takes a CAPACITY, and rdi still held whatever
+    ; type_check_is_class left there -- a pointer.  So __subclasses__()
+    ; allocated a list sized by an address: gigabytes, and a different number
+    ; of them on every run, because ASLR moves the address.  It is the reason
+    ; `make check-source` peaked at 22GB and was killed on a CI runner.
+    xor edi, edi
     call list_new
     mov [rbp - TMS_LIST], rax
 

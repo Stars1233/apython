@@ -193,14 +193,48 @@ END_FUNC module_getattr
 ;; Set attribute in module's dict
 ;; ============================================================================
 DEF_FUNC module_setattr
-    ; dict_set(mod_dict, name, value, value_tag, key_tag)
+    ; A NULL value is tp_setattr's DELETE convention -- the same one
+    ; dict_ass_subscript honours by routing to dict_del.  This handed it to
+    ; dict_set, which stored the NULL and kept the key, so `del mod.x` left
+    ; the entry findable with a NULL value.  Two things followed: dk_version
+    ; did not move, because a dict's keys version tracks the KEY SET and
+    ; overwriting a value is not a change to it, so every LOAD_GLOBAL_BUILTIN
+    ; inline cache guarding on it stayed valid; and when a cache did notice
+    ; the NULL and deopt, op_load_global looked the name up again, FOUND it,
+    ; re-specialized, and pushed the NULL.  A NULL Value on the value stack is
+    ; not an error anything notices -- it propagates until something
+    ; dereferences it.
     mov rax, rdi                ; self
+    test rdx, rdx
+    jz .ms_delete
     mov rdi, [rax + PyModuleObject.mod_dict]
     ; rsi = name_str and rdx = value are both already Values
     call dict_set
     xor eax, eax               ; return 0 (success)
     leave
     ret
+
+.ms_delete:
+    push rax                    ; the module, for the error message
+    push rsi                    ; the name, likewise
+    mov rdi, [rax + PyModuleObject.mod_dict]
+    extern dict_del_opt
+    call dict_del_opt           ; -1 when the name was never there
+    pop rsi
+    pop rdi
+    test eax, eax
+    js .ms_missing
+    xor eax, eax               ; return 0 (success)
+    leave
+    ret
+
+.ms_missing:
+    ; CPython raises AttributeError naming the module, exactly as a failed
+    ; READ of the same name does.  Storing a NULL under a fresh key, which is
+    ; what this used to do, invented an entry instead.
+    xor edx, edx
+    extern raise_no_attribute
+    call raise_no_attribute     ; does not return
 END_FUNC module_setattr
 
 ;; ============================================================================

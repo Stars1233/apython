@@ -85,7 +85,7 @@ BSLC_SLICE equ 32
 BSLC_STAG  equ 40    ; start tag
 BSLC_PTAG  equ 48    ; stop tag
 BSLC_OTAG  equ 56    ; obj tag
-BSLC_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
+BSLC_FRAME equ 72            ; + 0 pushes = 64, 16-aligned
 
 ; op_store_slice: rbp-frame layout [rbp - ...]
 SSLC_START equ 8
@@ -97,7 +97,7 @@ SSLC_STAG  equ 48    ; start tag
 SSLC_PTAG  equ 56    ; stop tag
 SSLC_OTAG  equ 64    ; obj tag
 SSLC_VTAG  equ 72    ; value tag
-SSLC_FRAME equ 80            ; + 0 pushes = 80, 16-aligned
+SSLC_FRAME equ 88            ; + 0 pushes = 80, 16-aligned
 
 ; op_map_add: 2-operand push layout [rsp+...]
 MA_VAL   equ 0     ; value (TOS, pushed last)
@@ -470,7 +470,7 @@ END_FUNC op_store_subscr
 ;; ============================================================================
 BT_COUNT    equ 8
 BT_TUPLE    equ 16
-DEF_FUNC op_build_tuple, 16
+DEF_FUNC op_build_tuple, 24   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
     ; [rbp - BT_COUNT] = count
 
     mov [rbp - BT_COUNT], rcx           ; save count
@@ -520,7 +520,7 @@ END_FUNC op_build_tuple
 ;; ============================================================================
 BL_COUNT    equ 8
 BL_LIST     equ 16
-DEF_FUNC op_build_list, 16
+DEF_FUNC op_build_list, 24   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
 
     mov [rbp - BL_COUNT], rcx           ; save count
 
@@ -594,7 +594,7 @@ END_FUNC op_build_list
 ;; ============================================================================
 BM_COUNT    equ 8
 BM_DICT     equ 16
-DEF_FUNC op_build_map, 16
+DEF_FUNC op_build_map, 24   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
 
     mov [rbp - BM_COUNT], rcx           ; save count
 
@@ -663,7 +663,7 @@ END_FUNC op_build_map
 CKM_COUNT   equ 8
 CKM_KEYS    equ 16
 CKM_DICT    equ 24
-DEF_FUNC op_build_const_key_map, 32
+DEF_FUNC op_build_const_key_map, 40   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
 
     mov [rbp - CKM_COUNT], rcx           ; count
 
@@ -780,14 +780,18 @@ DEF_FUNC_BARE op_unpack_sequence
     ; Stack here: [rsp] = the materialised tuple slot, [rsp+8] = payload,
     ; [rsp+16] = tag.
     push rcx                        ; expected count
-    sub rsp, 24                     ; scratch Value slot, keeps rsp aligned
+    sub rsp, 32                     ; scratch Value slot, and the pad that
+                                    ; makes rsp aligned here: three prologue
+                                    ; pushes plus this one is an ODD number of
+                                    ; slots, and the old comment said 24 kept
+                                    ; it aligned when it left it 8 out
     mov [rsp], rdi
     lea rsi, [rsp]
     extern tuple_type_call
     lea rdi, [rel tuple_type]
     mov edx, 1
     call tuple_type_call            ; raises for a non-iterable
-    add rsp, 24
+    add rsp, 32
     pop rcx                         ; expected count
     test rax, rax
     jz .unpack_iter_raised
@@ -1176,18 +1180,18 @@ DEF_FUNC_BARE op_for_iter
     lea rsi, [rel dunder_next]
     extern dunder_call_1
     call dunder_call_1
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    test rax, rax
     jnz .check_next_result     ; got a value
     jmp .next_null
 
 .have_iternext:
     call rax
-    V_UNPACK rax, rdx          ; tp_iternext returns a Value
 .check_next_result:
-    ; rax = payload, rdx = tag (TAG_NULL if exhausted)
-
-    test edx, edx
+    ; rax is the Value tp_iternext or __next__ returned, and 0 means
+    ; exhausted.  Both used to be V_UNPACKed here purely so that the tag
+    ; could be tested for NULL.  0 is the only NULL encoding -- integer 0 is
+    ; V_INT_BIAS -- so the raw test is exact.
+    test rax, rax
     jnz .next_got_value
 
 .next_null:
@@ -1225,7 +1229,7 @@ DEF_FUNC_BARE op_for_iter
 
     ; Got a value - push it (iterator stays on stack)
     add rsp, 16                ; discard saved exception and jump offset
-    VPUSH_VAL rax, rdx
+    VPUSH rax
 
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
@@ -1304,7 +1308,7 @@ LE_ITERABLE equ 16
 LE_COUNT    equ 24
 LE_CURSOR   equ 32
 LE_EXC      equ 40        ; current_exception before the iteration started
-DEF_FUNC op_list_extend, 48
+DEF_FUNC op_list_extend, 56   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
     ; locals: [rbp - LE_LIST]=list, [rbp - LE_ITERABLE]=iterable, [rbp - LE_COUNT]=count, [rbp - LE_CURSOR]=items
 
     ; TOS = iterable
@@ -1454,32 +1458,34 @@ END_FUNC op_list_extend
 ;; Pop right, pop left, push True/False.
 ;; ============================================================================
 DEF_FUNC_BARE op_is_op
-    mov r8d, ecx               ; save invert flag
+    mov r8d, ecx               ; the invert flag
 
-    VPOP_VAL rsi, r9           ; right
-    VPOP_VAL rdi, r10          ; left
+    VPOP rsi                   ; right
+    VPOP rdi                   ; left
 
-    ; None has a single representation (the heap singleton), so payload+tag
-    ; comparison is all `is` needs -- no normalization step.
-
-    ; Compare both payload AND tag (for SmallInt correctness)
+    ; A Value is a canonical bit pattern, so identity IS bit equality: a
+    ; pointer is its own Value, an integer immediate is unique per value, and
+    ; a float per bit pattern.  This used to V_UNPACK both sides and compare
+    ; payload and tag separately -- the same question, in twenty times the
+    ; instructions -- under a comment saying the tag was needed "for SmallInt
+    ; correctness".  It is the encoding that provides that, not the tag.
     xor eax, eax
     cmp rdi, rsi
-    jne .is_cmp_done
-    cmp r10, r9
-    jne .is_cmp_done
-    mov eax, 1
-.is_cmp_done:
+    sete al
 
-    ; DECREF both (tag-aware) — save left before DECREF right
+    ; Release both.  DECREF_V reaches obj_dealloc, which clobbers every
+    ; caller-saved register, so the answer and the operands go on the machine
+    ; stack -- four slots, an even number, because rsp is 16-byte aligned on
+    ; entry to a handler.
     push rax
     push r8
-    push r10                   ; save left tag
-    push rdi                   ; save left payload
-    DECREF_VAL rsi, r9         ; DECREF right (regs live before call)
-    pop rdi                    ; restore left payload
-    pop rsi                    ; restore left tag
-    DECREF_VAL rdi, rsi        ; DECREF left
+    push rdi                   ; left
+    push rsi                   ; right
+    mov rdi, rsi
+    DECREF_V rdi, rdx
+    add rsp, 8                 ; the right operand, released
+    pop rdi                    ; the left
+    DECREF_V rdi, rdx
     pop r8
     pop rax
 
@@ -1537,7 +1543,13 @@ DEF_FUNC_BARE op_contains_op
     mov rsi, [rsp + 8]        ; value
     mov rdx, [rsp + CN_LTAG]  ; value tag
     V_PACK rsi, rdx
+    ; Five saved words is an odd number of slots, and rsp is 16-byte aligned
+    ; on entry to a handler.  The pad is local to the call rather than added
+    ; to the prologue, because this handler has a dozen exits and each unwinds
+    ; the saved words itself.
+    sub rsp, 8
     call rax
+    add rsp, 8
     push rax                   ; save result on machine stack
 
     ; DECREF both (tag-aware, +8 for push rax)
@@ -2199,7 +2211,8 @@ END_FUNC op_store_slice
 ;; TOS = value, TOS1 = key
 ;; dict is at stack[-(ecx+2)] relative to current TOS (before pops)
 ;; ============================================================================
-DEF_FUNC op_map_add, 8            ; 1 pushes, so rsp is 16-aligned
+DEF_FUNC op_map_add, 8    ; + 4 pushes at the call; a handler is entered ALIGNED,
+                          ; so frame + pushes must be 8 mod 16
     push rcx                   ; save oparg
 
     VPOP_VAL rdx, r8           ; rdx = value (TOS), r8 = value tag
@@ -2717,7 +2730,7 @@ extern set_type
 
 BSE_COUNT   equ 8
 BSE_SET     equ 16
-DEF_FUNC op_build_set, 16
+DEF_FUNC op_build_set, 24   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
 
     mov [rbp - BSE_COUNT], rcx           ; save count
 
@@ -2819,8 +2832,10 @@ SU_EXC      equ 56        ; current_exception before the iteration started
 DEF_FUNC op_set_update
     push rbx
     push r14
-    sub rsp, 48                ; 48, not 40: the extra slot, and with it the
-                               ; 16-byte alignment the two pushes had broken.
+    sub rsp, 56                ; 56, not 48: a handler is entered 16-byte
+                               ; ALIGNED, so `push rbp` plus these two pushes
+                               ; leave rsp 8 out and the frame is what puts it
+                               ; back.  48 computed the ordinary-function rule.
                                ; locals: [rbp - SU_SOURCE]=set, [rbp - SU_SET]=iterable, [rbp - SU_CAP]=iter, [rbp - SU_ENTRIES]=iter_tag
 
     ; TOS = iterable
@@ -2887,7 +2902,7 @@ DEF_FUNC op_set_update
     mov rsi, [rbp - SU_ENTRIES]
     DECREF_VAL rdi, rsi
 
-    add rsp, 48
+    add rsp, 56
     pop r14
     pop rbx
     leave
@@ -2897,7 +2912,7 @@ DEF_FUNC op_set_update
     ; The iterable is left alone: the unwinder restores r13 to the stack as
     ; it stood before this instruction, where VPOP_VAL had not taken it off.
     extern eval_exception_unwind
-    add rsp, 48
+    add rsp, 56
     pop r14
     pop rbx
     leave
@@ -2939,7 +2954,7 @@ DEF_FUNC op_set_update
     mov rsi, [rbp - SU_ENTRIES]
     DECREF_VAL rdi, rsi
 
-    add rsp, 48
+    add rsp, 56
     pop r14
     pop rbx
     leave
@@ -3043,16 +3058,20 @@ DEF_FUNC_BARE op_for_iter_list
     jge .fil_exhausted
 
     ; Get item and INCREF (payload + tag arrays)
+    ; A list slot already holds a Value.  This used to V_UNPACK it into a
+    ; (payload, tag) pair and V_PACK it straight back around the refcount
+    ; bump, which made the SPECIALIZATION slower at handling the value than
+    ; the generic list_iter_next it exists to beat -- that one has always
+    ; been two instructions here.
     mov rdx, [rax + PyListObject.ob_item]
-    mov rax, [rdx + rcx * 8]      ; payload
-    V_UNPACK rax, r8
-    INCREF_VAL rax, r8
+    mov rax, [rdx + rcx * 8]      ; the item Value
+    INCREF_V rax, rdx
 
     ; Advance index
     inc qword [rdi + PyListIterObject.it_index]
 
     add rsp, 8                     ; discard saved jump offset
-    VPUSH_VAL rax, r8              ; push fat value
+    VPUSH rax
     add rbx, 2                     ; skip CACHE
     DISPATCH
 

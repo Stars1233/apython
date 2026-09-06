@@ -18,6 +18,14 @@ extern op_load_global
 extern op_load_global_module
 extern op_load_global_builtin
 extern op_load_attr_method
+extern op_load_attr_instance
+extern op_binary_op_and_int
+extern op_binary_op_or_int
+extern op_binary_op_xor_int
+extern op_binary_op_mod_int
+extern op_compare_op_float
+extern op_compare_op_float_jump_false
+extern op_compare_op_float_jump_true
 extern op_load_name
 extern op_store_name
 extern op_store_global
@@ -113,6 +121,11 @@ extern op_binary_op_mul_float
 extern op_binary_op_truediv_float
 extern op_binary_op_mul_int
 extern op_binary_op_floordiv_int
+extern op_binary_op_lshift_int
+extern op_binary_op_rshift_int
+extern op_binary_op_pow_int
+extern op_binary_op_truediv_int
+extern op_binary_op_inplace_add_unicode
 extern op_for_iter_list
 extern op_for_iter_range
 
@@ -1260,7 +1273,7 @@ opcode_table:
     dq op_load_global_builtin ; 201 = LOAD_GLOBAL_BUILTIN (IC)
     dq op_unimplemented      ; 202
     dq op_load_attr_method   ; 203 = LOAD_ATTR_METHOD (IC)
-    dq op_unimplemented      ; 204
+    dq op_load_attr_instance ; 204 = LOAD_ATTR_INSTANCE (inline cache)
     dq op_unimplemented      ; 205
     dq op_unimplemented      ; 206
     dq op_unimplemented      ; 207
@@ -1279,18 +1292,18 @@ opcode_table:
     dq op_binary_op_truediv_float ; 220 = BINARY_OP_TRUEDIV_FLOAT (specialized)
     dq op_binary_op_mul_int      ; 221 = BINARY_OP_MULTIPLY_INT (specialized)
     dq op_binary_op_floordiv_int ; 222 = BINARY_OP_FLOORDIV_INT (specialized)
-    dq op_unimplemented      ; 223
-    dq op_unimplemented      ; 224
-    dq op_unimplemented      ; 225
-    dq op_unimplemented      ; 226
-    dq op_unimplemented      ; 227
-    dq op_unimplemented      ; 228
-    dq op_unimplemented      ; 229
-    dq op_unimplemented      ; 230
-    dq op_unimplemented      ; 231
-    dq op_unimplemented      ; 232
-    dq op_unimplemented      ; 233
-    dq op_unimplemented      ; 234
+    dq op_compare_op_float   ; 223 = COMPARE_OP_FLOAT (IC)
+    dq op_compare_op_float_jump_false ; 224 = fused with POP_JUMP_IF_FALSE
+    dq op_compare_op_float_jump_true  ; 225 = fused with POP_JUMP_IF_TRUE
+    dq op_binary_op_and_int  ; 226 = BINARY_OP_AND_INT (specialized)
+    dq op_binary_op_or_int   ; 227 = BINARY_OP_OR_INT (specialized)
+    dq op_binary_op_xor_int  ; 228 = BINARY_OP_XOR_INT (specialized)
+    dq op_binary_op_mod_int  ; 229 = BINARY_OP_REMAINDER_INT (specialized)
+    dq op_binary_op_lshift_int ; 230 = BINARY_OP_LSHIFT_INT (specialized)
+    dq op_binary_op_rshift_int ; 231 = BINARY_OP_RSHIFT_INT (specialized)
+    dq op_binary_op_pow_int  ; 232 = BINARY_OP_POWER_INT (specialized)
+    dq op_binary_op_truediv_int ; 233 = BINARY_OP_TRUEDIV_INT (specialized)
+    dq op_binary_op_inplace_add_unicode ; 234 = BINARY_OP_INPLACE_ADD_UNICODE
     dq op_unimplemented      ; 235
     dq op_unimplemented      ; 236
     dq op_unimplemented      ; 237
@@ -1769,3 +1782,4 @@ opcode_names:
     dq opn_unknown                    ; 253
     dq opn_unknown                    ; 254
     dq opn_unknown                    ; 255
+

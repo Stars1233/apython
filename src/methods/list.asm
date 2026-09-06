@@ -6,6 +6,8 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern str_type
+extern ap_memcmp
 extern obj_as_index
 extern obj_as_slice_index
 %include "opcodes.inc"
@@ -654,6 +656,57 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov rsi, [rax + rcx]          ; left payload (other for comparison)
     mov r9, [rax + rcx + 8]       ; left tag (full 64-bit)
 
+    ; --- both exact strs: answer here ---------------------------------
+    ; Sorting a list of strings is common enough that CPython pre-scans the
+    ; list and installs a comparison function with no protocol in it at all
+    ; (unsafe_unicode_compare).  The generic route below reaches str_compare
+    ; through tp_richcompare, which builds a bool OBJECT, which is then tested
+    ; and released -- per comparison, of which a sort does n log n.
+    ;
+    ; Exact strs only, on both sides: a subclass may define __lt__.
+    cmp r8d, TAG_PTR
+    jne .merge_not_str
+    cmp r9d, TAG_PTR
+    jne .merge_not_str
+    lea rax, [rel str_type]
+    cmp [rdi + PyObject.ob_type], rax
+    jne .merge_not_str
+    cmp [rsi + PyObject.ob_type], rax
+    jne .merge_not_str
+    mov rax, [rdi + PyStrObject.ob_size]        ; right length
+    mov rcx, [rsi + PyStrObject.ob_size]        ; left length
+    push rax
+    push rcx                                    ; two slots: rsp stays aligned
+    mov rdx, rax
+    cmp rdx, rcx
+    cmova rdx, rcx                              ; rdx = min of the two
+    lea rdi, [rdi + PyStrObject.data]
+    lea rsi, [rsi + PyStrObject.data]
+    call ap_memcmp
+    pop rcx                                     ; left length
+    pop rdx                                     ; right length
+    test eax, eax
+    jnz .merge_str_have
+    ; The common prefix matched, so the shorter string is the smaller one.
+    xor eax, eax
+    cmp rdx, rcx
+    je .merge_str_have
+    mov eax, -1
+    jb .merge_str_have
+    mov eax, 1
+.merge_str_have:
+    ; eax < 0 means right < left, which is the question the merge asks.
+    cmp qword [rbp - LS_REV], 0
+    jne .merge_str_rev
+    test eax, eax
+    js .merge_take_right
+    jmp .merge_take_left
+.merge_str_rev:
+    test eax, eax
+    jg .merge_take_right
+    jmp .merge_take_left
+
+.merge_not_str:
     ; Type dispatch on right element for tp_richcompare
     ; Float coercion: if either operand is TAG_FLOAT, use float_compare
     cmp r8d, TAG_FLOAT

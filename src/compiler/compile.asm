@@ -48,6 +48,8 @@ extern sym_build
 extern sym_finalize
 extern sym_free_all
 extern str_new_heap
+extern str_intern_bytes
+extern str_all_name_chars
 
 extern asm_assemble
 extern ast_obj
@@ -346,19 +348,60 @@ END_FUNC comp_free
 ;; ============================================================================
 ;; comp_intern(const char *s, int64_t len) -> rax = owned PyStrObject*
 ;;
-;; Every identifier and string the front end builds goes through here.  It is a
-;; single entry point on purpose: a PyStrObject carries two lengths -- ob_size
+;; Every identifier and string LITERAL the front end builds goes through here
+;; -- which was not true until 2026-09-06: `par_string_atom` called
+;; str_new_heap directly, so a table this never reached could not share a
+;; constant with anything.  It is a single entry point on purpose: a PyStrObject carries two lengths -- ob_size
 ;; in bytes and ob_length in code points -- and a constructor that set only the
 ;; first would give non-ASCII identifiers and literals a silently wrong len().
 ;; str_new_heap sets both.
 ;;
-;; No dedup yet.  Repeated identifiers each get their own object; the name and
-;; const tables downstream do the deduplication that actually matters, because
-;; that is what decides co_names indices.
+;; It also dedups, through the process-wide intern table -- but only for a
+;; string that LOOKS LIKE AN IDENTIFIER, every byte [A-Za-z0-9_].  That is
+;; CPython's rule for a string constant and it is the guard rail: over-interning
+;; is invisible inside one module and shows up as two modules' unrelated long
+;; strings sharing an object.  `"hello"` is shared; `"hello world"` is not.
+;;
+;; Deduping matters here for a reason beyond memory.  `cg_name` dedups within
+;; ONE CompUnit, by linear scan, so `__init__` and a sibling method held two
+;; different objects for the same attribute name -- and `op_load_attr_instance`
+;; guards its cache by pointer identity between `co_names[i]` and the key the
+;; instance dict kept, which is the FIRST writer's.  So `self.x` read from a
+;; method other than the one that wrote it failed the guard on every execution,
+;; deopted and re-specialized forever.  A .pyc did not show it, because
+;; marshal's FLAG_REF happened to share those strings; our own compiler's
+;; output did, at about 47% on an attribute loop.
 ;; ============================================================================
-DEF_FUNC_BARE comp_intern
-    jmp str_new_heap
+CIN2_S     equ 8
+CIN2_LEN   equ 16
+CIN2_FRAME equ 16           ; + 0 pushes = 16-aligned at the calls
+DEF_FUNC comp_intern, CIN2_FRAME
+    mov [rbp - CIN2_S], rdi
+    mov [rbp - CIN2_LEN], rsi
+    call str_all_name_chars
+    mov rdi, [rbp - CIN2_S]
+    mov rsi, [rbp - CIN2_LEN]
+    test eax, eax
+    jz .ci_plain
+    call str_intern_bytes
+    leave
+    ret
+.ci_plain:
+    call str_new_heap
+    leave
+    ret
 END_FUNC comp_intern
+
+;; ============================================================================
+;; comp_intern_forced(const char *s, int64_t len) -> rax = owned PyStrObject*
+;;
+;; The same, without the identifier-shaped test: a NAME is interned whatever
+;; it is written in, as CPython interns every identifier including a non-ASCII
+;; one.  `comp_intern_name` is the only caller, and names are the whole point.
+;; ============================================================================
+DEF_FUNC_BARE comp_intern_forced
+    jmp str_intern_bytes
+END_FUNC comp_intern_forced
 
 
 ;; ============================================================================
@@ -1184,7 +1227,7 @@ DEF_FUNC comp_intern_name, 80
 .copy_done:
     mov rdi, [rbp - CIN_BUF + Buf.data]
     mov rsi, [rbp - CIN_BUF + Buf.len]
-    call comp_intern
+    call comp_intern_forced
     push rax
     lea rdi, [rbp - CIN_BUF]
     call buf_free
@@ -1197,7 +1240,7 @@ DEF_FUNC comp_intern_name, 80
 .plain:
     mov rdi, [rbp - CIN_P]
     mov rsi, [rbp - CIN_LEN]
-    call comp_intern
+    call comp_intern_forced
     pop r12
     pop rbx
     leave

@@ -274,10 +274,22 @@ DEF_FUNC float_repr
 .repr_loop:
     mov qword [rbp - FR_BUMP], 0
 .repr_try:
+    ; "%.*e", not "%.*g".  %g STRIPS TRAILING ZEROS, so asking it for sixteen
+    ; digits of 6.256509672447191e-148 gives "6.25650967244719e-148" -- fifteen
+    ; digits, because the sixteenth is a zero it threw away.  fr_bump_last then
+    ; carried the '9' instead of that zero and produced "...4472", so neither
+    ; candidate was the "...47191" that round-trips, and the search fell
+    ; through to seventeen digits.  CPython prints sixteen.  Four of the 2098
+    ; powers of two came out wrong this way.
+    ;
+    ; %e keeps the zero, which is the digit the bump has to land on.  It is
+    ; also the form .repr_found re-renders below, so the candidate that is
+    ; validated here is now the same string that is measured there.
     lea rdi, [rbp - FR_BUF]   ; buf
     mov esi, 48                ; bufsz
-    lea rdx, [rel fmt_g]      ; "%.*g"
-    mov ecx, [rbp - FR_PREC]  ; prec
+    lea rdx, [rel fmt_e]      ; "%.*e"
+    mov ecx, [rbp - FR_PREC]  ; significant digits
+    dec ecx                    ; %e counts digits AFTER the point
     movsd xmm0, [rbp - FR_VAL] ; value
     mov eax, 1                ; 1 xmm register used
     call snprintf wrt ..plt
@@ -1740,6 +1752,13 @@ DEF_FUNC float_compare, FC_FRAME
     mov rdi, [rbp - FC_RSAVE]
     mov esi, [rbp - FC_RTAG]
     call float_to_f64
+    ; A NaN is unordered against everything, this int included.  The double
+    ; path below reaches that conclusion from ucomisd's parity flag; this one
+    ; has to ask, because fc_int_vs_double compares in GMP and __gmpz_set_d is
+    ; undefined for a NaN.  Its +-inf shortcuts do not catch one either: a NaN
+    ; is unordered against both infinities, so neither `je` fires.
+    ucomisd xmm0, xmm0
+    jp .unordered
     mov rdi, [rbp - FC_LSAVE]
     mov esi, [rbp - FC_LTAG]
     call fc_int_vs_double
@@ -1750,6 +1769,8 @@ DEF_FUNC float_compare, FC_FRAME
     mov rdi, [rbp - FC_LSAVE]
     mov esi, [rbp - FC_LTAG]
     call float_to_f64
+    ucomisd xmm0, xmm0
+    jp .unordered
     mov rdi, [rbp - FC_RSAVE]
     mov esi, [rbp - FC_RTAG]
     call fc_int_vs_double
@@ -1869,13 +1890,26 @@ DEF_FUNC_LOCAL fc_wide_int
     mov edx, esi
     call int_unwrap
     cmp edx, TAG_SMALLINT
-    je .fcw_no                  ; an immediate int is inside +-2^50
+    je .fcw_flat                ; NOT necessarily inside +-2^50 -- see below
     test rdi, rdi
     jz .fcw_no
 .fcw_int:
     cmp qword [rdi + PyIntObject.compact], 0
     je .fcw_yes                 ; GMP-backed: always wider than a double
     mov rax, [rdi + PyIntObject.ival]
+    jmp .fcw_magnitude
+
+.fcw_flat:
+    ; int_unwrap hands back TAG_SMALLINT for a COMPACT HEAP INT as well as for
+    ; a true immediate, and a compact heap int covers the whole int64 range --
+    ; not just +-2^50.  Treating that tag as "small enough for a double to be
+    ; exact" answered `I(2**60 + 1) == float(...)` with True inside list.sort,
+    ; which calls float_compare directly, while the ordinary comparison path
+    ; got it right.  It only showed once 2**60 started arriving compact rather
+    ; than GMP-backed; the magnitude has to be checked either way.
+    mov rax, rdi
+
+.fcw_magnitude:
     mov rcx, rax
     sar rcx, 63
     xor rax, rcx
@@ -1924,7 +1958,8 @@ DEF_FUNC_LOCAL fc_int_vs_double, 104
     mov qword [rbp - FIV_HAVE], 0
     movsd xmm0, [rbp - FIV_D]
 
-    ; An infinity compares by sign alone; NaN never gets here.
+    ; An infinity compares by sign alone.  A NaN cannot get here: both
+    ; callers test the double for one first, because GMP has no answer for it.
     movsd xmm1, [rel pos_inf]
     ucomisd xmm0, xmm1
     je .fiv_minus                ; every finite int is below +inf

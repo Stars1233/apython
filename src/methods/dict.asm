@@ -15,6 +15,7 @@ extern str_from_cstr_heap
 extern tuple_new
 extern tuple_type
 extern current_exception
+extern dict_copy_shallow
 extern dict_new
 extern dict_get
 extern obj_getattr_opt
@@ -709,52 +710,9 @@ END_FUNC dict_method_setdefault
 ;; args[0]=self
 ;; ============================================================================
 DEF_FUNC dict_method_copy
-    push rbx
-    push r12
-    push r13
-    push r14
-
-    mov rbx, [rdi]          ; self (dict)
-
-    ; Create new dict
-    call dict_new
-    mov r12, rax            ; r12 = new dict
-
-    ; Iterate over self's entries
-    mov r13, [rbx + PyDictObject.capacity]
-    xor r14d, r14d          ; index
-
-.dcopy_loop:
-    cmp r14, r13
-    jge .dcopy_done
-
-    mov rax, [rbx + PyDictObject.entries]
-    imul rcx, r14, DICT_ENTRY_SIZE
-    add rax, rcx
-
-    mov rdi, [rax + DictEntry.key]
-    test rdi, rdi
-    jz .dcopy_next
-
-    ; dict_set(new_dict, key, value, value_tag, key_tag)
-    push r14
-    mov rdx, [rax + DictEntry.value]
-    mov rsi, rdi            ; key
-    mov rdi, r12            ; new dict
-    call dict_set
-    pop r14
-
-.dcopy_next:
-    inc r14
-    jmp .dcopy_loop
-
-.dcopy_done:
-    mov rax, r12
-    mov edx, TAG_PTR         ; dict is heap ptr
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
+    mov rdi, [rdi]          ; self (dict)
+    call dict_copy_shallow
+    mov edx, TAG_PTR        ; dict is heap ptr
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret

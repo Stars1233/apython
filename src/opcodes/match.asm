@@ -59,7 +59,7 @@ MK_KEYS    equ 8
 MK_SUBJ    equ 16
 MK_VALS    equ 24
 MK_NKEYS   equ 32
-MK_FRAME   equ 32           ; + 0 pushes = 32
+MK_FRAME   equ 40           ; + 0 pushes = 32
 
 ; --- moved to a sibling file by the split ---
 extern op_send
@@ -536,7 +536,12 @@ DEF_FUNC_BARE op_get_len
     mov rax, [rax + PySequenceMethods.sq_length]
     test rax, rax
     jz .gl_try_mapping
+    ; One saved word is an odd number of slots, and rsp is 16-byte aligned on
+    ; entry to a handler.  The pad is local to the call because .gl_error_nopop
+    ; is reached before the push and must not unwind it.
+    sub rsp, 8
     call rax
+    add rsp, 8
     jmp .gl_got_len
 
 .gl_try_mapping:
@@ -549,7 +554,9 @@ DEF_FUNC_BARE op_get_len
     mov rax, [rax + PyMappingMethods.mp_length]
     test rax, rax
     jz .gl_error
+    sub rsp, 8                  ; the same pad, for the same reason
     call rax
+    add rsp, 8
 
 .gl_got_len:
     pop rdi                     ; discard saved obj
@@ -571,9 +578,15 @@ END_FUNC op_get_len
 extern dict_new
 extern dict_set
 
+; A handler is entered 16-byte ALIGNED, so `push rbp` plus two saves leaves rsp
+; 8 out at every call below.  The third push is the slot that puts it back --
+; and it has to be a push rather than a DEF_FUNC frame, because this handler's
+; epilogue is a hand-written `pop rbp` with no `leave`, so a frame would never
+; be discarded and the eval loop's stack would sink 8 bytes per execution.
 DEF_FUNC op_setup_annotations
     push rbx
     push r12                    ; save eval loop r12
+    push r13                    ; unused; the alignment slot
 
     ; Check if locals dict exists
     mov rbx, [r12 + PyFrame.locals]
@@ -597,12 +610,16 @@ DEF_FUNC op_setup_annotations
     push rax                    ; save key for DECREF
     push rdx                    ; save value for DECREF
     call dict_set
-    pop rdi
+    ; Read each argument off the stack rather than popping between the two
+    ; calls, so the depth is the same at both.
+    mov rdi, [rsp]              ; the value
     call obj_decref             ; DECREF value (dict_set INCREFs)
-    pop rdi
+    mov rdi, [rsp + 8]          ; the key
     call obj_decref             ; DECREF key
+    add rsp, 16
 
 .sa_done:
+    pop r13
     pop r12
     pop rbx
     pop rbp
@@ -716,7 +733,7 @@ global op_load_from_dict_or_deref
 
 LFDOD_DICT  equ 8
 LFDOD_ARG   equ 16
-LFDOD_FRAME equ 16          ; + 0 pushes = 16
+LFDOD_FRAME equ 24          ; + 0 pushes = 16
 
 DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
     mov [rbp - LFDOD_ARG], ecx    ; save arg (localsplus index)
@@ -806,12 +823,15 @@ DEF_FUNC_BARE op_match_mapping
     ; asks a type flag only real mappings carry; the nearest thing available is
     ; dict and its subclasses, so anything else that is subscriptable is
     ; rejected -- the same shape as MATCH_SEQUENCE excluding dict on its side.
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rdi
     mov rdi, rax
     lea rsi, [rel dict_type]
     extern type_is_subtype
     call type_is_subtype
     pop rdi
+    add rsp, 8
     test eax, eax
     jz .mm_false
 .mm_true:
@@ -978,7 +998,7 @@ MC_MATCHARGS equ 48
 MC_IDX       equ 56
 MC_SUBJ_TAG  equ 64
 MC_ORIGIN    equ 72   ; the subject's type, for the __match_args__ walk
-MC_FRAME     equ 96            ; + 0 pushes = 96, 16-aligned
+MC_FRAME     equ 104            ; + 0 pushes = 96, 16-aligned
 
 extern str_type
 

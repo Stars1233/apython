@@ -8,6 +8,7 @@ extern none_singleton
 extern ap_malloc
 extern ap_free
 extern ap_strlen
+extern ap_memcmp
 extern ap_memcpy
 extern ap_strcmp
 extern bool_true
@@ -972,6 +973,50 @@ DEF_FUNC_BARE str_from_cstr
 END_FUNC str_from_cstr
 
 ;; ============================================================================
+;; str_alloc_bytes(int64_t nbytes, int64_t ncodepoints) -> rax = PyStrObject*
+;;
+;; An empty string of a known size, for a caller that is about to write the
+;; bytes itself.  The header is complete and the NUL padding is in place; only
+;; the data is uninitialised.
+;;
+;; This exists so that a method which already knows how long its result will be
+;; does not have to build the result twice.  The shape it replaces was: scan to
+;; size, `ap_malloc` a scratch buffer, fill it, hand it to `str_new_heap` --
+;; which mallocs a SECOND time, copies the whole thing again, and rescans it
+;; for code points a third time -- then free the scratch.  `join`, `replace`
+;; and the case mappings all had it.
+;;
+;; BOTH lengths are the caller's to supply and they are not the same number.
+;; `nbytes` is the byte count, `ncodepoints` what `len()` answers; they are
+;; equal exactly when the result is ASCII, which is what every fast path in
+;; the file tests for.  Pass 0 for `ncodepoints` and call `str_set_length`
+;; afterwards when the count is not known until the bytes are written.
+;; ============================================================================
+DEF_FUNC str_alloc_bytes
+    push rbx
+    push r12
+    mov rbx, rdi                ; nbytes
+    mov r12, rsi                ; ncodepoints
+
+    ; + 8 past the data so the word-at-a-time readers never run off the end.
+    lea rdi, [rbx + PyStrObject.data + 8]
+    call ap_malloc
+
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel str_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov [rax + PyStrObject.ob_size], rbx
+    mov [rax + PyStrObject.ob_length], r12
+    mov qword [rax + PyStrObject.ob_hash], -1
+    mov qword [rax + PyStrObject.data + rbx], 0
+
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_alloc_bytes
+
+;; ============================================================================
 ;; str_new_heap(const char *data, int64_t len) -> (rax=PyStrObject*, edx=TAG_PTR)
 ;; Always heap-allocates. For struct fields and internal use.
 ;; ============================================================================
@@ -1016,12 +1061,115 @@ DEF_FUNC str_new_heap, 8            ; 3 pushes, so rsp is 16-aligned
     ret
 END_FUNC str_new_heap
 
+
+;; ============================================================================
+;; str_char_table -- the 256 one-character latin-1 strings, as real objects
+;;
+;; There is no interning and no small-string cache, so every `s[i]` and every
+;; step of `for ch in s` used to allocate a fresh object, copy one character
+;; into it, and count its code points.  These are the same 256 objects every
+;; time, so they are built once, at assembly time, and handed out.
+;;
+;; latin-1 rather than ASCII, which is the range CPython's own LATIN1(ch)
+;; singletons cover.  Entries above 127 hold TWO bytes -- their UTF-8 encoding
+;; -- so ob_size is 2 where ob_length is 1, and they are indexed by code point
+;; and not by byte.
+;;
+;; They are immortal: the refcount starts at 0x7fffffffffffffff, the same value
+;; the True/False/None singletons use, so ordinary INCREF/DECREF traffic can
+;; neither free them nor be special-cased at the call sites.  `ob_hash` starts
+;; at -1 and fills in the first time one is hashed, which is a cache the whole
+;; process then shares.
+;;
+;; An immortal refcount also puts them permanently out of reach of the in-place
+;; append in opcodes/arith_spec.asm, which requires a refcount of exactly 2.
+;;
+;; 56 bytes apiece: the 40-byte header, the one byte, and enough padding to
+;; keep the stride 8-aligned and to give the word-at-a-time readers their
+;; 8 bytes past the end.
+;; ============================================================================
+STR_CHAR_STRIDE equ 56
+
+section .data
+global str_char_table
+str_char_table:
+%assign sci 0
+%rep 128
+    dq 0x7fffffffffffffff       ; ob_refcnt: immortal
+    dq str_type                 ; ob_type
+    dq 1                        ; ob_size, in bytes
+    dq -1                       ; ob_hash, not yet computed
+    dq 1                        ; ob_length, in code points
+    db sci                      ; data: one ASCII byte
+    times 15 db 0               ; the NUL, and the padding to the stride
+%assign sci sci+1
+%endrep
+%rep 128
+    dq 0x7fffffffffffffff       ; ob_refcnt: immortal
+    dq str_type                 ; ob_type
+    dq 2                        ; ob_size: two bytes of UTF-8
+    dq -1                       ; ob_hash, not yet computed
+    dq 1                        ; ob_length: still one character
+    db 0xC0 | (sci >> 6)        ; data: the two-byte encoding of U+00xx
+    db 0x80 | (sci & 0x3F)
+    times 14 db 0
+%assign sci sci+1
+%endrep
+section .text
+
+;; ============================================================================
+;; str_char(rdi = a code point 0..255) -> rax = the shared one-character str
+;; The reference is owned, as every other string-returning function's is; on
+;; an immortal object the increment simply never matters.
+;; ============================================================================
+DEF_FUNC_BARE str_char
+    lea rax, [rel str_char_table]
+    imul rdi, rdi, STR_CHAR_STRIDE
+    add rax, rdi
+    inc qword [rax + PyObject.ob_refcnt]
+    ret
+END_FUNC str_char
+
 ;; ============================================================================
 ;; str_new(const char *data, int64_t len) -> (rax=payload, edx=tag)
-;; Creates a string from data with given length. Always returns heap TAG_PTR.
+;; Creates a string from data with given length.
 ;; ============================================================================
 DEF_FUNC_BARE str_new
-    jmp str_new_heap         ; tail-call heap path
+    ; One ASCII byte is one of the 128 objects that already exist.  This is
+    ; what `s[i]`, `for ch in s` and `chr()` almost always ask for, and it is
+    ; the difference between returning a pointer and doing a malloc, a copy
+    ; and a code-point scan.
+    cmp rsi, 2
+    ja str_new_heap
+    je .sn_two
+    cmp rsi, 1
+    jne str_new_heap
+    movzx eax, byte [rdi]
+    test al, 0x80
+    jnz str_new_heap            ; a lead byte: not a whole character on its own
+.sn_have_cp:
+    mov rdi, rax
+    mov edx, TAG_PTR
+    jmp str_char
+.sn_two:
+    ; The two-byte encodings of U+0080..U+00FF, and only those: lead bytes
+    ; 0xC2 and 0xC3 with one continuation byte.  Anything else two bytes long
+    ; is either a fragment or a character outside the table.
+    movzx eax, byte [rdi]
+    mov ecx, eax
+    and ecx, 0xFE
+    cmp ecx, 0xC2
+    jne str_new_heap
+    movzx ecx, byte [rdi + 1]
+    mov edx, ecx
+    and edx, 0xC0
+    cmp edx, 0x80
+    jne str_new_heap
+    and eax, 0x1F
+    shl eax, 6
+    and ecx, 0x3F
+    or eax, ecx
+    jmp .sn_have_cp
 END_FUNC str_new
 
 ;; ============================================================================
@@ -1305,51 +1453,72 @@ DEF_FUNC str_hash
     cmp rax, -1
     jne .done
 
-    ; Compute FNV-1a
     mov rcx, [rdi + PyStrObject.ob_size]
-    lea rsi, [rdi + PyStrObject.data]
-    mov rax, 0xcbf29ce484222325     ; FNV offset basis
-    mov rdx, 0x100000001b3          ; FNV prime
-    ; 4x unrolled FNV-1a loop
-align 16
-.loop4:
-    cmp rcx, 4
-    jb .tail
-    movzx r8d, byte [rsi]
-    xor rax, r8
-    imul rax, rdx
-    movzx r8d, byte [rsi+1]
-    xor rax, r8
-    imul rax, rdx
-    movzx r8d, byte [rsi+2]
-    xor rax, r8
-    imul rax, rdx
-    movzx r8d, byte [rsi+3]
-    xor rax, r8
-    imul rax, rdx
-    add rsi, 4
-    sub rcx, 4
-    jmp .loop4
-.tail:
-    test rcx, rcx
-    jz .store
-    movzx r8d, byte [rsi]
-    xor rax, r8
-    imul rax, rdx
-    inc rsi
-    dec rcx
-    jmp .tail
-.store:
-    ; Ensure hash is never -1
-    cmp rax, -1
-    jne .cache
-    mov rax, -2
-.cache:
+    push rdi
+    lea rdi, [rdi + PyStrObject.data]
+    mov rsi, rcx
+    push rsi                        ; two slots: rsp stays 16-aligned
+    call str_hash_bytes
+    pop rsi
+    pop rdi
     mov [rdi + PyStrObject.ob_hash], rax
 .done:
     leave
     ret
 END_FUNC str_hash
+
+;; ============================================================================
+;; str_hash_bytes(const char *data, int64_t len) -> rax = the hash
+;;
+;; str_hash's body, given the bytes rather than the object.  The intern table
+;; keys on (data, len) with no object in hand, and a table that disagreed with
+;; str_hash about a string's hash would put the same string in two places --
+;; so there is one implementation and both callers use it.
+;;
+;; FNV-1a, unseeded.  That is a recorded divergence from CPython's siphash13
+;; and not an oversight; the value is never exposed by anything but hash()
+;; itself, and siphash would be slower.
+;; ============================================================================
+DEF_FUNC_BARE str_hash_bytes
+    mov rax, 0xcbf29ce484222325     ; FNV offset basis
+    mov rdx, 0x100000001b3          ; FNV prime
+    ; 4x unrolled FNV-1a loop
+align 16
+.loop4:
+    cmp rsi, 4
+    jb .tail
+    movzx r8d, byte [rdi]
+    xor rax, r8
+    imul rax, rdx
+    movzx r8d, byte [rdi+1]
+    xor rax, r8
+    imul rax, rdx
+    movzx r8d, byte [rdi+2]
+    xor rax, r8
+    imul rax, rdx
+    movzx r8d, byte [rdi+3]
+    xor rax, r8
+    imul rax, rdx
+    add rdi, 4
+    sub rsi, 4
+    jmp .loop4
+.tail:
+    test rsi, rsi
+    jz .fin
+    movzx r8d, byte [rdi]
+    xor rax, r8
+    imul rax, rdx
+    inc rdi
+    dec rsi
+    jmp .tail
+.fin:
+    ; -1 is the "not computed yet" sentinel, so no string may hash to it.
+    cmp rax, -1
+    jne .out
+    mov rax, -2
+.out:
+    ret
+END_FUNC str_hash_bytes
 
 ;; ============================================================================
 ;; str_concat(PyObject *a, PyObject *b, ?, ecx=right_tag) -> (rax,edx) fat value
@@ -1560,6 +1729,7 @@ DEF_FUNC str_compare
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     push rbx
+    push r12
 
     mov ebx, edx            ; save op
 
@@ -1572,16 +1742,66 @@ DEF_FUNC str_compare
     ; Heap pointer — verify ob_type == str_type
     mov rax, [rsi + PyObject.ob_type]
     REQUIRE_STR_TYPE rax, rdx, .not_string
+
+    ; --- Identity, before either string's data is touched ---
+    ; CPython answers this in PyUnicode_RichCompare ahead of everything else.
+    ; A str is never a NaN, so one object compares equal to itself under every
+    ; op, and the common `s == s` from a dict probe costs one compare.
+    ;
+    ; AFTER the type check, and that ordering is the whole correctness of it.
+    ; V_UNPACK leaves PAYLOADS in rdi and rsi, and an int immediate's payload
+    ; is the bare number -- so `cmp rdi, rsi` above the guard was comparing a
+    ; string's ADDRESS against an integer's VALUE, and Linux heap addresses sit
+    ; well inside the +-2^50 immediate range.  `s == id(s)` answered True.
+    cmp rdi, rsi
+    je .identical
+
+    ; --- Compare over the byte lengths, NOT as C strings ---
+    ; These are counted strings and a NUL is an ordinary byte, so `ap_strcmp`
+    ; was wrong here: "a\0b" == "a\0c" answered True and "a\0b" < "a\0c"
+    ; answered False.  str_contains was moved off ap_strstr for exactly this
+    ; reason; this was the half that was missed.
+    ;
+    ; Byte order is also the right ORDER: UTF-8 is constructed so that
+    ; comparing encoded bytes lexicographically gives the same answer as
+    ; comparing code points, so one ap_memcmp serves <, <=, > and >= over any
+    ; string, ASCII or not.
+    mov r12, [rdi + PyStrObject.ob_size]        ; left length, in bytes
+    mov rdx, [rsi + PyStrObject.ob_size]        ; right length, in bytes
+    lea rdi, [rdi + PyStrObject.data]
     lea rsi, [rsi + PyStrObject.data]
 
-    ; --- Resolve left operand to a data pointer (-> rdi) ---
-    ; Heap str — no type check needed (caller dispatched via str_type)
-    lea rdi, [rdi + PyStrObject.data]
+    cmp r12, rdx
+    je .cmp_common                              ; equal lengths: compare it all
+    ; Lengths differ.  Narrow rdx to the common prefix HERE, while the flags
+    ; from that compare are still the ones that were set -- the op dispatch
+    ; below is itself a compare and would overwrite them.
+    cmovb rdx, r12                              ; rdx = min(left, right)
 
-    ; --- Compare the two null-terminated data pointers ---
-    call ap_strcmp
-    ; eax = strcmp result
+    ; For == and != a length mismatch IS the answer -- no data is read at all,
+    ; which is the cheap exit a dict lookup or a keyword match takes.
+    cmp ebx, PY_EQ
+    je .ret_false
+    cmp ebx, PY_NE
+    je .ret_true
+    ; Ordering: compare the common prefix, and only if that matches does the
+    ; shorter string win by being a prefix of the longer.
+    call ap_memcmp                              ; preserves rdx
+    test eax, eax
+    jnz .dispatch
+    ; The prefix matched, so whichever ran out first is the smaller.  rdx is
+    ; still the length compared, and it equals the left length exactly when
+    ; the left string is the shorter one.
+    mov eax, 1
+    cmp r12, rdx
+    jne .dispatch
+    mov eax, -1
+    jmp .dispatch
 
+.cmp_common:
+    call ap_memcmp
+
+.dispatch:
     ; Dispatch on comparison op (ebx)
     cmp ebx, PY_NE
     je .do_ne
@@ -1618,6 +1838,13 @@ DEF_FUNC str_compare
     jg .ret_true
     jmp .ret_false
 
+.identical:
+    ; The same object.  Zero is what ap_memcmp would have returned, so the
+    ; ordinary dispatch below turns it into True for ==, <= and >= and False
+    ; for the other three.
+    xor eax, eax
+    jmp .dispatch
+
 .not_string:
     ; Right operand is not a string: DECLINE, for every op.
     ;
@@ -1628,17 +1855,20 @@ DEF_FUNC str_compare
     ; False where CPython calls S.__eq__, and by name str.__eq__('a', 1) was
     ; False where CPython says NotImplemented.
     RET_NULL
+    pop r12
     pop rbx
     leave
     ret
 
 .ret_true:
     RET_TRUE
+    pop r12
     pop rbx
     leave
     ret
 .ret_false:
     RET_FALSE
+    pop r12
     pop rbx
     leave
     ret
@@ -1680,14 +1910,17 @@ DEF_FUNC str_getitem, 8            ; 3 pushes, so rsp is 16-aligned
     jl .index_error
 
     ; Where the code point starts, and how many bytes it occupies.
+    ; One walk.  This used to call str_cp_offset twice, for i and for i+1,
+    ; and each call walks from byte zero -- so indexing a non-ASCII string in
+    ; a loop was quadratic with the walk done twice over.
     mov rdi, rbx
     mov rsi, r12
     call str_cp_offset
     mov r13, rax
-    mov rdi, rbx
-    lea rsi, [r12 + 1]
-    call str_cp_offset
-    sub rax, r13            ; the width of this one code point
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, [rbx + PyStrObject.ob_size]
+    mov rdx, r13
+    call str_cp_width       ; the width of this one code point
 
     lea rdi, [rbx + PyStrObject.data]
     add rdi, r13
@@ -1879,7 +2112,7 @@ DEF_FUNC str_getslice, SGS_FRAME
     lea rdi, [rbx + PyStrObject.data]
     add rdi, r12
     mov rsi, rax
-    call str_new_heap
+    call str_new                ; str_new, so that s[i:i+1] is s[i]
     jmp .sgs_ret
 
 .sgs_general:

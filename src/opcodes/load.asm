@@ -64,7 +64,8 @@ LA_WALK      equ 80   ; the MRO cursor while searching the type dicts
 LA_TAGTYPE   equ 88   ; the type an immediate resolved to, the walk's origin
 LA_OWNMRO    equ 96   ; the attribute came from the CLASS's own MRO
 LA_FROMMETA  equ 104  ; type_getattr_meta's out-parameter
-LA_FRAME     equ 112        ; + 0 pushes = 112
+LA_FROMINST  equ 112  ; instance_getattr_where's: the INSTANCE dict answered
+LA_FRAME     equ 136        ; + 0 pushes = 128
 
 ; op_load_super_attr frame layout (DEF_FUNC op_load_super_attr, LSA_FRAME)
 LSA_SELF     equ 8
@@ -75,7 +76,7 @@ LSA_ATTR_TAG equ 40
 LSA_ATTR     equ 48
 LSA_BIND     equ 56
 LSA_ORIGIN   equ 64      ; the MRO super() searches: the instance's, not the class's
-LSA_FRAME    equ 80         ; + 0 pushes = 80
+LSA_FRAME    equ 88         ; + 0 pushes = 80
 
 ;; ============================================================================
 ;; op_load_const - Load constant from co_consts[arg]
@@ -150,7 +151,6 @@ DEF_FUNC_BARE op_load_global
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
     mov rax, [rdi + DictEntry.value]
-    V_UNPACK rax, rdx
     add rsp, 8                 ; discard saved name
     jmp .lg_push_result
 
@@ -183,7 +183,6 @@ DEF_FUNC_BARE op_load_global
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
     mov rax, [rdi + DictEntry.value]
-    V_UNPACK rax, rdx
     jmp .lg_push_result
 
 .not_found:
@@ -192,8 +191,11 @@ DEF_FUNC_BARE op_load_global
     ; (does not return)
 
 .lg_push_result:
-    INCREF_VAL rax, rdx
-    VPUSH_VAL rax, rdx
+    ; rax is the Value straight out of the dict entry.  It used to be
+    ; V_UNPACKed into a (payload, tag) pair above and re-encoded here, around
+    ; a refcount bump that never needed either.
+    INCREF_V rax, rdx
+    VPUSH rax
     ; Skip 4 CACHE entries = 8 bytes
     add rbx, 8
     DISPATCH
@@ -224,15 +226,16 @@ DEF_FUNC_BARE op_load_global_module
     mov rax, [rdi + DictEntry.value]
     test rax, rax
     jz .lgm_deopt
-    V_UNPACK rax, rdx
+    ; The NULL test above was already made on the RAW Value -- 0 is the only
+    ; NULL encoding -- so nothing here ever needed the tag.
 
     ; Guards passed — now push NULL if needed
     test ecx, 1
     jz .lgm_no_null
     VPUSH_NULL
 .lgm_no_null:
-    INCREF_VAL rax, rdx
-    VPUSH_VAL rax, rdx
+    INCREF_V rax, rdx
+    VPUSH rax
     add rbx, 8
     DISPATCH
 
@@ -276,15 +279,16 @@ DEF_FUNC_BARE op_load_global_builtin
     mov rax, [rdi + DictEntry.value]
     test rax, rax
     jz .lgb_deopt
-    V_UNPACK rax, rdx
+    ; The NULL test above was already made on the RAW Value -- 0 is the only
+    ; NULL encoding -- so nothing here ever needed the tag.
 
     ; Guards passed — now push NULL if needed
     test ecx, 1
     jz .lgb_no_null
     VPUSH_NULL
 .lgb_no_null:
-    INCREF_VAL rax, rdx
-    VPUSH_VAL rax, rdx
+    INCREF_V rax, rdx
+    VPUSH rax
     add rbx, 8
     DISPATCH
 
@@ -307,6 +311,8 @@ DEF_FUNC_BARE op_load_name
     shl ecx, 3                ; payload array: 8-byte stride
     LOAD_CO_NAMES rsi
     mov rsi, [rsi + rcx]       ; rsi = name (PyStrObject*)
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rsi                   ; save name
 
     ; Check if frame has a locals dict
@@ -317,8 +323,7 @@ DEF_FUNC_BARE op_load_name
     ; Try locals first: dict_get(locals, name)
     mov rsi, [rsp]             ; rsi = name
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax               ; dict_get returns a Value, and 0 on a miss
     jnz .found
 
 .try_globals:
@@ -326,8 +331,7 @@ DEF_FUNC_BARE op_load_name
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp]             ; rsi = name
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax               ; dict_get returns a Value, and 0 on a miss
     jnz .found
 
     ; Try builtins: dict_get(builtins, name)
@@ -335,20 +339,24 @@ DEF_FUNC_BARE op_load_name
     pop rsi                    ; rsi = name
     push rsi                   ; save for error message
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax               ; dict_get returns a Value, and 0 on a miss
     jnz .found
 
     ; Not found in any dict - raise NameError with name
     pop rdi                    ; name (PyStrObject*)
+    add rsp, 8                 ; the pad; this does not return
     call raise_name_not_defined
     ; (does not return)
 
 .found:
-    add rsp, 8                 ; discard saved name
+    add rsp, 16                ; discard saved name and the pad
 .found_no_pop:
-    INCREF_VAL rax, rdx
-    VPUSH_VAL rax, rdx
+    ; Each of the three probes above used to V_UNPACK dict_get's answer just
+    ; to `test edx, edx` for a miss.  dict_get already returns a bare Value
+    ; and 0 on a miss, and 0 is the only NULL encoding -- integer 0 encodes as
+    ; V_INT_BIAS -- so the raw test is exact.
+    INCREF_V rax, rdx
+    VPUSH rax
     DISPATCH
 END_FUNC op_load_name
 
@@ -393,6 +401,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     and eax, 1
     mov [rbp - LA_FLAG], rax
     mov qword [rbp - LA_FROM_TYPE], 0
+    mov qword [rbp - LA_FROMINST], 0
     ; Only the tp_getattr path below has an opinion about which MRO answered.
     ; Every other road to .la_property_run would read this slot as whatever the
     ; last call left on the stack.
@@ -525,7 +534,21 @@ DEF_FUNC op_load_attr, LA_FRAME
     extern type_getattr_meta
     lea rdx, [rel type_getattr]
     cmp rax, rdx
+    je .la_call_type_getattr
+    ; A heaptype instance answers through instance_getattr, and it can say
+    ; whether the answer came out of the INSTANCE dict.  That decides whether
+    ; the descriptor protocol below runs at all: a property stored in an
+    ; instance dict is a property object, not a call to its getter, and this
+    ; used to invoke it.
+    extern instance_getattr
+    extern instance_getattr_where
+    lea rdx, [rel instance_getattr]
+    cmp rax, rdx
     jne .la_call_getattr
+    lea rdx, [rbp - LA_FROMINST]
+    call instance_getattr_where
+    jmp .la_getattr_done_v
+.la_call_type_getattr:
     mov qword [rbp - LA_FROMMETA], 0
     lea rdx, [rbp - LA_FROMMETA]
     call type_getattr_meta
@@ -541,6 +564,15 @@ DEF_FUNC op_load_attr, LA_FRAME
     V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .la_try_dict             ; tp_getattr returned NULL — fallback to tp_dict
+    jmp .la_getattr_done        ; load-bearing: the arm below unpacks again
+
+.la_getattr_done_v:
+    ; instance_getattr_where hands back a Value, and a NULL one means it found
+    ; nothing -- 0 is the only NULL encoding.
+    test rax, rax
+    jz .la_try_dict
+    V_UNPACK rax, rdx
+
 .la_getattr_done:
     mov [rbp - LA_ATTR], rax
     mov [rbp - LA_ATTR_TAG], rdx   ; save tag from tp_getattr
@@ -606,6 +638,13 @@ DEF_FUNC op_load_attr, LA_FRAME
     call raise_no_attribute
 
 .la_got_attr:
+    ; The descriptor protocol applies to what a TYPE supplies.  A value the
+    ; INSTANCE dict was holding is itself, whatever its type: CPython's
+    ; object.__getattribute__ returns it without looking, and this used to run
+    ; a property's getter and an object's __get__ out of an instance dict.
+    cmp qword [rbp - LA_FROMINST], 0
+    jne .la_check_flag
+
     ; === Descriptor protocol: check for staticmethod/classmethod ===
     mov rax, [rbp - LA_ATTR]   ; attr
     cmp qword [rbp - LA_ATTR_TAG], TAG_PTR
@@ -743,7 +782,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; flag=0: simple attribute load
     ; If attr came from type dict and is callable, create bound method
     cmp qword [rbp - LA_FROM_TYPE], 0
-    je .la_simple_push
+    je .la_try_ic_instance
     mov rax, [rbp - LA_ATTR]
     cmp qword [rbp - LA_ATTR_TAG], TAG_PTR
     jne .la_simple_push         ; not a heap pointer
@@ -773,6 +812,44 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rsi, [rbp - LA_OBJ_TAG]
     DECREF_VAL rdi, rsi         ; a payload, not necessarily a pointer
     jmp .la_done
+
+.la_try_ic_instance:
+    ; The attribute came out of the instance dict, and this site asked for a
+    ; plain load.  That is what opcode 204 caches: the class, the name, and
+    ; the dense index the name sits at.
+    cmp qword [rbp - LA_FROMINST], 0
+    je .la_simple_push
+    cmp qword [rbp - LA_OBJ_TAG], TAG_PTR
+    jne .la_simple_push
+    mov rdi, [rbp - LA_OBJ]
+    mov rax, [rdi + PyObject.ob_type]
+    ; No point installing a cache whose second guard would refuse every time.
+    test qword [rax + PyTypeObject.tp_flags], \
+         TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN | TYPE_FLAG_MRO_HAS_DATA_DESCR
+    jnz .la_simple_push
+    mov [rbp - LA_TAGTYPE], rax    ; the type, held across the call below
+    LOAD_INST_DICT rsi, rdi, .la_simple_push
+    test rsi, rsi
+    jz .la_simple_push
+    mov rdi, rsi
+    mov rsi, [rbp - LA_NAME]
+    mov edx, TAG_PTR
+    extern dict_get_index
+    call dict_get_index
+    cmp rax, -1
+    je .la_simple_push             ; gone already: do not cache a miss
+    cmp rax, 0xFFFF
+    ja .la_simple_push             ; the index does not fit the cache
+    mov word [rbx + 10], ax        ; CACHE[+10] = dense index
+    mov rcx, [rbp - LA_TAGTYPE]
+    mov [rbx], rcx                 ; CACHE[+0] = type (8 bytes, unaligned)
+    mov rcx, [rcx + PyTypeObject.tp_dict]
+    test rcx, rcx
+    jz .la_simple_push
+    mov rcx, [rcx + PyDictObject.dk_version]
+    mov word [rbx + 8], cx         ; CACHE[+8] = class dict version
+    mov byte [rbx - 2], 204        ; rewrite to LOAD_ATTR_INSTANCE
+    ; fall through
 
 .la_simple_push:
     mov rax, [rbp - LA_ATTR]
@@ -1171,6 +1248,136 @@ DEF_FUNC_BARE op_load_attr_method
     mov byte [rbx - 2], 106
     jmp op_load_attr
 END_FUNC op_load_attr_method
+
+;; ============================================================================
+;; op_load_attr_instance (204) -> nothing; replaces TOS with the attribute
+;;
+;; The data-load counterpart of LOAD_ATTR_METHOD.  A plain `self.x` had no
+;; inline cache at all: LOAD_ATTR's only one was for methods, so an ordinary
+;; attribute read went through op_load_attr's whole prologue, tp_getattr,
+;; instance_getattr, instance_getattr_default, LOAD_INST_DICT and dict_get --
+;; hashing the name and probing the table every time.  `c.m()` measured 0.40x
+;; of CPython against 1.00x for a plain `f()`, and a profile put the
+;; difference here rather than anywhere in the call machinery.
+;;
+;; CACHE, 18 bytes, the same budget the method cache spends:
+;;     [+0]   the type, 8 bytes
+;;     [+8]   the class dict's version, 2 bytes
+;;     [+10]  the dense index into the instance dict's entry array, 2 bytes
+;;
+;; The NAME is not cached.  It is taken from co_names at hit time, which costs
+;; one load and leaves room for the version.
+;;
+;; CPython caches (type version, keys version, index) and can trust the index
+;; because its instances share their keys object.  Ours do not: two instances
+;; of one class can have completely different dict layouts, from an __init__
+;; with a branch in it.  So the index is not trusted -- the KEY at that index
+;; is compared against the name, which makes the read self-validating and
+;; needs no INSTANCE dict version at all.  A hit is then exactly what dict_get
+;; would have returned, without the hash or the probe.
+;;
+;; That comparison is by POINTER, which is why interning matters to this
+;; opcode: dict_set keeps the FIRST writer's key object, so `self.x` read from
+;; a method other than the one that wrote it used to fail the guard on every
+;; execution when the two names were different objects.  See
+;; src/pyo/strintern.asm.
+;;
+;; The two type flags are read LIVE rather than guarded by a version.  They
+;; are maintained by type_refresh_attr_flags, which updates them in place, so
+;; adding a __getattribute__ or a property to the class -- or to a base --
+;; does not change the type POINTER that guard 1 compares.
+;; ============================================================================
+DEF_FUNC_BARE op_load_attr_instance
+    ; ecx is the oparg and MUST survive to .lai_deopt, which hands it to
+    ; op_load_attr -- so nothing below touches rcx.  Getting that wrong is not
+    ; a wrong answer, it is op_load_attr reading co_names out of bounds with a
+    ; name index of (garbage >> 1), and the wild pointer surfaces later inside
+    ; dict_get.
+    VPEEK rdi                      ; the object; not popped until it is a hit
+    V_TEST_PTR rdi, rax
+    ja .lai_deopt
+
+    ; Guard 1: the class, which pins its MRO and everything on it
+    mov rax, [rdi + PyObject.ob_type]
+    cmp rax, [rbx]                 ; CACHE[+0] = type
+    jne .lai_deopt
+
+    ; Guard 2: and its class dict has not been touched since.  A type POINTER
+    ; is not enough on its own: a class can be freed and another allocated at
+    ; the same address, and a class that is still alive can gain a property.
+    ; op_load_attr_method carries the same guard for the same reason.
+    mov rdx, [rax + PyTypeObject.tp_dict]
+    test rdx, rdx
+    jz .lai_deopt
+    mov rdx, [rdx + PyDictObject.dk_version]
+    cmp dx, word [rbx + 8]         ; CACHE[+8] = class dict version
+    jne .lai_deopt
+
+    ; Guard 3: the class still resolves attributes the ordinary way.  A
+    ; __getattribute__ runs instead of any of this, and a data descriptor
+    ; anywhere in the MRO outranks the instance dict.  Read LIVE: the flags are
+    ; maintained in place by type_refresh_attr_flags.
+    test qword [rax + PyTypeObject.tp_flags], \
+         TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN | TYPE_FLAG_MRO_HAS_DATA_DESCR
+    jnz .lai_deopt
+
+    ; Guard 4: there is an instance dict, and the cached slot is inside the
+    ; part of its dense array that has ever been used.
+    LOAD_INST_DICT rsi, rdi, .lai_deopt
+    test rsi, rsi
+    jz .lai_deopt
+    movzx r8d, word [rbx + 10]     ; CACHE[+10] = dense index
+    cmp r8, [rsi + PyDictObject.dk_nentries]
+    jae .lai_deopt
+
+    ; Guard 5: that slot still holds THIS name.  The index alone proves
+    ; nothing -- two instances of one class can have completely different dict
+    ; layouts, from an __init__ with a branch in it -- so the KEY is compared,
+    ; which makes the read self-validating and needs no dict version.  The
+    ; name comes from co_names rather than the cache: it is the site's own
+    ; name, so it is always right, and a cached borrowed pointer to it would
+    ; be one more thing to keep alive.
+    mov rdx, [rsi + PyDictObject.entries]
+    imul r8, r8, DICT_ENTRY_SIZE
+    add rdx, r8
+    mov r9d, ecx                   ; the oparg, untouched
+    shr r9d, 1                     ; arg >> 1 = the co_names index
+    shl r9d, 3
+    LOAD_CO_NAMES r10
+    mov r9, [r10 + r9]
+    cmp r9, [rdx + DictEntry.key]
+    jne .lai_deopt
+
+    ; Guard 6: it is not a hole.  A deleted entry keeps its position with a
+    ; NULL key, which guard 5 already covers; this covers a NULL value.
+    mov rax, [rdx + DictEntry.value]
+    test rax, rax
+    jz .lai_deopt
+
+    ; Hit.  attr_error_pending says a __getattr__ raised an AttributeError
+    ; that raise_no_attribute should hand over rather than replace, and every
+    ; ordinary lookup clears it -- object.asm calls that "it cannot survive a
+    ; lookup".  This is a lookup.
+    extern attr_error_pending
+    mov qword [rel attr_error_pending], 0
+
+    ; INCREF the attribute BEFORE releasing the object: the object may hold
+    ; the only reference to the dict the attribute lives in.
+    INCREF_V rax, rdx
+    mov [r13 - 8], rax             ; the attribute replaces the object
+    DECREF_V rdi, rdx              ; rdi is still the object
+
+    add rbx, 18                    ; skip 9 CACHE entries
+    DISPATCH
+
+.lai_deopt:
+    ; Deopt into the generic handler with the argument ecx still holds.
+    ; Rewinding rbx cannot be done here: LOAD_ATTR's arg is
+    ; (name index << 1 | flag) and carries an EXTENDED_ARG as soon as a module
+    ; has enough names.
+    mov byte [rbx - 2], 106
+    jmp op_load_attr
+END_FUNC op_load_attr_instance
 
 ;; ============================================================================
 ;; op_load_closure - Load cell from localsplus[arg]
@@ -1764,13 +1971,15 @@ GA_SAVETAG  equ 72
 GA_WALK     equ 80          ; the MRO cursor
 GA_OWNMRO   equ 88          ; the attribute came from the CLASS's own MRO
 GA_FROMMETA equ 96          ; type_getattr_meta's out-parameter
-GA_FRAME    equ 104         ; + 1 push = 112
+GA_FROMINST equ 104         ; instance_getattr_where's: instance storage
+GA_FRAME    equ 120         ; + 1 push = 128
 DEF_FUNC obj_getattr_opt, GA_FRAME
     push rbx
     mov [rbp - GA_OBJ], rdi
     mov [rbp - GA_NAME], rsi
     mov qword [rbp - GA_FROMTYPE], 0
     mov qword [rbp - GA_OWNMRO], 0
+    mov qword [rbp - GA_FROMINST], 0
 
     ; The type to look in, and whether the object is a real pointer.
     V_TEST_PTR rdi, rax
@@ -1812,7 +2021,21 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     extern type_getattr_meta
     lea rdx, [rel type_getattr]
     cmp rcx, rdx
+    je .ga_call_type_getattr
+    ; The same question op_load_attr asks, and it has to get the same answer:
+    ; tests/test_getattr_descriptors.py pins the two together.
+    lea rdx, [rel instance_getattr]
+    cmp rcx, rdx
     jne .ga_call_getattr
+    mov rdi, [rbp - GA_OBJ]
+    mov rsi, [rbp - GA_NAME]
+    lea rdx, [rbp - GA_FROMINST]
+    call instance_getattr_where
+    test rax, rax
+    jz .ga_type_dict
+    V_UNPACK rax, rdx
+    jmp .ga_getattr_done
+.ga_call_type_getattr:
     mov qword [rbp - GA_FROMMETA], 0
     lea rdx, [rbp - GA_FROMMETA]
     call type_getattr_meta
@@ -1884,6 +2107,10 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
 
 .ga_have_attr:
     ; --- the descriptor protocol, over whatever the lookup produced ---
+    ; Except over INSTANCE STORAGE.  A property in an instance dict or a
+    ; __slots__ slot is a property object, not a call to its getter.
+    cmp qword [rbp - GA_FROMINST], 0
+    jne .ga_plain
     cmp qword [rbp - GA_ATTRTAG], TAG_PTR
     jne .ga_plain
     mov rax, [rbp - GA_ATTR]
@@ -2097,20 +2324,20 @@ SA_OTAG   equ 40
 SA_VTAG   equ 48
 SA_EXC    equ 56
 SA_ORIGIN equ 64   ; the type the descriptor walk started from
-SA_FRAME  equ 80            ; + 0 pushes = 80
+SA_FRAME  equ 88            ; + 0 pushes = 80
 
 ; op_delete_attr: rbp-frame (16 bytes)
 DA_NAME   equ 8
 DA_OBJ    equ 16
 DA_EXC    equ 24            ; the exception pending before the deleter ran
-DA_FRAME  equ 32            ; + 0 pushes = 32
+DA_FRAME  equ 40            ; + 0 pushes = 32
 
 ; op_delete_subscr: rbp-frame (32 bytes)
 DS_OBJ    equ 8
 DS_KEY    equ 16
 DS_OTAG   equ 24
 DS_KTAG   equ 32
-DS_FRAME  equ 32            ; + 0 pushes = 32
+DS_FRAME  equ 40            ; + 0 pushes = 32
 
 ;; ============================================================================
 ;; op_store_fast - Store TOS into localsplus[arg]
@@ -2274,6 +2501,15 @@ DEF_FUNC op_store_attr, SA_FRAME
     ; Check for property/descriptor in type dict (walk MRO) before regular setattr
     mov rdi, [rbp - SA_OBJ]       ; obj
     mov rcx, [rdi + PyObject.ob_type]  ; rcx = type (walks chain)
+
+    ; ...but only when there is one to find.  This walk cost a dict_get per
+    ; MRO entry on EVERY store, and instance_setattr walks the same MRO again
+    ; straight afterwards -- five dict operations to put a key in an instance
+    ; dict.  The flag is the same one the load side uses, maintained by
+    ; type_refresh_attr_flags, and a class with no data descriptor in its MRO
+    ; cannot have a property or a __set__ to find here.
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_MRO_HAS_DATA_DESCR
+    jz .sa_no_property
 
 .sa_walk_mro:
     test rcx, rcx
@@ -2476,18 +2712,24 @@ DEF_FUNC_BARE op_delete_name
     mov rdi, [r12 + PyFrame.locals]
     test rdi, rdi
     jz .dn_globals
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rsi
     extern dict_del_opt
     call dict_del_opt
     pop rsi
+    add rsp, 8
     test eax, eax
     jz .dn_ok                  ; found and deleted
     jmp .dn_error
 .dn_globals:
     mov rdi, [r12 + PyFrame.globals]
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rsi
     call dict_del_opt
     pop rsi
+    add rsp, 8
     test eax, eax
     jnz .dn_error
 .dn_ok:
@@ -2504,10 +2746,13 @@ DEF_FUNC_BARE op_delete_global
     LOAD_CO_NAMES rsi
     mov rsi, [rsi + rcx]      ; name
     mov rdi, [r12 + PyFrame.globals]
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rsi
     extern dict_del_opt
     call dict_del_opt
     pop rsi
+    add rsp, 8
     test eax, eax
     jnz .dg_error
     DISPATCH

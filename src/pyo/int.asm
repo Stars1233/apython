@@ -127,6 +127,58 @@ DEF_FUNC int_promote_mpz
 END_FUNC int_promote_mpz
 
 ;; ============================================================================
+;; int_alloc_raw() -> rax = PyIntObject_size bytes, uninitialised
+;;
+;; Every heap integer in this file comes from here, and int_dealloc hands the
+;; block back rather than to free().
+;;
+;; A heap integer is the shortest-lived object this interpreter makes.  A loop
+;; whose accumulator has grown past +-2^50 allocates one per iteration and
+;; frees the previous one immediately, so glibc's malloc and free were 29.7% of
+;; such a loop -- more than GMP and the interpreter's own arithmetic together.
+;; The size is fixed and the type is fixed, so the general allocator is being
+;; asked a question with one answer.
+;;
+;; CPython has no int freelist, but it does not need one: every object below
+;; 512 bytes comes from pymalloc, which is a per-size-class free list already.
+;; This is that, for the one size class that matters here.
+;;
+;; The block is handed back RAW.  A caller that wants a compact integer sets
+;; .compact itself and a caller that wants a GMP-backed one clears it and
+;; calls __gmpz_init, exactly as when this was ap_malloc.  Nothing may assume
+;; a recycled block's mpz is live: int_dealloc clears it before recycling.
+;;
+;; The cap keeps a program that builds a large list of big integers and then
+;; drops it from holding the memory: past INT_FREELIST_MAX blocks the rest go
+;; back to libc.
+;;
+;; Building with -DNO_INT_FREELIST turns this into a plain ap_malloc, which is
+;; what to do when running under valgrind: a recycled block is not a freed one,
+;; so a use-after-free on an integer is invisible while the list is on.
+;; ============================================================================
+INT_FREELIST_MAX equ 256
+
+DEF_FUNC_BARE int_alloc_raw
+%ifndef NO_INT_FREELIST
+    mov rax, [rel int_freelist]
+    test rax, rax
+    jz .ial_malloc
+    ; The block is dead, so its refcount word is free to hold the next link.
+    mov rcx, [rax + PyObject.ob_refcnt]
+    mov [rel int_freelist], rcx
+    dec qword [rel int_freelist_count]
+    ret
+.ial_malloc:
+%endif
+    push rbp
+    mov rbp, rsp
+    mov edi, PyIntObject_size
+    call ap_malloc
+    leave
+    ret
+END_FUNC int_alloc_raw
+
+;; ============================================================================
 ;; int_new_compact(int64_t val) -> rax: PyIntObject*
 ;; Heap integer with no GMP init and no limb allocation.
 ;; ============================================================================
@@ -134,8 +186,7 @@ DEF_FUNC int_new_compact
     push rbx
     push r12
     mov rbx, rdi
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
@@ -421,6 +472,73 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     mov qword [rbp - IB_BASE], 10
 .base_resolved:
 
+    ; ------------------------------------------------------------------
+    ; Fast path: an ordinary run of ASCII digits that fits an int64.
+    ;
+    ; The general path below allocates a cleaned copy of the string, then a
+    ; PyIntObject, then an mpz, calls __gmpz_set_str, and finally asks
+    ; __gmpz_get_si and __gmpz_cmp_si whether the answer would have fitted an
+    ; int64 all along -- before freeing all three again.  int("5") did every
+    ; one of those; malloc and free alone were 23% of an int(str) loop.
+    ;
+    ; This loop reads the source in place and allocates nothing.  It declines
+    ; to the general path on ANYTHING it is not sure of -- an underscore, a
+    ; Unicode digit, trailing whitespace, a digit out of range for the base,
+    ; an empty string, more than 64 digits, or an int64 overflow -- so the
+    ; general path remains the only place the error wording and the awkward
+    ; cases are written down.
+    ;
+    ; The digit limit needs no check here: sys.set_int_max_str_digits refuses
+    ; anything between 1 and 639, so a number of 64 digits or fewer is under
+    ; every limit that can be set.
+    mov rsi, [rbp - IB_SRC]
+    mov r9, [rbp - IB_BASE]
+    cmp r9, 36
+    ja .fast_decline
+    cmp r9, 2
+    jb .fast_decline
+    xor eax, eax                ; the accumulating magnitude
+    xor r10d, r10d              ; how many digits have been taken
+.fast_digit_loop:
+    movzx ecx, byte [rsi]
+    test cl, cl
+    jz .fast_digits_done
+    cmp r10d, 64
+    jae .fast_decline           ; long enough that the limit could matter
+    mov edx, ecx
+    sub edx, '0'
+    cmp edx, 9
+    jbe .fast_have_digit
+    ; A letter, in either case.  Anything else -- '_', a space, a UTF-8 lead
+    ; byte -- lands above 25 here and declines.
+    or ecx, 0x20
+    mov edx, ecx
+    sub edx, 'a'
+    cmp edx, 25
+    ja .fast_decline
+    add edx, 10
+.fast_have_digit:
+    cmp rdx, r9
+    jae .fast_decline           ; not a digit in THIS base
+    imul rax, r9
+    jo .fast_decline
+    add rax, rdx
+    jo .fast_decline
+    inc r10d
+    inc rsi
+    jmp .fast_digit_loop
+.fast_digits_done:
+    test r10d, r10d
+    jz .fast_decline            ; nothing but a sign
+    cmp qword [rbp - IB_SIGN], 0
+    je .fast_positive
+    neg rax
+.fast_positive:
+    RET_TAG_SMALLINT
+    leave
+    ret
+.fast_decline:
+
     ; Step 4: Allocate buffer for cleaned string (strip underscores + trailing ws)
     ; First calculate length
     mov rdi, [rbp - IB_SRC]
@@ -470,6 +588,15 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     ; Check for underscore
     cmp r8b, '_'
     je .copy_underscore
+
+    ; A SECOND sign.  One leading sign was stripped in step 2; anything after
+    ; that is not a digit in any base, and __gmpz_set_str -- which this buffer
+    ; is handed to -- would happily parse a sign of its own.  int("+-1")
+    ; answered -1.
+    cmp r8b, '+'
+    je .parse_error
+    cmp r8b, '-'
+    je .parse_error
 
     ; Check for Unicode digit (multi-byte UTF-8)
     cmp r8b, 0xd9
@@ -702,8 +829,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
 
 .gmp_parse:
     ; Allocate PyIntObject
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     mov [rbp - IB_OBJ], rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -1222,16 +1348,33 @@ DEF_FUNC_BARE int_add
     jne .gmp_path
 
     ; Both SmallInt: decode and add
+    ; The tag has to be saved BEFORE rcx is clobbered.  .gmp_path is reached
+    ; two ways -- from the tag checks above, where ecx is the right operand's
+    ; TAG, and from the `jo` below, where `mov rcx, rsi` has just made it the
+    ; right operand's PAYLOAD.  Entering with a payload made .gmp_path's
+    ; `push rcx ; save right_tag` save the wrong thing, so `cmp ecx,
+    ; TAG_SMALLINT` failed, smallint_to_pyint was never called, and the raw
+    ; integer was dereferenced as a PyIntObject*.
+    ;
+    ; `s = s + 2**49` in a loop segfaulted the moment the accumulator crossed
+    ; 2**63 and took this path.  TAG_SMALLINT is 1, so an addend whose low 32
+    ; bits happened to equal 1 passed the broken comparison -- which is why
+    ; `s += 1` was fine and every other step was not.  int_mul already does it
+    ; this way; add and sub did not.
     mov rax, rdi
+    push rcx                ; save right_tag (ecx) before clobber
     mov rcx, rsi
     add rax, rcx
-    jo .gmp_path            ; overflow, fall back to GMP
+    jo .gmp_path_pop        ; overflow, fall back to GMP
+    add rsp, 8              ; discard saved right_tag
 
     ; Result fits: encode as SmallInt
     RET_TAG_SMALLINT
     V_PACK rax, rdx             ; return one Value
     ret
 
+.gmp_path_pop:
+    pop rcx                 ; restore right_tag
 .gmp_path:
     push rbp
     mov rbp, rsp
@@ -1262,8 +1405,7 @@ DEF_FUNC_BARE int_add
     or r13b, 2              ; flag: b was converted
 .b_ready:
     ; Allocate result
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax                ; save result ptr
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -1318,14 +1460,31 @@ DEF_FUNC_BARE int_sub
     cmp ecx, TAG_SMALLINT
     jne .gmp_path
 
+    ; The tag has to be saved BEFORE rcx is clobbered.  .gmp_path is reached
+    ; two ways -- from the tag checks above, where ecx is the right operand's
+    ; TAG, and from the `jo` below, where `mov rcx, rsi` has just made it the
+    ; right operand's PAYLOAD.  Entering with a payload made .gmp_path's
+    ; `push rcx ; save right_tag` save the wrong thing, so `cmp ecx,
+    ; TAG_SMALLINT` failed, smallint_to_pyint was never called, and the raw
+    ; integer was dereferenced as a PyIntObject*.
+    ;
+    ; `s = s + 2**49` in a loop segfaulted the moment the accumulator crossed
+    ; 2**63 and took this path.  TAG_SMALLINT is 1, so an addend whose low 32
+    ; bits happened to equal 1 passed the broken comparison -- which is why
+    ; `s += 1` was fine and every other step was not.  int_mul already does it
+    ; this way; add and sub did not.
     mov rax, rdi
+    push rcx                ; save right_tag (ecx) before clobber
     mov rcx, rsi
     sub rax, rcx
-    jo .gmp_path
+    jo .gmp_path_pop
+    add rsp, 8              ; discard saved right_tag
     RET_TAG_SMALLINT
     V_PACK rax, rdx             ; return one Value
     ret
 
+.gmp_path_pop:
+    pop rcx                 ; restore right_tag
 .gmp_path:
     push rbp
     mov rbp, rsp
@@ -1353,8 +1512,7 @@ DEF_FUNC_BARE int_sub
     mov r12, rax
     or r13b, 2
 .b_ready:
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -1447,8 +1605,7 @@ DEF_FUNC_BARE int_mul
     mov r12, rax
     or r13b, 2
 .b_ready:
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -1560,8 +1717,7 @@ DEF_FUNC_BARE int_floordiv
     test eax, eax
     jz .gmp_zdiv_error
 
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -1687,8 +1843,7 @@ DEF_FUNC_BARE int_mod
     test eax, eax
     jz .gmp_mod_zdiv_error
 
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -1771,8 +1926,7 @@ DEF_FUNC_BARE int_neg
     push rbx
     push r12
     mov rbx, rdi
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     mov r12, rax
     mov qword [r12 + PyObject.ob_refcnt], 1
     lea rax, [rel int_type]
@@ -2197,6 +2351,21 @@ DEF_FUNC_BARE int_dealloc
     lea rdi, [rbx + PyIntObject.mpz]
     call __gmpz_clear wrt ..plt
 .compact:
+%ifndef NO_INT_FREELIST
+    ; Back to the free list rather than to libc.  The mpz has been cleared
+    ; above when there was one, so the block is as raw as a fresh malloc.
+    mov rax, [rel int_freelist_count]
+    cmp rax, INT_FREELIST_MAX
+    jae .really_free
+    mov rcx, [rel int_freelist]
+    mov [rbx + PyObject.ob_refcnt], rcx     ; the dead refcount is the link
+    mov [rel int_freelist], rbx
+    inc qword [rel int_freelist_count]
+    pop rbx
+    pop rbp
+    ret
+.really_free:
+%endif
     mov rdi, rbx
     call ap_free
     pop rbx
@@ -2254,8 +2423,7 @@ DEF_FUNC_BARE int_and
     mov r12, rax
     or r13b, 2
 .b_ok:
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -2342,8 +2510,7 @@ DEF_FUNC_BARE int_or
     mov r12, rax
     or r13b, 2
 .b_ok:
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -2431,8 +2598,7 @@ DEF_FUNC_BARE int_xor
     mov r12, rax
     or r13b, 2
 .b_ok:
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -2485,8 +2651,7 @@ DEF_FUNC_BARE int_invert
     mov rbp, rsp
     push rbx
     mov rbx, rdi
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -2619,6 +2784,41 @@ DEF_FUNC int_lshift
     test r13, r13
     js .neg_shift
 
+    ; An int64 shift, when the result provably still fits one.  Without this
+    ; `1 << 3` cost two ap_mallocs (a temporary for the left operand and the
+    ; result), two __gmpz_inits, a __gmpz_mul_2exp and an int_shrink that then
+    ; asked GMP whether the answer fit a long after all.  int_rshift has had
+    ; its `sar` arm all along; this is the other half.
+    ;
+    ; The overflow test is the standard one: shift left, shift arithmetically
+    ; back, and compare.  Bits that fell off the top do not come back, so a
+    ; mismatch is exactly "this needed more than 64 bits".  It is correct for a
+    ; negative left operand too, which is why the shift back is `sar` and not
+    ; `shr`.  A count of 64 or more cannot be reasoned about this way -- `shl`
+    ; masks it to 6 bits -- so it goes to GMP.
+    cmp r14d, TAG_SMALLINT
+    jne .lshift_wide
+    cmp r13, 63
+    jae .lshift_wide
+    mov rax, rbx
+    mov rcx, r13
+    mov rdx, rax
+    shl rdx, cl
+    mov rsi, rdx
+    sar rsi, cl
+    cmp rsi, rax
+    jne .lshift_wide       ; bits were lost: GMP has to do it
+    mov rax, rdx
+    RET_TAG_SMALLINT
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.lshift_wide:
     ; Convert left to GMP if needed
     xor ecx, ecx           ; flag: converted
     cmp r14d, TAG_SMALLINT
@@ -2629,8 +2829,7 @@ DEF_FUNC int_lshift
     mov cl, 1
 .a_gmp:
     push rcx
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -2750,8 +2949,7 @@ DEF_FUNC int_rshift
     ret
 
 .gmp_path:
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -2845,6 +3043,47 @@ DEF_FUNC int_power, IPW_FRAME
     test r13, r13
     js .neg_exp
 
+    ; Repeated squaring in int64, while it fits.  Without this `i ** 2` cost
+    ; two ap_mallocs, two __gmpz_inits, a __gmpz_pow_ui and an int_shrink --
+    ; malloc and free were 32% of an `i ** 2` loop.
+    ;
+    ; Every imul is checked, and a bail lands in the GMP path below with the
+    ; base and exponent untouched in rbx/r13, so nothing has to be undone.
+    ; The base is squared only when another bit remains, so an overflow in the
+    ; final squaring -- whose value would never have been used -- cannot send a
+    ; result that fitted to GMP.
+    cmp r14d, TAG_SMALLINT
+    jne .pow_wide
+    cmp r13, 64
+    jae .pow_wide          ; any base but 0 and +-1 overflows well before this,
+                           ; and GMP settles those three quickly
+    mov rax, 1             ; result
+    mov rsi, rbx           ; b, the running square
+    mov rdi, r13           ; e, the remaining exponent
+.pow_loop:
+    test rdi, rdi
+    jz .pow_fits
+    test dil, 1
+    jz .pow_square
+    imul rax, rsi
+    jo .pow_wide
+.pow_square:
+    shr rdi, 1
+    jz .pow_fits
+    imul rsi, rsi
+    jo .pow_wide
+    jmp .pow_loop
+.pow_fits:
+    RET_TAG_SMALLINT
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.pow_wide:
     ; Convert base to GMP if needed
     ; r14d = base_tag from int_unwrap
     xor ecx, ecx
@@ -2856,8 +3095,7 @@ DEF_FUNC int_power, IPW_FRAME
     mov cl, 1
 .base_gmp:
     push rcx
-    mov edi, PyIntObject_size
-    call ap_malloc
+    call int_alloc_raw
     push rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
@@ -2902,31 +3140,26 @@ DEF_FUNC int_power, IPW_FRAME
     ; an infinity, so the reciprocal came out 0.0.
     ;
     ; float_pow answers all of it, and is the only place the IEEE corners are
-    ; written down.  Both operands go through GMP's mpz_get_d, which does not
-    ; truncate the way mpz_get_si does -- an exponent past int64 used to come
-    ; back with the wrong magnitude and sometimes the wrong sign.
-    cmp r14d, TAG_SMALLINT
-    je .neg_exp_smallint
-    INT_NEED_MPZ rbx
-    lea rdi, [rbx + PyIntObject.mpz]
-    call __gmpz_get_d wrt ..plt
-    jmp .neg_exp_have_base
-.neg_exp_smallint:
-    mov rax, rbx
-    cvtsi2sd xmm0, rax
-.neg_exp_have_base:
-    ; The exponent: r13 holds it when it fit an int64, and otherwise the
-    ; original object still does.
-    movsd [rbp - IPW_BASED], xmm0   ; r13 still holds the exponent
-    cmp dword [rbp - IPW_ETAG], TAG_SMALLINT
-    je .neg_exp_exp_small
-    INT_NEED_MPZ r12
-    lea rdi, [r12 + PyIntObject.mpz]
-    call __gmpz_get_d wrt ..plt
-    jmp .neg_exp_have_exp
-.neg_exp_exp_small:
-    cvtsi2sd xmm0, r13
-.neg_exp_have_exp:
+    ; written down.
+    ;
+    ; Both operands become doubles through float_to_f64, which is where the
+    ; CORRECT conversion lives: it renders the integer to a decimal string and
+    ; lets strtod round it to nearest even, as CPython's PyLong_AsDouble does.
+    ; This path used GMP's mpz_get_d, which TRUNCATES toward zero, so an
+    ; integer sitting between two doubles picked the lower neighbour and the
+    ; reciprocal of the wrong neighbour is a different float: (10**30) ** -1
+    ; answered 1e-30 where CPython says 9.999999999999999e-31.  float_to_f64
+    ; also handles an exponent past int64 without the magnitude and sign
+    ; damage mpz_get_si would do.
+    mov rdi, rbx
+    mov esi, r14d
+    extern float_to_f64
+    call float_to_f64
+    movsd [rbp - IPW_BASED], xmm0
+    ; The exponent, as the object rather than the int64 r13 holds when it fit.
+    mov rdi, r12
+    mov esi, dword [rbp - IPW_ETAG]
+    call float_to_f64
     movq rsi, xmm0
     V_FROM_F64 rsi, rax
     mov rdi, [rbp - IPW_BASED]
@@ -3314,3 +3547,9 @@ int_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+
+section .bss
+;; The free list int_alloc_raw pops from and int_dealloc pushes onto.  A block
+;; on it is dead: its refcount word holds the link to the next one.
+int_freelist:       resq 1
+int_freelist_count: resq 1

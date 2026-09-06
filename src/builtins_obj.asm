@@ -687,6 +687,43 @@ DEF_FUNC builtin_all, ALL_FRAME
 END_FUNC builtin_all
 
 ;; ============================================================================
+;; ============================================================================
+;; sum_settle(xmm0 = the running total, xmm1 = the compensation) -> rax = Value
+;;
+;; Folds the compensation term into the running total and hands back a Value.
+;; The two doubles are ARGUMENTS and not read out of the caller's frame: this
+;; has a prologue of its own, so rbp here is its own.
+;; The term is only added when it is NON-ZERO AND FINITE, which is CPython's
+;; test: an infinite or overflowed total must not be turned into a NaN by
+;; adding an infinity of the other sign to it, and a zero term must not turn
+;; -0.0 into +0.0.
+;; ============================================================================
+DEF_FUNC_LOCAL sum_settle, 8            ; 1 push, so rsp stays 16-aligned
+    push rbx
+    xorpd xmm2, xmm2
+    ucomisd xmm1, xmm2
+    jp .ss_skip                         ; a NaN term is not finite
+    je .ss_skip                         ; and a zero term changes nothing
+    movapd xmm3, xmm1
+    andpd xmm3, [rel sum_absmask]
+    ucomisd xmm3, [rel sum_inf]
+    jae .ss_skip                        ; an infinite term is refused
+    addsd xmm0, xmm1
+.ss_skip:
+    movq rax, xmm0
+    V_FROM_F64 rax, rbx
+    pop rbx
+    leave
+    ret
+END_FUNC sum_settle
+
+section .rodata
+align 16
+;; The sign bit cleared, for |x|.  andpd wants its memory operand aligned.
+sum_absmask: dq 0x7FFFFFFFFFFFFFFF, 0x7FFFFFFFFFFFFFFF
+sum_inf:     dq 0x7FF0000000000000, 0x7FF0000000000000
+section .text
+
 ;; 14. builtin_sum(rdi = args, rsi = nargs) - sum(iterable[, start])
 ;;   -> rax = Value
 ;; ============================================================================
@@ -697,12 +734,16 @@ END_FUNC builtin_all
 ;; accumulator.  NULL is not an error the loop noticed; it was added to,
 ;; DECREFed, and finally returned, and the failure surfaced wherever the
 ;; caller next touched it.
+
 SM_ACC   equ 8              ; the accumulator Value, owned
 SM_ITEM  equ 16             ; the item just pulled from the iterator, owned
 SM_NEW   equ 24             ; the sum, held across the two DECREFs below
 SM_EXC   equ 32
 SM_OBJ   equ 40             ; args[0], for the error message: rbx is reused
-SM_FRAME equ 48             ; + 2 pushes = 64, 16-byte aligned
+SM_FSUM  equ 48             ; the running float total, while SM_PHASE is 1
+SM_COMP  equ 56             ; and the compensation term beside it
+SM_PHASE equ 64             ; 0 = not yet a float sum, 1 = in it, 2 = left it
+SM_FRAME equ 80             ; + 2 pushes = 96, 16-byte aligned
 
 extern value_type
 extern raise_type_error_with_name
@@ -720,6 +761,7 @@ DEF_FUNC builtin_sum, SM_FRAME
     ja .sum_error
 
     mov rbx, rdi                ; args
+    mov qword [rbp - SM_PHASE], 0
     cmp rsi, 2
     je .sum_start
 
@@ -767,6 +809,25 @@ DEF_FUNC builtin_sum, SM_FRAME
 
     DUNDER_EXC_SAVE [rbp - SM_EXC]
 
+    ; A float `start` means the very FIRST addition is already one the
+    ; compensation has to cover.  Entering the compensated loop only from an
+    ; add's RESULT left that first add naked, and it is the one that loses the
+    ; digits: sum([1.0, -1e100], 1e100) dropped the 1.0 inside the
+    ; 1e100 + 1.0 that produced the seed, and answered 0.0 where CPython says
+    ; 1.0.  CPython seeds f_result from `result` before its loop for the same
+    ; reason.
+    ;
+    ; A float is an immediate here, so SM_ACC owns nothing and there is no
+    ; reference to hand over; a float SUBCLASS is a pointer, fails this test,
+    ; and correctly keeps the generic protocol.
+    V_TEST_F64_M [rbp - SM_ACC], rcx
+    ja .sum_loop
+    mov rax, [rbp - SM_ACC]
+    V_TO_F64 rax
+    mov [rbp - SM_FSUM], rax
+    mov qword [rbp - SM_COMP], 0        ; c = +0.0
+    mov qword [rbp - SM_PHASE], 1
+
 .sum_loop:
     mov rdi, rbx
     call r12
@@ -774,8 +835,38 @@ DEF_FUNC builtin_sum, SM_FRAME
     jz .sum_stop                ; exhausted -- or it raised
     mov [rbp - SM_ITEM], rax
 
+    cmp qword [rbp - SM_PHASE], 1
+    je .sum_compensated
+
+    ; Both the total and the item an integer immediate?  Then the addition is
+    ; three instructions on the Values themselves.  Everything below is the
+    ; general numeric protocol -- obj_binary_op, int_binop_unpack twice,
+    ; int_add -- and over a list of ordinary integers that was 45% of sum().
+    ; CPython has the same fast path, keeping a Py_ssize_t running total that
+    ; bails on overflow (bltinmodule.c); this bails into the protocol instead,
+    ; so there is only one place that knows how to add.
+    ;
+    ; Safe whether the phase is 0 or 2.  An immediate is never a heaptype
+    ; instance, so no __add__ or __radd__ is bypassed, and it owns nothing, so
+    ; neither side needs a DECREF.  A float total fails the first test, which
+    ; is why the phase does not have to be consulted again.
+    mov rax, [rbp - SM_ACC]
+    cmp rax, [rel v_int_lo]
+    jb .sum_generic_pair
+    mov rdx, [rbp - SM_ITEM]
+    cmp rdx, [rel v_int_lo]
+    jb .sum_generic_pair
+    add rax, rdx
+    sub rax, [rel v_int_bias]
+    cmp rax, [rel v_int_lo]
+    jb .sum_generic_pair        ; past +-2^50: the protocol boxes it properly
+    mov [rbp - SM_ACC], rax
+    jmp .sum_loop
+
+.sum_generic_pair:
     mov rdi, [rbp - SM_ACC]
-    mov rsi, rax
+.sum_generic_add:
+    mov rsi, [rbp - SM_ITEM]
     xor edx, edx                ; NB_ADD
     call obj_binary_op
     ; Park the result before either DECREF: obj_dealloc clobbers every
@@ -788,13 +879,103 @@ DEF_FUNC builtin_sum, SM_FRAME
     mov rax, [rbp - SM_NEW]
     mov [rbp - SM_ACC], rax     ; NULL if it raised; DECREF_V below is NULL-safe
     test rax, rax
+    jz .sum_check_done
+    ; The total has just become a float: from here the additions are
+    ; compensated.  CPython enters this at the same point -- its integer fast
+    ; path ends on the first non-integer item, and whatever that add produced
+    ; is what its float loop starts from.  Phase 2 is "already left it", which
+    ; is never re-entered, because CPython's float loop is not either.
+    cmp qword [rbp - SM_PHASE], 0
+    jne .sum_check_done
+    V_TEST_F64_M [rbp - SM_ACC], rcx
+    ja .sum_check_done
+    mov rax, [rbp - SM_ACC]
+    V_TO_F64 rax
+    mov [rbp - SM_FSUM], rax
+    mov qword [rbp - SM_COMP], 0        ; c = +0.0
+    mov qword [rbp - SM_PHASE], 1
+    mov rax, [rbp - SM_ACC]
+.sum_check_done:
+    test rax, rax
     jz .sum_fail
     jmp .sum_loop
+
+.sum_compensated:
+    ; Improved Kahan-Babuska, after Neumaier -- the algorithm CPython 3.12
+    ; adopted in gh-100425, and the reason sum([1e100, 1.0, -1e100]) is 1.0
+    ; there and was 0.0 here.  The compensation term IS the answer in that
+    ; example: the naive running total loses the 1.0 entirely when 1e100 is
+    ; added and again when it is taken away.
+    V_TEST_F64_M [rbp - SM_ITEM], rcx
+    jbe .sum_c_float
+    V_TEST_INT_M [rbp - SM_ITEM], rcx
+    jae .sum_c_int
+    jmp .sum_c_leave
+
+.sum_c_float:
+    mov rax, [rbp - SM_ITEM]
+    V_TO_F64 rax
+    movq xmm2, rax                      ; x
+    movsd xmm0, [rbp - SM_FSUM]         ; s
+    movapd xmm1, xmm0
+    addsd xmm1, xmm2                    ; t = s + x
+    ; Which of the two is larger decides which way round the lost low bits
+    ; are recovered.  ucomisd leaves CF set for unordered, so a NaN takes the
+    ; second form -- which is what `fabs(s) >= fabs(x)` being false does.
+    movapd xmm3, xmm0
+    andpd xmm3, [rel sum_absmask]
+    movapd xmm4, xmm2
+    andpd xmm4, [rel sum_absmask]
+    ucomisd xmm3, xmm4
+    jb .sum_c_x_bigger
+    subsd xmm0, xmm1                    ; s - t
+    addsd xmm0, xmm2                    ; (s - t) + x
+    jmp .sum_c_accum
+.sum_c_x_bigger:
+    subsd xmm2, xmm1                    ; x - t
+    addsd xmm2, xmm0                    ; (x - t) + s
+    movapd xmm0, xmm2
+.sum_c_accum:
+    movsd xmm3, [rbp - SM_COMP]
+    addsd xmm3, xmm0
+    movsd [rbp - SM_COMP], xmm3
+    movsd [rbp - SM_FSUM], xmm1
+    jmp .sum_loop                       ; an immediate owns nothing
+
+.sum_c_int:
+    ; CPython adds an integer straight into the total with no compensation,
+    ; so this does too.
+    mov rax, [rbp - SM_ITEM]
+    V_TO_I64 rax
+    cvtsi2sd xmm0, rax
+    movsd xmm1, [rbp - SM_FSUM]
+    addsd xmm1, xmm0
+    movsd [rbp - SM_FSUM], xmm1
+    jmp .sum_loop
+
+.sum_c_leave:
+    ; Something that is neither: settle the total, hand the item to the
+    ; general protocol, and do not come back.
+    movsd xmm0, [rbp - SM_FSUM]
+    movsd xmm1, [rbp - SM_COMP]
+    call sum_settle
+    mov [rbp - SM_ACC], rax
+    mov qword [rbp - SM_PHASE], 2
+    mov rdi, [rbp - SM_ACC]
+    jmp .sum_generic_add
 
 .sum_stop:
     ; tp_iternext answers NULL both for "exhausted" and for a raise, so the
     ; two are told apart by the pending exception, not by the return.
     EXC_RAISED_SINCE [rbp - SM_EXC], rcx, .sum_fail
+    cmp qword [rbp - SM_PHASE], 1
+    jne .sum_stop_have_acc
+    movsd xmm0, [rbp - SM_FSUM]
+    movsd xmm1, [rbp - SM_COMP]
+    call sum_settle
+    mov [rbp - SM_ACC], rax
+    mov qword [rbp - SM_PHASE], 2
+.sum_stop_have_acc:
     mov rdi, rbx
     call obj_decref
     mov rax, [rbp - SM_ACC]

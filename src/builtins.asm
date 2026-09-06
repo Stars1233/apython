@@ -2092,6 +2092,9 @@ END_FUNC builtin_bool
 ;; float(x)   -> convert x to float (int, float, or string)
 ;; ============================================================================
 global builtin_float
+
+
+extern float_str_clean
 BF_START  equ 8              ; the string strtod was handed
 BF_ENDPTR equ 16            ; where strtod stopped
 BF_OBJ    equ 24            ; the str object itself, for the error message
@@ -2228,6 +2231,24 @@ DEF_FUNC builtin_float, BF_FRAME
     call strlen wrt ..plt
     cmp rax, [rbp - BF_XLEN]
     jne .float_str_error
+
+    ; Reject a hex float and strip PEP 515 underscores before strtod sees
+    ; either.  A cleaned copy takes over BF_XLAT's ownership, so both exits
+    ; free exactly one buffer.
+    mov rdi, [rbp - BF_START]
+    mov rsi, [rbp - BF_XLEN]
+    call float_str_clean
+    test rax, rax
+    jz .float_str_error
+    mov [rbp - BF_START], rax
+    test edx, edx
+    jz .float_str_cleaned
+    mov rdi, [rbp - BF_XLAT]
+    mov [rbp - BF_XLAT], rax
+    test rdi, rdi
+    jz .float_str_cleaned
+    call ap_free
+.float_str_cleaned:
     mov rdi, [rbp - BF_START]
 
     ; Call strtod(str, &endptr)

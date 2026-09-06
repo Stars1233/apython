@@ -9,6 +9,8 @@
 %include "object.inc"
 
 extern type_is_subtype
+extern dict_copy_shallow
+extern dict_type
 extern dict_new
 extern dunder_call_3
 extern dunder_lookup
@@ -509,6 +511,37 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov r15, rdx                ; namespace dict, becomes tp_dict
     mov [rbp - TFP_BASES], rsi
     DUNDER_EXC_SAVE [rbp - TFP_EXC]
+
+    ; tp_dict is a COPY of the namespace, never the namespace itself.  The
+    ; caller's reference is transferred to us either way, so the original is
+    ; released here.
+    ;
+    ; Adopting it made `ns` and the live class the same object: `ns['y'] = 2`
+    ; after `type('C', (), ns)` added an attribute to C, where CPython's
+    ; type_new copied and answers False to hasattr(C, 'y').  It is also what
+    ; would make a version-tag cache unsound -- lib/enum.py writes into the
+    ; class body namespace after the class exists (`classdict['__str__'] =`),
+    ; and none of those writes go through type_setattr.
+    ;
+    ; Only an exact dict is copied.  A __prepare__ that returns something else
+    ; is adopted as before; the rest of this function already assumes a dict
+    ; and would be no worse off.
+    test r15, r15
+    jz .tfp_ns_ready
+    mov rax, [r15 + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    jne .tfp_ns_ready
+    mov rdi, r15
+    call dict_copy_shallow
+    test rax, rax
+    jz .tfp_ns_ready            ; copy failed; keep the original
+    mov rdi, r15                ; the caller's namespace, ours to release
+    mov r15, rax
+    call obj_decref
+.tfp_ns_ready:
+    mov rsi, [rbp - TFP_BASES]  ; the scan below still reads it, and the calls
+                                ; above are free to clobber a caller-saved reg
 
     ; The layout base is the widest base, not simply the first: `class
     ; C(Mixin, list)` has to be laid out as a list.  Ties go to the earlier
@@ -1481,6 +1514,28 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov qword [rel class_metatype_pending], 0
 .tfp_default_metatype:
 
+    ; Record it against each of its bases, so type.__subclasses__ can answer.
+    ; Borrowed, and dropped again by user_type_dealloc, so the list only ever
+    ; holds live classes -- which is what CPython's weak-referenced
+    ; tp_subclasses amounts to.
+    ;
+    ; BEFORE any user code runs, for the same reason the metatype above is:
+    ; __init_subclass__ can read Base.__subclasses__() and CPython's already
+    ; lists the class being created.  It also has to be before anything that
+    ; can cache against a base, or the class would sit outside the walk that
+    ; invalidates such a cache with no way back in.  Only tp_bases is needed,
+    ; and that has been set since the layout was decided.
+    extern subclass_register
+    mov rdi, r12
+    call subclass_register
+
+    ; Does anything in this MRO define a __getattribute__ of its own?  Asked
+    ; once, here, instead of on every attribute access.  tp_mro, tp_dict and
+    ; tp_bases are all set by now, which is all it reads.
+    extern type_refresh_attr_flags
+    mov rdi, r12
+    call type_refresh_attr_flags
+
     ; Call parent's __init_subclass__ if present
     mov rax, [rbp - TFP_BASE]          ; base class
     test rax, rax
@@ -1556,14 +1611,6 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     extern gc_track
     mov rdi, r12
     call gc_track
-
-    ; Record it against each of its bases, so type.__subclasses__ can answer.
-    ; Borrowed, and dropped again by user_type_dealloc, so the list only ever
-    ; holds live classes -- which is what CPython's weak-referenced
-    ; tp_subclasses amounts to.
-    extern subclass_register
-    mov rdi, r12
-    call subclass_register
 
     ; Now that the class exists, tell every descriptor in it what it is called.
     mov rdi, r12

@@ -2818,12 +2818,18 @@ END_FUNC obj_hash
 ;; Decodes the Value, then dispatches: int immediate → value != 0, pointer → type-based.
 ;; ============================================================================
 DEF_FUNC_BARE obj_is_true
-    V_UNPACK rdi, rsi
-
-    cmp esi, TAG_SMALLINT
-    je .smallint
-    cmp esi, TAG_FLOAT
-    je .float_tag
+    ; rdi is a Value.  This used to open with V_UNPACK -- classify by high16,
+    ; subtract a bias, synthesise a tag -- so that the next two instructions
+    ; could compare that tag against two constants.  V_IS_INT and V_IS_FLOAT
+    ; ask the same two questions of the Value directly, three instructions
+    ; each, and the integer arm then needs no decoding at all.
+    ;
+    ; This runs on every `if`, every `while`, every `and`/`or`, every `not`,
+    ; and on the result of every rich comparison.
+    V_IS_INT rdi, rsi
+    jae .smallint
+    V_IS_FLOAT rdi, rsi
+    jb .float_tag
 
     push rbp
     mov rbp, rsp
@@ -3021,14 +3027,16 @@ DEF_FUNC_BARE obj_is_true
     ret
 
 .smallint:
-    ; SmallInt is true iff raw value != 0
-    test rdi, rdi
-    setnz al
-    movzx eax, al
+    ; An integer immediate is zero exactly when its Value IS the bias, so the
+    ; truth test is one compare on the encoded form, with nothing decoded.
+    xor eax, eax
+    cmp rdi, [rel v_int_bias]
+    setne al
     ret
 
 .float_tag:
     ; Inline float: true iff not 0.0 and not -0.0
+    V_TO_F64 rdi
     movq xmm0, rdi
     xorpd xmm1, xmm1
     ucomisd xmm0, xmm1

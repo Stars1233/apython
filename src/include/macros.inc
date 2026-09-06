@@ -411,6 +411,12 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     add r13, %1 * 8
 %endmacro
 
+; Discard the top %1 slots without reading them.  For values the caller has
+; already established are immediates, so there is nothing to DECREF.
+%macro VDROP 1                  ; %1 = number of slots
+    sub r13, %1 * 8
+%endmacro
+
 ; ==========================================================================
 ; None / True / False as owned singleton pointers
 ;
@@ -835,3 +841,215 @@ ASM_INIT
 %endmacro
 
 %endif ; MACROS_INC
+
+;; ============================================================================
+;; FLOAT_PAIR_OR_DEOPT label -- xmm0 = left, xmm1 = right, or jump to `label`
+;;
+;; Accepts a float on both sides, or a float on one side and an INTEGER
+;; IMMEDIATE on the other.  r9d/r8d are the left/right tags and rdi/rsi the
+;; payloads, as VPOP_VAL leaves them.
+;;
+;; Mixed int/float had no fast arm anywhere: `x * 2` and `2 * x` both took the
+;; whole generic protocol on EVERY execution, with nothing ever rewritten --
+;; binop_left_wrapper, binop_subclass_first, binop_is_number, and then
+;; float_mul, which runs float_binop_accepts and float_to_f64 twice each.
+;; Around two hundred instructions to reach one cvtsi2sd and one mulsd.
+;; CPython does not specialize this either; its binary-op specializer rejects
+;; `!Py_IS_TYPE(lhs, Py_TYPE(rhs))` before it ever looks at float.
+;;
+;; TWO INTEGERS ARE REFUSED.  That pair belongs to the integer opcode, and
+;; answering it here would produce a float where Python produces an int.
+;;
+;; Safe in a specialized handler for the same reason the both-float form is:
+;; neither a TAG_FLOAT nor a TAG_SMALLINT immediate can be a heaptype
+;; instance, so no user __add__ on a float or int subclass is bypassed.
+;; ============================================================================
+%macro FLOAT_PAIR_OR_DEOPT 1
+    cmp r9d, TAG_FLOAT
+    je %%left_float
+    cmp r9d, TAG_SMALLINT
+    jne %1
+    cmp r8d, TAG_FLOAT
+    jne %1                      ; int against a non-float: not this opcode
+    cvtsi2sd xmm0, rdi
+    movq xmm1, rsi
+    jmp %%ready
+%%left_float:
+    movq xmm0, rdi
+    cmp r8d, TAG_FLOAT
+    je %%right_float
+    cmp r8d, TAG_SMALLINT
+    jne %1
+    cvtsi2sd xmm1, rsi
+    jmp %%ready
+%%right_float:
+    movq xmm1, rsi
+%%ready:
+%endmacro
+
+;; ============================================================================
+;; FLOAT_PAIR_OR_DEOPT_M label -- xmm0 = left, xmm1 = right, or jump to `label`
+;;
+;; What FLOAT_PAIR_OR_DEOPT accepts, read STRAIGHT OFF THE STACK instead of out
+;; of the (payload, tag) pairs VPOP_VAL leaves behind.  Same rules: float
+;; against float, float against an integer immediate either way round, and two
+;; integers REFUSED, because that pair belongs to the integer opcode and
+;; answering it here would produce a float where Python produces an int.
+;;
+;; The pair version cost two V_UNPACKs -- twenty instructions to classify by
+;; high16, subtract a bias and synthesise a tag -- before a six-compare ladder
+;; over those tags could look at them.  This classifies the raw Values with
+;; V_IS_FLOAT, which is the same three instructions V_UNPACK would have spent
+;; on step one, and then stops.
+;;
+;; Nothing is popped, so a handler using this has nothing to put back on its
+;; deopt arm: it writes the generic opcode and re-dispatches with the stack as
+;; it found it.
+;;
+;; Clobbers rax, rdi and rsi.  A pointer or NULL fails both tests and deopts.
+;; ============================================================================
+%macro FLOAT_PAIR_OR_DEOPT_M 1
+    mov rdi, [r13 - 16]         ; left Value
+    mov rsi, [r13 - 8]          ; right Value
+    V_IS_FLOAT rdi, rax
+    jb %%left_float
+    ; Not a float, so the only pair left to accept is integer against float.
+    cmp rdi, [rel v_int_lo]
+    jb %1                       ; a pointer, NULL, or a sentinel
+    V_IS_FLOAT rsi, rax
+    jae %1                      ; two integers: not this opcode
+    V_TO_I64 rdi
+    cvtsi2sd xmm0, rdi
+    V_TO_F64 rsi
+    movq xmm1, rsi
+    jmp %%ready
+%%left_float:
+    V_TO_F64 rdi
+    movq xmm0, rdi
+    V_IS_FLOAT rsi, rax
+    jb %%right_float
+    cmp rsi, [rel v_int_lo]
+    jb %1
+    V_TO_I64 rsi
+    cvtsi2sd xmm1, rsi
+    jmp %%ready
+%%right_float:
+    V_TO_F64 rsi
+    movq xmm1, rsi
+%%ready:
+%endmacro
+
+;; ============================================================================
+;; INT_PAIR_OR_DEOPT label -- rdx = left Value, rax = right Value, or jump
+;;
+;; Reads the top two stack slots WITHOUT popping them, and rejects anything
+;; that is not an integer immediate.  Because nothing was popped, the deopt
+;; arm has nothing to undo: it writes the generic opcode back and re-dispatches
+;; with the stack exactly as it found it.
+;;
+;; The two Values are left BIASED.  An immediate is `i - 2^50` taken modulo
+;; 2^64 (V_INT_BIAS is 2^64 - 2^50), so for i in [-2^50, 2^50) the encoding is
+;; strictly increasing as an UNSIGNED 64-bit number and never wraps.  Three
+;; consequences the handlers below use:
+;;
+;;   - `v >= V_INT_LO` unsigned is the whole type check, one compare per side.
+;;   - `cmp` on the biased Values, read unsigned, IS the signed comparison of
+;;     the integers -- so a compare needs no decoding at all.
+;;   - adding or subtracting biased Values gives the biased answer after one
+;;     correction by the bias, and the same `>= V_INT_LO` test then doubles as
+;;     the overflow check, since a sum outside the immediate range lands
+;;     outside [V_INT_LO, 2^64) in either direction.
+;;
+;; Only multiply, divide and the bitwise ops have to decode, and they do it
+;; with a single `sub` per operand.
+;;
+;; Safe in a specialized handler for the same reason the float form is: an
+;; integer immediate is never a heaptype instance, so no user __add__ on an
+;; int subclass is bypassed.  A COMPACT HEAP INT is refused here -- see P4.
+;; ============================================================================
+%macro INT_PAIR_OR_DEOPT 1
+    mov rax, [r13 - 8]          ; right
+    mov rdx, [r13 - 16]         ; left
+    cmp rax, [rel v_int_lo]
+    jb %1
+    cmp rdx, [rel v_int_lo]
+    jb %1
+%endmacro
+
+;; ============================================================================
+;; VREPLACE2 value -- drop two stack slots and store one Value in their place
+;;
+;; The counterpart to reading with INT_PAIR_OR_DEOPT rather than popping.
+;; ============================================================================
+%macro VREPLACE2 1              ; %1 = Value
+    sub r13, 8
+    mov [r13 - 8], %1
+%endmacro
+
+;; ============================================================================
+;; VREPLACE2_BOOL reg, scratch -- the same, for a 0/1 in the low byte of %1
+;;
+;; Branchless: both singletons are addressed and one is selected with cmov,
+;; so a comparison whose answer alternates costs no misprediction.  %1 is
+;; clobbered.
+;; ============================================================================
+%macro VREPLACE2_BOOL 2         ; %1 = 0/1 (clobbered), %2 = scratch
+    lea %2, [rel bool_true]
+    test %1, %1
+    lea %1, [rel bool_false]
+    cmovnz %1, %2
+    inc qword [%1 + PyObject.ob_refcnt]
+    sub r13, 8
+    mov [r13 - 8], %1
+%endmacro
+
+;; ============================================================================
+;; STR_PAIR_OR_DEOPT left, right, label
+;;
+;; Continue only when both Values are EXACT strs; jump to `label` otherwise.
+;; Both arguments must really be VALUES.  Handed a (payload, tag) pair's
+;; payload instead, a small int arrives as the bare number and passes the
+;; pointer test, and the type load then dereferences it.
+;; Clobbers r10.  It deliberately does NOT touch rcx: at the specialization
+;; site rcx still holds the BINARY_OP operator index that .binop_generic needs
+;; on the way out, and at a specialized handler's deopt rcx is the oparg.
+;; ============================================================================
+%macro STR_PAIR_OR_DEOPT 3      ; %1 = left, %2 = right, %3 = deopt label
+    V_TEST_PTR %1, r10
+    ja %3
+    test %1, %1
+    jz %3
+    V_TEST_PTR %2, r10
+    ja %3
+    test %2, %2
+    jz %3
+    lea r10, [rel str_type]
+    cmp [%1 + PyObject.ob_type], r10
+    jne %3
+    cmp [%2 + PyObject.ob_type], r10
+    jne %3
+%endmacro
+
+;; ============================================================================
+;; INPLACE_ADD_TARGET_OR_DEOPT left, label
+;;
+;; Continue only when the string in %1 can be appended to where it stands:
+;; the next instruction is the STORE_FAST that will consume the result, that
+;; local still holds this very object, this stack slot and that local are its
+;; only two references, and it has never been hashed.
+;;
+;; rbx is past the 2-byte instruction word, so the CACHE is at [rbx] and the
+;; instruction after it at [rbx + 2].  Clobbers r10 and r11, and not rcx.
+;; ============================================================================
+%macro INPLACE_ADD_TARGET_OR_DEOPT 2    ; %1 = left, %2 = deopt label
+    cmp byte [rbx + 2], 125             ; STORE_FAST
+    jne %2
+    movzx r11d, byte [rbx + 3]
+    mov r10, [r12 + PyFrame.localsplus + r11*8]
+    cmp %1, r10
+    jne %2
+    cmp qword [%1 + PyObject.ob_refcnt], 2
+    jne %2
+    cmp qword [%1 + PyStrObject.ob_hash], -1
+    jne %2
+%endmacro

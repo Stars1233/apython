@@ -93,9 +93,13 @@ DEF_FUNC_LOCAL method_call
     mov r12, rsi                ; original args
     mov r13, rdx                ; original nargs
 
-    ; Allocate new args array: (nargs+1) * 16 (fat values)
+    ; Allocate new args array: (nargs+1) Values, one word each.  This said
+    ; `shl rdi, 4` -- two words per argument -- left over from the fat
+    ; (payload, tag) representation, so every bound-method call through this
+    ; path asked for twice the memory it went on to use.  The copy loop below
+    ; already strides by 8.
     lea rdi, [rdx + 1]
-    shl rdi, 4
+    shl rdi, 3
     call ap_malloc
     mov r14, rax                ; new args array
 
@@ -103,7 +107,7 @@ DEF_FUNC_LOCAL method_call
     mov rcx, [rbx + PyMethodObject.im_self]
     mov [r14], rcx
 
-    ; Copy original args to new_args[1..] (16-byte stride)
+    ; Copy original args to new_args[1..]
     xor ecx, ecx
 .mc_copy:
     cmp rcx, r13

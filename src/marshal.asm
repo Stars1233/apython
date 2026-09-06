@@ -50,6 +50,7 @@ MARSHAL_FLAG_REF              equ 0x80
 ; .pyc file header
 PYC_MAGIC_3_12    equ 0x0a0d0dcb  ; 3531 in little-endian with \r\n
 PYC_HEADER_SIZE   equ 16          ; magic(4) + flags(4) + timestamp/size(8)
+extern str_intern_bytes
 extern int_promote_mpz
 extern none_singleton
 extern bool_true
@@ -796,7 +797,19 @@ mdo_short_ascii:
     jz mdo_str_fail    ; rax = pointer to string data in buffer
     mov rdi, rax               ; data ptr
     mov rsi, r13               ; length
-    call str_new_heap          ; always heap — co_names readers expect TAG_PTR
+    ; CPython recorded in the .pyc which strings IT interned; that answer was
+    ; being thrown away.  Taking it means two modules' `self`, `append` and
+    ; `__init__` are one object, which is what the LOAD_ATTR cache guard
+    ; compares by pointer.  This is before `mfinish`, deliberately: mfinish
+    ; calls marshal_add_ref, and recording the duplicate would let a later
+    ; TYPE_REF hand out an object the table does not know about.
+    cmp ebx, MARSHAL_TYPE_SHORT_ASCII_INTERNED
+    jne .msa_plain
+    call str_intern_bytes
+    jmp .msa_done
+.msa_plain:
+    call str_new_heap          ; always heap -- co_names readers expect TAG_PTR
+.msa_done:
 
     pop r13
     pop r12                    ; restore FLAG_REF
@@ -819,7 +832,19 @@ mdo_ascii:
     jz mdo_str_fail    ; rax = pointer to string data
     mov rdi, rax               ; data ptr
     mov rsi, r13               ; length
-    call str_new_heap          ; always heap — co_names readers expect TAG_PTR
+    ; CPython recorded in the .pyc which strings IT interned; that answer was
+    ; being thrown away.  Taking it means two modules' `self`, `append` and
+    ; `__init__` are one object, which is what the LOAD_ATTR cache guard
+    ; compares by pointer.  This is before `mfinish`, deliberately: mfinish
+    ; calls marshal_add_ref, and recording the duplicate would let a later
+    ; TYPE_REF hand out an object the table does not know about.
+    cmp ebx, MARSHAL_TYPE_ASCII_INTERNED
+    jne .mas_plain
+    call str_intern_bytes
+    jmp .mas_done
+.mas_plain:
+    call str_new_heap          ; always heap -- co_names readers expect TAG_PTR
+.mas_done:
 
     pop r13
     pop r12                    ; restore FLAG_REF
@@ -842,7 +867,17 @@ mdo_unicode:
     jz mdo_str_fail    ; rax = pointer to data
     mov rdi, rax               ; data ptr
     mov rsi, r13               ; length
-    call str_new_heap          ; always heap — co_names readers expect TAG_PTR
+    ; TYPE_INTERNED reaches here too -- it is a str that happened to be
+    ; interned, which CPython's reader also falls through to TYPE_UNICODE.
+    ; These bytes may be UTF-8 rather than ASCII, which is why the table
+    ; counts code points rather than assuming one per byte.
+    cmp ebx, MARSHAL_TYPE_INTERNED
+    jne .mun_plain
+    call str_intern_bytes
+    jmp .mun_done
+.mun_plain:
+    call str_new_heap          ; always heap -- co_names readers expect TAG_PTR
+.mun_done:
 
     pop r13
     pop r12                    ; restore FLAG_REF

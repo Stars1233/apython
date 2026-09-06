@@ -21,6 +21,15 @@ endif
 NASMFLAGS += -DINT_STRESS_BOX=$(INT_STRESS_THRESHOLD)
 endif
 
+# NO_INT_FREELIST=1 sends every heap integer back to libc instead of onto
+# int.asm's free list.  Do this when running under valgrind: a recycled block
+# is not a freed one, so a use-after-free on an integer is invisible while the
+# list is on.  It costs about 20% on loops whose accumulator has outgrown the
+# immediate range, and nothing on anything else.
+ifdef NO_INT_FREELIST
+NASMFLAGS += -DNO_INT_FREELIST
+endif
+
 CC = cc
 # -lm is for complex: hypot, pow, atan2, exp, log, cos and sin, which
 # src/pyo/complex.asm calls for the general complex power and for abs().
