@@ -876,6 +876,135 @@ END_FUNC slot_tp_iternext
 
 
 ;; ============================================================================
+;; slot_tp_call(rdi = self, rsi = Value *args, rdx = nargs) -> Value, or NULL
+;;
+;; tp_call for a class that defines __call__ in Python.  Until this existed,
+;; tp_call stayed 0 on every heaptype and `x()` worked only because op_call
+;; and obj_call_n each hand-rolled the __call__ lookup themselves.  Everything
+;; that consults tp_call directly did not: `f(*args)` raised TypeError,
+;; callable() answered False, and iter(o, sentinel), min/max's key= and the
+;; weakref and signal callback checks all refused a working callable.
+;;
+;; The dunder is looked up on the TYPE, along the MRO, exactly as
+;; obj_call_n's does -- not with getattr on the instance, which would find an
+;; instance attribute CPython ignores here.
+;;
+;; Keyword arguments ride in the tail of the same flat array, named by the
+;; kw_names_pending global.  Prepending self at the FRONT leaves that tail
+;; where the callee expects it, so this must not touch the global.
+;;
+;; obj_call_n is the model, but its OCN_MAX of 8 cannot be inherited: this is
+;; the general call path, and `c(*range(100))` is ordinary.  Small arities use
+;; the frame buffer, anything larger takes a heap one.
+;; ============================================================================
+STC_MAX   equ 16              ; args held in the frame; above this, ap_malloc
+STC_SELF  equ 8
+STC_FUNC  equ 16
+STC_HEAP  equ 24              ; the malloc'd buffer, or 0
+STC_BUF   equ 48 + (STC_MAX + 1) * 8
+STC_FRAME equ ((STC_BUF + 15) / 16) * 16 + 8    ; + 3 pushes = 16-aligned
+
+extern ap_malloc
+extern ap_free
+extern dunder_lookup
+extern dunder_call
+extern exc_MemoryError_type
+extern set_exception
+
+global slot_tp_call
+DEF_FUNC slot_tp_call, STC_FRAME
+    push rbx
+    push r12
+    push r13
+
+    mov [rbp - STC_SELF], rdi
+    mov rbx, rsi                ; args
+    mov r12, rdx                ; nargs
+    mov qword [rbp - STC_HEAP], 0
+
+    ; __call__ on the type, along the MRO.
+    mov rdi, [rdi + PyObject.ob_type]
+    lea rsi, [rel dunder_call]
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .stc_not_callable
+    mov [rbp - STC_FUNC], rax
+
+    ; Where the self-prepended copy goes.
+    lea r13, [rbp - STC_BUF]
+    cmp r12, STC_MAX
+    jbe .stc_have_buf
+    lea rdi, [r12 + 1]
+    shl rdi, 3
+    call ap_malloc
+    test rax, rax
+    jz .stc_no_memory
+    mov [rbp - STC_HEAP], rax
+    mov r13, rax
+
+.stc_have_buf:
+    mov rax, [rbp - STC_SELF]
+    mov [r13], rax
+    xor ecx, ecx
+.stc_copy:
+    cmp rcx, r12
+    jge .stc_copied
+    mov rax, [rbx + rcx*8]
+    mov [r13 + rcx*8 + 8], rax
+    inc rcx
+    jmp .stc_copy
+
+.stc_copied:
+    ; Dispatch through __call__'s own tp_call, with self as argument zero.
+    mov rax, [rbp - STC_FUNC]
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_call]
+    test rcx, rcx
+    jz .stc_not_callable
+    mov rdi, rax
+    mov rsi, r13
+    lea rdx, [r12 + 1]
+    call rcx
+    mov rbx, rax                ; the result, kept across ap_free
+
+    mov rdi, [rbp - STC_HEAP]
+    test rdi, rdi
+    jz .stc_return
+    call ap_free
+
+.stc_return:
+    mov rax, rbx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.stc_no_memory:
+    SET_EXC exc_MemoryError_type, "out of memory"
+    jmp .stc_fail
+
+.stc_not_callable:
+    ; The slot is installed, so __call__ was there at class creation and has
+    ; since been removed or replaced with something uncallable.
+    SET_EXC exc_TypeError_type, "object is not callable"
+
+.stc_fail:
+    mov rdi, [rbp - STC_HEAP]
+    test rdi, rdi
+    jz .stc_fail_ret
+    call ap_free
+.stc_fail_ret:
+    RET_NULL
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC slot_tp_call
+
+;; ============================================================================
 ;; type_install_slots(rdi = heaptype)
 ;;
 ;; Fill the type's slots from the dunders it defines.  Called once at class
@@ -1035,6 +1164,7 @@ sl_lt_name:     db "__lt__", 0
 sl_le_name:     db "__le__", 0
 sl_gt_name:     db "__gt__", 0
 sl_ge_name:     db "__ge__", 0
+sl_call_name:   db "__call__", 0
 sl_getitem_name: db "__getitem__", 0
 sl_setitem_name: db "__setitem__", 0
 sl_delitem_name: db "__delitem__", 0
@@ -1077,6 +1207,7 @@ slot_binop_wrappers:
     dq slot_nb_ixor
 
 slot_table:
+    dq sl_call_name,   SLOT_DIRECT,   PyTypeObject.tp_call,     slot_tp_call
     dq sl_iter_name,   SLOT_DIRECT,   PyTypeObject.tp_iter,     slot_tp_iter
     dq sl_next_name,   SLOT_DIRECT,   PyTypeObject.tp_iternext, slot_tp_iternext
     dq sl_hash_name,   SLOT_DIRECT,   PyTypeObject.tp_hash,     slot_tp_hash
