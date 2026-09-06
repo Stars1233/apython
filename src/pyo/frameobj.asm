@@ -117,14 +117,17 @@ extern str_type
 section .text
 
 ;; ============================================================================
-;; frameobj_new(rdi = a live PyFrame*) -> rax = the snapshot, or 0
+;; frameobj_new(rdi = a live PyFrame*) -> rax = the view, or 0
 ;;
-;; f_back is filled in by the caller, which walks the chain outward.
+;; The one reference it comes back with is the FRAME's, parked in
+;; PyFrame.frame_obj; go through frameobj_for, which is what hands out a
+;; reference of your own.  f_back is filled in by the caller, which walks the
+;; chain outward.
 ;; ============================================================================
 FON_FRAME_IN equ 8
 FON_OBJ      equ 16
 FON_FRAME    equ 40            ; + 1 push = 48, 16-aligned
-DEF_FUNC frameobj_new, FON_FRAME
+DEF_FUNC_LOCAL frameobj_new, FON_FRAME
     push rbx
     mov [rbp - FON_FRAME_IN], rdi
 
@@ -274,8 +277,18 @@ DEF_FUNC frameobj_for
     leave
     ret
 .ffor_new:
+    call frameobj_new
+    test rax, rax
+    jz .ffor_done
+    ; frameobj_new's reference is the FRAME's, held until frame_free detaches;
+    ; the caller gets one of its own.  The frame has to own it, or a caller
+    ; that drops the last reference takes the view down while the frame is
+    ; still running -- and a trace function that set f_trace on it would find
+    ; the frame untraced on the very next event.
+    INCREF rax
+.ffor_done:
     leave
-    jmp frameobj_new
+    ret
 END_FUNC frameobj_for
 
 ;; ============================================================================
@@ -302,6 +315,23 @@ DEF_FUNC frameobj_detach, 8            ; 1 push, so rsp is 16-aligned
     mov rdi, rbx
     call frameobj_refresh_pos
 
+    ; And f_back, while prev_frame is still readable.  A frame object that
+    ; outlives its frame keeps a working chain outward -- which is what
+    ; `sys._getframe()` returned from a function is for.
+    cmp qword [rbx + PyFrameObject.f_back], 0
+    jne .fdt_have_back
+    mov rcx, [rbx + PyFrameObject.f_frame]
+    test rcx, rcx
+    jz .fdt_have_back
+    mov rdi, [rcx + PyFrame.prev_frame]
+    test rdi, rdi
+    jz .fdt_have_back
+    call frameobj_for
+    test rax, rax
+    jz .fdt_have_back
+    mov [rbx + PyFrameObject.f_back], rax   ; takes over the reference
+.fdt_have_back:
+
     ; The fast locals, while localsplus is still this frame's.  Through
     ; refresh_locals rather than frame_fast_to_locals, so that a key the
     ; caller put in the dict itself survives -- pdb writes __return__ there
@@ -312,6 +342,11 @@ DEF_FUNC frameobj_detach, 8            ; 1 push, so rsp is 16-aligned
 
 .fdt_drop:
     mov qword [rbx + PyFrameObject.f_frame], 0
+    ; And the frame's own reference goes with the frame.  Anything else
+    ; holding one keeps a working snapshot; nothing else holding one frees it
+    ; here, which is where a view nobody kept should go.
+    mov rdi, rbx
+    call obj_decref
 .fdt_done:
     pop rbx
     leave
@@ -725,41 +760,17 @@ DEF_FUNC sys_getframe_func, SGF_FRAME
     jmp .sgf_descend
 
 .sgf_at_frame:
-    ; Snapshot this frame and every one outside it, linking them by f_back.
-    mov qword [rbp - SGF_HEAD], 0
-    mov qword [rbp - SGF_PREV], 0
-.sgf_walk:
-    test rbx, rbx
-    jz .sgf_walked
+    ; One view; f_back walks outward from it on demand.
     mov rdi, rbx
     call frameobj_for
     test rax, rax
-    jz .sgf_failed
-    cmp qword [rbp - SGF_HEAD], 0
-    jne .sgf_link
-    mov [rbp - SGF_HEAD], rax
-    jmp .sgf_advance
-.sgf_link:
-    mov rcx, [rbp - SGF_PREV]
-    mov [rcx + PyFrameObject.f_back], rax   ; takes over the reference
-.sgf_advance:
-    mov [rbp - SGF_PREV], rax
-    mov rbx, [rbx + PyFrame.prev_frame]
-    jmp .sgf_walk
-
-.sgf_walked:
-    mov rax, [rbp - SGF_HEAD]
+    jz .sgf_null
     mov edx, TAG_PTR
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.sgf_failed:
-    mov rdi, [rbp - SGF_HEAD]
-    test rdi, rdi
-    jz .sgf_null
-    call obj_decref
 .sgf_null:
     xor eax, eax
     pop rbx
@@ -874,7 +885,13 @@ DEF_FUNC frameobj_getattr, FOG_FRAME
     mov [rbp - FOG_NAME], rsi
     lea rdi, [rsi + PyStrObject.data]
 
-    FRAMEOBJ_ATTR "f_back",     f_back
+    mov rdi, [rbp - FOG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "f_back"
+    call ap_strcmp
+    test eax, eax
+    jz .fog_back
+
     FRAMEOBJ_ATTR "f_code",     f_code
     FRAMEOBJ_ATTR "f_globals",  f_globals
     FRAMEOBJ_ATTR "f_builtins", f_builtins
@@ -912,6 +929,43 @@ DEF_FUNC frameobj_getattr, FOG_FRAME
     ; Unknown: NULL, so the caller decides -- the contract every other
     ; tp_getattr here keeps.
     RET_NULL
+    leave
+    V_PACK rax, rdx
+    ret
+
+.fog_back:
+    ; Linked on demand.  Building the chain at construction would walk the
+    ; whole stack every time a hook asked for one frame, and a debugger asks
+    ; for one per event; leaving it unlinked was worse -- bdb sets
+    ; `self.botframe = frame.f_back` on the first call event and then compares
+    ; every later frame against it, so a None there made it re-arm on every
+    ; call and never report one.
+    mov rax, [rbp - FOG_SELF]
+    mov rcx, [rax + PyFrameObject.f_back]
+    test rcx, rcx
+    jnz .fog_back_have
+    mov rcx, [rax + PyFrameObject.f_frame]
+    test rcx, rcx
+    jz .fog_back_none           ; detached: what it was left with is all there is
+    mov rdi, [rcx + PyFrame.prev_frame]
+    test rdi, rdi
+    jz .fog_back_none
+    call frameobj_for
+    test rax, rax
+    jz .fog_back_none
+    mov rcx, [rbp - FOG_SELF]
+    mov [rcx + PyFrameObject.f_back], rax   ; takes over the reference
+    mov rcx, rax
+.fog_back_have:
+    mov rax, rcx
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.fog_back_none:
+    LOAD_NONE rax
+    mov edx, TAG_PTR
     leave
     V_PACK rax, rdx
     ret

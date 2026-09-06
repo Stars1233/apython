@@ -42,7 +42,7 @@ CL_IS_METHOD equ 32
 CL_TOTAL     equ 40
 CL_SAVED_RSP equ 48
 CL_TPCALL    equ 56
-CL_RETTAG    equ 64            ; spare: the return value is one word now
+CL_CFUNC     equ 64            ; the C function, while sys.setprofile is on
 CL_CALL_TAG  equ 72            ; spare: the callable is classified in place
 CL_SAVED_R13 equ 80
 CL_FRAME     equ 104         ; + 0 pushes = 96
@@ -242,12 +242,49 @@ DEF_FUNC op_call, CL_FRAME
     lea rax, [r13 + rax*8]                 ; deepest arg = args base
     mov [rbp - CL_SAVED_RSP], rax
 .args_ready:
+    ; sys.setprofile's c_call / c_return / c_exception.  One load and one
+    ; never-taken branch on the hottest opcode there is; without them
+    ; profile.py charges every builtin's time to its caller.  systrace_c_callable
+    ; answers 0 for everything that is not a C function, which includes every
+    ; Python call, so the second branch is free too.
+    extern sys_profilefunc
+    cmp qword [rel sys_profilefunc], 0
+    jne .call_profiled
+.call_unprofiled:
     mov rdi, [rbp - CL_CALLABLE]           ; callable
     mov rsi, [rbp - CL_SAVED_RSP]          ; args_ptr
     mov rdx, [rbp - CL_TOTAL]              ; total nargs
     mov rax, [rbp - CL_TPCALL]             ; tp_call
     call rax
     mov [rbp - CL_RETVAL], rax             ; the Value tp_call returned
+    jmp .cleanup
+
+.call_profiled:
+    mov rdi, [rbp - CL_CALLABLE]
+    extern systrace_c_callable
+    call systrace_c_callable
+    mov [rbp - CL_CFUNC], rax
+    test rax, rax
+    jz .call_unprofiled
+    mov rdi, rax
+    xor esi, esi                            ; c_call
+    extern systrace_c_event
+    call systrace_c_event
+
+    mov rdi, [rbp - CL_CALLABLE]
+    mov rsi, [rbp - CL_SAVED_RSP]
+    mov rdx, [rbp - CL_TOTAL]
+    mov rax, [rbp - CL_TPCALL]
+    call rax
+    mov [rbp - CL_RETVAL], rax
+
+    mov rdi, [rbp - CL_CFUNC]
+    mov esi, 1                              ; c_return
+    test rax, rax
+    jnz .call_prof_done
+    mov esi, 2                              ; c_exception: a NULL Value
+.call_prof_done:
+    call systrace_c_event
     jmp .cleanup
 
 .cleanup:

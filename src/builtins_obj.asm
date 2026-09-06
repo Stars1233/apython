@@ -2162,11 +2162,20 @@ DEF_FUNC builtin_input_fn, INP_FRAME
     cmp rsi, 1
     jne .inp_error
 
-    ; Print prompt to stdout
     mov rax, [rdi]          ; args[0] = prompt
     V_TEST_PTR rax, rcx
     ja .inp_type_error
-    ; Write prompt string data
+    ; The prompt has to appear where a print() around it would.  Writing it
+    ; straight to fd 1 put it AHEAD of everything still in stdout's buffer,
+    ; so a pdb session's prompts all arrived before the output they were
+    ; prompting for.  CPython writes it through sys.stdout and flushes; this
+    ; flushes first and then writes, which comes to the same order.
+    push rax
+    sub rsp, 8
+    extern fileobj_flush_std
+    call fileobj_flush_std
+    add rsp, 8
+    pop rax
     mov rsi, rax
     add rsi, PyStrObject.data  ; buf ptr
     mov rdx, [rax + PyStrObject.ob_size]  ; len
@@ -2174,40 +2183,49 @@ DEF_FUNC builtin_input_fn, INP_FRAME
     call sys_write
 
 .inp_no_prompt:
-    ; Read line from stdin into stack buffer
-    lea rsi, [rbp - INP_FRAME]  ; buffer
-    mov edx, INP_BUF_SIZE - 1
-    xor edi, edi            ; stdin (fd=0)
+    ; ONE LINE, not one bufferful.  A single read of 4095 bytes swallowed the
+    ; whole pipe: `input()` twice over "A\nB\n" answered "A\nB" and then "",
+    ; because the second call found EOF.  A byte at a time is a syscall per
+    ; character, which is the price of not owning a stdin buffer; input() is
+    ; not on any hot path.
+    xor r8d, r8d                ; bytes so far
+.inp_getc:
+    cmp r8, INP_BUF_SIZE - 1
+    jae .inp_have_line
+    push r8
+    sub rsp, 8
+    lea rsi, [rbp - INP_FRAME]
+    add rsi, r8
+    mov edx, 1
+    xor edi, edi                ; stdin
     call sys_read
-    ; rax = bytes read (or negative on error)
+    add rsp, 8
+    pop r8
     test rax, rax
-    jle .inp_empty
+    jle .inp_eof_or_line        ; 0 = EOF, negative = error
+    lea rcx, [rbp - INP_FRAME]
+    cmp byte [rcx + r8], 10     ; '\n' ends the line and is not kept
+    je .inp_have_line
+    inc r8
+    jmp .inp_getc
 
-    ; Strip trailing newline
+.inp_eof_or_line:
+    ; EOF with nothing read at all is CPython's EOFError; EOF after some
+    ; characters is a final line with no newline, which is not an error.
+    test r8, r8
+    jz .inp_eof
+
+.inp_have_line:
     lea rdi, [rbp - INP_FRAME]
-    mov rcx, rax
-    dec rcx
-    cmp byte [rdi + rcx], 10  ; '\n'
-    jne .inp_no_strip
-    dec rax                  ; exclude newline
-.inp_no_strip:
-    ; Null-terminate
-    mov byte [rdi + rax], 0
-
-    ; Create string from buffer
-    ; rdi already points to buffer
+    mov byte [rdi + r8], 0
     call str_from_cstr
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.inp_empty:
-    ; EOF or error: return empty string
-    CSTRING rdi, ""
-    call str_from_cstr
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
+.inp_eof:
+    extern exc_EOFError_type
+    RAISE exc_EOFError_type, "EOF when reading a line"
 
 .inp_error:
     RAISE exc_TypeError_type, "input() takes at most 1 argument"

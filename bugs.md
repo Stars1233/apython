@@ -148,6 +148,27 @@ reasoning that chose them and what changing one would cost.
   a `load_ic.asm` of their own.  They deopt by rewriting an opcode byte and
   re-dispatching, so they call nothing file-local.
 
+- **The compiler attributes a loop's back edge to the loop header, and
+  CPython attributes it to the body.**  For
+
+      for i in range(n):
+          total += i
+
+  CPython gives `JUMP_BACKWARD` the line of `total += i` and `END_FOR` the
+  line of the `for`; this gives both the `for`.  Nothing could see it until
+  `sys.settrace` arrived -- now a traced loop reports one extra `'line'` event
+  per iteration, naming the `for` line twice.  `tests/test_settrace.py` is the
+  one file in `tests/` that `make check-source` cannot match, and this is why;
+  it matches exactly from a CPython `.pyc`, so the tracing rule itself is
+  right.  A `try` block's line attribution differs in the same test for what
+  looks like the same reason.
+
+  The fix wants the line of the last instruction actually EMITTED, and
+  `CompUnit` tracks only `curline`, the line the emitters are currently
+  positioned at -- which `cg_stmt` has already restored to the `for`
+  statement's by the time the back edge is emitted.  A `.lastline` field
+  written by `cg_emit` is the shape; `.pad5` is there to take it.
+
 - **`int / int` double-rounds when either operand is wider than a double.**
   `(10**30) / 7` answers `1.4285714285714283e+29` where CPython answers
   `1.4285714285714285e+29`, and `1 / 10**30` is out by an ulp the same way.

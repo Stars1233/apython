@@ -940,14 +940,17 @@ DEF_FUNC compile_source, CS_FRAME
     jz .failed
 
     ; RESUME must be the first instruction of every code object: the frame
-    ; setup, the eval breaker and the tracing hook all key off it.  It carries
-    ; no source position, hence IF_NOLINE.
+    ; setup, the eval breaker and the tracing hook all key off it.  A module's
+    ; carries line ZERO, which is what CPython gives it -- co_lines() on
+    ; `x=1` answers (0, 2, 0) -- and which is not the same as no location at
+    ; all.  A tracer seeds itself from the frame's line at the 'call' event,
+    ; so a RESUME claiming line 1 swallowed the module's first real line.
     mov rdi, r12
     mov esi, OP_RESUME
     xor edx, edx
     xor ecx, ecx
     call cg_emit
-    or byte [rax + Instr.flags], IF_NOLINE
+    or byte [rax + Instr.flags], IF_LINE0
 
     cmp qword [rbp - CS_MODE], CMODE_EVAL
     je .gen_eval

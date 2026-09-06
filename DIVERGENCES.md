@@ -116,6 +116,23 @@ the reasoning rather than from scratch.
   nothing to undo, which is exactly what a program calling the pair in
   sequence would see either way.
 
+## `f_trace_opcodes` works, and CPython 3.12's does not
+
+`sys.settrace` plus `frame.f_trace_opcodes = True` delivers an `'opcode'`
+event per instruction here.  CPython 3.12 accepts the assignment and then
+never delivers one: PEP 669 moved instrumentation under the legacy hook and
+the opcode event did not come with it.  3.11 delivered them and 3.13 does
+again, so this matches Python either side of 3.12 rather than 3.12 itself.
+
+Costing nothing was the deciding argument.  The dispatch thunk already runs at
+every instruction while tracing is on, so the event is one more test in a
+function that is already there -- where CPython needs a separate interpreter
+state flag and thirteen `INSTRUMENTED_*` opcodes.  Refusing to deliver it
+would have been extra code to reproduce a regression.
+
+`tests/test_settrace.py` compares every other event against CPython and
+deliberately filters `'opcode'` out of the one case that asks for it.
+
 ## Interpreter structure
 
 - **C code here cannot catch a Python exception.**  `raise_exception`

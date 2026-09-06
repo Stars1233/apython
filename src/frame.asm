@@ -232,6 +232,23 @@ DEF_FUNC frame_free, 8            ; 3 pushes, so rsp is 16-aligned
     push r13
 
     mov rbx, rdi            ; rbx = frame
+
+    ; Anything looking at this frame has to stop looking before the pool takes
+    ; the memory back.  frameobj_detach copies out the line, the offset and
+    ; the fast locals -- everything that stops being readable -- and drops
+    ; both borrowed pointers.
+    ;
+    ; BEFORE the localsplus walk below, not after: the copy INCREFs each
+    ; local, and the walk has already released them by then.  Detaching last
+    ; resurrected freed objects into the snapshot's f_locals dict, and the
+    ; crash landed in the collector rather than here.
+    cmp qword [rbx + PyFrame.frame_obj], 0
+    je .no_frame_obj
+    mov rdi, rbx
+    extern frameobj_detach
+    call frameobj_detach
+.no_frame_obj:
+
     mov r12d, [rbx + PyFrame.nlocalsplus]  ; r12d = nlocalsplus
     xor r13d, r13d          ; r13d = loop index
     ; Iterate through localsplus entries
@@ -272,17 +289,6 @@ DEF_FUNC frame_free, 8            ; 3 pushes, so rsp is 16-aligned
     jmp .stack_loop
 
 .free_frame:
-    ; Anything looking at this frame has to stop looking before the pool takes
-    ; the memory back.  frameobj_detach copies out the line, the offset and
-    ; the fast locals -- everything that stops being readable -- and drops
-    ; both borrowed pointers.
-    cmp qword [rbx + PyFrame.frame_obj], 0
-    je .no_frame_obj
-    mov rdi, rbx
-    extern frameobj_detach
-    call frameobj_detach
-.no_frame_obj:
-
     ; A generator abandoned inside an except block still holds the exception
     ; it was handling, swapped out of the global by its last suspension.
     mov rdi, [rbx + PyFrame.exc_state]

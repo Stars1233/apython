@@ -413,6 +413,10 @@ IF_JREL_FWD  equ 0x02   ; delta = target - (offset + size)
 IF_JREL_BACK equ 0x04   ; delta = (offset + size) - target
 IF_NOFALL    equ 0x08   ; control does not reach the next instruction
 IF_NOLINE    equ 0x10   ; emit "no location" in the line table
+IF_LINE0     equ 0x20   ; the location is line ZERO, which is not the same as
+                        ; no location: CPython gives a module's leading RESUME
+                        ; line 0, and `co_lines()` says so.  Instr.line cannot
+                        ; carry it, because 0 there means "unset"
 
 ;; ===========================================================================
 ;; Opcode metadata.  One table drives four things: CACHE padding, instruction
