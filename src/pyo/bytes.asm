@@ -1038,6 +1038,26 @@ DEF_FUNC_BARE bytes_utf8_check
 .buc_loop:
     cmp rcx, rsi
     jge .buc_valid
+    ; ASCII runs, eight bytes at a time.  Every byte below 0x80 is a valid
+    ; one-byte character with nothing to check, and real input is mostly or
+    ; entirely such bytes -- this validator was 70% of a decode.  The moment a
+    ; high bit turns up the word is abandoned and the byte ladder below
+    ; resumes at the same index, so nothing about the multi-byte cases moves.
+    mov r11, 0x8080808080808080
+.buc_ascii_word:
+    lea r8, [rcx + 8]
+    cmp r8, rsi
+    ja .buc_ascii_done
+    mov r9, [rdi + rcx]
+    test r9, r11
+    jnz .buc_ascii_done
+    mov rcx, r8
+    cmp rcx, rsi
+    jl .buc_ascii_word
+    jmp .buc_valid
+.buc_ascii_done:
+    cmp rcx, rsi
+    jge .buc_valid
     movzx eax, byte [rdi + rcx]
     cmp al, 0x80
     jb .buc_one                 ; ASCII
