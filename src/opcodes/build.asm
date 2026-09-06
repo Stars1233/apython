@@ -780,14 +780,18 @@ DEF_FUNC_BARE op_unpack_sequence
     ; Stack here: [rsp] = the materialised tuple slot, [rsp+8] = payload,
     ; [rsp+16] = tag.
     push rcx                        ; expected count
-    sub rsp, 24                     ; scratch Value slot, keeps rsp aligned
+    sub rsp, 32                     ; scratch Value slot, and the pad that
+                                    ; makes rsp aligned here: three prologue
+                                    ; pushes plus this one is an ODD number of
+                                    ; slots, and the old comment said 24 kept
+                                    ; it aligned when it left it 8 out
     mov [rsp], rdi
     lea rsi, [rsp]
     extern tuple_type_call
     lea rdi, [rel tuple_type]
     mov edx, 1
     call tuple_type_call            ; raises for a non-iterable
-    add rsp, 24
+    add rsp, 32
     pop rcx                         ; expected count
     test rax, rax
     jz .unpack_iter_raised
@@ -1537,7 +1541,13 @@ DEF_FUNC_BARE op_contains_op
     mov rsi, [rsp + 8]        ; value
     mov rdx, [rsp + CN_LTAG]  ; value tag
     V_PACK rsi, rdx
+    ; Five saved words is an odd number of slots, and rsp is 16-byte aligned
+    ; on entry to a handler.  The pad is local to the call rather than added
+    ; to the prologue, because this handler has a dozen exits and each unwinds
+    ; the saved words itself.
+    sub rsp, 8
     call rax
+    add rsp, 8
     push rax                   ; save result on machine stack
 
     ; DECREF both (tag-aware, +8 for push rax)

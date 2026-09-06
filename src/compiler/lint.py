@@ -646,6 +646,63 @@ def all_asm():
     """Every hand-written .asm in the tree."""
     return sorted(glob.glob('src/*.asm') + glob.glob('src/*/*.asm'))
 
+def check_handler_alignment(files):
+    """rsp alignment at `call` inside an opcode handler.
+
+    A handler is reached by `jmp` from the dispatcher, not by `call`, so there
+    is no return address and rsp is 16-byte ALIGNED on entry -- the opposite of
+    an ordinary function.  A call inside one therefore needs an EVEN number of
+    8-byte slots pushed, where an ordinary DEF_FUNC_BARE function needs an odd
+    one.  check_alignment above cannot see this: it counts only prologue
+    pushes, and a handler's pushes are usually mid-body around the call.
+
+    Fourteen calls across twelve handlers were misaligned when this was
+    written, some of them under comments asserting the opposite.  glibc's
+    allocator and strtod do use aligned SSE, and DECREF reaches free().
+
+    Which functions are handlers is read from the dispatch table in eval.asm
+    rather than guessed from the name, because plenty of DEF_FUNC_BARE
+    functions beginning with op_ are called normally.
+
+    The walk is linear and stops trusting its count at the first label, since
+    a label may be reached at more than one depth.  That leaves some calls
+    unchecked rather than reporting them wrongly.
+    """
+    ev = open('src/eval.asm').read()
+    handlers = set(re.findall(r'^\s*dq\s+(op_\w+)', ev, re.M))
+    bad = []
+    for path in files:
+        src = open(path).read()
+        for m in re.finditer(r'^DEF_FUNC_BARE\s+(\w+)[^\n]*$(.*?)^END_FUNC',
+                             src, re.M | re.S):
+            name, body = m.group(1), m.group(2)
+            if name not in handlers:
+                continue
+            depth, known = 0, True
+            for raw in body.splitlines():
+                line = raw.split(';')[0].strip()
+                if not line or line.startswith('%'):
+                    continue
+                if re.match(r'^\.?\w+:$', line):
+                    known = False          # a label: the depth is no longer ours
+                    continue
+                if line.startswith('push '):
+                    depth += 8
+                elif line.startswith('pop '):
+                    depth -= 8
+                elif re.match(r'^sub\s+rsp\s*,\s*\d+$', line):
+                    depth += int(line.rsplit(',', 1)[1])
+                elif re.match(r'^add\s+rsp\s*,\s*\d+$', line):
+                    depth -= int(line.rsplit(',', 1)[1])
+                elif re.match(r'^call\s', line) and known and depth % 16:
+                    bad.append((path, 0,
+                                "rsp misaligned at `%s` in handler %s (%d bytes pushed)"
+                                % (line, name, depth),
+                                "pad with `sub rsp, 8` / `add rsp, 8` around the "
+                                "call, or add a slot to the push list"))
+    return bad
+
+
 def main():
     os.chdir(ROOT)
     if '--record-docblocks' in sys.argv:
@@ -679,7 +736,9 @@ def main():
                 + check_separators(everything) + check_file_size(everything) + check_docblocks(everything)
                 + check_text(everything) + check_guards(headers)
                 + check_type_tables(everything, nfields)
-                + check_alignment(everything) + check_tailjumps(scoped)
+                + check_alignment(everything)
+                + check_handler_alignment(everything)
+                + check_tailjumps(scoped)
                 + check_callee_saved(scoped) + check_saved_writes(scoped))
     for path, n, what, detail in problems:
         where = "%s:%d" % (path, n) if n else path

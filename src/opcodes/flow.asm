@@ -130,17 +130,18 @@ DEF_FUNC_BARE op_pop_jump_if_false
     ; left in rdi -- this used to VPOP_VAL into a (payload, tag) pair and then
     ; V_PACK it straight back so it could make the call, and obj_is_true
     ; unpacked it a third time on the way in.
+    ; A handler is reached by `jmp`, so rsp is 16-byte aligned on entry and a
+    ; call inside one needs an EVEN number of pushed slots.  Two here, and the
+    ; answer is parked in the value's own slot rather than pushed, so both
+    ; calls are made at the same aligned depth.
     push rcx                    ; the jump target
-    sub rsp, 8                  ; pad, so the two calls below sit at the depth
-                                ; this handler has always made them at
     push rdi                    ; the value, for the release below
     call obj_is_true
-    push rax                    ; the answer
-    mov rdi, [rsp + 8]
+    mov rdi, [rsp]              ; the value
+    mov [rsp], rax              ; park the answer where it was
     DECREF_V rdi, rsi
-    pop rax
-    add rsp, 16
-    pop rcx
+    pop rax                     ; the answer
+    pop rcx                     ; the jump target
     test eax, eax
     jz .pjif_jump               ; falsy: take the branch
     DISPATCH
@@ -177,17 +178,18 @@ DEF_FUNC_BARE op_pop_jump_if_true
     ; left in rdi -- this used to VPOP_VAL into a (payload, tag) pair and then
     ; V_PACK it straight back so it could make the call, and obj_is_true
     ; unpacked it a third time on the way in.
+    ; A handler is reached by `jmp`, so rsp is 16-byte aligned on entry and a
+    ; call inside one needs an EVEN number of pushed slots.  Two here, and the
+    ; answer is parked in the value's own slot rather than pushed, so both
+    ; calls are made at the same aligned depth.
     push rcx                    ; the jump target
-    sub rsp, 8                  ; pad, so the two calls below sit at the depth
-                                ; this handler has always made them at
     push rdi                    ; the value, for the release below
     call obj_is_true
-    push rax                    ; the answer
-    mov rdi, [rsp + 8]
+    mov rdi, [rsp]              ; the value
+    mov [rsp], rax              ; park the answer where it was
     DECREF_V rdi, rsi
-    pop rax
-    add rsp, 16
-    pop rcx
+    pop rax                     ; the answer
+    pop rcx                     ; the jump target
     test eax, eax
     jnz .pjit_jump              ; truthy: take the branch
     DISPATCH

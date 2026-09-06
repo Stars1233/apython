@@ -111,6 +111,8 @@ DEF_FUNC_BARE op_pop_except
     dec dword [r12 + PyFrame.exc_depth]
 
     ; XDECREF old handled_exception
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rax
     mov rdi, [rel handled_exception]
     test rdi, rdi
@@ -118,6 +120,7 @@ DEF_FUNC_BARE op_pop_except
     call obj_decref
 .no_old:
     pop rax
+    add rsp, 8
 
     ; Set restored exception as handled (or NULL if None)
     lea rdx, [rel none_singleton]
@@ -142,6 +145,8 @@ DEF_FUNC_BARE op_check_exc_match
     VPEEK rdi                ; rdi = exception (don't pop)
 
     ; Save type for DECREF
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rsi
 
     ; Call exc_isinstance(exc, type)
@@ -149,8 +154,8 @@ DEF_FUNC_BARE op_check_exc_match
     ; eax = 0 or 1
 
     ; DECREF the type
-    push rax
-    mov rdi, [rsp + 8]
+    mov rdi, [rsp]             ; the type
+    mov [rsp], rax             ; park the answer in its slot
     call obj_decref
     pop rax
     add rsp, 8

@@ -2473,15 +2473,17 @@ DEF_FUNC_BARE op_unary_not
     ; Anything else.  obj_is_true takes a Value, which is what VPOP left in
     ; rdi -- this used to unpack into a (payload, tag) pair and V_PACK it
     ; straight back to make the call.
-    sub rsp, 8                  ; pad, keeping the two calls below at the
-                                ; depth this handler has always made them at
+    ; rsp is 16-byte aligned on entry to a handler -- they are reached by
+    ; `jmp`, not `call` -- so a call inside one needs an EVEN number of pushed
+    ; slots.  Two, with the answer parked in the operand's slot.
+    sub rsp, 8                  ; the second of the two
     push rdi                    ; the operand, for the release below
     call obj_is_true
-    push rax
-    mov rdi, [rsp + 8]
+    mov rdi, [rsp]
+    mov [rsp], rax              ; park the answer where it was
     DECREF_V rdi, rsi
     pop rax
-    add rsp, 16
+    add rsp, 8
 
     ; NOT inverts: truthy pushes False, falsy pushes True.  The explicit jump
     ; is load-bearing -- the two bool arms below release their operand, and

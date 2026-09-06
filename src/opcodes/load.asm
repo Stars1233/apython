@@ -310,6 +310,8 @@ DEF_FUNC_BARE op_load_name
     shl ecx, 3                ; payload array: 8-byte stride
     LOAD_CO_NAMES rsi
     mov rsi, [rsi + rcx]       ; rsi = name (PyStrObject*)
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rsi                   ; save name
 
     ; Check if frame has a locals dict
@@ -341,11 +343,12 @@ DEF_FUNC_BARE op_load_name
 
     ; Not found in any dict - raise NameError with name
     pop rdi                    ; name (PyStrObject*)
+    add rsp, 8                 ; the pad; this does not return
     call raise_name_not_defined
     ; (does not return)
 
 .found:
-    add rsp, 8                 ; discard saved name
+    add rsp, 16                ; discard saved name and the pad
 .found_no_pop:
     ; Each of the three probes above used to V_UNPACK dict_get's answer just
     ; to `test edx, edx` for a miss.  dict_get already returns a bare Value
@@ -2489,18 +2492,24 @@ DEF_FUNC_BARE op_delete_name
     mov rdi, [r12 + PyFrame.locals]
     test rdi, rdi
     jz .dn_globals
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rsi
     extern dict_del_opt
     call dict_del_opt
     pop rsi
+    add rsp, 8
     test eax, eax
     jz .dn_ok                  ; found and deleted
     jmp .dn_error
 .dn_globals:
     mov rdi, [r12 + PyFrame.globals]
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rsi
     call dict_del_opt
     pop rsi
+    add rsp, 8
     test eax, eax
     jnz .dn_error
 .dn_ok:
@@ -2517,10 +2526,13 @@ DEF_FUNC_BARE op_delete_global
     LOAD_CO_NAMES rsi
     mov rsi, [rsi + rcx]      ; name
     mov rdi, [r12 + PyFrame.globals]
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rsi
     extern dict_del_opt
     call dict_del_opt
     pop rsi
+    add rsp, 8
     test eax, eax
     jnz .dg_error
     DISPATCH

@@ -83,19 +83,22 @@ DEF_FUNC_BARE op_get_awaitable
     ; Fall through to call tp_iter
     ; Pop TOS, save it, call tp_iter
     VPOP rdi
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rdi                   ; save for DECREF later
 
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iter]
     call rax                   ; tp_iter(obj) -> rax = iterator ptr (or NULL)
-    push rax                   ; save result
 
-    ; DECREF original
-    mov rdi, [rsp + 8]        ; saved original
+    ; DECREF original.  The result is parked in the original's own slot rather
+    ; than pushed, so both calls are made at the same aligned depth.
+    mov rdi, [rsp]             ; saved original
+    mov [rsp], rax             ; the result takes its place
     call obj_decref
 
     pop rax                    ; restore result
-    add rsp, 8                ; discard saved original
+    add rsp, 8                 ; discard the pad
 
     ; Check for NULL return (tp_iter failed)
     test rax, rax
@@ -139,11 +142,14 @@ DEF_FUNC_BARE op_get_aiter
     ; r15 is the eval loop's scratch and is callee-saved, so it carries the
     ; snapshot across the call.  A NULL result is "no such dunder" or "it
     ; raised", and those are not the same answer.
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rdi
     DUNDER_EXC_SAVE r15
     lea rsi, [rel dunder_aiter]
     call dunder_call_1
     pop rdi
+    add rsp, 8
     test edx, edx
     jnz .gai_by_name
     EXC_RAISED_SINCE r15, rcx, .gai_propagate
@@ -164,16 +170,19 @@ DEF_FUNC_BARE op_get_aiter
     jz .gai_error_noattr
 
     ; Save original for DECREF after call
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rdi
     call rax                   ; tp_iter(obj) -> rax = async iterator (ptr)
-    push rax                   ; save result
 
-    ; DECREF original object
-    mov rdi, [rsp + 8]
+    ; DECREF original object.  The result is parked in the original's own slot
+    ; rather than pushed, so both calls sit at the same aligned depth.
+    mov rdi, [rsp]
+    mov [rsp], rax
     call obj_decref
 
     pop rax                    ; restore result
-    add rsp, 8                ; discard saved original
+    add rsp, 8                 ; discard the pad
 
     ; tp_iter returns a pointer — validate not NULL
     test rax, rax
@@ -258,10 +267,13 @@ DEF_FUNC_BARE op_get_anext
     ; reading the slot alone refused it.  What comes back is an AWAITABLE --
     ; normally the coroutine an `async def __anext__` returns -- and raising
     ; StopAsyncIteration is that coroutine's business, not this handler's.
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rdi
     lea rsi, [rel dunder_anext]
     call dunder_call_1
     pop rdi
+    add rsp, 8
     test edx, edx
     jnz .gan_by_name
     EXC_RAISED_SINCE r15, rcx, .gan_propagate
@@ -480,10 +492,13 @@ DEF_FUNC_BARE op_end_async_for
     je .eaf_stop
 
     ; Check via isinstance (for subclasses)
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rcx                   ; save arg
     mov rsi, rdx
     call exc_isinstance
     pop rcx                    ; restore arg
+    add rsp, 8
     test eax, eax
     jnz .eaf_stop
 
@@ -512,6 +527,8 @@ DEF_FUNC_BARE op_end_async_for
     ; StopAsyncIteration — pop exc and aiter, jump forward
     ; Pop exc
     VPOP_VAL rdi, rsi
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rcx                   ; save arg
     DECREF_VAL rdi, rsi
 
@@ -519,6 +536,7 @@ DEF_FUNC_BARE op_end_async_for
     VPOP rdi
     DECREF_V rdi, rsi
     pop rcx                    ; restore arg
+    add rsp, 8
 
     ; Jump forward by arg instructions (each = 2 bytes)
     shl ecx, 1

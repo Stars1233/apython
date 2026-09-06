@@ -536,7 +536,12 @@ DEF_FUNC_BARE op_get_len
     mov rax, [rax + PySequenceMethods.sq_length]
     test rax, rax
     jz .gl_try_mapping
+    ; One saved word is an odd number of slots, and rsp is 16-byte aligned on
+    ; entry to a handler.  The pad is local to the call because .gl_error_nopop
+    ; is reached before the push and must not unwind it.
+    sub rsp, 8
     call rax
+    add rsp, 8
     jmp .gl_got_len
 
 .gl_try_mapping:
@@ -549,7 +554,9 @@ DEF_FUNC_BARE op_get_len
     mov rax, [rax + PyMappingMethods.mp_length]
     test rax, rax
     jz .gl_error
+    sub rsp, 8                  ; the same pad, for the same reason
     call rax
+    add rsp, 8
 
 .gl_got_len:
     pop rdi                     ; discard saved obj
@@ -806,12 +813,15 @@ DEF_FUNC_BARE op_match_mapping
     ; asks a type flag only real mappings carry; the nearest thing available is
     ; dict and its subclasses, so anything else that is subscriptable is
     ; rejected -- the same shape as MATCH_SEQUENCE excluding dict on its side.
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
+                               ; handler, so a call needs an even push list
     push rdi
     mov rdi, rax
     lea rsi, [rel dict_type]
     extern type_is_subtype
     call type_is_subtype
     pop rdi
+    add rsp, 8
     test eax, eax
     jz .mm_false
 .mm_true:
