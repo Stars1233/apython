@@ -235,6 +235,7 @@ test_gen_return
 test_getattr_descriptors
 test_getattr_generic_order
 test_getattribute_hook_flag
+test_getattribute_with_data_descr
 test_getattr_immediate
 test_getattr_raises
 test_getset_descriptors

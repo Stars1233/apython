@@ -337,13 +337,21 @@ DEF_FUNC type_refresh_attr_flags
     je .trg_clear
 .trg_set:
     or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN
-    jmp .trg_children
+    jmp .trg_data_descr
 .trg_clear:
     mov rax, TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN
     not rax
     and [rbx + PyTypeObject.tp_flags], rax
 
+.trg_data_descr:
     ; --- and the data-descriptor bit ---
+    ; Reached whichever way the question above was answered.  It used to be
+    ; reached only on the `clear` path, so a class that overrode
+    ; __getattribute__ never had this bit computed at all -- and the two are
+    ; independent: __getattribute__ has nothing to do with __setattr__, and
+    ; op_store_attr consults this bit ALONE to decide whether a store needs to
+    ; look for a property.  A class with both answered `c.p = 5` by putting
+    ; `p` straight into the instance dict, so the setter never ran.
     ; The MRO's dicts, scanned for anything a data descriptor could be.  Cold,
     ; and the answer saves the hot path an MRO walk per attribute access.
     mov rax, TYPE_FLAG_MRO_HAS_DATA_DESCR

@@ -116,6 +116,18 @@ reasoning that chose them and what changing one would cost.
   DECLINES hands over to `obj_richcompare_bool`.  What is missing is the case
   where there is no slot and no dunder to decline in the first place.
 
+- **A read-only property's AttributeError has CPython 3.10's wording.**
+  `Plain().r = 2` says `can't set attribute` where CPython 3.12 says
+  `property 'r' of 'Plain' object has no setter`, and the deleter case is the
+  same shape.  Found while fixing the data-descriptor flag; unrelated to it,
+  and it happens on a plain class too.
+
+  CPython's message needs the property's own name, which it learns through
+  `__set_name__` and keeps in a `prop_name` field.  `PyPropertyObject` has no
+  such field and property has no `__set_name__`, so this is not a wording
+  change -- it is that plus the object's type name at the raise site.
+  `lib/types.py` raises the old wording by hand in one place too.
+
 - **`int / int` double-rounds when either operand is wider than a double.**
   `(10**30) / 7` answers `1.4285714285714283e+29` where CPython answers
   `1.4285714285714285e+29`, and `1 / 10**30` is out by an ulp the same way.
