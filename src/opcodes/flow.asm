@@ -58,7 +58,10 @@ FV_FRAME   equ 48           ; + 0 pushes = 48
 ;; Stack layout constants for op_build_string (DEF_FUNC, 16 bytes).
 BS_COUNT   equ 8
 BS_ACCUM   equ 16
-BS_FRAME   equ 16           ; + 0 pushes = 16
+BS_BASE    equ 24           ; where the fragments start on the value stack
+BS_BYTES   equ 32           ; their total length in bytes
+BS_CP      equ 40           ; and in code points
+BS_FRAME   equ 48           ; + 2 pushes = 64, 16-byte aligned
 
 ;; Stack layout constants for op_send (DEF_FUNC, 48 bytes).
 SND_ARG    equ 8
@@ -498,12 +501,23 @@ DEF_FUNC op_format_value, FV_FRAME
 END_FUNC op_format_value
 
 ;; ============================================================================
-;; op_build_string - Concatenate N strings from the stack
+;; op_build_string(ecx = fragment count) -> nothing; pushes the joined str
 ;;
-;; ecx = number of string fragments
-;; Pops ecx strings, concatenates in order, pushes result.
+;; This used to call str_concat once per fragment and DECREF the intermediate,
+;; which is quadratic: an N-fragment f-string did N-1 allocations and copied a
+;; growing prefix every time.  f"{a}-{b}-{c}-{d}-{e}-{a}-{b}-{c}-{d}-{e}" is
+;; nineteen fragments, so nineteen allocations and about ten copies of the
+;; answer.  CPython builds it in one pass.
+;;
+;; Now: one pass to add up the lengths, one allocation, one memcpy per
+;; fragment.  Both PyStrObject lengths are summed -- ob_size in bytes and
+;; ob_length in code points -- because concatenating whole strings
+;; concatenates their code points too, which is what str_concat relied on and
+;; what str_set_length would otherwise have to recount.
 ;; ============================================================================
 DEF_FUNC op_build_string, BS_FRAME
+    push rbx
+    push r12
 
     mov [rbp - BS_COUNT], rcx  ; count
 
@@ -512,52 +526,85 @@ DEF_FUNC op_build_string, BS_FRAME
     cmp ecx, 1
     je .bs_one
 
-    ; General case: iterate and concatenate
-    ; Pop all items, keeping base pointers
+    ; Pop every fragment at once; r13 is then the base of the run.
     mov rdi, rcx
     shl rdi, 3                 ; count * 8 bytes/slot
-    sub r13, rdi               ; pop all items at once (r13 = base)
+    sub r13, rdi
+    mov [rbp - BS_BASE], r13
 
-    ; Start with first string
-    mov rax, [r13]             ; first fragment
+    ; --- pass one: total the two lengths, and check the types -------------
+    xor r11, r11               ; bytes
+    xor r10, r10               ; code points
+    xor rcx, rcx
+.bs_measure:
+    cmp rcx, [rbp - BS_COUNT]
+    jge .bs_measured
+    mov rax, [r13 + rcx*8]
     V_TEST_PTR rax, r9
     ja .bs_type_error
-    INCREF rax                 ; heap str needs INCREF
-    mov [rbp - BS_ACCUM], rax  ; accumulator (heap)
-
-    ; Concatenate remaining
-    mov rcx, 1                 ; start from index 1
-.bs_loop:
-    cmp rcx, [rbp - BS_COUNT]
-    jge .bs_decref
-    ; Get next fragment — must be heap str
-    mov rax, rcx
-    mov rsi, [r13 + rax*8]     ; fragment
-    V_TEST_PTR rsi, rdx
-    ja .bs_type_error
-    push rcx
-    extern str_concat
-    mov rdi, [rbp - BS_ACCUM] ; accumulator
-    mov ecx, TAG_PTR           ; right_tag (heap str guaranteed)
-    call str_concat
-    ; DECREF old accumulator
-    push rax                   ; save new result
-    mov rdi, [rbp - BS_ACCUM]
-    DECREF_REG rdi
-    pop rax
-    mov [rbp - BS_ACCUM], rax  ; new accumulator
-    pop rcx
+    mov r9, [rax + PyObject.ob_type]
+    REQUIRE_STR_TYPE r9, rbx, .bs_type_error
+    add r11, [rax + PyStrObject.ob_size]
+    add r10, [rax + PyStrObject.ob_length]
     inc rcx
-    jmp .bs_loop
+    jmp .bs_measure
+.bs_measured:
+    mov [rbp - BS_BYTES], r11
+    mov [rbp - BS_CP], r10
 
-.bs_decref:
-    ; DECREF all original fragments
-    xor ecx, ecx
+    ; --- one allocation ----------------------------------------------------
+    ; The +8 is the NUL padding every str carries, so ap_strcmp may read the
+    ; terminator eight bytes at a time.
+    lea rdi, [r11 + PyStrObject.data + 8]
+    extern ap_malloc
+    call ap_malloc
+    mov rbx, rax               ; rbx = the answer, across the copies below
+
+    mov qword [rbx + PyObject.ob_refcnt], 1
+    extern str_type
+    lea rcx, [rel str_type]
+    mov [rbx + PyObject.ob_type], rcx
+    mov rax, [rbp - BS_BYTES]
+    mov [rbx + PyStrObject.ob_size], rax
+    mov rax, [rbp - BS_CP]
+    mov [rbx + PyStrObject.ob_length], rax
+    mov qword [rbx + PyStrObject.ob_hash], -1
+
+    ; --- pass two: one memcpy per fragment ---------------------------------
+    xor r12, r12               ; the write offset
+    xor rcx, rcx
+.bs_copy:
+    cmp rcx, [rbp - BS_COUNT]
+    jge .bs_copied
+    mov r9, [rbp - BS_BASE]
+    mov rax, [r9 + rcx*8]
+    mov rdx, [rax + PyStrObject.ob_size]
+    test rdx, rdx
+    jz .bs_copy_next           ; ap_memcpy of nothing, skipped
+    push rcx
+    push rdx
+    lea rdi, [rbx + PyStrObject.data + r12]
+    lea rsi, [rax + PyStrObject.data]
+    extern ap_memcpy
+    call ap_memcpy
+    pop rdx
+    pop rcx
+    add r12, rdx
+.bs_copy_next:
+    inc rcx
+    jmp .bs_copy
+.bs_copied:
+    ; The eight-byte NUL pad ap_strcmp reads through.
+    mov rax, [rbp - BS_BYTES]
+    mov qword [rbx + PyStrObject.data + rax], 0
+
+    ; --- release the fragments --------------------------------------------
+    xor rcx, rcx
 .bs_decref_loop:
     cmp rcx, [rbp - BS_COUNT]
     jge .bs_push
-    mov rax, rcx
-    mov rdi, [r13 + rax*8]
+    mov r9, [rbp - BS_BASE]
+    mov rdi, [r9 + rcx*8]
     push rcx
     DECREF_V rdi, rsi
     pop rcx
@@ -565,12 +612,16 @@ DEF_FUNC op_build_string, BS_FRAME
     jmp .bs_decref_loop
 
 .bs_push:
-    mov rax, [rbp - BS_ACCUM]
+    mov rax, rbx
     VPUSH_PTR rax
+    pop r12
+    pop rbx
     leave
     DISPATCH
 
 .bs_type_error:
+    pop r12
+    pop rbx
     RAISE exc_TypeError_type, "build_string expects str"
 
 .bs_zero:
@@ -579,11 +630,15 @@ DEF_FUNC op_build_string, BS_FRAME
     CSTRING rdi, ""
     call str_from_cstr
     VPUSH_VAL rax, rdx
+    pop r12
+    pop rbx
     leave
     DISPATCH
 
 .bs_one:
     ; Shortcut: 1 fragment, just leave it on stack
+    pop r12
+    pop rbx
     leave
     DISPATCH
 END_FUNC op_build_string

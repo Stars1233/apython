@@ -211,6 +211,7 @@ test_frame_lineno
 test_frames_and_time
 test_frozenset_descriptors
 test_frozenset
+test_fstring_build
 test_fstrings
 test_func_attrs
 test_func_dunder_get
