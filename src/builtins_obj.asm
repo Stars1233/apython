@@ -809,6 +809,25 @@ DEF_FUNC builtin_sum, SM_FRAME
 
     DUNDER_EXC_SAVE [rbp - SM_EXC]
 
+    ; A float `start` means the very FIRST addition is already one the
+    ; compensation has to cover.  Entering the compensated loop only from an
+    ; add's RESULT left that first add naked, and it is the one that loses the
+    ; digits: sum([1.0, -1e100], 1e100) dropped the 1.0 inside the
+    ; 1e100 + 1.0 that produced the seed, and answered 0.0 where CPython says
+    ; 1.0.  CPython seeds f_result from `result` before its loop for the same
+    ; reason.
+    ;
+    ; A float is an immediate here, so SM_ACC owns nothing and there is no
+    ; reference to hand over; a float SUBCLASS is a pointer, fails this test,
+    ; and correctly keeps the generic protocol.
+    V_TEST_F64_M [rbp - SM_ACC], rcx
+    ja .sum_loop
+    mov rax, [rbp - SM_ACC]
+    V_TO_F64 rax
+    mov [rbp - SM_FSUM], rax
+    mov qword [rbp - SM_COMP], 0        ; c = +0.0
+    mov qword [rbp - SM_PHASE], 1
+
 .sum_loop:
     mov rdi, rbx
     call r12

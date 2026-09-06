@@ -91,3 +91,28 @@ for k in range(-40, 41, 4):
 print(len(total))
 for v in total:
     print(repr(v))
+
+# A float `start`.  The compensated loop used to be entered only from the
+# RESULT of an addition, so the first add -- the one that consumes `start` --
+# ran uncompensated, and it is exactly the one that loses the digits.
+print(sum([1.0, -1e100], 1e100))
+print(sum([-1e100, 1.0], 1e100))
+print(sum([1e100, 1.0, -1e100], 0.0))
+print(sum([1.0, 1e100, -1e100], 0.0))
+print(sum([1e100, -1e100], 1.0))
+print(sum([], 1.5), sum([], 0.0), repr(sum([], -0.0)))
+print(sum([0.1] * 10, 0.0), sum([0.1] * 10))
+print(sum([1, 2, 3], 0.5), sum([2**60, 1.0], 0.5))
+# An int start that only becomes a float part-way is the path that already
+# worked, and has to keep working.
+print(sum([1e100, 1.0, -1e100], 0))
+print(sum([1, 1e100, 1.0, -1e100]))
+# Infinities and NaN are not compensated away.
+print(sum([float("inf"), 1.0], 0.0), sum([1.0], float("inf")))
+n = sum([float("nan"), 1.0], 0.0)
+print(n != n)
+# A float subclass start is a pointer, not an immediate: it must keep the
+# generic protocol and still be right.
+class F(float):
+    pass
+print(sum([1.0, -1e100], F(1e100)), type(sum([1.0], F(2.0))).__name__)
