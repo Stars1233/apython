@@ -58,3 +58,33 @@ print(round(F(2.5)), round(F(2.675), 2))
 
 print(sorted(set(["is_integer", "as_integer_ratio", "__round__", "__ceil__",
                   "__floor__", "__getnewargs__", "__trunc__"]) - set(dir(float))))
+
+
+# --- float.__getformat__ ------------------------------------------------------
+#
+# CPython declares it METH_O|METH_CLASS and documents it as being for its own
+# test suite -- which is exactly what wanted it.  test.support reads it at
+# import time, and every one of CPython's 406 test modules imports
+# test.support, so this one missing method kept the whole suite out of reach.
+
+def _gf(label, fn):
+    try:
+        print("%-40s %r" % (label, fn()))
+    except BaseException as e:
+        print("%-40s !! %s: %s" % (label, type(e).__name__, str(e)[:60]))
+
+
+_gf("float.__getformat__('double')", lambda: float.__getformat__("double"))
+_gf("float.__getformat__('float')", lambda: float.__getformat__("float"))
+_gf("(1.5).__getformat__('double')", lambda: (1.5).__getformat__("double"))
+_gf("startswith IEEE", lambda: float.__getformat__("double").startswith("IEEE"))
+_gf("bad name", lambda: float.__getformat__("quad"))
+_gf("empty name", lambda: float.__getformat__(""))
+_gf("int argument", lambda: float.__getformat__(1))
+_gf("None argument", lambda: float.__getformat__(None))
+_gf("float argument", lambda: float.__getformat__(1.5))
+_gf("no argument", lambda: float.__getformat__())
+_gf("two arguments", lambda: float.__getformat__("double", "float"))
+_gf("str subclass", lambda: float.__getformat__(type("S", (str,), {})("double")))
+_gf("in dir(float)", lambda: "__getformat__" in dir(float))
+_gf("bound off an instance", lambda: (2.5).__getformat__("float"))

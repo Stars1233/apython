@@ -14,6 +14,8 @@ extern float_type
 extern ap_malloc
 extern ap_free
 extern ap_strcmp
+extern str_from_cstr
+extern str_require_str
 extern kw_names_pending
 extern obj_decref
 extern obj_dealloc
@@ -1518,7 +1520,6 @@ DEF_FUNC float_classmethod_fromhex, FFH_FRAME
     ; and every other type came back as "invalid hexadecimal floating-point
     ; string" where CPython refuses the TYPE.
     mov rdi, [rdi + 8]            ; args[1]
-    extern str_require_str
     CSTRING rsi, "bad argument type for built-in operation"
     call str_require_str
     mov rcx, rax
@@ -1711,6 +1712,59 @@ DEF_FUNC float_classmethod_fromhex, FFH_FRAME
 .ffh_parse_error:
     RAISE exc_ValueError_type, "invalid hexadecimal floating-point string"
 END_FUNC float_classmethod_fromhex
+
+;; ============================================================================
+;; float_classmethod_getformat(args, nargs) -> str
+;; float.__getformat__('double') and ('float').
+;;
+;; CPython declares it METH_O|METH_CLASS, so args[0] is the class and args[1]
+;; the type name.  Both answer the same thing here: x86-64 doubles and floats
+;; are IEEE 754 and the machine is little-endian.  CPython 3.12 documents it
+;; as being for its own test suite, which is exactly what wanted it -- one
+;; line of test.support reads it, and every one of CPython's 406 test modules
+;; imports test.support.
+;; ============================================================================
+DEF_FUNC float_classmethod_getformat, 8   ; 1 pushes, so rsp is 16-aligned
+    push rbx
+
+    mov rdi, [rdi + 8]              ; args[1]
+    ; CPython's _PyArg_BadArgument names None as "None" and every other type by
+    ; tp_name, so the \x01 composer -- which always answers tp_name, and is
+    ; right to, since "'NoneType' object is not callable" is CPython's own
+    ; wording elsewhere -- is one case short here.
+    extern none_singleton
+    lea rax, [rel none_singleton]
+    cmp rdi, rax
+    je .fgf_none
+    CSTRING rsi, `__getformat__() argument must be str, not \x01`
+    call str_require_str
+    lea rbx, [rax + PyStrObject.data]
+
+    mov rdi, rbx
+    CSTRING rsi, "double"
+    call ap_strcmp
+    test eax, eax
+    jz .fgf_ieee
+
+    mov rdi, rbx
+    CSTRING rsi, "float"
+    call ap_strcmp
+    test eax, eax
+    jnz .fgf_bad
+
+.fgf_ieee:
+    CSTRING rdi, "IEEE, little-endian"
+    call str_from_cstr
+    pop rbx
+    leave
+    ret
+
+.fgf_none:
+    RAISE exc_TypeError_type, "__getformat__() argument must be str, not None"
+
+.fgf_bad:
+    RAISE exc_ValueError_type, "__getformat__() argument 1 must be 'double' or 'float'"
+END_FUNC float_classmethod_getformat
 
 ;; ============================================================================
 ;; complex_method_conjugate(args, nargs) -> complex with the imaginary part
