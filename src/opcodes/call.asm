@@ -42,8 +42,8 @@ CL_IS_METHOD equ 32
 CL_TOTAL     equ 40
 CL_SAVED_RSP equ 48
 CL_TPCALL    equ 56
-CL_RETTAG    equ 64
-CL_CALL_TAG  equ 72
+CL_RETTAG    equ 64            ; spare: the return value is one word now
+CL_CALL_TAG  equ 72            ; spare: the callable is classified in place
 CL_SAVED_R13 equ 80
 CL_FRAME     equ 96         ; + 0 pushes = 96
 
@@ -135,8 +135,6 @@ DEF_FUNC op_call, CL_FRAME
 
     ; === Method call: callable is in the deeper slot ===
     mov [rbp - CL_CALLABLE], rdi               ; callable = func_or_null
-    V_TAG_OF rdx, rdi                          ; callable tag
-    mov [rbp - CL_CALL_TAG], rdx
     mov qword [rbp - CL_IS_METHOD], 1          ; is_method = 1
     jmp .setup_call
 
@@ -148,18 +146,18 @@ DEF_FUNC op_call, CL_FRAME
     lea rdi, [r13 + rax*8]
     mov rdi, [rdi]
     mov [rbp - CL_CALLABLE], rdi               ; callable = callable_or_self
-    V_TAG_OF rdx, rdi                          ; callable tag
-    mov [rbp - CL_CALL_TAG], rdx
 
 .setup_call:
     ; Get tp_call from the callable's type
     mov rdi, [rbp - CL_CALLABLE]              ; callable
     test rdi, rdi
     jz .not_callable               ; NULL check
-    cmp qword [rbp - CL_CALL_TAG], TAG_SMALLINT
-    je .not_callable               ; SmallInt check
-    cmp qword [rbp - CL_CALL_TAG], TAG_PTR
-    jne .not_callable              ; non-pointer tag (TAG_FLOAT, TAG_NONE, TAG_BOOL)
+    ; V_TAG_OF used to derive the callable's tag here -- the whole six-compare
+    ; classify -- and store it, so that this could compare it against TAG_PTR
+    ; and .not_callable could V_PACK it back into the Value it already was.
+    ; One test answers both questions: NULL and every immediate fail it.
+    V_TEST_PTR rdi, rax
+    ja .not_callable
     mov rax, [rdi + PyObject.ob_type]
     test rax, rax
     jz .not_callable               ; no type (shouldn't happen)
@@ -249,9 +247,7 @@ DEF_FUNC op_call, CL_FRAME
     mov rdx, [rbp - CL_TOTAL]              ; total nargs
     mov rax, [rbp - CL_TPCALL]             ; tp_call
     call rax
-    V_UNPACK rax, rdx           ; tp_call returns a Value
-    mov [rbp - CL_RETVAL], rax             ; save return value
-    mov [rbp - CL_RETTAG], rdx             ; save return tag
+    mov [rbp - CL_RETVAL], rax             ; the Value tp_call returned
     jmp .cleanup
 
 .cleanup:
@@ -269,9 +265,11 @@ DEF_FUNC op_call, CL_FRAME
     test rcx, rcx
     jz .args_done
 .decref_args:
-    VPOP_VAL rdi, rsi
-    mov [rbp - CL_NARGS], rcx     ; save loop counter (DECREF_VAL may call obj_dealloc)
-    DECREF_VAL rdi, rsi
+    ; One classify per argument per call, to feed DECREF_VAL a tag it does not
+    ; need -- the two slots popped just below have always used the Value form.
+    VPOP rdi
+    mov [rbp - CL_NARGS], rcx     ; save loop counter (DECREF_V may call obj_dealloc)
+    DECREF_V rdi, rsi
     mov rcx, [rbp - CL_NARGS]     ; restore loop counter
     dec rcx
     jnz .decref_args
@@ -284,11 +282,13 @@ DEF_FUNC op_call, CL_FRAME
     ; Pop deeper slot (callable for method, NULL for function) and DECREF
     VPOP rdi
     XDECREF_V rdi, rsi
-    ; Check for exception (TAG_NULL return with current_exception set)
-    ; Must check TAG (not payload) — None and SmallInt(0) have payload=0
+    ; Check for exception (a NULL return with current_exception set).  The
+    ; comment here used to say the TAG had to be tested rather than the
+    ; payload, "because None and SmallInt(0) have payload=0".  Neither is true
+    ; of a Value: None is a pointer and integer 0 encodes as V_INT_BIAS, so 0
+    ; is NULL and nothing else.
     mov rax, [rbp - CL_RETVAL]
-    mov rdx, [rbp - CL_RETTAG]
-    test rdx, rdx                    ; TAG_NULL = 0 means error
+    test rax, rax
     jnz .push_result
     extern current_exception
     mov rcx, [rel current_exception]
@@ -296,8 +296,8 @@ DEF_FUNC op_call, CL_FRAME
     jnz .propagate_exc
 
 .push_result:
-    ; Push return value onto value stack (rax, rdx already loaded)
-    VPUSH_VAL rax, rdx
+    ; Push the return Value (rax already loaded)
+    VPUSH rax
 
     ; Skip 3 CACHE entries (6 bytes)
     add rbx, 6
@@ -315,9 +315,7 @@ DEF_FUNC op_call, CL_FRAME
 .not_callable:
     ; CPython names the type: "'int' object is not callable" is what tells a
     ; caller WHICH of its values was not a function.
-    mov rsi, [rbp - CL_CALLABLE]
-    mov rcx, [rbp - CL_CALL_TAG]
-    V_PACK rsi, rcx
+    mov rsi, [rbp - CL_CALLABLE]    ; already a Value
     CSTRING rdi, `'\x01' object is not callable`
     extern raise_type_error_with_name
     jmp raise_type_error_with_name

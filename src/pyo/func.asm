@@ -489,9 +489,11 @@ DEF_FUNC func_call
     ; === Phase 7: Call eval_frame ===
     mov rdi, r12
     call eval_frame
-    V_UNPACK rax, rdx           ; eval_frame returns a Value
-    mov [rsp+16], rax       ; save return value payload
-    mov [rsp+24], rdx       ; save return value tag
+    ; eval_frame returns a Value and func_call returns a Value.  This used to
+    ; V_UNPACK it, spill both halves into two frame slots across the frame
+    ; free, reload both, and V_PACK it again -- a full classify and re-encode
+    ; on every Python function call, of a word that was never anything else.
+    mov [rsp+16], rax       ; park the return Value across frame_free
 
     ; Free the frame (unless generator owns it: instr_ptr != 0)
     cmp qword [r12 + PyFrame.instr_ptr], 0
@@ -500,8 +502,7 @@ DEF_FUNC func_call
     call frame_free
 .skip_frame_free:
 
-    mov rax, [rsp+16]       ; return value payload
-    mov rdx, [rsp+24]       ; return value tag
+    mov rax, [rsp+16]       ; the return Value
 
     add rsp, 56
     pop r15
@@ -510,7 +511,6 @@ DEF_FUNC func_call
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; tp_call returns one Value
     ret
 END_FUNC func_call
 
