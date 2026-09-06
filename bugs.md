@@ -103,6 +103,19 @@ reasoning that chose them and what changing one would cost.
   behind it.  `splitlines` has its own, different set (it takes `\x1c` and
   U+2028 but not `\x1f` or U+00A0) and the same gap.
 
+- **`sorted()` accepts an unorderable element when it falls on the right.**
+  `sorted(["a", None])` answers `['a', None]`; `sorted([None, "a"])` raises
+  the TypeError CPython raises for both.  Same for `[1, None]`.  The merge in
+  `list_method_sort` asks "is right < left" and resolves the comparison from
+  the RIGHT element, and when that resolution finds nothing it takes the left
+  element and carries on instead of failing -- so whether a list of mixed
+  types sorts or raises depends on the order it was already in, which also
+  means it can depend on how far the merge has got.
+
+  The reflected path is already there and already correct: a slot that
+  DECLINES hands over to `obj_richcompare_bool`.  What is missing is the case
+  where there is no slot and no dunder to decline in the first place.
+
 - **`int / int` double-rounds when either operand is wider than a double.**
   `(10**30) / 7` answers `1.4285714285714283e+29` where CPython answers
   `1.4285714285714285e+29`, and `1 / 10**30` is out by an ulp the same way.
