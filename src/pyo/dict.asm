@@ -1035,8 +1035,13 @@ DEF_FUNC dict_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     mov [rax + PyDictIterObject.it_dict], rbx
     mov qword [rax + PyDictIterObject.it_index], 0
     mov qword [rax + PyDictIterObject.it_kind], 0  ; 0 = keys
-    ; Snapshot dk_version for mutation detection
-    mov rcx, [rbx + PyDictObject.dk_version]
+    ; Snapshot the SIZE for mutation detection, as CPython's dictiter does.
+    ; dk_version was the wrong field: dict_set bumps it on every write, the
+    ; update-in-place branch included, so `for k in d: d[k] = f(d[k])` raised
+    ; RuntimeError.  ob_size is sufficient on its own -- a resize only ever
+    ; happens on an insert, and an insert always changes ob_size, so a
+    ; rebuilt entry array cannot slip past a size comparison.
+    mov rcx, [rbx + PyDictObject.ob_size]
     mov [rax + PyDictIterObject.it_version], rcx
 
     ; INCREF the dict
@@ -1066,7 +1071,7 @@ extern exc_RuntimeError_type
 DEF_FUNC_BARE dict_iter_next
     ; Mutation detection: compare saved version with current
     mov rax, [rdi + PyDictIterObject.it_dict]         ; dict
-    mov rcx, [rax + PyDictObject.dk_version]
+    mov rcx, [rax + PyDictObject.ob_size]
     cmp rcx, [rdi + PyDictIterObject.it_version]
     jne .di_mutation_error
 
@@ -1296,8 +1301,8 @@ DEF_FUNC dict_view_iter
 .dvi_named:
     mov [rax + PyObject.ob_type], rdx
 .dvi_kind_done:
-    ; Snapshot dk_version for mutation detection
-    mov rcx, [rdi + PyDictObject.dk_version]
+    ; The SIZE, not the version: see dict_tp_iter.
+    mov rcx, [rdi + PyDictObject.ob_size]
     mov [rax + PyDictIterObject.it_version], rcx
 
     ; INCREF dict
@@ -1908,8 +1913,13 @@ DEF_FUNC dict_reversed
     dec rcx
     mov [rax + PyDictIterObject.it_index], rcx
     mov qword [rax + PyDictIterObject.it_kind], 0  ; 0 = keys
-    ; Snapshot dk_version for mutation detection
-    mov rcx, [rbx + PyDictObject.dk_version]
+    ; Snapshot the SIZE for mutation detection, as CPython's dictiter does.
+    ; dk_version was the wrong field: dict_set bumps it on every write, the
+    ; update-in-place branch included, so `for k in d: d[k] = f(d[k])` raised
+    ; RuntimeError.  ob_size is sufficient on its own -- a resize only ever
+    ; happens on an insert, and an insert always changes ob_size, so a
+    ; rebuilt entry array cannot slip past a size comparison.
+    mov rcx, [rbx + PyDictObject.ob_size]
     mov [rax + PyDictIterObject.it_version], rcx
 
     ; INCREF the dict
@@ -1936,7 +1946,7 @@ END_FUNC dict_reversed
 DEF_FUNC_BARE dict_rev_iter_next
     ; Mutation detection
     mov rax, [rdi + PyDictIterObject.it_dict]
-    mov rcx, [rax + PyDictObject.dk_version]
+    mov rcx, [rax + PyDictObject.ob_size]
     cmp rcx, [rdi + PyDictIterObject.it_version]
     jne .dri_mutation_error
 

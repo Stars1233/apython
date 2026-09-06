@@ -14,6 +14,7 @@ ok bdb
 ok bisect
 ok calendar
 ok cgi
+ok cgitb
 ok chunk
 ok cmd
 ok code
@@ -41,6 +42,7 @@ ok dis
 ok doctest
 ok email
 ok encodings
+ok ensurepip
 ok enum
 ok filecmp
 ok fileinput
@@ -107,6 +109,7 @@ ok pyclbr
 ok py_compile
 ok _pydatetime
 ok _pydecimal
+ok pydoc
 ok pydoc_data
 ok _pyio
 ok _pylong
@@ -175,3 +178,4 @@ ok xml
 ok xmlrpc
 ok zipapp
 ok zipfile
+ok zoneinfo

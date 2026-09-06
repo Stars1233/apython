@@ -434,7 +434,12 @@ struc PyDictIterObject
     .it_dict:    resq 1    ; +16: ptr to dict
     .it_index:   resq 1    ; +24: current entry index
     .it_kind:    resq 1    ; +32: 0=keys, 1=values, 2=items
-    .it_version: resq 1    ; +40: dk_version snapshot for mutation detection
+    .it_version: resq 1    ; +40: the dict's SIZE when iteration began, which
+                           ;      is what "changed size during iteration"
+                           ;      means.  It held dk_version, which dict_set
+                           ;      bumps for a rebind too -- a change that is
+                           ;      not one.  The name is what CPython's
+                           ;      di_used is for.
 endstruc
 
 struc PyDictViewObject
