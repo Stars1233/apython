@@ -45,7 +45,7 @@ CL_TPCALL    equ 56
 CL_RETTAG    equ 64            ; spare: the return value is one word now
 CL_CALL_TAG  equ 72            ; spare: the callable is classified in place
 CL_SAVED_R13 equ 80
-CL_FRAME     equ 96         ; + 0 pushes = 96
+CL_FRAME     equ 104         ; + 0 pushes = 96
 
 ; op_make_function locals (DEF_FUNC op_make_function, MF_FRAME)
 MF_FLAGS   equ 8
@@ -55,7 +55,7 @@ MF_DEFAULTS equ 32
 MF_KWDEFS  equ 40
 MF_CTAG    equ 48
 MF_ANNOS   equ 56
-MF_FRAME   equ 64           ; + 0 pushes = 64
+MF_FRAME   equ 72           ; + 0 pushes = 64
 
 ; op_call_function_ex locals (manual frame, push rbx; push r12; sub rsp, 48)
 CFX_FUNC    equ 32
@@ -75,7 +75,7 @@ WES_FUNC   equ 8
 WES_VAL    equ 24
 WES_RESULT equ 32
 WES_RETTAG equ 40
-WES_FRAME  equ 48           ; + 0 pushes = 48
+WES_FRAME  equ 56           ; + 0 pushes = 48
 
 ;; ============================================================================
 ;; op_call - Call a callable object
@@ -759,7 +759,11 @@ extern method_new
 DEF_FUNC op_before_with
     push rbx
     push r12
-    sub rsp, 32
+    ; 40, not 32: a handler is entered 16-byte ALIGNED, so `push rbp` plus
+    ; these two pushes leave rsp 8 out and the frame is what puts it back.
+    ; The epilogue below is a hand-written `pop rbp` with no `leave`, so this
+    ; and the matching `add rsp` have to move together.
+    sub rsp, 40
 
     ; Pop mgr
     VPOP_VAL rax, rdx
@@ -802,7 +806,10 @@ DEF_FUNC op_before_with
     ; tp_getattr already bound it to the instance.
     mov rdi, r12
     push rax
+    push rax                        ; and a pad: the frame above is odd, so a
+                                    ; lone push here would misalign this call
     call obj_decref
+    pop rax
     pop rax
     VPUSH_PTR rax
     jmp .bw_exit_pushed
@@ -902,7 +909,7 @@ DEF_FUNC op_before_with
     mov rdx, [rbp - BW_RETTAG]
     VPUSH_VAL rax, rdx
 
-    add rsp, 32
+    add rsp, 40
     pop r12
     pop rbx
     pop rbp

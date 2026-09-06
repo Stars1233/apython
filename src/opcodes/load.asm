@@ -65,7 +65,7 @@ LA_TAGTYPE   equ 88   ; the type an immediate resolved to, the walk's origin
 LA_OWNMRO    equ 96   ; the attribute came from the CLASS's own MRO
 LA_FROMMETA  equ 104  ; type_getattr_meta's out-parameter
 LA_FROMINST  equ 112  ; instance_getattr_where's: the INSTANCE dict answered
-LA_FRAME     equ 128        ; + 0 pushes = 128
+LA_FRAME     equ 136        ; + 0 pushes = 128
 
 ; op_load_super_attr frame layout (DEF_FUNC op_load_super_attr, LSA_FRAME)
 LSA_SELF     equ 8
@@ -76,7 +76,7 @@ LSA_ATTR_TAG equ 40
 LSA_ATTR     equ 48
 LSA_BIND     equ 56
 LSA_ORIGIN   equ 64      ; the MRO super() searches: the instance's, not the class's
-LSA_FRAME    equ 80         ; + 0 pushes = 80
+LSA_FRAME    equ 88         ; + 0 pushes = 80
 
 ;; ============================================================================
 ;; op_load_const - Load constant from co_consts[arg]
@@ -2324,20 +2324,20 @@ SA_OTAG   equ 40
 SA_VTAG   equ 48
 SA_EXC    equ 56
 SA_ORIGIN equ 64   ; the type the descriptor walk started from
-SA_FRAME  equ 80            ; + 0 pushes = 80
+SA_FRAME  equ 88            ; + 0 pushes = 80
 
 ; op_delete_attr: rbp-frame (16 bytes)
 DA_NAME   equ 8
 DA_OBJ    equ 16
 DA_EXC    equ 24            ; the exception pending before the deleter ran
-DA_FRAME  equ 32            ; + 0 pushes = 32
+DA_FRAME  equ 40            ; + 0 pushes = 32
 
 ; op_delete_subscr: rbp-frame (32 bytes)
 DS_OBJ    equ 8
 DS_KEY    equ 16
 DS_OTAG   equ 24
 DS_KTAG   equ 32
-DS_FRAME  equ 32            ; + 0 pushes = 32
+DS_FRAME  equ 40            ; + 0 pushes = 32
 
 ;; ============================================================================
 ;; op_store_fast - Store TOS into localsplus[arg]

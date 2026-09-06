@@ -85,7 +85,7 @@ BSLC_SLICE equ 32
 BSLC_STAG  equ 40    ; start tag
 BSLC_PTAG  equ 48    ; stop tag
 BSLC_OTAG  equ 56    ; obj tag
-BSLC_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
+BSLC_FRAME equ 72            ; + 0 pushes = 64, 16-aligned
 
 ; op_store_slice: rbp-frame layout [rbp - ...]
 SSLC_START equ 8
@@ -97,7 +97,7 @@ SSLC_STAG  equ 48    ; start tag
 SSLC_PTAG  equ 56    ; stop tag
 SSLC_OTAG  equ 64    ; obj tag
 SSLC_VTAG  equ 72    ; value tag
-SSLC_FRAME equ 80            ; + 0 pushes = 80, 16-aligned
+SSLC_FRAME equ 88            ; + 0 pushes = 80, 16-aligned
 
 ; op_map_add: 2-operand push layout [rsp+...]
 MA_VAL   equ 0     ; value (TOS, pushed last)
@@ -470,7 +470,7 @@ END_FUNC op_store_subscr
 ;; ============================================================================
 BT_COUNT    equ 8
 BT_TUPLE    equ 16
-DEF_FUNC op_build_tuple, 16
+DEF_FUNC op_build_tuple, 24   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
     ; [rbp - BT_COUNT] = count
 
     mov [rbp - BT_COUNT], rcx           ; save count
@@ -520,7 +520,7 @@ END_FUNC op_build_tuple
 ;; ============================================================================
 BL_COUNT    equ 8
 BL_LIST     equ 16
-DEF_FUNC op_build_list, 16
+DEF_FUNC op_build_list, 24   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
 
     mov [rbp - BL_COUNT], rcx           ; save count
 
@@ -594,7 +594,7 @@ END_FUNC op_build_list
 ;; ============================================================================
 BM_COUNT    equ 8
 BM_DICT     equ 16
-DEF_FUNC op_build_map, 16
+DEF_FUNC op_build_map, 24   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
 
     mov [rbp - BM_COUNT], rcx           ; save count
 
@@ -663,7 +663,7 @@ END_FUNC op_build_map
 CKM_COUNT   equ 8
 CKM_KEYS    equ 16
 CKM_DICT    equ 24
-DEF_FUNC op_build_const_key_map, 32
+DEF_FUNC op_build_const_key_map, 40   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
 
     mov [rbp - CKM_COUNT], rcx           ; count
 
@@ -1308,7 +1308,7 @@ LE_ITERABLE equ 16
 LE_COUNT    equ 24
 LE_CURSOR   equ 32
 LE_EXC      equ 40        ; current_exception before the iteration started
-DEF_FUNC op_list_extend, 48
+DEF_FUNC op_list_extend, 56   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
     ; locals: [rbp - LE_LIST]=list, [rbp - LE_ITERABLE]=iterable, [rbp - LE_COUNT]=count, [rbp - LE_CURSOR]=items
 
     ; TOS = iterable
@@ -2211,7 +2211,8 @@ END_FUNC op_store_slice
 ;; TOS = value, TOS1 = key
 ;; dict is at stack[-(ecx+2)] relative to current TOS (before pops)
 ;; ============================================================================
-DEF_FUNC op_map_add, 8            ; 1 pushes, so rsp is 16-aligned
+DEF_FUNC op_map_add, 8    ; + 4 pushes at the call; a handler is entered ALIGNED,
+                          ; so frame + pushes must be 8 mod 16
     push rcx                   ; save oparg
 
     VPOP_VAL rdx, r8           ; rdx = value (TOS), r8 = value tag
@@ -2729,7 +2730,7 @@ extern set_type
 
 BSE_COUNT   equ 8
 BSE_SET     equ 16
-DEF_FUNC op_build_set, 16
+DEF_FUNC op_build_set, 24   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
 
     mov [rbp - BSE_COUNT], rcx           ; save count
 
@@ -2831,8 +2832,10 @@ SU_EXC      equ 56        ; current_exception before the iteration started
 DEF_FUNC op_set_update
     push rbx
     push r14
-    sub rsp, 48                ; 48, not 40: the extra slot, and with it the
-                               ; 16-byte alignment the two pushes had broken.
+    sub rsp, 56                ; 56, not 48: a handler is entered 16-byte
+                               ; ALIGNED, so `push rbp` plus these two pushes
+                               ; leave rsp 8 out and the frame is what puts it
+                               ; back.  48 computed the ordinary-function rule.
                                ; locals: [rbp - SU_SOURCE]=set, [rbp - SU_SET]=iterable, [rbp - SU_CAP]=iter, [rbp - SU_ENTRIES]=iter_tag
 
     ; TOS = iterable
@@ -2899,7 +2902,7 @@ DEF_FUNC op_set_update
     mov rsi, [rbp - SU_ENTRIES]
     DECREF_VAL rdi, rsi
 
-    add rsp, 48
+    add rsp, 56
     pop r14
     pop rbx
     leave
@@ -2909,7 +2912,7 @@ DEF_FUNC op_set_update
     ; The iterable is left alone: the unwinder restores r13 to the stack as
     ; it stood before this instruction, where VPOP_VAL had not taken it off.
     extern eval_exception_unwind
-    add rsp, 48
+    add rsp, 56
     pop r14
     pop rbx
     leave
@@ -2951,7 +2954,7 @@ DEF_FUNC op_set_update
     mov rsi, [rbp - SU_ENTRIES]
     DECREF_VAL rdi, rsi
 
-    add rsp, 48
+    add rsp, 56
     pop r14
     pop rbx
     leave

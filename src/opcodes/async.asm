@@ -344,7 +344,7 @@ BAW_RETTAG equ 8
 BAW_MGR    equ 16
 BAW_EXIT   equ 24
 BAW_ENTER  equ 32
-BAW_FRAME  equ 32           ; + 2 pushes = 48
+BAW_FRAME  equ 40           ; + 2 pushes; a handler is entered ALIGNED, so this is 8 mod 16
 
 DEF_FUNC op_before_async_with, BAW_FRAME
     push rbx
@@ -412,8 +412,11 @@ DEF_FUNC op_before_async_with, BAW_FRAME
 
     ; Got __aenter__ function — call it with mgr as self
     push rax                   ; save aenter func
+    push rax                   ; ...and a pad: this is the one call in the
+                               ; handler with an odd push under it
     mov rdi, r12
     call obj_decref            ; DECREF aenter name str
+    pop rax                    ; drop the pad
     pop rax                    ; restore aenter func
 
     ; Call __aenter__(mgr): tp_call(aenter_func, &mgr, 1)

@@ -59,7 +59,7 @@ MK_KEYS    equ 8
 MK_SUBJ    equ 16
 MK_VALS    equ 24
 MK_NKEYS   equ 32
-MK_FRAME   equ 32           ; + 0 pushes = 32
+MK_FRAME   equ 40           ; + 0 pushes = 32
 
 ; --- moved to a sibling file by the split ---
 extern op_send
@@ -578,9 +578,15 @@ END_FUNC op_get_len
 extern dict_new
 extern dict_set
 
+; A handler is entered 16-byte ALIGNED, so `push rbp` plus two saves leaves rsp
+; 8 out at every call below.  The third push is the slot that puts it back --
+; and it has to be a push rather than a DEF_FUNC frame, because this handler's
+; epilogue is a hand-written `pop rbp` with no `leave`, so a frame would never
+; be discarded and the eval loop's stack would sink 8 bytes per execution.
 DEF_FUNC op_setup_annotations
     push rbx
     push r12                    ; save eval loop r12
+    push r13                    ; unused; the alignment slot
 
     ; Check if locals dict exists
     mov rbx, [r12 + PyFrame.locals]
@@ -604,12 +610,16 @@ DEF_FUNC op_setup_annotations
     push rax                    ; save key for DECREF
     push rdx                    ; save value for DECREF
     call dict_set
-    pop rdi
+    ; Read each argument off the stack rather than popping between the two
+    ; calls, so the depth is the same at both.
+    mov rdi, [rsp]              ; the value
     call obj_decref             ; DECREF value (dict_set INCREFs)
-    pop rdi
+    mov rdi, [rsp + 8]          ; the key
     call obj_decref             ; DECREF key
+    add rsp, 16
 
 .sa_done:
+    pop r13
     pop r12
     pop rbx
     pop rbp
@@ -723,7 +733,7 @@ global op_load_from_dict_or_deref
 
 LFDOD_DICT  equ 8
 LFDOD_ARG   equ 16
-LFDOD_FRAME equ 16          ; + 0 pushes = 16
+LFDOD_FRAME equ 24          ; + 0 pushes = 16
 
 DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
     mov [rbp - LFDOD_ARG], ecx    ; save arg (localsplus index)
@@ -988,7 +998,7 @@ MC_MATCHARGS equ 48
 MC_IDX       equ 56
 MC_SUBJ_TAG  equ 64
 MC_ORIGIN    equ 72   ; the subject's type, for the __match_args__ walk
-MC_FRAME     equ 96            ; + 0 pushes = 96, 16-aligned
+MC_FRAME     equ 104            ; + 0 pushes = 96, 16-aligned
 
 extern str_type
 

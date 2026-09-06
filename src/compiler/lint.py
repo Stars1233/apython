@@ -214,6 +214,12 @@ def check_saved_writes(files):
     return bad
 
 def check_alignment(files):
+    # Opcode handlers are reached by `jmp` from the dispatcher, not by `call`,
+    # so they are entered 16-byte ALIGNED and want the OPPOSITE parity from an
+    # ordinary function.  check_handler_alignment below is what judges them;
+    # applying the ordinary rule here as well would demand both at once.
+    handlers = set(re.findall(r'^\s*dq\s+(op_\w+)', open('src/eval.asm').read(),
+                              re.M))
     bad = []
     for path in files:
         src = open(path).read()
@@ -234,6 +240,8 @@ def check_alignment(files):
         for m in re.finditer(r'^(DEF_FUNC(?:_LOCAL)?)\s+(\w+)(?:\s*,\s*([^\s;]+))?[^\n]*$(.*?)^END_FUNC',
                              src, re.M | re.S):
             name, frame, body = m.group(2), m.group(3), m.group(4)
+            if name in handlers:
+                continue        # judged by check_handler_alignment instead
             if '%' in m.group(0).split('\n')[0]:
                 continue        # inside a %macro: the name is a parameter, and
                                 # its prologue may be conditional
@@ -660,6 +668,13 @@ def check_handler_alignment(files):
     written, some of them under comments asserting the opposite.  glibc's
     allocator and strtod do use aligned SSE, and DECREF reaches free().
 
+    Both forms are checked, and they want OPPOSITE parities.  A DEF_FUNC
+    handler's own `push rbp` is an odd slot, so it needs FRAME + 8*pushes to be
+    8 mod 16 where a DEF_FUNC_BARE one needs 0.  Checking only the BARE form
+    was a blind spot that left 25 handlers -- op_call, op_load_attr,
+    op_store_attr, op_build_string and the rest -- calling glibc misaligned
+    under comments computing the ordinary-function rule.
+
     Which functions are handlers is read from the dispatch table in eval.asm
     rather than guessed from the name, because plenty of DEF_FUNC_BARE
     functions beginning with op_ are called normally.
@@ -673,12 +688,30 @@ def check_handler_alignment(files):
     bad = []
     for path in files:
         src = open(path).read()
-        for m in re.finditer(r'^DEF_FUNC_BARE\s+(\w+)[^\n]*$(.*?)^END_FUNC',
-                             src, re.M | re.S):
-            name, body = m.group(1), m.group(2)
+        for m in re.finditer(
+                r'^(DEF_FUNC_BARE|DEF_FUNC)[ \t]+(\w+)[ \t]*(?:,[ \t]*(\w+))?'
+                r'[^\n]*$(.*?)^END_FUNC', src, re.M | re.S):
+            kind, name, frame, body = m.groups()
             if name not in handlers:
                 continue
-            depth, known = 0, True
+            # DEF_FUNC's own prologue is the odd slot: `push rbp` puts rsp 8
+            # past aligned before the body starts, and `sub rsp, FRAME` moves
+            # it again.  So a DEF_FUNC handler needs FRAME + 8*pushes to be 8
+            # mod 16, where a DEF_FUNC_BARE one needs 0 -- the opposite parity,
+            # and the reason this loop cannot just look at the pushes.
+            depth = 0
+            if kind == 'DEF_FUNC':
+                depth = 8
+                if frame:
+                    if frame.isdigit():
+                        depth += int(frame)
+                    else:
+                        fm = re.search(r'^%s\s+equ\s+(\d+)' % re.escape(frame),
+                                       src, re.M)
+                        if fm is None:
+                            continue       # a frame size we cannot resolve
+                        depth += int(fm.group(1))
+            known = True
             for raw in body.splitlines():
                 line = raw.split(';')[0].strip()
                 if not line or line.startswith('%'):
@@ -696,10 +729,11 @@ def check_handler_alignment(files):
                     depth -= int(line.rsplit(',', 1)[1])
                 elif re.match(r'^call\s', line) and known and depth % 16:
                     bad.append((path, 0,
-                                "rsp misaligned at `%s` in handler %s (%d bytes pushed)"
+                                "rsp misaligned at `%s` in handler %s (%d bytes below entry)"
                                 % (line, name, depth),
-                                "pad with `sub rsp, 8` / `add rsp, 8` around the "
-                                "call, or add a slot to the push list"))
+                                "a handler is entered ALIGNED, so DEF_FUNC wants "
+                                "FRAME + 8*pushes == 8 (mod 16) and DEF_FUNC_BARE "
+                                "wants 0; grow the frame by 8"))
     return bad
 
 

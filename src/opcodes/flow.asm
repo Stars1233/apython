@@ -53,7 +53,7 @@ FV_SPEC    equ 24
 FV_VALUE   equ 32
 FV_STAG    equ 40    ; fmt_spec tag
 FV_VTAG    equ 48    ; value tag
-FV_FRAME   equ 48           ; + 0 pushes = 48
+FV_FRAME   equ 56           ; + 0 pushes = 48
 
 ;; Stack layout constants for op_build_string (DEF_FUNC, 16 bytes).
 BS_COUNT   equ 8
@@ -61,7 +61,7 @@ BS_ACCUM   equ 16
 BS_BASE    equ 24           ; where the fragments start on the value stack
 BS_BYTES   equ 32           ; their total length in bytes
 BS_CP      equ 40           ; and in code points
-BS_FRAME   equ 48           ; + 2 pushes = 64, 16-byte aligned
+BS_FRAME   equ 56           ; + 2 pushes = 64, 16-byte aligned
 
 ;; Stack layout constants for op_send (DEF_FUNC, 48 bytes).
 SND_ARG    equ 8
@@ -71,7 +71,7 @@ SND_RESULT equ 32
 SND_STAG   equ 40    ; sent_value tag
 SND_RTAG   equ 48    ; result tag
 SND_EXC    equ 56    ; what was pending before the send, to tell a raise apart
-SND_FRAME  equ 64           ; + 0 pushes = 64
+SND_FRAME  equ 72           ; + 0 pushes = 64
 
 ;; Stack layout constants for op_match_keys (DEF_FUNC, 32 bytes).
 
