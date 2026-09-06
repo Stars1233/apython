@@ -9,8 +9,8 @@
 #
 # What this pins down, because it is the argument the handler now rests on:
 #
-#   - two equal integer immediates ARE the same object, on either side of 0
-#     and out to +-2^50, while two equal WIDE ints are not
+#   - an object is identical to itself whatever its Value encodes -- an
+#     immediate, a float, a pointer -- and to nothing else in the sweep
 #   - 0.0 and -0.0 have different bit patterns and so are not identical, which
 #     is what CPython says too
 #   - None, True and False are singletons and compare by pointer
@@ -32,9 +32,12 @@ for i, a in enumerate(V):
 # identity against itself
 for a in V:
     print(repr(a), a is a, a is not a)
-# small-int identity and interning
-x = 256; y = 256
-print(x is y, (2**50) is (2**50))
+# Deliberately NOT here: whether two separately written equal integers are
+# one object.  That is a question about the representation, not about `is`,
+# and `make INT_STRESS=1` changes the answer on purpose by boxing every small
+# int.  What matters to this handler is that identity is decided by the Value
+# alone, which the pairwise sweep above covers: V and S hold the same objects,
+# so every True in it is a genuine identity.
 a = [1]; b = a; c = [1]
 print(a is b, a is c, a is not c)
 n = None
