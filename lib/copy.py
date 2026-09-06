@@ -127,12 +127,22 @@ def deepcopy(x, memo=None):
         else:
             raise Error("un(deep)copyable object of type %s" % cls)
 
-    y = _reconstruct(x, rv)
-    memo[d] = y
-    return y
+    return _reconstruct(x, rv, memo)
 
 
-def _reconstruct(x, info):
+def _reconstruct(x, info, memo=None):
+    """Rebuild an object from what __reduce_ex__ answered.
+
+    All five fields, not the first two.  This used to call func(*args) and
+    stop, which built an object of the right class with none of its
+    contents -- an honest reflection of a world where object.__reduce_ex__
+    always raised, and wrong the moment it stopped: `copy.copy(a)` for a
+    plain instance came back with an empty __dict__.
+
+    state is the instance dict, or the (dict, slots) pair a class with
+    __slots__ produces; listiter and dictiter rebuild a list or a dict
+    subclass, which cannot be handed its contents through __new__.
+    """
     if isinstance(info, str):
         return x
     if not isinstance(info, tuple):
@@ -140,6 +150,40 @@ def _reconstruct(x, info):
     n = len(info)
     if n < 2 or n > 5:
         raise Error("tuple returned by __reduce__ must have 2-5 elements")
-    callable_obj = info[0]
-    args = info[1]
-    return callable_obj(*args)
+    info = info + (None,) * (5 - n)
+    func, args, state, listiter, dictiter = info
+
+    deep = memo is not None
+    if deep and args:
+        args = tuple(deepcopy(arg, memo) for arg in args)
+    y = func(*args)
+    if deep:
+        memo[id(x)] = y
+
+    if state is not None:
+        if deep:
+            state = deepcopy(state, memo)
+        setstate = getattr(y, "__setstate__", None)
+        if setstate is not None:
+            setstate(state)
+        else:
+            if isinstance(state, tuple) and len(state) == 2:
+                state, slotstate = state
+            else:
+                slotstate = None
+            if state is not None:
+                y.__dict__.update(state)
+            if slotstate is not None:
+                for key, value in slotstate.items():
+                    setattr(y, key, value)
+
+    if listiter is not None:
+        for item in listiter:
+            y.append(deepcopy(item, memo) if deep else item)
+    if dictiter is not None:
+        for key, value in dictiter:
+            if deep:
+                key = deepcopy(key, memo)
+                value = deepcopy(value, memo)
+            y[key] = value
+    return y

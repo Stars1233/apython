@@ -35,7 +35,9 @@ DEF_FUNC_BARE op_import_name
     ; Pop level (TOS1)
     VPOP_VAL rdx, rcx           ; level payload+tag
 
-    ; Save name, fromlist (payload+tag), and level for later
+    ; Save name, fromlist (payload+tag), and level for later.  FOUR pushes,
+    ; deliberately: a handler is jumped to rather than called, so rsp arrives
+    ; 16-aligned and every call below has to be made at an even push count.
     push rax                    ; name
     push r8                     ; fromlist tag
     push rsi                    ; fromlist payload
@@ -64,35 +66,42 @@ DEF_FUNC_BARE op_import_name
     test rdx, rdx
     jz .absolute
     push rax
+    sub rsp, 8                  ; pad: an odd push makes the call below odd
     mov rdi, rax                ; the name as written
     mov rsi, [r12 + PyFrame.globals]
     extern import_resolve_relative
     call import_resolve_relative
     mov rdx, rax                ; the resolved name, owned
+    add rsp, 8
     pop rax
     mov [rsp + 24], rdx         ; keep it where the saved name lives
     mov rax, rdx
     mov rdx, 0                  ; it is absolute now
-    mov r9d, 1                  ; and the name is ours to release
+    mov r15d, 1                 ; and the name is ours to release
     jmp .have_name
 .absolute:
-    xor r9d, r9d
+    xor r15d, r15d
 .have_name:
-    push r9
+    ; The flag lives in r15, which the register convention leaves free for a
+    ; handler and which is callee-saved, so it survives import_module.  It
+    ; used to be a FIFTH push, and that is what misaligned this call -- and
+    ; with it every frame the imported module ran, since the misalignment
+    ; propagates down the whole nested interpreter stack.
 
     ; import_module(name_str, fromlist, level)
     mov rdi, rax                ; name
-    mov rsi, [rsp + 16]        ; fromlist
+    mov rsi, [rsp + 8]          ; fromlist
     ; rdx = level (already set)
     call import_module
     ; rax = module (new reference)
 
-    pop r9
-    test r9d, r9d
+    test r15d, r15d
     jz .no_resolved_name
     push rax
-    mov rdi, [rsp + 32]         ; the resolved name we built
+    sub rsp, 8                  ; pad, as above
+    mov rdi, [rsp + 40]         ; the resolved name we built
     call obj_decref
+    add rsp, 8
     pop rax
 .no_resolved_name:
 

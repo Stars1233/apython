@@ -548,11 +548,14 @@ DEF_FUNC op_build_list, 24   ; + 0 pushes; a handler is entered ALIGNED, so this
     cmp rdx, [rbp - BL_COUNT]
     jge .build_list_done
     push rdx
+    sub rsp, 8                  ; pad: a handler is entered 16-aligned, so the
+                                ; single push above leaves the call 8 out
     mov rdi, [rbp - BL_LIST]         ; list
     mov rax, rdx
     shl rax, 3                ; index * 8
     mov rsi, [r13 + rax]      ; item (ownership transfers, no extra INCREF)
     call list_append
+    add rsp, 8
     pop rdx
     inc rdx
     jmp .build_list_fill
@@ -616,12 +619,15 @@ DEF_FUNC op_build_map, 24   ; + 0 pushes; a handler is entered ALIGNED, so this 
     cmp rdx, [rbp - BM_COUNT]
     jge .build_map_done
     push rdx
+    sub rsp, 8                  ; pad: a handler is entered 16-aligned, so the
+                                ; single push above leaves the call 8 out
     mov rdi, [rbp - BM_DICT]         ; dict
     mov rax, rdx
     shl rax, 4                 ; pair_index * 16 (2 payload slots)
     mov rsi, [r13 + rax]      ; key
     mov rdx, [r13 + rax + 8]  ; value
     call dict_set
+    add rsp, 8
     pop rdx
     inc rdx
     jmp .build_map_fill
@@ -1113,8 +1119,11 @@ DEF_FUNC_BARE op_get_iter
     mov rdx, [rcx + PyTypeObject.tp_flags]
     test rdx, TYPE_FLAG_HEAPTYPE
     jz .not_iterable
+    ; A frame of its own for the call, and an odd one: a handler is entered
+    ; 16-aligned, so `push rbp` alone leaves rsp 8 out.
     push rbp
     mov rbp, rsp
+    sub rsp, 8
     extern seq_iter_new
     call seq_iter_new          ; creates seq_iter wrapping obj
     leave

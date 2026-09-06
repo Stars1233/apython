@@ -81,7 +81,13 @@ struc ZStream
 endstruc                ; sizeof = 112
 
 ; --- one open stream ------------------------------------------------------
+ZC_MAGIC equ 0x5A4C4942            ; "ZLIB": a freed handle must not look live
+
 struc ZHandle
+    ; The z_stream FIRST, so it inherits the allocator's 16-byte alignment.
+    ; libz's inflate reads it with SSE on this build, and a struct at 8 mod 16
+    ; is a general protection fault inside the library rather than a wrong
+    ; answer -- which is what putting the magic word in front of it caused.
     .zs:         resb ZStream_size
     .mode:       resq 1  ; 0 = deflate, 1 = inflate
     .eof:        resq 1  ; inflate reached Z_STREAM_END
@@ -90,6 +96,7 @@ struc ZHandle
     .tail_len:   resq 1
     .unused:     resq 1  ; input past the end of an inflate stream, ours
     .unused_len: resq 1
+    .magic:      resq 1  ; ZC_MAGIC while the handle is open, 0 once freed
 endstruc
 
 Z_OK            equ 0
@@ -276,6 +283,16 @@ DEF_FUNC_BARE zc_handle_at
     jae .zh_no
     mov rax, [rel zc_handles]
     mov rax, [rax + rdi*8]
+    test rax, rax
+    jz .zh_no
+    ; A handle whose magic is gone is a freed one whose slot was handed back
+    ; and whose memory may since have been reused.  libz's own state pointer
+    ; is dangling by then, and inflate() dereferences it: the fault landed
+    ; inside libz with a z_stream that still read plausibly.
+    cmp qword [rax + ZHandle.magic], ZC_MAGIC
+    je .zh_ok
+    xor eax, eax
+.zh_ok:
 .zh_no:
     ret
 END_FUNC zc_handle_at
@@ -397,8 +414,11 @@ ZN_LEVEL equ 24
 ZN_WBITS equ 32
 ZN_MEML  equ 40
 ZN_STRAT equ 48
-ZN_FRAME equ 64             ; + 0 pushes = 64
+ZN_FRAME equ 72             ; + 1 push = 80, 16-aligned
 DEF_FUNC zc_stream_new, ZN_FRAME
+    push r12
+    mov r12, rsp
+    and rsp, -16                ; libz uses aligned SSE; see zc_stream_feed
     cmp rsi, 5
     jne .zn_nargs
     push rdi
@@ -425,6 +445,7 @@ DEF_FUNC zc_stream_new, ZN_FRAME
     call ap_memset
 
     mov rax, [rbp - ZN_H]
+    mov qword [rax + ZHandle.magic], ZC_MAGIC
     mov rcx, [rbp - ZN_MODE]
     mov [rax + ZHandle.mode], rcx
     test rcx, rcx
@@ -473,6 +494,8 @@ DEF_FUNC zc_stream_new, ZN_FRAME
     jl .zn_table_failed
     mov rdi, rax
     call int_from_i64
+    mov rsp, r12
+    pop r12
     leave
     V_PACK rax, rdx
     ret
@@ -580,9 +603,18 @@ ZF_OUT    equ 48            ; the owned output buffer
 ZF_OUTCAP equ 56
 ZF_OUTLEN equ 64
 ZF_RES    equ 72            ; the bytes, while the buffers are freed
-ZF_FRAME  equ 88            ; + 1 push = 96, 16-aligned
+ZF_FRAME  equ 80            ; + 2 pushes = 96, 16-aligned
 DEF_FUNC zc_stream_feed, ZF_FRAME
     push rbx
+    push r12
+    ; libz's inflate stores to its own frame with `movaps`, so it faults --
+    ; a general protection fault inside the library, not a wrong answer -- if
+    ; rsp is 8 out when it is called.  This function is reached at both
+    ; alignments, because func_call is (see bugs.md), so it aligns rsp for
+    ; itself rather than trusting the caller.  The frame slots are rbp-based
+    ; and do not move.  int_true_divide does the same for glibc's strtod.
+    mov r12, rsp
+    and rsp, -16
     cmp rsi, 4
     jne .zf_nargs
     mov [rbp - ZF_ARGS], rdi
@@ -671,14 +703,18 @@ DEF_FUNC zc_stream_feed, ZF_FRAME
 
     ; --- the output buffer -------------------------------------------------
     ;
-    ; max_length sizes it exactly, because that is the only way the cap is
-    ; ever reached: with a buffer larger than the cap, libz finishes in one
-    ; pass and avail_out never falls to zero, so the test below never runs
-    ; and the whole answer comes back at once.
+    ; A max_length SMALLER than the default sizes the buffer exactly, because
+    ; that is the only way the cap is ever reached: with a buffer larger than
+    ; the cap, libz finishes in one pass, avail_out never falls to zero and
+    ; the whole answer comes back at once.  A larger one is only a ceiling --
+    ; allocating it up front would mean a 2 GB malloc for a caller that asked
+    ; for "up to everything", which is what gzip's reader does.
     mov rdi, ZC_INITIAL_OUT
     mov rcx, [rbp - ZF_MAX]
     test rcx, rcx
     jz .zf_out_size
+    cmp rcx, rdi
+    jae .zf_out_size
     mov rdi, rcx
 .zf_out_size:
     mov [rbp - ZF_OUTCAP], rdi
@@ -733,6 +769,13 @@ DEF_FUNC zc_stream_feed, ZF_FRAME
 .zf_grow:
     mov rax, [rbp - ZF_OUTCAP]
     add rax, rax
+    mov rcx, [rbp - ZF_MAX]
+    test rcx, rcx
+    jz .zf_grow_to
+    cmp rax, rcx
+    jbe .zf_grow_to
+    mov rax, rcx                ; never past the ceiling the caller named
+.zf_grow_to:
     mov rdi, [rbp - ZF_OUT]
     mov rsi, rax
     push rax
@@ -802,6 +845,8 @@ DEF_FUNC zc_stream_feed, ZF_FRAME
     call zc_release_buffers
     mov rax, [rbp - ZF_RES]
     mov edx, TAG_PTR
+    mov rsp, r12
+    pop r12
     pop rbx
     leave
     V_PACK rax, rdx
@@ -956,8 +1001,11 @@ END_FUNC zc_bytes_or_empty
 ;; thousand files would notice.
 ;; ============================================================================
 ZR_IDX   equ 8              ; the slot to clear once the ZHandle is in hand
-ZR_FRAME equ 16             ; + 0 pushes = 16
+ZR_FRAME equ 24             ; + 1 push = 32, 16-aligned
 DEF_FUNC zc_stream_free, ZR_FRAME
+    push r12
+    mov r12, rsp
+    and rsp, -16                ; libz uses aligned SSE; see zc_stream_feed
     cmp rsi, 1
     jne .zr_nargs
     xor esi, esi
@@ -970,6 +1018,7 @@ DEF_FUNC zc_stream_free, ZR_FRAME
     mov rcx, [rel zc_handles]
     mov rdx, [rbp - ZR_IDX]
     mov qword [rcx + rdx*8], 0
+    mov qword [rax + ZHandle.magic], 0
 
     push rax
     sub rsp, 8
@@ -1008,6 +1057,8 @@ DEF_FUNC zc_stream_free, ZR_FRAME
 .zr_none:
     LOAD_NONE rax
     mov edx, TAG_PTR
+    mov rsp, r12
+    pop r12
     leave
     V_PACK rax, rdx
     ret

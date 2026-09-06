@@ -477,11 +477,19 @@ CFX_RETTAG  equ 112      ; return tag from tp_call
 CFX_TEMP    equ 120      ; temp args buffer for fat tuple extraction
 CFX_FUNC_TAG equ 128     ; func tag for SmallInt check
 CFX_FRAME2  equ 144      ; new frame size (manual push, so offset from rbp-16)
+; What the prologue actually subtracts.  A handler is JUMPED to, so rsp
+; arrives 16-aligned and `push rbp` plus two more pushes leave it 8 out; the
+; carve has to be odd-by-eight to put it back.  It was CFX_FRAME2 - 16, which
+; is even, so every call this handler made was misaligned -- and so was every
+; frame the called function ran, since the misalignment propagates.  The slots
+; are addressed off rbp and do not move; only this number and the two matching
+; `add rsp` do.
+CFX_CARVE   equ CFX_FRAME2 - 8
 
 DEF_FUNC op_call_function_ex
     push rbx                        ; save (clobbered by eval convention save)
     push r12
-    sub rsp, CFX_FRAME2 - 16       ; allocate local frame
+    sub rsp, CFX_CARVE             ; allocate local frame
 
     mov [rbp - CFX_OPARG], ecx               ; save oparg
     mov qword [rbp - CFX_TEMP], 0             ; no temp buffer yet
@@ -753,7 +761,7 @@ DEF_FUNC op_call_function_ex
 .cfex_push_result:
     VPUSH_VAL rax, rdx
 
-    add rsp, CFX_FRAME2 - 16
+    add rsp, CFX_CARVE
     pop r12
     pop rbx
     pop rbp
@@ -762,7 +770,7 @@ DEF_FUNC op_call_function_ex
 .cfex_propagate_exc:
     ; Exception pending from callee — propagate to caller's handler
     extern eval_exception_unwind
-    add rsp, CFX_FRAME2 - 16
+    add rsp, CFX_CARVE
     pop r12
     pop rbx
     pop rbp

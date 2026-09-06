@@ -91,6 +91,36 @@ reasoning that chose them and what changing one would cost.
   a `load_ic.asm` of their own.  They deopt by rewriting an opcode byte and
   re-dispatching, so they call nothing file-local.
 
+- **Forty-two calls inside opcode handlers are made with `rsp` misaligned.**
+  Recorded one per site in `tests/align_floor.txt`, which `lint.py` ratchets:
+  a new one fails the build and the set can only shrink.  Pay one down by
+  padding the odd push and re-recording with
+  `python3 src/compiler/lint.py --record-alignment`.
+
+  They are not cosmetic, and they are not local.  A misaligned call
+  PROPAGATES: the callee's whole frame is 8 out, so every Python frame the
+  interpreter runs beneath it is too.  The fault surfaces far away and only
+  when something eventually reaches an aligned SSE store -- which is how this
+  was found at all: `import gzip; gzip.open(...)` faulted inside libz's
+  `inflate`, at a `movaps %xmm0,-0x70(%rbp)`, several thousand instructions
+  from anything zlib had done wrong.
+
+  `lint.py` had a check for this and it saw none of them, for two reasons
+  both now fixed: it stopped tracking depth at the first label, so a call six
+  instructions past the push that unbalanced it went unexamined, and it read
+  only a literal `sub rsp, 40` and ignored `sub rsp, SOME_CONST - 16`.
+  Teaching it to resolve a label from the depths control reaches it at, and
+  to evaluate the arithmetic, turned up all forty-five.
+
+  Three are already fixed and are the ones that mattered: `op_import_name`
+  made `call import_module` at a fifth push (the flag now lives in r15, which
+  the register convention leaves free); `op_call_function_ex` carved
+  `CFX_FRAME2 - 16`, an even number where a jumped-to handler needs an odd
+  one; and `op_get_iter`'s hand-rolled frame for `seq_iter_new` was `push rbp`
+  and nothing else.  Between them they accounted for every misalignment on
+  the `import` path -- `import io` went from thirty-eight misaligned frames
+  to none.
+
 - **The compiler attributes a loop's back edge to the loop header, and
   CPython attributes it to the body.**  For
 

@@ -24,6 +24,9 @@ __all__ = [
     "Z_RLE", "Z_SYNC_FLUSH", "Z_TREES",
 ]
 
+# Private, and named in __all__ nowhere -- but _compression.DecompressReader
+# imports it by name, so gzip and tarfile need it to exist.
+
 
 class error(Exception):
     """Raised for a corrupt stream, or for a stream used after its end."""
@@ -185,6 +188,38 @@ class Decompress(_Stream):
 
     def copy(self):
         raise error("Decompress.copy() is not supported")
+
+
+class _ZlibDecompressor(_Stream):
+    """The one-shot-per-block decompressor gzip and tarfile read through.
+
+    CPython added it in 3.11 and it is private, but _compression.DecompressReader
+    is written against it and nothing else -- so `tarfile.open(..., "r:gz")`
+    needs it by name.  It differs from Decompress in what it promises about
+    its input: `needs_input` says whether the caller must read more, which is
+    how the reader knows when to go back to the file.
+    """
+
+    def __init__(self, wbits=MAX_WBITS, zdict=b""):
+        if zdict:
+            raise error("zdict is not supported")
+        super().__init__(_INFLATE, 0, wbits, DEF_MEM_LEVEL,
+                         Z_DEFAULT_STRATEGY)
+        self.eof = False
+        self.needs_input = True
+        self.unused_data = b""
+
+    def decompress(self, data, max_length=-1):
+        if max_length < 0:
+            max_length = 0
+        out = self._feed(data, Z_NO_FLUSH, max_length)
+        eof, tail, unused = _zlibcore.stream_state(self._handle)
+        self.eof = eof
+        if unused:
+            self.unused_data += unused
+        # Buffered input left over means the caller must not read more yet.
+        self.needs_input = not tail
+        return out
 
 
 def compressobj(level=Z_DEFAULT_COMPRESSION, method=DEFLATED,
