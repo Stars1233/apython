@@ -208,6 +208,7 @@ test_fmtspec
 test_for_loops
 test_format_fields
 test_format_float_spec
+test_format_grouping
 test_format_map
 test_format
 test_format_spec

@@ -57,7 +57,11 @@ FS_BODY   equ 88         ; rendered body, a str object
 FS_SIGNCH equ 96         ; the sign actually emitted, or 0
 FS_SPECLEN equ 104       ; length of the spec as given
 FS_OWNED  equ 112        ; a box V_PACK made for a wide int subclass, or 0
-FS_FRAME  equ 120           ; + 5 pushes = 160, 16-aligned
+FS_CHBUF  equ 128        ; the eight bytes the `c` type encodes into
+FS_SIGNGIVEN equ 136     ; 1 when a sign was actually written in the spec.
+                         ; FS_SIGN defaults to '-', so it cannot answer this,
+                         ; and `c` refuses an explicit sign of any kind.
+FS_FRAME  equ 152           ; + 5 pushes = 192, 16-aligned
 
 ; The widest field this will build.  See .fs_after_width.
 FS_MAX_WIDTH equ 0x10000000
@@ -84,6 +88,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
     mov qword [rbp - FS_FILL], ' '
     mov qword [rbp - FS_ALIGN], 0
     mov qword [rbp - FS_SIGN], '-'
+    mov qword [rbp - FS_SIGNGIVEN], 0
     mov qword [rbp - FS_ALT], 0
     mov qword [rbp - FS_ZERO], 0
     mov qword [rbp - FS_WIDTH], 0
@@ -139,6 +144,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
     jne .fs_after_sign
 .fs_take_sign:
     mov [rbp - FS_SIGN], rcx
+    mov qword [rbp - FS_SIGNGIVEN], 1
     inc r14
 
 .fs_after_sign:
@@ -443,6 +449,26 @@ DEF_FUNC format_apply_spec, FS_FRAME
     lea rax, [rel str_type]
     cmp r15, rax
     je .fs_bad_numeric_type
+    ; `,` names a thousands separator, and a base that is not ten has no
+    ; thousands: CPython refuses it before formatting anything.  `_` is
+    ; allowed on all of them and groups in fours.
+    cmp qword [rbp - FS_GROUP], ','
+    jne .fs_group_ok
+    cmp rcx, 'b'
+    je .fs_bad_group
+    cmp rcx, 'o'
+    je .fs_bad_group
+    cmp rcx, 'x'
+    je .fs_bad_group
+    cmp rcx, 'X'
+    je .fs_bad_group
+.fs_group_ok:
+    ; `c` refuses BOTH separators, where a base only refuses the comma.
+    cmp rcx, 'c'
+    jne .fs_type_ok
+    cmp qword [rbp - FS_GROUP], 0
+    jne .fs_bad_group
+.fs_type_ok:
     cmp rcx, 'b'
     je .fs_body_int
     cmp rcx, 'o'
@@ -456,8 +482,86 @@ DEF_FUNC format_apply_spec, FS_FRAME
     cmp rcx, 'n'
     je .fs_body_int
     cmp rcx, 'c'
-    je .fs_body_int
+    je .fs_body_char
     jmp .fs_body_float
+
+.fs_bad_group:
+    ; "Cannot specify ',' with 'x'." -- the type letter goes in.
+    sub rsp, 64
+    mov rdi, rsp
+    CSTRING rsi, "Cannot specify '"
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rcx, [rbp - FS_GROUP]
+    mov [rax], cl
+    mov byte [rax + 1], 0x27
+    mov byte [rax + 2], 0
+    lea rdi, [rax + 3]
+    mov rdi, rax
+    add rdi, 2
+    CSTRING rsi, " with '"
+    call rbt_append_cstr
+    mov rcx, [rbp - FS_TYPE]
+    mov [rax], cl
+    mov byte [rax + 1], 0x27        ; a closing quote
+    mov byte [rax + 2], '.'
+    mov byte [rax + 3], 0
+    lea rdi, [rel exc_ValueError_type]
+    mov rsi, rsp
+    call raise_exception
+
+.fs_body_char:
+    ; `c` is the character the number names, and CPython refuses every flag
+    ; that only makes sense for a number beside it: a sign, an alternate form,
+    ; a separator and a precision.
+    ;
+    ; A float never reaches the integer formatter at all in CPython, so it
+    ; gets the type's own complaint rather than the index protocol's.
+    lea rax, [rel float_type]
+    cmp r15, rax
+    je .fs_bad_numeric_type
+    cmp qword [rbp - FS_SIGNGIVEN], 0
+    jne .fs_char_sign
+    cmp qword [rbp - FS_ALT], 0
+    jne .fs_char_alt
+    cmp qword [rbp - FS_PREC], -1
+    jne .fs_char_prec
+    mov rdi, [rbp - FS_VALUE]
+    V_UNPACK rdi, rdx
+    extern obj_as_index
+    call obj_as_index
+    cmp rax, 0
+    jl .fs_char_range
+    cmp rax, 0x110000
+    jae .fs_char_range
+    lea rdi, [rbp - FS_CHBUF]
+    extern ucase_utf8_put
+    call ucase_utf8_put         ; eax already holds the code point; ecx = width
+    lea rdi, [rbp - FS_CHBUF]
+    movsxd rsi, ecx
+    call str_new_heap
+    test rax, rax
+    jz .fs_failed
+    mov [rbp - FS_BODY], rax
+    jmp .fs_pad
+
+.fs_char_sign:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "Sign not allowed with integer format specifier 'c'"
+    call raise_exception
+.fs_char_alt:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "Alternate form (#) not allowed with integer format specifier 'c'"
+    call raise_exception
+.fs_char_prec:
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "Precision not allowed in integer format specifier"
+    call raise_exception
+.fs_char_range:
+    extern exc_OverflowError_type
+    lea rdi, [rel exc_OverflowError_type]
+    CSTRING rsi, "%c arg not in range(0x110000)"
+    call raise_exception
 
 .fs_body_str:
     mov rdi, [rbp - FS_VALUE]
@@ -490,11 +594,13 @@ DEF_FUNC format_apply_spec, FS_FRAME
 .fs_body_float:
     call format_float_body
     mov [rbp - FS_BODY], rax
+    call fs_apply_grouping
     jmp .fs_pad
 
 .fs_body_int:
     call format_int_body
     mov [rbp - FS_BODY], rax
+    call fs_apply_grouping
     mov rdi, [rbp - FS_OWNED]
     test rdi, rdi
     jz .fs_pad
@@ -908,27 +1014,15 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
 .fib_prefix_done:
     mov [rbp - FIB_NEG], r8             ; reuse: chars before the digits
 
-    ; digits, most significant first, with grouping every three
+    ; digits, most significant first.  The grouping is NOT done here: it is
+    ; format_group_body's, which the float path needs too and which is the
+    ; only place that knows how a zero pad and a separator interact.
     mov rcx, [rbp - FIB_LEN]
-    mov r9, [r14 - FS_GROUP]
 .fib_emit:
     test rcx, rcx
     jz .fib_emit_done
     dec rcx
     movzx eax, byte [rbx + rcx]
-    mov [rdi + r8], al
-    inc r8
-    test r9, r9
-    jz .fib_emit
-    test rcx, rcx
-    jz .fib_emit
-    mov rax, rcx
-    xor edx, edx
-    mov r10, 3
-    div r10
-    test rdx, rdx
-    jnz .fib_emit
-    mov rax, r9
     mov [rdi + r8], al
     inc r8
     jmp .fib_emit
@@ -1044,6 +1138,284 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     RAISE exc_OverflowError_type, "%c arg not in range(0x110000)"
     ud2
 END_FUNC format_int_body
+
+;; ============================================================================
+;; fs_apply_grouping() -> nothing (FS_BODY replaced when a separator was asked
+;;   for)
+;;
+;; A local, not a function: it reads and writes the caller's FS_* slots, which
+;; is why it takes nothing.  Both number formatters end here, so the rule
+;; about how a zero pad and a separator interact is written once.
+;; ============================================================================
+fs_apply_grouping:
+    cmp qword [rbp - FS_GROUP], 0
+    je .fag_done
+    push rbx
+    sub rsp, 8
+    mov rdi, [rbp - FS_BODY]
+    mov rsi, [rbp - FS_GROUP]
+    ; Hexadecimal, octal and binary group in fours; everything else in threes.
+    xor edx, edx
+    mov rax, [rbp - FS_TYPE]
+    cmp rax, 'x'
+    je .fag_wide
+    cmp rax, 'X'
+    je .fag_wide
+    cmp rax, 'o'
+    je .fag_wide
+    cmp rax, 'b'
+    jne .fag_have_base
+.fag_wide:
+    mov edx, 1
+.fag_have_base:
+    ; A zero pad is grouped into; any other fill is applied afterwards, by
+    ; the ordinary padding stage, and must not reach here as a width.
+    xor ecx, ecx
+    cmp qword [rbp - FS_ZERO], 0
+    je .fag_have_width
+    cmp qword [rbp - FS_ALIGN], '='
+    jne .fag_have_width
+    mov rcx, [rbp - FS_WIDTH]
+.fag_have_width:
+    call format_group_body
+    mov rbx, rax
+    mov rdi, [rbp - FS_BODY]
+    call obj_decref
+    mov [rbp - FS_BODY], rbx
+    add rsp, 8
+    pop rbx
+.fag_done:
+    ret
+
+;; ============================================================================
+;; format_group_body(rdi = the formatted body, esi = the separator character,
+;;                   edx = 1 when the digits are hexadecimal, rcx = the field
+;;                   width when a zero pad has to be grouped into, else 0)
+;;   -> rax = a NEW str, owned; the caller releases the body it passed
+;;
+;; One implementation for both formatters.  format_int_body used to group as
+;; it emitted, and format_float_body did not group at all, so
+;; format(1234567, ",") was right and format(1234567.5, ",.2f") answered
+;; '1234567.50'.
+;;
+;; Two things beyond inserting a character every three digits:
+;;
+;;   * `_` on a hex, octal or binary presentation groups every FOUR, which is
+;;     what a machine word is read in.  `,` is refused on those before it
+;;     reaches here.
+;;
+;;   * A zero pad is filled INTO the grouping, not before it: format(0, "012,")
+;;     is '0,000,000,000', which is thirteen characters for a width of twelve,
+;;     because the separators do not count toward the digits the pad owes.
+;;     The digit count grows until digits + separators reaches what is left of
+;;     the width once the sign, the base prefix and the fraction have taken
+;;     their share.
+;; ============================================================================
+FGB_BODY  equ 8
+FGB_SEP   equ 16
+FGB_GS    equ 24            ; 3, or 4 when the digits are hexadecimal
+FGB_WIDTH equ 32
+FGB_HEAD  equ 40            ; bytes before the digits: sign, and any 0x
+FGB_NDIG  equ 48            ; digits the body actually has
+FGB_TAIL  equ 56            ; where the digits end
+FGB_OUT   equ 64
+FGB_D     equ 72            ; digit positions to emit, once the pad is in
+FGB_FRAME equ 96            ; + 2 pushes = 112, 16-aligned
+DEF_FUNC_LOCAL format_group_body, FGB_FRAME
+    push rbx
+    push r12
+    mov [rbp - FGB_BODY], rdi
+    mov [rbp - FGB_SEP], rsi
+    mov [rbp - FGB_WIDTH], rcx
+    ; `_` on a hex, octal or binary presentation groups every FOUR digits,
+    ; which is how a machine word is read.  `,` is refused on those before it
+    ; reaches here, so the separator itself need not be consulted.
+    mov rax, 3
+    test rdx, rdx
+    jz .fgb_have_gs
+    mov rax, 4
+.fgb_have_gs:
+    mov [rbp - FGB_GS], rax
+    mov [rbp - FGB_D], rdx      ; parked: whether the digits are hexadecimal
+    mov rbx, rdi
+    mov r12, [rbx + PyStrObject.ob_size]
+
+    ; --- the head: a sign, then a base prefix ---------------------------
+    xor ecx, ecx
+    test r12, r12
+    jz .fgb_asis
+    movzx eax, byte [rbx + PyStrObject.data]
+    cmp al, '-'
+    je .fgb_sign
+    cmp al, '+'
+    je .fgb_sign
+    cmp al, ' '
+    jne .fgb_no_sign
+.fgb_sign:
+    mov ecx, 1
+.fgb_no_sign:
+    lea rax, [rcx + 2]
+    cmp rax, r12
+    ja .fgb_no_prefix
+    cmp byte [rbx + PyStrObject.data + rcx], '0'
+    jne .fgb_no_prefix
+    movzx eax, byte [rbx + PyStrObject.data + rcx + 1]
+    or al, 0x20
+    cmp al, 'x'
+    je .fgb_prefix
+    cmp al, 'o'
+    je .fgb_prefix
+    cmp al, 'b'
+    jne .fgb_no_prefix
+.fgb_prefix:
+    add rcx, 2
+.fgb_no_prefix:
+    mov [rbp - FGB_HEAD], rcx
+
+    ; --- the digits ------------------------------------------------------
+    mov rdx, rcx
+.fgb_scan:
+    cmp rdx, r12
+    jge .fgb_scanned
+    movzx eax, byte [rbx + PyStrObject.data + rdx]
+    cmp al, '0'
+    jb .fgb_scanned
+    cmp al, '9'
+    jbe .fgb_digit
+    cmp qword [rbp - FGB_D], 0      ; hexadecimal?
+    je .fgb_scanned
+    or al, 0x20
+    cmp al, 'a'
+    jb .fgb_scanned
+    cmp al, 'f'
+    ja .fgb_scanned
+.fgb_digit:
+    inc rdx
+    jmp .fgb_scan
+.fgb_scanned:
+    mov [rbp - FGB_TAIL], rdx
+    sub rdx, rcx
+    mov [rbp - FGB_NDIG], rdx
+    test rdx, rdx
+    jle .fgb_asis
+
+    ; --- how many digit positions, once the zero pad is folded in --------
+    mov [rbp - FGB_D], rdx
+    mov rcx, [rbp - FGB_WIDTH]
+    test rcx, rcx
+    jz .fgb_have_d
+    ; What the digits owe: the width, less the head and everything after
+    ; them.  The separators do not count toward it, which is why
+    ; format(0, "012,") is thirteen characters for a width of twelve.
+    sub rcx, [rbp - FGB_HEAD]
+    mov rax, r12
+    sub rax, [rbp - FGB_TAIL]
+    sub rcx, rax
+    jle .fgb_have_d
+.fgb_grow:
+    mov rsi, [rbp - FGB_GS]
+    mov rax, [rbp - FGB_D]
+    add rax, rsi
+    dec rax
+    xor edx, edx
+    div rsi                     ; groups = ceil(d / size)
+    add rax, [rbp - FGB_D]
+    dec rax                     ; total = d + groups - 1
+    cmp rax, rcx
+    jge .fgb_have_d
+    inc qword [rbp - FGB_D]
+    jmp .fgb_grow
+.fgb_have_d:
+
+    ; --- the new string ---------------------------------------------------
+    mov rsi, [rbp - FGB_GS]
+    mov rax, [rbp - FGB_D]
+    add rax, rsi
+    dec rax
+    xor edx, edx
+    div rsi
+    dec rax                     ; separators = groups - 1
+    add rax, [rbp - FGB_D]
+    add rax, [rbp - FGB_HEAD]
+    mov rcx, r12
+    sub rcx, [rbp - FGB_TAIL]
+    add rax, rcx                ; the whole length
+
+    ; The result is ASCII whatever the body was: digits, a separator and the
+    ; body's own tail, which for a number is a dot, an exponent or a percent.
+    mov rdi, rax
+    mov rsi, rax
+    extern str_alloc_bytes
+    call str_alloc_bytes
+    test rax, rax
+    jz .fgb_asis
+    mov [rbp - FGB_OUT], rax
+
+    lea rdi, [rax + PyStrObject.data]
+    lea rsi, [rbx + PyStrObject.data]
+    mov rdx, [rbp - FGB_HEAD]
+    test rdx, rdx
+    jz .fgb_head_done
+    call ap_memcpy
+.fgb_head_done:
+
+    ; digits, most significant first, with a separator every group and a
+    ; zero for any position the body itself does not have
+    mov rax, [rbp - FGB_OUT]
+    lea r8, [rax + PyStrObject.data]
+    add r8, [rbp - FGB_HEAD]
+    mov rcx, [rbp - FGB_D]
+.fgb_emit:
+    test rcx, rcx
+    jz .fgb_emit_done
+    dec rcx
+    mov eax, '0'
+    cmp rcx, [rbp - FGB_NDIG]
+    jae .fgb_emit_ch
+    mov rdx, [rbp - FGB_TAIL]
+    sub rdx, rcx
+    dec rdx
+    movzx eax, byte [rbx + PyStrObject.data + rdx]
+.fgb_emit_ch:
+    mov [r8], al
+    inc r8
+    test rcx, rcx
+    jz .fgb_emit
+    mov rax, rcx
+    xor edx, edx
+    div qword [rbp - FGB_GS]
+    test rdx, rdx
+    jnz .fgb_emit
+    mov rax, [rbp - FGB_SEP]
+    mov [r8], al
+    inc r8
+    jmp .fgb_emit
+.fgb_emit_done:
+
+    ; whatever followed the digits
+    mov rdi, r8
+    lea rsi, [rbx + PyStrObject.data]
+    add rsi, [rbp - FGB_TAIL]
+    mov rdx, r12
+    sub rdx, [rbp - FGB_TAIL]
+    test rdx, rdx
+    jz .fgb_tail_done
+    call ap_memcpy
+.fgb_tail_done:
+    mov rax, [rbp - FGB_OUT]
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.fgb_asis:
+    mov rax, [rbp - FGB_BODY]
+    INCREF rax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC format_group_body
 
 ;; ============================================================================
 ;; format_float_body -> rax = str

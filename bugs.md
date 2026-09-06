@@ -127,6 +127,32 @@ reasoning that chose them and what changing one would cost.
   statement's by the time the back edge is emitted.  A `.lastline` field
   written by `cg_emit` is the shape; `.pad5` is there to take it.
 
+- **Five families of format-spec difference, found by fuzzing the whole
+  grammar.**  Four thousand randomly assembled specs -- fill, align, sign,
+  `#`, `0`, width, separator, precision, type -- over seventeen values, diffed
+  against `python3`.  Grouping is not among them; these are what was left
+  once it was fixed:
+
+  - **An explicit fill and align, then a `0`.**  `format(-7, "*^-05d")` is
+    `'*-7**'` in CPython and `'0-700'` here: the `0` flag overwrites the fill
+    character that was already given, where CPython leaves an explicit fill
+    alone and lets `0` supply one only when none was written.
+  - **A precision on an integer presentation is not refused.**
+    `format(255, "#020.7")` answers a number here and is
+    `ValueError: Precision not allowed in integer format specifier` there.
+  - **`n` accepts a separator.**  `format(10**25, "0>#0,n")` groups here;
+    CPython says `Cannot specify ',' with 'n'.` because `n` takes its
+    separator from the locale.
+  - **`Invalid format specifier` names neither the spec nor the type.**
+    CPython's is `Invalid format specifier '*#012' for object of type 'int'`.
+  - **`#` with an empty float type.**  `format(0.0, "#12.0")` is `' 0.e+00'`
+    in CPython and `' 0.0'` here: an empty type with a precision behaves as
+    `e`, and `#` keeps the point.
+
+  `tests/test_format_grouping.py` covers the grouping; none of these has a
+  test yet, and the corpus that found them is worth keeping -- a
+  `tests/formatfuzz_probe.sh` beside the type one is the shape.
+
 - **`int / int` double-rounds when either operand is wider than a double.**
   `(10**30) / 7` answers `1.4285714285714283e+29` where CPython answers
   `1.4285714285714285e+29`, and `1 / 10**30` is out by an ulp the same way.
