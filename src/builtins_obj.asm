@@ -143,51 +143,16 @@ DEF_FUNC builtin_callable
     ja .callable_false
     mov rdi, [rdi]                     ; args[0] payload
 
-    ; Get type of arg
+    ; CPython's answer is one line -- type(x)->tp_call != NULL -- and this can
+    ; finally give the same one.  It used to name three static types it knew
+    ; had callable instances (func, builtin_func, method) and test tp_call
+    ; only for heaptypes, because until slot_tp_call existed a heaptype's
+    ; tp_call was always 0 and the allowlist was the only thing that could
+    ; work.  An allowlist answers every type nobody thought of wrong:
+    ; callable(weakref.ref(x)) was False despite weakrefmod setting tp_call.
     mov rax, [rdi + PyObject.ob_type]
-
-    ; Check if arg is a type (all types are callable via type_call)
-    extern type_type
-    lea rcx, [rel type_type]
-    cmp rax, rcx
-    je .callable_true
-    extern exc_metatype
-    lea rcx, [rel exc_metatype]
-    cmp rax, rcx
-    je .callable_true
-    lea rcx, [rel user_type_metatype]
-    cmp rax, rcx
-    je .callable_true
-
-    ; For heaptypes (user-defined classes): tp_call is set only when __call__ defined
-    mov rdx, [rax + PyTypeObject.tp_flags]
-    test rdx, TYPE_FLAG_HEAPTYPE
-    jnz .callable_check_heaptype
-
-    ; For built-in types: only known callable types return True
-    ; (func, builtin_func, method have genuinely callable instances)
-    extern func_type
-    lea rcx, [rel func_type]
-    cmp rax, rcx
-    je .callable_true
-    extern builtin_func_type
-    lea rcx, [rel builtin_func_type]
-    cmp rax, rcx
-    je .callable_true
-    extern method_type
-    lea rcx, [rel method_type]
-    cmp rax, rcx
-    je .callable_true
-
-    ; Not a known callable built-in type (dict, list, set, etc. instances → not callable)
-    jmp .callable_false
-
-.callable_check_heaptype:
-    ; Heaptype instance: check if type has tp_call set (set when __call__ defined)
-    mov rcx, [rax + PyTypeObject.tp_call]
-    test rcx, rcx
-    jnz .callable_true
-    jmp .callable_false
+    cmp qword [rax + PyTypeObject.tp_call], 0
+    je .callable_false
 
 .callable_true:
     RET_TRUE

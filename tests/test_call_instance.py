@@ -72,6 +72,21 @@ class Later:
 
 
 print(callable(NoCall()), callable(Later()))
+
+# builtins whose instances are callable through a real tp_call.  callable()
+# used to answer these from a three-name allowlist, so anything outside it --
+# a weakref, an itemgetter -- came back False however genuinely callable it
+# was.  It reads tp_call now, the way CPython's PyCallable_Check does.
+import functools
+import operator
+
+print([callable(x) for x in (operator.itemgetter(0), operator.attrgetter("x"),
+                             operator.methodcaller("upper"),
+                             functools.partial(len), functools.partial(len, []),
+                             property(), classmethod(len), memoryview(b"a"),
+                             bytearray(), frozenset(), NotImplemented,
+                             Ellipsis, __debug__ if False else ...)])
+print(operator.itemgetter(1)([7, 8]), functools.partial(len)("abc"))
 Later.__call__ = lambda self: "late"
 print(callable(Later()), Later()())
 # `del Later.__call__` is not probed: type_install_slots never clears a slot
