@@ -21,6 +21,7 @@ extern none_singleton
 extern bool_true
 extern bool_false
 extern dict_new
+extern str_intern
 extern dict_set
 extern dict_get
 extern list_new
@@ -1457,29 +1458,13 @@ DEF_FUNC sys_intern_func
     cmp rax, rcx
     jne .si_not_str
 
-    mov rax, [rel sys_intern_table]
-    test rax, rax
-    jnz .si_have_table
-    call dict_new
-    mov [rel sys_intern_table], rax
-.si_have_table:
-    mov rdi, [rel sys_intern_table]
-    mov rsi, rbx
-    call dict_get
-    test rax, rax
-    jz .si_insert
-    mov rbx, rax
-    jmp .si_return
-.si_insert:
-    mov rdi, [rel sys_intern_table]
-    mov rsi, rbx
-    mov rdx, rbx
-    call dict_set
-.si_return:
+    ; The one table, the same one marshal and the compiler file names in.
+    ; This used to be a private dict of its own, so `sys.intern('foo') is
+    ; 'foo'` was False here and True in CPython -- and functools and enum
+    ; intern names and then compare them with `is`, so every such comparison
+    ; was False.
     mov rdi, rbx
-    call obj_incref
-    mov rax, rbx
-    mov edx, TAG_PTR
+    call str_intern
     pop rbx
     leave
     V_PACK rax, rdx

@@ -1917,7 +1917,12 @@ DEF_FUNC pf_string, PS2_FRAME
     mov rsi, [rbp - PS2_BUF + Buf.len]
     cmp qword [rbp - PS2_BYTES], 0
     jne .make_bytes
-    call str_new_heap
+    ; comp_intern, not str_new_heap: this is where a plain string LITERAL
+    ; becomes an object, and comp_intern is what decides whether it is shared.
+    ; comp_intern's docblock claimed every string went through it; this call
+    ; site was the counterexample, and an intern table it never reached is a
+    ; table that does nothing for constants.
+    call comp_intern
     jmp .have_object
 .make_bytes:
     call bytes_from_data
