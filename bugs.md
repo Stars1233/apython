@@ -44,21 +44,6 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **`split()`, `strip()` and friends do not see the non-ASCII whitespace.**
-  CPython splits on U+0085, U+00A0, U+2028, U+2029, U+3000 and the U+2000
-  block as readily as on a space: `"a\xa0b".split()` is `['a', 'b']` there and
-  `['a\xa0b']` here, and `"\xa0mid\xa0".strip()` is `'mid'` there and
-  unchanged here.  The four ASCII separators `\x1c`-`\x1f` were missing for
-  the same reason until 2026-09-06 and are now in `str_ws_class`.
-
-  A byte table cannot close the rest: every one of those characters is two or
-  three bytes in UTF-8, so the scan loops in `str_split_impl` and
-  `str_strip_impl` would have to decode code points rather than walk bytes.
-  The shape that fits is the one `str_case_map` already uses -- an ASCII fast
-  path over bytes, chosen by `ob_size == ob_length`, and a decoding loop
-  behind it.  `splitlines` has its own, different set (it takes `\x1c` and
-  U+2028 but not `\x1f` or U+00A0) and the same gap.
-
 - **A read-only property's AttributeError has CPython 3.10's wording.**
   `Plain().r = 2` says `can't set attribute` where CPython 3.12 says
   `property 'r' of 'Plain' object has no setter`, and the deleter case is the

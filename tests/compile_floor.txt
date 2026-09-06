@@ -458,6 +458,7 @@ test_str_translate_mapping
 test_str_translate
 test_struct_binascii
 test_structseq
+test_str_unicode_space
 test_subclass_binop
 test_subclass_compare_float
 test_subclass_contains
