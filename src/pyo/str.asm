@@ -1453,51 +1453,72 @@ DEF_FUNC str_hash
     cmp rax, -1
     jne .done
 
-    ; Compute FNV-1a
     mov rcx, [rdi + PyStrObject.ob_size]
-    lea rsi, [rdi + PyStrObject.data]
-    mov rax, 0xcbf29ce484222325     ; FNV offset basis
-    mov rdx, 0x100000001b3          ; FNV prime
-    ; 4x unrolled FNV-1a loop
-align 16
-.loop4:
-    cmp rcx, 4
-    jb .tail
-    movzx r8d, byte [rsi]
-    xor rax, r8
-    imul rax, rdx
-    movzx r8d, byte [rsi+1]
-    xor rax, r8
-    imul rax, rdx
-    movzx r8d, byte [rsi+2]
-    xor rax, r8
-    imul rax, rdx
-    movzx r8d, byte [rsi+3]
-    xor rax, r8
-    imul rax, rdx
-    add rsi, 4
-    sub rcx, 4
-    jmp .loop4
-.tail:
-    test rcx, rcx
-    jz .store
-    movzx r8d, byte [rsi]
-    xor rax, r8
-    imul rax, rdx
-    inc rsi
-    dec rcx
-    jmp .tail
-.store:
-    ; Ensure hash is never -1
-    cmp rax, -1
-    jne .cache
-    mov rax, -2
-.cache:
+    push rdi
+    lea rdi, [rdi + PyStrObject.data]
+    mov rsi, rcx
+    push rsi                        ; two slots: rsp stays 16-aligned
+    call str_hash_bytes
+    pop rsi
+    pop rdi
     mov [rdi + PyStrObject.ob_hash], rax
 .done:
     leave
     ret
 END_FUNC str_hash
+
+;; ============================================================================
+;; str_hash_bytes(const char *data, int64_t len) -> rax = the hash
+;;
+;; str_hash's body, given the bytes rather than the object.  The intern table
+;; keys on (data, len) with no object in hand, and a table that disagreed with
+;; str_hash about a string's hash would put the same string in two places --
+;; so there is one implementation and both callers use it.
+;;
+;; FNV-1a, unseeded.  That is a recorded divergence from CPython's siphash13
+;; and not an oversight; the value is never exposed by anything but hash()
+;; itself, and siphash would be slower.
+;; ============================================================================
+DEF_FUNC_BARE str_hash_bytes
+    mov rax, 0xcbf29ce484222325     ; FNV offset basis
+    mov rdx, 0x100000001b3          ; FNV prime
+    ; 4x unrolled FNV-1a loop
+align 16
+.loop4:
+    cmp rsi, 4
+    jb .tail
+    movzx r8d, byte [rdi]
+    xor rax, r8
+    imul rax, rdx
+    movzx r8d, byte [rdi+1]
+    xor rax, r8
+    imul rax, rdx
+    movzx r8d, byte [rdi+2]
+    xor rax, r8
+    imul rax, rdx
+    movzx r8d, byte [rdi+3]
+    xor rax, r8
+    imul rax, rdx
+    add rdi, 4
+    sub rsi, 4
+    jmp .loop4
+.tail:
+    test rsi, rsi
+    jz .fin
+    movzx r8d, byte [rdi]
+    xor rax, r8
+    imul rax, rdx
+    inc rdi
+    dec rsi
+    jmp .tail
+.fin:
+    ; -1 is the "not computed yet" sentinel, so no string may hash to it.
+    cmp rax, -1
+    jne .out
+    mov rax, -2
+.out:
+    ret
+END_FUNC str_hash_bytes
 
 ;; ============================================================================
 ;; str_concat(PyObject *a, PyObject *b, ?, ecx=right_tag) -> (rax,edx) fat value
