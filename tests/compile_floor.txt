@@ -424,6 +424,7 @@ test_stdlib_glue
 test_stdlib_shims
 test_stdout_buffering
 test_str_case
+test_str_compare_spec
 test_str_decode
 test_strfmt
 test_str_format
@@ -436,6 +437,7 @@ test_str_methods_extra
 test_str_methods_fix
 test_str_mod_subclass
 test_str_predicates
+test_str_search_primitives
 test_str_search
 test_str_subclass_dict
 test_str_subclass_slots

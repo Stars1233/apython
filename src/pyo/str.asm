@@ -8,6 +8,7 @@ extern none_singleton
 extern ap_malloc
 extern ap_free
 extern ap_strlen
+extern ap_memcmp
 extern ap_memcpy
 extern ap_strcmp
 extern bool_true
@@ -1560,8 +1561,16 @@ DEF_FUNC str_compare
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     push rbx
+    push r12
 
     mov ebx, edx            ; save op
+
+    ; --- Identity, before either string's data is touched ---
+    ; CPython answers this in PyUnicode_RichCompare ahead of everything else.
+    ; A str is never a NaN, so one object compares equal to itself under every
+    ; op, and the common `s == s` from a dict probe costs one compare.
+    cmp rdi, rsi
+    je .identical
 
     ; --- Resolve right operand to a data pointer (-> rsi) ---
     ; Non-string guard: TAG_RC_BIT (bit 8) is set only for TAG_PTR (0x105).
@@ -1572,16 +1581,53 @@ DEF_FUNC str_compare
     ; Heap pointer — verify ob_type == str_type
     mov rax, [rsi + PyObject.ob_type]
     REQUIRE_STR_TYPE rax, rdx, .not_string
+
+    ; --- Compare over the byte lengths, NOT as C strings ---
+    ; These are counted strings and a NUL is an ordinary byte, so `ap_strcmp`
+    ; was wrong here: "a\0b" == "a\0c" answered True and "a\0b" < "a\0c"
+    ; answered False.  str_contains was moved off ap_strstr for exactly this
+    ; reason; this was the half that was missed.
+    ;
+    ; Byte order is also the right ORDER: UTF-8 is constructed so that
+    ; comparing encoded bytes lexicographically gives the same answer as
+    ; comparing code points, so one ap_memcmp serves <, <=, > and >= over any
+    ; string, ASCII or not.
+    mov r12, [rdi + PyStrObject.ob_size]        ; left length, in bytes
+    mov rdx, [rsi + PyStrObject.ob_size]        ; right length, in bytes
+    lea rdi, [rdi + PyStrObject.data]
     lea rsi, [rsi + PyStrObject.data]
 
-    ; --- Resolve left operand to a data pointer (-> rdi) ---
-    ; Heap str — no type check needed (caller dispatched via str_type)
-    lea rdi, [rdi + PyStrObject.data]
+    cmp r12, rdx
+    je .cmp_common                              ; equal lengths: compare it all
+    ; Lengths differ.  Narrow rdx to the common prefix HERE, while the flags
+    ; from that compare are still the ones that were set -- the op dispatch
+    ; below is itself a compare and would overwrite them.
+    cmovb rdx, r12                              ; rdx = min(left, right)
 
-    ; --- Compare the two null-terminated data pointers ---
-    call ap_strcmp
-    ; eax = strcmp result
+    ; For == and != a length mismatch IS the answer -- no data is read at all,
+    ; which is the cheap exit a dict lookup or a keyword match takes.
+    cmp ebx, PY_EQ
+    je .ret_false
+    cmp ebx, PY_NE
+    je .ret_true
+    ; Ordering: compare the common prefix, and only if that matches does the
+    ; shorter string win by being a prefix of the longer.
+    call ap_memcmp                              ; preserves rdx
+    test eax, eax
+    jnz .dispatch
+    ; The prefix matched, so whichever ran out first is the smaller.  rdx is
+    ; still the length compared, and it equals the left length exactly when
+    ; the left string is the shorter one.
+    mov eax, 1
+    cmp r12, rdx
+    jne .dispatch
+    mov eax, -1
+    jmp .dispatch
 
+.cmp_common:
+    call ap_memcmp
+
+.dispatch:
     ; Dispatch on comparison op (ebx)
     cmp ebx, PY_NE
     je .do_ne
@@ -1618,6 +1664,13 @@ DEF_FUNC str_compare
     jg .ret_true
     jmp .ret_false
 
+.identical:
+    ; The same object.  Zero is what ap_memcmp would have returned, so the
+    ; ordinary dispatch below turns it into True for ==, <= and >= and False
+    ; for the other three.
+    xor eax, eax
+    jmp .dispatch
+
 .not_string:
     ; Right operand is not a string: DECLINE, for every op.
     ;
@@ -1628,17 +1681,20 @@ DEF_FUNC str_compare
     ; False where CPython calls S.__eq__, and by name str.__eq__('a', 1) was
     ; False where CPython says NotImplemented.
     RET_NULL
+    pop r12
     pop rbx
     leave
     ret
 
 .ret_true:
     RET_TRUE
+    pop r12
     pop rbx
     leave
     ret
 .ret_false:
     RET_FALSE
+    pop r12
     pop rbx
     leave
     ret
