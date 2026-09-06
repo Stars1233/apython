@@ -10,6 +10,7 @@
 
 
 ; External functions
+extern str_alloc_bytes
 extern str_cp_width
 extern ap_malloc
 extern ap_free
@@ -1003,6 +1004,8 @@ SJ_TOTAL equ 48
 SJ_BUF   equ 56
 SJ_POS   equ 64
 SJ_TMP   equ 72         ; materialised sequence, owned, or 0
+SJ_CPLEN equ 80         ; code points in the result, summed rather than rescanned
+SJ_RESULT equ 88        ; the PyStrObject being built
 DEF_FUNC str_method_join
     push rbx
     push r12
@@ -1062,8 +1065,31 @@ DEF_FUNC str_method_join
     test r13, r13
     jz .join_empty
 
+    ; One item, already exactly a str: hand back the item itself.  The
+    ; separator never appears between one thing, so there is nothing to build
+    ; and nothing to copy.  CPython takes the same exit in
+    ; _PyUnicode_JoinArray, and for the same reason it is limited to an EXACT
+    ; str -- a subclass has to be converted, or join would return the subclass.
+    cmp r13, 1
+    jne .join_sized
+    mov rax, [r12 + PyListObject.ob_item]
+    mov rax, [rax]
+    V_TEST_PTR rax, rcx
+    ja .join_sized
+    test rax, rax
+    jz .join_sized
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .join_sized
+    INCREF rax
+    mov [rbp - SJ_RESULT], rax
+    jmp .join_return
+
+.join_sized:
     ; First pass: compute total length
     xor r15d, r15d          ; r15 = total data length
+    mov qword [rbp - SJ_CPLEN], 0
     xor ecx, ecx
 .join_len_loop:
     cmp rcx, r13
@@ -1078,6 +1104,10 @@ DEF_FUNC str_method_join
     mov rdi, [rax + PyObject.ob_type]
     REQUIRE_STR_TYPE rdi, r8, .join_type_error
     add r15, [rax + PyStrObject.ob_size]
+    ; Joining whole strings joins their code points too, so the count is
+    ; arithmetic.  str_new_heap used to rescan the finished buffer for it.
+    mov rdi, [rax + PyStrObject.ob_length]
+    add [rbp - SJ_CPLEN], rdi
     pop rcx
     inc rcx
     jmp .join_len_loop
@@ -1089,11 +1119,20 @@ DEF_FUNC str_method_join
     imul rax, r14
     add r15, rax
     mov [rbp - SJ_TOTAL], r15   ; total_len
+    ; and the separator's code points, the same way
+    mov rax, r13
+    dec rax
+    imul rax, [rbx + PyStrObject.ob_length]
+    add [rbp - SJ_CPLEN], rax
 
-    ; Allocate buffer
-    lea rdi, [r15 + 8]
-    call ap_malloc
-    mov [rbp - SJ_BUF], rax     ; buf_ptr
+    ; Allocate the RESULT, not a scratch buffer.  The pieces are copied into
+    ; it once; there is no second malloc, no second copy and no rescan.
+    mov rdi, r15
+    mov rsi, [rbp - SJ_CPLEN]
+    call str_alloc_bytes
+    mov [rbp - SJ_RESULT], rax
+    lea rax, [rax + PyStrObject.data]
+    mov [rbp - SJ_BUF], rax     ; the write cursor's base
     mov qword [rbp - SJ_POS], 0 ; write_pos = 0
 
     ; Second pass: copy data
@@ -1133,20 +1172,13 @@ DEF_FUNC str_method_join
     jmp .join_copy_loop
 
 .join_make_str:
-    mov rdi, [rbp - SJ_BUF]
-    mov rsi, [rbp - SJ_TOTAL]   ; total_len
-    call str_new_heap
-    push rax
-
-    mov rdi, [rbp - SJ_BUF]
-    call ap_free
-
+.join_return:
     ; DECREF owned separator
     mov rdi, rbx
     call obj_decref
     JOIN_RELEASE_TMP
 
-    pop rax
+    mov rax, [rbp - SJ_RESULT]
     mov edx, TAG_PTR
     add rsp, 56
     pop r15

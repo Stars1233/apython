@@ -25,6 +25,8 @@ extern ap_malloc
 extern ap_free
 extern ap_memcpy
 extern str_new_heap
+extern str_alloc_bytes
+extern ap_memcpy
 extern str_set_length
 extern raise_exception
 extern exc_TypeError_type
@@ -463,17 +465,55 @@ DEF_FUNC str_case_map, SC_FRAME
     cmp rcx, rax
     jne .sc_wide
 
-    mov rdi, [rbp - SC_DATA]
+    ; ASCII in, ASCII out, and the same number of code points as bytes -- so
+    ; the result's size is known exactly and str_new_heap's rescan for the
+    ; code-point count is pure waste.
+    mov rdi, rax
     mov rsi, rax
-    call str_new_heap
+    call str_alloc_bytes
     test rax, rax
     jz .sc_oom
     mov [rbp - SC_OUT], rax
+    mov rdi, [rbp - SC_DATA]
     lea r8, [rax + PyStrObject.data]
     mov r9, [rbp - SC_LEN]
     mov rdx, [rbp - SC_MODE]
+
+    ; Four of the six modes are per-byte and stateless, so the mode test does
+    ; not belong inside the loop -- it was five compares for every character.
+    ; Each gets its own loop, and each does eight bytes at a time.
+    ;
+    ; The whole word is decided arithmetically.  For a byte c, `c + 0x1f` has
+    ; bit 7 set exactly when c >= 'a', and `c + 0x05` has it set exactly when
+    ; c > 'z', so `(c+0x1f) & ~(c+0x05) & 0x80` marks the lowercase letters and
+    ; nothing else.  Every byte here is below 0x80 -- that is what ob_size ==
+    ; ob_length told us -- so neither addition can carry out of its byte and
+    ; the eight lanes stay independent.  Shifting the marks down two gives
+    ; 0x20 under each letter, which is the case bit.
+    cmp rdx, CASE_UPPER
+    je .sc_a_swar_upper
+    cmp rdx, CASE_LOWER
+    je .sc_a_swar_lower
+    cmp rdx, CASE_CASEFOLD
+    je .sc_a_swar_lower         ; ASCII casefold is ASCII lower
+    cmp rdx, CASE_SWAPCASE
+    je .sc_a_swar_swap
+
+    ; capitalize and title are stateful -- each character depends on the one
+    ; before it -- so they keep the byte loop.
+    mov rsi, rdi
     xor r11d, r11d              ; index
     xor r10d, r10d              ; the previous character was cased
+.sc_a_seed:
+    cmp r11, r9
+    jge .sc_ascii_loop_reset
+    mov cl, [rsi + r11]
+    mov [r8 + r11], cl
+    inc r11
+    jmp .sc_a_seed
+.sc_ascii_loop_reset:
+    xor r11d, r11d
+    xor r10d, r10d
 .sc_ascii_loop:
     cmp r11, r9
     jge .sc_ascii_done
@@ -540,6 +580,126 @@ DEF_FUNC str_case_map, SC_FRAME
     mov [r8 + r11], cl
     inc r11
     jmp .sc_ascii_loop
+.sc_a_swar_upper:
+    ; rdi = source, r8 = destination, r9 = byte count.  r12..r15 are free
+    ; here -- the function saved them on entry and the ASCII path uses none of
+    ; them -- so every mask sits in a register.  None of these constants fits
+    ; an AND's 32-bit immediate, and NASM will quietly sign-extend a truncated
+    ; one rather than refuse it, which corrupts exactly the top four bytes of
+    ; every word.
+    xor r11d, r11d
+    mov r12, 0x1f1f1f1f1f1f1f1f
+    mov r13, 0x0505050505050505
+    mov r14, 0x8080808080808080
+.sc_a_up_word:
+    lea rcx, [r11 + 8]
+    cmp rcx, r9
+    ja .sc_a_up_tail
+    mov rax, [rdi + r11]
+    lea rcx, [rax + r12]        ; c + 0x1f: bit 7 set when c >= 'a'
+    mov rdx, rax
+    add rdx, r13                ; c + 0x05: bit 7 set when c > 'z'
+    not rdx
+    and rcx, rdx
+    and rcx, r14                ; 0x80 under each lowercase letter
+    shr rcx, 2                  ; ... becomes 0x20, the case bit
+    sub rax, rcx
+    mov [r8 + r11], rax
+    add r11, 8
+    jmp .sc_a_up_word
+.sc_a_up_tail:
+    cmp r11, r9
+    jge .sc_ascii_done
+    movzx ecx, byte [rdi + r11]
+    mov eax, ecx
+    sub eax, 'a'
+    cmp eax, 'z' - 'a'
+    ja .sc_a_up_put
+    sub ecx, 32
+.sc_a_up_put:
+    mov [r8 + r11], cl
+    inc r11
+    jmp .sc_a_up_tail
+
+.sc_a_swar_lower:
+    ; The mirror: `c + 0x3f` marks c >= 'A' and `c + 0x25` marks c > 'Z'.
+    xor r11d, r11d
+    mov r12, 0x3f3f3f3f3f3f3f3f
+    mov r13, 0x2525252525252525
+    mov r14, 0x8080808080808080
+.sc_a_lo_word:
+    lea rcx, [r11 + 8]
+    cmp rcx, r9
+    ja .sc_a_lo_tail
+    mov rax, [rdi + r11]
+    lea rcx, [rax + r12]
+    mov rdx, rax
+    add rdx, r13
+    not rdx
+    and rcx, rdx
+    and rcx, r14
+    shr rcx, 2
+    add rax, rcx
+    mov [r8 + r11], rax
+    add r11, 8
+    jmp .sc_a_lo_word
+.sc_a_lo_tail:
+    cmp r11, r9
+    jge .sc_ascii_done
+    movzx ecx, byte [rdi + r11]
+    mov eax, ecx
+    sub eax, 'A'
+    cmp eax, 'Z' - 'A'
+    ja .sc_a_lo_put
+    add ecx, 32
+.sc_a_lo_put:
+    mov [r8 + r11], cl
+    inc r11
+    jmp .sc_a_lo_tail
+
+.sc_a_swar_swap:
+    ; A letter of either case flips bit 5, so what has to be marked is "is a
+    ; letter" rather than "is lower" or "is upper".  Folding the case away
+    ; first -- c | 0x20 -- turns that into the single lowercase test again,
+    ; and the result is an XOR instead of an add or a subtract.  c | 0x20 is
+    ; at most 0x7f for ASCII, so it still cannot carry between lanes.
+    xor r11d, r11d
+    mov r12, 0x2020202020202020
+    mov r13, 0x1f1f1f1f1f1f1f1f
+    mov r14, 0x0505050505050505
+    mov r15, 0x8080808080808080
+.sc_a_sw_word:
+    lea rcx, [r11 + 8]
+    cmp rcx, r9
+    ja .sc_a_sw_tail
+    mov rax, [rdi + r11]
+    mov rsi, rax
+    or rsi, r12                 ; fold case away
+    lea rcx, [rsi + r13]
+    add rsi, r14
+    not rsi
+    and rcx, rsi
+    and rcx, r15
+    shr rcx, 2
+    xor rax, rcx
+    mov [r8 + r11], rax
+    add r11, 8
+    jmp .sc_a_sw_word
+.sc_a_sw_tail:
+    cmp r11, r9
+    jge .sc_ascii_done
+    movzx ecx, byte [rdi + r11]
+    mov eax, ecx
+    or al, 0x20
+    sub eax, 'a'
+    cmp eax, 'z' - 'a'
+    ja .sc_a_sw_put
+    xor ecx, 32
+.sc_a_sw_put:
+    mov [r8 + r11], cl
+    inc r11
+    jmp .sc_a_sw_tail
+
 .sc_ascii_done:
     mov rax, [rbp - SC_OUT]
     jmp .sc_out
@@ -720,17 +880,24 @@ DEF_FUNC str_case_map, SC_FRAME
     jmp .sc_wide_loop
 
 .sc_wide_done:
-    mov rdi, [rbp - SC_BUF]
-    mov rsi, r15
-    call str_new_heap
-    mov [rbp - SC_OUT], rax
-    mov rdi, [rbp - SC_BUF]
-    call ap_free
-    mov rax, [rbp - SC_OUT]
+    ; The final size is only known now, so this path does keep its scratch
+    ; buffer -- but it copies out of it once.  It used to hand the buffer to
+    ; str_new_heap, which allocated a second time, copied again and scanned
+    ; for the code-point count, and then the count was taken a SECOND time
+    ; here because str_new_heap's answer was discarded.
+    mov rdi, r15
+    xor esi, esi                ; counted below; a mapping can change it
+    call str_alloc_bytes
     test rax, rax
     jz .sc_oom
-    ; str_new_heap sets ob_size; the code-point count has to be counted.
-    mov rdi, rax
+    mov [rbp - SC_OUT], rax
+    lea rdi, [rax + PyStrObject.data]
+    mov rsi, [rbp - SC_BUF]
+    mov rdx, r15
+    call ap_memcpy
+    mov rdi, [rbp - SC_BUF]
+    call ap_free
+    mov rdi, [rbp - SC_OUT]
     call str_set_length
     mov rax, [rbp - SC_OUT]
 

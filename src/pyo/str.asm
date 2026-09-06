@@ -973,6 +973,50 @@ DEF_FUNC_BARE str_from_cstr
 END_FUNC str_from_cstr
 
 ;; ============================================================================
+;; str_alloc_bytes(int64_t nbytes, int64_t ncodepoints) -> rax = PyStrObject*
+;;
+;; An empty string of a known size, for a caller that is about to write the
+;; bytes itself.  The header is complete and the NUL padding is in place; only
+;; the data is uninitialised.
+;;
+;; This exists so that a method which already knows how long its result will be
+;; does not have to build the result twice.  The shape it replaces was: scan to
+;; size, `ap_malloc` a scratch buffer, fill it, hand it to `str_new_heap` --
+;; which mallocs a SECOND time, copies the whole thing again, and rescans it
+;; for code points a third time -- then free the scratch.  `join`, `replace`
+;; and the case mappings all had it.
+;;
+;; BOTH lengths are the caller's to supply and they are not the same number.
+;; `nbytes` is the byte count, `ncodepoints` what `len()` answers; they are
+;; equal exactly when the result is ASCII, which is what every fast path in
+;; the file tests for.  Pass 0 for `ncodepoints` and call `str_set_length`
+;; afterwards when the count is not known until the bytes are written.
+;; ============================================================================
+DEF_FUNC str_alloc_bytes
+    push rbx
+    push r12
+    mov rbx, rdi                ; nbytes
+    mov r12, rsi                ; ncodepoints
+
+    ; + 8 past the data so the word-at-a-time readers never run off the end.
+    lea rdi, [rbx + PyStrObject.data + 8]
+    call ap_malloc
+
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel str_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov [rax + PyStrObject.ob_size], rbx
+    mov [rax + PyStrObject.ob_length], r12
+    mov qword [rax + PyStrObject.ob_hash], -1
+    mov qword [rax + PyStrObject.data + rbx], 0
+
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_alloc_bytes
+
+;; ============================================================================
 ;; str_new_heap(const char *data, int64_t len) -> (rax=PyStrObject*, edx=TAG_PTR)
 ;; Always heap-allocates. For struct fields and internal use.
 ;; ============================================================================
