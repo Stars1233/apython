@@ -429,6 +429,7 @@ test_source_import
 test_sre2
 test_sre_bytes
 test_sre_groupdict_refcount
+test_sre_position
 test_sre
 test_stdlib_glue
 test_stdlib_shims

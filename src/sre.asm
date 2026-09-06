@@ -1105,32 +1105,27 @@ DEF_FUNC sre_state_init, SSI_FRAME
     mov dword [rbx + SRE_State.match_all], 0
     mov dword [rbx + SRE_State.match_depth], 0
 
-    ; Determine if ASCII or needs Unicode codepoint decode
-    ; Scan string bytes — if all < 0x80, ASCII fast path.  A BYTES subject is
-    ; byte-indexed by definition, so it takes that path whatever the values
-    ; are: \xff in bytes is one element, not the start of a sequence.
-    mov rdi, [rbx + SRE_State.str_begin]
-    mov rcx, [rbx + SRE_State.str_end]
-    sub rcx, rdi
-    cmp dword [rbx + SRE_State.is_bytes], 0
-    jne .ssi_bytes_ascii
-.ssi_bytes_ascii:
+    ; Determine if ASCII or needs Unicode codepoint decode.
+    ;
+    ; The str already knows: ob_size counts bytes and ob_length code points,
+    ; and they are equal exactly when every byte is below 0x80.  This used to
+    ; scan the whole subject a byte at a time to learn the same thing, on
+    ; every single call -- so `pat.match(s, pos)` cost O(len(s)) however
+    ; little of it the match looked at, and any parser driving a regex
+    ; forward through a string was quadratic.  json.loads spent 599 ms on
+    ; 95 KB where CPython spent 0.5.
+    ;
+    ; A BYTES subject is byte-indexed by definition, so it takes the ASCII
+    ; path whatever the values are: \xff in bytes is one element, not the
+    ; start of a sequence.  It has no ob_length to consult, which is why the
+    ; comparison sits behind the is_bytes test rather than beside it.
     mov dword [rbx + SRE_State.charsize], 1  ; assume ASCII
     mov qword [rbx + SRE_State.codepoint_buf], 0
-    test rcx, rcx
-    jz .ascii_done
     cmp dword [rbx + SRE_State.is_bytes], 0
     jne .ascii_done
-
-    xor r8d, r8d               ; index
-.scan_ascii:
-    cmp r8, rcx
-    jge .ascii_done
-    movzx eax, byte [rdi + r8]
-    cmp al, 0x80
-    jae .need_unicode
-    inc r8
-    jmp .scan_ascii
+    mov rax, [r13 + PyStrObject.ob_size]
+    cmp rax, [r13 + PyStrObject.ob_length]
+    jne .need_unicode          ; an empty str has both at 0 and lands here too
 
 .ascii_done:
     ; Pure ASCII: str_begin/str_end are byte ptrs, charsize=1

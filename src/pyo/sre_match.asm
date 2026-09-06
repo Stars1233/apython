@@ -334,18 +334,15 @@ DEF_FUNC sre_match_get_group_str
     test r14, r14
     jnz .group_ascii
 
-    ; Check if string has non-ASCII (scan for bytes >= 0x80)
+    ; ASCII or not?  ob_size counts bytes and ob_length code points, and they
+    ; are equal exactly when every byte is below 0x80 -- the same O(1) question
+    ; sre_state_init asks.  This used to scan the entire subject here too, on
+    ; every m.group(n), so an incremental parser paid for the whole string
+    ; twice per token.
     mov rdi, [rbx + SRE_MatchObject.string]
-    mov rcx, [rdi + PyStrObject.ob_size]
-    lea rdi, [rdi + PyStrObject.data]
-    xor r8d, r8d
-.group_scan_ascii:
-    cmp r8, rcx
-    jge .group_ascii
-    cmp byte [rdi + r8], 0x80
-    jae .group_unicode
-    inc r8
-    jmp .group_scan_ascii
+    mov rax, [rdi + PyStrObject.ob_size]
+    cmp rax, [rdi + PyStrObject.ob_length]
+    jne .group_unicode
 
 .group_ascii:
     ; ASCII mode: byte index = codepoint index.
