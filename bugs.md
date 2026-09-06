@@ -21,10 +21,13 @@ reasoning that chose them and what changing one would cost.
   `_typing`, the `_sha*`/`_md5` family and `_posixsubprocess` are there now,
   and `importlib`, `hashlib`, `random` and `subprocess` with them.  So is
   `_signal`, with delivery at the top of a loop the way CPython's is, and
-  `doctest`, `pdb`, `unittest` and `signal` with it.  What is left blocks one
-  or two modules apiece and is genuinely C: `zlib`, `unicodedata`,
-  `_tracemalloc`, `_symtable`, `_ssl`, `_sqlite3`, `_crypt`, `_lzma`, `_bz2`,
-  `_ctypes`, `_curses`, `pyexpat` and `_tkinter`.
+  `doctest`, `pdb`, `unittest` and `signal` with it.  So is `zlib`, as a shim
+  over `-lz` on the precedent `-lgmp` set, and `gzip` with it -- and
+  `zipfile`, `tarfile` and `shutil`, which imported before and could not
+  compress.  What is left blocks one or two modules apiece and is genuinely
+  C: `unicodedata`, `_tracemalloc`, `_symtable`, `_ssl`, `_sqlite3`,
+  `_crypt`, `_lzma`, `_bz2`, `_ctypes`, `_curses`, `pyexpat` and
+  `_tkinter`.
   (`_io` is not among them: `src/iomod.asm` supplies `_iocore` and
   `lib/_io.py` assembles both halves under the name `_io`.  `_socket` and
   `select` are the same split over `_socketcore`.  Neither are `math`,
@@ -32,7 +35,7 @@ reasoning that chose them and what changing one would cost.
   `_tokenize`, `_operator`, `binascii`, `atexit` and `_ast`, which are
   there, and so are `_csv` and `termios` -- the second over one raw
   `posix.ioctl`, the same split `_socket` and `select` use.)
-  `make check-stdlib` gives the current figure: 173 of 196.
+  `make check-stdlib` gives the current figure: 178 of 196.
 
   `math`'s `gamma`, `lgamma`, the n-ary `hypot` and `sumprod` round
   differently from CPython's, which uses its own Lanczos approximation and

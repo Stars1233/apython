@@ -388,6 +388,35 @@ class IOBase(_iocore._IOBase, metaclass=abc.ABCMeta):
             self.write(line)
 
 
+def _push_down(pyclass, coretype):
+    """Copy a Python base's methods onto the _iocore type it derives from.
+
+    CPython's C `_io._IOBase` carries this whole surface, and its own
+    Lib/io.py builds on it DIRECTLY rather than on the Python class here:
+    `class IOBase(_io._IOBase, metaclass=abc.ABCMeta)` is what everything
+    written against `io.IOBase` really derives from.  A method that lives
+    only on this module's IOBase is invisible to all of it -- gzip.GzipFile
+    derives from io.BufferedIOBase and so had no `closed` and no
+    `__enter__`, and `with gzip.open(...)` was a TypeError about the context
+    manager protocol.
+
+    So the definitions are written once, here, and pushed down onto the core
+    type, which is what makes the split invisible from either direction.
+    Anything the assembly already defines is left alone.
+    """
+    skip = ("__dict__", "__weakref__", "__module__", "__qualname__",
+            "__doc__", "__abstractmethods__", "_abc_impl", "__slots__")
+    for name, value in list(vars(pyclass).items()):
+        if name in skip:
+            continue
+        if name in vars(coretype):
+            continue
+        setattr(coretype, name, value)
+
+
+_push_down(IOBase, _iocore._IOBase)
+
+
 class RawIOBase(_iocore._RawIOBase, IOBase):
 
     def read(self, size=-1):
@@ -416,6 +445,9 @@ class RawIOBase(_iocore._RawIOBase, IOBase):
 
     def write(self, b):
         self._unsupported("write")
+
+
+_push_down(RawIOBase, _iocore._RawIOBase)
 
 
 class BufferedIOBase(_iocore._BufferedIOBase, IOBase):
@@ -892,6 +924,9 @@ class BufferedRWPair(BufferedIOBase):
 
 # --- the text layer -------------------------------------------------------
 
+_push_down(BufferedIOBase, _iocore._BufferedIOBase)
+
+
 class TextIOBase(_iocore._TextIOBase, IOBase):
 
     def read(self, size=-1):
@@ -920,6 +955,9 @@ class TextIOBase(_iocore._TextIOBase, IOBase):
     @property
     def errors(self):
         return None
+
+
+_push_down(TextIOBase, _iocore._TextIOBase)
 
 
 class IncrementalNewlineDecoder:

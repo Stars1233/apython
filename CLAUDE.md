@@ -102,7 +102,7 @@ python3 tests/test_foo.py > /tmp/expected.txt
 diff /tmp/expected.txt /tmp/actual.txt
 ```
 
-**Dependencies:** nasm, gcc (linker), libgmp-dev, python3.12
+**Dependencies:** nasm, gcc (linker), libgmp-dev, zlib1g-dev, python3.12
 
 ## Register Convention (eval loop)
 
@@ -217,6 +217,11 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   directory syscalls in the first, and everything that makes a second process
   -- fork, execv, _exit, kill, setsid and PEP 3143's fork hooks -- in the
   second.  `lib/_posixsubprocess.py` builds `subprocess`'s fork_exec on them
+- `src/zlibmod.asm` — the `_zlibcore` module: libz's z_stream, the output
+  buffer that grows while deflate writes into it, and the handle table.  A
+  shim over `-lz`, on the precedent `-lgmp` set; `lib/zlib.py` is the module
+  surface -- the Compress and Decompress objects, the constants, `zlib.error`
+  and every default -- so each core call takes fixed positional arguments
 - `src/socketmod.asm` — the `_socketcore` module: the socket syscalls and the
   constant table, taking and returning sockaddrs as opaque bytes.  The socket
   type, the address packing and `select` are `lib/_socket.py` and

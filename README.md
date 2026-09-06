@@ -20,7 +20,7 @@ apython compiles and executes Python 3.12 directly — no CPython, no JIT, no in
 
 ## Quick start
 
-**Dependencies:** nasm, gcc (linker), libgmp-dev, python3.12
+**Dependencies:** nasm, gcc (linker), libgmp-dev, zlib1g-dev, python3.12
 
 ```bash
 make                # build ./apython
@@ -306,6 +306,7 @@ tests/                  the test suite
 - `nasm` — assembler
 - `gcc` — linker
 - `libgmp-dev` — arbitrary precision integers
+- `zlib1g-dev` — deflate, for `zlib` and everything behind it
 - `python3.12` — compiling test `.py` files to `.pyc`
 
 **Make targets:**

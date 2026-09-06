@@ -159,6 +159,7 @@ test_dict_dunder_args
 test_dict_fromkeys
 test_dict_int_keys
 test_dict_ior
+test_dict_mutate_iter
 test_dict_numkey
 test_dict_ops
 test_dict_order
@@ -511,3 +512,4 @@ test_weakref_types
 test_wrong_answers
 test_zero_valued_lookup
 test_zip_strict
+test_zlib
