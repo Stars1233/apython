@@ -16,6 +16,7 @@ extern iter_clear_one
 extern gc_track
 extern gc_dealloc
 extern ap_free
+extern ap_memcmp
 extern obj_hash
 extern obj_decref
 extern obj_dealloc
@@ -420,6 +421,7 @@ DL_HASH  equ 24
 DL_MASK  equ 32
 DL_SLOT  equ 40
 DL_FREE  equ 48
+DL_SKEY  equ 56            ; the probe key when it is an exact str, else 0
 DL_FRAME equ 72            ; + 3 pushes = 96, 16-aligned
 DEF_FUNC dict_lookup, DL_FRAME
     push rbx
@@ -428,8 +430,36 @@ DEF_FUNC dict_lookup, DL_FRAME
     mov [rbp - DL_DICT], rdi
     mov [rbp - DL_KEY], rsi
 
+    ; --- Is the probe key an exact str? ---------------------------------
+    ; Nearly every lookup in a running program is: attribute names, global
+    ; names, keyword arguments, module dicts, __dict__.  CPython keeps a whole
+    ; second probe loop for the case (unicodekeys_lookup_unicode, marked
+    ; _Py_HOT_FUNCTION and unrolled).  Recording the answer once here buys
+    ; both halves below -- the hash and the comparison.
+    ;
+    ; Exact str only.  A subclass may define __eq__ or __hash__, and then the
+    ; generic protocol is the only thing that gives the right answer.
+    mov qword [rbp - DL_SKEY], 0
+    V_TEST_PTR rsi, rax
+    ja .dl_hash_generic
+    test rsi, rsi
+    jz .dl_hash_generic
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .dl_hash_generic
+    mov [rbp - DL_SKEY], rsi
+    ; The hash is cached in the string itself, so the indirect obj_hash call
+    ; is pure overhead once it has been taken.  -1 is the "not yet" sentinel;
+    ; fall through to obj_hash to compute and cache it the first time.
+    mov rax, [rsi + PyStrObject.ob_hash]
+    cmp rax, -1
+    jne .dl_have_hash
+
+.dl_hash_generic:
     mov rdi, rsi
     call obj_hash
+.dl_have_hash:
     mov [rbp - DL_HASH], rax
 
     mov rbx, [rbp - DL_DICT]
@@ -466,9 +496,46 @@ DEF_FUNC dict_lookup, DL_FRAME
     jne .dl_next
     mov rdi, [rax + DictEntry.key]
     mov rsi, [rbp - DL_KEY]
+
+    ; --- str against str, answered here -------------------------------
+    ; The generic route is dict_keys_equal -> obj_richcompare_bool, which
+    ; INCREFs both operands, snapshots the exception state, dispatches through
+    ; tp_richcompare to str_compare, builds a bool object, calls obj_is_true
+    ; on it and DECREFs three times: five calls and six refcount operations to
+    ; answer whether two strings hold the same bytes.
+    ;
+    ; BOTH keys must be exact strs.  CPython gets to skip the resident-key
+    ; check because a dict remembers whether every key in it is unicode
+    ; (dk_kind == DICT_KEYS_UNICODE) and abandons the specialised loop when
+    ; one is not; we do not track that, and a stored key of some other type
+    ; may carry an __eq__ that a str probe must still be offered to.
+    cmp qword [rbp - DL_SKEY], 0
+    je .dl_generic_eq
+    cmp rdi, rsi
+    je .dl_found                ; the same object, which interning makes the
+                                ; common case for a name
+    V_TEST_PTR rdi, rcx
+    ja .dl_generic_eq
+    mov rcx, [rdi + PyObject.ob_type]
+    lea r9, [rel str_type]
+    cmp rcx, r9
+    jne .dl_generic_eq
+    ; Length, then bytes -- CPython's unicode_eq, in Objects/stringlib/eq.h.
+    mov rdx, [rdi + PyStrObject.ob_size]
+    cmp rdx, [rsi + PyStrObject.ob_size]
+    jne .dl_next
+    lea rdi, [rdi + PyStrObject.data]
+    lea rsi, [rsi + PyStrObject.data]
+    call ap_memcmp
+    test eax, eax
+    jnz .dl_next
+    jmp .dl_found
+
+.dl_generic_eq:
     call dict_keys_equal
     test eax, eax
     jz .dl_next
+.dl_found:
     mov rax, r12                ; found: the entries index
     jmp .dl_out
 

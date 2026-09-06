@@ -74,6 +74,20 @@ reasoning that chose them and what changing one would cost.
   exporting it, converting at the boundary, and giving `binary_op_offsets` a
   parallel column of reflected names.
 
+- **`obj_richcompare_bool` does not implement the subclass-first rule either,
+  and it is the one every container asks.**  For a str subclass whose `__eq__`
+  answers False, `SK("hello") in ["hello"]` is True here and False in CPython;
+  so are `in` on a dict and `list.count`.  The *expression* `"hello" == SK(...)`
+  is right, because `COMPARE_OP` gives the subclass its reflected call first --
+  the two answers come from different functions, exactly as with
+  `op_binary_op` and `obj_binary_op` above.
+
+  This is the same missing rule as the entry above but on a different axis, so
+  fixing one does not fix the other: `obj_richcompare_bool` needs to test
+  `type(right)` for being a proper subclass of `type(left)` that overrides the
+  comparison, and run the reflected slot first when it is.  `tests/test_dict_str_keys.py`
+  has the case written out and says why it is not asserted there.
+
 - **`int / int` double-rounds when either operand is wider than a double.**
   `(10**30) / 7` answers `1.4285714285714283e+29` where CPython answers
   `1.4285714285714285e+29`, and `1 / 10**30` is out by an ulp the same way.
