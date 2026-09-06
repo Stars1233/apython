@@ -25,6 +25,8 @@ extern eval_saved_r13
 extern eval_co_consts
 extern eval_return
 extern obj_is_true
+extern bool_true
+extern bool_false
 extern none_singleton
 extern cell_new
 extern gen_new
@@ -107,35 +109,46 @@ END_FUNC op_return_const
 ;; (2-byte units from start of co_code).
 ;; ============================================================================
 DEF_FUNC_BARE op_pop_jump_if_false
-    VPOP_VAL rdi, r8            ; rdi = value to test, r8 = value tag
+    VPOP rdi                    ; the Value
+    ; True and False are the overwhelming majority of what a conditional
+    ; tests, and both are IMMORTAL: their refcount starts at 2^63-1 and cannot
+    ; reach zero, so the release is a bare `dec` with no zero check and no
+    ; call.  A fast path here was advertised by a comment and a
+    ; .pjif_bool_fast label that nothing ever jumped to; this is that label,
+    ; reached.
+    lea rax, [rel bool_false]
+    cmp rdi, rax
+    je .pjif_bool_jump
+    lea rax, [rel bool_true]
+    cmp rdi, rax
+    je .pjif_bool_stay
 
-    ; Fast path: TAG_BOOL — payload is 0/1, no DECREF needed
-
-    ; Slow path: call obj_is_true + DECREF
-    push rcx                   ; save target offset
-    push r8                    ; save tag for DECREF
-    push rdi                   ; save value for DECREF
-    mov rsi, r8                ; tag
-    V_PACK rdi, rsi
+    ; Anything else.  obj_is_true takes a Value, which is exactly what VPOP
+    ; left in rdi -- this used to VPOP_VAL into a (payload, tag) pair and then
+    ; V_PACK it straight back so it could make the call, and obj_is_true
+    ; unpacked it a third time on the way in.
+    push rcx                    ; the jump target
+    sub rsp, 8                  ; pad, so the two calls below sit at the depth
+                                ; this handler has always made them at
+    push rdi                    ; the value, for the release below
     call obj_is_true
-    push rax                   ; save truthiness
-    mov rdi, [rsp + 8]        ; reload value
-    mov rsi, [rsp + 16]       ; tag
-    DECREF_VAL rdi, rsi
-    pop rax                    ; restore truthiness
-    add rsp, 16                ; discard saved value + tag
-    pop rcx                    ; restore target offset
+    push rax                    ; the answer
+    mov rdi, [rsp + 8]
+    DECREF_V rdi, rsi
+    pop rax
+    add rsp, 16
+    pop rcx
     test eax, eax
-    jnz .no_jump
-    lea rbx, [rbx + rcx*2]
-.no_jump:
+    jz .pjif_jump               ; falsy: take the branch
     DISPATCH
 
-.pjif_bool_fast:
-    test edi, edi
-    jnz .pjif_no_jump          ; truthy → don't jump
-    lea rbx, [rbx + rcx*2]    ; jump
-.pjif_no_jump:
+.pjif_bool_stay:
+    dec qword [rax + PyObject.ob_refcnt]
+    DISPATCH
+.pjif_bool_jump:
+    dec qword [rax + PyObject.ob_refcnt]
+.pjif_jump:
+    lea rbx, [rbx + rcx*2]
     DISPATCH
 END_FUNC op_pop_jump_if_false
 
@@ -143,35 +156,46 @@ END_FUNC op_pop_jump_if_false
 ;; op_pop_jump_if_true - Pop TOS, jump if truthy
 ;; ============================================================================
 DEF_FUNC_BARE op_pop_jump_if_true
-    VPOP_VAL rdi, r8            ; rdi = value to test, r8 = value tag
+    VPOP rdi                    ; the Value
+    ; True and False are the overwhelming majority of what a conditional
+    ; tests, and both are IMMORTAL: their refcount starts at 2^63-1 and cannot
+    ; reach zero, so the release is a bare `dec` with no zero check and no
+    ; call.  A fast path here was advertised by a comment and a
+    ; .pjit_bool_fast label that nothing ever jumped to; this is that label,
+    ; reached.
+    lea rax, [rel bool_true]
+    cmp rdi, rax
+    je .pjit_bool_jump
+    lea rax, [rel bool_false]
+    cmp rdi, rax
+    je .pjit_bool_stay
 
-    ; Fast path: TAG_BOOL — payload is 0/1, no DECREF needed
-
-    ; Slow path: call obj_is_true + DECREF
-    push rcx                   ; save target offset
-    push r8                    ; save tag for DECREF
-    push rdi                   ; save value for DECREF
-    mov rsi, r8                ; tag
-    V_PACK rdi, rsi
+    ; Anything else.  obj_is_true takes a Value, which is exactly what VPOP
+    ; left in rdi -- this used to VPOP_VAL into a (payload, tag) pair and then
+    ; V_PACK it straight back so it could make the call, and obj_is_true
+    ; unpacked it a third time on the way in.
+    push rcx                    ; the jump target
+    sub rsp, 8                  ; pad, so the two calls below sit at the depth
+                                ; this handler has always made them at
+    push rdi                    ; the value, for the release below
     call obj_is_true
-    push rax                   ; save truthiness
-    mov rdi, [rsp + 8]        ; reload value
-    mov rsi, [rsp + 16]       ; tag
-    DECREF_VAL rdi, rsi
-    pop rax                    ; restore truthiness
-    add rsp, 16                ; discard saved value + tag
-    pop rcx                    ; restore target offset
+    push rax                    ; the answer
+    mov rdi, [rsp + 8]
+    DECREF_V rdi, rsi
+    pop rax
+    add rsp, 16
+    pop rcx
     test eax, eax
-    jz .no_jump
-    lea rbx, [rbx + rcx*2]
-.no_jump:
+    jnz .pjit_jump              ; truthy: take the branch
     DISPATCH
 
-.pjit_bool_fast:
-    test edi, edi
-    jz .pjit_no_jump           ; falsy → don't jump
-    lea rbx, [rbx + rcx*2]    ; jump
-.pjit_no_jump:
+.pjit_bool_stay:
+    dec qword [rax + PyObject.ob_refcnt]
+    DISPATCH
+.pjit_bool_jump:
+    dec qword [rax + PyObject.ob_refcnt]
+.pjit_jump:
+    lea rbx, [rbx + rcx*2]
     DISPATCH
 END_FUNC op_pop_jump_if_true
 

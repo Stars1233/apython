@@ -459,6 +459,7 @@ test_termios
 test_time_module
 test_traceback_carets
 test_traceback
+test_truthiness
 test_tuple_identity
 test_tuples
 test_type_comments

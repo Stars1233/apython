@@ -2457,30 +2457,46 @@ END_FUNC op_unary_invert
 ;; Calls obj_is_true, then pushes the inverted boolean.
 ;; ============================================================================
 DEF_FUNC_BARE op_unary_not
-    VPOP_VAL rdi, r8            ; rdi = operand, r8 = operand tag
+    VPOP rdi                    ; the Value
 
-    ; Save operand + tag for DECREF
-    push r8
-    push rdi
+    ; The two bool singletons invert with no call.  Both are immortal -- their
+    ; refcount starts at 2^63-1 and cannot reach zero -- so releasing the
+    ; operand is a bare `dec` with no zero check.  It is a DIFFERENT object
+    ; from the one being pushed, so it does need releasing.
+    lea rax, [rel bool_true]
+    cmp rdi, rax
+    je .not_of_true
+    lea rax, [rel bool_false]
+    cmp rdi, rax
+    je .not_of_false
 
-    ; Call obj_is_true(operand, tag) -> 0 or 1
-    mov rsi, r8                ; tag
-    V_PACK rdi, rsi
+    ; Anything else.  obj_is_true takes a Value, which is what VPOP left in
+    ; rdi -- this used to unpack into a (payload, tag) pair and V_PACK it
+    ; straight back to make the call.
+    sub rsp, 8                  ; pad, keeping the two calls below at the
+                                ; depth this handler has always made them at
+    push rdi                    ; the operand, for the release below
     call obj_is_true
-    push rax                   ; save truthiness result
+    push rax
+    mov rdi, [rsp + 8]
+    DECREF_V rdi, rsi
+    pop rax
+    add rsp, 16
 
-    ; DECREF operand (tag-aware)
-    mov rdi, [rsp + 8]        ; reload operand
-    mov rsi, [rsp + 16]       ; tag
-    DECREF_VAL rdi, rsi
-    pop rax                    ; restore truthiness
-    add rsp, 16                ; discard saved operand + tag
-
-    ; NOT inverts: if truthy (1), push False; if falsy (0), push True
+    ; NOT inverts: truthy pushes False, falsy pushes True.  The explicit jump
+    ; is load-bearing -- the two bool arms below release their operand, and
+    ; falling into one of them from here would `dec` through the truthiness
+    ; result, which for a falsy value is 0.
     test eax, eax
     jnz .push_false
+    jmp .push_true
+.not_of_false:
+    dec qword [rax + PyObject.ob_refcnt]    ; rax is the operand, bool_false
+.push_true:
     lea rax, [rel bool_true]
     jmp .push_bool
+.not_of_true:
+    dec qword [rax + PyObject.ob_refcnt]    ; rax is the operand, bool_true
 .push_false:
     lea rax, [rel bool_false]
 .push_bool:
