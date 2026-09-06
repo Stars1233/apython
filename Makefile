@@ -120,6 +120,7 @@ check: $(TARGET) lib-pyc
 	@bash tests/run_tests.sh
 	@bash tests/pyc_probe.sh
 	@bash tests/arity_probe.sh
+	@bash tests/typefuzz_probe.sh
 	@bash tests/syntax_probe.sh
 
 # A malformed .pyc has to be refused rather than run.  Not a tests/test_*.py:
@@ -133,6 +134,7 @@ check-pyc: $(TARGET)
 # tests/arity_floor.txt.
 check-arity: $(TARGET)
 	@bash tests/arity_probe.sh
+	@bash tests/typefuzz_probe.sh
 
 # A syntax error's message and its five location fields, against CPython's,
 # over tests/syntax_corpus.txt.  Ratchets against tests/syntax_floor.txt;
