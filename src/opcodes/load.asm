@@ -150,7 +150,6 @@ DEF_FUNC_BARE op_load_global
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
     mov rax, [rdi + DictEntry.value]
-    V_UNPACK rax, rdx
     add rsp, 8                 ; discard saved name
     jmp .lg_push_result
 
@@ -183,7 +182,6 @@ DEF_FUNC_BARE op_load_global
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
     mov rax, [rdi + DictEntry.value]
-    V_UNPACK rax, rdx
     jmp .lg_push_result
 
 .not_found:
@@ -192,8 +190,11 @@ DEF_FUNC_BARE op_load_global
     ; (does not return)
 
 .lg_push_result:
-    INCREF_VAL rax, rdx
-    VPUSH_VAL rax, rdx
+    ; rax is the Value straight out of the dict entry.  It used to be
+    ; V_UNPACKed into a (payload, tag) pair above and re-encoded here, around
+    ; a refcount bump that never needed either.
+    INCREF_V rax, rdx
+    VPUSH rax
     ; Skip 4 CACHE entries = 8 bytes
     add rbx, 8
     DISPATCH
@@ -224,15 +225,16 @@ DEF_FUNC_BARE op_load_global_module
     mov rax, [rdi + DictEntry.value]
     test rax, rax
     jz .lgm_deopt
-    V_UNPACK rax, rdx
+    ; The NULL test above was already made on the RAW Value -- 0 is the only
+    ; NULL encoding -- so nothing here ever needed the tag.
 
     ; Guards passed — now push NULL if needed
     test ecx, 1
     jz .lgm_no_null
     VPUSH_NULL
 .lgm_no_null:
-    INCREF_VAL rax, rdx
-    VPUSH_VAL rax, rdx
+    INCREF_V rax, rdx
+    VPUSH rax
     add rbx, 8
     DISPATCH
 
@@ -276,15 +278,16 @@ DEF_FUNC_BARE op_load_global_builtin
     mov rax, [rdi + DictEntry.value]
     test rax, rax
     jz .lgb_deopt
-    V_UNPACK rax, rdx
+    ; The NULL test above was already made on the RAW Value -- 0 is the only
+    ; NULL encoding -- so nothing here ever needed the tag.
 
     ; Guards passed — now push NULL if needed
     test ecx, 1
     jz .lgb_no_null
     VPUSH_NULL
 .lgb_no_null:
-    INCREF_VAL rax, rdx
-    VPUSH_VAL rax, rdx
+    INCREF_V rax, rdx
+    VPUSH rax
     add rbx, 8
     DISPATCH
 
@@ -317,8 +320,7 @@ DEF_FUNC_BARE op_load_name
     ; Try locals first: dict_get(locals, name)
     mov rsi, [rsp]             ; rsi = name
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax               ; dict_get returns a Value, and 0 on a miss
     jnz .found
 
 .try_globals:
@@ -326,8 +328,7 @@ DEF_FUNC_BARE op_load_name
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp]             ; rsi = name
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax               ; dict_get returns a Value, and 0 on a miss
     jnz .found
 
     ; Try builtins: dict_get(builtins, name)
@@ -335,8 +336,7 @@ DEF_FUNC_BARE op_load_name
     pop rsi                    ; rsi = name
     push rsi                   ; save for error message
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax               ; dict_get returns a Value, and 0 on a miss
     jnz .found
 
     ; Not found in any dict - raise NameError with name
@@ -347,8 +347,12 @@ DEF_FUNC_BARE op_load_name
 .found:
     add rsp, 8                 ; discard saved name
 .found_no_pop:
-    INCREF_VAL rax, rdx
-    VPUSH_VAL rax, rdx
+    ; Each of the three probes above used to V_UNPACK dict_get's answer just
+    ; to `test edx, edx` for a miss.  dict_get already returns a bare Value
+    ; and 0 on a miss, and 0 is the only NULL encoding -- integer 0 encodes as
+    ; V_INT_BIAS -- so the raw test is exact.
+    INCREF_V rax, rdx
+    VPUSH rax
     DISPATCH
 END_FUNC op_load_name
 

@@ -1176,18 +1176,18 @@ DEF_FUNC_BARE op_for_iter
     lea rsi, [rel dunder_next]
     extern dunder_call_1
     call dunder_call_1
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    test rax, rax
     jnz .check_next_result     ; got a value
     jmp .next_null
 
 .have_iternext:
     call rax
-    V_UNPACK rax, rdx          ; tp_iternext returns a Value
 .check_next_result:
-    ; rax = payload, rdx = tag (TAG_NULL if exhausted)
-
-    test edx, edx
+    ; rax is the Value tp_iternext or __next__ returned, and 0 means
+    ; exhausted.  Both used to be V_UNPACKed here purely so that the tag
+    ; could be tested for NULL.  0 is the only NULL encoding -- integer 0 is
+    ; V_INT_BIAS -- so the raw test is exact.
+    test rax, rax
     jnz .next_got_value
 
 .next_null:
@@ -1225,7 +1225,7 @@ DEF_FUNC_BARE op_for_iter
 
     ; Got a value - push it (iterator stays on stack)
     add rsp, 16                ; discard saved exception and jump offset
-    VPUSH_VAL rax, rdx
+    VPUSH rax
 
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
@@ -3043,16 +3043,20 @@ DEF_FUNC_BARE op_for_iter_list
     jge .fil_exhausted
 
     ; Get item and INCREF (payload + tag arrays)
+    ; A list slot already holds a Value.  This used to V_UNPACK it into a
+    ; (payload, tag) pair and V_PACK it straight back around the refcount
+    ; bump, which made the SPECIALIZATION slower at handling the value than
+    ; the generic list_iter_next it exists to beat -- that one has always
+    ; been two instructions here.
     mov rdx, [rax + PyListObject.ob_item]
-    mov rax, [rdx + rcx * 8]      ; payload
-    V_UNPACK rax, r8
-    INCREF_VAL rax, r8
+    mov rax, [rdx + rcx * 8]      ; the item Value
+    INCREF_V rax, rdx
 
     ; Advance index
     inc qword [rdi + PyListIterObject.it_index]
 
     add rsp, 8                     ; discard saved jump offset
-    VPUSH_VAL rax, r8              ; push fat value
+    VPUSH rax
     add rbx, 2                     ; skip CACHE
     DISPATCH
 
