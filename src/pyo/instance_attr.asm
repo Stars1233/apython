@@ -83,8 +83,36 @@ section .text
 ;; ============================================================================
 IGA_SELF  equ 8
 IGA_NAME  equ 16
+IGA_WHERE equ 24        ; out-parameter: where the answer came from, or NULL
 IGA_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+;; ============================================================================
+;; instance_getattr_where(rdi = self, rsi = name, rdx = int64_t *from_inst_dict)
+;;   -> rax = Value, and *rdx = 1 when the answer came out of the INSTANCE dict
+;;
+;; instance_getattr with one more thing said.  Where the answer came from
+;; matters because the descriptor protocol applies to what a TYPE supplies and
+;; not to what an instance happens to be holding: a property stored in an
+;; instance dict is a property object, not a call to its getter, and an object
+;; with __get__ stored there is itself.
+;;
+;; The same shape as type_getattr / type_getattr_meta, and for the same reason.
+;; An out-parameter in the caller's frame is re-entrant; a global would be
+;; clobbered by any lookup a descriptor makes on its way through.
+;; ============================================================================
+global instance_getattr_where
+DEF_FUNC instance_getattr_where, IGA_FRAME
+    mov [rbp - IGA_WHERE], rdx
+    jmp instance_getattr.iga_body
+END_FUNC instance_getattr_where
+
+;; ============================================================================
+;; instance_getattr(rdi = self, rsi = name) -> rax = Value
+;;
+;; The tp_getattr slot: instance_getattr_where with nowhere to report.
+;; ============================================================================
 DEF_FUNC instance_getattr, IGA_FRAME
+    mov qword [rbp - IGA_WHERE], 0
+.iga_body:
     mov qword [rel attr_error_pending], 0
     mov [rbp - IGA_SELF], rdi
     mov [rbp - IGA_NAME], rsi
@@ -156,6 +184,7 @@ DEF_FUNC instance_getattr, IGA_FRAME
 .iga_default:
     mov rdi, [rbp - IGA_SELF]
     mov rsi, [rbp - IGA_NAME]
+    mov rdx, [rbp - IGA_WHERE]
     leave
     jmp instance_getattr_default
 END_FUNC instance_getattr
@@ -367,7 +396,8 @@ DEF_FUNC type_refresh_attr_flags
 END_FUNC type_refresh_attr_flags
 
 ;; ============================================================================
-;; instance_getattr_default(PyInstanceObject *self, PyObject *name) -> Value
+;; instance_getattr_default(PyInstanceObject *self, PyObject *name,
+;;                          int64_t *from_inst_dict_or_null) -> Value
 ;; Look up an attribute on an instance, without the __getattribute__ hook.
 ;; 1. Check self->inst_dict — return raw value
 ;; 2. If not found, check type->tp_dict (walk tp_base chain)
@@ -381,6 +411,7 @@ END_FUNC type_refresh_attr_flags
 IG_NAME   equ 8
 IG_ORIGIN equ 16        ; the type the MRO walk started from
 IG_DESCR1 equ 24        ; 1 when the MRO was consulted BEFORE the dict
+IG_WHERE  equ 32        ; out-parameter: set to 1 for an instance-dict hit
 IG_FRAME  equ 40            ; + 3 pushes = 64, 16-aligned
 global instance_getattr_default
 DEF_FUNC instance_getattr_default, IG_FRAME
@@ -393,6 +424,13 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     mov r12, rsi                ; r12 = name
     mov [rbp - IG_NAME], rsi    ; r12 is reused as scratch further down
     mov qword [rbp - IG_DESCR1], 0
+    ; rdx is the out-parameter, or NULL.  Everything but .found_inst leaves it
+    ; at 0, so only an instance-dict hit reports one.
+    mov [rbp - IG_WHERE], rdx
+    test rdx, rdx
+    jz .ig_no_where
+    mov qword [rdx], 0
+.ig_no_where:
 
     ; A DATA descriptor outranks the instance dict and a non-data one does
     ; not, so the correct order is MRO first -- and the fast order is instance
@@ -454,7 +492,13 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     jmp .not_found
 
 .found_inst:
-    ; Found in instance dict — INCREF and return raw value
+    ; Found in instance dict — INCREF and return raw value.  Tell the caller,
+    ; if it asked: this value gets no descriptor protocol run over it.
+    mov rcx, [rbp - IG_WHERE]
+    test rcx, rcx
+    jz .found_inst_nowhere
+    mov qword [rcx], 1
+.found_inst_nowhere:
     mov r13, rax                ; save payload
     mov r12, rdx                ; save tag (name no longer needed)
     INCREF_VAL rax, edx         ; tag-aware INCREF (skips SmallInt/NULL)
@@ -573,7 +617,14 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     ret
 
 .found_slot:
-    ; Member descriptor found — read the value out of the instance
+    ; Member descriptor found — read the value out of the instance.
+    ; A __slots__ value is instance storage exactly as a dict entry is, so it
+    ; reports the same way: the descriptor protocol does not run over it.
+    mov rcx, [rbp - IG_WHERE]
+    test rcx, rcx
+    jz .found_slot_nowhere
+    mov qword [rcx], 1
+.found_slot_nowhere:
     ; r13 = member descriptor, rbx = instance
     mov rcx, [r13 + PyMemberDescrObject.md_offset]
     SLOT_ADDR rdx, rbx, rcx

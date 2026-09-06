@@ -64,7 +64,8 @@ LA_WALK      equ 80   ; the MRO cursor while searching the type dicts
 LA_TAGTYPE   equ 88   ; the type an immediate resolved to, the walk's origin
 LA_OWNMRO    equ 96   ; the attribute came from the CLASS's own MRO
 LA_FROMMETA  equ 104  ; type_getattr_meta's out-parameter
-LA_FRAME     equ 112        ; + 0 pushes = 112
+LA_FROMINST  equ 112  ; instance_getattr_where's: the INSTANCE dict answered
+LA_FRAME     equ 128        ; + 0 pushes = 128
 
 ; op_load_super_attr frame layout (DEF_FUNC op_load_super_attr, LSA_FRAME)
 LSA_SELF     equ 8
@@ -400,6 +401,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     and eax, 1
     mov [rbp - LA_FLAG], rax
     mov qword [rbp - LA_FROM_TYPE], 0
+    mov qword [rbp - LA_FROMINST], 0
     ; Only the tp_getattr path below has an opinion about which MRO answered.
     ; Every other road to .la_property_run would read this slot as whatever the
     ; last call left on the stack.
@@ -532,7 +534,21 @@ DEF_FUNC op_load_attr, LA_FRAME
     extern type_getattr_meta
     lea rdx, [rel type_getattr]
     cmp rax, rdx
+    je .la_call_type_getattr
+    ; A heaptype instance answers through instance_getattr, and it can say
+    ; whether the answer came out of the INSTANCE dict.  That decides whether
+    ; the descriptor protocol below runs at all: a property stored in an
+    ; instance dict is a property object, not a call to its getter, and this
+    ; used to invoke it.
+    extern instance_getattr
+    extern instance_getattr_where
+    lea rdx, [rel instance_getattr]
+    cmp rax, rdx
     jne .la_call_getattr
+    lea rdx, [rbp - LA_FROMINST]
+    call instance_getattr_where
+    jmp .la_getattr_done_v
+.la_call_type_getattr:
     mov qword [rbp - LA_FROMMETA], 0
     lea rdx, [rbp - LA_FROMMETA]
     call type_getattr_meta
@@ -548,6 +564,15 @@ DEF_FUNC op_load_attr, LA_FRAME
     V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .la_try_dict             ; tp_getattr returned NULL — fallback to tp_dict
+    jmp .la_getattr_done        ; load-bearing: the arm below unpacks again
+
+.la_getattr_done_v:
+    ; instance_getattr_where hands back a Value, and a NULL one means it found
+    ; nothing -- 0 is the only NULL encoding.
+    test rax, rax
+    jz .la_try_dict
+    V_UNPACK rax, rdx
+
 .la_getattr_done:
     mov [rbp - LA_ATTR], rax
     mov [rbp - LA_ATTR_TAG], rdx   ; save tag from tp_getattr
@@ -613,6 +638,13 @@ DEF_FUNC op_load_attr, LA_FRAME
     call raise_no_attribute
 
 .la_got_attr:
+    ; The descriptor protocol applies to what a TYPE supplies.  A value the
+    ; INSTANCE dict was holding is itself, whatever its type: CPython's
+    ; object.__getattribute__ returns it without looking, and this used to run
+    ; a property's getter and an object's __get__ out of an instance dict.
+    cmp qword [rbp - LA_FROMINST], 0
+    jne .la_check_flag
+
     ; === Descriptor protocol: check for staticmethod/classmethod ===
     mov rax, [rbp - LA_ATTR]   ; attr
     cmp qword [rbp - LA_ATTR_TAG], TAG_PTR
@@ -1771,13 +1803,15 @@ GA_SAVETAG  equ 72
 GA_WALK     equ 80          ; the MRO cursor
 GA_OWNMRO   equ 88          ; the attribute came from the CLASS's own MRO
 GA_FROMMETA equ 96          ; type_getattr_meta's out-parameter
-GA_FRAME    equ 104         ; + 1 push = 112
+GA_FROMINST equ 104         ; instance_getattr_where's: instance storage
+GA_FRAME    equ 120         ; + 1 push = 128
 DEF_FUNC obj_getattr_opt, GA_FRAME
     push rbx
     mov [rbp - GA_OBJ], rdi
     mov [rbp - GA_NAME], rsi
     mov qword [rbp - GA_FROMTYPE], 0
     mov qword [rbp - GA_OWNMRO], 0
+    mov qword [rbp - GA_FROMINST], 0
 
     ; The type to look in, and whether the object is a real pointer.
     V_TEST_PTR rdi, rax
@@ -1819,7 +1853,21 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     extern type_getattr_meta
     lea rdx, [rel type_getattr]
     cmp rcx, rdx
+    je .ga_call_type_getattr
+    ; The same question op_load_attr asks, and it has to get the same answer:
+    ; tests/test_getattr_descriptors.py pins the two together.
+    lea rdx, [rel instance_getattr]
+    cmp rcx, rdx
     jne .ga_call_getattr
+    mov rdi, [rbp - GA_OBJ]
+    mov rsi, [rbp - GA_NAME]
+    lea rdx, [rbp - GA_FROMINST]
+    call instance_getattr_where
+    test rax, rax
+    jz .ga_type_dict
+    V_UNPACK rax, rdx
+    jmp .ga_getattr_done
+.ga_call_type_getattr:
     mov qword [rbp - GA_FROMMETA], 0
     lea rdx, [rbp - GA_FROMMETA]
     call type_getattr_meta
@@ -1891,6 +1939,10 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
 
 .ga_have_attr:
     ; --- the descriptor protocol, over whatever the lookup produced ---
+    ; Except over INSTANCE STORAGE.  A property in an instance dict or a
+    ; __slots__ slot is a property object, not a call to its getter.
+    cmp qword [rbp - GA_FROMINST], 0
+    jne .ga_plain
     cmp qword [rbp - GA_ATTRTAG], TAG_PTR
     jne .ga_plain
     mov rax, [rbp - GA_ATTR]

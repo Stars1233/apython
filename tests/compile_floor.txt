@@ -239,6 +239,7 @@ test_getset_descriptors
 test_getset_receiver
 test_hashlib_digests
 test_hash_protocol
+test_identity_values
 test_immediate_operands
 test_imp_module
 test_import_errors
@@ -253,6 +254,7 @@ test_inheritance
 test_init_raises
 test_init_subclass_generator
 test_init_subclass_kwargs
+test_instance_dict_descriptors
 test_instance_layout
 test_int_bases_and_float_spec
 test_int_bitwise_mod
