@@ -1733,13 +1733,6 @@ DEF_FUNC str_compare
 
     mov ebx, edx            ; save op
 
-    ; --- Identity, before either string's data is touched ---
-    ; CPython answers this in PyUnicode_RichCompare ahead of everything else.
-    ; A str is never a NaN, so one object compares equal to itself under every
-    ; op, and the common `s == s` from a dict probe costs one compare.
-    cmp rdi, rsi
-    je .identical
-
     ; --- Resolve right operand to a data pointer (-> rsi) ---
     ; Non-string guard: TAG_RC_BIT (bit 8) is set only for TAG_PTR (0x105).
     ; Non-pointer tags (0-4) and unset r8 from max/min: if TAG_RC_BIT clear
@@ -1749,6 +1742,19 @@ DEF_FUNC str_compare
     ; Heap pointer — verify ob_type == str_type
     mov rax, [rsi + PyObject.ob_type]
     REQUIRE_STR_TYPE rax, rdx, .not_string
+
+    ; --- Identity, before either string's data is touched ---
+    ; CPython answers this in PyUnicode_RichCompare ahead of everything else.
+    ; A str is never a NaN, so one object compares equal to itself under every
+    ; op, and the common `s == s` from a dict probe costs one compare.
+    ;
+    ; AFTER the type check, and that ordering is the whole correctness of it.
+    ; V_UNPACK leaves PAYLOADS in rdi and rsi, and an int immediate's payload
+    ; is the bare number -- so `cmp rdi, rsi` above the guard was comparing a
+    ; string's ADDRESS against an integer's VALUE, and Linux heap addresses sit
+    ; well inside the +-2^50 immediate range.  `s == id(s)` answered True.
+    cmp rdi, rsi
+    je .identical
 
     ; --- Compare over the byte lengths, NOT as C strings ---
     ; These are counted strings and a NUL is an ordinary byte, so `ap_strcmp`

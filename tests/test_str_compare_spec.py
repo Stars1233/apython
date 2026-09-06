@@ -113,6 +113,16 @@ def nonstring_cases():
     except TypeError:
         print("TypeError from >=")
     print("a" == 1, "a" != 1, "a" == None, "a" == b"a")
+    # An int whose VALUE equals the string's ADDRESS.  str_compare works in
+    # (payload, tag) pairs, and an int immediate's payload is the bare number,
+    # so an identity shortcut placed above the type guard compared a pointer
+    # against an integer -- and heap addresses are inside the +-2^50 immediate
+    # range, so this really did answer True.
+    s = "identity guard"
+    print(s == id(s), s != id(s), id(s) == s, id(s) != s)
+    print(s == float(id(s)), s != float(id(s)))
+    for n in (0, 1, -1, 2**49, -(2**49), 2**50, 2**60):
+        print(s == n, s != n, n == s)
     try:
         print("a" < 1)
     except TypeError as e:
