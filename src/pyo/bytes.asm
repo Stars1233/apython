@@ -4,6 +4,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern str_new_heap
 extern exc_UnicodeDecodeError_type
 extern exc_new
 extern exc_setattr
@@ -484,8 +485,17 @@ DEF_FUNC bytearray_repr, 8            ; 1 push, so rsp is 16-aligned
     ret
 END_FUNC bytearray_repr
 
-BRI_BUF   equ 1024          ; render buffer, on the stack
-DEF_FUNC_LOCAL bytes_repr_impl, 1032
+;; The render buffer is on the HEAP and sized from the input.  It used to be
+;; 1024 bytes of stack with a `if outpos >= 1000: stop` in the loop, so any
+;; object whose repr ran past that was silently cut short -- and a cut repr
+;; still carries its closing quote, so it looks well-formed.  bytes(range(256))
+;; needs 5883 characters and got 1001 of them.
+;;
+;; Four output bytes per input byte is the worst any byte can do (\xHH), and
+;; the wrapper is at most `bytearray(b'` plus `')` plus the NUL, so 4n + 32
+;; cannot be exceeded.
+BRI_FRAME equ 8             ; + 5 pushes = 48, 16-aligned
+DEF_FUNC_LOCAL bytes_repr_impl, BRI_FRAME
     push rbx
     push r12
     push r13
@@ -520,8 +530,11 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1032
     mov r15d, 0x22
 .br_scan_done_squote:
 
-    ; Build repr in local buffer
-    lea r13, [rbp - BRI_BUF]      ; buffer on stack
+    lea rdi, [r12*4 + 32]
+    call ap_malloc
+    test rax, rax
+    jz .br_oom
+    mov r13, rax                  ; the render buffer
 
     xor ecx, ecx               ; output pos
     test r14d, r14d
@@ -547,8 +560,6 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1032
 .br_loop:
     cmp rdx, r12
     jge .br_close
-    cmp ecx, 1000
-    jge .br_close              ; safety limit
 
     movzx eax, byte [rbx + rdx]
 
@@ -662,9 +673,17 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1032
 .br_terminate:
     mov byte [r13 + rcx], 0        ; null terminator
 
-    ; Create str from buffer
+    ; The length is already known, so str_new_heap rather than str_from_cstr:
+    ; no strlen, and no dependence on the output being NUL-free.
     mov rdi, r13
-    call str_from_cstr
+    movsxd rsi, ecx
+    call str_new_heap
+    push rax
+    push rax                       ; two slots: rsp stays 16-aligned
+    mov rdi, r13
+    call ap_free
+    pop rax
+    pop rax
 
     pop r15
     pop r14
@@ -673,6 +692,9 @@ DEF_FUNC_LOCAL bytes_repr_impl, 1032
     pop rbx
     leave
     ret
+.br_oom:
+    extern exc_MemoryError_type
+    RAISE exc_MemoryError_type, "out of memory"
 END_FUNC bytes_repr_impl
 
 

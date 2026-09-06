@@ -1262,16 +1262,25 @@ END_FUNC op_load_attr_method
 ;;
 ;; CACHE, 18 bytes, the same budget the method cache spends:
 ;;     [+0]   the type, 8 bytes
-;;     [+8]   the name, 8 bytes
-;;     [+16]  the dense index into the instance dict's entry array, 2 bytes
+;;     [+8]   the class dict's version, 2 bytes
+;;     [+10]  the dense index into the instance dict's entry array, 2 bytes
+;;
+;; The NAME is not cached.  It is taken from co_names at hit time, which costs
+;; one load and leaves room for the version.
 ;;
 ;; CPython caches (type version, keys version, index) and can trust the index
 ;; because its instances share their keys object.  Ours do not: two instances
 ;; of one class can have completely different dict layouts, from an __init__
 ;; with a branch in it.  So the index is not trusted -- the KEY at that index
-;; is compared against the cached name, which makes the read self-validating
-;; and needs no dict version at all.  A hit is then exactly what dict_get
+;; is compared against the name, which makes the read self-validating and
+;; needs no INSTANCE dict version at all.  A hit is then exactly what dict_get
 ;; would have returned, without the hash or the probe.
+;;
+;; That comparison is by POINTER, which is why interning matters to this
+;; opcode: dict_set keeps the FIRST writer's key object, so `self.x` read from
+;; a method other than the one that wrote it used to fail the guard on every
+;; execution when the two names were different objects.  See
+;; src/pyo/strintern.asm.
 ;;
 ;; The two type flags are read LIVE rather than guarded by a version.  They
 ;; are maintained by type_refresh_attr_flags, which updates them in place, so
