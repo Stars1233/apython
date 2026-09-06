@@ -1458,32 +1458,34 @@ END_FUNC op_list_extend
 ;; Pop right, pop left, push True/False.
 ;; ============================================================================
 DEF_FUNC_BARE op_is_op
-    mov r8d, ecx               ; save invert flag
+    mov r8d, ecx               ; the invert flag
 
-    VPOP_VAL rsi, r9           ; right
-    VPOP_VAL rdi, r10          ; left
+    VPOP rsi                   ; right
+    VPOP rdi                   ; left
 
-    ; None has a single representation (the heap singleton), so payload+tag
-    ; comparison is all `is` needs -- no normalization step.
-
-    ; Compare both payload AND tag (for SmallInt correctness)
+    ; A Value is a canonical bit pattern, so identity IS bit equality: a
+    ; pointer is its own Value, an integer immediate is unique per value, and
+    ; a float per bit pattern.  This used to V_UNPACK both sides and compare
+    ; payload and tag separately -- the same question, in twenty times the
+    ; instructions -- under a comment saying the tag was needed "for SmallInt
+    ; correctness".  It is the encoding that provides that, not the tag.
     xor eax, eax
     cmp rdi, rsi
-    jne .is_cmp_done
-    cmp r10, r9
-    jne .is_cmp_done
-    mov eax, 1
-.is_cmp_done:
+    sete al
 
-    ; DECREF both (tag-aware) — save left before DECREF right
+    ; Release both.  DECREF_V reaches obj_dealloc, which clobbers every
+    ; caller-saved register, so the answer and the operands go on the machine
+    ; stack -- four slots, an even number, because rsp is 16-byte aligned on
+    ; entry to a handler.
     push rax
     push r8
-    push r10                   ; save left tag
-    push rdi                   ; save left payload
-    DECREF_VAL rsi, r9         ; DECREF right (regs live before call)
-    pop rdi                    ; restore left payload
-    pop rsi                    ; restore left tag
-    DECREF_VAL rdi, rsi        ; DECREF left
+    push rdi                   ; left
+    push rsi                   ; right
+    mov rdi, rsi
+    DECREF_V rdi, rdx
+    add rsp, 8                 ; the right operand, released
+    pop rdi                    ; the left
+    DECREF_V rdi, rdx
     pop r8
     pop rax
 
