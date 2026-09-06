@@ -1813,10 +1813,25 @@ section .text
     ; before the general protocol below, but it is safe there for the reason
     ; the arithmetic superinstructions are: a TAG_FLOAT immediate is never a
     ; heaptype instance, so no user __lt__ can be bypassed.
+    ; A float on one side and an integer immediate on the other counts too:
+    ; the specialized handlers take that pair now, as the arithmetic ones have
+    ; since 34c0596.  `x < 0` for a float x used to reach the general protocol
+    ; on every execution with nothing ever rewritten.  TWO integers are not
+    ; this arm's -- they belong to the SmallInt arm above, which has already
+    ; had its chance.
     cmp r9d, TAG_FLOAT
+    je .cmp_float_left_ok
+    cmp r9d, TAG_SMALLINT
     jne .cmp_slow_real
+    cmp r8d, TAG_FLOAT          ; int on the left needs a float on the right
+    jne .cmp_slow_real
+    jmp .cmp_float_pair_ok
+.cmp_float_left_ok:
     cmp r8d, TAG_FLOAT
+    je .cmp_float_pair_ok
+    cmp r8d, TAG_SMALLINT
     jne .cmp_slow_real
+.cmp_float_pair_ok:
     cmp byte [rbx + 2], 114     ; POP_JUMP_IF_FALSE
     je .cmp_spec_float_jf
     cmp byte [rbx + 2], 115     ; POP_JUMP_IF_TRUE
@@ -1861,6 +1876,26 @@ section .text
     mov rdi, [rsp + BO_RIGHT]
     mov esi, [rsp + BO_RTAG]
 .cmp_probe:
+    ; A HEAPTYPE gets no shortcut.  float_binop_accepts says yes to a float
+    ; subclass and to an int subclass -- they ARE numbers -- so this went
+    ; straight to float_compare, which answers by value, and
+    ; `F(1.5) < 2.0` for an F defining __lt__ never called it.  The general
+    ; path below is the one that knows the order to ask in, and CPython
+    ; consults such a type's tp_richcompare first as well.
+    ;
+    ; Nothing legitimate is lost: the only heaptypes float_binop_accepts
+    ; accepts are int and float subclasses.  A plain one still compares by
+    ; value, one step further along.
+    cmp esi, TAG_PTR
+    jne .cmp_probe_not_heap
+    test rdi, rdi
+    jz .cmp_probe_not_heap
+    mov rax, [rdi + PyObject.ob_type]
+    test rax, rax
+    jz .cmp_probe_not_heap
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jnz .cmp_no_float
+.cmp_probe_not_heap:
     extern float_binop_accepts
     mov r15d, ecx               ; r15 is the handler scratch; ecx holds the op
     call float_binop_accepts
