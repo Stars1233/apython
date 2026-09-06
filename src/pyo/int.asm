@@ -24,6 +24,14 @@ extern type_type
 ; GMP functions
 extern bool_type
 extern __gmpz_init
+extern int_true_divide
+extern __gmpz_set
+extern __gmpz_set_si
+extern __gmpz_setbit
+extern __gmpz_fdiv_r_2exp
+extern __gmpz_tstbit
+extern __gmpz_add_ui
+extern __gmpz_tdiv_qr
 extern __gmpz_init_set_si
 extern __gmpz_clear
 extern __gmpz_get_si
@@ -3173,88 +3181,6 @@ DEF_FUNC int_power, IPW_FRAME
     jmp float_pow
 END_FUNC int_power
 
-;; ============================================================================
-;; True divide: int_true_divide(PyObject *a, PyObject *b) -> rax = Value (float)
-;; int / int always returns float in Python
-;; ============================================================================
-DEF_FUNC int_true_divide
-    ; This one never called int_unwrap at all, so an int subclass or a compact
-    ; heap int on either side took the GMP path unnecessarily; routing through
-    ; int_binop_unpack fixes that as well as rejecting foreign operands.
-    call int_binop_unpack       ; rdi/edx = left, rsi/ecx = right, both ints
-    test eax, eax
-    jnz .operands_ok
-    xor eax, eax                ; NULL Value = NotImplemented
-    leave
-    ret
-.operands_ok:
-    and rsp, -16           ; align for potential libc calls
-    push rbx
-    push r12
-    push r13
-    ; A real slot for the left double, and the padding that makes rsp
-    ; 16-byte aligned at the two __gmpz_get_d calls below.  It used to live at
-    ; [rsp-8] in the red zone, which is exactly where the second of those
-    ; calls writes its return address: `1/(2**70)` and `(2**70)/(2**70)` both
-    ; came back 0.0, having divided by a fragment of this function's own code
-    ; address.  The red zone is not a place to keep anything across a call.
-    ;
-    ; 24, not 16: `and rsp, -16` then three pushes leaves rsp 8 mod 16, so the
-    ; two __gmpz_get_d calls were already reached misaligned -- harmless until
-    ; glibc takes an aligned-SSE path.  24 restores the invariant the `and`
-    ; was there to establish.
-    sub rsp, 24
-
-    mov rbx, rdi           ; left
-    mov r12, rsi           ; right
-    mov r13d, ecx          ; r13d = right_tag
-
-    ; Convert left to double (edx = left_tag, still valid)
-    cmp edx, TAG_SMALLINT
-    je .td_left_small
-    INT_NEED_MPZ rbx
-    lea rdi, [rbx + PyIntObject.mpz]
-    call __gmpz_get_d wrt ..plt
-    jmp .td_have_left
-.td_left_small:
-    mov rax, rbx
-    cvtsi2sd xmm0, rax
-.td_have_left:
-    movsd [rsp], xmm0     ; save left double, in the slot reserved above
-
-    ; Convert right to double (r13d = right_tag)
-    cmp r13d, TAG_SMALLINT
-    je .td_right_small
-    INT_NEED_MPZ r12
-    lea rdi, [r12 + PyIntObject.mpz]
-    call __gmpz_get_d wrt ..plt
-    jmp .td_have_right
-.td_right_small:
-    mov rax, r12
-    cvtsi2sd xmm0, rax
-.td_have_right:
-    ; xmm0 = right double
-    ; Check division by zero
-    xorpd xmm1, xmm1
-    ucomisd xmm0, xmm1
-    je .td_divzero
-
-    movsd xmm1, xmm0      ; xmm1 = right
-    movsd xmm0, [rsp]     ; xmm0 = left
-    divsd xmm0, xmm1
-    call float_from_f64
-
-    add rsp, 24                 ; the left-double slot, and its padding
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; return one Value
-    ret
-
-.td_divzero:
-    RAISE exc_ZeroDivisionError_type, "division by zero"
-END_FUNC int_true_divide
 
 ;; ============================================================================
 ;; int_getattr(rdi = self Value, rsi = name str) -> rax = Value, or NULL
@@ -3458,10 +3384,22 @@ DEF_FUNC int_float
     extern float_to_f64
     call float_to_f64
     movq rax, xmm0
+    ; An integer too wide for a double is an OverflowError here, and only
+    ; here: float_to_f64 is also what a COMPARISON goes through, and
+    ; `10**400 > 1.0` has an answer.  CPython draws the line in the same
+    ; place -- long_as_double raises, long_richcompare does not.
+    mov rcx, rax
+    mov rdx, 0x7FFFFFFFFFFFFFFF
+    and rcx, rdx
+    mov rdx, 0x7FF0000000000000
+    cmp rcx, rdx
+    jae .if_overflow
     V_FROM_F64 rax, rdx
     mov edx, TAG_FLOAT
     leave
     ret
+.if_overflow:
+    RAISE exc_OverflowError_type, "int too large to convert to float"
 END_FUNC int_float
 
 

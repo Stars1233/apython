@@ -153,20 +153,6 @@ reasoning that chose them and what changing one would cost.
   test yet, and the corpus that found them is worth keeping -- a
   `tests/formatfuzz_probe.sh` beside the type one is the shape.
 
-- **`int / int` double-rounds when either operand is wider than a double.**
-  `(10**30) / 7` answers `1.4285714285714283e+29` where CPython answers
-  `1.4285714285714285e+29`, and `1 / 10**30` is out by an ulp the same way.
-  `int_true_divide` converts each operand to a double and divides, which
-  rounds twice; CPython's `long_true_divide` computes the quotient of the two
-  exact integers to 54 bits and rounds once.
-
-  Operands inside +-2^50 are unaffected and take a specialized opcode: each
-  converts exactly, so the single division rounding is the only one.  The fix
-  is a GMP `mpz_tdiv_qr` at a scale chosen from the two bit lengths, then one
-  round-half-even using the remainder as the sticky bit -- along with the
-  `OverflowError` CPython raises when the quotient is too large for a double,
-  which this does not raise either.
-
 - **Functions with no docblock at all**, and, among those that have one,
   docblocks with no `->` signature line.  The signature is the only part of a
   function's contract that nothing checks, so its absence is a real gap rather
