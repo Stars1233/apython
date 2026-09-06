@@ -1940,7 +1940,8 @@ DEF_FUNC builtin_chr, 16
     mov byte [rbp - BC_BUF + 1], cl
     mov byte [rbp - BC_BUF + 2], 0
     lea rdi, [rbp - BC_BUF]
-    call str_from_cstr
+    mov esi, 2
+    call str_new                ; str_new, so U+0080..U+00FF share one object
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret

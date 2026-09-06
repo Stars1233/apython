@@ -1061,12 +1061,115 @@ DEF_FUNC str_new_heap, 8            ; 3 pushes, so rsp is 16-aligned
     ret
 END_FUNC str_new_heap
 
+
+;; ============================================================================
+;; str_char_table -- the 256 one-character latin-1 strings, as real objects
+;;
+;; There is no interning and no small-string cache, so every `s[i]` and every
+;; step of `for ch in s` used to allocate a fresh object, copy one character
+;; into it, and count its code points.  These are the same 256 objects every
+;; time, so they are built once, at assembly time, and handed out.
+;;
+;; latin-1 rather than ASCII, which is the range CPython's own LATIN1(ch)
+;; singletons cover.  Entries above 127 hold TWO bytes -- their UTF-8 encoding
+;; -- so ob_size is 2 where ob_length is 1, and they are indexed by code point
+;; and not by byte.
+;;
+;; They are immortal: the refcount starts at 0x7fffffffffffffff, the same value
+;; the True/False/None singletons use, so ordinary INCREF/DECREF traffic can
+;; neither free them nor be special-cased at the call sites.  `ob_hash` starts
+;; at -1 and fills in the first time one is hashed, which is a cache the whole
+;; process then shares.
+;;
+;; An immortal refcount also puts them permanently out of reach of the in-place
+;; append in opcodes/arith_spec.asm, which requires a refcount of exactly 2.
+;;
+;; 56 bytes apiece: the 40-byte header, the one byte, and enough padding to
+;; keep the stride 8-aligned and to give the word-at-a-time readers their
+;; 8 bytes past the end.
+;; ============================================================================
+STR_CHAR_STRIDE equ 56
+
+section .data
+global str_char_table
+str_char_table:
+%assign sci 0
+%rep 128
+    dq 0x7fffffffffffffff       ; ob_refcnt: immortal
+    dq str_type                 ; ob_type
+    dq 1                        ; ob_size, in bytes
+    dq -1                       ; ob_hash, not yet computed
+    dq 1                        ; ob_length, in code points
+    db sci                      ; data: one ASCII byte
+    times 15 db 0               ; the NUL, and the padding to the stride
+%assign sci sci+1
+%endrep
+%rep 128
+    dq 0x7fffffffffffffff       ; ob_refcnt: immortal
+    dq str_type                 ; ob_type
+    dq 2                        ; ob_size: two bytes of UTF-8
+    dq -1                       ; ob_hash, not yet computed
+    dq 1                        ; ob_length: still one character
+    db 0xC0 | (sci >> 6)        ; data: the two-byte encoding of U+00xx
+    db 0x80 | (sci & 0x3F)
+    times 14 db 0
+%assign sci sci+1
+%endrep
+section .text
+
+;; ============================================================================
+;; str_char(rdi = a code point 0..255) -> rax = the shared one-character str
+;; The reference is owned, as every other string-returning function's is; on
+;; an immortal object the increment simply never matters.
+;; ============================================================================
+DEF_FUNC_BARE str_char
+    lea rax, [rel str_char_table]
+    imul rdi, rdi, STR_CHAR_STRIDE
+    add rax, rdi
+    inc qword [rax + PyObject.ob_refcnt]
+    ret
+END_FUNC str_char
+
 ;; ============================================================================
 ;; str_new(const char *data, int64_t len) -> (rax=payload, edx=tag)
-;; Creates a string from data with given length. Always returns heap TAG_PTR.
+;; Creates a string from data with given length.
 ;; ============================================================================
 DEF_FUNC_BARE str_new
-    jmp str_new_heap         ; tail-call heap path
+    ; One ASCII byte is one of the 128 objects that already exist.  This is
+    ; what `s[i]`, `for ch in s` and `chr()` almost always ask for, and it is
+    ; the difference between returning a pointer and doing a malloc, a copy
+    ; and a code-point scan.
+    cmp rsi, 2
+    ja str_new_heap
+    je .sn_two
+    cmp rsi, 1
+    jne str_new_heap
+    movzx eax, byte [rdi]
+    test al, 0x80
+    jnz str_new_heap            ; a lead byte: not a whole character on its own
+.sn_have_cp:
+    mov rdi, rax
+    mov edx, TAG_PTR
+    jmp str_char
+.sn_two:
+    ; The two-byte encodings of U+0080..U+00FF, and only those: lead bytes
+    ; 0xC2 and 0xC3 with one continuation byte.  Anything else two bytes long
+    ; is either a fragment or a character outside the table.
+    movzx eax, byte [rdi]
+    mov ecx, eax
+    and ecx, 0xFE
+    cmp ecx, 0xC2
+    jne str_new_heap
+    movzx ecx, byte [rdi + 1]
+    mov edx, ecx
+    and edx, 0xC0
+    cmp edx, 0x80
+    jne str_new_heap
+    and eax, 0x1F
+    shl eax, 6
+    and ecx, 0x3F
+    or eax, ecx
+    jmp .sn_have_cp
 END_FUNC str_new
 
 ;; ============================================================================
@@ -1780,14 +1883,17 @@ DEF_FUNC str_getitem, 8            ; 3 pushes, so rsp is 16-aligned
     jl .index_error
 
     ; Where the code point starts, and how many bytes it occupies.
+    ; One walk.  This used to call str_cp_offset twice, for i and for i+1,
+    ; and each call walks from byte zero -- so indexing a non-ASCII string in
+    ; a loop was quadratic with the walk done twice over.
     mov rdi, rbx
     mov rsi, r12
     call str_cp_offset
     mov r13, rax
-    mov rdi, rbx
-    lea rsi, [r12 + 1]
-    call str_cp_offset
-    sub rax, r13            ; the width of this one code point
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, [rbx + PyStrObject.ob_size]
+    mov rdx, r13
+    call str_cp_width       ; the width of this one code point
 
     lea rdi, [rbx + PyStrObject.data]
     add rdi, r13
@@ -1979,7 +2085,7 @@ DEF_FUNC str_getslice, SGS_FRAME
     lea rdi, [rbx + PyStrObject.data]
     add rdi, r12
     mov rsi, rax
-    call str_new_heap
+    call str_new                ; str_new, so that s[i:i+1] is s[i]
     jmp .sgs_ret
 
 .sgs_general:

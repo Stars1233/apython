@@ -426,6 +426,7 @@ test_stdlib_shims
 test_stdout_buffering
 test_str_build
 test_str_case
+test_str_char_singletons
 test_str_compare_spec
 test_str_decode
 test_strfmt
