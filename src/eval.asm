@@ -18,6 +18,7 @@ extern op_load_global
 extern op_load_global_module
 extern op_load_global_builtin
 extern op_load_attr_method
+extern op_load_attr_instance
 extern op_binary_op_and_int
 extern op_binary_op_or_int
 extern op_binary_op_xor_int
@@ -1271,7 +1272,7 @@ opcode_table:
     dq op_load_global_builtin ; 201 = LOAD_GLOBAL_BUILTIN (IC)
     dq op_unimplemented      ; 202
     dq op_load_attr_method   ; 203 = LOAD_ATTR_METHOD (IC)
-    dq op_unimplemented      ; 204
+    dq op_load_attr_instance ; 204 = LOAD_ATTR_INSTANCE (inline cache)
     dq op_unimplemented      ; 205
     dq op_unimplemented      ; 206
     dq op_unimplemented      ; 207
@@ -1780,3 +1781,4 @@ opcode_names:
     dq opn_unknown                    ; 253
     dq opn_unknown                    ; 254
     dq opn_unknown                    ; 255
+

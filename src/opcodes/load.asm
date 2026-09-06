@@ -782,7 +782,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; flag=0: simple attribute load
     ; If attr came from type dict and is callable, create bound method
     cmp qword [rbp - LA_FROM_TYPE], 0
-    je .la_simple_push
+    je .la_try_ic_instance
     mov rax, [rbp - LA_ATTR]
     cmp qword [rbp - LA_ATTR_TAG], TAG_PTR
     jne .la_simple_push         ; not a heap pointer
@@ -812,6 +812,44 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rsi, [rbp - LA_OBJ_TAG]
     DECREF_VAL rdi, rsi         ; a payload, not necessarily a pointer
     jmp .la_done
+
+.la_try_ic_instance:
+    ; The attribute came out of the instance dict, and this site asked for a
+    ; plain load.  That is what opcode 204 caches: the class, the name, and
+    ; the dense index the name sits at.
+    cmp qword [rbp - LA_FROMINST], 0
+    je .la_simple_push
+    cmp qword [rbp - LA_OBJ_TAG], TAG_PTR
+    jne .la_simple_push
+    mov rdi, [rbp - LA_OBJ]
+    mov rax, [rdi + PyObject.ob_type]
+    ; No point installing a cache whose second guard would refuse every time.
+    test qword [rax + PyTypeObject.tp_flags], \
+         TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN | TYPE_FLAG_MRO_HAS_DATA_DESCR
+    jnz .la_simple_push
+    mov [rbp - LA_TAGTYPE], rax    ; the type, held across the call below
+    LOAD_INST_DICT rsi, rdi, .la_simple_push
+    test rsi, rsi
+    jz .la_simple_push
+    mov rdi, rsi
+    mov rsi, [rbp - LA_NAME]
+    mov edx, TAG_PTR
+    extern dict_get_index
+    call dict_get_index
+    cmp rax, -1
+    je .la_simple_push             ; gone already: do not cache a miss
+    cmp rax, 0xFFFF
+    ja .la_simple_push             ; the index does not fit the cache
+    mov word [rbx + 10], ax        ; CACHE[+10] = dense index
+    mov rcx, [rbp - LA_TAGTYPE]
+    mov [rbx], rcx                 ; CACHE[+0] = type (8 bytes, unaligned)
+    mov rcx, [rcx + PyTypeObject.tp_dict]
+    test rcx, rcx
+    jz .la_simple_push
+    mov rcx, [rcx + PyDictObject.dk_version]
+    mov word [rbx + 8], cx         ; CACHE[+8] = class dict version
+    mov byte [rbx - 2], 204        ; rewrite to LOAD_ATTR_INSTANCE
+    ; fall through
 
 .la_simple_push:
     mov rax, [rbp - LA_ATTR]
@@ -1210,6 +1248,127 @@ DEF_FUNC_BARE op_load_attr_method
     mov byte [rbx - 2], 106
     jmp op_load_attr
 END_FUNC op_load_attr_method
+
+;; ============================================================================
+;; op_load_attr_instance (204) -> nothing; replaces TOS with the attribute
+;;
+;; The data-load counterpart of LOAD_ATTR_METHOD.  A plain `self.x` had no
+;; inline cache at all: LOAD_ATTR's only one was for methods, so an ordinary
+;; attribute read went through op_load_attr's whole prologue, tp_getattr,
+;; instance_getattr, instance_getattr_default, LOAD_INST_DICT and dict_get --
+;; hashing the name and probing the table every time.  `c.m()` measured 0.40x
+;; of CPython against 1.00x for a plain `f()`, and a profile put the
+;; difference here rather than anywhere in the call machinery.
+;;
+;; CACHE, 18 bytes, the same budget the method cache spends:
+;;     [+0]   the type, 8 bytes
+;;     [+8]   the name, 8 bytes
+;;     [+16]  the dense index into the instance dict's entry array, 2 bytes
+;;
+;; CPython caches (type version, keys version, index) and can trust the index
+;; because its instances share their keys object.  Ours do not: two instances
+;; of one class can have completely different dict layouts, from an __init__
+;; with a branch in it.  So the index is not trusted -- the KEY at that index
+;; is compared against the cached name, which makes the read self-validating
+;; and needs no dict version at all.  A hit is then exactly what dict_get
+;; would have returned, without the hash or the probe.
+;;
+;; The two type flags are read LIVE rather than guarded by a version.  They
+;; are maintained by type_refresh_attr_flags, which updates them in place, so
+;; adding a __getattribute__ or a property to the class -- or to a base --
+;; does not change the type POINTER that guard 1 compares.
+;; ============================================================================
+DEF_FUNC_BARE op_load_attr_instance
+    ; ecx is the oparg and MUST survive to .lai_deopt, which hands it to
+    ; op_load_attr -- so nothing below touches rcx.  Getting that wrong is not
+    ; a wrong answer, it is op_load_attr reading co_names out of bounds with a
+    ; name index of (garbage >> 1), and the wild pointer surfaces later inside
+    ; dict_get.
+    VPEEK rdi                      ; the object; not popped until it is a hit
+    V_TEST_PTR rdi, rax
+    ja .lai_deopt
+
+    ; Guard 1: the class, which pins its MRO and everything on it
+    mov rax, [rdi + PyObject.ob_type]
+    cmp rax, [rbx]                 ; CACHE[+0] = type
+    jne .lai_deopt
+
+    ; Guard 2: and its class dict has not been touched since.  A type POINTER
+    ; is not enough on its own: a class can be freed and another allocated at
+    ; the same address, and a class that is still alive can gain a property.
+    ; op_load_attr_method carries the same guard for the same reason.
+    mov rdx, [rax + PyTypeObject.tp_dict]
+    test rdx, rdx
+    jz .lai_deopt
+    mov rdx, [rdx + PyDictObject.dk_version]
+    cmp dx, word [rbx + 8]         ; CACHE[+8] = class dict version
+    jne .lai_deopt
+
+    ; Guard 3: the class still resolves attributes the ordinary way.  A
+    ; __getattribute__ runs instead of any of this, and a data descriptor
+    ; anywhere in the MRO outranks the instance dict.  Read LIVE: the flags are
+    ; maintained in place by type_refresh_attr_flags.
+    test qword [rax + PyTypeObject.tp_flags], \
+         TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN | TYPE_FLAG_MRO_HAS_DATA_DESCR
+    jnz .lai_deopt
+
+    ; Guard 4: there is an instance dict, and the cached slot is inside the
+    ; part of its dense array that has ever been used.
+    LOAD_INST_DICT rsi, rdi, .lai_deopt
+    test rsi, rsi
+    jz .lai_deopt
+    movzx r8d, word [rbx + 10]     ; CACHE[+10] = dense index
+    cmp r8, [rsi + PyDictObject.dk_nentries]
+    jae .lai_deopt
+
+    ; Guard 5: that slot still holds THIS name.  The index alone proves
+    ; nothing -- two instances of one class can have completely different dict
+    ; layouts, from an __init__ with a branch in it -- so the KEY is compared,
+    ; which makes the read self-validating and needs no dict version.  The
+    ; name comes from co_names rather than the cache: it is the site's own
+    ; name, so it is always right, and a cached borrowed pointer to it would
+    ; be one more thing to keep alive.
+    mov rdx, [rsi + PyDictObject.entries]
+    imul r8, r8, DICT_ENTRY_SIZE
+    add rdx, r8
+    mov r9d, ecx                   ; the oparg, untouched
+    shr r9d, 1                     ; arg >> 1 = the co_names index
+    shl r9d, 3
+    LOAD_CO_NAMES r10
+    mov r9, [r10 + r9]
+    cmp r9, [rdx + DictEntry.key]
+    jne .lai_deopt
+
+    ; Guard 6: it is not a hole.  A deleted entry keeps its position with a
+    ; NULL key, which guard 5 already covers; this covers a NULL value.
+    mov rax, [rdx + DictEntry.value]
+    test rax, rax
+    jz .lai_deopt
+
+    ; Hit.  attr_error_pending says a __getattr__ raised an AttributeError
+    ; that raise_no_attribute should hand over rather than replace, and every
+    ; ordinary lookup clears it -- object.asm calls that "it cannot survive a
+    ; lookup".  This is a lookup.
+    extern attr_error_pending
+    mov qword [rel attr_error_pending], 0
+
+    ; INCREF the attribute BEFORE releasing the object: the object may hold
+    ; the only reference to the dict the attribute lives in.
+    INCREF_V rax, rdx
+    mov [r13 - 8], rax             ; the attribute replaces the object
+    DECREF_V rdi, rdx              ; rdi is still the object
+
+    add rbx, 18                    ; skip 9 CACHE entries
+    DISPATCH
+
+.lai_deopt:
+    ; Deopt into the generic handler with the argument ecx still holds.
+    ; Rewinding rbx cannot be done here: LOAD_ATTR's arg is
+    ; (name index << 1 | flag) and carries an EXTENDED_ARG as soon as a module
+    ; has enough names.
+    mov byte [rbx - 2], 106
+    jmp op_load_attr
+END_FUNC op_load_attr_instance
 
 ;; ============================================================================
 ;; op_load_closure - Load cell from localsplus[arg]
