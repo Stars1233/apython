@@ -645,6 +645,61 @@ section .text
 ;; ============================================================================
 DEF_FUNC_BARE ap_memcpy
     mov rax, rdi            ; save dst for return
+    ; `rep movsb` is ERMS-accelerated for long copies and carries roughly
+    ; thirty cycles of startup, which is the entire cost of a short one.
+    ; Short is the common case here: a one-character string from iteration
+    ; copies ONE byte, and join and split copy a piece at a time.  Up to 32
+    ; bytes go through overlapping loads and stores instead, and the overlap
+    ; is safe because this is memcpy, not memmove.
+    ;
+    ; CLOBBERS ONLY rax AND rcx on these paths -- strictly less than the
+    ; `rep movsb` they replace, which also advanced rdi and rsi.  Widening
+    ; that set is not free: sre.asm reads r8 across a call to this.
+    cmp rdx, 32
+    ja .amcp_rep
+    cmp rdx, 16
+    ja .amcp_17_32
+    cmp rdx, 8
+    jb .amcp_under8
+    mov rcx, [rsi]                  ; 8..16, two qwords overlapping
+    mov [rdi], rcx
+    mov rcx, [rsi + rdx - 8]
+    mov [rdi + rdx - 8], rcx
+    ret
+.amcp_17_32:
+    mov rcx, [rsi]
+    mov [rdi], rcx
+    mov rcx, [rsi + 8]
+    mov [rdi + 8], rcx
+    mov rcx, [rsi + rdx - 16]
+    mov [rdi + rdx - 16], rcx
+    mov rcx, [rsi + rdx - 8]
+    mov [rdi + rdx - 8], rcx
+    ret
+.amcp_under8:
+    cmp rdx, 4
+    jb .amcp_under4
+    mov ecx, [rsi]                  ; 4..7, two dwords overlapping
+    mov [rdi], ecx
+    mov ecx, [rsi + rdx - 4]
+    mov [rdi + rdx - 4], ecx
+    ret
+.amcp_under4:
+    cmp rdx, 2
+    jb .amcp_under2
+    movzx ecx, word [rsi]           ; 2..3, two words overlapping
+    mov [rdi], cx
+    movzx ecx, word [rsi + rdx - 2]
+    mov [rdi + rdx - 2], cx
+    ret
+.amcp_under2:
+    test rdx, rdx
+    jz .amcp_done
+    mov cl, [rsi]                   ; exactly one byte
+    mov [rdi], cl
+.amcp_done:
+    ret
+.amcp_rep:
     mov rcx, rdx            ; rcx = count
     rep movsb               ; rdi=dst, rsi=src already in place
     ret
@@ -701,17 +756,151 @@ END_FUNC ap_memmove
 ;; Returns 0 if equal, <0 if s1<s2, >0 if s1>s2
 ;; ============================================================================
 DEF_FUNC_BARE ap_memcmp
-    mov rcx, rdx            ; rcx = count
-    repe cmpsb              ; rdi=s1, rsi=s2
-    je .memcmp_equal
-    movzx eax, byte [rdi - 1]
-    movzx ecx, byte [rsi - 1]
+    ; This was `repe cmpsb`.  Unlike `rep movsb`, `rep cmpsb` is microcoded on
+    ; every x86-64 and has never been ERMS-accelerated -- it runs at roughly a
+    ; byte every few cycles with a large fixed startup, and str.split called it
+    ; once per byte of the haystack.  Eight bytes at a time, with the byte loop
+    ; kept only for the tail.
+    ;
+    ; Never reads past the end: the word loop runs only while eight whole bytes
+    ; remain, which is what `sub`/`jae` below is counting.
+    ;
+    ; rbx carries the count so that rdx survives, because `repe cmpsb` left it
+    ; alone and eighteen call sites were written against that.
+    push rbx
+    mov rbx, rdx
+    sub rbx, 8
+    jb .amc_tail
+.amc_word:
+    mov rax, [rdi]
+    mov rcx, [rsi]
+    cmp rax, rcx
+    jne .amc_word_differs
+    add rdi, 8
+    add rsi, 8
+    sub rbx, 8
+    jae .amc_word
+.amc_tail:
+    add rbx, 8              ; 0..7 bytes left
+    jz .amc_equal
+.amc_byte:
+    movzx eax, byte [rdi]
+    movzx ecx, byte [rsi]
     sub eax, ecx
-    ret
-.memcmp_equal:
+    jnz .amc_done
+    inc rdi
+    inc rsi
+    dec rbx
+    jnz .amc_byte
+.amc_equal:
     xor eax, eax
+.amc_done:
+    pop rbx
+    ret
+.amc_word_differs:
+    ; The two words differ somewhere.  Byte-swapping puts memory order into
+    ; numeric order, so one unsigned compare gives the lexicographic answer
+    ; without finding which byte it was.
+    bswap rax
+    bswap rcx
+    cmp rax, rcx
+    sbb eax, eax            ; -1 when below, 0 when above
+    or eax, 1               ; -1 or 1; they cannot be equal here
+    pop rbx
     ret
 END_FUNC ap_memcmp
+
+;; ============================================================================
+;; ap_memchr(rdi = p, rsi = n, edx = byte) -> rax = the first match, or 0
+;;
+;; The scan every substring search stands on.  The byte is broadcast into all
+;; eight lanes of a word, XORed against eight bytes of input -- which leaves a
+;; zero byte exactly where it matched -- and the zero is found with the same
+;; Mycroft test ap_strcmp uses for its NUL.
+;;
+;; Never reads past the end: the word loop runs only while eight whole bytes
+;; remain.
+;; ============================================================================
+DEF_FUNC_BARE ap_memchr
+    ; A bounded byte prologue before any setup.  The word loop needs a
+    ; broadcast -- an imul, three cycles, on the critical path before anything
+    ; can be compared -- and a saved register.  str.count calls this once per
+    ; match and its matches are a few bytes apart, so it pays that fixed cost
+    ; on every call and never reaches the loop; measured, the word loop alone
+    ; was 40% SLOWER on `s.count("a")` than the byte scan it replaced, while
+    ; being fewer instructions.  Sixteen bytes is noise against a scan long
+    ; enough to want the loop.
+    mov rcx, rsi
+    cmp rcx, 16
+    jbe .amk_prologue
+    mov rcx, 16
+.amk_prologue:
+    sub rsi, rcx                    ; what is left for the word loop
+    test rcx, rcx
+    jz .amk_word_setup
+.amk_pro_byte:
+    cmp dl, [rdi]
+    je .amk_hit
+    inc rdi
+    dec rcx
+    jnz .amk_pro_byte
+
+.amk_word_setup:
+    test rsi, rsi
+    jz .amk_none
+    ; Clobbers rax, rcx, rdx, rdi and rsi only.  rbx carries the one constant
+    ; that cannot be an immediate operand; the other is rematerialised in the
+    ; loop, which costs nothing and saves a second saved register.  Widening
+    ; the clobber set is not free -- sre.asm reads r8 across ap_memcpy.
+    push rbx
+    movzx eax, dl
+    mov rbx, 0x0101010101010101
+    imul rax, rbx                   ; the byte, in all eight lanes
+    sub rsi, 8
+    jb .amk_tail
+.amk_word:
+    mov rcx, [rdi]
+    xor rcx, rax                    ; a zero byte wherever the input matched
+    mov rdx, rcx
+    not rdx                         ; ~x
+    sub rcx, rbx                    ; x - 0x01..01
+    and rcx, rdx
+    mov rdx, 0x8080808080808080
+    and rcx, rdx
+    jnz .amk_word_has_it
+    add rdi, 8
+    sub rsi, 8
+    jae .amk_word
+.amk_tail:
+    add rsi, 8                      ; 0..7 bytes left
+    jz .amk_none_pop
+.amk_tail_byte:
+    cmp al, [rdi]                   ; al is the byte: rdx is scratch now
+    je .amk_hit_pop
+    inc rdi
+    dec rsi
+    jnz .amk_tail_byte
+.amk_none_pop:
+    pop rbx
+.amk_none:
+    xor eax, eax
+    ret
+.amk_hit_pop:
+    pop rbx
+.amk_hit:
+    mov rax, rdi
+    ret
+.amk_word_has_it:
+    ; A 0x80 marks each matching lane.  The lowest set bit is the earliest
+    ; match in memory, because x86 is little-endian -- and a lane that is a
+    ; false positive of the borrow chain is always preceded by a real one, so
+    ; the lowest is never spurious.
+    bsf rcx, rcx
+    shr rcx, 3                      ; bit index -> byte index
+    lea rax, [rdi + rcx]
+    pop rbx
+    ret
+END_FUNC ap_memchr
 
 ;; ============================================================================
 ;; String operations, PLT-free
@@ -801,39 +990,30 @@ END_FUNC ap_strcmp
 ;; position costs one compare rather than a call frame -- ap_strstr re-entered
 ;; its inner loop at every offset, which is what made str.replace quadratic.
 ;; ============================================================================
+AMF_HAY    equ 8
+AMF_NEEDLE equ 16
+AMF_NLEN   equ 24
+AMF_LAST   equ 32           ; the last offset a match could start at
+AMF_FRAME  equ 40           ; + 1 push = 48, 16-byte aligned
+
 DEF_FUNC_BARE ap_memfind
+    ; No stack frame on this path.  str.count calls this once per occurrence,
+    ; so a prologue here is paid per match, not per search -- building one
+    ; before the one-byte test cost 40% on `s.count("a")` even though the
+    ; scan itself got faster.  The frame lives in ap_memfind_multi.
     test rcx, rcx
     jz .amf_empty               ; the empty needle matches immediately
-    mov r8, rsi
-    sub r8, rcx                 ; r8 = last offset a match could start at
+    mov rax, rsi
+    sub rax, rcx
     js .amf_none                ; needle longer than haystack
-    movzx r9d, byte [rdx]       ; r9b = the needle's first byte
-    xor r10, r10                ; r10 = current offset
-                                ; rsi is free from here: r8 is all it was for
 
-.amf_outer:
-    cmp r10, r8
-    jg .amf_none
-    cmp r9b, [rdi + r10]
-    jne .amf_next
-    ; First byte matches; compare the rest against the candidate.
-    lea r11, [rdi + r10]
-    mov rax, 1
-.amf_inner:
-    cmp rax, rcx
-    jge .amf_hit
-    mov sil, [rdx + rax]
-    cmp sil, [r11 + rax]
-    jne .amf_next
-    inc rax
-    jmp .amf_inner
-.amf_next:
-    inc r10
-    jmp .amf_outer
-
-.amf_hit:
-    mov rax, r11
-    ret
+    ; A one-byte needle IS ap_memchr -- CPython's search makes the same first
+    ; split (`m <= 1` in Objects/stringlib/fastsearch.h).  str.replace and
+    ; str.count over a single character are the common shape.
+    cmp rcx, 1
+    jne ap_memfind_multi
+    movzx edx, byte [rdx]
+    jmp ap_memchr               ; rdi = hay, rsi = hlen already
 .amf_empty:
     mov rax, rdi
     ret
@@ -841,6 +1021,65 @@ DEF_FUNC_BARE ap_memfind
     xor eax, eax
     ret
 END_FUNC ap_memfind
+
+;; ============================================================================
+;; ap_memfind_multi(rdi = hay, rsi = hlen, rdx = needle, rcx = nlen)
+;;   -> rax = the first match, or 0
+;;
+;; ap_memfind's needle-of-two-or-more arm, split out so that the one-byte case
+;; reaches ap_memchr without a prologue.  Entered by tail jump, never called
+;; directly; hlen >= nlen >= 2 is already established.
+;; ============================================================================
+DEF_FUNC_LOCAL ap_memfind_multi, AMF_FRAME
+    push rbx
+    mov [rbp - AMF_HAY], rdi
+    mov [rbp - AMF_NEEDLE], rdx
+    mov [rbp - AMF_NLEN], rcx
+    mov rax, rsi
+    sub rax, rcx
+    mov [rbp - AMF_LAST], rax
+    mov rbx, rdi                ; rbx = where the next scan starts
+
+.amf_loop:
+    ; The first byte is found by ap_memchr rather than compared one at a time,
+    ; so a position that cannot match costs an eighth of a compare instead of
+    ; a whole one.  Only the region that could still START a match is scanned.
+    mov rsi, [rbp - AMF_HAY]
+    add rsi, [rbp - AMF_LAST]
+    sub rsi, rbx                ; distance from here to the last valid start
+    js .amf_no_match
+    inc rsi                     ; ...as a count
+    mov rdi, rbx
+    mov rdx, [rbp - AMF_NEEDLE]
+    movzx edx, byte [rdx]
+    call ap_memchr
+    test rax, rax
+    jz .amf_no_match
+
+    ; The first byte is in place; ap_memcmp settles the rest.
+    mov rbx, rax
+    lea rdi, [rax + 1]
+    mov rsi, [rbp - AMF_NEEDLE]
+    inc rsi
+    mov rdx, [rbp - AMF_NLEN]
+    dec rdx
+    call ap_memcmp
+    test eax, eax
+    jz .amf_hit
+    inc rbx
+    jmp .amf_loop
+
+.amf_hit:
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+.amf_no_match:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC ap_memfind_multi
 
 ;; ============================================================================
 ;; ap_memrfind(rdi = hay, rsi = hlen, rdx = needle, rcx = nlen)
