@@ -106,6 +106,15 @@ reasoning that chose them and what changing one would cost.
   the `import` path -- `import io` went from thirty-eight misaligned frames
   to none.
 
+- **A module's leading RESUME and a body's implicit `return None` carry a
+  different location from CPython's.**  Visible now that `co_positions()` and
+  `co_lines()` report what the table holds: for `compile("x = 1\ny = 2\n")`
+  CPython's first entry is `(0, 1, 0, 0)` and its last run is line 2, where
+  this compiler gives `(0, 0, None, None)` and a trailing run with no location
+  at all.  Only code this compiler produced is affected -- a CPython `.pyc`
+  decodes exactly, which is what `tests/test_code_positions.py` pins.  Same
+  neighbourhood as the entry below.
+
 - **The compiler attributes a loop's back edge to the loop header, and
   CPython attributes it to the body.**  For
 
