@@ -88,6 +88,46 @@ DEF_FUNC_LOCAL staticmethod_dealloc, 8            ; 1 pushes, so rsp is 16-align
 END_FUNC staticmethod_dealloc
 
 ;; ============================================================================
+;; staticmethod_call(rdi = self, rsi = Value *args, rdx = nargs) -> Value
+;;
+;; tp_call for staticmethod_type.  A staticmethod object has been callable
+;; since Python 3.10 -- `staticmethod(f)(x)` is `f(x)` -- and this tree had it
+;; at 0, so calling one raised TypeError and callable() answered False.
+;;
+;; The wrapped value is a Value and need not be a pointer at all:
+;; staticmethod(1) is legal to build, and calling it must report the int the
+;; way calling the int directly would.  That is what op_call does for the same
+;; condition, with the same helper.
+;; ============================================================================
+DEF_FUNC staticmethod_call, 8            ; 1 pushes, so rsp is 16-aligned
+    push rbx
+
+    mov rbx, [rdi + PyStaticMethodObject.sm_callable]
+    V_TEST_PTR rbx, rax
+    ja .smc_not_callable
+    test rbx, rbx
+    jz .smc_not_callable
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz .smc_not_callable
+
+    mov rdi, rbx
+    call rax                    ; the wrapped callable, with our args verbatim
+
+    pop rbx
+    leave
+    ret
+
+.smc_not_callable:
+    mov rsi, rbx
+    CSTRING rdi, `'\x01' object is not callable`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+    ; does not return
+END_FUNC staticmethod_call
+
+;; ============================================================================
 ;; classmethod_construct(PyObject *type, PyObject **args, int64_t nargs)
 ;; tp_call for classmethod_type. Creates a classmethod wrapper.
 ;; rdi = classmethod_type (ignored), rsi = args, rdx = nargs
@@ -2624,7 +2664,7 @@ staticmethod_type:
     dq 0                        ; tp_repr
     dq 0                        ; tp_str
     dq 0                        ; tp_hash
-    dq 0                ; tp_call  (instances are not callable)
+    dq staticmethod_call        ; tp_call (callable since 3.10)
     dq descr_func_attr          ; tp_getattr
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
