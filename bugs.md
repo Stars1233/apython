@@ -128,6 +128,26 @@ reasoning that chose them and what changing one would cost.
   change -- it is that plus the object's type name at the raise site.
   `lib/types.py` raises the old wording by hand in one place too.
 
+- **A LOAD_ATTR site whose key was built at run time specializes and deopts
+  forever.**  `op_load_attr_instance`'s guard 5 compares the instance dict's
+  stored key against `co_names[i]` by POINTER, and `dict_set` keeps the FIRST
+  writer's key object.  When the attribute was created with a name that is not
+  the interned constant -- `setattr(o, "".join([...]), 1)` -- the guard can
+  never pass, so every execution writes the generic opcode back, re-runs the
+  full slow path, and re-specializes: two instruction-stream writes and a
+  `dict_get_index` per access.  Measured at 41ms against 18ms for the same
+  loop over an attribute set from a constant.  (Still ahead of CPython's 46ms,
+  which is why this is a performance note and not a correctness one.)
+
+  The fix is small -- refuse once at the specialization site when the stored
+  key is not the same object, and record the refusal in a spare CACHE byte so
+  the attempt is not repeated -- but it does not fit: `src/opcodes/load.asm`
+  is 107 bytes under lint's 100k cap for a hand-written file, so ANY addition
+  to it fails the build.  The seam is the one `arith.asm` / `arith_spec.asm`
+  already uses: move the two inline-cache handlers, opcodes 203 and 204, into
+  a `load_ic.asm` of their own.  They deopt by rewriting an opcode byte and
+  re-dispatching, so they call nothing file-local.
+
 - **`int / int` double-rounds when either operand is wider than a double.**
   `(10**30) / 7` answers `1.4285714285714283e+29` where CPython answers
   `1.4285714285714285e+29`, and `1 / 10**30` is out by an ulp the same way.
