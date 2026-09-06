@@ -2312,6 +2312,7 @@ section .data
 
 sm_name_str: db "staticmethod", 0
 descr_func_name: db "__func__", 0
+descr_wrapped_name: db "__wrapped__", 0
 align 8
 cm_name_str: db "classmethod", 0
 prop_name_str: db "property", 0
@@ -2329,20 +2330,35 @@ section .text
 ;; One function serves both wrappers -- sm_callable and cm_callable are the
 ;; same slot -- so both type tables point straight at it.
 ;; ============================================================================
-DEF_FUNC descr_func_attr, 8            ; 1 pushes, so rsp is 16-aligned
+DF_NAME  equ 8              ; the attribute name, across ap_strcmp
+DF_FRAME equ 8              ; + 1 push = 16, 16-byte aligned
+DEF_FUNC descr_func_attr, DF_FRAME
     push rbx
     mov rbx, rdi
+    mov [rbp - DF_NAME], rsi    ; a push here would unalign rsp for ap_strcmp
     lea rdi, [rsi + PyStrObject.data]
     lea rsi, [rel descr_func_name]
     call ap_strcmp
     test eax, eax
+    je .have
+    ; __wrapped__ is the same slot under CPython 3.10's second name, and
+    ; functools.wraps and inspect.unwrap both look for it.
+    mov rsi, [rbp - DF_NAME]
+    lea rdi, [rsi + PyStrObject.data]
+    lea rsi, [rel descr_wrapped_name]
+    call ap_strcmp
+    test eax, eax
     jne .none
+.have:
     mov rax, [rbx + PyClassMethodObject.cm_callable]
     test rax, rax
     jz .none
-    INCREF rax
+    ; A VALUE, as the constructor's own comment says.  INCREF wrote through
+    ; the number for `staticmethod(1).__func__`, and the V_PACK that followed
+    ; was a no-op the wrong way round -- an immediate is already its Value.
+    INCREF_V rax, rcx
+    xor edx, edx
     mov edx, TAG_PTR
-    V_PACK rax, rdx
     pop rbx
     leave
     ret
@@ -3074,9 +3090,9 @@ DEF_FUNC staticmethod_clear, 8            ; 1 pushes, so rsp is 16-aligned
     mov rbx, rdi
     mov rdi, [rbx + PyStaticMethodObject.sm_callable]
     mov qword [rbx + PyStaticMethodObject.sm_callable], 0
-    test rdi, rdi
-    jz .done
-    call obj_decref
+    ; DECREF_V: the slot is a Value, and the dealloc beside this one already
+    ; knows it.  An immediate here released a number as a pointer.
+    DECREF_V rdi, rax
 .done:
     pop rbx
     leave
@@ -3098,9 +3114,9 @@ DEF_FUNC classmethod_clear, 8            ; 1 pushes, so rsp is 16-aligned
     mov rbx, rdi
     mov rdi, [rbx + PyClassMethodObject.cm_callable]
     mov qword [rbx + PyClassMethodObject.cm_callable], 0
-    test rdi, rdi
-    jz .done
-    call obj_decref
+    ; DECREF_V: the slot is a Value, and the dealloc beside this one already
+    ; knows it.  An immediate here released a number as a pointer.
+    DECREF_V rdi, rax
 .done:
     pop rbx
     leave

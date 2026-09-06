@@ -3200,6 +3200,16 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
     mov rdi, [rbp - BIM_NAME]
     test rdi, rdi
     jz .imp_nargs_error
+    ; And it has to be a str.  import_module reads PyStrObject.data off it, so
+    ; an int immediate was a SIGSEGV and a heap singleton was worse than one:
+    ; __import__(None) read whatever .rodata sits near None and answered
+    ; "No module named 'plemented'".
+    V_TEST_PTR rdi, rax
+    ja .imp_name_error
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .imp_name_error
 
     ; level: only 0 is honoured.  A relative import needs the caller's
     ; __package__, which this entry point does not consult, so say so rather
@@ -3340,6 +3350,8 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
     RAISE exc_NotImplementedError_type, "__import__(): relative import is not supported"
 .imp_nargs_error:
     RAISE exc_TypeError_type, "__import__() requires at least 1 argument"
+.imp_name_error:
+    RAISE exc_TypeError_type, "module name must be a string"
 END_FUNC builtin_import_fn
 
 ;; ============================================================================

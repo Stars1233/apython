@@ -1378,9 +1378,13 @@ DEF_FUNC_LOCAL map_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     push r13
     mov rbx, rdi
 
-    ; DECREF func
+    ; DECREF func.  DECREF_V, not obj_decref: MAP_FUNC holds a VALUE, and
+    ; map(1, [1]) stores an int immediate there -- which the constructor was
+    ; careful not to INCREF and which this released as a pointer.  map_clear
+    ; and map_traverse beside it already use the Value-aware forms; this one
+    ; did not, and the crash was in the collector rather than in map.
     mov rdi, [rbx + MAP_FUNC]
-    call obj_decref
+    DECREF_V rdi, rax
 
     ; DECREF each iterator in array
     mov r12, [rbx + MAP_COUNT]
