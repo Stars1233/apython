@@ -32,6 +32,7 @@ test_async_streams
 test_async_tasks
 test_async_wait_for
 test_async_with
+test_awaitable
 test_await_raises
 test_bad_arguments
 test_binary_dunders
