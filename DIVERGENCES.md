@@ -42,15 +42,6 @@ the reasoning rather than from scratch.
   still would not match CPython's, since the basicsizes it is an offset into
   differ anyway.
 
-- **A frame object is a snapshot, so `f_lineno` is where the frame was when
-  it was taken.**  CPython's is a live view onto a frame that is still
-  running, and reports where it is when the attribute is READ:
-  `f = sys._getframe()` on one line and `f.f_lineno` on the next answers the
-  second line there and the first here.  Everything that reads it immediately
-  -- which is every use in the stdlib -- agrees.  Making it live means the
-  frame object holding the PyFrame rather than copying it, and the PyFrame
-  outliving the call.
-
 ## The platform surface
 
 - **`posix` is a subset, and a deliberate one.**  The file, directory and
