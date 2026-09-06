@@ -684,6 +684,11 @@ DEF_FUNC_LOCAL bytes_repr_impl, BRI_FRAME
     call ap_free
     pop rax
     pop rax
+    ; ap_free clobbers edx, and edx is the RETURN TAG this function's callers
+    ; propagate straight out.  Without this the repr came back as a Value with
+    ; a stale tag -- which read as an int, and only under valgrind, because
+    ; without it edx happened to still hold something usable.
+    mov edx, TAG_PTR
 
     pop r15
     pop r14
