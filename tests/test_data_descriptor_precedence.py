@@ -160,3 +160,68 @@ try:
     o.nope
 except AttributeError as e:
     print("AttributeError")
+
+# A descriptor whose OWN type gains __set__ after it is already installed on a
+# class.  That write touches neither the holding class nor any of its bases, so
+# a cached "does this MRO hold a data descriptor" bit computed at install time
+# is stale from then on -- and the store then went into the instance dict with
+# the setter never running.  The bit is an over-approximation for exactly this
+# reason; the walk it gates makes the live check.
+
+
+class Lazy:
+    def __get__(self, obj, objtype=None):
+        return "descr-get"
+
+
+class LateHolder:
+    pass
+
+
+LateHolder.attr = Lazy()
+h = LateHolder()
+# Before __set__ exists it is a NON-data descriptor: the instance dict wins.
+h.attr = "instance"
+print(h.attr, sorted(h.__dict__))
+del h.attr
+print(h.attr)
+
+# Now it becomes a data descriptor, and the same store must reach __set__.
+_seen = []
+Lazy.__set__ = lambda self, obj, value: _seen.append(value)
+h2 = LateHolder()
+h2.attr = 7
+print(h2.attr, sorted(h2.__dict__), _seen)
+
+# ...and the read side has to flip with it.
+h3 = LateHolder()
+h3.__dict__["attr"] = "shadow"      # the descriptor now outranks it
+print(h3.attr, sorted(h3.__dict__))
+
+# __delete__ alone is enough to make it a data descriptor too.
+class DelOnly:
+    def __get__(self, obj, objtype=None):
+        return "del-get"
+
+
+class DelHolder:
+    pass
+
+
+DelHolder.d = DelOnly()
+d1 = DelHolder()
+d1.d = "in-dict"
+print(d1.d, sorted(d1.__dict__))
+DelOnly.__delete__ = lambda self, obj: None
+d2 = DelHolder()
+d2.__dict__["d"] = "shadow2"        # __delete__ alone still outranks it
+print(d2.d, sorted(d2.__dict__))
+
+# A subclass created BEFORE the promotion must see it as well.
+class LateSub(LateHolder):
+    pass
+
+
+s2 = LateSub()
+s2.attr = 9
+print(s2.attr, sorted(s2.__dict__), _seen)

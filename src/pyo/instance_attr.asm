@@ -220,7 +220,12 @@ DEF_FUNC attr_is_data_descr, 8   ; 1 push below, so rsp stays 16-aligned
     cmp rbx, rax
     je .aidd_yes
 
-    ; Anything else is one only if its own type says so.
+    ; Anything else is one only if its own type says so.  This answer must be
+    ; EXACT: instance_getattr_default calls it live at .found_type to decide
+    ; whether the MRO entry outranks the instance dict, and a non-data
+    ; descriptor that answered yes there would beat an instance attribute.
+    ; The cached flag's scan wants a different question and asks
+    ; attr_may_be_data_descr below.
     test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jz .aidd_no
     mov rdi, rbx
@@ -249,6 +254,63 @@ DEF_FUNC attr_is_data_descr, 8   ; 1 push below, so rsp stays 16-aligned
 END_FUNC attr_is_data_descr
 
 ;; ============================================================================
+;; attr_may_be_data_descr(rdi = a Value) -> eax = 1 if it could EVER be one
+;;
+;; The question TYPE_FLAG_MRO_HAS_DATA_DESCR actually needs, which is not the
+;; one attr_is_data_descr answers.  That flag is computed when a class is
+;; created and when something is stored ON that class -- but a descriptor's
+;; OWN type can gain `__set__` long afterwards, and that write touches neither
+;; the class holding the descriptor nor any of its bases:
+;;
+;;     class Lazy:
+;;         def __get__(self, o, t=None): return 1
+;;     class B: pass
+;;     B.l = Lazy()            ; refreshes B; Lazy has no __set__ yet
+;;     Lazy.__set__ = ...      ; refreshes Lazy, which B knows nothing about
+;;     b.l = 7                 ; must still call the setter
+;;
+;; With the exact test the flag stayed clear and that store went straight into
+;; the instance dict.  Nothing short of re-scanning every class in the process
+;; on `__set__` keeps an exact answer true, so the flag means "there MIGHT be
+;; one here" and the walk it gates decides for real -- op_store_attr and
+;; instance_getattr_default both make a live attr_is_data_descr check once
+;; they get there.  A false positive costs an MRO walk; the false negative was
+;; a wrong answer.
+;;
+;; The over-approximation is exactly as wide as the uncertainty.  A static
+;; type cannot gain `__set__` -- setattr on one is refused -- so only a value
+;; whose type is a HEAPTYPE is in doubt, and a class body holding an instance
+;; of a user class is overwhelmingly the descriptor idiom already.  Functions,
+;; ints, strs, staticmethod and classmethod have static types and answer no.
+;; ============================================================================
+DEF_FUNC attr_may_be_data_descr, 8   ; 1 push below, so rsp stays 16-aligned
+    push rbx
+    V_TEST_PTR rdi, rax
+    ja .amdd_no                 ; an immediate is not a descriptor
+    test rdi, rdi
+    jz .amdd_no
+    mov rbx, [rdi + PyObject.ob_type]
+    test rbx, rbx
+    jz .amdd_no
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jnz .amdd_yes
+    ; A static type is fixed, so the exact test is also the final one.
+    pop rbx
+    leave
+    jmp attr_is_data_descr
+.amdd_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.amdd_yes:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC attr_may_be_data_descr
+
+;; ============================================================================
 ;; dict_has_data_descr(rdi = a dict) -> eax = 1 if any value is a data descr
 ;;
 ;; The dense entries array, holes skipped -- the same walk dict.copy() makes.
@@ -271,7 +333,7 @@ DEF_FUNC dict_has_data_descr
     test r12, r12
     jz .dhdd_next
     mov rdi, [rax + DictEntry.value]
-    call attr_is_data_descr
+    call attr_may_be_data_descr
     test eax, eax
     jnz .dhdd_yes
 .dhdd_next:
