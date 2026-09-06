@@ -439,6 +439,7 @@ test_str_translate
 test_struct_binascii
 test_structseq
 test_subclass_binop
+test_subclass_compare_float
 test_subclass_contains
 test_subclasses
 test_subclass_item_slots

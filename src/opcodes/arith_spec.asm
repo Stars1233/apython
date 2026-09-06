@@ -93,17 +93,15 @@ END_FUNC op_binary_op_sub_int
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
 DEF_FUNC_BARE op_binary_op_add_float
-    VPOP_VAL rsi, r8            ; right + tag
-    VPOP_VAL rdi, r9            ; left + tag
-    FLOAT_PAIR_OR_DEOPT .add_float_deopt_repush
+    FLOAT_PAIR_OR_DEOPT_M .add_float_deopt
     addsd xmm0, xmm1
     movq rax, xmm0
-    VPUSH_FLOAT rax, r15
+    V_FROM_F64 rax, rdx
+    VREPLACE2 rax
     add rbx, 2                 ; skip CACHE
     DISPATCH
-.add_float_deopt_repush:
-    VUNDROP 2
 .add_float_deopt:
+    ; Nothing was popped, so there is nothing to put back.
     mov byte [rbx - 2], 122
     sub rbx, 2
     DISPATCH
@@ -113,17 +111,15 @@ END_FUNC op_binary_op_add_float
 ;; op_binary_op_sub_float (218) -> nothing; pushes the difference and dispatches
 ;; ============================================================================
 DEF_FUNC_BARE op_binary_op_sub_float
-    VPOP_VAL rsi, r8            ; right + tag
-    VPOP_VAL rdi, r9            ; left + tag
-    FLOAT_PAIR_OR_DEOPT .sub_float_deopt_repush
+    FLOAT_PAIR_OR_DEOPT_M .sub_float_deopt
     subsd xmm0, xmm1
     movq rax, xmm0
-    VPUSH_FLOAT rax, r15
+    V_FROM_F64 rax, rdx
+    VREPLACE2 rax
     add rbx, 2                 ; skip CACHE
     DISPATCH
-.sub_float_deopt_repush:
-    VUNDROP 2
 .sub_float_deopt:
+    ; Nothing was popped, so there is nothing to put back.
     mov byte [rbx - 2], 122
     sub rbx, 2
     DISPATCH
@@ -133,17 +129,15 @@ END_FUNC op_binary_op_sub_float
 ;; op_binary_op_mul_float (219) -> nothing; pushes the product and dispatches
 ;; ============================================================================
 DEF_FUNC_BARE op_binary_op_mul_float
-    VPOP_VAL rsi, r8            ; right + tag
-    VPOP_VAL rdi, r9            ; left + tag
-    FLOAT_PAIR_OR_DEOPT .mul_float_deopt_repush
+    FLOAT_PAIR_OR_DEOPT_M .mul_float_deopt
     mulsd xmm0, xmm1
     movq rax, xmm0
-    VPUSH_FLOAT rax, r15
+    V_FROM_F64 rax, rdx
+    VREPLACE2 rax
     add rbx, 2                 ; skip CACHE
     DISPATCH
-.mul_float_deopt_repush:
-    VUNDROP 2
 .mul_float_deopt:
+    ; Nothing was popped, so there is nothing to put back.
     mov byte [rbx - 2], 122
     sub rbx, 2
     DISPATCH
@@ -153,26 +147,22 @@ END_FUNC op_binary_op_mul_float
 ;; op_binary_op_truediv_float (220) -> nothing; pushes the quotient and dispatches
 ;; ============================================================================
 DEF_FUNC_BARE op_binary_op_truediv_float
-    VPOP_VAL rsi, r8            ; right + tag
-    VPOP_VAL rdi, r9            ; left + tag
-    FLOAT_PAIR_OR_DEOPT .truediv_float_deopt_repush
-    ; A zero divisor deopts, so the generic path raises ZeroDivisionError.
-    ; ucomisd sets ZF for UNORDERED as well, so parity is tested first: a NaN
-    ; divisor took the deopt, which answers nan correctly but also rewrote the
-    ; site back to BINARY_OP for good, so one nan in a loop cost the
-    ; specialization for the rest of the run.
+    FLOAT_PAIR_OR_DEOPT_M .truediv_float_deopt
+    ; A zero divisor has to raise, and the generic path is what raises.
+    ; ucomisd sets ZF for UNORDERED too, so parity is consulted first: a NaN
+    ; divisor is not a zero one, and treating it as one refused to specialize
+    ; the site for the rest of the program.
     xorpd xmm2, xmm2
     ucomisd xmm1, xmm2
-    jp .tfd_nonzero
-    je .truediv_float_deopt_repush
-.tfd_nonzero:
+    jp .truediv_float_nonzero
+    je .truediv_float_deopt
+.truediv_float_nonzero:
     divsd xmm0, xmm1
     movq rax, xmm0
-    VPUSH_FLOAT rax, r15
+    V_FROM_F64 rax, rdx
+    VREPLACE2 rax
     add rbx, 2                 ; skip CACHE
     DISPATCH
-.truediv_float_deopt_repush:
-    VUNDROP 2
 .truediv_float_deopt:
     mov byte [rbx - 2], 122
     sub rbx, 2
@@ -274,12 +264,16 @@ END_FUNC op_binary_op_floordiv_int
 ;; ============================================================================
 section .rodata
 align 16
-;; op*4 + (2*(x>=y) + (x<=y)); the 0 column is the float-only unordered case.
+;; op*4 + (2*(x>=y) + (x<=y)).  Column 0 is the unordered case, which only a
+;; NaN produces, so the integer forms never index it and the float forms
+;; always do when either operand is a NaN.
 int_cmp_result:
     db 0, 1, 0, 0               ; PY_LT = 0
     db 0, 1, 0, 1               ; PY_LE = 1
     db 0, 0, 0, 1               ; PY_EQ = 2
-    db 0, 1, 1, 0               ; PY_NE = 3
+    db 1, 1, 1, 0               ; PY_NE = 3  -- 1 in the unordered column,
+                                ;   because NaN != anything is the one
+                                ;   comparison a NaN answers True
     db 0, 0, 1, 0               ; PY_GT = 4
     db 0, 0, 1, 1               ; PY_GE = 5
 section .text
@@ -580,62 +574,21 @@ END_FUNC op_binary_op_truediv_int
 ;; ============================================================================
 DEF_FUNC_BARE op_compare_op_float
     shr ecx, 4                  ; ecx = PY_LT/LE/EQ/NE/GT/GE (0-5)
-    V_TEST_F64_M [r13 - 8], rax
-    ja .cf_deopt
-    V_TEST_F64_M [r13 - 16], rax
-    ja .cf_deopt
-    mov rsi, [r13 - 8]          ; right
-    mov rdi, [r13 - 16]         ; left
-    V_TO_F64 rsi
-    V_TO_F64 rdi
-    movq xmm1, rsi
-    movq xmm0, rdi
-    sub r13, 16                 ; both consumed; immediates own nothing
+    FLOAT_PAIR_OR_DEOPT_M .cf_deopt
     ucomisd xmm0, xmm1
-    lea r8, [rel .cf_setcc_table]
-    jmp [r8 + rcx*8]            ; LEA and jmp [mem] leave the flags alone
-
-.cf_lt:
-    setb al
-    setnp dl
-    and al, dl
-    jmp .cf_push
-.cf_le:
-    setbe al
-    setnp dl
-    and al, dl
-    jmp .cf_push
-.cf_eq:
-    sete al
-    setnp dl
-    and al, dl
-    jmp .cf_push
-.cf_ne:
-    setne al
-    setp dl
-    or al, dl
-    jmp .cf_push
-.cf_gt:
-    seta al                     ; false for unordered already
-    jmp .cf_push
-.cf_ge:
-    setae al                    ; likewise
-.cf_push:
+    setae al                    ; x >= y -- already false when unordered
+    setbe dl                    ; x <= y -- wrongly TRUE when unordered, so
+    setnp r8b                   ;   mask it with "the pair was ordered"
+    and dl, r8b
     movzx eax, al
-    VPUSH_BOOL rax
+    movzx edx, dl
+    lea eax, [rdx + rax*2]      ; 0 = unordered, 1 = less, 2 = greater, 3 = equal
+    lea eax, [rax + rcx*4]      ; + op*4
+    lea rdx, [rel int_cmp_result]
+    movzx eax, byte [rdx + rax]
+    VREPLACE2_BOOL rax, rdx
     add rbx, 2                  ; skip CACHE
     DISPATCH
-
-section .data
-align 8
-.cf_setcc_table:
-    dq .cf_lt
-    dq .cf_le
-    dq .cf_eq
-    dq .cf_ne
-    dq .cf_gt
-    dq .cf_ge
-section .text
 .cf_deopt:
     ; Nothing was popped, so there is nothing to put back.
     mov byte [rbx - 2], 107     ; COMPARE_OP
@@ -651,65 +604,27 @@ END_FUNC op_compare_op_float
 ;; ============================================================================
 DEF_FUNC_BARE op_compare_op_float_jump_false
     shr ecx, 4
-    V_TEST_F64_M [r13 - 8], rax
-    ja .cfjf_deopt
-    V_TEST_F64_M [r13 - 16], rax
-    ja .cfjf_deopt
-    movzx r9d, byte [rbx + 3]   ; the POP_JUMP_IF_FALSE argument
-    mov rsi, [r13 - 8]
-    mov rdi, [r13 - 16]
-    V_TO_F64 rsi
-    V_TO_F64 rdi
-    movq xmm1, rsi
-    movq xmm0, rdi
-    sub r13, 16
+    FLOAT_PAIR_OR_DEOPT_M .cfjf_deopt
     ucomisd xmm0, xmm1
-    lea r8, [rel .cfjf_setcc_table]
-    jmp [r8 + rcx*8]
-
-.cfjf_lt:
-    setb al
-    setnp dl
-    and al, dl
-    jmp .cfjf_branch
-.cfjf_le:
-    setbe al
-    setnp dl
-    and al, dl
-    jmp .cfjf_branch
-.cfjf_eq:
-    sete al
-    setnp dl
-    and al, dl
-    jmp .cfjf_branch
-.cfjf_ne:
-    setne al
-    setp dl
-    or al, dl
-    jmp .cfjf_branch
-.cfjf_gt:
-    seta al
-    jmp .cfjf_branch
-.cfjf_ge:
-    setae al
-.cfjf_branch:
-    add rbx, 4                  ; CACHE (2) + POP_JUMP_IF_FALSE (2)
+    setae al                    ; x >= y -- already false when unordered
+    setbe dl                    ; x <= y -- wrongly TRUE when unordered, so
+    setnp r8b                   ;   mask it with "the pair was ordered"
+    and dl, r8b
+    movzx eax, al
+    movzx edx, dl
+    lea eax, [rdx + rax*2]      ; 0 = unordered, 1 = less, 2 = greater, 3 = equal
+    lea eax, [rax + rcx*4]      ; + op*4
+    lea rdx, [rel int_cmp_result]
+    movzx eax, byte [rdx + rax]
+    ; Skip CACHE (2) + POP_JUMP_IF_FALSE (2) = 4 bytes; its arg is at rbx+3.
+    movzx edx, byte [rbx + 3]
+    add rbx, 4
     test al, al
-    jnz .cfjf_no_jump
-    lea rbx, [rbx + r9*2]
+    jnz .cfjf_no_jump              ; truthy -> do not jump
+    lea rbx, [rbx + rdx*2]
 .cfjf_no_jump:
+    VDROP 2                     ; both operands are immediates
     DISPATCH
-
-section .data
-align 8
-.cfjf_setcc_table:
-    dq .cfjf_lt
-    dq .cfjf_le
-    dq .cfjf_eq
-    dq .cfjf_ne
-    dq .cfjf_gt
-    dq .cfjf_ge
-section .text
 .cfjf_deopt:
     mov byte [rbx - 2], 107
     sub rbx, 2
@@ -724,65 +639,27 @@ END_FUNC op_compare_op_float_jump_false
 ;; ============================================================================
 DEF_FUNC_BARE op_compare_op_float_jump_true
     shr ecx, 4
-    V_TEST_F64_M [r13 - 8], rax
-    ja .cfjt_deopt
-    V_TEST_F64_M [r13 - 16], rax
-    ja .cfjt_deopt
-    movzx r9d, byte [rbx + 3]
-    mov rsi, [r13 - 8]
-    mov rdi, [r13 - 16]
-    V_TO_F64 rsi
-    V_TO_F64 rdi
-    movq xmm1, rsi
-    movq xmm0, rdi
-    sub r13, 16
+    FLOAT_PAIR_OR_DEOPT_M .cfjt_deopt
     ucomisd xmm0, xmm1
-    lea r8, [rel .cfjt_setcc_table]
-    jmp [r8 + rcx*8]
-
-.cfjt_lt:
-    setb al
-    setnp dl
-    and al, dl
-    jmp .cfjt_branch
-.cfjt_le:
-    setbe al
-    setnp dl
-    and al, dl
-    jmp .cfjt_branch
-.cfjt_eq:
-    sete al
-    setnp dl
-    and al, dl
-    jmp .cfjt_branch
-.cfjt_ne:
-    setne al
-    setp dl
-    or al, dl
-    jmp .cfjt_branch
-.cfjt_gt:
-    seta al
-    jmp .cfjt_branch
-.cfjt_ge:
-    setae al
-.cfjt_branch:
+    setae al                    ; x >= y -- already false when unordered
+    setbe dl                    ; x <= y -- wrongly TRUE when unordered, so
+    setnp r8b                   ;   mask it with "the pair was ordered"
+    and dl, r8b
+    movzx eax, al
+    movzx edx, dl
+    lea eax, [rdx + rax*2]      ; 0 = unordered, 1 = less, 2 = greater, 3 = equal
+    lea eax, [rax + rcx*4]      ; + op*4
+    lea rdx, [rel int_cmp_result]
+    movzx eax, byte [rdx + rax]
+    ; Skip CACHE (2) + POP_JUMP_IF_TRUE (2) = 4 bytes; its arg is at rbx+3.
+    movzx edx, byte [rbx + 3]
     add rbx, 4
     test al, al
-    jz .cfjt_no_jump            ; falsy -> do not jump (POP_JUMP_IF_TRUE)
-    lea rbx, [rbx + r9*2]
+    jz .cfjt_no_jump              ; falsy -> do not jump
+    lea rbx, [rbx + rdx*2]
 .cfjt_no_jump:
+    VDROP 2                     ; both operands are immediates
     DISPATCH
-
-section .data
-align 8
-.cfjt_setcc_table:
-    dq .cfjt_lt
-    dq .cfjt_le
-    dq .cfjt_eq
-    dq .cfjt_ne
-    dq .cfjt_gt
-    dq .cfjt_ge
-section .text
 .cfjt_deopt:
     mov byte [rbx - 2], 107
     sub rbx, 2

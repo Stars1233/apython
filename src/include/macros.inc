@@ -888,6 +888,58 @@ ASM_INIT
 %endmacro
 
 ;; ============================================================================
+;; FLOAT_PAIR_OR_DEOPT_M label -- xmm0 = left, xmm1 = right, or jump to `label`
+;;
+;; What FLOAT_PAIR_OR_DEOPT accepts, read STRAIGHT OFF THE STACK instead of out
+;; of the (payload, tag) pairs VPOP_VAL leaves behind.  Same rules: float
+;; against float, float against an integer immediate either way round, and two
+;; integers REFUSED, because that pair belongs to the integer opcode and
+;; answering it here would produce a float where Python produces an int.
+;;
+;; The pair version cost two V_UNPACKs -- twenty instructions to classify by
+;; high16, subtract a bias and synthesise a tag -- before a six-compare ladder
+;; over those tags could look at them.  This classifies the raw Values with
+;; V_IS_FLOAT, which is the same three instructions V_UNPACK would have spent
+;; on step one, and then stops.
+;;
+;; Nothing is popped, so a handler using this has nothing to put back on its
+;; deopt arm: it writes the generic opcode and re-dispatches with the stack as
+;; it found it.
+;;
+;; Clobbers rax, rdi and rsi.  A pointer or NULL fails both tests and deopts.
+;; ============================================================================
+%macro FLOAT_PAIR_OR_DEOPT_M 1
+    mov rdi, [r13 - 16]         ; left Value
+    mov rsi, [r13 - 8]          ; right Value
+    V_IS_FLOAT rdi, rax
+    jb %%left_float
+    ; Not a float, so the only pair left to accept is integer against float.
+    cmp rdi, [rel v_int_lo]
+    jb %1                       ; a pointer, NULL, or a sentinel
+    V_IS_FLOAT rsi, rax
+    jae %1                      ; two integers: not this opcode
+    V_TO_I64 rdi
+    cvtsi2sd xmm0, rdi
+    V_TO_F64 rsi
+    movq xmm1, rsi
+    jmp %%ready
+%%left_float:
+    V_TO_F64 rdi
+    movq xmm0, rdi
+    V_IS_FLOAT rsi, rax
+    jb %%right_float
+    cmp rsi, [rel v_int_lo]
+    jb %1
+    V_TO_I64 rsi
+    cvtsi2sd xmm1, rsi
+    jmp %%ready
+%%right_float:
+    V_TO_F64 rsi
+    movq xmm1, rsi
+%%ready:
+%endmacro
+
+;; ============================================================================
 ;; INT_PAIR_OR_DEOPT label -- rdx = left Value, rax = right Value, or jump
 ;;
 ;; Reads the top two stack slots WITHOUT popping them, and rejects anything
