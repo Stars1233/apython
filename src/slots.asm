@@ -370,35 +370,77 @@ END_FUNC slot_sq_contains
 ;; the exception would surface later at an unrelated instruction -- so it goes
 ;; to slot_reraise, like every other wrapper here.
 ;;
-;; The wrapper speaks for the LEFT operand only.  op_binary_op offers the pair
-;; to the RIGHT type's slot as well, with the operands still in their original
-;; order, and answering there would call the left object's __op__ -- the wrong
-;; object entirely.  The identity test below is CPython's own, from SLOT1BIN:
-;; "am I the slot this operand's type actually holds?"
+;; The wrapper speaks for BOTH operands, as CPython's SLOT1BINFULL does, and
+;; the identity tests are what tell it which one it is speaking for.
+;;
+;; op_binary_op offers the pair to the RIGHT type's slot as well, with the
+;; operands still in their original order.  If the wrapper answered there with
+;; the LEFT object's __op__ it would be calling the wrong object entirely; so
+;; it asks "am I the slot the LEFT operand's type actually holds?", and when
+;; the answer is no it asks the mirror question about the right and calls
+;; __rop__ instead.  That second arm is what a subclass of a BUILTIN needs:
+;; MyFloat(float) defining only __radd__ inherits float's nb_add, which
+;; answers before any reflected dunder can be reached, so `1 + MyFloat(2)`
+;; came back 3.0.  CPython installs slot_nb_add on such a type precisely
+;; because __radd__ was defined, and notices there that self is on the right.
 ;; ============================================================================
 SB_LEFT  equ 8
 SB_RIGHT equ 16
 SB_EXC   equ 24
-SB_FRAME equ 32             ; + 0 pushes = 32, 16-aligned
+SB_OTHER equ 32             ; do_other: the right type holds this wrapper too
+SB_FRAME equ 48             ; + 0 pushes = 48, 16-aligned
 
 %macro DEF_BINARY_SLOT 3-4 0    ; %1 = wrapper, %2 = name symbol, %3 = nb field,
                                 ; %4 = the reflected name symbol, or 0
 DEF_FUNC %1, SB_FRAME
     mov [rbp - SB_LEFT], rdi
     mov [rbp - SB_RIGHT], rsi
+    mov qword [rbp - SB_OTHER], 0
+
+%ifnum %4
+%else
+    ; do_other, CPython's: the two types differ and the RIGHT one holds this
+    ; same wrapper in this same slot.  Computed first because the forward arm
+    ; below consults it before giving up.
+    V_TEST_PTR rsi, rax
+    ja %%have_other
+    mov rax, [rsi + PyObject.ob_type]
+    mov rcx, rdi
+    push rax
+    sub rsp, 8
+    mov rdi, rcx
+    extern value_type
+    call value_type
+    add rsp, 8
+    mov rcx, rax
+    pop rax                     ; the right type
+    cmp rax, rcx
+    je %%have_other             ; same type: there is no other side
+    mov rdx, [rax + PyTypeObject.tp_as_number]
+    test rdx, rdx
+    jz %%have_other
+    mov rdx, [rdx + PyNumberMethods.%3]
+    lea rcx, [rel %1]
+    cmp rdx, rcx
+    jne %%have_other
+    mov qword [rbp - SB_OTHER], 1
+%%have_other:
+    mov rdi, [rbp - SB_LEFT]
+    mov rsi, [rbp - SB_RIGHT]
+%endif
 
     V_TEST_PTR rdi, rax
-    ja %%decline                ; an immediate holds no slot of its own
+    ja %%try_other              ; an immediate holds no slot of its own
     test rdi, rdi
-    jz %%decline
+    jz %%try_other
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_number]
     test rax, rax
-    jz %%decline
+    jz %%try_other
     mov rax, [rax + PyNumberMethods.%3]
     lea rcx, [rel %1]
     cmp rax, rcx
-    jne %%decline               ; we are the RIGHT type's slot here
+    jne %%try_other             ; we are the RIGHT type's slot here
 
 %ifnum %4
 %else
@@ -446,6 +488,37 @@ DEF_FUNC %1, SB_FRAME
 %%drop_notimpl:
     mov rdi, rax                ; dunder_call_2 hands back an owned reference
     call obj_decref
+
+%%try_other:
+%ifnum %4
+%else
+    ; The forward direction had nothing to say, or this wrapper is the right
+    ; type's rather than the left's.  Either way, __rop__(right, left) is the
+    ; remaining question, and only when the right type really does hold this
+    ; slot -- otherwise op_binary_op's own reflected arm will ask it.
+    cmp qword [rbp - SB_OTHER], 0
+    je %%decline
+    mov qword [rbp - SB_OTHER], 0   ; once
+    DUNDER_EXC_SAVE [rbp - SB_EXC]
+    mov rdi, [rbp - SB_RIGHT]
+    mov rsi, [rbp - SB_LEFT]
+    V_UNPACK rsi, rcx
+    lea rdx, [rel %4]
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz %%none_or_raised
+    lea rcx, [rel notimpl_singleton]
+    cmp rax, rcx
+    je %%drop_other_notimpl
+    V_PACK rax, rdx
+    leave
+    ret
+%%drop_other_notimpl:
+    mov rdi, rax
+    call obj_decref
+%endif
+
 %%decline:
     xor eax, eax                ; the NULL Value
     leave
@@ -470,6 +543,10 @@ END_FUNC %1
 ;; The status is in ecx and not edx because the answer is already a Value:
 ;; edx would be read as its tag, and TAG_SMALLINT is 1.
 ;;
+;; Global, because obj_binary_op asks the same question: `sum([1, 2, MyInt(3)])`
+;; has to answer MyInt.__radd__ for the same reason `1 + MyInt(3)` does, and
+;; the two go through different functions.
+;;
 ;; CPython's SLOT1BINFULL prologue.  The reflected form runs FIRST when the
 ;; right operand's type is a proper subclass of the left's and overrides the
 ;; reflected name -- so `P() + Q()` for a Q(P) defining __radd__ answers
@@ -484,22 +561,28 @@ SBR_RIGHT equ 16
 SBR_NAME  equ 24
 SBR_EXC   equ 32
 SBR_LMETH equ 40
-SBR_FRAME equ 48            ; + 0 pushes = 48
-DEF_FUNC_LOCAL slot_binop_reflect_first, SBR_FRAME
+SBR_LTYPE equ 48            ; the left type, which value_type may synthesise
+SBR_FRAME equ 64            ; + 0 pushes = 64
+global slot_binop_reflect_first
+DEF_FUNC slot_binop_reflect_first, SBR_FRAME
     mov [rbp - SBR_LEFT], rdi
     mov [rbp - SBR_RIGHT], rsi
     mov [rbp - SBR_NAME], rdx
 
-    ; Both operands have to be objects with types to compare.
-    V_TEST_PTR rdi, rax
-    ja .sbr_no
+    ; The RIGHT operand has to be a heap object: an immediate's type is int or
+    ; float exactly, and neither can be a proper subclass of anything.  The
+    ; LEFT may well be an immediate -- `1 + MyInt(3)` and `sum([1, 2, MyInt(3)])`
+    ; both put one there -- so its type comes from value_type, which knows the
+    ; encoding, rather than from a dereference.
     V_TEST_PTR rsi, rax
     ja .sbr_no
-    test rsi, rsi
+    extern value_type
+    call value_type              ; rdi is still the left Value
+    test rax, rax
     jz .sbr_no
-
-    mov rax, [rdi + PyObject.ob_type]
-    mov rcx, [rsi + PyObject.ob_type]
+    mov [rbp - SBR_LTYPE], rax
+    mov rcx, [rbp - SBR_RIGHT]
+    mov rcx, [rcx + PyObject.ob_type]
     cmp rax, rcx
     je .sbr_no                  ; same type: nothing to prefer
 
@@ -524,8 +607,7 @@ DEF_FUNC_LOCAL slot_binop_reflect_first, SBR_FRAME
     jz .sbr_no                  ; the right type does not define it
     mov [rbp - SBR_LMETH], rax  ; the right type's, for the compare below
 
-    mov rdi, [rbp - SBR_LEFT]
-    mov rdi, [rdi + PyObject.ob_type]
+    mov rdi, [rbp - SBR_LTYPE]
     mov rsi, [rbp - SBR_NAME]
     call dunder_lookup
     V_UNPACK rax, rdx
@@ -1060,6 +1142,28 @@ slot_table:
     dq sl_ifloordiv_name, SLOT_NUMBER, PyNumberMethods.nb_ifloor_divide, slot_nb_ifloordiv
     dq sl_itruediv_name, SLOT_NUMBER, PyNumberMethods.nb_itrue_divide, slot_nb_itruediv
     dq sl_imatmul_name, SLOT_NUMBER, PyNumberMethods.nb_imatmul, slot_nb_imatmul
+
+    ; And the reflected names, which install the SAME wrapper.  CPython's
+    ; slotdef list has a row for each for the same reason: __radd__ alone has
+    ; to put something in nb_add, or a subclass of a BUILTIN never gets a
+    ; chance -- MyFloat(float) with only __radd__ inherits float's nb_add,
+    ; which answers first, and `1 + MyFloat(2)` came back 3.0.  The wrapper
+    ; knows which side it is speaking for and calls __rop__ when it is the
+    ; right one.
+    dq sl_radd_name, SLOT_NUMBER, PyNumberMethods.nb_add, slot_nb_add
+    dq sl_rsub_name, SLOT_NUMBER, PyNumberMethods.nb_subtract, slot_nb_sub
+    dq sl_rmul_name, SLOT_NUMBER, PyNumberMethods.nb_multiply, slot_nb_mul
+    dq sl_rmod_name, SLOT_NUMBER, PyNumberMethods.nb_remainder, slot_nb_mod
+    dq sl_rdivmod_name, SLOT_NUMBER, PyNumberMethods.nb_divmod, slot_nb_divmod
+    dq sl_rpow_name, SLOT_NUMBER, PyNumberMethods.nb_power, slot_nb_pow
+    dq sl_rlshift_name, SLOT_NUMBER, PyNumberMethods.nb_lshift, slot_nb_lshift
+    dq sl_rrshift_name, SLOT_NUMBER, PyNumberMethods.nb_rshift, slot_nb_rshift
+    dq sl_rand_name, SLOT_NUMBER, PyNumberMethods.nb_and, slot_nb_and
+    dq sl_rxor_name, SLOT_NUMBER, PyNumberMethods.nb_xor, slot_nb_xor
+    dq sl_ror_name, SLOT_NUMBER, PyNumberMethods.nb_or, slot_nb_or
+    dq sl_rfloordiv_name, SLOT_NUMBER, PyNumberMethods.nb_floor_divide, slot_nb_floordiv
+    dq sl_rtruediv_name, SLOT_NUMBER, PyNumberMethods.nb_true_divide, slot_nb_truediv
+    dq sl_rmatmul_name, SLOT_NUMBER, PyNumberMethods.nb_matmul, slot_nb_matmul
 
     dq 0, 0, 0, 0
 

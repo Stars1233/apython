@@ -29,8 +29,37 @@ extern float_type
 extern int_is_integer
 extern int_shrink
 extern int_type
+extern bool_type
 
 section .text
+
+;; ============================================================================
+;; pow_is_plain_int(rdi = payload, edx = tag) -> eax = 1 for an int that is
+;;   int or bool EXACTLY, 0 for a subclass or anything else
+;;
+;; int_is_integer accepts a subclass, which is right for arithmetic and wrong
+;; for deciding whether the operator protocol can be skipped.
+;; ============================================================================
+DEF_FUNC_BARE pow_is_plain_int
+    mov eax, 1
+    cmp edx, TAG_SMALLINT
+    je .pipi_done
+    test edx, TAG_RC_BIT
+    jz .pipi_no
+    test rdi, rdi
+    jz .pipi_no
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rdx, [rel int_type]
+    cmp rcx, rdx
+    je .pipi_done
+    lea rdx, [rel bool_type]
+    cmp rcx, rdx
+    je .pipi_done
+.pipi_no:
+    xor eax, eax
+.pipi_done:
+    ret
+END_FUNC pow_is_plain_int
 
 ;; ============================================================================
 ;; builtin_pow_fn(rdi = args Value[], rsi = nargs) -> rax = a Value
@@ -39,6 +68,7 @@ section .text
 ;; ============================================================================
 global builtin_pow_fn
 POW_BASE equ 8
+
 POW_BTAG equ 16
 POW_EXP  equ 24
 POW_ETAG equ 32
@@ -84,6 +114,22 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     call int_is_integer
     test eax, eax
     jz .pow_reload_float
+
+    ; Two integers, but a SUBCLASS of int gets the protocol anyway: it may
+    ; override __pow__ or __rpow__, and int_power would answer 8 for
+    ; pow(2, PowRight(3)) where CPython answers PowRight.__rpow__.  A heap
+    ; object whose type is neither int nor bool exactly is such a subclass.
+    mov rdi, r12
+    mov edx, [rbp - POW_BTAG]
+    call pow_is_plain_int
+    test eax, eax
+    jz .pow_reload_float
+    mov rdi, r13
+    mov edx, [rbp - POW_ETAG]
+    call pow_is_plain_int
+    test eax, eax
+    jz .pow_reload_float
+
     mov rax, r12
     mov rbx, r13
     mov ecx, [rbp - POW_BTAG]

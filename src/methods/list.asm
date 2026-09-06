@@ -717,7 +717,14 @@ DEF_FUNC list_method_sort, LS_FRAME
     cmp r8d, TAG_SMALLINT
     je .merge_si_type
     test r8d, TAG_RC_BIT
-    jz .merge_take_left            ; TAG_NONE/TAG_BOOL: take left (stable)
+    ; A tag with no type of its own -- an empty slot, or one of the async
+    ; sentinels.  Not orderable, and not this loop's business to decide:
+    ; obj_richcompare_bool raises the TypeError CPython raises.  Taking the
+    ; left element instead made `sorted([1, None])` answer [1, None] while
+    ; `sorted([None, 1])` raised, so whether a mixed list sorted depended on
+    ; the order it was already in -- and, with a longer list, on how far the
+    ; merge had got.
+    jz .merge_cmp_reflected
     mov rax, [rdi + PyObject.ob_type]
     jmp .merge_have_type
 .merge_si_type:
@@ -767,7 +774,11 @@ DEF_FUNC list_method_sort, LS_FRAME
     ; No tp_richcompare — try dunder on heaptype (right side, the "self")
     mov rdx, [r10 + PyTypeObject.tp_flags]
     test rdx, TYPE_FLAG_HEAPTYPE
-    jz .merge_take_left            ; not heaptype, give up
+    ; A static type with no tp_richcompare -- None is one -- has no opinion
+    ; and no dunder to decline with.  Hand it to obj_richcompare_bool, which
+    ; is the only thing here that knows how to say "not orderable"; taking the
+    ; left element left the answer depending on the order it was already in.
+    jz .merge_cmp_reflected
 
     ; Reload right/left from comparison array
     ; right = self, left = other (for right < left comparison)

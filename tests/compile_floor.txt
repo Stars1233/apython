@@ -210,6 +210,7 @@ test_format_map
 test_format
 test_format_spec
 test_frame_lineno
+test_frame_live
 test_frames_and_time
 test_frozenset_descriptors
 test_frozenset
@@ -243,6 +244,7 @@ test_getset_receiver
 test_hashlib_digests
 test_hash_protocol
 test_identity_values
+test_immediate_args
 test_immediate_operands
 test_imp_module
 test_import_errors
@@ -458,6 +460,7 @@ test_subclass_binop
 test_subclass_compare_float
 test_subclass_contains
 test_subclasses
+test_subclass_first
 test_subclass_item_slots
 test_subprocess_child
 test_sum_compensated

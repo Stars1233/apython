@@ -125,12 +125,13 @@ def subclass_keys():
     print(len(d))
 
     # The other direction -- a subclass as the PROBE key against a str
-    # resident -- is deliberately not asserted here.  It is wrong, and it is
-    # wrong for a reason that has nothing to do with the fast path: the probe
-    # key is not an exact str, so the fast path declines and the generic route
-    # runs, and `obj_richcompare_bool` does not apply the subclass-first rule.
-    # `StrKey("hello") in {"hello": 1}` answers True where CPython says False,
-    # on this commit and on the one before it.  See bugs.md.
+    # resident.  This used to be wrong, for a reason that had nothing to do
+    # with the fast path: the probe key is not an exact str, so the fast path
+    # declines and the generic route runs, and obj_richcompare_bool did not
+    # apply the subclass-first rule.  It does now, so the lying __eq__ is
+    # consulted and the probe finds nothing.
+    g = {"hello": 1}
+    print(StrKey("hello") in g, g.get(StrKey("hello")))
 
     # A plain str subclass, no overrides: equal to the str, so it finds it.
     class Plain(str):

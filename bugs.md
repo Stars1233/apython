@@ -41,53 +41,6 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **A reflected dunder on a subclass of a builtin loses to the builtin's own
-  slot.**  `1 + m`, for a `class MyFloat(float)` defining only `__radd__`,
-  answers `3.0` where CPython answers `MyFloat.__radd__`; `2 * MyFloatM(3.0)`
-  is the same shape.  int's `nb_add` declines the float subclass, and the
-  right operand's slot is tried next -- but MyFloat INHERITS `float_add`, so
-  that succeeds and the user's `__radd__` is never consulted.
-
-  `src/slots.asm` installs a wrapper for `__add__` and not for `__radd__` on
-  its own, on the stated ground that `op_binary_op`'s reflected-dunder arm
-  serves that direction.  It does, for a class with no inherited numeric slot
-  at all -- `1 + Plain()` is right -- and cannot for a builtin's subclass,
-  where the inherited slot answers first.  CPython's `slot_nb_add` exists on
-  such a type precisely because `__radd__` was defined, and notices that
-  `self` is the right operand.
-
-  The rule already exists here in `binop_subclass_first`, which is why
-  `1 + MyInt(2)` IS right: MyInt is a subclass of int, so the reflected arm
-  runs before either slot.  MyFloat is not a subclass of int, so nothing
-  reaches it.
-
-- **`obj_binary_op` does not implement the subclass-first rule at all.**
-  `sum([1, 2, MyInt(3)])` for an int subclass defining `__radd__` answers `6`
-  where CPython answers `MyInt.__radd__`, and `1 + MyInt(3)` answers correctly
-  -- the two go through different functions.  `op_binary_op` calls
-  `binop_subclass_first` before either slot; `obj_binary_op`, which every
-  builtin that adds two objects uses, goes straight to the left type's slot.
-
-  `binop_subclass_first` is file-local to `src/opcodes/arith.asm` and takes
-  `(payload, tag)` pairs rather than Values, and it needs the reflected
-  dunder's name, which `obj_binary_op` has no table for.  Sharing it means
-  exporting it, converting at the boundary, and giving `binary_op_offsets` a
-  parallel column of reflected names.
-
-- **`obj_richcompare_bool` does not implement the subclass-first rule either,
-  and it is the one every container asks.**  For a str subclass whose `__eq__`
-  answers False, `SK("hello") in ["hello"]` is True here and False in CPython;
-  so are `in` on a dict and `list.count`.  The *expression* `"hello" == SK(...)`
-  is right, because `COMPARE_OP` gives the subclass its reflected call first --
-  the two answers come from different functions, exactly as with
-  `op_binary_op` and `obj_binary_op` above.
-
-  This is the same missing rule as the entry above but on a different axis, so
-  fixing one does not fix the other: `obj_richcompare_bool` needs to test
-  `type(right)` for being a proper subclass of `type(left)` that overrides the
-  comparison, and run the reflected slot first when it is.  `tests/test_dict_str_keys.py`
-  has the case written out and says why it is not asserted there.
-
 - **`split()`, `strip()` and friends do not see the non-ASCII whitespace.**
   CPython splits on U+0085, U+00A0, U+2028, U+2029, U+3000 and the U+2000
   block as readily as on a space: `"a\xa0b".split()` is `['a', 'b']` there and
@@ -102,19 +55,6 @@ reasoning that chose them and what changing one would cost.
   path over bytes, chosen by `ob_size == ob_length`, and a decoding loop
   behind it.  `splitlines` has its own, different set (it takes `\x1c` and
   U+2028 but not `\x1f` or U+00A0) and the same gap.
-
-- **`sorted()` accepts an unorderable element when it falls on the right.**
-  `sorted(["a", None])` answers `['a', None]`; `sorted([None, "a"])` raises
-  the TypeError CPython raises for both.  Same for `[1, None]`.  The merge in
-  `list_method_sort` asks "is right < left" and resolves the comparison from
-  the RIGHT element, and when that resolution finds nothing it takes the left
-  element and carries on instead of failing -- so whether a list of mixed
-  types sorts or raises depends on the order it was already in, which also
-  means it can depend on how far the merge has got.
-
-  The reflected path is already there and already correct: a slot that
-  DECLINES hands over to `obj_richcompare_bool`.  What is missing is the case
-  where there is no slot and no dunder to decline in the first place.
 
 - **A read-only property's AttributeError has CPython 3.10's wording.**
   `Plain().r = 2` says `can't set attribute` where CPython 3.12 says
