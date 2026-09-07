@@ -14,6 +14,8 @@ extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern obj_dealloc
+extern raise_exception
+extern exc_TypeError_type
 extern obj_incref
 extern str_from_cstr
 extern str_type
@@ -342,6 +344,8 @@ ma_dunder_dict: db "__dict__", 0
 section .data
 align 8
 global module_type
+
+
 module_type:
     dq 1                        ; ob_refcnt (immortal)
     dq type_type                ; ob_type
@@ -358,7 +362,7 @@ module_type:
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
-    dq 0                        ; tp_new
+    dq module_type_new          ; tp_new
     dq 0                        ; tp_as_number
     dq 0                        ; tp_as_sequence
     dq 0                        ; tp_as_mapping
@@ -690,3 +694,117 @@ DEF_FUNC module_clear_gc, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     ret
 END_FUNC module_clear_gc
+
+section .text
+
+
+;; MTN_SET_NONE key -- one dict entry bound to None, on the module in MTN_MOD.
+%macro MTN_SET_NONE 1
+    lea rdi, [rel %1]
+    call str_from_cstr_heap
+    push rax
+    push rax                    ; pad
+    mov rcx, [rbp - MTN_MOD]
+    mov rdi, [rcx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    lea rdx, [rel none_singleton]
+    call dict_set
+    pop rdi
+    pop rdi
+    call obj_decref
+%endmacro
+
+;; ============================================================================
+;; module_type_new(rdi = type, rsi = args, rdx = nargs)
+;;   -> fat (rax = the new module, rdx = TAG_PTR); raises and does not return
+;;      on a bad argument
+;;
+;; `types.ModuleType(name[, doc])`.  module_type had no tp_new and no tp_init,
+;; so type_call fell through to instance_new, which allocated
+;; PyModuleObject_size bytes and handed back a module whose mod_name and
+;; mod_dict were whatever the allocator left -- before the arity check refused
+;; the arguments and reported "module() takes no arguments".  A constructor
+;; belongs in tp_new, which is what type_call consults; tp_call on a type is
+;; what makes that type's INSTANCES callable.  mappingproxy hit the same
+;; pattern.
+;;
+;; module_new already writes __name__ and __doc__ = None into the dict, so the
+;; only extra work is the optional doc.
+;; ============================================================================
+MTN_MOD   equ 8
+MTN_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC module_type_new, MTN_FRAME
+    cmp rdx, 1
+    jl .mtn_arity
+    cmp rdx, 2
+    jg .mtn_arity
+    push rdx                    ; nargs
+    push rsi                    ; args
+
+    mov rdi, [rsi]              ; args[0], the name, as a Value
+    V_TEST_PTR rdi, rax
+    ja .mtn_bad_name
+    test rdi, rdi
+    jz .mtn_bad_name
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .mtn_bad_name
+
+    xor esi, esi                ; a dict of its own
+    call module_new
+    mov [rbp - MTN_MOD], rax
+
+    pop rsi
+    pop rdx
+    cmp rdx, 2
+    jne .mtn_done
+
+    ; The docstring, over the None module_new left there.
+    mov rcx, [rsi + 8]          ; args[1]
+    mov rax, [rbp - MTN_MOD]
+    mov rdi, [rax + PyModuleObject.mod_dict]
+    push rcx
+    push rcx                    ; pad
+    lea rdi, [rel mod_doc_key]
+    call str_from_cstr_heap
+    pop rcx
+    pop rcx
+    mov rsi, rax
+    push rax
+    push rax                    ; pad
+    mov rax, [rbp - MTN_MOD]
+    mov rdi, [rax + PyModuleObject.mod_dict]
+    mov rdx, rcx
+    call dict_set
+    pop rdi
+    pop rdi
+    call obj_decref
+
+.mtn_done:
+    ; CPython's module.__init__ leaves these three in the dict as None, and
+    ; sorted(m.__dict__) is how a test notices they are missing.  A module the
+    ; import system builds gets real ones written over these.
+    MTN_SET_NONE mtn_loader_key
+    MTN_SET_NONE mtn_package_key
+    MTN_SET_NONE mtn_spec_key
+    mov rax, [rbp - MTN_MOD]
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.mtn_bad_name:
+    add rsp, 16
+    RAISE exc_TypeError_type, "module.__init__() argument 1 must be str, not None"
+.mtn_arity:
+    CSTRING rdi, "module() takes at most 2 arguments ("
+    mov rsi, rdx
+    CSTRING rdx, " given)"
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+END_FUNC module_type_new
+
+section .rodata
+mtn_loader_key:  db "__loader__", 0
+mtn_package_key: db "__package__", 0
+mtn_spec_key:    db "__spec__", 0

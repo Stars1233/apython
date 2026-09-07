@@ -107,6 +107,26 @@ reasoning that chose them and what changing one would cost.
   exhausted rather than freed.  Found once `frame.clear()` let CPython's
   `test_list` get 19 tests in instead of one.
 
+- **A module built by `types.ModuleType` reprs as `(built-in)`.**
+  CPython says `<module 'x'>` for one with neither a `__file__` nor a real
+  spec, and `<module 'sys' (built-in)>` only when the spec says so;
+  `module_repr` here decides on `__file__` alone, so anything without one is
+  reported as built-in.  Everything else about such a module matches now,
+  `sorted(m.__dict__)` included.  Telling the two apart means reading
+  `__spec__` out of the dict as well, which is one more lookup in a repr that
+  already does one.
+
+- **`type.__flags__` does not exist.**  `src/pyo/typeattr.asm` is where it
+  goes -- one name, one entry in the parallel tables, one `TYA_GET` -- but the
+  value cannot be `tp_flags`: the low 32 bits are this tree's own layout
+  (`TYPE_FLAG_HEAPTYPE`, `TYPE_FLAG_METATYPE`, `TYPE_FLAG_MRO_HAS_DATA_DESCR`,
+  ...) and the high 32 are the type version.  A faithful answer means
+  translating to CPython's `Py_TPFLAGS_*` -- HEAPTYPE, BASETYPE, HAVE_GC,
+  IMMUTABLETYPE, DEFAULT and the seven subclass bits -- and a PARTIAL
+  translation is worse than none, because code that masks a bit this tree does
+  not model would read a confident zero.  The table is the work, not the
+  plumbing.
+
 - **`\b` and `\B` are ASCII-only.**  `re.search(r"\b\d+\b", "eee42")` with
   non-ASCII letters in place of the e's finds `42`, where CPython finds nothing
   because those letters are word characters.  `\B\d` is wrong the same way and

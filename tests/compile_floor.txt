@@ -338,6 +338,7 @@ test_module_attr_call
 test_module_delattr
 test_module_doc_and_repr_depth
 test_module_file_attr
+test_module_type_new
 test_multiple_inheritance
 test_nanbox_float
 test_nanbox_int

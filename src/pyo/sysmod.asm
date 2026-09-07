@@ -87,6 +87,63 @@ extern raise_exception
 %endmacro
 
 
+
+;; SYS_ADD_INT name, value -- one integer attribute, the shape sys.maxsize is
+;; written out in longhand below.
+%macro SYS_ADD_INT 2
+    mov rdi, %2
+    call int_from_i64
+    push rdx
+    push rax
+    lea rdi, [rel %1]
+    call str_from_cstr_heap
+    push rax
+    push rax                    ; pad: dict_set below needs an even push list
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 16]
+    mov ecx, [rsp + 24]
+    V_PACK rdx, rcx
+    call dict_set
+    pop rdi
+    pop rdi
+    call obj_decref             ; the key; the value is an immediate
+    pop rax
+    pop rax
+%endmacro
+
+;; SYS_ADD_OBJ name, obj_label -- one attribute bound to a static object.
+%macro SYS_ADD_OBJ 2
+    lea rdi, [rel %1]
+    call str_from_cstr_heap
+    push rax
+    push rax                    ; pad
+    mov rdi, r15
+    mov rsi, rax
+    lea rdx, [rel %2]
+    call dict_set
+    pop rdi
+    pop rdi
+    call obj_decref
+%endmacro
+
+;; SYS_ALIAS_SLOT name, slot -- a second name for an object already installed,
+;; read back out of the .bss slot that remembers it.  sys.__stdout__ IS
+;; sys.stdout in CPython, and code checks it the way it checks __excepthook__.
+%macro SYS_ALIAS_SLOT 2
+    lea rdi, [rel %1]
+    call str_from_cstr_heap
+    push rax
+    push rax                    ; pad
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rel %2]
+    call dict_set
+    pop rdi
+    pop rdi
+    call obj_decref
+%endmacro
+
 ;; ============================================================================
 ;; sm_sort_names(rdi = a tuple of str) -> nothing; sorts it in place, by bytes
 ;;
@@ -495,6 +552,10 @@ DEF_FUNC sys_module_init, 40
     pop rdi
     call obj_decref
 
+    ; sys.__stdout__ IS sys.stdout in CPython, and code checks the pair the way
+    ; it checks sys.excepthook against sys.__excepthook__.
+    SYS_ALIAS_SLOT sm_dunder_stdout, sys_stdout_obj
+
     ; --- sys.stderr (fd=2) ---
     mov rdi, 2
     lea rsi, [rel sm_stderr_name]
@@ -508,6 +569,18 @@ DEF_FUNC sys_module_init, 40
     mov rsi, rax
     mov rdx, [rsp + 8]
     call dict_set
+    pop rdi
+    call obj_decref
+    ; the same object under its __ name, as CPython does
+    lea rdi, [rel sm_dunder_stderr]
+    call str_from_cstr_heap
+    push rax
+    push rax                    ; pad
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 16]         ; the file object, still on the stack below
+    call dict_set
+    pop rdi
     pop rdi
     call obj_decref
     pop rdi
@@ -526,6 +599,18 @@ DEF_FUNC sys_module_init, 40
     mov rsi, rax
     mov rdx, [rsp + 8]
     call dict_set
+    pop rdi
+    call obj_decref
+    ; the same object under its __ name, as CPython does
+    lea rdi, [rel sm_dunder_stdin]
+    call str_from_cstr_heap
+    push rax
+    push rax                    ; pad
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 16]         ; the file object, still on the stack below
+    call dict_set
+    pop rdi
     pop rdi
     call obj_decref
     pop rdi
@@ -1105,6 +1190,40 @@ DEF_FUNC sys_module_init, 40
                        sm_dunder_unraisablehook
     SYS_ADD_FUNC sys_exc_info_func, sm_exc_info
     SYS_ADD_FUNC sys_exception_func, sm_exception
+
+    ; Constants CPython has had since 2.x and code reads without asking.
+    ; hexversion is the one a version test is usually written against.
+    SYS_ADD_INT sm_hexversion, 0x030C00F0
+    SYS_ADD_INT sm_maxunicode, 0x10FFFF
+    ; "short" is true: src/dtoa.asm computes the shortest round-tripping
+    ; decimal rather than searching for it.
+    lea rdi, [rel sm_float_repr_style]
+    lea rsi, [rel sm_short]
+    mov rdx, r15
+    call sm_add_str
+    ; Nothing in this tree writes a .pyc -- import.asm only reads them and
+    ; marshal has no writer -- so this is a fact, not a switch.
+    SYS_ADD_OBJ sm_dont_write_bytecode, bool_true
+    ; An empty dict, so that code which reads or clears it stops raising.  The
+    ; finders here are assembly rather than importlib path hooks, so nothing
+    ; will ever populate it.
+    call dict_new
+    push rax
+    push rax                    ; pad
+    lea rdi, [rel sm_path_importer_cache]
+    call str_from_cstr_heap
+    push rax
+    push rax                    ; pad
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 16]
+    call dict_set
+    pop rdi
+    pop rdi
+    call obj_decref             ; the key
+    pop rdi
+    pop rdi
+    call obj_decref             ; the dict; the module dict holds it now
     ; audit() and addaudithook() do nothing: there are no audit hooks here,
     ; and with none installed CPython's audit() is a no-op too.  os.walk,
     ; os.listdir and half of shutil call audit() unconditionally, and an
@@ -1588,6 +1707,15 @@ sm_dunder_unraisablehook: db "__unraisablehook__", 0
 sm_unraisablehook: db "unraisablehook", 0
 sm_exc_info:     db "exc_info", 0
 sm_exception:    db "exception", 0
+sm_hexversion:   db "hexversion", 0
+sm_maxunicode:   db "maxunicode", 0
+sm_float_repr_style: db "float_repr_style", 0
+sm_short:        db "short", 0
+sm_dont_write_bytecode: db "dont_write_bytecode", 0
+sm_path_importer_cache: db "path_importer_cache", 0
+sm_dunder_stdout: db "__stdout__", 0
+sm_dunder_stderr: db "__stderr__", 0
+sm_dunder_stdin:  db "__stdin__", 0
 sm_getframe:     db "_getframe", 0
 sm_getframemodulename: db "_getframemodulename", 0
 sm_settrace:     db "settrace", 0
