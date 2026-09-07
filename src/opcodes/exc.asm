@@ -144,6 +144,12 @@ DEF_FUNC_BARE op_check_exc_match
     VPOP rsi                 ; rsi = type to match
     VPEEK rdi                ; rdi = exception (don't pop)
 
+    ; The slot just popped is about to be released, so the unwinder must not
+    ; still believe it is live: exc_isinstance raises for `except (1,)`, and
+    ; its pop loop would DECREF the same reference a second time.  Every
+    ; handler that pops and releases owes this store; this one did not make it.
+    mov [rel eval_saved_r13], r13
+
     ; Save type for DECREF
     sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
                                ; handler, so a call needs an even push list

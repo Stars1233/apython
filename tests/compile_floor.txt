@@ -524,6 +524,7 @@ test_value_typeconfusion
 test_warnings
 test_weakref
 test_weakref_types
+test_with_exit_raises
 test_wrong_answers
 test_zero_valued_lookup
 test_zip_strict

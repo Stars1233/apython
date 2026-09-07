@@ -21,6 +21,9 @@ extern obj_decref
 extern raise_exception
 extern func_new
 extern exc_TypeError_type
+extern exc_SystemError_type
+extern current_exception
+extern eval_exception_unwind
 extern kw_names_pending
 extern func_type
 extern cfex_temp_pending
@@ -956,6 +959,8 @@ DEF_FUNC op_before_with
     xor esi, esi
     xor edx, edx
     call rcx
+    test rax, rax               ; a NULL Value is a raise -- see .bw_enter_raised
+    jz .bw_enter_raised
     V_UNPACK rax, rdx
     mov [rbp - BW_ENTER], rax
     mov [rbp - BW_RETTAG], rdx
@@ -981,8 +986,10 @@ DEF_FUNC op_before_with
     mov rsi, rsp                   ; args ptr
     mov rdx, 1                     ; nargs = 1
     call rcx
-    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16                    ; pop fat arg
+    test rax, rax               ; a NULL Value is a raise -- see .bw_enter_raised
+    jz .bw_enter_raised
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     mov [rbp - BW_ENTER], rax              ; save __enter__ result
     mov [rbp - BW_RETTAG], rdx             ; save __enter__ result tag
 .bw_enter_called:
@@ -1001,6 +1008,35 @@ DEF_FUNC op_before_with
     pop rbx
     pop rbp
     DISPATCH
+
+.bw_enter_raised:
+    ; __enter__ raised.  CPython's BEFORE_WITH is (mgr -- exit, res) and its
+    ; error arm releases the bound __exit__ and pushes nothing, so the block is
+    ; entered by nobody.  Pushing the NULL instead let the exception escape the
+    ; enclosing `try` altogether: `try: with E(): pass / except ValueError` did
+    ; not catch an __enter__ that raised ValueError.
+    ;
+    ; The test must precede V_UNPACK, which maps NULL and integer 0 to the
+    ; same payload.
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .bw_enter_null_no_exc
+    VPOP rdi                        ; the bound __exit__ pushed above
+    XDECREF_V rdi, rsi
+    mov rdi, [rbp - BW_MGR]         ; and the reference VPOP_VAL took
+    call obj_decref
+    add rsp, 40
+    pop r12
+    pop rbx
+    pop rbp
+    ; r13 is now one slot BELOW what DISPATCH published -- mgr was popped and
+    ; the __exit__ that replaced it has been popped too -- so the unwinder
+    ; must be told, or its pop loop reads the dead mgr slot as a live Value.
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
+
+.bw_enter_null_no_exc:
+    RAISE exc_SystemError_type, "__enter__ returned NULL without setting an exception"
 
 .bw_no_exit_decref_name:
     mov rdi, r12
@@ -1087,8 +1123,20 @@ DEF_FUNC op_with_except_start, WES_FRAME
     mov rsi, rsp                     ; args ptr
     mov rdx, 3                       ; nargs = 3 (method_call adds self)
     call rax
-    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 32
+
+    ; A NULL Value is a raise, not a result.  Test it BEFORE V_UNPACK: that
+    ; maps NULL to payload 0 AND integer 0 to payload 0, so after it the two
+    ; are indistinguishable.  A raw Value of 0 is NULL and nothing else.
+    ;
+    ; Pushing it instead is what made an exception raised inside __exit__,
+    ; while another was in flight, a SIGSEGV: POP_JUMP_IF_TRUE popped the 0
+    ; and obj_is_true dereferenced address 0.  This is CPython's
+    ; ERROR_IF(res == NULL, error) in WITH_EXCEPT_START.
+    test rax, rax
+    jz .wes_raised
+
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     mov [rbp - WES_RESULT], rax                ; save result
     mov [rbp - WES_RETTAG], rdx                ; save result tag
 
@@ -1099,6 +1147,20 @@ DEF_FUNC op_with_except_start, WES_FRAME
 
     leave
     DISPATCH
+
+.wes_raised:
+    ; Nothing was popped and nothing pushed, so eval_saved_r13 is still what
+    ; DISPATCH published -- which is what the exception table wants.  CPython
+    ; leaves all four inputs in place here too and lets the handler's own
+    ; depth pop them.
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .wes_null_no_exc
+    leave
+    jmp eval_exception_unwind
+
+.wes_null_no_exc:
+    RAISE exc_SystemError_type, "__exit__ returned NULL without setting an exception"
 
 .wes_error:
     RAISE exc_TypeError_type, "__exit__ is not callable"

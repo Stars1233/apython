@@ -65,30 +65,20 @@ reasoning that chose them and what changing one would cost.
   type whose `tp_new` is not `object`'s own, unless `__init__` is overridden
   and `__new__` is not.  `copyreg._reconstructor` is the ordinary caller.
 
-- **An exception raised inside `__exit__`, while another is in flight,
-  segfaults.**  Four lines, no stdlib:
+- **`frame.clear()` and `BaseException.with_traceback()` do not exist, and
+  between them they stop `unittest.assertRaises`.**  `_AssertRaisesContext.__exit__`
+  calls `traceback.clear_frames(tb)` and then `exc_value.with_traceback(None)`;
+  both raise AttributeError here, so a test that expects an exception gets an
+  AttributeError instead -- and `assertRaises` is in nearly every test CPython
+  ships.  Of the 202 files in CPython 3.12's `Lib/test` that fail here, 175
+  name `assertRaises`, `assertWarns` or `assertLogs` directly and most of the
+  rest reach one through `test.support.check_syntax_error` or `doctest`.
 
-  ```python
-  class CM:
-      def __enter__(self): return self
-      def __exit__(self, et, ev, tb): raise ValueError("from exit")
-  with CM():
-      raise TypeError("inner")
-  ```
-
-  CPython raises the ValueError with the TypeError as its `__context__`.  This
-  tree dies with SIGSEGV in `obj_is_true` (`src/object.asm:2921`), reached from
-  `op_pop_jump_if_true` (`src/opcodes/flow.asm:187`) -- a garbage Value on the
-  stack, so the unwinder and the with-block's cleanup disagree about how far
-  to pop.  Any exception does it; `ev.nosuch` inside `__exit__` is the same
-  crash.
-
-  This is what actually stands between apython and CPython's own test suite.
-  `unittest`'s `assertRaises` calls `traceback.clear_frames` in its `__exit__`,
-  and `frame.clear()` does not exist here, so the AttributeError that follows
-  lands in exactly this shape -- and `assertRaises` is in nearly every test
-  CPython ships.  `frame.clear()` is worth adding on its own, but it is the
-  smaller half.
+  `traceback.clear_frames` catches only RuntimeError, so the AttributeError
+  escapes it.  Until the commit above this was not an AttributeError but a
+  SIGSEGV: the raise inside `__exit__` returned NULL, `WITH_EXCEPT_START`
+  pushed it as a Value, and `obj_is_true` dereferenced address 0.  That is
+  fixed; what is left is that the two methods are missing.
 
 - **`\b` and `\B` are ASCII-only.**  `re.search(r"\b\d+\b", "eee42")` with
   non-ASCII letters in place of the e's finds `42`, where CPython finds nothing
