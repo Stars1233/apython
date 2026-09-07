@@ -2222,7 +2222,24 @@ section .text
     ; Check if dunder returned NULL
     test edx, edx
     jz .cmp_identity           ; no dunder → identity fallback
-    jmp .cmp_do_call_result
+
+    ; ...and the NotImplemented SINGLETON is a decline too, not a result.
+    ; Only NULL was tested here, so a reflected __eq__ that answered
+    ; NotImplemented -- which is what object's does for two different
+    ; objects, and therefore what every plain class answers -- was pushed
+    ; onto the stack as though it were the comparison's value.  `1 == p` and
+    ; `c.m == c` both printed NotImplemented instead of False.  The left-hand
+    ; path has always tested for it; this one had not.
+    cmp edx, TAG_PTR
+    jne .cmp_do_call_result
+    lea r8, [rel notimpl_singleton]
+    cmp rax, r8
+    jne .cmp_do_call_result
+    push rcx
+    mov rdi, rax
+    call obj_decref
+    pop rcx
+    jmp .cmp_identity
 
 .cmp_right_do_call:
     ; Swap comparison op: LT↔GT, LE↔GE, EQ↔EQ, NE↔NE
