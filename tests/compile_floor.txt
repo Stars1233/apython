@@ -405,6 +405,7 @@ test_set_name_metatype
 test_set_name
 test_set_ops
 test_sets
+test_set_tombstone_reuse
 test_set_variadic
 test_signal
 test_size_and_recursion_limits

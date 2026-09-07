@@ -256,12 +256,29 @@ END_FUNC set_keys_equal
 ;; ============================================================================
 ;; set_find_slot(set, key, hash, key_tag)
 ;;   rdi=set, rsi=key, rdx=hash, rcx=key_tag
-;;   -> rax = entry ptr, rdx = 1 if existing key found, 0 if empty slot
+;;   -> rax = entry ptr, rdx = 1 if existing key found, 0 if free slot
 ;; Internal helper used by set_add and set_contains
+;;
+;; A slot freed by set_remove holds a TOMBSTONE: key 0, hash -1.  The probe
+;; cannot stop there -- the key it is looking for may sit further along the
+;; run that the tombstone is part of -- but the slot is reusable, and this
+;; remembers the first one and hands it back if the probe reaches a slot that
+;; was never used at all.
+;;
+;; Skipping tombstones without remembering them meant every insert consumed a
+;; fresh EMPTY slot, so a set that is added to and removed from in equal
+;; measure only ever filled up.  With few distinct keys -- which all land in
+;; one narrow band of slots -- the dead entries piled into a single
+;; linear-probe run and every later add walked the whole of it: n-queens with
+;; three such sets ran 500x slower than CPython and grew the tables without
+;; bound.  dict never had this; its probe has always remembered the first
+;; reusable slot (dl_probe's DL_FREE).
 ;; ============================================================================
 SFS_KEY_TAG equ 8
+SFS_FREE    equ 16              ; first tombstone seen on this probe, or 0
+SFS_FRAME   equ 24              ; padded: 24 + 5 pushes keeps rsp 16-aligned
 DEF_FUNC_LOCAL set_find_slot
-    sub rsp, SFS_KEY_TAG
+    sub rsp, SFS_FRAME
     push rbx
     push r12
     push r13
@@ -272,6 +289,7 @@ DEF_FUNC_LOCAL set_find_slot
     mov r12, rsi                ; key
     mov r13, rdx                ; hash
     mov [rbp - SFS_KEY_TAG], rcx ; save key_tag
+    mov qword [rbp - SFS_FREE], 0   ; no reusable slot seen yet
 
     ; mask = capacity - 1
     mov r14, [rbx + PyDictObject.capacity]
@@ -292,7 +310,7 @@ DEF_FUNC_LOCAL set_find_slot
     imul rdx, rcx, SET_ENTRY_SIZE
     add rax, rdx                ; rax = entry ptr
 
-    SET_ENTRY_CLASSIFY rax, .found_empty, .find_next
+    SET_ENTRY_CLASSIFY rax, .found_empty, .find_tombstone
     mov rdi, [rax + SET_ENTRY_KEY]
 
     ; Hash match?
@@ -313,6 +331,19 @@ DEF_FUNC_LOCAL set_find_slot
     pop rcx                     ; slot
     test edi, edi
     jnz .found_existing
+    ; An occupied slot holding a DIFFERENT key.  Keep probing -- and jump,
+    ; rather than falling through: the arm below records a reusable slot, and
+    ; a live entry recorded there is handed back as free by .found_empty and
+    ; then overwritten.  That reads as a set whose len() counts a key its
+    ; iteration no longer contains.
+    jmp .find_next
+
+.find_tombstone:
+    ; Remember the FIRST one and keep probing.  Stopping here would insert a
+    ; duplicate of a key that is still live further along the run.
+    cmp qword [rbp - SFS_FREE], 0
+    jne .find_next
+    mov [rbp - SFS_FREE], rax
 
 .find_next:
     inc rcx
@@ -321,7 +352,12 @@ DEF_FUNC_LOCAL set_find_slot
     jmp .find_loop
 
 .found_empty:
-    ; rax = entry ptr, rdx = 0 (empty)
+    ; A never-used slot ends the probe: the key is not in the table.  If a
+    ; tombstone was passed on the way, hand that one back instead, so the
+    ; insert reuses a dead slot rather than consuming a live one.
+    mov rdx, [rbp - SFS_FREE]
+    test rdx, rdx
+    cmovnz rax, rdx
     xor edx, edx
     pop r15
     pop r14
@@ -343,7 +379,22 @@ DEF_FUNC_LOCAL set_find_slot
     ret
 
 .table_full:
-    ; Should never happen if load factor is maintained
+    ; No never-used slot anywhere.  That is only fatal if there was no
+    ; reusable one either -- a table made entirely of live entries.  The load
+    ; factor is meant to prevent it; reusing a tombstone here is what makes
+    ; the claim true rather than merely intended.
+    mov rax, [rbp - SFS_FREE]
+    test rax, rax
+    jz .really_full
+    xor edx, edx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.really_full:
     CSTRING rdi, "set: hash table full"
     call fatal_error
 END_FUNC set_find_slot
@@ -481,6 +532,15 @@ DEF_FUNC set_add
     jnz .done                   ; key already exists, do nothing
 
     ; --- Insert new entry ---
+    ; The slot may be a reused tombstone rather than a never-used one; both
+    ; arrive here with key 0, and only the tombstone carries hash -1.  Taking
+    ; one back has to be counted, because dk_tombstones feeds the load factor
+    ; below -- left standing it would resize a table with room to spare, and
+    ; the capacity would climb on every add.
+    cmp qword [rax + SET_ENTRY_HASH], ENTRY_TOMBSTONE_HASH
+    jne .fresh_slot
+    dec qword [rbx + PyDictObject.dk_tombstones]
+.fresh_slot:
     ; Store hash and key; INCREF while the tag is in hand, then pack
     mov [rax + SET_ENTRY_HASH], r13
     INCREF_VAL r12, r14
