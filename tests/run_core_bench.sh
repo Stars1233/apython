@@ -379,6 +379,26 @@ def run(n):
 print(run(2000000))
 EOF
 
+# ---- a bound method called through a name, which is the one shape that still
+# ---- materialises a PyMethodObject: the load site cannot hand back [func,
+# ---- self] when the result is stored rather than called.
+mk c_call_bound <<'EOF'
+class C:
+    def __init__(self):
+        self.x = 0
+    def bump(self, v):
+        return self.x + v
+def run(n):
+    f = C().bump
+    s = 0
+    i = 0
+    while i < n:
+        s = f(1)
+        i += 1
+    return s
+print(run(2000000))
+EOF
+
 mk c_call_builtin <<'EOF'
 def run(n):
     a = [1, 2, 3]
@@ -530,7 +550,7 @@ BENCHES="c_if_bool c_if_int c_if_obj c_not c_and_or \
          c_for_list c_for_range c_for_tuple c_for_dict c_for_str c_genexp \
          c_global c_builtin c_is_none c_in_dict c_in_list \
          c_list_get c_list_set c_dict_get c_dict_set c_tuple_get c_str_get \
-         c_call c_call_method c_call_builtin c_append \
+         c_call c_call_method c_call_bound c_call_builtin c_append \
          c_new_plain c_new_slots c_new_init c_new_object \
          c_attr_get c_attr_set \
          c_fstring c_fstring_wide c_concat c_str_eq \

@@ -83,7 +83,20 @@ END_FUNC method_new
 ;; Call a bound method: prepend im_self to args, dispatch to im_func's tp_call.
 ;; rdi = PyMethodObject*, rsi = args, rdx = nargs
 ;; ============================================================================
-DEF_FUNC_LOCAL method_call
+;; The argument array method_call has to build -- im_self and then the
+;; caller's arguments -- lives in this frame for the sizes real code uses, and
+;; in the allocator above them.  A malloc and a free per call is what a bound
+;; method held in a variable used to cost, and `sorted(key=obj.method)` and a
+;; stored callback are both written that way.
+;;
+;; The cap is not caution about frame size: `m(*[0] * 10**7)` must stay a
+;; MemoryError rather than become a stack overflow, and a dynamic `sub rsp`
+;; would also be invisible to lint's alignment check.
+MC_FREE  equ 8              ; the heap array to release, or 0
+MC_BUF   equ 160            ; 19 slots at [rbp-160, rbp-8)
+MC_FRAME equ 160            ; + 4 pushes = 192, 16-aligned
+MC_MAX_STACK equ 17         ; self plus this many still fits
+DEF_FUNC_LOCAL method_call, MC_FRAME
     push rbx
     push r12
     push r13
@@ -92,16 +105,23 @@ DEF_FUNC_LOCAL method_call
     mov rbx, rdi                ; method obj
     mov r12, rsi                ; original args
     mov r13, rdx                ; original nargs
+    mov qword [rbp - MC_FREE], 0
 
-    ; Allocate new args array: (nargs+1) Values, one word each.  This said
-    ; `shl rdi, 4` -- two words per argument -- left over from the fat
-    ; (payload, tag) representation, so every bound-method call through this
-    ; path asked for twice the memory it went on to use.  The copy loop below
+    cmp rdx, MC_MAX_STACK
+    ja .mc_big
+    lea r14, [rbp - MC_BUF]
+    jmp .mc_have_args
+.mc_big:
+    ; (nargs+1) Values, one word each.  This said `shl rdi, 4` -- two words per
+    ; argument -- left over from the fat (payload, tag) representation, so it
+    ; asked for twice the memory it went on to use.  The copy loop below
     ; already strides by 8.
     lea rdi, [rdx + 1]
     shl rdi, 3
     call ap_malloc
     mov r14, rax                ; new args array
+    mov [rbp - MC_FREE], rax
+.mc_have_args:
 
     ; new_args[0] = im_self (a pointer is its own Value)
     mov rcx, [rbx + PyMethodObject.im_self]
@@ -133,9 +153,12 @@ DEF_FUNC_LOCAL method_call
     push rax                    ; save result payload
     push rdx                    ; save result tag
 
-    ; Free temp args array
-    mov rdi, r14
+    ; Free the temp args array, if it was not this frame's.
+    mov rdi, [rbp - MC_FREE]
+    test rdi, rdi
+    jz .mc_no_free
     call ap_free
+.mc_no_free:
 
     pop rdx                     ; restore result tag
     pop rax                     ; restore result payload
