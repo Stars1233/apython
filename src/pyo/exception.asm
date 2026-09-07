@@ -1960,6 +1960,100 @@ DEF_FUNC exc_method_with_traceback, EWT_FRAME
 END_FUNC exc_method_with_traceback
 
 ;; ============================================================================
+;; exc_method_new(args, nargs) -> a bare exception of args[0]'s type
+;;
+;; BaseException.__new__.  CPython has one and this tree did not, so
+;; `ValueError.__new__(ValueError)` resolved up the MRO to object.__new__ --
+;; which is a different function with a different rule.  It happened to work
+;; while object.__new__ accepted anything; once it started refusing types
+;; whose allocation it does not own, every `cls.__new__(cls)` on an exception
+;; became a TypeError.  copyreg and unittest both write that idiom.
+;;
+;; The remaining arguments become `.args`, as CPython's does -- `__init__` is
+;; what interprets them, and `__new__` only has to record them.
+;; ============================================================================
+EMN_TYPE  equ 8
+EMN_EXC   equ 16
+EMN_ARGS  equ 24
+EMN_NARGS equ 32
+EMN_TUP   equ 40
+EMN_I     equ 48
+EMN_FRAME equ 72            ; + 1 push = 80, 16-aligned
+DEF_FUNC exc_method_new, EMN_FRAME
+    push rbx
+    test rsi, rsi
+    jz .emn_no_type
+    mov [rbp - EMN_NARGS], rsi
+    mov [rbp - EMN_ARGS], rdi
+    mov rbx, [rdi]              ; args[0] = the class
+    mov [rbp - EMN_TYPE], rbx
+
+    ; A bare instance: no message, so exc_new builds an empty args tuple.
+    mov rdi, rbx
+    xor esi, esi
+    xor edx, edx
+    call exc_new
+    test rax, rax
+    jz .emn_fail
+    mov [rbp - EMN_EXC], rax
+
+    ; Anything after the class becomes .args.
+    mov rcx, [rbp - EMN_NARGS]
+    dec rcx
+    jz .emn_done
+    mov rdi, rcx
+    call tuple_new
+    test rax, rax
+    jz .emn_fail
+    mov [rbp - EMN_TUP], rax
+    mov qword [rbp - EMN_I], 0
+.emn_copy:
+    mov rdx, [rbp - EMN_I]
+    mov rcx, [rbp - EMN_NARGS]
+    dec rcx
+    cmp rdx, rcx
+    jge .emn_install
+    mov rsi, [rbp - EMN_ARGS]
+    lea rcx, [rdx + 1]          ; skip the class
+    mov rdi, [rsi + rcx * 8]
+    INCREF_V rdi, r8
+    mov rax, [rbp - EMN_TUP]
+    mov r9, [rax + PyTupleObject.ob_item]
+    mov [r9 + rdx * 8], rdi
+    inc qword [rbp - EMN_I]
+    jmp .emn_copy
+.emn_install:
+    mov rdi, [rbp - EMN_EXC]
+    mov rax, [rdi + PyExceptionObject.exc_args]
+    test rax, rax
+    jz .emn_set
+    mov rdi, rax
+    call obj_decref
+.emn_set:
+    mov rdi, [rbp - EMN_EXC]
+    mov rax, [rbp - EMN_TUP]
+    mov [rdi + PyExceptionObject.exc_args], rax
+.emn_done:
+    mov rax, [rbp - EMN_EXC]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+.emn_fail:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.emn_no_type:
+    pop rbx
+    RAISE exc_TypeError_type, \
+          "BaseException.__new__(): not enough arguments"
+END_FUNC exc_method_new
+
+;; ============================================================================
 ;; exc_install_methods() -- give BaseException a tp_dict with __init__ in it
 ;;
 ;; One dict on the root of the exception hierarchy is enough: every other
@@ -2010,6 +2104,13 @@ DEF_FUNC exc_install_methods, EIM_FRAME
     lea rdi, [rel exc_BaseException_type]
     extern type_stamp_methods
     call type_stamp_methods
+
+    ; __new__ goes in AFTER the stamp, because it is a staticmethod: its first
+    ; argument is the class being built, not a BaseException, so the receiver
+    ; check the stamp installs would refuse every correct call with
+    ; "descriptor '__new__' for 'BaseException' objects doesn't apply to a
+    ; 'type' object".
+    EXC_ADD_METHOD exc_method_new, "__new__"
 .eim_out:
     pop rbx
     leave

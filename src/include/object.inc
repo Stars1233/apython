@@ -1265,7 +1265,7 @@ struc PyExceptionGroupObject
     .exc_args:      resq 1  ; +56
     .exc_dict:      resq 1  ; +64: ptr to instance dict or NULL
     .exc_suppress:  resq 1  ; +72: __suppress_context__
-    .eg_exceptions: resq 1  ; +72: tuple of sub-exceptions
+    .eg_exceptions: resq 1  ; +80: tuple of sub-exceptions
 endstruc
 
 ; Traceback object

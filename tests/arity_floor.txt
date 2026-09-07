@@ -1050,6 +1050,10 @@ float.__getattribute__/0
 float.__getattribute__/1
 float.__getattribute__/2
 float.__getattribute__/3
+float.__getformat__/0
+float.__getformat__/1
+float.__getformat__/2
+float.__getformat__/3
 float.__getnewargs__/0
 float.__getnewargs__/1
 float.__getnewargs__/2

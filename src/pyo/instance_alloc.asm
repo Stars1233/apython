@@ -25,6 +25,9 @@ extern str_from_cstr_heap
 extern type_call
 extern dict_get
 extern raise_type_error_with_typename
+extern raise_type_error_with_name
+extern dunder_lookup_owner
+extern rbt_append_cstr
 extern new_dunder_cstr
 extern init_dunder_cstr
 extern ap_malloc
@@ -651,18 +654,132 @@ DEF_FUNC type_defines_dunder, TDD_FRAME
 END_FUNC type_defines_dunder
 
 ;; ============================================================================
+;; object_new_staticbase(rdi = the type being constructed)
+;;   -> rax = the type CPython calls `staticbase`
+;;
+;; CPython's tp_new_wrapper asks whether object's allocator is safe for a type
+;; by climbing tp_base past every class that defines `__new__` in PYTHON, then
+;; comparing what it lands on against object's own tp_new.  Its test for
+;; "defines __new__ in Python" is `tp_new == slot_tp_new`; this tree has no
+;; such slot -- a heaptype either inherits its base's tp_new or gets none --
+;; so the equivalent question is asked of the dunder instead: whoever OWNS the
+;; `__new__` this type would find is a heaptype exactly when that `__new__` is
+;; a Python-level definition.
+;;
+;; The owner and not the type's own dict, because the property is inherited.
+;; `class Mixed(P, L2)` defines no `__new__` of its own, but the one it finds
+;; is L2's, written in Python -- CPython skips Mixed for that reason and
+;; reports `list`, and asking Mixed's own dict would stop at Mixed and report
+;; the wrong name.
+;;
+;; object always terminates the walk: its `__new__` is in its own dict and it
+;; is not a heaptype, so a type with no Python-level `__new__` anywhere stops
+;; at itself.
+;; ============================================================================
+ONS_OWNER equ 8
+ONS_FRAME equ 24            ; + 1 push = 32, 16-aligned
+DEF_FUNC object_new_staticbase, ONS_FRAME
+    push rbx
+    mov rbx, rdi
+.ons_walk:
+    test rbx, rbx
+    jz .ons_done
+    mov rdi, rbx
+    lea rsi, [rel new_dunder_cstr]
+    lea rdx, [rbp - ONS_OWNER]
+    mov qword [rbp - ONS_OWNER], 0
+    call dunder_lookup_owner
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .ons_done                ; no __new__ at all: this is the staticbase
+    mov rax, [rbp - ONS_OWNER]
+    test rax, rax
+    jz .ons_done
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .ons_done                ; a builtin supplies it: stop here
+    mov rbx, [rbx + PyTypeObject.tp_base]
+    jmp .ons_walk
+.ons_done:
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+END_FUNC object_new_staticbase
+
+;; ============================================================================
+;; object_new_is_safe(rdi = the type being constructed, rsi = its staticbase)
+;;   -> eax = 1 when object's allocator owns this layout, 0 when it does not
+;;
+;; CPython compares `staticbase->tp_new` against object's.  Here the same
+;; question is "is the nearest STATIC base object itself": a heaptype whose
+;; static ancestry ends at object has object's layout, and one that reaches
+;; list, str or an exception does not.  tp_base is the layout-determining base
+;; -- type_from_parts picks it the way CPython's best_base does -- so a
+;; multiple-inheritance class follows the one that decided its storage.
+;; ============================================================================
+DEF_FUNC_BARE object_new_is_safe
+    mov rax, rsi
+.onis_walk:
+    test rax, rax
+    jz .onis_yes                ; no static base at all: not ours to refuse
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .onis_static
+    mov rax, [rax + PyTypeObject.tp_base]
+    jmp .onis_walk
+.onis_static:
+    lea rcx, [rel object_type]
+    cmp rax, rcx
+    jne .onis_no
+.onis_yes:
+    mov eax, 1
+    ret
+.onis_no:
+    xor eax, eax
+    ret
+END_FUNC object_new_is_safe
+
+;; ============================================================================
 ;; object_new_fn(args, nargs) -> instance
 ;; Implements object.__new__(cls) — creates a bare instance of cls.
 ;; args[0] = cls (the type to instantiate)
 ;; ============================================================================
 ONF_TYPE  equ 8
-ONF_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+ONF_BASE  equ 16
+ONF_NARGS equ 24
+ONF_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC object_new_fn, ONF_FRAME
     ; args[0] = cls
+    ; args[0] is the type to build.  Nothing checked that there WAS one:
+    ; `object.__new__()` read past the argument array and took the garbage it
+    ; found as a PyTypeObject*, which segfaulted a few dereferences later.
+    test rsi, rsi
+    jz .onf_no_type
+    mov [rbp - ONF_NARGS], rsi  ; the walk below clobbers rsi
     mov rdi, [rdi]              ; cls payload (PyTypeObject*)
+    V_TEST_PTR rdi, rcx         ; ja when NULL or an immediate
+    ja .onf_not_a_type
+    mov rcx, [rdi + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .onf_not_a_type
     mov [rbp - ONF_TYPE], rdi
+
+    ; Is object's allocator the right one for this type?  CPython asks first,
+    ; before the argument count, and it has to be first here for a stronger
+    ; reason: str, float and bytes keep their payload inline, so an instance
+    ; built at object's size is freed by the type's own dealloc as though the
+    ; storage were there.  That aborted the process rather than answering
+    ; wrongly.
+    call object_new_staticbase
+    mov rsi, rax
+    mov rdi, [rbp - ONF_TYPE]
+    call object_new_is_safe
+    test eax, eax
+    jz .onf_unsafe
+
     ; Excess arguments are CPython's object_new error, not something to
     ; drop: a class that overrides neither half has nowhere to put them.
+    mov rdi, [rbp - ONF_TYPE]
+    mov rsi, [rbp - ONF_NARGS]
     cmp rsi, 1
     jbe .onf_build
     lea rsi, [rel new_dunder_cstr]
@@ -684,6 +801,44 @@ DEF_FUNC object_new_fn, ONF_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.onf_no_type:
+    RAISE exc_TypeError_type, "object.__new__(): not enough arguments"
+
+.onf_not_a_type:
+    ; CPython names what it got: "X is not a type object (int)".
+    mov rsi, rdi
+    CSTRING rdi, `object.__new__(X): X is not a type object (\x01)`
+    jmp raise_type_error_with_name
+
+.onf_unsafe:
+    ; "object.__new__(C) is not safe, use B.__new__()" -- C is the type asked
+    ; for and B the staticbase, and they differ whenever a Python-level
+    ; __new__ sat between them.
+    mov rdi, [rbp - ONF_TYPE]
+    call object_new_staticbase
+    mov [rbp - ONF_BASE], rax
+    lea rdi, [rel onf_msgbuf]
+    lea rsi, [rel onf_not_safe_open]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - ONF_TYPE]
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel onf_not_safe_mid]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - ONF_BASE]
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel onf_not_safe_tail]
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel onf_msgbuf]
+    call raise_exception
+    ud2
+
 .onf_own_new:
     RAISE exc_TypeError_type, \
           "object.__new__() takes exactly one argument (the type to instantiate)"
@@ -692,3 +847,15 @@ DEF_FUNC object_new_fn, ONF_FRAME
     CSTRING rdi, `\x01() takes no arguments`
     jmp raise_type_error_with_typename
 END_FUNC object_new_fn
+
+section .rodata
+onf_not_safe_open: db "object.__new__(", 0
+onf_not_safe_mid:  db ") is not safe, use ", 0
+onf_not_safe_tail: db ".__new__()", 0
+
+section .bss
+; Two type names and the fixed text.  Written only on the way to a raise, so
+; it is never live across anything that could compose another message.
+onf_msgbuf: resb 256
+
+section .text
