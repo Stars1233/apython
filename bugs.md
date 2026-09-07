@@ -44,6 +44,27 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
+- **`from mod import *` does not check that `__all__`'s names exist.**  CPython
+  answers `AttributeError: module 'mod' has no attribute 'missing'`; this tree
+  binds what it finds and silently skips the rest
+  (`.is_all_loop`'s `jz .is_all_next` in `src/opcodes/match.asm`).  That is how
+  `lib/copyreg.py` came to promise `add_extension`, `remove_extension` and
+  `clear_extension_cache` in `__all__` while defining none of them, and nothing
+  noticed until a reviewer read the file.
+
+  The skip is one branch, but the replacement is not: the intrinsic runs on a
+  hand-rolled frame with the eval loop's bytecode IP saved in `rbx`, and
+  `raise_exception` tail-jumps into the unwinder.  Raising from there without
+  restoring `rbx` first is the same shape as the `systrace_exception` bug --
+  a corrupted IP in every frame that raised.
+
+- **`object.__new__` does not refuse a builtin subclass.**  `object.__new__(list)`
+  answers `[]` where CPython raises
+  `TypeError: object.__new__(list) is not safe, use list.__new__()`, and `dict`
+  and `int` are the same.  CPython's rule is that `object.__new__` refuses any
+  type whose `tp_new` is not `object`'s own, unless `__init__` is overridden
+  and `__new__` is not.  `copyreg._reconstructor` is the ordinary caller.
+
 - **An exception raised inside `__exit__`, while another is in flight,
   segfaults.**  Four lines, no stdlib:
 

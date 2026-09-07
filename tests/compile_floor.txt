@@ -136,6 +136,7 @@ test_container_dunders
 test_container_operator_names
 test_contains_fallback
 test_control_flow
+test_copyreg
 test_crash_regressions
 test_csv
 test_data_descriptor_precedence

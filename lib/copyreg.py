@@ -93,6 +93,59 @@ def _reduce_ex(self, proto):
     else:
         return _reconstructor, args
 
+# A registry of extension codes.  This is an ad-hoc compression mechanism:
+# whenever a global reference to <module>, <name> is about to be pickled, the
+# (<module>, <name>) tuple is looked up here to see if a registered extension
+# code stands for it.  Codes are universal, so a pickle's meaning does not
+# depend on context.
+#
+# Nothing in this tree registers one, and pickle here never consults them --
+# but __all__ has always named the three functions, and CPython's own
+# pickle.py opens with
+#
+#     from copyreg import _extension_registry, _inverted_registry, _extension_cache
+#
+# so a copyreg without them is a copyreg CPython's pickle cannot import.
+
+_extension_registry = {}                # key -> code
+_inverted_registry = {}                 # code -> key
+_extension_cache = {}                   # code -> object
+# Don't ever rebind those names:  pickling grabs a reference to them when
+# it's initialized, and won't see a rebinding.
+
+def add_extension(module, name, code):
+    """Register an extension code."""
+    code = int(code)
+    if not 1 <= code <= 0x7fffffff:
+        raise ValueError("code out of range")
+    key = (module, name)
+    if (_extension_registry.get(key) == code and
+        _inverted_registry.get(code) == key):
+        return # Redundant registrations are benign
+    if key in _extension_registry:
+        raise ValueError("key %s is already registered with code %s" %
+                         (key, _extension_registry[key]))
+    if code in _inverted_registry:
+        raise ValueError("code %s is already in use for key %s" %
+                         (code, _inverted_registry[code]))
+    _extension_registry[key] = code
+    _inverted_registry[code] = key
+
+def remove_extension(module, name, code):
+    """Unregister an extension code.  For testing only."""
+    key = (module, name)
+    if (_extension_registry.get(key) != code or
+        _inverted_registry.get(code) != key):
+        raise ValueError("key %s is not registered with code %s" %
+                         (key, code))
+    del _extension_registry[key]
+    del _inverted_registry[code]
+    if code in _extension_cache:
+        del _extension_cache[code]
+
+def clear_extension_cache():
+    _extension_cache.clear()
+
 # Helper for __reduce_ex__ protocol 2
 
 def __newobj__(cls, *args):
