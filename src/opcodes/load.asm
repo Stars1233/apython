@@ -765,6 +765,24 @@ DEF_FUNC op_load_attr, LA_FRAME
     je .la_simple_push             ; gone already: do not cache a miss
     cmp rax, 0xFFFF
     ja .la_simple_push             ; the index does not fit the cache
+
+    ; The handler validates the slot by comparing its KEY against co_names by
+    ; pointer, and dict_set keeps the FIRST writer's key object.  An attribute
+    ; created under a name that is not the interned constant --
+    ; setattr(o, "".join([...]), 1) -- can therefore never satisfy that guard,
+    ; and installing anyway made the site specialize and deopt on every single
+    ; execution: two instruction-stream writes and a dict_get_index per access,
+    ; measured at 41ms against 18ms for the same loop over a constant name.
+    ; Refusing once here is what stops it.
+    mov rdi, [rbp - LA_OBJ]
+    LOAD_INST_DICT rsi, rdi, .la_simple_push   ; rsi did not survive the call
+    mov rcx, [rsi + PyDictObject.entries]
+    imul rdx, rax, DICT_ENTRY_SIZE
+    add rcx, rdx
+    mov rdx, [rbp - LA_NAME]
+    cmp rdx, [rcx + DictEntry.key]
+    jne .la_simple_push
+
     mov word [rbx + 4], ax         ; CACHE[+4] = dense index
     mov rcx, [rbp - LA_TAGTYPE]
     mov rcx, [rcx + PyTypeObject.tp_flags]

@@ -177,3 +177,24 @@ print(getattribute_override_refuses())
 print(descriptor_type_gains_set_afterwards())
 print(deleting_the_instance_attribute())
 print(two_classes_at_one_site())
+
+
+def name_built_at_runtime_does_not_thrash():
+    """dict_set keeps the FIRST writer's key object, so an attribute created
+    under a name that is not the interned constant can never satisfy the
+    handler's pointer guard.  Installing anyway made the site specialize and
+    deopt on every execution -- two instruction-stream writes and a
+    dict_get_index per access.  The install site refuses once instead."""
+    class T:
+        pass
+
+    t = T()
+    nm = "".join(["a", "b", "c"])
+    setattr(t, nm, 0)
+    total = 0
+    for i in range(2000):
+        total += t.abc
+    return total, t.abc
+
+
+print(name_built_at_runtime_does_not_thrash())
