@@ -127,6 +127,14 @@ reasoning that chose them and what changing one would cost.
   not model would read a confident zero.  The table is the work, not the
   plumbing.
 
+- **Two bound methods for the same function and receiver do not compare
+  equal.**  `c.m == c.m` is True in CPython, which compares `__func__` and
+  `__self__`; here it is False, because `method` has no `__eq__` and falls back
+  to identity, and each attribute load builds a new wrapper.  `c.m is c.m` is
+  False either way.  It matters to any code that keeps a callback and later
+  asks whether it already has it -- removing a handler from a list of them is
+  the usual shape.
+
 - **`\b` and `\B` are ASCII-only.**  `re.search(r"\b\d+\b", "eee42")` with
   non-ASCII letters in place of the e's finds `42`, where CPython finds nothing
   because those letters are word characters.  `\B\d` is wrong the same way and

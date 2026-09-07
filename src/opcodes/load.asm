@@ -448,6 +448,12 @@ DEF_FUNC op_load_attr, LA_FRAME
     cmp rax, rdx
     jne .la_call_getattr
     lea rdx, [rbp - LA_FROMINST]
+    ; Ask for a method UNBOUND.  .la_unwrap_bound_method below takes a bound
+    ; method apart into [func, self] two instructions later, so building one
+    ; here is a gc_alloc, a gc_track, two increfs and an immediate dealloc for
+    ; nothing.  obj_getattr_opt shares this entry and asks for 0, because
+    ; getattr(c, 'm') must still answer a bound method.
+    mov ecx, 1
     call instance_getattr_where
     jmp .la_getattr_done_v
 .la_call_type_getattr:
@@ -474,12 +480,27 @@ DEF_FUNC op_load_attr, LA_FRAME
     test rax, rax
     jz .la_try_dict
     V_UNPACK rax, rdx
+    cmp qword [rbp - LA_FROMINST], 2
+    je .la_getattr_unbound
 
 .la_getattr_done:
     mov [rbp - LA_ATTR], rax
     mov [rbp - LA_ATTR_TAG], rdx   ; save tag from tp_getattr
     ; LA_FROM_TYPE stays 0 — tp_getattr already handled binding
     jmp .la_got_attr
+
+.la_getattr_unbound:
+    ; A function from the type, handed over unbound at our own request.  That
+    ; is exactly what .la_try_dict's own answer looks like, so it joins the
+    ; same path: LA_FROM_TYPE says the descriptor and binding rules apply, and
+    ; the descriptor block is skipped because a function is none of
+    ; staticmethod, classmethod, property or getset and its type is not a
+    ; heaptype.
+    mov qword [rbp - LA_FROMINST], 0
+    mov qword [rbp - LA_FROM_TYPE], 1
+    mov [rbp - LA_ATTR], rax
+    mov [rbp - LA_ATTR_TAG], rdx
+    jmp .la_check_flag
 
 .la_try_dict:
     ; No tp_getattr, or it found nothing: ask the class what it defines for
@@ -1790,6 +1811,7 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     mov rdi, [rbp - GA_OBJ]
     mov rsi, [rbp - GA_NAME]
     lea rdx, [rbp - GA_FROMINST]
+    xor ecx, ecx                ; getattr() wants the bound method itself
     call instance_getattr_where
     test rax, rax
     jz .ga_type_dict
