@@ -1590,6 +1590,50 @@ END_FUNC op_is_op
 ;; Pop right (container), pop left (value to find).
 ;; ============================================================================
 DEF_FUNC_BARE op_contains_op
+    ; The shape `in` almost always has: a container with an sq_contains, which
+    ; is every builtin one -- set, frozenset, dict, list, tuple, str, bytes.
+    ;
+    ; Both operands are already Values on the stack, and sq_contains takes a
+    ; Value, so nothing here needs unpacking or repacking.  The protocol below
+    ; keeps the __contains__ and iteration fallbacks and the error wording, and
+    ; reaches them having touched neither r13 nor rcx.
+    mov rsi, [r13 - 8]              ; the container
+    V_TEST_PTR rsi, rax
+    ja .contains_generic
+    mov rax, [rsi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .contains_generic
+    mov rax, [rax + PySequenceMethods.sq_contains]
+    test rax, rax
+    jz .contains_generic
+
+    mov rdi, rsi                    ; the container
+    mov rsi, [r13 - 16]             ; the value to find
+    push rcx                        ; the invert flag
+    sub rsp, 8                      ; one push is odd; rsp must be 16-aligned
+    call rax
+    add rsp, 8
+    pop rcx
+    ; r15 is free by the register convention and callee-saved, so it carries
+    ; the answer across the two releases below -- either can call obj_dealloc,
+    ; and that clobbers every caller-saved register.
+    mov r15d, eax
+    xor r15d, ecx                   ; `not in` inverts
+
+    mov rdi, [r13 - 8]
+    DECREF_V rdi, rdx
+    mov rdi, [r13 - 16]
+    DECREF_V rdi, rdx
+    sub r13, 16
+
+    lea rax, [rel bool_false]
+    test r15d, r15d
+    jz .contains_push
+    lea rax, [rel bool_true]
+    jmp .contains_push
+
+.contains_generic:
     mov r8d, ecx               ; save invert flag
 
     VPOP_VAL rsi, r9           ; rsi = right (container), r9 = tag
