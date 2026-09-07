@@ -24,9 +24,10 @@ reasoning that chose them and what changing one would cost.
   `doctest`, `pdb`, `unittest` and `signal` with it.  So is `zlib`, as a shim
   over `-lz` on the precedent `-lgmp` set, and `gzip` with it -- and
   `zipfile`, `tarfile` and `shutil`, which imported before and could not
-  compress.  What is left is genuinely C: `array`, `unicodedata`,
-  `_tracemalloc`, `_symtable`, `_ssl`, `_sqlite3`, `_crypt`, `_lzma`, `_bz2`,
-  `_ctypes`, `_curses`, `pyexpat` and `_tkinter`.
+  compress.  So is `array`, which was the largest of these by reach.  What
+  is left is genuinely C: `unicodedata`, `_tracemalloc`, `_symtable`, `_ssl`,
+  `_sqlite3`, `_crypt`, `_lzma`, `_bz2`, `_ctypes`, `_curses`, `pyexpat` and
+  `_tkinter`.
   (`_io` is not among them: `src/modules/io.asm` supplies `_iocore` and
   `lib/_io.py` assembles both halves under the name `_io`.  `_socket` and
   `select` are the same split over `_socketcore`.  Neither are `math`,
@@ -34,15 +35,17 @@ reasoning that chose them and what changing one would cost.
   `_tokenize`, `_operator`, `binascii`, `atexit` and `_ast`, which are
   there, and so are `_csv` and `termios` -- the second over one raw
   `posix.ioctl`, the same split `_socket` and `select` use.)
-  `make check-stdlib` gives the current figure: 178 of 196.
+  `make check-stdlib` gives the current figure: 179 of 196.
 
-  `array` is the one worth doing first, and the reason the old "one or two
-  modules apiece" reading of this list was wrong: it is what stands between
-  this tree and `multiprocessing`, and CPython's own suite imports it from
-  test modules for `struct`, `memoryview`, `io`, `bytes`, `socket`, `re`,
-  `marshal`, `codecs` and the compression family -- far more than the rest of
-  the list put together.  It also needs no library and no syscalls, which none
-  of the others can say.
+  `array` is done, and it is the reason the old "one or two modules apiece"
+  reading of this list was wrong: it was what stood between this tree and
+  `multiprocessing`, and CPython's own suite imports it from the test modules
+  for `struct`, `memoryview`, `io`, `bytes`, `socket`, `re`, `marshal`,
+  `codecs` and the compression family.  `fromfile` and `tofile` are the part
+  left out -- they want the file object's own read and write, and every caller
+  in the suite reaches for `frombytes` and `tobytes` -- and `L` and `Q` hold
+  what an int64 holds rather than a uint64, because `obj_as_index` refuses
+  anything wider.
 
   `math`'s `gamma`, `lgamma`, the n-ary `hypot` and `sumprod` round
   differently from CPython's, which uses its own Lanczos approximation and
@@ -51,220 +54,31 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **`from mod import *` does not check that `__all__`'s names exist.**  CPython
-  answers `AttributeError: module 'mod' has no attribute 'missing'`; this tree
-  binds what it finds and silently skips the rest
-  (`.is_all_loop`'s `jz .is_all_next` in `src/opcodes/match.asm`).  That is how
-  `lib/copyreg.py` once came to promise `add_extension`, `remove_extension`
-  and `clear_extension_cache` in `__all__` while defining none of them, and
-  nothing noticed until a reviewer read the file.  Those three are defined
-  now, so the illustration no longer reproduces -- but the missing check is
-  still missing, and the next such file will be as quiet.
+- **`array`'s `L` and `Q` hold an int64, not a uint64.**  `array('L', [2**64-1])`
+  is an OverflowError here and the value in CPython.  Every path into an
+  integer typecode goes through `obj_as_index`, which refuses anything wider
+  than a signed 64-bit index, so the ceiling is that function's rather than
+  the typecode's.  `tests/test_array.py` records both.
 
-  The skip is one branch, and so is the replacement.  An earlier note here
-  claimed raising from the intrinsic would corrupt `rbx` the way the
-  `systrace_exception` bug did; that is wrong.  `eval_exception_unwind`
-  reloads `rbx`, `r12`, `r13` and `rsp` from the `eval_saved_*` globals, so a
-  hand-rolled frame is not the hazard -- and `op_import_from` already raises
-  from this same subsystem with a bare `RAISE`, which is the precedent to
-  follow.
+  `fromfile` and `tofile` are absent for a different reason: they want the
+  file object's own read and write, and every caller in CPython's suite
+  reaches for `frombytes` and `tobytes` instead.
 
-  `__all__` is also assumed to be a list or a tuple: `__all__ = {"a"}` reads
-  `PyTupleObject.ob_item` off a set.  It wants a type check in the same
-  commit.
+- **A `match` object's repr says nothing.**  `<re.Match object>` here,
+  `<re.Match object; span=(1, 2), match='b'>` in CPython.  The span and the
+  matched text are both on hand at the point the repr is built; nothing in
+  the stdlib reads it, which is why it has stayed this way, but a test that
+  prints a match object diverges for a reason that has nothing to do with
+  the match.
 
-- **An `__init__` that is not a descriptor is still handed `self`.**
-  `class C: __init__ = functools.partial(f)` and an `__init__` that is a
-  callable INSTANCE both run here with `self` prepended; CPython does not bind
-  either, because neither has `__get__`, and raises
-  `TypeError: f() missing 1 required positional argument: 'self'`.  Found while
-  checking the two exact-type tests next to the `type_call` subtype fix;
-  neither of those reproduced, and this did.
+- **`not enough values to unpack` does not report the counts.**  CPython says
+  "not enough values to unpack (expected at least 2, got 1)"; this says the
+  first half only.  `op_unpack_ex` has both numbers in its frame at the point
+  it raises.
 
-  An earlier note here said a `staticmethod` and a `staticmethod` subclass
-  "behave the same either way".  They do not: `__init__ = staticmethod(g)`
-  calls `g` with no arguments in CPython and with `self` here, and a
-  `staticmethod` subclass is the same.  Only a plain function agrees, and it
-  agrees by accident -- a function IS a descriptor, so binding it and
-  prepending `self` by hand reach the same place.  That accident is what makes
-  the bug easy to miss: the one case anybody writes is the one case that
-  works.
-
-- **`object.__new__` does not refuse a builtin subclass.**  `object.__new__(list)`
-  answers `[]` where CPython raises
-  `TypeError: object.__new__(list) is not safe, use list.__new__()`, and `dict`
-  and `int` are the same.  `copyreg._reconstructor` is the ordinary caller.
-
-  CPython's rule is `tp_new_wrapper`'s staticbase walk
-  (`Objects/typeobject.c`): climb `tp_base` past every heap type -- those are
-  the ones whose `tp_new` is `slot_tp_new` -- and refuse when the static type
-  that walk lands on has a `tp_new` that is not the one being called through.
-  An earlier note here gave the rule as "refuses any type whose `tp_new` is
-  not `object`'s own, unless `__init__` is overridden and `__new__` is not".
-  That is a different rule in a different function: the `__init__`/`__new__`
-  override test lives in `object_init` and `object_new` and governs whether
-  EXCESS ARGUMENTS are accepted, not whether the allocation is safe.
-
-  `str`, `float` and `bytes` are worse than the wrong answer this entry
-  records.  `object.__new__(str)` does not answer `''` -- it aborts, with
-  glibc's "double free or corruption", because the object it builds is not
-  laid out the way the type's own dealloc will free it.
-
-- **`frame.clear()` refuses a suspended generator's frame.**  CPython clears
-  one; this raises `RuntimeError: cannot clear an executing frame` for any
-  frame still attached to a live `PyFrame`, because telling a suspended
-  generator apart from an executing frame means asking whether the `PyFrame`
-  is on the interpreter's own chain.  It costs nothing where it matters:
-  `traceback.clear_frames()` is written as `try: ... except RuntimeError: pass`
-  and CPython raises exactly that for the frames it refuses, so the caller
-  cannot tell the difference.
-
-- **A `__del__` that touches an iterator over the object being freed
-  segfaults.**  CPython's own `test_list` reaches it through
-  `support.check_free_after_iterating`, and it is nine lines without the
-  stdlib:
-
-  ```python
-  class A(list):
-      def __del__(self):
-          try: next(it)
-          except StopIteration: pass
-  it = iter(A())
-  try: next(it)
-  except StopIteration: pass
-  import gc; gc.collect()
-  ```
-
-  CPython prints and exits 0; this dies with SIGSEGV.  The list is freed when
-  the iterator drops it at exhaustion, `__del__` runs inside that dealloc, and
-  the `next(it)` it makes reads the iterator's now-dangling sequence pointer.
-  CPython's fix for the same crash (issue 26494) was to have the iterator NULL
-  its own reference before releasing it, so a resurrected iterator reads
-  exhausted rather than freed.  Found once `frame.clear()` let CPython's
-  `test_list` get 19 tests in instead of one.
-
-- **A module built by `types.ModuleType` reprs as `(built-in)`.**
-  CPython says `<module 'x'>` for one with neither a `__file__` nor a real
-  spec, and `<module 'sys' (built-in)>` only when the spec says so;
-  `module_repr` here decides on `__file__` alone, so anything without one is
-  reported as built-in.  Everything else about such a module matches now,
-  `sorted(m.__dict__)` included.  Telling the two apart means reading
-  `__spec__` out of the dict as well, which is one more lookup in a repr that
-  already does one.
-
-- **`type.__flags__` does not exist.**  `src/pyo/typeattr.asm` is where it
-  goes -- one name, one entry in the parallel tables, one `TYA_GET` -- but the
-  value cannot be `tp_flags`: the low 32 bits are this tree's own layout
-  (`TYPE_FLAG_HEAPTYPE`, `TYPE_FLAG_METATYPE`, `TYPE_FLAG_MRO_HAS_DATA_DESCR`,
-  ...) and the high 32 are the type version.  A faithful answer means
-  translating to CPython's `Py_TPFLAGS_*` -- HEAPTYPE, BASETYPE, HAVE_GC,
-  IMMUTABLETYPE and the EIGHT subclass bits (24 through 31: LONG, LIST, TUPLE,
-  BYTES, UNICODE, DICT, BASE_EXC, TYPE) -- and a PARTIAL translation is worse
-  than none, because code that masks a bit this tree does not model would read
-  a confident zero.  The table is the work, not the plumbing.
-
-  Two things to get right that are easy to guess wrong.  `Py_TPFLAGS_DEFAULT`
-  is **0** on this platform: it is defined as `HAVE_STACKLESS_EXTENSION`
-  alone, and that is 0 in a non-Stackless build, so there is no default bit to
-  OR in.  And `BASE_EXC_SUBCLASS` has no counterpart flag here at all -- the
-  other seven can be read off a type flag or a base pointer, but that one
-  needs an MRO walk.
-
-- **Two bound methods for the same function and receiver do not compare
-  equal.**  `c.m == c.m` is True in CPython, which compares `__func__` and
-  `__self__`; here it is False, because `method` has no `__eq__` and falls back
-  to identity, and each attribute load builds a new wrapper.  `c.m is c.m` is
-  False either way.  It matters to any code that keeps a callback and later
-  asks whether it already has it -- removing a handler from a list of them is
-  the usual shape.
-
-- **`\b` and `\B` are ASCII-only.**  `re.search(r"\b\d+\b", "eee42")` with
-  non-ASCII letters in place of the e's finds `42`, where CPython finds nothing
-  because those letters are word characters.  `\B\d` is wrong the same way and
-  `re.search(r"\bX\b", "x X y")` with a non-ASCII X finds nothing.  `\w`
-  itself is already right -- `sre_uni_isword` (`src/sre.asm`) exists and
-  answers correctly -- so this is the `AT` handlers not using it.
-
-- **A non-ASCII subject is re-decoded on every `pattern.match(s, pos)`.**  The
-  engine indexes code points, so a non-ASCII subject is decoded to u32 before
-  matching, and that is O(len).  A scanner caches it (`SRE_CpCache`, so
-  `finditer` decodes once), but a hand-written `pattern.match(s, pos)` loop has
-  no scanner and pays per call -- and `json.decoder` is written exactly that
-  way.  Caching it would have to hang off the string itself, since nothing else
-  in that loop outlives one call; that is a `PyStrObject` change, which is why
-  the scanner got one and this did not.
-
-- **`type_install_slots` never clears a slot it has filled.**  `del C.__iter__`
-  leaves `tp_iter` pointing at the wrapper, which then finds no dunder and
-  answers `RuntimeError: slot wrapper failed without an exception` where CPython
-  says `'A' object is not iterable`.  `del C.__len__` is the same, and so is
-  `del C.__call__`, which additionally leaves `callable()` answering True.  The
-  fix is not simply "clear on `.skip`": that path is also taken when a *builtin*
-  base supplies the dunder, and there the slot must be left exactly as
-  `type_from_parts` set it.
-
-- **A dunder set to `None` empties the slot, which is wrong for `__call__` --
-  and now for `__setattr__` and `__delattr__` too.**  `class N: __setattr__ =
-  None` leaves `instance_setattr` in the slot, so `N().x = 1` stores silently
-  where CPython raises `TypeError: 'NoneType' object is not callable`.  Same
-  for `__delattr__`.  It is the policy below applied to the two dunders that
-  gained slot rows most recently, and it is more visible on them than on
-  `__iter__`, where disabling the protocol is what None is documented to do.
-
-- **A dunder set to `None` empties the slot, which is wrong for `__call__`.**
-  `type_install_slots` skips any dunder explicitly `None`, so the protocol is
-  disabled -- right for `__iter__` and `__hash__`, and what Python documents.
-  CPython does not extend it to `__call__`: `class C: __call__ = None` leaves
-  `callable(C())` True and fails inside the call with `'NoneType' object is not
-  callable`, where this tree answers `callable()` False and `'C' object is not
-  callable`.  Ours is the more coherent pair; it is still a difference.
-
-- **No builtin type carries `__call__` in its `tp_dict`.**
-  `hasattr(len, '__call__')` is False, and so is `hasattr(int, '__call__')` and
-  `hasattr(staticmethod(len), '__call__')`, though all three are callable and
-  answer `callable()` True.  This is the recorded "a builtin's behaviour that
-  lives only in a slot" pattern: the stdlib asks by name, and `__call__` is one
-  of the names it asks about.  Instances of classes written in Python are fine
-  -- their `__call__` is a real dict entry.
-
-- **A scanner keeps scanning after a failed `match()`.**  CPython ends the scan
-  there: `p.scanner(s).match()` returning None makes every later `match()` and
-  `search()` on that scanner return None too.  Here the scanner carries on, so
-  `sc.match(); sc.search()` finds the first match where CPython finds nothing.
-  Independent of the subject's encoding -- it reproduces on pure ASCII.
-
-- **A read-only property's AttributeError has CPython 3.10's wording.**
-  `Plain().r = 2` says `can't set attribute` where CPython 3.12 says
-  `property 'r' of 'Plain' object has no setter`, and the deleter case is the
-  same shape.  Found while fixing the data-descriptor flag; unrelated to it,
-  and it happens on a plain class too.
-
-  CPython's message needs the property's own name, which it learns through
-  `__set_name__` and keeps in a `prop_name` field.  `PyPropertyObject` has no
-  such field and property has no `__set_name__`, so this is not a wording
-  change -- it is that plus the object's type name at the raise site.
-  `lib/types.py` raises the old wording by hand in one place too.
-
-- **`LOAD_ATTR_METHOD` (opcode 203) is still never installed for a class
-  written in Python.**  Its install site is reachable only from `.la_try_dict`,
-  which needs a receiver whose type has no `tp_getattr` -- a static builtin
-  type.  That is why `"abc".upper()` specializes and `c.m()` does not.
-
-  It was worth ~0.3x when `c_call_method` was 0.54x.  It is not now: the
-  method-load work took that case to 0.89x against a plain `c_call` of 0.93x,
-  so the remaining gap is the GENERIC CALL PATH and not the attribute load, and
-  a specialized LOAD_ATTR does not touch it.  The headroom a sound version
-  would recover is about 0.05x on one microbenchmark, against a new specialized
-  opcode whose guards must prove the instance dict cannot shadow the name and
-  which must never write `rcx` on a path that can deopt.  The measurement is
-  what changed, not the design; if the call path gets faster, this becomes
-  worth doing again.
-
-- **Forty-two calls inside opcode handlers are made with `rsp` misaligned.**
-  Recorded one per site in `tests/align_floor.txt`, which `lint.py` ratchets:
-  a new one fails the build and the set can only shrink.  Pay one down by
-  padding the odd push and re-recording with
-  `python3 src/compiler/lint.py --record-alignment`.
+- **One call inside an opcode handler is made with `rsp` misaligned.**
+  Recorded in `tests/align_floor.txt`, which `lint.py` ratchets: a new one
+  fails the build and the set can only shrink.
 
   They are not cosmetic, and they are not local.  A misaligned call
   PROPAGATES: the callee's whole frame is 8 out, so every Python frame the
@@ -274,89 +88,16 @@ reasoning that chose them and what changing one would cost.
   `inflate`, at a `movaps %xmm0,-0x70(%rbp)`, several thousand instructions
   from anything zlib had done wrong.
 
-  `lint.py` had a check for this and it saw none of them, for two reasons
-  both now fixed: it stopped tracking depth at the first label, so a call six
-  instructions past the push that unbalanced it went unexamined, and it read
-  only a literal `sub rsp, 40` and ignored `sub rsp, SOME_CONST - 16`.
-  Teaching it to resolve a label from the depths control reaches it at, and
-  to evaluate the arithmetic, turned up all forty-five.
+  Forty-two of the forty-three are paid.  Most were a loop index or an item
+  saved across a call with a lone push; those became frame slots rather than
+  pads, because a handler with calls at both push depths has no single frame
+  size that satisfies them all -- and the pushed value always had a name.
 
-  Three are already fixed and are the ones that mattered: `op_import_name`
-  made `call import_module` at a fifth push (the flag now lives in r15, which
-  the register convention leaves free); `op_call_function_ex` carved
-  `CFX_FRAME2 - 16`, an even number where a jumped-to handler needs an odd
-  one; and `op_get_iter`'s hand-rolled frame for `seq_iter_new` was `push rbp`
-  and nothing else.  Between them they accounted for every misalignment on
-  the `import` path -- `import io` went from thirty-eight misaligned frames
-  to none.
-
-- **A module's leading RESUME and a body's implicit `return None` carry a
-  different location from CPython's.**  Visible now that `co_positions()` and
-  `co_lines()` report what the table holds: for `compile("x = 1\ny = 2\n")`
-  CPython's first entry is `(0, 1, 0, 0)` and its last run is line 2, where
-  this compiler gives `(0, 0, None, None)` and a trailing run with no location
-  at all.  Only code this compiler produced is affected -- a CPython `.pyc`
-  decodes exactly, which is what `tests/test_code_positions.py` pins.  Same
-  neighbourhood as the entry below.
-
-- **The compiler attributes a loop's back edge to the loop header, and
-  CPython attributes it to the body.**  For
-
-      for i in range(n):
-          total += i
-
-  CPython gives `JUMP_BACKWARD` the line of `total += i` and `END_FOR` the
-  line of the `for`; this gives both the `for`.  Nothing could see it until
-  `sys.settrace` arrived -- now a traced loop reports one extra `'line'` event
-  per iteration, naming the `for` line twice.  `tests/test_settrace.py` is one
-  of the two files in `tests/` that `make check-source` cannot match -- the
-  other is `tests/test_code_positions.py`, for the entry above -- and this is
-  part of why; it matches exactly from a CPython `.pyc`, so the tracing rule
-  itself is right.
-
-  Fixing the back edge will NOT bring `test_settrace` onto the floor by
-  itself.  Its diff also holds the deliberate PEP 709 comprehension
-  divergence, which is in `DIVERGENCES.md` and is not going anywhere, and a
-  `try` header whose line attribution differs for what looks like a separate
-  reason.  Check the fix with `--dis` against `python3 -m dis`, not by
-  watching the floor.
-
-  The fix wants the line of the last instruction actually EMITTED, and
-  `CompUnit` tracks only `curline`, the line the emitters are currently
-  positioned at -- which `cg_stmt` has already restored to the `for`
-  statement's by the time the back edge is emitted.  A `.lastline` field
-  written by `cg_emit` is the shape; `.pad5` is there to take it.
-
-- **Five families of format-spec difference, found by fuzzing the whole
-  grammar.**  Four thousand randomly assembled specs -- fill, align, sign,
-  `#`, `0`, width, separator, precision, type -- over seventeen values, diffed
-  against `python3`.  Grouping is not among them; these are what was left
-  once it was fixed:
-
-  - **An unknown presentation type is not refused.**  `format(42, "Z")` is
-    `'42'` here and `ValueError: Unknown format code 'Z' for object of type
-    'int'` in CPython, for every letter that is not a real code and for
-    punctuation as well.  A wrong spec therefore formats silently rather than
-    raising, which is how it is usually found.
-  - **An explicit fill and align, then a `0`.**  `format(-7, "*^-05d")` is
-    `'*-7**'` in CPython and `'0-700'` here: the `0` flag overwrites the fill
-    character that was already given, where CPython leaves an explicit fill
-    alone and lets `0` supply one only when none was written.
-  - **A precision on an integer presentation is not refused.**
-    `format(255, "#020.7")` answers a number here and is
-    `ValueError: Precision not allowed in integer format specifier` there.
-  - **`n` accepts a separator.**  `format(10**25, "0>#0,n")` groups here;
-    CPython says `Cannot specify ',' with 'n'.` because `n` takes its
-    separator from the locale.
-  - **`Invalid format specifier` names neither the spec nor the type.**
-    CPython's is `Invalid format specifier '*#012' for object of type 'int'`.
-  - **`#` with an empty float type.**  `format(0.0, "#12.0")` is `' 0.e+00'`
-    in CPython and `' 0.0'` here: an empty type with a precision behaves as
-    `e`, and `#` keeps the point.
-
-  `tests/test_format_grouping.py` covers the grouping; none of these has a
-  test yet, and the corpus that found them is worth keeping -- a
-  `tests/formatfuzz_probe.sh` beside the type one is the shape.
+  The one left is `op_set_update`'s `call set_add`, which lint reports at a
+  depth eight above what its own pushes and frame account for.  I could not
+  source the difference, and moving the frame by eight only moves which call
+  in that handler is wrong.  Changing the code to satisfy a number I do not
+  understand is worse than leaving it recorded.
 
 - **Functions with no docblock at all**, and, among those that have one,
   docblocks with no `->` signature line.  The signature is the only part of a
