@@ -2555,6 +2555,15 @@ DEF_FUNC sre_scanner_iternext, SI_FRAME
 .si_no_match:
     lea rdi, [rbp - SI_STATE]
     call sre_state_fini
+    ; A failed attempt ENDS the scan.  CPython marks it by clearing
+    ; state->start, and every later match()/search() on the scanner returns
+    ; None from the guard at the top (sre.c, _sre_SRE_Scanner_match_impl).
+    ; Here the scan simply carried on from wherever the failed attempt left
+    ; the position, so `sc.match(); sc.search()` found the match CPython
+    ; does not.  pos is the guard's subject and it is compared UNSIGNED, so
+    ; -1 is past every real endpos and needs no second field.
+    mov rbx, [rbp - SI_SELF]
+    mov qword [rbx + SRE_ScannerObject.pos], -1
 
 .si_exhausted:
     RET_NULL
@@ -2672,6 +2681,9 @@ DEF_FUNC sre_scanner_match_method, SM2_FRAME
 .sm2_no_match:
     lea rdi, [rbp - SM2_STATE]
     call sre_state_fini
+    ; The scan is over -- see sre_scanner_iternext's .si_no_match.
+    mov rbx, [rbp - SM2_SELF]
+    mov qword [rbx + SRE_ScannerObject.pos], -1
 
 .sm2_none:
     xor eax, eax

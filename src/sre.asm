@@ -23,6 +23,22 @@ extern obj_incref
 extern raise_exception
 extern exc_RuntimeError_type
 
+;; SRE_SUBJECT_LEN reg -- rax = the subject's length in the unit the engine
+;; indexes: bytes for an ASCII subject, code points for a decoded one.  This
+;; was written out seven times; it is a macro rather than a function because
+;; every site holds live values in r8/r9 that a call would put at risk.
+%macro SRE_SUBJECT_LEN 1        ; %1 = the register holding SRE_State*
+    mov rax, [%1 + SRE_State.codepoint_buf]
+    test rax, rax
+    jnz %%uni
+    mov rax, [%1 + SRE_State.str_end]
+    sub rax, [%1 + SRE_State.str_begin]
+    jmp %%done
+%%uni:
+    mov rax, [%1 + SRE_State.codepoint_len]
+%%done:
+%endmacro
+
 ;; ============================================================================
 ;; sre_getchar(SRE_State* state, i64 index) -> u32 codepoint
 ;; Get character at given index. ASCII fast path or codepoint_buf lookup.
@@ -537,11 +553,20 @@ END_FUNC sre_charset
 ;; sre_at(SRE_State* state, i64 pos, u32 at_code) -> 0/1
 ;; Check position assertion (^, $, \b, etc.)
 ;; ============================================================================
-DEF_FUNC sre_at
+SA_CAT   equ 8              ; which word category \b and \B ask about
+SA_FRAME equ 16             ; + 0 pushes = 16, 16-aligned
+DEF_FUNC sre_at, SA_FRAME
     ; rdi = state, rsi = pos, edx = at_code
     mov r8, rdi                ; r8 = state
     mov r9, rsi                ; r9 = pos
     mov ecx, edx               ; ecx = at_code
+    ; \b and \B ask "is this a word character" on each side, and WHICH
+    ; question that is depends on the opcode.  Both handlers used to
+    ; hard-code the ASCII category, so a non-ASCII letter was not a word
+    ; character to them and `\b\d+\b` matched inside "ééé42".  The default
+    ; is the ASCII one: bytes patterns and re.ASCII both compile to the plain
+    ; AT_BOUNDARY, and only a unicode str pattern emits the UNI_ form.
+    mov qword [rbp - SA_CAT], SRE_CATEGORY_WORD
 
     cmp ecx, SRE_AT_BEGINNING
     je .at_beginning
@@ -560,9 +585,9 @@ DEF_FUNC sre_at
     cmp ecx, SRE_AT_NON_BOUNDARY
     je .at_non_boundary
     cmp ecx, SRE_AT_UNI_BOUNDARY
-    je .at_word_boundary        ; same as word boundary for now
+    je .at_uni_boundary
     cmp ecx, SRE_AT_UNI_NON_BOUNDARY
-    je .at_non_boundary
+    je .at_uni_non_boundary
     cmp ecx, SRE_AT_LOC_BOUNDARY
     je .at_word_boundary
     cmp ecx, SRE_AT_LOC_NON_BOUNDARY
@@ -598,15 +623,7 @@ DEF_FUNC sre_at
 
 .at_end:
     ; pos == len or (pos == len-1 and char[pos] == '\n')
-    mov rax, [r8 + SRE_State.codepoint_buf]
-    test rax, rax
-    jnz .at_end_unicode
-    ; ASCII
-    mov rax, [r8 + SRE_State.str_end]
-    sub rax, [r8 + SRE_State.str_begin]
-    jmp .at_end_check
-.at_end_unicode:
-    mov rax, [r8 + SRE_State.codepoint_len]
+    SRE_SUBJECT_LEN r8
 .at_end_check:
     cmp r9, rax
     je .at_true
@@ -623,14 +640,7 @@ DEF_FUNC sre_at
 
 .at_end_line:
     ; pos == len or char[pos] == '\n'
-    mov rax, [r8 + SRE_State.codepoint_buf]
-    test rax, rax
-    jnz .at_endline_unicode
-    mov rax, [r8 + SRE_State.str_end]
-    sub rax, [r8 + SRE_State.str_begin]
-    jmp .at_endline_check
-.at_endline_unicode:
-    mov rax, [r8 + SRE_State.codepoint_len]
+    SRE_SUBJECT_LEN r8
 .at_endline_check:
     cmp r9, rax
     je .at_true
@@ -643,21 +653,30 @@ DEF_FUNC sre_at
 
 .at_end_string:
     ; pos == len
-    mov rax, [r8 + SRE_State.codepoint_buf]
-    test rax, rax
-    jnz .at_endstr_unicode
-    mov rax, [r8 + SRE_State.str_end]
-    sub rax, [r8 + SRE_State.str_begin]
-    jmp .at_endstr_check
-.at_endstr_unicode:
-    mov rax, [r8 + SRE_State.codepoint_len]
+    SRE_SUBJECT_LEN r8
 .at_endstr_check:
     cmp r9, rax
     je .at_true
     jmp .at_false
 
+.at_uni_boundary:
+    ; sre_uni_isword's category, which \w has always used and \b had not.
+    mov qword [rbp - SA_CAT], SRE_CATEGORY_UNI_WORD
+    jmp .at_word_boundary
+.at_uni_non_boundary:
+    mov qword [rbp - SA_CAT], SRE_CATEGORY_UNI_WORD
+    jmp .at_non_boundary
+
 .at_word_boundary:
     ; \b: word status differs at pos-1 and pos
+    ; CPython returns 0 from both \b and \B on an EMPTY subject, before it
+    ; looks at either side (sre_lib.h, SRE_AT_BOUNDARY).  Without the early
+    ; out, \B saw "not a word on the left, not a word on the right, therefore
+    ; the same" and matched.
+    SRE_SUBJECT_LEN r8
+.wb_empty_done:
+    test rax, rax
+    jz .at_false
     push r8
     push r9
     ; Get "is word" for pos-1
@@ -667,7 +686,7 @@ DEF_FUNC sre_at
     lea rsi, [r9 - 1]
     mov rdi, r8
     call sre_getchar
-    mov edi, SRE_CATEGORY_WORD
+    mov rdi, [rbp - SA_CAT]
     mov esi, eax
     call sre_category
     mov r10d, eax
@@ -677,14 +696,7 @@ DEF_FUNC sre_at
     ; Get "is word" for pos
     xor r11d, r11d             ; right_is_word = 0
     ; Get string length
-    mov rax, [r8 + SRE_State.codepoint_buf]
-    test rax, rax
-    jnz .wb_right_unicode
-    mov rax, [r8 + SRE_State.str_end]
-    sub rax, [r8 + SRE_State.str_begin]
-    jmp .wb_right_check
-.wb_right_unicode:
-    mov rax, [r8 + SRE_State.codepoint_len]
+    SRE_SUBJECT_LEN r8
 .wb_right_check:
     cmp r9, rax
     jge .wb_compare
@@ -692,7 +704,7 @@ DEF_FUNC sre_at
     mov rdi, r8
     mov rsi, r9
     call sre_getchar
-    mov edi, SRE_CATEGORY_WORD
+    mov rdi, [rbp - SA_CAT]
     mov esi, eax
     call sre_category
     mov r11d, eax
@@ -704,6 +716,14 @@ DEF_FUNC sre_at
 
 .at_non_boundary:
     ; \B: word status same at pos-1 and pos
+    ; CPython returns 0 from both \b and \B on an EMPTY subject, before it
+    ; looks at either side (sre_lib.h, SRE_AT_BOUNDARY).  Without the early
+    ; out, \B saw "not a word on the left, not a word on the right, therefore
+    ; the same" and matched.
+    SRE_SUBJECT_LEN r8
+.nb_empty_done:
+    test rax, rax
+    jz .at_false
     push r8
     push r9
     xor r10d, r10d
@@ -712,7 +732,7 @@ DEF_FUNC sre_at
     lea rsi, [r9 - 1]
     mov rdi, r8
     call sre_getchar
-    mov edi, SRE_CATEGORY_WORD
+    mov rdi, [rbp - SA_CAT]
     mov esi, eax
     call sre_category
     mov r10d, eax
@@ -720,14 +740,7 @@ DEF_FUNC sre_at
     pop r9
     pop r8
     xor r11d, r11d
-    mov rax, [r8 + SRE_State.codepoint_buf]
-    test rax, rax
-    jnz .nb_right_unicode
-    mov rax, [r8 + SRE_State.str_end]
-    sub rax, [r8 + SRE_State.str_begin]
-    jmp .nb_right_check
-.nb_right_unicode:
-    mov rax, [r8 + SRE_State.codepoint_len]
+    SRE_SUBJECT_LEN r8
 .nb_right_check:
     cmp r9, rax
     jge .nb_compare
@@ -735,7 +748,7 @@ DEF_FUNC sre_at
     mov rdi, r8
     mov rsi, r9
     call sre_getchar
-    mov edi, SRE_CATEGORY_WORD
+    mov rdi, [rbp - SA_CAT]
     mov esi, eax
     call sre_category
     mov r11d, eax

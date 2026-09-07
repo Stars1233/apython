@@ -450,6 +450,7 @@ test_sre_bytes
 test_sre_groupdict_refcount
 test_sre_position
 test_sre
+test_sre_scanner_and_boundary
 test_stdlib_glue
 test_stdlib_shims
 test_stdout_buffering
