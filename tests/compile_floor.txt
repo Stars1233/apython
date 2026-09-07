@@ -217,6 +217,7 @@ test_format_grouping
 test_format_map
 test_format
 test_format_spec
+test_frame_clear_generator
 test_frame_clear
 test_frame_lineno
 test_frame_live

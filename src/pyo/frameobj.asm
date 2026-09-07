@@ -1042,8 +1042,32 @@ DEF_FUNC frameobj_method_clear, FMC_FRAME
     mov rax, [rdi]
     mov [rbp - FMC_SELF], rax
 
-    cmp qword [rax + PyFrameObject.f_frame], 0
+    ; A frame still attached to a live PyFrame is usually executing, and
+    ; clearing one is refused.  A SUSPENDED GENERATOR is the exception:
+    ; CPython closes it -- the finally blocks run, gi_frame becomes None, and
+    ; a later next() raises StopIteration.  It was refused here along with
+    ; everything else, and traceback.clear_frames() hid that by catching
+    ; RuntimeError.
+    ;
+    ; gen_owner says whose frame this is, and gi_running tells a suspended
+    ; generator from one that is actually on the interpreter's chain -- which
+    ; is the question CPython answers with FRAME_OWNED_BY_GENERATOR plus the
+    ; frame's state, and it needs no walk of the live frames.
+    mov rcx, [rax + PyFrameObject.f_frame]
+    test rcx, rcx
+    jz .fmc_detached
+    mov rcx, [rcx + PyFrame.gen_owner]
+    test rcx, rcx
+    jz .fmc_executing
+    cmp qword [rcx + PyGenObject.gi_running], 0
     jne .fmc_executing
+    ; Close it, which is the whole of what CPython's clear() does for one.
+    mov rdi, rcx
+    extern gen_close
+    call gen_close
+    mov rax, [rbp - FMC_SELF]
+    mov qword [rax + PyFrameObject.f_frame], 0
+.fmc_detached:
 
     mov rdi, [rax + PyFrameObject.f_locals]
     test rdi, rdi

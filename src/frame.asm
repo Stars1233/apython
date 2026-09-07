@@ -176,6 +176,11 @@ DEF_FUNC frame_new, 8            ; 5 pushes, so rsp is 16-aligned
     mov [r11 + PyFrame.locals], r14
     mov qword [r11 + PyFrame.instr_ptr], 0
     mov qword [r11 + PyFrame.stack_ptr], 0
+    ; call_ip is read by frameobj_refresh_pos for any frame that is not the
+    ; innermost, and nothing wrote it here -- so a recycled frame answered
+    ; f_lineno from the previous call's saved IP.  Valgrind reports it as a
+    ; branch on uninitialised memory in frameobj_detach.
+    mov qword [r11 + PyFrame.call_ip], 0
     mov dword [r11 + PyFrame.exc_depth], 0
     ; The pool hands back memory it did not zero, so a field that is read
     ; before it is written has to be initialised here.  exc_state is XDECREFd
@@ -186,6 +191,9 @@ DEF_FUNC frame_new, 8            ; 5 pushes, so rsp is 16-aligned
     ; a refcounted object, so a stale one is a live frame object handed to
     ; whoever calls frameobj_for next.
     mov qword [r11 + PyFrame.frame_obj], 0
+    ; The pool does not zero, and a recycled frame carrying a dead
+    ; generator's back-pointer would let frame.clear() close it.
+    mov qword [r11 + PyFrame.gen_owner], 0
 
     ; Set nlocalsplus and func_obj
     mov ecx, [rbx + PyCodeObject.co_nlocalsplus]

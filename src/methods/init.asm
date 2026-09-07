@@ -1061,10 +1061,14 @@ DEF_FUNC methods_init
 
     GEN_GETSET gs___name__,     gen_get_name
     GEN_GETSET gs___qualname__, gen_get_name
-    ; gi_frame and cr_frame are NOT here: a PyFrame is pooled and recycled and
-    ; is not an object with a type, so there is nothing to hand back.  Saying
-    ; so by leaving the name absent beats answering None to a caller that is
-    ; about to read f_lineno off it.
+    ; gi_frame goes through frameobj_for, which hands out an owned frame
+    ; object for a live pooled PyFrame -- the same thing sys._getframe
+    ; answers with.  The note that used to be here said a PyFrame was not an
+    ; object with a type and so could not be handed back; that has not been
+    ; true since frameobj_for was written, and the absence was what made
+    ; frame.clear() on a suspended generator unreachable.
+    extern gen_get_frame
+    GEN_GETSET gs_gi_frame,     gen_get_frame
     GEN_GETSET gs_gi_code,      gen_get_code
     GEN_GETSET gs_gi_running,   gen_get_running
 
@@ -1087,6 +1091,7 @@ DEF_FUNC methods_init
 
     GEN_GETSET gs___name__,     gen_get_name
     GEN_GETSET gs___qualname__, gen_get_name
+    GEN_GETSET gs_cr_frame,     gen_get_frame
     GEN_GETSET gs_cr_code,      gen_get_code
     GEN_GETSET gs_cr_running,   gen_get_running
 

@@ -53,6 +53,7 @@ DEF_FUNC gen_new
     mov r12, rax               ; r12 = gen object (ob_refcnt=1, ob_type set)
 
     mov [r12 + PyGenObject.gi_frame], rbx
+    mov [rbx + PyFrame.gen_owner], r12   ; borrowed; frame.clear() needs it
     mov qword [r12 + PyGenObject.gi_running], 0
 
     ; Copy code from frame and INCREF it
@@ -95,6 +96,7 @@ DEF_FUNC coro_new
     mov r12, rax               ; r12 = coro object (ob_refcnt=1, ob_type set)
 
     mov [r12 + PyGenObject.gi_frame], rbx
+    mov [rbx + PyFrame.gen_owner], r12   ; borrowed; frame.clear() needs it
     mov qword [r12 + PyGenObject.gi_running], 0
 
     ; Copy code from frame and INCREF it
@@ -134,6 +136,7 @@ DEF_FUNC async_gen_new
     mov r12, rax               ; ob_refcnt=1, ob_type set
 
     mov [r12 + PyGenObject.gi_frame], rbx
+    mov [rbx + PyFrame.gen_owner], r12   ; borrowed; frame.clear() needs it
     mov qword [r12 + PyGenObject.gi_running], 0
 
     mov rdx, [rbx + PyFrame.code]
@@ -1356,6 +1359,36 @@ END_FUNC gen_get_%1
 %endmacro
 DEF_GEN_GETTER name,    gi_name
 DEF_GEN_GETTER code,    gi_code
+
+;; ============================================================================
+;; gen_get_frame(rdi = the generator) -> rax = its frame object, or None
+;;
+;; gi_frame, and cr_frame under the other spelling.  It used to be left out
+;; deliberately: "a PyFrame is pooled and recycled and is not an object with a
+;; type, so there is nothing to hand back."  That stopped being true when
+;; frameobj_for arrived -- it hands out an OWNED frame object for a live
+;; pooled PyFrame, and sys._getframe has been built on it ever since.
+;;
+;; Its absence is not only a missing name.  frame.clear() on a suspended
+;; generator is the one thing that closes one from the outside, and without
+;; gi_frame there is no way to reach the frame to call it.
+;; ============================================================================
+DEF_FUNC gen_get_frame
+    mov rax, [rdi + PyGenObject.gi_frame]
+    test rax, rax
+    jz .ggf_none
+    mov rdi, rax
+    extern frameobj_for
+    call frameobj_for
+    test rax, rax
+    jz .ggf_none
+    leave
+    ret
+.ggf_none:
+    LOAD_NONE rax
+    leave
+    ret
+END_FUNC gen_get_frame
 
 ;; gi_running is a plain flag, not an object.
 DEF_FUNC gen_get_running

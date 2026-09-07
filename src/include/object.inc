@@ -1173,7 +1173,14 @@ struc PyFrame
                             ;      agree it is borrowed: frame_new zeroes it
                             ;      (the pool does not), frame_free detaches,
                             ;      and frameobj_dealloc clears it.
-    .localsplus:            ; +104: Value array (variable size)
+    .gen_owner:     resq 1  ; +104: the generator or coroutine whose frame this
+                            ;      is, BORROWED, or 0 for an ordinary call.
+                            ;      frame.clear() needs it: closing a suspended
+                            ;      generator from the outside means reaching
+                            ;      the generator, and a frame object only has
+                            ;      the frame.  Borrowed because the generator
+                            ;      owns the frame, not the other way round.
+    .localsplus:            ; +112: Value array (variable size)
 endstruc
 
 FRAME_HEADER_SIZE equ PyFrame.localsplus
