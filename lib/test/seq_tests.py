@@ -4,6 +4,7 @@ Tests common to tuple, list and UserList.UserList
 
 import unittest
 import sys
+from test import support
 
 # Sentinel objects for testing comparison behavior
 class _ALWAYS_EQ:
@@ -438,12 +439,5 @@ class CommonTest(unittest.TestCase):
         pass
 
     def test_free_after_iterating(self):
-        # Simplified check: just exhaust iterator, no GC verification
-        obj = self.type2test([0, 1, 2, 3, 4])
-        it = iter(obj)
-        for _ in it:
-            pass
-        obj = self.type2test([0, 1, 2, 3, 4])
-        it = reversed(obj)
-        for _ in it:
-            pass
+        support.check_free_after_iterating(self, iter, self.type2test)
+        support.check_free_after_iterating(self, reversed, self.type2test)
