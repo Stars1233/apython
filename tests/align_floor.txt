@@ -16,12 +16,3 @@ src/opcodes/build.asm op_unpack_ex call get_iterator_opt
 src/opcodes/build.asm op_unpack_ex call list_append
 src/opcodes/build.asm op_unpack_ex call list_new
 src/opcodes/build.asm op_unpack_ex call rax
-src/opcodes/import.asm op_import_from call dict_get
-src/opcodes/import.asm op_import_from call import_find_and_load
-src/opcodes/import.asm op_import_from call obj_decref
-src/opcodes/import.asm op_import_from call obj_decref
-src/opcodes/import.asm op_import_from call obj_decref
-src/opcodes/import.asm op_import_from call obj_decref
-src/opcodes/import.asm op_import_from call str_concat
-src/opcodes/import.asm op_import_from call str_concat
-src/opcodes/import.asm op_import_from call str_from_cstr_heap

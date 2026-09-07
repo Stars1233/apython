@@ -158,7 +158,9 @@ extern import_find_and_load
 IF_ATTR  equ 8
 IF2_MOD  equ 16
 IF2_SUB  equ 24             ; the submodule the fallback loaded
-IF2_FRAME equ 40            ; + 0 pushes = 32
+IF2_T1   equ 40             ; the two temporaries the dotted-name concat used
+IF2_T2   equ 48             ; to push and pop one at a time
+IF2_FRAME equ 56            ; 40 was the aligned size; +16 keeps the parity
 
 DEF_FUNC op_import_from, IF2_FRAME
     ; Get attribute name from co_names[ecx] (payload array: 8-byte stride)
@@ -230,51 +232,53 @@ DEF_FUNC op_import_from, IF2_FRAME
     ; Look up "__name__" in module dict (heap — dict key, DECREFed)
     lea rdi, [rel if_dunder_name]
     call str_from_cstr_heap
-    push rax                    ; save __name__ str key
+    mov [rbp - IF2_T1], rax     ; the __name__ key, ours to release
     mov rdi, [rbp - IF2_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
-    mov rcx, rax                ; rcx = pkg_name str (or NULL)
-    pop rdi                     ; __name__ str key
-    push rcx                    ; save pkg_name
+    mov [rbp - IF2_T2], rax     ; pkg_name str, or NULL
+    mov rdi, [rbp - IF2_T1]
     call obj_decref             ; DECREF __name__ key
-    pop rcx                     ; restore pkg_name
+    mov rcx, [rbp - IF2_T2]     ; restore pkg_name
     test rcx, rcx
     jz .if_error
 
     ; Concat: pkg_name + "." + attr_name
-    ; First: pkg_name + "."
-    push rcx                    ; save pkg_name
+    ;
+    ; Through two frame slots rather than the machine stack.  Every step here
+    ; saved one value across one call with a lone push, and a lone push leaves
+    ; the callee 8 out -- which propagates into every Python frame the
+    ; interpreter runs beneath it.  Slots cost the same and say what they
+    ; hold.
+    mov [rbp - IF2_T1], rcx     ; pkg_name
     lea rdi, [rel if_dot_str]
     call str_from_cstr_heap
-    pop rdi                     ; rdi = pkg_name
-    mov rsi, rax                ; rsi = "."
-    push rsi                    ; save dot str for decref
+    mov [rbp - IF2_T2], rax     ; "."
+    mov rdi, [rbp - IF2_T1]     ; pkg_name
+    mov rsi, rax                ; "."
     mov ecx, TAG_PTR            ; right_tag (heap str guaranteed)
     call str_concat             ; rax = pkg_name + "."
-    pop rdi                     ; dot str
-    push rax                    ; save intermediate
+    mov [rbp - IF2_T1], rax     ; "pkg."
+    mov rdi, [rbp - IF2_T2]
     call obj_decref             ; DECREF "."
-    pop rdi                     ; rdi = "pkg."
+
+    mov rdi, [rbp - IF2_T1]     ; "pkg."
     mov rsi, [rbp - IF_ATTR]    ; rsi = attr_name
-    push rdi                    ; save "pkg." for decref
     mov ecx, TAG_PTR            ; right_tag (heap str guaranteed)
     call str_concat             ; rax = "pkg.attr"
-    pop rdi                     ; "pkg."
-    push rax                    ; save full name
+    mov [rbp - IF2_T2], rax     ; "pkg.attr"
+    mov rdi, [rbp - IF2_T1]
     call obj_decref             ; DECREF "pkg."
 
     ; Try import_find_and_load with full dotted name
-    pop rdi                     ; rdi = "pkg.attr" str
-    push rdi                    ; save for decref
+    mov rdi, [rbp - IF2_T2]     ; "pkg.attr"
     call import_find_and_load
-    mov rcx, rax                ; rcx = submodule (or NULL)
-    pop rdi                     ; full name str
-    push rcx                    ; save submodule
+    mov [rbp - IF2_T1], rax     ; the submodule, or NULL
+    mov rdi, [rbp - IF2_T2]
     call obj_decref             ; DECREF full name
-    pop rax                     ; restore submodule
+    mov rax, [rbp - IF2_T1]     ; restore submodule
 
     test rax, rax
     jz .if_error
