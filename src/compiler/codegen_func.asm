@@ -1622,6 +1622,301 @@ DEF_FUNC cg_s_return, CSF_FRAME
 END_FUNC cg_s_return
 
 ;; ============================================================================
+;; cg_class_has_star(rdi = Comp*, rsi = the base list) -> eax = 1 when any
+;;   child is `*a` or `**k`, else 0
+;; ============================================================================
+CHS_COMP  equ 8
+CHS_LIST  equ 16
+CHS_N     equ 24
+CHS_I     equ 32
+CHS_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
+DEF_FUNC cg_class_has_star, CHS_FRAME
+    mov [rbp - CHS_COMP], rdi
+    mov [rbp - CHS_LIST], rsi
+    mov qword [rbp - CHS_I], 0
+    call ast_at
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - CHS_N], rcx
+.chs_loop:
+    mov rax, [rbp - CHS_I]
+    cmp rax, [rbp - CHS_N]
+    jae .chs_no
+    mov rdi, [rbp - CHS_COMP]
+    mov rsi, [rbp - CHS_LIST]
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CHS_I]
+    mov rdi, [rbp - CHS_COMP]
+    call ast_child
+    mov rdi, [rbp - CHS_COMP]
+    mov rsi, rax
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_STARRED
+    je .chs_yes
+    cmp ecx, AST_DOUBLESTARRED
+    je .chs_yes
+    inc qword [rbp - CHS_I]
+    jmp .chs_loop
+.chs_yes:
+    mov eax, 1
+    leave
+    ret
+.chs_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC cg_class_has_star
+
+;; ============================================================================
+;; cg_class_args_ex(rdi = Comp*, rsi = CompUnit*, rdx = the base list,
+;;                  rcx = line) -> rax = 1, or 0 on error
+;;
+;; The bases of `class C(*bases)` and `class C(**kwds)`, emitted the way
+;; CPython emits them: the two values already on the stack -- the class body
+;; function and the class's name -- are folded into a list by BUILD_LIST 2,
+;; each base is APPENDed or EXTENDed onto it, the list becomes a tuple, and the
+;; call is CALL_FUNCTION_EX rather than CALL.
+;;
+;; It was `unpacking is not supported in a class base list` before, reported
+;; with a line number of 0 because the arm that raised it had none to give.
+;; typing writes it and so do CPython's test_class and test_type_params.
+;;
+;; This is deliberately NOT cg_e_call's unpacked path factored out.  A class's
+;; argument list is the simple case -- no callable to classify, exactly two
+;; values already pushed -- and cg_e_call is the hottest emitter in the tree.
+;; ============================================================================
+CAX_COMP  equ 8
+CAX_UNIT  equ 16
+CAX_LIST  equ 24
+CAX_LINE  equ 32
+CAX_N     equ 40
+CAX_I     equ 48
+CAX_NKW   equ 56
+CAX_CHILD equ 64
+CAX_FRAME equ 80            ; + 0 pushes = 80, 16-aligned
+DEF_FUNC cg_class_args_ex, CAX_FRAME
+    mov [rbp - CAX_COMP], rdi
+    mov [rbp - CAX_UNIT], rsi
+    mov [rbp - CAX_LIST], rdx
+    mov [rbp - CAX_LINE], rcx
+    mov qword [rbp - CAX_NKW], 0
+    mov qword [rbp - CAX_I], 0
+
+    mov rdi, [rbp - CAX_COMP]
+    mov rsi, rdx
+    call ast_at
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - CAX_N], rcx
+
+    ; BUILD_LIST 2 takes the function and the name that are already there.
+    mov rdi, [rbp - CAX_UNIT]
+    mov esi, OP_BUILD_LIST
+    mov edx, 2
+    mov rcx, [rbp - CAX_LINE]
+    call cg_emit
+
+.cax_pos:
+    mov rax, [rbp - CAX_I]
+    cmp rax, [rbp - CAX_N]
+    jae .cax_to_tuple
+    call .cax_child
+    mov [rbp - CAX_CHILD], rax
+    mov rdi, [rbp - CAX_COMP]
+    mov rsi, rax
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_KEYWORD
+    je .cax_to_tuple            ; keywords come after every positional
+    cmp ecx, AST_DOUBLESTARRED
+    je .cax_to_tuple
+    cmp ecx, AST_STARRED
+    je .cax_star
+
+    mov rdi, [rbp - CAX_COMP]
+    mov rsi, [rbp - CAX_UNIT]
+    mov rdx, [rbp - CAX_CHILD]
+    call cg_expr
+    test eax, eax
+    jz .cax_fail
+    mov rdi, [rbp - CAX_UNIT]
+    mov esi, OP_LIST_APPEND
+    mov edx, 1
+    mov rcx, [rbp - CAX_LINE]
+    call cg_emit
+    jmp .cax_pos_next
+
+.cax_star:
+    ; The star's operand is the iterable; AstNode.a holds it.
+    mov rdi, [rbp - CAX_COMP]
+    mov rsi, [rbp - CAX_CHILD]
+    call ast_at
+    mov edx, [rax + AstNode.a]
+    mov rdi, [rbp - CAX_COMP]
+    mov rsi, [rbp - CAX_UNIT]
+    call cg_expr
+    test eax, eax
+    jz .cax_fail
+    mov rdi, [rbp - CAX_UNIT]
+    mov esi, OP_LIST_EXTEND
+    mov edx, 1
+    mov rcx, [rbp - CAX_LINE]
+    call cg_emit
+
+.cax_pos_next:
+    inc qword [rbp - CAX_I]
+    jmp .cax_pos
+
+.cax_to_tuple:
+    mov rdi, [rbp - CAX_UNIT]
+    mov esi, OP_CALL_INTRINSIC_1
+    mov edx, INTRINSIC_LIST_TO_TUPLE
+    mov rcx, [rbp - CAX_LINE]
+    call cg_emit
+
+.cax_kw:
+    mov rax, [rbp - CAX_I]
+    cmp rax, [rbp - CAX_N]
+    jae .cax_kw_done
+    call .cax_child
+    mov [rbp - CAX_CHILD], rax
+    mov rdi, [rbp - CAX_COMP]
+    mov rsi, rax
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_DOUBLESTARRED
+    je .cax_kw_unpack
+    cmp ecx, AST_KEYWORD
+    jne .cax_bad_order
+
+    ; LOAD_CONST <name>, then the value.  The name is an OBJECT index in
+    ; AstNode.a and the value a NODE index in .b -- the two arenas overlap, so
+    ; reading the wrong field gives a plausible index into the wrong one.
+    mov rdi, [rbp - CAX_COMP]
+    mov rsi, [rbp - CAX_CHILD]
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, [rbp - CAX_COMP]
+    call ast_obj_at
+    mov rdi, [rbp - CAX_UNIT]   ; cg_const indexes the UNIT's co_consts
+    mov rsi, rax
+    call cg_const
+    mov rdx, rax
+    mov rdi, [rbp - CAX_UNIT]
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CAX_LINE]
+    call cg_emit
+    mov rdi, [rbp - CAX_COMP]
+    mov rsi, [rbp - CAX_CHILD]
+    call ast_at
+    mov edx, [rax + AstNode.b]
+    mov rdi, [rbp - CAX_COMP]
+    mov rsi, [rbp - CAX_UNIT]
+    call cg_expr
+    test eax, eax
+    jz .cax_fail
+    inc qword [rbp - CAX_NKW]
+    inc qword [rbp - CAX_I]
+    jmp .cax_kw
+
+.cax_kw_unpack:
+    ; `**kwds`: whatever named keywords have accumulated become a map first,
+    ; then this merges into it.
+    call .cax_flush_map
+    mov rdi, [rbp - CAX_COMP]
+    mov rsi, [rbp - CAX_CHILD]
+    call ast_at
+    mov edx, [rax + AstNode.a]
+    mov rdi, [rbp - CAX_COMP]
+    mov rsi, [rbp - CAX_UNIT]
+    call cg_expr
+    test eax, eax
+    jz .cax_fail
+    cmp qword [rbp - CAX_NKW], -1
+    je .cax_kw_merge
+    ; Nothing accumulated, so this dict IS the mapping: BUILD_MAP 0 under it
+    ; and merge, which is what CPython emits for a leading **kwds.
+    push rax
+    mov rdi, [rbp - CAX_UNIT]
+    mov esi, OP_BUILD_MAP
+    xor edx, edx
+    mov rcx, [rbp - CAX_LINE]
+    call cg_emit
+    mov rdi, [rbp - CAX_UNIT]
+    mov esi, OP_SWAP
+    mov edx, 2
+    mov rcx, [rbp - CAX_LINE]
+    call cg_emit
+    pop rax
+    mov qword [rbp - CAX_NKW], -1
+.cax_kw_merge:
+    mov rdi, [rbp - CAX_UNIT]
+    mov esi, OP_DICT_MERGE
+    mov edx, 1
+    mov rcx, [rbp - CAX_LINE]
+    call cg_emit
+    inc qword [rbp - CAX_I]
+    jmp .cax_kw
+
+.cax_kw_done:
+    call .cax_flush_map
+    mov rdi, [rbp - CAX_UNIT]
+    mov esi, OP_CALL_FUNCTION_EX
+    xor edx, edx
+    cmp qword [rbp - CAX_NKW], 0
+    je .cax_emit_call
+    mov edx, 1
+.cax_emit_call:
+    mov rcx, [rbp - CAX_LINE]
+    call cg_emit
+    mov eax, 1
+    leave
+    ret
+
+.cax_bad_order:
+    mov rdi, [rbp - CAX_COMP]
+    CSTRING rsi, "positional argument follows keyword argument unpacking"
+    xor edx, edx
+    mov rcx, [rbp - CAX_LINE]
+    xor r8d, r8d
+    call comp_error
+.cax_fail:
+    xor eax, eax
+    leave
+    ret
+
+    ;; .cax_flush_map -- turn any accumulated name/value pairs into a dict.
+    ;; -1 means one is on the stack already, from an earlier **kwds.
+.cax_flush_map:
+    sub rsp, 8
+    mov rax, [rbp - CAX_NKW]
+    cmp rax, 0
+    jle .cax_flush_done
+    mov rdi, [rbp - CAX_UNIT]
+    mov esi, OP_BUILD_MAP
+    mov rdx, rax
+    mov rcx, [rbp - CAX_LINE]
+    call cg_emit
+    mov qword [rbp - CAX_NKW], -1
+.cax_flush_done:
+    add rsp, 8
+    ret
+
+    ;; .cax_child -> rax = the child at CAX_I
+.cax_child:
+    sub rsp, 8
+    mov rdi, [rbp - CAX_COMP]
+    mov rsi, [rbp - CAX_LIST]
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - CAX_I]
+    mov rdi, [rbp - CAX_COMP]
+    call ast_child
+    add rsp, 8
+    ret
+END_FUNC cg_class_args_ex
+
+;; ============================================================================
 ;; cg_s_classdef - `class C(bases): body`
 ;;
 ;;     PUSH_NULL; LOAD_BUILD_CLASS
@@ -1741,6 +2036,24 @@ DEF_FUNC cg_class_value, CC4_FRAME
     cmp qword [rbp - CC4_BASES], 0
     je .call
 
+    ; `class C(*bases)` cannot be a plain CALL: the bases have to become one
+    ; tuple first, which is what CALL_FUNCTION_EX takes.
+    mov rdi, rbx
+    mov rsi, [rbp - CC4_BASES]
+    call cg_class_has_star
+    test eax, eax
+    jz .plain_bases
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CC4_BASES]
+    mov rcx, [rbp - CC4_LINE]
+    call cg_class_args_ex
+    test eax, eax
+    jz .fail
+    mov eax, 1
+    jmp .ret
+
+.plain_bases:
     ; The bases were parsed as a call's argument list; emit them the same way.
     mov rdi, rbx
     mov rsi, r12

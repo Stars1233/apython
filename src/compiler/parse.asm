@@ -2948,7 +2948,7 @@ DEF_FUNC in_subscript, IS_FRAME
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_COMMA
-    jne .close
+    jne .lone_item
 
     ; A tuple index.  The first item is already parsed, so it is pushed before
     ; the loop rather than inside it.
@@ -2977,6 +2977,25 @@ DEF_FUNC in_subscript, IS_FRAME
     mov rsi, rax
     call ast_push
     jmp .comma_loop
+
+.lone_item:
+    ; `Generic[*Ts]` is Subscript(slice=Tuple(elts=[Starred(...)])) in CPython,
+    ; the shape `Generic[*Ts,]` and `Generic[int, *Ts]` already take here.  A
+    ; bare Starred reached cg_expr instead, which has no emitter for one and
+    ; reported "can't use starred expression here".  Confined to a subscript,
+    ; so `x = *Ts` keeps its own, correct error.
+    mov rdi, rbx
+    mov esi, [rbp - IS_IDX]
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_STARRED
+    jne .close
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - IS_MARK], rax
+    mov rdi, rbx
+    mov rsi, [rbp - IS_IDX]
+    call ast_push
 
 .finish_tuple:
     mov rdi, rbx

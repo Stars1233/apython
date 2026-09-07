@@ -124,6 +124,7 @@ test_compile_subscript_except
 test_compile_syntax_gaps
 test_compile_ternary_or
 test_compile_try
+test_compile_unpack_gaps
 test_compile_unwind
 test_compile_walrus_comp
 test_compile_warnings
