@@ -250,46 +250,44 @@ DEF_FUNC_BARE op_load_attr_instance
     V_TEST_PTR rdi, rax
     ja .lai_deopt
 
-    ; Guard 1: the class, which pins its MRO and everything on it
+    ; Guard 1: the class, in the state the install site vetted it in.
+    ;
+    ; One compare where there used to be three.  The version pins the type --
+    ; a freed class cannot be matched by a new one at the same address,
+    ; because versions come from a single counter -- and it pins everything
+    ; the install site checked about the MRO: that no __getattribute__ of the
+    ; class's own runs, and that THIS NAME resolves to nothing that could
+    ; outrank the instance dict.  All of those move only through
+    ; type_refresh_attr_flags, which stamps a new version and stamps it down
+    ; every subclass.
     mov rax, [rdi + PyObject.ob_type]
-    cmp rax, [rbx]                 ; CACHE[+0] = type
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    shr rdx, TYPE_VERSION_SHIFT
+    cmp edx, dword [rbx]           ; CACHE[+0] = the type's version
     jne .lai_deopt
 
-    ; Guard 2: and its class dict has not been touched since.  A type POINTER
-    ; is not enough on its own: a class can be freed and another allocated at
-    ; the same address, and a class that is still alive can gain a property.
-    ; op_load_attr_method carries the same guard for the same reason.
-    mov rdx, [rax + PyTypeObject.tp_dict]
-    test rdx, rdx
-    jz .lai_deopt
-    mov rdx, [rdx + PyDictObject.dk_version]
-    cmp dx, word [rbx + 8]         ; CACHE[+8] = class dict version
-    jne .lai_deopt
-
-    ; Guard 3: the class still resolves attributes the ordinary way.  A
-    ; __getattribute__ runs instead of any of this, and a data descriptor
-    ; anywhere in the MRO outranks the instance dict.  Read LIVE: the flags are
-    ; maintained in place by type_refresh_attr_flags.
-    test qword [rax + PyTypeObject.tp_flags], \
-         TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN | TYPE_FLAG_MRO_HAS_DATA_DESCR
-    jnz .lai_deopt
-
-    ; Guard 4: there is an instance dict, and the cached slot is inside the
+    ; Guard 2: there is an instance dict, and the cached slot is inside the
     ; part of its dense array that has ever been used.
     LOAD_INST_DICT rsi, rdi, .lai_deopt
     test rsi, rsi
     jz .lai_deopt
-    movzx r8d, word [rbx + 10]     ; CACHE[+10] = dense index
+    movzx r8d, word [rbx + 4]      ; CACHE[+4] = dense index
     cmp r8, [rsi + PyDictObject.dk_nentries]
     jae .lai_deopt
 
-    ; Guard 5: that slot still holds THIS name.  The index alone proves
+    ; Guard 3: that slot still holds THIS name.  The index alone proves
     ; nothing -- two instances of one class can have completely different dict
     ; layouts, from an __init__ with a branch in it -- so the KEY is compared,
-    ; which makes the read self-validating and needs no dict version.  The
-    ; name comes from co_names rather than the cache: it is the site's own
+    ; which makes the read self-validating and needs no instance dict version.
+    ; The name comes from co_names rather than the cache: it is the site's own
     ; name, so it is always right, and a cached borrowed pointer to it would
     ; be one more thing to keep alive.
+    ;
+    ; That comparison is by POINTER, which is why interning matters here:
+    ; dict_set keeps the FIRST writer's key object, so `self.x` read from a
+    ; method other than the one that wrote it used to fail the guard on every
+    ; execution when the two names were different objects.  See
+    ; src/pyo/strintern.asm.
     mov rdx, [rsi + PyDictObject.entries]
     imul r8, r8, DICT_ENTRY_SIZE
     add rdx, r8
@@ -301,8 +299,8 @@ DEF_FUNC_BARE op_load_attr_instance
     cmp r9, [rdx + DictEntry.key]
     jne .lai_deopt
 
-    ; Guard 6: it is not a hole.  A deleted entry keeps its position with a
-    ; NULL key, which guard 5 already covers; this covers a NULL value.
+    ; Guard 4: it is not a hole.  A deleted entry keeps its position with a
+    ; NULL key, which guard 3 already covers; this covers a NULL value.
     mov rax, [rdx + DictEntry.value]
     test rax, rax
     jz .lai_deopt

@@ -310,6 +310,7 @@ test_list_insert_pop
 test_list_remove_eq
 test_lists
 test_load_attr_cache
+test_load_attr_per_name
 test_maketrans
 test_map_multi
 test_mappingproxy_call

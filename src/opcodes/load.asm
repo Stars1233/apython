@@ -711,11 +711,48 @@ DEF_FUNC op_load_attr, LA_FRAME
     jne .la_simple_push
     mov rdi, [rbp - LA_OBJ]
     mov rax, [rdi + PyObject.ob_type]
-    ; No point installing a cache whose second guard would refuse every time.
-    test qword [rax + PyTypeObject.tp_flags], \
-         TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN | TYPE_FLAG_MRO_HAS_DATA_DESCR
+    ; A __getattribute__ of the class's own runs instead of all of this.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN
     jnz .la_simple_push
-    mov [rbp - LA_TAGTYPE], rax    ; the type, held across the call below
+    ; The version is what the handler guards on, so a type without one -- a
+    ; static type, whose instances have no instance dict anyway -- cannot be
+    ; cached.
+    mov rcx, [rax + PyTypeObject.tp_flags]
+    shr rcx, TYPE_VERSION_SHIFT
+    test ecx, ecx
+    jz .la_simple_push
+    mov [rbp - LA_TAGTYPE], rax    ; the type, held across the calls below
+
+    ; Does THIS NAME resolve to something that could outrank the instance
+    ; dict?  That used to be asked as TYPE_FLAG_MRO_HAS_DATA_DESCR, which is
+    ; per-CLASS: one @property anywhere in the MRO refused the cache for every
+    ; other attribute of the class, and an ordinary object with one computed
+    ; field paid a full instance_getattr for all of its plain ones.
+    ;
+    ; The per-name answer is only affordable because it is asked once, at
+    ; install, and the version the handler guards on is what keeps it true --
+    ; adding a property to the class, or to a base, stamps a new one.
+    ;
+    ; attr_may_be_data_descr, not attr_is_data_descr: a descriptor's own type
+    ; can gain __set__ long afterwards, and that write refreshes the
+    ; DESCRIPTOR's type, not the class holding it.  The over-approximation
+    ; refuses anything whose type is a heaptype, and a static type cannot gain
+    ; __set__ at all -- so what it lets through can never become one.
+    mov rdi, rax
+    mov rsi, [rbp - LA_NAME]
+    call type_lookup_cached        ; rax = payload, edx = tag
+    test edx, edx
+    jz .la_ic_name_free            ; the MRO does not define it at all
+    cmp edx, TAG_PTR
+    jne .la_ic_name_free           ; and an immediate is never a descriptor
+    mov rdi, rax
+    extern attr_may_be_data_descr
+    call attr_may_be_data_descr
+    test eax, eax
+    jnz .la_simple_push
+.la_ic_name_free:
+
+    mov rdi, [rbp - LA_OBJ]
     LOAD_INST_DICT rsi, rdi, .la_simple_push
     test rsi, rsi
     jz .la_simple_push
@@ -728,14 +765,11 @@ DEF_FUNC op_load_attr, LA_FRAME
     je .la_simple_push             ; gone already: do not cache a miss
     cmp rax, 0xFFFF
     ja .la_simple_push             ; the index does not fit the cache
-    mov word [rbx + 10], ax        ; CACHE[+10] = dense index
+    mov word [rbx + 4], ax         ; CACHE[+4] = dense index
     mov rcx, [rbp - LA_TAGTYPE]
-    mov [rbx], rcx                 ; CACHE[+0] = type (8 bytes, unaligned)
-    mov rcx, [rcx + PyTypeObject.tp_dict]
-    test rcx, rcx
-    jz .la_simple_push
-    mov rcx, [rcx + PyDictObject.dk_version]
-    mov word [rbx + 8], cx         ; CACHE[+8] = class dict version
+    mov rcx, [rcx + PyTypeObject.tp_flags]
+    shr rcx, TYPE_VERSION_SHIFT
+    mov dword [rbx], ecx           ; CACHE[+0] = the type's version
     mov byte [rbx - 2], 204        ; rewrite to LOAD_ATTR_INSTANCE
     ; fall through
 
