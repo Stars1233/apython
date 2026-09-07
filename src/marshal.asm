@@ -296,7 +296,7 @@ END_FUNC marshal_add_ref
 ;; marshal_cleanup_refs() - DECREF all refs and reset count
 ;; Called after marshal_read_object completes to release refs array ownership.
 ;; ============================================================================
-DEF_FUNC marshal_cleanup_refs
+DEF_FUNC marshal_cleanup_refs, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     push r12
     push r13

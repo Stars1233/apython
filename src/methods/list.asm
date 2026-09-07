@@ -1906,7 +1906,7 @@ END_FUNC list_dunder_init
 ;; list_method_clear(args, nargs) -> None
 ;; args[0]=self
 ;; ============================================================================
-DEF_FUNC list_method_clear
+DEF_FUNC list_method_clear, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     push r12
     push r13

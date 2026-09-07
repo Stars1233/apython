@@ -641,7 +641,7 @@ END_FUNC enumerate_iternext
 ;; field it releases is zeroed, and the array pointer with them, which is why
 ;; each dealloc's NULL checks matter.  ap_free is NULL-safe.
 ;; ============================================================================
-DEF_FUNC_LOCAL filter_traverse
+DEF_FUNC_LOCAL filter_traverse, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + IT_FIELD1]  ; the function, or NULL for filter(None, xs)
@@ -677,7 +677,7 @@ DEF_FUNC_LOCAL filter_clear, 8            ; 1 pushes, so rsp is 16-aligned
 END_FUNC filter_clear
 
 ;; zip: an iterator array at +16 walked by a count at +24.
-DEF_FUNC_LOCAL iters_array_traverse
+DEF_FUNC_LOCAL iters_array_traverse, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     push r12
     push r13
@@ -735,7 +735,7 @@ DEF_FUNC_LOCAL iters_array_clear, 8            ; 3 pushes, so rsp is 16-aligned
 END_FUNC iters_array_clear
 
 ;; map: a Value function at +16, then the same array shape one slot along.
-DEF_FUNC_LOCAL map_traverse
+DEF_FUNC_LOCAL map_traverse, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     push r12
     push r13
@@ -2251,7 +2251,7 @@ DEF_FUNC_LOCAL callable_iter_iternext, CIN_FRAME
     ret
 END_FUNC callable_iter_iternext
 
-DEF_FUNC_LOCAL callable_iter_traverse
+DEF_FUNC_LOCAL callable_iter_traverse, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + CI_CALL]

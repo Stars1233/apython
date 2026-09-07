@@ -1,0 +1,453 @@
+; opcodes/load_ic.asm - the inline-cache opcodes for loads
+;
+; The four specialized load handlers, each of which rewrites itself into the
+; bytecode once the generic handler has seen what the site actually does, and
+; each of which guards the shape it was specialized for:
+;
+;   200  LOAD_GLOBAL_MODULE     name found in the module globals
+;   201  LOAD_GLOBAL_BUILTIN    name found in builtins
+;   203  LOAD_ATTR_METHOD       a method reached through the type dict
+;   204  LOAD_ATTR_INSTANCE     a plain attribute reached through the instance
+;   240  STORE_ATTR_INSTANCE    a plain attribute written through the instance
+;
+; Split out of load.asm, which keeps the generic handlers, the attribute
+; protocol and the error messages, because that file had reached lint's 100k
+; cap for a hand-written file with 107 bytes to spare -- so no fix to any of
+; these could be written at all.  The seam is the one arith.asm and
+; arith_spec.asm already use, and it works for the same reason: nothing here
+; calls into load.asm's file-local helpers.  Each deopt writes the generic
+; opcode byte back and jumps to the generic handler, entering it with ecx
+; still holding the full oparg.
+;
+; That last point is not a detail.  LOAD_ATTR and LOAD_GLOBAL take a name
+; index wide enough to carry an EXTENDED_ARG prefix, and op_extended_arg
+; composes the full argument into ecx and jumps without leaving it anywhere in
+; the byte stream.  Rewinding rbx by two to re-dispatch would land past the
+; prefix and read the low byte as the whole argument; these deopt by jumping
+; instead, and nothing between a handler's entry and its deopt label may touch
+; rcx.
+
+%include "macros.inc"
+%include "object.inc"
+%include "opcodes.inc"
+
+extern eval_saved_rbx
+extern eval_saved_r13
+extern opcode_dispatch_table
+extern eval_co_names
+extern obj_dealloc
+extern op_load_attr
+extern op_load_global
+extern op_store_attr
+
+section .text
+
+;; ============================================================================
+;; op_load_global_module (200) -> nothing; pushes the global and dispatches
+;;
+;; The specialized LOAD_GLOBAL for a name that was found in the module's own
+;; globals.  Guards the globals dict's version and then reads the entry by its
+;; cached dense index, which costs neither the hash nor the probe.
+;;
+;; The version guard runs BEFORE anything touches the value stack, so a deopt
+;; has nothing to undo.
+;;
+;; CACHE layout at rbx: [+0]=counter [+2]=index [+4]=mod_ver [+6]=bi_ver
+;; ============================================================================
+DEF_FUNC_BARE op_load_global_module
+    ; Version guard FIRST (before any stack modification)
+    mov rdi, [r12 + PyFrame.globals]
+    mov rax, [rdi + PyDictObject.dk_version]
+    cmp ax, word [rbx + 4]     ; compare low 16 bits with CACHE[2]
+    jne .lgm_deopt
+
+    ; Fast path: load from globals entries by cached index
+    mov rdi, [rdi + PyDictObject.entries]
+    movzx eax, word [rbx + 2]  ; CACHE[1] = index
+    imul rax, rax, DICT_ENTRY_SIZE
+    add rdi, rax               ; rdi = entry ptr
+    ; A deleted entry has a NULL value.  This tested edx BEFORE anything had
+    ; loaded it -- a register the dispatcher leaves undefined -- so the guard
+    ; answered at random: usually not taken, and taken for no reason when it
+    ; happened to be zero.
+    mov rax, [rdi + DictEntry.value]
+    test rax, rax
+    jz .lgm_deopt
+    ; The NULL test above was already made on the RAW Value -- 0 is the only
+    ; NULL encoding -- so nothing here ever needed the tag.
+
+    ; Guards passed — now push NULL if needed
+    test ecx, 1
+    jz .lgm_no_null
+    VPUSH_NULL
+.lgm_no_null:
+    INCREF_V rax, rdx
+    VPUSH rax
+    add rbx, 8
+    DISPATCH
+
+.lgm_deopt:
+    ; Deopt into the generic handler with the argument ecx already
+    ; holds.  Rewinding rbx by two and re-dispatching would drop a
+    ; preceding EXTENDED_ARG, and both of these carry one as soon as
+    ; a module has enough names: the arg is (name index << 1 | flag).
+    mov byte [rbx - 2], 116
+    jmp op_load_global
+END_FUNC op_load_global_module
+
+;; ============================================================================
+;; op_load_global_builtin (201) -> nothing; pushes the builtin and dispatches
+;;
+;; The specialized LOAD_GLOBAL for a name that was not in the module globals
+;; and was found in builtins.  Both dictionaries are guarded: the globals one
+;; because the name may since have been defined there, which would shadow the
+;; builtin, and the builtins one because the entry itself may have moved.
+;; ============================================================================
+DEF_FUNC_BARE op_load_global_builtin
+    ; Guards FIRST (before any stack modification)
+    ; Guard 1: globals version must not have changed (name might now be in globals)
+    mov rdi, [r12 + PyFrame.globals]
+    mov rax, [rdi + PyDictObject.dk_version]
+    cmp ax, word [rbx + 4]     ; CACHE[2] = module_keys_version
+    jne .lgb_deopt
+
+    ; Guard 2: builtins version must match
+    mov rdi, [r12 + PyFrame.builtins]
+    mov rax, [rdi + PyDictObject.dk_version]
+    cmp ax, word [rbx + 6]     ; CACHE[3] = builtin_keys_version
+    jne .lgb_deopt
+
+    ; Fast path: load from builtins entries by cached index
+    mov rdi, [rdi + PyDictObject.entries]
+    movzx eax, word [rbx + 2]  ; CACHE[1] = index
+    imul rax, rax, DICT_ENTRY_SIZE
+    add rdi, rax               ; rdi = entry ptr
+    ; A deleted entry has a NULL value.  This tested edx BEFORE anything had
+    ; loaded it -- a register the dispatcher leaves undefined -- so the guard
+    ; answered at random: usually not taken, and taken for no reason when it
+    ; happened to be zero.
+    mov rax, [rdi + DictEntry.value]
+    test rax, rax
+    jz .lgb_deopt
+    ; The NULL test above was already made on the RAW Value -- 0 is the only
+    ; NULL encoding -- so nothing here ever needed the tag.
+
+    ; Guards passed — now push NULL if needed
+    test ecx, 1
+    jz .lgb_no_null
+    VPUSH_NULL
+.lgb_no_null:
+    INCREF_V rax, rdx
+    VPUSH rax
+    add rbx, 8
+    DISPATCH
+
+.lgb_deopt:
+    ; Deopt into the generic handler with the argument ecx already
+    ; holds.  Rewinding rbx by two and re-dispatching would drop a
+    ; preceding EXTENDED_ARG, and both of these carry one as soon as
+    ; a module has enough names: the arg is (name index << 1 | flag).
+    mov byte [rbx - 2], 116
+    jmp op_load_global
+END_FUNC op_load_global_builtin
+
+;; ============================================================================
+;; op_load_attr_method (203) - Specialized LOAD_ATTR for method-style loads
+;;
+;; Fast path for flag=1 method loads from type dict (no tp_getattr path).
+;; Guards: ob_type matches cached type_ptr, tp_dict dk_version matches.
+;; CACHE layout at rbx: [+0]=dk_version(16b), [+2]=type_ptr(64b), [+10]=descr(64b)
+;;
+;; Stack effect: ..., obj -> ..., obj(self), method
+;; (obj stays as self, cached method pushed on top)
+;; ============================================================================
+DEF_FUNC_BARE op_load_attr_method
+    ; ecx = arg (name_index << 1 | flag=1)
+    ; VPEEK obj (don't pop -- stays as self if guards pass, or for deopt)
+    VPEEK rdi
+
+    ; The inline cache only applies to real objects
+    V_TEST_PTR rdi, rax
+    ja .lam_deopt
+
+    ; Guard 1: ob_type == cached type_ptr
+    mov rax, [rdi + PyObject.ob_type]
+    cmp rax, [rbx + 2]            ; compare 8 bytes at CACHE[+2]
+    jne .lam_deopt
+
+    ; Guard 2: type->tp_dict->dk_version == cached dk_version
+    mov rax, [rax + PyTypeObject.tp_dict]
+    mov rax, [rax + PyDictObject.dk_version]
+    cmp ax, word [rbx]             ; compare low 16 bits at CACHE[+0]
+    jne .lam_deopt
+
+    ; Guards passed! CPython order: method (deeper), obj/self (TOS)
+    ; obj is currently at [r13-8]; overwrite it with method, push obj on top
+    mov rax, [rbx + 10]           ; cached descriptor (method ptr)
+    INCREF rax
+    mov rcx, [r13 - 8]            ; save obj (payload of TOS)
+    mov [r13 - 8], rax            ; overwrite obj position with method
+    VPUSH_PTR rcx                  ; push obj on top as self
+
+    ; Skip 9 CACHE entries = 18 bytes
+    add rbx, 18
+    DISPATCH
+
+.lam_deopt:
+    ; Deopt into the generic handler with the argument ecx already
+    ; holds.  Rewinding rbx by two and re-dispatching would drop a
+    ; preceding EXTENDED_ARG, and both of these carry one as soon as
+    ; a module has enough names: the arg is (name index << 1 | flag).
+    mov byte [rbx - 2], 106
+    jmp op_load_attr
+END_FUNC op_load_attr_method
+
+;; ============================================================================
+;; op_load_attr_instance (204) -> nothing; replaces TOS with the attribute
+;;
+;; The data-load counterpart of LOAD_ATTR_METHOD.  A plain `self.x` had no
+;; inline cache at all: LOAD_ATTR's only one was for methods, so an ordinary
+;; attribute read went through op_load_attr's whole prologue, tp_getattr,
+;; instance_getattr, instance_getattr_default, LOAD_INST_DICT and dict_get --
+;; hashing the name and probing the table every time.  `c.m()` measured 0.40x
+;; of CPython against 1.00x for a plain `f()`, and a profile put the
+;; difference here rather than anywhere in the call machinery.
+;;
+;; CACHE, 18 bytes, the same budget the method cache spends:
+;;     [+0]   the type, 8 bytes
+;;     [+8]   the class dict's version, 2 bytes
+;;     [+10]  the dense index into the instance dict's entry array, 2 bytes
+;;
+;; The NAME is not cached.  It is taken from co_names at hit time, which costs
+;; one load and leaves room for the version.
+;;
+;; CPython caches (type version, keys version, index) and can trust the index
+;; because its instances share their keys object.  Ours do not: two instances
+;; of one class can have completely different dict layouts, from an __init__
+;; with a branch in it.  So the index is not trusted -- the KEY at that index
+;; is compared against the name, which makes the read self-validating and
+;; needs no INSTANCE dict version at all.  A hit is then exactly what dict_get
+;; would have returned, without the hash or the probe.
+;;
+;; That comparison is by POINTER, which is why interning matters to this
+;; opcode: dict_set keeps the FIRST writer's key object, so `self.x` read from
+;; a method other than the one that wrote it used to fail the guard on every
+;; execution when the two names were different objects.  See
+;; src/pyo/strintern.asm.
+;;
+;; The two type flags are read LIVE rather than guarded by a version.  They
+;; are maintained by type_refresh_attr_flags, which updates them in place, so
+;; adding a __getattribute__ or a property to the class -- or to a base --
+;; does not change the type POINTER that guard 1 compares.
+;; ============================================================================
+DEF_FUNC_BARE op_load_attr_instance
+    ; ecx is the oparg and MUST survive to .lai_deopt, which hands it to
+    ; op_load_attr -- so nothing below touches rcx.  Getting that wrong is not
+    ; a wrong answer, it is op_load_attr reading co_names out of bounds with a
+    ; name index of (garbage >> 1), and the wild pointer surfaces later inside
+    ; dict_get.
+    VPEEK rdi                      ; the object; not popped until it is a hit
+    V_TEST_PTR rdi, rax
+    ja .lai_deopt
+
+    ; Guard 1: the class, in the state the install site vetted it in.
+    ;
+    ; One compare where there used to be three.  The version pins the type --
+    ; a freed class cannot be matched by a new one at the same address,
+    ; because versions come from a single counter -- and it pins everything
+    ; the install site checked about the MRO: that no __getattribute__ of the
+    ; class's own runs, and that THIS NAME resolves to nothing that could
+    ; outrank the instance dict.  All of those move only through
+    ; type_refresh_attr_flags, which stamps a new version and stamps it down
+    ; every subclass.
+    mov rax, [rdi + PyObject.ob_type]
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    shr rdx, TYPE_VERSION_SHIFT
+    cmp edx, dword [rbx]           ; CACHE[+0] = the type's version
+    jne .lai_deopt
+
+    ; Guard 2: there is an instance dict, and the cached slot is inside the
+    ; part of its dense array that has ever been used.
+    LOAD_INST_DICT rsi, rdi, .lai_deopt
+    test rsi, rsi
+    jz .lai_deopt
+    movzx r8d, word [rbx + 4]      ; CACHE[+4] = dense index
+    cmp r8, [rsi + PyDictObject.dk_nentries]
+    jae .lai_deopt
+
+    ; Guard 3: that slot still holds THIS name.  The index alone proves
+    ; nothing -- two instances of one class can have completely different dict
+    ; layouts, from an __init__ with a branch in it -- so the KEY is compared,
+    ; which makes the read self-validating and needs no instance dict version.
+    ; The name comes from co_names rather than the cache: it is the site's own
+    ; name, so it is always right, and a cached borrowed pointer to it would
+    ; be one more thing to keep alive.
+    ;
+    ; That comparison is by POINTER, which is why interning matters here:
+    ; dict_set keeps the FIRST writer's key object, so `self.x` read from a
+    ; method other than the one that wrote it used to fail the guard on every
+    ; execution when the two names were different objects.  See
+    ; src/pyo/strintern.asm.
+    mov rdx, [rsi + PyDictObject.entries]
+    imul r8, r8, DICT_ENTRY_SIZE
+    add rdx, r8
+    mov r9d, ecx                   ; the oparg, untouched
+    shr r9d, 1                     ; arg >> 1 = the co_names index
+    shl r9d, 3
+    LOAD_CO_NAMES r10
+    mov r9, [r10 + r9]
+    cmp r9, [rdx + DictEntry.key]
+    jne .lai_deopt
+
+    ; Guard 4: it is not a hole.  A deleted entry keeps its position with a
+    ; NULL key, which guard 3 already covers; this covers a NULL value.
+    mov rax, [rdx + DictEntry.value]
+    test rax, rax
+    jz .lai_deopt
+
+    ; Hit.  attr_error_pending says a __getattr__ raised an AttributeError
+    ; that raise_no_attribute should hand over rather than replace, and every
+    ; ordinary lookup clears it -- object.asm calls that "it cannot survive a
+    ; lookup".  This is a lookup.
+    extern attr_error_pending
+    mov qword [rel attr_error_pending], 0
+
+    ; INCREF the attribute BEFORE releasing the object: the object may hold
+    ; the only reference to the dict the attribute lives in.
+    INCREF_V rax, rdx
+    mov [r13 - 8], rax             ; the attribute replaces the object
+    DECREF_V rdi, rdx              ; rdi is still the object
+
+    add rbx, 18                    ; skip 9 CACHE entries
+    DISPATCH
+
+.lai_deopt:
+    ; Deopt into the generic handler with the argument ecx still holds.
+    ; Rewinding rbx cannot be done here: LOAD_ATTR's arg is
+    ; (name index << 1 | flag) and carries an EXTENDED_ARG as soon as a module
+    ; has enough names.
+    mov byte [rbx - 2], 106
+    jmp op_load_attr
+END_FUNC op_load_attr_instance
+
+
+;; ============================================================================
+;; op_store_attr_instance (240) -> nothing; stores and pops both operands
+;;
+;; `self.x = v` where x already exists in the instance dict.  The generic
+;; handler builds an 88-byte frame, saves the exception state, walks the MRO
+;; for a data descriptor, calls tp_setattr, and instance_setattr then walks the
+;; same MRO again before reaching dict_set, which hashes the name and probes.
+;; This writes the entry in place.
+;;
+;; CACHE, 8 bytes -- STORE_ATTR's four entries, which held nothing until now:
+;;     [+0]  the type's version, 4 bytes
+;;     [+4]  the dense index into the instance dict's entry array, 2 bytes
+;;     [+6]  spare
+;;
+;; Eight bytes is why the version exists.  LOAD_ATTR_INSTANCE has eighteen and
+;; spends ten of them on a type POINTER plus the class dict's version; there is
+;; no room for that here, and a four-byte version answers both questions at
+;; once -- it names one type in one state of its dict.
+;;
+;; What the version stands in for: the install site below checks that
+;; tp_setattr is instance_setattr and that no data descriptor is in the MRO,
+;; and records the version that was true when it did.  Either of those can only
+;; change through type_setattr, which runs type_install_slots and then
+;; type_refresh_attr_flags, which stamps a new version -- and stamps it down
+;; every subclass too.  So a matching version means both still hold.
+;;
+;; The INDEX is not trusted, exactly as it is not on the load side: two
+;; instances of one class can have different dict layouts, so the key at that
+;; slot is compared against co_names[arg] by pointer, which makes the write
+;; self-validating.
+;;
+;; dk_version is deliberately NOT bumped.  dict_set bumps it on every write
+;; including a rebind, which is why a store-side cache cannot guard on it; an
+;; in-place update of a value changes neither the layout nor the size, and
+;; nothing guards on an instance dict's version anyway.
+;; ============================================================================
+DEF_FUNC_BARE op_store_attr_instance
+    ; ecx is the oparg and must survive to .sai_deopt, so nothing before it
+    ; touches rcx.  Stack: ... value, obj -- obj on top.
+    mov rdi, [r13 - 8]              ; the object
+    V_TEST_PTR rdi, rax
+    ja .sai_deopt
+
+    ; Guard 1: the type, in the state the install site vetted it in.
+    mov rax, [rdi + PyObject.ob_type]
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    shr rdx, TYPE_VERSION_SHIFT
+    cmp edx, dword [rbx]            ; CACHE[+0] = version
+    jne .sai_deopt
+
+    ; Guard 2: there is an instance dict, and the cached slot is inside the
+    ; part of its dense array that has ever been used.
+    LOAD_INST_DICT rsi, rdi, .sai_deopt
+    test rsi, rsi
+    jz .sai_deopt
+    movzx r8d, word [rbx + 4]       ; CACHE[+4] = dense index
+    cmp r8, [rsi + PyDictObject.dk_nentries]
+    jae .sai_deopt
+
+    ; Guard 3: that slot still holds THIS name, compared by pointer.
+    mov rdx, [rsi + PyDictObject.entries]
+    imul r8, r8, DICT_ENTRY_SIZE
+    add rdx, r8                     ; rdx = the entry
+    mov r9d, ecx                    ; the oparg, untouched
+    shl r9d, 3
+    LOAD_CO_NAMES r10
+    mov r9, [r10 + r9]
+    cmp r9, [rdx + DictEntry.key]
+    jne .sai_deopt
+
+    ; Guard 4: it is not a hole.  Filling one would have to move
+    ; dk_nentries and ob_size, which is dict_set's job, not this one's.
+    cmp qword [rdx + DictEntry.value], 0
+    je .sai_deopt
+
+    ; Guard 5: the collector can see this dict, or the value cannot make a
+    ; cycle anyway.
+    ;
+    ; A dict enters a generation lazily, the first time dict_set is given a
+    ; key or value worth tracing -- dict_maybe_track does it, and an in-place
+    ; write here does not go near dict_set.  An instance whose __init__ only
+    ; assigned numbers therefore has an UNTRACKED dict, and writing the first
+    ; object reference into it inline left the collector unable to see the
+    ; reference at all: two nodes pointing at each other through such a dict
+    ; were never collected and their __del__ never ran.
+    ;
+    ; Storing an immediate cannot create a cycle, so it is safe either way and
+    ; keeps the ordinary `p.x = i` loop on the fast path.  A pointer into an
+    ; untracked dict goes the long way round, and the dict_set it lands in
+    ; tracks the dict, so the site is back on the fast path next time.
+    cmp qword [rsi - GC_HEAD_SIZE + PyGC_Head.gc_next], 0
+    jne .sai_tracked
+    mov rax, [r13 - 16]
+    V_TEST_PTR rax, r9              ; r9, not rcx: this branch can deopt, and
+                                    ; the deopt hands ecx to op_store_attr
+    jbe .sai_deopt
+.sai_tracked:
+
+    ; Hit.  Past the last guard, so rcx is free.
+    mov rsi, [r13 - 16]             ; the value, owned by the stack
+    mov rax, [rdx + DictEntry.value]
+    mov [rdx + DictEntry.value], rsi ; the dict takes the stack's reference
+    sub r13, 16                     ; both operands are consumed
+
+    ; The object is parked in a callee-saved register: releasing the old value
+    ; can call obj_dealloc, and that clobbers every caller-saved one.
+    mov r15, rdi
+    DECREF_V rax, rcx               ; the value that was there
+    DECREF_V r15, rcx               ; the object's stack reference
+
+    add rbx, 8                      ; skip 4 CACHE entries
+    DISPATCH
+
+.sai_deopt:
+    ; STORE_ATTR's arg is a name index and carries an EXTENDED_ARG as soon as a
+    ; module has enough names, so the deopt jumps with ecx rather than
+    ; rewinding rbx.  Nothing has been popped.
+    mov byte [rbx - 2], OP_STORE_ATTR
+    jmp op_store_attr
+END_FUNC op_store_attr_instance

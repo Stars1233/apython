@@ -1096,6 +1096,23 @@ TYPE_FLAG_BYTES_SUBCLASS equ 0x80000
 ; what it was.
 TYPE_FLAG_FINAL          equ 0x100000
 
+; The type's VERSION lives in the high 32 bits of tp_flags, which the flags
+; above leave free -- they stop at bit 20.  It is a stamp from one global
+; counter, so a version identifies a particular type in a particular state of
+; its dict, and comparing one is both "the same class" and "nothing has been
+; added to it or to anything in its MRO since".
+;
+; The alternative was a new PyTypeObject field, and it is worse than it looks:
+; STRUCTSEQ_DESC hangs a struct-sequence descriptor one qword past the end of
+; the struct, and 94 static type tables are hand-written `dq` sequences that
+; would each need a new trailing word or read whatever symbol follows.
+;
+; ZERO MEANS NEVER CACHE.  A static type's hand-written table has zeroes there
+; and never gets a version, which is correct rather than merely safe: its
+; instances have no instance dict, so the caches that read this do not apply
+; to them.  type_bump_version skips zero on wraparound, as dk_version does.
+TYPE_VERSION_SHIFT equ 32
+
 ; Comparison opcodes (used by tp_richcompare)
 PY_LT equ 0
 PY_LE equ 1

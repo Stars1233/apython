@@ -213,6 +213,16 @@ def check_saved_writes(files):
                     break
     return bad
 
+# A call does not have to be spelled `call`.  These macros expand to one, and
+# a function whose only calls are inside them was skipped entirely -- which is
+# how list_setitem came to reach obj_dealloc through DECREF_V with rsp 8 out.
+CALL_MACROS = ('DECREF', 'DECREF_REG', 'DECREF_V', 'DECREF_VAL', 'XDECREF_VAL',
+               'INT_NEED_MPZ', 'MODULE_ADD_FUNC', 'MRO_NEXT', 'RAISE',
+               'REQUIRE_SELF', 'REQUIRE_SELF_BARE', 'SET_EXC', 'VISIT_PTR',
+               'VISIT_V', 'V_PACK_I64')
+CALLS_RE = r'^\s*(?:call\s|(?:%s)\b)' % '|'.join(CALL_MACROS)
+
+
 def check_alignment(files):
     # Opcode handlers are reached by `jmp` from the dispatcher, not by `call`,
     # so they are entered 16-byte ALIGNED and want the OPPOSITE parity from an
@@ -245,7 +255,7 @@ def check_alignment(files):
             if '%' in m.group(0).split('\n')[0]:
                 continue        # inside a %macro: the name is a parameter, and
                                 # its prologue may be conditional
-            if not re.search(r'^\s*call\s', body, re.M):
+            if not re.search(CALLS_RE, body, re.M):
                 continue
             n = 0
             if frame:
@@ -395,6 +405,7 @@ GENERATED = {
     'src/compiler/unicodename.asm',
     'src/compiler/unicodecase.asm',
     'src/compiler/prule.asm',
+    'src/dtoa_tables.asm',
 }
 
 SIZE_CAP = 100 * 1024

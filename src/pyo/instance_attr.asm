@@ -354,6 +354,43 @@ DEF_FUNC dict_has_data_descr
 END_FUNC dict_has_data_descr
 
 ;; ============================================================================
+;; type_bump_version(rdi = a type, or NULL) -> nothing
+;;
+;; Give the type a version number nobody has held before, so that every cache
+;; guarding on the old one misses.  The version is the high 32 bits of
+;; tp_flags; see TYPE_VERSION_SHIFT in object.inc for why it lives there.
+;;
+;; Zero is the "never cached" sentinel, so the counter skips it on wraparound
+;; the way dk_version does.  Wrapping is not a correctness question either
+;; way -- a stale cache entry would have to survive 2^32 intervening class
+;; mutations AND land on the one type that reused its number -- but skipping
+;; zero keeps the sentinel meaning one thing.
+;;
+;; Every caller reaches this through type_refresh_attr_flags, which already
+;; runs at class creation and from type_setattr and already pushes its answer
+;; down every subclass.  That recursion is the whole reason the version can be
+;; a single word: a change to a base invalidates its subclasses' caches
+;; because the walk stamps each of them too.
+;; ============================================================================
+DEF_FUNC_BARE type_bump_version
+    test rdi, rdi
+    jz .tbv_out
+    mov eax, [rel type_version_counter]
+    inc eax
+    jnz .tbv_store
+    mov eax, 1                      ; wrapped; zero is not a version
+.tbv_store:
+    mov [rel type_version_counter], eax
+    mov rdx, [rdi + PyTypeObject.tp_flags]
+    mov edx, edx                    ; keep the flags, drop the old version
+    shl rax, TYPE_VERSION_SHIFT
+    or rdx, rax
+    mov [rdi + PyTypeObject.tp_flags], rdx
+.tbv_out:
+    ret
+END_FUNC type_bump_version
+
+;; ============================================================================
 ;; type_refresh_attr_flags(rdi = a heaptype) -> nothing
 ;;
 ;; Ask, once, the two questions instance_getattr's fast path is not allowed to
@@ -372,6 +409,7 @@ END_FUNC dict_has_data_descr
 ;; Called at class creation and from type_setattr.  Both are cold; this walks
 ;; the MRO and allocates nothing.
 ;; ============================================================================
+
 DEF_FUNC type_refresh_attr_flags
     push rbx
     push r12
@@ -380,6 +418,13 @@ DEF_FUNC type_refresh_attr_flags
     test rdi, rdi
     jz .trg_out
     mov rbx, rdi
+
+    ; Whatever this recomputes, it recomputes because the type or one of its
+    ; bases changed -- so every cache keyed on the old version is now wrong.
+    ; Stamping here rather than at the call sites means the walk over
+    ; subclasses below invalidates them too, which is the property the caches
+    ; rely on.
+    call type_bump_version
 
     lea rsi, [rel ig_getattribute_name]
     call dunder_lookup
@@ -525,26 +570,18 @@ DEF_FUNC instance_getattr_default, IG_FRAME
 
 .check_type_dict:
 
-    ; Not in inst_dict -- walk the type's MRO, checking each tp_dict.
-    mov rcx, [rbx + PyObject.ob_type]   ; rcx = type (the class)
-    mov [rbp - IG_ORIGIN], rcx
-.walk_mro:
-    mov rdi, [rcx + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jz .try_base
-
-    push rcx                            ; save current type
+    ; Not in inst_dict -- ask the class what it defines for this name.  That
+    ; is an MRO walk with a dict probe per entry, and the answer only changes
+    ; when a class in the MRO is written to, so type_lookup_cached keeps it
+    ; against the type's version.  It walks unchanged on a miss, and for a
+    ; static type, which has no version.
+    mov rdi, [rbx + PyObject.ob_type]
+    mov [rbp - IG_ORIGIN], rdi
     mov rsi, r12
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    pop rcx                             ; restore current type
-    test edx, edx               ; the tag, not the payload: a hit may be int 0
-    jnz .found_type                     ; found in type's dict
-
-.try_base:
-    MRO_NEXT rcx, [rbp - IG_ORIGIN]
-    test rcx, rcx
-    jnz .walk_mro
+    extern type_lookup_cached
+    call type_lookup_cached             ; rax/edx = value, rcx = the owner
+    test edx, edx
+    jnz .found_type
 
     ; Nothing in the MRO.  On the descriptor-first order that leaves the
     ; instance dict still unread.
@@ -1078,3 +1115,6 @@ END_FUNC instance_setattr
 section .rodata
 ig_getattr_name: db "__getattr__", 0
 ig_getattribute_name: db "__getattribute__", 0
+
+section .bss
+type_version_counter: resd 1

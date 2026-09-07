@@ -62,7 +62,7 @@ CN_FRAME equ 16             ; + 2 pushes = 32
 ;; cannot be a strided loop the way code_spec_clear is.
 ;; ============================================================================
 global code_traverse
-DEF_FUNC code_traverse
+DEF_FUNC code_traverse, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyCodeObject.co_consts]

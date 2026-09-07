@@ -67,6 +67,7 @@ test_bytes_str_text
 test_bytes_subclass_dict
 test_call_ex
 test_call_instance
+test_call_spec
 test_classes
 test_classmethod_metaclass
 test_class_namespace_copy
@@ -309,6 +310,7 @@ test_list_insert_pop
 test_list_remove_eq
 test_lists
 test_load_attr_cache
+test_load_attr_per_name
 test_maketrans
 test_map_multi
 test_mappingproxy_call
@@ -322,6 +324,7 @@ test_math_more
 test_math
 test_membership
 test_memoryview_stride
+test_metaclass_lifetime
 test_metaclass_prepare
 test_metaclass
 test_metaclass_resolution
@@ -398,6 +401,7 @@ test_richcompare_byname
 test_round
 test_select
 test_sequence_iteration
+test_setattr_dunder
 test_set_fatval
 test_set_inplace
 test_set_methods
@@ -405,6 +409,7 @@ test_set_name_metatype
 test_set_name
 test_set_ops
 test_sets
+test_set_tombstone_reuse
 test_set_variadic
 test_signal
 test_size_and_recursion_limits
@@ -436,6 +441,7 @@ test_sre
 test_stdlib_glue
 test_stdlib_shims
 test_stdout_buffering
+test_store_attr_spec
 test_str_build
 test_str_case
 test_str_char_singletons
@@ -471,6 +477,7 @@ test_subclasses
 test_subclass_first
 test_subclass_item_slots
 test_subprocess_child
+test_subscr_spec
 test_sum_compensated
 test_sum_int_fast
 test_sum_protocol
@@ -489,6 +496,7 @@ test_traceback
 test_truthiness
 test_tuple_identity
 test_tuples
+test_type_cache
 test_type_comments
 test_type_constructors
 test_type_dict
@@ -508,6 +516,7 @@ test_union_generic_alias
 test_union_hash
 test_unpack_dict
 test_unpack_refcount
+test_unpack_spec
 test_unraisable
 test_utf16_utf32
 test_utf8_validate_boundaries

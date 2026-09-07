@@ -1886,7 +1886,7 @@ section .text
 ;; ============================================================================
 ;; ---- gen_traverse / gen_clear ----
 ;; ============================================================================
-DEF_FUNC gen_traverse
+DEF_FUNC gen_traverse, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     push r12
     push r13

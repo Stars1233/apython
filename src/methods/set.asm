@@ -117,7 +117,8 @@ END_FUNC set_method_discard
 ;; args[0]=self
 ;; Scans for first occupied entry, removes and returns it.
 ;; ============================================================================
-SMP_FRAME equ 16    ; save self + entry ptr
+SMP_FRAME equ 24            ; 3 pushes, so rsp is 16-aligned at the calls
+                            ; the DECREF macros below expand to
 DEF_FUNC set_method_pop, SMP_FRAME
     push rbx
     push r12
@@ -180,7 +181,7 @@ END_FUNC set_method_pop
 ;; set_method_clear(args, nargs) -> None
 ;; args[0]=self
 ;; ============================================================================
-DEF_FUNC set_method_clear
+DEF_FUNC set_method_clear, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     push r12
     push r13

@@ -36,6 +36,8 @@ extern dict_get
 extern range_iter_type
 extern list_iter_type
 extern dict_type
+extern list_type
+extern tuple_type
 extern eval_saved_rbx
 extern obj_dealloc
 extern opcode_table
@@ -120,6 +122,31 @@ CN_SIZE  equ 40
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
 DEF_FUNC_BARE op_binary_subscr
+    ; Specialize, then run generically this time.  A list or a tuple indexed
+    ; by an int immediate is the overwhelming majority of subscripts, and both
+    ; can be read inline; everything else keeps the protocol below.
+    ;
+    ; The check reads the two operands without touching r13, so a site that
+    ; does not qualify has paid four instructions and nothing else.
+    mov r8, [r13 - 8]           ; the key Value
+    V_IS_INT r8, r9
+    jb .bs_no_spec
+    mov r8, [r13 - 16]          ; the container Value
+    V_TEST_PTR r8, r9
+    ja .bs_no_spec
+    mov r8, [r8 + PyObject.ob_type]
+    lea r9, [rel list_type]
+    cmp r8, r9
+    je .bs_spec_list
+    lea r9, [rel tuple_type]
+    cmp r8, r9
+    jne .bs_no_spec
+    mov byte [rbx - 2], OP_BINARY_SUBSCR_TUPLE_INT
+    jmp .bs_no_spec
+.bs_spec_list:
+    mov byte [rbx - 2], OP_BINARY_SUBSCR_LIST_INT
+.bs_no_spec:
+
     VPOP_VAL rsi, r8            ; rsi = key, r8 = key tag
     VPOP_VAL rdi, r9            ; rdi = obj, r9 = obj tag
 
@@ -335,6 +362,23 @@ END_FUNC op_binary_subscr
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
 DEF_FUNC_BARE op_store_subscr
+    ; Specialize, then run generically this time -- as op_binary_subscr does,
+    ; and for the same operand shape.  Only list is worth it: dict's
+    ; mp_ass_subscript is already a two-instruction trampoline into dict_set,
+    ; where list's goes through list_ass_subscript and then list_setitem, each
+    ; with a prologue of its own.
+    mov r8, [r13 - 8]           ; the key Value
+    V_IS_INT r8, r9
+    jb .ss_no_spec
+    mov r8, [r13 - 16]          ; the container Value
+    V_TEST_PTR r8, r9
+    ja .ss_no_spec
+    lea r9, [rel list_type]
+    cmp [r8 + PyObject.ob_type], r9
+    jne .ss_no_spec
+    mov byte [rbx - 2], OP_STORE_SUBSCR_LIST_INT
+.ss_no_spec:
+
     VPOP_VAL rsi, r8            ; key + tag
     VPOP_VAL rdi, r9            ; obj + tag
     VPOP_VAL rdx, r10           ; value + tag
@@ -749,6 +793,28 @@ END_FUNC op_build_const_key_map
 extern str_new
 extern str_type
 DEF_FUNC_BARE op_unpack_sequence
+    ; Specialize, then run generically this time.  A tuple or a list is the
+    ; shape the compiler emits this opcode for almost every time -- every
+    ; `a, b = ...` over a literal, a return of several values, a dict item.
+    ; The length is not checked here: the specialized handler checks it on
+    ; every execution anyway, and a site that unpacks a different length each
+    ; time would otherwise never specialize at all.
+    mov r8, [r13 - 8]
+    V_TEST_PTR r8, r9
+    ja .us_no_spec
+    mov r8, [r8 + PyObject.ob_type]
+    lea r9, [rel tuple_type]
+    cmp r8, r9
+    je .us_spec_tuple
+    lea r9, [rel list_type]
+    cmp r8, r9
+    jne .us_no_spec
+    mov byte [rbx - 2], OP_UNPACK_SEQUENCE_LIST
+    jmp .us_no_spec
+.us_spec_tuple:
+    mov byte [rbx - 2], OP_UNPACK_SEQUENCE_TUPLE
+.us_no_spec:
+
     VPOP_VAL rdi, r8           ; rdi = sequence (tuple or list), r8 = tag
     cmp r8d, TAG_PTR
     jne .unpack_type_error
@@ -1524,6 +1590,50 @@ END_FUNC op_is_op
 ;; Pop right (container), pop left (value to find).
 ;; ============================================================================
 DEF_FUNC_BARE op_contains_op
+    ; The shape `in` almost always has: a container with an sq_contains, which
+    ; is every builtin one -- set, frozenset, dict, list, tuple, str, bytes.
+    ;
+    ; Both operands are already Values on the stack, and sq_contains takes a
+    ; Value, so nothing here needs unpacking or repacking.  The protocol below
+    ; keeps the __contains__ and iteration fallbacks and the error wording, and
+    ; reaches them having touched neither r13 nor rcx.
+    mov rsi, [r13 - 8]              ; the container
+    V_TEST_PTR rsi, rax
+    ja .contains_generic
+    mov rax, [rsi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .contains_generic
+    mov rax, [rax + PySequenceMethods.sq_contains]
+    test rax, rax
+    jz .contains_generic
+
+    mov rdi, rsi                    ; the container
+    mov rsi, [r13 - 16]             ; the value to find
+    push rcx                        ; the invert flag
+    sub rsp, 8                      ; one push is odd; rsp must be 16-aligned
+    call rax
+    add rsp, 8
+    pop rcx
+    ; r15 is free by the register convention and callee-saved, so it carries
+    ; the answer across the two releases below -- either can call obj_dealloc,
+    ; and that clobbers every caller-saved register.
+    mov r15d, eax
+    xor r15d, ecx                   ; `not in` inverts
+
+    mov rdi, [r13 - 8]
+    DECREF_V rdi, rdx
+    mov rdi, [r13 - 16]
+    DECREF_V rdi, rdx
+    sub r13, 16
+
+    lea rax, [rel bool_false]
+    test r15d, r15d
+    jz .contains_push
+    lea rax, [rel bool_true]
+    jmp .contains_push
+
+.contains_generic:
     mov r8d, ecx               ; save invert flag
 
     VPOP_VAL rsi, r9           ; rsi = right (container), r9 = tag
@@ -2973,141 +3083,3 @@ DEF_FUNC op_set_update
     RAISE exc_TypeError_type, "object is not iterable"
 END_FUNC op_set_update
 
-;; ============================================================================
-;; op_for_iter_range - Specialized range iterator (opcode 214)
-;;
-;; Guard: TOS ob_type == range_iter_type
-;; Inlines range_iter_next logic: decode current/stop/step, check bounds,
-;; return SmallInt, advance current.
-;; ecx = jump offset. Followed by 1 CACHE entry (2 bytes).
-;; ============================================================================
-DEF_FUNC_BARE op_for_iter_range
-    VPEEK rdi                      ; iterator (don't pop)
-    ; Guard: must be range_iter_type
-    lea rax, [rel range_iter_type]
-    cmp [rdi + PyObject.ob_type], rax
-    jne .fir_deopt
-
-    ; Inline range_iter_next
-    mov rax, [rdi + PyRangeIterObject.it_current]
-
-    mov r8, [rdi + PyRangeIterObject.it_stop]
-
-    mov r9, [rdi + PyRangeIterObject.it_step]
-
-    ; Check exhaustion
-    test r9, r9
-    js .fir_neg_step
-    ; Positive step: current >= stop -> exhausted
-    cmp rax, r8
-    jge .fir_exhausted
-    jmp .fir_has_value
-.fir_neg_step:
-    ; Negative step: current <= stop -> exhausted
-    cmp rax, r8
-    jle .fir_exhausted
-
-.fir_has_value:
-    ; Return current as SmallInt (no INCREF needed for SmallInt)
-    mov rdx, rax
-
-    ; Advance: current += step
-    add rax, r9
-    mov [rdi + PyRangeIterObject.it_current], rax
-
-    VPUSH_INT rdx, r15                  ; push value
-    add rbx, 2                     ; skip CACHE
-    DISPATCH
-
-.fir_exhausted:
-    ; Pop iterator, skip CACHE + jump by (arg + 1)
-    ; ecx = saved arg (from instruction word)
-    lea rcx, [rcx + 1]            ; arg + 1
-    add rbx, 2                     ; skip CACHE
-    lea rbx, [rbx + rcx*2]        ; jump forward
-    VPOP rdi
-    DECREF_V rdi, rsi
-    DISPATCH
-
-.fir_deopt:
-    ; Type mismatch: rewrite to FOR_ITER (93) and run the generic handler.
-    ;
-    ; NOT by rewinding rbx and re-dispatching.  A FOR_ITER whose jump offset
-    ; is over 255 is preceded by EXTENDED_ARG, and rewinding two bytes lands
-    ; on the FOR_ITER alone: the prefix is gone, so the re-execution takes the
-    ; low byte of the offset as the whole of it and, on exhaustion, jumps into
-    ; the middle of its own loop body.  ecx already holds the full argument,
-    ; so entering the generic handler directly is both correct and cheaper.
-    mov byte [rbx - 2], 93
-    jmp op_for_iter
-END_FUNC op_for_iter_range
-
-;; ============================================================================
-;; op_for_iter_list - Specialized list iterator (opcode 213)
-;;
-;; Guard: TOS ob_type == list_iter_type
-;; Inlines list_iter_next: check index < list.ob_size, load item, INCREF,
-;; advance index.
-;; ecx = jump offset. Followed by 1 CACHE entry (2 bytes).
-;; ============================================================================
-DEF_FUNC_BARE op_for_iter_list
-    push rcx                       ; save jump offset (ecx will be clobbered)
-    VPEEK rdi                      ; iterator (don't pop)
-    ; Guard: must be list_iter_type
-    lea rax, [rel list_iter_type]
-    cmp [rdi + PyObject.ob_type], rax
-    jne .fil_deopt
-
-    ; Inline list_iter_next
-    mov rax, [rdi + PyListIterObject.it_seq]       ; list ptr
-    mov rcx, [rdi + PyListIterObject.it_index]     ; current index
-
-    ; Check bounds
-    cmp rcx, [rax + PyListObject.ob_size]
-    jge .fil_exhausted
-
-    ; Get item and INCREF (payload + tag arrays)
-    ; A list slot already holds a Value.  This used to V_UNPACK it into a
-    ; (payload, tag) pair and V_PACK it straight back around the refcount
-    ; bump, which made the SPECIALIZATION slower at handling the value than
-    ; the generic list_iter_next it exists to beat -- that one has always
-    ; been two instructions here.
-    mov rdx, [rax + PyListObject.ob_item]
-    mov rax, [rdx + rcx * 8]      ; the item Value
-    INCREF_V rax, rdx
-
-    ; Advance index
-    inc qword [rdi + PyListIterObject.it_index]
-
-    add rsp, 8                     ; discard saved jump offset
-    VPUSH rax
-    add rbx, 2                     ; skip CACHE
-    DISPATCH
-
-.fil_exhausted:
-    ; Mark iterator as exhausted: DECREF list, clear it_seq
-    push rdi                       ; save iterator ptr
-    mov rdi, [rdi + PyListIterObject.it_seq]
-    test rdi, rdi
-    jz .fil_already_exhausted
-    call obj_decref
-.fil_already_exhausted:
-    pop rdi
-    mov qword [rdi + PyListIterObject.it_seq], 0
-
-    ; Restore the original arg (jump offset)
-    pop rcx                        ; restore jump offset
-    lea rcx, [rcx + 1]            ; arg + 1
-    add rbx, 2                     ; skip CACHE
-    lea rbx, [rbx + rcx*2]        ; jump forward
-    VPOP rdi
-    DECREF_V rdi, rsi
-    DISPATCH
-
-.fil_deopt:
-    pop rcx                        ; restore the full jump offset
-    ; Rewrite to FOR_ITER (93) and enter the generic handler with it -- see
-    ; .fir_deopt above for why rewinding rbx instead would be wrong.
-    mov byte [rbx - 2], 93
-    jmp op_for_iter
-END_FUNC op_for_iter_list

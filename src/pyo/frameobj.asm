@@ -615,7 +615,7 @@ END_FUNC frameobj_flag_value
 ;; shape rather than a corner case.  Without these the cycle leaks for the
 ;; life of the process.
 ;; ============================================================================
-DEF_FUNC frameobj_traverse
+DEF_FUNC frameobj_traverse, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyFrameObject.f_back]

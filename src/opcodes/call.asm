@@ -22,6 +22,7 @@ extern raise_exception
 extern func_new
 extern exc_TypeError_type
 extern kw_names_pending
+extern func_type
 extern cfex_temp_pending
 extern cfex_merged_pending
 extern cfex_kwnames_pending
@@ -108,6 +109,47 @@ WES_FRAME  equ 56           ; + 0 pushes = 48
 ;; Followed by 3 CACHE entries (6 bytes) that must be skipped.
 ;; ============================================================================
 DEF_FUNC op_call, CL_FRAME
+    ; Specialize, then run generically this time.  A plain Python function
+    ; whose parameters are exactly filled is the shape almost every call has,
+    ; and the specialized handler needs neither this frame nor func_call's.
+    ;
+    ; Checked here rather than in the specialized handler alone so that a site
+    ; which will never qualify -- a builtin, a class, a callable instance --
+    ; is not rewritten and immediately deopted on every execution.
+    cmp qword [rel kw_names_pending], 0
+    jne .cl_no_spec
+    mov r8d, ecx
+    add r8d, 2
+    neg r8
+    mov r9, [r13 + r8*8]                ; func_or_null
+    mov r10d, ecx
+    test r9, r9
+    jz .cl_spec_plain
+    inc r10d
+    jmp .cl_spec_callable
+.cl_spec_plain:
+    mov r8d, ecx
+    inc r8d
+    neg r8
+    mov r9, [r13 + r8*8]
+.cl_spec_callable:
+    V_TEST_PTR r9, rax
+    ja .cl_no_spec
+    lea rax, [rel func_type]
+    cmp [r9 + PyObject.ob_type], rax
+    jne .cl_no_spec
+    mov rax, [r9 + PyFuncObject.func_code]
+    cmp r10d, [rax + PyCodeObject.co_argcount]
+    jne .cl_no_spec
+    cmp dword [rax + PyCodeObject.co_kwonlyargcount], 0
+    jne .cl_no_spec
+    test dword [rax + PyCodeObject.co_flags], \
+         CO_VARARGS | CO_VARKEYWORDS | CO_GENERATOR | CO_COROUTINE | \
+         CO_ASYNC_GENERATOR
+    jnz .cl_no_spec
+    mov byte [rbx - 2], OP_CALL_PY_EXACT
+.cl_no_spec:
+
 
     ; Save value stack pointers in case callee clobbers callee-saved regs
     mov [rbp - CL_SAVED_R13], r13

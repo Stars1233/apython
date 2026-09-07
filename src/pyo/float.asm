@@ -256,202 +256,45 @@ DEF_FUNC float_repr
     ucomisd xmm0, xmm1
     je .is_neg_inf
 
-    ; General case: the shortest decimal that reads back as this double.
+    ; The general case.  dtoa_shortest computes the shortest decimal that
+    ; reads back as this double directly, in one pass over a table of powers
+    ; of five -- where this used to search "%.1e" through "%.17e", twice each,
+    ; with a strtod after every attempt to see whether it round-tripped.  That
+    ; search cost up to 34 snprintf and 34 strtod calls and was linear in the
+    ; digit count; this is flat, as CPython's dtoa is.
     ;
-    ; Trying "%.*g" at rising precision finds the shortest of the forms GLIBC
-    ; produces, which is not always the shortest that exists: at an exact
-    ; half-way case glibc rounds to even, and it is the other neighbour that
-    ; round-trips.  repr(2.0**-24) came out with seventeen digits where
-    ; CPython prints sixteen, because "5.960464477539062e-08" -- glibc's
-    ; correctly-rounded sixteen -- does not read back as 2**-24 and
-    ; "...063" does.  About one in a hundred ordinary values hits it.
-    ;
-    ; So each precision is tried twice: as rendered, and with the last digit
-    ; carried up by one.  CPython's own dtoa searches the same two candidates
-    ; for the same reason.
-    mov qword [rbp - FR_PREC], 1     ; prec = 1
+    ; Zero is rendered here rather than there: the shortest-decimal question is
+    ; about the gap to the neighbouring doubles, and zero has no meaningful
+    ; interval of its own.
+    mov rax, [rbp - FR_VALUE]
+    mov rdx, rax
+    add rdx, rdx                    ; drop the sign bit
+    jnz .fr_general
+    lea rdi, [rel str_zero]
+    test rax, rax
+    jns .fr_zero_emit
+    lea rdi, [rel str_neg_zero]
+.fr_zero_emit:
+    call str_from_cstr
+    leave
+    ret
 
-.repr_loop:
-    mov qword [rbp - FR_BUMP], 0
-.repr_try:
-    ; "%.*e", not "%.*g".  %g STRIPS TRAILING ZEROS, so asking it for sixteen
-    ; digits of 6.256509672447191e-148 gives "6.25650967244719e-148" -- fifteen
-    ; digits, because the sixteenth is a zero it threw away.  fr_bump_last then
-    ; carried the '9' instead of that zero and produced "...4472", so neither
-    ; candidate was the "...47191" that round-trips, and the search fell
-    ; through to seventeen digits.  CPython prints sixteen.  Four of the 2098
-    ; powers of two came out wrong this way.
-    ;
-    ; %e keeps the zero, which is the digit the bump has to land on.  It is
-    ; also the form .repr_found re-renders below, so the candidate that is
-    ; validated here is now the same string that is measured there.
-    lea rdi, [rbp - FR_BUF]   ; buf
-    mov esi, 48                ; bufsz
-    lea rdx, [rel fmt_e]      ; "%.*e"
-    mov ecx, [rbp - FR_PREC]  ; significant digits
-    dec ecx                    ; %e counts digits AFTER the point
-    movsd xmm0, [rbp - FR_VAL] ; value
-    mov eax, 1                ; 1 xmm register used
-    call snprintf wrt ..plt
-
-    cmp qword [rbp - FR_BUMP], 0
-    je .repr_check
+.fr_general:
+    mov rdi, rax
+    extern dtoa_shortest
+    call dtoa_shortest              ; rax = the digits, edx = the exponent
+    mov rdi, rax
+    movsxd rsi, edx
+    mov rdx, [rbp - FR_VALUE]
+    shr rdx, 63                     ; negative?
+    lea rcx, [rbp - FR_BUF]
+    extern dtoa_format
+    call dtoa_format
     lea rdi, [rbp - FR_BUF]
-    call fr_bump_last
-    test eax, eax
-    jz .repr_next             ; the carry escaped: not a candidate
+    call str_from_cstr
+    leave
+    ret
 
-.repr_check:
-    ; Round-trip check: strtod(buf, NULL) == val?
-    lea rdi, [rbp - FR_BUF]   ; buf
-    xor esi, esi              ; endptr = NULL
-    call strtod wrt ..plt
-    ; xmm0 = reparsed value
-    movsd xmm1, [rbp - FR_VALUE]      ; original
-    ucomisd xmm0, xmm1
-    je .repr_found             ; match! use this precision
-
-    cmp qword [rbp - FR_BUMP], 0
-    jne .repr_next
-    mov qword [rbp - FR_BUMP], 1
-    jmp .repr_try
-
-.repr_next:
-    inc qword [rbp - FR_PREC]
-    cmp qword [rbp - FR_PREC], 17
-    jle .repr_loop
-    mov qword [rbp - FR_BUMP], 0      ; seventeen digits always round-trips
-
-.repr_found:
-    ; The loop above found the shortest digit count that round-trips, but it
-    ; let %g pick the notation -- and %g goes exponential as soon as the
-    ; exponent reaches the precision, so repr(100.0) came out as "1e+02".
-    ; CPython chooses the digits first and the notation second: fixed when
-    ; the decimal exponent is in [-4, 16), exponential otherwise.
-    lea rdi, [rbp - FR_EBUF]
-    mov esi, 48
-    lea rdx, [rel fmt_e]
-    mov ecx, [rbp - FR_PREC]
-    dec ecx                   ; %e takes digits after the point
-    movsd xmm0, [rbp - FR_VAL]
-    mov eax, 1
-    call snprintf wrt ..plt
-    cmp qword [rbp - FR_BUMP], 0
-    je .fr_e_ready
-    lea rdi, [rbp - FR_EBUF]
-    call fr_bump_last
-.fr_e_ready:
-
-    ; Read the exponent out of "d.dddde<sign>dd".
-    lea rsi, [rbp - FR_EBUF]
-    xor ecx, ecx
-.fr_find_e:
-    movzx eax, byte [rsi + rcx]
-    test al, al
-    jz .fr_use_e              ; no exponent: nothing to decide
-    cmp al, 'e'
-    je .fr_got_e
-    inc rcx
-    jmp .fr_find_e
-.fr_got_e:
-    inc rcx
-    xor r8d, r8d              ; negative?
-    movzx eax, byte [rsi + rcx]
-    cmp al, '-'
-    jne .fr_exp_sign_done
-    mov r8d, 1
-    inc rcx
-    jmp .fr_exp_digits
-.fr_exp_sign_done:
-    cmp al, '+'
-    jne .fr_exp_digits
-    inc rcx
-.fr_exp_digits:
-    xor r9d, r9d
-.fr_exp_loop:
-    movzx eax, byte [rsi + rcx]
-    cmp al, '0'
-    jb .fr_exp_done
-    cmp al, '9'
-    ja .fr_exp_done
-    imul r9, r9, 10
-    sub rax, '0'
-    add r9, rax
-    inc rcx
-    jmp .fr_exp_loop
-.fr_exp_done:
-    test r8d, r8d
-    jz .fr_exp_positive
-    neg r9
-.fr_exp_positive:
-    mov [rbp - FR_EXP], r9
-
-    cmp r9, -4
-    jl .fr_use_e
-    cmp r9, 16
-    jge .fr_use_e
-
-    ; Fixed notation: digits after the point = (significant - 1) - exponent
-    mov rcx, [rbp - FR_PREC]
-    dec rcx
-    sub rcx, r9
-    jns .fr_fixed_prec_ok
-    xor ecx, ecx
-.fr_fixed_prec_ok:
-    lea rdi, [rbp - FR_BUF]
-    mov esi, 48
-    lea rdx, [rel fmt_f]
-    movsd xmm0, [rbp - FR_VAL]
-    mov eax, 1
-    call snprintf wrt ..plt
-    cmp qword [rbp - FR_BUMP], 0
-    je .fr_notation_done
-    ; The last digit of the fixed form sits at the same decimal place as the
-    ; last digit of the exponential one, so it takes the same adjustment.
-    lea rdi, [rbp - FR_BUF]
-    call fr_bump_last
-    jmp .fr_notation_done
-
-.fr_use_e:
-    ; Exponential: the %e rendering is already what CPython would print.
-    lea rdi, [rbp - FR_BUF]
-    lea rsi, [rbp - FR_EBUF]
-    xor ecx, ecx
-.fr_copy_e:
-    movzx eax, byte [rsi + rcx]
-    mov [rdi + rcx], al
-    test al, al
-    jz .fr_notation_done
-    inc rcx
-    cmp rcx, 47
-    jl .fr_copy_e
-    mov byte [rdi + rcx], 0
-
-.fr_notation_done:
-    ; Check if buf needs ".0" appended (no '.', no 'e', no 'E')
-    lea rdi, [rbp - FR_BUF]
-    xor ecx, ecx
-.scan_dot:
-    mov al, [rdi + rcx]
-    test al, al
-    jz .no_dot_found
-    cmp al, '.'
-    je .has_dot
-    cmp al, 'e'
-    je .has_dot
-    cmp al, 'E'
-    je .has_dot
-    cmp al, 'n'               ; nan
-    je .has_dot
-    cmp al, 'i'               ; inf
-    je .has_dot
-    inc ecx
-    jmp .scan_dot
-.no_dot_found:
-    ; Append ".0"
-    mov byte [rdi + rcx], '.'
-    mov byte [rdi + rcx + 1], '0'
-    mov byte [rdi + rcx + 2], 0
 .has_dot:
     lea rdi, [rbp - FR_BUF]
     call str_from_cstr
@@ -2119,6 +1962,8 @@ END_FUNC float_get_imag
 section .data
 
 float_name_str: db "float", 0
+str_zero: db "0.0", 0
+str_neg_zero: db "-0.0", 0
 str_nan: db "nan", 0
 str_inf: db "inf", 0
 str_neg_inf: db "-inf", 0

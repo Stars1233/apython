@@ -92,6 +92,7 @@ regen:
 	$(PYTHON) src/compiler/gen_ast.py > lib/_ast.py.new
 	mv lib/_ast.py.new lib/_ast.py
 	$(PYTHON) src/compiler/gen_encodings.py lib/encodings
+	$(PYTHON) src/gen_dtoa.py
 
 $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
@@ -159,6 +160,11 @@ check-stdlib: $(TARGET)
 # in `make check`: `re` is a Python module, so it comes from $CPYTHON_LIB.
 check-re: $(TARGET)
 	@bash tests/re_probe.sh
+
+# Every repr(float) the shortest-decimal conversion can be asked for, over a
+# corpus far larger than make check can afford.  Not gated by default.
+check-dtoa: $(TARGET)
+	@bash tests/dtoa_probe.sh
 
 # CPython test suite targets
 # The CPython-derived test corpus.  One list, used by both the compile step

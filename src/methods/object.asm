@@ -1404,14 +1404,20 @@ DEF_DUNDER_UNARY complex, abs, nb_absolute
 ;; ============================================================================
 global object_method_setattr
 DEF_FUNC_BARE object_method_setattr
-    extern builtin_setattr
-    jmp builtin_setattr
+    ; The GENERIC store, not builtin_setattr's dispatch through tp_setattr.
+    ; Now that __setattr__ has a slot, that slot is the wrapper which called
+    ; this, and re-entering it is unbounded recursion -- which is exactly what
+    ; `object.__setattr__(self, k, v)` inside a __setattr__ does.
+    extern object_generic_setattr
+    jmp object_generic_setattr
 END_FUNC object_method_setattr
 
 global object_method_delattr
 DEF_FUNC_BARE object_method_delattr
-    extern builtin_delattr_fn
-    jmp builtin_delattr_fn      ; a NULL value through tp_setattr is a delete
+    ; The generic delete, for the same reason as __setattr__ above.  A NULL
+    ; value through the store is what a deletion is.
+    extern object_generic_delattr
+    jmp object_generic_delattr
 END_FUNC object_method_delattr
 
 
