@@ -240,7 +240,11 @@ END_FUNC list_getitem
 ;; list_setitem(PyListObject *list, int64_t index, PyObject *value, int value_tag)
 ;; sq_ass_item: set item at index, DECREF old, INCREF new. rcx = value_tag.
 ;; ============================================================================
-DEF_FUNC list_setitem
+DEF_FUNC list_setitem, 8        ; 3 pushes, so rsp is 16-aligned at the
+                                ; DECREF_V below -- which calls obj_dealloc.
+                                ; The three pushes that used to bracket that
+                                ; release supplied this by accident; storing
+                                ; before releasing removed them.
     push rbx
     push r12
     push r13

@@ -2101,7 +2101,7 @@ END_FUNC fileio_closed_get_fn
 ;; pointer.  These visit the two things that really are objects and nothing
 ;; else, which is also cheaper than the generic walk.
 ;; ============================================================================
-DEF_FUNC fileio_traverse
+DEF_FUNC fileio_traverse, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PyFileIOObject.inst_dict]

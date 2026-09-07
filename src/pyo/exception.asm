@@ -3188,7 +3188,7 @@ section .text
 ;; ============================================================================
 ;; ---- exc_traverse / exc_clear ----
 ;; ============================================================================
-DEF_FUNC exc_traverse
+DEF_FUNC exc_traverse, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     mov rbx, rdi
 

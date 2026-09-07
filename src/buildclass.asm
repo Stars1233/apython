@@ -724,6 +724,25 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov r12, rax            ; r12 = new type object (ob_refcnt=1, ob_type set)
     mov [rel build_class_pending], rax  ; register for exception cleanup
 
+    ; The class holds a REFERENCE to its metatype, not a borrowed pointer.
+    ;
+    ; For the two metatypes this tree ships that is only bookkeeping -- they
+    ; are static and outlive everything.  A metaclass written in Python is an
+    ; ordinary heap type that can be collected, and ob_type pointing at one
+    ; without counting is a dangling pointer the moment the metaclass dies
+    ; first.  user_type_dealloc gives it back and type_traverse reports the
+    ; edge, so a metaclass cycle stays collectable.
+    ;
+    ; Counted HERE, at the allocation, and not once the metatype is finally
+    ; decided: the line above registers the half-built class in
+    ; build_class_pending, and from that point any raise -- mro_compute
+    ; rejects an inconsistent MRO -- unwinds through user_type_dealloc, which
+    ; releases ob_type.  Taking the reference later made every failed class
+    ; creation a release of one that was never taken, and fifteen of them
+    ; drove user_type_metatype's count to zero.
+    mov rdi, [rax + PyObject.ob_type]
+    call obj_incref
+
     ; Zero-fill the type object (skip ob_refcnt and ob_type, already set by gc_alloc)
     lea rdi, [r12 + 16]
     xor eax, eax
@@ -1510,26 +1529,16 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov rax, [rel class_metatype_pending]
     test rax, rax
     jz .tfp_default_metatype
+    ; Swap the reference the allocation took: the explicit metatype gains one
+    ; and user_type_metatype, which gc_alloc installed and which is what
+    ; ob_type still holds here, gives its up.
     mov [r12 + PyObject.ob_type], rax
     mov qword [rel class_metatype_pending], 0
-.tfp_default_metatype:
-
-    ; The class holds a REFERENCE to its metatype, not a borrowed pointer.
-    ;
-    ; For the two metatypes this tree ships that is only bookkeeping -- they
-    ; are static and outlive everything.  A metaclass written in Python is an
-    ; ordinary heap type that can be collected, and ob_type pointing at one
-    ; without counting became a dangling pointer the moment the metaclass died
-    ; first.  Both go out of scope together when they are defined inside a
-    ; function, and the collector reaches the metaclass's own MRO cycle first:
-    ; the class was then freed through an ob_type that had already been freed.
-    ;
-    ; Taken here rather than at the store above, so that the default metatype
-    ; gc_alloc installed is counted on exactly the same terms as an explicit
-    ; one.  user_type_dealloc gives it back, and type_traverse reports the edge
-    ; so that a metaclass cycle stays collectable.
-    mov rdi, [r12 + PyObject.ob_type]
+    mov rdi, rax
     call obj_incref
+    lea rdi, [rel user_type_metatype]
+    call obj_decref
+.tfp_default_metatype:
 
     ; Record it against each of its bases, so type.__subclasses__ can answer.
     ; Borrowed, and dropped again by user_type_dealloc, so the list only ever

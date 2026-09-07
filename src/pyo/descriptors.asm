@@ -3163,7 +3163,7 @@ DEF_FUNC classmethod_clear, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 END_FUNC classmethod_clear
 
-DEF_FUNC property_traverse
+DEF_FUNC property_traverse, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     mov rbx, rdi
     mov rax, [rbx + PyPropertyObject.prop_get]
@@ -3179,7 +3179,7 @@ DEF_FUNC property_traverse
     ret
 END_FUNC property_traverse
 
-DEF_FUNC property_clear
+DEF_FUNC property_clear, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     mov rbx, rdi
 

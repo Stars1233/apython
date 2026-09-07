@@ -115,6 +115,14 @@ reasoning that chose them and what changing one would cost.
   base supplies the dunder, and there the slot must be left exactly as
   `type_from_parts` set it.
 
+- **A dunder set to `None` empties the slot, which is wrong for `__call__` --
+  and now for `__setattr__` and `__delattr__` too.**  `class N: __setattr__ =
+  None` leaves `instance_setattr` in the slot, so `N().x = 1` stores silently
+  where CPython raises `TypeError: 'NoneType' object is not callable`.  Same
+  for `__delattr__`.  It is the policy below applied to the two dunders that
+  gained slot rows most recently, and it is more visible on them than on
+  `__iter__`, where disabling the protocol is what None is documented to do.
+
 - **A dunder set to `None` empties the slot, which is wrong for `__call__`.**
   `type_install_slots` skips any dunder explicitly `None`, so the protocol is
   disabled -- right for `__iter__` and `__hash__`, and what Python documents.

@@ -2570,7 +2570,7 @@ END_FUNC dict_view_richcompare
 ;; ---- dict_traverse / dict_clear ----
 ;; ============================================================================
 
-DEF_FUNC dict_traverse
+DEF_FUNC dict_traverse, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     push r12
     push r13
@@ -2606,7 +2606,7 @@ DEF_FUNC dict_traverse
     ret
 END_FUNC dict_traverse
 
-DEF_FUNC dict_clear_gc
+DEF_FUNC dict_clear_gc, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     push r12
     push r13

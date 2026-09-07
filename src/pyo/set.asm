@@ -1488,7 +1488,7 @@ DEF_SET_INPLACE xor, set_nb_xor
 ;; into the temporary, which then releases it -- so the old keys are dropped
 ;; by the ordinary set dealloc rather than by a second copy of it here.
 ;; ============================================================================
-DEF_FUNC set_swap_storage
+DEF_FUNC set_swap_storage, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     push r12
     sub rsp, 8                  ; 8 + 16 = 24; + the pushed rbp = aligned
@@ -1733,7 +1733,7 @@ section .text
 SET_ENTRY_SIZE_GC    equ 16
 SET_ENTRY_KEY_GC     equ 8
 
-DEF_FUNC set_traverse
+DEF_FUNC set_traverse, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     push r12
     push r13
@@ -1764,7 +1764,7 @@ DEF_FUNC set_traverse
     ret
 END_FUNC set_traverse
 
-DEF_FUNC set_clear_gc
+DEF_FUNC set_clear_gc, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     push r12
     push r13

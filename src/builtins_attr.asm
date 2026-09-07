@@ -344,7 +344,9 @@ DEF_FUNC_LOCAL setattr_impl
 .setattr_raised:
     xor eax, eax
     xor edx, edx
-    add rsp, 8
+    add rsp, 24                 ; the prologue's carve, which grew with
+                                ; SETA_GENERIC; popping 8 restored rbx from
+                                ; the flag slot instead
     pop rbx
     leave
     V_PACK rax, rdx

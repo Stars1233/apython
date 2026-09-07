@@ -1892,7 +1892,7 @@ section .text
 ;; ============================================================================
 ;; ---- func_traverse / func_clear ----
 ;; ============================================================================
-DEF_FUNC func_traverse
+DEF_FUNC func_traverse, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     mov rbx, rdi
 
@@ -1978,7 +1978,7 @@ END_FUNC func_clear
 ;; ============================================================================
 ;; ---- cell_traverse / cell_clear ----
 ;; ============================================================================
-DEF_FUNC cell_traverse
+DEF_FUNC cell_traverse, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     mov rbx, rdi
 
@@ -1990,7 +1990,7 @@ DEF_FUNC cell_traverse
     ret
 END_FUNC cell_traverse
 
-DEF_FUNC cell_clear
+DEF_FUNC cell_clear, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     mov rbx, rdi
 

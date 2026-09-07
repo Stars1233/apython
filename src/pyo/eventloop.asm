@@ -368,7 +368,7 @@ END_FUNC task_set_send_value
 ;; reachable and is never freed early.  It can leave a cycle uncollected.
 ;; ============================================================================
 global task_traverse
-DEF_FUNC task_traverse
+DEF_FUNC task_traverse, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     push r12
     push r13

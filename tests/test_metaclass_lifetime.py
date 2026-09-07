@@ -133,3 +133,62 @@ def churn_plain_classes():
 print(churn_plain_classes())
 gc.collect()
 print("done")
+
+
+def failed_class_creation_does_not_leak_the_metatype():
+    """A class that fails to be created still has to give back the metatype
+    reference its allocation took.
+
+    type_from_parts registers the half-built class in build_class_pending as
+    soon as it is allocated, and any raise after that -- mro_compute rejects
+    an inconsistent MRO -- unwinds through user_type_dealloc, which releases
+    ob_type.  Taking that reference later than the allocation made every
+    failure a release of one that was never taken, and enough of them drove
+    the static metatype's count to zero and segfaulted.
+    """
+    class A:
+        pass
+
+    class B(A):
+        pass
+
+    failures = 0
+    for _ in range(60):
+        try:
+            class C(A, B):          # an inconsistent MRO
+                pass
+        except TypeError:
+            failures += 1
+    # The metatype is still usable afterwards.
+    class D:
+        pass
+
+    return failures, D().__class__.__name__, type(D).__name__
+
+
+def failed_creation_with_a_python_metaclass():
+    class M(type):
+        pass
+
+    class A(metaclass=M):
+        pass
+
+    class B(A):
+        pass
+
+    failures = 0
+    for _ in range(60):
+        try:
+            class C(A, B, metaclass=M):
+                pass
+        except TypeError:
+            failures += 1
+
+    class D(metaclass=M):
+        pass
+
+    return failures, type(D).__name__
+
+
+print(failed_class_creation_does_not_leak_the_metatype())
+print(failed_creation_with_a_python_metaclass())

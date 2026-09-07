@@ -792,7 +792,7 @@ section .text
 ;; ============================================================================
 ;; ---- slice_traverse / slice_clear ----
 ;; ============================================================================
-DEF_FUNC slice_traverse
+DEF_FUNC slice_traverse, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     mov rbx, rdi
 
@@ -808,7 +808,7 @@ DEF_FUNC slice_traverse
     ret
 END_FUNC slice_traverse
 
-DEF_FUNC slice_clear_gc
+DEF_FUNC slice_clear_gc, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
     mov rbx, rdi
 
