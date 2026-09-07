@@ -134,7 +134,7 @@ DEF_FUNC sre_pattern_do_match, PM_FRAME
     mov rdx, [rbp - PM_STR]
     mov rcx, [rbp - PM_POS]
     mov r8, [rbp - PM_ENDPOS]
-    xor r9d, r9d               ; no codepoint cache
+    lea r9, [rel sre_shared_cpcache]   ; see its definition
     call sre_state_init
 
     ; Set fullmatch mode if applicable
@@ -440,6 +440,29 @@ DEF_FUNC sre_substr_from_state_empty
     call sre_new_slice
     leave
     ret
+
+;; ============================================================================
+;; sre_shared_cpcache -- one decoded subject, shared by every pattern method
+;; that has no scanner of its own to hold one.
+;;
+;; The engine indexes CODE POINTS, so a non-ASCII subject is decoded to u32
+;; before matching, and that is O(len).  finditer has a scanner and pays it
+;; once; a hand-written `while m := p.search(s, pos)` loop had nothing to hold
+;; the decode and paid it per call, which is quadratic over the subject.
+;; json.decoder is written exactly that way.
+;;
+;; One entry is enough for the shape that matters -- a loop walks ONE subject
+;; -- and it is keyed on the string, so alternating between two merely costs
+;; what it cost before.  The key is an OWNED reference: without one, a freed
+;; string whose address the allocator reused would read as a hit and the
+;; engine would index a stale decode.
+;; ============================================================================
+section .bss
+align 8
+sre_shared_cpcache: resq 3      ; an SRE_CpCache: buf, len, subject
+
+section .text
+
 section .rodata
 sse_nothing: db 0
 section .text
@@ -601,7 +624,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     lea rdi, [rbp - FA_STATE]
     mov rsi, [rbp - FA_PAT]
     mov rdx, [rbp - FA_STR]
-    xor r9d, r9d               ; no codepoint cache
+    lea r9, [rel sre_shared_cpcache]   ; see its definition
     call sre_state_init
 
     mov r12, [rbp - FA_PAT]   ; pattern
@@ -975,7 +998,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov rdx, [rbp - SUB_STR]
     xor ecx, ecx
     mov r8, 0x7fffffffffffffff
-    xor r9d, r9d               ; no codepoint cache
+    lea r9, [rel sre_shared_cpcache]   ; see its definition
     call sre_state_init
 
 .sub_loop:
@@ -1422,7 +1445,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov rdx, [rbp - SN_STR]
     xor ecx, ecx
     mov r8, 0x7fffffffffffffff
-    xor r9d, r9d               ; no codepoint cache
+    lea r9, [rel sre_shared_cpcache]   ; see its definition
     call sre_state_init
 
 .subn_loop:
@@ -1761,7 +1784,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     mov rdx, [rbp - SP_STR]
     xor ecx, ecx
     mov r8, 0x7fffffffffffffff
-    xor r9d, r9d               ; no codepoint cache
+    lea r9, [rel sre_shared_cpcache]   ; see its definition
     call sre_state_init
 
 .split_loop:
@@ -2414,6 +2437,7 @@ DEF_FUNC sre_scanner_new, 8            ; 5 pushes, so rsp is 16-aligned
     ; whether the cache is filled.
     mov qword [rbx + SRE_ScannerObject.cp_buf], 0
     mov qword [rbx + SRE_ScannerObject.cp_len], 0
+    mov qword [rbx + SRE_ScannerObject.cp_subject], 0
 
     mov rax, rbx
 
@@ -2447,6 +2471,13 @@ DEF_FUNC sre_scanner_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     jz .ssd_no_cache
     call ap_free
 .ssd_no_cache:
+    ; The cache keeps a reference to the string it decoded, so that the
+    ; address it keys on cannot be reused by a different one.
+    mov rdi, [rbx + SRE_ScannerObject.cp_subject]
+    test rdi, rdi
+    jz .ssd_no_subject
+    call obj_decref
+.ssd_no_subject:
 
     mov rdi, rbx
     call ap_free

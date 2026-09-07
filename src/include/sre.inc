@@ -212,6 +212,12 @@ endstruc
 struc SRE_CpCache
     .buf:  resq 1  ; +0: u32* decoded codepoints, NULL until first filled
     .len:  resq 1  ; +8: codepoints in .buf, before any endpos clamp
+    ; Which subject .buf is the decode of, an OWNED reference.  A scanner's
+    ; cache never needs it -- one scanner has one subject for its whole life
+    ; -- but the module-level cache the pattern methods share is handed a
+    ; different string every other call, and a borrowed pointer there would
+    ; let a freed str's reused address pass for a hit.
+    .subject: resq 1  ; +16: PyStrObject*, owned, or 0
 endstruc
 
 ; Recursion depth limit (matches CPython's default)
@@ -248,6 +254,11 @@ struc SRE_ScannerObject
     ; the buffer can neither outlive its subject nor go stale.
     .cp_buf:       resq 1 ; +56  SRE_CpCache.buf
     .cp_len:       resq 1 ; +64  SRE_CpCache.len
+    .cp_subject:   resq 1 ; +72  SRE_CpCache.subject -- these three ARE an
+                          ;      SRE_CpCache, laid out inline, and
+                          ;      sre_state_init is handed a pointer to the
+                          ;      first.  Growing that struct means growing
+                          ;      this, and the three must stay adjacent.
 endstruc
 
 ; Initial marks array size (number of i64 slots)

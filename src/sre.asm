@@ -19,6 +19,7 @@ extern ap_malloc
 extern ap_free
 extern ap_realloc
 extern ap_memcpy
+extern obj_decref
 extern obj_incref
 extern raise_exception
 extern exc_RuntimeError_type
@@ -1197,6 +1198,12 @@ DEF_FUNC sre_state_init, SSI_FRAME
     mov rdx, [rax + SRE_CpCache.buf]
     test rdx, rdx
     jz .nu_decode
+    ; ...and of THIS subject.  A scanner's cache only ever sees one, but the
+    ; module-level cache the pattern methods share sees a different string
+    ; every other call.
+    mov rcx, [rax + SRE_CpCache.subject]
+    cmp rcx, r13
+    jne .nu_evict
     mov [rbx + SRE_State.codepoint_buf], rdx
     mov r8, [rax + SRE_CpCache.len]
     ; .utf8_clamp reads endpos from SSI_UENDPOS, which only the decode path
@@ -1206,6 +1213,19 @@ DEF_FUNC sre_state_init, SSI_FRAME
     mov rax, [rbp - SSI_ENDPOS]
     mov [rbp - SSI_UENDPOS], rax
     jmp .utf8_clamp            ; owns_cpbuf stays 0: the cache owns it
+
+.nu_evict:
+    ; A different subject: drop what is held and decode afresh below.
+    mov rdi, rdx
+    push rax
+    call ap_free
+    pop rax
+    mov qword [rax + SRE_CpCache.buf], 0
+    mov rdi, [rax + SRE_CpCache.subject]
+    mov qword [rax + SRE_CpCache.subject], 0
+    push rax
+    call obj_decref
+    pop rax
 
 .nu_decode:
     ; UTF-8 decode to u32 codepoint array
@@ -1303,6 +1323,15 @@ DEF_FUNC sre_state_init, SSI_FRAME
     mov rdx, [rbx + SRE_State.codepoint_buf]
     mov [rax + SRE_CpCache.buf], rdx
     mov [rax + SRE_CpCache.len], r8
+    ; The subject is kept alive by the cache: its ADDRESS is the key, and a
+    ; freed string whose address is reused would otherwise read as a hit.
+    mov [rax + SRE_CpCache.subject], r13
+    push rax
+    push r8
+    mov rdi, r13
+    call obj_incref
+    pop r8
+    pop rax
     mov qword [rbx + SRE_State.owns_cpbuf], 0   ; the cache owns it now
 
 .utf8_clamp:
