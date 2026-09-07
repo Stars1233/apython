@@ -482,32 +482,18 @@ DEF_FUNC op_load_attr, LA_FRAME
     jmp .la_got_attr
 
 .la_try_dict:
-    ; No tp_getattr, or it found nothing: walk the MRO's tp_dicts.  Reading only
-    ; the exact type's hid everything object supplies -- `[].__len__` and
-    ; `None.__new__` among them.
+    ; No tp_getattr, or it found nothing: ask the class what it defines for
+    ; this name.  Reading only the exact type's dict hid everything object
+    ; supplies -- `[].__len__` and `None.__new__` among them -- so this is an
+    ; MRO walk, and type_lookup_cached is that walk with the answer kept
+    ; against the class's version.
     mov rdi, [rbp - LA_OBJ]
-    mov rax, [rdi + PyObject.ob_type]
-    mov [rbp - LA_WALK], rax
-.la_dict_loop:
-    mov rax, [rbp - LA_WALK]
-    test rax, rax
-    jz .la_attr_error
-    mov rax, [rax + PyTypeObject.tp_dict]
-    test rax, rax
-    jz .la_dict_next
-    mov rdi, rax
+    mov rdi, [rdi + PyObject.ob_type]
     mov rsi, [rbp - LA_NAME]
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
+    extern type_lookup_cached
+    call type_lookup_cached     ; rax = payload, edx = tag, rcx = owner
     test edx, edx
-    jnz .la_dict_found
-.la_dict_next:
-    mov rdi, [rbp - LA_OBJ]
-    mov rcx, [rdi + PyObject.ob_type]
-    mov rax, [rbp - LA_WALK]
-    MRO_NEXT rax, rcx
-    mov [rbp - LA_WALK], rax
-    jmp .la_dict_loop
+    jz .la_attr_error
 .la_dict_found:
 
     ; INCREF the result (dict_get returns borrowed ref — may be SmallInt)
@@ -2234,27 +2220,19 @@ DEF_FUNC op_store_attr, SA_FRAME
     jz .sa_no_property
 
 .sa_walk_mro:
+    ; The same question the load side asks, through the same cache: what does
+    ; this class define for this name?  Only reached when the flag above says
+    ; there is a data descriptor somewhere in the MRO -- but that flag is
+    ; per-CLASS, so one property makes every attribute of the class take this
+    ; path, and the walk it replaces ran on every store.
     test rcx, rcx
     jz .sa_no_property
-    cmp qword [rbp - SA_ORIGIN], 0
-    jne .sa_have_origin
-    mov [rbp - SA_ORIGIN], rcx
-.sa_have_origin:
-
-    mov rdi, [rcx + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jz .sa_walk_next
-
-    push rcx                      ; save current type
-    mov rsi, [rbp - SA_NAME]      ; name
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    pop rcx
-    test edx, edx               ; the tag, not the payload: a hit may be int 0
-    jnz .sa_found_in_type         ; found attr in type dict
-.sa_walk_next:
-    MRO_NEXT rcx, [rbp - SA_ORIGIN]
-    jmp .sa_walk_mro
+    mov rdi, rcx
+    mov rsi, [rbp - SA_NAME]
+    call type_lookup_cached     ; rax = payload, edx = tag
+    test edx, edx
+    jnz .sa_found_in_type
+    jmp .sa_no_property
 
 .sa_found_in_type:
 
