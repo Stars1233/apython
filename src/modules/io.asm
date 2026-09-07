@@ -720,6 +720,15 @@ FSA_FRAME equ 32            ; + 0 pushes = 32
 DEF_FUNC_LOCAL fileio_set_attr, FSA_FRAME
     mov [rbp - FSA_SELF], rdi
     mov [rbp - FSA_VAL], rdx
+    ; The key is built FIRST, because dict_new below clobbers rsi and the name
+    ; used to be read out of it afterwards.  That only mattered on the arm
+    ; that creates the dict, which nothing reached while instance_new was
+    ; making one eagerly for every instance; it is the ordinary path now, and
+    ; the first attribute set on a fresh FileIO called ap_strlen on 0x40.
+    mov rdi, rsi
+    call str_from_cstr_heap
+    mov [rbp - FSA_KEY], rax
+    mov rdi, [rbp - FSA_SELF]
     mov rax, [rdi + PyFileIOObject.inst_dict]
     test rax, rax
     jnz .fsa_have_dict
@@ -727,9 +736,6 @@ DEF_FUNC_LOCAL fileio_set_attr, FSA_FRAME
     mov rdi, [rbp - FSA_SELF]
     mov [rdi + PyFileIOObject.inst_dict], rax
 .fsa_have_dict:
-    mov rdi, rsi
-    call str_from_cstr_heap
-    mov [rbp - FSA_KEY], rax
     mov rdi, [rbp - FSA_SELF]
     mov rdi, [rdi + PyFileIOObject.inst_dict]
     mov rsi, [rbp - FSA_KEY]

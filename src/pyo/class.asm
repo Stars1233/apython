@@ -2579,6 +2579,10 @@ DEF_FUNC instance_traverse
     mov rbx, rdi
 
     ; Visit the instance dict, wherever this family keeps it
+    ; No NULL test, and that is VISIT_PTR's doing rather than an omission: it
+    ; is NULL-safe.  An instance carries no dict until something puts one
+    ; there, so this is the ordinary case and not a rare one.  Swapping this
+    ; for VISIT_V would break it silently.
     LOAD_INST_DICT rdi, rbx, .no_inst_dict
     VISIT_PTR rdi
 .no_inst_dict:

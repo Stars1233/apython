@@ -231,23 +231,14 @@ DEF_FUNC str_sub_new, SSN_FRAME
     pop rax
 
 .ssn_no_copy:
-    ; The tail __dict__, unless __slots__ suppresses it.  It is created here
-    ; rather than lazily so that every consumer of LOAD_INST_DICT can keep
-    ; reading a NULL as "this family has no dict at all".  SSN_SRC is dead by
-    ; now -- the copy path decref'd it.
+    ; The tail __dict__ is not created here either.  The comment that used to
+    ; be here said it had to be, "so that every consumer of LOAD_INST_DICT can
+    ; keep reading a NULL as this family has no dict at all" -- and that was
+    ; already untrue twice over: .ssn_zero_tail below leaves the word at 0,
+    ; instance_setattr's .sa_no_slot arm has created the tail dict on demand
+    ; for as long as it has existed, and bytes subclasses ship a NULL one.
+    ; SSN_SRC is dead by now -- the copy path decref'd it.
     mov [rbp - SSN_SRC], rax
-    mov rdi, [rbp - SSN_TYPE]
-    mov rcx, [rdi + PyTypeObject.tp_flags]
-    test rcx, TYPE_FLAG_HAS_SLOTS
-    jnz .ssn_no_tail_dict
-    cmp qword [rdi + PyTypeObject.tp_dictoffset], TP_DICT_AT_TAIL
-    jne .ssn_no_tail_dict
-    extern dict_new
-    call dict_new
-    mov rdx, [rbp - SSN_SRC]
-    INST_DICT_TAIL rcx, rdx
-    mov [rcx], rax
-.ssn_no_tail_dict:
     mov rax, [rbp - SSN_SRC]
 
     ; gc_alloc does not INCREF the type it stamps into ob_type.
@@ -487,18 +478,16 @@ DEF_FUNC instance_new
     mov rdi, rbx
     call obj_incref
 
-    ; Create inst_dict only if class doesn't have __slots__ (or has __dict__ in __slots__)
-    mov rax, [rbx + PyTypeObject.tp_flags]
-    test rax, TYPE_FLAG_HAS_SLOTS
-    jnz .in_no_dict              ; __slots__ suppresses inst_dict
-
-    cmp qword [rbx + PyTypeObject.tp_dictoffset], 0
-    je .in_no_dict              ; this family's instances carry no dict
-    cmp qword [rbx + PyTypeObject.tp_dictoffset], TP_DICT_AT_TAIL
-    je .in_no_dict              ; a tail dict belongs to str_sub_new, not here
-    call dict_new
-    STORE_INST_DICT r12, rax, rcx, .in_no_dict
-
+    ; The instance dict is NOT created here.  The rep stosq above already left
+    ; the slot at 0, and NULL is what every consumer of LOAD_INST_DICT already
+    ; handles: instance_setattr creates one on the first store and
+    ; obj_generic_attr creates and attaches one on the first read of
+    ; __dict__.  int subclasses and bytes subclasses have shipped a NULL slot
+    ; from the start.
+    ;
+    ; It cost a dict_new -- gc_alloc plus two ap_mallocs and two rep stosqs,
+    ; nearly 300 bytes -- for every instance, including every one that never
+    ; gets an attribute.
 .in_no_dict:
     mov rdi, r12
     call gc_track

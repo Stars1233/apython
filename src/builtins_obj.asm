@@ -2432,20 +2432,20 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     ; vars(D()) after a single d['a'] = 1 was a segfault.
     LOAD_INST_DICT rax, rdi, .vars_ask
     test rax, rax
-    jz .vars_empty_dict
+    jz .vars_ask                ; see below
     INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.vars_empty_dict:
-    ; Instance has no dict yet — create empty dict
-    call dict_new
-    mov edx, TAG_PTR
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
+    ; A NULL instance dict used to answer with a fresh, DETACHED one here, so
+    ; `vars(o)['x'] = 1` silently did not stick and `vars(o) is o.__dict__` was
+    ; False.  It only mattered for int and bytes subclasses then; now that
+    ; instance_new leaves the slot NULL until something needs it, every fresh
+    ; instance reaches this.  .vars_ask goes through obj_getattr_opt to
+    ; __dict__, whose .oga_dict arm creates one AND attaches it -- two paths
+    ; that happened to agree become one path.
 
 .vars_no_arg:
     ; Same as locals()
