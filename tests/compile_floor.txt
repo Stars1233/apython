@@ -10,6 +10,7 @@ test_aiter_anext
 test_annotations
 test_argument_messages
 test_arithmetic
+test_array
 test_ast_mangling
 test_ast
 test_ast_type_comments

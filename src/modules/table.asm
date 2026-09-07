@@ -22,6 +22,7 @@
 
 ASM_INIT
 
+extern array_module_create
 extern time_module_create
 extern asyncio_module_create
 extern sre_module_create
@@ -44,6 +45,7 @@ bm_n_sys:      db "sys", 0
 bm_n_time:     db "time", 0
 bm_n_asyncio:  db "_asynciocore", 0
 bm_n_sre:      db "_sre", 0
+bm_n_array:    db "array", 0
 bm_n_abc:      db "_abc", 0
 bm_n_errno:    db "errno", 0
 bm_n_weakref:  db "_weakref", 0
@@ -63,6 +65,7 @@ global builtin_module_table
 ; rows that would -- sys and builtins -- are wired before the loop runs.
 builtin_module_table:
     dq bm_n_abc,      abc_module_create
+    dq bm_n_array,    array_module_create
     dq bm_n_asyncio,  asyncio_module_create
     dq bm_n_io,       io_module_create
     dq bm_n_socket,   socket_module_create

@@ -22,6 +22,8 @@ extern obj_decref
 extern obj_is_true
 extern raise_exception
 extern exc_TypeError_type
+extern current_exception
+extern eval_exception_unwind
 extern exc_ValueError_type
 extern int_to_i64
 extern type_type
@@ -337,6 +339,14 @@ DEF_FUNC_BARE op_binary_subscr
 
 .subscr_done:
     ; rax = result payload, rdx = result tag
+    ;
+    ; The NULL test comes BEFORE the operands are released.  The unwinder
+    ; restores r13 to the stack as it stood before this instruction, so the
+    ; operands are back on it and the unwind releases them -- releasing them
+    ; here as well frees each twice, which is a crash at whatever touches one
+    ; next rather than here.
+    test edx, edx
+    jz .bs_slot_failed
     SAVE_FAT_RESULT            ; save (rax,rdx) — shifts rsp refs by +16
     mov rdi, [rsp + 16 + BSUB_KEY]
     mov rsi, [rsp + 16 + BSUB_KTAG]
@@ -352,6 +362,26 @@ DEF_FUNC_BARE op_binary_subscr
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
     DISPATCH
+
+.bs_slot_failed:
+    ; A slot that answers NULL is REPORTING, not answering.  This pushed it
+    ; and carried on, so `a[3]` as a statement left the exception pending
+    ; with nothing to attach it to and it surfaced at whatever ran next --
+    ; CPython's BINARY_SUBSCR is `ERROR_IF(res == NULL, error)`.
+    ;
+    ; It went unnoticed because every mp_subscript in the tree until now
+    ; RAISED instead, tail-jumping into the unwinder.  array's cannot: the
+    ; sequence iterator has to be able to CATCH the IndexError it raises and
+    ; read it as exhaustion, which a tail-jump takes straight past.
+    add rsp, BSUB_SIZE
+    cmp qword [rel current_exception], 0
+    je .bs_no_exception
+    ; No `leave`: this handler is DEF_FUNC_BARE and carves its own space,
+    ; which the add above has already given back.
+    jmp eval_exception_unwind
+.bs_no_exception:
+    ; A NULL with nothing pending has no coherent value to stand for either.
+    RAISE exc_TypeError_type, "subscript failed without an exception"
 END_FUNC op_binary_subscr
 
 ;; ============================================================================
@@ -490,6 +520,13 @@ DEF_FUNC_BARE op_store_subscr
     RAISE exc_TypeError_type, "object does not support item assignment"
 
 .store_done:
+    ; mp_ass_subscript reports failure with -1, the way tp_setattr does.  It
+    ; was never looked at, so `a[5] = 1` on a short array set an IndexError
+    ; and carried on, and the exception surfaced at whatever ran next.  The
+    ; operands stay on the value stack for the unwinder, which restores r13
+    ; to the state before this instruction and releases them there.
+    test eax, eax
+    js .ss_slot_failed
     mov rdi, [rsp + SSUB_VAL]
     mov rsi, [rsp + SSUB_VTAG]
     DECREF_VAL rdi, rsi
@@ -504,6 +541,15 @@ DEF_FUNC_BARE op_store_subscr
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
     DISPATCH
+
+.ss_slot_failed:
+    add rsp, SSUB_SIZE
+    cmp qword [rel current_exception], 0
+    je .ss_no_exception
+    jmp eval_exception_unwind
+.ss_no_exception:
+    RAISE exc_TypeError_type, \
+          "item assignment failed without an exception"
 END_FUNC op_store_subscr
 
 ;; ============================================================================

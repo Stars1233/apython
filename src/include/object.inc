@@ -112,6 +112,22 @@ endstruc
 ; The buffer is always NUL-terminated one byte past ob_size, so the data
 ; pointer can be handed to anything that wants a C string; ob_cap counts the
 ; usable bytes and excludes that terminator.
+; array.array: a mutable sequence of C scalars, one typecode for the lot.
+; ob_data holds RAW SCALARS and not Values -- an array of 'i' is four-byte
+; machine integers -- which is why the type has no tp_traverse and no
+; tp_clear: there is nothing in there for the collector to follow, and giving
+; it one would have it read integers as pointers.
+struc PyArrayObject
+    .ob_refcnt:  resq 1   ; +0
+    .ob_type:    resq 1   ; +8
+    .ob_size:    resq 1   ; +16: item COUNT, not bytes
+    .ob_cap:     resq 1   ; +24: items that fit in ob_data
+    .ob_data:    resq 1   ; +32: the buffer, or 0 when empty
+    .ob_code:    resq 1   ; +40: the typecode letter
+    .ob_isize:   resq 1   ; +48: bytes per item
+    .ob_kind:    resq 1   ; +56: AK_SIGNED / AK_UNSIGNED / AK_FLOAT / AK_UNICODE
+endstruc
+
 struc PyByteArrayObject
     .ob_refcnt: resq 1    ; +0
     .ob_type:   resq 1    ; +8

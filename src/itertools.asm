@@ -2125,6 +2125,7 @@ END_FUNC reversed_type_call
 
 ;; seq_iter_new(rdi=obj) -> seq_iter_type instance
 ;; obj must be INCREFed by caller (we take ownership)
+global seq_iter_new
 DEF_FUNC seq_iter_new, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi                   ; save obj

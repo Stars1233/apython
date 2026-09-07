@@ -237,6 +237,7 @@ END_FUNC str_byte_to_cp
 ;; starts there.  builtin_ord had the only decoder in the tree and it insists
 ;; the character is the whole string.
 ;; ============================================================================
+global str_cp_at
 DEF_FUNC str_cp_at
     push rbx
     push r12
