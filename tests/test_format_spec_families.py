@@ -107,4 +107,28 @@ for fill, align, sign, alt, zero, width, sep, prec, ty in itertools.product(
         print("%-16s %-8r %s" % (spec, v, out))
 print("crossed:", seen)
 
+print("--- PEP 682's z, against the sign and the trim ---")
+ZVALS = (0.0, -0.0, 0.0001, -0.0001, 0.4, -0.4, 1.5, -1.5, 1e20, -1e20,
+         float("inf"), float("-inf"), 12345.6789, -12345.6789)
+for _sign in ("", "+", " ", "-"):
+    for _z in ("", "z"):
+        for _prec in ("", ".0", ".2"):
+            for _ty in ("", "f", "e", "g", "F", "E", "G", "%"):
+                _spec = _sign + _z + _prec + _ty
+                for _v in ZVALS:
+                    try:
+                        _out = repr(format(_v, _spec))
+                    except ValueError as e:
+                        _out = "ValueError: %s" % e
+                    print("%-10s %-12r %s" % (_spec, _v, _out))
+
+print("--- an unknown type code names itself the way CPython does ---")
+for _c in ("\t", "\x01", "\x7f", "\x80", "\xe9", "\u2603", "~", "Q"):
+    try:
+        format(0.0, _c)
+    except ValueError as e:
+        print("%r -> %s" % (_c, e))
+    else:
+        print("%r -> no error" % (_c,))
+
 print("done")

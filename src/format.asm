@@ -293,9 +293,15 @@ DEF_FUNC format_apply_spec, FS_FRAME
     ; ---- [type] ------------------------------------------------------------
     cmp r14, r12
     jge .fs_parsed
-    movzx ecx, byte [r13 + r14]
-    mov [rbp - FS_TYPE], rcx
-    inc r14
+    ; The type is one CHARACTER, not one byte: format(0.0, "\u00e9") answered
+    ; "Invalid format specifier" because the two bytes of the letter looked
+    ; like a type followed by trailing junk.
+    mov rdi, r13
+    mov rsi, r14
+    extern ucase_utf8_get
+    call ucase_utf8_get
+    mov [rbp - FS_TYPE], rax
+    add r14, rcx
     cmp r14, r12
     jne .fs_bad_spec
 
@@ -439,9 +445,54 @@ DEF_FUNC format_apply_spec, FS_FRAME
     extern rbt_append_cstr
     call rbt_append_cstr
     mov rcx, [rbp - FS_TYPE]
+    cmp rcx, 32
+    jbe .fs_uc_escape
+    cmp rcx, 128
+    jae .fs_uc_escape
     mov [rax], cl
     mov byte [rax + 1], 0
     lea rdi, [rax + 1]
+    jmp .fs_uc_typename
+.fs_uc_escape:
+    ; Outside (32, 128) CPython writes \x and the hex, unpadded --
+    ; unknown_presentation_type() in Objects/stringlib/unicode_format.h.
+    ; Emitting the raw byte instead made a tab or a NUL vanish from the
+    ; message, and a non-ASCII letter arrive as half of its encoding.
+    mov rdi, rax
+    CSTRING rsi, "\x"
+    call rbt_append_cstr
+    mov r11, [rbp - FS_TYPE]
+    mov ecx, 60                         ; the top nibble's shift
+    xor r9d, r9d                        ; nothing emitted yet
+.fs_uc_nibble:
+    mov rdx, r11
+    shr rdx, cl
+    and edx, 15
+    jnz .fs_uc_digit
+    test r9d, r9d
+    jz .fs_uc_next                      ; a leading zero
+.fs_uc_digit:
+    mov r9d, 1
+    cmp edx, 10
+    jb .fs_uc_dec
+    add edx, 'a' - 10
+    jmp .fs_uc_put
+.fs_uc_dec:
+    add edx, '0'
+.fs_uc_put:
+    mov [rax], dl
+    inc rax
+.fs_uc_next:
+    sub ecx, 4
+    jns .fs_uc_nibble
+    test r9d, r9d
+    jnz .fs_uc_zdone
+    mov byte [rax], '0'                 ; the code point was 0
+    inc rax
+.fs_uc_zdone:
+    mov byte [rax], 0
+    mov rdi, rax
+.fs_uc_typename:
     CSTRING rsi, "' for object of type '"
     call rbt_append_cstr
     mov rdi, rax
@@ -1870,9 +1921,18 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     jmp .ffb_trim_find
 .ffb_trim_found:
     mov r10, r9                         ; one past the mantissa
+    ; Where the mantissa's first digit is: one in, when the render carries a
+    ; sign.  Stopping at a fixed index 1 ate the digit of a signed zero --
+    ; format(-0.0, ".0") trimmed "-0e+00" down to "-e+00".
+    xor edi, edi
+    cmp byte [rcx], '-'
+    jne .ffb_trim_limit
+    mov edi, 1
+.ffb_trim_limit:
+    inc rdi                             ; one digit always survives
     ; Walk back over zeros, then the point.
 .ffb_trim_zeros:
-    cmp r10, 1
+    cmp r10, rdi
     jle .ffb_trim_copy
     cmp byte [rcx + r10 - 1], '0'
     jne .ffb_trim_dot
@@ -2099,13 +2159,72 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     pop rax
 
 .ffb_have_string:
-    ; A leading '-' is what '=' alignment keeps in front of the padding.
+    ; The sign, in the order PEP 682 needs: a leading '-' may be COERCED away
+    ; first, and only then is an explicit '+' or ' ' applied.  Running the two
+    ; the other way round meant a coerced result lost the sign the spec asked
+    ; for -- format(-0.0001, "+z.2f") answered '0.00' where CPython gives
+    ; '+0.00' -- and, worse, the add-sign arm fell THROUGH into the coercion,
+    ; so `format(0.0, "+z")` had its own '+' read as the sign to strip.
     mov qword [r12 - FS_SIGNCH], 0
     cmp qword [rax + PyStrObject.ob_size], 0
     jle .ffb_done
     cmp byte [rax + PyStrObject.data], '-'
-    je .ffb_negative
+    jne .ffb_no_minus
 
+    cmp qword [r12 - FS_ZCOERCE], 0
+    je .ffb_keep_minus
+
+    ; With `z`, a result whose digits are all zero loses its sign.  The test
+    ; is on the RENDERED text, not the value: -0.0001 at two decimal places
+    ; rounds to -0.00 and is coerced, while -0.4 is not.  inf and nan are
+    ; never coerced -- CPython guards this with Py_IS_FINITE, and a scan that
+    ; only recognises '1'..'9' as "a real digit" walks their letters and calls
+    ; them zero.
+    mov rcx, [rax + PyStrObject.ob_size]
+    lea rsi, [rax + PyStrObject.data]
+    mov r8, 1                           ; skip the '-'
+.ffb_z_scan:
+    cmp r8, rcx
+    jge .ffb_z_all_zero
+    movzx edx, byte [rsi + r8]
+    cmp dl, 'e'
+    je .ffb_z_all_zero                  ; the exponent's digits do not count
+    cmp dl, 'E'
+    je .ffb_z_all_zero
+    or  dl, 0x20                        ; inf/nan, in either case
+    cmp dl, 'i'
+    je .ffb_keep_minus
+    cmp dl, 'n'
+    je .ffb_keep_minus
+    movzx edx, byte [rsi + r8]
+    cmp dl, '1'
+    jb .ffb_z_next
+    cmp dl, '9'
+    jbe .ffb_keep_minus                 ; a real digit: the sign stays
+.ffb_z_next:
+    inc r8
+    jmp .ffb_z_scan
+
+.ffb_z_all_zero:
+    ; Re-render without the leading '-', then let the sign rules below run
+    ; over the result: a coerced zero still takes an explicit '+' or ' '.
+    mov rbx, rax
+    lea rdi, [rbx + PyStrObject.data + 1]
+    call str_from_cstr_heap
+    test rax, rax
+    jz .ffb_z_kept
+    push rax
+    mov rdi, rbx
+    call obj_decref
+    pop rax
+    jmp .ffb_no_minus
+.ffb_z_kept:
+    mov rax, rbx
+.ffb_keep_minus:
+    mov qword [r12 - FS_SIGNCH], 1
+    jmp .ffb_done
+
+.ffb_no_minus:
     ; float_format_spec knows nothing about the sign flag, so a '+' or a
     ; leading space has to be put on here: "%+.1f" % 1.25 was "1.2".
     mov rcx, [r12 - FS_SIGN]
@@ -2140,47 +2259,7 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     mov rdi, rbx
     call obj_decref
     pop rax
-
-.ffb_negative:
     mov qword [r12 - FS_SIGNCH], 1
-    ; PEP 682: with `z`, a result whose digits are all zero loses its sign.
-    ; The test is on the RENDERED text, not the value, because -0.0001 at two
-    ; decimal places rounds to -0.00 and is coerced while -0.4 is not.
-    cmp qword [r12 - FS_ZCOERCE], 0
-    je .ffb_done
-    mov rcx, [rax + PyStrObject.ob_size]
-    lea rsi, [rax + PyStrObject.data]
-    mov r8, 1                           ; skip the '-'
-.ffb_z_scan:
-    cmp r8, rcx
-    jge .ffb_z_all_zero
-    movzx edx, byte [rsi + r8]
-    cmp dl, 'e'
-    je .ffb_z_all_zero                  ; the exponent's digits do not count
-    cmp dl, 'E'
-    je .ffb_z_all_zero
-    cmp dl, '1'
-    jb .ffb_z_next
-    cmp dl, '9'
-    jbe .ffb_done                       ; a real digit: the sign stays
-.ffb_z_next:
-    inc r8
-    jmp .ffb_z_scan
-.ffb_z_all_zero:
-    ; Re-render without the leading '-'.
-    mov rbx, rax
-    lea rdi, [rbx + PyStrObject.data + 1]
-    call str_from_cstr_heap
-    test rax, rax
-    jz .ffb_z_kept
-    push rax
-    mov rdi, rbx
-    call obj_decref
-    pop rax
-    mov qword [r12 - FS_SIGNCH], 0
-    jmp .ffb_done
-.ffb_z_kept:
-    mov rax, rbx
 
 .ffb_done:
     pop r12
