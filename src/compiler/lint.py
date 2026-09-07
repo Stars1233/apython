@@ -432,6 +432,54 @@ def check_file_size(files):
     return bad
 
 
+def check_slot_table(files):
+    """Rows of slot_table that drive the same slot must be adjacent.
+
+    type_install_slots resolves a slot from every dunder that names it -- both
+    __setattr__ and __delattr__ drive tp_setattr, all six comparisons drive
+    tp_richcompare, and each binary operator's forward and reflected names
+    drive one nb_ field.  It walks the table once and flushes a slot when the
+    NEXT row names a different one, which is CPython's own
+    `do { ... } while ((++p)->offset == offset)`.
+
+    Scattered rows silently undo each other: with __radd__ thirty rows after
+    __add__, a class defining only __add__ had its wrapper installed by the
+    first row and cleared by the second, and every builtin subclass lost its
+    arithmetic.
+    """
+    bad = []
+    for path in files:
+        if not path.endswith('slots.asm'):
+            continue
+        with open(path) as fh:
+            lines = fh.read().split('\n')
+        try:
+            start = next(i for i, l in enumerate(lines)
+                         if l.startswith('slot_table:'))
+        except StopIteration:
+            continue
+        seen = {}
+        prev = None
+        for n in range(start + 1, len(lines)):
+            line = lines[n]
+            if not line.startswith('    dq sl_'):
+                if line.strip().startswith('dq 0'):
+                    break
+                continue
+            parts = [x.strip() for x in line.replace('    dq ', '').split(',')]
+            if len(parts) < 3:
+                continue
+            key = (parts[1], parts[2])
+            if key != prev and key in seen:
+                bad.append((path, n + 1,
+                            "slot_table row for %s is not beside the other "
+                            "rows that drive %s" % (parts[0], parts[2]),
+                            "move it next to line %d" % (seen[key] + 1)))
+            seen.setdefault(key, n)
+            prev = key
+    return bad
+
+
 ALIGN_FLOOR = os.path.join(ROOT, 'tests', 'align_floor.txt')
 DOCBLOCK_FLOOR = 'tests/docblock_floor.txt'
 
@@ -905,6 +953,7 @@ def main():
                 + check_text(everything) + check_guards(headers)
                 + check_type_tables(everything, nfields)
                 + check_alignment(everything)
+                + check_slot_table(everything)
                 + check_handler_alignment(everything)
                 + check_tailjumps(scoped)
                 + check_callee_saved(scoped) + check_saved_writes(scoped))

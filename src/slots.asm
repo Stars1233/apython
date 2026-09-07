@@ -40,6 +40,8 @@ struc SlotEntry
 endstruc
 
 extern obj_is_true
+extern object_type
+extern none_singleton
 extern dunder_lookup
 extern dunder_lookup_owner
 extern dunder_call_1
@@ -158,9 +160,81 @@ DEF_FUNC_LOCAL slot_ensure_table
 END_FUNC slot_ensure_table
 
 ;; ============================================================================
+;; slot_table_offset(rsi = a SlotEntry kind) -> rax = the byte offset of the
+;;   method-table pointer that kind lives in, within PyTypeObject
+;;
+;; The mapping slot_ensure_table already makes, needed on its own by the two
+;; callers that want to READ a table rather than materialise one: the arm that
+;; installs a builtin base's slot, and the one that declines to clear a slot
+;; in a table this type does not have.
+;; ============================================================================
+DEF_FUNC_BARE slot_table_offset
+    cmp esi, SLOT_NUMBER
+    je .sto_number
+    cmp esi, SLOT_SEQUENCE
+    je .sto_sequence
+    mov rax, PyTypeObject.tp_as_mapping
+    ret
+.sto_number:
+    mov rax, PyTypeObject.tp_as_number
+    ret
+.sto_sequence:
+    mov rax, PyTypeObject.tp_as_sequence
+    ret
+END_FUNC slot_table_offset
+
+;; ============================================================================
+;; slot_current(rbx = the SlotEntry, rbp = type_install_slots' frame)
+;;   -> rax = what TIS_TYPE's slot for that entry holds right now, or 0
+;;
+;; Only type_install_slots calls this, and only to ask whether the slot still
+;; holds the wrapper it installed -- which is what makes clearing safe.  It
+;; reads the caller's frame directly rather than taking the type as an
+;; argument, because the entry is already in rbx there.
+;; ============================================================================
+DEF_FUNC_BARE slot_current
+    mov rsi, [rbx + SlotEntry.kind]
+    mov rcx, [rbp - TIS_TYPE]
+    test rsi, rsi
+    jnz .sc_indirect
+    mov rax, [rbx + SlotEntry.offset]
+    mov rax, [rcx + rax]
+    ret
+.sc_indirect:
+    push rbx
+    call slot_table_offset
+    pop rbx
+    mov rcx, [rbp - TIS_TYPE]
+    mov rcx, [rcx + rax]
+    xor eax, eax
+    test rcx, rcx
+    jz .sc_done
+    mov rax, [rbx + SlotEntry.offset]
+    mov rax, [rcx + rax]
+.sc_done:
+    ret
+END_FUNC slot_current
+
+;; ============================================================================
 ;; slot_tp_hash(rdi = self, edx = tag) -> rax = i64 hash
 ;; ============================================================================
-DEF_FUNC slot_tp_hash
+DEF_FUNC slot_tp_hash, 8    ; + 1 push = 16, 16-aligned
+    ; `__hash__ = None` makes the type unhashable -- the one None case
+    ; update_one_slot special-cases, where it installs
+    ; PyObject_HashNotImplemented.  Asked here for the same reason
+    ; slot_tp_iter asks: dunder_call_1 would otherwise report a NoneType.
+    push rdi
+    mov rdi, [rdi + PyObject.ob_type]
+    lea rsi, [rel sl_hash_name]
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    pop rdi
+    test edx, edx
+    jz .sth_go
+    IS_NONE rax, rcx
+    je .sth_unhashable
+
+.sth_go:
     lea rsi, [rel sl_hash_name]
     call dunder_call_1
     V_UNPACK rax, rdx
@@ -176,6 +250,10 @@ DEF_FUNC slot_tp_hash
     ret
 .failed:
     call slot_reraise
+.sth_unhashable:
+    mov rsi, rdi
+    CSTRING rdi, `unhashable type: '\x01'`
+    jmp raise_type_error_with_name
 END_FUNC slot_tp_hash
 
 ;; ============================================================================
@@ -893,7 +971,24 @@ END_FUNC slot_reraise
 ;; get_iterator does `call rax` and then reads ob_type off the result without
 ;; a NULL check, so this must either return an object or not return.
 ;; ============================================================================
-DEF_FUNC slot_tp_iter
+DEF_FUNC slot_tp_iter, 8    ; + 1 push = 16, 16-aligned
+    ; `__iter__ = None` disables iteration, and says so in the type's own
+    ; name.  This is one of exactly two slots whose wrapper interprets None
+    ; -- the other is tp_hash -- and it has to be asked here, before
+    ; dunder_call_1 turns a None dunder into "'NoneType' object is not
+    ; callable".
+    push rdi
+    mov rdi, [rdi + PyObject.ob_type]
+    lea rsi, [rel dunder_iter]
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    pop rdi
+    test edx, edx
+    jz .sti_go                  ; absent: the ordinary path reports it
+    IS_NONE rax, rcx
+    je .sti_disabled
+
+.sti_go:
     lea rsi, [rel dunder_iter]
     call dunder_call_1
     V_UNPACK rax, rdx
@@ -903,6 +998,11 @@ DEF_FUNC slot_tp_iter
     ret
 .failed:
     call slot_reraise           ; does not return
+.sti_disabled:
+    mov rsi, rdi
+    CSTRING rdi, `'\x01' object is not iterable`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC slot_tp_iter
 
 ;; ============================================================================
@@ -989,6 +1089,8 @@ DEF_FUNC slot_tp_call, STC_FRAME
     mov rbx, rsi                ; args
     mov r12, rdx                ; nargs
     mov qword [rbp - STC_HEAP], 0
+    mov qword [rbp - STC_FUNC], 0   ; the first .stc_not_callable jump is
+                                    ; before the lookup that fills it
 
     ; __call__ on the type, along the MRO.
     mov rdi, [rdi + PyObject.ob_type]
@@ -1055,7 +1157,23 @@ DEF_FUNC slot_tp_call, STC_FRAME
 
 .stc_not_callable:
     ; The slot is installed, so __call__ was there at class creation and has
-    ; since been removed or replaced with something uncallable.
+    ; since been removed or replaced with something uncallable.  Name what was
+    ; found: `__call__ = None` is the common way to get here, and CPython says
+    ; "'NoneType' object is not callable" for it -- the message used to name
+    ; nothing at all.
+    mov rax, [rbp - STC_FUNC]
+    test rax, rax
+    jz .stc_nc_anon
+    mov rsi, [rax + PyObject.ob_type]
+    CSTRING rdi, `'\x01' object is not callable`
+    extern type_name_message
+    call type_name_message      ; rax = the composed C string
+    mov rsi, rax
+    lea rdi, [rel exc_TypeError_type]
+    extern set_exception
+    call set_exception
+    jmp .stc_fail
+.stc_nc_anon:
     SET_EXC exc_TypeError_type, "object is not callable"
 
 .stc_fail:
@@ -1083,13 +1201,18 @@ TIS_TYPE  equ 8
 TIS_ENTRY equ 16
 TIS_FOUND equ 24
 TIS_OWNER equ 32            ; the MRO entry whose tp_dict answered
-TIS_FRAME equ 48            ; + 2 pushes = 64
+TIS_BEST  equ 40            ; the strongest answer so far for this slot's group
+TIS_RANK  equ 48            ; and how strong it is: 2 wrapper, 1 inherited, 0 none
+TIS_SRC   equ 56            ; which type an inherited slot is read from
+TIS_FRAME equ 64            ; + 2 pushes = 80, 16-aligned
 
 DEF_FUNC type_install_slots, TIS_FRAME
     push rbx
     push r12
 
     mov [rbp - TIS_TYPE], rdi
+    mov qword [rbp - TIS_BEST], 0
+    mov dword [rbp - TIS_RANK], 0
     lea rbx, [rel slot_table]
 
 .next_entry:
@@ -1105,7 +1228,7 @@ DEF_FUNC type_install_slots, TIS_FRAME
     V_UNPACK rax, rdx
     mov rbx, [rbp - TIS_ENTRY]
     test edx, edx
-    jz .skip                    ; the class does not define this dunder
+    jz .not_found               ; nothing in the MRO defines this dunder
     mov [rbp - TIS_FOUND], rax
 
     ; A dunder a BUILTIN base supplies is not a definition this class made,
@@ -1125,14 +1248,19 @@ DEF_FUNC type_install_slots, TIS_FRAME
     ; nothing static, so the test is one flag on the type that answered.
     mov rcx, [rbp - TIS_OWNER]
     test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
-    jz .skip
-    ; A dunder explicitly set to None disables the protocol in Python, so
-    ; leave the slot empty rather than installing a wrapper that would call
-    ; None.
-    extern none_singleton
-    lea rcx, [rel none_singleton]
-    cmp rax, rcx
-    je .skip
+    jz .from_builtin
+    ; A dunder explicitly set to None is NOT skipped.  update_one_slot
+    ; special-cases None for tp_hash alone; everywhere else the generic
+    ; wrapper is installed and the call fails as "'NoneType' object is not
+    ; callable", which is what CPython answers for __setattr__ = None,
+    ; __getattr__ = None and __call__ = None.  The disabling that does happen
+    ; lives in the wrappers: slot_tp_iter and slot_tp_hash test for None
+    ; themselves, so `__iter__ = None` says "not iterable" while
+    ; `callable(C())` stays True for `__call__ = None`.
+    ;
+    ; Skipping here left the previous slot in place, so `__setattr__ = None`
+    ; silently stored and `__iter__ = None` after the class was built did
+    ; nothing at all.
     ; object's own defaults are not a definition.  They live in
     ; object_type.tp_dict so that `MutableMapping.__ne__` and friends can be
     ; bound by name, but a builtin subclass that inherits one must keep the
@@ -1141,21 +1269,161 @@ DEF_FUNC type_install_slots, TIS_FRAME
     ; instead of tuple's comparison.
     mov rax, [rbp - TIS_FOUND]
 
+    mov rdx, [rbx + SlotEntry.wrapper]
+    mov r8d, 2
+    jmp .store
+
+.not_found:
+    ; Nothing in the MRO answers this name any more -- `del C.__iter__`.  The
+    ; slot has to be EMPTIED, or it keeps pointing at a wrapper that finds no
+    ; dunder and raises "slot wrapper failed without an exception" where
+    ; CPython says "'A' object is not iterable".
+    ;
+    ; Writing 0 is the whole of it, and not "re-derive from the base":
+    ; update_one_slot begins with NULL and ends `*ptr = specific ? specific :
+    ; generic`, and inheritance is not re-derived because the lookup walks the
+    ; WHOLE MRO -- a base that supplies the dunder is simply found, and that
+    ; is the arm below.
+    xor edx, edx
+    xor r8d, r8d
+    jmp .store
+
+.from_builtin:
+    ; A dunder a BUILTIN base supplies is not a definition this class made,
+    ; and a generic wrapper must not be installed over it.  Install the
+    ; OWNER's slot: CPython takes `specific = d->d_wrapped`, the base's own C
+    ; function.  Leaving whatever is already there is right only at class
+    ; creation, when type_from_parts has just copied that value in; after a
+    ; delete the slot holds a stale wrapper and leaving it is the bug.
+    ;
+    ; Without this, `class E(int): pass` finds int's own __add__ in the MRO
+    ; and would get a wrapper over it -- and int.__add__ refuses a float, so
+    ; E(1) + 2.5 would answer NotImplemented both ways round and raise, where
+    ; int's nb_add coerces and CPython answers 3.5.
+    ; WHOSE slot to install.  For a real builtin base -- list, int, tuple --
+    ; it is that base's, which is what type_from_parts copied in at creation
+    ; and what a delete has to put back.
+    ;
+    ; object is the exception, and it has to be read from THIS type instead.
+    ; object's dunders live in its tp_dict so that `MutableMapping.__ne__`
+    ; and friends can be bound by name, but a heaptype's generic slot is not
+    ; object's -- it is instance_setattr, instance_getattr and the rest, which
+    ; type_from_parts already installed.  Writing object's over them made
+    ; every plain `self.x = 1` answer "cannot set attribute".
+    mov rcx, [rbp - TIS_OWNER]
+    lea rax, [rel object_type]
+    cmp rcx, rax
+    jne .from_builtin_have_src
+    mov rcx, [rbp - TIS_TYPE]   ; leave this type's own slot as it stands
+.from_builtin_have_src:
+    mov [rbp - TIS_SRC], rcx
+    mov rsi, [rbx + SlotEntry.kind]
+    test rsi, rsi
+    jnz .from_builtin_indirect
+    mov rax, [rbx + SlotEntry.offset]
+    mov rdx, [rcx + rax]
+    mov r8d, 1
+    jmp .store
+.from_builtin_indirect:
+    ; The source's method table, if it has one; a missing table means it
+    ; supplies nothing here and the slot is empty.
+    call slot_table_offset      ; rax = the byte offset of that table
+    mov rcx, [rbp - TIS_SRC]
+    mov rcx, [rcx + rax]
+    xor edx, edx
+    mov r8d, 1
+    test rcx, rcx
+    jz .store
+    mov rax, [rbx + SlotEntry.offset]
+    mov rdx, [rcx + rax]
+    jmp .store
+
+    ;; .store -- rdx is this ENTRY's answer for the slot.  Several entries can
+    ;; name the same slot -- __setattr__ and __delattr__ both drive
+    ;; tp_setattr, __delitem__ joins __setitem__ on mp_ass_subscript, and all
+    ;; six comparisons drive tp_richcompare -- and they are adjacent in the
+    ;; table, exactly as update_one_slot's `do { ... } while (++p)->offset ==
+    ;; offset` requires.  Resolving them one at a time let a later row undo an
+    ;; earlier one: `__setattr__ = None` installed the wrapper and the
+    ;; __delattr__ row, finding object's, immediately wrote object's slot back
+    ;; over it, so the assignment stored silently.
+    ;;
+    ;; A group's answer is the strongest of its rows, and the rows share a
+    ;; wrapper, so "strongest" is just: a wrapper beats an inherited slot,
+    ;; which beats empty.
+.store:
+    ; rdx = this row's value, r8d = its RANK: 2 a wrapper this class earns, 1
+    ; a slot inherited from a builtin base, 0 nothing.  The group keeps the
+    ; highest, which is what "a wrapper anywhere in the group wins" means.
+    cmp r8d, [rbp - TIS_RANK]
+    jbe .store_keep_best
+    mov [rbp - TIS_RANK], r8d
+    mov [rbp - TIS_BEST], rdx
+.store_keep_best:
+    ; Is the NEXT row the same slot?  If so, let it have its say first.
+    mov rcx, [rbx + SlotEntry_size + SlotEntry.name]
+    test rcx, rcx
+    jz .store_flush
+    mov rax, [rbx + SlotEntry_size + SlotEntry.kind]
+    cmp rax, [rbx + SlotEntry.kind]
+    jne .store_flush
+    mov rax, [rbx + SlotEntry_size + SlotEntry.offset]
+    cmp rax, [rbx + SlotEntry.offset]
+    jne .store_flush
+    jmp .skip
+
+.store_flush:
+    mov rdx, [rbp - TIS_BEST]
+    mov r9d, [rbp - TIS_RANK]
+    mov qword [rbp - TIS_BEST], 0
+    mov dword [rbp - TIS_RANK], 0
+    test r9d, r9d
+    jnz .store_write
+
+    ; Rank 0 means "nothing in the MRO answers this name", and the slot is
+    ; about to be emptied.  Only take out a wrapper THIS code installed.
+    ;
+    ; A builtin's slot is inherited by POINTER and often has no tp_dict entry
+    ; to be found -- type.__call__ is not in type's dict here -- so "not
+    ; found" does not mean "not there".  Clearing unconditionally emptied
+    ; tp_call on every metaclass, and `Circle()` for a class with an ABCMeta
+    ; metaclass became "'ABCMeta' object is not callable".
+    push rdx
+    call slot_current           ; rax = what the slot holds now
+    pop rdx
+    cmp rax, [rbx + SlotEntry.wrapper]
+    jne .skip
+
+.store_write:
     mov rcx, [rbp - TIS_TYPE]
     mov rsi, [rbx + SlotEntry.kind]
     test rsi, rsi
-    jnz .indirect
+    jnz .store_indirect
     mov rax, [rbx + SlotEntry.offset]
-    mov rdx, [rbx + SlotEntry.wrapper]
     mov [rcx + rax], rdx
     jmp .skip
 
-.indirect:
-    mov rdi, rcx
+.store_indirect:
+    ; Clearing a slot in a table this type does not have is nothing to do:
+    ; there is no wrapper there to take out, and materialising a copy of the
+    ; base's table to write a 0 into would break the inheritance it stands for.
+    test rdx, rdx
+    jnz .store_indirect_write
+    push rdx
+    call slot_table_offset
+    mov rcx, [rbp - TIS_TYPE]
+    mov rcx, [rcx + rax]
+    pop rdx
+    test rcx, rcx
+    jz .skip
+.store_indirect_write:
+    push rdx
+    mov rdi, [rbp - TIS_TYPE]
+    mov rsi, [rbx + SlotEntry.kind]
     call slot_ensure_table      ; rax = the method table
+    pop rdx
     mov rbx, [rbp - TIS_ENTRY]
     mov rcx, [rbx + SlotEntry.offset]
-    mov rdx, [rbx + SlotEntry.wrapper]
     mov [rax + rcx], rdx
     jmp .skip
 
@@ -1291,51 +1559,46 @@ slot_table:
     dq sl_float_name,  SLOT_NUMBER,   PyNumberMethods.nb_float,    slot_nb_float
     dq sl_len_name,    SLOT_MAPPING,  PyMappingMethods.mp_length,  slot_length
     dq sl_getitem_name, SLOT_MAPPING, PyMappingMethods.mp_subscript, slot_mp_subscript
-    ; Either one installs the single assignment wrapper, which reads a NULL
-    ; value as a deletion the way dict_ass_subscript does.
     dq sl_setitem_name, SLOT_MAPPING, PyMappingMethods.mp_ass_subscript, slot_mp_ass_subscript
     dq sl_delitem_name, SLOT_MAPPING, PyMappingMethods.mp_ass_subscript, slot_mp_ass_subscript
-    ; And the attribute pair, on exactly the same terms: one wrapper, a NULL
-    ; value meaning a deletion.  These had no rows at all, so a class defining
-    ; __setattr__ kept the instance_setattr type_from_parts installed and the
-    ; dunder was never called.
     dq sl_setattr_name, SLOT_DIRECT, PyTypeObject.tp_setattr, slot_tp_setattr
     dq sl_delattr_name, SLOT_DIRECT, PyTypeObject.tp_setattr, slot_tp_setattr
     dq sl_len_name,    SLOT_SEQUENCE, PySequenceMethods.sq_length, slot_length
-    ; Any one of the six installs the single richcompare wrapper, which
-    ; dispatches on the op it is handed.
     dq sl_eq_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
     dq sl_ne_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
     dq sl_lt_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
     dq sl_le_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
     dq sl_gt_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
     dq sl_ge_name,     SLOT_DIRECT,   PyTypeObject.tp_richcompare, slot_tp_richcompare
-    
-    ; __contains__ is the one SEQUENCE slot with a real dispatcher in CPython,
-    ; and the only sequence row here for that reason.
-    dq sl_contains_name, SLOT_SEQUENCE, PySequenceMethods.sq_contains, \
-       slot_sq_contains
-
-    ; The binary operators.  CPython maps each of these names to a sequence
-    ; slot as well, but only the NUMERIC slotdef carries a generic
-    ; dispatcher -- sq_concat and sq_repeat exist so list.__add__ is findable
-    ; by name, not to be filled in on a subclass.  A row for either would
-    ; answer `2 * L` with L.__mul__ where CPython answers list.__rmul__.
-
+    dq sl_contains_name, SLOT_SEQUENCE, PySequenceMethods.sq_contains, slot_sq_contains
     dq sl_add_name, SLOT_NUMBER, PyNumberMethods.nb_add, slot_nb_add
+    dq sl_radd_name, SLOT_NUMBER, PyNumberMethods.nb_add, slot_nb_add
     dq sl_sub_name, SLOT_NUMBER, PyNumberMethods.nb_subtract, slot_nb_sub
+    dq sl_rsub_name, SLOT_NUMBER, PyNumberMethods.nb_subtract, slot_nb_sub
     dq sl_mul_name, SLOT_NUMBER, PyNumberMethods.nb_multiply, slot_nb_mul
+    dq sl_rmul_name, SLOT_NUMBER, PyNumberMethods.nb_multiply, slot_nb_mul
     dq sl_mod_name, SLOT_NUMBER, PyNumberMethods.nb_remainder, slot_nb_mod
+    dq sl_rmod_name, SLOT_NUMBER, PyNumberMethods.nb_remainder, slot_nb_mod
     dq sl_divmod_name, SLOT_NUMBER, PyNumberMethods.nb_divmod, slot_nb_divmod
+    dq sl_rdivmod_name, SLOT_NUMBER, PyNumberMethods.nb_divmod, slot_nb_divmod
     dq sl_pow_name, SLOT_NUMBER, PyNumberMethods.nb_power, slot_nb_pow
+    dq sl_rpow_name, SLOT_NUMBER, PyNumberMethods.nb_power, slot_nb_pow
     dq sl_lshift_name, SLOT_NUMBER, PyNumberMethods.nb_lshift, slot_nb_lshift
+    dq sl_rlshift_name, SLOT_NUMBER, PyNumberMethods.nb_lshift, slot_nb_lshift
     dq sl_rshift_name, SLOT_NUMBER, PyNumberMethods.nb_rshift, slot_nb_rshift
+    dq sl_rrshift_name, SLOT_NUMBER, PyNumberMethods.nb_rshift, slot_nb_rshift
     dq sl_and_name, SLOT_NUMBER, PyNumberMethods.nb_and, slot_nb_and
+    dq sl_rand_name, SLOT_NUMBER, PyNumberMethods.nb_and, slot_nb_and
     dq sl_xor_name, SLOT_NUMBER, PyNumberMethods.nb_xor, slot_nb_xor
+    dq sl_rxor_name, SLOT_NUMBER, PyNumberMethods.nb_xor, slot_nb_xor
     dq sl_or_name, SLOT_NUMBER, PyNumberMethods.nb_or, slot_nb_or
+    dq sl_ror_name, SLOT_NUMBER, PyNumberMethods.nb_or, slot_nb_or
     dq sl_floordiv_name, SLOT_NUMBER, PyNumberMethods.nb_floor_divide, slot_nb_floordiv
+    dq sl_rfloordiv_name, SLOT_NUMBER, PyNumberMethods.nb_floor_divide, slot_nb_floordiv
     dq sl_truediv_name, SLOT_NUMBER, PyNumberMethods.nb_true_divide, slot_nb_truediv
+    dq sl_rtruediv_name, SLOT_NUMBER, PyNumberMethods.nb_true_divide, slot_nb_truediv
     dq sl_matmul_name, SLOT_NUMBER, PyNumberMethods.nb_matmul, slot_nb_matmul
+    dq sl_rmatmul_name, SLOT_NUMBER, PyNumberMethods.nb_matmul, slot_nb_matmul
     dq sl_iadd_name, SLOT_NUMBER, PyNumberMethods.nb_iadd, slot_nb_iadd
     dq sl_isub_name, SLOT_NUMBER, PyNumberMethods.nb_isub, slot_nb_isub
     dq sl_imul_name, SLOT_NUMBER, PyNumberMethods.nb_imul, slot_nb_imul
@@ -1349,28 +1612,6 @@ slot_table:
     dq sl_ifloordiv_name, SLOT_NUMBER, PyNumberMethods.nb_ifloor_divide, slot_nb_ifloordiv
     dq sl_itruediv_name, SLOT_NUMBER, PyNumberMethods.nb_itrue_divide, slot_nb_itruediv
     dq sl_imatmul_name, SLOT_NUMBER, PyNumberMethods.nb_imatmul, slot_nb_imatmul
-
-    ; And the reflected names, which install the SAME wrapper.  CPython's
-    ; slotdef list has a row for each for the same reason: __radd__ alone has
-    ; to put something in nb_add, or a subclass of a BUILTIN never gets a
-    ; chance -- MyFloat(float) with only __radd__ inherits float's nb_add,
-    ; which answers first, and `1 + MyFloat(2)` came back 3.0.  The wrapper
-    ; knows which side it is speaking for and calls __rop__ when it is the
-    ; right one.
-    dq sl_radd_name, SLOT_NUMBER, PyNumberMethods.nb_add, slot_nb_add
-    dq sl_rsub_name, SLOT_NUMBER, PyNumberMethods.nb_subtract, slot_nb_sub
-    dq sl_rmul_name, SLOT_NUMBER, PyNumberMethods.nb_multiply, slot_nb_mul
-    dq sl_rmod_name, SLOT_NUMBER, PyNumberMethods.nb_remainder, slot_nb_mod
-    dq sl_rdivmod_name, SLOT_NUMBER, PyNumberMethods.nb_divmod, slot_nb_divmod
-    dq sl_rpow_name, SLOT_NUMBER, PyNumberMethods.nb_power, slot_nb_pow
-    dq sl_rlshift_name, SLOT_NUMBER, PyNumberMethods.nb_lshift, slot_nb_lshift
-    dq sl_rrshift_name, SLOT_NUMBER, PyNumberMethods.nb_rshift, slot_nb_rshift
-    dq sl_rand_name, SLOT_NUMBER, PyNumberMethods.nb_and, slot_nb_and
-    dq sl_rxor_name, SLOT_NUMBER, PyNumberMethods.nb_xor, slot_nb_xor
-    dq sl_ror_name, SLOT_NUMBER, PyNumberMethods.nb_or, slot_nb_or
-    dq sl_rfloordiv_name, SLOT_NUMBER, PyNumberMethods.nb_floor_divide, slot_nb_floordiv
-    dq sl_rtruediv_name, SLOT_NUMBER, PyNumberMethods.nb_true_divide, slot_nb_truediv
-    dq sl_rmatmul_name, SLOT_NUMBER, PyNumberMethods.nb_matmul, slot_nb_matmul
 
     dq 0, 0, 0, 0
 

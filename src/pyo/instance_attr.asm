@@ -851,8 +851,10 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     V_UNPACK rax, rdx
     test edx, edx
     jz .really_not_found
-    IS_NONE rax, rcx
-    je .really_not_found
+    ; A __getattr__ explicitly set to None is not absent.  CPython calls it and
+    ; the call fails as "'NoneType' object is not callable"; treating it as
+    ; absent turned that into a plain AttributeError, which is what a caller
+    ; would then swallow.  dunder_call_2 raises it, so just let it through.
 
     ; dunder_call_2(self, name, "__getattr__", TAG_PTR)
     mov rdi, rbx
