@@ -26,6 +26,9 @@ extern type_type
 extern none_singleton
 extern raise_exception
 extern exc_AttributeError_type
+extern exc_TypeError_type
+extern exc_ValueError_type
+extern obj_dealloc
 
 section .text
 
@@ -84,6 +87,113 @@ DEF_FUNC traceback_dealloc
     leave
     ret
 END_FUNC traceback_dealloc
+
+
+;; ============================================================================
+;; traceback_setattr(rdi = tb, rsi = name str, rdx = value Value, ecx = tag)
+;;   -> rax = 0 on success; raises and does not return otherwise
+;;
+;; Only tb_next, and only a traceback or None -- which is all CPython's setter
+;; accepts either.  unittest trims its own frames out of a failure's traceback
+;; by walking to the last entry it wants and assigning None to that entry's
+;; tb_next, so without this every assertion failure inside unittest reported
+;; `AttributeError: cannot set attribute` instead of the failure.
+;;
+;; CPython also refuses a cycle (`tb.tb_next = tb` is a ValueError); so does
+;; this, by walking the chain the new value would create.
+;; ============================================================================
+TBS_SELF  equ 8
+TBS_NAME  equ 16
+TBS_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC traceback_setattr, TBS_FRAME
+    mov [rbp - TBS_SELF], rdi
+    mov [rbp - TBS_NAME], rsi
+    push rdx
+    push rdx                    ; pad: ap_strcmp below is a call
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "tb_next"
+    call ap_strcmp
+    pop rdx
+    pop rdx
+    test eax, eax
+    jnz .tbs_no_attr
+
+    lea rcx, [rel none_singleton]
+    cmp rdx, rcx
+    je .tbs_clear
+    V_TEST_PTR rdx, rax
+    ja .tbs_bad
+    mov rax, [rdx + PyObject.ob_type]
+    lea rcx, [rel traceback_type]
+    cmp rax, rcx
+    jne .tbs_bad
+
+    ; A traceback that reaches itself would make the chain infinite, and every
+    ; walker of it -- the renderer included -- would never stop.
+    mov rcx, rdx
+.tbs_cycle:
+    test rcx, rcx
+    jz .tbs_no_cycle
+    cmp rcx, [rbp - TBS_SELF]
+    je .tbs_loop
+    mov rcx, [rcx + PyTracebackObject.tb_next]
+    jmp .tbs_cycle
+.tbs_no_cycle:
+    mov rdi, rdx
+    call obj_incref
+    jmp .tbs_store
+.tbs_clear:
+    xor edx, edx
+.tbs_store:
+    mov rax, [rbp - TBS_SELF]
+    mov rcx, [rax + PyTracebackObject.tb_next]
+    mov [rax + PyTracebackObject.tb_next], rdx
+    test rcx, rcx
+    jz .tbs_done
+    mov rdi, rcx
+    call obj_decref
+.tbs_done:
+    xor eax, eax
+    leave
+    ret
+
+.tbs_loop:
+    RAISE exc_ValueError_type, "traceback loop detected"
+.tbs_bad:
+    RAISE exc_TypeError_type, "expected traceback object, got 'NoneType'"
+.tbs_no_attr:
+    ; CPython is not uniform here and this follows it exactly: tb_lineno has a
+    ; setter that refuses, tb_frame and tb_lasti are plain members, and a name
+    ; that is not an attribute at all is an ordinary AttributeError.
+    mov rdi, [rbp - TBS_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "tb_lineno"
+    call ap_strcmp
+    test eax, eax
+    jz .tbs_not_writable
+    mov rdi, [rbp - TBS_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "tb_frame"
+    call ap_strcmp
+    test eax, eax
+    jz .tbs_readonly
+    mov rdi, [rbp - TBS_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "tb_lasti"
+    call ap_strcmp
+    test eax, eax
+    jz .tbs_readonly
+    mov rdi, [rbp - TBS_SELF]
+    mov rsi, [rbp - TBS_NAME]
+    mov edx, 1
+    extern raise_no_attribute
+    call raise_no_attribute     ; does not return
+.tbs_not_writable:
+    RAISE exc_AttributeError_type, \
+        "attribute 'tb_lineno' of 'traceback' objects is not writable"
+.tbs_readonly:
+    RAISE exc_AttributeError_type, "readonly attribute"
+END_FUNC traceback_setattr
 
 ;; ============================================================================
 ;; traceback_getattr(PyTracebackObject *tb, PyStrObject *name) -> (rax, edx)
@@ -211,7 +321,7 @@ traceback_type:
     dq 0                    ; tp_hash
     dq 0                    ; tp_call
     dq traceback_getattr    ; tp_getattr
-    dq 0                    ; tp_setattr
+    dq traceback_setattr    ; tp_setattr
     dq 0                    ; tp_richcompare
     dq 0                    ; tp_iter
     dq 0                    ; tp_iternext
