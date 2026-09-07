@@ -61,7 +61,12 @@ FS_CHBUF  equ 128        ; the eight bytes the `c` type encodes into
 FS_SIGNGIVEN equ 136     ; 1 when a sign was actually written in the spec.
                          ; FS_SIGN defaults to '-', so it cannot answer this,
                          ; and `c` refuses an explicit sign of any kind.
-FS_FRAME  equ 152           ; + 5 pushes = 192, 16-aligned
+FS_FILLGIVEN equ 144     ; 1 when a fill character was WRITTEN.  The `0` flag
+                         ; supplies one only when none was, which FS_FILL
+                         ; cannot answer for itself: it defaults to a space.
+FS_ZCOERCE equ 152       ; PEP 682's `z`: a result that rounds to zero loses
+                         ; its sign.  Only a float presentation takes it.
+FS_FRAME  equ 184           ; + 5 pushes = 224, 16-aligned
 
 ; The widest field this will build.  See .fs_after_width.
 FS_MAX_WIDTH equ 0x10000000
@@ -95,6 +100,8 @@ DEF_FUNC format_apply_spec, FS_FRAME
     mov qword [rbp - FS_GROUP], 0
     mov qword [rbp - FS_PREC], -1
     mov qword [rbp - FS_TYPE], 0
+    mov qword [rbp - FS_FILLGIVEN], 0
+    mov qword [rbp - FS_ZCOERCE], 0
 
     mov rbx, rsi                        ; spec str
     mov r12, [rbx + PyStrObject.ob_size]
@@ -115,6 +122,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
     jz .fs_try_align_only
     movzx ecx, byte [r13 + r14]
     mov [rbp - FS_FILL], rcx
+    mov qword [rbp - FS_FILLGIVEN], 1
     movzx ecx, byte [r13 + r14 + 1]
     mov [rbp - FS_ALIGN], rcx
     add r14, 2
@@ -148,6 +156,19 @@ DEF_FUNC format_apply_spec, FS_FRAME
     inc r14
 
 .fs_after_sign:
+    ; ---- [z] ---------------------------------------------------------------
+    ; PEP 682, 3.11: a result that rounds to zero is reported without its
+    ; sign, so format(-0.0001, "z.2f") is '0.00' where a plain ".2f" gives
+    ; '-0.00'.  It was not parsed at all, so `z` read as a type letter and
+    ; every spec carrying one was "Unknown format code 'z'".
+    cmp r14, r12
+    jge .fs_after_zcoerce
+    cmp byte [r13 + r14], 'z'
+    jne .fs_after_zcoerce
+    mov qword [rbp - FS_ZCOERCE], 1
+    inc r14
+.fs_after_zcoerce:
+
     ; ---- [#] ---------------------------------------------------------------
     cmp r14, r12
     jge .fs_after_alt
@@ -163,7 +184,14 @@ DEF_FUNC format_apply_spec, FS_FRAME
     cmp byte [r13 + r14], '0'
     jne .fs_after_zero
     mov qword [rbp - FS_ZERO], 1
+    ; The `0` flag supplies a fill only when none was written.  CPython guards
+    ; this with fill_char_specified, and without it `format(-7, "*^-05d")`
+    ; answered '0-700': the 0 overwrote the '*' that was given two characters
+    ; earlier.
+    cmp qword [rbp - FS_FILLGIVEN], 0
+    jne .fs_zero_keep_fill
     mov qword [rbp - FS_FILL], '0'
+.fs_zero_keep_fill:
     cmp qword [rbp - FS_ALIGN], 0
     jne .fs_zero_taken
     mov qword [rbp - FS_ALIGN], '='
@@ -171,6 +199,19 @@ DEF_FUNC format_apply_spec, FS_FRAME
     inc r14
 
 .fs_after_zero:
+    ; Zero padding is not a flag of its own in CPython: it IS fill '0' with
+    ; align '=', which is what the `0` above supplies when nothing else did.
+    ; Deriving it here rather than trusting the flag is what makes an explicit
+    ; fill win -- `format(255, "*=06,")` pads with '*' and has nothing to
+    ; group, where the flag alone zero-padded and then grouped the padding
+    ; into '00,255'.
+    mov qword [rbp - FS_ZERO], 0
+    cmp qword [rbp - FS_FILL], '0'
+    jne .fs_zero_settled
+    cmp qword [rbp - FS_ALIGN], '='
+    jne .fs_zero_settled
+    mov qword [rbp - FS_ZERO], 1
+.fs_zero_settled:
     ; ---- [width] -----------------------------------------------------------
     xor r15d, r15d
 .fs_width_loop:
@@ -360,7 +401,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
     ; No type letter: a str formats as a string, a number as itself.
     lea rax, [rel str_type]
     cmp r15, rax
-    je .fs_body_str
+    je .fs_str_code
     lea rax, [rel float_type]
     cmp r15, rax
     je .fs_body_float
@@ -368,12 +409,15 @@ DEF_FUNC format_apply_spec, FS_FRAME
     lea rax, [rel complex_type]
     cmp r15, rax
     je .fs_body_complex
+    ; Through .fs_int_code, not straight to the body: an integer presentation
+    ; takes no precision whether or not a letter was written, so
+    ; format(255, "#020.7") has to be refused here as well.
     lea rax, [rel int_type]
     cmp r15, rax
-    je .fs_body_int
+    je .fs_int_code
     lea rax, [rel bool_type]
     cmp r15, rax
-    je .fs_body_int
+    je .fs_int_code
     ; Anything else uses object.__format__, which accepts only an empty
     ; spec.  format(None, ">5") padded None instead of raising.
     cmp qword [rbp - FS_SPECLEN], 0
@@ -445,10 +489,11 @@ DEF_FUNC format_apply_spec, FS_FRAME
 .fs_typed_not_complex:
     ; A numeric type letter needs a number.
     cmp rcx, 's'
-    je .fs_body_str
+    je .fs_str_code
     lea rax, [rel str_type]
     cmp r15, rax
     je .fs_bad_numeric_type
+
     ; `,` names a thousands separator, and a base that is not ten has no
     ; thousands: CPython refuses it before formatting anything.  `_` is
     ; allowed on all of them and groups in fours.
@@ -463,27 +508,107 @@ DEF_FUNC format_apply_spec, FS_FRAME
     cmp rcx, 'X'
     je .fs_bad_group
 .fs_group_ok:
-    ; `c` refuses BOTH separators, where a base only refuses the comma.
+    ; `c` refuses BOTH separators, where a base only refuses the comma -- and
+    ; so does `n`, which takes its separator from the locale.
     cmp rcx, 'c'
+    je .fs_no_sep_at_all
+    cmp rcx, 'n'
     jne .fs_type_ok
+.fs_no_sep_at_all:
     cmp qword [rbp - FS_GROUP], 0
     jne .fs_bad_group
 .fs_type_ok:
+    ; An INTEGER presentation needs an integer.  This is asked after the
+    ; separator checks, which CPython performs first -- format(0.0, ",x")
+    ; is "Cannot specify ',' with 'x'." and not a complaint about the type
+    ; -- and before the precision check, so format(1.5, ".0d") is "Unknown
+    ; format code 'd' for object of type 'float'".
+    ;
+    ; Reaching the int body with a float in hand produced "'float' object
+    ; cannot be interpreted as an integer" instead, from far enough away
+    ; that the spec was not mentioned at all.
+    ;
+    ; `n` is not in this list: it is the one code both families accept, and
+    ; CPython formats a float with it as a float.
+    lea rax, [rel float_type]
+    cmp r15, rax
+    jne .fs_not_float_value
     cmp rcx, 'b'
-    je .fs_body_int
+    je .fs_bad_numeric_type
     cmp rcx, 'o'
-    je .fs_body_int
+    je .fs_bad_numeric_type
     cmp rcx, 'x'
-    je .fs_body_int
+    je .fs_bad_numeric_type
     cmp rcx, 'X'
-    je .fs_body_int
+    je .fs_bad_numeric_type
     cmp rcx, 'd'
-    je .fs_body_int
+    je .fs_bad_numeric_type
+    cmp rcx, 'c'
+    je .fs_bad_numeric_type
     cmp rcx, 'n'
-    je .fs_body_int
+    je .fs_body_float           ; a float formats as a float under `n`
+.fs_not_float_value:
+    cmp rcx, 'b'
+    je .fs_int_code
+    cmp rcx, 'o'
+    je .fs_int_code
+    cmp rcx, 'x'
+    je .fs_int_code
+    cmp rcx, 'X'
+    je .fs_int_code
+    cmp rcx, 'd'
+    je .fs_int_code
+    cmp rcx, 'n'
+    je .fs_int_code
     cmp rcx, 'c'
     je .fs_body_char
-    jmp .fs_body_float
+
+    ; Every remaining letter must be a real float code.  This fell through to
+    ; .fs_body_float for ANY of them, so format(42, "Z") answered '42' where
+    ; CPython raises -- and a mistyped spec formatted silently, which is how
+    ; one is usually found.
+    cmp rcx, 'e'
+    je .fs_body_float
+    cmp rcx, 'E'
+    je .fs_body_float
+    cmp rcx, 'f'
+    je .fs_body_float
+    cmp rcx, 'F'
+    je .fs_body_float
+    cmp rcx, 'g'
+    je .fs_body_float
+    cmp rcx, 'G'
+    je .fs_body_float
+    cmp rcx, '%'
+    je .fs_body_float
+    jmp .fs_unknown_code
+
+.fs_int_code:
+    ; `z` is a float thing: CPython names the family it was asked of.
+    cmp qword [rbp - FS_ZCOERCE], 0
+    jne .fs_z_on_int
+    ; An integer presentation takes no precision.  CPython refuses it rather
+    ; than ignoring it, and `n` is an integer presentation for this purpose.
+    cmp qword [rbp - FS_PREC], -1
+    jne .fs_int_precision
+    jmp .fs_body_int
+
+.fs_int_precision:
+    extern exc_ValueError_type
+    RAISE exc_ValueError_type, \
+          "Precision not allowed in integer format specifier"
+
+.fs_z_on_int:
+    RAISE exc_ValueError_type, \
+          "Negative zero coercion (z) not allowed in integer format specifier"
+.fs_z_on_str:
+    RAISE exc_ValueError_type, \
+          "Negative zero coercion (z) not allowed in string format specifier"
+
+.fs_str_code:
+    cmp qword [rbp - FS_ZCOERCE], 0
+    jne .fs_z_on_str
+    jmp .fs_body_str
 
 .fs_bad_group:
     ; "Cannot specify ',' with 'x'." -- the type letter goes in.
@@ -803,7 +928,57 @@ DEF_FUNC format_apply_spec, FS_FRAME
     ret
 
 .fs_bad_spec:
-    RAISE exc_ValueError_type, "Invalid format specifier"
+    ; CPython names both the spec and the type: "Invalid format specifier
+    ; '*#012' for object of type 'int'".  This named neither, so the one
+    ; message a mistyped spec produces said nothing about what was mistyped.
+    ; r15 does not hold the value's type yet: it is assigned after the parse,
+    ; and this is reached from inside it.
+    mov rdi, [rbp - FS_VALUE]
+    extern value_type
+    call value_type
+    mov r14, rax                ; the parse is over; r14 is free
+
+    ; A type with no __format__ of its own never gets this far in CPython:
+    ; format(obj, spec) calls type(obj).__format__, and object's refuses any
+    ; non-empty spec without looking at it.  So the message for a list is
+    ; "unsupported format string passed to list.__format__" and not a report
+    ; about the spec, however malformed the spec is.
+    lea rax, [rel str_type]
+    cmp r14, rax
+    je .fs_bad_spec_report
+    lea rax, [rel int_type]
+    cmp r14, rax
+    je .fs_bad_spec_report
+    lea rax, [rel bool_type]
+    cmp r14, rax
+    je .fs_bad_spec_report
+    lea rax, [rel float_type]
+    cmp r14, rax
+    je .fs_bad_spec_report
+    lea rax, [rel complex_type]
+    cmp r14, rax
+    jne .fs_unsupported
+.fs_bad_spec_report:
+    sub rsp, 256
+    mov rdi, rsp
+    CSTRING rsi, "Invalid format specifier '"
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rbx + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "' for object of type '"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [r14 + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "'"
+    call rbt_append_cstr
+    lea rdi, [rel exc_ValueError_type]
+    mov rsi, rsp
+    call raise_exception
+    ud2
 
 ;; rdi = destination, rsi = count.  Writes the fill character.
 .fs_fill_run:
@@ -1431,7 +1606,11 @@ FFB_PCT   equ 16         ; 1 when the type letter was '%'
 ; the cap that kept it to three was the reason format(1.0, ".5000f") came back
 ; with a thousand decimal places instead of five thousand.
 FFB_SPEC  equ 48
-FFB_FRAME equ 64            ; + 2 pushes = 80, 16-aligned
+FFB_GPREC equ 72         ; the 'g' digit count for an empty type
+FFB_EPREC equ 80         ; the 'e' probe's digit count, one lower
+FFB_EBUF  equ 88         ; that probe's result, which is also the answer when
+                         ; the exponent form wins
+FFB_FRAME equ 96            ; + 2 pushes = 112, 16-aligned
 
 DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     push rbx
@@ -1484,14 +1663,305 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     jge .ffb_empty_with_prec
     extern float_repr
     call float_repr             ; rdi = the raw bits, still
+    ; With `#` and no precision the point is kept even when repr did not need
+    ; one: format(1e20, "#6") is '1.e+20' in CPython and repr alone gives
+    ; '1e+20'.  It goes BEFORE the exponent, which is why this is an insert
+    ; and not the ".0" append below.
+    cmp qword [r12 - FS_ALT], 0
+    je .ffb_have_string
+    mov rbx, rax
+    mov r8, [rbx + PyStrObject.ob_size]
+    lea rcx, [rbx + PyStrObject.data]
+    xor r9d, r9d
+.ffb_alt_scan:
+    cmp r9, r8
+    jge .ffb_alt_at_end
+    movzx eax, byte [rcx + r9]
+    cmp al, '.'
+    je .ffb_alt_none            ; already has one
+    cmp al, 'n'                 ; nan
+    je .ffb_alt_none
+    cmp al, 'i'                 ; inf
+    je .ffb_alt_none
+    cmp al, 'e'
+    je .ffb_alt_at_end
+    cmp al, 'E'
+    je .ffb_alt_at_end
+    inc r9
+    jmp .ffb_alt_scan
+.ffb_alt_at_end:
+    ; r9 is where the point goes.
+    sub rsp, 128
+    mov rsi, rsp
+    xor edx, edx
+.ffb_alt_head:
+    cmp rdx, r9
+    jge .ffb_alt_point
+    mov al, [rcx + rdx]
+    mov [rsi + rdx], al
+    inc rdx
+    jmp .ffb_alt_head
+.ffb_alt_point:
+    mov byte [rsi + rdx], '.'
+    mov r11, rdx
+    inc r11
+.ffb_alt_tail:
+    cmp r9, r8
+    jge .ffb_alt_built
+    mov al, [rcx + r9]
+    mov [rsi + r11], al
+    inc r9
+    inc r11
+    jmp .ffb_alt_tail
+.ffb_alt_built:
+    mov byte [rsi + r11], 0
+    mov rdi, rsi
+    call str_from_cstr_heap
+    add rsp, 128
+    test rax, rax
+    jz .ffb_alt_none
+    push rax
+    mov rdi, rbx
+    call obj_decref
+    pop rax
+    jmp .ffb_have_string
+.ffb_alt_none:
+    mov rax, rbx
     jmp .ffb_have_string
 .ffb_empty_with_prec:
+    ; An empty type with a precision is 'g', but CPython lowers the threshold
+    ; at which it switches to an exponent by one:
+    ;
+    ;     decpt <= -4 || decpt > (add_dot_0 ? precision-1 : precision)
+    ;
+    ; (pystrtod.c, format_float_short).  C's %g uses the un-lowered form, so
+    ; format(1.5, ".0") came back '2.0' where CPython answers '2e+00'.  The
+    ; two cannot be asked of one %g call -- the threshold moves but the digit
+    ; count does not -- so the exponent is measured first, with a render that
+    ; is also the answer whenever the exponent form wins.
+    ;
+    ; Precision 0 counts as 1 throughout, which is what CPython's own
+    ; bump to at least one significant digit amounts to.
     mov qword [rbp - FFB_ADDDOT], 1
+    mov rax, [r12 - FS_PREC]
+    cmp rax, 1
+    jge .ffb_ewp_have_p
+    mov rax, 1
+.ffb_ewp_have_p:
+    mov [rbp - FFB_GPREC], rax
+    dec rax
+    mov [rbp - FFB_EPREC], rax          ; the 'e' render's digit count
 
-.ffb_build_spec:
-    ; Build ".<precision><type>" in a small buffer.
+    ; Render "[#].<p-1>e" and read the exponent off the end of it.
     lea rbx, [rbp - FFB_SPEC]
     xor ecx, ecx
+    cmp qword [r12 - FS_ALT], 0
+    je .ffb_ewp_no_alt
+    mov byte [rbx], '#'
+    mov ecx, 1
+.ffb_ewp_no_alt:
+    mov byte [rbx + rcx], '.'
+    inc rcx
+    mov rax, [rbp - FFB_EPREC]
+    call .ffb_emit_number
+    mov byte [rbx + rcx], 'e'
+    inc rcx
+    push rdi                            ; the raw double bits
+    mov rsi, rbx
+    mov rdx, rcx
+    call float_format_spec
+    V_UNPACK rax, rdx
+    pop rdi
+    test rax, rax
+    jz .ffb_ewp_fixed
+    mov [rbp - FFB_EBUF], rax
+
+    ; The exponent is the tail after the last 'e'.
+    mov rsi, [rax + PyStrObject.ob_size]
+    lea rcx, [rax + PyStrObject.data]
+    dec rsi
+.ffb_ewp_scan:
+    test rsi, rsi
+    jl .ffb_ewp_fixed_rel
+    cmp byte [rcx + rsi], 'e'
+    je .ffb_ewp_found
+    dec rsi
+    jmp .ffb_ewp_scan
+.ffb_ewp_found:
+    inc rsi
+    xor r8d, r8d                        ; sign
+    cmp byte [rcx + rsi], '-'
+    jne .ffb_ewp_sign_done
+    mov r8d, 1
+    inc rsi
+.ffb_ewp_sign_done:
+    cmp byte [rcx + rsi], '+'
+    jne .ffb_ewp_digits
+    inc rsi
+.ffb_ewp_digits:
+    xor eax, eax
+    mov r9, [rbp - FFB_EBUF]
+    mov r9, [r9 + PyStrObject.ob_size]
+.ffb_ewp_digit:
+    cmp rsi, r9
+    jge .ffb_ewp_exp_done
+    movzx edx, byte [rcx + rsi]
+    sub edx, '0'
+    cmp edx, 9
+    ja .ffb_ewp_exp_done
+    imul rax, rax, 10
+    add rax, rdx
+    inc rsi
+    jmp .ffb_ewp_digit
+.ffb_ewp_exp_done:
+    test r8d, r8d
+    jz .ffb_ewp_positive
+    neg rax
+.ffb_ewp_positive:
+    inc rax                             ; decpt = exponent + 1
+
+    ; decpt <= -4 || decpt > precision-1 means the exponent form wins, and
+    ; the render just made IS that form.
+    cmp rax, -4
+    jle .ffb_ewp_use_exp
+    mov rdx, [rbp - FFB_GPREC]
+    dec rdx
+    cmp rax, rdx
+    jg .ffb_ewp_use_exp
+
+.ffb_ewp_fixed_rel:
+    mov rdi, [rbp - FFB_EBUF]
+    push rdi
+    call obj_decref
+    pop rdi
+.ffb_ewp_fixed:
+    ; The ordinary 'g' path below, with ADD_DOT_0 still set.
+    mov rdi, [r12 - FS_VALUE]
+    V_UNPACK rdi, rdx
+    cmp edx, TAG_FLOAT
+    je .ffb_build_spec
+    mov rsi, rdx
+    call float_to_f64
+    movq rdi, xmm0
+    jmp .ffb_build_spec
+
+.ffb_ewp_use_exp:
+    mov qword [rbp - FFB_ADDDOT], 0     ; it already has its point
+    mov rax, [rbp - FFB_EBUF]
+    ; 'g' drops trailing zeros in the mantissa and 'e' does not, so the probe
+    ; render has to be trimmed: format(1e20, ".3") is '1e+20' in CPython and
+    ; the raw %.2e is '1.00e+20'.  With `#` they stay, which is the whole of
+    ; what alternate formatting means here.
+    cmp qword [r12 - FS_ALT], 0
+    jne .ffb_ewp_no_trim
+    push rax
+    sub rsp, 128
+    mov rsi, rsp                        ; the trimmed copy
+    mov r8, [rax + PyStrObject.ob_size]
+    lea rcx, [rax + PyStrObject.data]
+    ; Find the 'e'.
+    xor r9d, r9d
+.ffb_trim_find:
+    cmp r9, r8
+    jge .ffb_trim_give_up
+    cmp byte [rcx + r9], 'e'
+    je .ffb_trim_found
+    inc r9
+    jmp .ffb_trim_find
+.ffb_trim_found:
+    mov r10, r9                         ; one past the mantissa
+    ; Walk back over zeros, then the point.
+.ffb_trim_zeros:
+    cmp r10, 1
+    jle .ffb_trim_copy
+    cmp byte [rcx + r10 - 1], '0'
+    jne .ffb_trim_dot
+    dec r10
+    jmp .ffb_trim_zeros
+.ffb_trim_dot:
+    cmp byte [rcx + r10 - 1], '.'
+    jne .ffb_trim_copy
+    dec r10
+.ffb_trim_copy:
+    ; mantissa[0..r10) then the exponent from r9.
+    xor edx, edx
+.ffb_trim_m:
+    cmp rdx, r10
+    jge .ffb_trim_e
+    mov al, [rcx + rdx]
+    mov [rsi + rdx], al
+    inc rdx
+    jmp .ffb_trim_m
+.ffb_trim_e:
+    mov r11, rdx
+.ffb_trim_ecopy:
+    cmp r9, r8
+    jge .ffb_trim_done
+    mov al, [rcx + r9]
+    mov [rsi + r11], al
+    inc r9
+    inc r11
+    jmp .ffb_trim_ecopy
+.ffb_trim_done:
+    mov byte [rsi + r11], 0
+    mov rdi, rsi
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    add rsp, 128
+    mov rdi, [rsp]
+    mov [rsp], rax
+    call obj_decref                     ; the untrimmed probe
+    pop rax
+    test rax, rax
+    jz .ffb_ewp_no_trim
+    jmp .ffb_ewp_trimmed
+.ffb_trim_give_up:
+    add rsp, 128
+    pop rax
+.ffb_ewp_no_trim:
+.ffb_ewp_trimmed:
+    mov edx, TAG_PTR
+    jmp .ffb_have_string
+
+    ;; .ffb_emit_number -- append rax as decimal digits at [rbx + rcx].
+.ffb_emit_number:
+    sub rsp, 8
+    mov r8, rax
+    mov r9, 10
+    xor r10d, r10d
+.ffb_en_split:
+    xor edx, edx
+    mov rax, r8
+    div r9
+    mov r8, rax
+    add rdx, '0'
+    push rdx
+    inc r10
+    test r8, r8
+    jnz .ffb_en_split
+.ffb_en_emit:
+    pop rax
+    mov [rbx + rcx], al
+    inc rcx
+    dec r10
+    jnz .ffb_en_emit
+    add rsp, 8
+    ret
+
+.ffb_build_spec:
+    ; Build "[#].<precision><type>" in a small buffer.
+    lea rbx, [rbp - FFB_SPEC]
+    xor ecx, ecx
+    ; The `#` flag was parsed and then never read by this function, so it was
+    ; silently dropped for every float type: format(1.5, "#.0f") answered '2'
+    ; where CPython answers '2.'.  snprintf's own '#' is exactly the rule --
+    ; keep the point, and keep trailing zeros for g -- so it goes into the
+    ; spec rather than being reimplemented after the fact.
+    cmp qword [r12 - FS_ALT], 0
+    je .ffb_no_alt
+    mov byte [rbx], '#'
+    mov ecx, 1
+.ffb_no_alt:
     mov rax, [r12 - FS_PREC]
     cmp rax, 0
     jge .ffb_have_prec
@@ -1515,8 +1985,8 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
 .ffb_default_prec:
     mov rax, 6
 .ffb_have_prec:
-    mov byte [rbx], '.'
-    mov ecx, 1
+    mov byte [rbx + rcx], '.'
+    inc rcx
     ; However many digits it takes.  float_format_spec renders through
     ; snprintf and falls back to a heap buffer of whatever size snprintf
     ; names, so the number here is the only limit -- and the spec parser has
@@ -1673,6 +2143,44 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
 
 .ffb_negative:
     mov qword [r12 - FS_SIGNCH], 1
+    ; PEP 682: with `z`, a result whose digits are all zero loses its sign.
+    ; The test is on the RENDERED text, not the value, because -0.0001 at two
+    ; decimal places rounds to -0.00 and is coerced while -0.4 is not.
+    cmp qword [r12 - FS_ZCOERCE], 0
+    je .ffb_done
+    mov rcx, [rax + PyStrObject.ob_size]
+    lea rsi, [rax + PyStrObject.data]
+    mov r8, 1                           ; skip the '-'
+.ffb_z_scan:
+    cmp r8, rcx
+    jge .ffb_z_all_zero
+    movzx edx, byte [rsi + r8]
+    cmp dl, 'e'
+    je .ffb_z_all_zero                  ; the exponent's digits do not count
+    cmp dl, 'E'
+    je .ffb_z_all_zero
+    cmp dl, '1'
+    jb .ffb_z_next
+    cmp dl, '9'
+    jbe .ffb_done                       ; a real digit: the sign stays
+.ffb_z_next:
+    inc r8
+    jmp .ffb_z_scan
+.ffb_z_all_zero:
+    ; Re-render without the leading '-'.
+    mov rbx, rax
+    lea rdi, [rbx + PyStrObject.data + 1]
+    call str_from_cstr_heap
+    test rax, rax
+    jz .ffb_z_kept
+    push rax
+    mov rdi, rbx
+    call obj_decref
+    pop rax
+    mov qword [r12 - FS_SIGNCH], 0
+    jmp .ffb_done
+.ffb_z_kept:
+    mov rax, rbx
 
 .ffb_done:
     pop r12

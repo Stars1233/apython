@@ -329,6 +329,7 @@ FS_SPEC    equ 16           ; spec data pointer
 FS_SPECLEN equ 20           ; spec length (4 bytes)
 FS_PREC    equ 24           ; precision (4 bytes)
 FS_TYPE    equ 25           ; the type character
+FS_ALT     equ 26           ; 1 when the spec opened with '#'
 FS_BUF     equ 76           ; 48-byte render buffer, for the ordinary case
 FS_BUFSZ   equ 48
 FS_FMT     equ 88           ; the snprintf format, across the retry
@@ -349,6 +350,16 @@ DEF_FUNC float_format_spec, FS_FRAME
     ; Default: precision=6, type='f'
     mov dword [rbp - FS_PREC], 6     ; precision
     mov byte [rbp - FS_TYPE], 'g'    ; type
+    mov byte [rbp - FS_ALT], 0
+    ; The spec may open with '#'.  It was not looked for at all, so the flag
+    ; was parsed by the caller and then dropped: format(1.5, "#.0f") answered
+    ; '2' where CPython answers '2.'.
+    test edx, edx
+    jz .ffs_no_alt
+    cmp byte [rsi], '#'
+    jne .ffs_no_alt
+    mov byte [rbp - FS_ALT], 1
+.ffs_no_alt:
 
     ; Scan spec
     xor ecx, ecx              ; pos
@@ -401,6 +412,8 @@ DEF_FUNC float_format_spec, FS_FRAME
     ; case at all and fell to the %g default, so format(1e20, 'G') was
     ; "1e+20".  'E' was right by accident of already having fmt_E.
     movzx eax, byte [rbp - FS_TYPE]  ; type char
+    cmp byte [rbp - FS_ALT], 0
+    jne .ffs_alt_table
     cmp al, 'f'
     je .ffs_use_f
     cmp al, 'F'
@@ -414,6 +427,35 @@ DEF_FUNC float_format_spec, FS_FRAME
     ; Default: use %.*g
     lea rdx, [rel fmt_g]
     jmp .ffs_do_snprintf
+.ffs_alt_table:
+    cmp al, 'f'
+    je .ffs_alt_f
+    cmp al, 'F'
+    je .ffs_alt_F
+    cmp al, 'e'
+    je .ffs_alt_e
+    cmp al, 'E'
+    je .ffs_alt_E
+    cmp al, 'G'
+    je .ffs_alt_G
+    lea rdx, [rel fmt_alt_g]
+    jmp .ffs_do_snprintf
+.ffs_alt_f:
+    lea rdx, [rel fmt_alt_f]
+    jmp .ffs_do_snprintf
+.ffs_alt_F:
+    lea rdx, [rel fmt_alt_F]
+    jmp .ffs_do_snprintf
+.ffs_alt_e:
+    lea rdx, [rel fmt_alt_e]
+    jmp .ffs_do_snprintf
+.ffs_alt_E:
+    lea rdx, [rel fmt_alt_E]
+    jmp .ffs_do_snprintf
+.ffs_alt_G:
+    lea rdx, [rel fmt_alt_G]
+    jmp .ffs_do_snprintf
+
 .ffs_use_f:
     lea rdx, [rel fmt_f]
     jmp .ffs_do_snprintf
@@ -1970,6 +2012,16 @@ str_neg_inf: db "-inf", 0
 fmt_g: db "%.*g", 0
 fmt_f: db "%.*f", 0
 fmt_e: db "%.*e", 0
+; The `#` forms.  CPython's alternate flag on a float means "keep the decimal
+; point", and for g "keep the trailing zeros as well" -- which is exactly what
+; C's own # does, so the conversion carries it rather than this patching the
+; result afterwards.
+fmt_alt_g: db "%#.*g", 0
+fmt_alt_f: db "%#.*f", 0
+fmt_alt_e: db "%#.*e", 0
+fmt_alt_E: db "%#.*E", 0
+fmt_alt_F: db "%#.*F", 0
+fmt_alt_G: db "%#.*G", 0
 fmt_pow10: db "1e%d", 0
 fmt_E: db "%.*E", 0
 fmt_F: db "%.*F", 0
