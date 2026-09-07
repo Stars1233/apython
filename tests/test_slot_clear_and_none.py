@@ -234,4 +234,64 @@ print("NCall has __call__:", hasattr(NCall, "__call__"))
 print("NIter has __iter__:", hasattr(NIter, "__iter__"))
 print("value is None:", NCall.__call__ is None, NIter.__iter__ is None)
 
+print("--- and a slot change reaches every subclass ---")
+
+
+class SA:
+    def __iter__(self):
+        return iter([1, 2])
+
+
+class SB(SA):
+    pass
+
+
+class SC(SB):
+    pass
+
+
+print("iter:", list(SB()), list(SC()))
+del SA.__iter__
+for cls in (SA, SB, SC):
+    try:
+        list(cls())
+        print(cls.__name__, "still iterable")
+    except TypeError as e:
+        print(cls.__name__, "TypeError:", e)
+
+
+class SD:
+    def __len__(self):
+        return 3
+
+
+class SE(SD):
+    pass
+
+
+print("len:", len(SE()))
+SD.__len__ = lambda self: 7
+print("len after assign:", len(SE()))
+del SD.__len__
+try:
+    len(SE())
+except TypeError as e:
+    print("len after delete: TypeError:", e)
+
+
+class SF:
+    pass
+
+
+class SG(SF):
+    pass
+
+
+SF.__call__ = lambda self, *a: ("called", a)
+print("call:", SG()(1), callable(SG()))
+SF.__eq__ = lambda self, other: True
+print("eq:", SG() == 5)
+del SF.__eq__
+print("eq after delete:", SG() == 5)
+
 print("done")

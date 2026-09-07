@@ -1078,6 +1078,7 @@ extern dunder_lookup
 extern dunder_call
 extern exc_MemoryError_type
 extern set_exception
+extern sub_list_for_type
 
 global slot_tp_call
 DEF_FUNC slot_tp_call, STC_FRAME
@@ -1437,6 +1438,68 @@ DEF_FUNC type_install_slots, TIS_FRAME
     leave
     ret
 END_FUNC type_install_slots
+
+;; ============================================================================
+;; type_install_slots_tree(rdi = a type) -> void
+;;
+;; type_install_slots for a class and for everything that derives from it.
+;;
+;; A slot is not inherited by pointer at run time: `type_from_parts` copies a
+;; base's slot in when the subclass is BUILT, and nothing re-reads it after
+;; that.  So `del A.__iter__` cleared A's tp_iter and left B(A) holding the
+;; wrapper it was born with, which then found no dunder anywhere and raised
+;; `RuntimeError: slot wrapper failed without an exception` where CPython says
+;; `'B' object is not iterable`.  Assigning one had the mirror bug: `A.__len__
+;; = f` after B exists never reached B.
+;;
+;; CPython's update_one_slot ends in update_subclasses for exactly this, and
+;; type_refresh_attr_flags next door already walks the same side table for the
+;; __getattribute__ bit.  A reinstall recomputes from the MRO, so it is
+;; idempotent and the order within the tree does not matter.
+;; ============================================================================
+DEF_FUNC type_install_slots_tree
+    push rbx
+    push r12
+    push r13
+    push r14
+    test rdi, rdi
+    jz .tist_out
+    mov rbx, rdi
+    ; A static type has no slots to install -- its table is the definition --
+    ; but it can still be walked past on the way to nothing.
+    mov rax, [rbx + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_HEAPTYPE
+    jz .tist_children
+    mov rdi, rbx
+    call type_install_slots
+.tist_children:
+    mov rdi, rbx
+    call sub_list_for_type
+    test rax, rax
+    jz .tist_out
+    mov r12, [rax + SubList.items]
+    mov r13, [rax + SubList.count]
+    test r12, r12
+    jz .tist_out
+    xor r14d, r14d
+.tist_loop:
+    cmp r14, r13
+    jge .tist_out
+    mov rdi, [r12 + r14*8]
+    test rdi, rdi
+    jz .tist_next
+    call type_install_slots_tree
+.tist_next:
+    inc r14
+    jmp .tist_loop
+.tist_out:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC type_install_slots_tree
 
 section .rodata
 

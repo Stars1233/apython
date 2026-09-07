@@ -156,8 +156,8 @@ DEF_FUNC type_setattr
     test rax, TYPE_FLAG_HEAPTYPE
     jz .ts_done
     mov rdi, rbx
-    extern type_install_slots
-    call type_install_slots
+    extern type_install_slots_tree
+    call type_install_slots_tree
 
     ; And the __getattribute__ bit, which unlike a slot is inherited -- so
     ; this pushes the new answer down every subclass, not just this type.
@@ -1543,7 +1543,13 @@ DEF_FUNC type_call
 
     ; The same cache as for __new__ above; .init_found already reads the owner
     ; out of rcx, which is where this leaves it.
-    mov rdi, rbx
+    ;
+    ; The search starts at the INSTANCE's type, not at the class that was
+    ; called: CPython's type_call runs Py_TYPE(obj)->tp_init.  Starting at
+    ; the called class ran the wrong __init__ whenever __new__ returned a
+    ; subclass instance -- the standard factory shape, and the one the
+    ; isinstance test above exists to allow.
+    mov rdi, [r14 + PyObject.ob_type]
     mov rsi, r15
     call type_lookup_cached
     test edx, edx
