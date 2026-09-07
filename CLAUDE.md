@@ -296,6 +296,7 @@ f-strings, async, comprehensions, PEP 695 type parameters.
 | `lex.asm` | tokenizer: indentation, operators, names, numbers, strings |
 | `ast.asm` | 32-byte nodes in a `Buf`, addressed by u32 index, and the growable `Buf` / bump `Arena` they live in |
 | `parse.asm` | Pratt expression parser and its prefix/infix handlers |
+| `parse_str.asm` | string literals: the escapes, `\N{...}`, implicit concatenation, and whether a run is an f-string |
 | `prule.asm` | **generated** -- `prule_table`, the precedence grammar |
 | `parse_stmt.asm` | statements, and the soft keywords `match` and `type` |
 | `pattern.asm` | `match` patterns |
