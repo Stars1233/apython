@@ -58,29 +58,6 @@ reasoning that chose them and what changing one would cost.
   restoring `rbx` first is the same shape as the `systrace_exception` bug --
   a corrupted IP in every frame that raised.
 
-- **A class's `__setattr__` and `__delattr__` are never called.**  Both are
-  ordinary entries in the class dict -- `'__setattr__' in R.__dict__` is True
-  and `R.__setattr__ is not object.__setattr__` is True -- and nothing ever
-  consults them.  `r.z = 7` and `setattr(r, "z", 7)` both write straight into
-  the instance dict, and `del r.z` deletes without running `__delattr__`:
-
-  ```python
-  class R:
-      def __setattr__(self, k, v): object.__setattr__(self, k, v * 10)
-  r = R(); r.z = 7
-  print(r.z)          # 70 in CPython, 7 here
-  ```
-
-  There is no `tp_setattr` slot wrapper: `src/slots.asm`'s table has no row for
-  either name, so `type_install_slots` leaves `tp_setattr` as the
-  `instance_setattr` that `type_from_parts` installed.  The fix is a wrapper
-  that calls the dunder, plus the usual care that it must not shadow a builtin
-  base's own slot.
-
-  `op_store_attr_instance` (240) is already guarded against it: the inline
-  cache installs only when `tp_setattr` is exactly `instance_setattr`, so a
-  wrapper appearing later will refuse the cache rather than be skipped by it.
-
 - **`object.__new__` does not refuse a builtin subclass.**  `object.__new__(list)`
   answers `[]` where CPython raises
   `TypeError: object.__new__(list) is not safe, use list.__new__()`, and `dict`

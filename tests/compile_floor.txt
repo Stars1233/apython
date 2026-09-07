@@ -399,6 +399,7 @@ test_richcompare_byname
 test_round
 test_select
 test_sequence_iteration
+test_setattr_dunder
 test_set_fatval
 test_set_inplace
 test_set_methods

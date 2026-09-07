@@ -727,6 +727,74 @@ DEF_FUNC slot_length
 END_FUNC slot_length
 
 ;; ============================================================================
+;; slot_tp_setattr(rdi = self, rsi = name, rdx = the value Value, or 0)
+;;   -> eax = 0, or does not return
+;;
+;; tp_setattr for a class that defines __setattr__ or __delattr__.  A NULL
+;; value is a deletion, the same convention instance_setattr and
+;; mp_ass_subscript use, so one wrapper serves both dunders.
+;;
+;; There was no row for either name in slot_table, so a class defining
+;; __setattr__ kept the instance_setattr that type_from_parts installs: the
+;; dunder sat in the class dict, answered `'__setattr__' in C.__dict__`, and
+;; was never called.  Both `o.x = v` and `setattr(o, "x", v)` wrote straight
+;; into the instance dict, and `del o.x` deleted without running __delattr__.
+;;
+;; object supplies both names, so type_install_slots' slot_is_object_default
+;; check is what keeps an ordinary class -- which merely inherits them -- from
+;; getting this wrapper and recursing into itself.
+;; ============================================================================
+STA_SELF  equ 8
+STA_NAME  equ 16
+STA_FRAME equ 24                    ; 24 + 1 push keeps rsp 16-aligned
+
+DEF_FUNC slot_tp_setattr, STA_FRAME
+    push rbx
+    mov [rbp - STA_SELF], rdi
+    mov [rbp - STA_NAME], rsi
+    mov rbx, rdx
+    test rbx, rbx
+    jz .sta_delete
+
+    ; __setattr__(self, name, value)
+    mov rsi, [rbp - STA_NAME]
+    mov rdx, rbx
+    lea rcx, [rel sl_setattr_name]
+    mov r8d, TAG_PTR
+    V_UNPACK rdx, r8
+    call dunder_call_3
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .sta_failed
+    mov rdi, rax
+    DECREF_V rdi, rsi                   ; __setattr__ returns None
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.sta_delete:
+    ; __delattr__(self, name)
+    mov rdi, [rbp - STA_SELF]
+    mov rsi, [rbp - STA_NAME]
+    lea rdx, [rel sl_delattr_name]
+    mov ecx, TAG_PTR
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .sta_failed
+    mov rdi, rax
+    DECREF_V rdi, rsi
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.sta_failed:
+    call slot_reraise                   ; does not return
+END_FUNC slot_tp_setattr
+
+;; ============================================================================
 ;; slot_mp_subscript(rdi = self, rsi = key Value) -> Value
 ;; slot_mp_ass_subscript(rdi = self, rsi = key Value, rdx = value Value)
 ;;
@@ -1168,6 +1236,8 @@ sl_call_name:   db "__call__", 0
 sl_getitem_name: db "__getitem__", 0
 sl_setitem_name: db "__setitem__", 0
 sl_delitem_name: db "__delitem__", 0
+sl_setattr_name: db "__setattr__", 0
+sl_delattr_name: db "__delattr__", 0
 
 align 8
 ;; ============================================================================
@@ -1225,6 +1295,12 @@ slot_table:
     ; value as a deletion the way dict_ass_subscript does.
     dq sl_setitem_name, SLOT_MAPPING, PyMappingMethods.mp_ass_subscript, slot_mp_ass_subscript
     dq sl_delitem_name, SLOT_MAPPING, PyMappingMethods.mp_ass_subscript, slot_mp_ass_subscript
+    ; And the attribute pair, on exactly the same terms: one wrapper, a NULL
+    ; value meaning a deletion.  These had no rows at all, so a class defining
+    ; __setattr__ kept the instance_setattr type_from_parts installed and the
+    ; dunder was never called.
+    dq sl_setattr_name, SLOT_DIRECT, PyTypeObject.tp_setattr, slot_tp_setattr
+    dq sl_delattr_name, SLOT_DIRECT, PyTypeObject.tp_setattr, slot_tp_setattr
     dq sl_len_name,    SLOT_SEQUENCE, PySequenceMethods.sq_length, slot_length
     ; Any one of the six installs the single richcompare wrapper, which
     ; dispatches on the op it is handed.
