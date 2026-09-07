@@ -1725,6 +1725,7 @@ CAX_N     equ 40
 CAX_I     equ 48
 CAX_NKW   equ 56
 CAX_CHILD equ 64
+CAX_HAVE  equ 72            ; is a mapping already on the stack?
 CAX_FRAME equ 80            ; + 0 pushes = 80, 16-aligned
 DEF_FUNC cg_class_args_ex, CAX_FRAME
     mov [rbp - CAX_COMP], rdi
@@ -1732,6 +1733,7 @@ DEF_FUNC cg_class_args_ex, CAX_FRAME
     mov [rbp - CAX_LIST], rdx
     mov [rbp - CAX_LINE], rcx
     mov qword [rbp - CAX_NKW], 0
+    mov qword [rbp - CAX_HAVE], 0
     mov qword [rbp - CAX_I], 0
 
     mov rdi, [rbp - CAX_COMP]
@@ -1757,10 +1759,14 @@ DEF_FUNC cg_class_args_ex, CAX_FRAME
     mov rsi, rax
     call ast_at
     movzx ecx, byte [rax + AstNode.kind]
+    ; Keywords are collected on the second pass.  They do not END the
+    ; positional one: `class C(metaclass=Meta, *bs)` is legal, and CPython
+    ; puts every positional and starred argument in the bases tuple wherever
+    ; it appears -- stopping here reported it as a syntax error instead.
     cmp ecx, AST_KEYWORD
-    je .cax_to_tuple            ; keywords come after every positional
+    je .cax_pos_next
     cmp ecx, AST_DOUBLESTARRED
-    je .cax_to_tuple
+    je .cax_pos_next
     cmp ecx, AST_STARRED
     je .cax_star
 
@@ -1804,6 +1810,7 @@ DEF_FUNC cg_class_args_ex, CAX_FRAME
     mov edx, INTRINSIC_LIST_TO_TUPLE
     mov rcx, [rbp - CAX_LINE]
     call cg_emit
+    mov qword [rbp - CAX_I], 0          ; the keyword pass walks them all again
 
 .cax_kw:
     mov rax, [rbp - CAX_I]
@@ -1818,7 +1825,7 @@ DEF_FUNC cg_class_args_ex, CAX_FRAME
     cmp ecx, AST_DOUBLESTARRED
     je .cax_kw_unpack
     cmp ecx, AST_KEYWORD
-    jne .cax_bad_order
+    jne .cax_kw_skip                    ; a positional, already in the tuple
 
     ; LOAD_CONST <name>, then the value.  The name is an OBJECT index in
     ; AstNode.a and the value a NODE index in .b -- the two arenas overlap, so
@@ -1863,11 +1870,10 @@ DEF_FUNC cg_class_args_ex, CAX_FRAME
     call cg_expr
     test eax, eax
     jz .cax_fail
-    cmp qword [rbp - CAX_NKW], -1
-    je .cax_kw_merge
+    cmp qword [rbp - CAX_HAVE], 0
+    jne .cax_kw_merge
     ; Nothing accumulated, so this dict IS the mapping: BUILD_MAP 0 under it
     ; and merge, which is what CPython emits for a leading **kwds.
-    push rax
     mov rdi, [rbp - CAX_UNIT]
     mov esi, OP_BUILD_MAP
     xor edx, edx
@@ -1878,8 +1884,7 @@ DEF_FUNC cg_class_args_ex, CAX_FRAME
     mov edx, 2
     mov rcx, [rbp - CAX_LINE]
     call cg_emit
-    pop rax
-    mov qword [rbp - CAX_NKW], -1
+    mov qword [rbp - CAX_HAVE], 1
 .cax_kw_merge:
     mov rdi, [rbp - CAX_UNIT]
     mov esi, OP_DICT_MERGE
@@ -1889,12 +1894,16 @@ DEF_FUNC cg_class_args_ex, CAX_FRAME
     inc qword [rbp - CAX_I]
     jmp .cax_kw
 
+.cax_kw_skip:
+    inc qword [rbp - CAX_I]
+    jmp .cax_kw
+
 .cax_kw_done:
     call .cax_flush_map
     mov rdi, [rbp - CAX_UNIT]
     mov esi, OP_CALL_FUNCTION_EX
     xor edx, edx
-    cmp qword [rbp - CAX_NKW], 0
+    cmp qword [rbp - CAX_HAVE], 0
     je .cax_emit_call
     mov edx, 1
 .cax_emit_call:
@@ -1904,13 +1913,6 @@ DEF_FUNC cg_class_args_ex, CAX_FRAME
     leave
     ret
 
-.cax_bad_order:
-    mov rdi, [rbp - CAX_COMP]
-    CSTRING rsi, "positional argument follows keyword argument unpacking"
-    xor edx, edx
-    mov rcx, [rbp - CAX_LINE]
-    xor r8d, r8d
-    call comp_error
 .cax_fail:
     xor eax, eax
     leave
@@ -1921,14 +1923,29 @@ DEF_FUNC cg_class_args_ex, CAX_FRAME
 .cax_flush_map:
     sub rsp, 8
     mov rax, [rbp - CAX_NKW]
-    cmp rax, 0
-    jle .cax_flush_done
+    test rax, rax
+    jz .cax_flush_done
     mov rdi, [rbp - CAX_UNIT]
     mov esi, OP_BUILD_MAP
     mov rdx, rax
     mov rcx, [rbp - CAX_LINE]
     call cg_emit
-    mov qword [rbp - CAX_NKW], -1
+    mov qword [rbp - CAX_NKW], 0
+    cmp qword [rbp - CAX_HAVE], 0
+    jne .cax_flush_merge
+    mov qword [rbp - CAX_HAVE], 1
+    jmp .cax_flush_done
+.cax_flush_merge:
+    ; A mapping is already there, so these pairs merge into it -- CPython's
+    ; BUILD_MAP 1 / DICT_MERGE 1 for `class C(**kw, extra=1)`.  Overloading
+    ; the pair COUNT with a -1 "a dict is on the stack" sentinel meant the
+    ; `inc` for a named keyword after a **kwds destroyed it, and the pairs
+    ; were left on the stack unmerged.
+    mov rdi, [rbp - CAX_UNIT]
+    mov esi, OP_DICT_MERGE
+    mov edx, 1
+    mov rcx, [rbp - CAX_LINE]
+    call cg_emit
 .cax_flush_done:
     add rsp, 8
     ret
