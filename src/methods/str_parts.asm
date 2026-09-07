@@ -520,7 +520,8 @@ END_FUNC str_method_expandtabs
 ;; args[0]=self, args[1]=keepends (optional bool, default False)
 ;; ============================================================================
 SL_STEP  equ 8           ; how far past the break the next line starts
-SL_FRAME equ 16             ; + 4 pushes = 48
+SL_WIDTH equ 16          ; the break's own width, for the multi-byte ones
+SL_FRAME equ 32             ; + 4 pushes = 64, 16-aligned
 DEF_FUNC str_method_splitlines, SL_FRAME
     push rbx
     push r12
@@ -558,6 +559,57 @@ DEF_FUNC str_method_splitlines, SL_FRAME
     je .sl_found
     cmp al, 13               ; '\r'
     je .sl_found_cr
+    ; CPython's line-break set is not the whitespace set, and this is the
+    ; whole difference: it takes \v, \f, \x1c, \x1d, \x1e, U+0085, U+2028
+    ; and U+2029, and it does NOT take \x1f, U+00A0 or U+3000, all three of
+    ; which split() does.  So it is written out here rather than shared.
+    cmp al, 0x0b             ; \v
+    je .sl_found
+    cmp al, 0x0c             ; \f
+    je .sl_found
+    cmp al, 0x1c             ; file separator
+    je .sl_found
+    cmp al, 0x1d             ; group separator
+    je .sl_found
+    cmp al, 0x1e             ; record separator
+    je .sl_found
+    cmp al, 0xc2
+    je .sl_maybe_nel
+    cmp al, 0xe2
+    je .sl_maybe_sep
+    inc r8
+    jmp .sl_loop
+
+.sl_maybe_nel:
+    ; U+0085 NEXT LINE is C2 85, and C2 leads nothing else this cares about.
+    lea rax, [r8 + 1]
+    cmp rax, r12
+    jge .sl_advance_one
+    movzx eax, byte [rbx + PyStrObject.data + rax]
+    cmp al, 0x85
+    jne .sl_advance_one
+    mov qword [rbp - SL_WIDTH], 2
+    jmp .sl_found_wide
+
+.sl_maybe_sep:
+    ; U+2028 LINE SEPARATOR is E2 80 A8 and U+2029 PARAGRAPH SEPARATOR is
+    ; E2 80 A9.
+    lea rax, [r8 + 2]
+    cmp rax, r12
+    jge .sl_advance_one
+    movzx eax, byte [rbx + PyStrObject.data + r8 + 1]
+    cmp al, 0x80
+    jne .sl_advance_one
+    movzx eax, byte [rbx + PyStrObject.data + r8 + 2]
+    cmp al, 0xa8
+    je .sl_sep_found
+    cmp al, 0xa9
+    jne .sl_advance_one
+.sl_sep_found:
+    mov qword [rbp - SL_WIDTH], 3
+    jmp .sl_found_wide
+
+.sl_advance_one:
     inc r8
     jmp .sl_loop
 
@@ -600,11 +652,18 @@ DEF_FUNC str_method_splitlines, SL_FRAME
     jmp .sl_loop
 
 .sl_found:
-    ; Line break at r8
+    ; A one-byte break.
+    mov qword [rbp - SL_WIDTH], 1
+.sl_found_wide:
+    ; SL_WIDTH bytes at r8, and SL_STEP is how far past them the next line
+    ; starts -- the same number unless \r\n has already set it to 2.
+    mov rax, [rbp - SL_WIDTH]
+    mov [rbp - SL_STEP], rax
     test r14d, r14d
     jz .sl_no_keep
-    ; keepends: include the newline char
-    lea rdx, [r8 + 1]
+    ; keepends: include the break itself, however wide it is
+    mov rdx, r8
+    add rdx, [rbp - SL_WIDTH]
     sub rdx, rcx
     jmp .sl_emit_line
 .sl_no_keep:

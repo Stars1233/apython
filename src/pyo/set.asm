@@ -1090,6 +1090,12 @@ DEF_FUNC set_tp_iter, 8            ; 1 push, so rsp is 16-aligned
     mov [rax + PyDictIterObject.it_dict], rbx     ; store set ptr
     mov qword [rax + PyDictIterObject.it_index], 0
     mov qword [rax + PyDictIterObject.it_kind], 0
+    ; The size when iteration began.  A set that grows or shrinks under a
+    ; `for` walks a rebuilt entry array with a stale index; nothing checked,
+    ; so `for x in s: s.add(2)` quietly finished with whatever it happened to
+    ; visit where CPython raises.
+    mov rcx, [rbx + PyDictObject.ob_size]
+    mov [rax + PyDictIterObject.it_version], rcx
 
     ; INCREF the set
     push rax
@@ -1110,6 +1116,9 @@ END_FUNC set_tp_iter
 ;; ============================================================================
 DEF_FUNC_BARE set_iter_next
     mov rax, [rdi + PyDictIterObject.it_dict]      ; set
+    mov rcx, [rax + PyDictObject.ob_size]
+    cmp rcx, [rdi + PyDictIterObject.it_version]
+    jne .si_mutation_error
     mov rcx, [rdi + PyDictIterObject.it_index]      ; current index
     mov rdx, [rax + PyDictObject.capacity]          ; capacity
     mov rsi, [rax + PyDictObject.entries]            ; entries ptr
@@ -1139,6 +1148,10 @@ DEF_FUNC_BARE set_iter_next
     mov [rdi + PyDictIterObject.it_index], rcx
     RET_NULL
     ret
+
+.si_mutation_error:
+    extern exc_RuntimeError_type
+    RAISE exc_RuntimeError_type, "Set changed size during iteration"
 END_FUNC set_iter_next
 
 ;; ============================================================================

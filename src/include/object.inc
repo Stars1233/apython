@@ -434,7 +434,12 @@ struc PyDictIterObject
     .it_dict:    resq 1    ; +16: ptr to dict
     .it_index:   resq 1    ; +24: current entry index
     .it_kind:    resq 1    ; +32: 0=keys, 1=values, 2=items
-    .it_version: resq 1    ; +40: dk_version snapshot for mutation detection
+    .it_version: resq 1    ; +40: the dict's SIZE when iteration began, which
+                           ;      is what "changed size during iteration"
+                           ;      means.  It held dk_version, which dict_set
+                           ;      bumps for a rebind too -- a change that is
+                           ;      not one.  The name is what CPython's
+                           ;      di_used is for.
 endstruc
 
 struc PyDictViewObject
@@ -1138,7 +1143,16 @@ struc PyFrame
                             ;      and returns before anything else can run.
                             ;      gen_send swaps it with the global around
                             ;      each resume -- CPython's gi_exc_state.
-    .localsplus:            ; +96: Value array (variable size)
+    .frame_obj:     resq 1  ; +96: the PyFrameObject looking at this frame,
+                            ;      BORROWED, or 0.  It is what makes
+                            ;      sys._getframe() answer the same object
+                            ;      twice and lets a trace function write
+                            ;      f_trace back -- bdb compares frames by
+                            ;      identity across events.  Three places must
+                            ;      agree it is borrowed: frame_new zeroes it
+                            ;      (the pool does not), frame_free detaches,
+                            ;      and frameobj_dealloc clears it.
+    .localsplus:            ; +104: Value array (variable size)
 endstruc
 
 FRAME_HEADER_SIZE equ PyFrame.localsplus
@@ -1154,8 +1168,22 @@ struc PyFrameObject
     .f_globals:   resq 1  ; +32
     .f_locals:    resq 1  ; +40
     .f_builtins:  resq 1  ; +48
-    .f_lineno:    resq 1  ; +56: where the frame was when the snapshot ran
-    .f_lasti:     resq 1  ; +64
+    .f_lineno:    resq 1  ; +56: where the frame was when the snapshot ran,
+                          ;      or, for a live one, recomputed on every read
+    .f_lasti:     resq 1  ; +64: a BYTE offset into co_code, as CPython's is
+    .f_frame:     resq 1  ; +72: the live PyFrame this is a view onto,
+                          ;      BORROWED, or 0 once it has been detached.
+                          ;      Zero from the start for a snapshot -- a
+                          ;      traceback entry's frame is long gone.
+    .f_trace:     resq 1  ; +80: the local trace function, owned, or 0
+    .f_trace_lines:   resq 1  ; +88: 1 by default, as CPython's is
+    .f_trace_opcodes: resq 1  ; +96: 0 by default
+    .ft_line:     resq 1  ; +104: the line last reported to the tracer, or -1.
+                          ;       A 'line' event fires when the line CHANGES,
+                          ;       or on any backward jump; these two words are
+                          ;       what "changes" is measured against, and both
+                          ;       reset at frame entry and at generator resume
+    .ft_prev:     resq 1  ; +112: the offset last executed, in code units
 endstruc
 
 ;; ============================================================================

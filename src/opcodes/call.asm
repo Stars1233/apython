@@ -42,7 +42,7 @@ CL_IS_METHOD equ 32
 CL_TOTAL     equ 40
 CL_SAVED_RSP equ 48
 CL_TPCALL    equ 56
-CL_RETTAG    equ 64            ; spare: the return value is one word now
+CL_CFUNC     equ 64            ; the C function, while sys.setprofile is on
 CL_CALL_TAG  equ 72            ; spare: the callable is classified in place
 CL_SAVED_R13 equ 80
 CL_FRAME     equ 104         ; + 0 pushes = 96
@@ -242,12 +242,49 @@ DEF_FUNC op_call, CL_FRAME
     lea rax, [r13 + rax*8]                 ; deepest arg = args base
     mov [rbp - CL_SAVED_RSP], rax
 .args_ready:
+    ; sys.setprofile's c_call / c_return / c_exception.  One load and one
+    ; never-taken branch on the hottest opcode there is; without them
+    ; profile.py charges every builtin's time to its caller.  systrace_c_callable
+    ; answers 0 for everything that is not a C function, which includes every
+    ; Python call, so the second branch is free too.
+    extern sys_profilefunc
+    cmp qword [rel sys_profilefunc], 0
+    jne .call_profiled
+.call_unprofiled:
     mov rdi, [rbp - CL_CALLABLE]           ; callable
     mov rsi, [rbp - CL_SAVED_RSP]          ; args_ptr
     mov rdx, [rbp - CL_TOTAL]              ; total nargs
     mov rax, [rbp - CL_TPCALL]             ; tp_call
     call rax
     mov [rbp - CL_RETVAL], rax             ; the Value tp_call returned
+    jmp .cleanup
+
+.call_profiled:
+    mov rdi, [rbp - CL_CALLABLE]
+    extern systrace_c_callable
+    call systrace_c_callable
+    mov [rbp - CL_CFUNC], rax
+    test rax, rax
+    jz .call_unprofiled
+    mov rdi, rax
+    xor esi, esi                            ; c_call
+    extern systrace_c_event
+    call systrace_c_event
+
+    mov rdi, [rbp - CL_CALLABLE]
+    mov rsi, [rbp - CL_SAVED_RSP]
+    mov rdx, [rbp - CL_TOTAL]
+    mov rax, [rbp - CL_TPCALL]
+    call rax
+    mov [rbp - CL_RETVAL], rax
+
+    mov rdi, [rbp - CL_CFUNC]
+    mov esi, 1                              ; c_return
+    test rax, rax
+    jnz .call_prof_done
+    mov esi, 2                              ; c_exception: a NULL Value
+.call_prof_done:
+    call systrace_c_event
     jmp .cleanup
 
 .cleanup:
@@ -440,11 +477,19 @@ CFX_RETTAG  equ 112      ; return tag from tp_call
 CFX_TEMP    equ 120      ; temp args buffer for fat tuple extraction
 CFX_FUNC_TAG equ 128     ; func tag for SmallInt check
 CFX_FRAME2  equ 144      ; new frame size (manual push, so offset from rbp-16)
+; What the prologue actually subtracts.  A handler is JUMPED to, so rsp
+; arrives 16-aligned and `push rbp` plus two more pushes leave it 8 out; the
+; carve has to be odd-by-eight to put it back.  It was CFX_FRAME2 - 16, which
+; is even, so every call this handler made was misaligned -- and so was every
+; frame the called function ran, since the misalignment propagates.  The slots
+; are addressed off rbp and do not move; only this number and the two matching
+; `add rsp` do.
+CFX_CARVE   equ CFX_FRAME2 - 8
 
 DEF_FUNC op_call_function_ex
     push rbx                        ; save (clobbered by eval convention save)
     push r12
-    sub rsp, CFX_FRAME2 - 16       ; allocate local frame
+    sub rsp, CFX_CARVE             ; allocate local frame
 
     mov [rbp - CFX_OPARG], ecx               ; save oparg
     mov qword [rbp - CFX_TEMP], 0             ; no temp buffer yet
@@ -716,7 +761,7 @@ DEF_FUNC op_call_function_ex
 .cfex_push_result:
     VPUSH_VAL rax, rdx
 
-    add rsp, CFX_FRAME2 - 16
+    add rsp, CFX_CARVE
     pop r12
     pop rbx
     pop rbp
@@ -725,7 +770,7 @@ DEF_FUNC op_call_function_ex
 .cfex_propagate_exc:
     ; Exception pending from callee — propagate to caller's handler
     extern eval_exception_unwind
-    add rsp, CFX_FRAME2 - 16
+    add rsp, CFX_CARVE
     pop r12
     pop rbx
     pop rbp

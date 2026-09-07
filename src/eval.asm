@@ -7,6 +7,8 @@
 %include "opcodes.inc"
 
 ; External opcode handlers (defined in opcodes_*.asm files)
+extern eval_hook_mask
+extern systrace_any
 extern op_pop_top
 extern op_push_null
 extern op_return_value
@@ -378,7 +380,27 @@ DEF_FUNC eval_frame
     mov byte [rel tb_suppress_frame], 1
     RAISE exc_RecursionError_type, "maximum recursion depth exceeded"
 
+.trace_call_raised:
+    ; A trace function that raised on the way into the frame.  The exception
+    ; is pending; unwind from here, which is what the frame's own raise would
+    ; have done.  Out of line, so it is not in the fall-through to dispatch.
+    mov [rel eval_saved_rbx], rbx
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
+
 .no_throw:
+    ; The 'call' event.  Here rather than earlier because the frame's globals
+    ; and eval_base_rsp are in place by now, so a raise from the trace
+    ; function unwinds through this frame and sys._getframe() inside the
+    ; tracer sees it.  systrace_call is a load and a branch when nothing is
+    ; set.
+    cmp qword [rel systrace_any], 0
+    je .no_trace_call
+    extern systrace_call
+    call systrace_call
+    test eax, eax
+    js .trace_call_raised
+.no_trace_call:
     ; Fall through to eval_dispatch
 END_FUNC eval_frame
 
@@ -392,24 +414,43 @@ DEF_FUNC_BARE eval_dispatch
 END_FUNC eval_dispatch
 
 ;; ============================================================================
-;; eval_trace_thunk - the -t handler, reached in place of every real one
+;; eval_hook_thunk - reached in place of every real handler while a hook is on
 ;;
-;; opcode_trace_table has all 256 entries pointing here, so `-t` costs one
-;; store to opcode_dispatch_table and nothing at all when it is off.  rax holds
-;; the opcode and ecx the argument, exactly as the real handler expects them,
-;; so this prints and jumps straight on.
+;; opcode_trace_table has all 256 entries pointing here, so an interpreter-wide
+;; hook costs one store to opcode_dispatch_table and NOTHING at all when it is
+;; off: DISPATCH already loads through that pointer, at all 222 of its
+;; expansions, and has since `-t` needed somewhere to interpose.  A
+;; `cmp [rel tracing]` inside DISPATCH would have added a second conditional
+;; branch at every one of those sites, against a design that spends a BTB
+;; entry per site on the indirect jump precisely so each predicts its own
+;; successor.
+;;
+;; Two independent reasons to be here -- `-t` printing opcodes and
+;; sys.settrace wanting line events -- so eval_hook_mask says which, and both
+;; run when both are on.  rax holds the opcode and ecx the argument, exactly
+;; as the real handler expects them.
 ;; ============================================================================
-DEF_FUNC_BARE eval_trace_thunk
+DEF_FUNC_BARE eval_hook_thunk
     push rax
     push rcx                    ; two pushes: rsp keeps whatever alignment it had
+    test qword [rel eval_hook_mask], 1
+    jz .eht_no_print
     mov edi, eax
     mov esi, ecx
     call trace_print_opcode
+.eht_no_print:
+    test qword [rel eval_hook_mask], 2
+    jz .eht_done
+    ; rbx already points PAST the instruction word; systrace_line backs up.
+    mov rdi, rbx
+    extern systrace_line
+    call systrace_line
+.eht_done:
     pop rcx
     pop rax
     lea rdx, [rel opcode_table]
     jmp [rdx + rax*8]
-END_FUNC eval_trace_thunk
+END_FUNC eval_hook_thunk
 
 ;; ============================================================================
 ;; eval_return - Return from eval_frame
@@ -417,6 +458,26 @@ END_FUNC eval_trace_thunk
 ;; ============================================================================
 DEF_FUNC_BARE eval_return
     dec qword [rel recursion_depth]
+
+    ; The 'return' event.  This is the single exit -- op_return_value,
+    ; op_yield_value, op_interpreter_exit and the unwinder's .no_handler all
+    ; arrive here -- so one hook covers CPython's PY_RETURN, PY_YIELD and
+    ; PY_UNWIND, which its legacy layer maps to 'return' anyway.  rax says
+    ; which: a value means a return or a yield, 0 means the frame is
+    ; unwinding and CPython reports None.
+    ;
+    ; It has to run BEFORE the pop chain below, and rax and rdx are the return
+    ; value, so both are saved across it.
+    cmp qword [rel systrace_any], 0
+    je .er_no_trace
+    push rax
+    push rdx
+    mov rdi, rax
+    extern systrace_return
+    call systrace_return
+    pop rdx
+    pop rax
+.er_no_trace:
     ; Restore caller's eval globals (reverse of save order)
     ; Use rcx as scratch — rdx holds return tag (fat value protocol)
 
@@ -677,6 +738,15 @@ extern exc_RecursionError_type
     extern traceback_here
     call traceback_here
 .skip_tb:
+
+    ; The 'exception' event.  The unwinder is entered once per frame as an
+    ; exception travels outward, which is where CPython raises it too, and by
+    ; here rbx, r12 and r13 are the frame's own again.
+    cmp qword [rel systrace_any], 0
+    je .no_trace_exc
+    extern systrace_exception
+    call systrace_exception
+.no_trace_exc:
 
     ; Re-derive the co_consts / co_names globals from the code object
     mov rax, [r12 + PyFrame.code]
@@ -1055,9 +1125,10 @@ op_load_assertion_error:
 section .data
 align 8
 
-; What DISPATCH jumps through.  Normally the real table; `-t` points it at
-; opcode_trace_table instead, which is how tracing reaches handlers that
-; dispatch inline -- which is all of them.
+; What DISPATCH jumps through.  Normally the real table; `-t` and
+; sys.settrace point it at opcode_trace_table instead, which is how a hook
+; reaches handlers that dispatch inline -- which is all of them.
+; eval_hooks_set, in src/systrace.asm, is what writes here.
 global opcode_dispatch_table
 opcode_dispatch_table: dq opcode_table
 
@@ -1065,7 +1136,7 @@ opcode_dispatch_table: dq opcode_table
 ; need one entry per opcode to know which it is.
 global opcode_trace_table
 opcode_trace_table:
-    times 256 dq eval_trace_thunk
+    times 256 dq eval_hook_thunk
 
 global opcode_table
 opcode_table:

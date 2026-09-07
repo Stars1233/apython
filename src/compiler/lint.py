@@ -421,6 +421,7 @@ def check_file_size(files):
     return bad
 
 
+ALIGN_FLOOR = os.path.join(ROOT, 'tests', 'align_floor.txt')
 DOCBLOCK_FLOOR = 'tests/docblock_floor.txt'
 
 
@@ -654,6 +655,112 @@ def all_asm():
     """Every hand-written .asm in the tree."""
     return sorted(glob.glob('src/*.asm') + glob.glob('src/*/*.asm'))
 
+
+def _file_consts(src):
+    """Every plain `NAME equ <arithmetic>` in a file, evaluated in order.
+
+    A prologue that carves `sub rsp, CFX_FRAME2 - 8` is as much a stack
+    adjustment as `sub rsp, 128`, and reading only the literal form was one of
+    the two holes that let a misaligned handler through.
+    """
+    consts = {}
+    for cm in re.finditer(r'^(\w+)\s+equ\s+(.+?)\s*(?:;.*)?$', src, re.M):
+        try:
+            consts[cm.group(1)] = eval(cm.group(2), {"__builtins__": {}},
+                                       dict(consts))
+        except Exception:
+            pass
+    return consts
+
+
+def _rsp_delta(line, consts):
+    """(+bytes, ok) for one instruction's effect on rsp."""
+    if line.startswith('push '):
+        return 8, True
+    if line.startswith('pop '):
+        return -8, True
+    mv = re.match(r'^(sub|add)\s+rsp\s*,\s*(.+)$', line)
+    if not mv:
+        return 0, True
+    try:
+        v = eval(mv.group(2), {"__builtins__": {}}, dict(consts))
+    except Exception:
+        return 0, False             # symbolic: the depth is no longer known
+    return (v if mv.group(1) == 'sub' else -v), True
+
+
+def _handler_walk(path, name, body, base, consts):
+    """Depth-track a handler's body, resolving labels by their arrivals.
+
+    Giving up permanently at the first label -- which is what this used to do
+    -- left every call after it unchecked, and that is where the misaligned
+    ones were: op_import_name's `call import_module` sits under `.have_name`,
+    six instructions past the push that unbalanced it.
+
+    So a label's depth is taken from the depths control can reach it AT: the
+    fall-through, plus every jump that names it.  When they all agree the walk
+    resumes there; when they disagree, or when any of them is unknown, that
+    label stays unknown and so does what follows it.  Two passes, because a
+    forward jump is only measured on the pass that reaches it.
+    """
+    lines = [l.split(';')[0].strip() for l in body.splitlines()]
+    lines = [l for l in lines if l and not l.startswith('%')]
+
+    label_depths = {}
+    for _ in range(3):
+        arrivals = {}
+        depth, known = base, True
+        for line in lines:
+            lm = re.match(r'^(\.?\w+):$', line)
+            if lm:
+                lab = lm.group(1)
+                if known:
+                    arrivals.setdefault(lab, set()).add(depth)
+                if lab in label_depths:
+                    depth, known = label_depths[lab], True
+                else:
+                    known = False
+                continue
+            jm = re.match(r'^j\w+\s+(\.?\w+)\s*$', line)
+            if jm and known:
+                arrivals.setdefault(jm.group(1), set()).add(depth)
+            if re.match(r'^(jmp|ret)\b', line):
+                known = False       # the fall-through is unreachable
+                continue
+            d, ok = _rsp_delta(line, consts)
+            if not ok:
+                known = False
+            depth += d
+        settled = {k: next(iter(v)) for k, v in arrivals.items() if len(v) == 1}
+        if settled == label_depths:
+            break
+        label_depths = settled
+
+    bad = []
+    depth, known = base, True
+    for line in lines:
+        lm = re.match(r'^(\.?\w+):$', line)
+        if lm:
+            lab = lm.group(1)
+            if lab in label_depths:
+                depth, known = label_depths[lab], True
+            else:
+                known = False
+            continue
+        if re.match(r'^call\s', line) and known and depth % 16:
+            bad.append(("%s %s %s" % (path, name, line),
+                        "rsp misaligned at `%s` in handler %s (%d bytes below entry)"
+                        % (line, name, depth)))
+        if re.match(r'^(jmp|ret)\b', line):
+            known = False
+            continue
+        d, ok = _rsp_delta(line, consts)
+        if not ok:
+            known = False
+        depth += d
+    return bad
+
+
 def check_handler_alignment(files):
     """rsp alignment at `call` inside an opcode handler.
 
@@ -688,6 +795,7 @@ def check_handler_alignment(files):
     bad = []
     for path in files:
         src = open(path).read()
+        consts = _file_consts(src)
         for m in re.finditer(
                 r'^(DEF_FUNC_BARE|DEF_FUNC)[ \t]+(\w+)[ \t]*(?:,[ \t]*(\w+))?'
                 r'[^\n]*$(.*?)^END_FUNC', src, re.M | re.S):
@@ -699,42 +807,57 @@ def check_handler_alignment(files):
             # it again.  So a DEF_FUNC handler needs FRAME + 8*pushes to be 8
             # mod 16, where a DEF_FUNC_BARE one needs 0 -- the opposite parity,
             # and the reason this loop cannot just look at the pushes.
-            depth = 0
+            base = 0
             if kind == 'DEF_FUNC':
-                depth = 8
+                base = 8
                 if frame:
                     if frame.isdigit():
-                        depth += int(frame)
+                        base += int(frame)
+                    elif frame in consts:
+                        base += consts[frame]
                     else:
-                        fm = re.search(r'^%s\s+equ\s+(\d+)' % re.escape(frame),
-                                       src, re.M)
-                        if fm is None:
-                            continue       # a frame size we cannot resolve
-                        depth += int(fm.group(1))
-            known = True
-            for raw in body.splitlines():
-                line = raw.split(';')[0].strip()
-                if not line or line.startswith('%'):
-                    continue
-                if re.match(r'^\.?\w+:$', line):
-                    known = False          # a label: the depth is no longer ours
-                    continue
-                if line.startswith('push '):
-                    depth += 8
-                elif line.startswith('pop '):
-                    depth -= 8
-                elif re.match(r'^sub\s+rsp\s*,\s*\d+$', line):
-                    depth += int(line.rsplit(',', 1)[1])
-                elif re.match(r'^add\s+rsp\s*,\s*\d+$', line):
-                    depth -= int(line.rsplit(',', 1)[1])
-                elif re.match(r'^call\s', line) and known and depth % 16:
-                    bad.append((path, 0,
-                                "rsp misaligned at `%s` in handler %s (%d bytes below entry)"
-                                % (line, name, depth),
-                                "a handler is entered ALIGNED, so DEF_FUNC wants "
-                                "FRAME + 8*pushes == 8 (mod 16) and DEF_FUNC_BARE "
-                                "wants 0; grow the frame by 8"))
-    return bad
+                        continue       # a frame size we cannot resolve
+            bad += _handler_walk(path, name, body, base, consts)
+
+    # A RATCHET, not a rule.  Forty-four calls were already misaligned when
+    # this check learned to see past a label, in twenty-two handlers, and they
+    # cannot all be repaired in one commit -- each is a hand edit that has to
+    # find the push it belongs to.  What matters is that the number can only
+    # fall: a new one fails the build, and the ones already here are listed by
+    # site so paying one down is a line deleted from the floor.
+    #
+    # They are not cosmetic.  A misaligned call propagates: every frame the
+    # callee runs inherits it, so one bad handler misaligns the whole nested
+    # interpreter stack under it.  The fault surfaces far away and only when
+    # something reaches an aligned SSE store -- libz's inflate does, which is
+    # how this was found at all.
+    floor = set()
+    try:
+        for line in open(ALIGN_FLOOR):
+            line = line.split('#')[0].strip()
+            if line:
+                floor.add(line)
+    except FileNotFoundError:
+        pass
+    if '--record-alignment' in sys.argv:
+        with open(ALIGN_FLOOR, 'w') as fh:
+            fh.write("# Calls made with rsp misaligned inside an opcode handler,\n"
+                     "# one per line as `file handler instruction`.  A ratchet:\n"
+                     "# lint fails on any site not listed here, so the set can\n"
+                     "# only shrink.  Re-record with\n"
+                     "#   python3 src/compiler/lint.py --record-alignment\n"
+                     "# in the commit that pays some of it down.\n")
+            for key, _msg in sorted(bad):
+                fh.write(key + "\n")
+        return []
+    out = []
+    for key, msg in bad:
+        if key not in floor:
+            out.append((key.split()[0], 0, msg,
+                        "a handler is entered ALIGNED, so DEF_FUNC wants "
+                        "FRAME + 8*pushes == 8 (mod 16) and DEF_FUNC_BARE "
+                        "wants 0; pad the odd push"))
+    return out
 
 
 def main():

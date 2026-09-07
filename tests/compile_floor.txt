@@ -32,6 +32,7 @@ test_async_streams
 test_async_tasks
 test_async_wait_for
 test_async_with
+test_awaitable
 test_await_raises
 test_bad_arguments
 test_binary_dunders
@@ -65,6 +66,7 @@ test_bytes_strmethods
 test_bytes_str_text
 test_bytes_subclass_dict
 test_call_ex
+test_call_instance
 test_classes
 test_classmethod_metaclass
 test_class_namespace_copy
@@ -134,6 +136,7 @@ test_container_dunders
 test_container_operator_names
 test_contains_fallback
 test_control_flow
+test_copyreg
 test_crash_regressions
 test_csv
 test_data_descriptor_precedence
@@ -158,6 +161,7 @@ test_dict_dunder_args
 test_dict_fromkeys
 test_dict_int_keys
 test_dict_ior
+test_dict_mutate_iter
 test_dict_numkey
 test_dict_ops
 test_dict_order
@@ -206,10 +210,12 @@ test_fmtspec
 test_for_loops
 test_format_fields
 test_format_float_spec
+test_format_grouping
 test_format_map
 test_format
 test_format_spec
 test_frame_lineno
+test_frame_live
 test_frames_and_time
 test_frozenset_descriptors
 test_frozenset
@@ -243,6 +249,7 @@ test_getset_receiver
 test_hashlib_digests
 test_hash_protocol
 test_identity_values
+test_immediate_args
 test_immediate_operands
 test_imp_module
 test_import_errors
@@ -279,6 +286,7 @@ test_int_str_unicode_sign
 test_int_subclass_index
 test_int_subclass_methods
 test_int_subclass_new
+test_int_truediv
 test_int_truediv_spec
 test_io_module
 test_io_prereqs
@@ -423,6 +431,7 @@ test_source_import
 test_sre2
 test_sre_bytes
 test_sre_groupdict_refcount
+test_sre_position
 test_sre
 test_stdlib_glue
 test_stdlib_shims
@@ -454,10 +463,12 @@ test_str_translate_mapping
 test_str_translate
 test_struct_binascii
 test_structseq
+test_str_unicode_space
 test_subclass_binop
 test_subclass_compare_float
 test_subclass_contains
 test_subclasses
+test_subclass_first
 test_subclass_item_slots
 test_subprocess_child
 test_sum_compensated
@@ -507,3 +518,4 @@ test_weakref_types
 test_wrong_answers
 test_zero_valued_lookup
 test_zip_strict
+test_zlib

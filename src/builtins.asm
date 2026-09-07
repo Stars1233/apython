@@ -342,6 +342,35 @@ DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
     test eax, eax
     jz .bfg_module
 
+    mov rdi, [rbp - BFG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "__self__"
+    call ap_strcmp
+    test eax, eax
+    jz .bfg_self
+
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.bfg_self:
+    ; The type this method was found on.  `int.__new__.__self__ is int` is
+    ; not decoration: copyreg._reduce_ex walks the MRO comparing
+    ; `base.__new__.__self__ is base` to find the last non-heap base, and
+    ; without it every protocol-0 and protocol-1 reduction was an
+    ; AttributeError -- which is `copy.copy` and every old pickle.
+    mov rax, [rbx + PyBuiltinObject.func_owner]
+    test rax, rax
+    jz .bfg_missing
+    INCREF rax
+    pop rbx
+    leave
+    ret
+.bfg_missing:
+    ; A plain function is not bound to anything, and CPython's has no
+    ; __self__ either; answering NULL lets the caller raise its own
+    ; AttributeError.
     xor eax, eax
     pop rbx
     leave

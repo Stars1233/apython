@@ -35,7 +35,7 @@ CC = cc
 # src/pyo/complex.asm calls for the general complex power and for abs().
 # float.asm avoids libm by doing its own x87 sequence; complex does not, since
 # the polar form needs all seven and hand-rolling them would be a worse bargain.
-LDFLAGS = -no-pie -lc -lm -lgmp
+LDFLAGS = -no-pie -lc -lm -lgmp -lz
 TARGET = apython
 
 # Source files.  Everything the interpreter is built from lives under src/:
@@ -120,6 +120,7 @@ check: $(TARGET) lib-pyc
 	@bash tests/run_tests.sh
 	@bash tests/pyc_probe.sh
 	@bash tests/arity_probe.sh
+	@bash tests/typefuzz_probe.sh
 	@bash tests/syntax_probe.sh
 
 # A malformed .pyc has to be refused rather than run.  Not a tests/test_*.py:
@@ -133,6 +134,7 @@ check-pyc: $(TARGET)
 # tests/arity_floor.txt.
 check-arity: $(TARGET)
 	@bash tests/arity_probe.sh
+	@bash tests/typefuzz_probe.sh
 
 # A syntax error's message and its five location fields, against CPython's,
 # over tests/syntax_corpus.txt.  Ratchets against tests/syntax_floor.txt;

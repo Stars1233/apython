@@ -182,6 +182,10 @@ DEF_FUNC frame_new, 8            ; 5 pushes, so rsp is 16-aligned
     ; by frame_free, which makes a stale pointer a free of someone else's
     ; object rather than a wrong answer.
     mov qword [r11 + PyFrame.exc_state], 0
+    ; frame_obj is the same trap one field along: it is a BORROWED pointer to
+    ; a refcounted object, so a stale one is a live frame object handed to
+    ; whoever calls frameobj_for next.
+    mov qword [r11 + PyFrame.frame_obj], 0
 
     ; Set nlocalsplus and func_obj
     mov ecx, [rbx + PyCodeObject.co_nlocalsplus]
@@ -228,6 +232,23 @@ DEF_FUNC frame_free, 8            ; 3 pushes, so rsp is 16-aligned
     push r13
 
     mov rbx, rdi            ; rbx = frame
+
+    ; Anything looking at this frame has to stop looking before the pool takes
+    ; the memory back.  frameobj_detach copies out the line, the offset and
+    ; the fast locals -- everything that stops being readable -- and drops
+    ; both borrowed pointers.
+    ;
+    ; BEFORE the localsplus walk below, not after: the copy INCREFs each
+    ; local, and the walk has already released them by then.  Detaching last
+    ; resurrected freed objects into the snapshot's f_locals dict, and the
+    ; crash landed in the collector rather than here.
+    cmp qword [rbx + PyFrame.frame_obj], 0
+    je .no_frame_obj
+    mov rdi, rbx
+    extern frameobj_detach
+    call frameobj_detach
+.no_frame_obj:
+
     mov r12d, [rbx + PyFrame.nlocalsplus]  ; r12d = nlocalsplus
     xor r13d, r13d          ; r13d = loop index
     ; Iterate through localsplus entries

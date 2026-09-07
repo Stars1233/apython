@@ -325,7 +325,7 @@ END_FUNC sys_ftruncate
 
 ;; ============================================================================
 ;; The eight the posix module was short of.  Each is the bare syscall; the
-;; argument checking and the OSError live in src/posixmod.asm.
+;; argument checking and the OSError live in src/modules/posix.asm.
 ;; sys_chdir(const char *path) -> int
 ;; ============================================================================
 global sys_chdir

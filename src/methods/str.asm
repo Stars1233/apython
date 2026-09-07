@@ -160,6 +160,146 @@ ssi_arg_msg:     db " arg must be None or str", 0
 section .text
 
 ;; ============================================================================
+;; str_ws_at(rdi = data, rsi = byte offset) -> eax = 1 when the character
+;;   there is whitespace, ecx = its width in bytes
+;;
+;; The scan primitive split() needs.  ASCII is one compare and one table load,
+;; which is what the byte loops this replaces cost; anything wider decodes and
+;; asks uflags_of, which is the only thing that knows about U+00A0 and the
+;; U+2000 block.
+;; ============================================================================
+DEF_FUNC str_ws_at
+    movzx eax, byte [rdi + rsi]
+    cmp al, 0x80
+    jae .swa_wide
+    lea rcx, [rel str_ws_class]
+    movzx eax, byte [rcx + rax]
+    mov ecx, 1
+    leave
+    ret
+.swa_wide:
+    extern ucase_utf8_get
+    call ucase_utf8_get         ; eax = code point, ecx = width
+    push rcx
+    sub rsp, 8
+    mov edi, eax
+    extern uflags_of
+    call uflags_of
+    add rsp, 8
+    pop rcx
+    and eax, 16                 ; UF_SPACE; see str_cp_matches
+    shr eax, 4
+    leave
+    ret
+END_FUNC str_ws_at
+
+;; ============================================================================
+;; str_ws_before(rdi = data, rsi = the offset just PAST a character)
+;;   -> eax = 1 when that character is whitespace, rcx = where it starts
+;;
+;; The same question asked backwards, which rsplit() and rstrip() need and
+;; which a byte loop answered by subtracting one.  A character is found by
+;; stepping back over its continuation bytes.
+;; ============================================================================
+SWB_DATA equ 8
+SWB_END  equ 16
+SWB_POS  equ 24
+SWB_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC str_ws_before, SWB_FRAME
+    mov [rbp - SWB_DATA], rdi
+    mov [rbp - SWB_END], rsi
+    mov rcx, rsi
+.swb_back:
+    dec rcx
+    test rcx, rcx
+    jle .swb_have
+    mov al, [rdi + rcx]
+    and al, 0xC0
+    cmp al, 0x80
+    je .swb_back
+.swb_have:
+    mov [rbp - SWB_POS], rcx
+    mov rdi, [rbp - SWB_DATA]
+    mov rsi, rcx
+    call str_ws_at
+    mov rcx, [rbp - SWB_POS]
+    leave
+    ret
+END_FUNC str_ws_before
+
+;; ============================================================================
+;; str_cp_matches(edi = a code point, rsi = chars data or 0, rdx = chars byte
+;;   length) -> eax = 1 when the character should be stripped
+;;
+;; The code-point twin of strip_char_matches, and the reason there has to be
+;; one.  A byte table cannot answer for whitespace: U+00A0, U+2028 and U+3000
+;; are two and three bytes in UTF-8, so no entry in a 256-byte array can name
+;; them.  uflags_of can, and its UF_SPACE bit is exactly CPython's set --
+;; gen_unicodecase.py generated it from str.isspace(), which is why
+;; "\xa0".isspace() was already True while "a\xa0b".split() was not.
+;;
+;; With an explicit `chars` the comparison is by CODE POINT as well, and that
+;; was not a refinement: comparing bytes made "\xe9\xe8x".strip("\xe8") strip
+;; the 0xC3 lead byte the two characters share, and hand back a string that
+;; is not valid UTF-8.
+;; ============================================================================
+SCM_CP    equ 8
+SCM_CHARS equ 16
+SCM_CLEN  equ 24
+SCM_POS   equ 32
+SCM_FRAME equ 48            ; + 0 pushes = 48
+DEF_FUNC str_cp_matches, SCM_FRAME
+    mov [rbp - SCM_CP], rdi
+    mov [rbp - SCM_CHARS], rsi
+    mov [rbp - SCM_CLEN], rdx
+    test rsi, rsi
+    jz .scpm_space
+
+    mov qword [rbp - SCM_POS], 0
+.scpm_loop:
+    mov rsi, [rbp - SCM_POS]
+    cmp rsi, [rbp - SCM_CLEN]
+    jge .scpm_no
+    mov rdi, [rbp - SCM_CHARS]
+    extern ucase_utf8_get
+    call ucase_utf8_get         ; eax = code point, ecx = width
+    movsxd rcx, ecx
+    add [rbp - SCM_POS], rcx
+    cmp eax, [rbp - SCM_CP]
+    jne .scpm_loop
+    mov eax, 1
+    leave
+    ret
+
+.scpm_space:
+    ; ASCII is the overwhelming majority and the byte table answers it in one
+    ; load; only a wider character needs the flag tables.
+    mov eax, [rbp - SCM_CP]
+    cmp eax, 128
+    jae .scpm_wide
+    lea rcx, [rel str_ws_class]
+    movzx eax, byte [rcx + rax]
+    leave
+    ret
+.scpm_wide:
+    mov edi, eax
+    extern uflags_of
+    call uflags_of
+    ; UF_SPACE, the fifth bit of the flag word gen_unicodecase.py builds.
+    ; Named here rather than included: str_case.asm owns the enum and nothing
+    ; else in this file needs it.
+    and eax, 16
+    shr eax, 4                  ; answer 0 or 1
+    leave
+    ret
+
+.scpm_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC str_cp_matches
+
+;; ============================================================================
 ;; str_strip_impl(rdi = args, rsi = nargs, edx = mode) -> Value
 ;; mode: bit 0 = strip the left, bit 1 = strip the right.
 ;; ============================================================================
@@ -169,6 +309,7 @@ SSI_MODE  equ 24
 ; Which of the three this is, so the refusal can name it: CPython says
 ; "lstrip arg must be None or str", not "strip".
 SSI_NAME  equ 32
+SSI_W     equ 40            ; a character's width, or where it starts
 SSI_FRAME equ 48            ; + 4 pushes = 80, 16-aligned
 
 DEF_FUNC_LOCAL str_strip_impl, SSI_FRAME
@@ -215,6 +356,13 @@ DEF_FUNC_LOCAL str_strip_impl, SSI_FRAME
     xor r13d, r13d              ; start
     mov r14, r12                ; end, exclusive
 
+    ; Pure ASCII takes the byte loops below: every character is one byte, and
+    ; a `chars` holding wider ones cannot match a byte under 0x80, so the
+    ; comparison stays honest.  Anything else decodes.
+    mov rax, [rbx + PyStrObject.ob_size]
+    cmp rax, [rbx + PyStrObject.ob_length]
+    jne .ssi_wide
+
     test qword [rbp - SSI_MODE], 1
     jz .ssi_right
 .ssi_left_loop:
@@ -243,6 +391,58 @@ DEF_FUNC_LOCAL str_strip_impl, SSI_FRAME
     jz .ssi_make
     dec r14
     jmp .ssi_right_loop
+
+; --- the same two scans, one code point at a time ------------------------
+.ssi_wide:
+    test qword [rbp - SSI_MODE], 1
+    jz .ssi_wide_right
+.ssi_wide_left:
+    cmp r13, r14
+    jge .ssi_wide_right_check
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, r13
+    call ucase_utf8_get         ; eax = code point, ecx = width
+    movsxd rcx, ecx
+    mov [rbp - SSI_W], rcx
+    mov edi, eax
+    mov rsi, [rbp - SSI_CHARS]
+    mov rdx, [rbp - SSI_CLEN]
+    call str_cp_matches
+    test eax, eax
+    jz .ssi_wide_right_check
+    add r13, [rbp - SSI_W]
+    jmp .ssi_wide_left
+
+.ssi_wide_right_check:
+.ssi_wide_right:
+    test qword [rbp - SSI_MODE], 2
+    jz .ssi_make
+.ssi_wide_rloop:
+    cmp r14, r13
+    jle .ssi_make
+    ; Back up over continuation bytes to the lead byte of the last character.
+    mov rcx, r14
+.ssi_wide_back:
+    dec rcx
+    cmp rcx, r13
+    jle .ssi_wide_have
+    mov al, [rbx + PyStrObject.data + rcx]
+    and al, 0xC0
+    cmp al, 0x80
+    je .ssi_wide_back
+.ssi_wide_have:
+    mov [rbp - SSI_W], rcx      ; where that character starts
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, rcx
+    call ucase_utf8_get
+    mov edi, eax
+    mov rsi, [rbp - SSI_CHARS]
+    mov rdx, [rbp - SSI_CLEN]
+    call str_cp_matches
+    test eax, eax
+    jz .ssi_make
+    mov r14, [rbp - SSI_W]
+    jmp .ssi_wide_rloop
 
 .ssi_make:
     lea rdi, [rbx + PyStrObject.data]
@@ -1455,11 +1655,12 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     ; skip leading whitespace
     cmp r12, [rbp - SPI_LEN]
     jge .spi_done
-    movzx eax, byte [rbx + PyStrObject.data + r12]
-    lea rcx, [rel str_ws_class]
-    cmp byte [rcx + rax], 0
-    je .spi_ws_piece
-    inc r12
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, r12
+    call str_ws_at
+    test eax, eax
+    jz .spi_ws_piece
+    add r12, rcx
     jmp .spi_ws_loop
 
 .spi_ws_piece:
@@ -1482,11 +1683,12 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
 .spi_ws_find_end:
     cmp r13, [rbp - SPI_LEN]
     jge .spi_ws_emit
-    movzx eax, byte [rbx + PyStrObject.data + r13]
-    lea rcx, [rel str_ws_class]
-    cmp byte [rcx + rax], 0
-    jne .spi_ws_emit
-    inc r13
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, r13
+    call str_ws_at
+    test eax, eax
+    jnz .spi_ws_emit
+    add r13, rcx
     jmp .spi_ws_find_end
 .spi_ws_emit:
     mov rsi, r13
@@ -1508,11 +1710,12 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     ; skip trailing whitespace
     test r12, r12
     jle .spi_done
-    movzx eax, byte [rbx + PyStrObject.data + r12 - 1]
-    lea rcx, [rel str_ws_class]
-    cmp byte [rcx + rax], 0
-    je .spi_wsr_piece
-    dec r12
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, r12
+    call str_ws_before          ; eax = whitespace?, rcx = where it starts
+    test eax, eax
+    jz .spi_wsr_piece
+    mov r12, rcx
     jmp .spi_wsr_loop
 
 .spi_wsr_piece:
@@ -1533,11 +1736,12 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
 .spi_wsr_find:
     test r13, r13
     jle .spi_wsr_emit
-    movzx eax, byte [rbx + PyStrObject.data + r13 - 1]
-    lea rcx, [rel str_ws_class]
-    cmp byte [rcx + rax], 0
-    jne .spi_wsr_emit
-    dec r13
+    lea rdi, [rbx + PyStrObject.data]
+    mov rsi, r13
+    call str_ws_before
+    test eax, eax
+    jnz .spi_wsr_emit
+    mov r13, rcx
     jmp .spi_wsr_find
 .spi_wsr_emit:
     mov rsi, r12

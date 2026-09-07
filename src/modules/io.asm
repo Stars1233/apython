@@ -288,9 +288,18 @@ DEF_FUNC io_module_create, IMC_FRAME
     xor esi, esi
     call io_new_type
     mov rbx, rax                ; rbx = _IOBase, one reference kept here
-    mov rdi, rax
+    ; The context-manager pair goes on _IOBase itself: see iobase_enter_fn.
+    mov rdi, [rbx + PyTypeObject.tp_dict]
+    lea rsi, [rel im_n_enter]
+    lea rdx, [rel iobase_enter_fn]
+    call io_add_method
+    mov rdi, [rbx + PyTypeObject.tp_dict]
+    lea rsi, [rel im_n_exit]
+    lea rdx, [rel iobase_exit_fn]
+    call io_add_method
+    mov rdi, rbx
     call obj_incref
-    IO_ADD_OBJ im_n_IOBase, rax
+    IO_ADD_OBJ im_n_IOBase, rbx
 
     mov rdi, rbx
     call io_bases1
@@ -2206,6 +2215,70 @@ DEF_FUNC_LOCAL io_add_method, IAM_FRAME
     leave
     ret
 END_FUNC io_add_method
+
+;; ============================================================================
+;; iobase_enter_fn(rdi = args, rsi = nargs) -> rax = self, as a Value
+;; iobase_exit_fn(rdi = args, rsi = nargs)  -> rax = None, after self.close()
+;;
+;; _IOBase.__enter__ and _IOBase.__exit__.
+;;
+;; On _IOBase and not only on the concrete types, because CPython's own
+;; Lib/io.py does not build on lib/_io.py's Python IOBase -- it derives a
+;; fresh `class IOBase(_io._IOBase, metaclass=abc.ABCMeta)` and everything
+;; behind it, so a method that exists only on the Python half is invisible to
+;; anything written against `io.IOBase`.  gzip.GzipFile is written against
+;; io.BufferedIOBase, and `with gzip.open(...)` was a TypeError saying the
+;; object does not support the context manager protocol.
+;;
+;; __exit__ calls close() by NAME, so a subclass that overrides it -- which
+;; every stream in the compression stack does -- gets its own.
+;; ============================================================================
+DEF_FUNC iobase_enter_fn
+    test rsi, rsi
+    jz .ibe_argerr
+    mov rax, [rdi]              ; self, already a Value
+    INCREF_V rax, rcx
+    mov edx, TAG_PTR
+    leave
+    ret
+.ibe_argerr:
+    RAISE exc_TypeError_type, "__enter__() missing self"
+END_FUNC iobase_enter_fn
+
+;; ============================================================================
+;; iobase_exit_fn(rdi = args, rsi = nargs) -> rax = None, or 0 with the
+;;   exception close() raised still pending
+;; ============================================================================
+DEF_FUNC iobase_exit_fn
+    test rsi, rsi
+    jz .ibx_argerr
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rax
+    ja .ibx_none
+    lea rsi, [rel im_n_close]
+    extern dunder_call_1
+    call dunder_call_1          ; -> (rax = payload, rdx = tag)
+    test edx, edx
+    jz .ibx_maybe_raised
+    mov rdi, rax
+    V_PACK rdi, rdx
+    DECREF_V rdi, rcx           ; whatever close() answered is discarded
+.ibx_none:
+    LOAD_NONE rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.ibx_maybe_raised:
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    je .ibx_none
+    xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
+    leave
+    ret
+.ibx_argerr:
+    RAISE exc_TypeError_type, "__exit__() missing self"
+END_FUNC iobase_exit_fn
 
 %macro IO_METHOD 2              ; %1 = name symbol, %2 = implementation
     mov rdi, rbx

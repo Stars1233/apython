@@ -93,76 +93,19 @@ def _reduce_ex(self, proto):
     else:
         return _reconstructor, args
 
-# Helper for __reduce_ex__ protocol 2
-
-def __newobj__(cls, *args):
-    return cls.__new__(cls, *args)
-
-def __newobj_ex__(cls, args, kwargs):
-    """Used by pickle protocol 4, instead of __newobj__ to allow classes with
-    keyword-only arguments to be pickled correctly.
-    """
-    return cls.__new__(cls, *args, **kwargs)
-
-def _slotnames(cls):
-    """Return a list of slot names for a given class.
-
-    This needs to find slots defined by the class and its bases, so we
-    can't simply return the __slots__ attribute.  We must walk down
-    the Method Resolution Order and concatenate the __slots__ of each
-    class found there.  (This assumes classes don't modify their
-    __slots__ attribute to misrepresent their slots after the class is
-    defined.)
-    """
-
-    # Get the value from a cache in the class if possible
-    names = cls.__dict__.get("__slotnames__")
-    if names is not None:
-        return names
-
-    # Not cached -- calculate the value
-    names = []
-    if not hasattr(cls, "__slots__"):
-        # This class has no slots
-        pass
-    else:
-        # Slots found -- gather slot names from all base classes
-        for c in cls.__mro__:
-            if "__slots__" in c.__dict__:
-                slots = c.__dict__['__slots__']
-                # if class has a single slot, it can be given as a string
-                if isinstance(slots, str):
-                    slots = (slots,)
-                for name in slots:
-                    # special descriptors
-                    if name in ("__dict__", "__weakref__"):
-                        continue
-                    # mangled names
-                    elif name.startswith('__') and not name.endswith('__'):
-                        stripped = c.__name__.lstrip('_')
-                        if stripped:
-                            names.append('_%s%s' % (stripped, name))
-                        else:
-                            names.append(name)
-                    else:
-                        names.append(name)
-
-    # Cache the outcome in the class if at all possible
-    try:
-        cls.__slotnames__ = names
-    except:
-        pass # But don't die if we can't
-
-    return names
-
-# A registry of extension codes.  This is an ad-hoc compression
-# mechanism.  Whenever a global reference to <module>, <name> is about
-# to be pickled, the (<module>, <name>) tuple is looked up here to see
-# if it is a registered extension code for it.  Extension codes are
-# universal, so that the meaning of a pickle does not depend on
-# context.  (There are also some codes reserved for local use that
-# don't have this restriction.)  Codes are positive ints; 0 is
-# reserved.
+# A registry of extension codes.  This is an ad-hoc compression mechanism:
+# whenever a global reference to <module>, <name> is about to be pickled, the
+# (<module>, <name>) tuple is looked up here to see if a registered extension
+# code stands for it.  Codes are universal, so a pickle's meaning does not
+# depend on context.
+#
+# Nothing in this tree registers one, and pickle here never consults them --
+# but __all__ has always named the three functions, and CPython's own
+# pickle.py opens with
+#
+#     from copyreg import _extension_registry, _inverted_registry, _extension_cache
+#
+# so a copyreg without them is a copyreg CPython's pickle cannot import.
 
 _extension_registry = {}                # key -> code
 _inverted_registry = {}                 # code -> key
@@ -203,15 +146,13 @@ def remove_extension(module, name, code):
 def clear_extension_cache():
     _extension_cache.clear()
 
-# Standard extension code assignments
+# Helper for __reduce_ex__ protocol 2
 
-# Reserved ranges
+def __newobj__(cls, *args):
+    return cls.__new__(cls, *args)
 
-# First  Last Count  Purpose
-#     1   127   127  Reserved for Python standard library
-#   128   191    64  Reserved for Zope
-#   192   239    48  Reserved for 3rd parties
-#   240   255    16  Reserved for private use (will never be assigned)
-#   256   Inf   Inf  Reserved for future assignment
-
-# Extension codes are assigned by the Python Software Foundation.
+def __newobj_ex__(cls, args, kwargs):
+    """Used by pickle protocol 4, instead of __newobj__ to allow classes with
+    keyword-only arguments to be pickled correctly.
+    """
+    return cls.__new__(cls, *args, **kwargs)

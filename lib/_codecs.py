@@ -589,10 +589,158 @@ def escape_decode(data, errors=None):
     return (bytes(out), n)
 
 
-unicode_escape_encode = escape_encode
-unicode_escape_decode = escape_decode
-raw_unicode_escape_encode = escape_encode
-raw_unicode_escape_decode = escape_decode
+# --- the two unicode-escape codecs ------------------------------------------
+#
+# NOT the same thing as escape_encode above, which is bytes-to-bytes and is
+# what `string_escape` was.  These take a STR: unicode_escape spells anything
+# outside printable ASCII with a backslash, and raw_unicode_escape spells only
+# what latin-1 cannot hold.  Aliasing them to escape_encode meant every
+# `"x".encode("unicode-escape")` was a TypeError about a string argument
+# without an encoding -- and pickle protocol 0 encodes every str that way.
+
+
+def _escape_above(cp, out):
+    """The \\u and \\U forms, which both codecs share."""
+    if cp < 0x10000:
+        out.append("\\u%04x" % cp)
+    else:
+        out.append("\\U%08x" % cp)
+
+
+def unicode_escape_encode(s, errors=None):
+    if not isinstance(s, str):
+        raise TypeError("unicode_escape_encode() argument must be str")
+    out = []
+    for ch in s:
+        cp = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif 32 <= cp < 127:
+            out.append(ch)
+        elif cp < 256:
+            out.append("\\x%02x" % cp)
+        else:
+            _escape_above(cp, out)
+    return ("".join(out).encode("ascii"), len(s))
+
+
+def raw_unicode_escape_encode(s, errors=None):
+    if not isinstance(s, str):
+        raise TypeError("raw_unicode_escape_encode() argument must be str")
+    out = bytearray()
+    for ch in s:
+        cp = ord(ch)
+        if cp < 256:
+            out.append(cp)
+        else:
+            esc = []
+            _escape_above(cp, esc)
+            out.extend("".join(esc).encode("ascii"))
+    return (bytes(out), len(s))
+
+
+_SIMPLE_ESCAPES = {
+    ord("n"): "\n", ord("t"): "\t", ord("r"): "\r", ord("\\"): "\\",
+    ord("'"): "'", ord('"'): '"', ord("a"): "\a", ord("b"): "\b",
+    ord("f"): "\f", ord("v"): "\v", ord("\n"): "",
+}
+
+
+def _escape_hex(b, i, width, out):
+    """Read `width` hex digits at i and append the character.  Returns i."""
+    digits = b[i:i + width]
+    if len(digits) < width:
+        raise UnicodeDecodeError("unicodeescape", bytes(b), i - 2, len(b),
+                                 "truncated \\xXX escape")
+    try:
+        out.append(chr(int(digits.decode("ascii"), 16)))
+    except ValueError:
+        raise UnicodeDecodeError("unicodeescape", bytes(b), i - 2, i + width,
+                                 "truncated \\xXX escape") from None
+    return i + width
+
+
+def unicode_escape_decode(data, errors=None, final=True):
+    b = _as_bytes(data)
+    out = []
+    i = 0
+    n = len(b)
+    while i < n:
+        c = b[i]
+        if c != 92:                     # not a backslash
+            out.append(chr(c))          # latin-1
+            i += 1
+            continue
+        i += 1
+        if i >= n:
+            out.append("\\")
+            break
+        e = b[i]
+        i += 1
+        if e in _SIMPLE_ESCAPES:
+            out.append(_SIMPLE_ESCAPES[e])
+        elif e == ord("x"):
+            i = _escape_hex(b, i, 2, out)
+        elif e == ord("u"):
+            i = _escape_hex(b, i, 4, out)
+        elif e == ord("U"):
+            i = _escape_hex(b, i, 8, out)
+        elif 48 <= e <= 55:             # up to three octal digits
+            val = e - 48
+            for _ in range(2):
+                if i < n and 48 <= b[i] <= 55:
+                    val = val * 8 + (b[i] - 48)
+                    i += 1
+                else:
+                    break
+            out.append(chr(val))
+        elif e == ord("N"):
+            if i < n and b[i] == ord("{"):
+                end = b.find(b"}", i)
+                if end < 0:
+                    raise UnicodeDecodeError(
+                        "unicodeescape", bytes(b), i - 2, n,
+                        "malformed \\N character escape")
+                import unicodedata
+                out.append(unicodedata.lookup(
+                    b[i + 1:end].decode("ascii")))
+                i = end + 1
+            else:
+                raise UnicodeDecodeError("unicodeescape", bytes(b), i - 2, n,
+                                         "malformed \\N character escape")
+        else:
+            # An unknown escape keeps the backslash, as CPython's does.
+            out.append("\\")
+            out.append(chr(e))
+    return ("".join(out), n)
+
+
+def raw_unicode_escape_decode(data, errors=None, final=True):
+    b = _as_bytes(data)
+    out = []
+    i = 0
+    n = len(b)
+    while i < n:
+        c = b[i]
+        if c != 92:
+            out.append(chr(c))
+            i += 1
+            continue
+        if i + 1 < n and b[i + 1] == ord("u"):
+            i = _escape_hex(b, i + 2, 4, out)
+        elif i + 1 < n and b[i + 1] == ord("U"):
+            i = _escape_hex(b, i + 2, 8, out)
+        else:
+            out.append("\\")          # every other backslash stands
+            i += 1
+    return ("".join(out), n)
+
 
 # Every codec function encodings/*.py may assign to a class attribute has to
 # be non-binding, not just utf-8's: ascii.py, latin_1.py and every
@@ -605,10 +753,6 @@ del _n
 
 iso8859_1_encode = latin_1_encode
 iso8859_1_decode = latin_1_decode
-unicode_escape_encode = escape_encode
-unicode_escape_decode = escape_decode
-raw_unicode_escape_encode = escape_encode
-raw_unicode_escape_decode = escape_decode
 
 
 # --- utf-7 -----------------------------------------------------------------

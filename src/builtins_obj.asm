@@ -143,51 +143,16 @@ DEF_FUNC builtin_callable
     ja .callable_false
     mov rdi, [rdi]                     ; args[0] payload
 
-    ; Get type of arg
+    ; CPython's answer is one line -- type(x)->tp_call != NULL -- and this can
+    ; finally give the same one.  It used to name three static types it knew
+    ; had callable instances (func, builtin_func, method) and test tp_call
+    ; only for heaptypes, because until slot_tp_call existed a heaptype's
+    ; tp_call was always 0 and the allowlist was the only thing that could
+    ; work.  An allowlist answers every type nobody thought of wrong:
+    ; callable(weakref.ref(x)) was False despite weakrefmod setting tp_call.
     mov rax, [rdi + PyObject.ob_type]
-
-    ; Check if arg is a type (all types are callable via type_call)
-    extern type_type
-    lea rcx, [rel type_type]
-    cmp rax, rcx
-    je .callable_true
-    extern exc_metatype
-    lea rcx, [rel exc_metatype]
-    cmp rax, rcx
-    je .callable_true
-    lea rcx, [rel user_type_metatype]
-    cmp rax, rcx
-    je .callable_true
-
-    ; For heaptypes (user-defined classes): tp_call is set only when __call__ defined
-    mov rdx, [rax + PyTypeObject.tp_flags]
-    test rdx, TYPE_FLAG_HEAPTYPE
-    jnz .callable_check_heaptype
-
-    ; For built-in types: only known callable types return True
-    ; (func, builtin_func, method have genuinely callable instances)
-    extern func_type
-    lea rcx, [rel func_type]
-    cmp rax, rcx
-    je .callable_true
-    extern builtin_func_type
-    lea rcx, [rel builtin_func_type]
-    cmp rax, rcx
-    je .callable_true
-    extern method_type
-    lea rcx, [rel method_type]
-    cmp rax, rcx
-    je .callable_true
-
-    ; Not a known callable built-in type (dict, list, set, etc. instances → not callable)
-    jmp .callable_false
-
-.callable_check_heaptype:
-    ; Heaptype instance: check if type has tp_call set (set when __call__ defined)
-    mov rcx, [rax + PyTypeObject.tp_call]
-    test rcx, rcx
-    jnz .callable_true
-    jmp .callable_false
+    cmp qword [rax + PyTypeObject.tp_call], 0
+    je .callable_false
 
 .callable_true:
     RET_TRUE
@@ -2162,11 +2127,20 @@ DEF_FUNC builtin_input_fn, INP_FRAME
     cmp rsi, 1
     jne .inp_error
 
-    ; Print prompt to stdout
     mov rax, [rdi]          ; args[0] = prompt
     V_TEST_PTR rax, rcx
     ja .inp_type_error
-    ; Write prompt string data
+    ; The prompt has to appear where a print() around it would.  Writing it
+    ; straight to fd 1 put it AHEAD of everything still in stdout's buffer,
+    ; so a pdb session's prompts all arrived before the output they were
+    ; prompting for.  CPython writes it through sys.stdout and flushes; this
+    ; flushes first and then writes, which comes to the same order.
+    push rax
+    sub rsp, 8
+    extern fileobj_flush_std
+    call fileobj_flush_std
+    add rsp, 8
+    pop rax
     mov rsi, rax
     add rsi, PyStrObject.data  ; buf ptr
     mov rdx, [rax + PyStrObject.ob_size]  ; len
@@ -2174,40 +2148,49 @@ DEF_FUNC builtin_input_fn, INP_FRAME
     call sys_write
 
 .inp_no_prompt:
-    ; Read line from stdin into stack buffer
-    lea rsi, [rbp - INP_FRAME]  ; buffer
-    mov edx, INP_BUF_SIZE - 1
-    xor edi, edi            ; stdin (fd=0)
+    ; ONE LINE, not one bufferful.  A single read of 4095 bytes swallowed the
+    ; whole pipe: `input()` twice over "A\nB\n" answered "A\nB" and then "",
+    ; because the second call found EOF.  A byte at a time is a syscall per
+    ; character, which is the price of not owning a stdin buffer; input() is
+    ; not on any hot path.
+    xor r8d, r8d                ; bytes so far
+.inp_getc:
+    cmp r8, INP_BUF_SIZE - 1
+    jae .inp_have_line
+    push r8
+    sub rsp, 8
+    lea rsi, [rbp - INP_FRAME]
+    add rsi, r8
+    mov edx, 1
+    xor edi, edi                ; stdin
     call sys_read
-    ; rax = bytes read (or negative on error)
+    add rsp, 8
+    pop r8
     test rax, rax
-    jle .inp_empty
+    jle .inp_eof_or_line        ; 0 = EOF, negative = error
+    lea rcx, [rbp - INP_FRAME]
+    cmp byte [rcx + r8], 10     ; '\n' ends the line and is not kept
+    je .inp_have_line
+    inc r8
+    jmp .inp_getc
 
-    ; Strip trailing newline
+.inp_eof_or_line:
+    ; EOF with nothing read at all is CPython's EOFError; EOF after some
+    ; characters is a final line with no newline, which is not an error.
+    test r8, r8
+    jz .inp_eof
+
+.inp_have_line:
     lea rdi, [rbp - INP_FRAME]
-    mov rcx, rax
-    dec rcx
-    cmp byte [rdi + rcx], 10  ; '\n'
-    jne .inp_no_strip
-    dec rax                  ; exclude newline
-.inp_no_strip:
-    ; Null-terminate
-    mov byte [rdi + rax], 0
-
-    ; Create string from buffer
-    ; rdi already points to buffer
+    mov byte [rdi + r8], 0
     call str_from_cstr
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.inp_empty:
-    ; EOF or error: return empty string
-    CSTRING rdi, ""
-    call str_from_cstr
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
+.inp_eof:
+    extern exc_EOFError_type
+    RAISE exc_EOFError_type, "EOF when reading a line"
 
 .inp_error:
     RAISE exc_TypeError_type, "input() takes at most 1 argument"
@@ -3200,6 +3183,16 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
     mov rdi, [rbp - BIM_NAME]
     test rdi, rdi
     jz .imp_nargs_error
+    ; And it has to be a str.  import_module reads PyStrObject.data off it, so
+    ; an int immediate was a SIGSEGV and a heap singleton was worse than one:
+    ; __import__(None) read whatever .rodata sits near None and answered
+    ; "No module named 'plemented'".
+    V_TEST_PTR rdi, rax
+    ja .imp_name_error
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .imp_name_error
 
     ; level: only 0 is honoured.  A relative import needs the caller's
     ; __package__, which this entry point does not consult, so say so rather
@@ -3340,6 +3333,8 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
     RAISE exc_NotImplementedError_type, "__import__(): relative import is not supported"
 .imp_nargs_error:
     RAISE exc_TypeError_type, "__import__() requires at least 1 argument"
+.imp_name_error:
+    RAISE exc_TypeError_type, "module name must be a string"
 END_FUNC builtin_import_fn
 
 ;; ============================================================================

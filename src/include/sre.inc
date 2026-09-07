@@ -191,6 +191,27 @@ struc SRE_State
     ; there", which is what lets '.*?' find 'a' where it had just found ''.
     .must_advance:  resd 1  ; +140: forbid an empty match at search_origin
     .search_origin: resq 1  ; +144: where the current search began
+    ; 0 when codepoint_buf is borrowed from an SRE_CpCache that outlives this
+    ; state.  sre_state_init's construction zeroes the whole struct, so a path
+    ; that allocates has to say so; sre_state_fini frees only what it owns.
+    ; A qword rather than a dword because the zero loop clears
+    ; SRE_State_size/8 qwords, and an odd tail would go unzeroed.
+    .owns_cpbuf:    resq 1  ; +152: 1 = this state must free codepoint_buf
+endstruc
+
+; ============================================================================
+; SRE_CpCache -- a decoded subject held across matches.
+;
+; Decoding a non-ASCII subject to u32 is O(len), and a scanner builds a fresh
+; SRE_State per iteration, so finditer over such a string used to re-decode it
+; on every step.  The scanner owns one of these and hands it to
+; sre_state_init, which fills it on the first miss and borrows it thereafter.
+; It holds the UNCLAMPED decode: endpos narrows codepoint_len per call and
+; must keep measuring against the whole string.
+; ============================================================================
+struc SRE_CpCache
+    .buf:  resq 1  ; +0: u32* decoded codepoints, NULL until first filled
+    .len:  resq 1  ; +8: codepoints in .buf, before any endpos clamp
 endstruc
 
 ; Recursion depth limit (matches CPython's default)
@@ -208,7 +229,7 @@ struc SRE_RepeatContext
 endstruc
 
 ; ============================================================================
-; SRE_ScannerObject layout (48 bytes)
+; SRE_ScannerObject layout
 ; Used by Pattern.finditer() and Pattern.scanner().
 ; ============================================================================
 struc SRE_ScannerObject
@@ -221,6 +242,12 @@ struc SRE_ScannerObject
     ; The scanner builds a fresh SRE_State per call, so the "the last match
     ; was empty" flag has to live here rather than in the state.
     .must_advance: resq 1 ; +48  forbid an empty match at pos
+    ; An SRE_CpCache, for the same reason: every iteration would otherwise
+    ; re-decode the subject.  Safe here and not in general because the scanner
+    ; holds a reference to .string for its whole life and str is immutable, so
+    ; the buffer can neither outlive its subject nor go stale.
+    .cp_buf:       resq 1 ; +56  SRE_CpCache.buf
+    .cp_len:       resq 1 ; +64  SRE_CpCache.len
 endstruc
 
 ; Initial marks array size (number of i64 slots)

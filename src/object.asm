@@ -2371,6 +2371,54 @@ DEF_FUNC obj_richcompare_bool, ORB_FRAME
 .orb_compare:
     DUNDER_EXC_SAVE [rbp - ORB_EXC]
 
+    ; --- the subclass-first rule ---
+    ; When the RIGHT operand's type is a proper subclass of the left's, it is
+    ; asked first, with the operator reversed.  COMPARE_OP has always done
+    ; this; obj_richcompare_bool is what every CONTAINER asks, and it went
+    ; straight to the left's slot -- so for a str subclass whose __eq__
+    ; answers False, `SK("hello") == "hello"` was False and
+    ; `SK("hello") in ["hello"]` was True.  Forty-three call sites: `in` on
+    ; every container, list.count, list.index, list.remove, tuple.count,
+    ; min, max and the sort.
+    ;
+    ; Looser than the arithmetic rule, exactly as CPython's do_richcompare is:
+    ; a proper subclass with a tp_richcompare is enough, with no question
+    ; about which methods it overrides.
+    mov rsi, [rbp - ORB_RIGHT]
+    V_TEST_PTR rsi, rax
+    ja .orb_left_first          ; an immediate is int or float exactly
+    mov rdi, [rbp - ORB_LEFT]
+    call value_type
+    test rax, rax
+    jz .orb_left_first
+    mov rcx, [rbp - ORB_RIGHT]
+    mov rcx, [rcx + PyObject.ob_type]
+    cmp rax, rcx
+    je .orb_left_first          ; same type: nothing to prefer
+    mov rdi, rcx
+    mov rsi, rax
+    call type_is_subtype
+    test eax, eax
+    jz .orb_left_first
+    mov rdi, [rbp - ORB_RIGHT]
+    mov rdi, [rdi + PyObject.ob_type]
+    mov rax, [rdi + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .orb_left_first
+    mov rdi, [rbp - ORB_RIGHT]
+    mov rsi, [rbp - ORB_LEFT]
+    mov edx, [rbp - ORB_OP]
+    lea rcx, [rel orb_swap_table]
+    movsxd rdx, edx
+    mov edx, [rcx + rdx*4]      ; the reversed op
+    call rax
+    test rax, rax
+    jnz .orb_have_result
+    ; It declined, or it raised.  A raise is the caller's; a decline means
+    ; the ordinary order still gets its turn.
+    DUNDER_RAISED [rbp - ORB_EXC], .orb_error
+
+.orb_left_first:
     ; Left operand's tp_richcompare.
     mov rdi, [rbp - ORB_LEFT]
     call value_type
@@ -2517,6 +2565,29 @@ DEF_FUNC obj_binary_op, OBO_FRAME
 
     DUNDER_EXC_SAVE [rbp - OBO_EXC]
 
+    ; --- the subclass-first rule ---
+    ; When the RIGHT operand's type is a proper subclass of the left's and
+    ; overrides the reflected name, it goes first.  op_binary_op has always
+    ; done this; this function is what every builtin that adds two objects
+    ; calls, and it went straight to the left type's slot -- so
+    ; `1 + MyInt(3)` was right and `sum([1, 2, MyInt(3)])` was not.
+    ;
+    ; Only the forward half, 0..12, reaches here, and binop_rdunder_table is
+    ; indexed the same way.
+    mov rdx, [rbp - OBO_OP]
+    lea rax, [rel binop_rdunder_table]
+    mov rdx, [rax + rdx*8]
+    mov rdi, [rbp - OBO_LEFT]
+    mov rsi, [rbp - OBO_RIGHT]
+    extern slot_binop_reflect_first
+    call slot_binop_reflect_first
+    test ecx, ecx
+    jz .obo_left_slot
+    cmp ecx, 2
+    je .obo_error               ; the reflected call raised
+    jmp .obo_done
+
+.obo_left_slot:
     ; --- the left type's slot ---
     mov rdi, [rbp - OBO_LEFT]
     call value_type

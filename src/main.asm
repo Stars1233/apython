@@ -185,12 +185,14 @@ DEF_FUNC main, 8
     jne .no_trace_flag
     cmp byte [rax + 2], 0
     jne .no_trace_flag
-    ; Point dispatch at the tracing table.  Setting a flag was not enough:
-    ; every handler dispatches inline and only eval_dispatch tested it.
-    extern opcode_dispatch_table
-    extern opcode_trace_table
-    lea rax, [rel opcode_trace_table]
-    mov [rel opcode_dispatch_table], rax
+    ; Point dispatch at the hook table.  Setting a flag was not enough: every
+    ; handler dispatches inline and only eval_dispatch tested it.  Through
+    ; eval_hooks_set, because sys.settrace wants the same table and the two
+    ; must not overwrite each other.
+    xor edi, edi                ; bit 0 = the -t printer
+    mov esi, 1
+    extern eval_hooks_set
+    call eval_hooks_set
     add r15, 8                  ; skip -t in argv
     dec r14d                    ; adjust argc
     cmp r14d, 2
@@ -270,6 +272,26 @@ DEF_FUNC main, 8
     mov rsi, rax
     lea rdx, [rel none_singleton]
     call dict_set
+    pop rdi
+    call obj_decref
+
+    ; Set __file__ to the path the script was named by.  CPython sets it for
+    ; a script as readily as for an import, and code reads it constantly --
+    ; os.path.dirname(__file__) is the ordinary way to find a data file.  Its
+    ; absence is why trace.py counted nothing: globaltrace_lt reads
+    ; frame.f_globals['__file__'] to decide whether to trace a module at all.
+    lea rdi, [rel __file__cstr]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rbx                ; the script path, as given on the command line
+    call str_from_cstr_heap
+    push rax
+    mov rdx, rax
+    mov rsi, [rsp + 8]
+    mov rdi, [rsp + 16]         ; globals dict
+    call dict_set
+    pop rdi
+    call obj_decref
     pop rdi
     call obj_decref
 
@@ -594,5 +616,6 @@ __name__cstr: db "__name__", 0
 __doc__cstr: db "__doc__", 0
 __main__cstr: db "__main__", 0
 __package__cstr: db "__package__", 0
+__file__cstr: db "__file__", 0
 __builtins__cstr: db "__builtins__", 0
 newline_char: db 10

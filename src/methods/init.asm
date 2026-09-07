@@ -171,6 +171,7 @@ extern dict_method_setdefault
 extern dict_method_update
 extern dict_method_values
 extern float_classmethod_fromhex
+extern float_classmethod_getformat
 extern float_method_as_integer_ratio
 extern float_method_conjugate
 extern complex_type
@@ -2126,6 +2127,7 @@ DEF_FUNC methods_init
 
     ; Add fromhex as classmethod
     ADD_CLASSMETHOD_N mn_fromhex, float_classmethod_fromhex, 2, 2
+    ADD_CLASSMETHOD_N mn___getformat__, float_classmethod_getformat, 2, 2
 
     ADD_FN_N mn___format__, builtin_method_format, 2, 2
 
@@ -2611,6 +2613,7 @@ mn_is_integer:  db "is_integer", 0
 mn_as_integer_ratio: db "as_integer_ratio", 0
 ; float method names (continued)
 mn_fromhex:     db "fromhex", 0
+mn___getformat__: db "__getformat__", 0
 ; bytes method names
 mn_decode:            db "decode", 0
 mn_tobytes:          db "tobytes", 0

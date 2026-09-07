@@ -1114,12 +1114,28 @@ DEF_FUNC sys_module_init, 40
     ; --- sys._getframe / sys._getframemodulename ---
     ;
     ; warnings._deprecated reaches for both, and nine stdlib modules come in
-    ; behind that one call.  What comes back is a SNAPSHOT: see
-    ; src/pyo/frameobj.asm for why it cannot be the frame itself.
+    ; behind that one call.  What comes back is a live VIEW onto the frame,
+    ; and the same object each time it is asked -- see src/pyo/frameobj.asm.
     extern sys_getframe_func
     extern sys_getframemodulename_func
     SYS_ADD_FUNC sys_getframe_func, sm_getframe
     SYS_ADD_FUNC sys_getframemodulename_func, sm_getframemodulename
+
+    ; --- the tracing hooks ---
+    ;
+    ; bdb, pdb, trace and profile are written against these five and nothing
+    ; else.  What they cost when nothing is set is nothing: see
+    ; src/systrace.asm.
+    extern sys_settrace_func
+    extern sys_gettrace_func
+    extern sys_setprofile_func
+    extern sys_getprofile_func
+    extern sys_call_tracing_func
+    SYS_ADD_FUNC sys_settrace_func, sm_settrace
+    SYS_ADD_FUNC sys_gettrace_func, sm_gettrace
+    SYS_ADD_FUNC sys_setprofile_func, sm_setprofile
+    SYS_ADD_FUNC sys_getprofile_func, sm_getprofile
+    SYS_ADD_FUNC sys_call_tracing_func, sm_call_tracing
 
     ; --- sys.intern function ---
     lea rdi, [rel sys_intern_func]
@@ -1572,6 +1588,11 @@ sm_unraisablehook: db "unraisablehook", 0
 sm_exc_info:     db "exc_info", 0
 sm_getframe:     db "_getframe", 0
 sm_getframemodulename: db "_getframemodulename", 0
+sm_settrace:     db "settrace", 0
+sm_gettrace:     db "gettrace", 0
+sm_setprofile:   db "setprofile", 0
+sm_getprofile:   db "getprofile", 0
+sm_call_tracing: db "call_tracing", 0
 sm_byteorder:    db "byteorder", 0
 sm_little:       db "little", 0
 sm_getdefaultencoding: db "getdefaultencoding", 0

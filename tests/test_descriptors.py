@@ -82,3 +82,42 @@ print(repr(str.__getitem__), repr(tuple.__getitem__))
 
 # Calling them unbound is unchanged.
 print(int.bit_length(5), str.upper("a"), len([1, 2]), list.__len__([1, 2]))
+
+
+# --- a staticmethod object is itself callable (3.10+) ------------------------
+#
+# staticmethod_type.tp_call was 0, so `staticmethod(f)(x)` raised TypeError and
+# callable(staticmethod(f)) was False.  The wrapped value is a Value and need
+# not be a pointer -- staticmethod(1) is legal to build -- so calling one has
+# to report the int the way calling the int directly would.
+
+def _sm(label, fn):
+    try:
+        print("%-34s %r" % (label, fn()))
+    except BaseException as e:
+        print("%-34s !! %s: %s" % (label, type(e).__name__, str(e)[:44]))
+
+
+_sm("callable(sm(len))", lambda: callable(staticmethod(len)))
+_sm("sm(len)([1, 2])", lambda: staticmethod(len)([1, 2]))
+_sm("sm(len)(*[[1, 2, 3]])", lambda: staticmethod(len)(*[[1, 2, 3]]))
+_sm("sm(pow)(2, 10)", lambda: staticmethod(pow)(2, 10))
+_sm("sm(sorted) with kwargs", lambda: staticmethod(sorted)([3, 1], reverse=True))
+_sm("sm(abs) as a key=", lambda: sorted([-2, 1], key=staticmethod(abs)))
+_sm("min(key=sm(abs))", lambda: min([-2, 1], key=staticmethod(abs)))
+_sm("sm(len).__func__", lambda: staticmethod(len).__func__ is len)
+_sm("callable(classmethod(len))", lambda: callable(classmethod(len)))
+
+for _bad in (1, 1.5, None, [], "x", object()):
+    _sm("sm(%s)()" % type(_bad).__name__, (lambda b: lambda: staticmethod(b)())(_bad))
+    _sm("callable(sm(%s))" % type(_bad).__name__,
+        (lambda b: lambda: callable(staticmethod(b)))(_bad))
+
+
+class _Static:
+    @staticmethod
+    def f(a, b=2):
+        return (a, b)
+
+
+print(_Static.f(1), _Static().f(1, 3), _Static.__dict__["f"](9))

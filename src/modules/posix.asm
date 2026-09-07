@@ -2,7 +2,7 @@
 ;
 ; The platform module os.py imports.  It gates on
 ; `if 'posix' in sys.builtin_module_names`, so the name has to be in
-; builtin_module_table (src/modtable.asm) as well as in sys.modules; without
+; builtin_module_table (src/modules/table.asm) as well as in sys.modules; without
 ; that, os.py raises "no os specific module found" whatever else exists here.
 ;
 ; The surface is the one measured to make every stdlib module that currently

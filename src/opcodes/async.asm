@@ -51,69 +51,144 @@ extern opcode_dispatch_table
 ;; ============================================================================
 ;; op_get_awaitable - GET_AWAITABLE (131)
 ;;
-;; TOS = object to await.
-;; If it's a coroutine, leave it. Otherwise call __await__ (tp_iter).
-;; Reject plain generators. Accept coroutines and objects with __await__.
+;; TOS = the object to await.  A coroutine is already awaitable and is left
+;; alone.  Anything else has to define __await__ and return an ITERATOR from
+;; it -- CPython's _PyCoro_GetAwaitableIter -- which is how asyncio.Future,
+;; every asyncio lock and condition, and essentially every third-party
+;; awaitable are written.
+;;
+;; This used to look for tp_iter, which is __iter__ and a different protocol
+;; entirely: a class defining __await__ has no tp_iter, so every one of them
+;; was refused.  Nothing here noticed, because apython's own asyncio is
+;; native and never goes through the protocol; CPython's cannot run without
+;; it.
 ;; ============================================================================
 DEF_FUNC_BARE op_get_awaitable
-    ; TOS = object to await
-    VPEEK rdi                  ; rdi = TOS payload (don't pop yet)
+    VPEEK rdi                  ; the object; not popped until it is resolved
 
-    ; Must be a real object to check ob_type
     V_TEST_PTR rdi, rax
-    ja .gaw_error
+    ja .gaw_error              ; an immediate has no type to ask
 
-    ; Check if it's a coroutine — already awaitable
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel coro_type]
     cmp rax, rcx
-    je .gaw_done               ; coroutine: leave on stack
+    je .gaw_done               ; a coroutine is its own awaitable
 
-    ; Check if it's a generator (plain generators are NOT awaitable)
+    ; A plain generator is not awaitable.  One decorated with
+    ; @types.coroutine IS, and says so with CO_ITERABLE_COROUTINE, which is
+    ; how the stdlib's own generator-based coroutines survive.
     lea rcx, [rel gen_type]
     cmp rax, rcx
-    je .gaw_gen_error
+    jne .gaw_await
+    mov rcx, [rdi + PyGenObject.gi_frame]
+    test rcx, rcx
+    jz .gaw_error
+    mov rcx, [rcx + PyFrame.code]
+    test rcx, rcx
+    jz .gaw_error
+    mov ecx, [rcx + PyCodeObject.co_flags]
+    test ecx, CO_ITERABLE_COROUTINE
+    jnz .gaw_done
+    jmp .gaw_error
 
-    ; Try calling __await__ via tp_iter
+.gaw_await:
+    ; __await__ if the type defines it; otherwise tp_iter, which is what the
+    ; awaitables this interpreter builds for itself use -- an async
+    ; generator's asend object is an iterator with no dunder of its own.
+    ; CPython's tp_as_async->am_await covers both; there is one slot fewer
+    ; here, so the two are asked in turn.
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a handler
+    push rdi                   ; the original, for the DECREF below
+    mov rax, [rdi + PyObject.ob_type]
+    mov rdi, rax
+    lea rsi, [rel gaw_await_name]
+    extern dunder_lookup
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .gaw_try_iter
+
+    mov rdi, [rsp]
+    lea rsi, [rel gaw_await_name]
+    extern dunder_call_1
+    call dunder_call_1          ; -> (rax = payload, rdx = tag); not a Value
+    test edx, edx
+    jz .gaw_await_failed
+    jmp .gaw_have_result
+
+.gaw_try_iter:
+    mov rdi, [rsp]
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iter]
     test rax, rax
-    jz .gaw_error
+    jz .gaw_await_failed
+    call rax                    ; tp_iter(obj) -> the iterator, or NULL
+    test rax, rax
+    jz .gaw_await_failed
 
-    ; Fall through to call tp_iter
-    ; Pop TOS, save it, call tp_iter
+.gaw_have_result:
+    pop rdi                    ; the original; still on the value stack too
+    add rsp, 8
+
+    ; It has to be an iterator, and not a coroutine: CPython refuses
+    ; __await__ returning a coroutine because awaiting it would recurse.
+    V_TEST_PTR rax, rcx
+    ja .gaw_not_iter
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel coro_type]
+    cmp rcx, rdx
+    je .gaw_not_iter
+    cmp qword [rcx + PyTypeObject.tp_iternext], 0
+    je .gaw_not_iter
+
+    ; Replace the original on the value stack with what it awaits.  Its
+    ; reference is released exactly once, here: an iterator's own tp_iter
+    ; hands back self, so releasing it earlier and then using the result was
+    ; a use-after-free that surfaced two opcodes later inside SEND.
     VPOP rdi
-    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
-                               ; handler, so a call needs an even push list
-    push rdi                   ; save for DECREF later
-
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iter]
-    call rax                   ; tp_iter(obj) -> rax = iterator ptr (or NULL)
-
-    ; DECREF original.  The result is parked in the original's own slot rather
-    ; than pushed, so both calls are made at the same aligned depth.
-    mov rdi, [rsp]             ; saved original
-    mov [rsp], rax             ; the result takes its place
-    call obj_decref
-
-    pop rax                    ; restore result
-    add rsp, 8                 ; discard the pad
-
-    ; Check for NULL return (tp_iter failed)
-    test rax, rax
-    jz .gaw_error
-
+    push rax
+    sub rsp, 8
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
     VPUSH_PTR rax
 
 .gaw_done:
     DISPATCH
 
-.gaw_error:
-    RAISE exc_TypeError_type, "object can't be used in 'await' expression"
+.gaw_await_failed:
+    ; No __await__ at all, or one that raised.  dunder_call_1 leaves the
+    ; exception pending in the second case, and a pending one is the caller's.
+    pop rdi
+    add rsp, 8
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    jne .gaw_propagate
+    jmp .gaw_error
 
-.gaw_gen_error:
-    RAISE exc_TypeError_type, "cannot 'await' a generator (use 'yield from' instead)"
+.gaw_propagate:
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
+
+.gaw_not_iter:
+    ; rax holds what __await__ answered, owned.  It is not released: the
+    ; message names its TYPE, and raise_type_error_with_name does not return,
+    ; so there is no moment between reading the type and unwinding at which a
+    ; decref would be safe.  One object on a path that ends in a TypeError.
+    mov rsi, rax
+    CSTRING rdi, `__await__() returned non-iterator of type '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+
+.gaw_error:
+    VPEEK rsi
+    CSTRING rdi, `object \x01 can't be used in 'await' expression`
+    jmp raise_type_error_with_name
+
+
+section .rodata
+gaw_await_name: db "__await__", 0
+section .text
 END_FUNC op_get_awaitable
 
 ;; ============================================================================

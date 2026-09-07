@@ -940,14 +940,17 @@ DEF_FUNC compile_source, CS_FRAME
     jz .failed
 
     ; RESUME must be the first instruction of every code object: the frame
-    ; setup, the eval breaker and the tracing hook all key off it.  It carries
-    ; no source position, hence IF_NOLINE.
+    ; setup, the eval breaker and the tracing hook all key off it.  A module's
+    ; carries line ZERO, which is what CPython gives it -- co_lines() on
+    ; `x=1` answers (0, 2, 0) -- and which is not the same as no location at
+    ; all.  A tracer seeds itself from the frame's line at the 'call' event,
+    ; so a RESUME claiming line 1 swallowed the module's first real line.
     mov rdi, r12
     mov esi, OP_RESUME
     xor edx, edx
     xor ecx, ecx
     call cg_emit
-    or byte [rax + Instr.flags], IF_NOLINE
+    or byte [rax + Instr.flags], IF_LINE0
 
     cmp qword [rbp - CS_MODE], CMODE_EVAL
     je .gen_eval
@@ -2467,6 +2470,7 @@ extern raise_exception
 extern str_from_cstr_heap
 extern str_type
 extern code_type
+extern bytes_type
 
 extern exc_TypeError_type
 extern exc_ValueError_type
@@ -2709,12 +2713,19 @@ DEF_FUNC builtin_eval_fn, EV_FRAME
 
     mov rdi, [rbp - EV_ARGS]
     mov rbx, [rdi]                      ; the source argument
-    test rbx, rbx
-    jz .bad_source
+    ; V_TEST_PTR, not `test rbx, rbx`: a Value is one word and an int inside
+    ; +-2^50 or any float is an IMMEDIATE with no ob_type to read.  The load
+    ; below dereferenced the number, so eval(1) was a SIGSEGV rather than a
+    ; TypeError.  The macro rejects NULL in the same compare.
+    V_TEST_PTR rbx, rax
+    ja .bad_source
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel code_type]
     cmp rax, rcx
     je .have_code
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .ev_bytes_src
     lea rcx, [rel str_type]
     cmp rax, rcx
     jne .bad_source
@@ -2724,6 +2735,12 @@ DEF_FUNC builtin_eval_fn, EV_FRAME
     ; exec("  x=1") is an IndentationError.
     lea r12, [rbx + PyStrObject.data]
     mov r13, [rbx + PyStrObject.ob_size]
+    jmp .strip
+.ev_bytes_src:
+    ; bytes is source too, and CPython says so: the text is read as UTF-8
+    ; either way, and a bytes carries the same two fields at its own offsets.
+    lea r12, [rbx + PyBytesObject.data]
+    mov r13, [rbx + PyBytesObject.ob_size]
 .strip:
     test r13, r13
     jz .stripped
@@ -2805,7 +2822,7 @@ DEF_FUNC builtin_eval_fn, EV_FRAME
     call raise_exception
 .bad_source:
     lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "eval() arg 1 must be a string or code object"
+    CSTRING rsi, "eval() arg 1 must be a string, bytes or code object"
     call raise_exception
 END_FUNC builtin_eval_fn
 
@@ -2904,7 +2921,9 @@ CO_NPOS  equ 40
 CO_RAW   equ 48          ; the raw tree, while _ast._from_raw runs on it
 CO_KWNAMES equ 56        ; the pending keyword names, while they are scanned
 CO_KWI   equ 64
-CO_FRAME equ 72          ; + 3 pushes = 96, 16-byte aligned
+CO_SRC   equ 72          ; the source bytes, str or bytes: only the two
+CO_SRCLEN equ 80         ;   fields differ, and the offsets differ with them
+CO_FRAME equ 88          ; + 3 pushes = 112, 16-byte aligned
 DEF_FUNC builtin_compile_fn, CO_FRAME
     push rbx
     push r12
@@ -2974,19 +2993,37 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     mov r12, [rdi + 8]                  ; filename
     mov r13, [rdi + 16]                 ; mode
 
-    test rbx, rbx
-    jz .bad_source
+    ; All three are Values, and an int or float immediate has no ob_type to
+    ; read -- compile(1, "a", "exec") dereferenced the number.  V_TEST_PTR
+    ; rejects NULL and both immediate kinds in one compare.
+    V_TEST_PTR rbx, rax
+    ja .bad_source
     mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .co_bytes_src
     lea rcx, [rel str_type]
     cmp rax, rcx
     jne .bad_source
-    test r12, r12
-    jz .bad_filename
+    lea rax, [rbx + PyStrObject.data]
+    mov [rbp - CO_SRC], rax
+    mov rax, [rbx + PyStrObject.ob_size]
+    mov [rbp - CO_SRCLEN], rax
+    jmp .co_have_src
+.co_bytes_src:
+    lea rax, [rbx + PyBytesObject.data]
+    mov [rbp - CO_SRC], rax
+    mov rax, [rbx + PyBytesObject.ob_size]
+    mov [rbp - CO_SRCLEN], rax
+.co_have_src:
+    lea rcx, [rel str_type]
+    V_TEST_PTR r12, rax
+    ja .bad_filename
     mov rax, [r12 + PyObject.ob_type]
     cmp rax, rcx
     jne .bad_filename
-    test r13, r13
-    jz .bad_mode
+    V_TEST_PTR r13, rax
+    ja .bad_mode
     mov rax, [r13 + PyObject.ob_type]
     cmp rax, rcx
     jne .bad_mode
@@ -3030,8 +3067,8 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     mov ecx, CMODE_SINGLE
 .have_mode:
     mov [rbp - CO_MODE], rcx
-    lea rdi, [rbx + PyStrObject.data]
-    mov rsi, [rbx + PyStrObject.ob_size]
+    mov rdi, [rbp - CO_SRC]
+    mov rsi, [rbp - CO_SRCLEN]
     mov rdx, r12
     mov rcx, [rbp - CO_MODE]
     test qword [rbp - CO_FLAGS], PYCF_ONLY_AST
@@ -3097,7 +3134,7 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     call raise_exception
 .bad_source:
     lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "compile() arg 1 must be a string"
+    CSTRING rsi, "compile() arg 1 must be a string, bytes or AST object"
     call raise_exception
 .bad_filename:
     lea rdi, [rel exc_TypeError_type]
@@ -3146,21 +3183,31 @@ DEF_FUNC builtin_exec_fn, EV_FRAME
 
     mov rdi, [rbp - EV_ARGS]
     mov rbx, [rdi]
-    test rbx, rbx
-    jz .bad_source
+    V_TEST_PTR rbx, rax                 ; an immediate has no ob_type; see eval
+    ja .bad_source
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel code_type]
     cmp rax, rcx
     je .have_code
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    je .ex_bytes_src
     lea rcx, [rel str_type]
     cmp rax, rcx
     jne .bad_source
+    lea r12, [rbx + PyStrObject.data]
+    mov r13, [rbx + PyStrObject.ob_size]
+    jmp .ex_have_src
+.ex_bytes_src:
+    lea r12, [rbx + PyBytesObject.data]
+    mov r13, [rbx + PyBytesObject.ob_size]
+.ex_have_src:
 
     lea rdi, [rel ev_string_name]
     call str_from_cstr_heap
     mov [rbp - EV_CODE], rax
-    lea rdi, [rbx + PyStrObject.data]
-    mov rsi, [rbx + PyStrObject.ob_size]
+    mov rdi, r12
+    mov rsi, r13
     mov rdx, [rbp - EV_CODE]
     mov ecx, CMODE_EXEC
     call compile_source
@@ -3225,7 +3272,7 @@ DEF_FUNC builtin_exec_fn, EV_FRAME
     call raise_exception
 .bad_source:
     lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "exec() arg 1 must be a string or code object"
+    CSTRING rsi, "exec() arg 1 must be a string, bytes or code object"
     call raise_exception
 END_FUNC builtin_exec_fn
 

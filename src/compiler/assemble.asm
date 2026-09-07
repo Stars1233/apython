@@ -848,6 +848,8 @@ DEF_FUNC asm_linetable, AL_FRAME
     shl rdx, INSTR_SHIFT
     add rax, rdx
     mov ecx, [rax + Instr.line]
+    test byte [rax + Instr.flags], IF_LINE0
+    jnz .line_zero
     test byte [rax + Instr.flags], IF_NOLINE
     jnz .no_location
     test ecx, ecx
@@ -936,6 +938,16 @@ DEF_FUNC asm_linetable, AL_FRAME
     sub [rbp - AL_SIZE], rcx
     jmp .line_chunk
 
+.line_zero:
+    ; Line 0 and no location are different answers, and CPython gives the
+    ; first to a module's leading RESUME: co_lines() reports (0, 2, 0) there,
+    ; and a tracer that seeds itself from the frame's current line needs that
+    ; 0 or it swallows the module's first real line.  Form 13, the line-only
+    ; one, with the delta from wherever the running line is.
+    xor ecx, ecx
+    mov [rbp - AL_LINE], rcx
+    jmp .line_only
+
 .no_location:
     mov rcx, [rbp - AL_SIZE]
     test rcx, rcx
@@ -960,11 +972,16 @@ DEF_FUNC asm_linetable, AL_FRAME
     shl rdx, INSTR_SHIFT
     add rax, rdx
     mov ecx, [rax + Instr.line]
+    test byte [rax + Instr.flags], IF_LINE0
+    jnz .advance_zero
     test byte [rax + Instr.flags], IF_NOLINE
     jnz .no_advance
     test ecx, ecx
     jz .no_advance
     mov [rbp - AL_CUR], rcx
+    jmp .no_advance
+.advance_zero:
+    mov qword [rbp - AL_CUR], 0
 .no_advance:
     inc qword [rbp - AL_I]
     jmp .each

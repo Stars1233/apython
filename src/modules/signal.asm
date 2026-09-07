@@ -182,8 +182,8 @@ DEF_FUNC signal_run_pending, SRP_FRAME
     mov rdi, [rel eval_saved_r12]
     test rdi, rdi
     jz .srp_no_frame
-    extern frameobj_new
-    call frameobj_new
+    extern frameobj_for
+    call frameobj_for
     test rax, rax
     jnz .srp_have_frame
 .srp_no_frame:

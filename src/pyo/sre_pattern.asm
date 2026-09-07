@@ -134,6 +134,7 @@ DEF_FUNC sre_pattern_do_match, PM_FRAME
     mov rdx, [rbp - PM_STR]
     mov rcx, [rbp - PM_POS]
     mov r8, [rbp - PM_ENDPOS]
+    xor r9d, r9d               ; no codepoint cache
     call sre_state_init
 
     ; Set fullmatch mode if applicable
@@ -600,6 +601,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     lea rdi, [rbp - FA_STATE]
     mov rsi, [rbp - FA_PAT]
     mov rdx, [rbp - FA_STR]
+    xor r9d, r9d               ; no codepoint cache
     call sre_state_init
 
     mov r12, [rbp - FA_PAT]   ; pattern
@@ -973,6 +975,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov rdx, [rbp - SUB_STR]
     xor ecx, ecx
     mov r8, 0x7fffffffffffffff
+    xor r9d, r9d               ; no codepoint cache
     call sre_state_init
 
 .sub_loop:
@@ -1419,6 +1422,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov rdx, [rbp - SN_STR]
     xor ecx, ecx
     mov r8, 0x7fffffffffffffff
+    xor r9d, r9d               ; no codepoint cache
     call sre_state_init
 
 .subn_loop:
@@ -1757,6 +1761,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     mov rdx, [rbp - SP_STR]
     xor ecx, ecx
     mov r8, 0x7fffffffffffffff
+    xor r9d, r9d               ; no codepoint cache
     call sre_state_init
 
 .split_loop:
@@ -2405,6 +2410,10 @@ DEF_FUNC sre_scanner_new, 8            ; 5 pushes, so rsp is 16-aligned
     mov [rbx + SRE_ScannerObject.pos], r14
     mov [rbx + SRE_ScannerObject.endpos], r15
     mov qword [rbx + SRE_ScannerObject.must_advance], 0
+    ; ap_malloc does not zero, and sre_state_init reads .cp_buf to decide
+    ; whether the cache is filled.
+    mov qword [rbx + SRE_ScannerObject.cp_buf], 0
+    mov qword [rbx + SRE_ScannerObject.cp_len], 0
 
     mov rax, rbx
 
@@ -2429,6 +2438,15 @@ DEF_FUNC sre_scanner_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
 
     mov rdi, [rbx + SRE_ScannerObject.string]
     call obj_decref
+
+    ; The decoded subject, if any state ever handed one over.  Every
+    ; SRE_State built from this scanner borrowed it, so this is the only
+    ; owner.
+    mov rdi, [rbx + SRE_ScannerObject.cp_buf]
+    test rdi, rdi
+    jz .ssd_no_cache
+    call ap_free
+.ssd_no_cache:
 
     mov rdi, rbx
     call ap_free
@@ -2474,6 +2492,7 @@ DEF_FUNC sre_scanner_iternext, SI_FRAME
     mov rdx, [rbx + SRE_ScannerObject.string]
     mov rcx, [rbx + SRE_ScannerObject.pos]
     mov r8, [rbx + SRE_ScannerObject.endpos]
+    lea r9, [rbx + SRE_ScannerObject.cp_buf]  ; decode cache
     call sre_state_init
 
     ; Reset state marks
@@ -2592,6 +2611,7 @@ DEF_FUNC sre_scanner_match_method, SM2_FRAME
     mov rdx, [rbx + SRE_ScannerObject.string]
     mov rcx, [rbx + SRE_ScannerObject.pos]
     mov r8, [rbx + SRE_ScannerObject.endpos]
+    lea r9, [rbx + SRE_ScannerObject.cp_buf]  ; decode cache
     call sre_state_init
 
     ; Reset marks

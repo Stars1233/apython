@@ -371,6 +371,21 @@ DEF_FUNC code_getattr
     test eax, eax
     jz .return_positions
 
+    ; and so is co_lines(), which dis, trace and inspect all walk.
+    lea rdi, [rel co_attr_lines]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_lines
+
+    ; co_code is the bytecode, and it lives INSIDE the code object rather
+    ; than behind a pointer -- so it is a copy, made on demand.  dis reads it.
+    lea rdi, [rel co_n_code]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_code
+
     ; Check for replace
     lea rdi, [rel cr_attr_replace]
     lea rsi, [r12 + PyStrObject.data]
@@ -440,6 +455,30 @@ DEF_FUNC code_getattr
 .return_replace:
     ; Bound too, for the same reason: `co.replace` names its own code object.
     call _get_co_replace_builtin
+    mov rdi, rax
+    mov rsi, rbx
+    call method_new
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.return_code:
+    lea rdi, [rbx + PyCodeObject.co_code]
+    mov esi, [rbx + PyCodeObject.co_code_len]
+    extern bytes_from_data
+    call bytes_from_data
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.return_lines:
+    call _get_co_lines_builtin
     mov rdi, rax
     mov rsi, rbx
     call method_new
@@ -522,10 +561,16 @@ CPO_CODE  equ 8
 CPO_LIST  equ 16
 CPO_I     equ 24
 CPO_N     equ 32
-CPO_FRAME equ 48            ; + 0 pushes = 48
+CPO_TUP   equ 40
+; The four out-slots code_addr2location fills, ASCENDING from CPO_L0.
+CPO_L0    equ 80            ; start line
+CPO_L1    equ 72            ; end line
+CPO_L2    equ 64            ; start column, or -1
+CPO_L3    equ 56            ; end column, or -1
+CPO_FRAME equ 96            ; + 0 pushes = 96
 DEF_FUNC code_method_co_positions, CPO_FRAME
-    test rsi, rsi
-    jz .cpo_args
+    cmp rsi, 1                  ; bound, so self is the only argument
+    jne .cpo_args
     mov rdi, [rdi]
     mov [rbp - CPO_CODE], rdi
     mov eax, [rdi + PyCodeObject.co_code_len]
@@ -544,29 +589,63 @@ DEF_FUNC code_method_co_positions, CPO_FRAME
     mov rax, [rbp - CPO_I]
     cmp rax, [rbp - CPO_N]
     jge .cpo_done
+    ; What a table miss should read as: line 0 and no columns.
+    mov qword [rbp - CPO_L0], 0
+    mov qword [rbp - CPO_L1], 0
+    mov qword [rbp - CPO_L2], -1
+    mov qword [rbp - CPO_L3], -1
     mov rdi, [rbp - CPO_CODE]
     mov rsi, rax
-    extern code_addr2line
-    call code_addr2line
-    push rax
-    sub rsp, 8
+    lea rdx, [rbp - CPO_L0]
+    extern code_addr2location
+    call code_addr2location
+
     mov edi, 4
     extern tuple_new
     call tuple_new
-    add rsp, 8
-    pop rcx
     test rax, rax
     jz .cpo_drop
+    mov [rbp - CPO_TUP], rax
     mov rdx, [rax + PyTupleObject.ob_item]
-    mov rsi, rcx
-    V_PACK_I64 rsi, r8
-    mov [rdx], rsi
-    mov [rdx + 8], rsi
-    LOAD_NONE rsi
-    INCREF rsi
-    mov [rdx + 16], rsi
-    INCREF rsi
-    mov [rdx + 24], rsi
+    ; A -1 line is a NO_LOCATION entry, and CPython reports None for all
+    ; four of its fields, not just the columns.
+    mov rcx, [rbp - CPO_L0]
+    test rcx, rcx
+    jns .cpo_l0
+    LOAD_NONE rcx
+    jmp .cpo_l0_set
+.cpo_l0:
+    V_PACK_I64 rcx, r8
+.cpo_l0_set:
+    mov [rdx], rcx
+    mov rcx, [rbp - CPO_L1]
+    test rcx, rcx
+    jns .cpo_l1
+    LOAD_NONE rcx
+    jmp .cpo_l1_set
+.cpo_l1:
+    V_PACK_I64 rcx, r8
+.cpo_l1_set:
+    mov [rdx + 8], rcx
+    mov rcx, [rbp - CPO_L2]
+    test rcx, rcx
+    jns .cpo_c2
+    LOAD_NONE rcx
+    jmp .cpo_c2_set
+.cpo_c2:
+    V_PACK_I64 rcx, r8
+.cpo_c2_set:
+    mov [rdx + 16], rcx
+    mov rcx, [rbp - CPO_L3]
+    test rcx, rcx
+    jns .cpo_c3
+    LOAD_NONE rcx
+    jmp .cpo_c3_set
+.cpo_c3:
+    V_PACK_I64 rcx, r8
+.cpo_c3_set:
+    mov [rdx + 24], rcx
+    mov rax, [rbp - CPO_TUP]
 
     push rax
     sub rsp, 8
@@ -612,6 +691,9 @@ co_n_flags:       db "co_flags", 0
 co_n_nlocals:     db "co_nlocals", 0
 co_n_stacksize:   db "co_stacksize", 0
 co_n_posonly:     db "co_posonlyargcount", 0
+co_n_linetable:   db "co_linetable", 0
+co_n_exctable:    db "co_exceptiontable", 0
+co_n_code:        db "co_code", 0
 align 8
 code_attr_table:
     dq co_n_name,        PyCodeObject.co_name,        0
@@ -625,6 +707,8 @@ code_attr_table:
     dq co_n_nlocals,     PyCodeObject.co_nlocals,     1
     dq co_n_stacksize,   PyCodeObject.co_stacksize,   1
     dq co_n_posonly,     PyCodeObject.co_posonlyargcount, 1
+    dq co_n_linetable,   PyCodeObject.co_linetable,   0
+    dq co_n_exctable,    PyCodeObject.co_exceptiontable, 0
     dq 0, 0, 0
 section .text
 
@@ -723,6 +807,7 @@ cr_attr_replace: db "replace", 0
 
 section .bss
 _co_positions_cache: resq 1
+_co_lines_cache: resq 1
 _co_replace_cache: resq 1
 
 section .text
@@ -993,6 +1078,156 @@ DEF_FUNC code_method_replace, CR_FRAME
     RAISE exc_TypeError_type, "replace() takes no positional arguments"
 END_FUNC code_method_replace
 
+;; ============================================================================
+;; code.co_lines() -> an iterable of (start, end, lineno)
+;;
+;; One entry per RUN of code units on the same line: CPython's own
+;; co_lines() coalesces, and `dis`, `trace` and `inspect` all read it that
+;; way.  A line of None marks a run the table does not cover, which is what
+;; CPython reports for a NO_LOCATION entry.
+;;
+;; Built from code_addr2line rather than from the line table directly: the
+;; walk is the same one every other reader here uses, and a second decoder
+;; would be a second thing to get wrong.
+;; ============================================================================
+COL_CODE  equ 8
+COL_LIST  equ 16
+COL_I     equ 24
+COL_N     equ 32
+COL_START equ 40            ; where the current run began, in code units
+COL_LINE  equ 48            ; the line that run is on
+COL_TUP   equ 56
+COL_LOC   equ 96            ; the four out-slots, ascending from here
+COL_FRAME equ 112           ; + 0 pushes = 112
+DEF_FUNC code_method_co_lines, COL_FRAME
+    cmp rsi, 1                  ; bound, so self is the only argument
+    jne .col_args
+    mov rdi, [rdi]
+    mov [rbp - COL_CODE], rdi
+    mov eax, [rdi + PyCodeObject.co_code_len]
+    shr eax, 1                  ; code units, two bytes each
+    mov [rbp - COL_N], rax
+
+    mov rdi, rax
+    extern list_new
+    call list_new
+    test rax, rax
+    jz .col_failed
+    mov [rbp - COL_LIST], rax
+
+    mov qword [rbp - COL_I], 0
+    mov qword [rbp - COL_START], 0
+    mov qword [rbp - COL_LINE], -2      ; neither a line nor "no location"
+
+.col_loop:
+    mov rax, [rbp - COL_I]
+    cmp rax, [rbp - COL_N]
+    jge .col_flush
+    ; code_addr2location, not code_addr2line: only the first can say that an
+    ; entry carries NO location, and CPython's co_lines() breaks its run
+    ; there and reports None for the line.
+    mov qword [rbp - COL_LOC], 0
+    mov rdi, [rbp - COL_CODE]
+    mov rsi, rax
+    lea rdx, [rbp - COL_LOC]
+    extern code_addr2location
+    call code_addr2location
+    mov rcx, [rbp - COL_LOC]
+    cmp qword [rbp - COL_I], 0
+    je .col_first
+    cmp rcx, [rbp - COL_LINE]
+    je .col_next
+    ; A different line: close the run that ended here.
+    push rcx
+    sub rsp, 8
+    call col_emit
+    add rsp, 8
+    pop rcx
+    mov rax, [rbp - COL_I]
+    mov [rbp - COL_START], rax
+.col_first:
+    mov [rbp - COL_LINE], rcx
+.col_next:
+    inc qword [rbp - COL_I]
+    jmp .col_loop
+
+.col_flush:
+    cmp qword [rbp - COL_N], 0
+    je .col_done
+    call col_emit
+.col_done:
+    mov rax, [rbp - COL_LIST]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.col_failed:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+.col_args:
+    RAISE exc_TypeError_type, "co_lines() takes no arguments"
+
+;; One (start, end, line) triple, from COL_START to COL_I.  A local, because
+;; it reads the caller's frame.  It sits after every dotted label that names
+;; it: a non-dotted label ends their scope.
+col_emit:
+    mov edi, 3
+    extern tuple_new
+    call tuple_new
+    test rax, rax
+    jz .ce_done
+    mov [rbp - COL_TUP], rax
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rcx, [rbp - COL_START]
+    add rcx, rcx                ; co_lines reports BYTE offsets
+    V_PACK_I64 rcx, r8
+    mov [rdx], rcx
+    mov rcx, [rbp - COL_I]
+    add rcx, rcx
+    V_PACK_I64 rcx, r8
+    mov [rdx + 8], rcx
+    mov rcx, [rbp - COL_LINE]
+    test rcx, rcx
+    js .ce_none
+    V_PACK_I64 rcx, r8
+    jmp .ce_line
+.ce_none:
+    LOAD_NONE rcx
+.ce_line:
+    mov [rdx + 16], rcx
+    mov rdi, [rbp - COL_LIST]
+    mov rsi, [rbp - COL_TUP]
+    extern list_append
+    call list_append
+    mov rdi, [rbp - COL_TUP]
+    extern obj_decref
+    call obj_decref
+.ce_done:
+    ret
+END_FUNC code_method_co_lines
+
+;; ============================================================================
+;; _get_co_lines_builtin() -> rax = the co_lines builtin, borrowed
+;;
+;; Made once and cached, the way the co_positions one is.
+;; ============================================================================
+DEF_FUNC_LOCAL _get_co_lines_builtin
+    mov rax, [rel _co_lines_cache]
+    test rax, rax
+    jnz .gcl_ret
+    lea rdi, [rel code_method_co_lines]
+    lea rsi, [rel co_attr_lines]
+    extern builtin_func_new
+    call builtin_func_new
+    mov [rel _co_lines_cache], rax
+.gcl_ret:
+    leave
+    ret
+END_FUNC _get_co_lines_builtin
+
 DEF_FUNC_LOCAL _get_co_positions_builtin
     mov rax, [rel _co_positions_cache]
     test rax, rax
@@ -1009,3 +1244,4 @@ END_FUNC _get_co_positions_builtin
 
 section .rodata
 co_attr_positions: db "co_positions", 0
+co_attr_lines: db "co_lines", 0

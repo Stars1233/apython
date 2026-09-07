@@ -287,16 +287,143 @@ END_FUNC object_method_dir
 
 ;; ============================================================================
 ;; object.__reduce_ex__(self, protocol) / object.__reduce__(self)
+;;   -> rax = the reduction tuple, as a Value
 ;;
-;; These exist so that code which asks whether a class overrode them -- enum
-;; does, to decide whether a mixin supplied its own -- finds something to
-;; compare against.  Calling one raises: the copyreg machinery CPython builds
-;; the default reduction on is not implemented here, and returning a wrong
-;; reduction would corrupt a pickle rather than refuse to make one.
+;; Delegated to lib/_reduce.py, which is where CPython's Python half of this
+;; lives -- and where the protocol-2 half CPython writes in C has been written
+;; to join it.  Assembling a
+;; five-tuple here would mean calling back into Python for
+;; __getnewargs_ex__, __getstate__ and the list/dict iterators anyway, and a
+;; reduction assembled wrongly does not fail: it makes a pickle that
+;; unpickles into the wrong object.
+;;
+;; This used to raise.  `copy.copy(x)` for an ordinary instance is
+;; `cls.__reduce_ex__(x, 4)` and nothing else, so copy, deepcopy and every
+;; pickle of a plain object were a TypeError -- which is what stopped
+;; tarfile, whose addfile() copies its TarInfo.
+;;
+;; object.__reduce__(self) is protocol 0, as CPython's is.
 ;; ============================================================================
-DEF_FUNC object_method_reduce
-    RAISE exc_TypeError_type, "cannot pickle this object: object.__reduce_ex__ is not implemented"
+ORX_ARGS  equ 16            ; two Values: args[0] = self, args[1] = protocol
+ORX_FN    equ 24
+ORX_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
+DEF_FUNC object_method_reduce, ORX_FRAME
+    test rsi, rsi
+    jz .orx_nargs
+    mov rax, [rdi]
+    mov [rbp - ORX_ARGS], rax   ; args[0] = self
+    xor eax, eax
+    cmp rsi, 2
+    jb .orx_have_proto
+    push rdi
+    sub rsp, 8
+    mov rdi, [rdi + 8]
+    V_UNPACK rdi, rdx
+    extern obj_as_index
+    call obj_as_index
+    add rsp, 8
+    pop rdi
+.orx_have_proto:
+    push rax
+    sub rsp, 8
+    mov rdi, rax
+    extern int_from_i64
+    call int_from_i64
+    V_PACK rax, rdx
+    add rsp, 8
+    add rsp, 8                  ; the pushed protocol is not needed again
+    mov [rbp - ORX_ARGS + 8], rax   ; args[1] = the protocol
+
+    call object_reduce_impl
+    test rax, rax
+    jz .orx_failed
+    mov rdi, rax
+    lea rsi, [rbp - ORX_ARGS]
+    mov edx, 2
+    extern obj_call_n
+    call obj_call_n
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - ORX_ARGS + 8]
+    DECREF_V rdi, rcx           ; the protocol int, which V_PACK may have boxed
+    add rsp, 8
+    pop rax
+    leave
+    ret
+
+.orx_failed:
+    RAISE exc_TypeError_type, "cannot pickle this object: _reduce is not available"
+.orx_nargs:
+    RAISE exc_TypeError_type, "__reduce_ex__() missing self"
 END_FUNC object_method_reduce
+
+;; ============================================================================
+;; object_reduce_impl() -> rax = _reduce.object_reduce_ex, borrowed, or 0
+;;
+;; Looked up lazily and cached for the life of the process, the way
+;; co_ast_builder caches _ast._from_raw and for the same reason: builtins are
+;; built long before the import system can run.
+;; ============================================================================
+section .data
+omr_cached: dq 0
+section .rodata
+omr_mod:  db "_reduce", 0
+omr_attr: db "object_reduce_ex", 0
+section .text
+
+ORI_KEY   equ 8
+ORI_MOD   equ 16
+ORI_FRAME equ 32            ; + 0 pushes = 32
+DEF_FUNC_LOCAL object_reduce_impl, ORI_FRAME
+    mov rax, [rel omr_cached]
+    test rax, rax
+    jnz .ori_out
+
+    lea rdi, [rel omr_mod]
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    mov [rbp - ORI_KEY], rax
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    extern import_module
+    call import_module
+    mov [rbp - ORI_MOD], rax
+    mov rdi, [rbp - ORI_KEY]
+    extern obj_decref
+    call obj_decref
+    mov rax, [rbp - ORI_MOD]
+    test rax, rax
+    jz .ori_fail
+
+    lea rdi, [rel omr_attr]
+    call str_from_cstr_heap
+    mov [rbp - ORI_KEY], rax
+    mov rdi, [rbp - ORI_MOD]
+    mov rdi, [rdi + PyModuleObject.mod_dict]
+    mov rsi, rax
+    extern dict_get
+    call dict_get
+    push rax
+    mov rdi, [rbp - ORI_KEY]
+    call obj_decref
+    mov rdi, [rbp - ORI_MOD]
+    call obj_decref             ; sys.modules keeps the module alive
+    pop rax
+    test rax, rax
+    jz .ori_fail
+    V_UNPACK rax, rdx
+    cmp edx, TAG_PTR
+    jne .ori_fail
+    mov [rel omr_cached], rax   ; borrowed: _reduce stays in sys.modules
+.ori_out:
+    leave
+    ret
+.ori_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC object_reduce_impl
 
 ;; ============================================================================
 extern str_from_cstr
