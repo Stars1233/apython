@@ -24,10 +24,9 @@ reasoning that chose them and what changing one would cost.
   `doctest`, `pdb`, `unittest` and `signal` with it.  So is `zlib`, as a shim
   over `-lz` on the precedent `-lgmp` set, and `gzip` with it -- and
   `zipfile`, `tarfile` and `shutil`, which imported before and could not
-  compress.  What is left blocks one or two modules apiece and is genuinely
-  C: `unicodedata`, `_tracemalloc`, `_symtable`, `_ssl`, `_sqlite3`,
-  `_crypt`, `_lzma`, `_bz2`, `_ctypes`, `_curses`, `pyexpat` and
-  `_tkinter`.
+  compress.  What is left is genuinely C: `array`, `unicodedata`,
+  `_tracemalloc`, `_symtable`, `_ssl`, `_sqlite3`, `_crypt`, `_lzma`, `_bz2`,
+  `_ctypes`, `_curses`, `pyexpat` and `_tkinter`.
   (`_io` is not among them: `src/modules/io.asm` supplies `_iocore` and
   `lib/_io.py` assembles both halves under the name `_io`.  `_socket` and
   `select` are the same split over `_socketcore`.  Neither are `math`,
@@ -36,6 +35,14 @@ reasoning that chose them and what changing one would cost.
   there, and so are `_csv` and `termios` -- the second over one raw
   `posix.ioctl`, the same split `_socket` and `select` use.)
   `make check-stdlib` gives the current figure: 178 of 196.
+
+  `array` is the one worth doing first, and the reason the old "one or two
+  modules apiece" reading of this list was wrong: it is what stands between
+  this tree and `multiprocessing`, and CPython's own suite imports it from
+  test modules for `struct`, `memoryview`, `io`, `bytes`, `socket`, `re`,
+  `marshal`, `codecs` and the compression family -- far more than the rest of
+  the list put together.  It also needs no library and no syscalls, which none
+  of the others can say.
 
   `math`'s `gamma`, `lgamma`, the n-ary `hypot` and `sumprod` round
   differently from CPython's, which uses its own Lanczos approximation and
@@ -48,31 +55,60 @@ reasoning that chose them and what changing one would cost.
   answers `AttributeError: module 'mod' has no attribute 'missing'`; this tree
   binds what it finds and silently skips the rest
   (`.is_all_loop`'s `jz .is_all_next` in `src/opcodes/match.asm`).  That is how
-  `lib/copyreg.py` came to promise `add_extension`, `remove_extension` and
-  `clear_extension_cache` in `__all__` while defining none of them, and nothing
-  noticed until a reviewer read the file.
+  `lib/copyreg.py` once came to promise `add_extension`, `remove_extension`
+  and `clear_extension_cache` in `__all__` while defining none of them, and
+  nothing noticed until a reviewer read the file.  Those three are defined
+  now, so the illustration no longer reproduces -- but the missing check is
+  still missing, and the next such file will be as quiet.
 
-  The skip is one branch, but the replacement is not: the intrinsic runs on a
-  hand-rolled frame with the eval loop's bytecode IP saved in `rbx`, and
-  `raise_exception` tail-jumps into the unwinder.  Raising from there without
-  restoring `rbx` first is the same shape as the `systrace_exception` bug --
-  a corrupted IP in every frame that raised.
+  The skip is one branch, and so is the replacement.  An earlier note here
+  claimed raising from the intrinsic would corrupt `rbx` the way the
+  `systrace_exception` bug did; that is wrong.  `eval_exception_unwind`
+  reloads `rbx`, `r12`, `r13` and `rsp` from the `eval_saved_*` globals, so a
+  hand-rolled frame is not the hazard -- and `op_import_from` already raises
+  from this same subsystem with a bare `RAISE`, which is the precedent to
+  follow.
+
+  `__all__` is also assumed to be a list or a tuple: `__all__ = {"a"}` reads
+  `PyTupleObject.ob_item` off a set.  It wants a type check in the same
+  commit.
 
 - **An `__init__` that is not a descriptor is still handed `self`.**
   `class C: __init__ = functools.partial(f)` and an `__init__` that is a
   callable INSTANCE both run here with `self` prepended; CPython does not bind
   either, because neither has `__get__`, and raises
-  `TypeError: f() missing 1 required positional argument: 'self'`.  A plain
-  function, a `staticmethod` and a `staticmethod` subclass all behave the same
-  either way.  Found while checking the two exact-type tests next to the
-  `type_call` subtype fix; neither of those reproduced, and this did.
+  `TypeError: f() missing 1 required positional argument: 'self'`.  Found while
+  checking the two exact-type tests next to the `type_call` subtype fix;
+  neither of those reproduced, and this did.
+
+  An earlier note here said a `staticmethod` and a `staticmethod` subclass
+  "behave the same either way".  They do not: `__init__ = staticmethod(g)`
+  calls `g` with no arguments in CPython and with `self` here, and a
+  `staticmethod` subclass is the same.  Only a plain function agrees, and it
+  agrees by accident -- a function IS a descriptor, so binding it and
+  prepending `self` by hand reach the same place.  That accident is what makes
+  the bug easy to miss: the one case anybody writes is the one case that
+  works.
 
 - **`object.__new__` does not refuse a builtin subclass.**  `object.__new__(list)`
   answers `[]` where CPython raises
   `TypeError: object.__new__(list) is not safe, use list.__new__()`, and `dict`
-  and `int` are the same.  CPython's rule is that `object.__new__` refuses any
-  type whose `tp_new` is not `object`'s own, unless `__init__` is overridden
-  and `__new__` is not.  `copyreg._reconstructor` is the ordinary caller.
+  and `int` are the same.  `copyreg._reconstructor` is the ordinary caller.
+
+  CPython's rule is `tp_new_wrapper`'s staticbase walk
+  (`Objects/typeobject.c`): climb `tp_base` past every heap type -- those are
+  the ones whose `tp_new` is `slot_tp_new` -- and refuse when the static type
+  that walk lands on has a `tp_new` that is not the one being called through.
+  An earlier note here gave the rule as "refuses any type whose `tp_new` is
+  not `object`'s own, unless `__init__` is overridden and `__new__` is not".
+  That is a different rule in a different function: the `__init__`/`__new__`
+  override test lives in `object_init` and `object_new` and governs whether
+  EXCESS ARGUMENTS are accepted, not whether the allocation is safe.
+
+  `str`, `float` and `bytes` are worse than the wrong answer this entry
+  records.  `object.__new__(str)` does not answer `''` -- it aborts, with
+  glibc's "double free or corruption", because the object it builds is not
+  laid out the way the type's own dealloc will free it.
 
 - **`frame.clear()` refuses a suspended generator's frame.**  CPython clears
   one; this raises `RuntimeError: cannot clear an executing frame` for any
@@ -122,10 +158,17 @@ reasoning that chose them and what changing one would cost.
   (`TYPE_FLAG_HEAPTYPE`, `TYPE_FLAG_METATYPE`, `TYPE_FLAG_MRO_HAS_DATA_DESCR`,
   ...) and the high 32 are the type version.  A faithful answer means
   translating to CPython's `Py_TPFLAGS_*` -- HEAPTYPE, BASETYPE, HAVE_GC,
-  IMMUTABLETYPE, DEFAULT and the seven subclass bits -- and a PARTIAL
-  translation is worse than none, because code that masks a bit this tree does
-  not model would read a confident zero.  The table is the work, not the
-  plumbing.
+  IMMUTABLETYPE and the EIGHT subclass bits (24 through 31: LONG, LIST, TUPLE,
+  BYTES, UNICODE, DICT, BASE_EXC, TYPE) -- and a PARTIAL translation is worse
+  than none, because code that masks a bit this tree does not model would read
+  a confident zero.  The table is the work, not the plumbing.
+
+  Two things to get right that are easy to guess wrong.  `Py_TPFLAGS_DEFAULT`
+  is **0** on this platform: it is defined as `HAVE_STACKLESS_EXTENSION`
+  alone, and that is 0 in a non-Stackless build, so there is no default bit to
+  OR in.  And `BASE_EXC_SUBCLASS` has no counterpart flag here at all -- the
+  other seven can be read off a type flag or a base pointer, but that one
+  needs an MRO walk.
 
 - **Two bound methods for the same function and receiver do not compare
   equal.**  `c.m == c.m` is True in CPython, which compares `__func__` and
@@ -265,11 +308,18 @@ reasoning that chose them and what changing one would cost.
   CPython gives `JUMP_BACKWARD` the line of `total += i` and `END_FOR` the
   line of the `for`; this gives both the `for`.  Nothing could see it until
   `sys.settrace` arrived -- now a traced loop reports one extra `'line'` event
-  per iteration, naming the `for` line twice.  `tests/test_settrace.py` is the
-  one file in `tests/` that `make check-source` cannot match, and this is why;
-  it matches exactly from a CPython `.pyc`, so the tracing rule itself is
-  right.  A `try` block's line attribution differs in the same test for what
-  looks like the same reason.
+  per iteration, naming the `for` line twice.  `tests/test_settrace.py` is one
+  of the two files in `tests/` that `make check-source` cannot match -- the
+  other is `tests/test_code_positions.py`, for the entry above -- and this is
+  part of why; it matches exactly from a CPython `.pyc`, so the tracing rule
+  itself is right.
+
+  Fixing the back edge will NOT bring `test_settrace` onto the floor by
+  itself.  Its diff also holds the deliberate PEP 709 comprehension
+  divergence, which is in `DIVERGENCES.md` and is not going anywhere, and a
+  `try` header whose line attribution differs for what looks like a separate
+  reason.  Check the fix with `--dis` against `python3 -m dis`, not by
+  watching the floor.
 
   The fix wants the line of the last instruction actually EMITTED, and
   `CompUnit` tracks only `curline`, the line the emitters are currently
