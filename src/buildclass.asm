@@ -1514,6 +1514,23 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov qword [rel class_metatype_pending], 0
 .tfp_default_metatype:
 
+    ; The class holds a REFERENCE to its metatype, not a borrowed pointer.
+    ;
+    ; For the two metatypes this tree ships that is only bookkeeping -- they
+    ; are static and outlive everything.  A metaclass written in Python is an
+    ; ordinary heap type that can be collected, and ob_type pointing at one
+    ; without counting became a dangling pointer the moment the metaclass died
+    ; first.  Both go out of scope together when they are defined inside a
+    ; function, and the collector reaches the metaclass's own MRO cycle first:
+    ; the class was then freed through an ob_type that had already been freed.
+    ;
+    ; Taken here rather than at the store above, so that the default metatype
+    ; gc_alloc installed is counted on exactly the same terms as an explicit
+    ; one.  user_type_dealloc gives it back, and type_traverse reports the edge
+    ; so that a metaclass cycle stays collectable.
+    mov rdi, [r12 + PyObject.ob_type]
+    call obj_incref
+
     ; Record it against each of its bases, so type.__subclasses__ can answer.
     ; Borrowed, and dropped again by user_type_dealloc, so the list only ever
     ; holds live classes -- which is what CPython's weak-referenced

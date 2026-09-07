@@ -2256,6 +2256,12 @@ DEF_FUNC type_traverse
     mov rbx, rdi
     mov rdi, [rbx + PyTypeObject.tp_dict]
     VISIT_PTR rdi
+    ; The metatype, which type_from_parts counts.  Without this edge a class
+    ; and its Python-level metaclass -- which refer to each other, the class
+    ; through ob_type and the metaclass through the class's MRO -- would be a
+    ; cycle the collector could not see all of.
+    mov rdi, [rbx + PyObject.ob_type]
+    VISIT_PTR rdi
     mov rdi, [rbx + PyTypeObject.tp_base]
     VISIT_PTR rdi
     mov rdi, [rbx + PyTypeObject.tp_bases]
@@ -2288,9 +2294,13 @@ DEF_FUNC type_clear, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 END_FUNC type_clear
 
-DEF_FUNC user_type_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
+DEF_FUNC user_type_dealloc, 16           ; 2 pushes, so rsp is 16-aligned
     push rbx
+    push r12
     mov rbx, rdi                ; rbx = type object
+    ; The metatype has to be read out before the object is freed and released
+    ; after, because gc_dealloc reads ob_type on its way through.
+    mov r12, [rbx + PyObject.ob_type]
 
     ; Out of every base's subclass list first, while tp_bases is still there
     ; to say which they are.  The entries are borrowed, so this is the only
@@ -2343,6 +2353,18 @@ DEF_FUNC user_type_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     mov rdi, rbx
     call gc_dealloc
 
+    ; And release the metatype, now that nothing reads ob_type any more.
+    ; type_from_parts counts it into ob_type for every class, so this is the
+    ; other half of that rather than a special case for a Python-level
+    ; metaclass -- a static metatype simply sees a balanced pair, exactly as
+    ; object_type does through tp_base above.
+    test r12, r12
+    jz .utd_no_metatype
+    mov rdi, r12
+    call obj_decref
+.utd_no_metatype:
+
+    pop r12
     pop rbx
     leave
     ret
