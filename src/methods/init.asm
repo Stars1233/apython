@@ -1675,8 +1675,24 @@ DEF_FUNC methods_init
     extern type_dict_add_attrs
     mov rdi, rbx
     call type_dict_add_attrs
+    ; A class is callable, and isinstance(int, Callable) asks by name.
+    extern type_dunder_call
+    ADD_FN mn___call__, type_dunder_call
 
     lea rax, [rel type_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
+    ;; --- method: a bound method is callable, and says so by name ---
+    ; method_type had no tp_dict at all, so hasattr(c.m, '__call__') was False
+    ; and collections.abc.Callable disowned every bound method.
+    call dict_new
+    mov rbx, rax
+    extern method_dunder_call
+    ADD_FN mn___call__, method_dunder_call
+    extern method_type
+    lea rax, [rel method_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
     call type_stamp_methods
@@ -1732,6 +1748,8 @@ DEF_FUNC methods_init
     ; does natively has to be reachable by name as well.
     extern func_dunder_get
     ADD_FN mn___get__, func_dunder_get
+    extern func_dunder_call
+    ADD_FN mn___call__, func_dunder_call
 
     extern func_type
     lea rax, [rel func_type]
@@ -1744,6 +1762,8 @@ DEF_FUNC methods_init
     mov rbx, rax
     extern staticmethod_dunder_get
     ADD_FN mn___get__, staticmethod_dunder_get
+    extern staticmethod_dunder_call
+    ADD_FN mn___call__, staticmethod_dunder_call
     lea rax, [rel staticmethod_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1804,6 +1824,8 @@ DEF_FUNC methods_init
     mov rbx, rax
     extern builtin_func_dunder_get
     ADD_FN mn___get__, builtin_func_dunder_get
+    extern builtin_func_dunder_call
+    ADD_FN mn___call__, builtin_func_dunder_call
     extern builtin_func_type
     lea rax, [rel builtin_func_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2597,6 +2619,7 @@ mn_islower:     db "islower", 0
 mn___new__:     db "__new__", 0
 mn___get__:     db "__get__", 0
 mn___set_name__: db "__set_name__", 0
+mn___call__:    db "__call__", 0
 mn___set__:     db "__set__", 0
 mn___delete__:  db "__delete__", 0
 mn_title:       db "title", 0

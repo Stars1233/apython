@@ -33,6 +33,8 @@ extern kw_names_pending
 extern eval_exception_unwind
 extern sub_list_for_type
 extern object_method_getattribute
+extern dunder_get
+extern dunder_call_3
 extern dunder_lookup
 extern dunder_call_2
 extern builtin_func_type
@@ -988,6 +990,12 @@ TC_EXCINIT  equ 72
 ; `class A: pass` then `A(1)` -- and answering that needs to know which of the
 ; two halves was the default.
 TC_PLAIN    equ 80
+; __init__ went through __get__, so the reference here is owned.
+TC_INIT_BOUND equ 88
+; ...and the receiver is already inside it, so self is not prepended.  Also
+; set for a callable that is not a descriptor at all, which CPython does not
+; bind and does not hand a self to either.
+TC_NO_SELF  equ 96
 
 ; Refuse arguments this construction has nowhere to put: object's own
 ; __new__ on one side and object's own __init__ on the other means CPython's
@@ -996,6 +1004,21 @@ TC_PLAIN    equ 80
 ; keyword names saved at the top -- __new__ consumes the global -- stand for
 ; the rest.  Written out at both sites rather than called, so that neither
 ; has to reason about what a return address does to rsp.
+; A __init__ this code bound through __get__ is owned and has to go back.
+; A plain function -- the fast path -- was never bound and must not be touched.
+%macro TC_RELEASE_BOUND_INIT 0
+    cmp qword [rbp - TC_INIT_BOUND], 0
+    je %%none
+    mov qword [rbp - TC_INIT_BOUND], 0
+    push rax
+    push rdx
+    mov rdi, rbx
+    call obj_decref
+    pop rdx
+    pop rax
+%%none:
+%endmacro
+
 %macro TC_REFUSE_EXTRA_ARGS 1
     cmp qword [rbp - TC_PLAIN], 0
     je %%ok
@@ -1262,7 +1285,7 @@ DEF_FUNC type_call
     push r13
     push r14
     push r15
-    sub rsp, 40                 ; locals + align (5 pushes + rbp = 48, +40 = 88)
+    sub rsp, 56                 ; locals + align (5 pushes + rbp = 48, +56 = 104)
     mov rax, [rel kw_names_pending]
     mov [rbp - TC_KWNAMES], rax
     mov qword [rbp - TC_NEW_TAG], TAG_PTR  ; default return tag
@@ -1546,6 +1569,62 @@ DEF_FUNC type_call
 .init_is_defined:
     mov rbx, rax                ; rbx = __init__ func
 
+    ; __init__ reaches its instance through the DESCRIPTOR PROTOCOL, not by
+    ; having self prepended to whatever the class dict holds.
+    ;
+    ; A plain function is the fast path and keeps the manual prepend, which is
+    ; what CPython's lookup_maybe_method does when it reports `unbound`: a
+    ; function's __get__ would only build a bound method for this to take
+    ; apart again.  That equivalence is also why the bug hid -- the one case
+    ; anybody writes is the one case where the two agree.
+    ;
+    ; Everything else is bound first and called with the arguments AS
+    ; WRITTEN.  `__init__ = staticmethod(g)` calls g with no arguments in
+    ; CPython and called it with self here; functools.partial and a callable
+    ; instance are not descriptors at all, and CPython does not bind them.
+    mov qword [rbp - TC_INIT_BOUND], 0
+    mov qword [rbp - TC_NO_SELF], 0
+    mov rax, [rbx + PyObject.ob_type]
+    lea rdx, [rel func_type]
+    cmp rax, rdx
+    je .init_have_callable
+
+    ; Does its type define __get__?
+    mov rdi, rax
+    lea rsi, [rel dunder_get]
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    mov qword [rbp - TC_NO_SELF], 1     ; either way, no manual prepend
+    test edx, edx
+    jz .init_have_callable              ; not a descriptor: call it as it is
+
+    ; __get__(init, instance, type_of_instance), which is the receiver
+    ; CPython's lookup_maybe_method passes.
+    mov rdi, rbx                        ; self = the __init__ object
+    mov rsi, r14                        ; arg1 = the instance
+    mov rdx, [r14 + PyObject.ob_type]   ; arg2 = its type
+    lea rcx, [rel dunder_get]           ; the dunder's name
+    mov r8d, TAG_PTR                    ; arg2 is always a heap pointer
+    call dunder_call_3
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .init_bind_raised
+    mov rbx, rax
+    mov qword [rbp - TC_INIT_BOUND], 1  ; owned; released after the call
+    jmp .init_have_callable
+
+.init_bind_raised:
+    ; __get__ raised.  Nothing has been allocated on the stack yet, so this
+    ; only has to drop the half-built instance the way .init_raised does.
+    mov rax, r14
+    mov rsi, [rbp - TC_NEW_TAG]
+    DECREF_VAL rax, rsi
+    xor r14d, r14d
+    mov qword [rbp - TC_NEW_TAG], 0
+    jmp .no_init
+
+.init_have_callable:
+
     ; === Call __init__(instance, *args) ===
     ; Build args array on machine stack: [instance, arg0, arg1, ...]
     ; Total args = nargs + 1 (for instance)
@@ -1555,22 +1634,28 @@ DEF_FUNC type_call
     sub rsp, rax                ; allocate on stack
     mov r15, rsp                ; r15 = new args array
 
-    ; args[0] = instance (a pointer is its own Value)
+    ; args[0] = instance (a pointer is its own Value).  A bound callable
+    ; already carries its receiver, so the copy starts at slot 0 for it and
+    ; slot 1 for the unbound fast path.
+    xor r8d, r8d                ; the destination offset, in slots
+    cmp qword [rbp - TC_NO_SELF], 0
+    jne .copy_args
     mov [r15], r14
+    mov r8d, 1
 
-    ; Copy original args: args[1..nargs] (16-byte stride)
-    xor ecx, ecx
 .copy_args:
+    xor ecx, ecx
+.copy_args_loop:
     cmp rcx, r13
     jge .args_copied
     mov rax, rcx
     shl rax, 3                  ; one Value per slot
     mov rdx, [r12 + rax]
-    lea r9, [rcx + 1]
-    shl r9, 3                   ; dest slot (offset by one for self)
+    lea r9, [rcx + r8]
+    shl r9, 3                   ; dest slot
     mov [r15 + r9], rdx
     inc rcx
-    jmp .copy_args
+    jmp .copy_args_loop
 .args_copied:
 
     ; Get __init__'s tp_call
@@ -1600,21 +1685,52 @@ DEF_FUNC type_call
 .init_no_kw:
     mov rdi, rbx                ; callable = __init__ func
     mov rsi, r15                ; args ptr
-    lea rdx, [r13 + 1]          ; nargs + 1
+    lea rdx, [r13 + 1]          ; nargs + 1, self included
+    cmp qword [rbp - TC_NO_SELF], 0
+    je .init_do_call
+    mov rdx, r13                ; bound, or not a descriptor: as written
+.init_do_call:
     call r11
     V_UNPACK rax, rdx           ; tp_call returns a Value
     test edx, edx
     jz .init_raised             ; NULL, with the exception still pending
 
-    ; DECREF __init__'s return value (should be None — TAG_NONE, not a pointer)
+    ; __init__ must return None, and CPython says so rather than dropping
+    ; whatever it got: a __init__ with a stray `return self` is a common
+    ; mistake and answering silently hides it.
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    jne .init_bad_return
+
     mov rsi, rdx
     DECREF_VAL rax, rsi
+    TC_RELEASE_BOUND_INIT
 
     ; Restore stack (undo the sub rsp from args allocation)
     lea rax, [r13 + 1]
     shl rax, 4
     add rsp, rax
     jmp .no_init
+
+.init_bad_return:
+    ; rax/rdx still hold what __init__ answered.
+    mov rsi, rdx
+    V_PACK rax, rsi
+    mov r15, rax                ; r15 is free: the args array is done with
+    TC_RELEASE_BOUND_INIT
+    CSTRING rdi, `__init__() should return None, not '\x01'`
+    mov rsi, r15
+    extern raise_type_error_with_name
+    ; The argument carve is still on the stack.  The raise does not return and
+    ; eval_exception_unwind reloads rsp from eval_base_rsp, so there is nothing
+    ; to unwind here.
+    ;
+    ; And eval_saved_r13 is NOT republished: r13 is the argument count in this
+    ; function, not the value stack, and handing the unwinder that made it
+    ; zero words from an arbitrary address.  The caller published the right
+    ; one before it got here, which is why the other raises in this function
+    ; do not touch it either.
+    jmp raise_type_error_with_name
 
 .init_raised:
     ; What __init__ returned was never looked at, so a raise inside it
@@ -1626,6 +1742,7 @@ DEF_FUNC type_call
     lea rax, [r13 + 1]
     shl rax, 4
     add rsp, rax
+    TC_RELEASE_BOUND_INIT
     mov rax, r14
     mov rsi, [rbp - TC_NEW_TAG]
     DECREF_VAL rax, rsi         ; the half-built instance goes no further
@@ -1637,7 +1754,7 @@ DEF_FUNC type_call
     mov rax, r14
     mov rdx, [rbp - TC_NEW_TAG]
 
-    add rsp, 40                 ; undo the locals; must match the sub above
+    add rsp, 56                 ; undo the locals; must match the sub above
     pop r15
     pop r14
     pop r13
@@ -1710,7 +1827,7 @@ DEF_FUNC type_call
 .exc_sub_no_init:
     mov rax, r14
     mov edx, TAG_PTR
-    add rsp, 40                 ; undo the locals; must match the sub above
+    add rsp, 56                 ; undo the locals; must match the sub above
     pop r15
     pop r14
     pop r13
@@ -1729,7 +1846,7 @@ DEF_FUNC type_call
     test edx, edx
     jz .int_sub_error
 .int_sub_epilogue:
-    add rsp, 40                 ; undo the locals; must match the sub above
+    add rsp, 56                 ; undo the locals; must match the sub above
     pop r15
     pop r14
     pop r13

@@ -671,6 +671,75 @@ DEF_FUNC %1_dunder_len
 END_FUNC %1_dunder_len
 %endmacro
 
+;; ============================================================================
+;; DEF_DUNDER_CALL type_prefix -- `__call__` in a callable builtin's tp_dict.
+;
+;; The stdlib asks by NAME.  collections.abc.Callable's __subclasshook__ is
+;; _check_methods(C, "__call__"), which walks C.__mro__ looking in each
+;; __dict__ -- so a type whose callability lives only in tp_call answered False
+;; to isinstance(x, Callable), and every builtin, function and lambda did.
+;
+;; The thunk calls the DEFINING type's tp_call, captured here, and not the
+;; argument's: reading it from the argument would send a subclass that
+;; installed slot_tp_call straight back into itself.
+;
+;; Unlike __iter__ and __len__ this one is variadic.  args[0] is self and the
+;; rest are already contiguous behind it, so they forward without a copy, and
+;; `len.__call__([1,2,3])` is the same call as `len([1,2,3])`.
+;; ============================================================================
+DDC_ARGS  equ 8
+DDC_N     equ 16
+DDC_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+%macro DEF_DUNDER_CALL 1
+DEF_FUNC %1_dunder_call, DDC_FRAME
+    test rsi, rsi
+    jz %%noself
+    mov [rbp - DDC_ARGS], rdi
+    mov [rbp - DDC_N], rsi
+
+    mov rdi, [rdi]              ; self
+    lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING rcx, "__call__"
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax                ; the receiver, checked
+
+    lea rax, [rel %1_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz %%bad
+    mov rsi, [rbp - DDC_ARGS]
+    add rsi, 8                  ; the arguments after self
+    mov rdx, [rbp - DDC_N]
+    dec rdx
+    call rax                    ; tp_call already answers one Value
+    leave
+    ret
+%%bad:
+    RAISE exc_TypeError_type, "object is not callable"
+%%noself:
+    xor edi, edi
+    xor edx, edx
+    mov esi, 1
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
+END_FUNC %1_dunder_call
+%endmacro
+
+; The callable builtins.  Every type with a tp_call needs one, or the ABC
+; answers False for its instances.
+extern method_type
+extern func_type
+extern builtin_func_type
+extern staticmethod_type
+extern type_type
+DEF_DUNDER_CALL method
+DEF_DUNDER_CALL func
+DEF_DUNDER_CALL builtin_func
+DEF_DUNDER_CALL staticmethod
+DEF_DUNDER_CALL type
+
 %macro DEF_DUNDER_ITER 1-2 0
 DEF_FUNC %1_dunder_iter
     cmp rsi, 1                  ; exactly self: an extra argument
