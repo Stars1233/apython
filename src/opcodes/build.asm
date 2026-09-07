@@ -793,6 +793,28 @@ END_FUNC op_build_const_key_map
 extern str_new
 extern str_type
 DEF_FUNC_BARE op_unpack_sequence
+    ; Specialize, then run generically this time.  A tuple or a list is the
+    ; shape the compiler emits this opcode for almost every time -- every
+    ; `a, b = ...` over a literal, a return of several values, a dict item.
+    ; The length is not checked here: the specialized handler checks it on
+    ; every execution anyway, and a site that unpacks a different length each
+    ; time would otherwise never specialize at all.
+    mov r8, [r13 - 8]
+    V_TEST_PTR r8, r9
+    ja .us_no_spec
+    mov r8, [r8 + PyObject.ob_type]
+    lea r9, [rel tuple_type]
+    cmp r8, r9
+    je .us_spec_tuple
+    lea r9, [rel list_type]
+    cmp r8, r9
+    jne .us_no_spec
+    mov byte [rbx - 2], OP_UNPACK_SEQUENCE_LIST
+    jmp .us_no_spec
+.us_spec_tuple:
+    mov byte [rbx - 2], OP_UNPACK_SEQUENCE_TUPLE
+.us_no_spec:
+
     VPOP_VAL rdi, r8           ; rdi = sequence (tuple or list), r8 = tag
     cmp r8d, TAG_PTR
     jne .unpack_type_error

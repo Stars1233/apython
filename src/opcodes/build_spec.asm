@@ -10,6 +10,8 @@
 ;   235  BINARY_SUBSCR_LIST_INT     lst[i]
 ;   236  BINARY_SUBSCR_TUPLE_INT    tup[i]
 ;   237  STORE_SUBSCR_LIST_INT      lst[i] = v
+;   238  UNPACK_SEQUENCE_TUPLE      a, b = tup
+;   239  UNPACK_SEQUENCE_LIST       a, b = lst
 ;
 ; Split out of build.asm, which keeps the generic handlers and the error
 ; messages, because that file had 3.5k left under lint's 100k cap for a
@@ -42,6 +44,7 @@ extern tuple_type
 extern op_for_iter
 extern op_binary_subscr
 extern op_store_subscr
+extern op_unpack_sequence
 
 section .text
 
@@ -324,3 +327,79 @@ DEF_FUNC_BARE op_store_subscr_list_int
     sub rbx, 2
     DISPATCH
 END_FUNC op_store_subscr_list_int
+
+
+;; ============================================================================
+;; The unpack specializations
+;;
+;; UNPACK_SEQUENCE's generic handler decides between tuple, list, str and
+;; "anything else iterable" with a type ladder, keeps three words on the
+;; machine stack so that the materialising path has somewhere to put the tuple
+;; it builds, and unwinds all of that on the way out.  A tuple or a list of
+;; exactly the right length needs none of it: the item array is already a
+;; Value array of the right shape, and the fill is the whole instruction.
+;;
+;; UNPACK_SEQUENCE carries an oparg -- the count -- and a count over 255 is
+;; preceded by an EXTENDED_ARG, whose contribution exists only in ecx.  So the
+;; deopt jumps to the generic handler with ecx intact rather than rewinding
+;; rbx, and nothing before the last guard may touch rcx.
+;;
+;; A length mismatch deopts.  The generic handler owns the ValueError and both
+;; of its wordings, and -- the part that matters -- owns the rule that the
+;; sequence is NOT released on that path, because the unwinder restores r13 to
+;; where it stood before the instruction and releases the slot itself.
+;; ============================================================================
+
+%macro UNPACK_SEQ_BODY 3        ; %1 = handler, %2 = type symbol, %3 = size field
+DEF_FUNC_BARE %1
+    mov rdi, [r13 - 8]              ; the sequence Value, not yet popped
+    V_TEST_PTR rdi, rdx
+    ja %%deopt
+    lea rdx, [rel %2]
+    cmp [rdi + PyObject.ob_type], rdx
+    jne %%deopt
+    cmp rcx, [rdi + %3]             ; ecx is the expected count
+    jne %%deopt
+
+    ; Past the last guard, so rcx is free.
+    mov rsi, [rdi + PyListObject.ob_item]
+    mov r10, rcx
+    neg r10                         ; the fill writes backwards from the top
+    lea r13, [r13 + rcx*8 - 8]      ; the sequence slot goes, count slots come
+    dec ecx                         ; source index, count-1 down to 0
+
+    ; items[count-1] lands deepest and items[0] on top, so that the first
+    ; assignment target pops the first element.
+%%fill:
+    test ecx, ecx
+    js %%done
+    mov eax, ecx
+    mov rax, [rsi + rax*8]
+    INCREF_V rax, rdx
+    mov [r13 + r10*8], rax
+    inc r10
+    dec ecx
+    jmp %%fill
+
+%%done:
+    ; Every item is INCREFd above, so the sequence can go even when it was the
+    ; last thing holding them.
+    DECREF_V rdi, rdx
+    add rbx, 2                      ; skip 1 CACHE entry
+    DISPATCH
+
+%%deopt:
+    mov byte [rbx - 2], OP_UNPACK_SEQUENCE
+    jmp op_unpack_sequence
+END_FUNC %1
+%endmacro
+
+;; ============================================================================
+;; op_unpack_sequence_tuple (238) -> nothing; replaces the tuple with its items
+;; ============================================================================
+UNPACK_SEQ_BODY op_unpack_sequence_tuple, tuple_type, PyTupleObject.ob_size
+
+;; ============================================================================
+;; op_unpack_sequence_list (239) -> nothing; replaces the list with its items
+;; ============================================================================
+UNPACK_SEQ_BODY op_unpack_sequence_list, list_type, PyListObject.ob_size

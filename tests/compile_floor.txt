@@ -510,6 +510,7 @@ test_union_generic_alias
 test_union_hash
 test_unpack_dict
 test_unpack_refcount
+test_unpack_spec
 test_unraisable
 test_utf16_utf32
 test_utf8_validate_boundaries
