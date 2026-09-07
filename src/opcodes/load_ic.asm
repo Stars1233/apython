@@ -181,6 +181,95 @@ DEF_FUNC_BARE op_load_attr_method
     cmp ax, word [rbx]             ; compare low 16 bits at CACHE[+0]
     jne .lam_deopt
 
+    ; Guard 3: the INSTANCE dict cannot shadow the name.
+    ;
+    ; Neither guard above says anything about it -- one pins the class, the
+    ; other the class's dict -- so a warm site went on calling the class's
+    ; method after `c.m = something` put one on the instance.  That was a
+    ; wrong ANSWER, not a slow one, and it needed the same call site to run
+    ; before and after the shadow to see: a fresh site is cold and takes the
+    ; generic path, which is why the obvious test missed it.
+    ;
+    ; The proof used here is the strong one: no dict, or an empty one.  Since
+    ; instance dicts became lazy that covers every instance that has had
+    ; nothing stored on it, which is what a method-heavy site mostly walks.
+    ; An instance with attributes deopts and takes the generic path, which is
+    ; where it was before this cache existed.
+    ;
+    ; A dict that exists and holds something is PROBED rather than refused:
+    ; the question is whether THIS name is in it, and dict_lookup answers
+    ; "no" the moment it reaches an empty slot.  Reaching one here is the
+    ; same proof, so the guard concludes absence only from that -- an
+    ; occupied slot, a tombstone or a long chain all deopt and let the
+    ; generic handler decide.
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_dictoffset]
+    test rax, rax
+    jz .lam_no_shadow             ; no instance dict at all
+    cmp rax, TP_DICT_AT_TAIL
+    je .lam_deopt                 ; str and bytes subclasses keep it elsewhere
+    mov rax, [rdi + rax]
+    test rax, rax
+    jz .lam_no_shadow             ; lazy, and never created
+    cmp qword [rax + PyDictObject.ob_size], 0
+    je .lam_no_shadow             ; empty: nothing to shadow with
+
+    ; The name, whose hash is cached: LOAD_ATTR's names are interned.
+    ;
+    ; `mov esi, ecx`, not `mov rsi, rcx`: the oparg is a DWORD in ecx and the
+    ; high half of rcx is whatever was there.  Taking all sixty-four bits made
+    ; the name index enormous, which read a "name" from past the end of
+    ; co_names, hashed it, and probed an unrelated slot -- and that slot was
+    ; empty, so the guard reported absence for a name that was present.  The
+    ; 32-bit move zero-extends, which is the whole fix.
+    push rbx
+    push r12
+    LOAD_CO_NAMES rdx
+    mov esi, ecx
+    shr esi, 1                    ; the arg is (name index << 1 | flag)
+    mov rdx, [rdx + rsi*8]        ; the name str
+    mov r8, [rdx + PyStrObject.ob_hash]
+    cmp r8, -1
+    je .lam_shadow_deopt          ; unhashed: not worth computing here
+    mov r11, [rax + PyDictObject.dk_indices]
+    test r11, r11
+    jz .lam_shadow_deopt          ; the tables are allocated lazily
+    mov r9, [rax + PyDictObject.capacity]
+    test r9, r9
+    jz .lam_shadow_deopt
+    dec r9                        ; the mask
+    mov r10, r8
+    and r10, r9                   ; the first slot dict_lookup would try
+    mov r12d, 4                   ; at most four steps, then give up
+.lam_probe:
+    mov rsi, [r11 + r10*8]
+    cmp rsi, DICT_IX_EMPTY
+    je .lam_probe_absent          ; where dict_lookup stops and reports a miss
+    cmp rsi, DICT_IX_DUMMY
+    je .lam_probe_next            ; a tombstone: dict_lookup walks past it too
+
+    ; An occupied slot has to be RULED OUT before walking past it.  Comparing
+    ; the stored hash is what dict_lookup does first, and it is enough here:
+    ; equal means it might be this name, so deopt and let the generic handler
+    ; answer.  Skipping this test was the whole bug -- the probe walked past
+    ; the slot the name was actually in and reported absence from the empty
+    ; one after it.
+    imul rsi, rsi, DICT_ENTRY_SIZE
+    add rsi, [rax + PyDictObject.entries]
+    cmp r8, [rsi + DictEntry.hash]
+    je .lam_shadow_deopt
+
+.lam_probe_next:
+    dec r12d
+    jz .lam_shadow_deopt
+    inc r10
+    and r10, r9
+    jmp .lam_probe
+.lam_probe_absent:
+    pop r12
+    pop rbx
+.lam_no_shadow:
+
     ; Guards passed! CPython order: method (deeper), obj/self (TOS)
     ; obj is currently at [r13-8]; overwrite it with method, push obj on top
     mov rax, [rbx + 10]           ; cached descriptor (method ptr)
@@ -193,6 +282,10 @@ DEF_FUNC_BARE op_load_attr_method
     add rbx, 18
     DISPATCH
 
+.lam_shadow_deopt:
+    pop r12
+    pop rbx
+    ; Fall through to the ordinary deopt.
 .lam_deopt:
     ; Deopt into the generic handler with the argument ecx already
     ; holds.  Rewinding rbx by two and re-dispatching would drop a
