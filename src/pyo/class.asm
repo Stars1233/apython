@@ -20,6 +20,7 @@ extern dict_get
 extern dict_set
 extern str_from_cstr
 extern str_from_cstr_heap
+extern dunder_name_obj
 extern ap_strcmp
 extern type_repr
 extern attr_error_pending
@@ -1278,18 +1279,18 @@ DEF_FUNC type_call
     mov rax, [rbx + PyTypeObject.tp_dict]
     test rax, rax
     jz .tc_not_abstract
+    ; dunder_name_obj hands back a BORROWED interned name, cached by the
+    ; literal's address; str_from_cstr_heap allocated, copied, scanned for code
+    ; points and hashed one afresh on every instantiation, and released it two
+    ; lines later.  Three of those per object made is most of what a heaptype
+    ; instance cost over object()'s.
     push rax
     lea rdi, [rel tc_abstract_name]
-    call str_from_cstr_heap
+    call dunder_name_obj
     mov rcx, rax
     pop rdi
-    push rcx
     mov rsi, rcx
     call dict_get
-    pop rdi
-    push rax
-    call obj_decref
-    pop rax
     test rax, rax
     jz .tc_not_abstract
     V_TEST_PTR rax, rcx
@@ -1316,9 +1317,11 @@ DEF_FUNC type_call
     ; The shortcut now waits at .new_not_found, beside the str one.
 
     ; === Look up __new__ in MRO (stop at object_type) ===
+    ; Borrowed and interned, so nothing below releases it -- see the note at
+    ; the __abstractmethods__ lookup above.
     lea rdi, [rel new_name_cstr]
-    call str_from_cstr_heap
-    mov r15, rax                ; r15 = "__new__" str
+    call dunder_name_obj
+    mov r15, rax                ; r15 = "__new__" str, BORROWED
 
     mov rcx, rbx                ; rcx = current type
 .new_mro_walk:
@@ -1345,9 +1348,6 @@ DEF_FUNC type_call
     jnz .new_mro_walk
 
 .new_not_found:
-    ; DECREF name string
-    mov rdi, r15
-    call obj_decref
     ; An int subclass carries its value inline, so it cannot come from
     ; instance_new either.
     mov rax, [rbx + PyTypeObject.tp_flags]
@@ -1441,9 +1441,6 @@ DEF_FUNC type_call
     mov rax, [rax + PyStaticMethodObject.sm_callable]
 .tc_new_unwrapped:
     mov [rbp - TC_NEW_FUNC], rax
-    ; DECREF name string
-    mov rdi, r15
-    call obj_decref
 
     ; Build args for __new__(cls, *original_args)
     lea rax, [r13 + 1]
@@ -1518,10 +1515,10 @@ DEF_FUNC type_call
 
 .lookup_init:
     ; Look up __init__ walking the MRO (type + tp_base chain)
-    ; Create "__init__" string for lookup (heap — dict key, DECREFed)
+    ; Borrowed and interned, as for __new__ above.
     lea rdi, [rel init_name_cstr]
-    call str_from_cstr_heap
-    mov r15, rax                ; r15 = "__init__" str object
+    call dunder_name_obj
+    mov r15, rax                ; r15 = "__init__" str, BORROWED
 
     ; Walk MRO: check type->tp_dict, then tp_base chain
     mov rcx, rbx                ; rcx = current type to check
@@ -1543,9 +1540,7 @@ DEF_FUNC type_call
     test rcx, rcx
     jnz .init_mro_walk
 
-    ; __init__ not found anywhere — DECREF name string, skip
-    mov rdi, r15
-    call obj_decref
+    ; __init__ not found anywhere
     TC_REFUSE_EXTRA_ARGS 0
     jmp .no_init
 
@@ -1564,10 +1559,6 @@ DEF_FUNC type_call
     pop rax
 .init_is_defined:
     mov rbx, rax                ; rbx = __init__ func
-
-    ; DECREF the "__init__" string (no longer needed)
-    mov rdi, r15
-    call obj_decref
 
     ; === Call __init__(instance, *args) ===
     ; Build args array on machine stack: [instance, arg0, arg1, ...]
