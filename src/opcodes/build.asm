@@ -713,6 +713,8 @@ END_FUNC op_build_map
 CKM_COUNT   equ 8
 CKM_KEYS    equ 16
 CKM_DICT    equ 24
+CKM_I       equ 32        ; the loop index, which used to be pushed across
+                          ; dict_set -- a lone push leaves the call 8 out
 DEF_FUNC op_build_const_key_map, 40   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
 
     mov [rbp - CKM_COUNT], rcx           ; count
@@ -733,11 +735,11 @@ DEF_FUNC op_build_const_key_map, 40   ; + 0 pushes; a handler is entered ALIGNED
     shl rdi, 3                 ; count * 8 bytes/slot
     sub r13, rdi               ; pop all items
 
-    xor edx, edx
+    mov qword [rbp - CKM_I], 0
 .bckm_fill:
+    mov rdx, [rbp - CKM_I]
     cmp rdx, [rbp - CKM_COUNT]
     jge .bckm_done
-    push rdx
     mov rdi, [rbp - CKM_DICT]         ; dict
     mov rax, [rbp - CKM_KEYS]         ; keys tuple
     mov r10, [rax + PyTupleObject.ob_item]       ; payloads
@@ -747,8 +749,7 @@ DEF_FUNC op_build_const_key_map, 40   ; + 0 pushes; a handler is entered ALIGNED
     shl rax, 3                ; index * 8
     mov rdx, [r13 + rax]      ; value
     call dict_set
-    pop rdx
-    inc rdx
+    inc qword [rbp - CKM_I]
     jmp .bckm_fill
 
 .bckm_done:
@@ -1383,6 +1384,8 @@ LE_ITERABLE equ 16
 LE_COUNT    equ 24
 LE_CURSOR   equ 32
 LE_EXC      equ 40        ; current_exception before the iteration started
+LE_I        equ 48        ; the loop index, which used to be pushed across
+                          ; list_append -- a lone push leaves the call 8 out
 DEF_FUNC op_list_extend, 56   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
     ; locals: [rbp - LE_LIST]=list, [rbp - LE_ITERABLE]=iterable, [rbp - LE_COUNT]=count, [rbp - LE_CURSOR]=items
 
@@ -1419,16 +1422,16 @@ DEF_FUNC op_list_extend, 56   ; + 0 pushes; a handler is entered ALIGNED, so thi
     mov [rbp - LE_COUNT], rcx          ; count
     test rcx, rcx
     jz .extend_done
-    xor r8d, r8d               ; index
+    mov qword [rbp - LE_I], 0  ; index
 .extend_tuple_loop:
     mov rdi, [rbp - LE_LIST]          ; list
     mov rax, [rbp - LE_ITERABLE]         ; iterable (tuple)
     mov r9, [rax + PyTupleObject.ob_item]
+    mov r8, [rbp - LE_I]
     mov rsi, [r9 + r8 * 8]    ; payload
-    push r8
     call list_append
-    pop r8
-    inc r8
+    inc qword [rbp - LE_I]
+    mov r8, [rbp - LE_I]
     cmp r8, [rbp - LE_COUNT]
     jb .extend_tuple_loop
     jmp .extend_done
@@ -1442,16 +1445,16 @@ DEF_FUNC op_list_extend, 56   ; + 0 pushes; a handler is entered ALIGNED, so thi
 
     test rcx, rcx
     jz .extend_done
-    xor r8d, r8d               ; index
+    mov qword [rbp - LE_I], 0  ; index
 .extend_list_loop:
     mov rdi, [rbp - LE_LIST]          ; list
     mov rdx, [rbp - LE_CURSOR]         ; payloads ptr
     mov rax, [rbp - LE_ITERABLE]         ; iterable list
+    mov r8, [rbp - LE_I]
     mov rsi, [rdx + r8 * 8]   ; item payload
-    push r8
     call list_append
-    pop r8
-    inc r8
+    inc qword [rbp - LE_I]
+    mov r8, [rbp - LE_I]
     cmp r8, [rbp - LE_COUNT]          ; count
     jb .extend_list_loop
     jmp .extend_done          ; or we fall into .extend_generic and re-append
@@ -2431,9 +2434,13 @@ DEF_FUNC op_dict_update
     jmp .du_loop
 
 .du_done:
-    ; DECREF the mapping
+    ; DECREF the mapping.  The pad is the alignment: the loop above reaches
+    ; its calls one push deep, so the frame is sized for that, and a call made
+    ; at depth zero is the odd one out.
     mov rdi, [rbp - DU_SOURCE]
+    push rdi
     call obj_decref
+    pop rdi
 
     add rsp, 32
     pop r14
@@ -2521,9 +2528,13 @@ DEF_FUNC op_dict_merge
     jmp .dm_loop
 
 .dm_done:
-    ; DECREF the mapping
+    ; DECREF the mapping.  The pad is the alignment: the loop above reaches
+    ; its calls one push deep, so the frame is sized for that, and a call made
+    ; at depth zero is the odd one out.
     mov rdi, [rbp - DM_SOURCE]
+    push rdi
     call obj_decref
+    pop rdi
 
     add rsp, 32
     pop r14
@@ -2554,13 +2565,25 @@ UEX_REST    equ 40
 UEX_ITAG    equ 48
 UEX_IPAY    equ 56
 UEX_EXC     equ 64        ; current_exception before the iteration started
+; The three values the loops below used to push and pop one at a time.  A
+; lone push leaves the call it spans 8 out, and a misaligned call propagates
+; into every Python frame the interpreter runs beneath it.
+UEX_RESTL   equ 72        ; the rest list, while it is being filled
+UEX_I       equ 80        ; the index being read
+UEX_N       equ 88        ; how many are left
+UEX_ITER    equ 96        ; the iterator the generic path walks
+UEX_TMPL    equ 104       ; and the list it builds from it
 DEF_FUNC op_unpack_ex
     push rbx
     push r14
     ; NOTE: do NOT push/pop r13 — the VPUSH macros advance it
     ; (tag stack top) and restoring it would desync from r13 (payload stack top)
-    sub rsp, 48                ; 48, not 40: the extra slot, and with it the
-                               ; 16-byte alignment the two pushes had broken.
+    sub rsp, 120               ; room for the slots the loops use, and
+                               ; FRAME + 8*pushes == 8 (mod 16), which is
+                               ; what a handler wants: it is reached by jmp
+                               ; and so entered ALIGNED.  The 48 that used
+                               ; to be here was 0 (mod 16) and every call at
+                               ; an even push depth was 8 out.
                                ; locals: [rbp - UEX_TOTAL]=total_len, [rbp - UEX_REST]=rest_count,
                                ;         [rbp - UEX_ITAG]=iter_tag, [rbp - UEX_IPAY]=iterable payload
 
@@ -2630,60 +2653,52 @@ DEF_FUNC op_unpack_ex
     ; Push them in reverse: index total_len-1, total_len-2, ..., total_len-count_after
     mov rax, [rbp - UEX_TOTAL]          ; total_len
     dec rax                    ; start from total_len - 1
+    mov [rbp - UEX_I], rax
+    mov [rbp - UEX_N], rcx
 .ue_after_loop:
+    mov rcx, [rbp - UEX_N]
     test rcx, rcx
     jz .ue_no_after
-    push rcx
-    push rax
 
-    ; Get item at index rax from iterable
+    ; Get item at index UEX_I from iterable
     mov rdi, [rbp - UEX_IPAY]
-    mov rsi, rax
+    mov rsi, [rbp - UEX_I]
     call .ue_getitem           ; rax = payload, rdx = tag (borrowed)
     INCREF_VAL rax, rdx
     VPUSH_VAL rax, rdx
 
-    pop rax
-    pop rcx
-    dec rax
-    dec rcx
+    dec qword [rbp - UEX_I]
+    dec qword [rbp - UEX_N]
     jmp .ue_after_loop
 
 .ue_no_after:
     ; 2. Build rest list
     mov rdi, [rbp - UEX_REST]          ; rest_count as initial capacity
     call list_new
-    push rax                   ; save rest list
+    mov [rbp - UEX_RESTL], rax ; the rest list, while it is being filled
 
     ; Add items at indices [count_before .. count_before + rest_count - 1]
     mov rcx, [rbp - UEX_REST]          ; rest_count
-    test rcx, rcx
-    jz .ue_rest_done
-    mov rax, rbx               ; start index = count_before
+    mov [rbp - UEX_N], rcx
+    mov [rbp - UEX_I], rbx     ; start index = count_before
 .ue_rest_loop:
-    test rcx, rcx
-    jz .ue_rest_done
-    push rcx
-    push rax
+    cmp qword [rbp - UEX_N], 0
+    je .ue_rest_done
 
     mov rdi, [rbp - UEX_IPAY]
-    mov rsi, rax
+    mov rsi, [rbp - UEX_I]
     call .ue_getitem           ; rax = payload, rdx = tag (borrowed)
     mov rsi, rax
-    mov rdi, [rsp + 16]        ; rest list (2 pushes deep)
-    push rsi
+    mov rdi, [rbp - UEX_RESTL]
     ; edx = item tag from .ue_getitem (already set)
     V_PACK rsi, rdx         ; list_append takes a Value
     call list_append           ; list_append does INCREF
-    pop rsi                    ; discard
-    pop rax
-    pop rcx
-    inc rax
-    dec rcx
+    inc qword [rbp - UEX_I]
+    dec qword [rbp - UEX_N]
     jmp .ue_rest_loop
 
 .ue_rest_done:
-    pop rax                    ; rest list
+    mov rax, [rbp - UEX_RESTL]
     VPUSH_PTR rax              ; push rest list
 
     ; 3. Push count_before items in reverse (from index count_before-1 down to 0)
@@ -2691,19 +2706,17 @@ DEF_FUNC op_unpack_ex
     test rcx, rcx
     jz .ue_no_before
     dec rcx                    ; start from count_before - 1
+    mov [rbp - UEX_I], rcx
 .ue_before_loop:
-    push rcx
-
     mov rdi, [rbp - UEX_IPAY]
-    mov rsi, rcx
+    mov rsi, [rbp - UEX_I]
     call .ue_getitem           ; rax = payload, rdx = tag (borrowed)
     INCREF_VAL rax, rdx
     VPUSH_VAL rax, rdx
 
-    pop rcx
-    test rcx, rcx
-    jz .ue_no_before
-    dec rcx
+    cmp qword [rbp - UEX_I], 0
+    je .ue_no_before
+    dec qword [rbp - UEX_I]
     jmp .ue_before_loop
 
 .ue_no_before:
@@ -2712,7 +2725,7 @@ DEF_FUNC op_unpack_ex
     mov rsi, [rbp - UEX_ITAG]         ; iterable tag
     DECREF_VAL rdi, rsi
 
-    add rsp, 48
+    add rsp, 120
     pop r14
     pop rbx
     leave
@@ -2727,44 +2740,43 @@ DEF_FUNC op_unpack_ex
     call get_iterator_opt       ; see the note in .extend_generic
     test rax, rax
     jz .ue_type_error
-    push rax                   ; [rsp] = iterator
+    mov [rbp - UEX_ITER], rax
 
     ; Create temp list
     xor edi, edi
     extern list_new
     call list_new
-    push rax                   ; [rsp] = temp_list, [rsp+8] = iterator
+    mov [rbp - UEX_TMPL], rax
 
     DUNDER_EXC_SAVE [rbp - UEX_EXC]
 .ue_gen_loop:
-    mov rdi, [rsp + 8]        ; iterator
+    mov rdi, [rbp - UEX_ITER]
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_iternext]
     test rax, rax
     jz .ue_gen_done
-    mov rdi, [rsp + 8]
+    mov rdi, [rbp - UEX_ITER]
     call rax                   ; tp_iternext(iter) → (payload, tag)
     V_UNPACK rax, rdx           ; tp_iternext returns a Value
     test edx, edx
     jz .ue_gen_done
 
     ; Append to temp list
-    push rax
-    push rdx
-    mov rdi, [rsp + 16]       ; temp_list (2 pushes deeper)
+    mov [rbp - UEX_I], rax     ; the item, held across list_append
+    mov [rbp - UEX_N], rdx     ; and its tag
+    mov rdi, [rbp - UEX_TMPL]
     mov rsi, rax
     V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
-    pop rsi                    ; tag
-    pop rdi                    ; payload
+    mov rdi, [rbp - UEX_I]
+    mov rsi, [rbp - UEX_N]
     DECREF_VAL rdi, rsi
     jmp .ue_gen_loop
 
 .ue_gen_done:
-    pop rax                    ; temp_list
-    pop rdi                    ; iterator
-    push rax                   ; save temp_list
+    mov rdi, [rbp - UEX_ITER]
     call obj_decref            ; DECREF iterator
+    mov rax, [rbp - UEX_TMPL]
 
     ; NULL is exhaustion or a raise alike.  Read as exhaustion, `a, *b = G()`
     ; for a G whose __getitem__ throws bound a and b to a short answer and
@@ -2777,7 +2789,7 @@ DEF_FUNC op_unpack_ex
     DECREF_VAL rdi, rsi
 
     ; Replace iterable with temp list, update tag
-    pop rax                    ; rax = temp_list
+    mov rax, [rbp - UEX_TMPL]
     mov [rbp - UEX_IPAY], rax
     mov qword [rbp - UEX_ITAG], TAG_PTR
 
@@ -2786,12 +2798,12 @@ DEF_FUNC op_unpack_ex
     jmp .ue_list
 
 .ue_gen_raised:
-    pop rdi                    ; the partly built temp list
+    mov rdi, [rbp - UEX_TMPL]  ; the partly built temp list
     call obj_decref
     ; The iterable is left alone: the unwinder restores r13 to the stack as
     ; it stood before this instruction, where the pop had not happened.
     extern eval_exception_unwind
-    add rsp, 48
+    add rsp, 120
     pop r14
     pop rbx
     leave
@@ -2849,6 +2861,9 @@ extern set_type
 
 BSE_COUNT   equ 8
 BSE_SET     equ 16
+BSE_I       equ 24        ; the loop index, which used to be pushed across
+                          ; set_add and DECREF_V -- a lone push leaves the
+                          ; call 8 out, and that propagates
 DEF_FUNC op_build_set, 24   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
 
     mov [rbp - BSE_COUNT], rcx           ; save count
@@ -2867,18 +2882,17 @@ DEF_FUNC op_build_set, 24   ; + 0 pushes; a handler is entered ALIGNED, so this 
     shl rdi, 3
     sub r13, rdi               ; pop all items
 
-    xor edx, edx
+    mov qword [rbp - BSE_I], 0
 .build_set_fill:
+    mov rdx, [rbp - BSE_I]
     cmp rdx, [rbp - BSE_COUNT]
     jge .build_set_done
-    push rdx
     mov rdi, [rbp - BSE_SET]         ; set
     mov rax, rdx
     shl rax, 3                ; index * 8
     mov rsi, [r13 + rax]     ; item
     call set_add               ; set_add does INCREF
-    pop rdx
-    inc rdx
+    inc qword [rbp - BSE_I]
     jmp .build_set_fill
 
 .build_set_done:
@@ -2886,17 +2900,16 @@ DEF_FUNC op_build_set, 24   ; + 0 pushes; a handler is entered ALIGNED, so this 
     mov rcx, [rbp - BSE_COUNT]
     test rcx, rcx
     jz .build_set_push
-    xor edx, edx
+    mov qword [rbp - BSE_I], 0
 .build_set_fixref:
+    mov rdx, [rbp - BSE_I]
     cmp rdx, [rbp - BSE_COUNT]
     jge .build_set_push
     mov rax, rdx
     shl rax, 3                ; index * 8
     mov rdi, [r13 + rax]
-    push rdx
     DECREF_V rdi, rsi
-    pop rdx
-    inc rdx
+    inc qword [rbp - BSE_I]
     jmp .build_set_fixref
 
 .build_set_push:
@@ -2948,10 +2961,13 @@ SU_SET      equ 32
 SU_CAP      equ 40
 SU_ENTRIES  equ 48
 SU_EXC      equ 56        ; current_exception before the iteration started
+SU_ITEM     equ 64        ; the item held across set_add, and its tag.  They
+SU_ITAG     equ 72        ; used to be pushed, which left the call 8 out
 DEF_FUNC op_set_update
     push rbx
     push r14
-    sub rsp, 56                ; 56, not 48: a handler is entered 16-byte
+    sub rsp, 72                ; 56 plus the two slots above, which keeps
+                               ; the parity: a handler is entered 16-byte
                                ; ALIGNED, so `push rbp` plus these two pushes
                                ; leave rsp 8 out and the frame is what puts it
                                ; back.  48 computed the ordinary-function rule.
@@ -2996,14 +3012,14 @@ DEF_FUNC op_set_update
     jz .su_iter_done
 
     ; rax = next item (owned ref), rdx = tag from tp_iternext
-    push rdx                   ; save item tag
-    push rax                   ; save item payload
+    mov [rbp - SU_ITAG], rdx   ; save item tag
+    mov [rbp - SU_ITEM], rax   ; save item payload
     mov rdi, [rbp - SU_SOURCE]          ; set
     mov rsi, rax               ; item
     V_PACK rsi, rdx            ; set_add takes a key Value
     call set_add               ; set_add does INCREF
-    pop rdi                    ; item payload
-    pop rsi                    ; item tag
+    mov rdi, [rbp - SU_ITEM]
+    mov rsi, [rbp - SU_ITAG]
     DECREF_VAL rdi, rsi        ; DECREF to compensate (set_add INCREF'd)
     jmp .su_iter_loop
 
@@ -3021,7 +3037,7 @@ DEF_FUNC op_set_update
     mov rsi, [rbp - SU_ENTRIES]
     DECREF_VAL rdi, rsi
 
-    add rsp, 56
+    add rsp, 72
     pop r14
     pop rbx
     leave
@@ -3031,7 +3047,7 @@ DEF_FUNC op_set_update
     ; The iterable is left alone: the unwinder restores r13 to the stack as
     ; it stood before this instruction, where VPOP_VAL had not taken it off.
     extern eval_exception_unwind
-    add rsp, 56
+    add rsp, 72
     pop r14
     pop rbx
     leave
@@ -3073,7 +3089,7 @@ DEF_FUNC op_set_update
     mov rsi, [rbp - SU_ENTRIES]
     DECREF_VAL rdi, rsi
 
-    add rsp, 56
+    add rsp, 72
     pop r14
     pop rbx
     leave

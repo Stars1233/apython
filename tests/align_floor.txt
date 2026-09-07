@@ -4,15 +4,4 @@
 # only shrink.  Re-record with
 #   python3 src/compiler/lint.py --record-alignment
 # in the commit that pays some of it down.
-src/opcodes/build.asm op_build_const_key_map call dict_set
-src/opcodes/build.asm op_build_set call set_add
-src/opcodes/build.asm op_dict_merge call obj_decref
-src/opcodes/build.asm op_dict_update call obj_decref
-src/opcodes/build.asm op_list_extend call list_append
-src/opcodes/build.asm op_list_extend call list_append
 src/opcodes/build.asm op_set_update call set_add
-src/opcodes/build.asm op_unpack_ex call .ue_getitem
-src/opcodes/build.asm op_unpack_ex call get_iterator_opt
-src/opcodes/build.asm op_unpack_ex call list_append
-src/opcodes/build.asm op_unpack_ex call list_new
-src/opcodes/build.asm op_unpack_ex call rax
