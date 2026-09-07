@@ -948,8 +948,11 @@ DEF_FUNC op_before_with
     jz .bw_no_enter_decref_name
     ; Already bound, so it takes no self argument.
     push rax
+    push rax                        ; and a pad, as above: this frame is even,
+                                    ; so a lone push misaligns the call
     mov rdi, r12
     call obj_decref
+    pop rax
     pop rax
     mov rcx, [rax + PyObject.ob_type]
     mov rcx, [rcx + PyTypeObject.tp_call]
@@ -969,8 +972,10 @@ DEF_FUNC op_before_with
 .bw_have_enter:
     ; Got __enter__ function - call it with mgr as self
     push rax                        ; save func
+    push rax                        ; and a pad, as above
     mov rdi, r12
     call obj_decref                 ; DECREF enter name
+    pop rax
     pop rax                         ; restore func
 
     ; Call __enter__(mgr): tp_call(enter_func, &mgr, 1)

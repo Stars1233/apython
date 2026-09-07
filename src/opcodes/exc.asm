@@ -446,8 +446,11 @@ DEF_FUNC_BARE op_raise_varargs
     test rax, rax
     jz .raise_bad
     push rdi
+    push rdi                  ; and a pad: this handler carves no frame,
+                              ; so a lone push leaves the call 8 out
     mov rdi, rax
     call type_is_exc_subclass
+    pop rdi
     pop rdi
     test eax, eax
     jnz .raise_exc_obj
@@ -472,7 +475,10 @@ DEF_FUNC_BARE op_raise_varargs
 .raise_check_type:
     ; rdi is a type object — check if it's an exception subclass
     push rdi
+    push rdi                  ; and a pad: this handler carves no frame,
+                              ; so a lone push leaves the call 8 out
     call type_is_exc_subclass
+    pop rdi
     pop rdi
     test eax, eax
     jnz .raise_type
@@ -482,9 +488,12 @@ DEF_FUNC_BARE op_raise_varargs
 .raise_type:
     ; rdi = exception type - create instance with no message
     push rdi
+    push rdi                  ; and a pad: this handler carves no frame,
+                              ; so a lone push leaves the call 8 out
     xor esi, esi              ; no message
     xor edx, edx              ; no tag (NULL msg)
     call exc_new
+    pop rdi
     pop rdi                  ; discard type (immortal, no DECREF needed)
     mov rdi, rax
     jmp .raise_exc_obj
