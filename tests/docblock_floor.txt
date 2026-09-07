@@ -45,12 +45,12 @@ src/modules/socket.asm                 16
 src/object.asm                         13
 src/opcodes/arith.asm                  5
 src/opcodes/async.asm                  5
-src/opcodes/build.asm                  28
+src/opcodes/build.asm                  26
 src/opcodes/call.asm                   3
 src/opcodes/exc.asm                    5
 src/opcodes/flow.asm                   17
 src/opcodes/import.asm                 2
-src/opcodes/load.asm                   27
+src/opcodes/load.asm                   25
 src/opcodes/match.asm                  12
 src/pyo/abcmod.asm                     4
 src/pyo/asyncmod.asm                   26
@@ -94,5 +94,5 @@ src/pyo/tuple.asm                      5
 src/pyo/weakrefmod.asm                 18
 src/runtime.asm                        4
 src/slots.asm                          3
-src/sre.asm                            6
+src/sre.asm                            5
 src/traceback.asm                      16
