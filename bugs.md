@@ -58,6 +58,15 @@ reasoning that chose them and what changing one would cost.
   restoring `rbx` first is the same shape as the `systrace_exception` bug --
   a corrupted IP in every frame that raised.
 
+- **An `__init__` that is not a descriptor is still handed `self`.**
+  `class C: __init__ = functools.partial(f)` and an `__init__` that is a
+  callable INSTANCE both run here with `self` prepended; CPython does not bind
+  either, because neither has `__get__`, and raises
+  `TypeError: f() missing 1 required positional argument: 'self'`.  A plain
+  function, a `staticmethod` and a `staticmethod` subclass all behave the same
+  either way.  Found while checking the two exact-type tests next to the
+  `type_call` subtype fix; neither of those reproduced, and this did.
+
 - **`object.__new__` does not refuse a builtin subclass.**  `object.__new__(list)`
   answers `[]` where CPython raises
   `TypeError: object.__new__(list) is not safe, use list.__new__()`, and `dict`

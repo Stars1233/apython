@@ -1489,12 +1489,32 @@ DEF_FUNC type_call
     shl rax, 4
     add rsp, rax
 
-    ; Check: only call __init__ if __new__ returned instance of cls
+    ; Only call __init__ if __new__ returned an INSTANCE OF cls -- CPython's
+    ; type_call asks PyObject_TypeCheck, which is isinstance and not identity.
+    ; The pointer compare that was here skipped __init__ for the standard
+    ; factory shape, where __new__ picks a subclass and returns object.__new__
+    ; of it:
+    ;
+    ;   class Base:
+    ;       def __new__(cls, *a): return object.__new__(Sub if cls is Base else cls)
+    ;       def __init__(self, *a): self.args = a
+    ;   class Sub(Base): pass
+    ;   Base(1, 2).args         # AttributeError; __init__ never ran
+    ;
+    ; pathlib is the ordinary victim: Path.__new__ returns a PosixPath, so
+    ; PurePath.__init__ never ran and every method died on _raw_paths.
+    ;
+    ; type_is_subtype is DEF_FUNC_BARE and clobbers rdi/rsi/r10/r11/rax; rbx,
+    ; r12, r13 and r14 all survive it, and rcx is dead here.  rsp is back to
+    ; the prologue's shape, the add rsp above having undone the argument carve.
     cmp qword [rbp - TC_NEW_TAG], TAG_PTR
     jne .no_init
-    mov rax, [r14 + PyObject.ob_type]
-    cmp rax, rbx
-    jne .no_init
+    mov rdi, [r14 + PyObject.ob_type]
+    mov rsi, rbx
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jz .no_init
 
 .lookup_init:
     ; Look up __init__ walking the MRO (type + tp_base chain)
