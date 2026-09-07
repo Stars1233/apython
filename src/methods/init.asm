@@ -1767,6 +1767,11 @@ DEF_FUNC methods_init
     ADD_FN mn___set__, property_dunder_set
     extern property_dunder_delete
     ADD_FN mn___delete__, property_dunder_delete
+    ; __set_name__ is how a property learns what it was assigned to, which is
+    ; the only way its AttributeError can say "property 'r' of 'C' object has
+    ; no setter" rather than 3.10's bare "can't set attribute".
+    extern property_dunder_set_name
+    ADD_FN mn___set_name__, property_dunder_set_name
     extern property_type
     lea rax, [rel property_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2591,6 +2596,7 @@ mn_isupper:     db "isupper", 0
 mn_islower:     db "islower", 0
 mn___new__:     db "__new__", 0
 mn___get__:     db "__get__", 0
+mn___set_name__: db "__set_name__", 0
 mn___set__:     db "__set__", 0
 mn___delete__:  db "__delete__", 0
 mn_title:       db "title", 0

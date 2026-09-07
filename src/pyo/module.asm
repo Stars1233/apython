@@ -251,6 +251,7 @@ END_FUNC module_setattr
 ;; CPython's is the .py -- a difference in that attribute, not in this.
 ;; ============================================================================
 MR_FILE  equ 8
+MR_BUILTIN equ 16       ; is this name in builtin_module_table?
 MR_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC module_repr, MR_FRAME
     push rbx
@@ -289,6 +290,45 @@ DEF_FUNC module_repr, MR_FRAME
     mov [rbp - MR_FILE], rax
 .mr_no_file:
 
+    ; "(built-in)" is for a module that really is one.  The decision used to
+    ; be __file__ alone, so anything without one -- types.ModuleType('x'), and
+    ; every module a test builds by hand -- claimed to be built-in.  CPython
+    ; asks __spec__ first and says plain `<module 'x'>` for a module that is
+    ; neither built-in nor loaded from a file.
+    ;
+    ; __spec__ cannot answer here: it is None or absent on every module in
+    ; this tree.  builtin_module_table can, exactly -- it is the list
+    ; sys.builtin_module_names is built from, so "is this name in it" IS the
+    ; question "is this module built-in".
+    mov qword [rbp - MR_BUILTIN], 0
+    mov rsi, [rbx + PyModuleObject.mod_name]
+    test rsi, rsi
+    jz .mr_not_builtin
+    lea rsi, [rsi + PyStrObject.data]
+    extern builtin_module_table
+    extern builtin_module_count
+    lea r8, [rel builtin_module_table]
+    mov r9, [rel builtin_module_count]
+.mr_bm_loop:
+    test r9, r9
+    jz .mr_not_builtin
+    mov rdi, [r8]                   ; the row's name, a C string
+    push r8
+    push r9
+    push rsi
+    call ap_strcmp
+    pop rsi
+    pop r9
+    pop r8
+    test eax, eax
+    jz .mr_is_builtin
+    add r8, BuiltinModule_size
+    dec r9
+    jmp .mr_bm_loop
+.mr_is_builtin:
+    mov qword [rbp - MR_BUILTIN], 1
+.mr_not_builtin:
+
     lea rdi, [rel mod_repr_open]
     call obj_repr_buf
     mov rdi, rax
@@ -304,7 +344,13 @@ DEF_FUNC module_repr, MR_FRAME
     mov rdi, rax
     cmp qword [rbp - MR_FILE], 0
     jne .mr_from
+    cmp qword [rbp - MR_BUILTIN], 0
+    je .mr_plain
     lea rsi, [rel mod_repr_builtin]
+    call rbt_append_cstr
+    jmp .mr_done
+.mr_plain:
+    lea rsi, [rel mod_repr_plain]
     call rbt_append_cstr
     jmp .mr_done
 .mr_from:
@@ -336,6 +382,7 @@ mod_file_key: db "__file__", 0
 mod_repr_open:    db "<module '", 0
 mod_repr_unknown: db "?", 0
 mod_repr_builtin: db "' (built-in)>", 0
+mod_repr_plain:   db "'>", 0
 mod_repr_from:    db "' from '", 0
 mod_repr_close:   db "'>", 0
 module_type_name: db "module", 0

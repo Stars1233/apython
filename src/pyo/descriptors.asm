@@ -21,6 +21,8 @@ extern obj_decref
 extern obj_dealloc
 extern type_type
 extern raise_exception
+extern rbt_typename
+extern rbt_append_cstr
 extern exc_TypeError_type
 extern exc_AttributeError_type
 extern ap_strcmp
@@ -312,6 +314,22 @@ DEF_FUNC property_construct
     push rax
 
 .pc_do_alloc:
+    ; None means "no accessor", and CPython normalises it to NULL right here
+    ; (property_init_impl).  Storing the singleton instead made
+    ; `property(None, f)` look like it HAD a getter, and reading the attribute
+    ; called None: "TypeError: 'NoneType' object is not callable" where
+    ; CPython raises AttributeError.  Doing it at the constructor fixes every
+    ; reader at once, and .pga_fget already maps NULL back to None.
+    lea rax, [rel none_singleton]
+    cmp r13, rax
+    jne .pc_get_ok
+    xor r13d, r13d
+.pc_get_ok:
+    cmp r14, rax
+    jne .pc_set_ok
+    xor r14d, r14d
+.pc_set_ok:
+
     mov edi, PyPropertyObject_size
     lea rsi, [rel property_type]
     call gc_alloc
@@ -319,9 +337,20 @@ DEF_FUNC property_construct
     mov [rbx + PyPropertyObject.prop_get], r13
     mov [rbx + PyPropertyObject.prop_set], r14
     pop rax                     ; fdel
+    push rcx
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    jne .pc_del_ok
+    xor eax, eax
+.pc_del_ok:
+    pop rcx
     mov [rbx + PyPropertyObject.prop_del], rax
     pop rax                     ; doc
     mov [rbx + PyPropertyObject.prop_doc], rax
+    ; Filled in by __set_name__ when the class body is built; a property that
+    ; never reaches a class body keeps NULL and falls back to CPython's
+    ; unnamed wording.
+    mov qword [rbx + PyPropertyObject.prop_name], 0
 
     ; All four are Values, not pointers.  CPython takes any object for each --
     ; property(f, None, None, 5).__doc__ is 5, and f.__doc__ may be an int --
@@ -397,6 +426,120 @@ DEF_FUNC property_construct
 END_FUNC property_construct
 
 ;; ============================================================================
+;; property_dunder_set_name(args, nargs) -> None, always
+;;   args[0] = the property, args[1] = the owner class, args[2] = the name
+;;
+;; CPython's property.__set_name__.  It exists for one purpose: to let the
+;; AttributeError name the attribute.  "property 'r' of 'Plain' object has no
+;; setter" needs the name, and a descriptor is not told its own name anywhere
+;; else -- the class body assigns it into a dict and nothing hands it down.
+;;
+;; A property that never reaches a class body -- one built and called by hand
+;; -- keeps a NULL name and falls back to CPython's unnamed wording.
+;; ============================================================================
+PSN_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC property_dunder_set_name, PSN_FRAME
+    cmp rsi, 3
+    jb .psn_done
+    mov rax, [rdi]              ; the property
+    mov rdx, [rdi + 16]         ; the name Value (one Value per slot)
+    ; Only a str, and only once: a re-assignment under a second name would
+    ; otherwise leak the first.
+    push rax
+    mov rdi, [rax + PyPropertyObject.prop_name]
+    test rdi, rdi
+    jz .psn_no_old
+    call obj_decref
+.psn_no_old:
+    pop rax
+    mov qword [rax + PyPropertyObject.prop_name], 0
+    V_TEST_PTR rdx, rcx         ; ja when NULL or an immediate
+    ja .psn_done
+    mov rcx, [rdx + PyObject.ob_type]
+    lea rdi, [rel str_type]
+    cmp rcx, rdi
+    jne .psn_done
+    mov [rax + PyPropertyObject.prop_name], rdx
+    mov rdi, rdx
+    call obj_incref
+.psn_done:
+    xor eax, eax
+    RET_NONE
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+END_FUNC property_dunder_set_name
+
+;; ============================================================================
+;; property_raise_no_accessor(rdi = the property, rsi = the receiver Value,
+;;                            rdx = "setter"/"deleter"/"getter")
+;;   -> does not return; raises AttributeError
+;;
+;; "property 'r' of 'Plain' object has no setter", which is 3.12's wording.
+;; The old message was 3.10's bare "can't set attribute" and named neither.
+;; Falls back to CPython's own unnamed form when __set_name__ never ran.
+;; ============================================================================
+PRN_RECV equ 8
+PRN_WHAT equ 16
+PRN_FRAME equ 40            ; + 1 push = 48, 16-aligned
+DEF_FUNC property_raise_no_accessor, PRN_FRAME
+    push rbx
+    mov [rbp - PRN_RECV], rsi
+    mov [rbp - PRN_WHAT], rdx
+    mov rbx, [rdi + PyPropertyObject.prop_name]
+
+    lea rdi, [rel prop_msg_buf]
+    test rbx, rbx
+    jz .prn_unnamed
+    lea rsi, [rel prop_msg_open]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rbx + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel prop_msg_of]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - PRN_RECV]
+    call rbt_typename
+    mov rdi, rax
+    lea rsi, [rel prop_msg_has_no]
+    call rbt_append_cstr
+    jmp .prn_what
+.prn_unnamed:
+    lea rsi, [rel prop_msg_anon]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - PRN_RECV]
+    call rbt_typename
+    mov rdi, rax
+    lea rsi, [rel prop_msg_has_no]
+    call rbt_append_cstr
+.prn_what:
+    mov rdi, rax
+    mov rsi, [rbp - PRN_WHAT]
+    call rbt_append_cstr
+    lea rdi, [rel exc_AttributeError_type]
+    lea rsi, [rel prop_msg_buf]
+    call raise_exception
+    ud2
+END_FUNC property_raise_no_accessor
+
+section .rodata
+prop_msg_open:   db "property '", 0
+prop_msg_of:     db "' of '", 0
+prop_msg_anon:   db "property of '", 0
+prop_msg_has_no: db "' object has no ", 0
+prop_msg_setter: db "setter", 0
+prop_msg_deleter: db "deleter", 0
+prop_msg_getter: db "getter", 0
+
+section .bss
+prop_msg_buf: resb 256
+
+section .text
+
+;; ============================================================================
 ;; property_dealloc(PyObject *self)
 ;; ============================================================================
 DEF_FUNC_LOCAL property_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
@@ -423,6 +566,11 @@ DEF_FUNC_LOCAL property_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     jz .pd_no_doc
     DECREF_V rdi, rcx
 .pd_no_doc:
+    mov rdi, [rbx + PyPropertyObject.prop_name]
+    test rdi, rdi
+    jz .pd_no_name
+    call obj_decref
+.pd_no_name:
 
     mov rdi, rbx
     call gc_dealloc
@@ -774,7 +922,10 @@ DEF_FUNC property_descr_get
     ret
 
 .pdg_no_getter:
-    RAISE exc_AttributeError_type, "unreadable attribute"
+    mov rdi, rbx
+    mov rsi, r12
+    lea rdx, [rel prop_msg_getter]
+    call property_raise_no_accessor
 END_FUNC property_descr_get
 
 ;; ============================================================================
@@ -850,9 +1001,15 @@ DEF_FUNC property_descr_set
     jmp .pds_done
 
 .pds_no_deleter:
-    RAISE exc_AttributeError_type, "can't delete attribute"
+    mov rdi, rbx
+    mov rsi, r12
+    lea rdx, [rel prop_msg_deleter]
+    call property_raise_no_accessor
 .pds_no_setter:
-    RAISE exc_AttributeError_type, "can't set attribute"
+    mov rdi, rbx
+    mov rsi, r12
+    lea rdx, [rel prop_msg_setter]
+    call property_raise_no_accessor
 END_FUNC property_descr_set
 
 ;; ============================================================================
@@ -3183,6 +3340,12 @@ DEF_FUNC property_clear, 8        ; rsp 16-aligned at the call the macros below 
     push rbx
     mov rbx, rdi
 
+    mov rdi, [rbx + PyPropertyObject.prop_name]
+    mov qword [rbx + PyPropertyObject.prop_name], 0
+    test rdi, rdi
+    jz .no_name
+    call obj_decref
+.no_name:
     mov rdi, [rbx + PyPropertyObject.prop_get]
     mov qword [rbx + PyPropertyObject.prop_get], 0
     test rdi, rdi

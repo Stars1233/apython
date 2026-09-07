@@ -1283,7 +1283,8 @@ DEF_FUNC rbt_append_cstr
     ret
 END_FUNC rbt_append_cstr
 
-DEF_FUNC_LOCAL rbt_typename, 8            ; 1 push, so rsp is 16-aligned     ; (rdi = dest, rsi = a Value) -> rax = the NUL
+global rbt_typename
+DEF_FUNC rbt_typename, 8            ; 1 push, so rsp is 16-aligned     ; (rdi = dest, rsi = a Value) -> rax = the NUL
     push rbx
     mov rbx, rdi
     mov rdi, rsi

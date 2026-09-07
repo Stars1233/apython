@@ -558,6 +558,10 @@ struc PyPropertyObject
                           ;      because it is WRITTEN: dis.py opens with
                           ;      `_Instruction.opname.__doc__ = "..."`, and a
                           ;      read-only __doc__ made that an AttributeError.
+    .prop_name:   resq 1  ; +48: the attribute name, a str or NULL.  CPython
+                          ;      learns it through __set_name__ and uses it in
+                          ;      "property 'r' of 'C' object has no setter";
+                          ;      without it the message was 3.10's wording.
 endstruc
 
 ; Generator object
