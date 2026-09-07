@@ -25,10 +25,3 @@ src/opcodes/import.asm op_import_from call obj_decref
 src/opcodes/import.asm op_import_from call str_concat
 src/opcodes/import.asm op_import_from call str_concat
 src/opcodes/import.asm op_import_from call str_from_cstr_heap
-src/opcodes/load.asm op_load_attr call obj_decref
-src/opcodes/load.asm op_load_attr call obj_decref
-src/opcodes/load.asm op_load_attr call obj_incref
-src/opcodes/load.asm op_load_attr call obj_incref
-src/opcodes/load.asm op_load_global call dict_get_index
-src/opcodes/load.asm op_load_global call dict_get_index
-src/opcodes/load.asm op_load_super_attr call dict_get
