@@ -437,6 +437,7 @@ test_sre
 test_stdlib_glue
 test_stdlib_shims
 test_stdout_buffering
+test_store_attr_spec
 test_str_build
 test_str_case
 test_str_char_singletons

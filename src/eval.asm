@@ -114,6 +114,7 @@ extern op_import_name
 extern op_import_from
 extern op_binary_subscr_list_int
 extern op_unpack_sequence_tuple
+extern op_store_attr_instance
 extern op_unpack_sequence_list
 extern op_binary_subscr_tuple_int
 extern op_store_subscr_list_int
@@ -1385,7 +1386,7 @@ opcode_table:
     dq op_store_subscr_list_int ; 237
     dq op_unpack_sequence_tuple ; 238
     dq op_unpack_sequence_list ; 239
-    dq op_unimplemented      ; 240
+    dq op_store_attr_instance ; 240
     dq op_unimplemented      ; 241
     dq op_unimplemented      ; 242
     dq op_unimplemented      ; 243
@@ -1599,6 +1600,7 @@ opn_BINARY_SUBSCR_TUPLE_INT: db "BINARY_SUBSCR_TUPLE_INT", 0
 opn_STORE_SUBSCR_LIST_INT: db "STORE_SUBSCR_LIST_INT", 0
 opn_UNPACK_SEQUENCE_TUPLE: db "UNPACK_SEQUENCE_TUPLE", 0
 opn_UNPACK_SEQUENCE_LIST: db "UNPACK_SEQUENCE_LIST", 0
+opn_STORE_ATTR_INSTANCE: db "STORE_ATTR_INSTANCE", 0
 
 ;; ============================================================================
 ;; Opcode name lookup table (256 entries, in .data for relocations)
@@ -1847,7 +1849,7 @@ opcode_names:
     dq opn_STORE_SUBSCR_LIST_INT     ; 237
     dq opn_UNPACK_SEQUENCE_TUPLE     ; 238
     dq opn_UNPACK_SEQUENCE_LIST      ; 239
-    dq opn_unknown                    ; 240
+    dq opn_STORE_ATTR_INSTANCE       ; 240
     dq opn_unknown                    ; 241
     dq opn_unknown                    ; 242
     dq opn_unknown                    ; 243

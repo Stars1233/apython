@@ -8,6 +8,7 @@
 ;   201  LOAD_GLOBAL_BUILTIN    name found in builtins
 ;   203  LOAD_ATTR_METHOD       a method reached through the type dict
 ;   204  LOAD_ATTR_INSTANCE     a plain attribute reached through the instance
+;   240  STORE_ATTR_INSTANCE    a plain attribute written through the instance
 ;
 ; Split out of load.asm, which keeps the generic handlers, the attribute
 ; protocol and the error messages, because that file had reached lint's 100k
@@ -37,6 +38,7 @@ extern eval_co_names
 extern obj_dealloc
 extern op_load_attr
 extern op_load_global
+extern op_store_attr
 
 section .text
 
@@ -329,3 +331,125 @@ DEF_FUNC_BARE op_load_attr_instance
     mov byte [rbx - 2], 106
     jmp op_load_attr
 END_FUNC op_load_attr_instance
+
+
+;; ============================================================================
+;; op_store_attr_instance (240) -> nothing; stores and pops both operands
+;;
+;; `self.x = v` where x already exists in the instance dict.  The generic
+;; handler builds an 88-byte frame, saves the exception state, walks the MRO
+;; for a data descriptor, calls tp_setattr, and instance_setattr then walks the
+;; same MRO again before reaching dict_set, which hashes the name and probes.
+;; This writes the entry in place.
+;;
+;; CACHE, 8 bytes -- STORE_ATTR's four entries, which held nothing until now:
+;;     [+0]  the type's version, 4 bytes
+;;     [+4]  the dense index into the instance dict's entry array, 2 bytes
+;;     [+6]  spare
+;;
+;; Eight bytes is why the version exists.  LOAD_ATTR_INSTANCE has eighteen and
+;; spends ten of them on a type POINTER plus the class dict's version; there is
+;; no room for that here, and a four-byte version answers both questions at
+;; once -- it names one type in one state of its dict.
+;;
+;; What the version stands in for: the install site below checks that
+;; tp_setattr is instance_setattr and that no data descriptor is in the MRO,
+;; and records the version that was true when it did.  Either of those can only
+;; change through type_setattr, which runs type_install_slots and then
+;; type_refresh_attr_flags, which stamps a new version -- and stamps it down
+;; every subclass too.  So a matching version means both still hold.
+;;
+;; The INDEX is not trusted, exactly as it is not on the load side: two
+;; instances of one class can have different dict layouts, so the key at that
+;; slot is compared against co_names[arg] by pointer, which makes the write
+;; self-validating.
+;;
+;; dk_version is deliberately NOT bumped.  dict_set bumps it on every write
+;; including a rebind, which is why a store-side cache cannot guard on it; an
+;; in-place update of a value changes neither the layout nor the size, and
+;; nothing guards on an instance dict's version anyway.
+;; ============================================================================
+DEF_FUNC_BARE op_store_attr_instance
+    ; ecx is the oparg and must survive to .sai_deopt, so nothing before it
+    ; touches rcx.  Stack: ... value, obj -- obj on top.
+    mov rdi, [r13 - 8]              ; the object
+    V_TEST_PTR rdi, rax
+    ja .sai_deopt
+
+    ; Guard 1: the type, in the state the install site vetted it in.
+    mov rax, [rdi + PyObject.ob_type]
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    shr rdx, TYPE_VERSION_SHIFT
+    cmp edx, dword [rbx]            ; CACHE[+0] = version
+    jne .sai_deopt
+
+    ; Guard 2: there is an instance dict, and the cached slot is inside the
+    ; part of its dense array that has ever been used.
+    LOAD_INST_DICT rsi, rdi, .sai_deopt
+    test rsi, rsi
+    jz .sai_deopt
+    movzx r8d, word [rbx + 4]       ; CACHE[+4] = dense index
+    cmp r8, [rsi + PyDictObject.dk_nentries]
+    jae .sai_deopt
+
+    ; Guard 3: that slot still holds THIS name, compared by pointer.
+    mov rdx, [rsi + PyDictObject.entries]
+    imul r8, r8, DICT_ENTRY_SIZE
+    add rdx, r8                     ; rdx = the entry
+    mov r9d, ecx                    ; the oparg, untouched
+    shl r9d, 3
+    LOAD_CO_NAMES r10
+    mov r9, [r10 + r9]
+    cmp r9, [rdx + DictEntry.key]
+    jne .sai_deopt
+
+    ; Guard 4: it is not a hole.  Filling one would have to move
+    ; dk_nentries and ob_size, which is dict_set's job, not this one's.
+    cmp qword [rdx + DictEntry.value], 0
+    je .sai_deopt
+
+    ; Guard 5: the collector can see this dict, or the value cannot make a
+    ; cycle anyway.
+    ;
+    ; A dict enters a generation lazily, the first time dict_set is given a
+    ; key or value worth tracing -- dict_maybe_track does it, and an in-place
+    ; write here does not go near dict_set.  An instance whose __init__ only
+    ; assigned numbers therefore has an UNTRACKED dict, and writing the first
+    ; object reference into it inline left the collector unable to see the
+    ; reference at all: two nodes pointing at each other through such a dict
+    ; were never collected and their __del__ never ran.
+    ;
+    ; Storing an immediate cannot create a cycle, so it is safe either way and
+    ; keeps the ordinary `p.x = i` loop on the fast path.  A pointer into an
+    ; untracked dict goes the long way round, and the dict_set it lands in
+    ; tracks the dict, so the site is back on the fast path next time.
+    cmp qword [rsi - GC_HEAD_SIZE + PyGC_Head.gc_next], 0
+    jne .sai_tracked
+    mov rax, [r13 - 16]
+    V_TEST_PTR rax, r9              ; r9, not rcx: this branch can deopt, and
+                                    ; the deopt hands ecx to op_store_attr
+    jbe .sai_deopt
+.sai_tracked:
+
+    ; Hit.  Past the last guard, so rcx is free.
+    mov rsi, [r13 - 16]             ; the value, owned by the stack
+    mov rax, [rdx + DictEntry.value]
+    mov [rdx + DictEntry.value], rsi ; the dict takes the stack's reference
+    sub r13, 16                     ; both operands are consumed
+
+    ; The object is parked in a callee-saved register: releasing the old value
+    ; can call obj_dealloc, and that clobbers every caller-saved one.
+    mov r15, rdi
+    DECREF_V rax, rcx               ; the value that was there
+    DECREF_V r15, rcx               ; the object's stack reference
+
+    add rbx, 8                      ; skip 4 CACHE entries
+    DISPATCH
+
+.sai_deopt:
+    ; STORE_ATTR's arg is a name index and carries an EXTENDED_ARG as soon as a
+    ; module has enough names, so the deopt jumps with ecx rather than
+    ; rewinding rbx.  Nothing has been popped.
+    mov byte [rbx - 2], OP_STORE_ATTR
+    jmp op_store_attr
+END_FUNC op_store_attr_instance

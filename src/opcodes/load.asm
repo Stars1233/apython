@@ -24,6 +24,7 @@ extern eval_saved_r13
 extern eval_co_consts
 extern dict_get
 extern dict_get_index
+extern instance_setattr
 extern raise_exception
 extern obj_incref
 extern obj_decref
@@ -2342,6 +2343,21 @@ DEF_FUNC op_store_attr, SA_FRAME
     V_PACK rdx, rcx             ; tp_setattr takes a value Value
     call rax
 
+    ; Specialize, now that the store has happened.
+    ;
+    ; It has to be AFTER rather than before: the first store to an attribute is
+    ; the one that creates it, so there is no dense index to cache until this
+    ; call has run.  A site whose attribute is created here specializes on its
+    ; second execution, which is what `self.x = ...` in __init__ followed by a
+    ; loop of `p.x = ...` actually does.
+    ;
+    ; Nothing here can fail loudly -- every branch out just leaves the site
+    ; generic -- so it is written as a straight run of guards.
+    mov rdi, [rbp - SA_OBJ]
+    mov rsi, [rbp - SA_NAME]
+    mov rdx, rbx
+    call sa_try_specialize
+
     ; DECREF value (tag-aware)
     mov rdi, [rbp - SA_VAL]
     mov rsi, [rbp - SA_VTAG]
@@ -2698,3 +2714,96 @@ DEF_FUNC_BARE op_swap
     mov [r13 - 8], r9
     DISPATCH
 END_FUNC op_swap
+
+;; ============================================================================
+;; sa_try_specialize(rdi = the object, rsi = the name, rdx = the bytecode IP)
+;;   -> nothing
+;;
+;; Install STORE_ATTR_INSTANCE at the site rdx points into, if the store that
+;; just happened was an ordinary write into an instance dict.  Every check that
+;; fails simply returns and leaves the site generic.
+;;
+;; It runs AFTER the store rather than before, because the first store to an
+;; attribute is the one that creates it: there is no dense index to cache until
+;; tp_setattr has run.  A site specializes on its second execution, which is
+;; what `self.x = ...` in __init__ followed by a loop of `p.x = ...` does.
+;;
+;; The key comparison is the one that matters most.  dict_set keeps the FIRST
+;; writer's key object, so an attribute created under a name that is not the
+;; interned constant -- setattr(o, "".join(...), 1) -- can never satisfy the
+;; handler's pointer guard.  Refusing to install here is what stops such a site
+;; specializing and deopting on every execution for ever, which is the shape
+;; bugs.md records on the load side.
+;;
+;; A type whose version is zero is never cached.  That is a static type, and
+;; its instances have no instance dict to write into.
+;; ============================================================================
+STS_IP  equ 8
+STS_VER equ 16
+STS_FRAME equ 24                    ; 24 + 3 pushes keeps rsp 16-aligned
+
+DEF_FUNC_LOCAL sa_try_specialize, STS_FRAME
+    push rbx
+    push r12
+    push r13
+
+    mov [rbp - STS_IP], rdx
+    mov r12, rdi                    ; the object
+    mov r13, rsi                    ; the name
+    V_TEST_PTR r12, rax
+    ja .sts_out
+
+    ; An ordinary instance store: nothing in the MRO able to outrank the dict,
+    ; and no __setattr__ of the class's own.
+    mov rax, [r12 + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_MRO_HAS_DATA_DESCR
+    jnz .sts_out
+    lea rcx, [rel instance_setattr]
+    cmp [rax + PyTypeObject.tp_setattr], rcx
+    jne .sts_out
+
+    ; The version the handler will guard on.
+    mov rax, [rax + PyTypeObject.tp_flags]
+    shr rax, TYPE_VERSION_SHIFT
+    test eax, eax
+    jz .sts_out
+    mov [rbp - STS_VER], eax
+
+    LOAD_INST_DICT rbx, r12, .sts_out
+    test rbx, rbx
+    jz .sts_out
+
+    ; Where the name sits in the dense array.
+    mov rdi, rbx
+    mov rsi, r13
+    xor edx, edx
+    call dict_get_index
+    test rax, rax
+    js .sts_out
+    cmp rax, 0xFFFF                 ; the cache field is 16 bits wide
+    jae .sts_out
+    mov r12, rax                    ; the index
+
+    ; And whether that entry is keyed by the very object co_names holds.
+    mov rdx, [rbx + PyDictObject.entries]
+    imul rax, rax, DICT_ENTRY_SIZE
+    add rdx, rax
+    cmp r13, [rdx + DictEntry.key]
+    jne .sts_out
+    cmp qword [rdx + DictEntry.value], 0
+    je .sts_out
+
+    ; Install: version, index, then the opcode byte last.
+    mov rcx, [rbp - STS_IP]
+    mov eax, [rbp - STS_VER]
+    mov dword [rcx], eax
+    mov word [rcx + 4], r12w
+    mov byte [rcx - 2], OP_STORE_ATTR_INSTANCE
+
+.sts_out:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC sa_try_specialize
