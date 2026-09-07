@@ -167,15 +167,18 @@ DEF_FUNC_BARE op_for_iter_list
     DISPATCH
 
 .fil_exhausted:
-    ; Mark iterator as exhausted: DECREF list, clear it_seq
+    ; Clear it_seq BEFORE releasing the list, for the reason list_iter_next
+    ; carries in full: a __del__ that re-enters this iterator must find it
+    ; exhausted rather than pointing at storage being freed.
     push rdi                       ; save iterator ptr
     mov rdi, [rdi + PyListIterObject.it_seq]
+    mov rcx, [rsp]
+    mov qword [rcx + PyListIterObject.it_seq], 0
     test rdi, rdi
     jz .fil_already_exhausted
     call obj_decref
 .fil_already_exhausted:
     pop rdi
-    mov qword [rdi + PyListIterObject.it_seq], 0
 
     ; Restore the original arg (jump offset)
     pop rcx                        ; restore jump offset

@@ -232,9 +232,11 @@ DEF_FUNC gen_iternext
     cmp qword [rdi + PyFrame.instr_ptr], 0
     jne .yielded
 
-    ; Generator is exhausted: free frame, set gi_frame = NULL
-    call frame_free
+    ; Generator is exhausted.  Clear gi_frame BEFORE freeing it: frame_free
+    ; releases localsplus, and a __del__ down there that touches this
+    ; generator must not find gi_frame naming a frame being torn down.
     mov qword [rbx + PyGenObject.gi_frame], 0
+    call frame_free
 
     ; Store return value in gi_return_value (for StopIteration.value)
     pop rax                    ; rax = return value tag
@@ -398,9 +400,10 @@ DEF_FUNC ags_iternext
     cmp qword [rdi + PyFrame.instr_ptr], 0
     jne .agsi_yielded
 
-    ; Async gen returned (exhausted): free frame, raise StopAsyncIteration
-    call frame_free
+    ; Async gen returned (exhausted).  Clear before freeing, as gen_iternext
+    ; does and for the same reason.
     mov qword [r12 + PyGenObject.gi_frame], 0
+    call frame_free
     pop rdx                    ; result tag
     pop rax                    ; result payload
     V_PACK rax, rdx
@@ -443,8 +446,8 @@ DEF_FUNC ags_iternext
     mov rdi, [r12 + PyGenObject.gi_frame]
     test rdi, rdi
     jz .agsi_body_raised_closed
-    call frame_free
     mov qword [r12 + PyGenObject.gi_frame], 0
+    call frame_free
 .agsi_body_raised_closed:
     mov dword [rbx + AsyncGenASend.ags_state], 2
     pop r12
@@ -923,9 +926,9 @@ DEF_FUNC gen_send
     cmp qword [rdi + PyFrame.instr_ptr], 0
     jne .gs_yielded
 
-    ; Exhausted: free frame
-    call frame_free
+    ; Exhausted.  Clear before freeing, as gen_iternext does.
     mov qword [rbx + PyGenObject.gi_frame], 0
+    call frame_free
 
     ; Store return value in gi_return_value (for StopIteration.value)
     V_PACK r12, r13
@@ -1084,10 +1087,10 @@ DEF_FUNC gen_throw, GT_FRAME
     mov [rel current_exception], rcx
 .gt_exhausted_propagating:
 
-    ; Exhausted: free frame
+    ; Exhausted.  Clear before freeing, as gen_iternext does.
     mov rdi, [rbx + PyGenObject.gi_frame]
-    call frame_free
     mov qword [rbx + PyGenObject.gi_frame], 0
+    call frame_free
     V_PACK r12, r13
     mov [rbx + PyGenObject.gi_return_value], r12
 
@@ -1114,12 +1117,35 @@ DEF_FUNC gen_throw, GT_FRAME
     ret
 
 .gt_exhausted:
-    ; Generator is exhausted — re-raise the exception
+    ; Generator is exhausted -- re-raise the exception.
+    ;
+    ; throw() takes a class OR an already-built instance, and this arm used
+    ; to call exc_new on both.  Handed an instance that made an exception
+    ; whose exc_type was the INSTANCE, and the next `except ValueError` read
+    ; tp_base off it -- a segfault in type_mro_next, several frames away.
+    ; The live path above learned this; this one had not.
+    mov rax, [r12 + PyObject.ob_type]
+    lea rcx, [rel exc_metatype]
+    cmp rax, rcx
+    je .gt_exh_from_class
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    je .gt_exh_from_class
+    lea rcx, [rel type_type]
+    cmp rax, rcx
+    je .gt_exh_from_class
+    ; Already an instance: raise it as it stands.
+    mov rdi, r12
+    call obj_incref
+    mov rdi, r12
+    jmp .gt_exh_raise
+.gt_exh_from_class:
     mov rdi, r12               ; exc_type
     xor esi, esi
     xor edx, edx
     call exc_new
     mov rdi, rax
+.gt_exh_raise:
     call raise_exception_obj
     RET_NULL
     pop r13
@@ -1189,8 +1215,8 @@ DEF_FUNC gen_close, GC_FRAME
     mov rdi, [rbx + PyGenObject.gi_frame]
     test rdi, rdi
     jz .gc_no_frame
-    call frame_free
     mov qword [rbx + PyGenObject.gi_frame], 0
+    call frame_free
 .gc_no_frame:
 
     lea rax, [rel none_singleton]

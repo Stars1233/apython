@@ -118,13 +118,17 @@ DEF_FUNC_BARE list_iter_next
     ret
 
 .exhausted_mark:
-    ; Mark as permanently exhausted by clearing it_seq
-    ; DECREF the list
+    ; Drop the reference BEFORE releasing it.  Releasing first runs the
+    ; list's __del__ inside obj_decref, and a __del__ that calls next() on
+    ; this same iterator then read it_seq while the list was being freed --
+    ; CPython issue 26494, and a segfault here.  Clearing first makes that
+    ; re-entrant next() see an exhausted iterator, which is what it is.
+    mov rax, [rdi + PyListIterObject.it_seq]
+    mov qword [rdi + PyListIterObject.it_seq], 0
     push rdi
-    mov rdi, [rdi + PyListIterObject.it_seq]
+    mov rdi, rax
     call obj_decref
     pop rdi
-    mov qword [rdi + PyListIterObject.it_seq], 0
 .exhausted:
     RET_NULL
     ret
