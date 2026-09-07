@@ -202,6 +202,21 @@ reasoning that chose them and what changing one would cost.
   change -- it is that plus the object's type name at the raise site.
   `lib/types.py` raises the old wording by hand in one place too.
 
+- **`LOAD_ATTR_METHOD` (opcode 203) is still never installed for a class
+  written in Python.**  Its install site is reachable only from `.la_try_dict`,
+  which needs a receiver whose type has no `tp_getattr` -- a static builtin
+  type.  That is why `"abc".upper()` specializes and `c.m()` does not.
+
+  It was worth ~0.3x when `c_call_method` was 0.54x.  It is not now: the
+  method-load work took that case to 0.89x against a plain `c_call` of 0.93x,
+  so the remaining gap is the GENERIC CALL PATH and not the attribute load, and
+  a specialized LOAD_ATTR does not touch it.  The headroom a sound version
+  would recover is about 0.05x on one microbenchmark, against a new specialized
+  opcode whose guards must prove the instance dict cannot shadow the name and
+  which must never write `rcx` on a path that can deopt.  The measurement is
+  what changed, not the design; if the call path gets faster, this becomes
+  worth doing again.
+
 - **Forty-two calls inside opcode handlers are made with `rsp` misaligned.**
   Recorded one per site in `tests/align_floor.txt`, which `lint.py` ratchets:
   a new one fails the build and the set can only shrink.  Pay one down by

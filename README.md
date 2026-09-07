@@ -111,6 +111,8 @@ Missing: `IOError` / `EnvironmentError` (the OSError aliases),
 - Compiling Python source: `compile()`, `exec()`, `eval()`, `./apython foo.py`,
   and `import` of a `.py` when no `.pyc` is there
 - The walrus operator, PEP 695 type parameters, `from __future__ import ...`
+- PEP 701 f-strings: the quote that opened one may be reused inside a field,
+  fields nest, and they may hold comments, backslashes and newlines
 - Classes with inheritance, `__init__`, `__repr__`, `__str__`, `__slots__`, MRO
 - Generators and `yield` / `yield from`
 - `async def`, `await`, `async for`, `async with`
