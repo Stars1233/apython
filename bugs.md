@@ -74,20 +74,38 @@ reasoning that chose them and what changing one would cost.
   type whose `tp_new` is not `object`'s own, unless `__init__` is overridden
   and `__new__` is not.  `copyreg._reconstructor` is the ordinary caller.
 
-- **`frame.clear()` and `BaseException.with_traceback()` do not exist, and
-  between them they stop `unittest.assertRaises`.**  `_AssertRaisesContext.__exit__`
-  calls `traceback.clear_frames(tb)` and then `exc_value.with_traceback(None)`;
-  both raise AttributeError here, so a test that expects an exception gets an
-  AttributeError instead -- and `assertRaises` is in nearly every test CPython
-  ships.  Of the 202 files in CPython 3.12's `Lib/test` that fail here, 175
-  name `assertRaises`, `assertWarns` or `assertLogs` directly and most of the
-  rest reach one through `test.support.check_syntax_error` or `doctest`.
+- **`frame.clear()` refuses a suspended generator's frame.**  CPython clears
+  one; this raises `RuntimeError: cannot clear an executing frame` for any
+  frame still attached to a live `PyFrame`, because telling a suspended
+  generator apart from an executing frame means asking whether the `PyFrame`
+  is on the interpreter's own chain.  It costs nothing where it matters:
+  `traceback.clear_frames()` is written as `try: ... except RuntimeError: pass`
+  and CPython raises exactly that for the frames it refuses, so the caller
+  cannot tell the difference.
 
-  `traceback.clear_frames` catches only RuntimeError, so the AttributeError
-  escapes it.  Until the commit above this was not an AttributeError but a
-  SIGSEGV: the raise inside `__exit__` returned NULL, `WITH_EXCEPT_START`
-  pushed it as a Value, and `obj_is_true` dereferenced address 0.  That is
-  fixed; what is left is that the two methods are missing.
+- **A `__del__` that touches an iterator over the object being freed
+  segfaults.**  CPython's own `test_list` reaches it through
+  `support.check_free_after_iterating`, and it is nine lines without the
+  stdlib:
+
+  ```python
+  class A(list):
+      def __del__(self):
+          try: next(it)
+          except StopIteration: pass
+  it = iter(A())
+  try: next(it)
+  except StopIteration: pass
+  import gc; gc.collect()
+  ```
+
+  CPython prints and exits 0; this dies with SIGSEGV.  The list is freed when
+  the iterator drops it at exhaustion, `__del__` runs inside that dealloc, and
+  the `next(it)` it makes reads the iterator's now-dangling sequence pointer.
+  CPython's fix for the same crash (issue 26494) was to have the iterator NULL
+  its own reference before releasing it, so a resurrected iterator reads
+  exhausted rather than freed.  Found once `frame.clear()` let CPython's
+  `test_list` get 19 tests in instead of one.
 
 - **`\b` and `\B` are ASCII-only.**  `re.search(r"\b\d+\b", "eee42")` with
   non-ASCII letters in place of the e's finds `42`, where CPython finds nothing

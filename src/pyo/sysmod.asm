@@ -1104,6 +1104,7 @@ DEF_FUNC sys_module_init, 40
     SYS_ADD_FUNC_ALIAS sys_unraisablehook_func, sm_unraisablehook, \
                        sm_dunder_unraisablehook
     SYS_ADD_FUNC sys_exc_info_func, sm_exc_info
+    SYS_ADD_FUNC sys_exception_func, sm_exception
     ; audit() and addaudithook() do nothing: there are no audit hooks here,
     ; and with none installed CPython's audit() is a no-op too.  os.walk,
     ; os.listdir and half of shutil call audit() unconditionally, and an
@@ -1586,6 +1587,7 @@ sm_dunder_excepthook: db "__excepthook__", 0
 sm_dunder_unraisablehook: db "__unraisablehook__", 0
 sm_unraisablehook: db "unraisablehook", 0
 sm_exc_info:     db "exc_info", 0
+sm_exception:    db "exception", 0
 sm_getframe:     db "_getframe", 0
 sm_getframemodulename: db "_getframemodulename", 0
 sm_settrace:     db "settrace", 0
@@ -1843,3 +1845,29 @@ DEF_FUNC sys_exc_info_func
     V_PACK rax, rdx
     ret
 END_FUNC sys_exc_info_func
+
+;; ============================================================================
+;; sys.exception() -> the exception being handled, or None
+;;   -> rax = Value: handled_exception with a new reference, else None
+;;
+;; 3.11 added this as the one-value form of exc_info(), and CPython's own
+;; traceback.py is written against it -- format_exc() is literally
+;; "".join(format_exception(sys.exception(), ...)), so without this every
+;; traceback.format_exc() and print_exc() raised AttributeError.  pdb reads it
+;; too.
+;;
+;; Same source as exc_info's first element and for the same reason: the
+;; exception being HANDLED, not the one merely in flight.
+;; ============================================================================
+DEF_FUNC sys_exception_func
+    mov rax, [rel handled_exception]
+    test rax, rax
+    jnz .sx_have
+    LOAD_NONE rax
+.sx_have:
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+END_FUNC sys_exception_func

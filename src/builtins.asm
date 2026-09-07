@@ -2295,6 +2295,16 @@ DEF_FUNC builtins_init, 8            ; 1 push, so rsp is 16-aligned
     lea rdx, [rel ellipsis_singleton]
     call add_exc_type_builtin
 
+    ; __debug__ is True: there is no -O here, and nothing strips an assert.
+    ; CPython makes it a compile-time constant; a builtin answers every read
+    ; the same way, and the stdlib does read it -- test_exceptions decorates a
+    ; whole class with @unittest.skipUnless(__debug__, ...), which is a
+    ; NameError without this.
+    mov rdi, rbx
+    lea rsi, [rel bi_name_debug]
+    lea rdx, [rel bool_true]
+    call add_exc_type_builtin
+
     ; Register exception types as builtins
     mov rdi, rbx
     lea rsi, [rel bi_name_BaseException]
@@ -2964,6 +2974,7 @@ bi_name_classmethod:  db "classmethod", 0
 bi_name_property:     db "property", 0
 bi_name_NotImplemented: db "NotImplemented", 0
 bi_name_Ellipsis:      db "Ellipsis", 0
+bi_name_debug:         db "__debug__", 0
 
 ; Exception type names
 bi_name_BaseException:     db "BaseException", 0

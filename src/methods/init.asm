@@ -13,6 +13,8 @@
 %include "opcodes.inc"
 
 ; External functions
+extern frameobj_method_clear
+extern frame_object_type
 extern memoryview_method_tobytes
 extern memoryview_method_tolist
 extern memoryview_method_cast
@@ -2475,6 +2477,18 @@ DEF_FUNC methods_init
     call dict_add_none
 
     lea rax, [rel bytearray_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
+    ;; --- frame_object_type methods ---
+    ;; frameobj_getattr answers the f_* attributes and returns NULL for
+    ;; anything else, so a tp_dict beside it is where a METHOD goes; the
+    ;; attribute fallback and the dict do not overlap.
+    call dict_new
+    mov rbx, rax
+    ADD_FN_N mn_clear, frameobj_method_clear, 1, 1
+    lea rax, [rel frame_object_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
     call type_stamp_methods

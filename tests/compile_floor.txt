@@ -190,6 +190,7 @@ test_exception_metatype
 test_exceptions
 test_exception_str_repr
 test_exception_subclass_init
+test_exception_traceback_api
 test_except_star
 test_exc_state_frame
 test_exec_builtins_value
@@ -215,6 +216,7 @@ test_format_grouping
 test_format_map
 test_format
 test_format_spec
+test_frame_clear
 test_frame_lineno
 test_frame_live
 test_frames_and_time
@@ -490,6 +492,7 @@ test_syntax_error_location
 test_syntax_error_offset
 test_sys_argv
 test_sys_attrs
+test_sys_exception
 test_sys_exit
 test_termios
 test_time_module

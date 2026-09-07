@@ -90,6 +90,8 @@ iter, next, aiter, anext,
 getattr, hasattr, setattr, delattr, vars, dir,
 globals, locals, breakpoint, \_\_build\_class\_\_, \_\_import\_\_
 
+**Constants:** True, False, None, NotImplemented, Ellipsis, \_\_debug\_\_
+
 **Types:**
 type, int, float, str, bool, object, list, dict, tuple, set, frozenset,
 bytes, bytearray, memoryview, slice, staticmethod, classmethod, property
@@ -139,7 +141,7 @@ Missing: `IOError` / `EnvironmentError` (the OSError aliases),
 
 | Module | Description |
 |--------|-------------|
-| sys | argv, exit (raises `SystemExit`), version, version_info, path, modules, stdin/stdout/stderr, exc_info, maxsize, platform, byteorder, executable, prefix, implementation, builtin_module_names, warnoptions, intern, getrecursionlimit/setrecursionlimit, get/set_int_max_str_digits |
+| sys | argv, exit (raises `SystemExit`), version, version_info, path, modules, stdin/stdout/stderr, exc_info, exception, maxsize, platform, byteorder, executable, prefix, implementation, builtin_module_names, warnoptions, intern, getrecursionlimit/setrecursionlimit, get/set_int_max_str_digits |
 | _abc | The ABC accelerator abc.py is built on: get_cache_token, _abc_init, _abc_register, _abc_instancecheck, _abc_subclasscheck, _get_dump, _reset_registry, _reset_caches |
 | _weakref | Real weak references: ref (subclassable, with callbacks), proxy, getweakrefcount, getweakrefs, _remove_dead_weakref |
 | asyncio | Event loop with io_uring backend, coroutine runner, TCP streams (open_connection, start_server), sleep, gather |

@@ -1008,6 +1008,84 @@ DEF_FUNC frameobj_getattr, FOG_FRAME
     ret
 END_FUNC frameobj_getattr
 
+;; ============================================================================
+;; frameobj_method_clear(rdi = args, rsi = nargs) -> rax = Value, None
+;;
+;; `frame.clear()` drops what the frame holds so that a reference cycle through
+;; a traceback can be broken.  traceback.clear_frames() calls it on every entry
+;; of a traceback, and unittest's assertRaises calls THAT in its __exit__ --
+;; which is why its absence stopped nearly every test CPython ships.
+;;
+;; A frame still attached to a live PyFrame raises RuntimeError, as CPython's
+;; does for an executing frame.  This is more conservative than CPython, which
+;; allows a SUSPENDED generator's frame to be cleared: telling the two apart
+;; means asking whether the PyFrame is on the interpreter's own chain, and a
+;; detached snapshot -- what a traceback entry always holds by the time anyone
+;; looks at it -- is the case that matters.  Being conservative costs nothing
+;; where it counts, because clear_frames is written as
+;;
+;;     try: tb.tb_frame.clear()
+;;     except RuntimeError: pass
+;;
+;; and CPython raises exactly that for the frames it refuses.
+;;
+;; What a detached frame owns and this releases: f_locals, the snapshot
+;; frameobj_detach copied out of localsplus, and f_trace.  f_back, f_code,
+;; f_globals and f_builtins are NOT released: CPython keeps them, and a
+;; traceback that has been cleared still renders its own lines.
+;; ============================================================================
+FMC_SELF  equ 8
+FMC_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC frameobj_method_clear, FMC_FRAME
+    cmp rsi, 1
+    jne .fmc_arity
+    mov rax, [rdi]
+    mov [rbp - FMC_SELF], rax
+
+    cmp qword [rax + PyFrameObject.f_frame], 0
+    jne .fmc_executing
+
+    mov rdi, [rax + PyFrameObject.f_locals]
+    test rdi, rdi
+    jz .fmc_no_locals
+    ; CPython leaves f_locals an EMPTY DICT, not None: what clear() drops is
+    ; the fast locals, and the mapping over them survives.  Emptying it in
+    ; place releases exactly the references the cycle runs through, and keeps
+    ; the object for anything already holding it -- releasing the dict instead
+    ; made `frame.f_locals` read None afterwards, where CPython reads {}.
+    sub rsp, 16
+    mov [rsp], rdi
+    mov rdi, rsp
+    mov esi, 1
+    extern dict_method_clear
+    call dict_method_clear
+    add rsp, 16
+.fmc_no_locals:
+    mov rax, [rbp - FMC_SELF]
+    mov rdi, [rax + PyFrameObject.f_trace]
+    test rdi, rdi
+    jz .fmc_done
+    mov qword [rax + PyFrameObject.f_trace], 0
+    call obj_decref
+.fmc_done:
+    LOAD_NONE rax
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.fmc_executing:
+    extern exc_RuntimeError_type
+    RAISE exc_RuntimeError_type, "cannot clear an executing frame"
+.fmc_arity:
+    dec rsi                     ; the count CPython reports excludes self
+    CSTRING rdi, "clear() takes no arguments ("
+    CSTRING rdx, " given)"
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+END_FUNC frameobj_method_clear
+
 DEF_FUNC frameobj_repr
     CSTRING rdi, "<frame object>"
     extern str_from_cstr

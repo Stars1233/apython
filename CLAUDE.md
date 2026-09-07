@@ -203,6 +203,10 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   `signal.asm`, `socket.asm`, `sre.asm`, `zlib.asm`.  `table.asm` is the list
   every one of them is registered from -- `import_init` and
   `sys.builtin_module_names` both read it, and they used to disagree
+- `src/pyo/exc_oserror.asm` — what OSError does that no other exception does:
+  the constructor that rewrites its own class from the errno, the four named
+  attributes beside `.args`, the message assembled from them, and CPython's
+  errno-to-subclass table
 - `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func,
   class, iter, singleton, bytes, bytearray, memoryview, code).  `class.asm` is
   the metatype, the instance and attribute access; `instance_alloc.asm` is

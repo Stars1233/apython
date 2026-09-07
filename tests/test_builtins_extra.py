@@ -48,3 +48,13 @@ b.y = 2
 d = vars(b)
 print('x' in d)      # True
 print('y' in d)      # True
+
+# __debug__ is a builtin here rather than a compile-time constant, because
+# there is no -O and nothing strips an assert.  The stdlib reads it by name:
+# CPython's test_exceptions decorates a whole class with
+# @unittest.skipUnless(__debug__, ...), which is a NameError without it.
+print("__debug__:", __debug__, type(__debug__).__name__)
+assert __debug__
+print("assert ran under __debug__")
+import builtins
+print("on builtins:", getattr(builtins, "__debug__", "<missing>"))
