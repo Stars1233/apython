@@ -570,26 +570,18 @@ DEF_FUNC instance_getattr_default, IG_FRAME
 
 .check_type_dict:
 
-    ; Not in inst_dict -- walk the type's MRO, checking each tp_dict.
-    mov rcx, [rbx + PyObject.ob_type]   ; rcx = type (the class)
-    mov [rbp - IG_ORIGIN], rcx
-.walk_mro:
-    mov rdi, [rcx + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jz .try_base
-
-    push rcx                            ; save current type
+    ; Not in inst_dict -- ask the class what it defines for this name.  That
+    ; is an MRO walk with a dict probe per entry, and the answer only changes
+    ; when a class in the MRO is written to, so type_lookup_cached keeps it
+    ; against the type's version.  It walks unchanged on a miss, and for a
+    ; static type, which has no version.
+    mov rdi, [rbx + PyObject.ob_type]
+    mov [rbp - IG_ORIGIN], rdi
     mov rsi, r12
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    pop rcx                             ; restore current type
-    test edx, edx               ; the tag, not the payload: a hit may be int 0
-    jnz .found_type                     ; found in type's dict
-
-.try_base:
-    MRO_NEXT rcx, [rbp - IG_ORIGIN]
-    test rcx, rcx
-    jnz .walk_mro
+    extern type_lookup_cached
+    call type_lookup_cached             ; rax/edx = value, rcx = the owner
+    test edx, edx
+    jnz .found_type
 
     ; Nothing in the MRO.  On the descriptor-first order that leaves the
     ; instance dict still unread.
