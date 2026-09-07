@@ -252,6 +252,10 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   the numeric builtins, the object/iteration/IO builtins, and `str()` with the
   three-argument decode form; `src/builtins_pow.asm` is `pow()` and the
   modular exponentiation GMP does for its three-argument form
+- `src/builtins_type.asm` — `isinstance()` and `issubclass()`, and
+  `obj_declared_class`, the "what does this object say it is" step they share.
+  CPython asks the real type first and `__class__` only when that says no, and
+  so does this
 - `src/buildclass.asm` — `type.__new__`, `type_from_parts`, `__build_class__`
 - `src/slots.asm` — Installs slot wrappers on a heaptype from the dunders it defines
 - `src/mro.asm` — C3 linearization, `type_mro_next`, `type_is_subtype`
@@ -260,6 +264,9 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   `co_exceptiontable`, plus traceback rendering
 - `src/frame.asm` — Frame alloc/dealloc
 - `src/object.asm` — Base PyObject ops (alloc, refcount, dealloc, `obj_richcompare_bool`)
+- `src/objerr.asm` — the arity and receiver error messages, split off when
+  `object.asm` reached the 100k cap.  Each builds its text into a stack
+  buffer and hands it to `raise_exception`; none of them returns
 - `src/runtime.asm` — The freestanding layer: syscalls, allocation, PLT-free
   memory and string ops, and `fatal_error`
 - `src/compiler/` — The Python **source** compiler (see below)

@@ -294,6 +294,7 @@ test_io_prereqs
 test_io
 test_io_subclass
 test_io_tail
+test_isinstance_hostile
 test_iterable_arguments
 test_iterator_cycles
 test_iterator_slots
@@ -499,6 +500,7 @@ test_tuples
 test_type_cache
 test_type_comments
 test_type_constructors
+test_type_delattr
 test_type_dict
 test_type_immutable_and_subclasses
 test_type_layout

@@ -226,6 +226,7 @@ src/
   builtins.asm          Builtin function object, core builtins, the registry
   builtins_num.asm      Numeric builtins (int, abs, round, pow, hex/bin/oct)
   builtins_obj.asm      Object/iteration/IO builtins (getattr, iter, open, ...)
+  builtins_type.asm     isinstance/issubclass, and the declared-class step
   buildclass.asm        type.__new__, type_from_parts, __build_class__
   slots.asm             Slot wrappers installed from a heaptype's dunders
   mro.asm               C3 linearization and MRO walking
@@ -235,6 +236,7 @@ src/
   marshal.asm           .pyc marshal deserializer and file reader
   frame.asm             Frame allocation/deallocation
   object.asm            Base PyObject operations, type_type, rich comparison
+  objerr.asm            The arity and receiver error messages
   runtime.asm           Syscalls, allocation, PLT-free mem/str ops, fatal_error
   gc.asm                3-generation cycle-collecting garbage collector
   import.asm            Module import system

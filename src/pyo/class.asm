@@ -109,10 +109,41 @@ DEF_FUNC type_setattr
     pop rsi
 
 .ts_have_dict:
+    ; A NULL value means DELETE, not "store a NULL".  dict_set was called
+    ; either way, so `del C.attr` left the key in the type's dict bound to a
+    ; NULL Value.  Lookup answered correctly -- `k in C.__dict__` was False and
+    ; `C.__dict__[k]` raised KeyError -- but the entry was still occupied, so
+    ; keys() and items() went on yielding it, and items() handed out the NULL
+    ; Value itself.
+    ;
+    ; That is how a NULL reached ordinary builtins: enum.py deletes five names
+    ; from Enum, doctest walks Enum.__dict__.items(), and inspect called
+    ; type() and isinstance() on the hole.  isinstance() then released an
+    ; uninitialised frame slot, and the decrement landed inside a live code
+    ; object's bytecode -- one byte of a RETURN_VALUE, which the eval loop
+    ; then refused as opcode 82.
+    ;
+    ; instance_setattr already had this fix; type_setattr was missed.
+    test rdx, rdx
+    jz .ts_dict_del
     ; dict_set(dict, name Value, value Value)
     pop rcx
     call dict_set
+    jmp .ts_wrote
 
+.ts_dict_del:
+    ; The alignment push is still on the stack here, so this call is aligned
+    ; where the dict_set above is not; borrow that word to carry the name
+    ; across, since rsi does not survive a call and there is no frame.
+    mov [rsp], rsi
+    extern dict_del_opt
+    call dict_del_opt           ; -1 when it was never there
+    mov rsi, [rsp]
+    pop rcx
+    test eax, eax
+    jnz .ts_del_missing
+
+.ts_wrote:
     ; Assigning a dunder after the class exists has to take effect, the way
     ; `C.__eq__ = f` does in CPython: the slot is installed at class creation
     ; from what the body defined, and nothing re-ran this.  Only a heaptype
@@ -135,6 +166,15 @@ DEF_FUNC type_setattr
     pop rbx
     leave
     ret
+
+.ts_del_missing:
+    ; `del C.nosuch` succeeded silently while dict_set was storing a NULL over
+    ; a key that was never there.  CPython raises, and so does the instance
+    ; path next door.  rsi is the name, restored above.
+    mov rdi, rbx                ; the type -- a pointer is its own Value
+    mov edx, 1                  ; a delete is a set, as far as the wording goes
+    extern raise_no_attribute
+    call raise_no_attribute     ; does not return
 
 .ts_rename:
     ; tp_name points into a PyStrObject's data, and the type owns a reference
