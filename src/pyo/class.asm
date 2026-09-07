@@ -20,6 +20,7 @@ extern dict_get
 extern dict_set
 extern str_from_cstr
 extern str_from_cstr_heap
+extern type_lookup_cached
 extern dunder_name_obj
 extern ap_strcmp
 extern type_repr
@@ -1323,29 +1324,26 @@ DEF_FUNC type_call
     call dunder_name_obj
     mov r15, rax                ; r15 = "__new__" str, BORROWED
 
-    mov rcx, rbx                ; rcx = current type
-.new_mro_walk:
-    ; Stop at object_type (default __new__ = instance_new)
+    ; type_lookup_cached answers exactly what the MRO walk this replaced did --
+    ; the value in the first tp_dict along the MRO that has the name, and the
+    ; type whose dict that was -- from a table keyed on the type's version,
+    ; which type_refresh_attr_flags already bumps down every subclass whenever
+    ; a class dict is written.  Invalidation is therefore free and passive.
+    ;
+    ; It could not have been used before the names became interned: its hit
+    ; test is a POINTER compare on the name, and a freshly built string missed
+    ; every time and churned the entry's owned reference on the way past.
+    mov rdi, rbx
+    mov rsi, r15
+    call type_lookup_cached     ; rax/edx = the value, rcx = the owner
+    test edx, edx
+    jz .new_not_found
+    ; The hand walk stopped AT object_type and the cache walks past it.
+    ; object's own __new__ is instance_new's business, not a definition.
     lea rdi, [rel object_type]
     cmp rcx, rdi
     je .new_not_found
-
-    mov rdi, [rcx + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jz .new_try_base
-
-    push rcx
-    mov rsi, r15
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    pop rcx
-    test edx, edx               ; the tag, not the payload: a hit may be int 0
-    jnz .new_found
-
-.new_try_base:
-    MRO_NEXT rcx, rbx
-    test rcx, rcx
-    jnz .new_mro_walk
+    jmp .new_found
 
 .new_not_found:
     ; An int subclass carries its value inline, so it cannot come from
@@ -1520,25 +1518,13 @@ DEF_FUNC type_call
     call dunder_name_obj
     mov r15, rax                ; r15 = "__init__" str, BORROWED
 
-    ; Walk MRO: check type->tp_dict, then tp_base chain
-    mov rcx, rbx                ; rcx = current type to check
-.init_mro_walk:
-    mov rdi, [rcx + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jz .init_try_base
-
-    push rcx                    ; save current type
+    ; The same cache as for __new__ above; .init_found already reads the owner
+    ; out of rcx, which is where this leaves it.
+    mov rdi, rbx
     mov rsi, r15
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    pop rcx                     ; restore current type
-    test edx, edx               ; the tag, not the payload: a hit may be int 0
+    call type_lookup_cached
+    test edx, edx
     jnz .init_found
-
-.init_try_base:
-    MRO_NEXT rcx, rbx
-    test rcx, rcx
-    jnz .init_mro_walk
 
     ; __init__ not found anywhere
     TC_REFUSE_EXTRA_ARGS 0
