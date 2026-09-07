@@ -858,7 +858,6 @@ def check_handler_alignment(files):
                         "FRAME + 8*pushes == 8 (mod 16) and DEF_FUNC_BARE "
                         "wants 0; pad the odd push"))
     return out
-    return bad
 
 
 def main():
