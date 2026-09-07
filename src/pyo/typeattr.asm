@@ -36,7 +36,7 @@ extern raise_exception
 
 ;; The attributes exposed, in slot order.  Every one of them is a name
 ;; type_getattr answers from the type itself rather than from its dict.
-TYA_COUNT equ 10
+TYA_COUNT equ 11
 
 section .bss
 ;; The interned name for each slot, built once by type_dict_add_attrs.  A
@@ -54,6 +54,7 @@ tya_dict:          db "__dict__", 0
 tya_basicsize:     db "__basicsize__", 0
 tya_dictoffset:    db "__dictoffset__", 0
 tya_weakrefoffset: db "__weakrefoffset__", 0
+tya_flags:         db "__flags__", 0
 
 ;; Parallel to tya_names: the C string for each slot, so the registration is
 ;; one loop rather than ten copies of it.
@@ -61,6 +62,7 @@ align 8
 tya_cstrs:
     dq tya_mro, tya_bases, tya_base, tya_name, tya_qualname
     dq tya_module, tya_dict, tya_basicsize, tya_dictoffset, tya_weakrefoffset
+    dq tya_flags
 
 section .text
 
@@ -88,6 +90,31 @@ DEF_FUNC_LOCAL tya_fetch, TYF_FRAME
     RAISE exc_TypeError_type, "descriptor requires a type object"
 END_FUNC tya_fetch
 
+;; CPython's Py_TPFLAGS_*, for the bits this tree can answer honestly.
+CPY_TPFLAGS_COMPAT            equ 0x00000002
+CPY_TPFLAGS_IMMUTABLETYPE     equ 0x00000100
+CPY_TPFLAGS_HEAPTYPE          equ 0x00000200
+CPY_TPFLAGS_BASETYPE          equ 0x00000400
+CPY_TPFLAGS_READY             equ 0x00001000
+CPY_TPFLAGS_HAVE_GC           equ 0x00004000
+CPY_TPFLAGS_VALID_VERSION_TAG equ 0x00080000
+CPY_TPFLAGS_LONG_SUBCLASS     equ 0x01000000
+CPY_TPFLAGS_LIST_SUBCLASS     equ 0x02000000
+CPY_TPFLAGS_TUPLE_SUBCLASS    equ 0x04000000
+CPY_TPFLAGS_BYTES_SUBCLASS    equ 0x08000000
+CPY_TPFLAGS_UNICODE_SUBCLASS  equ 0x10000000
+CPY_TPFLAGS_DICT_SUBCLASS     equ 0x20000000
+CPY_TPFLAGS_BASE_EXC_SUBCLASS equ 0x40000000
+CPY_TPFLAGS_TYPE_SUBCLASS     equ 0x80000000
+
+;; TGF_BIT ours, theirs -- copy one flag across, ecx holding this type's.
+%macro TGF_BIT 2
+    test ecx, %1
+    jz %%off
+    or eax, %2
+%%off:
+%endmacro
+
 ;; TYA_GET name, slot -- one getter, which is the whole body of a descriptor.
 %macro TYA_GET 2
 DEF_FUNC_BARE %1
@@ -107,12 +134,130 @@ TYA_GET tya_get_basicsize,     7
 TYA_GET tya_get_dictoffset,    8
 TYA_GET tya_get_weakrefoffset, 9
 
+;; ============================================================================
+;; tya_get_flags(rdi = the class) -> rax = its Py_TPFLAGS_* word, as an int
+;;
+;; tp_flags cannot be reported raw: the low 32 bits are this tree's own layout
+;; and the high 32 are the type version.  This translates the bits that mean
+;; the same thing in both.
+;;
+;; It is deliberately NOT the whole of CPython's word, and cannot be.  The
+;; bits left out are the ones this tree does not model -- MANAGED_DICT and
+;; MANAGED_WEAKREF above all, whose absence is a recorded divergence, and
+;; MATCH_SELF, SEQUENCE, MAPPING, HAVE_VECTORCALL and ITEMS_AT_END, which no
+;; flag here stands for.  Reporting them would be a lie; reporting a subset
+;; means code masking one of them reads a confident zero.  Both are wrong and
+;; the subset is the less wrong: BASETYPE, HAVE_GC and the subclass bits are
+;; what anything in Python actually tests, and they are exact.
+;; DIVERGENCES.md carries the list.
+;; ============================================================================
+TGF_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL tya_get_flags, TGF_FRAME
+    V_TEST_PTR rdi, rax
+    ja .tgf_bad
+    mov rax, [rdi + PyObject.ob_type]
+    test rax, rax
+    jz .tgf_bad
+    test dword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .tgf_bad
+    call type_cpython_flags
+    V_PACK_I64 rax, rcx
+    leave
+    ret
+.tgf_bad:
+    RAISE exc_TypeError_type, "descriptor requires a type object"
+END_FUNC tya_get_flags
+
+;; ============================================================================
+;; type_cpython_flags(rdi = a type) -> rax = its Py_TPFLAGS_* word
+;;
+;; Shared with type_getattr, which answers __flags__ ahead of the tp_dict walk
+;; because CPython's is a data descriptor on the metatype.
+;; ============================================================================
+global type_cpython_flags
+DEF_FUNC type_cpython_flags, 8      ; + 1 push = 16, 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov rcx, [rdi + PyTypeObject.tp_flags]
+    ; READY, and the compatibility bit every CPython type carries.  A type
+    ; that can be asked for its flags at all is ready by construction here.
+    mov eax, CPY_TPFLAGS_READY | CPY_TPFLAGS_COMPAT
+
+    test ecx, TYPE_FLAG_HEAPTYPE
+    jz .tcf_static
+    or eax, CPY_TPFLAGS_HEAPTYPE
+    jmp .tcf_after_heap
+.tcf_static:
+    ; A static type is immutable, and CPython stamps VALID_VERSION_TAG on the
+    ; ones it has readied.
+    or eax, CPY_TPFLAGS_IMMUTABLETYPE | CPY_TPFLAGS_VALID_VERSION_TAG
+.tcf_after_heap:
+
+    ; BASETYPE is "can be subclassed", and this tree keeps the NEGATIVE of it:
+    ; TYPE_FLAG_BASETYPE is set on three types by hand, while TYPE_FLAG_FINAL
+    ; is the flag buildclass actually consults to refuse a base.  Translating
+    ; the positive one reported `object` as un-subclassable.
+    test ecx, TYPE_FLAG_FINAL
+    jnz .tcf_no_base
+    or eax, CPY_TPFLAGS_BASETYPE
+.tcf_no_base:
+    test ecx, TYPE_FLAG_HAVE_GC
+    jz .tcf_no_gc
+    or eax, CPY_TPFLAGS_HAVE_GC
+.tcf_no_gc:
+
+    ; The subclass bits, seven of them one flag each.
+    ; Not TYPE_FLAG_INT_SUBCLASS for bool: setting that flag on bool_type
+    ; makes `WIFEXITED(s)` answer 1 rather than True, because the flag is how
+    ; several places ask "is this an int" and a bool then takes the int path
+    ; and loses its boolness.  The MRO answers the same question without
+    ; touching what anything else reads.
+    TGF_BIT TYPE_FLAG_INT_SUBCLASS,       CPY_TPFLAGS_LONG_SUBCLASS
+    TGF_BIT TYPE_FLAG_LIST_SUBCLASS,      CPY_TPFLAGS_LIST_SUBCLASS
+    TGF_BIT TYPE_FLAG_TUPLE_SUBCLASS,     CPY_TPFLAGS_TUPLE_SUBCLASS
+    TGF_BIT TYPE_FLAG_BYTES_SUBCLASS,     CPY_TPFLAGS_BYTES_SUBCLASS
+    TGF_BIT TYPE_FLAG_STR_SUBCLASS,       CPY_TPFLAGS_UNICODE_SUBCLASS
+    TGF_BIT TYPE_FLAG_DICT_SUBCLASS,      CPY_TPFLAGS_DICT_SUBCLASS
+    TGF_BIT TYPE_FLAG_METATYPE,           CPY_TPFLAGS_TYPE_SUBCLASS
+
+    ; Two that want the MRO instead of a flag: BASE_EXC has none at all, and
+    ; bool's LONG deliberately is not set (see above).
+    push rax
+    mov rdi, rbx
+    lea rsi, [rel exc_BaseException_type]
+    extern type_is_subtype
+    extern exc_BaseException_type
+    call type_is_subtype
+    mov edx, eax
+    pop rax
+    test edx, edx
+    jz .tcf_no_exc
+    or eax, CPY_TPFLAGS_BASE_EXC_SUBCLASS
+.tcf_no_exc:
+    test eax, CPY_TPFLAGS_LONG_SUBCLASS
+    jnz .tcf_no_long
+    push rax
+    mov rdi, rbx
+    lea rsi, [rel int_type]
+    extern int_type
+    call type_is_subtype
+    mov edx, eax
+    pop rax
+    test edx, edx
+    jz .tcf_no_long
+    or eax, CPY_TPFLAGS_LONG_SUBCLASS
+.tcf_no_long:
+    pop rbx
+    leave
+    ret
+END_FUNC type_cpython_flags
+
 section .rodata
 align 8
 tya_getters:
     dq tya_get_mro, tya_get_bases, tya_get_base, tya_get_name
     dq tya_get_qualname, tya_get_module, tya_get_dict, tya_get_basicsize
-    dq tya_get_dictoffset, tya_get_weakrefoffset
+    dq tya_get_dictoffset, tya_get_weakrefoffset, tya_get_flags
 section .text
 
 ;; ============================================================================

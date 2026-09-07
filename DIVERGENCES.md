@@ -306,3 +306,32 @@ bytecode that addresses it has broken the code object either way.  They raise
 a TypeError naming all three rather than "unexpected keyword argument", so
 the message says what is missing rather than pretending the field does not
 exist.
+
+## `type.__flags__` reports a subset of CPython's Py_TPFLAGS_*
+
+`tp_flags` cannot be handed back raw -- the low 32 bits are this tree's own
+layout and the high 32 are the type version -- so `__flags__` translates.  The
+translation is faithful for every bit it reports, and it does not report the
+ones this tree has no counterpart for:
+
+  - `MANAGED_DICT` and `MANAGED_WEAKREF`.  The absence of managed dicts is
+    itself recorded above; an instance dict here is an ordinary field, and
+    saying otherwise would be a lie about the layout.
+  - `MATCH_SELF`, `SEQUENCE` and `MAPPING`.  These drive `match` statement
+    shortcuts in CPython's C code; the pattern machinery here reaches the
+    same answers through the protocol rather than through a flag.
+  - `HAVE_VECTORCALL` and `ITEMS_AT_END`, which describe CPython's call and
+    allocation internals.
+  - `DISALLOW_INSTANTIATION`, `METHOD_DESCRIPTOR` and `IS_ABSTRACT`.
+
+`HAVE_GC` is reported and differs on a few builtins: `int`, `str`, `bytes` and
+`float` are collector-tracked here and are not in CPython.  That is a real
+difference in what the collector walks, not a translation gap.
+
+A partial answer is a hazard -- code masking a bit that is not modelled reads
+a confident zero -- and the alternative is not better: refusing to answer at
+all breaks everything that asks about `BASETYPE` or a subclass bit, which is
+what Python-level code actually reads.  `tests/test_type_flags.py` asserts the
+bits that mean the same thing on both sides rather than the whole word, since
+a test comparing values would be asserting this divergence rather than the
+translation.

@@ -521,6 +521,7 @@ test_type_comments
 test_type_constructors
 test_type_delattr
 test_type_dict
+test_type_flags
 test_type_immutable_and_subclasses
 test_type_layout
 test_type_metatype

@@ -1994,6 +1994,16 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     test eax, eax
     jz .tga_return_weakrefoffset
 
+    ; __flags__ is computed rather than read, but it is a data descriptor on
+    ; the metatype in CPython for the same reason as the three above, so it
+    ; has to be answered here too -- otherwise `type.__flags__` finds the
+    ; getset in type's own dict and hands back the descriptor.
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__flags__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_flags
+
     ; Check type->tp_dict, then walk tp_base chain
 .tga_walk:
     mov rdi, [r12 + PyTypeObject.tp_dict]
@@ -2157,6 +2167,13 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+
+.tga_return_flags:
+    mov rdi, r12
+    extern type_cpython_flags
+    call type_cpython_flags
+    mov rdi, rax
+    jmp .tga_return_layout_int
 
 .tga_return_basicsize:
     mov rdi, [r12 + PyTypeObject.tp_basicsize]
