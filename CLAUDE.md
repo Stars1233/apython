@@ -298,6 +298,7 @@ f-strings, async, comprehensions, PEP 695 type parameters.
 | `parse_stmt.asm` | statements, and the soft keywords `match` and `type` |
 | `pattern.asm` | `match` patterns |
 | `fstring.asm` | f-string fields, lexed as spans of the same source |
+| `fstrscan.asm` | where a literal ends, under PEP 701 -- the one definition the lexer and both field scanners share |
 | `symtab.asm` | scopes, local/cell/free classification, name mangling |
 | `codegen.asm` | AST kind → emitter jump table; `_stmt`/`_func`/`_try`/`_comp`/`_match` for the rest.  `_try` also holds `except*`, `with` and `await`: they are one unwinder |
 | `assemble.asm` | EXTENDED_ARG fixpoint, stack depth, exception table, line table |

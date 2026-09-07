@@ -260,6 +260,11 @@ reasoning that chose them and what changing one would cost.
   against `python3`.  Grouping is not among them; these are what was left
   once it was fixed:
 
+  - **An unknown presentation type is not refused.**  `format(42, "Z")` is
+    `'42'` here and `ValueError: Unknown format code 'Z' for object of type
+    'int'` in CPython, for every letter that is not a real code and for
+    punctuation as well.  A wrong spec therefore formats silently rather than
+    raising, which is how it is usually found.
   - **An explicit fill and align, then a `0`.**  `format(-7, "*^-05d")` is
     `'*-7**'` in CPython and `'0-700'` here: the `0` flag overwrites the fill
     character that was already given, where CPython leaves an explicit fill

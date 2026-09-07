@@ -52,8 +52,11 @@ LR_KIND  equ 24          ; its token kind
 LR_FLAGS equ 32          ; its TF_* flags
 LR_STRNL equ 40          ; lines a string literal spanned, not applied yet
 LR_STRLS equ 48          ; where the last of those lines starts
-LR_FRAME equ 56          ; + 5 pushes = 96
-
+LR_SKIP  equ 96          ; an FsSkip, at [rbp-96, rbp-56): the f-string
+                         ; scanner's state, derived rather than hand-picked so
+                         ; that growing the struct cannot land it on the slots
+                         ; above it
+LR_FRAME equ 104         ; + 5 pushes = 144
 section .bss
 ;; Set around .sub_type_comment: was the `#` the first thing on its line?
 lex_tc_own_line: resb 1
@@ -1613,6 +1616,50 @@ DEF_FUNC lex_run, LR_FRAME
 ; A backslash escapes the next byte even in a raw string: r"\" is unterminated
 ; in Python too, because rawness affects the *value*, not where the token ends.
 .sub_string:
+    ; PEP 701 made an f-string's end depend on its whole grammar rather than on
+    ; the next copy of its quote: a replacement field may hold that quote, a
+    ; nested f-string, a comment, a backslash and a newline.
+    ; src/compiler/fstrscan.asm answers that, for this scanner and for the two
+    ; in fstring.asm both.  Anything without an f is still the plain loop
+    ; below, which is what every other literal in the file takes.
+    test qword [rbp - LR_FLAGS], TF_STR_FMT
+    jz .ss_plain
+    mov rax, [rbp - LR_STRNL]
+    mov [rbp - LR_SKIP + FsSkip.nl], rax
+    mov rax, [r14 + Lexer.line_start]
+    mov [rbp - LR_SKIP + FsSkip.lstart], rax
+    mov qword [rbp - LR_SKIP + FsSkip.level], 0
+    mov qword [rbp - LR_SKIP + FsSkip.err], FSE_OK
+    mov rdi, r12
+    mov rsi, r13
+    lea rdx, [rbp - LR_SKIP]
+    mov rcx, [rbp - LR_FLAGS]
+    and ecx, FS_LIT_RAW | FS_LIT_FMT
+    sub rsp, 8                          ; this subroutine is itself one call deep
+    extern fs_skip_literal
+    call fs_skip_literal
+    add rsp, 8
+    test rax, rax
+    jz .ss_plain
+    ; Only on success.  A failure leaves the counters alone because .ss_plain
+    ; is about to count from the opening quote again.
+    mov rcx, [rbp - LR_SKIP + FsSkip.nl]
+    mov [rbp - LR_STRNL], rcx
+    mov rcx, [rbp - LR_SKIP + FsSkip.lstart]
+    mov [rbp - LR_STRLS], rcx
+    mov r12, rax
+    mov eax, 1
+    ret
+
+    ; A failure falls through to the plain scan rather than reporting: an
+    ; f-string that does not parse then ends where it always did, and
+    ; fstring.asm reports it with the message and the position it always had.
+    ; `f'{'` is the case that matters -- CPython calls that
+    ; `f-string: expecting '}'`, which is fstring.asm's answer and not a
+    ; lexer's, and reporting an unterminated literal here instead lost it.
+    ; Acceptance improves; no error message moves.
+
+.ss_plain:
     movzx r10d, byte [r12]              ; the quote character
     mov r11d, 1                         ; quote run length
     lea rax, [r12 + 2]
