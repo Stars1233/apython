@@ -2219,6 +2219,8 @@ DEF_FUNC str_iter_next, 8            ; 1 pushes, so rsp is 16-aligned
 
     mov rbx, rdi                                      ; self (iter)
     mov rax, [rbx + PyStrIterObject.it_seq]            ; str
+    test rax, rax
+    jz .si_done                 ; already dropped, or cleared by the collector
     mov rcx, [rbx + PyStrIterObject.it_index]          ; index
 
     ; Check bounds (byte index vs ob_size)
@@ -2248,6 +2250,13 @@ DEF_FUNC str_iter_next, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 
 .si_exhausted:
+    ; Drop the str at exhaustion, as CPython's striter does.  Clear before
+    ; releasing -- list_iter_next carries the reason in full.  str_iter_dealloc
+    ; still decrefs it_seq afterwards, which is fine: obj_decref is NULL-safe.
+    mov rdi, [rbx + PyStrIterObject.it_seq]
+    mov qword [rbx + PyStrIterObject.it_seq], 0
+    call obj_decref
+.si_done:
     RET_NULL
     pop rbx
     leave

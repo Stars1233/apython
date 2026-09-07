@@ -1791,14 +1791,24 @@ END_FUNC bytearray_tp_iter
 
 DEF_FUNC_BARE bytearray_iter_next
     mov rax, [rdi + PyBytesIterObject.it_seq]
+    test rax, rax
+    jz .exhausted               ; already dropped, or cleared by the collector
     mov rcx, [rdi + PyBytesIterObject.it_index]
     cmp rcx, [rax + PyByteArrayObject.ob_size]
-    jge .exhausted
+    jge .exhausted_mark
     mov rax, [rax + PyByteArrayObject.ob_bytes]
     movzx eax, byte [rax + rcx]
     add rax, [rel v_int_bias]
     inc qword [rdi + PyBytesIterObject.it_index]
     ret
+.exhausted_mark:
+    ; Drop the bytearray at exhaustion, as bytes_iter_next does.
+    mov rax, [rdi + PyBytesIterObject.it_seq]
+    mov qword [rdi + PyBytesIterObject.it_seq], 0
+    push rdi
+    mov rdi, rax
+    call obj_decref
+    pop rdi
 .exhausted:
     xor eax, eax
     ret

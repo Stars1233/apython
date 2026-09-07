@@ -210,10 +210,12 @@ END_FUNC tuple_iter_new
 ;; ============================================================================
 DEF_FUNC_BARE tuple_iter_next
     mov rax, [rdi + PyTupleIterObject.it_seq]
+    test rax, rax
+    jz .exhausted               ; already dropped, or cleared by the collector
     mov rcx, [rdi + PyTupleIterObject.it_index]
 
     cmp rcx, [rax + PyTupleObject.ob_size]
-    jge .exhausted
+    jge .exhausted_mark
 
     ; Get item
     mov rax, [rax + PyTupleObject.ob_item]
@@ -223,6 +225,17 @@ DEF_FUNC_BARE tuple_iter_next
     inc qword [rdi + PyTupleIterObject.it_index]
     ret
 
+.exhausted_mark:
+    ; Drop the tuple at exhaustion, the way list_iter_next does and the way
+    ; CPython's tupleiter_next does -- it is what lets a __del__ on the last
+    ; reference run while the iterator can still answer "exhausted".  Clear
+    ; before releasing, for the reason list_iter_next carries in full.
+    mov rax, [rdi + PyTupleIterObject.it_seq]
+    mov qword [rdi + PyTupleIterObject.it_seq], 0
+    push rdi
+    mov rdi, rax
+    call obj_decref
+    pop rdi
 .exhausted:
     RET_NULL
     ret

@@ -49,12 +49,11 @@ def check(name, make):
     print(name, "->", box.get("saw"))
 
 
-# tuple, dict, set, str and bytes are NOT here yet: their iterators hold the
-# sequence until the iterator itself dies rather than dropping it at
-# exhaustion, so __del__ runs too late to observe anything.  That is the next
-# commit; this file grows to cover them there.
 print("--- exhaustion frees the sequence ---")
 check("list", list)
+check("tuple", tuple)
+check("dict", dict)
+check("set", set)
 
 
 print("--- a non-empty container, exhausted by a full walk ---")
@@ -87,6 +86,9 @@ def check_full(name, factory, items):
 
 
 check_full("list", list, [1, 2, 3])
+check_full("tuple", tuple, (1, 2, 3))
+check_full("set", set, {1, 2, 3})
+check_full("dict", dict, {"a": 1, "b": 2})
 
 
 print("--- str and bytes iterators ---")
