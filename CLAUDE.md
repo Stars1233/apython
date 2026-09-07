@@ -248,8 +248,10 @@ No hand-written file exceeds 100k bytes; only generated asm may.
 - `src/repr.asm` — the container reprs and the recursion stack they share
 - `src/gc.asm` — the generational collector.  Each type's `tp_traverse` and
   `tp_clear` live with the type, in `src/pyo/*.asm`
-- `src/sre.asm` / `src/modules/sre.asm` — the regex engine and its module
-  wrapper; the pattern and match objects live in `src/pyo/`
+- `src/sre.asm` / `src/sre_char.asm` / `src/modules/sre.asm` — the regex
+  engine, its character layer (code-point fetch, the categories, character
+  sets, the position assertions and case folding) and its module wrapper;
+  the pattern and match objects live in `src/pyo/`
 - `src/valtest.asm` — `--selftest-value`
 - `src/builtins.asm` — `PyBuiltinObject`, the core builtins, and `builtins_init`
 - `src/builtins_num.asm` / `src/builtins_obj.asm` / `src/builtins_str.asm` —

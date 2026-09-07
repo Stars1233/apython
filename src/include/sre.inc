@@ -197,6 +197,9 @@ struc SRE_State
     ; A qword rather than a dword because the zero loop clears
     ; SRE_State_size/8 qwords, and an odd tail would go unzeroed.
     .owns_cpbuf:    resq 1  ; +152: 1 = this state must free codepoint_buf
+    .cpcache:       resq 1  ; +160: the SRE_CpCache this state BORROWED from,
+                            ;       or 0.  sre_state_fini releases the borrow
+                            ;       so the cache knows when it may evict.
 endstruc
 
 ; ============================================================================
@@ -218,6 +221,13 @@ struc SRE_CpCache
     ; different string every other call, and a borrowed pointer there would
     ; let a freed str's reused address pass for a hit.
     .subject: resq 1  ; +16: PyStrObject*, owned, or 0
+    ; How many live SRE_States are reading .buf.  Evicting is a free, and a
+    ; scan that is still running holds a BORROWED pointer into it: sub, subn,
+    ; split and findall all run user code between matches, so a nested regex
+    ; on a different subject could pull the buffer out from under the outer
+    ; one.  Eviction waits for this to reach zero and decodes privately
+    ; meanwhile.
+    .borrows: resq 1  ; +24
 endstruc
 
 ; Recursion depth limit (matches CPython's default)
@@ -254,14 +264,31 @@ struc SRE_ScannerObject
     ; the buffer can neither outlive its subject nor go stale.
     .cp_buf:       resq 1 ; +56  SRE_CpCache.buf
     .cp_len:       resq 1 ; +64  SRE_CpCache.len
-    .cp_subject:   resq 1 ; +72  SRE_CpCache.subject -- these three ARE an
+    .cp_subject:   resq 1 ; +72  SRE_CpCache.subject
+    .cp_borrows:   resq 1 ; +80  SRE_CpCache.borrows -- these four ARE an
                           ;      SRE_CpCache, laid out inline, and
                           ;      sre_state_init is handed a pointer to the
                           ;      first.  Growing that struct means growing
-                          ;      this, and the three must stay adjacent.
+                          ;      this, and the four must stay adjacent.
 endstruc
 
 ; Initial marks array size (number of i64 slots)
 SRE_MARKS_INITIAL equ 64
 
 %endif ; SRE_INC
+
+;; SRE_SUBJECT_LEN reg -- rax = the subject's length in the unit the engine
+;; indexes: bytes for an ASCII subject, code points for a decoded one.  This
+;; was written out seven times; it is a macro rather than a function because
+;; every site holds live values in r8/r9 that a call would put at risk.
+%macro SRE_SUBJECT_LEN 1        ; %1 = the register holding SRE_State*
+    mov rax, [%1 + SRE_State.codepoint_buf]
+    test rax, rax
+    jnz %%uni
+    mov rax, [%1 + SRE_State.str_end]
+    sub rax, [%1 + SRE_State.str_begin]
+    jmp %%done
+%%uni:
+    mov rax, [%1 + SRE_State.codepoint_len]
+%%done:
+%endmacro
