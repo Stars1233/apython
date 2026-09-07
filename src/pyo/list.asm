@@ -263,20 +263,19 @@ DEF_FUNC list_setitem
     cmp rsi, 0
     jl .index_error
 
-    ; DECREF old value
+    ; Install the new value BEFORE releasing the old one.
+    ;
+    ; Releasing first was wrong twice over.  A __del__ reached from the release
+    ; saw the slot still holding the object being destroyed, where CPython's
+    ; list_ass_item -- which stores first -- shows it the replacement.  And the
+    ; same __del__ may append to the list or clear it, which reallocates
+    ; ob_item: the address computed above was then written through after the
+    ; block it pointed into had been freed.
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdi, [rax + rsi * 8]      ; old Value
-    push rax
-    push rdx
-    push rsi
-    DECREF_V rdi, rcx
-    pop rsi
-    pop rdx
-    pop rax
-
-    ; Store new value and INCREF
+    mov rdi, [rax + rsi * 8]      ; the old occupant
     INCREF_V r12, r13
     mov [rax + rsi * 8], r12
+    DECREF_V rdi, rcx             ; nothing below reads rax or rsi
 
     pop r13
     pop r12

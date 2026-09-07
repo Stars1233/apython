@@ -472,6 +472,7 @@ test_subclasses
 test_subclass_first
 test_subclass_item_slots
 test_subprocess_child
+test_subscr_spec
 test_sum_compensated
 test_sum_int_fast
 test_sum_protocol

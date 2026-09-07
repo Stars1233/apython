@@ -112,6 +112,9 @@ extern op_call_intrinsic_2
 extern op_load_super_attr
 extern op_import_name
 extern op_import_from
+extern op_binary_subscr_list_int
+extern op_binary_subscr_tuple_int
+extern op_store_subscr_list_int
 extern op_binary_op_add_int
 extern op_binary_op_sub_int
 extern op_compare_op_int
@@ -1375,9 +1378,9 @@ opcode_table:
     dq op_binary_op_pow_int  ; 232 = BINARY_OP_POWER_INT (specialized)
     dq op_binary_op_truediv_int ; 233 = BINARY_OP_TRUEDIV_INT (specialized)
     dq op_binary_op_inplace_add_unicode ; 234 = BINARY_OP_INPLACE_ADD_UNICODE
-    dq op_unimplemented      ; 235
-    dq op_unimplemented      ; 236
-    dq op_unimplemented      ; 237
+    dq op_binary_subscr_list_int ; 235
+    dq op_binary_subscr_tuple_int ; 236
+    dq op_store_subscr_list_int ; 237
     dq op_unimplemented      ; 238
     dq op_unimplemented      ; 239
     dq op_unimplemented      ; 240
@@ -1589,6 +1592,9 @@ opn_BINARY_OP_ADD_INT: db "BINARY_OP_ADD_INT", 0
 opn_BINARY_OP_SUBTRACT_INT: db "BINARY_OP_SUBTRACT_INT", 0
 opn_FOR_ITER_LIST: db "FOR_ITER_LIST", 0
 opn_FOR_ITER_RANGE: db "FOR_ITER_RANGE", 0
+opn_BINARY_SUBSCR_LIST_INT: db "BINARY_SUBSCR_LIST_INT", 0
+opn_BINARY_SUBSCR_TUPLE_INT: db "BINARY_SUBSCR_TUPLE_INT", 0
+opn_STORE_SUBSCR_LIST_INT: db "STORE_SUBSCR_LIST_INT", 0
 
 ;; ============================================================================
 ;; Opcode name lookup table (256 entries, in .data for relocations)
@@ -1832,9 +1838,9 @@ opcode_names:
     dq opn_unknown                    ; 232
     dq opn_unknown                    ; 233
     dq opn_unknown                    ; 234
-    dq opn_unknown                    ; 235
-    dq opn_unknown                    ; 236
-    dq opn_unknown                    ; 237
+    dq opn_BINARY_SUBSCR_LIST_INT    ; 235
+    dq opn_BINARY_SUBSCR_TUPLE_INT   ; 236
+    dq opn_STORE_SUBSCR_LIST_INT     ; 237
     dq opn_unknown                    ; 238
     dq opn_unknown                    ; 239
     dq opn_unknown                    ; 240

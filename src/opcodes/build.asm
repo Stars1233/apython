@@ -36,6 +36,8 @@ extern dict_get
 extern range_iter_type
 extern list_iter_type
 extern dict_type
+extern list_type
+extern tuple_type
 extern eval_saved_rbx
 extern obj_dealloc
 extern opcode_table
@@ -120,6 +122,31 @@ CN_SIZE  equ 40
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
 DEF_FUNC_BARE op_binary_subscr
+    ; Specialize, then run generically this time.  A list or a tuple indexed
+    ; by an int immediate is the overwhelming majority of subscripts, and both
+    ; can be read inline; everything else keeps the protocol below.
+    ;
+    ; The check reads the two operands without touching r13, so a site that
+    ; does not qualify has paid four instructions and nothing else.
+    mov r8, [r13 - 8]           ; the key Value
+    V_IS_INT r8, r9
+    jb .bs_no_spec
+    mov r8, [r13 - 16]          ; the container Value
+    V_TEST_PTR r8, r9
+    ja .bs_no_spec
+    mov r8, [r8 + PyObject.ob_type]
+    lea r9, [rel list_type]
+    cmp r8, r9
+    je .bs_spec_list
+    lea r9, [rel tuple_type]
+    cmp r8, r9
+    jne .bs_no_spec
+    mov byte [rbx - 2], OP_BINARY_SUBSCR_TUPLE_INT
+    jmp .bs_no_spec
+.bs_spec_list:
+    mov byte [rbx - 2], OP_BINARY_SUBSCR_LIST_INT
+.bs_no_spec:
+
     VPOP_VAL rsi, r8            ; rsi = key, r8 = key tag
     VPOP_VAL rdi, r9            ; rdi = obj, r9 = obj tag
 
@@ -335,6 +362,23 @@ END_FUNC op_binary_subscr
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
 DEF_FUNC_BARE op_store_subscr
+    ; Specialize, then run generically this time -- as op_binary_subscr does,
+    ; and for the same operand shape.  Only list is worth it: dict's
+    ; mp_ass_subscript is already a two-instruction trampoline into dict_set,
+    ; where list's goes through list_ass_subscript and then list_setitem, each
+    ; with a prologue of its own.
+    mov r8, [r13 - 8]           ; the key Value
+    V_IS_INT r8, r9
+    jb .ss_no_spec
+    mov r8, [r13 - 16]          ; the container Value
+    V_TEST_PTR r8, r9
+    ja .ss_no_spec
+    lea r9, [rel list_type]
+    cmp [r8 + PyObject.ob_type], r9
+    jne .ss_no_spec
+    mov byte [rbx - 2], OP_STORE_SUBSCR_LIST_INT
+.ss_no_spec:
+
     VPOP_VAL rsi, r8            ; key + tag
     VPOP_VAL rdi, r9            ; obj + tag
     VPOP_VAL rdx, r10           ; value + tag

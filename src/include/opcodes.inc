@@ -158,6 +158,21 @@ CMP_NE equ 3
 CMP_GT equ 4
 CMP_GE equ 5
 
+; apython's own specialized opcodes.
+;
+; The interpreter rewrites a generic opcode into one of these on first
+; execution, once it has seen what the site's operands actually are.  They
+; occupy numbers CPython 3.12 leaves unused, they never reach a .pyc -- marshal
+; has no writer -- and op_meta's rows for them stay all-zero, so a specialized
+; opcode must occupy EXACTLY as many bytes as the generic one it replaced.
+;
+; The specialized opcodes that predate this block are still written as bare
+; literals at their handlers; these are named because five new numbers spread
+; across three files is how a wrong one gets introduced.
+OP_BINARY_SUBSCR_LIST_INT    equ 235
+OP_BINARY_SUBSCR_TUPLE_INT   equ 236
+OP_STORE_SUBSCR_LIST_INT     equ 237
+
 ; MAKE_FUNCTION flags
 MAKE_FUNC_DEFAULTS  equ 0x01
 MAKE_FUNC_KWDEFAULTS equ 0x02

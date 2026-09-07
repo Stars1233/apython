@@ -5,8 +5,11 @@
 ; a guard failure writes the generic opcode byte back and enters the generic
 ; handler.
 ;
-;   213  FOR_ITER_LIST      a for-loop over a list
-;   214  FOR_ITER_RANGE     a for-loop over a range
+;   213  FOR_ITER_LIST              a for-loop over a list
+;   214  FOR_ITER_RANGE             a for-loop over a range
+;   235  BINARY_SUBSCR_LIST_INT     lst[i]
+;   236  BINARY_SUBSCR_TUPLE_INT    tup[i]
+;   237  STORE_SUBSCR_LIST_INT      lst[i] = v
 ;
 ; Split out of build.asm, which keeps the generic handlers and the error
 ; messages, because that file had 3.5k left under lint's 100k cap for a
@@ -34,7 +37,11 @@ extern obj_dealloc
 extern obj_decref
 extern list_iter_type
 extern range_iter_type
+extern list_type
+extern tuple_type
 extern op_for_iter
+extern op_binary_subscr
+extern op_store_subscr
 
 section .text
 
@@ -183,3 +190,137 @@ DEF_FUNC_BARE op_for_iter_list
     mov byte [rbx - 2], 93
     jmp op_for_iter
 END_FUNC op_for_iter_list
+
+
+;; ============================================================================
+;; The subscript specializations
+;;
+;; A list and a tuple have ob_size at +16 and ob_item at +32 alike, so one
+;; body serves both and the two handlers differ only in the type they compare
+;; against.  BSUB_INT_BODY generates them.
+;;
+;; What they replace is not one call but two: op_binary_subscr reaches
+;; list_subscript through tp_as_mapping->mp_subscript, and list_subscript
+;; calls list_getitem, each with a full prologue, either side of four machine
+;; pushes and a V_PACK/V_UNPACK round trip on the key.  A guarded inline read
+;; is about a dozen instructions and no call at all.
+;;
+;; BINARY_SUBSCR and STORE_SUBSCR carry no oparg -- op_meta gives neither
+;; OM_HASARG -- so neither can ever be preceded by an EXTENDED_ARG, and the
+;; cheap deopt is available: write the generic opcode byte back, rewind rbx by
+;; the two bytes DISPATCH advanced it, and re-dispatch.  Nothing is popped
+;; before a deopt can be taken, so there is nothing to put back.
+;;
+;; An index out of range deopts rather than raising here.  The generic handler
+;; owns the IndexError and its wording, and a site that goes out of range is a
+;; site that is about to raise anyway.
+;; ============================================================================
+
+%macro BSUB_INT_BODY 2          ; %1 = handler name, %2 = type symbol
+DEF_FUNC_BARE %1
+    mov rax, [r13 - 8]              ; the key Value
+    V_IS_INT rax, rdx
+    jb %%deopt
+    mov rdi, [r13 - 16]             ; the container Value
+    V_TEST_PTR rdi, rdx
+    ja %%deopt
+    lea rdx, [rel %2]
+    cmp [rdi + PyObject.ob_type], rdx
+    jne %%deopt
+
+    V_TO_I64 rax                    ; rax = the index, as a plain int64
+    mov rdx, [rdi + PyListObject.ob_size]
+    test rax, rax
+    jns %%nonneg
+    add rax, rdx                    ; a negative index counts from the end
+%%nonneg:
+    cmp rax, rdx
+    jae %%deopt                     ; unsigned, so it catches a still-negative
+                                    ; index as well as one past the end
+
+    mov rdx, [rdi + PyListObject.ob_item]
+    mov rax, [rdx + rax*8]          ; the item, already a Value
+    INCREF_V rax, rdx
+
+    ; The container's own reference goes away with its stack slot.  The item
+    ; is INCREFd above the drop, so it survives even when the container was
+    ; the last thing holding it -- `f()[0]` is exactly that shape.  It has to
+    ; sit in a callee-saved register meanwhile: DECREF_V calls obj_dealloc
+    ; when the count reaches zero, and that clobbers every caller-saved one.
+    mov r15, rax
+    DECREF_V rdi, rdx
+    VREPLACE2 r15
+
+    add rbx, 2                      ; skip 1 CACHE entry
+    DISPATCH
+
+%%deopt:
+    mov byte [rbx - 2], OP_BINARY_SUBSCR
+    sub rbx, 2
+    DISPATCH
+END_FUNC %1
+%endmacro
+
+;; ============================================================================
+;; op_binary_subscr_list_int (235) -> nothing; replaces the pair with the item
+;; ============================================================================
+BSUB_INT_BODY op_binary_subscr_list_int, list_type
+
+;; ============================================================================
+;; op_binary_subscr_tuple_int (236) -> nothing; replaces the pair with the item
+;; ============================================================================
+BSUB_INT_BODY op_binary_subscr_tuple_int, tuple_type
+
+;; ============================================================================
+;; op_store_subscr_list_int (237) -> nothing; stores and pops all three
+;;
+;; Stack on entry, top last:  value, container, key.
+;;
+;; The new value is not INCREFd: the stack was holding a reference to it and
+;; the list takes that one over.  The old occupant is released afterwards, and
+;; the store happens BEFORE the release, because a __del__ reached from it can
+;; run arbitrary code -- including code that reallocates ob_item, which would
+;; leave the address computed here pointing into a freed block.
+;; ============================================================================
+DEF_FUNC_BARE op_store_subscr_list_int
+    mov rax, [r13 - 8]              ; the key Value
+    V_IS_INT rax, rdx
+    jb .ssl_deopt
+    mov rdi, [r13 - 16]             ; the container Value
+    V_TEST_PTR rdi, rdx
+    ja .ssl_deopt
+    lea rdx, [rel list_type]
+    cmp [rdi + PyObject.ob_type], rdx
+    jne .ssl_deopt
+
+    V_TO_I64 rax
+    mov rdx, [rdi + PyListObject.ob_size]
+    test rax, rax
+    jns .ssl_nonneg
+    add rax, rdx
+.ssl_nonneg:
+    cmp rax, rdx
+    jae .ssl_deopt
+
+    mov rdx, [rdi + PyListObject.ob_item]
+    lea rcx, [rdx + rax*8]          ; the slot
+    mov rsi, [r13 - 24]             ; the new value, owned by the stack
+    mov rax, [rcx]                  ; the old occupant, owned by the list
+    mov [rcx], rsi                  ; the list takes the stack's reference
+
+    sub r13, 24                     ; all three operands are consumed
+
+    ; Both drops can call obj_dealloc, so the container is parked in a
+    ; callee-saved register across the first of them.
+    mov r15, rdi
+    DECREF_V rax, rdx               ; the value that was there
+    DECREF_V r15, rdx               ; the container's stack reference
+
+    add rbx, 2                      ; skip 1 CACHE entry
+    DISPATCH
+
+.ssl_deopt:
+    mov byte [rbx - 2], OP_STORE_SUBSCR
+    sub rbx, 2
+    DISPATCH
+END_FUNC op_store_subscr_list_int
