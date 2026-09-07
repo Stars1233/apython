@@ -210,7 +210,8 @@ IS_IDX      equ 40      ; loop index
 IS_LIMIT    equ 48      ; capacity or count
 IS_ITEMS    equ 56      ; items payload ptr (__all__ path)
 IS_ITEM_TAGS equ 64     ; items tag ptr (__all__ path)
-IS_FRAME    equ 64      ; sub rsp, 64 (after push rbp + push rbx = 72 total)
+IS_SQITEM   equ 72      ; sq_item for an __all__ that is neither list nor tuple
+IS_FRAME    equ 80      ; sub rsp, 80 (after push rbp + push rbx = 96 total)
 extern dict_get
 extern dict_set
 extern str_from_cstr_heap
@@ -260,23 +261,55 @@ extern obj_decref
     test edx, edx                     ; TAG_NULL = not found?
     jz .is_no_all
 
-    ;; --- __all__ found: rax = list/tuple ptr ---
-    ; Determine items array and count
+    ;; --- __all__ found ---
+    ; It was assumed to be a list or a tuple.  A set has no ob_item, so
+    ; `__all__ = {"a"}` read a tuple's field off a set header and segfaulted.
+    ; CPython indexes __all__ with PySequence_GetItem, which is the sq_item
+    ; slot -- so a str works (a sequence of one-character names, and it really
+    ; does bind them) and a set, a dict or an int is
+    ; "'X' object does not support indexing".
     mov rbx, rax                      ; rbx = __all__ object
-    mov rcx, [rbx + PyVarObject.ob_size]  ; count (same offset for list/tuple)
-    mov [rbp - IS_LIMIT], rcx
+    mov qword [rbp - IS_SQITEM], 0
+    ; The tag, not V_TEST_PTR: dict_get's result was already V_UNPACKed, so
+    ; rax is a raw payload and `__all__ = 5` would look like a pointer to
+    ; address 5.
+    cmp edx, TAG_PTR
+    jne .is_all_not_seq
 
-    ; Check if list or tuple
     extern list_type
     mov rax, [rbx + PyObject.ob_type]
     lea rdx, [rel list_type]
     cmp rax, rdx
-    jne .is_all_tuple
-    ; List: items = payload/tag arrays
+    je .is_all_list
+    lea rdx, [rel tuple_type]
+    cmp rax, rdx
+    je .is_all_tuple
+
+    ; Neither: go through the sequence protocol, as CPython does.
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .is_all_not_seq_ptr
+    mov rdx, [rax + PySequenceMethods.sq_item]
+    test rdx, rdx
+    jz .is_all_not_seq_ptr
+    mov [rbp - IS_SQITEM], rdx
+    mov rax, [rax + PySequenceMethods.sq_length]
+    test rax, rax
+    jz .is_all_not_seq_ptr
+    mov rdi, rbx
+    call rax
+    mov [rbp - IS_LIMIT], rax
+    mov qword [rbp - IS_IDX], 0
+    jmp .is_all_loop
+
+.is_all_list:
+    mov rcx, [rbx + PyVarObject.ob_size]
+    mov [rbp - IS_LIMIT], rcx
     mov rax, [rbx + PyListObject.ob_item]
     jmp .is_all_have_items
 .is_all_tuple:
-    ; Tuple: items = payload/tag arrays
+    mov rcx, [rbx + PyVarObject.ob_size]
+    mov [rbp - IS_LIMIT], rcx
     mov rax, [rbx + PyTupleObject.ob_item]
 .is_all_have_items:
     mov [rbp - IS_ITEMS], rax         ; save payloads ptr
@@ -288,27 +321,25 @@ extern obj_decref
     cmp rcx, [rbp - IS_LIMIT]
     jge .is_done
 
-    ; Get name from items[idx]
-    mov rax, [rbp - IS_ITEMS]
-    mov rdx, [rbp - IS_ITEM_TAGS]
-    mov rsi, [rax + rcx * 8]          ; name payload
+    call .is_all_name                 ; rsi = the name at IS_IDX
 
     ; Look up name in mod_dict
     mov rdi, [rbp - IS_MODDICT]
-    ; rsi = key payload, rdx = key_tag (already set)
+    xor edx, edx
     call dict_get                     ; → (rax=value, rdx=value_tag) or (0, 0)
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
-    jz .is_all_next                   ; name not in module dict → skip
+    jz .is_all_absent                 ; the module does not define it
 
     ; dict_set(locals, key=name, value, value_tag, key_tag)
-    ; Reload name from items array (caller-saved regs clobbered by dict_get)
+    ; Reload the name: dict_get clobbers the caller-saved registers.
     mov r9, rax                       ; save value payload
     mov r10, rdx                      ; save value tag
-    mov rcx, [rbp - IS_IDX]
-    mov rax, [rbp - IS_ITEMS]
-    mov rdx, [rbp - IS_ITEM_TAGS]
-    mov rsi, [rax + rcx * 8]          ; name payload
+    push r9
+    push r10
+    call .is_all_name
+    pop r10
+    pop r9
     mov rdi, [rbp - IS_LOCALS]
     mov rdx, r9                       ; value payload
     mov rcx, r10                      ; value tag
@@ -318,6 +349,64 @@ extern obj_decref
 .is_all_next:
     inc qword [rbp - IS_IDX]
     jmp .is_all_loop
+
+    ;; .is_all_name -> rsi = the __all__ entry at IS_IDX, borrowed.
+    ;; Two shapes: a list or tuple is read straight out of ob_item, and
+    ;; anything else goes through the sq_item this type supplied.
+.is_all_name:
+    sub rsp, 8
+    mov rax, [rbp - IS_SQITEM]
+    test rax, rax
+    jnz .ian_slot
+    mov rcx, [rbp - IS_IDX]
+    mov rax, [rbp - IS_ITEMS]
+    mov rsi, [rax + rcx * 8]
+    add rsp, 8
+    ret
+.ian_slot:
+    mov rdi, rbx                      ; the __all__ object
+    mov rsi, [rbp - IS_IDX]
+    call rax
+    V_UNPACK rax, rdx
+    mov rsi, rax                      ; an owned one-character str; the locals
+                                      ; dict takes its own reference, and the
+                                      ; leak is bounded by len(__all__)
+    add rsp, 8
+    ret
+
+.is_all_absent:
+    ; CPython raises AttributeError here rather than binding what it found and
+    ; skipping the rest.  That silence is how lib/copyreg.py came to promise
+    ; three functions in __all__ while defining none of them.
+    ;
+    ; Raising from this hand-rolled frame is safe: eval_exception_unwind
+    ; reloads rbx, r12, r13 and rsp from the eval_saved_* globals, and
+    ; op_import_from already raises from the same subsystem the same way.
+    call .is_all_name
+    mov rdi, [rbp - IS_MOD]
+    mov [rel eval_saved_r13], r13
+    xor edx, edx                      ; a get, not a set
+    extern raise_no_attribute
+    call raise_no_attribute
+    ud2
+
+.is_all_not_seq_ptr:
+    ; Reached once rbx is known to be a real pointer, which is its own Value.
+    ; The tag register has been reused for the type walk by this point, so
+    ; these paths must not go through the V_PACK below.
+    mov rsi, rbx
+    jmp .is_all_not_seq_raise
+.is_all_not_seq:
+    ; raise_type_error_with_name takes a Value; rbx and edx are the unpacked
+    ; pair dict_get handed back.
+    mov rsi, rbx
+    mov ecx, edx
+    V_PACK rsi, rcx
+.is_all_not_seq_raise:
+    mov [rel eval_saved_r13], r13
+    CSTRING rdi, `'\x01' object does not support indexing`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
     ;; --- No __all__: walk dict entries, skip _-prefixed names ---
 .is_no_all:
