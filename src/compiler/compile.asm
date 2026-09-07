@@ -951,6 +951,13 @@ DEF_FUNC compile_source, CS_FRAME
     xor ecx, ecx
     call cg_emit
     or byte [rax + Instr.flags], IF_LINE0
+    ; CPython's module RESUME is (0, 1, 0, 0): line zero, ending at line one,
+    ; with an empty column span at the start of the file.  cg_emit attaches no
+    ; columns to it because the line it is emitted for is zero and .curline is
+    ; not, so they are written here.
+    mov dword [rax + Instr.end_line], 1
+    mov dword [rax + Instr.col], 0
+    mov dword [rax + Instr.end_col], 0
 
     cmp qword [rbp - CS_MODE], CMODE_EVAL
     je .gen_eval
@@ -1101,9 +1108,26 @@ DEF_FUNC cs_return_none, 8
     mov rdx, rax
     mov rdi, rbx
     mov esi, OP_RETURN_CONST
-    xor ecx, ecx
+    ; CPython gives the implicit return the line of the last statement, not
+    ; "no location": `compile("x = 1\ny = 2\n")` ends its line table with a
+    ; run for line 2, where this produced a trailing run with none at all.
+    mov ecx, [rbx + CompUnit.lastline]
+    ; ...and the columns with it, which means positioning the unit there so
+    ; cg_emit's own column logic applies.  CPython gives the implicit return
+    ; the last statement's extent, not "no location".
+    mov [rbx + CompUnit.curline], ecx
+    mov edx, [rbx + CompUnit.lastend]
+    mov [rbx + CompUnit.curend], edx
+    mov edx, [rbx + CompUnit.lastcol]
+    mov [rbx + CompUnit.curcol], edx
+    mov edx, [rbx + CompUnit.lastendcol]
+    mov [rbx + CompUnit.curendcol], edx
+    mov rdx, rax                ; the const index, saved above
     call cg_emit
+    cmp dword [rax + Instr.line], 0     ; cg_emit clobbered rcx
+    jnz .crn_have_line
     or byte [rax + Instr.flags], IF_NOLINE
+.crn_have_line:
     pop rbx
     leave
     ret

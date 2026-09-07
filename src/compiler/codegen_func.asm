@@ -1196,12 +1196,29 @@ DEF_FUNC cg_compile_body, CB_FRAME
     or byte [rax + Instr.flags], IF_NOLINE
 .not_generator:
 
+    ; CPython gives a function's RESUME the line of its `def`, so co_lines()
+    ; opens with a run for that line; this said "no location" and the run was
+    ; missing entirely.  A tracer seeds itself from the frame's line at the
+    ; 'call' event, so the absence showed up there first.
     mov rdi, r12
     mov esi, OP_RESUME
     xor edx, edx
-    xor ecx, ecx
+    mov ecx, [r12 + CompUnit.curline]
     call cg_emit
+    ; cg_emit clobbers rcx, so the line is re-read rather than remembered.
+    mov ecx, [rax + Instr.line]
+    test ecx, ecx
+    jnz .resume_has_line
     or byte [rax + Instr.flags], IF_NOLINE
+    jmp .resume_done
+.resume_has_line:
+    ; CPython's is (defline, defline, 0, 0): an empty span at the start of the
+    ; line, the same shape the module RESUME gets.  cg_emit attaches nothing
+    ; because the columns it would copy belong to the `def`'s own node.
+    mov [rax + Instr.end_line], ecx
+    mov dword [rax + Instr.col], 0
+    mov dword [rax + Instr.end_col], 0
+.resume_done:
 
     ; A function reserves co_consts[0] for its docstring, or None when it has
     ; none.  CPython's compiler does, and func_doc reads that slot -- so a
@@ -1460,9 +1477,23 @@ DEF_FUNC cg_return_none, 16
     mov rdx, rax
     mov rdi, rbx
     mov esi, OP_RETURN_CONST
-    xor ecx, ecx
+    ; The last statement's location, not "no location" -- the same rule
+    ; cs_return_none follows for a module body, and for the same reason:
+    ; .curline has been restored to the enclosing statement's by now, so the
+    ; line has to come from what was last EMITTED.
+    mov ecx, [rbx + CompUnit.lastline]
+    mov [rbx + CompUnit.curline], ecx
+    mov r8d, [rbx + CompUnit.lastend]
+    mov [rbx + CompUnit.curend], r8d
+    mov r8d, [rbx + CompUnit.lastcol]
+    mov [rbx + CompUnit.curcol], r8d
+    mov r8d, [rbx + CompUnit.lastendcol]
+    mov [rbx + CompUnit.curendcol], r8d
     call cg_emit
+    cmp dword [rax + Instr.line], 0     ; cg_emit clobbered rcx
+    jnz .crn_has_line
     or byte [rax + Instr.flags], IF_NOLINE
+.crn_has_line:
     pop r12
     pop rbx
     leave

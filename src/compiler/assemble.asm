@@ -860,6 +860,7 @@ DEF_FUNC asm_linetable, AL_FRAME
     ; writes -1 for the column whenever the instruction's line is not the one
     ; the code generator was positioned at, so this needs no second opinion
     ; about whether the two belong together.
+.have_line:
     mov edx, [rax + Instr.col]
     cmp edx, 0
     jl .line_only
@@ -944,9 +945,13 @@ DEF_FUNC asm_linetable, AL_FRAME
     ; and a tracer that seeds itself from the frame's current line needs that
     ; 0 or it swallows the module's first real line.  Form 13, the line-only
     ; one, with the delta from wherever the running line is.
+    ; It carries columns when it has them: CPython's module RESUME is
+    ; (0, 1, 0, 0), an empty span at the start of the file, and the long form
+    ; is the only one that can say so.  Jumping straight to the line-only form
+    ; threw them away.
     xor ecx, ecx
     mov [rbp - AL_LINE], rcx
-    jmp .line_only
+    jmp .have_line
 
 .no_location:
     mov rcx, [rbp - AL_SIZE]

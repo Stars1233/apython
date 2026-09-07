@@ -685,7 +685,15 @@ struc CompUnit
     .curend:    resd 1
     .curcol:    resd 1
     .curendcol: resd 1
-    .pad5:      resd 1
+    ; The line of the last instruction actually EMITTED, which is not
+    ; .curline: cg_stmt restores that to the enclosing statement's before the
+    ; implicit `return None` and a loop's back edge are emitted, so both got
+    ; the wrong location.  Written by cg_emit and read by whoever needs "where
+    ; did the code actually get to".
+    .lastline:  resd 1
+    .lastend:   resd 1
+    .lastcol:   resd 1
+    .lastendcol: resd 1
     .name:      resq 1          ; PyStrObject*, borrowed
     .qualname:  resq 1
     .filename:  resq 1

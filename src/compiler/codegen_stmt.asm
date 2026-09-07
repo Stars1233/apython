@@ -2593,10 +2593,15 @@ DEF_FUNC_LOCAL cg_s_while, CST_FRAME
     test eax, eax
     jz .fail
 
+    ; The body's line, not the header's -- see cg_s_for's back edge.
     mov rdi, r12
     mov esi, OP_JUMP_BACKWARD
     mov rdx, [rbp - CST_I]
+    mov ecx, [r12 + CompUnit.lastline]
+    test ecx, ecx
+    jnz .while_back_line
     mov rcx, [rbp - CST_LINE]
+.while_back_line:
     call cg_emit_jump_back
 
     mov rdi, r12
@@ -2725,10 +2730,20 @@ DEF_FUNC_LOCAL cg_s_for, CST_FRAME
     test eax, eax
     jz .fail
 
+    ; The back edge belongs to the BODY, not to the loop header.  CPython
+    ; gives JUMP_BACKWARD the line of the last statement in the body and
+    ; END_FOR the line of the `for`; this gave both the `for`, so a traced
+    ; loop reported an extra 'line' event per iteration naming that line
+    ; twice.  cg_block has just run, so lastline is where the body ended --
+    ; CST_LINE has already been restored to the statement's.
     mov rdi, r12
     mov esi, OP_JUMP_BACKWARD
     mov rdx, [rbp - CST_I]
+    mov ecx, [r12 + CompUnit.lastline]
+    test ecx, ecx
+    jnz .for_back_line
     mov rcx, [rbp - CST_LINE]
+.for_back_line:
     call cg_emit_jump_back
 
     mov rdi, r12
