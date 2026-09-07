@@ -59,7 +59,11 @@ MK_KEYS    equ 8
 MK_SUBJ    equ 16
 MK_VALS    equ 24
 MK_NKEYS   equ 32
-MK_FRAME   equ 40           ; + 0 pushes = 32
+MK_I       equ 40           ; the loop index, which used to be pushed.  It
+                            ; sits at the very bottom of the carve below --
+                            ; the frame is what lint checks, and 40 is the
+                            ; aligned size for this handler.
+MK_FRAME   equ 40
 
 ; --- moved to a sibling file by the split ---
 extern op_send
@@ -183,14 +187,21 @@ DEF_FUNC_BARE op_call_intrinsic_1
     CSTRING rdi, "_typealias"
 .ci1_typing_one:
     VPOP rsi
+    ; Two pushes at each call: this handler carves no frame, so a lone save
+    ; leaves the callee 8 out -- and a misaligned call propagates into every
+    ; Python frame the interpreter runs beneath it.
+    push rsi
     push rsi
     xor edx, edx
     call typing_call
     pop rdi
+    pop rdi
     test rax, rax
     jz .ci1_typing_failed
     push rax
+    push rax
     DECREF_V rdi, rcx
+    pop rax
     pop rax
     VPUSH rax
     DISPATCH
@@ -500,8 +511,11 @@ extern obj_decref
     test rcx, rcx
     jz .ci1_si_go
     push rax
+    push rax                          ; and a pad: no frame here, so a lone
+                                      ; push leaves the call 8 out
     mov rdi, rcx
     call obj_decref
+    pop rax
     pop rax
 .ci1_si_go:
     ; This is a re-raise, so it adds no traceback entry -- the frame already
@@ -1010,13 +1024,16 @@ DEF_FUNC op_match_keys, MK_FRAME
     call tuple_new
     mov [rbp - MK_VALS], rax      ; values tuple
 
-    xor edx, edx                   ; index
+    ; The index lives in the frame, not on the machine stack.  It used to be
+    ; pushed across dict_get, which clobbers rdx -- and that lone push left
+    ; the call 8 out, which propagates into every frame the interpreter runs
+    ; beneath it.  A slot costs the same and says what it holds.
+    mov qword [rbp - MK_I], 0
 
 .mk_loop:
+    mov rdx, [rbp - MK_I]
     cmp rdx, [rbp - MK_NKEYS]
     jge .mk_success
-
-    push rdx
 
     ; Get key
     mov rax, [rbp - MK_KEYS]
@@ -1030,20 +1047,17 @@ DEF_FUNC op_match_keys, MK_FRAME
     test edx, edx
     jz .mk_fail
 
-    ; Save dict_get tag (rdx) before restoring loop index
     mov r9, rdx                 ; r9 = value tag from dict_get
 
     ; Store value in values tuple
-    pop rdx
-    push rdx
+    mov rdx, [rbp - MK_I]
     INCREF_VAL rax, r9          ; tag-aware INCREF
     mov rcx, [rbp - MK_VALS]
     mov r8, [rcx + PyTupleObject.ob_item]         ; payloads
     V_PACK rax, r9
     mov [r8 + rdx * 8], rax
 
-    pop rdx
-    inc rdx
+    inc qword [rbp - MK_I]
     jmp .mk_loop
 
 .mk_success:
@@ -1053,7 +1067,7 @@ DEF_FUNC op_match_keys, MK_FRAME
     jmp .mk_done
 
 .mk_fail:
-    pop rdx
+    ; No pop: the index is a frame slot now, not a push.
     ; DECREF partial values tuple
     mov rdi, [rbp - MK_VALS]
     call obj_decref
@@ -1165,8 +1179,11 @@ DEF_FUNC op_match_class, MC_FRAME
     pop rsi                         ; rsi = string to DECREF
     push rdx                        ; save dict_get tag
     push rax                        ; save dict_get payload
+    push rax                        ; and a pad: r8 is still down there, so
+                                    ; these two alone leave the call 8 out
     mov rdi, rsi
     call obj_decref
+    pop rax
     pop rax                         ; restore dict_get payload
     pop rdx                         ; restore dict_get tag
     pop r8                          ; restore type pointer

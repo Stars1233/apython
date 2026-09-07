@@ -32,7 +32,3 @@ src/opcodes/load.asm op_load_attr call obj_incref
 src/opcodes/load.asm op_load_global call dict_get_index
 src/opcodes/load.asm op_load_global call dict_get_index
 src/opcodes/load.asm op_load_super_attr call dict_get
-src/opcodes/match.asm op_call_intrinsic_1 call obj_decref
-src/opcodes/match.asm op_call_intrinsic_1 call typing_call
-src/opcodes/match.asm op_match_class call obj_decref
-src/opcodes/match.asm op_match_keys call dict_get
