@@ -203,4 +203,44 @@ c = Callee()
 print("instance:", c(3), c.__call__(3), callable(c),
       isinstance(c, collections.abc.Callable))
 
+print("--- __init__ comes from the instance's type, not the called class ---")
+
+
+class IBase:
+    def __new__(cls, *a):
+        if cls is IBase:
+            return object.__new__(ISub)
+        return object.__new__(cls)
+
+    def __init__(self, *a):
+        print("IBase.__init__", a)
+
+
+class ISub(IBase):
+    def __init__(self, *a):
+        print("ISub.__init__", a)
+
+
+x = IBase(1, 2)
+print("type:", type(x).__name__)
+y = ISub(3)
+print("type:", type(y).__name__)
+
+
+class IOther:
+    def __init__(self, *a):
+        print("IOther.__init__", a)
+
+
+class IFactory:
+    def __new__(cls, *a):
+        return object.__new__(IOther)
+
+    def __init__(self, *a):
+        print("IFactory.__init__", a)
+
+
+z = IFactory(4)
+print("type:", type(z).__name__, "(no __init__ runs: not an instance of cls)")
+
 print("done")
