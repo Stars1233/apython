@@ -67,6 +67,7 @@ test_bytes_str_text
 test_bytes_subclass_dict
 test_call_ex
 test_call_instance
+test_call_spec
 test_classes
 test_classmethod_metaclass
 test_class_namespace_copy
