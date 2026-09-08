@@ -80,3 +80,53 @@ try:
     _weakref.ref.__new__(dict)
 except TypeError:
     print("unrelated class refused")
+
+
+# Dropping the last reference to a REF takes its callback with it.  The side
+# table's chain used to hold an owned reference, so a ref nobody else held
+# stayed alive for as long as its referent did and its callback still ran --
+# which CPython's does not.  The chain is borrowed now, and a ref leaves it as
+# it dies.
+order = []
+
+
+def when_ref_dies_first():
+    target = C(1)
+    r = _weakref.ref(target, lambda ref: order.append("fired"))
+    del r
+    del target
+    return order
+
+
+print(when_ref_dies_first())
+order.clear()
+
+
+def when_referent_dies_first():
+    target = C(2)
+    r = _weakref.ref(target, lambda ref: order.append("fired"))
+    del target
+    del r
+    return order
+
+
+print(when_referent_dies_first())
+order.clear()
+
+# getweakrefcount and getweakrefs count what is LIVE, not what the chain has
+# room for: a slot a dead reference left behind is not a reference.
+live = C(3)
+a = _weakref.ref(live, lambda ref: None)
+b = _weakref.ref(live, lambda ref: None)
+print(_weakref.getweakrefcount(live), len(_weakref.getweakrefs(live)))
+del a
+print(_weakref.getweakrefcount(live), len(_weakref.getweakrefs(live)))
+print(b in _weakref.getweakrefs(live))
+del b
+print(_weakref.getweakrefcount(live), _weakref.getweakrefs(live))
+
+# ...and a new one after that still works, on the same referent.
+c = _weakref.ref(live, lambda ref: order.append("late"))
+print(_weakref.getweakrefcount(live), c() is live)
+del live
+print(order)

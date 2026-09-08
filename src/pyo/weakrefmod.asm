@@ -132,6 +132,25 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     mov rdi, rax
     call obj_incref             ; hold it past the table entry going away
 
+    ; ...and hold every reference IN it, because the chain's entries are
+    ; borrowed and a callback may drop the last reference to a later one.
+    ; CPython builds a tuple of them for the same reason.
+    mov rax, [rbp - WC_LIST]
+    mov rbx, [rax + PyListObject.ob_size]
+    mov r12, [rax + PyListObject.ob_item]
+    xor ecx, ecx
+.hold_loop:
+    cmp rcx, rbx
+    jge .hold_done
+    mov rdi, [r12 + rcx*8]
+    test rdi, rdi
+    jz .hold_next
+    inc qword [rdi + PyObject.ob_refcnt]
+.hold_next:
+    inc rcx
+    jmp .hold_loop
+.hold_done:
+
     ; Empty every reference first.
     mov rax, [rbp - WC_LIST]
     mov rbx, [rax + PyListObject.ob_size]
@@ -174,8 +193,6 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     inc qword [rbp - WC_IDX]
     test rbx, rbx
     jz .cb_loop
-    cmp qword [rbx + PyObject.ob_refcnt], 0
-    jle .cb_loop
     mov r12, [rbx + PyWeakRefObject.wr_callback]
     test r12, r12
     jz .cb_loop
@@ -214,6 +231,30 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     jmp .cb_resume
 
 .cb_done:
+    ; Give back what the hold loop took.  wr_object is zero on all of them by
+    ; now, so a ref that dies here does not go looking for a chain that the
+    ; table no longer has.
+    mov rax, [rbp - WC_LIST]
+    mov rbx, [rax + PyListObject.ob_size]
+    xor r12d, r12d
+.rel_loop:
+    cmp r12, rbx
+    jge .rel_done
+    mov rax, [rbp - WC_LIST]
+    mov rax, [rax + PyListObject.ob_item]
+    mov rdi, [rax + r12*8]
+    test rdi, rdi
+    jz .rel_next
+    ; Zeroed BEFORE the release: the list's own dealloc releases every item it
+    ; still holds, and these are borrowed -- the chain gave its reference back
+    ; when it took them.  Emptying the slot is what keeps the two from
+    ; disagreeing.
+    mov qword [rax + r12*8], 0
+    call obj_decref
+.rel_next:
+    inc r12
+    jmp .rel_loop
+.rel_done:
     mov rdi, [rbp - WC_LIST]
     call obj_decref
 .done:
@@ -364,6 +405,14 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
     mov rdi, rax
     mov rsi, rbx
     call list_append
+    ; The chain holds a BORROWED reference.  list_append took one, and it is
+    ; given straight back: an owned one meant a ref nobody else held stayed
+    ; alive for as long as its referent did, so `r = ref(c, cb); del r; del c`
+    ; still ran the callback -- which CPython does not, because dropping the
+    ; last reference to a ref takes its callback with it.  ref_clear is what
+    ; keeps the slot from dangling.
+    mov rdi, rbx
+    call obj_decref
     mov rax, [rel weakref_table]
     mov rax, [rax + PyDictObject.ob_size]
     mov [rel weakref_live], rax
@@ -380,12 +429,7 @@ END_FUNC weakref_make
 DEF_FUNC_LOCAL ref_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
-    mov rdi, [rbx + PyWeakRefObject.wr_callback]
-    test rdi, rdi
-    jz .no_cb
-    mov qword [rbx + PyWeakRefObject.wr_callback], 0
-    call obj_decref
-.no_cb:
+    call ref_clear              ; the chain slot and the callback
     mov rdi, [rbx + PyObject.ob_type]
     test rdi, rdi
     jz .free
@@ -837,6 +881,30 @@ END_FUNC ref_traverse
 DEF_FUNC ref_clear, 8               ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
+
+    ; Leave the referent's chain, whose entries are borrowed.  A NULL
+    ; wr_object means the referent has already gone and taken the whole entry
+    ; with it, so there is nothing to leave.
+    mov rdi, [rbx + PyWeakRefObject.wr_object]
+    test rdi, rdi
+    jz .rc_unlinked
+    call weakref_chain
+    test rax, rax
+    jz .rc_unlinked
+    mov rcx, [rax + PyListObject.ob_size]
+    mov rdx, [rax + PyListObject.ob_item]
+    xor r8d, r8d
+.rc_scan:
+    cmp r8, rcx
+    jge .rc_unlinked
+    cmp [rdx + r8*8], rbx
+    je .rc_hit
+    inc r8
+    jmp .rc_scan
+.rc_hit:
+    mov qword [rdx + r8*8], 0
+.rc_unlinked:
+
     mov rdi, [rbx + PyWeakRefObject.wr_callback]
     mov qword [rbx + PyWeakRefObject.wr_callback], 0
     test rdi, rdi
@@ -1006,7 +1074,22 @@ DEF_FUNC wr_getweakrefcount_func
     call weakref_chain
     test rax, rax
     jz .zero
-    mov rax, [rax + PyListObject.ob_size]
+    ; Count the LIVE ones: a reference that died before its referent left its
+    ; slot empty rather than shortening the chain.
+    mov rcx, [rax + PyListObject.ob_size]
+    mov rdx, [rax + PyListObject.ob_item]
+    xor eax, eax
+    xor r8d, r8d
+.count_loop:
+    cmp r8, rcx
+    jge .counted
+    cmp qword [rdx + r8*8], 0
+    je .count_next
+    inc rax
+.count_next:
+    inc r8
+    jmp .count_loop
+.counted:
     add rax, [rel v_int_bias]
     leave
     ret
@@ -1038,15 +1121,18 @@ DEF_FUNC wr_getweakrefs_func
 .copy:
     cmp r8, rcx
     jge .copied
+    mov rsi, [rdx + r8*8]
+    test rsi, rsi
+    jz .copy_next               ; a slot a dead reference left behind
     push rcx
     push rdx
     push r8
     mov rdi, [rsp + 24]
-    mov rsi, [rdx + r8*8]
     call list_append
     pop r8
     pop rdx
     pop rcx
+.copy_next:
     inc r8
     jmp .copy
 .copied:
