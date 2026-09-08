@@ -210,6 +210,29 @@ SMI_TMP   equ 24            ; whichever object is being installed just now
 ;; fifteen lines, and this file does it fifty-odd times; the prefix family is
 ;; where that started to hide which names were actually being set.
 ;; ============================================================================
+;; SS_SET index, value -- fill one field of the structseq being built in rbx
+;;
+;; sys.flags and sys.float_info are assembled a field at a time, and the four
+;; instructions that set one repeated forty-seven times.  The receiver is
+;; always rbx and the index always the next integer, so the only thing worth
+;; reading at a call site is which value goes where.
+;;
+;; `value` is a VALUE, not an integer: V_INT(n) for a literal, a register for
+;; something computed.  Nothing generated here calls anything but
+;; structseq_set, so rbx survives across the whole run.
+;; ============================================================================
+%macro SS_SET 2                 ; %1 = field index, %2 = the Value
+    mov rdi, rbx
+%if %1 == 0
+    xor esi, esi
+%else
+    mov esi, %1
+%endif
+    mov rdx, %2
+    call structseq_set
+%endmacro
+
+;; ============================================================================
 SAS_DICT  equ 8
 SAS_KEY   equ 16
 SAS_FRAME equ 24            ; + 1 push = 32, 16-aligned
@@ -425,14 +448,8 @@ DEF_FUNC sys_module_init, 40
     mov rbx, rax                ; rbx = the version_info object
 
     ; (3, 12, 0, 'final', 0)
-    mov rdi, rbx
-    xor esi, esi
-    mov rdx, V_INT(3)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 1
-    mov rdx, V_INT(12)
-    call structseq_set
+    SS_SET 0, V_INT(3)
+    SS_SET 1, V_INT(12)
     mov rdi, rbx
     mov esi, 2
     xor edx, edx
@@ -836,80 +853,32 @@ DEF_FUNC sys_module_init, 40
     lea rdi, [rel flags_type]
     call structseq_new
     mov rbx, rax
-    mov rdi, rbx
-    xor esi, esi
-    mov rdx, V_INT(0)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 1
-    mov rdx, V_INT(0)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 2
-    mov rdx, V_INT(0)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 3
-    mov rdx, V_INT(0)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 4
-    mov rdx, V_INT(0)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 5
-    mov rdx, V_INT(0)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 6
-    mov rdx, V_INT(0)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 7
-    mov rdx, V_INT(0)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 8
-    mov rdx, V_INT(0)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 9
-    mov rdx, V_INT(0)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 10
-    mov rdx, V_INT(0)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 11
-    mov rdx, V_INT(0)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 12
-    mov rdx, V_INT(0)
-    call structseq_set
+    SS_SET 0, V_INT(0)
+    SS_SET 1, V_INT(0)
+    SS_SET 2, V_INT(0)
+    SS_SET 3, V_INT(0)
+    SS_SET 4, V_INT(0)
+    SS_SET 5, V_INT(0)
+    SS_SET 6, V_INT(0)
+    SS_SET 7, V_INT(0)
+    SS_SET 8, V_INT(0)
+    SS_SET 9, V_INT(0)
+    SS_SET 10, V_INT(0)
+    SS_SET 11, V_INT(0)
+    SS_SET 12, V_INT(0)
     mov rdi, rbx
     mov esi, 13
     lea rdx, [rel bool_false]
     inc qword [rdx + PyObject.ob_refcnt]
     call structseq_set
-    mov rdi, rbx
-    mov esi, 14
-    mov rdx, V_INT(0)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 15
-    mov rdx, V_INT(0)
-    call structseq_set
+    SS_SET 14, V_INT(0)
+    SS_SET 15, V_INT(0)
     mov rdi, rbx
     mov esi, 16
     lea rdx, [rel bool_false]
     inc qword [rdx + PyObject.ob_refcnt]
     call structseq_set
-    mov rdi, rbx
-    mov esi, 17
-    mov rdx, V_INT(4300)
-    call structseq_set
+    SS_SET 17, V_INT(4300)
     lea rdi, [rel sm_flags]
     call str_from_cstr_heap
     push rax
@@ -932,48 +901,24 @@ DEF_FUNC sys_module_init, 40
     mov rdx, [rel float_info_v0]
     V_FROM_F64 rdx, rcx
     call structseq_set
-    mov rdi, rbx
-    mov esi, 1
-    mov rdx, V_INT(1024)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 2
-    mov rdx, V_INT(308)
-    call structseq_set
+    SS_SET 1, V_INT(1024)
+    SS_SET 2, V_INT(308)
     mov rdi, rbx
     mov esi, 3
     mov rdx, [rel float_info_v3]
     V_FROM_F64 rdx, rcx
     call structseq_set
-    mov rdi, rbx
-    mov esi, 4
-    mov rdx, V_INT(-1021)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 5
-    mov rdx, V_INT(-307)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 6
-    mov rdx, V_INT(15)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 7
-    mov rdx, V_INT(53)
-    call structseq_set
+    SS_SET 4, V_INT(-1021)
+    SS_SET 5, V_INT(-307)
+    SS_SET 6, V_INT(15)
+    SS_SET 7, V_INT(53)
     mov rdi, rbx
     mov esi, 8
     mov rdx, [rel float_info_v8]
     V_FROM_F64 rdx, rcx
     call structseq_set
-    mov rdi, rbx
-    mov esi, 9
-    mov rdx, V_INT(2)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 10
-    mov rdx, V_INT(1)
-    call structseq_set
+    SS_SET 9, V_INT(2)
+    SS_SET 10, V_INT(1)
     lea rdi, [rel sm_float_info]
     call str_from_cstr_heap
     push rax
@@ -994,22 +939,10 @@ DEF_FUNC sys_module_init, 40
     lea rdi, [rel int_info_type]
     call structseq_new
     mov rbx, rax
-    mov rdi, rbx
-    xor esi, esi
-    mov rdx, V_INT(30)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 1
-    mov rdx, V_INT(4)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 2
-    mov rdx, V_INT(4300)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 3
-    mov rdx, V_INT(640)
-    call structseq_set
+    SS_SET 0, V_INT(30)
+    SS_SET 1, V_INT(4)
+    SS_SET 2, V_INT(4300)
+    SS_SET 3, V_INT(640)
     lea rdi, [rel sm_int_info]
     call str_from_cstr_heap
     push rax
@@ -1032,27 +965,15 @@ DEF_FUNC sys_module_init, 40
     lea rdi, [rel hash_info_type]
     call structseq_new
     mov rbx, rax
-    mov rdi, rbx
-    xor esi, esi
-    mov rdx, V_INT(64)
-    call structseq_set
+    SS_SET 0, V_INT(64)
     mov rdi, rbx
     mov esi, 1
     mov rdx, 2305843009213693951
     V_PACK_I64 rdx, rcx
     call structseq_set
-    mov rdi, rbx
-    mov esi, 2
-    mov rdx, V_INT(314159)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 3
-    mov rdx, V_INT(0)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 4
-    mov rdx, V_INT(1000003)
-    call structseq_set
+    SS_SET 2, V_INT(314159)
+    SS_SET 3, V_INT(0)
+    SS_SET 4, V_INT(1000003)
     mov rdi, rbx
     mov esi, 5
     lea rdi, [rel hash_info_v5]
@@ -1061,18 +982,9 @@ DEF_FUNC sys_module_init, 40
     mov rdi, rbx
     mov esi, 5
     call structseq_set
-    mov rdi, rbx
-    mov esi, 6
-    mov rdx, V_INT(64)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 7
-    mov rdx, V_INT(0)
-    call structseq_set
-    mov rdi, rbx
-    mov esi, 8
-    mov rdx, V_INT(0)
-    call structseq_set
+    SS_SET 6, V_INT(64)
+    SS_SET 7, V_INT(0)
+    SS_SET 8, V_INT(0)
     lea rdi, [rel sm_hash_info]
     call str_from_cstr_heap
     push rax

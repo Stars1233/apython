@@ -504,7 +504,19 @@ def docblock_debt(path):
     """
     lines = open(path).read().split('\n')
     nodoc = nosig = 0
+    # A DEF_FUNC inside a %macro body defines whatever the invocation names,
+    # and its documentation is the macro's own docblock -- which the walk below
+    # cannot reach, because the `%macro` line stops it.  Skip those, the way
+    # check_alignment already does.  bytearray_methods.asm's BA_SHARED and
+    # methods/object.asm's DEF_DUNDER_* family are what this is about.
+    in_macro = False
     for i, L in enumerate(lines):
+        if re.match(r'^\s*%macro\s', L):
+            in_macro = True
+        elif re.match(r'^\s*%endmacro\b', L):
+            in_macro = False
+        if in_macro:
+            continue
         if not re.match(r'^DEF_FUNC(?:_LOCAL|_BARE)?\s+\w+', L):
             continue
         j = i - 1
