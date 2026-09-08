@@ -158,6 +158,9 @@ extern bytes_method_replace
 extern bytes_method_split
 extern bytes_method_startswith
 extern container_dunder_new
+extern memoryview_getattr
+extern property_getattr
+extern descr_func_attr
 extern dict_classmethod_fromkeys
 extern dict_dunder_delitem
 extern dict_dunder_getitem
@@ -300,6 +303,28 @@ extern tuple_method_index
 ;; These were open-coded: four instructions per method, six for a checked one,
 ;; 455 times, which is most of what made this file 115k.  The expansion is
 ;; identical -- the object file is unchanged to the byte.
+; A name a type's own tp_getattr already answers, published as a read-only
+; getset descriptor so the type's dict holds it too.  The dict is in rbx, as
+; ADD_FN wants it.
+%macro TYPE_GETATTR 2           ; %1 = the name symbol, %2 = the getattr fn
+    mov rdi, rbx
+    lea rsi, [rel %1]
+    lea rdx, [rel %2]
+    call dict_add_getattr
+%endmacro
+
+%macro MV_GETATTR 1
+    TYPE_GETATTR %1, memoryview_getattr
+%endmacro
+
+%macro PROP_GETATTR 1
+    TYPE_GETATTR %1, property_getattr
+%endmacro
+
+%macro DESCR_GETATTR 1
+    TYPE_GETATTR %1, descr_func_attr
+%endmacro
+
 %macro ADD_FN 2
     mov rdi, rbx
     lea rsi, [rel %1]
@@ -462,6 +487,52 @@ DEF_FUNC dict_add_getset
     leave
     ret
 END_FUNC dict_add_getset
+
+;; ============================================================================
+;; dict_add_getattr(rdi = dict, rsi = name_cstr, rdx = a tp_getattr function)
+;;   -> nothing; the dict holds a read-only getset descriptor for that name
+;;
+;; The same thing dict_add_getset makes, for an attribute a type already
+;; answers through its tp_getattr.  Those functions take (self, name) and
+;; decide from the name, so one of them serves every attribute it knows --
+;; twelve for memoryview -- and the descriptor carries the name it was
+;; registered under.  Without this each name would need a thunk whose only
+;; content is which name to pass on.
+;;
+;; Read-only, because every attribute reached this way is: a memoryview's
+;; shape, a property's fget, a bound method's __func__.
+;; ============================================================================
+DGA_NAME  equ 8
+DGA_DESC  equ 16
+DGA_FRAME equ 24            ; + 1 push = 32, 16-aligned
+DEF_FUNC dict_add_getattr, DGA_FRAME
+    push rbx
+    mov rbx, rdi                ; the dict
+    mov rdi, rdx                ; the getter
+    push rdx
+    mov rdi, rsi
+    call str_from_cstr_heap
+    mov [rbp - DGA_NAME], rax
+    pop rdi                     ; the getter
+    xor esi, esi                ; no setter
+    mov rdx, rax                ; the name
+    call getset_descr_new
+    mov [rbp - DGA_DESC], rax
+    mov qword [rax + PyGetSetDescrObject.gs_flags], GS_NAMED
+
+    mov rdi, rbx
+    mov rsi, [rbp - DGA_NAME]
+    mov rdx, rax
+    call dict_set
+
+    mov rdi, [rbp - DGA_DESC]
+    call obj_decref             ; dict_set took its own reference
+    mov rdi, [rbp - DGA_NAME]
+    call obj_decref             ; and getset_descr_new took one on the name
+    pop rbx
+    leave
+    ret
+END_FUNC dict_add_getattr
 
 ;; ============================================================================
 ;; HELPER: add_method_to_dict_checked(dict, name_cstr, func_ptr, min_args, max_args)
@@ -1801,6 +1872,8 @@ DEF_FUNC methods_init
     ADD_FN mn___init__, staticmethod_method_init
     extern staticmethod_dunder_call
     ADD_FN mn___call__, staticmethod_dunder_call
+    DESCR_GETATTR mn___func__
+    DESCR_GETATTR mn___wrapped__
     lea rax, [rel staticmethod_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1812,6 +1885,8 @@ DEF_FUNC methods_init
     ADD_FN mn___get__, classmethod_dunder_get
     extern classmethod_method_init
     ADD_FN mn___init__, classmethod_method_init
+    DESCR_GETATTR mn___func__
+    DESCR_GETATTR mn___wrapped__
     lea rax, [rel classmethod_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1833,6 +1908,15 @@ DEF_FUNC methods_init
     ; no setter" rather than 3.10's bare "can't set attribute".
     extern property_dunder_set_name
     ADD_FN mn___set_name__, property_dunder_set_name
+    ; The six property_getattr answers.  fget/fset/fdel are the accessors and
+    ; getter/setter/deleter the builders; all six read off an instance and
+    ; none was in the type's dict, so inspect could not find them.
+    PROP_GETATTR mn_fget
+    PROP_GETATTR mn_fset
+    PROP_GETATTR mn_fdel
+    PROP_GETATTR mn_getter
+    PROP_GETATTR mn_setter
+    PROP_GETATTR mn_deleter
     extern property_type
     lea rax, [rel property_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2577,6 +2661,22 @@ DEF_FUNC methods_init
     ADD_FN_N mn___getitem__, memoryview_dunder_getitem, 2, 2
     ADD_FN_N mn___setitem__, memoryview_dunder_setitem, 3, 3
     ADD_FN_N mn___len__, memoryview_dunder_len, 1, 1
+    ; Twelve attributes memoryview_getattr already answers.  They read
+    ; correctly off an INSTANCE and were absent from the type, so dir() did
+    ; not list them and nothing that walks a type's dict -- inspect, help(),
+    ; `'nbytes' in vars(memoryview)` -- could see them.
+    MV_GETATTR mn_nbytes
+    MV_GETATTR mn_itemsize
+    MV_GETATTR mn_format
+    MV_GETATTR mn_readonly
+    MV_GETATTR mn_obj
+    MV_GETATTR mn_ndim
+    MV_GETATTR mn_shape
+    MV_GETATTR mn_strides
+    MV_GETATTR mn_suboffsets
+    MV_GETATTR mn_c_contiguous
+    MV_GETATTR mn_f_contiguous
+    MV_GETATTR mn_contiguous
     lea rax, [rel memoryview_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -2592,6 +2692,25 @@ END_FUNC methods_init
 ;; Data section
 ;; ============================================================================
 section .rodata
+mn_nbytes: db "nbytes", 0
+mn_itemsize: db "itemsize", 0
+mn_readonly: db "readonly", 0
+mn_obj: db "obj", 0
+mn_ndim: db "ndim", 0
+mn_shape: db "shape", 0
+mn_strides: db "strides", 0
+mn_suboffsets: db "suboffsets", 0
+mn_c_contiguous: db "c_contiguous", 0
+mn_f_contiguous: db "f_contiguous", 0
+mn_contiguous: db "contiguous", 0
+mn_fget: db "fget", 0
+mn_fset: db "fset", 0
+mn_fdel: db "fdel", 0
+mn_getter: db "getter", 0
+mn_setter: db "setter", 0
+mn_deleter: db "deleter", 0
+mn___func__: db "__func__", 0
+mn___wrapped__: db "__wrapped__", 0
 
 empty_str_cstr: db 0
 

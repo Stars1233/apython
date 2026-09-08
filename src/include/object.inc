@@ -377,7 +377,15 @@ struc PyGetSetDescrObject
     .gs_owner:  resq 1  ; +40: the type it was registered on, or 0 -- for the
                         ;      repr, which CPython words "<attribute 'real'
                         ;      of 'int' objects>"; borrowed, types are static
+    .gs_flags:  resq 1  ; +48: GS_* below
 endstruc
+
+; A getset whose getter is a whole tp_getattr rather than one attribute's:
+; it is called (self, gs_name) and answers from the name.  Twelve of
+; memoryview's attributes, and every one of property's, super's and the two
+; method wrappers', are already answered by such a function; without this each
+; would need a thunk of its own whose only content is the name it passes on.
+GS_NAMED    equ 1
 
 ; types.SimpleNamespace: attributes are the entries of a dict.
 struc PySimpleNamespaceObject

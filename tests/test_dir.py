@@ -75,3 +75,55 @@ class Slotted:
     __slots__ = ("s1", "s2")
 ds = dir(Slotted())
 print("s1" in ds, "s2" in ds, ds == sorted(ds))
+
+
+# A builtin attribute answered only by tp_getattr is invisible to dir(), and to
+# everything that reads a type's dict rather than calling getattr: inspect,
+# help(), and any `'name' in vars(T)` test.  These all read correctly through an
+# instance and were absent from the class.
+def missing_from(T, names):
+    d = dir(T)
+    return [n for n in names if n not in d]
+
+
+print(missing_from(memoryview, ["nbytes", "format", "itemsize", "shape",
+                                "strides", "ndim", "obj", "readonly",
+                                "suboffsets", "c_contiguous", "f_contiguous",
+                                "contiguous"]))
+print(missing_from(property, ["fget", "fset", "fdel",
+                              "getter", "setter", "deleter"]))
+print(missing_from(classmethod, ["__func__", "__wrapped__"]))
+print(missing_from(staticmethod, ["__func__", "__wrapped__"]))
+
+# The descriptors work through the class, not only through an instance, and
+# repr as CPython's do.
+mv = memoryview(b"abcd")
+print(memoryview.nbytes.__get__(mv), mv.nbytes)
+print(memoryview.readonly.__get__(mv), memoryview.itemsize.__get__(mv))
+print(memoryview.shape.__get__(mv), memoryview.ndim.__get__(mv))
+print(repr(memoryview.nbytes))
+
+p = property(lambda s: 1)
+print(property.fget.__get__(p) is p.fget, property.fset.__get__(p))
+print(callable(property.getter.__get__(p)))
+
+c = classmethod(lambda cls: 1)
+print(classmethod.__func__.__get__(c) is c.__func__)
+s = staticmethod(lambda: 1)
+print(staticmethod.__func__.__get__(s) is s.__func__)
+
+# They are descriptors, which is the question the stdlib actually asks:
+# inspect.isdatadescriptor and the enum and dataclasses classifiers all walk a
+# __dict__ and test hasattr(v, '__get__').
+print(hasattr(vars(memoryview)["nbytes"], "__get__"))
+print(hasattr(vars(property)["fget"], "__get__"))
+
+# A released view answers AttributeError through the descriptor rather than
+# handing back the NULL its tp_getattr uses to mean "not mine".
+released = memoryview(bytearray(b"xy"))
+released.release()
+try:
+    memoryview.nbytes.__get__(released)
+    print("released view answered")
+except (AttributeError, ValueError) as e:
+    print("released view:", type(e).__name__)

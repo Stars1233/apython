@@ -1397,6 +1397,7 @@ DEF_FUNC getset_descr_new, 8            ; 3 pushes, so rsp is 16-aligned
     mov [rax + PyGetSetDescrObject.gs_set], r12
     mov [rax + PyGetSetDescrObject.gs_name], r13
     mov qword [rax + PyGetSetDescrObject.gs_owner], 0
+    mov qword [rax + PyGetSetDescrObject.gs_flags], 0
     ; gs_name is owned -- getset_descr_dealloc decrefs it -- and was stored
     ; without a reference of its own.  Harmless while the one instance ever
     ; built was immortal; not once every numeric type registers several.
@@ -1721,8 +1722,25 @@ DEF_FUNC getset_descr_get, GDG_FRAME
     mov rax, [rdi + PyGetSetDescrObject.gs_get]
     test rax, rax
     jz .gdg_unreadable
+    test qword [rdi + PyGetSetDescrObject.gs_flags], GS_NAMED
+    jnz .gdg_named
     mov rdi, rsi
     call rax
+    leave
+    ret
+.gdg_named:
+    ; A whole tp_getattr, called the way the slot calls it.  It answers NULL
+    ; for a name that is not its own, which cannot happen here -- the
+    ; descriptor was registered under a name that function answers -- but a
+    ; released memoryview answers NULL for every one of them, so the NULL is
+    ; turned into the AttributeError the caller expects rather than passed on
+    ; as a value.
+    mov rdi, rsi
+    mov rsi, [rbp - GDG_DESC]
+    mov rsi, [rsi + PyGetSetDescrObject.gs_name]
+    call rax
+    test rax, rax
+    jz .gdg_unreadable
     leave
     ret
 .gdg_unreadable:
