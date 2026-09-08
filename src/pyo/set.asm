@@ -28,6 +28,37 @@ SET_ENTRY_KEY     equ 8
 ; Initial capacity (must be power of 2)
 SET_INIT_CAP equ 8
 
+; SET_HASH_VALUE key, out -- the hash of a key Value, with the int case inline.
+;
+; Every one of the three sites that needed a hash used to V_UNPACK the Value,
+; V_PACK the identical word straight back and call obj_hash, whose first
+; instruction is another V_UNPACK -- and whose whole answer for an int
+; immediate is the value itself, because |n| < 2^50 is below PYHASH_MODULUS
+; and int_hash_i64's `.ihi_small` arm returns it unchanged.  Only -1 is
+; special, and only because hash(-1) is reserved for "error".  Nothing in set
+; can observe that fixup today -- every insert and every probe hashes through
+; here, and set_resize reuses the stored hash -- but it is what keeps this and
+; obj_hash from ever disagreeing about the same key, which is the invariant
+; the entries rely on.
+;
+; This is set's parallel of dict_lookup's cached string hash: n-queens hashes
+; nothing but ints, and the call was most of what `c in cols` cost.
+%macro SET_HASH_VALUE 2         ; %1 = key Value (preserved), %2 = the hash out
+    V_IS_INT %1, %2
+    jb %%slow
+    mov %2, %1
+    V_TO_I64 %2
+    cmp %2, -1
+    jne %%done
+    mov %2, -2
+    jmp %%done
+%%slow:
+    mov rdi, %1
+    call obj_hash
+    mov %2, rax
+%%done:
+%endmacro
+
 ; Tombstone marker for deleted entries (must not collide with any tag)
 
 ;; ============================================================================
@@ -228,18 +259,20 @@ DEF_FUNC frozenset_hash
 END_FUNC frozenset_hash
 
 ;; ============================================================================
-;; set_keys_equal(a, b, a_tag, b_tag) -> int (1=equal, 0=not)
+;; set_keys_equal(rdi = a Value, rsi = b Value) -> eax = 1 if equal, 0 if not
 ;;
 ;; Was an identity check plus a string compare, and nothing else: no
 ;; cross-type numeric equality, so 1.0 in {1} was False where the same
 ;; lookup in a dict succeeded, and no __eq__, so a user class could never
 ;; find its own key.  Set membership is PyObject_RichCompareBool, the same
 ;; as everywhere else.
-;; rdi=a payload, rsi=b payload, rdx=a_tag, rcx=b_tag
+;;
+;; It took a (payload, tag) pair and packed both back, which was the only
+;; reason set_find_slot unpacked them -- the entries hold Values and so does
+;; the probe key.  Now it is only reached when the two Values DIFFER, which
+;; rules out every int and every identity hit before the call is made.
 ;; ============================================================================
 DEF_FUNC_LOCAL set_keys_equal
-    V_PACK rdi, rdx             ; both are immediates or pointers, so the
-    V_PACK rsi, rcx             ; round-trip cannot box anything
     mov edx, PY_EQ
     call obj_richcompare_bool
     cmp eax, -1
@@ -254,10 +287,10 @@ DEF_FUNC_LOCAL set_keys_equal
 END_FUNC set_keys_equal
 
 ;; ============================================================================
-;; set_find_slot(set, key, hash, key_tag)
-;;   rdi=set, rsi=key, rdx=hash, rcx=key_tag
-;;   -> rax = entry ptr, rdx = 1 if existing key found, 0 if free slot
-;; Internal helper used by set_add and set_contains
+;; set_find_slot(rdi = the set, rsi = the key Value, rdx = its hash)
+;;   -> rax = entry ptr, rdx = 1 if the key is there, 0 if the slot is free
+;;
+;; Internal helper used by set_add and set_contains.
 ;;
 ;; A slot freed by set_remove holds a TOMBSTONE: key 0, hash -1.  The probe
 ;; cannot stop there -- the key it is looking for may sit further along the
@@ -274,9 +307,8 @@ END_FUNC set_keys_equal
 ;; bound.  dict never had this; its probe has always remembered the first
 ;; reusable slot (dl_probe's DL_FREE).
 ;; ============================================================================
-SFS_KEY_TAG equ 8
-SFS_FREE    equ 16              ; first tombstone seen on this probe, or 0
-SFS_FRAME   equ 24              ; padded: 24 + 5 pushes keeps rsp 16-aligned
+SFS_FREE    equ 8               ; first tombstone seen on this probe, or 0
+SFS_FRAME   equ 8               ; 8 + 5 pushes keeps rsp 16-aligned
 DEF_FUNC_LOCAL set_find_slot
     sub rsp, SFS_FRAME
     push rbx
@@ -286,45 +318,56 @@ DEF_FUNC_LOCAL set_find_slot
     push r15
 
     mov rbx, rdi                ; set
-    mov r12, rsi                ; key
+    mov r12, rsi                ; the key, a Value
     mov r13, rdx                ; hash
-    mov [rbp - SFS_KEY_TAG], rcx ; save key_tag
     mov qword [rbp - SFS_FREE], 0   ; no reusable slot seen yet
 
-    ; mask = capacity - 1
+    ; r14 = probes REMAINING, counting down.  It was a count UP compared
+    ; against a capacity reloaded from the set header on every iteration, for
+    ; a bound the load factor already makes unreachable -- the same thing
+    ; dict_lookup's probe was fixed for.
     mov r14, [rbx + PyDictObject.capacity]
-    lea r15, [r14 - 1]          ; mask
+    mov r15, r14
+    dec r15                     ; mask
 
     ; slot = hash & mask
     mov rcx, r13
     and rcx, r15
 
-    xor r14d, r14d              ; probe counter
-
 .find_loop:
-    cmp r14, [rbx + PyDictObject.capacity]
-    jge .table_full
+    dec r14
+    js .table_full
 
-    ; entry = entries + slot * SET_ENTRY_SIZE
+    ; entry = entries + slot * SET_ENTRY_SIZE.  SET_ENTRY_SIZE is 16, which no
+    ; index scale reaches, but two lea do -- and without imul's latency in the
+    ; middle of the recurrence.
     mov rax, [rbx + PyDictObject.entries]
-    imul rdx, rcx, SET_ENTRY_SIZE
-    add rax, rdx                ; rax = entry ptr
+    lea rdx, [rcx + rcx]
+    lea rax, [rax + rdx*8]
 
     SET_ENTRY_CLASSIFY rax, .found_empty, .find_tombstone
-    mov rdi, [rax + SET_ENTRY_KEY]
 
     ; Hash match?
     cmp r13, [rax + SET_ENTRY_HASH]
     jne .find_next
 
-    ; Key equality check
-    ; rdi = entry.key (already loaded above)
+    ; The stored key is a Value and so is the probe key, and the encoding is a
+    ; bijection: equal Values are the same object, and two equal small ints
+    ; have bit-identical Values.  So `cmp` answers for every int, every
+    ; interned str and every identity hit -- where this used to V_UNPACK the
+    ; entry, call set_keys_equal, V_PACK both operands back and call
+    ; obj_richcompare_bool, two call/ret pairs and about seventy instructions
+    ; to conclude what one compare does.  dict_lookup has had its inline
+    ; compare since a52b70d; set was left out of it.
+    mov rdi, [rax + SET_ENTRY_KEY]
+    cmp rdi, r12
+    je .found_existing
+
+    ; Different Values still need the real question asked: 1.0 == 1, and a
+    ; user class decides for itself.
     push rcx                    ; save slot
     push rax                    ; save entry ptr
-
-    V_UNPACK rdi, rdx           ; set_keys_equal takes (payload, tag)
-    mov rsi, r12                        ; b = lookup key
-    mov rcx, [rbp - SFS_KEY_TAG]        ; b_tag (lookup key tag)
+    mov rsi, r12                ; b = the lookup key
     call set_keys_equal
     mov edi, eax                ; save equality result (survives pops)
     pop rax                     ; entry ptr
@@ -348,7 +391,6 @@ DEF_FUNC_LOCAL set_find_slot
 .find_next:
     inc rcx
     and rcx, r15
-    inc r14
     jmp .find_loop
 
 .found_empty:
@@ -508,23 +550,15 @@ DEF_FUNC set_add
     push r13
     push r14
 
-    V_UNPACK rsi, rdx           ; decode the key Value
     mov rbx, rdi                ; set
-    mov r12, rsi                ; key
-    mov r14, rdx                ; key_tag
+    mov r12, rsi                ; the key, a Value
 
-    ; Hash the key
-    mov rdi, r12
-    mov rsi, r14                ; key_tag (saved from rdx on entry)
-    V_PACK rdi, rsi
-    call obj_hash
-    mov r13, rax                ; r13 = hash
+    SET_HASH_VALUE r12, r13     ; r13 = hash
 
     ; Find slot
     mov rdi, rbx                ; set
-    mov rsi, r12                ; key
+    mov rsi, r12                ; the key
     mov rdx, r13                ; hash
-    mov rcx, r14                ; key_tag
     call set_find_slot
     ; rax = entry ptr, edx = 1 if existing, 0 if empty
 
@@ -541,10 +575,10 @@ DEF_FUNC set_add
     jne .fresh_slot
     dec qword [rbx + PyDictObject.dk_tombstones]
 .fresh_slot:
-    ; Store hash and key; INCREF while the tag is in hand, then pack
+    ; Store the hash and the key; the entries hold Values, which is what the
+    ; key already is.
     mov [rax + SET_ENTRY_HASH], r13
-    INCREF_VAL r12, r14
-    V_PACK r12, r14
+    INCREF_V r12, rcx
     mov [rax + SET_ENTRY_KEY], r12
 
     ; Increment ob_size
@@ -613,23 +647,15 @@ DEF_FUNC set_contains, SCT_FRAME
     mov rsi, rax
 .sct_not_set:
 
-    V_UNPACK rsi, rdx           ; decode the key Value
     mov rbx, rdi                ; set
-    mov r12, rsi                ; key
-    mov r14, rdx                ; key_tag
+    mov r12, rsi                ; the key, a Value
 
-    ; Hash the key
-    mov rdi, r12
-    mov rsi, r14                ; key_tag
-    V_PACK rdi, rsi
-    call obj_hash
-    mov r13, rax                ; r13 = hash
+    SET_HASH_VALUE r12, r13     ; r13 = hash
 
     ; Find slot
     mov rdi, rbx                ; set
-    mov rsi, r12                ; key
+    mov rsi, r12                ; the key
     mov rdx, r13                ; hash
-    mov rcx, r14                ; key_tag
     call set_find_slot
     ; rax = entry ptr, edx = 1 if found, 0 if empty slot
 
@@ -860,68 +886,64 @@ END_FUNC set_contains_sq
 ;; set_remove(set, key) -> int (0=ok, -1=not found)
 ;; Remove a key from the set
 ;; ============================================================================
-SR_KEY_TAG equ 8
-DEF_FUNC set_remove, SR_KEY_TAG
+SR_FRAME equ 8                  ; 8 + 5 pushes keeps rsp 16-aligned
+DEF_FUNC set_remove, SR_FRAME
     push rbx
     push r12
     push r13
     push r14
     push r15
 
-    V_UNPACK rsi, rdx           ; decode the key Value
     mov rbx, rdi                ; set
-    mov r12, rsi                ; key
-    mov [rbp - SR_KEY_TAG], rdx ; save key_tag
+    mov r12, rsi                ; the key, a Value
 
-    ; Hash the key
-    mov rdi, r12
-    mov rsi, rdx                ; key_tag
-    V_PACK rdi, rsi
-    call obj_hash
-    mov r13, rax                ; hash
+    SET_HASH_VALUE r12, r13     ; r13 = hash
 
-    ; capacity mask
-    mov r14, [rbx + PyDictObject.capacity]
-    lea r15, [r14 - 1]          ; mask
+    ; An independent second copy of set_find_slot's probe, because a removal
+    ; has to tombstone the slot it lands on rather than be handed one; it gets
+    ; the same treatment.
+    mov r14, [rbx + PyDictObject.capacity]  ; probes remaining, counting down
+    mov r15, r14
+    dec r15                     ; mask
 
     ; Starting slot
     mov rcx, r13
     and rcx, r15
-    xor r14d, r14d              ; probe counter
 
 .sr_probe:
-    cmp r14, [rbx + PyDictObject.capacity]
-    jge .sr_not_found
+    dec r14
+    js .sr_not_found
 
     mov rax, [rbx + PyDictObject.entries]
-    imul rdx, rcx, SET_ENTRY_SIZE
-    add rax, rdx
+    lea rdx, [rcx + rcx]
+    lea rax, [rax + rdx*8]      ; entries + slot * SET_ENTRY_SIZE
 
-    mov rdi, [rax + SET_ENTRY_KEY]
     SET_ENTRY_CLASSIFY rax, .sr_not_found, .sr_next
 
     cmp r13, [rax + SET_ENTRY_HASH]
     jne .sr_next
 
-    ; rdi = entry.key (already loaded)
+    ; Equal Values are the same key; see set_find_slot.
+    mov rdi, [rax + SET_ENTRY_KEY]
+    cmp rdi, r12
+    mov rdx, rax
+    je .sr_found
+
     push rcx                    ; save slot
     push rax                    ; save entry ptr
-
-    V_UNPACK rdi, rdx           ; set_keys_equal takes (payload, tag)
-    mov rsi, r12                        ; b = lookup key
-    mov rcx, [rbp - SR_KEY_TAG]         ; b_tag (lookup key tag)
+    mov rsi, r12                ; b = the lookup key
     call set_keys_equal
     pop rdx                     ; entry ptr
     pop rcx
     test eax, eax
     jz .sr_next
 
-    ; Found: tombstone entry, DECREF key, decrement size
+.sr_found:
+    ; Found: tombstone the entry, release the key, decrement the size
     mov rdi, [rdx + SET_ENTRY_KEY]
-    V_UNPACK rdi, rsi
     mov qword [rdx + SET_ENTRY_KEY], 0
     mov qword [rdx + SET_ENTRY_HASH], ENTRY_TOMBSTONE_HASH   ; tombstone
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     dec qword [rbx + PyDictObject.ob_size]
     inc qword [rbx + PyDictObject.dk_tombstones]
     xor eax, eax               ; return 0 = success
@@ -930,7 +952,6 @@ DEF_FUNC set_remove, SR_KEY_TAG
 .sr_next:
     inc rcx
     and rcx, r15
-    inc r14
     jmp .sr_probe
 
 .sr_not_found:
