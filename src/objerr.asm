@@ -407,6 +407,7 @@ END_FUNC raise_builtin_arity
 ;;   list.__new__(): not enough arguments
 ;;   list.__new__(X): X is not a type object (int)
 ;;   list.__new__(dict): dict is not a subtype of list
+;;   int.__new__(bool) is not safe, use bool.__new__()
 ;;
 ;; The first name is the type the __new__ was found on, not the argument's:
 ;; that is what says which constructor was reached, and it is the whole point
@@ -431,6 +432,8 @@ DEF_FUNC raise_new_bad_class, RNB_FRAME
     je .rnb_no_arg
     cmp qword [rbp - RNB_WHY], 1
     je .rnb_not_type
+    cmp qword [rbp - RNB_WHY], 3
+    je .rnb_not_safe
 
     ; "T.__new__(cls): cls is not a subtype of T"
     CSTRING rsi, ".__new__("
@@ -451,6 +454,23 @@ DEF_FUNC raise_new_bad_class, RNB_FRAME
 
 .rnb_no_arg:
     CSTRING rsi, ".__new__(): not enough arguments"
+    call rbt_append_cstr
+    jmp .rnb_raise
+
+.rnb_not_safe:
+    ; "T.__new__(cls) is not safe, use cls.__new__()" -- cls is a subtype, but
+    ; the constructor that would actually run for it is not T's.
+    CSTRING rsi, ".__new__("
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rnb_arg_name
+    mov rdi, rax
+    CSTRING rsi, ") is not safe, use "
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rnb_arg_name
+    mov rdi, rax
+    CSTRING rsi, ".__new__()"
     call rbt_append_cstr
     jmp .rnb_raise
 

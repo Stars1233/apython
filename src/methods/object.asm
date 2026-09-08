@@ -2323,9 +2323,114 @@ END_FUNC generic_method_contains
 ;; The owner's constructor already takes the class to build as its first
 ;; argument, which is how a subclass instance still comes out.
 ;; ============================================================================
+;; ============================================================================
+;; new_check_class(rdi = the type this __new__ belongs to, rsi = args,
+;;                 rdx = nargs) -> rax = args[0], the class to build; or the
+;;                 TypeError is raised and this does not return
+;;
+;; The three things CPython's tp_new_wrapper checks before any __new__ runs,
+;; in its order and with its wording: there is a first argument, it is a type,
+;; and it is a subtype of the type whose __new__ was reached.  Skipping the
+;; last one is not a message-quality question -- `list.__new__(dict)` built a
+;; DICT and handed it back as the result of list's constructor, and every
+;; container and scalar __new__ in this tree did that.
+;; ============================================================================
 extern type_check_is_class
 extern type_is_subtype
 extern raise_new_bad_class
+NCC_OWNER equ 8
+NCC_ARGS  equ 16
+NCC_FRAME equ 24                        ; + 1 push = 32, 16-aligned
+DEF_FUNC new_check_class, NCC_FRAME
+    push rbx
+    mov [rbp - NCC_OWNER], rdi
+    mov [rbp - NCC_ARGS], rsi
+    mov rbx, rdi
+
+    test rdx, rdx
+    jz .ncc_no_arg
+
+    mov rdi, [rsi]                      ; cls
+    call type_check_is_class
+    test eax, eax
+    jz .ncc_not_type
+
+    mov rsi, [rbp - NCC_ARGS]
+    mov rdi, [rsi]
+    mov rsi, rbx
+    call type_is_subtype
+    test eax, eax
+    jz .ncc_not_subtype
+
+    ; ...and the constructor that would actually run for it has to be the one
+    ; being asked for.  `int.__new__(bool)` is a subtype call and still wrong:
+    ; bool builds itself, so int's constructor would make an int wearing
+    ; bool's name.  CPython compares the two tp_new slots and so does this.
+    mov rax, [rbp - NCC_ARGS]
+    mov rdi, [rax]
+    test qword [rdi + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .ncc_static                      ; cls is static: its own slot answers
+    extern base_slot
+    mov rsi, PyTypeObject.tp_new
+    call base_slot                      ; the first STATIC base's constructor
+    test rax, rax
+    jz .ncc_ok                          ; no static base with one at all
+    cmp rax, [rbx + PyTypeObject.tp_new]
+    jne .ncc_not_safe
+    jmp .ncc_ok
+.ncc_static:
+    mov rax, [rdi + PyTypeObject.tp_new]
+    cmp rax, [rbx + PyTypeObject.tp_new]
+    jne .ncc_not_safe
+.ncc_ok:
+    mov rax, [rbp - NCC_ARGS]
+    mov rax, [rax]
+    pop rbx
+    leave
+    ret
+
+.ncc_not_safe:
+    mov rdi, rbx
+    mov rsi, [rbp - NCC_ARGS]
+    mov rsi, [rsi]
+    mov edx, 3
+    call raise_new_bad_class
+.ncc_no_arg:
+    mov rdi, rbx
+    xor esi, esi
+    xor edx, edx
+    call raise_new_bad_class
+.ncc_not_type:
+    mov rdi, rbx
+    mov rsi, [rbp - NCC_ARGS]
+    mov rsi, [rsi]
+    mov edx, 1
+    call raise_new_bad_class
+.ncc_not_subtype:
+    mov rdi, rbx
+    mov rsi, [rbp - NCC_ARGS]
+    mov rsi, [rsi]
+    mov edx, 2
+    call raise_new_bad_class
+END_FUNC new_check_class
+
+;; ============================================================================
+;; new_from_slot(rdi = the type this __new__ belongs to, rsi = args,
+;;               rdx = nargs) -> Value
+;;
+;; The __new__ for a builtin that keeps its constructor in tp_new and has no
+;; entry of its own in tp_dict.  `weakref.ref` was the costly one: KeyedRef
+;; does `super().__new__(type, ob, callback)`, that found object.__new__
+;; instead, and object refuses extra arguments for a type whose real
+;; constructor is elsewhere -- so WeakValueDictionary, and everything in the
+;; standard library above it, could not be built.
+;;
+;; The slot called is the OWNER's, taken from rdi, never the argument's.  A
+;; subclass that defines __new__ in Python has its own entry ahead of this one
+;; in the MRO; reaching for cls->tp_new here would re-enter that and recurse.
+;; The owner's constructor already takes the class to build as its first
+;; argument, which is how a subclass instance still comes out.
+;; ============================================================================
 DEF_FUNC new_from_slot, 8               ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
@@ -2334,23 +2439,11 @@ DEF_FUNC new_from_slot, 8               ; 3 pushes, so rsp is 16-aligned
     mov r12, rsi                        ; args
     mov r13, rdx                        ; nargs
 
-    test r13, r13
-    jz .nfs_no_arg
-
-    mov rdi, [r12]                      ; cls
-    call type_check_is_class
-    test eax, eax
-    jz .nfs_not_type
-
-    mov rdi, [r12]
-    mov rsi, rbx
-    call type_is_subtype
-    test eax, eax
-    jz .nfs_not_subtype
+    call new_check_class                ; raises for all three refusals
 
     mov rax, [rbx + PyTypeObject.tp_new]
     test rax, rax
-    jz .nfs_not_subtype                 ; an owner with no constructor at all
+    jz .nfs_no_ctor                     ; an owner with no constructor at all
 
     mov rdi, [r12]                      ; cls
     lea rsi, [r12 + 8]                  ; the arguments after cls
@@ -2361,19 +2454,55 @@ DEF_FUNC new_from_slot, 8               ; 3 pushes, so rsp is 16-aligned
     leave
     jmp rax                             ; the slot returns a Value already
 
-.nfs_no_arg:
-    mov rdi, rbx
-    xor esi, esi
-    xor edx, edx
-    call raise_new_bad_class
-.nfs_not_type:
-    mov rdi, rbx
-    mov rsi, [r12]
-    mov edx, 1
-    call raise_new_bad_class
-.nfs_not_subtype:
+.nfs_no_ctor:
     mov rdi, rbx
     mov rsi, [r12]
     mov edx, 2
     call raise_new_bad_class
 END_FUNC new_from_slot
+
+;; ============================================================================
+;; The per-type __new__ entry points.
+;;
+;; container_dunder_new serves list, tuple, dict, set and frozenset, and
+;; scalar_dunder_new serves int, str, float and complex: one body each,
+;; because what they do is decided by the class argument's own flags.  That is
+;; also why neither could check the argument -- a shared body does not know
+;; which type's dict it was reached through, and "is dict a subtype of list"
+;; is a question about the OWNER.  So each type gets four lines that name it,
+;; and `list.__new__(dict)` stops answering `{}`.
+;; ============================================================================
+%macro NEW_THUNK 3              ; %1 = symbol, %2 = owner type, %3 = the body
+DEF_FUNC %1                     ; 2 pushes + frame 0 = 16, 16-aligned
+    push rbx
+    push r12
+    mov rbx, rdi                ; args
+    mov r12, rsi                ; nargs
+    lea rdi, [rel %2]
+    mov rsi, rbx
+    mov rdx, r12
+    call new_check_class        ; raises for a bad class argument
+    mov rdi, rbx
+    mov rsi, r12
+    call %3
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC %1
+%endmacro
+
+extern container_dunder_new
+extern set_type
+extern module_type
+extern module_method_new
+NEW_THUNK list_dunder_new,      list_type,      container_dunder_new
+NEW_THUNK tuple_dunder_new,     tuple_type,     container_dunder_new
+NEW_THUNK dict_dunder_new,      dict_type,      container_dunder_new
+NEW_THUNK set_dunder_new,       set_type,       container_dunder_new
+NEW_THUNK frozenset_dunder_new, frozenset_type, container_dunder_new
+NEW_THUNK int_dunder_new,       int_type,       scalar_dunder_new
+NEW_THUNK str_dunder_new,       str_type,       scalar_dunder_new
+NEW_THUNK float_dunder_new,     float_type,     scalar_dunder_new
+NEW_THUNK complex_dunder_new,   complex_type,   scalar_dunder_new
+NEW_THUNK module_dunder_new,    module_type,    module_method_new

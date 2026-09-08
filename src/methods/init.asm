@@ -158,6 +158,16 @@ extern bytes_method_replace
 extern bytes_method_split
 extern bytes_method_startswith
 extern container_dunder_new
+extern list_dunder_new
+extern tuple_dunder_new
+extern dict_dunder_new
+extern set_dunder_new
+extern frozenset_dunder_new
+extern int_dunder_new
+extern str_dunder_new
+extern float_dunder_new
+extern complex_dunder_new
+extern module_dunder_new
 extern memoryview_getattr
 extern property_getattr
 extern descr_func_attr
@@ -659,7 +669,10 @@ DEF_FUNC_LOCAL add_new_staticmethod, 8            ; 3 pushes, so rsp is 16-align
 
     mov rdi, r13                            ; func ptr
     lea rsi, [rel mn___new__]               ; name
-    mov edx, 1                              ; min args (cls)
+    ; No minimum: the arity refusal belongs to new_check_class, which words it
+    ; as CPython does -- "list.__new__(): not enough arguments" rather than the
+    ; generic count message this would have given.
+    xor edx, edx
     mov rcx, -1                             ; no maximum
     call builtin_func_new_checked
     mov [rsp], rax              ; args[0] for staticmethod()
@@ -772,10 +785,9 @@ DEF_FUNC_LOCAL set_add_shared_methods, SASM_FRAME
     ADD_FN_D SASM_DICT, mn___contains__, generic_method_contains
 
     ; __new__ allocates an empty instance of args[0], so it serves both.
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel container_dunder_new]
-    call add_new_staticmethod
-
+    ; __new__ is NOT here: it names the type it belongs to, and this body is
+    ; called once for set's dict and once for frozenset's.  Each registers its
+    ; own, so `set.__new__(frozenset)` is refused the way CPython refuses it.
     mov rdi, [rbp - SASM_DICT]
     call add_class_getitem
 
@@ -886,7 +898,7 @@ DEF_FUNC methods_init
     ; `member_type.__new__(cls, *args)`, and decides which base is the data
     ; type by asking whether __new__ is in its __dict__.
     mov rdi, rbx
-    lea rsi, [rel scalar_dunder_new]
+    lea rsi, [rel str_dunder_new]
     call add_new_staticmethod
 
     ADD_FN_N mn_upper, str_method_upper, 1, 1
@@ -1123,7 +1135,7 @@ DEF_FUNC methods_init
 
     extern module_method_new
     mov rdi, rbx
-    lea rsi, [rel module_method_new]
+    lea rsi, [rel module_dunder_new]
     call add_new_staticmethod       ; __new__ takes the class, not an instance
     extern module_method_init
     ADD_FN mn___init__, module_method_init
@@ -1257,7 +1269,7 @@ DEF_FUNC methods_init
     ADD_FN_N mn___init__, list_dunder_init, 1, -1
 
     mov rdi, rbx
-    lea rsi, [rel container_dunder_new]
+    lea rsi, [rel list_dunder_new]
     call add_new_staticmethod
 
     mov rdi, rbx
@@ -1331,7 +1343,7 @@ DEF_FUNC methods_init
     ADD_CLASSMETHOD_N mn_fromkeys, dict_classmethod_fromkeys, 2, 3
 
     mov rdi, rbx
-    lea rsi, [rel container_dunder_new]
+    lea rsi, [rel dict_dunder_new]
     call add_new_staticmethod
 
     ADD_FN_N mn___contains__, generic_method_contains, 2, 2
@@ -1402,7 +1414,7 @@ DEF_FUNC methods_init
     ADD_FN_N mn___rmul__, tuple_dunder_rmul, 2, 2
 
     mov rdi, rbx
-    lea rsi, [rel container_dunder_new]
+    lea rsi, [rel tuple_dunder_new]
     call add_new_staticmethod
 
     mov rdi, rbx
@@ -1454,6 +1466,9 @@ DEF_FUNC methods_init
     ; update() already takes (self, iterable) and returns None.
     ADD_FN_N mn___init__, set_method_update, 1, -1
 
+    mov rdi, rbx
+    lea rsi, [rel set_dunder_new]
+    call add_new_staticmethod
     mov rdi, rbx
     call set_add_shared_methods
 
@@ -1513,6 +1528,9 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax
 
+    mov rdi, rbx
+    lea rsi, [rel frozenset_dunder_new]
+    call add_new_staticmethod
     mov rdi, rbx
     call set_add_shared_methods
 
@@ -1967,7 +1985,7 @@ DEF_FUNC methods_init
     ; `member_type.__new__(cls, *args)`, and decides which base is the data
     ; type by asking whether __new__ is in its __dict__.
     mov rdi, rbx
-    lea rsi, [rel scalar_dunder_new]
+    lea rsi, [rel int_dunder_new]
     call add_new_staticmethod
 
     ADD_FN_N mn_bit_length, int_method_bit_length, 1, 1
@@ -2177,7 +2195,7 @@ DEF_FUNC methods_init
     ADD_FN_N mn___repr__, complex_dunder_repr, 1, 1
 
     mov rdi, rbx
-    lea rsi, [rel scalar_dunder_new]
+    lea rsi, [rel complex_dunder_new]
     call add_new_staticmethod
 
     ADD_FN_N mn_conjugate, complex_method_conjugate, 1, 1
@@ -2253,7 +2271,7 @@ DEF_FUNC methods_init
     ; that overrides __new__ reaches the base's through super(), and enum
     ; looks the name up in __dict__ to pick its data type.
     mov rdi, rbx
-    lea rsi, [rel scalar_dunder_new]
+    lea rsi, [rel float_dunder_new]
     call add_new_staticmethod
 
     ADD_FN_N mn_is_integer, float_method_is_integer, 1, 1

@@ -178,3 +178,48 @@ try:
     list(sequence=())
 except TypeError:
     print("list keyword refused")
+
+
+# `T.__new__(cls)` checks its class argument, and every builtin __new__ has to
+# do it: `list.__new__(dict)` used to BUILD a dict and hand it back as the
+# result of list's constructor.  container_dunder_new and scalar_dunder_new
+# each serve four or five types, so neither could ask "is this a subtype of
+# ME" -- the owner is the type whose dict the __new__ was reached through, and
+# a shared body does not know it.  Each type names itself now.
+def newcheck(expr):
+    try:
+        return repr(eval(expr))
+    except TypeError as e:
+        return "TypeError: %s" % e
+
+
+for expr in ("list.__new__(dict)", "dict.__new__(list)", "tuple.__new__(list)",
+             "set.__new__(frozenset)", "frozenset.__new__(set)",
+             "int.__new__(str)", "str.__new__(int)", "float.__new__(int)",
+             "complex.__new__(float)", "list.__new__(1)", "list.__new__(None)",
+             "list.__new__()", "int.__new__(bool)", "list.__new__(list)",
+             "tuple.__new__(tuple)", "set.__new__(set)"):
+    print(expr, "->", newcheck(expr))
+
+
+# A subclass is a subtype, and its own constructor is still the base's, so it
+# passes both checks.
+class L(list):
+    pass
+
+
+class D(dict):
+    pass
+
+
+class I(int):
+    pass
+
+
+class S(str):
+    pass
+
+
+print(repr(list.__new__(L)), repr(dict.__new__(D)))
+print(repr(int.__new__(I, 5)), repr(str.__new__(S, "x")))
+print(type(list.__new__(L)) is L, type(int.__new__(I, 5)) is I)
