@@ -559,17 +559,9 @@ DEF_FUNC sym_visit, SV_FRAME
     mov [rbp - SV_N], rcx
     jmp .ne_climb
 .ne_found:
-    mov rdi, rbx
-    mov rsi, [rbp - SV_N]
-    call sym_at
-    xor r13d, r13d
-    cmp dword [rax + Scope.kind], SCOPE_FUNCTION
-    je .ne_have_kind
-    mov r13d, 1                         ; module or class: a global
-.ne_have_kind:
-    mov [rbp - SV_I], r13
-
-    ; The name itself.
+    ; The name first: whether the target is nonlocal or global depends on what
+    ; the enclosing scope has already SAID about it, not only on what kind of
+    ; scope it is.
     mov rax, [rbp - SV_NPTR]
     mov esi, [rax + AstNode.a]
     mov rdi, rbx
@@ -578,6 +570,28 @@ DEF_FUNC sym_visit, SV_FRAME
     mov rdi, rbx
     call ast_obj_at
     mov [rbp - SV_NAME], rax
+
+    mov rdi, rbx
+    mov rsi, [rbp - SV_N]
+    call sym_at
+    xor r13d, r13d
+    cmp dword [rax + Scope.kind], SCOPE_FUNCTION
+    jne .ne_is_global                   ; module or class: a global
+    ; ...and a function that declared the name `global` makes the target one
+    ; too.  Taking the scope's kind as the whole answer declared it NONLOCAL,
+    ; and sym_classify then walked out looking for a binding it had itself
+    ; just been told not to look for: `[G := 5 for _ in r]` under a
+    ; `global G` was "no binding for nonlocal 'G' found".
+    mov rdi, rbx
+    mov rsi, [rbp - SV_N]
+    mov rdx, [rbp - SV_NAME]
+    call sym_get
+    test eax, DEF_GLOBAL
+    jz .ne_have_kind
+.ne_is_global:
+    mov r13d, 1
+.ne_have_kind:
+    mov [rbp - SV_I], r13
 
     ; Bind it where it belongs.
     mov rdi, rbx

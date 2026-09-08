@@ -65,3 +65,62 @@ d = {}
 while (item := len(d)) < 3:
     d[item] = item
 print(d, item)
+
+
+# A walrus target inside a comprehension binds in the ENCLOSING scope, and
+# which kind of binding that is depends on what the enclosing scope has said
+# about the name -- not only on what kind of scope it is.  Taking the kind as
+# the whole answer declared the target nonlocal even under a `global`, and the
+# classifier then went looking for a binding it had just been told not to look
+# for: "no binding for nonlocal 'G' found".
+G = None
+
+
+def to_a_global():
+    global G
+    [G := 5 for _ in range(1)]
+    return G
+
+
+print(to_a_global(), G)
+
+
+def to_a_nonlocal():
+    x = 0
+
+    def inner():
+        nonlocal x
+        [x := 7 for _ in range(1)]
+
+    inner()
+    return x
+
+
+print(to_a_nonlocal())
+
+
+def to_a_plain_local():
+    y = 0
+    [y := 3 for _ in range(1)]
+    return y
+
+
+print(to_a_plain_local())
+
+MODULE_LEVEL = None
+[MODULE_LEVEL := 9 for _ in range(1)]
+print(MODULE_LEVEL)
+
+
+# The global declared inside a nested function, with the comprehension two
+# deep, which is where the climb out of the comprehension scopes matters.
+H = None
+
+
+def two_deep():
+    global H
+    [[H := i for i in range(3)] for _ in range(1)]
+    return H
+
+
+print(two_deep(), H)
