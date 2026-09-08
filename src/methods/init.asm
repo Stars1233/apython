@@ -1789,6 +1789,8 @@ DEF_FUNC methods_init
     mov rbx, rax
     extern staticmethod_dunder_get
     ADD_FN mn___get__, staticmethod_dunder_get
+    extern staticmethod_method_init
+    ADD_FN mn___init__, staticmethod_method_init
     extern staticmethod_dunder_call
     ADD_FN mn___call__, staticmethod_dunder_call
     lea rax, [rel staticmethod_type]
@@ -1800,6 +1802,8 @@ DEF_FUNC methods_init
     mov rbx, rax
     extern classmethod_dunder_get
     ADD_FN mn___get__, classmethod_dunder_get
+    extern classmethod_method_init
+    ADD_FN mn___init__, classmethod_method_init
     lea rax, [rel classmethod_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1810,6 +1814,8 @@ DEF_FUNC methods_init
     mov rbx, rax
     extern property_dunder_get
     ADD_FN mn___get__, property_dunder_get
+    extern property_method_init
+    ADD_FN mn___init__, property_method_init
     extern property_dunder_set
     ADD_FN mn___set__, property_dunder_set
     extern property_dunder_delete

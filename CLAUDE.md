@@ -494,6 +494,19 @@ Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 byt
   and out of the `for` that was calling it.  Use `SET_EXC` and return NULL;
   the slot wrapper is what turns StopIteration into exhaustion.
 
+- **Turning on `TYPE_FLAG_HAVE_GC` without moving every allocation site.**
+  The flag is what `gc_dealloc` reads to decide whether to free at
+  `obj - GC_HEAD_SIZE`, so the moment a type carries it, EVERY place that
+  builds one of its instances has to come from `gc_alloc` and every free has to
+  go through `gc_dealloc`.  A second constructor still using `ap_malloc` hands
+  the allocator a pointer sixteen bytes short of what it gave out, and the heap
+  corruption surfaces as segfaults in unrelated tests.  `frame_object_type` had
+  two constructors -- one for `sys._getframe()`, one for a traceback's snapshot
+  -- and only the first was moved.  A type declaring `tp_traverse` and
+  `tp_clear` while its instances are never tracked is the other half of the
+  same mistake: the collector never sees them, so a cycle through one is
+  uncollectable.
+
 - **A removed load whose guard stayed.** The `(payload, tag)` conversion deleted many `key_tag` loads; where the `test`/`jz` that used them was left in place it now reads a stale register — `from mod import *` and `dict.popitem()` both failed this way, silently. When deleting a load, delete its test.
 
 ## Adding a New Test

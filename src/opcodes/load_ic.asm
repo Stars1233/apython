@@ -473,8 +473,9 @@ END_FUNC op_load_attr_instance
 ;; ============================================================================
 LAP_OBJ   equ 8
 LAP_RET   equ 16
-LAP_FRAME equ 24                ; a handler is entered with rsp 16-aligned, so
-                                ; push rbp + 24 brings it back to aligned
+LAP_ARG   equ 24                ; the oparg, which frame_new's rcx destroys
+LAP_FRAME equ 40                ; a handler is entered with rsp 16-aligned, so
+                                ; push rbp + 40 brings it back to aligned
 
 DEF_FUNC op_load_attr_property, LAP_FRAME
     ; ecx is the oparg and must survive to .lap_deopt, which hands it to
@@ -511,8 +512,10 @@ DEF_FUNC op_load_attr_property, LAP_FRAME
          CO_ASYNC_GENERATOR
     jnz .lap_deopt
 
-    ; Past the last guard.
+    ; Past the last guard, so rcx is free -- but the name is still wanted on
+    ; the error path below, and by then frame_new will have had rcx.
     mov [rbp - LAP_OBJ], rdi
+    mov [rbp - LAP_ARG], rcx
 
     ; frame_new(code, globals, builtins, locals = NULL), as op_call_py_exact.
     mov rdi, rax
@@ -538,7 +541,23 @@ DEF_FUNC op_load_attr_property, LAP_FRAME
 
     mov rax, [rbp - LAP_RET]
     test rax, rax
+    jnz .lap_have
+
+    ; The getter raised.  An AttributeError out of one is the attribute saying
+    ; it is absent, not a failure, and __getattr__ is the hook for exactly
+    ; that -- the generic handler asks the same question at .la_prop_call.
+    mov rdi, [rbp - LAP_OBJ]
+    mov esi, [rbp - LAP_ARG]
+    shr esi, 1                      ; the arg is (name index << 1 | flag)
+    shl esi, 3
+    LOAD_CO_NAMES rcx
+    mov rsi, [rcx + rsi]
+    extern attr_getattr_hook
+    call attr_getattr_hook          ; -> (rax, edx); edx = 0 leaves it pending
+    V_PACK rax, rdx
+    test rax, rax
     jz .lap_propagate
+.lap_have:
 
     ; attr_error_pending says a __getattr__ raised an AttributeError that
     ; raise_no_attribute should hand over rather than replace, and every

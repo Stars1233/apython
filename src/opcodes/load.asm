@@ -1124,6 +1124,16 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_ATTR]   ; property descriptor
     mov rsi, [rbp - LA_OBJ]    ; obj
     call property_descr_get
+    ; A getter that raised an AttributeError has not failed -- it has said the
+    ; attribute is absent, which is what __getattr__ is the hook for.  Asked
+    ; here, before the object below is released, and before the tag says NULL.
+    test edx, edx
+    jnz .la_prop_got
+    mov rdi, [rbp - LA_OBJ]
+    mov rsi, [rbp - LA_NAME]
+    extern attr_getattr_hook
+    call attr_getattr_hook     ; -> (rax, edx); edx = 0 leaves it pending
+.la_prop_got:
     SAVE_FAT_RESULT            ; save (rax,rdx) across DECREF calls
 
     ; DECREF property wrapper
@@ -2098,6 +2108,15 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     mov rdi, [rbp - GA_ATTR]
     mov rsi, [rbp - GA_OBJ]
     call property_descr_get
+    ; As in op_load_attr: an AttributeError out of the getter is the attribute
+    ; saying it is absent, and a class with __getattr__ gets its chance at the
+    ; name.  getattr(o, n, default) reaches the property through here.
+    test edx, edx
+    jnz .ga_prop_got
+    mov rdi, [rbp - GA_OBJ]
+    mov rsi, [rbp - GA_NAME]
+    call attr_getattr_hook
+.ga_prop_got:
     ; property_descr_get hands back the (payload, tag) pair, already unpacked.
     ; Unpacking it again read the payload as a Value: a small int came back as
     ; a pointer to its own numeric value, and the first thing to touch it died.

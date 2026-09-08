@@ -2109,7 +2109,9 @@ EIM_FRAME equ 40            ; + 1 push = 48, 16-aligned
     mov [rbp - EIM_FN], rax
     sub rsp, 16
     mov [rsp], rax
-    xor edi, edi
+    ; The class to build, which staticmethod_construct no longer ignores.
+    extern staticmethod_type
+    lea rdi, [rel staticmethod_type]
     mov rsi, rsp
     mov edx, 1
     extern staticmethod_construct

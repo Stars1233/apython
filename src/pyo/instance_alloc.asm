@@ -454,6 +454,40 @@ DEF_FUNC builtin_sub_alloc, BSA_FRAME
     ret
 END_FUNC builtin_sub_alloc
 
+;; ============================================================================
+;; descr_alloc(rdi = the class being constructed, rsi = this descriptor's own
+;;             static type, edx = that type's instance size) -> rax = the new
+;;             instance, ob_refcnt 1 and ob_type set
+;;
+;; The class a tp_new is called on is NOT always the type it belongs to.
+;; buildclass copies a builtin base's tp_new into the subclass and type_call
+;; hands it the SUBCLASS, so all three of these built a plain base instance
+;; for every subclass ever written: `type(C.__dict__['v'])` on a
+;; `class Loud(property)` answered `property`, and Loud.__get__ never ran.
+;; The attribute machinery was never at fault -- it falls through to the
+;; general __get__ lookup for anything that is not EXACTLY one of the four
+;; builtin descriptor types, and what it was handed genuinely was one.
+;;
+;; builtin_sub_alloc is how every other builtin subclass is built: the class's
+;; own tp_basicsize, so __slots__ and a __dict__ have room; everything past
+;; the header zeroed, because the collector can see the instance before its
+;; fields are filled; and the reference to the class that builtin_sub_dealloc
+;; gives back.  The exact type keeps the plain gc_alloc -- it is immortal, and
+;; nothing would hand that reference back.
+;; ============================================================================
+global descr_alloc
+DEF_FUNC descr_alloc
+    cmp rdi, rsi
+    jne .da_subclass
+    mov edi, edx                ; rsi already holds the type
+    leave
+    jmp gc_alloc
+.da_subclass:
+    extern builtin_sub_alloc
+    leave
+    jmp builtin_sub_alloc
+END_FUNC descr_alloc
+
 DEF_FUNC instance_new
     push rbx
     push r12

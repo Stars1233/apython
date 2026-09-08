@@ -54,41 +54,6 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **`sys._getframe()` leaks the frame's fast locals.**  Asking a live frame
-  for a frame object keeps a reference to every local it was holding, and the
-  reference is never given back: a hundred calls to a function that does
-  nothing but `sys._getframe()` leave a hundred of its arguments alive after
-  `gc.collect()`.  Reading `f_locals` or `f_back` is not what does it -- the
-  `_getframe()` alone is enough -- so the imbalance is between
-  `frameobj_detach`, which copies the locals out with a reference of their
-  own, and whatever should release the snapshot when the frame object dies.
-  A traceback's frame does NOT leak, which is the useful contrast: it goes
-  through `frameobj_from_code` instead.  Found while writing
-  test_call_arg_ownership, which is why that file does not cover
-  `sys._getframe`.
-
-- **A `property` subclass that defines its own `__get__` is not consulted.**
-  `op_load_attr`'s descriptor block compares the attribute's type against
-  `property_type` by identity and calls `property_descr_get` directly, so a
-  class deriving from `property` to wrap or log the read has its `__get__`
-  bypassed and the base behaviour runs instead.  The identity compare is a
-  fast path for the overwhelmingly common case; the fix is to fall through to
-  the general `__get__` lookup when the type is not exactly `property`, which
-  the block already does for every other heaptype descriptor.  The same shape
-  applies to `staticmethod`, `classmethod` and `getset_descriptor`, which are
-  compared the same way.  (LOAD_ATTR_PROPERTY refuses to specialize anything
-  but an exact `property`, so it does not widen this.)
-
-- **An `AttributeError` raised by a property getter is not offered to
-  `__getattr__`.**  CPython's `object.__getattribute__` lets the error out and
-  `slot_tp_getattr_hook` catches it and calls `__getattr__`; here it
-  propagates from `.la_property_run` straight to the unwinder, so a class with
-  both a computed attribute and a `__getattr__` fallback never reaches the
-  fallback.  `getattr(o, name, default)` and `hasattr` answer correctly, since
-  they go through `obj_getattr_opt`, which is why this was invisible.  There
-  is an `attr_error_pending` flag for exactly this handover; the property path
-  does not set it.
-
 - **`array.fromfile` and `array.tofile` are absent.**  They want the file
   object's own read and write, and every caller in CPython's suite reaches
   for `frombytes` and `tobytes` instead.

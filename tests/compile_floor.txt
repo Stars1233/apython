@@ -161,6 +161,7 @@ test_descr_func_attr
 test_descriptor_class_access
 test_descriptor_receiver
 test_descriptors
+test_descriptor_subclass
 test_dict_bugs
 test_dict_dunder_args
 test_dict_fromkeys
@@ -225,6 +226,7 @@ test_frame_clear_generator
 test_frame_clear
 test_frame_lineno
 test_frame_live
+test_frame_object_cycles
 test_frames_and_time
 test_frozenset_descriptors
 test_frozenset
@@ -401,6 +403,7 @@ test_prepare_raises
 test_print_file
 test_property_callables
 test_property_doc
+test_property_getattr_hook
 test_property
 test_property_raises
 test_pyc_hardening
