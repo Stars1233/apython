@@ -134,6 +134,38 @@ Repeat the register convention comment block at the top of every
 ; rbx has already been advanced past the 2-byte instruction word.
 ```
 
+## Inline Caches
+
+A specialized handler is installed by rewriting the opcode byte in the
+running bytecode buffer, and it deopts by writing the generic byte back.  Two
+rules keep that from costing more than it saves.
+
+**Ask the question per NAME, not per class.**  `TYPE_FLAG_MRO_HAS_DATA_DESCR`
+answers "does anything in this MRO outrank the instance dict", which is what a
+class-creation-time scan can maintain -- but a site caches ONE name, and using
+the class-wide bit means a single `@property` refuses the cache for every
+other attribute of that class and of every subclass.  Ask
+`type_lookup_cached` for the name and hand the answer to
+`attr_may_be_data_descr`.  It is affordable because it is asked once, at
+install, and the type version the handler guards on is what keeps it true:
+adding a property to the class or to a base stamps a new one.
+
+Both `LOAD_ATTR` and `STORE_ATTR` do this.  The per-class flag survives only
+as a cheap pre-filter, where a clear bit is a real negative.
+
+**A deopt must back off.**  A site whose guard can never pass -- a
+`STORE_ATTR` in an `__init__`, whose object's dict is empty on the very store
+that installed the cache -- otherwise specializes and deopts on every single
+execution, writing its own instruction byte twice per iteration for a cache
+that will never answer.  Spend a counter in one of the opcode's CACHE words:
+the deopt sets it, the install site counts it down and refuses while it is
+non-zero.  CPython spells the same idea `ADAPTIVE_BACKOFF_*`.
+
+**Testing one needs the same site twice.**  A fresh call site is cold and
+takes the generic path, so a test that builds a new one after changing the
+class proves nothing.  Put the access in a helper and call the helper before
+and after.
+
 ## Naming
 
 | Kind | Convention | Examples |

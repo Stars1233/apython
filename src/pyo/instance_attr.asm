@@ -978,35 +978,29 @@ DEF_FUNC instance_setattr
     mov r12, rsi                ; name
     mov r13, rdx                ; value Value
 
-    ; Walk the type's MRO looking for a member descriptor (slot)
+    ; Does the MRO define this name as a data descriptor?
     mov rax, [rbx + PyObject.ob_type]
-    mov r14, rax                ; origin of the walk
     ; A slot, a property and a getset are all data descriptors, so the flag
-    ; that says none of them is in this MRO says this walk will find nothing.
-    ; op_store_attr just walked the same MRO for the same reason.
+    ; that says none of them is in this MRO says the lookup will find nothing.
+    ; It is an over-approximation, so a clear flag is a real negative.
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_MRO_HAS_DATA_DESCR
     jz .sa_no_slot
-.sa_walk:
-    mov rdi, [rax + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jz .sa_try_base
-    push rax                    ; save current type
-    mov rsi, r12                ; name
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    mov r9, rax                 ; save dict_get value
-    pop rax                     ; restore current type
-    test edx, edx
-    jnz .sa_found_type
 
-.sa_try_base:
-    MRO_NEXT rax, r14
-    test rax, rax
-    jnz .sa_walk
-    jmp .sa_no_slot
+    ; Asked through the type cache, not by walking.  This is the SECOND time
+    ; the same MRO is searched for the same name on an ordinary store --
+    ; op_store_attr asks first -- and as a raw dict_get per level it cost more
+    ; than everything else the store does put together, every level of it
+    ; finding nothing.  Same registers as the walk it replaces, and the
+    ; reference is borrowed the same way.
+    mov rdi, rax
+    mov rsi, r12                ; name
+    call type_lookup_cached     ; rax = payload, edx = tag
+    mov r9, rax
+    test edx, edx
+    jz .sa_no_slot
 
 .sa_found_type:
-    ; Check if it's a member descriptor (r9 = dict value, rax = type)
+    ; Check if it's a member descriptor (r9 = the value found)
     cmp edx, TAG_PTR
     jne .sa_no_slot
     extern member_descr_type

@@ -2836,21 +2836,46 @@ DEF_FUNC_LOCAL sa_try_specialize, STS_FRAME
     V_TEST_PTR r12, rax
     ja .sts_out
 
-    ; An ordinary instance store: nothing in the MRO able to outrank the dict,
-    ; and no __setattr__ of the class's own.
+    ; An ordinary instance store: no __setattr__ of the class's own.
     mov rax, [r12 + PyObject.ob_type]
-    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_MRO_HAS_DATA_DESCR
-    jnz .sts_out
     lea rcx, [rel instance_setattr]
     cmp [rax + PyTypeObject.tp_setattr], rcx
     jne .sts_out
 
     ; The version the handler will guard on.
-    mov rax, [rax + PyTypeObject.tp_flags]
-    shr rax, TYPE_VERSION_SHIFT
-    test eax, eax
+    mov rcx, [rax + PyTypeObject.tp_flags]
+    shr rcx, TYPE_VERSION_SHIFT
+    test ecx, ecx
     jz .sts_out
-    mov [rbp - STS_VER], eax
+    mov [rbp - STS_VER], ecx
+
+    ; And nothing in the MRO able to outrank the instance dict FOR THIS NAME.
+    ; That used to be asked as TYPE_FLAG_MRO_HAS_DATA_DESCR, which is
+    ; per-CLASS: one @property anywhere in the MRO refused STORE_ATTR_INSTANCE
+    ; for every other attribute of the class and of every subclass, so an
+    ; ordinary object with one computed field ran the generic handler for all
+    ; of its plain writes.  The load side asks per name a few hundred lines
+    ; above; the store side is the same question with the same answer.
+    ;
+    ; A __slots__ member descriptor is a data descriptor too, and refusing it
+    ; here is what keeps the handler -- which writes into the instance dict --
+    ; away from a name that lives in a slot.
+    ;
+    ; attr_may_be_data_descr, not attr_is_data_descr: a descriptor's own type
+    ; can gain __set__ long after the class holding it was stamped.  Asked
+    ; once, at install; the version guard is what keeps the answer true.
+    mov rdi, rax
+    mov rsi, r13
+    call type_lookup_cached         ; rax = payload, edx = tag
+    test edx, edx
+    jz .sts_name_free               ; the MRO does not define it at all
+    cmp edx, TAG_PTR
+    jne .sts_name_free              ; and an immediate is never a descriptor
+    mov rdi, rax
+    call attr_may_be_data_descr
+    test eax, eax
+    jnz .sts_out
+.sts_name_free:
 
     LOAD_INST_DICT rbx, r12, .sts_out
     test rbx, rbx
