@@ -50,8 +50,9 @@ src/opcodes/call.asm                   3
 src/opcodes/exc.asm                    5
 src/opcodes/flow.asm                   17
 src/opcodes/import.asm                 2
-src/opcodes/load.asm                   25
+src/opcodes/load.asm                   14
 src/opcodes/match.asm                  12
+src/opcodes/store.asm                  11
 src/pyo/abcmod.asm                     4
 src/pyo/asyncmod.asm                   26
 src/pyo/bytearray.asm                  19

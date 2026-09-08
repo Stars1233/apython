@@ -466,6 +466,7 @@ test_sre_scanner_and_boundary
 test_stdlib_glue
 test_stdlib_shims
 test_stdout_buffering
+test_store_attr_per_name
 test_store_attr_spec
 test_str_build
 test_str_case
