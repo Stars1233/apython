@@ -508,6 +508,15 @@ Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 byt
   uncollectable.
 
 - **A removed load whose guard stayed.** The `(payload, tag)` conversion deleted many `key_tag` loads; where the `test`/`jz` that used them was left in place it now reads a stale register — `from mod import *` and `dict.popitem()` both failed this way, silently. When deleting a load, delete its test.
+  **And keep reading past the test.** The guard is rarely the only consumer:
+  converting `dunder_lookup`, `dunder_call_1` and `dict_get` to return a Value
+  swept every guard and left five `V_PACK rax, rdx` / `INCREF_VAL rax, rdx`
+  one line below one, still reading the tag register nothing had written. All
+  five produced wrong ANSWERS rather than crashes — an int 2^50 out, or an
+  INCREF skipped and a borrowed reference pushed — so `make check`,
+  `check-cpython`, both `-source` gates, `lint.py` and `INT_STRESS=1` were all
+  green over them. After converting a funnel, grep its call sites for the tag
+  register and read to the next write of it, not to the next branch.
 
 ## Adding a New Test
 
