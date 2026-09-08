@@ -137,6 +137,39 @@ DEF_FUNC_BARE op_import_name
     jmp eval_exception_unwind
 END_FUNC op_import_name
 
+
+;; ============================================================================
+;; import_module_dict(rdi = an object) -> rax = its mod_dict, or 0 when the
+;;   object is not a module
+;;
+;; sys.modules is an ordinary dict and a program may put anything in it --
+;; importlib's own import_fresh_module does.  Reading mod_dict off whatever
+;; was there handed dict_get a field that belongs to some other struct: a
+;; string's characters, in the crash that found this.
+;; ============================================================================
+extern module_type
+DEF_FUNC_BARE import_module_dict
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel module_type]
+    cmp rax, rcx
+    je .imd_yes
+    ; A ModuleType SUBCLASS is a module too, and lib/ ships one.
+    push rdi
+    mov rdi, rax
+    mov rsi, rcx
+    extern type_is_subtype
+    call type_is_subtype
+    pop rdi
+    test eax, eax
+    jz .imd_no
+.imd_yes:
+    mov rax, [rdi + PyModuleObject.mod_dict]
+    ret
+.imd_no:
+    xor eax, eax
+    ret
+END_FUNC import_module_dict
+
 ;; ============================================================================
 ;; op_import_from - Opcode 109: IMPORT_FROM
 ;;
@@ -187,7 +220,8 @@ DEF_FUNC op_import_from, IF2_FRAME
 
     ; tp_getattr returned NULL — try dict_get directly
     mov rdi, [rbp - IF2_MOD]
-    mov rdi, [rdi + PyModuleObject.mod_dict]
+    call import_module_dict
+    mov rdi, rax
     test rdi, rdi
     jz .if_try_submodule
     mov rsi, [rbp - IF_ATTR]
@@ -200,7 +234,8 @@ DEF_FUNC op_import_from, IF2_FRAME
 .if_no_getattr:
     ; No tp_getattr — try dict_get on module dict
     mov rdi, [rbp - IF2_MOD]
-    mov rdi, [rdi + PyModuleObject.mod_dict]
+    call import_module_dict
+    mov rdi, rax
     test rdi, rdi
     jz .if_try_submodule
     mov rsi, [rbp - IF_ATTR]

@@ -756,7 +756,13 @@ global import_submodule_attr
 DEF_FUNC import_submodule_attr, ISA_FRAME
     mov [rbp - ISA_MOD], rdi
     mov [rbp - ISA_ATTR], rsi
-    mov rdi, [rdi + PyModuleObject.mod_dict]
+    ; Only a module has a mod_dict.  sys.modules is an ordinary dict and a
+    ; program may put anything in it -- importlib's own import_fresh_module
+    ; does -- so this used to read a field belonging to some other struct and
+    ; hand it to dict_get.
+    extern import_module_dict
+    call import_module_dict
+    mov rdi, rax
     test rdi, rdi
     jz .isa_none
 
@@ -767,8 +773,9 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     jz .isa_none
     mov [rbp - ISA_T1], rax
     mov rdi, [rbp - ISA_MOD]
-    mov rdi, [rdi + PyModuleObject.mod_dict]
-    mov rsi, rax
+    call import_module_dict
+    mov rdi, rax
+    mov rsi, [rbp - ISA_T1]
     call dict_get
     V_UNPACK rax, rdx
     mov [rbp - ISA_T2], rax

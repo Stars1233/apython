@@ -225,6 +225,8 @@ IS_SQITEM   equ 72      ; sq_item for an __all__ that is neither list nor tuple
 IS_SUBNAME  equ 80      ; the name being imported as a submodule
 IS_FRAME    equ 80      ; sub rsp, 80 (after push rbp + push rbx = 96 total)
 extern dict_get
+extern module_type
+extern exc_ImportError_type
 extern dict_set
 extern str_from_cstr_heap
 extern obj_decref
@@ -242,11 +244,89 @@ extern obj_decref
     sub rsp, IS_FRAME
     mov [rbp - IS_MOD], rdi           ; save module ptr
 
+    ; A module keeps its namespace in mod_dict.  Anything ELSE keeps it in
+    ; __dict__, and `from x import *` is allowed over anything else: sys.modules
+    ; is an ordinary dict a program may put an ordinary object in, and
+    ; importlib's own import_fresh_module does exactly that.  This read
+    ; mod_dict off whatever it was handed, so a class registered there gave up
+    ; the field that happens to sit at that offset -- a string's characters,
+    ; read as a dict pointer, in the crash that found this.
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel module_type]
+    cmp rax, rcx
+    je .is_real_module
+    mov rdi, rax
+    mov rsi, rcx
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jnz .is_real_module
+
+    CSTRING rdi, "__dict__"
+    call str_from_cstr_heap
+    mov rbx, rax
+    mov rdi, [rbp - IS_MOD]
+    mov rsi, rax
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    push rax
+    push rax                        ; and a pad: the frame here is odd, so a
+                                    ; lone push would misalign the call
+    mov rdi, rbx
+    call obj_decref
+    pop rax
+    pop rax
+    test rax, rax
+    jz .is_no_dict
+    V_TEST_PTR rax, rcx
+    ja .is_no_dict
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel dict_type]
+    cmp rcx, rdx
+    je .is_dict_ok
+    ; A CLASS answers __dict__ with a mappingproxy, and CPython iterates that
+    ; through the mapping protocol.  The dict inside it is the class's own and
+    ; the class is alive on the value stack, so unwrapping is safe for exactly
+    ; as long as this needs it.
+    extern mappingproxy_type
+    lea rdx, [rel mappingproxy_type]
+    cmp rcx, rdx
+    jne .is_no_dict
+    push rax
+    mov rax, [rax + PyMappingProxyObject.mp_mapping]
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel dict_type]
+    cmp rcx, rdx
+    pop rcx
+    jne .is_no_dict
+    mov rdi, rcx
+    push rax
+    push rax                        ; pad, as above
+    call obj_decref                 ; the proxy; the dict is the class's own
+    pop rax
+    pop rax
+    mov [rbp - IS_MODDICT], rax
+    jmp .is_have_dict
+.is_dict_ok:
+    ; Borrowed on purpose: the object is alive on the value stack below, and
+    ; obj_getattr_opt's reference is released with it when the unwinder or the
+    ; ordinary path lets the stack slot go.
+    mov [rbp - IS_MODDICT], rax
+    mov rdi, rax
+    call obj_decref
+    jmp .is_have_dict
+
+.is_no_dict:
+    RAISE exc_ImportError_type, "from-import-* object has no __dict__ and no __all__"
+
+.is_real_module:
     ; Get mod_dict (+24)
+    mov rdi, [rbp - IS_MOD]
     mov rax, [rdi + PyModuleObject.mod_dict]
     test rax, rax
     jz .is_done
     mov [rbp - IS_MODDICT], rax
+.is_have_dict:
 
     ; Get frame locals
     mov rax, [r12 + PyFrame.locals]

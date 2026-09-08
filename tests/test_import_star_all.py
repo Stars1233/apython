@@ -80,3 +80,77 @@ import all_pkg
 print("bound on the package:", all_pkg.leaf.value)
 
 print("done")
+
+
+# sys.modules is an ordinary dict and a program may put anything in it --
+# importlib's own import_fresh_module does, and CPython's test suite is full
+# of it.  `from x import *` and `from x import y` both read mod_dict off
+# whatever was there, which for a class is the field that happens to sit at
+# that offset: a string's characters, handed to dict_get as a pointer.
+import sys
+import types
+
+
+class WithAll:
+    __all__ = ["shown"]
+    shown = 1
+    hidden = 2
+
+
+sys.modules["apy_fake_all"] = WithAll
+ns = {}
+exec("from apy_fake_all import *", ns)
+print(sorted(k for k in ns if not k.startswith("__")))
+
+
+class WithoutAll:
+    visible = 1
+    _private = 2
+
+
+sys.modules["apy_fake_plain"] = WithoutAll
+ns = {}
+exec("from apy_fake_plain import *", ns)
+print(sorted(k for k in ns if not k.startswith("__")))
+
+# ...and by name, which goes down a different path.
+ns = {}
+exec("from apy_fake_plain import visible", ns)
+print(ns["visible"])
+try:
+    exec("from apy_fake_plain import nope", {})
+    print("NOT REFUSED")
+except ImportError as e:
+    print("missing name:", type(e).__name__)
+
+
+class NoDict:
+    __slots__ = ()
+
+
+sys.modules["apy_fake_nodict"] = NoDict()
+try:
+    exec("from apy_fake_nodict import *", {})
+    print("NOT REFUSED")
+except ImportError as e:
+    print("no dict:", e)
+
+# A real module still works, and so does a ModuleType subclass.
+real = types.ModuleType("apy_real")
+real.a = 1
+sys.modules["apy_real"] = real
+ns = {}
+exec("from apy_real import *", ns)
+print(sorted(k for k in ns if not k.startswith("__")))
+
+
+class SubModule(types.ModuleType):
+    pass
+
+
+sub = SubModule("apy_sub")
+sub.b = 2
+sys.modules["apy_sub"] = sub
+ns = {}
+exec("from apy_sub import *", ns)
+print(sorted(k for k in ns if not k.startswith("__")))
