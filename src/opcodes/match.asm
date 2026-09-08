@@ -222,6 +222,7 @@ IS_LIMIT    equ 48      ; capacity or count
 IS_ITEMS    equ 56      ; items payload ptr (__all__ path)
 IS_ITEM_TAGS equ 64     ; items tag ptr (__all__ path)
 IS_SQITEM   equ 72      ; sq_item for an __all__ that is neither list nor tuple
+IS_SUBNAME  equ 80      ; the name being imported as a submodule
 IS_FRAME    equ 80      ; sub rsp, 80 (after push rbp + push rbx = 96 total)
 extern dict_get
 extern dict_set
@@ -386,6 +387,25 @@ extern obj_decref
     ret
 
 .is_all_absent:
+    ; Not in the module's dict.  It may still be a SUBMODULE that the
+    ; package's own body never bound: CPython's _handle_fromlist imports each
+    ; name in __all__ that the package does not already have, and IMPORT_FROM
+    ; next door has always done it -- so `__all__ = ["sub"]` used to raise
+    ; here where `from pkg import sub` worked.
+    call .is_all_name
+    mov [rbp - IS_SUBNAME], rsi
+    mov rdi, [rbp - IS_MOD]
+    extern import_submodule_attr
+    call import_submodule_attr
+    test rax, rax
+    jz .is_all_really_absent
+    mov rdx, rax
+    mov rdi, [rbp - IS_LOCALS]
+    mov rsi, [rbp - IS_SUBNAME]
+    call dict_set
+    jmp .is_all_next
+
+.is_all_really_absent:
     ; CPython raises AttributeError here rather than binding what it found and
     ; skipping the rest.  That silence is how lib/copyreg.py came to promise
     ; three functions in __all__ while defining none of them.
@@ -393,6 +413,8 @@ extern obj_decref
     ; Raising from this hand-rolled frame is safe: eval_exception_unwind
     ; reloads rbx, r12, r13 and rsp from the eval_saved_* globals, and
     ; op_import_from already raises from the same subsystem the same way.
+    cmp qword [rel current_exception], 0
+    jne .is_all_propagate
     call .is_all_name
     mov rdi, [rbp - IS_MOD]
     mov [rel eval_saved_r13], r13
@@ -400,6 +422,11 @@ extern obj_decref
     extern raise_no_attribute
     call raise_no_attribute
     ud2
+.is_all_propagate:
+    ; The submodule was found and its body raised; that is the real cause.
+    mov [rel eval_saved_r13], r13
+    leave
+    jmp eval_exception_unwind
 
 .is_all_not_seq_ptr:
     ; Reached once rbx is known to be a real pointer, which is its own Value.

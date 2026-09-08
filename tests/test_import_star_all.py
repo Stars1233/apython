@@ -71,4 +71,12 @@ print("--- a named import of one that is there ---")
 from all_missing import present
 print("named ok:", present)
 
+print("--- a package whose __all__ names a submodule ---")
+_ns = {}
+exec("from all_pkg import *", _ns)
+print("here:", _ns.get("here"))
+print("leaf:", _ns["leaf"].__name__, _ns["leaf"].value)
+import all_pkg
+print("bound on the package:", all_pkg.leaf.value)
+
 print("done")
