@@ -1918,13 +1918,44 @@ END_FUNC pf_dictset
 ;; Legal only inside a display, a call or a target list; the emitters reject it
 ;; anywhere else, which is what makes `*x + 1` a syntax error.
 ;; ============================================================================
+;; ============================================================================
+;; pf_starred_call(Comp *c) -> node   -- the same, for a CALL's argument list
+;;
+;; CPython has two productions and they take different operands.  A display,
+;; an assignment target and a for target use `star_expressions`, whose star
+;; takes a bitwise_or -- which is what the note below is about, and why
+;; BP_STAROP cannot simply be lowered.  A call argument uses
+;; `starred_expression: '*' expression`, which admits or/and/not, a
+;; comparison and a ternary, and stops only at the walrus.  So `d(*() or (1,))`
+;; is legal there and `[*a or b]` is not, and one binding power cannot say
+;; both.
+;; ============================================================================
 PST_LINE  equ 16
 PST_KIND  equ 24
-PST_FRAME equ 24         ; + 1 push = 32
+PST_BP    equ 32
+PST_FRAME equ 40         ; + 1 push = 48
+;; The prefix rule the grammar table names: a display, an assignment target
+;; or a for target.  pf_starred(Comp *c) -> node
 global pf_starred
-DEF_FUNC pf_starred, PST_FRAME
+DEF_FUNC_BARE pf_starred
+    mov esi, BP_STAROP
+    jmp pf_starred_bp
+END_FUNC pf_starred
+
+;; The same star inside a call's argument list, whose operand reaches further.
+;; pf_starred_call(Comp *c) -> node
+global pf_starred_call
+DEF_FUNC_BARE pf_starred_call
+    mov esi, BP_WALRUS
+    jmp pf_starred_bp
+END_FUNC pf_starred_call
+
+;; The body both reach.
+;; pf_starred_bp(Comp *c, esi = the operand's binding power) -> node, or 0
+DEF_FUNC pf_starred_bp, PST_FRAME
     push rbx
     mov rbx, rdi
+    mov [rbp - PST_BP], rsi
     call par_peek
     TOK_POS rax
     mov [rbp - PST_LINE], rcx
@@ -1955,7 +1986,7 @@ DEF_FUNC pf_starred, PST_FRAME
     cmp eax, TOK_COMMA
     je .pst_bare
     mov rdi, rbx
-    mov esi, BP_STAROP
+    mov rsi, [rbp - PST_BP]
     call par_expr
     test rax, rax
     jz .fail
@@ -1988,7 +2019,7 @@ DEF_FUNC pf_starred, PST_FRAME
     pop rbx
     leave
     ret
-END_FUNC pf_starred
+END_FUNC pf_starred_bp
 
 ;; ============================================================================
 ;; in_attr(Comp *c, node value) -> node   -- value.name
@@ -2377,11 +2408,28 @@ DEF_FUNC in_call, ICL_FRAME
     jmp .push_arg
 
 .positional:
+    ; A star in an ARGUMENT list takes a whole expression, not a bitwise_or --
+    ; see pf_starred_call.  par_expr would reach pf_starred, which is the
+    ; display and target-list rule, so the star is consumed here instead.
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_STAR
+    je .star_arg
+    cmp eax, TOK_DOUBLESTAR
+    je .star_arg
     mov rdi, rbx
     mov esi, BP_NONE
     call par_expr
     test rax, rax
     jz .fail
+    jmp .arg_parsed
+.star_arg:
+    mov rdi, rbx
+    extern pf_starred_call
+    call pf_starred_call
+    test rax, rax
+    jz .fail
+.arg_parsed:
     ; `f(x for x in y)` is a generator expression as the sole argument, with no
     ; parentheses of its own -- the call's own brackets serve.
     push rax

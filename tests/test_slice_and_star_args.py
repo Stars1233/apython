@@ -65,3 +65,47 @@ def g(a, b=0, **k):
 
 print(g(*[1], **{"b": 2, "c": 3}))
 print(g(*"x"), g(*(1, 2)))
+
+
+# A star in an ARGUMENT list takes a whole expression.  CPython has two
+# productions: `star_expressions` for a display, an assignment target and a for
+# target, whose star takes a bitwise_or, and `starred_expression` for a call,
+# which admits or/and/not, a comparison and a ternary.  One binding power
+# cannot say both, and this was parsed with the display's -- so `f(*() or ())`,
+# which CPython's own test_grammar exercises, was a SyntaxError.
+def d(*a, **k):
+    return a, sorted(k.items())
+
+
+print(d(*() or (1,)))
+print(d(*[] or [2]))
+print(d(*() or (), *{} and (), **() or {}))
+print(d(**{"a": 2} or {}))
+print(d(*(1, 2) if True else ()))
+print(d(*[1] if 1 else [2], **{"k": 1} if 1 else {}))
+print(d(*[1] if 0 else [2, 3]))
+print(d(*(x for x in (1, 2))))
+
+# A class statement's bases share the argument parser, so it follows.
+BASES = ()
+
+
+class C(*BASES or (object,)):
+    pass
+
+
+print(C.__mro__[-1] is object)
+
+# The display and target forms are unchanged: the star there stops before
+# `or`, which is what makes `[*a or b]` a SyntaxError in both.
+try:
+    exec("[*a or b]")
+    print("NOT REFUSED")
+except SyntaxError:
+    print("display star still refused")
+
+for first, *rest in [(1, 2, 3)]:
+    print(first, rest)
+
+head, *tail = [1, 2, 3]
+print(head, tail)
