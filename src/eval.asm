@@ -116,6 +116,7 @@ extern op_binary_subscr_list_int
 extern op_unpack_sequence_tuple
 extern op_store_attr_instance
 extern op_call_py_exact
+extern op_load_attr_property
 extern op_unpack_sequence_list
 extern op_binary_subscr_tuple_int
 extern op_store_subscr_list_int
@@ -1417,7 +1418,7 @@ opcode_table:
     dq op_unpack_sequence_list ; 239
     dq op_store_attr_instance ; 240
     dq op_call_py_exact     ; 241
-    dq op_unimplemented      ; 242
+    dq op_load_attr_property ; 242
     dq op_unimplemented      ; 243
     dq op_unimplemented      ; 244
     dq op_unimplemented      ; 245
@@ -1651,6 +1652,7 @@ opn_UNPACK_SEQUENCE_TUPLE: db "UNPACK_SEQUENCE_TUPLE", 0
 opn_UNPACK_SEQUENCE_LIST: db "UNPACK_SEQUENCE_LIST", 0
 opn_STORE_ATTR_INSTANCE: db "STORE_ATTR_INSTANCE", 0
 opn_CALL_PY_EXACT: db "CALL_PY_EXACT", 0
+opn_LOAD_ATTR_PROPERTY: db "LOAD_ATTR_PROPERTY", 0
 
 ;; ============================================================================
 ;; Opcode name lookup table (256 entries, in .data for relocations)
@@ -1901,7 +1903,7 @@ opcode_names:
     dq opn_UNPACK_SEQUENCE_LIST      ; 239
     dq opn_STORE_ATTR_INSTANCE       ; 240
     dq opn_CALL_PY_EXACT             ; 241
-    dq opn_unknown                    ; 242
+    dq opn_LOAD_ATTR_PROPERTY        ; 242
     dq opn_unknown                    ; 243
     dq opn_unknown                    ; 244
     dq opn_unknown                    ; 245

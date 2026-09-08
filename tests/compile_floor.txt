@@ -325,6 +325,7 @@ test_lists
 test_load_attr_cache
 test_load_attr_method_shadow
 test_load_attr_per_name
+test_load_attr_property_ic
 test_maketrans
 test_map_multi
 test_mappingproxy_call

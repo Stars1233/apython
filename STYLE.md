@@ -137,8 +137,8 @@ Repeat the register convention comment block at the top of every
 ## Inline Caches
 
 A specialized handler is installed by rewriting the opcode byte in the
-running bytecode buffer, and it deopts by writing the generic byte back.  Two
-rules keep that from costing more than it saves.
+running bytecode buffer, and it deopts by writing the generic byte back.
+These are the rules that keep that from costing more than it saves.
 
 **Ask the question per NAME, not per class.**  `TYPE_FLAG_MRO_HAS_DATA_DESCR`
 answers "does anything in this MRO outrank the instance dict", which is what a
@@ -160,6 +160,31 @@ execution, writing its own instruction byte twice per iteration for a cache
 that will never answer.  Spend a counter in one of the opcode's CACHE words:
 the deopt sets it, the install site counts it down and refuses while it is
 non-zero.  CPython spells the same idea `ADAPTIVE_BACKOFF_*`.
+
+The condition is "cannot hit", not "deopts".  A POLYMORPHIC site is not this:
+a benchmark that walks twenty objects of one class and then twenty of another
+deopts once per run and hits nineteen times, and backing off there replaces
+those nineteen hits with generic lookups.  Backoff on `LOAD_ATTR` was measured
+and dropped for exactly that.  A hand-written strictly alternating loop DOES
+improve, which is the trap: measure on the macro suite.
+
+**Install where the work happens, and prove it fires.**  The generic handler
+has many exits and only one of them is the path being specialized; an install
+site placed on a neighbouring exit assembles, links, passes every test, and
+never runs.  Confirm with a breakpoint on the new handler that it is reached,
+and with a hit count on the generic one that it stops being.  A specialization
+that measures as no change at all is this, not a wrong estimate.
+
+**A handler may push a frame itself.**  `op_call_py_exact` shows the shape --
+`frame_new`, bind the arguments, `eval_frame`, `frame_free` -- and it is what
+lets `LOAD_ATTR_PROPERTY` run a getter without the descriptor protocol or the
+call machinery.  The guards that make it safe are the callee's own: exactly
+`func_type`, the parameter count matched, and none of `CO_VARARGS`,
+`CO_VARKEYWORDS`, `CO_GENERATOR`, `CO_COROUTINE` or `CO_ASYNC_GENERATOR`,
+because such a call returns with the frame still live and this frees it
+unconditionally.  Read those out of the code object at every hit rather than
+vetting them once: `f.__code__` can be assigned, and no type version covers a
+write to a function.
 
 **Testing one needs the same site twice.**  A fresh call site is cold and
 takes the generic path, so a test that builds a new one after changing the

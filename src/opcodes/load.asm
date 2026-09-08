@@ -1046,6 +1046,80 @@ DEF_FUNC op_load_attr, LA_FRAME
     jmp .la_done
 
 .la_property_run:
+    ; === IC: try to specialize as LOAD_ATTR_PROPERTY (242) ===
+    ;
+    ; This is where a @property is actually run, and until now it was the only
+    ; place: every read of one took op_load_attr's whole prologue, the MRO
+    ; lookup, the descriptor protocol, property_descr_get and then the generic
+    ; call path for the getter.  Decomposing m_oo put the entire remaining gap
+    ; there -- a method body reading one property cost 45.8ms against CPython's
+    ; 34.8, where the same body reading a plain attribute cost 19.4 against
+    ; 28.1.  Opcode 242 caches the getter and pushes its frame directly.
+    ;
+    ; Only flag=0 installs: a method-style load would have to push [NULL,
+    ; value], and `obj.prop()` is not a shape worth a second cache layout.
+    cmp qword [rbp - LA_FLAG], 0
+    jne .la_prop_call
+    cmp qword [rbp - LA_OBJ_TAG], TAG_PTR
+    jne .la_prop_call
+    mov rdi, [rbp - LA_OBJ]
+    mov rax, [rdi + PyObject.ob_type]
+    ; A __getattribute__ of the class's own runs instead of all of this.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN
+    jnz .la_prop_call
+    ; The version is what the handler guards on, and it is what pins the
+    ; property the getter is read out of: rebinding the class attribute goes
+    ; through type_setattr, which stamps a new one down every subclass.
+    mov rcx, [rax + PyTypeObject.tp_flags]
+    shr rcx, TYPE_VERSION_SHIFT
+    test ecx, ecx
+    jz .la_prop_call
+    mov [rbp - LA_TAGTYPE], rax
+
+    ; Ask the type by NAME rather than trusting LA_ATTR: what the handler will
+    ; do on every later execution is resolve this name against this type, and
+    ; this is the one place to check that the two agree.
+    mov rdi, rax
+    mov rsi, [rbp - LA_NAME]
+    call type_lookup_cached        ; rax = payload, edx = tag
+    cmp edx, TAG_PTR
+    jne .la_prop_call
+    cmp rax, [rbp - LA_ATTR]
+    jne .la_prop_call              ; a different answer: do not cache this one
+    ; Exactly property, not a subclass of it: a subclass may define __get__.
+    lea rcx, [rel property_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .la_prop_call
+    mov rax, [rax + PyPropertyObject.prop_get]
+    test rax, rax
+    jz .la_prop_call               ; no getter: the generic path raises
+    ; The getter has to be a shape the handler can run inline.  Checking it
+    ; here as well as at every hit is what keeps a lambda with a default, a
+    ; builtin or a generator from installing and deopting for ever.
+    lea rcx, [rel func_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .la_prop_call
+    mov rcx, [rax + PyFuncObject.func_code]
+    cmp dword [rcx + PyCodeObject.co_argcount], 1
+    jne .la_prop_call
+    cmp dword [rcx + PyCodeObject.co_kwonlyargcount], 0
+    jne .la_prop_call
+    test dword [rcx + PyCodeObject.co_flags], \
+         CO_VARARGS | CO_VARKEYWORDS | CO_GENERATOR | CO_COROUTINE | \
+         CO_ASYNC_GENERATOR
+    jnz .la_prop_call
+
+    ; Install BEFORE the getter runs: the getter is arbitrary Python and may
+    ; rewrite the very class this cached, and a version stamped after it would
+    ; be the new one against a getter read before it.
+    mov [rbx + 4], rax             ; CACHE[+4] = the getter
+    mov rcx, [rbp - LA_TAGTYPE]
+    mov rcx, [rcx + PyTypeObject.tp_flags]
+    shr rcx, TYPE_VERSION_SHIFT
+    mov dword [rbx], ecx           ; CACHE[+0] = the type's version
+    mov byte [rbx - 2], OP_LOAD_ATTR_PROPERTY
+
+.la_prop_call:
     ; Call property_descr_get(property, obj)
     mov rdi, [rbp - LA_ATTR]   ; property descriptor
     mov rsi, [rbp - LA_OBJ]    ; obj
