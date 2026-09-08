@@ -72,9 +72,10 @@ CPE_TOTAL equ 16                ; the arguments the callee actually receives
 CPE_FUNC  equ 24
 CPE_ARGS  equ 32                ; where they start on the value stack
 CPE_RET   equ 40
-CPE_IDX   equ 48
 CPE_FRAME equ 56                ; a handler is entered with rsp 16-aligned, so
-                                ; push rbp + 56 brings it back to aligned
+                                ; push rbp + 56 brings it back to aligned.
+                                ; 56 and not 48 although CPE_IDX is gone: the
+                                ; parity is what the number is for.
 
 DEF_FUNC op_call_py_exact, CPE_FRAME
     ; ecx is the oparg and must survive to .cpe_deopt, so nothing before the
@@ -159,19 +160,21 @@ DEF_FUNC op_call_py_exact, CPE_FRAME
 
     ; Release the arguments and the callable.  They are contiguous: the
     ; callable is the slot immediately below the arguments in both shapes.
+    ; A pointer walking down, not an index in the frame.  This used to reload
+    ; the argument base AND read back the counter it had just written, on
+    ; every iteration -- four memory accesses per released argument for two
+    ; values that fit in registers.  r15 is free: the frame it held has just
+    ; been given back, and it survives DECREF_V, which is the whole
+    ; difficulty.
     mov rax, [rbp - CPE_TOTAL]
-    inc rax
-    mov [rbp - CPE_IDX], rax
+    mov r15, [rbp - CPE_ARGS]
+    lea r15, [r15 + rax*8]              ; one past the last argument
 .cpe_release:
-    cmp qword [rbp - CPE_IDX], 0
-    je .cpe_released
-    dec qword [rbp - CPE_IDX]
-    mov r8, [rbp - CPE_ARGS]
-    mov rax, [rbp - CPE_IDX]
-    mov rdi, [r8 + rax*8 - 8]
+    sub r15, 8
+    mov rdi, [r15]
     DECREF_V rdi, rdx
-    jmp .cpe_release
-.cpe_released:
+    cmp r15, [rbp - CPE_ARGS]
+    jae .cpe_release                    ; ...down to the callable below them
 
     ; N+2 slots go, whichever shape this was.
     mov rcx, [rbp - CPE_NARGS]

@@ -1472,8 +1472,9 @@ DEF_FUNC type_call
     mov [rbp - TC_NEW_FUNC], rax
 
     ; Build args for __new__(cls, *original_args)
-    lea rax, [r13 + 1]
-    shl rax, 4                  ; (nargs+1) * 16
+    lea rax, [r13 + 2]          ; nargs + 1 slots...
+    and rax, -2                 ; ...rounded up to a pair, so rsp stays
+    shl rax, 3                  ; 16-aligned for the tp_call below
     sub rsp, rax
     mov r15, rsp                ; r15 = new args array
 
@@ -1511,8 +1512,9 @@ DEF_FUNC type_call
     mov [rbp - TC_NEW_TAG], rdx ; save result tag
 
     ; Restore stack from args allocation
-    lea rax, [r13 + 1]
-    shl rax, 4
+    lea rax, [r13 + 2]          ; nargs + 1 slots...
+    and rax, -2                 ; ...rounded up to a pair, so rsp stays
+    shl rax, 3                  ; 16-aligned for the tp_call below
     add rsp, rax
 
     ; Only call __init__ if __new__ returned an INSTANCE OF cls -- CPython's
@@ -1642,9 +1644,12 @@ DEF_FUNC type_call
     ; === Call __init__(instance, *args) ===
     ; Build args array on machine stack: [instance, arg0, arg1, ...]
     ; Total args = nargs + 1 (for instance)
-    ; Allocate (nargs+1)*16 bytes on the stack (fat values)
-    lea rax, [r13 + 1]
-    shl rax, 4                  ; (nargs+1) * 16
+    ; One Value per slot.  This carved (nargs+1)*16 and filled at stride 8 --
+    ; twice the stack it needs, left over from the 128-bit representation the
+    ; NaN-box migration ended, and the comment still said "fat values".
+    lea rax, [r13 + 2]          ; nargs + 1 slots...
+    and rax, -2                 ; ...rounded up to a pair, so rsp stays
+    shl rax, 3                  ; 16-aligned for the tp_call below
     sub rsp, rax                ; allocate on stack
     mov r15, rsp                ; r15 = new args array
 
@@ -1721,8 +1726,9 @@ DEF_FUNC type_call
     TC_RELEASE_BOUND_INIT
 
     ; Restore stack (undo the sub rsp from args allocation)
-    lea rax, [r13 + 1]
-    shl rax, 4
+    lea rax, [r13 + 2]          ; nargs + 1 slots...
+    and rax, -2                 ; ...rounded up to a pair, so rsp stays
+    shl rax, 3                  ; 16-aligned for the tp_call below
     add rsp, rax
     jmp .no_init
 
@@ -1753,8 +1759,9 @@ DEF_FUNC type_call
     ; next, as a "During handling of the above exception" chain attached to
     ; code that had nothing to do with it.  io.StringIO(5) is where it turned
     ; up -- it raises TypeError from __init__ and got back a StringIO.
-    lea rax, [r13 + 1]
-    shl rax, 4
+    lea rax, [r13 + 2]          ; nargs + 1 slots...
+    and rax, -2                 ; ...rounded up to a pair, so rsp stays
+    shl rax, 3                  ; 16-aligned for the tp_call below
     add rsp, rax
     TC_RELEASE_BOUND_INIT
     mov rax, r14
@@ -1799,9 +1806,10 @@ DEF_FUNC type_call
     test rax, rax
     jz .exc_sub_no_init
 
-    ; Build args: (instance, *original_args) using 16-byte fat value stride
-    lea rax, [r13 + 1]
-    shl rax, 4                  ; (nargs+1) * 16
+    ; Build args: (instance, *original_args), one Value per slot
+    lea rax, [r13 + 2]          ; nargs + 1 slots...
+    and rax, -2                 ; ...rounded up to a pair, so rsp stays
+    shl rax, 3                  ; 16-aligned for the tp_call below
     sub rsp, rax
     mov r15, rsp                ; r15 = new args array
     mov [r15], r14
@@ -1834,8 +1842,9 @@ DEF_FUNC type_call
     mov rsi, rdx
     DECREF_VAL rax, rsi
 .exc_sub_init_cleanup:
-    lea rax, [r13 + 1]
-    shl rax, 4
+    lea rax, [r13 + 2]          ; nargs + 1 slots...
+    and rax, -2                 ; ...rounded up to a pair, so rsp stays
+    shl rax, 3                  ; 16-aligned for the tp_call below
     add rsp, rax
 
 .exc_sub_no_init:
@@ -1886,8 +1895,9 @@ DEF_FUNC type_call
 
 .new_not_callable:
     ; Restore stack from args allocation, then error
-    lea rax, [r13 + 1]
-    shl rax, 4
+    lea rax, [r13 + 2]          ; nargs + 1 slots...
+    and rax, -2                 ; ...rounded up to a pair, so rsp stays
+    shl rax, 3                  ; 16-aligned for the tp_call below
     add rsp, rax
     RAISE exc_TypeError_type, "__new__ is not callable"
     ; does not return

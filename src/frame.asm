@@ -167,6 +167,11 @@ DEF_FUNC frame_new, 8            ; 5 pushes, so rsp is 16-aligned
     call frame_pool_get
     ; rax = frame pointer
     mov r11, rax
+    ; nlocalsplus, once.  It was re-read four times below -- twice from the
+    ; code object and twice from the frame field just written -- because eax
+    ; and ecx kept being spent on the size arithmetic.  r8 is free here:
+    ; frame_pool_get has already returned.
+    mov r8d, [rbx + PyCodeObject.co_nlocalsplus]
 
     ; Fill frame header fields
     mov qword [r11 + PyFrame.prev_frame], 0
@@ -196,27 +201,41 @@ DEF_FUNC frame_new, 8            ; 5 pushes, so rsp is 16-aligned
     mov qword [r11 + PyFrame.gen_owner], 0
 
     ; Set nlocalsplus and func_obj
-    mov ecx, [rbx + PyCodeObject.co_nlocalsplus]
-    mov [r11 + PyFrame.nlocalsplus], ecx
+    mov [r11 + PyFrame.nlocalsplus], r8d
     mov qword [r11 + PyFrame.func_obj], 0
 
     ; stack_base = &localsplus[nlocalsplus] (8 bytes/slot)
-    mov ecx, [r11 + PyFrame.nlocalsplus]
-    mov edx, ecx            ; edx = nlocalsplus
     lea rdi, [r11 + PyFrame.localsplus]
-    shl rdx, 3              ; nlocalsplus * 8
-    lea rsi, [rdi + rdx]    ; rsi = &localsplus[nlocalsplus]
+    lea rsi, [rdi + r8*8]
     mov [r11 + PyFrame.stack_base], rsi
 
-    ; Zero the locals (one Value per slot; an empty slot is 0)
-    mov ecx, [r11 + PyFrame.nlocalsplus]
+    ; Zero the locals (one Value per slot; an empty slot is 0).
+    ;
+    ; `rep stosq` carries twenty to thirty cycles of startup whatever the
+    ; count, and the count here is usually tiny -- a function of one or two
+    ; parameters is the common shape.  Four or fewer slots are stored straight
+    ; through, which is the same argument ap_memcpy's size ladder makes.
+    mov ecx, r8d
     test ecx, ecx
     jz .done
-    push r11                ; save frame pointer
-    lea rdi, [r11 + PyFrame.localsplus]
     xor eax, eax
+    cmp ecx, 4
+    ja .zero_rep
+    mov [rdi], rax
+    cmp ecx, 1
+    je .done
+    mov [rdi + 8], rax
+    cmp ecx, 2
+    je .done
+    mov [rdi + 16], rax
+    cmp ecx, 3
+    je .done
+    mov [rdi + 24], rax
+    jmp .done
+.zero_rep:
+    push r11                ; rep stosq advances rdi; r11 is the frame
     rep stosq               ; store ecx qwords of 0 at [rdi]
-    pop r11                 ; restore frame pointer
+    pop r11
 
 .done:
     mov rax, r11            ; return frame pointer
@@ -259,19 +278,19 @@ DEF_FUNC frame_free, 8            ; 3 pushes, so rsp is 16-aligned
 
     mov r12d, [rbx + PyFrame.nlocalsplus]  ; r12d = nlocalsplus
     xor r13d, r13d          ; r13d = loop index
-    ; Iterate through localsplus entries
+    ; Iterate through localsplus entries.  The index arithmetic is the
+    ; addressing mode's -- it used to be a `mov` and a `shl` per slot, on a
+    ; loop that runs once per local of every call that returns.
+    test r12d, r12d
+    jz .stack_walk
 .loop:
-    cmp r13d, r12d
-    jge .stack_walk
-
-    mov rax, r13
-    shl rax, 3              ; r13 * 8
-    mov rdi, [rbx + PyFrame.localsplus + rax]
+    mov rdi, [rbx + r13*8 + PyFrame.localsplus]
     XDECREF_V rdi, rsi      ; no-op for NULL and for immediates
 
 .next:
     inc r13d
-    jmp .loop
+    cmp r13d, r12d
+    jb .loop
 
 .stack_walk:
     ; A SUSPENDED frame still owns everything on its VALUE STACK -- the
