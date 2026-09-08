@@ -7,13 +7,10 @@
 # the class being built: "TypeError: bases must be types", or an invalid free
 # inside tuple_clear under valgrind.
 #
-# THIS FILE IS EXPECTED TO DIFFER UNDER `make check-source`.  The opcode is
-# only reached from a PEP 695 generic class whose bases name something in the
-# enclosing CLASS scope, and that needs __classdict__ -- the cell CPython's
-# compiler builds so a type-params scope can see the class body it sits in.
-# Ours does not build one, so compiled by our own compiler this raises
-# NameError instead; bugs.md carries the gap.  Run from CPython's .pyc, which
-# is what `make check` does, it exercises the handler.
+# The opcode is only reached from a PEP 695 generic class whose bases name
+# something in the enclosing CLASS scope.  Until our compiler learned to build
+# the __classdict__ cell that needs, this file could only be run from
+# CPython's .pyc; test_pep695_classdict covers the compiler half.
 
 
 def a_class_body_reads_an_enclosing_name():

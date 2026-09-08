@@ -202,6 +202,53 @@ DEF_FUNC cg_nameop, CN2_FRAME
     mov esi, OP_DELETE_GLOBAL
     cmp qword [rbp - CN2_CTX], CTX_DEL
     je .emit
+    ; Inside a PEP 695 type-parameter wrapper that sits in a class body, an
+    ; implicit global is looked for in that body's namespace FIRST: the
+    ; wrapper is a function, so ordinary scoping cannot see the body, and
+    ; `class Outer: B = list; class Inner[T](B)` would raise NameError.  The
+    ; namespace arrives as the __classdict__ free variable and
+    ; LOAD_FROM_DICT_OR_GLOBALS falls back to the globals and the builtins,
+    ; so a name that is not the body's still resolves the ordinary way.
+    ;
+    ; The oparg is a plain name index here, so a want_null caller gets its
+    ; PUSH_NULL separately -- LOAD_FROM_DICT_OR_GLOBALS has no such bit.
+    mov rdi, rbx
+    mov rsi, [rbp - CN2_SCOPE]
+    call sym_at
+    test dword [rax + Scope.flags], SCF_SEES_CLASS
+    jz .plain_global
+    mov [rbp - CN2_SLOT], rdx
+    cmp qword [rbp - CN2_NULL], 0
+    je .cn2_no_null
+    mov rdi, r12
+    mov esi, OP_PUSH_NULL
+    xor edx, edx
+    xor ecx, ecx
+    call cg_emit
+.cn2_no_null:
+    mov rdi, rbx
+    lea rsi, [rel cg_classdict_dunder]
+    call comp_intern_cstr
+    test rax, rax
+    jz .missing
+    mov rdx, rax
+    mov rdi, rbx
+    mov rsi, [rbp - CN2_SCOPE]
+    call sym_lp_index
+    cmp eax, -1
+    je .plain_global_slot
+    mov edx, eax
+    mov rdi, r12
+    mov esi, OP_LOAD_DEREF
+    xor ecx, ecx
+    call cg_emit
+    mov rdx, [rbp - CN2_SLOT]
+    mov esi, OP_LOAD_FROM_DICT_OR_GLOBALS
+    jmp .emit
+.plain_global_slot:
+    mov rdx, [rbp - CN2_SLOT]
+.plain_global:
+
     ; LOAD_GLOBAL's oparg is the name index shifted left, with bit 0 asking the
     ; interpreter to push a NULL alongside -- which is how a call's empty self
     ; slot gets filled without a separate PUSH_NULL.
@@ -1248,6 +1295,17 @@ DEF_FUNC cg_compile_body, CB_FRAME
     call cg_class_prologue
     test eax, eax
     jz .fail
+    ; ...and, when a PEP 695 wrapper inside it needs to read this namespace,
+    ; parks the namespace in the cell the wrapper closes over.  Before the
+    ; body has run a single statement: the wrapper is created and CALLED from
+    ; inside the body, so the cell has to hold the mapping by then.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CB_SCOPE]
+    mov rcx, [rbp - CB_LINE]
+    call cg_classdict_prologue
+    cmp rax, -1
+    je .fail
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
@@ -1283,6 +1341,18 @@ DEF_FUNC cg_compile_body, CB_FRAME
     ; class body with no such method -- falls off the end returning None.
     cmp qword [rbp - CB_LAMBDA], 2
     jne .plain_return
+    ; The cell holding this body's namespace goes into the namespace, where
+    ; type.__new__ finds it and repoints it at the finished tp_dict.  Without
+    ; that a type alias's lazily-evaluated value reads a snapshot of the
+    ; mapping the body was built in -- `type Later[T] = V` after `A.V = 99`
+    ; answered the old V.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - CB_SCOPE]
+    mov rcx, [rbp - CB_LINE]
+    call cg_classdict_epilogue
+    cmp rax, -1
+    je .fail
     mov rdi, rbx
     mov rsi, r12
     mov rdx, [rbp - CB_SCOPE]
@@ -2443,6 +2513,154 @@ DEF_FUNC cg_class_prologue, CQ_FRAME
 END_FUNC cg_class_prologue
 
 ;; ============================================================================
+;; cg_classdict_prologue(Comp *c, CompUnit *u, uint32_t scope, int line)
+;;   -> rax = 1 if it emitted, 0 if there was nothing to do, -1 on error
+;;
+;;     LOAD_LOCALS ; STORE_DEREF __classdict__
+;;
+;; The mapping a class body writes its names into, parked in a cell so the
+;; PEP 695 type-parameter wrapper nested in that body can read through it.
+;; Emitted only when __classdict__ came out of the analysis as a cell here,
+;; which sym_enter_typeparams arranges exactly when there is such a wrapper.
+;;
+;; CPython also stores the cell into the namespace as __classdictcell__ on the
+;; way out, so type.__new__ can repoint it at the finished class dict.  That
+;; matters to nothing here: the wrapper runs DURING the body, while the cell
+;; still holds the mapping it was given, and the cell dies with the frame.
+;; ============================================================================
+CDP_SCOPE equ 24
+CDP_LINE  equ 32
+CDP_FRAME equ 40          ; + 3 pushes = 64
+DEF_FUNC cg_classdict_prologue, CDP_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov [rbp - CDP_SCOPE], rdx
+    mov [rbp - CDP_LINE], rcx
+
+    mov rdi, rbx
+    lea rsi, [rel cg_classdict_dunder]
+    call comp_intern_cstr
+    test rax, rax
+    jz .cdp_oops
+    mov r13, rax
+    mov rdi, rbx
+    mov rsi, [rbp - CDP_SCOPE]
+    mov rdx, r13
+    call sym_scope_of
+    cmp eax, SYM_CELL
+    jne .cdp_none
+
+    mov rdi, rbx
+    mov rsi, [rbp - CDP_SCOPE]
+    mov rdx, r13
+    call sym_lp_index
+    cmp eax, -1
+    je .cdp_none
+    mov r13d, eax
+
+    mov rdi, r12
+    mov esi, OP_LOAD_LOCALS
+    xor edx, edx
+    mov rcx, [rbp - CDP_LINE]
+    call cg_emit
+    or byte [rax + Instr.flags], IF_NOLINE
+    mov rdi, r12
+    mov esi, OP_STORE_DEREF
+    mov edx, r13d
+    mov rcx, [rbp - CDP_LINE]
+    call cg_emit
+    or byte [rax + Instr.flags], IF_NOLINE
+    mov eax, 1
+    jmp .cdp_ret
+.cdp_oops:
+    mov rax, -1
+    jmp .cdp_ret
+.cdp_none:
+    xor eax, eax
+.cdp_ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_classdict_prologue
+
+;; ============================================================================
+;; cg_classdict_epilogue(Comp *c, CompUnit *u, uint32_t scope, int line)
+;;   -> rax = 1 if it emitted, 0 if there was nothing to do, -1 on error
+;;
+;;     LOAD_CLOSURE __classdict__ ; STORE_NAME __classdictcell__
+;;
+;; The other half of cg_classdict_prologue, and no return of its own: this is
+;; a store into the namespace the body is building, which type.__new__ then
+;; empties.
+;; ============================================================================
+DEF_FUNC cg_classdict_epilogue, CDP_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    mov [rbp - CDP_SCOPE], rdx
+    mov [rbp - CDP_LINE], rcx
+
+    mov rdi, rbx
+    lea rsi, [rel cg_classdict_dunder]
+    call comp_intern_cstr
+    test rax, rax
+    jz .cde_oops
+    mov r13, rax
+    mov rdi, rbx
+    mov rsi, [rbp - CDP_SCOPE]
+    mov rdx, r13
+    call sym_scope_of
+    cmp eax, SYM_CELL
+    jne .cde_none
+
+    mov rdi, rbx
+    mov rsi, [rbp - CDP_SCOPE]
+    mov rdx, r13
+    call sym_lp_index
+    cmp eax, -1
+    je .cde_none
+    mov edx, eax
+    mov rdi, r12
+    mov esi, OP_LOAD_CLOSURE
+    mov rcx, [rbp - CDP_LINE]
+    call cg_emit
+
+    mov rdi, rbx
+    lea rsi, [rel cg_classdictcell_dunder]
+    call comp_intern_cstr
+    test rax, rax
+    jz .cde_oops
+    mov rdi, r12
+    mov rsi, rax
+    call cg_name
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_STORE_NAME
+    mov rcx, [rbp - CDP_LINE]
+    call cg_emit
+    mov eax, 1
+    jmp .cde_ret
+.cde_oops:
+    mov rax, -1
+    jmp .cde_ret
+.cde_none:
+    xor eax, eax
+.cde_ret:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC cg_classdict_epilogue
+
+;; ============================================================================
 ;; cg_classcell_epilogue(Comp *c, CompUnit *u, uint32_t scope, int line)
 ;;   -> rax = 1 if it emitted a return, 0 if there was nothing to do, -1 error
 ;;
@@ -2530,6 +2748,8 @@ END_FUNC cg_classcell_epilogue
 section .rodata
 cg_class_dunder:     db "__class__", 0
 cg_classcell_dunder: db "__classcell__", 0
+cg_classdict_dunder: db "__classdict__", 0
+cg_classdictcell_dunder: db "__classdictcell__", 0
 
 cg_name_dunder:     db "__name__", 0
 cg_module_dunder:   db "__module__", 0

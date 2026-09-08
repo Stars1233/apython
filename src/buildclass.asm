@@ -410,6 +410,52 @@ DEF_FUNC type_mangle_name, TMN_FRAME
 END_FUNC type_mangle_name
 
 ;; ============================================================================
+;; bc_fill_cell(rdi = the class namespace, rsi = a cstring name, rdx = a Value)
+;;   -> nothing
+;;
+;; Fill the cell the compiler left under that name, then take the name back
+;; out: both cells a class body can leave are plumbing rather than attributes,
+;; and CPython's type_new deletes each after using it.  A missing name is the
+;; ordinary case and does nothing.
+;; ============================================================================
+BFC_DICT equ 8
+BFC_NAME equ 16
+BFC_VAL  equ 24
+BFC_KEY  equ 32
+BFC_FRAME equ 48                ; + 0 pushes, 16-aligned
+DEF_FUNC_LOCAL bc_fill_cell, BFC_FRAME
+    mov [rbp - BFC_DICT], rdi
+    mov [rbp - BFC_NAME], rsi
+    mov [rbp - BFC_VAL], rdx
+
+    mov rdi, rsi
+    call str_from_cstr_heap
+    test rax, rax
+    jz .bfc_out
+    mov [rbp - BFC_KEY], rax
+    mov rdi, [rbp - BFC_DICT]
+    mov rsi, rax
+    call dict_get                       ; a Value; 0 is the miss
+    test rax, rax
+    jz .bfc_drop_key
+
+    mov rcx, [rbp - BFC_VAL]
+    mov [rax + PyCellObject.ob_ref], rcx  ; a pointer is its own Value
+    mov rdi, rcx
+    call obj_incref
+    mov rdi, [rbp - BFC_DICT]
+    mov rsi, [rbp - BFC_KEY]
+    extern dict_del_opt
+    call dict_del_opt
+.bfc_drop_key:
+    mov rdi, [rbp - BFC_KEY]
+    call obj_decref
+.bfc_out:
+    leave
+    ret
+END_FUNC bc_fill_cell
+
+;; ============================================================================
 ;; type_from_parts(rdi = name str, rsi = bases tuple or NULL, rdx = namespace dict)
 ;;   -> rax = the new type object, one strong reference
 ;;
@@ -1625,27 +1671,20 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
 
 .bc_no_init_subclass:
 
-    ; Handle __classcell__: look in class_dict for the cell, set its ob_ref to the new type
-    lea rdi, [rel bc_classcell_name]
-    call str_from_cstr_heap
-    push rax                ; save key str
-    mov rdi, r15            ; class_dict
-    mov rsi, rax
-    call dict_get           ; returns cell or NULL
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    pop rdi                 ; key str
-    push rdx                ; save dict_get tag
-    push rax                ; save cell payload
-    call obj_decref         ; DECREF key str
-    pop rax                 ; restore cell payload
-    pop rdx                 ; restore dict_get tag
-    test edx, edx
-    jz .bc_no_classcell
-    ; cell.ob_ref = new type (r12), with tag
-    mov [rax + PyCellObject.ob_ref], r12        ; a type pointer is its own Value
-    mov rdi, r12
-    call obj_incref         ; cell holds a ref to the type
-.bc_no_classcell:
+    ; The two cells a class body may have left for this moment.
+    ; __classcell__ takes the finished class, which is what a method's
+    ; `__class__` reads.  __classdictcell__ is PEP 695's parallel and takes
+    ; the tp_dict -- class_dict IS it, set above -- so a type alias's
+    ; __value__, evaluated long after the body returned, sees the class as it
+    ; is rather than a snapshot of the mapping it was built in.
+    mov rdi, r15
+    lea rsi, [rel bc_classcell_name]
+    mov rdx, r12
+    call bc_fill_cell
+    mov rdi, r15
+    lea rsi, [rel bc_classdictcell_name]
+    mov rdx, r15
+    call bc_fill_cell
 
     ; Track the type object in GC
     extern gc_track
@@ -3024,6 +3063,7 @@ bc_init_name: db "__init__", 0
 bc_module_name: db "__module__", 0
 bc_dunder_name_name: db "__name__", 0
 bc_classcell_name: db "__classcell__", 0
+bc_classdictcell_name: db "__classdictcell__", 0
 bc_slots_name: db "__slots__", 0
 bc_slots_unsupported:
     db "nonempty __slots__ not supported for subtype of '", 1, "'", 0

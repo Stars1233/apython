@@ -768,6 +768,13 @@ SYM_CELL            equ 5
 ; Scope.flags
 SCF_GENERATOR equ 0x01
 SCF_COROUTINE equ 0x02
+; PEP 695: this block is a type-parameter wrapper sitting directly inside a
+; CLASS body, so a name that would otherwise be an implicit global is looked
+; for in that body's namespace first.  Ordinary scoping cannot do it -- a
+; class body is invisible to a nested function -- so the wrapper carries a
+; __classdict__ free variable holding the mapping and reads through it with
+; LOAD_FROM_DICT_OR_GLOBALS.  CPython calls the same bit ste_can_see_class_scope.
+SCF_SEES_CLASS equ 0x04
 
 struc Scope
     .parent:    resd 1          ; scope index, 0 = none

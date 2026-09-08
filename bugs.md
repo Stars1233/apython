@@ -54,19 +54,6 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **A PEP 695 generic class cannot see the class body it is nested in.**
-  `class Inner[T](B)` inside a `class Outer` whose body binds `B` raises
-  `NameError` when our compiler builds it.  CPython's compiler gives the
-  implicit "generic parameters of Inner" scope a `__classdict__` freevar, has
-  the enclosing class body store a `__classdictcell__`, and emits
-  `LOAD_FROM_DICT_OR_GLOBALS` for the name; ours emits an ordinary global
-  load, so the class attribute is invisible.  The interpreter half is all
-  there -- opcode 175 works, and `tests/test_load_from_dict_or_globals.py`
-  exercises it from CPython's `.pyc` -- and that file is the third of the
-  three `make check-source` reports as differing.  What is missing is the cell
-  plumbing in `symtab.asm` and `codegen.asm`, which is the same shape as the
-  `__class__` cell those already build for `super()`.
-
 - **`array.fromfile` and `array.tofile` are absent.**  They want the file
   object's own read and write, and every caller in CPython's suite reaches
   for `frombytes` and `tobytes` instead.
