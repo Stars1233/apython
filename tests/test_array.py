@@ -166,4 +166,51 @@ print("--- a large one still answers ---")
 big = array.array("i", range(1000))
 print("len:", len(big), "first:", big[0], "last:", big[-1], "sum:", sum(big))
 
+print("--- arrays compare by their items ---")
+_a = array.array("i", [1, 2, 3])
+print("eq:", _a == array.array("i", [1, 2, 3]), _a == array.array("i", [1, 2]))
+print("ne:", _a != array.array("i", [1, 2, 4]))
+print("cross typecode:", array.array("i", [1]) == array.array("f", [1.0]))
+print("vs list:", _a == [1, 2, 3], _a != [1, 2, 3])
+print("order:", _a < array.array("i", [1, 2, 4]), _a <= _a,
+      _a > array.array("i", [1, 2]), _a >= _a)
+print("by name:", _a.__eq__(array.array("i", [1, 2, 3])))
+print("empty:", array.array("i") == array.array("i"))
+
+print("--- a long repr is not truncated ---")
+_big = array.array("i", range(40))
+print(repr(_big))
+print("len:", len(repr(_big)))
+
+print("--- every typecode's range, and how it refuses ---")
+_LIMITS = {"b": (-128, 127), "B": (0, 255), "h": (-32768, 32767),
+           "H": (0, 65535), "i": (-2 ** 31, 2 ** 31 - 1), "I": (0, 2 ** 32 - 1),
+           "l": (-2 ** 63, 2 ** 63 - 1), "L": (0, 2 ** 64 - 1),
+           "q": (-2 ** 63, 2 ** 63 - 1), "Q": (0, 2 ** 64 - 1)}
+for _c in "bBhHiIlLqQ":
+    _lo, _hi = _LIMITS[_c]
+    print(_c, "edges:", list(array.array(_c, [_lo, _hi])))
+    for _v in (_lo - 1, _hi + 1, -1, 2 ** 64, -2 ** 64):
+        try:
+            array.array(_c, [_v])
+            print("%s %-22s stored" % (_c, _v))
+        except OverflowError as e:
+            print("%s %-22s OverflowError: %s" % (_c, _v, e))
+
+print("--- and what is not an integer at all ---")
+
+
+class _Index:
+    def __index__(self):
+        return 5
+
+
+print("__index__:", list(array.array("i", [_Index()])))
+print("bool:", list(array.array("i", [True, False])))
+for _bad in (1.5, "x", None):
+    try:
+        array.array("i", [_bad])
+    except TypeError as e:
+        print("%-6r TypeError: %s" % (_bad, e))
+
 print("done")

@@ -46,6 +46,9 @@ extern exc_OverflowError_type
 extern type_type
 extern str_type
 extern int_type
+extern int_promote_mpz
+extern eval_exception_unwind
+extern bool_type
 extern float_type
 extern bytes_type
 extern bytes_from_data
@@ -262,6 +265,8 @@ DEF_FUNC array_item_value, AIV_FRAME
     cmp rcx, 4
     je .aiv_u4
     mov rdi, [rax]
+    test rdi, rdi
+    js .aiv_u8_wide             ; above 2**63: an i64 cannot say it
     jmp .aiv_int
 .aiv_u1:
     movzx edi, byte [rax]
@@ -272,6 +277,14 @@ DEF_FUNC array_item_value, AIV_FRAME
 .aiv_u4:
     mov edi, dword [rax]
     jmp .aiv_int
+
+.aiv_u8_wide:
+    ; 'L' and 'Q' hold the full u64 range, so reading one back through an i64
+    ; answered array('Q', [2**64-1])[0] as -1.
+    call array_int_from_u64
+    leave
+    V_PACK rax, rdx
+    ret
 
 .aiv_int:
     ; int_from_i64 answers a (payload, tag) PAIR, not a Value.  Handing the
@@ -312,6 +325,33 @@ DEF_FUNC array_item_value, AIV_FRAME
 END_FUNC array_item_value
 
 ;; ============================================================================
+;; array_int_from_u64(rdi = an unsigned 64-bit value) -> (rax, edx = TAG_PTR)
+;;
+;; For the half of the u64 range an i64 cannot express.  int_from_i64 would
+;; answer a negative number, so the mpz is set from the unsigned value
+;; directly.
+;; ============================================================================
+DEF_FUNC_LOCAL array_int_from_u64, 8            ; + 1 push = 16, 16-aligned
+    push rbx
+    mov rbx, rdi
+    xor edi, edi
+    extern int_from_i64_gmp
+    call int_from_i64_gmp
+    mov rdi, rax
+    INT_NEED_MPZ rdi
+    lea rdi, [rax + PyIntObject.mpz]
+    mov rsi, rbx
+    mov rbx, rax
+    extern __gmpz_set_ui
+    call __gmpz_set_ui wrt ..plt
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+END_FUNC array_int_from_u64
+
+;; ============================================================================
 ;; array_store_item(rdi = the array, rsi = index, rdx = the Value to store)
 ;;   -> eax = 1, or 0 with an exception pending
 ;;
@@ -322,8 +362,12 @@ END_FUNC array_item_value
 ASI_ARR   equ 8
 ASI_IDX   equ 16
 ASI_VAL   equ 24
-ASI_FRAME equ 32            ; + 1 push = 40 ... padded below
-DEF_FUNC array_store_item, 40
+ASI_OBJ   equ 32        ; a heap int too wide for an i64, borrowed
+ASI_NEG   equ 40        ; 1 when the refusal is "less than minimum"
+ASI_MSG_ROW equ 40      ; five qwords per row of asi_msgs
+ASI_WIDE  equ 48        ; 1 when it did not even fit the C conversion type
+ASI_FRAME equ 56            ; + 1 push = 64, 16-aligned
+DEF_FUNC array_store_item, ASI_FRAME
     push rbx
     mov [rbp - ASI_ARR], rdi
     mov [rbp - ASI_IDX], rsi
@@ -337,25 +381,29 @@ DEF_FUNC array_store_item, 40
 
     ; An integer typecode takes an index-like object, and refuses a float:
     ; CPython says "'float' object cannot be interpreted as an integer".
-    ; obj_as_index takes the UNPACKED pair, not a Value: handing it a Value
-    ; passes the biased encoding of an int immediate as the number itself,
-    ; and every append then looked like an overflow.
     mov rdi, rdx
     V_UNPACK rdi, rdx
-    call obj_as_index
+    call array_int_arg
+    test edx, edx
+    jz .asi_fail
+    mov qword [rbp - ASI_NEG], 0
+    mov qword [rbp - ASI_WIDE], 0
+    cmp edx, 2
+    je .asi_wide
     mov rbx, rax                ; the value, as an i64
-    cmp qword [rel current_exception], 0
-    jne .asi_fail
 
     ; Range, by size and signedness.  Out of range is OverflowError, not a
     ; silent truncation.
     mov rdi, [rbp - ASI_ARR]
     mov rcx, [rdi + PyArrayObject.ob_isize]
     mov rdx, [rdi + PyArrayObject.ob_kind]
-    cmp rcx, 8
-    je .asi_store                ; eight bytes takes whatever fits an i64
+    ; The signedness test comes FIRST.  Behind the eight-byte shortcut, 'L'
+    ; and 'Q' were never range-checked at all, and array('Q', [-1]) stored
+    ; -1 and printed it back.
     cmp rdx, AK_UNSIGNED
     je .asi_range_unsigned
+    cmp rcx, 8
+    je .asi_store                ; eight signed bytes take any i64
 
     ; signed: -(1 << (bits-1)) .. (1 << (bits-1)) - 1
     shl rcx, 3                  ; bits
@@ -365,7 +413,10 @@ DEF_FUNC array_store_item, 40
     mov rdx, rax
     neg rdx                     ; the low bound
     cmp rbx, rdx
-    jl .asi_overflow
+    jge .asi_hi_check
+    mov qword [rbp - ASI_NEG], 1
+    jmp .asi_overflow
+.asi_hi_check:
     dec rax
     cmp rbx, rax
     jg .asi_overflow
@@ -373,7 +424,12 @@ DEF_FUNC array_store_item, 40
 
 .asi_range_unsigned:
     test rbx, rbx
-    js .asi_overflow
+    jns .asi_unsigned_hi
+    mov qword [rbp - ASI_NEG], 1
+    jmp .asi_overflow
+.asi_unsigned_hi:
+    cmp rcx, 8
+    je .asi_store               ; every non-negative i64 fits a u64
     shl rcx, 3                  ; bits
     mov rax, 1
     shl rax, cl
@@ -458,11 +514,75 @@ DEF_FUNC array_store_item, 40
     pop rbx
     leave
     ret
+.asi_wide:
+    ; Wider than an i64.  Only an eight-byte UNSIGNED array can still take it:
+    ; array('Q', [2**64-1]) is legal, and obj_as_index cannot express it.
+    mov [rbp - ASI_OBJ], rax
+    mov rdi, [rbp - ASI_ARR]
+    cmp qword [rdi + PyArrayObject.ob_kind], AK_UNSIGNED
+    jne .asi_wide_sign
+    cmp qword [rdi + PyArrayObject.ob_isize], 8
+    jne .asi_wide_sign
+    mov rdi, [rbp - ASI_OBJ]
+    lea rdi, [rdi + PyIntObject.mpz]
+    extern __gmpz_fits_ulong_p
+    call __gmpz_fits_ulong_p wrt ..plt
+    test eax, eax
+    jz .asi_wide_sign
+    mov rdi, [rbp - ASI_OBJ]
+    lea rdi, [rdi + PyIntObject.mpz]
+    extern __gmpz_get_ui
+    call __gmpz_get_ui wrt ..plt
+    mov rbx, rax
+    jmp .asi_store
+.asi_wide_sign:
+    ; _mp_size carries the sign, and the refusal's wording depends on it.
+    mov qword [rbp - ASI_WIDE], 1
+    mov rax, [rbp - ASI_OBJ]
+    mov eax, [rax + PyIntObject.mpz + 4]
+    test eax, eax
+    jns .asi_overflow
+    mov qword [rbp - ASI_NEG], 1
+
 .asi_overflow:
+    ; CPython words this per TYPECODE, and not consistently: 'b' says "signed
+    ; char", 'H' says "unsigned short", 'I' names __index__'s own refusal, and
+    ; 'q' just says "int too big to convert".  Worse, each code has TWO pairs
+    ; of messages: one for a value the C conversion accepted and the range
+    ; then refused, and one for a value that never fit the C type at all --
+    ; array('b', [2**64]) blames a C long, not a signed char.  A table is the
+    ; only honest way to reproduce that.
+    ;
     ; SET_EXC: the callers return a failure code and let their own caller
     ; unwind, so a RAISE here would skip the cleanup in between.
-    SET_EXC exc_OverflowError_type, \
-            "signed integer is greater than maximum"
+    mov rax, [rbp - ASI_ARR]
+    mov rcx, [rax + PyArrayObject.ob_code]
+    lea rdx, [rel asi_msgs]
+.asi_msg_scan:
+    mov rax, [rdx]
+    test rax, rax
+    jz .asi_msg_generic
+    cmp rax, rcx
+    je .asi_msg_found
+    add rdx, ASI_MSG_ROW
+    jmp .asi_msg_scan
+.asi_msg_found:
+    mov rax, 8                          ; past the typecode
+    cmp qword [rbp - ASI_WIDE], 0
+    je .asi_msg_pair
+    add rax, 16                         ; the "did not fit the C type" pair
+.asi_msg_pair:
+    cmp qword [rbp - ASI_NEG], 0
+    jne .asi_msg_take
+    add rax, 8                          ; the "greater than maximum" half
+.asi_msg_take:
+    mov rsi, [rdx + rax]
+    jmp .asi_msg_raise
+.asi_msg_generic:
+    lea rsi, [rel asi_m_toobig]
+.asi_msg_raise:
+    lea rdi, [rel exc_OverflowError_type]
+    call set_exception
     xor eax, eax
     pop rbx
     leave
@@ -475,6 +595,183 @@ DEF_FUNC array_store_item, 40
     leave
     ret
 END_FUNC array_store_item
+
+section .rodata
+asi_m_schar_lo:  db "signed char is less than minimum", 0
+asi_m_schar_hi:  db "signed char is greater than maximum", 0
+asi_m_ubyte_lo:  db "unsigned byte integer is less than minimum", 0
+asi_m_ubyte_hi:  db "unsigned byte integer is greater than maximum", 0
+asi_m_short_lo:  db "signed short integer is less than minimum", 0
+asi_m_short_hi:  db "signed short integer is greater than maximum", 0
+asi_m_ushort_lo: db "unsigned short is less than minimum", 0
+asi_m_ushort_hi: db "unsigned short is greater than maximum", 0
+asi_m_int_lo:    db "signed integer is less than minimum", 0
+asi_m_int_hi:    db "signed integer is greater than maximum", 0
+asi_m_uint_neg:  db "can't convert negative value to unsigned int", 0
+asi_m_uint_hi:   db "unsigned int is greater than maximum", 0
+asi_m_long:      db "Python int too large to convert to C long", 0
+asi_m_ulong_hi:  db "Python int too large to convert to C unsigned long", 0
+asi_m_toobig:    db "int too big to convert", 0
+asi_m_uneg:      db "can't convert negative int to unsigned", 0
+align 8
+; typecode, then two pairs of (too small, too large): the first for a value
+; the C conversion accepted, the second for one that never fit the C type.
+asi_msgs:
+    dq 'b', asi_m_schar_lo,  asi_m_schar_hi,  asi_m_long,     asi_m_long
+    dq 'B', asi_m_ubyte_lo,  asi_m_ubyte_hi,  asi_m_long,     asi_m_long
+    dq 'h', asi_m_short_lo,  asi_m_short_hi,  asi_m_long,     asi_m_long
+    dq 'H', asi_m_ushort_lo, asi_m_ushort_hi, asi_m_long,     asi_m_long
+    dq 'i', asi_m_int_lo,    asi_m_int_hi,    asi_m_long,     asi_m_long
+    dq 'I', asi_m_uint_neg,  asi_m_uint_hi,   asi_m_uint_neg, asi_m_ulong_hi
+    dq 'l', asi_m_long,      asi_m_long,      asi_m_long,     asi_m_long
+    dq 'L', asi_m_uint_neg,  asi_m_ulong_hi,  asi_m_uint_neg, asi_m_ulong_hi
+    dq 'q', asi_m_toobig,    asi_m_toobig,    asi_m_toobig,   asi_m_toobig
+    dq 'Q', asi_m_uneg,      asi_m_toobig,    asi_m_uneg,     asi_m_toobig
+    dq 0, 0, 0, 0, 0
+section .text
+
+;; ============================================================================
+;; array_int_arg(rdi = payload, edx = tag)
+;;   -> edx = 1 and rax = the value as an i64
+;;      edx = 2 and rax = a BORROWED PyIntObject* wider than an i64
+;;      edx = 0 with an exception pending
+;;
+;; obj_as_index would do all of this, except that it refuses a value outside
+;; i64 with "Python int too large to convert to C ssize_t" -- which is not
+;; what any typecode wants to say, and which array('Q', [2**64-1]) should not
+;; be refused with at all.  So the int case is unwrapped here, and only what
+;; is NOT an int is handed over -- where obj_as_index runs the __index__
+;; protocol and words the TypeError.
+;; ============================================================================
+DEF_FUNC_LOCAL array_int_arg
+    cmp edx, TAG_SMALLINT
+    je .aia_immediate
+    cmp edx, TAG_PTR
+    jne .aia_hand_over
+    extern int_unwrap
+    call int_unwrap
+    cmp edx, TAG_SMALLINT
+    je .aia_immediate
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_INT_TYPE rax, rcx, .aia_hand_over
+    push rdi
+    push rdx
+    extern int_fits_i64
+    call int_fits_i64
+    pop rdx
+    pop rdi
+    test eax, eax
+    jz .aia_wide
+    extern int_to_i64
+    call int_to_i64
+    mov edx, 1
+    leave
+    ret
+.aia_wide:
+    mov rax, rdi
+    mov edx, 2
+    leave
+    ret
+.aia_immediate:
+    mov rax, rdi
+    mov edx, 1
+    leave
+    ret
+.aia_hand_over:
+    call obj_as_index
+    cmp qword [rel current_exception], 0
+    jne .aia_failed
+    mov edx, 1
+    leave
+    ret
+.aia_failed:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+END_FUNC array_int_arg
+
+;; ============================================================================
+;; array_richcompare(rdi = left, rsi = right, edx = op) -> (rax, edx) a Value
+;;
+;; Element-wise, like a list's -- array('i', [1, 2]) == array('i', [1, 2]) is
+;; True in CPython, and with no tp_richcompare at all it was False here, so
+;; every array compared by identity and `<` was a TypeError.
+;;
+;; Delegated to the LISTS, for the reason array_repr is: list_richcompare
+;; already has the lexicographic order, the per-element dispatch and the
+;; recursion guard, and comparing values rather than bytes is what makes
+;; array('i', [1]) == array('f', [1.0]) answer True the way CPython's does.
+;; ============================================================================
+ARC_RIGHT equ 8
+ARC_OP    equ 16
+ARC_L1    equ 24
+ARC_L2    equ 32
+ARC_RES   equ 40
+ARC_TAG   equ 48
+ARC_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
+DEF_FUNC array_richcompare, ARC_FRAME
+    V_TEST_PTR rsi, rax
+    ja .arc_not_impl
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel array_type]
+    cmp rax, rcx
+    jne .arc_not_impl
+
+    mov [rbp - ARC_RIGHT], rsi
+    mov [rbp - ARC_OP], rdx
+    mov qword [rbp - ARC_L1], 0
+    mov qword [rbp - ARC_L2], 0
+
+    call array_tolist
+    test rax, rax
+    jz .arc_error
+    mov [rbp - ARC_L1], rax
+    mov rdi, [rbp - ARC_RIGHT]
+    call array_tolist
+    test rax, rax
+    jz .arc_error
+    mov [rbp - ARC_L2], rax
+
+    mov rdi, [rbp - ARC_L1]
+    mov rsi, rax
+    mov rdx, [rbp - ARC_OP]
+    extern list_richcompare
+    call list_richcompare
+    mov [rbp - ARC_RES], rax
+    mov [rbp - ARC_TAG], rdx
+    call .arc_drop
+    mov rax, [rbp - ARC_RES]
+    mov rdx, [rbp - ARC_TAG]
+    leave
+    ret
+
+.arc_error:
+    call .arc_drop
+    leave
+    jmp eval_exception_unwind
+
+.arc_not_impl:
+    RET_NULL
+    leave
+    ret
+
+    ;; .arc_drop -- release whichever lists were built
+.arc_drop:
+    sub rsp, 8
+    mov rdi, [rbp - ARC_L1]
+    test rdi, rdi
+    jz .arc_drop_two
+    call obj_decref
+.arc_drop_two:
+    mov rdi, [rbp - ARC_L2]
+    test rdi, rdi
+    jz .arc_drop_done
+    call obj_decref
+.arc_drop_done:
+    add rsp, 8
+    ret
+END_FUNC array_richcompare
 
 ;; ============================================================================
 ;; array_dealloc(rdi = the array) -> nothing
@@ -814,6 +1111,7 @@ ARP_ARR   equ 8
 ARP_LIST  equ 16
 ARP_INNER equ 24
 ARP_BUF   equ 32
+ARP_END   equ 40        ; where the inner repr is copied to
 ARP_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
 DEF_FUNC array_repr, ARP_FRAME
     mov [rbp - ARP_ARR], rdi
@@ -871,11 +1169,19 @@ DEF_FUNC array_repr, ARP_FRAME
     lea rdi, [rax + 1]
     lea rsi, [rel arp_tail_items]
     call rbt_append_cstr
-    mov rdi, rax
+
+    ; The inner repr is copied, not appended: rbt_append_cstr is bounded at 80
+    ; bytes because it builds ERROR messages, where a field that long is a
+    ; hostile type name.  An array's repr has no such bound, and going through
+    ; it truncated every array of more than about twenty items mid-token.
     mov rsi, [rbp - ARP_INNER]
-    lea rsi, [rsi + PyStrObject.data]
-    call rbt_append_cstr
+    mov rdx, [rsi + PyStrObject.ob_size]
+    lea rcx, [rax + rdx]
+    mov [rbp - ARP_END], rcx
     mov rdi, rax
+    lea rsi, [rsi + PyStrObject.data]
+    call ap_memcpy
+    mov rdi, [rbp - ARP_END]
     lea rsi, [rel arp_close_paren]
     call rbt_append_cstr
 
@@ -1054,7 +1360,7 @@ array_type:
     dq 0                        ; tp_call (set by add_builtin_type)
     dq array_getattr            ; tp_getattr (typecode, itemsize)
     dq 0                        ; tp_setattr
-    dq 0                        ; tp_richcompare
+    dq array_richcompare        ; tp_richcompare
     dq array_tp_iter            ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init

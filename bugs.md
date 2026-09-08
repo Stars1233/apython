@@ -54,15 +54,9 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **`array`'s `L` and `Q` hold an int64, not a uint64.**  `array('L', [2**64-1])`
-  is an OverflowError here and the value in CPython.  Every path into an
-  integer typecode goes through `obj_as_index`, which refuses anything wider
-  than a signed 64-bit index, so the ceiling is that function's rather than
-  the typecode's.  `tests/test_array.py` records both.
-
-  `fromfile` and `tofile` are absent for a different reason: they want the
-  file object's own read and write, and every caller in CPython's suite
-  reaches for `frombytes` and `tobytes` instead.
+- **`array.fromfile` and `array.tofile` are absent.**  They want the file
+  object's own read and write, and every caller in CPython's suite reaches
+  for `frombytes` and `tobytes` instead.
 
 - **A `match` object's repr says nothing.**  `<re.Match object>` here,
   `<re.Match object; span=(1, 2), match='b'>` in CPython.  The span and the
