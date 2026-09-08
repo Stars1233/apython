@@ -54,6 +54,13 @@ reasoning that chose them and what changing one would cost.
   the value-pattern parser never sees the shape it would reject.  Both refuse
   it; only the wording differs.
 
+- **`set.__and__` reads a freed entry somewhere in CPython's test_set.**
+  Valgrind names it: `set_nb_and` -> `set_contains` -> `obj_richcompare_bool`
+  reads eight bytes that are not stack'd, malloc'd or recently freed, and the
+  process dies in `gc_list_remove` some way later.  An `__eq__` that clears the
+  set during the intersection is the obvious shape and is NOT it -- that one
+  behaves.  Reached only once the import fixes let the module load.
+
 - **`op_call_function_ex` segfaults somewhere in CPython's test_extcall.**
   Reached only once the import fixes let that module load, and not yet
   reduced: `f(*x)` and `f(**x)` over ints, floats, None and a plain object all
