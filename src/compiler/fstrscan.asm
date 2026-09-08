@@ -47,27 +47,36 @@ section .text
 ;;   -> rax = the opening quote of the literal starting at p, or 0 when p does
 ;;      not begin one; edx = the FS_LIT_* flags its prefix means
 ;;
-;; A quote, or a run of one or two letters immediately followed by one.  Three
-;; letters is an identifier, and so is a letter run that hits anything else --
-;; which is why `format("x")` is not read as a literal at the f.
+;; A quote, or a run of one or two letters immediately followed by one -- and
+;; only when those letters really are a string prefix Python accepts, and only
+;; when they do not continue an identifier.
 ;;
-;; It does not check that the letters spell a PREFIX Python accepts: an
-;; unknown pair still delimits a string exactly the same way, and this only
-;; has to find where that string ends.  lex_str_prefix is what refuses `qq""`,
-;; and it runs over the same bytes afterwards.
+;; Both conditions matter, and each on its own is not enough.  `f"{1 if'x'}"`
+;; is legal: CPython tokenises `if` as a NAME and `'x'` as a plain string.
+;; Accepting any letter pair read "if" as a prefix, and the f in it set
+;; FS_LIT_FMT -- so the scan looked for replacement fields inside `'x'` and
+;; the f-string was rejected as unterminated.  Refusing "if" alone is not
+;; enough either: the byte-at-a-time caller then arrives at the `f` and finds
+;; a perfectly good f-string prefix there.  So the byte BEFORE the run has to
+;; be looked at as well, which is safe here -- the scan always starts past the
+;; f-string's own opening quote.
+;;
+;; A bare quote is a literal wherever it appears; only the PREFIX form is
+;; restricted.
 ;; ============================================================================
 DEF_FUNC_BARE fs_literal_at
     xor edx, edx                ; the flags
     xor r8d, r8d                ; letters consumed
+    xor r9d, r9d                ; and the letters themselves, folded and packed
 .fla_loop:
     lea rcx, [rdi + r8]
     cmp rcx, rsi
     jae .fla_no
     movzx eax, byte [rcx]
     cmp al, 34                  ; "
-    je .fla_yes
+    je .fla_quote
     cmp al, 39                  ; '
-    je .fla_yes
+    je .fla_quote
     cmp r8, 2
     jae .fla_no
     or al, 0x20                 ; fold, so F and R count as well
@@ -75,16 +84,61 @@ DEF_FUNC_BARE fs_literal_at
     jb .fla_no
     cmp al, 'z'
     ja .fla_no
-    cmp al, 'f'
-    jne .fla_not_f
-    or edx, FS_LIT_FMT
-.fla_not_f:
-    cmp al, 'r'
-    jne .fla_not_r
-    or edx, FS_LIT_RAW
-.fla_not_r:
+    shl r9d, 8
+    or  r9d, eax
     inc r8
     jmp .fla_loop
+
+.fla_quote:
+    test r8, r8
+    jz .fla_yes                 ; no prefix at all
+
+    ; A prefix cannot continue an identifier: in `if'x'` the f is the tail of
+    ; a keyword, not the head of an f-string.
+    movzx eax, byte [rdi - 1]
+    cmp al, '_'
+    je .fla_no
+    cmp al, '0'
+    jb .fla_prefix
+    cmp al, '9'
+    jbe .fla_no
+    or al, 0x20
+    cmp al, 'a'
+    jb .fla_prefix
+    cmp al, 'z'
+    jbe .fla_no
+
+.fla_prefix:
+    cmp r8, 2
+    je .fla_two
+    ; b f r u
+    cmp r9d, 'b'
+    je .fla_yes
+    cmp r9d, 'u'
+    je .fla_yes
+    cmp r9d, 'f'
+    je .fla_fmt
+    cmp r9d, 'r'
+    je .fla_raw
+    jmp .fla_no
+.fla_two:
+    ; br rb fr rf, in either case, which the fold above has already settled
+    cmp r9d, ('b' << 8) | 'r'
+    je .fla_raw
+    cmp r9d, ('r' << 8) | 'b'
+    je .fla_raw
+    cmp r9d, ('f' << 8) | 'r'
+    je .fla_fmt_raw
+    cmp r9d, ('r' << 8) | 'f'
+    je .fla_fmt_raw
+    jmp .fla_no
+.fla_fmt_raw:
+    or edx, FS_LIT_RAW
+.fla_fmt:
+    or edx, FS_LIT_FMT
+    jmp .fla_yes
+.fla_raw:
+    or edx, FS_LIT_RAW
 .fla_yes:
     mov rax, rcx
     ret

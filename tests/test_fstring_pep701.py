@@ -121,4 +121,27 @@ for src in ('f"{"',
     except SyntaxError as e:
         print(src, "=> SyntaxError")
 
+print("--- a keyword ending in a prefix letter is not a prefix ---")
+# `if'x'` is NAME then STRING; reading the pair as a prefix set the f-string
+# flag on the inner literal and the scan went looking for fields inside it.
+_SRCS = [
+    "f\"{1 if'{' else 2}\"",
+    "f\"{0 or'x'}\"",
+    "f\"{'b' in'abc'}\"",
+    "f\"{1 if'a' else'b'}\"",
+    "f\"{f'{1}'}\"",
+    "f\"{rb'ab'}\"",
+    "f\"{br'ab'}\"",
+    "f\"{u'ab'}\"",
+    "f\"{R'a'}\"",
+    "f\"{Rb'a'}\"",
+    "f\"{fr'{1}'}\"",
+    "f\"{RF'{1}'}\"",
+]
+for _src in _SRCS:
+    try:
+        print(_src, "=>", repr(eval(_src)))
+    except SyntaxError as e:
+        print(_src, "=> SyntaxError:", e.msg)
+
 print("done")
