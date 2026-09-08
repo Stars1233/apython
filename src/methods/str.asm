@@ -1614,17 +1614,23 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     mov r13, r12
     sub r13, [rbp - SPI_SEPLEN]
 .spi_sepr_scan:
+    ; One search per PIECE, as on the forward path above.  This was an
+    ; ap_memcmp CALL for every byte offset, walking backwards -- the same
+    ; anti-pattern .spi_sep_scan's comment names, left behind when the forward
+    ; half was fixed.  ap_memrfind over the part not yet split off finds the
+    ; last separator directly.
     test r13, r13
     js .spi_sepr_tail
     lea rdi, [rbx + PyStrObject.data]
-    add rdi, r13
-    mov rsi, [rbp - SPI_SEP]
-    mov rdx, [rbp - SPI_SEPLEN]
-    call ap_memcmp
-    test eax, eax
-    jz .spi_sepr_hit
-    dec r13
-    jmp .spi_sepr_scan
+    mov rsi, r12                    ; only what is still unsplit
+    mov rdx, [rbp - SPI_SEP]
+    mov rcx, [rbp - SPI_SEPLEN]
+    call ap_memrfind
+    test rax, rax
+    jz .spi_sepr_tail
+    lea rcx, [rbx + PyStrObject.data]
+    sub rax, rcx
+    mov r13, rax                    ; byte offset of the separator
 
 .spi_sepr_hit:
     mov r14, r13

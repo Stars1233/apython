@@ -710,17 +710,67 @@ END_FUNC ap_memcpy
 ;; ============================================================================
 DEF_FUNC_BARE ap_memset
     mov r8, rdi             ; save dst for return
-    mov al, sil             ; val (byte)
+    ; `rep stosb` carries the same thirty-odd cycles of startup that ap_memcpy
+    ; documents for `rep movsb`, and it had no size ladder at all -- so
+    ; clearing eight bytes cost what clearing four hundred does.  The callers
+    ; are dict and set table clears, code-object field zeroing and the numeric
+    ; scratch buffers, and most of them are short.  Same shape as ap_memcpy
+    ; above: overlapping stores up to 32 bytes, `rep stosb` beyond.
+    movzx eax, sil
+    mov rcx, 0x0101010101010101
+    imul rax, rcx           ; the byte, in all eight lanes.  rcx, not a fresh
+                            ; register: `rep stosb` already clobbers it, so
+                            ; the clobber set is unchanged from before.
+    cmp rdx, 32
+    ja .ams_rep
+    cmp rdx, 16
+    ja .ams_17_32
+    cmp rdx, 8
+    jb .ams_under8
+    mov [rdi], rax                  ; 8..16, two qwords overlapping
+    mov [rdi + rdx - 8], rax
+    jmp .ams_done
+.ams_17_32:
+    mov [rdi], rax
+    mov [rdi + 8], rax
+    mov [rdi + rdx - 16], rax
+    mov [rdi + rdx - 8], rax
+    jmp .ams_done
+.ams_under8:
+    cmp rdx, 4
+    jb .ams_under4
+    mov [rdi], eax                  ; 4..7, two dwords overlapping
+    mov [rdi + rdx - 4], eax
+    jmp .ams_done
+.ams_under4:
+    cmp rdx, 2
+    jb .ams_under2
+    mov [rdi], ax                   ; 2..3, two words overlapping
+    mov [rdi + rdx - 2], ax
+    jmp .ams_done
+.ams_under2:
+    test rdx, rdx
+    jz .ams_done
+    mov [rdi], al                   ; exactly one byte
+.ams_done:
+    mov rax, r8             ; return original dst
+    ret
+.ams_rep:
     mov rcx, rdx            ; rcx = count
-    rep stosb               ; rdi=dst already in place
+    rep stosb               ; rdi=dst already in place, al = the byte
     mov rax, r8             ; return original dst
     ret
 END_FUNC ap_memset
 
 ;; ============================================================================
 ;; ap_memmove(void *dst, const void *src, size_t n) -> void *dst
-;; Handles overlapping regions. n must be a multiple of 8.
-;; Forward: rep movsq (fast). Backward: manual qword loop (avoids std penalty).
+;; Handles overlapping regions.  Any n; byte-granular at both ends.
+;;
+;; Three arms.  Forward covers dst < src and, after the disjointness test
+;; below, most of dst > src as well; only a real overlap upward needs the
+;; descending loop.
+;;
+;; Clobbers rax, rcx, rdx, rsi and rdi.  rbx is pushed and restored.
 ;; ============================================================================
 DEF_FUNC_BARE ap_memmove
     mov rax, rdi            ; save dst for return
@@ -729,23 +779,62 @@ DEF_FUNC_BARE ap_memmove
     jz .memmove_done
     cmp rdi, rsi
     je .memmove_done        ; dst == src, nop
-    jb .memmove_fwd         ; dst < src: forward safe
+    jb .memmove_fwd         ; dst < src: forward is safe
+
+    ; dst > src.  Forward is still correct when the two regions do not
+    ; actually touch, and forward is where the fast copy lives, so ask before
+    ; committing to the slow direction.
+    lea rdx, [rsi + rcx]
+    cmp rdi, rdx
+    jae .memmove_fwd        ; dst >= src + n: disjoint after all
+
 .memmove_bk:
-    ; dst > src: copy backward to avoid overlap corruption
-    ; Point rsi/rdi to last byte, set direction flag, copy bytes
-    lea rsi, [rsi + rcx - 1]
-    lea rdi, [rdi + rcx - 1]
-    std
-    rep movsb
-    cld
+    ; A genuine upward overlap: copy from the top down.
+    ;
+    ; This was `std` + `rep movsb` + `cld`, which is the obvious spelling and
+    ; the wrong one.  Backward `rep movsb` has never been ERMSB-accelerated on
+    ; any x86-64 -- it degrades to about a byte a cycle -- and each flip of the
+    ; direction flag costs ten to twenty cycles on top.  The header claimed a
+    ; "manual qword loop (avoids std penalty)" that was not there; this is it.
+    ;
+    ; list.insert(0, x) and list.pop(0) reach here on every call, as do
+    ; bytearray's splices.
+    push rbx
+    lea rsi, [rsi + rcx]
+    lea rdi, [rdi + rcx]
+    mov rdx, rcx
+    and edx, 7              ; the byte remainder is at the LOW end going down
+    shr rcx, 3
+    jz .mmb_tail
+.mmb_qword:
+    sub rsi, 8
+    sub rdi, 8
+    mov rbx, [rsi]
+    mov [rdi], rbx
+    dec rcx
+    jnz .mmb_qword
+.mmb_tail:
+    test edx, edx
+    jz .mmb_done
+.mmb_byte:
+    dec rsi
+    dec rdi
+    mov bl, [rsi]
+    mov [rdi], bl
+    dec edx
+    jnz .mmb_byte
+.mmb_done:
+    pop rbx
     ret
+
 .memmove_fwd:
-    ; dst < src: forward copy — qwords then byte remainder
-    push rdx                ; save original count
+    ; qwords then a byte remainder.  rcx rather than rdx is saved across the
+    ; `rep movsq` because the disjointness test above spends rdx.
+    push rcx
     shr rcx, 3
     rep movsq
     pop rcx
-    and rcx, 7
+    and ecx, 7
     rep movsb
 .memmove_done:
     ret
@@ -913,17 +1002,76 @@ section .text
 
 ;; ============================================================================
 ;; ap_strlen(const char *s) -> size_t
-;; Uses repne scasb (fast on modern x86-64 with FAST_SHORT_REP)
+;;
+;; Eight bytes at a time, by the same Mycroft test ap_strcmp uses below: for a
+;; word x, (x - 0x01..01) & ~x & 0x80..80 is nonzero exactly when some byte of
+;; x is zero.
+;;
+;; This was `repne scasb`, under a comment claiming it was "fast on modern
+;; x86-64 with FAST_SHORT_REP".  FSRM covers `rep movsb` and nothing else;
+;; `repne scasb` has never been accelerated on any Intel or AMD part, and runs
+;; at roughly a byte every two to four cycles after a large fixed startup.
+;;
+;; A byte prologue walks to the next 8-byte boundary before the word loop
+;; starts, so no 8-byte load can reach into a page the string does not already
+;; touch.  It also costs no register, which is the point: the clobber set here
+;; is exactly what `repne scasb` clobbered -- rax, rcx and rdi -- because the
+;; thirteen callers were written against that and one of them holds a live
+;; rsi across the call.  The two constants live in .rodata for the same
+;; reason; in a register they would have widened it.
 ;; ============================================================================
 DEF_FUNC_BARE ap_strlen
-    xor eax, eax            ; search for NUL byte
-    mov rcx, -1             ; max search length
-    repne scasb
+    push rsi
+    mov rsi, rdi                    ; the original pointer, for the length
+.asl_align:
+    test dil, 7
+    jz .asl_aligned
+    cmp byte [rdi], 0
+    je .asl_hit
+    inc rdi
+    jmp .asl_align
+
+.asl_aligned:
+    mov rax, [rdi]
+    mov rcx, rax
     not rcx
-    dec rcx                 ; rcx = length (not counting NUL)
-    mov rax, rcx
+    sub rax, [rel swar_ones]
+    and rax, rcx
+    and rax, [rel swar_himask]
+    jnz .asl_found
+.asl_loop:
+    add rdi, 8
+    mov rax, [rdi]
+    mov rcx, rax
+    not rcx
+    sub rax, [rel swar_ones]
+    and rax, rcx
+    and rax, [rel swar_himask]
+    jz .asl_loop
+.asl_found:
+    ; The lowest set 0x80 marks the first NUL, x86 being little-endian.
+    bsf rax, rax
+    shr rax, 3                      ; bit index -> byte index within the word
+    add rdi, rax
+.asl_hit:
+    mov rax, rdi
+    sub rax, rsi
+    pop rsi
     ret
 END_FUNC ap_strlen
+
+section .rodata
+align 8
+; The two Mycroft constants, shared by ap_strlen and ap_strcmp.  In .rodata
+; rather than in registers because both functions were written to a clobber
+; set their callers depend on, and rematerialising them inside a loop -- which
+; ap_strcmp did, twice per eight bytes, at ten bytes of encoding each -- is
+; twenty bytes of instruction fetch per iteration to save a load that is
+; always L1-resident.
+swar_ones:    dq 0x0101010101010101
+swar_himask:  dq 0x8080808080808080
+
+section .text
 
 ;; ============================================================================
 ;; ap_strcmp(const char *a, const char *b) -> int
@@ -942,14 +1090,14 @@ DEF_FUNC_BARE ap_strcmp
     cmp rax, rdx
     jne .byte_loop          ; mismatch -> fall back
 
-    ; Check if NUL within these 8 bytes (Mycroft's trick)
+    ; Check if NUL within these 8 bytes (Mycroft's trick).  Both constants
+    ; used to be movabs'd inside this loop -- twenty bytes of encoding per
+    ; eight bytes compared -- and r8 is no longer touched at all.
     mov rcx, rax
-    mov r8, 0x0101010101010101
-    sub rcx, r8
+    sub rcx, [rel swar_ones]
     not rax
     and rcx, rax
-    mov r8, 0x8080808080808080
-    and rcx, r8
+    and rcx, [rel swar_himask]
     jnz .equal              ; NUL found -> strings equal
 
     add rdi, 8

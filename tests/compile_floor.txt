@@ -337,6 +337,7 @@ test_match
 test_math_more
 test_math
 test_membership
+test_memmove_boundaries
 test_memoryview_stride
 test_metaclass_lifetime
 test_metaclass_prepare
@@ -419,6 +420,7 @@ test_review_regressions
 test_richcompare_bool
 test_richcompare_byname
 test_round
+test_rsplit_boundaries
 test_select
 test_sequence_iteration
 test_setattr_dunder
