@@ -109,3 +109,42 @@ for first, *rest in [(1, 2, 3)]:
 
 head, *tail = [1, 2, 3]
 print(head, tail)
+
+
+# A dict takes any hashable key, and DictEntry.key is a full Value -- so an
+# int key in a `**` spread put an IMMEDIATE in the names tuple and the INCREF
+# that gives the tuple its reference wrote through the number itself.
+# `print(**{1: 2})` was one line of Python and a segfault; CPython refuses a
+# non-string keyword before anything else happens, and now so does this.
+class StrSub(str):
+    pass
+
+
+def kw(**k):
+    return sorted(k.items())
+
+
+for mapping in ({1: 2}, {1.5: 2}, {None: 2}, {(1,): 2}, {True: 2},
+                {"a": 1, 2: 3}, {b"a": 1}):
+    try:
+        print(kw(**mapping))
+    except TypeError as e:
+        print("refused:", e)
+
+print(kw(**{}), kw(**{"a": 1}), kw(**{StrSub("b"): 2}))
+print(kw(**{"a": 1}, **{"b": 2}))
+
+# The refusal happens for any callable, and before the callable is entered.
+entered = []
+
+
+def records(**k):
+    entered.append(1)
+    return k
+
+
+try:
+    records(**{1: 2})
+except TypeError:
+    pass
+print("callee not entered:", entered == [])

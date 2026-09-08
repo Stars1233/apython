@@ -21,6 +21,7 @@ extern obj_decref
 extern raise_exception
 extern func_new
 extern exc_TypeError_type
+extern str_type
 extern exc_SystemError_type
 extern current_exception
 extern eval_exception_unwind
@@ -652,6 +653,39 @@ DEF_FUNC op_call_function_ex
     test rcx, rcx
     jz .cfex_empty_kwargs          ; empty dict → treat as no kwargs
     mov [rbp - CFX_NKW], rcx
+
+    ; Every key has to be a string, and CPython refuses a call where one is
+    ; not before anything else happens.  DictEntry.key is a full Value and a
+    ; dict takes any hashable key, so `f(**{1: 2})` put an int IMMEDIATE in
+    ; the names tuple and the INCREF below wrote through the number itself --
+    ; one line of Python, and a segfault.  Checked here, before the merged
+    ; buffer and the names tuple exist, so the refusal has nothing to release.
+    mov rsi, [rbp - CFX_KWARGS]
+    mov r8, [rsi + PyDictObject.entries]
+    mov r9, [rsi + PyDictObject.capacity]
+    xor ecx, ecx
+.cfex_kwkey_scan:
+    cmp rcx, r9
+    jge .cfex_kwkeys_ok
+    imul rax, rcx, DictEntry_size
+    mov rax, [r8 + rax + DictEntry.key]
+    test rax, rax
+    jz .cfex_kwkey_next            ; empty slot or a tombstone
+    V_TEST_PTR rax, rdx
+    ja .cfex_kwkey_bad
+    mov rdx, [rax + PyObject.ob_type]
+    lea rdi, [rel str_type]
+    cmp rdx, rdi
+    je .cfex_kwkey_next
+    ; A str SUBCLASS is a string, which is what CPython's check accepts.
+    test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .cfex_kwkey_bad
+.cfex_kwkey_next:
+    inc rcx
+    jmp .cfex_kwkey_scan
+.cfex_kwkey_bad:
+    RAISE exc_TypeError_type, "keywords must be strings"
+.cfex_kwkeys_ok:
 
     ; Get n_pos from args tuple
     mov rax, [rbp - CFX_ARGS]
