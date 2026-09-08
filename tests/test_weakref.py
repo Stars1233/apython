@@ -130,3 +130,41 @@ c = _weakref.ref(live, lambda ref: order.append("late"))
 print(_weakref.getweakrefcount(live), c() is live)
 del live
 print(order)
+
+
+# The chain the side table keeps is NOT collector-tracked, and it cannot be:
+# its entries are borrowed, and the collector walks a tracked list's items and
+# counts a reference for each.  Every weak reference in it would look one
+# reference short of reachable, and an explicit collect() would free objects a
+# live frame is still holding.
+import gc
+
+
+def survives_a_collection():
+    target = C(11)
+    keep = _weakref.ref(target, lambda ref: None)
+    shared = _weakref.ref(target)
+    for _ in range(3):
+        gc.collect()
+    return target.n, keep() is target, shared() is target
+
+
+print(survives_a_collection())
+
+
+def a_cycle_through_a_referent():
+    class Node:
+        pass
+
+    a = Node()
+    b = Node()
+    a.other = b
+    b.other = a
+    r = _weakref.ref(a, lambda ref: None)
+    alive = r() is a
+    del a, b
+    gc.collect()
+    return alive, r() is None
+
+
+print(a_cycle_through_a_referent())

@@ -390,6 +390,17 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
     jnz .have_chain
     xor edi, edi
     call list_new
+    ; The chain is NOT collector-tracked.  Its entries are borrowed, and
+    ; gc_visit_decref walks a tracked list's items and counts a reference for
+    ; each -- so every weak reference in it looked one reference short of
+    ; reachable, and an explicit gc.collect() freed objects a live frame was
+    ; still holding.  Nothing here can be part of a cycle: the list holds no
+    ; references at all, and the table that holds the list is tracked.
+    push rax
+    mov rdi, rax
+    extern gc_untrack
+    call gc_untrack
+    pop rax
     push rax
     mov rdi, [rbp - WM_REF]
     mov rsi, [rbp - WM_OBJ]
