@@ -1114,6 +1114,10 @@ DEF_FUNC sys_module_init, 40
     ; Nothing in this tree writes a .pyc -- import.asm only reads them and
     ; marshal has no writer -- so this is a fact, not a switch.
     SYS_ADD_OBJ sm_dont_write_bytecode, bool_true
+    ; None, and importlib._bootstrap_external reads it on every path it
+    ; caches -- unguarded, so its absence stopped importlib installing its
+    ; own finders and left sys.meta_path empty.
+    SYS_ADD_OBJ sm_pycache_prefix, none_singleton
     ; The import machinery's own three attributes, all empty.  The finders here
     ; are assembly rather than importlib path hooks, so nothing will ever
     ; populate them -- but importlib._bootstrap walks meta_path on EVERY import
@@ -1628,6 +1632,7 @@ sm_short:        db "short", 0
 sm_dont_write_bytecode: db "dont_write_bytecode", 0
 sm_path_importer_cache: db "path_importer_cache", 0
 sm_meta_path:    db "meta_path", 0
+sm_pycache_prefix: db "pycache_prefix", 0
 sm_path_hooks:   db "path_hooks", 0
 sm_displayhook:  db "displayhook", 0
 sm_dunder_displayhook: db "__displayhook__", 0

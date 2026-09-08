@@ -232,3 +232,84 @@ def _siphash13(k0, k1, data):
     for _ in range(3):
         v0, v1, v2, v3 = _sipround(v0, v1, v2, v3)
     return ((v0 ^ v1) ^ (v2 ^ v3)) & _MASK
+
+
+# ---------------------------------------------------------------------------
+# The meta-path finder.
+#
+# importlib asks sys.meta_path and nothing else: _bootstrap._find_spec walks
+# it, and an empty list is a ModuleNotFoundError with an ImportWarning about
+# the emptiness.  CPython fills it from pylifecycle.c at startup, with the
+# three finders its own bootstrap defines; nothing here runs at that point,
+# and the finders here are the interpreter's own -- assembly, reached by the
+# IMPORT_NAME opcode, not by any hook.
+#
+# So one finder stands in front of them.  It does no searching of its own:
+# __import__ is the whole search, and it is the same one an `import` statement
+# takes, which is the point -- there is one answer about where a module comes
+# from rather than two that can disagree.  The loader hands back the module
+# that import already built, and exec_module does nothing, exactly as
+# create_builtin and exec_builtin above do for a builtin.
+#
+# Installed on `import _imp`, which importlib/__init__.py does on its first
+# line, before it imports the bootstrap that will read the list.  A program
+# that never touches importlib never imports this module and pays nothing.
+# ---------------------------------------------------------------------------
+
+class _ApythonLoader:
+    """Hands back the module the interpreter's own importer already made."""
+
+    @staticmethod
+    def create_module(spec):
+        return sys.modules.get(spec.name)
+
+    @staticmethod
+    def exec_module(module):
+        """Nothing left to do: create_module returned a finished module."""
+
+    @staticmethod
+    def is_package(name):
+        return hasattr(sys.modules.get(name), "__path__")
+
+    @staticmethod
+    def get_code(name):
+        return None
+
+    @staticmethod
+    def get_source(name):
+        return None
+
+
+class _ApythonFinder:
+    """sys.meta_path's entry for the interpreter's own import machinery."""
+
+    @classmethod
+    def find_spec(cls, name, path=None, target=None):
+        module = sys.modules.get(name)
+        if module is None:
+            try:
+                __import__(name)
+            except ImportError:
+                return None
+            module = sys.modules.get(name)
+            if module is None:
+                return None
+        spec = getattr(module, "__spec__", None)
+        if spec is not None:
+            return spec
+        from importlib.machinery import ModuleSpec
+        spec = ModuleSpec(name, _ApythonLoader,
+                          origin=getattr(module, "__file__", None),
+                          is_package=hasattr(module, "__path__"))
+        if spec.submodule_search_locations is not None:
+            spec.submodule_search_locations = list(module.__path__)
+        spec.has_location = getattr(module, "__file__", None) is not None
+        return spec
+
+    @classmethod
+    def invalidate_caches(cls):
+        """No cache of its own: __import__ keeps sys.modules."""
+
+
+if _ApythonFinder not in sys.meta_path:
+    sys.meta_path.append(_ApythonFinder)
