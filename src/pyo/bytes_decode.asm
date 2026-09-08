@@ -405,11 +405,31 @@ DEF_FUNC_BARE bytes_utf8_check
 .buc_loop:
     cmp rcx, rsi
     jge .buc_valid
-    ; ASCII runs, eight bytes at a time.  Every byte below 0x80 is a valid
+    ; ASCII runs, sixteen bytes at a time.  Every byte below 0x80 is a valid
     ; one-byte character with nothing to check, and real input is mostly or
     ; entirely such bytes -- this validator was 70% of a decode.  The moment a
-    ; high bit turns up the word is abandoned and the byte ladder below
+    ; high bit turns up the block is abandoned and the byte ladder below
     ; resumes at the same index, so nothing about the multi-byte cases moves.
+    ;
+    ; pmovmskb collects the high bit of each byte, so the vector arm needs no
+    ; mask constant at all.  That matters more than the width does: the 8-byte
+    ; arm's constant cannot be hoisted out of .buc_loop, because the 3-byte
+    ; arms below spend r11 on their own bounds -- so a long ASCII run used to
+    ; re-execute a ten-byte movabs after every multi-byte character.  Now that
+    ; happens only on the way out of the vector arm.
+.buc_ascii_vec:
+    lea r8, [rcx + 16]
+    cmp r8, rsi
+    ja .buc_ascii_word_setup
+    movdqu xmm0, [rdi + rcx]
+    pmovmskb r9d, xmm0
+    test r9d, r9d
+    jnz .buc_ascii_word_setup
+    mov rcx, r8
+    cmp rcx, rsi
+    jl .buc_ascii_vec
+    jmp .buc_valid
+.buc_ascii_word_setup:
     mov r11, 0x8080808080808080
 .buc_ascii_word:
     lea r8, [rcx + 8]

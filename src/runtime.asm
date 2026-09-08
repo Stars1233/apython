@@ -900,33 +900,50 @@ DEF_FUNC_BARE ap_memcmp
 END_FUNC ap_memcmp
 
 ;; ============================================================================
-;; ap_memchr(rdi = p, rsi = n, edx = byte) -> rax = the first match, or 0
+;; ap_memchr(rdi = buf, rsi = len, rdx = byte) -> rax = first match, or 0
 ;;
-;; The scan every substring search stands on.  The byte is broadcast into all
-;; eight lanes of a word, XORed against eight bytes of input -- which leaves a
-;; zero byte exactly where it matched -- and the zero is found with the same
-;; Mycroft test ap_strcmp uses for its NUL.
+;; The highest-leverage scanner in the tree: str.find, .count, .replace,
+;; .split, .partition and `in` all reach it, most of them through ap_memfind,
+;; which tail-jumps here for a one-byte needle.
 ;;
-;; Never reads past the end: the word loop runs only while eight whole bytes
-;; remain.
+;; Sixteen bytes at a time with SSE2, which is architecturally guaranteed on
+;; every x86-64 -- no cpuid, no ifunc, nothing to detect.  `pcmpeqb` marks
+;; every matching lane and `pmovmskb` collapses the answer to a 16-bit mask,
+;; so the loop is four instructions per sixteen bytes where the SWAR form it
+;; replaced was twelve per eight.
+;;
+;; The vector arm runs only while sixteen or more bytes remain, so it never
+;; reads past the end -- the guarantee the SWAR version documented is kept
+;; exactly, without widening any allocation's padding.  Below sixteen the byte
+;; loop is entered directly: the old code had a sixteen-byte byte-at-a-time
+;; PROLOGUE for the same reason, to keep a short scan away from a three-cycle
+;; `imul` broadcast on the critical path (measured at the time: the word loop
+;; alone was 40% slower on `s.count("a")`).  SSE2 has no such setup -- the
+;; broadcast is four cheap shuffles -- but a scan shorter than one vector
+;; still cannot pay for even that, so the test stays.
+;;
+;; Clobbers rax, rcx, rdi, rsi and xmm0/xmm1 -- narrower than the version it
+;; replaces, which also pushed rbx.  No SysV xmm register is callee-saved, and
+;; no caller of this function touches one.
 ;; ============================================================================
 DEF_FUNC_BARE ap_memchr
-    ; A bounded byte prologue before any setup.  The word loop needs a
-    ; broadcast -- an imul, three cycles, on the critical path before anything
-    ; can be compared -- and a saved register.  str.count calls this once per
-    ; match and its matches are a few bytes apart, so it pays that fixed cost
-    ; on every call and never reaches the loop; measured, the word loop alone
-    ; was 40% SLOWER on `s.count("a")` than the byte scan it replaced, while
-    ; being fewer instructions.  Sixteen bytes is noise against a scan long
+    ; A bounded byte prologue before any setup, kept from the SWAR version and
+    ; for the same reason -- which a first pass at this removed, and the
+    ; benchmark caught within one run.  `A = "abcdefghij" * 100; s.count("a")`
+    ; calls this once per match with the next match ten bytes away, so what it
+    ; measures is the fixed cost per CALL.  A vector setup is four shuffles
+    ; plus two GPR/XMM domain crossings; ten byte compares pipeline better
+    ; than that, and dropping the prologue cost 57% on s_count while making
+    ; every long scan faster.  Sixteen bytes is noise against a scan long
     ; enough to want the loop.
     mov rcx, rsi
     cmp rcx, 16
     jbe .amk_prologue
     mov ecx, 16
 .amk_prologue:
-    sub rsi, rcx                    ; what is left for the word loop
+    sub rsi, rcx                    ; what is left for the vector loop
     test rcx, rcx
-    jz .amk_word_setup
+    jz .amk_vec_setup
 .amk_pro_byte:
     cmp dl, [rdi]
     je .amk_hit
@@ -934,60 +951,49 @@ DEF_FUNC_BARE ap_memchr
     dec rcx
     jnz .amk_pro_byte
 
-.amk_word_setup:
+.amk_vec_setup:
+    cmp rsi, 16
+    jb .amk_bytes
+
+    ; Broadcast the low byte of edx to all sixteen lanes.  Each step doubles
+    ; the width, so only byte 0 survives and the caller need not have zeroed
+    ; the rest of the register.
+    movd xmm1, edx
+    punpcklbw xmm1, xmm1
+    punpcklwd xmm1, xmm1
+    pshufd xmm1, xmm1, 0
+
+.amk_vec:
+    movdqu xmm0, [rdi]
+    pcmpeqb xmm0, xmm1
+    pmovmskb eax, xmm0
+    test eax, eax
+    jnz .amk_vec_hit
+    add rdi, 16
+    sub rsi, 16
+    cmp rsi, 16
+    jae .amk_vec
+
+.amk_bytes:
     test rsi, rsi
     jz .amk_none
-    ; Clobbers rax, rcx, rdx, rdi and rsi only.  rbx carries the one constant
-    ; that cannot be an immediate operand; the other is rematerialised in the
-    ; loop, which costs nothing and saves a second saved register.  Widening
-    ; the clobber set is not free -- sre.asm reads r8 across ap_memcpy.
-    push rbx
-    movzx eax, dl
-    mov rbx, 0x0101010101010101
-    imul rax, rbx                   ; the byte, in all eight lanes
-    sub rsi, 8
-    jb .amk_tail
-.amk_word:
-    mov rcx, [rdi]
-    xor rcx, rax                    ; a zero byte wherever the input matched
-    mov rdx, rcx
-    not rdx                         ; ~x
-    sub rcx, rbx                    ; x - 0x01..01
-    and rcx, rdx
-    mov rdx, 0x8080808080808080
-    and rcx, rdx
-    jnz .amk_word_has_it
-    add rdi, 8
-    sub rsi, 8
-    jae .amk_word
-.amk_tail:
-    add rsi, 8                      ; 0..7 bytes left
-    jz .amk_none_pop
-.amk_tail_byte:
-    cmp al, [rdi]                   ; al is the byte: rdx is scratch now
-    je .amk_hit_pop
+.amk_byte_loop:
+    cmp dl, [rdi]
+    je .amk_hit
     inc rdi
     dec rsi
-    jnz .amk_tail_byte
-.amk_none_pop:
-    pop rbx
+    jnz .amk_byte_loop
 .amk_none:
     xor eax, eax
     ret
-.amk_hit_pop:
-    pop rbx
+
+.amk_vec_hit:
+    ; One mask bit per byte, lowest bit = lowest address.
+    bsf eax, eax
+    add rax, rdi
+    ret
 .amk_hit:
     mov rax, rdi
-    ret
-.amk_word_has_it:
-    ; A 0x80 marks each matching lane.  The lowest set bit is the earliest
-    ; match in memory, because x86 is little-endian -- and a lane that is a
-    ; false positive of the borrow chain is always preceded by a real one, so
-    ; the lowest is never spurious.
-    bsf rcx, rcx
-    shr rcx, 3                      ; bit index -> byte index
-    lea rax, [rdi + rcx]
-    pop rbx
     ret
 END_FUNC ap_memchr
 

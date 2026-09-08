@@ -797,6 +797,42 @@ differs from `shl`+`add` in writing no flags at all -- both are *more*
 flag-preserving than what they replace, so they can only break code that
 wanted the flags `add`/`shl` would have set.
 
+## SIMD
+
+The tree uses **SSE2 and nothing wider**.  SSE2 is part of the x86-64
+architecture, so there is no `cpuid`, no ifunc, no feature flag and no
+fallback path to keep in step — which is the whole reason to stop there.
+Anything above it (AVX, AVX2, BMI) would need detection machinery this tree
+has never had, for a win that shows up only on long inputs.
+
+Four rules, and the first two are correctness:
+
+- **`movdqu`, never `movdqa`.**  Heap data comes from `ap_malloc`, i.e. libc
+  `malloc`, and a `PyStrObject.data` sits at a fixed struct offset that is not
+  16-aligned.  `src/modules/zlib.asm` already records libz faulting on a
+  `movaps` for this reason.
+- **A vector arm runs only while a whole vector remains.**  `ap_memcmp` and
+  `ap_memchr` both promise in their headers never to read past the end of
+  their buffer, and `str_count_codepoints` runs on strings whose allocation
+  guarantees only 8 bytes of slack.  Loop while `len >= 16` and let the
+  existing scalar tail finish; do not reach for the align-down-and-mask idiom
+  to save a few bytes.
+- **Keep the scalar prologue for short inputs, and measure before removing
+  one.**  `ap_memchr` has a bounded byte prologue that predates SIMD; a first
+  pass at vectorising deleted it and `s.count("a")` — which calls the function
+  once per match, ten bytes apart — got 57% slower, because what that measures
+  is the fixed cost per *call* and a vector setup is four shuffles plus two
+  GPR/XMM domain crossings.
+- **`pmovmskb` is the whole answer for a high-bit test.**  It collects the top
+  bit of each byte, so an "is this ASCII" probe needs no mask constant at all.
+  Use `pcmpeqb` + `pmovmskb` when comparing against a byte, and `bsf` on the
+  resulting mask to find which lane.
+
+xmm registers are all caller-saved under SysV and no hand-written function in
+this tree holds one across a call, so using `xmm0`/`xmm1` in a leaf primitive
+*narrows* its clobber set rather than widening it.  That matters here: several
+of these functions document a clobber set their callers depend on.
+
 ## What to Avoid
 
 - **Raw offsets** — always use struct fields and named frame constants
