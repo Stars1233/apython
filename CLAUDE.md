@@ -311,7 +311,7 @@ f-strings, async, comprehensions, PEP 695 type parameters.
 | `codegen.asm` | AST kind → emitter jump table; `_stmt`/`_func`/`_try`/`_comp`/`_match` for the rest.  `_try` also holds `except*`, `with` and `await`: they are one unwinder |
 | `assemble.asm` | EXTENDED_ARG fixpoint, stack depth, exception table, line table |
 | `compile.asm` | pipeline driver and lifetime; the `code_from_path` and `compile()`/`exec()`/`eval()` entry points; and `comp_error`, the record side of the error protocol |
-| `unicodename.asm` | **generated** -- the names `\N{...}` resolves |
+| `unicodename.asm` | **generated** -- the names `\N{...}` resolves, front-coded: `db shared, cpdelta, "suffix", 0` per entry, decoded as the scan walks |
 | `gen_unicodename.py` | regenerates `unicodename.asm` from `unicodedata` |
 | `unicodecase.asm` | **generated** -- the case mappings and the character flags |
 | `gen_unicodecase.py` | regenerates `unicodecase.asm` from CPython's own `str` methods |
