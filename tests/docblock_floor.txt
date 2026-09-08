@@ -60,7 +60,7 @@ src/pyo/bytes.asm                      11
 src/pyo/class.asm                      9
 src/pyo/code.asm                       6
 src/pyo/complex.asm                    9
-src/pyo/descriptors.asm                40
+src/pyo/descriptors.asm                32
 src/pyo/dict.asm                       11
 src/pyo/eventloop.asm                  19
 src/pyo/eventloop_iouring.asm          6
