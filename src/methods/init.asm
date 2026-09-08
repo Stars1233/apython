@@ -1041,6 +1041,28 @@ DEF_FUNC methods_init
     mov rdi, rax
     call type_stamp_methods
 
+    ;; --- module's own two names ---
+    ;; module_type had no tp_dict at all, so `module.__init__` and
+    ;; `module.__new__` resolved to object's: a ModuleType subclass written
+    ;; the ordinary way -- __init__ calling super().__init__(name) -- raised
+    ;; "object.__init__() takes exactly one argument".  CPython splits the
+    ;; work the same way, PyType_GenericNew and module___init__.
+    call dict_new
+    mov rbx, rax
+
+    extern module_method_new
+    mov rdi, rbx
+    lea rsi, [rel module_method_new]
+    call add_new_staticmethod       ; __new__ takes the class, not an instance
+    extern module_method_init
+    ADD_FN mn___init__, module_method_init
+
+    extern module_type
+    lea rax, [rel module_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
     ;; --- generator and coroutine dicts ---
     ;; gen_type had no tp_dict, so `hasattr(gen, "__next__")` was False and
     ;; `it.__next__` an AttributeError.  CPython's threading.py does

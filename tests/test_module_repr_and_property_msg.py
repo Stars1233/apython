@@ -143,4 +143,46 @@ try:
 except AttributeError as e:
     print("slotted:", e)
 
+print("--- a ModuleType subclass is an instance of itself ---")
+import types
+
+
+class MySub(types.ModuleType):
+    def __init__(self, name, doc=None):
+        super().__init__(name, doc)
+        self.extra = 1
+
+
+_m = MySub("mine", "a docstring")
+print("type:", type(_m).__name__, isinstance(_m, MySub), isinstance(_m, types.ModuleType))
+print("name:", _m.__name__, "doc:", _m.__doc__, "extra:", _m.extra)
+print("dict:", sorted(_m.__dict__))
+
+
+class Bare(types.ModuleType):
+    pass
+
+
+_b = Bare("bare")
+print("bare:", type(_b).__name__, _b.__name__, sorted(_b.__dict__))
+
+
+class WithNew(types.ModuleType):
+    def __new__(cls, *a):
+        print("  __new__ ran")
+        return super().__new__(cls, *a)
+
+    def __init__(self, name):
+        print("  __init__ ran")
+        super().__init__(name)
+
+
+_w = WithNew("w")
+print("both:", type(_w).__name__, _w.__name__)
+
+_plain = types.ModuleType("plain")
+print("plain:", type(_plain).__name__, _plain.__name__, sorted(_plain.__dict__))
+_m.later = 5
+print("setattr:", _m.later, _m.__dict__["later"])
+
 print("done")

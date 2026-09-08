@@ -1263,6 +1263,14 @@ DEF_FUNC type_call
     ; It lives in tp_new, NOT tp_call: tp_call on a type is what makes that
     ; type's INSTANCES callable, so parking a constructor there made every
     ; string, list and heap int callable ("abc"() returned '').
+    ; A HEAPTYPE never takes this shortcut, however it came by its tp_new.
+    ; buildclass copies a builtin base's constructor into the subclass, and
+    ; calling it here skipped the __new__ and __init__ the class defined in
+    ; Python: `class M(ModuleType)` with both of them had neither run.
+    ; .normal_type_call reaches the base's constructor anyway, at
+    ; .nnf_check_base_new, and runs __init__ on what it built.
+    test qword [rdi + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jnz .normal_type_call
     mov rax, [rdi + PyTypeObject.tp_new]
     test rax, rax
     jz .normal_type_call
