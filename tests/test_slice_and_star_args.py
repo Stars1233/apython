@@ -148,3 +148,50 @@ try:
 except TypeError:
     pass
 print("callee not entered:", entered == [])
+
+
+# What a `*` or `**` spread says when its operand cannot be used.  Three
+# different messages in CPython, from three different places, and this said
+# one thing everywhere -- "list.extend() argument must be iterable", named
+# after the routine that happened to be doing the work.
+def refuse(thunk):
+    try:
+        return repr(thunk())
+    except TypeError as e:
+        return "TypeError: %s" % e
+
+
+def star(*a, **k):
+    return a, sorted(k.items())
+
+
+print("method:", refuse(lambda: [].extend(5)))
+print("list display:", refuse(lambda: [*5]))
+print("tuple display:", refuse(lambda: (*5,)))
+print("set display:", refuse(lambda: {*5}))
+print("two groups:", refuse(lambda: star(*[1], *5)))
+print("double star:", refuse(lambda: star(**5)))
+print("double star float:", refuse(lambda: star(**1.5)))
+print("double star list:", refuse(lambda: star(**[1])))
+
+
+class Mapping:
+    def keys(self):
+        return ["a", "b"]
+
+    def __getitem__(self, k):
+        return {"a": 1, "b": 2}[k]
+
+
+# `f(**mapping)` is legal over anything with keys() and __getitem__, which is
+# what dict.update() takes; this required an exact dict.
+print("mapping:", star(**Mapping()))
+import collections
+print("ordered:", star(**collections.OrderedDict(z=1)))
+
+
+class NotAMapping:
+    pass
+
+
+print("no keys:", refuse(lambda: star(**NotAMapping())))

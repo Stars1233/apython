@@ -2119,7 +2119,25 @@ DEF_FUNC list_method_extend, LE_FRAME
     ret
 
 .extend_type_error:
-    RAISE exc_TypeError_type, "list.extend() argument must be iterable"
+    ; The METHOD's wording, which is not the opcode's: CPython says
+    ; "'int' object is not iterable" here and "Value after * must be an
+    ; iterable, not int" for the `*x` that LIST_EXTEND compiles from.  The
+    ; type comes from the TAG, because an int or a float has no ob_type.
+    extern int_type
+    extern float_type
+    lea rsi, [rel int_type]
+    cmp r13d, TAG_PTR
+    je .lme_ptr_type
+    cmp r13d, TAG_FLOAT
+    jne .lme_have_type
+    lea rsi, [rel float_type]
+    jmp .lme_have_type
+.lme_ptr_type:
+    mov rsi, [r12 + PyObject.ob_type]
+.lme_have_type:
+    CSTRING rdi, `'\x01' object is not iterable`
+    extern raise_type_error_with_typename
+    jmp raise_type_error_with_typename
 END_FUNC list_method_extend
 
 ;; ============================================================================
