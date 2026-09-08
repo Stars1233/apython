@@ -1055,6 +1055,13 @@ DEF_FUNC op_before_with
     mov rdi, r12
     call obj_decref
 .bw_no_enter:
+    ; Every path here is past .bw_exit_pushed, so the bound __exit__ has
+    ; already OVERWRITTEN mgr's slot on the value stack: the unwinder gives
+    ; back what is in the slot, which is the method, and nobody gives back the
+    ; reference VPOP_VAL took on mgr.  .bw_no_exit above needs no such line --
+    ; it is reached before the push, with mgr still in its own slot.
+    mov rdi, [rbp - BW_MGR]
+    call obj_decref
     RAISE exc_TypeError_type, "object does not support the context manager protocol"
 
 .bw_not_a_manager:

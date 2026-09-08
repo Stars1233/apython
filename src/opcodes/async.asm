@@ -539,6 +539,10 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     mov rdi, r12
     call obj_decref
 .baw_no_enter:
+    ; The __aexit__ method pushed above has taken mgr's slot, so the unwinder
+    ; releases that and not mgr.  Same shape as op_before_with's .bw_no_enter.
+    mov rdi, [rbp - BAW_MGR]
+    call obj_decref
     RAISE exc_TypeError_type, "'async with' requires __aenter__ method"
 END_FUNC op_before_async_with
 
