@@ -1691,17 +1691,18 @@ DEF_FUNC type_call
     ; kw_names_pending by now, and without handing them back a metaclass's
     ; __init__ sees the keyword VALUES as extra positional arguments.
     ;
-    ; Only a Python-level __init__ gets them, and a builtin one is left exactly
-    ; as it was -- not even cleared.  `L(sequence=())` reaches list's
-    ; constructor as its __init__ and is rejected by it, which is where that
-    ; TypeError comes from.
-    mov rax, [rbx + PyObject.ob_type]
-    lea rdx, [rel func_type]
-    cmp rax, rdx
-    jne .init_no_kw
+    ; A BUILTIN __init__ used to be left with whatever was in the global
+    ; rather than being given these, on the reasoning that what was there was
+    ; still the original call's.  It is not, as soon as __new__ is a Python
+    ; function that forwards: `super().__new__(cls, **kw)` is itself a call
+    ; with keywords, and container_dunder_new does not consume them, so dict's
+    ; __init__ read the leftover names against the wrong argument array and
+    ; `class D(dict)` with a forwarding __new__ failed on `D(a=1)` with
+    ; "'int' object is not iterable".  Handing both kinds the SAME saved names
+    ; is what the slot is for, and it keeps `L(sequence=())` a TypeError --
+    ; list's constructor is still the one that refuses it.
     mov rcx, [rbp - TC_KWNAMES]
     mov [rel kw_names_pending], rcx     ; func_call clears it again
-.init_no_kw:
     mov rdi, rbx                ; callable = __init__ func
     mov rsi, r15                ; args ptr
     lea rdx, [r13 + 1]          ; nargs + 1, self included

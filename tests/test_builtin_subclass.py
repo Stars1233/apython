@@ -139,3 +139,42 @@ for _ in range(30):
     b.append(a)
     del a, b
 print("cycles ok")
+
+
+# A subclass whose __new__ forwards to the base's, with no __init__ of its own.
+# type_call hands __init__ the keywords the class was called with; it used to
+# hand it whatever the LAST call had left in the pending slot instead, and the
+# inner super().__new__(cls, **kw) is a call that leaves one.  dict's __init__
+# then read the keyword's VALUE as a positional argument: 'int' object is not
+# iterable, from `D(a=1)`.
+class ForwardDict(dict):
+    def __new__(cls, *a, **k):
+        return super().__new__(cls, *a, **k)
+
+
+class ForwardList(list):
+    def __new__(cls, *a, **k):
+        return super().__new__(cls, *a, **k)
+
+
+print(ForwardDict(a=1), ForwardDict([("b", 2)]), ForwardDict())
+print(ForwardList([1, 2]), ForwardList())
+
+# And the keywords still reach a Python __init__ that asks for them.
+class Counted(dict):
+    def __new__(cls, *a, **k):
+        return super().__new__(cls, *a, **k)
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.kw = sorted(k)
+
+
+c = Counted(x=1, y=2)
+print(sorted(c.items()), c.kw)
+
+# A keyword a builtin constructor does not take is still a TypeError.
+try:
+    list(sequence=())
+except TypeError:
+    print("list keyword refused")

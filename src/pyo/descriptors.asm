@@ -1206,22 +1206,35 @@ extern obj_incref
 ;; tp_new, not tp_call: tp_call on a type is what makes that type's *instances*
 ;; callable.
 ;; ============================================================================
-DEF_FUNC mappingproxy_construct
+extern type_is_subtype
+extern raise_type_error_with_name
+MPC_ARG   equ 8             ; the argument, kept across type_is_subtype
+MPC_FRAME equ 16            ; + 0 pushes = 16, and a call needs 8 more
+DEF_FUNC mappingproxy_construct, MPC_FRAME
     cmp rdx, 1
-    jne .mpc_error
+    jne .mpc_arity
     mov rdi, [rsi]                  ; the mapping
+    mov [rbp - MPC_ARG], rdi
     V_TEST_PTR rdi, rax
     ja .mpc_error
     test rdi, rdi
     jz .mpc_error
     mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel dict_type]
-    cmp rax, rcx
-    je .mpc_wrap
     ; A proxy of a proxy wraps the same dict, as CPython's does.
     lea rcx, [rel mappingproxy_type]
     cmp rax, rcx
-    jne .mpc_error
+    je .mpc_unwrap
+    ; A dict SUBCLASS is a dict: `ob_type is dict_type` refused OrderedDict,
+    ; which is what stopped inspect.signature.  A subtype test and not a
+    ; protocol probe, because the slots below reach real dict internals.
+    mov rdi, rax
+    lea rsi, [rel dict_type]
+    call type_is_subtype
+    test eax, eax
+    jz .mpc_error
+    mov rdi, [rbp - MPC_ARG]
+    jmp .mpc_wrap
+.mpc_unwrap:
     mov rdi, [rdi + PyMappingProxyObject.mp_mapping]
 .mpc_wrap:
     call mappingproxy_new
@@ -1229,6 +1242,10 @@ DEF_FUNC mappingproxy_construct
     leave
     ret
 .mpc_error:
+    mov rsi, [rbp - MPC_ARG]
+    CSTRING rdi, `mappingproxy() argument must be a mapping, not \x01`
+    jmp raise_type_error_with_name
+.mpc_arity:
     RAISE exc_TypeError_type, "mappingproxy() argument must be a mapping, not a sequence"
 END_FUNC mappingproxy_construct
 

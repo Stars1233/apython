@@ -953,6 +953,11 @@ O_NONBLOCK  equ 0o4000
 O_DIRECTORY equ 0o200000
 O_NOFOLLOW  equ 0o400000
 O_CLOEXEC   equ 0o2000000
+; O_TMPFILE is two bits, and both of them: Linux spells it
+; __O_TMPFILE | O_DIRECTORY so that an old kernel, which honours only
+; the directory bit, refuses the open rather than creating a file.
+__O_TMPFILE equ 0o20000000
+O_TMPFILE   equ __O_TMPFILE | O_DIRECTORY
 
 ; access() modes
 F_OK equ 0

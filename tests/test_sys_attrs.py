@@ -44,3 +44,52 @@ try:
     time.perf_counter(1)
 except TypeError:
     print("argument => TypeError")
+
+print("=== the import machinery's own attributes ===")
+# importlib._bootstrap walks sys.meta_path on every import and sys.path_hooks
+# when a path entry has no finder cached.  Neither is guarded, so their absence
+# was an AttributeError from inside `import`.  The finders here are assembly
+# rather than importlib hooks, so both are empty -- what matters is that they
+# exist, that they are lists, and that a program can append to them.
+# The CONTENTS differ by design -- CPython's hold its own finders and these
+# hold nothing -- so the lengths are compared against themselves, not printed.
+print("meta_path:", type(sys.meta_path).__name__)
+print("path_hooks:", type(sys.path_hooks).__name__)
+before = len(sys.meta_path)
+sys.meta_path.append("sentinel")
+print("append works:", sys.meta_path[-1], len(sys.meta_path) - before)
+sys.meta_path.pop()
+print("and pop:", len(sys.meta_path) - before)
+print("still a list:", isinstance(sys.meta_path, list))
+
+print("=== getrefcount ===")
+# The count includes getrefcount's own argument reference, which is why
+# CPython documents it as one higher than expected.  Two names for one object
+# is one more than one name for it: that difference is the invariant, not the
+# absolute number.
+obj = []
+one = sys.getrefcount(obj)
+alias = obj
+two = sys.getrefcount(obj)
+print("an alias adds one:", two - one)
+del alias
+print("and dropping it takes it back:", sys.getrefcount(obj) - one)
+print("type:", type(one).__name__)
+try:
+    sys.getrefcount()
+except TypeError:
+    print("no argument => TypeError")
+
+print("=== displayhook ===")
+print("is the default:", sys.displayhook is sys.__displayhook__)
+print("callable:", callable(sys.displayhook))
+# None prints nothing and does not bind _; anything else prints its repr and
+# does, which is what an interactive prompt is.
+import builtins
+if hasattr(builtins, "_"):
+    del builtins._
+sys.displayhook(None)
+print("None does not bind _:", not hasattr(builtins, "_"))
+sys.displayhook("hi")
+print("bound _:", builtins._)
+del builtins._

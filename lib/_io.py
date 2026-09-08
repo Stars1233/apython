@@ -1623,13 +1623,41 @@ def open(file, mode="r", buffering=-1, encoding=None, errors=None,
                       "binary mode, the default buffer size will be used",
                       RuntimeWarning, 2)
 
-    raw = FileIO(file,
-                 (creating and "x" or "")
-                 + (reading and "r" or "")
-                 + (writing and "w" or "")
-                 + (appending and "a" or "")
-                 + (updating and "+" or ""),
-                 closefd)
+    raw_mode = ((creating and "x" or "")
+                + (reading and "r" or "")
+                + (writing and "w" or "")
+                + (appending and "a" or "")
+                + (updating and "+" or ""))
+
+    if opener is None:
+        raw = FileIO(file, raw_mode, closefd)
+    else:
+        # An opener is handed the path and the flags open() would have used,
+        # and returns the descriptor to wrap.  CPython threads this through
+        # FileIO itself; here it is done in the layer above, because the
+        # callable is Python and _iocore is not.  Doing it at all matters:
+        # tempfile.NamedTemporaryFile passes the DIRECTORY as `file` and an
+        # opener that ignores it and returns a descriptor from mkstemp, so an
+        # ignored opener opened the directory and raised IsADirectoryError.
+        import posix
+        if creating:
+            flags = posix.O_CREAT | posix.O_EXCL | posix.O_WRONLY
+        elif writing:
+            flags = posix.O_CREAT | posix.O_TRUNC | posix.O_WRONLY
+        elif appending:
+            flags = posix.O_CREAT | posix.O_APPEND | posix.O_WRONLY
+        else:
+            flags = posix.O_RDONLY
+        if updating:
+            flags = (flags & ~(posix.O_RDONLY | posix.O_WRONLY)) | posix.O_RDWR
+        fd = opener(file, flags)
+        if not isinstance(fd, int):
+            raise TypeError("expected integer from opener")
+        raw = FileIO(fd, raw_mode, closefd)
+        # The name is what the caller asked for, not what the opener opened:
+        # CPython reports the argument, and tempfile overwrites it afterwards
+        # with the real path anyway.
+        raw.name = file
 
     result = raw
     try:
