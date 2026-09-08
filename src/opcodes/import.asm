@@ -76,7 +76,7 @@ DEF_FUNC_BARE op_import_name
     pop rax
     mov [rsp + 24], rdx         ; keep it where the saved name lives
     mov rax, rdx
-    mov rdx, 0                  ; it is absolute now
+    xor edx, edx                    ; it is absolute now
     mov r15d, 1                 ; and the name is ours to release
     jmp .have_name
 .absolute:

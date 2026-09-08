@@ -61,7 +61,7 @@ DEF_FUNC str_method_upper
     ; only in which of the four Unicode mappings each character takes.
     mov rax, [rdi]
     mov rdi, rax
-    mov esi, 0
+    xor esi, esi
     extern str_case_map
     call str_case_map
     mov edx, TAG_PTR
@@ -1104,7 +1104,7 @@ DEF_FUNC str_method_replace
     lea rax, [r14 + 1]         ; self_len + 1
     imul rax, rcx              ; (self_len + 1) * new_len
     add rax, r14               ; + self_len
-    add rax, 1                 ; + NUL
+    inc rax                         ; + NUL
     mov [rbp - RPL_ALLOC], rax          ; buf_alloc
     mov rdi, rax
     call ap_malloc
@@ -1614,17 +1614,23 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     mov r13, r12
     sub r13, [rbp - SPI_SEPLEN]
 .spi_sepr_scan:
+    ; One search per PIECE, as on the forward path above.  This was an
+    ; ap_memcmp CALL for every byte offset, walking backwards -- the same
+    ; anti-pattern .spi_sep_scan's comment names, left behind when the forward
+    ; half was fixed.  ap_memrfind over the part not yet split off finds the
+    ; last separator directly.
     test r13, r13
     js .spi_sepr_tail
     lea rdi, [rbx + PyStrObject.data]
-    add rdi, r13
-    mov rsi, [rbp - SPI_SEP]
-    mov rdx, [rbp - SPI_SEPLEN]
-    call ap_memcmp
-    test eax, eax
-    jz .spi_sepr_hit
-    dec r13
-    jmp .spi_sepr_scan
+    mov rsi, r12                    ; only what is still unsplit
+    mov rdx, [rbp - SPI_SEP]
+    mov rcx, [rbp - SPI_SEPLEN]
+    call ap_memrfind
+    test rax, rax
+    jz .spi_sepr_tail
+    lea rcx, [rbx + PyStrObject.data]
+    sub rax, rcx
+    mov r13, rax                    ; byte offset of the separator
 
 .spi_sepr_hit:
     mov r14, r13
@@ -1722,7 +1728,7 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     cmp qword [rbp - SPI_MAX], 0
     jne .spi_wsr_scan
     ; Likewise from the other end: ' a b '.rsplit(None, 1) is [' a', 'b'].
-    mov r13, 0
+    xor r13d, r13d
 .spi_wsr_emit_last:
     mov rsi, r12
     sub rsi, r13
@@ -1827,7 +1833,7 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     mov [rsp + 16], rax
     push rax
     lea rdi, [rsp + 8]
-    mov rsi, 3
+    mov esi, 3
     call list_method_insert
     pop rdi
     add rsp, 32
@@ -2578,7 +2584,7 @@ DEF_FUNC_LOCAL fm_expand_spec, FES_FRAME
     inc qword [rbp - FES_POS]
     lea rdi, [rbp - FES_STATE]
     lea rsi, [rbx + PyStrObject.data + rcx]
-    mov rdx, 1
+    mov edx, 1
     call fmtbuf_append
     jmp .fes_loop
 

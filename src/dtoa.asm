@@ -190,7 +190,7 @@ DEF_FUNC dtoa_shortest, DT_FRAME
     mov qword [rbp - DT_VRTZ], 0
     mov qword [rbp - DT_LASTDIG], 0
 
-    cmp r15d, 0
+    test r15d, r15d
     jl .ds_neg_e2
 
     ; --- e2 >= 0: divide by a power of ten, i.e. multiply by its reciprocal --
@@ -323,7 +323,7 @@ DEF_FUNC dtoa_shortest, DT_FRAME
     mov rax, [rbp - DT_M2]
     shl rax, 2
     mov ecx, r10d
-    mov rdx, 1
+    mov edx, 1
     shl rdx, cl
     dec rdx
     test rax, rdx
@@ -490,7 +490,7 @@ END_FUNC dtoa_shortest
 DEF_FUNC_BARE dtoa_mm_value
     mov rax, [rbp - DT_M2]
     shl rax, 2
-    sub rax, 1
+    dec rax
     sub rax, [rbp - DT_MMSHIFT]
     ret
 END_FUNC dtoa_mm_value
@@ -523,7 +523,7 @@ DEF_FUNC_BARE dtoa_bounds
 
     mov rdi, rbx
     shl rdi, 2
-    sub rdi, 1
+    dec rdi
     sub rdi, [rbp - DT_MMSHIFT]
     mov rsi, [rbp - DT_ENTRY]
     mov edx, [rbp - DT_SHIFT]
@@ -664,7 +664,7 @@ DEF_FUNC dtoa_format, DF_FRAME
     ; --- exponential -------------------------------------------------------
 .df_sci:
     ; the leading digit, then a point and the rest only if there is a rest
-    mov r10, 1
+    mov r10d, 1
     call df_emit_n
     cmp qword [rbp - DF_NDIG], 1
     jbe .df_sci_e

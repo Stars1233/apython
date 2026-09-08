@@ -87,7 +87,7 @@ section .text
     mov rdi, [rbp - %1]
     V_UNPACK rdi, rdx
     call obj_as_index
-    cmp rax, 0
+    test rax, rax
     jl %%range
     cmp rax, 255
     jle %%in_range
@@ -790,7 +790,7 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     mov rdx, [rbp - BAF_SLEN]
     mov rcx, [rbp - BAF_END]
     call bytes_affix_match
-    cmp eax, 0
+    test eax, eax
     jl .baf_item_type           ; an ELEMENT of the tuple, worded differently
     test eax, eax
     jnz .baf_true
@@ -804,7 +804,7 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     mov rdx, [rbp - BAF_SLEN]
     mov rcx, [rbp - BAF_END]
     call bytes_affix_match
-    cmp eax, 0
+    test eax, eax
     jl .baf_arg_type
     test eax, eax
     jnz .baf_true
@@ -1702,7 +1702,7 @@ DEF_FUNC bytes_partition_impl, BPT_FRAME
     cmp qword [rbp - BPT_RIGHT], 0
     jne .bpt_missing_right
     mov [rcx], rax
-    mov r8, 8
+    mov r8d, 8
     jmp .bpt_missing_fill
 .bpt_missing_right:
     mov [rcx + 16], rax
@@ -1776,6 +1776,9 @@ BR_BUF    equ 32
 BR_BUFSZ  equ 40
 BR_WPOS   equ 48
 BR_NEWLEN equ 56
+BR_COUNT  equ 64            ; replacements still allowed; -1 is "no limit", and
+                            ; while the argument is being parsed it holds the
+                            ; raw Value, with 0 meaning it was not given
 BR_FRAME  equ 72            ; + 5 pushes = 112, 16-aligned -- replace reaches
                             ; glibc through ap_malloc
 
@@ -1786,8 +1789,19 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     push r14
     push r15
 
+    ; The count is optional, which methods/init.asm has always registered
+    ; (3, 4) for -- the implementation refused it, so `b"aaa".replace(b"a",
+    ; b"X", 2)` was a TypeError where str.replace has always taken one.
     cmp rsi, 3
+    je .br_no_count
+    cmp rsi, 4
     jne .br_error
+    mov rax, [rdi + 24]
+    mov [rbp - BR_COUNT], rax   ; the raw Value; converted once the operands are
+    jmp .br_have_count          ; out, because obj_as_index can raise
+.br_no_count:
+    mov qword [rbp - BR_COUNT], 0
+.br_have_count:
 
     mov rax, [rdi]              ; self
     mov rcx, [rdi + 8]         ; old
@@ -1823,9 +1837,20 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     mov r12, [rbp - BR_OLD]
     mov r13, [rbp - BR_NEW]
 
-    ; If old_len == 0, return copy of self
+    mov rdi, [rbp - BR_COUNT]
+    test rdi, rdi
+    jz .br_count_unlimited
+    V_UNPACK rdi, rdx           ; obj_as_index takes the pair, as str.replace
+    extern obj_as_index         ; hands it
+    call obj_as_index
+    mov [rbp - BR_COUNT], rax
+    jmp .br_count_done
+.br_count_unlimited:
+    mov qword [rbp - BR_COUNT], -1
+.br_count_done:
+
     test r15, r15
-    jz .br_copy_self
+    jz .br_empty_old
 
     ; Allocate initial buffer: self_len * 2 + 64
     lea rdi, [r14 * 2 + 64]
@@ -1837,6 +1862,8 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     xor ecx, ecx               ; scan position
 
 .br_scan:
+    cmp qword [rbp - BR_COUNT], 0
+    je .br_copy_tail            ; the count is spent; the rest is copied
     ; Remaining bytes
     mov rax, r14
     sub rax, rcx
@@ -1885,6 +1912,7 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     pop rcx
     add [rbp - BR_WPOS], rax
 .br_skip_new:
+    dec qword [rbp - BR_COUNT]  ; -1 stays negative: that is "no limit"
     add rcx, r15                ; advance past old
     jmp .br_scan
 
@@ -1936,6 +1964,60 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+
+.br_empty_old:
+    ; An empty needle is not "no match".  CPython lays the replacement down
+    ; before every byte and once more at the end, so b"ab".replace(b"", b"Z")
+    ; is b"ZaZbZ" and b"".replace(b"", b"Z") is b"Z"; this returned self
+    ; unchanged, so bytes and bytearray disagreed with str about the same call.
+    ;
+    ; n insertions, where n is one more than the length, capped by the count.
+    lea rax, [r14 + 1]
+    mov rcx, [rbp - BR_COUNT]
+    test rcx, rcx
+    js .br_empty_n              ; negative: no limit
+    cmp rcx, rax
+    jae .br_empty_n
+    mov rax, rcx
+.br_empty_n:
+    test rax, rax
+    jz .br_copy_self            ; a count of zero replaces nothing
+    mov [rbp - BR_COUNT], rax   ; n, from here on
+
+    mov rdx, [rbp - BR_NEWLEN]
+    imul rdx, rax
+    add rdx, r14                ; n * new_len + self_len
+    mov [rbp - BR_BUFSZ], rdx
+    lea rdi, [rdx + 1]          ; never ap_malloc(0)
+    call ap_malloc
+    mov [rbp - BR_BUF], rax
+    mov qword [rbp - BR_WPOS], 0
+    xor r15d, r15d              ; the source index; old_len was 0 and is done
+
+.br_empty_loop:
+    mov rdi, [rbp - BR_BUF]
+    add rdi, [rbp - BR_WPOS]
+    mov rsi, [rbp - BR_NEW]
+    mov rdx, [rbp - BR_NEWLEN]
+    call ap_memcpy
+    mov rax, [rbp - BR_NEWLEN]
+    add [rbp - BR_WPOS], rax
+    ; ...and, while another is still to come, the byte it goes in front of
+    inc r15
+    cmp r15, [rbp - BR_COUNT]
+    jge .br_empty_tail
+    mov rdi, [rbp - BR_BUF]
+    add rdi, [rbp - BR_WPOS]
+    mov rsi, [rbp - BR_SELF]
+    movzx eax, byte [rsi + r15 - 1]
+    mov [rdi], al
+    inc qword [rbp - BR_WPOS]
+    jmp .br_empty_loop
+
+.br_empty_tail:
+    mov rcx, [rbp - BR_COUNT]
+    dec rcx                     ; whatever is left of self, from n-1
+    jmp .br_copy_tail
 
 .br_copy_self:
     ; Return copy of self
@@ -2047,7 +2129,7 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
 .bsp_no_sep:
     ; Split by whitespace
 
-    mov rdi, 8
+    mov edi, 8
     call list_new
     mov r13, rax                ; result list
 
@@ -2128,7 +2210,7 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
 .bsp_by_sep:
     mov r14, [rbp - BSP_SEPLEN]              ; sep_len
 
-    mov rdi, 8
+    mov edi, 8
     call list_new
     mov r13, rax                ; result list
 
@@ -2229,7 +2311,7 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
     js .bsp_sepr_head
 
 .bsp_sepr_probe:
-    cmp rcx, 0
+    test rcx, rcx
     jl .bsp_sepr_head
     push rcx
     push r11
@@ -2355,7 +2437,7 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
     mov [rsp + 16], rax
     push rax
     lea rdi, [rsp + 8]
-    mov rsi, 3
+    mov esi, 3
     extern list_method_insert
     call list_method_insert
     pop rdi
@@ -2697,7 +2779,7 @@ DEF_FUNC_LOCAL bj_append_i64    ; (rdi = prefix cstr, rsi = n) -> rax = the NUL
     mov rax, r12
     lea r8, [rel bj_numbuf + 24]
     mov byte [r8], 0
-    mov r9, 10
+    mov r9d, 10
 .bai_loop:
     xor edx, edx
     div r9

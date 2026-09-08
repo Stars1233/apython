@@ -81,7 +81,7 @@ DEF_FUNC_LOCAL si_grow, SG_FRAME
     ; Eight slots to begin with, then double.
     test rax, rax
     jnz .sg_double
-    mov rax, 8
+    mov eax, 8
     jmp .sg_have_cap
 .sg_double:
     shl rax, 1

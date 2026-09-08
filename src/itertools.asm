@@ -291,8 +291,7 @@ DEF_FUNC get_iterator_opt, 8            ; 1 pushes, so rsp is 16-aligned
     extern dunder_getitem
     lea rsi, [rel dunder_getitem]
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .no_iter                    ; no __getitem__
     ; Has __getitem__ — create seq_iter
     mov rdi, rbx                   ; obj
@@ -593,7 +592,7 @@ DEF_FUNC_LOCAL enumerate_iternext, 8            ; 3 pushes, so rsp is 16-aligned
     V_PACK_I64 r13, rcx              ; the count as a Value
 
     ; Create 2-tuple
-    mov rdi, 2
+    mov edi, 2
     call tuple_new
     ; Fill: tuple[0] = count, tuple[1] = value
     mov r8, [rax + PyTupleObject.ob_item]
@@ -1082,7 +1081,7 @@ DEF_FUNC_LOCAL zip_iternext, 8            ; 5 pushes, so rsp is 16-aligned
     jnz .zip_strict_mismatch
 
     ; r15 == 0: first iterator exhausted. Check others for remaining items.
-    mov r14, 1
+    mov r14d, 1
 .zip_strict_check:
     cmp r14, r12
     jge .zip_exhausted       ; all exhausted — OK
@@ -1668,8 +1667,7 @@ DEF_FUNC builtin_reversed, 8            ; 3 pushes, so rsp is 16-aligned
     lea rsi, [rel .dunder_reversed_name]
     extern dunder_lookup
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .rev_no_dunder      ; not found at all
 
     ; Found __reversed__.  Setting it to None blocks reversal.
@@ -1748,8 +1746,7 @@ section .text
     extern dunder_len
     lea rsi, [rel dunder_len]
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     pop rcx                 ; restore type
     jz .rev_type_error      ; no __len__
 
@@ -1758,8 +1755,7 @@ section .text
     extern dunder_getitem
     lea rsi, [rel dunder_getitem]
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .rev_type_error      ; no __getitem__
 
     ; Call __len__ to get length
@@ -2023,7 +2019,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
 
 .sorted_no_kw:
     lea rdi, [rbp - SO_SORT_BUF]
-    mov rsi, 1
+    mov esi, 1
     call list_method_sort
 
 .sorted_return:

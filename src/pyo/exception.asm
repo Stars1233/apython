@@ -607,7 +607,7 @@ DEF_FUNC exc_syntax_str, SS_FRAME
     xor r8d, r8d
 .ss_digit:
     xor edx, edx
-    mov rcx, 10
+    mov ecx, 10
     div rcx                             ; rax = rax/10, rdx = the digit
     add dl, '0'
     mov [rbp - SS_DIG + r8], dl
@@ -1079,7 +1079,7 @@ DEF_FUNC exc_getattr
     ; out keeps one source of truth and needs no five-argument constructor.
     lea rdi, [r12 + PyStrObject.data]
     CSTRING rsi, "encoding"
-    mov r14d, 0
+    xor r14d, r14d
     call ap_strcmp
     test eax, eax
     jz .uni_attr
@@ -1153,7 +1153,7 @@ DEF_FUNC exc_getattr
     ; 1..6 index the location tuple.
     lea rdi, [r12 + PyStrObject.data]
     CSTRING rsi, "msg"
-    mov r14d, 0
+    xor r14d, r14d
     call ap_strcmp
     test eax, eax
     jz .syn_attr
@@ -2109,7 +2109,9 @@ EIM_FRAME equ 40            ; + 1 push = 48, 16-aligned
     mov [rbp - EIM_FN], rax
     sub rsp, 16
     mov [rsp], rax
-    xor edi, edi
+    ; The class to build, which staticmethod_construct no longer ignores.
+    extern staticmethod_type
+    lea rdi, [rel staticmethod_type]
     mov rsi, rsp
     mov edx, 1
     extern staticmethod_construct

@@ -1528,8 +1528,7 @@ DEF_FUNC math_prod, MPR_FRAME
     mov rax, [rbx + 8]
     jmp .mpr_have_start
 .mpr_default_start:
-    mov eax, 1
-    V_PACK_I64 rax, rcx
+    mov rax, V_INT(1)
 .mpr_have_start:
     mov [rbp - MPR_ACC], rax
     INCREF_V rax, rcx

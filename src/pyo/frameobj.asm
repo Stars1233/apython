@@ -30,7 +30,6 @@
 ASM_INIT
 
 extern ap_malloc
-extern ap_free
 extern obj_decref
 extern obj_incref
 extern type_type
@@ -131,14 +130,20 @@ DEF_FUNC_LOCAL frameobj_new, FON_FRAME
     push rbx
     mov [rbp - FON_FRAME_IN], rdi
 
+    ; Through the collector, not ap_malloc.  A frame object can be part of a
+    ; cycle it is the only route into: `f = sys._getframe()` puts the object
+    ; in the very f_locals that frameobj_detach then copies the fast locals
+    ; into, so the object refers to itself and its refcount never reaches
+    ; zero.  The type has had tp_traverse and tp_clear all along and the
+    ; collector never saw one, because nothing tracked it -- so every such
+    ; frame, its locals dict, and every local in it leaked.
     mov edi, PyFrameObject_size
-    call ap_malloc
+    lea rsi, [rel frame_object_type]
+    extern gc_alloc
+    call gc_alloc               ; sets ob_refcnt = 1 and ob_type
     test rax, rax
     jz .fon_fail
     mov rbx, rax
-    mov qword [rbx + PyObject.ob_refcnt], 1
-    lea rcx, [rel frame_object_type]
-    mov [rbx + PyObject.ob_type], rcx
     mov qword [rbx + PyFrameObject.f_back], 0
     mov qword [rbx + PyFrameObject.f_trace], 0
     mov qword [rbx + PyFrameObject.f_trace_lines], 1
@@ -190,6 +195,12 @@ DEF_FUNC_LOCAL frameobj_new, FON_FRAME
 
     mov rdi, rbx
     call frameobj_refresh_pos
+
+    ; Tracked last: every field it traverses is filled by now, and gc_track
+    ; can collect.
+    mov rdi, rbx
+    extern gc_track
+    call gc_track
 
     mov rax, rbx
     pop rbx
@@ -669,14 +680,16 @@ DEF_FUNC frameobj_from_code, FFC_FRAME
     mov [rbp - FFC_LINE], rsi
     mov [rbp - FFC_LASTI], rdx
 
+    ; Through the collector, as frameobj_new is: the type carries
+    ; TYPE_FLAG_HAVE_GC, so frameobj_dealloc frees at obj - GC_HEAD_SIZE and an
+    ; ap_malloc'd one would hand the allocator a pointer sixteen bytes short of
+    ; what it gave out.
     mov edi, PyFrameObject_size
-    call ap_malloc
+    lea rsi, [rel frame_object_type]
+    call gc_alloc               ; sets ob_refcnt = 1 and ob_type
     test rax, rax
     jz .ffc_fail
     mov [rbp - FFC_OBJ], rax
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel frame_object_type]
-    mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyFrameObject.f_back], 0
     ; Detached from birth: a traceback is looked at long after its frame went
     ; back on the pool.
@@ -710,12 +723,17 @@ DEF_FUNC frameobj_from_code, FFC_FRAME
     LOAD_NONE rax
     INCREF rax
     mov [rcx + PyFrameObject.f_builtins], rax
-    mov rax, rcx
+    ; Tracked once every field it traverses is filled.  A traceback's frame
+    ; can be part of a cycle like any other -- the traceback holds the frame
+    ; and the exception holds the traceback.
+    mov rdi, rcx
+    call gc_track
+    mov rax, [rbp - FFC_OBJ]
     leave
     ret
 .ffc_drop:
     mov rdi, [rbp - FFC_OBJ]
-    call ap_free
+    call gc_dealloc
 .ffc_fail:
     xor eax, eax
     leave
@@ -870,8 +888,11 @@ DEF_FUNC frameobj_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     FRAMEOBJ_DROP f_locals
     FRAMEOBJ_DROP f_builtins
     FRAMEOBJ_DROP f_trace
+    ; gc_dealloc, not ap_free: the object carries a PyGC_Head and may still be
+    ; in a generation list.
     mov rdi, rbx
-    call ap_free
+    extern gc_dealloc
+    call gc_dealloc
     pop rbx
     leave
     ret
@@ -1145,7 +1166,7 @@ frame_object_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC        ; tp_flags
     dq 0                        ; tp_bases
     dq frameobj_traverse        ; tp_traverse
     dq frameobj_clear           ; tp_clear

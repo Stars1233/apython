@@ -540,7 +540,7 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     call __gmpz_cmp_si wrt ..plt
     test eax, eax
     jz .itb_zero
-    mov r12d, 0
+    mov r12d, 0                         ; lint: flags -- xor would clobber the compare
     jns .itb_have_sign
     mov r12d, 1                                 ; self is negative
 .itb_have_sign:
@@ -1215,7 +1215,7 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     push rax                    ; numerator
 
     ; Build 2-tuple (numerator=rax, denominator=1)
-    mov rdi, 2
+    mov edi, 2
     call tuple_new
     mov rbx, rax
     pop rcx                     ; numerator
@@ -1223,8 +1223,7 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     mov r9, [rbx + PyTupleObject.ob_item]
     V_PACK_I64 rcx, r10
     mov [r9], rcx
-    mov rcx, 1
-    V_PACK_I64 rcx, r10
+    mov rcx, V_INT(1)
     mov [r9 + 8], rcx
 
     mov rax, rbx
@@ -1240,11 +1239,11 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     cmp ecx, 62
     ja .fir_error
     push rax                    ; save numerator
-    mov rdx, 1
+    mov edx, 1
     shl rdx, cl                 ; denominator = 1 << (-ecx)
     push rdx                    ; save denominator
 
-    mov rdi, 2
+    mov edi, 2
     call tuple_new
     mov rbx, rax
     pop rdx                     ; denominator
@@ -1265,7 +1264,7 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
 
 .fir_zero:
     ; Return (0, 1)
-    mov rdi, 2
+    mov edi, 2
     call tuple_new
     mov rbx, rax
 
@@ -1273,8 +1272,7 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     xor ecx, ecx
     V_PACK_I64 rcx, r10
     mov [r9], rcx
-    mov rcx, 1
-    V_PACK_I64 rcx, r10
+    mov rcx, V_INT(1)
     mov [r9 + 8], rcx
 
     mov rax, rbx
@@ -1877,8 +1875,7 @@ DEF_FUNC int_method_as_integer_ratio, NIR_FRAME
     mov rcx, [rbp - NIR_SELF]
     INCREF_V rcx, rsi
     mov [rdx], rcx
-    mov rcx, 1
-    V_PACK_I64 rcx, rsi
+    mov rcx, V_INT(1)
     mov [rdx + 8], rcx
     mov rax, [rbp - NIR_TUP]
     mov edx, TAG_PTR

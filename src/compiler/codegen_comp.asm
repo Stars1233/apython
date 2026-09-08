@@ -718,7 +718,7 @@ DEF_FUNC cg_comp_element, CE4_FRAME
     mov rdi, r12
     mov esi, OP_MAP_ADD
     mov rdx, [rbp - CE4_DEPTH]
-    add rdx, 1
+    inc rdx
     mov rcx, [rbp - CE4_LINE]
     call cg_emit
     jmp .ok
@@ -771,7 +771,7 @@ DEF_FUNC cg_comp_element, CE4_FRAME
 .have_add:
     mov rdi, r12
     mov rdx, [rbp - CE4_DEPTH]
-    add rdx, 1
+    inc rdx
     mov rcx, [rbp - CE4_LINE]
     call cg_emit
 .ok:

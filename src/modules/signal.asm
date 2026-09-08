@@ -236,7 +236,7 @@ DEF_FUNC_LOCAL signal_arg
     js .sa_range
     cmp rax, SIG_NSIG
     jae .sa_range
-    cmp rax, 0
+    test rax, rax
     je .sa_range
     leave
     ret
@@ -298,7 +298,7 @@ DEF_FUNC signal_method_signal, 24           ; + 1 push = 32, 16-aligned
     jb .ss_typeerr
     mov rax, rdi
     sub rax, [rel v_int_bias]
-    cmp rax, 0
+    test rax, rax
     je .ss_dfl
     cmp rax, 1
     je .ss_ign
@@ -481,7 +481,7 @@ DEF_FUNC signal_method_strsignal, 16
     V_UNPACK rax, rdx
     mov rdi, rax
     call obj_as_index
-    cmp rax, 0
+    test rax, rax
     jle .sts_none
     cmp rax, SIG_NSIG
     jae .sts_none

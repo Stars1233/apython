@@ -94,7 +94,7 @@ repr_push:
     mov rsi, [rel repr_stack_cap]
     test rsi, rsi
     jnz .rp_double
-    mov rsi, 64
+    mov esi, 64
     jmp .rp_sized
 .rp_double:
     shl rsi, 1

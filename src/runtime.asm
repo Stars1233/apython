@@ -710,17 +710,67 @@ END_FUNC ap_memcpy
 ;; ============================================================================
 DEF_FUNC_BARE ap_memset
     mov r8, rdi             ; save dst for return
-    mov al, sil             ; val (byte)
+    ; `rep stosb` carries the same thirty-odd cycles of startup that ap_memcpy
+    ; documents for `rep movsb`, and it had no size ladder at all -- so
+    ; clearing eight bytes cost what clearing four hundred does.  The callers
+    ; are dict and set table clears, code-object field zeroing and the numeric
+    ; scratch buffers, and most of them are short.  Same shape as ap_memcpy
+    ; above: overlapping stores up to 32 bytes, `rep stosb` beyond.
+    movzx eax, sil
+    mov rcx, 0x0101010101010101
+    imul rax, rcx           ; the byte, in all eight lanes.  rcx, not a fresh
+                            ; register: `rep stosb` already clobbers it, so
+                            ; the clobber set is unchanged from before.
+    cmp rdx, 32
+    ja .ams_rep
+    cmp rdx, 16
+    ja .ams_17_32
+    cmp rdx, 8
+    jb .ams_under8
+    mov [rdi], rax                  ; 8..16, two qwords overlapping
+    mov [rdi + rdx - 8], rax
+    jmp .ams_done
+.ams_17_32:
+    mov [rdi], rax
+    mov [rdi + 8], rax
+    mov [rdi + rdx - 16], rax
+    mov [rdi + rdx - 8], rax
+    jmp .ams_done
+.ams_under8:
+    cmp rdx, 4
+    jb .ams_under4
+    mov [rdi], eax                  ; 4..7, two dwords overlapping
+    mov [rdi + rdx - 4], eax
+    jmp .ams_done
+.ams_under4:
+    cmp rdx, 2
+    jb .ams_under2
+    mov [rdi], ax                   ; 2..3, two words overlapping
+    mov [rdi + rdx - 2], ax
+    jmp .ams_done
+.ams_under2:
+    test rdx, rdx
+    jz .ams_done
+    mov [rdi], al                   ; exactly one byte
+.ams_done:
+    mov rax, r8             ; return original dst
+    ret
+.ams_rep:
     mov rcx, rdx            ; rcx = count
-    rep stosb               ; rdi=dst already in place
+    rep stosb               ; rdi=dst already in place, al = the byte
     mov rax, r8             ; return original dst
     ret
 END_FUNC ap_memset
 
 ;; ============================================================================
 ;; ap_memmove(void *dst, const void *src, size_t n) -> void *dst
-;; Handles overlapping regions. n must be a multiple of 8.
-;; Forward: rep movsq (fast). Backward: manual qword loop (avoids std penalty).
+;; Handles overlapping regions.  Any n; byte-granular at both ends.
+;;
+;; Three arms.  Forward covers dst < src and, after the disjointness test
+;; below, most of dst > src as well; only a real overlap upward needs the
+;; descending loop.
+;;
+;; Clobbers rax, rcx, rdx, rsi and rdi.  rbx is pushed and restored.
 ;; ============================================================================
 DEF_FUNC_BARE ap_memmove
     mov rax, rdi            ; save dst for return
@@ -729,23 +779,62 @@ DEF_FUNC_BARE ap_memmove
     jz .memmove_done
     cmp rdi, rsi
     je .memmove_done        ; dst == src, nop
-    jb .memmove_fwd         ; dst < src: forward safe
+    jb .memmove_fwd         ; dst < src: forward is safe
+
+    ; dst > src.  Forward is still correct when the two regions do not
+    ; actually touch, and forward is where the fast copy lives, so ask before
+    ; committing to the slow direction.
+    lea rdx, [rsi + rcx]
+    cmp rdi, rdx
+    jae .memmove_fwd        ; dst >= src + n: disjoint after all
+
 .memmove_bk:
-    ; dst > src: copy backward to avoid overlap corruption
-    ; Point rsi/rdi to last byte, set direction flag, copy bytes
-    lea rsi, [rsi + rcx - 1]
-    lea rdi, [rdi + rcx - 1]
-    std
-    rep movsb
-    cld
+    ; A genuine upward overlap: copy from the top down.
+    ;
+    ; This was `std` + `rep movsb` + `cld`, which is the obvious spelling and
+    ; the wrong one.  Backward `rep movsb` has never been ERMSB-accelerated on
+    ; any x86-64 -- it degrades to about a byte a cycle -- and each flip of the
+    ; direction flag costs ten to twenty cycles on top.  The header claimed a
+    ; "manual qword loop (avoids std penalty)" that was not there; this is it.
+    ;
+    ; list.insert(0, x) and list.pop(0) reach here on every call, as do
+    ; bytearray's splices.
+    push rbx
+    lea rsi, [rsi + rcx]
+    lea rdi, [rdi + rcx]
+    mov rdx, rcx
+    and edx, 7              ; the byte remainder is at the LOW end going down
+    shr rcx, 3
+    jz .mmb_tail
+.mmb_qword:
+    sub rsi, 8
+    sub rdi, 8
+    mov rbx, [rsi]
+    mov [rdi], rbx
+    dec rcx
+    jnz .mmb_qword
+.mmb_tail:
+    test edx, edx
+    jz .mmb_done
+.mmb_byte:
+    dec rsi
+    dec rdi
+    mov bl, [rsi]
+    mov [rdi], bl
+    dec edx
+    jnz .mmb_byte
+.mmb_done:
+    pop rbx
     ret
+
 .memmove_fwd:
-    ; dst < src: forward copy — qwords then byte remainder
-    push rdx                ; save original count
+    ; qwords then a byte remainder.  rcx rather than rdx is saved across the
+    ; `rep movsq` because the disjointness test above spends rdx.
+    push rcx
     shr rcx, 3
     rep movsq
     pop rcx
-    and rcx, 7
+    and ecx, 7
     rep movsb
 .memmove_done:
     ret
@@ -811,33 +900,50 @@ DEF_FUNC_BARE ap_memcmp
 END_FUNC ap_memcmp
 
 ;; ============================================================================
-;; ap_memchr(rdi = p, rsi = n, edx = byte) -> rax = the first match, or 0
+;; ap_memchr(rdi = buf, rsi = len, rdx = byte) -> rax = first match, or 0
 ;;
-;; The scan every substring search stands on.  The byte is broadcast into all
-;; eight lanes of a word, XORed against eight bytes of input -- which leaves a
-;; zero byte exactly where it matched -- and the zero is found with the same
-;; Mycroft test ap_strcmp uses for its NUL.
+;; The highest-leverage scanner in the tree: str.find, .count, .replace,
+;; .split, .partition and `in` all reach it, most of them through ap_memfind,
+;; which tail-jumps here for a one-byte needle.
 ;;
-;; Never reads past the end: the word loop runs only while eight whole bytes
-;; remain.
+;; Sixteen bytes at a time with SSE2, which is architecturally guaranteed on
+;; every x86-64 -- no cpuid, no ifunc, nothing to detect.  `pcmpeqb` marks
+;; every matching lane and `pmovmskb` collapses the answer to a 16-bit mask,
+;; so the loop is four instructions per sixteen bytes where the SWAR form it
+;; replaced was twelve per eight.
+;;
+;; The vector arm runs only while sixteen or more bytes remain, so it never
+;; reads past the end -- the guarantee the SWAR version documented is kept
+;; exactly, without widening any allocation's padding.  Below sixteen the byte
+;; loop is entered directly: the old code had a sixteen-byte byte-at-a-time
+;; PROLOGUE for the same reason, to keep a short scan away from a three-cycle
+;; `imul` broadcast on the critical path (measured at the time: the word loop
+;; alone was 40% slower on `s.count("a")`).  SSE2 has no such setup -- the
+;; broadcast is four cheap shuffles -- but a scan shorter than one vector
+;; still cannot pay for even that, so the test stays.
+;;
+;; Clobbers rax, rcx, rdi, rsi and xmm0/xmm1 -- narrower than the version it
+;; replaces, which also pushed rbx.  No SysV xmm register is callee-saved, and
+;; no caller of this function touches one.
 ;; ============================================================================
 DEF_FUNC_BARE ap_memchr
-    ; A bounded byte prologue before any setup.  The word loop needs a
-    ; broadcast -- an imul, three cycles, on the critical path before anything
-    ; can be compared -- and a saved register.  str.count calls this once per
-    ; match and its matches are a few bytes apart, so it pays that fixed cost
-    ; on every call and never reaches the loop; measured, the word loop alone
-    ; was 40% SLOWER on `s.count("a")` than the byte scan it replaced, while
-    ; being fewer instructions.  Sixteen bytes is noise against a scan long
+    ; A bounded byte prologue before any setup, kept from the SWAR version and
+    ; for the same reason -- which a first pass at this removed, and the
+    ; benchmark caught within one run.  `A = "abcdefghij" * 100; s.count("a")`
+    ; calls this once per match with the next match ten bytes away, so what it
+    ; measures is the fixed cost per CALL.  A vector setup is four shuffles
+    ; plus two GPR/XMM domain crossings; ten byte compares pipeline better
+    ; than that, and dropping the prologue cost 57% on s_count while making
+    ; every long scan faster.  Sixteen bytes is noise against a scan long
     ; enough to want the loop.
     mov rcx, rsi
     cmp rcx, 16
     jbe .amk_prologue
-    mov rcx, 16
+    mov ecx, 16
 .amk_prologue:
-    sub rsi, rcx                    ; what is left for the word loop
+    sub rsi, rcx                    ; what is left for the vector loop
     test rcx, rcx
-    jz .amk_word_setup
+    jz .amk_vec_setup
 .amk_pro_byte:
     cmp dl, [rdi]
     je .amk_hit
@@ -845,60 +951,49 @@ DEF_FUNC_BARE ap_memchr
     dec rcx
     jnz .amk_pro_byte
 
-.amk_word_setup:
+.amk_vec_setup:
+    cmp rsi, 16
+    jb .amk_bytes
+
+    ; Broadcast the low byte of edx to all sixteen lanes.  Each step doubles
+    ; the width, so only byte 0 survives and the caller need not have zeroed
+    ; the rest of the register.
+    movd xmm1, edx
+    punpcklbw xmm1, xmm1
+    punpcklwd xmm1, xmm1
+    pshufd xmm1, xmm1, 0
+
+.amk_vec:
+    movdqu xmm0, [rdi]
+    pcmpeqb xmm0, xmm1
+    pmovmskb eax, xmm0
+    test eax, eax
+    jnz .amk_vec_hit
+    add rdi, 16
+    sub rsi, 16
+    cmp rsi, 16
+    jae .amk_vec
+
+.amk_bytes:
     test rsi, rsi
     jz .amk_none
-    ; Clobbers rax, rcx, rdx, rdi and rsi only.  rbx carries the one constant
-    ; that cannot be an immediate operand; the other is rematerialised in the
-    ; loop, which costs nothing and saves a second saved register.  Widening
-    ; the clobber set is not free -- sre.asm reads r8 across ap_memcpy.
-    push rbx
-    movzx eax, dl
-    mov rbx, 0x0101010101010101
-    imul rax, rbx                   ; the byte, in all eight lanes
-    sub rsi, 8
-    jb .amk_tail
-.amk_word:
-    mov rcx, [rdi]
-    xor rcx, rax                    ; a zero byte wherever the input matched
-    mov rdx, rcx
-    not rdx                         ; ~x
-    sub rcx, rbx                    ; x - 0x01..01
-    and rcx, rdx
-    mov rdx, 0x8080808080808080
-    and rcx, rdx
-    jnz .amk_word_has_it
-    add rdi, 8
-    sub rsi, 8
-    jae .amk_word
-.amk_tail:
-    add rsi, 8                      ; 0..7 bytes left
-    jz .amk_none_pop
-.amk_tail_byte:
-    cmp al, [rdi]                   ; al is the byte: rdx is scratch now
-    je .amk_hit_pop
+.amk_byte_loop:
+    cmp dl, [rdi]
+    je .amk_hit
     inc rdi
     dec rsi
-    jnz .amk_tail_byte
-.amk_none_pop:
-    pop rbx
+    jnz .amk_byte_loop
 .amk_none:
     xor eax, eax
     ret
-.amk_hit_pop:
-    pop rbx
+
+.amk_vec_hit:
+    ; One mask bit per byte, lowest bit = lowest address.
+    bsf eax, eax
+    add rax, rdi
+    ret
 .amk_hit:
     mov rax, rdi
-    ret
-.amk_word_has_it:
-    ; A 0x80 marks each matching lane.  The lowest set bit is the earliest
-    ; match in memory, because x86 is little-endian -- and a lane that is a
-    ; false positive of the borrow chain is always preceded by a real one, so
-    ; the lowest is never spurious.
-    bsf rcx, rcx
-    shr rcx, 3                      ; bit index -> byte index
-    lea rax, [rdi + rcx]
-    pop rbx
     ret
 END_FUNC ap_memchr
 
@@ -913,18 +1008,76 @@ section .text
 
 ;; ============================================================================
 ;; ap_strlen(const char *s) -> size_t
-;; Uses repne scasb (fast on modern x86-64 with FAST_SHORT_REP)
+;;
+;; Eight bytes at a time, by the same Mycroft test ap_strcmp uses below: for a
+;; word x, (x - 0x01..01) & ~x & 0x80..80 is nonzero exactly when some byte of
+;; x is zero.
+;;
+;; This was `repne scasb`, under a comment claiming it was "fast on modern
+;; x86-64 with FAST_SHORT_REP".  FSRM covers `rep movsb` and nothing else;
+;; `repne scasb` has never been accelerated on any Intel or AMD part, and runs
+;; at roughly a byte every two to four cycles after a large fixed startup.
+;;
+;; A byte prologue walks to the next 8-byte boundary before the word loop
+;; starts, so no 8-byte load can reach into a page the string does not already
+;; touch.  It also costs no register, which is the point: the clobber set here
+;; is exactly what `repne scasb` clobbered -- rax, rcx and rdi -- because the
+;; thirteen callers were written against that and one of them holds a live
+;; rsi across the call.  The two constants live in .rodata for the same
+;; reason; in a register they would have widened it.
 ;; ============================================================================
 DEF_FUNC_BARE ap_strlen
-    mov rdi, rdi            ; s already in rdi
-    xor eax, eax            ; search for NUL byte
-    mov rcx, -1             ; max search length
-    repne scasb
+    push rsi
+    mov rsi, rdi                    ; the original pointer, for the length
+.asl_align:
+    test dil, 7
+    jz .asl_aligned
+    cmp byte [rdi], 0
+    je .asl_hit
+    inc rdi
+    jmp .asl_align
+
+.asl_aligned:
+    mov rax, [rdi]
+    mov rcx, rax
     not rcx
-    dec rcx                 ; rcx = length (not counting NUL)
-    mov rax, rcx
+    sub rax, [rel swar_ones]
+    and rax, rcx
+    and rax, [rel swar_himask]
+    jnz .asl_found
+.asl_loop:
+    add rdi, 8
+    mov rax, [rdi]
+    mov rcx, rax
+    not rcx
+    sub rax, [rel swar_ones]
+    and rax, rcx
+    and rax, [rel swar_himask]
+    jz .asl_loop
+.asl_found:
+    ; The lowest set 0x80 marks the first NUL, x86 being little-endian.
+    bsf rax, rax
+    shr rax, 3                      ; bit index -> byte index within the word
+    add rdi, rax
+.asl_hit:
+    mov rax, rdi
+    sub rax, rsi
+    pop rsi
     ret
 END_FUNC ap_strlen
+
+section .rodata
+align 8
+; The two Mycroft constants, shared by ap_strlen and ap_strcmp.  In .rodata
+; rather than in registers because both functions were written to a clobber
+; set their callers depend on, and rematerialising them inside a loop -- which
+; ap_strcmp did, twice per eight bytes, at ten bytes of encoding each -- is
+; twenty bytes of instruction fetch per iteration to save a load that is
+; always L1-resident.
+swar_ones:    dq 0x0101010101010101
+swar_himask:  dq 0x8080808080808080
+
+section .text
 
 ;; ============================================================================
 ;; ap_strcmp(const char *a, const char *b) -> int
@@ -943,14 +1096,14 @@ DEF_FUNC_BARE ap_strcmp
     cmp rax, rdx
     jne .byte_loop          ; mismatch -> fall back
 
-    ; Check if NUL within these 8 bytes (Mycroft's trick)
+    ; Check if NUL within these 8 bytes (Mycroft's trick).  Both constants
+    ; used to be movabs'd inside this loop -- twenty bytes of encoding per
+    ; eight bytes compared -- and r8 is no longer touched at all.
     mov rcx, rax
-    mov r8, 0x0101010101010101
-    sub rcx, r8
+    sub rcx, [rel swar_ones]
     not rax
     and rcx, rax
-    mov r8, 0x8080808080808080
-    and rcx, r8
+    and rcx, [rel swar_himask]
     jnz .equal              ; NUL found -> strings equal
 
     add rdi, 8
@@ -1099,12 +1252,12 @@ DEF_FUNC_BARE ap_memrfind
     mov r10, r8                 ; r10 = current offset, counting down
 
 .amr_outer:
-    cmp r10, 0
+    test r10, r10
     jl .amr_none
     cmp r9b, [rdi + r10]
     jne .amr_next
     lea r11, [rdi + r10]
-    mov rax, 1
+    mov eax, 1
 .amr_inner:
     cmp rax, rcx
     jge .amr_hit
@@ -1144,13 +1297,13 @@ extern realloc
 ;; ap_malloc(size_t size) -> void*
 ;; Allocates memory, fatal error on failure
 ;; ============================================================================
-DEF_FUNC ap_malloc, 8            ; 1 pushes, so rsp is 16-aligned
-    push rbx
-    mov rbx, rdi            ; save size
+DEF_FUNC ap_malloc, 16           ; 0 pushes, so rsp is 16-aligned
+    ; No register is saved here: the size used to be parked in rbx "for the
+    ; error case" and no path ever read it back, so every allocation in the
+    ; interpreter paid a push, a mov and a pop for nothing.
     call malloc wrt ..plt
     test rax, rax
     jz .oom
-    pop rbx
     leave
     ret
 .oom:
@@ -1174,13 +1327,11 @@ END_FUNC ap_free
 ;; ap_realloc(void *ptr, size_t size) -> void*
 ;; Reallocates memory, fatal error on failure
 ;; ============================================================================
-DEF_FUNC ap_realloc, 8            ; 1 pushes, so rsp is 16-aligned
-    push rbx
-    mov rbx, rsi            ; save size for error case
+DEF_FUNC ap_realloc, 16           ; 0 pushes, so rsp is 16-aligned
+    ; As in ap_malloc: the saved size was never read on the error path.
     call realloc wrt ..plt
     test rax, rax
     jz .oom
-    pop rbx
     leave
     ret
 .oom:

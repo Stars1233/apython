@@ -2126,7 +2126,7 @@ DEF_FUNC par_params, PP_FRAME
 
     ; An ordinary parameter.
     mov rdi, rbx
-    mov rsi, 1
+    mov esi, 1
     cmp qword [rbp - PP_CLOSE], TOK_COLON
     jne .ann_ok1
     xor esi, esi
@@ -2222,7 +2222,7 @@ DEF_FUNC par_params, PP_FRAME
     ; 2, not 1: this is the *args parameter, and PEP 646 lets ITS annotation
     ; be starred -- `def g(*rest: *Ts)` -- where no other parameter's may be.
     mov rdi, rbx
-    mov rsi, 2
+    mov esi, 2
     cmp qword [rbp - PP_CLOSE], TOK_COLON
     jne .ann_ok2
     xor esi, esi
@@ -2248,7 +2248,7 @@ DEF_FUNC par_params, PP_FRAME
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
-    mov rsi, 1
+    mov esi, 1
     cmp qword [rbp - PP_CLOSE], TOK_COLON
     jne .ann_ok3
     xor esi, esi
@@ -3708,7 +3708,7 @@ DEF_FUNC_LOCAL ps_class, PC_FRAME
     cmp eax, TOK_LPAR
     jne .body
     mov rdi, rbx
-    mov esi, 0                          ; a placeholder callee
+    xor esi, esi                    ; a placeholder callee
     call in_call_public
     test rax, rax
     jz .fail

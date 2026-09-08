@@ -175,8 +175,7 @@ DEF_FUNC code_disassemble, DS_FRAME
     mov rax, [rbp - DS_OFF]
     shl rax, 2
     movzx eax, byte [rcx + rax + OpMeta.cache]
-    shl rax, 1
-    add r12, rax
+    lea r12, [r12 + rax*2]
     jmp .loop
 
 .done:

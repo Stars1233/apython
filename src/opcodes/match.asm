@@ -796,16 +796,14 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
     ; Try dict first
     mov rsi, [rsp + 8]         ; name
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .lfdg_found
 
     ; Try globals
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp + 8]         ; name
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .lfdg_found
 
     ; DECREF dict (owned ref from TOS) before builtins lookup
@@ -816,8 +814,7 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
     ; Try builtins
     mov rdi, [r12 + PyFrame.builtins]
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .lfdg_found_no_pop
 
     ; Not found
@@ -825,17 +822,21 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
     RAISE exc_NameError_type, "name not found"
 
 .lfdg_found:
-    ; INCREF result (borrowed ref) before DECREF dict
-    INCREF_VAL rax, rdx
-    ; Save result across DECREF
+    ; dict_get answers with a VALUE, and rdx is whatever its probe left there.
+    ; Reading it as a tag skipped the INCREF whenever it did not look like
+    ; TAG_PTR and pushed a BORROWED reference: `class Inner[T](B)` with B a
+    ; class attribute freed the base out from under the class being built,
+    ; and which names it happened to was a function of the probe.
+    INCREF_V rax, rcx
+    ; Save the result across the DECREF
     push rax
-    push rdx
+    push rax                    ; twice: rsp keeps its alignment
     mov rdi, [rsp + 16]        ; saved dict (shifted by 2 pushes)
     DECREF rdi
-    pop rdx
+    pop rax
     pop rax
     add rsp, 16                 ; pop saved dict + name
-    VPUSH_VAL rax, rdx
+    VPUSH rax
     DISPATCH
 
 .lfdg_not_dict:
@@ -845,9 +846,9 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
     RAISE exc_TypeError_type, "dict expected"
 
 .lfdg_found_no_pop:
-    ; dict already DECREFed in builtins path
-    INCREF_VAL rax, rdx
-    VPUSH_VAL rax, rdx
+    ; dict already DECREFed in builtins path; a Value, as above
+    INCREF_V rax, rcx
+    VPUSH rax
     DISPATCH
 END_FUNC op_load_from_dict_or_globals
 

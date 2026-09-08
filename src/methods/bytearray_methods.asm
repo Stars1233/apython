@@ -233,216 +233,158 @@ END_FUNC bytearray_from_bytes
 ;; bytearray.hex, run as bytes_method_hex over a temporary bytes;
 ;; the body answers, unchanged.
 ;; ============================================================================
-DEF_FUNC ba_shared_hex
-    lea rdx, [rel bytes_method_hex]
-    mov ecx, 0
-    leave
+;; BA_SHARED suffix, impl, wrap -- one bytearray method that is a bytes method
+;;
+;; Each generates ba_shared_<suffix>(rdi = args, rsi = nargs) -> rax = Value.
+;;
+;; Forty of these existed as forty copies of the same four instructions,
+;; identical except for which bytes body to run and how to wrap the result.
+;; Each defines ba_shared_<suffix> and tail-jumps into bytearray_shared_call,
+;; which builds the temporary bytes, runs the body over it and converts what
+;; comes back -- `wrap` says how: 0 raw, 1 a bytes-like, 2 a list of them.
+;;
+;; DEF_FUNC_BARE, not DEF_FUNC: the whole body is a tail jump, and a function
+;; that has pushed rbp cannot make one.  That is also why the copies all had a
+;; `leave` before the `jmp`, which this does not need.
+;;
+;; The per-method docblocks stay above their invocations, because what each
+;; one says -- which bytes method answers, and why the wrapping differs -- is
+;; the only thing that varies.
+;; ============================================================================
+%macro BA_SHARED 3              ; %1 = suffix, %2 = bytes body, %3 = wrap mode
+    extern %2
+DEF_FUNC_BARE ba_shared_ %+ %1
+    lea rdx, [rel %2]
+%if %3 == 0
+    xor ecx, ecx
+%else
+    mov ecx, %3
+%endif
     jmp bytearray_shared_call
-END_FUNC ba_shared_hex
+END_FUNC ba_shared_ %+ %1
+%endmacro
+
+;; ============================================================================
+BA_SHARED hex, bytes_method_hex, 0
 
 ;; ============================================================================
 ;; ba_shared_startswith(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.startswith, run as bytes_method_startswith over a temporary bytes;
 ;; the body answers, unchanged.
 ;; ============================================================================
-DEF_FUNC ba_shared_startswith
-    lea rdx, [rel bytes_method_startswith]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_startswith
+BA_SHARED startswith, bytes_method_startswith, 0
 
 ;; ============================================================================
 ;; ba_shared_endswith(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.endswith, run as bytes_method_endswith over a temporary bytes;
 ;; the body answers, unchanged.
 ;; ============================================================================
-DEF_FUNC ba_shared_endswith
-    lea rdx, [rel bytes_method_endswith]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_endswith
+BA_SHARED endswith, bytes_method_endswith, 0
 
 ;; ============================================================================
 ;; ba_shared_count(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.count, run as bytes_method_count over a temporary bytes;
 ;; the body answers, unchanged.
 ;; ============================================================================
-DEF_FUNC ba_shared_count
-    lea rdx, [rel bytes_method_count]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_count
+BA_SHARED count, bytes_method_count, 0
 
 ;; ============================================================================
 ;; ba_shared_find(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.find, run as bytes_method_find over a temporary bytes;
 ;; the body answers, unchanged.
 ;; ============================================================================
-DEF_FUNC ba_shared_find
-    lea rdx, [rel bytes_method_find]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_find
+BA_SHARED find, bytes_method_find, 0
 
 ;; ============================================================================
 ;; ba_shared_decode(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.decode, run as _bytes_decode_impl over a temporary bytes;
 ;; the body answers, unchanged.
 ;; ============================================================================
-DEF_FUNC ba_shared_decode
-    lea rdx, [rel _bytes_decode_impl]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_decode
+BA_SHARED decode, _bytes_decode_impl, 0
 
 ;; ============================================================================
 ;; ba_shared_replace(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.replace, run as bytes_method_replace over a temporary bytes;
 ;; the result becomes a bytearray.
 ;; ============================================================================
-DEF_FUNC ba_shared_replace
-    lea rdx, [rel bytes_method_replace]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_replace
+BA_SHARED replace, bytes_method_replace, 1
 
 ;; ============================================================================
 ;; ba_shared_split(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.split, run as bytes_method_split over a temporary bytes;
 ;; the result becomes a list of bytearrays.
 ;; ============================================================================
-DEF_FUNC ba_shared_split
-    lea rdx, [rel bytes_method_split]
-    mov ecx, 2
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_split
+BA_SHARED split, bytes_method_split, 2
 
 ;; ============================================================================
 ;; ba_shared_rsplit(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.rsplit, run as bytes_method_rsplit over a temporary bytes;
 ;; the result becomes a list of bytearrays.
 ;; ============================================================================
-DEF_FUNC ba_shared_rsplit
-    lea rdx, [rel bytes_method_rsplit]
-    mov ecx, 2
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_rsplit
+BA_SHARED rsplit, bytes_method_rsplit, 2
 
 ;; ============================================================================
 ;; ba_shared_rfind(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.rfind, run as bytes_method_rfind over a temporary bytes;
 ;; the body answers, unchanged.
 ;; ============================================================================
-DEF_FUNC ba_shared_rfind
-    lea rdx, [rel bytes_method_rfind]
-    xor ecx, ecx
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_rfind
+BA_SHARED rfind, bytes_method_rfind, 0
 
 ;; ============================================================================
 ;; ba_shared_index(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.index, run as bytes_method_index over a temporary bytes;
 ;; the body answers, unchanged.
 ;; ============================================================================
-DEF_FUNC ba_shared_index
-    lea rdx, [rel bytes_method_index]
-    xor ecx, ecx
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_index
+BA_SHARED index, bytes_method_index, 0
 
 ;; ============================================================================
 ;; ba_shared_rindex(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.rindex, run as bytes_method_rindex over a temporary bytes;
 ;; the body answers, unchanged.
 ;; ============================================================================
-DEF_FUNC ba_shared_rindex
-    lea rdx, [rel bytes_method_rindex]
-    xor ecx, ecx
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_rindex
+BA_SHARED rindex, bytes_method_rindex, 0
 
 ;; ============================================================================
 ;; ba_shared_strip(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.strip, run as bytes_method_strip over a temporary bytes;
 ;; the result becomes a bytearray.
 ;; ============================================================================
-DEF_FUNC ba_shared_strip
-    lea rdx, [rel bytes_method_strip]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_strip
+BA_SHARED strip, bytes_method_strip, 1
 
 ;; ============================================================================
 ;; ba_shared_lstrip(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.lstrip, run as bytes_method_lstrip over a temporary bytes;
 ;; the result becomes a bytearray.
 ;; ============================================================================
-DEF_FUNC ba_shared_lstrip
-    lea rdx, [rel bytes_method_lstrip]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_lstrip
+BA_SHARED lstrip, bytes_method_lstrip, 1
 
 ;; ============================================================================
 ;; ba_shared_rstrip(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.rstrip, run as bytes_method_rstrip over a temporary bytes;
 ;; the result becomes a bytearray.
 ;; ============================================================================
-DEF_FUNC ba_shared_rstrip
-    lea rdx, [rel bytes_method_rstrip]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_rstrip
+BA_SHARED rstrip, bytes_method_rstrip, 1
 
 ;; ============================================================================
 ;; ba_shared_partition(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.partition, run as bytes_method_partition over a temporary bytes;
 ;; the result becomes a list of bytearrays.
 ;; ============================================================================
-DEF_FUNC ba_shared_partition
-    lea rdx, [rel bytes_method_partition]
-    mov ecx, 2
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_partition
+BA_SHARED partition, bytes_method_partition, 2
 
 ;; ============================================================================
 ;; ba_shared_rpartition(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.rpartition, run as bytes_method_rpartition over a temporary bytes;
 ;; the result becomes a list of bytearrays.
 ;; ============================================================================
-DEF_FUNC ba_shared_rpartition
-    lea rdx, [rel bytes_method_rpartition]
-    mov ecx, 2
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_rpartition
+BA_SHARED rpartition, bytes_method_rpartition, 2
 
 ;; ============================================================================
 ;; ba_shared_join(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.join, run as bytes_method_join over a temporary bytes;
 ;; the result becomes a bytearray.
 ;; ============================================================================
-DEF_FUNC ba_shared_join
-    lea rdx, [rel bytes_method_join]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_join
+BA_SHARED join, bytes_method_join, 1
 
 ;; ============================================================================
 ;; bytearray_dunder_len(rdi = args, rsi = nargs) -> rax = Value
@@ -578,283 +520,151 @@ END_FUNC bytearray_dunder_contains
 ;; one of its siblings below.
 ;; ============================================================================
 
-DEF_FUNC ba_shared_upper
-    extern bytes_method_upper
-    lea rdx, [rel bytes_method_upper]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_upper
+BA_SHARED upper, bytes_method_upper, 1
 
 ;; ============================================================================
 ;; ba_shared_lower(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.lower, run as bytes_method_lower over a temporary bytes;
 ;; the result becomes a bytearray.
 ;; ============================================================================
-DEF_FUNC ba_shared_lower
-    extern bytes_method_lower
-    lea rdx, [rel bytes_method_lower]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_lower
+BA_SHARED lower, bytes_method_lower, 1
 
 ;; ============================================================================
 ;; ba_shared_swapcase(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.swapcase, run as bytes_method_swapcase over a temporary bytes;
 ;; the result becomes a bytearray.
 ;; ============================================================================
-DEF_FUNC ba_shared_swapcase
-    extern bytes_method_swapcase
-    lea rdx, [rel bytes_method_swapcase]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_swapcase
+BA_SHARED swapcase, bytes_method_swapcase, 1
 
 ;; ============================================================================
 ;; ba_shared_capitalize(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.capitalize, run as bytes_method_capitalize over a temporary bytes;
 ;; the result becomes a bytearray.
 ;; ============================================================================
-DEF_FUNC ba_shared_capitalize
-    extern bytes_method_capitalize
-    lea rdx, [rel bytes_method_capitalize]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_capitalize
+BA_SHARED capitalize, bytes_method_capitalize, 1
 
 ;; ============================================================================
 ;; ba_shared_title(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.title, run as bytes_method_title over a temporary bytes;
 ;; the result becomes a bytearray.
 ;; ============================================================================
-DEF_FUNC ba_shared_title
-    extern bytes_method_title
-    lea rdx, [rel bytes_method_title]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_title
+BA_SHARED title, bytes_method_title, 1
 
 ;; ============================================================================
 ;; ba_shared_isalpha(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.isalpha, run as bytes_method_isalpha over a temporary bytes;
 ;; the body answers, unchanged.
 ;; ============================================================================
-DEF_FUNC ba_shared_isalpha
-    extern bytes_method_isalpha
-    lea rdx, [rel bytes_method_isalpha]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_isalpha
+BA_SHARED isalpha, bytes_method_isalpha, 0
 
 ;; ============================================================================
 ;; ba_shared_isdigit(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.isdigit, run as bytes_method_isdigit over a temporary bytes;
 ;; the body answers, unchanged.
 ;; ============================================================================
-DEF_FUNC ba_shared_isdigit
-    extern bytes_method_isdigit
-    lea rdx, [rel bytes_method_isdigit]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_isdigit
+BA_SHARED isdigit, bytes_method_isdigit, 0
 
 ;; ============================================================================
 ;; ba_shared_isspace(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.isspace, run as bytes_method_isspace over a temporary bytes;
 ;; the body answers, unchanged.
 ;; ============================================================================
-DEF_FUNC ba_shared_isspace
-    extern bytes_method_isspace
-    lea rdx, [rel bytes_method_isspace]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_isspace
+BA_SHARED isspace, bytes_method_isspace, 0
 
 ;; ============================================================================
 ;; ba_shared_isalnum(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.isalnum, run as bytes_method_isalnum over a temporary bytes;
 ;; the body answers, unchanged.
 ;; ============================================================================
-DEF_FUNC ba_shared_isalnum
-    extern bytes_method_isalnum
-    lea rdx, [rel bytes_method_isalnum]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_isalnum
+BA_SHARED isalnum, bytes_method_isalnum, 0
 
 ;; ============================================================================
 ;; ba_shared_isascii(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.isascii, run as bytes_method_isascii over a temporary bytes;
 ;; the body answers, unchanged.
 ;; ============================================================================
-DEF_FUNC ba_shared_isascii
-    extern bytes_method_isascii
-    lea rdx, [rel bytes_method_isascii]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_isascii
+BA_SHARED isascii, bytes_method_isascii, 0
 
 ;; ============================================================================
 ;; ba_shared_isupper(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.isupper, run as bytes_method_isupper over a temporary bytes;
 ;; the body answers, unchanged.
 ;; ============================================================================
-DEF_FUNC ba_shared_isupper
-    extern bytes_method_isupper
-    lea rdx, [rel bytes_method_isupper]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_isupper
+BA_SHARED isupper, bytes_method_isupper, 0
 
 ;; ============================================================================
 ;; ba_shared_islower(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.islower, run as bytes_method_islower over a temporary bytes;
 ;; the body answers, unchanged.
 ;; ============================================================================
-DEF_FUNC ba_shared_islower
-    extern bytes_method_islower
-    lea rdx, [rel bytes_method_islower]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_islower
+BA_SHARED islower, bytes_method_islower, 0
 
 ;; ============================================================================
 ;; ba_shared_istitle(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.istitle, run as bytes_method_istitle over a temporary bytes;
 ;; the body answers, unchanged.
 ;; ============================================================================
-DEF_FUNC ba_shared_istitle
-    extern bytes_method_istitle
-    lea rdx, [rel bytes_method_istitle]
-    mov ecx, 0
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_istitle
+BA_SHARED istitle, bytes_method_istitle, 0
 
 ;; ============================================================================
 ;; ba_shared_ljust(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.ljust, run as bytes_method_ljust over a temporary bytes;
 ;; the result becomes a bytearray.
 ;; ============================================================================
-DEF_FUNC ba_shared_ljust
-    extern bytes_method_ljust
-    lea rdx, [rel bytes_method_ljust]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_ljust
+BA_SHARED ljust, bytes_method_ljust, 1
 
 ;; ============================================================================
 ;; ba_shared_rjust(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.rjust, run as bytes_method_rjust over a temporary bytes;
 ;; the result becomes a bytearray.
 ;; ============================================================================
-DEF_FUNC ba_shared_rjust
-    extern bytes_method_rjust
-    lea rdx, [rel bytes_method_rjust]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_rjust
+BA_SHARED rjust, bytes_method_rjust, 1
 
 ;; ============================================================================
 ;; ba_shared_center(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.center, run as bytes_method_center over a temporary bytes;
 ;; the result becomes a bytearray.
 ;; ============================================================================
-DEF_FUNC ba_shared_center
-    extern bytes_method_center
-    lea rdx, [rel bytes_method_center]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_center
+BA_SHARED center, bytes_method_center, 1
 
 ;; ============================================================================
 ;; ba_shared_zfill(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.zfill, run as bytes_method_zfill over a temporary bytes;
 ;; the result becomes a bytearray.
 ;; ============================================================================
-DEF_FUNC ba_shared_zfill
-    extern bytes_method_zfill
-    lea rdx, [rel bytes_method_zfill]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_zfill
+BA_SHARED zfill, bytes_method_zfill, 1
 
 ;; ============================================================================
 ;; ba_shared_expandtabs(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.expandtabs, run as bytes_method_expandtabs over a temporary bytes;
 ;; the result becomes a bytearray.
 ;; ============================================================================
-DEF_FUNC ba_shared_expandtabs
-    extern bytes_method_expandtabs
-    lea rdx, [rel bytes_method_expandtabs]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_expandtabs
+BA_SHARED expandtabs, bytes_method_expandtabs, 1
 
 ;; ============================================================================
 ;; ba_shared_translate(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.translate, run as bytes_method_translate over a temporary bytes;
 ;; the result becomes a bytearray.
 ;; ============================================================================
-DEF_FUNC ba_shared_translate
-    extern bytes_method_translate
-    lea rdx, [rel bytes_method_translate]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_translate
+BA_SHARED translate, bytes_method_translate, 1
 
 ;; ============================================================================
 ;; ba_shared_splitlines(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.splitlines, run as bytes_method_splitlines over a temporary bytes;
 ;; the result becomes a list of bytearrays.
 ;; ============================================================================
-DEF_FUNC ba_shared_splitlines
-    extern bytes_method_splitlines
-    lea rdx, [rel bytes_method_splitlines]
-    mov ecx, 2
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_splitlines
+BA_SHARED splitlines, bytes_method_splitlines, 2
 
 ;; ============================================================================
 ;; ba_shared_removeprefix(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.removeprefix, run as bytes_method_removeprefix over a temporary bytes;
 ;; the result becomes a bytearray.
 ;; ============================================================================
-DEF_FUNC ba_shared_removeprefix
-    extern bytes_method_removeprefix
-    lea rdx, [rel bytes_method_removeprefix]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_removeprefix
+BA_SHARED removeprefix, bytes_method_removeprefix, 1
 
 ;; ============================================================================
 ;; ba_shared_removesuffix(rdi = args, rsi = nargs) -> rax = Value
 ;; bytearray.removesuffix, run as bytes_method_removesuffix over a temporary bytes;
 ;; the result becomes a bytearray.
 ;; ============================================================================
-DEF_FUNC ba_shared_removesuffix
-    extern bytes_method_removesuffix
-    lea rdx, [rel bytes_method_removesuffix]
-    mov ecx, 1
-    leave
-    jmp bytearray_shared_call
-END_FUNC ba_shared_removesuffix
+BA_SHARED removesuffix, bytes_method_removesuffix, 1

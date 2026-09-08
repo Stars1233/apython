@@ -270,7 +270,7 @@ DEF_FUNC_BARE op_unpack_sequence
     lea rdi, [r14 + PyStrObject.data]
     movsxd rax, ebx
     add rdi, rax               ; rdi = &str.data[ebx]
-    mov rsi, 1                 ; length = 1
+    mov esi, 1                      ; length = 1
     push rcx                   ; save negative offset
     push rbx                   ; save source index
     call str_new
@@ -369,7 +369,7 @@ DEF_FUNC raise_unpack_count, RUC_FRAME
     and rsp, -16
     lea rcx, [rsp + 24]
     mov byte [rcx], 0
-    mov r8, 10
+    mov r8d, 10
     test rax, rax
     jnz .ruc_digits
     dec rcx

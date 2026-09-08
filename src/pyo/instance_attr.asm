@@ -244,8 +244,7 @@ DEF_FUNC attr_is_data_descr, 8   ; 1 push below, so rsp stays 16-aligned
     mov rdi, rbx
     CSTRING rsi, "__set__"
     call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jnz .aidd_yes
     mov rdi, rbx
     CSTRING rsi, "__delete__"
@@ -812,8 +811,18 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     ret
 
 .slot_not_set:
-    ; Slot exists but not initialized — raise AttributeError directly
-    ; (must not return NULL or LOAD_ATTR fallback finds descriptor in tp_dict).
+    ; A __slots__ slot that has never been assigned is ABSENT, and __getattr__
+    ; is the hook for absent -- the same join attr_getattr_hook makes for a
+    ; property whose getter says so.  Asked only when the class has one:
+    ; without it the direct raise below is what names the type and the
+    ; attribute, and returning NULL instead would let LOAD_ATTR's fallback
+    ; find the member descriptor in tp_dict and hand THAT back.
+    mov rdi, [rbx + PyObject.ob_type]
+    lea rsi, [rel ig_getattr_name]
+    call dunder_lookup
+    test rax, rax               ; a Value; 0 is the miss
+    jnz .ig_ask_getattr
+
     ; CPython names the type and the attribute here as it does everywhere else.
     mov rdi, rbx
     mov rsi, [rbp - IG_NAME]
@@ -848,8 +857,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     lea rsi, [rel ig_getattr_name]
     call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .really_not_found
     ; A __getattr__ explicitly set to None is not absent.  CPython calls it and
     ; the call fails as "'NoneType' object is not callable"; treating it as
@@ -963,6 +971,110 @@ DEF_FUNC instance_getattr_default, IG_FRAME
 END_FUNC instance_getattr_default
 
 ;; ============================================================================
+;; attr_getattr_hook(rdi = the object, rsi = the name str)
+;;   -> rax = payload, edx = tag; edx == 0 means the exception is still pending
+;;
+;; Offer a FAILED lookup to __getattr__.  instance_getattr asks the hook at
+;; .ig_ask_getattr when the search found nothing, but a search that found the
+;; attribute and then failed running it is the same thing to Python: a
+;; @property whose getter raises AttributeError is absent, and a class with a
+;; __getattr__ must get its chance at the name.
+;;
+;;     class G:
+;;         @property
+;;         def v(self): raise AttributeError("not here")
+;;         def __getattr__(self, n): return "fallback:" + n
+;;     G().v                       ; "fallback:v", not AttributeError
+;;
+;; CPython has no seam here at all: slot_tp_getattr_hook wraps the WHOLE of
+;; __getattribute__, so it cannot tell whether the error came from the search
+;; or from a descriptor the search ran.  Ours runs the descriptor outside
+;; instance_getattr -- op_load_attr, op_load_attr_property and obj_getattr_opt
+;; each do it themselves -- so the two halves are joined here instead, and
+;; each of those three calls this on the way to propagating.
+;;
+;; Only an AttributeError.  Anything else is a genuine failure in the middle of
+;; a lookup and keeps unwinding, which is what all three did before.  And the
+;; error is CLEARED rather than chained, because __getattr__ is not handling
+;; it -- it is the rest of the lookup -- which is what CPython does too.
+;; ============================================================================
+AGH_OBJ   equ 8
+AGH_NAME  equ 16
+AGH_FRAME equ 24                ; 24 + 1 push keeps rsp 16-aligned
+
+global attr_getattr_hook
+DEF_FUNC attr_getattr_hook, AGH_FRAME
+    push rbx
+    mov [rbp - AGH_OBJ], rdi
+    mov [rbp - AGH_NAME], rsi
+
+    ; Only a real object has a type to ask.
+    V_TEST_PTR rdi, rax
+    ja .agh_no
+    test rdi, rdi
+    jz .agh_no
+
+    mov rbx, [rel current_exception]
+    test rbx, rbx
+    jz .agh_no
+    mov rdi, [rbx + PyObject.ob_type]
+    lea rsi, [rel exc_AttributeError_type]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jz .agh_no
+
+    mov rdi, [rbp - AGH_OBJ]
+    mov rdi, [rdi + PyObject.ob_type]
+    lea rsi, [rel ig_getattr_name]
+    call dunder_lookup
+    test rax, rax               ; a Value; 0 is the miss
+    jz .agh_no
+
+    ; rbx still holds the exception, and the global still holds its reference.
+    mov qword [rel current_exception], 0
+    mov qword [rel attr_error_pending], 0
+    mov rdi, rbx
+    call obj_decref
+
+    mov rdi, [rbp - AGH_OBJ]
+    mov rsi, [rbp - AGH_NAME]
+    lea rdx, [rel ig_getattr_name]
+    mov ecx, TAG_PTR
+    call dunder_call_2
+    V_UNPACK rax, rdx
+    test edx, edx
+    jnz .agh_out
+
+    ; The hook raised in its turn.  An AttributeError from it is still the
+    ; protocol saying "absent", and getattr(o, n, default) has to see that --
+    ; the same handover .getattr_raised above makes.
+    mov rbx, [rel current_exception]
+    test rbx, rbx
+    jz .agh_zero
+    mov rdi, [rbx + PyObject.ob_type]
+    lea rsi, [rel exc_AttributeError_type]
+    call type_is_subtype
+    test eax, eax
+    jz .agh_zero
+    mov qword [rel attr_error_pending], 1
+.agh_zero:
+    xor eax, eax
+    xor edx, edx
+.agh_out:
+    pop rbx
+    leave
+    ret
+
+.agh_no:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+END_FUNC attr_getattr_hook
+
+;; ============================================================================
 ;; instance_setattr(rdi = instance, rsi = name, rdx = value Value) -> nothing
 ;;
 ;; tp_setattr for a heaptype instance.  Walks the MRO for a data descriptor
@@ -980,35 +1092,29 @@ DEF_FUNC instance_setattr
     mov r12, rsi                ; name
     mov r13, rdx                ; value Value
 
-    ; Walk the type's MRO looking for a member descriptor (slot)
+    ; Does the MRO define this name as a data descriptor?
     mov rax, [rbx + PyObject.ob_type]
-    mov r14, rax                ; origin of the walk
     ; A slot, a property and a getset are all data descriptors, so the flag
-    ; that says none of them is in this MRO says this walk will find nothing.
-    ; op_store_attr just walked the same MRO for the same reason.
+    ; that says none of them is in this MRO says the lookup will find nothing.
+    ; It is an over-approximation, so a clear flag is a real negative.
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_MRO_HAS_DATA_DESCR
     jz .sa_no_slot
-.sa_walk:
-    mov rdi, [rax + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jz .sa_try_base
-    push rax                    ; save current type
-    mov rsi, r12                ; name
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    mov r9, rax                 ; save dict_get value
-    pop rax                     ; restore current type
-    test edx, edx
-    jnz .sa_found_type
 
-.sa_try_base:
-    MRO_NEXT rax, r14
-    test rax, rax
-    jnz .sa_walk
-    jmp .sa_no_slot
+    ; Asked through the type cache, not by walking.  This is the SECOND time
+    ; the same MRO is searched for the same name on an ordinary store --
+    ; op_store_attr asks first -- and as a raw dict_get per level it cost more
+    ; than everything else the store does put together, every level of it
+    ; finding nothing.  Same registers as the walk it replaces, and the
+    ; reference is borrowed the same way.
+    mov rdi, rax
+    mov rsi, r12                ; name
+    call type_lookup_cached     ; rax = payload, edx = tag
+    mov r9, rax
+    test edx, edx
+    jz .sa_no_slot
 
 .sa_found_type:
-    ; Check if it's a member descriptor (r9 = dict value, rax = type)
+    ; Check if it's a member descriptor (r9 = the value found)
     cmp edx, TAG_PTR
     jne .sa_no_slot
     extern member_descr_type

@@ -427,8 +427,7 @@ DEF_FUNC asm_effect, 16         ; a frame, because .variable now calls out
     add rax, r8                         ; rax = Instr*
     movzx ecx, byte [rax + Instr.opcode]
     lea r8, [rel op_meta]
-    shl rcx, 2
-    add r8, rcx
+    lea r8, [r8 + rcx*4]
     test edx, edx
     jz .fallthrough
     movsx edx, byte [r8 + OpMeta.jeff]
@@ -600,8 +599,7 @@ DEF_FUNC asm_stackdepth, AS_FRAME
     lea r15, [rax + rcx]
     movzx ecx, byte [r15 + Instr.opcode]
     lea rax, [rel op_meta]
-    shl rcx, 2
-    add rax, rcx
+    lea rax, [rax + rcx*4]
     movzx ecx, byte [rax + OpMeta.flags]
     test cl, OM_JUMP
     jz .no_jump
@@ -650,8 +648,7 @@ DEF_FUNC asm_stackdepth, AS_FRAME
     lea r15, [rax + rcx]
     movzx ecx, byte [r15 + Instr.opcode]
     lea rax, [rel op_meta]
-    shl rcx, 2
-    add rax, rcx
+    lea rax, [rax + rcx*4]
     movzx ecx, byte [rax + OpMeta.flags]
     test cl, OM_NOFALL
     jnz .work
@@ -862,7 +859,7 @@ DEF_FUNC asm_linetable, AL_FRAME
     ; about whether the two belong together.
 .have_line:
     mov edx, [rax + Instr.col]
-    cmp edx, 0
+    test edx, edx
     jl .line_only
     mov [rbp - AL_COL], rdx
     mov edx, [rax + Instr.end_col]
@@ -886,7 +883,7 @@ DEF_FUNC asm_linetable, AL_FRAME
     jz .next
     cmp rcx, 8
     jbe .col_len
-    mov rcx, 8
+    mov ecx, 8
 .col_len:
     mov rdi, [rbp - AL_OUT]
     lea rsi, [rcx - 1]
@@ -924,7 +921,7 @@ DEF_FUNC asm_linetable, AL_FRAME
     jz .next
     cmp rcx, 8
     jbe .have_len
-    mov rcx, 8
+    mov ecx, 8
 .have_len:
     mov rdi, [rbp - AL_OUT]
     lea rsi, [rcx - 1]
@@ -959,7 +956,7 @@ DEF_FUNC asm_linetable, AL_FRAME
     jz .next
     cmp rcx, 8
     jbe .nl_len
-    mov rcx, 8
+    mov ecx, 8
 .nl_len:
     mov rdi, [rbp - AL_OUT]
     lea rsi, [rcx - 1]
@@ -1530,7 +1527,7 @@ DEF_FUNC asm_exc_varint, EV2_FRAME
 
     mov ecx, 24
 .find_top:
-    cmp ecx, 0
+    test ecx, ecx
     je .emit_last
     mov rax, r12
     mov r8, rcx
@@ -1560,7 +1557,7 @@ DEF_FUNC asm_exc_varint, EV2_FRAME
     call buf_push_u8
     pop r8
     sub r8, 6
-    cmp r8, 0
+    test r8, r8
     jg .chunk_loop
 .emit_last:
     mov rax, r12

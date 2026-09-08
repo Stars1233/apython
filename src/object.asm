@@ -1336,7 +1336,7 @@ DEF_FUNC msg_append_i64
     test rax, rax
     jz .mai_emit
     xor edx, edx
-    mov r8, 10
+    mov r8d, 10
     div r8
     add dl, '0'
     dec rcx
@@ -2316,7 +2316,7 @@ DEF_FUNC obj_binary_op, OBO_FRAME
     ; sq_concat for +, sq_repeat for *, off the left operand -- what makes
     ; sum(list_of_lists, []) work.
     mov rcx, [rbp - OBO_OP]
-    cmp rcx, 0                  ; NB_ADD
+    test rcx, rcx                   ; NB_ADD
     je .obo_seq_have_op
     cmp rcx, 5                  ; NB_MULTIPLY
     jne .obo_dunder
@@ -2665,8 +2665,7 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, [rbx + PyObject.ob_type]
     lea rsi, [rel dunder_bool]
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .check_dunder_len       ; not found (TAG_NULL) → try __len__
 
     ; Check if __bool__ is None → TypeError

@@ -357,7 +357,7 @@ DEF_FUNC cg_emit, CM_FRAME
     cmp edx, [rbx + CompUnit.curline]
     jne .cm_done
     mov ecx, [rbx + CompUnit.curcol]
-    cmp ecx, 0
+    test ecx, ecx
     jl .cm_done
     mov [rax + Instr.col], ecx
     mov [rbx + CompUnit.lastcol], ecx
@@ -780,7 +780,7 @@ DEF_FUNC cg_set_loc, SLOC_FRAME
     mov [r12 + CompUnit.curline], ecx
     mov ecx, [rax + AstNode.col]
     mov [r12 + CompUnit.curcol], ecx
-    cmp ecx, 0
+    test ecx, ecx
     jl .csl_none
 
     mov rdi, rbx
@@ -790,9 +790,9 @@ DEF_FUNC cg_set_loc, SLOC_FRAME
     jz .csl_none
     mov ecx, [rax + AstSpan.end_lineno]
     mov edx, [rax + AstSpan.end_col]
-    cmp ecx, 0
+    test ecx, ecx
     jl .csl_none
-    cmp edx, 0
+    test edx, edx
     jl .csl_none
     mov [r12 + CompUnit.curend], ecx
     mov [r12 + CompUnit.curendcol], edx

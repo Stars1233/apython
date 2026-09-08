@@ -206,7 +206,7 @@ DEF_FUNC_LOCAL get_monotonic_ns
 
     ; Convert to nanoseconds: tv_sec * 1_000_000_000 + tv_nsec
     mov rax, [rel timespec_buf]        ; tv_sec
-    mov rcx, 1000000000
+    mov ecx, 1000000000
     imul rax, rcx
     add rax, [rel timespec_buf + 8]    ; tv_nsec
     leave
@@ -438,7 +438,7 @@ DEF_FUNC poll_wait_and_drain, 8            ; 3 pushes, so rsp is 16-aligned
 
     ; Convert ns to ms: remaining_ns / 1_000_000
     mov rax, rbx
-    mov rcx, 1000000
+    mov ecx, 1000000
     xor edx, edx
     div rcx
     ; rax = timeout_ms (may be 0 for sub-ms)

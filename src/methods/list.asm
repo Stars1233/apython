@@ -109,7 +109,7 @@ DEF_FUNC list_method_pop, 8            ; 3 pushes, so rsp is 16-aligned
 
 .pop_do:
     ; Bounds check
-    cmp r13, 0
+    test r13, r13
     jl .pop_error
     cmp r13, [rbx + PyListObject.ob_size]
     jge .pop_error
@@ -242,7 +242,9 @@ END_FUNC list_method_insert
 ;; args[0]=self, reverse in place
 ;; ============================================================================
 DEF_FUNC list_method_reverse
-    push rbx
+    ; No push: the body uses rax, rcx, rdi, rsi, r8 and r10, and the one exit
+    ; that is not the `ret` below is a tail jump into list_sorting_error,
+    ; which never returns.  rbx was saved and never read.
     mov rax, [rdi]          ; self
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rax + PyListObject.ob_item], 0
@@ -268,7 +270,6 @@ DEF_FUNC list_method_reverse
 
 .rev_done:
     RET_NONE
-    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -881,7 +882,7 @@ DEF_FUNC list_method_sort, LS_FRAME
 .merge_refl_call:
     extern obj_richcompare_bool
     call obj_richcompare_bool
-    cmp eax, 0
+    test eax, eax
     jl .sort_free_temp             ; it raised: clean up and propagate
     test eax, eax
     jnz .merge_take_right
@@ -1619,7 +1620,7 @@ DEF_FUNC list_method_copy, 8            ; 3 pushes, so rsp is 16-aligned
     mov rdi, r12
     test rdi, rdi
     jnz .copy_alloc
-    mov rdi, 4
+    mov edi, 4
 .copy_alloc:
     call list_new
     mov r13, rax            ; new list
@@ -1888,7 +1889,7 @@ DEF_FUNC list_dunder_init
     ; Build args for list_extend: args[0]=self, args[1]=iterable
     ; Our args are already in the right format: [self, iterable, ...]
     mov rdi, rbx            ; args ptr (already has self + iterable)
-    mov rsi, 2              ; nargs = 2
+    mov esi, 2                      ; nargs = 2
     call list_method_extend
 
 .ldi_done:

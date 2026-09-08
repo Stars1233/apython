@@ -176,8 +176,9 @@ No hand-written file exceeds 100k bytes; only generated asm may.
 
 - `src/eval.asm` — Bytecode dispatch loop (256-entry jump table), the
   exception unwinder, and `raise_exception`
-- `src/opcodes/*.asm` — Opcode handlers by category: `load` (loads, stores and
-  the stack shuffles), `call`, `build`, `unpack` (UNPACK_SEQUENCE and
+- `src/opcodes/*.asm` — Opcode handlers by category: `load` (the loads, the
+  attribute protocol they share, and the pure stack shuffles), `store` (the
+  stores and the deletes), `call`, `build`, `unpack` (UNPACK_SEQUENCE and
   UNPACK_EX, the two that take a sequence apart), `arith` (BINARY_OP/
   COMPARE_OP/unary and the specialized int/float superinstructions), `flow`
   (returns, jumps, f-strings, generators), `match` (the MATCH_* family and the
@@ -209,7 +210,11 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   attributes beside `.args`, the message assembled from them, and CPython's
   errno-to-subclass table
 - `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func,
-  class, iter, singleton, bytes, bytearray, memoryview, code).  `class.asm` is
+  class, iter, singleton, bytes, bytearray, memoryview, code).
+  `bytes_decode.asm` is bytes -> str and why it sometimes cannot be: the three
+  codecs that are not a table, the UTF-8 validator under them, and the
+  UnicodeDecodeError worded the way CPython words it.  Split off when
+  `bytes.asm` reached the 100k cap; what stayed is bytes *itself*.  `class.asm` is
   the metatype, the instance and attribute access; `instance_alloc.asm` is
   where an instance comes from, including the constructors a subclass of a
   builtin needs; `method.asm` is the bound method; `str_mod.asm` is the `%`
@@ -307,7 +312,7 @@ f-strings, async, comprehensions, PEP 695 type parameters.
 | `codegen.asm` | AST kind → emitter jump table; `_stmt`/`_func`/`_try`/`_comp`/`_match` for the rest.  `_try` also holds `except*`, `with` and `await`: they are one unwinder |
 | `assemble.asm` | EXTENDED_ARG fixpoint, stack depth, exception table, line table |
 | `compile.asm` | pipeline driver and lifetime; the `code_from_path` and `compile()`/`exec()`/`eval()` entry points; and `comp_error`, the record side of the error protocol |
-| `unicodename.asm` | **generated** -- the names `\N{...}` resolves |
+| `unicodename.asm` | **generated** -- the names `\N{...}` resolves, front-coded: `db shared, cpdelta, "suffix", 0` per entry, decoded as the scan walks |
 | `gen_unicodename.py` | regenerates `unicodename.asm` from `unicodedata` |
 | `unicodecase.asm` | **generated** -- the case mappings and the character flags |
 | `gen_unicodecase.py` | regenerates `unicodecase.asm` from CPython's own `str` methods |
@@ -489,7 +494,29 @@ Opcodes have trailing CACHE words that must be skipped. Key counts (each = 2 byt
   and out of the `for` that was calling it.  Use `SET_EXC` and return NULL;
   the slot wrapper is what turns StopIteration into exhaustion.
 
+- **Turning on `TYPE_FLAG_HAVE_GC` without moving every allocation site.**
+  The flag is what `gc_dealloc` reads to decide whether to free at
+  `obj - GC_HEAD_SIZE`, so the moment a type carries it, EVERY place that
+  builds one of its instances has to come from `gc_alloc` and every free has to
+  go through `gc_dealloc`.  A second constructor still using `ap_malloc` hands
+  the allocator a pointer sixteen bytes short of what it gave out, and the heap
+  corruption surfaces as segfaults in unrelated tests.  `frame_object_type` had
+  two constructors -- one for `sys._getframe()`, one for a traceback's snapshot
+  -- and only the first was moved.  A type declaring `tp_traverse` and
+  `tp_clear` while its instances are never tracked is the other half of the
+  same mistake: the collector never sees them, so a cycle through one is
+  uncollectable.
+
 - **A removed load whose guard stayed.** The `(payload, tag)` conversion deleted many `key_tag` loads; where the `test`/`jz` that used them was left in place it now reads a stale register — `from mod import *` and `dict.popitem()` both failed this way, silently. When deleting a load, delete its test.
+  **And keep reading past the test.** The guard is rarely the only consumer:
+  converting `dunder_lookup`, `dunder_call_1` and `dict_get` to return a Value
+  swept every guard and left five `V_PACK rax, rdx` / `INCREF_VAL rax, rdx`
+  one line below one, still reading the tag register nothing had written. All
+  five produced wrong ANSWERS rather than crashes — an int 2^50 out, or an
+  INCREF skipped and a borrowed reference pushed — so `make check`,
+  `check-cpython`, both `-source` gates, `lint.py` and `INT_STRESS=1` were all
+  green over them. After converting a funnel, grep its call sites for the tag
+  register and read to the next write of it, not to the next branch.
 
 ## Adding a New Test
 

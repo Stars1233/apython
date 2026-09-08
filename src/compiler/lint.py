@@ -216,10 +216,20 @@ def check_saved_writes(files):
 # A call does not have to be spelled `call`.  These macros expand to one, and
 # a function whose only calls are inside them was skipped entirely -- which is
 # how list_setitem came to reach obj_dealloc through DECREF_V with rsp 8 out.
+# Macros that expand to a `call`, so a function containing one is subject to
+# the alignment rule even if it has no literal `call` line.
+#
+# V_PACK and V_UNPACK joined this list when their cold arms were hoisted into
+# val_pack_cold / val_unpack_cold; before that they reached val_from_i64_p
+# through V_PACK_I64 and the hole let 1280 functions past check_alignment
+# unexamined.  The helpers are written to be correct at either rsp parity --
+# see their docblocks in src/val.asm -- but the functions AROUND them still
+# have to obey the rule for their own calls, which is what this restores.
 CALL_MACROS = ('DECREF', 'DECREF_REG', 'DECREF_V', 'DECREF_VAL', 'XDECREF_VAL',
                'INT_NEED_MPZ', 'MODULE_ADD_FUNC', 'MRO_NEXT', 'RAISE',
                'REQUIRE_SELF', 'REQUIRE_SELF_BARE', 'SET_EXC', 'VISIT_PTR',
-               'VISIT_V', 'V_PACK_I64')
+               'VISIT_V', 'V_PACK_I64', 'V_PACK', 'V_UNPACK',
+               'VPUSH_VAL', 'VPOP_VAL')
 CALLS_RE = r'^\s*(?:call\s|(?:%s)\b)' % '|'.join(CALL_MACROS)
 
 
@@ -494,7 +504,19 @@ def docblock_debt(path):
     """
     lines = open(path).read().split('\n')
     nodoc = nosig = 0
+    # A DEF_FUNC inside a %macro body defines whatever the invocation names,
+    # and its documentation is the macro's own docblock -- which the walk below
+    # cannot reach, because the `%macro` line stops it.  Skip those, the way
+    # check_alignment already does.  bytearray_methods.asm's BA_SHARED and
+    # methods/object.asm's DEF_DUNDER_* family are what this is about.
+    in_macro = False
     for i, L in enumerate(lines):
+        if re.match(r'^\s*%macro\s', L):
+            in_macro = True
+        elif re.match(r'^\s*%endmacro\b', L):
+            in_macro = False
+        if in_macro:
+            continue
         if not re.match(r'^DEF_FUNC(?:_LOCAL|_BARE)?\s+\w+', L):
             continue
         j = i - 1
@@ -919,6 +941,122 @@ def check_handler_alignment(files):
     return out
 
 
+# --------------------------------------------------------------------------
+# Encoding hygiene.
+#
+# None of these is a correctness rule -- every form they reject assembles to
+# something that works.  They are here because the tree was swept clean of all
+# four in one pass, and because each of them is the kind of thing that comes
+# back one site at a time: `mov rdx, 0` reads perfectly well and costs five
+# bytes more than `xor edx, edx` every time it is written.
+#
+# Where a shorter form would change the flags, the sweep left the long one
+# alone, so a violation is not automatically a bug -- but it does have to be
+# justified.  Say so in a trailing `; lint: flags` comment and the check will
+# accept it.
+# --------------------------------------------------------------------------
+ENC_R64  = r'r(?:[a-d]x|[sd]i|bp|8|9|1[0-5])'
+ENC_ANYR = (r'(?:r[a-d]x|r[sd]i|rbp|rsp|r8|r9|r1[0-5]|e[a-d]x|e[sd]i|ebp|esp'
+            r'|r8d|r9d|r1[0-5]d|[a-d]x|si|di|r8w|r9w|r1[0-5]w'
+            r'|[a-d]l|sil|dil|r8b|r9b|r1[0-5]b)')
+
+def _enc_lines(path):
+    """Code lines outside any data section, with their 1-based numbers."""
+    out, in_text = [], True
+    for n, raw in enumerate(open(path), 1):
+        s = raw.split(';')[0].strip()
+        m = re.match(r'^section\s+\.(\w+)', s)
+        if m:
+            in_text = m.group(1) == 'text'
+            continue
+        if in_text and s:
+            out.append((n, s, raw))
+    return out
+
+def check_encoding(files):
+    """Four shorter-encoding rules, tree-wide.  See STYLE.md."""
+    bad = []
+    for path in files:
+        for n, s, raw in _enc_lines(path):
+            if 'lint: flags' in raw:
+                continue
+            m = re.match(r'^mov\s+(%s)\s*,\s*0$' % ENC_ANYR, s)
+            if m:
+                bad.append((path, n, "`%s` where xor would do" % s,
+                            "xor the 32-bit form: it is 5 bytes shorter and "
+                            "breaks the dependency on the old value"))
+                continue
+            m = re.match(r'^mov\s+(%s)\s*,\s*(0x[0-9a-fA-F]+|\d+)$' % ENC_R64, s)
+            if m and 0 <= int(m.group(2), 0) <= 0x7fffffff:
+                bad.append((path, n, "64-bit `%s` for a 32-bit immediate" % s,
+                            "write the 32-bit register: it zero-extends, and "
+                            "saves the REX.W and two immediate bytes"))
+                continue
+            m = re.match(r'^cmp\s+(%s)\s*,\s*0$' % ENC_ANYR, s)
+            if m:
+                bad.append((path, n, "`%s` where test would do" % s,
+                            "test %s, %s -- identical flags, one byte shorter, "
+                            "and it macro-fuses" % (m.group(1), m.group(1))))
+                continue
+            m = re.match(r'^and\s+(%s)\s*,\s*0x[fF]{8}$' % ENC_R64, s)
+            if m:
+                w = {'rax':'eax','rbx':'ebx','rcx':'ecx','rdx':'edx','rsi':'esi',
+                     'rdi':'edi','rbp':'ebp'}.get(m.group(1), m.group(1) + 'd')
+                bad.append((path, n, "`%s` is a zero-extend written the long way" % s,
+                            "mov %s, %s" % (w, w)))
+    return bad
+
+
+def check_const_value(files):
+    """A compile-time integer Value must be folded, not built at run time.
+
+    `mov rdx, 0` / `V_PACK_I64 rdx, rcx` is about sixteen instructions to
+    produce a constant the assembler can work out: an int immediate is just
+    n + V_INT_BIAS.  V_INT(n) in include/value.inc does it for free.
+
+    And it only works inside the immediate range.  V_INT is a `%define`, so
+    NASM folds `V_INT(1 << 51)` into a FLOAT Value without a word -- the
+    range is checked here instead, which is where the tree checks everything
+    else the assembler will not.
+    """
+    bad = []
+    vint = re.compile(r'V_INT\(\s*(-?(?:\d+|0x[0-9a-fA-F]+)(?:\s*<<\s*\d+)?)\s*\)')
+    for path in files:
+        for row in _enc_lines(path):
+            n, line = row[0], row[1]
+            for m in vint.finditer(line):
+                try:
+                    v = eval(m.group(1), {"__builtins__": {}}, {})
+                except Exception:
+                    continue
+                if not -(1 << 50) <= v < (1 << 50):
+                    bad.append((path, n,
+                                "V_INT(%s) is outside the immediate range"
+                                % m.group(1),
+                                "NASM folds it into a float Value, silently;"
+                                " box it at run time instead"))
+    lit = re.compile(r'^mov\s+(\w+)\s*,\s*(-?\d+|0x[0-9a-fA-F]+)$')
+    pack = re.compile(r'^V_PACK_I64\s+(\w+)\s*,')
+    wide = lambda r: {'eax':'rax','ebx':'rbx','ecx':'rcx','edx':'rdx','esi':'rsi',
+                      'edi':'rdi'}.get(r, r[:-1] if re.fullmatch(r'r\d+d', r) else r)
+    for path in files:
+        rows = _enc_lines(path)
+        for i in range(len(rows) - 1):
+            m1, m2 = lit.match(rows[i][1]), pack.match(rows[i + 1][1])
+            if not (m1 and m2 and wide(m1.group(1)) == wide(m2.group(1))):
+                continue
+            # Only an immediate-range constant can be folded; a wider one
+            # really does have to be boxed on the heap at run time.
+            if not -(1 << 50) <= int(m1.group(2), 0) < (1 << 50):
+                continue
+            if True:
+                bad.append((path, rows[i][0],
+                            "V_PACK_I64 of the compile-time constant %s" % m1.group(2),
+                            "mov %s, V_INT(%s) -- one instruction, folded by NASM"
+                            % (wide(m1.group(1)), m1.group(2))))
+    return bad
+
+
 def main():
     os.chdir(ROOT)
     if '--record-docblocks' in sys.argv:
@@ -953,6 +1091,8 @@ def main():
                 + check_text(everything) + check_guards(headers)
                 + check_type_tables(everything, nfields)
                 + check_alignment(everything)
+                + check_encoding(everything)
+                + check_const_value(everything)
                 + check_slot_table(everything)
                 + check_handler_alignment(everything)
                 + check_tailjumps(scoped)

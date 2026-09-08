@@ -1306,7 +1306,7 @@ DEF_FUNC complex_hash, CH_FRAME
     mov rdi, [rbp - CH_IMAG]
     mov edx, TAG_FLOAT
     call float_hash
-    mov rcx, 1000003
+    mov ecx, 1000003
     imul rax, rcx
     add rax, rbx
     cmp rax, -1

@@ -116,6 +116,7 @@ extern op_binary_subscr_list_int
 extern op_unpack_sequence_tuple
 extern op_store_attr_instance
 extern op_call_py_exact
+extern op_load_attr_property
 extern op_unpack_sequence_list
 extern op_binary_subscr_tuple_int
 extern op_store_subscr_list_int
@@ -179,6 +180,11 @@ extern tuple_new
 ; rdi = frame
 section .data
 eval_no_frame_msg: db "exception raised outside the interpreter loop", 0
+; The message above is 45 bytes, which left every counter below it at
+; `addr % 8 == 6`: recursion_depth's per-call `inc qword` was a misaligned
+; read-modify-write and c_recursion_depth straddled a cache line.  Costs
+; nothing to say so.
+align 8
 global recursion_depth
 global recursion_limit
 recursion_depth: dq 0
@@ -792,8 +798,7 @@ extern exc_RecursionError_type
     ; Adjust value stack to target depth
     mov rdi, [r12 + PyFrame.stack_base]
     mov eax, edx
-    shl rax, 3               ; depth * 8
-    add rdi, rax             ; target stack ptr
+    lea rdi, [rdi + rax*8]              ; target stack ptr
     ; DECREF any items being popped from stack
     cmp r13, rdi
     jb .stack_below          ; shallower than the table says -- see below
@@ -1413,7 +1418,7 @@ opcode_table:
     dq op_unpack_sequence_list ; 239
     dq op_store_attr_instance ; 240
     dq op_call_py_exact     ; 241
-    dq op_unimplemented      ; 242
+    dq op_load_attr_property ; 242
     dq op_unimplemented      ; 243
     dq op_unimplemented      ; 244
     dq op_unimplemented      ; 245
@@ -1431,7 +1436,24 @@ opcode_table:
 ;; ============================================================================
 ;; Global exception state (BSS)
 ;; ============================================================================
+;; The block below is `align 64` and the two byte-sized flags are at the END of
+;; it, both deliberately.
+;;
+;; tb_suppress_frame used to sit in the middle as a lone `resb 1`, which put
+;; every word after it at `addr % 8 == 1`: eval_saved_r12 and
+;; build_class_pending each STRADDLED a 64-byte line, and both are saved and
+;; restored on every Python call.  Worse, eval.o's .bss has sh_addralign 4, so
+;; the words DISPATCH writes on every opcode avoided splitting a line only
+;; because dunder_cache_vals happened to end where it did -- any edit changing
+;; another file's .bss size by a non-multiple of 8 would have turned every one
+;; of them into a split access, and it would have read as an unrelated
+;; regression somewhere else entirely.
+;;
+;; With the flags moved out, current_exception through eval_co_consts are six
+;; consecutive words in one cache line, which is what DISPATCH and
+;; eval_frame/eval_return actually touch.
 section .bss
+align 64
 global current_exception
 current_exception: resq 1    ; PyExceptionObject* or NULL -- IN FLIGHT
 ;; The exception being HANDLED: what an `except` block installed and what
@@ -1444,8 +1466,6 @@ current_exception: resq 1    ; PyExceptionObject* or NULL -- IN FLIGHT
 global handled_exception
 handled_exception: resq 1    ; PyExceptionObject* or NULL -- BEING HANDLED
 eval_base_rsp: resq 1        ; machine stack pointer at eval dispatch level
-global tb_suppress_frame
-tb_suppress_frame: resb 1    ; 1 = the next unwind adds no traceback entry
 global eval_saved_rbx
 eval_saved_rbx: resq 1       ; bytecode IP saved at dispatch (for exception unwind)
 global eval_saved_r12
@@ -1473,8 +1493,13 @@ global build_class_pending
 build_class_pending: resq 1  ; type object from builtin___build_class__ during construction, or NULL
 
 
+; The two byte-sized flags, together, at the end -- see the note at the top of
+; this block.  A `resb 1` anywhere above them puts every word after it off
+; 8-byte alignment.
 global throw_pending
 throw_pending: resb 1           ; nonzero = gen_throw set current_exception before resume
+global tb_suppress_frame
+tb_suppress_frame: resb 1    ; 1 = the next unwind adds no traceback entry
 
 ;; ============================================================================
 ;; Read-only data for traceback printing
@@ -1627,6 +1652,7 @@ opn_UNPACK_SEQUENCE_TUPLE: db "UNPACK_SEQUENCE_TUPLE", 0
 opn_UNPACK_SEQUENCE_LIST: db "UNPACK_SEQUENCE_LIST", 0
 opn_STORE_ATTR_INSTANCE: db "STORE_ATTR_INSTANCE", 0
 opn_CALL_PY_EXACT: db "CALL_PY_EXACT", 0
+opn_LOAD_ATTR_PROPERTY: db "LOAD_ATTR_PROPERTY", 0
 
 ;; ============================================================================
 ;; Opcode name lookup table (256 entries, in .data for relocations)
@@ -1877,7 +1903,7 @@ opcode_names:
     dq opn_UNPACK_SEQUENCE_LIST      ; 239
     dq opn_STORE_ATTR_INSTANCE       ; 240
     dq opn_CALL_PY_EXACT             ; 241
-    dq opn_unknown                    ; 242
+    dq opn_LOAD_ATTR_PROPERTY        ; 242
     dq opn_unknown                    ; 243
     dq opn_unknown                    ; 244
     dq opn_unknown                    ; 245

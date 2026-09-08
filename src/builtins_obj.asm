@@ -343,9 +343,10 @@ DEF_FUNC builtin_next_fn, NX_FRAME
     lea rsi, [rel dunder_next]
     extern dunder_call_1
     call dunder_call_1
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
-    jnz .next_got_val                  ; got a value
+    test rax, rax               ; dunder_call_1 answers with a Value; 0 is the miss
+    jnz .next_got_value                ; got a Value -- NOT .next_got_val,
+                                       ; which packs a (payload, tag) pair and
+                                       ; would read rdx as a tag it never set
     ; NULL from __next__ — check for StopIteration in current_exception
     extern current_exception
     mov rax, [rel current_exception]
@@ -374,10 +375,16 @@ DEF_FUNC builtin_next_fn, NX_FRAME
     jz .next_stop
 
 .next_got_val:
-    ; tp_iternext / __next__ returns fat (rax=payload, rdx=tag)
+    ; tp_iternext returns the pair (rax = payload, rdx = tag)
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.next_got_value:
+    ; __next__ through dunder_call_1 already answered with a Value
+    pop rbx
+    leave
     ret
 
 .next_stop:
@@ -1199,7 +1206,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     test rax, rax
     jz .mm_fail
     mov [rbp - MM_BESTKEY], rax
-    mov r12, 1
+    mov r12d, 1
 
 .mm_loop:
     cmp r12, [rbp - MM_N]
@@ -1213,7 +1220,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     mov rsi, [rbp - MM_BESTKEY]
     mov edx, [rbp - MM_OP]
     call obj_richcompare_bool
-    cmp eax, 0
+    test eax, eax
     jl .mm_fail                 ; the comparison raised
     je .mm_next                 ; the incumbent keeps
     mov rax, [rbx + r12*8]
@@ -1313,7 +1320,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     mov rsi, [rbp - MM_BESTKEY]
     mov edx, [rbp - MM_OP]
     call obj_richcompare_bool
-    cmp eax, 0
+    test eax, eax
     jl .mm_iter_fail
     je .mm_iter_next
     ; The candidate wins: hand its reference to BEST rather than adjusting
@@ -1418,7 +1425,7 @@ GA_EXC    equ 8              ; current_exception before the lookup
 ;; Returns the globals dict of the current frame.
 ;; ============================================================================
 DEF_FUNC builtin_globals
-    cmp rsi, 0
+    test rsi, rsi
     jne .globals_error
 
     ; Get current eval frame from saved r12
@@ -1446,7 +1453,7 @@ END_FUNC builtin_globals
 ;; In function scope, returns globals as approximation.
 ;; ============================================================================
 DEF_FUNC builtin_locals
-    cmp rsi, 0
+    test rsi, rsi
     jne .locals_error
 
     ; Get current eval frame
@@ -1849,7 +1856,7 @@ global builtin_input_fn
 INP_BUF_SIZE equ 4096
 INP_FRAME equ INP_BUF_SIZE + 16  ; buffer + saved values
 DEF_FUNC builtin_input_fn, INP_FRAME
-    cmp rsi, 0
+    test rsi, rsi
     je .inp_no_prompt
     cmp rsi, 1
     jne .inp_error
@@ -2545,7 +2552,7 @@ DEF_FUNC builtin_aiter_fn, AIT_FRAME
     CSTRING rsi, "__aiter__"
     call dunder_lookup
     pop rdi
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .aiter_type_error
     ; Call tp_iter
     mov rax, [rdi + PyObject.ob_type]

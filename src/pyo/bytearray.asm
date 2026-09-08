@@ -265,7 +265,7 @@ DEF_FUNC_BARE bytearray_getitem
 .bag_positive:
     cmp rsi, [rdi + PyByteArrayObject.ob_size]
     jge .bag_index_error
-    cmp rsi, 0
+    test rsi, rsi
     jl .bag_index_error
 
     mov rax, [rdi + PyByteArrayObject.ob_bytes]
@@ -298,7 +298,7 @@ END_FUNC bytearray_data
 DEF_FUNC bytearray_index_arg
     V_UNPACK rdi, rdx           ; obj_as_index takes the pair, not the Value
     call obj_as_index
-    cmp rax, 0
+    test rax, rax
     jl .bia_range
     cmp rax, 255
     jg .bia_range
@@ -406,7 +406,7 @@ DEF_FUNC bytearray_subscript, BSU_FRAME
     jns .bsu_have_index
     add rax, rdx                ; a negative index counts from the end
 .bsu_have_index:
-    cmp rax, 0
+    test rax, rax
     jl .bsu_range
     cmp rax, rdx
     jge .bsu_range
@@ -561,7 +561,7 @@ DEF_FUNC bytearray_ass_subscript, 104
     jns .bas_int_bounds
     add rbx, rdx
 .bas_int_bounds:
-    cmp rbx, 0
+    test rbx, rbx
     jl .bas_range
     cmp rbx, rdx
     jge .bas_range
@@ -950,7 +950,7 @@ DEF_FUNC bytearray_contains, BCT_FRAME
     V_UNPACK rdi, rdx
     call obj_as_index
     mov rdi, rax
-    cmp rdi, 0
+    test rdi, rdi
     jl .bct_range
     cmp rdi, 255
     jg .bct_range
@@ -1271,7 +1271,7 @@ DEF_FUNC bytearray_method_pop, BAM_FRAME
     jns .bpo_have_idx
     add rcx, rdx
 .bpo_have_idx:
-    cmp rcx, 0
+    test rcx, rcx
     jl .bpo_range
     cmp rcx, rdx
     jge .bpo_range

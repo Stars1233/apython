@@ -104,15 +104,14 @@ DEF_FUNC_BARE op_get_awaitable
     lea rsi, [rel gaw_await_name]
     extern dunder_lookup
     call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .gaw_try_iter
 
     mov rdi, [rsp]
     lea rsi, [rel gaw_await_name]
     extern dunder_call_1
-    call dunder_call_1          ; -> (rax = payload, rdx = tag); not a Value
-    test edx, edx
+    call dunder_call_1
+    test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
     jz .gaw_await_failed
     jmp .gaw_have_result
 
@@ -225,7 +224,7 @@ DEF_FUNC_BARE op_get_aiter
     call dunder_call_1
     pop rdi
     add rsp, 8
-    test edx, edx
+    test rax, rax               ; dunder_call_1 answers with a Value; 0 is the miss
     jnz .gai_by_name
     EXC_RAISED_SINCE r15, rcx, .gai_propagate
 
@@ -349,7 +348,7 @@ DEF_FUNC_BARE op_get_anext
     call dunder_call_1
     pop rdi
     add rsp, 8
-    test edx, edx
+    test rax, rax               ; dunder_call_1 answers with a Value; 0 is the miss
     jnz .gan_by_name
     EXC_RAISED_SINCE r15, rcx, .gan_propagate
 
@@ -505,7 +504,7 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     SPUSH_PTR r8               ; args[0] = mgr
     mov rdi, rax               ; callable = __aenter__
     mov rsi, rsp               ; args ptr
-    mov rdx, 1                 ; nargs = 1
+    mov edx, 1                      ; nargs = 1
     call rcx
     V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16                ; pop fat arg

@@ -706,7 +706,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
-    cmp rax, 0
+    test rax, rax
     jl .fs_char_range
     cmp rax, 0x110000
     jae .fs_char_range
@@ -749,7 +749,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
     ; A precision truncates a string, and it counts characters: cutting at a
     ; byte offset would split a multi-byte one in half.
     mov rcx, [rbp - FS_PREC]
-    cmp rcx, 0
+    test rcx, rcx
     jl .fs_pad
     cmp rcx, [rax + PyStrObject.ob_length]
     jge .fs_pad
@@ -1108,7 +1108,7 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     mov r12, rax                        ; the value
 
     ; base and digit set from the type letter
-    mov r13, 10
+    mov r13d, 10
     mov rcx, [r14 - FS_TYPE]
     cmp rcx, 'b'
     je .fib_base2
@@ -1120,13 +1120,13 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     je .fib_base16
     jmp .fib_have_base
 .fib_base2:
-    mov r13, 2
+    mov r13d, 2
     jmp .fib_have_base
 .fib_base8:
-    mov r13, 8
+    mov r13d, 8
     jmp .fib_have_base
 .fib_base16:
-    mov r13, 16
+    mov r13d, 16
 .fib_have_base:
 
     mov qword [rbp - FIB_NEG], 0
@@ -1456,10 +1456,10 @@ DEF_FUNC_LOCAL format_group_body, FGB_FRAME
     ; `_` on a hex, octal or binary presentation groups every FOUR digits,
     ; which is how a machine word is read.  `,` is refused on those before it
     ; reaches here, so the separator itself need not be consulted.
-    mov rax, 3
+    mov eax, 3
     test rdx, rdx
     jz .fgb_have_gs
-    mov rax, 4
+    mov eax, 4
 .fgb_have_gs:
     mov [rbp - FGB_GS], rax
     mov [rbp - FGB_D], rdx      ; parked: whether the digits are hexadecimal
@@ -1710,7 +1710,7 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     test rax, rax
     jnz .ffb_build_spec
     mov rax, [r12 - FS_PREC]
-    cmp rax, 0
+    test rax, rax
     jge .ffb_empty_with_prec
     extern float_repr
     call float_repr             ; rdi = the raw bits, still
@@ -1797,7 +1797,7 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     mov rax, [r12 - FS_PREC]
     cmp rax, 1
     jge .ffb_ewp_have_p
-    mov rax, 1
+    mov eax, 1
 .ffb_ewp_have_p:
     mov [rbp - FFB_GPREC], rax
     dec rax
@@ -1987,7 +1987,7 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
 .ffb_emit_number:
     sub rsp, 8
     mov r8, rax
-    mov r9, 10
+    mov r9d, 10
     xor r10d, r10d
 .ffb_en_split:
     xor edx, edx
@@ -2023,7 +2023,7 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     mov ecx, 1
 .ffb_no_alt:
     mov rax, [r12 - FS_PREC]
-    cmp rax, 0
+    test rax, rax
     jge .ffb_have_prec
     ; e, f and g default to six digits; only a bare spec means repr.  Without
     ; this f"{1.5:f}" was "1.5" rather than "1.500000".
@@ -2043,7 +2043,7 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     cmp rdx, '%'
     jne .ffb_no_prec
 .ffb_default_prec:
-    mov rax, 6
+    mov eax, 6
 .ffb_have_prec:
     mov byte [rbx + rcx], '.'
     inc rcx
@@ -2054,7 +2054,7 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     ; to be all this could write, and rather than say so it silently used 999
     ; instead: format(1.0, ".5000f") came back one thousand places long.
     mov r8, rax
-    mov r9, 10
+    mov r9d, 10
     xor r10d, r10d                      ; digits on the machine stack
 .ffb_prec_split:
     xor edx, edx
@@ -2182,7 +2182,7 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     ; them zero.
     mov rcx, [rax + PyStrObject.ob_size]
     lea rsi, [rax + PyStrObject.data]
-    mov r8, 1                           ; skip the '-'
+    mov r8d, 1                      ; skip the '-'
 .ffb_z_scan:
     cmp r8, rcx
     jge .ffb_z_all_zero
@@ -2305,18 +2305,18 @@ DEF_FUNC_LOCAL format_complex_body, FCB_FRAME
     ; ---- build ".<prec><type>" ---------------------------------------------
     lea rbx, [rbp - FCB_SPEC]
     mov rax, [r12 - FS_PREC]
-    cmp rax, 0
+    test rax, rax
     jge .fcb_prec_given
-    mov rax, 6                          ; e E f F g G n all default to six
+    mov eax, 6                      ; e E f F g G n all default to six
 .fcb_prec_given:
     cmp rax, 999
     jle .fcb_prec_ok
-    mov rax, 999
+    mov eax, 999
 .fcb_prec_ok:
     mov byte [rbx], '.'
     mov ecx, 1
     xor r8d, r8d                        ; a digit has been emitted
-    mov r9, 100
+    mov r9d, 100
     xor edx, edx
     div r9                              ; rax = hundreds, rdx = rest
     test rax, rax
@@ -2328,7 +2328,7 @@ DEF_FUNC_LOCAL format_complex_body, FCB_FRAME
 .fcb_tens:
     mov rax, rdx
     xor edx, edx
-    mov r9, 10
+    mov r9d, 10
     div r9                              ; rax = tens, rdx = units
     mov r10, rdx
     test rax, rax

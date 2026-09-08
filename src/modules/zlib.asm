@@ -216,7 +216,7 @@ DEF_FUNC_LOCAL zc_append_i64, ZI_FRAME
     ; read.
     lea r10, [rbp - ZI_DIGITS]  ; one past the last digit
     mov r9, r10
-    mov rcx, 10
+    mov ecx, 10
 .zai_digit:
     xor edx, edx
     div rcx
@@ -324,7 +324,7 @@ DEF_FUNC zc_crc32, ZK_FRAME
     jne .zk_nargs
     push rdi
     sub rsp, 8
-    mov rsi, 1
+    mov esi, 1
     call zc_arg_int
     add rsp, 8
     pop rdi
@@ -342,7 +342,7 @@ DEF_FUNC zc_crc32, ZK_FRAME
     call crc32 wrt ..plt
 .zk_return:
     mov rdi, rax
-    and rdi, 0xffffffff         ; uLong in, an unsigned 32-bit answer out
+    mov edi, edi                    ; uLong in, an unsigned 32-bit answer out
     call int_from_i64
     leave
     V_PACK rax, rdx
@@ -364,7 +364,7 @@ DEF_FUNC zc_adler32, ZK_FRAME
     jne .za_nargs
     push rdi
     sub rsp, 8
-    mov rsi, 1
+    mov esi, 1
     call zc_arg_int
     add rsp, 8
     pop rdi
@@ -381,7 +381,7 @@ DEF_FUNC zc_adler32, ZK_FRAME
     mov rdx, [rbp - ZK_LEN]
     call adler32 wrt ..plt
     mov rdi, rax
-    and rdi, 0xffffffff
+    mov edi, edi                    ; zero-extend: same as and 0xffffffff
     call int_from_i64
     leave
     V_PACK rax, rdx
@@ -490,7 +490,7 @@ DEF_FUNC zc_stream_new, ZN_FRAME
 
     mov rdi, [rbp - ZN_H]
     call zc_handle_alloc
-    cmp rax, 0
+    test rax, rax
     jl .zn_table_failed
     mov rdi, rax
     call int_from_i64
@@ -548,7 +548,7 @@ DEF_FUNC_LOCAL zc_handle_alloc, 40
     mov rax, [rel zc_handle_cap]
     test rax, rax
     jnz .za_double
-    mov rax, 8
+    mov eax, 8
     jmp .za_grow
 .za_double:
     add rax, rax

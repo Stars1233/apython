@@ -202,7 +202,7 @@ DEF_FUNC sym_free_all, 8
     push r13
     mov rbx, rdi
     mov r13, [rbx + Comp.scopes + Buf.len]
-    mov r12, 1                          ; index 0 is the reserved blank
+    mov r12d, 1                     ; index 0 is the reserved blank
 .loop:
     cmp r12, r13
     jae .done

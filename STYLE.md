@@ -30,6 +30,8 @@ These run over **every** hand-written `.asm` in the tree:
 | No raw `[rbp +- N]`; frame slots carry named `equ` constants | `check_frame_offsets` | error |
 | Heavy separators are `;;` and 76 `=`, 79 columns | `check_separators` | error |
 | No hand-written .asm over 100k bytes | `check_file_size` | error |
+| `mov r, 0`, `cmp r, 0`, `mov r64, imm32`, `and r64, 0xffffffff` | `check_encoding` | error |
+| `V_PACK_I64` of a compile-time constant | `check_const_value` | error |
 | Every function has a docblock, with a `->` signature line | `check_docblocks` | ratchet |
 
 | `(frame + 8*pushes + a prologue's own `sub rsp`) % 16 == 0` in any function containing a `call` | `check_alignment` | error |
@@ -132,6 +134,63 @@ Repeat the register convention comment block at the top of every
 ; rbx has already been advanced past the 2-byte instruction word.
 ```
 
+## Inline Caches
+
+A specialized handler is installed by rewriting the opcode byte in the
+running bytecode buffer, and it deopts by writing the generic byte back.
+These are the rules that keep that from costing more than it saves.
+
+**Ask the question per NAME, not per class.**  `TYPE_FLAG_MRO_HAS_DATA_DESCR`
+answers "does anything in this MRO outrank the instance dict", which is what a
+class-creation-time scan can maintain -- but a site caches ONE name, and using
+the class-wide bit means a single `@property` refuses the cache for every
+other attribute of that class and of every subclass.  Ask
+`type_lookup_cached` for the name and hand the answer to
+`attr_may_be_data_descr`.  It is affordable because it is asked once, at
+install, and the type version the handler guards on is what keeps it true:
+adding a property to the class or to a base stamps a new one.
+
+Both `LOAD_ATTR` and `STORE_ATTR` do this.  The per-class flag survives only
+as a cheap pre-filter, where a clear bit is a real negative.
+
+**A deopt must back off.**  A site whose guard can never pass -- a
+`STORE_ATTR` in an `__init__`, whose object's dict is empty on the very store
+that installed the cache -- otherwise specializes and deopts on every single
+execution, writing its own instruction byte twice per iteration for a cache
+that will never answer.  Spend a counter in one of the opcode's CACHE words:
+the deopt sets it, the install site counts it down and refuses while it is
+non-zero.  CPython spells the same idea `ADAPTIVE_BACKOFF_*`.
+
+The condition is "cannot hit", not "deopts".  A POLYMORPHIC site is not this:
+a benchmark that walks twenty objects of one class and then twenty of another
+deopts once per run and hits nineteen times, and backing off there replaces
+those nineteen hits with generic lookups.  Backoff on `LOAD_ATTR` was measured
+and dropped for exactly that.  A hand-written strictly alternating loop DOES
+improve, which is the trap: measure on the macro suite.
+
+**Install where the work happens, and prove it fires.**  The generic handler
+has many exits and only one of them is the path being specialized; an install
+site placed on a neighbouring exit assembles, links, passes every test, and
+never runs.  Confirm with a breakpoint on the new handler that it is reached,
+and with a hit count on the generic one that it stops being.  A specialization
+that measures as no change at all is this, not a wrong estimate.
+
+**A handler may push a frame itself.**  `op_call_py_exact` shows the shape --
+`frame_new`, bind the arguments, `eval_frame`, `frame_free` -- and it is what
+lets `LOAD_ATTR_PROPERTY` run a getter without the descriptor protocol or the
+call machinery.  The guards that make it safe are the callee's own: exactly
+`func_type`, the parameter count matched, and none of `CO_VARARGS`,
+`CO_VARKEYWORDS`, `CO_GENERATOR`, `CO_COROUTINE` or `CO_ASYNC_GENERATOR`,
+because such a call returns with the frame still live and this frees it
+unconditionally.  Read those out of the code object at every hit rather than
+vetting them once: `f.__code__` can be assigned, and no type version covers a
+write to a function.
+
+**Testing one needs the same site twice.**  A fresh call site is cold and
+takes the generic path, so a test that builds a new one after changing the
+class proves nothing.  Put the access in a helper and call the helper before
+and after.
+
 ## Naming
 
 | Kind | Convention | Examples |
@@ -181,6 +240,29 @@ END_FUNC func_name
 | `DEF_FUNC_LOCAL name, N` | Same + `sub rsp, N` | ditto, with locals |
 
 `END_FUNC name` must name the same symbol, or the size expression fails to link.
+
+**Turning a `DEF_FUNC` into a `DEF_FUNC_BARE` is not a local edit.**  A leaf
+that pushes `rbp` and never uses it looks like free bytes, and sometimes is --
+but two things have to be true, and only one of them is visible inside the
+function:
+
+- **Nothing in the body may call.**  Not just `call`: `DECREF_V`, `VISIT_V`,
+  `VISIT_PTR`, `INT_NEED_MPZ`, `MRO_NEXT`, `V_PACK` and `V_PACK_I64` all
+  contain one.  A bare function is entered with `rsp % 16 == 8`, so a call
+  from inside one arrives misaligned -- the opposite of the `DEF_FUNC` case.
+  Every `tp_traverse` and `tp_clear` in the tree fails this test.
+- **Nothing *after* `END_FUNC` may jump back in.**  `src/marshal.asm`'s
+  `mread_*_eof` handlers sit outside the function they serve, `call
+  marshal_fail`, and end `leave` / `ret` -- they run on the frame the
+  prologue set up.  Deleting that prologue leaves a `leave` that pops garbage
+  into `rbp`, and lint sees none of it, because the `leave` is outside the
+  markers it scans between.  `make check` caught this one; nothing else would
+  have.
+
+There is also a cost, which is why the tree has not converted every leaf that
+qualifies: unwinding here is frame-pointer-only, so a `bt` taken *inside* a
+bare leaf loses the immediate caller.  Convert one when it is hot enough to
+pay for that, not merely because it can be.
 
 **A tail `jmp` to another global function is legal only from `DEF_FUNC_BARE`.**
 A `DEF_FUNC` has already pushed `rbp`; returning through the callee's
@@ -493,6 +575,7 @@ the macros that implement it, all in `src/include/value.inc`.
 | `V_TO_F64 v` | In place; caller must already know it is a float |
 | `V_FROM_I64 i, scratch, ovf_label` | Branches to `ovf_label`; **caller boxes** |
 | `V_TO_I64 v` | In place |
+| `V_INT(n)` | An **assemble-time** constant: the Value of a literal int, folded by NASM.  `mov rdx, V_INT(0)`.  Only for `n` inside +-2^50 |
 | `V_PACK_I64 i, scratch` | Boxes on overflow — **contains a call** |
 | `V_PACK pay, tag` | `(payload, tag)` -> Value; may reach `V_PACK_I64`'s call |
 | `V_UNPACK v, tag` | Value -> `(payload, tag)` |
@@ -506,9 +589,48 @@ packed by a tail `jmp` target, and a call site must not decode a result its
 callee already handed over as a Value — both show up as a value off by exactly
 2^48 or by `V_INT_BIAS`, not as a crash.
 
-`V_PACK`, `V_PACK_I64` and `VPUSH_VAL` clobber their second operand, which must
-not be `rax`.  `V_PACK` on a TAG_SMALLINT outside ±2^50 allocates; the reference
-it returns is owned.
+`V_PACK_I64` and `VPUSH_VAL` clobber their second operand, which must not be
+`rax`.  `V_PACK` clobbers its second operand too, but since the out-of-line
+change below it accepts `rax` there like any other register.  `V_PACK` on a
+TAG_SMALLINT outside ±2^50 allocates; the reference it returns is owned.
+
+### `V_PACK` and `V_UNPACK` are out of line
+
+Each of these used to expand in full at every site: 114 bytes for a `V_PACK`
+and about 124 for a `V_UNPACK`, at 1280 and 950 expansions — a ninth of the
+whole `.text` segment, most of it arms for tags the site never sees.  They now
+keep only the arms that are hot inline and `call` `val_pack_cold` /
+`val_unpack_cold` in `src/val.asm` for the rest.
+
+Three consequences worth knowing before touching either:
+
+- **Both macros now contain a `call`**, and both are in lint's `CALL_MACROS`.
+  A function containing one is subject to `check_alignment` — which it was
+  not before, because the old bodies reached `val_from_i64_p` only through
+  `V_PACK_I64`, and the regex anchors on the mnemonic.
+- **The helpers are correct at either `rsp` parity**, deliberately: a macro
+  cannot know the alignment of the site it expands at, and 728 `V_PACK` sites
+  sit after a `leave`, where it is the opposite of the usual.  They clobber
+  `rax` and `rdx` and nothing else, which is what lets the (rax, rdx) sites
+  call them with no register saves at all.  Keep both invariants if you edit
+  them; the docblocks say so too.
+- **Which arms stay inline was measured, not guessed.**  Sending the integer
+  arm out of line cost 4–5% on the int and macro suites — the regressions were
+  `i_divmod`, `i_neg`, `i_bitand`, the unspecialized integer operations that
+  go through the generic `BINARY_OP` — so it came back inline, written to
+  preserve the tag register (`V_FROM_I64` clobbers its scratch, and the
+  scratch here *is* the tag, which the overflow path still needs).
+
+`V_PACK_INLINE` / `V_UNPACK_INLINE` and `VPUSH_VAL_INLINE` / `VPOP_VAL_INLINE`
+keep the old fully-expanded bodies.  Reaching for one is a claim that the site
+was profiled; say what you measured in the commit that adds it.  Nothing in the
+tree needs one at present.
+
+`./apython --selftest-value` group 5 exercises every operand *shape* the
+shuffle macros support, and checks the thing that would otherwise fail
+silently: that `rax` survives a macro whose operands are not `rax`, and `rdx`
+one whose operands are not `rdx`.  A shape used at a single site in the tree is
+covered there and nowhere else — add a case when you add a shape.
 
 ## Refcounting Macros
 
@@ -540,6 +662,13 @@ all it saves is `rdi`; `DECREF_REG`, `DECREF_V`, `XDECREF_V`, `DECREF_VAL` and
 
 `INCREF_VAL` / `DECREF_VAL` / `XDECREF_VAL` are the `(payload, tag)` shims;
 prefer the `_V` forms in Value-native code.
+
+**A macro that loads its operand into a fixed register guards the move.**
+Every DECREF form, `VISIT_V`, `VISIT_PTR`, `V_PACK_I64` and `MRO_NEXT` end up
+doing `mov rdi, %1`, and at a great many sites `%1` already *is* `rdi` --
+which emitted 593 `mov rdi, rdi` in the linked binary before each was wrapped
+in `%ifnidni %1, rdi`.  `INT_NEED_MPZ` in `object.inc` has always done this;
+the rest now do too.  Write a new macro of this shape the same way.
 
 ## Other Macros
 
@@ -697,10 +826,69 @@ Prefer shorter encodings when semantically equivalent:
 |--------|------|-----|
 | `xor eax, eax` | `mov rax, 0` | 2 bytes vs 7, breaks dep chains |
 | `test eax, eax` | `test rax, rax` | 2 bytes vs 3 (when 32-bit safe) |
-| `test reg, reg` | `cmp reg, 0` | Shorter, same flags |
+| `test reg, reg` | `cmp reg, 0` | Shorter, **identical** flags |
+| `mov eax, 5` | `mov rax, 5` | 5 bytes vs 7; the 32-bit write zero-extends |
+| `mov edi, edi` | `and rdi, 0xffffffff` | 2 bytes vs 7, same zero-extend |
 | `movzx eax, byte [m]` | `movzx rax, byte [m]` | Shorter, same result |
 | `lea` | `shl` + `add` | No flags clobber, often fewer insns |
 | `inc` / `dec` | `add 1` / `sub 1` | 1 byte shorter (no partial-flag stall on Haswell+) |
+| `mov rdx, V_INT(0)` | `mov rdx, 0` + `V_PACK_I64` | One folded instruction vs about sixteen |
+
+The first four and the `V_INT` row are **enforced tree-wide** by
+`check_encoding` and `check_const_value`.  The tree was swept clean of all of
+them in one pass, so a new one is a regression rather than a debt.
+
+**The exception is flags, and it is a real one.**  `xor` and `lea` write or
+withhold flags where `mov`, `shl`+`add`, `add 1` and `sub 1` do not, so a
+shorter form is only equivalent where nothing reads the flags before something
+else rewrites them.  Three sites in the tree keep the long form for exactly
+that reason -- `mov r12d, 0` sitting between a `__gmpz_cmp_si` and its `jns`
+(`src/methods/num.asm`), and the two three-way `cmp` ladders in
+`src/pyo/float.asm` and `src/pyo/int.asm`.  Mark such a site
+`; lint: flags` with a note saying which flag is live, and `check_encoding`
+will accept it.  Do not mark one you have not checked: the failure is a branch
+silently inverted, not a build error.
+
+`inc`/`dec` differ from `add 1`/`sub 1` only in leaving CF alone, and `lea`
+differs from `shl`+`add` in writing no flags at all -- both are *more*
+flag-preserving than what they replace, so they can only break code that
+wanted the flags `add`/`shl` would have set.
+
+## SIMD
+
+The tree uses **SSE2 and nothing wider**.  SSE2 is part of the x86-64
+architecture, so there is no `cpuid`, no ifunc, no feature flag and no
+fallback path to keep in step — which is the whole reason to stop there.
+Anything above it (AVX, AVX2, BMI) would need detection machinery this tree
+has never had, for a win that shows up only on long inputs.
+
+Four rules, and the first two are correctness:
+
+- **`movdqu`, never `movdqa`.**  Heap data comes from `ap_malloc`, i.e. libc
+  `malloc`, and a `PyStrObject.data` sits at a fixed struct offset that is not
+  16-aligned.  `src/modules/zlib.asm` already records libz faulting on a
+  `movaps` for this reason.
+- **A vector arm runs only while a whole vector remains.**  `ap_memcmp` and
+  `ap_memchr` both promise in their headers never to read past the end of
+  their buffer, and `str_count_codepoints` runs on strings whose allocation
+  guarantees only 8 bytes of slack.  Loop while `len >= 16` and let the
+  existing scalar tail finish; do not reach for the align-down-and-mask idiom
+  to save a few bytes.
+- **Keep the scalar prologue for short inputs, and measure before removing
+  one.**  `ap_memchr` has a bounded byte prologue that predates SIMD; a first
+  pass at vectorising deleted it and `s.count("a")` — which calls the function
+  once per match, ten bytes apart — got 57% slower, because what that measures
+  is the fixed cost per *call* and a vector setup is four shuffles plus two
+  GPR/XMM domain crossings.
+- **`pmovmskb` is the whole answer for a high-bit test.**  It collects the top
+  bit of each byte, so an "is this ASCII" probe needs no mask constant at all.
+  Use `pcmpeqb` + `pmovmskb` when comparing against a byte, and `bsf` on the
+  resulting mask to find which lane.
+
+xmm registers are all caller-saved under SysV and no hand-written function in
+this tree holds one across a call, so using `xmm0`/`xmm1` in a leaf primitive
+*narrows* its clobber set rather than widening it.  That matters here: several
+of these functions document a clobber set their callers depend on.
 
 ## What to Avoid
 

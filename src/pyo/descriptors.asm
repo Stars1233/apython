@@ -10,6 +10,8 @@ extern str_type
 
 extern current_exception
 extern kw_names_pending
+extern descr_alloc
+extern prop_new_of
 extern ap_strcmp
 extern ap_malloc
 extern gc_alloc
@@ -31,22 +33,38 @@ extern method_new
 extern builtin_func_new
 
 ;; ============================================================================
-;; staticmethod_construct(PyObject *type, PyObject **args, int64_t nargs)
-;; tp_call for staticmethod_type. Creates a staticmethod wrapper.
-;; rdi = staticmethod_type (ignored), rsi = args, rdx = nargs
+;; staticmethod_construct(rdi = the class, rsi = args, rdx = nargs)
+;;   -> rax = the wrapper, edx = TAG_PTR
+;;
+;; tp_new for staticmethod_type.  The class is NOT always staticmethod: see
+;; descr_alloc above.
 ;; ============================================================================
 DEF_FUNC staticmethod_construct, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
+    ; A SUBCLASS's arguments belong to its __init__, and CPython's __new__
+    ; ignores what it cannot use rather than refusing them: `class Named(staticmethod)`
+    ; taking (f, label) reaches this first.  The exact type is strict, because
+    ; nothing runs __init__ after it -- type_call's builtin shortcut is tp_new
+    ; and nothing else.
+    lea rax, [rel staticmethod_type]
+    cmp rdi, rax
+    je .sm_exact
+    xor ebx, ebx
+    test rdx, rdx
+    jz .sm_have
+    mov rbx, [rsi]
+    jmp .sm_have
+.sm_exact:
     cmp rdx, 1
     jne .sm_error
-
     mov rbx, [rsi]              ; rbx = func (args[0])
+.sm_have:
 
-    ; Allocate wrapper (GC-tracked)
-    mov edi, PyStaticMethodObject_size
+    ; rdi is still the class this was called on; nothing above touches it.
     lea rsi, [rel staticmethod_type]
-    call gc_alloc
+    mov edx, PyStaticMethodObject_size
+    call descr_alloc
     ; ob_refcnt=1, ob_type set
     mov [rax + PyStaticMethodObject.sm_callable], rbx
 
@@ -130,23 +148,39 @@ DEF_FUNC staticmethod_call, 8            ; 1 pushes, so rsp is 16-aligned
 END_FUNC staticmethod_call
 
 ;; ============================================================================
-;; classmethod_construct(PyObject *type, PyObject **args, int64_t nargs)
-;; tp_call for classmethod_type. Creates a classmethod wrapper.
-;; rdi = classmethod_type (ignored), rsi = args, rdx = nargs
+;; classmethod_construct(rdi = the class, rsi = args, rdx = nargs)
+;;   -> rax = the wrapper, edx = TAG_PTR
+;;
+;; tp_new for classmethod_type.  The class is NOT always classmethod: see
+;; descr_alloc above.
 ;; ============================================================================
 global classmethod_construct
 DEF_FUNC classmethod_construct, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
 
+    ; A SUBCLASS's arguments belong to its __init__, and CPython's __new__
+    ; ignores what it cannot use rather than refusing them: `class Named(classmethod)`
+    ; taking (f, label) reaches this first.  The exact type is strict, because
+    ; nothing runs __init__ after it -- type_call's builtin shortcut is tp_new
+    ; and nothing else.
+    lea rax, [rel classmethod_type]
+    cmp rdi, rax
+    je .cm_exact
+    xor ebx, ebx
+    test rdx, rdx
+    jz .cm_have
+    mov rbx, [rsi]
+    jmp .cm_have
+.cm_exact:
     cmp rdx, 1
     jne .cm_error
-
     mov rbx, [rsi]              ; rbx = func (args[0])
+.cm_have:
 
-    ; Allocate wrapper (GC-tracked)
-    mov edi, PyClassMethodObject_size
+    ; rdi is still the class this was called on; nothing above touches it.
     lea rsi, [rel classmethod_type]
-    call gc_alloc
+    mov edx, PyClassMethodObject_size
+    call descr_alloc
     ; ob_refcnt=1, ob_type set
     mov [rax + PyClassMethodObject.cm_callable], rbx
 
@@ -191,12 +225,20 @@ DEF_FUNC_LOCAL classmethod_dealloc, 8            ; 1 pushes, so rsp is 16-aligne
 END_FUNC classmethod_dealloc
 
 ;; ============================================================================
-;; property_construct(PyObject *type, PyObject **args, int64_t nargs)
-;; tp_call for property_type. Creates a property descriptor.
-;; property(fget) or property(fget, fset) or property(fget, fset, fdel)
-;; rdi = property_type (ignored), rsi = args, rdx = nargs
+;; property_construct(rdi = the class, rsi = args, rdx = nargs)
+;;   -> rax = the property, edx = TAG_PTR
+;;
+;; tp_new for property_type: property(fget), property(fget, fset), or with
+;; fdel and doc.  The class is NOT always property -- see descr_alloc above --
+;; and unlike the other two this one makes calls before it allocates, so the
+;; class goes in a frame slot rather than staying in rdi.
 ;; ============================================================================
-DEF_FUNC property_construct
+PC_CLS   equ 8
+PC_FRAME equ 16                 ; 16 + 4 pushes keeps rsp 16-aligned, and the
+                                ; four collected arguments pushed below it
+                                ; keep the parity
+DEF_FUNC property_construct, PC_FRAME
+    mov [rbp - PC_CLS], rdi
     push rbx
     push r12
     push r13
@@ -214,6 +256,18 @@ DEF_FUNC property_construct
     push qword 0                ; [rsp + 16] = fdel
     push qword 0                ; [rsp +  8] = fset
     push qword 0                ; [rsp     ] = fget
+
+    ; A SUBCLASS's arguments belong to its __init__, exactly as they do for
+    ; staticmethod and classmethod above -- and here it is not only leniency
+    ; about how many: `class Named(property)` taking (fget, label) hit the
+    ; keyword loop and was told property() has no argument called label.  So
+    ; the four slots are left empty and the parse happens once, in
+    ; property_method_init, which every subclass reaches because property's
+    ; own __init__ is on the MRO.
+    mov rax, [rbp - PC_CLS]
+    lea rcx, [rel property_type]
+    cmp rax, rcx
+    jne .pc_pos_done
 
     mov rax, [rel kw_names_pending]
     test rax, rax
@@ -330,9 +384,10 @@ DEF_FUNC property_construct
     xor r14d, r14d
 .pc_set_ok:
 
-    mov edi, PyPropertyObject_size
+    mov rdi, [rbp - PC_CLS]
     lea rsi, [rel property_type]
-    call gc_alloc
+    mov edx, PyPropertyObject_size
+    call descr_alloc
     mov rbx, rax                ; rbx = new property (ob_refcnt=1, ob_type set)
     mov [rbx + PyPropertyObject.prop_get], r13
     mov [rbx + PyPropertyObject.prop_set], r14
@@ -797,7 +852,10 @@ DEF_FUNC _prop_setter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     mov rax, [r8 + PyPropertyObject.prop_del]
     mov [rsp + 16], rax         ; args[2] = fdel
 
-    xor edi, edi                ; type (ignored)
+    ; The new property is an instance of the OLD one's class, not of property:
+    ; `@Cached.setter` on a property subclass must still hand back a Cached.
+    ; CPython's property_copy takes Py_TYPE(old) for the same reason.
+    mov rdi, [r8 + PyObject.ob_type]
     mov rsi, rsp                ; args
     mov edx, 3                  ; nargs
     ; Check if fdel is NULL — if so, pass 2 args
@@ -805,8 +863,9 @@ DEF_FUNC _prop_setter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     jne .psi_call
     mov edx, 2
 .psi_call:
-    call property_construct
+    call prop_new_of
     add rsp, 32
+    mov edx, TAG_PTR
 
     pop rbx
     leave
@@ -838,7 +897,7 @@ DEF_FUNC _prop_getter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     mov rax, [r8 + PyPropertyObject.prop_del]
     mov [rsp + 16], rax         ; args[2] = fdel
 
-    xor edi, edi
+    mov rdi, [r8 + PyObject.ob_type]   ; the old property's class, not property
     mov rsi, rsp
     mov edx, 3
     cmp qword [rsp + 16], 0
@@ -848,8 +907,9 @@ DEF_FUNC _prop_getter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     jne .pgi_call
     mov edx, 1
 .pgi_call:
-    call property_construct
+    call prop_new_of
     add rsp, 32
+    mov edx, TAG_PTR
 
     pop rbx
     leave
@@ -881,11 +941,12 @@ DEF_FUNC _prop_deleter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     mov [rsp + 8], rax          ; args[1] = fset
     mov [rsp + 16], r9          ; args[2] = new fdel
 
-    xor edi, edi
+    mov rdi, [r8 + PyObject.ob_type]   ; the old property's class, not property
     mov rsi, rsp
     mov edx, 3
-    call property_construct
+    call prop_new_of
     add rsp, 32
+    mov edx, TAG_PTR
 
     pop rbx
     leave
@@ -1691,7 +1752,7 @@ DEF_FUNC_LOCAL getset_check_receiver, GCR_FRAME
     ; tail, so the joining word is passed in.
     lea rdi, [rel gcr_open]
     mov rsi, [rbp - GCR_DESC]
-    mov rdx, 1                  ; "for", not "of"
+    mov edx, 1                      ; "for", not "of"
     call getset_descr_compose
     mov rdi, rax
     lea rsi, [rel gcr_mid]
@@ -3085,7 +3146,7 @@ DEF_FUNC generic_alias_richcompare, GRC_FRAME
     mov edx, PY_EQ
     extern obj_richcompare_bool
     call obj_richcompare_bool
-    cmp eax, 0
+    test eax, eax
     jl .grc_raised
     test eax, eax
     jz .grc_false
@@ -3096,7 +3157,7 @@ DEF_FUNC generic_alias_richcompare, GRC_FRAME
     mov rsi, [rsi + PyGenericAliasObject.ga_args]
     mov edx, PY_EQ
     call obj_richcompare_bool
-    cmp eax, 0
+    test eax, eax
     jl .grc_raised
     test eax, eax
     jz .grc_false

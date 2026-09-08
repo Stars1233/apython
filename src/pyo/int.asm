@@ -1208,7 +1208,7 @@ DEF_FUNC_BARE int_repr
     mov byte [rsi], 0          ; null terminator
     dec rsi
 
-    mov r8, 10
+    mov r8d, 10
 .si_digit_loop:
     xor edx, edx
     div r8                     ; rax = quotient, rdx = remainder
@@ -2271,7 +2271,7 @@ DEF_FUNC int_compare
     mov rcx, r13
     cmp rax, rcx
     ; Set r12d to cmp-style result: -1, 0, or 1
-    mov r12d, 0
+    mov r12d, 0                         ; lint: flags -- xor would clobber the compare
     jz .dispatch_op
     mov r12d, -1
     jl .dispatch_op
@@ -3065,7 +3065,7 @@ DEF_FUNC int_power, IPW_FRAME
     cmp r13, 64
     jae .pow_wide          ; any base but 0 and +-1 overflows well before this,
                            ; and GMP settles those three quickly
-    mov rax, 1             ; result
+    mov eax, 1                      ; result
     mov rsi, rbx           ; b, the running square
     mov rdi, r13           ; e, the remaining exponent
 .pow_loop:
@@ -3322,8 +3322,7 @@ END_FUNC int_get_imag
 ;; int_get_denominator(rdi = self Value) -> rax = Value.  Always 1.
 ;; ============================================================================
 DEF_FUNC int_get_denominator
-    mov eax, 1
-    V_PACK_I64 rax, rcx
+    mov rax, V_INT(1)
     leave
     ret
 END_FUNC int_get_denominator
@@ -3489,5 +3488,10 @@ int_type:
 section .bss
 ;; The free list int_alloc_raw pops from and int_dealloc pushes onto.  A block
 ;; on it is dead: its refcount word holds the link to the next one.
+;;
+;; align 8 because a `resd 1` earlier in this file's .bss (type_version_counter)
+;; had left both of these at `addr % 8 == 4`, so every push and pop of the free
+;; list was an unaligned qword access four bytes from a line split.
+align 8
 int_freelist:       resq 1
 int_freelist_count: resq 1

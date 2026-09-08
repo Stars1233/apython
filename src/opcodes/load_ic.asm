@@ -9,6 +9,7 @@
 ;   203  LOAD_ATTR_METHOD       a method reached through the type dict
 ;   204  LOAD_ATTR_INSTANCE     a plain attribute reached through the instance
 ;   240  STORE_ATTR_INSTANCE    a plain attribute written through the instance
+;   242  LOAD_ATTR_PROPERTY     a @property, whose getter runs without a call
 ;
 ; Split out of load.asm, which keeps the generic handlers, the attribute
 ; protocol and the error messages, because that file had reached lint's 100k
@@ -36,9 +37,18 @@ extern eval_saved_r13
 extern opcode_dispatch_table
 extern eval_co_names
 extern obj_dealloc
+extern obj_decref
 extern op_load_attr
 extern op_load_global
 extern op_store_attr
+
+extern func_type
+extern frame_new
+extern frame_free
+extern eval_frame
+extern eval_exception_unwind
+extern builtins_dict_global
+extern attr_error_pending
 
 section .text
 
@@ -307,9 +317,9 @@ END_FUNC op_load_attr_method
 ;; difference here rather than anywhere in the call machinery.
 ;;
 ;; CACHE, 18 bytes, the same budget the method cache spends:
-;;     [+0]   the type, 8 bytes
-;;     [+8]   the class dict's version, 2 bytes
-;;     [+10]  the dense index into the instance dict's entry array, 2 bytes
+;;     [+0]   the type's version, 4 bytes
+;;     [+4]   the dense index into the instance dict's entry array, 2 bytes
+;;     [+6]   spare
 ;;
 ;; The NAME is not cached.  It is taken from co_names at hit time, which costs
 ;; one load and leaves room for the version.
@@ -328,10 +338,12 @@ END_FUNC op_load_attr_method
 ;; execution when the two names were different objects.  See
 ;; src/pyo/strintern.asm.
 ;;
-;; The two type flags are read LIVE rather than guarded by a version.  They
-;; are maintained by type_refresh_attr_flags, which updates them in place, so
-;; adding a __getattribute__ or a property to the class -- or to a base --
-;; does not change the type POINTER that guard 1 compares.
+;; One version compare stands in for the three guards this used to make.  It
+;; pins the type -- a freed class cannot be matched by a new one at the same
+;; address, because versions come from a single counter -- and it pins
+;; everything the install site checked about the MRO, because all of that moves
+;; only through type_refresh_attr_flags, which stamps a new version and stamps
+;; it down every subclass.
 ;; ============================================================================
 DEF_FUNC_BARE op_load_attr_instance
     ; ecx is the oparg and MUST survive to .lai_deopt, which hands it to
@@ -423,6 +435,174 @@ DEF_FUNC_BARE op_load_attr_instance
     jmp op_load_attr
 END_FUNC op_load_attr_instance
 
+
+;; ============================================================================
+;; op_load_attr_property (242) -> nothing; replaces TOS with the getter's result
+;;
+;; `self.scale` where scale is a @property.  The generic handler reaches the
+;; getter through op_load_attr's whole prologue, instance_getattr,
+;; instance_getattr_where, the descriptor protocol, property_descr_get and
+;; obj_call_n -- and then obj_call_n builds the frame the ordinary call path
+;; builds.  Decomposing m_oo put the entire remaining gap here: a method whose
+;; body reads one property cost 45.8ms against CPython's 34.8, where the same
+;; body reading a plain attribute instead cost 19.4 against 28.1.  Per access
+;; that is about 33ns against CPython's 8.
+;;
+;; So this does what CPython's LOAD_ATTR_PROPERTY does: guard, then push the
+;; getter's frame directly, the way op_call_py_exact pushes a call's.  What is
+;; NOT taken is the same thing op_call_py_exact leaves alone -- eval_frame and
+;; the frame allocation.
+;;
+;; CACHE, 18 bytes:
+;;     [+0]   the type's version, 4 bytes
+;;     [+4]   the getter, 8 bytes -- a borrowed pointer, as 203's descriptor is
+;;     [+12]  spare
+;;
+;; The version pins the property: a property object cannot be mutated (its
+;; tp_setattr takes __doc__ and nothing else) and rebinding the class attribute
+;; goes through type_setattr, which stamps a new version and stamps it down
+;; every subclass.  So the getter needs no guard of its own -- except that a
+;; FUNCTION can be given a different __code__, which is why the code object is
+;; read at every hit rather than vetted once.
+;;
+;; Only flag=0 sites install: a method-style load of a property would have to
+;; push [NULL, value], and `obj.prop()` is not a shape worth a second layout.
+;;
+;; A getter that is not a plain one-parameter Python function -- a lambda with
+;; a default, a builtin, a generator -- deopts and takes the road it took
+;; before this existed.
+;; ============================================================================
+LAP_OBJ   equ 8
+LAP_RET   equ 16
+LAP_ARG   equ 24                ; the oparg, which frame_new's rcx destroys
+LAP_FN    equ 32                ; the getter, held across its own frame
+LAP_FRAME equ 40                ; a handler is entered with rsp 16-aligned, so
+                                ; push rbp + 40 brings it back to aligned
+
+DEF_FUNC op_load_attr_property, LAP_FRAME
+    ; ecx is the oparg and must survive to .lap_deopt, which hands it to
+    ; op_load_attr, so nothing before the last guard touches rcx.
+    VPEEK rdi                       ; the object; not popped until it is a hit
+    V_TEST_PTR rdi, rax
+    ja .lap_deopt
+
+    ; Guard 1: the class, in the state the install site vetted it in.  It pins
+    ; the property the cached getter came out of, and everything the install
+    ; checked about the MRO -- all of that moves only through
+    ; type_refresh_attr_flags, which stamps a new version down every subclass.
+    mov rax, [rdi + PyObject.ob_type]
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    shr rdx, TYPE_VERSION_SHIFT
+    cmp edx, dword [rbx]            ; CACHE[+0] = the type's version
+    jne .lap_deopt
+
+    ; Guard 2: the getter is still a shape this can run inline -- a plain
+    ; Python function of exactly one parameter that does not suspend.  The
+    ; property is pinned above, but `fget.__code__ = ...` is a write to the
+    ; FUNCTION, which no version covers, so the code object is read here.
+    mov rsi, [rbx + 4]              ; CACHE[+4] = the getter
+    lea rax, [rel func_type]
+    cmp [rsi + PyObject.ob_type], rax
+    jne .lap_deopt
+    mov rax, [rsi + PyFuncObject.func_code]
+    cmp dword [rax + PyCodeObject.co_argcount], 1
+    jne .lap_deopt
+    cmp dword [rax + PyCodeObject.co_kwonlyargcount], 0
+    jne .lap_deopt
+    test dword [rax + PyCodeObject.co_flags], \
+         CO_VARARGS | CO_VARKEYWORDS | CO_GENERATOR | CO_COROUTINE | \
+         CO_ASYNC_GENERATOR
+    jnz .lap_deopt
+
+    ; Past the last guard, so rcx is free -- but the name is still wanted on
+    ; the error path below, and by then frame_new will have had rcx.
+    mov [rbp - LAP_OBJ], rdi
+    mov [rbp - LAP_ARG], rcx
+
+    ; The cached getter is BORROWED -- pinned by the type version, which is
+    ; enough right up until the getter deletes itself: `del type(self).v`
+    ; inside one drops the property, which drops the function whose code this
+    ; frame is about to run.  op_call_py_exact has the callable's stack
+    ; reference for the same window; this has none, so it takes one.
+    ; CPython's _PyFrame_PushUnspecialized does the same.
+    mov [rbp - LAP_FN], rsi
+    INCREF rsi
+
+    ; frame_new(code, globals, builtins, locals = NULL), as op_call_py_exact.
+    mov rdi, rax
+    mov rsi, [rsi + PyFuncObject.func_globals]
+    mov rdx, [rel builtins_dict_global]
+    xor ecx, ecx
+    call frame_new
+    mov r15, rax                    ; the register convention leaves r15 free,
+                                    ; and eval_frame preserves it
+    mov rcx, [rbx + 4]
+    mov [r15 + PyFrame.func_obj], rcx
+
+    ; The getter's one parameter is the object.
+    mov rdx, [rbp - LAP_OBJ]
+    INCREF_V rdx, rcx
+    mov [r15 + PyFrame.localsplus], rdx
+
+    mov rdi, r15
+    call eval_frame
+    mov [rbp - LAP_RET], rax
+    mov rdi, r15
+    call frame_free
+    mov rdi, [rbp - LAP_FN]
+    call obj_decref
+
+    mov rax, [rbp - LAP_RET]
+    test rax, rax
+    jnz .lap_have
+
+    ; The getter raised.  An AttributeError out of one is the attribute saying
+    ; it is absent, not a failure, and __getattr__ is the hook for exactly
+    ; that -- the generic handler asks the same question at .la_prop_call.
+    mov rdi, [rbp - LAP_OBJ]
+    mov esi, [rbp - LAP_ARG]
+    shr esi, 1                      ; the arg is (name index << 1 | flag)
+    shl esi, 3
+    LOAD_CO_NAMES rcx
+    mov rsi, [rcx + rsi]
+    extern attr_getattr_hook
+    call attr_getattr_hook          ; -> (rax, edx); edx = 0 leaves it pending
+    V_PACK rax, rdx
+    test rax, rax
+    jz .lap_propagate
+.lap_have:
+
+    ; attr_error_pending says a __getattr__ raised an AttributeError that
+    ; raise_no_attribute should hand over rather than replace, and every
+    ; ordinary lookup clears it.  This is a lookup.
+    mov qword [rel attr_error_pending], 0
+
+    mov rdi, [rbp - LAP_OBJ]
+    mov [r13 - 8], rax              ; the result replaces the object
+    DECREF_V rdi, rdx               ; whose stack reference is now spent
+    add rbx, 18                     ; skip 9 CACHE entries
+    leave
+    DISPATCH
+
+.lap_propagate:
+    ; The getter raised.  The object goes, as op_call_py_exact releases its
+    ; arguments before propagating, and rbx is not advanced: the unwinder
+    ; reads the current IP from eval_saved_rbx, which DISPATCH set.
+    mov rdi, [rbp - LAP_OBJ]
+    DECREF_V rdi, rdx
+    sub r13, 8
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
+
+.lap_deopt:
+    ; LOAD_ATTR's arg is (name index << 1 | flag) and carries an EXTENDED_ARG
+    ; as soon as a module has enough names, so this jumps with ecx rather than
+    ; rewinding rbx.  Nothing has been popped.
+    mov byte [rbx - 2], 106
+    leave
+    jmp op_load_attr
+END_FUNC op_load_attr_property
 
 ;; ============================================================================
 ;; op_store_attr_instance (240) -> nothing; stores and pops both operands
@@ -541,6 +721,14 @@ DEF_FUNC_BARE op_store_attr_instance
     ; STORE_ATTR's arg is a name index and carries an EXTENDED_ARG as soon as a
     ; module has enough names, so the deopt jumps with ecx rather than
     ; rewinding rbx.  Nothing has been popped.
+    ;
+    ; Ask the install site not to try again for a while.  A STORE_ATTR in an
+    ; __init__ can never hit this cache on the object it just built -- guard 2
+    ; wants the cached index inside dk_nentries and a fresh instance's dict has
+    ; none -- so without the backoff the site specialized on every store and
+    ; deoptimized on the next, writing its own instruction byte twice per
+    ; constructed object for the life of the program.
+    mov word [rbx + 6], 63          ; STS_BACKOFF_N, in src/opcodes/load.asm
     mov byte [rbx - 2], OP_STORE_ATTR
     jmp op_store_attr
 END_FUNC op_store_attr_instance

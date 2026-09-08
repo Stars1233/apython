@@ -276,7 +276,7 @@ DEF_FUNC cg_unwind_finallys, UF_FRAME
 .no_swap:
     mov rdi, rbx
     mov rsi, r12
-    mov rdx, 0
+    xor edx, edx
     mov rcx, [rbp - UF_ASYNC]
     call cg_call_exit_none
     test eax, eax
@@ -1089,7 +1089,7 @@ DEF_FUNC cg_s_with, CW_FRAME
     mov qword [rbp - CW_I], 0
     mov rdi, rbx
     mov rsi, r13
-    mov rdx, 0
+    xor edx, edx
     call cg_with_item
     jmp .ret
 .ret:

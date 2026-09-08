@@ -105,14 +105,33 @@ END_FUNC str_cp_width
 ;; *establishes* ob_length, which is the one that cannot assume it.
 ;; ============================================================================
 DEF_FUNC str_count_codepoints
-    push rbx
-    push r12
-    push r13
-    push r14
-
     ; --- ASCII probe: no high bit anywhere means one code point per byte ---
+    ;
+    ; Sixteen bytes at a time: pmovmskb IS this test -- it collects exactly
+    ; the high bit of each byte -- so the whole probe is a load, a move and a
+    ; branch per vector, against five instructions per eight bytes before.
+    ; The vector arm runs only while sixteen bytes remain, so it cannot read
+    ; past the end of the string.
+    ;
+    ; The four callee-saved pushes moved to .walk_setup, which is the only arm
+    ; that needs them.  This function runs on EVERY string creation, and the
+    ; overwhelming majority of those are ASCII and take the exit below: they
+    ; now save and restore nothing at all.
     mov rax, rdi
     mov rcx, rsi
+    cmp rcx, 16
+    jb .ascii_word_setup
+.ascii_vec:
+    movdqu xmm0, [rax]
+    pmovmskb edx, xmm0              ; one bit per byte, from its high bit
+    test edx, edx
+    jnz .walk_setup
+    add rax, 16
+    sub rcx, 16
+    cmp rcx, 16
+    jae .ascii_vec
+
+.ascii_word_setup:
     mov rdx, 0x8080808080808080
 .ascii_word:
     cmp rcx, 8
@@ -132,14 +151,16 @@ DEF_FUNC str_count_codepoints
     jmp .ascii_tail
 .all_ascii:
     mov rax, rsi                    ; one code point per byte
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
     leave
     ret
 
 .walk_setup:
+    ; Not ASCII: walk it properly, from the start.  Four pushes, so rsp stays
+    ; 16-aligned for the str_cp_width calls below.
+    push rbx
+    push r12
+    push r13
+    push r14
     mov rbx, rdi
     mov r12, rsi
     xor r13d, r13d                  ; byte cursor
@@ -1907,7 +1928,7 @@ DEF_FUNC str_getitem, 8            ; 3 pushes, so rsp is 16-aligned
     ; Bounds check
     cmp r12, [rbx + PyStrObject.ob_length]
     jge .index_error
-    cmp r12, 0
+    test r12, r12
     jl .index_error
 
     ; Where the code point starts, and how many bytes it occupies.

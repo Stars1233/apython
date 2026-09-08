@@ -1551,8 +1551,7 @@ DEF_FUNC builtin_range, 8            ; 3 pushes, so rsp is 16-aligned
     mov rsi, rax
     xor edi, edi
     V_PACK_I64 rdi, rdx        ; start = 0
-    mov edx, 1
-    V_PACK_I64 rdx, rcx        ; step = 1
+    mov rdx, V_INT(1)           ; step = 1
     call range_new_v
     jmp .range_done
 
@@ -1565,8 +1564,7 @@ DEF_FUNC builtin_range, 8            ; 3 pushes, so rsp is 16-aligned
     call range_arg_value
     mov rsi, rax               ; stop
     mov rdi, r13               ; start
-    mov edx, 1
-    V_PACK_I64 rdx, rcx        ; step = 1
+    mov rdx, V_INT(1)           ; step = 1
     call range_new_v
     jmp .range_done
 
@@ -1636,7 +1634,7 @@ END_FUNC builtin_repr
 ;; ============================================================================
 DEF_FUNC builtin_bool
 
-    cmp rsi, 0
+    test rsi, rsi
     je .bool_no_args
     cmp rsi, 1
     jne .bool_error
@@ -1685,7 +1683,7 @@ BF_XLEN   equ 40            ; and the length of what is being parsed
 BF_FRAME equ 48             ; + 0 pushes = 48
 DEF_FUNC builtin_float, BF_FRAME
 
-    cmp rsi, 0
+    test rsi, rsi
     je .float_no_args
     cmp rsi, 1
     jne .float_error

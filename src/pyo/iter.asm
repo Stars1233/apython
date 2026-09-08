@@ -588,8 +588,7 @@ DEF_FUNC range_longiter_next, RLIN_FRAME
 
     ; len -= 1
     mov rdi, [rbx + PyLongRangeIterObject.it_len]
-    mov eax, 1
-    V_PACK_I64 rax, rcx
+    mov rax, V_INT(1)
     mov rsi, rax
     mov edx, NB_SUBTRACT
     call range_binop
@@ -763,7 +762,7 @@ DEF_FUNC range_obj_sq_item
     add r12, rax               ; index += length
 .pos_idx:
     ; Bounds check
-    cmp r12, 0
+    test r12, r12
     jl .index_error
     cmp r12, rax
     jge .index_error
@@ -962,8 +961,7 @@ DEF_FUNC range_obj_reversed, RREV_FRAME
     mov [rbp - RREV_LEN], rax
 
     ; last = start + (len - 1) * step
-    mov eax, 1
-    V_PACK_I64 rax, rcx
+    mov rax, V_INT(1)
     mov rsi, rax
     mov rdi, [rbp - RREV_LEN]
     mov edx, NB_SUBTRACT
@@ -1183,7 +1181,7 @@ DEF_FUNC range_obj_hash, ROH_FRAME
     call range_obj_sq_length
     mov rcx, rax                ; the length
 
-    mov rax, 0x345678
+    mov eax, 0x345678
     imul rax, 1000003
     xor rax, rcx
     test rcx, rcx
@@ -1210,7 +1208,7 @@ DEF_FUNC range_obj_hash, ROH_FRAME
     call obj_hash
     mov rcx, rax
 
-    mov rax, 0x345678
+    mov eax, 0x345678
     imul rax, 1000003
     xor rax, rcx
     mov [rbp - ROH_ACC], rax
@@ -1232,8 +1230,7 @@ DEF_FUNC range_obj_hash, ROH_FRAME
     xor rax, rcx
     mov [rbp - ROH_ACC], rax
 
-    mov eax, 1
-    V_PACK_I64 rax, rcx
+    mov rax, V_INT(1)
     mov rdi, [rbp - ROH_LEN]
     mov rsi, rax
     mov edx, PY_EQ
@@ -1982,8 +1979,7 @@ DEF_FUNC_LOCAL range_wide_eq, RWE_FRAME
     js .rwe_err
     jz .rwe_no
 
-    mov eax, 1
-    V_PACK_I64 rax, rcx
+    mov rax, V_INT(1)
     mov rdi, [rbp - RWE_LA]
     mov rsi, rax
     mov edx, PY_EQ
@@ -2202,8 +2198,7 @@ DEF_FUNC_LOCAL range_wide_slice, RWS_FRAME
     mov rdi, [rsi + PySliceObject.step]
     IS_NONE rdi, rax
     jne .rws_step_given
-    mov eax, 1
-    V_PACK_I64 rax, rcx
+    mov rax, V_INT(1)
     mov rdi, rax
 .rws_step_given:
     V_UNPACK rdi, rdx
@@ -2288,12 +2283,10 @@ DEF_FUNC_LOCAL range_wide_slice, RWS_FRAME
     test r8, r8
     jz .rws_forward
     ; lower = -1, upper = len - 1
-    mov rax, -1                 ; the 32-bit form zero-extends
-    V_PACK_I64 rax, rcx
+    mov rax, V_INT(-1)          ; the 32-bit form zero-extends
     mov rdx, rax
     mov rdi, [rbp - RWS_LEN]
-    mov eax, 1
-    V_PACK_I64 rax, rcx
+    mov rax, V_INT(1)
     mov rsi, rax
     push rdx
     push rdx
@@ -2424,8 +2417,7 @@ DEF_FUNC_LOCAL range_repr_wide, RRW_FRAME
     ; The step is printed only when it is not 1, as the narrow repr does.
     mov rdi, [rbp - RRW_SELF]
     mov rax, [rdi + PyRangeObject.vstep]
-    mov ecx, 1
-    V_PACK_I64 rcx, rdx
+    mov rcx, V_INT(1)
     cmp rax, rcx
     je .rrw_sized
     mov rdi, rax
@@ -2658,7 +2650,7 @@ DEF_FUNC range_obj_repr, ROR_FRAME
     mov rax, rbx
 .ror_fi_loop:
     xor edx, edx
-    mov rcx, 10
+    mov ecx, 10
     div rcx                    ; rax = quotient, rdx = remainder
     add dl, '0'
     mov [rdi + r8], dl

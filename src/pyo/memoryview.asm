@@ -706,7 +706,7 @@ DEF_FUNC memoryview_method_toreadonly, MVM_FRAME
     mov rdi, [rbp - MVM_SELF]
     mov rsi, rdi
     lea rdi, [rel memoryview_type]
-    mov rdx, 1                  ; nargs
+    mov edx, 1                      ; nargs
     lea rsi, [rbp - MVM_SELF]
     call memoryview_type_call
     V_UNPACK rax, rdx
@@ -1224,7 +1224,7 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     jns .ms_check_bounds
     add rsi, rcx
 .ms_check_bounds:
-    cmp rsi, 0
+    test rsi, rsi
     jl .ms_index_error
     cmp rsi, rcx
     jge .ms_index_error
@@ -1325,7 +1325,7 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     jns .ma_bounds
     add rsi, rcx
 .ma_bounds:
-    cmp rsi, 0
+    test rsi, rsi
     jl .ma_index_error
     cmp rsi, rcx
     jge .ma_index_error
@@ -1339,7 +1339,7 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     mov rdi, [rbp - MA_VAL]
     V_UNPACK rdi, rdx
     call obj_as_index
-    cmp rax, 0
+    test rax, rax
     jl .ma_value_range
     cmp rax, 255
     jg .ma_value_range

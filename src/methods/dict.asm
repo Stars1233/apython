@@ -404,7 +404,7 @@ DEF_FUNC dict_method_update, DU_FRAME
 
     xor esi, esi
     mov rdi, [rbp - DU_PAIR]
-    mov edx, 0
+    xor edx, edx
     call obj_call_n
     mov r14, rax
     mov rdi, [rbp - DU_PAIR]
@@ -841,7 +841,7 @@ DEF_FUNC dict_method_popitem
     dec r12                  ; start from capacity-1
 
 .dpopitem_scan:
-    cmp r12, 0
+    test r12, r12
     jl .dpopitem_empty       ; shouldn't happen, but safety
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
@@ -872,7 +872,7 @@ DEF_FUNC dict_method_popitem
     push r8                  ; save key_tag
     push rcx                 ; save value_tag across tuple_new
     ; Create 2-tuple
-    mov rdi, 2
+    mov edi, 2
     call tuple_new
     pop rcx                  ; restore value_tag
     pop r8                   ; restore key_tag

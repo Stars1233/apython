@@ -387,9 +387,11 @@ END_FUNC dict_keys_equal
 ;; dict_get(rdi=dict, rsi=key Value) -> rax = value Value, or 0 when absent
 ;; Linear probing lookup
 ;; ============================================================================
-DEF_FUNC dict_get, 16
+DEF_FUNC dict_get, 8            ; + 1 push = 16, 16-aligned
+    ; One push, not two: r12 was saved and never touched, and this is on the
+    ; path of every global load and every attribute lookup.  The frame carries
+    ; the alignment instead, which is where STYLE.md says padding belongs.
     push rbx
-    push r12
     mov rbx, rdi                ; the dict; rdi does not survive the call
     call dict_lookup            ; rax = entries index or -1
     test rax, rax
@@ -397,13 +399,11 @@ DEF_FUNC dict_get, 16
     mov rcx, [rbx + PyDictObject.entries]
     imul rax, rax, DICT_ENTRY_SIZE
     mov rax, [rcx + rax + DictEntry.value]
-    pop r12
     pop rbx
     leave
     ret
 .dg_miss:
     xor eax, eax
-    pop r12
     pop rbx
     leave
     ret
@@ -418,15 +418,21 @@ END_FUNC dict_get
 DL_DICT  equ 8
 DL_KEY   equ 16
 DL_HASH  equ 24
-DL_MASK  equ 32
-DL_SLOT  equ 40
-DL_FREE  equ 48
-DL_SKEY  equ 56            ; the probe key when it is an exact str, else 0
-DL_FRAME equ 72            ; + 3 pushes = 96, 16-aligned
+DL_FREE  equ 32
+DL_SKEY  equ 40            ; the probe key when it is an exact str, else 0
+DL_FRAME equ 56            ; + 5 pushes = 96, 16-aligned
+;
+; The probe recurrence lives in REGISTERS.  The slot and the mask used to be
+; frame slots that .dl_next stored and .dl_probe reloaded on the next
+; iteration -- a store-to-load forward, about five cycles, sitting directly on
+; the dependency chain of a loop whose whole job is to chase one.  r14 and r15
+; were free: this function pushed only rbx, r12 and r13.
 DEF_FUNC dict_lookup, DL_FRAME
     push rbx
     push r12
     push r13
+    push r14
+    push r15
     mov [rbp - DL_DICT], rdi
     mov [rbp - DL_KEY], rsi
 
@@ -463,19 +469,23 @@ DEF_FUNC dict_lookup, DL_FRAME
     mov [rbp - DL_HASH], rax
 
     mov rbx, [rbp - DL_DICT]
-    mov rcx, [rbx + PyDictObject.capacity]
-    dec rcx
-    mov [rbp - DL_MASK], rcx
-    and rax, rcx
-    mov [rbp - DL_SLOT], rax
+    mov r13, [rbx + PyDictObject.capacity]
+    mov r15, r13
+    dec r15                     ; r15 = mask
+    and rax, r15
+    mov r14, rax                ; r14 = slot
     mov qword [rbp - DL_FREE], -1
-    xor r13d, r13d              ; probes
+                                ; r13 = probes REMAINING, counting down.  It
+                                ; was a count up compared against capacity,
+                                ; which reloaded capacity from the dict on
+                                ; every iteration for a bound that the load
+                                ; factor already makes unreachable.
 
 .dl_probe:
-    cmp r13, [rbx + PyDictObject.capacity]
-    jge .dl_miss
+    dec r13
+    js .dl_miss
     mov rax, [rbx + PyDictObject.dk_indices]
-    mov rcx, [rbp - DL_SLOT]
+    mov rcx, r14
     mov r12, [rax + rcx*8]      ; the index stored here
     cmp r12, DICT_IX_EMPTY
     je .dl_miss
@@ -540,11 +550,8 @@ DEF_FUNC dict_lookup, DL_FRAME
     jmp .dl_out
 
 .dl_next:
-    mov rcx, [rbp - DL_SLOT]
-    inc rcx
-    and rcx, [rbp - DL_MASK]
-    mov [rbp - DL_SLOT], rcx
-    inc r13
+    inc r14
+    and r14, r15
     jmp .dl_probe
 
 .dl_miss:
@@ -552,14 +559,16 @@ DEF_FUNC dict_lookup, DL_FRAME
     mov rcx, [rbp - DL_FREE]
     cmp rcx, -1
     jne .dl_have_free
-    mov rcx, [rbp - DL_SLOT]
+    mov rcx, r14
 .dl_have_free:
-    mov [rbp - DL_SLOT], rcx
+    mov r14, rcx
     mov rax, -1
 
 .dl_out:
-    mov rdx, [rbp - DL_SLOT]
+    mov rdx, r14
     mov r8, [rbp - DL_HASH]
+    pop r15
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -571,14 +580,15 @@ END_FUNC dict_lookup
 ;; dict_get_index(rdi=dict, rsi=key, edx=key_tag) -> int64
 ;; Like dict_get but returns the slot index (for IC caching), -1 if not found.
 ;; ============================================================================
-DEF_FUNC dict_get_index, 8
+DEF_FUNC dict_get_index, 16     ; + 0 pushes = 16, 16-aligned
     ; The index into the *dense* array, which the LOAD_GLOBAL inline cache
     ; caches.  A dense index never moves except on a resize, and the cache is
     ; already guarded by dk_version, so it is strictly more stable than the
     ; hash slot this used to return.
-    push rbx
+    ;
+    ; rbx was pushed and popped purely to align rsp for the call; the frame
+    ; does that now, without the two instructions.
     call dict_lookup
-    pop rbx
     leave
     ret
 END_FUNC dict_get_index
@@ -842,7 +852,7 @@ DEF_FUNC dict_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     push r13
     mov rbx, rdi
     mov r13, [rbx + PyDictObject.dk_nentries]
-    mov r12, 0
+    xor r12d, r12d
 .dde_loop:
     cmp r12, r13
     jge .dde_done

@@ -291,7 +291,7 @@ DEF_FUNC asyncio_wait_fd_func, 40           ; + 1 push = 48, 16-aligned
     test rax, rax
     js .awf_value_error
     mov rbx, rax
-    and rbx, 0xFFFFFFFF
+    mov ebx, ebx                    ; zero-extend: same as and 0xffffffff
 
     mov rdi, [rbp - AWF_ARGS]
     mov rdi, [rdi + 8]          ; the poll mask
@@ -473,7 +473,7 @@ DEF_FUNC_BARE wait_for_awaitable_iternext
     ; rdi = WaitForAwaitable*
     mov eax, [rdi + WaitForAwaitable.state]
 
-    cmp eax, 0
+    test eax, eax
     je .wfai_first
 
     cmp eax, 1

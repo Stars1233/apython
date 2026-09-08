@@ -75,6 +75,8 @@ extern v_mask48
 extern v_sleep_lo
 extern v_iowait_lo
 extern val_from_i64_p
+extern val_pack_cold
+extern val_unpack_cold
 %endif
 
 ; ==========================================================================
@@ -176,6 +178,16 @@ extern val_from_i64_p
     sub %1, [rel v_int_bias]
 %endmacro
 
+; V_INT(n) -- the Value of a COMPILE-TIME integer constant, folded by NASM.
+;
+; An int immediate is just n + V_INT_BIAS, so a literal needs no runtime work
+; at all: `mov rdx, V_INT(0)` is one instruction where `mov rdx, 0` followed by
+; `V_PACK_I64 rdx, rcx` was about sixteen.  Only for constants known to the
+; assembler and inside the immediate range: NASM would fold a wider one into a
+; FLOAT Value without a word, so `check_const_value` in src/compiler/lint.py is
+; what refuses it -- a %define cannot check its own argument.
+%define V_INT(n) ((n) + V_INT_BIAS)
+
 ; ==========================================================================
 ; MIGRATION SHIMS
 ;
@@ -196,7 +208,9 @@ extern val_from_i64_p
     ; register except rax, so this cold path cannot disturb the caller.
     push rax
     push rdi
+%ifnidni %1, rdi
     mov rdi, %1
+%endif
     call val_from_i64_p
     mov %2, rax
     pop rdi
@@ -235,7 +249,7 @@ extern val_from_i64_p
 %endmacro
 
 ; (payload, tag) -> Value.  %2 must not be rax.
-%macro V_PACK 2                 ; %1 = payload in / Value out, %2 = tag (clobbered)
+%macro V_PACK_INLINE 2          ; %1 = payload in / Value out, %2 = tag (clobbered)
     cmp %2, TAG_SMALLINT
     je %%si
     cmp %2, TAG_FLOAT
@@ -260,7 +274,7 @@ extern val_from_i64_p
 %endmacro
 
 ; Value -> (payload, tag).
-%macro V_UNPACK 2               ; %1 = Value in / payload out, %2 = tag out
+%macro V_UNPACK_INLINE 2        ; %1 = Value in / payload out, %2 = tag out
     mov %2, %1
     shr %2, 48
     jz %%ptr
@@ -302,6 +316,188 @@ extern val_from_i64_p
 %endmacro
 
 ; ==========================================================================
+; V_PACK / V_UNPACK -- the out-of-line form
+;
+; These two are the most-used macros in the tree, and until this was written
+; each expanded in full: 114 bytes for a V_PACK and about 124 for a V_UNPACK,
+; at 1280 and 950 sites, which came to a ninth of the whole .text segment.
+; Most of that was arms for tags that the site in question never sees.
+;
+; So the arm the site DOES see stays inline -- for V_PACK, a payload that is
+; already the Value (TAG_PTR and TAG_NULL); for V_UNPACK, a real non-NULL
+; pointer -- and everything else is one call to a helper in src/val.asm.  The
+; two hot arms get FASTER as a side effect: a TAG_PTR pack was a
+; four-compare ladder and is now one compare and one predicted branch.
+;
+; The helpers clobber rax and rdx and nothing else, which is what lets the
+; 496 + 1062 sites whose operands are already (rax, rdx) call them with no
+; register saves at all.  Every other operand pair is shuffled into place by
+; V_PACK_CALL / V_UNPACK_CALL below, which preserve the same contract: the
+; macro clobbers %1 and %2 and NOTHING ELSE.
+;
+; V_PACK_INLINE / V_UNPACK_INLINE keep the old fully-expanded bodies.  Using
+; one is a claim that the site was profiled; say what you measured in the
+; commit that adds it.
+; ==========================================================================
+
+; ---------------------------------------------------------------------------
+; V_PACK_CALL payload, tag -- reach val_pack_cold with (rax = payload,
+; rdx = tag), leave the Value in `payload`, and disturb nothing else.
+;
+; Six shapes, because rax and rdx are both the helper's ABI and, at most
+; sites, somebody else's live registers.  Where an operand IS rax or rdx it is
+; already the macro's to clobber, so the save collapses to an xchg -- which is
+; why the overwhelmingly common (rax, rdx) shape costs one call and nothing.
+; ---------------------------------------------------------------------------
+%macro V_PACK_CALL 2
+  %ifidni %1,%2
+    %error "V_PACK: payload and tag must be different registers"
+  %endif
+  %ifidni %1,rax
+    %ifidni %2,rdx
+    call val_pack_cold
+    %else
+    push rdx
+    mov rdx, %2
+    call val_pack_cold
+    pop rdx
+    %endif
+  %elifidni %1,rdx
+    %ifidni %2,rax
+    xchg rax, rdx
+    call val_pack_cold
+    xchg rax, rdx
+    %else
+    push rax
+    mov rax, rdx
+    mov rdx, %2
+    call val_pack_cold
+    mov rdx, rax
+    pop rax
+    %endif
+  %elifidni %2,rdx
+    xchg rax, %1                ; park the caller's rax in %1, which is ours
+    call val_pack_cold
+    xchg rax, %1
+  %elifidni %2,rax
+    push rdx
+    mov rdx, rax                ; the tag, before rax is overwritten
+    mov rax, %1
+    call val_pack_cold
+    mov %1, rax
+    pop rdx
+  %else
+    xchg rax, %1
+    push rdx
+    mov rdx, %2
+    call val_pack_cold
+    pop rdx
+    xchg rax, %1
+  %endif
+%endmacro
+
+; ---------------------------------------------------------------------------
+; V_UNPACK_CALL value, tag -- the mirror.  Both operands are outputs here, so
+; where %2 is already rdx the tag needs no move at all.
+; ---------------------------------------------------------------------------
+%macro V_UNPACK_CALL 2
+  %ifidni %1,%2
+    %error "V_UNPACK: value and tag must be different registers"
+  %endif
+  %ifidni %1,rax
+    %ifidni %2,rdx
+    call val_unpack_cold
+    %else
+    push rdx
+    call val_unpack_cold
+    mov %2, rdx
+    pop rdx
+    %endif
+  %elifidni %1,rdx
+    %ifidni %2,rax
+    xchg rax, rdx
+    call val_unpack_cold
+    xchg rax, rdx
+    %else
+    push rax
+    mov rax, rdx
+    call val_unpack_cold
+    mov %2, rdx                 ; read the tag out before rdx is retired
+    mov rdx, rax
+    pop rax
+    %endif
+  %elifidni %2,rdx
+    xchg rax, %1
+    call val_unpack_cold
+    xchg rax, %1
+  %elifidni %2,rax
+    push rdx
+    mov rax, %1
+    call val_unpack_cold
+    mov %1, rax                 ; the payload, before rax takes the tag
+    mov rax, rdx
+    pop rdx
+  %else
+    xchg rax, %1
+    push rdx
+    call val_unpack_cold
+    mov %2, rdx
+    pop rdx
+    xchg rax, %1
+  %endif
+%endmacro
+
+; (payload, tag) -> Value.  Clobbers %1 and %2 only.
+;
+; The tag set is {0, 1, 2, 7, 8, 0x85}, so `> TAG_IO_WAIT` is exactly TAG_PTR
+; and zero is exactly TAG_NULL -- both are the Value already.  A reserved tag
+; in 3..6 falls through to the helper, which passes it through, which is what
+; the fully-inline form did too.
+%macro V_PACK 2                 ; %1 = payload in / Value out, %2 = tag (clobbered)
+    cmp %2, TAG_IO_WAIT
+    ja %%done                   ; TAG_PTR: a pointer is its own Value
+    cmp %2, TAG_SMALLINT
+    jne %%not_int
+    ; An in-range int is one add, and the range check is the add's own result:
+    ; i + bias lands in [V_INT_LO, 2^64) for exactly i in [-2^50, 2^50), and
+    ; for nothing else -- the interval is 2^51 wide, so the wrap is unique.
+    ; Testing it this way rather than with V_FROM_I64 is not a flourish:
+    ; V_FROM_I64 needs a scratch, the only scratch here is the tag, and the
+    ; helper on the overflow path still needs the tag.
+    add %1, [rel v_int_bias]
+    cmp %1, [rel v_int_lo]
+    jae %%done
+    sub %1, [rel v_int_bias]    ; too wide for an immediate: the helper boxes it
+    jmp %%call
+%%not_int:
+    test %2, %2
+    jz %%done                   ; TAG_NULL: an empty slot is the Value too
+%%call:
+    V_PACK_CALL %1, %2
+%%done:
+%endmacro
+
+; Value -> (payload, tag).  Clobbers %1 and %2 only.
+;
+; `lea %2,[%1-1]` + one unsigned compare tests "non-NULL" and "below 2^48" at
+; once; the `mov` in between sets the answer for the taken arm without
+; touching the flags.
+%macro V_UNPACK 2               ; %1 = Value in / payload out, %2 = tag out
+    lea %2, [%1 - 1]
+    cmp %2, [rel v_ptr_max_m1]
+    mov %2, TAG_PTR
+    jbe %%done
+    cmp %1, [rel v_int_lo]      ; everything at or above it is an int immediate
+    jb %%slow
+    sub %1, [rel v_int_bias]
+    mov %2, TAG_SMALLINT
+    jmp %%done
+%%slow:
+    V_UNPACK_CALL %1, %2
+%%done:
+%endmacro
+
+; ==========================================================================
 ; REFERENCE COUNTING
 ; A Value participates in refcounting iff it is a non-NULL pointer, i.e.
 ; 1 <= v < 2^48.  `lea scratch,[v-1]` + one unsigned compare tests both
@@ -317,13 +513,19 @@ extern val_from_i64_p
 %endmacro
 
 ; Clobbers rdi and all caller-saved registers when the object is freed.
+;
+; The %ifnidni is not cosmetic: DECREF_V's operand is already rdi at a great
+; many sites, and without the guard the macro emits `mov rdi, rdi` there --
+; 593 of them in the linked binary before this was added.
 %macro DECREF_V 2               ; %1 = value, %2 = scratch (clobbered)
     lea %2, [%1 - 1]
     cmp %2, [rel v_ptr_max_m1]
     ja %%skip
     dec qword [%1 + PyObject.ob_refcnt]
     jnz %%skip
+%ifnidni %1, rdi
     mov rdi, %1
+%endif
     call obj_dealloc
     %%skip:
 %endmacro

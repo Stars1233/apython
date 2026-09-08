@@ -404,7 +404,7 @@ DEF_FUNC bool_init
     lea rdi, [rel bool_true + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
     lea rdi, [rel bool_true + PyIntObject.mpz]
-    mov rsi, 1
+    mov esi, 1
     call __gmpz_set_si wrt ..plt
 
     ; Init False's mpz to 0
@@ -441,7 +441,7 @@ END_FUNC none_repr
 ;; Returns a fixed hash value for None
 ;; ============================================================================
 DEF_FUNC_BARE none_hash
-    mov rax, 0x48fa9b36     ; arbitrary fixed hash
+    mov eax, 0x48fa9b36             ; arbitrary fixed hash
     ret
 END_FUNC none_hash
 

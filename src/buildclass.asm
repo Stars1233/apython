@@ -265,8 +265,7 @@ DEF_FUNC type_apply_set_name, TSN_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     lea rsi, [rel tsn_name]
     call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .next
 
     mov rdi, rbx                        ; self = the value
@@ -275,8 +274,7 @@ DEF_FUNC type_apply_set_name, TSN_FRAME
     lea rcx, [rel tsn_name]
     mov r8d, TAG_PTR
     call dunder_call_3
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_call_3 answers with a Value; 0 is the miss
     jz .raised
     mov rdi, rax
     DECREF_V rdi, rsi
@@ -936,8 +934,7 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov rdi, r15
     mov rsi, rax
     call dict_get
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .bc_have_module
     extern eval_saved_r12
     mov rcx, [rel eval_saved_r12]
@@ -1140,8 +1137,7 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     jne .bc_slot_tail_off
     mov rdi, [rsp + 8]             ; base_basicsize
     mov rax, [rsp]                 ; i
-    shl rax, 3
-    add rdi, rax                   ; offset
+    lea rdi, [rdi + rax*8]              ; offset
     jmp .bc_slot_have_off
 .bc_slot_tail_off:
     mov rdi, [rsp + 8]             ; -(1 + inherited tail slots)
@@ -1461,6 +1457,25 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     je .bc_no_set_base
     ; Inherit the constructor from the base (for bytearray, etc.)
     mov [r12 + PyTypeObject.tp_new], rdi
+
+    ; A base that OWNS references -- property, staticmethod, classmethod, the
+    ; three static bases with a tp_clear -- needs its fields released and
+    ; traced, and its subclass is instance-shaped besides: it has a __dict__
+    ; and may have __slots__.  bytes, bytearray and memoryview have neither a
+    ; tp_traverse nor a tp_clear, keep their data inline, and are what
+    ; builtin_sub_dealloc was written for.
+    mov rcx, [rax + PyTypeObject.tp_clear]
+    test rcx, rcx
+    jz .bc_sub_plain
+    mov [r12 + PyTypeObject.tp_clear], rcx
+    mov rcx, [rax + PyTypeObject.tp_traverse]
+    mov [r12 + PyTypeObject.tp_traverse], rcx
+    extern descr_sub_dealloc
+    lea rcx, [rel descr_sub_dealloc]
+    mov [r12 + PyTypeObject.tp_dealloc], rcx
+    jmp .bc_container_sub
+
+.bc_sub_plain:
     ; Use builtin_sub_dealloc instead of instance_dealloc
     ; (builtin subclasses don't have inst_dict at +16)
     extern builtin_sub_dealloc
@@ -1572,8 +1587,7 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov rdi, rax               ; base class (as type)
     CSTRING rsi, "__init_subclass__"
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .bc_no_init_subclass
 
     ; object's own is a classmethod wrapper; unwrap it, since the class it

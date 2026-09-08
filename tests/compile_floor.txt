@@ -61,12 +61,14 @@ test_bytesio
 test_bytes_methods
 test_bytes_percent
 test_bytes
+test_bytes_replace_center
 test_bytes_repr_long
 test_bytes_rsplit
 test_bytes_strmethods
 test_bytes_str_text
 test_bytes_subclass_dict
 test_call_arg_order
+test_call_arg_ownership
 test_call_ex
 test_call_instance
 test_call_spec
@@ -160,6 +162,7 @@ test_descr_func_attr
 test_descriptor_class_access
 test_descriptor_receiver
 test_descriptors
+test_descriptor_subclass
 test_dict_bugs
 test_dict_dunder_args
 test_dict_fromkeys
@@ -224,6 +227,7 @@ test_frame_clear_generator
 test_frame_clear
 test_frame_lineno
 test_frame_live
+test_frame_object_cycles
 test_frames_and_time
 test_frozenset_descriptors
 test_frozenset
@@ -325,6 +329,7 @@ test_lists
 test_load_attr_cache
 test_load_attr_method_shadow
 test_load_attr_per_name
+test_load_attr_property_ic
 test_maketrans
 test_map_multi
 test_mappingproxy_call
@@ -337,6 +342,7 @@ test_match
 test_math_more
 test_math
 test_membership
+test_memmove_boundaries
 test_memoryview_stride
 test_metaclass_lifetime
 test_metaclass_prepare
@@ -398,6 +404,7 @@ test_prepare_raises
 test_print_file
 test_property_callables
 test_property_doc
+test_property_getattr_hook
 test_property
 test_property_raises
 test_pyc_hardening
@@ -419,17 +426,20 @@ test_review_regressions
 test_richcompare_bool
 test_richcompare_byname
 test_round
+test_rsplit_boundaries
 test_select
 test_sequence_iteration
 test_setattr_dunder
 test_set_fatval
 test_set_inplace
 test_set_methods
+test_set_mutated_under_probe
 test_set_name_metatype
 test_set_name
 test_set_ops
 test_sets
 test_set_tombstone_reuse
+test_set_value_probe
 test_set_variadic
 test_signal
 test_size_and_recursion_limits
@@ -464,6 +474,7 @@ test_sre_scanner_and_boundary
 test_stdlib_glue
 test_stdlib_shims
 test_stdout_buffering
+test_store_attr_per_name
 test_store_attr_spec
 test_str_build
 test_str_case
@@ -483,6 +494,7 @@ test_str_methods_extra
 test_str_methods_fix
 test_str_mod_subclass
 test_str_predicates
+test_strsearch_boundaries
 test_str_search_primitives
 test_str_search
 test_str_split_spec
@@ -535,6 +547,7 @@ test_type_three_arg
 test_unary
 test_unbound_local
 test_unicode_case
+test_unicode_names
 test_unicode_numbers
 test_unicode_predicates
 test_unicode
@@ -547,6 +560,7 @@ test_unpack_spec
 test_unraisable
 test_utf16_utf32
 test_utf8_validate_boundaries
+test_value_funnel_guards
 test_value_typeconfusion
 test_warnings
 test_weakref

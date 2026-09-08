@@ -680,8 +680,7 @@ DEF_FUNC slot_binop_reflect_first, SBR_FRAME
     mov rsi, [rbp - SBR_NAME]
     extern dunder_lookup
     call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .sbr_no                  ; the right type does not define it
     mov [rbp - SBR_LMETH], rax  ; the right type's, for the compare below
 
@@ -841,8 +840,7 @@ DEF_FUNC slot_tp_setattr, STA_FRAME
     mov r8d, TAG_PTR
     V_UNPACK rdx, r8
     call dunder_call_3
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_call_3 answers with a Value; 0 is the miss
     jz .sta_failed
     mov rdi, rax
     DECREF_V rdi, rsi                   ; __setattr__ returns None
@@ -858,8 +856,7 @@ DEF_FUNC slot_tp_setattr, STA_FRAME
     lea rdx, [rel sl_delattr_name]
     mov ecx, TAG_PTR
     call dunder_call_2
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_call_2 answers with a Value; 0 is the miss
     jz .sta_failed
     mov rdi, rax
     DECREF_V rdi, rsi
@@ -919,8 +916,7 @@ DEF_FUNC slot_mp_ass_subscript, SAS_FRAME
     mov r8d, TAG_PTR                    ; dunder_call_3 packs arg2 with this
     V_UNPACK rdx, r8
     call dunder_call_3
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_call_3 answers with a Value; 0 is the miss
     jz .failed
     mov rdi, rax
     DECREF_V rdi, rsi                   ; __setitem__ returns None
@@ -935,8 +931,7 @@ DEF_FUNC slot_mp_ass_subscript, SAS_FRAME
     V_UNPACK rsi, rcx
     lea rdx, [rel sl_delitem_name]
     call dunder_call_2
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_call_2 answers with a Value; 0 is the miss
     jz .failed
     mov rdi, rax
     DECREF_V rdi, rsi
@@ -1015,8 +1010,7 @@ END_FUNC slot_tp_iter
 DEF_FUNC slot_tp_iternext
     lea rsi, [rel dunder_next]
     call dunder_call_1
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_call_1 answers with a Value; 0 is the miss
     jnz .got_value
 
     mov rax, [rel current_exception]
@@ -1036,7 +1030,8 @@ DEF_FUNC slot_tp_iternext
     ret
 
 .got_value:
-    V_PACK rax, rdx
+    ; dunder_call_1 already answered with a Value; packing it again read rdx
+    ; as a tag, and `class A(list): __next__ = list.pop` came back 2^50 out.
     leave
     ret
 END_FUNC slot_tp_iternext
@@ -1097,8 +1092,7 @@ DEF_FUNC slot_tp_call, STC_FRAME
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel dunder_call]
     call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .stc_not_callable
     mov [rbp - STC_FUNC], rax
 

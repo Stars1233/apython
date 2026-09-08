@@ -270,8 +270,7 @@ DEF_FUNC_BARE op_binary_subscr
     mov rdi, [rsp+8]              ; obj (the type itself)
     CSTRING rsi, "__class_getitem__"
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .subscr_error
 
     ; rax = __class_getitem__ attr (borrowed ref)
@@ -619,7 +618,7 @@ DEF_FUNC op_build_list, 24   ; + 0 pushes; a handler is entered ALIGNED, so this
     mov rdi, rcx
     test rdi, rdi
     jnz .bl_has_cap
-    mov rdi, 4                 ; minimum capacity
+    mov edi, 4                      ; minimum capacity
 .bl_has_cap:
     call list_new
     mov [rbp - BL_LIST], rax          ; save list
@@ -1465,8 +1464,7 @@ DEF_FUNC_BARE op_contains_op
     lea rsi, [rel dunder_contains]
     extern dunder_lookup
     call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .contains_iter_fallback  ; genuinely not defined
     IS_NONE rax, rcx
     je .contains_type_error
@@ -1528,7 +1526,7 @@ DEF_FUNC_BARE op_contains_op
                                  ; call that boxes clobbers rdx
     call obj_richcompare_bool
     add rsp, 16
-    cmp eax, 0
+    test eax, eax
     jl .contains_iter_eq_raised
     test eax, eax
     pop rdx                      ; elem tag
@@ -2210,8 +2208,7 @@ DEF_FUNC op_dict_merge
     push rbx
     mov rdi, [rbp - DM_DICT]          ; target dict
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .dm_dup_error          ; key already exists in target
 
     ; dict_set(target, key, value, value_tag, key_tag)

@@ -546,8 +546,7 @@ DEF_FUNC import_module, IF_FRAME
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax
     call dict_get
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .walk_have_module
     mov rdi, [rsp]
     call import_find_and_load
@@ -853,8 +852,7 @@ DEF_FUNC import_find_and_load, FL_FRAME
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - FL_NAME]
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .found_in_sysmod
 
     ; Ensure path buffer is allocated
@@ -2219,8 +2217,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx
     call dict_get
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jz .br_not_cached
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx

@@ -286,7 +286,7 @@ DEF_FUNC str_method_isalpha
     ; str_pred_impl in methods/str_case.asm, over the same generated flag
     ; table the case mappings read.
     mov rdi, [rdi]
-    mov esi, 0
+    xor esi, esi
     extern str_pred_impl
     call str_pred_impl
     RET_BOOL_RAX
@@ -674,14 +674,23 @@ DEF_FUNC str_method_center, PA_FRAME
     mov r12, rax
 .center_have_fill:
 
+    mov rax, r13                        ; the width, before it becomes the margin
     sub r13, [rbp - PA_CPLEN]           ; the padding, in characters
     jle .center_return_self
 
+    ; CPython's unicode_center is `left = marg/2 + (marg & width & 1)`, so the
+    ; odd character goes on the LEFT, and only when the width is odd as well:
+    ; "ab".center(3) is "*ab" and "ab".center(6) is "**ab**".  Halving alone
+    ; put it on the right, and bytes.center had the rule right -- so str and
+    ; bytes disagreed with each other about the same call.
+    and rax, r13
+    and rax, 1
     mov rdi, [rbp - PA_SELF]
     mov rsi, r13
-    shr rsi, 1                          ; CPython puts the odd one on the RIGHT
+    shr rsi, 1
+    add rsi, rax                        ; the left pad
     mov rdx, r13
-    sub rdx, rsi
+    sub rdx, rsi                        ; and the rest on the right
     mov rcx, r12
     extern str_pad_build
     call str_pad_build

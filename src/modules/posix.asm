@@ -265,7 +265,7 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     CSTRING rsi, "__fspath__"
     DUNDER_EXC_SAVE [rbp - PPA_EXC]
     call dunder_call_1
-    test edx, edx
+    test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
     jnz .ppa_got_fspath
     ; NULL means either "no __fspath__" or "__fspath__ raised", and reporting
     ; the second as a bad path type buries the real exception.
@@ -332,14 +332,14 @@ DEF_FUNC posix_path_arg, PPA_FRAME
 
     lea rdi, [rel pm_msgbuf]
     lea rsi, [rel pm_msg_expected]
-    mov rdx, 40
+    mov edx, 40
     call posix_copy_bounded
     mov rdi, rax
     mov rsi, [rbp - PPA_ORIG]
     call posix_typename_of
     mov rdi, rax
     lea rsi, [rel pm_msg_fspath]
-    mov rdx, 60
+    mov edx, 60
     call posix_copy_bounded
     mov rdi, rax
     mov rsi, [rbp - PPA_VAL]
@@ -356,18 +356,18 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     mov rsi, [rbp - PPA_WHO]
     test rsi, rsi
     jz .ppa_no_who
-    mov rdx, 40                 ; the prefix already reads "<func>: <arg>"
+    mov edx, 40                     ; the prefix already reads "<func>: <arg>"
     call posix_copy_bounded
     mov rdi, rax
     jmp .ppa_kinds
 .ppa_no_who:
     lea rsi, [rel pm_msg_path]
-    mov rdx, 8
+    mov edx, 8
     call posix_copy_bounded
     mov rdi, rax
 .ppa_kinds:
     lea rsi, [rel pm_msg_shouldbe]
-    mov rdx, 32
+    mov edx, 32
     call posix_copy_bounded
     mov rdi, rax
     mov rcx, [rbp - PPA_KINDS]
@@ -383,11 +383,11 @@ DEF_FUNC posix_path_arg, PPA_FRAME
 .ppa_kind_fd_none:
     lea rsi, [rel pm_kind_fd_none]
 .ppa_kind_copy:
-    mov rdx, 48
+    mov edx, 48
     call posix_copy_bounded
     mov rdi, rax
     lea rsi, [rel pm_msg_not]
-    mov rdx, 8
+    mov edx, 8
     call posix_copy_bounded
     mov rdi, rax
     mov rsi, [rbp - PPA_VAL]
@@ -421,7 +421,7 @@ PSR_FRAME equ 32            ; + 1 push = 40... see below
 ; below 1e9 -- bugs.md said they carried the exact value, and they did not.
 %macro STAT_FIELD_NS 3          ; %1 = field index, %2 = tv_sec, %3 = tv_nsec
     mov rax, %2
-    mov rcx, 1000000000
+    mov ecx, 1000000000
     imul rax, rcx
     add rax, %3
     mov rdi, rax
@@ -586,7 +586,7 @@ DEF_FUNC posix_stat, PST_FRAME
     jnz .pst_kw_next
     ; A real tail call: posix_lstat builds its own frame, so this one has to
     ; be gone before the jump or its rsp is never restored.
-    mov rsi, 1                  ; nargs for lstat, which takes no keywords
+    mov esi, 1                      ; nargs for lstat, which takes no keywords
     leave
     jmp posix_lstat
 .pst_kw_next:
@@ -844,7 +844,7 @@ DEF_FUNC posix_listdir, PLD_FRAME
 .pld_fail:
     POSIX_PATH_DONE [rbp - PLD_OWNED]
     mov rdi, [rbp - PLD_FD]
-    cmp rdi, 0
+    test rdi, rdi
     jl .pld_fail_buf
     call sys_close
 .pld_fail_buf:
@@ -1507,13 +1507,13 @@ DEF_FUNC posix_raise_typename
 .prt_int:
     lea rsi, [rel pm_name_int]
 .prt_have:
-    mov rdx, 40
+    mov edx, 40
     call posix_copy_bounded
     mov byte [rax], 0x27
     inc rax
     mov rdi, rax
     lea rsi, [rel pm_int_required]
-    mov rdx, 80
+    mov edx, 80
     call posix_copy_bounded
     mov rdi, rbx
     lea rsi, [rel pm_msgbuf]
@@ -1539,7 +1539,7 @@ DEF_FUNC_LOCAL posix_typename_of
 .pto_int:
     lea rsi, [rel pm_name_int]
 .pto_have:
-    mov rdx, 40
+    mov edx, 40
     call posix_copy_bounded
     leave
     ret
@@ -2694,7 +2694,7 @@ DEF_FUNC posix_fspath, PFS_FRAME
     CSTRING rsi, "__fspath__"
     DUNDER_EXC_SAVE [rbp - PFS_EXC]
     call dunder_call_1
-    test edx, edx
+    test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
     jz .pfs_no_result
 
     ; What __fspath__ answered has to be a path itself; CPython checks, and
@@ -2739,14 +2739,14 @@ DEF_FUNC posix_fspath, PFS_FRAME
     push rax                    ; twice, to keep rsp 16-byte aligned
     lea rdi, [rel pm_msgbuf]
     lea rsi, [rel pm_msg_expected]
-    mov rdx, 40
+    mov edx, 40
     call posix_copy_bounded
     mov rdi, rax
     mov rsi, [rbp - PFS_OBJ]
     call posix_typename_of
     mov rdi, rax
     lea rsi, [rel pm_msg_fspath]
-    mov rdx, 60
+    mov edx, 60
     call posix_copy_bounded
     mov rdi, rax
     mov rsi, [rsp]

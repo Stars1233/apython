@@ -253,8 +253,7 @@ DEF_FUNC_LOCAL binop_subclass_first, BSF_FRAME
     mov rsi, [rbp - BSF_RNAME]
     extern dunder_lookup
     call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .bsf_no
     mov [rbp - BSF_LMETH], rax
     mov rdi, [rbp - BSF_LTYPE]
@@ -505,7 +504,7 @@ DEF_FUNC_BARE op_binary_op
     ; TAG_PTR and the ordinary int path handles them -- no tag rewriting.
 
     ; Fast path: SmallInt add (NB_ADD=0, NB_INPLACE_ADD=13)
-    cmp ecx, 0                 ; NB_ADD
+    test ecx, ecx                   ; NB_ADD
     je .binop_try_smallint_add
     cmp ecx, 13                ; NB_INPLACE_ADD
     je .binop_try_smallint_add
@@ -716,7 +715,7 @@ DEF_FUNC_BARE op_binary_op
     ; Repeated squaring, checked at every step.  The base is squared only
     ; while another exponent bit remains, so an overflow in a squaring whose
     ; value would never be used cannot send a result that fitted to GMP.
-    mov rax, 1                 ; the running result
+    mov eax, 1                      ; the running result
     mov r10, rdi               ; b, the running square
     mov r11, rsi               ; e, the remaining exponent
 .binop_pow_loop:
@@ -1024,7 +1023,7 @@ DEF_FUNC_BARE op_binary_op
     mov rcx, [rsp]
     cmp qword [rcx + PyTypeObject.tp_as_sequence], 0
     je .binop_number_ok
-    cmp r9d, 0                  ; NB_ADD
+    test r9d, r9d                   ; NB_ADD
     je .binop_seq_from_stack
     cmp r9d, 5                  ; NB_MULTIPLY
     je .binop_seq_from_stack
@@ -1196,7 +1195,7 @@ DEF_FUNC_BARE op_binary_op
     test rax, rax
     jz .binop_try_right_slot
     ; NB_ADD (0) or NB_INPLACE_ADD (13) → sq_concat / sq_inplace_concat
-    cmp r9d, 0              ; NB_ADD
+    test r9d, r9d                   ; NB_ADD
     je .binop_seq_concat
     cmp r9d, 13             ; NB_INPLACE_ADD
     je .binop_seq_iconcat
@@ -1793,48 +1792,28 @@ DEF_FUNC_BARE op_compare_op
     ; fall through
 
 .cmp_do_compare:
-    ; Both SmallInt: decode and compare
-    mov rax, rdi
-    mov rdx, rsi
-    cmp rax, rdx               ; flags survive LEA + jmp [mem]
-    lea r8, [rel .cmp_setcc_table]
-    jmp [r8 + rcx*8]          ; 1 indirect branch on comparison op
-
-.cmp_set_lt:
-    setl al
-    jmp .cmp_push_bool
-.cmp_set_le:
-    setle al
-    jmp .cmp_push_bool
-.cmp_set_eq:
-    sete al
-    jmp .cmp_push_bool
-.cmp_set_ne:
-    setne al
-    jmp .cmp_push_bool
-.cmp_set_gt:
-    setg al
-    jmp .cmp_push_bool
-.cmp_set_ge:
-    setge al
-    ; fall through to .cmp_push_bool
-
-.cmp_push_bool:
-    movzx eax, al             ; eax = 0 or 1
-    VPUSH_BOOL rax             ; (0/1, TAG_BOOL) — no INCREF needed
+    ; Both SmallInt.  This reached one of six `setcc` arms through an indirect
+    ; jump on a six-entry table -- a BTB entry, a table load, and a `jmp` back
+    ; to the merge point, with a comment about the flags having to survive the
+    ; `lea` in between.  arith_spec.asm already replaced exactly that with
+    ; int_cmp_result: `2*(x>=y) + (x<=y)` is 1 for less, 2 for greater and 3
+    ; for equal, so one byte table indexed by `op*4 + that` answers all six
+    ; operators branchlessly.  Six handlers there share the 24 bytes; this is
+    ; the seventh, and it takes the `.data` section out of a `.text` file with
+    ; it.
+    cmp rdi, rsi
+    setge al                   ; a >= b
+    setle dl                   ; a <= b
+    movzx eax, al
+    movzx edx, dl
+    lea eax, [rdx + rax*2]     ; 1 = less, 2 = greater, 3 = equal
+    lea eax, [rax + rcx*4]     ; + op*4
+    extern int_cmp_result
+    lea rdx, [rel int_cmp_result]
+    movzx eax, byte [rdx + rax]
+    VPUSH_BOOL rax             ; no INCREF needed: the singletons are immortal
     add rbx, 2
     DISPATCH
-
-section .data
-align 8
-.cmp_setcc_table:
-    dq .cmp_set_lt             ; PY_LT = 0
-    dq .cmp_set_le             ; PY_LE = 1
-    dq .cmp_set_eq             ; PY_EQ = 2
-    dq .cmp_set_ne             ; PY_NE = 3
-    dq .cmp_set_gt             ; PY_GT = 4
-    dq .cmp_set_ge             ; PY_GE = 5
-section .text
 
 .cmp_slow_path:
     ; Both float: specialize, the same way the SmallInt arm above does, and

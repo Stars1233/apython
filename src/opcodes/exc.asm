@@ -384,7 +384,7 @@ END_FUNC op_check_eg_match
 ;; arg 2: raise TOS1 from TOS (chaining, simplified)
 ;; ============================================================================
 DEF_FUNC_BARE op_raise_varargs
-    cmp ecx, 0
+    test ecx, ecx
     je .reraise
     cmp ecx, 1
     je .raise_exc
