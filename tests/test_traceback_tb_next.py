@@ -110,4 +110,16 @@ except IndexError as e:
     e.__traceback__ = r
     print("attached foreign traceback:", length(e.__traceback__))
 
+print("--- and what tb_next refuses names itself ---")
+try:
+    raise ValueError("x")
+except ValueError as _e:
+    _tb = _e.__traceback__
+for _v in (5, "x", 1.5, [], (), {}, object(), int):
+    try:
+        _tb.tb_next = _v
+        print(type(_v).__name__, "-> accepted, wrong")
+    except TypeError as _err:
+        print("%-8s %s" % (type(_v).__name__, _err))
+
 print("done")

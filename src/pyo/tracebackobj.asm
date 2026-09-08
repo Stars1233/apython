@@ -160,7 +160,13 @@ DEF_FUNC traceback_setattr, TBS_FRAME
 .tbs_loop:
     RAISE exc_ValueError_type, "traceback loop detected"
 .tbs_bad:
-    RAISE exc_TypeError_type, "expected traceback object, got 'NoneType'"
+    ; Name what was actually assigned.  The message was a fixed 'NoneType',
+    ; which is the one value this arm cannot be reached with -- None is the
+    ; legal way to clear tb_next, handled above.
+    mov rsi, rdx
+    CSTRING rdi, `expected traceback object, got '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .tbs_no_attr:
     ; CPython is not uniform here and this follows it exactly: tb_lineno has a
     ; setter that refuses, tb_frame and tb_lasti are plain members, and a name

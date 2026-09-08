@@ -1016,18 +1016,19 @@ END_FUNC frameobj_getattr
 ;; of a traceback, and unittest's assertRaises calls THAT in its __exit__ --
 ;; which is why its absence stopped nearly every test CPython ships.
 ;;
-;; A frame still attached to a live PyFrame raises RuntimeError, as CPython's
-;; does for an executing frame.  This is more conservative than CPython, which
-;; allows a SUSPENDED generator's frame to be cleared: telling the two apart
-;; means asking whether the PyFrame is on the interpreter's own chain, and a
-;; detached snapshot -- what a traceback entry always holds by the time anyone
-;; looks at it -- is the case that matters.  Being conservative costs nothing
-;; where it counts, because clear_frames is written as
+;; An EXECUTING frame raises RuntimeError, which is what CPython does; a
+;; suspended generator's frame is CLOSED, which is also what CPython does --
+;; the finally blocks run, gi_frame becomes None, and a later next() raises
+;; StopIteration.  A detached snapshot, which is what a traceback entry holds
+;; by the time anyone looks at it, is simply cleared.
+;;
+;; This used to refuse everything still attached to a live PyFrame, and
+;; nothing noticed because clear_frames is written as
 ;;
 ;;     try: tb.tb_frame.clear()
 ;;     except RuntimeError: pass
 ;;
-;; and CPython raises exactly that for the frames it refuses.
+;; so the suspended-generator half was silently skipped.
 ;;
 ;; What a detached frame owns and this releases: f_locals, the snapshot
 ;; frameobj_detach copied out of localsplus, and f_trace.  f_back, f_code,
