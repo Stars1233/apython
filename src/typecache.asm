@@ -37,7 +37,11 @@ extern obj_decref
 ; 2048 entries, direct mapped.  A collision misses and does the walk, which is
 ; what the code did unconditionally before, so a bad hash costs nothing that
 ; was not already being paid.
-TC_SLOTS     equ 2048
+;; A POWER OF TWO, because the index is taken with `and rcx, TC_MASK`.  1024
+;; rather than the old 2048 so the array is 64 KB where it was 96 KB: the
+;; entries got wider, and a collision costs the MRO walk this cache replaced,
+;; which is what the code did unconditionally before it existed.
+TC_SLOTS     equ 1024
 TC_MASK      equ TC_SLOTS - 1
 TC_VERSION   equ 0              ; 0 marks a slot that has never been filled
 TC_TYPE      equ 8
@@ -45,7 +49,14 @@ TC_NAME      equ 16             ; OWNED -- see the note in type_lookup_cached
 TC_VALUE     equ 24             ; the Value dict_get returned, borrowed
 TC_TAG       equ 32             ; 0 means "this class does not define it"
 TC_OWNER     equ 40             ; the MRO entry whose dict answered
-TC_ENTRY     equ 48
+;; 64, not the 48 the six fields need.  gcd(48, 64) is 16, so entries at a
+;; 48-byte stride start at offsets {0, 48, 32, 16} mod 64 and EXACTLY HALF of
+;; them spanned two cache lines -- every one of those hits cost two line
+;; fetches to read six words that fit in one.  At 64 an entry is a line, the
+;; index is a shift instead of a multiply, and TC_SLOTS falls to keep the
+;; array no larger than it was.
+TC_ENTRY     equ 64
+TC_SHIFT     equ 6              ; log2(TC_ENTRY)
 
 section .bss
 align 64
@@ -99,7 +110,7 @@ DEF_FUNC type_lookup_cached, TLC_FRAME
     imul rcx, rcx, 31
     xor rcx, rdx
     and rcx, TC_MASK
-    imul rcx, rcx, TC_ENTRY
+    shl rcx, TC_SHIFT
     lea r13, [rel type_cache]
     add r13, rcx
     mov [rbp - TLC_SLOT], r13
