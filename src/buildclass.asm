@@ -7,6 +7,9 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern bool_true
+extern type_check_is_class
+extern bool_false
 
 extern type_is_subtype
 extern dict_copy_shallow
@@ -155,6 +158,151 @@ DEF_FUNC type_method_init
 .tmi_error:
     RAISE exc_TypeError_type, "type.__init__() takes 1 or 3 arguments"
 END_FUNC type_method_init
+
+;; ============================================================================
+;; type_method_prepare(args, nargs) -> Value: a fresh empty dict
+;;
+;; `type.__prepare__(name, bases, **kwds)`, a classmethod.  A metaclass that
+;; wants an ordered or otherwise special namespace overrides it; type's own
+;; answers the plain dict __build_class__ would have made anyway.  Absent, it
+;; was `types.prepare_class` and every cooperative `super().__prepare__(...)`
+;; that could not find it.
+;; ============================================================================
+DEF_FUNC type_method_prepare
+    extern dict_new
+    call dict_new
+    test rax, rax
+    jz .tmp_fail
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.tmp_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC type_method_prepare
+
+;; ============================================================================
+;; type_method_instancecheck(args, nargs) -> Value: True or False
+;; type_method_subclasscheck(args, nargs) -> Value: True or False
+;;
+;; `type.__instancecheck__(cls, obj)` and `type.__subclasscheck__(cls, sub)`.
+;;
+;; These are the PLAIN checks, and that is the whole point of them: CPython's
+;; go straight to recursive_isinstance rather than back through
+;; PyObject_IsInstance.  One that consulted the dunder would recurse forever
+;; through a metaclass whose __instancecheck__ ends in
+;; `super().__instancecheck__(obj)` -- which is how ABCMeta's is written.
+;; ============================================================================
+TIC_CLS   equ 8
+TIC_OBJ   equ 16
+TIC_FRAME equ 24            ; + 1 push = 32, 16-aligned
+DEF_FUNC type_method_instancecheck, TIC_FRAME
+    push rbx
+    cmp rsi, 2
+    jne .tic_error
+    mov rax, [rdi]
+    mov [rbp - TIC_CLS], rax
+    mov rax, [rdi + 8]
+    mov [rbp - TIC_OBJ], rax
+
+    mov rdi, [rbp - TIC_CLS]
+        call type_check_is_class
+    test eax, eax
+    jz .tic_error
+
+    ; What the object IS.
+    mov rdi, [rbp - TIC_OBJ]
+    extern value_type
+    call value_type
+    test rax, rax
+    jz .tic_declared
+    mov rdi, rax
+    mov rsi, [rbp - TIC_CLS]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jnz .tic_true
+
+.tic_declared:
+    ; ...and what it SAYS it is, which is a separate question a mock answers
+    ; differently.  obj_declared_class hands back a new reference.
+    mov rdi, [rbp - TIC_OBJ]
+    extern obj_declared_class
+    call obj_declared_class
+    test rax, rax
+    jz .tic_false
+    mov rbx, rax
+    mov rdi, rax
+    mov rsi, [rbp - TIC_CLS]
+    call type_is_subtype
+    push rax
+    push rax                        ; pad
+    mov rdi, rbx
+    extern obj_decref
+    call obj_decref
+    pop rax
+    pop rax
+    test eax, eax
+    jnz .tic_true
+
+.tic_false:
+    RET_FALSE
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.tic_true:
+    RET_TRUE
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.tic_error:
+    RAISE exc_TypeError_type, "__instancecheck__() takes exactly one argument"
+END_FUNC type_method_instancecheck
+
+;; type_method_subclasscheck(args, nargs) -> Value, documented with its twin
+;; above: the same plain check, over two classes rather than a class and an
+;; instance.
+DEF_FUNC type_method_subclasscheck, TIC_FRAME
+    push rbx
+    cmp rsi, 2
+    jne .tsc_error
+    mov rax, [rdi]
+    mov [rbp - TIC_CLS], rax
+    mov rax, [rdi + 8]
+    mov [rbp - TIC_OBJ], rax
+    mov rdi, rax
+    call type_check_is_class
+    test eax, eax
+    jz .tsc_not_a_class
+    mov rdi, [rbp - TIC_CLS]
+    call type_check_is_class
+    test eax, eax
+    jz .tsc_error
+    mov rdi, [rbp - TIC_OBJ]
+    mov rsi, [rbp - TIC_CLS]
+    call type_is_subtype
+    test eax, eax
+    jnz .tsc_true
+    RET_FALSE
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.tsc_true:
+    RET_TRUE
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.tsc_not_a_class:
+    RAISE exc_TypeError_type, "issubclass() arg 1 must be a class"
+.tsc_error:
+    RAISE exc_TypeError_type, "__subclasscheck__() takes exactly one argument"
+END_FUNC type_method_subclasscheck
 
 
 ;; ============================================================================

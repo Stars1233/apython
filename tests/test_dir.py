@@ -92,8 +92,14 @@ print(missing_from(memoryview, ["nbytes", "format", "itemsize", "shape",
                                 "contiguous"]))
 print(missing_from(property, ["fget", "fset", "fdel",
                               "getter", "setter", "deleter"]))
-print(missing_from(classmethod, ["__func__", "__wrapped__"]))
-print(missing_from(staticmethod, ["__func__", "__wrapped__"]))
+print(missing_from(classmethod, ["__func__", "__wrapped__",
+                                 "__isabstractmethod__"]))
+print(missing_from(staticmethod, ["__func__", "__wrapped__",
+                                  "__isabstractmethod__"]))
+print(missing_from(property, ["__isabstractmethod__"]))
+print(missing_from(super, ["__self__", "__self_class__", "__thisclass__"]))
+print(missing_from(type, ["__prepare__", "__instancecheck__",
+                          "__subclasscheck__"]))
 
 # The descriptors work through the class, not only through an instance, and
 # repr as CPython's do.
@@ -127,3 +133,88 @@ try:
     print("released view answered")
 except (AttributeError, ValueError) as e:
     print("released view:", type(e).__name__)
+
+
+# super's three, which its tp_getattr answers and its type had no dict to hold.
+class Base:
+    def who(self):
+        return "Base"
+
+
+class Derived(Base):
+    def who(self):
+        s = super()
+        return (s.__self__ is self, s.__self_class__ is Derived,
+                s.__thisclass__ is Derived, s.who())
+
+
+print(Derived().who())
+print("__new__" in super.__dict__)
+
+# type's three, which the metaclass protocol is asked by name.  They are the
+# PLAIN checks: one that went back through isinstance() would recurse forever
+# through a metaclass whose own ends in super().__instancecheck__(obj).
+class Plain:
+    pass
+
+
+print(type.__prepare__("N", ()) == {})
+print(type.__instancecheck__(Plain, Plain()), type.__instancecheck__(Plain, 1))
+print(type.__subclasscheck__(object, Plain), type.__subclasscheck__(Plain, object))
+print(type.__instancecheck__(int, True), type.__subclasscheck__(int, bool))
+
+# __isabstractmethod__ on the three wrappers, computed from what they wrap.
+# Without it abc collected nothing and an abstract property or classmethod
+# did not make its class abstract at all.
+import abc
+
+
+class Abstract(abc.ABC):
+    @property
+    @abc.abstractmethod
+    def p(self):
+        ...
+
+    @classmethod
+    @abc.abstractmethod
+    def c(cls):
+        ...
+
+    @staticmethod
+    @abc.abstractmethod
+    def s():
+        ...
+
+    @abc.abstractmethod
+    def m(self):
+        ...
+
+
+print(sorted(Abstract.__abstractmethods__))
+try:
+    Abstract()
+    print("NOT REFUSED")
+except TypeError as e:
+    print("refused:", str(e)[:40])
+
+print(property(lambda s: 1).__isabstractmethod__,
+      classmethod(lambda c: 1).__isabstractmethod__,
+      staticmethod(lambda: 1).__isabstractmethod__)
+
+
+class Concrete(Abstract):
+    p = 1
+
+    @classmethod
+    def c(cls):
+        return 2
+
+    @staticmethod
+    def s():
+        return 3
+
+    def m(self):
+        return 4
+
+
+print(sorted(Concrete.__abstractmethods__), Concrete().m(), Concrete.c(), Concrete.s())

@@ -1566,6 +1566,26 @@ DEF_FUNC methods_init
     mov rdi, rax
     call type_stamp_methods
 
+    ;; --- super's three own attributes ---
+    ;; super_type had no tp_dict at all, so __self__, __self_class__ and
+    ;; __thisclass__ read correctly off an instance and were invisible to
+    ;; dir(), to inspect and to anything reading vars(super).
+    call dict_new
+    mov rbx, rax
+    extern super_getattr_value
+    TYPE_GETATTR mn___self__, super_getattr_value
+    TYPE_GETATTR mn___self_class__, super_getattr_value
+    TYPE_GETATTR mn___thisclass__, super_getattr_value
+    extern super_dunder_new
+    mov rdi, rbx
+    lea rsi, [rel super_dunder_new]
+    call add_new_staticmethod
+    extern super_type
+    lea rax, [rel super_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
     ;; --- weakref methods ---
     ; weakref.py binds ref.__hash__ and ref.__eq__ into its subclasses at
     ; class definition time, so those have to exist as methods.
@@ -1774,6 +1794,17 @@ DEF_FUNC methods_init
     extern type_method_init
     ADD_FN mn___init__, type_method_init
 
+    ; The three the metaclass protocol is asked BY NAME: types.prepare_class
+    ; calls __prepare__, and a metaclass that ends in
+    ; `super().__instancecheck__(obj)` -- ABCMeta's does -- needs type's to
+    ; exist and to be the plain check.
+    extern type_method_prepare
+    ADD_CLASSMETHOD mn___prepare__, type_method_prepare
+    extern type_method_instancecheck
+    ADD_FN_N mn___instancecheck__, type_method_instancecheck, 2, 2
+    extern type_method_subclasscheck
+    ADD_FN_N mn___subclasscheck__, type_method_subclasscheck, 2, 2
+
     ; No add_class_getitem here: `type[int]` is a special case in CPython's
     ; PyObject_GetItem, taken before any lookup, and type carries no
     ; __class_getitem__ of its own -- hasattr(type, "__class_getitem__") is
@@ -1893,6 +1924,8 @@ DEF_FUNC methods_init
     ADD_FN mn___call__, staticmethod_dunder_call
     DESCR_GETATTR mn___func__
     DESCR_GETATTR mn___wrapped__
+    extern descr_wrapper_isabstract
+    TYPE_GETATTR mn___isabstractmethod__, descr_wrapper_isabstract
     lea rax, [rel staticmethod_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1906,6 +1939,7 @@ DEF_FUNC methods_init
     ADD_FN mn___init__, classmethod_method_init
     DESCR_GETATTR mn___func__
     DESCR_GETATTR mn___wrapped__
+    TYPE_GETATTR mn___isabstractmethod__, descr_wrapper_isabstract
     lea rax, [rel classmethod_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1936,6 +1970,8 @@ DEF_FUNC methods_init
     PROP_GETATTR mn_getter
     PROP_GETATTR mn_setter
     PROP_GETATTR mn_deleter
+    extern property_isabstract
+    TYPE_GETATTR mn___isabstractmethod__, property_isabstract
     extern property_type
     lea rax, [rel property_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2711,6 +2747,13 @@ END_FUNC methods_init
 ;; Data section
 ;; ============================================================================
 section .rodata
+mn___isabstractmethod__: db "__isabstractmethod__", 0
+mn___self__: db "__self__", 0
+mn___self_class__: db "__self_class__", 0
+mn___thisclass__: db "__thisclass__", 0
+mn___prepare__: db "__prepare__", 0
+mn___instancecheck__: db "__instancecheck__", 0
+mn___subclasscheck__: db "__subclasscheck__", 0
 mn_nbytes: db "nbytes", 0
 mn_itemsize: db "itemsize", 0
 mn_readonly: db "readonly", 0

@@ -1948,6 +1948,123 @@ DEF_FUNC descr_func_attr, DF_FRAME
 END_FUNC descr_func_attr
 
 ;; ============================================================================
+;; descr_is_abstract(rdi = a callable Value, or 0) -> eax = 1 when it carries a
+;;   truthy __isabstractmethod__
+;;
+;; What abc marks a function with.  A wrapper is abstract when what it wraps
+;; is, which is how `@property` over `@abstractmethod` reaches
+;; ABCMeta.__new__: it collects the names whose values answer True here, and
+;; a wrapper that could not answer at all left __abstractmethods__ empty and
+;; the class instantiable.
+;; ============================================================================
+DIA_FRAME equ 8             ; + 1 push = 16, 16-aligned
+DEF_FUNC descr_is_abstract, DIA_FRAME
+    push rbx
+    test rdi, rdi
+    jz .dia_no
+    V_TEST_PTR rdi, rax
+    ja .dia_no
+    mov rbx, rdi
+    lea rdi, [rel dia_name]
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    push rax
+    push rax                            ; pad
+    mov rdi, rbx
+    mov rsi, rax
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    mov rbx, rax
+    pop rdi
+    pop rdi
+    call obj_decref                     ; the name
+    test rbx, rbx
+    jz .dia_no
+    mov rdi, rbx
+    extern obj_is_true
+    call obj_is_true
+    push rax
+    push rax                            ; pad
+    mov rdi, rbx
+    extern obj_decref
+    DECREF_V rdi, rcx
+    pop rax
+    pop rcx
+    test eax, eax
+    jle .dia_no
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.dia_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC descr_is_abstract
+
+section .rodata
+dia_name: db "__isabstractmethod__", 0
+section .text
+
+;; ============================================================================
+;; descr_wrapper_isabstract(rdi = a staticmethod or classmethod, rsi = unused)
+;;   -> rax = Value: True or False
+;;
+;; Both keep what they wrap in the same slot, which is why one body serves the
+;; pair everywhere else in this file too.
+;; ============================================================================
+DEF_FUNC descr_wrapper_isabstract
+    mov rdi, [rdi + PyStaticMethodObject.sm_callable]
+    call descr_is_abstract
+    test eax, eax
+    jnz .dwa_true
+    lea rax, [rel bool_false]
+    jmp .dwa_done
+.dwa_true:
+    lea rax, [rel bool_true]
+.dwa_done:
+    inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+END_FUNC descr_wrapper_isabstract
+
+;; ============================================================================
+;; property_isabstract(rdi = a property, rsi = unused) -> rax = Value
+;;
+;; A property is abstract when ANY of its three accessors is, which is what
+;; lets `@property` sit over `@abstractmethod` and also over a concrete
+;; setter.
+;; ============================================================================
+PIA_SELF  equ 8
+PIA_FRAME equ 16            ; + 0 pushes = 16, and a call needs 8 more
+DEF_FUNC property_isabstract, PIA_FRAME
+    mov [rbp - PIA_SELF], rdi
+    mov rdi, [rdi + PyPropertyObject.prop_get]
+    call descr_is_abstract
+    test eax, eax
+    jnz .pia_true
+    mov rdi, [rbp - PIA_SELF]
+    mov rdi, [rdi + PyPropertyObject.prop_set]
+    call descr_is_abstract
+    test eax, eax
+    jnz .pia_true
+    mov rdi, [rbp - PIA_SELF]
+    mov rdi, [rdi + PyPropertyObject.prop_del]
+    call descr_is_abstract
+    test eax, eax
+    jnz .pia_true
+    lea rax, [rel bool_false]
+    jmp .pia_done
+.pia_true:
+    lea rax, [rel bool_true]
+.pia_done:
+    inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+END_FUNC property_isabstract
+
+;; ============================================================================
 ;; func_dunder_get(args, nargs) -> Value
 ;; staticmethod_dunder_get(args, nargs) -> Value
 ;; classmethod_dunder_get(args, nargs) -> Value
