@@ -1933,8 +1933,7 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     mov rdi, rcx
     lea rsi, [rel dunder_get]
     call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .ga_plain
     mov rdi, [rbp - GA_ATTR]
     mov rsi, [rbp - GA_OBJ]
@@ -2355,8 +2354,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rdi, rcx                  ; descriptor's type
     lea rsi, [rel dunder_set]
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .sa_no_property
 
     ; Has __set__! Call descriptor.__set__(obj, value)

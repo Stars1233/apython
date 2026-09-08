@@ -244,8 +244,7 @@ DEF_FUNC attr_is_data_descr, 8   ; 1 push below, so rsp stays 16-aligned
     mov rdi, rbx
     CSTRING rsi, "__set__"
     call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jnz .aidd_yes
     mov rdi, rbx
     CSTRING rsi, "__delete__"
@@ -848,8 +847,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     lea rsi, [rel ig_getattr_name]
     call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .really_not_found
     ; A __getattr__ explicitly set to None is not absent.  CPython calls it and
     ; the call fails as "'NoneType' object is not callable"; treating it as

@@ -265,7 +265,7 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     CSTRING rsi, "__fspath__"
     DUNDER_EXC_SAVE [rbp - PPA_EXC]
     call dunder_call_1
-    test edx, edx
+    test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
     jnz .ppa_got_fspath
     ; NULL means either "no __fspath__" or "__fspath__ raised", and reporting
     ; the second as a bad path type buries the real exception.
@@ -2694,7 +2694,7 @@ DEF_FUNC posix_fspath, PFS_FRAME
     CSTRING rsi, "__fspath__"
     DUNDER_EXC_SAVE [rbp - PFS_EXC]
     call dunder_call_1
-    test edx, edx
+    test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
     jz .pfs_no_result
 
     ; What __fspath__ answered has to be a path itself; CPython checks, and

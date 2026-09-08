@@ -972,8 +972,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     CSTRING rsi, "__int__"
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .int_from_int_sub_extract ; no __int__, extract int_value
     lea rcx, [rel int_dunder_int_msg]
     mov [rbp - BI_DUNDER], rcx  ; which dunder the deprecation names
@@ -1190,8 +1189,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rax + PyObject.ob_type]
     CSTRING rsi, "__index__"
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jnz .int_call_trunc_index
     ; No __index__ — raise TypeError with type name
     ; Get type name from __trunc__ result
@@ -1381,8 +1379,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, rcx                  ; type
     CSTRING rsi, "__index__"
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .int_base_no_index
     ; Call __index__(base_obj)
     mov rcx, [rax + PyObject.ob_type]
@@ -2260,7 +2257,7 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     CSTRING rsi, "__round__"
     extern dunder_call_1
     call dunder_call_1
-    test edx, edx
+    test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
     jz .rnd_type_error          ; no __round__, or it raised
     pop rbx
     leave
@@ -2948,7 +2945,7 @@ DEF_FUNC_LOCAL bcx_coerce, BCC_FRAME
     ; --- __complex__ ---
     CSTRING rsi, "__complex__"
     call dunder_call_1
-    test edx, edx
+    test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
     jz .bcc_try_float           ; absent, or it raised
     ; The result must be a complex.  Take its parts and release it: an exact
     ; complex or a subclass both answer, as CPython accepts both.

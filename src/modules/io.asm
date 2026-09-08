@@ -2263,8 +2263,8 @@ DEF_FUNC iobase_exit_fn
     ja .ibx_none
     lea rsi, [rel im_n_close]
     extern dunder_call_1
-    call dunder_call_1          ; -> (rax = payload, rdx = tag)
-    test edx, edx
+    call dunder_call_1
+    test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
     jz .ibx_maybe_raised
     mov rdi, rax
     V_PACK rdi, rdx

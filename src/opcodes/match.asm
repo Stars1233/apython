@@ -796,16 +796,14 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
     ; Try dict first
     mov rsi, [rsp + 8]         ; name
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .lfdg_found
 
     ; Try globals
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp + 8]         ; name
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .lfdg_found
 
     ; DECREF dict (owned ref from TOS) before builtins lookup
@@ -816,8 +814,7 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
     ; Try builtins
     mov rdi, [r12 + PyFrame.builtins]
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .lfdg_found_no_pop
 
     ; Not found

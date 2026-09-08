@@ -253,8 +253,7 @@ DEF_FUNC_LOCAL binop_subclass_first, BSF_FRAME
     mov rsi, [rbp - BSF_RNAME]
     extern dunder_lookup
     call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .bsf_no
     mov [rbp - BSF_LMETH], rax
     mov rdi, [rbp - BSF_LTYPE]

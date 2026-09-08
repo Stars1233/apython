@@ -2665,8 +2665,7 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, [rbx + PyObject.ob_type]
     lea rsi, [rel dunder_bool]
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .check_dunder_len       ; not found (TAG_NULL) → try __len__
 
     ; Check if __bool__ is None → TypeError

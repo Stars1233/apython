@@ -156,8 +156,7 @@ DEF_FUNC dunder_lookup_owner, DLO_FRAME
 
     mov rsi, r13
     call dict_get           ; dict_get(tp_dict, name_str) -> borrowed ref
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax               ; a Value already, and 0 is the miss
     jnz .found
 
 .try_base:
@@ -175,27 +174,31 @@ DEF_FUNC dunder_lookup_owner, DLO_FRAME
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; return one Value
-    ret
+    ret                     ; rax is the Value dict_get answered with
 
 .not_found:
-    RET_NULL                ; rax=0, edx=TAG_NULL(0)
+    xor eax, eax            ; a NULL Value
 
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC dunder_lookup_owner
 
 ;; ============================================================================
 ;; dunder_call_1(PyObject *self, const char *name) -> (rax=payload, rdx=tag)
 ;;
-;; Look up dunder on self's type, call with self as only arg.
-;; rdi = self (heap ptr), rsi = dunder name C string
-;; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
+;; dunder_call_1(rdi = self, rsi = dunder name C string) -> rax = the result
+;;   Value, or 0 when the dunder is absent, is not callable, or raised.
+;;
+;; This said "(rax=payload, rdx=tag)" and had not for some time; the code
+;; already ended `V_PACK rax, rdx`.  A stale signature here is not cosmetic --
+;; V_PACK happened to leave the tag in rdx as well, so SIX callers grew a
+;; `test edx, edx` against a second return value nobody had promised, and they
+;; all broke the moment the pack went away.  dunder_call_2's docblock records
+;; the same trap costing a real str.translate bug.  0 in rax is the answer.
 ;; ============================================================================
 DEF_FUNC dunder_call_1
     push rbx
@@ -209,12 +212,12 @@ DEF_FUNC dunder_call_1
     mov rdi, [rbx + PyObject.ob_type]
     ; rsi = name already set
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
-    jz .not_found
-    ; Guard: a dunder explicitly set to None, or any non-pointer, is not callable
-    test edx, TAG_RC_BIT
-    jz .not_found
+    ; Absent, or present but not a pointer, is not callable -- and for a Value
+    ; those are the same test: `ja` covers NULL and every immediate at once.
+    ; This was V_UNPACK plus two tag tests; dunder_lookup already returns the
+    ; Value, so the tag it synthesised was thrown away either way.
+    V_TEST_PTR rax, r9
+    ja .not_found
     IS_NONE rax, r9
     je .dunder_is_none
 
@@ -234,7 +237,6 @@ DEF_FUNC dunder_call_1
     push r15                ; pushed twice: rsp must stay 16-byte aligned
     DUNDER_KW_SAVE r15      ; at the call, and the args pointer was taken
     call rax                ; before these, so it is unaffected
-    V_UNPACK rax, rdx           ; tp_call returns a Value
     DUNDER_KW_RESTORE r15
     pop r15
     pop r15
@@ -246,8 +248,7 @@ DEF_FUNC dunder_call_1
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; return one Value
-    ret
+    ret                     ; rax is already the Value
 
 .dunder_is_none:
     ; A dunder explicitly set to None is not "absent": CPython installs the
@@ -269,8 +270,7 @@ DEF_FUNC dunder_call_1
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; return one Value
-    ret
+    ret                     ; rax is already the Value
 END_FUNC dunder_call_1
 
 ;; ============================================================================
@@ -300,12 +300,12 @@ DEF_FUNC dunder_call_2
     mov rdi, [rbx + PyObject.ob_type]
     mov rsi, rdx            ; name
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
-    jz .not_found
-    ; Guard: a dunder explicitly set to None, or any non-pointer, is not callable
-    test edx, TAG_RC_BIT
-    jz .not_found
+    ; Absent, or present but not a pointer, is not callable -- and for a Value
+    ; those are the same test: `ja` covers NULL and every immediate at once.
+    ; This was V_UNPACK plus two tag tests; dunder_lookup already returns the
+    ; Value, so the tag it synthesised was thrown away either way.
+    V_TEST_PTR rax, r9
+    ja .not_found
     IS_NONE rax, r9
     je .dunder_is_none
 
@@ -327,7 +327,6 @@ DEF_FUNC dunder_call_2
     push r15                ; pushed twice: rsp must stay 16-byte aligned
     DUNDER_KW_SAVE r15      ; at the call, and the args pointer was taken
     call rax                ; before these, so it is unaffected
-    V_UNPACK rax, rdx           ; tp_call returns a Value
     DUNDER_KW_RESTORE r15
     pop r15
     pop r15
@@ -339,8 +338,7 @@ DEF_FUNC dunder_call_2
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; return one Value
-    ret
+    ret                     ; rax is already the Value
 
 .dunder_is_none:
     ; A dunder explicitly set to None is not "absent": CPython installs the
@@ -362,14 +360,15 @@ DEF_FUNC dunder_call_2
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; return one Value
-    ret
+    ret                     ; rax is already the Value
 END_FUNC dunder_call_2
 
 ;; ============================================================================
 ;; dunder_call_3(PyObject *self, PyObject *arg1, PyObject *arg2, const char *name,
 ;;               int arg2_tag)
-;;   -> (rax=payload, rdx=tag)
+;;   -> rax = the result Value, or 0 when the dunder is absent, is not
+;;      callable, or raised.  As in dunder_call_1: this said "(rax=payload,
+;;      rdx=tag)" and did not mean it.
 ;;
 ;; Look up dunder on self's type, call with (self, arg1, arg2).
 ;; rdi = self (heap), rsi = arg1 (heap), rdx = arg2, rcx = dunder name,
@@ -392,12 +391,12 @@ DEF_FUNC dunder_call_3, 8            ; 5 pushes, so rsp is 16-aligned
     mov rdi, [rbx + PyObject.ob_type]
     mov rsi, rcx            ; name
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
-    jz .not_found
-    ; Guard: a dunder explicitly set to None, or any non-pointer, is not callable
-    test edx, TAG_RC_BIT
-    jz .not_found
+    ; Absent, or present but not a pointer, is not callable -- and for a Value
+    ; those are the same test: `ja` covers NULL and every immediate at once.
+    ; This was V_UNPACK plus two tag tests; dunder_lookup already returns the
+    ; Value, so the tag it synthesised was thrown away either way.
+    V_TEST_PTR rax, r9
+    ja .not_found
     IS_NONE rax, r9
     je .dunder_is_none
 
@@ -420,7 +419,6 @@ DEF_FUNC dunder_call_3, 8            ; 5 pushes, so rsp is 16-aligned
     push r15                ; pushed twice: rsp must stay 16-byte aligned
     DUNDER_KW_SAVE r15      ; at the call, and the args pointer was taken
     call rax                ; before these, so it is unaffected
-    V_UNPACK rax, rdx           ; tp_call returns a Value
     DUNDER_KW_RESTORE r15
     pop r15
     pop r15
@@ -433,8 +431,7 @@ DEF_FUNC dunder_call_3, 8            ; 5 pushes, so rsp is 16-aligned
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; return one Value
-    ret
+    ret                     ; rax is already the Value
 
 .dunder_is_none:
     ; A dunder explicitly set to None is not "absent": CPython installs the
@@ -457,8 +454,7 @@ DEF_FUNC dunder_call_3, 8            ; 5 pushes, so rsp is 16-aligned
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; return one Value
-    ret
+    ret                     ; rax is already the Value
 END_FUNC dunder_call_3
 
 ;; ============================================================================
@@ -511,11 +507,10 @@ DEF_FUNC obj_call_n, OCN_FRAME
     mov rdi, rax
     lea rsi, [rel dunder_call]
     call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
-    jz .not_callable
-    test edx, TAG_RC_BIT
-    jz .not_callable
+    ; As in dunder_call_1: absent and "present but not a pointer" are one
+    ; test on the Value dunder_lookup already returns.
+    V_TEST_PTR rax, r9
+    ja .not_callable
     mov [rbp - OCN_FN], rax
 
     cmp r13, OCN_MAX

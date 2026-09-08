@@ -343,8 +343,7 @@ DEF_FUNC builtin_next_fn, NX_FRAME
     lea rsi, [rel dunder_next]
     extern dunder_call_1
     call dunder_call_1
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    test rax, rax               ; dunder_call_1 answers with a Value; 0 is the miss
     jnz .next_got_val                  ; got a value
     ; NULL from __next__ — check for StopIteration in current_exception
     extern current_exception
@@ -2545,7 +2544,7 @@ DEF_FUNC builtin_aiter_fn, AIT_FRAME
     CSTRING rsi, "__aiter__"
     call dunder_lookup
     pop rdi
-    test edx, edx
+    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .aiter_type_error
     ; Call tp_iter
     mov rax, [rdi + PyObject.ob_type]
