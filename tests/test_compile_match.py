@@ -145,11 +145,22 @@ for source in ("case 1 * 2", "case 1 + 2", "case 2j + 1", "case +1 + 2j",
     except SyntaxError as e:
         print(source, "->", e.msg)
 
-# A name on the left is refused by both, with different wording: CPython says
-# "invalid syntax" and this says "expected ':'", because the name is a capture
-# pattern and the operator is simply what follows it.
-try:
-    compile("match 1:\n case x + 0j: pass", "<s>", "exec")
-    print("name + imaginary NOT REFUSED")
-except SyntaxError:
-    print("name + imaginary refused")
+# A name on the left is a capture pattern, and the operator is simply what
+# follows it -- so the value-pattern parser never sees the shape it would
+# reject, and the error is the one a leftover token gets anywhere else.
+# CPython words a missing colon and a leftover token differently, and the
+# token being a NEWLINE is what separates them.
+for source in ("case x + 0j", "case x * 2", "case x y", "case 1 2",
+               "case x.y + 0j", "case [1] + [2]", "case (x) + 1"):
+    try:
+        compile("match 1:\n " + source + ": pass", "<s>", "exec")
+        print(source, "-> NOT REFUSED")
+    except SyntaxError as e:
+        print(source, "->", e.msg)
+
+for source in ("match 1:\n case x\n", "match 1:\n case x\n  pass\n"):
+    try:
+        compile(source, "<s>", "exec")
+        print("no colon -> NOT REFUSED")
+    except SyntaxError as e:
+        print("no colon ->", e.msg)

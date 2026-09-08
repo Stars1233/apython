@@ -297,6 +297,7 @@ DEF_FUNC_LOCAL par_case, PC2_FRAME
     call ast_mark
     mov [rbp - PC2_MARK], rax
     mov rdi, rbx
+    xor esi, esi
     call par_suite_into
     test eax, eax
     jz .fail

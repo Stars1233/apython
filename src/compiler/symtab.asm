@@ -538,6 +538,15 @@ DEF_FUNC sym_visit, SV_FRAME
 ;; enclosing function -- or a global at module level -- and be declared in
 ;; every comprehension scope in between.  Without that, `[y := i for i in r]`
 ;; left y visible only inside the comprehension.
+.ne_in_class:
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "assignment expression within a comprehension cannot be used in a class body"
+    xor ecx, ecx
+    xor r8d, r8d
+    call comp_error
+    jmp .fail
+
 .namedexpr:
     mov rax, [rbp - SV_NPTR]
     mov edx, [rax + AstNode.b]          ; the value first
@@ -559,6 +568,21 @@ DEF_FUNC sym_visit, SV_FRAME
     mov [rbp - SV_N], rcx
     jmp .ne_climb
 .ne_found:
+    ; A class body is not somewhere a comprehension can bind into: the
+    ; comprehension has a scope of its own and a class body's namespace is not
+    ; a scope its children can see, so CPython refuses the combination
+    ; outright rather than binding somewhere surprising.  Only when the climb
+    ; actually left a comprehension -- a bare walrus in a class body is fine.
+    mov rcx, [rbp - SV_N]
+    cmp rcx, r12
+    je .ne_not_in_class
+    mov rdi, rbx
+    mov rsi, rcx
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_CLASS
+    je .ne_in_class
+.ne_not_in_class:
+
     ; The name first: whether the target is nonlocal or global depends on what
     ; the enclosing scope has already SAID about it, not only on what kind of
     ; scope it is.

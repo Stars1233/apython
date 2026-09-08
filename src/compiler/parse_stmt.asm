@@ -1568,7 +1568,8 @@ END_FUNC psu_no_block
 ;; ============================================================================
 PSU_MARK  equ 16
 PSU_LINE  equ 24
-PSU_FRAME equ 24          ; + 1 push = 32
+PSU_HARD  equ 32          ; the caller is at a grammar cut
+PSU_FRAME equ 40          ; + 1 push = 48
 DEF_FUNC par_suite, PSU_FRAME
     push rbx
     mov rbx, rdi
@@ -1576,9 +1577,24 @@ DEF_FUNC par_suite, PSU_FRAME
     TOK_POS rax
     mov [rbp - PSU_LINE], rcx
 
+    ; A missing colon and a LEFTOVER token are different errors: `if 1\n` is
+    ; "expected ':'", `if 1 2:` is plain "invalid syntax".  A NEWLINE is what
+    ; separates the two.  esi = 1 says the caller is at a grammar CUT -- `try`
+    ; and `def` commit to the colon -- and keeps the first message either way.
+    mov [rbp - PSU_HARD], rsi
+    mov rdi, rbx
+    call par_kind
+    CSTRING rdx, "expected ':'"
+    cmp qword [rbp - PSU_HARD], 0
+    jne .psu_have_msg
+    cmp eax, TOK_NEWLINE
+    je .psu_have_msg
+    cmp eax, TOK_ENDMARKER
+    je .psu_have_msg
+    CSTRING rdx, "invalid syntax"
+.psu_have_msg:
     mov rdi, rbx
     mov esi, TOK_COLON
-    CSTRING rdx, "expected ':'"
     call par_expect
     test eax, eax
     jz .fail
@@ -1755,6 +1771,7 @@ DEF_FUNC_LOCAL ps_if, PIF_FRAME
 
     SUITE_FOR "'if' statement", dword [rbp - PIF_LINE]
     mov rdi, rbx
+    xor esi, esi
     call par_suite
     test rax, rax
     jz .fail
@@ -1772,6 +1789,7 @@ DEF_FUNC_LOCAL ps_if, PIF_FRAME
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
+    xor esi, esi
     call par_suite
     test rax, rax
     jz .fail
@@ -1845,6 +1863,7 @@ DEF_FUNC_LOCAL ps_while, PIF_FRAME
 
     SUITE_FOR "'while' statement", dword [rbp - PIF_LINE]
     mov rdi, rbx
+    xor esi, esi
     call par_suite
     test rax, rax
     jz .fail
@@ -1859,6 +1878,7 @@ DEF_FUNC_LOCAL ps_while, PIF_FRAME
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
+    xor esi, esi
     call par_suite
     test rax, rax
     jz .fail
@@ -1925,6 +1945,7 @@ DEF_FUNC_LOCAL ps_for, PIF_FRAME
 
     SUITE_FOR "'for' statement", dword [rbp - PIF_LINE]
     mov rdi, rbx
+    xor esi, esi
     call par_suite
     test rax, rax
     jz .fail
@@ -1939,6 +1960,7 @@ DEF_FUNC_LOCAL ps_for, PIF_FRAME
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
+    xor esi, esi
     call par_suite
     test rax, rax
     jz .fail
@@ -2720,6 +2742,7 @@ DEF_FUNC_LOCAL ps_def, PDF_FRAME
     mov [rbp - PDF_MARK], rax
     SUITE_FOR "function definition", dword [rbp - PDF_LINE]
     mov rdi, rbx
+    mov esi, 1
     call par_suite_into
     test eax, eax
     jz .fail
@@ -2765,11 +2788,25 @@ END_FUNC ps_def
 ;; Like par_suite, but pushes the statements onto the caller's pending list
 ;; instead of wrapping them in a block node.
 ;; ============================================================================
-DEF_FUNC par_suite_into, 8
+PSI_HARD  equ 8
+PSI_FRAME equ 24          ; + 1 push = 32, 16-aligned
+DEF_FUNC par_suite_into, PSI_FRAME
     push rbx
     mov rbx, rdi
-    mov esi, TOK_COLON
+    ; par_suite's two errors and its cut flag.
+    mov [rbp - PSI_HARD], rsi
+    call par_kind
     CSTRING rdx, "expected ':'"
+    cmp qword [rbp - PSI_HARD], 0
+    jne .psi_have_msg
+    cmp eax, TOK_NEWLINE
+    je .psi_have_msg
+    cmp eax, TOK_ENDMARKER
+    je .psi_have_msg
+    CSTRING rdx, "invalid syntax"
+.psi_have_msg:
+    mov rdi, rbx
+    mov esi, TOK_COLON
     call par_expect
     test eax, eax
     jz .fail
@@ -3310,6 +3347,7 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     mov [rbp - PT2_MARK], rax
     SUITE_FOR "'try' statement", dword [rbp - PT2_LINE]
     mov rdi, rbx
+    mov esi, 1
     call par_suite_into
     test eax, eax
     jz .fail
@@ -3382,6 +3420,7 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     mov [rbp - PT2_BODY], rax
     SUITE_FOR "'except' statement", dword [rbp - PT2_HLINE]
     mov rdi, rbx
+    mov esi, 1
     call par_suite_into
     test eax, eax
     jz .fail
@@ -3424,6 +3463,7 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
+    mov esi, 1
     call par_suite
     test rax, rax
     jz .fail
@@ -3438,6 +3478,7 @@ DEF_FUNC_LOCAL ps_try, PT2_FRAME
     mov rdi, rbx
     call par_advance
     mov rdi, rbx
+    mov esi, 1
     call par_suite
     test rax, rax
     jz .fail
@@ -3622,6 +3663,7 @@ DEF_FUNC_LOCAL ps_with, PT2_FRAME
 .with_body:
     SUITE_FOR "'with' statement", dword [rbp - PT2_LINE]
     mov rdi, rbx
+    xor esi, esi
     call par_suite
     test rax, rax
     jz .fail
@@ -3732,6 +3774,7 @@ DEF_FUNC_LOCAL ps_class, PC_FRAME
 
     SUITE_FOR "class definition", dword [rbp - PC_LINE]
     mov rdi, rbx
+    xor esi, esi
     call par_suite_into
     push rax
     mov rax, [rbp - PC_PRIV]

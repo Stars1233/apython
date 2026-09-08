@@ -124,3 +124,35 @@ def two_deep():
 
 
 print(two_deep(), H)
+
+
+# A comprehension has a scope of its own and a class body's namespace is not
+# one its children can see, so a walrus inside a comprehension in a class body
+# has nowhere to bind.  CPython refuses the combination outright; this used to
+# accept it and bind somewhere surprising.
+def refuse(source):
+    try:
+        compile(source, "<s>", "exec")
+        return "NOT REFUSED"
+    except SyntaxError as e:
+        return e.msg
+
+
+print(refuse("class K:\n    [A := 2 for _ in range(1)]\n"))
+print(refuse("class K:\n    {A := 2 for _ in range(1)}\n"))
+print(refuse("class K:\n    [[A := 2 for _ in range(1)] for _ in range(1)]\n"))
+
+# A bare walrus in a class body is fine -- it binds in the class namespace --
+# and so is one inside a method, where the enclosing scope is a function.
+print(refuse("class K:\n    A = (B := 2)\n"))
+print(refuse("class K:\n    def m(self):\n        [A := 2 for _ in range(1)]\n"))
+print(refuse("def f():\n    [A := 2 for _ in range(1)]\n"))
+print(refuse("[A := 2 for _ in range(1)]\n"))
+print(refuse("class K:\n    [x for x in range(1)]\n"))
+
+
+class ClassBodyWalrus:
+    VALUE = (SEEN := 7)
+
+
+print(ClassBodyWalrus.VALUE, ClassBodyWalrus.SEEN)
