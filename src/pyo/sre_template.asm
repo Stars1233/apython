@@ -116,7 +116,7 @@ DEF_FUNC_LOCAL tp_error, TPE_FRAME
     inc rbx
     mov rax, rdx
     lea rcx, [rbp - TPE_DIGITS]
-    mov r10, 10
+    mov r10d, 10
     xor r8, r8                  ; digits written
 .tpe_num_loop:
     xor rdx, rdx
@@ -141,7 +141,7 @@ DEF_FUNC_LOCAL tp_error, TPE_FRAME
     add rbx, 2
     cmp rdx, 40
     jbe .tpe_quote_len_ok
-    mov rdx, 40
+    mov edx, 40
 .tpe_quote_len_ok:
     xor eax, eax
 .tpe_quote_copy:
@@ -596,7 +596,7 @@ DEF_FUNC sre_template_parse, TP_FRAME
     cmp cl, 'z'
     ja .tp_bad_char
 .tp_name_head_ok:
-    mov r11, 1
+    mov r11d, 1
 .tp_name_scan:
     cmp r11, [rbp - TP_NAMEL]
     jge .tp_name_ok

@@ -286,7 +286,7 @@ DEF_FUNC str_method_isalpha
     ; str_pred_impl in methods/str_case.asm, over the same generated flag
     ; table the case mappings read.
     mov rdi, [rdi]
-    mov esi, 0
+    xor esi, esi
     extern str_pred_impl
     call str_pred_impl
     RET_BOOL_RAX

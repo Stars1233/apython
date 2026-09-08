@@ -524,7 +524,7 @@ global super_construct
 DEF_FUNC super_construct, SN_FRAME
     mov qword [rbp - SN_OBJ], 0
     mov qword [rbp - SN_OBJTY], 0
-    cmp rdx, 0
+    test rdx, rdx
     je .sn_zero_arg
     cmp rdx, 1
     je .sn_one_arg
@@ -534,7 +534,7 @@ DEF_FUNC super_construct, SN_FRAME
     lea rcx, [rel sup_msg_buf + SUP_MSG_MAX]
     mov byte [rcx], 0
     mov rax, rdx
-    mov r8, 10
+    mov r8d, 10
 .sn_digits:
     xor edx, edx
     div r8

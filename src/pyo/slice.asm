@@ -406,7 +406,7 @@ DEF_FUNC slice_indices
     call pyobj_to_i64
     jmp .have_step
 .step_is_none:
-    mov rax, 1
+    mov eax, 1
 .have_step:
     ; A zero step reaches `neg rcx` and then `div rcx` in every caller's
     ; slice loop: "abc"[::0] and [10,11][10:0:0] were SIGFPE.  One check

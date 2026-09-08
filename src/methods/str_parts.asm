@@ -174,7 +174,7 @@ DEF_FUNC str_method_partition, PT_FRAME
     mov r13, rax             ; r13 = after
 
     ; Create 3-tuple
-    mov rdi, 3
+    mov edi, 3
     call tuple_new
     mov rbx, rax             ; rbx = tuple
 
@@ -212,7 +212,7 @@ DEF_FUNC str_method_partition, PT_FRAME
     call str_new_heap
     mov r13, rax             ; empty2
 
-    mov rdi, 3
+    mov edi, 3
     call tuple_new
     mov rbx, rax
 
@@ -264,7 +264,7 @@ DEF_FUNC str_method_rpartition, PT_FRAME
     js .rpart_not_found
 
 .rpart_loop:
-    cmp rax, 0
+    test rax, rax
     jl .rpart_not_found
     push rax
     push rcx
@@ -306,7 +306,7 @@ DEF_FUNC str_method_rpartition, PT_FRAME
     call str_new_heap
     mov r13, rax
 
-    mov rdi, 3
+    mov edi, 3
     call tuple_new
     mov rbx, rax
 
@@ -343,7 +343,7 @@ DEF_FUNC str_method_rpartition, PT_FRAME
     call str_new_heap
     mov r13, rax
 
-    mov rdi, 3
+    mov edi, 3
     call tuple_new
     mov rbx, rax
 
@@ -384,7 +384,7 @@ DEF_FUNC str_method_expandtabs, ET_FRAME
     mov r12, [rbx + PyStrObject.ob_size]
 
     ; Get tabsize (default 8)
-    mov r13, 8
+    mov r13d, 8
     cmp rsi, 2
     jl .et_have_tab
     mov rax, rdi
@@ -1046,7 +1046,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
 .trn_call_sub:
     ; Past the end of a bounded table: a miss, without asking.
     mov rdx, [rbp - TRN_LEN]
-    cmp rdx, 0
+    test rdx, rdx
     jl .trn_do_sub
     cmp rbx, rdx
     jge .trn_keep
@@ -1132,7 +1132,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     mov rdi, r12
     V_UNPACK rdi, rdx
     call obj_as_index           ; not V_TO_I64: it may be a heap int
-    cmp rax, 0
+    test rax, rax
     jl .trn_range
     cmp rax, 0x10ffff
     jg .trn_range
@@ -1456,7 +1456,7 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     jne .smt_key_len
     push rdi
     lea rdi, [rdi + PyStrObject.data]
-    mov rsi, 4
+    mov esi, 4
     call trn_decode_cp
     pop rdi
     V_PACK_I64 rax, rcx
@@ -2388,7 +2388,7 @@ DEF_FUNC_LOCAL see_append_u64
     mov rcx, rsp
     add rcx, 24
     mov byte [rcx], 0
-    mov r10, 10
+    mov r10d, 10
 .sau_loop:
     xor edx, edx
     div r10

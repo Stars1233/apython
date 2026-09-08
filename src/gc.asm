@@ -409,7 +409,7 @@ GCU_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
 DEF_FUNC_LOCAL gcd_putu, GCU_FRAME
     mov rax, rdi
     lea rcx, [rbp - GCU_END]
-    mov r8, 10
+    mov r8d, 10
 .gcu_loop:
     xor edx, edx
     div r8

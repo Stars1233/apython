@@ -968,7 +968,7 @@ DEF_FUNC_LOCAL par_value_pattern, VP_FRAME
     cmp eax, TOK_LPAR
     je .class_pattern
 
-    mov edx, 0
+    xor edx, edx
     mov rax, [rbp - VP_KIND]
     cmp eax, TOK_NONE
     je .identity

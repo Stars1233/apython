@@ -537,7 +537,7 @@ DEF_FUNC par_eval_root, 16      ; + 2 pushes = 32
     push r12
     mov rbx, rdi
 
-    mov esi, 0                          ; BP_NONE
+    xor esi, esi                    ; BP_NONE
     call par_expr
     test rax, rax
     jz .fail
@@ -613,7 +613,7 @@ DEF_FUNC par_func_type_root, 48         ; + 2 pushes = 64, 16-aligned
 
 .pft_arg_loop:
     mov rdi, rbx
-    mov esi, 0                          ; BP_NONE
+    xor esi, esi                    ; BP_NONE
     call par_expr
     test rax, rax
     jz .pft_fail
@@ -648,7 +648,7 @@ DEF_FUNC par_func_type_root, 48         ; + 2 pushes = 64, 16-aligned
     jz .pft_fail
 
     mov rdi, rbx
-    mov esi, 0                          ; BP_NONE
+    xor esi, esi                    ; BP_NONE
     call par_expr
     test rax, rax
     jz .pft_fail

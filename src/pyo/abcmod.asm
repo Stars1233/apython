@@ -898,7 +898,7 @@ DEF_FUNC type_abstract_error, TAE_FRAME
     mov [rbp - TAE_COUNT], r13
     cmp r13, 2
     jl .tae_build
-    mov r8, 1                   ; i
+    mov r8d, 1                      ; i
 .tae_sort_outer:
     cmp r8, r13
     jge .tae_build

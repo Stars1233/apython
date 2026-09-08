@@ -677,7 +677,7 @@ DEF_FUNC str_mod_impl, SM_FRAME
     test rax, rax
     jnz .hex_nonzero
     mov byte [rsi], '0'
-    mov rax, 1
+    mov eax, 1
     pop rbx
     ret
 .hex_nonzero:
@@ -1158,7 +1158,7 @@ DEF_FUNC str_mod_impl, SM_FRAME
     xor r12d, r12d              ; digits pushed
 .sm_sc_star_split:
     xor edx, edx
-    mov rbx, 10
+    mov ebx, 10
     div rbx                     ; rax = quotient, rdx = digit
     add rdx, '0'
     push rdx
@@ -1338,7 +1338,7 @@ DEF_FUNC str_mod_impl, SM_FRAME
     V_UNPACK rdi, rdx
     extern int_to_i64
     call int_to_i64
-    cmp rax, 0
+    test rax, rax
     jl .sm_sc_bc_range
     cmp rax, 255
     ja .sm_sc_bc_range

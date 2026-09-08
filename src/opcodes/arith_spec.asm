@@ -499,7 +499,7 @@ DEF_FUNC_BARE op_binary_op_pow_int
     sub rdx, [rel v_int_bias]   ; the base
     mov rsi, rdx                ; b, the running square
     mov rcx, rax                ; e, the remaining exponent
-    mov rax, 1                  ; the running result
+    mov eax, 1                      ; the running result
 .pow_int_loop:
     test rcx, rcx
     jz .pow_int_fits

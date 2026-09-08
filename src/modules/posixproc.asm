@@ -106,7 +106,7 @@ DEF_FUNC posix_fork, 24                 ; + 1 push = 32, 16-aligned
 
     call sys_fork
     mov [rbp - PFK_PID], rax
-    cmp rax, 0
+    test rax, rax
     jl .pfk_failed
 
     mov rdi, [rel pm_atfork_parent]

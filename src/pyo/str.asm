@@ -1907,7 +1907,7 @@ DEF_FUNC str_getitem, 8            ; 3 pushes, so rsp is 16-aligned
     ; Bounds check
     cmp r12, [rbx + PyStrObject.ob_length]
     jge .index_error
-    cmp r12, 0
+    test r12, r12
     jl .index_error
 
     ; Where the code point starts, and how many bytes it occupies.

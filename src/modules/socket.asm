@@ -448,7 +448,7 @@ DEF_FUNC sock_accept_fn, SAC_FRAME
     jz .sa_fail
     mov rbx, rax                    ; the address bytes
 
-    mov rdi, 2
+    mov edi, 2
     call tuple_new
     test rax, rax
     jz .sa_fail
@@ -782,7 +782,7 @@ DEF_FUNC sock_recvfrom_fn, SRF_FRAME
     jz .srf_fail
     mov rbx, rax
 
-    mov rdi, 2
+    mov edi, 2
     call tuple_new
     test rax, rax
     jz .srf_fail
@@ -991,7 +991,7 @@ DEF_FUNC sock_socketpair_fn, 24
     call sys_socketpair
     SOCK_CHECK rax
 
-    mov rdi, 2
+    mov edi, 2
     call tuple_new
     test rax, rax
     jz .ssp_fail

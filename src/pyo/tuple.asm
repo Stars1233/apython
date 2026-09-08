@@ -149,7 +149,7 @@ DEF_FUNC_BARE tuple_getitem
     ; Bounds check
     cmp rsi, [rdi + PyTupleObject.ob_size]
     jge .index_error
-    cmp rsi, 0
+    test rsi, rsi
     jl .index_error
     mov rax, [rdi + PyTupleObject.ob_item]
     mov rax, [rax + rsi * 8]
@@ -317,7 +317,7 @@ DEF_FUNC tuple_hash
 
     mov r12, [rbx + PyTupleObject.ob_size]  ; r12 = item count
     xor r13d, r13d              ; r13 = index
-    mov r14, 0x345678            ; r14 = hash accumulator
+    mov r14d, 0x345678              ; r14 = hash accumulator
 
 .hash_loop:
     cmp r13, r12
@@ -432,8 +432,7 @@ DEF_FUNC tuple_getslice
     ; Copy payloads (contiguous)
     mov rsi, [rbx + PyTupleObject.ob_item]
     mov rax, r13
-    shl rax, 3
-    add rsi, rax              ; src payloads + start*8
+    lea rsi, [rsi + rax*8]              ; src payloads + start*8
     mov rdi, [rbp - TGS_NEW]
     mov rdi, [rdi + PyTupleObject.ob_item]  ; dst payloads
     mov rdx, [rbp - TGS_LEN]         ; slicelength

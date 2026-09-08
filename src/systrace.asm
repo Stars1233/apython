@@ -115,7 +115,7 @@ section .text
 global eval_hooks_set
 DEF_FUNC eval_hooks_set
     mov ecx, edi
-    mov rax, 1
+    mov eax, 1
     shl rax, cl
     test esi, esi
     jz .ehs_clear

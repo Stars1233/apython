@@ -275,7 +275,7 @@ DEF_FUNC sre_pattern_match_method
     lea rdx, [rsi - 1]         ; user nargs
 
     ; Get string arg
-    cmp rdx, 0
+    test rdx, rdx
     je .match_error
     mov rsi, [r12]             ; string payload
 
@@ -330,7 +330,7 @@ DEF_FUNC sre_pattern_search_method, 8            ; 3 pushes, so rsp is 16-aligne
     lea r12, [rdi + 8]         ; user args
     lea r13, [rsi - 1]         ; user nargs
 
-    cmp r13, 0
+    test r13, r13
     je .search_error
     mov rsi, [r12]             ; string payload
 
@@ -379,7 +379,7 @@ DEF_FUNC sre_pattern_fullmatch_method, 8            ; 3 pushes, so rsp is 16-ali
     lea r12, [rdi + 8]         ; user args
     lea r13, [rsi - 1]         ; user nargs
 
-    cmp r13, 0
+    test r13, r13
     je .fm_error
     mov rsi, [r12]             ; string payload
 
@@ -582,7 +582,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     mov rax, [rdi]             ; pattern = args[0] payload
     mov [rbp - FA_PAT], rax
     lea rdx, [rsi - 1]         ; user nargs
-    cmp rdx, 0
+    test rdx, rdx
     je .fa_error
 
     mov rax, [rdi + 8]       ; string = args[1] payload
@@ -642,7 +642,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     jz .fa_done
 
     ; Found a match. What to append depends on groups.
-    cmp r15d, 0
+    test r15d, r15d
     je .fa_no_groups
     cmp r15d, 1
     je .fa_one_group
@@ -1750,7 +1750,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     mov rax, [rdi]             ; pattern = args[0] payload
     mov [rbp - SP_PAT], rax
     lea rdx, [rsi - 1]         ; user nargs
-    cmp rdx, 0
+    test rdx, rdx
     je .split_error
 
     mov rax, [rdi + 8]       ; string = args[1] payload
@@ -2335,7 +2335,7 @@ DEF_FUNC sre_pattern_finditer_method, 8            ; 3 pushes, so rsp is 16-alig
     lea r12, [rdi + 8]         ; user args
     lea r13, [rsi - 1]         ; user nargs
 
-    cmp r13, 0
+    test r13, r13
     je .fi_error
 
     ; string = user_args[0]

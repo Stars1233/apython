@@ -129,7 +129,7 @@ CLOCK_PROCESS_CPUTIME_ID equ 2
 TS_SEC    equ 16
 TS_NSEC   equ 8
 DEF_FUNC time_process_time_func, 16
-    cmp rsi, 0
+    test rsi, rsi
     jne .pt_error
 
     ; clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &timespec)
@@ -161,7 +161,7 @@ END_FUNC time_process_time_func
 ;; Returns monotonic clock as a float (seconds)
 ;; ============================================================================
 DEF_FUNC time_monotonic_func, 16
-    cmp rsi, 0
+    test rsi, rsi
     jne .mono_error
 
     mov eax, 228            ; __NR_clock_gettime
@@ -193,7 +193,7 @@ END_FUNC time_monotonic_func
 ;; stdlib ask for this name rather than that one.
 ;; ============================================================================
 DEF_FUNC time_perf_counter_func, 16
-    cmp rsi, 0
+    test rsi, rsi
     jne .perf_error
 
     mov eax, 228            ; __NR_clock_gettime
@@ -222,7 +222,7 @@ END_FUNC time_perf_counter_func
 ;; the one that cannot go backwards.
 ;; ============================================================================
 DEF_FUNC time_time_func, 16
-    cmp rsi, 0
+    test rsi, rsi
     jne .time_error
 
     mov eax, 228            ; __NR_clock_gettime
@@ -849,7 +849,7 @@ DEF_FUNC_LOCAL time_read_struct, TRS_FRAME
     mov rdi, [rax + 6*8]
     V_UNPACK rdi, rdx
     call obj_as_index
-    add rax, 1
+    inc rax
     cdq
     mov ecx, 7
     idiv ecx

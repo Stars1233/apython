@@ -1459,7 +1459,7 @@ DEF_FUNC par_finish_list, PF_FRAME
     xor r8d, r8d
     xor r9d, r9d
     mov rcx, rdx                        ; lineno
-    mov rdx, 0                          ; subkind
+    xor edx, edx                    ; subkind
     call ast_make
     mov [rbp - PF_NODE], rax
     mov rdi, rbx

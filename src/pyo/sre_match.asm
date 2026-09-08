@@ -104,7 +104,7 @@ DEF_FUNC sre_match_new, MN_FRAME
     mov qword [rbx + SRE_MatchObject.lastgroup], 0
     mov rax, [rbp - MN_STATE]
     mov rcx, [rax + SRE_State.lastindex]
-    cmp rcx, 0
+    test rcx, rcx
     jle .mn_no_lastgroup
     ; Check if pattern has indexgroup tuple
     mov rax, [rbp - MN_PAT]
@@ -143,7 +143,7 @@ DEF_FUNC sre_match_new, MN_FRAME
     ; State marks[1] = MARK 1 from bytecode = group 1 end
     ; etc. These go into match.marks[2..] (after group 0 pair)
     mov r13, [rdi + SRE_State.marks_size]
-    cmp r13, 0
+    test r13, r13
     je .mn_no_marks
 
     ; Source: state marks from index 0
@@ -347,7 +347,7 @@ END_FUNC sre_match_repr
 ;; Match objects are always truthy.
 ;; ============================================================================
 DEF_FUNC_BARE sre_match_bool
-    mov rax, 1
+    mov eax, 1
     ret
 END_FUNC sre_match_bool
 

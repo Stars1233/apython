@@ -175,7 +175,7 @@ DEF_FUNC int_true_divide, ITD_FRAME
     ; shift = 55 - (abits - bbits)
     mov rax, rbx
     sub rax, r12
-    mov rcx, 55
+    mov ecx, 55
     sub rcx, rax
     mov [rbp - ITD_SHIFT], rcx
     test rcx, rcx
@@ -234,7 +234,7 @@ DEF_FUNC int_true_divide, ITD_FRAME
 
     ; half = 1 << (drop - 1)
     lea rdi, [rbp - ITD_A]
-    mov rsi, 1
+    mov esi, 1
     call __gmpz_set_si wrt ..plt
     lea rdi, [rbp - ITD_A]
     lea rsi, [rbp - ITD_A]

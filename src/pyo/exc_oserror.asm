@@ -235,7 +235,7 @@ DEF_FUNC_LOCAL oserror_append, OSA_FRAME
     mov rdx, [rax + PyStrObject.ob_size]
     cmp rdx, 120
     jle .osa_len_ok
-    mov rdx, 120                    ; one field cannot fill the buffer
+    mov edx, 120                    ; one field cannot fill the buffer
     ; Back off to a character boundary: cutting at 120 bytes landed in the
     ; middle of a UTF-8 sequence and left the message ending in a lone
     ; continuation byte, which is not a str at all.

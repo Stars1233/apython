@@ -632,25 +632,25 @@ DEF_FUNC structseq_raise_length
     mov r12, rdx
     mov rsi, [rdi + PyTypeObject.tp_name]
     lea rdi, [rel ssq_msgbuf]
-    mov rdx, 60
+    mov edx, 60
     call ssq_copy
     mov rdi, rax
     lea rsi, [rel ssq_takes]
-    mov rdx, 20
+    mov edx, 20
     call ssq_copy
     mov rdi, rax
     mov rsi, rbx
     call ssq_append_i64
     mov rdi, rax
     lea rsi, [rel ssq_seq_open]
-    mov rdx, 20
+    mov edx, 20
     call ssq_copy
     mov rdi, rax
     mov rsi, r12
     call ssq_append_i64
     mov rdi, rax
     lea rsi, [rel ssq_seq_close]
-    mov rdx, 20
+    mov edx, 20
     call ssq_copy
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel ssq_msgbuf]
@@ -680,7 +680,7 @@ DEF_FUNC_LOCAL ssq_append_i64   ; (rdi = dest, rsi = value) -> the NUL
     mov rax, rsi
     lea r8, [rel ssq_numbuf + 24]
     mov byte [r8], 0
-    mov r9, 10
+    mov r9d, 10
 .sqa_loop:
     xor edx, edx
     div r9

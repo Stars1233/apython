@@ -1336,7 +1336,7 @@ DEF_FUNC msg_append_i64
     test rax, rax
     jz .mai_emit
     xor edx, edx
-    mov r8, 10
+    mov r8d, 10
     div r8
     add dl, '0'
     dec rcx
@@ -2316,7 +2316,7 @@ DEF_FUNC obj_binary_op, OBO_FRAME
     ; sq_concat for +, sq_repeat for *, off the left operand -- what makes
     ; sum(list_of_lists, []) work.
     mov rcx, [rbp - OBO_OP]
-    cmp rcx, 0                  ; NB_ADD
+    test rcx, rcx                   ; NB_ADD
     je .obo_seq_have_op
     cmp rcx, 5                  ; NB_MULTIPLY
     jne .obo_dunder

@@ -163,7 +163,7 @@ DEF_FUNC_BARE bytes_getitem
     ; Bounds check
     cmp rsi, [rdi + PyBytesObject.ob_size]
     jge .index_error
-    cmp rsi, 0
+    test rsi, rsi
     jl .index_error
 
     ; Get byte and return as SmallInt
@@ -1045,7 +1045,7 @@ DEF_FUNC_LOCAL bd_append_i64    ; (rdi = dest, rsi = n) -> rax = the NUL
     mov rax, rsi
     lea r8, [rel bd_numbuf + 24]
     mov byte [r8], 0
-    mov r9, 10
+    mov r9d, 10
 .bda_loop:
     xor edx, edx
     div r9
@@ -2809,7 +2809,7 @@ DEF_FUNC_LOCAL bls_item_byte, BIB_FRAME
     call obj_as_index
 
 .bib_check:
-    cmp rax, 0
+    test rax, rax
     jl .bib_range
     cmp rax, 255
     jg .bib_range
@@ -3303,7 +3303,7 @@ END_FUNC bytes_type_call
 ;; constructor has to initialise it or a new object reads a stale value.
 ;; Nothing hashes bytes in a hot loop.
 ;; ============================================================================
-DEF_FUNC bytes_hash
+DEF_FUNC_BARE bytes_hash
     mov rcx, [rdi + PyBytesObject.ob_size]
     lea rsi, [rdi + PyBytesObject.data]
     mov rax, 0xcbf29ce484222325     ; FNV offset basis
@@ -3341,10 +3341,8 @@ DEF_FUNC bytes_hash
     jne .bh_out
     mov rax, -2
 .bh_out:
-    leave
     ret
 END_FUNC bytes_hash
-
 section .data
 
 ; bytes type object

@@ -352,8 +352,7 @@ DEF_FUNC ar_node, ARN_FRAME
     ; 6 a, 7 b, 8 c -- each read the way this kind's row says.
     lea rcx, [rel ar_fieldkinds]
     mov rdx, [rbp - ARN_KIND]
-    shl rdx, 2
-    add rcx, rdx
+    lea rcx, [rcx + rdx*4]
     mov rdi, [rbp - ARN_COMP]
     mov esi, [rbx + AstNode.a]
     movzx edx, byte [rcx]

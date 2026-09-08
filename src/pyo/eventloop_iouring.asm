@@ -149,7 +149,7 @@ DEF_FUNC uring_init
     mov edx, PROT_READ | PROT_WRITE
     mov ecx, MAP_SHARED | MAP_POPULATE
     mov r8d, ebx
-    mov r9, 0x10000000         ; IORING_OFF_SQES
+    mov r9d, 0x10000000             ; IORING_OFF_SQES
     call sys_mmap
     cmp rax, -1
     je .ui_unmap_sq
@@ -168,7 +168,7 @@ DEF_FUNC uring_init
     mov edx, PROT_READ | PROT_WRITE
     mov ecx, MAP_SHARED | MAP_POPULATE
     mov r8d, ebx
-    mov r9, 0x8000000          ; IORING_OFF_CQ_RING
+    mov r9d, 0x8000000              ; IORING_OFF_CQ_RING
     call sys_mmap
     cmp rax, -1
     je .ui_unmap_sqes
@@ -352,7 +352,7 @@ DEF_FUNC uring_submit_timeout
 
     ; Convert delay_ns to timespec — store in task's ts_sec/ts_nsec
     mov rax, r12
-    mov rcx, 1000000000
+    mov ecx, 1000000000
     xor edx, edx
     div rcx
     mov [rbx + AsyncTask.ts_sec], rax     ; tv_sec

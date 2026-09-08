@@ -544,7 +544,7 @@ DEF_FUNC int_type_call, ITC_FRAME
     leave
     jmp builtin_int_fn
 .itc_kw_no_pos:
-    cmp r8, 0
+    test r8, r8
     jne .itc_kw_reject
     RAISE exc_TypeError_type, "int() missing string argument"
 .itc_kw_reject:
@@ -786,7 +786,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     cmp rax, [rbp - BI_XLEN]
     jne .int_str_parse_error_x
     mov rdi, [rbp - BI_DATA]
-    mov rsi, 10
+    mov esi, 10
     call int_from_cstr_base
     test edx, edx
     jz .int_str_parse_error_x
@@ -836,7 +836,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jne .int_bytes_nul_error  ; embedded NUL → free buf + error
     ; Parse
     mov rdi, [rsp]            ; buffer (still on stack)
-    mov rsi, 10
+    mov esi, 10
     call int_from_cstr_base
     mov rbx, rax              ; save result payload
     push rdx                  ; save result tag
@@ -900,7 +900,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     cmp rax, [rbp - BI_ARRLEN]
     jne .int_bytes_nul_error
     mov rdi, [rsp]
-    mov rsi, 10
+    mov esi, 10
     call int_from_cstr_base
     mov rbx, rax              ; save result payload
     push rdx                  ; save result tag
@@ -941,7 +941,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     cmp rax, [rbx + PyMemoryViewObject.mv_len]
     jne .int_bytes_nul_error
     mov rdi, [rsp]
-    mov rsi, 10
+    mov esi, 10
     call int_from_cstr_base
     mov rbx, rax              ; save result payload
     push rdx                  ; save result tag
@@ -962,7 +962,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     RET_TAG_SMALLINT
     jmp .int_ret
 .int_bool_true:
-    mov rax, 1
+    mov eax, 1
     RET_TAG_SMALLINT
     jmp .int_ret
 
@@ -1333,7 +1333,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     RET_TAG_SMALLINT
     jmp .int_ret
 .int_bool_result_true:
-    mov rax, 1
+    mov eax, 1
     RET_TAG_SMALLINT
     jmp .int_ret
 
@@ -1935,7 +1935,7 @@ DEF_FUNC builtin_chr, 16
     jg .chr_too_wide
     cmp rax, -0x80000000
     jl .chr_too_wide
-    cmp rax, 0
+    test rax, rax
     jl .chr_range_error
     cmp rax, 0x10ffff
     ja .chr_range_error
@@ -2928,7 +2928,7 @@ DEF_FUNC_LOCAL bcx_coerce, BCC_FRAME
     test eax, eax
     jz .bcc_protocols
     mov rax, [rbp - BCC_EXC]
-    add eax, 1                  ; 1 for a real number, 2 for a complex one
+    inc eax                         ; 1 for a real number, 2 for a complex one
     jmp .bcc_done
 
 .bcc_protocols:
@@ -3020,7 +3020,7 @@ END_FUNC bcx_coerce
 DEF_FUNC builtin_complex, BCX_FRAME
     mov [rbp - BCX_ARGS], rdi
     mov [rbp - BCX_NARGS], rsi
-    cmp rsi, 0
+    test rsi, rsi
     je .bcx_zero
     cmp rsi, 2
     ja .bcx_argcount

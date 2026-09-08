@@ -1562,7 +1562,7 @@ DEF_FUNC lex_run, LR_FRAME
     mov rdi, rbx
     mov esi, TOK_NEWLINE
     mov rdx, r13
-    mov ecx, 0
+    xor ecx, ecx
     xor r8d, r8d
     call lex_emit
 

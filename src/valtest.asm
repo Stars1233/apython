@@ -229,7 +229,7 @@ DEF_FUNC value_selftest, 8            ; 5 pushes, so rsp is 16-aligned
     inc r12
 
     ; Immediates must never be refcounted.
-    mov rdi, 12345
+    mov edi, 12345
     call val_from_i64
     mov rbx, rax
     cmp rbx, [rel v_int_lo]

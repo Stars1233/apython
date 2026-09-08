@@ -143,7 +143,7 @@ DEF_FUNC sre_state_init, SSI_FRAME
 
     ; Clamp effective length with endpos
     mov rcx, [rbp - SSI_ENDPOS] ; endpos
-    cmp rcx, 0
+    test rcx, rcx
     jl .ascii_endpos_done
     cmp rcx, rax
     jge .ascii_endpos_done
@@ -156,7 +156,7 @@ DEF_FUNC sre_state_init, SSI_FRAME
     mov [rbx + SRE_State.str_end], rcx
 
     ; Clamp pos
-    cmp r14, 0
+    test r14, r14
     jge .pos_ok
     xor r14d, r14d
 .pos_ok:
@@ -345,7 +345,7 @@ DEF_FUNC sre_state_init, SSI_FRAME
 .utf8_clamp:
     ; Clamp codepoint_len with endpos
     mov rcx, [rbp - SSI_UENDPOS] ; endpos (saved before clobber)
-    cmp rcx, 0
+    test rcx, rcx
     jl .uni_endpos_done
     cmp rcx, r8
     jge .uni_endpos_done
@@ -354,7 +354,7 @@ DEF_FUNC sre_state_init, SSI_FRAME
     mov [rbx + SRE_State.codepoint_len], r8
 
     ; Clamp pos for Unicode
-    cmp r14, 0
+    test r14, r14
     jge .upos_ok
     xor r14d, r14d
 .upos_ok:

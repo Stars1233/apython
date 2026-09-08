@@ -69,7 +69,7 @@ DEF_FUNC gc_mod_collect, GMCF_FRAME
     mov rdi, [rdi]
     V_UNPACK rdi, rdx
     call obj_as_index
-    cmp rax, 0
+    test rax, rax
     jl .gmc_range
     cmp rax, 2
     jg .gmc_range
@@ -289,7 +289,7 @@ DEF_FUNC gc_mod_get_objects, GGO_FRAME
     mov [rbp - GGO_LIST], rax
 
     mov rbx, [rbp - GGO_GEN]
-    cmp rbx, 0
+    test rbx, rbx
     jge .ggo_one
     xor ebx, ebx
 .ggo_all_loop:

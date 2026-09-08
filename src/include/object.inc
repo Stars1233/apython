@@ -1377,7 +1377,9 @@ GC_PREV_MASK            equ ~3    ; mask to extract prev pointer (clear low 2 bi
     lea %2, [%1 - 1]
     cmp %2, [rel v_ptr_max_m1]
     ja %%skip                     ; immediate or NULL — not a reference
+%ifnidni %1, rdi
     mov rdi, %1
+%endif
     call r14                      ; visit callback(obj)
 %%skip:
 %endmacro
@@ -1386,7 +1388,9 @@ GC_PREV_MASK            equ ~3    ; mask to extract prev pointer (clear low 2 bi
 %macro VISIT_PTR 1                ; %1 = ptr_reg
     test %1, %1
     jz %%skip
+%ifnidni %1, rdi
     mov rdi, %1
+%endif
     call r14
 %%skip:
 %endmacro

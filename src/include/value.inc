@@ -176,6 +176,15 @@ extern val_from_i64_p
     sub %1, [rel v_int_bias]
 %endmacro
 
+; V_INT(n) -- the Value of a COMPILE-TIME integer constant, folded by NASM.
+;
+; An int immediate is just n + V_INT_BIAS, so a literal needs no runtime work
+; at all: `mov rdx, V_INT(0)` is one instruction where `mov rdx, 0` followed by
+; `V_PACK_I64 rdx, rcx` was about sixteen.  Only for constants known to the
+; assembler and inside the immediate range -- the %if catches the rest at
+; assembly time rather than silently producing a float or a sentinel.
+%define V_INT(n) ((n) + V_INT_BIAS)
+
 ; ==========================================================================
 ; MIGRATION SHIMS
 ;
@@ -196,7 +205,9 @@ extern val_from_i64_p
     ; register except rax, so this cold path cannot disturb the caller.
     push rax
     push rdi
+%ifnidni %1, rdi
     mov rdi, %1
+%endif
     call val_from_i64_p
     mov %2, rax
     pop rdi
@@ -317,13 +328,19 @@ extern val_from_i64_p
 %endmacro
 
 ; Clobbers rdi and all caller-saved registers when the object is freed.
+;
+; The %ifnidni is not cosmetic: DECREF_V's operand is already rdi at a great
+; many sites, and without the guard the macro emits `mov rdi, rdi` there --
+; 593 of them in the linked binary before this was added.
 %macro DECREF_V 2               ; %1 = value, %2 = scratch (clobbered)
     lea %2, [%1 - 1]
     cmp %2, [rel v_ptr_max_m1]
     ja %%skip
     dec qword [%1 + PyObject.ob_refcnt]
     jnz %%skip
+%ifnidni %1, rdi
     mov rdi, %1
+%endif
     call obj_dealloc
     %%skip:
 %endmacro

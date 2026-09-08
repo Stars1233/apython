@@ -505,7 +505,7 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     SPUSH_PTR r8               ; args[0] = mgr
     mov rdi, rax               ; callable = __aenter__
     mov rsi, rsp               ; args ptr
-    mov rdx, 1                 ; nargs = 1
+    mov edx, 1                      ; nargs = 1
     call rcx
     V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16                ; pop fat arg

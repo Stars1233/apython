@@ -254,7 +254,7 @@ DEF_FUNC str_decimal_ascii, SDA_FRAME
     call udecimal_value
     mov edx, eax
     pop rax
-    cmp edx, 0
+    test edx, edx
     jl .sda_maybe_space
     add dl, '0'
     jmp .sda_emit_byte

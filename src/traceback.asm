@@ -463,7 +463,7 @@ DEF_FUNC tb_write_dec, TD_FRAME
     mov r9d, 1
     neg rax
 .td_pos:
-    mov r10, 10
+    mov r10d, 10
 .td_loop:
     xor edx, edx
     div r10
@@ -537,10 +537,10 @@ DEF_FUNC_LOCAL tb_write_carets, TC_FRAME
     cmp qword [rcx], 0
     jl .tc_out
     mov rax, [rcx + 16]
-    cmp rax, 0
+    test rax, rax
     jl .tc_out
     mov rdx, [rcx + 24]
-    cmp rdx, 0
+    test rdx, rdx
     jl .tc_out
     ; Clamp rather than give up: the end column of an expression that runs
     ; past this line is a column on a LATER line, and the multi-line branch
@@ -641,7 +641,7 @@ DEF_FUNC_LOCAL tb_write_carets, TC_FRAME
 .tc_measure:
     ; Elide the row when the primary run is the whole stripped line.
     mov rax, [rbp - TC_LEFT]
-    cmp rax, 0
+    test rax, rax
     jge .tc_emit
     cmp qword [rbp - TC_RIGHT], 0
     jge .tc_emit
@@ -862,7 +862,7 @@ DEF_FUNC tb_anchors, AN_FRAME
 .an_close:
     dec r14
     inc r13
-    mov r15, 1
+    mov r15d, 1
     jmp .an_loop
 
 .an_close_sq:
@@ -874,7 +874,7 @@ DEF_FUNC tb_anchors, AN_FRAME
     mov [rbp - AN_SCLOSE], r13
 .an_close_sq_deep:
     inc r13
-    mov r15, 1
+    mov r15d, 1
     jmp .an_loop
 
 .an_string:
@@ -933,7 +933,7 @@ DEF_FUNC tb_anchors, AN_FRAME
     inc rdx
 .an_str_done:
     mov r13, rdx
-    mov r15, 1
+    mov r15d, 1
     jmp .an_loop
 
 .an_name:
@@ -993,7 +993,7 @@ DEF_FUNC tb_anchors, AN_FRAME
     jmp .an_loop
 .an_name_ordinary:
     mov r13, rdx
-    mov r15, 1
+    mov r15d, 1
     jmp .an_loop
 
 .an_number:
@@ -1034,7 +1034,7 @@ DEF_FUNC tb_anchors, AN_FRAME
     jmp .an_num_scan
 .an_num_done:
     mov r13, rdx
-    mov r15, 1
+    mov r15d, 1
     jmp .an_loop
 
 .an_operator:
@@ -1183,7 +1183,7 @@ DEF_FUNC tb_anchors, AN_FRAME
     cmp qword [rbp - AN_DISQ], 0
     jne .an_no
     mov rax, [rbp - AN_IDX]
-    cmp rax, 0
+    test rax, rax
     jl .an_try_subscript
     mov rdx, [rbp - AN_OUT]
     mov [rdx], rax
@@ -1195,13 +1195,13 @@ DEF_FUNC tb_anchors, AN_FRAME
 .an_try_subscript:
     ; The segment is a subscript when its last character closes one.
     mov rax, [rbp - AN_SCLOSE]
-    cmp rax, 0
+    test rax, rax
     jl .an_no
     lea rcx, [rax + 1]
     cmp rcx, r12
     jne .an_no
     mov rdx, [rbp - AN_SOPEN]
-    cmp rdx, 0
+    test rdx, rdx
     jle .an_no                     ; `[1, 2]` is a list, not a subscript
     mov r8, [rbp - AN_OUT]
     mov [r8], rdx
@@ -1462,7 +1462,7 @@ DEF_FUNC tb_write_source, TS_FRAME
 
 .ts_close:
     mov rdi, [rbp - TS_FD]
-    cmp rdi, 0
+    test rdi, rdi
     jl .ts_out
     call sys_close
 .ts_out:
@@ -2145,7 +2145,7 @@ DEF_FUNC tb_syntax_header, SH_FRAME
     sub rsi, [rbp - SH_I]
     mov qword [rbp - SH_LEN], 0
     ; Trim the trailing newline; the caret line supplies its own.
-    cmp rsi, 0
+    test rsi, rsi
     jle .no_text
     cmp byte [rdi + rsi - 1], 10
     jne .write_text

@@ -235,7 +235,7 @@ END_FUNC bytearray_from_bytes
 ;; ============================================================================
 DEF_FUNC ba_shared_hex
     lea rdx, [rel bytes_method_hex]
-    mov ecx, 0
+    xor ecx, ecx
     leave
     jmp bytearray_shared_call
 END_FUNC ba_shared_hex
@@ -247,7 +247,7 @@ END_FUNC ba_shared_hex
 ;; ============================================================================
 DEF_FUNC ba_shared_startswith
     lea rdx, [rel bytes_method_startswith]
-    mov ecx, 0
+    xor ecx, ecx
     leave
     jmp bytearray_shared_call
 END_FUNC ba_shared_startswith
@@ -259,7 +259,7 @@ END_FUNC ba_shared_startswith
 ;; ============================================================================
 DEF_FUNC ba_shared_endswith
     lea rdx, [rel bytes_method_endswith]
-    mov ecx, 0
+    xor ecx, ecx
     leave
     jmp bytearray_shared_call
 END_FUNC ba_shared_endswith
@@ -271,7 +271,7 @@ END_FUNC ba_shared_endswith
 ;; ============================================================================
 DEF_FUNC ba_shared_count
     lea rdx, [rel bytes_method_count]
-    mov ecx, 0
+    xor ecx, ecx
     leave
     jmp bytearray_shared_call
 END_FUNC ba_shared_count
@@ -283,7 +283,7 @@ END_FUNC ba_shared_count
 ;; ============================================================================
 DEF_FUNC ba_shared_find
     lea rdx, [rel bytes_method_find]
-    mov ecx, 0
+    xor ecx, ecx
     leave
     jmp bytearray_shared_call
 END_FUNC ba_shared_find
@@ -295,7 +295,7 @@ END_FUNC ba_shared_find
 ;; ============================================================================
 DEF_FUNC ba_shared_decode
     lea rdx, [rel _bytes_decode_impl]
-    mov ecx, 0
+    xor ecx, ecx
     leave
     jmp bytearray_shared_call
 END_FUNC ba_shared_decode
@@ -646,7 +646,7 @@ END_FUNC ba_shared_title
 DEF_FUNC ba_shared_isalpha
     extern bytes_method_isalpha
     lea rdx, [rel bytes_method_isalpha]
-    mov ecx, 0
+    xor ecx, ecx
     leave
     jmp bytearray_shared_call
 END_FUNC ba_shared_isalpha
@@ -659,7 +659,7 @@ END_FUNC ba_shared_isalpha
 DEF_FUNC ba_shared_isdigit
     extern bytes_method_isdigit
     lea rdx, [rel bytes_method_isdigit]
-    mov ecx, 0
+    xor ecx, ecx
     leave
     jmp bytearray_shared_call
 END_FUNC ba_shared_isdigit
@@ -672,7 +672,7 @@ END_FUNC ba_shared_isdigit
 DEF_FUNC ba_shared_isspace
     extern bytes_method_isspace
     lea rdx, [rel bytes_method_isspace]
-    mov ecx, 0
+    xor ecx, ecx
     leave
     jmp bytearray_shared_call
 END_FUNC ba_shared_isspace
@@ -685,7 +685,7 @@ END_FUNC ba_shared_isspace
 DEF_FUNC ba_shared_isalnum
     extern bytes_method_isalnum
     lea rdx, [rel bytes_method_isalnum]
-    mov ecx, 0
+    xor ecx, ecx
     leave
     jmp bytearray_shared_call
 END_FUNC ba_shared_isalnum
@@ -698,7 +698,7 @@ END_FUNC ba_shared_isalnum
 DEF_FUNC ba_shared_isascii
     extern bytes_method_isascii
     lea rdx, [rel bytes_method_isascii]
-    mov ecx, 0
+    xor ecx, ecx
     leave
     jmp bytearray_shared_call
 END_FUNC ba_shared_isascii
@@ -711,7 +711,7 @@ END_FUNC ba_shared_isascii
 DEF_FUNC ba_shared_isupper
     extern bytes_method_isupper
     lea rdx, [rel bytes_method_isupper]
-    mov ecx, 0
+    xor ecx, ecx
     leave
     jmp bytearray_shared_call
 END_FUNC ba_shared_isupper
@@ -724,7 +724,7 @@ END_FUNC ba_shared_isupper
 DEF_FUNC ba_shared_islower
     extern bytes_method_islower
     lea rdx, [rel bytes_method_islower]
-    mov ecx, 0
+    xor ecx, ecx
     leave
     jmp bytearray_shared_call
 END_FUNC ba_shared_islower
@@ -737,7 +737,7 @@ END_FUNC ba_shared_islower
 DEF_FUNC ba_shared_istitle
     extern bytes_method_istitle
     lea rdx, [rel bytes_method_istitle]
-    mov ecx, 0
+    xor ecx, ecx
     leave
     jmp bytearray_shared_call
 END_FUNC ba_shared_istitle

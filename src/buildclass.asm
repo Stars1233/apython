@@ -1140,8 +1140,7 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     jne .bc_slot_tail_off
     mov rdi, [rsp + 8]             ; base_basicsize
     mov rax, [rsp]                 ; i
-    shl rax, 3
-    add rdi, rax                   ; offset
+    lea rdi, [rdi + rax*8]              ; offset
     jmp .bc_slot_have_off
 .bc_slot_tail_off:
     mov rdi, [rsp + 8]             ; -(1 + inherited tail slots)

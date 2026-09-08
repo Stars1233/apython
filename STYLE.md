@@ -30,6 +30,8 @@ These run over **every** hand-written `.asm` in the tree:
 | No raw `[rbp +- N]`; frame slots carry named `equ` constants | `check_frame_offsets` | error |
 | Heavy separators are `;;` and 76 `=`, 79 columns | `check_separators` | error |
 | No hand-written .asm over 100k bytes | `check_file_size` | error |
+| `mov r, 0`, `cmp r, 0`, `mov r64, imm32`, `and r64, 0xffffffff` | `check_encoding` | error |
+| `V_PACK_I64` of a compile-time constant | `check_const_value` | error |
 | Every function has a docblock, with a `->` signature line | `check_docblocks` | ratchet |
 
 | `(frame + 8*pushes + a prologue's own `sub rsp`) % 16 == 0` in any function containing a `call` | `check_alignment` | error |
@@ -181,6 +183,29 @@ END_FUNC func_name
 | `DEF_FUNC_LOCAL name, N` | Same + `sub rsp, N` | ditto, with locals |
 
 `END_FUNC name` must name the same symbol, or the size expression fails to link.
+
+**Turning a `DEF_FUNC` into a `DEF_FUNC_BARE` is not a local edit.**  A leaf
+that pushes `rbp` and never uses it looks like free bytes, and sometimes is --
+but two things have to be true, and only one of them is visible inside the
+function:
+
+- **Nothing in the body may call.**  Not just `call`: `DECREF_V`, `VISIT_V`,
+  `VISIT_PTR`, `INT_NEED_MPZ`, `MRO_NEXT`, `V_PACK` and `V_PACK_I64` all
+  contain one.  A bare function is entered with `rsp % 16 == 8`, so a call
+  from inside one arrives misaligned -- the opposite of the `DEF_FUNC` case.
+  Every `tp_traverse` and `tp_clear` in the tree fails this test.
+- **Nothing *after* `END_FUNC` may jump back in.**  `src/marshal.asm`'s
+  `mread_*_eof` handlers sit outside the function they serve, `call
+  marshal_fail`, and end `leave` / `ret` -- they run on the frame the
+  prologue set up.  Deleting that prologue leaves a `leave` that pops garbage
+  into `rbp`, and lint sees none of it, because the `leave` is outside the
+  markers it scans between.  `make check` caught this one; nothing else would
+  have.
+
+There is also a cost, which is why the tree has not converted every leaf that
+qualifies: unwinding here is frame-pointer-only, so a `bt` taken *inside* a
+bare leaf loses the immediate caller.  Convert one when it is hot enough to
+pay for that, not merely because it can be.
 
 **A tail `jmp` to another global function is legal only from `DEF_FUNC_BARE`.**
 A `DEF_FUNC` has already pushed `rbp`; returning through the callee's
@@ -493,6 +518,7 @@ the macros that implement it, all in `src/include/value.inc`.
 | `V_TO_F64 v` | In place; caller must already know it is a float |
 | `V_FROM_I64 i, scratch, ovf_label` | Branches to `ovf_label`; **caller boxes** |
 | `V_TO_I64 v` | In place |
+| `V_INT(n)` | An **assemble-time** constant: the Value of a literal int, folded by NASM.  `mov rdx, V_INT(0)`.  Only for `n` inside +-2^50 |
 | `V_PACK_I64 i, scratch` | Boxes on overflow — **contains a call** |
 | `V_PACK pay, tag` | `(payload, tag)` -> Value; may reach `V_PACK_I64`'s call |
 | `V_UNPACK v, tag` | Value -> `(payload, tag)` |
@@ -540,6 +566,13 @@ all it saves is `rdi`; `DECREF_REG`, `DECREF_V`, `XDECREF_V`, `DECREF_VAL` and
 
 `INCREF_VAL` / `DECREF_VAL` / `XDECREF_VAL` are the `(payload, tag)` shims;
 prefer the `_V` forms in Value-native code.
+
+**A macro that loads its operand into a fixed register guards the move.**
+Every DECREF form, `VISIT_V`, `VISIT_PTR`, `V_PACK_I64` and `MRO_NEXT` end up
+doing `mov rdi, %1`, and at a great many sites `%1` already *is* `rdi` --
+which emitted 593 `mov rdi, rdi` in the linked binary before each was wrapped
+in `%ifnidni %1, rdi`.  `INT_NEED_MPZ` in `object.inc` has always done this;
+the rest now do too.  Write a new macro of this shape the same way.
 
 ## Other Macros
 
@@ -697,10 +730,33 @@ Prefer shorter encodings when semantically equivalent:
 |--------|------|-----|
 | `xor eax, eax` | `mov rax, 0` | 2 bytes vs 7, breaks dep chains |
 | `test eax, eax` | `test rax, rax` | 2 bytes vs 3 (when 32-bit safe) |
-| `test reg, reg` | `cmp reg, 0` | Shorter, same flags |
+| `test reg, reg` | `cmp reg, 0` | Shorter, **identical** flags |
+| `mov eax, 5` | `mov rax, 5` | 5 bytes vs 7; the 32-bit write zero-extends |
+| `mov edi, edi` | `and rdi, 0xffffffff` | 2 bytes vs 7, same zero-extend |
 | `movzx eax, byte [m]` | `movzx rax, byte [m]` | Shorter, same result |
 | `lea` | `shl` + `add` | No flags clobber, often fewer insns |
 | `inc` / `dec` | `add 1` / `sub 1` | 1 byte shorter (no partial-flag stall on Haswell+) |
+| `mov rdx, V_INT(0)` | `mov rdx, 0` + `V_PACK_I64` | One folded instruction vs about sixteen |
+
+The first four and the `V_INT` row are **enforced tree-wide** by
+`check_encoding` and `check_const_value`.  The tree was swept clean of all of
+them in one pass, so a new one is a regression rather than a debt.
+
+**The exception is flags, and it is a real one.**  `xor` and `lea` write or
+withhold flags where `mov`, `shl`+`add`, `add 1` and `sub 1` do not, so a
+shorter form is only equivalent where nothing reads the flags before something
+else rewrites them.  Three sites in the tree keep the long form for exactly
+that reason -- `mov r12d, 0` sitting between a `__gmpz_cmp_si` and its `jns`
+(`src/methods/num.asm`), and the two three-way `cmp` ladders in
+`src/pyo/float.asm` and `src/pyo/int.asm`.  Mark such a site
+`; lint: flags` with a note saying which flag is live, and `check_encoding`
+will accept it.  Do not mark one you have not checked: the failure is a branch
+silently inverted, not a build error.
+
+`inc`/`dec` differ from `add 1`/`sub 1` only in leaving CF alone, and `lea`
+differs from `shl`+`add` in writing no flags at all -- both are *more*
+flag-preserving than what they replace, so they can only break code that
+wanted the flags `add`/`shl` would have set.
 
 ## What to Avoid
 

@@ -757,7 +757,7 @@ DEF_FUNC bytes_method_expandtabs, BET_FRAME
     xor esi, esi
     jmp .bet_size_next
 .bet_size_tab:
-    cmp r10, 0
+    test r10, r10
     jle .bet_size_next          ; tabsize <= 0 deletes the tab
     mov [rbp - BET_ACC], rax
     mov rax, rsi
@@ -805,7 +805,7 @@ DEF_FUNC bytes_method_expandtabs, BET_FRAME
     xor esi, esi
     jmp .bet_fill_next
 .bet_fill_tab:
-    cmp r10, 0
+    test r10, r10
     jle .bet_fill_next
     mov [rbp - BET_ACC], rax
     mov rax, rsi

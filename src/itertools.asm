@@ -593,7 +593,7 @@ DEF_FUNC_LOCAL enumerate_iternext, 8            ; 3 pushes, so rsp is 16-aligned
     V_PACK_I64 r13, rcx              ; the count as a Value
 
     ; Create 2-tuple
-    mov rdi, 2
+    mov edi, 2
     call tuple_new
     ; Fill: tuple[0] = count, tuple[1] = value
     mov r8, [rax + PyTupleObject.ob_item]
@@ -1082,7 +1082,7 @@ DEF_FUNC_LOCAL zip_iternext, 8            ; 5 pushes, so rsp is 16-aligned
     jnz .zip_strict_mismatch
 
     ; r15 == 0: first iterator exhausted. Check others for remaining items.
-    mov r14, 1
+    mov r14d, 1
 .zip_strict_check:
     cmp r14, r12
     jge .zip_exhausted       ; all exhausted — OK
@@ -2023,7 +2023,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
 
 .sorted_no_kw:
     lea rdi, [rbp - SO_SORT_BUF]
-    mov rsi, 1
+    mov esi, 1
     call list_method_sort
 
 .sorted_return:

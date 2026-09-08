@@ -196,8 +196,7 @@ DEF_FUNC_BARE ast_span_at
     cmp rsi, rax
     jae .asa_none
     mov rax, [rdi + Comp.spans + Buf.data]
-    shl rsi, 3
-    add rax, rsi
+    lea rax, [rax + rsi*8]
     ret
 .asa_none:
     xor eax, eax

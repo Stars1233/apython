@@ -61,7 +61,7 @@ DEF_FUNC str_method_upper
     ; only in which of the four Unicode mappings each character takes.
     mov rax, [rdi]
     mov rdi, rax
-    mov esi, 0
+    xor esi, esi
     extern str_case_map
     call str_case_map
     mov edx, TAG_PTR
@@ -1104,7 +1104,7 @@ DEF_FUNC str_method_replace
     lea rax, [r14 + 1]         ; self_len + 1
     imul rax, rcx              ; (self_len + 1) * new_len
     add rax, r14               ; + self_len
-    add rax, 1                 ; + NUL
+    inc rax                         ; + NUL
     mov [rbp - RPL_ALLOC], rax          ; buf_alloc
     mov rdi, rax
     call ap_malloc
@@ -1722,7 +1722,7 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     cmp qword [rbp - SPI_MAX], 0
     jne .spi_wsr_scan
     ; Likewise from the other end: ' a b '.rsplit(None, 1) is [' a', 'b'].
-    mov r13, 0
+    xor r13d, r13d
 .spi_wsr_emit_last:
     mov rsi, r12
     sub rsi, r13
@@ -1827,7 +1827,7 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     mov [rsp + 16], rax
     push rax
     lea rdi, [rsp + 8]
-    mov rsi, 3
+    mov esi, 3
     call list_method_insert
     pop rdi
     add rsp, 32
@@ -2578,7 +2578,7 @@ DEF_FUNC_LOCAL fm_expand_spec, FES_FRAME
     inc qword [rbp - FES_POS]
     lea rdi, [rbp - FES_STATE]
     lea rsi, [rbx + PyStrObject.data + rcx]
-    mov rdx, 1
+    mov edx, 1
     call fmtbuf_append
     jmp .fes_loop
 

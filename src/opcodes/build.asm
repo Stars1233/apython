@@ -619,7 +619,7 @@ DEF_FUNC op_build_list, 24   ; + 0 pushes; a handler is entered ALIGNED, so this
     mov rdi, rcx
     test rdi, rdi
     jnz .bl_has_cap
-    mov rdi, 4                 ; minimum capacity
+    mov edi, 4                      ; minimum capacity
 .bl_has_cap:
     call list_new
     mov [rbp - BL_LIST], rax          ; save list
@@ -1528,7 +1528,7 @@ DEF_FUNC_BARE op_contains_op
                                  ; call that boxes clobbers rdx
     call obj_richcompare_bool
     add rsp, 16
-    cmp eax, 0
+    test eax, eax
     jl .contains_iter_eq_raised
     test eax, eax
     pop rdx                      ; elem tag

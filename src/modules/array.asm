@@ -192,7 +192,7 @@ DEF_FUNC array_reserve, AR_FRAME
 .arr_have_cap:
     cmp rax, 8
     jge .arr_cap_ok
-    mov rax, 8
+    mov eax, 8
 .arr_cap_ok:
     push rax
     mov rdi, [rbp - AR_ARR]
@@ -408,7 +408,7 @@ DEF_FUNC array_store_item, ASI_FRAME
     ; signed: -(1 << (bits-1)) .. (1 << (bits-1)) - 1
     shl rcx, 3                  ; bits
     dec rcx
-    mov rax, 1
+    mov eax, 1
     shl rax, cl                 ; 1 << (bits-1)
     mov rdx, rax
     neg rdx                     ; the low bound
@@ -431,7 +431,7 @@ DEF_FUNC array_store_item, ASI_FRAME
     cmp rcx, 8
     je .asi_store               ; every non-negative i64 fits a u64
     shl rcx, 3                  ; bits
-    mov rax, 1
+    mov eax, 1
     shl rax, cl
     dec rax
     cmp rbx, rax
@@ -504,8 +504,7 @@ DEF_FUNC array_store_item, ASI_FRAME
     mov rdi, [rbp - ASI_ARR]
     mov rax, [rdi + PyArrayObject.ob_data]
     mov rsi, [rbp - ASI_IDX]
-    shl rsi, 2
-    add rax, rsi
+    lea rax, [rax + rsi*4]
     mov [rax], ebx
     jmp .asi_ok
 
@@ -567,7 +566,7 @@ DEF_FUNC array_store_item, ASI_FRAME
     add rdx, ASI_MSG_ROW
     jmp .asi_msg_scan
 .asi_msg_found:
-    mov rax, 8                          ; past the typecode
+    mov eax, 8                      ; past the typecode
     cmp qword [rbp - ASI_WIDE], 0
     je .asi_msg_pair
     add rax, 16                         ; the "did not fit the C type" pair
@@ -808,7 +807,7 @@ DEF_FUNC array_sq_item
     jns .asq_have
     add rsi, [rdi + PyArrayObject.ob_size]
 .asq_have:
-    cmp rsi, 0
+    test rsi, rsi
     jl .asq_range
     cmp rsi, [rdi + PyArrayObject.ob_size]
     jge .asq_range
@@ -1269,7 +1268,7 @@ DEF_FUNC array_ass_subscript, AAS_FRAME
     jns .aas_have
     add rax, [rdi + PyArrayObject.ob_size]
 .aas_have:
-    cmp rax, 0
+    test rax, rax
     jl .aas_range
     cmp rax, [rdi + PyArrayObject.ob_size]
     jge .aas_range

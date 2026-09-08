@@ -505,7 +505,7 @@ DEF_FUNC_BARE op_binary_op
     ; TAG_PTR and the ordinary int path handles them -- no tag rewriting.
 
     ; Fast path: SmallInt add (NB_ADD=0, NB_INPLACE_ADD=13)
-    cmp ecx, 0                 ; NB_ADD
+    test ecx, ecx                   ; NB_ADD
     je .binop_try_smallint_add
     cmp ecx, 13                ; NB_INPLACE_ADD
     je .binop_try_smallint_add
@@ -716,7 +716,7 @@ DEF_FUNC_BARE op_binary_op
     ; Repeated squaring, checked at every step.  The base is squared only
     ; while another exponent bit remains, so an overflow in a squaring whose
     ; value would never be used cannot send a result that fitted to GMP.
-    mov rax, 1                 ; the running result
+    mov eax, 1                      ; the running result
     mov r10, rdi               ; b, the running square
     mov r11, rsi               ; e, the remaining exponent
 .binop_pow_loop:
@@ -1024,7 +1024,7 @@ DEF_FUNC_BARE op_binary_op
     mov rcx, [rsp]
     cmp qword [rcx + PyTypeObject.tp_as_sequence], 0
     je .binop_number_ok
-    cmp r9d, 0                  ; NB_ADD
+    test r9d, r9d                   ; NB_ADD
     je .binop_seq_from_stack
     cmp r9d, 5                  ; NB_MULTIPLY
     je .binop_seq_from_stack
@@ -1196,7 +1196,7 @@ DEF_FUNC_BARE op_binary_op
     test rax, rax
     jz .binop_try_right_slot
     ; NB_ADD (0) or NB_INPLACE_ADD (13) → sq_concat / sq_inplace_concat
-    cmp r9d, 0              ; NB_ADD
+    test r9d, r9d                   ; NB_ADD
     je .binop_seq_concat
     cmp r9d, 13             ; NB_INPLACE_ADD
     je .binop_seq_iconcat

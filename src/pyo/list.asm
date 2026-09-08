@@ -53,7 +53,7 @@ DEF_FUNC list_new
     mov r12, rdi               ; r12 = capacity
     test r12, r12
     jnz .has_cap
-    mov r12, 4                 ; minimum capacity
+    mov r12d, 4                     ; minimum capacity
 .has_cap:
 
     ; Try list header pool first
@@ -116,7 +116,7 @@ DEF_FUNC list_copy, 8            ; 3 pushes, so rsp is 16-aligned
     mov rdi, r12
     test rdi, rdi
     jnz .lc_alloc
-    mov rdi, 4
+    mov edi, 4
 .lc_alloc:
     call list_new
     mov r13, rax               ; new list
@@ -219,7 +219,7 @@ DEF_FUNC list_getitem
     ; Bounds check
     cmp rsi, [rdi + PyListObject.ob_size]
     jge .index_error
-    cmp rsi, 0
+    test rsi, rsi
     jl .index_error
 
     ; Return item with INCREF (payload + tag)
@@ -264,7 +264,7 @@ DEF_FUNC list_setitem, 8        ; 3 pushes, so rsp is 16-aligned at the
     ; Bounds check
     cmp rsi, [rbx + PyListObject.ob_size]
     jge .index_error
-    cmp rsi, 0
+    test rsi, rsi
     jl .index_error
 
     ; Install the new value BEFORE releasing the old one.
@@ -435,7 +435,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ; Bounds check
     cmp rsi, [rbx + PyListObject.ob_size]
     jge .lid_index_error
-    cmp rsi, 0
+    test rsi, rsi
     jl .lid_index_error
 
     push rsi                   ; save index
@@ -773,13 +773,11 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ; dst = payloads + (start + new_len) * 8
     mov rax, r13
     add rax, r8
-    shl rax, 3
-    add rdi, rax
+    lea rdi, [rdi + rax*8]
     ; src = payloads + stop * 8
     mov rsi, [rbx + PyListObject.ob_item]
     mov rax, r14
-    shl rax, 3
-    add rsi, rax
+    lea rsi, [rsi + rax*8]
     push rcx
     shl rcx, 3                ; bytes = tail_count * 8
     mov rdx, rcx
@@ -808,8 +806,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     push r10                  ; save new_tag_ptr [rsp+0]
     mov rdi, [rbx + PyListObject.ob_item]
     mov rax, r13
-    shl rax, 3
-    add rdi, rax              ; dst = ob_item + start*8
+    lea rdi, [rdi + rax*8]              ; dst = ob_item + start*8
     mov rsi, r9               ; src = new payloads ptr
     mov rdx, r8
     shl rdx, 3
@@ -1317,7 +1314,7 @@ DEF_FUNC list_getslice
     mov rdi, rax
     test rdi, rdi
     jnz .lgs_alloc
-    mov rdi, 4                 ; min capacity
+    mov edi, 4                      ; min capacity
 .lgs_alloc:
     call list_new
     push rax                   ; save the new list
@@ -1344,8 +1341,7 @@ DEF_FUNC list_getslice
     ; Copy payloads
     mov rsi, [rbx + PyListObject.ob_item]
     mov rcx, rax
-    shl rcx, 3
-    add rsi, rcx              ; src payloads + (stop+1)*8
+    lea rsi, [rsi + rcx*8]              ; src payloads + (stop+1)*8
     mov rdi, [rsp]            ; new list
     mov rdi, [rdi + PyListObject.ob_item]  ; dst payloads
     push rax                   ; save source start index
@@ -1385,8 +1381,7 @@ DEF_FUNC list_getslice
     ; Copy payloads (contiguous)
     mov rsi, [rbx + PyListObject.ob_item]
     mov rax, r13
-    shl rax, 3
-    add rsi, rax              ; src payloads
+    lea rsi, [rsi + rax*8]              ; src payloads
     mov rdi, [rsp]            ; new list
     mov rdi, [rdi + PyListObject.ob_item]  ; dst payloads
     mov rdx, [rsp + 8]        ; slicelength
@@ -1593,7 +1588,7 @@ DEF_FUNC list_repeat
     mov rdi, r14
     test rdi, rdi
     jnz .rep_has_size
-    mov rdi, 1              ; min capacity
+    mov edi, 1                      ; min capacity
 .rep_has_size:
     call list_new
     push rax                ; save new list
@@ -1889,7 +1884,7 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
 
     ; Copy items (count - 1) more times + INCREF each copy
     mov rax, [rbx + PyListObject.ob_item]       ; payloads
-    mov rcx, 1                ; copy number (1-based)
+    mov ecx, 1                      ; copy number (1-based)
 .lir_copy_outer:
     cmp rcx, r12
     jge .lir_done
@@ -2022,7 +2017,7 @@ DEF_FUNC list_type_call, LTC_FRAME
     jz .ltc_no_length
     mov rdi, [r12]
     call rax
-    cmp rax, 0
+    test rax, rax
     jl .ltc_length_failed
 .ltc_no_length:
 

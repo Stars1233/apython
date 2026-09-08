@@ -562,12 +562,12 @@ DEF_FUNC io_raise_typename_q, 8            ; 3 pushes, so rsp is 16-aligned
 io_raise_typename_common:
 
     lea rdi, [rel io_msgbuf]
-    mov rdx, 200
+    mov edx, 200
     call io_copy_bounded        ; rax = one past the prefix
 
     lea rsi, [rel io_msg_not]
     mov rdi, rax
-    mov rdx, 24
+    mov edx, 24
     call io_copy_bounded
 
     ; The type name, from the type itself: an int subclass reports its own
@@ -591,7 +591,7 @@ io_raise_typename_common:
 .irt_no_quote:
     pop rsi
     mov rdi, rax
-    mov rdx, 30
+    mov edx, 30
     call io_copy_bounded
     test r13d, r13d
     jz .irt_no_quote2
@@ -638,7 +638,7 @@ DEF_FUNC io_raise_number
     mov rbx, rdi
     mov r12, rdx
     lea rdi, [rel io_msgbuf]
-    mov rdx, 200
+    mov edx, 200
     call io_copy_bounded
     mov rdi, rax
     mov rsi, r12
@@ -662,7 +662,7 @@ DEF_FUNC_LOCAL io_append_i64
     ; reversed on the way to the destination.
     lea r8, [rel io_numbuf + 24]
     mov byte [r8], 0
-    mov r9, 10
+    mov r9d, 10
 .iai_loop:
     xor edx, edx
     div r9
@@ -1031,7 +1031,7 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     mov rdi, [rbp - FI_FILE]
     V_UNPACK rdi, rdx
     call obj_as_index
-    cmp rax, 0
+    test rax, rax
     jl .fi_fd_bad
     mov rdi, [rbp - FI_SELF]
     mov [rdi + PyFileIOObject.fio_fd], rax
@@ -1179,7 +1179,7 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     FI_DROP_MODE
     lea rdi, [rel io_badmode_msg]
     lea rsi, [rel io_msg_badmode]
-    mov rdx, 40
+    mov edx, 40
     call io_copy_bounded
     mov cl, [rel io_badmode_char]
     mov [rax], cl
@@ -2495,7 +2495,7 @@ DEF_FUNC_LOCAL bytesio_reserve
     ; safe against a negative arriving from a caller that did not check.
     test r12, r12
     js .bre_fail
-    mov rax, 0x7fffffff
+    mov eax, 0x7fffffff
     cmp r12, rax
     jg .bre_fail
     cmp r12, [rbx + PyBytesIOObject.bio_cap]
@@ -2503,7 +2503,7 @@ DEF_FUNC_LOCAL bytesio_reserve
     mov rax, [rbx + PyBytesIOObject.bio_cap]
     test rax, rax
     jnz .bre_double
-    mov rax, 64
+    mov eax, 64
 .bre_double:
     add rax, rax
     cmp rax, r12
@@ -2925,7 +2925,7 @@ DEF_FUNC bytesio_seek_fn, BS_FRAME
     je .bs_end
     lea rdi, [rel io_msgbuf]
     lea rsi, [rel io_msg_whence]
-    mov rdx, 100
+    mov edx, 100
     push r8
     call io_copy_bounded
     pop rsi
@@ -2936,7 +2936,7 @@ DEF_FUNC bytesio_seek_fn, BS_FRAME
     lea rdi, [rel io_msgbuf]
     add rdi, rax
     lea rsi, [rel io_msg_whence2]
-    mov rdx, 40
+    mov edx, 40
     call io_copy_bounded
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel io_msgbuf]
@@ -3007,7 +3007,7 @@ DEF_FUNC bytesio_truncate_fn, BTR_FRAME
     mov rdi, rcx
     V_UNPACK rdi, rdx
     call obj_as_index
-    cmp rax, 0
+    test rax, rax
     jl .btr_negative
     mov [rbp - BTR_SIZE], rax
 .btr_have_size:
@@ -3016,7 +3016,7 @@ DEF_FUNC bytesio_truncate_fn, BTR_FRAME
     cmp qword [rdi + PyBytesIOObject.bio_exports], 0
     jne .btr_exported
     mov rax, [rbp - BTR_SIZE]
-    cmp rax, 0
+    test rax, rax
     jge .btr_do
     mov rax, [rdi + PyBytesIOObject.bio_pos]   ; None truncates here
 .btr_do:

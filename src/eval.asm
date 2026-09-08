@@ -792,8 +792,7 @@ extern exc_RecursionError_type
     ; Adjust value stack to target depth
     mov rdi, [r12 + PyFrame.stack_base]
     mov eax, edx
-    shl rax, 3               ; depth * 8
-    add rdi, rax             ; target stack ptr
+    lea rdi, [rdi + rax*8]              ; target stack ptr
     ; DECREF any items being popped from stack
     cmp r13, rdi
     jb .stack_below          ; shallower than the table says -- see below

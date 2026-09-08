@@ -842,7 +842,7 @@ DEF_FUNC dict_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     push r13
     mov rbx, rdi
     mov r13, [rbx + PyDictObject.dk_nentries]
-    mov r12, 0
+    xor r12d, r12d
 .dde_loop:
     cmp r12, r13
     jge .dde_done

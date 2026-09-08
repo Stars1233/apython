@@ -1199,7 +1199,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     test rax, rax
     jz .mm_fail
     mov [rbp - MM_BESTKEY], rax
-    mov r12, 1
+    mov r12d, 1
 
 .mm_loop:
     cmp r12, [rbp - MM_N]
@@ -1213,7 +1213,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     mov rsi, [rbp - MM_BESTKEY]
     mov edx, [rbp - MM_OP]
     call obj_richcompare_bool
-    cmp eax, 0
+    test eax, eax
     jl .mm_fail                 ; the comparison raised
     je .mm_next                 ; the incumbent keeps
     mov rax, [rbx + r12*8]
@@ -1313,7 +1313,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     mov rsi, [rbp - MM_BESTKEY]
     mov edx, [rbp - MM_OP]
     call obj_richcompare_bool
-    cmp eax, 0
+    test eax, eax
     jl .mm_iter_fail
     je .mm_iter_next
     ; The candidate wins: hand its reference to BEST rather than adjusting
@@ -1418,7 +1418,7 @@ GA_EXC    equ 8              ; current_exception before the lookup
 ;; Returns the globals dict of the current frame.
 ;; ============================================================================
 DEF_FUNC builtin_globals
-    cmp rsi, 0
+    test rsi, rsi
     jne .globals_error
 
     ; Get current eval frame from saved r12
@@ -1446,7 +1446,7 @@ END_FUNC builtin_globals
 ;; In function scope, returns globals as approximation.
 ;; ============================================================================
 DEF_FUNC builtin_locals
-    cmp rsi, 0
+    test rsi, rsi
     jne .locals_error
 
     ; Get current eval frame
@@ -1849,7 +1849,7 @@ global builtin_input_fn
 INP_BUF_SIZE equ 4096
 INP_FRAME equ INP_BUF_SIZE + 16  ; buffer + saved values
 DEF_FUNC builtin_input_fn, INP_FRAME
-    cmp rsi, 0
+    test rsi, rsi
     je .inp_no_prompt
     cmp rsi, 1
     jne .inp_error

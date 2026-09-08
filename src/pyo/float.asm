@@ -612,7 +612,7 @@ DEF_FUNC float_hash, FH_FRAME
     js .fh_neg_exp
     mov rax, r12
     xor edx, edx
-    mov rcx, 61
+    mov ecx, 61
     div rcx
     mov r12, rdx
     jmp .fh_rotate
@@ -620,9 +620,9 @@ DEF_FUNC float_hash, FH_FRAME
     mov rax, r12
     not rax                             ; -1 - e
     xor edx, edx
-    mov rcx, 61
+    mov ecx, 61
     div rcx
-    mov r12, 60
+    mov r12d, 60
     sub r12, rdx
 .fh_rotate:
     ; x = ((x << e) & MODULUS) | (x >> (61 - e))
@@ -631,7 +631,7 @@ DEF_FUNC float_hash, FH_FRAME
     shl rax, cl
     and rax, r10
     mov rdx, rbx
-    mov rcx, 61
+    mov ecx, 61
     sub rcx, r12
     shr rdx, cl
     or rax, rdx
@@ -659,7 +659,7 @@ DEF_FUNC float_hash, FH_FRAME
     ret
 
 .fh_pos_inf:
-    mov rax, 314159            ; hash(inf) = 314159 (CPython convention)
+    mov eax, 314159                 ; hash(inf) = 314159 (CPython convention)
     pop r13
     pop r12
     pop rbx
@@ -1684,7 +1684,7 @@ DEF_FUNC float_compare, FC_FRAME
 
     ; Save ucomisd result as three-way (-1=below, 0=equal, 1=above)
     ; Must do this BEFORE cmp instructions overwrite flags
-    mov r8d, 0
+    mov r8d, 0                          ; lint: flags -- xor would clobber the compare
     je .float_cmp_dispatch
     mov r8d, -1
     jb .float_cmp_dispatch

@@ -1053,7 +1053,7 @@ DEF_FUNC_LOCAL sc_append_num, SAN_FRAME
     mov byte [rcx], 0
 .san_loop:
     xor edx, edx
-    mov r8, 10
+    mov r8d, 10
     div r8
     add dl, '0'
     dec rcx

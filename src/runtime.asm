@@ -833,7 +833,7 @@ DEF_FUNC_BARE ap_memchr
     mov rcx, rsi
     cmp rcx, 16
     jbe .amk_prologue
-    mov rcx, 16
+    mov ecx, 16
 .amk_prologue:
     sub rsi, rcx                    ; what is left for the word loop
     test rcx, rcx
@@ -916,7 +916,6 @@ section .text
 ;; Uses repne scasb (fast on modern x86-64 with FAST_SHORT_REP)
 ;; ============================================================================
 DEF_FUNC_BARE ap_strlen
-    mov rdi, rdi            ; s already in rdi
     xor eax, eax            ; search for NUL byte
     mov rcx, -1             ; max search length
     repne scasb
@@ -1099,12 +1098,12 @@ DEF_FUNC_BARE ap_memrfind
     mov r10, r8                 ; r10 = current offset, counting down
 
 .amr_outer:
-    cmp r10, 0
+    test r10, r10
     jl .amr_none
     cmp r9b, [rdi + r10]
     jne .amr_next
     lea r11, [rdi + r10]
-    mov rax, 1
+    mov eax, 1
 .amr_inner:
     cmp rax, rcx
     jge .amr_hit
@@ -1144,13 +1143,13 @@ extern realloc
 ;; ap_malloc(size_t size) -> void*
 ;; Allocates memory, fatal error on failure
 ;; ============================================================================
-DEF_FUNC ap_malloc, 8            ; 1 pushes, so rsp is 16-aligned
-    push rbx
-    mov rbx, rdi            ; save size
+DEF_FUNC ap_malloc, 16           ; 0 pushes, so rsp is 16-aligned
+    ; No register is saved here: the size used to be parked in rbx "for the
+    ; error case" and no path ever read it back, so every allocation in the
+    ; interpreter paid a push, a mov and a pop for nothing.
     call malloc wrt ..plt
     test rax, rax
     jz .oom
-    pop rbx
     leave
     ret
 .oom:
@@ -1174,13 +1173,11 @@ END_FUNC ap_free
 ;; ap_realloc(void *ptr, size_t size) -> void*
 ;; Reallocates memory, fatal error on failure
 ;; ============================================================================
-DEF_FUNC ap_realloc, 8            ; 1 pushes, so rsp is 16-aligned
-    push rbx
-    mov rbx, rsi            ; save size for error case
+DEF_FUNC ap_realloc, 16           ; 0 pushes, so rsp is 16-aligned
+    ; As in ap_malloc: the saved size was never read on the error path.
     call realloc wrt ..plt
     test rax, rax
     jz .oom
-    pop rbx
     leave
     ret
 .oom:

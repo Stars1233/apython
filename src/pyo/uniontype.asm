@@ -506,7 +506,7 @@ DEF_FUNC_LOCAL union_args_subset, UAS_FRAME
     ; tp_richcompare here -- a NULL Value means NotImplemented, not failure --
     ; but the scan must at least stop, or the next comparison runs more Python
     ; over the top of the pending exception.
-    cmp eax, 0
+    test eax, eax
     jl .uas_no
     cmp eax, 1
     je .uas_found

@@ -186,7 +186,7 @@ DEF_FUNC op_call, CL_FRAME
 .func_call:
     ; === Function call: callable is in the shallower slot ===
     mov rax, rcx
-    add rax, 1
+    inc rax
     neg rax
     lea rdi, [r13 + rax*8]
     mov rdi, [rdi]
@@ -664,7 +664,7 @@ DEF_FUNC op_call_function_ex
     shl rdi, 3
     test rdi, rdi
     jnz .cfex_alloc_merged
-    mov rdi, 8                    ; minimum one slot
+    mov edi, 8                      ; minimum one slot
 .cfex_alloc_merged:
     call ap_malloc
     mov [rbp - CFX_MERGED], rax
@@ -703,7 +703,7 @@ DEF_FUNC op_call_function_ex
     ; Iterate kwargs dict entries, copy values to merged buffer and keys to kw_names
     mov r12, [rbp - CFX_KWARGS]
     mov rbx, [r12 + PyDictObject.entries]
-    mov ecx, 0                   ; dict scan index
+    xor ecx, ecx                    ; dict scan index
     xor edx, edx                 ; kw output index (0..n_kw-1)
 
 .cfex_dict_scan:
@@ -989,7 +989,7 @@ DEF_FUNC op_before_with
     SPUSH_PTR r8                   ; args[0] = mgr
     mov rdi, rax                   ; callable = __enter__
     mov rsi, rsp                   ; args ptr
-    mov rdx, 1                     ; nargs = 1
+    mov edx, 1                      ; nargs = 1
     call rcx
     add rsp, 16                    ; pop fat arg
     test rax, rax               ; a NULL Value is a raise -- see .bw_enter_raised
@@ -1126,7 +1126,7 @@ DEF_FUNC op_with_except_start, WES_FRAME
     ; Call bound_exit(exc_type, exc_val, exc_tb)
     mov rdi, [rbp - WES_FUNC]                 ; callable = bound method
     mov rsi, rsp                     ; args ptr
-    mov rdx, 3                       ; nargs = 3 (method_call adds self)
+    mov edx, 3                      ; nargs = 3 (method_call adds self)
     call rax
     add rsp, 32
 

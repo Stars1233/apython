@@ -100,7 +100,9 @@
     dec qword [%1 + PyObject.ob_refcnt]
     jnz %%skip
     push rdi
+%ifnidni %1, rdi
     mov rdi, %1
+%endif
     call obj_dealloc
     pop rdi
     %%skip:
@@ -111,7 +113,9 @@
 %macro DECREF_REG 1
     dec qword [%1 + PyObject.ob_refcnt]
     jnz %%skip
+%ifnidni %1, rdi
     mov rdi, %1
+%endif
     call obj_dealloc
     %%skip:
 %endmacro
@@ -488,7 +492,9 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     jz %%skip
     dec qword [%1 + PyObject.ob_refcnt]
     jnz %%skip
+%ifnidni %1, rdi
     mov rdi, %1
+%endif
     call obj_dealloc
     %%skip:
 %endmacro
@@ -501,7 +507,9 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     jz %%skip
     dec qword [%1 + PyObject.ob_refcnt]
     jnz %%skip
+%ifnidni %1, rdi
     mov rdi, %1
+%endif
     call obj_dealloc
     %%skip:
 %endmacro
@@ -833,8 +841,12 @@ ASM_INIT
 ; static builtin type) this is exactly the old `mov walker, [walker+tp_base]`.
 ; Clobbers rax, rcx, rdx, rsi, rdi, r8-r11.
 %macro MRO_NEXT 2
+%ifnidni %2, rdi
     mov rdi, %2
+%endif
+%ifnidni %1, rsi
     mov rsi, %1
+%endif
     extern type_mro_next
     call type_mro_next
     mov %1, rax

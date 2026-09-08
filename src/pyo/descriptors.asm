@@ -1691,7 +1691,7 @@ DEF_FUNC_LOCAL getset_check_receiver, GCR_FRAME
     ; tail, so the joining word is passed in.
     lea rdi, [rel gcr_open]
     mov rsi, [rbp - GCR_DESC]
-    mov rdx, 1                  ; "for", not "of"
+    mov edx, 1                      ; "for", not "of"
     call getset_descr_compose
     mov rdi, rax
     lea rsi, [rel gcr_mid]
@@ -3085,7 +3085,7 @@ DEF_FUNC generic_alias_richcompare, GRC_FRAME
     mov edx, PY_EQ
     extern obj_richcompare_bool
     call obj_richcompare_bool
-    cmp eax, 0
+    test eax, eax
     jl .grc_raised
     test eax, eax
     jz .grc_false
@@ -3096,7 +3096,7 @@ DEF_FUNC generic_alias_richcompare, GRC_FRAME
     mov rsi, [rsi + PyGenericAliasObject.ga_args]
     mov edx, PY_EQ
     call obj_richcompare_bool
-    cmp eax, 0
+    test eax, eax
     jl .grc_raised
     test eax, eax
     jz .grc_false

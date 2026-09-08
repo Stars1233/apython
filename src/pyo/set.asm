@@ -187,7 +187,7 @@ DEF_FUNC frozenset_hash
     ; h ^= ((h ^ 89869747) ^ (h << 16)) * 3644798167
     mov rdx, [rax + SET_ENTRY_HASH]
     mov rsi, rdx
-    mov rdi, 89869747
+    mov edi, 89869747
     xor rsi, rdi
     mov rdi, rdx
     shl rdi, 16
@@ -205,19 +205,19 @@ DEF_FUNC frozenset_hash
     ; readily, then scramble once more.
     mov rax, [rbx + PyDictObject.ob_size]
     inc rax
-    mov rdi, 1927868237
+    mov edi, 1927868237
     imul rax, rdi
     xor r8, rax
 
     mov rax, r8
-    mov rdi, 69069
+    mov edi, 69069
     imul rax, rdi
-    mov rdi, 907133923
+    mov edi, 907133923
     add rax, rdi
 
     cmp rax, -1                 ; -1 is the error sentinel everywhere else
     jne .fsh_ret
-    mov rax, 590923713
+    mov eax, 590923713
 
 .fsh_ret:
     pop r13
@@ -1014,7 +1014,7 @@ DEF_FUNC set_type_call, STC_FRAME
     push r12
 
     ; nargs can be 0 or 1
-    cmp rdx, 0
+    test rdx, rdx
     je .stc_empty
     cmp rdx, 1
     jne .stc_error
@@ -1269,7 +1269,7 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     push r12
 
     ; nargs can be 0 or 1
-    cmp rdx, 0
+    test rdx, rdx
     je .ftc_empty
     cmp rdx, 1
     jne .ftc_error

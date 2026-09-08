@@ -2223,7 +2223,7 @@ DEF_FUNC marshal_module_init, 24        ; + 1 push = 32, 16-aligned
     call obj_decref
 
     ; CPython's `version` is 4, and importlib compares against it.
-    mov rdi, 4
+    mov edi, 4
     extern int_from_i64
     call int_from_i64
     V_PACK rax, rdx

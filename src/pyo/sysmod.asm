@@ -427,13 +427,11 @@ DEF_FUNC sys_module_init, 40
     ; (3, 12, 0, 'final', 0)
     mov rdi, rbx
     xor esi, esi
-    mov rdx, 3
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(3)
     call structseq_set
     mov rdi, rbx
     mov esi, 1
-    mov rdx, 12
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(12)
     call structseq_set
     mov rdi, rbx
     mov esi, 2
@@ -534,7 +532,7 @@ DEF_FUNC sys_module_init, 40
     call sm_add_str
 
     ; --- sys.stdout (fd=1) ---
-    mov rdi, 1
+    mov edi, 1
     lea rsi, [rel sm_stdout_name]
     lea rdx, [rel sm_mode_w]
     call fileobj_new
@@ -557,7 +555,7 @@ DEF_FUNC sys_module_init, 40
     SYS_ALIAS_SLOT sm_dunder_stdout, sys_stdout_obj
 
     ; --- sys.stderr (fd=2) ---
-    mov rdi, 2
+    mov edi, 2
     lea rsi, [rel sm_stderr_name]
     lea rdx, [rel sm_mode_w]
     call fileobj_new
@@ -839,69 +837,56 @@ DEF_FUNC sys_module_init, 40
     call structseq_new
     mov rbx, rax
     mov rdi, rbx
-    mov esi, 0
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    xor esi, esi
+    mov rdx, V_INT(0)
     call structseq_set
     mov rdi, rbx
     mov esi, 1
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(0)
     call structseq_set
     mov rdi, rbx
     mov esi, 2
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(0)
     call structseq_set
     mov rdi, rbx
     mov esi, 3
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(0)
     call structseq_set
     mov rdi, rbx
     mov esi, 4
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(0)
     call structseq_set
     mov rdi, rbx
     mov esi, 5
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(0)
     call structseq_set
     mov rdi, rbx
     mov esi, 6
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(0)
     call structseq_set
     mov rdi, rbx
     mov esi, 7
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(0)
     call structseq_set
     mov rdi, rbx
     mov esi, 8
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(0)
     call structseq_set
     mov rdi, rbx
     mov esi, 9
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(0)
     call structseq_set
     mov rdi, rbx
     mov esi, 10
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(0)
     call structseq_set
     mov rdi, rbx
     mov esi, 11
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(0)
     call structseq_set
     mov rdi, rbx
     mov esi, 12
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(0)
     call structseq_set
     mov rdi, rbx
     mov esi, 13
@@ -910,13 +895,11 @@ DEF_FUNC sys_module_init, 40
     call structseq_set
     mov rdi, rbx
     mov esi, 14
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(0)
     call structseq_set
     mov rdi, rbx
     mov esi, 15
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(0)
     call structseq_set
     mov rdi, rbx
     mov esi, 16
@@ -925,8 +908,7 @@ DEF_FUNC sys_module_init, 40
     call structseq_set
     mov rdi, rbx
     mov esi, 17
-    mov rdx, 4300
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(4300)
     call structseq_set
     lea rdi, [rel sm_flags]
     call str_from_cstr_heap
@@ -946,19 +928,17 @@ DEF_FUNC sys_module_init, 40
     call structseq_new
     mov rbx, rax
     mov rdi, rbx
-    mov esi, 0
+    xor esi, esi
     mov rdx, [rel float_info_v0]
     V_FROM_F64 rdx, rcx
     call structseq_set
     mov rdi, rbx
     mov esi, 1
-    mov rdx, 1024
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(1024)
     call structseq_set
     mov rdi, rbx
     mov esi, 2
-    mov rdx, 308
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(308)
     call structseq_set
     mov rdi, rbx
     mov esi, 3
@@ -967,23 +947,19 @@ DEF_FUNC sys_module_init, 40
     call structseq_set
     mov rdi, rbx
     mov esi, 4
-    mov rdx, -1021
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(-1021)
     call structseq_set
     mov rdi, rbx
     mov esi, 5
-    mov rdx, -307
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(-307)
     call structseq_set
     mov rdi, rbx
     mov esi, 6
-    mov rdx, 15
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(15)
     call structseq_set
     mov rdi, rbx
     mov esi, 7
-    mov rdx, 53
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(53)
     call structseq_set
     mov rdi, rbx
     mov esi, 8
@@ -992,13 +968,11 @@ DEF_FUNC sys_module_init, 40
     call structseq_set
     mov rdi, rbx
     mov esi, 9
-    mov rdx, 2
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(2)
     call structseq_set
     mov rdi, rbx
     mov esi, 10
-    mov rdx, 1
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(1)
     call structseq_set
     lea rdi, [rel sm_float_info]
     call str_from_cstr_heap
@@ -1021,24 +995,20 @@ DEF_FUNC sys_module_init, 40
     call structseq_new
     mov rbx, rax
     mov rdi, rbx
-    mov esi, 0
-    mov rdx, 30
-    V_PACK_I64 rdx, rcx
+    xor esi, esi
+    mov rdx, V_INT(30)
     call structseq_set
     mov rdi, rbx
     mov esi, 1
-    mov rdx, 4
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(4)
     call structseq_set
     mov rdi, rbx
     mov esi, 2
-    mov rdx, 4300
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(4300)
     call structseq_set
     mov rdi, rbx
     mov esi, 3
-    mov rdx, 640
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(640)
     call structseq_set
     lea rdi, [rel sm_int_info]
     call str_from_cstr_heap
@@ -1063,9 +1033,8 @@ DEF_FUNC sys_module_init, 40
     call structseq_new
     mov rbx, rax
     mov rdi, rbx
-    mov esi, 0
-    mov rdx, 64
-    V_PACK_I64 rdx, rcx
+    xor esi, esi
+    mov rdx, V_INT(64)
     call structseq_set
     mov rdi, rbx
     mov esi, 1
@@ -1074,18 +1043,15 @@ DEF_FUNC sys_module_init, 40
     call structseq_set
     mov rdi, rbx
     mov esi, 2
-    mov rdx, 314159
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(314159)
     call structseq_set
     mov rdi, rbx
     mov esi, 3
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(0)
     call structseq_set
     mov rdi, rbx
     mov esi, 4
-    mov rdx, 1000003
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(1000003)
     call structseq_set
     mov rdi, rbx
     mov esi, 5
@@ -1097,18 +1063,15 @@ DEF_FUNC sys_module_init, 40
     call structseq_set
     mov rdi, rbx
     mov esi, 6
-    mov rdx, 64
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(64)
     call structseq_set
     mov rdi, rbx
     mov esi, 7
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(0)
     call structseq_set
     mov rdi, rbx
     mov esi, 8
-    mov rdx, 0
-    V_PACK_I64 rdx, rcx
+    mov rdx, V_INT(0)
     call structseq_set
     lea rdi, [rel sm_hash_info]
     call str_from_cstr_heap
@@ -1426,7 +1389,7 @@ END_FUNC sys_getdefaultencoding_func
 ;; Returns the current int max str digits limit
 ;; ============================================================================
 DEF_FUNC sys_get_int_max_str_digits_func
-    cmp rsi, 0
+    test rsi, rsi
     jne .get_imsd_error
     mov rdi, [rel sys_int_max_str_digits]
     call int_from_i64

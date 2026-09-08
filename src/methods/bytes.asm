@@ -87,7 +87,7 @@ section .text
     mov rdi, [rbp - %1]
     V_UNPACK rdi, rdx
     call obj_as_index
-    cmp rax, 0
+    test rax, rax
     jl %%range
     cmp rax, 255
     jle %%in_range
@@ -790,7 +790,7 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     mov rdx, [rbp - BAF_SLEN]
     mov rcx, [rbp - BAF_END]
     call bytes_affix_match
-    cmp eax, 0
+    test eax, eax
     jl .baf_item_type           ; an ELEMENT of the tuple, worded differently
     test eax, eax
     jnz .baf_true
@@ -804,7 +804,7 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     mov rdx, [rbp - BAF_SLEN]
     mov rcx, [rbp - BAF_END]
     call bytes_affix_match
-    cmp eax, 0
+    test eax, eax
     jl .baf_arg_type
     test eax, eax
     jnz .baf_true
@@ -1702,7 +1702,7 @@ DEF_FUNC bytes_partition_impl, BPT_FRAME
     cmp qword [rbp - BPT_RIGHT], 0
     jne .bpt_missing_right
     mov [rcx], rax
-    mov r8, 8
+    mov r8d, 8
     jmp .bpt_missing_fill
 .bpt_missing_right:
     mov [rcx + 16], rax
@@ -2047,7 +2047,7 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
 .bsp_no_sep:
     ; Split by whitespace
 
-    mov rdi, 8
+    mov edi, 8
     call list_new
     mov r13, rax                ; result list
 
@@ -2128,7 +2128,7 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
 .bsp_by_sep:
     mov r14, [rbp - BSP_SEPLEN]              ; sep_len
 
-    mov rdi, 8
+    mov edi, 8
     call list_new
     mov r13, rax                ; result list
 
@@ -2229,7 +2229,7 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
     js .bsp_sepr_head
 
 .bsp_sepr_probe:
-    cmp rcx, 0
+    test rcx, rcx
     jl .bsp_sepr_head
     push rcx
     push r11
@@ -2355,7 +2355,7 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
     mov [rsp + 16], rax
     push rax
     lea rdi, [rsp + 8]
-    mov rsi, 3
+    mov esi, 3
     extern list_method_insert
     call list_method_insert
     pop rdi
@@ -2697,7 +2697,7 @@ DEF_FUNC_LOCAL bj_append_i64    ; (rdi = prefix cstr, rsi = n) -> rax = the NUL
     mov rax, r12
     lea r8, [rel bj_numbuf + 24]
     mov byte [r8], 0
-    mov r9, 10
+    mov r9d, 10
 .bai_loop:
     xor edx, edx
     div r9
