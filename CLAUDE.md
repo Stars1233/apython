@@ -209,7 +209,11 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   attributes beside `.args`, the message assembled from them, and CPython's
   errno-to-subclass table
 - `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func,
-  class, iter, singleton, bytes, bytearray, memoryview, code).  `class.asm` is
+  class, iter, singleton, bytes, bytearray, memoryview, code).
+  `bytes_decode.asm` is bytes -> str and why it sometimes cannot be: the three
+  codecs that are not a table, the UTF-8 validator under them, and the
+  UnicodeDecodeError worded the way CPython words it.  Split off when
+  `bytes.asm` reached the 100k cap; what stayed is bytes *itself*.  `class.asm` is
   the metatype, the instance and attribute access; `instance_alloc.asm` is
   where an instance comes from, including the constructors a subclass of a
   builtin needs; `method.asm` is the bound method; `str_mod.asm` is the `%`
