@@ -80,3 +80,95 @@ print(seen)
 seen.clear()
 D = type("D", (Base,), {})
 print(seen)
+
+
+# The hook is found on the new class's MRO, not on its layout base.  A mixin
+# written first is the shape unittest.TestCase subclasses use, and picking the
+# widest base instead meant TestCase.__init_subclass__ never ran.
+class Mixin:
+    pass
+
+
+class Hooked:
+    def __init_subclass__(cls, **kw):
+        cls.marked = cls.__name__
+        super().__init_subclass__(**kw)
+
+
+class MixinFirst(Mixin, Hooked):
+    pass
+
+
+class MixinLast(Hooked, Mixin):
+    pass
+
+
+print(MixinFirst.marked, MixinLast.marked)
+
+
+# A wider base that defines nothing must not win over a narrower one that does.
+class Wide(list):
+    pass
+
+
+class Narrow:
+    def __init_subclass__(cls, **kw):
+        cls.narrow = True
+        super().__init_subclass__(**kw)
+
+
+class WideFirst(Wide, Narrow):
+    pass
+
+
+print(getattr(WideFirst, "narrow", "MISSING"))
+
+
+# Exactly one hook fires: the first after cls on the MRO.  Chaining past it is
+# the author's job, through super().
+order = []
+
+
+class One:
+    def __init_subclass__(cls, **kw):
+        order.append("One")
+        super().__init_subclass__(**kw)
+
+
+class Two(One):
+    def __init_subclass__(cls, **kw):
+        order.append("Two")
+        super().__init_subclass__(**kw)
+
+
+order.clear()
+class Three(Two):
+    pass
+
+
+print(order)
+
+order.clear()
+class Four(Three):
+    pass
+
+
+print(order)
+
+
+# A class that defines its own hook does not call it on itself.
+called = []
+
+
+class SelfHook:
+    def __init_subclass__(cls, **kw):
+        called.append(cls.__name__)
+        super().__init_subclass__(**kw)
+
+
+print(called)
+class SelfChild(SelfHook):
+    pass
+
+
+print(called)

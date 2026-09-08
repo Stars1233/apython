@@ -1639,17 +1639,18 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov rdi, r12
     call type_refresh_attr_flags
 
-    ; Call parent's __init_subclass__ if present
-    mov rax, [rbp - TFP_BASE]          ; base class
-    test rax, rax
-    jz .bc_no_init_subclass
-
-    ; Look up __init_subclass__ on the base class (walk MRO)
-    extern dunder_lookup
-    mov rdi, rax               ; base class (as type)
+    ; Call __init_subclass__, resolved the way Python resolves it:
+    ; `super(cls, cls).__init_subclass__`, over the NEW CLASS's own MRO with
+    ; its own entry skipped.  It used to be looked up on TFP_BASE -- the
+    ; layout base, the widest of the bases -- which answers a different
+    ; question: `class D(Mixin, Base)` picked whichever of the two was wider,
+    ; so a hook on the other never ran.  Skipping the first entry is also what
+    ; keeps a class from calling its own hook on itself.
+    extern dunder_lookup_after
+    mov rdi, r12               ; the class being built
     CSTRING rsi, "__init_subclass__"
-    call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    call dunder_lookup_after
+    test rax, rax               ; a Value; 0 is the miss
     jz .bc_no_init_subclass
 
     ; object's own is a classmethod wrapper; unwrap it, since the class it
