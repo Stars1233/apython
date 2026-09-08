@@ -132,3 +132,39 @@ def gen():
 p, q = gen()
 r, s = {"a": 1, "b": 2}.keys()
 print(p, q, r, s)
+
+
+# Unpacking something with no type pointer to walk.  UNPACK_SEQUENCE has always
+# checked for it; UNPACK_EX did not, so `a, *b = 5` read ob_type off the number
+# itself and segfaulted.  Both refusals now name the type, as CPython's do.
+def unpack_two(v):
+    a, b = v
+    return a, b
+
+
+def unpack_star(v):
+    a, *b = v
+    return a, b
+
+
+for value in (5, 1.5, None, True, 2 ** 70, object):
+    for name, fn in (("two", unpack_two), ("star", unpack_star)):
+        try:
+            print(name, fn(value))
+        except TypeError as e:
+            print(name, "TypeError:", e)
+        except ValueError as e:
+            print(name, "ValueError:", e)
+
+# A loop, because the failing path leaves an operand on the stack for the
+# unwinder and getting that wrong corrupts the heap rather than raising.
+def churn(n):
+    for i in range(n):
+        try:
+            a, *b = i
+        except TypeError:
+            pass
+    return "survived"
+
+
+print(churn(300))
