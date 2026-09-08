@@ -2875,9 +2875,15 @@ DEF_FUNC type_repr, TR_FRAME
     push rax
     push rdx
     call ap_strcmp
+    mov ecx, eax                ; the verdict, before the restores overwrite it
     pop rdx
     pop rax
-    test eax, eax
+    ; `test eax, eax` was here, AFTER the pop that puts the module string back
+    ; in rax -- so it tested the low half of a heap pointer, which is never
+    ; zero, and every class defined with builtins as its module printed as
+    ; <class 'builtins.C'>.  exec(src, {}) is the ordinary way to get one:
+    ; the class body's LOAD_NAME __name__ falls through to builtins.
+    test ecx, ecx
     jz .tr_name                 ; module is "builtins": leave it off
 .tr_copy_module:
     lea rsi, [rax + PyStrObject.data]
