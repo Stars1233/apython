@@ -216,10 +216,20 @@ def check_saved_writes(files):
 # A call does not have to be spelled `call`.  These macros expand to one, and
 # a function whose only calls are inside them was skipped entirely -- which is
 # how list_setitem came to reach obj_dealloc through DECREF_V with rsp 8 out.
+# Macros that expand to a `call`, so a function containing one is subject to
+# the alignment rule even if it has no literal `call` line.
+#
+# V_PACK and V_UNPACK joined this list when their cold arms were hoisted into
+# val_pack_cold / val_unpack_cold; before that they reached val_from_i64_p
+# through V_PACK_I64 and the hole let 1280 functions past check_alignment
+# unexamined.  The helpers are written to be correct at either rsp parity --
+# see their docblocks in src/val.asm -- but the functions AROUND them still
+# have to obey the rule for their own calls, which is what this restores.
 CALL_MACROS = ('DECREF', 'DECREF_REG', 'DECREF_V', 'DECREF_VAL', 'XDECREF_VAL',
                'INT_NEED_MPZ', 'MODULE_ADD_FUNC', 'MRO_NEXT', 'RAISE',
                'REQUIRE_SELF', 'REQUIRE_SELF_BARE', 'SET_EXC', 'VISIT_PTR',
-               'VISIT_V', 'V_PACK_I64')
+               'VISIT_V', 'V_PACK_I64', 'V_PACK', 'V_UNPACK',
+               'VPUSH_VAL', 'VPOP_VAL')
 CALLS_RE = r'^\s*(?:call\s|(?:%s)\b)' % '|'.join(CALL_MACROS)
 
 

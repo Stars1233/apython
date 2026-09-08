@@ -242,7 +242,9 @@ END_FUNC list_method_insert
 ;; args[0]=self, reverse in place
 ;; ============================================================================
 DEF_FUNC list_method_reverse
-    push rbx
+    ; No push: the body uses rax, rcx, rdi, rsi, r8 and r10, and the one exit
+    ; that is not the `ret` below is a tail jump into list_sorting_error,
+    ; which never returns.  rbx was saved and never read.
     mov rax, [rdi]          ; self
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rax + PyListObject.ob_item], 0
@@ -268,7 +270,6 @@ DEF_FUNC list_method_reverse
 
 .rev_done:
     RET_NONE
-    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret

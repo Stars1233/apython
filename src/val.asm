@@ -185,3 +185,115 @@ DEF_FUNC val_unpack
     ret
 END_FUNC val_unpack
 
+
+;; ============================================================================
+;; val_unpack_cold(rax = Value) -> rax = payload, rdx = tag
+;;
+;; The cold arms of the V_UNPACK macro, hoisted out of ~950 expansions.  The
+;; macro answers a real non-NULL pointer itself -- one lea, one compare, one
+;; branch -- and calls here for everything else.  Accepts a pointer anyway, so
+;; it is a complete unpack on its own and not a trap for a future caller.
+;;
+;; TWO INVARIANTS, and both are load-bearing:
+;;
+;;   * It clobbers rax and rdx and NOTHING ELSE.  That is exactly the macro's
+;;     documented clobber set, which is why the call needs no register saves
+;;     at the 496 sites whose operands are already (rax, rdx).  Keep it that
+;;     way: no call, no push, no SSE, no memory but the rip-relative pool.
+;;   * It is correct at EITHER rsp parity.  It makes no call, so alignment is
+;;     meaningless to it -- which matters because a macro cannot know the
+;;     parity of the site it expands at.
+;; ============================================================================
+DEF_FUNC_BARE val_unpack_cold
+    mov rdx, rax
+    shr rdx, 48
+    jz .vuc_ptr                 ; high16 == 0: a pointer, or NULL
+
+    cmp edx, VH_INT_LO          ; the shr left at most 16 bits, so edx is exact
+    jae .vuc_int
+    cmp edx, VH_F64_MAX
+    jbe .vuc_f64
+    cmp edx, VH_SLEEP
+    je .vuc_slp
+    cmp edx, VH_IOWAIT
+    je .vuc_iow
+    xor eax, eax                ; a reserved encoding: treat it as an empty slot
+.vuc_null:
+    xor edx, edx
+    ret
+
+.vuc_ptr:
+    test rax, rax
+    jz .vuc_null
+    mov edx, TAG_PTR
+    ret
+
+.vuc_int:
+    V_TO_I64 rax
+    mov edx, TAG_SMALLINT
+    ret
+
+.vuc_f64:
+    V_TO_F64 rax
+    mov edx, TAG_FLOAT
+    ret
+
+.vuc_slp:
+    and rax, [rel v_mask48]
+    mov edx, TAG_SLEEP
+    ret
+
+.vuc_iow:
+    and rax, [rel v_mask48]
+    mov edx, TAG_IO_WAIT
+    ret
+END_FUNC val_unpack_cold
+
+;; ============================================================================
+;; val_pack_cold(rax = payload, rdx = tag) -> rax = Value
+;;
+;; The cold arms of V_PACK, hoisted out of ~1280 expansions.  TAG_PTR and
+;; TAG_NULL never arrive -- the macro answers those in two instructions -- but
+;; they are accepted and passed through, so this is a complete pack.
+;;
+;; Same two invariants as val_unpack_cold, and the boxing arm is why the
+;; second one needs saying twice.  It reaches ap_malloc and GMP, but only
+;; through val_from_i64_p, which realigns rsp itself and preserves every
+;; register except rax.  The caller's rdi is parked in rdx across it rather
+;; than pushed: rdx is the macro's scratch operand and therefore ours, so this
+;; function touches the stack only for its own return address.
+;; ============================================================================
+DEF_FUNC_BARE val_pack_cold
+    cmp rdx, TAG_SMALLINT
+    je .vpc_si
+    cmp rdx, TAG_FLOAT
+    je .vpc_f64
+    cmp rdx, TAG_SLEEP
+    je .vpc_slp
+    cmp rdx, TAG_IO_WAIT
+    je .vpc_iow
+    ret                         ; TAG_PTR, TAG_NULL, reserved: already a Value
+
+.vpc_f64:
+    V_FROM_F64 rax, rdx
+    ret
+
+.vpc_slp:
+    or rax, [rel v_sleep_lo]
+    ret
+
+.vpc_iow:
+    or rax, [rel v_iowait_lo]
+    ret
+
+.vpc_si:
+    V_FROM_I64 rax, rdx, .vpc_box
+    ret
+
+.vpc_box:
+    mov rdx, rdi                ; park the caller's rdi in our own scratch
+    mov rdi, rax
+    call val_from_i64_p         ; preserves rdx and rdi; answers in rax
+    mov rdi, rdx
+    ret
+END_FUNC val_pack_cold

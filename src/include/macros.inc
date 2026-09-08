@@ -360,6 +360,24 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     V_UNPACK %1, %2
 %endmacro
 
+; The fully-inline spellings of the two above.  V_PACK and V_UNPACK send their
+; cold arms to a helper in src/val.asm (see the comment on V_PACK in
+; value.inc); these keep every arm at the call site.  Reaching for one is a
+; claim that the site was profiled -- say what you measured in the commit that
+; adds it.  Nothing in the tree needs one at present: inlining the int arm of
+; both macros was enough, and it was enough uniformly.
+%macro VPUSH_VAL_INLINE 2       ; %1 = payload (clobbered), %2 = tag (clobbered)
+    V_PACK_INLINE %1, %2
+    mov [r13], %1
+    add r13, 8
+%endmacro
+
+%macro VPOP_VAL_INLINE 2        ; %1 = payload dest, %2 = tag dest
+    sub r13, 8
+    mov %1, [r13]
+    V_UNPACK_INLINE %1, %2
+%endmacro
+
 ; Push a raw int64, boxing it when it falls outside the immediate range.
 ; %2 must not be rax.
 %macro VPUSH_INT 2              ; %1 = int64 (clobbered), %2 = scratch

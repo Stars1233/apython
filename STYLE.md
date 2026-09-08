@@ -532,9 +532,48 @@ packed by a tail `jmp` target, and a call site must not decode a result its
 callee already handed over as a Value — both show up as a value off by exactly
 2^48 or by `V_INT_BIAS`, not as a crash.
 
-`V_PACK`, `V_PACK_I64` and `VPUSH_VAL` clobber their second operand, which must
-not be `rax`.  `V_PACK` on a TAG_SMALLINT outside ±2^50 allocates; the reference
-it returns is owned.
+`V_PACK_I64` and `VPUSH_VAL` clobber their second operand, which must not be
+`rax`.  `V_PACK` clobbers its second operand too, but since the out-of-line
+change below it accepts `rax` there like any other register.  `V_PACK` on a
+TAG_SMALLINT outside ±2^50 allocates; the reference it returns is owned.
+
+### `V_PACK` and `V_UNPACK` are out of line
+
+Each of these used to expand in full at every site: 114 bytes for a `V_PACK`
+and about 124 for a `V_UNPACK`, at 1280 and 950 expansions — a ninth of the
+whole `.text` segment, most of it arms for tags the site never sees.  They now
+keep only the arms that are hot inline and `call` `val_pack_cold` /
+`val_unpack_cold` in `src/val.asm` for the rest.
+
+Three consequences worth knowing before touching either:
+
+- **Both macros now contain a `call`**, and both are in lint's `CALL_MACROS`.
+  A function containing one is subject to `check_alignment` — which it was
+  not before, because the old bodies reached `val_from_i64_p` only through
+  `V_PACK_I64`, and the regex anchors on the mnemonic.
+- **The helpers are correct at either `rsp` parity**, deliberately: a macro
+  cannot know the alignment of the site it expands at, and 728 `V_PACK` sites
+  sit after a `leave`, where it is the opposite of the usual.  They clobber
+  `rax` and `rdx` and nothing else, which is what lets the (rax, rdx) sites
+  call them with no register saves at all.  Keep both invariants if you edit
+  them; the docblocks say so too.
+- **Which arms stay inline was measured, not guessed.**  Sending the integer
+  arm out of line cost 4–5% on the int and macro suites — the regressions were
+  `i_divmod`, `i_neg`, `i_bitand`, the unspecialized integer operations that
+  go through the generic `BINARY_OP` — so it came back inline, written to
+  preserve the tag register (`V_FROM_I64` clobbers its scratch, and the
+  scratch here *is* the tag, which the overflow path still needs).
+
+`V_PACK_INLINE` / `V_UNPACK_INLINE` and `VPUSH_VAL_INLINE` / `VPOP_VAL_INLINE`
+keep the old fully-expanded bodies.  Reaching for one is a claim that the site
+was profiled; say what you measured in the commit that adds it.  Nothing in the
+tree needs one at present.
+
+`./apython --selftest-value` group 5 exercises every operand *shape* the
+shuffle macros support, and checks the thing that would otherwise fail
+silently: that `rax` survives a macro whose operands are not `rax`, and `rdx`
+one whose operands are not `rdx`.  A shape used at a single site in the tree is
+covered there and nowhere else — add a case when you add a shape.
 
 ## Refcounting Macros
 

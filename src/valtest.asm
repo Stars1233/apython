@@ -295,6 +295,216 @@ DEF_FUNC value_selftest, 8            ; 5 pushes, so rsp is 16-aligned
     jmp .pk_loop
 .pk_done:
 
+
+    ; ---------------------------------------------------------------- group 5
+    ; The V_PACK / V_UNPACK operand SHAPES.
+    ;
+    ; Both macros now reach a helper that speaks (rax, rdx), so an operand
+    ; pair that is anything else gets shuffled around the call.  The shuffle
+    ; is chosen at assembly time by %ifidni, and its whole job is to leave
+    ; every register that is not an operand exactly as it found it.  Group 4
+    ; exercises one shape thoroughly; this exercises all of them, and checks
+    ; the thing that would otherwise fail silently -- that rax survives a
+    ; macro whose operands are not rax, and rdx one whose operands are not
+    ; rdx.  A shape used at a single site in the tree is covered here and
+    ; nowhere else.
+    ;
+    ; rbx carries the case number; SH_WITNESS is a value no arm produces.
+%define SH_WITNESS 0x5AFE0F1CE5AFE001
+
+    ; --- V_PACK rax, rdx -- the 1062-site shape, no shuffle at all
+    mov ebx, 1
+    mov eax, 42
+    mov edx, TAG_SMALLINT
+    V_PACK rax, rdx
+    mov r12, V_INT(42)
+    cmp rax, r12
+    jne .sh_fail
+
+    ; --- V_PACK rdi, rdx -- %2 is rdx, so rax is parked in rdi by an xchg
+    mov ebx, 2
+    mov r13, SH_WITNESS
+    mov rax, r13
+    mov edi, 42
+    mov edx, TAG_SMALLINT
+    V_PACK rdi, rdx
+    cmp rdi, r12
+    jne .sh_fail
+    cmp rax, r13                    ; the parked rax must have come back
+    jne .sh_fail
+
+    ; --- V_PACK rdi, rsi -- neither operand is rax or rdx: xchg AND push
+    mov ebx, 3
+    mov rax, r13
+    mov rdx, r13
+    mov edi, 42
+    mov esi, TAG_SMALLINT
+    V_PACK rdi, rsi
+    cmp rdi, r12
+    jne .sh_fail
+    cmp rax, r13
+    jne .sh_fail
+    cmp rdx, r13
+    jne .sh_fail
+
+    ; --- V_PACK rax, rsi -- %1 is rax, %2 is not rdx
+    mov ebx, 4
+    mov rdx, r13
+    mov eax, 42
+    mov esi, TAG_SMALLINT
+    V_PACK rax, rsi
+    cmp rax, r12
+    jne .sh_fail
+    cmp rdx, r13
+    jne .sh_fail
+
+    ; --- V_PACK rdx, rsi -- %1 is rdx
+    mov ebx, 5
+    mov rax, r13
+    mov edx, 42
+    mov esi, TAG_SMALLINT
+    V_PACK rdx, rsi
+    cmp rdx, r12
+    jne .sh_fail
+    cmp rax, r13
+    jne .sh_fail
+
+    ; --- V_PACK rdx, rax -- the reversed pair: both are the helper's own
+    mov ebx, 6
+    mov edx, 42
+    mov eax, TAG_SMALLINT
+    V_PACK rdx, rax
+    cmp rdx, r12
+    jne .sh_fail
+
+    ; --- V_PACK rdi, rax -- %2 is rax, the single-site shape
+    mov ebx, 7
+    mov rdx, r13
+    mov edi, 42
+    mov eax, TAG_SMALLINT
+    V_PACK rdi, rax
+    cmp rdi, r12
+    jne .sh_fail
+    cmp rdx, r13
+    jne .sh_fail
+
+    ; --- and the same seven for V_UNPACK, from the Value back to the pair ---
+
+    mov ebx, 11
+    mov rax, r12
+    V_UNPACK rax, rdx
+    cmp rax, 42
+    jne .sh_fail
+    cmp rdx, TAG_SMALLINT
+    jne .sh_fail
+
+    mov ebx, 12
+    mov r13, SH_WITNESS
+    mov rax, r13
+    mov rdi, r12
+    V_UNPACK rdi, rdx
+    cmp rdi, 42
+    jne .sh_fail
+    cmp rdx, TAG_SMALLINT
+    jne .sh_fail
+    cmp rax, r13
+    jne .sh_fail
+
+    mov ebx, 13
+    mov rax, r13
+    mov rdx, r13
+    mov rdi, r12
+    V_UNPACK rdi, rsi
+    cmp rdi, 42
+    jne .sh_fail
+    cmp rsi, TAG_SMALLINT
+    jne .sh_fail
+    cmp rax, r13
+    jne .sh_fail
+    cmp rdx, r13
+    jne .sh_fail
+
+    mov ebx, 14
+    mov rdx, r13
+    mov rax, r12
+    V_UNPACK rax, rsi
+    cmp rax, 42
+    jne .sh_fail
+    cmp rsi, TAG_SMALLINT
+    jne .sh_fail
+    cmp rdx, r13
+    jne .sh_fail
+
+    mov ebx, 15
+    mov rax, r13
+    mov rdx, r12
+    V_UNPACK rdx, rsi
+    cmp rdx, 42
+    jne .sh_fail
+    cmp rsi, TAG_SMALLINT
+    jne .sh_fail
+    cmp rax, r13
+    jne .sh_fail
+
+    mov ebx, 16
+    mov rdx, r12
+    V_UNPACK rdx, rax
+    cmp rdx, 42
+    jne .sh_fail
+    cmp rax, TAG_SMALLINT
+    jne .sh_fail
+
+    mov ebx, 17
+    mov rdx, r13
+    mov rdi, r12
+    V_UNPACK rdi, rax
+    cmp rdi, 42
+    jne .sh_fail
+    cmp rax, TAG_SMALLINT
+    jne .sh_fail
+    cmp rdx, r13
+    jne .sh_fail
+
+    ; --- the two arms the shapes above never reach: a pointer and an empty
+    ; --- slot.  A pointer is answered inline and must not reach the helper;
+    ; --- an empty slot must come back as (0, 0) rather than as a pointer.
+    mov ebx, 21
+    lea rdi, [rel probe_obj]
+    mov r13, rdi
+    V_UNPACK rdi, rsi
+    cmp rdi, r13
+    jne .sh_fail
+    cmp rsi, TAG_PTR
+    jne .sh_fail
+
+    mov ebx, 22
+    xor edi, edi
+    V_UNPACK rdi, rsi
+    test rdi, rdi
+    jnz .sh_fail
+    test rsi, rsi
+    jnz .sh_fail
+
+    ; --- a TAG_SMALLINT payload OUTSIDE the immediate range, so V_PACK's
+    ; --- boxing arm runs.  It reaches ap_malloc and GMP through
+    ; --- val_from_i64_p; the point is that it still preserves rdi's caller.
+    mov ebx, 23
+    mov r13, SH_WITNESS
+    mov rdi, r13
+    mov r14, 1 << 55
+    mov rsi, TAG_SMALLINT
+    V_PACK r14, rsi                 ; r14 = an owned heap PyIntObject
+    cmp rdi, r13                    ; the boxing arm parks rdi in its scratch
+    jne .sh_fail
+    mov rdi, r14
+    mov edx, TAG_PTR
+    call int_to_i64
+    mov r15, 1 << 55
+    cmp rax, r15
+    jne .sh_fail
+    mov rdi, r14
+    call obj_dealloc
+
     ; ---------------------------------------------------------------- success
     xor eax, eax
     jmp .done
@@ -314,6 +524,10 @@ DEF_FUNC value_selftest, 8            ; 5 pushes, so rsp is 16-aligned
 .pk_fail:
     lea rax, [r12 + 1]
     add rax, 4000
+    jmp .done
+.sh_fail:
+    mov rax, rbx
+    add rax, 5000
 
 .done:
     pop r15
