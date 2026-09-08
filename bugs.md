@@ -29,6 +29,15 @@ reasoning that chose them and what changing one would cost.
   it -- the collector deciding something is unreachable that is not.  Both
   predate the round that recorded them.
 
+  CPython's test_sys_settrace dies of the same thing, in `gc_visit_decref`
+  under `exc_traverse` at shutdown, and it is HEAP-LAYOUT SENSITIVE: the same
+  commit built at `/tmp/apy-base` passes and built at
+  `/home/jgarzik/repo/apython` crashes, because the DWARF path length changes
+  the binary's size and with it every allocation address.  A git worktree is
+  the usual way to compare two commits, and a worktree whose path differs in
+  LENGTH is not a control -- build the comparison at a path of the same
+  length, or the answer is about the path.
+
 - **`f(*5)` does not name the callable.**  CPython says
   "__main__.f() argument after * must be an iterable, not int"; this says
   "Value after * must be an iterable, not int", which is CPython's message
