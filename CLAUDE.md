@@ -177,10 +177,11 @@ No hand-written file exceeds 100k bytes; only generated asm may.
 - `src/eval.asm` — Bytecode dispatch loop (256-entry jump table), the
   exception unwinder, and `raise_exception`
 - `src/opcodes/*.asm` — Opcode handlers by category: `load` (loads, stores and
-  the stack shuffles), `call`, `build`, `arith` (BINARY_OP/COMPARE_OP/unary and
-  the specialized int/float superinstructions), `flow` (returns, jumps,
-  f-strings, generators), `match` (the MATCH_* family and the intrinsics),
-  `async`, `import`
+  the stack shuffles), `call`, `build`, `unpack` (UNPACK_SEQUENCE and
+  UNPACK_EX, the two that take a sequence apart), `arith` (BINARY_OP/
+  COMPARE_OP/unary and the specialized int/float superinstructions), `flow`
+  (returns, jumps, f-strings, generators), `match` (the MATCH_* family and the
+  intrinsics), `async`, `import`
 - `src/methods/*.asm` — Builtin type methods, one file per type: `str`,
   `str_pred`, `str_parts`, `list`, `tuple`, `dict`, `set`, `num`, `bytes`,
   `bytearray_methods` (bytearray's share of bytes' bodies, each run over a
