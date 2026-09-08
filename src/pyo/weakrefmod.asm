@@ -283,7 +283,29 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
     jmp .reuse_scan
 
 .fresh:
+    ; A SUBCLASS is a heaptype: it carries TYPE_FLAG_HAVE_GC, so its instance
+    ; has to come from gc_alloc and be tracked, and its body -- the instance
+    ; dict and any __slots__ past our fields -- has to be zeroed before the
+    ; collector can see it.  builtin_sub_alloc is what every other builtin
+    ; subclass is built by and does all three.  ap_malloc here handed
+    ; gc_dealloc a pointer sixteen bytes short of the block, and the first
+    ; weakref.KeyedRef ever built corrupted the heap.
     mov rdi, [rbp - WM_TYPE]
+    lea rcx, [rel weakref_type]
+    cmp rdi, rcx
+    je .fresh_exact
+    lea rcx, [rel proxy_type]
+    cmp rdi, rcx
+    je .fresh_exact
+    lea rcx, [rel callableproxy_type]
+    cmp rdi, rcx
+    je .fresh_exact
+    extern builtin_sub_alloc
+    call builtin_sub_alloc      ; refcnt, ob_type, the type's reference, zeroed
+    mov rbx, rax
+    jmp .fields
+
+.fresh_exact:
     mov rdi, [rdi + PyTypeObject.tp_basicsize]
     cmp rdi, PyWeakRefObject_size
     jae .size_ok
@@ -295,6 +317,8 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
     mov rax, [rbp - WM_TYPE]
     mov [rbx + PyObject.ob_type], rax
     inc qword [rax + PyObject.ob_refcnt]
+
+.fields:
     mov rax, [rbp - WM_OBJ]
     mov [rbx + PyWeakRefObject.wr_object], rax
     mov rax, [rbp - WM_CB]
@@ -741,6 +765,90 @@ DEF_FUNC ref_construct
 END_FUNC ref_construct
 
 ;; ============================================================================
+;; ref_dunder_new(args, nargs) -> Value    -- weakref.ref.__new__
+;;
+;; ref keeps its constructor in tp_new, so ref.__dict__ had no __new__ and
+;; `super().__new__(cls, ob, cb)` in a subclass reached object.__new__, which
+;; refuses the extra arguments.  weakref.KeyedRef is written exactly that way,
+;; and WeakValueDictionary is built on it.
+;; ============================================================================
+extern new_from_slot
+DEF_FUNC ref_dunder_new
+    mov rdx, rsi                ; nargs
+    mov rsi, rdi                ; args
+    lea rdi, [rel weakref_type]
+    call new_from_slot
+    leave
+    ret
+END_FUNC ref_dunder_new
+
+;; ============================================================================
+;; ref_dunder_init(args, nargs) -> None    -- weakref.ref.__init__
+;;
+;; A no-op that ACCEPTS the constructor's arguments.  ref builds itself in
+;; __new__, so there is nothing left to initialise -- but weakref.KeyedRef's
+;; __init__ ends in `super().__init__(ob, callback)`, and without an entry
+;; here that reaches object.__init__, which refuses the two extra arguments.
+;; CPython's ref has the same do-nothing tp_init for the same reason.
+;; ============================================================================
+DEF_FUNC ref_dunder_init
+    cmp rsi, 1
+    jl .rdi_error
+    cmp rsi, 3
+    jg .rdi_error
+    RET_NONE
+    leave
+    V_PACK rax, rdx
+    ret
+.rdi_error:
+    RAISE exc_TypeError_type, "ref.__init__() takes 1 or 2 arguments"
+END_FUNC ref_dunder_init
+
+;; ============================================================================
+;; ref_traverse(rdi = a ref) -> nothing; the collector's visit of what it owns
+;;
+;; A ref owns exactly one thing: its callback.  wr_object is BORROWED -- the
+;; whole point of a weak reference -- so it is not visited and not released.
+;;
+;; This and ref_clear exist for the SUBCLASS.  type_from_parts reads a builtin
+;; base's tp_clear to decide what a subclass's dealloc must do: with one it
+;; gets descr_sub_dealloc, which runs the clear and then instance_dealloc for
+;; the instance dict, the __slots__ and the class reference; without one it
+;; gets builtin_sub_dealloc, which frees the block and leaks everything else
+;; -- and weakref.KeyedRef, which is what WeakValueDictionary stores, carries
+;; a key in an instance dict.
+;; ============================================================================
+DEF_FUNC ref_traverse, 8            ; 1 push, so rsp is 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov rax, [rbx + PyWeakRefObject.wr_callback]
+    VISIT_V rax, rcx
+    pop rbx
+    leave
+    ret
+END_FUNC ref_traverse
+
+;; ============================================================================
+;; ref_clear(rdi = a ref) -> nothing; the callback released and the field zeroed
+;;
+;; The other half of the pair above.  Zeroing as it goes is what keeps
+;; descr_sub_dealloc from releasing the callback a second time.
+;; ============================================================================
+DEF_FUNC ref_clear, 8               ; 1 push, so rsp is 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyWeakRefObject.wr_callback]
+    mov qword [rbx + PyWeakRefObject.wr_callback], 0
+    test rdi, rdi
+    jz .rc_done
+    call obj_decref
+.rc_done:
+    pop rbx
+    leave
+    ret
+END_FUNC ref_clear
+
+;; ============================================================================
 ;; proxy objects: the same structure, forwarding attribute access
 ;; ============================================================================
 DEF_FUNC_LOCAL proxy_referent
@@ -1088,8 +1196,8 @@ weakref_type:
     dq 0                        ; tp_mro
     dq TYPE_FLAG_BASETYPE       ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq ref_traverse             ; tp_traverse
+    dq ref_clear                ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
 

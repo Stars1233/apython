@@ -1550,6 +1550,22 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov rcx, [rax + PyTypeObject.tp_iternext]
     mov [r12 + PyTypeObject.tp_iternext], rcx
 
+    ; tp_call is what makes the base's INSTANCES callable, and a subclass of
+    ; weakref.ref that did not inherit it could not be dereferenced -- which
+    ; is weakref.KeyedRef, and WeakValueDictionary above it.  The two
+    ; metatype constructors are excluded for the same reason tp_new excludes
+    ; them: calling an instance of an ordinary class must not build a class.
+    mov rcx, [rax + PyTypeObject.tp_call]
+    test rcx, rcx
+    jz .bc_no_set_base
+    lea rdx, [rel object_type_call]
+    cmp rcx, rdx
+    je .bc_no_set_base
+    lea rdx, [rel type_call]
+    cmp rcx, rdx
+    je .bc_no_set_base
+    mov [r12 + PyTypeObject.tp_call], rcx
+
 .bc_no_set_base:
 
     ; Fill the type's slots from the dunders it defines.  Until now a

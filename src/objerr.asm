@@ -18,6 +18,7 @@
 ; --- the message primitives, which stay in object.asm ---
 extern msg_append_i64
 extern rbt_append_cstr
+extern rbt_typename
 
 ; --- what the messages describe ---
 extern value_type
@@ -394,3 +395,89 @@ DEF_FUNC raise_builtin_arity, RBA_FRAME
     lea rsi, [rbp - RBA_BUF]
     call raise_exception
 END_FUNC raise_builtin_arity
+
+;; ============================================================================
+;; raise_new_bad_class(rdi = the type whose __new__ this is, rsi = the class
+;;                     argument as a Value, edx = 0 no argument / 1 not a type
+;;                     / 2 not a subtype)
+;;   -> does not return: the composed message is raised as a TypeError
+;;
+;; The three ways `T.__new__(cls, ...)` can be called wrongly, worded as
+;; CPython words them:
+;;   list.__new__(): not enough arguments
+;;   list.__new__(X): X is not a type object (int)
+;;   list.__new__(dict): dict is not a subtype of list
+;;
+;; The first name is the type the __new__ was found on, not the argument's:
+;; that is what says which constructor was reached, and it is the whole point
+;; of the message.  `X` is CPython's literal placeholder, not the argument.
+;; ============================================================================
+RNB_OWNER equ 8
+RNB_ARG   equ 16
+RNB_WHY   equ 24
+RNB_BUF   equ 400
+RNB_FRAME equ 400           ; + 0 pushes = 400, 16-aligned
+global raise_new_bad_class
+DEF_FUNC raise_new_bad_class, RNB_FRAME
+    mov [rbp - RNB_OWNER], rdi
+    mov [rbp - RNB_ARG], rsi
+    mov [rbp - RNB_WHY], rdx
+
+    lea rdi, [rbp - RNB_BUF]
+    call .rnb_owner_name
+    mov rdi, rax
+
+    cmp qword [rbp - RNB_WHY], 0
+    je .rnb_no_arg
+    cmp qword [rbp - RNB_WHY], 1
+    je .rnb_not_type
+
+    ; "T.__new__(cls): cls is not a subtype of T"
+    CSTRING rsi, ".__new__("
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rnb_arg_name
+    mov rdi, rax
+    CSTRING rsi, "): "
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rnb_arg_name
+    mov rdi, rax
+    CSTRING rsi, " is not a subtype of "
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rnb_owner_name
+    jmp .rnb_raise
+
+.rnb_no_arg:
+    CSTRING rsi, ".__new__(): not enough arguments"
+    call rbt_append_cstr
+    jmp .rnb_raise
+
+.rnb_not_type:
+    CSTRING rsi, ".__new__(X): X is not a type object ("
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RNB_ARG]
+    call rbt_typename
+    mov rdi, rax
+    CSTRING rsi, ")"
+    call rbt_append_cstr
+
+.rnb_raise:
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RNB_BUF]
+    call raise_exception
+
+;; The two names, appended at the cursor in rdi.  The argument is a class here
+;; -- reason 2 is the only caller -- so its own tp_name is what to print, not
+;; the metatype's, which is what rbt_typename would give.
+.rnb_owner_name:
+    mov rcx, [rbp - RNB_OWNER]
+    mov rsi, [rcx + PyTypeObject.tp_name]
+    jmp rbt_append_cstr
+.rnb_arg_name:
+    mov rcx, [rbp - RNB_ARG]
+    mov rsi, [rcx + PyTypeObject.tp_name]
+    jmp rbt_append_cstr
+END_FUNC raise_new_bad_class

@@ -50,3 +50,33 @@ except (TypeError, ReferenceError):
 
 # A class with no weak references at all costs nothing and behaves normally.
 print([C(i).n for i in range(3)])
+
+# A ref subclass must be able to reach its base constructor by name.  This is
+# exactly weakref.KeyedRef's shape, and `super().__new__` finding only
+# object.__new__ is what broke WeakValueDictionary: object refuses the extra
+# arguments, because ref keeps its constructor in a slot rather than in
+# ref.__dict__.
+print("__new__" in _weakref.ref.__dict__, _weakref.ref.__new__ is object.__new__)
+
+
+class KeyedRef(_weakref.ref):
+    def __new__(type, ob, callback, key):
+        self = super().__new__(type, ob, callback)
+        return self
+
+    def __init__(self, ob, callback, key):
+        super().__init__(ob, callback)
+        self.key = key
+
+
+kr_target = C(7)
+kr = KeyedRef(kr_target, None, "k")
+print(kr() is kr_target, kr.key, type(kr) is KeyedRef)
+
+# ref.__new__ called directly, and refused when the class is unrelated.
+direct = _weakref.ref.__new__(KeyedRef, kr_target, None)
+print(type(direct) is KeyedRef, direct() is kr_target)
+try:
+    _weakref.ref.__new__(dict)
+except TypeError:
+    print("unrelated class refused")

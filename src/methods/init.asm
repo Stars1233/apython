@@ -1482,6 +1482,14 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax
     ADD_FN mn___hash__, generic_method_hash
+    ; ref's constructor lives in tp_new, so a subclass reaching for it by name
+    ; -- weakref.KeyedRef does -- found object.__new__ and was refused.
+    extern ref_dunder_new
+    mov rdi, rbx
+    lea rsi, [rel ref_dunder_new]
+    call add_new_staticmethod
+    extern ref_dunder_init
+    ADD_FN_N mn___init__, ref_dunder_init, 1, 3
     mov rdi, rbx
     call add_class_getitem
     extern weakref_type

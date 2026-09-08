@@ -2305,3 +2305,75 @@ DEF_FUNC generic_method_contains
 .gmc_error:
     RAISE exc_TypeError_type, "__contains__() takes exactly one argument"
 END_FUNC generic_method_contains
+
+;; ============================================================================
+;; new_from_slot(rdi = the type this __new__ belongs to, rsi = args,
+;;               rdx = nargs) -> Value
+;;
+;; The __new__ for a builtin that keeps its constructor in tp_new and has no
+;; entry of its own in tp_dict.  `weakref.ref` was the costly one: KeyedRef
+;; does `super().__new__(type, ob, callback)`, that found object.__new__
+;; instead, and object refuses extra arguments for a type whose real
+;; constructor is elsewhere -- so WeakValueDictionary, and everything in the
+;; standard library above it, could not be built.
+;;
+;; The slot called is the OWNER's, taken from rdi, never the argument's.  A
+;; subclass that defines __new__ in Python has its own entry ahead of this one
+;; in the MRO; reaching for cls->tp_new here would re-enter that and recurse.
+;; The owner's constructor already takes the class to build as its first
+;; argument, which is how a subclass instance still comes out.
+;; ============================================================================
+extern type_check_is_class
+extern type_is_subtype
+extern raise_new_bad_class
+DEF_FUNC new_from_slot, 8               ; 3 pushes, so rsp is 16-aligned
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi                        ; the owning type
+    mov r12, rsi                        ; args
+    mov r13, rdx                        ; nargs
+
+    test r13, r13
+    jz .nfs_no_arg
+
+    mov rdi, [r12]                      ; cls
+    call type_check_is_class
+    test eax, eax
+    jz .nfs_not_type
+
+    mov rdi, [r12]
+    mov rsi, rbx
+    call type_is_subtype
+    test eax, eax
+    jz .nfs_not_subtype
+
+    mov rax, [rbx + PyTypeObject.tp_new]
+    test rax, rax
+    jz .nfs_not_subtype                 ; an owner with no constructor at all
+
+    mov rdi, [r12]                      ; cls
+    lea rsi, [r12 + 8]                  ; the arguments after cls
+    lea rdx, [r13 - 1]
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    jmp rax                             ; the slot returns a Value already
+
+.nfs_no_arg:
+    mov rdi, rbx
+    xor esi, esi
+    xor edx, edx
+    call raise_new_bad_class
+.nfs_not_type:
+    mov rdi, rbx
+    mov rsi, [r12]
+    mov edx, 1
+    call raise_new_bad_class
+.nfs_not_subtype:
+    mov rdi, rbx
+    mov rsi, [r12]
+    mov edx, 2
+    call raise_new_bad_class
+END_FUNC new_from_slot
