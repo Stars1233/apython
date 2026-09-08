@@ -14,6 +14,21 @@ reasoning that chose them and what changing one would cost.
 
 ## Correctness
 
+- **CPython's test_weakref overflows the C stack.**  `WeakMethodTestCase.
+  test_hashing` and two of its sibling classes die with an unbounded
+  recursion whose top frame is `dict_lookup`; valgrind reports "can't grow
+  stack" rather than an invalid access.  The test in isolation passes, and so
+  does every reduction of it tried so far -- it needs the rest of the module,
+  so the state that arms it comes from an earlier test.  The Python-level
+  recursion limit is in place and works (`sys.getrecursionlimit()` is 1000
+  and a runaway Python function raises RecursionError), so whatever recurses
+  here is doing it below the eval loop, where nothing counts the depth.
+
+  The same file also reports 44 valgrind errors of a second kind, all of them
+  an object freed by an explicit `gc.collect()` while a live frame still held
+  it -- the collector deciding something is unreachable that is not.  Both
+  predate the round that recorded them.
+
 - **`f(*5)` does not name the callable.**  CPython says
   "__main__.f() argument after * must be an iterable, not int"; this says
   "Value after * must be an iterable, not int", which is CPython's message
