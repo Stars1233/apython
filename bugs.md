@@ -54,6 +54,19 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
+- **`sys._getframe()` leaks the frame's fast locals.**  Asking a live frame
+  for a frame object keeps a reference to every local it was holding, and the
+  reference is never given back: a hundred calls to a function that does
+  nothing but `sys._getframe()` leave a hundred of its arguments alive after
+  `gc.collect()`.  Reading `f_locals` or `f_back` is not what does it -- the
+  `_getframe()` alone is enough -- so the imbalance is between
+  `frameobj_detach`, which copies the locals out with a reference of their
+  own, and whatever should release the snapshot when the frame object dies.
+  A traceback's frame does NOT leak, which is the useful contrast: it goes
+  through `frameobj_from_code` instead.  Found while writing
+  test_call_arg_ownership, which is why that file does not cover
+  `sys._getframe`.
+
 - **A `property` subclass that defines its own `__get__` is not consulted.**
   `op_load_attr`'s descriptor block compares the attribute's type against
   `property_type` by identity and calls `property_descr_get` directly, so a

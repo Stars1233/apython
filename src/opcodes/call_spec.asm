@@ -25,7 +25,9 @@
 ; A generator, coroutine or async generator is refused at the guard.  Such a
 ; call returns with the frame still live -- op_return_generator hands it to the
 ; generator object and func_call reads instr_ptr to decide not to free it --
-; and this handler frees unconditionally.
+; and this handler frees unconditionally.  That guard is load-bearing twice
+; over: the unconditional frame_free is also what lets the arguments' stack
+; references be MOVED into the frame rather than copied.
 
 %include "macros.inc"
 %include "object.inc"
@@ -138,6 +140,21 @@ DEF_FUNC op_call_py_exact, CPE_FRAME
 
     ; Every parameter has an argument, so the bind is a copy.  Defaults need no
     ; test: a default could not apply to a parameter that already has one.
+    ;
+    ; And it is a copy in the ownership sense too: the stack slot's reference
+    ; MOVES into the frame, which is what CPython's CALL_PY_EXACT_ARGS does.
+    ; The slots below are popped and never read again, and frame_free releases
+    ; every localsplus entry unconditionally -- which this handler's own guards
+    ; guarantee runs, because they exclude the generator, coroutine and async
+    ; generator shapes, the only ones that return with the frame still live.
+    ; So the pair of refcount operations per argument becomes none, on the path
+    ; every Python call takes.
+    ;
+    ; Nothing sees the slots twice in the window between: neither the value
+    ; stack nor localsplus is reached by any tp_traverse -- an interpreter
+    ; frame is pool-allocated and untracked, and frameobj_traverse walks
+    ; f_back, f_globals, f_locals and f_trace -- so the collector cannot
+    ; subtract two references where only one exists.
     mov rcx, [rbp - CPE_TOTAL]
     test ecx, ecx
     jz .cpe_run
@@ -145,7 +162,6 @@ DEF_FUNC op_call_py_exact, CPE_FRAME
     xor eax, eax
 .cpe_bind:
     mov rdx, [r8 + rax*8]
-    INCREF_V rdx, r9
     mov [r15 + PyFrame.localsplus + rax*8], rdx
     inc eax
     cmp eax, ecx
@@ -158,23 +174,15 @@ DEF_FUNC op_call_py_exact, CPE_FRAME
     mov rdi, r15
     call frame_free
 
-    ; Release the arguments and the callable.  They are contiguous: the
-    ; callable is the slot immediately below the arguments in both shapes.
-    ; A pointer walking down, not an index in the frame.  This used to reload
-    ; the argument base AND read back the counter it had just written, on
-    ; every iteration -- four memory accesses per released argument for two
-    ; values that fit in registers.  r15 is free: the frame it held has just
-    ; been given back, and it survives DECREF_V, which is the whole
-    ; difficulty.
-    mov rax, [rbp - CPE_TOTAL]
+    ; Release the callable, and only the callable.  The arguments' references
+    ; went into the frame at .cpe_bind and frame_free has just given them back;
+    ; releasing them here as well would be one DECREF too many.  The callable
+    ; is the slot immediately below the arguments in both shapes -- the method
+    ; in one, the function in the other -- and in the plain shape the NULL two
+    ; slots down needs nothing.
     mov r15, [rbp - CPE_ARGS]
-    lea r15, [r15 + rax*8]              ; one past the last argument
-.cpe_release:
-    sub r15, 8
-    mov rdi, [r15]
+    mov rdi, [r15 - 8]
     DECREF_V rdi, rdx
-    cmp r15, [rbp - CPE_ARGS]
-    jae .cpe_release                    ; ...down to the callable below them
 
     ; N+2 slots go, whichever shape this was.
     mov rcx, [rbp - CPE_NARGS]
