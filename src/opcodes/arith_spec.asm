@@ -271,6 +271,7 @@ align 16
 ;; op*4 + (2*(x>=y) + (x<=y)).  Column 0 is the unordered case, which only a
 ;; NaN produces, so the integer forms never index it and the float forms
 ;; always do when either operand is a NaN.
+global int_cmp_result
 int_cmp_result:
     db 0, 1, 0, 0               ; PY_LT = 0
     db 0, 1, 0, 1               ; PY_LE = 1

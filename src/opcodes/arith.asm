@@ -1792,48 +1792,28 @@ DEF_FUNC_BARE op_compare_op
     ; fall through
 
 .cmp_do_compare:
-    ; Both SmallInt: decode and compare
-    mov rax, rdi
-    mov rdx, rsi
-    cmp rax, rdx               ; flags survive LEA + jmp [mem]
-    lea r8, [rel .cmp_setcc_table]
-    jmp [r8 + rcx*8]          ; 1 indirect branch on comparison op
-
-.cmp_set_lt:
-    setl al
-    jmp .cmp_push_bool
-.cmp_set_le:
-    setle al
-    jmp .cmp_push_bool
-.cmp_set_eq:
-    sete al
-    jmp .cmp_push_bool
-.cmp_set_ne:
-    setne al
-    jmp .cmp_push_bool
-.cmp_set_gt:
-    setg al
-    jmp .cmp_push_bool
-.cmp_set_ge:
-    setge al
-    ; fall through to .cmp_push_bool
-
-.cmp_push_bool:
-    movzx eax, al             ; eax = 0 or 1
-    VPUSH_BOOL rax             ; (0/1, TAG_BOOL) — no INCREF needed
+    ; Both SmallInt.  This reached one of six `setcc` arms through an indirect
+    ; jump on a six-entry table -- a BTB entry, a table load, and a `jmp` back
+    ; to the merge point, with a comment about the flags having to survive the
+    ; `lea` in between.  arith_spec.asm already replaced exactly that with
+    ; int_cmp_result: `2*(x>=y) + (x<=y)` is 1 for less, 2 for greater and 3
+    ; for equal, so one byte table indexed by `op*4 + that` answers all six
+    ; operators branchlessly.  Six handlers there share the 24 bytes; this is
+    ; the seventh, and it takes the `.data` section out of a `.text` file with
+    ; it.
+    cmp rdi, rsi
+    setge al                   ; a >= b
+    setle dl                   ; a <= b
+    movzx eax, al
+    movzx edx, dl
+    lea eax, [rdx + rax*2]     ; 1 = less, 2 = greater, 3 = equal
+    lea eax, [rax + rcx*4]     ; + op*4
+    extern int_cmp_result
+    lea rdx, [rel int_cmp_result]
+    movzx eax, byte [rdx + rax]
+    VPUSH_BOOL rax             ; no INCREF needed: the singletons are immortal
     add rbx, 2
     DISPATCH
-
-section .data
-align 8
-.cmp_setcc_table:
-    dq .cmp_set_lt             ; PY_LT = 0
-    dq .cmp_set_le             ; PY_LE = 1
-    dq .cmp_set_eq             ; PY_EQ = 2
-    dq .cmp_set_ne             ; PY_NE = 3
-    dq .cmp_set_gt             ; PY_GT = 4
-    dq .cmp_set_ge             ; PY_GE = 5
-section .text
 
 .cmp_slow_path:
     ; Both float: specialize, the same way the SmallInt arm above does, and
