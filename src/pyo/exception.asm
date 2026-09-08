@@ -1986,6 +1986,21 @@ DEF_FUNC exc_method_new, EMN_FRAME
     mov [rbp - EMN_NARGS], rsi
     mov [rbp - EMN_ARGS], rdi
     mov rbx, [rdi]              ; args[0] = the class
+    ; ...if it IS a class.  Nothing checked, so `ValueError("x").__new__(V)`
+    ; -- which reaches here with the INSTANCE in args[0], because the wrapper
+    ; below binds -- built an exception whose exc_type was an instance and
+    ; aborted with "double free or corruption" when it was freed.
+    V_TEST_PTR rbx, rax
+    ja .emn_not_a_type
+    mov rax, [rbx + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .emn_not_a_type
+    mov rdi, rbx
+    lea rsi, [rel exc_BaseException_type]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jz .emn_not_an_exc
     mov [rbp - EMN_TYPE], rbx
 
     ; A bare instance: no message, so exc_new builds an empty args tuple.
@@ -2051,6 +2066,21 @@ DEF_FUNC exc_method_new, EMN_FRAME
     pop rbx
     RAISE exc_TypeError_type, \
           "BaseException.__new__(): not enough arguments"
+.emn_not_a_type:
+    mov rsi, rbx
+    pop rbx
+    CSTRING rdi, `BaseException.__new__(X): X is not a type object (\x01)`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+.emn_not_an_exc:
+    ; raise_type_error_with_TYPENAME: the argument here IS a class, so the
+    ; name wanted is its own and not its type's, which is always "type".
+    mov rsi, rbx
+    pop rbx
+    CSTRING rdi, \
+        `BaseException.__new__(\x01): \x01 is not a subtype of BaseException`
+    extern raise_type_error_with_typename
+    jmp raise_type_error_with_typename
 END_FUNC exc_method_new
 
 ;; ============================================================================
@@ -2067,6 +2097,39 @@ EIM_FRAME equ 40            ; + 1 push = 48, 16-aligned
 ;; EXC_ADD_METHOD impl, "name" -- one entry in BaseException's tp_dict.
 ;; rbx holds the dict.  This was open-coded for the single method that used to
 ;; be here; a second one is what turned fifteen lines into a macro.
+;; EXC_ADD_STATIC impl, "name" -- the same, wrapped in a staticmethod so that
+;; reading it off an INSTANCE does not bind the instance as its first argument.
+%macro EXC_ADD_STATIC 2
+    CSTRING rdi, %2
+    call str_from_cstr_heap
+    mov [rbp - EIM_KEY], rax
+    lea rdi, [rel %1]
+    CSTRING rsi, %2
+    call builtin_func_new
+    mov [rbp - EIM_FN], rax
+    sub rsp, 16
+    mov [rsp], rax
+    xor edi, edi
+    mov rsi, rsp
+    mov edx, 1
+    extern staticmethod_construct
+    call staticmethod_construct
+    add rsp, 16
+    push rax
+    mov rdi, [rbp - EIM_FN]
+    call obj_decref             ; the staticmethod holds it now
+    pop rax
+    mov [rbp - EIM_FN], rax
+    mov rdi, rbx
+    mov rsi, [rbp - EIM_KEY]
+    mov rdx, rax
+    call dict_set
+    mov rdi, [rbp - EIM_KEY]
+    call obj_decref
+    mov rdi, [rbp - EIM_FN]
+    call obj_decref
+%endmacro
+
 %macro EXC_ADD_METHOD 2
     CSTRING rdi, %2
     call str_from_cstr_heap
@@ -2105,12 +2168,13 @@ DEF_FUNC exc_install_methods, EIM_FRAME
     extern type_stamp_methods
     call type_stamp_methods
 
-    ; __new__ goes in AFTER the stamp, because it is a staticmethod: its first
+    ; __new__ goes in after the stamp AND inside a staticmethod.  Its first
     ; argument is the class being built, not a BaseException, so the receiver
-    ; check the stamp installs would refuse every correct call with
-    ; "descriptor '__new__' for 'BaseException' objects doesn't apply to a
-    ; 'type' object".
-    EXC_ADD_METHOD exc_method_new, "__new__"
+    ; check the stamp installs would refuse every correct call -- and a bare
+    ; builtin function BINDS on instance access, which put the instance in
+    ; args[0] for `ValueError("x").__new__(ValueError)`.  A staticmethod is
+    ; what CPython makes __new__, and it is what stops both.
+    EXC_ADD_STATIC exc_method_new, "__new__"
 .eim_out:
     pop rbx
     leave

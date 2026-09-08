@@ -437,21 +437,29 @@ END_FUNC property_construct
 ;; A property that never reaches a class body -- one built and called by hand
 ;; -- keeps a NULL name and falls back to CPython's unnamed wording.
 ;; ============================================================================
-PSN_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+PSN_NAME  equ 8          ; the name, held across the release below
+PSN_PROP  equ 16         ; and the property, for the same reason
+PSN_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC property_dunder_set_name, PSN_FRAME
     cmp rsi, 3
     jb .psn_done
     mov rax, [rdi]              ; the property
     mov rdx, [rdi + 16]         ; the name Value (one Value per slot)
+    ; The name goes in the FRAME before anything is released.  It was held in
+    ; rdx across the obj_decref below, and rdx is caller-saved: a release that
+    ; reached zero ran obj_dealloc, which destroys it, and the garbage left
+    ; behind was then classified and dereferenced.
+    mov [rbp - PSN_NAME], rdx
     ; Only a str, and only once: a re-assignment under a second name would
     ; otherwise leak the first.
-    push rax
     mov rdi, [rax + PyPropertyObject.prop_name]
     test rdi, rdi
     jz .psn_no_old
+    mov [rbp - PSN_PROP], rax
     call obj_decref
+    mov rax, [rbp - PSN_PROP]
 .psn_no_old:
-    pop rax
+    mov rdx, [rbp - PSN_NAME]
     mov qword [rax + PyPropertyObject.prop_name], 0
     V_TEST_PTR rdx, rcx         ; ja when NULL or an immediate
     ja .psn_done

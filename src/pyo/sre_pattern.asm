@@ -459,7 +459,7 @@ DEF_FUNC sre_substr_from_state_empty
 ;; ============================================================================
 section .bss
 align 8
-sre_shared_cpcache: resq 3      ; an SRE_CpCache: buf, len, subject
+sre_shared_cpcache: resq 4      ; an SRE_CpCache: buf, len, subject, borrows
 
 section .text
 
@@ -2438,6 +2438,7 @@ DEF_FUNC sre_scanner_new, 8            ; 5 pushes, so rsp is 16-aligned
     mov qword [rbx + SRE_ScannerObject.cp_buf], 0
     mov qword [rbx + SRE_ScannerObject.cp_len], 0
     mov qword [rbx + SRE_ScannerObject.cp_subject], 0
+    mov qword [rbx + SRE_ScannerObject.cp_borrows], 0
 
     mov rax, rbx
 
