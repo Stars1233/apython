@@ -319,7 +319,13 @@ END_FUNC set_method_copy
 ;; set_method_union(args, nargs) -> new set = self | other
 ;; args[0]=self, args[1]=other (iterable)
 ;; ============================================================================
-DEF_FUNC_LOCAL set_binop_union, 8            ; 5 pushes, so rsp is 16-aligned
+; set_add probes the RESULT with a key borrowed from one of the operands, and
+; the probe runs __eq__ -- which may clear that operand.  Same hazard as
+; set_binop_intersection below, with set_add in place of set_contains.
+SMU_KEY   equ 8
+SMU_IDX   equ 16
+SMU_FRAME equ 24            ; + 5 pushes = 64, 16-aligned
+DEF_FUNC_LOCAL set_binop_union, SMU_FRAME
     push rbx
     push r12
     push r13
@@ -340,9 +346,8 @@ DEF_FUNC_LOCAL set_binop_union, 8            ; 5 pushes, so rsp is 16-aligned
     jz .smu_fail
     mov r15, rax            ; owned: the set itself, or one built from it
 
-    ; Copy self → new set
-    mov r12, [r14 + PyDictObject.entries]
-    mov r13, [r14 + PyDictObject.capacity]
+    ; Copy self → new set.  entries and capacity are read INSIDE the loop:
+    ; __eq__ can resize either operand and free the array.
     ; The result takes the left operand's kind: a frozenset operator or method
     ; answers a frozenset, not a set.
     mov rdi, r14
@@ -353,48 +358,52 @@ DEF_FUNC_LOCAL set_binop_union, 8            ; 5 pushes, so rsp is 16-aligned
     xor ecx, ecx
 
 .smu_copy_self:
-    cmp rcx, r13
+    cmp rcx, [r14 + PyDictObject.capacity]
     jge .smu_add_other
+    mov [rbp - SMU_IDX], rcx
 
+    mov rdx, [r14 + PyDictObject.entries]
     imul rax, rcx, SET_ENTRY_SIZE
-    add rax, r12
-    push rcx
+    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    test rsi, rsi                        ; occupied?
+    jz .smu_cs_next
 
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
-    je .smu_cs_next
-
+    INCREF_V rsi, rax                    ; ours across __eq__
+    mov [rbp - SMU_KEY], rsi
     mov rdi, rbx
-    mov rsi, [rax + SET_ENTRY_KEY]
     call set_add
+    mov rdi, [rbp - SMU_KEY]
+    DECREF_V rdi, rax
 
 .smu_cs_next:
-    pop rcx
+    mov rcx, [rbp - SMU_IDX]
     inc ecx
     jmp .smu_copy_self
 
 .smu_add_other:
     ; Now add all elements from other
-    mov r12, [r15 + PyDictObject.entries]
-    mov r13, [r15 + PyDictObject.capacity]
     xor ecx, ecx
 
 .smu_add_loop:
-    cmp rcx, r13
+    cmp rcx, [r15 + PyDictObject.capacity]
     jge .smu_done
+    mov [rbp - SMU_IDX], rcx
 
+    mov rdx, [r15 + PyDictObject.entries]
     imul rax, rcx, SET_ENTRY_SIZE
-    add rax, r12
-    push rcx
+    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    test rsi, rsi                        ; occupied?
+    jz .smu_al_next
 
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
-    je .smu_al_next
-
+    INCREF_V rsi, rax                    ; ours across __eq__
+    mov [rbp - SMU_KEY], rsi
     mov rdi, rbx
-    mov rsi, [rax + SET_ENTRY_KEY]
     call set_add
+    mov rdi, [rbp - SMU_KEY]
+    DECREF_V rdi, rax
 
 .smu_al_next:
-    pop rcx
+    mov rcx, [rbp - SMU_IDX]
     inc ecx
     jmp .smu_add_loop
 
@@ -438,6 +447,8 @@ END_FUNC set_binop_union
 ;; ============================================================================
 SU_SELF   equ 8
 SU_TMP    equ 16        ; materialised sequence, owned, or 0
+SU_KEY    equ 24        ; the entry being added, held across set_add
+SU_IDX    equ 32
 SU_FRAME  equ 40            ; + 3 pushes = 64, 16-aligned
 
 DEF_FUNC_LOCAL set_update_one, SU_FRAME
@@ -497,26 +508,32 @@ DEF_FUNC_LOCAL set_update_one, SU_FRAME
     jmp .supd_done
 
 .supd_from_set:
-    mov r13, [r12 + PyDictObject.capacity]
     xor ecx, ecx
 
 .supd_loop:
-    cmp rcx, r13
+    ; The capacity and the entry array are read INSIDE the loop, and the key
+    ; is held for the turn: set_add probes with it, the probe runs __eq__,
+    ; and __eq__ may clear or resize the very set being walked -- taking the
+    ; key's last reference, or the array, with it.  See set_binop_union.
+    cmp rcx, [r12 + PyDictObject.capacity]
     jge .supd_done
+    mov [rbp - SU_IDX], rcx
 
+    mov rdx, [r12 + PyDictObject.entries]
     imul rax, rcx, SET_ENTRY_SIZE
-    add rax, [r12 + PyDictObject.entries]
-    push rcx
+    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    test rsi, rsi                        ; occupied?
+    jz .supd_next
 
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
-    je .supd_next
-
+    INCREF_V rsi, rax
+    mov [rbp - SU_KEY], rsi
     mov rdi, [rbp - SU_SELF]
-    mov rsi, [rax + SET_ENTRY_KEY]
     call set_add
+    mov rdi, [rbp - SU_KEY]
+    DECREF_V rdi, rax
 
 .supd_next:
-    pop rcx
+    mov rcx, [rbp - SU_IDX]
     inc ecx
     jmp .supd_loop
 
@@ -544,7 +561,15 @@ END_FUNC set_update_one
 ;; set_method_intersection(args, nargs) -> new set = self & other
 ;; args[0]=self, args[1]=other
 ;; ============================================================================
-DEF_FUNC_LOCAL set_binop_intersection, 8            ; 5 pushes, so rsp is 16-aligned
+; The key is borrowed from the table being walked, and set_contains runs
+; __eq__ -- arbitrary Python, which may clear that very set and take the key's
+; last reference with it.  CPython INCREFs around the same call for the same
+; reason.  The table's base and capacity are re-read each turn for the other
+; half of it: __eq__ may also have RESIZED the set, which frees the array.
+SMI_KEY   equ 8
+SMI_IDX   equ 16
+SMI_FRAME equ 24            ; + 5 pushes = 64, 16-aligned
+DEF_FUNC_LOCAL set_binop_intersection, SMI_FRAME
     push rbx
     push r12
     push r13
@@ -574,37 +599,37 @@ DEF_FUNC_LOCAL set_binop_intersection, 8            ; 5 pushes, so rsp is 16-ali
     mov rbx, rax            ; new set
 
     ; Iterate self, add if in other
-    mov r12, [r14 + PyDictObject.entries]
-    mov r13, [r14 + PyDictObject.capacity]
     xor ecx, ecx
 
 .smi_loop:
-    cmp rcx, r13
+    cmp rcx, [r14 + PyDictObject.capacity]
     jge .smi_done
+    mov [rbp - SMI_IDX], rcx
 
+    mov rdx, [r14 + PyDictObject.entries]
     imul rax, rcx, SET_ENTRY_SIZE
-    add rax, r12
-    push rcx
-
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
-    je .smi_next
-
-    ; Check if key is in other
-    push rax                ; save entry ptr
-    mov rdi, r15            ; other set
-    mov rsi, [rax + SET_ENTRY_KEY]
-    call set_contains
-    pop rcx                 ; restore entry ptr (was rax)
-    test eax, eax
+    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    test rsi, rsi                        ; occupied?
     jz .smi_next
+
+    INCREF_V rsi, rax                    ; ours for the rest of this turn
+    mov [rbp - SMI_KEY], rsi
+    mov rdi, r15            ; other set
+    call set_contains
+    mov rsi, [rbp - SMI_KEY]
+    test eax, eax
+    jz .smi_drop
 
     ; In both — add to result
     mov rdi, rbx
-    mov rsi, [rcx + SET_ENTRY_KEY]
     call set_add
 
+.smi_drop:
+    mov rdi, [rbp - SMI_KEY]
+    DECREF_V rdi, rax
+
 .smi_next:
-    pop rcx
+    mov rcx, [rbp - SMI_IDX]
     inc ecx
     jmp .smi_loop
 
@@ -642,7 +667,11 @@ END_FUNC set_binop_intersection
 ;; set_method_difference(args, nargs) -> new set = self - other
 ;; args[0]=self, args[1]=other
 ;; ============================================================================
-DEF_FUNC_LOCAL set_binop_difference, 8            ; 5 pushes, so rsp is 16-aligned
+; Same borrowed-key and moving-table hazard as set_binop_intersection above.
+SMDF_KEY   equ 8
+SMDF_IDX   equ 16
+SMDF_FRAME equ 24           ; + 5 pushes = 64, 16-aligned
+DEF_FUNC_LOCAL set_binop_difference, SMDF_FRAME
     push rbx
     push r12
     push r13
@@ -672,37 +701,37 @@ DEF_FUNC_LOCAL set_binop_difference, 8            ; 5 pushes, so rsp is 16-align
     mov rbx, rax            ; new set
 
     ; Iterate self, add if NOT in other
-    mov r12, [r14 + PyDictObject.entries]
-    mov r13, [r14 + PyDictObject.capacity]
     xor ecx, ecx
 
 .smdf_loop:
-    cmp rcx, r13
+    cmp rcx, [r14 + PyDictObject.capacity]
     jge .smdf_done
+    mov [rbp - SMDF_IDX], rcx
 
+    mov rdx, [r14 + PyDictObject.entries]
     imul rax, rcx, SET_ENTRY_SIZE
-    add rax, r12
-    push rcx
+    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    test rsi, rsi                        ; occupied?
+    jz .smdf_next
 
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
-    je .smdf_next
-
-    ; Check if key is in other
-    push rax
+    INCREF_V rsi, rax
+    mov [rbp - SMDF_KEY], rsi
     mov rdi, r15
-    mov rsi, [rax + SET_ENTRY_KEY]
     call set_contains
-    pop rcx                 ; entry ptr
+    mov rsi, [rbp - SMDF_KEY]
     test eax, eax
-    jnz .smdf_next          ; in other — skip
+    jnz .smdf_drop          ; in other — skip
 
     ; NOT in other — add to result
     mov rdi, rbx
-    mov rsi, [rcx + SET_ENTRY_KEY]
     call set_add
 
+.smdf_drop:
+    mov rdi, [rbp - SMDF_KEY]
+    DECREF_V rdi, rax
+
 .smdf_next:
-    pop rcx
+    mov rcx, [rbp - SMDF_IDX]
     inc ecx
     jmp .smdf_loop
 
@@ -1011,7 +1040,12 @@ sn_symmetric_difference:        db "symmetric_difference", 0
 sn_symmetric_difference_update: db "symmetric_difference_update", 0
 section .text
 
-DEF_FUNC set_method_symmetric_difference, 8            ; 5 pushes, so rsp is 16-aligned
+; Same borrowed-key and moving-table hazard as set_binop_intersection above,
+; twice: the walk runs once over each operand.
+SMSD_KEY   equ 8
+SMSD_IDX   equ 16
+SMSD_FRAME equ 24           ; + 5 pushes = 64, 16-aligned
+DEF_FUNC set_method_symmetric_difference, SMSD_FRAME
     push rbx
     push r12
     push r13
@@ -1041,69 +1075,71 @@ DEF_FUNC set_method_symmetric_difference, 8            ; 5 pushes, so rsp is 16-
     mov rbx, rax            ; new set
 
     ; Add elements in self but NOT in other
-    mov r12, [r14 + PyDictObject.entries]
-    mov r13, [r14 + PyDictObject.capacity]
     xor ecx, ecx
 
 .smsd_self_loop:
-    cmp rcx, r13
+    cmp rcx, [r14 + PyDictObject.capacity]
     jge .smsd_other
+    mov [rbp - SMSD_IDX], rcx
 
+    mov rdx, [r14 + PyDictObject.entries]
     imul rax, rcx, SET_ENTRY_SIZE
-    add rax, r12
-    push rcx
+    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    test rsi, rsi                        ; occupied?
+    jz .smsd_self_next
 
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
-    je .smsd_s_next
-
-    push rax
+    INCREF_V rsi, rax
+    mov [rbp - SMSD_KEY], rsi
     mov rdi, r15
-    mov rsi, [rax + SET_ENTRY_KEY]
     call set_contains
-    pop rcx
+    mov rsi, [rbp - SMSD_KEY]
     test eax, eax
-    jnz .smsd_s_next        ; in other, skip
+    jnz .smsd_self_drop
 
     mov rdi, rbx
-    mov rsi, [rcx + SET_ENTRY_KEY]
     call set_add
 
-.smsd_s_next:
-    pop rcx
+.smsd_self_drop:
+    mov rdi, [rbp - SMSD_KEY]
+    DECREF_V rdi, rax
+
+.smsd_self_next:
+    mov rcx, [rbp - SMSD_IDX]
     inc ecx
     jmp .smsd_self_loop
 
 .smsd_other:
     ; Add elements in other but NOT in self
-    mov r12, [r15 + PyDictObject.entries]
-    mov r13, [r15 + PyDictObject.capacity]
     xor ecx, ecx
 
 .smsd_other_loop:
-    cmp rcx, r13
+    cmp rcx, [r15 + PyDictObject.capacity]
     jge .smsd_done
+    mov [rbp - SMSD_IDX], rcx
 
+    mov rdx, [r15 + PyDictObject.entries]
     imul rax, rcx, SET_ENTRY_SIZE
-    add rax, r12
-    push rcx
+    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    test rsi, rsi                        ; occupied?
+    jz .smsd_other_next
 
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
-    je .smsd_o_next
-
-    push rax
+    INCREF_V rsi, rax
+    mov [rbp - SMSD_KEY], rsi
     mov rdi, r14
-    mov rsi, [rax + SET_ENTRY_KEY]
     call set_contains
-    pop rcx
+    mov rsi, [rbp - SMSD_KEY]
     test eax, eax
-    jnz .smsd_o_next        ; in self, skip
+    jnz .smsd_other_drop
 
     mov rdi, rbx
-    mov rsi, [rcx + SET_ENTRY_KEY]
     call set_add
 
-.smsd_o_next:
-    pop rcx
+.smsd_other_drop:
+    mov rdi, [rbp - SMSD_KEY]
+    DECREF_V rdi, rax
+
+.smsd_other_next:
+    mov rcx, [rbp - SMSD_IDX]
     inc ecx
     jmp .smsd_other_loop
 
@@ -1145,7 +1181,12 @@ END_FUNC set_method_symmetric_difference
 ;; args[0]=self, args[1]=other
 ;; True if every element of self is in other.
 ;; ============================================================================
-DEF_FUNC set_method_issubset, 8            ; 5 pushes, so rsp is 16-aligned
+; The key is borrowed from the table being walked and set_contains runs
+; __eq__; see set_binop_intersection.
+SMSS_KEY   equ 8
+SMSS_IDX   equ 16
+SMSS_FRAME equ 24           ; + 5 pushes = 64, 16-aligned
+DEF_FUNC set_method_issubset, SMSS_FRAME
     push rbx
     push r12
     push r13
@@ -1168,29 +1209,34 @@ DEF_FUNC set_method_issubset, 8            ; 5 pushes, so rsp is 16-aligned
     jz .smss_fail
     mov r15, rax            ; owned: the set itself, or one built from it
 
-    mov r12, [r14 + PyDictObject.entries]
-    mov r13, [r14 + PyDictObject.capacity]
     xor ecx, ecx
 
 .smss_loop:
-    cmp rcx, r13
+    cmp rcx, [r14 + PyDictObject.capacity]
     jge .smss_true
+    mov [rbp - SMSS_IDX], rcx
 
+    mov rdx, [r14 + PyDictObject.entries]
     imul rax, rcx, SET_ENTRY_SIZE
-    add rax, r12
-    push rcx
+    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    test rsi, rsi                        ; occupied?
+    jz .smss_next
 
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
-    je .smss_next
-
+    INCREF_V rsi, rax                    ; ours across __eq__
+    mov [rbp - SMSS_KEY], rsi
     mov rdi, r15
-    mov rsi, [rax + SET_ENTRY_KEY]
     call set_contains
+    mov rdi, [rbp - SMSS_KEY]
+    push rax
+    push rax                             ; pad
+    DECREF_V rdi, rcx
+    pop rax
+    pop rcx
     test eax, eax
     jz .smss_false          ; not in other
 
 .smss_next:
-    pop rcx
+    mov rcx, [rbp - SMSS_IDX]
     inc ecx
     jmp .smss_loop
 
@@ -1208,7 +1254,6 @@ DEF_FUNC set_method_issubset, 8            ; 5 pushes, so rsp is 16-aligned
     ret
 
 .smss_false:
-    pop rcx                 ; balance the push in loop
     mov rdi, r15
     call obj_decref
     RET_FALSE
@@ -1241,7 +1286,12 @@ END_FUNC set_method_issubset
 ;; args[0]=self, args[1]=other
 ;; True if every element of other is in self.
 ;; ============================================================================
-DEF_FUNC set_method_issuperset, 8            ; 5 pushes, so rsp is 16-aligned
+; The key is borrowed from the table being walked and set_contains runs
+; __eq__; see set_binop_intersection.
+SMIS_KEY   equ 8
+SMIS_IDX   equ 16
+SMIS_FRAME equ 24           ; + 5 pushes = 64, 16-aligned
+DEF_FUNC set_method_issuperset, SMIS_FRAME
     push rbx
     push r12
     push r13
@@ -1258,29 +1308,34 @@ DEF_FUNC set_method_issuperset, 8            ; 5 pushes, so rsp is 16-aligned
     jz .smis_fail
     mov r14, rax            ; owned
 
-    mov r12, [r14 + PyDictObject.entries]
-    mov r13, [r14 + PyDictObject.capacity]
     xor ecx, ecx
 
 .smis_loop:
-    cmp rcx, r13
+    cmp rcx, [r14 + PyDictObject.capacity]
     jge .smis_true
+    mov [rbp - SMIS_IDX], rcx
 
+    mov rdx, [r14 + PyDictObject.entries]
     imul rax, rcx, SET_ENTRY_SIZE
-    add rax, r12
-    push rcx
+    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    test rsi, rsi                        ; occupied?
+    jz .smis_next
 
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
-    je .smis_next
-
+    INCREF_V rsi, rax                    ; ours across __eq__
+    mov [rbp - SMIS_KEY], rsi
     mov rdi, r15            ; check in self
-    mov rsi, [rax + SET_ENTRY_KEY]
     call set_contains
+    mov rdi, [rbp - SMIS_KEY]
+    push rax
+    push rax                             ; pad
+    DECREF_V rdi, rcx
+    pop rax
+    pop rcx
     test eax, eax
     jz .smis_false
 
 .smis_next:
-    pop rcx
+    mov rcx, [rbp - SMIS_IDX]
     inc ecx
     jmp .smis_loop
 
@@ -1298,7 +1353,6 @@ DEF_FUNC set_method_issuperset, 8            ; 5 pushes, so rsp is 16-aligned
     ret
 
 .smis_false:
-    pop rcx
     mov rdi, r14
     call obj_decref
     RET_FALSE
@@ -1331,7 +1385,12 @@ END_FUNC set_method_issuperset
 ;; args[0]=self, args[1]=other
 ;; True if self and other have no common elements.
 ;; ============================================================================
-DEF_FUNC set_method_isdisjoint, 8            ; 5 pushes, so rsp is 16-aligned
+; The key is borrowed from the table being walked and set_contains runs
+; __eq__; see set_binop_intersection.
+SMDJ_KEY   equ 8
+SMDJ_IDX   equ 16
+SMDJ_FRAME equ 24           ; + 5 pushes = 64, 16-aligned
+DEF_FUNC set_method_isdisjoint, SMDJ_FRAME
     push rbx
     push r12
     push r13
@@ -1348,29 +1407,34 @@ DEF_FUNC set_method_isdisjoint, 8            ; 5 pushes, so rsp is 16-aligned
     jz .smdj_fail
     mov r15, rax            ; owned
 
-    mov r12, [r14 + PyDictObject.entries]
-    mov r13, [r14 + PyDictObject.capacity]
     xor ecx, ecx
 
 .smdj_loop:
-    cmp rcx, r13
+    cmp rcx, [r14 + PyDictObject.capacity]
     jge .smdj_true
+    mov [rbp - SMDJ_IDX], rcx
 
+    mov rdx, [r14 + PyDictObject.entries]
     imul rax, rcx, SET_ENTRY_SIZE
-    add rax, r12
-    push rcx
+    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    test rsi, rsi                        ; occupied?
+    jz .smdj_next
 
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
-    je .smdj_next
-
+    INCREF_V rsi, rax                    ; ours across __eq__
+    mov [rbp - SMDJ_KEY], rsi
     mov rdi, r15
-    mov rsi, [rax + SET_ENTRY_KEY]
     call set_contains
+    mov rdi, [rbp - SMDJ_KEY]
+    push rax
+    push rax                             ; pad
+    DECREF_V rdi, rcx
+    pop rax
+    pop rcx
     test eax, eax
     jnz .smdj_false         ; found in other — not disjoint
 
 .smdj_next:
-    pop rcx
+    mov rcx, [rbp - SMDJ_IDX]
     inc ecx
     jmp .smdj_loop
 
@@ -1388,7 +1452,6 @@ DEF_FUNC set_method_isdisjoint, 8            ; 5 pushes, so rsp is 16-aligned
     ret
 
 .smdj_false:
-    pop rcx
     mov rdi, r15
     call obj_decref
     RET_FALSE
