@@ -2805,12 +2805,32 @@ STS_IP  equ 8
 STS_VER equ 16
 STS_FRAME equ 24                    ; 24 + 3 pushes keeps rsp 16-aligned
 
+; The fourth CACHE word is a backoff counter, and it is what stops a site
+; that can never hit from rewriting its own instruction stream forever.  A
+; STORE_ATTR inside an __init__ is exactly that site: the handler's second
+; guard wants the cached dense index to be inside dk_nentries, and the object
+; being constructed has an empty instance dict or none at all, so the cache
+; misses on the very store that installed it.  Before this, every constructed
+; object cost two writes into the bytecode buffer -- specialize, deopt,
+; specialize -- for a cache that was never once going to answer.  CPython
+; spells the same idea ADAPTIVE_BACKOFF_*.
+STS_BACKOFF equ 6                   ; CACHE[+6], a word; +0 and +4 are in use
+STS_BACKOFF_N equ 63                ; executions to skip after a deopt
+
 DEF_FUNC_LOCAL sa_try_specialize, STS_FRAME
     push rbx
     push r12
     push r13
 
     mov [rbp - STS_IP], rdx
+    ; Still backing off from a deopt?  Count down and leave the site alone.
+    movzx eax, word [rdx + STS_BACKOFF]
+    test eax, eax
+    jz .sts_no_backoff
+    dec eax
+    mov [rdx + STS_BACKOFF], ax
+    jmp .sts_out
+.sts_no_backoff:
     mov r12, rdi                    ; the object
     mov r13, rsi                    ; the name
     V_TEST_PTR r12, rax

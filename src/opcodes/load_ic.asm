@@ -541,6 +541,14 @@ DEF_FUNC_BARE op_store_attr_instance
     ; STORE_ATTR's arg is a name index and carries an EXTENDED_ARG as soon as a
     ; module has enough names, so the deopt jumps with ecx rather than
     ; rewinding rbx.  Nothing has been popped.
+    ;
+    ; Ask the install site not to try again for a while.  A STORE_ATTR in an
+    ; __init__ can never hit this cache on the object it just built -- guard 2
+    ; wants the cached index inside dk_nentries and a fresh instance's dict has
+    ; none -- so without the backoff the site specialized on every store and
+    ; deoptimized on the next, writing its own instruction byte twice per
+    ; constructed object for the life of the program.
+    mov word [rbx + 6], 63          ; STS_BACKOFF_N, in src/opcodes/load.asm
     mov byte [rbx - 2], OP_STORE_ATTR
     jmp op_store_attr
 END_FUNC op_store_attr_instance
