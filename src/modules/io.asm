@@ -2266,8 +2266,9 @@ DEF_FUNC iobase_exit_fn
     call dunder_call_1
     test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
     jz .ibx_maybe_raised
+    ; Already a Value; packing it again read rdx as a tag and handed
+    ; DECREF_V a word that was not the object close() returned.
     mov rdi, rax
-    V_PACK rdi, rdx
     DECREF_V rdi, rcx           ; whatever close() answered is discarded
 .ibx_none:
     LOAD_NONE rax

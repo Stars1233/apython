@@ -11,6 +11,7 @@ extern str_type
 extern current_exception
 extern kw_names_pending
 extern descr_alloc
+extern prop_new_of
 extern ap_strcmp
 extern ap_malloc
 extern gc_alloc
@@ -255,6 +256,18 @@ DEF_FUNC property_construct, PC_FRAME
     push qword 0                ; [rsp + 16] = fdel
     push qword 0                ; [rsp +  8] = fset
     push qword 0                ; [rsp     ] = fget
+
+    ; A SUBCLASS's arguments belong to its __init__, exactly as they do for
+    ; staticmethod and classmethod above -- and here it is not only leniency
+    ; about how many: `class Named(property)` taking (fget, label) hit the
+    ; keyword loop and was told property() has no argument called label.  So
+    ; the four slots are left empty and the parse happens once, in
+    ; property_method_init, which every subclass reaches because property's
+    ; own __init__ is on the MRO.
+    mov rax, [rbp - PC_CLS]
+    lea rcx, [rel property_type]
+    cmp rax, rcx
+    jne .pc_pos_done
 
     mov rax, [rel kw_names_pending]
     test rax, rax
@@ -850,8 +863,9 @@ DEF_FUNC _prop_setter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     jne .psi_call
     mov edx, 2
 .psi_call:
-    call property_construct
+    call prop_new_of
     add rsp, 32
+    mov edx, TAG_PTR
 
     pop rbx
     leave
@@ -893,8 +907,9 @@ DEF_FUNC _prop_getter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     jne .pgi_call
     mov edx, 1
 .pgi_call:
-    call property_construct
+    call prop_new_of
     add rsp, 32
+    mov edx, TAG_PTR
 
     pop rbx
     leave
@@ -929,8 +944,9 @@ DEF_FUNC _prop_deleter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     mov rdi, [r8 + PyObject.ob_type]   ; the old property's class, not property
     mov rsi, rsp
     mov edx, 3
-    call property_construct
+    call prop_new_of
     add rsp, 32
+    mov edx, TAG_PTR
 
     pop rbx
     leave

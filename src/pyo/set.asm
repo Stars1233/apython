@@ -308,7 +308,8 @@ END_FUNC set_keys_equal
 ;; reusable slot (dl_probe's DL_FREE).
 ;; ============================================================================
 SFS_FREE    equ 8               ; first tombstone seen on this probe, or 0
-SFS_FRAME   equ 8               ; 8 + 5 pushes keeps rsp 16-aligned
+SFS_ENTRIES equ 16              ; the entry array the probe is walking
+SFS_FRAME   equ 24              ; 24 + 5 pushes keeps rsp 16-aligned
 DEF_FUNC_LOCAL set_find_slot
     sub rsp, SFS_FRAME
     push rbx
@@ -320,6 +321,8 @@ DEF_FUNC_LOCAL set_find_slot
     mov rbx, rdi                ; set
     mov r12, rsi                ; the key, a Value
     mov r13, rdx                ; hash
+
+.sfs_restart:
     mov qword [rbp - SFS_FREE], 0   ; no reusable slot seen yet
 
     ; r14 = probes REMAINING, counting down.  It was a count UP compared
@@ -365,6 +368,8 @@ DEF_FUNC_LOCAL set_find_slot
 
     ; Different Values still need the real question asked: 1.0 == 1, and a
     ; user class decides for itself.
+    mov rdx, [rbx + PyDictObject.entries]
+    mov [rbp - SFS_ENTRIES], rdx
     push rcx                    ; save slot
     push rax                    ; save entry ptr
     mov rsi, r12                ; b = the lookup key
@@ -372,6 +377,17 @@ DEF_FUNC_LOCAL set_find_slot
     mov edi, eax                ; save equality result (survives pops)
     pop rax                     ; entry ptr
     pop rcx                     ; slot
+
+    ; __eq__ is arbitrary Python and may have added to THIS set: a resize
+    ; frees the entry array and rehashes into a new one, which leaves the
+    ; entry pointer just restored dangling and the mask, the probe budget and
+    ; the remembered free slot all describing a table that no longer exists.
+    ; The probe starts again rather than trusting any of it -- a set whose
+    ; keys collide and whose __eq__ grows it used to walk the freed array and
+    ; end at fatal_error("set: hash table full").
+    mov rdx, [rbx + PyDictObject.entries]
+    cmp rdx, [rbp - SFS_ENTRIES]
+    jne .sfs_restart
     test edi, edi
     jnz .found_existing
     ; An occupied slot holding a DIFFERENT key.  Keep probing -- and jump,
@@ -886,7 +902,8 @@ END_FUNC set_contains_sq
 ;; set_remove(set, key) -> int (0=ok, -1=not found)
 ;; Remove a key from the set
 ;; ============================================================================
-SR_FRAME equ 8                  ; 8 + 5 pushes keeps rsp 16-aligned
+SR_ENTRIES equ 8                ; the entry array the probe is walking
+SR_FRAME equ 24                 ; 24 + 5 pushes keeps rsp 16-aligned
 DEF_FUNC set_remove, SR_FRAME
     push rbx
     push r12
@@ -901,7 +918,8 @@ DEF_FUNC set_remove, SR_FRAME
 
     ; An independent second copy of set_find_slot's probe, because a removal
     ; has to tombstone the slot it lands on rather than be handed one; it gets
-    ; the same treatment.
+    ; the same treatment, restart included.
+.sr_restart:
     mov r14, [rbx + PyDictObject.capacity]  ; probes remaining, counting down
     mov r15, r14
     dec r15                     ; mask
@@ -929,12 +947,19 @@ DEF_FUNC set_remove, SR_FRAME
     mov rdx, rax
     je .sr_found
 
+    mov rdx, [rbx + PyDictObject.entries]
+    mov [rbp - SR_ENTRIES], rdx
     push rcx                    ; save slot
     push rax                    ; save entry ptr
     mov rsi, r12                ; b = the lookup key
     call set_keys_equal
     pop rdx                     ; entry ptr
     pop rcx
+    ; As in set_find_slot: an __eq__ that grew this set has moved the entries
+    ; out from under the pointer just restored.
+    mov rsi, [rbx + PyDictObject.entries]
+    cmp rsi, [rbp - SR_ENTRIES]
+    jne .sr_restart
     test eax, eax
     jz .sr_next
 

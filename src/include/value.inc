@@ -183,8 +183,9 @@ extern val_unpack_cold
 ; An int immediate is just n + V_INT_BIAS, so a literal needs no runtime work
 ; at all: `mov rdx, V_INT(0)` is one instruction where `mov rdx, 0` followed by
 ; `V_PACK_I64 rdx, rcx` was about sixteen.  Only for constants known to the
-; assembler and inside the immediate range -- the %if catches the rest at
-; assembly time rather than silently producing a float or a sentinel.
+; assembler and inside the immediate range: NASM would fold a wider one into a
+; FLOAT Value without a word, so `check_const_value` in src/compiler/lint.py is
+; what refuses it -- a %define cannot check its own argument.
 %define V_INT(n) ((n) + V_INT_BIAS)
 
 ; ==========================================================================

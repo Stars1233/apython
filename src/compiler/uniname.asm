@@ -123,8 +123,12 @@ DEF_FUNC uniname_lookup, UN_FRAME
     ; Uppercase the query ONCE.  It used to be folded a character at a time,
     ; through a call, for every entry -- 46,100 times over a failing lookup.
     mov rsi, [rbp - UN_LEN]
-    cmp rsi, UN_BUFSZ - 1
-    jae .miss                           ; longer than any name in the table
+    cmp rsi, UN_BUFSZ
+    jae .miss                           ; longer than the buffer can hold with
+                                        ; its NUL, and so longer than any name
+                                        ; the generator will emit.  UN_BUFSZ-1
+                                        ; here rejected a name of exactly
+                                        ; UNINAME_MAX-1 bytes, which fits
     mov rdi, [rbp - UN_NAME]
     lea rdx, [rbp - UN_QBUF]
     xor ecx, ecx

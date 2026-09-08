@@ -1457,6 +1457,25 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     je .bc_no_set_base
     ; Inherit the constructor from the base (for bytearray, etc.)
     mov [r12 + PyTypeObject.tp_new], rdi
+
+    ; A base that OWNS references -- property, staticmethod, classmethod, the
+    ; three static bases with a tp_clear -- needs its fields released and
+    ; traced, and its subclass is instance-shaped besides: it has a __dict__
+    ; and may have __slots__.  bytes, bytearray and memoryview have neither a
+    ; tp_traverse nor a tp_clear, keep their data inline, and are what
+    ; builtin_sub_dealloc was written for.
+    mov rcx, [rax + PyTypeObject.tp_clear]
+    test rcx, rcx
+    jz .bc_sub_plain
+    mov [r12 + PyTypeObject.tp_clear], rcx
+    mov rcx, [rax + PyTypeObject.tp_traverse]
+    mov [r12 + PyTypeObject.tp_traverse], rcx
+    extern descr_sub_dealloc
+    lea rcx, [rel descr_sub_dealloc]
+    mov [r12 + PyTypeObject.tp_dealloc], rcx
+    jmp .bc_container_sub
+
+.bc_sub_plain:
     ; Use builtin_sub_dealloc instead of instance_dealloc
     ; (builtin subclasses don't have inst_dict at +16)
     extern builtin_sub_dealloc

@@ -61,6 +61,7 @@ test_bytesio
 test_bytes_methods
 test_bytes_percent
 test_bytes
+test_bytes_replace_center
 test_bytes_repr_long
 test_bytes_rsplit
 test_bytes_strmethods
@@ -432,6 +433,7 @@ test_setattr_dunder
 test_set_fatval
 test_set_inplace
 test_set_methods
+test_set_mutated_under_probe
 test_set_name_metatype
 test_set_name
 test_set_ops
@@ -558,6 +560,7 @@ test_unpack_spec
 test_unraisable
 test_utf16_utf32
 test_utf8_validate_boundaries
+test_value_funnel_guards
 test_value_typeconfusion
 test_warnings
 test_weakref

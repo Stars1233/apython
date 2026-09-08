@@ -344,7 +344,9 @@ DEF_FUNC builtin_next_fn, NX_FRAME
     extern dunder_call_1
     call dunder_call_1
     test rax, rax               ; dunder_call_1 answers with a Value; 0 is the miss
-    jnz .next_got_val                  ; got a value
+    jnz .next_got_value                ; got a Value -- NOT .next_got_val,
+                                       ; which packs a (payload, tag) pair and
+                                       ; would read rdx as a tag it never set
     ; NULL from __next__ — check for StopIteration in current_exception
     extern current_exception
     mov rax, [rel current_exception]
@@ -373,10 +375,16 @@ DEF_FUNC builtin_next_fn, NX_FRAME
     jz .next_stop
 
 .next_got_val:
-    ; tp_iternext / __next__ returns fat (rax=payload, rdx=tag)
+    ; tp_iternext returns the pair (rax = payload, rdx = tag)
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.next_got_value:
+    ; __next__ through dunder_call_1 already answered with a Value
+    pop rbx
+    leave
     ret
 
 .next_stop:

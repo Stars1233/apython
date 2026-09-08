@@ -488,6 +488,51 @@ DEF_FUNC descr_alloc
     jmp builtin_sub_alloc
 END_FUNC descr_alloc
 
+;; ============================================================================
+;; descr_sub_dealloc(rdi = a subclass instance) -> nothing
+;;
+;; tp_dealloc for a heaptype subclass of a static base that OWNS things --
+;; property, staticmethod and classmethod, the three whose tp_clear is not
+;; NULL.  builtin_sub_dealloc, which the subclasses of bytes and bytearray
+;; use, frees the object and releases the class and nothing else: those bases
+;; keep their data inline and own no references.  These do, and until subclass
+;; instances of them existed at all the mismatch could not show -- every
+;; `Named(property)` was a plain property, so property_dealloc ran and
+;; released the four accessors.  Now the class is honoured, and this releases
+;; them.
+;;
+;; Through the base's tp_clear, which is exactly "release everything held and
+;; leave the fields empty" -- the same borrowing instance_dealloc already does
+;; for a dict, list, set or tuple subclass's storage.  It zeroes as it goes,
+;; so nothing below can release one twice, and instance_dealloc's slot walk
+;; starts above them anyway.
+;;
+;; Then instance_dealloc for the rest of it: __del__, the __slots__, the
+;; instance dict, the reference to the class that builtin_sub_alloc took, and
+;; the free.
+;; ============================================================================
+DEF_FUNC descr_sub_dealloc, 8       ; 1 push, so rsp is 16-aligned
+    push rbx
+    mov rbx, rdi
+
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_clear]
+    test rax, rax
+    jz .dsd_done
+    extern instance_clear
+    lea rcx, [rel instance_clear]
+    cmp rax, rcx
+    je .dsd_done                    ; the generic one holds nothing of its own
+    mov rdi, rbx
+    call rax
+.dsd_done:
+    mov rdi, rbx
+    pop rbx
+    leave
+    extern instance_dealloc
+    jmp instance_dealloc
+END_FUNC descr_sub_dealloc
+
 DEF_FUNC instance_new
     push rbx
     push r12

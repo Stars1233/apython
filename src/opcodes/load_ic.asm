@@ -37,6 +37,7 @@ extern eval_saved_r13
 extern opcode_dispatch_table
 extern eval_co_names
 extern obj_dealloc
+extern obj_decref
 extern op_load_attr
 extern op_load_global
 extern op_store_attr
@@ -474,6 +475,7 @@ END_FUNC op_load_attr_instance
 LAP_OBJ   equ 8
 LAP_RET   equ 16
 LAP_ARG   equ 24                ; the oparg, which frame_new's rcx destroys
+LAP_FN    equ 32                ; the getter, held across its own frame
 LAP_FRAME equ 40                ; a handler is entered with rsp 16-aligned, so
                                 ; push rbp + 40 brings it back to aligned
 
@@ -517,6 +519,15 @@ DEF_FUNC op_load_attr_property, LAP_FRAME
     mov [rbp - LAP_OBJ], rdi
     mov [rbp - LAP_ARG], rcx
 
+    ; The cached getter is BORROWED -- pinned by the type version, which is
+    ; enough right up until the getter deletes itself: `del type(self).v`
+    ; inside one drops the property, which drops the function whose code this
+    ; frame is about to run.  op_call_py_exact has the callable's stack
+    ; reference for the same window; this has none, so it takes one.
+    ; CPython's _PyFrame_PushUnspecialized does the same.
+    mov [rbp - LAP_FN], rsi
+    INCREF rsi
+
     ; frame_new(code, globals, builtins, locals = NULL), as op_call_py_exact.
     mov rdi, rax
     mov rsi, [rsi + PyFuncObject.func_globals]
@@ -538,6 +549,8 @@ DEF_FUNC op_load_attr_property, LAP_FRAME
     mov [rbp - LAP_RET], rax
     mov rdi, r15
     call frame_free
+    mov rdi, [rbp - LAP_FN]
+    call obj_decref
 
     mov rax, [rbp - LAP_RET]
     test rax, rax

@@ -1030,7 +1030,8 @@ DEF_FUNC slot_tp_iternext
     ret
 
 .got_value:
-    V_PACK rax, rdx
+    ; dunder_call_1 already answered with a Value; packing it again read rdx
+    ; as a tag, and `class A(list): __next__ = list.pop` came back 2^50 out.
     leave
     ret
 END_FUNC slot_tp_iternext

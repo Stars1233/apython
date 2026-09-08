@@ -36,6 +36,72 @@ extern property_construct
 section .text
 
 ;; ============================================================================
+;; prop_new_of(rdi = the class to build, rsi = a [fget, fset, fdel] array,
+;;             rdx = how many of them are meaningful) -> rax = a new property
+;;
+;; What property.getter, property.setter and property.deleter each hand back:
+;; a copy of the original with one accessor replaced, and of the ORIGINAL'S
+;; class, so a decorator chain on a subclass still yields the subclass.
+;;
+;; It goes through __init__ rather than through the constructor's own parse,
+;; because a subclass's tp_new deliberately leaves the accessors alone -- they
+;; are its __init__'s business, which is the only way `class Named(property)`
+;; taking (fget, label) can work at all.  Building one here therefore has to
+;; run the same fill type_call would, and running it for the exact type too
+;; keeps one path instead of two.
+;; ============================================================================
+PNO_SELF  equ 8
+PNO_ARGS  equ 48                ; [self, fget, fset, fdel], contiguous
+PNO_N     equ 56
+PNO_FRAME equ 56                ; 56 + 1 push keeps rsp 16-aligned
+
+DEF_FUNC prop_new_of, PNO_FRAME
+    push rbx
+    mov [rbp - PNO_N], rdx
+
+    ; Copy the accessors into the tail of the argument array, leaving room for
+    ; self in front of them.
+    xor ecx, ecx
+.pno_copy:
+    cmp rcx, rdx
+    jge .pno_copied
+    mov rax, [rsi + rcx*8]
+    mov [rbp - PNO_ARGS + 8 + rcx*8], rax
+    inc rcx
+    jmp .pno_copy
+.pno_copied:
+
+    ; An EMPTY property of the right class.  Nought arguments, so the exact
+    ; type does not parse either -- one fill, below.
+    xor esi, esi
+    xor edx, edx
+    call property_construct
+    test rax, rax
+    jz .pno_out
+    mov rbx, rax
+    mov [rbp - PNO_ARGS], rax               ; args[0] = self
+
+    lea rdi, [rbp - PNO_ARGS]
+    mov rsi, [rbp - PNO_N]
+    inc rsi                                 ; self as well
+    call property_method_init
+    test rax, rax
+    jz .pno_failed
+    mov rax, rbx
+.pno_out:
+    pop rbx
+    leave
+    ret
+.pno_failed:
+    mov rdi, rbx
+    call obj_decref
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC prop_new_of
+
+;; ============================================================================
 ;; staticmethod_method_init(rdi = args, rsi = nargs) -> a Value, always None
 ;;
 ;; staticmethod.__init__(self, callable).  The wrapped callable is a VALUE,

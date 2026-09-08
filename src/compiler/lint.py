@@ -1013,8 +1013,28 @@ def check_const_value(files):
     `mov rdx, 0` / `V_PACK_I64 rdx, rcx` is about sixteen instructions to
     produce a constant the assembler can work out: an int immediate is just
     n + V_INT_BIAS.  V_INT(n) in include/value.inc does it for free.
+
+    And it only works inside the immediate range.  V_INT is a `%define`, so
+    NASM folds `V_INT(1 << 51)` into a FLOAT Value without a word -- the
+    range is checked here instead, which is where the tree checks everything
+    else the assembler will not.
     """
     bad = []
+    vint = re.compile(r'V_INT\(\s*(-?(?:\d+|0x[0-9a-fA-F]+)(?:\s*<<\s*\d+)?)\s*\)')
+    for path in files:
+        for row in _enc_lines(path):
+            n, line = row[0], row[1]
+            for m in vint.finditer(line):
+                try:
+                    v = eval(m.group(1), {"__builtins__": {}}, {})
+                except Exception:
+                    continue
+                if not -(1 << 50) <= v < (1 << 50):
+                    bad.append((path, n,
+                                "V_INT(%s) is outside the immediate range"
+                                % m.group(1),
+                                "NASM folds it into a float Value, silently;"
+                                " box it at run time instead"))
     lit = re.compile(r'^mov\s+(\w+)\s*,\s*(-?\d+|0x[0-9a-fA-F]+)$')
     pack = re.compile(r'^V_PACK_I64\s+(\w+)\s*,')
     wide = lambda r: {'eax':'rax','ebx':'rbx','ecx':'rcx','edx':'rdx','esi':'rsi',

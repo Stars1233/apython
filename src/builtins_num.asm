@@ -2259,9 +2259,10 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     call dunder_call_1
     test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
     jz .rnd_type_error          ; no __round__, or it raised
+    ; Already a Value.  The guard above was converted and this was not, so
+    ; `class M(list): __round__ = list.__len__` answered 2^50 out.
     pop rbx
     leave
-    V_PACK rax, rdx
     ret
 
 .rnd_two_arg:
