@@ -3488,5 +3488,10 @@ int_type:
 section .bss
 ;; The free list int_alloc_raw pops from and int_dealloc pushes onto.  A block
 ;; on it is dead: its refcount word holds the link to the next one.
+;;
+;; align 8 because a `resd 1` earlier in this file's .bss (type_version_counter)
+;; had left both of these at `addr % 8 == 4`, so every push and pop of the free
+;; list was an unaligned qword access four bytes from a line split.
+align 8
 int_freelist:       resq 1
 int_freelist_count: resq 1

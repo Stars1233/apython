@@ -179,6 +179,11 @@ extern tuple_new
 ; rdi = frame
 section .data
 eval_no_frame_msg: db "exception raised outside the interpreter loop", 0
+; The message above is 45 bytes, which left every counter below it at
+; `addr % 8 == 6`: recursion_depth's per-call `inc qword` was a misaligned
+; read-modify-write and c_recursion_depth straddled a cache line.  Costs
+; nothing to say so.
+align 8
 global recursion_depth
 global recursion_limit
 recursion_depth: dq 0
@@ -1430,7 +1435,24 @@ opcode_table:
 ;; ============================================================================
 ;; Global exception state (BSS)
 ;; ============================================================================
+;; The block below is `align 64` and the two byte-sized flags are at the END of
+;; it, both deliberately.
+;;
+;; tb_suppress_frame used to sit in the middle as a lone `resb 1`, which put
+;; every word after it at `addr % 8 == 1`: eval_saved_r12 and
+;; build_class_pending each STRADDLED a 64-byte line, and both are saved and
+;; restored on every Python call.  Worse, eval.o's .bss has sh_addralign 4, so
+;; the words DISPATCH writes on every opcode avoided splitting a line only
+;; because dunder_cache_vals happened to end where it did -- any edit changing
+;; another file's .bss size by a non-multiple of 8 would have turned every one
+;; of them into a split access, and it would have read as an unrelated
+;; regression somewhere else entirely.
+;;
+;; With the flags moved out, current_exception through eval_co_consts are six
+;; consecutive words in one cache line, which is what DISPATCH and
+;; eval_frame/eval_return actually touch.
 section .bss
+align 64
 global current_exception
 current_exception: resq 1    ; PyExceptionObject* or NULL -- IN FLIGHT
 ;; The exception being HANDLED: what an `except` block installed and what
@@ -1443,8 +1465,6 @@ current_exception: resq 1    ; PyExceptionObject* or NULL -- IN FLIGHT
 global handled_exception
 handled_exception: resq 1    ; PyExceptionObject* or NULL -- BEING HANDLED
 eval_base_rsp: resq 1        ; machine stack pointer at eval dispatch level
-global tb_suppress_frame
-tb_suppress_frame: resb 1    ; 1 = the next unwind adds no traceback entry
 global eval_saved_rbx
 eval_saved_rbx: resq 1       ; bytecode IP saved at dispatch (for exception unwind)
 global eval_saved_r12
@@ -1472,8 +1492,13 @@ global build_class_pending
 build_class_pending: resq 1  ; type object from builtin___build_class__ during construction, or NULL
 
 
+; The two byte-sized flags, together, at the end -- see the note at the top of
+; this block.  A `resb 1` anywhere above them puts every word after it off
+; 8-byte alignment.
 global throw_pending
 throw_pending: resb 1           ; nonzero = gen_throw set current_exception before resume
+global tb_suppress_frame
+tb_suppress_frame: resb 1    ; 1 = the next unwind adds no traceback entry
 
 ;; ============================================================================
 ;; Read-only data for traceback printing
