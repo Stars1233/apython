@@ -330,6 +330,17 @@ DEF_FUNC cg_emit, CM_FRAME
     mov [rax + Instr.oparg], edx
     mov rdx, [rbp - CM_LINE]
     mov [rax + Instr.line], edx
+    ; Where the code actually got to, for the emitters that run after
+    ; cg_stmt has restored .curline to the enclosing statement's.
+    test edx, edx
+    jz .cm_no_line
+    mov [rbx + CompUnit.lastline], edx
+    ; The columns go with it, cleared here and filled in below when this
+    ; instruction turns out to carry any.
+    mov dword [rbx + CompUnit.lastcol], -1
+    mov dword [rbx + CompUnit.lastendcol], -1
+    mov [rbx + CompUnit.lastend], edx
+.cm_no_line:
     mov dword [rax + Instr.offset], 0
 
     ; The columns come from the location the dispatcher set, and only when the
@@ -349,10 +360,13 @@ DEF_FUNC cg_emit, CM_FRAME
     cmp ecx, 0
     jl .cm_done
     mov [rax + Instr.col], ecx
+    mov [rbx + CompUnit.lastcol], ecx
     mov ecx, [rbx + CompUnit.curendcol]
     mov [rax + Instr.end_col], ecx
+    mov [rbx + CompUnit.lastendcol], ecx
     mov ecx, [rbx + CompUnit.curend]
     mov [rax + Instr.end_line], ecx
+    mov [rbx + CompUnit.lastend], ecx
 .cm_done:
 
     pop rbx

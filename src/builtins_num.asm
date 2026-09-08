@@ -624,7 +624,9 @@ BI_DUNDER equ 56       ; which of __int__/__index__/__trunc__ was called, so
                        ; name it the way CPython does
 BI_LEN    equ 48       ; the source length: bytes and bytearray keep it in
                        ; different fields, so the shared tail cannot re-read it
-BI_FRAME  equ 88            ; + 1 push = 96, 16-byte aligned
+BI_ARRLEN equ 88       ; the byte length of a buffer source: an array
+                       ; counts ITEMS in ob_size, so it is not ob_size
+BI_FRAME  equ 104           ; + 1 push = 112, 16-byte aligned
 
 DEF_FUNC builtin_int_fn, BI_FRAME
     push rbx
@@ -704,6 +706,14 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     lea rdx, [rel memoryview_type]
     cmp rcx, rdx
     je .int_from_memoryview
+    ; array.array is a buffer too, and CPython's int() takes any buffer:
+    ; int(array('B', b'100')) is 100.  CPython's own test_int asserts it, and
+    ; guards the whole case on `from array import array` succeeding -- so the
+    ; assertion only became reachable when the module arrived.
+    extern array_type
+    lea rdx, [rel array_type]
+    cmp rcx, rdx
+    je .int_from_array
     MRO_NEXT rcx, [rbp - BI_ORIGIN]
     test rcx, rcx
     jnz .int_check_bytes_chain
@@ -847,27 +857,47 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 .int_str_parse_error:
     jmp .int_invalid_literal_error
 
+.int_from_array:
+    ; The same shape as a bytearray, except that ob_size counts ITEMS: the
+    ; byte length is items times the item size, and the buffer pointer sits
+    ; at the same offset.  int() reads the raw bytes, whatever the typecode
+    ; says they mean.
+    mov [rbp - BI_OBJ], rbx
+    mov qword [rbp - BI_BASE], 10
+    mov rcx, [rbx + PyArrayObject.ob_size]
+    imul rcx, [rbx + PyArrayObject.ob_isize]
+    mov [rbp - BI_ARRLEN], rcx
+    mov rsi, [rbx + PyArrayObject.ob_data]
+    jmp .int_bytes_common
+
 .int_from_bytearray:
     ; Same as int_from_bytes but using PyByteArrayObject layout (identical to PyBytesObject)
     mov [rbp - BI_OBJ], rbx
     mov qword [rbp - BI_BASE], 10
     mov rcx, [rbx + PyByteArrayObject.ob_size]
+    mov [rbp - BI_ARRLEN], rcx
+    mov rsi, [rbx + PyByteArrayObject.ob_bytes]
+.int_bytes_common:
     lea rdi, [rcx + 8]
+    push rsi
     push rcx
     call ap_malloc
     pop rcx
+    pop rsi
     push rax
     mov rdi, rax
-    mov rsi, [rbx + PyByteArrayObject.ob_bytes]
     mov rdx, rcx
+    test rdx, rdx
+    jz .int_bytes_copied
     call ap_memcpy
+.int_bytes_copied:
     pop rdi
     push rdi
-    mov rcx, [rbx + PyByteArrayObject.ob_size]
+    mov rcx, [rbp - BI_ARRLEN]
     mov qword [rdi + rcx], 0
     ; Check for embedded NUL
     call strlen wrt ..plt
-    cmp rax, [rbx + PyByteArrayObject.ob_size]
+    cmp rax, [rbp - BI_ARRLEN]
     jne .int_bytes_nul_error
     mov rdi, [rsp]
     mov rsi, 10

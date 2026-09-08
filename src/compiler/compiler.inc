@@ -685,7 +685,15 @@ struc CompUnit
     .curend:    resd 1
     .curcol:    resd 1
     .curendcol: resd 1
-    .pad5:      resd 1
+    ; The line of the last instruction actually EMITTED, which is not
+    ; .curline: cg_stmt restores that to the enclosing statement's before the
+    ; implicit `return None` and a loop's back edge are emitted, so both got
+    ; the wrong location.  Written by cg_emit and read by whoever needs "where
+    ; did the code actually get to".
+    .lastline:  resd 1
+    .lastend:   resd 1
+    .lastcol:   resd 1
+    .lastendcol: resd 1
     .name:      resq 1          ; PyStrObject*, borrowed
     .qualname:  resq 1
     .filename:  resq 1
@@ -782,5 +790,48 @@ struc Scope
     .nfrees:    resd 1
     .pad2:      resd 1
 endstruc
+
+
+;; ============================================================================
+;; The f-string scanner's state, in src/compiler/fstrscan.asm.
+;;
+;; One of these is threaded through the whole recursion, because a nested
+;; literal or a nested field can cross a newline and the lexer's line counter
+;; has to move with it -- on the failure paths as much as on the successful
+;; ones, since the message names the line the scan gave up on.
+;; ============================================================================
+struc FsSkip
+    .nl:        resq 1  ; +0:  newlines crossed so far, not yet applied
+    .lstart:    resq 1  ; +8:  where the last of those lines starts
+    .level:     resq 1  ; +16: f-strings currently open, capped at 150
+    .err:       resq 1  ; +24: FSE_*, or FSE_OK
+    .badp:      resq 1  ; +32: where the error is
+endstruc
+
+;; Two callers keep one of these in a frame slot whose offset is written down
+;; rather than derived -- lex_run's LR_SKIP and par_fstring_field's FF_SKIP --
+;; because the slot above each was chosen to leave exactly this much room.  A
+;; struct that grows silently lands on that slot, and the symptom is one field
+;; reading as garbage.
+%if FsSkip_size != 40
+  %error "FsSkip changed size: check LR_SKIP in lex.asm and FF_SKIP in fstring.asm"
+%endif
+
+FSE_OK            equ 0
+FSE_UNTERM        equ 1   ; a literal ran off the end
+FSE_EXPECT_RBRACE equ 2   ; a replacement field ran off the end
+FSE_UNMATCHED     equ 3   ; a closing bracket with nothing open
+FSE_TOO_NESTED    equ 4   ; more than FS_MAXFSTRING f-strings deep
+
+;; What fs_skip_literal needs to know about the literal it is starting on.
+;; They are the TF_STR_* bits under another name, so a caller that already has
+;; those can pass them straight through.
+FS_LIT_RAW equ TF_STR_RAW
+FS_LIT_FMT equ TF_STR_FMT
+
+;; PEP 701 removed the limit on how deeply an EXPRESSION may nest inside a
+;; field; this one it kept.  Measured against CPython 3.12: 149 levels parse
+;; and the 150th is `too many nested f-strings`.
+FS_MAXFSTRING equ 150
 
 %endif ; COMPILER_INC

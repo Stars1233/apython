@@ -1639,11 +1639,13 @@ END_FUNC bytes_tp_iter
 ;; ============================================================================
 DEF_FUNC_BARE bytes_iter_next
     mov rax, [rdi + PyBytesIterObject.it_seq]   ; bytes obj
+    test rax, rax
+    jz .exhausted               ; already dropped, or cleared by the collector
     mov rcx, [rdi + PyBytesIterObject.it_index] ; index
 
     ; Check bounds
     cmp rcx, [rax + PyBytesObject.ob_size]
-    jge .exhausted
+    jge .exhausted_mark
 
     ; Get byte and return as an int immediate (0..255 always fits)
     movzx eax, byte [rax + PyBytesObject.data + rcx]
@@ -1653,6 +1655,15 @@ DEF_FUNC_BARE bytes_iter_next
     inc qword [rdi + PyBytesIterObject.it_index]
     ret
 
+.exhausted_mark:
+    ; Drop the bytes at exhaustion, as CPython's striter does.  Clear before
+    ; releasing -- list_iter_next carries the reason in full.
+    mov rax, [rdi + PyBytesIterObject.it_seq]
+    mov qword [rdi + PyBytesIterObject.it_seq], 0
+    push rdi
+    mov rdi, rax
+    call obj_decref
+    pop rdi
 .exhausted:
     RET_NULL
     ret

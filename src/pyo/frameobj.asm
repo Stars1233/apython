@@ -1008,6 +1008,109 @@ DEF_FUNC frameobj_getattr, FOG_FRAME
     ret
 END_FUNC frameobj_getattr
 
+;; ============================================================================
+;; frameobj_method_clear(rdi = args, rsi = nargs) -> rax = Value, None
+;;
+;; `frame.clear()` drops what the frame holds so that a reference cycle through
+;; a traceback can be broken.  traceback.clear_frames() calls it on every entry
+;; of a traceback, and unittest's assertRaises calls THAT in its __exit__ --
+;; which is why its absence stopped nearly every test CPython ships.
+;;
+;; An EXECUTING frame raises RuntimeError, which is what CPython does; a
+;; suspended generator's frame is CLOSED, which is also what CPython does --
+;; the finally blocks run, gi_frame becomes None, and a later next() raises
+;; StopIteration.  A detached snapshot, which is what a traceback entry holds
+;; by the time anyone looks at it, is simply cleared.
+;;
+;; This used to refuse everything still attached to a live PyFrame, and
+;; nothing noticed because clear_frames is written as
+;;
+;;     try: tb.tb_frame.clear()
+;;     except RuntimeError: pass
+;;
+;; so the suspended-generator half was silently skipped.
+;;
+;; What a detached frame owns and this releases: f_locals, the snapshot
+;; frameobj_detach copied out of localsplus, and f_trace.  f_back, f_code,
+;; f_globals and f_builtins are NOT released: CPython keeps them, and a
+;; traceback that has been cleared still renders its own lines.
+;; ============================================================================
+FMC_SELF  equ 8
+FMC_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC frameobj_method_clear, FMC_FRAME
+    cmp rsi, 1
+    jne .fmc_arity
+    mov rax, [rdi]
+    mov [rbp - FMC_SELF], rax
+
+    ; A frame still attached to a live PyFrame is usually executing, and
+    ; clearing one is refused.  A SUSPENDED GENERATOR is the exception:
+    ; CPython closes it -- the finally blocks run, gi_frame becomes None, and
+    ; a later next() raises StopIteration.  It was refused here along with
+    ; everything else, and traceback.clear_frames() hid that by catching
+    ; RuntimeError.
+    ;
+    ; gen_owner says whose frame this is, and gi_running tells a suspended
+    ; generator from one that is actually on the interpreter's chain -- which
+    ; is the question CPython answers with FRAME_OWNED_BY_GENERATOR plus the
+    ; frame's state, and it needs no walk of the live frames.
+    mov rcx, [rax + PyFrameObject.f_frame]
+    test rcx, rcx
+    jz .fmc_detached
+    mov rcx, [rcx + PyFrame.gen_owner]
+    test rcx, rcx
+    jz .fmc_executing
+    cmp qword [rcx + PyGenObject.gi_running], 0
+    jne .fmc_executing
+    ; Close it, which is the whole of what CPython's clear() does for one.
+    mov rdi, rcx
+    extern gen_close
+    call gen_close
+    mov rax, [rbp - FMC_SELF]
+    mov qword [rax + PyFrameObject.f_frame], 0
+.fmc_detached:
+
+    mov rdi, [rax + PyFrameObject.f_locals]
+    test rdi, rdi
+    jz .fmc_no_locals
+    ; CPython leaves f_locals an EMPTY DICT, not None: what clear() drops is
+    ; the fast locals, and the mapping over them survives.  Emptying it in
+    ; place releases exactly the references the cycle runs through, and keeps
+    ; the object for anything already holding it -- releasing the dict instead
+    ; made `frame.f_locals` read None afterwards, where CPython reads {}.
+    sub rsp, 16
+    mov [rsp], rdi
+    mov rdi, rsp
+    mov esi, 1
+    extern dict_method_clear
+    call dict_method_clear
+    add rsp, 16
+.fmc_no_locals:
+    mov rax, [rbp - FMC_SELF]
+    mov rdi, [rax + PyFrameObject.f_trace]
+    test rdi, rdi
+    jz .fmc_done
+    mov qword [rax + PyFrameObject.f_trace], 0
+    call obj_decref
+.fmc_done:
+    LOAD_NONE rax
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.fmc_executing:
+    extern exc_RuntimeError_type
+    RAISE exc_RuntimeError_type, "cannot clear an executing frame"
+.fmc_arity:
+    dec rsi                     ; the count CPython reports excludes self
+    CSTRING rdi, "clear() takes no arguments ("
+    CSTRING rdx, " given)"
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+END_FUNC frameobj_method_clear
+
 DEF_FUNC frameobj_repr
     CSTRING rdi, "<frame object>"
     extern str_from_cstr

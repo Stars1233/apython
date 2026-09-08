@@ -1176,6 +1176,8 @@ END_FUNC set_tp_iter
 ;; ============================================================================
 DEF_FUNC_BARE set_iter_next
     mov rax, [rdi + PyDictIterObject.it_dict]      ; set
+    test rax, rax
+    jz .si_done                 ; already dropped, or cleared by the collector
     mov rcx, [rax + PyDictObject.ob_size]
     cmp rcx, [rdi + PyDictIterObject.it_version]
     jne .si_mutation_error
@@ -1205,7 +1207,18 @@ DEF_FUNC_BARE set_iter_next
     jmp .si_scan
 
 .si_exhausted:
+    ; Drop the set at exhaustion, as CPython's setiter does, so a __del__ on
+    ; the last reference runs while the iterator can still say "exhausted".
     mov [rdi + PyDictIterObject.it_index], rcx
+    mov rax, [rdi + PyDictIterObject.it_dict]
+    test rax, rax
+    jz .si_done
+    mov qword [rdi + PyDictIterObject.it_dict], 0
+    push rdi
+    mov rdi, rax
+    call obj_decref
+    pop rdi
+.si_done:
     RET_NULL
     ret
 

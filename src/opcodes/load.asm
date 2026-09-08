@@ -126,7 +126,9 @@ DEF_FUNC_BARE op_load_global
     LOAD_CO_NAMES rdi
     mov rdi, [rdi + rcx]       ; rdi = name (PyStrObject*)
 
-    ; Save name on the regular stack for retry
+    ; Save name on the regular stack for retry.  Twice: this handler carves no
+    ; frame, so a lone push leaves every call below it 8 out.
+    push rdi
     push rdi
 
     ; Try globals first: dict_get_index(globals, name) -> slot or -1
@@ -152,7 +154,7 @@ DEF_FUNC_BARE op_load_global
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
     mov rax, [rdi + DictEntry.value]
-    add rsp, 8                 ; discard saved name
+    add rsp, 16                ; discard the saved name and its pad
     jmp .lg_push_result
 
 .try_builtins:
@@ -166,7 +168,7 @@ DEF_FUNC_BARE op_load_global
     je .not_found
 
     ; Found in builtins — specialize to LOAD_GLOBAL_BUILTIN
-    add rsp, 8                 ; discard saved name
+    add rsp, 16                ; discard the saved name and its pad
     mov word [rbx + 2], ax     ; CACHE[1] = index
     mov rdi, [r12 + PyFrame.globals]
     mov rdi, [rdi + PyDictObject.dk_version]
@@ -188,6 +190,7 @@ DEF_FUNC_BARE op_load_global
 
 .not_found:
     pop rdi                    ; name (PyStrObject*)
+    add rsp, 8                 ; and its pad
     call raise_name_not_defined
     ; (does not return)
 
@@ -448,6 +451,12 @@ DEF_FUNC op_load_attr, LA_FRAME
     cmp rax, rdx
     jne .la_call_getattr
     lea rdx, [rbp - LA_FROMINST]
+    ; Ask for a method UNBOUND.  .la_unwrap_bound_method below takes a bound
+    ; method apart into [func, self] two instructions later, so building one
+    ; here is a gc_alloc, a gc_track, two increfs and an immediate dealloc for
+    ; nothing.  obj_getattr_opt shares this entry and asks for 0, because
+    ; getattr(c, 'm') must still answer a bound method.
+    mov ecx, 1
     call instance_getattr_where
     jmp .la_getattr_done_v
 .la_call_type_getattr:
@@ -474,12 +483,27 @@ DEF_FUNC op_load_attr, LA_FRAME
     test rax, rax
     jz .la_try_dict
     V_UNPACK rax, rdx
+    cmp qword [rbp - LA_FROMINST], 2
+    je .la_getattr_unbound
 
 .la_getattr_done:
     mov [rbp - LA_ATTR], rax
     mov [rbp - LA_ATTR_TAG], rdx   ; save tag from tp_getattr
     ; LA_FROM_TYPE stays 0 — tp_getattr already handled binding
     jmp .la_got_attr
+
+.la_getattr_unbound:
+    ; A function from the type, handed over unbound at our own request.  That
+    ; is exactly what .la_try_dict's own answer looks like, so it joins the
+    ; same path: LA_FROM_TYPE says the descriptor and binding rules apply, and
+    ; the descriptor block is skipped because a function is none of
+    ; staticmethod, classmethod, property or getset and its type is not a
+    ; heaptype.
+    mov qword [rbp - LA_FROMINST], 0
+    mov qword [rbp - LA_FROM_TYPE], 1
+    mov [rbp - LA_ATTR], rax
+    mov [rbp - LA_ATTR_TAG], rdx
+    jmp .la_check_flag
 
 .la_try_dict:
     ; No tp_getattr, or it found nothing: ask the class what it defines for
@@ -927,11 +951,15 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; INCREF im_func and im_self (we're creating new refs on the value stack)
     mov rdi, [rax + PyMethodObject.im_func]
     push rax
+    push rax                    ; twice: rsp stays 16-byte aligned
     call obj_incref
+    pop rax
     pop rax
     mov rdi, [rax + PyMethodObject.im_self]
     push rax
+    push rax
     call obj_incref
+    pop rax
     pop rax
 
     ; Push [im_func, im_self] then DECREF the method wrapper
@@ -961,6 +989,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; Unwrap: extract sm_callable from wrapper
     mov rdi, [rax + PyStaticMethodObject.sm_callable]
     push rdi                   ; save unwrapped func
+    push rdi                   ; twice: rsp stays 16-byte aligned
     call obj_incref            ; INCREF unwrapped func
 
     ; DECREF wrapper
@@ -968,6 +997,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     call obj_decref
 
     ; Update attr to unwrapped func
+    pop rax
     pop rax
     mov [rbp - LA_ATTR], rax
 
@@ -1054,6 +1084,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; Unwrap: extract cm_callable from wrapper
     mov rdi, [rax + PyClassMethodObject.cm_callable]
     push rdi                   ; save unwrapped func
+    push rdi                   ; twice: rsp stays 16-byte aligned
     call obj_incref            ; INCREF unwrapped func
 
     ; DECREF wrapper
@@ -1061,6 +1092,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     call obj_decref
 
     ; Update attr to unwrapped func
+    pop rax
     pop rax
     mov [rbp - LA_ATTR], rax
 
@@ -1421,9 +1453,11 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     jz .lsa_next_base
 
     push rax                       ; save current type
+    push rax                       ; twice: rsp stays 16-byte aligned
     mov rsi, [rbp - LSA_NAME]      ; name
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
+    pop rcx
     pop rcx                        ; restore current type
     test edx, edx               ; the tag, not the payload: a hit may be int 0
     jnz .lsa_found
@@ -1790,6 +1824,7 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     mov rdi, [rbp - GA_OBJ]
     mov rsi, [rbp - GA_NAME]
     lea rdx, [rbp - GA_FROMINST]
+    xor ecx, ecx                ; getattr() wants the bound method itself
     call instance_getattr_where
     test rax, rax
     jz .ga_type_dict

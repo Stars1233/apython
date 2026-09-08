@@ -144,6 +144,12 @@ DEF_FUNC_BARE op_check_exc_match
     VPOP rsi                 ; rsi = type to match
     VPEEK rdi                ; rdi = exception (don't pop)
 
+    ; The slot just popped is about to be released, so the unwinder must not
+    ; still believe it is live: exc_isinstance raises for `except (1,)`, and
+    ; its pop loop would DECREF the same reference a second time.  Every
+    ; handler that pops and releases owes this store; this one did not make it.
+    mov [rel eval_saved_r13], r13
+
     ; Save type for DECREF
     sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
                                ; handler, so a call needs an even push list
@@ -440,8 +446,11 @@ DEF_FUNC_BARE op_raise_varargs
     test rax, rax
     jz .raise_bad
     push rdi
+    push rdi                  ; and a pad: this handler carves no frame,
+                              ; so a lone push leaves the call 8 out
     mov rdi, rax
     call type_is_exc_subclass
+    pop rdi
     pop rdi
     test eax, eax
     jnz .raise_exc_obj
@@ -466,7 +475,10 @@ DEF_FUNC_BARE op_raise_varargs
 .raise_check_type:
     ; rdi is a type object — check if it's an exception subclass
     push rdi
+    push rdi                  ; and a pad: this handler carves no frame,
+                              ; so a lone push leaves the call 8 out
     call type_is_exc_subclass
+    pop rdi
     pop rdi
     test eax, eax
     jnz .raise_type
@@ -476,9 +488,12 @@ DEF_FUNC_BARE op_raise_varargs
 .raise_type:
     ; rdi = exception type - create instance with no message
     push rdi
+    push rdi                  ; and a pad: this handler carves no frame,
+                              ; so a lone push leaves the call 8 out
     xor esi, esi              ; no message
     xor edx, edx              ; no tag (NULL msg)
     call exc_new
+    pop rdi
     pop rdi                  ; discard type (immortal, no DECREF needed)
     mov rdi, rax
     jmp .raise_exc_obj

@@ -118,13 +118,17 @@ DEF_FUNC_BARE list_iter_next
     ret
 
 .exhausted_mark:
-    ; Mark as permanently exhausted by clearing it_seq
-    ; DECREF the list
+    ; Drop the reference BEFORE releasing it.  Releasing first runs the
+    ; list's __del__ inside obj_decref, and a __del__ that calls next() on
+    ; this same iterator then read it_seq while the list was being freed --
+    ; CPython issue 26494, and a segfault here.  Clearing first makes that
+    ; re-entrant next() see an exhausted iterator, which is what it is.
+    mov rax, [rdi + PyListIterObject.it_seq]
+    mov qword [rdi + PyListIterObject.it_seq], 0
     push rdi
-    mov rdi, [rdi + PyListIterObject.it_seq]
+    mov rdi, rax
     call obj_decref
     pop rdi
-    mov qword [rdi + PyListIterObject.it_seq], 0
 .exhausted:
     RET_NULL
     ret
@@ -206,10 +210,12 @@ END_FUNC tuple_iter_new
 ;; ============================================================================
 DEF_FUNC_BARE tuple_iter_next
     mov rax, [rdi + PyTupleIterObject.it_seq]
+    test rax, rax
+    jz .exhausted               ; already dropped, or cleared by the collector
     mov rcx, [rdi + PyTupleIterObject.it_index]
 
     cmp rcx, [rax + PyTupleObject.ob_size]
-    jge .exhausted
+    jge .exhausted_mark
 
     ; Get item
     mov rax, [rax + PyTupleObject.ob_item]
@@ -219,6 +225,17 @@ DEF_FUNC_BARE tuple_iter_next
     inc qword [rdi + PyTupleIterObject.it_index]
     ret
 
+.exhausted_mark:
+    ; Drop the tuple at exhaustion, the way list_iter_next does and the way
+    ; CPython's tupleiter_next does -- it is what lets a __del__ on the last
+    ; reference run while the iterator can still answer "exhausted".  Clear
+    ; before releasing, for the reason list_iter_next carries in full.
+    mov rax, [rdi + PyTupleIterObject.it_seq]
+    mov qword [rdi + PyTupleIterObject.it_seq], 0
+    push rdi
+    mov rdi, rax
+    call obj_decref
+    pop rdi
 .exhausted:
     RET_NULL
     ret

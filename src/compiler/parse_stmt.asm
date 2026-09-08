@@ -826,6 +826,18 @@ DEF_FUNC_LOCAL ps_del, PK_FRAME
     jne .done
     mov rdi, rbx
     call par_advance
+    ; A trailing comma adds no target: `del y,` is Delete(targets=[Name('y')])
+    ; in CPython -- one DELETE_NAME and no tuple -- and looping back into
+    ; par_expr reported `invalid syntax`.  `del ,` and `del y, ,` still error,
+    ; because this only fires after a target has been parsed.
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_NEWLINE
+    je .done
+    cmp eax, TOK_SEMI
+    je .done
+    cmp eax, TOK_ENDMARKER
+    je .done
     jmp .loop
 .done:
     mov rdi, rbx

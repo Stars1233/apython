@@ -84,10 +84,20 @@ section .text
 IGA_SELF  equ 8
 IGA_NAME  equ 16
 IGA_WHERE equ 24        ; out-parameter: where the answer came from, or NULL
-IGA_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+IGA_UNBOUND equ 32      ; 1 when the caller will take a method UNBOUND
+IGA_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
 ;; ============================================================================
-;; instance_getattr_where(rdi = self, rsi = name, rdx = int64_t *from_inst_dict)
-;;   -> rax = Value, and *rdx = 1 when the answer came out of the INSTANCE dict
+;; instance_getattr_where(rdi = self, rsi = name, rdx = int64_t *from_inst_dict,
+;;                        ecx = 1 to accept a method UNBOUND)
+;;   -> rax = Value, and *rdx = 1 when the answer came out of the INSTANCE
+;;      dict, or 2 when it is a function the caller asked for unbound
+;;
+;; The unbound form exists so that `c.m()` does not build a bound method for
+;; op_load_attr to take apart two instructions later: method_new is a gc_alloc,
+;; two increfs and a gc_track, and the wrapper is released again immediately.
+;; It has to be asked for rather than implied by the out-pointer, because
+;; obj_getattr_opt shares this entry and getattr(c, 'm') must still answer a
+;; bound method.
 ;;
 ;; instance_getattr with one more thing said.  Where the answer came from
 ;; matters because the descriptor protocol applies to what a TYPE supplies and
@@ -102,6 +112,7 @@ IGA_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 global instance_getattr_where
 DEF_FUNC instance_getattr_where, IGA_FRAME
     mov [rbp - IGA_WHERE], rdx
+    mov [rbp - IGA_UNBOUND], rcx
     jmp instance_getattr.iga_body
 END_FUNC instance_getattr_where
 
@@ -112,6 +123,7 @@ END_FUNC instance_getattr_where
 ;; ============================================================================
 DEF_FUNC instance_getattr, IGA_FRAME
     mov qword [rbp - IGA_WHERE], 0
+    mov qword [rbp - IGA_UNBOUND], 0
 .iga_body:
     mov qword [rel attr_error_pending], 0
     mov [rbp - IGA_SELF], rdi
@@ -185,6 +197,7 @@ DEF_FUNC instance_getattr, IGA_FRAME
     mov rdi, [rbp - IGA_SELF]
     mov rsi, [rbp - IGA_NAME]
     mov rdx, [rbp - IGA_WHERE]
+    mov rcx, [rbp - IGA_UNBOUND]
     leave
     jmp instance_getattr_default
 END_FUNC instance_getattr
@@ -512,7 +525,8 @@ END_FUNC type_refresh_attr_flags
 
 ;; ============================================================================
 ;; instance_getattr_default(PyInstanceObject *self, PyObject *name,
-;;                          int64_t *from_inst_dict_or_null) -> Value
+;;                          int64_t *from_inst_dict_or_null,
+;;                          ecx = 1 to accept a method UNBOUND) -> Value
 ;; Look up an attribute on an instance, without the __getattribute__ hook.
 ;; 1. Check self->inst_dict — return raw value
 ;; 2. If not found, check type->tp_dict (walk tp_base chain)
@@ -527,7 +541,8 @@ IG_NAME   equ 8
 IG_ORIGIN equ 16        ; the type the MRO walk started from
 IG_DESCR1 equ 24        ; 1 when the MRO was consulted BEFORE the dict
 IG_WHERE  equ 32        ; out-parameter: set to 1 for an instance-dict hit
-IG_FRAME  equ 40            ; + 3 pushes = 64, 16-aligned
+IG_UNBOUND equ 40       ; 1 when the caller will take a method unbound
+IG_FRAME  equ 56            ; + 3 pushes = 80, 16-aligned
 global instance_getattr_default
 DEF_FUNC instance_getattr_default, IG_FRAME
     push rbx
@@ -542,6 +557,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     ; rdx is the out-parameter, or NULL.  Everything but .found_inst leaves it
     ; at 0, so only an instance-dict hit reports one.
     mov [rbp - IG_WHERE], rdx
+    mov [rbp - IG_UNBOUND], rcx
     test rdx, rdx
     jz .ig_no_where
     mov qword [rdx], 0
@@ -710,6 +726,27 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     jmp .found_type_raw         ; not a function — return raw
 
 .bind_method:
+    ; A caller that is about to CALL this does not need the wrapper: it wants
+    ; the function and the receiver, which is what op_load_attr takes the
+    ; wrapper apart to get.  Answer with the function and say so, and the
+    ; gc_alloc, the gc_track, the two increfs and the immediate dealloc all go.
+    cmp qword [rbp - IG_UNBOUND], 0
+    je .bind_method_wrapped
+    mov rcx, [rbp - IG_WHERE]
+    test rcx, rcx
+    jz .bind_method_wrapped
+    mov qword [rcx], 2          ; "a function, not bound"
+    mov rax, r13
+    INCREF rax
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.bind_method_wrapped:
     ; Function found in type dict — create bound method
     mov rdi, r13                ; func
     mov rsi, rbx                ; self (instance)
@@ -814,8 +851,10 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     V_UNPACK rax, rdx
     test edx, edx
     jz .really_not_found
-    IS_NONE rax, rcx
-    je .really_not_found
+    ; A __getattr__ explicitly set to None is not absent.  CPython calls it and
+    ; the call fails as "'NoneType' object is not callable"; treating it as
+    ; absent turned that into a plain AttributeError, which is what a caller
+    ; would then swallow.  dunder_call_2 raises it, so just let it through.
 
     ; dunder_call_2(self, name, "__getattr__", TAG_PTR)
     mov rdi, rbx

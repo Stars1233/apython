@@ -15,6 +15,7 @@
 section .text
 
 extern get_iterator_opt
+extern raise_unpack_count
 extern eval_dispatch
 extern eval_saved_r13
 extern eval_co_consts
@@ -22,6 +23,8 @@ extern obj_decref
 extern obj_is_true
 extern raise_exception
 extern exc_TypeError_type
+extern current_exception
+extern eval_exception_unwind
 extern exc_ValueError_type
 extern int_to_i64
 extern type_type
@@ -337,6 +340,14 @@ DEF_FUNC_BARE op_binary_subscr
 
 .subscr_done:
     ; rax = result payload, rdx = result tag
+    ;
+    ; The NULL test comes BEFORE the operands are released.  The unwinder
+    ; restores r13 to the stack as it stood before this instruction, so the
+    ; operands are back on it and the unwind releases them -- releasing them
+    ; here as well frees each twice, which is a crash at whatever touches one
+    ; next rather than here.
+    test edx, edx
+    jz .bs_slot_failed
     SAVE_FAT_RESULT            ; save (rax,rdx) — shifts rsp refs by +16
     mov rdi, [rsp + 16 + BSUB_KEY]
     mov rsi, [rsp + 16 + BSUB_KTAG]
@@ -352,6 +363,26 @@ DEF_FUNC_BARE op_binary_subscr
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
     DISPATCH
+
+.bs_slot_failed:
+    ; A slot that answers NULL is REPORTING, not answering.  This pushed it
+    ; and carried on, so `a[3]` as a statement left the exception pending
+    ; with nothing to attach it to and it surfaced at whatever ran next --
+    ; CPython's BINARY_SUBSCR is `ERROR_IF(res == NULL, error)`.
+    ;
+    ; It went unnoticed because every mp_subscript in the tree until now
+    ; RAISED instead, tail-jumping into the unwinder.  array's cannot: the
+    ; sequence iterator has to be able to CATCH the IndexError it raises and
+    ; read it as exhaustion, which a tail-jump takes straight past.
+    add rsp, BSUB_SIZE
+    cmp qword [rel current_exception], 0
+    je .bs_no_exception
+    ; No `leave`: this handler is DEF_FUNC_BARE and carves its own space,
+    ; which the add above has already given back.
+    jmp eval_exception_unwind
+.bs_no_exception:
+    ; A NULL with nothing pending has no coherent value to stand for either.
+    RAISE exc_TypeError_type, "subscript failed without an exception"
 END_FUNC op_binary_subscr
 
 ;; ============================================================================
@@ -490,6 +521,13 @@ DEF_FUNC_BARE op_store_subscr
     RAISE exc_TypeError_type, "object does not support item assignment"
 
 .store_done:
+    ; mp_ass_subscript reports failure with -1, the way tp_setattr does.  It
+    ; was never looked at, so `a[5] = 1` on a short array set an IndexError
+    ; and carried on, and the exception surfaced at whatever ran next.  The
+    ; operands stay on the value stack for the unwinder, which restores r13
+    ; to the state before this instruction and releases them there.
+    test eax, eax
+    js .ss_slot_failed
     mov rdi, [rsp + SSUB_VAL]
     mov rsi, [rsp + SSUB_VTAG]
     DECREF_VAL rdi, rsi
@@ -504,6 +542,15 @@ DEF_FUNC_BARE op_store_subscr
     ; Skip 1 CACHE entry = 2 bytes
     add rbx, 2
     DISPATCH
+
+.ss_slot_failed:
+    add rsp, SSUB_SIZE
+    cmp qword [rel current_exception], 0
+    je .ss_no_exception
+    jmp eval_exception_unwind
+.ss_no_exception:
+    RAISE exc_TypeError_type, \
+          "item assignment failed without an exception"
 END_FUNC op_store_subscr
 
 ;; ============================================================================
@@ -713,6 +760,8 @@ END_FUNC op_build_map
 CKM_COUNT   equ 8
 CKM_KEYS    equ 16
 CKM_DICT    equ 24
+CKM_I       equ 32        ; the loop index, which used to be pushed across
+                          ; dict_set -- a lone push leaves the call 8 out
 DEF_FUNC op_build_const_key_map, 40   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
 
     mov [rbp - CKM_COUNT], rcx           ; count
@@ -733,11 +782,11 @@ DEF_FUNC op_build_const_key_map, 40   ; + 0 pushes; a handler is entered ALIGNED
     shl rdi, 3                 ; count * 8 bytes/slot
     sub r13, rdi               ; pop all items
 
-    xor edx, edx
+    mov qword [rbp - CKM_I], 0
 .bckm_fill:
+    mov rdx, [rbp - CKM_I]
     cmp rdx, [rbp - CKM_COUNT]
     jge .bckm_done
-    push rdx
     mov rdi, [rbp - CKM_DICT]         ; dict
     mov rax, [rbp - CKM_KEYS]         ; keys tuple
     mov r10, [rax + PyTupleObject.ob_item]       ; payloads
@@ -747,8 +796,7 @@ DEF_FUNC op_build_const_key_map, 40   ; + 0 pushes; a handler is entered ALIGNED
     shl rax, 3                ; index * 8
     mov rdx, [r13 + rax]      ; value
     call dict_set
-    pop rdx
-    inc rdx
+    inc qword [rbp - CKM_I]
     jmp .bckm_fill
 
 .bckm_done:
@@ -783,350 +831,6 @@ DEF_FUNC op_build_const_key_map, 40   ; + 0 pushes; a handler is entered ALIGNED
     DISPATCH
 END_FUNC op_build_const_key_map
 
-;; ============================================================================
-;; op_unpack_sequence - Unpack iterable into N items on stack
-;;
-;; ecx = count
-;; Pop TOS (tuple/list/str), push items[count-1], ..., items[0] (reverse order)
-;; Followed by 1 CACHE entry (2 bytes).
-;; ============================================================================
-extern str_new
-extern str_type
-DEF_FUNC_BARE op_unpack_sequence
-    ; Specialize, then run generically this time.  A tuple or a list is the
-    ; shape the compiler emits this opcode for almost every time -- every
-    ; `a, b = ...` over a literal, a return of several values, a dict item.
-    ; The length is not checked here: the specialized handler checks it on
-    ; every execution anyway, and a site that unpacks a different length each
-    ; time would otherwise never specialize at all.
-    mov r8, [r13 - 8]
-    V_TEST_PTR r8, r9
-    ja .us_no_spec
-    mov r8, [r8 + PyObject.ob_type]
-    lea r9, [rel tuple_type]
-    cmp r8, r9
-    je .us_spec_tuple
-    lea r9, [rel list_type]
-    cmp r8, r9
-    jne .us_no_spec
-    mov byte [rbx - 2], OP_UNPACK_SEQUENCE_LIST
-    jmp .us_no_spec
-.us_spec_tuple:
-    mov byte [rbx - 2], OP_UNPACK_SEQUENCE_TUPLE
-.us_no_spec:
-
-    VPOP_VAL rdi, r8           ; rdi = sequence (tuple or list), r8 = tag
-    cmp r8d, TAG_PTR
-    jne .unpack_type_error
-
-    ; Determine if tuple or list and get item array + size.
-    ;
-    ; Three saved words, and the third is the one that matters: the
-    ; materialising path below builds a tuple out of an arbitrary iterable,
-    ; and that tuple is ours to release, while the original is not -- the
-    ; unwinder releases the original for us if this instruction raises.  The
-    ; slot holds the tuple, or 0 when there is none.
-    push r8                    ; [rsp+16] save tag
-    push rdi                   ; [rsp+8]  save payload
-    push 0                     ; [rsp]    the materialised tuple, or 0
-
-    mov rax, [rdi + PyObject.ob_type]
-
-    extern tuple_type
-    lea rdx, [rel tuple_type]
-    cmp rax, rdx
-    je .unpack_tuple
-
-    extern list_type
-    lea rdx, [rel list_type]
-    cmp rax, rdx
-    je .unpack_list
-
-    lea rdx, [rel str_type]
-    cmp rax, rdx
-    je .unpack_str
-
-    ; Anything iterable unpacks in Python -- a set, a range, a generator, a
-    ; dict, a str subclass.  Only exact tuple, list and str were accepted, so
-    ; `a, b = {1, 2}` and `a, b = range(2)` raised.
-    ; Stack here: [rsp] = the materialised tuple slot, [rsp+8] = payload,
-    ; [rsp+16] = tag.
-    push rcx                        ; expected count
-    sub rsp, 32                     ; scratch Value slot, and the pad that
-                                    ; makes rsp aligned here: three prologue
-                                    ; pushes plus this one is an ODD number of
-                                    ; slots, and the old comment said 24 kept
-                                    ; it aligned when it left it 8 out
-    mov [rsp], rdi
-    lea rsi, [rsp]
-    extern tuple_type_call
-    lea rdi, [rel tuple_type]
-    mov edx, 1
-    call tuple_type_call            ; raises for a non-iterable
-    add rsp, 32
-    pop rcx                         ; expected count
-    test rax, rax
-    jz .unpack_iter_raised
-    ; The original stays in its saved slot: it is what the unwinder releases
-    ; if the count then turns out to be wrong.  The tuple goes in the third
-    ; slot, and is released on both ways out.
-    mov [rsp], rax
-    mov rdi, rax
-    jmp .unpack_tuple
-
-
-.unpack_iter_raised:
-    ; tuple_type_call answers NULL when the iteration itself raised -- a
-    ; __getitem__ or __next__ that threw partway through.  Reading ob_type off
-    ; that NULL is how `a, b, c = G()` became a segfault instead of the
-    ; exception G raised.
-    ;
-    ; The sequence is NOT released here.  The unwinder restores r13 from
-    ; eval_saved_r13, which is the value stack as it stood before this
-    ; instruction ran -- so the sequence VPOP_VAL took off the top is back on
-    ; it, and the unwind releases it.  Decref'ing it here as well frees it
-    ; while the unwinder is still holding it, which valgrind reports as an
-    ; invalid read inside eval_exception_unwind.
-    add rsp, 24                     ; the three words the prologue pushed
-    extern eval_exception_unwind
-    jmp eval_exception_unwind
-
-.unpack_type_error:
-    ; Unknown type
-    RAISE exc_TypeError_type, "cannot unpack non-sequence"
-
-.unpack_tuple:
-    ; Validate count matches size
-    mov r8, [rdi + PyTupleObject.ob_size]
-    cmp rcx, r8
-    jne .unpack_count_error
-    ; Items are in payload/tag arrays
-    mov rsi, [rdi + PyTupleObject.ob_item]
-    jmp .unpack_fill
-
-.unpack_list:
-    ; Validate count matches size
-    mov r8, [rdi + PyListObject.ob_size]
-    cmp rcx, r8
-    jne .unpack_count_error
-    ; Items in payload/tag arrays
-    mov rsi, [rdi + PyListObject.ob_item]
-
-.unpack_fill:
-    ; Pre-advance stack by count (ecx)
-    mov edx, ecx
-    shl edx, 3
-    add r13, rdx              ; stack += count * 8
-    ; r10 = negative offset from the pre-advanced pointer, starts at -count
-    mov r10, rcx
-    neg r10
-    mov edx, ecx
-    dec edx                    ; edx = source index (count-1 down to 0)
-.unpack_fill_loop:
-    test edx, edx
-    js .unpack_done
-    mov eax, edx
-    mov rax, [rsi + rax * 8]  ; items[edx] is already a Value
-    INCREF_V rax, r9
-    mov [r13 + r10*8], rax
-    inc r10
-    dec edx
-    jmp .unpack_fill_loop
-
-.unpack_done:
-    ; Release the materialised tuple, if the iterable path built one, and then
-    ; the sequence itself (payload + tag).
-    pop rdi
-    test rdi, rdi
-    jz .unpack_done_seq
-    call obj_decref
-.unpack_done_seq:
-    pop rdi                    ; sequence payload
-    pop rsi                    ; sequence tag
-    DECREF_VAL rdi, rsi
-
-    ; Skip 1 CACHE entry = 2 bytes
-    add rbx, 2
-    DISPATCH
-
-.unpack_count_error:
-    ; Count mismatch: rcx expected, r8 actually there.  The two directions get
-    ; different messages, and both carry the counts.
-    ;
-    ; The sequence is NOT released here, for the reason .unpack_iter_raised
-    ; gives above: the unwinder restores r13 from eval_saved_r13, the value
-    ; the stack pointer had before this instruction, so the slot VPOP_VAL took
-    ; the sequence out of is inside the range the unwind releases.  Releasing
-    ; it here as well drove a live sequence's refcount to zero -- `print(xs)`
-    ; after `except ValueError` read freed memory and segfaulted.
-    ;
-    ; The materialised tuple is a different matter: nothing else has ever seen
-    ; it, so it has to go here or it leaks.
-    pop rdi
-    test rdi, rdi
-    jz .unpack_count_raise
-    push rcx
-    push r8
-    call obj_decref
-    pop r8
-    pop rcx
-.unpack_count_raise:
-    add rsp, 16                ; the payload and tag the prologue pushed
-    mov rdi, rcx               ; expected
-    mov rsi, r8                ; got
-    call raise_unpack_count
-
-.unpack_str:
-    ; String unpacking: a, b, c = "xyz"
-    ; Validate length matches count
-    mov r8, [rdi + PyStrObject.ob_size]
-    cmp rcx, r8
-    jne .unpack_count_error
-
-    ; Use rbp-frame for the string unpacking loop
-    ; Save callee-saved regs
-    push rbx                   ; save bytecode IP
-    push r12                   ; save frame
-    push r14                   ; spare
-
-    mov r12, rcx               ; r12 = count
-    mov r14, rdi               ; r14 = string object
-
-    ; Pre-advance stack by count
-    mov edx, ecx
-    shl edx, 3
-    add r13, rdx              ; stack += count * 8
-
-    ; Create single-char strings in reverse order (count-1 down to 0)
-    mov ebx, ecx
-    dec ebx                    ; ebx = source index (count-1)
-    mov rcx, r12
-    neg rcx                    ; rcx = -count (negative offset)
-
-.unpack_str_loop:
-    test ebx, ebx
-    js .unpack_str_done
-
-    ; Create single-char string: str_new(&data[ebx], 1)
-    lea rdi, [r14 + PyStrObject.data]
-    movsxd rax, ebx
-    add rdi, rax               ; rdi = &str.data[ebx]
-    mov rsi, 1                 ; length = 1
-    push rcx                   ; save negative offset
-    push rbx                   ; save source index
-    call str_new
-    pop rbx
-    pop rcx
-    ; rax = new string (TAG_PTR, refcount=1, ownership transferred to stack)
-    mov [r13 + rcx*8], rax    ; a string pointer is its own Value
-    inc rcx
-    dec ebx
-    jmp .unpack_str_loop
-
-.unpack_str_done:
-    pop r14
-    pop r12
-    pop rbx                    ; restore bytecode IP
-    jmp .unpack_done           ; the three saved words, and the dispatch
-END_FUNC op_unpack_sequence
-
-;; ============================================================================
-;; raise_unpack_count(rdi = expected, rsi = got)
-;; The two ValueErrors an unpack can raise, in CPython's wording:
-;;   "not enough values to unpack (expected 2, got 1)"
-;;   "too many values to unpack (expected 2)"
-;; One shared message said "not enough" for both, so unpacking three values
-;; into two reported the opposite of what happened.
-;; ============================================================================
-RUC_BUF   equ 128
-RUC_FRAME equ RUC_BUF + 24
-DEF_FUNC raise_unpack_count, RUC_FRAME
-    push rbx
-    push r12
-    mov rbx, rdi                        ; expected
-    mov r12, rsi                        ; got
-    lea rdi, [rbp - RUC_BUF]
-    cmp r12, rbx
-    jle .ruc_not_enough
-
-    CSTRING rsi, "too many values to unpack (expected "
-    call .ruc_cat
-    mov rax, rbx
-    call .ruc_itoa
-    CSTRING rsi, ")"
-    call .ruc_cat
-    jmp .ruc_raise
-
-.ruc_not_enough:
-    CSTRING rsi, "not enough values to unpack (expected "
-    call .ruc_cat
-    mov rax, rbx
-    call .ruc_itoa
-    CSTRING rsi, ", got "
-    call .ruc_cat
-    mov rax, r12
-    call .ruc_itoa
-    CSTRING rsi, ")"
-    call .ruc_cat
-
-.ruc_raise:
-    mov byte [rdi], 0
-    lea rsi, [rbp - RUC_BUF]
-    lea rdi, [rel exc_ValueError_type]
-    call raise_exception
-
-; Local: append the NUL-terminated rsi at rdi, leaving rdi past it.
-.ruc_cat:
-    mov al, [rsi]
-    test al, al
-    jz .ruc_cat_done
-    mov [rdi], al
-    inc rdi
-    inc rsi
-    jmp .ruc_cat
-.ruc_cat_done:
-    ret
-
-; Local: append rax in decimal at rdi, leaving rdi past it.
-.ruc_itoa:
-    push rbx
-    push r12
-    mov r12, rdi
-    mov rbx, rsp
-    sub rsp, 32
-    and rsp, -16
-    lea rcx, [rsp + 24]
-    mov byte [rcx], 0
-    mov r8, 10
-    test rax, rax
-    jnz .ruc_digits
-    dec rcx
-    mov byte [rcx], '0'
-    jmp .ruc_emit
-.ruc_digits:
-    xor edx, edx
-    div r8
-    add dl, '0'
-    dec rcx
-    mov [rcx], dl
-    test rax, rax
-    jnz .ruc_digits
-.ruc_emit:
-    mov rdi, r12
-.ruc_emit_loop:
-    mov al, [rcx]
-    test al, al
-    jz .ruc_emit_done
-    mov [rdi], al
-    inc rdi
-    inc rcx
-    jmp .ruc_emit_loop
-.ruc_emit_done:
-    mov rsp, rbx
-    pop r12
-    pop rbx
-    ret
-END_FUNC raise_unpack_count
 
 ;; ============================================================================
 ;; op_get_iter - Get iterator from TOS
@@ -1383,6 +1087,8 @@ LE_ITERABLE equ 16
 LE_COUNT    equ 24
 LE_CURSOR   equ 32
 LE_EXC      equ 40        ; current_exception before the iteration started
+LE_I        equ 48        ; the loop index, which used to be pushed across
+                          ; list_append -- a lone push leaves the call 8 out
 DEF_FUNC op_list_extend, 56   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
     ; locals: [rbp - LE_LIST]=list, [rbp - LE_ITERABLE]=iterable, [rbp - LE_COUNT]=count, [rbp - LE_CURSOR]=items
 
@@ -1419,16 +1125,16 @@ DEF_FUNC op_list_extend, 56   ; + 0 pushes; a handler is entered ALIGNED, so thi
     mov [rbp - LE_COUNT], rcx          ; count
     test rcx, rcx
     jz .extend_done
-    xor r8d, r8d               ; index
+    mov qword [rbp - LE_I], 0  ; index
 .extend_tuple_loop:
     mov rdi, [rbp - LE_LIST]          ; list
     mov rax, [rbp - LE_ITERABLE]         ; iterable (tuple)
     mov r9, [rax + PyTupleObject.ob_item]
+    mov r8, [rbp - LE_I]
     mov rsi, [r9 + r8 * 8]    ; payload
-    push r8
     call list_append
-    pop r8
-    inc r8
+    inc qword [rbp - LE_I]
+    mov r8, [rbp - LE_I]
     cmp r8, [rbp - LE_COUNT]
     jb .extend_tuple_loop
     jmp .extend_done
@@ -1442,16 +1148,16 @@ DEF_FUNC op_list_extend, 56   ; + 0 pushes; a handler is entered ALIGNED, so thi
 
     test rcx, rcx
     jz .extend_done
-    xor r8d, r8d               ; index
+    mov qword [rbp - LE_I], 0  ; index
 .extend_list_loop:
     mov rdi, [rbp - LE_LIST]          ; list
     mov rdx, [rbp - LE_CURSOR]         ; payloads ptr
     mov rax, [rbp - LE_ITERABLE]         ; iterable list
+    mov r8, [rbp - LE_I]
     mov rsi, [rdx + r8 * 8]   ; item payload
-    push r8
     call list_append
-    pop r8
-    inc r8
+    inc qword [rbp - LE_I]
+    mov r8, [rbp - LE_I]
     cmp r8, [rbp - LE_COUNT]          ; count
     jb .extend_list_loop
     jmp .extend_done          ; or we fall into .extend_generic and re-append
@@ -2431,9 +2137,13 @@ DEF_FUNC op_dict_update
     jmp .du_loop
 
 .du_done:
-    ; DECREF the mapping
+    ; DECREF the mapping.  The pad is the alignment: the loop above reaches
+    ; its calls one push deep, so the frame is sized for that, and a call made
+    ; at depth zero is the odd one out.
     mov rdi, [rbp - DU_SOURCE]
+    push rdi
     call obj_decref
+    pop rdi
 
     add rsp, 32
     pop r14
@@ -2521,9 +2231,13 @@ DEF_FUNC op_dict_merge
     jmp .dm_loop
 
 .dm_done:
-    ; DECREF the mapping
+    ; DECREF the mapping.  The pad is the alignment: the loop above reaches
+    ; its calls one push deep, so the frame is sized for that, and a call made
+    ; at depth zero is the odd one out.
     mov rdi, [rbp - DM_SOURCE]
+    push rdi
     call obj_decref
+    pop rdi
 
     add rsp, 32
     pop r14
@@ -2539,287 +2253,6 @@ DEF_FUNC op_dict_merge
     RAISE exc_TypeError_type, "dict.update() argument must be a dict"
 END_FUNC op_dict_merge
 
-;; ============================================================================
-;; op_unpack_ex - Unpack with *rest
-;;
-;; UNPACK_EX (94): arg encodes (count_before | count_after << 8)
-;; Pop iterable from TOS, push count_after items, then a list of remaining,
-;; then count_before items (in reverse order on stack).
-;; ============================================================================
-extern list_type
-
-; IPAY/ITAG are the iterable as a (payload, tag) pair
-UEX_TOTAL   equ 32
-UEX_REST    equ 40
-UEX_ITAG    equ 48
-UEX_IPAY    equ 56
-UEX_EXC     equ 64        ; current_exception before the iteration started
-DEF_FUNC op_unpack_ex
-    push rbx
-    push r14
-    ; NOTE: do NOT push/pop r13 — the VPUSH macros advance it
-    ; (tag stack top) and restoring it would desync from r13 (payload stack top)
-    sub rsp, 48                ; 48, not 40: the extra slot, and with it the
-                               ; 16-byte alignment the two pushes had broken.
-                               ; locals: [rbp - UEX_TOTAL]=total_len, [rbp - UEX_REST]=rest_count,
-                               ;         [rbp - UEX_ITAG]=iter_tag, [rbp - UEX_IPAY]=iterable payload
-
-    ; Decode arg: count_before = ecx & 0xff, count_after = ecx >> 8
-    mov eax, ecx
-    and eax, 0xff
-    mov ebx, eax               ; ebx = count_before
-    mov eax, ecx
-    shr eax, 8
-    mov r14d, eax              ; r14 = count_after
-
-    ; Pop iterable
-    VPOP_VAL rdi, rax
-    mov [rbp - UEX_ITAG], rax          ; iterable tag
-    mov [rbp - UEX_IPAY], rdi          ; iterable payload
-
-    ; Get length
-    mov rdi, [rbp - UEX_IPAY]
-    mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel list_type]
-    cmp rax, rcx
-    je .ue_list
-
-    extern tuple_type
-    lea rcx, [rel tuple_type]
-    cmp rax, rcx
-    je .ue_tuple
-
-    ; Generic iterable: iterate into a temp list, then unpack from it
-    jmp .ue_generic
-
-.ue_list:
-    mov rax, [rdi + PyListObject.ob_size]
-    jmp .ue_have_len
-.ue_tuple:
-    mov rax, [rdi + PyTupleObject.ob_size]
-
-.ue_have_len:
-    ; rax = total length
-    ; We need: count_before + count_after <= total_length
-    lea rcx, [rbx + r14]      ; count_before + count_after
-    cmp rax, rcx
-    jl .ue_not_enough
-
-    mov [rbp - UEX_TOTAL], rax          ; save total_len
-
-    ; Compute rest_count = total_len - count_before - count_after
-    sub rax, rbx
-    sub rax, r14
-    mov [rbp - UEX_REST], rax          ; rest_count
-
-    ; Push in reverse order (top of stack = last pushed = first in sequence)
-    ; Stack order (bottom to top):
-    ;   last after_item, ..., first after_item, rest_list, last before_item, ..., first before_item
-    ; Wait, Python actually pushes in this order:
-    ;   Push count_after items in reverse (items from end)
-    ;   Push rest list
-    ;   Push count_before items in reverse (items from start)
-    ; So TOS = first_before, TOS1 = second_before, ..., then rest, then after items
-
-    ; 1. Push count_after items (from end, in reverse)
-    mov rcx, r14
-    test rcx, rcx
-    jz .ue_no_after
-
-    ; after items are at indices [total_len - count_after .. total_len - 1]
-    ; Push them in reverse: index total_len-1, total_len-2, ..., total_len-count_after
-    mov rax, [rbp - UEX_TOTAL]          ; total_len
-    dec rax                    ; start from total_len - 1
-.ue_after_loop:
-    test rcx, rcx
-    jz .ue_no_after
-    push rcx
-    push rax
-
-    ; Get item at index rax from iterable
-    mov rdi, [rbp - UEX_IPAY]
-    mov rsi, rax
-    call .ue_getitem           ; rax = payload, rdx = tag (borrowed)
-    INCREF_VAL rax, rdx
-    VPUSH_VAL rax, rdx
-
-    pop rax
-    pop rcx
-    dec rax
-    dec rcx
-    jmp .ue_after_loop
-
-.ue_no_after:
-    ; 2. Build rest list
-    mov rdi, [rbp - UEX_REST]          ; rest_count as initial capacity
-    call list_new
-    push rax                   ; save rest list
-
-    ; Add items at indices [count_before .. count_before + rest_count - 1]
-    mov rcx, [rbp - UEX_REST]          ; rest_count
-    test rcx, rcx
-    jz .ue_rest_done
-    mov rax, rbx               ; start index = count_before
-.ue_rest_loop:
-    test rcx, rcx
-    jz .ue_rest_done
-    push rcx
-    push rax
-
-    mov rdi, [rbp - UEX_IPAY]
-    mov rsi, rax
-    call .ue_getitem           ; rax = payload, rdx = tag (borrowed)
-    mov rsi, rax
-    mov rdi, [rsp + 16]        ; rest list (2 pushes deep)
-    push rsi
-    ; edx = item tag from .ue_getitem (already set)
-    V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append           ; list_append does INCREF
-    pop rsi                    ; discard
-    pop rax
-    pop rcx
-    inc rax
-    dec rcx
-    jmp .ue_rest_loop
-
-.ue_rest_done:
-    pop rax                    ; rest list
-    VPUSH_PTR rax              ; push rest list
-
-    ; 3. Push count_before items in reverse (from index count_before-1 down to 0)
-    mov rcx, rbx
-    test rcx, rcx
-    jz .ue_no_before
-    dec rcx                    ; start from count_before - 1
-.ue_before_loop:
-    push rcx
-
-    mov rdi, [rbp - UEX_IPAY]
-    mov rsi, rcx
-    call .ue_getitem           ; rax = payload, rdx = tag (borrowed)
-    INCREF_VAL rax, rdx
-    VPUSH_VAL rax, rdx
-
-    pop rcx
-    test rcx, rcx
-    jz .ue_no_before
-    dec rcx
-    jmp .ue_before_loop
-
-.ue_no_before:
-    ; DECREF iterable (tag-aware)
-    mov rdi, [rbp - UEX_IPAY]
-    mov rsi, [rbp - UEX_ITAG]         ; iterable tag
-    DECREF_VAL rdi, rsi
-
-    add rsp, 48
-    pop r14
-    pop rbx
-    leave
-    DISPATCH
-
-.ue_generic:
-    ; Generic iterable: iterate into a temp list, then unpack from it
-    ; [rbp - UEX_IPAY] = iterable payload, [rbp - UEX_ITAG] = iterable tag
-    ; ebx = count_before, r14 = count_after (must preserve)
-    mov rdi, [rbp - UEX_IPAY]
-    mov esi, TAG_PTR
-    call get_iterator_opt       ; see the note in .extend_generic
-    test rax, rax
-    jz .ue_type_error
-    push rax                   ; [rsp] = iterator
-
-    ; Create temp list
-    xor edi, edi
-    extern list_new
-    call list_new
-    push rax                   ; [rsp] = temp_list, [rsp+8] = iterator
-
-    DUNDER_EXC_SAVE [rbp - UEX_EXC]
-.ue_gen_loop:
-    mov rdi, [rsp + 8]        ; iterator
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_iternext]
-    test rax, rax
-    jz .ue_gen_done
-    mov rdi, [rsp + 8]
-    call rax                   ; tp_iternext(iter) → (payload, tag)
-    V_UNPACK rax, rdx           ; tp_iternext returns a Value
-    test edx, edx
-    jz .ue_gen_done
-
-    ; Append to temp list
-    push rax
-    push rdx
-    mov rdi, [rsp + 16]       ; temp_list (2 pushes deeper)
-    mov rsi, rax
-    V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
-    pop rsi                    ; tag
-    pop rdi                    ; payload
-    DECREF_VAL rdi, rsi
-    jmp .ue_gen_loop
-
-.ue_gen_done:
-    pop rax                    ; temp_list
-    pop rdi                    ; iterator
-    push rax                   ; save temp_list
-    call obj_decref            ; DECREF iterator
-
-    ; NULL is exhaustion or a raise alike.  Read as exhaustion, `a, *b = G()`
-    ; for a G whose __getitem__ throws bound a and b to a short answer and
-    ; left the exception to surface somewhere unrelated.
-    EXC_RAISED_SINCE [rbp - UEX_EXC], rcx, .ue_gen_raised
-
-    ; DECREF original iterable
-    mov rdi, [rbp - UEX_IPAY]
-    mov rsi, [rbp - UEX_ITAG]
-    DECREF_VAL rdi, rsi
-
-    ; Replace iterable with temp list, update tag
-    pop rax                    ; rax = temp_list
-    mov [rbp - UEX_IPAY], rax
-    mov qword [rbp - UEX_ITAG], TAG_PTR
-
-    ; Now fall through to .ue_list path (reload rdi — clobbered by DECREF_VAL above)
-    mov rdi, rax
-    jmp .ue_list
-
-.ue_gen_raised:
-    pop rdi                    ; the partly built temp list
-    call obj_decref
-    ; The iterable is left alone: the unwinder restores r13 to the stack as
-    ; it stood before this instruction, where the pop had not happened.
-    extern eval_exception_unwind
-    add rsp, 48
-    pop r14
-    pop rbx
-    leave
-    jmp eval_exception_unwind
-
-.ue_not_enough:
-    RAISE exc_ValueError_type, "not enough values to unpack"
-
-.ue_type_error:
-    RAISE exc_TypeError_type, "cannot unpack non-sequence"
-
-; Helper: get item at index rsi from iterable rdi (returns borrowed ref: rax=payload, rdx=tag)
-.ue_getitem:
-    mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel list_type]
-    cmp rax, rcx
-    je .ue_gi_list
-    ; tuple: payload + tag arrays
-    mov rax, [rdi + PyTupleObject.ob_item]
-    mov rax, [rax + rsi * 8]       ; payload
-    V_UNPACK rax, rdx
-    ret
-.ue_gi_list:
-    mov rax, [rdi + PyListObject.ob_item]
-    mov rax, [rax + rsi * 8]      ; payload
-    V_UNPACK rax, rdx
-    ret
-END_FUNC op_unpack_ex
 
 ;; ============================================================================
 ;; op_kw_names - Store keyword argument names for next CALL
@@ -2849,6 +2282,9 @@ extern set_type
 
 BSE_COUNT   equ 8
 BSE_SET     equ 16
+BSE_I       equ 24        ; the loop index, which used to be pushed across
+                          ; set_add and DECREF_V -- a lone push leaves the
+                          ; call 8 out, and that propagates
 DEF_FUNC op_build_set, 24   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
 
     mov [rbp - BSE_COUNT], rcx           ; save count
@@ -2867,18 +2303,17 @@ DEF_FUNC op_build_set, 24   ; + 0 pushes; a handler is entered ALIGNED, so this 
     shl rdi, 3
     sub r13, rdi               ; pop all items
 
-    xor edx, edx
+    mov qword [rbp - BSE_I], 0
 .build_set_fill:
+    mov rdx, [rbp - BSE_I]
     cmp rdx, [rbp - BSE_COUNT]
     jge .build_set_done
-    push rdx
     mov rdi, [rbp - BSE_SET]         ; set
     mov rax, rdx
     shl rax, 3                ; index * 8
     mov rsi, [r13 + rax]     ; item
     call set_add               ; set_add does INCREF
-    pop rdx
-    inc rdx
+    inc qword [rbp - BSE_I]
     jmp .build_set_fill
 
 .build_set_done:
@@ -2886,17 +2321,16 @@ DEF_FUNC op_build_set, 24   ; + 0 pushes; a handler is entered ALIGNED, so this 
     mov rcx, [rbp - BSE_COUNT]
     test rcx, rcx
     jz .build_set_push
-    xor edx, edx
+    mov qword [rbp - BSE_I], 0
 .build_set_fixref:
+    mov rdx, [rbp - BSE_I]
     cmp rdx, [rbp - BSE_COUNT]
     jge .build_set_push
     mov rax, rdx
     shl rax, 3                ; index * 8
     mov rdi, [r13 + rax]
-    push rdx
     DECREF_V rdi, rsi
-    pop rdx
-    inc rdx
+    inc qword [rbp - BSE_I]
     jmp .build_set_fixref
 
 .build_set_push:
@@ -2948,10 +2382,13 @@ SU_SET      equ 32
 SU_CAP      equ 40
 SU_ENTRIES  equ 48
 SU_EXC      equ 56        ; current_exception before the iteration started
+SU_ITEM     equ 64        ; the item held across set_add, and its tag.  They
+SU_ITAG     equ 72        ; used to be pushed, which left the call 8 out
 DEF_FUNC op_set_update
     push rbx
     push r14
-    sub rsp, 56                ; 56, not 48: a handler is entered 16-byte
+    sub rsp, 72                ; 56 plus the two slots above, which keeps
+                               ; the parity: a handler is entered 16-byte
                                ; ALIGNED, so `push rbp` plus these two pushes
                                ; leave rsp 8 out and the frame is what puts it
                                ; back.  48 computed the ordinary-function rule.
@@ -2996,14 +2433,14 @@ DEF_FUNC op_set_update
     jz .su_iter_done
 
     ; rax = next item (owned ref), rdx = tag from tp_iternext
-    push rdx                   ; save item tag
-    push rax                   ; save item payload
+    mov [rbp - SU_ITAG], rdx   ; save item tag
+    mov [rbp - SU_ITEM], rax   ; save item payload
     mov rdi, [rbp - SU_SOURCE]          ; set
     mov rsi, rax               ; item
     V_PACK rsi, rdx            ; set_add takes a key Value
     call set_add               ; set_add does INCREF
-    pop rdi                    ; item payload
-    pop rsi                    ; item tag
+    mov rdi, [rbp - SU_ITEM]
+    mov rsi, [rbp - SU_ITAG]
     DECREF_VAL rdi, rsi        ; DECREF to compensate (set_add INCREF'd)
     jmp .su_iter_loop
 
@@ -3021,7 +2458,7 @@ DEF_FUNC op_set_update
     mov rsi, [rbp - SU_ENTRIES]
     DECREF_VAL rdi, rsi
 
-    add rsp, 56
+    add rsp, 72
     pop r14
     pop rbx
     leave
@@ -3031,7 +2468,7 @@ DEF_FUNC op_set_update
     ; The iterable is left alone: the unwinder restores r13 to the stack as
     ; it stood before this instruction, where VPOP_VAL had not taken it off.
     extern eval_exception_unwind
-    add rsp, 56
+    add rsp, 72
     pop r14
     pop rbx
     leave
@@ -3073,7 +2510,7 @@ DEF_FUNC op_set_update
     mov rsi, [rbp - SU_ENTRIES]
     DECREF_VAL rdi, rsi
 
-    add rsp, 56
+    add rsp, 72
     pop r14
     pop rbx
     leave

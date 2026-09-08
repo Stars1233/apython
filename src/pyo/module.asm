@@ -14,6 +14,8 @@ extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern obj_dealloc
+extern raise_exception
+extern exc_TypeError_type
 extern obj_incref
 extern str_from_cstr
 extern str_type
@@ -28,13 +30,36 @@ extern ap_strcmp
 ;; module_new(PyObject *name_str, PyObject *dict) -> PyModuleObject*
 ;; Create a new module with given name and dict
 ;; If dict is NULL, creates a new empty dict
+;;
+;; module_new_of takes the TYPE as well, for a subclass of ModuleType, and
+;; ecx = 0 to leave the dict EMPTY -- which is what module.__new__ hands back
+;; before module.__init__ has run.  The constructor used to allocate
+;; module_type unconditionally, so `class M(ModuleType)` produced a plain
+;; module: type(M("x")) was `module` and isinstance(m, M) was False.
 ;; ============================================================================
 DEF_FUNC module_new
+    lea rdx, [rel module_type]
+    mov ecx, 1
+    leave
+    jmp module_new_of
+END_FUNC module_new
+
+;; ============================================================================
+;; module_new_of(rdi = name_str, rsi = dict or NULL, rdx = the type,
+;;               ecx = 1 to write __name__ and __doc__) -> PyModuleObject*
+;; ============================================================================
+MNO_FILL  equ 8
+MNO_FRAME equ 24            ; + 3 pushes = 48, 16-aligned
+global module_new_of
+DEF_FUNC module_new_of, MNO_FRAME
     push rbx
     push r12
+    push r13
+    mov [rbp - MNO_FILL], rcx
 
     mov rbx, rdi                ; name_str
     mov r12, rsi                ; dict (or NULL)
+    mov r13, rdx                ; the type
 
     ; Create dict if NULL
     test r12, r12
@@ -48,11 +73,27 @@ DEF_FUNC module_new
     call obj_incref
 
 .alloc:
-    ; Allocate PyModuleObject (GC-tracked)
-    mov edi, PyModuleObject_size
-    lea rsi, [rel module_type]
+    ; Allocate PyModuleObject (GC-tracked).  A subclass is wider, and gc_alloc
+    ; does not zero what it hands back, so the tail past the module's own
+    ; fields is cleared here -- instance_traverse walks it as Values.
+    mov rdi, [r13 + PyTypeObject.tp_basicsize]
+    cmp rdi, PyModuleObject_size
+    jae .alloc_size_ok
+    mov rdi, PyModuleObject_size
+.alloc_size_ok:
+    push rdi
+    mov rsi, r13
     call gc_alloc
+    pop rcx
     ; ob_refcnt=1, ob_type set by gc_alloc
+    mov rdx, PyModuleObject_size
+.alloc_zero:
+    cmp rdx, rcx
+    jae .alloc_zeroed
+    mov qword [rax + rdx], 0
+    add rdx, 8
+    jmp .alloc_zero
+.alloc_zeroed:
 
     ; INCREF name
     push rax
@@ -63,6 +104,8 @@ DEF_FUNC module_new
     ; Fill module fields
     mov [rax + PyModuleObject.mod_name], rbx
     mov [rax + PyModuleObject.mod_dict], r12
+    cmp qword [rbp - MNO_FILL], 0
+    je .mn_tracked
 
     ; __name__ lives in the dict, not only in mod_name: module_getattr looks
     ; nowhere else, so every builtin module answered AttributeError for it --
@@ -95,16 +138,18 @@ DEF_FUNC module_new
     call obj_decref
     pop rax
 
+.mn_tracked:
     push rax
     mov rdi, rax
     call gc_track
     pop rax
 
+    pop r13
     pop r12
     pop rbx
     leave
     ret
-END_FUNC module_new
+END_FUNC module_new_of
 
 ;; ============================================================================
 ;; module_dealloc(PyObject *self)
@@ -249,6 +294,7 @@ END_FUNC module_setattr
 ;; CPython's is the .py -- a difference in that attribute, not in this.
 ;; ============================================================================
 MR_FILE  equ 8
+MR_BUILTIN equ 16       ; is this name in builtin_module_table?
 MR_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC module_repr, MR_FRAME
     push rbx
@@ -287,6 +333,45 @@ DEF_FUNC module_repr, MR_FRAME
     mov [rbp - MR_FILE], rax
 .mr_no_file:
 
+    ; "(built-in)" is for a module that really is one.  The decision used to
+    ; be __file__ alone, so anything without one -- types.ModuleType('x'), and
+    ; every module a test builds by hand -- claimed to be built-in.  CPython
+    ; asks __spec__ first and says plain `<module 'x'>` for a module that is
+    ; neither built-in nor loaded from a file.
+    ;
+    ; __spec__ cannot answer here: it is None or absent on every module in
+    ; this tree.  builtin_module_table can, exactly -- it is the list
+    ; sys.builtin_module_names is built from, so "is this name in it" IS the
+    ; question "is this module built-in".
+    mov qword [rbp - MR_BUILTIN], 0
+    mov rsi, [rbx + PyModuleObject.mod_name]
+    test rsi, rsi
+    jz .mr_not_builtin
+    lea rsi, [rsi + PyStrObject.data]
+    extern builtin_module_table
+    extern builtin_module_count
+    lea r8, [rel builtin_module_table]
+    mov r9, [rel builtin_module_count]
+.mr_bm_loop:
+    test r9, r9
+    jz .mr_not_builtin
+    mov rdi, [r8]                   ; the row's name, a C string
+    push r8
+    push r9
+    push rsi
+    call ap_strcmp
+    pop rsi
+    pop r9
+    pop r8
+    test eax, eax
+    jz .mr_is_builtin
+    add r8, BuiltinModule_size
+    dec r9
+    jmp .mr_bm_loop
+.mr_is_builtin:
+    mov qword [rbp - MR_BUILTIN], 1
+.mr_not_builtin:
+
     lea rdi, [rel mod_repr_open]
     call obj_repr_buf
     mov rdi, rax
@@ -302,7 +387,13 @@ DEF_FUNC module_repr, MR_FRAME
     mov rdi, rax
     cmp qword [rbp - MR_FILE], 0
     jne .mr_from
+    cmp qword [rbp - MR_BUILTIN], 0
+    je .mr_plain
     lea rsi, [rel mod_repr_builtin]
+    call rbt_append_cstr
+    jmp .mr_done
+.mr_plain:
+    lea rsi, [rel mod_repr_plain]
     call rbt_append_cstr
     jmp .mr_done
 .mr_from:
@@ -334,6 +425,7 @@ mod_file_key: db "__file__", 0
 mod_repr_open:    db "<module '", 0
 mod_repr_unknown: db "?", 0
 mod_repr_builtin: db "' (built-in)>", 0
+mod_repr_plain:   db "'>", 0
 mod_repr_from:    db "' from '", 0
 mod_repr_close:   db "'>", 0
 module_type_name: db "module", 0
@@ -342,6 +434,8 @@ ma_dunder_dict: db "__dict__", 0
 section .data
 align 8
 global module_type
+
+
 module_type:
     dq 1                        ; ob_refcnt (immortal)
     dq type_type                ; ob_type
@@ -358,18 +452,21 @@ module_type:
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
-    dq 0                        ; tp_new
+    dq module_type_new          ; tp_new
     dq 0                        ; tp_as_number
     dq 0                        ; tp_as_sequence
     dq 0                        ; tp_as_mapping
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_BASETYPE   ; tp_flags
     dq 0                        ; tp_bases
     dq module_traverse                        ; tp_traverse
     dq module_clear_gc                        ; tp_clear
-    dq 0            ; tp_dictoffset
+    ; A module's own dict IS its __dict__, which is what makes `self.x = 1`
+    ; work on a ModuleType subclass -- CPython's PyModule_Type says the same
+    ; thing with offsetof(PyModuleObject, md_dict).
+    dq PyModuleObject.mod_dict  ; tp_dictoffset
     dq 0                        ; tp_tailslots
 
 ;; ============================================================================
@@ -690,3 +787,323 @@ DEF_FUNC module_clear_gc, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     ret
 END_FUNC module_clear_gc
+
+section .text
+
+
+;; MTN_SET_NONE key -- one dict entry bound to None, on the module in MTN_MOD.
+%macro MTN_SET_NONE 1
+    lea rdi, [rel %1]
+    call str_from_cstr_heap
+    push rax
+    push rax                    ; pad
+    mov rcx, [rbp - MTN_MOD]
+    mov rdi, [rcx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    lea rdx, [rel none_singleton]
+    call dict_set
+    pop rdi
+    pop rdi
+    call obj_decref
+%endmacro
+
+;; ============================================================================
+;; module_type_new(rdi = type, rsi = args, rdx = nargs)
+;;   -> fat (rax = the new module, rdx = TAG_PTR); raises and does not return
+;;      on a bad argument
+;;
+;; `types.ModuleType(name[, doc])`.  module_type had no tp_new and no tp_init,
+;; so type_call fell through to instance_new, which allocated
+;; PyModuleObject_size bytes and handed back a module whose mod_name and
+;; mod_dict were whatever the allocator left -- before the arity check refused
+;; the arguments and reported "module() takes no arguments".  A constructor
+;; belongs in tp_new, which is what type_call consults; tp_call on a type is
+;; what makes that type's INSTANCES callable.  mappingproxy hit the same
+;; pattern.
+;;
+;; module_new already writes __name__ and __doc__ = None into the dict, so the
+;; only extra work is the optional doc.
+;; ============================================================================
+MTN_MOD   equ 8
+MTN_TYPE  equ 16
+MTN_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC module_type_new, MTN_FRAME
+    mov [rbp - MTN_TYPE], rdi
+    cmp rdx, 1
+    jl .mtn_arity
+    cmp rdx, 2
+    jg .mtn_arity
+    push rdx                    ; nargs
+    push rsi                    ; args
+
+    mov rdi, [rsi]              ; args[0], the name, as a Value
+    V_TEST_PTR rdi, rax
+    ja .mtn_bad_name
+    test rdi, rdi
+    jz .mtn_bad_name
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .mtn_bad_name
+
+    mov rdx, [rbp - MTN_TYPE]   ; the class that was called, not module_type
+    xor esi, esi                ; a dict of its own
+    mov ecx, 1
+    extern module_new_of
+    call module_new_of
+    mov [rbp - MTN_MOD], rax
+
+    pop rsi
+    pop rdx
+    cmp rdx, 2
+    jne .mtn_done
+
+    ; The docstring, over the None module_new left there.
+    mov rcx, [rsi + 8]          ; args[1]
+    mov rax, [rbp - MTN_MOD]
+    mov rdi, [rax + PyModuleObject.mod_dict]
+    push rcx
+    push rcx                    ; pad
+    lea rdi, [rel mod_doc_key]
+    call str_from_cstr_heap
+    pop rcx
+    pop rcx
+    mov rsi, rax
+    push rax
+    push rax                    ; pad
+    mov rax, [rbp - MTN_MOD]
+    mov rdi, [rax + PyModuleObject.mod_dict]
+    mov rdx, rcx
+    call dict_set
+    pop rdi
+    pop rdi
+    call obj_decref
+
+.mtn_done:
+    ; CPython's module.__init__ leaves these three in the dict as None, and
+    ; sorted(m.__dict__) is how a test notices they are missing.  A module the
+    ; import system builds gets real ones written over these.
+    MTN_SET_NONE mtn_loader_key
+    MTN_SET_NONE mtn_package_key
+    MTN_SET_NONE mtn_spec_key
+    mov rax, [rbp - MTN_MOD]
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.mtn_bad_name:
+    add rsp, 16
+    RAISE exc_TypeError_type, "module.__init__() argument 1 must be str, not None"
+.mtn_arity:
+    CSTRING rdi, "module() takes at most 2 arguments ("
+    mov rsi, rdx
+    CSTRING rdx, " given)"
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+END_FUNC module_type_new
+
+;; MMI_SET key_cstr, value -- write one entry into the module being
+;; initialised.  rdi (args) and rsi (nargs) are preserved across it.
+%macro MMI_SET 2
+    mov rax, %2
+    push rsi
+    push rdi
+    push rax
+    push rax                    ; pad
+    lea rdi, [rel %1]
+    call str_from_cstr_heap
+    pop rdx
+    pop rdx                     ; the value again
+    push rax
+    push rax                    ; pad
+    mov rcx, [rbp - MMI_SELF]
+    mov rdi, [rcx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    call dict_set
+    pop rdi
+    pop rdi
+    call obj_decref
+    pop rdi
+    pop rsi
+%endmacro
+
+%macro MMI_SET_NONE 1
+    push rsi
+    push rdi
+    lea rdi, [rel %1]
+    call str_from_cstr_heap
+    push rax
+    push rax                    ; pad
+    mov rcx, [rbp - MMI_SELF]
+    mov rdi, [rcx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    lea rdx, [rel none_singleton]
+    call dict_set
+    pop rdi
+    pop rdi
+    call obj_decref
+    pop rdi
+    pop rsi
+%endmacro
+
+
+;; ============================================================================
+;; module_method_new(rdi = args, rsi = nargs) -> a Value
+;;
+;; `module.__new__(cls, *args)`.  CPython's is PyType_GenericNew: it allocates
+;; and nothing more, and module.__init__ is what writes the name.  The split
+;; matters because a ModuleType subclass is written that way --
+;;
+;;     class M(ModuleType):
+;;         def __init__(self, name):
+;;             super().__init__(name)
+;;
+;; -- and with neither name in module's tp_dict, `super().__init__` resolved
+;; to object's and raised, while `super().__new__` hit the object.__new__
+;; gate.  module_type had no tp_dict at all.
+;; ============================================================================
+MMN_TYPE  equ 8
+MMN_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC module_method_new, MMN_FRAME
+    test rsi, rsi
+    jle .mmn_no_args
+    mov rdi, [rdi]              ; args[0], the class
+    V_TEST_PTR rdi, rax
+    ja .mmn_not_a_type
+    test rdi, rdi
+    jz .mmn_not_a_type
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .mmn_not_a_type
+    mov [rbp - MMN_TYPE], rdi
+    lea rsi, [rel module_type]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jz .mmn_not_a_module
+
+    ; An empty name rather than a NULL one: module_repr and module_dealloc
+    ; both read the field, and __init__ overwrites it a moment later.
+    lea rdi, [rel mod_empty_name]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, rax
+    xor esi, esi                ; a dict of its own
+    mov rdx, [rbp - MMN_TYPE]
+    xor ecx, ecx                ; and an EMPTY one, as CPython's is
+    call module_new_of
+    pop rdi
+    push rax
+    call obj_decref             ; the module holds the name now
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.mmn_no_args:
+    RAISE exc_TypeError_type, "module.__new__(): not enough arguments"
+.mmn_not_a_type:
+    RAISE exc_TypeError_type, "module.__new__(X): X is not a type object"
+.mmn_not_a_module:
+    RAISE exc_TypeError_type, "module.__new__(X): X is not a subtype of module"
+END_FUNC module_method_new
+
+;; ============================================================================
+;; module_method_init(rdi = args, rsi = nargs) -> a Value (None)
+;;
+;; `module.__init__(self, name[, doc])` -- the half that writes the name, the
+;; docstring and the three attributes CPython leaves as None.
+;; ============================================================================
+MMI_SELF  equ 8
+MMI_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC module_method_init, MMI_FRAME
+    cmp rsi, 2
+    jl .mmi_arity
+    cmp rsi, 3
+    jg .mmi_arity
+    push rsi
+    push rdi
+    mov rdi, [rdi]              ; args[0], self
+    V_TEST_PTR rdi, rax
+    ja .mmi_bad_self
+    test rdi, rdi
+    jz .mmi_bad_self
+    mov rax, [rdi + PyObject.ob_type]
+    push rdi
+    push rdi
+    mov rdi, rax
+    lea rsi, [rel module_type]
+    call type_is_subtype
+    pop rdi
+    pop rdi
+    test eax, eax
+    jz .mmi_bad_self
+    mov [rbp - MMI_SELF], rdi
+
+    pop rdi                     ; args
+    pop rsi                     ; nargs
+    mov rdx, [rdi + 8]          ; args[1], the name
+    V_TEST_PTR rdx, rax
+    ja .mmi_bad_name
+    test rdx, rdx
+    jz .mmi_bad_name
+    mov rax, [rdx + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .mmi_bad_name
+
+    ; The name, in the field and in the dict both.
+    push rsi
+    push rdi
+    mov rdi, rdx
+    call obj_incref
+    pop rdi
+    pop rsi
+    mov rdx, [rdi + 8]
+    mov rcx, [rbp - MMI_SELF]
+    mov rax, [rcx + PyModuleObject.mod_name]
+    mov [rcx + PyModuleObject.mod_name], rdx
+    push rsi
+    push rdi
+    mov rdi, rax
+    call obj_decref             ; whatever __new__ left there
+    pop rdi
+    pop rsi
+
+    MMI_SET mod_name_key, [rdi + 8]
+    cmp rsi, 3
+    jl .mmi_no_doc
+    MMI_SET mod_doc_key, [rdi + 16]
+    jmp .mmi_rest
+.mmi_no_doc:
+    MMI_SET_NONE mod_doc_key
+.mmi_rest:
+    MMI_SET_NONE mtn_loader_key
+    MMI_SET_NONE mtn_package_key
+    MMI_SET_NONE mtn_spec_key
+
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.mmi_bad_self:
+    add rsp, 16
+    RAISE exc_TypeError_type, \
+        "module.__init__() argument 1 must be a module"
+.mmi_bad_name:
+    RAISE exc_TypeError_type, \
+        "module.__init__() argument 1 must be str, not None"
+.mmi_arity:
+    RAISE exc_TypeError_type, "module.__init__() takes at most 2 arguments"
+END_FUNC module_method_init
+
+
+section .rodata
+mtn_loader_key:  db "__loader__", 0
+mtn_package_key: db "__package__", 0
+mtn_spec_key:    db "__spec__", 0
+mod_empty_name:  db "", 0

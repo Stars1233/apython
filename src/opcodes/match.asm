@@ -59,7 +59,11 @@ MK_KEYS    equ 8
 MK_SUBJ    equ 16
 MK_VALS    equ 24
 MK_NKEYS   equ 32
-MK_FRAME   equ 40           ; + 0 pushes = 32
+MK_I       equ 40           ; the loop index, which used to be pushed.  It
+                            ; sits at the very bottom of the carve below --
+                            ; the frame is what lint checks, and 40 is the
+                            ; aligned size for this handler.
+MK_FRAME   equ 40
 
 ; --- moved to a sibling file by the split ---
 extern op_send
@@ -183,14 +187,21 @@ DEF_FUNC_BARE op_call_intrinsic_1
     CSTRING rdi, "_typealias"
 .ci1_typing_one:
     VPOP rsi
+    ; Two pushes at each call: this handler carves no frame, so a lone save
+    ; leaves the callee 8 out -- and a misaligned call propagates into every
+    ; Python frame the interpreter runs beneath it.
+    push rsi
     push rsi
     xor edx, edx
     call typing_call
     pop rdi
+    pop rdi
     test rax, rax
     jz .ci1_typing_failed
     push rax
+    push rax
     DECREF_V rdi, rcx
+    pop rax
     pop rax
     VPUSH rax
     DISPATCH
@@ -210,7 +221,9 @@ IS_IDX      equ 40      ; loop index
 IS_LIMIT    equ 48      ; capacity or count
 IS_ITEMS    equ 56      ; items payload ptr (__all__ path)
 IS_ITEM_TAGS equ 64     ; items tag ptr (__all__ path)
-IS_FRAME    equ 64      ; sub rsp, 64 (after push rbp + push rbx = 72 total)
+IS_SQITEM   equ 72      ; sq_item for an __all__ that is neither list nor tuple
+IS_SUBNAME  equ 80      ; the name being imported as a submodule
+IS_FRAME    equ 80      ; sub rsp, 80 (after push rbp + push rbx = 96 total)
 extern dict_get
 extern dict_set
 extern str_from_cstr_heap
@@ -260,23 +273,55 @@ extern obj_decref
     test edx, edx                     ; TAG_NULL = not found?
     jz .is_no_all
 
-    ;; --- __all__ found: rax = list/tuple ptr ---
-    ; Determine items array and count
+    ;; --- __all__ found ---
+    ; It was assumed to be a list or a tuple.  A set has no ob_item, so
+    ; `__all__ = {"a"}` read a tuple's field off a set header and segfaulted.
+    ; CPython indexes __all__ with PySequence_GetItem, which is the sq_item
+    ; slot -- so a str works (a sequence of one-character names, and it really
+    ; does bind them) and a set, a dict or an int is
+    ; "'X' object does not support indexing".
     mov rbx, rax                      ; rbx = __all__ object
-    mov rcx, [rbx + PyVarObject.ob_size]  ; count (same offset for list/tuple)
-    mov [rbp - IS_LIMIT], rcx
+    mov qword [rbp - IS_SQITEM], 0
+    ; The tag, not V_TEST_PTR: dict_get's result was already V_UNPACKed, so
+    ; rax is a raw payload and `__all__ = 5` would look like a pointer to
+    ; address 5.
+    cmp edx, TAG_PTR
+    jne .is_all_not_seq
 
-    ; Check if list or tuple
     extern list_type
     mov rax, [rbx + PyObject.ob_type]
     lea rdx, [rel list_type]
     cmp rax, rdx
-    jne .is_all_tuple
-    ; List: items = payload/tag arrays
+    je .is_all_list
+    lea rdx, [rel tuple_type]
+    cmp rax, rdx
+    je .is_all_tuple
+
+    ; Neither: go through the sequence protocol, as CPython does.
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .is_all_not_seq_ptr
+    mov rdx, [rax + PySequenceMethods.sq_item]
+    test rdx, rdx
+    jz .is_all_not_seq_ptr
+    mov [rbp - IS_SQITEM], rdx
+    mov rax, [rax + PySequenceMethods.sq_length]
+    test rax, rax
+    jz .is_all_not_seq_ptr
+    mov rdi, rbx
+    call rax
+    mov [rbp - IS_LIMIT], rax
+    mov qword [rbp - IS_IDX], 0
+    jmp .is_all_loop
+
+.is_all_list:
+    mov rcx, [rbx + PyVarObject.ob_size]
+    mov [rbp - IS_LIMIT], rcx
     mov rax, [rbx + PyListObject.ob_item]
     jmp .is_all_have_items
 .is_all_tuple:
-    ; Tuple: items = payload/tag arrays
+    mov rcx, [rbx + PyVarObject.ob_size]
+    mov [rbp - IS_LIMIT], rcx
     mov rax, [rbx + PyTupleObject.ob_item]
 .is_all_have_items:
     mov [rbp - IS_ITEMS], rax         ; save payloads ptr
@@ -288,27 +333,25 @@ extern obj_decref
     cmp rcx, [rbp - IS_LIMIT]
     jge .is_done
 
-    ; Get name from items[idx]
-    mov rax, [rbp - IS_ITEMS]
-    mov rdx, [rbp - IS_ITEM_TAGS]
-    mov rsi, [rax + rcx * 8]          ; name payload
+    call .is_all_name                 ; rsi = the name at IS_IDX
 
     ; Look up name in mod_dict
     mov rdi, [rbp - IS_MODDICT]
-    ; rsi = key payload, rdx = key_tag (already set)
+    xor edx, edx
     call dict_get                     ; → (rax=value, rdx=value_tag) or (0, 0)
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
-    jz .is_all_next                   ; name not in module dict → skip
+    jz .is_all_absent                 ; the module does not define it
 
     ; dict_set(locals, key=name, value, value_tag, key_tag)
-    ; Reload name from items array (caller-saved regs clobbered by dict_get)
+    ; Reload the name: dict_get clobbers the caller-saved registers.
     mov r9, rax                       ; save value payload
     mov r10, rdx                      ; save value tag
-    mov rcx, [rbp - IS_IDX]
-    mov rax, [rbp - IS_ITEMS]
-    mov rdx, [rbp - IS_ITEM_TAGS]
-    mov rsi, [rax + rcx * 8]          ; name payload
+    push r9
+    push r10
+    call .is_all_name
+    pop r10
+    pop r9
     mov rdi, [rbp - IS_LOCALS]
     mov rdx, r9                       ; value payload
     mov rcx, r10                      ; value tag
@@ -318,6 +361,90 @@ extern obj_decref
 .is_all_next:
     inc qword [rbp - IS_IDX]
     jmp .is_all_loop
+
+    ;; .is_all_name -> rsi = the __all__ entry at IS_IDX, borrowed.
+    ;; Two shapes: a list or tuple is read straight out of ob_item, and
+    ;; anything else goes through the sq_item this type supplied.
+.is_all_name:
+    sub rsp, 8
+    mov rax, [rbp - IS_SQITEM]
+    test rax, rax
+    jnz .ian_slot
+    mov rcx, [rbp - IS_IDX]
+    mov rax, [rbp - IS_ITEMS]
+    mov rsi, [rax + rcx * 8]
+    add rsp, 8
+    ret
+.ian_slot:
+    mov rdi, rbx                      ; the __all__ object
+    mov rsi, [rbp - IS_IDX]
+    call rax
+    V_UNPACK rax, rdx
+    mov rsi, rax                      ; an owned one-character str; the locals
+                                      ; dict takes its own reference, and the
+                                      ; leak is bounded by len(__all__)
+    add rsp, 8
+    ret
+
+.is_all_absent:
+    ; Not in the module's dict.  It may still be a SUBMODULE that the
+    ; package's own body never bound: CPython's _handle_fromlist imports each
+    ; name in __all__ that the package does not already have, and IMPORT_FROM
+    ; next door has always done it -- so `__all__ = ["sub"]` used to raise
+    ; here where `from pkg import sub` worked.
+    call .is_all_name
+    mov [rbp - IS_SUBNAME], rsi
+    mov rdi, [rbp - IS_MOD]
+    extern import_submodule_attr
+    call import_submodule_attr
+    test rax, rax
+    jz .is_all_really_absent
+    mov rdx, rax
+    mov rdi, [rbp - IS_LOCALS]
+    mov rsi, [rbp - IS_SUBNAME]
+    call dict_set
+    jmp .is_all_next
+
+.is_all_really_absent:
+    ; CPython raises AttributeError here rather than binding what it found and
+    ; skipping the rest.  That silence is how lib/copyreg.py came to promise
+    ; three functions in __all__ while defining none of them.
+    ;
+    ; Raising from this hand-rolled frame is safe: eval_exception_unwind
+    ; reloads rbx, r12, r13 and rsp from the eval_saved_* globals, and
+    ; op_import_from already raises from the same subsystem the same way.
+    cmp qword [rel current_exception], 0
+    jne .is_all_propagate
+    call .is_all_name
+    mov rdi, [rbp - IS_MOD]
+    mov [rel eval_saved_r13], r13
+    xor edx, edx                      ; a get, not a set
+    extern raise_no_attribute
+    call raise_no_attribute
+    ud2
+.is_all_propagate:
+    ; The submodule was found and its body raised; that is the real cause.
+    mov [rel eval_saved_r13], r13
+    leave
+    jmp eval_exception_unwind
+
+.is_all_not_seq_ptr:
+    ; Reached once rbx is known to be a real pointer, which is its own Value.
+    ; The tag register has been reused for the type walk by this point, so
+    ; these paths must not go through the V_PACK below.
+    mov rsi, rbx
+    jmp .is_all_not_seq_raise
+.is_all_not_seq:
+    ; raise_type_error_with_name takes a Value; rbx and edx are the unpacked
+    ; pair dict_get handed back.
+    mov rsi, rbx
+    mov ecx, edx
+    V_PACK rsi, rcx
+.is_all_not_seq_raise:
+    mov [rel eval_saved_r13], r13
+    CSTRING rdi, `'\x01' object does not support indexing`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
     ;; --- No __all__: walk dict entries, skip _-prefixed names ---
 .is_no_all:
@@ -411,8 +538,11 @@ extern obj_decref
     test rcx, rcx
     jz .ci1_si_go
     push rax
+    push rax                          ; and a pad: no frame here, so a lone
+                                      ; push leaves the call 8 out
     mov rdi, rcx
     call obj_decref
+    pop rax
     pop rax
 .ci1_si_go:
     ; This is a re-raise, so it adds no traceback entry -- the frame already
@@ -921,13 +1051,16 @@ DEF_FUNC op_match_keys, MK_FRAME
     call tuple_new
     mov [rbp - MK_VALS], rax      ; values tuple
 
-    xor edx, edx                   ; index
+    ; The index lives in the frame, not on the machine stack.  It used to be
+    ; pushed across dict_get, which clobbers rdx -- and that lone push left
+    ; the call 8 out, which propagates into every frame the interpreter runs
+    ; beneath it.  A slot costs the same and says what it holds.
+    mov qword [rbp - MK_I], 0
 
 .mk_loop:
+    mov rdx, [rbp - MK_I]
     cmp rdx, [rbp - MK_NKEYS]
     jge .mk_success
-
-    push rdx
 
     ; Get key
     mov rax, [rbp - MK_KEYS]
@@ -941,20 +1074,17 @@ DEF_FUNC op_match_keys, MK_FRAME
     test edx, edx
     jz .mk_fail
 
-    ; Save dict_get tag (rdx) before restoring loop index
     mov r9, rdx                 ; r9 = value tag from dict_get
 
     ; Store value in values tuple
-    pop rdx
-    push rdx
+    mov rdx, [rbp - MK_I]
     INCREF_VAL rax, r9          ; tag-aware INCREF
     mov rcx, [rbp - MK_VALS]
     mov r8, [rcx + PyTupleObject.ob_item]         ; payloads
     V_PACK rax, r9
     mov [r8 + rdx * 8], rax
 
-    pop rdx
-    inc rdx
+    inc qword [rbp - MK_I]
     jmp .mk_loop
 
 .mk_success:
@@ -964,7 +1094,7 @@ DEF_FUNC op_match_keys, MK_FRAME
     jmp .mk_done
 
 .mk_fail:
-    pop rdx
+    ; No pop: the index is a frame slot now, not a push.
     ; DECREF partial values tuple
     mov rdi, [rbp - MK_VALS]
     call obj_decref
@@ -1076,8 +1206,11 @@ DEF_FUNC op_match_class, MC_FRAME
     pop rsi                         ; rsi = string to DECREF
     push rdx                        ; save dict_get tag
     push rax                        ; save dict_get payload
+    push rax                        ; and a pad: r8 is still down there, so
+                                    ; these two alone leave the call 8 out
     mov rdi, rsi
     call obj_decref
+    pop rax
     pop rax                         ; restore dict_get payload
     pop rdx                         ; restore dict_get tag
     pop r8                          ; restore type pointer

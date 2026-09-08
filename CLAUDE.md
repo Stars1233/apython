@@ -177,10 +177,11 @@ No hand-written file exceeds 100k bytes; only generated asm may.
 - `src/eval.asm` — Bytecode dispatch loop (256-entry jump table), the
   exception unwinder, and `raise_exception`
 - `src/opcodes/*.asm` — Opcode handlers by category: `load` (loads, stores and
-  the stack shuffles), `call`, `build`, `arith` (BINARY_OP/COMPARE_OP/unary and
-  the specialized int/float superinstructions), `flow` (returns, jumps,
-  f-strings, generators), `match` (the MATCH_* family and the intrinsics),
-  `async`, `import`
+  the stack shuffles), `call`, `build`, `unpack` (UNPACK_SEQUENCE and
+  UNPACK_EX, the two that take a sequence apart), `arith` (BINARY_OP/
+  COMPARE_OP/unary and the specialized int/float superinstructions), `flow`
+  (returns, jumps, f-strings, generators), `match` (the MATCH_* family and the
+  intrinsics), `async`, `import`
 - `src/methods/*.asm` — Builtin type methods, one file per type: `str`,
   `str_pred`, `str_parts`, `list`, `tuple`, `dict`, `set`, `num`, `bytes`,
   `bytearray_methods` (bytearray's share of bytes' bodies, each run over a
@@ -203,6 +204,10 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   `signal.asm`, `socket.asm`, `sre.asm`, `zlib.asm`.  `table.asm` is the list
   every one of them is registered from -- `import_init` and
   `sys.builtin_module_names` both read it, and they used to disagree
+- `src/pyo/exc_oserror.asm` — what OSError does that no other exception does:
+  the constructor that rewrites its own class from the errno, the four named
+  attributes beside `.args`, the message assembled from them, and CPython's
+  errno-to-subclass table
 - `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func,
   class, iter, singleton, bytes, bytearray, memoryview, code).  `class.asm` is
   the metatype, the instance and attribute access; `instance_alloc.asm` is
@@ -244,14 +249,20 @@ No hand-written file exceeds 100k bytes; only generated asm may.
 - `src/repr.asm` — the container reprs and the recursion stack they share
 - `src/gc.asm` — the generational collector.  Each type's `tp_traverse` and
   `tp_clear` live with the type, in `src/pyo/*.asm`
-- `src/sre.asm` / `src/modules/sre.asm` — the regex engine and its module
-  wrapper; the pattern and match objects live in `src/pyo/`
+- `src/sre.asm` / `src/sre_char.asm` / `src/modules/sre.asm` — the regex
+  engine, its character layer (code-point fetch, the categories, character
+  sets, the position assertions and case folding) and its module wrapper;
+  the pattern and match objects live in `src/pyo/`
 - `src/valtest.asm` — `--selftest-value`
 - `src/builtins.asm` — `PyBuiltinObject`, the core builtins, and `builtins_init`
 - `src/builtins_num.asm` / `src/builtins_obj.asm` / `src/builtins_str.asm` —
   the numeric builtins, the object/iteration/IO builtins, and `str()` with the
   three-argument decode form; `src/builtins_pow.asm` is `pow()` and the
   modular exponentiation GMP does for its three-argument form
+- `src/builtins_type.asm` — `isinstance()` and `issubclass()`, and
+  `obj_declared_class`, the "what does this object say it is" step they share.
+  CPython asks the real type first and `__class__` only when that says no, and
+  so does this
 - `src/buildclass.asm` — `type.__new__`, `type_from_parts`, `__build_class__`
 - `src/slots.asm` — Installs slot wrappers on a heaptype from the dunders it defines
 - `src/mro.asm` — C3 linearization, `type_mro_next`, `type_is_subtype`
@@ -260,6 +271,9 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   `co_exceptiontable`, plus traceback rendering
 - `src/frame.asm` — Frame alloc/dealloc
 - `src/object.asm` — Base PyObject ops (alloc, refcount, dealloc, `obj_richcompare_bool`)
+- `src/objerr.asm` — the arity and receiver error messages, split off when
+  `object.asm` reached the 100k cap.  Each builds its text into a stack
+  buffer and hands it to `raise_exception`; none of them returns
 - `src/runtime.asm` — The freestanding layer: syscalls, allocation, PLT-free
   memory and string ops, and `fatal_error`
 - `src/compiler/` — The Python **source** compiler (see below)
@@ -283,10 +297,12 @@ f-strings, async, comprehensions, PEP 695 type parameters.
 | `lex.asm` | tokenizer: indentation, operators, names, numbers, strings |
 | `ast.asm` | 32-byte nodes in a `Buf`, addressed by u32 index, and the growable `Buf` / bump `Arena` they live in |
 | `parse.asm` | Pratt expression parser and its prefix/infix handlers |
+| `parse_str.asm` | string literals: the escapes, `\N{...}`, implicit concatenation, and whether a run is an f-string |
 | `prule.asm` | **generated** -- `prule_table`, the precedence grammar |
 | `parse_stmt.asm` | statements, and the soft keywords `match` and `type` |
 | `pattern.asm` | `match` patterns |
 | `fstring.asm` | f-string fields, lexed as spans of the same source |
+| `fstrscan.asm` | where a literal ends, under PEP 701 -- the one definition the lexer and both field scanners share |
 | `symtab.asm` | scopes, local/cell/free classification, name mangling |
 | `codegen.asm` | AST kind → emitter jump table; `_stmt`/`_func`/`_try`/`_comp`/`_match` for the rest.  `_try` also holds `except*`, `with` and `await`: they are one unwinder |
 | `assemble.asm` | EXTENDED_ARG fixpoint, stack depth, exception table, line table |

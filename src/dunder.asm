@@ -216,7 +216,7 @@ DEF_FUNC dunder_call_1
     test edx, TAG_RC_BIT
     jz .not_found
     IS_NONE rax, r9
-    je .not_found
+    je .dunder_is_none
 
     ; Call: tp_call(dunder_func, &[self], 1)
     mov r12, rax            ; r12 = dunder func
@@ -248,6 +248,19 @@ DEF_FUNC dunder_call_1
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+
+.dunder_is_none:
+    ; A dunder explicitly set to None is not "absent": CPython installs the
+    ; generic wrapper anyway and the call fails as "'NoneType' object is not
+    ; callable".  Returning NULL with nothing pending instead made
+    ; `__setattr__ = None` store silently and `__call__ = None` report the
+    ; receiver as the thing that was not callable.
+    ;
+    ; The two slots whose WRAPPER interprets None -- tp_iter and tp_hash, the
+    ; only ones update_one_slot special-cases -- test for it before they get
+    ; here, so "not iterable" and "unhashable type" still win.
+    extern exc_TypeError_type
+    RAISE exc_TypeError_type, "'NoneType' object is not callable"
 
 .not_found:
     RET_NULL
@@ -294,7 +307,7 @@ DEF_FUNC dunder_call_2
     test edx, TAG_RC_BIT
     jz .not_found
     IS_NONE rax, r9
-    je .not_found
+    je .dunder_is_none
 
     ; Call: tp_call(dunder_func, &[self, other], 2)
     mov r13, rax            ; r13 = dunder func
@@ -328,6 +341,19 @@ DEF_FUNC dunder_call_2
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+
+.dunder_is_none:
+    ; A dunder explicitly set to None is not "absent": CPython installs the
+    ; generic wrapper anyway and the call fails as "'NoneType' object is not
+    ; callable".  Returning NULL with nothing pending instead made
+    ; `__setattr__ = None` store silently and `__call__ = None` report the
+    ; receiver as the thing that was not callable.
+    ;
+    ; The two slots whose WRAPPER interprets None -- tp_iter and tp_hash, the
+    ; only ones update_one_slot special-cases -- test for it before they get
+    ; here, so "not iterable" and "unhashable type" still win.
+    extern exc_TypeError_type
+    RAISE exc_TypeError_type, "'NoneType' object is not callable"
 
 .not_found:
     RET_NULL
@@ -373,7 +399,7 @@ DEF_FUNC dunder_call_3, 8            ; 5 pushes, so rsp is 16-aligned
     test edx, TAG_RC_BIT
     jz .not_found
     IS_NONE rax, r9
-    je .not_found
+    je .dunder_is_none
 
     ; Call: tp_call(dunder_func, &[self, arg1, arg2], 3)
     mov r14, rax            ; r14 = dunder func
@@ -409,6 +435,19 @@ DEF_FUNC dunder_call_3, 8            ; 5 pushes, so rsp is 16-aligned
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+
+.dunder_is_none:
+    ; A dunder explicitly set to None is not "absent": CPython installs the
+    ; generic wrapper anyway and the call fails as "'NoneType' object is not
+    ; callable".  Returning NULL with nothing pending instead made
+    ; `__setattr__ = None` store silently and `__call__ = None` report the
+    ; receiver as the thing that was not callable.
+    ;
+    ; The two slots whose WRAPPER interprets None -- tp_iter and tp_hash, the
+    ; only ones update_one_slot special-cases -- test for it before they get
+    ; here, so "not iterable" and "unhashable type" still win.
+    extern exc_TypeError_type
+    RAISE exc_TypeError_type, "'NoneType' object is not callable"
 
 .not_found:
     RET_NULL

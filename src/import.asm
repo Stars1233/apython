@@ -56,6 +56,7 @@ extern sys_module_init
 extern builtins_dict_global
 extern exc_ImportError_type
 extern exc_ModuleNotFoundError_type
+extern str_concat
 
 ; Builtin modules
 
@@ -730,6 +731,108 @@ DEF_FUNC import_module, IF_FRAME
     leave
     ret
 END_FUNC import_module
+
+
+;; ============================================================================
+;; import_submodule_attr(rdi = a package module, rsi = an attribute name str)
+;;   -> rax = the submodule, BORROWED (sys.modules owns it), or 0
+;;
+;; `from pkg import sub` and `from pkg import *` both have to IMPORT a
+;; submodule that the package's own body never bound.  CPython does it in
+;; _handle_fromlist, once, for both; the two paths here had drifted apart --
+;; IMPORT_FROM did it and IMPORT_STAR did not, so an __all__ naming a
+;; submodule raised AttributeError instead of importing it.
+;;
+;; The submodule is also bound on the package under its bare name, which is
+;; what makes `from . import x` inside one submodule leave `x` visible in the
+;; package itself: a package's __init__ shares its globals with the module
+;; object, so CPython's setattr on the parent is the whole mechanism.
+;; ============================================================================
+ISA_MOD  equ 8
+ISA_ATTR equ 16
+ISA_T1   equ 24
+ISA_T2   equ 32
+ISA_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
+global import_submodule_attr
+DEF_FUNC import_submodule_attr, ISA_FRAME
+    mov [rbp - ISA_MOD], rdi
+    mov [rbp - ISA_ATTR], rsi
+    mov rdi, [rdi + PyModuleObject.mod_dict]
+    test rdi, rdi
+    jz .isa_none
+
+    ; The package's own __name__, which the dotted name is built from.
+    lea rdi, [rel isa_dunder_name]
+    call str_from_cstr_heap
+    test rax, rax
+    jz .isa_none
+    mov [rbp - ISA_T1], rax
+    mov rdi, [rbp - ISA_MOD]
+    mov rdi, [rdi + PyModuleObject.mod_dict]
+    mov rsi, rax
+    call dict_get
+    V_UNPACK rax, rdx
+    mov [rbp - ISA_T2], rax
+    mov rdi, [rbp - ISA_T1]
+    call obj_decref
+    cmp qword [rbp - ISA_T2], 0
+    je .isa_none
+
+    ; "pkg" + "." + "attr"
+    lea rdi, [rel isa_dot]
+    call str_from_cstr_heap
+    test rax, rax
+    jz .isa_none
+    mov [rbp - ISA_T1], rax
+    mov rdi, [rbp - ISA_T2]
+    mov rsi, rax
+    mov ecx, TAG_PTR
+    call str_concat
+    mov [rbp - ISA_T2], rax
+    mov rdi, [rbp - ISA_T1]
+    call obj_decref
+    cmp qword [rbp - ISA_T2], 0
+    je .isa_none
+
+    mov rdi, [rbp - ISA_T2]
+    mov rsi, [rbp - ISA_ATTR]
+    mov ecx, TAG_PTR
+    call str_concat
+    mov [rbp - ISA_T1], rax
+    mov rdi, [rbp - ISA_T2]
+    call obj_decref
+    cmp qword [rbp - ISA_T1], 0
+    je .isa_none
+
+    mov rdi, [rbp - ISA_T1]
+    call import_find_and_load
+    mov [rbp - ISA_T2], rax
+    mov rdi, [rbp - ISA_T1]
+    call obj_decref
+    cmp qword [rbp - ISA_T2], 0
+    je .isa_none
+
+    mov rdi, [rbp - ISA_MOD]
+    mov rdi, [rdi + PyModuleObject.mod_dict]
+    test rdi, rdi
+    jz .isa_out
+    mov rsi, [rbp - ISA_ATTR]
+    mov rdx, [rbp - ISA_T2]
+    call dict_set
+.isa_out:
+    mov rax, [rbp - ISA_T2]
+    leave
+    ret
+.isa_none:
+    xor eax, eax
+    leave
+    ret
+END_FUNC import_submodule_attr
+
+section .rodata
+isa_dunder_name: db "__name__", 0
+isa_dot:         db ".", 0
+section .text
 
 ;; ============================================================================
 ;; import_find_and_load(PyObject *name_str) -> PyObject*

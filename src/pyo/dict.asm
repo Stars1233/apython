@@ -1071,6 +1071,8 @@ extern exc_RuntimeError_type
 DEF_FUNC_BARE dict_iter_next
     ; Mutation detection: compare saved version with current
     mov rax, [rdi + PyDictIterObject.it_dict]         ; dict
+    test rax, rax
+    jz .di_done                 ; already dropped, or cleared by the collector
     mov rcx, [rax + PyDictObject.ob_size]
     cmp rcx, [rdi + PyDictIterObject.it_version]
     jne .di_mutation_error
@@ -1145,7 +1147,20 @@ DEF_FUNC_BARE dict_iter_next
     jmp .di_scan
 
 .di_exhausted:
+    ; Drop the dict at exhaustion, as CPython's dictiter does: it is what
+    ; lets a __del__ holding the last reference run while the iterator can
+    ; still answer "exhausted".  Clear before releasing -- list_iter_next
+    ; carries the reason in full.
     mov [rdi + PyDictIterObject.it_index], rcx
+    mov rax, [rdi + PyDictIterObject.it_dict]
+    test rax, rax
+    jz .di_done
+    mov qword [rdi + PyDictIterObject.it_dict], 0
+    push rdi
+    mov rdi, rax
+    call obj_decref
+    pop rdi
+.di_done:
     RET_NULL
     ret
 
@@ -1946,6 +1961,8 @@ END_FUNC dict_reversed
 DEF_FUNC_BARE dict_rev_iter_next
     ; Mutation detection
     mov rax, [rdi + PyDictIterObject.it_dict]
+    test rax, rax
+    jz .dri_done                ; already dropped, or cleared by the collector
     mov rcx, [rax + PyDictObject.ob_size]
     cmp rcx, [rdi + PyDictIterObject.it_version]
     jne .dri_mutation_error
@@ -1976,7 +1993,17 @@ DEF_FUNC_BARE dict_rev_iter_next
     jmp .dri_scan
 
 .dri_exhausted:
+    ; Drop the dict at exhaustion, as dict_iter_next does.
     mov [rdi + PyDictIterObject.it_index], rcx
+    mov rax, [rdi + PyDictIterObject.it_dict]
+    test rax, rax
+    jz .dri_done
+    mov qword [rdi + PyDictIterObject.it_dict], 0
+    push rdi
+    mov rdi, rax
+    call obj_decref
+    pop rdi
+.dri_done:
     RET_NULL
     ret
 

@@ -442,16 +442,22 @@ DEF_FUNC op_format_value, FV_FRAME
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jz .fv_use_str
     extern str_from_cstr_heap
+    ; Two pushes at each call, not one: this frame leaves rsp aligned, so a
+    ; lone save puts the callee 8 out.
+    push rdi
     push rdi
     CSTRING rdi, ""
     call str_from_cstr_heap
     mov rsi, rax               ; the empty spec
     pop rdi
+    pop rdi
+    push rsi
     push rsi
     lea rdx, [rel fv_format_name]
     mov ecx, TAG_PTR
     call dunder_call_2
     V_UNPACK rax, rdx
+    pop rdi
     pop rdi                    ; the empty spec, ours to release
     push rax
     push rdx

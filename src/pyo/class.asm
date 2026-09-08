@@ -20,6 +20,8 @@ extern dict_get
 extern dict_set
 extern str_from_cstr
 extern str_from_cstr_heap
+extern type_lookup_cached
+extern dunder_name_obj
 extern ap_strcmp
 extern type_repr
 extern attr_error_pending
@@ -31,6 +33,8 @@ extern kw_names_pending
 extern eval_exception_unwind
 extern sub_list_for_type
 extern object_method_getattribute
+extern dunder_get
+extern dunder_call_3
 extern dunder_lookup
 extern dunder_call_2
 extern builtin_func_type
@@ -109,10 +113,41 @@ DEF_FUNC type_setattr
     pop rsi
 
 .ts_have_dict:
+    ; A NULL value means DELETE, not "store a NULL".  dict_set was called
+    ; either way, so `del C.attr` left the key in the type's dict bound to a
+    ; NULL Value.  Lookup answered correctly -- `k in C.__dict__` was False and
+    ; `C.__dict__[k]` raised KeyError -- but the entry was still occupied, so
+    ; keys() and items() went on yielding it, and items() handed out the NULL
+    ; Value itself.
+    ;
+    ; That is how a NULL reached ordinary builtins: enum.py deletes five names
+    ; from Enum, doctest walks Enum.__dict__.items(), and inspect called
+    ; type() and isinstance() on the hole.  isinstance() then released an
+    ; uninitialised frame slot, and the decrement landed inside a live code
+    ; object's bytecode -- one byte of a RETURN_VALUE, which the eval loop
+    ; then refused as opcode 82.
+    ;
+    ; instance_setattr already had this fix; type_setattr was missed.
+    test rdx, rdx
+    jz .ts_dict_del
     ; dict_set(dict, name Value, value Value)
     pop rcx
     call dict_set
+    jmp .ts_wrote
 
+.ts_dict_del:
+    ; The alignment push is still on the stack here, so this call is aligned
+    ; where the dict_set above is not; borrow that word to carry the name
+    ; across, since rsi does not survive a call and there is no frame.
+    mov [rsp], rsi
+    extern dict_del_opt
+    call dict_del_opt           ; -1 when it was never there
+    mov rsi, [rsp]
+    pop rcx
+    test eax, eax
+    jnz .ts_del_missing
+
+.ts_wrote:
     ; Assigning a dunder after the class exists has to take effect, the way
     ; `C.__eq__ = f` does in CPython: the slot is installed at class creation
     ; from what the body defined, and nothing re-ran this.  Only a heaptype
@@ -121,8 +156,8 @@ DEF_FUNC type_setattr
     test rax, TYPE_FLAG_HEAPTYPE
     jz .ts_done
     mov rdi, rbx
-    extern type_install_slots
-    call type_install_slots
+    extern type_install_slots_tree
+    call type_install_slots_tree
 
     ; And the __getattribute__ bit, which unlike a slot is inherited -- so
     ; this pushes the new answer down every subclass, not just this type.
@@ -135,6 +170,15 @@ DEF_FUNC type_setattr
     pop rbx
     leave
     ret
+
+.ts_del_missing:
+    ; `del C.nosuch` succeeded silently while dict_set was storing a NULL over
+    ; a key that was never there.  CPython raises, and so does the instance
+    ; path next door.  rsi is the name, restored above.
+    mov rdi, rbx                ; the type -- a pointer is its own Value
+    mov edx, 1                  ; a delete is a set, as far as the wording goes
+    extern raise_no_attribute
+    call raise_no_attribute     ; does not return
 
 .ts_rename:
     ; tp_name points into a PyStrObject's data, and the type owns a reference
@@ -946,6 +990,12 @@ TC_EXCINIT  equ 72
 ; `class A: pass` then `A(1)` -- and answering that needs to know which of the
 ; two halves was the default.
 TC_PLAIN    equ 80
+; __init__ went through __get__, so the reference here is owned.
+TC_INIT_BOUND equ 88
+; ...and the receiver is already inside it, so self is not prepended.  Also
+; set for a callable that is not a descriptor at all, which CPython does not
+; bind and does not hand a self to either.
+TC_NO_SELF  equ 96
 
 ; Refuse arguments this construction has nowhere to put: object's own
 ; __new__ on one side and object's own __init__ on the other means CPython's
@@ -954,6 +1004,21 @@ TC_PLAIN    equ 80
 ; keyword names saved at the top -- __new__ consumes the global -- stand for
 ; the rest.  Written out at both sites rather than called, so that neither
 ; has to reason about what a return address does to rsp.
+; A __init__ this code bound through __get__ is owned and has to go back.
+; A plain function -- the fast path -- was never bound and must not be touched.
+%macro TC_RELEASE_BOUND_INIT 0
+    cmp qword [rbp - TC_INIT_BOUND], 0
+    je %%none
+    mov qword [rbp - TC_INIT_BOUND], 0
+    push rax
+    push rdx
+    mov rdi, rbx
+    call obj_decref
+    pop rdx
+    pop rax
+%%none:
+%endmacro
+
 %macro TC_REFUSE_EXTRA_ARGS 1
     cmp qword [rbp - TC_PLAIN], 0
     je %%ok
@@ -1198,6 +1263,14 @@ DEF_FUNC type_call
     ; It lives in tp_new, NOT tp_call: tp_call on a type is what makes that
     ; type's INSTANCES callable, so parking a constructor there made every
     ; string, list and heap int callable ("abc"() returned '').
+    ; A HEAPTYPE never takes this shortcut, however it came by its tp_new.
+    ; buildclass copies a builtin base's constructor into the subclass, and
+    ; calling it here skipped the __new__ and __init__ the class defined in
+    ; Python: `class M(ModuleType)` with both of them had neither run.
+    ; .normal_type_call reaches the base's constructor anyway, at
+    ; .nnf_check_base_new, and runs __init__ on what it built.
+    test qword [rdi + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jnz .normal_type_call
     mov rax, [rdi + PyTypeObject.tp_new]
     test rax, rax
     jz .normal_type_call
@@ -1220,7 +1293,7 @@ DEF_FUNC type_call
     push r13
     push r14
     push r15
-    sub rsp, 40                 ; locals + align (5 pushes + rbp = 48, +40 = 88)
+    sub rsp, 56                 ; locals + align (5 pushes + rbp = 48, +56 = 104)
     mov rax, [rel kw_names_pending]
     mov [rbp - TC_KWNAMES], rax
     mov qword [rbp - TC_NEW_TAG], TAG_PTR  ; default return tag
@@ -1238,18 +1311,18 @@ DEF_FUNC type_call
     mov rax, [rbx + PyTypeObject.tp_dict]
     test rax, rax
     jz .tc_not_abstract
+    ; dunder_name_obj hands back a BORROWED interned name, cached by the
+    ; literal's address; str_from_cstr_heap allocated, copied, scanned for code
+    ; points and hashed one afresh on every instantiation, and released it two
+    ; lines later.  Three of those per object made is most of what a heaptype
+    ; instance cost over object()'s.
     push rax
     lea rdi, [rel tc_abstract_name]
-    call str_from_cstr_heap
+    call dunder_name_obj
     mov rcx, rax
     pop rdi
-    push rcx
     mov rsi, rcx
     call dict_get
-    pop rdi
-    push rax
-    call obj_decref
-    pop rax
     test rax, rax
     jz .tc_not_abstract
     V_TEST_PTR rax, rcx
@@ -1276,38 +1349,34 @@ DEF_FUNC type_call
     ; The shortcut now waits at .new_not_found, beside the str one.
 
     ; === Look up __new__ in MRO (stop at object_type) ===
+    ; Borrowed and interned, so nothing below releases it -- see the note at
+    ; the __abstractmethods__ lookup above.
     lea rdi, [rel new_name_cstr]
-    call str_from_cstr_heap
-    mov r15, rax                ; r15 = "__new__" str
+    call dunder_name_obj
+    mov r15, rax                ; r15 = "__new__" str, BORROWED
 
-    mov rcx, rbx                ; rcx = current type
-.new_mro_walk:
-    ; Stop at object_type (default __new__ = instance_new)
+    ; type_lookup_cached answers exactly what the MRO walk this replaced did --
+    ; the value in the first tp_dict along the MRO that has the name, and the
+    ; type whose dict that was -- from a table keyed on the type's version,
+    ; which type_refresh_attr_flags already bumps down every subclass whenever
+    ; a class dict is written.  Invalidation is therefore free and passive.
+    ;
+    ; It could not have been used before the names became interned: its hit
+    ; test is a POINTER compare on the name, and a freshly built string missed
+    ; every time and churned the entry's owned reference on the way past.
+    mov rdi, rbx
+    mov rsi, r15
+    call type_lookup_cached     ; rax/edx = the value, rcx = the owner
+    test edx, edx
+    jz .new_not_found
+    ; The hand walk stopped AT object_type and the cache walks past it.
+    ; object's own __new__ is instance_new's business, not a definition.
     lea rdi, [rel object_type]
     cmp rcx, rdi
     je .new_not_found
-
-    mov rdi, [rcx + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jz .new_try_base
-
-    push rcx
-    mov rsi, r15
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    pop rcx
-    test edx, edx               ; the tag, not the payload: a hit may be int 0
-    jnz .new_found
-
-.new_try_base:
-    MRO_NEXT rcx, rbx
-    test rcx, rcx
-    jnz .new_mro_walk
+    jmp .new_found
 
 .new_not_found:
-    ; DECREF name string
-    mov rdi, r15
-    call obj_decref
     ; An int subclass carries its value inline, so it cannot come from
     ; instance_new either.
     mov rax, [rbx + PyTypeObject.tp_flags]
@@ -1401,9 +1470,6 @@ DEF_FUNC type_call
     mov rax, [rax + PyStaticMethodObject.sm_callable]
 .tc_new_unwrapped:
     mov [rbp - TC_NEW_FUNC], rax
-    ; DECREF name string
-    mov rdi, r15
-    call obj_decref
 
     ; Build args for __new__(cls, *original_args)
     lea rax, [r13 + 1]
@@ -1449,43 +1515,55 @@ DEF_FUNC type_call
     shl rax, 4
     add rsp, rax
 
-    ; Check: only call __init__ if __new__ returned instance of cls
+    ; Only call __init__ if __new__ returned an INSTANCE OF cls -- CPython's
+    ; type_call asks PyObject_TypeCheck, which is isinstance and not identity.
+    ; The pointer compare that was here skipped __init__ for the standard
+    ; factory shape, where __new__ picks a subclass and returns object.__new__
+    ; of it:
+    ;
+    ;   class Base:
+    ;       def __new__(cls, *a): return object.__new__(Sub if cls is Base else cls)
+    ;       def __init__(self, *a): self.args = a
+    ;   class Sub(Base): pass
+    ;   Base(1, 2).args         # AttributeError; __init__ never ran
+    ;
+    ; pathlib is the ordinary victim: Path.__new__ returns a PosixPath, so
+    ; PurePath.__init__ never ran and every method died on _raw_paths.
+    ;
+    ; type_is_subtype is DEF_FUNC_BARE and clobbers rdi/rsi/r10/r11/rax; rbx,
+    ; r12, r13 and r14 all survive it, and rcx is dead here.  rsp is back to
+    ; the prologue's shape, the add rsp above having undone the argument carve.
     cmp qword [rbp - TC_NEW_TAG], TAG_PTR
     jne .no_init
-    mov rax, [r14 + PyObject.ob_type]
-    cmp rax, rbx
-    jne .no_init
+    mov rdi, [r14 + PyObject.ob_type]
+    mov rsi, rbx
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jz .no_init
 
 .lookup_init:
     ; Look up __init__ walking the MRO (type + tp_base chain)
-    ; Create "__init__" string for lookup (heap — dict key, DECREFed)
+    ; Borrowed and interned, as for __new__ above.
     lea rdi, [rel init_name_cstr]
-    call str_from_cstr_heap
-    mov r15, rax                ; r15 = "__init__" str object
+    call dunder_name_obj
+    mov r15, rax                ; r15 = "__init__" str, BORROWED
 
-    ; Walk MRO: check type->tp_dict, then tp_base chain
-    mov rcx, rbx                ; rcx = current type to check
-.init_mro_walk:
-    mov rdi, [rcx + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jz .init_try_base
-
-    push rcx                    ; save current type
+    ; The same cache as for __new__ above; .init_found already reads the owner
+    ; out of rcx, which is where this leaves it.
+    ;
+    ; The search starts at the INSTANCE's type, not at the class that was
+    ; called: CPython's type_call runs Py_TYPE(obj)->tp_init.  Starting at
+    ; the called class ran the wrong __init__ whenever __new__ returned a
+    ; subclass instance -- the standard factory shape, and the one the
+    ; isinstance test above exists to allow.
+    mov rdi, [r14 + PyObject.ob_type]
     mov rsi, r15
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    pop rcx                     ; restore current type
-    test edx, edx               ; the tag, not the payload: a hit may be int 0
+    call type_lookup_cached
+    test edx, edx
     jnz .init_found
 
-.init_try_base:
-    MRO_NEXT rcx, rbx
-    test rcx, rcx
-    jnz .init_mro_walk
-
-    ; __init__ not found anywhere — DECREF name string, skip
-    mov rdi, r15
-    call obj_decref
+    ; __init__ not found anywhere
     TC_REFUSE_EXTRA_ARGS 0
     jmp .no_init
 
@@ -1505,9 +1583,61 @@ DEF_FUNC type_call
 .init_is_defined:
     mov rbx, rax                ; rbx = __init__ func
 
-    ; DECREF the "__init__" string (no longer needed)
-    mov rdi, r15
-    call obj_decref
+    ; __init__ reaches its instance through the DESCRIPTOR PROTOCOL, not by
+    ; having self prepended to whatever the class dict holds.
+    ;
+    ; A plain function is the fast path and keeps the manual prepend, which is
+    ; what CPython's lookup_maybe_method does when it reports `unbound`: a
+    ; function's __get__ would only build a bound method for this to take
+    ; apart again.  That equivalence is also why the bug hid -- the one case
+    ; anybody writes is the one case where the two agree.
+    ;
+    ; Everything else is bound first and called with the arguments AS
+    ; WRITTEN.  `__init__ = staticmethod(g)` calls g with no arguments in
+    ; CPython and called it with self here; functools.partial and a callable
+    ; instance are not descriptors at all, and CPython does not bind them.
+    mov qword [rbp - TC_INIT_BOUND], 0
+    mov qword [rbp - TC_NO_SELF], 0
+    mov rax, [rbx + PyObject.ob_type]
+    lea rdx, [rel func_type]
+    cmp rax, rdx
+    je .init_have_callable
+
+    ; Does its type define __get__?
+    mov rdi, rax
+    lea rsi, [rel dunder_get]
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    mov qword [rbp - TC_NO_SELF], 1     ; either way, no manual prepend
+    test edx, edx
+    jz .init_have_callable              ; not a descriptor: call it as it is
+
+    ; __get__(init, instance, type_of_instance), which is the receiver
+    ; CPython's lookup_maybe_method passes.
+    mov rdi, rbx                        ; self = the __init__ object
+    mov rsi, r14                        ; arg1 = the instance
+    mov rdx, [r14 + PyObject.ob_type]   ; arg2 = its type
+    lea rcx, [rel dunder_get]           ; the dunder's name
+    mov r8d, TAG_PTR                    ; arg2 is always a heap pointer
+    call dunder_call_3
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .init_bind_raised
+    mov rbx, rax
+    mov qword [rbp - TC_INIT_BOUND], 1  ; owned; released after the call
+    jmp .init_have_callable
+
+.init_bind_raised:
+    ; __get__ raised.  Nothing has been allocated on the stack yet, so this
+    ; only has to drop the half-built instance the way .init_raised does.
+    mov rax, r14
+    mov rsi, [rbp - TC_NEW_TAG]
+    DECREF_VAL rax, rsi
+    xor r14d, r14d
+    mov qword [rbp - TC_NEW_TAG], 0
+    jmp .no_init
+
+.init_have_callable:
 
     ; === Call __init__(instance, *args) ===
     ; Build args array on machine stack: [instance, arg0, arg1, ...]
@@ -1518,22 +1648,28 @@ DEF_FUNC type_call
     sub rsp, rax                ; allocate on stack
     mov r15, rsp                ; r15 = new args array
 
-    ; args[0] = instance (a pointer is its own Value)
+    ; args[0] = instance (a pointer is its own Value).  A bound callable
+    ; already carries its receiver, so the copy starts at slot 0 for it and
+    ; slot 1 for the unbound fast path.
+    xor r8d, r8d                ; the destination offset, in slots
+    cmp qword [rbp - TC_NO_SELF], 0
+    jne .copy_args
     mov [r15], r14
+    mov r8d, 1
 
-    ; Copy original args: args[1..nargs] (16-byte stride)
-    xor ecx, ecx
 .copy_args:
+    xor ecx, ecx
+.copy_args_loop:
     cmp rcx, r13
     jge .args_copied
     mov rax, rcx
     shl rax, 3                  ; one Value per slot
     mov rdx, [r12 + rax]
-    lea r9, [rcx + 1]
-    shl r9, 3                   ; dest slot (offset by one for self)
+    lea r9, [rcx + r8]
+    shl r9, 3                   ; dest slot
     mov [r15 + r9], rdx
     inc rcx
-    jmp .copy_args
+    jmp .copy_args_loop
 .args_copied:
 
     ; Get __init__'s tp_call
@@ -1563,21 +1699,52 @@ DEF_FUNC type_call
 .init_no_kw:
     mov rdi, rbx                ; callable = __init__ func
     mov rsi, r15                ; args ptr
-    lea rdx, [r13 + 1]          ; nargs + 1
+    lea rdx, [r13 + 1]          ; nargs + 1, self included
+    cmp qword [rbp - TC_NO_SELF], 0
+    je .init_do_call
+    mov rdx, r13                ; bound, or not a descriptor: as written
+.init_do_call:
     call r11
     V_UNPACK rax, rdx           ; tp_call returns a Value
     test edx, edx
     jz .init_raised             ; NULL, with the exception still pending
 
-    ; DECREF __init__'s return value (should be None — TAG_NONE, not a pointer)
+    ; __init__ must return None, and CPython says so rather than dropping
+    ; whatever it got: a __init__ with a stray `return self` is a common
+    ; mistake and answering silently hides it.
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    jne .init_bad_return
+
     mov rsi, rdx
     DECREF_VAL rax, rsi
+    TC_RELEASE_BOUND_INIT
 
     ; Restore stack (undo the sub rsp from args allocation)
     lea rax, [r13 + 1]
     shl rax, 4
     add rsp, rax
     jmp .no_init
+
+.init_bad_return:
+    ; rax/rdx still hold what __init__ answered.
+    mov rsi, rdx
+    V_PACK rax, rsi
+    mov r15, rax                ; r15 is free: the args array is done with
+    TC_RELEASE_BOUND_INIT
+    CSTRING rdi, `__init__() should return None, not '\x01'`
+    mov rsi, r15
+    extern raise_type_error_with_name
+    ; The argument carve is still on the stack.  The raise does not return and
+    ; eval_exception_unwind reloads rsp from eval_base_rsp, so there is nothing
+    ; to unwind here.
+    ;
+    ; And eval_saved_r13 is NOT republished: r13 is the argument count in this
+    ; function, not the value stack, and handing the unwinder that made it
+    ; zero words from an arbitrary address.  The caller published the right
+    ; one before it got here, which is why the other raises in this function
+    ; do not touch it either.
+    jmp raise_type_error_with_name
 
 .init_raised:
     ; What __init__ returned was never looked at, so a raise inside it
@@ -1589,6 +1756,7 @@ DEF_FUNC type_call
     lea rax, [r13 + 1]
     shl rax, 4
     add rsp, rax
+    TC_RELEASE_BOUND_INIT
     mov rax, r14
     mov rsi, [rbp - TC_NEW_TAG]
     DECREF_VAL rax, rsi         ; the half-built instance goes no further
@@ -1600,7 +1768,7 @@ DEF_FUNC type_call
     mov rax, r14
     mov rdx, [rbp - TC_NEW_TAG]
 
-    add rsp, 40                 ; undo the locals; must match the sub above
+    add rsp, 56                 ; undo the locals; must match the sub above
     pop r15
     pop r14
     pop r13
@@ -1673,7 +1841,7 @@ DEF_FUNC type_call
 .exc_sub_no_init:
     mov rax, r14
     mov edx, TAG_PTR
-    add rsp, 40                 ; undo the locals; must match the sub above
+    add rsp, 56                 ; undo the locals; must match the sub above
     pop r15
     pop r14
     pop r13
@@ -1692,7 +1860,7 @@ DEF_FUNC type_call
     test edx, edx
     jz .int_sub_error
 .int_sub_epilogue:
-    add rsp, 40                 ; undo the locals; must match the sub above
+    add rsp, 56                 ; undo the locals; must match the sub above
     pop r15
     pop r14
     pop r13
@@ -1839,6 +2007,16 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     call ap_strcmp
     test eax, eax
     jz .tga_return_weakrefoffset
+
+    ; __flags__ is computed rather than read, but it is a data descriptor on
+    ; the metatype in CPython for the same reason as the three above, so it
+    ; has to be answered here too -- otherwise `type.__flags__` finds the
+    ; getset in type's own dict and hands back the descriptor.
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__flags__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_return_flags
 
     ; Check type->tp_dict, then walk tp_base chain
 .tga_walk:
@@ -2003,6 +2181,13 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+
+.tga_return_flags:
+    mov rdi, r12
+    extern type_cpython_flags
+    call type_cpython_flags
+    mov rdi, rax
+    jmp .tga_return_layout_int
 
 .tga_return_basicsize:
     mov rdi, [r12 + PyTypeObject.tp_basicsize]
@@ -2542,6 +2727,10 @@ DEF_FUNC instance_traverse
     mov rbx, rdi
 
     ; Visit the instance dict, wherever this family keeps it
+    ; No NULL test, and that is VISIT_PTR's doing rather than an omission: it
+    ; is NULL-safe.  An instance carries no dict until something puts one
+    ; there, so this is the ordinary case and not a rare one.  Swapping this
+    ; for VISIT_V would break it silently.
     LOAD_INST_DICT rdi, rbx, .no_inst_dict
     VISIT_PTR rdi
 .no_inst_dict:

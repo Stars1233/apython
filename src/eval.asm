@@ -796,6 +796,7 @@ extern exc_RecursionError_type
     add rdi, rax             ; target stack ptr
     ; DECREF any items being popped from stack
     cmp r13, rdi
+    jb .stack_below          ; shallower than the table says -- see below
     jbe .stack_adjusted
 .pop_stack:
     sub r13, 8
@@ -834,6 +835,29 @@ extern exc_RecursionError_type
     lea rbx, [rbx + rax*2]   ; target * 2 = byte offset
 
     DISPATCH
+
+.stack_below:
+    ; The stack is SHALLOWER than the depth the exception table names.  CPython
+    ; asserts here (`STACK_LEVEL() >= level`, Python/ceval.c); this cannot
+    ; assert, so it makes the recovery safe instead.
+    ;
+    ; The unconditional `mov r13, rdi` below raises the stack back to the
+    ; table's depth, which re-exposes whatever words happen to sit between --
+    ; a handler's dead operands, or nothing that was ever a Value.  The
+    ; handler then reads them, and the next unwind DECREFs them.  Zeroing
+    ; first makes them NULL, which every VPOP/XDECREF_V path already treats as
+    ; empty, so a reachable-but-wrong depth degrades to a clean NULL rather
+    ; than to a wild pointer.
+    ;
+    ; Reaching here at all means some handler published eval_saved_r13 below
+    ; the depth its own instruction is covered at.  Nothing does today.
+    mov rsi, r13
+.sb_zero:
+    cmp rsi, rdi
+    jae .stack_adjusted
+    mov qword [rsi], 0
+    add rsi, 8
+    jmp .sb_zero
 
 .no_interpreter_frame:
     lea rdi, [rel eval_no_frame_msg]

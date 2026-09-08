@@ -13,6 +13,8 @@
 %include "opcodes.inc"
 
 ; External functions
+extern frameobj_method_clear
+extern frame_object_type
 extern memoryview_method_tobytes
 extern memoryview_method_tolist
 extern memoryview_method_cast
@@ -1039,6 +1041,28 @@ DEF_FUNC methods_init
     mov rdi, rax
     call type_stamp_methods
 
+    ;; --- module's own two names ---
+    ;; module_type had no tp_dict at all, so `module.__init__` and
+    ;; `module.__new__` resolved to object's: a ModuleType subclass written
+    ;; the ordinary way -- __init__ calling super().__init__(name) -- raised
+    ;; "object.__init__() takes exactly one argument".  CPython splits the
+    ;; work the same way, PyType_GenericNew and module___init__.
+    call dict_new
+    mov rbx, rax
+
+    extern module_method_new
+    mov rdi, rbx
+    lea rsi, [rel module_method_new]
+    call add_new_staticmethod       ; __new__ takes the class, not an instance
+    extern module_method_init
+    ADD_FN mn___init__, module_method_init
+
+    extern module_type
+    lea rax, [rel module_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
     ;; --- generator and coroutine dicts ---
     ;; gen_type had no tp_dict, so `hasattr(gen, "__next__")` was False and
     ;; `it.__next__` an AttributeError.  CPython's threading.py does
@@ -1059,10 +1083,14 @@ DEF_FUNC methods_init
 
     GEN_GETSET gs___name__,     gen_get_name
     GEN_GETSET gs___qualname__, gen_get_name
-    ; gi_frame and cr_frame are NOT here: a PyFrame is pooled and recycled and
-    ; is not an object with a type, so there is nothing to hand back.  Saying
-    ; so by leaving the name absent beats answering None to a caller that is
-    ; about to read f_lineno off it.
+    ; gi_frame goes through frameobj_for, which hands out an owned frame
+    ; object for a live pooled PyFrame -- the same thing sys._getframe
+    ; answers with.  The note that used to be here said a PyFrame was not an
+    ; object with a type and so could not be handed back; that has not been
+    ; true since frameobj_for was written, and the absence was what made
+    ; frame.clear() on a suspended generator unreachable.
+    extern gen_get_frame
+    GEN_GETSET gs_gi_frame,     gen_get_frame
     GEN_GETSET gs_gi_code,      gen_get_code
     GEN_GETSET gs_gi_running,   gen_get_running
 
@@ -1085,6 +1113,7 @@ DEF_FUNC methods_init
 
     GEN_GETSET gs___name__,     gen_get_name
     GEN_GETSET gs___qualname__, gen_get_name
+    GEN_GETSET gs_cr_frame,     gen_get_frame
     GEN_GETSET gs_cr_code,      gen_get_code
     GEN_GETSET gs_cr_running,   gen_get_running
 
@@ -1673,8 +1702,24 @@ DEF_FUNC methods_init
     extern type_dict_add_attrs
     mov rdi, rbx
     call type_dict_add_attrs
+    ; A class is callable, and isinstance(int, Callable) asks by name.
+    extern type_dunder_call
+    ADD_FN mn___call__, type_dunder_call
 
     lea rax, [rel type_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
+    ;; --- method: a bound method is callable, and says so by name ---
+    ; method_type had no tp_dict at all, so hasattr(c.m, '__call__') was False
+    ; and collections.abc.Callable disowned every bound method.
+    call dict_new
+    mov rbx, rax
+    extern method_dunder_call
+    ADD_FN mn___call__, method_dunder_call
+    extern method_type
+    lea rax, [rel method_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
     call type_stamp_methods
@@ -1730,6 +1775,8 @@ DEF_FUNC methods_init
     ; does natively has to be reachable by name as well.
     extern func_dunder_get
     ADD_FN mn___get__, func_dunder_get
+    extern func_dunder_call
+    ADD_FN mn___call__, func_dunder_call
 
     extern func_type
     lea rax, [rel func_type]
@@ -1742,6 +1789,8 @@ DEF_FUNC methods_init
     mov rbx, rax
     extern staticmethod_dunder_get
     ADD_FN mn___get__, staticmethod_dunder_get
+    extern staticmethod_dunder_call
+    ADD_FN mn___call__, staticmethod_dunder_call
     lea rax, [rel staticmethod_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1765,6 +1814,11 @@ DEF_FUNC methods_init
     ADD_FN mn___set__, property_dunder_set
     extern property_dunder_delete
     ADD_FN mn___delete__, property_dunder_delete
+    ; __set_name__ is how a property learns what it was assigned to, which is
+    ; the only way its AttributeError can say "property 'r' of 'C' object has
+    ; no setter" rather than 3.10's bare "can't set attribute".
+    extern property_dunder_set_name
+    ADD_FN mn___set_name__, property_dunder_set_name
     extern property_type
     lea rax, [rel property_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1797,6 +1851,8 @@ DEF_FUNC methods_init
     mov rbx, rax
     extern builtin_func_dunder_get
     ADD_FN mn___get__, builtin_func_dunder_get
+    extern builtin_func_dunder_call
+    ADD_FN mn___call__, builtin_func_dunder_call
     extern builtin_func_type
     lea rax, [rel builtin_func_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2479,6 +2535,18 @@ DEF_FUNC methods_init
     mov rdi, rax
     call type_stamp_methods
 
+    ;; --- frame_object_type methods ---
+    ;; frameobj_getattr answers the f_* attributes and returns NULL for
+    ;; anything else, so a tp_dict beside it is where a METHOD goes; the
+    ;; attribute fallback and the dict do not overlap.
+    call dict_new
+    mov rbx, rax
+    ADD_FN_N mn_clear, frameobj_method_clear, 1, 1
+    lea rax, [rel frame_object_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
     ;; --- memoryview_type methods ---
     ;; It had none: tp_getattr was 0 and tp_dict was empty.  _pyio calls
     ;; tobytes and cast, and wraps every readinto in `with memoryview(b)`.
@@ -2577,6 +2645,8 @@ mn_isupper:     db "isupper", 0
 mn_islower:     db "islower", 0
 mn___new__:     db "__new__", 0
 mn___get__:     db "__get__", 0
+mn___set_name__: db "__set_name__", 0
+mn___call__:    db "__call__", 0
 mn___set__:     db "__set__", 0
 mn___delete__:  db "__delete__", 0
 mn_title:       db "title", 0

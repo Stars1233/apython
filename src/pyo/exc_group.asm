@@ -70,6 +70,13 @@ DEF_FUNC eg_new, EGN_FRAME
     mov qword [rax + PyExceptionGroupObject.exc_tb], 0
     mov qword [rax + PyExceptionGroupObject.exc_context], 0
     mov qword [rax + PyExceptionGroupObject.exc_cause], 0
+    ; ap_malloc does not zero, and exc_getattr reads exc_dict on every
+    ; attribute miss -- so leaving it uninitialised made `eg.anything` branch
+    ; on a garbage pointer.  exc_suppress is read the same way by a bare
+    ; `raise`.  exc_args is filled in below, once the args tuple exists.
+    mov qword [rax + PyExceptionGroupObject.exc_dict], 0
+    mov qword [rax + PyExceptionGroupObject.exc_suppress], 0
+    mov qword [rax + PyExceptionGroupObject.exc_args], 0
     mov [rax + PyExceptionGroupObject.eg_exceptions], r13
 
     ; INCREF msg_str

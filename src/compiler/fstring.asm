@@ -418,7 +418,10 @@ FF_LBASE equ 128         ; where the line the f-string starts on begins
 FF_FSTART equ 136        ; the field's own '{'
 FF_FEND  equ 144         ; just past its '}'
 FF_NODE  equ 152
-FF_FRAME equ 168          ; + 3 pushes = 192
+FF_SKIP  equ 208          ; an FsSkip, at [rbp-208, rbp-168): derived from the
+                          ; slot above it rather than hand-picked, so that
+                          ; growing the struct cannot land it on FF_NODE
+FF_FRAME equ 216          ; + 3 pushes = 240
 DEF_FUNC par_fstring_field, FF_FRAME
     push rbx
     push r12
@@ -442,23 +445,45 @@ DEF_FUNC par_fstring_field, FF_FRAME
     mov [rbp - FF_ESTART], r12
     mov r13, [rbp - FF_END]
     xor ecx, ecx                        ; brace depth
-    xor r8d, r8d                        ; quote character, 0 = outside a string
+    ; The FsSkip below carries only the error slot: this scan runs over a span
+    ; the lexer has already accepted, so a literal inside it cannot be
+    ; unterminated, and the line counting was done then.
+    mov qword [rbp - FF_SKIP + FsSkip.nl], 0
+    mov qword [rbp - FF_SKIP + FsSkip.lstart], 0
+    mov qword [rbp - FF_SKIP + FsSkip.level], 0
+    mov qword [rbp - FF_SKIP + FsSkip.err], FSE_OK
 
 .scan:
     cmp r12, r13
     jae .unterminated
     movzx eax, byte [r12]
-    test r8d, r8d
-    jz .not_in_string
-    cmp eax, r8d
-    jne .advance
-    xor r8d, r8d
-    jmp .advance
 .not_in_string:
     cmp al, 39
     je .open_quote
     cmp al, 34
     je .open_quote
+    cmp al, '#'
+    je .comment
+    cmp al, 'A'
+    jb .after_prefix_check
+    cmp al, 'z'
+    ja .after_prefix_check
+    ; A letter may begin a prefixed literal -- rb'...', f"..." -- and the
+    ; letters are not part of it.  fs_literal_at refuses anything that is not
+    ; one or two letters followed by a quote, which is every identifier and
+    ; the six punctuation bytes that sit between 'Z' and 'a'.
+    mov rdi, r12
+    mov rsi, r13
+    push rcx
+    push rcx                            ; pad: the call needs an even push list
+    extern fs_literal_at
+    call fs_literal_at
+    pop rcx
+    pop rcx
+    test rax, rax
+    jnz .prefixed_literal
+    movzx eax, byte [r12]               ; fs_literal_at answered in rax
+.after_prefix_check:
     cmp al, '{'
     je .deeper
     cmp al, '['
@@ -480,9 +505,46 @@ DEF_FUNC par_fstring_field, FF_FRAME
     cmp al, '='
     je .maybe_debug
     jmp .advance
+.comment:
+    ; A comment runs to the end of the line, and everything in it is text:
+    ; CPython's own test_fstring has `{ # the following operation it's` inside
+    ; a triple-quoted f-string, and the apostrophe there opened a nested
+    ; literal that then ran to the end of the token.  The lexer's scanner has
+    ; always skipped comments; this one had never needed to, because before
+    ; PEP 701 a field could not span a line and so could not hold one.
+    inc r12
+    cmp r12, r13
+    jae .unterminated
+    cmp byte [r12], 10
+    jne .comment
+    jmp .scan
+
+.prefixed_literal:
+    mov r12, rax
+    jmp .skip_literal
+
 .open_quote:
-    mov r8d, eax
-    jmp .advance
+    xor edx, edx                        ; no prefix, so no flags
+.skip_literal:
+    ; A nested literal is skipped whole, by the same code the lexer uses: a
+    ; backslash escapes, a triple quote runs to its matching three, and a
+    ; nested f-string brings its own replacement fields.  The one-byte quote
+    ; state that used to be here read f"{ "a\"b" }" as ending at the escaped
+    ; quote, and knew nothing of triples or of nesting.
+    push rcx
+    push rcx                            ; pad
+    mov rdi, r12
+    mov rsi, r13
+    mov ecx, edx
+    lea rdx, [rbp - FF_SKIP]
+    extern fs_skip_literal
+    call fs_skip_literal
+    pop rcx
+    pop rcx
+    test rax, rax
+    jz .unterminated
+    mov r12, rax
+    jmp .scan
 .deeper:
     inc ecx
     jmp .advance
@@ -528,14 +590,41 @@ DEF_FUNC par_fstring_field, FF_FRAME
 .have_conv:
     mov [rbp - FF_CONV], rdx
     inc r12
+.conv_ws:
+    ; Whitespace is allowed between the conversion and what follows it, as it
+    ; is everywhere else in a field: `f"{ v!r }"` is ordinary Python and this
+    ; read the space as a second conversion character and refused it.  The
+    ; spaces are not part of anything -- unlike the ones around a `=`, which
+    ; the debug text keeps.
     cmp r12, r13
     jae .unterminated
     movzx eax, byte [r12]
+    cmp al, ' '
+    je .conv_ws_step
+    cmp al, 9
+    jne .conv_ws_done
+.conv_ws_step:
+    inc r12
+    jmp .conv_ws
+.conv_ws_done:
     cmp al, ':'
     je .spec_after_conv
     cmp al, '}'
     je .close_with_end
+    cmp al, '#'
+    je .conv_comment
+    cmp al, 10
+    je .conv_skip_one
     jmp .bad_conv
+.conv_comment:
+    inc r12
+    cmp r12, r13
+    jae .unterminated
+    cmp byte [r12], 10
+    jne .conv_comment
+.conv_skip_one:
+    inc r12
+    jmp .conv_ws
 
 .maybe_debug:
     ; `{x=}` prints the expression text as well as its value; `==`, `<=`,
@@ -577,7 +666,11 @@ DEF_FUNC par_fstring_field, FF_FRAME
     inc r12
     jmp .debug_ws
 .debug_ws_done:
+    ; The spaces stop the debug text; a comment and the newline after it are
+    ; not part of it but do not end the field either.  CPython's own
+    ; test_fstring has `f"{1+2 = # my comment\n}"`, whose text is "1+2 = ".
     mov [rbp - FF_WSEND], r12
+.debug_after_ws:
     cmp r12, r13
     jae .unterminated
     movzx eax, byte [r12]
@@ -587,7 +680,24 @@ DEF_FUNC par_fstring_field, FF_FRAME
     je .spec_after_conv
     cmp al, '!'
     je .maybe_conv
+    cmp al, '#'
+    je .debug_comment
+    cmp al, 10
+    je .debug_skip_one
+    cmp al, ' '
+    je .debug_skip_one
+    cmp al, 9
+    je .debug_skip_one
     jmp .bad_conv
+.debug_comment:
+    inc r12
+    cmp r12, r13
+    jae .unterminated
+    cmp byte [r12], 10
+    jne .debug_comment
+.debug_skip_one:
+    inc r12
+    jmp .debug_after_ws
 .skip_two:
     add r12, 2
     jmp .scan
@@ -597,7 +707,6 @@ DEF_FUNC par_fstring_field, FF_FRAME
 .spec_after_conv:
     inc r12
     mov [rbp - FF_SSTART], r12
-    xor ecx, ecx
 .spec_scan:
     cmp r12, r13
     jae .unterminated
@@ -609,15 +718,28 @@ DEF_FUNC par_fstring_field, FF_FRAME
     inc r12
     jmp .spec_scan
 .spec_deeper:
-    inc ecx
-    inc r12
+    ; A nested field inside a spec is a field, not a brace to count: f"{v:{"}"}}"
+    ; has a `}` inside a string inside it, and a depth counter closed the spec
+    ; on that.  The quote argument is 0 because nothing here knows which quote
+    ; opened the enclosing f-string, and it is only used to notice that the
+    ; f-string ENDED -- which the lexer has already ruled out for this span.
+    lea rdi, [r12 + 1]
+    mov rsi, r13
+    lea rdx, [rbp - FF_SKIP]
+    xor ecx, ecx
+    xor r8d, r8d
+    extern fs_scan_field
+    call fs_scan_field
+    test rax, rax
+    jz .unterminated
+    mov r12, rax
     jmp .spec_scan
 .spec_maybe_close:
-    test ecx, ecx
-    jz .spec_done
-    dec ecx
-    inc r12
-    jmp .spec_scan
+    ; Every nested field is consumed whole above, so the only `}` that reaches
+    ; here is the one that ends the spec.  The depth counter that used to be
+    ; here is gone, and it had to go: fs_scan_field clobbers rcx, and a
+    ; counter read after that call is whatever the callee left.
+    jmp .spec_done
 .spec_done:
     mov [rbp - FF_SEND], r12
     jmp .close_expr_done

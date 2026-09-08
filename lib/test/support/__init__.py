@@ -1,3 +1,4 @@
+import gc
 import sys
 import unittest
 
@@ -64,9 +65,27 @@ NEVER_EQ = _NEVER_EQ()
 
 C_RECURSION_LIMIT = 50
 
-def check_free_after_iterating(test, func, cls):
-    """Check that an iterator doesn't hold references after exhaustion."""
-    obj = cls([0, 1, 2, 3, 4])
-    it = func(obj)
-    for _ in it:
-        pass
+def check_free_after_iterating(test, iter, cls, args=()):
+    """Check that an iterator drops its sequence as soon as it is exhausted.
+
+    CPython's own, restored.  The copy here had been reduced to walking an
+    iterator and asserting nothing, so every caller passed no matter what --
+    which is how the issue-26494 segfault survived in this tree with
+    test_list, test_tuple, test_dict and test_set all green.
+    """
+    class A(cls):
+        def __del__(self):
+            nonlocal done
+            done = True
+            try:
+                next(it)
+            except StopIteration:
+                pass
+
+    done = False
+    it = iter(A(*args))
+    # Issue 26494: Shouldn't crash
+    test.assertRaises(StopIteration, next, it)
+    # The sequence should be deallocated just after the end of iterating
+    gc.collect()
+    test.assertTrue(done)

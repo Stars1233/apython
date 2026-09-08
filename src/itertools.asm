@@ -1830,6 +1830,11 @@ DEF_FUNC_LOCAL reversed_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     mov rax, [rbx + IT_FIELD2]   ; it_index
     test rax, rax
     js .revi_exhausted
+    ; iter_clear_one is this type's tp_clear, so the sequence can already be
+    ; gone; and it is dropped at exhaustion below.  Either way a NULL here
+    ; means exhausted, not something to dereference.
+    cmp qword [rbx + IT_FIELD1], 0
+    je .revi_done
 
     ; Get item at index using sq_item or __getitem__
     mov rdi, [rbx + IT_FIELD1]   ; it_seq
@@ -1869,6 +1874,14 @@ DEF_FUNC_LOCAL reversed_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 
 .revi_exhausted:
+    ; Drop the sequence at exhaustion, as CPython's listreviter does and as
+    ; every forward iterator here now does.  Clear before releasing --
+    ; list_iter_next carries the reason in full.  reversed_dealloc still
+    ; releases it_seq afterwards, which is fine: obj_decref is NULL-safe.
+    mov rdi, [rbx + IT_FIELD1]
+    mov qword [rbx + IT_FIELD1], 0
+    call obj_decref
+.revi_done:
     RET_NULL
     pop rbx
     leave
@@ -2112,6 +2125,7 @@ END_FUNC reversed_type_call
 
 ;; seq_iter_new(rdi=obj) -> seq_iter_type instance
 ;; obj must be INCREFed by caller (we take ownership)
+global seq_iter_new
 DEF_FUNC seq_iter_new, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi                   ; save obj

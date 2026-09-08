@@ -81,6 +81,7 @@ ok mailcap
 ok _markupbase
 ok mimetypes
 ok modulefinder
+ok multiprocessing
 ok netrc
 ok nntplib
 ok ntpath

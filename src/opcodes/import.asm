@@ -158,7 +158,9 @@ extern import_find_and_load
 IF_ATTR  equ 8
 IF2_MOD  equ 16
 IF2_SUB  equ 24             ; the submodule the fallback loaded
-IF2_FRAME equ 40            ; + 0 pushes = 32
+IF2_T1   equ 40             ; the two temporaries the dotted-name concat used
+IF2_T2   equ 48             ; to push and pop one at a time
+IF2_FRAME equ 56            ; 40 was the aligned size; +16 keeps the parity
 
 DEF_FUNC op_import_from, IF2_FRAME
     ; Get attribute name from co_names[ecx] (payload array: 8-byte stride)
@@ -227,74 +229,17 @@ DEF_FUNC op_import_from, IF2_FRAME
     test rdi, rdi
     jz .if_error
 
-    ; Look up "__name__" in module dict (heap — dict key, DECREFed)
-    lea rdi, [rel if_dunder_name]
-    call str_from_cstr_heap
-    push rax                    ; save __name__ str key
+    ; The attribute is not there, so it may be a SUBMODULE the package's own
+    ; body never bound.  import_submodule_attr builds the dotted name, loads
+    ; it, and binds it on the package -- which is also what IMPORT_STAR needs,
+    ; and used not to have.
     mov rdi, [rbp - IF2_MOD]
-    mov rdi, [rdi + PyModuleObject.mod_dict]
-    mov rsi, rax
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    mov rcx, rax                ; rcx = pkg_name str (or NULL)
-    pop rdi                     ; __name__ str key
-    push rcx                    ; save pkg_name
-    call obj_decref             ; DECREF __name__ key
-    pop rcx                     ; restore pkg_name
-    test rcx, rcx
-    jz .if_error
-
-    ; Concat: pkg_name + "." + attr_name
-    ; First: pkg_name + "."
-    push rcx                    ; save pkg_name
-    lea rdi, [rel if_dot_str]
-    call str_from_cstr_heap
-    pop rdi                     ; rdi = pkg_name
-    mov rsi, rax                ; rsi = "."
-    push rsi                    ; save dot str for decref
-    mov ecx, TAG_PTR            ; right_tag (heap str guaranteed)
-    call str_concat             ; rax = pkg_name + "."
-    pop rdi                     ; dot str
-    push rax                    ; save intermediate
-    call obj_decref             ; DECREF "."
-    pop rdi                     ; rdi = "pkg."
-    mov rsi, [rbp - IF_ATTR]    ; rsi = attr_name
-    push rdi                    ; save "pkg." for decref
-    mov ecx, TAG_PTR            ; right_tag (heap str guaranteed)
-    call str_concat             ; rax = "pkg.attr"
-    pop rdi                     ; "pkg."
-    push rax                    ; save full name
-    call obj_decref             ; DECREF "pkg."
-
-    ; Try import_find_and_load with full dotted name
-    pop rdi                     ; rdi = "pkg.attr" str
-    push rdi                    ; save for decref
-    call import_find_and_load
-    mov rcx, rax                ; rcx = submodule (or NULL)
-    pop rdi                     ; full name str
-    push rcx                    ; save submodule
-    call obj_decref             ; DECREF full name
-    pop rax                     ; restore submodule
-
+    mov rsi, [rbp - IF_ATTR]
+    extern import_submodule_attr
+    call import_submodule_attr
     test rax, rax
     jz .if_error
     mov [rbp - IF2_SUB], rax
-
-    ; Bind it on the package under its bare name.  That is what makes
-    ; `from . import x` inside one submodule leave `x` visible in the package
-    ; itself -- a package's __init__ shares its globals with the module
-    ; object, so CPython's setattr on the parent is the whole mechanism.
-    ; asyncio's __init__ reads `coroutines.__all__` having written nothing but
-    ; `from .coroutines import *`, and it is base_events, imported one line
-    ; earlier, that actually pulled coroutines in.
-    mov rdi, [rbp - IF2_MOD]
-    mov rdi, [rdi + PyModuleObject.mod_dict]
-    test rdi, rdi
-    jz .if_sub_no_dict
-    mov rsi, [rbp - IF_ATTR]
-    mov rdx, [rbp - IF2_SUB]
-    call dict_set
-.if_sub_no_dict:
 
     ; import_find_and_load hands back a BORROWED reference -- sys.modules owns
     ; it -- and the value stack owns what it holds.

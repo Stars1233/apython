@@ -90,6 +90,8 @@ iter, next, aiter, anext,
 getattr, hasattr, setattr, delattr, vars, dir,
 globals, locals, breakpoint, \_\_build\_class\_\_, \_\_import\_\_
 
+**Constants:** True, False, None, NotImplemented, Ellipsis, \_\_debug\_\_
+
 **Types:**
 type, int, float, str, bool, object, list, dict, tuple, set, frozenset,
 bytes, bytearray, memoryview, slice, staticmethod, classmethod, property
@@ -109,6 +111,8 @@ Missing: `IOError` / `EnvironmentError` (the OSError aliases),
 - Compiling Python source: `compile()`, `exec()`, `eval()`, `./apython foo.py`,
   and `import` of a `.py` when no `.pyc` is there
 - The walrus operator, PEP 695 type parameters, `from __future__ import ...`
+- PEP 701 f-strings: the quote that opened one may be reused inside a field,
+  fields nest, and they may hold comments, backslashes and newlines
 - Classes with inheritance, `__init__`, `__repr__`, `__str__`, `__slots__`, MRO
 - Generators and `yield` / `yield from`
 - `async def`, `await`, `async for`, `async with`
@@ -139,7 +143,7 @@ Missing: `IOError` / `EnvironmentError` (the OSError aliases),
 
 | Module | Description |
 |--------|-------------|
-| sys | argv, exit (raises `SystemExit`), version, version_info, path, modules, stdin/stdout/stderr, exc_info, maxsize, platform, byteorder, executable, prefix, implementation, builtin_module_names, warnoptions, intern, getrecursionlimit/setrecursionlimit, get/set_int_max_str_digits |
+| sys | argv, exit (raises `SystemExit`), version, version_info, path, modules, stdin/stdout/stderr, exc_info, exception, maxsize, platform, byteorder, executable, prefix, implementation, builtin_module_names, warnoptions, intern, getrecursionlimit/setrecursionlimit, get/set_int_max_str_digits |
 | _abc | The ABC accelerator abc.py is built on: get_cache_token, _abc_init, _abc_register, _abc_instancecheck, _abc_subclasscheck, _get_dump, _reset_registry, _reset_caches |
 | _weakref | Real weak references: ref (subclassable, with callbacks), proxy, getweakrefcount, getweakrefs, _remove_dead_weakref |
 | asyncio | Event loop with io_uring backend, coroutine runner, TCP streams (open_connection, start_server), sleep, gather |
@@ -226,6 +230,7 @@ src/
   builtins.asm          Builtin function object, core builtins, the registry
   builtins_num.asm      Numeric builtins (int, abs, round, pow, hex/bin/oct)
   builtins_obj.asm      Object/iteration/IO builtins (getattr, iter, open, ...)
+  builtins_type.asm     isinstance/issubclass, and the declared-class step
   buildclass.asm        type.__new__, type_from_parts, __build_class__
   slots.asm             Slot wrappers installed from a heaptype's dunders
   mro.asm               C3 linearization and MRO walking
@@ -235,6 +240,7 @@ src/
   marshal.asm           .pyc marshal deserializer and file reader
   frame.asm             Frame allocation/deallocation
   object.asm            Base PyObject operations, type_type, rich comparison
+  objerr.asm            The arity and receiver error messages
   runtime.asm           Syscalls, allocation, PLT-free mem/str ops, fatal_error
   gc.asm                3-generation cycle-collecting garbage collector
   import.asm            Module import system

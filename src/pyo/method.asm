@@ -20,6 +20,8 @@ extern gc_alloc
 extern gc_track
 extern gc_dealloc
 extern obj_incref
+extern obj_hash
+extern object_hash
 extern obj_decref
 extern obj_dealloc
 extern obj_repr
@@ -83,7 +85,20 @@ END_FUNC method_new
 ;; Call a bound method: prepend im_self to args, dispatch to im_func's tp_call.
 ;; rdi = PyMethodObject*, rsi = args, rdx = nargs
 ;; ============================================================================
-DEF_FUNC_LOCAL method_call
+;; The argument array method_call has to build -- im_self and then the
+;; caller's arguments -- lives in this frame for the sizes real code uses, and
+;; in the allocator above them.  A malloc and a free per call is what a bound
+;; method held in a variable used to cost, and `sorted(key=obj.method)` and a
+;; stored callback are both written that way.
+;;
+;; The cap is not caution about frame size: `m(*[0] * 10**7)` must stay a
+;; MemoryError rather than become a stack overflow, and a dynamic `sub rsp`
+;; would also be invisible to lint's alignment check.
+MC_FREE  equ 8              ; the heap array to release, or 0
+MC_BUF   equ 160            ; 19 slots at [rbp-160, rbp-8)
+MC_FRAME equ 160            ; + 4 pushes = 192, 16-aligned
+MC_MAX_STACK equ 17         ; self plus this many still fits
+DEF_FUNC_LOCAL method_call, MC_FRAME
     push rbx
     push r12
     push r13
@@ -92,16 +107,23 @@ DEF_FUNC_LOCAL method_call
     mov rbx, rdi                ; method obj
     mov r12, rsi                ; original args
     mov r13, rdx                ; original nargs
+    mov qword [rbp - MC_FREE], 0
 
-    ; Allocate new args array: (nargs+1) Values, one word each.  This said
-    ; `shl rdi, 4` -- two words per argument -- left over from the fat
-    ; (payload, tag) representation, so every bound-method call through this
-    ; path asked for twice the memory it went on to use.  The copy loop below
+    cmp rdx, MC_MAX_STACK
+    ja .mc_big
+    lea r14, [rbp - MC_BUF]
+    jmp .mc_have_args
+.mc_big:
+    ; (nargs+1) Values, one word each.  This said `shl rdi, 4` -- two words per
+    ; argument -- left over from the fat (payload, tag) representation, so it
+    ; asked for twice the memory it went on to use.  The copy loop below
     ; already strides by 8.
     lea rdi, [rdx + 1]
     shl rdi, 3
     call ap_malloc
     mov r14, rax                ; new args array
+    mov [rbp - MC_FREE], rax
+.mc_have_args:
 
     ; new_args[0] = im_self (a pointer is its own Value)
     mov rcx, [rbx + PyMethodObject.im_self]
@@ -133,9 +155,12 @@ DEF_FUNC_LOCAL method_call
     push rax                    ; save result payload
     push rdx                    ; save result tag
 
-    ; Free temp args array
-    mov rdi, r14
+    ; Free the temp args array, if it was not this frame's.
+    mov rdi, [rbp - MC_FREE]
+    test rdi, rdi
+    jz .mc_no_free
     call ap_free
+.mc_no_free:
 
     pop rdx                     ; restore result tag
     pop rax                     ; restore result payload
@@ -486,6 +511,143 @@ mr_builtin_classmethod:
 
 END_FUNC method_repr
 
+;; ============================================================================
+;; method_richcompare(left, right, op, left_tag, right_tag) -> (rax, edx)
+;;
+;; CPython compares im_self by IDENTITY and im_func by EQUALITY, and answers
+;; only EQ and NE; every ordering is NotImplemented, which is what makes
+;; `sorted(list_of_methods)` a TypeError there and here.
+;;
+;; im_func by equality and not by identity because two wrappers over the same
+;; underlying callable need not be the same object: a builtin method reached
+;; twice through the type can hand back a fresh PyBuiltinObject each time.
+;;
+;; Without this, `method` fell back to identity and `c.m == c.m` was False --
+;; each attribute load builds a new wrapper.  Any code that keeps a callback
+;; and later asks whether it already has one saw every method as new.
+;; ============================================================================
+MRC_LEFT  equ 8
+MRC_RIGHT equ 16
+MRC_OP    equ 24
+MRC_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC method_richcompare, MRC_FRAME
+    V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
+    V_UNPACK rsi, r8            ; right Value -> (payload, tag)
+    mov [rbp - MRC_LEFT], rdi
+    mov [rbp - MRC_RIGHT], rsi
+    mov [rbp - MRC_OP], rdx
+
+    ; Only EQ and NE; anything else is NotImplemented, as CPython's is.
+    cmp edx, PY_EQ
+    je .mrc_kinds
+    cmp edx, PY_NE
+    jne .mrc_not_impl
+
+.mrc_kinds:
+    ; The other side has to be a method too.  A non-pointer never is, and
+    ; answering False here rather than NotImplemented would stop the other
+    ; operand's own __eq__ from ever being asked.
+    test r8d, TAG_RC_BIT
+    jz .mrc_not_impl
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel method_type]
+    cmp rax, rcx
+    jne .mrc_not_impl
+
+    ; im_self by identity.
+    mov rax, [rdi + PyMethodObject.im_self]
+    cmp rax, [rsi + PyMethodObject.im_self]
+    jne .mrc_false
+
+    ; im_func by equality.
+    mov rdi, [rdi + PyMethodObject.im_func]
+    mov rsi, [rsi + PyMethodObject.im_func]
+    cmp rdi, rsi
+    je .mrc_true                ; the common case, and it cannot raise
+    extern obj_richcompare_bool
+    mov edx, PY_EQ
+    call obj_richcompare_bool
+    test eax, eax
+    js .mrc_error               ; the comparison raised
+    jz .mrc_false
+    jmp .mrc_true
+
+.mrc_true:
+    cmp qword [rbp - MRC_OP], PY_EQ
+    je .mrc_ret_true
+    jmp .mrc_ret_false
+.mrc_false:
+    cmp qword [rbp - MRC_OP], PY_EQ
+    je .mrc_ret_false
+.mrc_ret_true:
+    extern bool_true
+    lea rax, [rel bool_true]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.mrc_ret_false:
+    extern bool_false
+    lea rax, [rel bool_false]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.mrc_not_impl:
+    ; A NULL Value is NotImplemented to the caller, not failure -- the
+    ; dispatcher turns it into the reflected call and then into identity.
+    RET_NULL
+    leave
+    ret
+.mrc_error:
+    RET_NULL
+    leave
+    ret
+END_FUNC method_richcompare
+
+;; ============================================================================
+;; method_hash(PyObject *self) -> int64
+;;
+;; CPython's: _Py_HashPointer(im_self) ^ hash(im_func).  It has to agree with
+;; method_richcompare or the dict invariant breaks -- two methods that compare
+;; equal must hash equal, and they do because both halves are the same
+;; question.
+;;
+;; im_self is hashed by ADDRESS and not through its __hash__, which is the
+;; half that is easy to get wrong.  It follows from richcompare comparing the
+;; receiver by identity: a class that sets `__hash__ = None` is still a
+;; perfectly good receiver, and `hash(u.m)` answers in CPython where hashing
+;; the receiver properly would raise.  object_hash is that address hash.
+;; ============================================================================
+DEF_FUNC method_hash, 16    ; + 2 pushes = 32, 16-aligned
+    push rbx
+    push r12
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyMethodObject.im_self]
+    xor edx, edx
+    call object_hash
+    mov r12, rax
+
+    mov rdi, [rbx + PyMethodObject.im_func]
+    call obj_hash
+    cmp rax, -1
+    je .mh_out
+    xor rax, r12
+    ; -1 is the error signal, so a real hash never takes that value.
+    cmp rax, -1
+    jne .mh_out
+    mov rax, -2
+.mh_out:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC method_hash
+
 section .data
 
 method_name_str:    db "method", 0
@@ -501,11 +663,11 @@ method_type:
     dq method_dealloc           ; tp_dealloc
     dq method_repr              ; tp_repr
     dq method_repr              ; tp_str
-    dq 0                        ; tp_hash
+    dq method_hash              ; tp_hash
     dq method_call              ; tp_call
     dq method_getattr           ; tp_getattr
     dq 0                        ; tp_setattr
-    dq 0                        ; tp_richcompare
+    dq method_richcompare       ; tp_richcompare
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init

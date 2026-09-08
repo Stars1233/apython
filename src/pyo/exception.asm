@@ -19,6 +19,13 @@
 %include "macros.inc"
 %include "object.inc"
 extern traceback_type
+extern ap_memcpy
+extern oserror_str
+extern oserror_new
+extern raise_oserror
+extern raise_oserror_owned
+extern raise_oserror_owned2
+extern raise_oserror_build
 extern type_number_methods
 
 extern ap_malloc
@@ -640,215 +647,6 @@ DEF_FUNC exc_syntax_str, SS_FRAME
     leave
     ret
 END_FUNC exc_syntax_str
-
-;; ============================================================================
-;; oserror_str(rdi = exc) -> rax = PyStrObject*, 0 to fall through, or -1 when
-;; a field's repr()/str() raised.  The third answer is not the second: falling
-;; through on a raise rendered the args tuple and left the exception pending.
-;;
-;; "[Errno N] strerror: 'file' -> 'file2'", with the tail dropped as the parts
-;; run out, exactly as CPython's OSError_str does.  Returns 0 when there is not
-;; even an errno and a strerror, so exc_str falls back to the generic rendering
-;; -- which is what makes str(OSError()) empty and str(OSError("boom")) "boom".
-;;
-;; The attributes are read out of exc_dict, where oserror_new put them.
-;; ============================================================================
-OSS_EXC    equ 8
-OSS_DICT   equ 16
-OSS_TMP    equ 24           ; a borrowed str being copied out
-OSS_CUR    equ 32           ; write cursor
-OSS_BUF    equ 544          ; 512 bytes of assembly space
-OSS_FRAME  equ 544          ; + 2 pushes = 560
-DEF_FUNC oserror_str, OSS_FRAME
-    push rbx
-    push r12
-    mov [rbp - OSS_EXC], rdi
-    mov rax, [rdi + PyExceptionObject.exc_dict]
-    test rax, rax
-    jz .oss_none
-    mov [rbp - OSS_DICT], rax
-
-    lea rbx, [rbp - OSS_BUF]        ; rbx = cursor
-
-    ; errno and strerror are both required for any of the forms.
-    lea rdi, [rel oserror_n_errno]
-    call oserror_field
-    test rax, rax
-    jz .oss_none
-    mov r12, rax                    ; r12 = errno Value
-    lea rdi, [rel oserror_n_strerror]
-    call oserror_field
-    test rax, rax
-    jz .oss_none
-
-    ; "[Errno " <repr(errno)> "] "
-    mov dword [rbx], '[Err'
-    mov dword [rbx + 4], 'no  '
-    add rbx, 7
-    mov rdi, r12
-    call obj_repr                   ; an int's repr is its digits
-    test rax, rax
-    jz .oss_raised                  ; the repr/str raised
-    V_UNPACK rax, rdx
-    mov rdi, rbx
-    call oserror_append
-    mov rbx, rax
-    mov word [rbx], ' ' * 256 + ']'
-    add rbx, 2
-
-    ; str(strerror)
-    lea rdi, [rel oserror_n_strerror]
-    call oserror_field
-    mov rdi, rax
-    call obj_str
-    test rax, rax
-    jz .oss_raised                  ; the repr/str raised
-    V_UNPACK rax, rdx
-    mov rdi, rbx
-    call oserror_append
-    mov rbx, rax
-
-    ; ": " repr(filename), then " -> " repr(filename2)
-    lea rdi, [rel oserror_n_filename]
-    call oserror_field
-    test rax, rax
-    jz .oss_finish
-    mov r12, rax
-    mov word [rbx], ' ' * 256 + ':'
-    add rbx, 2
-    mov rdi, r12
-    call obj_repr
-    test rax, rax
-    jz .oss_raised                  ; the repr/str raised
-    V_UNPACK rax, rdx
-    mov rdi, rbx
-    call oserror_append
-    mov rbx, rax
-
-    lea rdi, [rel oserror_n_filename2]
-    call oserror_field
-    test rax, rax
-    jz .oss_finish
-    mov r12, rax
-    mov dword [rbx], ' -> '
-    add rbx, 4
-    mov rdi, r12
-    call obj_repr
-    test rax, rax
-    jz .oss_raised                  ; the repr/str raised
-    V_UNPACK rax, rdx
-    mov rdi, rbx
-    call oserror_append
-    mov rbx, rax
-
-.oss_finish:
-    lea rdi, [rbp - OSS_BUF]
-    mov rsi, rbx
-    sub rsi, rdi
-    extern str_new_heap
-    call str_new_heap
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.oss_none:
-    xor eax, eax
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.oss_raised:
-    ; A field's repr() or str() raised.  Those four returns went unchecked, so
-    ; a filename with a raising __repr__ produced a truncated message and left
-    ; the exception to fire at some later, unrelated point.
-    mov rax, -1
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC oserror_str
-
-;; ============================================================================
-;; oserror_field(rdi = name cstr) -> rax = the Value, or 0 when absent or None
-;; Reads [rbp - OSS_DICT] from oserror_str's frame, so it is local to it.
-;; ============================================================================
-DEF_FUNC_LOCAL oserror_field, 8            ; 1 pushes, so rsp is 16-aligned
-    push rbx
-    mov rbx, [rbp]                  ; oserror_str's rbp
-    call str_from_cstr_heap
-    push rax
-    mov rdi, [rbx - OSS_DICT]
-    mov rsi, rax
-    call dict_get
-    mov rcx, rax
-    pop rdi
-    push rcx
-    call obj_decref                 ; the temporary key
-    pop rax
-    test rax, rax
-    jz .osf_no
-    lea rcx, [rel none_singleton]
-    cmp rax, rcx
-    je .osf_no
-    pop rbx
-    leave
-    ret
-.osf_no:
-    xor eax, eax
-    pop rbx
-    leave
-    ret
-END_FUNC oserror_field
-
-;; ============================================================================
-;; oserror_append(rdi = cursor, rax = PyStrObject*) -> rax = new cursor
-;; Copies the string's bytes and drops the reference.  Bounded: the caller's
-;; buffer is 512 bytes and a single field is truncated rather than overrunning.
-;; ============================================================================
-OSA_CUR   equ 8
-OSA_STR   equ 16
-OSA_LEN   equ 24
-OSA_FRAME equ 32            ; + 0 pushes = 32
-DEF_FUNC_LOCAL oserror_append, OSA_FRAME
-    mov [rbp - OSA_CUR], rdi
-    mov [rbp - OSA_STR], rax
-    test rax, rax
-    jz .osa_nothing
-    mov rdx, [rax + PyStrObject.ob_size]
-    cmp rdx, 120
-    jle .osa_len_ok
-    mov rdx, 120                    ; one field cannot fill the buffer
-    ; Back off to a character boundary: cutting at 120 bytes landed in the
-    ; middle of a UTF-8 sequence and left the message ending in a lone
-    ; continuation byte, which is not a str at all.
-.osa_back_off:
-    test rdx, rdx
-    jz .osa_len_ok
-    movzx ecx, byte [rax + PyStrObject.data + rdx]
-    and ecx, 0xc0
-    cmp ecx, 0x80                   ; a continuation byte: the cut is inside
-    jne .osa_len_ok
-    dec rdx
-    jmp .osa_back_off
-.osa_len_ok:
-    mov [rbp - OSA_LEN], rdx
-    mov rdi, [rbp - OSA_CUR]
-    lea rsi, [rax + PyStrObject.data]
-    extern ap_memcpy
-    call ap_memcpy
-    mov rdi, [rbp - OSA_STR]
-    call obj_decref
-    mov rax, [rbp - OSA_CUR]
-    add rax, [rbp - OSA_LEN]
-    leave
-    ret
-.osa_nothing:
-    mov rax, [rbp - OSA_CUR]
-    leave
-    ret
-END_FUNC oserror_append
 
 
 ;; ============================================================================
@@ -2098,6 +1896,194 @@ DEF_FUNC exc_method_init, EMI_FRAME
 END_FUNC exc_method_init
 
 ;; ============================================================================
+;; exc_method_with_traceback(rdi = args, rsi = nargs) -> rax = Value, self
+;;
+;; `exc.with_traceback(tb)` sets __traceback__ and hands the exception back, so
+;; that `raise e.with_traceback(tb)` is one expression.  unittest's
+;; assertRaises does `self.exception = exc_value.with_traceback(None)` in its
+;; __exit__, so without this every assertRaises raised AttributeError from
+;; inside a __exit__ that was already handling an exception.
+;;
+;; args[0] is the exception: builtin_func_call has already checked the receiver
+;; against the owner type_stamp_methods stamped on this dict.
+;; ============================================================================
+EWT_SELF  equ 8
+EWT_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC exc_method_with_traceback, EWT_FRAME
+    cmp rsi, 2
+    jne .ewt_arity
+    mov rax, [rdi]
+    mov [rbp - EWT_SELF], rax
+    mov rdx, [rdi + 8]              ; the traceback, as a Value
+
+    lea rcx, [rel none_singleton]
+    cmp rdx, rcx
+    je .ewt_clear
+    ; Only a traceback or None.  An immediate is neither, and reading ob_type
+    ; off one is a dereference of the number.
+    V_TEST_PTR rdx, rcx
+    ja .ewt_bad
+    mov rcx, [rdx + PyObject.ob_type]
+    lea r8, [rel traceback_type]
+    cmp rcx, r8
+    jne .ewt_bad
+    INCREF rdx
+    jmp .ewt_store
+.ewt_clear:
+    xor edx, edx                    ; None clears it, as the setter does
+.ewt_store:
+    mov rax, [rbp - EWT_SELF]
+    mov rcx, [rax + PyExceptionObject.exc_tb]
+    mov [rax + PyExceptionObject.exc_tb], rdx
+    test rcx, rcx
+    jz .ewt_ret
+    push rax
+    push rax                        ; pad: the call below needs an even list
+    mov rdi, rcx
+    call obj_decref
+    pop rax
+    pop rax
+.ewt_ret:
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx                 ; builtins return one Value
+    ret
+.ewt_bad:
+    RAISE exc_TypeError_type, "__traceback__ must be a traceback or None"
+.ewt_arity:
+    dec rsi                         ; the count CPython reports excludes self
+    CSTRING rdi, "BaseException.with_traceback() takes exactly one argument ("
+    CSTRING rdx, " given)"
+    extern raise_type_error_counted
+    jmp raise_type_error_counted
+END_FUNC exc_method_with_traceback
+
+;; ============================================================================
+;; exc_method_new(args, nargs) -> a bare exception of args[0]'s type
+;;
+;; BaseException.__new__.  CPython has one and this tree did not, so
+;; `ValueError.__new__(ValueError)` resolved up the MRO to object.__new__ --
+;; which is a different function with a different rule.  It happened to work
+;; while object.__new__ accepted anything; once it started refusing types
+;; whose allocation it does not own, every `cls.__new__(cls)` on an exception
+;; became a TypeError.  copyreg and unittest both write that idiom.
+;;
+;; The remaining arguments become `.args`, as CPython's does -- `__init__` is
+;; what interprets them, and `__new__` only has to record them.
+;; ============================================================================
+EMN_TYPE  equ 8
+EMN_EXC   equ 16
+EMN_ARGS  equ 24
+EMN_NARGS equ 32
+EMN_TUP   equ 40
+EMN_I     equ 48
+EMN_FRAME equ 72            ; + 1 push = 80, 16-aligned
+DEF_FUNC exc_method_new, EMN_FRAME
+    push rbx
+    test rsi, rsi
+    jz .emn_no_type
+    mov [rbp - EMN_NARGS], rsi
+    mov [rbp - EMN_ARGS], rdi
+    mov rbx, [rdi]              ; args[0] = the class
+    ; ...if it IS a class.  Nothing checked, so `ValueError("x").__new__(V)`
+    ; -- which reaches here with the INSTANCE in args[0], because the wrapper
+    ; below binds -- built an exception whose exc_type was an instance and
+    ; aborted with "double free or corruption" when it was freed.
+    V_TEST_PTR rbx, rax
+    ja .emn_not_a_type
+    mov rax, [rbx + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .emn_not_a_type
+    mov rdi, rbx
+    lea rsi, [rel exc_BaseException_type]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jz .emn_not_an_exc
+    mov [rbp - EMN_TYPE], rbx
+
+    ; A bare instance: no message, so exc_new builds an empty args tuple.
+    mov rdi, rbx
+    xor esi, esi
+    xor edx, edx
+    call exc_new
+    test rax, rax
+    jz .emn_fail
+    mov [rbp - EMN_EXC], rax
+
+    ; Anything after the class becomes .args.
+    mov rcx, [rbp - EMN_NARGS]
+    dec rcx
+    jz .emn_done
+    mov rdi, rcx
+    call tuple_new
+    test rax, rax
+    jz .emn_fail
+    mov [rbp - EMN_TUP], rax
+    mov qword [rbp - EMN_I], 0
+.emn_copy:
+    mov rdx, [rbp - EMN_I]
+    mov rcx, [rbp - EMN_NARGS]
+    dec rcx
+    cmp rdx, rcx
+    jge .emn_install
+    mov rsi, [rbp - EMN_ARGS]
+    lea rcx, [rdx + 1]          ; skip the class
+    mov rdi, [rsi + rcx * 8]
+    INCREF_V rdi, r8
+    mov rax, [rbp - EMN_TUP]
+    mov r9, [rax + PyTupleObject.ob_item]
+    mov [r9 + rdx * 8], rdi
+    inc qword [rbp - EMN_I]
+    jmp .emn_copy
+.emn_install:
+    mov rdi, [rbp - EMN_EXC]
+    mov rax, [rdi + PyExceptionObject.exc_args]
+    test rax, rax
+    jz .emn_set
+    mov rdi, rax
+    call obj_decref
+.emn_set:
+    mov rdi, [rbp - EMN_EXC]
+    mov rax, [rbp - EMN_TUP]
+    mov [rdi + PyExceptionObject.exc_args], rax
+.emn_done:
+    mov rax, [rbp - EMN_EXC]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+.emn_fail:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.emn_no_type:
+    pop rbx
+    RAISE exc_TypeError_type, \
+          "BaseException.__new__(): not enough arguments"
+.emn_not_a_type:
+    mov rsi, rbx
+    pop rbx
+    CSTRING rdi, `BaseException.__new__(X): X is not a type object (\x01)`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+.emn_not_an_exc:
+    ; raise_type_error_with_TYPENAME: the argument here IS a class, so the
+    ; name wanted is its own and not its type's, which is always "type".
+    mov rsi, rbx
+    pop rbx
+    CSTRING rdi, \
+        `BaseException.__new__(\x01): \x01 is not a subtype of BaseException`
+    extern raise_type_error_with_typename
+    jmp raise_type_error_with_typename
+END_FUNC exc_method_new
+
+;; ============================================================================
 ;; exc_install_methods() -- give BaseException a tp_dict with __init__ in it
 ;;
 ;; One dict on the root of the exception hierarchy is enough: every other
@@ -2108,21 +2094,48 @@ EIM_KEY   equ 8
 EIM_FN    equ 16
 EIM_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
-global exc_install_methods
-DEF_FUNC exc_install_methods, EIM_FRAME
-    push rbx
-    call dict_new
-    test rax, rax
-    jz .eim_out
-    mov rbx, rax
-    mov [rel exc_BaseException_type + PyTypeObject.tp_dict], rbx
-
-    CSTRING rdi, "__init__"
+;; EXC_ADD_METHOD impl, "name" -- one entry in BaseException's tp_dict.
+;; rbx holds the dict.  This was open-coded for the single method that used to
+;; be here; a second one is what turned fifteen lines into a macro.
+;; EXC_ADD_STATIC impl, "name" -- the same, wrapped in a staticmethod so that
+;; reading it off an INSTANCE does not bind the instance as its first argument.
+%macro EXC_ADD_STATIC 2
+    CSTRING rdi, %2
     call str_from_cstr_heap
     mov [rbp - EIM_KEY], rax
-    lea rdi, [rel exc_method_init]
-    CSTRING rsi, "__init__"
-    extern builtin_func_new
+    lea rdi, [rel %1]
+    CSTRING rsi, %2
+    call builtin_func_new
+    mov [rbp - EIM_FN], rax
+    sub rsp, 16
+    mov [rsp], rax
+    xor edi, edi
+    mov rsi, rsp
+    mov edx, 1
+    extern staticmethod_construct
+    call staticmethod_construct
+    add rsp, 16
+    push rax
+    mov rdi, [rbp - EIM_FN]
+    call obj_decref             ; the staticmethod holds it now
+    pop rax
+    mov [rbp - EIM_FN], rax
+    mov rdi, rbx
+    mov rsi, [rbp - EIM_KEY]
+    mov rdx, rax
+    call dict_set
+    mov rdi, [rbp - EIM_KEY]
+    call obj_decref
+    mov rdi, [rbp - EIM_FN]
+    call obj_decref
+%endmacro
+
+%macro EXC_ADD_METHOD 2
+    CSTRING rdi, %2
+    call str_from_cstr_heap
+    mov [rbp - EIM_KEY], rax
+    lea rdi, [rel %1]
+    CSTRING rsi, %2
     call builtin_func_new
     mov [rbp - EIM_FN], rax
     mov rdi, rbx
@@ -2133,6 +2146,20 @@ DEF_FUNC exc_install_methods, EIM_FRAME
     call obj_decref
     mov rdi, [rbp - EIM_FN]
     call obj_decref
+%endmacro
+
+global exc_install_methods
+DEF_FUNC exc_install_methods, EIM_FRAME
+    push rbx
+    call dict_new
+    test rax, rax
+    jz .eim_out
+    mov rbx, rax
+    mov [rel exc_BaseException_type + PyTypeObject.tp_dict], rbx
+
+    extern builtin_func_new
+    EXC_ADD_METHOD exc_method_init, "__init__"
+    EXC_ADD_METHOD exc_method_with_traceback, "with_traceback"
     ; Stamp the owner on it, which is what makes builtin_func_call check the
     ; receiver.  Without it `BaseException.__init__([], 'a')` wrote a tuple
     ; into a list's 57th byte -- exc_args' offset -- and released whatever
@@ -2140,6 +2167,14 @@ DEF_FUNC exc_install_methods, EIM_FRAME
     lea rdi, [rel exc_BaseException_type]
     extern type_stamp_methods
     call type_stamp_methods
+
+    ; __new__ goes in after the stamp AND inside a staticmethod.  Its first
+    ; argument is the class being built, not a BaseException, so the receiver
+    ; check the stamp installs would refuse every correct call -- and a bare
+    ; builtin function BINDS on instance access, which put the instance in
+    ; args[0] for `ValueError("x").__new__(ValueError)`.  A staticmethod is
+    ; what CPython makes __new__, and it is what stops both.
+    EXC_ADD_STATIC exc_method_new, "__new__"
 .eim_out:
     pop rbx
     leave
@@ -2551,326 +2586,6 @@ DEF_FUNC_LOCAL exc_store_named, ESN_FRAME
     ret
 END_FUNC exc_store_named
 
-;; ============================================================================
-;; oserror_new(rdi = type, rsi = args, rdx = nargs) -> fat pair (rax, rdx)
-;;
-;; OSError's constructor, installed as tp_new on exc_OSError_type only.
-;; exc_type_call consults tp_new before its own default path, and DEF_EXC_TYPE
-;; leaves the slot 0 on the subclasses -- which is what CPython wants too: the
-;; errno-to-subclass remapping applies only when the type is exactly OSError.
-;;
-;; From CPython's oserror_parse_args/oserror_init: for 2 <= nargs <= 5 the
-;; arguments are (errno, strerror, filename, winerror, filename2); when a
-;; filename is given and is not None it is stored and `.args` is truncated to
-;; its first two items, which is why `OSError(2, "x", "/f").args` is a 2-tuple.
-;;
-;; The four attributes live in the instance's exc_dict rather than in new
-;; struct fields.  exc_getattr already falls through to exc_dict, so `.errno`
-;; and friends need no arm of their own; and PyExceptionObject stays the size
-;; it was, which matters because exc_new allocates a compile-time constant and
-;; every exception in the process would otherwise have paid for these.
-;; ============================================================================
-ONW_TYPE   equ 8
-ONW_ARGS   equ 16
-ONW_NARGS  equ 24
-ONW_EXC    equ 32
-ONW_ERRNO  equ 40           ; the four attributes, as Values
-ONW_STRERR equ 48
-ONW_FNAME  equ 56
-ONW_FNAME2 equ 64
-ONW_EFFN   equ 72           ; the effective argument count for .args
-ONW_FRAME  equ 80           ; + 2 pushes = 96
-DEF_FUNC oserror_new, ONW_FRAME
-    push rbx
-    push r12
-    mov [rbp - ONW_TYPE], rdi
-    mov [rbp - ONW_ARGS], rsi
-    mov [rbp - ONW_NARGS], rdx
-    mov [rbp - ONW_EFFN], rdx
-
-    ; Everything defaults to None; CPython reports None, not AttributeError,
-    ; for an OSError built with no arguments.
-    lea rax, [rel none_singleton]
-    mov [rbp - ONW_ERRNO], rax
-    mov [rbp - ONW_STRERR], rax
-    mov [rbp - ONW_FNAME], rax
-    mov [rbp - ONW_FNAME2], rax
-
-    cmp rdx, 2
-    jl .onw_build
-    cmp rdx, 5
-    jg .onw_build
-
-    mov rax, [rbp - ONW_ARGS]
-    mov rcx, [rax]
-    mov [rbp - ONW_ERRNO], rcx
-    mov rcx, [rax + 8]
-    mov [rbp - ONW_STRERR], rcx
-    cmp qword [rbp - ONW_NARGS], 3
-    jl .onw_have_fields
-    mov rcx, [rax + 16]
-    mov [rbp - ONW_FNAME], rcx
-    cmp qword [rbp - ONW_NARGS], 5
-    jl .onw_have_fields
-    mov rcx, [rax + 32]         ; args[4]; args[3] is Windows-only winerror
-    mov [rbp - ONW_FNAME2], rcx
-
-.onw_have_fields:
-    ; A filename that is present and not None truncates .args to two items.
-    mov rax, [rbp - ONW_FNAME]
-    lea rcx, [rel none_singleton]
-    cmp rax, rcx
-    je .onw_subclass
-    mov qword [rbp - ONW_EFFN], 2
-
-.onw_subclass:
-    ; Remap to a subclass by errno, but only for OSError itself.
-    mov rax, [rbp - ONW_TYPE]
-    lea rcx, [rel exc_OSError_type]
-    cmp rax, rcx
-    jne .onw_build
-    ; int_is_integer, not V_IS_INT: under INT_STRESS=1 -- and for any errno
-    ; past the immediate range -- the number arrives as a heap PyIntObject, and
-    ; testing only for an immediate silently skipped the remapping.
-    mov rdi, [rbp - ONW_ERRNO]
-    V_UNPACK rdi, rdx
-    push rdi
-    push rdx
-    call int_is_integer
-    pop rdx
-    pop rdi
-    test eax, eax
-    jz .onw_build
-    call int_to_i64             ; rdi = payload, edx = tag
-    mov rdi, rax
-    lea rsi, [rel oserror_errnomap]
-.onw_scan:
-    mov rax, [rsi]
-    test rax, rax
-    jz .onw_build               ; end of table
-    cmp rax, rdi
-    je .onw_mapped
-    add rsi, 16
-    jmp .onw_scan
-.onw_mapped:
-    mov rax, [rsi + 8]
-    mov [rbp - ONW_TYPE], rax
-
-.onw_build:
-    ; exc_new(type, args[0] or NULL) gives the instance and a 0-or-1 tuple.
-    mov rdi, [rbp - ONW_TYPE]
-    xor esi, esi
-    xor edx, edx
-    cmp qword [rbp - ONW_NARGS], 0
-    je .onw_created
-    mov rax, [rbp - ONW_ARGS]
-    mov rsi, [rax]
-    mov edx, TAG_PTR
-.onw_created:
-    call exc_new
-    mov [rbp - ONW_EXC], rax
-
-    ; Replace .args when the effective count is not the 0-or-1 exc_new made.
-    mov rcx, [rbp - ONW_EFFN]
-    cmp rcx, 2
-    jl .onw_attrs
-    mov rdi, rcx
-    call tuple_new
-    mov r12, rax
-    xor edx, edx
-.onw_copy:
-    cmp rdx, [rbp - ONW_EFFN]
-    jge .onw_replace
-    mov rsi, [rbp - ONW_ARGS]
-    mov rdi, [rsi + rdx*8]
-    INCREF_V rdi, r8
-    mov r9, [r12 + PyTupleObject.ob_item]
-    mov [r9 + rdx*8], rdi
-    inc rdx
-    jmp .onw_copy
-.onw_replace:
-    mov rdi, [rbp - ONW_EXC]
-    mov rax, [rdi + PyExceptionObject.exc_args]
-    test rax, rax
-    jz .onw_set_args
-    mov rdi, rax
-    call obj_decref
-.onw_set_args:
-    mov rdi, [rbp - ONW_EXC]
-    mov [rdi + PyExceptionObject.exc_args], r12
-
-.onw_attrs:
-    lea rbx, [rel oserror_attr_names]
-    ; The four Values sit at rbp-40, -48, -56, -64: a larger ONW_ constant is a
-    ; LOWER address, so the walk subtracts.
-    lea r12, [rbp - ONW_ERRNO]
-.onw_attr_loop:
-    mov rdi, [rbx]
-    test rdi, rdi
-    jz .onw_done
-    call str_from_cstr_heap
-    push rax
-    mov rdi, [rbp - ONW_EXC]
-    mov rsi, rax
-    mov rdx, [r12]
-    mov ecx, TAG_PTR
-    call exc_setattr
-    pop rdi
-    call obj_decref             ; exc_setattr's dict_set took its own ref
-    add rbx, 8
-    sub r12, 8
-    jmp .onw_attr_loop
-
-.onw_done:
-    mov rax, [rbp - ONW_EXC]
-    mov edx, TAG_PTR
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC oserror_new
-
-;; ============================================================================
-;; raise_oserror(rdi = errno (positive), rsi = filename PyStrObject* or NULL)
-;; -- does not return.
-;;
-;; Builds OSError(errno, strerror(errno), filename) and raises it, so the
-;; subclass remapping and the "[Errno N] ...: 'file'" rendering both apply.
-;; strerror comes from libc, whose text is byte-identical to CPython's -- it is
-;; the same call CPython makes.
-;;
-;; The sibling of raise_key_error: a raise that needs richer args than the
-;; two-argument RAISE macro can build.
-;; ============================================================================
-RO_ARGS  equ 40             ; five Values: errno, strerror, filename,
-                            ; winerror, filename2 -- CPython's full form
-RO_FRAME equ 48             ; + 0 pushes = 48
-;; raise_oserror_owned(rdi = errno, rsi = the caller's path Value,
-;;                     rdx = a resolved path the caller owns, or 0)
-;;
-;; The same raise, naming the resolved path when there is one and releasing
-;; it afterwards.  posix resolves os.PathLike arguments into a new string, and
-;; the message has to name that rather than the object that produced it --
-;; which means it cannot be released before the exception is built.
-ROO_OWNED equ 8
-ROO_OWNED2 equ 16           ; the second resolved path, for rename
-ROO_FRAME equ 32            ; + 0 pushes = 32
-
-DEF_FUNC raise_oserror_owned, ROO_FRAME
-    xor ecx, ecx                ; no second path
-    xor r8d, r8d
-    leave
-    jmp raise_oserror_owned2
-END_FUNC raise_oserror_owned
-
-;; raise_oserror_owned2(rdi = errno, rsi = the first path Value,
-;;                      rdx = the owned resolved first path or 0,
-;;                      rcx = the second path Value,
-;;                      r8 = the owned resolved second path or 0)
-;;
-;; The two-path form, for rename and symlink: CPython reports
-;; "'src' -> 'dst'".  Each path is named by its RESOLVED form when
-;; posix_path_arg had to build one -- a PathLike argument -- and by the
-;; argument itself otherwise.  Both resolved paths are released after the
-;; exception is built and before the raise, which is the whole reason this
-;; and its sibling exist.
-global raise_oserror_owned2
-DEF_FUNC raise_oserror_owned2, ROO_FRAME
-    mov [rbp - ROO_OWNED], rdx
-    mov [rbp - ROO_OWNED2], r8
-    test rdx, rdx
-    jz .roo_have_second
-    mov rsi, rdx                ; name the resolved path, not the PathLike
-.roo_have_second:
-    mov rdx, rcx
-    test r8, r8
-    jz .roo_second_plain
-    mov rdx, r8
-.roo_second_plain:
-    ; raise_oserror does not return, so the release has to happen inside the
-    ; build: hand it the pieces and let it call back here.  Simplest is to
-    ; do the build here too.
-    call raise_oserror_build    ; rax = the exception, and it took its own
-                                ; reference to both filenames
-    push rax
-    sub rsp, 8
-    mov rdi, [rbp - ROO_OWNED]
-    test rdi, rdi
-    jz .roo_no_owned
-    call obj_decref
-.roo_no_owned:
-    mov rdi, [rbp - ROO_OWNED2]
-    test rdi, rdi
-    jz .roo_no_owned2
-    call obj_decref
-.roo_no_owned2:
-    add rsp, 8
-    pop rdi
-    call raise_exception_obj    ; does not return
-END_FUNC raise_oserror_owned2
-
-DEF_FUNC raise_oserror, RO_FRAME
-    xor edx, edx                    ; no second path
-    call raise_oserror_build
-    mov rdi, rax
-    extern raise_exception_obj
-    call raise_exception_obj        ; does not return
-END_FUNC raise_oserror
-
-;; raise_oserror_build(rdi = errno, rsi = filename or 0, rdx = a second
-;;                     filename or 0) -> rax = the exception
-;;
-;; The half of raise_oserror that can return, so a caller with cleanup of its
-;; own can do it between building and raising: a raise abandons the C stack,
-;; and posix has a resolved path to release that the message names.
-;;
-;; The second filename is CPython's five-argument form, (errno, strerror,
-;; filename, winerror, filename2); OSError.__str__ already renders it as
-;; "... : 'src' -> 'dst'".  rename reported only its source without it.
-DEF_FUNC raise_oserror_build, RO_FRAME
-    mov [rbp - RO_ARGS + 16], rsi   ; args[2] = filename, or NULL for now
-    mov [rbp - RO_ARGS + 24], rdx   ; args[3] = winerror; overwritten below
-    mov [rbp - RO_ARGS + 32], rdx   ; args[4] = filename2, or NULL
-    push rdi
-    call int_from_i64
-    V_PACK rax, rdx
-    mov [rbp - RO_ARGS], rax        ; args[0] = errno
-    pop rdi
-    extern strerror
-    call strerror wrt ..plt
-    mov rdi, rax
-    call str_from_cstr_heap
-    mov [rbp - RO_ARGS + 8], rax    ; args[1] = strerror text
-
-    mov edx, 2                      ; two args when there is no filename
-    cmp qword [rbp - RO_ARGS + 16], 0
-    je .ro_call
-    mov edx, 3
-    cmp qword [rbp - RO_ARGS + 32], 0
-    je .ro_call
-    ; The five-argument form.  args[3] is Windows-only and is None here.
-    lea rax, [rel none_singleton]
-    mov [rbp - RO_ARGS + 24], rax
-    mov edx, 5
-.ro_call:
-    lea rdi, [rel exc_OSError_type]
-    lea rsi, [rbp - RO_ARGS]
-    call oserror_new                ; rax = the instance
-    ; oserror_new takes references of its own, so the two built here are
-    ; ours to release: without this every OSError raised from posix leaked
-    ; its strerror text and, outside +-2^50, its errno as well.  A loop that
-    ; probes the filesystem with try/except leaked once per attempt.
-    push rax
-    sub rsp, 8
-    mov rdi, [rbp - RO_ARGS + 8]
-    call obj_decref
-    mov rax, [rbp - RO_ARGS]
-    DECREF_V rax, rcx
-    add rsp, 8
-    pop rax
-    leave
-    ret
-END_FUNC raise_oserror_build
 
 
 
@@ -2885,42 +2600,6 @@ exc_name_BaseException:     db "BaseException", 0
 exc_name_Exception:         db "Exception", 0
 exc_name_TypeError:         db "TypeError", 0
 exc_name_ValueError:        db "ValueError", 0
-
-; errno -> OSError subclass, exactly CPython's ADD_ERRNO table (19 entries,
-; Objects/exceptions.c).  Terminated by a zero errno; errno 0 never maps.
-align 8
-oserror_errnomap:
-    dq 11,  exc_BlockingIOError_type        ; EAGAIN (and EWOULDBLOCK)
-    dq 114, exc_BlockingIOError_type        ; EALREADY
-    dq 115, exc_BlockingIOError_type        ; EINPROGRESS
-    dq 32,  exc_BrokenPipeError_type        ; EPIPE
-    dq 108, exc_BrokenPipeError_type        ; ESHUTDOWN
-    dq 10,  exc_ChildProcessError_type      ; ECHILD
-    dq 103, exc_ConnectionAbortedError_type ; ECONNABORTED
-    dq 111, exc_ConnectionRefusedError_type ; ECONNREFUSED
-    dq 104, exc_ConnectionResetError_type   ; ECONNRESET
-    dq 17,  exc_FileExistsError_type        ; EEXIST
-    dq 2,   exc_FileNotFoundError_type      ; ENOENT
-    dq 21,  exc_IsADirectoryError_type      ; EISDIR
-    dq 20,  exc_NotADirectoryError_type     ; ENOTDIR
-    dq 4,   exc_InterruptedError_type       ; EINTR
-    dq 13,  exc_PermissionError_type        ; EACCES
-    dq 1,   exc_PermissionError_type        ; EPERM
-    dq 3,   exc_ProcessLookupError_type     ; ESRCH
-    dq 110, exc_TimeoutError_type           ; ETIMEDOUT
-    dq 0,   0
-
-align 8
-oserror_attr_names:
-    dq oserror_n_errno
-    dq oserror_n_strerror
-    dq oserror_n_filename
-    dq oserror_n_filename2
-    dq 0
-oserror_n_errno:     db "errno", 0
-oserror_n_strerror:  db "strerror", 0
-oserror_n_filename:  db "filename", 0
-oserror_n_filename2: db "filename2", 0
 
 exc_name_KeyError:          db "KeyError", 0
 exc_name_IndexError:        db "IndexError", 0
