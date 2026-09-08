@@ -857,16 +857,19 @@ END_FUNC set_fold
 ;; The three variadic entry points.  The operators reach the bodies through
 ;; these too, always with exactly two operands, so they cost one jump.
 DEF_FUNC_BARE set_method_union
+    NO_KEYWORDS "set.union() takes no keyword arguments"
     lea rdx, [rel set_binop_union]
     jmp set_fold
 END_FUNC set_method_union
 
 DEF_FUNC_BARE set_method_intersection
+    NO_KEYWORDS "set.intersection() takes no keyword arguments"
     lea rdx, [rel set_binop_intersection]
     jmp set_fold
 END_FUNC set_method_intersection
 
 DEF_FUNC_BARE set_method_difference
+    NO_KEYWORDS "set.difference() takes no keyword arguments"
     lea rdx, [rel set_binop_difference]
     jmp set_fold
 END_FUNC set_method_difference
@@ -886,6 +889,7 @@ SUV_TMP   equ 40            ; [-40] = self, [-32] = one source
 SUV_FRAME equ 48            ; + 0 pushes = 48
 
 DEF_FUNC set_method_update, SUV_FRAME
+    NO_KEYWORDS "set.update() takes no keyword arguments"
     mov [rbp - SUV_ARGS], rdi
     mov [rbp - SUV_N], rsi
     mov qword [rbp - SUV_IDX], 1
@@ -917,6 +921,19 @@ DEF_FUNC set_method_update, SUV_FRAME
 END_FUNC set_method_update
 
 ;; ============================================================================
+;; set_dunder_init(args, nargs) -> None    -- set.__init__
+;;
+;; set_method_update under set's own name.  CPython's set_init refuses
+;; keywords outright -- there is no __new__ carve-out, because a subclass that
+;; wants them overrides __init__ and this never runs -- and the message names
+;; the TYPE, not the method the body happens to be shared with.
+;; ============================================================================
+DEF_FUNC_BARE set_dunder_init
+    NO_KEYWORDS "set() takes no keyword arguments"
+    jmp set_method_update
+END_FUNC set_dunder_init
+
+;; ============================================================================
 ;; The three in-place method forms: intersection_update, difference_update and
 ;; symmetric_difference_update.  All three were simply absent, so the only way
 ;; to narrow a set in place was `s &= t` -- which, until the commit before
@@ -932,6 +949,9 @@ SUI_FRAME equ 16            ; + 1 push = 24, not 16-aligned
 %macro DEF_SET_UPDATE 2-3    ; %1 = method name, %2 = the value-producing form,
                              ; %3 = a name symbol when the form takes exactly one
 DEF_FUNC set_method_%1, SUI_FRAME
+%defstr %%mname %1
+%strcat %%nokw "set.", %%mname, "() takes no keyword arguments"
+    NO_KEYWORDS %%nokw
     push rbx
     cmp rsi, 1
     jl %%bad

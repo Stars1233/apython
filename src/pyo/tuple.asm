@@ -1136,6 +1136,7 @@ TTC_EXC     equ 24      ; current_exception on entry, to tell "raised" from
 TTC_FRAME   equ 32          ; + 4 pushes = 64, 16-aligned
 
 DEF_FUNC tuple_type_call, TTC_FRAME
+    NO_KEYWORDS "tuple() takes no keyword arguments"
     push rbx
     push r12
     push r13

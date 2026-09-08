@@ -2335,6 +2335,7 @@ END_FUNC generic_method_contains
 ;; DICT and handed it back as the result of list's constructor, and every
 ;; container and scalar __new__ in this tree did that.
 ;; ============================================================================
+extern kw_names_pending
 extern type_check_is_class
 extern type_is_subtype
 extern raise_new_bad_class
@@ -2472,7 +2473,9 @@ END_FUNC new_from_slot
 ;; is a question about the OWNER.  So each type gets four lines that name it,
 ;; and `list.__new__(dict)` stops answering `{}`.
 ;; ============================================================================
-%macro NEW_THUNK 3              ; %1 = symbol, %2 = owner type, %3 = the body
+%macro NEW_THUNK 3-4            ; %1 = symbol, %2 = owner type, %3 = the body,
+                                ; %4 = the message when the type takes NO
+                                ; keywords at all
 DEF_FUNC %1                     ; 2 pushes + frame 0 = 16, 16-aligned
     push rbx
     push r12
@@ -2481,7 +2484,17 @@ DEF_FUNC %1                     ; 2 pushes + frame 0 = 16, 16-aligned
     lea rdi, [rel %2]
     mov rsi, rbx
     mov rdx, r12
-    call new_check_class        ; raises for a bad class argument
+    call new_check_class        ; raises for a bad class argument; rax = cls
+%if %0 >= 4
+    NO_KEYWORDS_TP_INIT %2, %4
+%endif
+    ; __new__ CONSUMES the keywords, which is the contract type_call states --
+    ; it hands them back to __init__ from its own saved copy.  Leaving them set
+    ; gave them to whatever the body calls next: a frozenset subclass's
+    ; __new__ fills itself through set.update, which refuses keywords, so
+    ; `class FS(frozenset)` with its own __init__ was refused under update's
+    ; name before its __init__ ever ran.
+    mov qword [rel kw_names_pending], 0
     mov rdi, rbx
     mov rsi, r12
     call %3
@@ -2497,12 +2510,12 @@ extern set_type
 extern module_type
 extern module_method_new
 NEW_THUNK list_dunder_new,      list_type,      container_dunder_new
-NEW_THUNK tuple_dunder_new,     tuple_type,     container_dunder_new
+NEW_THUNK tuple_dunder_new,     tuple_type,     container_dunder_new, "tuple() takes no keyword arguments"
 NEW_THUNK dict_dunder_new,      dict_type,      container_dunder_new
 NEW_THUNK set_dunder_new,       set_type,       container_dunder_new
-NEW_THUNK frozenset_dunder_new, frozenset_type, container_dunder_new
+NEW_THUNK frozenset_dunder_new, frozenset_type, container_dunder_new, "frozenset() takes no keyword arguments"
 NEW_THUNK int_dunder_new,       int_type,       scalar_dunder_new
 NEW_THUNK str_dunder_new,       str_type,       scalar_dunder_new
-NEW_THUNK float_dunder_new,     float_type,     scalar_dunder_new
+NEW_THUNK float_dunder_new,     float_type,     scalar_dunder_new, "float() takes no keyword arguments"
 NEW_THUNK complex_dunder_new,   complex_type,   scalar_dunder_new
 NEW_THUNK module_dunder_new,    module_type,    module_method_new

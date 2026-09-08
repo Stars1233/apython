@@ -261,6 +261,48 @@
 ; leaving the unwind to the interpreter frame.  For a helper that holds owned
 ; references at the point it fails -- RAISE would abandon the C stack and leak
 ; every one of them.  The caller must return its documented error value.
+; A builtin that takes no keyword arguments at all, refusing them the way
+; CPython does.  kw_names_pending is CONSUMED either way: a builtin that
+; leaves it set hands its caller's keywords to whatever call runs next.
+;
+;   NO_KEYWORDS "set() takes no keyword arguments"
+;
+; Placed at the top of the function, before anything is popped or allocated,
+; so RAISE has nothing to release.
+%macro NO_KEYWORDS 1            ; %1 = the whole message
+    extern kw_names_pending
+    cmp qword [rel kw_names_pending], 0
+    je %%no_kw
+    mov qword [rel kw_names_pending], 0
+    RAISE exc_TypeError_type, %1
+%%no_kw:
+%endmacro
+
+; The same refusal, with the carve-out CPython's generated constructors carry:
+; a class that overrides __init__ absorbs the keywords itself, so only the type
+; itself and a subclass that has NOT overridden __init__ refuse them.  tuple,
+; float and frozenset are written this way; list is the odd one out and puts
+; its check in __init__ with a carve-out on __new__ instead.
+;
+;   NO_KEYWORDS_TP_INIT owner_type, "tuple() takes no keyword arguments"
+;
+; rax must hold the class being constructed.
+%macro NO_KEYWORDS_TP_INIT 2    ; %1 = the owning type, %2 = the whole message
+    extern kw_names_pending
+    cmp qword [rel kw_names_pending], 0
+    je %%no_kw
+    lea rcx, [rel %1]
+    cmp rax, rcx
+    je %%refuse
+    mov rdx, [rax + PyTypeObject.tp_init]
+    cmp rdx, [rcx + PyTypeObject.tp_init]
+    jne %%no_kw
+%%refuse:
+    mov qword [rel kw_names_pending], 0
+    RAISE exc_TypeError_type, %2
+%%no_kw:
+%endmacro
+
 %macro SET_EXC 2                ; %1 = exception type symbol, %2 = message
     lea rdi, [rel %1]
     CSTRING rsi, %2

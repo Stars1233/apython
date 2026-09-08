@@ -223,3 +223,82 @@ class S(str):
 print(repr(list.__new__(L)), repr(dict.__new__(D)))
 print(repr(int.__new__(I, 5)), repr(str.__new__(S, "x")))
 print(type(list.__new__(L)) is L, type(int.__new__(I, 5)) is I)
+
+
+# Which builtins take keyword arguments, and the carve-outs CPython's
+# generated constructors carry.  set and frozenset and tuple and float take
+# none; list takes none either, but each draws the line in a different place
+# and a subclass can move it.
+def kwcheck(expr):
+    try:
+        return repr(eval(expr))
+    except TypeError as e:
+        return "TypeError: %s" % e
+
+
+for expr in ("set(sequence=())", "frozenset(sequence=())", "tuple(sequence=())",
+             "list(sequence=())", "float(x=1.0)", "dict(a=1)", "str(object='x')",
+             "set().update(x=1)", "{1}.union(x=1)", "{1}.intersection(x=1)",
+             "{1}.difference(x=1)", "{1}.symmetric_difference_update(x=1)"):
+    print(expr, "->", kwcheck(expr))
+
+
+# tuple, float and frozenset refuse in __new__ unless the class overrode
+# __init__; set refuses in __init__, so overriding __init__ is what lets a
+# subclass through; list refuses in __init__ unless the class overrode __new__.
+class SetInit(set):
+    def __init__(self, seq, n=None):
+        super().__init__(seq)
+        self.n = n
+
+
+class TupleNew(tuple):
+    def __new__(cls, seq, n=None):
+        self = super().__new__(cls, seq)
+        self.n = n
+        return self
+
+
+class FloatNew(float):
+    def __new__(cls, v, n=None):
+        return super().__new__(cls, v)
+
+
+class FrozenInit(frozenset):
+    def __init__(self, *a, **k):
+        pass
+
+
+class ListInit(list):
+    def __init__(self, seq, newarg=None):
+        super().__init__(seq)
+        self.newarg = newarg
+
+
+class ListNew(list):
+    def __new__(cls, seq, newarg=None):
+        self = super().__new__(cls, seq)
+        self.newarg = newarg
+        return self
+
+
+class PlainSet(set):
+    pass
+
+
+class PlainTuple(tuple):
+    pass
+
+
+for name, thunk in (("SetInit", lambda: SetInit([1], n=2)),
+                    ("TupleNew", lambda: TupleNew([1], n=2)),
+                    ("FloatNew", lambda: FloatNew(1.0, n=2)),
+                    ("FrozenInit", lambda: FrozenInit([1], n=2)),
+                    ("ListInit", lambda: ListInit([1], newarg=3)),
+                    ("ListNew", lambda: ListNew([1], newarg=3)),
+                    ("PlainSet", lambda: PlainSet([1], n=2)),
+                    ("PlainTuple", lambda: PlainTuple([1], n=2))):
+    try:
+        print(name, "->", repr(thunk()))
+    except TypeError as e:
+        print(name, "-> TypeError:", e)

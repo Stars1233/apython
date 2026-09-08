@@ -1086,6 +1086,7 @@ extern exc_TypeError_type
 STC_EXC   equ 16            ; current_exception before the iteration started
 STC_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
 DEF_FUNC set_type_call, STC_FRAME
+    NO_KEYWORDS "set() takes no keyword arguments"
     push rbx
     push r12
 
@@ -1341,6 +1342,7 @@ global frozenset_type_call
 FTC_EXC   equ 16            ; current_exception before the iteration started
 FTC_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
 DEF_FUNC frozenset_type_call, FTC_FRAME
+    NO_KEYWORDS "frozenset() takes no keyword arguments"
     push rbx
     push r12
 

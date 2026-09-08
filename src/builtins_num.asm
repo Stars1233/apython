@@ -581,6 +581,7 @@ FTC_FRAME equ 16            ; + 0 pushes = 16
 extern builtin_sub_alloc
 
 DEF_FUNC float_type_call, FTC_FRAME
+    NO_KEYWORDS "float() takes no keyword arguments"
     mov [rbp - FTC_TYPE], rdi
     mov rdi, rsi
     mov rsi, rdx

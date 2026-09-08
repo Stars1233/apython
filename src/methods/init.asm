@@ -1464,7 +1464,8 @@ DEF_FUNC methods_init
 
     ; set() has no __init__, so a subclass had nothing to fill it from.
     ; update() already takes (self, iterable) and returns None.
-    ADD_FN_N mn___init__, set_method_update, 1, -1
+    extern set_dunder_init
+    ADD_FN_N mn___init__, set_dunder_init, 1, -1
 
     mov rdi, rbx
     lea rsi, [rel set_dunder_new]
@@ -1481,7 +1482,7 @@ DEF_FUNC methods_init
     ; it doubles as set.__init__.
     ADD_FN_N mn_intersection_update, set_method_intersection_update, 1, -1
     ADD_FN_N mn_difference_update, set_method_difference_update, 1, -1
-    ADD_FN_N mn_symmetric_difference_update, set_method_symmetric_difference_update, 2, 2
+    ADD_FN_N mn_symmetric_difference_update, set_method_symmetric_difference_update, 1, -1
 
     ; The reflected four are registered with the forward four.  The in-place
     ; four go on set alone: they mutate, and frozenset cannot.  They are not
