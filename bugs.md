@@ -14,6 +14,53 @@ reasoning that chose them and what changing one would cost.
 
 ## Correctness
 
+- **A weakref's callback fires when the REFERENCE dies, not only the
+  referent.**  `r = ref(c, cb); del r, c` runs the callback here and does not
+  in CPython: dropping the last reference to the `ref` itself should take the
+  callback with it, and the side table keeps it reachable.  Found while making
+  a `ref` subclass work; not the same bug and not fixed with it.
+
+- **The three things `super`, the method wrappers and `type` still do not
+  publish.**  `super.__self__`, `__self_class__` and `__thisclass__` are
+  answered by `super_getattr`, which returns a (payload, tag) pair rather than
+  a Value, and `super_type` has no `tp_dict` to hold them; the getset
+  machinery that publishes memoryview's and property's wants both.
+  `__isabstractmethod__` on `property`, `classmethod` and `staticmethod` is
+  not answered at all -- CPython computes it from the wrapped callable.  And
+  `type.__prepare__`, `type.__instancecheck__` and `type.__subclasscheck__`
+  are methods rather than getsets, and want the PLAIN checks: an
+  `__instancecheck__` on `type` that went back through `isinstance()` would
+  recurse forever through a metaclass that defines one.
+
+- **`set(sequence=())` and `tuple(sequence=())` are not TypeErrors.**  CPython
+  refuses a keyword to either.  `list` does refuse it, and carries CPython's
+  carve-out for a subclass that overrides `__new__`; the other two never look
+  at `kw_names_pending` at all, so `S([1], extra=2)` on a set subclass reads
+  the keyword's VALUE as an iterable and reports "'int' object is not
+  iterable" where CPython says "set() takes no keyword arguments".
+
+- **`list.__new__(dict)` answers `{}`.**  `container_dunder_new` and
+  `scalar_dunder_new` do not check that the class argument is a subtype of the
+  type whose `__new__` was reached.  `new_from_slot` does, and words the
+  refusal as CPython does; these two predate it.
+
+- **A walrus inside a comprehension in a CLASS body is accepted.**  CPython
+  refuses it -- "assignment expression within a comprehension cannot be used
+  in a class body" -- because the comprehension's own scope cannot see the
+  class namespace it would have to bind into.
+
+- **`case x + 0j:` says "expected ':'" where CPython says "invalid syntax".**
+  A name is a capture pattern and the operator is simply what follows it, so
+  the value-pattern parser never sees the shape it would reject.  Both refuse
+  it; only the wording differs.
+
+- **`op_call_function_ex` segfaults somewhere in CPython's test_extcall.**
+  Reached only once the import fixes let that module load, and not yet
+  reduced: `f(*x)` and `f(**x)` over ints, floats, None and a plain object all
+  refuse correctly.  The wording of those refusals is also wrong --
+  "list.extend() argument must be iterable" where CPython names the callable
+  and the argument position -- which may be the same code.
+
 - **Missing C modules.**  The ranking here is by what actually stands in the
   way rather than by which import fails first -- the two are not the same,
   and `_imp` was reached by twelve modules a few lines after some other
@@ -35,7 +82,7 @@ reasoning that chose them and what changing one would cost.
   `_tokenize`, `_operator`, `binascii`, `atexit` and `_ast`, which are
   there, and so are `_csv` and `termios` -- the second over one raw
   `posix.ioctl`, the same split `_socket` and `select` use.)
-  `make check-stdlib` gives the current figure: 179 of 196.
+  `make check-stdlib` gives the current figure.
 
   `array` is done, and it is the reason the old "one or two modules apiece"
   reading of this list was wrong: it was what stood between this tree and
