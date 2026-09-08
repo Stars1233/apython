@@ -58,18 +58,6 @@ reasoning that chose them and what changing one would cost.
   object's own read and write, and every caller in CPython's suite reaches
   for `frombytes` and `tobytes` instead.
 
-- **A `match` object's repr says nothing.**  `<re.Match object>` here,
-  `<re.Match object; span=(1, 2), match='b'>` in CPython.  The span and the
-  matched text are both on hand at the point the repr is built; nothing in
-  the stdlib reads it, which is why it has stayed this way, but a test that
-  prints a match object diverges for a reason that has nothing to do with
-  the match.
-
-- **`not enough values to unpack` does not report the counts.**  CPython says
-  "not enough values to unpack (expected at least 2, got 1)"; this says the
-  first half only.  `op_unpack_ex` has both numbers in its frame at the point
-  it raises.
-
 - **One call inside an opcode handler is made with `rsp` misaligned.**
   Recorded in `tests/align_floor.txt`, which `lint.py` ratchets: a new one
   fails the build and the set can only shrink.

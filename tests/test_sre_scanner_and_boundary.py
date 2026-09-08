@@ -95,4 +95,13 @@ print("--- bytes patterns are ASCII by definition ---")
 print("bytes \\b:", span(re.search(rb"\b\d+\b", b"abc42")))
 print("bytes ok:", re.search(rb"\b\d+\b", b"abc 42").group())
 
+print("--- a match object prints its span and its text ---")
+for _pat, _subj in ((r"b", "abc"), (r"(x)?", "abc"), (r"\u00e9", "a\u00e9c"),
+                    (r".{0,40}", "x" * 100), (r".{0,60}", "x" * 100),
+                    (r".{0,60}", "\u00e9" * 100), (r".*", ""),
+                    (r"a\nb", "xa\nbz"), (r"'", "a'b")):
+    print(repr(re.search(_pat, _subj)))
+print(repr(re.search(b"b", b"abc")))
+print(repr(re.search(b".{0,60}", b"y" * 100)))
+
 print("done")

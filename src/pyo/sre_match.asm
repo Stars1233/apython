@@ -241,10 +241,103 @@ END_FUNC sre_match_dealloc
 
 ;; ============================================================================
 ;; sre_match_repr(PyObject* self) -> PyObject*
+;;
+;; "<re.Match object; span=(1, 2), match='b'>".  It used to say "<re.Match
+;; object>" and nothing else, so any test that prints a match diverged for a
+;; reason that had nothing to do with the match.
+;;
+;; CPython's format string is "%.50R" for the matched text, which truncates
+;; the REPR to fifty code points and does not mark that it did -- a long
+;; match loses its closing quote, and that is the answer to reproduce.
 ;; ============================================================================
-DEF_FUNC sre_match_repr
-    CSTRING rdi, "<re.Match object>"
+MRP_SELF equ 8
+MRP_TEXT equ 16         ; the group-0 string
+MRP_REPR equ 24         ; and its repr
+MRP_END  equ 32         ; where the next byte goes
+MRP_BUF  equ 416        ; 384 bytes: the fixed parts, two numbers, 50 points
+MRP_FRAME equ 432           ; + 0 pushes = 432, 16-aligned
+DEF_FUNC sre_match_repr, MRP_FRAME
+    mov [rbp - MRP_SELF], rdi
+    mov qword [rbp - MRP_TEXT], 0
+    mov qword [rbp - MRP_REPR], 0
+
+    lea rdi, [rbp - MRP_BUF]
+    CSTRING rsi, "<re.Match object; span=("
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rcx, [rbp - MRP_SELF]
+    mov rsi, [rcx + SRE_MatchObject.marks]
+    extern msg_append_i64
+    call msg_append_i64
+    mov rdi, rax
+    CSTRING rsi, ", "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rcx, [rbp - MRP_SELF]
+    mov rsi, [rcx + SRE_MatchObject.marks + 8]
+    call msg_append_i64
+    mov rdi, rax
+    CSTRING rsi, "), match="
+    call rbt_append_cstr
+    mov [rbp - MRP_END], rax
+
+    ; The matched text, through the same accessor group(0) uses -- which is
+    ; what makes a bytes subject answer b'...' rather than a decoded str.
+    mov rdi, [rbp - MRP_SELF]
+    xor esi, esi
+    call sre_match_get_group_str
+    test edx, edx
+    jz .mrp_no_text
+    cmp edx, TAG_PTR
+    jne .mrp_no_text
+    mov [rbp - MRP_TEXT], rax
+    mov rdi, rax
+    extern obj_repr
+    call obj_repr
+    test rax, rax
+    jz .mrp_no_text
+    mov [rbp - MRP_REPR], rax
+
+    ; Fifty CODE POINTS of it, which for anything non-ASCII is more bytes.
+    mov rcx, [rax + PyStrObject.ob_length]
+    cmp rcx, 50
+    jbe .mrp_whole
+    mov rdi, rax
+    mov esi, 50
+    extern str_cp_offset
+    call str_cp_offset
+    mov rdx, rax
+    jmp .mrp_copy
+.mrp_whole:
+    mov rdx, [rax + PyStrObject.ob_size]
+.mrp_copy:
+    mov rsi, [rbp - MRP_REPR]
+    lea rsi, [rsi + PyStrObject.data]
+    mov rdi, [rbp - MRP_END]
+    add [rbp - MRP_END], rdx
+    extern ap_memcpy
+    call ap_memcpy
+
+.mrp_no_text:
+    mov rdi, [rbp - MRP_END]
+    CSTRING rsi, ">"
+    call rbt_append_cstr
+
+    lea rdi, [rbp - MRP_BUF]
     call str_from_cstr_heap
+    mov [rbp - MRP_END], rax
+    mov rdi, [rbp - MRP_REPR]
+    test rdi, rdi
+    jz .mrp_no_repr
+    call obj_decref
+.mrp_no_repr:
+    mov rdi, [rbp - MRP_TEXT]
+    test rdi, rdi
+    jz .mrp_done
+    call obj_decref
+.mrp_done:
+    mov rax, [rbp - MRP_END]
     leave
     ret
 END_FUNC sre_match_repr
