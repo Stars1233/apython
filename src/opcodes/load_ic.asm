@@ -307,9 +307,9 @@ END_FUNC op_load_attr_method
 ;; difference here rather than anywhere in the call machinery.
 ;;
 ;; CACHE, 18 bytes, the same budget the method cache spends:
-;;     [+0]   the type, 8 bytes
-;;     [+8]   the class dict's version, 2 bytes
-;;     [+10]  the dense index into the instance dict's entry array, 2 bytes
+;;     [+0]   the type's version, 4 bytes
+;;     [+4]   the dense index into the instance dict's entry array, 2 bytes
+;;     [+6]   spare
 ;;
 ;; The NAME is not cached.  It is taken from co_names at hit time, which costs
 ;; one load and leaves room for the version.
@@ -328,10 +328,12 @@ END_FUNC op_load_attr_method
 ;; execution when the two names were different objects.  See
 ;; src/pyo/strintern.asm.
 ;;
-;; The two type flags are read LIVE rather than guarded by a version.  They
-;; are maintained by type_refresh_attr_flags, which updates them in place, so
-;; adding a __getattribute__ or a property to the class -- or to a base --
-;; does not change the type POINTER that guard 1 compares.
+;; One version compare stands in for the three guards this used to make.  It
+;; pins the type -- a freed class cannot be matched by a new one at the same
+;; address, because versions come from a single counter -- and it pins
+;; everything the install site checked about the MRO, because all of that moves
+;; only through type_refresh_attr_flags, which stamps a new version and stamps
+;; it down every subclass.
 ;; ============================================================================
 DEF_FUNC_BARE op_load_attr_instance
     ; ecx is the oparg and MUST survive to .lai_deopt, which hands it to
