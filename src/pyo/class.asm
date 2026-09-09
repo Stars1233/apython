@@ -1970,6 +1970,18 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     mov r12, rdi                ; r12 = type (walks)
     mov [rbp - TGA_ORIGIN], rdi
 
+    ; Every name the ladder below can match begins with "__", and there are
+    ; twelve of them, each an ap_strcmp CALL made before any dict is touched.
+    ; An ordinary attribute -- which is what `C.attr` almost always is --
+    ; matched none of them and paid for all twelve: ap_strcmp was 17% of the
+    ; case and type_getattr_meta another 12%.  Two byte compares now stand in
+    ; front of the lot.  The second byte is read only when the first is an
+    ; underscore, so an empty name reads its NUL terminator and stops.
+    cmp byte [rbx + PyStrObject.data], '_'
+    jne .tga_walk
+    cmp byte [rbx + PyStrObject.data + 1], '_'
+    jne .tga_walk
+
     ; Check for __name__: compare name string data with "__name__"
     lea rdi, [rbx + PyStrObject.data]
     lea rsi, [rel tga_name_str]
@@ -2057,9 +2069,8 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     jz .tga_next_base
 
     mov rsi, rbx
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    call dict_get               ; a Value; 0 is the only miss
+    test rax, rax
     jnz .tga_found
 
 .tga_next_base:
@@ -2201,17 +2212,11 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     ret
 
 .tga_found:
-    ; Found — INCREF and return
-    mov rbx, rax                ; save payload (name no longer needed)
-    mov r12, rdx                ; save tag (type walk done)
-    INCREF_VAL rax, edx         ; tag-aware INCREF (skips SmallInt/NULL)
-    mov rax, rbx
-    mov rdx, r12                ; restore tag from dict_get
-
+    ; dict_get's answer is a borrowed Value.
+    INCREF_V rax, rdx
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; return one Value
     ret
 
 .tga_return_flags:
