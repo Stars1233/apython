@@ -89,7 +89,7 @@ DEF_FUNC list_new_from, 8       ; 3 pushes, so rsp is 16-aligned
     mov r12, rdi               ; r12 = capacity
     test r12, r12
     jnz .has_cap
-    mov r12d, 4                     ; minimum capacity
+    mov r12d, 8                     ; minimum capacity
 .has_cap:
 
     ; Try list header pool first
