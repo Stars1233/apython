@@ -40,6 +40,7 @@ extern exc_ValueError_type
 extern exc_IndexError_type
 extern int_type
 extern list_sorting_error
+extern list_reverse_values
 extern obj_dealloc
 
 ; Set entry layout constants (must match set.asm)
@@ -251,25 +252,9 @@ DEF_FUNC list_method_reverse
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rax + PyListObject.ob_item], 0
     je list_sorting_error
-    mov rcx, [rax + PyListObject.ob_size]
-    test rcx, rcx
-    jz .rev_done
-
-    mov rdi, [rax + PyListObject.ob_item]       ; payloads
-    xor esi, esi            ; lo = 0
-    dec rcx                 ; hi = size - 1
-.rev_loop:
-    cmp rsi, rcx
-    jge .rev_done
-    ; Swap payloads
-    mov r8, [rdi + rsi * 8]      ; lo payload
-    mov r10, [rdi + rcx * 8]     ; hi payload
-    mov [rdi + rsi * 8], r10
-    mov [rdi + rcx * 8], r8
-    inc rsi
-    dec rcx
-    jmp .rev_loop
-
+    mov rsi, [rax + PyListObject.ob_size]
+    mov rdi, [rax + PyListObject.ob_item]
+    call list_reverse_values
 .rev_done:
     RET_NONE
     leave
@@ -687,18 +672,7 @@ END_FUNC list_method_sort
 ;; no refcount traffic: the array owns exactly what it owned before.
 ;; ============================================================================
 DEF_FUNC_LOCAL ls_reverse_array
-    lea rsi, [rdi + rsi*8 - 8]  ; the last slot; below rdi when n is 0
-.lra_loop:
-    cmp rdi, rsi
-    jae .lra_done
-    mov rax, [rdi]
-    mov rcx, [rsi]
-    mov [rdi], rcx
-    mov [rsi], rax
-    add rdi, 8
-    sub rsi, 8
-    jmp .lra_loop
-.lra_done:
+    call list_reverse_values
     leave
     ret
 END_FUNC ls_reverse_array

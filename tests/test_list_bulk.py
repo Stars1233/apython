@@ -261,3 +261,48 @@ class RMul:
 
 
 print([1] * RMul())
+
+# --- the reversal, which moves four Values an iteration -------------------
+# Two from each end, through a 16-byte load and a pshufd, so the tail is
+# whatever is left when fewer than four remain: every length below 40 lands
+# on a different one, and the two boundaries that matter are 3 and 4.  The
+# same helper turns a[::-1] round, so both callers are here.
+rev_ok = True
+for n in range(0, 40):
+    a3 = list(range(n))
+    b3 = list(a3)
+    b3.reverse()
+    if b3 != a3[::-1]:
+        rev_ok = False
+    b3.reverse()
+    if b3 != a3:
+        rev_ok = False
+    if a3[::-1] != list(reversed(a3)):
+        rev_ok = False
+print("reverse shapes", rev_ok)
+for n in (0, 1, 2, 3, 4, 5, 8, 9, 16, 17, 1000):
+    a3 = list(range(n))
+    a3.reverse()
+    print(n, a3[:3], a3[-3:])
+a3 = [1, "x", None, 2.5, (1,), [0]]
+a3.reverse()
+print(a3)
+print(list(range(9))[::-1], list(range(9))[::-2], list(range(9))[7:2:-1])
+
+seen4 = []
+
+
+class Watch4:
+    def __del__(self):
+        seen4.append(1)
+
+
+def churn4():
+    l4 = [Watch4() for _ in range(9)]
+    l4.reverse()
+    m4 = l4[::-1]
+    del l4, m4
+
+
+churn4()
+print(len(seen4))

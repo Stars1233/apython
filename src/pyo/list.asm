@@ -1487,28 +1487,11 @@ DEF_FUNC list_getslice
 
     pop rax                    ; restore source start index
 
-    ; Reverse payloads in place (lo/hi swap loop)
-    mov rcx, [rsp + 8]        ; slicelength
-    cmp rcx, 2
-    jl .lgs_rev_done           ; 0 or 1 elements, no swap needed
-    mov rdi, [rsp]             ; new list
-    mov rdi, [rdi + PyListObject.ob_item]  ; payload array
-    mov rsi, rcx
-    dec rsi
-    shl rsi, 3
-    add rsi, rdi               ; rsi = &payloads[slicelength-1]
-    ; rdi = lo, rsi = hi
-.lgs_rev_payload_loop:
-    cmp rdi, rsi
-    jge .lgs_rev_done
-    mov rax, [rdi]
-    mov rdx, [rsi]
-    mov [rdi], rdx
-    mov [rsi], rax
-    add rdi, 8
-    sub rsi, 8
-    jmp .lgs_rev_payload_loop
-
+    ; Reverse in place: a[::-1] is the forward block, turned round.
+    mov rsi, [rsp + 8]        ; slicelength
+    mov rdi, [rsp]            ; new list
+    mov rdi, [rdi + PyListObject.ob_item]
+    call list_reverse_values
 .lgs_rev_done:
     ; Bulk INCREF (reuse common path)
     jmp .lgs_incref_start
@@ -1574,6 +1557,54 @@ DEF_FUNC list_getslice
     leave
     ret
 END_FUNC list_getslice
+
+;; ============================================================================
+;; list_reverse_values(rdi = Value[], rsi = n) -> void
+;;
+;; Reverse a run of Values in place.  No refcount traffic: the array owns
+;; exactly what it owned before.
+;;
+;; Four elements an iteration, two from each end: a 16-byte load holds two
+;; Values, pshufd exchanges them, and the two halves are stored crosswise.
+;; The scalar loop that was here moved two, and gcc vectorises CPython's
+;; reverse_slice the same way, which is the whole of why list.reverse() was
+;; half CPython's speed on a thousand-element list.
+;; ============================================================================
+global list_reverse_values
+DEF_FUNC_BARE list_reverse_values
+    cmp rsi, 2
+    jb .lrv_done
+    lea rdx, [rdi + rsi*8]      ; one past the last
+
+.lrv_wide:
+    lea rax, [rdi + 32]         ; the two 16-byte windows must not overlap
+    cmp rax, rdx
+    ja .lrv_narrow
+    movdqu xmm0, [rdi]
+    movdqu xmm1, [rdx - 16]
+    pshufd xmm0, xmm0, 0x4E     ; swap the two Values within each window
+    pshufd xmm1, xmm1, 0x4E
+    movdqu [rdi], xmm1
+    movdqu [rdx - 16], xmm0
+    add rdi, 16
+    sub rdx, 16
+    jmp .lrv_wide
+
+.lrv_narrow:
+    sub rdx, 8                  ; the last element
+.lrv_loop:
+    cmp rdi, rdx
+    jae .lrv_done
+    mov rax, [rdi]
+    mov rcx, [rdx]
+    mov [rdi], rcx
+    mov [rdx], rax
+    add rdi, 8
+    sub rdx, 8
+    jmp .lrv_loop
+.lrv_done:
+    ret
+END_FUNC list_reverse_values
 
 ;; ============================================================================
 ;; list_incref_range(rdi = Value[], rsi = count) -> void
