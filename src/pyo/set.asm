@@ -547,12 +547,37 @@ END_FUNC set_resize_to
 
 ;; ============================================================================
 ;; set_resize(rdi = set) -> void
-;; Rebuild at twice the capacity, which is what an insert that has run out of
-;; room wants.
+;;
+;; Rebuild at the size the LIVE count asks for: CPython's
+;; `used > 50000 ? used*2 : used*4`, rounded up to the next power of two.
+;;
+;; This used to double the CURRENT capacity, which answers a different
+;; question.  A set added to and discarded from in equal measure fills with
+;; tombstones; the tombstones trip the load factor while ob_size stays flat;
+;; the table doubles; and the next round of churn does it again.  n-queens
+;; holds three sets of exactly that shape.  Sizing from the live count makes
+;; one expression do both jobs -- a genuinely full table grows, a
+;; tombstone-heavy one shrinks -- because the rehash drops tombstones on the
+;; way and the new size never sees them.
 ;; ============================================================================
 DEF_FUNC_BARE set_resize
-    mov rsi, [rdi + PyDictObject.capacity]
-    add rsi, rsi
+    mov rsi, [rdi + PyDictObject.ob_size]
+    mov rax, rsi
+    add rsi, rsi                ; used * 2
+    cmp rax, 50000
+    ja .srz_round
+    add rsi, rsi                ; used * 4, below CPython's cutover
+.srz_round:
+    ; The smallest power of two STRICTLY greater than that, so a set is at
+    ; most a quarter full the moment it has been rebuilt.
+    mov eax, SET_INIT_CAP
+.srz_grow:
+    cmp rax, rsi
+    ja .srz_go
+    add rax, rax
+    jmp .srz_grow
+.srz_go:
+    mov rsi, rax
     jmp set_resize_to
 END_FUNC set_resize
 
@@ -565,30 +590,30 @@ END_FUNC set_resize
 ;; constructors, update, copy and all four binary operators.  dict_reserve
 ;; does the same job for dicts and for the same reason.
 ;;
-;; The table holds ob_size + tombstones at three quarters of capacity, so the
-;; room needed is that many slots rounded up to a power of two.  A set that
-;; already has the room is left alone.
+;; The table holds ob_size + tombstones below three fifths of capacity, so
+;; the room needed is that many slots rounded up to a power of two -- the
+;; same test set_add applies, negated.  A set that already has the room is
+;; left alone.
 ;; ============================================================================
 global set_reserve
 DEF_FUNC_BARE set_reserve
     mov rax, [rdi + PyDictObject.ob_size]
     add rax, [rdi + PyDictObject.dk_tombstones]
     add rax, rsi
+    lea rax, [rax + rax*4]      ; what the table will hold, times five
     mov rcx, [rdi + PyDictObject.capacity]
     mov rdx, rcx
-    shr rdx, 2
-    lea rdx, [rdx + rdx*2]      ; capacity * 3/4
+    lea rdx, [rdx + rdx*2]      ; capacity * 3
     cmp rax, rdx
-    jle .srv_done               ; the room is already there
+    jl .srv_done                ; the room is already there
     cmp rcx, SET_INIT_CAP
     jae .srv_grow
     mov ecx, SET_INIT_CAP
 .srv_grow:
     mov rdx, rcx
-    shr rdx, 2
     lea rdx, [rdx + rdx*2]
     cmp rax, rdx
-    jle .srv_resize
+    jl .srv_resize
     add rcx, rcx
     jmp .srv_grow
 .srv_resize:
@@ -712,15 +737,19 @@ DEF_FUNC set_add
     ; Increment ob_size
     inc qword [rbx + PyDictObject.ob_size]
 
-    ; Check load factor: (ob_size + tombstones) > capacity * 3/4
-    mov rax, [rbx + PyDictObject.capacity]
-    mov rcx, rax
-    shr rcx, 2                  ; capacity / 4
-    imul rcx, rcx, 3            ; capacity * 3/4
+    ; Check load factor: (ob_size + tombstones) * 5 >= capacity * 3.
+    ;
+    ; Three quarters is what a table probed with a good hash and a jumping
+    ; sequence can carry.  This one probes in runs, and the int hash is the
+    ; identity, so a full table is one long run: CPython's setobject.c keeps
+    ; sets at three fifths for exactly that reason, and pays the memory.
     mov rax, [rbx + PyDictObject.ob_size]
     add rax, [rbx + PyDictObject.dk_tombstones]
+    lea rax, [rax + rax*4]      ; fill * 5
+    mov rcx, [rbx + PyDictObject.capacity]
+    lea rcx, [rcx + rcx*2]      ; capacity * 3
     cmp rax, rcx
-    jle .done
+    jl .done
 
     ; Resize needed
     mov rdi, rbx
