@@ -2323,6 +2323,28 @@ DEF_FUNC op_dict_merge
 
 .dm_dup_error:
     pop rbx                    ; balance push from before dict_get
+    ; CPython names the callable and the key: "f() got multiple values for
+    ; keyword argument 'a'".  The key goes through str(), which is what
+    ; CPython's %S does, so a non-str key reads as itself rather than
+    ; crashing the formatter.
+    mov rax, [rbp - DM_ENTRIES]
+    imul rcx, rbx, DictEntry_size
+    add rax, rcx
+    mov rdi, [rax + DictEntry.key]
+    sub rsp, 8                  ; this handler carves an odd frame
+    extern obj_str
+    call obj_str
+    add rsp, 8
+    test rax, rax
+    jz .dm_dup_plain
+    mov [rbp - DM_TYPE], rax            ; the str, held while it is read
+    mov rdi, [rbp - DM_FUNC]
+    lea rsi, [rax + PyStrObject.data]
+    CSTRING rdx, " got multiple values for keyword argument '"
+    CSTRING rcx, "'"
+    extern raise_callable_arg
+    jmp raise_callable_arg
+.dm_dup_plain:
     RAISE exc_TypeError_type, "got multiple values for keyword argument"
 
 .dm_immediate_type:
@@ -2339,7 +2361,9 @@ DEF_FUNC op_dict_merge
 .dm_type_error:
     mov rdi, [rbp - DM_FUNC]
     mov rsi, [rbp - DM_TYPE]
+    mov rsi, [rsi + PyTypeObject.tp_name]
     CSTRING rdx, " argument after ** must be a mapping, not "
+    xor ecx, ecx
     extern raise_callable_arg
     jmp raise_callable_arg
 END_FUNC op_dict_merge

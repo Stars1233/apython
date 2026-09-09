@@ -89,3 +89,81 @@ print(mixed[1], mixed["s"], mixed[(1, 2)], mixed[2.5])
 
 # equality is order-independent
 print({"a": 1, "b": 2} == {"b": 2, "a": 1})
+
+# --- popitem is LIFO, from the high-water mark ----------------------------
+# The scan used to start at capacity-1 and walk every empty slot above the
+# dense array before reaching anything.  dk_nentries is where that array
+# stops, so the shapes that matter are the ones where the mark and the live
+# count disagree: entries deleted off the end, a table emptied except for its
+# first key, and one churned by delete-and-reinsert.
+p = {"a": 1, "b": 2, "c": 3}
+print(p.popitem(), p)
+print(p.popitem(), p)
+print(p.popitem(), p)
+try:
+    p.popitem()
+except KeyError as e:
+    print("KeyError", e)
+try:
+    {}.popitem()
+except KeyError as e:
+    print("KeyError", e)
+
+trimmed = {i: i for i in range(10)}
+for i in (9, 8, 7):
+    del trimmed[i]
+print(trimmed.popitem(), sorted(trimmed))
+
+first_only = {i: i for i in range(10)}
+for i in range(1, 10):
+    del first_only[i]
+print(first_only.popitem(), first_only)
+
+drained = {i: i * 2 for i in range(200)}
+out = []
+while drained:
+    out.append(drained.popitem())
+print(out == [(i, i * 2) for i in range(199, -1, -1)], len(drained))
+
+churned2 = {i: i for i in range(50)}
+for i in range(50):
+    del churned2[i]
+    churned2[i + 100] = i
+print(churned2.popitem(), len(churned2))
+
+shared = [1]
+mixed = {(1, 2): shared, 2 ** 70: "big", 1.5: None, "s": 1}
+while mixed:
+    kk, vv = mixed.popitem()
+    print(repr(kk), repr(vv))
+print({"x": shared}.popitem()[1] is shared)
+
+seen5 = []
+
+
+class Watch5:
+    def __init__(self, tag):
+        self.tag = tag
+
+    def __del__(self):
+        seen5.append(self.tag)
+
+
+def churn5():
+    holder = {"k": Watch5("v")}
+    pair = holder.popitem()
+    del holder
+    print("still alive", seen5)
+    del pair
+
+
+churn5()
+print(seen5)
+
+
+class DictSub(dict):
+    pass
+
+
+ds = DictSub({"a": 1})
+print(ds.popitem(), len(ds))

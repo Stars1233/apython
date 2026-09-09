@@ -71,6 +71,7 @@ test_call_arg_order
 test_call_arg_ownership
 test_call_ex
 test_call_instance
+test_call_kwargs_errors
 test_call_spec
 test_classes
 test_classmethod_metaclass

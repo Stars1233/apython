@@ -839,66 +839,37 @@ DEF_FUNC dict_method_popitem
     cmp qword [rbx + PyDictObject.ob_size], 0
     je .dpopitem_empty
 
-    ; Find last non-NULL entry by scanning backward
-    mov r12, [rbx + PyDictObject.capacity]
-    dec r12                  ; start from capacity-1
-
+    ; The LAST entry, found from the high-water mark.  The scan used to start
+    ; at capacity-1, so on a hundred-entry dict in a 256-slot table it walked
+    ; a hundred and fifty-six empty slots before reaching anything.
+    ; dk_nentries is where the dense array stops.
+    mov r12, [rbx + PyDictObject.dk_nentries]
 .dpopitem_scan:
-    test r12, r12
-    jl .dpopitem_empty       ; shouldn't happen, but safety
+    dec r12
+    js .dpopitem_empty          ; unreachable while ob_size is non-zero
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
     add rax, rcx
-
-    mov r13, [rax + DictEntry.key]
+    mov r13, [rax + DictEntry.key]      ; a Value; 0 is a hole
     test r13, r13
-    jz .dpopitem_prev           ; a NULL key is an empty slot or a tombstone
-    ; A second test of rcx used to stand here, left over from a removed
-    ; key-tag load; rcx now holds the byte offset, which is 0 at slot 0, so
-    ; an occupied slot 0 was skipped and popitem() reported an empty dict.
+    jz .dpopitem_scan
     mov r14, [rax + DictEntry.value]
-    V_UNPACK r14, rcx
-    jmp .dpopitem_found
 
-.dpopitem_prev:
-    dec r12
-    jmp .dpopitem_scan
-
-.dpopitem_found:
-    ; r13 = key, r14 = value, rcx = value_tag
-    ; Also save key_tag from the entry
-    mov rax, [rbx + PyDictObject.entries]
-    imul rdx, r12, DICT_ENTRY_SIZE
-    add rax, rdx
-    V_TAG_OF r8, qword [rax + DictEntry.key]
-    V_UNPACK r13, r8         ; r13 held the key as a Value
-    push r8                  ; save key_tag
-    push rcx                 ; save value_tag across tuple_new
-    ; Create 2-tuple
+    ; The (key, value) pair.  Values throughout: this used to take the key
+    ; apart with V_TAG_OF and V_UNPACK and put it back together with V_PACK
+    ; three times over, to move two words.
     mov edi, 2
     call tuple_new
-    pop rcx                  ; restore value_tag
-    pop r8                   ; restore key_tag
-    mov r12, rax             ; r12 = tuple
-
-    ; Set tuple[0] = key with correct tag, tuple[1] = value
+    mov r12, rax
     mov r9, [r12 + PyTupleObject.ob_item]
-    INCREF_VAL r13, r8
-    INCREF_VAL r14, rcx
-    mov r10, r13
-    mov r11, r8
-    V_PACK r10, r11
-    mov [r9], r10
-    mov r10, r14
-    mov r11, rcx
-    V_PACK r10, r11
-    mov [r9 + 8], r10
+    INCREF_V r13, rcx
+    INCREF_V r14, rcx
+    mov [r9], r13
+    mov [r9 + 8], r14
 
     ; Delete key from dict
     mov rdi, rbx
     mov rsi, r13
-    mov edx, r8d            ; key tag from the entry
-    V_PACK rsi, rdx           ; dict_get/del take a key Value
     call dict_del
 
     mov rax, r12
@@ -912,7 +883,7 @@ DEF_FUNC dict_method_popitem
     ret
 
 .dpopitem_empty:
-    RAISE exc_KeyError_type, "dictionary is empty"
+    RAISE exc_KeyError_type, "popitem(): dictionary is empty"
 END_FUNC dict_method_popitem
 
 section .rodata
