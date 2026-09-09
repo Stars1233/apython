@@ -44,6 +44,9 @@ extern op_store_attr
 
 extern func_type
 extern frame_new
+extern frame_alloc_inline
+extern frame_datastack_top
+extern frame_datastack_end
 extern frame_free
 extern eval_frame
 extern eval_exception_unwind
@@ -528,22 +531,68 @@ DEF_FUNC op_load_attr_property, LAP_FRAME
     mov [rbp - LAP_FN], rsi
     INCREF rsi
 
-    ; frame_new(code, globals, builtins, locals = NULL), as op_call_py_exact.
-    mov rdi, rax
-    mov rsi, [rsi + PyFuncObject.func_globals]
-    mov rdx, [rel builtins_dict_global]
-    xor ecx, ecx
-    call frame_new
-    mov r15, rax                    ; the register convention leaves r15 free,
-                                    ; and eval_frame preserves it
-    mov rcx, [rbx + 4]
-    mov [r15 + PyFrame.func_obj], rcx
+    ; The frame, built here rather than by frame_new -- the code object, its
+    ; two size fields and the getter's globals are all in hand, and the one
+    ; argument is the object.  Same shape as op_call_py_exact's, and off the
+    ; same datastack: this frame nests exactly as an inline call's does,
+    ; because the guards above refuse every shape that could return with it
+    ; still live, and it is released unconditionally below.
+    ;
+    ; It is NOT entered inline -- entry_kind stays FRAME_ENTRY_CALL and
+    ; eval_frame is still called -- because this handler's resume has a
+    ; __getattr__ fallback in it that the call's does not.
+    mov r8d, [rax + PyCodeObject.co_nlocalsplus]
+    mov r9d, [rax + PyCodeObject.co_stacksize]
+    add r9, r8
+    shl r9, 3
+    add r9, FRAME_HEADER_SIZE
 
-    ; The getter's one parameter is the object.
+    mov r15, [rel frame_datastack_top]
+    lea rdx, [r15 + r9]
+    cmp rdx, [rel frame_datastack_end]
+    ja .lap_frame_slow
+    mov [rel frame_datastack_top], rdx
+
+.lap_frame_ready:
+    ; frame_new's header, minus prev_frame -- eval_frame overwrites that from
+    ; eval_saved_r12 a few instructions later, and nothing runs in between.
+    ; entry_slots is not written: nothing reads it while entry_kind is
+    ; FRAME_ENTRY_CALL.
+    mov [r15 + PyFrame.code], rax
+    mov rdx, [rsi + PyFuncObject.func_globals]
+    mov [r15 + PyFrame.globals], rdx
+    mov rdx, [rel builtins_dict_global]
+    mov [r15 + PyFrame.builtins], rdx
+    mov [r15 + PyFrame.func_obj], rsi
+    mov qword [r15 + PyFrame.locals], 0
+    mov qword [r15 + PyFrame.instr_ptr], 0
+    mov qword [r15 + PyFrame.stack_ptr], 0
+    mov qword [r15 + PyFrame.call_ip], 0
+    mov qword [r15 + PyFrame.exc_state], 0
+    mov qword [r15 + PyFrame.frame_obj], 0
+    mov qword [r15 + PyFrame.gen_owner], 0
+    mov dword [r15 + PyFrame.exc_depth], 0
+    mov dword [r15 + PyFrame.entry_kind], FRAME_ENTRY_CALL
+    mov [r15 + PyFrame.nlocalsplus], r8d
+    lea rdx, [r15 + PyFrame.localsplus]
+    lea rcx, [rdx + r8*8]
+    mov [r15 + PyFrame.stack_base], rcx
+
+    ; The getter's one parameter is the object, and that store is also this
+    ; slot's initialisation -- only the slots beyond it need zeroing.
     mov rdx, [rbp - LAP_OBJ]
     INCREF_V rdx, rcx
     mov [r15 + PyFrame.localsplus], rdx
+    mov edx, 1
+    cmp edx, r8d
+    jae .lap_run
+.lap_zero:
+    mov qword [r15 + PyFrame.localsplus + rdx*8], 0
+    inc edx
+    cmp edx, r8d
+    jb .lap_zero
 
+.lap_run:
     mov rdi, r15
     call eval_frame
     mov [rbp - LAP_RET], rax
@@ -594,6 +643,20 @@ DEF_FUNC op_load_attr_property, LAP_FRAME
     leave
     mov [rel eval_saved_r13], r13
     jmp eval_exception_unwind
+
+.lap_frame_slow:
+    ; The region does not exist yet, or has no room: frame_alloc_inline makes
+    ; it or falls back to the pool.  Two pushes, so rsp keeps its alignment.
+    push rax
+    push rax
+    mov rdi, r9
+    call frame_alloc_inline
+    mov r15, rax
+    pop rax
+    pop rax
+    mov rsi, [rbp - LAP_FN]         ; the getter, and r8 with it: both are
+    mov r8d, [rax + PyCodeObject.co_nlocalsplus]    ; caller-saved
+    jmp .lap_frame_ready
 
 .lap_deopt:
     ; LOAD_ATTR's arg is (name index << 1 | flag) and carries an EXTENDED_ARG
