@@ -234,6 +234,7 @@ test_frame_live
 test_frame_object_cycles
 test_frames_and_time
 test_frozenset_descriptors
+test_frozenset_hash
 test_frozenset
 test_fstring_build
 test_fstring_pep701

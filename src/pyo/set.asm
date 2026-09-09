@@ -101,6 +101,7 @@ DEF_FUNC set_new_of_type
     mov qword [rbx + PyDictObject.dk_version], 0
     mov qword [rbx + PyDictObject.dk_tombstones], 0
     mov qword [rbx + SET_FINGER], 0
+    mov qword [rbx + SET_HASH], -1      ; no hash has been asked for yet
 
     ; The shared empty table: no allocation at all.  A set that is never
     ; added to -- and a great many are not, starting with the temporary every
@@ -176,6 +177,7 @@ DEF_FUNC set_release_table, 8           ; + 1 push = 16, 16-aligned
     mov qword [rbx + PyDictObject.capacity], SET_EMPTY_CAP
     mov qword [rbx + PyDictObject.dk_tombstones], 0
     mov qword [rbx + SET_FINGER], 0
+    mov qword [rbx + SET_HASH], -1
 .srt_done:
     pop rbx
     leave
@@ -269,6 +271,17 @@ DEF_FUNC frozenset_hash
     push r13
 
     mov rbx, rdi
+
+    ; Cached?  A frozenset's elements cannot change once it exists, so the
+    ; fold below has exactly one answer and it is worth keeping: this used
+    ; to walk the whole table on EVERY call, and the table is four to six
+    ; times the element count, so `hash(f)` in a loop over a hundred-element
+    ; frozenset read five hundred slots each time round.  Every use of a
+    ; frozenset as a dict key or a set member goes through here.
+    mov rax, [rbx + SET_HASH]
+    cmp rax, -1
+    jne .fsh_ret
+
     mov r12, [rbx + PyDictObject.entries]
     mov r13, [rbx + PyDictObject.capacity]
     xor r8d, r8d                ; the accumulator; nothing here calls out
@@ -313,9 +326,12 @@ DEF_FUNC frozenset_hash
     mov edi, 907133923
     add rax, rdi
 
-    cmp rax, -1                 ; -1 is the error sentinel everywhere else
-    jne .fsh_ret
+    cmp rax, -1                 ; -1 is the error sentinel everywhere else,
+    jne .fsh_store              ; and the not-yet-computed one here
     mov eax, 590923713
+
+.fsh_store:
+    mov [rbx + SET_HASH], rax
 
 .fsh_ret:
     pop r13
@@ -974,6 +990,23 @@ DEF_FUNC set_richcompare, SRC_FRAME
     mov rax, [rdi + PyDictObject.ob_size]
     cmp rax, [rsi + PyDictObject.ob_size]
     jne .src_false
+
+    ; Two operands that have both been hashed and whose hashes differ cannot
+    ; be equal, and that is one compare where the walk below is a lookup per
+    ; element.  Only a frozenset ever caches a hash, so the two -1 tests are
+    ; the type test as well: a mutable set leaves the field at -1 for life
+    ; and simply falls through.  CPython's set_richcompare does exactly this
+    ; and for the same reason -- a dict keyed by frozensets asks this
+    ; question on every collision.
+    mov rax, [rdi + SET_HASH]
+    cmp rax, -1
+    je .src_eq_walk
+    mov rcx, [rsi + SET_HASH]
+    cmp rcx, -1
+    je .src_eq_walk
+    cmp rax, rcx
+    jne .src_false
+.src_eq_walk:
 
     ; Every element of self must be in other
     mov rbx, rdi               ; self (set)
@@ -1904,6 +1937,14 @@ DEF_FUNC set_swap_storage, 8        ; rsp 16-aligned at the call the macros belo
     mov rcx, [r12 + SET_FINGER]
     mov [rbx + SET_FINGER], rcx
     mov [r12 + SET_FINGER], rax
+
+    ; A cached hash describes the ELEMENTS, and both objects just got a
+    ; different set of them.  Neither is a frozenset today -- only `|=` and
+    ; its siblings come through here, and those are mutable-set operators --
+    ; but a stale hash is the kind of thing that is discovered years later
+    ; by a dict lookup that cannot find a key it is holding.
+    mov qword [rbx + SET_HASH], -1
+    mov qword [r12 + SET_HASH], -1
 
     ; The version counter belongs to the object, not to the table, so it does
     ; not travel -- but it does have to move, or an iterator that is mid-walk

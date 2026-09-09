@@ -253,6 +253,15 @@ SET_ENTRY_SIZE equ 16           ; the two fields above, and nothing else
 ; before use, so a stale one costs a wrong starting slot and nothing more.
 SET_FINGER equ 56               ; the word PyDictObject calls dk_indices
 
+; The second is a frozenset's cached hash, -1 until something asks for it.
+; CPython's PySetObject has the same field and the same sentinel, and a
+; MUTABLE set simply leaves it at -1 forever -- which is what makes the
+; O(1) inequality shortcut in set_richcompare need no type test: two sets
+; whose cached hashes are both set and differ cannot be equal, and a set
+; that never cached one never takes the shortcut.  frozenset_hash maps a
+; computed -1 onto another constant so the sentinel stays unambiguous.
+SET_HASH equ 64                 ; the word PyDictObject calls dk_nentries
+
 ; Set-entry counterpart of ENTRY_CLASSIFY.
 %macro SET_ENTRY_CLASSIFY 3     ; %1 = entry ptr, %2 = empty label, %3 = tombstone label
     cmp qword [%1 + SET_ENTRY_KEY], 0
