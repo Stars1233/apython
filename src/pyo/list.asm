@@ -46,10 +46,46 @@ extern list_sorting_error
 ;; ============================================================================
 LIST_POOL_MAX equ 16
 
-DEF_FUNC list_new
+;; ============================================================================
+;; list_new(rdi = capacity) -> rax = PyListObject*, every slot zeroed
+;; list_new_filled(rdi = n) -> rax = PyListObject* of capacity max(n, 4),
+;;                             whose first n slots are UNINITIALISED
+;;
+;; Both go through list_new_from below; they differ only in where the zeroing
+;; starts.  list_new_filled is for the four builders that write every one of
+;; the n slots before anything can look -- copy, slice, concat, repeat -- and
+;; on those the zeroing was pure waste: the array was filled with zeroes and
+;; then immediately overwritten by an ap_memcpy of exactly the same length.
+;; It still zeroes the tail, [n, max(n, 4)), because the invariant the
+;; zeroing exists for is about the slots ABOVE ob_size, and a list of fewer
+;; than four items has some.
+;; ============================================================================
+DEF_FUNC_BARE list_new
+    xor esi, esi                ; zero from slot 0: nothing is promised
+    jmp list_new_from
+END_FUNC list_new
+
+;; ============================================================================
+;; list_new_filled(rdi = n) -> rax = PyListObject*; see list_new above
+;; ============================================================================
+global list_new_filled
+DEF_FUNC_BARE list_new_filled
+    mov rsi, rdi                ; zero from slot n: the caller writes [0, n)
+    jmp list_new_from
+END_FUNC list_new_filled
+
+;; ============================================================================
+;; list_new_from(rdi = capacity, rsi = first slot to zero) -> rax = the list
+;;
+;; The body both of the above share.  Not called from anywhere else: the two
+;; entry points above are the contract.
+;; ============================================================================
+DEF_FUNC list_new_from, 8       ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
+    push r13
 
+    mov r13, rsi               ; r13 = first slot to zero
     mov r12, rdi               ; r12 = capacity
     test r12, r12
     jnz .has_cap
@@ -85,20 +121,24 @@ DEF_FUNC list_new
     shl rdi, 3
     call ap_malloc
     mov [rbx + PyListObject.ob_item], rax
-    mov rdi, rax
+    lea rdi, [rax + r13*8]
+    mov rcx, r12
+    sub rcx, r13               ; the slots the caller does not promise
+    jbe .lnf_no_zero
     xor eax, eax
-    mov ecx, r12d
     rep stosq
+.lnf_no_zero:
 
     mov rdi, rbx
     call gc_track
 
     mov rax, rbx
+    pop r13
     pop r12
     pop rbx
     leave
     ret
-END_FUNC list_new
+END_FUNC list_new_from
 
 ;; ============================================================================
 ;; list_copy(PyListObject *src) -> PyListObject* (shallow copy)
@@ -112,13 +152,10 @@ DEF_FUNC list_copy, 8            ; 3 pushes, so rsp is 16-aligned
     mov rbx, rdi               ; src list
     mov r12, [rbx + PyListObject.ob_size]
 
-    ; Allocate new list
+    ; Allocate new list.  Every one of the r12 slots is written by the
+    ; ap_memcpy below, so the zeroing is only owed on the tail.
     mov rdi, r12
-    test rdi, rdi
-    jnz .lc_alloc
-    mov edi, 4
-.lc_alloc:
-    call list_new
+    call list_new_filled
     mov r13, rax               ; new list
     mov [r13 + PyListObject.ob_size], r12
 
@@ -129,18 +166,20 @@ DEF_FUNC list_copy, 8            ; 3 pushes, so rsp is 16-aligned
     shl rdx, 3
     call ap_memcpy
 
-    ; INCREF each item
-    xor ecx, ecx
-.lc_incref:
-    cmp rcx, r12
-    jge .lc_done
+    ; INCREF each item.  The array pointer is loaded once and the counter
+    ; stays in a register: INCREF_V is a compare, a branch and an increment
+    ; and clobbers only the scratch it is given, so the push/pop bracket that
+    ; was here protected nothing.
     mov rax, [r13 + PyListObject.ob_item]
+    xor ecx, ecx
+    jmp .lc_incref_test
+.lc_incref:
     mov rdi, [rax + rcx * 8]
-    push rcx
     INCREF_V rdi, rsi
-    pop rcx
     inc rcx
-    jmp .lc_incref
+.lc_incref_test:
+    cmp rcx, r12
+    jb .lc_incref
 
 .lc_done:
     mov rax, r13
@@ -150,6 +189,102 @@ DEF_FUNC list_copy, 8            ; 3 pushes, so rsp is 16-aligned
     leave
     ret
 END_FUNC list_copy
+
+;; ============================================================================
+;; list_extend_from_array(rdi = list, rsi = Value[], rdx = count) -> void
+;;
+;; Append count Values in one go: grow once, one ap_memcpy, one INCREF pass.
+;; Every caller that knows its source's length wants this -- LIST_EXTEND from
+;; a list or a tuple, list.extend of either, `+=`, and a list literal, which
+;; is what `BUILD_LIST 0; LOAD_CONST tuple; LIST_EXTEND 1` compiles to.  They
+;; each called list_append per element, so the destination re-checked its
+;; capacity on every one and could realloc log(n) times for a source whose
+;; size was sitting in a register.
+;;
+;; `l.extend(l)` and `l += l` hand this the destination's own array, which the
+;; grow may move -- hence the flag.  The copy itself is safe either way: the
+;; destination starts at ob_item + ob_size and the source at ob_item, and
+;; with count == ob_size those two runs are adjacent, not overlapping.
+;; ============================================================================
+LEFA_SELF  equ 8
+LEFA_FRAME equ 16               ; + 4 pushes = 48, 16-aligned
+DEF_FUNC list_extend_from_array, LEFA_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, rdi
+    mov r12, rsi
+    mov r13, rdx
+    test r13, r13
+    jz .lefa_done
+
+    ; The sorting sentinel, as every other way into a list checks it.
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je list_sorting_error
+
+    xor eax, eax
+    cmp r12, [rbx + PyListObject.ob_item]
+    sete al
+    mov [rbp - LEFA_SELF], rax
+
+    mov r14, [rbx + PyListObject.ob_size]
+    add r14, r13                        ; r14 = the size afterwards
+    cmp r14, [rbx + PyListObject.allocated]
+    jbe .lefa_have_room
+
+    ; Grow to max(2 * allocated, the new size) -- the same rule the slice
+    ; assignment path uses, so a repeated extend still doubles.
+    mov rax, [rbx + PyListObject.allocated]
+    shl rax, 1
+    cmp rax, r14
+    jae .lefa_cap
+    mov rax, r14
+.lefa_cap:
+    mov [rbx + PyListObject.allocated], rax
+    mov rdi, [rbx + PyListObject.ob_item]
+    mov rsi, rax
+    shl rsi, 3
+    call ap_realloc
+    mov [rbx + PyListObject.ob_item], rax
+    cmp qword [rbp - LEFA_SELF], 0
+    je .lefa_have_room
+    mov r12, rax                        ; the source moved with the array
+
+.lefa_have_room:
+    mov rdi, [rbx + PyListObject.ob_item]
+    mov rax, [rbx + PyListObject.ob_size]
+    lea rdi, [rdi + rax*8]
+    mov rsi, r12
+    mov rdx, r13
+    shl rdx, 3
+    call ap_memcpy
+    mov [rbx + PyListObject.ob_size], r14
+
+    ; One INCREF pass over what was copied.
+    mov rax, [rbx + PyListObject.ob_item]
+    mov rcx, r14
+    sub rcx, r13
+    lea rax, [rax + rcx*8]
+    xor ecx, ecx
+    jmp .lefa_incref_test
+.lefa_incref:
+    mov rdi, [rax + rcx*8]
+    INCREF_V rdi, rsi
+    inc rcx
+.lefa_incref_test:
+    cmp rcx, r13
+    jb .lefa_incref
+
+.lefa_done:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC list_extend_from_array
 
 ;; ============================================================================
 ;; list_append(rdi=list, rsi=item Value)
@@ -1319,11 +1454,7 @@ DEF_FUNC list_getslice
     ; rax = slicelength
     push rax                   ; save slicelength
     mov rdi, rax
-    test rdi, rdi
-    jnz .lgs_alloc
-    mov edi, 4                      ; min capacity
-.lgs_alloc:
-    call list_new
+    call list_new_filled       ; every slot below the length is written below
     push rax                   ; save the new list
 
     ; Fill items: for i = 0..slicelength-1, idx = start + i*step
@@ -1475,9 +1606,10 @@ DEF_FUNC list_concat
     mov r13, [rbx + PyListObject.ob_size]   ; r13 = len(a)
     mov r14, [r12 + PyListObject.ob_size]   ; r14 = len(b)
 
-    ; Allocate new list with total capacity
+    ; Allocate new list with total capacity.  Both halves are written in
+    ; full below, so only the tail is owed a zero.
     lea rdi, [r13 + r14]
-    call list_new
+    call list_new_filled
     push rax                ; save new list
 
     ; Set size
@@ -1591,13 +1723,9 @@ DEF_FUNC list_repeat
     cmp r14, 0x10000000                      ; 256M items limit (~2GB)
     ja .rep_toobig                           ; too large to allocate
 
-    ; Allocate new list
+    ; Allocate new list.  The copy loops below write every slot.
     mov rdi, r14
-    test rdi, rdi
-    jnz .rep_has_size
-    mov edi, 1                      ; min capacity
-.rep_has_size:
-    call list_new
+    call list_new_filled
     push rax                ; save new list
     mov [rax + PyListObject.ob_size], r14
 
@@ -1698,35 +1826,24 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     je .lic_tuple
     jmp .lic_generic
 
+    ; Both shapes are a contiguous Value array and a size; only the field
+    ; offsets differ.  list_extend_from_array grows once and copies once, and
+    ; it is the same helper LIST_EXTEND and list.extend use -- `l += l`
+    ; included, which is why it handles a source that is the destination's
+    ; own array.
 .lic_list:
-    mov r13, [r12 + PyListObject.ob_size]
-    xor ecx, ecx
-.lic_list_loop:
-    cmp rcx, r13
-    jge .lic_done
-    push rcx
-    mov rax, [r12 + PyListObject.ob_item]
-    mov rsi, [rax + rcx * 8]
-    mov rdi, rbx
-    call list_append
-    pop rcx
-    inc rcx
-    jmp .lic_list_loop
+    mov rdx, [r12 + PyListObject.ob_size]
+    mov rsi, [r12 + PyListObject.ob_item]
+    jmp .lic_from_array
 
 .lic_tuple:
-    mov r13, [r12 + PyTupleObject.ob_size]
-    xor ecx, ecx
-.lic_tuple_loop:
-    cmp rcx, r13
-    jge .lic_done
-    push rcx
-    mov rax, [r12 + PyTupleObject.ob_item]
-    mov rsi, [rax + rcx * 8]
+    mov rdx, [r12 + PyTupleObject.ob_size]
+    mov rsi, [r12 + PyTupleObject.ob_item]
+
+.lic_from_array:
     mov rdi, rbx
-    call list_append
-    pop rcx
-    inc rcx
-    jmp .lic_tuple_loop
+    call list_extend_from_array
+    jmp .lic_done
 
 .lic_generic:
     ; get_iterator_opt, not a tp_iter read: an object with __getitem__
@@ -2000,16 +2117,54 @@ DEF_FUNC list_type_call, LTC_FRAME
     cmp r13, 1
     jne .ltc_error
 
-    ; Create empty list, then extend from iterable
-    xor edi, edi
-    call list_new
+    ; An EXACT list or tuple is a contiguous Value array and a size, so no
+    ; iterator is needed at all: one allocation and one memcpy.  A subclass
+    ; is not eligible -- it may define __iter__ -- which is what the exact
+    ; type compares are for.
+    mov rdi, [r12]
+    V_TEST_PTR rdi, rax
+    ja .ltc_make_list
+    test rdi, rdi
+    jz .ltc_make_list
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel list_type]
+    cmp rax, rcx
+    je .ltc_from_list
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    jne .ltc_make_list
+    mov r13, [rdi + PyTupleObject.ob_size]
+    mov rbx, [rdi + PyTupleObject.ob_item]
+    jmp .ltc_from_array
+.ltc_from_list:
+    mov r13, [rdi + PyListObject.ob_size]
+    mov rbx, [rdi + PyListObject.ob_item]
+.ltc_from_array:
+    mov rdi, r13
+    call list_new_filled
     mov [rbp - LTC_LIST], rax
-    mov rbx, rax            ; rbx = new list
+    mov rdi, rax
+    mov rsi, rbx
+    mov rdx, r13
+    mov rbx, [rbp - LTC_LIST]
+    call list_extend_from_array
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
+.ltc_make_list:
     ; A length the source cannot report is a failure, not a hint to skip:
     ; CPython asks PyObject_LengthHint first, so `list(range(1 << 70))`
     ; raises the OverflowError its __len__ raises rather than looping until
     ; the machine runs out of memory.
+    ;
+    ; The answer is also used, which it was not before: it is the capacity to
+    ; start at, so `list(range(1000))` stops walking the doubling curve.
+    xor r13d, r13d          ; the length hint, 0 when there is none
     mov rdi, [r12]
     V_TEST_PTR rdi, rax
     ja .ltc_no_length
@@ -2025,8 +2180,13 @@ DEF_FUNC list_type_call, LTC_FRAME
     mov rdi, [r12]
     call rax
     test rax, rax
-    jl .ltc_length_failed
+    jl .ltc_length_hint_failed
+    mov r13, rax
 .ltc_no_length:
+    mov rdi, r13
+    call list_new
+    mov [rbp - LTC_LIST], rax
+    mov rbx, rax            ; rbx = new list
 
     ; Get iterator from arg (supports heaptypes with __iter__)
     mov rdi, [r12]          ; args[0]
@@ -2103,10 +2263,10 @@ DEF_FUNC list_type_call, LTC_FRAME
     extern exc_TypeError_type
     RAISE exc_TypeError_type, "list() argument must be an iterable"
 
-.ltc_length_failed:
-    ; sq_length answered -1 and left an exception; hand it on.
-    mov rdi, [rbp - LTC_LIST]
-    call obj_decref
+.ltc_length_hint_failed:
+    ; sq_length answered -1 and left an exception; hand it on.  The list does
+    ; not exist yet -- the probe now runs before it is made, so that its
+    ; answer can be the capacity -- so there is nothing to release.
     xor eax, eax
     xor edx, edx
     pop r13

@@ -1617,34 +1617,14 @@ DEF_FUNC list_method_copy, 8            ; 3 pushes, so rsp is 16-aligned
     push r12
     push r13
 
-    mov rbx, [rdi]          ; self
-    mov r12, [rbx + PyListObject.ob_size]
-
-    ; Create new list with same capacity
-    mov rdi, r12
-    test rdi, rdi
-    jnz .copy_alloc
-    mov edi, 4
-.copy_alloc:
-    call list_new
-    mov r13, rax            ; new list
-
-    ; Append each item (list_append does INCREF)
-    xor ecx, ecx
-.copy_loop:
-    cmp rcx, r12
-    jge .copy_done
-    push rcx
-    mov rax, [rbx + PyListObject.ob_item]
-    mov rsi, [rax + rcx * 8]    ; payload
-    mov rdi, r13
-    call list_append
-    pop rcx
-    inc rcx
-    jmp .copy_loop
-
-.copy_done:
-    mov rax, r13
+    ; list_copy, in src/pyo/list.asm, is one ap_memcpy and one INCREF loop.
+    ; This used to be list_new plus a `call list_append` per element, with a
+    ; push and a pop around each call -- two implementations of a shallow
+    ; copy, and the method used the slow one.  list_append was 34.7% of a
+    ; .copy() loop.
+    mov rdi, [rdi]          ; self
+    extern list_copy
+    call list_copy
     mov edx, TAG_PTR
     pop r13
     pop r12
@@ -2024,35 +2004,25 @@ DEF_FUNC list_method_extend, LE_FRAME
     ; Generic iterable path
     jmp .extend_generic
 
+    ; A list and a tuple are the same shape here -- a contiguous Value array
+    ; and a size -- so both go to list_extend_from_array, which grows once
+    ; and copies once.  Each used to call list_append per element, and
+    ; l.extend(l) is why that helper handles a source that is the
+    ; destination's own array.
 .extend_list:
-    mov r13, [r12 + PyListObject.ob_size]
-    xor ecx, ecx
-.extend_list_loop:
-    cmp rcx, r13
-    jge .extend_done
-    push rcx
-    mov rax, [r12 + PyListObject.ob_item]
-    mov rsi, [rax + rcx * 8]       ; payload
-    mov rdi, [rbp - LE_SELF]
-    call list_append
-    pop rcx
-    inc rcx
-    jmp .extend_list_loop
+    mov rdx, [r12 + PyListObject.ob_size]
+    mov rsi, [r12 + PyListObject.ob_item]
+    jmp .extend_from_array
 
 .extend_tuple:
-    mov r13, [r12 + PyTupleObject.ob_size]
-    xor ecx, ecx
-.extend_tuple_loop:
-    cmp rcx, r13
-    jge .extend_done
-    push rcx
-    mov rax, [r12 + PyTupleObject.ob_item]
-    mov rsi, [rax + rcx * 8]      ; payload
+    mov rdx, [r12 + PyTupleObject.ob_size]
+    mov rsi, [r12 + PyTupleObject.ob_item]
+
+.extend_from_array:
     mov rdi, [rbp - LE_SELF]
-    call list_append
-    pop rcx
-    inc rcx
-    jmp .extend_tuple_loop
+    extern list_extend_from_array
+    call list_extend_from_array
+    jmp .extend_done
 
 .extend_generic:
     ; get_iterator_opt, not a tp_iter read: an object with __getitem__
