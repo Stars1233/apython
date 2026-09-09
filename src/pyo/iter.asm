@@ -2603,12 +2603,24 @@ DEF_FUNC range_obj_repr, ROR_FRAME
     mov rdi, [rbp - ROR_BUF]
     call str_from_cstr_heap
     push rax                   ; save string
+    push rax                   ; ...and keep the call below 16-aligned
 
     ; Free buffer
     mov rdi, [rbp - ROR_BUF]
     call ap_free
 
+    pop rax
     pop rax                    ; return string
+    ; A tp_repr answers with a tag beside the pointer, and this one never set
+    ; it -- so the answer was whatever ap_free happened to leave in rdx.  While
+    ; that was libc free it was reliably non-zero and the accident held; the
+    ; pool allocator leaves the class's previous free-list head there, which is
+    ; ZERO the first time a block of that size comes back.  A zero tag is
+    ; TAG_NULL, and builtin_print reads TAG_NULL as "skip this argument", so
+    ; `print(r, ...)` printed nothing at all for r.  repr.asm has said
+    ; "ap_free clobbers rdx" at each of its own exits for as long as it has
+    ; existed; this file did not.
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -2619,6 +2631,7 @@ DEF_FUNC range_obj_repr, ROR_FRAME
 .ror_wide:
     mov rdi, rbx
     call range_repr_wide
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
