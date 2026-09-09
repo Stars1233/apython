@@ -2027,6 +2027,44 @@ ORB_RES   equ 40
 ORB_FRAME equ 48            ; + 0 pushes = 48
 
 DEF_FUNC obj_richcompare_bool, ORB_FRAME
+    ; Two int immediates settle every operator right here, with no frame, no
+    ; pair of references, no subclass question and no slot lookup.  The
+    ; encoding is monotonic -- an immediate is i + V_INT_BIAS and the whole
+    ; range lands in [0xFFF8.., 0xFFFF..] without wrapping -- so an UNSIGNED
+    ; compare of the two Values IS the integer compare, which is the same
+    ; identity list.sort's int comparator uses.
+    ;
+    ; It is worth an arm of its own because of what the general path costs for
+    ; two small integers: int_compare builds a bool OBJECT, this function
+    ; tests it with obj_is_true and then releases it.  Those three were 62% of
+    ; min() and max() over a list of them.
+    V_IS_INT rdi, rax
+    jb .orb_general
+    V_IS_INT rsi, rax
+    jb .orb_general
+    cmp rdi, rsi
+    jb .orb_int_lt
+    ja .orb_int_gt
+    mov eax, 2                  ; equal
+    jmp .orb_int_have
+.orb_int_lt:
+    mov eax, 1
+    jmp .orb_int_have
+.orb_int_gt:
+    mov eax, 4
+.orb_int_have:
+    ; Each operator is the set of relations it accepts; the answer is whether
+    ; the one that holds is in it.
+    and edx, 7
+    lea rcx, [rel orb_int_ops]
+    movzx ecx, byte [rcx + rdx]
+    test al, cl
+    setnz al
+    movzx eax, al
+    leave
+    ret
+
+.orb_general:
     mov [rbp - ORB_LEFT], rdi
     mov [rbp - ORB_RIGHT], rsi
     mov [rbp - ORB_OP], rdx
@@ -2448,6 +2486,16 @@ orb_msg_ge: db "'>=' not supported between instances", 0
 orb_msg_eq: db "unorderable types", 0
 
 align 4
+; Which relations each operator accepts: less = 1, equal = 2, greater = 4.
+orb_int_ops:
+    db 1                        ; PY_LT
+    db 3                        ; PY_LE
+    db 2                        ; PY_EQ
+    db 5                        ; PY_NE
+    db 4                        ; PY_GT
+    db 6                        ; PY_GE
+    db 0, 0                     ; no such operator; the mask makes it False
+
 orb_swap_table:
     dd PY_GT                    ; PY_LT reversed
     dd PY_GE                    ; PY_LE

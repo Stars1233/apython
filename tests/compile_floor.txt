@@ -430,6 +430,7 @@ test_re_review
 test_review_regressions
 test_richcompare_bool
 test_richcompare_byname
+test_richcompare_int
 test_round
 test_rsplit_boundaries
 test_select
