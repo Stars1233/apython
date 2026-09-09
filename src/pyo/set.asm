@@ -5,6 +5,8 @@
 %include "object.inc"
 
 extern get_iterator_opt
+extern list_type
+extern tuple_type
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -17,6 +19,7 @@ extern obj_incref
 extern str_type
 extern eval_exception_unwind
 extern obj_richcompare_bool
+extern ap_memcpy
 extern ap_memset
 extern fatal_error
 extern type_type
@@ -459,10 +462,11 @@ DEF_FUNC_LOCAL set_find_slot
 END_FUNC set_find_slot
 
 ;; ============================================================================
-;; set_resize(set)
-;; Double capacity and rehash all entries
+;; set_resize_to(rdi = set, rsi = the new capacity) -> void
+;; Rebuild the table at the capacity asked for, rehashing nothing: every
+;; entry carries the hash it was stored with.
 ;; ============================================================================
-DEF_FUNC_LOCAL set_resize, 8            ; 5 pushes, so rsp is 16-aligned
+DEF_FUNC_LOCAL set_resize_to, 8         ; 5 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -470,13 +474,12 @@ DEF_FUNC_LOCAL set_resize, 8            ; 5 pushes, so rsp is 16-aligned
     push r15
 
     mov rbx, rdi                ; set
+    mov r14, rsi                ; the capacity asked for
 
     ; Save old entries and capacity
     mov r12, [rbx + PyDictObject.entries]    ; old entries
     mov r13, [rbx + PyDictObject.capacity]   ; old capacity
 
-    ; New capacity = old * 2
-    lea r14, [r13 * 2]          ; r14 = new capacity
     mov [rbx + PyDictObject.capacity], r14
     mov qword [rbx + PyDictObject.dk_tombstones], 0  ; rehash clears tombstones
     mov qword [rbx + SET_FINGER], 0     ; and the table it indexed is gone
@@ -556,7 +559,130 @@ DEF_FUNC_LOCAL set_resize, 8            ; 5 pushes, so rsp is 16-aligned
     pop rbx
     leave
     ret
+END_FUNC set_resize_to
+
+;; ============================================================================
+;; set_resize(rdi = set) -> void
+;; Rebuild at twice the capacity, which is what an insert that has run out of
+;; room wants.
+;; ============================================================================
+DEF_FUNC_BARE set_resize
+    mov rsi, [rdi + PyDictObject.capacity]
+    add rsi, rsi
+    jmp set_resize_to
 END_FUNC set_resize
+
+;; ============================================================================
+;; set_reserve(rdi = set, rsi = how many more elements are coming) -> void
+;;
+;; Grow ONCE, so that a bulk build of a known size does not rebuild the table
+;; on the way.  Every bulk path started at eight slots and rehashed at 7, 14,
+;; 28, 56...: BUILD_SET (which is handed the element count), both
+;; constructors, update, copy and all four binary operators.  dict_reserve
+;; does the same job for dicts and for the same reason.
+;;
+;; The table holds ob_size + tombstones at three quarters of capacity, so the
+;; room needed is that many slots rounded up to a power of two.  A set that
+;; already has the room is left alone.
+;; ============================================================================
+global set_reserve
+DEF_FUNC_BARE set_reserve
+    mov rax, [rdi + PyDictObject.ob_size]
+    add rax, [rdi + PyDictObject.dk_tombstones]
+    add rax, rsi
+    mov rcx, [rdi + PyDictObject.capacity]
+    mov rdx, rcx
+    shr rdx, 2
+    lea rdx, [rdx + rdx*2]      ; capacity * 3/4
+    cmp rax, rdx
+    jle .srv_done               ; the room is already there
+    cmp rcx, SET_INIT_CAP
+    jae .srv_grow
+    mov ecx, SET_INIT_CAP
+.srv_grow:
+    mov rdx, rcx
+    shr rdx, 2
+    lea rdx, [rdx + rdx*2]
+    cmp rax, rdx
+    jle .srv_resize
+    add rcx, rcx
+    jmp .srv_grow
+.srv_resize:
+    mov rsi, rcx
+    jmp set_resize_to
+.srv_done:
+    ret
+END_FUNC set_reserve
+
+;; ============================================================================
+;; set_clone_into(rdi = a fresh empty set, rsi = the source set) -> void
+;;
+;; Copy the source's table wholesale instead of re-inserting its elements.
+;; The destination takes the source's CAPACITY, so the entry array transfers
+;; verbatim -- tombstones included, because in a flat table an entry's slot IS
+;; its probe position and a tombstone is what keeps a chain alive.  Not one
+;; key is hashed and not one slot is probed.
+;;
+;; copy() and the self-half of `a | b` used to walk every slot and call
+;; set_add per element, which is a hash, a probe, a load-factor test and a
+;; possible resize each.  dict_copy_shallow was changed the same way and for
+;; the same reason.
+;;
+;; The caller owns the destination's type; this touches only the table.
+;; ============================================================================
+global set_clone_into
+DEF_FUNC set_clone_into, 16             ; + 4 pushes = 48, 16-aligned
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, rdi                ; dst
+    mov r12, rsi                ; src
+
+    cmp qword [r12 + PyDictObject.ob_size], 0
+    je .sci_done                ; nothing to carry; the default table is right
+
+    mov rdi, rbx
+    mov rsi, [r12 + PyDictObject.capacity]
+    call set_resize_to          ; the same shape, so the slots line up
+
+    mov rdi, [rbx + PyDictObject.entries]
+    mov rsi, [r12 + PyDictObject.entries]
+    mov rdx, [r12 + PyDictObject.capacity]
+    shl rdx, 4                  ; * SET_ENTRY_SIZE
+    call ap_memcpy
+
+    mov rax, [r12 + PyDictObject.ob_size]
+    mov [rbx + PyDictObject.ob_size], rax
+    mov rax, [r12 + PyDictObject.dk_tombstones]
+    mov [rbx + PyDictObject.dk_tombstones], rax
+
+    ; One reference for each key the copy now holds.  A tombstone carries a
+    ; zero key and owns nothing.
+    mov r13, [rbx + PyDictObject.entries]
+    mov r14, [rbx + PyDictObject.capacity]
+    shl r14, 4
+    add r14, r13
+.sci_loop:
+    cmp r13, r14
+    jae .sci_done
+    mov rax, [r13 + SET_ENTRY_KEY]
+    test rax, rax
+    jz .sci_next
+    INCREF_V rax, rcx
+.sci_next:
+    add r13, SET_ENTRY_SIZE
+    jmp .sci_loop
+
+.sci_done:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC set_clone_into
 
 ;; ============================================================================
 ;; set_add(set, key, key_tag) -> void
@@ -1108,6 +1234,35 @@ DEF_FUNC set_type_call, STC_FRAME
     call set_new
     mov rbx, rax            ; rbx = new set
 
+    ; A set source is CLONED -- its table copies wholesale, so no key is
+    ; hashed and no slot probed.  A list or a tuple knows how many elements
+    ; are coming, so the room is taken once instead of rehashing at 7, 14,
+    ; 28, 56 on the way.
+    mov rax, [r12 + PyObject.ob_type]
+    lea rcx, [rel set_type]
+    cmp rax, rcx
+    je .stc_clone
+    lea rcx, [rel frozenset_type]
+    cmp rax, rcx
+    je .stc_clone
+    lea rcx, [rel list_type]
+    cmp rax, rcx
+    je .stc_reserve
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    jne .stc_sized_done
+.stc_reserve:
+    mov rdi, rbx
+    mov rsi, [r12 + PyListObject.ob_size]
+    call set_reserve
+    jmp .stc_sized_done
+.stc_clone:
+    mov rdi, rbx
+    mov rsi, r12
+    call set_clone_into
+    jmp .stc_cloned
+.stc_sized_done:
+
     ; Get iterator: tp_iter(iterable)
     ; get_iterator_opt, not tp_iter: an object with __getitem__ and no
     ; __iter__ is iterable, and reading the slot rejects it.
@@ -1148,6 +1303,7 @@ DEF_FUNC set_type_call, STC_FRAME
     ; DECREF iterator
     mov rdi, r12
     call obj_decref
+.stc_cloned:
 
     ; NULL is exhaustion and a raise alike.  Read as exhaustion, a raising
     ; __getitem__ or __next__ produced a short set and a stranded exception.
@@ -1359,8 +1515,51 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     V_TEST_PTR r12, rcx
     ja .ftc_not_iterable
 
+    ; frozenset(f) IS f.  A frozenset cannot change, so there is nothing a
+    ; copy of one could be for -- CPython's make_new_set says "frozenset(f)
+    ; is idempotent" and hands the argument straight back.  This built a
+    ; whole second table and answered an object that compared equal but was
+    ; not the same one.  Exact type only: a subclass may carry state that a
+    ; plain frozenset does not.
+    mov rax, [r12 + PyObject.ob_type]
+    lea rcx, [rel frozenset_type]
+    cmp rax, rcx
+    jne .ftc_build
+    INCREF r12
+    mov rax, r12
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ftc_build:
     call set_new
     mov rbx, rax
+
+    ; A set source is cloned and a sized one is presized, exactly as in
+    ; set_type_call above.
+    mov rax, [r12 + PyObject.ob_type]
+    lea rcx, [rel set_type]
+    cmp rax, rcx
+    je .ftc_clone
+    lea rcx, [rel list_type]
+    cmp rax, rcx
+    je .ftc_reserve
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    jne .ftc_sized_done
+.ftc_reserve:
+    mov rdi, rbx
+    mov rsi, [r12 + PyListObject.ob_size]
+    call set_reserve
+    jmp .ftc_sized_done
+.ftc_clone:
+    mov rdi, rbx
+    mov rsi, r12
+    call set_clone_into
+    jmp .ftc_cloned
+.ftc_sized_done:
 
     ; Get iterator
     ; get_iterator_opt, not tp_iter: an object with __getitem__ and no
@@ -1398,6 +1597,7 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
 .ftc_iter_done:
     mov rdi, r12
     call obj_decref
+.ftc_cloned:
 
     ; NULL is exhaustion and a raise alike.  Read as exhaustion, a raising
     ; __getitem__ or __next__ produced a short set and a stranded exception.

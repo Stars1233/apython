@@ -146,3 +146,23 @@ print(frozenset({2}).__rsub__({1}))
 print(sorted(frozenset({1, 2}).__rand__({2, 3})))
 print(sorted(frozenset({1}).__rxor__({2})))
 print(sorted(frozenset({1}).__ror__({2})))
+
+# --- frozenset(f) IS f ----------------------------------------------------
+# A frozenset cannot change, so there is nothing a copy of one could be for.
+# CPython's make_new_set says "frozenset(f) is idempotent" and hands the
+# argument straight back; this built a whole second table and answered an
+# object that compared equal but was not the same one.  Exact type only: a
+# subclass may carry state a plain frozenset does not.
+plain = frozenset({1, 2, 3})
+print(frozenset(plain) is plain, frozenset(set(plain)) is plain)
+print(frozenset(frozenset()) is frozenset(), frozenset(plain) == plain)
+
+
+class FrozenKind(frozenset):
+    pass
+
+
+kind = FrozenKind([1, 2])
+print(frozenset(kind) is kind, type(frozenset(kind)).__name__,
+      sorted(frozenset(kind)))
+print(plain.copy() is plain, kind.copy() is kind, type(kind.copy()).__name__)

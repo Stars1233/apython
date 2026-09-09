@@ -285,31 +285,12 @@ DEF_FUNC set_method_copy
     call set_new_of_type
     mov rbx, rax            ; rbx = new set
 
-    ; Iterate source entries
-    mov r12, [r14 + PyDictObject.entries]
-    mov r13, [r14 + PyDictObject.capacity]
-    xor ecx, ecx
-
-.smcp_loop:
-    cmp rcx, r13
-    jge .smcp_done
-
-    imul rax, rcx, SET_ENTRY_SIZE
-    add rax, r12
-    push rcx
-
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
-    je .smcp_next
-
-    ; Add key to new set
-    mov rdi, rbx            ; new set
-    mov rsi, [rax + SET_ENTRY_KEY]
-    call set_add
-
-.smcp_next:
-    pop rcx
-    inc ecx
-    jmp .smcp_loop
+    ; The table is copied wholesale rather than re-inserted element by
+    ; element; see set_clone_into.
+    extern set_clone_into
+    mov rdi, rbx
+    mov rsi, r14
+    call set_clone_into
 
 .smcp_done:
     mov rax, rbx

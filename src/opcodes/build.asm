@@ -2408,6 +2408,13 @@ DEF_FUNC op_build_set, 24   ; + 0 pushes; a handler is entered ALIGNED, so this 
     call set_new
     mov [rbp - BSE_SET], rax          ; save set
 
+    ; The element count is known, so take the room once.  A twenty-element
+    ; literal grew its table twice on the way, rehashing everything each time.
+    mov rdi, rax
+    mov rsi, [rbp - BSE_COUNT]
+    extern set_reserve
+    call set_reserve
+
     ; Pop items and add to set
     mov rcx, [rbp - BSE_COUNT]
     test rcx, rcx
