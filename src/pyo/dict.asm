@@ -75,9 +75,19 @@ END_FUNC dict_new
 ;; ============================================================================
 ;; dict_copy_shallow(rdi = src dict) -> rax = a new dict, or 0
 ;;
-;; The entries walk is over the DENSE array, so insertion order survives the
-;; copy; `key == 0` skips a hole.  dict_set takes its own references, so the
-;; result owns everything it holds and the source is left untouched.
+;; BOTH TABLES ARE CLONED, not re-inserted.  The copy takes the source's
+;; capacity, so the sparse index array transfers as it stands and not one key
+;; is hashed or probed; the dense array is memcpy'd up to its high-water mark,
+;; holes and all, which is what keeps the index array's dummies pointing at
+;; the right slots and keeps insertion order.  CPython's clone_combined_dict_keys.
+;;
+;; It used to walk every slot of the source and call dict_set per entry -- a
+;; hash, a probe, a tracking check and a version bump for each -- and read
+;; 0.18x of CPython on d_copy and 0.13x on d_from_dict.  Cloning is one
+;; ap_memcpy each way and one pass taking a reference per live element.
+;;
+;; The copy holds exactly what the source holds, so it is collector-tracked
+;; exactly when the source is: the tracked bit needs no re-derivation.
 ;;
 ;; dict.copy() is this, and so is the namespace copy type_from_parts makes:
 ;; a class must not keep the caller's dict as its tp_dict, or `ns['x'] = 1`
@@ -95,25 +105,58 @@ DEF_FUNC dict_copy_shallow      ; 4 pushes, so rsp stays 16-aligned
     jz .dcs_out
     mov r12, rax                ; dst
 
-    mov r13, [rbx + PyDictObject.capacity]
-    xor r14d, r14d
+    ; An empty source needs no table at all: the shared one is already right.
+    cmp qword [rbx + PyDictObject.ob_size], 0
+    je .dcs_done
 
-.dcs_loop:
-    cmp r14, r13
-    jge .dcs_done
-    mov rax, [rbx + PyDictObject.entries]
-    imul rcx, r14, DICT_ENTRY_SIZE
-    add rax, rcx
-    mov rdi, [rax + DictEntry.key]
-    test rdi, rdi
-    jz .dcs_next
-    mov rdx, [rax + DictEntry.value]
-    mov rsi, rdi
     mov rdi, r12
-    call dict_set
+    mov rsi, [rbx + PyDictObject.capacity]
+    call dict_alloc_tables      ; same capacity, so the indices transfer as-is
+
+    mov rdi, [r12 + PyDictObject.entries]
+    mov rsi, [rbx + PyDictObject.entries]
+    mov rdx, [rbx + PyDictObject.dk_nentries]
+    imul rdx, rdx, DICT_ENTRY_SIZE
+    call ap_memcpy
+
+    mov rdi, [r12 + PyDictObject.dk_indices]
+    mov rsi, [rbx + PyDictObject.dk_indices]
+    mov rdx, [rbx + PyDictObject.capacity]
+    shl rdx, 3
+    call ap_memcpy
+
+    mov rax, [rbx + PyDictObject.dk_nentries]
+    mov [r12 + PyDictObject.dk_nentries], rax
+    mov rax, [rbx + PyDictObject.dk_tombstones]
+    mov [r12 + PyDictObject.dk_tombstones], rax
+    mov rax, [rbx + PyDictObject.ob_size]
+    mov [r12 + PyDictObject.ob_size], rax
+
+    ; One reference for each key and value the copy now holds.  A hole in the
+    ; dense array carries a zero key and owns nothing.
+    mov r13, [r12 + PyDictObject.entries]
+    mov r14, [r12 + PyDictObject.dk_nentries]
+    imul r14, r14, DICT_ENTRY_SIZE
+    add r14, r13
+.dcs_loop:
+    cmp r13, r14
+    jae .dcs_track
+    mov rax, [r13 + DictEntry.key]
+    test rax, rax
+    jz .dcs_next
+    INCREF_V rax, rcx
+    mov rax, [r13 + DictEntry.value]
+    INCREF_V rax, rcx
 .dcs_next:
-    inc r14
+    add r13, DICT_ENTRY_SIZE
     jmp .dcs_loop
+
+.dcs_track:
+    ; Tracked exactly when the source is: the copy holds the same objects.
+    cmp qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_next], 0
+    je .dcs_done
+    mov rdi, r12
+    call gc_track
 
 .dcs_done:
     mov rax, r12
@@ -240,36 +283,14 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
     mov rax, [rdi + PyObject.ob_type]
     REQUIRE_DICT_TYPE rax, rcx, .dtc_try_iterable
 
-    ; dict(other_dict) → create new dict and copy entries
-    push rdi                   ; save source dict
-    call dict_new
-    mov r15, rax               ; r15 = new dict
-    pop rdi                    ; rdi = source dict
-
-    ; Copy all entries from source
-    mov r8, [rdi + PyDictObject.capacity]
-    xor ecx, ecx
-.dtc_copy_loop:
-    cmp rcx, r8
-    jge .dtc_copy_done
-    imul rax, rcx, DICT_ENTRY_SIZE
-    add rax, [rdi + PyDictObject.entries]
-    cmp qword [rax + DictEntry.key], 0   ; occupied?
-    je .dtc_copy_next
-    push rcx
-    push r8
-    push rdi
-    mov rdi, r15               ; new dict
-    mov rsi, [rax + DictEntry.key]
-    mov rdx, [rax + DictEntry.value]
-    call dict_set
-    pop rdi
-    pop r8
-    pop rcx
-.dtc_copy_next:
-    inc rcx
-    jmp .dtc_copy_loop
-.dtc_copy_done:
+    ; dict(other_dict) is a copy, and dict_copy_shallow is what a copy is:
+    ; both tables cloned, nothing re-hashed.  The loop that was here walked
+    ; every slot and called dict_set per entry, with a three-register push
+    ; bracket around each call.
+    call dict_copy_shallow
+    mov r15, rax
+    test rax, rax
+    jz .dtc_error
     ; Fall through to add kwargs if present
     jmp .dtc_add_kwargs
 
