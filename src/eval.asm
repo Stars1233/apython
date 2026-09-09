@@ -115,6 +115,7 @@ extern op_import_from
 extern op_binary_subscr_list_int
 extern op_unpack_sequence_tuple
 extern op_store_attr_instance
+extern op_store_attr_slot
 extern op_call_py_exact
 extern op_load_attr_property
 extern op_unpack_sequence_list
@@ -1419,7 +1420,7 @@ opcode_table:
     dq op_store_attr_instance ; 240
     dq op_call_py_exact     ; 241
     dq op_load_attr_property ; 242
-    dq op_unimplemented      ; 243
+    dq op_store_attr_slot   ; 243
     dq op_unimplemented      ; 244
     dq op_unimplemented      ; 245
     dq op_unimplemented      ; 246

@@ -27,6 +27,7 @@
 %include "opcodes.inc"
 
 extern instance_setattr
+extern member_descr_type
 extern dict_get_index
 extern unbound_local_raise
 extern obj_dealloc
@@ -765,9 +766,40 @@ DEF_FUNC_LOCAL sa_try_specialize, STS_FRAME
     cmp edx, TAG_PTR
     jne .sts_name_free              ; and an immediate is never a descriptor
     mov rdi, rax
+
+    ; A __slots__ member is a data descriptor too, and refusing it above is
+    ; what keeps STORE_ATTR_INSTANCE -- which writes into the instance dict --
+    ; away from a name that lives in a slot.  But a slot has a cache of its
+    ; own, and a simpler one: the offset is fixed by the CLASS, so there is no
+    ; index to distrust and no key to compare, and the same version guard
+    ; covers it.  Without this a class with __slots__ specialized nothing at
+    ; all, and every `self.x = v` in its __init__ ran the generic handler.
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rdx, [rel member_descr_type]
+    cmp rcx, rdx
+    je .sts_member
+
     call attr_may_be_data_descr
     test eax, eax
     jnz .sts_out
+    jmp .sts_name_free
+
+.sts_member:
+    ; The offset has to fit the 16-bit cache field, and it is SIGNED: a str
+    ; subclass addresses its slots from the tail with a negative one.  An
+    ; instance is never big enough for it not to fit, but an offset that did
+    ; not would be silently truncated, so it is checked rather than assumed.
+    mov rax, [rdi + PyMemberDescrObject.md_offset]
+    movsx rdx, ax
+    cmp rdx, rax
+    jne .sts_out
+    mov rcx, [rbp - STS_IP]
+    mov edx, [rbp - STS_VER]
+    mov dword [rcx], edx
+    mov word [rcx + 4], ax
+    mov byte [rcx - 2], OP_STORE_ATTR_SLOT
+    jmp .sts_out
+
 .sts_name_free:
 
     LOAD_INST_DICT rbx, r12, .sts_out
