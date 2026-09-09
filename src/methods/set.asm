@@ -598,15 +598,29 @@ DEF_FUNC_LOCAL set_binop_intersection, SMI_FRAME
     call set_new_of_type
     mov rbx, rax            ; new set
 
-    ; Iterate self, add if in other
+    ; Intersection is commutative, so WALK THE SMALLER SIDE and probe the
+    ; other.  It used to walk self always: `set(range(5000)) & {0, 1, 2}`
+    ; visited five thousand slots where three would do, and read 0.00x of
+    ; CPython -- 421ms against 1ms -- on tests/run_set_bench.sh.  CPython's
+    ; set_intersection makes the same swap.  Only the walk changes: the
+    ; result's TYPE still comes from the left operand, which is settled
+    ; above, and the membership question is the same either way round.
+    mov r12, r14                ; walk
+    mov r13, r15                ; probe
+    mov rax, [r15 + PyDictObject.ob_size]
+    cmp rax, [r14 + PyDictObject.ob_size]
+    jae .smi_sides
+    mov r12, r15
+    mov r13, r14
+.smi_sides:
     xor ecx, ecx
 
 .smi_loop:
-    cmp rcx, [r14 + PyDictObject.capacity]
+    cmp rcx, [r12 + PyDictObject.capacity]
     jge .smi_done
     mov [rbp - SMI_IDX], rcx
 
-    mov rdx, [r14 + PyDictObject.entries]
+    mov rdx, [r12 + PyDictObject.entries]
     imul rax, rcx, SET_ENTRY_SIZE
     mov rsi, [rdx + rax + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
@@ -614,7 +628,7 @@ DEF_FUNC_LOCAL set_binop_intersection, SMI_FRAME
 
     INCREF_V rsi, rax                    ; ours for the rest of this turn
     mov [rbp - SMI_KEY], rsi
-    mov rdi, r15            ; other set
+    mov rdi, r13            ; the side being probed
     call set_contains
     mov rsi, [rbp - SMI_KEY]
     test eax, eax
@@ -1427,14 +1441,26 @@ DEF_FUNC set_method_isdisjoint, SMDJ_FRAME
     jz .smdj_fail
     mov r15, rax            ; owned
 
+    ; Disjointness is symmetric, so walk the smaller side, exactly as
+    ; intersection does above and for the same measured reason: this read
+    ; 369ms against CPython's 1ms with a five-thousand-element left operand
+    ; and a three-element right one.
+    mov r12, r14                ; walk
+    mov r13, r15                ; probe
+    mov rax, [r15 + PyDictObject.ob_size]
+    cmp rax, [r14 + PyDictObject.ob_size]
+    jae .smdj_sides
+    mov r12, r15
+    mov r13, r14
+.smdj_sides:
     xor ecx, ecx
 
 .smdj_loop:
-    cmp rcx, [r14 + PyDictObject.capacity]
+    cmp rcx, [r12 + PyDictObject.capacity]
     jge .smdj_true
     mov [rbp - SMDJ_IDX], rcx
 
-    mov rdx, [r14 + PyDictObject.entries]
+    mov rdx, [r12 + PyDictObject.entries]
     imul rax, rcx, SET_ENTRY_SIZE
     mov rsi, [rdx + rax + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
@@ -1442,7 +1468,7 @@ DEF_FUNC set_method_isdisjoint, SMDJ_FRAME
 
     INCREF_V rsi, rax                    ; ours across __eq__
     mov [rbp - SMDJ_KEY], rsi
-    mov rdi, r15
+    mov rdi, r13            ; the side being probed
     call set_contains
     mov rdi, [rbp - SMDJ_KEY]
     push rax
