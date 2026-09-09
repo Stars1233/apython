@@ -2635,21 +2635,28 @@ DEF_FUNC op_set_update
     ; Iterable is a set or frozenset - iterate entries directly
     mov rax, [rsi + PyDictObject.capacity]
     mov [rbp - SU_CAP], rax          ; capacity (reuse slot)
+    ; The source is a quarter full at most -- set_resize sizes from the live
+    ; count and overshoots by four -- so the capacity is the wrong bound.
+    ; r14 counts the live elements down; the capacity stays as the backstop,
+    ; because set_add runs __eq__ and __eq__ can mutate the source.
+    mov r14, [rsi + PyDictObject.ob_size]
     xor ebx, ebx              ; index
 
 .su_set_loop:
+    test r14, r14
+    jz .su_set_done
     cmp rbx, [rbp - SU_CAP]
     jge .su_set_done
 
     mov rax, [rbp - SU_SET]         ; source set
     mov rax, [rax + PyDictObject.entries]
-    imul rcx, rbx, 16         ; SET_ENTRY_SIZE = 16
-    add rax, rcx
+    lea rcx, [rbx + rbx]      ; SET_ENTRY_SIZE = 16, which two lea reach
 
     ; Check if entry has a key
-    mov rsi, [rax + 8]        ; SET_ENTRY_KEY offset = 8
+    mov rsi, [rax + rcx*8 + 8]      ; SET_ENTRY_KEY offset = 8
     test rsi, rsi
     jz .su_set_next
+    dec r14
 
     ; set_add(target_set, key Value)
     push rbx

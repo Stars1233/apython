@@ -197,7 +197,9 @@ END_FUNC set_method_pop
 ;; set_method_clear(args, nargs) -> None
 ;; args[0]=self
 ;; ============================================================================
-DEF_FUNC set_method_clear, 8        ; rsp 16-aligned at the call the macros below expand to
+SMCL_END   equ 8            ; one past the last slot of the table being cleared
+SMCL_FRAME equ 8            ; + 3 pushes = 32, 16-aligned
+DEF_FUNC set_method_clear, SMCL_FRAME
     push rbx
     push r12
     push r13
@@ -207,29 +209,27 @@ DEF_FUNC set_method_clear, 8        ; rsp 16-aligned at the call the macros belo
 
     mov rbx, [rdi]          ; self (set)
     mov r12, [rbx + PyDictObject.entries]
-    mov r13, [rbx + PyDictObject.capacity]
-    xor ecx, ecx
+    mov r13, [rbx + PyDictObject.ob_size]   ; live keys still to release
+    mov rcx, [rbx + PyDictObject.capacity]
+    shl rcx, 4
+    add rcx, r12                            ; one past the end
+    mov [rbp - SMCL_END], rcx
 
 .smc_loop:
-    cmp rcx, r13
-    jge .smc_done
+    ; The live count ends this; the end of the table is the backstop, since
+    ; a __del__ reached from the DECREF can resurrect and mutate.
+    test r13, r13
+    jz .smc_done
+    cmp r12, [rbp - SMCL_END]
+    jae .smc_done
 
-    imul rax, rcx, SET_ENTRY_SIZE
-    add rax, r12
-    push rcx                ; save index
-
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
-    je .smc_next
-
-    ; DECREF key
-    mov rdi, [rax + SET_ENTRY_KEY]
-    V_UNPACK rdi, rsi
-    mov qword [rax + SET_ENTRY_KEY], 0
-    DECREF_VAL rdi, rsi
-
-.smc_next:
-    pop rcx
-    inc ecx
+    mov rdi, [r12 + SET_ENTRY_KEY]
+    add r12, SET_ENTRY_SIZE
+    test rdi, rdi                           ; occupied?
+    jz .smc_loop
+    dec r13
+    mov qword [r12 - SET_ENTRY_SIZE + SET_ENTRY_KEY], 0
+    DECREF_V rdi, rsi
     jmp .smc_loop
 
 .smc_done:

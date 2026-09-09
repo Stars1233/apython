@@ -529,7 +529,9 @@ END_FUNC set_find_slot
 ;; Rebuild the table at the capacity asked for, rehashing nothing: every
 ;; entry carries the hash it was stored with.
 ;; ============================================================================
-DEF_FUNC_LOCAL set_resize_to, 8         ; 5 pushes, so rsp is 16-aligned
+SRT_LIVE  equ 8             ; live entries the rehash has still to move
+SRT_FRAME equ 8             ; + 5 pushes = 48, 16-aligned
+DEF_FUNC_LOCAL set_resize_to, SRT_FRAME
     push rbx
     push r12
     push r13
@@ -561,10 +563,16 @@ DEF_FUNC_LOCAL set_resize_to, 8         ; 5 pushes, so rsp is 16-aligned
     ; Store new entries pointer
     mov [rbx + PyDictObject.entries], r15
 
-    ; Rehash: iterate old entries, re-insert non-empty ones
+    ; Rehash: iterate old entries, re-insert non-empty ones.  ob_size is the
+    ; count of them and nothing here calls out, so the walk stops on the last
+    ; one rather than at the end of an array that is three quarters empty.
+    mov rax, [rbx + PyDictObject.ob_size]
+    mov [rbp - SRT_LIVE], rax
     xor ecx, ecx               ; ecx = index into old entries
 
 .rehash_loop:
+    cmp qword [rbp - SRT_LIVE], 0
+    je .rehash_done
     cmp rcx, r13                ; compared against old capacity
     jge .rehash_done
 
@@ -574,6 +582,7 @@ DEF_FUNC_LOCAL set_resize_to, 8         ; 5 pushes, so rsp is 16-aligned
 
     ; Skip slots that are not occupied
     SET_ENTRY_CLASSIFY rax, .rehash_next, .rehash_next
+    dec qword [rbp - SRT_LIVE]
 
     ; Compute new slot: hash & (new_capacity - 1)
     push rcx                    ; save outer index
@@ -736,14 +745,29 @@ DEF_FUNC set_clone_into, 16             ; + 4 pushes = 48, 16-aligned
     cmp qword [r12 + PyDictObject.ob_size], 0
     je .sci_done                ; nothing to carry; the default table is right
 
-    mov rdi, rbx
-    mov rsi, [r12 + PyDictObject.capacity]
-    call set_resize_to          ; the same shape, so the slots line up
-
+    ; The destination's own table goes back first.  This used to go through
+    ; set_resize_to, which zeroes the new array and then re-probes every
+    ; entry into it -- both wasted, because the memcpy below overwrites
+    ; every byte of it.
+    lea rax, [rel set_empty_entries]
     mov rdi, [rbx + PyDictObject.entries]
+    cmp rdi, rax
+    je .sci_alloc               ; the shared table is not ours to free
+    call ap_free
+.sci_alloc:
+    mov r13, [r12 + PyDictObject.capacity]
+    mov rdi, r13
+    shl rdi, 4                  ; * SET_ENTRY_SIZE
+    call ap_malloc
+    mov [rbx + PyDictObject.entries], rax
+    mov [rbx + PyDictObject.capacity], r13
+    mov qword [rbx + SET_FINGER], 0
+    mov qword [rbx + SET_HASH], -1
+
+    mov rdi, rax
     mov rsi, [r12 + PyDictObject.entries]
-    mov rdx, [r12 + PyDictObject.capacity]
-    shl rdx, 4                  ; * SET_ENTRY_SIZE
+    mov rdx, r13
+    shl rdx, 4
     call ap_memcpy
 
     mov rax, [r12 + PyDictObject.ob_size]
@@ -752,20 +776,20 @@ DEF_FUNC set_clone_into, 16             ; + 4 pushes = 48, 16-aligned
     mov [rbx + PyDictObject.dk_tombstones], rax
 
     ; One reference for each key the copy now holds.  A tombstone carries a
-    ; zero key and owns nothing.
+    ; zero key and owns nothing.  ob_size is exactly how many live keys are
+    ; in there and nothing here can call out, so the count is the bound: the
+    ; empty tail of the table is never touched.
     mov r13, [rbx + PyDictObject.entries]
-    mov r14, [rbx + PyDictObject.capacity]
-    shl r14, 4
-    add r14, r13
+    mov r14, [rbx + PyDictObject.ob_size]
 .sci_loop:
-    cmp r13, r14
-    jae .sci_done
+    test r14, r14
+    jz .sci_done
     mov rax, [r13 + SET_ENTRY_KEY]
-    test rax, rax
-    jz .sci_next
-    INCREF_V rax, rcx
-.sci_next:
     add r13, SET_ENTRY_SIZE
+    test rax, rax
+    jz .sci_loop
+    dec r14
+    INCREF_V rax, rcx
     jmp .sci_loop
 
 .sci_done:
@@ -1298,35 +1322,37 @@ END_FUNC set_remove
 ;; set_dealloc(PyObject *self)
 ;; Free all entries, then free set
 ;; ============================================================================
-DEF_FUNC set_dealloc
+DEF_FUNC set_dealloc, 8         ; + 5 pushes = 48, 16-aligned
     push rbx
     push r12
     push r13
     push r14
+    push r15
 
     mov rbx, rdi                ; self (set)
-    mov r12, [rbx + PyDictObject.entries]
-    mov r13, [rbx + PyDictObject.capacity]
-    xor r14d, r14d              ; index
+    mov r12, [rbx + PyDictObject.entries]    ; the base, for the free below
+    mov r13, [rbx + PyDictObject.ob_size]    ; live keys still to release
+    mov r15, r12                             ; the walking pointer
+    mov r14, [rbx + PyDictObject.capacity]
+    shl r14, 4
+    add r14, r12                             ; one past the end
 
 .dealloc_loop:
-    cmp r14, r13
-    jge .dealloc_entries_done
+    ; Stop when the last live key has been released rather than at the end
+    ; of the table: a set is a quarter full at most.  The capacity is the
+    ; backstop, because a __del__ reached from DECREF_V can resurrect and
+    ; mutate, and then ob_size is no longer what the table holds.
+    test r13, r13
+    jz .dealloc_entries_done
+    cmp r15, r14
+    jae .dealloc_entries_done
 
-    ; entry = entries + index * SET_ENTRY_SIZE
-    imul rax, r14, SET_ENTRY_SIZE
-    add rax, r12
-
-    ; Skip slots that are not occupied
-    SET_ENTRY_CLASSIFY rax, .dealloc_next, .dealloc_next
-
-    ; DECREF key (fat value)
-    mov rdi, [rax + SET_ENTRY_KEY]
-    V_UNPACK rdi, rsi
-    DECREF_VAL rdi, rsi
-
-.dealloc_next:
-    inc r14
+    mov rdi, [r15 + SET_ENTRY_KEY]
+    add r15, SET_ENTRY_SIZE
+    test rdi, rdi                            ; empty or tombstone?
+    jz .dealloc_loop
+    dec r13
+    DECREF_V rdi, rsi
     jmp .dealloc_loop
 
 .dealloc_entries_done:
@@ -1342,6 +1368,7 @@ DEF_FUNC set_dealloc
     mov rdi, rbx
     call gc_dealloc
 
+    pop r15
     pop r14
     pop r13
     pop r12
@@ -2188,30 +2215,34 @@ section .text
 SET_ENTRY_SIZE_GC    equ 16
 SET_ENTRY_KEY_GC     equ 8
 
-DEF_FUNC set_traverse, 8        ; rsp 16-aligned at the call the macros below expand to
+DEF_FUNC set_traverse, 16       ; + 4 pushes = 48, 16-aligned
     push rbx
     push r12
     push r13
+    push r15
 
     mov rbx, rdi
     mov r12, [rbx + PyDictObject.entries]   ; set reuses PyDictObject layout for header
     mov r13, [rbx + PyDictObject.capacity]
+    ; r15, not r14: r14 is where the collector left the visit callback, and
+    ; VISIT_V calls through it.
+    mov r15, [rbx + PyDictObject.ob_size]   ; live keys still to visit
+.st_loop:
+    ; The capacity is the backstop; the live count is what usually ends this.
+    test r15, r15
+    jz .st_done
     test r13, r13
     jz .st_done
-.st_loop:
     dec r13
-    ; Check for empty (key_tag == 0) or tombstone (key_tag == 0xdead)
-    SET_ENTRY_CLASSIFY r12, .st_next, .st_next
-
-    ; Visit key
     mov rdi, [r12 + SET_ENTRY_KEY_GC]
-    VISIT_V rdi, rsi
-
-.st_next:
     add r12, SET_ENTRY_SIZE_GC
-    test r13, r13
-    jnz .st_loop
+    test rdi, rdi                           ; empty or tombstone?
+    jz .st_loop
+    dec r15
+    VISIT_V rdi, rsi
+    jmp .st_loop
 .st_done:
+    pop r15
     pop r13
     pop r12
     pop rbx
@@ -2219,39 +2250,39 @@ DEF_FUNC set_traverse, 8        ; rsp 16-aligned at the call the macros below ex
     ret
 END_FUNC set_traverse
 
-DEF_FUNC set_clear_gc, 8        ; rsp 16-aligned at the call the macros below expand to
+DEF_FUNC set_clear_gc, 16       ; + 4 pushes = 48, 16-aligned
     push rbx
     push r12
     push r13
+    push r14
 
     mov rbx, rdi
     mov r12, [rbx + PyDictObject.entries]
     mov r13, [rbx + PyDictObject.capacity]
-
+    mov r14, [rbx + PyDictObject.ob_size]   ; live keys still to release
+.sc_loop:
+    test r14, r14
+    jz .sc_done
     test r13, r13
     jz .sc_done
-.sc_loop:
     dec r13
-    SET_ENTRY_CLASSIFY r12, .sc_next, .sc_next
-
-    ; DECREF key
+    mov rdi, [r12 + SET_ENTRY_KEY_GC]
+    test rdi, rdi                           ; empty or tombstone?
+    jz .sc_next
+    dec r14
+    mov qword [r12 + SET_ENTRY_KEY_GC], 0   ; before the DECREF, which calls out
     push r12
     push r13
-    mov rdi, [r12 + SET_ENTRY_KEY_GC]
     DECREF_V rdi, rsi
     pop r13
     pop r12
-
-    ; Clear entry
-    mov qword [r12 + SET_ENTRY_KEY_GC], 0
-
 .sc_next:
     add r12, SET_ENTRY_SIZE_GC
-    test r13, r13
-    jnz .sc_loop
+    jmp .sc_loop
 .sc_done:
     mov qword [rbx + PyDictObject.ob_size], 0
 
+    pop r14
     pop r13
     pop r12
     pop rbx
