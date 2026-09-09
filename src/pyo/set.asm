@@ -312,7 +312,6 @@ END_FUNC set_keys_equal
 ;; reusable slot (dl_probe's DL_FREE).
 ;; ============================================================================
 SFS_FREE    equ 8               ; first tombstone seen on this probe, or 0
-SFS_ENTRIES equ 16              ; the entry array the probe is walking
 SFS_FRAME   equ 24              ; 24 + 5 pushes keeps rsp 16-aligned
 DEF_FUNC_LOCAL set_find_slot
     sub rsp, SFS_FRAME
@@ -329,30 +328,35 @@ DEF_FUNC_LOCAL set_find_slot
 .sfs_restart:
     mov qword [rbp - SFS_FREE], 0   ; no reusable slot seen yet
 
-    ; r14 = probes REMAINING, counting down.  It was a count UP compared
-    ; against a capacity reloaded from the set header on every iteration, for
-    ; a bound the load factor already makes unreachable -- the same thing
-    ; dict_lookup's probe was fixed for.
-    mov r14, [rbx + PyDictObject.capacity]
-    mov r15, r14
+    ; EVERYTHING THE LOOP NEEDS IS IN A REGISTER: the entry array, the mask,
+    ; the key and the hash.  The array used to be reloaded from the set
+    ; header on every probe, and the key was loaded twice from the same
+    ; address -- once inside SET_ENTRY_CLASSIFY and again to compare it --
+    ; so four loads answered what two do.
+    mov r14, [rbx + PyDictObject.entries]
+    mov r15, [rbx + PyDictObject.capacity]
     dec r15                     ; mask
 
     ; slot = hash & mask
     mov rcx, r13
     and rcx, r15
 
+    ; There is no probe counter.  A slot that is not empty holds a live entry
+    ; or a tombstone, and set_add keeps their sum at three quarters of
+    ; capacity, so a quarter of the table is always empty and the walk always
+    ; ends.  Counting cost a dec, a branch and a whole register for a bound
+    ; the load factor already made unreachable, which is the register the
+    ; entry array now lives in.
 .find_loop:
-    dec r14
-    js .table_full
-
     ; entry = entries + slot * SET_ENTRY_SIZE.  SET_ENTRY_SIZE is 16, which no
     ; index scale reaches, but two lea do -- and without imul's latency in the
     ; middle of the recurrence.
-    mov rax, [rbx + PyDictObject.entries]
     lea rdx, [rcx + rcx]
-    lea rax, [rax + rdx*8]
+    lea rax, [r14 + rdx*8]
 
-    SET_ENTRY_CLASSIFY rax, .found_empty, .find_tombstone
+    mov rdi, [rax + SET_ENTRY_KEY]
+    test rdi, rdi
+    jz .find_vacant
 
     ; Hash match?
     cmp r13, [rax + SET_ENTRY_HASH]
@@ -364,16 +368,12 @@ DEF_FUNC_LOCAL set_find_slot
     ; interned str and every identity hit -- where this used to V_UNPACK the
     ; entry, call set_keys_equal, V_PACK both operands back and call
     ; obj_richcompare_bool, two call/ret pairs and about seventy instructions
-    ; to conclude what one compare does.  dict_lookup has had its inline
-    ; compare since a52b70d; set was left out of it.
-    mov rdi, [rax + SET_ENTRY_KEY]
+    ; to conclude what one compare does.
     cmp rdi, r12
     je .found_existing
 
     ; Different Values still need the real question asked: 1.0 == 1, and a
     ; user class decides for itself.
-    mov rdx, [rbx + PyDictObject.entries]
-    mov [rbp - SFS_ENTRIES], rdx
     push rcx                    ; save slot
     push rax                    ; save entry ptr
     mov rsi, r12                ; b = the lookup key
@@ -384,13 +384,13 @@ DEF_FUNC_LOCAL set_find_slot
 
     ; __eq__ is arbitrary Python and may have added to THIS set: a resize
     ; frees the entry array and rehashes into a new one, which leaves the
-    ; entry pointer just restored dangling and the mask, the probe budget and
-    ; the remembered free slot all describing a table that no longer exists.
+    ; entry pointer just restored dangling and the mask, the slot and the
+    ; remembered free slot all describing a table that no longer exists.
     ; The probe starts again rather than trusting any of it -- a set whose
     ; keys collide and whose __eq__ grows it used to walk the freed array and
-    ; end at fatal_error("set: hash table full").
-    mov rdx, [rbx + PyDictObject.entries]
-    cmp rdx, [rbp - SFS_ENTRIES]
+    ; end at fatal_error("set: hash table full").  r14 IS the array the walk
+    ; began on, so the check needs no frame slot of its own.
+    cmp r14, [rbx + PyDictObject.entries]
     jne .sfs_restart
     test edi, edi
     jnz .found_existing
@@ -401,9 +401,13 @@ DEF_FUNC_LOCAL set_find_slot
     ; iteration no longer contains.
     jmp .find_next
 
-.find_tombstone:
-    ; Remember the FIRST one and keep probing.  Stopping here would insert a
-    ; duplicate of a key that is still live further along the run.
+.find_vacant:
+    ; A zero key is a tombstone when the hash says so, and a never-used slot
+    ; otherwise.  Remember the FIRST tombstone and keep probing: stopping
+    ; here would insert a duplicate of a key that is still live further along
+    ; the run.
+    cmp qword [rax + SET_ENTRY_HASH], ENTRY_TOMBSTONE_HASH
+    jne .found_empty
     cmp qword [rbp - SFS_FREE], 0
     jne .find_next
     mov [rbp - SFS_FREE], rax
@@ -439,26 +443,6 @@ DEF_FUNC_LOCAL set_find_slot
     pop rbx
     leave
     ret
-
-.table_full:
-    ; No never-used slot anywhere.  That is only fatal if there was no
-    ; reusable one either -- a table made entirely of live entries.  The load
-    ; factor is meant to prevent it; reusing a tombstone here is what makes
-    ; the claim true rather than merely intended.
-    mov rax, [rbp - SFS_FREE]
-    test rax, rax
-    jz .really_full
-    xor edx, edx
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-.really_full:
-    CSTRING rdi, "set: hash table full"
-    call fatal_error
 END_FUNC set_find_slot
 
 ;; ============================================================================
