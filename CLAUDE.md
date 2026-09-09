@@ -24,6 +24,7 @@ make check-cpython-source  # the CPython corpus, compiled by OUR compiler
 
 ```bash
 ./apython --selftest-compile   # source-compiler invariants and tokenizer
+./apython --selftest-alloc     # the pool allocator, without the interpreter
 python3 src/compiler/lint.py   # static checks over the assembly
 ```
 
@@ -266,6 +267,9 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   sets, the position assertions and case folding) and its module wrapper;
   the pattern and match objects live in `src/pyo/`
 - `src/valtest.asm` — `--selftest-value`
+- `src/alloctest.asm` — `--selftest-alloc`: the pool allocator hammered
+  directly, with no objects and no eval loop.  An allocator bug reaches
+  Python as data corruption in code that is correct, so it is caught here
 - `src/builtins.asm` — `PyBuiltinObject`, the core builtins, and `builtins_init`
 - `src/builtins_num.asm` / `src/builtins_obj.asm` / `src/builtins_str.asm` —
   the numeric builtins, the object/iteration/IO builtins, and `str()` with the
