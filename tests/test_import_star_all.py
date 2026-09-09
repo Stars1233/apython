@@ -154,3 +154,54 @@ sys.modules["apy_sub"] = sub
 ns = {}
 exec("from apy_sub import *", ns)
 print(sorted(k for k in ns if not k.startswith("__")))
+
+
+# __dict__ is whatever the object's TYPE answers with, and a property that
+# builds one on every read hands back the only reference there is -- so the
+# walk has to hold it.  Releasing it and keeping a borrowed pointer, which is
+# safe for an instance whose __dict__ is a real field, freed the dict this
+# loop was about to read.
+class FreshDict:
+    @property
+    def __dict__(self):
+        return {"alpha": 1, "beta": 2, "_hidden": 3}
+
+
+sys.modules["apy_fresh"] = FreshDict()
+try:
+    exec("from apy_fresh import *", {})
+    print("NOT REFUSED")
+except AttributeError as e:
+    # CPython takes the NAMES from __dict__ and then getattr's each off the
+    # object, so a __dict__ that is not the object's namespace fails here.
+    print("fresh dict:", e)
+
+
+class FreshDictThatAnswers:
+    alpha = 1
+    beta = 2
+
+    @property
+    def __dict__(self):
+        return {"alpha": 0, "beta": 0}
+
+
+sys.modules["apy_fresh2"] = FreshDictThatAnswers()
+ns = {}
+exec("from apy_fresh2 import *", ns)
+print("names from __dict__, values from the object:",
+      sorted((k, ns[k]) for k in ns if not k.startswith("__")))
+
+# An instance whose __dict__ IS its namespace is the ordinary case, and the
+# two agree there.
+class Ordinary:
+    pass
+
+
+ordinary = Ordinary()
+ordinary.one = 1
+ordinary._two = 2
+sys.modules["apy_ordinary"] = ordinary
+ns = {}
+exec("from apy_ordinary import *", ns)
+print("ordinary:", sorted(k for k in ns if not k.startswith("__")))

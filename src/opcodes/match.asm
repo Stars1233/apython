@@ -223,7 +223,22 @@ IS_ITEMS    equ 56      ; items payload ptr (__all__ path)
 IS_ITEM_TAGS equ 64     ; items tag ptr (__all__ path)
 IS_SQITEM   equ 72      ; sq_item for an __all__ that is neither list nor tuple
 IS_SUBNAME  equ 80      ; the name being imported as a submodule
-IS_FRAME    equ 80      ; sub rsp, 80 (after push rbp + push rbx = 96 total)
+IS_OWNDICT  equ 88      ; a __dict__ this handler OWNS, or 0.  A module's
+                        ; mod_dict is borrowed and needs none of this; an
+                        ; object's __dict__ is whatever its type answers with,
+                        ; and a property that builds one fresh hands back the
+                        ; only reference there is.
+IS_FRAME    equ 96      ; sub rsp, 96 (after push rbp + push rbx = 112 total)
+; Release the __dict__ this handler took a reference to, if it took one.
+%macro IS_DROP_OWNDICT 0
+    mov rdi, [rbp - IS_OWNDICT]
+    test rdi, rdi
+    jz %%none
+    mov qword [rbp - IS_OWNDICT], 0
+    call obj_decref
+%%none:
+%endmacro
+
 extern dict_get
 extern module_type
 extern exc_ImportError_type
@@ -242,6 +257,7 @@ extern obj_decref
     mov rbp, rsp
     push rbx                          ; [rbp - IS_SAVED_RBX] = saved eval-loop bytecode IP
     sub rsp, IS_FRAME
+    mov qword [rbp - IS_OWNDICT], 0
     mov [rbp - IS_MOD], rdi           ; save module ptr
 
     ; A module keeps its namespace in mod_dict.  Anything ELSE keeps it in
@@ -299,21 +315,20 @@ extern obj_decref
     cmp rcx, rdx
     pop rcx
     jne .is_no_dict
-    mov rdi, rcx
-    push rax
-    push rax                        ; pad, as above
-    call obj_decref                 ; the proxy; the dict is the class's own
-    pop rax
-    pop rax
+    ; The PROXY is what is held, not the dict inside it: a class's own dict
+    ; would outlive the proxy, but an object that answers __dict__ with a
+    ; freshly built mappingproxy owns neither, and the dict goes with it.
     mov [rbp - IS_MODDICT], rax
+    mov [rbp - IS_OWNDICT], rcx
     jmp .is_have_dict
 .is_dict_ok:
-    ; Borrowed on purpose: the object is alive on the value stack below, and
-    ; obj_getattr_opt's reference is released with it when the unwinder or the
-    ; ordinary path lets the stack slot go.
+    ; obj_getattr_opt hands back an OWNED reference and this keeps it.  The
+    ; object being alive is not enough: `__dict__` is whatever its type
+    ; answers with, and a property that builds a dict on each read gives back
+    ; the only reference in existence -- releasing it here freed the dict the
+    ; walk below was about to read.
     mov [rbp - IS_MODDICT], rax
-    mov rdi, rax
-    call obj_decref
+    mov [rbp - IS_OWNDICT], rax
     jmp .is_have_dict
 
 .is_no_dict:
@@ -504,6 +519,7 @@ extern obj_decref
     ud2
 .is_all_propagate:
     ; The submodule was found and its body raised; that is the real cause.
+    IS_DROP_OWNDICT
     mov [rel eval_saved_r13], r13
     leave
     jmp eval_exception_unwind
@@ -521,6 +537,12 @@ extern obj_decref
     mov ecx, edx
     V_PACK rsi, rcx
 .is_all_not_seq_raise:
+    ; __all__ came out of the dict borrowed, so it is taken before the dict is
+    ; dropped -- and leaked with it, for the reason .is_dict_no_attr gives.
+    INCREF_V rsi, rax
+    mov [rbp - IS_SUBNAME], rsi
+    IS_DROP_OWNDICT
+    mov rsi, [rbp - IS_SUBNAME]
     mov [rel eval_saved_r13], r13
     CSTRING rdi, `'\x01' object does not support indexing`
     extern raise_type_error_with_name
@@ -560,6 +582,31 @@ extern obj_decref
     je .is_dict_next
 
 .is_dict_copy:
+    ; A MODULE's namespace is its dict, so the value comes straight from the
+    ; entry.  Anything else only lent its __dict__ for the NAMES: CPython
+    ; getattr's each of them off the object, and for an object whose __dict__
+    ; is not its namespace -- one that builds a fresh dict on every read --
+    ; the two answer differently, and CPython's answer is the object's.
+    cmp qword [rbp - IS_OWNDICT], 0
+    je .is_dict_from_entry
+    mov rdi, [rbp - IS_MOD]
+    ; A key that is not a str cannot be an attribute name; CPython's
+    ; PyObject_GetAttr refuses it, and so does obj_getattr_opt by answering 0.
+    call obj_getattr_opt
+    test rax, rax
+    jz .is_dict_no_attr
+    mov rdx, rax
+    push rdx
+    push rdx                          ; and a pad: the frame here is odd
+    mov rdi, [rbp - IS_LOCALS]
+    mov rsi, [rbx + DictEntry.key]
+    call dict_set
+    pop rdi
+    pop rdi
+    DECREF_V rdi, rcx                 ; dict_set took its own reference
+    jmp .is_dict_next
+
+.is_dict_from_entry:
     ; dict_set(locals, key Value, value Value)
     mov rdi, [rbp - IS_LOCALS]
     ; rsi = key Value (already set), value comes straight from the entry
@@ -570,7 +617,28 @@ extern obj_decref
     inc qword [rbp - IS_IDX]
     jmp .is_dict_loop
 
+.is_dict_no_attr:
+    ; The name was in __dict__ and the object will not answer it.  CPython
+    ; lets PyObject_GetAttr's AttributeError out, naming the attribute.
+    ;
+    ; The name belongs to the dict, and dropping the dict is what frees it --
+    ; rbx points INTO its entry array -- so the name is taken first and the
+    ; entry is not read again.  That one reference is leaked: raise_no_attribute
+    ; abandons this frame, as every RAISE in the tree does, and leaking a name
+    ; is the smaller of the two things that can be leaked here.
+    mov rsi, [rbx + DictEntry.key]
+    INCREF_V rsi, rax
+    mov [rbp - IS_SUBNAME], rsi
+    IS_DROP_OWNDICT
+    mov [rel eval_saved_r13], r13
+    mov rdi, [rbp - IS_MOD]
+    mov rsi, [rbp - IS_SUBNAME]
+    xor edx, edx                      ; a get, not a set
+    extern raise_no_attribute
+    jmp raise_no_attribute
+
 .is_done:
+    IS_DROP_OWNDICT
     ; DECREF module
     mov rdi, [rbp - IS_MOD]
     call obj_decref
