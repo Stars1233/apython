@@ -30,6 +30,8 @@ extern int_to_i64
 extern type_type
 extern tuple_new
 extern list_new
+extern list_new_filled
+extern ap_memcpy
 extern list_append
 extern dict_new
 extern dict_set
@@ -615,63 +617,34 @@ DEF_FUNC op_build_list, 24   ; + 0 pushes; a handler is entered ALIGNED, so this
 
     mov [rbp - BL_COUNT], rcx           ; save count
 
-    ; Allocate list with capacity
+    ; The items are already a contiguous array of Values on the value stack,
+    ; which is exactly the shape the list's own array has.  So this is one
+    ; ap_memcpy and nothing else.
+    ;
+    ; It was a `call list_append` per item followed by a SECOND pass calling
+    ; DECREF_V on every one of them -- because list_append takes a reference
+    ; of its own and the stack's reference was being given away, so every
+    ; item was incremented and then immediately decremented.  Moving the
+    ; references wholesale is what CPython's _PyList_FromArraySteal does, and
+    ; it is why that one can memcpy too.
     mov rdi, rcx
-    test rdi, rdi
-    jnz .bl_has_cap
-    mov edi, 4                      ; minimum capacity
-.bl_has_cap:
-    call list_new
-    mov [rbp - BL_LIST], rax          ; save list
+    call list_new_filled
+    mov [rbp - BL_LIST], rax
 
-    ; Pop items and append
-    mov rcx, [rbp - BL_COUNT]
-    test rcx, rcx
-    jz .build_list_done
-
-    ; Calculate base of items on the value stack
-    mov rdi, rcx
-    shl rdi, 3
-    sub r13, rdi               ; pop all items
-
-    xor edx, edx
-.build_list_fill:
-    cmp rdx, [rbp - BL_COUNT]
-    jge .build_list_done
-    push rdx
-    sub rsp, 8                  ; pad: a handler is entered 16-aligned, so the
-                                ; single push above leaves the call 8 out
-    mov rdi, [rbp - BL_LIST]         ; list
-    mov rax, rdx
-    shl rax, 3                ; index * 8
-    mov rsi, [r13 + rax]      ; item (ownership transfers, no extra INCREF)
-    call list_append
-    add rsp, 8
-    pop rdx
-    inc rdx
-    jmp .build_list_fill
-
-.build_list_done:
-    ; list_append does INCREF, but we're transferring ownership from stack
-    ; so we need to adjust: items already had a ref from the stack, list_append
-    ; adds another. We should DECREF each to compensate.
-    ; Actually: stack items have a ref, list_append INCREFs, so now refcount is
-    ; one too high. We need to DECREF each.
     mov rcx, [rbp - BL_COUNT]
     test rcx, rcx
     jz .build_list_push
-    xor edx, edx
-.build_list_fixref:
-    cmp rdx, [rbp - BL_COUNT]
-    jge .build_list_push
-    mov rax, rdx
-    shl rax, 3                ; index * 8
-    mov rdi, [r13 + rax]
-    push rdx
-    DECREF_V rdi, rsi
-    pop rdx
-    inc rdx
-    jmp .build_list_fixref
+
+    mov rdi, rcx
+    shl rdi, 3
+    sub r13, rdi               ; pop all items; their references move
+    mov rsi, r13
+    mov rdi, [rbp - BL_LIST]
+    mov [rdi + PyListObject.ob_size], rcx
+    mov rdi, [rdi + PyListObject.ob_item]
+    mov rdx, rcx
+    shl rdx, 3
+    call ap_memcpy
 
 .build_list_push:
     mov rax, [rbp - BL_LIST]
@@ -1136,47 +1109,26 @@ DEF_FUNC op_list_extend, 72   ; + 0 pushes; a handler is entered ALIGNED, so thi
     ; Generic iterable: use tp_iter/tp_iternext
     jmp .extend_generic
 
+    ; A tuple and a list are the same shape here -- a contiguous Value array
+    ; and a size -- and only the field offsets differ.  Both hand the whole
+    ; run to list_extend_from_array, which grows once and copies once; they
+    ; used to call list_append per element, so a twenty-item list literal
+    ; (which is BUILD_LIST 0 + LOAD_CONST tuple + LIST_EXTEND) walked the
+    ; whole doubling curve.
 .extend_tuple:
-    mov rcx, [rsi + PyTupleObject.ob_size]
-    mov [rbp - LE_COUNT], rcx          ; count
-    test rcx, rcx
-    jz .extend_done
-    mov qword [rbp - LE_I], 0  ; index
-.extend_tuple_loop:
-    mov rdi, [rbp - LE_LIST]          ; list
-    mov rax, [rbp - LE_ITERABLE]         ; iterable (tuple)
-    mov r9, [rax + PyTupleObject.ob_item]
-    mov r8, [rbp - LE_I]
-    mov rsi, [r9 + r8 * 8]    ; payload
-    call list_append
-    inc qword [rbp - LE_I]
-    mov r8, [rbp - LE_I]
-    cmp r8, [rbp - LE_COUNT]
-    jb .extend_tuple_loop
-    jmp .extend_done
+    mov rdx, [rsi + PyTupleObject.ob_size]
+    mov rsi, [rsi + PyTupleObject.ob_item]
+    jmp .extend_from_array
 
 .extend_list:
-    mov rcx, [rsi + PyListObject.ob_size]
-    mov rdx, [rsi + PyListObject.ob_item]
+    mov rdx, [rsi + PyListObject.ob_size]
+    mov rsi, [rsi + PyListObject.ob_item]
 
-    mov [rbp - LE_COUNT], rcx          ; count
-    mov [rbp - LE_CURSOR], rdx          ; items ptr
-
-    test rcx, rcx
-    jz .extend_done
-    mov qword [rbp - LE_I], 0  ; index
-.extend_list_loop:
-    mov rdi, [rbp - LE_LIST]          ; list
-    mov rdx, [rbp - LE_CURSOR]         ; payloads ptr
-    mov rax, [rbp - LE_ITERABLE]         ; iterable list
-    mov r8, [rbp - LE_I]
-    mov rsi, [rdx + r8 * 8]   ; item payload
-    call list_append
-    inc qword [rbp - LE_I]
-    mov r8, [rbp - LE_I]
-    cmp r8, [rbp - LE_COUNT]          ; count
-    jb .extend_list_loop
-    jmp .extend_done          ; or we fall into .extend_generic and re-append
+.extend_from_array:
+    mov rdi, [rbp - LE_LIST]
+    extern list_extend_from_array
+    call list_extend_from_array
+    jmp .extend_done
 
 .extend_generic:
     ; get_iterator_opt, not a tp_iter read: an object with __getitem__

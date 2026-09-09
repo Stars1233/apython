@@ -72,7 +72,7 @@ $(shell mkdir -p build; printf '%s\n' '$(NASMFLAGS)' | cmp -s - $(FLAGSTAMP) \
 # Python compiler for tests
 PYTHON = python3
 
-.PHONY: all clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-re check-source check-pyc check-arity check-syntax lib-pyc
+.PHONY: all clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-re check-source check-pyc check-arity check-syntax check-dtoa check-round lib-pyc
 
 all: $(TARGET) lib-pyc
 
@@ -165,6 +165,12 @@ check-re: $(TARGET)
 # corpus far larger than make check can afford.  Not gated by default.
 check-dtoa: $(TARGET)
 	@bash tests/dtoa_probe.sh
+
+# round(x, ndigits) over ~1.4 million (value, ndigits) pairs: the exact
+# integer fast path and the rendering path behind it, against CPython.  Not
+# gated by default, for the same reason.
+check-round: $(TARGET)
+	@bash tests/round_probe.sh
 
 # CPython test suite targets
 # The CPython-derived test corpus.  One list, used by both the compile step

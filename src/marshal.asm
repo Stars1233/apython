@@ -736,8 +736,16 @@ mdo_long:
     lea rsi, [r15 + PyIntObject.mpz]
     call __gmpz_neg wrt ..plt
 .long_gmp_not_neg:
-    mov rax, r15
-    mov edx, TAG_PTR
+    ; A constant that fits an int64 must not stay mpz-backed: int_binop_unpack
+    ; flattens a compact heap int into an immediate and can do nothing with an
+    ; mpz.  The GMP arm is taken for anything over four 15-bit digits, so
+    ; `1 << 60` -- five digits, and a number that fits in a register -- came
+    ; out of here as a bignum and dragged every arithmetic operation on it into
+    ; GMP for the life of the program.
+    mov rdi, r15
+    extern int_shrink
+    call int_shrink             ; -> rax, a Value: the same object made
+    mov edx, TAG_PTR            ; compact, or an immediate with the object freed
     add rsp, 24
     pop r15
     pop r14

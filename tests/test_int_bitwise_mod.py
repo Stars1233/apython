@@ -68,3 +68,16 @@ def subs():
     return r
 out.append(repr(subs()))
 print("\n".join(out)); print(len(out))
+
+# INT64_MIN // -1 and INT64_MIN % -1.  `idiv` raises #DE for the first -- the
+# quotient has no int64 -- and computes the quotient even when only the
+# remainder is wanted, so the second trapped too.  The operands int_floordiv
+# and int_mod see are int_binop_unpack's, which are full int64s and not
+# immediates, so a COMPACT heap int holding -2**63 reaches the fast path and
+# took the interpreter down with SIGFPE.  Nothing produced such an int until
+# int_shrink learned to collapse an mpz that fits an int64.
+MIN = -(2 ** 63)
+for b in (-1, 1, -2, 2, 3, -3):
+    print(MIN, b, MIN // b, MIN % b, divmod(MIN, b))
+print((MIN).__floordiv__(-1), (MIN).__mod__(-1))
+print((MIN + 1) // -1, (MIN + 1) % -1, (2 ** 63) // -1, (2 ** 63) % -1)

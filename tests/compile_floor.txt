@@ -320,11 +320,14 @@ test_itertools_tail
 test_kwargs
 test_layout_conflict
 test_lazy_instance_dict
+test_list_bulk
 test_list_extend_iterable
 test_list_extend_star
 test_list_fixes
+test_list_in
 test_list_insert_pop
 test_list_remove_eq
+test_list_scan
 test_lists
 test_load_attr_cache
 test_load_attr_method_shadow
@@ -427,6 +430,7 @@ test_re_review
 test_review_regressions
 test_richcompare_bool
 test_richcompare_byname
+test_richcompare_int
 test_round
 test_rsplit_boundaries
 test_select
@@ -453,6 +457,7 @@ test_slicing
 test_slot_clear_and_none
 test_slots_mangling
 test_slots
+test_slots_store_cache
 test_slots_suppression
 test_smallint_identity
 test_smallstr_builtins
@@ -465,6 +470,7 @@ test_smallstr
 test_socket_module
 test_socket
 test_sort_str
+test_sort_timsort
 test_source_import
 test_sre2
 test_sre_bytes

@@ -115,6 +115,7 @@ extern op_import_from
 extern op_binary_subscr_list_int
 extern op_unpack_sequence_tuple
 extern op_store_attr_instance
+extern op_store_attr_slot
 extern op_call_py_exact
 extern op_load_attr_property
 extern op_unpack_sequence_list
@@ -543,7 +544,22 @@ DEF_FUNC_BARE eval_return
     mov [rel eval_saved_r12], rcx
     pop rcx
     mov [rel eval_saved_rbx], rcx
+
+    ; How was this frame entered?  Asked HERE, while r12 is still the frame
+    ; being left -- RESTORE_EVAL_REGS below makes it the caller's again.  A
+    ; frame pushed inline by a bytecode handler has no return address to go
+    ; back to; the handler left a resume label instead, and everything above
+    ; has already put the caller's registers and globals back, so jumping to
+    ; it lands exactly where a `ret` would have.
+    ;
+    ; r9 and r10 carry the two things the resume cannot recover for itself
+    ; across RESTORE_EVAL_REGS.  Nothing is called between, so they survive.
+    ; The compare happens before RESTORE_EVAL_REGS and the branch after it:
+    ; `pop` does not touch the flags, so the answer survives the five of them.
+    cmp dword [r12 + PyFrame.entry_kind], FRAME_ENTRY_CALL
+    mov r9, r12                 ; the frame being left, for the resume to free
     RESTORE_EVAL_REGS
+    jne .er_inline
     test r11, r11
     jnz .er_release
     pop rbp
@@ -561,7 +577,39 @@ DEF_FUNC_BARE eval_return
     pop rax
     pop rbp
     ret
+
+.er_inline:
+    ; The caller is a bytecode handler, not C.  Undo the two words that stand
+    ; where `call eval_frame` would have left rbp and a return address, and
+    ; hand over: r9 = the frame just left, r11 = an exception whose release
+    ; was deferred to the caller's position (or 0), rax:rdx = the returned
+    ; Value, with rax 0 meaning the frame is unwinding.
+    pop rbp
+    add rsp, 8                  ; the poisoned return slot the handler pushed
+    extern eval_inline_resume
+    jmp eval_inline_resume
 END_FUNC eval_return
+
+;; ============================================================================
+;; eval_inline_ret_bug() -> does not return
+;;
+;; The poisoned return address an inline frame carries.
+;;
+;; A frame pushed inline by a bytecode handler is left through .er_inline, not
+;; through `ret`.  The word standing where a return address would be points
+;; here, so that getting PyFrame.entry_kind wrong is a named death rather than
+;; a jump into whatever the value stack happened to hold.  It also supplies
+;; the stack parity a `call` would have: a handler is entered with rsp
+;; 16-aligned and eval_frame's push list is counted from rsp being 8 past it.
+;; ============================================================================
+DEF_FUNC_BARE eval_inline_ret_bug
+    lea rdi, [rel eval_inline_ret_msg]
+    call fatal_error            ; does not return
+END_FUNC eval_inline_ret_bug
+
+section .rodata
+eval_inline_ret_msg: db "eval_return: an inline frame returned through ret", 0
+section .text
 
 ;; ============================================================================
 ;; trace_print_opcode - Print opcode name and arg to stderr
@@ -1419,7 +1467,7 @@ opcode_table:
     dq op_store_attr_instance ; 240
     dq op_call_py_exact     ; 241
     dq op_load_attr_property ; 242
-    dq op_unimplemented      ; 243
+    dq op_store_attr_slot   ; 243
     dq op_unimplemented      ; 244
     dq op_unimplemented      ; 245
     dq op_unimplemented      ; 246

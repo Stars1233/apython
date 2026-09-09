@@ -18,9 +18,16 @@
 ; plain case with one more argument and the callable one slot deeper.  That
 ; layout exists precisely so no argument array has to be built.
 ;
-; What is NOT taken: eval_frame and eval_return, and the frame allocation.
-; Those need the frame pushed without a C-level call, which is a change to how
-; the interpreter is structured rather than a new handler.
+; The frame is now pushed WITHOUT a C-level call: the handler builds it, writes
+; PyFrame.entry_kind, and jumps into eval_frame rather than calling it.
+; eval_return reads that field while the frame is still current, restores the
+; caller exactly as it always did, and jumps to eval_inline_resume below
+; instead of returning.  What is still shared, unchanged, is eval_frame's whole
+; prologue and eval_return's whole restore -- the 19-word state block, the
+; handled_exception swap, prev_frame linking, eval_base_rsp, the recursion
+; count and the trace hooks.
+;
+; The frame allocation is still frame_new's.
 ;
 ; A generator, coroutine or async generator is refused at the guard.  Such a
 ; call returns with the frame still live -- op_return_generator hands it to the
@@ -37,14 +44,20 @@ extern eval_saved_rbx
 extern eval_saved_r13
 extern opcode_dispatch_table
 extern eval_frame
+extern eval_inline_ret_bug
+extern eval_dispatch
 extern eval_exception_unwind
 extern frame_new
+extern frame_alloc_inline
+extern frame_datastack_top
+extern frame_datastack_end
 extern frame_free
 extern func_type
 extern builtins_dict_global
 extern kw_names_pending
 extern current_exception
 extern obj_dealloc
+extern obj_decref
 extern op_call
 
 section .text
@@ -69,17 +82,13 @@ section .text
 ;; back, and the values to release are the arguments plus the callable -- which
 ;; is the slot immediately below them in both shapes.
 ;; ============================================================================
-CPE_NARGS equ 8
-CPE_TOTAL equ 16                ; the arguments the callee actually receives
-CPE_FUNC  equ 24
-CPE_ARGS  equ 32                ; where they start on the value stack
-CPE_RET   equ 40
-CPE_FRAME equ 56                ; a handler is entered with rsp 16-aligned, so
-                                ; push rbp + 56 brings it back to aligned.
-                                ; 56 and not 48 although CPE_IDX is gone: the
-                                ; parity is what the number is for.
-
-DEF_FUNC op_call_py_exact, CPE_FRAME
+;; The handler has no frame of its own.  It used to need one to hold four
+;; values across `call frame_new` and `call eval_frame`; the second is gone and
+;; the first has become a `call frame_pool_get` on the slow path only, so on
+;; the path every call takes nothing is spilled at all.  A handler is entered
+;; with rsp 16-aligned and DEF_FUNC_BARE leaves it there, which is the parity
+;; the one call below wants.
+DEF_FUNC_BARE op_call_py_exact
     ; ecx is the oparg and must survive to .cpe_deopt, so nothing before the
     ; last guard touches rcx.
     cmp qword [rel kw_names_pending], 0
@@ -117,26 +126,63 @@ DEF_FUNC op_call_py_exact, CPE_FRAME
          CO_ASYNC_GENERATOR
     jnz .cpe_deopt
 
-    ; Past the last guard.
-    mov [rbp - CPE_NARGS], rcx
-    mov [rbp - CPE_TOTAL], r10
-    mov [rbp - CPE_FUNC], rdi
-    mov r8, r10
-    neg r8
-    lea r8, [r13 + r8*8]
-    mov [rbp - CPE_ARGS], r8
+    ; Past the last guard.  rdi = the function, rax = its code object,
+    ; ecx = the oparg, r10d = the arguments the callee receives -- and none of
+    ; those is written to memory, because the fast path below calls nothing.
 
-    ; frame_new(code, globals, builtins, locals = NULL)
-    mov rdi, rax
-    mov rsi, [rbp - CPE_FUNC]
-    mov rsi, [rsi + PyFuncObject.func_globals]
+    ; The frame's size, in 64 bits.  co_nlocalsplus and co_stacksize are 32-bit
+    ; fields out of a .pyc, and adding them in 32 would let a crafted pair near
+    ; 2**31 wrap to a small total -- frame_new makes the same point.
+    mov r8d, [rax + PyCodeObject.co_nlocalsplus]
+    mov r9d, [rax + PyCodeObject.co_stacksize]
+    add r9, r8
+    shl r9, 3
+    add r9, FRAME_HEADER_SIZE
+
+    ; The frame comes off the datastack: an add and a compare.  It can, because
+    ; this handler's guards refuse the three shapes that return with a frame
+    ; still live, so an inline frame is always released by the resume of the
+    ; call that made it and these frames nest -- src/frame.asm's header over
+    ; frame_alloc_inline is where that argument is written out.
+    ;
+    ; Before the first inline call top and end are both zero, so the compare
+    ; fails and the region gets made below; after it, this is the whole
+    ; allocation.
+    mov r15, [rel frame_datastack_top]
+    lea rdx, [r15 + r9]
+    cmp rdx, [rel frame_datastack_end]
+    ja .cpe_frame_slow
+    mov [rel frame_datastack_top], rdx
+
+.cpe_frame_ready:
+    ; frame_new's header, minus what this path already knows.  prev_frame is
+    ; not zeroed: eval_frame overwrites it from eval_saved_r12 a few
+    ; instructions later, and nothing runs in between.
+    mov [r15 + PyFrame.code], rax
+    mov rdx, [rdi + PyFuncObject.func_globals]
+    mov [r15 + PyFrame.globals], rdx
     mov rdx, [rel builtins_dict_global]
-    xor ecx, ecx
-    call frame_new
-    mov r15, rax                        ; the register convention leaves r15
-                                        ; free, and eval_frame preserves it
-    mov rcx, [rbp - CPE_FUNC]
-    mov [r15 + PyFrame.func_obj], rcx
+    mov [r15 + PyFrame.builtins], rdx
+    mov [r15 + PyFrame.func_obj], rdi
+    mov qword [r15 + PyFrame.locals], 0     ; a function call has fast locals
+    mov qword [r15 + PyFrame.instr_ptr], 0  ; not a resume, and not suspended
+    mov qword [r15 + PyFrame.stack_ptr], 0
+    mov qword [r15 + PyFrame.call_ip], 0
+    mov qword [r15 + PyFrame.exc_state], 0
+    mov qword [r15 + PyFrame.frame_obj], 0
+    mov qword [r15 + PyFrame.gen_owner], 0
+    mov dword [r15 + PyFrame.exc_depth], 0
+    mov [r15 + PyFrame.nlocalsplus], r8d
+
+    ; How the frame is entered, and what the resume has to undo: N+2 slots go,
+    ; whichever of the two call shapes this was.
+    mov dword [r15 + PyFrame.entry_kind], FRAME_ENTRY_INLINE
+    lea edx, [rcx + 2]
+    mov [r15 + PyFrame.entry_slots], edx
+
+    lea rdx, [r15 + PyFrame.localsplus]
+    lea rsi, [rdx + r8*8]
+    mov [r15 + PyFrame.stack_base], rsi
 
     ; Every parameter has an argument, so the bind is a copy.  Defaults need no
     ; test: a default could not apply to a parameter that already has one.
@@ -155,59 +201,164 @@ DEF_FUNC op_call_py_exact, CPE_FRAME
     ; frame is pool-allocated and untracked, and frameobj_traverse walks
     ; f_back, f_globals, f_locals and f_trace -- so the collector cannot
     ; subtract two references where only one exists.
-    mov rcx, [rbp - CPE_TOTAL]
-    test ecx, ecx
-    jz .cpe_run
-    mov r8, [rbp - CPE_ARGS]
-    xor eax, eax
+    ;
+    ; And it is the frame's initialisation as well.  frame_new zeroed every
+    ; slot and this loop then overwrote the first ones; here only the slots
+    ; BEYOND the arguments -- the cells, the frees and the locals a function
+    ; has not assigned yet -- need zeroing.
+    xor edx, edx
+    test r10d, r10d
+    jz .cpe_zero_rest
+    mov r9, r10
+    neg r9
+    lea r9, [r13 + r9*8]                ; the first argument on the value stack
 .cpe_bind:
-    mov rdx, [r8 + rax*8]
-    mov [r15 + PyFrame.localsplus + rax*8], rdx
-    inc eax
-    cmp eax, ecx
+    mov rsi, [r9 + rdx*8]
+    mov [r15 + PyFrame.localsplus + rdx*8], rsi
+    inc edx
+    cmp edx, r10d
     jb .cpe_bind
+.cpe_zero_rest:
+    cmp edx, r8d
+    jae .cpe_run
+.cpe_zero:
+    mov qword [r15 + PyFrame.localsplus + rdx*8], 0
+    inc edx
+    cmp edx, r8d
+    jb .cpe_zero
 
 .cpe_run:
+    ; Hand the frame to eval_frame WITHOUT calling it.
+    ;
+    ; Two words say everything the far side needs.  entry_kind tells
+    ; eval_return that this frame has no return address to go back to, so that
+    ; after its restore -- which is unchanged, and which is what puts rbx, r12,
+    ; r13 and every eval global back to the caller's -- it jumps to
+    ; eval_inline_resume instead of returning.  entry_slots is what the resume
+    ; cannot work out for itself once the frame is gone: how many value-stack
+    ; slots this call consumed.
     mov rdi, r15
-    call eval_frame
-    mov [rbp - CPE_RET], rax
-    mov rdi, r15
+    ; The word where a return address would be.  It is a real address, not
+    ; padding: if entry_kind is ever wrong, a `ret` lands on a named
+    ; fatal_error rather than in the middle of the value stack.  It also
+    ; supplies the parity -- a handler is entered with rsp 16-aligned, `call`
+    ; would have left rsp 8 past that, and eval_frame's push list is counted
+    ; from there.  Get this wrong and every libc call inside the callee is
+    ; misaligned.
+    push eval_inline_ret_bug    ; one instruction: -no-pie puts .text below
+                                ; 2**31, so the immediate sign-extends to
+                                ; itself
+    ;
+    ; rbx is deliberately NOT advanced past the CACHE entries here.  The
+    ; unwinder reads the current IP from eval_saved_rbx, which DISPATCH set to
+    ; this CALL's own address, and a propagate out of the callee has to find it
+    ; there -- exactly as .cpe_propagate relied on.  The resume advances it.
+    jmp eval_frame
+
+.cpe_frame_slow:
+    ; Out of line, and the only place this handler calls anything: the region
+    ; does not exist yet, or has no room and the pool has to serve.  Four
+    ; pushes, so rsp keeps the alignment it was entered with.
+    push rcx
+    push r10
+    push rdi
+    push rax
+    mov rdi, r9
+    call frame_alloc_inline
+    mov r15, rax
+    pop rax
+    pop rdi
+    pop r10
+    pop rcx
+    ; r8 held co_nlocalsplus and is caller-saved, so the call above took it.
+    ; Re-reading it is one instruction and this arm is not the hot one; pushing
+    ; it would have cost the alignment a second slot as well.
+    mov r8d, [rax + PyCodeObject.co_nlocalsplus]
+    jmp .cpe_frame_ready
+
+.cpe_deopt:
+    mov byte [rbx - 2], OP_CALL
+    jmp op_call
+END_FUNC op_call_py_exact
+
+;; ============================================================================
+;; eval_inline_resume(r9 = the frame just left, r11 = a deferred exception or 0,
+;;                    rax:rdx = the returned Value) -> nothing; dispatches on
+;;                    in the caller, or unwinds
+;;
+;; The far side of the jump above.
+;;
+;; eval_return jumps here in place of returning, having already put back
+;; everything a `ret` would have: rbx, r12, r13, r14, rbp and all thirteen
+;; scoped globals.  So this runs exactly where the instruction after
+;; `call eval_frame` used to, and does exactly what stood there.
+;;
+;;   r9  = the frame just left, to free
+;;   r11 = an exception whose release eval_return deferred to here, or 0
+;;   rax:rdx = the returned Value; rax == 0 means the callee is unwinding
+;;
+;; The order below is the order that code had, and two parts of it are not
+;; free to move.  The deferred release comes before frame_free because that is
+;; where it was -- eval_return did it last, the caller did frame_free first --
+;; and its whole point is to run a __del__ where the caller's next opcode
+;; would.  entry_slots is read before frame_free because after it the frame is
+;; back in the pool.
+;; ============================================================================
+DEF_FUNC_BARE eval_inline_resume
+    ; The stack top first, while the frame is still there to be asked.  r13 is
+    ; callee-saved, so lowering it now means nothing below has to carry the
+    ; count across a call -- and the slots are still physically there, which is
+    ; what makes finding the callable below work.
+    mov r10d, dword [r9 + PyFrame.entry_slots]
+    shl r10, 3
+    sub r13, r10                        ; N+2 slots go, whichever shape it was
+
+    ; rdx is DEAD: it is the fat-pair tag, and the code this replaces clobbered
+    ; it in its own DECREF before pushing rax.  So only the payload has to
+    ; survive the two calls below, and r15 -- free by the register convention,
+    ; and between frames here -- carries it instead of a stack slot.
+    mov r15, rax
+
+    ; The exception eval_return deferred, released before the frame is freed,
+    ; which is the order it had: eval_return did this last and the caller did
+    ; frame_free first.  Its point is that a __del__ runs where the caller's
+    ; next opcode would, and that is here.
+    test r11, r11
+    jz .eir_no_deferred
+    push r9
+    push r9                             ; twice: rsp keeps its alignment
+    mov rdi, r11
+    call obj_decref
+    pop r9
+    pop r9
+.eir_no_deferred:
+    mov rdi, r9
     call frame_free
 
     ; Release the callable, and only the callable.  The arguments' references
     ; went into the frame at .cpe_bind and frame_free has just given them back;
-    ; releasing them here as well would be one DECREF too many.  The callable
-    ; is the slot immediately below the arguments in both shapes -- the method
-    ; in one, the function in the other -- and in the plain shape the NULL two
-    ; slots down needs nothing.
-    mov r15, [rbp - CPE_ARGS]
-    mov rdi, [r15 - 8]
-    DECREF_V rdi, rdx
+    ; releasing them here as well would be one DECREF too many.
+    ;
+    ; Which slot it is depends on the call's shape, and the stack still says
+    ; which: the deepest of the consumed slots is the method in one shape and a
+    ; NULL in the other, and in the second the callable is the slot above it.
+    mov rdi, [r13]
+    test rdi, rdi
+    jnz .eir_have_callable
+    mov rdi, [r13 + 8]
+.eir_have_callable:
+    DECREF_V rdi, rcx
 
-    ; N+2 slots go, whichever shape this was.
-    mov rcx, [rbp - CPE_NARGS]
-    add rcx, 2
-    shl rcx, 3
-    sub r13, rcx
-
-    mov rax, [rbp - CPE_RET]
+    mov rax, r15
     test rax, rax
-    jz .cpe_propagate
+    jz .eir_propagate
     VPUSH rax
     add rbx, 6                          ; skip 3 CACHE entries
-    leave
     DISPATCH
 
-.cpe_propagate:
-    ; The callee raised.  As op_call's own propagate: rbx is not advanced,
-    ; because the unwinder reads the current IP from eval_saved_rbx, which
-    ; DISPATCH set.
-    leave
+.eir_propagate:
+    ; The callee raised and found no handler.  rbx is still the CALL's own
+    ; address, which is what the unwinder reads out of eval_saved_rbx.
     mov [rel eval_saved_r13], r13
     jmp eval_exception_unwind
-
-.cpe_deopt:
-    mov byte [rbx - 2], OP_CALL
-    leave
-    jmp op_call
-END_FUNC op_call_py_exact
+END_FUNC eval_inline_resume

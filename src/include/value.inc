@@ -517,6 +517,36 @@ extern val_unpack_cold
 ; The %ifnidni is not cosmetic: DECREF_V's operand is already rdi at a great
 ; many sites, and without the guard the macro emits `mov rdi, rdi` there --
 ; 593 of them in the linked binary before this was added.
+; VALUE_EQ_FAST elem, needle, scratch, equal_label, unequal_label
+;
+; The two questions about `==` that a Value can answer without calling
+; anything, for the loops that scan a container comparing every element
+; against one needle.  Falls THROUGH when neither applies, so the caller's
+; general comparison follows immediately.
+;
+;   - identical Values are equal.  obj_richcompare_bool answers this in its
+;     own first compare, but only after two INCREF_Vs, a frame and a call --
+;     and over a container of small integers, where every element IS its
+;     Value, that compare is the only thing it does.
+;   - two int immediates that are not the same Value are NOT equal, the
+;     encoding being one-to-one.  That is the other half: the misses, which
+;     the identity arm cannot settle and which are every element of the
+;     container when the answer is "not found".
+;
+; Anything else -- a bool, which is a heap singleton; a heap integer, which
+; is outside the immediate range; a float; a class with its own __eq__ --
+; falls through and is compared properly.
+%macro VALUE_EQ_FAST 5          ; %1 elem, %2 needle, %3 scratch, %4 eq, %5 ne
+    cmp %1, %2
+    je %4
+    V_IS_INT %1, %3
+    jb %%general
+    V_IS_INT %2, %3
+    jb %%general
+    jmp %5
+%%general:
+%endmacro
+
 %macro DECREF_V 2               ; %1 = value, %2 = scratch (clobbered)
     lea %2, [%1 - 1]
     cmp %2, [rel v_ptr_max_m1]

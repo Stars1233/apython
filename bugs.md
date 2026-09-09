@@ -89,6 +89,26 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
+- **Indexing a non-ASCII string is O(n), so a loop over one is quadratic.**
+  `str_cp_offset` and `str_byte_to_cp` walk from byte 0 every time, because
+  nothing remembers where the last code point was.  `s[i]` in a loop, a slice
+  of a wide string and `str.find`'s conversion of its answer back to a code
+  point index all pay it; CPython's strings are fixed-width per object and pay
+  nothing.  `tests/run_str_bench.sh` runs its wide indexing and slicing cases
+  at 50-100x fewer iterations than their ASCII partners for this reason alone,
+  which is why those rows cannot be compared with the rest of the suite.
+
+  The walk itself is as cheap as it can be made -- the per-code-point call was
+  inlined and cost 20% of the instructions of a wide indexing loop -- but the
+  shape is what is wrong.  What closes it is a cursor on the string object:
+  one word holding the last (code point index, byte offset) pair, which makes
+  forward sequential indexing O(1) amortised.  A zeroed cursor is valid for
+  every string, so it needs no invalidation and strings are immutable in any
+  case.  It is not done here because it moves `PyStrObject.data` and every one
+  of the twenty-odd places that build a string by hand has to initialise the
+  new field -- and a missed one is a wrong CHARACTER out of a wide string, in
+  a path the suite barely exercises, rather than a crash.
+
 - **`array.fromfile` and `array.tofile` are absent.**  They want the file
   object's own read and write, and every caller in CPython's suite reaches
   for `frombytes` and `tobytes` instead.

@@ -24,7 +24,7 @@ extern kw_names_pending
 %endmacro
 
 extern none_singleton
-extern str_from_cstr_heap
+extern str_intern_cstr
 extern dict_get
 extern obj_decref
 extern obj_incref
@@ -45,21 +45,38 @@ extern raise_exception
 ;; call site and comparing pointers is enough to recognise one.  A miss interns
 ;; the string once and keeps it forever; the interned object then caches its own
 ;; ob_hash, so the dict probes stop rehashing too.  Two call sites that spell
-;; the same name in different literals simply get two entries, and dict lookup
-;; matches them by value regardless.
+;; the same name in different literals simply get two entries, and -- because
+;; the miss goes through the intern table -- both entries hold the SAME object,
+;; which is what lets dict_lookup answer by pointer.  It said "interns" here
+;; long before it did: the miss arm called str_from_cstr_heap, so the name a
+;; __init__ lookup probed with was a different object from the one
+;; src/methods/init.asm had put in object's tp_dict, and every such probe ran
+;; a length compare and an ap_memcmp.
 ;;
 ;; The table never evicts.  Distinct dunder literals number a few dozen against
 ;; 256 slots, so the probe terminates.
+;;
+;; The hash has to be multiplicative and not a shift.  The sixty dunder_* names
+;; are one contiguous 565-byte run of .rodata, so (addr >> 4) put all of them
+;; into thirty-six CONSECUTIVE slots: seventy-odd keys, one primary cluster, and
+;; linear probing walking most of it.  Simulated over the sixty-one names nm can
+;; put a symbol on, that averaged 13.6 probes per lookup with a worst case of
+;; 55, and callgrind measured the function at 33.6% of a `class C: pass; C()`
+;; loop -- 227 instructions for a body whose hit path is ten.  Multiplying by
+;; the 64-bit golden-ratio constant and taking the TOP byte mixes the low
+;; address bits into the slot number, which is what a shift cannot do; the same
+;; simulation gives 1.1 probes and a worst case of 3.
 ;; ============================================================================
 DUNDER_CACHE_SLOTS equ 256
+DUNDER_HASH_MUL    equ 0x9E3779B97F4A7C15   ; 2^64 / phi, odd, all bits set-ish
 
 DEF_FUNC dunder_name_obj
     push rbx
     push r12                    ; 2 pushes + frame 0 = 16
     mov rbx, rdi
-    mov rax, rdi
-    shr rax, 4                  ; literals are not 16-byte aligned; spread them
-    and rax, DUNDER_CACHE_SLOTS - 1
+    mov rax, DUNDER_HASH_MUL
+    imul rax, rdi
+    shr rax, 56                 ; the top byte: 256 slots, so eight bits
     mov r12, rax
 
 .probe:
@@ -83,7 +100,7 @@ DEF_FUNC dunder_name_obj
 
 .miss:
     mov rdi, rbx
-    call str_from_cstr_heap     ; kept for the life of the process
+    call str_intern_cstr        ; kept for the life of the process
     lea rcx, [rel dunder_cache_keys]
     mov [rcx + r12*8], rbx
     lea rcx, [rel dunder_cache_vals]

@@ -9,9 +9,9 @@
 # Every loop is INSIDE A FUNCTION, for the reason the other three say and for
 # one more that is specific to strings: `s += x` at module scope compiles to
 # STORE_NAME, and CPython's BINARY_OP_INPLACE_ADD_UNICODE specialization only
-# fires ahead of a STORE_FAST.  Measured at module scope the two interpreters
-# look level; measured in a function CPython is linear and this one is
-# quadratic.  DIVERGENCES.md records the module-scope reading.
+# fires ahead of a STORE_FAST.  Measured at module scope both interpreters are
+# quadratic and look level, which is how the quadratic one here went unnoticed
+# for as long as it did.
 #
 # The run diffs both interpreters' OUTPUT on every case before it times
 # anything.  Note what that forbids: no case may expose a hash VALUE, because
@@ -21,11 +21,15 @@
 # Cases come in ASCII and non-ASCII pairs.  The wide inputs are the same
 # LENGTH IN CODE POINTS as the ASCII ones, so an operation that is O(code
 # points) compares like for like and one that is O(bytes) shows what the
-# encoding costs.  Wide iteration counts are 50-100x lower for indexing and
-# slicing on purpose: str_cp_offset walks from byte 0 with a call per code
-# point once ob_size != ob_length, so indexing a wide string in a loop is
-# quadratic with a call in the inner loop, and at ASCII counts it does not
-# finish.
+# encoding costs.
+#
+# Wide iteration counts for indexing and slicing are 50-100x lower than their
+# ASCII partners' BECAUSE OF A BUG, not by design: str_cp_offset walks from
+# byte 0, so a loop that indexes a non-ASCII string is quadratic here and
+# CPython's is not.  At ASCII counts those cases do not finish.  Reading their
+# ratios is therefore reading a bug and a millisecond of CPython time, and
+# neither number means much until bugs.md's entry is closed and the counts are
+# raised to match.
 #
 # Usage: bash tests/run_str_bench.sh
 set -u

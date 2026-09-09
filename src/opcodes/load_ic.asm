@@ -44,6 +44,9 @@ extern op_store_attr
 
 extern func_type
 extern frame_new
+extern frame_alloc_inline
+extern frame_datastack_top
+extern frame_datastack_end
 extern frame_free
 extern eval_frame
 extern eval_exception_unwind
@@ -528,22 +531,68 @@ DEF_FUNC op_load_attr_property, LAP_FRAME
     mov [rbp - LAP_FN], rsi
     INCREF rsi
 
-    ; frame_new(code, globals, builtins, locals = NULL), as op_call_py_exact.
-    mov rdi, rax
-    mov rsi, [rsi + PyFuncObject.func_globals]
-    mov rdx, [rel builtins_dict_global]
-    xor ecx, ecx
-    call frame_new
-    mov r15, rax                    ; the register convention leaves r15 free,
-                                    ; and eval_frame preserves it
-    mov rcx, [rbx + 4]
-    mov [r15 + PyFrame.func_obj], rcx
+    ; The frame, built here rather than by frame_new -- the code object, its
+    ; two size fields and the getter's globals are all in hand, and the one
+    ; argument is the object.  Same shape as op_call_py_exact's, and off the
+    ; same datastack: this frame nests exactly as an inline call's does,
+    ; because the guards above refuse every shape that could return with it
+    ; still live, and it is released unconditionally below.
+    ;
+    ; It is NOT entered inline -- entry_kind stays FRAME_ENTRY_CALL and
+    ; eval_frame is still called -- because this handler's resume has a
+    ; __getattr__ fallback in it that the call's does not.
+    mov r8d, [rax + PyCodeObject.co_nlocalsplus]
+    mov r9d, [rax + PyCodeObject.co_stacksize]
+    add r9, r8
+    shl r9, 3
+    add r9, FRAME_HEADER_SIZE
 
-    ; The getter's one parameter is the object.
+    mov r15, [rel frame_datastack_top]
+    lea rdx, [r15 + r9]
+    cmp rdx, [rel frame_datastack_end]
+    ja .lap_frame_slow
+    mov [rel frame_datastack_top], rdx
+
+.lap_frame_ready:
+    ; frame_new's header, minus prev_frame -- eval_frame overwrites that from
+    ; eval_saved_r12 a few instructions later, and nothing runs in between.
+    ; entry_slots is not written: nothing reads it while entry_kind is
+    ; FRAME_ENTRY_CALL.
+    mov [r15 + PyFrame.code], rax
+    mov rdx, [rsi + PyFuncObject.func_globals]
+    mov [r15 + PyFrame.globals], rdx
+    mov rdx, [rel builtins_dict_global]
+    mov [r15 + PyFrame.builtins], rdx
+    mov [r15 + PyFrame.func_obj], rsi
+    mov qword [r15 + PyFrame.locals], 0
+    mov qword [r15 + PyFrame.instr_ptr], 0
+    mov qword [r15 + PyFrame.stack_ptr], 0
+    mov qword [r15 + PyFrame.call_ip], 0
+    mov qword [r15 + PyFrame.exc_state], 0
+    mov qword [r15 + PyFrame.frame_obj], 0
+    mov qword [r15 + PyFrame.gen_owner], 0
+    mov dword [r15 + PyFrame.exc_depth], 0
+    mov dword [r15 + PyFrame.entry_kind], FRAME_ENTRY_CALL
+    mov [r15 + PyFrame.nlocalsplus], r8d
+    lea rdx, [r15 + PyFrame.localsplus]
+    lea rcx, [rdx + r8*8]
+    mov [r15 + PyFrame.stack_base], rcx
+
+    ; The getter's one parameter is the object, and that store is also this
+    ; slot's initialisation -- only the slots beyond it need zeroing.
     mov rdx, [rbp - LAP_OBJ]
     INCREF_V rdx, rcx
     mov [r15 + PyFrame.localsplus], rdx
+    mov edx, 1
+    cmp edx, r8d
+    jae .lap_run
+.lap_zero:
+    mov qword [r15 + PyFrame.localsplus + rdx*8], 0
+    inc edx
+    cmp edx, r8d
+    jb .lap_zero
 
+.lap_run:
     mov rdi, r15
     call eval_frame
     mov [rbp - LAP_RET], rax
@@ -594,6 +643,20 @@ DEF_FUNC op_load_attr_property, LAP_FRAME
     leave
     mov [rel eval_saved_r13], r13
     jmp eval_exception_unwind
+
+.lap_frame_slow:
+    ; The region does not exist yet, or has no room: frame_alloc_inline makes
+    ; it or falls back to the pool.  Two pushes, so rsp keeps its alignment.
+    push rax
+    push rax
+    mov rdi, r9
+    call frame_alloc_inline
+    mov r15, rax
+    pop rax
+    pop rax
+    mov rsi, [rbp - LAP_FN]         ; the getter, and r8 with it: both are
+    mov r8d, [rax + PyCodeObject.co_nlocalsplus]    ; caller-saved
+    jmp .lap_frame_ready
 
 .lap_deopt:
     ; LOAD_ATTR's arg is (name index << 1 | flag) and carries an EXTENDED_ARG
@@ -732,3 +795,72 @@ DEF_FUNC_BARE op_store_attr_instance
     mov byte [rbx - 2], OP_STORE_ATTR
     jmp op_store_attr
 END_FUNC op_store_attr_instance
+
+
+;; ============================================================================
+;; op_store_attr_slot (243) -> nothing; writes TOS1 into TOS's __slots__ slot
+;;
+;; `self.x = v` where x is a __slots__ member.  STORE_ATTR_INSTANCE cannot
+;; serve it and must not try -- a member descriptor is a data descriptor, and
+;; that handler writes into the instance dict, which a slotted class does not
+;; have.  So a class with __slots__ specialized NOTHING: every store ran the
+;; generic handler, and callgrind put three type_lookup_cached calls and
+;; instance_setattr's own walk behind each one.  Two stores in an __init__
+;; were a fifth of a `C(1, 2)` construction loop.
+;;
+;; A slot is simpler than a dict entry, and the cache is simpler with it: the
+;; offset is fixed by the CLASS, so there is no index to distrust and no key
+;; to compare.  One version guard answers everything -- that tp_setattr is
+;; instance_setattr, that this name resolves to a member descriptor of this
+;; class, and that its md_offset is the cached one.  All three move only
+;; through type_setattr, which runs type_refresh_attr_flags, which stamps a
+;; new version down every subclass.
+;;
+;; CACHE, 8 bytes -- STORE_ATTR's four entries, laid out as 240's are:
+;;     [+0]   the type's version, 4 bytes
+;;     [+4]   md_offset, a SIGNED 16-bit byte offset.  Signed because a str
+;;            subclass addresses its slots from the tail with a negative one;
+;;            16-bit because [+6] is the backoff counter 240 defined, and the
+;;            install site refuses an offset that does not fit.
+;;     [+6]   the deopt backoff counter
+;; ============================================================================
+DEF_FUNC_BARE op_store_attr_slot
+    ; ecx is the oparg and must survive to .sas_deopt, which hands it to
+    ; op_store_attr -- so nothing below touches rcx until the last guard has
+    ; passed.  Stack: ... value, obj -- obj on top.
+    mov rdi, [r13 - 8]              ; the object
+    V_TEST_PTR rdi, rax
+    ja .sas_deopt
+
+    mov rax, [rdi + PyObject.ob_type]
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    shr rdx, TYPE_VERSION_SHIFT
+    cmp edx, dword [rbx]            ; CACHE[+0] = version
+    jne .sas_deopt
+
+    ; Hit.  Past the last guard, so rcx is free.
+    movsx rdx, word [rbx + 4]       ; CACHE[+4] = md_offset, signed
+    SLOT_ADDR rsi, rdi, rdx         ; rsi = &slot
+
+    mov r8, [r13 - 16]              ; the value, owned by the stack
+    mov rax, [rsi]                  ; whatever the slot held, 0 when unset
+    mov [rsi], r8                   ; the slot takes the stack's reference
+    sub r13, 16                     ; both operands are consumed
+
+    ; The object goes in a callee-saved register: releasing the old value can
+    ; call obj_dealloc, and that clobbers every caller-saved one.
+    mov r15, rdi
+    XDECREF_V rax, rcx              ; NULL-safe: the slot may never have been set
+    DECREF_V r15, rcx               ; the object's stack reference
+
+    add rbx, 8                      ; skip 4 CACHE entries
+    DISPATCH
+
+.sas_deopt:
+    ; As 240's: STORE_ATTR's arg carries an EXTENDED_ARG as soon as a module
+    ; has enough names, so the deopt jumps with ecx rather than rewinding rbx.
+    ; Nothing has been popped.
+    mov word [rbx + 6], 63          ; STS_BACKOFF_N, in src/opcodes/store.asm
+    mov byte [rbx - 2], OP_STORE_ATTR
+    jmp op_store_attr
+END_FUNC op_store_attr_slot

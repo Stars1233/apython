@@ -2,7 +2,7 @@
 ; Manages execution frames for the bytecode interpreter
 ;
 ; Frame pooling: 4 size classes (256, 512, 1024, 2048 bytes).
-; Each class has a freelist (singly-linked, max POOL_MAX_FREE entries).
+; Each class has a freelist (singly-linked, max FRAME_POOL_MAX_FREE entries).
 ; frame_pool_get(size) checks freelist first, falls back to ap_malloc.
 ; frame_pool_put(frame, size) pushes to freelist or ap_free if full.
 
@@ -14,19 +14,79 @@ extern ap_free
 extern obj_dealloc
 extern obj_decref
 
-; Pool constants
-POOL_CLASS_0  equ 256
-POOL_CLASS_1  equ 512
-POOL_CLASS_2  equ 1024
-POOL_CLASS_3  equ 2048
-POOL_MAX_FREE equ 16      ; max frames per freelist
+; The pool's constants live in object.inc, beside PyFrame: the specialized
+; call pops the smallest class inline and needs them too.  A pool record is
+; (head, count), selected as a unit with `lea rcx, [rel frame_pool_free_N]`
+; and then indexed -- the count was once reached as a bare [rcx + 8], which
+; made frame_pool_count_N decoration.
 
-; A pool record is (head, count), selected as a unit with `lea rcx, [rel
-; pool_free_N]` and then indexed.  The count was reached as a bare [rcx + 8],
-; which made pool_count_N decoration: inserting a field between the two would
-; have silently moved which dword holds the cap.
-POOL_HEAD   equ 0
-POOL_COUNT  equ 8
+
+;; ============================================================================
+;; THE FRAME DATASTACK
+;;
+;; A frame pushed inline by the specialized call has a lifetime the
+;; interpreter can prove.  That handler's guards refuse CO_GENERATOR,
+;; CO_COROUTINE and CO_ASYNC_GENERATOR -- the only shapes that return with the
+;; frame still live -- so such a frame is always released by the resume of the
+;; very call that made it.  Inline calls nest, so their frames nest, so the
+;; region they come from can be a bump pointer: an allocation is an add and a
+;; compare, a release is one store, against a four-way size ladder and a
+;; capped freelist each way.
+;;
+;; Everything else still comes from the pool -- module bodies, eval(), class
+;; bodies, generators, func_call's slow path -- so nothing about a generator
+;; frame's lifetime changes, and frame_free tells the two apart by address.
+;;
+;; The region is not grown.  Running out falls back to the pool, which is
+;; correct if slower, and stays correct while both are in use: a datastack
+;; frame's callee may come from the pool without disturbing the top, and the
+;; datastack frames that remain still nest among themselves.
+;;
+;; Four megabytes is about sixteen thousand frames of the smallest size,
+;; against a default recursion limit of a thousand.  It is malloc'd on the
+;; first inline call rather than at startup, so a program that makes none --
+;; and the .pyc probes are full of them -- pays nothing.
+;; ============================================================================
+FRAME_DATASTACK_BYTES equ 4 * 1024 * 1024
+
+;; ============================================================================
+;; frame_alloc_inline(rdi = size) -> rax = a block of at least that size
+;;
+;; The slow half of the specialized call's frame allocation: the fast half is
+;; four instructions inlined in the handler, and this is where it lands when
+;; the region does not exist yet or has no room.  Falling back to the pool is
+;; a tail call, so the handler makes one call either way.
+;; ============================================================================
+DEF_FUNC frame_alloc_inline
+    cmp qword [rel frame_datastack_base], 0
+    je .fai_create
+.fai_have_region:
+    mov rax, [rel frame_datastack_top]
+    lea rcx, [rax + rdi]
+    cmp rcx, [rel frame_datastack_end]
+    ja .fai_pool                ; no room: the pool, which can always grow
+    mov [rel frame_datastack_top], rcx
+    leave
+    ret
+.fai_pool:
+    leave
+    jmp frame_pool_get          ; rdi is still the size
+
+.fai_create:
+    push rdi
+    push rdi                    ; twice: rsp keeps its alignment
+    mov edi, FRAME_DATASTACK_BYTES
+    call ap_malloc
+    pop rdi
+    pop rdi
+    test rax, rax
+    jz .fai_pool                ; no region, ever: the pool does the work
+    mov [rel frame_datastack_base], rax
+    mov [rel frame_datastack_top], rax
+    add rax, FRAME_DATASTACK_BYTES
+    mov [rel frame_datastack_end], rax
+    jmp .fai_have_region
+END_FUNC frame_alloc_inline
 
 ;; ============================================================================
 ;; frame_pool_get(size) -> ptr
@@ -35,43 +95,43 @@ POOL_COUNT  equ 8
 ;; ============================================================================
 DEF_FUNC frame_pool_get
     ; Round up to pool class
-    cmp rdi, POOL_CLASS_0
+    cmp rdi, FRAME_POOL_CLASS_0
     jbe .fp_class0
-    cmp rdi, POOL_CLASS_1
+    cmp rdi, FRAME_POOL_CLASS_1
     jbe .fp_class1
-    cmp rdi, POOL_CLASS_2
+    cmp rdi, FRAME_POOL_CLASS_2
     jbe .fp_class2
-    cmp rdi, POOL_CLASS_3
+    cmp rdi, FRAME_POOL_CLASS_3
     jbe .fp_class3
     ; Too large for pool — ap_malloc
     jmp .fp_malloc
 
 .fp_class0:
-    lea rcx, [rel pool_free_0]
-    mov edi, POOL_CLASS_0
+    lea rcx, [rel frame_pool_free_0]
+    mov edi, FRAME_POOL_CLASS_0
     jmp .fp_try_pool
 .fp_class1:
-    lea rcx, [rel pool_free_1]
-    mov edi, POOL_CLASS_1
+    lea rcx, [rel frame_pool_free_1]
+    mov edi, FRAME_POOL_CLASS_1
     jmp .fp_try_pool
 .fp_class2:
-    lea rcx, [rel pool_free_2]
-    mov edi, POOL_CLASS_2
+    lea rcx, [rel frame_pool_free_2]
+    mov edi, FRAME_POOL_CLASS_2
     jmp .fp_try_pool
 .fp_class3:
-    lea rcx, [rel pool_free_3]
-    mov edi, POOL_CLASS_3
+    lea rcx, [rel frame_pool_free_3]
+    mov edi, FRAME_POOL_CLASS_3
 
 .fp_try_pool:
     ; rcx = &pool_free_N, edi = class size
-    mov rax, [rcx + POOL_HEAD]      ; head of freelist
+    mov rax, [rcx + FRAME_POOL_HEAD]      ; head of freelist
     test rax, rax
     jz .fp_malloc              ; empty freelist
     ; Pop from freelist: head = head->next
     mov rdx, [rax]             ; next pointer (stored at offset 0)
-    mov [rcx + POOL_HEAD], rdx
+    mov [rcx + FRAME_POOL_HEAD], rdx
     ; Decrement count
-    lea rdx, [rcx + POOL_COUNT]     ; &pool_count_N
+    lea rdx, [rcx + FRAME_POOL_COUNT]     ; &pool_count_N
     dec dword [rdx]
     ; rax = recycled frame
     leave
@@ -89,39 +149,39 @@ END_FUNC frame_pool_get
 ;; ============================================================================
 DEF_FUNC frame_pool_put
     ; Determine pool class
-    cmp rsi, POOL_CLASS_0
+    cmp rsi, FRAME_POOL_CLASS_0
     jbe .fpp_class0
-    cmp rsi, POOL_CLASS_1
+    cmp rsi, FRAME_POOL_CLASS_1
     jbe .fpp_class1
-    cmp rsi, POOL_CLASS_2
+    cmp rsi, FRAME_POOL_CLASS_2
     jbe .fpp_class2
-    cmp rsi, POOL_CLASS_3
+    cmp rsi, FRAME_POOL_CLASS_3
     jbe .fpp_class3
     ; Too large — ap_free
     leave
     jmp ap_free                ; tail call
 
 .fpp_class0:
-    lea rcx, [rel pool_free_0]
+    lea rcx, [rel frame_pool_free_0]
     jmp .fpp_try_push
 .fpp_class1:
-    lea rcx, [rel pool_free_1]
+    lea rcx, [rel frame_pool_free_1]
     jmp .fpp_try_push
 .fpp_class2:
-    lea rcx, [rel pool_free_2]
+    lea rcx, [rel frame_pool_free_2]
     jmp .fpp_try_push
 .fpp_class3:
-    lea rcx, [rel pool_free_3]
+    lea rcx, [rel frame_pool_free_3]
 
 .fpp_try_push:
     ; rcx = &pool_free_N
-    lea rdx, [rcx + POOL_COUNT]     ; &pool_count_N
-    cmp dword [rdx], POOL_MAX_FREE
+    lea rdx, [rcx + FRAME_POOL_COUNT]     ; &pool_count_N
+    cmp dword [rdx], FRAME_POOL_MAX_FREE
     jge .fpp_full
     ; Push to freelist: frame->next = head; head = frame
-    mov rax, [rcx + POOL_HEAD]      ; old head
+    mov rax, [rcx + FRAME_POOL_HEAD]      ; old head
     mov [rdi], rax                  ; frame->next = old head
-    mov [rcx + POOL_HEAD], rdi      ; head = frame
+    mov [rcx + FRAME_POOL_HEAD], rdi      ; head = frame
     inc dword [rdx]            ; count++
     leave
     ret
@@ -199,6 +259,12 @@ DEF_FUNC frame_new, 8            ; 5 pushes, so rsp is 16-aligned
     ; The pool does not zero, and a recycled frame carrying a dead
     ; generator's back-pointer would let frame.clear() close it.
     mov qword [r11 + PyFrame.gen_owner], 0
+    ; And how the frame is entered.  Every caller of frame_new that goes on to
+    ; `call eval_frame` wants FRAME_ENTRY_CALL, which is zero; the one handler
+    ; that pushes the frame inline overwrites it.  A recycled frame carrying a
+    ; stale FRAME_ENTRY_INLINE would make eval_return jump to a resume with no
+    ; call to resume, so this is not an optional zero.  Both dwords go at once.
+    mov qword [r11 + PyFrame.entry_kind], 0
 
     ; Set nlocalsplus and func_obj
     mov [r11 + PyFrame.nlocalsplus], r8d
@@ -325,6 +391,23 @@ DEF_FUNC frame_free, 8            ; 3 pushes, so rsp is 16-aligned
     call obj_decref
 .no_exc_state:
 
+    ; A datastack frame goes back by moving the top, and that is correct
+    ; because these frames nest -- see the header above frame_alloc_inline.
+    ; The test is an address range, which is also what keeps the two kinds of
+    ; frame apart while both are in use.
+    mov rax, [rel frame_datastack_base]
+    cmp rbx, rax
+    jb .ff_pool
+    cmp rbx, [rel frame_datastack_end]
+    jae .ff_pool
+    mov [rel frame_datastack_top], rbx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ff_pool:
     ; Calculate frame size for pool return.  The same 64-bit add frame_new
     ; makes, and it has to be the same or the pool is handed a size the block
     ; was never allocated at.
@@ -354,8 +437,19 @@ DEF_FUNC frame_pool_drain
     push rbx
     push r12        ; alignment
 
+    ; The datastack region, if one was ever made.  Nothing can still be using
+    ; it: this runs at exit, after the last frame.
+    mov rdi, [rel frame_datastack_base]
+    test rdi, rdi
+    jz .no_datastack
+    mov qword [rel frame_datastack_base], 0
+    mov qword [rel frame_datastack_top], 0
+    mov qword [rel frame_datastack_end], 0
+    call ap_free
+.no_datastack:
+
     ; Drain pool class 0
-    lea rbx, [rel pool_free_0]
+    lea rbx, [rel frame_pool_free_0]
 .drain_0:
     mov rdi, [rbx]
     test rdi, rdi
@@ -368,7 +462,7 @@ DEF_FUNC frame_pool_drain
     mov dword [rbx + 8], 0
 
     ; Drain pool class 1
-    lea rbx, [rel pool_free_1]
+    lea rbx, [rel frame_pool_free_1]
 .drain_1:
     mov rdi, [rbx]
     test rdi, rdi
@@ -381,7 +475,7 @@ DEF_FUNC frame_pool_drain
     mov dword [rbx + 8], 0
 
     ; Drain pool class 2
-    lea rbx, [rel pool_free_2]
+    lea rbx, [rel frame_pool_free_2]
 .drain_2:
     mov rdi, [rbx]
     test rdi, rdi
@@ -394,7 +488,7 @@ DEF_FUNC frame_pool_drain
     mov dword [rbx + 8], 0
 
     ; Drain pool class 3
-    lea rbx, [rel pool_free_3]
+    lea rbx, [rel frame_pool_free_3]
 .drain_3:
     mov rdi, [rbx]
     test rdi, rdi
@@ -417,22 +511,33 @@ END_FUNC frame_pool_drain
 ;; ============================================================================
 section .data
 
+; The datastack: base and end bound the region, top is the bump pointer.
+; Zero until the first inline call, which is what makes the handler's inline
+; fast path fall through to frame_alloc_inline exactly once.
+align 8
+global frame_datastack_top
+global frame_datastack_end
+frame_datastack_base: dq 0
+frame_datastack_top:  dq 0
+frame_datastack_end:  dq 0
+
 ; Freelists: each is (head_ptr, count)
 align 8
-pool_free_0:  dq 0        ; 256B class freelist head
-pool_count_0: dd 0         ; count
+global frame_pool_free_0
+frame_pool_free_0:  dq 0        ; 256B class freelist head
+frame_pool_count_0: dd 0         ; count
               dd 0         ; padding
 
-pool_free_1:  dq 0         ; 512B class freelist head
-pool_count_1: dd 0
+frame_pool_free_1:  dq 0         ; 512B class freelist head
+frame_pool_count_1: dd 0
               dd 0
 
-pool_free_2:  dq 0         ; 1024B class freelist head
-pool_count_2: dd 0
+frame_pool_free_2:  dq 0         ; 1024B class freelist head
+frame_pool_count_2: dd 0
               dd 0
 
-pool_free_3:  dq 0         ; 2048B class freelist head
-pool_count_3: dd 0
+frame_pool_free_3:  dq 0         ; 2048B class freelist head
+frame_pool_count_3: dd 0
               dd 0
 
 section .text

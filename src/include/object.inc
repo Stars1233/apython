@@ -1129,6 +1129,21 @@ TYPE_FLAG_BYTES_SUBCLASS equ 0x80000
 ; what it was.
 TYPE_FLAG_FINAL          equ 0x100000
 
+; Does anything in this type's MRO have an entry named __del__?  ANY entry:
+; the bit stands in for "dunder_lookup finds something", not for "and it is
+; callable", so `__del__ = None` still reaches dunder_call_1 and still reports
+; 'NoneType' object is not callable the way it did.  Maintained beside
+; TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN and TYPE_FLAG_MRO_HAS_DATA_DESCR by
+; type_refresh_attr_flags, so it is recomputed and pushed down every subclass
+; whenever a class dict is written.
+;
+; instance_dealloc asked by NAME instead, on every heaptype instance that
+; died: a dunder_call_1, which is an MRO walk and a dict probe per entry, to
+; discover that a class almost never has one.  Callgrind put it at 23.9% of a
+; `class C: pass` construction loop.  Every heaptype comes from
+; type_from_parts, which calls the refresh, so the bit is always current.
+TYPE_FLAG_HAS_DEL        equ 0x200000
+
 ; The type's VERSION lives in the high 32 bits of tp_flags, which the flags
 ; above leave free -- they stop at bit 20.  It is a stamp from one global
 ; counter, so a version identifies a particular type in a particular state of
@@ -1209,8 +1224,38 @@ struc PyFrame
                             ;      the generator, and a frame object only has
                             ;      the frame.  Borrowed because the generator
                             ;      owns the frame, not the other way round.
-    .localsplus:            ; +112: Value array (variable size)
+    ; How this frame was entered, and therefore how it is left.  Zero is a
+    ; C-level `call eval_frame` -- a module body, an eval(), a class body, a
+    ; generator resume, func_call's slow path -- and eval_return leaves such a
+    ; frame with a `ret`.  Anything else means a bytecode handler pushed the
+    ; frame INLINE and there is no `ret` to go back to: eval_return restores
+    ; the caller and jumps to that handler's resume instead.  .entry_slots is
+    ; the resume's one piece of state, the value-stack slots the call
+    ; consumed, and it has to be read out of the frame before it is freed.
+    .entry_kind:    resd 1  ; +112: FRAME_ENTRY_*
+    .entry_slots:   resd 1  ; +116: inline only
+    .localsplus:            ; +120: Value array (variable size)
 endstruc
+
+FRAME_ENTRY_CALL   equ 0    ; entered by `call eval_frame`; left by `ret`
+FRAME_ENTRY_INLINE equ 1    ; pushed by CALL_PY_EXACT; left by eval_inline_resume
+
+; The frame pool: four size classes, each a singly-linked freelist whose next
+; link lives in the block's first word, capped so a burst of deep recursion
+; does not park megabytes there for ever.  A pool record is (head, count),
+; selected as a unit with `lea rcx, [rel frame_pool_free_N]` and then indexed.
+;
+; They are here rather than in src/frame.asm because the specialized call
+; pops the smallest class inline -- that is the size of nearly every frame,
+; and going through frame_pool_get for it is a call, a size ladder and a
+; return.  Everything else, including every push back, is still frame.asm's.
+FRAME_POOL_CLASS_0  equ 256
+FRAME_POOL_CLASS_1  equ 512
+FRAME_POOL_CLASS_2  equ 1024
+FRAME_POOL_CLASS_3  equ 2048
+FRAME_POOL_MAX_FREE equ 16
+FRAME_POOL_HEAD     equ 0
+FRAME_POOL_COUNT    equ 8
 
 FRAME_HEADER_SIZE equ PyFrame.localsplus
 

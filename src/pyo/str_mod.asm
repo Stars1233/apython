@@ -40,6 +40,7 @@ section .text
 ;; args can be a single value or a tuple
 ;; ============================================================================
 extern obj_str
+extern int_type
 extern exc_ValueError_type
 extern obj_repr
 extern tuple_type
@@ -523,6 +524,62 @@ DEF_FUNC str_mod_impl, SM_FRAME
     jmp .sm_dispatch_plain
 .sm_use_spec:
     mov [rbp-SM_POS], rcx
+
+    ; --- a bare %d, with nothing else to say ------------------------------
+    ; Far and away the commonest directive, and it went through the whole
+    ; format-spec machinery: a spec string assembled character by character
+    ; and handed to format_apply_spec.  `"%s-%d" % ("abc", i)` cost four
+    ; mallocs, and callgrind put str_mod_impl and format_apply_spec together
+    ; at 19% of a loop of them.
+    ;
+    ; With no flags, no width and no precision there is nothing for a spec to
+    ; say and int.__str__ is the whole answer.  What the spec path is really
+    ; here for is the TYPE check -- %d was routed through it because the
+    ; direct arm formatted whatever it was handed, and `"%d" % "x"` answered
+    ; 'x'.  So the argument is fetched and inspected, and anything that is not
+    ; an exact int is put back and goes the long way.
+    ;
+    ; A mapping key is excluded rather than handled: .sm_get_arg clears
+    ; SM_HASKEY on its way past, so putting that argument back would take
+    ; more than a `dec`.
+    movzx eax, byte [rbx + rcx]
+    cmp al, 'd'
+    je .sm_bare_d_try
+    cmp al, 'i'
+    je .sm_bare_d_try
+    cmp al, 'u'
+    jne .sm_spec_general
+.sm_bare_d_try:
+    cmp qword [rbp-SM_HASKEY], 0
+    jne .sm_spec_general
+    mov rax, [rbp-SM_SPECST]
+    cmp rax, rcx
+    jne .sm_spec_general        ; flags, a width or a precision: not bare
+    call .sm_get_arg            ; rax/edx = the argument, r15 advanced
+    cmp edx, TAG_SMALLINT
+    je .sm_bare_d_ok
+    cmp edx, TAG_PTR
+    jne .sm_bare_d_decline
+    test rax, rax
+    jz .sm_bare_d_decline
+    mov rcx, [rax + PyObject.ob_type]
+    lea r8, [rel int_type]
+    cmp rcx, r8
+    jne .sm_bare_d_decline      ; a bool, an int subclass, anything else
+.sm_bare_d_ok:
+    mov rcx, [rbp-SM_POS]
+    inc rcx                     ; past the conversion character
+    push rcx                    ; .sm_copy_str pops the input position
+    mov rdi, rax
+    mov rsi, rdx
+    V_PACK rdi, rsi
+    call obj_str                ; int.__str__ = int_repr
+    jmp .sm_copy_str
+.sm_bare_d_decline:
+    dec r15                     ; put the argument back
+    mov rcx, [rbp-SM_POS]
+
+.sm_spec_general:
     call .sm_spec_conv
     mov rcx, [rbp-SM_POS]
     jmp .sm_loop

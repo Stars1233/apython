@@ -69,3 +69,39 @@ try:
     print("%(a)d" % {"a": "x"})
 except TypeError as e:
     print("TypeError:", e)
+
+
+# A BARE %d -- no flags, no width, no precision -- skips the format-spec
+# machinery and calls int.__str__ directly.  The type check is the whole
+# reason %d was routed through that machinery in the first place, so the
+# fast arm has to make it too: everything that is not an EXACT int puts the
+# argument back and goes the long way.
+class I(int):
+    def __str__(self):
+        return "I!"
+
+
+for v in (0, 1, -1, 42, 2 ** 50, -(2 ** 50), 2 ** 63, -(2 ** 63), 10 ** 30,
+          True, False, I(7)):
+    print(repr(v), "%d" % (v,), "%i" % (v,), "%u" % (v,), "%s-%d" % ("a", v))
+
+for bad in ("x", 1.5, None, [1], (1,), {1: 2}, object):
+    for f in ("%d", "%i", "%u"):
+        try:
+            print(f, repr(bad), repr(f % (bad,)))
+        except TypeError as e:
+            print(f, repr(bad), "TypeError", e)
+
+# and the arm must not eat an argument it declines, nor mis-count the rest
+print("%d %s %d" % (1, "x", 2))
+print("%s %d %s %d" % ("a", 1, "b", 2))
+try:
+    print("%d %d" % (1,))
+except TypeError as e:
+    print("TypeError", e)
+try:
+    print("%d" % (1, 2))
+except TypeError as e:
+    print("TypeError", e)
+print("%(k)d" % {"k": 9}, "%(k)d-%(k)d" % {"k": 9})
+print("%5d|%-5d|%05d|%+d" % (42, 42, 42, 42))

@@ -56,7 +56,7 @@ extern gc_alloc
 extern gc_track
 extern obj_incref
 extern obj_decref
-extern str_from_cstr_heap
+extern str_intern_cstr
 extern str_type
 extern list_type
 extern tuple_type
@@ -393,7 +393,7 @@ DAN_FRAME equ 16            ; + 0 pushes = 16
 DEF_FUNC_LOCAL dict_add_none, DAN_FRAME
     mov [rbp - DAN_DICT], rdi
     mov rdi, rsi
-    call str_from_cstr_heap
+    call str_intern_cstr
     push rax
     sub rsp, 8
     mov rdi, [rbp - DAN_DICT]
@@ -424,7 +424,7 @@ DEF_FUNC dict_add_builtin_func, 8            ; 3 pushes, so rsp is 16-aligned
 
     ; Create key string from name
     mov rdi, r12
-    call str_from_cstr_heap
+    call str_intern_cstr
     push rax                ; save key str
 
     ; dict_set(dict, key, func_obj)
@@ -470,7 +470,7 @@ DEF_FUNC dict_add_getset
     mov r14, rcx                ; setter
 
     mov rdi, r12
-    call str_from_cstr_heap
+    call str_intern_cstr
     push rax                    ; the key, and the descriptor's own name
 
     mov rdi, r13
@@ -521,7 +521,7 @@ DEF_FUNC dict_add_getattr, DGA_FRAME
     mov rdi, rdx                ; the getter
     push rdx
     mov rdi, rsi
-    call str_from_cstr_heap
+    call str_intern_cstr
     mov [rbp - DGA_NAME], rax
     pop rdi                     ; the getter
     xor esi, esi                ; no setter
@@ -570,7 +570,7 @@ DEF_FUNC_LOCAL add_method_to_dict_checked, 8            ; 3 pushes, so rsp is 16
 
     ; Create key string from name
     mov rdi, r12
-    call str_from_cstr_heap
+    call str_intern_cstr
     push rax                ; save key str
 
     ; dict_set(dict, key, func_obj)
@@ -630,7 +630,7 @@ DEF_FUNC_LOCAL add_staticmethod, ASM_FRAME
     call gc_track
 
     mov rdi, r12
-    call str_from_cstr_heap
+    call str_intern_cstr
     mov [rbp - ASM_KEY], rax
 
     mov rdi, rbx
@@ -664,7 +664,7 @@ DEF_FUNC_LOCAL add_new_staticmethod, 8            ; 3 pushes, so rsp is 16-align
     ; Build the plain builtin-function object first.
     sub rsp, 16
     lea rdi, [rel mn___new__]
-    call str_from_cstr_heap
+    call str_intern_cstr
     mov r12, rax                ; the name, ours
 
     mov rdi, r13                            ; func ptr
@@ -725,7 +725,7 @@ DEF_FUNC_LOCAL add_class_getitem
     mov rdi, rax
     call gc_track
     lea rdi, [rel mn___class_getitem__]
-    call str_from_cstr_heap
+    call str_intern_cstr
     push rax
     mov rdi, rbx
     mov rsi, rax
@@ -861,7 +861,7 @@ END_FUNC set_add_operator_methods
     pop rax
     push rax
     lea rdi, [rel %1]
-    call str_from_cstr_heap
+    call str_intern_cstr
     push rax
     mov rdi, rbx
     mov rsi, rax
@@ -1632,7 +1632,7 @@ DEF_FUNC methods_init
 
     ; Create key string
     lea rdi, [rel mn___new__]
-    call str_from_cstr_heap
+    call str_intern_cstr
     push rax                    ; save key
 
     ; dict_set(dict, key, staticmethod_wrapper, TAG_PTR, TAG_PTR)
@@ -1665,7 +1665,7 @@ DEF_FUNC methods_init
     ; -- types.DynamicClassAttribute's `doc or fget.__doc__`, with no getter --
     ; is that the lookup succeeds at all.
     lea rdi, [rel mn___doc__]
-    call str_from_cstr_heap
+    call str_intern_cstr
     push rax
     mov rdi, rbx
     mov rsi, rax
@@ -1689,7 +1689,7 @@ DEF_FUNC methods_init
     mov rdi, rax
     call gc_track
     lea rdi, [rel mn___init_subclass__]
-    call str_from_cstr_heap
+    call str_intern_cstr
     push rax
     mov rdi, rbx
     mov rsi, rax
@@ -1744,7 +1744,7 @@ DEF_FUNC methods_init
     mov rdi, rax
     call gc_track
     lea rdi, [rel mn___subclasshook__]
-    call str_from_cstr_heap
+    call str_intern_cstr
     push rax
     mov rdi, rbx
     mov rsi, rax
@@ -1780,7 +1780,7 @@ DEF_FUNC methods_init
     mov rdi, rax
     call gc_track
     lea rdi, [rel mn___new__]
-    call str_from_cstr_heap
+    call str_intern_cstr
     push rax
     mov rdi, rbx
     mov rsi, rax
@@ -1862,7 +1862,7 @@ DEF_FUNC methods_init
     mov rbx, rax
 
     lea rdi, [rel mn___code__]
-    call str_from_cstr_heap
+    call str_intern_cstr
     push rax
     xor edi, edi
     xor esi, esi
@@ -1883,7 +1883,7 @@ DEF_FUNC methods_init
     lea rsi, [rel mn___globals__]
     push rdi
     mov rdi, rsi
-    call str_from_cstr_heap
+    call str_intern_cstr
     pop rdi
     push rax
     mov rsi, rax
@@ -2073,7 +2073,7 @@ DEF_FUNC methods_init
 
     ; Create key string
     lea rdi, [rel mn_from_bytes]
-    call str_from_cstr_heap
+    call str_intern_cstr
     push rax                    ; save key
 
     ; dict_set(dict, key, classmethod_wrapper, TAG_PTR, TAG_PTR)
