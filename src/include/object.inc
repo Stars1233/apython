@@ -377,7 +377,15 @@ struc PyGetSetDescrObject
     .gs_owner:  resq 1  ; +40: the type it was registered on, or 0 -- for the
                         ;      repr, which CPython words "<attribute 'real'
                         ;      of 'int' objects>"; borrowed, types are static
+    .gs_flags:  resq 1  ; +48: GS_* below
 endstruc
+
+; A getset whose getter is a whole tp_getattr rather than one attribute's:
+; it is called (self, gs_name) and answers from the name.  Twelve of
+; memoryview's attributes, and every one of property's, super's and the two
+; method wrappers', are already answered by such a function; without this each
+; would need a thunk of its own whose only content is the name it passes on.
+GS_NAMED    equ 1
 
 ; types.SimpleNamespace: attributes are the entries of a dict.
 struc PySimpleNamespaceObject
@@ -953,6 +961,11 @@ O_NONBLOCK  equ 0o4000
 O_DIRECTORY equ 0o200000
 O_NOFOLLOW  equ 0o400000
 O_CLOEXEC   equ 0o2000000
+; O_TMPFILE is two bits, and both of them: Linux spells it
+; __O_TMPFILE | O_DIRECTORY so that an old kernel, which honours only
+; the directory bit, refuses the open rather than creating a file.
+__O_TMPFILE equ 0o20000000
+O_TMPFILE   equ __O_TMPFILE | O_DIRECTORY
 
 ; access() modes
 F_OK equ 0

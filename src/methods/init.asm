@@ -158,6 +158,19 @@ extern bytes_method_replace
 extern bytes_method_split
 extern bytes_method_startswith
 extern container_dunder_new
+extern list_dunder_new
+extern tuple_dunder_new
+extern dict_dunder_new
+extern set_dunder_new
+extern frozenset_dunder_new
+extern int_dunder_new
+extern str_dunder_new
+extern float_dunder_new
+extern complex_dunder_new
+extern module_dunder_new
+extern memoryview_getattr
+extern property_getattr
+extern descr_func_attr
 extern dict_classmethod_fromkeys
 extern dict_dunder_delitem
 extern dict_dunder_getitem
@@ -300,6 +313,28 @@ extern tuple_method_index
 ;; These were open-coded: four instructions per method, six for a checked one,
 ;; 455 times, which is most of what made this file 115k.  The expansion is
 ;; identical -- the object file is unchanged to the byte.
+; A name a type's own tp_getattr already answers, published as a read-only
+; getset descriptor so the type's dict holds it too.  The dict is in rbx, as
+; ADD_FN wants it.
+%macro TYPE_GETATTR 2           ; %1 = the name symbol, %2 = the getattr fn
+    mov rdi, rbx
+    lea rsi, [rel %1]
+    lea rdx, [rel %2]
+    call dict_add_getattr
+%endmacro
+
+%macro MV_GETATTR 1
+    TYPE_GETATTR %1, memoryview_getattr
+%endmacro
+
+%macro PROP_GETATTR 1
+    TYPE_GETATTR %1, property_getattr
+%endmacro
+
+%macro DESCR_GETATTR 1
+    TYPE_GETATTR %1, descr_func_attr
+%endmacro
+
 %macro ADD_FN 2
     mov rdi, rbx
     lea rsi, [rel %1]
@@ -464,6 +499,52 @@ DEF_FUNC dict_add_getset
 END_FUNC dict_add_getset
 
 ;; ============================================================================
+;; dict_add_getattr(rdi = dict, rsi = name_cstr, rdx = a tp_getattr function)
+;;   -> nothing; the dict holds a read-only getset descriptor for that name
+;;
+;; The same thing dict_add_getset makes, for an attribute a type already
+;; answers through its tp_getattr.  Those functions take (self, name) and
+;; decide from the name, so one of them serves every attribute it knows --
+;; twelve for memoryview -- and the descriptor carries the name it was
+;; registered under.  Without this each name would need a thunk whose only
+;; content is which name to pass on.
+;;
+;; Read-only, because every attribute reached this way is: a memoryview's
+;; shape, a property's fget, a bound method's __func__.
+;; ============================================================================
+DGA_NAME  equ 8
+DGA_DESC  equ 16
+DGA_FRAME equ 24            ; + 1 push = 32, 16-aligned
+DEF_FUNC dict_add_getattr, DGA_FRAME
+    push rbx
+    mov rbx, rdi                ; the dict
+    mov rdi, rdx                ; the getter
+    push rdx
+    mov rdi, rsi
+    call str_from_cstr_heap
+    mov [rbp - DGA_NAME], rax
+    pop rdi                     ; the getter
+    xor esi, esi                ; no setter
+    mov rdx, rax                ; the name
+    call getset_descr_new
+    mov [rbp - DGA_DESC], rax
+    mov qword [rax + PyGetSetDescrObject.gs_flags], GS_NAMED
+
+    mov rdi, rbx
+    mov rsi, [rbp - DGA_NAME]
+    mov rdx, rax
+    call dict_set
+
+    mov rdi, [rbp - DGA_DESC]
+    call obj_decref             ; dict_set took its own reference
+    mov rdi, [rbp - DGA_NAME]
+    call obj_decref             ; and getset_descr_new took one on the name
+    pop rbx
+    leave
+    ret
+END_FUNC dict_add_getattr
+
+;; ============================================================================
 ;; HELPER: add_method_to_dict_checked(dict, name_cstr, func_ptr, min_args, max_args)
 ;; rdi=dict, rsi=name_cstr, rdx=func_ptr, rcx=min_args, r8=max_args
 ;; Like dict_add_builtin_func but sets arg count bounds.
@@ -588,7 +669,10 @@ DEF_FUNC_LOCAL add_new_staticmethod, 8            ; 3 pushes, so rsp is 16-align
 
     mov rdi, r13                            ; func ptr
     lea rsi, [rel mn___new__]               ; name
-    mov edx, 1                              ; min args (cls)
+    ; No minimum: the arity refusal belongs to new_check_class, which words it
+    ; as CPython does -- "list.__new__(): not enough arguments" rather than the
+    ; generic count message this would have given.
+    xor edx, edx
     mov rcx, -1                             ; no maximum
     call builtin_func_new_checked
     mov [rsp], rax              ; args[0] for staticmethod()
@@ -701,10 +785,9 @@ DEF_FUNC_LOCAL set_add_shared_methods, SASM_FRAME
     ADD_FN_D SASM_DICT, mn___contains__, generic_method_contains
 
     ; __new__ allocates an empty instance of args[0], so it serves both.
-    mov rdi, [rbp - SASM_DICT]
-    lea rsi, [rel container_dunder_new]
-    call add_new_staticmethod
-
+    ; __new__ is NOT here: it names the type it belongs to, and this body is
+    ; called once for set's dict and once for frozenset's.  Each registers its
+    ; own, so `set.__new__(frozenset)` is refused the way CPython refuses it.
     mov rdi, [rbp - SASM_DICT]
     call add_class_getitem
 
@@ -815,7 +898,7 @@ DEF_FUNC methods_init
     ; `member_type.__new__(cls, *args)`, and decides which base is the data
     ; type by asking whether __new__ is in its __dict__.
     mov rdi, rbx
-    lea rsi, [rel scalar_dunder_new]
+    lea rsi, [rel str_dunder_new]
     call add_new_staticmethod
 
     ADD_FN_N mn_upper, str_method_upper, 1, 1
@@ -1052,7 +1135,7 @@ DEF_FUNC methods_init
 
     extern module_method_new
     mov rdi, rbx
-    lea rsi, [rel module_method_new]
+    lea rsi, [rel module_dunder_new]
     call add_new_staticmethod       ; __new__ takes the class, not an instance
     extern module_method_init
     ADD_FN mn___init__, module_method_init
@@ -1186,7 +1269,7 @@ DEF_FUNC methods_init
     ADD_FN_N mn___init__, list_dunder_init, 1, -1
 
     mov rdi, rbx
-    lea rsi, [rel container_dunder_new]
+    lea rsi, [rel list_dunder_new]
     call add_new_staticmethod
 
     mov rdi, rbx
@@ -1260,7 +1343,7 @@ DEF_FUNC methods_init
     ADD_CLASSMETHOD_N mn_fromkeys, dict_classmethod_fromkeys, 2, 3
 
     mov rdi, rbx
-    lea rsi, [rel container_dunder_new]
+    lea rsi, [rel dict_dunder_new]
     call add_new_staticmethod
 
     ADD_FN_N mn___contains__, generic_method_contains, 2, 2
@@ -1331,7 +1414,7 @@ DEF_FUNC methods_init
     ADD_FN_N mn___rmul__, tuple_dunder_rmul, 2, 2
 
     mov rdi, rbx
-    lea rsi, [rel container_dunder_new]
+    lea rsi, [rel tuple_dunder_new]
     call add_new_staticmethod
 
     mov rdi, rbx
@@ -1381,8 +1464,12 @@ DEF_FUNC methods_init
 
     ; set() has no __init__, so a subclass had nothing to fill it from.
     ; update() already takes (self, iterable) and returns None.
-    ADD_FN_N mn___init__, set_method_update, 1, -1
+    extern set_dunder_init
+    ADD_FN_N mn___init__, set_dunder_init, 1, -1
 
+    mov rdi, rbx
+    lea rsi, [rel set_dunder_new]
+    call add_new_staticmethod
     mov rdi, rbx
     call set_add_shared_methods
 
@@ -1395,7 +1482,7 @@ DEF_FUNC methods_init
     ; it doubles as set.__init__.
     ADD_FN_N mn_intersection_update, set_method_intersection_update, 1, -1
     ADD_FN_N mn_difference_update, set_method_difference_update, 1, -1
-    ADD_FN_N mn_symmetric_difference_update, set_method_symmetric_difference_update, 2, 2
+    ADD_FN_N mn_symmetric_difference_update, set_method_symmetric_difference_update, 1, -1
 
     ; The reflected four are registered with the forward four.  The in-place
     ; four go on set alone: they mutate, and frozenset cannot.  They are not
@@ -1443,6 +1530,9 @@ DEF_FUNC methods_init
     mov rbx, rax
 
     mov rdi, rbx
+    lea rsi, [rel frozenset_dunder_new]
+    call add_new_staticmethod
+    mov rdi, rbx
     call set_add_shared_methods
 
     ; frozenset's own eight, so its descriptors refuse a set the way
@@ -1476,12 +1566,40 @@ DEF_FUNC methods_init
     mov rdi, rax
     call type_stamp_methods
 
+    ;; --- super's three own attributes ---
+    ;; super_type had no tp_dict at all, so __self__, __self_class__ and
+    ;; __thisclass__ read correctly off an instance and were invisible to
+    ;; dir(), to inspect and to anything reading vars(super).
+    call dict_new
+    mov rbx, rax
+    extern super_getattr_value
+    TYPE_GETATTR mn___self__, super_getattr_value
+    TYPE_GETATTR mn___self_class__, super_getattr_value
+    TYPE_GETATTR mn___thisclass__, super_getattr_value
+    extern super_dunder_new
+    mov rdi, rbx
+    lea rsi, [rel super_dunder_new]
+    call add_new_staticmethod
+    extern super_type
+    lea rax, [rel super_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
     ;; --- weakref methods ---
     ; weakref.py binds ref.__hash__ and ref.__eq__ into its subclasses at
     ; class definition time, so those have to exist as methods.
     call dict_new
     mov rbx, rax
     ADD_FN mn___hash__, generic_method_hash
+    ; ref's constructor lives in tp_new, so a subclass reaching for it by name
+    ; -- weakref.KeyedRef does -- found object.__new__ and was refused.
+    extern ref_dunder_new
+    mov rdi, rbx
+    lea rsi, [rel ref_dunder_new]
+    call add_new_staticmethod
+    extern ref_dunder_init
+    ADD_FN_N mn___init__, ref_dunder_init, 1, 3
     mov rdi, rbx
     call add_class_getitem
     extern weakref_type
@@ -1676,6 +1794,17 @@ DEF_FUNC methods_init
     extern type_method_init
     ADD_FN mn___init__, type_method_init
 
+    ; The three the metaclass protocol is asked BY NAME: types.prepare_class
+    ; calls __prepare__, and a metaclass that ends in
+    ; `super().__instancecheck__(obj)` -- ABCMeta's does -- needs type's to
+    ; exist and to be the plain check.
+    extern type_method_prepare
+    ADD_CLASSMETHOD mn___prepare__, type_method_prepare
+    extern type_method_instancecheck
+    ADD_FN_N mn___instancecheck__, type_method_instancecheck, 2, 2
+    extern type_method_subclasscheck
+    ADD_FN_N mn___subclasscheck__, type_method_subclasscheck, 2, 2
+
     ; No add_class_getitem here: `type[int]` is a special case in CPython's
     ; PyObject_GetItem, taken before any lookup, and type carries no
     ; __class_getitem__ of its own -- hasattr(type, "__class_getitem__") is
@@ -1793,6 +1922,10 @@ DEF_FUNC methods_init
     ADD_FN mn___init__, staticmethod_method_init
     extern staticmethod_dunder_call
     ADD_FN mn___call__, staticmethod_dunder_call
+    DESCR_GETATTR mn___func__
+    DESCR_GETATTR mn___wrapped__
+    extern descr_wrapper_isabstract
+    TYPE_GETATTR mn___isabstractmethod__, descr_wrapper_isabstract
     lea rax, [rel staticmethod_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1804,6 +1937,9 @@ DEF_FUNC methods_init
     ADD_FN mn___get__, classmethod_dunder_get
     extern classmethod_method_init
     ADD_FN mn___init__, classmethod_method_init
+    DESCR_GETATTR mn___func__
+    DESCR_GETATTR mn___wrapped__
+    TYPE_GETATTR mn___isabstractmethod__, descr_wrapper_isabstract
     lea rax, [rel classmethod_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1825,6 +1961,17 @@ DEF_FUNC methods_init
     ; no setter" rather than 3.10's bare "can't set attribute".
     extern property_dunder_set_name
     ADD_FN mn___set_name__, property_dunder_set_name
+    ; The six property_getattr answers.  fget/fset/fdel are the accessors and
+    ; getter/setter/deleter the builders; all six read off an instance and
+    ; none was in the type's dict, so inspect could not find them.
+    PROP_GETATTR mn_fget
+    PROP_GETATTR mn_fset
+    PROP_GETATTR mn_fdel
+    PROP_GETATTR mn_getter
+    PROP_GETATTR mn_setter
+    PROP_GETATTR mn_deleter
+    extern property_isabstract
+    TYPE_GETATTR mn___isabstractmethod__, property_isabstract
     extern property_type
     lea rax, [rel property_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1875,7 +2022,7 @@ DEF_FUNC methods_init
     ; `member_type.__new__(cls, *args)`, and decides which base is the data
     ; type by asking whether __new__ is in its __dict__.
     mov rdi, rbx
-    lea rsi, [rel scalar_dunder_new]
+    lea rsi, [rel int_dunder_new]
     call add_new_staticmethod
 
     ADD_FN_N mn_bit_length, int_method_bit_length, 1, 1
@@ -2085,7 +2232,7 @@ DEF_FUNC methods_init
     ADD_FN_N mn___repr__, complex_dunder_repr, 1, 1
 
     mov rdi, rbx
-    lea rsi, [rel scalar_dunder_new]
+    lea rsi, [rel complex_dunder_new]
     call add_new_staticmethod
 
     ADD_FN_N mn_conjugate, complex_method_conjugate, 1, 1
@@ -2161,7 +2308,7 @@ DEF_FUNC methods_init
     ; that overrides __new__ reaches the base's through super(), and enum
     ; looks the name up in __dict__ to pick its data type.
     mov rdi, rbx
-    lea rsi, [rel scalar_dunder_new]
+    lea rsi, [rel float_dunder_new]
     call add_new_staticmethod
 
     ADD_FN_N mn_is_integer, float_method_is_integer, 1, 1
@@ -2569,6 +2716,22 @@ DEF_FUNC methods_init
     ADD_FN_N mn___getitem__, memoryview_dunder_getitem, 2, 2
     ADD_FN_N mn___setitem__, memoryview_dunder_setitem, 3, 3
     ADD_FN_N mn___len__, memoryview_dunder_len, 1, 1
+    ; Twelve attributes memoryview_getattr already answers.  They read
+    ; correctly off an INSTANCE and were absent from the type, so dir() did
+    ; not list them and nothing that walks a type's dict -- inspect, help(),
+    ; `'nbytes' in vars(memoryview)` -- could see them.
+    MV_GETATTR mn_nbytes
+    MV_GETATTR mn_itemsize
+    MV_GETATTR mn_format
+    MV_GETATTR mn_readonly
+    MV_GETATTR mn_obj
+    MV_GETATTR mn_ndim
+    MV_GETATTR mn_shape
+    MV_GETATTR mn_strides
+    MV_GETATTR mn_suboffsets
+    MV_GETATTR mn_c_contiguous
+    MV_GETATTR mn_f_contiguous
+    MV_GETATTR mn_contiguous
     lea rax, [rel memoryview_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -2584,6 +2747,32 @@ END_FUNC methods_init
 ;; Data section
 ;; ============================================================================
 section .rodata
+mn___isabstractmethod__: db "__isabstractmethod__", 0
+mn___self__: db "__self__", 0
+mn___self_class__: db "__self_class__", 0
+mn___thisclass__: db "__thisclass__", 0
+mn___prepare__: db "__prepare__", 0
+mn___instancecheck__: db "__instancecheck__", 0
+mn___subclasscheck__: db "__subclasscheck__", 0
+mn_nbytes: db "nbytes", 0
+mn_itemsize: db "itemsize", 0
+mn_readonly: db "readonly", 0
+mn_obj: db "obj", 0
+mn_ndim: db "ndim", 0
+mn_shape: db "shape", 0
+mn_strides: db "strides", 0
+mn_suboffsets: db "suboffsets", 0
+mn_c_contiguous: db "c_contiguous", 0
+mn_f_contiguous: db "f_contiguous", 0
+mn_contiguous: db "contiguous", 0
+mn_fget: db "fget", 0
+mn_fset: db "fset", 0
+mn_fdel: db "fdel", 0
+mn_getter: db "getter", 0
+mn_setter: db "setter", 0
+mn_deleter: db "deleter", 0
+mn___func__: db "__func__", 0
+mn___wrapped__: db "__wrapped__", 0
 
 empty_str_cstr: db 0
 

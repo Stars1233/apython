@@ -1854,20 +1854,60 @@ DEF_FUNC container_dunder_new, 8            ; 3 pushes, so rsp is 16-aligned
     RAISE exc_TypeError_type, "__new__() takes a class argument"
 END_FUNC container_dunder_new
 
-DEF_FUNC list_dunder_init
+;; ============================================================================
+;; list_dunder_init(args, nargs) -> None    -- list.__init__
+;;
+;; `list()` takes no keyword arguments, and CPython refuses them here with one
+;; carve-out that its generated code spells out: the refusal applies only when
+;; the receiver IS a list, or when its type has not overridden __new__.  A
+;; subclass with its own __new__ has already absorbed the keywords, and list's
+;; init is then entitled to ignore whatever is left -- `WithNew([1, 2],
+;; newarg=3)` works in CPython and has to work here.
+;;
+;; The keyword VALUES sit in the argument array after the positional ones, so
+;; where they are ignored the count comes down by as many; otherwise the first
+;; of them would be read as the iterable.
+;; ============================================================================
+LDI_ARGS  equ 8
+LDI_NARGS equ 16
+LDI_OWNER equ 24
+LDI_FRAME equ 32            ; + 2 pushes = 48, 16-aligned
+DEF_FUNC list_dunder_init, LDI_FRAME
     push rbx
     push r12
 
-    ; list() takes no keyword arguments.  A subclass that overrides __init__
-    ; or __new__ absorbs them itself -- func_call clears kw_names_pending on
-    ; the way in, so by the time super().__init__(seq) reaches here it is
-    ; unset.  Seeing it still set means the keywords were aimed at list's own
-    ; init, which CPython rejects: subclass(sequence=()) is a TypeError.
-    cmp qword [rel kw_names_pending], 0
-    jne .ldi_no_keywords
-
     mov rbx, rdi            ; save args ptr
     mov r12, rsi            ; save nargs
+
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .ldi_kw_done
+    mov qword [rel kw_names_pending], 0     ; consumed, whichever way this goes
+    mov rcx, [rax + PyTupleObject.ob_size]
+    sub r12, rcx                            ; the positional count alone
+
+    mov rax, [rbx]                          ; self
+    mov rax, [rax + PyObject.ob_type]
+    lea rcx, [rel list_type]
+    cmp rax, rcx
+    je .ldi_no_keywords                     ; the receiver IS a list
+
+    mov [rbp - LDI_ARGS], rbx
+    mov [rbp - LDI_NARGS], r12
+    mov qword [rbp - LDI_OWNER], 0
+    mov rdi, rax
+    CSTRING rsi, "__new__"
+    lea rdx, [rbp - LDI_OWNER]
+    extern dunder_lookup_owner
+    call dunder_lookup_owner
+    mov rax, [rbp - LDI_OWNER]              ; the type whose dict answered
+    mov rbx, [rbp - LDI_ARGS]
+    mov r12, [rbp - LDI_NARGS]
+    test rax, rax
+    jz .ldi_no_keywords
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .ldi_no_keywords                     ; still list's own __new__
+.ldi_kw_done:
 
     ; self = args[0]
     mov rax, [rbx]          ; self (list)
@@ -2079,7 +2119,25 @@ DEF_FUNC list_method_extend, LE_FRAME
     ret
 
 .extend_type_error:
-    RAISE exc_TypeError_type, "list.extend() argument must be iterable"
+    ; The METHOD's wording, which is not the opcode's: CPython says
+    ; "'int' object is not iterable" here and "Value after * must be an
+    ; iterable, not int" for the `*x` that LIST_EXTEND compiles from.  The
+    ; type comes from the TAG, because an int or a float has no ob_type.
+    extern int_type
+    extern float_type
+    lea rsi, [rel int_type]
+    cmp r13d, TAG_PTR
+    je .lme_ptr_type
+    cmp r13d, TAG_FLOAT
+    jne .lme_have_type
+    lea rsi, [rel float_type]
+    jmp .lme_have_type
+.lme_ptr_type:
+    mov rsi, [r12 + PyObject.ob_type]
+.lme_have_type:
+    CSTRING rdi, `'\x01' object is not iterable`
+    extern raise_type_error_with_typename
+    jmp raise_type_error_with_typename
 END_FUNC list_method_extend
 
 ;; ============================================================================

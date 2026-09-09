@@ -36,6 +36,7 @@ extern dict_set
 extern slice_new
 extern none_singleton
 extern dict_get
+extern str_from_cstr_heap
 extern range_iter_type
 extern list_iter_type
 extern dict_type
@@ -1088,14 +1089,30 @@ LE_CURSOR   equ 32
 LE_EXC      equ 40        ; current_exception before the iteration started
 LE_I        equ 48        ; the loop index, which used to be pushed across
                           ; list_append -- a lone push leaves the call 8 out
-DEF_FUNC op_list_extend, 56   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
+LE_TYPE     equ 56        ; the operand's type, for the message
+DEF_FUNC op_list_extend, 72   ; + 0 pushes; a handler is entered ALIGNED, so this is 8 mod 16
     ; locals: [rbp - LE_LIST]=list, [rbp - LE_ITERABLE]=iterable, [rbp - LE_COUNT]=count, [rbp - LE_CURSOR]=items
 
     ; TOS = iterable
     VPOP_VAL rsi, r8           ; rsi = iterable (tuple or list)
+    mov [rbp - LE_ITERABLE], rsi          ; save iterable
+    ; Its type, for the message, resolved from the TAG: an int or a float has
+    ; no ob_type to read.
+    extern int_type
+    extern float_type
+    lea rax, [rel int_type]
+    cmp r8d, TAG_PTR
+    je .le_ptr_type
+    cmp r8d, TAG_FLOAT
+    jne .le_type_stored
+    lea rax, [rel float_type]
+    jmp .le_type_stored
+.le_ptr_type:
+    mov rax, [rsi + PyObject.ob_type]
+.le_type_stored:
+    mov [rbp - LE_TYPE], rax
     cmp r8d, TAG_PTR
     jne .extend_type_error
-    mov [rbp - LE_ITERABLE], rsi          ; save iterable
 
     ; list is at stack[-(ecx)] after popping (payload slots)
     neg rcx
@@ -1228,7 +1245,15 @@ DEF_FUNC op_list_extend, 56   ; + 0 pushes; a handler is entered ALIGNED, so thi
     jmp eval_exception_unwind
 
 .extend_type_error:
-    RAISE exc_TypeError_type, "list.extend() argument must be iterable"
+    ; LIST_EXTEND is what `*x` compiles to in a display and in a call with
+    ; more than one positional group, and CPython words its refusal by the
+    ; SYNTAX rather than by the opcode: "Value after * must be an iterable,
+    ; not int".  list.extend() the method keeps its own message, which is a
+    ; different one again.
+    mov rsi, [rbp - LE_TYPE]
+    CSTRING rdi, `Value after * must be an iterable, not \x01`
+    extern raise_type_error_with_typename
+    jmp raise_type_error_with_typename
 END_FUNC op_list_extend
 
 ;; ============================================================================
@@ -2165,15 +2190,38 @@ DM_SOURCE   equ 24
 DM_DICT     equ 32
 DM_CAP      equ 40
 DM_ENTRIES  equ 48
+DM_FUNC     equ 56          ; the callable, for the message
+DM_TEMP     equ 64          ; a dict built from a non-dict mapping, or 0
+DM_TYPE     equ 72          ; the source's type, for the message
 DEF_FUNC op_dict_merge
     push rbx
     push r14
-    sub rsp, 32                ; locals + alignment
+    ; 64, not 48: the two pushes above put the first slot at [rbp - 24], so
+    ; the last one -- DM_TYPE at 72 -- needs 72 - 16 bytes of frame under it.
+    ; The parity is unchanged, which is what the handler rule cares about.
+    sub rsp, 64
+
+    mov qword [rbp - DM_TEMP], 0
 
     VPOP_VAL rsi, r8           ; rsi = mapping to merge from
-    cmp r8d, TAG_PTR
-    jne .dm_type_error
     mov [rbp - DM_SOURCE], rsi
+
+    ; The callable sits under the map, the args tuple and its own NULL, which
+    ; is where CPython peeks for it: every refusal CALL_FUNCTION_EX makes
+    ; names the callable, and this one is made on its behalf.
+    mov rax, rcx
+    add rax, 2
+    neg rax
+    shl rax, 3
+    mov rax, [r13 + rax]
+    mov [rbp - DM_FUNC], rax
+
+    ; ...and the source's TYPE, resolved from the tag: an int or a float is
+    ; not an object with an ob_type to read.
+    cmp r8d, TAG_PTR
+    jne .dm_immediate_type
+    mov rax, [rsi + PyObject.ob_type]
+    mov [rbp - DM_TYPE], rax
 
     ; dict is at stack[-(ecx)] after pop (payload slots)
     neg rcx
@@ -2181,9 +2229,12 @@ DEF_FUNC op_dict_merge
     mov rdi, [r13 + rcx]
     mov [rbp - DM_DICT], rdi          ; target dict
 
-    ; mapping must be a dict
-    mov rax, [rsi + PyObject.ob_type]
-    REQUIRE_DICT_TYPE rax, rdx, .dm_type_error
+    ; A dict merges directly.  Anything ELSE with a `keys` is a mapping, and
+    ; `f(**mapping)` is legal over one: CPython's DICT_MERGE takes the same
+    ; path dict.update() does.  Building a dict from it is what dict.update
+    ; would do anyway, and keeps one merge loop rather than two.
+    REQUIRE_DICT_TYPE rax, rdx, .dm_try_mapping
+.dm_have_dict:
 
     ; Iterate over source dict entries
     mov rax, [rsi + PyDictObject.capacity]
@@ -2231,23 +2282,91 @@ DEF_FUNC op_dict_merge
     ; DECREF the mapping.  The pad is the alignment: the loop above reaches
     ; its calls one push deep, so the frame is sized for that, and a call made
     ; at depth zero is the odd one out.
+    mov rdi, [rbp - DM_TEMP]
+    test rdi, rdi
+    jz .dm_no_temp
+    push rdi
+    call obj_decref
+    pop rdi
+.dm_no_temp:
     mov rdi, [rbp - DM_SOURCE]
     push rdi
     call obj_decref
     pop rdi
 
-    add rsp, 32
+    add rsp, 64
     pop r14
     pop rbx
     leave
     DISPATCH
 
+.dm_try_mapping:
+    ; `keys` is what makes something a mapping here, as it is for dict().
+    CSTRING rdi, "keys"
+    call str_from_cstr_heap
+    push rax
+    push rax                            ; pad
+    mov rdi, [rbp - DM_SOURCE]
+    mov rsi, rax
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    mov rbx, rax
+    pop rdi
+    pop rdi
+    call obj_decref                     ; the name
+    test rbx, rbx
+    jz .dm_type_error
+    mov rdi, rbx
+    DECREF_V rdi, rcx                   ; the bound method; dict() calls it again
+
+    ; dict(source) -- which honours keys() and __getitem__, and raises with
+    ; its own wording if the mapping misbehaves halfway.
+    sub rsp, 16
+    mov rax, [rbp - DM_SOURCE]
+    mov [rsp], rax
+    extern dict_type_call
+    extern dict_type
+    lea rdi, [rel dict_type]
+    mov rsi, rsp
+    mov edx, 1
+    call dict_type_call
+    add rsp, 16
+    test rax, rax
+    jz .dm_propagate
+    mov [rbp - DM_TEMP], rax
+    mov rsi, rax
+    jmp .dm_have_dict
+
+.dm_propagate:
+    mov [rel eval_saved_r13], r13
+    add rsp, 64
+    pop r14
+    pop rbx
+    leave
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
+
 .dm_dup_error:
     pop rbx                    ; balance push from before dict_get
     RAISE exc_TypeError_type, "got multiple values for keyword argument"
 
+.dm_immediate_type:
+    extern float_type
+    extern int_type
+    lea rax, [rel int_type]
+    cmp r8d, TAG_FLOAT
+    jne .dm_immediate_stored
+    lea rax, [rel float_type]
+.dm_immediate_stored:
+    mov [rbp - DM_TYPE], rax
+    jmp .dm_type_error
+
 .dm_type_error:
-    RAISE exc_TypeError_type, "dict.update() argument must be a dict"
+    mov rdi, [rbp - DM_FUNC]
+    mov rsi, [rbp - DM_TYPE]
+    CSTRING rdx, " argument after ** must be a mapping, not "
+    extern raise_callable_arg
+    jmp raise_callable_arg
 END_FUNC op_dict_merge
 
 
@@ -2394,6 +2513,7 @@ DEF_FUNC op_set_update
     ; TOS = iterable
     VPOP_VAL rsi, rax          ; rsi = iterable
     mov [rbp - SU_ENTRIES], rax          ; iterable tag
+    mov [rbp - SU_SET], rsi              ; ...and the value, for the message
     cmp eax, TAG_PTR
     jne .su_type_error
     mov [rbp - SU_SET], rsi          ; save iterable
@@ -2514,6 +2634,24 @@ DEF_FUNC op_set_update
     DISPATCH
 
 .su_type_error:
-    RAISE exc_TypeError_type, "object is not iterable"
+    ; CPython names the type: "'int' object is not iterable", which is what
+    ; `{*5}` and `s.update(5)` both say.
+    extern int_type
+    extern float_type
+    lea rsi, [rel int_type]
+    mov rax, [rbp - SU_ENTRIES]
+    cmp eax, TAG_PTR
+    je .su_ptr_type
+    cmp eax, TAG_FLOAT
+    jne .su_have_type
+    lea rsi, [rel float_type]
+    jmp .su_have_type
+.su_ptr_type:
+    mov rsi, [rbp - SU_SET]
+    mov rsi, [rsi + PyObject.ob_type]
+.su_have_type:
+    CSTRING rdi, `'\x01' object is not iterable`
+    extern raise_type_error_with_typename
+    jmp raise_type_error_with_typename
 END_FUNC op_set_update
 

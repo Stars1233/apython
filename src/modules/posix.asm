@@ -3191,6 +3191,7 @@ DEF_FUNC posix_module_create, 40
     POSIX_ADD_INT pm_n_O_DIRECTORY, O_DIRECTORY
     POSIX_ADD_INT pm_n_O_NOFOLLOW,  O_NOFOLLOW
     POSIX_ADD_INT pm_n_O_CLOEXEC,   O_CLOEXEC
+    POSIX_ADD_INT pm_n_O_TMPFILE,   O_TMPFILE
     POSIX_ADD_INT pm_n_F_OK,        F_OK
     POSIX_ADD_INT pm_n_R_OK,        R_OK
     POSIX_ADD_INT pm_n_W_OK,        W_OK
@@ -3368,6 +3369,7 @@ pm_n_O_NONBLOCK:  db "O_NONBLOCK", 0
 pm_n_O_DIRECTORY: db "O_DIRECTORY", 0
 pm_n_O_NOFOLLOW:  db "O_NOFOLLOW", 0
 pm_n_O_CLOEXEC:   db "O_CLOEXEC", 0
+pm_n_O_TMPFILE:   db "O_TMPFILE", 0
 pm_n_F_OK:        db "F_OK", 0
 pm_n_R_OK:        db "R_OK", 0
 pm_n_W_OK:        db "W_OK", 0

@@ -330,6 +330,7 @@ test_load_attr_cache
 test_load_attr_method_shadow
 test_load_attr_per_name
 test_load_attr_property_ic
+test_load_from_dict_or_globals
 test_maketrans
 test_map_multi
 test_mappingproxy_call
@@ -385,6 +386,7 @@ test_ordereddict
 test_ordering_typeerror
 test_oserror
 test_pep646
+test_pep695_classdict
 test_pep695
 test_percent_and_ior
 test_percent_errors

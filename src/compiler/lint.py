@@ -941,6 +941,101 @@ def check_handler_alignment(files):
     return out
 
 
+UNWIND_FLOOR = os.path.join(ROOT, 'tests', 'unwind_floor.txt')
+
+# What ends a straight-line run backwards from a RAISE.  Anything above one of
+# these reaches the RAISE only by a jump, so it is a different path.
+UNWIND_STOP = re.compile(r'^\s*(?:DISPATCH\b|ret\b|jmp\b|leave\b'
+                         r'|RAISE\b|SET_EXC\b|END_FUNC\b)')
+UNWIND_DECREF = re.compile(r'^\s*(?:call\s+obj_decref\b|X?DECREF_V(?:AL)?\b'
+                           r'|DECREF_REG\b)')
+UNWIND_PUBLISH = re.compile(r'\[rel\s+eval_saved_r13\]\s*,\s*r13')
+
+
+def check_unwind_balance(files):
+    """A handler that pops an operand and then RAISEs must not also release it.
+
+    DISPATCH publishes eval_saved_r13 BEFORE the handler runs, and
+    eval_exception_unwind restores r13 from it and XDECREF_Vs every slot down
+    to the handler's depth.  So a VPOP only moves r13: the slot still holds the
+    pointer, and the unwinder is what gives that reference back.  Two rules
+    follow, and the tree uses both:
+
+      A  pop, do not release, do not republish -- the unwinder does it
+      B  pop, release (or hand the reference on), and republish r13 at once
+
+    Mixing them is a double free.  op_delete_attr did: `del range(i).start`
+    decref'd the object and then RAISEd without republishing, so the unwinder
+    released the same slot again and the heap was corrupted -- with the crash
+    landing later, in the collector or inside malloc.
+
+    A text linter cannot prove which rule a site is following, so this is a
+    RATCHET on the shape: a decref in the straight-line run that falls into a
+    RAISE, inside a handler that pops.  Each site listed in the floor has been
+    read and is releasing something the unwinder does NOT cover -- a name
+    string, or an operand whose stack slot has since been overwritten by a
+    push.  A new one has to be read the same way.  Re-record with
+      python3 src/compiler/lint.py --record-unwind
+    """
+    bad = []
+    for path in files:
+        if not path.startswith('src/opcodes/'):
+            continue
+        src = open(path).read()
+        for m in re.finditer(r'^(DEF_FUNC(?:_LOCAL|_BARE)?)\s+(\w+)[^\n]*$(.*?)^END_FUNC',
+                             src, re.M | re.S):
+            name, body = m.group(2), m.group(3)
+            if not re.search(r'^\s*VPOP', body, re.M):
+                continue
+            lines = body.split('\n')
+            for i, L in enumerate(lines):
+                if not re.match(r'^\s*RAISE\b', L):
+                    continue
+                # Walk back over the run that falls THROUGH into this RAISE.
+                j = i - 1
+                run = []
+                while j >= 0 and not UNWIND_STOP.match(lines[j]):
+                    run.append(lines[j])
+                    j -= 1
+                if any(UNWIND_PUBLISH.search(r) for r in run):
+                    continue        # rule B, stated
+                if not any(UNWIND_DECREF.match(r) for r in run):
+                    continue        # rule A, and nothing released
+                bad.append(("%s %s" % (path, name),
+                            "%s releases a popped operand and then RAISEs"
+                            % name))
+    floor = set()
+    try:
+        for line in open(UNWIND_FLOOR):
+            line = line.split('#')[0].strip()
+            if line:
+                floor.add(line)
+    except FileNotFoundError:
+        pass
+    if '--record-unwind' in sys.argv:
+        with open(UNWIND_FLOOR, 'w') as fh:
+            fh.write("# Handlers that pop an operand, release something, and\n"
+                     "# then RAISE without republishing eval_saved_r13, one per\n"
+                     "# line as `file handler`.  Every one listed here has been\n"
+                     "# read: what it releases is NOT what the unwinder gives\n"
+                     "# back.  A ratchet -- lint fails on any site not listed,\n"
+                     "# so a new one has to be read too.  Re-record with\n"
+                     "#   python3 src/compiler/lint.py --record-unwind\n")
+            for key, _msg in sorted(set(bad)):
+                fh.write(key + "\n")
+        return []
+    out = []
+    seen = set()
+    for key, msg in bad:
+        if key in floor or key in seen:
+            continue
+        seen.add(key)
+        out.append((key.split()[0], 0, msg,
+                    "the unwinder releases the popped slot from "
+                    "eval_saved_r13; either drop the decref or republish r13"))
+    return out
+
+
 # --------------------------------------------------------------------------
 # Encoding hygiene.
 #
@@ -1062,6 +1157,10 @@ def main():
     if '--record-docblocks' in sys.argv:
         record_docblocks(all_asm())
         return 0
+    if '--record-unwind' in sys.argv:
+        check_unwind_balance(all_asm())
+        print("unwind floor recorded")
+        return 0
     # Some checks are scoped to src/compiler plus src/main.asm: main holds argc
     # and argv across compile_source, and DEF_FUNC main + 5 pushes enters
     # glibc's strtod misaligned on any source file with a float literal.  The
@@ -1094,6 +1193,7 @@ def main():
                 + check_encoding(everything)
                 + check_const_value(everything)
                 + check_slot_table(everything)
+                + check_unwind_balance(everything)
                 + check_handler_alignment(everything)
                 + check_tailjumps(scoped)
                 + check_callee_saved(scoped) + check_saved_writes(scoped))

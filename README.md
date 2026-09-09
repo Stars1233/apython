@@ -103,8 +103,7 @@ and OSError trees (FileNotFoundError, PermissionError, ConnectionResetError,
 SystemExit, RecursionError, UnicodeDecodeError / UnicodeEncodeError, the
 Warning family, and BaseExceptionGroup / ExceptionGroup — which derives from
 both BaseExceptionGroup and Exception, so `except Exception` catches it.
-Missing: `IOError` / `EnvironmentError` (the OSError aliases),
-`FileExistsError`, `UnicodeTranslateError`.
+All 69 of them, aliases included.
 
 ### Language features
 

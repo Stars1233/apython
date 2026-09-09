@@ -21,6 +21,7 @@ extern none_singleton
 extern bool_true
 extern bool_false
 extern dict_new
+extern kw_names_pending
 extern str_intern
 extern dict_set
 extern dict_get
@@ -257,6 +258,38 @@ DEF_FUNC_LOCAL sm_add_str, SAS_FRAME
     leave
     ret
 END_FUNC sm_add_str
+
+;; ============================================================================
+;; sm_add_owned(rdi = name cstr, rsi = the object, OWNED, rdx = module dict)
+;;   -> nothing; the dict holds the object and the caller's reference is gone
+;;
+;; The counterpart to sm_add_str for a value that is built rather than spelled:
+;; a fresh list or dict.  Open-coding it cost eight pushes and two pads each
+;; time, and path_importer_cache was written out that way before there were
+;; three more of them.
+;; ============================================================================
+SAO_DICT  equ 8
+SAO_VAL   equ 16
+SAO_KEY   equ 24
+SAO_FRAME equ 24            ; + 1 push = 32, 16-aligned
+DEF_FUNC_LOCAL sm_add_owned, SAO_FRAME
+    push rbx
+    mov [rbp - SAO_DICT], rdx
+    mov [rbp - SAO_VAL], rsi
+    call str_from_cstr_heap             ; the key
+    mov [rbp - SAO_KEY], rax
+    mov rdi, [rbp - SAO_DICT]
+    mov rsi, rax
+    mov rdx, [rbp - SAO_VAL]
+    call dict_set                       ; takes its own reference to both
+    mov rdi, [rbp - SAO_VAL]
+    call obj_decref
+    mov rdi, [rbp - SAO_KEY]
+    call obj_decref
+    pop rbx
+    leave
+    ret
+END_FUNC sm_add_owned
 
 DEF_FUNC sys_module_init, 40
     push rbx
@@ -1061,6 +1094,8 @@ DEF_FUNC sys_module_init, 40
     ; around a thread's run().  It is the same report the interpreter prints
     ; for an uncaught exception, which traceback_print already produces.
     SYS_ADD_FUNC_ALIAS sys_excepthook_func, sm_excepthook, sm_dunder_excepthook
+    SYS_ADD_FUNC_ALIAS sys_displayhook_func, sm_displayhook, sm_dunder_displayhook
+    SYS_ADD_FUNC sys_getrefcount_func, sm_getrefcount
     SYS_ADD_FUNC_ALIAS sys_unraisablehook_func, sm_unraisablehook, \
                        sm_dunder_unraisablehook
     SYS_ADD_FUNC sys_exc_info_func, sm_exc_info
@@ -1079,26 +1114,34 @@ DEF_FUNC sys_module_init, 40
     ; Nothing in this tree writes a .pyc -- import.asm only reads them and
     ; marshal has no writer -- so this is a fact, not a switch.
     SYS_ADD_OBJ sm_dont_write_bytecode, bool_true
-    ; An empty dict, so that code which reads or clears it stops raising.  The
-    ; finders here are assembly rather than importlib path hooks, so nothing
-    ; will ever populate it.
+    ; None, and importlib._bootstrap_external reads it on every path it
+    ; caches -- unguarded, so its absence stopped importlib installing its
+    ; own finders and left sys.meta_path empty.
+    SYS_ADD_OBJ sm_pycache_prefix, none_singleton
+    ; The import machinery's own three attributes, all empty.  The finders here
+    ; are assembly rather than importlib path hooks, so nothing will ever
+    ; populate them -- but importlib._bootstrap walks meta_path on EVERY import
+    ; and path_hooks whenever a path entry has no finder cached, and neither
+    ; read is guarded, so their absence was an AttributeError raised from
+    ; inside `import`.  Measured over CPython 3.12's own Lib/test, that was the
+    ; single most common way a module failed.
     call dict_new
-    push rax
-    push rax                    ; pad
     lea rdi, [rel sm_path_importer_cache]
-    call str_from_cstr_heap
-    push rax
-    push rax                    ; pad
-    mov rdi, r15
     mov rsi, rax
-    mov rdx, [rsp + 16]
-    call dict_set
-    pop rdi
-    pop rdi
-    call obj_decref             ; the key
-    pop rdi
-    pop rdi
-    call obj_decref             ; the dict; the module dict holds it now
+    mov rdx, r15
+    call sm_add_owned
+    xor edi, edi
+    call list_new
+    lea rdi, [rel sm_meta_path]
+    mov rsi, rax
+    mov rdx, r15
+    call sm_add_owned
+    xor edi, edi
+    call list_new
+    lea rdi, [rel sm_path_hooks]
+    mov rsi, rax
+    mov rdx, r15
+    call sm_add_owned
     ; audit() and addaudithook() do nothing: there are no audit hooks here,
     ; and with none installed CPython's audit() is a no-op too.  os.walk,
     ; os.listdir and half of shutil call audit() unconditionally, and an
@@ -1588,6 +1631,13 @@ sm_float_repr_style: db "float_repr_style", 0
 sm_short:        db "short", 0
 sm_dont_write_bytecode: db "dont_write_bytecode", 0
 sm_path_importer_cache: db "path_importer_cache", 0
+sm_meta_path:    db "meta_path", 0
+sm_pycache_prefix: db "pycache_prefix", 0
+sm_path_hooks:   db "path_hooks", 0
+sm_displayhook:  db "displayhook", 0
+sm_dunder_displayhook: db "__displayhook__", 0
+sm_getrefcount:  db "getrefcount", 0
+sm_underscore:   db "_", 0
 sm_dunder_stdout: db "__stdout__", 0
 sm_dunder_stderr: db "__stderr__", 0
 sm_dunder_stdin:  db "__stdin__", 0
@@ -1643,6 +1693,120 @@ section .text
 ;; traceback, and CPython's C hook falls back on the same when the three
 ;; arguments disagree.
 ;; ============================================================================
+
+;; ============================================================================
+;; sys_getrefcount_func(args, nargs) -> Value: the object's reference count
+;;
+;; The count INCLUDES the reference this call's own argument holds -- CPython
+;; documents its answer as one higher than expected for exactly that reason,
+;; and the args array here points into the value stack, whose slot holds one.
+;; So the two agree on what a program can actually measure, which is the
+;; DIFFERENCE a binding makes.
+;;
+;; A Value that is not a pointer -- an int immediate, a float -- is not an
+;; object and has no count.  CPython's nearest thing is an immortal object,
+;; and 3.12 reports 4294967295 for one; `sys.getrefcount(5)` answers that
+;; there and answers it here.
+;; ============================================================================
+SGR_IMMORTAL equ 4294967295
+DEF_FUNC sys_getrefcount_func
+    cmp rsi, 1
+    jne .sgr_args
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rax
+    ja .sgr_immortal
+    test rdi, rdi
+    jz .sgr_immortal
+    mov rax, [rdi + PyObject.ob_refcnt]
+    V_PACK_I64 rax, rcx
+    leave
+    ret
+.sgr_immortal:
+    mov rax, SGR_IMMORTAL
+    V_PACK_I64 rax, rcx
+    leave
+    ret
+.sgr_args:
+    RAISE exc_TypeError_type, "getrefcount() takes exactly one argument"
+END_FUNC sys_getrefcount_func
+
+;; ============================================================================
+;; sys_displayhook_func(args, nargs) -> Value: None
+;;
+;; What an interactive prompt does with the value of an expression statement:
+;; None is dropped silently, anything else is printed as its repr and bound to
+;; builtins._ so the next line can refer to it.  Nothing in this tree calls it
+;; -- there is no REPL -- but `sys.displayhook is sys.__displayhook__` is how
+;; a program asks whether anything has replaced the hook, and code.py, pdb and
+;; doctest all read it.
+;;
+;; builtins._ is set AFTER the print, as CPython sets it: a repr that raises
+;; must not leave the name bound to a value the user never saw.
+;; ============================================================================
+SDH_VAL   equ 8
+SDH_REPR  equ 16
+SDH_KW    equ 24
+SDH_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC sys_displayhook_func, SDH_FRAME
+    cmp rsi, 1
+    jne .sdh_args
+    mov rdi, [rdi]
+    mov [rbp - SDH_VAL], rdi
+    lea rax, [rel none_singleton]
+    cmp rdi, rax
+    je .sdh_none
+
+    extern obj_repr
+    call obj_repr
+    test rax, rax
+    jz .sdh_failed
+    mov [rbp - SDH_REPR], rax
+
+    ; print() reads kw_names_pending, and whatever called US may have left one
+    ; there.  Saved and restored rather than cleared, because a caller further
+    ; up is entitled to find it as it was.
+    mov rax, [rel kw_names_pending]
+    mov [rbp - SDH_KW], rax
+    mov qword [rel kw_names_pending], 0
+    lea rdi, [rbp - SDH_REPR]
+    mov esi, 1
+    extern builtin_print
+    call builtin_print
+    mov rax, [rbp - SDH_KW]
+    mov [rel kw_names_pending], rax
+
+    mov rdi, [rbp - SDH_REPR]
+    call obj_decref
+
+    ; builtins._ = value
+    lea rdi, [rel sm_underscore]
+    call str_from_cstr_heap
+    push rax
+    push rax                    ; pad
+    extern builtins_dict_global
+    mov rdi, [rel builtins_dict_global]
+    mov rsi, rax
+    mov rdx, [rbp - SDH_VAL]
+    call dict_set
+    pop rdi
+    pop rdi
+    call obj_decref
+
+.sdh_none:
+    RET_NONE
+    leave
+    V_PACK rax, rdx
+    ret
+
+.sdh_failed:
+    leave
+    xor eax, eax
+    ret
+
+.sdh_args:
+    RAISE exc_TypeError_type, "displayhook() takes exactly one argument"
+END_FUNC sys_displayhook_func
+
 DEF_FUNC sys_excepthook_func
     cmp rsi, 3
     jl .seh_args

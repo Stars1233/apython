@@ -65,3 +65,133 @@ def g(a, b=0, **k):
 
 print(g(*[1], **{"b": 2, "c": 3}))
 print(g(*"x"), g(*(1, 2)))
+
+
+# A star in an ARGUMENT list takes a whole expression.  CPython has two
+# productions: `star_expressions` for a display, an assignment target and a for
+# target, whose star takes a bitwise_or, and `starred_expression` for a call,
+# which admits or/and/not, a comparison and a ternary.  One binding power
+# cannot say both, and this was parsed with the display's -- so `f(*() or ())`,
+# which CPython's own test_grammar exercises, was a SyntaxError.
+def d(*a, **k):
+    return a, sorted(k.items())
+
+
+print(d(*() or (1,)))
+print(d(*[] or [2]))
+print(d(*() or (), *{} and (), **() or {}))
+print(d(**{"a": 2} or {}))
+print(d(*(1, 2) if True else ()))
+print(d(*[1] if 1 else [2], **{"k": 1} if 1 else {}))
+print(d(*[1] if 0 else [2, 3]))
+print(d(*(x for x in (1, 2))))
+
+# A class statement's bases share the argument parser, so it follows.
+BASES = ()
+
+
+class C(*BASES or (object,)):
+    pass
+
+
+print(C.__mro__[-1] is object)
+
+# The display and target forms are unchanged: the star there stops before
+# `or`, which is what makes `[*a or b]` a SyntaxError in both.
+try:
+    exec("[*a or b]")
+    print("NOT REFUSED")
+except SyntaxError:
+    print("display star still refused")
+
+for first, *rest in [(1, 2, 3)]:
+    print(first, rest)
+
+head, *tail = [1, 2, 3]
+print(head, tail)
+
+
+# A dict takes any hashable key, and DictEntry.key is a full Value -- so an
+# int key in a `**` spread put an IMMEDIATE in the names tuple and the INCREF
+# that gives the tuple its reference wrote through the number itself.
+# `print(**{1: 2})` was one line of Python and a segfault; CPython refuses a
+# non-string keyword before anything else happens, and now so does this.
+class StrSub(str):
+    pass
+
+
+def kw(**k):
+    return sorted(k.items())
+
+
+for mapping in ({1: 2}, {1.5: 2}, {None: 2}, {(1,): 2}, {True: 2},
+                {"a": 1, 2: 3}, {b"a": 1}):
+    try:
+        print(kw(**mapping))
+    except TypeError as e:
+        print("refused:", e)
+
+print(kw(**{}), kw(**{"a": 1}), kw(**{StrSub("b"): 2}))
+print(kw(**{"a": 1}, **{"b": 2}))
+
+# The refusal happens for any callable, and before the callable is entered.
+entered = []
+
+
+def records(**k):
+    entered.append(1)
+    return k
+
+
+try:
+    records(**{1: 2})
+except TypeError:
+    pass
+print("callee not entered:", entered == [])
+
+
+# What a `*` or `**` spread says when its operand cannot be used.  Three
+# different messages in CPython, from three different places, and this said
+# one thing everywhere -- "list.extend() argument must be iterable", named
+# after the routine that happened to be doing the work.
+def refuse(thunk):
+    try:
+        return repr(thunk())
+    except TypeError as e:
+        return "TypeError: %s" % e
+
+
+def star(*a, **k):
+    return a, sorted(k.items())
+
+
+print("method:", refuse(lambda: [].extend(5)))
+print("list display:", refuse(lambda: [*5]))
+print("tuple display:", refuse(lambda: (*5,)))
+print("set display:", refuse(lambda: {*5}))
+print("two groups:", refuse(lambda: star(*[1], *5)))
+print("double star:", refuse(lambda: star(**5)))
+print("double star float:", refuse(lambda: star(**1.5)))
+print("double star list:", refuse(lambda: star(**[1])))
+
+
+class Mapping:
+    def keys(self):
+        return ["a", "b"]
+
+    def __getitem__(self, k):
+        return {"a": 1, "b": 2}[k]
+
+
+# `f(**mapping)` is legal over anything with keys() and __getitem__, which is
+# what dict.update() takes; this required an exact dict.
+print("mapping:", star(**Mapping()))
+import collections
+print("ordered:", star(**collections.OrderedDict(z=1)))
+
+
+class NotAMapping:
+    pass
+
+
+print("no keys:", refuse(lambda: star(**NotAMapping())))

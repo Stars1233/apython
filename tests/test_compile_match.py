@@ -98,3 +98,69 @@ print(sorted(d.items()))
 '''
 ns = {}
 exec(compile(SRC, "<t>", "exec"), ns)
+
+
+# A complex literal is a value pattern, and the only operator one may hold:
+#   complex_number: signed_real_number ('+'|'-') imaginary_number
+# It was parsed at BP_ARITH, which is the binding power of `+` ITSELF, so the
+# Pratt loop stopped before the operator and `case 0 + 0j:` was "expected ':'".
+def kind(v):
+    match v:
+        case 0 + 0j:
+            return "0+0j"
+        case -1.5 - 2j:
+            return "-1.5-2j"
+        case 1 + 2j:
+            return "1+2j"
+        case 2.5:
+            return "2.5"
+        case -7:
+            return "-7"
+        case _:
+            return "other"
+
+
+for value in (0, complex(-1.5, -2), 1 + 2j, 2.5, -7, 9):
+    print(repr(value), kind(value))
+
+# `case 1:` still matches True, because 1 == True; the complex arm must not
+# have disturbed that.
+match True:
+    case 1:
+        print("1 matches True")
+
+# An or-pattern's bar is well below the operator, so it still ends the value.
+match 2:
+    case 1 + 0j | 2 | 3:
+        print("or-pattern still parses")
+
+# The shape is a grammar rule, not a precedence, so what precedence would let
+# through is refused afterwards -- and worded as CPython words it.
+for source in ("case 1 * 2", "case 1 + 2", "case 2j + 1", "case +1 + 2j",
+               "case 1 + -2j", "case True + 1j", "case 1 + 2j + 3j",
+               "case 1 - 2"):
+    try:
+        compile("match 1:\n " + source + ": pass", "<s>", "exec")
+        print(source, "-> NOT REFUSED")
+    except SyntaxError as e:
+        print(source, "->", e.msg)
+
+# A name on the left is a capture pattern, and the operator is simply what
+# follows it -- so the value-pattern parser never sees the shape it would
+# reject, and the error is the one a leftover token gets anywhere else.
+# CPython words a missing colon and a leftover token differently, and the
+# token being a NEWLINE is what separates them.
+for source in ("case x + 0j", "case x * 2", "case x y", "case 1 2",
+               "case x.y + 0j", "case [1] + [2]", "case (x) + 1"):
+    try:
+        compile("match 1:\n " + source + ": pass", "<s>", "exec")
+        print(source, "-> NOT REFUSED")
+    except SyntaxError as e:
+        print(source, "->", e.msg)
+
+for source in ("match 1:\n case x\n", "match 1:\n case x\n  pass\n"):
+    try:
+        compile(source, "<s>", "exec")
+        print("no colon -> NOT REFUSED")
+    except SyntaxError as e:
+        print("no colon ->", e.msg)

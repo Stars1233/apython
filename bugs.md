@@ -14,6 +14,41 @@ reasoning that chose them and what changing one would cost.
 
 ## Correctness
 
+- **CPython's test_weakref overflows the C stack.**  `WeakMethodTestCase.
+  test_hashing` and two of its sibling classes die with an unbounded
+  recursion whose top frame is `dict_lookup`; valgrind reports "can't grow
+  stack" rather than an invalid access.  The test in isolation passes, and so
+  does every reduction of it tried so far -- it needs the rest of the module,
+  so the state that arms it comes from an earlier test.  The Python-level
+  recursion limit is in place and works (`sys.getrecursionlimit()` is 1000
+  and a runaway Python function raises RecursionError), so whatever recurses
+  here is doing it below the eval loop, where nothing counts the depth.
+
+  The same file also reports 44 valgrind errors of a second kind, all of them
+  an object freed by an explicit `gc.collect()` while a live frame still held
+  it -- the collector deciding something is unreachable that is not.  Both
+  predate the round that recorded them.
+
+  CPython's test_sys_settrace dies of the same thing, in `gc_visit_decref`
+  under `exc_traverse` at shutdown, and it is HEAP-LAYOUT SENSITIVE: the same
+  commit built at `/tmp/apy-base` passes and built at
+  `/home/jgarzik/repo/apython` crashes, because the DWARF path length changes
+  the binary's size and with it every allocation address.  A git worktree is
+  the usual way to compare two commits, and a worktree whose path differs in
+  LENGTH is not a control -- build the comparison at a path of the same
+  length, or the answer is about the path.
+
+- **`f(*5)` does not name the callable.**  CPython says
+  "__main__.f() argument after * must be an iterable, not int"; this says
+  "Value after * must be an iterable, not int", which is CPython's message
+  for the OTHER shape -- `f(*a, *b)` and `[*5]`.  The two differ because
+  CPython compiles a lone `*x` to a bare CALL_FUNCTION_EX and this compiles
+  it to BUILD_LIST + LIST_EXTEND, so the refusal comes from a different
+  opcode.  Matching it means matching the codegen, and then teaching
+  CALL_FUNCTION_EX to materialise an arbitrary iterable -- it takes a tuple
+  or a list today.  The `**` half is done: DICT_MERGE names the callable and
+  accepts any mapping.
+
 - **Missing C modules.**  The ranking here is by what actually stands in the
   way rather than by which import fails first -- the two are not the same,
   and `_imp` was reached by twelve modules a few lines after some other
@@ -35,7 +70,7 @@ reasoning that chose them and what changing one would cost.
   `_tokenize`, `_operator`, `binascii`, `atexit` and `_ast`, which are
   there, and so are `_csv` and `termios` -- the second over one raw
   `posix.ioctl`, the same split `_socket` and `select` use.)
-  `make check-stdlib` gives the current figure: 179 of 196.
+  `make check-stdlib` gives the current figure.
 
   `array` is done, and it is the reason the old "one or two modules apiece"
   reading of this list was wrong: it was what stood between this tree and
@@ -53,19 +88,6 @@ reasoning that chose them and what changing one would cost.
   shares `hypot`'s routine and so shares the note.  `fsum` is exact: it is
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
-
-- **A PEP 695 generic class cannot see the class body it is nested in.**
-  `class Inner[T](B)` inside a `class Outer` whose body binds `B` raises
-  `NameError` when our compiler builds it.  CPython's compiler gives the
-  implicit "generic parameters of Inner" scope a `__classdict__` freevar, has
-  the enclosing class body store a `__classdictcell__`, and emits
-  `LOAD_FROM_DICT_OR_GLOBALS` for the name; ours emits an ordinary global
-  load, so the class attribute is invisible.  The interpreter half is all
-  there -- opcode 175 works, and `tests/test_load_from_dict_or_globals.py`
-  exercises it from CPython's `.pyc` -- and that file is the third of the
-  three `make check-source` reports as differing.  What is missing is the cell
-  plumbing in `symtab.asm` and `codegen.asm`, which is the same shape as the
-  `__class__` cell those already build for `super()`.
 
 - **`array.fromfile` and `array.tofile` are absent.**  They want the file
   object's own read and write, and every caller in CPython's suite reaches

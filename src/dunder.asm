@@ -188,6 +188,69 @@ DEF_FUNC dunder_lookup_owner, DLO_FRAME
 END_FUNC dunder_lookup_owner
 
 ;; ============================================================================
+;; dunder_lookup_after(rdi = the class itself, rsi = name cstr) -> rax = Value
+;;
+;; What CPython writes as `super(cls, cls).name`: the same walk as
+;; dunder_lookup, started one entry further along the class's OWN MRO, so the
+;; class's own definition is skipped and everything behind it is not.
+;;
+;; __init_subclass__ is what needs this.  It used to be looked up on the
+;; LAYOUT base -- the widest of the bases -- which is not where Python says to
+;; look: `class D(Mixin, Base)` picked whichever of the two was wider, so a
+;; hook on the other one never ran.  unittest.TestCase is written that way,
+;; and 44 of CPython 3.12's own test modules ended on the AttributeError that
+;; followed.  Skipping the first entry is also what keeps the class from
+;; calling its own hook on itself: type_wrap_implicit_classmethods has
+;; already put one in its dict by the time this runs.
+;; ============================================================================
+DLA_FRAME equ 16            ; + 4 pushes = 48, 16-aligned
+global dunder_lookup_after
+DEF_FUNC dunder_lookup_after, DLA_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov r14, rdi            ; r14 = the origin whose MRO is authoritative
+    mov rbx, rdi            ; rbx walks it
+    mov r12, rsi            ; r12 = name C string
+
+    mov rdi, r12
+    call dunder_name_obj
+    mov r13, rax            ; borrowed, so no DECREF on the way out
+
+    MRO_NEXT rbx, r14       ; start AFTER the class itself
+
+.dla_walk:
+    test rbx, rbx
+    jz .dla_not_found
+
+    mov rdi, [rbx + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .dla_next
+
+    mov rsi, r13
+    call dict_get           ; a Value already, and 0 is the miss
+    test rax, rax
+    jnz .dla_done
+
+.dla_next:
+    MRO_NEXT rbx, r14
+    jmp .dla_walk
+
+.dla_not_found:
+    xor eax, eax
+
+.dla_done:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dunder_lookup_after
+
+;; ============================================================================
 ;; dunder_call_1(PyObject *self, const char *name) -> (rax=payload, rdx=tag)
 ;;
 ;; dunder_call_1(rdi = self, rsi = dunder name C string) -> rax = the result

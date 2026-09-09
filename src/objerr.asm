@@ -18,6 +18,7 @@
 ; --- the message primitives, which stay in object.asm ---
 extern msg_append_i64
 extern rbt_append_cstr
+extern rbt_typename
 
 ; --- what the messages describe ---
 extern value_type
@@ -394,3 +395,256 @@ DEF_FUNC raise_builtin_arity, RBA_FRAME
     lea rsi, [rbp - RBA_BUF]
     call raise_exception
 END_FUNC raise_builtin_arity
+
+;; ============================================================================
+;; raise_new_bad_class(rdi = the type whose __new__ this is, rsi = the class
+;;                     argument as a Value, edx = 0 no argument / 1 not a type
+;;                     / 2 not a subtype)
+;;   -> does not return: the composed message is raised as a TypeError
+;;
+;; The three ways `T.__new__(cls, ...)` can be called wrongly, worded as
+;; CPython words them:
+;;   list.__new__(): not enough arguments
+;;   list.__new__(X): X is not a type object (int)
+;;   list.__new__(dict): dict is not a subtype of list
+;;   int.__new__(bool) is not safe, use bool.__new__()
+;;
+;; The first name is the type the __new__ was found on, not the argument's:
+;; that is what says which constructor was reached, and it is the whole point
+;; of the message.  `X` is CPython's literal placeholder, not the argument.
+;; ============================================================================
+RNB_OWNER equ 8
+RNB_ARG   equ 16
+RNB_WHY   equ 24
+RNB_BUF   equ 400
+RNB_FRAME equ 400           ; + 0 pushes = 400, 16-aligned
+global raise_new_bad_class
+DEF_FUNC raise_new_bad_class, RNB_FRAME
+    mov [rbp - RNB_OWNER], rdi
+    mov [rbp - RNB_ARG], rsi
+    mov [rbp - RNB_WHY], rdx
+
+    lea rdi, [rbp - RNB_BUF]
+    call .rnb_owner_name
+    mov rdi, rax
+
+    cmp qword [rbp - RNB_WHY], 0
+    je .rnb_no_arg
+    cmp qword [rbp - RNB_WHY], 1
+    je .rnb_not_type
+    cmp qword [rbp - RNB_WHY], 3
+    je .rnb_not_safe
+
+    ; "T.__new__(cls): cls is not a subtype of T"
+    CSTRING rsi, ".__new__("
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rnb_arg_name
+    mov rdi, rax
+    CSTRING rsi, "): "
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rnb_arg_name
+    mov rdi, rax
+    CSTRING rsi, " is not a subtype of "
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rnb_owner_name
+    jmp .rnb_raise
+
+.rnb_no_arg:
+    CSTRING rsi, ".__new__(): not enough arguments"
+    call rbt_append_cstr
+    jmp .rnb_raise
+
+.rnb_not_safe:
+    ; "T.__new__(cls) is not safe, use cls.__new__()" -- cls is a subtype, but
+    ; the constructor that would actually run for it is not T's.
+    CSTRING rsi, ".__new__("
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rnb_arg_name
+    mov rdi, rax
+    CSTRING rsi, ") is not safe, use "
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rnb_arg_name
+    mov rdi, rax
+    CSTRING rsi, ".__new__()"
+    call rbt_append_cstr
+    jmp .rnb_raise
+
+.rnb_not_type:
+    CSTRING rsi, ".__new__(X): X is not a type object ("
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RNB_ARG]
+    call rbt_typename
+    mov rdi, rax
+    CSTRING rsi, ")"
+    call rbt_append_cstr
+
+.rnb_raise:
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RNB_BUF]
+    call raise_exception
+
+;; The two names, appended at the cursor in rdi.  The argument is a class here
+;; -- reason 2 is the only caller -- so its own tp_name is what to print, not
+;; the metatype's, which is what rbt_typename would give.
+.rnb_owner_name:
+    mov rcx, [rbp - RNB_OWNER]
+    mov rsi, [rcx + PyTypeObject.tp_name]
+    jmp rbt_append_cstr
+.rnb_arg_name:
+    mov rcx, [rbp - RNB_ARG]
+    mov rsi, [rcx + PyTypeObject.tp_name]
+    jmp rbt_append_cstr
+END_FUNC raise_new_bad_class
+
+;; ============================================================================
+;; rca_fetch(rdi = an object, rsi = an attribute name as a C string)
+;;   -> rax = the attribute when it is a str, a NEW reference; else 0
+;;
+;; getattr with no exception and no surprises: anything that is not a str is
+;; treated as absent, which is what CPython's fallback amounts to.
+;; ============================================================================
+RAC_STR   equ 8
+RAC_VAL   equ 16
+RAC_FRAME equ 24            ; + 1 push = 32, 16-aligned
+extern obj_getattr_opt
+extern str_from_cstr_heap
+extern obj_decref
+extern str_type
+extern obj_dealloc
+DEF_FUNC_LOCAL rca_fetch, RAC_FRAME
+    push rbx
+    mov rbx, rdi
+    mov rdi, rsi
+    call str_from_cstr_heap
+    mov [rbp - RAC_STR], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call obj_getattr_opt
+    mov [rbp - RAC_VAL], rax
+    mov rdi, [rbp - RAC_STR]
+    call obj_decref
+    mov rax, [rbp - RAC_VAL]
+    test rax, rax
+    jz .rac_none
+    V_TEST_PTR rax, rcx
+    ja .rac_release
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .rac_release
+    pop rbx
+    leave
+    ret
+.rac_release:
+    mov rdi, rax
+    DECREF_V rdi, rcx
+.rac_none:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC rca_fetch
+
+;; ============================================================================
+;; raise_callable_arg(rdi = the callable, rsi = the offending argument's TYPE,
+;;                    rdx = the text between them)
+;;   -> does not return: the composed message is raised as a TypeError
+;;
+;; "__main__.f() argument after ** must be a mapping, not int".  CPython names
+;; the callable in every refusal CALL_FUNCTION_EX makes, through
+;; _PyObject_FunctionStr: the qualified name, prefixed by the module unless
+;; that is builtins or missing, and then "()".  A callable that answers
+;; neither name is printed as its type, which is CPython's own fallback.
+;;
+;; Every attribute is APPENDED before it is released.  Reading a str's data
+;; after giving its reference back is the shape half of today's bugs had.
+;; ============================================================================
+RCA_FUNC  equ 8
+RCA_ARG   equ 16
+RCA_MID   equ 24
+RCA_CUR   equ 32
+RCA_HELD  equ 40
+RCA_BUF   equ 456
+RCA_FRAME equ 464           ; + 0 pushes = 464, 16-aligned
+global raise_callable_arg
+DEF_FUNC raise_callable_arg, RCA_FRAME
+    mov [rbp - RCA_FUNC], rdi
+    mov [rbp - RCA_ARG], rsi
+    mov [rbp - RCA_MID], rdx
+    lea rax, [rbp - RCA_BUF]
+    mov [rbp - RCA_CUR], rax
+
+    mov rdi, [rbp - RCA_FUNC]
+    CSTRING rsi, "__module__"
+    call rca_fetch
+    test rax, rax
+    jz .rca_no_module
+    mov [rbp - RCA_HELD], rax
+    lea rdi, [rax + PyStrObject.data]
+    CSTRING rsi, "builtins"
+    call ap_strcmp
+    test eax, eax
+    jz .rca_drop_module
+    mov rdi, [rbp - RCA_CUR]
+    mov rsi, [rbp - RCA_HELD]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "."
+    call rbt_append_cstr
+    mov [rbp - RCA_CUR], rax
+.rca_drop_module:
+    mov rdi, [rbp - RCA_HELD]
+    call obj_decref
+.rca_no_module:
+
+    mov rdi, [rbp - RCA_FUNC]
+    CSTRING rsi, "__qualname__"
+    call rca_fetch
+    test rax, rax
+    jnz .rca_have_name
+    mov rdi, [rbp - RCA_FUNC]
+    CSTRING rsi, "__name__"
+    call rca_fetch
+    test rax, rax
+    jz .rca_use_type
+.rca_have_name:
+    mov [rbp - RCA_HELD], rax
+    mov rdi, [rbp - RCA_CUR]
+    mov rsi, rax
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    mov [rbp - RCA_CUR], rax
+    mov rdi, [rbp - RCA_HELD]
+    call obj_decref
+    jmp .rca_tail
+
+.rca_use_type:
+    mov rdi, [rbp - RCA_CUR]
+    mov rsi, [rbp - RCA_FUNC]
+    mov rsi, [rsi + PyObject.ob_type]
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    mov [rbp - RCA_CUR], rax
+
+.rca_tail:
+    mov rdi, [rbp - RCA_CUR]
+    CSTRING rsi, "()"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RCA_MID]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RCA_ARG]
+    mov rsi, [rsi + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RCA_BUF]
+    call raise_exception
+END_FUNC raise_callable_arg

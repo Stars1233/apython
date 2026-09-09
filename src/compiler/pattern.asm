@@ -17,6 +17,7 @@
 %include "object.inc"
 %include "value.inc"
 %include "compiler.inc"
+%include "opcodes.inc"
 
 extern ast_at
 extern ast_make
@@ -31,6 +32,7 @@ extern par_kind
 extern par_peek
 extern par_suite_into
 extern par_syntax_error
+extern ast_obj_at
 extern ap_memcmp
 extern par_name_obj
 extern par_exprlist_stmt
@@ -295,6 +297,7 @@ DEF_FUNC_LOCAL par_case, PC2_FRAME
     call ast_mark
     mov [rbp - PC2_MARK], rax
     mov rdi, rbx
+    xor esi, esi
     call par_suite_into
     test eax, eax
     jz .fail
@@ -932,6 +935,164 @@ DEF_FUNC_LOCAL par_mapping_pattern, MP_FRAME
 END_FUNC par_mapping_pattern
 
 ;; ============================================================================
+;; pat_complex_ok(Comp *c, uint32_t node) -> eax = 1 legal, 0 and reported
+;;
+;; CPython's grammar admits exactly one operator inside a value pattern:
+;;   complex_number: signed_real_number ('+'|'-') imaginary_number
+;; and it is a shape, not a precedence -- `case 2j + 1:` is "real number
+;; required in complex literal", `case 1 + 2:` is "imaginary number required",
+;; and `case 1 * 2:`, `case x + 0j:` and `case 1 + -2j:` are all plain
+;; "invalid syntax".  Anything that is not a binary operation at all is fine
+;; and passes straight through.
+;; ============================================================================
+PCX_NODE  equ 8
+PCX_RIGHT equ 16
+PCX_FRAME equ 24          ; + 1 push = 32
+DEF_FUNC_LOCAL pat_complex_ok, PCX_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PCX_NODE], rsi
+    mov rdi, rbx
+    call ast_at
+    cmp byte [rax + AstNode.kind], AST_BINOP
+    jne .pcx_ok
+    movzx ecx, byte [rax + AstNode.subkind]
+    mov edx, [rax + AstNode.a]
+    mov esi, [rax + AstNode.b]
+    mov [rbp - PCX_RIGHT], rsi
+    cmp ecx, NB_ADD
+    je .pcx_shape
+    cmp ecx, NB_SUBTRACT
+    jne .pcx_syntax
+.pcx_shape:
+    mov rdi, rbx
+    mov esi, edx
+    call pat_signed_real            ; eax: 0 no, 1 real, 2 imaginary
+    cmp eax, 2
+    je .pcx_want_real
+    test eax, eax
+    jz .pcx_syntax
+    mov rdi, rbx
+    mov rsi, [rbp - PCX_RIGHT]
+    call pat_number_kind
+    cmp eax, 2
+    je .pcx_ok
+    cmp eax, 1
+    je .pcx_want_imag
+.pcx_syntax:
+    mov rdi, rbx
+    CSTRING rsi, "invalid syntax"
+    call par_syntax_error
+    jmp .pcx_fail
+.pcx_want_imag:
+    mov rdi, rbx
+    CSTRING rsi, "imaginary number required in complex literal"
+    call par_syntax_error
+    jmp .pcx_fail
+.pcx_want_real:
+    mov rdi, rbx
+    CSTRING rsi, "real number required in complex literal"
+    call par_syntax_error
+.pcx_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.pcx_ok:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC pat_complex_ok
+
+;; ============================================================================
+;; pat_signed_real(Comp *c, uint32_t node) -> eax = pat_number_kind's answer,
+;;   seen through at most one leading minus
+;;
+;; `signed_real_number: real_number | '-' real_number`.  A leading PLUS is not
+;; in the grammar -- `case +1 + 2j:` is a syntax error in CPython -- and two
+;; signs are not either, so this looks through exactly one UOP_NEG.
+;; ============================================================================
+PSR_NODE  equ 8
+PSR_FRAME equ 24          ; + 1 push = 32, 16-aligned
+DEF_FUNC_LOCAL pat_signed_real, PSR_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PSR_NODE], rsi
+    call ast_at                     ; clobbers rsi, which is why it is saved
+    cmp byte [rax + AstNode.kind], AST_UNARYOP
+    jne .psr_plain
+    cmp byte [rax + AstNode.subkind], UOP_NEG
+    jne .psr_no
+    mov eax, [rax + AstNode.a]
+    mov [rbp - PSR_NODE], rax
+.psr_plain:
+    mov rdi, rbx
+    mov rsi, [rbp - PSR_NODE]
+    call pat_number_kind
+    pop rbx
+    leave
+    ret
+.psr_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC pat_signed_real
+
+;; ============================================================================
+;; pat_number_kind(Comp *c, uint32_t node) -> eax = 0 not a number literal,
+;;   1 a real one, 2 an imaginary one
+;;
+;; True and False are not numbers here even though they are ints at run time:
+;; the grammar says NUMBER, and `case True + 1j:` is a syntax error.
+;; ============================================================================
+PNK_FRAME equ 8           ; + 1 push = 16, 16-aligned
+DEF_FUNC_LOCAL pat_number_kind, PNK_FRAME
+    push rbx
+    mov rbx, rdi
+    call ast_at                     ; clobbers rsi
+    cmp byte [rax + AstNode.kind], AST_CONST
+    jne .pnk_no
+    mov eax, [rax + AstNode.a]
+    mov rsi, rax
+    mov rdi, rbx
+    call ast_obj_at                 ; a Value: an int may be an immediate
+    mov rdi, rax
+    extern value_type
+    call value_type
+    test rax, rax
+    jz .pnk_no
+    extern int_type
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .pnk_real
+    extern float_type
+    lea rcx, [rel float_type]
+    cmp rax, rcx
+    je .pnk_real
+    extern complex_type
+    lea rcx, [rel complex_type]
+    cmp rax, rcx
+    je .pnk_imag
+.pnk_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.pnk_real:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.pnk_imag:
+    mov eax, 2
+    pop rbx
+    leave
+    ret
+END_FUNC pat_number_kind
+
+;; ============================================================================
 ;; par_value_pattern(Comp *c) -> node
 ;; A literal, one of the three singletons, or a dotted name -- and, when a
 ;; dotted-or-plain name is followed by '(', a class pattern instead.
@@ -944,6 +1105,7 @@ VP_LINE  equ 8
 VP_EXPR  equ 16
 VP_KIND  equ 24
 VP_FRAME equ 24           ; + 1 push = 32
+
 DEF_FUNC_LOCAL par_value_pattern, VP_FRAME
     push rbx
     mov rbx, rdi
@@ -967,6 +1129,14 @@ DEF_FUNC_LOCAL par_value_pattern, VP_FRAME
     call par_kind
     cmp eax, TOK_LPAR
     je .class_pattern
+
+    ; The only operator a pattern's value may hold is the one joining the two
+    ; halves of a complex literal.
+    mov rdi, rbx
+    mov rsi, [rbp - VP_EXPR]
+    call pat_complex_ok
+    test eax, eax
+    jz .fail
 
     xor edx, edx
     mov rax, [rbp - VP_KIND]
@@ -1171,8 +1341,15 @@ END_FUNC pat_drop_to
 ;; par_expr would take a following '(' as a call, and in a pattern it opens a
 ;; class pattern instead.
 ;;
-;; A literal goes through par_expr at BP_ARITH, which admits `-1` and `1 + 2j`
-;; and stops before `|`, so an or-pattern's bar is never read as a bitwise or.
+;; A literal goes through par_expr just BELOW BP_ARITH, which is what admits
+;; the one `+` or `-` of a complex literal: the Pratt driver continues while
+;; `lbp > min_bp`, so BP_ARITH itself stopped before the operator and
+;; `case 0 + 0j:` was "expected ':'".  `|` is BP_BITOR and well below, so an
+;; or-pattern's bar is still never read as a bitwise or.
+;;
+;; What that admits and CPython's grammar does not -- `1 * 2`, a second `+`,
+;; a name on either side -- par_value_pattern rejects afterwards, because the
+;; grammar's rule is about the SHAPE and not about precedence.
 ;; ============================================================================
 PV_LINE  equ 8
 PV_NODE  equ 16
@@ -1188,7 +1365,7 @@ DEF_FUNC_LOCAL par_pattern_value_expr, PV_FRAME
     cmp eax, TOK_NAME
     je .dotted
     mov rdi, rbx
-    mov esi, BP_ARITH
+    mov esi, BP_ARITH - 1
     call par_expr
     pop rbx
     leave

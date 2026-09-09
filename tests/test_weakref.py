@@ -50,3 +50,121 @@ except (TypeError, ReferenceError):
 
 # A class with no weak references at all costs nothing and behaves normally.
 print([C(i).n for i in range(3)])
+
+# A ref subclass must be able to reach its base constructor by name.  This is
+# exactly weakref.KeyedRef's shape, and `super().__new__` finding only
+# object.__new__ is what broke WeakValueDictionary: object refuses the extra
+# arguments, because ref keeps its constructor in a slot rather than in
+# ref.__dict__.
+print("__new__" in _weakref.ref.__dict__, _weakref.ref.__new__ is object.__new__)
+
+
+class KeyedRef(_weakref.ref):
+    def __new__(type, ob, callback, key):
+        self = super().__new__(type, ob, callback)
+        return self
+
+    def __init__(self, ob, callback, key):
+        super().__init__(ob, callback)
+        self.key = key
+
+
+kr_target = C(7)
+kr = KeyedRef(kr_target, None, "k")
+print(kr() is kr_target, kr.key, type(kr) is KeyedRef)
+
+# ref.__new__ called directly, and refused when the class is unrelated.
+direct = _weakref.ref.__new__(KeyedRef, kr_target, None)
+print(type(direct) is KeyedRef, direct() is kr_target)
+try:
+    _weakref.ref.__new__(dict)
+except TypeError:
+    print("unrelated class refused")
+
+
+# Dropping the last reference to a REF takes its callback with it.  The side
+# table's chain used to hold an owned reference, so a ref nobody else held
+# stayed alive for as long as its referent did and its callback still ran --
+# which CPython's does not.  The chain is borrowed now, and a ref leaves it as
+# it dies.
+order = []
+
+
+def when_ref_dies_first():
+    target = C(1)
+    r = _weakref.ref(target, lambda ref: order.append("fired"))
+    del r
+    del target
+    return order
+
+
+print(when_ref_dies_first())
+order.clear()
+
+
+def when_referent_dies_first():
+    target = C(2)
+    r = _weakref.ref(target, lambda ref: order.append("fired"))
+    del target
+    del r
+    return order
+
+
+print(when_referent_dies_first())
+order.clear()
+
+# getweakrefcount and getweakrefs count what is LIVE, not what the chain has
+# room for: a slot a dead reference left behind is not a reference.
+live = C(3)
+a = _weakref.ref(live, lambda ref: None)
+b = _weakref.ref(live, lambda ref: None)
+print(_weakref.getweakrefcount(live), len(_weakref.getweakrefs(live)))
+del a
+print(_weakref.getweakrefcount(live), len(_weakref.getweakrefs(live)))
+print(b in _weakref.getweakrefs(live))
+del b
+print(_weakref.getweakrefcount(live), _weakref.getweakrefs(live))
+
+# ...and a new one after that still works, on the same referent.
+c = _weakref.ref(live, lambda ref: order.append("late"))
+print(_weakref.getweakrefcount(live), c() is live)
+del live
+print(order)
+
+
+# The chain the side table keeps is NOT collector-tracked, and it cannot be:
+# its entries are borrowed, and the collector walks a tracked list's items and
+# counts a reference for each.  Every weak reference in it would look one
+# reference short of reachable, and an explicit collect() would free objects a
+# live frame is still holding.
+import gc
+
+
+def survives_a_collection():
+    target = C(11)
+    keep = _weakref.ref(target, lambda ref: None)
+    shared = _weakref.ref(target)
+    for _ in range(3):
+        gc.collect()
+    return target.n, keep() is target, shared() is target
+
+
+print(survives_a_collection())
+
+
+def a_cycle_through_a_referent():
+    class Node:
+        pass
+
+    a = Node()
+    b = Node()
+    a.other = b
+    b.other = a
+    r = _weakref.ref(a, lambda ref: None)
+    alive = r() is a
+    del a, b
+    gc.collect()
+    return alive, r() is None
+
+
+print(a_cycle_through_a_referent())

@@ -583,7 +583,7 @@ DEF_FUNC op_delete_attr, DA_FRAME
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_setattr]
     test rax, rax
-    jz .da_error_decref
+    jz .da_error
 
     mov rdi, [rbp - DA_OBJ]
     mov rsi, [rbp - DA_NAME]
@@ -611,10 +611,15 @@ DEF_FUNC op_delete_attr, DA_FRAME
     mov [rel eval_saved_r13], r13
     jmp eval_exception_unwind
 
-.da_error_decref:
-    mov rdi, [rbp - DA_OBJ]
-    call obj_decref
 .da_error:
+    ; The object is NOT released here, and this is the whole shape of the bug
+    ; that used to live at this label.  VPOP_VAL only moved r13; the slot
+    ; still holds the pointer, and eval_exception_unwind restores r13 from
+    ; eval_saved_r13 -- what DISPATCH published BEFORE the pop -- and releases
+    ; everything above the handler's depth.  Decref'ing here as well freed it
+    ; while the unwinder was still holding it, and `del range(i).start` in a
+    ; loop corrupted the heap.  op_store_attr's .sa_no_setattr, which is the
+    ; same branch of the same question, has always got this right.
     RAISE exc_AttributeError_type, "cannot delete attribute"
 END_FUNC op_delete_attr
 

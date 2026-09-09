@@ -239,40 +239,22 @@ END_FUNC abc_get_cache_token
 
 ;; ============================================================================
 ;; abc_getattr(rdi = object Value, rsi = name str) -> rax = Value, or 0
-;; Whatever tp_getattr the object's type offers, else its type's tp_dict.
+;;
+;; What `getattr(value, "__isabstractmethod__", False)` means, and it has to
+;; be the WHOLE attribute protocol: this used to ask the type's tp_getattr and
+;; then read the type's tp_dict raw, which hands back a descriptor rather than
+;; what the descriptor answers.  Harmless while no wrapper had the name; the
+;; moment classmethod and property published theirs, every wrapper looked
+;; abstract because a getset object is truthy, and a subclass that overrode an
+;; abstract classmethod stayed abstract.
 ;; ============================================================================
-AGA_OBJ  equ 8
-AGA_NAME equ 16
-AGA_FRAME equ 32            ; + 0 pushes = 32
-DEF_FUNC_LOCAL abc_getattr, AGA_FRAME
+DEF_FUNC_LOCAL abc_getattr
     V_TEST_PTR rdi, rax
     ja .aga_none
     test rdi, rdi
     jz .aga_none
-    mov [rbp - AGA_OBJ], rdi
-    mov [rbp - AGA_NAME], rsi
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_getattr]
-    test rax, rax
-    jz .aga_dict
-    call rax
-    V_UNPACK rax, rdx
-    test edx, edx
-    jz .aga_dict
-    leave
-    V_PACK rax, rdx
-    ret
-.aga_dict:
-    mov rdi, [rbp - AGA_OBJ]
-    mov rdi, [rdi + PyObject.ob_type]
-    mov rdi, [rdi + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jz .aga_none
-    mov rsi, [rbp - AGA_NAME]
-    call dict_get
-    test rax, rax
-    jz .aga_none
-    INCREF_V rax, rcx
+    extern obj_getattr_opt
+    call obj_getattr_opt        ; a new reference, or 0 with no exception set
     leave
     ret
 .aga_none:

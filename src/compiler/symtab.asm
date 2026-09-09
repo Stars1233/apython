@@ -331,7 +331,9 @@ SV_N     equ 40
 SV_NPTR  equ 48
 SV_KIND  equ 56
 SV_NAME  equ 64          ; the walrus target, across the scope walk
-SV_FRAME equ 72          ; + 3 pushes = 96
+SV_TASCOPE equ 72        ; a `type` statement's own block, before PEP 695's
+                         ; type-parameter wrapper displaces it
+SV_FRAME equ 88          ; + 3 pushes = 112
 DEF_FUNC sym_visit, SV_FRAME
     push rbx
     push r12
@@ -536,6 +538,15 @@ DEF_FUNC sym_visit, SV_FRAME
 ;; enclosing function -- or a global at module level -- and be declared in
 ;; every comprehension scope in between.  Without that, `[y := i for i in r]`
 ;; left y visible only inside the comprehension.
+.ne_in_class:
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "assignment expression within a comprehension cannot be used in a class body"
+    xor ecx, ecx
+    xor r8d, r8d
+    call comp_error
+    jmp .fail
+
 .namedexpr:
     mov rax, [rbp - SV_NPTR]
     mov edx, [rax + AstNode.b]          ; the value first
@@ -557,17 +568,24 @@ DEF_FUNC sym_visit, SV_FRAME
     mov [rbp - SV_N], rcx
     jmp .ne_climb
 .ne_found:
+    ; A class body is not somewhere a comprehension can bind into: the
+    ; comprehension has a scope of its own and a class body's namespace is not
+    ; a scope its children can see, so CPython refuses the combination
+    ; outright rather than binding somewhere surprising.  Only when the climb
+    ; actually left a comprehension -- a bare walrus in a class body is fine.
+    mov rcx, [rbp - SV_N]
+    cmp rcx, r12
+    je .ne_not_in_class
     mov rdi, rbx
-    mov rsi, [rbp - SV_N]
+    mov rsi, rcx
     call sym_at
-    xor r13d, r13d
-    cmp dword [rax + Scope.kind], SCOPE_FUNCTION
-    je .ne_have_kind
-    mov r13d, 1                         ; module or class: a global
-.ne_have_kind:
-    mov [rbp - SV_I], r13
+    cmp dword [rax + Scope.kind], SCOPE_CLASS
+    je .ne_in_class
+.ne_not_in_class:
 
-    ; The name itself.
+    ; The name first: whether the target is nonlocal or global depends on what
+    ; the enclosing scope has already SAID about it, not only on what kind of
+    ; scope it is.
     mov rax, [rbp - SV_NPTR]
     mov esi, [rax + AstNode.a]
     mov rdi, rbx
@@ -576,6 +594,28 @@ DEF_FUNC sym_visit, SV_FRAME
     mov rdi, rbx
     call ast_obj_at
     mov [rbp - SV_NAME], rax
+
+    mov rdi, rbx
+    mov rsi, [rbp - SV_N]
+    call sym_at
+    xor r13d, r13d
+    cmp dword [rax + Scope.kind], SCOPE_FUNCTION
+    jne .ne_is_global                   ; module or class: a global
+    ; ...and a function that declared the name `global` makes the target one
+    ; too.  Taking the scope's kind as the whole answer declared it NONLOCAL,
+    ; and sym_classify then walked out looking for a binding it had itself
+    ; just been told not to look for: `[G := 5 for _ in r]` under a
+    ; `global G` was "no binding for nonlocal 'G' found".
+    mov rdi, rbx
+    mov rsi, [rbp - SV_N]
+    mov rdx, [rbp - SV_NAME]
+    call sym_get
+    test eax, DEF_GLOBAL
+    jz .ne_have_kind
+.ne_is_global:
+    mov r13d, 1
+.ne_have_kind:
+    mov [rbp - SV_I], r13
 
     ; Bind it where it belongs.
     mov rdi, rbx
@@ -710,6 +750,7 @@ DEF_FUNC sym_visit, SV_FRAME
     jmp .ret
 
 .typealias:
+    mov [rbp - SV_TASCOPE], r12         ; before any wrapper displaces it
     ; `type X = V`.  The NAME binds in this scope; the VALUE does not belong
     ; to it at all -- PEP 695 evaluates it lazily, inside a function of its
     ; own, which is what lets an alias name another defined further down and
@@ -734,6 +775,7 @@ DEF_FUNC sym_visit, SV_FRAME
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
+    mov rcx, [rbp - SV_TASCOPE]         ; the scope the statement was in
     call sym_enter_typealias
     jmp .ret
 
@@ -1652,9 +1694,12 @@ DEF_FUNC sym_enclosing_binds, SEB_FRAME
     call sym_is_function_like
     test eax, eax
     jnz .function_block
-    ; A class block provides nothing to nested blocks -- with one exception.
+    ; A class block provides nothing to nested blocks -- with two exceptions.
     ; `__class__` is visible to them, which is what makes zero-argument super()
-    ; and an explicit __class__ reference work inside a method.
+    ; and an explicit __class__ reference work inside a method; and
+    ; `__classdict__` is, which is what lets a PEP 695 type-parameter wrapper
+    ; read the body it is nested in.  Neither can be written in source: both
+    ; are put there by the symbol table itself, and only where they are needed.
     mov rdi, rbx
     lea rsi, [rel sym_class_name]
     call comp_intern_cstr
@@ -1663,6 +1708,11 @@ DEF_FUNC sym_enclosing_binds, SEB_FRAME
     mov rdi, rax
     mov rsi, [rbp - SEB_NAME]
     call sym_str_eq
+    test eax, eax
+    jnz .check_binds
+    mov rdi, rbx
+    mov rsi, [rbp - SEB_NAME]
+    call sym_is_classdict_name
     test eax, eax
     jz .loop
     jmp .check_binds
@@ -1996,6 +2046,15 @@ DEF_FUNC sym_promote_cells, SPC_FRAME
     mov rdi, rbx
     mov rsi, [rbp - SPC_NAME]
     call sym_is_class_name
+    test eax, eax
+    jnz .make_cell
+    ; ...and __classdict__, for the same reason and by the same route: the
+    ; type-parameter wrapper PEP 695 hangs inside the body reads the body's
+    ; namespace through it, so it has to be a real cell here and a free
+    ; variable there.
+    mov rdi, rbx
+    mov rsi, [rbp - SPC_NAME]
+    call sym_is_classdict_name
     test eax, eax
     jnz .make_cell
 
@@ -2462,6 +2521,36 @@ DEF_FUNC sym_is_class_name, 8
 END_FUNC sym_is_class_name
 
 ;; ============================================================================
+;; sym_is_classdict_name(Comp *c, PyStrObject *name) -> rax = 1 if __classdict__
+;;
+;; The other name that comes OUT of a class body's free set and gets a real
+;; cell.  PEP 695 hangs a type-parameter wrapper inside the class body and
+;; that wrapper is a function, so ordinary scoping hides the body from it;
+;; the cell holds the body's own namespace mapping so the wrapper can read
+;; through it.  See sym_enter_typeparams.
+;; ============================================================================
+global sym_is_classdict_name
+DEF_FUNC sym_is_classdict_name, 8
+    push rbx
+    mov rbx, rsi
+    lea rsi, [rel sym_classdict_name]
+    call comp_intern_cstr
+    test rax, rax
+    jz .no
+    mov rdi, rax
+    mov rsi, rbx
+    call sym_str_eq
+    pop rbx
+    leave
+    ret
+.no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC sym_is_classdict_name
+
+;; ============================================================================
 ;; sym_params_into(Comp *c, uint32_t argsnode) -> rax = 1 ok
 ;; Append the parameter names to the scope's varnames, in the order
 ;; co_varnames requires: positional, keyword-only, *args, **kwargs.
@@ -2665,6 +2754,88 @@ DEF_FUNC sym_note_super, SNS_FRAME
 END_FUNC sym_note_super
 
 ;; ============================================================================
+;; sym_note_classdict(Comp *c, uint32_t scope, uint32_t maybe_class)
+;;   -> rax = 1 ok, 0 on an interning failure
+;;
+;; Give `scope` the standing to read the class body `maybe_class` -- if that
+;; is what it is; anything else and this does nothing and answers 1.
+;;
+;; Ordinary scoping forbids it: a class body is invisible to a function nested
+;; inside it, so `class Outer: B = list; class Inner[T](B)` would look B up as
+;; a global and raise NameError.  PEP 695 keeps the scoping rule and adds a
+;; runtime one -- the nested block takes the body's namespace as a free
+;; variable called __classdict__ and reads through it with
+;; LOAD_FROM_DICT_OR_GLOBALS, which falls back to the globals and the builtins
+;; so every other name still resolves the ordinary way.
+;;
+;; Registering the name at both ends is all the analysis needs: it binds in the
+;; body, so it becomes a cell there and a free variable here -- exactly what
+;; __class__ does for super(), and it travels the same two exceptions, in
+;; sym_enclosing_binds and at .bound_here.
+;;
+;; The blocks that get it are the ones CPython gives ste_can_see_class_scope:
+;; a type-parameter wrapper, and a type alias's lazily-evaluated value.  Both
+;; ask about the block the STATEMENT is written in, not their immediate
+;; parent, so `type X[T] = V` inside a class reaches V from both of its
+;; scopes.
+;;
+;; Unconditional, where CPython works out per name whether the body binds any
+;; of them.  What that costs is a cell in a class body whose nested block
+;; turns out not to need one; nothing but introspection of co_cellvars can
+;; see it.
+;; ============================================================================
+SNC_SCOPE equ 8
+SNC_CLASS equ 16
+SNC_NAME  equ 24
+SNC_FRAME equ 40                ; + 1 push = 48, 16-aligned
+global sym_note_classdict
+DEF_FUNC sym_note_classdict, SNC_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - SNC_SCOPE], rsi
+    mov [rbp - SNC_CLASS], rdx
+
+    mov rdi, rbx
+    mov rsi, rdx
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_CLASS
+    jne .snc_done
+
+    mov rdi, rbx
+    lea rsi, [rel sym_classdict_name]
+    call comp_intern_cstr
+    test rax, rax
+    jz .snc_fail
+    mov [rbp - SNC_NAME], rax
+
+    mov rdi, rbx
+    mov rsi, [rbp - SNC_SCOPE]
+    mov rdx, [rbp - SNC_NAME]
+    mov ecx, DEF_USE
+    call sym_add
+    mov rdi, rbx
+    mov rsi, [rbp - SNC_CLASS]
+    mov rdx, [rbp - SNC_NAME]
+    mov ecx, DEF_LOCAL
+    call sym_add
+
+    mov rdi, rbx
+    mov rsi, [rbp - SNC_SCOPE]
+    call sym_at
+    or dword [rax + Scope.flags], SCF_SEES_CLASS
+.snc_done:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.snc_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC sym_note_classdict
+
+;; ============================================================================
 ;; sym_enter_typeparams(Comp *c, uint32_t parent, uint32_t node)
 ;;   -> rax = the scope the def or class should be built in, or 0 on error
 ;;
@@ -2714,6 +2885,14 @@ DEF_FUNC sym_enter_typeparams, STP_FRAME
     mov ecx, [rax + AstNode.nchild]
     mov [rbp - STP_N], rcx
     mov qword [rbp - STP_I], 0
+
+    ; A wrapper written directly inside a CLASS body can see that body's names.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - STP_PARENT]
+    call sym_note_classdict
+    test eax, eax
+    jz .stp_fail
 
 .stp_loop:
     mov rcx, [rbp - STP_I]
@@ -2791,7 +2970,8 @@ DEF_FUNC sym_enter_typeparams, STP_FRAME
 END_FUNC sym_enter_typeparams
 
 ;; ============================================================================
-;; sym_enter_typealias(Comp *c, uint32_t parent, uint32_t node) -> 1 ok, 0
+;; sym_enter_typealias(Comp *c, uint32_t parent, uint32_t node,
+;;                     uint32_t stmt_scope) -> 1 ok, 0
 ;;
 ;; The scope an alias's VALUE is evaluated in.  It is a function scope with no
 ;; parameters: CPython gives it the alias's own name and calls it from
@@ -2801,8 +2981,9 @@ END_FUNC sym_enter_typeparams
 ;; ============================================================================
 SET_PARENT equ 16
 SET_NODE   equ 24
-SET_FRAME  equ 32           ; + 3 pushes = 56... one word more to land right
-DEF_FUNC sym_enter_typealias, 40            ; + 3 pushes = 64, 16-aligned
+SET_STMT   equ 32           ; the scope the `type` statement is written in
+SET_FRAME  equ 40           ; + 3 pushes = 64, 16-aligned
+DEF_FUNC sym_enter_typealias, SET_FRAME
     push rbx
     push r12
     push r13
@@ -2810,6 +2991,7 @@ DEF_FUNC sym_enter_typealias, 40            ; + 3 pushes = 64, 16-aligned
     mov [rbp - SET_PARENT], rsi
     mov r13, rdx
     mov [rbp - SET_NODE], rdx
+    mov [rbp - SET_STMT], rcx           ; the block the statement is written in
 
     mov rdi, rbx
     mov rsi, [rbp - SET_PARENT]
@@ -2822,6 +3004,18 @@ DEF_FUNC sym_enter_typealias, 40            ; + 3 pushes = 64, 16-aligned
     call ast_at
     mov [rax + AstNode.flags], r12w
 
+    ; The value is lazily evaluated in this scope, and if the alias was
+    ; written in a class body it may name what that body binds -- `type
+    ; Direct[T] = V` reads V from the class.  The BLOCK THE STATEMENT IS IN is
+    ; the one to ask, which is rcx: for a generic alias the parent is the
+    ; type-parameter wrapper, not the class.
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - SET_STMT]
+    call sym_note_classdict
+    test eax, eax
+    jz .set_fail
+
     mov rdi, rbx
     mov rsi, r13
     call ast_at
@@ -2829,6 +3023,13 @@ DEF_FUNC sym_enter_typealias, 40            ; + 3 pushes = 64, 16-aligned
     mov rdi, rbx
     mov rsi, r12
     call sym_visit
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.set_fail:
+    xor eax, eax
     pop r13
     pop r12
     pop rbx
@@ -3079,5 +3280,6 @@ sym_dot_zero: db ".0", 0
 
 sym_super_name: db "super", 0
 sym_class_name: db "__class__", 0
+sym_classdict_name: db "__classdict__", 0
 
 ASM_INIT

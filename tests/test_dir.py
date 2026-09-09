@@ -75,3 +75,146 @@ class Slotted:
     __slots__ = ("s1", "s2")
 ds = dir(Slotted())
 print("s1" in ds, "s2" in ds, ds == sorted(ds))
+
+
+# A builtin attribute answered only by tp_getattr is invisible to dir(), and to
+# everything that reads a type's dict rather than calling getattr: inspect,
+# help(), and any `'name' in vars(T)` test.  These all read correctly through an
+# instance and were absent from the class.
+def missing_from(T, names):
+    d = dir(T)
+    return [n for n in names if n not in d]
+
+
+print(missing_from(memoryview, ["nbytes", "format", "itemsize", "shape",
+                                "strides", "ndim", "obj", "readonly",
+                                "suboffsets", "c_contiguous", "f_contiguous",
+                                "contiguous"]))
+print(missing_from(property, ["fget", "fset", "fdel",
+                              "getter", "setter", "deleter"]))
+print(missing_from(classmethod, ["__func__", "__wrapped__",
+                                 "__isabstractmethod__"]))
+print(missing_from(staticmethod, ["__func__", "__wrapped__",
+                                  "__isabstractmethod__"]))
+print(missing_from(property, ["__isabstractmethod__"]))
+print(missing_from(super, ["__self__", "__self_class__", "__thisclass__"]))
+print(missing_from(type, ["__prepare__", "__instancecheck__",
+                          "__subclasscheck__"]))
+
+# The descriptors work through the class, not only through an instance, and
+# repr as CPython's do.
+mv = memoryview(b"abcd")
+print(memoryview.nbytes.__get__(mv), mv.nbytes)
+print(memoryview.readonly.__get__(mv), memoryview.itemsize.__get__(mv))
+print(memoryview.shape.__get__(mv), memoryview.ndim.__get__(mv))
+print(repr(memoryview.nbytes))
+
+p = property(lambda s: 1)
+print(property.fget.__get__(p) is p.fget, property.fset.__get__(p))
+print(callable(property.getter.__get__(p)))
+
+c = classmethod(lambda cls: 1)
+print(classmethod.__func__.__get__(c) is c.__func__)
+s = staticmethod(lambda: 1)
+print(staticmethod.__func__.__get__(s) is s.__func__)
+
+# They are descriptors, which is the question the stdlib actually asks:
+# inspect.isdatadescriptor and the enum and dataclasses classifiers all walk a
+# __dict__ and test hasattr(v, '__get__').
+print(hasattr(vars(memoryview)["nbytes"], "__get__"))
+print(hasattr(vars(property)["fget"], "__get__"))
+
+# A released view answers AttributeError through the descriptor rather than
+# handing back the NULL its tp_getattr uses to mean "not mine".
+released = memoryview(bytearray(b"xy"))
+released.release()
+try:
+    memoryview.nbytes.__get__(released)
+    print("released view answered")
+except (AttributeError, ValueError) as e:
+    print("released view:", type(e).__name__)
+
+
+# super's three, which its tp_getattr answers and its type had no dict to hold.
+class Base:
+    def who(self):
+        return "Base"
+
+
+class Derived(Base):
+    def who(self):
+        s = super()
+        return (s.__self__ is self, s.__self_class__ is Derived,
+                s.__thisclass__ is Derived, s.who())
+
+
+print(Derived().who())
+print("__new__" in super.__dict__)
+
+# type's three, which the metaclass protocol is asked by name.  They are the
+# PLAIN checks: one that went back through isinstance() would recurse forever
+# through a metaclass whose own ends in super().__instancecheck__(obj).
+class Plain:
+    pass
+
+
+print(type.__prepare__("N", ()) == {})
+print(type.__instancecheck__(Plain, Plain()), type.__instancecheck__(Plain, 1))
+print(type.__subclasscheck__(object, Plain), type.__subclasscheck__(Plain, object))
+print(type.__instancecheck__(int, True), type.__subclasscheck__(int, bool))
+
+# __isabstractmethod__ on the three wrappers, computed from what they wrap.
+# Without it abc collected nothing and an abstract property or classmethod
+# did not make its class abstract at all.
+import abc
+
+
+class Abstract(abc.ABC):
+    @property
+    @abc.abstractmethod
+    def p(self):
+        ...
+
+    @classmethod
+    @abc.abstractmethod
+    def c(cls):
+        ...
+
+    @staticmethod
+    @abc.abstractmethod
+    def s():
+        ...
+
+    @abc.abstractmethod
+    def m(self):
+        ...
+
+
+print(sorted(Abstract.__abstractmethods__))
+try:
+    Abstract()
+    print("NOT REFUSED")
+except TypeError as e:
+    print("refused:", str(e)[:40])
+
+print(property(lambda s: 1).__isabstractmethod__,
+      classmethod(lambda c: 1).__isabstractmethod__,
+      staticmethod(lambda: 1).__isabstractmethod__)
+
+
+class Concrete(Abstract):
+    p = 1
+
+    @classmethod
+    def c(cls):
+        return 2
+
+    @staticmethod
+    def s():
+        return 3
+
+    def m(self):
+        return 4
+
+
+print(sorted(Concrete.__abstractmethods__), Concrete().m(), Concrete.c(), Concrete.s())

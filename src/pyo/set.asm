@@ -709,7 +709,13 @@ END_FUNC set_contains
 SRC_SELF  equ 8
 SRC_OTHER equ 16
 SRC_OP    equ 24
-SRC_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+; The key each of the three subset walks below probes with is BORROWED from
+; the table it is walking, and set_contains runs __eq__ -- arbitrary Python,
+; which may clear that set and take the key's last reference with it.  Held
+; here for the turn, the way CPython holds it.
+SRC_KEY   equ 32
+SRC_IDX   equ 40
+SRC_FRAME equ 48            ; + 3 pushes = 72... see the pad below
 DEF_FUNC set_richcompare, SRC_FRAME
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, r8            ; right Value -> (payload, tag)
@@ -760,26 +766,34 @@ DEF_FUNC set_richcompare, SRC_FRAME
     mov r13, [rbx + PyDictObject.capacity]
     xor ecx, ecx               ; index
 .src_eq_loop:
-    cmp rcx, r13
+    cmp rcx, [rbx + PyDictObject.capacity]
     jge .src_true
+    mov [rbp - SRC_IDX], rcx
 
     ; Get entry at index
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, [rbx + PyDictObject.entries]
     ; Occupied entries have a non-zero key Value
-    cmp qword [rax + SET_ENTRY_KEY], 0
-    je .src_eq_next
+    mov rsi, [rax + SET_ENTRY_KEY]
+    test rsi, rsi
+    jz .src_eq_next
 
     ; Entry is occupied — check if key is in other set
-    push rcx
+    INCREF_V rsi, rax                    ; ours across __eq__
+    mov [rbp - SRC_KEY], rsi
     mov rdi, r12               ; other set
-    mov rsi, [rax + SET_ENTRY_KEY]   ; key
     call set_contains
+    mov rdi, [rbp - SRC_KEY]
+    push rax
+    push rax                             ; pad
+    DECREF_V rdi, rcx
+    pop rax
     pop rcx
     test eax, eax
     jz .src_false              ; not found → not equal
 
 .src_eq_next:
+    mov rcx, [rbp - SRC_IDX]
     inc rcx
     jmp .src_eq_loop
 
@@ -790,20 +804,28 @@ DEF_FUNC set_richcompare, SRC_FRAME
     mov r13, [rbx + PyDictObject.capacity]
     xor ecx, ecx
 .src_le_loop:
-    cmp rcx, r13
+    cmp rcx, [rbx + PyDictObject.capacity]
     jge .src_true
+    mov [rbp - SRC_IDX], rcx
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, [rbx + PyDictObject.entries]
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
-    je .src_le_next
-    push rcx
-    mov rdi, r12
     mov rsi, [rax + SET_ENTRY_KEY]
+    test rsi, rsi                        ; occupied?
+    jz .src_le_next
+    INCREF_V rsi, rax                    ; ours across __eq__
+    mov [rbp - SRC_KEY], rsi
+    mov rdi, r12
     call set_contains
+    mov rdi, [rbp - SRC_KEY]
+    push rax
+    push rax                             ; pad
+    DECREF_V rdi, rcx
+    pop rax
     pop rcx
     test eax, eax
     jz .src_false
 .src_le_next:
+    mov rcx, [rbp - SRC_IDX]
     inc rcx
     jmp .src_le_loop
 
@@ -814,20 +836,28 @@ DEF_FUNC set_richcompare, SRC_FRAME
     mov r13, [rbx + PyDictObject.capacity]
     xor ecx, ecx
 .src_ge_loop:
-    cmp rcx, r13
+    cmp rcx, [rbx + PyDictObject.capacity]
     jge .src_true
+    mov [rbp - SRC_IDX], rcx
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, [rbx + PyDictObject.entries]
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
-    je .src_ge_next
-    push rcx
-    mov rdi, r12
     mov rsi, [rax + SET_ENTRY_KEY]
+    test rsi, rsi                        ; occupied?
+    jz .src_ge_next
+    INCREF_V rsi, rax                    ; ours across __eq__
+    mov [rbp - SRC_KEY], rsi
+    mov rdi, r12
     call set_contains
+    mov rdi, [rbp - SRC_KEY]
+    push rax
+    push rax                             ; pad
+    DECREF_V rdi, rcx
+    pop rax
     pop rcx
     test eax, eax
     jz .src_false
 .src_ge_next:
+    mov rcx, [rbp - SRC_IDX]
     inc rcx
     jmp .src_ge_loop
 
@@ -1056,6 +1086,7 @@ extern exc_TypeError_type
 STC_EXC   equ 16            ; current_exception before the iteration started
 STC_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
 DEF_FUNC set_type_call, STC_FRAME
+    NO_KEYWORDS "set() takes no keyword arguments"
     push rbx
     push r12
 
@@ -1311,6 +1342,7 @@ global frozenset_type_call
 FTC_EXC   equ 16            ; current_exception before the iteration started
 FTC_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
 DEF_FUNC frozenset_type_call, FTC_FRAME
+    NO_KEYWORDS "frozenset() takes no keyword arguments"
     push rbx
     push r12
 

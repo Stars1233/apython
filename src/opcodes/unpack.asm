@@ -40,6 +40,9 @@ extern set_type
 extern str_new
 extern str_type
 extern tuple_type
+extern raise_type_error_with_typename
+extern int_type
+extern float_type
 
 ;; ============================================================================
 ;; op_unpack_sequence(ecx = count) -> DISPATCH, or unwinds
@@ -104,6 +107,35 @@ DEF_FUNC_BARE op_unpack_sequence
     cmp rax, rdx
     je .unpack_str
 
+    ; CPython's guard, and its wording with it: an object with neither a
+    ; tp_iter nor an sq_item cannot be iterated at all, and the refusal names
+    ; the type -- "cannot unpack non-iterable NoneType object" -- rather than
+    ; letting the constructor below speak for it.  op_unpack_ex's generic arm
+    ; already answered this way; this one said "'NoneType' object is not
+    ; iterable", which is tuple()'s message and not this statement's.
+    cmp qword [rax + PyTypeObject.tp_iter], 0
+    jne .unpack_generic
+    mov rdx, [rax + PyTypeObject.tp_as_sequence]
+    test rdx, rdx
+    jz .unpack_check_mapping
+    cmp qword [rdx + PySequenceMethods.sq_item], 0
+    jne .unpack_generic
+.unpack_check_mapping:
+    ; A class that defines __getitem__ and no __iter__ is iterable through the
+    ; legacy protocol, and get_iterator_opt honours it.  Here that shows as
+    ; mp_subscript rather than sq_item, so asking only about sq_item -- which
+    ; is what CPython's PySequence_Check asks -- refused a class whose
+    ; __getitem__ was the whole point.
+    mov rdx, [rax + PyTypeObject.tp_as_mapping]
+    test rdx, rdx
+    jz .unpack_not_iterable
+    cmp qword [rdx + PyMappingMethods.mp_subscript], 0
+    jne .unpack_generic
+.unpack_not_iterable:
+    mov esi, TAG_PTR
+    jmp unpack_bad_type
+
+.unpack_generic:
     ; Anything iterable unpacks in Python -- a set, a range, a generator, a
     ; dict, a str subclass.  Only exact tuple, list and str were accepted, so
     ; `a, b = {1, 2}` and `a, b = range(2)` raised.
@@ -150,8 +182,9 @@ DEF_FUNC_BARE op_unpack_sequence
     jmp eval_exception_unwind
 
 .unpack_type_error:
-    ; Unknown type
-    RAISE exc_TypeError_type, "cannot unpack non-sequence"
+    ; rdi = payload, r8 = tag; unpack_bad_type names the type CPython names.
+    mov rsi, r8
+    jmp unpack_bad_type
 
 .unpack_tuple:
     ; Validate count matches size
@@ -451,6 +484,12 @@ DEF_FUNC op_unpack_ex
     mov [rbp - UEX_ITAG], rax          ; iterable tag
     mov [rbp - UEX_IPAY], rdi          ; iterable payload
 
+    ; An int or a float has no type pointer to walk: its payload is a value,
+    ; not an address.  op_unpack_sequence has always checked this and this did
+    ; not, so `a, *b = 5` read ob_type off the number itself and segfaulted.
+    cmp eax, TAG_PTR
+    jne .ue_type_error
+
     ; Get length
     mov rdi, [rbp - UEX_IPAY]
     mov rax, [rdi + PyObject.ob_type]
@@ -673,7 +712,9 @@ DEF_FUNC op_unpack_ex
     ud2
 
 .ue_type_error:
-    RAISE exc_TypeError_type, "cannot unpack non-sequence"
+    mov rdi, [rbp - UEX_IPAY]
+    mov rsi, [rbp - UEX_ITAG]
+    jmp unpack_bad_type
 
 ; Helper: get item at index rsi from iterable rdi (returns borrowed ref: rax=payload, rdx=tag)
 .ue_getitem:
@@ -692,3 +733,34 @@ DEF_FUNC op_unpack_ex
     V_UNPACK rax, rdx
     ret
 END_FUNC op_unpack_ex
+
+;; ============================================================================
+;; unpack_bad_type(rdi = the payload, rsi = its tag) -> does not return; the
+;;   composed TypeError is raised
+;;
+;; "cannot unpack non-iterable int object", which is how CPython words both
+;; refusals.  The type is resolved from the TAG rather than by packing the
+;; pair back into a Value and asking value_type: packing a smallint outside
+;; the immediate range allocates, and this path never comes back to free it.
+;;
+;; Nothing is released here.  The value is still in the stack slot VPOP_VAL
+;; took it from, and eval_exception_unwind is what gives that reference back.
+;; ============================================================================
+DEF_FUNC_BARE unpack_bad_type
+    cmp rsi, TAG_FLOAT
+    je .ubt_float
+    cmp rsi, TAG_PTR
+    jne .ubt_int                ; TAG_SMALLINT, and any tag with no object
+    test rdi, rdi
+    jz .ubt_int
+    mov rsi, [rdi + PyObject.ob_type]
+    jmp .ubt_raise
+.ubt_int:
+    lea rsi, [rel int_type]
+    jmp .ubt_raise
+.ubt_float:
+    lea rsi, [rel float_type]
+.ubt_raise:
+    CSTRING rdi, `cannot unpack non-iterable \x01 object`
+    jmp raise_type_error_with_typename
+END_FUNC unpack_bad_type

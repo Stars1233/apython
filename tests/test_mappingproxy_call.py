@@ -40,3 +40,36 @@ try:
     MappingProxyType()
 except TypeError:
     print("no-arg refused")
+
+# A dict SUBCLASS is a mapping.  The check was `ob_type is dict`, so
+# OrderedDict, defaultdict, Counter and any user subclass were refused with
+# the message meant for a sequence -- which is what stopped inspect.signature,
+# whose Signature.parameters wraps an OrderedDict in one.
+class MyDict(dict):
+    pass
+
+
+sub = MyDict(a=1, b=2)
+sp = MappingProxyType(sub)
+print(sp["a"], len(sp), "b" in sp, sorted(sp.keys()))
+print(sp.get("a"), sp.get("zz", 9), sorted(sp.items()))
+
+import collections
+od = MappingProxyType(collections.OrderedDict([("x", 1), ("y", 2)]))
+print(list(od), od["y"])
+
+# The proxy is a view: a write through the underlying dict shows, and a write
+# through the proxy is still refused.
+sub["c"] = 3
+print(len(sp), sp["c"])
+try:
+    sp["d"] = 4
+except TypeError:
+    print("still read-only")
+
+# A list is refused by both, and with the same wording -- this is the message
+# the dict-subclass cases above used to get.
+try:
+    MappingProxyType([1, 2])
+except TypeError as e:
+    print("list refused:", e)

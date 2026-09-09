@@ -739,6 +739,44 @@ DEF_FUNC super_getattr, SG_FRAME
 END_FUNC super_getattr
 
 ;; ============================================================================
+;; super_getattr_value(rdi = the super object, rsi = the name) -> rax = Value
+;;
+;; super_getattr in the shape a getset descriptor's getter is called in: it
+;; answers a (payload, tag) pair and this packs it.  The three names it owns
+;; -- __self__, __self_class__ and __thisclass__ -- are the only ones ever
+;; reached through it, because they are the only ones a descriptor is
+;; registered for; everything else still goes through the slot.
+;; ============================================================================
+DEF_FUNC super_getattr_value
+    call super_getattr
+    test edx, edx
+    jz .sgv_absent
+    leave
+    V_PACK rax, rdx
+    ret
+.sgv_absent:
+    xor eax, eax
+    leave
+    ret
+END_FUNC super_getattr_value
+
+;; ============================================================================
+;; super_dunder_new(args, nargs) -> Value    -- super.__new__
+;;
+;; super keeps its constructor in tp_new, so `super.__new__` was
+;; object.__new__ and a subclass could not reach it by name.
+;; ============================================================================
+extern new_from_slot
+DEF_FUNC super_dunder_new
+    mov rdx, rsi
+    mov rsi, rdi
+    lea rdi, [rel super_type]
+    call new_from_slot
+    leave
+    ret
+END_FUNC super_dunder_new
+
+;; ============================================================================
 ;; super_repr(rdi = the super object) -> rax = PyStrObject*, rdx = TAG_PTR
 ;;
 ;; CPython's two forms: "<super: <class 'B'>, <B object>>" when it is bound,
