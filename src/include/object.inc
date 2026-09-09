@@ -1240,6 +1240,23 @@ endstruc
 FRAME_ENTRY_CALL   equ 0    ; entered by `call eval_frame`; left by `ret`
 FRAME_ENTRY_INLINE equ 1    ; pushed by CALL_PY_EXACT; left by eval_inline_resume
 
+; The frame pool: four size classes, each a singly-linked freelist whose next
+; link lives in the block's first word, capped so a burst of deep recursion
+; does not park megabytes there for ever.  A pool record is (head, count),
+; selected as a unit with `lea rcx, [rel frame_pool_free_N]` and then indexed.
+;
+; They are here rather than in src/frame.asm because the specialized call
+; pops the smallest class inline -- that is the size of nearly every frame,
+; and going through frame_pool_get for it is a call, a size ladder and a
+; return.  Everything else, including every push back, is still frame.asm's.
+FRAME_POOL_CLASS_0  equ 256
+FRAME_POOL_CLASS_1  equ 512
+FRAME_POOL_CLASS_2  equ 1024
+FRAME_POOL_CLASS_3  equ 2048
+FRAME_POOL_MAX_FREE equ 16
+FRAME_POOL_HEAD     equ 0
+FRAME_POOL_COUNT    equ 8
+
 FRAME_HEADER_SIZE equ PyFrame.localsplus
 
 ; The snapshot sys._getframe() hands back.  A PyFrame is pooled and recycled,

@@ -48,6 +48,8 @@ extern eval_inline_ret_bug
 extern eval_dispatch
 extern eval_exception_unwind
 extern frame_new
+extern frame_pool_get
+extern frame_pool_free_0
 extern frame_free
 extern func_type
 extern builtins_dict_global
@@ -79,17 +81,13 @@ section .text
 ;; back, and the values to release are the arguments plus the callable -- which
 ;; is the slot immediately below them in both shapes.
 ;; ============================================================================
-CPE_NARGS equ 8
-CPE_TOTAL equ 16                ; the arguments the callee actually receives
-CPE_FUNC  equ 24
-CPE_ARGS  equ 32                ; where they start on the value stack
-CPE_RET   equ 40
-CPE_FRAME equ 56                ; a handler is entered with rsp 16-aligned, so
-                                ; push rbp + 56 brings it back to aligned.
-                                ; 56 and not 48 although CPE_IDX is gone: the
-                                ; parity is what the number is for.
-
-DEF_FUNC op_call_py_exact, CPE_FRAME
+;; The handler has no frame of its own.  It used to need one to hold four
+;; values across `call frame_new` and `call eval_frame`; the second is gone and
+;; the first has become a `call frame_pool_get` on the slow path only, so on
+;; the path every call takes nothing is spilled at all.  A handler is entered
+;; with rsp 16-aligned and DEF_FUNC_BARE leaves it there, which is the parity
+;; the one call below wants.
+DEF_FUNC_BARE op_call_py_exact
     ; ecx is the oparg and must survive to .cpe_deopt, so nothing before the
     ; last guard touches rcx.
     cmp qword [rel kw_names_pending], 0
@@ -127,26 +125,63 @@ DEF_FUNC op_call_py_exact, CPE_FRAME
          CO_ASYNC_GENERATOR
     jnz .cpe_deopt
 
-    ; Past the last guard.
-    mov [rbp - CPE_NARGS], rcx
-    mov [rbp - CPE_TOTAL], r10
-    mov [rbp - CPE_FUNC], rdi
-    mov r8, r10
-    neg r8
-    lea r8, [r13 + r8*8]
-    mov [rbp - CPE_ARGS], r8
+    ; Past the last guard.  rdi = the function, rax = its code object,
+    ; ecx = the oparg, r10d = the arguments the callee receives -- and none of
+    ; those is written to memory, because the fast path below calls nothing.
 
-    ; frame_new(code, globals, builtins, locals = NULL)
-    mov rdi, rax
-    mov rsi, [rbp - CPE_FUNC]
-    mov rsi, [rsi + PyFuncObject.func_globals]
+    ; The frame's size, in 64 bits.  co_nlocalsplus and co_stacksize are 32-bit
+    ; fields out of a .pyc, and adding them in 32 would let a crafted pair near
+    ; 2**31 wrap to a small total -- frame_new makes the same point.
+    mov r8d, [rax + PyCodeObject.co_nlocalsplus]
+    mov r9d, [rax + PyCodeObject.co_stacksize]
+    add r9, r8
+    shl r9, 3
+    add r9, FRAME_HEADER_SIZE
+
+    ; The pool's smallest class holds a frame of about seventeen slots, which
+    ; is nearly every frame there is.  Anything larger, and an empty freelist,
+    ; go through frame_pool_get: it is what knows how to round a size to a
+    ; class, and a block allocated at any other size would be handed back to
+    ; the wrong freelist when the frame dies.
+    cmp r9, FRAME_POOL_CLASS_0
+    ja .cpe_frame_slow
+    lea r11, [rel frame_pool_free_0]
+    mov r15, [r11 + FRAME_POOL_HEAD]
+    test r15, r15
+    jz .cpe_frame_slow
+    mov rdx, [r15]                      ; the next link lives at offset 0
+    mov [r11 + FRAME_POOL_HEAD], rdx
+    dec dword [r11 + FRAME_POOL_COUNT]
+
+.cpe_frame_ready:
+    ; frame_new's header, minus what this path already knows.  prev_frame is
+    ; not zeroed: eval_frame overwrites it from eval_saved_r12 a few
+    ; instructions later, and nothing runs in between.
+    mov [r15 + PyFrame.code], rax
+    mov rdx, [rdi + PyFuncObject.func_globals]
+    mov [r15 + PyFrame.globals], rdx
     mov rdx, [rel builtins_dict_global]
-    xor ecx, ecx
-    call frame_new
-    mov r15, rax                        ; the register convention leaves r15
-                                        ; free, and eval_frame preserves it
-    mov rcx, [rbp - CPE_FUNC]
-    mov [r15 + PyFrame.func_obj], rcx
+    mov [r15 + PyFrame.builtins], rdx
+    mov [r15 + PyFrame.func_obj], rdi
+    mov qword [r15 + PyFrame.locals], 0     ; a function call has fast locals
+    mov qword [r15 + PyFrame.instr_ptr], 0  ; not a resume, and not suspended
+    mov qword [r15 + PyFrame.stack_ptr], 0
+    mov qword [r15 + PyFrame.call_ip], 0
+    mov qword [r15 + PyFrame.exc_state], 0
+    mov qword [r15 + PyFrame.frame_obj], 0
+    mov qword [r15 + PyFrame.gen_owner], 0
+    mov dword [r15 + PyFrame.exc_depth], 0
+    mov [r15 + PyFrame.nlocalsplus], r8d
+
+    ; How the frame is entered, and what the resume has to undo: N+2 slots go,
+    ; whichever of the two call shapes this was.
+    mov dword [r15 + PyFrame.entry_kind], FRAME_ENTRY_INLINE
+    lea edx, [rcx + 2]
+    mov [r15 + PyFrame.entry_slots], edx
+
+    lea rdx, [r15 + PyFrame.localsplus]
+    lea rsi, [rdx + r8*8]
+    mov [r15 + PyFrame.stack_base], rsi
 
     ; Every parameter has an argument, so the bind is a copy.  Defaults need no
     ; test: a default could not apply to a parameter that already has one.
@@ -165,17 +200,31 @@ DEF_FUNC op_call_py_exact, CPE_FRAME
     ; frame is pool-allocated and untracked, and frameobj_traverse walks
     ; f_back, f_globals, f_locals and f_trace -- so the collector cannot
     ; subtract two references where only one exists.
-    mov rcx, [rbp - CPE_TOTAL]
-    test ecx, ecx
-    jz .cpe_run
-    mov r8, [rbp - CPE_ARGS]
-    xor eax, eax
+    ;
+    ; And it is the frame's initialisation as well.  frame_new zeroed every
+    ; slot and this loop then overwrote the first ones; here only the slots
+    ; BEYOND the arguments -- the cells, the frees and the locals a function
+    ; has not assigned yet -- need zeroing.
+    xor edx, edx
+    test r10d, r10d
+    jz .cpe_zero_rest
+    mov r9, r10
+    neg r9
+    lea r9, [r13 + r9*8]                ; the first argument on the value stack
 .cpe_bind:
-    mov rdx, [r8 + rax*8]
-    mov [r15 + PyFrame.localsplus + rax*8], rdx
-    inc eax
-    cmp eax, ecx
+    mov rsi, [r9 + rdx*8]
+    mov [r15 + PyFrame.localsplus + rdx*8], rsi
+    inc edx
+    cmp edx, r10d
     jb .cpe_bind
+.cpe_zero_rest:
+    cmp edx, r8d
+    jae .cpe_run
+.cpe_zero:
+    mov qword [r15 + PyFrame.localsplus + rdx*8], 0
+    inc edx
+    cmp edx, r8d
+    jb .cpe_zero
 
 .cpe_run:
     ; Hand the frame to eval_frame WITHOUT calling it.
@@ -187,15 +236,7 @@ DEF_FUNC op_call_py_exact, CPE_FRAME
     ; eval_inline_resume instead of returning.  entry_slots is what the resume
     ; cannot work out for itself once the frame is gone: how many value-stack
     ; slots this call consumed.
-    mov dword [r15 + PyFrame.entry_kind], FRAME_ENTRY_INLINE
-    mov ecx, [rbp - CPE_NARGS]
-    add ecx, 2                          ; N+2 slots, whichever shape this was
-    mov dword [r15 + PyFrame.entry_slots], ecx
-
     mov rdi, r15
-    leave                               ; this handler's own C frame is gone;
-                                        ; rbp is the caller frame's again, and
-                                        ; eval_frame will push it as its own
     ; The word where a return address would be.  It is a real address, not
     ; padding: if entry_kind is ever wrong, a `ret` lands on a named
     ; fatal_error rather than in the middle of the value stack.  It also
@@ -213,9 +254,28 @@ DEF_FUNC op_call_py_exact, CPE_FRAME
     ; there -- exactly as .cpe_propagate relied on.  The resume advances it.
     jmp eval_frame
 
+.cpe_frame_slow:
+    ; Out of line, and the only place this handler calls anything.  Four
+    ; pushes, so rsp keeps the alignment it was entered with.
+    push rcx
+    push r10
+    push rdi
+    push rax
+    mov rdi, r9
+    call frame_pool_get
+    mov r15, rax
+    pop rax
+    pop rdi
+    pop r10
+    pop rcx
+    ; r8 held co_nlocalsplus and is caller-saved, so the call above took it.
+    ; Re-reading it is one instruction and this arm is not the hot one; pushing
+    ; it would have cost the alignment a second slot as well.
+    mov r8d, [rax + PyCodeObject.co_nlocalsplus]
+    jmp .cpe_frame_ready
+
 .cpe_deopt:
     mov byte [rbx - 2], OP_CALL
-    leave
     jmp op_call
 END_FUNC op_call_py_exact
 
