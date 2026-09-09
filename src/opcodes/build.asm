@@ -2394,6 +2394,8 @@ END_FUNC op_kw_names
 extern set_new
 extern set_add
 extern set_type
+extern frozenset_type
+extern set_reserve
 
 BSE_COUNT   equ 8
 BSE_SET     equ 16
@@ -2412,7 +2414,6 @@ DEF_FUNC op_build_set, 24   ; + 0 pushes; a handler is entered ALIGNED, so this 
     ; literal grew its table twice on the way, rehashing everything each time.
     mov rdi, rax
     mov rsi, [rbp - BSE_COUNT]
-    extern set_reserve
     call set_reserve
 
     ; Pop items and add to set
@@ -2530,9 +2531,42 @@ DEF_FUNC op_set_update
     mov rdi, [r13 + rcx]      ; rdi = set
     mov [rbp - SU_SOURCE], rdi          ; save set
 
-    ; Check if iterable is a set (direct iteration over entries)
+    ; Take the room in one step whenever the source can say how big it is.
+    ;
+    ; A set literal of constants is a FROZENSET in co_consts plus BUILD_SET 0
+    ; and SET_UPDATE, so `{1, 2, 3, 4, 5}` arrives here as an empty set and a
+    ; five-element source -- and the empty set had to grow from the shared
+    ; one-slot table to eight and then to thirty-two, two mallocs and two
+    ; rehashes, to hold five ints.  set/frozenset/list/tuple all keep their
+    ; element count at ob_size, and none of the four can lie about it.
     mov rax, [rsi + PyObject.ob_type]
     lea rdx, [rel set_type]
+    cmp rax, rdx
+    je .su_presize
+    lea rdx, [rel frozenset_type]
+    cmp rax, rdx
+    je .su_presize
+    lea rdx, [rel list_type]
+    cmp rax, rdx
+    je .su_presize
+    lea rdx, [rel tuple_type]
+    cmp rax, rdx
+    jne .su_sized
+.su_presize:
+    mov rdi, [rbp - SU_SOURCE]              ; the set being updated
+    mov rsi, [rsi + PyDictObject.ob_size]   ; +16 on all four types
+    call set_reserve
+    mov rsi, [rbp - SU_SET]                 ; the iterable again
+.su_sized:
+
+    ; A set or a frozenset is walked slot by slot: its own entry array is
+    ; already the list of its elements, so an iterator object would be an
+    ; allocation to answer a question the table answers.
+    mov rax, [rsi + PyObject.ob_type]
+    lea rdx, [rel set_type]
+    cmp rax, rdx
+    je .su_from_set
+    lea rdx, [rel frozenset_type]
     cmp rax, rdx
     je .su_from_set
 
@@ -2598,7 +2632,7 @@ DEF_FUNC op_set_update
     jmp eval_exception_unwind
 
 .su_from_set:
-    ; Iterable is a set - iterate entries directly
+    ; Iterable is a set or frozenset - iterate entries directly
     mov rax, [rsi + PyDictObject.capacity]
     mov [rbp - SU_CAP], rax          ; capacity (reuse slot)
     xor ebx, ebx              ; index

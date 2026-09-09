@@ -441,6 +441,7 @@ test_select
 test_sequence_iteration
 test_setattr_dunder
 test_set_fatval
+test_set_growth
 test_set_inplace
 test_set_methods
 test_set_mutated_under_probe

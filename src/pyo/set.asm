@@ -31,6 +31,11 @@ SET_ENTRY_KEY     equ 8
 ; Initial capacity (must be power of 2)
 SET_INIT_CAP equ 8
 
+;; The capacity of the shared empty table below.  One slot, so the mask is
+;; zero and a probe lands on that slot, finds it EMPTY and stops -- which is
+;; the right answer for every lookup in an empty set.
+SET_EMPTY_CAP equ 1
+
 ; SET_HASH_VALUE key, out -- the hash of a key Value, with the int case inline.
 ;
 ; Every one of the three sites that needed a hash used to V_UNPACK the Value,
@@ -93,21 +98,19 @@ DEF_FUNC set_new_of_type
     mov rbx, rax                ; rbx = set (ob_refcnt=1, ob_type set)
 
     mov qword [rbx + PyDictObject.ob_size], 0
-    mov qword [rbx + PyDictObject.capacity], SET_INIT_CAP
     mov qword [rbx + PyDictObject.dk_version], 0
     mov qword [rbx + PyDictObject.dk_tombstones], 0
     mov qword [rbx + SET_FINGER], 0
 
-    ; Allocate entries array: capacity * SET_ENTRY_SIZE
-    mov edi, SET_INIT_CAP * SET_ENTRY_SIZE
-    call ap_malloc
+    ; The shared empty table: no allocation at all.  A set that is never
+    ; added to -- and a great many are not, starting with the temporary every
+    ; binary operator builds -- costs one gc_alloc and nothing else, and the
+    ; set literal that used to malloc eight slots and then immediately
+    ; malloc sixteen now mallocs once.  dict_new hands out
+    ; dict_empty_entries for the same reason.
+    mov qword [rbx + PyDictObject.capacity], SET_EMPTY_CAP
+    lea rax, [rel set_empty_entries]
     mov [rbx + PyDictObject.entries], rax
-
-    ; Zero out entries (NULL key = empty slot)
-    mov rdi, rax
-    xor esi, esi
-    mov edx, SET_INIT_CAP * SET_ENTRY_SIZE
-    call ap_memset
 
     mov rdi, rbx
     call gc_track
@@ -118,6 +121,66 @@ DEF_FUNC set_new_of_type
     leave
     ret
 END_FUNC set_new_of_type
+
+section .rodata
+;; ============================================================================
+;; The table every empty set points at.
+;;
+;; A set used to allocate its own in set_new_of_type: an ap_malloc and an
+;; ap_memset of eight entries for every set ever made, including the
+;; temporary each binary operator builds and then swaps storage with, and
+;; including the one a set literal builds and set_reserve immediately
+;; replaces -- two mallocs and two memsets for `{1, 2, 3, 4, 5}`.
+;;
+;; The capacity is ONE, and that is what makes it safe rather than a special
+;; case.  A read needs no arm: set_find_slot masks the hash to the single
+;; slot, finds a NULL key with a zero hash -- an EMPTY, not a tombstone --
+;; and answers miss, which is the right answer for every lookup in an empty
+;; set.  A write cannot reach it either, because set_add's room test is
+;; `(fill + 1) * 5 >= capacity * 3` and 3 is not more than 5, so the very
+;; first insert resizes to a real table before it stores anything.
+;;
+;; It lives in .rodata, so "no write path can reach it" is enforced by the
+;; page tables rather than by argument.  dict_empty_entries is the same
+;; trick and the same reasoning.
+;; ============================================================================
+align 16
+set_empty_entries:
+    times SET_ENTRY_SIZE / 8 dq 0
+
+section .text
+
+;; ============================================================================
+;; set_release_table(rdi = set) -> void
+;;
+;; Give the table back and point the set at the shared empty one.  What
+;; clear() means: the alternative is to keep a table whose every slot is now
+;; dead, which leaves a set that held a million elements holding a million
+;; slots.  CPython's set_clear does the same -- it calls set_table_resize
+;; down to PySet_MINSIZE -- and dict_release_tables is this function for
+;; dicts.
+;;
+;; The keys are the CALLER's to release; this only touches storage.
+;; ============================================================================
+global set_release_table
+DEF_FUNC set_release_table, 8           ; + 1 push = 16, 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyDictObject.entries]
+    lea rax, [rel set_empty_entries]
+    cmp rdi, rax
+    je .srt_done                        ; already shared; nothing to release
+    call ap_free
+    lea rax, [rel set_empty_entries]
+    mov [rbx + PyDictObject.entries], rax
+    mov qword [rbx + PyDictObject.capacity], SET_EMPTY_CAP
+    mov qword [rbx + PyDictObject.dk_tombstones], 0
+    mov qword [rbx + SET_FINGER], 0
+.srt_done:
+    pop rbx
+    leave
+    ret
+END_FUNC set_release_table
 
 ;; ============================================================================
 ;; set_result_type(rdi = a set or frozenset) -> rax = the type a derived set
@@ -532,9 +595,14 @@ DEF_FUNC_LOCAL set_resize_to, 8         ; 5 pushes, so rsp is 16-aligned
     jmp .rehash_loop
 
 .rehash_done:
-    ; Free old entries array
+    ; Free the old entries array -- unless it is the shared empty table, which
+    ; lives in .rodata and belongs to no set.
+    lea rax, [rel set_empty_entries]
+    cmp r12, rax
+    je .rehash_freed
     mov rdi, r12
     call ap_free
+.rehash_freed:
 
     pop r15
     pop r14
@@ -708,6 +776,28 @@ DEF_FUNC set_add
 
     SET_HASH_VALUE r12, r13     ; r13 = hash
 
+    ; Make the room BEFORE probing rather than after inserting.
+    ;
+    ; A fresh set points at the shared read-only empty table, so the free
+    ; slot a probe would hand back is in .rodata.  Resizing first is what
+    ; gives the set a table it may write to, and it means no write path
+    ; anywhere has to test for the shared one: by the time a slot has been
+    ; handed out, the table under it is this set's own.
+    ;
+    ; (ob_size + tombstones + 1) * 5 >= capacity * 3, which is the same
+    ; three-fifths rule one insert earlier.
+    mov rax, [rbx + PyDictObject.ob_size]
+    add rax, [rbx + PyDictObject.dk_tombstones]
+    inc rax
+    lea rax, [rax + rax*4]      ; (fill + 1) * 5
+    mov rcx, [rbx + PyDictObject.capacity]
+    lea rcx, [rcx + rcx*2]      ; capacity * 3
+    cmp rax, rcx
+    jl .have_room
+    mov rdi, rbx
+    call set_resize
+.have_room:
+
     ; Find slot
     mov rdi, rbx                ; set
     mov rsi, r12                ; the key
@@ -734,26 +824,8 @@ DEF_FUNC set_add
     INCREF_V r12, rcx
     mov [rax + SET_ENTRY_KEY], r12
 
-    ; Increment ob_size
+    ; Increment ob_size.  The load factor was settled on the way in.
     inc qword [rbx + PyDictObject.ob_size]
-
-    ; Check load factor: (ob_size + tombstones) * 5 >= capacity * 3.
-    ;
-    ; Three quarters is what a table probed with a good hash and a jumping
-    ; sequence can carry.  This one probes in runs, and the int hash is the
-    ; identity, so a full table is one long run: CPython's setobject.c keeps
-    ; sets at three fifths for exactly that reason, and pays the memory.
-    mov rax, [rbx + PyDictObject.ob_size]
-    add rax, [rbx + PyDictObject.dk_tombstones]
-    lea rax, [rax + rax*4]      ; fill * 5
-    mov rcx, [rbx + PyDictObject.capacity]
-    lea rcx, [rcx + rcx*2]      ; capacity * 3
-    cmp rax, rcx
-    jl .done
-
-    ; Resize needed
-    mov rdi, rbx
-    call set_resize
 
 .done:
     pop r14
@@ -808,6 +880,28 @@ DEF_FUNC set_contains, SCT_FRAME
     mov r12, rsi                ; the key, a Value
 
     SET_HASH_VALUE r12, r13     ; r13 = hash
+
+    ; Make the room BEFORE probing rather than after inserting.
+    ;
+    ; A fresh set points at the shared read-only empty table, so the free
+    ; slot a probe would hand back is in .rodata.  Resizing first is what
+    ; gives the set a table it may write to, and it means no write path
+    ; anywhere has to test for the shared one: by the time a slot has been
+    ; handed out, the table under it is this set's own.
+    ;
+    ; (ob_size + tombstones + 1) * 5 >= capacity * 3, which is the same
+    ; three-fifths rule one insert earlier.
+    mov rax, [rbx + PyDictObject.ob_size]
+    add rax, [rbx + PyDictObject.dk_tombstones]
+    inc rax
+    lea rax, [rax + rax*4]      ; (fill + 1) * 5
+    mov rcx, [rbx + PyDictObject.capacity]
+    lea rcx, [rcx + rcx*2]      ; capacity * 3
+    cmp rax, rcx
+    jl .have_room
+    mov rdi, rbx
+    call set_resize
+.have_room:
 
     ; Find slot
     mov rdi, rbx                ; set
@@ -1199,9 +1293,13 @@ DEF_FUNC set_dealloc
     jmp .dealloc_loop
 
 .dealloc_entries_done:
-    ; Free entries array
+    ; Free entries array, unless it is the shared one
+    lea rax, [rel set_empty_entries]
+    cmp r12, rax
+    je .dealloc_freed
     mov rdi, r12
     call ap_free
+.dealloc_freed:
 
     ; Free set object itself (GC-aware)
     mov rdi, rbx

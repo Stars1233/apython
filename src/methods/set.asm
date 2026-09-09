@@ -35,6 +35,8 @@ extern set_new
 extern set_new_of_type
 extern set_result_type
 extern set_coerce_operand
+extern set_clone_into
+extern set_release_table
 
 ; --- moved to a sibling file by the split ---
 
@@ -232,6 +234,12 @@ DEF_FUNC set_method_clear, 8        ; rsp 16-aligned at the call the macros belo
 .smc_done:
     mov qword [rbx + PyDictObject.ob_size], 0
 
+    ; Hand the table back.  Zeroing the keys in place left a set that had
+    ; held a million elements still holding a million slots -- and every
+    ; later walk, iteration and rehash paying for them.
+    mov rdi, rbx
+    call set_release_table
+
     RET_NONE
     pop r13
     pop r12
@@ -287,7 +295,6 @@ DEF_FUNC set_method_copy
 
     ; The table is copied wholesale rather than re-inserted element by
     ; element; see set_clone_into.
-    extern set_clone_into
     mov rdi, rbx
     mov rsi, r14
     call set_clone_into
