@@ -234,6 +234,11 @@ endstruc
 
 DICT_ENTRY_SIZE equ DictEntry_size  ; 24
 DICT_INIT_CAP   equ 8               ; initial hash-table slots for dict and set
+
+; How far the hash is shifted down for each step of the probe recurrence,
+; i = (i*5 + perturb + 1) & mask.  CPython's PERTURB_SHIFT, and Tim Peters'
+; note that 4 and 6 were not significantly worse.
+PERTURB_SHIFT   equ 5
 ENTRY_TOMBSTONE_HASH equ -1
 
 ; A set entry mirrors DictEntry minus the value: hash at +0, key Value at +8.

@@ -186,3 +186,54 @@ class Grow:
 for i in range(5):
     D[Grow(i)] = i
 print(Grow(4) in D, Grow(9) in D, len(D) > 100, all(i in D for i in range(400)))
+
+# --- the probe recurrence, i = (i*5 + perturb + 1) & mask -----------------
+# Linear probing brings only the hash's LOW bits into play, and with an
+# identity hash for integers the fixed probe order is the same order
+# consecutive keys arrive in -- the case CPython's own comment calls deadly.
+# Every key below shares its low bits with every other, so a wrong recurrence
+# is not slow, it is unfindable: a probe that walks a different sequence from
+# the one the rebuild placed them with stops at the first empty slot and
+# reports a miss.
+for stride in (4096, 1024, 256, 64):
+    heavy = {}
+    for i in range(120):
+        heavy[i * stride] = i
+    bad = [i for i in range(120) if heavy.get(i * stride, -1) != i]
+    missing = [i for i in range(120) if i * stride not in heavy]
+    print(stride, len(heavy), bad[:3], missing[:3])
+
+# deletion leaves tombstones the recurrence has to walk THROUGH, and the
+# rebuild that eventually clears them must place every survivor where the
+# probe will look for it
+churn = {}
+for i in range(200):
+    churn[i * 512] = i
+for i in range(0, 200, 2):
+    del churn[i * 512]
+print(len(churn), all(churn[i * 512] == i for i in range(1, 200, 2)),
+      all(i * 512 not in churn for i in range(0, 200, 2)))
+for i in range(0, 200, 2):
+    churn[i * 512] = i + 1000
+print(len(churn), churn[0], churn[512], churn[198 * 512])
+for i in range(200):
+    del churn[i * 512]
+print(len(churn), churn == {})
+
+# the same for objects that all hash alike, across a resize
+class Clash:
+    def __init__(self, v):
+        self.v = v
+
+    def __hash__(self):
+        return 12345
+
+    def __eq__(self, o):
+        return isinstance(o, Clash) and self.v == o.v
+
+
+big = {Clash(i): i for i in range(120)}
+print(len(big), big[Clash(0)], big[Clash(119)], big.get(Clash(200), "-"))
+for i in range(0, 120, 3):
+    del big[Clash(i)]
+print(len(big), big.get(Clash(0), "-"), big[Clash(1)], big[Clash(118)])

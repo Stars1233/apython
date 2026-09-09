@@ -483,6 +483,7 @@ DL_FREE  equ 16
 DL_IX    equ 24            ; the candidate index, across a comparison call
 DL_DICT  equ 32            ; ... and the dict, to see whether it moved
 DL_CMPKEY equ 40           ; ... and the key that was compared
+DL_PERT  equ 48            ; the probe recurrence's remaining hash bits
 DL_FRAME equ 56            ; + 5 pushes = 96, 16-aligned
 
 ; rbx = dk_indices, r12 = entries, r13 = the key, r14 = slot, r15 = mask
@@ -492,8 +493,24 @@ DL_FRAME equ 56            ; + 5 pushes = 96, 16-aligned
     mov r15, [rdi + PyDictObject.capacity]
     dec r15                     ; the mask
     mov r14, [rbp - DL_HASH]
-    and r14, r15                ; the first slot
+    mov [rbp - DL_PERT], r14     ; the whole hash, folded in a step at a time
+    and r14, r15                 ; the first slot
     mov qword [rbp - DL_FREE], -1
+%endmacro
+
+; i = (i*5 + perturb + 1) & mask, with perturb shifted down each step.  The
+; first slot uses the hash's LOW bits only; this is what brings the high ones
+; into play.  Linear probing does not, and with an identity hash for integers
+; the fixed probe order is the same order consecutive keys arrive in, which
+; is the case CPython's own comment calls deadly.
+%macro DL_ADVANCE 0
+    mov rax, [rbp - DL_PERT]
+    shr rax, PERTURB_SHIFT
+    mov [rbp - DL_PERT], rax
+    lea r14, [r14 + r14*4]
+    add r14, rax
+    inc r14
+    and r14, r15
 %endmacro
 
 ; The entry at index %2, without the 3-cycle `imul reg, reg, 24`.
@@ -594,8 +611,7 @@ DEF_FUNC dict_lookup, DL_FRAME
     jne .dls_next
     mov [rbp - DL_FREE], r14
 .dls_next:
-    inc r14
-    and r14, r15
+    DL_ADVANCE
     jmp .dls_probe
 
 ;; --- everything else ------------------------------------------------------
@@ -653,8 +669,7 @@ DEF_FUNC dict_lookup, DL_FRAME
     jne .dlg_next
     mov [rbp - DL_FREE], r14
 .dlg_next:
-    inc r14
-    and r14, r15
+    DL_ADVANCE
     jmp .dlg_probe
 
 .dl_miss:
@@ -761,10 +776,14 @@ DEF_FUNC dict_resize_to, DR_FRAME
     dec rcx
     mov rdx, r13
     and rdx, rcx                ; slot
+    mov r8, r13                 ; perturb
 .dr_probe:
     mov rsi, [rbx + PyDictObject.dk_indices]
     cmp qword [rsi + rdx*8], DICT_IX_EMPTY
     je .dr_place
+    shr r8, PERTURB_SHIFT       ; the same recurrence dict_lookup walks
+    lea rdx, [rdx + rdx*4]
+    add rdx, r8
     inc rdx
     and rdx, rcx
     jmp .dr_probe
