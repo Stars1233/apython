@@ -291,7 +291,13 @@ No hand-written file exceeds 100k bytes; only generated asm may.
 - `src/alloc.asm` — where memory comes from.  `ap_malloc`, `ap_free` and
   `ap_realloc` are the whole funnel: nothing else in the tree calls libc's,
   and GMP and zlib allocate and free their own, so every byte the interpreter
-  owns passes through these three
+  owns passes through these three.  They are a size-class pool allocator over
+  one contiguous reservation, with libc under it above 512 bytes; the file
+  header is the design, including the three invariants it rests on.
+  `NO_POOL=1` compiles it out and `APYTHON_MALLOC=libc` switches it off
+  without a rebuild -- **use the latter under valgrind**, or every
+  use-after-free goes invisible.  `POOL_TINY=1` shrinks the reservation so the
+  whole corpus runs on a mixed pool/libc heap
 - `src/compiler/` — The Python **source** compiler (see below)
 - `src/include/` — `object.inc` (every struct and id enum), `macros.inc`,
   `value.inc`, `opcodes.inc`, and the three private ABIs `sre.inc`,

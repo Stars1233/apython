@@ -30,6 +30,25 @@ ifdef NO_INT_FREELIST
 NASMFLAGS += -DNO_INT_FREELIST
 endif
 
+# NO_POOL=1 compiles the pool allocator out of src/alloc.asm, leaving the thin
+# libc wrappers ap_malloc/ap_free/ap_realloc used to be.  APYTHON_MALLOC=libc
+# does the same at run time, without a rebuild, and that is the one to reach
+# for under valgrind: a block recycled through a size-class free list is not a
+# freed block, so every use-after-free in the interpreter goes invisible while
+# the pools are on.  Reach for BOTH it and NO_INT_FREELIST=1 there.
+ifdef NO_POOL
+NASMFLAGS += -DNO_POOL
+endif
+
+# POOL_TINY=1 shrinks the reservation from a gigabyte to a megabyte, so an
+# ordinary program EXHAUSTS it and every later allocation falls through to
+# libc -- which turns the whole existing corpus into a test of the crossover,
+# where pool pointers and libc pointers are live at the same time and each has
+# to be freed by the right one.
+ifdef POOL_TINY
+NASMFLAGS += -DAP_SPAN_TINY
+endif
+
 CC = cc
 # -lm is for complex: hypot, pow, atan2, exp, log, cos and sin, which
 # src/pyo/complex.asm calls for the general complex power and for abs().
