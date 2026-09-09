@@ -445,11 +445,16 @@ DEF_FUNC_LOCAL str_strip_impl, SSI_FRAME
     jmp .ssi_wide_rloop
 
 .ssi_make:
-    lea rdi, [rbx + PyStrObject.data]
-    add rdi, r13
-    mov rsi, r14
-    sub rsi, r13
-    call str_new_heap
+    ; The result is a run of the subject's own bytes, and str_new_slice is
+    ; where that is worth saying: when the subject is ASCII the result's
+    ; code-point count is its byte count, and str_new_heap would rescan for
+    ; it -- str_count_codepoints was 17% of a strip() loop.
+    mov rdi, rbx
+    mov rsi, r13
+    mov rdx, r14
+    sub rdx, r13
+    extern str_new_slice
+    call str_new_slice
     mov edx, TAG_PTR
     pop r14
     pop r13

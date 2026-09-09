@@ -1129,6 +1129,67 @@ DEF_FUNC str_new_heap, 8            ; 3 pushes, so rsp is 16-aligned
 END_FUNC str_new_heap
 
 
+
+;; ============================================================================
+;; str_new_slice(rdi = the parent PyStrObject*, rsi = byte start,
+;;               rdx = byte length) -> rax = PyStrObject*, edx = TAG_PTR
+;;
+;; A run of a string's own bytes, as a new string.  Its point is the length:
+;; when the PARENT is ASCII so is any slice of it, and the slice's code-point
+;; count is its byte count -- which str_new_heap cannot know and rescans for.
+;; str_count_codepoints' probe is cheap per byte and not free per call, and
+;; over `s.strip()` on a 1000-byte string it was 17% of the work, rescanning
+;; bytes the parent was established ASCII for when it was built.
+;;
+;; The caller has already decided WHICH bytes; nothing here is bounds-checked.
+;; ============================================================================
+SNS_START equ 8
+SNS_OBJ   equ 16
+SNS_ASCII equ 24
+SNS_FRAME equ 32                ; + 2 pushes = 48, 16-aligned
+DEF_FUNC str_new_slice, SNS_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi                ; the parent
+    mov r12, rdx                ; the length
+    mov [rbp - SNS_START], rsi
+
+    ; Is the parent ASCII?  Then so is any run of its bytes.
+    xor ecx, ecx
+    mov rax, [rbx + PyStrObject.ob_size]
+    cmp rax, [rbx + PyStrObject.ob_length]
+    sete cl
+    mov [rbp - SNS_ASCII], rcx
+
+    mov rdi, r12
+    xor esi, esi                ; 0 means "count the code points afterwards"
+    test ecx, ecx
+    jz .sns_alloc
+    mov rsi, r12                ; one code point per byte
+.sns_alloc:
+    call str_alloc_bytes
+    mov [rbp - SNS_OBJ], rax
+
+    lea rdi, [rax + PyStrObject.data]
+    lea rsi, [rbx + PyStrObject.data]
+    add rsi, [rbp - SNS_START]
+    mov rdx, r12
+    call ap_memcpy
+
+    mov rax, [rbp - SNS_OBJ]
+    cmp qword [rbp - SNS_ASCII], 0
+    jne .sns_done
+    mov rdi, rax
+    call str_set_length
+    mov rax, [rbp - SNS_OBJ]
+.sns_done:
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC str_new_slice
+
 ;; ============================================================================
 ;; str_char_table -- the 256 one-character latin-1 strings, as real objects
 ;;
