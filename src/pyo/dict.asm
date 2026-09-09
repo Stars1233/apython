@@ -1519,6 +1519,68 @@ DEF_FUNC_BARE dict_keys_view_contains
 END_FUNC dict_keys_view_contains
 
 ;; ============================================================================
+;; dict_items_view_contains(rdi = view, rsi = probe Value) -> eax = 0 or 1
+;;
+;; `(k, v) in d.items()` is one lookup and one comparison, not a walk.  The
+;; items view had no sq_contains at all, so the question fell to the generic
+;; protocol, which iterates the whole view and compares every pair -- O(n)
+;; where CPython's dictitems_contains is O(1), and measured at a hundred
+;; times CPython on tests/run_dict_bench.sh.
+;;
+;; A probe that is not a two-element tuple is simply not in the view; CPython
+;; answers False rather than raising, and it accepts a tuple SUBCLASS, whose
+;; __eq__ the comparison below still gets to run.
+;;
+;; The dict's value is compared on the LEFT, as in CPython: the pair's own
+;; second element is the right operand, so a probe carrying a type with an
+;; __eq__ is offered the reflected operand by the ordinary rule rather than
+;; being asked first.
+;; ============================================================================
+DEF_FUNC dict_items_view_contains, 8    ; + 1 push = 16, 16-aligned
+    push rbx
+
+    V_TEST_PTR rsi, rax
+    ja .divc_no
+    mov rax, [rsi + PyObject.ob_type]
+    REQUIRE_TUPLE_TYPE rax, rcx, .divc_no
+    cmp qword [rsi + PyTupleObject.ob_size], 2
+    jne .divc_no
+
+    mov rbx, rsi                        ; the pair, held across the lookup
+    mov rdi, [rdi + PyDictViewObject.dv_dict]
+    mov rax, [rbx + PyTupleObject.ob_item]
+    mov rsi, [rax]                      ; the key
+    call dict_get                       ; a borrowed Value, or 0
+    test rax, rax
+    jz .divc_no
+
+    ; The borrow is safe across the comparison: obj_richcompare_bool takes a
+    ; reference to both operands before it can run any Python.
+    mov rdi, rax
+    mov rax, [rbx + PyTupleObject.ob_item]
+    mov rsi, [rax + 8]                  ; the value the pair carries
+    mov edx, PY_EQ
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .divc_error
+    pop rbx
+    leave
+    ret
+
+.divc_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.divc_error:
+    ; sq_contains has no error channel; the exception is already pending.
+    pop rbx
+    leave
+    jmp eval_exception_unwind
+END_FUNC dict_items_view_contains
+
+;; ============================================================================
 ;; dict_nb_or(left, right, ltag, rtag) -> new dict (merge)
 ;; Implements dict | dict -> new dict containing all items from both.
 ;; Right dict values override left on key collision.
@@ -2298,7 +2360,9 @@ dict_view_num_methods:
     dq dict_view_nb_or      ; nb_or
     times PyNumberMethods_size / 8 - 16 dq 0
 
-; Dict view sequence methods (for len(), values/items views)
+; Dict values view sequence methods.  No sq_contains, as in CPython:
+; `x in d.values()` is a walk there too, and a direct scan here would answer
+; without noticing a mutation that the iteration protocol raises on.
 align 8
 dict_view_sequence_methods:
     dq dict_view_len            ; sq_length
@@ -2307,6 +2371,18 @@ dict_view_sequence_methods:
     dq 0                        ; sq_item
     dq 0                        ; sq_ass_item
     dq 0                        ; sq_contains
+    dq 0                        ; sq_inplace_concat
+    dq 0                        ; sq_inplace_repeat
+
+; Dict items view sequence methods (len + contains)
+align 8
+dict_items_view_seq_methods:
+    dq dict_view_len            ; sq_length
+    dq 0                        ; sq_concat
+    dq 0                        ; sq_repeat
+    dq 0                        ; sq_item
+    dq 0                        ; sq_ass_item
+    dq dict_items_view_contains ; sq_contains
     dq 0                        ; sq_inplace_concat
     dq 0                        ; sq_inplace_repeat
 
@@ -2397,7 +2473,7 @@ dict_items_view_type:
     dq 0                        ; tp_init
     dq 0                        ; tp_new
     dq dict_view_num_methods    ; tp_as_number
-    dq dict_view_sequence_methods ; tp_as_sequence
+    dq dict_items_view_seq_methods ; tp_as_sequence
     dq 0                        ; tp_as_mapping
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
