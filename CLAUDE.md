@@ -190,7 +190,11 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   `object` (object's own dunders plus the `DEF_DUNDER_*` generators), and
   `init`, which registers them all into each type's `tp_dict`.  These share
   basenames with `src/pyo/` on purpose: `methods/dict.asm` is dict's methods,
-  `pyo/dict.asm` is dict itself
+  `pyo/dict.asm` is dict itself.  `list_sort.asm` is the timsort engine
+  `list.sort` drives -- run detection, minrun, the run stack, galloping and
+  the comparator the pre-sort type scan chooses; `methods/list.asm` keeps
+  everything around it, and `src/include/listsort.inc` is the MergeState
+  layout the two share
 - `lib/_imp.py` and `lib/_warnings.py` — the import system's own primitives
   and the warning machinery's C half, which CPython's `importlib._bootstrap`
   is written against.  Neither needs to be assembly: one thread means the
@@ -283,8 +287,8 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   memory and string ops, and `fatal_error`
 - `src/compiler/` — The Python **source** compiler (see below)
 - `src/include/` — `object.inc` (every struct and id enum), `macros.inc`,
-  `value.inc`, `opcodes.inc`, and the two private ABIs `sre.inc` and
-  `eventloop.inc`
+  `value.inc`, `opcodes.inc`, and the three private ABIs `sre.inc`,
+  `eventloop.inc` and `listsort.inc`
 
 ## Source Compiler (`src/compiler/`)
 
