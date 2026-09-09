@@ -31,6 +31,7 @@ SYS_close           equ 3
 SYS_fstat           equ 5
 SYS_mmap            equ 9
 SYS_munmap          equ 11
+SYS_madvise         equ 28
 SYS_socket          equ 41
 SYS_connect         equ 42
 SYS_accept4         equ 288
@@ -457,6 +458,21 @@ DEF_FUNC_BARE sys_munmap
     syscall
     ret
 END_FUNC sys_munmap
+
+;; ============================================================================
+;; sys_madvise(addr, len, advice) -> int
+;;
+;; Only MADV_NOHUGEPAGE is wanted so far, and only by the pool allocator: on a
+;; host whose transparent_hugepage is `always`, a reservation of a gigabyte is
+;; hugepage-eligible, and touching one 16 KiB pool would fault in two megabytes
+;; of resident memory to back it.  Advice a kernel is free to ignore, so the
+;; result is ignored too.
+;; ============================================================================
+DEF_FUNC_BARE sys_madvise
+    mov rax, SYS_madvise
+    syscall
+    ret
+END_FUNC sys_madvise
 
 ;; ============================================================================
 ;; sys_io_uring_setup(entries, params*) -> int fd
