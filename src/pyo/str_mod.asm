@@ -189,13 +189,19 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov [rbp-SM_NARGS], rax    ; nargs = tuple size
 .sm_not_tuple:
 
-    ; Allocate initial heap buffer (8192 bytes)
+    ; The output buffer, which .sm_ensure_cap doubles as needed.
+    ;
+    ; It used to start at 8192 bytes -- for EVERY `%` operation, including
+    ; `"%s-%d" % ("abc", i)`, whose answer is eight bytes.  That is over the
+    ; pool allocator's small-object threshold, so it was also a libc round
+    ; trip every time; 256 is a size class, and it still holds every format
+    ; result short of a deliberately long one in a single allocation.
     extern ap_malloc, ap_free, ap_realloc
-    mov edi, 8192
+    mov edi, 256
     call ap_malloc
     mov r13, rax               ; r13 = output buffer
     mov [rbp-SM_BUF], rax
-    mov qword [rbp-SM_CAP], 8192
+    mov qword [rbp-SM_CAP], 256
     xor r14d, r14d             ; r14 = output pos
     xor r15d, r15d             ; r15 = arg index
     mov qword [rbp-SM_HASKEY], 0
@@ -882,7 +888,13 @@ DEF_FUNC str_mod_impl, SM_FRAME
     jb .sm_too_many
 .sm_arity_ok:
 
-    ; Null-terminate and create string
+    ; Null-terminate and create string.  Guarded rather than assumed: every
+    ; append above ensures room for what IT writes, and the terminator is one
+    ; byte more than any of them asked for.  While the buffer started at 8 KB
+    ; and doubled, the slack made that unreachable; it is one byte past the
+    ; end of a block that fits exactly.
+    lea rdi, [r14 + 1]
+    call .sm_ensure_cap
     mov byte [r13 + r14], 0
 
     push r13                   ; save buffer ptr for free
@@ -1445,7 +1457,7 @@ DEF_FUNC str_mod_impl, SM_FRAME
     ; Append the piece to the caller's buffer, advancing its position.
     mov rax, [rbp-SM_PIECE]
     mov r8, [rax + PyStrObject.ob_size]
-    lea rdi, [r14 + r8]
+    lea rdi, [r14 + r8 + 1]     ; + the NUL .sm_done writes after the last piece
     call .sm_ensure_cap
     mov rax, [rbp-SM_PIECE]
     mov r8, [rax + PyStrObject.ob_size]

@@ -513,6 +513,7 @@ test_str_justify
 test_str_maketrans
 test_str_methods_extra
 test_str_methods_fix
+test_str_mod_buffer
 test_str_mod_subclass
 test_str_predicates
 test_strsearch_boundaries
