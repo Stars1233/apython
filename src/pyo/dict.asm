@@ -53,9 +53,13 @@ DEF_FUNC dict_new, 8            ; 1 pushes, so rsp is 16-aligned
     mov qword [rbx + PyDictObject.dk_tombstones], 0
     mov qword [rbx + PyDictObject.dk_nentries], 0
 
-    mov rdi, rbx
-    mov rsi, DICT_INIT_CAP
-    call dict_alloc_tables
+    ; The shared empty table: no allocation, and the first insert resizes
+    ; away from it before it can write anything.
+    mov qword [rbx + PyDictObject.capacity], 1
+    lea rax, [rel dict_empty_entries]
+    mov [rbx + PyDictObject.entries], rax
+    lea rax, [rel dict_empty_indices]
+    mov [rbx + PyDictObject.dk_indices], rax
 
     ; NOT tracked yet.  A dict whose contents are all untrackable cannot be
     ; part of a cycle, and CPython does not track one: `gc.is_tracked({})` is
@@ -121,6 +125,36 @@ DEF_FUNC dict_copy_shallow      ; 4 pushes, so rsp stays 16-aligned
     leave
     ret
 END_FUNC dict_copy_shallow
+
+;; ============================================================================
+;; dict_release_tables(rdi = dict) -> void
+;;
+;; Hand the dict back to the shared empty table, releasing whatever it had.
+;; What clear() means, and cheaper than what it used to do: an ap_memset over
+;; capacity*24 bytes and a `rep stosq` over capacity*8 more, keeping a table
+;; whose contents are all gone.  CPython's dict_clear points ma_keys at
+;; Py_EMPTY_KEYS for the same reason.
+;; ============================================================================
+DEF_FUNC dict_release_tables, 8         ; + 1 push = 16, 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyDictObject.entries]
+    lea rax, [rel dict_empty_entries]
+    cmp rdi, rax
+    je .drt_done                        ; already shared; nothing to release
+    call ap_free
+    mov rdi, [rbx + PyDictObject.dk_indices]
+    call ap_free
+    mov qword [rbx + PyDictObject.capacity], 1
+    lea rax, [rel dict_empty_entries]
+    mov [rbx + PyDictObject.entries], rax
+    lea rax, [rel dict_empty_indices]
+    mov [rbx + PyDictObject.dk_indices], rax
+.drt_done:
+    pop rbx
+    leave
+    ret
+END_FUNC dict_release_tables
 
 ;; ============================================================================
 ;; dict_alloc_tables(rdi = dict, rsi = capacity)
@@ -630,9 +664,20 @@ DEF_FUNC dict_resize, DR_FRAME
     jl .dr_same_cap
     shl r12, 1
 .dr_same_cap:
+    ; A dict growing away from the shared empty table has capacity one, and
+    ; doubling that is still two.  The floor is what makes the first insert
+    ; land on a real table rather than resize again immediately.
+    cmp r12, DICT_INIT_CAP
+    jae .dr_have_cap
+    mov r12d, DICT_INIT_CAP
+.dr_have_cap:
     ; r12, not rcx: ap_free below is a call and rcx is caller-saved.
     mov rdi, [rbx + PyDictObject.dk_indices]
+    lea rax, [rel dict_empty_indices]
+    cmp rdi, rax
+    je .dr_alloc
     call ap_free
+.dr_alloc:
     mov rdi, rbx
     mov rsi, r12
     call dict_alloc_tables
@@ -683,7 +728,11 @@ DEF_FUNC dict_resize, DR_FRAME
 
 .dr_done:
     mov rdi, [rbp - DR_OLDE]
+    lea rax, [rel dict_empty_entries]
+    cmp rdi, rax
+    je .dr_out
     call ap_free
+.dr_out:
     pop r13
     pop r12
     pop rbx
@@ -873,6 +922,9 @@ DEF_FUNC dict_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     jmp .dde_loop
 .dde_done:
     mov rdi, [rbx + PyDictObject.entries]
+    lea rax, [rel dict_empty_entries]
+    cmp rdi, rax
+    je .dde_no_idx              ; the shared table; both halves are static
     test rdi, rdi
     jz .dde_no_entries
     call ap_free
@@ -2486,6 +2538,34 @@ dict_items_view_type:
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
 
+section .rodata
+
+;; ============================================================================
+;; The table every empty dict points at.
+;;
+;; A dict used to allocate its tables in dict_new: two ap_mallocs and two
+;; `rep stosq` -- 192 bytes of entries and 64 of indices -- for every dict
+;; ever made, including `{}`, every **kwargs frame dict whether or not a
+;; keyword arrives, and every instance __dict__.  malloc and free were 37% of
+;; `{}` in a loop.  CPython allocates nothing: PyDict_New points at one
+;; immortal empty keys object and the table is built on the first insert.
+;;
+;; The capacity is ONE, and that is what makes it safe rather than a special
+;; case.  Reads need no arm at all: dict_lookup masks the hash to the single
+;; slot, finds DICT_IX_EMPTY and answers miss.  Writes cannot reach it
+;; either, because dict_set's room test is `dk_nentries + 1 > capacity*3/4`
+;; and 3/4 of one is zero, so the very first insert resizes to a real table
+;; before it stores anything.
+;;
+;; It lives in .rodata, so "no write path can reach it" is enforced by the
+;; page tables rather than by argument.
+;; ============================================================================
+align 8
+dict_empty_indices:
+    dq DICT_IX_EMPTY
+dict_empty_entries:
+    times DICT_ENTRY_SIZE / 8 dq 0
+
 section .text
 
 ;; ============================================================================
@@ -2896,15 +2976,11 @@ DEF_FUNC dict_clear_gc, 8        ; rsp 16-aligned at the call the macros below e
     test r13, r13
     jnz .loop
 .done:
-    ; Keep the header coherent with the table we just emptied: the sparse
-    ; index array has to forget the entries too.
-    mov rdi, [rbx + PyDictObject.dk_indices]
-    test rdi, rdi
-    jz .no_indices
-    mov rcx, [rbx + PyDictObject.capacity]
-    mov rax, DICT_IX_EMPTY
-    rep stosq
-.no_indices:
+    ; The table is empty now, so give it back rather than rewriting it.  The
+    ; tombstones above still had to be written: a DECREF can run Python that
+    ; looks this dict up while the walk is only half done.
+    mov rdi, rbx
+    call dict_release_tables
     mov qword [rbx + PyDictObject.ob_size], 0
     mov qword [rbx + PyDictObject.dk_nentries], 0
     mov qword [rbx + PyDictObject.dk_tombstones], 0

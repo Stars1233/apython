@@ -605,21 +605,12 @@ DEF_FUNC instance_dealloc, ID_FRAME
     jmp .id_no_storage
 
 .id_dict_storage:
+    ; dict_clear_gc releases the table as well as the contents -- an emptied
+    ; dict is handed back to the shared empty one -- so there is nothing left
+    ; here to free.  Freeing it anyway handed free() a static address.
     extern dict_clear_gc
     mov rdi, rbx
     call dict_clear_gc
-    mov rdi, [rbx + PyDictObject.entries]
-    test rdi, rdi
-    jz .id_dict_no_entries
-    mov qword [rbx + PyDictObject.entries], 0
-    call ap_free
-.id_dict_no_entries:
-    mov rdi, [rbx + PyDictObject.dk_indices]
-    test rdi, rdi
-    jz .id_no_storage
-    mov qword [rbx + PyDictObject.dk_indices], 0
-    mov qword [rbx + PyDictObject.capacity], 0
-    call ap_free
     jmp .id_no_storage
 
 .id_list_storage:

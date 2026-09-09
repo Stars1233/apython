@@ -261,21 +261,13 @@ DEF_FUNC dict_method_clear
     jmp .dc_loop
 
 .dc_clear_entries:
-    ; Zero out all entries
-    mov rdi, [rbx + PyDictObject.entries]
-    xor esi, esi
-    imul rdx, r12, DICT_ENTRY_SIZE
-    call ap_memset
-
-    ; And reset the sparse index array, or every slot would still point at a
-    ; dense entry that is now blank.
-    mov rdi, [rbx + PyDictObject.dk_indices]
-    test rdi, rdi
-    jz .dc_no_indices
-    mov rcx, r12
-    mov rax, DICT_IX_EMPTY
-    rep stosq
-.dc_no_indices:
+    ; Give the table back instead of rewriting it: an ap_memset over
+    ; capacity*24 bytes and a `rep stosq` over capacity*8 more, to keep a
+    ; table with nothing in it.  CPython's dict_clear points ma_keys at
+    ; Py_EMPTY_KEYS.
+    extern dict_release_tables
+    mov rdi, rbx
+    call dict_release_tables
 
     ; Reset size to 0
     mov qword [rbx + PyDictObject.ob_size], 0
