@@ -264,6 +264,58 @@ DEF_FUNC dict_method_clear
     ret
 END_FUNC dict_method_clear
 
+; CPython's PySequence_Fast hands a list or a tuple straight back rather than
+; copying it, and dict.update's two materialisation points are exactly where
+; it uses it.  A list and a tuple carry ob_size and ob_item at the same two
+; offsets, which is the only reason one accessor serves both; NASM checks it
+; here rather than leaving it to a reader.
+%if PyTupleObject.ob_size != PyListObject.ob_size
+    %error "list and tuple must agree on ob_size for du_as_sequence"
+%endif
+%if PyTupleObject.ob_item != PyListObject.ob_item
+    %error "list and tuple must agree on ob_item for du_as_sequence"
+%endif
+
+;; ============================================================================
+;; du_as_sequence(rdi = a Value) -> rax = an owned exact list or tuple, or 0
+;;   with an exception pending
+;;
+;; A list or a tuple is already what the caller wants to index, so it comes
+;; back with one more reference and nothing is built.  `dict(pairs)` was
+;; copying the whole sequence AND allocating a fresh two-element tuple for
+;; every pair in it, which is one allocation per element to read two words
+;; that were already contiguous.
+;; ============================================================================
+DAS_ARG   equ 8                         ; also the one-Value argument array
+DAS_FRAME equ 16                        ; + 0 pushes = 16, 16-aligned
+DEF_FUNC du_as_sequence, DAS_FRAME
+    mov [rbp - DAS_ARG], rdi
+    V_TEST_PTR rdi, rax
+    ja .das_build
+    test rdi, rdi
+    jz .das_build
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    je .das_keep
+    extern list_type
+    lea rcx, [rel list_type]
+    cmp rax, rcx
+    jne .das_build
+.das_keep:
+    INCREF_V rdi, rax
+    mov rax, rdi
+    leave
+    ret
+.das_build:
+    lea rsi, [rbp - DAS_ARG]
+    lea rdi, [rel tuple_type]
+    mov edx, 1
+    call tuple_type_call
+    leave
+    ret
+END_FUNC du_as_sequence
+
 ;; ============================================================================
 ;; dict_method_update(args, nargs) -> None
 ;; args[0]=self; then either a mapping, or an iterable of key/value pairs,
@@ -475,12 +527,8 @@ DEF_FUNC dict_method_update, DU_FRAME
     jmp .du_kwargs
 
 .du_as_pairs:
-    mov r12, [rbp - DU_OTHER]
-    mov rdi, [rbp - DU_ARGS]
-    lea rsi, [rdi + 8]
-    lea rdi, [rel tuple_type]
-    mov edx, 1
-    call tuple_type_call            ; raises for a non-iterable
+    mov rdi, [rbp - DU_OTHER]
+    call du_as_sequence             ; raises for a non-iterable
     mov [rbp - DU_TMP], rax
     mov r12, rax
     ; ...but an iterable whose __next__ raises returns NULL rather than
@@ -506,19 +554,35 @@ DEF_FUNC dict_method_update, DU_FRAME
     ja .du_not_a_sequence
     test rdi, rdi
     jz .du_not_a_sequence
+    ; A pair that is already a list or a tuple is read where it lies.  A pair
+    ; of any other shape still has to be materialised, and still has to be
+    ; refused BY NAME when it is not iterable at all -- CPython's message
+    ; says which element it was, and tuple() below would say only
+    ; "'int' object is not iterable".
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    je .du_pair_direct
+    lea rcx, [rel list_type]
+    cmp rax, rcx
+    je .du_pair_direct
     mov esi, TAG_PTR
     extern get_iterator_opt
     call get_iterator_opt
     test rax, rax
     jz .du_not_a_sequence
-    V_UNPACK rax, rdx
     mov rdi, rax
     call obj_decref
-    ; Materialise the pair too, so any two-element iterable is accepted.
+    ; Materialise the pair, so any two-element iterable is accepted.
     lea rsi, [rbp - DU_PAIRV]
     lea rdi, [rel tuple_type]
     mov edx, 1
     call tuple_type_call
+    jmp .du_pair_have
+.du_pair_direct:
+    INCREF_V rdi, rax
+    mov rax, rdi
+.du_pair_have:
     mov [rbp - DU_PAIR], rax
     test rax, rax
     jz .du_propagate
