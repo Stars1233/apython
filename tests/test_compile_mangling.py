@@ -115,3 +115,63 @@ exec("def outer():\n    __w = 1\n    class E:\n        def m(self):\n"
      "            return 'ok'\n    def inner():\n        nonlocal __w\n"
      "        __w = 2\n    inner()\n    return __w\nout = outer()\n", ns)
 print(ns["out"])
+
+# A name that is ALL underscores is two leading underscores and two trailing
+# ones at the same time, and CPython mangles neither `__` nor `___`.  The
+# "does it also end in two underscores" test used to be skipped for names
+# shorter than four characters, so a class body's `__ = 2` was stored as
+# `_C__` and `C.__` was an AttributeError.
+
+
+class Underscores:
+    _ = 1
+    __ = 2
+    ___ = 3
+    ____ = 4
+    __x = 5
+    __x__ = 6
+    _x__ = 7
+    x__ = 8
+    __x_ = 9
+
+    def get(self):
+        return (self._, self.__, self.___, self.____, self.__x,
+                self.__x__, self._x__, self.x__, self.__x_)
+
+
+print(Underscores._, Underscores.__, Underscores.___, Underscores.____,
+      Underscores._Underscores__x, Underscores.__x__, Underscores._x__,
+      Underscores.x__, Underscores._Underscores__x_)
+print(Underscores().get())
+
+
+# The class name's own leading underscores are stripped, and a class named
+# entirely with underscores mangles nothing at all.
+class _Lead:
+    __y = 1
+
+    def g(self):
+        return self.__y
+
+
+print(_Lead._Lead__y, _Lead().g())
+
+
+class ___Lead:
+    __z = 1
+
+    def g(self):
+        return self.__z
+
+
+print(___Lead._Lead__z, ___Lead().g())
+
+
+class Two:
+    __ = "two"
+
+    def g(self):
+        return self.__
+
+
+print(Two().g(), Two.__)
