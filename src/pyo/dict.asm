@@ -1029,15 +1029,11 @@ DEF_FUNC dict_subscript, 8            ; 1 pushes, so rsp is 16-aligned
 
     mov rbx, rsi               ; save the key Value for the error message
     call dict_get              ; both take a key Value
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax              ; a Value, and 0 is the only miss
     jz .key_error
-
-    ; INCREF the returned value (dict_get returns borrowed fat ref)
-    INCREF_VAL rax, rdx                ; value may be SmallInt
+    INCREF_V rax, rdx          ; dict_get's answer is borrowed
     pop rbx
     leave
-    V_PACK rax, rdx             ; return one Value
     ret
 
 .key_error:
@@ -1334,13 +1330,9 @@ dict_iter_self:
 ;; ============================================================================
 DEF_FUNC_BARE dict_contains
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
-    jz .dc_no
-    mov eax, 1
-    ret
-.dc_no:
-    xor eax, eax
+    test rax, rax               ; a Value, and 0 is the only miss
+    setnz al
+    movzx eax, al
     ret
 END_FUNC dict_contains
 

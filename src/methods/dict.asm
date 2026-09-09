@@ -62,23 +62,18 @@ DEF_FUNC dict_method_get
     mov rdi, rbx
     mov rsi, [rax + 8]      ; key Value -- dict_get unpacks it itself, so
     call dict_get           ; decoding here would hand it a bare payload
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-
-    test edx, edx               ; the tag, not the payload: a hit may be int 0
+    test rax, rax               ; a Value, and 0 is the only miss
     jnz .dg_found
 
     ; Not found - return default or None
     pop rcx                 ; args
     cmp r12, 3
     jl .dg_ret_none
-    ; Return args[2] (default)
-    mov rax, [rcx + 16]     ; default payload
-    V_UNPACK rax, rdx       ; args[2]
-    INCREF_VAL rax, rdx
+    mov rax, [rcx + 16]     ; args[2], the default
+    INCREF_V rax, rdx
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .dg_ret_none:
@@ -91,13 +86,10 @@ DEF_FUNC dict_method_get
 
 .dg_found:
     add rsp, 8              ; discard saved args
-    ; INCREF the value (dict_get returns borrowed ref, rdx=tag)
-    INCREF_VAL rax, rdx
-    ; rdx already has correct tag from dict_get
+    INCREF_V rax, rdx       ; dict_get's answer is borrowed
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_method_get
 
@@ -164,54 +156,41 @@ DEF_FUNC dict_method_pop, 8            ; 5 pushes, so rsp is 16-aligned
     mov r14, rdi            ; r14 = args
     mov rbx, [r14]          ; self
     mov r12, rsi            ; nargs
-    mov r13, [r14 + 8]     ; key payload (16-byte stride)
-    V_UNPACK r13, r15       ; args[1]
+    mov r13, [r14 + 8]      ; args[1], the key Value
 
-    ; Try dict_get
     mov rdi, rbx
     mov rsi, r13
-    mov edx, r15d           ; key tag
-    V_PACK rsi, rdx           ; dict_get/del take a key Value
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax           ; a Value, and 0 is the only miss
     jz .dpop2_not_found
 
-    ; dict_get returns fat (rax=payload, rdx=tag)
-    INCREF_VAL rax, rdx
-    push rdx                ; save tag across dict_del
-    push rax                ; save payload
+    INCREF_V rax, rdx       ; dict_get's answer is borrowed
+    mov r15, rax            ; held across dict_del, which can run a __del__
 
     mov rdi, rbx
     mov rsi, r13
-    mov rdx, r15            ; key tag
-    V_PACK rsi, rdx           ; dict_get/del take a key Value
     call dict_del
 
-    pop rax                 ; restore payload
-    pop rdx                 ; restore tag
+    mov rax, r15
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .dpop2_not_found:
     cmp r12, 3
     jl .dpop2_error
-    mov rax, [r14 + 16]     ; default = args[2] payload (16-byte stride)
-    V_UNPACK rax, rdx       ; args[2]
-    INCREF_VAL rax, rdx
+    mov rax, [r14 + 16]     ; args[2], the default
+    INCREF_V rax, rdx
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .dpop2_error:
@@ -640,71 +619,53 @@ DEF_FUNC dict_method_setdefault, 8            ; 5 pushes, so rsp is 16-aligned
     push r15
 
     mov rbx, [rdi]          ; self (dict)
-    mov r12, [rdi + 8]     ; key payload
-    V_UNPACK r12, r14       ; args[1]
+    mov r12, [rdi + 8]      ; args[1], the key Value
     mov r13, rsi            ; nargs
 
     ; Save args ptr for default value access
     push rdi
 
-    ; dict_get(self, key)
     mov rdi, rbx
     mov rsi, r12
-    mov edx, r14d           ; key tag
-    V_PACK rsi, rdx           ; dict_get/del take a key Value
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-
-    test edx, edx               ; the tag, not the payload: a hit may be int 0
+    test rax, rax           ; a Value, and 0 is the only miss
     jnz .sd_found
 
     ; Not found - determine default value
     pop rdi                 ; restore args ptr
     cmp r13, 3
     jl .sd_use_none
-    mov r13, [rdi + 16]     ; default = args[2] payload
-    V_UNPACK r13, r15       ; args[2]
+    mov r13, [rdi + 16]     ; args[2], the default
     jmp .sd_set_default
 
 .sd_use_none:
     lea r13, [rel none_singleton]
-    mov r15d, TAG_PTR
 
 .sd_set_default:
-    ; dict_set(self, key, default_val)
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
-    mov ecx, r15d           ; default val tag
-    V_PACK rdx, rcx
-    mov r8d, r14d           ; key tag
-    V_PACK rsi, r8
     call dict_set
 
-    ; INCREF and return default_val
-    INCREF_VAL r13, r15
     mov rax, r13
-    mov edx, r15d           ; return tag
+    INCREF_V rax, rdx
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .sd_found:
     add rsp, 8              ; discard saved args ptr
-    ; INCREF the found value (dict_get returns borrowed ref, rdx=tag)
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx       ; dict_get's answer is borrowed
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_method_setdefault
 
