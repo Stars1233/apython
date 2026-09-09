@@ -71,6 +71,7 @@ extern ap_memmove
 extern ap_memcmp
 extern obj_richcompare_bool
 extern str_type
+extern tuple_type
 extern v_f64_off
 
 section .text
@@ -120,41 +121,65 @@ END_FUNC sort_cmp_float
 ;; ============================================================================
 ;; sort_cmp_str(rdi = a, rsi = b) -> eax = 1 when a < b
 ;;
-;; Both are exact str, proved by the scan.  A memcmp over the common prefix
-;; and then the lengths -- CPython's unsafe_latin_compare, except that it can
-;; do this for every string because ours are UTF-8 and a byte compare of two
-;; UTF-8 strings orders them by code point.
+;; Both are exact str, proved by the scan.  CPython's unsafe_latin_compare,
+;; except that it can do this for EVERY string: ours are UTF-8, and a byte
+;; compare of two UTF-8 strings orders them by code point, where CPython has
+;; to check that both are one-byte kind first.
+;;
+;; The comparison is open-coded rather than a call to ap_memcmp, because the
+;; strings a sort compares are usually short and the call, the frame and the
+;; three saves cost more than the bytes do.  Eight at a time: an x86 load is
+;; little-endian and a lexicographic compare is big-endian, so the differing
+;; word is byte-swapped before it is compared, which puts the earliest
+;; differing byte in the most significant position where it belongs.
 ;; ============================================================================
-DEF_FUNC sort_cmp_str, 8        ; 3 pushes, so rsp is 16-aligned
-    push rbx
-    push r12
-    push r13
-    mov rbx, [rdi + PyStrObject.ob_size]
-    mov r12, [rsi + PyStrObject.ob_size]
-    mov rdx, rbx
-    cmp rdx, r12
-    cmova rdx, r12              ; the shorter of the two
+DEF_FUNC_BARE sort_cmp_str
+    mov r10, [rdi + PyStrObject.ob_size]
+    mov r11, [rsi + PyStrObject.ob_size]
+    mov rdx, r10
+    cmp rdx, r11
+    cmova rdx, r11              ; the shorter of the two
     lea rdi, [rdi + PyStrObject.data]
     lea rsi, [rsi + PyStrObject.data]
-    call ap_memcmp
-    test eax, eax
-    js .scs_less
-    jnz .scs_notless
+.scs_qword:
+    cmp rdx, 8
+    jb .scs_byte
+    mov r8, [rdi]
+    mov r9, [rsi]
+    cmp r8, r9
+    jne .scs_qword_differs
+    add rdi, 8
+    add rsi, 8
+    sub rdx, 8
+    jmp .scs_qword
+.scs_qword_differs:
+    bswap r8
+    bswap r9
+    xor eax, eax
+    cmp r8, r9
+    setb al
+    ret
+.scs_byte:
+    test rdx, rdx
+    jz .scs_prefix
+    movzx r8d, byte [rdi]
+    movzx r9d, byte [rsi]
+    cmp r8d, r9d
+    jne .scs_byte_differs
+    inc rdi
+    inc rsi
+    dec rdx
+    jmp .scs_byte
+.scs_byte_differs:
+    xor eax, eax
+    cmp r8d, r9d
+    setb al
+    ret
+.scs_prefix:
     ; The common prefix matched: the shorter string is the smaller one.
     xor eax, eax
-    cmp rbx, r12
-    jb .scs_less
-    jmp .scs_out
-.scs_less:
-    mov eax, 1
-    jmp .scs_out
-.scs_notless:
-    xor eax, eax
-.scs_out:
-    pop r13
-    pop r12
-    pop rbx
-    leave
+    cmp r10, r11
+    setb al
     ret
 END_FUNC sort_cmp_str
 
@@ -188,74 +213,230 @@ END_FUNC sort_cmp_general
 %endmacro
 
 ;; ============================================================================
-;; sort_scan_types(rbx = ms, rdi = keys, rsi = n) -> void; sets MS_CMP
+;; sort_cmp_tuple(rdi = a, rsi = b) -> eax = 1 when a < b, -1 on error
 ;;
-;; One pass, breaking at the first element that is not the kind the first one
-;; was.  CPython's pre-sort check does the same and for the same reason: the
-;; safety a comparator would otherwise re-establish on every one of n log n
-;; comparisons is established once here instead.
+;; CPython's unsafe_tuple_compare.  Sorting a list of tuples is common enough
+;; -- (key, payload) pairs, and everything decorate-sort-undecorate builds --
+;; that it is worth not going through the tuple type's own tp_richcompare,
+;; which walks the pair twice: once for == and again for <.
+;;
+;; Here the walk is once.  Elements are compared for equality until one pair
+;; differs, and the FIRST pair gets the element comparator the scan chose,
+;; because that is the position it proved homogeneous.  Any later pair falls
+;; to obj_richcompare_bool, which knows nothing about them and must not.
+;;
+;; The equality test itself is the one `x in list` uses: two identical Values
+;; are equal, and two int immediates that are not the same Value are not.
+;; That settles the common case -- a first element that decides the order --
+;; without a call at all, which is a thing CPython's version cannot do.
+;; ============================================================================
+STU_A     equ 8
+STU_B     equ 16
+STU_VLEN  equ 24
+STU_WLEN  equ 32
+STU_FRAME equ 48                ; + 2 pushes = 64, 16-aligned
+DEF_FUNC sort_cmp_tuple, STU_FRAME
+    push r12
+    push r13
+    mov [rbp - STU_A], rdi
+    mov [rbp - STU_B], rsi
+    mov rax, [rdi + PyTupleObject.ob_size]
+    mov [rbp - STU_VLEN], rax
+    mov rax, [rsi + PyTupleObject.ob_size]
+    mov [rbp - STU_WLEN], rax
+    xor r12d, r12d              ; i
+
+.sct_loop:
+    cmp r12, [rbp - STU_VLEN]
+    jae .sct_ran_out
+    cmp r12, [rbp - STU_WLEN]
+    jae .sct_ran_out
+    mov rax, [rbp - STU_A]
+    mov rdi, [rax + PyTupleObject.ob_item]
+    mov rdi, [rdi + r12*8]
+    mov rax, [rbp - STU_B]
+    mov rsi, [rax + PyTupleObject.ob_item]
+    mov rsi, [rsi + r12*8]
+    VALUE_EQ_FAST rdi, rsi, rdx, .sct_equal, .sct_differ_here
+    mov edx, PY_EQ
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .sct_error
+    test eax, eax
+    jz .sct_differ
+.sct_equal:
+    inc r12
+    jmp .sct_loop
+
+.sct_ran_out:
+    ; One tuple is a prefix of the other, so the shorter one is the smaller.
+    xor eax, eax
+    mov rcx, [rbp - STU_VLEN]
+    cmp rcx, [rbp - STU_WLEN]
+    setb al
+    jmp .sct_out
+
+.sct_differ_here:
+    ; rdi and rsi still hold the pair; the fast arms did not call anything.
+    test r12, r12
+    jnz .sct_general
+    call [rbx + MS_ELEMCMP]
+    jmp .sct_out
+
+.sct_differ:
+    mov rax, [rbp - STU_A]
+    mov rdi, [rax + PyTupleObject.ob_item]
+    mov rdi, [rdi + r12*8]
+    mov rax, [rbp - STU_B]
+    mov rsi, [rax + PyTupleObject.ob_item]
+    mov rsi, [rsi + r12*8]
+    test r12, r12
+    jz .sct_elem
+.sct_general:
+    mov edx, PY_LT
+    call obj_richcompare_bool
+    jmp .sct_out
+.sct_elem:
+    call [rbx + MS_ELEMCMP]
+    jmp .sct_out
+
+.sct_error:
+    mov eax, -1
+.sct_out:
+    pop r13
+    pop r12
+    leave
+    ret
+END_FUNC sort_cmp_tuple
+
+;; ============================================================================
+;; sort_scan_types(rbx = ms, rdi = keys, rsi = n) -> void; sets MS_CMP and,
+;; for a list of tuples, MS_ELEMCMP
+;;
+;; One pass, proving what a comparator would otherwise have to re-establish on
+;; every one of n log n comparisons.  CPython's pre-sort check, and the same
+;; order of questions:
+;;
+;; ARE THE KEYS TUPLES?  That is asked first, because for a list of tuples the
+;; thing that has to be homogeneous is the FIRST ELEMENTS, not the keys.  A
+;; list of tuples whose first elements disagree still gets the tuple
+;; comparator; it just gets the general one for the element.
 ;;
 ;; A heap integer is NOT an int immediate and does not qualify -- the compare
 ;; would have to go through GMP -- so a list holding one falls to the general
 ;; comparator, as it must.
+;;
+;; Nothing here calls anything, so there is no frame and nothing is spilled:
+;; a ten-element sort pays for this pass before it does any work at all, and
+;; it has to be cheaper than what it saves.
 ;; ============================================================================
 DEF_FUNC_BARE sort_scan_types
     lea rax, [rel sort_cmp_general]
     mov [rbx + MS_CMP], rax
+    mov [rbx + MS_ELEMCMP], rax
     cmp rsi, 2
-    jb .sst_out
+    jb .sst_ret
+    lea rsi, [rdi + rsi*8]      ; one past the last key
+    xor r9d, r9d                ; r9 = the keys are tuples, so far
 
-    mov r8, [rdi]               ; the first key decides what to prove
-    V_IS_INT r8, rax
-    jae .sst_try_int
-    V_IS_FLOAT r8, rax
-    jb .sst_try_float
-    ; A pointer: exact str is the only kind with a comparator here.
-    V_TEST_PTR r8, rax
-    ja .sst_out
-    test r8, r8
-    jz .sst_out
-    lea rax, [rel str_type]
-    cmp [r8 + PyObject.ob_type], rax
-    jne .sst_out
-
-.sst_str_loop:
+    ; The first key decides which question the loop is asking.
     mov r8, [rdi]
     V_TEST_PTR r8, rax
-    ja .sst_out
-    test r8, r8
-    jz .sst_out
-    lea rax, [rel str_type]
+    ja .sst_scan
+    lea rax, [rel tuple_type]
     cmp [r8 + PyObject.ob_type], rax
-    jne .sst_out
+    jne .sst_scan
+    cmp qword [r8 + PyTupleObject.ob_size], 0
+    jle .sst_scan
+    mov r9d, 1
+
+.sst_scan:
+    mov r10, -1                 ; r10 = the kind: -1 undecided, -2 mixed
+.sst_loop:
+    cmp rdi, rsi
+    jae .sst_done
+    mov r8, [rdi]
     add rdi, 8
-    dec rsi
-    jnz .sst_str_loop
-    lea rax, [rel sort_cmp_str]
-    mov [rbx + MS_CMP], rax
+    test r9, r9
+    jz .sst_have_probe
+
+    ; Every key has to be an exact tuple with something in it, or there is no
+    ; first element to compare and the whole idea is off.
+    V_TEST_PTR r8, rax
+    ja .sst_not_tuples
+    lea rax, [rel tuple_type]
+    cmp [r8 + PyObject.ob_type], rax
+    jne .sst_not_tuples
+    cmp qword [r8 + PyTupleObject.ob_size], 0
+    jle .sst_not_tuples
+    mov rax, [r8 + PyTupleObject.ob_item]
+    mov r8, [rax]               ; the first element is what is classified
+
+.sst_have_probe:
+    ; 1 = int immediate, 2 = float immediate, 3 = exact str, 0 = anything else
+    xor eax, eax
+    V_IS_INT r8, rcx
+    jb .sst_not_int
+    mov eax, 1
+    jmp .sst_have_kind
+.sst_not_int:
+    V_IS_FLOAT r8, rcx
+    jae .sst_not_float
+    mov eax, 2
+    jmp .sst_have_kind
+.sst_not_float:
+    V_TEST_PTR r8, rcx
+    ja .sst_have_kind
+    lea rcx, [rel str_type]
+    cmp [r8 + PyObject.ob_type], rcx
+    jne .sst_have_kind
+    mov eax, 3
+.sst_have_kind:
+    cmp r10, -1
+    jne .sst_compare_kind
+    mov r10, rax                ; the first one is the claim
+    jmp .sst_loop
+.sst_compare_kind:
+    cmp rax, r10
+    je .sst_loop
+    ; Mixed.  With plain keys there is nothing left to learn; with tuples the
+    ; loop still has to prove that every key IS one.
+    mov r10, -2
+    test r9, r9
+    jnz .sst_loop
+    jmp .sst_done
+
+.sst_not_tuples:
+    ; One key is not a tuple, so neither the tuple comparator nor anything
+    ; learned about first elements applies.
     ret
 
-.sst_try_int:
-    mov r8, [rdi]
-    V_IS_INT r8, rax
-    jb .sst_out
-    add rdi, 8
-    dec rsi
-    jnz .sst_try_int
+.sst_done:
+    ; r10 names the comparator the probed values earned.
+    lea rax, [rel sort_cmp_general]
+    cmp r10, 1
+    jne .sst_try_float
     lea rax, [rel sort_cmp_int]
+    jmp .sst_have_cmp
+.sst_try_float:
+    cmp r10, 2
+    jne .sst_try_str
+    lea rax, [rel sort_cmp_float]
+    jmp .sst_have_cmp
+.sst_try_str:
+    cmp r10, 3
+    jne .sst_have_cmp
+    lea rax, [rel sort_cmp_str]
+.sst_have_cmp:
+    test r9, r9
+    jnz .sst_tuples
     mov [rbx + MS_CMP], rax
     ret
-
-.sst_try_float:
-    mov r8, [rdi]
-    V_IS_FLOAT r8, rax
-    jae .sst_out
-    add rdi, 8
-    dec rsi
-    jnz .sst_try_float
-    lea rax, [rel sort_cmp_float]
+.sst_tuples:
+    mov [rbx + MS_ELEMCMP], rax
+    lea rax, [rel sort_cmp_tuple]
     mov [rbx + MS_CMP], rax
-.sst_out:
+.sst_ret:
     ret
 END_FUNC sort_scan_types
 
@@ -463,114 +644,108 @@ END_FUNC sort_count_run
 ;; ============================================================================
 SBS_LO    equ 8
 SBS_HI    equ 16
-SBS_START equ 24
-SBS_PIV   equ 32
-SBS_PIVV  equ 40
-SBS_L     equ 48
-SBS_R     equ 56
-SBS_FRAME equ 64                ; + 2 pushes = 80, 16-aligned
+SBS_PIVV  equ 24                ; the value that rides along with the pivot
+SBS_M     equ 32                ; the probe, across the comparator call
+SBS_FRAME equ 32                ; + 4 pushes = 64, 16-aligned
 DEF_FUNC sort_binarysort, SBS_FRAME
     push r12
     push r13
+    push r14
+    push r15
     mov [rbp - SBS_LO], rdi
     mov [rbp - SBS_HI], rsi
-    mov [rbp - SBS_START], rdx
+    mov r12, rdx                ; start
 
-    cmp rdx, rdi
+    cmp r12, rdi
     jne .sbs_outer
-    inc qword [rbp - SBS_START]     ; a single element is a sorted prefix
+    inc r12                     ; a single element is a sorted prefix
 
 .sbs_outer:
-    mov r12, [rbp - SBS_START]
     cmp r12, [rbp - SBS_HI]
     jae .sbs_ok
 
-    ST_LOAD rax, MS_KEYS, r12
-    mov [rbp - SBS_PIV], rax
-    mov qword [rbp - SBS_PIVV], 0
+    mov rax, [rbx + MS_KEYS]
+    mov r15, [rax + r12*8]      ; the pivot
     cmp qword [rbx + MS_VALUES], 0
     je .sbs_no_pivv
-    ST_LOAD rax, MS_VALUES, r12
+    mov rax, [rbx + MS_VALUES]
+    mov rax, [rax + r12*8]
     mov [rbp - SBS_PIVV], rax
 .sbs_no_pivv:
 
     ; l = lo, r = start;  invariant: keys[lo, l) <= pivot < keys[r, start)
-    mov rax, [rbp - SBS_LO]
-    mov [rbp - SBS_L], rax
-    mov rax, r12
-    mov [rbp - SBS_R], rax
+    mov r13, [rbp - SBS_LO]
+    mov r14, r12
 
 .sbs_bsearch:
-    mov rax, [rbp - SBS_L]
-    cmp rax, [rbp - SBS_R]
+    cmp r13, r14
     jae .sbs_place
-    mov rcx, [rbp - SBS_R]
-    sub rcx, rax
-    shr rcx, 1
-    add rcx, rax                    ; p = l + (r - l) / 2
-    mov r13, rcx
-    mov rdi, [rbp - SBS_PIV]
-    ST_LOAD rsi, MS_KEYS, r13
-    ST_ISLT                         ; pivot < keys[p] ?
+    mov rax, r14
+    sub rax, r13
+    shr rax, 1
+    add rax, r13                ; m = l + (r - l) / 2
+    mov [rbp - SBS_M], rax      ; a frame slot, not a register: the comparator
+    mov rcx, [rbx + MS_KEYS]    ; answers in eax and would clobber a restore
+    mov rsi, [rcx + rax*8]
+    mov rdi, r15
+    ST_ISLT                     ; pivot < keys[m] ?
     cmp eax, -1
     je .sbs_error
     test eax, eax
     jz .sbs_go_right
-    mov [rbp - SBS_R], r13
+    mov r14, [rbp - SBS_M]      ; r = m
     jmp .sbs_bsearch
 .sbs_go_right:
-    lea rax, [r13 + 1]
-    mov [rbp - SBS_L], rax
+    mov r13, [rbp - SBS_M]      ; l = m + 1
+    inc r13
     jmp .sbs_bsearch
 
 .sbs_place:
-    ; Slide keys[l, start) up one and drop the pivot at l.
-    mov rax, [rbp - SBS_L]
+    ; Slide keys[l, start) up one and drop the pivot at l.  A backward walk
+    ; rather than a memmove: the run is short -- that is what minrun is for --
+    ; and the call costs more than the words do.
+    mov rax, [rbx + MS_KEYS]
     mov rcx, r12
-    sub rcx, rax                    ; how many to move
-    jz .sbs_store
-    mov r13, [rbx + MS_KEYS]
-    lea rdi, [r13 + rax*8 + 8]
-    lea rsi, [r13 + rax*8]
-    mov rdx, rcx
-    shl rdx, 3
-    push rcx
-    push rcx                        ; twice: rsp keeps its alignment
-    call ap_memmove
-    pop rcx
-    pop rcx
-    cmp qword [rbx + MS_VALUES], 0
-    je .sbs_store
-    mov rax, [rbp - SBS_L]
-    mov r13, [rbx + MS_VALUES]
-    lea rdi, [r13 + rax*8 + 8]
-    lea rsi, [r13 + rax*8]
-    mov rdx, rcx
-    shl rdx, 3
-    call ap_memmove
-
-.sbs_store:
-    mov rax, [rbp - SBS_L]
-    mov r13, [rbx + MS_KEYS]
-    mov rcx, [rbp - SBS_PIV]
-    mov [r13 + rax*8], rcx
+.sbs_slide:
+    cmp rcx, r13
+    jbe .sbs_slide_done
+    mov rdx, [rax + rcx*8 - 8]
+    mov [rax + rcx*8], rdx
+    dec rcx
+    jmp .sbs_slide
+.sbs_slide_done:
+    mov [rax + r13*8], r15
     cmp qword [rbx + MS_VALUES], 0
     je .sbs_next
-    mov r13, [rbx + MS_VALUES]
-    mov rcx, [rbp - SBS_PIVV]
-    mov [r13 + rax*8], rcx
+    mov rax, [rbx + MS_VALUES]
+    mov rcx, r12
+.sbs_vslide:
+    cmp rcx, r13
+    jbe .sbs_vslide_done
+    mov rdx, [rax + rcx*8 - 8]
+    mov [rax + rcx*8], rdx
+    dec rcx
+    jmp .sbs_vslide
+.sbs_vslide_done:
+    mov rdx, [rbp - SBS_PIVV]
+    mov [rax + r13*8], rdx
+
 .sbs_next:
-    inc qword [rbp - SBS_START]
+    inc r12
     jmp .sbs_outer
 
 .sbs_ok:
     xor eax, eax
+    pop r15
+    pop r14
     pop r13
     pop r12
     leave
     ret
 .sbs_error:
     mov eax, -1
+    pop r15
+    pop r14
     pop r13
     pop r12
     leave
@@ -1797,6 +1972,9 @@ DEF_FUNC list_timsort, LTS_FRAME
     mov qword [rbx + MS_TVALS], 0
     mov qword [rbx + MS_ALLOCED], 0
     mov qword [rbx + MS_NRUNS], 0
+    lea rax, [rel sort_cmp_general]
+    mov [rbx + MS_CMP], rax
+    mov [rbx + MS_ELEMCMP], rax
     mov [rbp - LTS_N], rcx
 
     cmp rcx, 2

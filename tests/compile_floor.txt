@@ -469,6 +469,7 @@ test_smallstr
 test_socket_module
 test_socket
 test_sort_str
+test_sort_timsort
 test_source_import
 test_sre2
 test_sre_bytes

@@ -31,7 +31,10 @@ MS_TVALS     equ 32     ; scratch for values, or 0
 MS_ALLOCED   equ 40     ; scratch capacity, in elements
 MS_NRUNS     equ 48
 MS_CMP       equ 56     ; the comparator chosen by the pre-sort scan
-MS_PENDING   equ 64     ; (base index, length) pairs
+MS_ELEMCMP   equ 64     ; and, for a list of tuples, the one for element 0
+                        ; 72 is padding: the pending pairs are 16 bytes each
+                        ; and start on a 16-byte boundary
+MS_PENDING   equ 80     ; (base index, length) pairs
 MS_SIZE      equ MS_PENDING + ST_MAX_PENDING * 16
 
 %endif ; LISTSORT_INC
