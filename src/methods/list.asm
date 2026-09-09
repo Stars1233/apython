@@ -6,8 +6,10 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "listsort.inc"
 extern str_type
 extern ap_memcmp
+extern current_exception
 extern obj_as_index
 extern obj_as_slice_index
 %include "opcodes.inc"
@@ -277,33 +279,47 @@ END_FUNC list_method_reverse
 
 ;; ============================================================================
 ;; list_method_sort(args, nargs) -> None
-;; Stable bottom-up merge sort with key= and reverse= support
-;; args[0]=self
+;;
+;; Everything AROUND the sort: the arity check, the two keywords, the key
+;; array, emptying the list so that a re-entrant mutation is caught, and
+;; putting it back.  The sort itself is timsort, in methods/list_sort.asm.
+;;
+;; What is sorted is the list's OWN ob_item array, in place, one Value per
+;; element.  There is no conversion pass and no fat buffer: the previous
+;; version allocated n x 16 bytes, V_UNPACKed every element into it, merged
+;; sixteen-byte elements and packed the result back, which is the largest
+;; single piece of (payload, tag) scaffolding that was left in the tree.
+;;
+;; With key=, the keys are a second array of the same length and the items
+;; ride along as `values` -- CPython's sortslice, and the same reason for it:
+;; the comparator only ever looks at a key, so a decorate-sort-undecorate
+;; costs nothing at compare time.
+;;
+;; reverse= is TWO reversals, before and after, not a flag the inner loop
+;; tests.  That is CPython's choice as well, and it is what keeps a stable
+;; sort stable: reversing the input and the output leaves equal elements in
+;; their original relative order, while flipping the comparison would not.
+;; It also takes a compare out of every one of n log n comparisons.
+;;
+;; args[0] = self.
 ;; ============================================================================
-LS_LIST    equ 8      ; list object ptr
-LS_N       equ 16     ; element count
-LS_SRC     equ 24     ; current source array (items or temp)
-LS_DST     equ 32     ; current dest array (temp or items)
-LS_TEMP    equ 40     ; temp array (for freeing)
-LS_REV     equ 48     ; reverse flag (0=normal, 1=reverse)
-LS_KEY     equ 56     ; key function payload (0=none)
-LS_KSRC    equ 64     ; keys source array (swapped during sort)
-LS_KDST    equ 72     ; keys dest array (swapped during sort)
-LS_KTEMP   equ 80     ; keys temp array (2nd alloc, for freeing)
-LS_KORIG   equ 168    ; original keys array (1st alloc, for freeing)
-LS_WIDTH   equ 88     ; current merge width
-LS_OUTI    equ 96     ; outer loop index
-LS_MI      equ 104    ; merge: left index
-LS_MJ      equ 112    ; merge: right index (j)
-LS_MMID    equ 120    ; merge: mid boundary
-LS_MREND   equ 128    ; merge: right end boundary
-LS_MK      equ 136    ; merge: dest index (k)
-LS_SAVED_ITEMS equ 144  ; saved fat items buffer
-LS_SAVED_SIZE  equ 152  ; saved ob_size before sort
-LS_SAVED_PAYLOADS equ 176 ; saved payload array ptr
-LS_SAVED_TAGS     equ 184 ; saved tag array ptr
-LS_EXC     equ 192    ; current_exception on entry
-LS_FRAME   equ 200     ; includes saved payload/tag pointers; + 5 pushes = 240
+LS_LIST    equ 8      ; the list
+LS_N       equ 16     ; ob_size, taken before the list is emptied
+LS_ITEMS   equ 24     ; the ob_item array, taken with it
+LS_ALLOC   equ 32     ; and its capacity
+LS_KEYS    equ 40     ; what is compared: LS_ITEMS, or the key array
+LS_VALUES  equ 48     ; what rides along: 0, or LS_ITEMS
+LS_KEY     equ 56     ; the key callable, or 0
+LS_REV     equ 64     ; reverse=
+LS_EXC     equ 72     ; current_exception on entry
+LS_NK      equ 80     ; keys computed so far; the error path DECREFs them
+;; The MergeState sits at the top of the frame, so that adding a scalar slot
+;; above cannot silently overlap it.
+LS_MS      equ 88 + MS_SIZE
+LS_FRAME   equ LS_MS  ; + 5 pushes = 16-aligned
+extern list_timsort
+extern obj_call_n
+extern obj_is_true
 DEF_FUNC list_method_sort, LS_FRAME
     push rbx
     push r12
@@ -338,17 +354,16 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov [rbp - LS_N], r12
     mov qword [rbp - LS_REV], 0
     mov qword [rbp - LS_KEY], 0
-    mov qword [rbp - LS_KSRC], 0
-    mov qword [rbp - LS_KDST], 0
-    mov qword [rbp - LS_KTEMP], 0
-    mov qword [rbp - LS_KORIG], 0
+    mov qword [rbp - LS_KEYS], 0
+    mov qword [rbp - LS_VALUES], 0
+    mov qword [rbp - LS_NK], 0
 
     ; --- Parse keyword arguments ---
     extern kw_names_pending
     extern ap_strcmp
     mov rax, [rel kw_names_pending]
     test rax, rax
-    jz .sort_no_kw
+    jz .ls_no_kw
 
     push rdi                       ; save args ptr
     push rsi                       ; save nargs
@@ -358,9 +373,9 @@ DEF_FUNC list_method_sort, LS_FRAME
     sub r8, rcx                    ; r8 = n_pos
     xor r9d, r9d                   ; kw index
 
-.sort_kw_loop:
+.ls_kw_loop:
     cmp r9, rcx
-    jge .sort_kw_done
+    jge .ls_kw_done
 
     ; Get kwarg name string ptr from kw_names tuple
     mov r10, r9
@@ -390,31 +405,30 @@ DEF_FUNC list_method_sort, LS_FRAME
     pop rcx
     pop rax
     test r10d, r10d
-    jnz .sort_kw_not_reverse
+    jnz .ls_kw_not_reverse
 
-    ; Extract reverse value
-    mov r10, [rdi + r11]           ; the value Value
-    V_UNPACK r10, r13
-    cmp r13d, TAG_SMALLINT
-    je .sort_rev_int
-    ; TAG_PTR: check if bool_true
-    lea r13, [rel bool_true]
-    cmp r10, r13
-    sete r10b
-    movzx r10d, r10b
+    ; reverse= is any object, and its truth is obj_is_true's answer.  The test
+    ; that used to be here compared the Value against bool_true, so
+    ; `reverse=[1]` sorted forwards and `reverse=1.5` did too.
+    push rax
+    push rcx
+    push r8
+    push r9
+    push r11
+    push rdi
+    mov rdi, [rdi + r11]
+    call obj_is_true
+    mov r10d, eax
+    pop rdi
+    pop r11
+    pop r9
+    pop r8
+    pop rcx
+    pop rax
     mov [rbp - LS_REV], r10
-    jmp .sort_kw_next
-.sort_rev_bool:
-    mov [rbp - LS_REV], r10       ; 0 or 1
-    jmp .sort_kw_next
-.sort_rev_int:
-    test r10, r10
-    setnz r10b
-    movzx r10d, r10b
-    mov [rbp - LS_REV], r10
-    jmp .sort_kw_next
+    jmp .ls_kw_next
 
-.sort_kw_not_reverse:
+.ls_kw_not_reverse:
     ; --- Check "key" ---
     ; r10 was clobbered by strcmp result above, reload kwarg name
     mov r10, r9
@@ -437,99 +451,60 @@ DEF_FUNC list_method_sort, LS_FRAME
     pop rcx
     pop rax
     test r10d, r10d
-    jnz .sort_kw_next              ; not "key" either, skip
+    jnz .ls_kw_next                ; not "key" either, skip
 
     ; Extract key function value
     mov r10, [rdi + r11]           ; the key Value (a callable, so a pointer)
     ; key=None means no key function
     lea r14, [rel none_singleton]
     cmp r10, r14
-    je .sort_kw_next
+    je .ls_kw_next
     mov [rbp - LS_KEY], r10
-    jmp .sort_kw_next
 
-.sort_kw_next:
+.ls_kw_next:
     inc r9
-    jmp .sort_kw_loop
+    jmp .ls_kw_loop
 
-.sort_kw_done:
+.ls_kw_done:
     pop rsi
     pop rdi
     mov qword [rel kw_names_pending], 0
-    mov rbx, [rbp - LS_LIST]           ; reload list (clobbered by kw parsing)
+    mov rbx, [rbp - LS_LIST]       ; reload list (clobbered by kw parsing)
 
-.sort_no_kw:
-    ; Initialize saved state (needed for sort_done even on early exit)
-    mov qword [rbp - LS_SAVED_ITEMS], 0
-    mov qword [rbp - LS_SAVED_SIZE], 0
-    mov qword [rbp - LS_SAVED_PAYLOADS], 0
-    mov qword [rbp - LS_SAVED_TAGS], 0
-
-    ; If n < 2, nothing to sort
+.ls_no_kw:
     cmp r12, 2
-    jl .sort_trivial_done
+    jb .ls_trivial
 
-    ; Save list state and empty it during sort (mutation detection)
+    ; --- Take the array away from the list ------------------------------
+    ; ob_item == NULL is what every other list method tests to decide that a
+    ; sort is in progress, so from here to the restore below any re-entrant
+    ; append, pop, insert, clear, extend, remove or reverse raises.
     mov rax, [rbx + PyListObject.ob_item]
-    mov [rbp - LS_SAVED_PAYLOADS], rax
-    mov [rbp - LS_SAVED_TAGS], rax
-    mov [rbp - LS_SAVED_SIZE], r12
-
-    ; Allocate fat buffer (n * 16) and copy payload+tag into it
-    mov rdi, r12
-    shl rdi, 4
-    extern ap_malloc
-    call ap_malloc
-    mov [rbp - LS_SAVED_ITEMS], rax
-    mov rdi, rax                          ; dest fat buffer
-    mov rsi, [rbp - LS_SAVED_PAYLOADS]    ; src payloads
-    mov rdx, [rbp - LS_SAVED_TAGS]        ; src tags
-    xor rcx, rcx
-.sort_copy_items:
-    cmp rcx, r12
-    jge .sort_copy_items_done
-    mov r8, [rsi + rcx * 8]               ; payload
-    V_UNPACK r8, r9
-    mov r10, rcx
-    shl r10, 4
-    mov [rdi + r10], r8
-    mov [rdi + r10 + 8], r9
-    inc rcx
-    jmp .sort_copy_items
-.sort_copy_items_done:
-
+    mov [rbp - LS_ITEMS], rax
+    mov [rbp - LS_KEYS], rax       ; with no key=, the items ARE the keys
+    mov rax, [rbx + PyListObject.allocated]
+    mov [rbp - LS_ALLOC], rax
     mov qword [rbx + PyListObject.ob_item], 0
     mov qword [rbx + PyListObject.ob_size], 0
 
-    ; --- Pre-compute keys if key= provided ---
     cmp qword [rbp - LS_KEY], 0
-    jz .sort_alloc_temp
+    jz .ls_keys_ready
 
-    ; Allocate keys array: n * 16 bytes
+    ; --- key=: a parallel array, computed before anything is compared ----
     mov rdi, r12
-    shl rdi, 4
-    extern ap_malloc
+    shl rdi, 3
     call ap_malloc
-    mov [rbp - LS_KSRC], rax
-    mov [rbp - LS_KORIG], rax      ; save original allocation for freeing
-    mov r14, rax                   ; r14 = keys array
-
-    ; Compute key(items[i]) for each i
-    xor r15d, r15d                 ; i = 0
-.sort_keys_loop:
+    mov [rbp - LS_KEYS], rax
+    mov rax, [rbp - LS_ITEMS]
+    mov [rbp - LS_VALUES], rax     ; the items now ride along with their keys
+    xor r15d, r15d
+.ls_keys_loop:
     cmp r15, [rbp - LS_N]
-    jge .sort_keys_done
-
-    ; Get items[i] and push as single arg on stack (use saved items, list is empty during sort)
-    mov rax, [rbp - LS_SAVED_ITEMS]
-    mov rcx, r15
-    shl rcx, 4
-    mov rdi, [rax + rcx]          ; item payload
-    mov rsi, [rax + rcx + 8]      ; item tag
-    V_PACK rdi, rsi
+    jae .ls_keys_ready
+    mov rax, [rbp - LS_ITEMS]
+    mov rdi, [rax + r15*8]
     sub rsp, 16                    ; one Value; 16 keeps rsp aligned
     mov [rsp], rdi                 ; args[0] = item
-
     ; The key, through obj_call_n: it takes a function, a builtin, a type or
     ; an instance with a __call__, and refuses anything else BY NAME.  The
     ; three-way tp_call dance that used to be here read a non-pointer key's
@@ -538,670 +513,131 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov rdi, [rbp - LS_KEY]
     mov rsi, rsp                   ; args ptr -> &[item]
     mov edx, 1                     ; nargs = 1
-    extern obj_call_n
     call obj_call_n
-    V_UNPACK rax, rdx
-
-.sort_key_store:
-    add rsp, 16                    ; pop item from stack
-    ; rax = key result payload, edx = key result tag
-    test edx, edx
-    jz .sort_cleanup_keys          ; NULL return → error (item already popped)
-    ; Store key in keys[i]
-    mov rcx, r15
-    shl rcx, 4
-    mov [r14 + rcx], rax
-    mov [r14 + rcx + 8], rdx
+    add rsp, 16
+    test rax, rax
+    jz .ls_failed
+    mov rcx, [rbp - LS_KEYS]
+    mov [rcx + r15*8], rax
     inc r15
-    jmp .sort_keys_loop
+    mov [rbp - LS_NK], r15
+    jmp .ls_keys_loop
 
-.sort_key_error:
-    add rsp, 16                    ; pop item if still on stack
-    ; DECREF any keys computed so far, free keys array
-    jmp .sort_cleanup_keys
-
-.sort_keys_done:
-    ; Allocate keys temp array
-    mov rdi, [rbp - LS_N]
-    shl rdi, 4
-    call ap_malloc
-    mov [rbp - LS_KTEMP], rax
-    mov [rbp - LS_KDST], rax
-
-.sort_alloc_temp:
-    ; Allocate temp array: n * 16 bytes
-    mov rdi, [rbp - LS_N]
-    shl rdi, 4
-    call ap_malloc
-    mov [rbp - LS_TEMP], rax
-    mov [rbp - LS_DST], rax
-
-    ; Source = saved list items array (list is empty during sort)
-    mov rax, [rbp - LS_SAVED_ITEMS]
-    mov [rbp - LS_SRC], rax
-
-    ; =========================================================================
-    ; Bottom-up merge sort: for width=1,2,4,...; merge adjacent pairs
-    ; =========================================================================
-    mov qword [rbp - LS_WIDTH], 1
-
-.sort_width_loop:
-    mov rax, [rbp - LS_WIDTH]
-    cmp rax, [rbp - LS_N]
-    jge .sort_width_done
-
-    ; For i = 0; i < n; i += 2*width
-    mov qword [rbp - LS_OUTI], 0
-
-.sort_outer_loop:
-    mov rax, [rbp - LS_OUTI]
-    cmp rax, [rbp - LS_N]
-    jge .sort_outer_done
-
-    ; left = i
-    mov [rbp - LS_MI], rax
-    ; mid = min(i + width, n)
-    add rax, [rbp - LS_WIDTH]
-    cmp rax, [rbp - LS_N]
-    jle .sort_mid_ok
-    mov rax, [rbp - LS_N]
-.sort_mid_ok:
-    mov [rbp - LS_MMID], rax
-    ; right_end = min(i + 2*width, n)
-    mov rax, [rbp - LS_OUTI]
-    mov rcx, [rbp - LS_WIDTH]
-    lea rax, [rax + rcx*2]
-    cmp rax, [rbp - LS_N]
-    jle .sort_right_ok
-    mov rax, [rbp - LS_N]
-.sort_right_ok:
-    mov [rbp - LS_MREND], rax
-    ; k = i (dest index starts at i)
-    mov rax, [rbp - LS_OUTI]
-    mov [rbp - LS_MK], rax
-    ; j = mid
-    mov rax, [rbp - LS_MMID]
-    mov [rbp - LS_MJ], rax
-
-    ; =====================================================================
-    ; Merge loop: merge src[left..mid) and src[mid..right_end) into dst
-    ; =====================================================================
-.merge_loop:
-    ; Check if left run exhausted
-    mov rax, [rbp - LS_MI]
-    cmp rax, [rbp - LS_MMID]
-    jge .merge_copy_right
-
-    ; Check if right run exhausted
-    mov rax, [rbp - LS_MJ]
-    cmp rax, [rbp - LS_MREND]
-    jge .merge_copy_left
-
-    ; Load elements for comparison (use keys if available, else items)
-    ; Python's sort uses right < left (PY_LT on right), not left > right.
-    ; This ensures __lt__ works (more commonly defined than __gt__).
-    mov rax, [rbp - LS_KSRC]
-    test rax, rax
-    jnz .merge_have_cmp_arr
-    mov rax, [rbp - LS_SRC]
-.merge_have_cmp_arr:
-    ; For comparison: we do right < left (ascending) or right > left (descending)
-    ; Load right element first (will be "self" in dunder call)
-    mov rcx, [rbp - LS_MJ]
-    shl rcx, 4
-    mov rdi, [rax + rcx]          ; right payload (self for comparison)
-    mov r8, [rax + rcx + 8]       ; right tag (full 64-bit)
-    ; Load left element (will be "other" in dunder call)
-    mov rcx, [rbp - LS_MI]
-    shl rcx, 4
-    mov rsi, [rax + rcx]          ; left payload (other for comparison)
-    mov r9, [rax + rcx + 8]       ; left tag (full 64-bit)
-
-    ; --- both exact strs: answer here ---------------------------------
-    ; Sorting a list of strings is common enough that CPython pre-scans the
-    ; list and installs a comparison function with no protocol in it at all
-    ; (unsafe_unicode_compare).  The generic route below reaches str_compare
-    ; through tp_richcompare, which builds a bool OBJECT, which is then tested
-    ; and released -- per comparison, of which a sort does n log n.
-    ;
-    ; Exact strs only, on both sides: a subclass may define __lt__.
-    cmp r8d, TAG_PTR
-    jne .merge_not_str
-    cmp r9d, TAG_PTR
-    jne .merge_not_str
-    lea rax, [rel str_type]
-    cmp [rdi + PyObject.ob_type], rax
-    jne .merge_not_str
-    cmp [rsi + PyObject.ob_type], rax
-    jne .merge_not_str
-    mov rax, [rdi + PyStrObject.ob_size]        ; right length
-    mov rcx, [rsi + PyStrObject.ob_size]        ; left length
-    push rax
-    push rcx                                    ; two slots: rsp stays aligned
-    mov rdx, rax
-    cmp rdx, rcx
-    cmova rdx, rcx                              ; rdx = min of the two
-    lea rdi, [rdi + PyStrObject.data]
-    lea rsi, [rsi + PyStrObject.data]
-    call ap_memcmp
-    pop rcx                                     ; left length
-    pop rdx                                     ; right length
-    test eax, eax
-    jnz .merge_str_have
-    ; The common prefix matched, so the shorter string is the smaller one.
-    xor eax, eax
-    cmp rdx, rcx
-    je .merge_str_have
-    mov eax, -1
-    jb .merge_str_have
-    mov eax, 1
-.merge_str_have:
-    ; eax < 0 means right < left, which is the question the merge asks.
+.ls_keys_ready:
+    ; --- reverse=, half of it -------------------------------------------
     cmp qword [rbp - LS_REV], 0
-    jne .merge_str_rev
-    test eax, eax
-    js .merge_take_right
-    jmp .merge_take_left
-.merge_str_rev:
-    test eax, eax
-    jg .merge_take_right
-    jmp .merge_take_left
+    jz .ls_run
+    mov rdi, [rbp - LS_KEYS]
+    mov rsi, [rbp - LS_N]
+    call ls_reverse_array
+    cmp qword [rbp - LS_VALUES], 0
+    jz .ls_run
+    mov rdi, [rbp - LS_VALUES]
+    mov rsi, [rbp - LS_N]
+    call ls_reverse_array
 
-.merge_not_str:
-    ; Type dispatch on right element for tp_richcompare
-    ; Float coercion: if either operand is TAG_FLOAT, use float_compare
-    cmp r8d, TAG_FLOAT
-    je .merge_use_float
-    cmp r9d, TAG_FLOAT
-    je .merge_use_float
+.ls_run:
+    lea rdi, [rbp - LS_MS]
+    mov rsi, [rbp - LS_KEYS]
+    mov rdx, [rbp - LS_VALUES]
+    mov rcx, [rbp - LS_N]
+    call list_timsort
+    cmp eax, -1
+    je .ls_failed
 
-    cmp r8d, TAG_SMALLINT
-    je .merge_si_type
-    test r8d, TAG_RC_BIT
-    ; A tag with no type of its own -- an empty slot, or one of the async
-    ; sentinels.  Not orderable, and not this loop's business to decide:
-    ; obj_richcompare_bool raises the TypeError CPython raises.  Taking the
-    ; left element instead made `sorted([1, None])` answer [1, None] while
-    ; `sorted([None, 1])` raised, so whether a mixed list sorted depended on
-    ; the order it was already in -- and, with a longer list, on how far the
-    ; merge had got.
-    jz .merge_cmp_reflected
-    mov rax, [rdi + PyObject.ob_type]
-    jmp .merge_have_type
-.merge_si_type:
-    lea rax, [rel int_type]
-.merge_have_type:
-    mov r10, rax                   ; save type ptr for dunder fallback
-    mov rax, [rax + PyTypeObject.tp_richcompare]
-    test rax, rax
-    jz .merge_try_dunder
-
-    ; tp_richcompare(rdi=right, rsi=left, edx=op, rcx=right_tag, r8=left_tag)
-    ; Comparing: right < left (ascending) or right > left (descending)
-    mov rcx, r8                    ; right_tag
-    mov r8, r9                     ; left_tag
-    cmp qword [rbp - LS_REV], 0
-    je .merge_use_lt
-    mov edx, PY_GT                 ; reversed: right > left
-    jmp .merge_do_cmp
-.merge_use_lt:
-    mov edx, PY_LT                 ; normal: right < left
-.merge_do_cmp:
-    V_PACK rdi, rcx             ; left  -> Value
-    V_PACK rsi, r8              ; right -> Value
-    call rax
-    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
-    jmp .merge_check_result
-
-.merge_use_float:
-    ; float_compare(right, left, op, right_tag, left_tag)
-    extern float_compare
-    mov rcx, r8                    ; right_tag (full 64-bit)
-    mov r8, r9                     ; left_tag (full 64-bit)
-    cmp qword [rbp - LS_REV], 0
-    je .merge_float_lt
-    mov edx, PY_GT                 ; reversed: right > left
-    jmp .merge_float_cmp
-.merge_float_lt:
-    mov edx, PY_LT                 ; normal: right < left
-.merge_float_cmp:
-    V_PACK rdi, rcx             ; left  -> Value
-    V_PACK rsi, r8              ; right -> Value
-    call float_compare
-    V_UNPACK rax, rdx           ; float_compare returns a Value
-    jmp .merge_check_result
-
-.merge_try_dunder:
-    ; No tp_richcompare — try dunder on heaptype (right side, the "self")
-    mov rdx, [r10 + PyTypeObject.tp_flags]
-    test rdx, TYPE_FLAG_HEAPTYPE
-    ; A static type with no tp_richcompare -- None is one -- has no opinion
-    ; and no dunder to decline with.  Hand it to obj_richcompare_bool, which
-    ; is the only thing here that knows how to say "not orderable"; taking the
-    ; left element left the answer depending on the order it was already in.
-    jz .merge_cmp_reflected
-
-    ; Reload right/left from comparison array
-    ; right = self, left = other (for right < left comparison)
-    mov rax, [rbp - LS_KSRC]
-    test rax, rax
-    jnz .merge_dunder_have_arr
-    mov rax, [rbp - LS_SRC]
-.merge_dunder_have_arr:
-    ; right element = self (index MJ)
-    mov rcx, [rbp - LS_MJ]
-    shl rcx, 4
-    mov rdi, [rax + rcx]          ; right payload (self)
-    mov r11d, [rax + rcx + 8]     ; right_tag (save temporarily)
-    ; left element = other (index MI)
-    mov rcx, [rbp - LS_MI]
-    shl rcx, 4
-    mov rsi, [rax + rcx]          ; left payload (other)
-    mov ecx, [rax + rcx + 8]      ; left_tag (32-bit for dunder_call_2)
-
-    ; dunder_call_2(rdi=self, rsi=other, rdx=name, ecx=other_tag)
-    ; self=right, other=left: comparing right < left (ascending)
-    cmp qword [rbp - LS_REV], 0
-    je .merge_dunder_lt
-    extern dunder_gt
-    lea rdx, [rel dunder_gt]       ; reversed: right > left
-    jmp .merge_dunder_call
-.merge_dunder_lt:
-    extern dunder_lt
-    lea rdx, [rel dunder_lt]       ; normal: right < left
-.merge_dunder_call:
-    extern dunder_call_2
-    call dunder_call_2
-    V_UNPACK rax, rdx           ; returns a Value
-    ; fall through to check_result
-
-.merge_check_result:
-    ; (rax=payload, edx=tag) — check if comparison is true
-    test edx, edx
-    jz .merge_cmp_null             ; NULL → check for error or unorderable types
-    ; TAG_PTR: check for NotImplemented, then check bool_true
-    extern notimpl_singleton
-    lea rcx, [rel notimpl_singleton]
-    cmp rax, rcx
-    je .merge_cmp_reflected        ; NotImplemented → try the other operand
-    push rax                       ; save for DECREF
-    lea rcx, [rel bool_true]
-    cmp rax, rcx
-    sete cl
-    movzx ecx, cl                  ; ecx = 1 if true (take right)
-    mov rdi, rax
-    push rcx
-    call obj_decref
-    pop rcx
-    add rsp, 8                     ; discard saved ptr
-    test ecx, ecx
-    jnz .merge_take_right
-    jmp .merge_take_left
-
-.merge_cmp_null:
-    ; NULL return — check current_exception
-    mov rax, [rel current_exception]
-    test rax, rax
-    jnz .sort_free_temp            ; real exception → cleanup and propagate
-    ; No exception → the right operand's slot declined; ask the left one.
-
-.merge_cmp_reflected:
-    ; The merge asks "right < left" and resolves tp_richcompare from the right
-    ; element alone.  A slot that declines ended the sort with a TypeError,
-    ; with no reflected retry -- so once float became subclassable,
-    ; sorted([F(3.5), 1]) raised while sorted([2.5, F(3.5)]) worked, the
-    ; failure depending on which way round the two happened to fall.
-    ;
-    ; obj_richcompare_bool already implements the whole protocol, reflected
-    ; retry and identity fallback included, so the decline hands over to it
-    ; rather than growing a second copy of it here.
-    mov rax, [rbp - LS_KSRC]
-    test rax, rax
-    jnz .merge_refl_arr
-    mov rax, [rbp - LS_SRC]
-.merge_refl_arr:
-    mov rcx, [rbp - LS_MJ]
-    shl rcx, 4
-    mov rdi, [rax + rcx]           ; right payload
-    mov rsi, [rax + rcx + 8]       ; right tag
-    V_PACK rdi, rsi
-    mov rax, [rbp - LS_KSRC]
-    test rax, rax
-    jnz .merge_refl_arr2
-    mov rax, [rbp - LS_SRC]
-.merge_refl_arr2:
-    mov rcx, [rbp - LS_MI]
-    shl rcx, 4
-    mov rsi, [rax + rcx]           ; left payload
-    mov rdx, [rax + rcx + 8]       ; left tag
-    V_PACK rsi, rdx
-    xor edx, edx                   ; PY_LT
-    cmp qword [rbp - LS_REV], 0
-    je .merge_refl_call
-    mov edx, PY_GT
-.merge_refl_call:
-    extern obj_richcompare_bool
-    call obj_richcompare_bool
-    test eax, eax
-    jl .sort_free_temp             ; it raised: clean up and propagate
-    test eax, eax
-    jnz .merge_take_right
-    jmp .merge_take_left
-
-.merge_cmp_type_error:
-    ; IMPORTANT: raise_exception does not return (non-local jump to eval_exception_unwind)
-    ; Must free temp buffer and restore list state BEFORE raising.
-    
-    ; Free temp buffer
-    mov rdi, [rbp - LS_TEMP]
-    call ap_free
-    
-    ; If keys were used, DECREF keys and free arrays
+    mov r13d, 1                    ; the sort itself succeeded
+    jmp .ls_unwind
+.ls_failed:
+    xor r13d, r13d
+.ls_unwind:
+    ; --- the key array, whose contents are owned references --------------
     cmp qword [rbp - LS_KEY], 0
-    jz .mcte_no_keys
-    mov r14, [rbp - LS_KSRC]
-    test r14, r14
-    jz .mcte_free_ktemp
+    jz .ls_no_keyarr
+    mov r14, [rbp - LS_KEYS]
     xor r15d, r15d
-.mcte_decref_keys:
-    cmp r15, [rbp - LS_N]
-    jge .mcte_free_keys
-    mov rcx, r15
-    shl rcx, 4
-    mov rdi, [r14 + rcx]
-    mov esi, [r14 + rcx + 8]
-    DECREF_VAL rdi, rsi
+.ls_free_keys:
+    cmp r15, [rbp - LS_NK]
+    jae .ls_free_keyarr
+    mov rdi, [r14 + r15*8]
+    push r14
+    push r15
+    DECREF_V rdi, rcx
+    pop r15
+    pop r14
     inc r15
-    jmp .mcte_decref_keys
-.mcte_free_keys:
-    mov rdi, [rbp - LS_KORIG]
+    jmp .ls_free_keys
+.ls_free_keyarr:
+    mov rdi, r14
     call ap_free
-    mov rdi, [rbp - LS_KTEMP]
-    call ap_free
-    jmp .mcte_restore_list
-.mcte_free_ktemp:
-    mov rdi, [rbp - LS_KTEMP]
-    test rdi, rdi
-    jz .mcte_restore_list
-    call ap_free
-.mcte_no_keys:
-.mcte_restore_list:
-    ; Restore list items (list is empty during sort)
+.ls_no_keyarr:
+
+    ; --- the other half of reverse=, on the items alone ------------------
+    ; The keys are gone; only the array that goes back into the list is left
+    ; to un-reverse.
+    cmp qword [rbp - LS_REV], 0
+    jz .ls_restore
+    mov rdi, [rbp - LS_ITEMS]
+    mov rsi, [rbp - LS_N]
+    call ls_reverse_array
+
+.ls_restore:
+    ; --- did anything reach the list while it was empty? -----------------
     mov rbx, [rbp - LS_LIST]
-    mov rax, [rbx + PyListObject.ob_item]
-    test rax, rax
-    jnz .mcte_already_restored     ; someone else restored
-    mov rax, [rbp - LS_SAVED_PAYLOADS]
+    mov r14, [rbx + PyListObject.ob_item]   ; what the mutation left, if any
+    mov r15, [rbx + PyListObject.ob_size]
+    mov rax, [rbp - LS_ITEMS]
     mov [rbx + PyListObject.ob_item], rax
-    mov rax, [rbp - LS_SAVED_TAGS]
-    mov rax, [rbp - LS_SAVED_SIZE]
+    mov rax, [rbp - LS_ALLOC]
+    mov [rbx + PyListObject.allocated], rax
+    mov rax, [rbp - LS_N]
     mov [rbx + PyListObject.ob_size], rax
-.mcte_already_restored:
-    ; Now raise TypeError
-    extern exc_TypeError_type
-    extern raise_exception
-    RAISE exc_TypeError_type, "'<' not supported between instances"
-    ; raise_exception does not return
-.merge_bool_result:
-    ; eax = 0 (false) or 1 (true)
-    test eax, eax
-    jnz .merge_take_right
-    ; fall through: take left (equal → left wins for stability)
-
-.merge_take_left:
-    ; Copy src[left] to dst[k] (16 bytes)
-    mov rax, [rbp - LS_SRC]
-    mov rcx, [rbp - LS_MI]
-    shl rcx, 4
-    mov r8, [rax + rcx]
-    mov r9, [rax + rcx + 8]
-    mov rax, [rbp - LS_DST]
-    mov rcx, [rbp - LS_MK]
-    shl rcx, 4
-    mov [rax + rcx], r8
-    mov [rax + rcx + 8], r9
-    ; If keys, copy ksrc[left] to kdst[k]
-    mov rax, [rbp - LS_KSRC]
-    test rax, rax
-    jz .merge_left_nokeys
-    mov rcx, [rbp - LS_MI]
-    shl rcx, 4
-    mov r8, [rax + rcx]
-    mov r9, [rax + rcx + 8]
-    mov rax, [rbp - LS_KDST]
-    mov rcx, [rbp - LS_MK]
-    shl rcx, 4
-    mov [rax + rcx], r8
-    mov [rax + rcx + 8], r9
-.merge_left_nokeys:
-    inc qword [rbp - LS_MI]
-    inc qword [rbp - LS_MK]
-    jmp .merge_loop
-
-.merge_take_right:
-    ; Copy src[j] to dst[k] (16 bytes)
-    mov rax, [rbp - LS_SRC]
-    mov rcx, [rbp - LS_MJ]
-    shl rcx, 4
-    mov r8, [rax + rcx]
-    mov r9, [rax + rcx + 8]
-    mov rax, [rbp - LS_DST]
-    mov rcx, [rbp - LS_MK]
-    shl rcx, 4
-    mov [rax + rcx], r8
-    mov [rax + rcx + 8], r9
-    ; If keys, copy ksrc[j] to kdst[k]
-    mov rax, [rbp - LS_KSRC]
-    test rax, rax
-    jz .merge_right_nokeys
-    mov rcx, [rbp - LS_MJ]
-    shl rcx, 4
-    mov r8, [rax + rcx]
-    mov r9, [rax + rcx + 8]
-    mov rax, [rbp - LS_KDST]
-    mov rcx, [rbp - LS_MK]
-    shl rcx, 4
-    mov [rax + rcx], r8
-    mov [rax + rcx + 8], r9
-.merge_right_nokeys:
-    inc qword [rbp - LS_MJ]
-    inc qword [rbp - LS_MK]
-    jmp .merge_loop
-
-.merge_copy_right:
-    ; Left exhausted — copy remaining right elements to dst
-    mov rax, [rbp - LS_MJ]
-    cmp rax, [rbp - LS_MREND]
-    jge .merge_done
-    mov rax, [rbp - LS_SRC]
-    mov rcx, [rbp - LS_MJ]
-    shl rcx, 4
-    mov r8, [rax + rcx]
-    mov r9, [rax + rcx + 8]
-    mov rax, [rbp - LS_DST]
-    mov rcx, [rbp - LS_MK]
-    shl rcx, 4
-    mov [rax + rcx], r8
-    mov [rax + rcx + 8], r9
-    ; Keys
-    mov rax, [rbp - LS_KSRC]
-    test rax, rax
-    jz .merge_cr_nokeys
-    mov rcx, [rbp - LS_MJ]
-    shl rcx, 4
-    mov r8, [rax + rcx]
-    mov r9, [rax + rcx + 8]
-    mov rax, [rbp - LS_KDST]
-    mov rcx, [rbp - LS_MK]
-    shl rcx, 4
-    mov [rax + rcx], r8
-    mov [rax + rcx + 8], r9
-.merge_cr_nokeys:
-    inc qword [rbp - LS_MJ]
-    inc qword [rbp - LS_MK]
-    jmp .merge_copy_right
-
-.merge_copy_left:
-    ; Right exhausted — copy remaining left elements to dst
-    mov rax, [rbp - LS_MI]
-    cmp rax, [rbp - LS_MMID]
-    jge .merge_done
-    mov rax, [rbp - LS_SRC]
-    mov rcx, [rbp - LS_MI]
-    shl rcx, 4
-    mov r8, [rax + rcx]
-    mov r9, [rax + rcx + 8]
-    mov rax, [rbp - LS_DST]
-    mov rcx, [rbp - LS_MK]
-    shl rcx, 4
-    mov [rax + rcx], r8
-    mov [rax + rcx + 8], r9
-    ; Keys
-    mov rax, [rbp - LS_KSRC]
-    test rax, rax
-    jz .merge_cl_nokeys
-    mov rcx, [rbp - LS_MI]
-    shl rcx, 4
-    mov r8, [rax + rcx]
-    mov r9, [rax + rcx + 8]
-    mov rax, [rbp - LS_KDST]
-    mov rcx, [rbp - LS_MK]
-    shl rcx, 4
-    mov [rax + rcx], r8
-    mov [rax + rcx + 8], r9
-.merge_cl_nokeys:
-    inc qword [rbp - LS_MI]
-    inc qword [rbp - LS_MK]
-    jmp .merge_copy_left
-
-.merge_done:
-    ; Advance to next pair of runs
-    mov rax, [rbp - LS_OUTI]
-    mov rcx, [rbp - LS_WIDTH]
-    lea rax, [rax + rcx*2]
-    mov [rbp - LS_OUTI], rax
-    jmp .sort_outer_loop
-
-.sort_outer_done:
-    ; Swap src/dst pointers (result now in "new src" for next pass)
-    mov rax, [rbp - LS_SRC]
-    mov rcx, [rbp - LS_DST]
-    mov [rbp - LS_SRC], rcx
-    mov [rbp - LS_DST], rax
-    ; Swap keys src/dst if keys exist
-    mov rax, [rbp - LS_KSRC]
-    test rax, rax
-    jz .sort_no_key_swap
-    mov rcx, [rbp - LS_KDST]
-    mov [rbp - LS_KSRC], rcx
-    mov [rbp - LS_KDST], rax
-.sort_no_key_swap:
-    ; width *= 2
-    shl qword [rbp - LS_WIDTH], 1
-    jmp .sort_width_loop
-
-.sort_width_done:
-    ; After loop, result is in LS_SRC. If not list's items, copy back.
-    mov rax, [rbp - LS_SAVED_ITEMS]
-    cmp rax, [rbp - LS_SRC]
-    je .sort_free_temp             ; result already in items
-
-    ; memcpy items ← src, n*16 bytes
-    mov rdi, rax                   ; dest = saved items
-    mov rsi, [rbp - LS_SRC]       ; src = temp (where result is)
-    mov rdx, [rbp - LS_N]
-    shl rdx, 4                     ; byte count
-    extern ap_memcpy
-    call ap_memcpy
-
-.sort_free_temp:
-    ; Free temp array
-    mov rdi, [rbp - LS_TEMP]
-    extern ap_free
-    call ap_free
-
-    ; If keys were used, DECREF all keys and free arrays
-    cmp qword [rbp - LS_KEY], 0
-    jz .sort_done
-
-    ; DECREF each key in the final keys array (in LS_KSRC after swaps)
-    mov r14, [rbp - LS_KSRC]
     test r14, r14
-    jz .sort_free_ktemp
-    xor r15d, r15d
-.sort_decref_keys:
-    cmp r15, [rbp - LS_N]
-    jge .sort_free_keys
-    mov rcx, r15
-    shl rcx, 4
-    mov rdi, [r14 + rcx]          ; key payload
-    mov esi, [r14 + rcx + 8]      ; key tag
-    DECREF_VAL rdi, rsi
-    inc r15
-    jmp .sort_decref_keys
+    jnz .ls_mutated
 
-.sort_free_keys:
-    ; Free both keys arrays (use LS_KORIG not LS_KSRC - they may swap)
-    mov rdi, [rbp - LS_KORIG]
-    call ap_free
-    mov rdi, [rbp - LS_KTEMP]
-    call ap_free
-    jmp .sort_done
-
-.sort_free_ktemp:
-    mov rdi, [rbp - LS_KTEMP]
-    test rdi, rdi
-    jz .sort_done
-    call ap_free
-    jmp .sort_done
-
-.sort_trivial_raised:
-    xor eax, eax
-    xor edx, edx
+    test r13d, r13d
+    jz .ls_error_return
+    RET_NONE
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx
+    V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.sort_cleanup_keys:
-    ; Error during key computation — DECREF computed keys and free
-    mov r14, [rbp - LS_KSRC]
-    test r14, r14
-    jz .sort_done
-    xor r13d, r13d
-.sort_cleanup_keys_loop:
-    cmp r13, r15                   ; r15 = keys computed so far
-    jge .sort_cleanup_keys_free
-    mov rcx, r13
-    shl rcx, 4
-    mov rdi, [r14 + rcx]
-    mov esi, [r14 + rcx + 8]
-    DECREF_VAL rdi, rsi
-    inc r13
-    jmp .sort_cleanup_keys_loop
-.sort_cleanup_keys_free:
+.ls_mutated:
+    ; Somebody put items into the list while the sort held its array.  Ours
+    ; is back in place; theirs has to be released, element by element,
+    ; because nothing else owns those references.
+    xor ebx, ebx
+.ls_mut_loop:
+    cmp rbx, r15
+    jae .ls_mut_done
+    mov rdi, [r14 + rbx*8]
+    DECREF_V rdi, rcx
+    inc rbx
+    jmp .ls_mut_loop
+.ls_mut_done:
     mov rdi, r14
     call ap_free
-    ; Error path: propagate exception (return TAG_NULL)
-    extern current_exception
-    EXC_RAISED_SINCE [rbp - LS_EXC], rax, .sort_error_return
+    test r13d, r13d
+    jz .ls_error_return          ; there is already an exception to report
+    RAISE exc_ValueError_type, "list modified during sort"
+    ; raise_exception does not return
 
-.sort_trivial_done:
+.ls_trivial:
     ; n < 2 and nothing to sort -- but the KEY still runs, once per element.
     ; CPython computes them before it looks at the length, so `sorted([1],
     ; key=0)` is a TypeError there and was [1] here, and a key that raises
     ; was not called at all.
     cmp qword [rbp - LS_KEY], 0
-    jz .sort_trivial_no_key
-    cmp qword [rbp - LS_N], 1
-    jne .sort_trivial_no_key
+    jz .ls_trivial_done
+    cmp r12, 1
+    jne .ls_trivial_done
     mov rax, [rbx + PyListObject.ob_item]
     test rax, rax
-    jz .sort_trivial_no_key
+    jz .ls_trivial_done
     mov rdi, [rax]                 ; items[0], a Value
     sub rsp, 16
     mov [rsp], rdi
@@ -1211,10 +647,9 @@ DEF_FUNC list_method_sort, LS_FRAME
     call obj_call_n
     add rsp, 16
     test rax, rax
-    jz .sort_trivial_raised
+    jz .ls_error_return
     XDECREF_V rax, rcx             ; only whether it could be computed
-.sort_trivial_no_key:
-    ; n < 2, no sort needed, return None
+.ls_trivial_done:
     RET_NONE
     pop r15
     pop r14
@@ -1225,191 +660,12 @@ DEF_FUNC list_method_sort, LS_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.sort_done:
-    ; Restore list state: put sorted items back
-    mov rbx, [rbp - LS_LIST]
-    ; Check if list was mutated during sort (ob_item or ob_size changed)
-    mov rax, [rbx + PyListObject.ob_item]
-    test rax, rax
-    jnz .sort_mutated              ; ob_item != NULL → someone put items back
-    test rax, rax
-    jnz .sort_mutated              ; ob_item != NULL → someone put items back
-    mov rax, [rbx + PyListObject.ob_size]
-    test rax, rax
-    jnz .sort_mutated              ; ob_size != 0 → someone changed it
-
-    ; No mutation: copy sorted fat buffer back to payload/tag arrays
-    mov rdi, [rbp - LS_SAVED_ITEMS]       ; fat buffer
-    mov rsi, [rbp - LS_SAVED_PAYLOADS]    ; payloads
-    mov rdx, [rbp - LS_SAVED_TAGS]        ; tags
-    mov rcx, [rbp - LS_SAVED_SIZE]
-    xor r8d, r8d
-.sort_copy_back:
-    cmp r8, rcx
-    jge .sort_copy_back_done
-    mov r9, r8
-    shl r9, 4
-    mov r10, [rdi + r9]           ; payload
-    mov r11, [rdi + r9 + 8]       ; tag (low byte)
-    V_PACK r10, r11
-    mov [rsi + r8 * 8], r10
-    inc r8
-    jmp .sort_copy_back
-.sort_copy_back_done:
-    ; Free fat buffer
-    mov rdi, [rbp - LS_SAVED_ITEMS]
-    test rdi, rdi
-    jz .sort_restore_ptrs
-    call ap_free
-    mov qword [rbp - LS_SAVED_ITEMS], 0
-.sort_restore_ptrs:
-    ; Restore list pointers and size
-    mov rax, [rbp - LS_SAVED_PAYLOADS]
-    mov [rbx + PyListObject.ob_item], rax
-    mov rax, [rbp - LS_SAVED_TAGS]
-    mov rax, [rbp - LS_SAVED_SIZE]
-    mov [rbx + PyListObject.ob_size], rax
-
-    ; Check if an exception was raised during sort
-    EXC_RAISED_SINCE [rbp - LS_EXC], rax, .sort_error_return
-    RET_NONE
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
-.sort_mutated:
-    ; List was mutated during sort — this is an error
-    ; IMPORTANT: raise_exception does not return (non-local jump)
-    ; Must cleanup BEFORE raising.
-    
-    ; First free temp buffer (allocated during sort)
-    mov rdi, [rbp - LS_TEMP]
-    call ap_free
-    
-    ; If keys were used, DECREF keys and free arrays
-    cmp qword [rbp - LS_KEY], 0
-    jz .sm_no_keys
-    mov r14, [rbp - LS_KSRC]
-    test r14, r14
-    jz .sm_free_ktemp
-    xor r15d, r15d
-.sm_decref_keys:
-    cmp r15, [rbp - LS_N]
-    jge .sm_free_keys
-    mov rcx, r15
-    shl rcx, 4
-    mov rdi, [r14 + rcx]
-    mov esi, [r14 + rcx + 8]
-    DECREF_VAL rdi, rsi
-    inc r15
-    jmp .sm_decref_keys
-.sm_free_keys:
-    mov rdi, [rbp - LS_KORIG]
-    call ap_free
-    mov rdi, [rbp - LS_KTEMP]
-    call ap_free
-    jmp .sm_handle_mutation
-.sm_free_ktemp:
-    mov rdi, [rbp - LS_KTEMP]
-    test rdi, rdi
-    jz .sm_handle_mutation
-    call ap_free
-.sm_no_keys:
-.sm_handle_mutation:
-    ; Save mutated items for cleanup
-    mov rcx, [rbx + PyListObject.ob_item]       ; mutated payloads
-    mov r8, [rbx + PyListObject.ob_size]
-
-    ; Restore our sorted items from fat buffer
-    mov rdi, [rbp - LS_SAVED_ITEMS]       ; fat buffer
-    mov rsi, [rbp - LS_SAVED_PAYLOADS]
-    mov rdx, [rbp - LS_SAVED_TAGS]
-    mov r10, [rbp - LS_SAVED_SIZE]
-    xor r11d, r11d
-.sort_mut_copy_back:
-    cmp r11, r10
-    jge .sort_mut_copy_back_done
-    mov rax, r11
-    shl rax, 4
-    mov r12, [rdi + rax]          ; payload
-    mov r13, [rdi + rax + 8]      ; tag
-    V_PACK r12, r13
-    mov [rsi + r11 * 8], r12
-    inc r11
-    jmp .sort_mut_copy_back
-.sort_mut_copy_back_done:
-    ; Free fat buffer
-    mov rdi, [rbp - LS_SAVED_ITEMS]
-    test rdi, rdi
-    jz .sort_mut_restore_ptrs
-    call ap_free
-.sort_mut_restore_ptrs:
-    mov rax, [rbp - LS_SAVED_PAYLOADS]
-    mov [rbx + PyListObject.ob_item], rax
-    mov rax, [rbp - LS_SAVED_TAGS]
-    mov rax, [rbp - LS_SAVED_SIZE]
-    mov [rbx + PyListObject.ob_size], rax
-
-    ; DECREF all mutated items and free the arrays
-    push rcx
-    push r9
-    push r8
-    test rcx, rcx
-    jz .sort_mut_no_decref
-    xor r11d, r11d
-.sort_mut_decref_loop:
-    cmp r11, r8
-    jge .sort_mut_decref_done
-    mov rdi, [rcx + r11 * 8]          ; payload
-    V_UNPACK rdi, rsi
-    push rcx
-    push r9
-    push r8
-    push r11
-    DECREF_VAL rdi, rsi
-    pop r11
-    pop r8
-    pop r9
-    pop rcx
-    inc r11
-    jmp .sort_mut_decref_loop
-.sort_mut_decref_done:
-    mov rdi, rcx
-    call ap_free
-    mov rdi, r9
-    call ap_free
-.sort_mut_no_decref:
-    pop r8
-    pop r9
-    pop rcx
-    ; Raise ValueError
-    RAISE exc_ValueError_type, "list modified during sort"
-    ; raise_exception does not return
-
-.sort_error_return:
-    ; Restore list items if still saved (error during sort before merge)
-    mov rbx, [rbp - LS_LIST]
-    mov rax, [rbx + PyListObject.ob_item]
-    test rax, rax
-    jnz .sort_error_already_restored
-    ; List is still empty — restore saved pointers
-    mov rax, [rbp - LS_SAVED_PAYLOADS]
-    mov [rbx + PyListObject.ob_item], rax
-    mov rax, [rbp - LS_SAVED_TAGS]
-    mov rax, [rbp - LS_SAVED_SIZE]
-    mov [rbx + PyListObject.ob_size], rax
-.sort_error_already_restored:
-    ; Free fat buffer if allocated
-    mov rdi, [rbp - LS_SAVED_ITEMS]
-    test rdi, rdi
-    jz .sort_error_done
-    call ap_free
-.sort_error_done:
+.ls_error_return:
+    ; Something raised -- a key, a comparison, or a __lt__ that mutated the
+    ; list.  The array is already back where it belongs.
+    EXC_RAISED_SINCE [rbp - LS_EXC], rax, .ls_error_have
+    RAISE exc_ValueError_type, "sort failed"
+.ls_error_have:
     RET_NULL
     pop r15
     pop r14
@@ -1422,6 +678,30 @@ DEF_FUNC list_method_sort, LS_FRAME
 .ls_too_many:
     RAISE exc_TypeError_type, "sort() takes no positional arguments"
 END_FUNC list_method_sort
+
+;; ============================================================================
+;; ls_reverse_array(rdi = Value[], rsi = n) -> void
+;;
+;; reverse= is done by reversing the input and reversing the result, which is
+;; what keeps the sort stable; this is both halves of it.  Values, so there is
+;; no refcount traffic: the array owns exactly what it owned before.
+;; ============================================================================
+DEF_FUNC_LOCAL ls_reverse_array
+    lea rsi, [rdi + rsi*8 - 8]  ; the last slot; below rdi when n is 0
+.lra_loop:
+    cmp rdi, rsi
+    jae .lra_done
+    mov rax, [rdi]
+    mov rcx, [rsi]
+    mov [rdi], rcx
+    mov [rsi], rax
+    add rdi, 8
+    sub rsi, 8
+    jmp .lra_loop
+.lra_done:
+    leave
+    ret
+END_FUNC ls_reverse_array
 
 ;; ============================================================================
 ;; list_method_index(args, nargs) -> SmallInt index
