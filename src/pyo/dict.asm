@@ -1018,14 +1018,44 @@ DEF_FUNC dict_set, DS_FRAME
     lea rdx, [rdx + rdx*2]      ; capacity * 3/4
     cmp rax, rdx
     jle .ds_have_room
+
     mov rdi, rbx
     call dict_resize
-    ; the slot is stale after a rebuild; find it again
-    mov rdi, rbx
-    mov rsi, [rbp - DS_KEY]
-    call dict_lookup
-    mov r12, rdx
-    mov r13, r8
+
+    ; The slot is stale after a rebuild, and the replacement is found by
+    ; PROBING FOR AN EMPTY ONE rather than by looking the key up again.
+    ;
+    ; A second dict_lookup is what this used to do, and dict_lookup is
+    ; arbitrary Python: obj_hash on the way in, obj_richcompare_bool on a
+    ; collision.  Either can clear this dict, and clear() points entries at
+    ; the read-only dict_empty_entries and sets the capacity to one -- so the
+    ; store below landed in .rodata, at an index the new capacity does not
+    ; have.  Re-testing for room afterwards does not fix it either: __hash__
+    ; runs on EVERY lookup, so a __hash__ that clears makes the resize and
+    ; the re-lookup chase each other forever.
+    ;
+    ; Nothing needs looking up.  The key is known absent -- the lookup at the
+    ; top of this function missed -- and dict_resize runs no user code, so it
+    ; is absent still.  What is wanted is a free slot for a hash already in
+    ; hand, and that is a comparison-free walk of the same recurrence
+    ; dict_lookup and dict_resize_to use.  CPython's insertdict does exactly
+    ; this: find_empty_slot, not a second lookup.  A rebuilt table has no
+    ; dummies in it, so EMPTY is the only thing to look for.
+    mov rcx, [rbx + PyDictObject.capacity]
+    dec rcx                     ; mask
+    mov r12, r13
+    and r12, rcx                ; slot
+    mov r8, r13                 ; perturb
+.ds_empty_probe:
+    mov rsi, [rbx + PyDictObject.dk_indices]
+    cmp qword [rsi + r12*8], DICT_IX_EMPTY
+    je .ds_have_room
+    shr r8, PERTURB_SHIFT
+    lea r12, [r12 + r12*4]
+    add r12, r8
+    inc r12
+    and r12, rcx
+    jmp .ds_empty_probe
 
 .ds_have_room:
     mov rax, [rbx + PyDictObject.dk_nentries]
@@ -1172,7 +1202,8 @@ END_FUNC dict_ass_subscript
 DD_DICT  equ 8
 DD_KEYV  equ 16
 DD_QUIET equ 24             ; answer -1 instead of raising
-DD_FRAME equ 32             ; + 2 pushes = 48
+DD_VAL   equ 32             ; the value, held while the key is released
+DD_FRAME equ 48             ; + 2 pushes = 64
 global dict_del_opt
 DEF_FUNC dict_del_opt, DD_FRAME
     push rbx
@@ -1204,21 +1235,34 @@ DEF_FUNC dict_del, DD_FRAME
     add rcx, rax
     mov rdi, [rcx + DictEntry.key]
     mov rsi, [rcx + DictEntry.value]
+    mov [rbp - DD_VAL], rsi
     mov qword [rcx + DictEntry.key], 0
     mov qword [rcx + DictEntry.value], 0
     mov qword [rcx + DictEntry.hash], ENTRY_TOMBSTONE_HASH
-    push rsi
-    DECREF_V rdi, rax
-    pop rdi
-    DECREF_V rdi, rax
 
+    ; EVERY change to the table is made before either reference is released.
+    ;
+    ; A DECREF here can reach a __del__, and a __del__ is arbitrary Python:
+    ; it can call clear() on this very dict, and clear() hands the tables
+    ; back and points dk_indices at the one-slot read-only
+    ; dict_empty_indices.  The store below used to come after, through a
+    ; pointer read before -- so it landed in .rodata, at an index the new
+    ; capacity does not have.  A twenty-key dict and a __del__ that clears it
+    ; was a SIGSEGV.
     mov rcx, [rbx + PyDictObject.dk_indices]
     mov qword [rcx + r12*8], DICT_IX_DUMMY
     dec qword [rbx + PyDictObject.ob_size]
     inc qword [rbx + PyDictObject.dk_tombstones]
     inc qword [rbx + PyDictObject.dk_version]
-    jnz .dd_done
+    jnz .dd_release
     mov qword [rbx + PyDictObject.dk_version], 1
+
+.dd_release:
+    ; The table no longer refers to either of these, so whatever a __del__
+    ; does with the dict from here finds it consistent.
+    DECREF_V rdi, rax
+    mov rdi, [rbp - DD_VAL]
+    DECREF_V rdi, rax
 .dd_done:
     xor eax, eax
     pop r12

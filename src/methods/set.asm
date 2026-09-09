@@ -35,6 +35,9 @@ extern set_new
 extern set_new_of_type
 extern set_result_type
 extern set_coerce_operand
+extern set_clone_into
+extern set_reserve
+extern set_release_table
 
 ; --- moved to a sibling file by the split ---
 
@@ -133,41 +136,54 @@ DEF_FUNC set_method_pop, SMP_FRAME
     cmp qword [rbx + PyDictObject.ob_size], 0
     je .smpop_empty
 
-    ; Scan for first non-empty entry
+    ; Start where the last pop left off.  The cursor is only a hint -- it is
+    ; masked, so a stale one costs a wrong starting slot and nothing more --
+    ; but without it a drain rescans from slot zero every time and is
+    ; O(capacity^2).  CPython calls it `finger`.
     mov r12, [rbx + PyDictObject.entries]
     mov r13, [rbx + PyDictObject.capacity]
-    xor ecx, ecx            ; index
+    mov rcx, [rbx + SET_FINGER]
+    mov rax, r13
+    dec rax
+    and rcx, rax            ; in bounds, however stale
 
 .smpop_scan:
-    cmp rcx, r13
-    jge .smpop_empty         ; shouldn't happen
-
-    imul rax, rcx, SET_ENTRY_SIZE
-    add rax, r12             ; entry ptr
-
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
+    ; The size check above proved at least one slot is occupied, so the wrap
+    ; below always terminates.
+    mov rax, rcx
+    shl rax, 4              ; * SET_ENTRY_SIZE
+    add rax, r12
+    cmp qword [rax + SET_ENTRY_KEY], 0
     jne .smpop_found
-    inc ecx
+    inc rcx
+    cmp rcx, r13
+    jb .smpop_scan
+    xor ecx, ecx
     jmp .smpop_scan
 
 .smpop_found:
-    ; rax = entry ptr with valid key
-    ; Get key (return value) — DON'T incref, we're removing it
-    mov rcx, [rax + SET_ENTRY_KEY]        ; key payload
-    V_UNPACK rcx, r12
+    ; rax = the entry, rcx = its slot.  The key comes back as a Value and
+    ; ownership transfers to the caller, so there is no refcount work.
+    mov rdx, [rax + SET_ENTRY_KEY]
 
-    ; Clear the entry (mark as empty)
+    ; A TOMBSTONE, not an empty slot.  This wrote only the key and left the
+    ; hash, which SET_ENTRY_CLASSIFY reads as EMPTY -- so any probe run
+    ; passing through the popped slot stopped there, and a colliding key
+    ; further along became unreachable to `in`, to discard() and to remove()
+    ; while still being visible to iteration.  set_remove has always done
+    ; this correctly.
     mov qword [rax + SET_ENTRY_KEY], 0
+    mov qword [rax + SET_ENTRY_HASH], ENTRY_TOMBSTONE_HASH
     dec qword [rbx + PyDictObject.ob_size]
+    inc qword [rbx + PyDictObject.dk_tombstones]
+    inc rcx
+    mov [rbx + SET_FINGER], rcx
 
-    ; Return the key (ownership transfers, no INCREF/DECREF needed)
-    mov rax, rcx
-    mov edx, r12d
+    mov rax, rdx
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smpop_empty:
@@ -181,7 +197,9 @@ END_FUNC set_method_pop
 ;; set_method_clear(args, nargs) -> None
 ;; args[0]=self
 ;; ============================================================================
-DEF_FUNC set_method_clear, 8        ; rsp 16-aligned at the call the macros below expand to
+SMCL_END   equ 8            ; one past the last slot of the table being cleared
+SMCL_FRAME equ 8            ; + 3 pushes = 32, 16-aligned
+DEF_FUNC set_method_clear, SMCL_FRAME
     push rbx
     push r12
     push r13
@@ -191,33 +209,37 @@ DEF_FUNC set_method_clear, 8        ; rsp 16-aligned at the call the macros belo
 
     mov rbx, [rdi]          ; self (set)
     mov r12, [rbx + PyDictObject.entries]
-    mov r13, [rbx + PyDictObject.capacity]
-    xor ecx, ecx
+    mov r13, [rbx + PyDictObject.ob_size]   ; live keys still to release
+    mov rcx, [rbx + PyDictObject.capacity]
+    shl rcx, 4
+    add rcx, r12                            ; one past the end
+    mov [rbp - SMCL_END], rcx
 
 .smc_loop:
-    cmp rcx, r13
-    jge .smc_done
+    ; The live count ends this; the end of the table is the backstop, since
+    ; a __del__ reached from the DECREF can resurrect and mutate.
+    test r13, r13
+    jz .smc_done
+    cmp r12, [rbp - SMCL_END]
+    jae .smc_done
 
-    imul rax, rcx, SET_ENTRY_SIZE
-    add rax, r12
-    push rcx                ; save index
-
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
-    je .smc_next
-
-    ; DECREF key
-    mov rdi, [rax + SET_ENTRY_KEY]
-    V_UNPACK rdi, rsi
-    mov qword [rax + SET_ENTRY_KEY], 0
-    DECREF_VAL rdi, rsi
-
-.smc_next:
-    pop rcx
-    inc ecx
+    mov rdi, [r12 + SET_ENTRY_KEY]
+    add r12, SET_ENTRY_SIZE
+    test rdi, rdi                           ; occupied?
+    jz .smc_loop
+    dec r13
+    mov qword [r12 - SET_ENTRY_SIZE + SET_ENTRY_KEY], 0
+    DECREF_V rdi, rsi
     jmp .smc_loop
 
 .smc_done:
     mov qword [rbx + PyDictObject.ob_size], 0
+
+    ; Hand the table back.  Zeroing the keys in place left a set that had
+    ; held a million elements still holding a million slots -- and every
+    ; later walk, iteration and rehash paying for them.
+    mov rdi, rbx
+    call set_release_table
 
     RET_NONE
     pop r13
@@ -272,31 +294,11 @@ DEF_FUNC set_method_copy
     call set_new_of_type
     mov rbx, rax            ; rbx = new set
 
-    ; Iterate source entries
-    mov r12, [r14 + PyDictObject.entries]
-    mov r13, [r14 + PyDictObject.capacity]
-    xor ecx, ecx
-
-.smcp_loop:
-    cmp rcx, r13
-    jge .smcp_done
-
-    imul rax, rcx, SET_ENTRY_SIZE
-    add rax, r12
-    push rcx
-
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
-    je .smcp_next
-
-    ; Add key to new set
-    mov rdi, rbx            ; new set
-    mov rsi, [rax + SET_ENTRY_KEY]
-    call set_add
-
-.smcp_next:
-    pop rcx
-    inc ecx
-    jmp .smcp_loop
+    ; The table is copied wholesale rather than re-inserted element by
+    ; element; see set_clone_into.
+    mov rdi, rbx
+    mov rsi, r14
+    call set_clone_into
 
 .smcp_done:
     mov rax, rbx
@@ -355,45 +357,45 @@ DEF_FUNC_LOCAL set_binop_union, SMU_FRAME
     mov rdi, rax
     call set_new_of_type
     mov rbx, rax            ; new set
-    xor ecx, ecx
 
-.smu_copy_self:
-    cmp rcx, [r14 + PyDictObject.capacity]
-    jge .smu_add_other
-    mov [rbp - SMU_IDX], rcx
-
-    mov rdx, [r14 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
-    test rsi, rsi                        ; occupied?
-    jz .smu_cs_next
-
-    INCREF_V rsi, rax                    ; ours across __eq__
-    mov [rbp - SMU_KEY], rsi
+    ; The self half is a whole table the result is about to be given a copy
+    ; of, so it is copied -- slot for slot, no hash, no probe, no
+    ; load-factor test.  It used to be re-inserted element by element, which
+    ; is what set_method_copy stopped doing in 2e05c3e; this is the other
+    ; caller CPython's set_merge has a tier for.
     mov rdi, rbx
-    call set_add
-    mov rdi, [rbp - SMU_KEY]
-    DECREF_V rdi, rax
+    mov rsi, r14
+    call set_clone_into
 
-.smu_cs_next:
-    mov rcx, [rbp - SMU_IDX]
-    inc ecx
-    jmp .smu_copy_self
+    ; And take the room the other half needs in one step rather than growing
+    ; through it.  An over-estimate: the two operands may overlap, and the
+    ; result is then smaller than the room taken for it.
+    mov rdi, rbx
+    mov rsi, [r15 + PyDictObject.ob_size]
+    call set_reserve
 
 .smu_add_other:
     ; Now add all elements from other
+    mov r12, [r15 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
-
 .smu_add_loop:
+    ; The walk ends when every live element has been seen, not when the
+    ; table runs out.  set_resize sizes from the live count and overshoots by
+    ; four, so a set is a quarter full at most and three slots in four are
+    ; empty -- and with the identity hash an int carries, the live ones
+    ; cluster at the bottom and the whole tail is dead.  r12 counts them down.
+    test r12, r12
+    jz .smu_done
     cmp rcx, [r15 + PyDictObject.capacity]
     jge .smu_done
     mov [rbp - SMU_IDX], rcx
 
     mov rdx, [r15 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .smu_al_next
+    dec r12
 
     INCREF_V rsi, rax                    ; ours across __eq__
     mov [rbp - SMU_KEY], rsi
@@ -488,6 +490,13 @@ DEF_FUNC_LOCAL set_update_one, SU_FRAME
     mov [rbp - SU_TMP], rax
     mov r12, rax
     mov r13, [r12 + PyTupleObject.ob_size]
+
+    ; The sequence has been materialised, so its length is known: take the
+    ; room once instead of growing through it.
+    mov rdi, [rbp - SU_SELF]
+    mov rsi, r13
+    call set_reserve
+
     xor ecx, ecx
 .supd_seq_loop:
     cmp rcx, r13
@@ -508,22 +517,45 @@ DEF_FUNC_LOCAL set_update_one, SU_FRAME
     jmp .supd_done
 
 .supd_from_set:
-    xor ecx, ecx
+    ; An EMPTY destination takes the source's table wholesale.  `s = set();
+    ; s.update(src)` and `set(src)` are the same shape, and both used to
+    ; hash and probe every element of src into a table growing underneath
+    ; them.  CPython's set_merge has this tier too.  If self IS src the
+    ; sizes are equal, so this arm is taken only when both are empty and
+    ; set_clone_into returns at once -- there is no table to free out from
+    ; under the copy.
+    cmp qword [rbx + PyDictObject.ob_size], 0
+    jne .supd_reserve
+    mov rdi, rbx
+    mov rsi, r12
+    call set_clone_into
+    jmp .supd_done
 
+.supd_reserve:
+    ; Not empty: still take the room in one step.
+    mov rdi, rbx
+    mov rsi, [r12 + PyDictObject.ob_size]
+    call set_reserve
+
+    mov r13, [r12 + PyDictObject.ob_size]   ; live elements still to visit
+    xor ecx, ecx
 .supd_loop:
     ; The capacity and the entry array are read INSIDE the loop, and the key
     ; is held for the turn: set_add probes with it, the probe runs __eq__,
     ; and __eq__ may clear or resize the very set being walked -- taking the
     ; key's last reference, or the array, with it.  See set_binop_union.
+    test r13, r13
+    jz .supd_done
     cmp rcx, [r12 + PyDictObject.capacity]
     jge .supd_done
     mov [rbp - SU_IDX], rcx
 
     mov rdx, [r12 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .supd_next
+    dec r13
 
     INCREF_V rsi, rax
     mov [rbp - SU_KEY], rsi
@@ -598,23 +630,40 @@ DEF_FUNC_LOCAL set_binop_intersection, SMI_FRAME
     call set_new_of_type
     mov rbx, rax            ; new set
 
-    ; Iterate self, add if in other
+    ; Intersection is commutative, so WALK THE SMALLER SIDE and probe the
+    ; other.  It used to walk self always: `set(range(5000)) & {0, 1, 2}`
+    ; visited five thousand slots where three would do, and read 0.00x of
+    ; CPython -- 421ms against 1ms -- on tests/run_set_bench.sh.  CPython's
+    ; set_intersection makes the same swap.  Only the walk changes: the
+    ; result's TYPE still comes from the left operand, which is settled
+    ; above, and the membership question is the same either way round.
+    mov r12, r14                ; walk
+    mov r13, r15                ; probe
+    mov rax, [r15 + PyDictObject.ob_size]
+    cmp rax, [r14 + PyDictObject.ob_size]
+    jae .smi_sides
+    mov r12, r15
+    mov r13, r14
+.smi_sides:
+    mov r14, [r12 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
-
 .smi_loop:
-    cmp rcx, [r14 + PyDictObject.capacity]
+    test r14, r14
+    jz .smi_done
+    cmp rcx, [r12 + PyDictObject.capacity]
     jge .smi_done
     mov [rbp - SMI_IDX], rcx
 
-    mov rdx, [r14 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    mov rdx, [r12 + PyDictObject.entries]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .smi_next
+    dec r14
 
     INCREF_V rsi, rax                    ; ours for the rest of this turn
     mov [rbp - SMI_KEY], rsi
-    mov rdi, r15            ; other set
+    mov rdi, r13            ; the side being probed
     call set_contains
     mov rsi, [rbp - SMI_KEY]
     test eax, eax
@@ -701,18 +750,21 @@ DEF_FUNC_LOCAL set_binop_difference, SMDF_FRAME
     mov rbx, rax            ; new set
 
     ; Iterate self, add if NOT in other
+    mov r12, [r14 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
-
 .smdf_loop:
+    test r12, r12
+    jz .smdf_done
     cmp rcx, [r14 + PyDictObject.capacity]
     jge .smdf_done
     mov [rbp - SMDF_IDX], rcx
 
     mov rdx, [r14 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .smdf_next
+    dec r12
 
     INCREF_V rsi, rax
     mov [rbp - SMDF_KEY], rsi
@@ -1095,18 +1147,21 @@ DEF_FUNC set_method_symmetric_difference, SMSD_FRAME
     mov rbx, rax            ; new set
 
     ; Add elements in self but NOT in other
+    mov r12, [r14 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
-
 .smsd_self_loop:
+    test r12, r12
+    jz .smsd_other
     cmp rcx, [r14 + PyDictObject.capacity]
     jge .smsd_other
     mov [rbp - SMSD_IDX], rcx
 
     mov rdx, [r14 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .smsd_self_next
+    dec r12
 
     INCREF_V rsi, rax
     mov [rbp - SMSD_KEY], rsi
@@ -1130,18 +1185,21 @@ DEF_FUNC set_method_symmetric_difference, SMSD_FRAME
 
 .smsd_other:
     ; Add elements in other but NOT in self
+    mov r12, [r15 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
-
 .smsd_other_loop:
+    test r12, r12
+    jz .smsd_done
     cmp rcx, [r15 + PyDictObject.capacity]
     jge .smsd_done
     mov [rbp - SMSD_IDX], rcx
 
     mov rdx, [r15 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .smsd_other_next
+    dec r12
 
     INCREF_V rsi, rax
     mov [rbp - SMSD_KEY], rsi
@@ -1229,18 +1287,21 @@ DEF_FUNC set_method_issubset, SMSS_FRAME
     jz .smss_fail
     mov r15, rax            ; owned: the set itself, or one built from it
 
+    mov r12, [r14 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
-
 .smss_loop:
+    test r12, r12
+    jz .smss_true
     cmp rcx, [r14 + PyDictObject.capacity]
     jge .smss_true
     mov [rbp - SMSS_IDX], rcx
 
     mov rdx, [r14 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .smss_next
+    dec r12
 
     INCREF_V rsi, rax                    ; ours across __eq__
     mov [rbp - SMSS_KEY], rsi
@@ -1328,18 +1389,21 @@ DEF_FUNC set_method_issuperset, SMIS_FRAME
     jz .smis_fail
     mov r14, rax            ; owned
 
+    mov r12, [r14 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
-
 .smis_loop:
+    test r12, r12
+    jz .smis_true
     cmp rcx, [r14 + PyDictObject.capacity]
     jge .smis_true
     mov [rbp - SMIS_IDX], rcx
 
     mov rdx, [r14 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .smis_next
+    dec r12
 
     INCREF_V rsi, rax                    ; ours across __eq__
     mov [rbp - SMIS_KEY], rsi
@@ -1427,22 +1491,37 @@ DEF_FUNC set_method_isdisjoint, SMDJ_FRAME
     jz .smdj_fail
     mov r15, rax            ; owned
 
+    ; Disjointness is symmetric, so walk the smaller side, exactly as
+    ; intersection does above and for the same measured reason: this read
+    ; 369ms against CPython's 1ms with a five-thousand-element left operand
+    ; and a three-element right one.
+    mov r12, r14                ; walk
+    mov r13, r15                ; probe
+    mov rax, [r15 + PyDictObject.ob_size]
+    cmp rax, [r14 + PyDictObject.ob_size]
+    jae .smdj_sides
+    mov r12, r15
+    mov r13, r14
+.smdj_sides:
+    mov r14, [r12 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
-
 .smdj_loop:
-    cmp rcx, [r14 + PyDictObject.capacity]
+    test r14, r14
+    jz .smdj_true
+    cmp rcx, [r12 + PyDictObject.capacity]
     jge .smdj_true
     mov [rbp - SMDJ_IDX], rcx
 
-    mov rdx, [r14 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    mov rdx, [r12 + PyDictObject.entries]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .smdj_next
+    dec r14
 
     INCREF_V rsi, rax                    ; ours across __eq__
     mov [rbp - SMDJ_KEY], rsi
-    mov rdi, r15
+    mov rdi, r13            ; the side being probed
     call set_contains
     mov rdi, [rbp - SMDJ_KEY]
     push rax

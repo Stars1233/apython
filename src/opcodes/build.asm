@@ -2070,12 +2070,15 @@ END_FUNC op_map_add
 
 DU_SOURCE   equ 24
 DU_DICT     equ 32
-DU_CAP      equ 40
-DU_ENTRIES  equ 48
+DU_SRC      equ 40          ; the source dict; entries and the bound are read
+                            ;   from it every turn, never cached
+DU_KEYV     equ 48          ; key and value, held across dict_set: both are
+DU_VALV     equ 56          ;   borrowed from a table user code can empty
+DU_ORIGN    equ 64          ; the source's dk_nentries when the walk started
 DEF_FUNC op_dict_update
     push rbx
     push r14                   ; extra callee-saved
-    sub rsp, 32                ; locals + alignment
+    sub rsp, 64                ; locals + alignment
 
     VPOP_VAL rsi, r8           ; rsi = mapping to merge from
     cmp r8d, TAG_PTR
@@ -2099,18 +2102,24 @@ DEF_FUNC op_dict_update
     mov rsi, [rsi + PyDictObject.ob_size]
     call dict_reserve
     pop rsi
+    mov [rbp - DU_SRC], rsi
     mov rax, [rsi + PyDictObject.dk_nentries]
-    mov [rbp - DU_CAP], rax
-    mov rax, [rsi + PyDictObject.entries]
-    mov [rbp - DU_ENTRIES], rax          ; entries ptr
+    mov [rbp - DU_ORIGN], rax
     xor ebx, ebx              ; index
 
 .du_loop:
-    cmp rbx, [rbp - DU_CAP]
+    ; The bound AND the entry array come from the source header every turn.
+    ; dict_set runs user code -- __hash__ and __eq__ on the target's keys --
+    ; and that code can clear the source, which frees the table this used to
+    ; hold in a frame slot and points the dict at the one-slot read-only
+    ; dict_empty_entries.  Cached, the walk then read a freed array to a
+    ; stale bound and inserted what it found.
+    mov rax, [rbp - DU_SRC]
+    cmp rbx, [rax + PyDictObject.dk_nentries]
     jge .du_done
 
     ; Check if entry has a key and value_tag != TAG_NULL
-    mov rax, [rbp - DU_ENTRIES]
+    mov rax, [rax + PyDictObject.entries]
     imul rcx, rbx, DictEntry_size
     add rax, rcx
     mov rsi, [rax + DictEntry.key]
@@ -2118,11 +2127,30 @@ DEF_FUNC op_dict_update
     jz .du_next
     mov rdx, [rax + DictEntry.value]
 
+    ; Both are borrowed out of that table, so both are held for the call.
+    mov [rbp - DU_KEYV], rsi
+    mov [rbp - DU_VALV], rdx
+    INCREF_V rsi, rcx
+    INCREF_V rdx, rcx
+
     ; dict_set(target, key, value, value_tag, key_tag)
     push rbx
     mov rdi, [rbp - DU_DICT]
     call dict_set
     pop rbx
+    push rbx
+    mov rdi, [rbp - DU_KEYV]
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - DU_VALV]
+    DECREF_V rdi, rcx
+    pop rbx
+
+    ; And say so.  CPython's dict_merge compares the source's dk_nentries
+    ; against what it was after every insert, with this wording.
+    mov rax, [rbp - DU_SRC]
+    mov rax, [rax + PyDictObject.dk_nentries]
+    cmp rax, [rbp - DU_ORIGN]
+    jne .du_mutated
 
 .du_next:
     inc rbx
@@ -2137,11 +2165,15 @@ DEF_FUNC op_dict_update
     call obj_decref
     pop rdi
 
-    add rsp, 32
+    add rsp, 64
     pop r14
     pop rbx
     leave
     DISPATCH
+
+.du_mutated:
+    extern exc_RuntimeError_type
+    RAISE exc_RuntimeError_type, "dict mutated during update"
 
 .du_type_error:
     RAISE exc_TypeError_type, "dict.update() argument must be a dict"
@@ -2157,18 +2189,20 @@ extern dict_get
 
 DM_SOURCE   equ 24
 DM_DICT     equ 32
-DM_CAP      equ 40
-DM_ENTRIES  equ 48
-DM_FUNC     equ 56          ; the callable, for the message
-DM_TEMP     equ 64          ; a dict built from a non-dict mapping, or 0
-DM_TYPE     equ 72          ; the source's type, for the message
+DM_SRC      equ 40          ; the source dict; see DU_SRC above
+DM_KEYV     equ 48          ; key and value, held across dict_get/dict_set
+DM_VALV     equ 56
+DM_ORIGN    equ 64          ; the source's dk_nentries when the walk started
+DM_FUNC     equ 80          ; the callable, for the message
+DM_TEMP     equ 88          ; a dict built from a non-dict mapping, or 0
+DM_TYPE     equ 96          ; the source's type, for the message
 DEF_FUNC op_dict_merge
     push rbx
     push r14
     ; 64, not 48: the two pushes above put the first slot at [rbp - 24], so
     ; the last one -- DM_TYPE at 72 -- needs 72 - 16 bytes of frame under it.
     ; The parity is unchanged, which is what the handler rule cares about.
-    sub rsp, 64
+    sub rsp, 96
 
     mov qword [rbp - DM_TEMP], 0
 
@@ -2212,22 +2246,31 @@ DEF_FUNC op_dict_merge
     mov rsi, [rsi + PyDictObject.ob_size]
     call dict_reserve
     pop rsi
+    mov [rbp - DM_SRC], rsi
     mov rax, [rsi + PyDictObject.dk_nentries]
-    mov [rbp - DM_CAP], rax
-    mov rax, [rsi + PyDictObject.entries]
-    mov [rbp - DM_ENTRIES], rax          ; entries ptr
+    mov [rbp - DM_ORIGN], rax
     xor ebx, ebx              ; index
 
 .dm_loop:
-    cmp rbx, [rbp - DM_CAP]
+    ; Read from the source header every turn, and hold the two Values across
+    ; both calls; see op_dict_update above for what a cached table costs.
+    ; This loop makes TWO calls into user code per entry, dict_get's probe
+    ; and dict_set's, so it had two chances at it.
+    mov rax, [rbp - DM_SRC]
+    cmp rbx, [rax + PyDictObject.dk_nentries]
     jge .dm_done
 
-    mov rax, [rbp - DM_ENTRIES]
+    mov rax, [rax + PyDictObject.entries]
     imul rcx, rbx, DictEntry_size
     add rax, rcx
     mov rsi, [rax + DictEntry.key]
     test rsi, rsi
     jz .dm_next
+    mov rdx, [rax + DictEntry.value]
+    mov [rbp - DM_KEYV], rsi
+    mov [rbp - DM_VALV], rdx
+    INCREF_V rsi, rcx
+    INCREF_V rdx, rcx
 
     ; Check for duplicate: dict_get(target, key, key_tag).  dict_get returns
     ; its tag in edx, so the key tag must not be restored over it.
@@ -2239,15 +2282,23 @@ DEF_FUNC op_dict_merge
 
     ; dict_set(target, key, value, value_tag, key_tag)
     pop rbx
-    mov rax, [rbp - DM_ENTRIES]
-    imul rcx, rbx, DictEntry_size
-    add rax, rcx
-    mov rsi, [rax + DictEntry.key]
-    mov rdx, [rax + DictEntry.value]
+    mov rsi, [rbp - DM_KEYV]
+    mov rdx, [rbp - DM_VALV]
     push rbx
     mov rdi, [rbp - DM_DICT]
     call dict_set
     pop rbx
+    push rbx
+    mov rdi, [rbp - DM_KEYV]
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - DM_VALV]
+    DECREF_V rdi, rcx
+    pop rbx
+
+    mov rax, [rbp - DM_SRC]
+    mov rax, [rax + PyDictObject.dk_nentries]
+    cmp rax, [rbp - DM_ORIGN]
+    jne .dm_mutated
 
 .dm_next:
     inc rbx
@@ -2269,7 +2320,7 @@ DEF_FUNC op_dict_merge
     call obj_decref
     pop rdi
 
-    add rsp, 64
+    add rsp, 96
     pop r14
     pop rbx
     leave
@@ -2314,27 +2365,37 @@ DEF_FUNC op_dict_merge
 
 .dm_propagate:
     mov [rel eval_saved_r13], r13
-    add rsp, 64
+    add rsp, 96
     pop r14
     pop rbx
     leave
     extern eval_exception_unwind
     jmp eval_exception_unwind
 
+.dm_mutated:
+    RAISE exc_RuntimeError_type, "dict mutated during update"
+
 .dm_dup_error:
     pop rbx                    ; balance push from before dict_get
+    ; The value's reference goes back now; the key's is wanted one line
+    ; further on, and goes back after obj_str has read it.
+    mov rdi, [rbp - DM_VALV]
+    DECREF_V rdi, rcx
     ; CPython names the callable and the key: "f() got multiple values for
     ; keyword argument 'a'".  The key goes through str(), which is what
     ; CPython's %S does, so a non-str key reads as itself rather than
     ; crashing the formatter.
-    mov rax, [rbp - DM_ENTRIES]
-    imul rcx, rbx, DictEntry_size
-    add rax, rcx
-    mov rdi, [rax + DictEntry.key]
+    mov rdi, [rbp - DM_KEYV]            ; still held; the table may be gone
     sub rsp, 8                  ; this handler carves an odd frame
     extern obj_str
     call obj_str
     add rsp, 8
+    push rax
+    push rax                            ; pad
+    mov rdi, [rbp - DM_KEYV]
+    DECREF_V rdi, rcx
+    pop rax
+    pop rax
     test rax, rax
     jz .dm_dup_plain
     mov [rbp - DM_TYPE], rax            ; the str, held while it is read
@@ -2394,6 +2455,8 @@ END_FUNC op_kw_names
 extern set_new
 extern set_add
 extern set_type
+extern frozenset_type
+extern set_reserve
 
 BSE_COUNT   equ 8
 BSE_SET     equ 16
@@ -2407,6 +2470,12 @@ DEF_FUNC op_build_set, 24   ; + 0 pushes; a handler is entered ALIGNED, so this 
     ; Allocate empty set
     call set_new
     mov [rbp - BSE_SET], rax          ; save set
+
+    ; The element count is known, so take the room once.  A twenty-element
+    ; literal grew its table twice on the way, rehashing everything each time.
+    mov rdi, rax
+    mov rsi, [rbp - BSE_COUNT]
+    call set_reserve
 
     ; Pop items and add to set
     mov rcx, [rbp - BSE_COUNT]
@@ -2523,9 +2592,42 @@ DEF_FUNC op_set_update
     mov rdi, [r13 + rcx]      ; rdi = set
     mov [rbp - SU_SOURCE], rdi          ; save set
 
-    ; Check if iterable is a set (direct iteration over entries)
+    ; Take the room in one step whenever the source can say how big it is.
+    ;
+    ; A set literal of constants is a FROZENSET in co_consts plus BUILD_SET 0
+    ; and SET_UPDATE, so `{1, 2, 3, 4, 5}` arrives here as an empty set and a
+    ; five-element source -- and the empty set had to grow from the shared
+    ; one-slot table to eight and then to thirty-two, two mallocs and two
+    ; rehashes, to hold five ints.  set/frozenset/list/tuple all keep their
+    ; element count at ob_size, and none of the four can lie about it.
     mov rax, [rsi + PyObject.ob_type]
     lea rdx, [rel set_type]
+    cmp rax, rdx
+    je .su_presize
+    lea rdx, [rel frozenset_type]
+    cmp rax, rdx
+    je .su_presize
+    lea rdx, [rel list_type]
+    cmp rax, rdx
+    je .su_presize
+    lea rdx, [rel tuple_type]
+    cmp rax, rdx
+    jne .su_sized
+.su_presize:
+    mov rdi, [rbp - SU_SOURCE]              ; the set being updated
+    mov rsi, [rsi + PyDictObject.ob_size]   ; +16 on all four types
+    call set_reserve
+    mov rsi, [rbp - SU_SET]                 ; the iterable again
+.su_sized:
+
+    ; A set or a frozenset is walked slot by slot: its own entry array is
+    ; already the list of its elements, so an iterator object would be an
+    ; allocation to answer a question the table answers.
+    mov rax, [rsi + PyObject.ob_type]
+    lea rdx, [rel set_type]
+    cmp rax, rdx
+    je .su_from_set
+    lea rdx, [rel frozenset_type]
     cmp rax, rdx
     je .su_from_set
 
@@ -2591,24 +2693,31 @@ DEF_FUNC op_set_update
     jmp eval_exception_unwind
 
 .su_from_set:
-    ; Iterable is a set - iterate entries directly
+    ; Iterable is a set or frozenset - iterate entries directly
     mov rax, [rsi + PyDictObject.capacity]
     mov [rbp - SU_CAP], rax          ; capacity (reuse slot)
+    ; The source is a quarter full at most -- set_resize sizes from the live
+    ; count and overshoots by four -- so the capacity is the wrong bound.
+    ; r14 counts the live elements down; the capacity stays as the backstop,
+    ; because set_add runs __eq__ and __eq__ can mutate the source.
+    mov r14, [rsi + PyDictObject.ob_size]
     xor ebx, ebx              ; index
 
 .su_set_loop:
+    test r14, r14
+    jz .su_set_done
     cmp rbx, [rbp - SU_CAP]
     jge .su_set_done
 
     mov rax, [rbp - SU_SET]         ; source set
     mov rax, [rax + PyDictObject.entries]
-    imul rcx, rbx, 16         ; SET_ENTRY_SIZE = 16
-    add rax, rcx
+    lea rcx, [rbx + rbx]      ; SET_ENTRY_SIZE = 16, which two lea reach
 
     ; Check if entry has a key
-    mov rsi, [rax + 8]        ; SET_ENTRY_KEY offset = 8
+    mov rsi, [rax + rcx*8 + 8]      ; SET_ENTRY_KEY offset = 8
     test rsi, rsi
     jz .su_set_next
+    dec r14
 
     ; set_add(target_set, key Value)
     push rbx

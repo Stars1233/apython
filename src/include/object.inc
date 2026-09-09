@@ -239,12 +239,35 @@ DICT_INIT_CAP   equ 8               ; initial hash-table slots for dict and set
 ; i = (i*5 + perturb + 1) & mask.  CPython's PERTURB_SHIFT, and Tim Peters'
 ; note that 4 and 6 were not significantly worse.
 PERTURB_SHIFT   equ 5
+
+; A set uses the same recurrence, and that is NOT what CPython does: its set
+; walks LINEAR_PROBES (9) consecutive entries before each jump, on the
+; argument that a set entry is a contiguous sixteen bytes so ten of them are
+; two and a half prefetchable cache lines.  Measured here the run only costs.
+; See src/pyo/set.asm's probe for the numbers and the reason.
+
 ENTRY_TOMBSTONE_HASH equ -1
 
 ; A set entry mirrors DictEntry minus the value: hash at +0, key Value at +8.
 SET_ENTRY_HASH equ 0
 SET_ENTRY_KEY  equ 8
 SET_ENTRY_SIZE equ 16           ; the two fields above, and nothing else
+
+; A set reuses the dict header but not its compact-layout words: dk_indices,
+; dk_nentries and dk_kind mean nothing to a set.  The first of them is set's
+; pop() cursor -- CPython calls it `finger` -- so draining a set does not
+; rescan from slot zero on every call.  It is only ever a hint: it is masked
+; before use, so a stale one costs a wrong starting slot and nothing more.
+SET_FINGER equ 56               ; the word PyDictObject calls dk_indices
+
+; The second is a frozenset's cached hash, -1 until something asks for it.
+; CPython's PySetObject has the same field and the same sentinel, and a
+; MUTABLE set simply leaves it at -1 forever -- which is what makes the
+; O(1) inequality shortcut in set_richcompare need no type test: two sets
+; whose cached hashes are both set and differ cannot be equal, and a set
+; that never cached one never takes the shortcut.  frozenset_hash maps a
+; computed -1 onto another constant so the sentinel stays unambiguous.
+SET_HASH equ 64                 ; the word PyDictObject calls dk_nentries
 
 ; Set-entry counterpart of ENTRY_CLASSIFY.
 %macro SET_ENTRY_CLASSIFY 3     ; %1 = entry ptr, %2 = empty label, %3 = tombstone label

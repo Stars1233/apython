@@ -172,6 +172,7 @@ test_dict_fromkeys
 test_dict_int_keys
 test_dict_ior
 test_dict_mutate_iter
+test_dict_mutate_under_write
 test_dict_numkey
 test_dict_ops
 test_dict_order
@@ -234,6 +235,7 @@ test_frame_live
 test_frame_object_cycles
 test_frames_and_time
 test_frozenset_descriptors
+test_frozenset_hash
 test_frozenset
 test_fstring_build
 test_fstring_pep701
@@ -440,13 +442,18 @@ test_rsplit_boundaries
 test_select
 test_sequence_iteration
 test_setattr_dunder
+test_set_contains_readonly
+test_set_ctor_exc
 test_set_fatval
+test_set_gc_walk
+test_set_growth
 test_set_inplace
 test_set_methods
 test_set_mutated_under_probe
 test_set_name_metatype
 test_set_name
 test_set_ops
+test_set_probe_sequence
 test_sets
 test_set_tombstone_reuse
 test_set_value_probe

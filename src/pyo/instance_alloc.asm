@@ -380,6 +380,9 @@ DEF_FUNC builtin_sub_init_base, 8            ; 1 pushes, so rsp is 16-aligned
     xor eax, eax
     rep stosq
     mov qword [rbx + PyDictObject.capacity], DICT_INIT_CAP
+    ; A frozenset caches its hash there, and -1 is the not-yet-computed
+    ; sentinel; the zeroed instance would otherwise claim a hash of zero.
+    mov qword [rbx + SET_HASH], -1
 
 .bsib_done:
     pop rbx
