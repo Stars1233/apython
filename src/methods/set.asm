@@ -376,18 +376,26 @@ DEF_FUNC_LOCAL set_binop_union, SMU_FRAME
 
 .smu_add_other:
     ; Now add all elements from other
+    mov r12, [r15 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
-
 .smu_add_loop:
+    ; The walk ends when every live element has been seen, not when the
+    ; table runs out.  set_resize sizes from the live count and overshoots by
+    ; four, so a set is a quarter full at most and three slots in four are
+    ; empty -- and with the identity hash an int carries, the live ones
+    ; cluster at the bottom and the whole tail is dead.  r12 counts them down.
+    test r12, r12
+    jz .smu_done
     cmp rcx, [r15 + PyDictObject.capacity]
     jge .smu_done
     mov [rbp - SMU_IDX], rcx
 
     mov rdx, [r15 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .smu_al_next
+    dec r12
 
     INCREF_V rsi, rax                    ; ours across __eq__
     mov [rbp - SMU_KEY], rsi
@@ -529,22 +537,25 @@ DEF_FUNC_LOCAL set_update_one, SU_FRAME
     mov rsi, [r12 + PyDictObject.ob_size]
     call set_reserve
 
+    mov r13, [r12 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
-
 .supd_loop:
     ; The capacity and the entry array are read INSIDE the loop, and the key
     ; is held for the turn: set_add probes with it, the probe runs __eq__,
     ; and __eq__ may clear or resize the very set being walked -- taking the
     ; key's last reference, or the array, with it.  See set_binop_union.
+    test r13, r13
+    jz .supd_done
     cmp rcx, [r12 + PyDictObject.capacity]
     jge .supd_done
     mov [rbp - SU_IDX], rcx
 
     mov rdx, [r12 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .supd_next
+    dec r13
 
     INCREF_V rsi, rax
     mov [rbp - SU_KEY], rsi
@@ -634,18 +645,21 @@ DEF_FUNC_LOCAL set_binop_intersection, SMI_FRAME
     mov r12, r15
     mov r13, r14
 .smi_sides:
+    mov r14, [r12 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
-
 .smi_loop:
+    test r14, r14
+    jz .smi_done
     cmp rcx, [r12 + PyDictObject.capacity]
     jge .smi_done
     mov [rbp - SMI_IDX], rcx
 
     mov rdx, [r12 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .smi_next
+    dec r14
 
     INCREF_V rsi, rax                    ; ours for the rest of this turn
     mov [rbp - SMI_KEY], rsi
@@ -736,18 +750,21 @@ DEF_FUNC_LOCAL set_binop_difference, SMDF_FRAME
     mov rbx, rax            ; new set
 
     ; Iterate self, add if NOT in other
+    mov r12, [r14 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
-
 .smdf_loop:
+    test r12, r12
+    jz .smdf_done
     cmp rcx, [r14 + PyDictObject.capacity]
     jge .smdf_done
     mov [rbp - SMDF_IDX], rcx
 
     mov rdx, [r14 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .smdf_next
+    dec r12
 
     INCREF_V rsi, rax
     mov [rbp - SMDF_KEY], rsi
@@ -1130,18 +1147,21 @@ DEF_FUNC set_method_symmetric_difference, SMSD_FRAME
     mov rbx, rax            ; new set
 
     ; Add elements in self but NOT in other
+    mov r12, [r14 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
-
 .smsd_self_loop:
+    test r12, r12
+    jz .smsd_other
     cmp rcx, [r14 + PyDictObject.capacity]
     jge .smsd_other
     mov [rbp - SMSD_IDX], rcx
 
     mov rdx, [r14 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .smsd_self_next
+    dec r12
 
     INCREF_V rsi, rax
     mov [rbp - SMSD_KEY], rsi
@@ -1165,18 +1185,21 @@ DEF_FUNC set_method_symmetric_difference, SMSD_FRAME
 
 .smsd_other:
     ; Add elements in other but NOT in self
+    mov r12, [r15 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
-
 .smsd_other_loop:
+    test r12, r12
+    jz .smsd_done
     cmp rcx, [r15 + PyDictObject.capacity]
     jge .smsd_done
     mov [rbp - SMSD_IDX], rcx
 
     mov rdx, [r15 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .smsd_other_next
+    dec r12
 
     INCREF_V rsi, rax
     mov [rbp - SMSD_KEY], rsi
@@ -1264,18 +1287,21 @@ DEF_FUNC set_method_issubset, SMSS_FRAME
     jz .smss_fail
     mov r15, rax            ; owned: the set itself, or one built from it
 
+    mov r12, [r14 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
-
 .smss_loop:
+    test r12, r12
+    jz .smss_true
     cmp rcx, [r14 + PyDictObject.capacity]
     jge .smss_true
     mov [rbp - SMSS_IDX], rcx
 
     mov rdx, [r14 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .smss_next
+    dec r12
 
     INCREF_V rsi, rax                    ; ours across __eq__
     mov [rbp - SMSS_KEY], rsi
@@ -1363,18 +1389,21 @@ DEF_FUNC set_method_issuperset, SMIS_FRAME
     jz .smis_fail
     mov r14, rax            ; owned
 
+    mov r12, [r14 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
-
 .smis_loop:
+    test r12, r12
+    jz .smis_true
     cmp rcx, [r14 + PyDictObject.capacity]
     jge .smis_true
     mov [rbp - SMIS_IDX], rcx
 
     mov rdx, [r14 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .smis_next
+    dec r12
 
     INCREF_V rsi, rax                    ; ours across __eq__
     mov [rbp - SMIS_KEY], rsi
@@ -1474,18 +1503,21 @@ DEF_FUNC set_method_isdisjoint, SMDJ_FRAME
     mov r12, r15
     mov r13, r14
 .smdj_sides:
+    mov r14, [r12 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
-
 .smdj_loop:
+    test r14, r14
+    jz .smdj_true
     cmp rcx, [r12 + PyDictObject.capacity]
     jge .smdj_true
     mov [rbp - SMDJ_IDX], rcx
 
     mov rdx, [r12 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
+    lea rax, [rcx + rcx]
+    mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .smdj_next
+    dec r14
 
     INCREF_V rsi, rax                    ; ours across __eq__
     mov [rbp - SMDJ_KEY], rsi

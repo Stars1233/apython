@@ -1011,9 +1011,17 @@ DEF_FUNC set_richcompare, SRC_FRAME
     ; Every element of self must be in other
     mov rbx, rdi               ; self (set)
     mov r12, rsi               ; other (set)
-    mov r13, [rbx + PyDictObject.capacity]
+    mov r13, [rbx + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx               ; index
 .src_eq_loop:
+    ; The walk ends when every live element has been seen rather than at the
+    ; end of the table.  set_resize sizes from the live count and overshoots
+    ; by four, so a set is a quarter full at most; r13 counts the live ones
+    ; down.  The capacity and the entry array are still read INSIDE the loop
+    ; because set_contains runs __eq__, which can resize the set being
+    ; walked -- the counter is only a bound, never a pointer.
+    test r13, r13
+    jz .src_true
     cmp rcx, [rbx + PyDictObject.capacity]
     jge .src_true
     mov [rbp - SRC_IDX], rcx
@@ -1023,8 +1031,9 @@ DEF_FUNC set_richcompare, SRC_FRAME
     add rax, [rbx + PyDictObject.entries]
     ; Occupied entries have a non-zero key Value
     mov rsi, [rax + SET_ENTRY_KEY]
-    test rsi, rsi
+    test rsi, rsi                        ; occupied?
     jz .src_eq_next
+    dec r13
 
     ; Entry is occupied — check if key is in other set
     INCREF_V rsi, rax                    ; ours across __eq__
@@ -1047,11 +1056,19 @@ DEF_FUNC set_richcompare, SRC_FRAME
 
 .src_le:
     ; self <= other: self is subset of other (every elem of self in other)
+    ; A set with more elements than the other cannot be a subset of it, and
+    ; that is two loads where the walk below is a lookup per element.
+    ; CPython's set_issubset opens with the same test.
+    mov rax, [rdi + PyDictObject.ob_size]
+    cmp rax, [rsi + PyDictObject.ob_size]
+    ja .src_false
     mov rbx, rdi               ; self
     mov r12, rsi               ; other
-    mov r13, [rbx + PyDictObject.capacity]
-    xor ecx, ecx
+    mov r13, [rbx + PyDictObject.ob_size]   ; live elements still to visit
+    xor ecx, ecx               ; index
 .src_le_loop:
+    test r13, r13
+    jz .src_true
     cmp rcx, [rbx + PyDictObject.capacity]
     jge .src_true
     mov [rbp - SRC_IDX], rcx
@@ -1060,6 +1077,7 @@ DEF_FUNC set_richcompare, SRC_FRAME
     mov rsi, [rax + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .src_le_next
+    dec r13
     INCREF_V rsi, rax                    ; ours across __eq__
     mov [rbp - SRC_KEY], rsi
     mov rdi, r12
@@ -1079,11 +1097,16 @@ DEF_FUNC set_richcompare, SRC_FRAME
 
 .src_ge:
     ; self >= other: other is subset of self → swap and do <=
+    mov rax, [rsi + PyDictObject.ob_size]
+    cmp rax, [rdi + PyDictObject.ob_size]
+    ja .src_false              ; other is the bigger one; see .src_le
     mov rbx, rsi               ; other (check all of other in self)
     mov r12, rdi               ; self
-    mov r13, [rbx + PyDictObject.capacity]
-    xor ecx, ecx
+    mov r13, [rbx + PyDictObject.ob_size]   ; live elements still to visit
+    xor ecx, ecx               ; index
 .src_ge_loop:
+    test r13, r13
+    jz .src_true
     cmp rcx, [rbx + PyDictObject.capacity]
     jge .src_true
     mov [rbp - SRC_IDX], rcx
@@ -1092,6 +1115,7 @@ DEF_FUNC set_richcompare, SRC_FRAME
     mov rsi, [rax + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
     jz .src_ge_next
+    dec r13
     INCREF_V rsi, rax                    ; ours across __eq__
     mov [rbp - SRC_KEY], rsi
     mov rdi, r12

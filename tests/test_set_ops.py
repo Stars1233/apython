@@ -247,3 +247,73 @@ for src in ([1, 2, 3], (4, 5), range(6, 9), "xy", {10: 0, 11: 0}, iter([12])):
 q = {1}
 q.update([2], (3,), range(4, 6))
 print(sorted(q))
+
+# --- the walks stop when they have seen every live element ----------------
+# Each operator's loop now counts ob_size down instead of running to the end
+# of the table, so what has to hold is that ob_size and "number of occupied
+# slots" never disagree.  They disagree if a tombstone is miscounted, if a
+# resize forgets one, or if an __eq__ mutates the set mid-walk -- so the
+# operands below are punched full of holes, are of very different sizes, and
+# in the last group carry an __eq__ that empties the other side.
+holed = set(range(400))
+for i in range(400):
+    if i % 5:
+        holed.discard(i)
+plain = set(range(0, 400, 10))
+drained = set(range(100))
+for i in range(100):
+    drained.discard(i)
+big = set(range(2000))
+small = {3, 7, 11}
+empty = set()
+
+sets = [holed, plain, drained, big, small, empty]
+for a in sets:
+    for b in sets:
+        print(len(a | b), len(a & b), len(a - b), len(a ^ b),
+              a <= b, a >= b, a < b, a > b, a == b, a.isdisjoint(b))
+
+# and the method forms, which coerce their argument first
+for a in (holed, small, empty):
+    print(len(a.union([1, 2])), len(a.intersection(range(50))),
+          len(a.difference("xy")), len(a.symmetric_difference((1, 2, 3))),
+          a.issubset(range(2000)), a.issuperset([]), a.isdisjoint([9999]))
+
+
+# an __eq__ that clears the other operand while the walk is running
+class Bomb:
+    target = None
+
+    def __hash__(self):
+        return 12345
+
+    def __eq__(self, o):
+        t = Bomb.target
+        if t is not None:
+            Bomb.target = None
+            t.clear()
+        return False
+
+
+def blow(op):
+    # How MANY elements survive is slot order, and slot order is not the
+    # same in two implementations -- what has to hold is that the walk ends,
+    # that it answers a set, and that every element in the answer came from
+    # an operand rather than from a slot the clear left behind.
+    victim = set(range(30))
+    live = set(range(20))
+    live.add(Bomb())
+    victim.add(Bomb())
+    everything = set(range(30)) | set(range(20))
+    Bomb.target = victim
+    try:
+        r = op(live, victim)
+    except (RuntimeError, TypeError):
+        return "raised"
+    ok = all(x in everything or isinstance(x, Bomb) for x in r)
+    return (type(r).__name__, ok, len(r) <= 51)
+
+
+for op in (lambda a, b: a | b, lambda a, b: a & b, lambda a, b: a - b,
+           lambda a, b: a ^ b):
+    print(blow(op))
