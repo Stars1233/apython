@@ -88,8 +88,14 @@ END_FUNC dict_new
 ;; 0.18x of CPython on d_copy and 0.13x on d_from_dict.  Cloning is one
 ;; ap_memcpy each way and one pass taking a reference per live element.
 ;;
-;; The copy holds exactly what the source holds, so it is collector-tracked
-;; exactly when the source is: the tracked bit needs no re-derivation.
+;; The copy holds exactly what the source holds, so a NON-EMPTY one is
+;; collector-tracked exactly when the source is and the bit needs no
+;; re-derivation.  An EMPTY source yields an untracked copy however the source
+;; itself is marked, which is CPython's answer as well -- PyDict_Copy returns a
+;; plain PyDict_New() when ma_used is 0.  The two come apart because clear()
+;; does not untrack: `d = {1: []}; d.clear()` leaves a dict that is still in a
+;; generation and holds nothing, and a copy of it holds nothing either, so it
+;; cannot be part of a cycle and there is nothing for the collector to walk.
 ;;
 ;; dict.copy() is this, and so is the namespace copy type_from_parts makes:
 ;; a class must not keep the caller's dict as its tp_dict, or `ns['x'] = 1`
@@ -108,6 +114,7 @@ DEF_FUNC dict_copy_shallow      ; 4 pushes, so rsp stays 16-aligned
     mov r12, rax                ; dst
 
     ; An empty source needs no table at all: the shared one is already right.
+    ; This also skips the tracking below, deliberately -- see the docblock.
     cmp qword [rbx + PyDictObject.ob_size], 0
     je .dcs_done
 
@@ -156,7 +163,8 @@ DEF_FUNC dict_copy_shallow      ; 4 pushes, so rsp stays 16-aligned
     jmp .dcs_loop
 
 .dcs_track:
-    ; Tracked exactly when the source is: the copy holds the same objects.
+    ; Tracked when the source is: the copy holds the same objects.  Only a
+    ; non-empty source reaches here.
     cmp qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_next], 0
     je .dcs_done
     mov rdi, r12

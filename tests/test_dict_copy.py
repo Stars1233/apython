@@ -100,10 +100,30 @@ def churn():
 churn()
 print(seen)
 
-# The clone is collector-tracked exactly when the source is.
+# A non-empty clone is collector-tracked exactly when its source is.
 print(gc.is_tracked({}.copy()), gc.is_tracked({1: 2}.copy()),
       gc.is_tracked({1: []}.copy()))
 print(gc.is_tracked(dict({1: []})), gc.is_tracked(dict({1: 2})))
+
+# An EMPTY source is the case where the two come apart, because clear() does
+# not untrack: this dict is still in a generation and holds nothing.  Every
+# copy of it is untracked, which is what CPython answers too -- PyDict_Copy
+# returns a plain PyDict_New() when ma_used is 0 -- and is right, because a
+# dict holding nothing cannot be part of a cycle.
+emptied = {1: []}
+print(gc.is_tracked(emptied))
+emptied.clear()
+print(gc.is_tracked(emptied), gc.is_tracked(emptied.copy()),
+      gc.is_tracked(dict(emptied)), gc.is_tracked({**emptied}))
+into = {}
+into.update(emptied)
+print(gc.is_tracked(into))
+# ...and it starts being tracked again the moment something trackable goes in
+emptied["k"] = []
+print(gc.is_tracked(emptied), gc.is_tracked(emptied.copy()))
+emptied["self"] = emptied
+del emptied, into
+print(gc.collect() >= 0)
 cyc = {}
 cyc["s"] = cyc
 cc = cyc.copy()
