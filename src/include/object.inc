@@ -239,6 +239,13 @@ DICT_INIT_CAP   equ 8               ; initial hash-table slots for dict and set
 ; i = (i*5 + perturb + 1) & mask.  CPython's PERTURB_SHIFT, and Tim Peters'
 ; note that 4 and 6 were not significantly worse.
 PERTURB_SHIFT   equ 5
+
+; A set uses the same recurrence, and that is NOT what CPython does: its set
+; walks LINEAR_PROBES (9) consecutive entries before each jump, on the
+; argument that a set entry is a contiguous sixteen bytes so ten of them are
+; two and a half prefetchable cache lines.  Measured here the run only costs.
+; See src/pyo/set.asm's probe for the numbers and the reason.
+
 ENTRY_TOMBSTONE_HASH equ -1
 
 ; A set entry mirrors DictEntry minus the value: hash at +0, key Value at +8.

@@ -416,16 +416,41 @@ DEF_FUNC_LOCAL set_find_slot
     mov r15, [rbx + PyDictObject.capacity]
     dec r15                     ; mask
 
-    ; slot = hash & mask
+    ; i = (i * 5 + 1 + perturb) & mask, perturb >>= 5 -- dict's recurrence,
+    ; and dict's for a reason that had to be measured rather than assumed.
+    ;
+    ; The probe used to be purely LINEAR, which is fine until keys collide --
+    ; and an int hashes to itself, so `i * 4096` sends every key to slot
+    ; zero.  Two hundred of those formed one run of two hundred and a lookup
+    ; walked half of it.
+    ;
+    ; CPython's set does not use its dict's recurrence either.  It walks
+    ; LINEAR_PROBES (9) consecutive entries before each jump, on the argument
+    ; in setobject.c's header: a set entry is a contiguous sixteen bytes, so
+    ; ten of them are two and a half cache lines and one predictable stride,
+    ; where a dict's compact layout would chase ten scattered entries.  That
+    ; argument assumes the keys are SCATTERED to begin with.  Ours are not:
+    ; an int hash is the identity, so a set of small ints -- which is most
+    ; sets, and is exactly what n-queens' three diagonal sets hold -- packs
+    ; into one dense band at the bottom of the table.  A linear run walks
+    ; that band; a jump leaves it at once.
+    ;
+    ; The run length was swept over the whole set harness and the macro
+    ; suite.  m_nqueens, which is 23% set code and was the largest single
+    ; loss in the suite, reads 351ms at a run of 0, 380 at 1, 417 at 2, 443
+    ; at 3, 486 at 5 and 532 at CPython's 9 -- monotone, with no interior
+    ; optimum to look for.  The set harness agrees or is indifferent on every
+    ; case and prefers 0 sharply where collisions are the measurement:
+    ; st_in_collide 1.57x at 9 against 4.33x at 0.
+    ;
+    ; r8 = perturb.  It is the only extra state, and the recurrence is
+    ; full-period without it -- 5i+1 over a power of two reaches every slot --
+    ; which is what makes a miss terminate once the load factor guarantees an
+    ; empty one.
+    mov r8, r13                 ; perturb = hash
     mov rcx, r13
-    and rcx, r15
+    and rcx, r15                ; i = hash & mask
 
-    ; There is no probe counter.  A slot that is not empty holds a live entry
-    ; or a tombstone, and set_add keeps their sum at three quarters of
-    ; capacity, so a quarter of the table is always empty and the walk always
-    ; ends.  Counting cost a dec, a branch and a whole register for a bound
-    ; the load factor already made unreachable, which is the register the
-    ; entry array now lives in.
 .find_loop:
     ; entry = entries + slot * SET_ENTRY_SIZE.  SET_ENTRY_SIZE is 16, which no
     ; index scale reaches, but two lea do -- and without imul's latency in the
@@ -453,11 +478,18 @@ DEF_FUNC_LOCAL set_find_slot
 
     ; Different Values still need the real question asked: 1.0 == 1, and a
     ; user class decides for itself.
+    ; The perturb is caller-saved, so it goes on the stack -- but only here,
+    ; on the path where a hash matched and the two keys are not the same
+    ; object, which is rare.
     push rcx                    ; save slot
     push rax                    ; save entry ptr
+    push r8                     ; perturb; caller-saved, and the walk needs it
+    push r8                     ; pad, so the call stays 16-aligned
     mov rsi, r12                ; b = the lookup key
     call set_keys_equal
     mov edi, eax                ; save equality result (survives pops)
+    pop r8                      ; pad
+    pop r8
     pop rax                     ; entry ptr
     pop rcx                     ; slot
 
@@ -492,6 +524,9 @@ DEF_FUNC_LOCAL set_find_slot
     mov [rbp - SFS_FREE], rax
 
 .find_next:
+    shr r8, PERTURB_SHIFT
+    lea rcx, [rcx + rcx*4]      ; i * 5
+    add rcx, r8
     inc rcx
     and rcx, r15
     jmp .find_loop
@@ -584,28 +619,35 @@ DEF_FUNC_LOCAL set_resize_to, SRT_FRAME
     SET_ENTRY_CLASSIFY rax, .rehash_next, .rehash_next
     dec qword [rbp - SRT_LIVE]
 
-    ; Compute new slot: hash & (new_capacity - 1)
     push rcx                    ; save outer index
     mov rcx, [rax + SET_ENTRY_HASH]
+    mov r8, rcx                 ; perturb = hash
     mov rdx, r14
     dec rdx                     ; new mask
-    and rcx, rdx                ; starting slot
+    and rcx, rdx                ; i = hash & new mask
 
     ; Save entry data
     push qword [rax + SET_ENTRY_HASH]
     push qword [rax + SET_ENTRY_KEY]
 
-    ; Linear probe in new table to find empty slot
+    ; Find the first empty slot on set_find_slot's sequence.  It has to be
+    ; that sequence and not a linear scan: a key is findable only if the walk
+    ; that placed it is the walk that goes looking, and a rehash that packed
+    ; a collision run linearly would leave everything past the first slot
+    ; invisible to a lookup that jumps.  There are no tombstones and no
+    ; duplicates in a freshly built table, so nothing is compared -- this is
+    ; CPython's set_insert_clean.
 .rehash_probe:
-    imul rax, rcx, SET_ENTRY_SIZE
-    add rax, r15                ; new entry ptr
+    lea rax, [rcx + rcx]
+    lea rax, [r15 + rax*8]      ; new entry ptr
     cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
     je .rehash_insert
 
+    shr r8, PERTURB_SHIFT
+    lea rcx, [rcx + rcx*4]
+    add rcx, r8
     inc rcx
-    mov rax, r14
-    dec rax
-    and rcx, rax                ; slot = (slot+1) & new_mask
+    and rcx, rdx
     jmp .rehash_probe
 
 .rehash_insert:
@@ -1227,89 +1269,50 @@ END_FUNC set_contains_sq
 ;; ============================================================================
 ;; set_remove(set, key) -> int (0=ok, -1=not found)
 ;; Remove a key from the set
+;;
+;; The probe is set_find_slot's, and now it is ONLY set_find_slot's.  This
+;; used to carry an independent second copy of the whole loop -- its own
+;; restart-after-__eq__ guard, its own tombstone handling, its own advance --
+;; three hundred lines from the original.  Two copies of a probe SEQUENCE is
+;; a bug waiting for its occasion, because a key is findable only if the
+;; sequence that placed it is the sequence that goes looking; the moment
+;; set_find_slot started walking ten slots and jumping, the linear copy here
+;; would have stopped finding anything past the tenth.
 ;; ============================================================================
-SR_ENTRIES equ 8                ; the entry array the probe is walking
-SR_FRAME equ 24                 ; 24 + 5 pushes keeps rsp 16-aligned
-DEF_FUNC set_remove, SR_FRAME
+DEF_FUNC set_remove
     push rbx
     push r12
     push r13
-    push r14
-    push r15
+    push r14                    ; unused; the pair keeps rsp 16-aligned
 
     mov rbx, rdi                ; set
     mov r12, rsi                ; the key, a Value
 
     SET_HASH_VALUE r12, r13     ; r13 = hash
 
-    ; An independent second copy of set_find_slot's probe, because a removal
-    ; has to tombstone the slot it lands on rather than be handed one; it gets
-    ; the same treatment, restart included.
-.sr_restart:
-    mov r14, [rbx + PyDictObject.capacity]  ; probes remaining, counting down
-    mov r15, r14
-    dec r15                     ; mask
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call set_find_slot          ; rax = entry, edx = 1 if the key is there
+    test edx, edx
+    jz .sr_not_found
 
-    ; Starting slot
-    mov rcx, r13
-    and rcx, r15
-
-.sr_probe:
-    dec r14
-    js .sr_not_found
-
-    mov rax, [rbx + PyDictObject.entries]
-    lea rdx, [rcx + rcx]
-    lea rax, [rax + rdx*8]      ; entries + slot * SET_ENTRY_SIZE
-
-    SET_ENTRY_CLASSIFY rax, .sr_not_found, .sr_next
-
-    cmp r13, [rax + SET_ENTRY_HASH]
-    jne .sr_next
-
-    ; Equal Values are the same key; see set_find_slot.
+    ; Tombstone the entry, release the key, and count both sides of it.  An
+    ; EMPTY here rather than a tombstone would end any probe run passing
+    ; through this slot, and every key beyond it would stop being findable.
     mov rdi, [rax + SET_ENTRY_KEY]
-    cmp rdi, r12
-    mov rdx, rax
-    je .sr_found
-
-    mov rdx, [rbx + PyDictObject.entries]
-    mov [rbp - SR_ENTRIES], rdx
-    push rcx                    ; save slot
-    push rax                    ; save entry ptr
-    mov rsi, r12                ; b = the lookup key
-    call set_keys_equal
-    pop rdx                     ; entry ptr
-    pop rcx
-    ; As in set_find_slot: an __eq__ that grew this set has moved the entries
-    ; out from under the pointer just restored.
-    mov rsi, [rbx + PyDictObject.entries]
-    cmp rsi, [rbp - SR_ENTRIES]
-    jne .sr_restart
-    test eax, eax
-    jz .sr_next
-
-.sr_found:
-    ; Found: tombstone the entry, release the key, decrement the size
-    mov rdi, [rdx + SET_ENTRY_KEY]
-    mov qword [rdx + SET_ENTRY_KEY], 0
-    mov qword [rdx + SET_ENTRY_HASH], ENTRY_TOMBSTONE_HASH   ; tombstone
+    mov qword [rax + SET_ENTRY_KEY], 0
+    mov qword [rax + SET_ENTRY_HASH], ENTRY_TOMBSTONE_HASH
     DECREF_V rdi, rsi
     dec qword [rbx + PyDictObject.ob_size]
     inc qword [rbx + PyDictObject.dk_tombstones]
-    xor eax, eax               ; return 0 = success
+    xor eax, eax                ; 0 = removed
     jmp .sr_done
-
-.sr_next:
-    inc rcx
-    and rcx, r15
-    jmp .sr_probe
 
 .sr_not_found:
     mov eax, -1
 
 .sr_done:
-    pop r15
     pop r14
     pop r13
     pop r12

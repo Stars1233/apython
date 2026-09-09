@@ -451,6 +451,7 @@ test_set_mutated_under_probe
 test_set_name_metatype
 test_set_name
 test_set_ops
+test_set_probe_sequence
 test_sets
 test_set_tombstone_reuse
 test_set_value_probe
