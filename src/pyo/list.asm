@@ -1162,24 +1162,11 @@ DEF_FUNC list_contains, LC_FRAME
     mov rdi, [rcx + rax * 8]        ; the element Value
     mov rsi, [rbp - LC_VALUE]
 
-    ; Identity, inline.  obj_richcompare_bool answers this in its own first
-    ; compare, but only after two INCREF_Vs, a frame and a call -- and over a
-    ; list of small integers, where every element IS its Value, that identity
-    ; compare is the only thing it does.
-    cmp rdi, rsi
-    je .found
-
-    ; And two int immediates that are not the same Value are not equal, the
-    ; encoding being one-to-one.  That is the other half of `x in list` over
-    ; ints -- the misses, which the identity arm cannot settle and which are
-    ; every element of the list when the answer is False.
-    V_IS_INT rdi, rdx
-    jb .lc_general
-    V_IS_INT rsi, rdx
-    jb .lc_general
-    jmp .lc_next
-
-.lc_general:
+    ; The two questions a Value can answer without calling anything.  See
+    ; VALUE_EQ_FAST in src/include/value.inc; index, count and remove use the
+    ; same macro, and until they did they were the slow half of a family whose
+    ; other half was three times CPython's speed.
+    VALUE_EQ_FAST rdi, rsi, rdx, .found, .lc_next
     mov edx, PY_EQ
     call obj_richcompare_bool
     cmp eax, -1
@@ -2252,6 +2239,20 @@ DEF_FUNC_LOCAL list_richcompare_inner, LRC_FRAME
     mov [rbp - LRC_OP], rdx
     mov qword [rbp - LRC_IDX], 0
 
+    ; Lengths that differ settle == and != without looking at an element,
+    ; which is CPython's first line here too.  It is not merely a shortcut:
+    ; the loop below cannot reach this answer cheaply, because it compares
+    ; min(len) elements first and only then falls out to the size compare.
+    mov edx, [rbp - LRC_OP]
+    cmp edx, PY_EQ
+    je .lrc_len_shortcut
+    cmp edx, PY_NE
+    jne .lrc_elem_loop
+.lrc_len_shortcut:
+    mov rax, [rdi + PyListObject.ob_size]
+    cmp rax, [rsi + PyListObject.ob_size]
+    jne .lrc_ran_out            ; which compares the sizes for this op
+
 .lrc_elem_loop:
     ; while (i < len(v) && i < len(w))
     mov rax, [rbp - LRC_IDX]
@@ -2268,6 +2269,12 @@ DEF_FUNC_LOCAL list_richcompare_inner, LRC_FRAME
     mov rcx, [rbp - LRC_RIGHT]
     mov rcx, [rcx + PyListObject.ob_item]
     mov rsi, [rcx + rax * 8]
+    ; The two questions a Value can answer without calling anything -- see
+    ; VALUE_EQ_FAST.  For two lists of small integers this is the whole
+    ; comparison, and `a == b` over interned or immediate elements becomes a
+    ; pointer scan with no refcount traffic, which is what CPython's own
+    ; per-element `if (vitem == witem) continue;` buys it.
+    VALUE_EQ_FAST rdi, rsi, rdx, .lrc_next, .lrc_differ
     mov edx, PY_EQ
     call obj_richcompare_bool
     cmp eax, -1
@@ -2275,6 +2282,7 @@ DEF_FUNC_LOCAL list_richcompare_inner, LRC_FRAME
     test eax, eax
     jz .lrc_differ               ; first differing element
 
+.lrc_next:
     inc qword [rbp - LRC_IDX]
     jmp .lrc_elem_loop
 

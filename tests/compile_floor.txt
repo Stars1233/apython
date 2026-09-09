@@ -326,6 +326,7 @@ test_list_fixes
 test_list_in
 test_list_insert_pop
 test_list_remove_eq
+test_list_scan
 test_lists
 test_load_attr_cache
 test_load_attr_method_shadow

@@ -1515,6 +1515,7 @@ DEF_FUNC list_method_index, LI_FRAME
     ; result meaning "no match" -- so NotImplemented never tried the
     ; reflected operand and a raising __eq__ was reported as absence.
     mov rsi, [rbp - LI_VPAY]
+    VALUE_EQ_FAST rdi, rsi, rdx, .index_found, .index_next
     mov edx, PY_EQ
     call obj_richcompare_bool
     cmp eax, -1
@@ -1522,6 +1523,7 @@ DEF_FUNC list_method_index, LI_FRAME
     test eax, eax
     jnz .index_found
 
+.index_next:
     inc qword [rbp - LI_IDX]
     jmp .index_loop
 
@@ -1576,12 +1578,14 @@ DEF_FUNC list_method_count, LC_FRAME
     mov rax, [rbx + PyListObject.ob_item]
     mov rdi, [rax + rcx * 8]    ; the element Value
     mov rsi, r12
+    VALUE_EQ_FAST rdi, rsi, rdx, .count_hit, .count_next
     mov edx, PY_EQ
     call obj_richcompare_bool
     cmp eax, -1
     je .count_error
     test eax, eax
     jz .count_next
+.count_hit:
     inc r14
 
 .count_next:
@@ -2172,6 +2176,7 @@ DEF_FUNC list_method_remove, 8            ; 5 pushes, so rsp is 16-aligned
     ; result as "no match" -- so NotImplemented never reached the reflected
     ; operand and a raising __eq__ became a ValueError about absence.
     mov rsi, r12
+    VALUE_EQ_FAST rdi, rsi, rdx, .lremove_found, .lremove_next
     mov edx, PY_EQ
     call obj_richcompare_bool
     cmp eax, -1
@@ -2179,6 +2184,7 @@ DEF_FUNC list_method_remove, 8            ; 5 pushes, so rsp is 16-aligned
     test eax, eax
     jnz .lremove_found
 
+.lremove_next:
     inc r14
     jmp .lremove_loop
 
