@@ -1435,10 +1435,18 @@ DEF_FUNC set_type_call, STC_FRAME
     call set_reserve
     jmp .stc_sized_done
 .stc_clone:
+    ; Straight to the return, NOT to the exception check below.  That check
+    ; reads a snapshot DUNDER_EXC_SAVE takes further down, on the iterator
+    ; path; jumping into it from here read whatever was in the frame slot, so
+    ; `set(s)` compared current_exception against stack garbage and, whenever
+    ; an exception happened to be in flight -- a __del__ running while a
+    ; frame unwinds -- decided the construction had raised, dropped the
+    ; finished set and returned NULL.  Nothing in set_clone_into can raise:
+    ; it is a memcpy and a run of INCREFs.
     mov rdi, rbx
     mov rsi, r12
     call set_clone_into
-    jmp .stc_cloned
+    jmp .stc_done
 .stc_sized_done:
 
     ; Get iterator: tp_iter(iterable)
@@ -1481,12 +1489,11 @@ DEF_FUNC set_type_call, STC_FRAME
     ; DECREF iterator
     mov rdi, r12
     call obj_decref
-.stc_cloned:
-
     ; NULL is exhaustion and a raise alike.  Read as exhaustion, a raising
     ; __getitem__ or __next__ produced a short set and a stranded exception.
     EXC_RAISED_SINCE [rbp - STC_EXC], rcx, .stc_iter_raised
 
+.stc_done:
     mov rax, rbx            ; return new set
     mov edx, TAG_PTR
     pop r12
@@ -1736,7 +1743,7 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     mov rdi, rbx
     mov rsi, r12
     call set_clone_into
-    jmp .ftc_cloned
+    jmp .ftc_done               ; past the exception check; see .stc_clone
 .ftc_sized_done:
 
     ; Get iterator
@@ -1775,12 +1782,11 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
 .ftc_iter_done:
     mov rdi, r12
     call obj_decref
-.ftc_cloned:
-
     ; NULL is exhaustion and a raise alike.  Read as exhaustion, a raising
     ; __getitem__ or __next__ produced a short set and a stranded exception.
     EXC_RAISED_SINCE [rbp - FTC_EXC], rcx, .ftc_iter_raised
 
+.ftc_done:
     ; Set type to frozenset_type
     lea rax, [rel frozenset_type]
     mov [rbx + PyObject.ob_type], rax
