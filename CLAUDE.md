@@ -286,8 +286,12 @@ No hand-written file exceeds 100k bytes; only generated asm may.
 - `src/objerr.asm` — the arity and receiver error messages, split off when
   `object.asm` reached the 100k cap.  Each builds its text into a stack
   buffer and hands it to `raise_exception`; none of them returns
-- `src/runtime.asm` — The freestanding layer: syscalls, allocation, PLT-free
-  memory and string ops, and `fatal_error`
+- `src/runtime.asm` — The freestanding layer: syscalls, PLT-free memory and
+  string ops, and `fatal_error`
+- `src/alloc.asm` — where memory comes from.  `ap_malloc`, `ap_free` and
+  `ap_realloc` are the whole funnel: nothing else in the tree calls libc's,
+  and GMP and zlib allocate and free their own, so every byte the interpreter
+  owns passes through these three
 - `src/compiler/` — The Python **source** compiler (see below)
 - `src/include/` — `object.inc` (every struct and id enum), `macros.inc`,
   `value.inc`, `opcodes.inc`, and the three private ABIs `sre.inc`,

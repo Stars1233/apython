@@ -1297,66 +1297,6 @@ DEF_FUNC_BARE ap_memrfind
     ret
 END_FUNC ap_memrfind
 
-;; ============================================================================
-;; Allocation
-;; (was src/memory.asm)
-;; ============================================================================
-
-section .text
-
-; Wraps libc malloc/free/realloc with error checking
-
-extern malloc
-extern free
-extern realloc
-;; ============================================================================
-;; ap_malloc(size_t size) -> void*
-;; Allocates memory, fatal error on failure
-;; ============================================================================
-DEF_FUNC ap_malloc, 16           ; 0 pushes, so rsp is 16-aligned
-    ; No register is saved here: the size used to be parked in rbx "for the
-    ; error case" and no path ever read it back, so every allocation in the
-    ; interpreter paid a push, a mov and a pop for nothing.
-    call malloc wrt ..plt
-    test rax, rax
-    jz .oom
-    leave
-    ret
-.oom:
-    lea rdi, [rel mem_oom_msg]
-    call fatal_error        ; never returns
-END_FUNC ap_malloc
-
-;; ============================================================================
-;; ap_free(void *ptr)
-;; Frees memory; NULL-safe
-;; ============================================================================
-DEF_FUNC_BARE ap_free
-    test rdi, rdi
-    jz .null
-    jmp free wrt ..plt
-.null:
-    ret
-END_FUNC ap_free
-
-;; ============================================================================
-;; ap_realloc(void *ptr, size_t size) -> void*
-;; Reallocates memory, fatal error on failure
-;; ============================================================================
-DEF_FUNC ap_realloc, 16           ; 0 pushes, so rsp is 16-aligned
-    ; As in ap_malloc: the saved size was never read on the error path.
-    call realloc wrt ..plt
-    test rax, rax
-    jz .oom
-    leave
-    ret
-.oom:
-    lea rdi, [rel mem_oom_msg]
-    call fatal_error        ; never returns
-END_FUNC ap_realloc
-
-section .rodata
-mem_oom_msg: db "Fatal: out of memory", 0
 
 ;; ============================================================================
 ;; Dying without an interpreter
