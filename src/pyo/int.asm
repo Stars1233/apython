@@ -791,10 +791,18 @@ DEF_FUNC_BARE int_floordiv
     jne .gmp_path
 
     ; SmallInt fast path
+    test rsi, rsi
+    jz .zdiv_error          ; div by zero -> raise ZeroDivisionError
+    cmp rsi, -1
+    je .fd_neg_one          ; idiv TRAPS on INT64_MIN / -1: the quotient has no
+                            ; int64, and the CPU raises #DE for it exactly as
+                            ; it does for a zero divisor.  These operands are
+                            ; int_binop_unpack's, so they are full int64s and
+                            ; not immediates -- a compact heap int holding
+                            ; -2**63 reaches here, and `(-2**63) // -1` died
+                            ; with SIGFPE inside int_floordiv.
     mov rax, rdi
     mov rcx, rsi
-    test rcx, rcx
-    jz .zdiv_error          ; div by zero -> raise ZeroDivisionError
     cqo
     idiv rcx
     ; Python floored division: if remainder != 0 and has different sign from divisor, adjust
@@ -805,6 +813,17 @@ DEF_FUNC_BARE int_floordiv
     jns .smallint_done
     dec rax
 .smallint_done:
+    RET_TAG_SMALLINT
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.fd_neg_one:
+    ; a // -1 is -a exactly.  -INT64_MIN is the one that does not fit, and it
+    ; goes to GMP -- where ecx is still the right operand's tag, because
+    ; nothing above has written it.
+    mov rax, rdi
+    neg rax
+    jo .gmp_path
     RET_TAG_SMALLINT
     V_PACK rax, rdx             ; return one Value
     ret
@@ -916,10 +935,13 @@ DEF_FUNC_BARE int_mod
     cmp ecx, TAG_SMALLINT
     jne .gmp_path
 
+    test rsi, rsi
+    jz .mod_zdiv_error
+    cmp rsi, -1
+    je .mod_neg_one         ; idiv traps on INT64_MIN / -1, and it computes the
+                            ; quotient even when only the remainder is wanted
     mov rax, rdi
     mov rcx, rsi
-    test rcx, rcx
-    jz .mod_zdiv_error
     cqo
     idiv rcx
     mov rax, rdx            ; remainder is in rdx
@@ -931,6 +953,12 @@ DEF_FUNC_BARE int_mod
     jns .smallint_done
     add rax, rcx            ; remainder += divisor
 .smallint_done:
+    RET_TAG_SMALLINT
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.mod_neg_one:
+    xor eax, eax            ; a % -1 is 0 for every a
     RET_TAG_SMALLINT
     V_PACK rax, rdx             ; return one Value
     ret
@@ -1822,6 +1850,15 @@ END_FUNC int_invert
 ;; so `x is 1` compares words, and a boxed 1 is not the 1 every other operation
 ;; produces.  The operators that always compute through GMP -- shift and power
 ;; -- hand their result through this on the way out.
+;;
+;; A value too wide for an immediate but inside an int64 becomes COMPACT here,
+;; and that is the second half of the job.  int_binop_unpack flattens a compact
+;; heap int into an immediate and can do nothing with an mpz-backed one, so a
+;; value that stayed mpz-backed dragged every later operation on it back into
+;; GMP: marshal built 1 << 60 as a bignum, and `s += x + i` then paid an
+;; __gmpz_init, an __gmpz_add and an __gmpz_clear per iteration for a number
+;; that fits in a register.  The __gmpz_clear is not a new cost -- the object's
+;; dealloc would have paid it either way.
 ;; ============================================================================
 DEF_FUNC int_shrink, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
@@ -1838,6 +1875,19 @@ DEF_FUNC int_shrink, 8            ; 1 pushes, so rsp is 16-aligned
 .from_compact:
     mov rax, [rbx + PyIntObject.ival]
 .have:
+    ; Still mpz-backed but inside an int64: collapse it.
+    cmp qword [rbx + PyIntObject.compact], 0
+    jne .have_compact
+    push rax
+    push rax                    ; two pushes: rsp keeps its alignment
+    lea rdi, [rbx + PyIntObject.mpz]
+    call __gmpz_clear wrt ..plt
+    pop rax
+    pop rax
+    mov [rbx + PyIntObject.ival], rax
+    mov qword [rbx + PyIntObject.compact], 1
+.have_compact:
+
     ; |v| < the immediate limit.  The stress build lowers that limit to force
     ; the heap paths, and this has to move with it or the two disagree about
     ; which integers are immediates.
