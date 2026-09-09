@@ -618,6 +618,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ; Decrement ob_size
     mov [rbx + PyListObject.ob_size], rcx
 
+    xor eax, eax                ; deleted; see list_setitem for why this is set
     pop r12
     pop rbx
     leave
@@ -978,6 +979,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     jz .las_no_temp
     call obj_decref
 .las_no_temp:
+    xor eax, eax                ; assigned; see list_setitem for why this is set
     add rsp, 8             ; undo alignment
     pop r15
     pop r14

@@ -21,6 +21,10 @@ a[0] = 1; a[N-1] = 2; a[N//2] = 3
 out.append(("list item", a[0], a[N-1], a[N//2]))
 a[1:3] = [7, 8]
 out.append(("list slice", a[1], a[2]))
+a[::2] = [9] * ((len(a) + 1) // 2)
+out.append(("list ext slice", a[0], a[2], a[4]))
+del a[::2]
+out.append(("list ext del", len(a)))
 del a[1]
 out.append(("list del", len(a)))
 
