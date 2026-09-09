@@ -333,7 +333,10 @@ DU_PAIRV  equ 48        ; scratch Value, so &it can be passed as an args array
 DU_PAIR   equ 56        ; materialised pair, owned, or 0
 DU_KWNAMES equ 64       ; the consumed kw_names_pending tuple, borrowed
 DU_OTHER  equ 72        ; the positional argument, borrowed
-DU_FRAME  equ 96            ; + 4 pushes = 128
+DU_KEYV   equ 80        ; key and value, held across dict_set: both are
+DU_VALV   equ 88        ;   borrowed from a table user code can empty
+DU_ORIGN  equ 96        ; the source's dk_nentries when the walk started
+DU_FRAME  equ 112           ; + 4 pushes = 144
 
 DEF_FUNC dict_method_update, DU_FRAME
     push rbx
@@ -384,10 +387,17 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov rdi, rbx
     mov rsi, [r12 + PyDictObject.ob_size]
     call dict_reserve
-    mov r13, [r12 + PyDictObject.dk_nentries]
+    mov rax, [r12 + PyDictObject.dk_nentries]
+    mov [rbp - DU_ORIGN], rax
     xor r14d, r14d
 .du_loop:
-    cmp r14, r13
+    ; The bound is re-read every turn rather than cached.  dict_set runs user
+    ; code -- __hash__ and __eq__ on the DESTINATION's keys -- and that code
+    ; can clear the SOURCE, which points its entries at the one-slot
+    ; read-only dict_empty_entries.  A cached dk_nentries kept walking to the
+    ; old bound, off the end of a 24-byte .rodata table, and inserted what it
+    ; found there as a key and a value.
+    cmp r14, [r12 + PyDictObject.dk_nentries]
     jge .du_kwargs
 
     mov rax, [r12 + PyDictObject.entries]
@@ -399,9 +409,28 @@ DEF_FUNC dict_method_update, DU_FRAME
     jz .du_next
 
     mov rdx, [rax + DictEntry.value]
+    ; Both Values are BORROWED from that table, so both are held for the
+    ; duration: the same user code can drop the source's last reference to
+    ; either, and dict_set would then store what it had already read.
+    ; CPython's dict_merge takes the same pair of references.
+    mov [rbp - DU_KEYV], rdi
+    mov [rbp - DU_VALV], rdx
+    INCREF_V rdi, rcx
+    INCREF_V rdx, rcx
     mov rsi, rdi                    ; key Value
     mov rdi, rbx                    ; self
     call dict_set
+    mov rdi, [rbp - DU_KEYV]
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - DU_VALV]
+    DECREF_V rdi, rcx
+
+    ; And say so, rather than carrying on over whatever is left.  CPython's
+    ; dict_merge compares the source's dk_nentries against what it was after
+    ; every insert, for the same reason and with this wording.
+    mov rax, [r12 + PyDictObject.dk_nentries]
+    cmp rax, [rbp - DU_ORIGN]
+    jne .du_mutated
 
 .du_next:
     inc r14
@@ -490,6 +519,12 @@ DEF_FUNC dict_method_update, DU_FRAME
     call .du_release
     RAISE exc_TypeError_type, "object is not subscriptable"
 
+.du_mutated:
+    extern exc_RuntimeError_type
+    extern set_exception
+    SET_EXC exc_RuntimeError_type, "dict mutated during update"
+    ; fall through: the exception is pending, which is what .du_propagate is for
+
 .du_propagate:
     ; Something we called raised, and the exception is already pending.
     ; Falling through to the success tail returned None and left it to surface
@@ -541,7 +576,12 @@ DEF_FUNC dict_method_update, DU_FRAME
     call dict_reserve               ; the pair count is known; take it once
     xor r14d, r14d
 .du_pair_loop:
-    cmp r14, r13
+    ; The bound is re-read, not the r13 the reserve was sized from.  A tuple
+    ; source cannot change, but 8010506 made an exact LIST source be read
+    ; where it lies rather than snapshotted -- and dict_set below runs
+    ; __hash__ and __eq__, which can shorten that list.  Indexing ob_item to
+    ; a stale length reads freed slots.
+    cmp r14, [r12 + PyTupleObject.ob_size]
     jge .du_pairs_done
     mov rax, [r12 + PyTupleObject.ob_item]
     mov rax, [rax + r14 * 8]
@@ -591,8 +631,19 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov rcx, [rax + PyTupleObject.ob_item]
     mov rsi, [rcx]                  ; key Value
     mov rdx, [rcx + 8]              ; value Value
+    ; DU_PAIR holds the pair itself, but a pair that is a LIST keeps its
+    ; elements somewhere the same user code can empty -- and these two are
+    ; borrowed out of it.  Held for the call, as in the dict branch above.
+    mov [rbp - DU_KEYV], rsi
+    mov [rbp - DU_VALV], rdx
+    INCREF_V rsi, rcx
+    INCREF_V rdx, rcx
     mov rdi, [rbp - DU_SELF]
     call dict_set
+    mov rdi, [rbp - DU_KEYV]
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - DU_VALV]
+    DECREF_V rdi, rcx
     mov rdi, [rbp - DU_PAIR]
     mov qword [rbp - DU_PAIR], 0
     call obj_decref
