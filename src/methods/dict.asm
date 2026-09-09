@@ -344,8 +344,16 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov rax, [r12 + PyObject.ob_type]
     REQUIRE_DICT_TYPE rax, rcx, .du_from_pairs
 
-    ; ---- other is a dict: walk its entry table ----------------------------
-    mov r13, [r12 + PyDictObject.capacity]
+    ; ---- other is a dict: walk its DENSE array ----------------------------
+    ; Room for the whole of it first, so a hundred-key update does not
+    ; rebuild the table five times on the way; then dk_nentries, which is the
+    ; exact high-water mark, rather than capacity, which at the 3/4 load
+    ; factor is a third more slots and after deletions is unbounded.
+    extern dict_reserve
+    mov rdi, rbx
+    mov rsi, [r12 + PyDictObject.ob_size]
+    call dict_reserve
+    mov r13, [r12 + PyDictObject.dk_nentries]
     xor r14d, r14d
 .du_loop:
     cmp r14, r13
@@ -501,6 +509,9 @@ DEF_FUNC dict_method_update, DU_FRAME
     test rax, rax
     jz .du_propagate
     mov r13, [r12 + PyTupleObject.ob_size]
+    mov rdi, rbx
+    mov rsi, r13
+    call dict_reserve               ; the pair count is known; take it once
     xor r14d, r14d
 .du_pair_loop:
     cmp r14, r13

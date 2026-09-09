@@ -665,33 +665,17 @@ DR_DICT  equ 8
 DR_OLDE  equ 16
 DR_OLDN  equ 24
 DR_FRAME equ 40            ; + 3 pushes = 64, 16-aligned
-DEF_FUNC dict_resize, DR_FRAME
+DEF_FUNC dict_resize_to, DR_FRAME
     push rbx
     push r12
     push r13
     mov rbx, rdi
+    mov r12, rsi                ; the capacity asked for
     mov [rbp - DR_DICT], rbx
     mov rax, [rbx + PyDictObject.entries]
     mov [rbp - DR_OLDE], rax
     mov rax, [rbx + PyDictObject.dk_nentries]
     mov [rbp - DR_OLDN], rax
-
-    ; Grow only when the live count warrants it; a table full of holes is
-    ; compacted at the same capacity instead.
-    mov r12, [rbx + PyDictObject.capacity]
-    mov rdx, r12
-    shr rdx, 1
-    cmp [rbx + PyDictObject.ob_size], rdx
-    jl .dr_same_cap
-    shl r12, 1
-.dr_same_cap:
-    ; A dict growing away from the shared empty table has capacity one, and
-    ; doubling that is still two.  The floor is what makes the first insert
-    ; land on a real table rather than resize again immediately.
-    cmp r12, DICT_INIT_CAP
-    jae .dr_have_cap
-    mov r12d, DICT_INIT_CAP
-.dr_have_cap:
     ; r12, not rcx: ap_free below is a call and rcx is caller-saved.
     mov rdi, [rbx + PyDictObject.dk_indices]
     lea rax, [rel dict_empty_indices]
@@ -759,7 +743,70 @@ DEF_FUNC dict_resize, DR_FRAME
     pop rbx
     leave
     ret
+END_FUNC dict_resize_to
+
+;; ============================================================================
+;; dict_resize(rdi = dict) -> void
+;;
+;; Rebuild at whatever capacity the live count warrants: double it when the
+;; dict is at least half full, and otherwise keep it, which compacts a table
+;; that is mostly holes.  The floor matters because a dict growing away from
+;; the shared empty table has capacity one, and doubling that is two.
+;; ============================================================================
+DEF_FUNC_BARE dict_resize
+    mov rsi, [rdi + PyDictObject.capacity]
+    mov rax, rsi
+    shr rax, 1
+    cmp [rdi + PyDictObject.ob_size], rax
+    jl .drz_same
+    shl rsi, 1
+.drz_same:
+    cmp rsi, DICT_INIT_CAP
+    jae dict_resize_to
+    mov esi, DICT_INIT_CAP
+    jmp dict_resize_to
 END_FUNC dict_resize
+
+;; ============================================================================
+;; dict_reserve(rdi = dict, rsi = how many more entries are coming) -> void
+;;
+;; Grow ONCE, so that a bulk insert of a known size does not rebuild the
+;; table on the way.  Building a hundred-key dict from an empty one resized
+;; five times, rehashing everything each time; CPython presizes in exactly
+;; the same places -- dict_merge, BUILD_MAP, dict.fromkeys -- and for exactly
+;; this reason.
+;;
+;; The table holds dk_nentries at three quarters of capacity, so the room
+;; needed is that many slots rounded up to a power of two.  A dict that
+;; already has the room is left alone, which is what makes it safe to call on
+;; the shared empty table with nothing coming.
+;; ============================================================================
+DEF_FUNC_BARE dict_reserve
+    mov rax, [rdi + PyDictObject.dk_nentries]
+    add rax, rsi
+    mov rcx, [rdi + PyDictObject.capacity]
+    mov rdx, rcx
+    shr rdx, 2
+    lea rdx, [rdx + rdx*2]      ; capacity * 3/4
+    cmp rax, rdx
+    jbe .drv_done               ; the room is already there
+    cmp rcx, DICT_INIT_CAP
+    jae .drv_grow
+    mov ecx, DICT_INIT_CAP
+.drv_grow:
+    mov rdx, rcx
+    shr rdx, 2
+    lea rdx, [rdx + rdx*2]
+    cmp rax, rdx
+    jbe .drv_resize
+    shl rcx, 1
+    jmp .drv_grow
+.drv_resize:
+    mov rsi, rcx
+    jmp dict_resize_to
+.drv_done:
+    ret
+END_FUNC dict_reserve
 
 ;; ============================================================================
 ;; dict_set(rdi=dict, rsi=key Value, rdx=value Value)
@@ -1683,43 +1730,24 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     mov [rbp - DNO_RIGHT], rsi      ; right dict
 
     ; Create new dict
-    call dict_new
+    ; The left half of `a | b` IS a copy of a, so it is a clone: no key is
+    ; hashed and no slot is probed.  The loop that was here re-inserted every
+    ; entry through dict_set.
+    mov rdi, [rbp - DNO_LEFT]
+    call dict_copy_shallow
     mov [rbp - DNO_NEW], rax
 
-    ; Copy all entries from left dict
-    mov rdi, [rbp - DNO_LEFT]
-    mov r8, [rdi + PyDictObject.capacity]
-    xor ecx, ecx                    ; index = 0
-.dno_copy_left:
-    cmp rcx, r8
-    jge .dno_copy_right_start
-
-    imul rax, rcx, DICT_ENTRY_SIZE
-    add rax, [rdi + PyDictObject.entries]
-    ; Check if entry is occupied (value_tag != 0)
-    cmp qword [rax + DictEntry.key], 0   ; occupied?
-    je .dno_left_next
-
-    ; dict_set(dict, key, value, value_tag, key_tag)
-    push rcx
-    push r8
-    push rdi
-    mov rdi, [rbp - DNO_NEW]
-    mov rsi, [rax + DictEntry.key]
-    mov rdx, [rax + DictEntry.value]
-    call dict_set
-    pop rdi
-    pop r8
-    pop rcx
-
-.dno_left_next:
-    inc rcx
-    jmp .dno_copy_left
+    ; Then room for the right half in one go, so the merge cannot rebuild
+    ; the table underneath itself.
+    mov rdi, rax
+    mov rsi, [rbp - DNO_RIGHT]
+    mov rsi, [rsi + PyDictObject.ob_size]
+    call dict_reserve
 
 .dno_copy_right_start:
-    ; Copy all entries from right dict (overrides left)
+    ; Copy all entries from right dict (overrides left), over the DENSE array
     mov rdi, [rbp - DNO_RIGHT]
-    mov r8, [rdi + PyDictObject.capacity]
+    mov r8, [rdi + PyDictObject.dk_nentries]
     xor ecx, ecx
 .dno_copy_right:
     cmp rcx, r8
@@ -1787,9 +1815,13 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
     mov [rbp - DIO_LEFT], rdi       ; left dict
     mov [rbp - DIO_RIGHT], rsi      ; right dict
 
-    ; Iterate right dict entries, set each into left
+    ; Room for the whole right half first, then walk its DENSE array.
+    mov rdi, [rbp - DIO_LEFT]
+    mov rsi, [rbp - DIO_RIGHT]
+    mov rsi, [rsi + PyDictObject.ob_size]
+    call dict_reserve
     mov rdi, [rbp - DIO_RIGHT]
-    mov r8, [rdi + PyDictObject.capacity]
+    mov r8, [rdi + PyDictObject.dk_nentries]
     xor ecx, ecx
 .dio_loop:
     cmp rcx, r8

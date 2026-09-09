@@ -668,6 +668,13 @@ DEF_FUNC op_build_map, 24   ; + 0 pushes; a handler is entered ALIGNED, so this 
     call dict_new
     mov [rbp - BM_DICT], rax          ; save dict
 
+    ; The count is known, so take the room once.  A twenty-key literal grew
+    ; its table twice on the way, rehashing everything each time.
+    mov rdi, rax
+    mov rsi, [rbp - BM_COUNT]
+    extern dict_reserve
+    call dict_reserve
+
     ; Total items on stack = count * 2
     mov rcx, [rbp - BM_COUNT]
     shl rcx, 1                 ; count * 2
@@ -745,6 +752,11 @@ DEF_FUNC op_build_const_key_map, 40   ; + 0 pushes; a handler is entered ALIGNED
 
     call dict_new
     mov [rbp - CKM_DICT], rax          ; dict
+
+    ; The keys tuple names them all, so take the room once.
+    mov rdi, rax
+    mov rsi, [rbp - CKM_COUNT]
+    call dict_reserve
 
     ; Pop values
     mov rcx, [rbp - CKM_COUNT]
@@ -2080,10 +2092,15 @@ DEF_FUNC op_dict_update
     mov rax, [rsi + PyObject.ob_type]
     REQUIRE_DICT_TYPE rax, rdx, .du_type_error
 
-    ; Iterate over source dict entries and copy to target
-    ; Source dict: entries at [rsi + PyDictObject.entries], capacity at +24
-    mov rax, [rsi + PyDictObject.capacity]
-    mov [rbp - DU_CAP], rax          ; capacity
+    ; Iterate over the source's DENSE array, with room taken once.
+    mov rdi, [rbp - DU_DICT]
+    push rsi                    ; ONE push: these handlers carve an odd frame,
+                                ; so a single push is what re-aligns the call
+    mov rsi, [rsi + PyDictObject.ob_size]
+    call dict_reserve
+    pop rsi
+    mov rax, [rsi + PyDictObject.dk_nentries]
+    mov [rbp - DU_CAP], rax
     mov rax, [rsi + PyDictObject.entries]
     mov [rbp - DU_ENTRIES], rax          ; entries ptr
     xor ebx, ebx              ; index
@@ -2188,9 +2205,15 @@ DEF_FUNC op_dict_merge
     REQUIRE_DICT_TYPE rax, rdx, .dm_try_mapping
 .dm_have_dict:
 
-    ; Iterate over source dict entries
-    mov rax, [rsi + PyDictObject.capacity]
-    mov [rbp - DM_CAP], rax          ; capacity
+    ; Iterate over the source's DENSE array, with room taken once.
+    mov rdi, [rbp - DM_DICT]
+    push rsi                    ; ONE push: these handlers carve an odd frame,
+                                ; so a single push is what re-aligns the call
+    mov rsi, [rsi + PyDictObject.ob_size]
+    call dict_reserve
+    pop rsi
+    mov rax, [rsi + PyDictObject.dk_nentries]
+    mov [rbp - DM_CAP], rax
     mov rax, [rsi + PyDictObject.entries]
     mov [rbp - DM_ENTRIES], rax          ; entries ptr
     xor ebx, ebx              ; index

@@ -164,7 +164,9 @@ test_descriptor_receiver
 test_descriptors
 test_descriptor_subclass
 test_dict_bugs
+test_dict_copy
 test_dict_dunder_args
+test_dict_empty
 test_dict_fromkeys
 test_dict_int_keys
 test_dict_ior
