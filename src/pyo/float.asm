@@ -680,6 +680,61 @@ align 16
 fh_sign_mask: dq 0x8000000000000000, 0
 align 16
 frn_absmask:  dq 0x7fffffffffffffff, 0x7fffffffffffffff
+
+;; 5**0 through 5**22.  5**22 is 2384185791015625, under 2**52, so a 53-bit
+;; mantissa times any of them stays inside 128 bits.
+align 8
+frn_pow5:
+    dq 1
+    dq 5
+    dq 25
+    dq 125
+    dq 625
+    dq 3125
+    dq 15625
+    dq 78125
+    dq 390625
+    dq 1953125
+    dq 9765625
+    dq 48828125
+    dq 244140625
+    dq 1220703125
+    dq 6103515625
+    dq 30517578125
+    dq 152587890625
+    dq 762939453125
+    dq 3814697265625
+    dq 19073486328125
+    dq 95367431640625
+    dq 476837158203125
+    dq 2384185791015625
+
+;; 10**0 through 10**22, every one of them exact as a double.
+align 8
+frn_pow10:
+    dq 0x3ff0000000000000        ; 1e0
+    dq 0x4024000000000000        ; 1e1
+    dq 0x4059000000000000        ; 1e2
+    dq 0x408f400000000000        ; 1e3
+    dq 0x40c3880000000000        ; 1e4
+    dq 0x40f86a0000000000        ; 1e5
+    dq 0x412e848000000000        ; 1e6
+    dq 0x416312d000000000        ; 1e7
+    dq 0x4197d78400000000        ; 1e8
+    dq 0x41cdcd6500000000        ; 1e9
+    dq 0x4202a05f20000000        ; 1e10
+    dq 0x42374876e8000000        ; 1e11
+    dq 0x426d1a94a2000000        ; 1e12
+    dq 0x42a2309ce5400000        ; 1e13
+    dq 0x42d6bcc41e900000        ; 1e14
+    dq 0x430c6bf526340000        ; 1e15
+    dq 0x4341c37937e08000        ; 1e16
+    dq 0x4376345785d8a000        ; 1e17
+    dq 0x43abc16d674ec800        ; 1e18
+    dq 0x43e158e460913d00        ; 1e19
+    dq 0x4415af1d78b58c40        ; 1e20
+    dq 0x444b1ae4d6e2ef50        ; 1e21
+    dq 0x4480f0cf064dd592        ; 1e22
 align 8
 fh_two28:     dq 0x41b0000000000000      ; 2.0**28
 section .text
@@ -1303,6 +1358,141 @@ DEF_FUNC float_round_ndigits, FRN_FRAME
     cmp dword [rbp - FRN_ND], -308
     jl .frn_zero
 
+    ; ---- the exact integer fast path ------------------------------------
+    ;
+    ; round(x, n) is the nearest multiple of 10**-n to x, ties to even, and
+    ; then the nearest double to THAT.  Write the multiple as N / 10**n with N
+    ; an integer.  When
+    ;
+    ;     0 <= n <= 22    and    N < 2**53
+    ;
+    ; both halves are exact machine work and no decimal string is needed at
+    ; all.  |x| is m * 2**e with m a 53-bit integer, so
+    ;
+    ;     |x| * 10**n  =  m * 5**n * 2**(e+n)
+    ;
+    ; -- a 128-bit product and one shift, and the shift is where ties to even
+    ; is decided.  5**n through 5**22 fits in 52 bits, so the product fits in
+    ; 128.  Then 10**n for n <= 22 and N below 2**53 are both exactly
+    ; representable, so `(double)N / (double)10**n` is one IEEE division and
+    ; the hardware rounds it correctly.
+    ;
+    ; This is the same answer the rendering below computes, arrived at without
+    ; glibc: its two `%.*e` calls were 66% of a round(x, 2) loop's
+    ; instructions and its strtod another 9%.  Everything the bounds exclude
+    ; -- a negative n, a value so small that N shifts away to nothing, a value
+    ; so large that N will not fit -- falls through to it unchanged, which is
+    ; also where round(2.675, 2) = 2.67 goes on being settled by the exact
+    ; value rather than by the shortest decimal.
+    mov esi, [rbp - FRN_ND]
+    test esi, esi
+    jl .frn_slow
+    cmp esi, 22
+    jg .frn_slow
+
+    mov rax, [rbp - FRN_X]
+    mov r9, rax
+    mov r10, 0x7fffffffffffffff
+    and r9, r10                     ; |x| bits
+    mov r8, r9
+    shr r8, 52                      ; the biased exponent
+    mov r10, 0x000fffffffffffff
+    and r9, r10                     ; the fraction
+    test r8, r8
+    jz .frn_fp_subnormal
+    bts r9, 52                      ; m = fraction | 1 << 52
+    sub r8, 1075                    ; e
+    jmp .frn_fp_have
+.frn_fp_subnormal:
+    mov r8, -1074                   ; and m is the fraction as it stands
+.frn_fp_have:
+    lea r10, [rel frn_pow5]
+    mov rax, [r10 + rsi*8]          ; 5**n
+    mul r9                          ; rdx:rax = u = m * 5**n
+    add r8, rsi                     ; e + n
+    neg r8                          ; s: u is shifted RIGHT by this much
+    jle .frn_fp_left
+
+    ; Right by s, half to even.  Do it as "right by s-1, remembering whether
+    ; anything was lost", after which the bit falling off next IS the guard
+    ; bit and everything lost so far is the sticky.
+    cmp r8, 127
+    jg .frn_slow                    ; nothing survives; the slow path has the
+                                    ; underflow rules and the round-up-to-
+                                    ; 10**-n case with them
+    xor r11d, r11d                  ; sticky
+    sub r8, 1                       ; t = s - 1
+    cmp r8, 64
+    jb .frn_fp_t_low
+    test rax, rax
+    setnz r11b
+    mov rax, rdx
+    xor edx, edx
+    sub r8, 64                      ; t < 64 now: s <= 127 means t <= 62 here
+.frn_fp_t_low:
+    test r8, r8
+    jz .frn_fp_guard
+    mov rcx, r8
+    mov r10d, 1
+    shl r10, cl
+    sub r10, 1                      ; the low t bits
+    test r10, rax
+    jz .frn_fp_no_lost
+    mov r11b, 1
+.frn_fp_no_lost:
+    shrd rax, rdx, cl
+    shr rdx, cl
+.frn_fp_guard:
+    ; the guard bit is now bit 0
+    mov r10, rax
+    and r10, 1
+    shrd rax, rdx, 1
+    shr rdx, 1
+    test r10, r10
+    jz .frn_fp_have_n               ; below half: down
+    test r11b, r11b
+    jnz .frn_fp_round_up            ; above half
+    test al, 1
+    jz .frn_fp_have_n               ; an exact tie, and N is already even
+.frn_fp_round_up:
+    add rax, 1
+    adc rdx, 0
+    jmp .frn_fp_have_n
+
+.frn_fp_left:
+    ; s <= 0: N = u << -s exactly, and it has to stay inside 53 bits, so
+    ; anything in the high word already disqualifies it and so does a value
+    ; the shift would carry past bit 52.
+    test rdx, rdx
+    jnz .frn_slow
+    neg r8                          ; the left shift, >= 0
+    cmp r8, 53
+    jge .frn_slow
+    mov ecx, 53
+    sub rcx, r8
+    mov r10d, 1
+    shl r10, cl                     ; 1 << (53 - shift): the room there is
+    cmp rax, r10
+    jae .frn_slow
+    mov rcx, r8
+    shl rax, cl
+    xor edx, edx
+
+.frn_fp_have_n:
+    test rdx, rdx
+    jnz .frn_slow                   ; 2**64 and up: far outside 53 bits
+    mov r10d, 1
+    shl r10, 53
+    cmp rax, r10
+    jae .frn_slow
+
+    ; N / 10**n, one correctly-rounded division of two exact operands.
+    cvtsi2sd xmm0, rax
+    lea r10, [rel frn_pow10]
+    divsd xmm0, [r10 + rsi*8]
+    jmp .frn_apply_sign             ; and x's sign back on top
+
+.frn_slow:
     ; The decimal exponent, read out of a "%.17e" rendering.  It has to be 17
     ; and not 1: a short precision ROUNDS, and 9.995 at one digit is
     ; "1.0e+01", an exponent one too high -- which made round(9.995, 1)

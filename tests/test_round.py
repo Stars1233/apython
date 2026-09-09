@@ -92,6 +92,48 @@ print(round(12345, 100), round(-12345, 100))
 print(round(12345, 10 ** 20), round(1.5, 10 ** 20))
 print(round(1.5, -(10 ** 20)), round(-1.5, -(10 ** 20)))
 
+# --- the exact integer fast path, and its four edges -----------------------
+# float_round_ndigits answers 0 <= ndigits <= 22 with integer arithmetic when
+# the result numerator fits in 53 bits, and hands everything else to the
+# rendering path.  Each of the boundaries is where the two have to agree.
+
+# ndigits at and just past the top of the 5**n table.
+print(round(1.2345678901234567, 21), round(1.2345678901234567, 22),
+      round(1.2345678901234567, 23))
+print(round(1e-20, 22), round(1e-20, 23), round(1e-22, 22))
+
+# A numerator that outgrows 53 bits, so the fast path steps aside: 15, 16 and
+# 17 significant digits of the same value.
+print(round(1234567890.1234567, 5), round(1234567890.1234567, 6),
+      round(1234567890.1234567, 7), round(1234567890.1234567, 8))
+print(round(9007199254740992.0, 1), round(9007199254740993.0, 1))
+
+# Small enough that the shift takes everything: the underflow rules and the
+# round-up-to-10**-n case behind them.
+print(round(1e-30, 2), round(4.9e-3, 2), round(5.0e-3, 2), round(5.1e-3, 2))
+print(round(-4.9e-3, 2), round(-5.0e-3, 2), round(-5.1e-3, 2))
+print(round(1e-320, 300), round(5e-324, 324), round(5e-324, 323))
+
+# A left shift instead of a right one: e + ndigits >= 0.
+print(round(4.0, 0), round(1024.0, 0), round(2.0 ** 52, 0),
+      round(2.0 ** 52, 1))
+
+# Ties, which is the whole reason the shift rounds half to even.
+print(round(0.125, 2), round(0.375, 2), round(0.625, 2), round(0.875, 2))
+print(round(-0.125, 2), round(-0.375, 2))
+print(round(2.5, 0), round(3.5, 0), round(0.5, 0), round(1.5, 0))
+
+# The exact value decides, not the shortest decimal that prints for it.
+print(round(2.675, 2), round(1.005, 2), round(8.835, 2), round(0.145, 2))
+print(round(9.995, 1), round(9.995, 2), round(99.5, -3))
+
+# Subnormals and the largest finite double, at both ends of ndigits.
+print(round(2.2250738585072014e-308, 320), round(1.7976931348623157e308, 0))
+try:
+    round(1.7976931348623157e308, -308)
+except OverflowError:
+    print("OverflowError")
+
 # --- the errors ---
 for f in (lambda: round(), lambda: round(1, 2, 3), lambda: round("x"),
           lambda: round("x", 2), lambda: round(1, "x")):
