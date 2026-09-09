@@ -414,8 +414,17 @@ DEF_FUNC list_setitem, 8        ; 3 pushes, so rsp is 16-aligned at the
     mov rdi, [rax + rsi * 8]      ; the old occupant
     INCREF_V r12, r13
     mov [rax + rsi * 8], r12
-    DECREF_V rdi, rcx             ; nothing below reads rax or rsi
+    DECREF_V rdi, rcx             ; nothing below reads rsi
 
+    ; 0 is "assigned", and it has to be SET.  This is an mp_ass_subscript-
+    ; shaped function: op_store_subscr tests the low half of the answer for a
+    ; negative, and what was left in rax here was ob_item -- a heap pointer.
+    ; While that came from glibc's brk arena it was a low address with bit 31
+    ; clear, so the test passed by luck.  It stops being luck the moment
+    ; ob_item comes from anywhere else: a list of two hundred thousand
+    ; elements is served by mmap today, and `a[0] = 1` on one raises
+    ; "item assignment failed without an exception" about a third of the time.
+    xor eax, eax
     pop r13
     pop r12
     pop rbx
