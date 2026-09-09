@@ -1161,6 +1161,25 @@ DEF_FUNC list_contains, LC_FRAME
     mov rcx, [rcx + PyListObject.ob_item]
     mov rdi, [rcx + rax * 8]        ; the element Value
     mov rsi, [rbp - LC_VALUE]
+
+    ; Identity, inline.  obj_richcompare_bool answers this in its own first
+    ; compare, but only after two INCREF_Vs, a frame and a call -- and over a
+    ; list of small integers, where every element IS its Value, that identity
+    ; compare is the only thing it does.
+    cmp rdi, rsi
+    je .found
+
+    ; And two int immediates that are not the same Value are not equal, the
+    ; encoding being one-to-one.  That is the other half of `x in list` over
+    ; ints -- the misses, which the identity arm cannot settle and which are
+    ; every element of the list when the answer is False.
+    V_IS_INT rdi, rdx
+    jb .lc_general
+    V_IS_INT rsi, rdx
+    jb .lc_general
+    jmp .lc_next
+
+.lc_general:
     mov edx, PY_EQ
     call obj_richcompare_bool
     cmp eax, -1
@@ -1168,6 +1187,7 @@ DEF_FUNC list_contains, LC_FRAME
     test eax, eax
     jnz .found
 
+.lc_next:
     inc qword [rbp - LC_IDX]
     jmp .loop
 
