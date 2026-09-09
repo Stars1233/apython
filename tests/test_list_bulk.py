@@ -202,3 +202,62 @@ try:
     [1] + (2,)
 except TypeError:
     print("TypeError")
+
+# --- repeat's doubling copy -----------------------------------------------
+# `a * k` writes one copy of a and then copies the RESULT onto itself, each
+# time doubling what is written, so the last block is a partial one whenever
+# k is not a power of two.  Every (len, count) pair below 9x9 exercises a
+# different final chunk, and the refcount is a single addition of k rather
+# than k separate increments -- so a wrong k is a leak or a crash, never a
+# wrong value.
+sizes_ok = True
+for n in range(0, 9):
+    for k in range(0, 9):
+        s2 = list(range(n))
+        r2 = s2 * k
+        if len(r2) != n * k:
+            sizes_ok = False
+        if any(r2[i] != s2[i % n] for i in range(n * k)):
+            sizes_ok = False
+print("repeat sizes", sizes_ok)
+for k in (1, 2, 3, 7, 8, 15, 16, 17, 100):
+    r2 = [1, 2, 3] * k
+    print(k, len(r2), r2[:3], r2[-3:])
+
+seen3 = []
+
+
+class Watch3:
+    def __del__(self):
+        seen3.append(1)
+
+
+def churn3():
+    w = Watch3()
+    a2 = [w]
+    b2 = a2 * 20
+    c2 = a2 * 0
+    d2 = a2 * 1
+    e2 = (a2 + a2) * 3
+    del a2, b2, c2, d2, e2, w
+
+
+churn3()
+print(len(seen3))
+
+try:
+    [1] * (2 ** 64)
+except (OverflowError, MemoryError) as ex:
+    print(type(ex).__name__)
+try:
+    [1] * None
+except TypeError:
+    print("TypeError")
+
+
+class RMul:
+    def __rmul__(self, o):
+        return "rmul"
+
+
+print([1] * RMul())

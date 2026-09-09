@@ -835,10 +835,11 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     cmp rcx, r14           ; i < stop?
     jge .las_decref_done
     push rcx
+    push rcx                      ; twice: rsp keeps its alignment
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdi, [rax + rcx * 8]      ; payload
-    V_UNPACK rdi, rsi
-    XDECREF_VAL rdi, rsi
+    mov rdi, [rax + rcx * 8]
+    XDECREF_V rdi, rsi
+    pop rcx
     pop rcx
     inc rcx
     jmp .las_decref_loop
@@ -957,8 +958,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     cmp rcx, r8
     jge .las_insert_done
     mov rdi, [r9 + rcx * 8]
-    V_UNPACK rdi, rax
-    INCREF_VAL rdi, rax
+    INCREF_V rdi, rax
     inc rcx
     jmp .las_incref_loop
 
@@ -1153,9 +1153,8 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     push rcx
     push r8
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdi, [rax + rcx * 8]      ; payload
-    V_UNPACK rdi, rsi
-    XDECREF_VAL rdi, rsi
+    mov rdi, [rax + rcx * 8]
+    XDECREF_V rdi, rsi
     pop r8
     pop rcx
     add rcx, r15              ; cur += step
@@ -1346,9 +1345,8 @@ DEF_FUNC list_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     cmp r13, r12
     jge .free_items
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdi, [rax + r13 * 8]      ; payload
-    V_UNPACK rdi, rsi
-    XDECREF_VAL rdi, rsi
+    mov rdi, [rax + r13 * 8]
+    XDECREF_V rdi, rsi
     inc r13
     jmp .dealloc_loop
 
@@ -1537,9 +1535,8 @@ DEF_FUNC list_getslice
 .lgs_incref_loop:
     cmp rdx, rcx
     jge .lgs_done
-    mov r8, [rdi + rdx * 8]       ; payload
-    V_UNPACK r8, r9
-    INCREF_VAL r8, r9
+    mov r8, [rdi + rdx * 8]
+    INCREF_V r8, r9
     inc rdx
     jmp .lgs_incref_loop
 
@@ -1579,10 +1576,61 @@ DEF_FUNC list_getslice
 END_FUNC list_getslice
 
 ;; ============================================================================
+;; list_incref_range(rdi = Value[], rsi = count) -> void
+;;
+;; One reference for each element of a run.  A Value that is not a pointer
+;; owns nothing and is skipped, which is the whole of INCREF_V.  The array
+;; pointer and the end are in registers, so the loop is a load, a test, an
+;; increment and a compare.
+;; ============================================================================
+DEF_FUNC_LOCAL list_incref_range
+    test rsi, rsi
+    jz .lir_done
+    lea rsi, [rdi + rsi*8]
+.lir_loop:
+    mov rax, [rdi]
+    INCREF_V rax, rcx
+    add rdi, 8
+    cmp rdi, rsi
+    jb .lir_loop
+.lir_done:
+    leave
+    ret
+END_FUNC list_incref_range
+
+;; ============================================================================
+;; list_incref_range_by(rdi = Value[], rsi = count, rdx = n) -> void
+;;
+;; n references for each element, in one addition rather than n increments --
+;; CPython's _Py_RefcntAdd, and for the same caller: a repeat puts every
+;; source element into the result exactly n times.
+;; ============================================================================
+DEF_FUNC_LOCAL list_incref_range_by
+    test rsi, rsi
+    jz .lirb_done
+    lea rsi, [rdi + rsi*8]
+.lirb_loop:
+    mov rax, [rdi]
+    lea rcx, [rax - 1]
+    cmp rcx, [rel v_ptr_max_m1]
+    ja .lirb_next
+    add [rax + PyObject.ob_refcnt], rdx
+.lirb_next:
+    add rdi, 8
+    cmp rdi, rsi
+    jb .lirb_loop
+.lirb_done:
+    leave
+    ret
+END_FUNC list_incref_range_by
+
+;; ============================================================================
 ;; list_concat(PyListObject *a, PyObject *b) -> PyListObject*
 ;; Concatenate two lists: [1,2] + [3,4] -> [1,2,3,4]
 ;; ============================================================================
-DEF_FUNC list_concat
+LCC_NEW   equ 8                 ; the new list, across the two memcpys
+LCC_FRAME equ 16                ; + 4 pushes = 48, 16-aligned
+DEF_FUNC list_concat, LCC_FRAME
     BINOP_REQUIRE_LEFT list_type, TYPE_FLAG_LIST_SUBCLASS, 1
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
@@ -1610,43 +1658,37 @@ DEF_FUNC list_concat
     ; full below, so only the tail is owed a zero.
     lea rdi, [r13 + r14]
     call list_new_filled
-    push rax                ; save new list
+    mov [rbp - LCC_NEW], rax    ; one slot, read three times: the loop that
+                            ; used to be here reloaded the list from the stack
+                            ; and then ob_item off it, once per element
 
-    ; Set size
     lea rcx, [r13 + r14]
     mov [rax + PyListObject.ob_size], rcx
 
-    ; Copy items from a
-    mov rdi, [rax + PyListObject.ob_item]       ; dest payloads
-    mov rsi, [rbx + PyListObject.ob_item]       ; src payloads
-    xor ecx, ecx
-.copy_a:
-    cmp rcx, r13
-    jge .copy_b_start
-    mov r9, [rsi + rcx * 8]       ; item from source
-    mov [rdi + rcx * 8], r9
-    INCREF_V r9, r10
-    inc rcx
-    jmp .copy_a
+    ; Both halves move as blocks; the references are taken afterwards, in one
+    ; pass over the result.  Values, so the two are independent -- there is no
+    ; per-element interleaving of a copy with a refcount.
+    mov rdi, [rbp - LCC_NEW]
+    mov rdi, [rdi + PyListObject.ob_item]
+    mov rsi, [rbx + PyListObject.ob_item]
+    mov rdx, r13
+    shl rdx, 3
+    call ap_memcpy
 
-.copy_b_start:
-    ; Copy items from b
-    mov rsi, [r12 + PyListObject.ob_item]       ; src payloads
-    xor ecx, ecx
-.copy_b:
-    cmp rcx, r14
-    jge .concat_done
-    mov r9, [rsi + rcx * 8]       ; item from source b
-    lea r11, [r13 + rcx]          ; dest index
-    mov rax, [rsp]                ; new list
-    mov rax, [rax + PyListObject.ob_item]
-    mov [rax + r11 * 8], r9
-    INCREF_V r9, r10
-    inc rcx
-    jmp .copy_b
+    mov rdi, [rbp - LCC_NEW]
+    mov rdi, [rdi + PyListObject.ob_item]
+    lea rdi, [rdi + r13*8]
+    mov rsi, [r12 + PyListObject.ob_item]
+    mov rdx, r14
+    shl rdx, 3
+    call ap_memcpy
 
-.concat_done:
-    pop rax                 ; return new list
+    mov rdi, [rbp - LCC_NEW]
+    mov rdi, [rdi + PyListObject.ob_item]
+    lea rsi, [r13 + r14]
+    call list_incref_range
+
+    mov rax, [rbp - LCC_NEW]
     mov edx, TAG_PTR
     pop r14
     pop r13
@@ -1674,7 +1716,10 @@ END_FUNC list_concat
 ;; list_repeat(PyListObject *list, PyObject *count) -> PyListObject*
 ;; Repeat a list: [1,2] * 3 -> [1,2,1,2,1,2]
 ;; ============================================================================
-DEF_FUNC list_repeat
+LRP_NEW   equ 8                 ; the new list, across the copies
+LRP_DONE  equ 16                ; how much of it is written
+LRP_FRAME equ 16                ; + 4 pushes = 48, 16-aligned
+DEF_FUNC list_repeat, LRP_FRAME
     BINOP_REQUIRE_LEFT list_type, TYPE_FLAG_LIST_SUBCLASS, 1
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, rcx           ; right Value -> (payload, tag)
@@ -1700,8 +1745,10 @@ DEF_FUNC list_repeat
     ; when nothing else answers either.
     mov rdi, rsi
     push rsi
+    push rsi                    ; twice: rsp keeps its alignment
     extern binop_is_count
     call binop_is_count
+    pop rsi
     pop rsi
     test eax, eax
     jz .rep_decline
@@ -1723,38 +1770,53 @@ DEF_FUNC list_repeat
     cmp r14, 0x10000000                      ; 256M items limit (~2GB)
     ja .rep_toobig                           ; too large to allocate
 
-    ; Allocate new list.  The copy loops below write every slot.
+    ; Allocate new list.  The copies below write every slot.
     mov rdi, r14
     call list_new_filled
-    push rax                ; save new list
+    mov [rbp - LRP_NEW], rax
     mov [rax + PyListObject.ob_size], r14
+    test r14, r14
+    jz .rep_done
 
-    ; Copy list r12 times
-    mov rdi, [rax + PyListObject.ob_item]       ; dest payloads
-    xor ecx, ecx            ; ecx = repeat counter
-.rep_outer:
-    cmp rcx, r12
-    jge .rep_done
-    push rcx
-    ; Copy all items from source list
-    mov rsi, [rbx + PyListObject.ob_item]       ; src payloads
-    xor edx, edx
-.rep_inner:
-    cmp rdx, r13
-    jge .rep_inner_done
-    mov r8, [rsi + rdx * 8]       ; item
-    mov [rdi], r8
-    INCREF_V r8, r9
-    add rdi, 8                    ; advance dest
-    inc rdx
-    jmp .rep_inner
-.rep_inner_done:
-    pop rcx
-    inc rcx
-    jmp .rep_outer
+    ; One copy of the source, and then the RESULT copied onto itself, each
+    ; time doubling what is written -- CPython's _Py_memory_repeat.  The
+    ; element-at-a-time nest that was here ran the source r12 times and
+    ; touched a refcount at every step; this touches each refcount once and
+    ; moves the rest in log2(r12) block copies.
+    mov rdi, [rax + PyListObject.ob_item]
+    mov rsi, [rbx + PyListObject.ob_item]
+    mov rdx, r13
+    shl rdx, 3
+    call ap_memcpy
+
+    ; Every source element lands in the result r12 times, so its refcount
+    ; rises by r12 -- one addition, not r12 increments.
+    mov rdi, [rbx + PyListObject.ob_item]
+    mov rsi, r13
+    mov rdx, r12
+    call list_incref_range_by
+
+    mov [rbp - LRP_DONE], r13
+.rep_double:
+    mov rcx, [rbp - LRP_DONE]
+    cmp rcx, r14
+    jae .rep_done
+    mov rdx, rcx                ; as much again as is already written,
+    mov rax, r14                ; or only what is left
+    sub rax, rcx
+    cmp rdx, rax
+    cmova rdx, rax
+    mov rdi, [rbp - LRP_NEW]
+    mov rdi, [rdi + PyListObject.ob_item]
+    mov rsi, rdi
+    lea rdi, [rdi + rcx*8]
+    add [rbp - LRP_DONE], rdx
+    shl rdx, 3
+    call ap_memcpy
+    jmp .rep_double
 
 .rep_done:
-    pop rax                 ; return new list
+    mov rax, [rbp - LRP_NEW]
     mov edx, TAG_PTR
     pop r14
     pop r13
@@ -2053,9 +2115,10 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     jge .lir_clear_done
     mov rax, [rbx + PyListObject.ob_item]
     push rcx
+    push rcx                      ; twice: rsp keeps its alignment
     mov rdi, [rax + rcx * 8]
-    V_UNPACK rdi, rsi
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
+    pop rcx
     pop rcx
     inc rcx
     jmp .lir_clear_loop
