@@ -5,6 +5,67 @@
 %include "object.inc"
 
 extern none_singleton
+
+;; ============================================================================
+;; CP_ADVANCE base, size, cursor, scratch1, scratch2, scratch3
+;;
+;; The body of str_cp_width, inline: `cursor` moves to the start of the next
+;; code point.  Same answer, malformed UTF-8 included -- the declared width of
+;; the lead byte, clamped by the end of the string and by the first byte that
+;; is not a continuation.
+;;
+;; The three walks that use it made one CALL per code point, and the call with
+;; its argument shuffling was about half the work.  They are still O(n) per
+;; index -- `s[i]` over a non-ASCII string walks from byte 0, so a loop over
+;; one is quadratic.  What would make it O(1) is a cursor on the string object
+;; itself, which is a layout change; bugs.md records it.
+;;
+;; Every operand must be a 64-bit register: the byte tests are written in the
+;; 32-bit form because a macro parameter cannot take a size suffix.
+;; ============================================================================
+%macro CP_ADVANCE 6             ; %1 base, %2 size, %3 cursor, %4-%6 scratch
+    movzx %4, byte [%1 + %3]
+    cmp %4, 0xc0
+    jb %%one                    ; ASCII, or a continuation with no lead
+    mov %5, 2
+    cmp %4, 0xe0
+    jb %%have
+    mov %5, 3
+    cmp %4, 0xf0
+    jb %%have
+    mov %5, 4
+    cmp %4, 0xf8
+    jb %%have
+%%one:
+    inc %3
+    jmp %%done
+%%have:
+    ; Clamp to the bytes that are left...
+    mov %6, %2
+    sub %6, %3
+    cmp %5, %6
+    jle %%scan
+    mov %5, %6
+%%scan:
+    ; ...and to the first byte that is not a continuation: a sequence cut
+    ; short is not one code point.
+    mov %6, 1
+%%cont:
+    cmp %6, %5
+    jge %%take
+    mov %4, %3
+    add %4, %6
+    movzx %4, byte [%1 + %4]
+    and %4, 0xc0
+    cmp %4, 0x80
+    jne %%take
+    inc %6
+    jmp %%cont
+%%take:
+    add %3, %6
+%%done:
+%endmacro
+
 extern ap_malloc
 extern ap_free
 extern ap_strlen
@@ -168,11 +229,7 @@ DEF_FUNC str_count_codepoints
 .scan:
     cmp r13, r12
     jge .done
-    mov rdi, rbx
-    mov rsi, r12
-    mov rdx, r13
-    call str_cp_width
-    add r13, rax
+    CP_ADVANCE rbx, r12, r13, rcx, rdx, rax
     inc r14
     jmp .scan
 .done:
@@ -228,13 +285,7 @@ DEF_FUNC str_byte_to_cp
     jge .done
     cmp r13, r12
     jge .done
-    push rax
-    mov rdi, rbx
-    mov rsi, r12
-    mov rdx, r13
-    call str_cp_width
-    add r13, rax
-    pop rax
+    CP_ADVANCE rbx, r12, r13, rcx, rdx, rsi
     inc rax
     jmp .walk
 .done:
@@ -355,13 +406,7 @@ DEF_FUNC str_cp_offset
     jge .done
     cmp r13, r12
     jge .done
-    push rax
-    mov rdi, rbx
-    mov rsi, r12
-    mov rdx, r13
-    call str_cp_width
-    add r13, rax
-    pop rax
+    CP_ADVANCE rbx, r12, r13, rcx, rdx, rsi
     inc rax
     jmp .walk
 .done:
