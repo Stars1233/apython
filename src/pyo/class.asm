@@ -1574,14 +1574,23 @@ DEF_FUNC type_call
     ; object's __new__ on the other side CPython refuses the arguments
     ; outright rather than dropping them: `class A: pass` makes `A(1)` a
     ; TypeError there and made a silent A here.
+    ;
+    ; Having refused them, there is nothing left to run.  object.__init__ does
+    ; exactly this check and then returns None -- and reaching it cost a
+    ; dunder_lookup of __get__ on builtin_func_type, a dunder_call_3 to run it,
+    ; a method_new (a gc_alloc and a gc_track) for the bound method it builds,
+    ; the call, and the dealloc of the method again.  Callgrind put that chain
+    ; at 15.0% of a `class C: pass` construction and two of its five dict
+    ; lookups, all of it to reach a function whose body is `return None`.
+    ;
+    ; Only the arm that lands on object's own __init__ takes this exit.  A
+    ; class that writes `__init__ = object.__init__` has it in its OWN dict, so
+    ; the owner is that class and the call still happens.
     lea rdx, [rel object_type]
     cmp rcx, rdx
     jne .init_is_defined
-    push rax
-    push rax                    ; two pushes: rsp keeps its alignment
     TC_REFUSE_EXTRA_ARGS 0
-    pop rax
-    pop rax
+    jmp .no_init
 .init_is_defined:
     mov rbx, rax                ; rbx = __init__ func
 
