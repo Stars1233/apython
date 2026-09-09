@@ -36,6 +36,7 @@ extern set_new_of_type
 extern set_result_type
 extern set_coerce_operand
 extern set_clone_into
+extern set_reserve
 extern set_release_table
 
 ; --- moved to a sibling file by the split ---
@@ -356,30 +357,22 @@ DEF_FUNC_LOCAL set_binop_union, SMU_FRAME
     mov rdi, rax
     call set_new_of_type
     mov rbx, rax            ; new set
-    xor ecx, ecx
 
-.smu_copy_self:
-    cmp rcx, [r14 + PyDictObject.capacity]
-    jge .smu_add_other
-    mov [rbp - SMU_IDX], rcx
-
-    mov rdx, [r14 + PyDictObject.entries]
-    imul rax, rcx, SET_ENTRY_SIZE
-    mov rsi, [rdx + rax + SET_ENTRY_KEY]
-    test rsi, rsi                        ; occupied?
-    jz .smu_cs_next
-
-    INCREF_V rsi, rax                    ; ours across __eq__
-    mov [rbp - SMU_KEY], rsi
+    ; The self half is a whole table the result is about to be given a copy
+    ; of, so it is copied -- slot for slot, no hash, no probe, no
+    ; load-factor test.  It used to be re-inserted element by element, which
+    ; is what set_method_copy stopped doing in 2e05c3e; this is the other
+    ; caller CPython's set_merge has a tier for.
     mov rdi, rbx
-    call set_add
-    mov rdi, [rbp - SMU_KEY]
-    DECREF_V rdi, rax
+    mov rsi, r14
+    call set_clone_into
 
-.smu_cs_next:
-    mov rcx, [rbp - SMU_IDX]
-    inc ecx
-    jmp .smu_copy_self
+    ; And take the room the other half needs in one step rather than growing
+    ; through it.  An over-estimate: the two operands may overlap, and the
+    ; result is then smaller than the room taken for it.
+    mov rdi, rbx
+    mov rsi, [r15 + PyDictObject.ob_size]
+    call set_reserve
 
 .smu_add_other:
     ; Now add all elements from other
@@ -489,6 +482,13 @@ DEF_FUNC_LOCAL set_update_one, SU_FRAME
     mov [rbp - SU_TMP], rax
     mov r12, rax
     mov r13, [r12 + PyTupleObject.ob_size]
+
+    ; The sequence has been materialised, so its length is known: take the
+    ; room once instead of growing through it.
+    mov rdi, [rbp - SU_SELF]
+    mov rsi, r13
+    call set_reserve
+
     xor ecx, ecx
 .supd_seq_loop:
     cmp rcx, r13
@@ -509,6 +509,26 @@ DEF_FUNC_LOCAL set_update_one, SU_FRAME
     jmp .supd_done
 
 .supd_from_set:
+    ; An EMPTY destination takes the source's table wholesale.  `s = set();
+    ; s.update(src)` and `set(src)` are the same shape, and both used to
+    ; hash and probe every element of src into a table growing underneath
+    ; them.  CPython's set_merge has this tier too.  If self IS src the
+    ; sizes are equal, so this arm is taken only when both are empty and
+    ; set_clone_into returns at once -- there is no table to free out from
+    ; under the copy.
+    cmp qword [rbx + PyDictObject.ob_size], 0
+    jne .supd_reserve
+    mov rdi, rbx
+    mov rsi, r12
+    call set_clone_into
+    jmp .supd_done
+
+.supd_reserve:
+    ; Not empty: still take the room in one step.
+    mov rdi, rbx
+    mov rsi, [r12 + PyDictObject.ob_size]
+    call set_reserve
+
     xor ecx, ecx
 
 .supd_loop:

@@ -158,3 +158,92 @@ few = set(Clash(i) for i in range(3))
 print(sorted(x.v for x in (many & few)), sorted(x.v for x in (few & many)))
 print(many.isdisjoint(few), few.isdisjoint(many))
 print(many.isdisjoint({Clash(99)}), {Clash(99)}.isdisjoint(many))
+
+# --- union and update now copy a whole table rather than re-inserting -----
+# `a | b` clones a's table into the result and reserves b's room; update()
+# into an EMPTY set clones the source outright.  Neither hashes or probes an
+# element on the way, so what has to be checked is what a bulk copy can get
+# wrong and a per-element insert cannot: the references, the tombstones the
+# copy carries with it, and a source that IS the destination.
+import sys
+
+
+def refs(o):
+    return sys.getrefcount(o) if hasattr(sys, "getrefcount") else -1
+
+
+for a, b in (
+    (set(), set()),
+    (set(), {1, 2, 3}),
+    ({1, 2, 3}, set()),
+    ({1, 2, 3}, {3, 4, 5}),
+    ({1, 2, 3}, {1, 2, 3}),
+    (set(range(50)), set(range(40, 90))),
+    (frozenset(range(20)), set(range(10, 30))),
+    (set("abc"), frozenset("cde")),
+):
+    u = a | b if type(a) is type(b) else a.union(b)
+    print(sorted(a.union(b)), sorted(b.union(a)), type(a.union(b)).__name__)
+    s = set(a)
+    s.update(b)
+    print(sorted(s), len(s))
+
+# a set that has been punched full of holes, then cloned
+h = set(range(200))
+for i in range(0, 200, 3):
+    h.discard(i)
+c = set()
+c.update(h)
+print(len(c), sorted(c) == sorted(h), c == h)
+print(sorted(h | set()) == sorted(h), len(h | {1000}) == len(h) + 1)
+
+# update from itself, empty and not
+e = set()
+e.update(e)
+print(len(e), sorted(e))
+n = {1, 2, 3}
+n.update(n)
+print(sorted(n))
+n |= n
+print(sorted(n))
+
+# the references a clone transfers
+seen = []
+
+
+class W:
+    def __init__(self, t):
+        self.t = t
+
+    def __hash__(self):
+        return hash(self.t)
+
+    def __eq__(self, o):
+        return isinstance(o, W) and self.t == o.t
+
+    def __del__(self):
+        seen.append(self.t)
+
+
+def churn():
+    src = {W(i) for i in range(20)}
+    d = set()
+    d.update(src)
+    u = src | d
+    v = set(src)
+    del d, u, v
+    print(len(seen))
+    del src
+
+
+churn()
+print(len(seen))
+
+# update from a non-set iterable, whose room is now taken in one step
+for src in ([1, 2, 3], (4, 5), range(6, 9), "xy", {10: 0, 11: 0}, iter([12])):
+    q = set()
+    q.update(src)
+    print(sorted(q, key=repr))
+q = {1}
+q.update([2], (3,), range(4, 6))
+print(sorted(q))
