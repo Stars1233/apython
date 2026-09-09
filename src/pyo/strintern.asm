@@ -51,6 +51,7 @@ extern ap_free
 extern ap_memcmp
 extern ap_memcpy
 extern str_hash_bytes
+extern ap_strlen
 extern str_alloc_bytes
 extern str_set_length
 extern str_type
@@ -428,6 +429,33 @@ DEF_FUNC str_intern, SINT_FRAME
     mov rbx, [rbp - SINT_SELF]
     jmp .sint_asis
 END_FUNC str_intern
+
+;; ============================================================================
+;; str_intern_cstr(rdi = const char *) -> rax = PyStrObject*, edx = TAG_PTR
+;;
+;; The interned string for a NUL-terminated literal.  Owned, like every other
+;; entry point here, so it drops straight in where a `str_from_cstr_heap` built
+;; a type-dict key.
+;;
+;; It exists because those keys were NOT interned.  `src/methods/init.asm`
+;; registers every builtin method with `str_from_cstr_heap`, so the key sitting
+;; in `list`'s tp_dict under "append" was a different object from the interned
+;; `co_names` entry a `l.append(x)` site probes with -- and `dict_lookup`'s
+;; pointer-identity arm, the one interning exists to make hit, could never fire
+;; for a builtin's methods.  Every such probe fell through to a length compare
+;; and an `ap_memcmp`.
+;; ============================================================================
+DEF_FUNC str_intern_cstr, 8     ; + 1 push, so rsp is 16-aligned at the calls
+    push rbx
+    mov rbx, rdi
+    call ap_strlen
+    mov rdi, rbx
+    mov rsi, rax
+    call str_intern_bytes
+    pop rbx
+    leave
+    ret
+END_FUNC str_intern_cstr
 
 ;; ============================================================================
 ;; str_intern_steal(rdi = an OWNED PyStrObject*) -> rax = PyStrObject*, edx

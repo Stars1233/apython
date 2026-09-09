@@ -24,7 +24,7 @@ extern kw_names_pending
 %endmacro
 
 extern none_singleton
-extern str_from_cstr_heap
+extern str_intern_cstr
 extern dict_get
 extern obj_decref
 extern obj_incref
@@ -45,8 +45,13 @@ extern raise_exception
 ;; call site and comparing pointers is enough to recognise one.  A miss interns
 ;; the string once and keeps it forever; the interned object then caches its own
 ;; ob_hash, so the dict probes stop rehashing too.  Two call sites that spell
-;; the same name in different literals simply get two entries, and dict lookup
-;; matches them by value regardless.
+;; the same name in different literals simply get two entries, and -- because
+;; the miss goes through the intern table -- both entries hold the SAME object,
+;; which is what lets dict_lookup answer by pointer.  It said "interns" here
+;; long before it did: the miss arm called str_from_cstr_heap, so the name a
+;; __init__ lookup probed with was a different object from the one
+;; src/methods/init.asm had put in object's tp_dict, and every such probe ran
+;; a length compare and an ap_memcmp.
 ;;
 ;; The table never evicts.  Distinct dunder literals number a few dozen against
 ;; 256 slots, so the probe terminates.
@@ -95,7 +100,7 @@ DEF_FUNC dunder_name_obj
 
 .miss:
     mov rdi, rbx
-    call str_from_cstr_heap     ; kept for the life of the process
+    call str_intern_cstr        ; kept for the life of the process
     lea rcx, [rel dunder_cache_keys]
     mov [rcx + r12*8], rbx
     lea rcx, [rel dunder_cache_vals]
