@@ -93,6 +93,7 @@ DEF_FUNC set_new_of_type
     mov qword [rbx + PyDictObject.capacity], SET_INIT_CAP
     mov qword [rbx + PyDictObject.dk_version], 0
     mov qword [rbx + PyDictObject.dk_tombstones], 0
+    mov qword [rbx + SET_FINGER], 0
 
     ; Allocate entries array: capacity * SET_ENTRY_SIZE
     mov edi, SET_INIT_CAP * SET_ENTRY_SIZE
@@ -478,6 +479,7 @@ DEF_FUNC_LOCAL set_resize, 8            ; 5 pushes, so rsp is 16-aligned
     lea r14, [r13 * 2]          ; r14 = new capacity
     mov [rbx + PyDictObject.capacity], r14
     mov qword [rbx + PyDictObject.dk_tombstones], 0  ; rehash clears tombstones
+    mov qword [rbx + SET_FINGER], 0     ; and the table it indexed is gone
 
     ; Allocate new entries array
     imul rdi, r14, SET_ENTRY_SIZE
@@ -1605,6 +1607,12 @@ DEF_FUNC set_swap_storage, 8        ; rsp 16-aligned at the call the macros belo
     mov rcx, [r12 + PyDictObject.dk_tombstones]
     mov [rbx + PyDictObject.dk_tombstones], rcx
     mov [r12 + PyDictObject.dk_tombstones], rax
+
+    ; The pop cursor indexes the table, so it travels with it.
+    mov rax, [rbx + SET_FINGER]
+    mov rcx, [r12 + SET_FINGER]
+    mov [rbx + SET_FINGER], rcx
+    mov [r12 + SET_FINGER], rax
 
     ; The version counter belongs to the object, not to the table, so it does
     ; not travel -- but it does have to move, or an iterator that is mid-walk

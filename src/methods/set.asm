@@ -133,41 +133,54 @@ DEF_FUNC set_method_pop, SMP_FRAME
     cmp qword [rbx + PyDictObject.ob_size], 0
     je .smpop_empty
 
-    ; Scan for first non-empty entry
+    ; Start where the last pop left off.  The cursor is only a hint -- it is
+    ; masked, so a stale one costs a wrong starting slot and nothing more --
+    ; but without it a drain rescans from slot zero every time and is
+    ; O(capacity^2).  CPython calls it `finger`.
     mov r12, [rbx + PyDictObject.entries]
     mov r13, [rbx + PyDictObject.capacity]
-    xor ecx, ecx            ; index
+    mov rcx, [rbx + SET_FINGER]
+    mov rax, r13
+    dec rax
+    and rcx, rax            ; in bounds, however stale
 
 .smpop_scan:
-    cmp rcx, r13
-    jge .smpop_empty         ; shouldn't happen
-
-    imul rax, rcx, SET_ENTRY_SIZE
-    add rax, r12             ; entry ptr
-
-    cmp qword [rax + SET_ENTRY_KEY], 0   ; occupied?
+    ; The size check above proved at least one slot is occupied, so the wrap
+    ; below always terminates.
+    mov rax, rcx
+    shl rax, 4              ; * SET_ENTRY_SIZE
+    add rax, r12
+    cmp qword [rax + SET_ENTRY_KEY], 0
     jne .smpop_found
-    inc ecx
+    inc rcx
+    cmp rcx, r13
+    jb .smpop_scan
+    xor ecx, ecx
     jmp .smpop_scan
 
 .smpop_found:
-    ; rax = entry ptr with valid key
-    ; Get key (return value) — DON'T incref, we're removing it
-    mov rcx, [rax + SET_ENTRY_KEY]        ; key payload
-    V_UNPACK rcx, r12
+    ; rax = the entry, rcx = its slot.  The key comes back as a Value and
+    ; ownership transfers to the caller, so there is no refcount work.
+    mov rdx, [rax + SET_ENTRY_KEY]
 
-    ; Clear the entry (mark as empty)
+    ; A TOMBSTONE, not an empty slot.  This wrote only the key and left the
+    ; hash, which SET_ENTRY_CLASSIFY reads as EMPTY -- so any probe run
+    ; passing through the popped slot stopped there, and a colliding key
+    ; further along became unreachable to `in`, to discard() and to remove()
+    ; while still being visible to iteration.  set_remove has always done
+    ; this correctly.
     mov qword [rax + SET_ENTRY_KEY], 0
+    mov qword [rax + SET_ENTRY_HASH], ENTRY_TOMBSTONE_HASH
     dec qword [rbx + PyDictObject.ob_size]
+    inc qword [rbx + PyDictObject.dk_tombstones]
+    inc rcx
+    mov [rbx + SET_FINGER], rcx
 
-    ; Return the key (ownership transfers, no INCREF/DECREF needed)
-    mov rax, rcx
-    mov edx, r12d
+    mov rax, rdx
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .smpop_empty:

@@ -246,6 +246,13 @@ SET_ENTRY_HASH equ 0
 SET_ENTRY_KEY  equ 8
 SET_ENTRY_SIZE equ 16           ; the two fields above, and nothing else
 
+; A set reuses the dict header but not its compact-layout words: dk_indices,
+; dk_nentries and dk_kind mean nothing to a set.  The first of them is set's
+; pop() cursor -- CPython calls it `finger` -- so draining a set does not
+; rescan from slot zero on every call.  It is only ever a hint: it is masked
+; before use, so a stale one costs a wrong starting slot and nothing more.
+SET_FINGER equ 56               ; the word PyDictObject calls dk_indices
+
 ; Set-entry counterpart of ENTRY_CLASSIFY.
 %macro SET_ENTRY_CLASSIFY 3     ; %1 = entry ptr, %2 = empty label, %3 = tombstone label
     cmp qword [%1 + SET_ENTRY_KEY], 0
