@@ -479,7 +479,7 @@ DEF_FUNC type_refresh_attr_flags
     mov r12, rbx                        ; the MRO walker
 .trg_mro:
     test r12, r12
-    jz .trg_children
+    jz .trg_has_del
     mov rdi, [r12 + PyTypeObject.tp_dict]
     test rdi, rdi
     jz .trg_mro_next
@@ -487,10 +487,25 @@ DEF_FUNC type_refresh_attr_flags
     test eax, eax
     jz .trg_mro_next
     or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_MRO_HAS_DATA_DESCR
-    jmp .trg_children
+    jmp .trg_has_del
 .trg_mro_next:
     MRO_NEXT r12, rbx
     jmp .trg_mro
+
+.trg_has_del:
+    ; --- and the __del__ bit ---
+    ; The same question instance_dealloc used to ask by name on every instance
+    ; that died.  Asked once here instead, and pushed down the subclasses by
+    ; the walk below, so `Base.__del__ = f` reaches an already-built D.
+    mov rax, TYPE_FLAG_HAS_DEL
+    not rax
+    and [rbx + PyTypeObject.tp_flags], rax
+    mov rdi, rbx
+    lea rsi, [rel trg_del_name]
+    call dunder_lookup
+    test rax, rax                       ; a NULL Value is the only "absent"
+    jz .trg_children
+    or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HAS_DEL
 
 .trg_children:
     mov rdi, rbx
@@ -1260,6 +1275,7 @@ END_FUNC instance_setattr
 section .rodata
 ig_getattr_name: db "__getattr__", 0
 ig_getattribute_name: db "__getattribute__", 0
+trg_del_name:         db "__del__", 0
 
 section .bss
 type_version_counter: resd 1

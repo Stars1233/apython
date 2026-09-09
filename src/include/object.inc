@@ -1129,6 +1129,21 @@ TYPE_FLAG_BYTES_SUBCLASS equ 0x80000
 ; what it was.
 TYPE_FLAG_FINAL          equ 0x100000
 
+; Does anything in this type's MRO have an entry named __del__?  ANY entry:
+; the bit stands in for "dunder_lookup finds something", not for "and it is
+; callable", so `__del__ = None` still reaches dunder_call_1 and still reports
+; 'NoneType' object is not callable the way it did.  Maintained beside
+; TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN and TYPE_FLAG_MRO_HAS_DATA_DESCR by
+; type_refresh_attr_flags, so it is recomputed and pushed down every subclass
+; whenever a class dict is written.
+;
+; instance_dealloc asked by NAME instead, on every heaptype instance that
+; died: a dunder_call_1, which is an MRO walk and a dict probe per entry, to
+; discover that a class almost never has one.  Callgrind put it at 23.9% of a
+; `class C: pass` construction loop.  Every heaptype comes from
+; type_from_parts, which calls the refresh, so the bit is always current.
+TYPE_FLAG_HAS_DEL        equ 0x200000
+
 ; The type's VERSION lives in the high 32 bits of tp_flags, which the flags
 ; above leave free -- they stop at bit 20.  It is a stamp from one global
 ; counter, so a version identifies a particular type in a particular state of

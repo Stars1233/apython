@@ -291,10 +291,16 @@ DEF_FUNC instance_dealloc, ID_FRAME
 
     mov rbx, rdi                ; rbx = self
 
-    ; Check for __del__ dunder on heaptype
+    ; Does this class have a __del__ at all?  One bit, maintained by
+    ; type_refresh_attr_flags down every subclass, instead of the MRO walk and
+    ; a dict probe per entry that dunder_call_1 does -- which ran on EVERY
+    ; heaptype instance that died, to discover that almost none of them has
+    ; one.  Callgrind put that at 23.9% of a `class C: pass` construction loop.
+    ; TYPE_FLAG_HAS_DEL is only ever set on a heaptype, so it implies the
+    ; heaptype test the check used to make.
     mov rax, [rbx + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_flags]
-    test rax, TYPE_FLAG_HEAPTYPE
+    test rax, TYPE_FLAG_HAS_DEL
     jz .no_del
 
     ; Temporarily bump refcount to prevent re-entrant dealloc during __del__
