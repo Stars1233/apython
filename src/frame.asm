@@ -20,6 +20,74 @@ extern obj_decref
 ; and then indexed -- the count was once reached as a bare [rcx + 8], which
 ; made frame_pool_count_N decoration.
 
+
+;; ============================================================================
+;; THE FRAME DATASTACK
+;;
+;; A frame pushed inline by the specialized call has a lifetime the
+;; interpreter can prove.  That handler's guards refuse CO_GENERATOR,
+;; CO_COROUTINE and CO_ASYNC_GENERATOR -- the only shapes that return with the
+;; frame still live -- so such a frame is always released by the resume of the
+;; very call that made it.  Inline calls nest, so their frames nest, so the
+;; region they come from can be a bump pointer: an allocation is an add and a
+;; compare, a release is one store, against a four-way size ladder and a
+;; capped freelist each way.
+;;
+;; Everything else still comes from the pool -- module bodies, eval(), class
+;; bodies, generators, func_call's slow path -- so nothing about a generator
+;; frame's lifetime changes, and frame_free tells the two apart by address.
+;;
+;; The region is not grown.  Running out falls back to the pool, which is
+;; correct if slower, and stays correct while both are in use: a datastack
+;; frame's callee may come from the pool without disturbing the top, and the
+;; datastack frames that remain still nest among themselves.
+;;
+;; Four megabytes is about sixteen thousand frames of the smallest size,
+;; against a default recursion limit of a thousand.  It is malloc'd on the
+;; first inline call rather than at startup, so a program that makes none --
+;; and the .pyc probes are full of them -- pays nothing.
+;; ============================================================================
+FRAME_DATASTACK_BYTES equ 4 * 1024 * 1024
+
+;; ============================================================================
+;; frame_alloc_inline(rdi = size) -> rax = a block of at least that size
+;;
+;; The slow half of the specialized call's frame allocation: the fast half is
+;; four instructions inlined in the handler, and this is where it lands when
+;; the region does not exist yet or has no room.  Falling back to the pool is
+;; a tail call, so the handler makes one call either way.
+;; ============================================================================
+DEF_FUNC frame_alloc_inline
+    cmp qword [rel frame_datastack_base], 0
+    je .fai_create
+.fai_have_region:
+    mov rax, [rel frame_datastack_top]
+    lea rcx, [rax + rdi]
+    cmp rcx, [rel frame_datastack_end]
+    ja .fai_pool                ; no room: the pool, which can always grow
+    mov [rel frame_datastack_top], rcx
+    leave
+    ret
+.fai_pool:
+    leave
+    jmp frame_pool_get          ; rdi is still the size
+
+.fai_create:
+    push rdi
+    push rdi                    ; twice: rsp keeps its alignment
+    mov edi, FRAME_DATASTACK_BYTES
+    call ap_malloc
+    pop rdi
+    pop rdi
+    test rax, rax
+    jz .fai_pool                ; no region, ever: the pool does the work
+    mov [rel frame_datastack_base], rax
+    mov [rel frame_datastack_top], rax
+    add rax, FRAME_DATASTACK_BYTES
+    mov [rel frame_datastack_end], rax
+    jmp .fai_have_region
+END_FUNC frame_alloc_inline
+
 ;; ============================================================================
 ;; frame_pool_get(size) -> ptr
 ;; Allocate from pool or ap_malloc. rdi = requested size.
@@ -323,6 +391,23 @@ DEF_FUNC frame_free, 8            ; 3 pushes, so rsp is 16-aligned
     call obj_decref
 .no_exc_state:
 
+    ; A datastack frame goes back by moving the top, and that is correct
+    ; because these frames nest -- see the header above frame_alloc_inline.
+    ; The test is an address range, which is also what keeps the two kinds of
+    ; frame apart while both are in use.
+    mov rax, [rel frame_datastack_base]
+    cmp rbx, rax
+    jb .ff_pool
+    cmp rbx, [rel frame_datastack_end]
+    jae .ff_pool
+    mov [rel frame_datastack_top], rbx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ff_pool:
     ; Calculate frame size for pool return.  The same 64-bit add frame_new
     ; makes, and it has to be the same or the pool is handed a size the block
     ; was never allocated at.
@@ -351,6 +436,17 @@ END_FUNC frame_free
 DEF_FUNC frame_pool_drain
     push rbx
     push r12        ; alignment
+
+    ; The datastack region, if one was ever made.  Nothing can still be using
+    ; it: this runs at exit, after the last frame.
+    mov rdi, [rel frame_datastack_base]
+    test rdi, rdi
+    jz .no_datastack
+    mov qword [rel frame_datastack_base], 0
+    mov qword [rel frame_datastack_top], 0
+    mov qword [rel frame_datastack_end], 0
+    call ap_free
+.no_datastack:
 
     ; Drain pool class 0
     lea rbx, [rel frame_pool_free_0]
@@ -414,6 +510,16 @@ END_FUNC frame_pool_drain
 ;; Pool data
 ;; ============================================================================
 section .data
+
+; The datastack: base and end bound the region, top is the bump pointer.
+; Zero until the first inline call, which is what makes the handler's inline
+; fast path fall through to frame_alloc_inline exactly once.
+align 8
+global frame_datastack_top
+global frame_datastack_end
+frame_datastack_base: dq 0
+frame_datastack_top:  dq 0
+frame_datastack_end:  dq 0
 
 ; Freelists: each is (head_ptr, count)
 align 8

@@ -48,8 +48,9 @@ extern eval_inline_ret_bug
 extern eval_dispatch
 extern eval_exception_unwind
 extern frame_new
-extern frame_pool_get
-extern frame_pool_free_0
+extern frame_alloc_inline
+extern frame_datastack_top
+extern frame_datastack_end
 extern frame_free
 extern func_type
 extern builtins_dict_global
@@ -138,20 +139,20 @@ DEF_FUNC_BARE op_call_py_exact
     shl r9, 3
     add r9, FRAME_HEADER_SIZE
 
-    ; The pool's smallest class holds a frame of about seventeen slots, which
-    ; is nearly every frame there is.  Anything larger, and an empty freelist,
-    ; go through frame_pool_get: it is what knows how to round a size to a
-    ; class, and a block allocated at any other size would be handed back to
-    ; the wrong freelist when the frame dies.
-    cmp r9, FRAME_POOL_CLASS_0
+    ; The frame comes off the datastack: an add and a compare.  It can, because
+    ; this handler's guards refuse the three shapes that return with a frame
+    ; still live, so an inline frame is always released by the resume of the
+    ; call that made it and these frames nest -- src/frame.asm's header over
+    ; frame_alloc_inline is where that argument is written out.
+    ;
+    ; Before the first inline call top and end are both zero, so the compare
+    ; fails and the region gets made below; after it, this is the whole
+    ; allocation.
+    mov r15, [rel frame_datastack_top]
+    lea rdx, [r15 + r9]
+    cmp rdx, [rel frame_datastack_end]
     ja .cpe_frame_slow
-    lea r11, [rel frame_pool_free_0]
-    mov r15, [r11 + FRAME_POOL_HEAD]
-    test r15, r15
-    jz .cpe_frame_slow
-    mov rdx, [r15]                      ; the next link lives at offset 0
-    mov [r11 + FRAME_POOL_HEAD], rdx
-    dec dword [r11 + FRAME_POOL_COUNT]
+    mov [rel frame_datastack_top], rdx
 
 .cpe_frame_ready:
     ; frame_new's header, minus what this path already knows.  prev_frame is
@@ -255,14 +256,15 @@ DEF_FUNC_BARE op_call_py_exact
     jmp eval_frame
 
 .cpe_frame_slow:
-    ; Out of line, and the only place this handler calls anything.  Four
+    ; Out of line, and the only place this handler calls anything: the region
+    ; does not exist yet, or has no room and the pool has to serve.  Four
     ; pushes, so rsp keeps the alignment it was entered with.
     push rcx
     push r10
     push rdi
     push rax
     mov rdi, r9
-    call frame_pool_get
+    call frame_alloc_inline
     mov r15, rax
     pop rax
     pop rdi
