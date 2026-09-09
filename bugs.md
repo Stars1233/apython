@@ -38,6 +38,29 @@ reasoning that chose them and what changing one would cost.
   LENGTH is not a control -- build the comparison at a path of the same
   length, or the answer is about the path.
 
+- **A set or frozenset SUBCLASS is not treated as a set by `update` or by
+  the comparisons.**  CPython asks `PyAnySet_Check`, which is a subtype test;
+  three places here compare the type pointer against `set_type` and
+  `frozenset_type` exactly, and a subclass fails all three.
+
+  `s.update(sub)` and `{*sub}` fall through to the generic iterator path, so
+  a subclass that defines `__iter__` is asked -- CPython ignores it and reads
+  the table, which is what makes `{*FS([1,2,3])}` `{1, 2, 3}` there and
+  `{99}` here.  `set_richcompare` returns NotImplemented for a subclass
+  operand, so `FS([1,2]) == FS([1,2])` is False (the identity fallback) and
+  `FS([1,2]) <= FS([1,2])` is a TypeError; a subclass is therefore unusable
+  as a dict key or a set member, because the lookup finds the right hash and
+  then decides the keys are unequal.  `set_contains`'s frozenset-for-a-set-
+  key arm is the third, and the mildest: `SubSet() in s` raises where CPython
+  answers False.
+
+  The fix is `type_is_subtype` in all three, and the reason it is not a
+  one-liner is the fourth site it implies: `set_coerce_operand` already
+  accepts a subclass through `REQUIRE_SET_TYPE`, so the method forms and the
+  operator forms currently disagree with each other as well as with CPython,
+  and the three exact-type tests have to move together with a test that
+  fixes the whole surface at once.
+
 - **`f(*5)` does not name the callable.**  CPython says
   "__main__.f() argument after * must be an iterable, not int"; this says
   "Value after * must be an iterable, not int", which is CPython's message
