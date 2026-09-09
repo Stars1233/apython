@@ -1392,6 +1392,73 @@ DEF_FUNC_BARE int_add
     mov rbx, rdi
     mov r12, rsi
 
+    ; --- big + small, without building an mpz for the small ---------------
+    ; int_binop_unpack has already flattened a compact heap int into an
+    ; immediate, so an operand still tagged TAG_PTR here is genuinely
+    ; GMP-backed and the other one, when it is an immediate, is an int64 GMP
+    ; will take directly.  Going through smallint_to_pyint instead cost an
+    ; object allocation, an __gmpz_init, an __gmpz_set and an __gmpz_clear
+    ; with its free -- per addition, and `s += x + i` over a bignum
+    ; accumulator is exactly this shape.  Callgrind put malloc and free
+    ; together at 19.7% of that loop.
+    ;
+    ; Both-immediate reaches here too, from the `jo` above, and wants the
+    ; general path: there is no mpz to add to.
+    cmp edx, TAG_SMALLINT
+    je .add_small_left
+    cmp ecx, TAG_SMALLINT
+    jne .add_both_big
+    mov r13, r12            ; right is the immediate
+    mov r12, rbx            ; left is the mpz
+    jmp .add_mixed
+.add_small_left:
+    cmp ecx, TAG_SMALLINT
+    je .add_both_big        ; both immediates: the overflow arm
+    mov r13, rbx            ; left is the immediate, r12 already the mpz
+.add_mixed:
+    mov rax, 0x8000000000000000
+    cmp r13, rax
+    je .add_mixed_general   ; -2**63 has no positive magnitude to hand mpz_ui
+
+    sub rsp, 8              ; the GMP calls want rsp 16-byte aligned
+    call int_alloc_raw
+    mov rbx, rax
+    mov qword [rbx + PyObject.ob_refcnt], 1
+    lea rcx, [rel int_type]
+    mov [rbx + PyObject.ob_type], rcx
+    mov qword [rbx + PyIntObject.compact], 0  ; GMP-backed
+    lea rdi, [rbx + PyIntObject.mpz]
+    call __gmpz_init wrt ..plt
+    lea rdi, [rbx + PyIntObject.mpz]
+    lea rsi, [r12 + PyIntObject.mpz]
+    mov rdx, r13
+    test rdx, rdx
+    js .add_mixed_neg
+    extern __gmpz_add_ui
+    call __gmpz_add_ui wrt ..plt
+    jmp .add_mixed_done
+.add_mixed_neg:
+    neg rdx
+    extern __gmpz_sub_ui
+    call __gmpz_sub_ui wrt ..plt
+.add_mixed_done:
+    add rsp, 8
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.add_mixed_general:
+    ; -2**63 fell out of the arm above; put the operands back the way the
+    ; general path expects to find them and let it build the temporary.
+    mov rbx, rdi
+    mov r12, rsi
+
+.add_both_big:
     ; Convert SmallInt args to GMP if needed
     push rcx                ; save right_tag across left conversion
     cmp edx, TAG_SMALLINT
