@@ -53,6 +53,7 @@ DEF_FUNC dict_new, 8            ; 1 pushes, so rsp is 16-aligned
     mov qword [rbx + PyDictObject.dk_version], 1
     mov qword [rbx + PyDictObject.dk_tombstones], 0
     mov qword [rbx + PyDictObject.dk_nentries], 0
+    mov qword [rbx + PyDictObject.dk_kind], 1   ; vacuously all-str
 
     ; The shared empty table: no allocation, and the first insert resizes
     ; away from it before it can write anything.
@@ -132,6 +133,8 @@ DEF_FUNC dict_copy_shallow      ; 4 pushes, so rsp stays 16-aligned
     mov [r12 + PyDictObject.dk_tombstones], rax
     mov rax, [rbx + PyDictObject.ob_size]
     mov [r12 + PyDictObject.ob_size], rax
+    mov rax, [rbx + PyDictObject.dk_kind]
+    mov [r12 + PyDictObject.dk_kind], rax
 
     ; One reference for each key and value the copy now holds.  A hole in the
     ; dense array carries a zero key and owns nothing.
@@ -190,6 +193,7 @@ DEF_FUNC dict_release_tables, 8         ; + 1 push = 16, 16-aligned
     mov rdi, [rbx + PyDictObject.dk_indices]
     call ap_free
     mov qword [rbx + PyDictObject.capacity], 1
+    mov qword [rbx + PyDictObject.dk_kind], 1   ; no keys left to disprove it
     lea rax, [rel dict_empty_entries]
     mov [rbx + PyDictObject.entries], rax
     lea rax, [rel dict_empty_indices]
@@ -417,28 +421,6 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
     RAISE exc_TypeError_type, "dict() argument must be a mapping or iterable"
 END_FUNC dict_type_call
 
-;; ============================================================================
-;; dict_keys_equal(rdi=a_key, rsi=b_key, edx=a_tag, ecx=b_tag) -> int (1=equal, 0=not)
-;;
-;; Was identity, then a hand-rolled cross-type numeric compare, then a
-;; strcmp, then tp_richcompare -- most of PyObject_RichCompareBool, with the
-;; reflected call missing.  So a key whose __eq__ lives on the *lookup* side
-;; rather than the stored side was never found.
-;; ============================================================================
-DEF_FUNC_LOCAL dict_keys_equal
-    ; Both arguments are Values.
-    mov edx, PY_EQ
-    call obj_richcompare_bool
-    cmp eax, -1
-    je .dke_error
-    leave
-    ret
-
-.dke_error:
-    ; The probe loop has no error channel; the exception is already pending.
-    leave
-    jmp eval_exception_unwind
-END_FUNC dict_keys_equal
 
 ;; ============================================================================
 ;; dict_get(rdi=dict, rsi=key Value) -> rax = value Value, or 0 when absent
@@ -471,157 +453,219 @@ END_FUNC dict_get
 ;;   rdx = the indices slot the key hashes to (where an insert would go, or
 ;;         the first dummy on the probe path), r8 = hash
 ;; The one probe loop; every read path goes through it.
+;;
+;; TWO probe loops, chosen once on entry, as CPython 3.12 does.  Everything
+;; invariant for the call is in a REGISTER -- the index array, the entry
+;; array, the key, the slot and the mask -- because the loop used to reload
+;; all five from the dict header and the frame on every single iteration.
+;; Eight loads to answer a question that, for an interned name hitting on the
+;; first probe, is one indexed load and one pointer compare.
+;;
+;; The str loop is entered only when the probe key is an exact str AND the
+;; dict's dk_kind says every key in it is one, so it can compare bytes
+;; without first asking what the STORED key is.  Everything else -- an int, a
+;; tuple, an object, or a str probe into a dict that has seen a non-str key --
+;; takes the generic loop, which asks obj_richcompare_bool.  A str probing a
+;; mixed dict gets a correct but slower answer, which is the trade CPython
+;; makes with its third loop and this does not.
+;;
+;; Both loops try IDENTITY first.  Interning makes that the answer for every
+;; attribute name, every global and every keyword; it used to sit behind a
+;; frame-slot load and a memory compare.
+;;
+;; There is no probe counter.  Every slot that is not EMPTY was claimed by an
+;; insert, so the non-empty count is dk_nentries, which dict_set holds at
+;; three quarters of capacity -- a quarter of the table is always EMPTY and
+;; the walk always ends.
 ;; ============================================================================
-DL_DICT  equ 8
-DL_KEY   equ 16
-DL_HASH  equ 24
-DL_FREE  equ 32
-DL_SKEY  equ 40            ; the probe key when it is an exact str, else 0
+DL_HASH  equ 8
+DL_FREE  equ 16
+DL_IX    equ 24            ; the candidate index, across a comparison call
+DL_DICT  equ 32            ; ... and the dict, to see whether it moved
+DL_CMPKEY equ 40           ; ... and the key that was compared
 DL_FRAME equ 56            ; + 5 pushes = 96, 16-aligned
-;
-; The probe recurrence lives in REGISTERS.  The slot and the mask used to be
-; frame slots that .dl_next stored and .dl_probe reloaded on the next
-; iteration -- a store-to-load forward, about five cycles, sitting directly on
-; the dependency chain of a loop whose whole job is to chase one.  r14 and r15
-; were free: this function pushed only rbx, r12 and r13.
+
+; rbx = dk_indices, r12 = entries, r13 = the key, r14 = slot, r15 = mask
+%macro DL_SETUP 0
+    mov rbx, [rdi + PyDictObject.dk_indices]
+    mov r12, [rdi + PyDictObject.entries]
+    mov r15, [rdi + PyDictObject.capacity]
+    dec r15                     ; the mask
+    mov r14, [rbp - DL_HASH]
+    and r14, r15                ; the first slot
+    mov qword [rbp - DL_FREE], -1
+%endmacro
+
+; The entry at index %2, without the 3-cycle `imul reg, reg, 24`.
+%macro DL_ENTRY 2               ; %1 = dst, %2 = index
+    lea %1, [%2 + %2*2]
+    lea %1, [r12 + %1*8]
+%endmacro
+
 DEF_FUNC dict_lookup, DL_FRAME
     push rbx
     push r12
     push r13
     push r14
     push r15
-    mov [rbp - DL_DICT], rdi
-    mov [rbp - DL_KEY], rsi
 
-    ; --- Is the probe key an exact str? ---------------------------------
-    ; Nearly every lookup in a running program is: attribute names, global
-    ; names, keyword arguments, module dicts, __dict__.  CPython keeps a whole
-    ; second probe loop for the case (unicodekeys_lookup_unicode, marked
-    ; _Py_HOT_FUNCTION and unrolled).  Recording the answer once here buys
-    ; both halves below -- the hash and the comparison.
-    ;
-    ; Exact str only.  A subclass may define __eq__ or __hash__, and then the
-    ; generic protocol is the only thing that gives the right answer.
-    mov qword [rbp - DL_SKEY], 0
+    mov r13, rsi                ; the key, held for the whole call
+    mov [rbp - DL_DICT], rdi
+
+    ; --- the hash, and which loop -----------------------------------------
+    V_IS_INT rsi, rax
+    jae .dl_int_key
     V_TEST_PTR rsi, rax
-    ja .dl_hash_generic
+    ja .dl_hash_generic         ; a float immediate has no cached hash
     test rsi, rsi
     jz .dl_hash_generic
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
     jne .dl_hash_generic
-    mov [rbp - DL_SKEY], rsi
     ; The hash is cached in the string itself, so the indirect obj_hash call
     ; is pure overhead once it has been taken.  -1 is the "not yet" sentinel;
     ; fall through to obj_hash to compute and cache it the first time.
     mov rax, [rsi + PyStrObject.ob_hash]
     cmp rax, -1
+    je .dl_hash_generic
+    mov [rbp - DL_HASH], rax
+    cmp qword [rdi + PyDictObject.dk_kind], 0
+    je .dl_generic_setup        ; a key of some other type is in the table
+    DL_SETUP
+    jmp .dls_probe
+
+.dl_int_key:
+    ; An int immediate IS its own hash: int_hash_i64 answers v whenever
+    ; |v| is below PYHASH_MODULUS, and +-2^50 is well inside that.  The only
+    ; exception is CPython's, that hash(-1) is -2.  This used to be a call to
+    ; obj_hash, which unpacked the Value, walked a tag ladder and tail-jumped
+    ; to int_hash_i64 to compute v from v.
+    mov rax, rsi
+    V_TO_I64 rax
+    cmp rax, -1
     jne .dl_have_hash
+    mov rax, -2
+    jmp .dl_have_hash
 
 .dl_hash_generic:
+    push rdi
+    push rdi                    ; twice: rsp keeps its alignment
     mov rdi, rsi
     call obj_hash
+    pop rdi
+    pop rdi
 .dl_have_hash:
     mov [rbp - DL_HASH], rax
+.dl_generic_setup:
+    DL_SETUP
+    jmp .dlg_probe
 
-    mov rbx, [rbp - DL_DICT]
-    mov r13, [rbx + PyDictObject.capacity]
-    mov r15, r13
-    dec r15                     ; r15 = mask
-    and rax, r15
-    mov r14, rax                ; r14 = slot
-    mov qword [rbp - DL_FREE], -1
-                                ; r13 = probes REMAINING, counting down.  It
-                                ; was a count up compared against capacity,
-                                ; which reloaded capacity from the dict on
-                                ; every iteration for a bound that the load
-                                ; factor already makes unreachable.
-
-.dl_probe:
-    dec r13
-    js .dl_miss
-    mov rax, [rbx + PyDictObject.dk_indices]
-    mov rcx, r14
-    mov r12, [rax + rcx*8]      ; the index stored here
-    cmp r12, DICT_IX_EMPTY
-    je .dl_miss
-    cmp r12, DICT_IX_DUMMY
-    jne .dl_occupied
-    ; remember the first reusable slot for an insert
-    cmp qword [rbp - DL_FREE], -1
-    jne .dl_next
-    mov [rbp - DL_FREE], rcx
-    jmp .dl_next
-
-.dl_occupied:
-    mov rax, [rbx + PyDictObject.entries]
-    imul rcx, r12, DICT_ENTRY_SIZE
-    add rax, rcx
-    mov rcx, [rbp - DL_HASH]
-    cmp rcx, [rax + DictEntry.hash]
-    jne .dl_next
-    mov rdi, [rax + DictEntry.key]
-    mov rsi, [rbp - DL_KEY]
-
-    ; --- str against str, answered here -------------------------------
-    ; The generic route is dict_keys_equal -> obj_richcompare_bool, which
-    ; INCREFs both operands, snapshots the exception state, dispatches through
-    ; tp_richcompare to str_compare, builds a bool object, calls obj_is_true
-    ; on it and DECREFs three times: five calls and six refcount operations to
-    ; answer whether two strings hold the same bytes.
-    ;
-    ; BOTH keys must be exact strs.  CPython gets to skip the resident-key
-    ; check because a dict remembers whether every key in it is unicode
-    ; (dk_kind == DICT_KEYS_UNICODE) and abandons the specialised loop when
-    ; one is not; we do not track that, and a stored key of some other type
-    ; may carry an __eq__ that a str probe must still be offered to.
-    cmp qword [rbp - DL_SKEY], 0
-    je .dl_generic_eq
-    cmp rdi, rsi
-    je .dl_found                ; the same object, which interning makes the
+;; --- str against str, in a table of nothing but strs ----------------------
+.dls_probe:
+    mov rax, [rbx + r14*8]      ; the index stored at this slot
+    test rax, rax
+    js .dls_no_entry            ; EMPTY (-1) or DUMMY (-2)
+    DL_ENTRY rcx, rax
+    mov rdx, [rbp - DL_HASH]
+    cmp rdx, [rcx + DictEntry.hash]
+    jne .dls_next
+    mov rdi, [rcx + DictEntry.key]
+    cmp rdi, r13
+    je .dl_out_found            ; the same object, which interning makes the
                                 ; common case for a name
-    V_TEST_PTR rdi, rcx
-    ja .dl_generic_eq
-    mov rcx, [rdi + PyObject.ob_type]
-    lea r9, [rel str_type]
-    cmp rcx, r9
-    jne .dl_generic_eq
     ; Length, then bytes -- CPython's unicode_eq, in Objects/stringlib/eq.h.
+    ; Nothing here can run Python, so the table cannot move underneath it.
     mov rdx, [rdi + PyStrObject.ob_size]
-    cmp rdx, [rsi + PyStrObject.ob_size]
-    jne .dl_next
+    cmp rdx, [r13 + PyStrObject.ob_size]
+    jne .dls_next
+    mov [rbp - DL_IX], rax
     lea rdi, [rdi + PyStrObject.data]
-    lea rsi, [rsi + PyStrObject.data]
+    lea rsi, [r13 + PyStrObject.data]
     call ap_memcmp
     test eax, eax
-    jnz .dl_next
-    jmp .dl_found
-
-.dl_generic_eq:
-    call dict_keys_equal
-    test eax, eax
-    jz .dl_next
-.dl_found:
-    mov rax, r12                ; found: the entries index
-    jmp .dl_out
-
-.dl_next:
+    jnz .dls_next
+    mov rax, [rbp - DL_IX]
+    jmp .dl_out_found
+.dls_no_entry:
+    cmp rax, DICT_IX_EMPTY
+    je .dl_miss
+    cmp qword [rbp - DL_FREE], -1   ; the first dummy is where an insert goes
+    jne .dls_next
+    mov [rbp - DL_FREE], r14
+.dls_next:
     inc r14
     and r14, r15
-    jmp .dl_probe
+    jmp .dls_probe
+
+;; --- everything else ------------------------------------------------------
+.dlg_probe:
+    mov rax, [rbx + r14*8]
+    test rax, rax
+    js .dlg_no_entry
+    DL_ENTRY rcx, rax
+    mov rdx, [rbp - DL_HASH]
+    cmp rdx, [rcx + DictEntry.hash]
+    jne .dlg_next
+    mov rdi, [rcx + DictEntry.key]
+    cmp rdi, r13
+    je .dl_out_found            ; identical Values are equal, whatever they are
+    ; obj_richcompare_bool, reached directly.  dict_keys_equal was a whole
+    ; extra frame whose entire body was to set edx and test the answer for -1.
+    mov [rbp - DL_IX], rax
+    mov [rbp - DL_CMPKEY], rdi
+    mov rsi, r13
+    mov edx, PY_EQ
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .dl_error
+
+    ; THE TABLE MAY HAVE MOVED.  __eq__ is arbitrary Python and may insert
+    ; into the very dict being probed; a resize frees both arrays and
+    ; rehashes into new ones, which leaves the two pointers and the mask in
+    ; registers stale.  This is the only comparison in either loop that can
+    ; run Python -- the str loop compares bytes -- and it is why the old code
+    ; reloaded the arrays from the header on EVERY probe.  Ask once, here,
+    ; and start again if the answer changed: CPython returns DKIX_KEY_CHANGED
+    ; and its caller does the same.
+    mov rcx, [rbp - DL_DICT]
+    cmp rbx, [rcx + PyDictObject.dk_indices]
+    jne .dl_restart
+    mov rcx, [rbp - DL_IX]
+    DL_ENTRY rcx, rcx
+    mov rcx, [rcx + DictEntry.key]
+    cmp rcx, [rbp - DL_CMPKEY]
+    jne .dl_restart             ; the entry itself was deleted or rebound
+
+    test eax, eax
+    jz .dlg_next
+    mov rax, [rbp - DL_IX]
+    jmp .dl_out_found
+
+.dl_restart:
+    mov rdi, [rbp - DL_DICT]
+    DL_SETUP
+    jmp .dlg_probe
+.dlg_no_entry:
+    cmp rax, DICT_IX_EMPTY
+    je .dl_miss
+    cmp qword [rbp - DL_FREE], -1
+    jne .dlg_next
+    mov [rbp - DL_FREE], r14
+.dlg_next:
+    inc r14
+    and r14, r15
+    jmp .dlg_probe
 
 .dl_miss:
     ; An insert goes into the first dummy seen, else this empty slot.
     mov rcx, [rbp - DL_FREE]
     cmp rcx, -1
-    jne .dl_have_free
-    mov rcx, r14
-.dl_have_free:
+    je .dl_out_miss
     mov r14, rcx
+.dl_out_miss:
     mov rax, -1
-
-.dl_out:
+.dl_out_found:
     mov rdx, r14
     mov r8, [rbp - DL_HASH]
     pop r15
@@ -631,6 +675,16 @@ DEF_FUNC dict_lookup, DL_FRAME
     pop rbx
     leave
     ret
+
+.dl_error:
+    ; The probe loop has no error channel; the exception is already pending.
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    jmp eval_exception_unwind
 END_FUNC dict_lookup
 
 ;; ============================================================================
@@ -911,6 +965,23 @@ DEF_FUNC dict_set, DS_FRAME
 .ds_insert:
     mov r12, rdx                ; the indices slot to claim
     mov r13, r8                 ; hash
+
+    ; A key that is not an exact str ends the str probe loop's licence, for
+    ; good.  Only an INSERT can do it: a lookup that misses changes nothing,
+    ; and a delete leaves the remaining keys as they were.  CPython rebuilds
+    ; the whole table here; one word is enough for the one bit we use.
+    cmp qword [rbx + PyDictObject.dk_kind], 0
+    je .ds_kind_known
+    mov rax, [rbp - DS_KEY]
+    V_TEST_PTR rax, rcx
+    ja .ds_not_str
+    mov rcx, [rax + PyObject.ob_type]
+    lea rax, [rel str_type]
+    cmp rcx, rax
+    je .ds_kind_known
+.ds_not_str:
+    mov qword [rbx + PyDictObject.dk_kind], 0
+.ds_kind_known:
     ; Room for one more dense entry?
     mov rax, [rbx + PyDictObject.dk_nentries]
     inc rax

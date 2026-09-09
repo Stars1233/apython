@@ -175,6 +175,7 @@ test_dict_mutate_iter
 test_dict_numkey
 test_dict_ops
 test_dict_order
+test_dict_probe
 test_dicts
 test_dict_str_keys
 test_dict_update_mapping
