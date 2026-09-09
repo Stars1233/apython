@@ -5,6 +5,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern current_exception
 extern obj_richcompare_bool
 extern eval_exception_unwind
 extern bool_true
@@ -2434,7 +2435,7 @@ dict_values_view_type:
     dq 0                        ; tp_call
     dq 0                        ; tp_getattr
     dq 0                        ; tp_setattr
-    dq dict_view_richcompare    ; tp_richcompare
+    dq 0                        ; tp_richcompare (a values view is not set-like)
     dq dict_view_iter           ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
@@ -2588,85 +2589,215 @@ DEF_VIEW_BINOP nb_or,  NB_OR
 DEF_VIEW_BINOP nb_xor, NB_XOR
 
 ;; ============================================================================
+;; dvr_len(rdi = a set, a frozenset or a keys/items view) -> rax = its length
+;; ============================================================================
+DEF_FUNC_BARE dvr_len
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    mov rax, [rax + PySequenceMethods.sq_length]
+    jmp rax
+END_FUNC dvr_len
+
+;; ============================================================================
+;; dvr_all_contained_in(rdi = a, rsi = b) -> eax = 1 when every element of a
+;;   is in b, 0 when one is not, -1 with an exception pending
+;;
+;; CPython's all_contained_in: walk a with the ordinary iterator protocol and
+;; ask b's sq_contains about each element.  Nothing is hashed that b does not
+;; hash itself, which is the whole point -- an items view's VALUES need not be
+;; hashable, and building a set of them is what used to raise on them.
+;; ============================================================================
+DAC_B     equ 8
+DAC_EXC   equ 16
+DAC_FRAME equ 40                ; + 3 pushes = 64, 16-aligned
+DEF_FUNC_LOCAL dvr_all_contained_in, DAC_FRAME
+    push rbx
+    push r12
+    push r13
+    mov [rbp - DAC_B], rsi
+    DUNDER_EXC_SAVE [rbp - DAC_EXC]
+
+    mov esi, TAG_PTR            ; a is always a set or a view, so a pointer
+    extern get_iterator
+    call get_iterator
+    test rax, rax
+    jz .dac_error
+    mov r12, rax
+
+.dac_loop:
+    mov rdi, r12
+    extern call_iternext
+    call call_iternext
+    test rax, rax
+    jz .dac_exhausted
+    mov rbx, rax                ; the element, owned
+
+    mov rdi, [rbp - DAC_B]
+    mov rsi, rbx
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    mov rax, [rax + PySequenceMethods.sq_contains]
+    call rax                    ; sq_contains unwinds rather than reporting
+    mov r13d, eax
+    mov rdi, rbx
+    DECREF_V rdi, rcx
+    test r13d, r13d
+    jnz .dac_loop
+
+    mov rdi, r12
+    call obj_decref
+    xor eax, eax
+    jmp .dac_out
+
+.dac_exhausted:
+    ; call_iternext answers NULL for a clean exhaustion and for a __next__
+    ; that raised anything but StopIteration, which it leaves pending.
+    mov rdi, r12
+    call obj_decref
+    EXC_RAISED_SINCE [rbp - DAC_EXC], rcx, .dac_error
+    mov eax, 1
+    jmp .dac_out
+.dac_error:
+    mov eax, -1
+.dac_out:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dvr_all_contained_in
+
+;; ============================================================================
 ;; dict_view_richcompare(rdi = self, rsi = other, edx = op) -> rax = Value
 ;;
 ;; A view compares as the set of what it holds, which is how `d.keys() ==
-;; {"a"}` is True in CPython.  Only against something set-like: a view
-;; compared with a list is unequal rather than an error.
+;; {"a"}` is True.  Only against something set-like: a view compared with a
+;; list is unequal rather than an error.
+;;
+;; The comparison is CPython's dictview_richcompare -- lengths first, then
+;; containment one element at a time.  It used to build a SET out of each
+;; side and compare those, which is wrong twice over:
+;;
+;;   - an items view's values need not be hashable, and hashing them is not
+;;     part of the question.  `{"k": [1]}.items() == {"k": [1]}.items()` is
+;;     True in CPython and raised TypeError here, and so did every ordering
+;;     operator, and so did a comparison whose LENGTHS already settled it.
+;;   - a VALUES view is not set-like at all.  CPython gives it no
+;;     tp_richcompare, so two of them compare by identity and
+;;     `{1: 2}.values() == {1: 2}.values()` is False; here it was True, and
+;;     `{1: 2}.values() == {2}` was True as well.  The values view's slot is
+;;     now 0 and this function refuses one as the right operand.
+;;
+;; Lengths first is not only an optimisation: for the ordering operators a
+;; size mismatch settles the answer with no containment check at all, which
+;; is why an unhashable value cannot get in the way of `a.items() == {}`.
 ;; ============================================================================
-DVR_OP    equ 8
-DVR_LEFT  equ 16
-DVR_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
-DEF_FUNC_LOCAL dict_view_richcompare, DVR_FRAME
-    mov [rbp - DVR_OP], rdx
-    ; The other side has to be set-like: a view or a set.  Anything else is
+DVC_OP     equ 8
+DVC_SELF   equ 16
+DVC_OTHER  equ 24
+DVC_LSELF  equ 32
+DVC_LOTHER equ 40
+DVC_FRAME  equ 48           ; + 0 pushes = 48, 16-aligned
+DEF_FUNC_LOCAL dict_view_richcompare, DVC_FRAME
+    mov [rbp - DVC_OP], rdx
+    mov [rbp - DVC_SELF], rdi
+    mov [rbp - DVC_OTHER], rsi
+
+    ; The other side has to be set-like: a set, a frozenset, or a KEYS or
+    ; ITEMS view.  Anything else -- a values view included -- is
     ; NotImplemented, which for == falls back to identity.
     V_TEST_PTR rsi, rax
-    ja .dvr_notimpl
+    ja .dvc_notimpl
     test rsi, rsi
-    jz .dvr_notimpl
+    jz .dvc_notimpl
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel set_type]
     cmp rax, rcx
-    je .dvr_ok
+    je .dvc_ok
     lea rcx, [rel frozenset_type]
     cmp rax, rcx
-    je .dvr_ok
+    je .dvc_ok
     lea rcx, [rel dict_keys_view_type]
     cmp rax, rcx
-    je .dvr_ok
+    je .dvc_ok
     lea rcx, [rel dict_items_view_type]
     cmp rax, rcx
-    je .dvr_ok
-    lea rcx, [rel dict_values_view_type]
+    jne .dvc_notimpl
+.dvc_ok:
+    mov rdi, [rbp - DVC_SELF]
+    call dvr_len
+    mov [rbp - DVC_LSELF], rax
+    mov rdi, [rbp - DVC_OTHER]
+    call dvr_len
+    mov [rbp - DVC_LOTHER], rax
+
+    mov rax, [rbp - DVC_LSELF]
+    mov rcx, [rbp - DVC_LOTHER]
+    mov edx, [rbp - DVC_OP]
+    cmp edx, PY_EQ
+    je .dvc_eq
+    cmp edx, PY_NE
+    je .dvc_eq
+    cmp edx, PY_LT
+    je .dvc_lt
+    cmp edx, PY_LE
+    je .dvc_le
+    cmp edx, PY_GT
+    je .dvc_gt
+
+    cmp rax, rcx                ; PY_GE: self >= other
+    jb .dvc_false
+    jmp .dvc_swapped
+.dvc_gt:
     cmp rax, rcx
-    jne .dvr_notimpl
-.dvr_ok:
-    push rsi
-    push rsi
-    call dict_view_to_set
-    pop rsi
-    pop rsi
-    test rax, rax
-    jz .dvr_fail
-    mov [rbp - DVR_LEFT], rax
-    mov rdi, rsi
-    call dict_view_to_set
-    test rax, rax
-    jz .dvr_fail_left
-    mov rsi, rax
-    mov rdi, [rbp - DVR_LEFT]
-    push rsi
-    push rdi
-    mov edx, [rbp - DVR_OP]
-    extern obj_richcompare_bool
-    call obj_richcompare_bool
-    pop rdi
-    push rax
-    DECREF_V rdi, rcx
-    mov rdi, [rsp + 8]
-    DECREF_V rdi, rcx
-    pop rax
-    add rsp, 8
+    jbe .dvc_false
+.dvc_swapped:
+    ; A superset question is the subset question with the operands the other
+    ; way round.
+    mov rdi, [rbp - DVC_OTHER]
+    mov rsi, [rbp - DVC_SELF]
+    jmp .dvc_contained
+.dvc_lt:
+    cmp rax, rcx
+    jae .dvc_false
+    jmp .dvc_forward
+.dvc_le:
+    cmp rax, rcx
+    ja .dvc_false
+    jmp .dvc_forward
+.dvc_eq:
+    cmp rax, rcx
+    jne .dvc_len_differs
+.dvc_forward:
+    mov rdi, [rbp - DVC_SELF]
+    mov rsi, [rbp - DVC_OTHER]
+.dvc_contained:
+    call dvr_all_contained_in
+    cmp eax, -1
+    je .dvc_fail
+    jmp .dvc_have
+.dvc_len_differs:
+    xor eax, eax                ; == over different sizes, without looking
+.dvc_have:
+    cmp dword [rbp - DVC_OP], PY_NE
+    jne .dvc_bool
+    xor eax, 1
+.dvc_bool:
     test eax, eax
-    js .dvr_fail                ; the comparison itself raised
-    jz .dvr_false
+    jz .dvc_false
     lea rax, [rel bool_true]
-    jmp .dvr_answer
-.dvr_false:
+    jmp .dvc_answer
+.dvc_false:
     lea rax, [rel bool_false]
-.dvr_answer:
+.dvc_answer:
     inc qword [rax + PyObject.ob_refcnt]
     leave
     ret
-.dvr_fail_left:
-    mov rdi, [rbp - DVR_LEFT]
-    DECREF_V rdi, rcx
-.dvr_fail:
+.dvc_fail:
     xor eax, eax
     leave
     ret
-.dvr_notimpl:
+.dvc_notimpl:
     xor eax, eax
     leave
     ret
