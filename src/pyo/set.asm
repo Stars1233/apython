@@ -881,29 +881,9 @@ DEF_FUNC set_contains, SCT_FRAME
 
     SET_HASH_VALUE r12, r13     ; r13 = hash
 
-    ; Make the room BEFORE probing rather than after inserting.
-    ;
-    ; A fresh set points at the shared read-only empty table, so the free
-    ; slot a probe would hand back is in .rodata.  Resizing first is what
-    ; gives the set a table it may write to, and it means no write path
-    ; anywhere has to test for the shared one: by the time a slot has been
-    ; handed out, the table under it is this set's own.
-    ;
-    ; (ob_size + tombstones + 1) * 5 >= capacity * 3, which is the same
-    ; three-fifths rule one insert earlier.
-    mov rax, [rbx + PyDictObject.ob_size]
-    add rax, [rbx + PyDictObject.dk_tombstones]
-    inc rax
-    lea rax, [rax + rax*4]      ; (fill + 1) * 5
-    mov rcx, [rbx + PyDictObject.capacity]
-    lea rcx, [rcx + rcx*2]      ; capacity * 3
-    cmp rax, rcx
-    jl .have_room
-    mov rdi, rbx
-    call set_resize
-.have_room:
-
-    ; Find slot
+    ; Find slot.  A lookup never resizes: set_add's room-making belongs to
+    ; the insert, and a membership test that rehashed the table would move
+    ; every element out from under any iterator walking it.
     mov rdi, rbx                ; set
     mov rsi, r12                ; the key
     mov rdx, r13                ; hash
