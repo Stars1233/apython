@@ -172,6 +172,7 @@ test_dict_fromkeys
 test_dict_int_keys
 test_dict_ior
 test_dict_mutate_iter
+test_dict_mutate_under_write
 test_dict_numkey
 test_dict_ops
 test_dict_order
