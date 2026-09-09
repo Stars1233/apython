@@ -199,6 +199,12 @@ DEF_FUNC frame_new, 8            ; 5 pushes, so rsp is 16-aligned
     ; The pool does not zero, and a recycled frame carrying a dead
     ; generator's back-pointer would let frame.clear() close it.
     mov qword [r11 + PyFrame.gen_owner], 0
+    ; And how the frame is entered.  Every caller of frame_new that goes on to
+    ; `call eval_frame` wants FRAME_ENTRY_CALL, which is zero; the one handler
+    ; that pushes the frame inline overwrites it.  A recycled frame carrying a
+    ; stale FRAME_ENTRY_INLINE would make eval_return jump to a resume with no
+    ; call to resume, so this is not an optional zero.  Both dwords go at once.
+    mov qword [r11 + PyFrame.entry_kind], 0
 
     ; Set nlocalsplus and func_obj
     mov [r11 + PyFrame.nlocalsplus], r8d

@@ -18,9 +18,16 @@
 ; plain case with one more argument and the callable one slot deeper.  That
 ; layout exists precisely so no argument array has to be built.
 ;
-; What is NOT taken: eval_frame and eval_return, and the frame allocation.
-; Those need the frame pushed without a C-level call, which is a change to how
-; the interpreter is structured rather than a new handler.
+; The frame is now pushed WITHOUT a C-level call: the handler builds it, writes
+; PyFrame.entry_kind, and jumps into eval_frame rather than calling it.
+; eval_return reads that field while the frame is still current, restores the
+; caller exactly as it always did, and jumps to eval_inline_resume below
+; instead of returning.  What is still shared, unchanged, is eval_frame's whole
+; prologue and eval_return's whole restore -- the 19-word state block, the
+; handled_exception swap, prev_frame linking, eval_base_rsp, the recursion
+; count and the trace hooks.
+;
+; The frame allocation is still frame_new's.
 ;
 ; A generator, coroutine or async generator is refused at the guard.  Such a
 ; call returns with the frame still live -- op_return_generator hands it to the
@@ -37,6 +44,8 @@ extern eval_saved_rbx
 extern eval_saved_r13
 extern opcode_dispatch_table
 extern eval_frame
+extern eval_inline_ret_bug
+extern eval_dispatch
 extern eval_exception_unwind
 extern frame_new
 extern frame_free
@@ -45,6 +54,7 @@ extern builtins_dict_global
 extern kw_names_pending
 extern current_exception
 extern obj_dealloc
+extern obj_decref
 extern op_call
 
 section .text
@@ -168,46 +178,125 @@ DEF_FUNC op_call_py_exact, CPE_FRAME
     jb .cpe_bind
 
 .cpe_run:
+    ; Hand the frame to eval_frame WITHOUT calling it.
+    ;
+    ; Two words say everything the far side needs.  entry_kind tells
+    ; eval_return that this frame has no return address to go back to, so that
+    ; after its restore -- which is unchanged, and which is what puts rbx, r12,
+    ; r13 and every eval global back to the caller's -- it jumps to
+    ; eval_inline_resume instead of returning.  entry_slots is what the resume
+    ; cannot work out for itself once the frame is gone: how many value-stack
+    ; slots this call consumed.
+    mov dword [r15 + PyFrame.entry_kind], FRAME_ENTRY_INLINE
+    mov ecx, [rbp - CPE_NARGS]
+    add ecx, 2                          ; N+2 slots, whichever shape this was
+    mov dword [r15 + PyFrame.entry_slots], ecx
+
     mov rdi, r15
-    call eval_frame
-    mov [rbp - CPE_RET], rax
-    mov rdi, r15
-    call frame_free
-
-    ; Release the callable, and only the callable.  The arguments' references
-    ; went into the frame at .cpe_bind and frame_free has just given them back;
-    ; releasing them here as well would be one DECREF too many.  The callable
-    ; is the slot immediately below the arguments in both shapes -- the method
-    ; in one, the function in the other -- and in the plain shape the NULL two
-    ; slots down needs nothing.
-    mov r15, [rbp - CPE_ARGS]
-    mov rdi, [r15 - 8]
-    DECREF_V rdi, rdx
-
-    ; N+2 slots go, whichever shape this was.
-    mov rcx, [rbp - CPE_NARGS]
-    add rcx, 2
-    shl rcx, 3
-    sub r13, rcx
-
-    mov rax, [rbp - CPE_RET]
-    test rax, rax
-    jz .cpe_propagate
-    VPUSH rax
-    add rbx, 6                          ; skip 3 CACHE entries
-    leave
-    DISPATCH
-
-.cpe_propagate:
-    ; The callee raised.  As op_call's own propagate: rbx is not advanced,
-    ; because the unwinder reads the current IP from eval_saved_rbx, which
-    ; DISPATCH set.
-    leave
-    mov [rel eval_saved_r13], r13
-    jmp eval_exception_unwind
+    leave                               ; this handler's own C frame is gone;
+                                        ; rbp is the caller frame's again, and
+                                        ; eval_frame will push it as its own
+    ; The word where a return address would be.  It is a real address, not
+    ; padding: if entry_kind is ever wrong, a `ret` lands on a named
+    ; fatal_error rather than in the middle of the value stack.  It also
+    ; supplies the parity -- a handler is entered with rsp 16-aligned, `call`
+    ; would have left rsp 8 past that, and eval_frame's push list is counted
+    ; from there.  Get this wrong and every libc call inside the callee is
+    ; misaligned.
+    push eval_inline_ret_bug    ; one instruction: -no-pie puts .text below
+                                ; 2**31, so the immediate sign-extends to
+                                ; itself
+    ;
+    ; rbx is deliberately NOT advanced past the CACHE entries here.  The
+    ; unwinder reads the current IP from eval_saved_rbx, which DISPATCH set to
+    ; this CALL's own address, and a propagate out of the callee has to find it
+    ; there -- exactly as .cpe_propagate relied on.  The resume advances it.
+    jmp eval_frame
 
 .cpe_deopt:
     mov byte [rbx - 2], OP_CALL
     leave
     jmp op_call
 END_FUNC op_call_py_exact
+
+;; ============================================================================
+;; eval_inline_resume(r9 = the frame just left, r11 = a deferred exception or 0,
+;;                    rax:rdx = the returned Value) -> nothing; dispatches on
+;;                    in the caller, or unwinds
+;;
+;; The far side of the jump above.
+;;
+;; eval_return jumps here in place of returning, having already put back
+;; everything a `ret` would have: rbx, r12, r13, r14, rbp and all thirteen
+;; scoped globals.  So this runs exactly where the instruction after
+;; `call eval_frame` used to, and does exactly what stood there.
+;;
+;;   r9  = the frame just left, to free
+;;   r11 = an exception whose release eval_return deferred to here, or 0
+;;   rax:rdx = the returned Value; rax == 0 means the callee is unwinding
+;;
+;; The order below is the order that code had, and two parts of it are not
+;; free to move.  The deferred release comes before frame_free because that is
+;; where it was -- eval_return did it last, the caller did frame_free first --
+;; and its whole point is to run a __del__ where the caller's next opcode
+;; would.  entry_slots is read before frame_free because after it the frame is
+;; back in the pool.
+;; ============================================================================
+DEF_FUNC_BARE eval_inline_resume
+    ; The stack top first, while the frame is still there to be asked.  r13 is
+    ; callee-saved, so lowering it now means nothing below has to carry the
+    ; count across a call -- and the slots are still physically there, which is
+    ; what makes finding the callable below work.
+    mov r10d, dword [r9 + PyFrame.entry_slots]
+    shl r10, 3
+    sub r13, r10                        ; N+2 slots go, whichever shape it was
+
+    ; rdx is DEAD: it is the fat-pair tag, and the code this replaces clobbered
+    ; it in its own DECREF before pushing rax.  So only the payload has to
+    ; survive the two calls below, and r15 -- free by the register convention,
+    ; and between frames here -- carries it instead of a stack slot.
+    mov r15, rax
+
+    ; The exception eval_return deferred, released before the frame is freed,
+    ; which is the order it had: eval_return did this last and the caller did
+    ; frame_free first.  Its point is that a __del__ runs where the caller's
+    ; next opcode would, and that is here.
+    test r11, r11
+    jz .eir_no_deferred
+    push r9
+    push r9                             ; twice: rsp keeps its alignment
+    mov rdi, r11
+    call obj_decref
+    pop r9
+    pop r9
+.eir_no_deferred:
+    mov rdi, r9
+    call frame_free
+
+    ; Release the callable, and only the callable.  The arguments' references
+    ; went into the frame at .cpe_bind and frame_free has just given them back;
+    ; releasing them here as well would be one DECREF too many.
+    ;
+    ; Which slot it is depends on the call's shape, and the stack still says
+    ; which: the deepest of the consumed slots is the method in one shape and a
+    ; NULL in the other, and in the second the callable is the slot above it.
+    mov rdi, [r13]
+    test rdi, rdi
+    jnz .eir_have_callable
+    mov rdi, [r13 + 8]
+.eir_have_callable:
+    DECREF_V rdi, rcx
+
+    mov rax, r15
+    test rax, rax
+    jz .eir_propagate
+    VPUSH rax
+    add rbx, 6                          ; skip 3 CACHE entries
+    DISPATCH
+
+.eir_propagate:
+    ; The callee raised and found no handler.  rbx is still the CALL's own
+    ; address, which is what the unwinder reads out of eval_saved_rbx.
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
+END_FUNC eval_inline_resume

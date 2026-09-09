@@ -1224,8 +1224,21 @@ struc PyFrame
                             ;      the generator, and a frame object only has
                             ;      the frame.  Borrowed because the generator
                             ;      owns the frame, not the other way round.
-    .localsplus:            ; +112: Value array (variable size)
+    ; How this frame was entered, and therefore how it is left.  Zero is a
+    ; C-level `call eval_frame` -- a module body, an eval(), a class body, a
+    ; generator resume, func_call's slow path -- and eval_return leaves such a
+    ; frame with a `ret`.  Anything else means a bytecode handler pushed the
+    ; frame INLINE and there is no `ret` to go back to: eval_return restores
+    ; the caller and jumps to that handler's resume instead.  .entry_slots is
+    ; the resume's one piece of state, the value-stack slots the call
+    ; consumed, and it has to be read out of the frame before it is freed.
+    .entry_kind:    resd 1  ; +112: FRAME_ENTRY_*
+    .entry_slots:   resd 1  ; +116: inline only
+    .localsplus:            ; +120: Value array (variable size)
 endstruc
+
+FRAME_ENTRY_CALL   equ 0    ; entered by `call eval_frame`; left by `ret`
+FRAME_ENTRY_INLINE equ 1    ; pushed by CALL_PY_EXACT; left by eval_inline_resume
 
 FRAME_HEADER_SIZE equ PyFrame.localsplus
 
