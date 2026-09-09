@@ -1025,6 +1025,27 @@ TC_NO_SELF  equ 96
 %%none:
 %endmacro
 
+;; ============================================================================
+;; TC_NAME dest, cache, literal
+;;
+;; The interned str for a literal type_call asks for on EVERY construction,
+;; memoised in one qword.  dunder_name_obj is a hash probe and a call; three of
+;; them per object made were 6.7% of a `class C: pass` construction loop once
+;; the probe itself was fixed.  The name it answers with is immortal -- the
+;; intern table never evicts -- so a qword is a complete cache and needs no
+;; invalidation.
+;; ============================================================================
+%macro TC_NAME 3
+    mov %1, [rel %2]
+    test %1, %1
+    jnz %%have
+    lea rdi, [rel %3]
+    call dunder_name_obj
+    mov [rel %2], rax
+    mov %1, rax
+%%have:
+%endmacro
+
 %macro TC_REFUSE_EXTRA_ARGS 1
     cmp qword [rbp - TC_PLAIN], 0
     je %%ok
@@ -1323,9 +1344,7 @@ DEF_FUNC type_call
     ; lines later.  Three of those per object made is most of what a heaptype
     ; instance cost over object()'s.
     push rax
-    lea rdi, [rel tc_abstract_name]
-    call dunder_name_obj
-    mov rcx, rax
+    TC_NAME rcx, tc_abstract_name_obj, tc_abstract_name
     pop rdi
     mov rsi, rcx
     call dict_get
@@ -1357,9 +1376,7 @@ DEF_FUNC type_call
     ; === Look up __new__ in MRO (stop at object_type) ===
     ; Borrowed and interned, so nothing below releases it -- see the note at
     ; the __abstractmethods__ lookup above.
-    lea rdi, [rel new_name_cstr]
-    call dunder_name_obj
-    mov r15, rax                ; r15 = "__new__" str, BORROWED
+    TC_NAME r15, tc_new_name_obj, new_name_cstr   ; BORROWED
 
     ; type_lookup_cached answers exactly what the MRO walk this replaced did --
     ; the value in the first tp_dict along the MRO that has the name, and the
@@ -1553,9 +1570,7 @@ DEF_FUNC type_call
 .lookup_init:
     ; Look up __init__ walking the MRO (type + tp_base chain)
     ; Borrowed and interned, as for __new__ above.
-    lea rdi, [rel init_name_cstr]
-    call dunder_name_obj
-    mov r15, rax                ; r15 = "__init__" str, BORROWED
+    TC_NAME r15, tc_init_name_obj, init_name_cstr ; BORROWED
 
     ; The same cache as for __new__ above; .init_found already reads the owner
     ; out of rcx, which is where this leaves it.
@@ -2597,6 +2612,12 @@ id_del_ignored_msg: db "Exception ignored in __del__", 10
 id_del_ignored_len equ $ - id_del_ignored_msg
 section .bss
 align 8
+;; The three names type_call resolves on every construction, memoised by
+;; TC_NAME.  Immortal once set: the intern table never evicts.
+tc_abstract_name_obj: resq 1
+tc_new_name_obj:      resq 1
+tc_init_name_obj:     resq 1
+
 ;; Where type_setattr builds its refusal for a static type.  A raise follows
 ;; immediately, so nothing outlives the call.
 TS_IMM_BUFSZ equ 256
