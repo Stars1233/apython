@@ -1,10 +1,23 @@
 # apython
 
-A Python 3.12 bytecode interpreter in x86-64 NASM assembly, exploring the fastest x86 single-core Python execution, with a focus on floating point and integer performance.
+A Python 3.12 bytecode interpreter in x86-64 NASM assembly, exploring
+the fastest x86 single-core Python execution, with a focus on floating
+point and integer performance.
 
 ## What is this?
 
-apython compiles and executes Python 3.12 directly — no CPython, no JIT, no interpreter overhead layers.  It reads `.py` source through a compiler written in the same assembly, and `.pyc` bytecode through a marshal reader. The entire interpreter is **~86,000 lines of x86-64 assembly**, from the eval loop to the type system to the garbage collector to async I/O. It implements a complete Python 3.12 compiler — tokenizer, Pratt parser, symbol table, code generator and assembler — plus the full type and opcode set, generators, async/await, multiple inheritance with a C3 MRO, metaclasses, abstract base classes, weak references, pattern matching, real tracebacks, a regex engine, cycle-collecting GC, and a pure-assembly asyncio event loop.  Strings hold UTF-8 and count themselves in code points.
+apython compiles and executes Python 3.12 directly — no CPython,
+no JIT, no interpreter overhead layers.  It reads `.py` source
+through a compiler written in the same assembly, and `.pyc` bytecode
+through a marshal reader. The entire interpreter is **~86,000 lines
+of x86-64 assembly**, from the eval loop to the type system to the
+garbage collector to async I/O. It implements a complete Python 3.12
+compiler — tokenizer, Pratt parser, symbol table, code generator
+and assembler — plus the full type and opcode set, generators,
+async/await, multiple inheritance with a C3 MRO, metaclasses, abstract
+base classes, weak references, pattern matching, real tracebacks,
+a regex engine, cycle-collecting GC, and a pure-assembly asyncio
+event loop.  Strings hold UTF-8 and count themselves in code points.
 
 ## Key design choices
 
@@ -17,6 +30,13 @@ apython compiles and executes Python 3.12 directly — no CPython, no JIT, no in
 - **Full async/await with io_uring** — high-speed async I/O via Linux io_uring (with epoll fallback), zero-copy TCP streams
 - **A Python compiler in the same assembly** — `compile()`, `exec()`, `eval()`, `./apython foo.py` and `import` from source, all from a table-driven front end: a 256-entry character class, a Pratt table with one row per token, and one opcode-metadata table that drives cache padding, instruction sizing and stack depth together
 - **DWARF debug symbols** — full GDB support with frame-pointer unwinding, function boundaries, and source-level stepping
+
+## AI LLM level
+
+apython is expert-guided, AI-written.  An expert is making top-level
+data structure, data flow and code algorithm choices, not a "dumb
+ralph wiggum w/ cpython oracle" approach.  Basing a project entirely in
+x86-64 assembly would not have been feasible for 1 person without LLM.
 
 ## Quick start
 

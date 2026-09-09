@@ -1199,9 +1199,11 @@ DEF_FUNC comp_intern_name, 80
     jne .plain
     cmp byte [rsi + 1], '_'
     jne .plain
-    ; ...but not one that also ends in two underscores.
-    cmp rdx, 4
-    jl .mangle_ok
+    ; ...but not one that also ends in two underscores.  There is no length
+    ; floor on that: `__` is two leading underscores AND two trailing ones,
+    ; and CPython does not mangle it, nor `___`.  Skipping the check below
+    ; four characters mangled both, so a class body's `__ = 2` was stored as
+    ; `_C__` and `C.__` was an AttributeError.
     mov rcx, rdx
     cmp byte [rsi + rcx - 1], '_'
     jne .mangle_ok

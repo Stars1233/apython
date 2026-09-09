@@ -120,3 +120,82 @@ except TypeError as e:
 print("--- and the module-level shape sre_constants relies on ---")
 import _codecs as _
 print(len({k: v for k, v in vars(_).items() if k[:2] != "__"}) > 0)
+
+# --- the twelve names type_getattr answers before it walks anything -------
+# Each was an ap_strcmp CALL, made in order, before any dict was touched --
+# so an ORDINARY class attribute, which is what `C.attr` almost always is,
+# matched none of them and paid for all twelve.  ap_strcmp was 17% of the
+# case.  All twelve begin with two underscores, so two byte compares now
+# stand in front of the lot.
+#
+# What that must not change: a name that starts with one underscore, or ends
+# with two, or is exactly "__", or is empty, still resolves the ordinary way.
+
+
+class Attrs:
+    LIMIT = 7
+    _priv = 1
+    __mangled = 2
+
+    def m(self):
+        return 1
+
+    @property
+    def p(self):
+        return 2
+
+
+class Sub(Attrs):
+    pass
+
+
+for t in (Attrs, Sub, Exception, ValueError):
+    print(t.__name__, t.__qualname__, t.__module__,
+          len(t.__mro__), len(t.__bases__),
+          t.__basicsize__ >= 0, isinstance(t.__dictoffset__, int),
+          isinstance(t.__weakrefoffset__, int), isinstance(t.__flags__, int),
+          type(t.__dict__).__name__)
+print(Attrs.LIMIT, Attrs._priv, Attrs._Attrs__mangled, Sub.LIMIT,
+      type(Attrs.m).__name__, type(Attrs.p).__name__)
+print(sorted(x for x in Attrs.__dict__ if not x.startswith("__")))
+
+
+class Underscores:
+    _ = 1
+    __ = 2
+    _x__ = 3
+    __x = 4
+    x__ = 5
+
+
+print(Underscores._, Underscores.__, Underscores._x__,
+      Underscores._Underscores__x, Underscores.x__)
+
+
+class Doc:
+    pass
+
+
+Doc.__doc__ = "doc"
+print(Doc.__doc__, Doc.__name__)
+
+for t, n in ((Attrs, "nope"), (Attrs, "__nope__"), (Attrs, "_nope"),
+             (int, "nope"), (Attrs, "")):
+    try:
+        getattr(t, n)
+    except AttributeError as e:
+        print("AttributeError", e)
+print(getattr(Attrs, "LIMIT"), getattr(Attrs, "nope", "DEF"),
+      hasattr(Attrs, "__mro__"))
+
+
+class Meta(type):
+    META = 9
+
+
+class ViaMeta(metaclass=Meta):
+    OWN = 1
+
+
+print(ViaMeta.OWN, ViaMeta.META, ViaMeta.__name__, type(ViaMeta).__name__)
+print(int.__name__, str.__module__, len(list.__mro__), dict.__basicsize__ > 0)

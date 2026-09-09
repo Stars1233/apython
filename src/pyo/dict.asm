@@ -5,6 +5,8 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern ap_memcpy
+extern current_exception
 extern obj_richcompare_bool
 extern eval_exception_unwind
 extern bool_true
@@ -51,10 +53,15 @@ DEF_FUNC dict_new, 8            ; 1 pushes, so rsp is 16-aligned
     mov qword [rbx + PyDictObject.dk_version], 1
     mov qword [rbx + PyDictObject.dk_tombstones], 0
     mov qword [rbx + PyDictObject.dk_nentries], 0
+    mov qword [rbx + PyDictObject.dk_kind], 1   ; vacuously all-str
 
-    mov rdi, rbx
-    mov rsi, DICT_INIT_CAP
-    call dict_alloc_tables
+    ; The shared empty table: no allocation, and the first insert resizes
+    ; away from it before it can write anything.
+    mov qword [rbx + PyDictObject.capacity], 1
+    lea rax, [rel dict_empty_entries]
+    mov [rbx + PyDictObject.entries], rax
+    lea rax, [rel dict_empty_indices]
+    mov [rbx + PyDictObject.dk_indices], rax
 
     ; NOT tracked yet.  A dict whose contents are all untrackable cannot be
     ; part of a cycle, and CPython does not track one: `gc.is_tracked({})` is
@@ -70,9 +77,25 @@ END_FUNC dict_new
 ;; ============================================================================
 ;; dict_copy_shallow(rdi = src dict) -> rax = a new dict, or 0
 ;;
-;; The entries walk is over the DENSE array, so insertion order survives the
-;; copy; `key == 0` skips a hole.  dict_set takes its own references, so the
-;; result owns everything it holds and the source is left untouched.
+;; BOTH TABLES ARE CLONED, not re-inserted.  The copy takes the source's
+;; capacity, so the sparse index array transfers as it stands and not one key
+;; is hashed or probed; the dense array is memcpy'd up to its high-water mark,
+;; holes and all, which is what keeps the index array's dummies pointing at
+;; the right slots and keeps insertion order.  CPython's clone_combined_dict_keys.
+;;
+;; It used to walk every slot of the source and call dict_set per entry -- a
+;; hash, a probe, a tracking check and a version bump for each -- and read
+;; 0.18x of CPython on d_copy and 0.13x on d_from_dict.  Cloning is one
+;; ap_memcpy each way and one pass taking a reference per live element.
+;;
+;; The copy holds exactly what the source holds, so a NON-EMPTY one is
+;; collector-tracked exactly when the source is and the bit needs no
+;; re-derivation.  An EMPTY source yields an untracked copy however the source
+;; itself is marked, which is CPython's answer as well -- PyDict_Copy returns a
+;; plain PyDict_New() when ma_used is 0.  The two come apart because clear()
+;; does not untrack: `d = {1: []}; d.clear()` leaves a dict that is still in a
+;; generation and holds nothing, and a copy of it holds nothing either, so it
+;; cannot be part of a cycle and there is nothing for the collector to walk.
 ;;
 ;; dict.copy() is this, and so is the namespace copy type_from_parts makes:
 ;; a class must not keep the caller's dict as its tp_dict, or `ns['x'] = 1`
@@ -90,25 +113,62 @@ DEF_FUNC dict_copy_shallow      ; 4 pushes, so rsp stays 16-aligned
     jz .dcs_out
     mov r12, rax                ; dst
 
-    mov r13, [rbx + PyDictObject.capacity]
-    xor r14d, r14d
+    ; An empty source needs no table at all: the shared one is already right.
+    ; This also skips the tracking below, deliberately -- see the docblock.
+    cmp qword [rbx + PyDictObject.ob_size], 0
+    je .dcs_done
 
-.dcs_loop:
-    cmp r14, r13
-    jge .dcs_done
-    mov rax, [rbx + PyDictObject.entries]
-    imul rcx, r14, DICT_ENTRY_SIZE
-    add rax, rcx
-    mov rdi, [rax + DictEntry.key]
-    test rdi, rdi
-    jz .dcs_next
-    mov rdx, [rax + DictEntry.value]
-    mov rsi, rdi
     mov rdi, r12
-    call dict_set
+    mov rsi, [rbx + PyDictObject.capacity]
+    call dict_alloc_tables      ; same capacity, so the indices transfer as-is
+
+    mov rdi, [r12 + PyDictObject.entries]
+    mov rsi, [rbx + PyDictObject.entries]
+    mov rdx, [rbx + PyDictObject.dk_nentries]
+    imul rdx, rdx, DICT_ENTRY_SIZE
+    call ap_memcpy
+
+    mov rdi, [r12 + PyDictObject.dk_indices]
+    mov rsi, [rbx + PyDictObject.dk_indices]
+    mov rdx, [rbx + PyDictObject.capacity]
+    shl rdx, 3
+    call ap_memcpy
+
+    mov rax, [rbx + PyDictObject.dk_nentries]
+    mov [r12 + PyDictObject.dk_nentries], rax
+    mov rax, [rbx + PyDictObject.dk_tombstones]
+    mov [r12 + PyDictObject.dk_tombstones], rax
+    mov rax, [rbx + PyDictObject.ob_size]
+    mov [r12 + PyDictObject.ob_size], rax
+    mov rax, [rbx + PyDictObject.dk_kind]
+    mov [r12 + PyDictObject.dk_kind], rax
+
+    ; One reference for each key and value the copy now holds.  A hole in the
+    ; dense array carries a zero key and owns nothing.
+    mov r13, [r12 + PyDictObject.entries]
+    mov r14, [r12 + PyDictObject.dk_nentries]
+    imul r14, r14, DICT_ENTRY_SIZE
+    add r14, r13
+.dcs_loop:
+    cmp r13, r14
+    jae .dcs_track
+    mov rax, [r13 + DictEntry.key]
+    test rax, rax
+    jz .dcs_next
+    INCREF_V rax, rcx
+    mov rax, [r13 + DictEntry.value]
+    INCREF_V rax, rcx
 .dcs_next:
-    inc r14
+    add r13, DICT_ENTRY_SIZE
     jmp .dcs_loop
+
+.dcs_track:
+    ; Tracked when the source is: the copy holds the same objects.  Only a
+    ; non-empty source reaches here.
+    cmp qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_next], 0
+    je .dcs_done
+    mov rdi, r12
+    call gc_track
 
 .dcs_done:
     mov rax, r12
@@ -120,6 +180,37 @@ DEF_FUNC dict_copy_shallow      ; 4 pushes, so rsp stays 16-aligned
     leave
     ret
 END_FUNC dict_copy_shallow
+
+;; ============================================================================
+;; dict_release_tables(rdi = dict) -> void
+;;
+;; Hand the dict back to the shared empty table, releasing whatever it had.
+;; What clear() means, and cheaper than what it used to do: an ap_memset over
+;; capacity*24 bytes and a `rep stosq` over capacity*8 more, keeping a table
+;; whose contents are all gone.  CPython's dict_clear points ma_keys at
+;; Py_EMPTY_KEYS for the same reason.
+;; ============================================================================
+DEF_FUNC dict_release_tables, 8         ; + 1 push = 16, 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyDictObject.entries]
+    lea rax, [rel dict_empty_entries]
+    cmp rdi, rax
+    je .drt_done                        ; already shared; nothing to release
+    call ap_free
+    mov rdi, [rbx + PyDictObject.dk_indices]
+    call ap_free
+    mov qword [rbx + PyDictObject.capacity], 1
+    mov qword [rbx + PyDictObject.dk_kind], 1   ; no keys left to disprove it
+    lea rax, [rel dict_empty_entries]
+    mov [rbx + PyDictObject.entries], rax
+    lea rax, [rel dict_empty_indices]
+    mov [rbx + PyDictObject.dk_indices], rax
+.drt_done:
+    pop rbx
+    leave
+    ret
+END_FUNC dict_release_tables
 
 ;; ============================================================================
 ;; dict_alloc_tables(rdi = dict, rsi = capacity)
@@ -205,36 +296,14 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
     mov rax, [rdi + PyObject.ob_type]
     REQUIRE_DICT_TYPE rax, rcx, .dtc_try_iterable
 
-    ; dict(other_dict) → create new dict and copy entries
-    push rdi                   ; save source dict
-    call dict_new
-    mov r15, rax               ; r15 = new dict
-    pop rdi                    ; rdi = source dict
-
-    ; Copy all entries from source
-    mov r8, [rdi + PyDictObject.capacity]
-    xor ecx, ecx
-.dtc_copy_loop:
-    cmp rcx, r8
-    jge .dtc_copy_done
-    imul rax, rcx, DICT_ENTRY_SIZE
-    add rax, [rdi + PyDictObject.entries]
-    cmp qword [rax + DictEntry.key], 0   ; occupied?
-    je .dtc_copy_next
-    push rcx
-    push r8
-    push rdi
-    mov rdi, r15               ; new dict
-    mov rsi, [rax + DictEntry.key]
-    mov rdx, [rax + DictEntry.value]
-    call dict_set
-    pop rdi
-    pop r8
-    pop rcx
-.dtc_copy_next:
-    inc rcx
-    jmp .dtc_copy_loop
-.dtc_copy_done:
+    ; dict(other_dict) is a copy, and dict_copy_shallow is what a copy is:
+    ; both tables cloned, nothing re-hashed.  The loop that was here walked
+    ; every slot and called dict_set per entry, with a three-register push
+    ; bracket around each call.
+    call dict_copy_shallow
+    mov r15, rax
+    test rax, rax
+    jz .dtc_error
     ; Fall through to add kwargs if present
     jmp .dtc_add_kwargs
 
@@ -360,28 +429,6 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
     RAISE exc_TypeError_type, "dict() argument must be a mapping or iterable"
 END_FUNC dict_type_call
 
-;; ============================================================================
-;; dict_keys_equal(rdi=a_key, rsi=b_key, edx=a_tag, ecx=b_tag) -> int (1=equal, 0=not)
-;;
-;; Was identity, then a hand-rolled cross-type numeric compare, then a
-;; strcmp, then tp_richcompare -- most of PyObject_RichCompareBool, with the
-;; reflected call missing.  So a key whose __eq__ lives on the *lookup* side
-;; rather than the stored side was never found.
-;; ============================================================================
-DEF_FUNC_LOCAL dict_keys_equal
-    ; Both arguments are Values.
-    mov edx, PY_EQ
-    call obj_richcompare_bool
-    cmp eax, -1
-    je .dke_error
-    leave
-    ret
-
-.dke_error:
-    ; The probe loop has no error channel; the exception is already pending.
-    leave
-    jmp eval_exception_unwind
-END_FUNC dict_keys_equal
 
 ;; ============================================================================
 ;; dict_get(rdi=dict, rsi=key Value) -> rax = value Value, or 0 when absent
@@ -414,157 +461,234 @@ END_FUNC dict_get
 ;;   rdx = the indices slot the key hashes to (where an insert would go, or
 ;;         the first dummy on the probe path), r8 = hash
 ;; The one probe loop; every read path goes through it.
+;;
+;; TWO probe loops, chosen once on entry, as CPython 3.12 does.  Everything
+;; invariant for the call is in a REGISTER -- the index array, the entry
+;; array, the key, the slot and the mask -- because the loop used to reload
+;; all five from the dict header and the frame on every single iteration.
+;; Eight loads to answer a question that, for an interned name hitting on the
+;; first probe, is one indexed load and one pointer compare.
+;;
+;; The str loop is entered only when the probe key is an exact str AND the
+;; dict's dk_kind says every key in it is one, so it can compare bytes
+;; without first asking what the STORED key is.  Everything else -- an int, a
+;; tuple, an object, or a str probe into a dict that has seen a non-str key --
+;; takes the generic loop, which asks obj_richcompare_bool.  A str probing a
+;; mixed dict gets a correct but slower answer, which is the trade CPython
+;; makes with its third loop and this does not.
+;;
+;; Both loops try IDENTITY first.  Interning makes that the answer for every
+;; attribute name, every global and every keyword; it used to sit behind a
+;; frame-slot load and a memory compare.
+;;
+;; There is no probe counter.  Every slot that is not EMPTY was claimed by an
+;; insert, so the non-empty count is dk_nentries, which dict_set holds at
+;; three quarters of capacity -- a quarter of the table is always EMPTY and
+;; the walk always ends.
 ;; ============================================================================
-DL_DICT  equ 8
-DL_KEY   equ 16
-DL_HASH  equ 24
-DL_FREE  equ 32
-DL_SKEY  equ 40            ; the probe key when it is an exact str, else 0
+DL_HASH  equ 8
+DL_FREE  equ 16
+DL_IX    equ 24            ; the candidate index, across a comparison call
+DL_DICT  equ 32            ; ... and the dict, to see whether it moved
+DL_CMPKEY equ 40           ; ... and the key that was compared
+DL_PERT  equ 48            ; the probe recurrence's remaining hash bits
 DL_FRAME equ 56            ; + 5 pushes = 96, 16-aligned
-;
-; The probe recurrence lives in REGISTERS.  The slot and the mask used to be
-; frame slots that .dl_next stored and .dl_probe reloaded on the next
-; iteration -- a store-to-load forward, about five cycles, sitting directly on
-; the dependency chain of a loop whose whole job is to chase one.  r14 and r15
-; were free: this function pushed only rbx, r12 and r13.
+
+; rbx = dk_indices, r12 = entries, r13 = the key, r14 = slot, r15 = mask
+%macro DL_SETUP 0
+    mov rbx, [rdi + PyDictObject.dk_indices]
+    mov r12, [rdi + PyDictObject.entries]
+    mov r15, [rdi + PyDictObject.capacity]
+    dec r15                     ; the mask
+    mov r14, [rbp - DL_HASH]
+    mov [rbp - DL_PERT], r14     ; the whole hash, folded in a step at a time
+    and r14, r15                 ; the first slot
+    mov qword [rbp - DL_FREE], -1
+%endmacro
+
+; i = (i*5 + perturb + 1) & mask, with perturb shifted down each step.  The
+; first slot uses the hash's LOW bits only; this is what brings the high ones
+; into play.  Linear probing does not, and with an identity hash for integers
+; the fixed probe order is the same order consecutive keys arrive in, which
+; is the case CPython's own comment calls deadly.
+%macro DL_ADVANCE 0
+    mov rax, [rbp - DL_PERT]
+    shr rax, PERTURB_SHIFT
+    mov [rbp - DL_PERT], rax
+    lea r14, [r14 + r14*4]
+    add r14, rax
+    inc r14
+    and r14, r15
+%endmacro
+
+; The entry at index %2, without the 3-cycle `imul reg, reg, 24`.
+%macro DL_ENTRY 2               ; %1 = dst, %2 = index
+    lea %1, [%2 + %2*2]
+    lea %1, [r12 + %1*8]
+%endmacro
+
 DEF_FUNC dict_lookup, DL_FRAME
     push rbx
     push r12
     push r13
     push r14
     push r15
-    mov [rbp - DL_DICT], rdi
-    mov [rbp - DL_KEY], rsi
 
-    ; --- Is the probe key an exact str? ---------------------------------
-    ; Nearly every lookup in a running program is: attribute names, global
-    ; names, keyword arguments, module dicts, __dict__.  CPython keeps a whole
-    ; second probe loop for the case (unicodekeys_lookup_unicode, marked
-    ; _Py_HOT_FUNCTION and unrolled).  Recording the answer once here buys
-    ; both halves below -- the hash and the comparison.
-    ;
-    ; Exact str only.  A subclass may define __eq__ or __hash__, and then the
-    ; generic protocol is the only thing that gives the right answer.
-    mov qword [rbp - DL_SKEY], 0
+    mov r13, rsi                ; the key, held for the whole call
+    mov [rbp - DL_DICT], rdi
+
+    ; --- the hash, and which loop -----------------------------------------
+    V_IS_INT rsi, rax
+    jae .dl_int_key
     V_TEST_PTR rsi, rax
-    ja .dl_hash_generic
+    ja .dl_hash_generic         ; a float immediate has no cached hash
     test rsi, rsi
     jz .dl_hash_generic
     mov rax, [rsi + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
     jne .dl_hash_generic
-    mov [rbp - DL_SKEY], rsi
     ; The hash is cached in the string itself, so the indirect obj_hash call
     ; is pure overhead once it has been taken.  -1 is the "not yet" sentinel;
     ; fall through to obj_hash to compute and cache it the first time.
     mov rax, [rsi + PyStrObject.ob_hash]
     cmp rax, -1
+    je .dl_hash_generic
+    mov [rbp - DL_HASH], rax
+    cmp qword [rdi + PyDictObject.dk_kind], 0
+    je .dl_generic_setup        ; a key of some other type is in the table
+    DL_SETUP
+    jmp .dls_probe
+
+.dl_int_key:
+    ; An int immediate IS its own hash: int_hash_i64 answers v whenever
+    ; |v| is below PYHASH_MODULUS, and +-2^50 is well inside that.  The only
+    ; exception is CPython's, that hash(-1) is -2.  This used to be a call to
+    ; obj_hash, which unpacked the Value, walked a tag ladder and tail-jumped
+    ; to int_hash_i64 to compute v from v.
+    mov rax, rsi
+    V_TO_I64 rax
+    cmp rax, -1
     jne .dl_have_hash
+    mov rax, -2
+    jmp .dl_have_hash
 
 .dl_hash_generic:
+    push rdi
+    push rdi                    ; twice: rsp keeps its alignment
     mov rdi, rsi
     call obj_hash
+    pop rdi
+    pop rdi
 .dl_have_hash:
     mov [rbp - DL_HASH], rax
+.dl_generic_setup:
+    DL_SETUP
+    jmp .dlg_probe
 
-    mov rbx, [rbp - DL_DICT]
-    mov r13, [rbx + PyDictObject.capacity]
-    mov r15, r13
-    dec r15                     ; r15 = mask
-    and rax, r15
-    mov r14, rax                ; r14 = slot
-    mov qword [rbp - DL_FREE], -1
-                                ; r13 = probes REMAINING, counting down.  It
-                                ; was a count up compared against capacity,
-                                ; which reloaded capacity from the dict on
-                                ; every iteration for a bound that the load
-                                ; factor already makes unreachable.
-
-.dl_probe:
-    dec r13
-    js .dl_miss
-    mov rax, [rbx + PyDictObject.dk_indices]
-    mov rcx, r14
-    mov r12, [rax + rcx*8]      ; the index stored here
-    cmp r12, DICT_IX_EMPTY
-    je .dl_miss
-    cmp r12, DICT_IX_DUMMY
-    jne .dl_occupied
-    ; remember the first reusable slot for an insert
-    cmp qword [rbp - DL_FREE], -1
-    jne .dl_next
-    mov [rbp - DL_FREE], rcx
-    jmp .dl_next
-
-.dl_occupied:
-    mov rax, [rbx + PyDictObject.entries]
-    imul rcx, r12, DICT_ENTRY_SIZE
-    add rax, rcx
-    mov rcx, [rbp - DL_HASH]
-    cmp rcx, [rax + DictEntry.hash]
-    jne .dl_next
-    mov rdi, [rax + DictEntry.key]
-    mov rsi, [rbp - DL_KEY]
-
-    ; --- str against str, answered here -------------------------------
-    ; The generic route is dict_keys_equal -> obj_richcompare_bool, which
-    ; INCREFs both operands, snapshots the exception state, dispatches through
-    ; tp_richcompare to str_compare, builds a bool object, calls obj_is_true
-    ; on it and DECREFs three times: five calls and six refcount operations to
-    ; answer whether two strings hold the same bytes.
-    ;
-    ; BOTH keys must be exact strs.  CPython gets to skip the resident-key
-    ; check because a dict remembers whether every key in it is unicode
-    ; (dk_kind == DICT_KEYS_UNICODE) and abandons the specialised loop when
-    ; one is not; we do not track that, and a stored key of some other type
-    ; may carry an __eq__ that a str probe must still be offered to.
-    cmp qword [rbp - DL_SKEY], 0
-    je .dl_generic_eq
-    cmp rdi, rsi
-    je .dl_found                ; the same object, which interning makes the
+;; --- str against str, in a table of nothing but strs ----------------------
+.dls_probe:
+    mov rax, [rbx + r14*8]      ; the index stored at this slot
+    test rax, rax
+    js .dls_no_entry            ; EMPTY (-1) or DUMMY (-2)
+    DL_ENTRY rcx, rax
+    mov rdx, [rbp - DL_HASH]
+    cmp rdx, [rcx + DictEntry.hash]
+    jne .dls_next
+    mov rdi, [rcx + DictEntry.key]
+    cmp rdi, r13
+    je .dl_out_found            ; the same object, which interning makes the
                                 ; common case for a name
-    V_TEST_PTR rdi, rcx
-    ja .dl_generic_eq
-    mov rcx, [rdi + PyObject.ob_type]
-    lea r9, [rel str_type]
-    cmp rcx, r9
-    jne .dl_generic_eq
     ; Length, then bytes -- CPython's unicode_eq, in Objects/stringlib/eq.h.
+    ; Nothing here can run Python, so the table cannot move underneath it.
     mov rdx, [rdi + PyStrObject.ob_size]
-    cmp rdx, [rsi + PyStrObject.ob_size]
-    jne .dl_next
+    cmp rdx, [r13 + PyStrObject.ob_size]
+    jne .dls_next
+    mov [rbp - DL_IX], rax
     lea rdi, [rdi + PyStrObject.data]
-    lea rsi, [rsi + PyStrObject.data]
+    lea rsi, [r13 + PyStrObject.data]
     call ap_memcmp
     test eax, eax
-    jnz .dl_next
-    jmp .dl_found
+    jnz .dls_next
+    mov rax, [rbp - DL_IX]
+    jmp .dl_out_found
+.dls_no_entry:
+    cmp rax, DICT_IX_EMPTY
+    je .dl_miss
+    cmp qword [rbp - DL_FREE], -1   ; the first dummy is where an insert goes
+    jne .dls_next
+    mov [rbp - DL_FREE], r14
+.dls_next:
+    DL_ADVANCE
+    jmp .dls_probe
 
-.dl_generic_eq:
-    call dict_keys_equal
+;; --- everything else ------------------------------------------------------
+.dlg_probe:
+    mov rax, [rbx + r14*8]
+    test rax, rax
+    js .dlg_no_entry
+    DL_ENTRY rcx, rax
+    mov rdx, [rbp - DL_HASH]
+    cmp rdx, [rcx + DictEntry.hash]
+    jne .dlg_next
+    mov rdi, [rcx + DictEntry.key]
+    cmp rdi, r13
+    je .dl_out_found            ; identical Values are equal, whatever they are
+    ; obj_richcompare_bool, reached directly.  dict_keys_equal was a whole
+    ; extra frame whose entire body was to set edx and test the answer for -1.
+    mov [rbp - DL_IX], rax
+    mov [rbp - DL_CMPKEY], rdi
+    mov rsi, r13
+    mov edx, PY_EQ
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .dl_error
+
+    ; THE TABLE MAY HAVE MOVED.  __eq__ is arbitrary Python and may insert
+    ; into the very dict being probed; a resize frees both arrays and
+    ; rehashes into new ones, which leaves the two pointers and the mask in
+    ; registers stale.  This is the only comparison in either loop that can
+    ; run Python -- the str loop compares bytes -- and it is why the old code
+    ; reloaded the arrays from the header on EVERY probe.  Ask once, here,
+    ; and start again if the answer changed: CPython returns DKIX_KEY_CHANGED
+    ; and its caller does the same.
+    mov rcx, [rbp - DL_DICT]
+    cmp rbx, [rcx + PyDictObject.dk_indices]
+    jne .dl_restart
+    mov rcx, [rbp - DL_IX]
+    DL_ENTRY rcx, rcx
+    mov rcx, [rcx + DictEntry.key]
+    cmp rcx, [rbp - DL_CMPKEY]
+    jne .dl_restart             ; the entry itself was deleted or rebound
+
     test eax, eax
-    jz .dl_next
-.dl_found:
-    mov rax, r12                ; found: the entries index
-    jmp .dl_out
+    jz .dlg_next
+    mov rax, [rbp - DL_IX]
+    jmp .dl_out_found
 
-.dl_next:
-    inc r14
-    and r14, r15
-    jmp .dl_probe
+.dl_restart:
+    mov rdi, [rbp - DL_DICT]
+    DL_SETUP
+    jmp .dlg_probe
+.dlg_no_entry:
+    cmp rax, DICT_IX_EMPTY
+    je .dl_miss
+    cmp qword [rbp - DL_FREE], -1
+    jne .dlg_next
+    mov [rbp - DL_FREE], r14
+.dlg_next:
+    DL_ADVANCE
+    jmp .dlg_probe
 
 .dl_miss:
     ; An insert goes into the first dummy seen, else this empty slot.
     mov rcx, [rbp - DL_FREE]
     cmp rcx, -1
-    jne .dl_have_free
-    mov rcx, r14
-.dl_have_free:
+    je .dl_out_miss
     mov r14, rcx
+.dl_out_miss:
     mov rax, -1
-
-.dl_out:
+.dl_out_found:
     mov rdx, r14
     mov r8, [rbp - DL_HASH]
     pop r15
@@ -574,6 +698,16 @@ DEF_FUNC dict_lookup, DL_FRAME
     pop rbx
     leave
     ret
+
+.dl_error:
+    ; The probe loop has no error channel; the exception is already pending.
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    jmp eval_exception_unwind
 END_FUNC dict_lookup
 
 ;; ============================================================================
@@ -609,29 +743,24 @@ DR_DICT  equ 8
 DR_OLDE  equ 16
 DR_OLDN  equ 24
 DR_FRAME equ 40            ; + 3 pushes = 64, 16-aligned
-DEF_FUNC dict_resize, DR_FRAME
+DEF_FUNC dict_resize_to, DR_FRAME
     push rbx
     push r12
     push r13
     mov rbx, rdi
+    mov r12, rsi                ; the capacity asked for
     mov [rbp - DR_DICT], rbx
     mov rax, [rbx + PyDictObject.entries]
     mov [rbp - DR_OLDE], rax
     mov rax, [rbx + PyDictObject.dk_nentries]
     mov [rbp - DR_OLDN], rax
-
-    ; Grow only when the live count warrants it; a table full of holes is
-    ; compacted at the same capacity instead.
-    mov r12, [rbx + PyDictObject.capacity]
-    mov rdx, r12
-    shr rdx, 1
-    cmp [rbx + PyDictObject.ob_size], rdx
-    jl .dr_same_cap
-    shl r12, 1
-.dr_same_cap:
     ; r12, not rcx: ap_free below is a call and rcx is caller-saved.
     mov rdi, [rbx + PyDictObject.dk_indices]
+    lea rax, [rel dict_empty_indices]
+    cmp rdi, rax
+    je .dr_alloc
     call ap_free
+.dr_alloc:
     mov rdi, rbx
     mov rsi, r12
     call dict_alloc_tables
@@ -655,10 +784,14 @@ DEF_FUNC dict_resize, DR_FRAME
     dec rcx
     mov rdx, r13
     and rdx, rcx                ; slot
+    mov r8, r13                 ; perturb
 .dr_probe:
     mov rsi, [rbx + PyDictObject.dk_indices]
     cmp qword [rsi + rdx*8], DICT_IX_EMPTY
     je .dr_place
+    shr r8, PERTURB_SHIFT       ; the same recurrence dict_lookup walks
+    lea rdx, [rdx + rdx*4]
+    add rdx, r8
     inc rdx
     and rdx, rcx
     jmp .dr_probe
@@ -682,13 +815,80 @@ DEF_FUNC dict_resize, DR_FRAME
 
 .dr_done:
     mov rdi, [rbp - DR_OLDE]
+    lea rax, [rel dict_empty_entries]
+    cmp rdi, rax
+    je .dr_out
     call ap_free
+.dr_out:
     pop r13
     pop r12
     pop rbx
     leave
     ret
+END_FUNC dict_resize_to
+
+;; ============================================================================
+;; dict_resize(rdi = dict) -> void
+;;
+;; Rebuild at whatever capacity the live count warrants: double it when the
+;; dict is at least half full, and otherwise keep it, which compacts a table
+;; that is mostly holes.  The floor matters because a dict growing away from
+;; the shared empty table has capacity one, and doubling that is two.
+;; ============================================================================
+DEF_FUNC_BARE dict_resize
+    mov rsi, [rdi + PyDictObject.capacity]
+    mov rax, rsi
+    shr rax, 1
+    cmp [rdi + PyDictObject.ob_size], rax
+    jl .drz_same
+    shl rsi, 1
+.drz_same:
+    cmp rsi, DICT_INIT_CAP
+    jae dict_resize_to
+    mov esi, DICT_INIT_CAP
+    jmp dict_resize_to
 END_FUNC dict_resize
+
+;; ============================================================================
+;; dict_reserve(rdi = dict, rsi = how many more entries are coming) -> void
+;;
+;; Grow ONCE, so that a bulk insert of a known size does not rebuild the
+;; table on the way.  Building a hundred-key dict from an empty one resized
+;; five times, rehashing everything each time; CPython presizes in exactly
+;; the same places -- dict_merge, BUILD_MAP, dict.fromkeys -- and for exactly
+;; this reason.
+;;
+;; The table holds dk_nentries at three quarters of capacity, so the room
+;; needed is that many slots rounded up to a power of two.  A dict that
+;; already has the room is left alone, which is what makes it safe to call on
+;; the shared empty table with nothing coming.
+;; ============================================================================
+DEF_FUNC_BARE dict_reserve
+    mov rax, [rdi + PyDictObject.dk_nentries]
+    add rax, rsi
+    mov rcx, [rdi + PyDictObject.capacity]
+    mov rdx, rcx
+    shr rdx, 2
+    lea rdx, [rdx + rdx*2]      ; capacity * 3/4
+    cmp rax, rdx
+    jbe .drv_done               ; the room is already there
+    cmp rcx, DICT_INIT_CAP
+    jae .drv_grow
+    mov ecx, DICT_INIT_CAP
+.drv_grow:
+    mov rdx, rcx
+    shr rdx, 2
+    lea rdx, [rdx + rdx*2]
+    cmp rax, rdx
+    jbe .drv_resize
+    shl rcx, 1
+    jmp .drv_grow
+.drv_resize:
+    mov rsi, rcx
+    jmp dict_resize_to
+.drv_done:
+    ret
+END_FUNC dict_reserve
 
 ;; ============================================================================
 ;; dict_set(rdi=dict, rsi=key Value, rdx=value Value)
@@ -792,6 +992,23 @@ DEF_FUNC dict_set, DS_FRAME
 .ds_insert:
     mov r12, rdx                ; the indices slot to claim
     mov r13, r8                 ; hash
+
+    ; A key that is not an exact str ends the str probe loop's licence, for
+    ; good.  Only an INSERT can do it: a lookup that misses changes nothing,
+    ; and a delete leaves the remaining keys as they were.  CPython rebuilds
+    ; the whole table here; one word is enough for the one bit we use.
+    cmp qword [rbx + PyDictObject.dk_kind], 0
+    je .ds_kind_known
+    mov rax, [rbp - DS_KEY]
+    V_TEST_PTR rax, rcx
+    ja .ds_not_str
+    mov rcx, [rax + PyObject.ob_type]
+    lea rax, [rel str_type]
+    cmp rcx, rax
+    je .ds_kind_known
+.ds_not_str:
+    mov qword [rbx + PyDictObject.dk_kind], 0
+.ds_kind_known:
     ; Room for one more dense entry?
     mov rax, [rbx + PyDictObject.dk_nentries]
     inc rax
@@ -872,6 +1089,9 @@ DEF_FUNC dict_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     jmp .dde_loop
 .dde_done:
     mov rdi, [rbx + PyDictObject.entries]
+    lea rax, [rel dict_empty_entries]
+    cmp rdi, rax
+    je .dde_no_idx              ; the shared table; both halves are static
     test rdi, rdi
     jz .dde_no_entries
     call ap_free
@@ -908,15 +1128,11 @@ DEF_FUNC dict_subscript, 8            ; 1 pushes, so rsp is 16-aligned
 
     mov rbx, rsi               ; save the key Value for the error message
     call dict_get              ; both take a key Value
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax              ; a Value, and 0 is the only miss
     jz .key_error
-
-    ; INCREF the returned value (dict_get returns borrowed fat ref)
-    INCREF_VAL rax, rdx                ; value may be SmallInt
+    INCREF_V rax, rdx          ; dict_get's answer is borrowed
     pop rbx
     leave
-    V_PACK rax, rdx             ; return one Value
     ret
 
 .key_error:
@@ -1213,310 +1429,12 @@ dict_iter_self:
 ;; ============================================================================
 DEF_FUNC_BARE dict_contains
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
-    jz .dc_no
-    mov eax, 1
-    ret
-.dc_no:
-    xor eax, eax
+    test rax, rax               ; a Value, and 0 is the only miss
+    setnz al
+    movzx eax, al
     ret
 END_FUNC dict_contains
 
-;; ============================================================================
-;; Dict View Objects
-;; dict.keys(), dict.values(), dict.items() return view objects.
-;; Views hold a reference to the dict and support iteration + len().
-;; ============================================================================
-
-;; ============================================================================
-;; dict_view_new(rdi=dict, rsi=kind, rdx=type_ptr) -> PyDictViewObject*
-;; Create a new dict view. kind: 0=keys, 1=values, 2=items
-;; ============================================================================
-DEF_FUNC dict_view_new, 8            ; 3 pushes, so rsp is 16-aligned
-    push rbx
-    push r12
-    push r13
-
-    mov rbx, rdi               ; dict
-    mov r12, rsi               ; kind
-    mov r13, rdx               ; view type
-
-    mov edi, PyDictViewObject_size
-    mov rsi, r13
-    call gc_alloc
-
-    mov [rax + PyDictViewObject.dv_dict], rbx
-    mov [rax + PyDictViewObject.dv_kind], r12
-
-    ; INCREF dict
-    push rax
-    mov rdi, rbx
-    call obj_incref
-    pop rax
-    push rax
-    mov rdi, rax
-    call gc_track
-    pop rax
-
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC dict_view_new
-
-;; ============================================================================
-;; dict_view_dealloc(PyObject *self)
-;; ============================================================================
-DEF_FUNC_LOCAL dict_view_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
-    push rbx
-    mov rbx, rdi
-
-    ; DECREF dict
-    mov rdi, [rbx + PyDictViewObject.dv_dict]
-    call obj_decref
-
-    ; Free self
-    mov rdi, rbx
-    call gc_dealloc
-
-    pop rbx
-    leave
-    ret
-END_FUNC dict_view_dealloc
-
-;; ============================================================================
-;; dict_view_len(rdi=view) -> i64
-;; Returns the number of items in the underlying dict.
-;; ============================================================================
-DEF_FUNC_BARE dict_view_len
-    mov rax, [rdi + PyDictViewObject.dv_dict]
-    mov rax, [rax + PyDictObject.ob_size]
-    ret
-END_FUNC dict_view_len
-
-;; ============================================================================
-;; dict_view_iter(rdi=view) -> PyDictIterObject*
-;; Create an iterator for this view, using the view's kind.
-;; ============================================================================
-DEF_FUNC dict_view_iter
-    push rbx
-    push r12
-
-    mov rbx, rdi               ; view
-
-    mov edi, PyDictIterObject_size
-    lea rsi, [rel dict_iter_type]
-    call gc_alloc
-
-    mov rdi, [rbx + PyDictViewObject.dv_dict]
-    mov [rax + PyDictIterObject.it_dict], rdi
-    mov qword [rax + PyDictIterObject.it_index], 0
-    mov rcx, [rbx + PyDictViewObject.dv_kind]
-    mov [rax + PyDictIterObject.it_kind], rcx
-    ; The three kinds are three types, differing only in the name they report.
-    lea rdx, [rel dict_value_iter_type]
-    cmp rcx, 1
-    je .dvi_named
-    lea rdx, [rel dict_item_iter_type]
-    cmp rcx, 2
-    je .dvi_named
-    jmp .dvi_kind_done
-.dvi_named:
-    mov [rax + PyObject.ob_type], rdx
-.dvi_kind_done:
-    ; The SIZE, not the version: see dict_tp_iter.
-    mov rcx, [rdi + PyDictObject.ob_size]
-    mov [rax + PyDictIterObject.it_version], rcx
-
-    ; INCREF dict
-    push rax                    ; save iterator
-    call obj_incref
-    pop rax                     ; restore iterator
-    push rax
-    mov rdi, rax
-    call gc_track
-    pop rax
-
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC dict_view_iter
-
-;; ============================================================================
-;; dict_view_repr(rdi = the view) -> rax = PyStrObject*, edx = TAG_PTR
-;;
-;; "dict_keys(['a'])", and the same for values and items.  The three view
-;; types had tp_repr 0, and obj_repr answers a NULL Value for that with no
-;; exception -- so print(d.keys()) printed nothing at all.
-;;
-;; The text is the type's own name around the repr of a list of the view's
-;; contents, which is exactly what CPython writes, and lets list_repr do the
-;; work including its recursion guard.
-;; ============================================================================
-DVR_VIEW  equ 8
-DVR_LIST  equ 16
-DVR_TEXT  equ 24
-DVR_FRAME equ 32            ; + 2 pushes = 48, 16-aligned
-
-extern obj_repr
-DEF_FUNC dict_view_repr, DVR_FRAME
-    push rbx
-    push r12
-    mov [rbp - DVR_VIEW], rdi
-
-    ; The same cycle stack list and tuple use.  A view can reach itself --
-    ; d['k'] = d.values() -- and without this the repr recursed until the
-    ; depth limit where CPython prints dict_values([...]).
-    extern repr_check_active
-    extern repr_push
-    extern repr_pop
-    call repr_check_active
-    test eax, eax
-    jnz .dvr_recursive
-    mov rdi, [rbp - DVR_VIEW]
-    call repr_push
-
-    xor edi, edi
-    extern list_new
-    call list_new
-    mov [rbp - DVR_LIST], rax
-    mov rbx, rax
-
-    mov rdi, [rbp - DVR_VIEW]
-    call dict_view_iter
-    mov r12, rax
-.dvr_loop:
-    mov rdi, r12
-    call dict_iter_next
-    V_UNPACK rax, rdx
-    test edx, edx
-    jz .dvr_done
-    push rax
-    push rdx
-    mov rdi, rbx
-    mov rsi, rax
-    V_PACK rsi, rdx
-    extern list_append
-    call list_append
-    pop rdx
-    pop rax
-    ; dict_iter_next hands back an OWNED reference and list_append takes its
-    ; own, so without this every element leaked -- and for an items view the
-    ; leaked object is a freshly built tuple, so a loop grew without bound.
-    mov rdi, rax
-    mov rsi, rdx
-    DECREF_VAL rdi, rsi
-    jmp .dvr_loop
-.dvr_done:
-    mov rdi, r12
-    call obj_decref
-
-    mov rdi, rbx
-    call obj_repr
-    V_UNPACK rax, rdx
-    mov [rbp - DVR_TEXT], rax
-    mov rdi, rbx
-    call obj_decref
-    ; After the nested reprs, not before them: they are what the guard is
-    ; for, and they all happen inside that obj_repr.
-    mov rdi, [rbp - DVR_VIEW]
-    call repr_pop
-    mov rax, [rbp - DVR_TEXT]
-    test rax, rax
-    jz .dvr_failed
-
-.dvr_wrap:
-    ; "<name>(" + that + ")"
-    mov rdi, [rbp - DVR_VIEW]
-    mov rdi, [rdi + PyObject.ob_type]
-    mov rbx, [rdi + PyTypeObject.tp_name]
-    xor ecx, ecx
-.dvr_namelen:
-    cmp byte [rbx + rcx], 0
-    je .dvr_have_namelen
-    inc rcx
-    jmp .dvr_namelen
-.dvr_have_namelen:
-    mov r12, rcx                        ; the name's length
-    mov rax, [rbp - DVR_TEXT]
-    mov rdx, [rax + PyStrObject.ob_size]
-    lea rdi, [r12 + rdx]
-    add rdi, PyStrObject.data + 10      ; two brackets, a NUL and slack
-    extern ap_malloc
-    call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel str_type]
-    mov [rax + PyObject.ob_type], rcx
-    mov qword [rax + PyStrObject.ob_hash], -1
-    push rax
-
-    lea rdi, [rax + PyStrObject.data]
-    mov rsi, rbx
-    mov rdx, r12
-    extern ap_memcpy
-    call ap_memcpy
-    mov rax, [rsp]
-    mov byte [rax + PyStrObject.data + r12], '('
-    lea rdi, [rax + PyStrObject.data + r12 + 1]
-    mov rcx, [rbp - DVR_TEXT]
-    lea rsi, [rcx + PyStrObject.data]
-    mov rdx, [rcx + PyStrObject.ob_size]
-    call ap_memcpy
-    mov rax, [rsp]
-    mov rcx, [rbp - DVR_TEXT]
-    mov rdx, [rcx + PyStrObject.ob_size]
-    lea rcx, [r12 + rdx]
-    mov byte [rax + PyStrObject.data + rcx + 1], ')'
-    mov byte [rax + PyStrObject.data + rcx + 2], 0
-    add rcx, 2
-    mov [rax + PyStrObject.ob_size], rcx
-    mov rdi, rax
-    extern str_set_length
-    call str_set_length
-
-    mov rdi, [rbp - DVR_TEXT]
-    call obj_decref
-    pop rax
-    mov edx, TAG_PTR
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.dvr_failed:
-    xor eax, eax
-    xor edx, edx
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.dvr_recursive:
-    ; A bare ellipsis, NOT the name wrapper: CPython's dictview_repr returns
-    ; "..." on its own here, and the enclosing level supplies the name.  It
-    ; is what makes d['k'] = d.values() print
-    ; dict_values([dict_values([...])]) rather than one level deeper.
-    CSTRING rdi, "..."
-    extern str_from_cstr_heap
-    call str_from_cstr_heap
-    mov edx, TAG_PTR
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC dict_view_repr
-
-;; ============================================================================
-;; dict_keys_view_contains(rdi=view, rsi=key, rdx=key_tag) -> int (0 or 1)
-;; sq_contains for dict_keys view: delegates to dict_contains on underlying dict.
-;; ============================================================================
-DEF_FUNC_BARE dict_keys_view_contains
-    mov rdi, [rdi + PyDictViewObject.dv_dict]
-    jmp dict_contains           ; (rdi=dict, rsi=key Value)
-END_FUNC dict_keys_view_contains
 
 ;; ============================================================================
 ;; dict_nb_or(left, right, ltag, rtag) -> new dict (merge)
@@ -1547,43 +1465,24 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     mov [rbp - DNO_RIGHT], rsi      ; right dict
 
     ; Create new dict
-    call dict_new
+    ; The left half of `a | b` IS a copy of a, so it is a clone: no key is
+    ; hashed and no slot is probed.  The loop that was here re-inserted every
+    ; entry through dict_set.
+    mov rdi, [rbp - DNO_LEFT]
+    call dict_copy_shallow
     mov [rbp - DNO_NEW], rax
 
-    ; Copy all entries from left dict
-    mov rdi, [rbp - DNO_LEFT]
-    mov r8, [rdi + PyDictObject.capacity]
-    xor ecx, ecx                    ; index = 0
-.dno_copy_left:
-    cmp rcx, r8
-    jge .dno_copy_right_start
-
-    imul rax, rcx, DICT_ENTRY_SIZE
-    add rax, [rdi + PyDictObject.entries]
-    ; Check if entry is occupied (value_tag != 0)
-    cmp qword [rax + DictEntry.key], 0   ; occupied?
-    je .dno_left_next
-
-    ; dict_set(dict, key, value, value_tag, key_tag)
-    push rcx
-    push r8
-    push rdi
-    mov rdi, [rbp - DNO_NEW]
-    mov rsi, [rax + DictEntry.key]
-    mov rdx, [rax + DictEntry.value]
-    call dict_set
-    pop rdi
-    pop r8
-    pop rcx
-
-.dno_left_next:
-    inc rcx
-    jmp .dno_copy_left
+    ; Then room for the right half in one go, so the merge cannot rebuild
+    ; the table underneath itself.
+    mov rdi, rax
+    mov rsi, [rbp - DNO_RIGHT]
+    mov rsi, [rsi + PyDictObject.ob_size]
+    call dict_reserve
 
 .dno_copy_right_start:
-    ; Copy all entries from right dict (overrides left)
+    ; Copy all entries from right dict (overrides left), over the DENSE array
     mov rdi, [rbp - DNO_RIGHT]
-    mov r8, [rdi + PyDictObject.capacity]
+    mov r8, [rdi + PyDictObject.dk_nentries]
     xor ecx, ecx
 .dno_copy_right:
     cmp rcx, r8
@@ -1651,9 +1550,13 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
     mov [rbp - DIO_LEFT], rdi       ; left dict
     mov [rbp - DIO_RIGHT], rsi      ; right dict
 
-    ; Iterate right dict entries, set each into left
+    ; Room for the whole right half first, then walk its DENSE array.
+    mov rdi, [rbp - DIO_LEFT]
+    mov rsi, [rbp - DIO_RIGHT]
+    mov rsi, [rsi + PyDictObject.ob_size]
+    call dict_reserve
     mov rdi, [rbp - DIO_RIGHT]
-    mov r8, [rdi + PyDictObject.capacity]
+    mov r8, [rdi + PyDictObject.dk_nentries]
     xor ecx, ecx
 .dio_loop:
     cmp rcx, r8
@@ -2031,9 +1934,6 @@ dict_iter_name: db "dict_keyiterator", 0
 dict_value_iter_name: db "dict_valueiterator", 0
 dict_item_iter_name: db "dict_itemiterator", 0
 dict_rev_iter_name: db "dict_reversekeyiterator", 0
-dict_keys_view_name: db "dict_keys", 0
-dict_values_view_name: db "dict_values", 0
-dict_items_view_name: db "dict_items", 0
 
 dict_name_str: db "dict", 0
 
@@ -2265,336 +2165,37 @@ dict_rev_iter_type:
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
 
-; Dict keys view sequence methods (len + contains)
-align 8
-dict_keys_view_seq_methods:
-    dq dict_view_len            ; sq_length
-    dq 0                        ; sq_concat
-    dq 0                        ; sq_repeat
-    dq 0                        ; sq_item
-    dq 0                        ; sq_ass_item
-    dq dict_keys_view_contains  ; sq_contains
-    dq 0                        ; sq_inplace_concat
-    dq 0                        ; sq_inplace_repeat
 
-; The number methods every view shares: the four set operators.
-align 8
-dict_view_num_methods:
-    dq 0                    ; nb_add
-    dq dict_view_nb_sub     ; nb_subtract
-    dq 0                    ; nb_multiply
-    dq 0                    ; nb_remainder
-    dq 0                    ; nb_divmod
-    dq 0                    ; nb_power
-    dq 0                    ; nb_negative
-    dq 0                    ; nb_positive
-    dq 0                    ; nb_absolute
-    dq 0                    ; nb_bool
-    dq 0                    ; nb_invert
-    dq 0                    ; nb_lshift
-    dq 0                    ; nb_rshift
-    dq dict_view_nb_and     ; nb_and
-    dq dict_view_nb_xor     ; nb_xor
-    dq dict_view_nb_or      ; nb_or
-    times PyNumberMethods_size / 8 - 16 dq 0
+section .rodata
 
-; Dict view sequence methods (for len(), values/items views)
+;; ============================================================================
+;; The table every empty dict points at.
+;;
+;; A dict used to allocate its tables in dict_new: two ap_mallocs and two
+;; `rep stosq` -- 192 bytes of entries and 64 of indices -- for every dict
+;; ever made, including `{}`, every **kwargs frame dict whether or not a
+;; keyword arrives, and every instance __dict__.  malloc and free were 37% of
+;; `{}` in a loop.  CPython allocates nothing: PyDict_New points at one
+;; immortal empty keys object and the table is built on the first insert.
+;;
+;; The capacity is ONE, and that is what makes it safe rather than a special
+;; case.  Reads need no arm at all: dict_lookup masks the hash to the single
+;; slot, finds DICT_IX_EMPTY and answers miss.  Writes cannot reach it
+;; either, because dict_set's room test is `dk_nentries + 1 > capacity*3/4`
+;; and 3/4 of one is zero, so the very first insert resizes to a real table
+;; before it stores anything.
+;;
+;; It lives in .rodata, so "no write path can reach it" is enforced by the
+;; page tables rather than by argument.
+;; ============================================================================
 align 8
-dict_view_sequence_methods:
-    dq dict_view_len            ; sq_length
-    dq 0                        ; sq_concat
-    dq 0                        ; sq_repeat
-    dq 0                        ; sq_item
-    dq 0                        ; sq_ass_item
-    dq 0                        ; sq_contains
-    dq 0                        ; sq_inplace_concat
-    dq 0                        ; sq_inplace_repeat
-
-; Dict keys view type
-align 8
-global dict_keys_view_type
-dict_keys_view_type:
-    dq 1                        ; ob_refcnt (immortal)
-    dq type_type                ; ob_type
-    dq dict_keys_view_name      ; tp_name
-    dq PyDictViewObject_size    ; tp_basicsize
-    dq dict_view_dealloc        ; tp_dealloc
-    dq dict_view_repr           ; tp_repr
-    dq dict_view_repr           ; tp_str
-    dq 0                        ; tp_hash
-    dq 0                        ; tp_call
-    dq 0                        ; tp_getattr
-    dq 0                        ; tp_setattr
-    dq dict_view_richcompare    ; tp_richcompare
-    dq dict_view_iter           ; tp_iter
-    dq 0                        ; tp_iternext
-    dq 0                        ; tp_init
-    dq 0                        ; tp_new
-    dq dict_view_num_methods    ; tp_as_number
-    dq dict_keys_view_seq_methods ; tp_as_sequence (with sq_contains)
-    dq 0                        ; tp_as_mapping
-    dq 0                        ; tp_base
-    dq 0                        ; tp_dict
-    dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
-    dq 0                        ; tp_bases
-    dq iter_traverse_one                        ; tp_traverse
-    dq iter_clear_one                        ; tp_clear
-    dq 0 ; tp_dictoffset
-    dq 0                        ; tp_tailslots
-
-; Dict values view type
-align 8
-global dict_values_view_type
-dict_values_view_type:
-    dq 1                        ; ob_refcnt (immortal)
-    dq type_type                ; ob_type
-    dq dict_values_view_name    ; tp_name
-    dq PyDictViewObject_size    ; tp_basicsize
-    dq dict_view_dealloc        ; tp_dealloc
-    dq dict_view_repr           ; tp_repr
-    dq dict_view_repr           ; tp_str
-    dq 0                        ; tp_hash
-    dq 0                        ; tp_call
-    dq 0                        ; tp_getattr
-    dq 0                        ; tp_setattr
-    dq dict_view_richcompare    ; tp_richcompare
-    dq dict_view_iter           ; tp_iter
-    dq 0                        ; tp_iternext
-    dq 0                        ; tp_init
-    dq 0                        ; tp_new
-    dq dict_view_num_methods    ; tp_as_number
-    dq dict_view_sequence_methods ; tp_as_sequence
-    dq 0                        ; tp_as_mapping
-    dq 0                        ; tp_base
-    dq 0                        ; tp_dict
-    dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
-    dq 0                        ; tp_bases
-    dq iter_traverse_one                        ; tp_traverse
-    dq iter_clear_one                        ; tp_clear
-    dq 0 ; tp_dictoffset
-    dq 0                        ; tp_tailslots
-
-; Dict items view type
-align 8
-global dict_items_view_type
-dict_items_view_type:
-    dq 1                        ; ob_refcnt (immortal)
-    dq type_type                ; ob_type
-    dq dict_items_view_name     ; tp_name
-    dq PyDictViewObject_size    ; tp_basicsize
-    dq dict_view_dealloc        ; tp_dealloc
-    dq dict_view_repr           ; tp_repr
-    dq dict_view_repr           ; tp_str
-    dq 0                        ; tp_hash
-    dq 0                        ; tp_call
-    dq 0                        ; tp_getattr
-    dq 0                        ; tp_setattr
-    dq dict_view_richcompare    ; tp_richcompare
-    dq dict_view_iter           ; tp_iter
-    dq 0                        ; tp_iternext
-    dq 0                        ; tp_init
-    dq 0                        ; tp_new
-    dq dict_view_num_methods    ; tp_as_number
-    dq dict_view_sequence_methods ; tp_as_sequence
-    dq 0                        ; tp_as_mapping
-    dq 0                        ; tp_base
-    dq 0                        ; tp_dict
-    dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
-    dq 0                        ; tp_bases
-    dq iter_traverse_one                        ; tp_traverse
-    dq iter_clear_one                        ; tp_clear
-    dq 0 ; tp_dictoffset
-    dq 0                        ; tp_tailslots
+dict_empty_indices:
+    dq DICT_IX_EMPTY
+dict_empty_entries:
+    times DICT_ENTRY_SIZE / 8 dq 0
 
 section .text
 
-;; ============================================================================
-;; dict_view_to_set(rdi = a Value) -> rax = a set Value, owned, or 0
-;;
-;; Both operands of a view's set operations become sets first.  A set or a
-;; frozenset is kept as it is; anything else is built into one, which is
-;; what makes `d.keys() - ["a"]` work where `{"a"} - ["a"]` does not: a
-;; view's operators take any iterable, as CPython's do.
-;; ============================================================================
-DVS_ARG   equ 8
-DVS_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
-DEF_FUNC_LOCAL dict_view_to_set, DVS_FRAME
-    mov [rbp - DVS_ARG], rdi
-    V_TEST_PTR rdi, rax
-    ja .dvs_build
-    test rdi, rdi
-    jz .dvs_build
-    mov rax, [rdi + PyObject.ob_type]
-    extern set_type
-    lea rcx, [rel set_type]
-    cmp rax, rcx
-    je .dvs_keep
-    extern frozenset_type
-    lea rcx, [rel frozenset_type]
-    cmp rax, rcx
-    jne .dvs_build
-.dvs_keep:
-    mov rax, [rbp - DVS_ARG]
-    INCREF_V rax, rcx
-    leave
-    ret
-.dvs_build:
-    lea rsi, [rbp - DVS_ARG]
-    lea rdi, [rel set_type]
-    mov edx, 1
-    extern set_type_call
-    call set_type_call
-    V_UNPACK rax, rdx
-    leave
-    ret
-END_FUNC dict_view_to_set
-
-;; ============================================================================
-;; dict_view_binop(rdi = left Value, rsi = right Value, edx = op index)
-;;   -> rax = Value, or 0 with an exception pending
-;;
-;; A view is set-like, and CPython gives it the four set operators.  Both
-;; sides become sets and the set's own slot does the work.
-;; ============================================================================
-DVB_OP    equ 8
-DVB_LEFT  equ 16
-DVB_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
-DEF_FUNC_LOCAL dict_view_binop, DVB_FRAME
-    mov [rbp - DVB_OP], rdx
-    push rsi
-    push rsi
-    call dict_view_to_set
-    pop rsi
-    pop rsi
-    test rax, rax
-    jz .dvb_fail
-    mov [rbp - DVB_LEFT], rax
-    mov rdi, rsi
-    call dict_view_to_set
-    test rax, rax
-    jz .dvb_fail_left
-    mov rsi, rax
-    mov rdi, [rbp - DVB_LEFT]
-    mov edx, [rbp - DVB_OP]
-    extern obj_binary_op
-    call obj_binary_op          ; consumes both
-    leave
-    ret
-.dvb_fail_left:
-    mov rdi, [rbp - DVB_LEFT]
-    DECREF_V rdi, rcx
-.dvb_fail:
-    xor eax, eax
-    leave
-    ret
-END_FUNC dict_view_binop
-
-%macro DEF_VIEW_BINOP 2
-;; ============================================================================
-;; dict_view_<op>(rdi = left Value, rsi = right Value) -> rax = Value, or 0
-;; One of the four set operators, named for the slot it fills.
-;; ============================================================================
-DEF_FUNC_LOCAL dict_view_%1, 8      ; + 0 pushes = 16, 16-aligned
-    mov edx, %2
-    call dict_view_binop
-    leave
-    ret
-END_FUNC dict_view_%1
-%endmacro
-
-;; The four, each naming the set slot it ends up in.
-DEF_VIEW_BINOP nb_sub, NB_SUBTRACT
-DEF_VIEW_BINOP nb_and, NB_AND
-DEF_VIEW_BINOP nb_or,  NB_OR
-DEF_VIEW_BINOP nb_xor, NB_XOR
-
-;; ============================================================================
-;; dict_view_richcompare(rdi = self, rsi = other, edx = op) -> rax = Value
-;;
-;; A view compares as the set of what it holds, which is how `d.keys() ==
-;; {"a"}` is True in CPython.  Only against something set-like: a view
-;; compared with a list is unequal rather than an error.
-;; ============================================================================
-DVR_OP    equ 8
-DVR_LEFT  equ 16
-DVR_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
-DEF_FUNC_LOCAL dict_view_richcompare, DVR_FRAME
-    mov [rbp - DVR_OP], rdx
-    ; The other side has to be set-like: a view or a set.  Anything else is
-    ; NotImplemented, which for == falls back to identity.
-    V_TEST_PTR rsi, rax
-    ja .dvr_notimpl
-    test rsi, rsi
-    jz .dvr_notimpl
-    mov rax, [rsi + PyObject.ob_type]
-    lea rcx, [rel set_type]
-    cmp rax, rcx
-    je .dvr_ok
-    lea rcx, [rel frozenset_type]
-    cmp rax, rcx
-    je .dvr_ok
-    lea rcx, [rel dict_keys_view_type]
-    cmp rax, rcx
-    je .dvr_ok
-    lea rcx, [rel dict_items_view_type]
-    cmp rax, rcx
-    je .dvr_ok
-    lea rcx, [rel dict_values_view_type]
-    cmp rax, rcx
-    jne .dvr_notimpl
-.dvr_ok:
-    push rsi
-    push rsi
-    call dict_view_to_set
-    pop rsi
-    pop rsi
-    test rax, rax
-    jz .dvr_fail
-    mov [rbp - DVR_LEFT], rax
-    mov rdi, rsi
-    call dict_view_to_set
-    test rax, rax
-    jz .dvr_fail_left
-    mov rsi, rax
-    mov rdi, [rbp - DVR_LEFT]
-    push rsi
-    push rdi
-    mov edx, [rbp - DVR_OP]
-    extern obj_richcompare_bool
-    call obj_richcompare_bool
-    pop rdi
-    push rax
-    DECREF_V rdi, rcx
-    mov rdi, [rsp + 8]
-    DECREF_V rdi, rcx
-    pop rax
-    add rsp, 8
-    test eax, eax
-    js .dvr_fail                ; the comparison itself raised
-    jz .dvr_false
-    lea rax, [rel bool_true]
-    jmp .dvr_answer
-.dvr_false:
-    lea rax, [rel bool_false]
-.dvr_answer:
-    inc qword [rax + PyObject.ob_refcnt]
-    leave
-    ret
-.dvr_fail_left:
-    mov rdi, [rbp - DVR_LEFT]
-    DECREF_V rdi, rcx
-.dvr_fail:
-    xor eax, eax
-    leave
-    ret
-.dvr_notimpl:
-    xor eax, eax
-    leave
-    ret
-END_FUNC dict_view_richcompare
 
 
 ;; ============================================================================
@@ -2689,15 +2290,11 @@ DEF_FUNC dict_clear_gc, 8        ; rsp 16-aligned at the call the macros below e
     test r13, r13
     jnz .loop
 .done:
-    ; Keep the header coherent with the table we just emptied: the sparse
-    ; index array has to forget the entries too.
-    mov rdi, [rbx + PyDictObject.dk_indices]
-    test rdi, rdi
-    jz .no_indices
-    mov rcx, [rbx + PyDictObject.capacity]
-    mov rax, DICT_IX_EMPTY
-    rep stosq
-.no_indices:
+    ; The table is empty now, so give it back rather than rewriting it.  The
+    ; tombstones above still had to be written: a DECREF can run Python that
+    ; looks this dict up while the walk is only half done.
+    mov rdi, rbx
+    call dict_release_tables
     mov qword [rbx + PyDictObject.ob_size], 0
     mov qword [rbx + PyDictObject.dk_nentries], 0
     mov qword [rbx + PyDictObject.dk_tombstones], 0

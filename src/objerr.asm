@@ -552,11 +552,12 @@ DEF_FUNC_LOCAL rca_fetch, RAC_FRAME
 END_FUNC rca_fetch
 
 ;; ============================================================================
-;; raise_callable_arg(rdi = the callable, rsi = the offending argument's TYPE,
-;;                    rdx = the text between them)
+;; raise_callable_arg(rdi = the callable, rsi = a C string to append,
+;;                    rdx = the text between them, rcx = a suffix or 0)
 ;;   -> does not return: the composed message is raised as a TypeError
 ;;
-;; "__main__.f() argument after ** must be a mapping, not int".  CPython names
+;; "__main__.f() argument after ** must be a mapping, not int", and
+;; "__main__.f() got multiple values for keyword argument 'a'".  CPython names
 ;; the callable in every refusal CALL_FUNCTION_EX makes, through
 ;; _PyObject_FunctionStr: the qualified name, prefixed by the module unless
 ;; that is builtins or missing, and then "()".  A callable that answers
@@ -570,6 +571,7 @@ RCA_ARG   equ 16
 RCA_MID   equ 24
 RCA_CUR   equ 32
 RCA_HELD  equ 40
+RCA_SUF   equ 48            ; a trailing quote, or 0
 RCA_BUF   equ 456
 RCA_FRAME equ 464           ; + 0 pushes = 464, 16-aligned
 global raise_callable_arg
@@ -577,6 +579,7 @@ DEF_FUNC raise_callable_arg, RCA_FRAME
     mov [rbp - RCA_FUNC], rdi
     mov [rbp - RCA_ARG], rsi
     mov [rbp - RCA_MID], rdx
+    mov [rbp - RCA_SUF], rcx
     lea rax, [rbp - RCA_BUF]
     mov [rbp - RCA_CUR], rax
 
@@ -642,8 +645,13 @@ DEF_FUNC raise_callable_arg, RCA_FRAME
     call rbt_append_cstr
     mov rdi, rax
     mov rsi, [rbp - RCA_ARG]
-    mov rsi, [rsi + PyTypeObject.tp_name]
     call rbt_append_cstr
+    mov rsi, [rbp - RCA_SUF]
+    test rsi, rsi
+    jz .rca_raise
+    mov rdi, rax
+    call rbt_append_cstr
+.rca_raise:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RCA_BUF]
     call raise_exception

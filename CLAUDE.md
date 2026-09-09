@@ -215,6 +215,9 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   errno-to-subclass table
 - `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func,
   class, iter, singleton, bytes, bytearray, memoryview, code).
+  `dict_views.asm` is the three view types `dict.keys()`, `.values()` and
+  `.items()` return, and everything only they do; `dict.asm` is the table.
+  Split off when `dict.asm` reached the 100k cap.
   `bytes_decode.asm` is bytes -> str and why it sometimes cannot be: the three
   codecs that are not a table, the UTF-8 validator under them, and the
   UnicodeDecodeError worded the way CPython words it.  Split off when

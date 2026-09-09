@@ -71,6 +71,7 @@ test_call_arg_order
 test_call_arg_ownership
 test_call_ex
 test_call_instance
+test_call_kwargs_errors
 test_call_spec
 test_classes
 test_classmethod_metaclass
@@ -164,7 +165,9 @@ test_descriptor_receiver
 test_descriptors
 test_descriptor_subclass
 test_dict_bugs
+test_dict_copy
 test_dict_dunder_args
+test_dict_empty
 test_dict_fromkeys
 test_dict_int_keys
 test_dict_ior
@@ -172,6 +175,7 @@ test_dict_mutate_iter
 test_dict_numkey
 test_dict_ops
 test_dict_order
+test_dict_probe
 test_dicts
 test_dict_str_keys
 test_dict_update_mapping

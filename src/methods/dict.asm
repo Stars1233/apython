@@ -62,23 +62,18 @@ DEF_FUNC dict_method_get
     mov rdi, rbx
     mov rsi, [rax + 8]      ; key Value -- dict_get unpacks it itself, so
     call dict_get           ; decoding here would hand it a bare payload
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-
-    test edx, edx               ; the tag, not the payload: a hit may be int 0
+    test rax, rax               ; a Value, and 0 is the only miss
     jnz .dg_found
 
     ; Not found - return default or None
     pop rcx                 ; args
     cmp r12, 3
     jl .dg_ret_none
-    ; Return args[2] (default)
-    mov rax, [rcx + 16]     ; default payload
-    V_UNPACK rax, rdx       ; args[2]
-    INCREF_VAL rax, rdx
+    mov rax, [rcx + 16]     ; args[2], the default
+    INCREF_V rax, rdx
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .dg_ret_none:
@@ -91,13 +86,10 @@ DEF_FUNC dict_method_get
 
 .dg_found:
     add rsp, 8              ; discard saved args
-    ; INCREF the value (dict_get returns borrowed ref, rdx=tag)
-    INCREF_VAL rax, rdx
-    ; rdx already has correct tag from dict_get
+    INCREF_V rax, rdx       ; dict_get's answer is borrowed
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_method_get
 
@@ -164,54 +156,41 @@ DEF_FUNC dict_method_pop, 8            ; 5 pushes, so rsp is 16-aligned
     mov r14, rdi            ; r14 = args
     mov rbx, [r14]          ; self
     mov r12, rsi            ; nargs
-    mov r13, [r14 + 8]     ; key payload (16-byte stride)
-    V_UNPACK r13, r15       ; args[1]
+    mov r13, [r14 + 8]      ; args[1], the key Value
 
-    ; Try dict_get
     mov rdi, rbx
     mov rsi, r13
-    mov edx, r15d           ; key tag
-    V_PACK rsi, rdx           ; dict_get/del take a key Value
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
+    test rax, rax           ; a Value, and 0 is the only miss
     jz .dpop2_not_found
 
-    ; dict_get returns fat (rax=payload, rdx=tag)
-    INCREF_VAL rax, rdx
-    push rdx                ; save tag across dict_del
-    push rax                ; save payload
+    INCREF_V rax, rdx       ; dict_get's answer is borrowed
+    mov r15, rax            ; held across dict_del, which can run a __del__
 
     mov rdi, rbx
     mov rsi, r13
-    mov rdx, r15            ; key tag
-    V_PACK rsi, rdx           ; dict_get/del take a key Value
     call dict_del
 
-    pop rax                 ; restore payload
-    pop rdx                 ; restore tag
+    mov rax, r15
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .dpop2_not_found:
     cmp r12, 3
     jl .dpop2_error
-    mov rax, [r14 + 16]     ; default = args[2] payload (16-byte stride)
-    V_UNPACK rax, rdx       ; args[2]
-    INCREF_VAL rax, rdx
+    mov rax, [r14 + 16]     ; args[2], the default
+    INCREF_V rax, rdx
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .dpop2_error:
@@ -261,21 +240,13 @@ DEF_FUNC dict_method_clear
     jmp .dc_loop
 
 .dc_clear_entries:
-    ; Zero out all entries
-    mov rdi, [rbx + PyDictObject.entries]
-    xor esi, esi
-    imul rdx, r12, DICT_ENTRY_SIZE
-    call ap_memset
-
-    ; And reset the sparse index array, or every slot would still point at a
-    ; dense entry that is now blank.
-    mov rdi, [rbx + PyDictObject.dk_indices]
-    test rdi, rdi
-    jz .dc_no_indices
-    mov rcx, r12
-    mov rax, DICT_IX_EMPTY
-    rep stosq
-.dc_no_indices:
+    ; Give the table back instead of rewriting it: an ap_memset over
+    ; capacity*24 bytes and a `rep stosq` over capacity*8 more, to keep a
+    ; table with nothing in it.  CPython's dict_clear points ma_keys at
+    ; Py_EMPTY_KEYS.
+    extern dict_release_tables
+    mov rdi, rbx
+    call dict_release_tables
 
     ; Reset size to 0
     mov qword [rbx + PyDictObject.ob_size], 0
@@ -292,6 +263,58 @@ DEF_FUNC dict_method_clear
     V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_method_clear
+
+; CPython's PySequence_Fast hands a list or a tuple straight back rather than
+; copying it, and dict.update's two materialisation points are exactly where
+; it uses it.  A list and a tuple carry ob_size and ob_item at the same two
+; offsets, which is the only reason one accessor serves both; NASM checks it
+; here rather than leaving it to a reader.
+%if PyTupleObject.ob_size != PyListObject.ob_size
+    %error "list and tuple must agree on ob_size for du_as_sequence"
+%endif
+%if PyTupleObject.ob_item != PyListObject.ob_item
+    %error "list and tuple must agree on ob_item for du_as_sequence"
+%endif
+
+;; ============================================================================
+;; du_as_sequence(rdi = a Value) -> rax = an owned exact list or tuple, or 0
+;;   with an exception pending
+;;
+;; A list or a tuple is already what the caller wants to index, so it comes
+;; back with one more reference and nothing is built.  `dict(pairs)` was
+;; copying the whole sequence AND allocating a fresh two-element tuple for
+;; every pair in it, which is one allocation per element to read two words
+;; that were already contiguous.
+;; ============================================================================
+DAS_ARG   equ 8                         ; also the one-Value argument array
+DAS_FRAME equ 16                        ; + 0 pushes = 16, 16-aligned
+DEF_FUNC du_as_sequence, DAS_FRAME
+    mov [rbp - DAS_ARG], rdi
+    V_TEST_PTR rdi, rax
+    ja .das_build
+    test rdi, rdi
+    jz .das_build
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    je .das_keep
+    extern list_type
+    lea rcx, [rel list_type]
+    cmp rax, rcx
+    jne .das_build
+.das_keep:
+    INCREF_V rdi, rax
+    mov rax, rdi
+    leave
+    ret
+.das_build:
+    lea rsi, [rbp - DAS_ARG]
+    lea rdi, [rel tuple_type]
+    mov edx, 1
+    call tuple_type_call
+    leave
+    ret
+END_FUNC du_as_sequence
 
 ;; ============================================================================
 ;; dict_method_update(args, nargs) -> None
@@ -352,8 +375,16 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov rax, [r12 + PyObject.ob_type]
     REQUIRE_DICT_TYPE rax, rcx, .du_from_pairs
 
-    ; ---- other is a dict: walk its entry table ----------------------------
-    mov r13, [r12 + PyDictObject.capacity]
+    ; ---- other is a dict: walk its DENSE array ----------------------------
+    ; Room for the whole of it first, so a hundred-key update does not
+    ; rebuild the table five times on the way; then dk_nentries, which is the
+    ; exact high-water mark, rather than capacity, which at the 3/4 load
+    ; factor is a third more slots and after deletions is unbounded.
+    extern dict_reserve
+    mov rdi, rbx
+    mov rsi, [r12 + PyDictObject.ob_size]
+    call dict_reserve
+    mov r13, [r12 + PyDictObject.dk_nentries]
     xor r14d, r14d
 .du_loop:
     cmp r14, r13
@@ -496,12 +527,8 @@ DEF_FUNC dict_method_update, DU_FRAME
     jmp .du_kwargs
 
 .du_as_pairs:
-    mov r12, [rbp - DU_OTHER]
-    mov rdi, [rbp - DU_ARGS]
-    lea rsi, [rdi + 8]
-    lea rdi, [rel tuple_type]
-    mov edx, 1
-    call tuple_type_call            ; raises for a non-iterable
+    mov rdi, [rbp - DU_OTHER]
+    call du_as_sequence             ; raises for a non-iterable
     mov [rbp - DU_TMP], rax
     mov r12, rax
     ; ...but an iterable whose __next__ raises returns NULL rather than
@@ -509,6 +536,9 @@ DEF_FUNC dict_method_update, DU_FRAME
     test rax, rax
     jz .du_propagate
     mov r13, [r12 + PyTupleObject.ob_size]
+    mov rdi, rbx
+    mov rsi, r13
+    call dict_reserve               ; the pair count is known; take it once
     xor r14d, r14d
 .du_pair_loop:
     cmp r14, r13
@@ -524,19 +554,35 @@ DEF_FUNC dict_method_update, DU_FRAME
     ja .du_not_a_sequence
     test rdi, rdi
     jz .du_not_a_sequence
+    ; A pair that is already a list or a tuple is read where it lies.  A pair
+    ; of any other shape still has to be materialised, and still has to be
+    ; refused BY NAME when it is not iterable at all -- CPython's message
+    ; says which element it was, and tuple() below would say only
+    ; "'int' object is not iterable".
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    je .du_pair_direct
+    lea rcx, [rel list_type]
+    cmp rax, rcx
+    je .du_pair_direct
     mov esi, TAG_PTR
     extern get_iterator_opt
     call get_iterator_opt
     test rax, rax
     jz .du_not_a_sequence
-    V_UNPACK rax, rdx
     mov rdi, rax
     call obj_decref
-    ; Materialise the pair too, so any two-element iterable is accepted.
+    ; Materialise the pair, so any two-element iterable is accepted.
     lea rsi, [rbp - DU_PAIRV]
     lea rdi, [rel tuple_type]
     mov edx, 1
     call tuple_type_call
+    jmp .du_pair_have
+.du_pair_direct:
+    INCREF_V rdi, rax
+    mov rax, rdi
+.du_pair_have:
     mov [rbp - DU_PAIR], rax
     test rax, rax
     jz .du_propagate
@@ -637,71 +683,53 @@ DEF_FUNC dict_method_setdefault, 8            ; 5 pushes, so rsp is 16-aligned
     push r15
 
     mov rbx, [rdi]          ; self (dict)
-    mov r12, [rdi + 8]     ; key payload
-    V_UNPACK r12, r14       ; args[1]
+    mov r12, [rdi + 8]      ; args[1], the key Value
     mov r13, rsi            ; nargs
 
     ; Save args ptr for default value access
     push rdi
 
-    ; dict_get(self, key)
     mov rdi, rbx
     mov rsi, r12
-    mov edx, r14d           ; key tag
-    V_PACK rsi, rdx           ; dict_get/del take a key Value
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-
-    test edx, edx               ; the tag, not the payload: a hit may be int 0
+    test rax, rax           ; a Value, and 0 is the only miss
     jnz .sd_found
 
     ; Not found - determine default value
     pop rdi                 ; restore args ptr
     cmp r13, 3
     jl .sd_use_none
-    mov r13, [rdi + 16]     ; default = args[2] payload
-    V_UNPACK r13, r15       ; args[2]
+    mov r13, [rdi + 16]     ; args[2], the default
     jmp .sd_set_default
 
 .sd_use_none:
     lea r13, [rel none_singleton]
-    mov r15d, TAG_PTR
 
 .sd_set_default:
-    ; dict_set(self, key, default_val)
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
-    mov ecx, r15d           ; default val tag
-    V_PACK rdx, rcx
-    mov r8d, r14d           ; key tag
-    V_PACK rsi, r8
     call dict_set
 
-    ; INCREF and return default_val
-    INCREF_VAL r13, r15
     mov rax, r13
-    mov edx, r15d           ; return tag
+    INCREF_V rax, rdx
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
 .sd_found:
     add rsp, 8              ; discard saved args ptr
-    ; INCREF the found value (dict_get returns borrowed ref, rdx=tag)
-    INCREF_VAL rax, rdx
+    INCREF_V rax, rdx       ; dict_get's answer is borrowed
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC dict_method_setdefault
 
@@ -836,66 +864,37 @@ DEF_FUNC dict_method_popitem
     cmp qword [rbx + PyDictObject.ob_size], 0
     je .dpopitem_empty
 
-    ; Find last non-NULL entry by scanning backward
-    mov r12, [rbx + PyDictObject.capacity]
-    dec r12                  ; start from capacity-1
-
+    ; The LAST entry, found from the high-water mark.  The scan used to start
+    ; at capacity-1, so on a hundred-entry dict in a 256-slot table it walked
+    ; a hundred and fifty-six empty slots before reaching anything.
+    ; dk_nentries is where the dense array stops.
+    mov r12, [rbx + PyDictObject.dk_nentries]
 .dpopitem_scan:
-    test r12, r12
-    jl .dpopitem_empty       ; shouldn't happen, but safety
+    dec r12
+    js .dpopitem_empty          ; unreachable while ob_size is non-zero
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
     add rax, rcx
-
-    mov r13, [rax + DictEntry.key]
+    mov r13, [rax + DictEntry.key]      ; a Value; 0 is a hole
     test r13, r13
-    jz .dpopitem_prev           ; a NULL key is an empty slot or a tombstone
-    ; A second test of rcx used to stand here, left over from a removed
-    ; key-tag load; rcx now holds the byte offset, which is 0 at slot 0, so
-    ; an occupied slot 0 was skipped and popitem() reported an empty dict.
+    jz .dpopitem_scan
     mov r14, [rax + DictEntry.value]
-    V_UNPACK r14, rcx
-    jmp .dpopitem_found
 
-.dpopitem_prev:
-    dec r12
-    jmp .dpopitem_scan
-
-.dpopitem_found:
-    ; r13 = key, r14 = value, rcx = value_tag
-    ; Also save key_tag from the entry
-    mov rax, [rbx + PyDictObject.entries]
-    imul rdx, r12, DICT_ENTRY_SIZE
-    add rax, rdx
-    V_TAG_OF r8, qword [rax + DictEntry.key]
-    V_UNPACK r13, r8         ; r13 held the key as a Value
-    push r8                  ; save key_tag
-    push rcx                 ; save value_tag across tuple_new
-    ; Create 2-tuple
+    ; The (key, value) pair.  Values throughout: this used to take the key
+    ; apart with V_TAG_OF and V_UNPACK and put it back together with V_PACK
+    ; three times over, to move two words.
     mov edi, 2
     call tuple_new
-    pop rcx                  ; restore value_tag
-    pop r8                   ; restore key_tag
-    mov r12, rax             ; r12 = tuple
-
-    ; Set tuple[0] = key with correct tag, tuple[1] = value
+    mov r12, rax
     mov r9, [r12 + PyTupleObject.ob_item]
-    INCREF_VAL r13, r8
-    INCREF_VAL r14, rcx
-    mov r10, r13
-    mov r11, r8
-    V_PACK r10, r11
-    mov [r9], r10
-    mov r10, r14
-    mov r11, rcx
-    V_PACK r10, r11
-    mov [r9 + 8], r10
+    INCREF_V r13, rcx
+    INCREF_V r14, rcx
+    mov [r9], r13
+    mov [r9 + 8], r14
 
     ; Delete key from dict
     mov rdi, rbx
     mov rsi, r13
-    mov edx, r8d            ; key tag from the entry
-    V_PACK rsi, rdx           ; dict_get/del take a key Value
     call dict_del
 
     mov rax, r12
@@ -909,7 +908,7 @@ DEF_FUNC dict_method_popitem
     ret
 
 .dpopitem_empty:
-    RAISE exc_KeyError_type, "dictionary is empty"
+    RAISE exc_KeyError_type, "popitem(): dictionary is empty"
 END_FUNC dict_method_popitem
 
 section .rodata

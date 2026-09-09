@@ -127,3 +127,75 @@ e = {}
 e["x"] = e.keys()
 print(e.keys())
 print({1: 2}.keys(), {1: 2}.values(), {1: 2}.items())
+
+# --- `(k, v) in d.items()` ------------------------------------------------
+# The items view answers this with one lookup and one comparison, where it
+# used to fall to the generic protocol and walk the whole view.  What the
+# shortcut must NOT change: a probe that is not a two-element tuple is False
+# rather than an error, a tuple SUBCLASS is accepted, the value comparison
+# runs __eq__ on the object the dict holds, and an exception from either the
+# key's __hash__ or the value's __eq__ propagates instead of answering False.
+w = {"a": 1, "b": 2, 3: "x", (1, 2): 9}
+print(("a", 1) in w.items(), ("a", 2) in w.items(), ("z", 1) in w.items())
+print((3, "x") in w.items(), ((1, 2), 9) in w.items())
+print(("a", 1) not in w.items(), ("a", 9) not in w.items())
+for probe in ("a", 1, None, (), ("a",), ("a", 1, 2), ["a", 1], 1.5, w):
+    print(repr(probe), probe in w.items())
+
+
+class TSub(tuple):
+    pass
+
+
+print(TSub(("a", 1)) in w.items(), TSub(("a", 9)) in w.items())
+
+# equality across the three encodings, exactly as a plain lookup gives
+one = {1: 1}
+print((True, 1) in one.items(), (1, True) in one.items(),
+      (1.0, 1.0) in one.items(), (1, 2) in one.items())
+
+
+class Eq:
+    def __init__(self, v):
+        self.v = v
+
+    def __eq__(self, o):
+        return isinstance(o, Eq) and self.v == o.v
+
+    def __hash__(self):
+        return hash(self.v)
+
+
+byval = {"k": Eq(1)}
+print(("k", Eq(1)) in byval.items(), ("k", Eq(2)) in byval.items())
+bykey = {Eq(1): "v"}
+print((Eq(1), "v") in bykey.items(), (Eq(2), "v") in bykey.items())
+
+
+class RaisesEq:
+    def __eq__(self, o):
+        raise ZeroDivisionError("eq")
+
+    def __hash__(self):
+        return 7
+
+
+try:
+    print(("k", 1) in {"k": RaisesEq()}.items())
+except ZeroDivisionError as ex:
+    print("ZeroDivisionError", ex)
+
+
+class RaisesHash:
+    def __hash__(self):
+        raise KeyError("h")
+
+
+try:
+    print((RaisesHash(), 1) in w.items())
+except KeyError as ex:
+    print("KeyError", ex)
+
+print(("a", 1) in {}.items(), len({}.items()))
+# the other two views are unchanged: keys goes to the dict, values walks
+print("a" in w.keys(), "z" in w.keys(), 1 in w.values(), 99 in w.values())

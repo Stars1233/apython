@@ -203,6 +203,12 @@ struc PyDictObject
     .dk_indices: resq 1   ; +56: ptr to int64[capacity], -1 empty, -2 dummy,
                           ;      else an index into .entries
     .dk_nentries: resq 1  ; +64: high-water mark of .entries in use
+    ; Non-zero while every key in the table is an exact str -- vacuously true
+    ; of an empty one, and cleared for good the moment a key of any other type
+    ; goes in.  It is what lets the str probe loop skip asking whether the
+    ; STORED key is a str too, which is a load and two compares on every
+    ; hash-matching probe.  CPython's dk_kind, one bit of it.
+    .dk_kind: resq 1      ; +72
 endstruc
 
 ; The dict is CPython's compact layout: a sparse index array over a *dense*
@@ -228,6 +234,11 @@ endstruc
 
 DICT_ENTRY_SIZE equ DictEntry_size  ; 24
 DICT_INIT_CAP   equ 8               ; initial hash-table slots for dict and set
+
+; How far the hash is shifted down for each step of the probe recurrence,
+; i = (i*5 + perturb + 1) & mask.  CPython's PERTURB_SHIFT, and Tim Peters'
+; note that 4 and 6 were not significantly worse.
+PERTURB_SHIFT   equ 5
 ENTRY_TOMBSTONE_HASH equ -1
 
 ; A set entry mirrors DictEntry minus the value: hash at +0, key Value at +8.
