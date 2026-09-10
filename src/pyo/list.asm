@@ -48,17 +48,21 @@ LIST_POOL_MAX equ 16
 
 ;; ============================================================================
 ;; list_new(rdi = capacity) -> rax = PyListObject*, every slot zeroed
-;; list_new_filled(rdi = n) -> rax = PyListObject* of capacity max(n, 4),
-;;                             whose first n slots are UNINITIALISED
+;; list_new_filled(rdi = n) -> rax = PyListObject* of capacity n, whose n
+;;                             slots are UNINITIALISED
 ;;
 ;; Both go through list_new_from below; they differ only in where the zeroing
 ;; starts.  list_new_filled is for the four builders that write every one of
 ;; the n slots before anything can look -- copy, slice, concat, repeat -- and
 ;; on those the zeroing was pure waste: the array was filled with zeroes and
 ;; then immediately overwritten by an ap_memcpy of exactly the same length.
-;; It still zeroes the tail, [n, max(n, 4)), because the invariant the
-;; zeroing exists for is about the slots ABOVE ob_size, and a list of fewer
-;; than four items has some.
+;;
+;; The capacity is what was ASKED FOR, not max(n, something).  list_new_from
+;; substitutes its minimum only for a request of ZERO -- so list_new(0) gets
+;; the minimum and list_new_filled(2) gets exactly two slots and zeroes
+;; nothing.  That minimum is 8 rather than 4 since 5501d5b, because a list
+;; literal compiles to BUILD_LIST 0 plus LIST_EXTEND and four slots meant
+;; every one of them grew immediately.
 ;; ============================================================================
 DEF_FUNC_BARE list_new
     xor esi, esi                ; zero from slot 0: nothing is promised
