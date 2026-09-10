@@ -138,7 +138,12 @@ DEF_FUNC eg_new, EGN_FRAME
     mov rdi, rcx
     call gc_track
 
-    mov rax, rcx
+    ; From the frame slot, not from rcx: gc_track is where a collection
+    ; actually runs, and rcx is caller-saved.  The 1-in-N allocation that
+    ; triggered one came back with a clobbered rcx and returned it as the new
+    ; group -- usually harmless rubbish, and NULL often enough that building
+    ; ~150 nested ExceptionGroups reliably died on `[NULL + exc_args]`.
+    mov rax, [rbp - EGN_EG]
 
     pop r13
     pop r12
@@ -380,10 +385,13 @@ DEF_FUNC eg_type_call, EGC_FRAME
     call eg_new
     ; rax = new EG object
 
-    ; DECREF our ref to exc_tuple (eg_new INCREFed it)
+    ; DECREF our ref to exc_tuple (eg_new INCREFed it).  Two pushes, not one:
+    ; this frame leaves rsp 16-aligned, so a lone save puts the callee 8 out.
+    push rax
     push rax
     mov rdi, r12
     call obj_decref
+    pop rax
     pop rax
 
     ; .args holds the sequence AS PASSED, not the tuple this made of it:
