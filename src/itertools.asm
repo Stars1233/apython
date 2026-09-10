@@ -1914,12 +1914,16 @@ SO_ARGS       equ 8
 SO_NARGS      equ 16
 SO_SORT_BUF   equ 72     ; END of sort args buffer (grows down from here)
 SO_EXC        equ 80     ; the exception pending before iteration began
-SO_FRAME      equ 96        ; + 0 pushes = 96
+SO_FRAME      equ 104       ; + 3 pushes = 128, 16-aligned.  It said "+ 0
+                            ; pushes" and there are three below, so every call
+                            ; in this body was eight bytes out -- including
+                            ; list.sort, whose comparisons reach int_compare
+                            ; and so GMP.
 DEF_FUNC builtin_sorted, SO_FRAME
+    push rbx                    ; before DUNDER_EXC_SAVE, not after: a push
+    push r12                    ; that follows any other instruction is a push
+    push r13                    ; lint.py's check_alignment cannot count
     DUNDER_EXC_SAVE [rbp - SO_EXC]
-    push rbx
-    push r12
-    push r13
 
     mov [rbp - SO_ARGS], rdi    ; save original args
     mov [rbp - SO_NARGS], rsi   ; save original nargs
