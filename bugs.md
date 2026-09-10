@@ -22,6 +22,25 @@ reasoning that chose them and what changing one would cost.
   builtin it found dispatched into each other for ever, and the module no
   longer crashes.
 
+  The same defect is what stands between `time.get_clock_info` and the six
+  asyncio modules.  CPython's `BaseEventLoop.__init__` reads
+  `time.get_clock_info('monotonic').resolution` and gets no further without
+  it, so those modules never ran; supply it -- a pure-Python one injected
+  into an unmodified build is enough -- and test_contextlib_async, test_logging
+  and test_sys_settrace segfault instead, in `gc_list_remove` under
+  `gc_visit_reachable`, walking a block the allocator has already handed back.
+
+  Traced: the object is an asyncio `Task`'s `_context`, a `contextvars.Context`
+  with `__slots__`, sitting in the Task's instance dict at a live dense index
+  with a live key.  A hardware watchpoint over its whole refcount history
+  shows fifteen writes, every LOAD_FAST matched by its DECREF, and **no
+  `dict_set` among them** -- so the dict entry that holds it never took a
+  reference.  The last decref is `tuple_dealloc` under `list_ass_subscript`,
+  and the block is freed and reused while the dict still names it.  Watching
+  the entry slot instead shows the entries array moving under a resize, so the
+  write that put the pointer there is not the one the watch caught.  That is
+  as far as it is reduced; the two halves have not been seen in one timeline.
+
   CPython's test_sys_settrace dies in `gc_visit_decref` under `exc_traverse`
   at shutdown, and it is HEAP-LAYOUT SENSITIVE: the same commit built at
   `/tmp/apy-base` passes and built at `/home/jgarzik/repo/apython` crashes,
