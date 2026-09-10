@@ -137,7 +137,9 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     jmp .mv_error
 
 .mv_from_view:
-    ; memoryview(memoryview) shares the same window, as CPython's does.
+    ; memoryview(memoryview) shares the same window, as CPython's does -- but
+    ; there is no window to share once the original has been released.
+    call memoryview_check
     push rdi
     mov edi, PyMemoryViewObject_size
     call ap_malloc
@@ -298,6 +300,11 @@ END_FUNC memoryview_hash
 ;; ============================================================================
 global memoryview_as_bytes
 DEF_FUNC memoryview_as_bytes
+    ; A released view answers no questions -- that is what release() is for --
+    ; and `bytes(m)` reached this straight from bytes_type_call, which read a
+    ; buffer that is no longer there.  Asked before the pushes, so the raise
+    ; leaves nothing on this frame.
+    call memoryview_check
     push rbx
     push r12
     mov rbx, rdi
@@ -562,6 +569,10 @@ DEF_FUNC memoryview_getattr, MVG_FRAME
     ret
 
 .mvg_obj:
+    ; A released view has no .obj to report, and CPython refuses rather than
+    ; answering None -- the source is exactly what release() let go of.
+    mov rdi, [rbp - MVG_SELF]
+    call memoryview_check
     mov rdi, [rbp - MVG_SELF]
     mov rax, [rdi + PyMemoryViewObject.mv_source]
     test rax, rax

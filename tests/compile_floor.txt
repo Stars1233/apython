@@ -366,6 +366,7 @@ test_math_more
 test_math
 test_membership
 test_memmove_boundaries
+test_memoryview_released
 test_memoryview_stride
 test_metaclass_lifetime
 test_metaclass_prepare
