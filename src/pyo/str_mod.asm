@@ -81,8 +81,9 @@ SM_STARWON equ 216       ; ...and whether there was one
 SM_STARP   equ 224       ; a '*' precision, likewise
 SM_STARPON equ 232
 SM_SAWDOT  equ 240       ; the spec copier's cursor has passed the '.'
-SM_FRAME   equ 256          ; + 0 pushes = 256; SM_NORAISE at 248 is the
-                            ; last slot, and the frame is full
+SM_SAVERSP equ 264       ; .sm_ensure_cap's saved rsp; see the note there
+SM_FRAME   equ 272          ; + 0 pushes = 272; the five pushes below are
+                            ; mid-body, which is why lint cannot see them
 
 ;; str_mod(rdi = the format, a Value; rsi = the argument, a Value)
 ;;   -> (rax = the formatted str, rdx = TAG_PTR), or does not return
@@ -871,7 +872,19 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov [rbp-SM_CAP], rax
     mov rdi, r13               ; old ptr
     mov rsi, rax               ; new size
+    ; ALIGN, rather than assume.  This helper is reached from seven places at
+    ; three different parities -- one push, two pushes, and none at all, some
+    ; of them behind a jump that has already pushed -- so there is no single
+    ; correction that is right for all of them, and no comment at any one
+    ; site could stay true.  It passed its caller's parity straight through
+    ; to ap_realloc, which reaches glibc realloc for any buffer past 512
+    ; bytes; that was unreachable while the buffer started at 8 KB, and 256
+    ; is what makes it live.  `and` costs one instruction and is right from
+    ; anywhere.
+    mov [rbp-SM_SAVERSP], rsp
+    and rsp, -16
     call ap_realloc
+    mov rsp, [rbp-SM_SAVERSP]
     mov r13, rax
     mov [rbp-SM_BUF], rax
 .sm_cap_ok:
