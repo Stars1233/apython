@@ -486,6 +486,7 @@ test_slice_indices
 test_slicing
 test_slot_builtin_dunder_assign
 test_slot_clear_and_none
+test_slot_descr_receiver
 test_slots_mangling
 test_slots
 test_slots_store_cache

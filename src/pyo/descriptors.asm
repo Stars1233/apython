@@ -1817,7 +1817,92 @@ DEF_FUNC_LOCAL getset_check_receiver, GCR_FRAME
     call raise_exception        ; does not return
 END_FUNC getset_check_receiver
 
+;; ============================================================================
+;; member_check_receiver(rdi = the descriptor, rsi = self Value)
+;;   -> returns, or raises and does not
+;;
+;; A __slots__ descriptor is an OFFSET into an instance of the class it was
+;; made for.  Nothing stops a program from putting one in another class's body
+;; -- `class Sneaky: borrowed = Class.slot`, which CPython's own test_opcache
+;; does on purpose -- and `o.borrowed = 42` then wrote at Class's offset into
+;; a Sneaky, which has a different layout: a wild store rather than an error.
+;; CPython's member_get and member_set both ask this first, and word the
+;; refusal the way getset's does.
+;; ============================================================================
+MCR_DESC  equ 8
+MCR_SELF  equ 16
+MCR_FRAME equ 32            ; + 0 pushes = 32
+global member_check_receiver
+DEF_FUNC member_check_receiver, MCR_FRAME
+    mov [rbp - MCR_DESC], rdi
+    mov [rbp - MCR_SELF], rsi
+    mov rcx, [rdi + PyMemberDescrObject.md_owner]
+    test rcx, rcx
+    jz .mcr_ok                  ; no owner recorded: nothing to check against
+    mov rdi, rsi
+    call value_type
+    test rax, rax
+    jz .mcr_bad
+    mov rdi, rax
+    mov rcx, [rbp - MCR_DESC]
+    mov rsi, [rcx + PyMemberDescrObject.md_owner]
+    call type_is_subtype
+    test eax, eax
+    jz .mcr_bad
+.mcr_ok:
+    leave
+    ret
+
+.mcr_bad:
+    lea rdi, [rel gdr_buf]
+    lea rsi, [rel gcr_open]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rcx, [rbp - MCR_DESC]
+    mov rsi, [rcx + PyMemberDescrObject.md_name]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel mcr_for]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rcx, [rbp - MCR_DESC]
+    mov rcx, [rcx + PyMemberDescrObject.md_owner]
+    mov rsi, [rcx + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel mcr_quote]
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel gcr_mid]
+    call rbt_append_cstr
+    ; The receiver's type name, worked out BEFORE the append point goes into
+    ; rdi -- value_type takes rdi as well.
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - MCR_SELF]
+    call value_type
+    add rsp, 8
+    pop rdi
+    test rax, rax
+    jz .mcr_unknown
+    mov rsi, [rax + PyTypeObject.tp_name]
+    jmp .mcr_have
+.mcr_unknown:
+    lea rsi, [rel gdr_unknown]
+.mcr_have:
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [rel gcr_tail]
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel gdr_buf]
+    call raise_exception        ; does not return
+END_FUNC member_check_receiver
+
 section .rodata
+mcr_for:   db "' for '", 0
+mcr_quote: db "' objects", 0
 gcr_open: db "descriptor '", 0
 gcr_mid:  db " doesn't apply to a '", 0
 gcr_tail: db "' object", 0

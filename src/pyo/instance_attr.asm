@@ -783,7 +783,14 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     jz .found_slot_nowhere
     mov qword [rcx], 1
 .found_slot_nowhere:
-    ; r13 = member descriptor, rbx = instance
+    ; r13 = member descriptor, rbx = instance.  The descriptor is an OFFSET
+    ; into an instance of the class it was made for, and it need not have come
+    ; from this one's: `class Sneaky: borrowed = Other.slot` puts it in a
+    ; class with a different layout.
+    extern member_check_receiver
+    mov rdi, r13
+    mov rsi, rbx
+    call member_check_receiver  ; raises when the layouts do not match
     mov rcx, [r13 + PyMemberDescrObject.md_offset]
     SLOT_ADDR rdx, rbx, rcx
     mov rax, [rdx]             ; slot Value
@@ -1177,6 +1184,17 @@ DEF_FUNC instance_setattr
     ret
 
 .sa_member:
+    ; The offset is into an instance of the descriptor's OWN class, and a
+    ; descriptor borrowed into another class body would otherwise store at
+    ; that offset in an object of a different layout -- a wild write.
+    push r9
+    push r9                     ; and a pad: the call below stays aligned
+    mov rdi, r9
+    mov rsi, rbx
+    extern member_check_receiver
+    call member_check_receiver
+    pop r9
+    pop r9
 
     ; Member descriptor! Write the value into the slot
     mov rcx, [r9 + PyMemberDescrObject.md_offset]
