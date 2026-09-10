@@ -2213,9 +2213,19 @@ DEF_FUNC sre_pattern_hash, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi               ; self
 
-    ; hash(pattern_str)
+    ; hash(pattern), through the object's OWN tp_hash.
+    ;
+    ; This called str_hash whatever `.pattern` held, and str_hash reads a
+    ; cached hash from PyStrObject.ob_hash at +24 and writes the one it
+    ; computes back there.  PyBytesObject.data starts at +24, so for a BYTES
+    ; pattern that read the first eight bytes of the pattern text as a hash --
+    ; past the end of the object when the pattern is shorter than that -- and,
+    ; when those bytes happened to read as -1, overwrote them with the hash.
+    ; `re.compile(re.escape(b"\xff" * 8))` is that case, and it corrupted its
+    ; own pattern.
     mov rdi, [rbx + SRE_PatternObject.pattern]
-    call str_hash
+    extern obj_hash
+    call obj_hash
 
     ; XOR flags
     mov ecx, [rbx + SRE_PatternObject.flags]
@@ -2281,17 +2291,17 @@ DEF_FUNC sre_pattern_richcompare
     cmp eax, [r12 + SRE_PatternObject.groups]
     jne .prc_ne_result
 
-    ; Compare pattern strings via str_compare
+    ; Compare the pattern texts the ordinary way.  str_compare reads the text
+    ; at PyStrObject.data (+40), where a bytes keeps it at +24 -- so two BYTES
+    ; patterns compared whatever sat past the end of each and were never
+    ; equal.  A str and a bytes are refused above, so this is like against
+    ; like; -1 cannot happen for two of either, and is not equal if it does.
     mov rdi, [rbx + SRE_PatternObject.pattern]
     mov rsi, [r12 + SRE_PatternObject.pattern]
     mov edx, PY_EQ
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
-    call str_compare
-    ; rax = payload (bool_true/bool_false ptr), edx = tag (TAG_PTR)
-    ; Check if str_compare returned bool_true
-    lea rcx, [rel bool_true]
-    cmp rax, rcx
+    extern obj_richcompare_bool
+    call obj_richcompare_bool
+    cmp eax, 1
     jne .prc_ne_result
 
     ; Patterns are equal
