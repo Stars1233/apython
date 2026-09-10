@@ -478,6 +478,7 @@ test_set_tombstone_reuse
 test_set_value_probe
 test_set_variadic
 test_signal
+test_simplenamespace
 test_size_and_recursion_limits
 test_slice_and_star_args
 test_slice_assign

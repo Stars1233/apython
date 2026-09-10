@@ -495,23 +495,132 @@ extern exc_TypeError_type
 section .text
 
 ;; ============================================================================
+;; namespace_alloc(rdi = the type to build) -> rax = the object, or 0
+;;
+;; builtin_sub_alloc rather than a bare ap_malloc, because the type is not
+;; always THIS one: `class Sub(SimpleNamespace)` is a heaptype, its
+;; tp_basicsize is larger and it is collector-tracked, so its instances come
+;; from gc_alloc with a header sixteen bytes below the object.  It also counts
+;; the type, which namespace_dealloc gives back.
+;; ============================================================================
+extern builtin_sub_alloc
+DEF_FUNC_LOCAL namespace_alloc, 8            ; 1 push = 16, 16-aligned
+    push rbx
+    call builtin_sub_alloc
+    test rax, rax
+    jz .nsa_out
+    mov rbx, rax
+    call dict_new
+    test rax, rax
+    jz .nsa_no_dict
+    mov [rbx + PySimpleNamespaceObject.ns_dict], rax
+    mov rax, rbx
+.nsa_out:
+    pop rbx
+    leave
+    ret
+.nsa_no_dict:
+    mov rdi, rbx
+    call obj_decref
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC namespace_alloc
+
+;; ============================================================================
 ;; namespace_new() -> PySimpleNamespaceObject* with a fresh dict
 ;; ============================================================================
 DEF_FUNC namespace_new, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
-    mov edi, PySimpleNamespaceObject_size
-    call ap_malloc
-    mov rbx, rax
-    mov qword [rbx + PyObject.ob_refcnt], 1
-    lea rax, [rel namespace_type]
-    mov [rbx + PyObject.ob_type], rax
-    call dict_new
-    mov [rbx + PySimpleNamespaceObject.ns_dict], rax
-    mov rax, rbx
+    lea rdi, [rel namespace_type]
+    call namespace_alloc
     pop rbx
     leave
     ret
 END_FUNC namespace_new
+
+;; ============================================================================
+;; namespace_type_call(rdi = type, rsi = args, rdx = nargs) -> rax = Value
+;;
+;; types.SimpleNamespace(**kwargs).  There was no tp_new at all, so calling the
+;; type fell through to the ordinary class-construction path: the object came
+;; from instance_new with no ns_dict -- "namespace has no attribute storage" on
+;; the first assignment -- and was then freed at the object pointer by
+;; namespace_dealloc, sixteen bytes above the block gc_alloc had handed out.
+;;
+;; CPython takes keywords only, and says so.
+;; ============================================================================
+extern kw_names_pending
+NTC_TYPE  equ 8
+NTC_NS    equ 16
+NTC_ARGS  equ 24
+NTC_NARGS equ 32
+NTC_KW    equ 40
+NTC_I     equ 48
+NTC_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
+DEF_FUNC namespace_type_call, NTC_FRAME
+    mov [rbp - NTC_TYPE], rdi
+    mov [rbp - NTC_ARGS], rsi
+    mov [rbp - NTC_NARGS], rdx
+
+    ; The keywords, taken now: a tp_new is expected to consume them, and
+    ; type_call hands __init__ its own saved copy.
+    mov rax, [rel kw_names_pending]
+    mov [rbp - NTC_KW], rax
+    mov qword [rel kw_names_pending], 0
+    xor ecx, ecx
+    test rax, rax
+    jz .ntc_no_kw
+    mov rcx, [rax + PyTupleObject.ob_size]
+.ntc_no_kw:
+    ; nargs counts the keyword VALUES too; whatever is left is positional.
+    mov rdx, [rbp - NTC_NARGS]
+    sub rdx, rcx
+    test rdx, rdx
+    jnz .ntc_positional
+
+    mov rdi, [rbp - NTC_TYPE]
+    call namespace_alloc
+    test rax, rax
+    jz .ntc_fail
+    mov [rbp - NTC_NS], rax
+
+    ; Every keyword becomes an attribute.  With no positionals the values
+    ; start at args[0], in the order the names are in.
+    mov qword [rbp - NTC_I], 0
+.ntc_kw_loop:
+    mov rax, [rbp - NTC_KW]
+    test rax, rax
+    jz .ntc_done
+    mov rcx, [rbp - NTC_I]
+    cmp rcx, [rax + PyTupleObject.ob_size]
+    jge .ntc_done
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rsi, [rdx + rcx*8]                  ; the name
+    mov rdx, [rbp - NTC_ARGS]
+    mov rdx, [rdx + rcx*8]                  ; the value
+    mov rdi, [rbp - NTC_NS]
+    mov rdi, [rdi + PySimpleNamespaceObject.ns_dict]
+    call dict_set
+    inc qword [rbp - NTC_I]
+    jmp .ntc_kw_loop
+
+.ntc_done:
+    mov rax, [rbp - NTC_NS]
+    mov edx, TAG_PTR
+    leave
+    ret
+
+.ntc_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+
+.ntc_positional:
+    RAISE exc_TypeError_type, "no positional arguments expected"
+END_FUNC namespace_type_call
 
 ;; namespace_set(rdi = ns, rsi = name cstr, rdx = value Value)
 ;; Helper for building one from assembly; steals nothing, INCREFs via dict_set.
@@ -535,7 +644,9 @@ DEF_FUNC namespace_set
     ret
 END_FUNC namespace_set
 
-DEF_FUNC_LOCAL namespace_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
+NSD_TYPE  equ 8
+NSD_FRAME equ 24            ; + 1 push = 32, 16-aligned
+DEF_FUNC_LOCAL namespace_dealloc, NSD_FRAME
     push rbx
     mov rbx, rdi
     mov rdi, [rbx + PySimpleNamespaceObject.ns_dict]
@@ -543,33 +654,62 @@ DEF_FUNC_LOCAL namespace_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     jz .nsd_free
     call obj_decref
 .nsd_free:
+    ; gc_dealloc, not ap_free: a SUBCLASS of this type is a heaptype and is
+    ; collector-tracked, so its block starts sixteen bytes below the object.
+    ; And the reference namespace_alloc took on the type goes back, after the
+    ; object is gone -- gc_dealloc reads ob_type on its way past.
+    mov rax, [rbx + PyObject.ob_type]
+    mov [rbp - NSD_TYPE], rax
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
+    mov rdi, [rbp - NSD_TYPE]
+    call obj_decref
     pop rbx
     leave
     ret
 END_FUNC namespace_dealloc
 
 ;; namespace_getattr(rdi = self, rsi = name) -> Value or NULL
-DEF_FUNC namespace_getattr, 8            ; 1 pushes, so rsp is 16-aligned
+NSG_NAME  equ 8
+NSG_FRAME equ 24            ; + 1 push = 32, 16-aligned
+DEF_FUNC namespace_getattr, NSG_FRAME
     push rbx
     mov rbx, rdi
+    mov [rbp - NSG_NAME], rsi
     cmp qword [rdi + PySimpleNamespaceObject.ns_dict], 0
     je .nsg_none
-    mov rdi, [rdi + PySimpleNamespaceObject.ns_dict]
+
+    ; __dict__ IS the storage, and writing through it is how CPython lets a
+    ; caller add attributes in bulk.  vars(ns) asks the same question.
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__dict__"
+    call ap_strcmp
+    test eax, eax
+    jnz .nsg_lookup
+    mov rax, [rbx + PySimpleNamespaceObject.ns_dict]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.nsg_lookup:
+    mov rdi, [rbx + PySimpleNamespaceObject.ns_dict]
+    mov rsi, [rbp - NSG_NAME]
     call dict_get
     V_UNPACK rax, rdx
     test edx, edx
-    jz .nsg_generic
+    jz .nsg_none
     INCREF_VAL rax, rdx
     pop rbx
     leave
     V_PACK rax, rdx
     ret
-.nsg_generic:
+
 .nsg_none:
-    ; Not here: LOAD_ATTR's shared tail still gets a chance at __class__
-    ; and __dict__, so returning NULL is the right answer.
+    ; Not here: LOAD_ATTR's shared tail still gets a chance at __class__,
+    ; so returning NULL is the right answer.
     xor eax, eax
     xor edx, edx
     pop rbx
@@ -579,14 +719,41 @@ DEF_FUNC namespace_getattr, 8            ; 1 pushes, so rsp is 16-aligned
 END_FUNC namespace_getattr
 
 ;; namespace_setattr(rdi = self, rsi = name, rdx = value Value) -> 0
-DEF_FUNC namespace_setattr
+NSS_SELF  equ 8
+NSS_NAME  equ 16
+NSS_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC namespace_setattr, NSS_FRAME
+    mov [rbp - NSS_SELF], rdi
+    mov [rbp - NSS_NAME], rsi
     mov rdi, [rdi + PySimpleNamespaceObject.ns_dict]
     test rdi, rdi
     jz .nss_no_dict
+    ; A NULL value is a DELETE -- that is tp_setattr's convention, and this
+    ; stored the NULL instead, leaving an entry whose value was nothing.
+    ; `del ns.a` then showed as `a=` in the repr and read back as garbage.
+    test rdx, rdx
+    jz .nss_delete
     call dict_set
     xor eax, eax
     leave
     ret
+
+.nss_delete:
+    extern dict_del_opt
+    call dict_del_opt
+    test eax, eax
+    js .nss_missing
+    xor eax, eax
+    leave
+    ret
+
+.nss_missing:
+    mov rdi, [rbp - NSS_SELF]
+    mov rsi, [rbp - NSS_NAME]
+    xor edx, edx
+    extern raise_no_attribute
+    call raise_no_attribute     ; does not return
+
 .nss_no_dict:
     RAISE exc_TypeError_type, "namespace has no attribute storage"
 END_FUNC namespace_setattr
@@ -606,17 +773,54 @@ DEF_FUNC namespace_repr, NR_FRAME
     mov qword [rbp - NR_IDX], 0
     mov qword [rbp - NR_COUNT], 0
 
+    ; A namespace can hold itself, and this walked into it for ever.  The
+    ; recursion stack the container reprs share is what stops it, and CPython
+    ; prints the same marker whatever the type is called.
+    extern repr_check_active
+    extern repr_push
+    extern repr_pop
+    call repr_check_active
+    test eax, eax
+    jnz .nr_recursive
+    mov rdi, [rbp - NR_SELF]
+    call repr_push
+
     lea rbx, [rbp - NR_BUF]
     xor r13d, r13d
-    CSTRING rsi, "namespace("
+    ; A SUBCLASS reprs under its own name -- `Sub(q=9)` -- while this type
+    ; itself is spelled "namespace" and not by its tp_name, which is
+    ; "types.SimpleNamespace".
+    mov rax, [rbp - NR_SELF]
+    mov rax, [rax + PyObject.ob_type]
+    lea rcx, [rel namespace_type]
+    cmp rax, rcx
+    je .nr_own_name
+    mov rsi, [rax + PyTypeObject.tp_name]
+    jmp .nr_prefix
+.nr_own_name:
+    CSTRING rsi, "namespace"
 .nr_prefix:
     movzx eax, byte [rsi]
     test al, al
-    jz .nr_setup
+    jz .nr_open_paren
     inc rsi
     mov [rbx + r13], al
     inc r13
     jmp .nr_prefix
+.nr_open_paren:
+    mov byte [rbx + r13], '('
+    inc r13
+    jmp .nr_setup
+
+.nr_recursive:
+    lea rdi, [rel nr_recursive_str]
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    mov edx, TAG_PTR
+    pop r13
+    pop rbx
+    leave
+    ret
 
 .nr_setup:
     mov rax, [rbp - NR_SELF]
@@ -701,6 +905,7 @@ DEF_FUNC namespace_repr, NR_FRAME
 .nr_close:
     mov byte [rbx + r13], ')'
     inc r13
+    call repr_pop
     mov rdi, rbx
     mov rsi, r13
     call str_new_heap
@@ -710,6 +915,64 @@ DEF_FUNC namespace_repr, NR_FRAME
     leave
     ret
 END_FUNC namespace_repr
+
+section .rodata
+nr_recursive_str: db "namespace(...)", 0
+section .text
+
+;; ============================================================================
+;; namespace_richcompare(rdi = left Value, rsi = right Value, edx = op,
+;;                       rcx = left tag, r8 = right tag)
+;;   -> rax = Value (True/False), or NULL for NotImplemented
+;;
+;; Two namespaces are equal when their contents are, which is what makes
+;; SimpleNamespace usable as a record.  There was no tp_richcompare at all, so
+;; `SN(x=1) == SN(x=1)` fell through to identity and answered False.  CPython
+;; requires BOTH to be namespaces -- a subclass counts -- and then asks the
+;; two dicts.
+;; ============================================================================
+extern type_is_subtype
+extern dict_richcompare
+NRC_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC namespace_richcompare, NRC_FRAME
+    V_UNPACK rdi, rcx
+    V_UNPACK rsi, r8
+    cmp edx, 2                  ; PY_EQ
+    je .nrc_op_ok
+    cmp edx, 3                  ; PY_NE
+    jne .nrc_notimpl
+.nrc_op_ok:
+    cmp r8d, TAG_PTR
+    jne .nrc_notimpl
+    test rsi, rsi
+    jz .nrc_notimpl
+
+    push rdi
+    push rsi
+    push rdx
+    push rdx                    ; and a pad: the call below stays aligned
+    mov rdi, [rsi + PyObject.ob_type]
+    lea rsi, [rel namespace_type]
+    call type_is_subtype
+    pop rdx
+    pop rdx
+    pop rsi
+    pop rdi
+    test eax, eax
+    jz .nrc_notimpl
+
+    mov rdi, [rdi + PySimpleNamespaceObject.ns_dict]
+    mov rsi, [rsi + PySimpleNamespaceObject.ns_dict]
+    mov ecx, TAG_PTR
+    mov r8d, TAG_PTR
+    leave
+    jmp dict_richcompare        ; a pointer is its own Value
+
+.nrc_notimpl:
+    RET_NULL
+    leave
+    ret
+END_FUNC namespace_richcompare
 
 section .data
 
@@ -730,11 +993,11 @@ namespace_type:
     dq 0                            ; tp_call
     dq namespace_getattr            ; tp_getattr
     dq namespace_setattr            ; tp_setattr
-    dq 0                            ; tp_richcompare
+    dq namespace_richcompare        ; tp_richcompare
     dq 0                            ; tp_iter
     dq 0                            ; tp_iternext
     dq 0                            ; tp_init
-    dq 0                            ; tp_new
+    dq namespace_type_call          ; tp_new  (constructor)
     dq 0                            ; tp_as_number
     dq 0                            ; tp_as_sequence
     dq 0                            ; tp_as_mapping
