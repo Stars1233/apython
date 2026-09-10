@@ -33,8 +33,14 @@ extern func_getattr
 extern func_type
 extern builtin_func_type
 extern type_type
+extern kw_names_pending
+extern none_singleton
+extern exc_TypeError_type
+extern raise_exception
+extern raise_type_error_counted
 
 global method_new
+global method_construct
 global method_type
 global method_traverse
 global method_clear
@@ -79,6 +85,85 @@ DEF_FUNC method_new
     leave
     ret
 END_FUNC method_new
+
+;; ============================================================================
+;; method_construct(rdi = the class, rsi = args, rdx = nargs)
+;;   -> rax = the bound method, edx = TAG_PTR
+;;
+;; tp_new for method_type -- `types.MethodType(func, obj)`.  There was none,
+;; so type_call fell through to .normal_type_call and TC_REFUSE_EXTRA_ARGS
+;; answered "method() takes no arguments" for every call; contextlib's
+;; `return MethodType(cm_exit, cm)` is the line that put twenty-four of
+;; CPython's test modules on the floor.
+;;
+;; The class is ignored rather than dispatched on: method_type carries
+;; TYPE_FLAG_FINAL, as CPython's does, so it can only ever be method_type.
+;; ============================================================================
+MTN_NARGS equ 8
+MTN_FRAME equ 24            ; + 1 push, 16-aligned
+DEF_FUNC method_construct, MTN_FRAME
+    push rbx
+    mov rbx, rsi                ; args
+    mov [rbp - MTN_NARGS], rdx
+
+    ; Keyword values arrive in the same array with their names in
+    ; kw_names_pending, so a bare arity check would count them as positional.
+    ; CPython's method_new refuses them outright, and so does this.
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jnz .mtn_kwargs
+
+    cmp rdx, 2
+    jne .mtn_arity
+
+    mov rdi, [rbx]              ; args[0], the function
+    V_TEST_PTR rdi, rax
+    ja .mtn_not_callable        ; an immediate has no tp_call to read
+    test rdi, rdi
+    jz .mtn_not_callable
+    mov rax, [rdi + PyObject.ob_type]
+    cmp qword [rax + PyTypeObject.tp_call], 0
+    je .mtn_not_callable
+
+    ; self is a Value: binding to an immediate int is legitimate, and
+    ; method_new's INCREF_V is already written for it.  None is not -- CPython
+    ; names it, because `MethodType(f, None)` is how an unbound method used to
+    ; be spelled and silence there would be a trap.
+    mov rsi, [rbx + 8]
+    test rsi, rsi
+    jz .mtn_none
+    lea rax, [rel none_singleton]
+    cmp rsi, rax
+    je .mtn_none
+
+    call method_new
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+
+.mtn_kwargs:
+    mov qword [rel kw_names_pending], 0   ; consumed, however this ends
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "method() takes no keyword arguments"
+    call raise_exception
+
+.mtn_arity:
+    mov rsi, [rbp - MTN_NARGS]
+    CSTRING rdi, "method expected 2 arguments, got "
+    xor edx, edx
+    jmp raise_type_error_counted
+
+.mtn_not_callable:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "first argument must be callable"
+    call raise_exception
+
+.mtn_none:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "instance must not be None"
+    call raise_exception
+END_FUNC method_construct
 
 ;; ============================================================================
 ;; method_call(self_method, args, nargs) -> rax = Value
@@ -671,14 +756,14 @@ method_type:
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
-    dq 0                        ; tp_new
+    dq method_construct         ; tp_new
     dq 0                        ; tp_as_number
     dq 0                        ; tp_as_sequence
     dq 0                        ; tp_as_mapping
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_FINAL      ; tp_flags
     dq 0                        ; tp_bases
     dq method_traverse                        ; tp_traverse
     dq method_clear                        ; tp_clear
