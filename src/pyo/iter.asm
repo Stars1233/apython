@@ -438,8 +438,16 @@ DEF_FUNC_BARE range_iter_next
     ; Return current as SmallInt
     mov r8, rax
 
-    ; Advance: current += step
+    ; Advance: current += step.  A SIGNED overflow means the next value is
+    ; past anything an int64 holds, so the run is over -- where wrapping round
+    ; to the other end put current back below stop and started it again:
+    ; `range(2**63-2, 2**63-1, 2)` yielded for ever, and `range(1, 2, 2**63-1)`
+    ; answered [1, -2**63].  Saturating at stop makes the next call report
+    ; exhaustion, in either direction.
     add rax, rdx
+    jno .no_overflow
+    mov rax, rcx
+.no_overflow:
     mov [rdi + PyRangeIterObject.it_current], rax
 
     mov rax, r8
