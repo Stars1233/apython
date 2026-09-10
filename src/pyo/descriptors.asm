@@ -2121,6 +2121,28 @@ DEF_FUNC classmethod_dunder_get, 8            ; 1 pushes, so rsp is 16-aligned
     mov rbx, [rbx + PyClassMethodObject.cm_callable]
     test rbx, rbx
     jz .cmg_none
+    ; classmethod() takes anything, callable or not -- CPython's own test_descr
+    ; builds classmethod(1) on purpose -- and a non-pointer cannot be bound:
+    ; method_new would INCREF an immediate.  Hand it back as it is; calling
+    ; what comes out is the same TypeError either way.
+    V_TEST_PTR rbx, rax
+    ja .cmg_plain
+
+    ; With neither an instance nor an owner there is nothing to bind to, and
+    ; the __get__ wrapper says so before the descriptor's own code runs --
+    ; CPython's wrap_descr_get maps both Nones to NULL and refuses the pair.
+    cmp rsi, 2
+    jl .cmg_pair_ok             ; no instance argument at all
+    mov rax, [rdi + 8]
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    jne .cmg_pair_ok
+    cmp rsi, 3
+    jl .cmg_bad_pair
+    mov rax, [rdi + 16]
+    cmp rax, rcx
+    je .cmg_bad_pair
+.cmg_pair_ok:
 
     ; The owner type, or the instance's type when only an instance is given.
     xor edx, edx
@@ -2140,10 +2162,22 @@ DEF_FUNC classmethod_dunder_get, 8            ; 1 pushes, so rsp is 16-aligned
     je .cmg_plain
     test rdx, rdx
     jz .cmg_plain
-    mov rdx, [rdx + PyObject.ob_type]
+    ; The instance is a Value, not a pointer: `classmethod(f).__get__(0)`
+    ; binds to int, and reading ob_type off the immediate dereferenced the
+    ; NUMBER.  value_type is the one place that knows all three encodings.
+    ; args is not needed past here -- rbx holds the callable -- so rdi is
+    ; free to carry the argument.
+    extern value_type
+    mov rdi, rdx
+    call value_type
+    mov rdx, rax
 .cmg_have_owner:
     test rdx, rdx
     jz .cmg_plain
+    ; And the owner has to be a pointer for the same reason: `__get__(0, 5)`
+    ; would otherwise hand method_new an immediate to hold.
+    V_TEST_PTR rdx, rax
+    ja .cmg_plain
     mov rdi, rbx
     mov rsi, rdx
     call method_new
@@ -2152,10 +2186,12 @@ DEF_FUNC classmethod_dunder_get, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 .cmg_plain:
     mov rax, rbx
-    INCREF rax
+    INCREF_V rax, rcx
     pop rbx
     leave
     ret
+.cmg_bad_pair:
+    RAISE exc_TypeError_type, "__get__(None, None) is invalid"
 .cmg_none:
     lea rax, [rel none_singleton]
     INCREF rax

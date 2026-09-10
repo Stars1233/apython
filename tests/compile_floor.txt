@@ -162,6 +162,7 @@ test_del_resurrect
 test_deopt_extended_arg
 test_deque
 test_descr_func_attr
+test_descr_get_immediate
 test_descriptor_class_access
 test_descriptor_receiver
 test_descriptors
