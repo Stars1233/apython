@@ -662,9 +662,22 @@ DEF_FUNC instance_dealloc, ID_FRAME
     mov rdi, [rbx + PyDictObject.entries]
     test rdi, rdi
     jz .id_no_storage
+    ; Not the shared empty table, which lives in .rodata and belongs to no
+    ; set: `S().clear()` installs it, and freeing it handed free() a static
+    ; address -- "free(): invalid pointer", and the process aborted.
+    ; set_dealloc has this check; instance_dealloc, which is what runs for a
+    ; SUBCLASS of set, did not.  The dict arm above says the same thing.
+    extern set_empty_entries
+    lea rax, [rel set_empty_entries]
+    cmp rdi, rax
+    je .id_set_shared
     mov qword [rbx + PyDictObject.entries], 0
     mov qword [rbx + PyDictObject.capacity], 0
     call ap_free
+    jmp .id_no_storage
+.id_set_shared:
+    mov qword [rbx + PyDictObject.entries], 0
+    mov qword [rbx + PyDictObject.capacity], 0
 
 .id_no_storage:
 
