@@ -74,6 +74,27 @@ else
     ERRORS="$ERRORS compiler-lint"
 fi
 
+# Every call into GMP, checked in the BINARY rather than in the source: the
+# probe breaks on each one under gdb and reads rsp.  It is here and not in
+# lint.py because NASM macros hide both pushes and branches from any
+# source-level check -- INT_NEED_MPZ expands to a `push rdi` around a call.
+# Skips where gdb is absent, which is why lint.py's own check still matters.
+printf "%-40s " "gmp call alignment"
+if bash "$TESTDIR/gmp_align_probe.sh" > "$WORK/gmpalign.out" 2>&1; then
+    if grep -q "SKIP" "$WORK/gmpalign.out"; then
+        printf "${YELLOW}SKIP${NC} %s\n" "$(cat "$WORK/gmpalign.out")"
+        SKIP=$((SKIP + 1))
+    else
+        printf "${GREEN}PASS${NC}\n"
+        PASS=$((PASS + 1))
+    fi
+else
+    printf "${RED}FAIL${NC}\n"
+    cat "$WORK/gmpalign.out"
+    FAIL=$((FAIL + 1))
+    ERRORS="$ERRORS gmp-alignment"
+fi
+
 # Source-compiler self-test: checks the compiler's encoders directly, against
 # the decoders the interpreter will actually use.  Runs before any Python-level
 # test, because an encoding bug produces symptoms that look nothing like their

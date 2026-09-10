@@ -38,32 +38,38 @@ reasoning that chose them and what changing one would cost.
   LENGTH is not a control -- build the comparison at a path of the same
   length, or the answer is about the path.
 
-- **Eighty-five calls into GMP are still made with a misaligned stack.**
-  The SysV ABI wants `rsp % 16 == 0` at a `call`, and glibc's float paths do
-  use aligned SSE.  7593761 fixed the three worst offenders and took a bignum
-  workload from 337 misaligned GMP calls to 85; these are what is left.
+- **Calls made with a misaligned stack, everywhere except the paths into
+  GMP.**  The SysV ABI wants `rsp % 16 == 0` at a `call`, and glibc's float
+  paths and GMP both use aligned SSE.  Every call into GMP is now made
+  aligned, and `tests/gmp_align_probe.sh` is the gate: it breaks on every GMP
+  call site in the built binary under gdb and reads rsp at each.  The
+  same class is still there outside that reach, and three shapes of it are
+  measured rather than guessed:
 
-  All of them sit just after an `INT_NEED_MPZ` expansion inside a
-  `DEF_FUNC_BARE` body: `__gmpz_cmp_si` from `int_floordiv` (src/pyo/int.asm
-  around the `.done` of the macro before the compare) and from `int_mod`
-  take 83 of the 85, with one `__gmpz_init` and one `__gmpz_fdiv_r` from
-  `int_compare`.
+  `INT_NEED_MPZ` expands to `push rdi` / `call int_promote_mpz` / `pop rdi`,
+  so every one of its expansions calls at the wrong parity -- all 1,261 in a
+  bignum workload.  It is harmless today only because `int_promote_mpz` saves
+  rsp and `and`s it, which is the reason its own GMP call never showed.
 
-  It is not a one-line fix, and that is the point.  These functions reach
-  their calls at DIFFERENT PARITIES ON DIFFERENT PATHS -- some arms push an
-  odd number of registers before branching in -- so no correction at the call
-  site is right for all of them, and a comment claiming one would be wrong
-  half the time.  The fix is to give each of them a real frame, the way
-  `int_promote_mpz` now saves rsp and `and`s it, rather than to keep counting
-  pushes.  `lint.py` cannot help: `check_alignment` exempts `DEF_FUNC_BARE`
-  because it has no frame to reason about, and it counts only the pushes that
-  precede the first non-push instruction, so mid-body pushes are invisible to
-  it in every function.
+  `V_PACK`'s cold path is called AFTER `leave` in every function that packs
+  its return value on the way out, so it runs at the caller's parity rather
+  than the function's -- eight bytes out.
 
-  Reproduce it by breaking on every `call *@plt` to a GMP entry in the
-  disassembly and printing `((long)$rsp) % 16` -- that is how these were
-  found, and it is the only sound way, because NASM macros hide both pushes
-  and branches from any source-level check.
+  And the propagation: `obj_richcompare_bool` is entered misaligned by
+  `dict_lookup`, which is entered misaligned by `dict_set` and by a dozen
+  module-init callers, and everything under any of them inherits it.
+
+  Neither `lint.py` nor any other source-level check can find these.
+  `check_alignment` counts only the pushes before the first non-push
+  instruction, exempts `DEF_FUNC_BARE` entirely, and cannot see inside a NASM
+  macro -- which hides both pushes and branches.  A source-level detector
+  written for exactly this produced twenty-two false positives and was thrown
+  away.  What works is a CFG walk over the DISASSEMBLY, tracking rsp's offset
+  from entry: objdump sees the macros expanded.  The one thing such a walk
+  needs told is entry parity, because an opcode handler is reached by `jmp`
+  from the dispatch table and is entered at the opposite parity from a
+  function reached by `call` -- assume the wrong one and every handler in the
+  tree reports as broken.
 
 - **A set or frozenset SUBCLASS is not treated as a set by `update` or by
   the comparisons.**  CPython asks `PyAnySet_Check`, which is a subtype test;
