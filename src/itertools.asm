@@ -1042,31 +1042,16 @@ DEF_FUNC_LOCAL zip_iternext, 8            ; 5 pushes, so rsp is 16-aligned
     ret
 
 .zip_partial_cleanup:
-    ; One iterator exhausted at index r15.
-    ; DECREF items already stored in tuple, then free tuple.
-    xor ecx, ecx
-.zip_cleanup_loop:
-    cmp rcx, r15
-    jge .zip_free_tuple
-    push rcx
-    mov r8, [r14 + PyTupleObject.ob_item]
-    mov rdi, [r8 + rcx*8]
-    DECREF_V rdi, rsi
-    pop rcx
-    inc rcx
-    jmp .zip_cleanup_loop
-
-.zip_free_tuple:
-    ; Zero out remaining items to avoid double-free in tuple_dealloc
-    mov rcx, r15
-.zip_zero_loop:
-    cmp rcx, r12
-    jge .zip_do_free
-    mov r8, [r14 + PyTupleObject.ob_item]
-    mov qword [r8 + rcx*8], 0
-    inc rcx
-    jmp .zip_zero_loop
-.zip_do_free:
+    ; One iterator exhausted at index r15, so slots 0..r15-1 hold this round's
+    ; items and the rest are still the zeros tuple_new left.  Releasing the
+    ; tuple is the whole cleanup: tuple_dealloc walks those same slots and
+    ; DECREF_Vs each, and a NULL is a no-op there.
+    ;
+    ; This used to DECREF 0..r15-1 by hand FIRST and then release the tuple,
+    ; which released each of them twice -- so every element of a longer
+    ; iterable that landed in the last, incomplete round lost a reference it
+    ; still had.  It needs the SECOND iterable to be the short one to bite:
+    ; with the first exhausted, nothing has been stored yet.
     mov rdi, r14
     call obj_decref
 
