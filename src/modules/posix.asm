@@ -3105,6 +3105,9 @@ DEF_FUNC posix_module_create, 40
     MODULE_ADD_FUNC posix_lstat, pm_n_lstat
     MODULE_ADD_FUNC posix_fstat, pm_n_fstat
     MODULE_ADD_FUNC posix_listdir, pm_n_listdir
+    extern posixproc_register_env
+    mov rdi, r12
+    call posixproc_register_env ; putenv and unsetenv, from posixproc.asm
     extern posixdir_register
     mov rdi, r12
     call posixdir_register      ; scandir and DirEntry, from posixdir.asm

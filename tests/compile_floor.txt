@@ -420,6 +420,7 @@ test_posix_files
 test_posix_more
 test_posix_pathlike
 test_posix_process
+test_posix_putenv
 test_posix
 test_posix_scandir
 test_pow_dunder

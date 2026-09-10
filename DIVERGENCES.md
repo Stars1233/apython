@@ -51,6 +51,12 @@ the reasoning rather than from scratch.
   family.  `_have_functions` is an empty list, which is the honest answer --
   no `dir_fd=` support -- and os.py reads it to build `supports_dir_fd`.
 
+  `putenv` and `unsetenv` were on it too, and are not: `os.environ`'s
+  `__setitem__` and `__delitem__` call them, so `os.environ["X"] = "1"` was a
+  NameError -- and the setUp of CPython's test_argparse does exactly that on
+  every one of its four hundred tests.  They are libc's setenv and unsetenv,
+  because there is no syscall for the process environment.
+
   `scandir` and `DirEntry` were on this list and are not any more.  Calling
   their absence deliberate had stopped being true: `os.walk` reaches for
   `scandir` and nothing else, and through it so do `shutil`, `glob`,
