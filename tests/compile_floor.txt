@@ -391,6 +391,7 @@ test_metaclass_resolution
 test_method_equality
 test_method_hostile
 test_method_load_unbound
+test_method_repr_callables
 test_methods
 test_method_type
 test_misc_ops
