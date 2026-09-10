@@ -1074,12 +1074,22 @@ extern dunder_call
 extern exc_MemoryError_type
 extern set_exception
 extern sub_list_for_type
+extern c_recursion_depth
+extern recursion_limit
 
 global slot_tp_call
 DEF_FUNC slot_tp_call, STC_FRAME
     push rbx
     push r12
     push r13
+
+    ; `A.__call__ = A()` makes calling an A reach this again through the
+    ; instance's own __call__, and again, with no Python frame anywhere in the
+    ; chain -- so recursion_depth never moved and the machine stack simply ran
+    ; out.  CPython raises RecursionError here (Py_EnterRecursiveCall in
+    ; slot_tp_call), and its test_class has a test for exactly this.  The
+    ; counter is the C one, reset wholesale by eval_exception_unwind.
+    C_RECURSION_ENTER .stc_overflow
 
     mov [rbp - STC_SELF], rdi
     mov rbx, rsi                ; args
@@ -1139,7 +1149,18 @@ DEF_FUNC slot_tp_call, STC_FRAME
     call ap_free
 
 .stc_return:
+    C_RECURSION_LEAVE
     mov rax, rbx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.stc_overflow:
+    extern exc_RecursionError_type
+    SET_EXC exc_RecursionError_type, "maximum recursion depth exceeded"
+    RET_NULL
     pop r13
     pop r12
     pop rbx
@@ -1177,6 +1198,7 @@ DEF_FUNC slot_tp_call, STC_FRAME
     jz .stc_fail_ret
     call ap_free
 .stc_fail_ret:
+    C_RECURSION_LEAVE
     RET_NULL
     pop r13
     pop r12

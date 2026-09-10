@@ -72,6 +72,7 @@ test_call_arg_ownership
 test_call_ex
 test_call_instance
 test_call_kwargs_errors
+test_call_recursion
 test_call_spec
 test_classcell_not_a_cell
 test_classes
@@ -486,6 +487,7 @@ test_set_value_probe
 test_set_variadic
 test_signal
 test_simplenamespace
+test_singleton_construct
 test_size_and_recursion_limits
 test_slice_and_star_args
 test_slice_assign
