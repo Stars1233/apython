@@ -1460,6 +1460,7 @@ GC_DEBUG_LEAK          equ GC_DEBUG_COLLECTABLE | GC_DEBUG_UNCOLLECTABLE | GC_DE
 
 ; GC state bits stored in low 2 bits of gc_prev
 GC_PREV_MASK_COLLECTING equ 1     ; object is in unreachable set
+GC_PREV_MASK_FINALIZED  equ 2     ; __del__ has already run on this object
 GC_PREV_SHIFT           equ 2     ; gc_refs stored in bits 2+
 GC_PREV_MASK            equ ~3    ; mask to extract prev pointer (clear low 2 bits)
 

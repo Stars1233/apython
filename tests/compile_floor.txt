@@ -249,6 +249,7 @@ test_func_dunder_get
 test_function_attrs
 test_functions
 test_future_import
+test_gc_finalizer_order
 test_gc_generations
 test_gc_module
 test_gen_adv

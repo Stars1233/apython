@@ -283,25 +283,26 @@ END_FUNC ts_imm_append
 ;; Deallocate an instance: DECREF inst_dict, DECREF ob_type, free self.
 ;; rdi = instance
 ;; ============================================================================
-ID_EXC   equ 8
-ID_OWNED equ 16          ; whether the reference below is ours to drop
-ID_FRAME equ 24             ; + 1 push = 32
-DEF_FUNC instance_dealloc, ID_FRAME
+
+;; ============================================================================
+;; obj_call_finalizer(rdi = obj) -> void
+;;
+;; CPython's PyObject_CallFinalizer: run __del__ once, with the object held
+;; alive for the duration and the pending exception put back the way it was.
+;;
+;; It is a function of its own because the COLLECTOR calls it too.  PEP 442
+;; says the finalizers of an unreachable cycle all run before any of it is
+;; cleared -- otherwise __del__ is handed an object whose attributes have
+;; already been dropped, and anything it resurrects has been freed underneath
+;; the reference it was just given.  The caller is what decides "once": the
+;; FINALIZED bit in the object's GC head.
+;; ============================================================================
+OCF_EXC   equ 8
+OCF_OWNED equ 16          ; whether the reference below is ours to drop
+OCF_FRAME equ 24          ; + 1 push = 32
+DEF_FUNC obj_call_finalizer, OCF_FRAME
     push rbx
-
-    mov rbx, rdi                ; rbx = self
-
-    ; Does this class have a __del__ at all?  One bit, maintained by
-    ; type_refresh_attr_flags down every subclass, instead of the MRO walk and
-    ; a dict probe per entry that dunder_call_1 does -- which ran on EVERY
-    ; heaptype instance that died, to discover that almost none of them has
-    ; one.  Callgrind put that at 23.9% of a `class C: pass` construction loop.
-    ; TYPE_FLAG_HAS_DEL is only ever set on a heaptype, so it implies the
-    ; heaptype test the check used to make.
-    mov rax, [rbx + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_flags]
-    test rax, TYPE_FLAG_HAS_DEL
-    jz .no_del
+    mov rbx, rdi
 
     ; Temporarily bump refcount to prevent re-entrant dealloc during __del__
     inc qword [rbx + PyObject.ob_refcnt]
@@ -312,9 +313,9 @@ DEF_FUNC instance_dealloc, ID_FRAME
     ; Snapshot what was pending, and hold a reference to it: if __del__ raises,
     ; installing its exception releases the global's reference to this one, and
     ; the saved pointer would be dangling by the time it is put back.
-    DUNDER_EXC_SAVE [rbp - ID_EXC]
-    mov qword [rbp - ID_OWNED], 0
-    mov rdi, [rbp - ID_EXC]
+    DUNDER_EXC_SAVE [rbp - OCF_EXC]
+    mov qword [rbp - OCF_OWNED], 0
+    mov rdi, [rbp - OCF_EXC]
     test rdi, rdi
     jz .del_nothing_pending
     ; ...but only when the global's own reference is real.  The unwinder can
@@ -332,7 +333,7 @@ DEF_FUNC instance_dealloc, ID_FRAME
     cmp qword [rdi + PyObject.ob_refcnt], 0
     jle .del_nothing_pending
     call obj_incref
-    mov qword [rbp - ID_OWNED], 1
+    mov qword [rbp - OCF_OWNED], 1
 .del_nothing_pending:
     mov rdi, rbx
     lea rsi, [rel dunder_del]
@@ -357,13 +358,13 @@ DEF_FUNC instance_dealloc, ID_FRAME
     ; then zeroed the global -- destroying the exception the interpreter was
     ; carrying, so that a __del__ running during an unwind made the enclosing
     ; except block never run.
-    EXC_RAISED_SINCE [rbp - ID_EXC], rax, .del_report
+    EXC_RAISED_SINCE [rbp - OCF_EXC], rax, .del_report
 
 .del_restore:
     ; Whatever __del__ left behind, the pending exception goes back to what it
     ; was.  The reference taken above is what the global gets; anything else
     ; sitting there is released.
-    mov rax, [rbp - ID_EXC]
+    mov rax, [rbp - OCF_EXC]
     cmp [rel current_exception], rax
     je .del_drop_saved
     mov rdi, [rel current_exception]
@@ -374,7 +375,7 @@ DEF_FUNC instance_dealloc, ID_FRAME
     jmp .del_cleared
 .del_drop_saved:
     ; Unchanged, so the global still owns its own; drop the extra one.
-    cmp qword [rbp - ID_OWNED], 0
+    cmp qword [rbp - OCF_OWNED], 0
     je .del_cleared
     mov rdi, rax
     test rdi, rdi
@@ -383,10 +384,14 @@ DEF_FUNC instance_dealloc, ID_FRAME
 
 .del_cleared:
 
-    ; Restore refcount (undo the bump)
+    ; Restore refcount (undo the bump).  It cannot reach zero: the caller is
+    ; either mid-dealloc and holds the object at zero already, or the
+    ; collector, which found it in a cycle.
     dec qword [rbx + PyObject.ob_refcnt]
 
-    jmp .no_del
+    pop rbx
+    leave
+    ret
 
 .del_report:
     ; A genuinely new exception: report it in full on stderr -- the object it
@@ -407,6 +412,46 @@ DEF_FUNC instance_dealloc, ID_FRAME
     extern traceback_print_unraisable
     call traceback_print_unraisable
     jmp .del_restore
+END_FUNC obj_call_finalizer
+
+ID_EXC   equ 8
+ID_OWNED equ 16          ; whether the reference below is ours to drop
+ID_FRAME equ 24             ; + 1 push = 32
+DEF_FUNC instance_dealloc, ID_FRAME
+    push rbx
+
+    mov rbx, rdi                ; rbx = self
+
+    ; Does this class have a __del__ at all?  One bit, maintained by
+    ; type_refresh_attr_flags down every subclass, instead of the MRO walk and
+    ; a dict probe per entry that dunder_call_1 does -- which ran on EVERY
+    ; heaptype instance that died, to discover that almost none of them has
+    ; one.  Callgrind put that at 23.9% of a `class C: pass` construction loop.
+    ; TYPE_FLAG_HAS_DEL is only ever set on a heaptype, so it implies the
+    ; heaptype test the check used to make.
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_HAS_DEL
+    jz .no_del
+
+    ; PEP 442 says a finalizer runs at most once, and the collector may have
+    ; run this one already -- it finalizes a whole unreachable cycle before it
+    ; clears any of it.  The bit lives in the GC head, so it is only there to
+    ; read while the object is still tracked, which it is: gc_untrack happens
+    ; further down, inside gc_dealloc.
+    mov rax, [rbx + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .del_do_call
+    cmp qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_next], 0
+    je .del_do_call                 ; untracked: no bit to read
+    test qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_prev], GC_PREV_MASK_FINALIZED
+    jnz .no_del
+    or qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_prev], GC_PREV_MASK_FINALIZED
+
+.del_do_call:
+    extern obj_call_finalizer
+    mov rdi, rbx
+    call obj_call_finalizer
 
 .no_del:
     ; Check if this is an int subclass — XDECREF int_value (tag-aware)

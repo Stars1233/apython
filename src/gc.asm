@@ -507,8 +507,10 @@ section .text
 GCG_GEN     equ 8
 GCG_YOUNG   equ 24    ; 16-byte PyGC_Head sentinel on stack (next+prev)
 GCG_UNREACH equ 40    ; 16-byte PyGC_Head sentinel on stack
+GCG_RANFIN  equ 48    ; did any finalizer actually run this pass?
 GCG_FOUND   equ 56    ; how many unreachable objects this pass cleared
-GCG_FRAME   equ 72            ; + 5 pushes = 112, 16-aligned
+GCG_SEEN    equ 72    ; 16-byte PyGC_Head sentinel, the finalize phase's
+GCG_FRAME   equ 88            ; + 5 pushes = 128, 16-aligned
 
 global gc_collect_gen
 DEF_FUNC gc_collect_gen, GCG_FRAME
@@ -520,6 +522,7 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
 
     mov [rbp - GCG_GEN], edi    ; save generation
     mov qword [rbp - GCG_FOUND], 0
+    mov qword [rbp - GCG_RANFIN], 0
 
     ; Set collecting flag
     mov qword [rel gc_collecting], 1
@@ -582,6 +585,14 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     ; list was silently corrupt until something tried to unlink through it.
     shl rcx, GC_PREV_SHIFT
     or rcx, GC_PREV_MASK_COLLECTING
+    ; FINALIZED is not this collection's business and must outlive it: it says
+    ; __del__ has already run, ever.  Overwriting the whole word here dropped
+    ; it, so an object resurrected by its own finalizer and collected again
+    ; later had __del__ run a second time.  CPython's gc_reset_refs keeps the
+    ; same bit for the same reason.
+    mov rdx, [rbx + PyGC_Head.gc_prev]
+    and rdx, GC_PREV_MASK_FINALIZED
+    or rcx, rdx
     mov [rbx + PyGC_Head.gc_prev], rcx
 
     mov rbx, [rbx + PyGC_Head.gc_next]
@@ -631,6 +642,8 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
 
     ; Check gc_refs (stored in gc_prev high bits from phase 1)
     mov rax, [rbx + PyGC_Head.gc_prev]
+    mov rdx, rax
+    and rdx, GC_PREV_MASK_FINALIZED  ; carried across both rewrites below
     shr rax, GC_PREV_SHIFT     ; gc_refs
     test rax, rax
     jnz .phase3_keep           ; gc_refs > 0 — tentatively reachable
@@ -647,13 +660,17 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     ; Mark as collecting (set bit in gc_prev)
     mov rax, [rbx + PyGC_Head.gc_prev]
     or rax, GC_PREV_MASK_COLLECTING
+    or rax, rdx                ; and whatever FINALIZED said
     mov [rbx + PyGC_Head.gc_prev], rax
 
     jmp .phase3_next
 
 .phase3_keep:
-    ; Reachable: restore gc_prev to point to prev node
-    mov [rbx + PyGC_Head.gc_prev], r14
+    ; Reachable: restore gc_prev to point to prev node.  Every reader of a
+    ; prev pointer masks the low two bits off, so FINALIZED rides along in it.
+    mov rax, r14
+    or rax, rdx
+    mov [rbx + PyGC_Head.gc_prev], rax
     mov r14, rbx               ; update prev
 
 .phase3_next:
@@ -690,6 +707,185 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     mov rbx, [rbx + PyGC_Head.gc_next]
     jmp .phase4_loop
 .phase4_done:
+
+    ; ---- Phase 4.5: run the finalizers, before anything is cleared --------
+    ; PEP 442.  Every unreachable object with a __del__ gets it called, once,
+    ; while the cycle it is part of is still intact.  Letting phase 5's
+    ; tp_clear drop the last reference and reach __del__ that way, which is
+    ; what happened before, hands the finalizer an object whose attributes
+    ; have already been dropped -- and then frees whatever it resurrected,
+    ; underneath the reference it was just given.
+    ;
+    ; Each object moves to `seen` BEFORE its finalizer runs and the head is
+    ; re-read every turn, because a __del__ can break a cycle and free other
+    ; members of this very list.  The state bits are carried across the move
+    ; by hand: gc_list_append writes a clean prev pointer.
+    lea r13, [rbp - GCG_SEEN]
+    mov [r13 + PyGC_Head.gc_next], r13
+    mov [r13 + PyGC_Head.gc_prev], r13
+
+.finalize_loop:
+    mov rbx, [r15 + PyGC_Head.gc_next]
+    cmp rbx, r15
+    je .finalize_done
+
+    mov r14, [rbx + PyGC_Head.gc_prev]
+    and r14, ~GC_PREV_MASK          ; the state bits, kept across the move
+    mov rdi, rbx
+    call gc_list_remove
+    mov rdi, rbx
+    mov rsi, r13
+    call gc_list_append
+    or [rbx + PyGC_Head.gc_prev], r14
+
+    test r14, GC_PREV_MASK_FINALIZED
+    jnz .finalize_loop              ; an earlier collection already ran it
+
+    lea rdi, [rbx + GC_HEAD_SIZE]
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAS_DEL
+    jz .finalize_loop
+
+    or qword [rbx + PyGC_Head.gc_prev], GC_PREV_MASK_FINALIZED
+    mov qword [rbp - GCG_RANFIN], 1
+    extern obj_call_finalizer
+    call obj_call_finalizer
+    jmp .finalize_loop
+
+.finalize_done:
+    ; Put the chain back.  gc_list_merge would rewrite the head node's gc_prev
+    ; and lose its state bits, and nothing can have been added to the
+    ; unreachable sentinel meanwhile, so the two just exchange chains.
+    mov rax, [r13 + PyGC_Head.gc_next]
+    cmp rax, r13
+    je .finalize_empty
+    mov rcx, [r13 + PyGC_Head.gc_prev]
+    and rcx, GC_PREV_MASK           ; tail
+    mov [r15 + PyGC_Head.gc_next], rax
+    mov [r15 + PyGC_Head.gc_prev], rcx
+    mov rdx, [rax + PyGC_Head.gc_prev]
+    and rdx, ~GC_PREV_MASK
+    or rdx, r15
+    mov [rax + PyGC_Head.gc_prev], rdx
+    mov [rcx + PyGC_Head.gc_next], r15
+    jmp .finalize_back
+.finalize_empty:
+    mov [r15 + PyGC_Head.gc_next], r15
+    mov [r15 + PyGC_Head.gc_prev], r15
+.finalize_back:
+
+    ; Nothing ran, so nothing can have been resurrected: skip the recount.
+    ; This is the ordinary case -- most programs have no __del__ anywhere --
+    ; and it keeps the collection at exactly the cost it had before.
+    cmp qword [rbp - GCG_RANFIN], 0
+    je .resurrect_done
+
+    ; ---- Phase 4.6: what the finalizers brought back ----------------------
+    ; A finalizer that stored `self` somewhere outside the cycle has given the
+    ; object a reference this set does not account for.  Recompute reachability
+    ; over the unreachable set alone, exactly as phases 1-4 did over the young
+    ; list: whatever still has no reference from outside stays unreachable, and
+    ; everything else -- and everything it holds -- goes back to be looked at
+    ; next time.
+    mov rbx, [r15 + PyGC_Head.gc_next]
+.res1_loop:
+    cmp rbx, r15
+    je .res1_done
+    lea rax, [rbx + GC_HEAD_SIZE]
+    mov rcx, [rax + PyObject.ob_refcnt]
+    shl rcx, GC_PREV_SHIFT
+    or rcx, GC_PREV_MASK_COLLECTING
+    mov rdx, [rbx + PyGC_Head.gc_prev]
+    and rdx, GC_PREV_MASK_FINALIZED ; a finalizer still runs at most once
+    or rcx, rdx
+    mov [rbx + PyGC_Head.gc_prev], rcx
+    mov rbx, [rbx + PyGC_Head.gc_next]
+    jmp .res1_loop
+.res1_done:
+
+    mov rbx, [r15 + PyGC_Head.gc_next]
+.res2_loop:
+    cmp rbx, r15
+    je .res2_done
+    lea r13, [rbx + GC_HEAD_SIZE]
+    mov rax, [r13 + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_traverse]
+    test rax, rax
+    jz .res2_next
+    push rbx
+    push rbx                        ; and a pad, so the call is 16-aligned
+    mov rdi, r13
+    lea r14, [rel gc_visit_decref]
+    call rax
+    pop rbx
+    pop rbx
+.res2_next:
+    mov rbx, [rbx + PyGC_Head.gc_next]
+    jmp .res2_loop
+.res2_done:
+
+    ; Sort the set: still unreachable back into the unreachable list, anything
+    ; with a reference from outside it into the young list.  Draining by
+    ; gc_next and re-appending is what rebuilds the prev pointers that the
+    ; recount above overwrote with gc_refs.
+    mov rbx, [r15 + PyGC_Head.gc_next]
+    mov [r15 + PyGC_Head.gc_next], r15
+    mov [r15 + PyGC_Head.gc_prev], r15
+.res3_loop:
+    cmp rbx, r15
+    je .res3_done
+    mov r13, [rbx + PyGC_Head.gc_next]      ; the original next
+    mov r14, [rbx + PyGC_Head.gc_prev]
+    mov rax, r14
+    shr rax, GC_PREV_SHIFT                  ; gc_refs
+    and r14, GC_PREV_MASK_FINALIZED         ; the bit to carry over
+    test rax, rax
+    jnz .res3_alive
+
+    mov rdi, rbx
+    mov rsi, r15
+    call gc_list_append
+    or r14, GC_PREV_MASK_COLLECTING
+    or [rbx + PyGC_Head.gc_prev], r14
+    jmp .res3_next
+
+.res3_alive:
+    ; Resurrected.  It joins the reachable set with the collecting bit clear,
+    ; and is promoted with the rest at the end of this collection.
+    mov rdi, rbx
+    mov rsi, r12
+    call gc_list_append
+    or [rbx + PyGC_Head.gc_prev], r14
+
+.res3_next:
+    mov rbx, r13
+    jmp .res3_loop
+.res3_done:
+
+    ; And whatever a resurrected object holds comes back with it.
+    mov [rel gc_reachable_sentinel], r12
+    mov rbx, [r12 + PyGC_Head.gc_next]
+.res4_loop:
+    cmp rbx, r12
+    je .res4_done
+    lea r13, [rbx + GC_HEAD_SIZE]
+    mov rax, [r13 + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_traverse]
+    test rax, rax
+    jz .res4_next
+    push rbx
+    push rbx                        ; and a pad, so the call is 16-aligned
+    mov rdi, r13
+    lea r14, [rel gc_visit_reachable]
+    call rax
+    pop rbx
+    pop rbx
+.res4_next:
+    mov rbx, [rbx + PyGC_Head.gc_next]
+    jmp .res4_loop
+.res4_done:
+
+.resurrect_done:
 
     ; ---- Count the unreachable set, before phase 5 starts freeing it ----
     ; This is the number gc.collect() answers with.  Counting inside phase 5
@@ -730,11 +926,14 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     lea rsi, [rbx + GC_HEAD_SIZE]
     mov rdi, [rel gc_garbage_list]
     call list_append
+    mov r14, [rbx + PyGC_Head.gc_prev]
+    and r14, GC_PREV_MASK_FINALIZED  ; kept; only COLLECTING is being cleared
     mov rdi, rbx
     call gc_list_remove
     mov rdi, rbx
     mov rsi, r12
     call gc_list_append
+    or [rbx + PyGC_Head.gc_prev], r14
     jmp .saveall_loop
 .saveall_done:
     jmp .phase5_done
@@ -766,13 +965,21 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     ; Still at the head?  Then clearing it did not take it out of the list,
     ; and the loop has to, or it never advances.  Survivors join the young
     ; list and are promoted with it; CPython moves them to `old` the same way.
+    ;
+    ; gc_list_append writes a clean prev pointer, which is what takes the
+    ; collecting bit off -- and it would take FINALIZED off with it, so a
+    ; survivor whose __del__ the finalize phase already ran would have it run
+    ; a second time on the way out.  That bit is carried over by hand.
     cmp qword [r15 + PyGC_Head.gc_next], rbx
     jne .phase5_drop
+    mov r14, [rbx + PyGC_Head.gc_prev]
+    and r14, GC_PREV_MASK_FINALIZED
     mov rdi, rbx
     call gc_list_remove
     mov rdi, rbx
     mov rsi, r12
     call gc_list_append
+    or [rbx + PyGC_Head.gc_prev], r14
 
 .phase5_drop:
     mov rdi, r13
@@ -908,7 +1115,9 @@ END_FUNC gc_visit_decref
 ;; gc_visit_reachable(rdi=obj)
 ;; Visit callback for Phase 4: if obj is in unreachable set, move to reachable
 ;; ============================================================================
-DEF_FUNC gc_visit_reachable, 8            ; 1 pushes, so rsp is 16-aligned
+GVR_FIN   equ 8            ; the FINALIZED bit, across the two list calls
+GVR_FRAME equ 24           ; + 1 push = 32, so rsp is 16-aligned
+DEF_FUNC gc_visit_reachable, GVR_FRAME
     push rbx
 
     ; Check if this object's type has HAVE_GC flag (non-GC objects have no GC head)
@@ -926,12 +1135,15 @@ DEF_FUNC gc_visit_reachable, 8            ; 1 pushes, so rsp is 16-aligned
     test rax, GC_PREV_MASK_COLLECTING
     jz .done                   ; not in unreachable — nothing to do
 
+    ; FINALIZED says __del__ has already run and outlives any one collection;
+    ; gc_list_append below writes a clean prev pointer, which is what takes
+    ; the collecting bit off and would take that one with it.
+    and rax, GC_PREV_MASK_FINALIZED
+    mov [rbp - GVR_FIN], rax
+
     ; Remove from unreachable list
     mov rdi, rbx
     call gc_list_remove
-
-    ; Clear collecting bit, set gc_refs to 1 (so phase 3 won't re-add)
-    mov qword [rbx + PyGC_Head.gc_prev], (1 << GC_PREV_SHIFT)
 
     ; Append to young/reachable list (r12 = young sentinel, set in gc_collect_gen)
     ; We use a global to pass the reachable list sentinel
@@ -939,6 +1151,8 @@ DEF_FUNC gc_visit_reachable, 8            ; 1 pushes, so rsp is 16-aligned
     lea rsi, [rel gc_reachable_sentinel]
     mov rsi, [rsi]
     call gc_list_append
+    mov rax, [rbp - GVR_FIN]
+    or [rbx + PyGC_Head.gc_prev], rax
 
 .done:
     pop rbx
