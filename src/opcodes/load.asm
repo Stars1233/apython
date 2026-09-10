@@ -230,11 +230,44 @@ DEF_FUNC_BARE op_load_name
     test rdi, rdi
     jz .try_globals
 
+    ; ...and it need not BE a dict: exec() takes any mapping, and a class body
+    ; runs in whatever __prepare__ returned.  Handing one of those to dict_get
+    ; probed the object's header as a hash table.
+    ;
+    ; A dict SUBCLASS keeps the direct read, where CPython's PyDict_CheckExact
+    ; sends it through PyObject_GetItem.  It cannot go the other way here: a
+    ; builtin __getitem__ reports a miss by RAISING, which in this tree is a
+    ; non-local jump into the unwinder, so the KeyError could not be absorbed
+    ; -- `class Enum(metaclass=EnumType)` died on `__name__`.  The cost is
+    ; that a dict subclass overriding __getitem__ is not consulted; bugs.md
+    ; carries it.
+    extern dict_type
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_DICT_TYPE rax, rdx, .locals_mapping
+
     ; Try locals first: dict_get(locals, name)
     mov rsi, [rsp]             ; rsi = name
     call dict_get
     test rax, rax               ; dict_get returns a Value, and 0 on a miss
     jnz .found
+    jmp .try_globals
+
+.locals_mapping:
+    mov rsi, [rsp]             ; rsi = name
+    extern mapping_getitem_opt
+    call mapping_getitem_opt
+    test rax, rax
+    jnz .found_owned
+    ; A miss RAISES for a mapping of its own, where a dict answers NULL.
+    ; CPython clears a KeyError and lets anything else through; clearing
+    ; whatever it was keeps the mapping's exception out of a name lookup that
+    ; then succeeds in globals or in builtins.
+    extern current_exception
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .try_globals
+    mov qword [rel current_exception], 0
+    call obj_decref
 
 .try_globals:
     ; Try globals: dict_get(globals, name)
@@ -257,6 +290,12 @@ DEF_FUNC_BARE op_load_name
     add rsp, 8                 ; the pad; this does not return
     call raise_name_not_defined
     ; (does not return)
+
+.found_owned:
+    ; mapping_getitem_opt already handed over a reference of its own.
+    add rsp, 16                ; discard saved name and the pad
+    VPUSH rax
+    DISPATCH
 
 .found:
     add rsp, 16                ; discard saved name and the pad

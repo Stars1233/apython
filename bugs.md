@@ -63,28 +63,24 @@ reasoning that chose them and what changing one would cost.
   function reached by `call` -- assume the wrong one and every handler in the
   tree reports as broken.
 
-- **A set or frozenset SUBCLASS is not treated as a set by `update` or by
-  the comparisons.**  CPython asks `PyAnySet_Check`, which is a subtype test;
-  three places here compare the type pointer against `set_type` and
-  `frozenset_type` exactly, and a subclass fails all three.
+- **A set or frozenset SUBCLASS is not treated as a set by `update`.**
+  CPython asks `PyAnySet_Check`, which is a subtype test; two places here
+  still compare the type pointer against `set_type` and `frozenset_type`
+  exactly, and a subclass fails both.  (`set_richcompare` was the third and
+  is fixed: it asks TYPE_FLAG_SET_SUBCLASS now.)
 
   `s.update(sub)` and `{*sub}` fall through to the generic iterator path, so
   a subclass that defines `__iter__` is asked -- CPython ignores it and reads
   the table, which is what makes `{*FS([1,2,3])}` `{1, 2, 3}` there and
-  `{99}` here.  `set_richcompare` returns NotImplemented for a subclass
-  operand, so `FS([1,2]) == FS([1,2])` is False (the identity fallback) and
-  `FS([1,2]) <= FS([1,2])` is a TypeError; a subclass is therefore unusable
-  as a dict key or a set member, because the lookup finds the right hash and
-  then decides the keys are unequal.  `set_contains`'s frozenset-for-a-set-
-  key arm is the third, and the mildest: `SubSet() in s` raises where CPython
-  answers False.
+  `{99}` here.  `set_contains`'s frozenset-for-a-set-key arm is the second,
+  and the milder: `SubSet() in s` raises where CPython answers False.
 
-  The fix is `type_is_subtype` in all three, and the reason it is not a
-  one-liner is the fourth site it implies: `set_coerce_operand` already
-  accepts a subclass through `REQUIRE_SET_TYPE`, so the method forms and the
-  operator forms currently disagree with each other as well as with CPython,
-  and the three exact-type tests have to move together with a test that
-  fixes the whole surface at once.
+  The fix is the flag test in both, and what makes it more than a one-liner
+  is the site it implies: `set_coerce_operand` already accepts a subclass
+  through `REQUIRE_SET_TYPE`, so the method forms and the operator forms
+  currently disagree with each other as well as with CPython, and the
+  remaining exact-type tests have to move together with a test that fixes the
+  whole surface at once.
 
 - **`except*` does not look inside a NESTED group, and a group publishes
   neither `split` nor `subgroup` nor `derive`.**  `except* KeyError` over
@@ -151,6 +147,39 @@ reasoning that chose them and what changing one would cost.
   argument's own kind through the getdents64 loop and building bytes objects
   on that side, which is the second half of every string-building step in
   `posix_scandir`.
+
+- **A raise from a C-level slot is a non-local jump, so a C caller cannot
+  absorb it.**  `slot_mp_subscript` and its siblings end in `slot_reraise`,
+  which tail-jumps into `eval_exception_unwind`; a builtin's own miss --
+  `dict_subscript`'s KeyError, say -- goes through `RAISE`, which does the
+  same.  Neither returns to its caller, so an opcode that wants to try a
+  lookup and recover from the miss cannot go through the slot at all.
+
+  `mapping_getitem_opt` is the way round it for a heaptype (ask
+  `__getitem__` through `dunder_call_2`, which does return), and LOAD_NAME
+  and SETUP_ANNOTATIONS use it for a locals mapping that is not a dict.  It
+  does not help for a builtin `__getitem__`, so a dict SUBCLASS keeps the
+  direct table read in LOAD_NAME where CPython's `PyDict_CheckExact` sends it
+  through `PyObject_GetItem`: an overridden `__getitem__` on a dict subclass
+  used as `exec()` locals is not consulted.  Fixing it properly means the
+  builtin subscripts reporting a miss by RETURNING rather than by raising,
+  which is every caller of `dict_subscript`.
+
+- **`zip(..., strict=True)` does not say which argument was short.**
+  CPython's is "zip() argument 2 is shorter than argument 1" (and
+  "...longer..."), with an "argument%s 1-%d" plural once there are more than
+  two; this says "zip() has arguments with different lengths" whichever
+  happened.  The information is all there at the raise -- `zip_iternext`
+  knows the index and which direction it found -- so this is wording rather
+  than machinery.
+
+- **A user `__eq__` that reaches itself answers False instead of raising
+  RecursionError.**  `class D: def __eq__(s, o): return s.me == o.me` with
+  `p.me = p` gives False here and RecursionError in CPython.  The container
+  comparisons are guarded (`C_RECURSION_ENTER` in list, tuple and dict) and
+  Python-level recursion is guarded by `recursion_depth`, so something on the
+  instance-comparison path is deciding the answer before either limit is
+  reached rather than recursing; which one has not been traced.
 
 - **`f(*5)` does not name the callable.**  CPython says
   "__main__.f() argument after * must be an iterable, not int"; this says

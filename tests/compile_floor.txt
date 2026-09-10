@@ -217,6 +217,7 @@ test_exception_traceback_api
 test_except_star
 test_exc_state_frame
 test_exec_builtins_value
+test_exec_custom_locals
 test_extended_slice
 test_fileio
 test_final_types
