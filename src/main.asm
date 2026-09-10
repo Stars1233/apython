@@ -609,7 +609,29 @@ DEF_FUNC main, 8
     extern fileobj_flush_std
     call fileobj_flush_std
 
-    ; Break sys.modules cycle: sys_modules_dict -> sys module -> sys_dict
+    ; Finalize cyclic garbage while the interpreter is still whole.  CPython
+    ; runs a full collection at shutdown, which is what makes a __del__ on an
+    ; object in a cycle run at all; without one, every such cycle was simply
+    ; abandoned.  It goes before the sys.modules cascade rather than after:
+    ; module dicts are what most cycles hang off, and a collection run after
+    ; they are torn down finds nothing to do.
+    ;
+    ; And BEFORE the sys cycle is broken, which is the whole interpreter this
+    ; runs in: those finalizers are ordinary Python, and the first thing one
+    ; does is `sys.stderr` or `sys.is_finalizing`.  With sys's dict already
+    ; NULLed, module_getattr read a dict pointer of zero -- so any __del__ in
+    ; a cycle that touched sys segfaulted the process at exit, after every
+    ; line of output had been produced.
+    extern gc_collect_gen
+    mov edi, 2
+    call gc_collect_gen
+
+    ; ...and flush again.  Those finalizers are the last Python that runs,
+    ; and `print` from one of them lands in the buffer the flush above just
+    ; emptied.  CPython flushes after finalization for the same reason.
+    call fileobj_flush_std
+
+    ; Break sys.modules cycle, now that no more Python can run: sys_modules_dict -> sys module -> sys_dict
     ;   -> "modules" entry -> sys_modules_dict
     ; NULL out sys_module.mod_dict and DECREF the old dict twice:
     ;   once for creation ref, once for module_new INCREF
@@ -626,16 +648,6 @@ DEF_FUNC main, 8
     pop rdi
     call obj_decref
 .no_sys_module:
-
-    ; Finalize cyclic garbage while the interpreter is still whole.  CPython
-    ; runs a full collection at shutdown, which is what makes a __del__ on an
-    ; object in a cycle run at all; without one, every such cycle was simply
-    ; abandoned.  It goes before the sys.modules cascade rather than after:
-    ; module dicts are what most cycles hang off, and a collection run after
-    ; they are torn down finds nothing to do.
-    extern gc_collect_gen
-    mov edi, 2
-    call gc_collect_gen
 
     ; DECREF owned objects.
     ;

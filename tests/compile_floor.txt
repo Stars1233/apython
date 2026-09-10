@@ -499,6 +499,7 @@ test_set_subclass_compare
 test_set_tombstone_reuse
 test_set_value_probe
 test_set_variadic
+test_shutdown_finalizer
 test_signal
 test_simplenamespace
 test_singleton_construct
@@ -570,6 +571,7 @@ test_str_translate_mapping
 test_str_translate
 test_struct_binascii
 test_structseq
+test_structseq_tail
 test_str_unicode_space
 test_subclass_binop
 test_subclass_compare_float

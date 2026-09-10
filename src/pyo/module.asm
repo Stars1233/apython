@@ -210,6 +210,8 @@ DEF_FUNC module_getattr
 .normal_lookup:
     ; dict_get(mod_dict, name_str)
     mov rdi, [rbx + PyModuleObject.mod_dict]
+    test rdi, rdi
+    jz .not_found
     mov rsi, r12
     call dict_get
     V_UNPACK rax, rdx           ; dict_get returns a Value
