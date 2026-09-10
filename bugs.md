@@ -129,15 +129,6 @@ reasoning that chose them and what changing one would cost.
   out for this reason; the shape that fails is the file that test was cut
   down from, with the proxy call followed by two more statements.
 
-- **`member_descriptor` publishes no `__get__`, `__set__` or `__delete__`.**
-  A `__slots__` descriptor works through attribute access, and answers
-  `AttributeError: 'member_descriptor' object has no attribute '__get__'` when
-  a program reaches for the protocol by name -- which
-  `inspect.getattr_static`, the descriptor tests and anything walking
-  `type.__dict__` do.  The receiver check they would need is
-  `member_check_receiver`, which is already there; what is missing is the
-  three entries in the type's dict and the thunks behind them.
-
 - **`scandir()` on a BYTES path yields str entries.**  CPython gives a bytes
   path bytes names and bytes paths back; here the argument goes through
   `posix_path_arg`, which hands over a C string, and the entries are built
