@@ -768,11 +768,20 @@ DEF_FUNC exc_str, ES_FRAME
     jne .es_tuple
 
     ; KeyError is the one that shows its single argument's repr, so that a
-    ; missing key prints with its quotes.
-    mov rcx, [rbx + PyExceptionObject.ob_type]
-    lea rdx, [rel exc_KeyError_type]
-    cmp rcx, rdx
-    je .es_one_repr
+    ; missing key prints with its quotes -- and so does a SUBCLASS of it.
+    ; CPython gives KeyError its own tp_str and subclasses inherit it; this
+    ; was an exact-pointer compare, so `class K(KeyError)` lost the quotes.
+    push rax
+    push rax                        ; exc_args, and a pad for the alignment
+    mov rdi, [rbx + PyExceptionObject.ob_type]
+    lea rsi, [rel exc_KeyError_type]
+    extern type_is_subtype
+    call type_is_subtype
+    pop rcx
+    pop rcx                         ; exc_args back
+    test eax, eax
+    mov rax, rcx
+    jnz .es_one_repr
 
     mov rcx, [rax + PyTupleObject.ob_item]
     mov rdi, [rcx]

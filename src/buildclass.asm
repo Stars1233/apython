@@ -1581,16 +1581,18 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     test eax, eax
     jz .bc_check_int_sub
 
-    ; Exception subclass: override instance_* with exc_* methods
+    ; Exception subclass: override instance_* with exc_* methods.
+    ;
+    ; tp_repr and tp_str stay instance_repr / instance_str, for the reason
+    ; the int arm below spells out: they look for the class's own __repr__ /
+    ; __str__ first and fall back to the base's slot -- exc_repr / exc_str --
+    ; when there is none.  Overwriting them meant an exception subclass that
+    ; defined __str__ never had it called, which is every argparse error
+    ; message: ArgumentError.__str__ builds the text, so they all came out as
+    ; the args tuple.
     extern exc_dealloc
-    extern exc_repr
-    extern exc_str
     lea rax, [rel exc_dealloc]
     mov [r12 + PyTypeObject.tp_dealloc], rax
-    lea rax, [rel exc_repr]
-    mov [r12 + PyTypeObject.tp_repr], rax
-    lea rax, [rel exc_str]
-    mov [r12 + PyTypeObject.tp_str], rax
     ; Exception getattr/setattr for custom attributes via exc_dict
     extern exc_getattr
     extern exc_setattr
@@ -1620,15 +1622,12 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     jz .bc_no_set_base
     extern eg_dealloc
     extern eg_getattr
-    extern eg_str
     extern eg_traverse
     extern eg_clear
     lea rax, [rel eg_dealloc]
     mov [r12 + PyTypeObject.tp_dealloc], rax
     lea rax, [rel eg_getattr]
     mov [r12 + PyTypeObject.tp_getattr], rax
-    lea rax, [rel eg_str]
-    mov [r12 + PyTypeObject.tp_str], rax
     lea rax, [rel eg_traverse]
     mov [r12 + PyTypeObject.tp_traverse], rax
     lea rax, [rel eg_clear]

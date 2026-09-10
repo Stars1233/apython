@@ -557,11 +557,96 @@ DEF_FUNC eg_clear, 8            ; 1 push, so rsp is 16-aligned
 END_FUNC eg_clear
 
 ;; ============================================================================
-;; eg_str(PyExceptionGroupObject *eg) -> PyObject* (string)
-;; Returns the message string (exc_value), like exc_str.
+;; eg_str(PyExceptionGroupObject *eg) -> (rax = str, edx = TAG_PTR), or (0, 0)
+;;
+;; CPython's BaseExceptionGroup_str: "%S (%zd sub-exception%s)".  This was
+;; `jmp exc_str`, which printed the args tuple -- "('m', [ValueError(1)])"
+;; where CPython says "m (1 sub-exception)".
 ;; ============================================================================
-DEF_FUNC_BARE eg_str
-    jmp exc_str
+EST_MSG   equ 8
+EST_BUF   equ 16
+EST_FRAME equ 24            ; + 1 push = 32, 16-aligned
+DEF_FUNC eg_str, EST_FRAME
+    push rbx
+    mov rbx, rdi
+
+    ; The message, as a string.  The constructor requires a str, but str() of
+    ; it costs nothing and is what CPython's %S does.
+    mov rdi, [rbx + PyExceptionGroupObject.exc_value]
+    extern obj_str
+    call obj_str
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .est_failed
+    mov [rbp - EST_MSG], rax
+
+    ; The message, then at most " (18446744073709551615 sub-exceptions)".
+    mov rdi, [rax + PyVarObject.ob_size]
+    add rdi, 64
+    extern ap_malloc
+    call ap_malloc
+    mov [rbp - EST_BUF], rax
+
+    mov rdi, rax
+    mov rsi, [rbp - EST_MSG]
+    mov rdx, [rsi + PyVarObject.ob_size]
+    lea rsi, [rsi + PyStrObject.data]
+    extern ap_memcpy
+    call ap_memcpy
+    mov rax, [rbp - EST_BUF]
+    mov rcx, [rbp - EST_MSG]
+    add rax, [rcx + PyVarObject.ob_size]
+
+    mov rdi, rax
+    CSTRING rsi, " ("
+    extern rbt_append_cstr
+    call rbt_append_cstr
+
+    mov rdi, rax
+    mov rsi, [rbx + PyExceptionGroupObject.eg_exceptions]
+    mov rsi, [rsi + PyVarObject.ob_size]
+    extern msg_append_i64
+    call msg_append_i64
+
+    mov rdi, rax
+    CSTRING rsi, " sub-exception"
+    call rbt_append_cstr
+
+    mov rcx, [rbx + PyExceptionGroupObject.eg_exceptions]
+    cmp qword [rcx + PyVarObject.ob_size], 1
+    jle .est_singular
+    mov rdi, rax
+    CSTRING rsi, "s"
+    call rbt_append_cstr
+.est_singular:
+    mov rdi, rax
+    CSTRING rsi, ")"
+    call rbt_append_cstr
+
+    mov rdi, [rbp - EST_BUF]
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    push rax
+    push rax                    ; and a pad, for the alignment
+    mov rdi, [rbp - EST_BUF]
+    extern ap_free
+    call ap_free
+    mov rdi, [rbp - EST_MSG]
+    extern obj_decref
+    call obj_decref
+    pop rax
+    pop rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+
+.est_failed:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
 END_FUNC eg_str
 
 ;; ============================================================================
