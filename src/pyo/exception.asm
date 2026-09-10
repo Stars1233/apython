@@ -174,14 +174,33 @@ DEF_FUNC exc_set_context, ESC_FRAME
 
     mov rdi, [rbp - ESC_NEW]
     mov rsi, [rbp - ESC_OLD]
-    ; Break an existing link back to `new` so the chain stays acyclic.
-    mov rax, rsi
+    ; Break an existing link back to `new` so the chain stays acyclic -- and
+    ; do not HANG on a cycle that is already there.  `ex.__context__ = ex` is
+    ; a legal assignment, and this walked the resulting chain for ever;
+    ; CPython's test_exceptions has two tests named for not hanging on exactly
+    ; that (issue 25782).  Floyd's tortoise and hare, as _PyErr_SetObject
+    ; does it: the tortoise moves every other step, and meeting it means the
+    ; whole path has been visited and checked.
+    mov rax, rsi                ; the hare
+    mov r8, rsi                 ; the tortoise
+    xor r9d, r9d                ; ...which moves on every other turn
 .esc_scan:
     mov rcx, [rax + PyExceptionObject.exc_context]
     test rcx, rcx
     jz .esc_link
     cmp rcx, rdi
-    jne .esc_next
+    je .esc_unlink
+    mov rax, rcx
+    cmp rax, r8
+    je .esc_link                ; a cycle that was already there
+    test r9d, r9d
+    jz .esc_next
+    mov r8, [r8 + PyExceptionObject.exc_context]
+.esc_next:
+    xor r9d, 1
+    jmp .esc_scan
+
+.esc_unlink:
     mov qword [rax + PyExceptionObject.exc_context], 0
     push rdi
     push rsi
@@ -189,10 +208,6 @@ DEF_FUNC exc_set_context, ESC_FRAME
     call obj_decref
     pop rsi
     pop rdi
-    jmp .esc_link
-.esc_next:
-    mov rax, rcx
-    jmp .esc_scan
 
 .esc_link:
     ; Drop whatever context `new` already had, then take a reference to `old`.
