@@ -255,6 +255,14 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
+- **`str.find` and `str.count` are the naive O(n*m) search.**  CPython's is
+  Crochemore-Perrin two-way with a Bloom-filter skip, which is O(n + m), and
+  its own test says so: `string_tests.test_adaptive_find` searches a
+  1,000,000-character haystack built to defeat the naive scan, and
+  test_userstring and test_string time out on it here rather than failing.
+  Ordinary searches are unaffected -- the shapes that hurt are the ones with
+  long repeated prefixes.
+
 - **Indexing a non-ASCII string is O(n), so a loop over one is quadratic.**
   `str_cp_offset` and `str_byte_to_cp` walk from byte 0 every time, because
   nothing remembers where the last code point was.  `s[i]` in a loop, a slice
