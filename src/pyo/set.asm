@@ -146,6 +146,7 @@ section .rodata
 ;; trick and the same reasoning.
 ;; ============================================================================
 align 16
+global set_empty_entries
 set_empty_entries:
     times SET_ENTRY_SIZE / 8 dq 0
 
@@ -1024,17 +1025,16 @@ DEF_FUNC set_richcompare, SRC_FRAME
     mov [rbp - SRC_OTHER], rsi
     mov [rbp - SRC_OP], rdx
 
-    ; Check other is a set or frozenset
+    ; Check other is a set or frozenset -- or a SUBCLASS of either, which the
+    ; exact-pointer compare this used to be refused: `S() <= S()` for
+    ; `class S(set)` came out NotImplemented and then TypeError.  Both static
+    ; types carry TYPE_FLAG_SET_SUBCLASS and every subclass inherits it, so
+    ; the flag is exactly the question being asked.
     test r8d, TAG_RC_BIT
     jz .src_not_impl
     mov rax, [rsi + PyObject.ob_type]
-    lea rcx, [rel set_type]
-    cmp rax, rcx
-    je .src_is_set
-    lea rcx, [rel frozenset_type]
-    cmp rax, rcx
-    je .src_is_set
-    jmp .src_not_impl
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_SET_SUBCLASS
+    jz .src_not_impl
 
 .src_is_set:
     cmp edx, PY_EQ
