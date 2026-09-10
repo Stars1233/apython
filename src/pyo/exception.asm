@@ -66,7 +66,7 @@ extern exc_ExceptionGroup_type
 ;; ============================================================================
 ;; exc_new(PyTypeObject *type, PyObject *msg_str, int msg_tag) -> PyExceptionObject*
 ;; Creates a new exception with given type and message string.
-;; msg_str is INCREFed. type is stored but not INCREFed (types are immortal).
+;; msg_str and type are both INCREFed.
 ;; rdx = msg_tag (TAG_PTR for heap objs, TAG_SMALLINT for ints, 0 for NULL).
 ;; ============================================================================
 EN_EXC equ 8
@@ -83,7 +83,12 @@ DEF_FUNC exc_new, EN_FRAME
     mov edi, PyExceptionObject_size
     mov rsi, rbx               ; type
     call gc_alloc
-    ; ob_refcnt=1, ob_type set by gc_alloc
+    ; ob_refcnt=1, ob_type set by gc_alloc -- but gc_alloc does not count the
+    ; type it stamps, and "exception types are immortal" is true of the
+    ; sixty-nine builtin ones and false of every class a program writes.  An
+    ; uncounted one is freed by the collector out from under live instances,
+    ; because a class's only cycle is with its own MRO tuple.
+    inc qword [rbx + PyObject.ob_refcnt]
     mov [rax + PyExceptionObject.exc_type], rbx
     mov [rax + PyExceptionObject.exc_value], r12
     mov qword [rax + PyExceptionObject.exc_tb], 0
@@ -274,7 +279,9 @@ END_FUNC exc_from_cstr
 ;; exc_dealloc(PyExceptionObject *exc)
 ;; Free exception and DECREF its fields.
 ;; ============================================================================
-DEF_FUNC exc_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
+ED_TYPE  equ 8
+ED_FRAME equ 24                    ; + 1 push = 32, so rsp is 16-aligned
+DEF_FUNC exc_dealloc, ED_FRAME
     push rbx
 
     mov rbx, rdi
@@ -319,9 +326,18 @@ DEF_FUNC exc_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     call obj_decref
 .no_dict:
 
+    ; Save ob_type before freeing: gc_dealloc reads it, then frees.  A frame
+    ; slot rather than a push, so both calls below stay 16-aligned.
+    mov rax, [rbx + PyObject.ob_type]
+    mov [rbp - ED_TYPE], rax
+
     ; Free the object (GC-aware)
     mov rdi, rbx
     call gc_dealloc
+
+    ; Release the class AFTER the instance, the order instance_dealloc uses.
+    mov rdi, [rbp - ED_TYPE]
+    call obj_decref
 
     pop rbx
     leave

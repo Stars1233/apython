@@ -71,7 +71,10 @@ DEF_FUNC eg_new, EGN_FRAME
     mov edi, PyExceptionGroupObject_size
     mov rsi, rbx
     call gc_alloc
-    ; gc_alloc sets ob_refcnt = 1 and stamps ob_type
+    ; gc_alloc sets ob_refcnt = 1 and stamps ob_type, but does not COUNT the
+    ; type -- and a group's type is as often a program's class as it is one of
+    ; the two builtins.  See exc_new.
+    inc qword [rbx + PyObject.ob_refcnt]
     mov [rax + PyExceptionGroupObject.exc_type], rbx
     mov [rax + PyExceptionGroupObject.exc_value], r12
     mov qword [rax + PyExceptionGroupObject.exc_tb], 0
@@ -444,7 +447,9 @@ END_FUNC eg_type_call
 ;; eg_dealloc(PyExceptionGroupObject *eg)
 ;; Free exception group and DECREF all fields.
 ;; ============================================================================
-DEF_FUNC eg_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
+EGD_TYPE  equ 8
+EGD_FRAME equ 24                  ; + 1 push = 32, so rsp is 16-aligned
+DEF_FUNC eg_dealloc, EGD_FRAME
     push rbx
     mov rbx, rdi
 
@@ -487,9 +492,18 @@ DEF_FUNC eg_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     call obj_decref
 .no_excs:
 
+    ; Save ob_type before freeing: gc_dealloc reads it, then frees.  A frame
+    ; slot rather than a push, so both calls below stay 16-aligned.
+    mov rax, [rbx + PyObject.ob_type]
+    mov [rbp - EGD_TYPE], rax
+
     ; Free the object (GC-aware), matching eg_new's gc_alloc
     mov rdi, rbx
     call gc_dealloc
+
+    ; Release the class AFTER the instance, matching eg_new's count.
+    mov rdi, [rbp - EGD_TYPE]
+    call obj_decref
 
     pop rbx
     leave
