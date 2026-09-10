@@ -988,13 +988,15 @@ DEF_FUNC math_isqrt, MIS_FRAME
     js .mis_negative
 
     call math_new_mpz
-    push rax
+    mov [rbp - MIS_RES], rax    ; the result.  A `push` here would leave
+                                ; __gmpz_sqrt below eight bytes out of
+                                ; 16-alignment, and MIS_RES is free: the
+                                ; argument it held is read only by .mis_type,
+                                ; which is above math_index's success test.
     lea rdi, [rax + PyIntObject.mpz]
     mov rsi, [rbp - MIS_N]
     add rsi, PyIntObject.mpz
     call __gmpz_sqrt wrt ..plt
-    pop rax
-    mov [rbp - MIS_RES], rax
     mov rdi, [rbp - MIS_N]
     mov rsi, [rbp - MIS_OWN]
     call math_drop_temp
@@ -1023,7 +1025,8 @@ END_FUNC math_isqrt
 MFA_N     equ 8
 MFA_OWN   equ 16
 MFA_ARG   equ 24
-MFA_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+MFA_K     equ 32            ; the count, across math_new_mpz's call
+MFA_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
 DEF_FUNC math_factorial, MFA_FRAME
     cmp rsi, 1
     jne .mfa_args
@@ -1050,11 +1053,12 @@ DEF_FUNC math_factorial, MFA_FRAME
     mov rdi, [rbp - MFA_N]
     lea rdi, [rdi + PyIntObject.mpz]
     call __gmpz_get_ui wrt ..plt
-    push rax
+    mov [rbp - MFA_K], rax      ; a `push` here left math_new_mpz's own GMP
+                                ; call eight bytes out of 16-alignment
     call math_new_mpz
     mov [rbp - MFA_ARG], rax
     lea rdi, [rax + PyIntObject.mpz]
-    pop rsi
+    mov rsi, [rbp - MFA_K]
     call __gmpz_fac_ui wrt ..plt
 
     mov rdi, [rbp - MFA_N]

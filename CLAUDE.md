@@ -24,6 +24,7 @@ make check-cpython-source  # the CPython corpus, compiled by OUR compiler
 
 ```bash
 ./apython --selftest-compile   # source-compiler invariants and tokenizer
+./apython --selftest-alloc     # the pool allocator, without the interpreter
 python3 src/compiler/lint.py   # static checks over the assembly
 ```
 
@@ -266,6 +267,9 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   sets, the position assertions and case folding) and its module wrapper;
   the pattern and match objects live in `src/pyo/`
 - `src/valtest.asm` — `--selftest-value`
+- `src/alloctest.asm` — `--selftest-alloc`: the pool allocator hammered
+  directly, with no objects and no eval loop.  An allocator bug reaches
+  Python as data corruption in code that is correct, so it is caught here
 - `src/builtins.asm` — `PyBuiltinObject`, the core builtins, and `builtins_init`
 - `src/builtins_num.asm` / `src/builtins_obj.asm` / `src/builtins_str.asm` —
   the numeric builtins, the object/iteration/IO builtins, and `str()` with the
@@ -286,8 +290,18 @@ No hand-written file exceeds 100k bytes; only generated asm may.
 - `src/objerr.asm` — the arity and receiver error messages, split off when
   `object.asm` reached the 100k cap.  Each builds its text into a stack
   buffer and hands it to `raise_exception`; none of them returns
-- `src/runtime.asm` — The freestanding layer: syscalls, allocation, PLT-free
-  memory and string ops, and `fatal_error`
+- `src/runtime.asm` — The freestanding layer: syscalls, PLT-free memory and
+  string ops, and `fatal_error`
+- `src/alloc.asm` — where memory comes from.  `ap_malloc`, `ap_free` and
+  `ap_realloc` are the whole funnel: nothing else in the tree calls libc's,
+  and GMP and zlib allocate and free their own, so every byte the interpreter
+  owns passes through these three.  They are a size-class pool allocator over
+  one contiguous reservation, with libc under it above 512 bytes; the file
+  header is the design, including the three invariants it rests on.
+  `NO_POOL=1` compiles it out and `APYTHON_MALLOC=libc` switches it off
+  without a rebuild -- **use the latter under valgrind**, or every
+  use-after-free goes invisible.  `POOL_TINY=1` shrinks the reservation so the
+  whole corpus runs on a mixed pool/libc heap
 - `src/compiler/` — The Python **source** compiler (see below)
 - `src/include/` — `object.inc` (every struct and id enum), `macros.inc`,
   `value.inc`, `opcodes.inc`, and the three private ABIs `sre.inc`,

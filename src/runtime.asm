@@ -31,6 +31,7 @@ SYS_close           equ 3
 SYS_fstat           equ 5
 SYS_mmap            equ 9
 SYS_munmap          equ 11
+SYS_madvise         equ 28
 SYS_socket          equ 41
 SYS_connect         equ 42
 SYS_accept4         equ 288
@@ -457,6 +458,21 @@ DEF_FUNC_BARE sys_munmap
     syscall
     ret
 END_FUNC sys_munmap
+
+;; ============================================================================
+;; sys_madvise(addr, len, advice) -> int
+;;
+;; Only MADV_NOHUGEPAGE is wanted so far, and only by the pool allocator: on a
+;; host whose transparent_hugepage is `always`, a reservation of a gigabyte is
+;; hugepage-eligible, and touching one 16 KiB pool would fault in two megabytes
+;; of resident memory to back it.  Advice a kernel is free to ignore, so the
+;; result is ignored too.
+;; ============================================================================
+DEF_FUNC_BARE sys_madvise
+    mov rax, SYS_madvise
+    syscall
+    ret
+END_FUNC sys_madvise
 
 ;; ============================================================================
 ;; sys_io_uring_setup(entries, params*) -> int fd
@@ -1281,66 +1297,6 @@ DEF_FUNC_BARE ap_memrfind
     ret
 END_FUNC ap_memrfind
 
-;; ============================================================================
-;; Allocation
-;; (was src/memory.asm)
-;; ============================================================================
-
-section .text
-
-; Wraps libc malloc/free/realloc with error checking
-
-extern malloc
-extern free
-extern realloc
-;; ============================================================================
-;; ap_malloc(size_t size) -> void*
-;; Allocates memory, fatal error on failure
-;; ============================================================================
-DEF_FUNC ap_malloc, 16           ; 0 pushes, so rsp is 16-aligned
-    ; No register is saved here: the size used to be parked in rbx "for the
-    ; error case" and no path ever read it back, so every allocation in the
-    ; interpreter paid a push, a mov and a pop for nothing.
-    call malloc wrt ..plt
-    test rax, rax
-    jz .oom
-    leave
-    ret
-.oom:
-    lea rdi, [rel mem_oom_msg]
-    call fatal_error        ; never returns
-END_FUNC ap_malloc
-
-;; ============================================================================
-;; ap_free(void *ptr)
-;; Frees memory; NULL-safe
-;; ============================================================================
-DEF_FUNC_BARE ap_free
-    test rdi, rdi
-    jz .null
-    jmp free wrt ..plt
-.null:
-    ret
-END_FUNC ap_free
-
-;; ============================================================================
-;; ap_realloc(void *ptr, size_t size) -> void*
-;; Reallocates memory, fatal error on failure
-;; ============================================================================
-DEF_FUNC ap_realloc, 16           ; 0 pushes, so rsp is 16-aligned
-    ; As in ap_malloc: the saved size was never read on the error path.
-    call realloc wrt ..plt
-    test rax, rax
-    jz .oom
-    leave
-    ret
-.oom:
-    lea rdi, [rel mem_oom_msg]
-    call fatal_error        ; never returns
-END_FUNC ap_realloc
-
-section .rodata
-mem_oom_msg: db "Fatal: out of memory", 0
 
 ;; ============================================================================
 ;; Dying without an interpreter

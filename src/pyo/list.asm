@@ -48,17 +48,21 @@ LIST_POOL_MAX equ 16
 
 ;; ============================================================================
 ;; list_new(rdi = capacity) -> rax = PyListObject*, every slot zeroed
-;; list_new_filled(rdi = n) -> rax = PyListObject* of capacity max(n, 4),
-;;                             whose first n slots are UNINITIALISED
+;; list_new_filled(rdi = n) -> rax = PyListObject* of capacity n, whose n
+;;                             slots are UNINITIALISED
 ;;
 ;; Both go through list_new_from below; they differ only in where the zeroing
 ;; starts.  list_new_filled is for the four builders that write every one of
 ;; the n slots before anything can look -- copy, slice, concat, repeat -- and
 ;; on those the zeroing was pure waste: the array was filled with zeroes and
 ;; then immediately overwritten by an ap_memcpy of exactly the same length.
-;; It still zeroes the tail, [n, max(n, 4)), because the invariant the
-;; zeroing exists for is about the slots ABOVE ob_size, and a list of fewer
-;; than four items has some.
+;;
+;; The capacity is what was ASKED FOR, not max(n, something).  list_new_from
+;; substitutes its minimum only for a request of ZERO -- so list_new(0) gets
+;; the minimum and list_new_filled(2) gets exactly two slots and zeroes
+;; nothing.  That minimum is 8 rather than 4 since 5501d5b, because a list
+;; literal compiles to BUILD_LIST 0 plus LIST_EXTEND and four slots meant
+;; every one of them grew immediately.
 ;; ============================================================================
 DEF_FUNC_BARE list_new
     xor esi, esi                ; zero from slot 0: nothing is promised
@@ -89,7 +93,7 @@ DEF_FUNC list_new_from, 8       ; 3 pushes, so rsp is 16-aligned
     mov r12, rdi               ; r12 = capacity
     test r12, r12
     jnz .has_cap
-    mov r12d, 4                     ; minimum capacity
+    mov r12d, 8                     ; minimum capacity
 .has_cap:
 
     ; Try list header pool first
@@ -414,8 +418,17 @@ DEF_FUNC list_setitem, 8        ; 3 pushes, so rsp is 16-aligned at the
     mov rdi, [rax + rsi * 8]      ; the old occupant
     INCREF_V r12, r13
     mov [rax + rsi * 8], r12
-    DECREF_V rdi, rcx             ; nothing below reads rax or rsi
+    DECREF_V rdi, rcx             ; nothing below reads rsi
 
+    ; 0 is "assigned", and it has to be SET.  This is an mp_ass_subscript-
+    ; shaped function: op_store_subscr tests the low half of the answer for a
+    ; negative, and what was left in rax here was ob_item -- a heap pointer.
+    ; While that came from glibc's brk arena it was a low address with bit 31
+    ; clear, so the test passed by luck.  It stops being luck the moment
+    ; ob_item comes from anywhere else: a list of two hundred thousand
+    ; elements is served by mmap today, and `a[0] = 1` on one raises
+    ; "item assignment failed without an exception" about a third of the time.
+    xor eax, eax
     pop r13
     pop r12
     pop rbx
@@ -609,6 +622,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ; Decrement ob_size
     mov [rbx + PyListObject.ob_size], rcx
 
+    xor eax, eax                ; deleted; see list_setitem for why this is set
     pop r12
     pop rbx
     leave
@@ -969,6 +983,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     jz .las_no_temp
     call obj_decref
 .las_no_temp:
+    xor eax, eax                ; assigned; see list_setitem for why this is set
     add rsp, 8             ; undo alignment
     pop r15
     pop r14

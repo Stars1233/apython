@@ -2619,6 +2619,11 @@ END_FUNC obj_hash
 ;; obj_is_true(rdi=value) -> int (0 or 1)
 ;; Decodes the Value, then dispatches: int immediate → value != 0, pointer → type-based.
 ;; ============================================================================
+OIT_PAD equ 8               ; rbp and one callee-saved push leave the body
+                            ; eight bytes out of 16-alignment, and __bool__,
+                            ; __len__ and nb_bool are all reached by a call
+                            ; from here -- nb_bool for an int is int_bool,
+                            ; which asks GMP.
 DEF_FUNC_BARE obj_is_true
     ; rdi is a Value.  This used to open with V_UNPACK -- classify by high16,
     ; subtract a bias, synthesise a tag -- so that the next two instructions
@@ -2636,6 +2641,7 @@ DEF_FUNC_BARE obj_is_true
     push rbp
     mov rbp, rsp
     push rbx
+    sub rsp, OIT_PAD
     mov rbx, rdi
 
     ; None is false (legacy — TAG_PTR none_singleton)
@@ -2666,6 +2672,7 @@ DEF_FUNC_BARE obj_is_true
     ; `not x` and `if x:` were right, because they go elsewhere.
     mov edx, TAG_PTR
     call rax
+    add rsp, OIT_PAD
     pop rbx
     pop rbp
     ret
@@ -2747,12 +2754,14 @@ DEF_FUNC_BARE obj_is_true
     cmp rax, rcx
     sete al
     movzx eax, al
+    add rsp, OIT_PAD
     pop rbx
     pop rbp
     ret
 
 .dunder_bool_is_bool:
     ; Result is TAG_BOOL: rax payload is 0 or 1
+    add rsp, OIT_PAD
     pop rbx
     pop rbp
     ret
@@ -2790,6 +2799,7 @@ DEF_FUNC_BARE obj_is_true
     test rax, rax
     setnz al
     movzx eax, al
+    add rsp, OIT_PAD
     pop rbx
     pop rbp
     ret
@@ -2807,6 +2817,7 @@ DEF_FUNC_BARE obj_is_true
     pop rsi                    ; tag
     DECREF_VAL rdi, rsi
     mov eax, ecx
+    add rsp, OIT_PAD
     pop rbx
     pop rbp
     ret
@@ -2817,12 +2828,14 @@ DEF_FUNC_BARE obj_is_true
 
 .false:
     xor eax, eax
+    add rsp, OIT_PAD
     pop rbx
     pop rbp
     ret
 
 .true:
     mov eax, 1
+    add rsp, OIT_PAD
     pop rbx
     pop rbp
     ret

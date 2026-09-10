@@ -45,6 +45,21 @@ else
     ERRORS="$ERRORS value-selftest"
 fi
 
+# The allocator, before anything that allocates.  An allocator bug reaches a
+# Python-level test as data corruption in code that is correct, which is the
+# hardest kind of failure to localise; this runs against ap_malloc/ap_free/
+# ap_realloc directly, with no objects and no eval loop.
+printf "%-40s " "pool allocator selftest"
+if $APYTHON --selftest-alloc > "$WORK/alloctest.out" 2>&1; then
+    printf "${GREEN}PASS${NC}\n"
+    PASS=$((PASS + 1))
+else
+    printf "${RED}FAIL${NC}\n"
+    cat "$WORK/alloctest.out"
+    FAIL=$((FAIL + 1))
+    ERRORS="$ERRORS alloc-selftest"
+fi
+
 # Static checks over the assembly: 64-bit reads of 4-byte struct fields, and
 # calls made with a misaligned rsp.  Both assemble cleanly and fail at runtime
 # far from the cause, so they are checked here rather than discovered.
@@ -57,6 +72,27 @@ else
     cat "$WORK/lint.out"
     FAIL=$((FAIL + 1))
     ERRORS="$ERRORS compiler-lint"
+fi
+
+# Every call into GMP, checked in the BINARY rather than in the source: the
+# probe breaks on each one under gdb and reads rsp.  It is here and not in
+# lint.py because NASM macros hide both pushes and branches from any
+# source-level check -- INT_NEED_MPZ expands to a `push rdi` around a call.
+# Skips where gdb is absent, which is why lint.py's own check still matters.
+printf "%-40s " "gmp call alignment"
+if bash "$TESTDIR/gmp_align_probe.sh" > "$WORK/gmpalign.out" 2>&1; then
+    if grep -q "SKIP" "$WORK/gmpalign.out"; then
+        printf "${YELLOW}SKIP${NC} %s\n" "$(cat "$WORK/gmpalign.out")"
+        SKIP=$((SKIP + 1))
+    else
+        printf "${GREEN}PASS${NC}\n"
+        PASS=$((PASS + 1))
+    fi
+else
+    printf "${RED}FAIL${NC}\n"
+    cat "$WORK/gmpalign.out"
+    FAIL=$((FAIL + 1))
+    ERRORS="$ERRORS gmp-alignment"
 fi
 
 # Source-compiler self-test: checks the compiler's encoders directly, against

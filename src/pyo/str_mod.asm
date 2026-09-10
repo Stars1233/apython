@@ -81,8 +81,9 @@ SM_STARWON equ 216       ; ...and whether there was one
 SM_STARP   equ 224       ; a '*' precision, likewise
 SM_STARPON equ 232
 SM_SAWDOT  equ 240       ; the spec copier's cursor has passed the '.'
-SM_FRAME   equ 256          ; + 0 pushes = 256; SM_NORAISE at 248 is the
-                            ; last slot, and the frame is full
+SM_SAVERSP equ 264       ; .sm_ensure_cap's saved rsp; see the note there
+SM_FRAME   equ 272          ; + 0 pushes = 272; the five pushes below are
+                            ; mid-body, which is why lint cannot see them
 
 ;; str_mod(rdi = the format, a Value; rsi = the argument, a Value)
 ;;   -> (rax = the formatted str, rdx = TAG_PTR), or does not return
@@ -189,13 +190,19 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov [rbp-SM_NARGS], rax    ; nargs = tuple size
 .sm_not_tuple:
 
-    ; Allocate initial heap buffer (8192 bytes)
+    ; The output buffer, which .sm_ensure_cap doubles as needed.
+    ;
+    ; It used to start at 8192 bytes -- for EVERY `%` operation, including
+    ; `"%s-%d" % ("abc", i)`, whose answer is eight bytes.  That is over the
+    ; pool allocator's small-object threshold, so it was also a libc round
+    ; trip every time; 256 is a size class, and it still holds every format
+    ; result short of a deliberately long one in a single allocation.
     extern ap_malloc, ap_free, ap_realloc
-    mov edi, 8192
+    mov edi, 256
     call ap_malloc
     mov r13, rax               ; r13 = output buffer
     mov [rbp-SM_BUF], rax
-    mov qword [rbp-SM_CAP], 8192
+    mov qword [rbp-SM_CAP], 256
     xor r14d, r14d             ; r14 = output pos
     xor r15d, r15d             ; r15 = arg index
     mov qword [rbp-SM_HASKEY], 0
@@ -865,7 +872,19 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov [rbp-SM_CAP], rax
     mov rdi, r13               ; old ptr
     mov rsi, rax               ; new size
+    ; ALIGN, rather than assume.  This helper is reached from seven places at
+    ; three different parities -- one push, two pushes, and none at all, some
+    ; of them behind a jump that has already pushed -- so there is no single
+    ; correction that is right for all of them, and no comment at any one
+    ; site could stay true.  It passed its caller's parity straight through
+    ; to ap_realloc, which reaches glibc realloc for any buffer past 512
+    ; bytes; that was unreachable while the buffer started at 8 KB, and 256
+    ; is what makes it live.  `and` costs one instruction and is right from
+    ; anywhere.
+    mov [rbp-SM_SAVERSP], rsp
+    and rsp, -16
     call ap_realloc
+    mov rsp, [rbp-SM_SAVERSP]
     mov r13, rax
     mov [rbp-SM_BUF], rax
 .sm_cap_ok:
@@ -882,7 +901,13 @@ DEF_FUNC str_mod_impl, SM_FRAME
     jb .sm_too_many
 .sm_arity_ok:
 
-    ; Null-terminate and create string
+    ; Null-terminate and create string.  Guarded rather than assumed: every
+    ; append above ensures room for what IT writes, and the terminator is one
+    ; byte more than any of them asked for.  While the buffer started at 8 KB
+    ; and doubled, the slack made that unreachable; it is one byte past the
+    ; end of a block that fits exactly.
+    lea rdi, [r14 + 1]
+    call .sm_ensure_cap
     mov byte [r13 + r14], 0
 
     push r13                   ; save buffer ptr for free
@@ -1445,7 +1470,7 @@ DEF_FUNC str_mod_impl, SM_FRAME
     ; Append the piece to the caller's buffer, advancing its position.
     mov rax, [rbp-SM_PIECE]
     mov r8, [rax + PyStrObject.ob_size]
-    lea rdi, [r14 + r8]
+    lea rdi, [r14 + r8 + 1]     ; + the NUL .sm_done writes after the last piece
     call .sm_ensure_cap
     mov rax, [rbp-SM_PIECE]
     mov r8, [rax + PyStrObject.ob_size]

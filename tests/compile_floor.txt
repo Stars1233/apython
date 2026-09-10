@@ -413,6 +413,7 @@ test_pow_dunder
 test_pow
 test_prepare_raises
 test_print_file
+test_print_tag
 test_property_callables
 test_property_doc
 test_property_getattr_hook
@@ -448,6 +449,7 @@ test_set_fatval
 test_set_gc_walk
 test_set_growth
 test_set_inplace
+test_setitem_status
 test_set_methods
 test_set_mutated_under_probe
 test_set_name_metatype
@@ -511,6 +513,7 @@ test_str_justify
 test_str_maketrans
 test_str_methods_extra
 test_str_methods_fix
+test_str_mod_buffer
 test_str_mod_subclass
 test_str_predicates
 test_strsearch_boundaries

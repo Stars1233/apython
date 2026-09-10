@@ -148,7 +148,13 @@ END_FUNC num_self_to_mpz
 ;; Returns number of bits needed to represent abs(self), excluding sign and
 ;; leading zeros. bit_length(0) = 0.
 ;; ============================================================================
-DEF_FUNC int_method_bit_length
+IBL_SELF  equ 8             ; the unwrapped int, across the two GMP calls
+IBL_FRAME equ 16            ; + 0 pushes = 16, 16-aligned.  IBL_SELF was a
+                            ; `push rbx` mid-body, which left both of those
+                            ; calls eight bytes out of the alignment the ABI
+                            ; wants -- and mid-body is exactly where lint.py's
+                            ; own check cannot see a push.
+DEF_FUNC int_method_bit_length, IBL_FRAME
     ; A value too large for int64 has to be measured on its mpz: going
     ; through int_to_i64 truncated it, so (2**63).bit_length() was 0.
     ;
@@ -180,26 +186,23 @@ DEF_FUNC int_method_bit_length
     extern raise_type_error_with_name
     call raise_type_error_with_name
 .ibl_use_mpz:
-
-    push rbx
-    mov rbx, rax
-    lea rdi, [rbx + PyIntObject.mpz]
+    mov [rbp - IBL_SELF], rax
+    lea rdi, [rax + PyIntObject.mpz]
     xor esi, esi
     extern __gmpz_cmp_si
     call __gmpz_cmp_si wrt ..plt
     test eax, eax
     jz .ibl_mpz_zero
-    lea rdi, [rbx + PyIntObject.mpz]
+    mov rdi, [rbp - IBL_SELF]
+    lea rdi, [rdi + PyIntObject.mpz]
     mov esi, 2
     extern __gmpz_sizeinbase
     call __gmpz_sizeinbase wrt ..plt
-    pop rbx
     RET_TAG_SMALLINT
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .ibl_mpz_zero:
-    pop rbx
     xor eax, eax
     RET_TAG_SMALLINT
     leave

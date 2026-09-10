@@ -119,8 +119,8 @@ DEF_FUNC uring_init
     mov r8d, ebx               ; fd
     xor r9d, r9d               ; offset = IORING_OFF_SQ_RING = 0
     call sys_mmap
-    cmp rax, -1
-    je .ui_close_fail
+    cmp rax, -4095              ; mmap answers -errno, never -1
+    jae .ui_close_fail
     mov [rel uring_sq_ring], rax
 
     ; Cache SQ ring pointers
@@ -151,8 +151,8 @@ DEF_FUNC uring_init
     mov r8d, ebx
     mov r9d, 0x10000000             ; IORING_OFF_SQES
     call sys_mmap
-    cmp rax, -1
-    je .ui_unmap_sq
+    cmp rax, -4095              ; mmap answers -errno, never -1
+    jae .ui_unmap_sq
     mov [rel uring_sqes], rax
 
     ; CQ ring size = cq_off.cqes + cq_entries * 16
@@ -170,8 +170,8 @@ DEF_FUNC uring_init
     mov r8d, ebx
     mov r9d, 0x8000000              ; IORING_OFF_CQ_RING
     call sys_mmap
-    cmp rax, -1
-    je .ui_unmap_sqes
+    cmp rax, -4095              ; mmap answers -errno, never -1
+    jae .ui_unmap_sqes
     mov [rel uring_cq_ring], rax
 
     ; Cache CQ ring pointers

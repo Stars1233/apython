@@ -38,6 +38,39 @@ reasoning that chose them and what changing one would cost.
   LENGTH is not a control -- build the comparison at a path of the same
   length, or the answer is about the path.
 
+- **Calls made with a misaligned stack, everywhere except the paths into
+  GMP.**  The SysV ABI wants `rsp % 16 == 0` at a `call`, and glibc's float
+  paths and GMP both use aligned SSE.  Every call into GMP is now made
+  aligned, and `tests/gmp_align_probe.sh` is the gate: it breaks on every GMP
+  call site in the built binary under gdb and reads rsp at each.  The
+  same class is still there outside that reach, and three shapes of it are
+  measured rather than guessed:
+
+  `INT_NEED_MPZ` expands to `push rdi` / `call int_promote_mpz` / `pop rdi`,
+  so every one of its expansions calls at the wrong parity -- all 1,261 in a
+  bignum workload.  It is harmless today only because `int_promote_mpz` saves
+  rsp and `and`s it, which is the reason its own GMP call never showed.
+
+  `V_PACK`'s cold path is called AFTER `leave` in every function that packs
+  its return value on the way out, so it runs at the caller's parity rather
+  than the function's -- eight bytes out.
+
+  And the propagation: `obj_richcompare_bool` is entered misaligned by
+  `dict_lookup`, which is entered misaligned by `dict_set` and by a dozen
+  module-init callers, and everything under any of them inherits it.
+
+  Neither `lint.py` nor any other source-level check can find these.
+  `check_alignment` counts only the pushes before the first non-push
+  instruction, exempts `DEF_FUNC_BARE` entirely, and cannot see inside a NASM
+  macro -- which hides both pushes and branches.  A source-level detector
+  written for exactly this produced twenty-two false positives and was thrown
+  away.  What works is a CFG walk over the DISASSEMBLY, tracking rsp's offset
+  from entry: objdump sees the macros expanded.  The one thing such a walk
+  needs told is entry parity, because an opcode handler is reached by `jmp`
+  from the dispatch table and is entered at the opposite parity from a
+  function reached by `call` -- assume the wrong one and every handler in the
+  tree reports as broken.
+
 - **A set or frozenset SUBCLASS is not treated as a set by `update` or by
   the comparisons.**  CPython asks `PyAnySet_Check`, which is a subtype test;
   three places here compare the type pointer against `set_type` and
