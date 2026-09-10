@@ -1752,8 +1752,9 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
 END_FUNC dict_nb_ior
 
 ;; ============================================================================
-;; dict_richcompare(left, right, op, left_tag, right_tag) -> (payload, tag)
-;; rdi=left, rsi=right, edx=op, rcx=left_tag, r8=right_tag
+;; dict_richcompare(rdi = left, rsi = right, edx = op, rcx = left tag,
+;;                  r8 = right tag) -> (rax = payload, edx = tag)
+;;
 ;; Only supports Py_EQ (2) and Py_NE (3).
 ;; Two dicts are equal if they have the same size and all key-value pairs match.
 ;; ============================================================================
@@ -1768,7 +1769,28 @@ DRC_IDX   equ 56
 DRC_RES   equ 64            ; the comparison's verdict, across the releases
 DRC_FRAME equ 80            ; + 0 pushes = 80
 
-DEF_FUNC dict_richcompare, DRC_FRAME
+; Comparing two dicts that reach each other -- x = {}; x['foo'] = x, twice --
+; recursed until the machine stack ran out; the identity fast path inside only
+; catches x == x.  The body is wrapped so its several exits need not each be
+; touched, exactly as list_richcompare and tuple_richcompare are.  CPython's
+; test_copy.test_deepcopy_reflexive_dict is the test for it.
+extern c_recursion_depth
+extern recursion_limit
+extern exc_RecursionError_type
+DEF_FUNC dict_richcompare
+    C_RECURSION_ENTER .drc_too_deep
+    call dict_richcompare_inner
+    C_RECURSION_LEAVE
+    leave
+    ret
+.drc_too_deep:
+    C_RECURSION_LEAVE
+    RAISE exc_RecursionError_type, "maximum recursion depth exceeded in comparison"
+END_FUNC dict_richcompare
+
+;; dict_richcompare_inner(the same arguments) -> (rax = payload, edx = tag)
+;; The comparison itself; the wrapper above only bounds the recursion.
+DEF_FUNC_LOCAL dict_richcompare_inner, DRC_FRAME
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     ; edx = op (PY_EQ=2, PY_NE=3)
@@ -1934,7 +1956,7 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     RET_BOOL_RAX
     leave
     ret
-END_FUNC dict_richcompare
+END_FUNC dict_richcompare_inner
 
 ;; ============================================================================
 ;; dict_reversed(args, nargs) -> PyDictIterObject* (reverse key iterator)

@@ -450,6 +450,7 @@ test_range_slice
 test_range_wide
 test_recursion_and_repr
 test_recursion
+test_reflexive_compare
 test_relative_import
 test_re_module
 test_re_opcodes
