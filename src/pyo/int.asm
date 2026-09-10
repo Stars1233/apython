@@ -950,6 +950,9 @@ END_FUNC int_floordiv
 ;; ============================================================================
 ;; int_mod(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
+MD_RTAG   equ 32            ; the right operand's tag, across a conversion call
+MD_NEW    equ 40            ; the result object, across the GMP calls
+MD_LOCALS equ 24            ; as int_floordiv above, and for the same reason
 DEF_FUNC_BARE int_mod
     call int_binop_unpack       ; rdi/edx = left, rsi/ecx = right, both ints
     test eax, eax
@@ -1002,9 +1005,10 @@ DEF_FUNC_BARE int_mod
     push rbx
     push r12
     push r13
+    sub rsp, MD_LOCALS
     mov rbx, rdi
     mov r12, rsi
-    push rcx                ; save right_tag
+    mov [rbp - MD_RTAG], rcx    ; save right_tag
     cmp edx, TAG_SMALLINT
     jne .a_ready
     mov rdi, rbx
@@ -1015,7 +1019,7 @@ DEF_FUNC_BARE int_mod
 .a_ready:
     xor r13d, r13d
 .check_b:
-    pop rcx                 ; restore right_tag
+    mov rcx, [rbp - MD_RTAG]    ; restore right_tag
     cmp ecx, TAG_SMALLINT
     jne .b_ready
     mov rdi, r12
@@ -1032,7 +1036,7 @@ DEF_FUNC_BARE int_mod
     jz .gmp_mod_zdiv_error
 
     call int_alloc_raw
-    push rax
+    mov [rbp - MD_NEW], rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
@@ -1040,7 +1044,7 @@ DEF_FUNC_BARE int_mod
     INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
-    mov rax, [rsp]
+    mov rax, [rbp - MD_NEW]
     INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     INT_NEED_MPZ rbx
@@ -1058,8 +1062,9 @@ DEF_FUNC_BARE int_mod
     mov rdi, r12
     call int_dealloc
 .no_free_b:
-    pop rax
+    mov rax, [rbp - MD_NEW]
     mov edx, TAG_PTR
+    add rsp, MD_LOCALS
     pop r13
     pop r12
     pop rbx

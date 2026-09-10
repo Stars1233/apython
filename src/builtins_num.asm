@@ -217,7 +217,14 @@ END_FUNC builtin_abs
 ;; ============================================================================
 ;; builtin_divmod(args, nargs) - divmod(a, b) -> (a // b, a % b)
 ;; ============================================================================
-DEF_FUNC builtin_divmod, 8            ; 5 pushes, so rsp is 16-aligned
+DM_QTAG equ 8               ; the quotient's tag, across the remainder's call
+DM_FRAME equ 8              ; + 5 pushes = 48, 16-aligned.  DM_QTAG is a frame
+                            ; slot and not a `push` because a push here flips
+                            ; the parity for the whole remainder half of the
+                            ; body -- and nb_remainder for an int is int_mod,
+                            ; which calls GMP.  157 of the misaligned GMP
+                            ; calls in the tree arrived through here.
+DEF_FUNC builtin_divmod, DM_FRAME
     push rbx
     push r12
     push r13
@@ -332,7 +339,7 @@ DEF_FUNC builtin_divmod, 8            ; 5 pushes, so rsp is 16-aligned
 .divmod_have_quot:
     V_UNPACK rax, rdx           ; int_floordiv returns a Value
     mov r15, rax                ; r15 = quotient payload
-    push rdx                   ; save quotient tag (stack slot)
+    mov [rbp - DM_QTAG], rdx   ; save quotient tag
 
     ; Same for the remainder.
     mov rdi, rbx
@@ -380,7 +387,7 @@ DEF_FUNC builtin_divmod, 8            ; 5 pushes, so rsp is 16-aligned
     extern tuple_new
     call tuple_new
     mov rbx, [rax + PyTupleObject.ob_item]
-    pop rcx                                      ; quotient tag
+    mov rcx, [rbp - DM_QTAG]                     ; quotient tag
     V_PACK r15, rcx
     mov [rbx], r15
     V_PACK r12, r13
@@ -403,7 +410,6 @@ DEF_FUNC builtin_divmod, 8            ; 5 pushes, so rsp is 16-aligned
     jmp raise_type_error_counted
 
 .divmod_pop_type_error:
-    add rsp, 8                  ; the quotient tag pushed above
 .divmod_type_error:
     ; Name both operands, as CPython does: with two of them, "unsupported"
     ; alone does not say which.
