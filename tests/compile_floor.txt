@@ -598,6 +598,7 @@ test_sys_executable
 test_sys_exit
 test_termios
 test_time_module
+test_time_ns
 test_traceback_carets
 test_traceback
 test_traceback_tb_next

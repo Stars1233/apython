@@ -217,6 +217,48 @@ DEF_FUNC time_perf_counter_func, 16
 END_FUNC time_perf_counter_func
 
 ;; ============================================================================
+;; DEF_CLOCK_NS %1 = the function, %2 = the CLOCK_* to read, %3 = the message
+;;
+;; The same clock the float function beside it reads, reported as an integer
+;; count of nanoseconds instead.  That is the whole point of the *_ns family:
+;; a double carries 53 bits of mantissa, so seconds-since-the-epoch loses
+;; resolution below a microsecond around now and keeps losing it, and
+;; asyncio, timeit and every deadline in the stdlib ask for these names.
+;;
+;; int_from_i64, not V_PACK_I64: time_ns() is about 1.7e18, far outside the
+;; +-2^50 an immediate holds, so it has to be free to box.
+;; ============================================================================
+%macro DEF_CLOCK_NS 3
+DEF_FUNC %1, 16
+    test rsi, rsi
+    jne %%bad
+
+    mov eax, 228            ; __NR_clock_gettime
+    mov edi, %2
+    lea rsi, [rbp - TS_SEC]
+    syscall
+
+    mov rax, [rbp - TS_SEC]
+    mov ecx, 1000000000
+    imul rax, rcx
+    add rax, [rbp - TS_NSEC]
+    mov rdi, rax
+    call int_from_i64
+    leave
+    V_PACK rax, rdx         ; builtins return one Value
+    ret
+
+%%bad:
+    RAISE exc_TypeError_type, %3
+END_FUNC %1
+%endmacro
+
+DEF_CLOCK_NS time_time_ns_func, CLOCK_REALTIME, "time_ns() takes no arguments"
+DEF_CLOCK_NS time_monotonic_ns_func, CLOCK_MONOTONIC, "monotonic_ns() takes no arguments"
+DEF_CLOCK_NS time_perf_counter_ns_func, CLOCK_MONOTONIC, "perf_counter_ns() takes no arguments"
+DEF_CLOCK_NS time_process_time_ns_func, CLOCK_PROCESS_CPUTIME_ID, "process_time_ns() takes no arguments"
+
+;; ============================================================================
 ;; time_time_func(PyObject **args, int64_t nargs) -> rax = Value
 ;; Seconds since the epoch, as a float.  The wall clock, where monotonic is
 ;; the one that cannot go backwards.
@@ -495,6 +537,21 @@ DEF_FUNC time_module_create
     pop rdi
     call obj_decref
 
+    ; --- the integer-nanosecond clocks, and _STRUCT_TM_ITEMS ---
+    ;
+    ; _strptime.py's last line is
+    ; `time.struct_time(tt[:time._STRUCT_TM_ITEMS])`, so the absence of that
+    ; one number was every strptime call in the stdlib.  struct_time already
+    ; declared n_fields = 11; the module simply never published it.
+    TIME_ADD_FUNC time_time_ns_func,         tm_time_ns
+    TIME_ADD_FUNC time_monotonic_ns_func,    tm_monotonic_ns
+    TIME_ADD_FUNC time_perf_counter_ns_func, tm_perf_counter_ns
+    TIME_ADD_FUNC time_process_time_ns_func, tm_process_time_ns
+
+    mov edi, 11
+    lea rsi, [rel tm_struct_tm_items]
+    call tm_add_int
+
     ; Add time and sleep
     lea rdi, [rel time_time_func]
     lea rsi, [rel tm_time_name]
@@ -612,6 +669,12 @@ tm_timezone:     db "timezone", 0
 tm_altzone:      db "altzone", 0
 tm_daylight:     db "daylight", 0
 tm_struct_time:  db "struct_time", 0
+tm_time_ns:         db "time_ns", 0
+tm_monotonic_ns:    db "monotonic_ns", 0
+tm_perf_counter_ns: db "perf_counter_ns", 0
+tm_process_time_ns: db "process_time_ns", 0
+tm_struct_tm_items: db "_STRUCT_TM_ITEMS", 0
+
 
 ; --- struct_time ---
 st_name: db "time.struct_time", 0
