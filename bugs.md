@@ -174,6 +174,20 @@ reasoning that chose them and what changing one would cost.
   fields on PyExceptionObject and a getattr arm for each, which is what
   CPython does.
 
+- **The attribute lookup order is instance-dict-first unless the MRO holds a
+  data descriptor**, which is observable when user code mutates the class
+  DURING the lookup.  CPython always consults the type first and keeps what it
+  found; this consults the instance dict first when
+  TYPE_FLAG_MRO_HAS_DATA_DESCR is clear, which is almost every class, because
+  that is the fast order for an ordinary `self.x`.
+
+  A key whose `__eq__` runs `del C.meth` while the instance dict is being
+  probed therefore makes `d.meth` an AttributeError here and a bound method in
+  CPython.  Nothing is unsafe -- the descriptor the MRO walk found is held
+  across the probe now -- and no ordinary program can tell the two orders
+  apart.  Closing it means paying the MRO walk on every attribute access, or
+  finding a cheaper way to notice that the class changed underneath.
+
 - **`zip(..., strict=True)` does not say which argument was short.**
   CPython's is "zip() argument 2 is shorter than argument 1" (and
   "...longer..."), with an "argument%s 1-%d" plural once there are more than
