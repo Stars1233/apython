@@ -1143,7 +1143,7 @@ align 16
     mov r9, rdx                 ; r9 = result tag
 
     test r9d, r9d
-    jz .skip_arg                ; TAG_NULL → skip
+    jz .print_str_failed        ; obj_str raised; see below
 
     ; Heap string: get length from ob_size
     mov rcx, [r14 + PyStrObject.ob_size]
@@ -1261,6 +1261,31 @@ align 16
     mov rdi, r14
     call obj_decref
     jmp .skip_arg
+
+.print_str_failed:
+    ; str() on an argument raised.  Skipping the argument left the exception
+    ; pending and printed the rest of the line anyway, so it surfaced at some
+    ; later instruction rather than at the print() -- or, with nothing else to
+    ; carry it, at the end of the program.
+    ;
+    ; CPython writes each argument as it reaches it, so whatever came before
+    ; this one is already out; flush that much and propagate.
+    test r15, r15
+    jz .psf_return
+    mov rdi, [rbp - PR_FILE_FD]
+    lea rsi, [rbp - PR_FRAME]
+    mov rdx, r15
+    call fileobj_write_fd
+.psf_return:
+    xor eax, eax
+    xor edx, edx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .print_flush:
     ; Append end string (default: "\n")
