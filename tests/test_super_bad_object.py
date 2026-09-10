@@ -35,6 +35,14 @@ class D(C):
     pass
 
 
+# Argument 1 has to be a type, and CPython checks it FIRST.
+for bad in (1, "x", None, 1.5, [1], object(), True):
+    try:
+        super(bad, C()).f
+        print("super(%s, obj) -> ok" % type(bad).__name__)
+    except TypeError as e:
+        print("super(%s, obj) ->" % type(bad).__name__, e)
+
 print("instance:", C().f())
 print("classmethod:", C.g())
 print("subclass:", D().f(), D.g())

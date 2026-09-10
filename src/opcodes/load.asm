@@ -80,7 +80,9 @@ LSA_ATTR     equ 48
 LSA_BIND     equ 56
 LSA_ORIGIN   equ 64      ; the MRO super() searches: the instance's, not the class's
 LSA_SELFTAG  equ 72      ; self is a Value, and need not be a pointer at all
-LSA_FRAME    equ 88         ; + 0 pushes = 80
+LSA_CLASSTAG equ 80      ; and so is the class
+LSA_FRAME    equ 104        ; + 0 pushes; a handler is entered by jmp, so
+                         ; this is 8 mod 16 and not 0
 
 ;; ============================================================================
 ;; op_load_const - Load constant from co_consts[arg]
@@ -1404,6 +1406,7 @@ DEF_FUNC unbound_local_raise, ULR_FRAME
 END_FUNC unbound_local_raise
 
 section .rodata
+lsa_bad_class_msg: db `super() argument 1 must be a type, not \x01`, 0
 ulr_open:      db "cannot access local variable '", 0
 ulr_close:     db "' where it is not associated with a value", 0
 ulr_free_open: db "cannot access free variable '", 0
@@ -1465,8 +1468,23 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov [rbp - LSA_SELFTAG], rdx
     VPOP_VAL rax, rdx              ; class
     mov [rbp - LSA_CLASS], rax
+    mov [rbp - LSA_CLASSTAG], rdx
     VPOP rdi              ; global_super -- DECREF and discard
     DECREF_V rdi, rsi
+
+    ; Argument 1 has to be a type: every walk below is over its MRO, and
+    ; `super(1, self)` read a tp_mro off the number.  CPython checks this one
+    ; FIRST, so `super(1, 5)` complains about the 1.  Whether it is a class is
+    ; the metatype flag rather than a pointer compare, because a class built
+    ; by a metaclass of its own has a metatype of its own.
+    cmp qword [rbp - LSA_CLASSTAG], TAG_PTR
+    jne .lsa_bad_class
+    mov rdi, [rbp - LSA_CLASS]
+    test rdi, rdi
+    jz .lsa_bad_class
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .lsa_bad_class
 
     ; Everything below reads self as an object -- it is decref'd unconditionally
     ; and handed to super_lookup -- so an immediate has to be refused here.
@@ -1606,6 +1624,43 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rax, rcx
     test rax, rax
     jnz .lsa_walk
+
+.lsa_bad_class:
+    ; Compose the message while the operands are still held, then release them
+    ; and raise: the raise abandons this frame, so nothing may be owed by then.
+    ; The type to name, from the TAG: LSA_CLASS is a payload and an int one is
+    ; the number itself, which value_type would read as a Value.
+    mov rax, [rbp - LSA_CLASSTAG]
+    cmp eax, TAG_PTR
+    jne .lsa_bad_class_imm
+    mov rdi, [rbp - LSA_CLASS]
+    mov rsi, [rdi + PyObject.ob_type]
+    jmp .lsa_bad_class_name
+.lsa_bad_class_imm:
+    extern int_type
+    extern float_type
+    lea rsi, [rel int_type]
+    cmp eax, TAG_SMALLINT
+    je .lsa_bad_class_name
+    lea rsi, [rel float_type]
+.lsa_bad_class_name:
+    lea rdi, [rel lsa_bad_class_msg]
+    extern type_name_message
+    call type_name_message
+    mov [rbp - LSA_ORIGIN], rax     ; the composed text, across the releases
+    mov rdi, [rbp - LSA_SELF]
+    mov rsi, [rbp - LSA_SELFTAG]
+    DECREF_VAL rdi, rsi
+    mov rdi, [rbp - LSA_CLASS]
+    mov rsi, [rbp - LSA_CLASSTAG]
+    DECREF_VAL rdi, rsi
+    ; DISPATCH saved the stack top from before the three operands were popped.
+    mov [rel eval_saved_r13], r13
+    lea rdi, [rel exc_TypeError_type]
+    mov rsi, [rbp - LSA_ORIGIN]
+    extern raise_exception
+    leave
+    jmp raise_exception
 
 .lsa_bad_self:
     ; Release what was popped -- the tag says how -- and say what CPython says.
