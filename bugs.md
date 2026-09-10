@@ -94,6 +94,32 @@ reasoning that chose them and what changing one would cost.
   and the three exact-type tests have to move together with a test that
   fixes the whole surface at once.
 
+- **`except*` does not look inside a NESTED group, and a group publishes
+  neither `split` nor `subgroup` nor `derive`.**  `except* KeyError` over
+  `ExceptionGroup("outer", [ExceptionGroup("inner", [KeyError()]), OSError()])`
+  matches the OSError and leaves the outer group unhandled, where CPython
+  recurses and matches the KeyError through the nesting.  The split is
+  `eg_split`, and it walks one level.
+
+  The three methods are the other half of the same gap: the splitting exists
+  only as the thing `except*` calls, so a program cannot do it itself.  And
+  where CPython's `split` asks the group to `derive()` a new one -- whose
+  default builds a plain `ExceptionGroup` -- `eg_split` constructs one of the
+  group's OWN type, so a subclass of `ExceptionGroup` splits into more of
+  itself rather than into `ExceptionGroup`.  Publishing the three and routing
+  the internal split through `derive` is one change, because the type the
+  halves get is decided there.
+
+- **`raise SomeExceptionClass` does not run the class's `__init__`.**  The
+  class form of the operand reaches `exc_new`, which builds the object and its
+  args tuple directly rather than CALLING the type, so
+  `class C(Exception):` with an `__init__` of its own is constructed with none
+  of it: `raise C` gives `C()` where CPython gives whatever `C()` gives.  The
+  `from` clause instantiates a class cause the same way and inherits the same
+  limit.  Fixing it means calling the type -- `exc_type_call` -- where
+  `.raise_type` calls `exc_new`, on the path every `raise ValueError` takes,
+  so it is a hot path and wants measuring rather than just changing.
+
 - **`f(*5)` does not name the callable.**  CPython says
   "__main__.f() argument after * must be an iterable, not int"; this says
   "Value after * must be an iterable, not int", which is CPython's message

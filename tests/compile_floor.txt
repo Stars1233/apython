@@ -195,6 +195,7 @@ test_exc_catchable
 test_exc_context
 test_excepthook
 test_exception_context
+test_exception_group_subclass
 test_exception_init
 test_exception_kwargs
 test_exception_metatype

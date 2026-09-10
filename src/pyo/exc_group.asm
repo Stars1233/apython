@@ -18,6 +18,10 @@ extern ap_free
 extern object_type
 extern ap_malloc
 extern gc_alloc
+extern gc_dealloc
+extern gc_track
+extern exc_traverse
+extern exc_clear_gc
 extern ap_strcmp
 extern exc_BaseException_type
 extern exc_Exception_type
@@ -58,13 +62,16 @@ DEF_FUNC eg_new, EGN_FRAME
     mov r12, rsi            ; msg_str
     mov r13, rdx            ; exc_tuple
 
-    ; Allocate
+    ; Allocate through the collector.  It has to be gc_alloc rather than
+    ; ap_malloc because the TYPE decides how the block is freed, and the type
+    ; here is whatever the caller passed: `except*` splits a group by calling
+    ; this with the group's own type, and a SUBCLASS of any exception type is
+    ; given exc_dealloc, which frees through gc_dealloc at obj - GC_HEAD_SIZE.
+    ; A plain ap_malloc block handed back sixteen bytes low corrupts the heap.
     mov edi, PyExceptionGroupObject_size
-    call ap_malloc
-
-    ; Initialize fields
-    mov qword [rax + PyExceptionGroupObject.ob_refcnt], 1
-    mov [rax + PyExceptionGroupObject.ob_type], rbx
+    mov rsi, rbx
+    call gc_alloc
+    ; gc_alloc sets ob_refcnt = 1 and stamps ob_type
     mov [rax + PyExceptionGroupObject.exc_type], rbx
     mov [rax + PyExceptionGroupObject.exc_value], r12
     mov qword [rax + PyExceptionGroupObject.exc_tb], 0
@@ -123,6 +130,11 @@ DEF_FUNC eg_new, EGN_FRAME
     mov [r8 + 8], rdx
 .args_done:
     mov [rcx + PyExceptionGroupObject.exc_args], rax
+
+    ; Track only now: every field the traverse reads is set.
+    mov rdi, rcx
+    call gc_track
+
     mov rax, rcx
 
     pop r13
@@ -475,14 +487,60 @@ DEF_FUNC eg_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     call obj_decref
 .no_excs:
 
-    ; Free the object
+    ; Free the object (GC-aware), matching eg_new's gc_alloc
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
 
     pop rbx
     leave
     ret
 END_FUNC eg_dealloc
+
+;; ============================================================================
+;; eg_traverse(PyExceptionGroupObject *eg) -> visits every reference it owns
+;;
+;; A group is an exception plus one more reference -- the tuple of the
+;; exceptions it holds -- so it visits that and hands the rest to
+;; exc_traverse.  Without it a group's instances are tracked and report no
+;; outgoing references, and no cycle through one is ever collectable.
+;; ============================================================================
+DEF_FUNC eg_traverse, 8         ; + 1 push = 16, so `call r14` is aligned
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyExceptionGroupObject.eg_exceptions]
+    VISIT_PTR rdi
+
+    mov rdi, rbx
+    call exc_traverse
+
+    pop rbx
+    leave
+    ret
+END_FUNC eg_traverse
+
+;; ============================================================================
+;; eg_clear(PyExceptionGroupObject *eg) -> drops every reference it owns
+;; The collector's half of eg_traverse.
+;; ============================================================================
+DEF_FUNC eg_clear, 8            ; 1 push, so rsp is 16-aligned
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyExceptionGroupObject.eg_exceptions]
+    mov qword [rbx + PyExceptionGroupObject.eg_exceptions], 0
+    test rdi, rdi
+    jz .egc_no_excs
+    call obj_decref
+.egc_no_excs:
+
+    mov rdi, rbx
+    call exc_clear_gc
+
+    pop rbx
+    leave
+    ret
+END_FUNC eg_clear
 
 ;; ============================================================================
 ;; eg_str(PyExceptionGroupObject *eg) -> PyObject* (string)
@@ -1019,10 +1077,10 @@ exc_BaseExceptionGroup_type:
     dq exc_BaseException_type   ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq eg_traverse              ; tp_traverse
+    dq eg_clear                 ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
 
@@ -1052,10 +1110,10 @@ exc_ExceptionGroup_type:
     dq exc_BaseExceptionGroup_type ; tp_base
     dq 0                        ; tp_dict
     dq eg_mro_tuple             ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC        ; tp_flags
     dq eg_bases_tuple           ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
+    dq eg_traverse              ; tp_traverse
+    dq eg_clear                 ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
 

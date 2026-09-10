@@ -1574,6 +1574,34 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov [r12 + PyTypeObject.tp_traverse], rax
     lea rax, [rel exc_clear_gc]
     mov [r12 + PyTypeObject.tp_clear], rax
+
+    ; A subclass of an exception GROUP is still a group, and the four slots
+    ; above are the exception's, not the group's: they neither answer
+    ; `.exceptions` nor release the tuple behind it.  `except*` splits a group
+    ; by constructing one of the group's OWN type, so a subclass reaches all
+    ; of them.
+    extern exc_BaseExceptionGroup_type
+    extern type_is_subtype
+    mov rdi, [rbp - TFP_BASE]
+    lea rsi, [rel exc_BaseExceptionGroup_type]
+    call type_is_subtype
+    test eax, eax
+    jz .bc_no_set_base
+    extern eg_dealloc
+    extern eg_getattr
+    extern eg_str
+    extern eg_traverse
+    extern eg_clear
+    lea rax, [rel eg_dealloc]
+    mov [r12 + PyTypeObject.tp_dealloc], rax
+    lea rax, [rel eg_getattr]
+    mov [r12 + PyTypeObject.tp_getattr], rax
+    lea rax, [rel eg_str]
+    mov [r12 + PyTypeObject.tp_str], rax
+    lea rax, [rel eg_traverse]
+    mov [r12 + PyTypeObject.tp_traverse], rax
+    lea rax, [rel eg_clear]
+    mov [r12 + PyTypeObject.tp_clear], rax
     jmp .bc_no_set_base
 
 .bc_check_int_sub:
