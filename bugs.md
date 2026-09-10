@@ -165,6 +165,15 @@ reasoning that chose them and what changing one would cost.
   builtin subscripts reporting a miss by RETURNING rather than by raising,
   which is every caller of `dict_subscript`.
 
+- **OSError's four named attributes are in its instance `__dict__`.**
+  `errno`, `strerror`, `filename` and `filename2` are C fields in CPython and
+  do not appear in `vars(e)`; here `exc_oserror` writes them into `exc_dict`,
+  so `OSError(2, 'x').__dict__` has four entries CPython's has none of.  Every
+  read of them agrees, and so does `args`; what differs is only what
+  `__dict__`, `vars()` and `__getstate__` report.  Moving them means four more
+  fields on PyExceptionObject and a getattr arm for each, which is what
+  CPython does.
+
 - **`zip(..., strict=True)` does not say which argument was short.**
   CPython's is "zip() argument 2 is shorter than argument 1" (and
   "...longer..."), with an "argument%s 1-%d" plural once there are more than

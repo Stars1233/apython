@@ -997,9 +997,10 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     ; the end.  The __slots__ code below adds to this.
     mov rcx, [rax + PyTypeObject.tp_tailslots]
     mov [r12 + PyTypeObject.tp_tailslots], rcx
-    ; If the base already has a dict slot -- another heaptype, or an int
-    ; subclass -- share it rather than adding a second one, which would
-    ; collide with whatever the base put there.
+    ; If the base already has a dict slot -- another heaptype, an int
+    ; subclass, or an EXCEPTION, whose exc_dict is one -- share it rather than
+    ; adding a second one, which would collide with whatever the base put
+    ; there.
     mov rcx, [rax + PyTypeObject.tp_dictoffset]
     test rcx, rcx
     jnz .bc_layout_inherit

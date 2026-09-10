@@ -1563,6 +1563,13 @@ DEF_FUNC exc_setattr, ESA_FRAME
     mov [rbp - ESA_VAL], rdx
     mov [rbp - ESA_TAG], rcx
 
+    ; A NULL value is a DELETE: op_delete_attr calls tp_setattr(obj, name,
+    ; NULL).  Writing that straight into the dict left an entry whose key was
+    ; set and whose value was 0, which every later read of that dict trips
+    ; over -- `del e.attr` then `e.__dict__` reported "object has no repr".
+    cmp qword [rbp - ESA_VAL], 0
+    je .esa_delete
+
     ; Four names are fields of the object, not entries in its dict, and
     ; exc_getattr reads them from the fields.  Writing them to the dict left
     ; the assignment invisible: `e.__cause__ = other` read back as None, and
@@ -1589,6 +1596,14 @@ DEF_FUNC exc_setattr, ESA_FRAME
     call ap_strcmp
     test eax, eax
     jz .esa_suppress
+    ; And `e.__dict__ = {...}` REPLACES the dict rather than putting an entry
+    ; called "__dict__" inside it, which is what exc_getattr answers with and
+    ; what every other object does.
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__dict__"
+    call ap_strcmp
+    test eax, eax
+    jz .esa_dict
     ; ap_strcmp clobbers the argument registers, so the value and its tag come
     ; back from the frame.
     mov rsi, r12
@@ -1619,6 +1634,60 @@ DEF_FUNC exc_setattr, ESA_FRAME
     pop rbx
     leave
     ret
+
+.esa_dict:
+    extern dict_type
+    ; Only a dict, as CPython's __dict__ setter insists.
+    mov rdx, [rbp - ESA_VAL]
+    V_TEST_PTR rdx, rax
+    ja .esa_dict_bad
+    test rdx, rdx
+    jz .esa_dict_bad
+    mov rax, [rdx + PyObject.ob_type]
+    REQUIRE_DICT_TYPE rax, rcx, .esa_dict_bad
+    INCREF rdx
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    mov [rbx + PyExceptionObject.exc_dict], rdx
+    test rdi, rdi
+    jz .esa_dict_done
+    call obj_decref
+.esa_dict_done:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+.esa_dict_bad:
+    pop r12
+    pop rbx
+    RAISE exc_TypeError_type, "__dict__ must be set to a dictionary"
+
+.esa_delete:
+    mov rax, [rbx + PyExceptionObject.exc_dict]
+    test rax, rax
+    jz .esa_del_missing
+    mov rdi, rax
+    mov rsi, r12
+    extern dict_del_opt
+    call dict_del_opt
+    test eax, eax
+    jnz .esa_del_missing
+    xor eax, eax            ; return 0 (success)
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+.esa_del_missing:
+    mov rdi, rbx
+    mov rsi, r12
+    xor edx, edx
+    extern raise_no_attribute
+    pop r12
+    pop rbx
+    leave
+    jmp raise_no_attribute      ; does not return
 
     ; Each field holds a strong reference, and None means "none of it": the
     ; report walks a NULL field, not a None one.
@@ -2774,7 +2843,14 @@ global %1
     dq 0                    ; tp_bases
     dq exc_traverse         ; tp_traverse
     dq exc_clear_gc         ; tp_clear
-    dq 0         ; tp_dictoffset
+    ; An exception's instance dict is exc_dict, and saying so is what lets
+    ; the GENERIC machinery find it: obj_generic_attr and
+    ; object.__getstate__ both go through tp_dictoffset, and with a zero
+    ; there `Exception('x').__getstate__()` was None however many attributes
+    ; had been set.  It is also what type_from_parts inherits, so a subclass
+    ; stops putting a SECOND dict one word past the end of an object whose
+    ; constructor allocates exactly PyExceptionObject_size.
+    dq PyExceptionObject.exc_dict ; tp_dictoffset
     dq 0                        ; tp_tailslots
 %endmacro
 
