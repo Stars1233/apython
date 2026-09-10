@@ -108,7 +108,10 @@ END_FUNC int_from_i64
 ;; PRESERVES EVERY REGISTER, so INT_NEED_MPZ can be dropped in front of any
 ;; .mpz access without auditing what is live around it.
 ;; ============================================================================
-DEF_FUNC int_promote_mpz
+IPM_RSP equ 8               ; the caller's rsp, while GMP is called on an
+                            ;   aligned one
+IPM_FRAME equ 16            ; + 10 pushes below, which are mid-body
+DEF_FUNC int_promote_mpz, IPM_FRAME
     push rax
     push rcx
     push rdx
@@ -118,10 +121,18 @@ DEF_FUNC int_promote_mpz
     push r9
     push r10
     push r11
-    push rdi                    ; 10th push keeps rsp 16-byte aligned for GMP
+    push rdi                    ; the object again, for after the call
     mov rsi, [rdi + PyIntObject.ival]
     lea rdi, [rdi + PyIntObject.mpz]
+    ; ALIGN rather than count.  The tenth push used to be here to make the
+    ; pushes even, which is right only if the CALLER got its own parity right
+    ; -- and INT_NEED_MPZ, the macro that reaches this, brackets the call with
+    ; a single push, so it arrives at whichever parity its own caller had.
+    ; Measured: two calls in a bignum workload came in eight out.
+    mov [rbp - IPM_RSP], rsp
+    and rsp, -16
     call __gmpz_init_set_si wrt ..plt
+    mov rsp, [rbp - IPM_RSP]
     pop rdi                     ; the object again
     mov qword [rdi + PyIntObject.compact], 0
     pop r11
@@ -1509,7 +1520,14 @@ DEF_FUNC_BARE int_dealloc
     cmp qword [rbx + PyIntObject.compact], 0
     jne .compact                ; no mpz was ever initialized
     lea rdi, [rbx + PyIntObject.mpz]
+    ; `push rbp` and `push rbx` above leave rsp eight out, and this is a call
+    ; into libc.  DEF_FUNC_BARE is exempt from lint's alignment check -- it
+    ; has no frame for lint to reason about -- so a hand-rolled prologue like
+    ; this one has to get its own parity right.  Measured: 290 of 290 calls
+    ; here were misaligned on a bignum workload.
+    sub rsp, 8
     call __gmpz_clear wrt ..plt
+    add rsp, 8
 .compact:
 %ifndef NO_INT_FREELIST
     ; Back to the free list rather than to libc.  The mpz has been cleared
@@ -2298,8 +2316,11 @@ DEF_FUNC int_power, IPW_FRAME
     test cl, cl
     jz .pow_done
     push rax
+    sub rsp, 8              ; the lone push above flips the parity, and
+                            ;   int_dealloc reaches __gmpz_clear
     mov rdi, rbx
     call int_dealloc
+    add rsp, 8
     pop rax
 .pow_done:
     mov rdi, rax
