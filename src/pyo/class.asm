@@ -290,6 +290,15 @@ END_FUNC ts_imm_append
 ;; CPython's PyObject_CallFinalizer: run __del__ once, with the object held
 ;; alive for the duration and the pending exception put back the way it was.
 ;;
+;; Answers eax = 1 when the object still has references after the call.  A
+;; caller that is DEALLOCATING it -- where the refcount was zero on the way in
+;; -- reads that as resurrection and must free nothing: __del__ stored `self`
+;; somewhere, and that somewhere is a live reference.  That is CPython's
+;; PyObject_CallFinalizerFromDealloc, which is the same arithmetic entered at
+;; zero.  The collector calls this on an object that is in a cycle and so has
+;; references either way; it ignores the answer and lets the resurrection pass
+;; decide.
+;;
 ;; It is a function of its own because the COLLECTOR calls it too.  PEP 442
 ;; says the finalizers of an unreachable cycle all run before any of it is
 ;; cleared -- otherwise __del__ is handed an object whose attributes have
@@ -384,10 +393,12 @@ DEF_FUNC obj_call_finalizer, OCF_FRAME
 
 .del_cleared:
 
-    ; Restore refcount (undo the bump).  It cannot reach zero: the caller is
-    ; either mid-dealloc and holds the object at zero already, or the
-    ; collector, which found it in a cycle.
+    ; Undo the bump, without deallocating: whether anything is left is the
+    ; answer this function gives.
     dec qword [rbx + PyObject.ob_refcnt]
+    xor eax, eax
+    cmp qword [rbx + PyObject.ob_refcnt], 0
+    setne al
 
     pop rbx
     leave
@@ -422,38 +433,12 @@ DEF_FUNC instance_dealloc, ID_FRAME
 
     mov rbx, rdi                ; rbx = self
 
-    ; Does this class have a __del__ at all?  One bit, maintained by
-    ; type_refresh_attr_flags down every subclass, instead of the MRO walk and
-    ; a dict probe per entry that dunder_call_1 does -- which ran on EVERY
-    ; heaptype instance that died, to discover that almost none of them has
-    ; one.  Callgrind put that at 23.9% of a `class C: pass` construction loop.
-    ; TYPE_FLAG_HAS_DEL is only ever set on a heaptype, so it implies the
-    ; heaptype test the check used to make.
-    mov rax, [rbx + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_flags]
-    test rax, TYPE_FLAG_HAS_DEL
-    jz .no_del
+    ; __del__ has already run by now: obj_dealloc calls the finalizer before
+    ; it clears the weak references and before it reaches this tp_dealloc,
+    ; which is the order PEP 442 asks for and the order that lets an object
+    ; its own finalizer resurrects keep the weakrefs that pointed at it.  If
+    ; it did resurrect, obj_dealloc returned and this never ran at all.
 
-    ; PEP 442 says a finalizer runs at most once, and the collector may have
-    ; run this one already -- it finalizes a whole unreachable cycle before it
-    ; clears any of it.  The bit lives in the GC head, so it is only there to
-    ; read while the object is still tracked, which it is: gc_untrack happens
-    ; further down, inside gc_dealloc.
-    mov rax, [rbx + PyObject.ob_type]
-    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
-    jz .del_do_call
-    cmp qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_next], 0
-    je .del_do_call                 ; untracked: no bit to read
-    test qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_prev], GC_PREV_MASK_FINALIZED
-    jnz .no_del
-    or qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_prev], GC_PREV_MASK_FINALIZED
-
-.del_do_call:
-    extern obj_call_finalizer
-    mov rdi, rbx
-    call obj_call_finalizer
-
-.no_del:
     ; Check if this is an int subclass — XDECREF int_value (tag-aware)
     mov rax, [rbx + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_flags]

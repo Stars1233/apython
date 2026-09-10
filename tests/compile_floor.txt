@@ -157,6 +157,7 @@ test_del_during_unwind
 test_delete_name
 test_delete
 test_del
+test_del_resurrect
 test_deopt_extended_arg
 test_deque
 test_descr_func_attr

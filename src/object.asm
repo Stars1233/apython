@@ -119,6 +119,43 @@ DEF_FUNC_BARE obj_dealloc
 .td_enter:
     inc qword [rel trash_nesting]
 
+    ; PEP 442: __del__ runs before anything is taken apart -- before the weak
+    ; references are cleared and before tp_dealloc releases a field -- and if
+    ; it brings the object back, nothing below may run at all.  It used to be
+    ; called from inside instance_dealloc, after the weakrefs had already been
+    ; emptied and with no way to say the object had been resurrected, so
+    ; `def __del__(self): survivors.append(self)` freed an object that the
+    ; list it had just been added to still pointed at.
+    ;
+    ; TYPE_FLAG_HAS_DEL is one bit, maintained by type_refresh_attr_flags down
+    ; every subclass, and it is only ever set on a heaptype.
+    mov rax, [rbx + PyObject.ob_type]
+    test rax, rax
+    jz .no_finalizer
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAS_DEL
+    jz .no_finalizer
+
+    ; A finalizer runs at most once, and the collector may have run this one
+    ; already: it finalizes a whole unreachable cycle before clearing any of
+    ; it.  The bit lives in the GC head, which is only there to read while the
+    ; object is still tracked -- gc_untrack happens later, inside gc_dealloc.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .td_do_finalize
+    cmp qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_next], 0
+    je .td_do_finalize              ; untracked: no bit to read
+    test qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_prev], GC_PREV_MASK_FINALIZED
+    jnz .no_finalizer
+    or qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_prev], GC_PREV_MASK_FINALIZED
+
+.td_do_finalize:
+    extern obj_call_finalizer
+    mov rdi, rbx
+    call obj_call_finalizer
+    test eax, eax
+    jnz .td_leave                   ; resurrected: free nothing
+
+.no_finalizer:
+
     ; Weak references to this object have to be emptied, and their callbacks
     ; run, before it is freed.  The links live in a side table rather than in
     ; the object, so the check is one compare against a counter that stays
