@@ -213,6 +213,87 @@ DEF_FUNC dict_release_tables, 8         ; + 1 push = 16, 16-aligned
 END_FUNC dict_release_tables
 
 ;; ============================================================================
+;; dict_clear_all(rdi = dict) -> void
+;; Empty a dict and release everything it held.
+;;
+;; The tables are DETACHED first, and only then walked.  Releasing a value runs
+;; its __del__, which is arbitrary Python and may call clear() on this same
+;; dict -- and a second call that still found these entries installed released
+;; every one of them a second time, freeing objects the first call was in the
+;; middle of.  CPython's PyDict_Clear installs the empty table before it drops
+;; a single reference, for exactly this reason.  Nothing hands out a pointer to
+;; the detached table, so the walk below needs no re-reading and no clearing.
+;; ============================================================================
+DCA_BASE    equ 8              ; the detached entry array, to free
+DCA_CUR     equ 16             ; the cursor into it
+DCA_INDICES equ 24             ; the detached index array, to free
+DCA_COUNT   equ 32
+DCA_VAL     equ 40
+DCA_FRAME   equ 56             ; + 1 push = 64, 16-aligned
+DEF_FUNC dict_clear_all, DCA_FRAME
+    push rbx
+    mov rbx, rdi
+
+    mov rax, [rbx + PyDictObject.entries]
+    mov rcx, [rbx + PyDictObject.dk_indices]
+    mov rdx, [rbx + PyDictObject.capacity]
+    mov [rbp - DCA_BASE], rax
+    mov [rbp - DCA_CUR], rax
+    mov [rbp - DCA_INDICES], rcx
+    mov [rbp - DCA_COUNT], rdx
+
+    lea rcx, [rel dict_empty_entries]
+    cmp rax, rcx
+    jne .dca_detach
+    ; Already sharing the empty table: nothing of ours to release or free.
+    mov qword [rbp - DCA_BASE], 0
+    mov qword [rbp - DCA_COUNT], 0
+    jmp .dca_reset
+
+.dca_detach:
+    mov [rbx + PyDictObject.entries], rcx
+    lea rcx, [rel dict_empty_indices]
+    mov [rbx + PyDictObject.dk_indices], rcx
+    mov qword [rbx + PyDictObject.capacity], 1
+    mov qword [rbx + PyDictObject.dk_kind], 1   ; no keys left to disprove it
+
+.dca_reset:
+    mov qword [rbx + PyDictObject.ob_size], 0
+    mov qword [rbx + PyDictObject.dk_nentries], 0
+    mov qword [rbx + PyDictObject.dk_tombstones], 0
+    inc qword [rbx + PyDictObject.dk_version]
+
+.dca_loop:
+    cmp qword [rbp - DCA_COUNT], 0
+    je .dca_free
+    dec qword [rbp - DCA_COUNT]
+    mov rax, [rbp - DCA_CUR]
+    mov rdi, [rax + DictEntry.key]
+    test rdi, rdi
+    jz .dca_next                    ; empty slot or tombstone
+    mov rcx, [rax + DictEntry.value]
+    mov [rbp - DCA_VAL], rcx
+    DECREF_V rdi, rax
+    mov rdi, [rbp - DCA_VAL]
+    DECREF_V rdi, rax
+.dca_next:
+    add qword [rbp - DCA_CUR], DICT_ENTRY_SIZE
+    jmp .dca_loop
+
+.dca_free:
+    cmp qword [rbp - DCA_BASE], 0
+    je .dca_done
+    mov rdi, [rbp - DCA_BASE]
+    call ap_free
+    mov rdi, [rbp - DCA_INDICES]
+    call ap_free
+.dca_done:
+    pop rbx
+    leave
+    ret
+END_FUNC dict_clear_all
+
+;; ============================================================================
 ;; dict_alloc_tables(rdi = dict, rsi = capacity)
 ;; Allocates the dense entry array (zeroed, so the unused tail reads as empty)
 ;; and the sparse index array (all DICT_IX_EMPTY).  Sets .capacity.
