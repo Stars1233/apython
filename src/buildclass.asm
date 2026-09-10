@@ -558,23 +558,33 @@ DEF_FUNC type_mangle_name, TMN_FRAME
 END_FUNC type_mangle_name
 
 ;; ============================================================================
-;; bc_fill_cell(rdi = the class namespace, rsi = a cstring name, rdx = a Value)
-;;   -> nothing
+;; bc_fill_cell(rdi = the class namespace, rsi = a cstring name, rdx = a Value,
+;;              rcx = the refusal to raise when the name is not a cell)
+;;   -> nothing, or does not return
 ;;
 ;; Fill the cell the compiler left under that name, then take the name back
 ;; out: both cells a class body can leave are plumbing rather than attributes,
 ;; and CPython's type_new deletes each after using it.  A missing name is the
 ;; ordinary case and does nothing.
+;;
+;; What is under the name need not be a cell: a metaclass can put anything
+;; there, and CPython's own test_super puts None, 0, "" and object() there on
+;; purpose.  This wrote the class straight into PyCellObject.ob_ref of
+;; whatever it found -- into the None singleton, or through an int immediate
+;; as if it were an address.
 ;; ============================================================================
 BFC_DICT equ 8
 BFC_NAME equ 16
 BFC_VAL  equ 24
 BFC_KEY  equ 32
-BFC_FRAME equ 48                ; + 0 pushes, 16-aligned
+BFC_MSG  equ 40
+BFC_FOUND equ 48                ; what was under the name, across the release
+BFC_FRAME equ 64                ; + 0 pushes, 16-aligned
 DEF_FUNC_LOCAL bc_fill_cell, BFC_FRAME
     mov [rbp - BFC_DICT], rdi
     mov [rbp - BFC_NAME], rsi
     mov [rbp - BFC_VAL], rdx
+    mov [rbp - BFC_MSG], rcx
 
     mov rdi, rsi
     call str_from_cstr_heap
@@ -586,6 +596,17 @@ DEF_FUNC_LOCAL bc_fill_cell, BFC_FRAME
     call dict_get                       ; a Value; 0 is the miss
     test rax, rax
     jz .bfc_drop_key
+
+    ; It has to BE a cell.  CPython's type_new asks the same question and
+    ; words the refusal the same way, naming the type it found instead.
+    mov [rbp - BFC_FOUND], rax
+    V_TEST_PTR rax, rcx
+    ja .bfc_not_a_cell
+    mov rcx, [rax + PyObject.ob_type]
+    extern cell_type
+    lea rdx, [rel cell_type]
+    cmp rcx, rdx
+    jne .bfc_not_a_cell
 
     mov rcx, [rbp - BFC_VAL]
     mov [rax + PyCellObject.ob_ref], rcx  ; a pointer is its own Value
@@ -601,6 +622,16 @@ DEF_FUNC_LOCAL bc_fill_cell, BFC_FRAME
 .bfc_out:
     leave
     ret
+
+.bfc_not_a_cell:
+    ; Release the interned key first: the raise abandons this frame.
+    mov rdi, [rbp - BFC_KEY]
+    call obj_decref
+    mov rdi, [rbp - BFC_MSG]
+    mov rsi, [rbp - BFC_FOUND]
+    extern raise_type_error_with_name
+    leave
+    jmp raise_type_error_with_name      ; does not return
 END_FUNC bc_fill_cell
 
 ;; ============================================================================
@@ -1873,10 +1904,12 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov rdi, r15
     lea rsi, [rel bc_classcell_name]
     mov rdx, r12
+    lea rcx, [rel bc_classcell_bad]
     call bc_fill_cell
     mov rdi, r15
     lea rsi, [rel bc_classdictcell_name]
     mov rdx, r15
+    lea rcx, [rel bc_classdictcell_bad]
     call bc_fill_cell
 
     ; Track the type object in GC
@@ -2332,6 +2365,8 @@ bc_init_name: db "__init__", 0
 bc_module_name: db "__module__", 0
 bc_dunder_name_name: db "__name__", 0
 bc_classcell_name: db "__classcell__", 0
+bc_classcell_bad: db `__classcell__ must be a nonlocal cell, not <class '\x01'>`, 0
+bc_classdictcell_bad: db `__classdictcell__ must be a nonlocal cell, not <class '\x01'>`, 0
 bc_classdictcell_name: db "__classdictcell__", 0
 bc_slots_name: db "__slots__", 0
 bc_slots_unsupported:

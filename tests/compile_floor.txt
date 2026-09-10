@@ -73,6 +73,7 @@ test_call_ex
 test_call_instance
 test_call_kwargs_errors
 test_call_spec
+test_classcell_not_a_cell
 test_classes
 test_classmethod_metaclass
 test_class_namespace_copy
