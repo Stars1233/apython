@@ -225,6 +225,7 @@ test_exec_custom_locals
 test_extended_slice
 test_fileio
 test_final_types
+test_float_as_integer_ratio
 test_float_big_int
 test_float_compare_spec
 test_float_complex_subclass

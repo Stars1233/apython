@@ -1143,11 +1143,91 @@ END_FUNC float_method_conjugate
 
 
 ;; ============================================================================
-;; float_method_as_integer_ratio(args, nargs) -> 2-tuple (numerator, denominator)
-;; Extract IEEE 754 mantissa/exponent and return (n, d) as SmallInts.
+;; fir_pow2_scale(rdi = a signed int64, rsi = a shift) -> rax = a Value
+;;   holding exactly `value * 2**shift`
+;;
+;; The one arithmetic float.as_integer_ratio() cannot do in a register.  A
+;; shift that stays inside an int64 is done inline, which is the common case --
+;; 0.5 is (1, 2) -- and anything wider goes through GMP and comes back through
+;; int_shrink, exactly as every other operator that can overflow does.
+;; ============================================================================
+extern int_new_compact
+extern int_shrink
+extern __gmpz_set_si
+extern __gmpz_mul_2exp
+
+FPS_MANT  equ 8
+FPS_SHIFT equ 16
+FPS_FRAME equ 24            ; + 1 push = 32, 16-aligned for the GMP calls
+DEF_FUNC_LOCAL fir_pow2_scale, FPS_FRAME
+    ; rbx is saved in the prologue rather than inside .fps_wide, so that the
+    ; alignment check can see the push: the GMP calls below need rsp 16-byte
+    ; aligned and 24 + 8 is what does it.
+    push rbx
+
+    ; The inline arm: shift, shift back, and see whether the value survived.
+    mov rax, rdi
+    mov rcx, rsi
+    cmp rcx, 62
+    ja .fps_wide
+    mov rdx, rax
+    shl rax, cl
+    sar rax, cl
+    cmp rax, rdx
+    jne .fps_wide
+    mov rax, rdx
+    shl rax, cl
+    V_PACK_I64 rax, rcx
+    pop rbx
+    leave
+    ret
+
+.fps_wide:
+    mov [rbp - FPS_MANT], rdi
+    mov [rbp - FPS_SHIFT], rsi
+    ; int_new_compact, not int_from_i64: the latter answers an IMMEDIATE for a
+    ; small value, and there is no mpz on an immediate to scale.
+    xor edi, edi
+    call int_new_compact
+    mov rbx, rax
+    INT_NEED_MPZ rbx
+    lea rdi, [rbx + PyIntObject.mpz]
+    mov rsi, [rbp - FPS_MANT]
+    call __gmpz_set_si wrt ..plt
+    lea rdi, [rbx + PyIntObject.mpz]
+    mov rsi, rdi
+    mov rdx, [rbp - FPS_SHIFT]
+    call __gmpz_mul_2exp wrt ..plt
+    mov rdi, rbx
+    call int_shrink
+    pop rbx
+    leave
+    ret
+END_FUNC fir_pow2_scale
+
+;; ============================================================================
+;; float_method_as_integer_ratio(rdi = args, rsi = nargs)
+;;   -> rax = a Value: the 2-tuple (numerator, denominator)
+;;
+;; Exact for every finite float.  This used to build both halves in one 64-bit
+;; register, which was wrong three ways at once:
+;;
+;;   - anything needing a shift past 62 raised OverflowError wearing the
+;;     message meant for inf and NaN.  (1e300) and (2.0**70) both did, and
+;;     21,998 of CPython's test_statistics errors were this one line.
+;;   - a SUBNORMAL was decoded as if it were normal: the exponent came out one
+;;     too low and the implicit mantissa bit was set, which a subnormal does
+;;     not have.  Both were invisible only because the range check rejected
+;;     every subnormal first.
+;;   - and between 2**63 and about 2**115, where the shift still passed the
+;;     guard but not the register, it silently WRAPPED.  3.0 * 2**62 is the
+;;     smallest case.
+;;
+;; inf and NaN are also two different refusals in CPython, not one.
 ;; ============================================================================
 extern exc_OverflowError_type
 
+FIR_MANT  equ 8             ; the mantissa, across the calls that build the pair
 FIR_FRAME equ 8             ; + 1 push = 16
 DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     push rbx
@@ -1156,80 +1236,73 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     call float_self_bits        ; a subclass instance is a pointer, not an
                                 ; immediate: see float_self_bits
 
-    ; Check for inf/nan
+    ; inf and NaN: OverflowError for the infinities, ValueError for a NaN,
+    ; each naming what it was handed rather than both at once.
     mov rcx, rax
     mov rdx, 0x7ff0000000000000
     and rcx, rdx
     cmp rcx, rdx
-    je .fir_error
-
-    ; Check for zero
+    jne .fir_finite
     mov rcx, rax
-    btr rcx, 63                 ; clear sign
-    test rcx, rcx
-    jz .fir_zero
+    mov rdx, 0x000fffffffffffff
+    and rcx, rdx
+    jnz .fir_nan
+    jmp .fir_inf
 
-    ; Extract sign, exponent, mantissa from IEEE 754
-    ; sign = bit 63, exponent = bits 62-52 (biased), mantissa = bits 51-0
-    mov r8, rax                 ; save original bits
-    mov rcx, rax
-    shr rcx, 52
-    and ecx, 0x7ff              ; biased exponent
-    sub ecx, 1023               ; unbiased exponent
-    sub ecx, 52                 ; adjust for mantissa bits
-
-    ; mantissa with implicit 1 bit
+.fir_finite:
+    mov r8, rax                 ; the raw bits
+    mov r10d, eax
+    shr rax, 52
+    and eax, 0x7ff              ; the biased exponent
+    mov r10d, eax
     mov rax, r8
     mov rdx, 0x000fffffffffffff
-    and rax, rdx
-    bts rax, 52                 ; set implicit bit (bit 52)
+    and rax, rdx                ; the mantissa field
+    test r10d, r10d
+    jz .fir_subnormal
 
-    ; Reduce: strip trailing zeros from mantissa (common factor of 2)
-    ; This makes the fraction fully reduced
-    tzcnt rdx, rax              ; count trailing zeros
-    mov cl, dl
-    shr rax, cl                 ; mantissa >>= trailing_zeros
+    ; Normal: the implicit bit is there, and the value is M * 2**(biased-1075)
+    ; -- 1023 of bias and 52 of mantissa.
+    bts rax, 52
+    sub r10d, 1075
+    jmp .fir_have_parts
 
-    ; Reload exponent (ecx was clobbered by cl usage)
-    mov rcx, r8
-    shr rcx, 52
-    and ecx, 0x7ff
-    sub ecx, 1023
-    sub ecx, 52
-    add ecx, edx               ; adjust exponent by trailing zeros stripped
+.fir_subnormal:
+    ; No implicit bit, and the exponent is -1074 rather than the -1075 the
+    ; normal formula gives: a subnormal's leading digit is 0, not 1.  A zero
+    ; mantissa here is the zero itself, either sign of it.
+    test rax, rax
+    jz .fir_zero
+    mov r10d, -1074
 
-    ; Apply sign
+.fir_have_parts:
+    ; Strip the trailing zeros, so the pair comes out fully reduced.
+    tzcnt rdx, rax
+    mov ecx, edx
+    shr rax, cl
+    add r10d, edx
+
+    ; The sign belongs to the numerator.
     bt r8, 63
-    jnc .fir_positive
+    jnc .fir_signed
     neg rax
-.fir_positive:
+.fir_signed:
 
-    ; Now: value = rax * 2^ecx
-    ; If ecx >= 0: numerator = rax << ecx, denominator = 1
-    ; If ecx < 0: numerator = rax, denominator = 1 << (-ecx)
-    test ecx, ecx
+    ; value = rax * 2**r10d, with rax odd and inside 54 bits.
+    test r10d, r10d
     js .fir_neg_exp
 
-    ; Positive exponent: shift numerator left
-    cmp ecx, 62                 ; limit to prevent overflow
-    ja .fir_error
-    mov cl, cl
-    shl rax, cl
-    push rax                    ; numerator
-
-    ; Build 2-tuple (numerator=rax, denominator=1)
+    ; numerator = mantissa << exp, denominator = 1
+    mov rdi, rax
+    movsxd rsi, r10d
+    call fir_pow2_scale
+    mov rbx, rax                ; the numerator, a Value
     mov edi, 2
     call tuple_new
-    mov rbx, rax
-    pop rcx                     ; numerator
-
-    mov r9, [rbx + PyTupleObject.ob_item]
-    V_PACK_I64 rcx, r10
-    mov [r9], rcx
+    mov r9, [rax + PyTupleObject.ob_item]
+    mov [r9], rbx
     mov rcx, V_INT(1)
     mov [r9 + 8], rcx
-
-    mov rax, rbx
     mov edx, TAG_PTR
     pop rbx
     leave
@@ -1237,28 +1310,21 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     ret
 
 .fir_neg_exp:
-    ; Negative exponent
-    neg ecx
-    cmp ecx, 62
-    ja .fir_error
-    push rax                    ; save numerator
-    mov edx, 1
-    shl rdx, cl                 ; denominator = 1 << (-ecx)
-    push rdx                    ; save denominator
-
+    ; numerator = mantissa, denominator = 1 << -exp.  The numerator always
+    ; fits an int64 here: it is what is left of a 53-bit mantissa.
+    neg r10d
+    mov [rbp - FIR_MANT], rax
+    mov edi, 1
+    movsxd rsi, r10d
+    call fir_pow2_scale
+    mov rbx, rax                ; the denominator, a Value
     mov edi, 2
     call tuple_new
-    mov rbx, rax
-    pop rdx                     ; denominator
-    pop rcx                     ; numerator
-
-    mov r9, [rbx + PyTupleObject.ob_item]
+    mov r9, [rax + PyTupleObject.ob_item]
+    mov rcx, [rbp - FIR_MANT]
     V_PACK_I64 rcx, r10
     mov [r9], rcx
-    V_PACK_I64 rdx, r10
-    mov [r9 + 8], rdx
-
-    mov rax, rbx
+    mov [r9 + 8], rbx
     mov edx, TAG_PTR
     pop rbx
     leave
@@ -1285,8 +1351,10 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.fir_error:
-    RAISE exc_OverflowError_type, "cannot convert float infinity or NaN to integer ratio"
+.fir_inf:
+    RAISE exc_OverflowError_type, "cannot convert Infinity to integer ratio"
+.fir_nan:
+    RAISE exc_ValueError_type, "cannot convert NaN to integer ratio"
 END_FUNC float_method_as_integer_ratio
 
 ;; ============================================================================
