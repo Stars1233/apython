@@ -2043,6 +2043,25 @@ DEF_FUNC methods_init
     mov rdi, rax
     call type_stamp_methods
 
+    ;; --- member_descriptor: the __slots__ descriptor, by NAME ---
+    ; It worked through attribute access and answered "'member_descriptor'
+    ; object has no attribute '__get__'" to every program that reached for the
+    ; protocol itself -- inspect.getattr_static, inspect.isdatadescriptor and
+    ; anything walking type.__dict__.
+    call dict_new
+    mov rbx, rax
+    extern member_descr_dunder_get
+    ADD_FN mn___get__, member_descr_dunder_get
+    extern member_descr_dunder_set
+    ADD_FN mn___set__, member_descr_dunder_set
+    extern member_descr_dunder_delete
+    ADD_FN mn___delete__, member_descr_dunder_delete
+    extern member_descr_type
+    lea rax, [rel member_descr_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
     ;; --- builtin_function_or_method: a NON-data descriptor by name ---
     ; __get__ and no __set__ is how inspect and the enum and dataclasses
     ; classifiers tell a method from a getset.

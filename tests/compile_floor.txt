@@ -379,6 +379,7 @@ test_match_mapping_types
 test_match
 test_math_more
 test_math
+test_member_descriptor_protocol
 test_membership
 test_memmove_boundaries
 test_memoryview_released
