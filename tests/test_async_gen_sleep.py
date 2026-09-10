@@ -73,6 +73,28 @@ async def main_coro():
 print(asyncio.run(main_coro()))
 
 
-# NOTE: `await g.asend(None)` is not supported here -- the asend wrapper is not
-# awaitable -- so the asend/athrow surface stays uncovered.  It is reachable
-# only through `async for`, which is what the cases above drive.
+# The same generators driven by hand, which is the other half of the surface:
+# asend, aclose and athrow each answer an awaitable, and an `await` inside the
+# generator body has to pass outward through it to the loop unchanged.
+async def by_hand():
+    g = gen_coro()
+    out = []
+    while True:
+        try:
+            out.append(await g.asend(None))
+        except StopAsyncIteration:
+            break
+    return out
+
+
+print(asyncio.run(by_hand()))
+
+
+async def half_way():
+    g = gen_coro()
+    first = await g.asend(None)
+    await g.aclose()
+    return first
+
+
+print(asyncio.run(half_way()))

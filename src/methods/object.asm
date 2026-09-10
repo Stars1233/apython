@@ -953,6 +953,10 @@ DEF_DUNDER_NEXT scandir_iter
 ; A generator is its own iterator, and CPython's type says so by name.
 extern gen_type
 extern coro_type
+extern async_gen_asend_type
+DEF_DUNDER_ITER async_gen_asend
+extern async_gen_athrow_type
+DEF_DUNDER_ITER async_gen_athrow
 DEF_DUNDER_ITER gen
 ; A coroutine's __await__ is the same thing under the name `await` uses.
 DEF_DUNDER_ITER coro

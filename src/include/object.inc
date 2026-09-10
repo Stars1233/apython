@@ -832,8 +832,11 @@ struc AsyncGenASend
     .ags_gen:       resq 1  ; +16: pointer to async generator (INCREF'd)
     .ags_state:     resd 1  ; +24: 0=initial, 1=yielded, 2=closed
     .pad0:          resd 1  ; +28
-    .pad1:          resq 1  ; +32
-    .pad2:          resq 1  ; +40
+    .ags_sendval:   resq 1  ; +32: the Value asend.send() will resume with,
+                            ;      owned, 0 for None
+    .ags_started:   resd 1  ; +40: athrow only -- 1 once the throw has been
+                            ;      delivered, so a later drive resumes instead
+    .pad2:          resd 1  ; +44
     .gi_return_value: resq 1 ; +48: yielded Value (for SEND exhaustion path)
 endstruc
 

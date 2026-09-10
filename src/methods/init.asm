@@ -1183,6 +1183,50 @@ DEF_FUNC methods_init
     mov rdi, rax
     call type_stamp_methods
 
+    ;; --- the asend awaitable --------------------------------------------
+    ;; What async_gen.__anext__() answers.  It had a live tp_iternext and no
+    ;; tp_dict, so driving an async generator by hand -- `.__anext__()` then
+    ;; `.send(None)`, which is what CPython's test_asyncgen does throughout
+    ;; and the only way to do it without an event loop -- raised
+    ;; AttributeError on send.
+    call dict_new
+    mov rbx, rax
+
+    extern _ags_send_impl
+    ADD_FN mn_send, _ags_send_impl
+    extern _ags_next_impl
+    ADD_FN mn___next__, _ags_next_impl
+    extern _ags_close_impl
+    ADD_FN mn_close, _ags_close_impl
+    extern async_gen_asend_dunder_iter
+    ADD_FN mn___iter__, async_gen_asend_dunder_iter
+    ADD_FN mn___await__, async_gen_asend_dunder_iter
+
+    extern async_gen_asend_type
+    lea rax, [rel async_gen_asend_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
+    ;; --- the aclose/athrow awaitable ------------------------------------
+    ;; The same five names over its own tp_iternext, so `await agen.aclose()`
+    ;; and a hand-driven `.send(None)` reach the same object.
+    call dict_new
+    mov rbx, rax
+
+    ADD_FN mn_send, _ags_send_impl
+    ADD_FN mn___next__, _ags_next_impl
+    ADD_FN mn_close, _ags_close_impl
+    extern async_gen_athrow_dunder_iter
+    ADD_FN mn___iter__, async_gen_athrow_dunder_iter
+    ADD_FN mn___await__, async_gen_athrow_dunder_iter
+
+    extern async_gen_athrow_type
+    lea rax, [rel async_gen_athrow_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
     ;; A coroutine is awaited rather than iterated, so it gets the same
     ;; three methods and the cr_* spellings of the same fields.
     call dict_new
