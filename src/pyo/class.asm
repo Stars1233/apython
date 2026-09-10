@@ -730,7 +730,42 @@ END_FUNC base_slot
 
 IR_EXC   equ 8
 IR_FRAME equ 24            ; + 1 push = 32, 16-aligned
-DEF_FUNC instance_repr, IR_FRAME
+
+;; ============================================================================
+;; instance_repr(rdi = an instance) -> (rax = a str, edx = TAG_PTR), or (0, 0)
+;;
+;; `Foo.__repr__ = Foo.__str__` makes the two chase each other: instance_repr
+;; finds __repr__, which is object.__str__, which asks for __repr__ again.  No
+;; Python frame is entered anywhere in that loop, so recursion_depth never
+;; moved and the machine stack ran out -- CPython raises RecursionError, and
+;; its test_descr.test_repr_as_str (issue 11603) is the test for it.
+;;
+;; The body is wrapped so its several exits need not each be touched, as
+;; list_richcompare is.  A NULL rather than a raise, so the container reprs
+;; still get to free their buffers on the way out.
+;; ============================================================================
+extern c_recursion_depth
+extern recursion_limit
+extern exc_RecursionError_type
+extern set_exception
+DEF_FUNC instance_repr
+    C_RECURSION_ENTER .ir_too_deep
+    call instance_repr_inner
+    C_RECURSION_LEAVE
+    leave
+    ret
+.ir_too_deep:
+    C_RECURSION_LEAVE
+    SET_EXC exc_RecursionError_type, \
+            "maximum recursion depth exceeded while getting the repr of an object"
+    RET_NULL
+    leave
+    ret
+END_FUNC instance_repr
+
+;; instance_repr_inner(rdi = an instance) -> the same; the wrapper above only
+;; bounds the recursion.
+DEF_FUNC_LOCAL instance_repr_inner, IR_FRAME
     push rbx
     mov rbx, rdi
     DUNDER_EXC_SAVE [rbp - IR_EXC]
@@ -810,7 +845,7 @@ DEF_FUNC instance_repr, IR_FRAME
     pop rbx
     leave
     ret
-END_FUNC instance_repr
+END_FUNC instance_repr_inner
 
 ;; ============================================================================
 ;; instance_repr_default(rdi = the instance) -> rax = PyStrObject*
@@ -919,7 +954,28 @@ END_FUNC instance_repr_default
 ;; ============================================================================
 IS_EXC   equ 8
 IS_FRAME equ 24            ; + 1 push = 32, 16-aligned
-DEF_FUNC instance_str, IS_FRAME
+
+;; The same guard instance_repr carries, and for the same loop: the two reach
+;; each other, so bounding only one of them would report the depth at whichever
+;; happened to be asked first.
+DEF_FUNC instance_str
+    C_RECURSION_ENTER .is_too_deep
+    call instance_str_inner
+    C_RECURSION_LEAVE
+    leave
+    ret
+.is_too_deep:
+    C_RECURSION_LEAVE
+    SET_EXC exc_RecursionError_type, \
+            "maximum recursion depth exceeded while getting the str of an object"
+    RET_NULL
+    leave
+    ret
+END_FUNC instance_str
+
+;; instance_str_inner(rdi = an instance) -> the same; the wrapper above only
+;; bounds the recursion.
+DEF_FUNC_LOCAL instance_str_inner, IS_FRAME
     push rbx
     mov rbx, rdi
     DUNDER_EXC_SAVE [rbp - IS_EXC]
@@ -1003,7 +1059,7 @@ DEF_FUNC instance_str, IS_FRAME
     pop rbx
     leave
     ret
-END_FUNC instance_str
+END_FUNC instance_str_inner
 
 ;; ============================================================================
 ;; type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> PyObject*

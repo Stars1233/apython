@@ -208,6 +208,7 @@ test_exception_dunder_str
 test_exception_group_deep
 test_exception_group_subclass
 test_exception_init
+test_exception_instance_dict
 test_exception_kwargs
 test_exception_metatype
 test_exceptions
@@ -458,6 +459,7 @@ test_re_module
 test_re_opcodes
 test_repr_element_raises
 test_repr
+test_repr_str_cycle
 test_re_review
 test_review_regressions
 test_richcompare_bool
