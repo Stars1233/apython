@@ -809,7 +809,13 @@ DEF_DUNDER_LEN str
 ;; back into exhaustion.
 ;; ============================================================================
 DN_EXC   equ 8
-DN_FRAME equ 24             ; + 0 pushes = 24 ... see the pad in the prologue
+DN_FRAME equ 32             ; + 0 pushes = 32, 16-aligned.  It was 24, so
+                            ; every one of the twenty-two functions this macro
+                            ; generates called dunder_require_self -- and then
+                            ; tp_iternext, which for map and filter reaches
+                            ; arbitrary Python -- eight bytes out.  lint's
+                            ; check_alignment skips a DEF_FUNC inside a %macro,
+                            ; so nothing saw it.
 
 %macro DEF_DUNDER_NEXT 1
 DEF_FUNC %1_dunder_next, DN_FRAME

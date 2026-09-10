@@ -296,3 +296,126 @@ for call, label in ((lambda: g3.aclose(1), "aclose"),
         print(label, "arity refused")
 
 print("done 2")
+
+
+# ---------------------------------------------------------------------------
+# ags_sendval means two different things: asend's resume value and athrow's
+# EXCEPTION.  send() is one method over both awaitables, and it stored the
+# sent value into that field whichever it was -- so `agen.aclose().send(3)`
+# handed gen_throw a plain int to raise, which is a segfault from ordinary
+# Python, and the athrow form dropped the exception's reference on the way.
+import sys
+
+
+async def one():
+    yield 1
+
+
+a = one()
+an = a.__anext__()
+try:
+    an.send(None)
+except StopIteration:
+    pass
+for make, label in ((lambda g: g.aclose(), "aclose"),
+                    (lambda g: g.athrow(ValueError("x")), "athrow")):
+    try:
+        make(one()).send(3)
+    except RuntimeError as e:
+        print(label, "refuses a sent value:", e)
+
+# The sent value replaces what asend() carried, and neither leaks.
+class T:
+    pass
+
+
+async def echoing():
+    while True:
+        got = yield
+        del got
+
+
+g = echoing()
+try:
+    g.asend(None).send(None)
+except StopIteration:
+    pass
+t = T()
+base = sys.getrefcount(t)
+for _ in range(4):
+    try:
+        g.asend(t).send(None)
+    except StopIteration:
+        pass
+    try:
+        g.asend(T()).send(t)
+    except StopIteration:
+        pass
+print("asend argument leak:", sys.getrefcount(t) - base)
+
+# ...and neither does the item a drive hands back through StopIteration.
+async def yielding(v):
+    while True:
+        yield v
+
+
+item = T()
+gy = yielding(item)
+base = sys.getrefcount(item)
+for _ in range(5):
+    try:
+        gy.__anext__().send(None)
+    except StopIteration:
+        pass
+print("yielded item leak:", sys.getrefcount(item) - base)
+
+# athrow takes CPython's deprecated (type, value, traceback) spelling too.
+async def catching():
+    try:
+        yield 1
+    except ValueError as e:
+        print("caught", e.args)
+        yield 2
+
+
+def drive(coro):
+    try:
+        while True:
+            coro.send(None)
+    except StopIteration as e:
+        return e.value
+
+
+async def use(args):
+    g = catching()
+    await g.asend(None)
+    return await g.athrow(*args)
+
+
+import warnings
+
+# The deprecated spellings warn, and the filter is what keeps the message --
+# whose text names this FILE, spelled differently by a script run directly and
+# by its .pyc -- out of the comparison below.
+warnings.simplefilter("ignore", DeprecationWarning)
+
+print(drive(use((ValueError,))))
+print(drive(use((ValueError, "msg"))))
+print(drive(use((ValueError, "msg", None))))
+print(drive(use((ValueError("inst"),))))
+
+# ...and a filter that makes it an error stops the athrow before it throws.
+with warnings.catch_warnings():
+    warnings.simplefilter("error")
+    try:
+        drive(use((ValueError, "msg")))
+    except DeprecationWarning as e:
+        print("deprecated:", e)
+    print(drive(use((ValueError,))))
+for bad in ((), (ValueError, 1, 2, 3)):
+    try:
+        drive(use(bad))
+    except TypeError as e:
+        print("athrow arity:", e)
+
+print("done 3")

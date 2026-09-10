@@ -659,7 +659,9 @@ END_FUNC ags_dealloc
 ;; except or finally passes that outward instead, and ags_started is what
 ;; makes the next drive resume it rather than throw again.
 ;; ============================================================================
-DEF_FUNC agt_iternext
+AGT_EXC   equ 8             ; the exception, across gen_throw
+AGT_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
+DEF_FUNC agt_iternext, AGT_FRAME
     push rbx
     push r12
     mov rbx, rdi
@@ -685,16 +687,17 @@ DEF_FUNC agt_iternext
     test rsi, rsi
     jz .agt_close
 
-    push rsi
+    mov [rbp - AGT_EXC], rsi    ; a frame slot, not a push: a lone push would
+                                ; leave gen_throw -- and every finally body it
+                                ; runs -- called eight bytes out
     mov rdi, r12
     call gen_throw
     push rax
     push rdx
-    mov rdi, [rsp + 16]
+    mov rdi, [rbp - AGT_EXC]
     DECREF_V rdi, rsi
     pop rdx
     pop rax
-    add rsp, 8
 
     test edx, edx
     jz .agt_throw_done
@@ -826,21 +829,114 @@ END_FUNC _agen_aclose_impl
 ;; agen.athrow(exc), the other half of aclose above: the same awaitable,
 ;; carrying the exception rather than the GeneratorExit aclose implies.
 ;; ============================================================================
-DEF_FUNC_LOCAL _agen_athrow_impl
+AAT_EXC   equ 8             ; the exception, across the receiver check
+AAT_OWNED equ 16            ; non-zero when AAT_EXC is a reference of ours
+AAT_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC_LOCAL _agen_athrow_impl, AAT_FRAME
+    ; CPython takes athrow(typ[, val[, tb]]): the two- and three-argument
+    ; spellings are deprecated but its own test_asyncgen uses them, and the
+    ; value is what the type is CALLED with.  The traceback is accepted and
+    ; ignored, as it is nowhere else in this tree either.
     cmp rsi, 2
-    jne .arity
-    push rbx
-    mov rbx, [rdi + 8]          ; the exception, borrowed
+    jl .arity
+    cmp rsi, 4
+    jg .arity
+    mov qword [rbp - AAT_OWNED], 0
+    cmp rsi, 2
+    jle .not_deprecated
+    ; CPython warns before it does anything else, and a suite that turns
+    ; warnings into errors reads that as the deprecation firing.
+    mov [rbp - AAT_EXC], rdi
+    lea rdi, [rel aat_deprecated]
+    extern deprecation_warn
+    call deprecation_warn
+    mov rdi, [rbp - AAT_EXC]
+    test eax, eax
+    jz .raised                  ; a filter made it an error
+.not_deprecated:
+    mov rax, [rdi + 8]          ; the exception or its type, borrowed
+    mov [rbp - AAT_EXC], rax    ; a frame slot: a lone push left both calls
+                                ; below, and ap_malloc under the second, eight
+                                ; bytes out
+    cmp rsi, 3
+    jl .have_exc
+    mov rdx, [rdi + 16]         ; the value
+    lea rcx, [rel none_singleton]
+    cmp rdx, rcx
+    je .have_exc
+    test rdx, rdx
+    jz .have_exc
+
+    ; typ(val), which is what CPython's _PyErr_CreateException does with the
+    ; pair.  Its reference is this function's until async_gen_athrow_new takes
+    ; one of its own.
+    push rdi
+    sub rsp, 8
+    lea rsi, [rdi + 16]
+    mov rdi, rax
+    mov edx, 1
+    extern type_call
+    call type_call
+    add rsp, 8
+    pop rdi
+    test rax, rax
+    jz .raised
+    mov [rbp - AAT_EXC], rax
+    mov qword [rbp - AAT_OWNED], 1
+
+.have_exc:
     mov rdi, [rdi]
     call _agen_check_receiver
-    mov rsi, rbx
+    mov rsi, [rbp - AAT_EXC]
     call async_gen_athrow_new
-    pop rbx
+    cmp qword [rbp - AAT_OWNED], 0
+    je .out
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - AAT_EXC]
+    call obj_decref
+    add rsp, 8
+    pop rax
+.out:
     leave
     ret
+
+.raised:
+    ; The type refused the value; its exception is the caller's.
+    extern eval_exception_unwind
+    leave
+    jmp eval_exception_unwind
+
 .arity:
-    RAISE exc_TypeError_type, "athrow() takes exactly one argument"
+    ; _PyArg_CheckPositional's wording, which names the count it got.
+    dec rsi                     ; self is not one of them
+    lea rdi, [rel aat_buf]
+    push rsi
+    sub rsp, 8
+    cmp rsi, 1
+    jl .too_few
+    CSTRING rsi, "athrow expected at most 3 arguments, got "
+    jmp .say
+.too_few:
+    CSTRING rsi, "athrow expected at least 1 argument, got "
+.say:
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    add rsp, 8
+    pop rsi
+    mov rdi, rax
+    extern msg_append_i64
+    call msg_append_i64
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel aat_buf]
+    call raise_exception        ; does not return
 END_FUNC _agen_athrow_impl
+
+section .rodata
+aat_deprecated: db "the (type, exc, tb) signature of athrow() is deprecated, use the single-arg signature instead.", 0
+section .bss
+aat_buf: resb 96
+section .text
 
 ;; ============================================================================
 ;; _agen_check_receiver(rdi = the candidate) -> rax = it, unchanged
@@ -2000,7 +2096,8 @@ END_FUNC _gen_send_impl
 ;; cannot be shared even though everything after it is.
 ;; ============================================================================
 AGSS_SELF  equ 8
-AGSS_FRAME equ 16           ; + 0 pushes = 16, 16-aligned
+AGSS_VAL   equ 16           ; the item, held across exc_new so it can be freed
+AGSS_FRAME equ 32           ; + 0 pushes = 32, 16-aligned
 
 global _ags_send_impl
 DEF_FUNC_BARE _ags_send_impl
@@ -2041,21 +2138,47 @@ DEF_FUNC_LOCAL ags_send_core, AGSS_FRAME
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel async_gen_asend_type]
     cmp rcx, rdx
-    je .agss_ok
+    je .agss_asend
     lea rdx, [rel async_gen_athrow_type]
     cmp rcx, rdx
     jne .agss_receiver
-.agss_ok:
-    mov [rbp - AGSS_SELF], rax
 
-    ; The sent value.  ags_iternext resumes with None; anything else is
-    ; stashed for it to push instead, and the reference goes with it.
+    ; --- the aclose/athrow awaitable ---
+    ; ags_sendval is NOT a resume value here: it is the exception agt_iternext
+    ; is going to throw.  Storing the sent value over it handed gen_throw a
+    ; plain int to raise -- a segfault from ordinary Python -- and dropped the
+    ; exception's reference on the way.  CPython refuses the send instead.
+    mov [rbp - AGSS_SELF], rax
     cmp rsi, 2
     jne .agss_go
     mov rdx, [rdi + 8]
     lea rcx, [rel none_singleton]
     cmp rdx, rcx
     je .agss_go
+    cmp dword [rax + AsyncGenASend.ags_started], 0
+    jne .agss_store             ; already thrown: this is an ordinary resume
+    RAISE exc_RuntimeError_type, "can't send non-None value to a just-started coroutine"
+
+.agss_asend:
+    ; The sent value.  ags_iternext resumes with None; anything else is
+    ; stashed for it to push instead, and the reference goes with it.
+    mov [rbp - AGSS_SELF], rax
+    cmp rsi, 2
+    jne .agss_go
+    mov rdx, [rdi + 8]
+    lea rcx, [rel none_singleton]
+    cmp rdx, rcx
+    je .agss_go
+
+.agss_store:
+    ; asend(v).send(w) is CPython's "w wins", so what asend() left here is
+    ; released rather than leaked.
+    push rdx
+    mov rdi, [rax + AsyncGenASend.ags_sendval]
+    mov qword [rax + AsyncGenASend.ags_sendval], 0
+    XDECREF_V rdi, rcx
+    pop rdx
+    mov rax, [rbp - AGSS_SELF]
     INCREF_V rdx, rcx
     mov [rax + AsyncGenASend.ags_sendval], rdx
 
@@ -2081,6 +2204,7 @@ DEF_FUNC_LOCAL ags_send_core, AGSS_FRAME
     mov rcx, [rbp - AGSS_SELF]
     mov rsi, [rcx + AsyncGenASend.gi_return_value]
     mov qword [rcx + AsyncGenASend.gi_return_value], 0   ; the reference moves
+    mov [rbp - AGSS_VAL], rsi   ; ...to here, and is released below
     mov dword [rcx + AsyncGenASend.ags_state], 2
     lea rdi, [rel exc_StopIteration_type]
     test rsi, rsi
@@ -2090,14 +2214,18 @@ DEF_FUNC_LOCAL ags_send_core, AGSS_FRAME
     lea rax, [rel none_singleton]
     cmp rsi, rax
     jne .agss_have_val
-    mov rdi, rsi
-    call obj_decref
-    lea rdi, [rel exc_StopIteration_type]
 .agss_no_val:
     xor esi, esi
 .agss_have_val:
     call exc_new
-    mov rdi, rax
+    ; exc_new took a reference of its own, so the one moved out of the
+    ; wrapper is this function's to drop.  Leaving it held leaked the yielded
+    ; item once per drive -- five objects for five turns of a hand-driven
+    ; `async for`, invisible to every gate because nothing crashed.
+    push rax
+    mov rdi, [rbp - AGSS_VAL]
+    XDECREF_V rdi, rcx
+    pop rdi
     call raise_exception_obj
 
 .agss_propagate:
