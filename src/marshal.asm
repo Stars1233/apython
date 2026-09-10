@@ -961,7 +961,11 @@ mdo_small_tuple:
     push r13
     push r14
     push r15
+    sub rsp, 8                 ; the arm's own frame is 16-aligned, so three
+                               ; pushes leave this call eight bytes out -- and
+                               ; a TYPE_LONG element reaches GMP through it
     call marshal_read_object
+    add rsp, 8
     pop r15
     pop r14
     pop r13
@@ -1040,7 +1044,11 @@ mdo_tuple:
     push r13
     push r14
     push r15
+    sub rsp, 8                 ; the arm's own frame is 16-aligned, so three
+                               ; pushes leave this call eight bytes out -- and
+                               ; a TYPE_LONG element reaches GMP through it
     call marshal_read_object
+    add rsp, 8
     pop r15
     pop r14
     pop r13
@@ -1612,7 +1620,11 @@ mdo_list:
     push r13
     push r14
     push r15
+    sub rsp, 8                 ; the arm's own frame is 16-aligned, so three
+                               ; pushes leave this call eight bytes out -- and
+                               ; a TYPE_LONG element reaches GMP through it
     call marshal_read_object
+    add rsp, 8
     pop r15
     pop r14
     pop r13
@@ -1621,11 +1633,13 @@ mdo_list:
     push r15
     push rdx
     push rax
+    sub rsp, 8                 ; five pushes, so the calls below need the pad
     mov rdi, r14
     mov rsi, rax
     V_PACK rsi, rdx
     extern list_append
     call list_append
+    add rsp, 8
     pop rdi
     pop rsi
     DECREF_VAL rdi, rsi        ; list_append took its own reference
@@ -1784,7 +1798,11 @@ mdo_set_common:
     push r13
     push r14
     push r15
+    sub rsp, 8                 ; the arm's own frame is 16-aligned, so three
+                               ; pushes leave this call eight bytes out -- and
+                               ; a TYPE_LONG element reaches GMP through it
     call marshal_read_object
+    add rsp, 8
     pop r15
     pop r14
     pop r13
@@ -1795,10 +1813,14 @@ mdo_set_common:
     push r15
     push rdx                   ; save element tag
     push rax                   ; save element payload
+    sub rsp, 8                 ; five pushes, so the calls below need the pad;
+                               ; set_add hashes its element, and hashing a
+                               ; big integer reaches GMP
     mov rdi, r14               ; set
     mov rsi, rax               ; element
     V_PACK rsi, rdx            ; set_add takes a key Value
     call set_add
+    add rsp, 8
     pop rdi                    ; element payload
     pop rsi                    ; element tag
     DECREF_VAL rdi, rsi        ; compensate for set_add's INCREF
