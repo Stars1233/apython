@@ -564,6 +564,12 @@ DEF_FUNC dict_repr, RB_FRAME
     ret
 
 .dr_elem_failed:
+    ; The entry index is on the machine stack: both arms above push it across
+    ; obj_repr and pop it once that repr comes back, and neither gets there
+    ; when it fails.  Without this pop the four register restores below take
+    ; each saved register off by one slot -- and one of them is r13, the
+    ; interpreter's value stack pointer.
+    pop r12
     mov rdi, [rbp - RB_PTR]
     call ap_free
     call repr_pop
@@ -768,6 +774,7 @@ DEF_FUNC set_repr, RB_FRAME
     ret
 
 .sr_elem_failed:
+    pop r12                    ; the entry index, as in dict_repr
     mov rdi, [rbp - RB_PTR]
     call ap_free
     call repr_pop

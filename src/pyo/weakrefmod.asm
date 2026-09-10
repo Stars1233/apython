@@ -66,6 +66,7 @@ extern exc_TypeError_type
 extern bool_true
 extern bool_false
 extern none_singleton
+extern kw_names_pending
 extern current_exception
 extern v_int_bias
 
@@ -781,14 +782,46 @@ END_FUNC weakref_referenceable
 
 section .rodata
 wrr_weakref_name: db "__weakref__", 0
+rc_too_many: db "__new__ expected at most 2 arguments, got ", 0
 section .text
 
-DEF_FUNC ref_construct
+WRC_NARGS equ 8
+WRC_FRAME equ 40            ; + 1 push = 48, and the two pushes below keep it
+DEF_FUNC ref_construct, WRC_FRAME
     ; rdi = type, rsi = args, rdx = nargs
-    cmp rdx, 1
-    jl .bad
     push rbx
     mov rbx, rdi
+
+    ; Only the POSITIONAL arguments count.  A keyword's value sits in the same
+    ; array with its name parked in kw_names_pending, so a subclass written
+    ; `MyRef(ob, callback=None, value=42)` -- which is how CPython's own
+    ; test_weakref writes one -- handed `value`'s 24 to weakref_make as the
+    ; callback and INCREF'd an int immediate as a pointer.  CPython's
+    ; weakref___new__ unpacks the positional tuple and ignores the keywords
+    ; entirely; ref.__init__ is what refuses them, and a subclass overriding
+    ; __init__ is therefore free to have keywords of its own.  __new__ is
+    ; expected to consume the global, and type_call hands __init__ its own copy.
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jz .rc_no_kw
+    mov qword [rel kw_names_pending], 0
+    sub rdx, [rax + PyTupleObject.ob_size]
+    ; ref ITSELF takes none.  CPython raises that from ref.__init__, which
+    ; this tree's type_call does not reach for a static type -- the builtin
+    ; constructor in tp_new is the whole of the call there -- so the refusal
+    ; is made here, and only for ref itself.  A subclass still gets CPython's
+    ; answer either way: its own __init__ if it has one, and ref.__init__,
+    ; which refuses, if it does not.
+    lea rcx, [rel weakref_type]
+    cmp rbx, rcx
+    je .bad_kw
+.rc_no_kw:
+    mov [rbp - WRC_NARGS], rdx
+    cmp rdx, 1
+    jl .bad_few
+    cmp rdx, 2
+    jg .bad_many
+
     push rdx                    ; nargs, across the check
     push rsi
     mov rdi, [rsi]
@@ -815,8 +848,18 @@ DEF_FUNC ref_construct
     V_PACK rax, rdx
     leave
     ret
-.bad:
-    RAISE exc_TypeError_type, "ref expected at least 1 argument"
+.bad_few:
+    RAISE exc_TypeError_type, "__new__ expected at least 1 argument, got 0"
+.bad_kw:
+    RAISE exc_TypeError_type, "ref() takes no keyword arguments"
+.bad_many:
+    ; CPython counts them in the message, and a caller that passed three has
+    ; to be told it passed three.
+    extern raise_type_error_counted
+    lea rdi, [rel rc_too_many]
+    mov rsi, [rbp - WRC_NARGS]
+    xor edx, edx
+    call raise_type_error_counted   ; does not return
 END_FUNC ref_construct
 
 ;; ============================================================================
@@ -838,6 +881,22 @@ DEF_FUNC ref_dunder_new
 END_FUNC ref_dunder_new
 
 ;; ============================================================================
+;; ref_dunder_call(rdi = args, rsi = nargs) -> rax = Value, the referent or None
+;;
+;; ref keeps its dereference in tp_call, so ref.__dict__ had no __call__ and a
+;; subclass's `super().__call__()` found nothing -- which is how CPython's own
+;; test_weakref writes a subclass that logs each deref.  It calls REF's slot
+;; and not the argument's type's, so a subclass that overrides __call__ does
+;; not re-enter itself.
+;; ============================================================================
+DEF_FUNC ref_dunder_call
+    mov rdi, [rdi]
+    call ref_deref
+    leave
+    ret
+END_FUNC ref_dunder_call
+
+;; ============================================================================
 ;; ref_dunder_init(args, nargs) -> None    -- weakref.ref.__init__
 ;;
 ;; A no-op that ACCEPTS the constructor's arguments.  ref builds itself in
@@ -847,6 +906,11 @@ END_FUNC ref_dunder_new
 ;; CPython's ref has the same do-nothing tp_init for the same reason.
 ;; ============================================================================
 DEF_FUNC ref_dunder_init
+    ; ref itself takes no keywords -- `ref(o, callback=cb)` is a TypeError in
+    ; CPython, raised HERE rather than in __new__, which is why a subclass
+    ; that overrides __init__ never sees this refusal.
+    cmp qword [rel kw_names_pending], 0
+    jne .rdi_kwerror
     cmp rsi, 1
     jl .rdi_error
     cmp rsi, 3
@@ -857,6 +921,9 @@ DEF_FUNC ref_dunder_init
     ret
 .rdi_error:
     RAISE exc_TypeError_type, "ref.__init__() takes 1 or 2 arguments"
+.rdi_kwerror:
+    mov qword [rel kw_names_pending], 0
+    RAISE exc_TypeError_type, "ref() takes no keyword arguments"
 END_FUNC ref_dunder_init
 
 ;; ============================================================================

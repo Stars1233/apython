@@ -454,6 +454,59 @@ DEF_FUNC_BARE none_bool
     ret
 END_FUNC none_bool
 
+
+;; ============================================================================
+;; singleton_type_call(rdi = the type, rsi = args, rdx = nargs)
+;;   -> (rax = the singleton, rdx = TAG_PTR), or does not return
+;;
+;; `NoneType()`, `EllipsisType()` and `NotImplementedType()` answer their own
+;; singleton -- `type(None)() is None` -- and take no arguments at all.
+;;
+;; With no tp_new all three fell through to the ordinary class-construction
+;; path, which ALLOCATED a fresh two-word object of that type.  It was not the
+;; singleton, so `type(None)() is None` was False; it had no tp_dealloc, so
+;; nothing ever freed it; and its type carries no tp_flags, no tp_dict and no
+;; tp_basicsize beyond the header, so the heap fell over at shutdown.
+;; ============================================================================
+DEF_FUNC singleton_type_call
+    ; The message is spelled out per type rather than taken from tp_name,
+    ; because CPython's is: ellipsis_new says "EllipsisType" where the type
+    ; itself is called "ellipsis".
+    lea rax, [rel none_singleton]
+    lea r8, [rel stc_none_msg]
+    lea rcx, [rel none_type]
+    cmp rdi, rcx
+    je .stc_have
+    lea rax, [rel notimpl_singleton]
+    lea r8, [rel stc_notimpl_msg]
+    lea rcx, [rel notimpl_type]
+    cmp rdi, rcx
+    je .stc_have
+    lea rax, [rel ellipsis_singleton]
+    lea r8, [rel stc_ellipsis_msg]
+.stc_have:
+    ; A keyword argument arrives in the same array with its name parked in
+    ; kw_names_pending, so the count covers both forms.
+    test rdx, rdx
+    jnz .stc_takes_none
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+.stc_takes_none:
+    mov rsi, r8
+    extern exc_TypeError_type
+    lea rdi, [rel exc_TypeError_type]
+    extern raise_exception
+    leave
+    jmp raise_exception         ; does not return
+section .rodata
+stc_none_msg:     db "NoneType takes no arguments", 0
+stc_notimpl_msg:  db "NotImplementedType takes no arguments", 0
+stc_ellipsis_msg: db "EllipsisType takes no arguments", 0
+section .text
+END_FUNC singleton_type_call
+
 section .data
 
 ; NoneType name and repr string
@@ -518,7 +571,7 @@ none_type:
     dq 0                    ; tp_iter
     dq 0                    ; tp_iternext
     dq 0                    ; tp_init
-    dq 0                    ; tp_new
+    dq singleton_type_call                     ; tp_new
     dq none_number_methods  ; tp_as_number
     dq 0                    ; tp_as_sequence
     dq 0                    ; tp_as_mapping
@@ -575,7 +628,7 @@ notimpl_type:
     dq 0                    ; tp_iter
     dq 0                    ; tp_iternext
     dq 0                    ; tp_init
-    dq 0                    ; tp_new
+    dq singleton_type_call                     ; tp_new
     dq 0                    ; tp_as_number
     dq 0                    ; tp_as_sequence
     dq 0                    ; tp_as_mapping
@@ -632,7 +685,7 @@ ellipsis_type:
     dq 0                    ; tp_iter
     dq 0                    ; tp_iternext
     dq 0                    ; tp_init
-    dq 0                    ; tp_new
+    dq singleton_type_call                     ; tp_new
     dq 0                    ; tp_as_number
     dq 0                    ; tp_as_sequence
     dq 0                    ; tp_as_mapping

@@ -871,30 +871,90 @@ DEF_FUNC op_setup_annotations
     test rbx, rbx
     jz .sa_done
 
-    ; Create __annotations__ dict
-    call dict_new
-    mov r12, rax                ; r12 = new annotations dict (saved)
-
-    ; Create key string (heap — dict key, DECREFed)
+    ; The key first: both arms below need it.
     extern str_from_cstr_heap
     CSTRING rdi, "__annotations__"
     call str_from_cstr_heap
-    ; rax = key string
+    mov r13, rax                ; the key, owned
 
-    ; dict_set(locals, key, value, value_tag)
-    mov rdi, rbx                ; dict = locals
-    mov rsi, rax                ; key = "__annotations__"
-    mov rdx, r12                ; value = new annotations dict
-    push rax                    ; save key for DECREF
-    push rdx                    ; save value for DECREF
+    ; A frame's locals need not be a dict -- exec() takes any mapping, and
+    ; CPython's SETUP_ANNOTATIONS has an arm for each.  This one handed
+    ; whatever it found to dict_set, which probed the object's header as a
+    ; hash table; CPython's test_grammar.test_var_annot_refleak passes a
+    ; class with __getitem__ and __setitem__ and died there.
+    extern dict_type
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    je .sa_dict
+    REQUIRE_DICT_TYPE rax, rcx, .sa_mapping
+
+.sa_dict:
+    ; Only when it is not already there.  Installing a fresh one unconditionally
+    ; discarded whatever an enclosing class body had put in it -- CPython looks
+    ; first too.
+    extern dict_get
+    mov rdi, rbx
+    mov rsi, r13
+    call dict_get
+    test rax, rax
+    jnz .sa_have
+
+    call dict_new
+    mov r12, rax                ; the new annotations dict
+    mov rdi, rbx
+    mov rsi, r13
+    mov rdx, r12
     call dict_set
-    ; Read each argument off the stack rather than popping between the two
-    ; calls, so the depth is the same at both.
-    mov rdi, [rsp]              ; the value
-    call obj_decref             ; DECREF value (dict_set INCREFs)
-    mov rdi, [rsp + 8]          ; the key
-    call obj_decref             ; DECREF key
-    add rsp, 16
+    mov rdi, r12
+    call obj_decref             ; dict_set took its own reference
+    jmp .sa_have
+
+.sa_mapping:
+    ; Through mapping_getitem_opt rather than mp_subscript: a heaptype's slot
+    ; does not RETURN when __getitem__ raises, so the miss this arm exists to
+    ; absorb would escape as a KeyError from an opcode that has nothing to do
+    ; with it.
+    mov rdi, rbx
+    mov rsi, r13
+    extern mapping_getitem_opt
+    call mapping_getitem_opt
+    test rax, rax
+    jz .sa_map_missing
+    mov rdi, rax
+    DECREF_V rdi, rsi           ; it exists; only its presence mattered
+    jmp .sa_have
+
+.sa_map_missing:
+    ; A miss RAISES here where a dict answers NULL.  CPython clears a KeyError
+    ; and lets anything else through; clearing whatever it was keeps an
+    ; exception from a mapping's __getitem__ out of an opcode that has nothing
+    ; to do with it.
+    extern current_exception
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .sa_map_make
+    mov qword [rel current_exception], 0
+    call obj_decref
+.sa_map_make:
+    call dict_new
+    mov r12, rax
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    mov rax, [rax + PyMappingMethods.mp_ass_subscript]
+    test rax, rax
+    jz .sa_map_free
+    mov rdi, rbx
+    mov rsi, r13
+    mov rdx, r12
+    call rax
+.sa_map_free:
+    mov rdi, r12
+    call obj_decref
+
+.sa_have:
+    mov rdi, r13
+    call obj_decref             ; the key
 
 .sa_done:
     pop r13

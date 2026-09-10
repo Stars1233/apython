@@ -783,6 +783,8 @@ DEF_FUNC str_mod_impl, SM_FRAME
 
 .sm_copy_str:
     ; rax = str payload (heap PyStrObject*)
+    test rax, rax
+    jz .sm_conv_failed         ; obj_str/obj_repr raised: nothing to copy
     push rax                   ; save for DECREF
     mov rcx, [rax + PyStrObject.ob_size]
     lea rsi, [rax + PyStrObject.data]
@@ -1006,6 +1008,38 @@ DEF_FUNC str_mod_impl, SM_FRAME
     pop rbx
     leave
     extern raise_exception_obj
+    jmp raise_exception_obj     ; takes the reference, does not return
+
+;; A conversion's own call raised, and its exception is already pending.
+;;
+;; Every plain arm pushes the input position before the call and lets
+;; .sm_copy_str pop it, and .sm_spec_conv is reached with a `call`, so the
+;; stack is reset the way .sm_error resets it.  Unlike .sm_error there is
+;; nothing to raise -- only the buffer to give back and the pending exception
+;; to hand on.
+;;
+;; It has to hand it on by RAISING rather than by returning NULL: op_binary_op
+;; reads a NULL Value from an nb_ slot as "this pair is not mine" and carries
+;; on to the right operand's slot and then to a TypeError, which would bury
+;; the exception the conversion actually raised.
+.sm_conv_failed:
+    lea rsp, [rbp - SM_FRAME - 40]      ; the five pushes, and nothing else
+    mov rdi, [rbp-SM_BUF]
+    test rdi, rdi
+    jz .sm_cf_freed
+    mov qword [rbp-SM_BUF], 0
+    call ap_free
+.sm_cf_freed:
+    cmp qword [rbp-SM_NORAISE], 0
+    jne .sm_error_ret           ; the caller reads the pending exception
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     jmp raise_exception_obj     ; takes the reference, does not return
 
 ;; The one way out.  rdi = the exception type, rsi = the message; the buffer
@@ -1306,6 +1340,8 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov rsi, [rbp-SM_CONV]
     extern fmt_percent_coerce
     call fmt_percent_coerce
+    test rax, rax
+    jz .sm_conv_failed          ; a raising __index__ or __float__
     mov [rbp-SM_VALUE], rax
     mov [rbp-SM_OWNVAL], rdx
     mov rcx, [rbp-SM_CONV]
@@ -1320,6 +1356,8 @@ DEF_FUNC str_mod_impl, SM_FRAME
 .sm_sc_repr:
     mov rdi, [rbp-SM_VALUE]
     call obj_repr
+    test rax, rax
+    jz .sm_conv_failed
     V_UNPACK rax, rdx
     V_PACK rax, rdx
     mov [rbp-SM_VALUE], rax
@@ -1335,6 +1373,8 @@ DEF_FUNC str_mod_impl, SM_FRAME
     extern builtin_ascii_fn
     call builtin_ascii_fn
     add rsp, 16
+    test rax, rax
+    jz .sm_conv_failed
     mov [rbp-SM_VALUE], rax
     mov qword [rbp-SM_OWNVAL], 1
     jmp .sm_sc_format
@@ -1466,6 +1506,11 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov rdi, [rbp-SM_VALUE]
     DECREF_V rdi, rsi
 .sm_sc_no_own:
+    ; format_apply_spec runs __format__, which can raise.  The test is here
+    ; rather than at the call so that the spec object and the owned value are
+    ; released either way.
+    cmp qword [rbp-SM_PIECE], 0
+    je .sm_conv_failed
 
     ; Append the piece to the caller's buffer, advancing its position.
     mov rax, [rbp-SM_PIECE]

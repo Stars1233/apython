@@ -475,6 +475,16 @@ DEF_FUNC_BARE op_delete_name
     mov rdi, [r12 + PyFrame.locals]
     test rdi, rdi
     jz .dn_globals
+    ; ...and they need not be a DICT: exec() takes any mapping, and a class
+    ; body runs in whatever __prepare__ returned.  dict_del_opt read the
+    ; object's header as a hash table.  Anything but an exact dict goes
+    ; through mp_ass_subscript with a NULL value, which is how CPython's
+    ; PyObject_DelItem spells a delete -- and it is also what makes a custom
+    ; mapping's __delitem__ run at all.
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    jne .dn_mapping
     sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
                                ; handler, so a call needs an even push list
     push rsi
@@ -485,6 +495,23 @@ DEF_FUNC_BARE op_delete_name
     test eax, eax
     jz .dn_ok                  ; found and deleted
     jmp .dn_error
+
+.dn_mapping:
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jz .dn_error
+    mov rax, [rax + PyMappingMethods.mp_ass_subscript]
+    test rax, rax
+    jz .dn_error
+    sub rsp, 8
+    push rsi
+    xor edx, edx               ; a NULL value is a delete
+    call rax
+    pop rsi
+    add rsp, 8
+    ; A mapping that refuses has already raised, and slot_mp_ass_subscript
+    ; does not even return in that case; there is nothing to report here.
+    jmp .dn_ok
 .dn_globals:
     mov rdi, [r12 + PyFrame.globals]
     sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a

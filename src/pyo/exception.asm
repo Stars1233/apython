@@ -66,7 +66,7 @@ extern exc_ExceptionGroup_type
 ;; ============================================================================
 ;; exc_new(PyTypeObject *type, PyObject *msg_str, int msg_tag) -> PyExceptionObject*
 ;; Creates a new exception with given type and message string.
-;; msg_str is INCREFed. type is stored but not INCREFed (types are immortal).
+;; msg_str and type are both INCREFed.
 ;; rdx = msg_tag (TAG_PTR for heap objs, TAG_SMALLINT for ints, 0 for NULL).
 ;; ============================================================================
 EN_EXC equ 8
@@ -83,7 +83,12 @@ DEF_FUNC exc_new, EN_FRAME
     mov edi, PyExceptionObject_size
     mov rsi, rbx               ; type
     call gc_alloc
-    ; ob_refcnt=1, ob_type set by gc_alloc
+    ; ob_refcnt=1, ob_type set by gc_alloc -- but gc_alloc does not count the
+    ; type it stamps, and "exception types are immortal" is true of the
+    ; sixty-nine builtin ones and false of every class a program writes.  An
+    ; uncounted one is freed by the collector out from under live instances,
+    ; because a class's only cycle is with its own MRO tuple.
+    inc qword [rbx + PyObject.ob_refcnt]
     mov [rax + PyExceptionObject.exc_type], rbx
     mov [rax + PyExceptionObject.exc_value], r12
     mov qword [rax + PyExceptionObject.exc_tb], 0
@@ -169,14 +174,33 @@ DEF_FUNC exc_set_context, ESC_FRAME
 
     mov rdi, [rbp - ESC_NEW]
     mov rsi, [rbp - ESC_OLD]
-    ; Break an existing link back to `new` so the chain stays acyclic.
-    mov rax, rsi
+    ; Break an existing link back to `new` so the chain stays acyclic -- and
+    ; do not HANG on a cycle that is already there.  `ex.__context__ = ex` is
+    ; a legal assignment, and this walked the resulting chain for ever;
+    ; CPython's test_exceptions has two tests named for not hanging on exactly
+    ; that (issue 25782).  Floyd's tortoise and hare, as _PyErr_SetObject
+    ; does it: the tortoise moves every other step, and meeting it means the
+    ; whole path has been visited and checked.
+    mov rax, rsi                ; the hare
+    mov r8, rsi                 ; the tortoise
+    xor r9d, r9d                ; ...which moves on every other turn
 .esc_scan:
     mov rcx, [rax + PyExceptionObject.exc_context]
     test rcx, rcx
     jz .esc_link
     cmp rcx, rdi
-    jne .esc_next
+    je .esc_unlink
+    mov rax, rcx
+    cmp rax, r8
+    je .esc_link                ; a cycle that was already there
+    test r9d, r9d
+    jz .esc_next
+    mov r8, [r8 + PyExceptionObject.exc_context]
+.esc_next:
+    xor r9d, 1
+    jmp .esc_scan
+
+.esc_unlink:
     mov qword [rax + PyExceptionObject.exc_context], 0
     push rdi
     push rsi
@@ -184,10 +208,6 @@ DEF_FUNC exc_set_context, ESC_FRAME
     call obj_decref
     pop rsi
     pop rdi
-    jmp .esc_link
-.esc_next:
-    mov rax, rcx
-    jmp .esc_scan
 
 .esc_link:
     ; Drop whatever context `new` already had, then take a reference to `old`.
@@ -274,7 +294,9 @@ END_FUNC exc_from_cstr
 ;; exc_dealloc(PyExceptionObject *exc)
 ;; Free exception and DECREF its fields.
 ;; ============================================================================
-DEF_FUNC exc_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
+ED_TYPE  equ 8
+ED_FRAME equ 24                    ; + 1 push = 32, so rsp is 16-aligned
+DEF_FUNC exc_dealloc, ED_FRAME
     push rbx
 
     mov rbx, rdi
@@ -319,9 +341,18 @@ DEF_FUNC exc_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     call obj_decref
 .no_dict:
 
+    ; Save ob_type before freeing: gc_dealloc reads it, then frees.  A frame
+    ; slot rather than a push, so both calls below stay 16-aligned.
+    mov rax, [rbx + PyObject.ob_type]
+    mov [rbp - ED_TYPE], rax
+
     ; Free the object (GC-aware)
     mov rdi, rbx
     call gc_dealloc
+
+    ; Release the class AFTER the instance, the order instance_dealloc uses.
+    mov rdi, [rbp - ED_TYPE]
+    call obj_decref
 
     pop rbx
     leave
@@ -752,11 +783,20 @@ DEF_FUNC exc_str, ES_FRAME
     jne .es_tuple
 
     ; KeyError is the one that shows its single argument's repr, so that a
-    ; missing key prints with its quotes.
-    mov rcx, [rbx + PyExceptionObject.ob_type]
-    lea rdx, [rel exc_KeyError_type]
-    cmp rcx, rdx
-    je .es_one_repr
+    ; missing key prints with its quotes -- and so does a SUBCLASS of it.
+    ; CPython gives KeyError its own tp_str and subclasses inherit it; this
+    ; was an exact-pointer compare, so `class K(KeyError)` lost the quotes.
+    push rax
+    push rax                        ; exc_args, and a pad for the alignment
+    mov rdi, [rbx + PyExceptionObject.ob_type]
+    lea rsi, [rel exc_KeyError_type]
+    extern type_is_subtype
+    call type_is_subtype
+    pop rcx
+    pop rcx                         ; exc_args back
+    test eax, eax
+    mov rax, rcx
+    jnz .es_one_repr
 
     mov rcx, [rax + PyTupleObject.ob_item]
     mov rdi, [rcx]
@@ -1538,6 +1578,13 @@ DEF_FUNC exc_setattr, ESA_FRAME
     mov [rbp - ESA_VAL], rdx
     mov [rbp - ESA_TAG], rcx
 
+    ; A NULL value is a DELETE: op_delete_attr calls tp_setattr(obj, name,
+    ; NULL).  Writing that straight into the dict left an entry whose key was
+    ; set and whose value was 0, which every later read of that dict trips
+    ; over -- `del e.attr` then `e.__dict__` reported "object has no repr".
+    cmp qword [rbp - ESA_VAL], 0
+    je .esa_delete
+
     ; Four names are fields of the object, not entries in its dict, and
     ; exc_getattr reads them from the fields.  Writing them to the dict left
     ; the assignment invisible: `e.__cause__ = other` read back as None, and
@@ -1564,6 +1611,14 @@ DEF_FUNC exc_setattr, ESA_FRAME
     call ap_strcmp
     test eax, eax
     jz .esa_suppress
+    ; And `e.__dict__ = {...}` REPLACES the dict rather than putting an entry
+    ; called "__dict__" inside it, which is what exc_getattr answers with and
+    ; what every other object does.
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__dict__"
+    call ap_strcmp
+    test eax, eax
+    jz .esa_dict
     ; ap_strcmp clobbers the argument registers, so the value and its tag come
     ; back from the frame.
     mov rsi, r12
@@ -1594,6 +1649,60 @@ DEF_FUNC exc_setattr, ESA_FRAME
     pop rbx
     leave
     ret
+
+.esa_dict:
+    extern dict_type
+    ; Only a dict, as CPython's __dict__ setter insists.
+    mov rdx, [rbp - ESA_VAL]
+    V_TEST_PTR rdx, rax
+    ja .esa_dict_bad
+    test rdx, rdx
+    jz .esa_dict_bad
+    mov rax, [rdx + PyObject.ob_type]
+    REQUIRE_DICT_TYPE rax, rcx, .esa_dict_bad
+    INCREF rdx
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    mov [rbx + PyExceptionObject.exc_dict], rdx
+    test rdi, rdi
+    jz .esa_dict_done
+    call obj_decref
+.esa_dict_done:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+.esa_dict_bad:
+    pop r12
+    pop rbx
+    RAISE exc_TypeError_type, "__dict__ must be set to a dictionary"
+
+.esa_delete:
+    mov rax, [rbx + PyExceptionObject.exc_dict]
+    test rax, rax
+    jz .esa_del_missing
+    mov rdi, rax
+    mov rsi, r12
+    extern dict_del_opt
+    call dict_del_opt
+    test eax, eax
+    jnz .esa_del_missing
+    xor eax, eax            ; return 0 (success)
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+.esa_del_missing:
+    mov rdi, rbx
+    mov rsi, r12
+    xor edx, edx
+    extern raise_no_attribute
+    pop r12
+    pop rbx
+    leave
+    jmp raise_no_attribute      ; does not return
 
     ; Each field holds a strong reference, and None means "none of it": the
     ; report walks a NULL field, not a None one.
@@ -2749,7 +2858,14 @@ global %1
     dq 0                    ; tp_bases
     dq exc_traverse         ; tp_traverse
     dq exc_clear_gc         ; tp_clear
-    dq 0         ; tp_dictoffset
+    ; An exception's instance dict is exc_dict, and saying so is what lets
+    ; the GENERIC machinery find it: obj_generic_attr and
+    ; object.__getstate__ both go through tp_dictoffset, and with a zero
+    ; there `Exception('x').__getstate__()` was None however many attributes
+    ; had been set.  It is also what type_from_parts inherits, so a subclass
+    ; stops putting a SECOND dict one word past the end of an object whose
+    ; constructor allocates exactly PyExceptionObject_size.
+    dq PyExceptionObject.exc_dict ; tp_dictoffset
     dq 0                        ; tp_tailslots
 %endmacro
 

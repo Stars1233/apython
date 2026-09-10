@@ -261,6 +261,16 @@ DEF_FUNC cg_unit_init, CU_FRAME
     mov dword [rbx + CompUnit.curend], 0
     mov dword [rbx + CompUnit.curcol], -1
     mov dword [rbx + CompUnit.curendcol], -1
+    ; And the four beside them, which nothing set.  cg_emit only writes these
+    ; when it emits an instruction that HAS a line, so a unit that reaches its
+    ; implicit `return None` without emitting one -- an empty module, a module
+    ; that is only a comment, an empty function body -- read whatever was on
+    ; the stack and put it in the line table.  "no location" is the same pair
+    ; of defaults the cur* fields get.
+    mov dword [rbx + CompUnit.lastline], 0
+    mov dword [rbx + CompUnit.lastend], 0
+    mov dword [rbx + CompUnit.lastcol], -1
+    mov dword [rbx + CompUnit.lastendcol], -1
     mov rax, [rbp - CU_FILE]
     mov [rbx + CompUnit.filename], rax
     mov rax, [rbp - CU_NAME]

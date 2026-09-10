@@ -1282,6 +1282,12 @@ DEF_FUNC str_method_join
     lea rsi, [r15 + 8]
     mov edx, 1
     call tuple_type_call
+    ; It can fail: draining the iterable runs whatever produced it, and a
+    ; generator that raises part way through leaves NULL here with the
+    ; exception already pending.  `"".join(codecs.iterdecode(gen, "idna"))`
+    ; is exactly that, and this read ob_size off the NULL.
+    test rax, rax
+    jz .join_materialise_failed
     mov [rbp - SJ_TMP], rax
     mov r12, rax
 .join_seq_ready:
@@ -1435,6 +1441,22 @@ DEF_FUNC str_method_join
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.join_materialise_failed:
+    ; Nothing to raise: whatever the iterable did is already pending, and this
+    ; hands back the NULL that says so.
+    mov rdi, rbx
+    call obj_decref             ; the separator this borrowed
+    xor eax, eax
+    xor edx, edx
+    add rsp, 56
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .join_not_iterable:
@@ -2678,18 +2700,90 @@ DEF_FUNC_LOCAL fm_name_equals
     ret
 END_FUNC fm_name_equals
 
-;; ============================================================================
-;; str_method_format_map(args, nargs) -> formatted string
-;; args[0]=self (format string), args[1]=mapping (dict)
-;; Replaces {key} with mapping[key].
-;; ============================================================================
 FM_ARGS   equ 8
 FM_MAP    equ 16
 FM_BUF    equ 24
 FM_USED   equ 32
 FM_CAP    equ 40
-FM_FRAME  equ 56            ; + 5 pushes = 96, 16-aligned
+FM_VALUE  equ 48            ; the Value the lookup answered, still packed
+FM_OWNED  equ 56            ; ...and whether the reference is ours to release
+FM_FRAME  equ 72            ; + 5 pushes = 112, 16-aligned
 
+;; ============================================================================
+;; fm_lookup(rdi = the mapping, rsi = the key str)
+;;   -> (rax = a Value, edx = its tag, r8d = 1 when the reference is OWNED)
+;;
+;; str.format_map takes ANY mapping, and CPython's is PyObject_GetItem: its
+;; own test suite calls `'{a1}'.format_map(match_object)`.  This read whatever
+;; it was handed as a PyDictObject and probed the object's header as a hash
+;; table, which is what killed test_re.
+;;
+;; A dict keeps the direct lookup, whose miss is a NULL Value with nothing
+;; pending; anything else goes through mp_subscript, which RAISES on a miss --
+;; and hands back an OWNED reference where dict_get's is borrowed, which is
+;; what r8 is for.
+;; ============================================================================
+DEF_FUNC_LOCAL fm_lookup
+    xor r8d, r8d
+    V_TEST_PTR rdi, rax
+    ja .fml_none
+    test rdi, rdi
+    jz .fml_none
+    mov rax, [rdi + PyObject.ob_type]
+    extern dict_type
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    je .fml_dict
+    REQUIRE_DICT_TYPE rax, rcx, .fml_generic
+.fml_dict:
+    extern dict_get
+    call dict_get
+    xor r8d, r8d
+    leave
+    ret
+.fml_generic:
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jz .fml_none
+    mov rax, [rax + PyMappingMethods.mp_subscript]
+    test rax, rax
+    jz .fml_none
+    call rax
+    mov r8d, 1
+    leave
+    ret
+.fml_none:
+    ; Not subscriptable at all.  CPython's PyObject_GetItem names the type;
+    ; falling through to the caller's "no such key" KeyError named the wrong
+    ; problem, and `'{a}'.format_map(5)` came out as a KeyError.
+    push rdi
+    push rdi                    ; and a pad: this frame carves nothing
+    extern value_type
+    call value_type             ; rdi is the mapping, as a Value
+    mov rsi, rax
+    CSTRING rdi, `'\x01' object is not subscriptable`
+    extern type_name_message
+    call type_name_message
+    mov rsi, rax
+    extern exc_TypeError_type
+    lea rdi, [rel exc_TypeError_type]
+    extern set_exception
+    call set_exception
+    pop rdi
+    pop rdi
+    xor eax, eax
+    xor edx, edx
+    xor r8d, r8d
+    leave
+    ret
+END_FUNC fm_lookup
+
+;; ============================================================================
+;; str_method_format_map(rdi = args, rsi = nargs) -> rax = a formatted str
+;; args[0] = self (the format string), args[1] = the mapping.
+;; Replaces {key} with mapping[key].
+;; ============================================================================
 DEF_FUNC str_method_format_map, FM_FRAME
     push rbx
     push r12
@@ -2775,6 +2869,26 @@ DEF_FUNC str_method_format_map, FM_FRAME
 .fmap_key_error:
     RAISE exc_KeyError_type, "format_map() got no such key"
 
+.fmap_lookup_failed:
+    ; A dict miss answers a NULL Value with nothing pending, and the KeyError
+    ; is ours to raise.  A mapping of its own has already raised -- the
+    ; IndexError a match object gives for an unknown group, say -- and that
+    ; exception is the answer.
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    je .fmap_key_error
+    mov rdi, [rbp - FM_BUF]
+    call ap_free
+    xor eax, eax
+    xor edx, edx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
 .fmap_have_key:
     ; Key is from r14 to ecx (exclusive); the base key stops at the first
     ; '.' or '[' within that.
@@ -2795,15 +2909,17 @@ DEF_FUNC str_method_format_map, FM_FRAME
     call str_new_heap
     push rax                    ; save key str
 
-    ; Look up in mapping: dict_get(dict, key, key_tag)
+    ; Look up in the mapping -- any mapping, not only a dict.
     mov rdi, [rbp - FM_MAP]
     mov rsi, rax
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
+    call fm_lookup
+    mov [rbp - FM_VALUE], rax   ; the Value, before it is taken apart
+    mov [rbp - FM_OWNED], r8
+    V_UNPACK rax, rdx
     ; A miss answers a NULL Value.  Nothing checked, and obj_str below then
     ; dereferenced it: every missing key was a segfault rather than a KeyError.
     test edx, edx
-    jz .fmap_key_error
+    jz .fmap_lookup_failed
     ; rax = value payload, edx = value tag
     push rax
     push rdx
@@ -2877,6 +2993,13 @@ DEF_FUNC str_method_format_map, FM_FRAME
     ; DECREF temp str
     pop rdi
     call obj_decref
+    ; mp_subscript hands back an OWNED reference where dict_get's is borrowed.
+    cmp qword [rbp - FM_OWNED], 0
+    je .fmap_not_owned
+    mov qword [rbp - FM_OWNED], 0
+    mov rdi, [rbp - FM_VALUE]
+    DECREF_V rdi, rcx
+.fmap_not_owned:
     pop rax                     ; discard saved key str slot
     pop rcx                     ; next source pos
     pop rax                     ; discard saved old ecx

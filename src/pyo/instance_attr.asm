@@ -537,6 +537,23 @@ DEF_FUNC type_refresh_attr_flags
     ret
 END_FUNC type_refresh_attr_flags
 
+; Give back the descriptor IG_HELD is keeping alive, if there is one.  Every
+; exit has produced its own owned result by the time this runs, so a __del__
+; reached from here cannot take the answer with it.  Two pushes: this frame
+; leaves rsp 16-aligned at the epilogue.
+%macro IG_RELEASE_HELD 0
+    cmp qword [rbp - IG_HELD], 0
+    je %%none
+    push rax
+    push rdx
+    mov rdi, [rbp - IG_HELD]
+    mov qword [rbp - IG_HELD], 0
+    DECREF_V rdi, rsi
+    pop rdx
+    pop rax
+%%none:
+%endmacro
+
 ;; ============================================================================
 ;; instance_getattr_default(PyInstanceObject *self, PyObject *name,
 ;;                          int64_t *from_inst_dict_or_null,
@@ -556,6 +573,9 @@ IG_ORIGIN equ 16        ; the type the MRO walk started from
 IG_DESCR1 equ 24        ; 1 when the MRO was consulted BEFORE the dict
 IG_WHERE  equ 32        ; out-parameter: set to 1 for an instance-dict hit
 IG_UNBOUND equ 40       ; 1 when the caller will take a method unbound
+; A reference to what the MRO walk found, held across the instance-dict lookup
+; and released at every exit.  See .ft_beaten_by_inst.
+IG_HELD   equ 48
 IG_FRAME  equ 56            ; + 3 pushes = 80, 16-aligned
 global instance_getattr_default
 DEF_FUNC instance_getattr_default, IG_FRAME
@@ -568,6 +588,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     mov r12, rsi                ; r12 = name
     mov [rbp - IG_NAME], rsi    ; r12 is reused as scratch further down
     mov qword [rbp - IG_DESCR1], 0
+    mov qword [rbp - IG_HELD], 0
     ; rdx is the out-parameter, or NULL.  Everything but .found_inst leaves it
     ; at 0, so only an instance-dict hit reports one.
     mov [rbp - IG_WHERE], rdx
@@ -641,6 +662,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     INCREF_VAL rax, edx         ; tag-aware INCREF (skips SmallInt/NULL)
     mov rax, r13
     mov rdx, r12                ; restore tag from dict_get
+    IG_RELEASE_HELD
     pop r13
     pop r12
     pop rbx
@@ -669,8 +691,20 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     jnz .found_type_dispatch            ; data descriptor: it wins
 .ft_beaten_by_inst:
     ; Not one.  If the instance has the name, that is the answer.
+    ;
+    ; The lookup below runs the instance dict's KEYS' __eq__, and that is
+    ; arbitrary Python: `del C.attr` inside one drops the type's last
+    ; reference to the descriptor this is still holding, and everything after
+    ; reads freed memory.  CPython INCREFs what _PyType_Lookup found and keeps
+    ; it to the end of the function for exactly this -- test_descr's
+    ; vicious_descriptor_nonsense, from 2003 -- and so does IG_HELD.
     push rax
     push rdx
+    cmp rdx, TAG_PTR
+    jne .ft_not_held
+    mov [rbp - IG_HELD], rax
+    INCREF rax
+.ft_not_held:
     LOAD_INST_DICT rdi, rbx, .ft_no_inst
     test rdi, rdi
     jz .ft_no_inst
@@ -753,6 +787,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     mov rax, r13
     INCREF rax
     mov edx, TAG_PTR
+    IG_RELEASE_HELD
     pop r13
     pop r12
     pop rbx
@@ -767,6 +802,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     call method_new
     ; rax = bound method (method_new INCREFs func and self)
     mov edx, TAG_PTR
+    IG_RELEASE_HELD
     pop r13
     pop r12
     pop rbx
@@ -783,7 +819,14 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     jz .found_slot_nowhere
     mov qword [rcx], 1
 .found_slot_nowhere:
-    ; r13 = member descriptor, rbx = instance
+    ; r13 = member descriptor, rbx = instance.  The descriptor is an OFFSET
+    ; into an instance of the class it was made for, and it need not have come
+    ; from this one's: `class Sneaky: borrowed = Other.slot` puts it in a
+    ; class with a different layout.
+    extern member_check_receiver
+    mov rdi, r13
+    mov rsi, rbx
+    call member_check_receiver  ; raises when the layouts do not match
     mov rcx, [r13 + PyMemberDescrObject.md_offset]
     SLOT_ADDR rdx, rbx, rcx
     mov rax, [rdx]             ; slot Value
@@ -791,6 +834,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     jz .slot_not_set            ; 0 = slot not set → AttributeError
     INCREF_V rax, rdx
     V_UNPACK rax, rdx
+    IG_RELEASE_HELD
     pop r13
     pop r12
     pop rbx
@@ -806,6 +850,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     extern getset_descr_get
     call getset_descr_get
     V_UNPACK rax, rdx
+    IG_RELEASE_HELD
     pop r13
     pop r12
     pop rbx
@@ -818,6 +863,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     INCREF_VAL r13, r12         ; tag-aware INCREF
     mov rax, r13
     mov rdx, r12                ; restore tag from dict_get
+    IG_RELEASE_HELD
     pop r13
     pop r12
     pop rbx
@@ -858,6 +904,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     test rax, rax
     jz .ig_ask_getattr
     mov edx, TAG_PTR
+    IG_RELEASE_HELD
     pop r13
     pop r12
     pop rbx
@@ -889,6 +936,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     V_UNPACK rax, rdx
     test edx, edx
     jz .getattr_raised          ; the slot is present, so NULL means it raised
+    IG_RELEASE_HELD
     pop r13
     pop r12
     pop rbx
@@ -919,6 +967,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     jz .getattr_unwind
     mov qword [rel attr_error_pending], 1
     RET_NULL
+    IG_RELEASE_HELD
     pop r13
     pop r12
     pop rbx
@@ -968,6 +1017,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
 .base_getattr_ptr:
     mov edx, TAG_PTR
 .base_getattr_done:
+    IG_RELEASE_HELD
     pop r13
     pop r12
     pop rbx
@@ -977,6 +1027,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
 
 .no_base_getattr:
     RET_NULL
+    IG_RELEASE_HELD
     pop r13
     pop r12
     pop rbx
@@ -1177,6 +1228,17 @@ DEF_FUNC instance_setattr
     ret
 
 .sa_member:
+    ; The offset is into an instance of the descriptor's OWN class, and a
+    ; descriptor borrowed into another class body would otherwise store at
+    ; that offset in an object of a different layout -- a wild write.
+    push r9
+    push r9                     ; and a pad: the call below stays aligned
+    mov rdi, r9
+    mov rsi, rbx
+    extern member_check_receiver
+    call member_check_receiver
+    pop r9
+    pop r9
 
     ; Member descriptor! Write the value into the slot
     mov rcx, [r9 + PyMemberDescrObject.md_offset]

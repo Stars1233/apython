@@ -14,29 +14,21 @@ reasoning that chose them and what changing one would cost.
 
 ## Correctness
 
-- **CPython's test_weakref overflows the C stack.**  `WeakMethodTestCase.
-  test_hashing` and two of its sibling classes die with an unbounded
-  recursion whose top frame is `dict_lookup`; valgrind reports "can't grow
-  stack" rather than an invalid access.  The test in isolation passes, and so
-  does every reduction of it tried so far -- it needs the rest of the module,
-  so the state that arms it comes from an earlier test.  The Python-level
-  recursion limit is in place and works (`sys.getrecursionlimit()` is 1000
-  and a runaway Python function raises RecursionError), so whatever recurses
-  here is doing it below the eval loop, where nothing counts the depth.
+- **CPython's test_weakref reports 44 valgrind errors of one kind**: an object
+  freed by an explicit `gc.collect()` while a live frame still held it -- the
+  collector deciding something is unreachable that is not.  The C-stack
+  overflow that used to head this entry is gone: it was `hash()` on a class
+  written `__hash__ = ref.__hash__`, where the generic slot wrapper and the
+  builtin it found dispatched into each other for ever, and the module no
+  longer crashes.
 
-  The same file also reports 44 valgrind errors of a second kind, all of them
-  an object freed by an explicit `gc.collect()` while a live frame still held
-  it -- the collector deciding something is unreachable that is not.  Both
-  predate the round that recorded them.
-
-  CPython's test_sys_settrace dies of the same thing, in `gc_visit_decref`
-  under `exc_traverse` at shutdown, and it is HEAP-LAYOUT SENSITIVE: the same
-  commit built at `/tmp/apy-base` passes and built at
-  `/home/jgarzik/repo/apython` crashes, because the DWARF path length changes
-  the binary's size and with it every allocation address.  A git worktree is
-  the usual way to compare two commits, and a worktree whose path differs in
-  LENGTH is not a control -- build the comparison at a path of the same
-  length, or the answer is about the path.
+  CPython's test_sys_settrace dies in `gc_visit_decref` under `exc_traverse`
+  at shutdown, and it is HEAP-LAYOUT SENSITIVE: the same commit built at
+  `/tmp/apy-base` passes and built at `/home/jgarzik/repo/apython` crashes,
+  because the DWARF path length changes the binary's size and with it every
+  allocation address.  A git worktree is the usual way to compare two commits,
+  and a worktree whose path differs in LENGTH is not a control -- build the
+  comparison at a path of the same length, or the answer is about the path.
 
 - **Calls made with a misaligned stack, everywhere except the paths into
   GMP.**  The SysV ABI wants `rsp % 16 == 0` at a `call`, and glibc's float
@@ -71,28 +63,146 @@ reasoning that chose them and what changing one would cost.
   function reached by `call` -- assume the wrong one and every handler in the
   tree reports as broken.
 
-- **A set or frozenset SUBCLASS is not treated as a set by `update` or by
-  the comparisons.**  CPython asks `PyAnySet_Check`, which is a subtype test;
-  three places here compare the type pointer against `set_type` and
-  `frozenset_type` exactly, and a subclass fails all three.
+- **A set or frozenset SUBCLASS is not treated as a set by `update`.**
+  CPython asks `PyAnySet_Check`, which is a subtype test; two places here
+  still compare the type pointer against `set_type` and `frozenset_type`
+  exactly, and a subclass fails both.  (`set_richcompare` was the third and
+  is fixed: it asks TYPE_FLAG_SET_SUBCLASS now.)
 
   `s.update(sub)` and `{*sub}` fall through to the generic iterator path, so
   a subclass that defines `__iter__` is asked -- CPython ignores it and reads
   the table, which is what makes `{*FS([1,2,3])}` `{1, 2, 3}` there and
-  `{99}` here.  `set_richcompare` returns NotImplemented for a subclass
-  operand, so `FS([1,2]) == FS([1,2])` is False (the identity fallback) and
-  `FS([1,2]) <= FS([1,2])` is a TypeError; a subclass is therefore unusable
-  as a dict key or a set member, because the lookup finds the right hash and
-  then decides the keys are unequal.  `set_contains`'s frozenset-for-a-set-
-  key arm is the third, and the mildest: `SubSet() in s` raises where CPython
-  answers False.
+  `{99}` here.  `set_contains`'s frozenset-for-a-set-key arm is the second,
+  and the milder: `SubSet() in s` raises where CPython answers False.
 
-  The fix is `type_is_subtype` in all three, and the reason it is not a
-  one-liner is the fourth site it implies: `set_coerce_operand` already
-  accepts a subclass through `REQUIRE_SET_TYPE`, so the method forms and the
-  operator forms currently disagree with each other as well as with CPython,
-  and the three exact-type tests have to move together with a test that
-  fixes the whole surface at once.
+  The fix is the flag test in both, and what makes it more than a one-liner
+  is the site it implies: `set_coerce_operand` already accepts a subclass
+  through `REQUIRE_SET_TYPE`, so the method forms and the operator forms
+  currently disagree with each other as well as with CPython, and the
+  remaining exact-type tests have to move together with a test that fixes the
+  whole surface at once.
+
+- **`except*` does not look inside a NESTED group, and a group publishes
+  neither `split` nor `subgroup` nor `derive`.**  `except* KeyError` over
+  `ExceptionGroup("outer", [ExceptionGroup("inner", [KeyError()]), OSError()])`
+  matches the OSError and leaves the outer group unhandled, where CPython
+  recurses and matches the KeyError through the nesting.  The split is
+  `eg_split`, and it walks one level.
+
+  The three methods are the other half of the same gap: the splitting exists
+  only as the thing `except*` calls, so a program cannot do it itself.  And
+  where CPython's `split` asks the group to `derive()` a new one -- whose
+  default builds a plain `ExceptionGroup` -- `eg_split` constructs one of the
+  group's OWN type, so a subclass of `ExceptionGroup` splits into more of
+  itself rather than into `ExceptionGroup`.  Publishing the three and routing
+  the internal split through `derive` is one change, because the type the
+  halves get is decided there.
+
+- **`raise SomeExceptionClass` does not run the class's `__init__`.**  The
+  class form of the operand reaches `exc_new`, which builds the object and its
+  args tuple directly rather than CALLING the type, so
+  `class C(Exception):` with an `__init__` of its own is constructed with none
+  of it: `raise C` gives `C()` where CPython gives whatever `C()` gives.  The
+  `from` clause instantiates a class cause the same way and inherits the same
+  limit.  Fixing it means calling the type -- `exc_type_call` -- where
+  `.raise_type` calls `exc_new`, on the path every `raise ValueError` takes,
+  so it is a hot path and wants measuring rather than just changing.
+
+- **`super(C, obj)` on a PROXY answers differently depending on what comes
+  after it in the file.**  CPython's supercheck asks an object what class it
+  says it is when neither its type nor the object itself is a subtype, which
+  is what makes super() work through a proxy that forwards attribute access --
+  `test_descr.test_proxy_super` is exactly that.  It works on its own; in a
+  longer program the same call refuses with "obj must be an instance or
+  subtype of type", and DELETING an unrelated statement that comes AFTER it
+  makes it work again.
+
+  valgrind is clean over both, so it is not memory corruption: it is
+  `obj_declared_class` answering 0, which means the `__class__` lookup did not
+  produce the class.  That lookup runs the proxy's own `__getattribute__` --
+  Python, from inside an opcode handler, which is the one thing this path does
+  that no other form of super() does, and it recurses once more because
+  `self.__obj` goes through `__getattribute__` too.  Something about that
+  nested eval, and not about the object, decides the answer.
+
+  `tests/test_super_bad_object.py` covers the refusals and leaves the proxy
+  out for this reason; the shape that fails is the file that test was cut
+  down from, with the proxy call followed by two more statements.
+
+- **`member_descriptor` publishes no `__get__`, `__set__` or `__delete__`.**
+  A `__slots__` descriptor works through attribute access, and answers
+  `AttributeError: 'member_descriptor' object has no attribute '__get__'` when
+  a program reaches for the protocol by name -- which
+  `inspect.getattr_static`, the descriptor tests and anything walking
+  `type.__dict__` do.  The receiver check they would need is
+  `member_check_receiver`, which is already there; what is missing is the
+  three entries in the type's dict and the thunks behind them.
+
+- **`scandir()` on a BYTES path yields str entries.**  CPython gives a bytes
+  path bytes names and bytes paths back; here the argument goes through
+  `posix_path_arg`, which hands over a C string, and the entries are built
+  from it as str.  Everything works, and works on the right files -- what
+  differs is the type of `.name` and `.path`, which `os.walk(b'.')` and the
+  bytes half of `glob` then propagate.  Fixing it means carrying the
+  argument's own kind through the getdents64 loop and building bytes objects
+  on that side, which is the second half of every string-building step in
+  `posix_scandir`.
+
+- **A raise from a C-level slot is a non-local jump, so a C caller cannot
+  absorb it.**  `slot_mp_subscript` and its siblings end in `slot_reraise`,
+  which tail-jumps into `eval_exception_unwind`; a builtin's own miss --
+  `dict_subscript`'s KeyError, say -- goes through `RAISE`, which does the
+  same.  Neither returns to its caller, so an opcode that wants to try a
+  lookup and recover from the miss cannot go through the slot at all.
+
+  `mapping_getitem_opt` is the way round it for a heaptype (ask
+  `__getitem__` through `dunder_call_2`, which does return), and LOAD_NAME
+  and SETUP_ANNOTATIONS use it for a locals mapping that is not a dict.  It
+  does not help for a builtin `__getitem__`, so a dict SUBCLASS keeps the
+  direct table read in LOAD_NAME where CPython's `PyDict_CheckExact` sends it
+  through `PyObject_GetItem`: an overridden `__getitem__` on a dict subclass
+  used as `exec()` locals is not consulted.  Fixing it properly means the
+  builtin subscripts reporting a miss by RETURNING rather than by raising,
+  which is every caller of `dict_subscript`.
+
+- **OSError's four named attributes are in its instance `__dict__`.**
+  `errno`, `strerror`, `filename` and `filename2` are C fields in CPython and
+  do not appear in `vars(e)`; here `exc_oserror` writes them into `exc_dict`,
+  so `OSError(2, 'x').__dict__` has four entries CPython's has none of.  Every
+  read of them agrees, and so does `args`; what differs is only what
+  `__dict__`, `vars()` and `__getstate__` report.  Moving them means four more
+  fields on PyExceptionObject and a getattr arm for each, which is what
+  CPython does.
+
+- **The attribute lookup order is instance-dict-first unless the MRO holds a
+  data descriptor**, which is observable when user code mutates the class
+  DURING the lookup.  CPython always consults the type first and keeps what it
+  found; this consults the instance dict first when
+  TYPE_FLAG_MRO_HAS_DATA_DESCR is clear, which is almost every class, because
+  that is the fast order for an ordinary `self.x`.
+
+  A key whose `__eq__` runs `del C.meth` while the instance dict is being
+  probed therefore makes `d.meth` an AttributeError here and a bound method in
+  CPython.  Nothing is unsafe -- the descriptor the MRO walk found is held
+  across the probe now -- and no ordinary program can tell the two orders
+  apart.  Closing it means paying the MRO walk on every attribute access, or
+  finding a cheaper way to notice that the class changed underneath.
+
+- **`zip(..., strict=True)` does not say which argument was short.**
+  CPython's is "zip() argument 2 is shorter than argument 1" (and
+  "...longer..."), with an "argument%s 1-%d" plural once there are more than
+  two; this says "zip() has arguments with different lengths" whichever
+  happened.  The information is all there at the raise -- `zip_iternext`
+  knows the index and which direction it found -- so this is wording rather
+  than machinery.
+
+- **A user `__eq__` that reaches itself answers False instead of raising
+  RecursionError.**  `class D: def __eq__(s, o): return s.me == o.me` with
+  `p.me = p` gives False here and RecursionError in CPython.  The container
+  comparisons are guarded (`C_RECURSION_ENTER` in list, tuple and dict) and
+  Python-level recursion is guarded by `recursion_depth`, so something on the
+  instance-comparison path is deciding the answer before either limit is
+  reached rather than recursing; which one has not been traced.
 
 - **`f(*5)` does not name the callable.**  CPython says
   "__main__.f() argument after * must be an iterable, not int"; this says
@@ -144,6 +254,14 @@ reasoning that chose them and what changing one would cost.
   shares `hypot`'s routine and so shares the note.  `fsum` is exact: it is
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
+
+- **`str.find` and `str.count` are the naive O(n*m) search.**  CPython's is
+  Crochemore-Perrin two-way with a Bloom-filter skip, which is O(n + m), and
+  its own test says so: `string_tests.test_adaptive_find` searches a
+  1,000,000-character haystack built to defeat the naive scan, and
+  test_userstring and test_string time out on it here rather than failing.
+  Ordinary searches are unaffected -- the shapes that hurt are the ones with
+  long repeated prefixes.
 
 - **Indexing a non-ASCII string is O(n), so a loop over one is quadratic.**
   `str_cp_offset` and `str_byte_to_cp` walk from byte 0 every time, because

@@ -18,6 +18,10 @@ extern ap_free
 extern object_type
 extern ap_malloc
 extern gc_alloc
+extern gc_dealloc
+extern gc_track
+extern exc_traverse
+extern exc_clear_gc
 extern ap_strcmp
 extern exc_BaseException_type
 extern exc_Exception_type
@@ -25,6 +29,8 @@ extern exc_getattr
 extern exc_isinstance
 extern exc_metatype
 extern exc_repr
+extern exc_setattr
+extern exc_AttributeError_type
 extern exc_str
 extern exc_TypeError_type
 extern exc_ValueError_type
@@ -58,13 +64,19 @@ DEF_FUNC eg_new, EGN_FRAME
     mov r12, rsi            ; msg_str
     mov r13, rdx            ; exc_tuple
 
-    ; Allocate
+    ; Allocate through the collector.  It has to be gc_alloc rather than
+    ; ap_malloc because the TYPE decides how the block is freed, and the type
+    ; here is whatever the caller passed: `except*` splits a group by calling
+    ; this with the group's own type, and a SUBCLASS of any exception type is
+    ; given exc_dealloc, which frees through gc_dealloc at obj - GC_HEAD_SIZE.
+    ; A plain ap_malloc block handed back sixteen bytes low corrupts the heap.
     mov edi, PyExceptionGroupObject_size
-    call ap_malloc
-
-    ; Initialize fields
-    mov qword [rax + PyExceptionGroupObject.ob_refcnt], 1
-    mov [rax + PyExceptionGroupObject.ob_type], rbx
+    mov rsi, rbx
+    call gc_alloc
+    ; gc_alloc sets ob_refcnt = 1 and stamps ob_type, but does not COUNT the
+    ; type -- and a group's type is as often a program's class as it is one of
+    ; the two builtins.  See exc_new.
+    inc qword [rbx + PyObject.ob_refcnt]
     mov [rax + PyExceptionGroupObject.exc_type], rbx
     mov [rax + PyExceptionGroupObject.exc_value], r12
     mov qword [rax + PyExceptionGroupObject.exc_tb], 0
@@ -123,7 +135,17 @@ DEF_FUNC eg_new, EGN_FRAME
     mov [r8 + 8], rdx
 .args_done:
     mov [rcx + PyExceptionGroupObject.exc_args], rax
-    mov rax, rcx
+
+    ; Track only now: every field the traverse reads is set.
+    mov rdi, rcx
+    call gc_track
+
+    ; From the frame slot, not from rcx: gc_track is where a collection
+    ; actually runs, and rcx is caller-saved.  The 1-in-N allocation that
+    ; triggered one came back with a clobbered rcx and returned it as the new
+    ; group -- usually harmless rubbish, and NULL often enough that building
+    ; ~150 nested ExceptionGroups reliably died on `[NULL + exc_args]`.
+    mov rax, [rbp - EGN_EG]
 
     pop r13
     pop r12
@@ -365,10 +387,13 @@ DEF_FUNC eg_type_call, EGC_FRAME
     call eg_new
     ; rax = new EG object
 
-    ; DECREF our ref to exc_tuple (eg_new INCREFed it)
+    ; DECREF our ref to exc_tuple (eg_new INCREFed it).  Two pushes, not one:
+    ; this frame leaves rsp 16-aligned, so a lone save puts the callee 8 out.
+    push rax
     push rax
     mov rdi, r12
     call obj_decref
+    pop rax
     pop rax
 
     ; .args holds the sequence AS PASSED, not the tuple this made of it:
@@ -432,7 +457,9 @@ END_FUNC eg_type_call
 ;; eg_dealloc(PyExceptionGroupObject *eg)
 ;; Free exception group and DECREF all fields.
 ;; ============================================================================
-DEF_FUNC eg_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
+EGD_TYPE  equ 8
+EGD_FRAME equ 24                  ; + 1 push = 32, so rsp is 16-aligned
+DEF_FUNC eg_dealloc, EGD_FRAME
     push rbx
     mov rbx, rdi
 
@@ -475,9 +502,18 @@ DEF_FUNC eg_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     call obj_decref
 .no_excs:
 
-    ; Free the object
+    ; Save ob_type before freeing: gc_dealloc reads it, then frees.  A frame
+    ; slot rather than a push, so both calls below stay 16-aligned.
+    mov rax, [rbx + PyObject.ob_type]
+    mov [rbp - EGD_TYPE], rax
+
+    ; Free the object (GC-aware), matching eg_new's gc_alloc
     mov rdi, rbx
-    call ap_free
+    call gc_dealloc
+
+    ; Release the class AFTER the instance, matching eg_new's count.
+    mov rdi, [rbp - EGD_TYPE]
+    call obj_decref
 
     pop rbx
     leave
@@ -485,12 +521,189 @@ DEF_FUNC eg_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
 END_FUNC eg_dealloc
 
 ;; ============================================================================
-;; eg_str(PyExceptionGroupObject *eg) -> PyObject* (string)
-;; Returns the message string (exc_value), like exc_str.
+;; eg_traverse(PyExceptionGroupObject *eg) -> visits every reference it owns
+;;
+;; A group is an exception plus one more reference -- the tuple of the
+;; exceptions it holds -- so it visits that and hands the rest to
+;; exc_traverse.  Without it a group's instances are tracked and report no
+;; outgoing references, and no cycle through one is ever collectable.
 ;; ============================================================================
-DEF_FUNC_BARE eg_str
-    jmp exc_str
+DEF_FUNC eg_traverse, 8         ; + 1 push = 16, so `call r14` is aligned
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyExceptionGroupObject.eg_exceptions]
+    VISIT_PTR rdi
+
+    mov rdi, rbx
+    call exc_traverse
+
+    pop rbx
+    leave
+    ret
+END_FUNC eg_traverse
+
+;; ============================================================================
+;; eg_clear(PyExceptionGroupObject *eg) -> drops every reference it owns
+;; The collector's half of eg_traverse.
+;; ============================================================================
+DEF_FUNC eg_clear, 8            ; 1 push, so rsp is 16-aligned
+    push rbx
+    mov rbx, rdi
+
+    mov rdi, [rbx + PyExceptionGroupObject.eg_exceptions]
+    mov qword [rbx + PyExceptionGroupObject.eg_exceptions], 0
+    test rdi, rdi
+    jz .egc_no_excs
+    call obj_decref
+.egc_no_excs:
+
+    mov rdi, rbx
+    call exc_clear_gc
+
+    pop rbx
+    leave
+    ret
+END_FUNC eg_clear
+
+;; ============================================================================
+;; eg_str(PyExceptionGroupObject *eg) -> (rax = str, edx = TAG_PTR), or (0, 0)
+;;
+;; CPython's BaseExceptionGroup_str: "%S (%zd sub-exception%s)".  This was
+;; `jmp exc_str`, which printed the args tuple -- "('m', [ValueError(1)])"
+;; where CPython says "m (1 sub-exception)".
+;; ============================================================================
+EST_MSG   equ 8
+EST_BUF   equ 16
+EST_FRAME equ 24            ; + 1 push = 32, 16-aligned
+DEF_FUNC eg_str, EST_FRAME
+    push rbx
+    mov rbx, rdi
+
+    ; The message, as a string.  The constructor requires a str, but str() of
+    ; it costs nothing and is what CPython's %S does.
+    mov rdi, [rbx + PyExceptionGroupObject.exc_value]
+    extern obj_str
+    call obj_str
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .est_failed
+    mov [rbp - EST_MSG], rax
+
+    ; The message, then at most " (18446744073709551615 sub-exceptions)".
+    mov rdi, [rax + PyVarObject.ob_size]
+    add rdi, 64
+    extern ap_malloc
+    call ap_malloc
+    mov [rbp - EST_BUF], rax
+
+    mov rdi, rax
+    mov rsi, [rbp - EST_MSG]
+    mov rdx, [rsi + PyVarObject.ob_size]
+    lea rsi, [rsi + PyStrObject.data]
+    extern ap_memcpy
+    call ap_memcpy
+    mov rax, [rbp - EST_BUF]
+    mov rcx, [rbp - EST_MSG]
+    add rax, [rcx + PyVarObject.ob_size]
+
+    mov rdi, rax
+    CSTRING rsi, " ("
+    extern rbt_append_cstr
+    call rbt_append_cstr
+
+    mov rdi, rax
+    mov rsi, [rbx + PyExceptionGroupObject.eg_exceptions]
+    mov rsi, [rsi + PyVarObject.ob_size]
+    extern msg_append_i64
+    call msg_append_i64
+
+    mov rdi, rax
+    CSTRING rsi, " sub-exception"
+    call rbt_append_cstr
+
+    mov rcx, [rbx + PyExceptionGroupObject.eg_exceptions]
+    cmp qword [rcx + PyVarObject.ob_size], 1
+    jle .est_singular
+    mov rdi, rax
+    CSTRING rsi, "s"
+    call rbt_append_cstr
+.est_singular:
+    mov rdi, rax
+    CSTRING rsi, ")"
+    call rbt_append_cstr
+
+    mov rdi, [rbp - EST_BUF]
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    push rax
+    push rax                    ; and a pad, for the alignment
+    mov rdi, [rbp - EST_BUF]
+    extern ap_free
+    call ap_free
+    mov rdi, [rbp - EST_MSG]
+    extern obj_decref
+    call obj_decref
+    pop rax
+    pop rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+
+.est_failed:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
 END_FUNC eg_str
+
+;; ============================================================================
+;; eg_setattr(rdi = the group, rsi = the name, rdx = the value Value,
+;;            rcx = its tag) -> rax = 0, or does not return
+;;
+;; The two names eg_getattr answers out of the object's FIELDS are read-only,
+;; as CPython's member table has them.  exc_setattr would have put them in the
+;; instance dict, where nothing ever reads them again: `g.message = "x"` was
+;; accepted and then invisible.  Everything else is an ordinary exception
+;; attribute and goes to exc_setattr.
+;; ============================================================================
+EST2_NAME  equ 8
+EST2_SELF  equ 16
+EST2_VAL   equ 24
+EST2_TAG   equ 32
+EST2_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
+DEF_FUNC eg_setattr, EST2_FRAME
+    mov [rbp - EST2_SELF], rdi
+    mov [rbp - EST2_NAME], rsi
+    mov [rbp - EST2_VAL], rdx
+    mov [rbp - EST2_TAG], rcx
+
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "message"
+    call ap_strcmp
+    test eax, eax
+    jz .egs_readonly
+
+    mov rdi, [rbp - EST2_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "exceptions"
+    call ap_strcmp
+    test eax, eax
+    jz .egs_readonly
+
+    mov rdi, [rbp - EST2_SELF]
+    mov rsi, [rbp - EST2_NAME]
+    mov rdx, [rbp - EST2_VAL]
+    mov rcx, [rbp - EST2_TAG]
+    leave
+    jmp exc_setattr
+
+.egs_readonly:
+    leave
+    RAISE exc_AttributeError_type, "readonly attribute"
+END_FUNC eg_setattr
 
 ;; ============================================================================
 ;; eg_getattr(PyExceptionGroupObject *eg, PyStrObject *name) -> rax = Value or NULL
@@ -1007,7 +1220,11 @@ exc_BaseExceptionGroup_type:
     dq 0                        ; tp_hash
     dq 0                ; tp_call  (instances are not callable)
     dq eg_getattr               ; tp_getattr
-    dq 0                        ; tp_setattr
+    ; A setter at all.  There was none, so `e.__traceback__ = tb` on a group
+    ; was "AttributeError: cannot set attribute" -- which is what unittest's
+    ; _clean_tracebacks does to every error it reports, so CPython's
+    ; test_exception_group could not even print its first failure.
+    dq eg_setattr               ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
@@ -1019,11 +1236,11 @@ exc_BaseExceptionGroup_type:
     dq exc_BaseException_type   ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC        ; tp_flags
     dq 0                        ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
-    dq 0 ; tp_dictoffset
+    dq eg_traverse              ; tp_traverse
+    dq eg_clear                 ; tp_clear
+    dq PyExceptionObject.exc_dict ; tp_dictoffset
     dq 0                        ; tp_tailslots
 
 ; ExceptionGroup type — base = BaseExceptionGroup (also inherits from Exception)
@@ -1040,7 +1257,11 @@ exc_ExceptionGroup_type:
     dq 0                        ; tp_hash
     dq 0                ; tp_call  (instances are not callable)
     dq eg_getattr               ; tp_getattr
-    dq 0                        ; tp_setattr
+    ; A setter at all.  There was none, so `e.__traceback__ = tb` on a group
+    ; was "AttributeError: cannot set attribute" -- which is what unittest's
+    ; _clean_tracebacks does to every error it reports, so CPython's
+    ; test_exception_group could not even print its first failure.
+    dq eg_setattr               ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
@@ -1052,11 +1273,11 @@ exc_ExceptionGroup_type:
     dq exc_BaseExceptionGroup_type ; tp_base
     dq 0                        ; tp_dict
     dq eg_mro_tuple             ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC        ; tp_flags
     dq eg_bases_tuple           ; tp_bases
-    dq 0                        ; tp_traverse
-    dq 0                        ; tp_clear
-    dq 0 ; tp_dictoffset
+    dq eg_traverse              ; tp_traverse
+    dq eg_clear                 ; tp_clear
+    dq PyExceptionObject.exc_dict ; tp_dictoffset
     dq 0                        ; tp_tailslots
 
 ;; ExceptionGroup is the one builtin with two bases: BaseExceptionGroup for

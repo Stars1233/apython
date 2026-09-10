@@ -203,62 +203,13 @@ END_FUNC dict_method_pop
 ;; args[0]=self
 ;; ============================================================================
 DEF_FUNC dict_method_clear
-    push rbx
-    push r12
-    push r13
-    push r14
-
-    mov rbx, [rdi]          ; self (dict)
-
-    ; DECREF all keys and values
-    mov r12, [rbx + PyDictObject.capacity]
-    xor r13d, r13d
-
-.dc_loop:
-    cmp r13, r12
-    jge .dc_clear_entries
-
-    mov rax, [rbx + PyDictObject.entries]
-    imul rcx, r13, DICT_ENTRY_SIZE
-    lea r14, [rax + rcx]    ; r14 = entry ptr
-
-    mov rdi, [r14 + DictEntry.key]
-    V_UNPACK rdi, rsi
-    test rdi, rdi
-    jz .dc_next
-
-    ; DECREF key (tag-aware)
-    DECREF_VAL rdi, rsi
-
-    ; DECREF value (tag-aware)
-    mov rdi, [r14 + DictEntry.value]
-    V_UNPACK rdi, rsi
-    DECREF_VAL rdi, rsi
-
-.dc_next:
-    inc r13
-    jmp .dc_loop
-
-.dc_clear_entries:
-    ; Give the table back instead of rewriting it: an ap_memset over
-    ; capacity*24 bytes and a `rep stosq` over capacity*8 more, to keep a
-    ; table with nothing in it.  CPython's dict_clear points ma_keys at
-    ; Py_EMPTY_KEYS.
-    extern dict_release_tables
-    mov rdi, rbx
-    call dict_release_tables
-
-    ; Reset size to 0
-    mov qword [rbx + PyDictObject.ob_size], 0
-    mov qword [rbx + PyDictObject.dk_nentries], 0
-    mov qword [rbx + PyDictObject.dk_tombstones], 0
-    inc qword [rbx + PyDictObject.dk_version]
+    ; dict_clear_all detaches the tables before it releases anything, which is
+    ; what makes clear() safe against a value's __del__ calling clear() again.
+    extern dict_clear_all
+    mov rdi, [rdi]              ; self (dict)
+    call dict_clear_all
 
     RET_NONE
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret

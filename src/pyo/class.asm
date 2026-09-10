@@ -283,25 +283,35 @@ END_FUNC ts_imm_append
 ;; Deallocate an instance: DECREF inst_dict, DECREF ob_type, free self.
 ;; rdi = instance
 ;; ============================================================================
-ID_EXC   equ 8
-ID_OWNED equ 16          ; whether the reference below is ours to drop
-ID_FRAME equ 24             ; + 1 push = 32
-DEF_FUNC instance_dealloc, ID_FRAME
+
+;; ============================================================================
+;; obj_call_finalizer(rdi = obj) -> void
+;;
+;; CPython's PyObject_CallFinalizer: run __del__ once, with the object held
+;; alive for the duration and the pending exception put back the way it was.
+;;
+;; Answers eax = 1 when the object still has references after the call.  A
+;; caller that is DEALLOCATING it -- where the refcount was zero on the way in
+;; -- reads that as resurrection and must free nothing: __del__ stored `self`
+;; somewhere, and that somewhere is a live reference.  That is CPython's
+;; PyObject_CallFinalizerFromDealloc, which is the same arithmetic entered at
+;; zero.  The collector calls this on an object that is in a cycle and so has
+;; references either way; it ignores the answer and lets the resurrection pass
+;; decide.
+;;
+;; It is a function of its own because the COLLECTOR calls it too.  PEP 442
+;; says the finalizers of an unreachable cycle all run before any of it is
+;; cleared -- otherwise __del__ is handed an object whose attributes have
+;; already been dropped, and anything it resurrects has been freed underneath
+;; the reference it was just given.  The caller is what decides "once": the
+;; FINALIZED bit in the object's GC head.
+;; ============================================================================
+OCF_EXC   equ 8
+OCF_OWNED equ 16          ; whether the reference below is ours to drop
+OCF_FRAME equ 24          ; + 1 push = 32
+DEF_FUNC obj_call_finalizer, OCF_FRAME
     push rbx
-
-    mov rbx, rdi                ; rbx = self
-
-    ; Does this class have a __del__ at all?  One bit, maintained by
-    ; type_refresh_attr_flags down every subclass, instead of the MRO walk and
-    ; a dict probe per entry that dunder_call_1 does -- which ran on EVERY
-    ; heaptype instance that died, to discover that almost none of them has
-    ; one.  Callgrind put that at 23.9% of a `class C: pass` construction loop.
-    ; TYPE_FLAG_HAS_DEL is only ever set on a heaptype, so it implies the
-    ; heaptype test the check used to make.
-    mov rax, [rbx + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_flags]
-    test rax, TYPE_FLAG_HAS_DEL
-    jz .no_del
+    mov rbx, rdi
 
     ; Temporarily bump refcount to prevent re-entrant dealloc during __del__
     inc qword [rbx + PyObject.ob_refcnt]
@@ -312,9 +322,9 @@ DEF_FUNC instance_dealloc, ID_FRAME
     ; Snapshot what was pending, and hold a reference to it: if __del__ raises,
     ; installing its exception releases the global's reference to this one, and
     ; the saved pointer would be dangling by the time it is put back.
-    DUNDER_EXC_SAVE [rbp - ID_EXC]
-    mov qword [rbp - ID_OWNED], 0
-    mov rdi, [rbp - ID_EXC]
+    DUNDER_EXC_SAVE [rbp - OCF_EXC]
+    mov qword [rbp - OCF_OWNED], 0
+    mov rdi, [rbp - OCF_EXC]
     test rdi, rdi
     jz .del_nothing_pending
     ; ...but only when the global's own reference is real.  The unwinder can
@@ -332,7 +342,7 @@ DEF_FUNC instance_dealloc, ID_FRAME
     cmp qword [rdi + PyObject.ob_refcnt], 0
     jle .del_nothing_pending
     call obj_incref
-    mov qword [rbp - ID_OWNED], 1
+    mov qword [rbp - OCF_OWNED], 1
 .del_nothing_pending:
     mov rdi, rbx
     lea rsi, [rel dunder_del]
@@ -357,13 +367,13 @@ DEF_FUNC instance_dealloc, ID_FRAME
     ; then zeroed the global -- destroying the exception the interpreter was
     ; carrying, so that a __del__ running during an unwind made the enclosing
     ; except block never run.
-    EXC_RAISED_SINCE [rbp - ID_EXC], rax, .del_report
+    EXC_RAISED_SINCE [rbp - OCF_EXC], rax, .del_report
 
 .del_restore:
     ; Whatever __del__ left behind, the pending exception goes back to what it
     ; was.  The reference taken above is what the global gets; anything else
     ; sitting there is released.
-    mov rax, [rbp - ID_EXC]
+    mov rax, [rbp - OCF_EXC]
     cmp [rel current_exception], rax
     je .del_drop_saved
     mov rdi, [rel current_exception]
@@ -374,7 +384,7 @@ DEF_FUNC instance_dealloc, ID_FRAME
     jmp .del_cleared
 .del_drop_saved:
     ; Unchanged, so the global still owns its own; drop the extra one.
-    cmp qword [rbp - ID_OWNED], 0
+    cmp qword [rbp - OCF_OWNED], 0
     je .del_cleared
     mov rdi, rax
     test rdi, rdi
@@ -383,10 +393,16 @@ DEF_FUNC instance_dealloc, ID_FRAME
 
 .del_cleared:
 
-    ; Restore refcount (undo the bump)
+    ; Undo the bump, without deallocating: whether anything is left is the
+    ; answer this function gives.
     dec qword [rbx + PyObject.ob_refcnt]
+    xor eax, eax
+    cmp qword [rbx + PyObject.ob_refcnt], 0
+    setne al
 
-    jmp .no_del
+    pop rbx
+    leave
+    ret
 
 .del_report:
     ; A genuinely new exception: report it in full on stderr -- the object it
@@ -407,8 +423,22 @@ DEF_FUNC instance_dealloc, ID_FRAME
     extern traceback_print_unraisable
     call traceback_print_unraisable
     jmp .del_restore
+END_FUNC obj_call_finalizer
 
-.no_del:
+ID_EXC   equ 8
+ID_OWNED equ 16          ; whether the reference below is ours to drop
+ID_FRAME equ 24             ; + 1 push = 32
+DEF_FUNC instance_dealloc, ID_FRAME
+    push rbx
+
+    mov rbx, rdi                ; rbx = self
+
+    ; __del__ has already run by now: obj_dealloc calls the finalizer before
+    ; it clears the weak references and before it reaches this tp_dealloc,
+    ; which is the order PEP 442 asks for and the order that lets an object
+    ; its own finalizer resurrects keep the weakrefs that pointed at it.  If
+    ; it did resurrect, obj_dealloc returned and this never ran at all.
+
     ; Check if this is an int subclass — XDECREF int_value (tag-aware)
     mov rax, [rbx + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_flags]
@@ -632,9 +662,22 @@ DEF_FUNC instance_dealloc, ID_FRAME
     mov rdi, [rbx + PyDictObject.entries]
     test rdi, rdi
     jz .id_no_storage
+    ; Not the shared empty table, which lives in .rodata and belongs to no
+    ; set: `S().clear()` installs it, and freeing it handed free() a static
+    ; address -- "free(): invalid pointer", and the process aborted.
+    ; set_dealloc has this check; instance_dealloc, which is what runs for a
+    ; SUBCLASS of set, did not.  The dict arm above says the same thing.
+    extern set_empty_entries
+    lea rax, [rel set_empty_entries]
+    cmp rdi, rax
+    je .id_set_shared
     mov qword [rbx + PyDictObject.entries], 0
     mov qword [rbx + PyDictObject.capacity], 0
     call ap_free
+    jmp .id_no_storage
+.id_set_shared:
+    mov qword [rbx + PyDictObject.entries], 0
+    mov qword [rbx + PyDictObject.capacity], 0
 
 .id_no_storage:
 
@@ -687,7 +730,42 @@ END_FUNC base_slot
 
 IR_EXC   equ 8
 IR_FRAME equ 24            ; + 1 push = 32, 16-aligned
-DEF_FUNC instance_repr, IR_FRAME
+
+;; ============================================================================
+;; instance_repr(rdi = an instance) -> (rax = a str, edx = TAG_PTR), or (0, 0)
+;;
+;; `Foo.__repr__ = Foo.__str__` makes the two chase each other: instance_repr
+;; finds __repr__, which is object.__str__, which asks for __repr__ again.  No
+;; Python frame is entered anywhere in that loop, so recursion_depth never
+;; moved and the machine stack ran out -- CPython raises RecursionError, and
+;; its test_descr.test_repr_as_str (issue 11603) is the test for it.
+;;
+;; The body is wrapped so its several exits need not each be touched, as
+;; list_richcompare is.  A NULL rather than a raise, so the container reprs
+;; still get to free their buffers on the way out.
+;; ============================================================================
+extern c_recursion_depth
+extern recursion_limit
+extern exc_RecursionError_type
+extern set_exception
+DEF_FUNC instance_repr
+    C_RECURSION_ENTER .ir_too_deep
+    call instance_repr_inner
+    C_RECURSION_LEAVE
+    leave
+    ret
+.ir_too_deep:
+    C_RECURSION_LEAVE
+    SET_EXC exc_RecursionError_type, \
+            "maximum recursion depth exceeded while getting the repr of an object"
+    RET_NULL
+    leave
+    ret
+END_FUNC instance_repr
+
+;; instance_repr_inner(rdi = an instance) -> the same; the wrapper above only
+;; bounds the recursion.
+DEF_FUNC_LOCAL instance_repr_inner, IR_FRAME
     push rbx
     mov rbx, rdi
     DUNDER_EXC_SAVE [rbp - IR_EXC]
@@ -767,7 +845,7 @@ DEF_FUNC instance_repr, IR_FRAME
     pop rbx
     leave
     ret
-END_FUNC instance_repr
+END_FUNC instance_repr_inner
 
 ;; ============================================================================
 ;; instance_repr_default(rdi = the instance) -> rax = PyStrObject*
@@ -876,7 +954,28 @@ END_FUNC instance_repr_default
 ;; ============================================================================
 IS_EXC   equ 8
 IS_FRAME equ 24            ; + 1 push = 32, 16-aligned
-DEF_FUNC instance_str, IS_FRAME
+
+;; The same guard instance_repr carries, and for the same loop: the two reach
+;; each other, so bounding only one of them would report the depth at whichever
+;; happened to be asked first.
+DEF_FUNC instance_str
+    C_RECURSION_ENTER .is_too_deep
+    call instance_str_inner
+    C_RECURSION_LEAVE
+    leave
+    ret
+.is_too_deep:
+    C_RECURSION_LEAVE
+    SET_EXC exc_RecursionError_type, \
+            "maximum recursion depth exceeded while getting the str of an object"
+    RET_NULL
+    leave
+    ret
+END_FUNC instance_str
+
+;; instance_str_inner(rdi = an instance) -> the same; the wrapper above only
+;; bounds the recursion.
+DEF_FUNC_LOCAL instance_str_inner, IS_FRAME
     push rbx
     mov rbx, rdi
     DUNDER_EXC_SAVE [rbp - IS_EXC]
@@ -960,7 +1059,7 @@ DEF_FUNC instance_str, IS_FRAME
     pop rbx
     leave
     ret
-END_FUNC instance_str
+END_FUNC instance_str_inner
 
 ;; ============================================================================
 ;; type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> PyObject*

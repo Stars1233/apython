@@ -2103,7 +2103,7 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     mov rdi, [rdi]            ; args[0]
     call obj_repr
     test edx, edx
-    jz .aa_nargs_error
+    jz .aa_repr_failed        ; a raising __repr__, not a wrong arity
 
     ; Check if all chars are ASCII (fast path)
     mov [rbp - AA_REPR], rax
@@ -2238,6 +2238,16 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.aa_repr_failed:
+    ; obj_repr raised and its exception is pending.  This shared the arity
+    ; label, which both buried that exception and read rsi -- long since
+    ; something else -- as the argument count: "ascii() takes exactly one
+    ; argument (184 given)".
+    xor eax, eax
+    xor edx, edx
+    leave
     ret
 
 .aa_nargs_error:

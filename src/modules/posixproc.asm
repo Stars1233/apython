@@ -679,3 +679,191 @@ section .bss
 ; The environment a dict is flattened into.  Fixed, because this may run in a
 ; freshly forked child where allocating is the one thing not to do.
 pxv_envbuf: resb PXV_ENVBUF
+
+section .text
+
+;; ============================================================================
+;; posix.putenv(name, value) -> None   /   posix.unsetenv(name) -> None
+;;
+;; os.environ.__setitem__ calls the first and __delitem__ the second, so
+;; without them `os.environ["X"] = "1"` is a NameError -- which is what the
+;; setUp of CPython's test_argparse does on every one of its four hundred
+;; tests, and what os_helper.EnvironmentVarGuard is built on.
+;;
+;; They go through libc rather than a syscall because there is no syscall:
+;; the environment is a process-image thing, and glibc's `environ` is what
+;; execve is handed here, so setenv keeps the child's view in step with this
+;; one's for free.
+;;
+;; The two refusals are CPython's.  A name with '=' in it is a ValueError
+;; because it could not be read back; an empty one is what setenv itself
+;; refuses, with EINVAL.
+;;
+;;   posix_putenv(rdi = args, rsi = nargs) -> rax = Value (None), or 0 raising
+;;   posix_unsetenv(rdi = args, rsi = nargs) -> rax = Value (None), or 0 raising
+;; ============================================================================
+POSIX_PATH_KIND_PLAIN equ 0     ; spelled out: posix.asm is at the 100k cap
+
+%macro PXE_PATH_DONE 1          ; %1 = a frame slot holding what rdx returned
+    mov rdi, %1
+    test rdi, rdi
+    jz %%none
+    mov qword %1, 0
+    call obj_decref
+%%none:
+%endmacro
+
+extern obj_decref
+extern setenv
+extern unsetenv
+extern builtin_func_new
+extern str_from_cstr_heap
+extern dict_set
+
+;; posix_putenv(rdi = args, rsi = nargs) -> rax = Value (None), or 0 raising
+PPE_NAME  equ 8             ; the C string
+PPE_VALUE equ 16
+PPE_ON    equ 24            ; the object holding the name's bytes
+PPE_OV    equ 32            ; and the value's
+PPE_RC    equ 40            ; setenv's answer, across the releases
+PPE_FRAME equ 56            ; + 1 push = 64, 16-aligned
+DEF_FUNC posix_putenv, PPE_FRAME
+    push rbx
+    mov qword [rbp - PPE_ON], 0
+    mov qword [rbp - PPE_OV], 0
+    cmp rsi, 2
+    jne .ppe_argerr
+    mov rbx, rdi
+
+    mov rdi, [rbx]
+    CSTRING rsi, "putenv: name"
+    mov edx, POSIX_PATH_KIND_PLAIN
+    call posix_path_arg
+    test rax, rax
+    jz .ppe_fail
+    mov [rbp - PPE_NAME], rax
+    mov [rbp - PPE_ON], rdx
+
+    mov rdi, [rbx + 8]
+    CSTRING rsi, "putenv: value"
+    mov edx, POSIX_PATH_KIND_PLAIN
+    call posix_path_arg
+    test rax, rax
+    jz .ppe_fail
+    mov [rbp - PPE_VALUE], rax
+    mov [rbp - PPE_OV], rdx
+
+    ; A name carrying '=' could never be read back, and CPython says so.
+    mov rdi, [rbp - PPE_NAME]
+.ppe_scan:
+    movzx eax, byte [rdi]
+    test al, al
+    jz .ppe_name_ok
+    cmp al, '='
+    je .ppe_badname
+    inc rdi
+    jmp .ppe_scan
+.ppe_name_ok:
+
+    mov rdi, [rbp - PPE_NAME]
+    mov rsi, [rbp - PPE_VALUE]
+    mov edx, 1                      ; overwrite
+    call setenv wrt ..plt
+    mov [rbp - PPE_RC], eax
+    PXE_PATH_DONE [rbp - PPE_OV]
+    PXE_PATH_DONE [rbp - PPE_ON]
+    cmp dword [rbp - PPE_RC], 0
+    jne .ppe_failed_set
+
+    RET_NONE
+    pop rbx
+    leave
+    ret
+
+.ppe_failed_set:
+    ; setenv refuses an empty name with EINVAL, and has nothing else to fail
+    ; on once the name has been checked.
+    mov edi, 22                     ; EINVAL
+    xor esi, esi
+    call raise_oserror              ; does not return
+
+.ppe_badname:
+    PXE_PATH_DONE [rbp - PPE_OV]
+    PXE_PATH_DONE [rbp - PPE_ON]
+    RAISE exc_ValueError_type, "illegal environment variable name"
+
+.ppe_fail:
+    PXE_PATH_DONE [rbp - PPE_OV]
+    PXE_PATH_DONE [rbp - PPE_ON]
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+
+.ppe_argerr:
+    RAISE exc_TypeError_type, "putenv expected 2 arguments"
+END_FUNC posix_putenv
+
+;; posix_unsetenv(rdi = args, rsi = nargs) -> rax = Value (None), or 0 raising
+PUE_NAME  equ 8
+PUE_ON    equ 16
+PUE_FRAME equ 24            ; + 1 push = 32, 16-aligned
+DEF_FUNC posix_unsetenv, PUE_FRAME
+    push rbx
+    mov qword [rbp - PUE_ON], 0
+    cmp rsi, 1
+    jne .pue_argerr
+    mov rbx, rdi
+
+    mov rdi, [rbx]
+    CSTRING rsi, "unsetenv: name"
+    mov edx, POSIX_PATH_KIND_PLAIN
+    call posix_path_arg
+    test rax, rax
+    jz .pue_fail
+    mov [rbp - PUE_NAME], rax
+    mov [rbp - PUE_ON], rdx
+
+    mov rdi, [rbp - PUE_NAME]
+    call unsetenv wrt ..plt
+    PXE_PATH_DONE [rbp - PUE_ON]
+
+    RET_NONE
+    pop rbx
+    leave
+    ret
+
+.pue_fail:
+    PXE_PATH_DONE [rbp - PUE_ON]
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+
+.pue_argerr:
+    RAISE exc_TypeError_type, "unsetenv expected 1 argument"
+END_FUNC posix_unsetenv
+
+;; ============================================================================
+;; posixproc_register_env(rdi = the posix module dict) -> void
+;; Two entries, registered from here because posix.asm is at the 100k cap.
+;; ============================================================================
+PRE_FRAME equ 16            ; + 1 push = 24 ... padded below
+DEF_FUNC posixproc_register_env, PRE_FRAME
+    push r12
+    sub rsp, 8                  ; pad: 16 + 8 + 8 = 32, so the calls are aligned
+    mov r12, rdi
+    MODULE_ADD_FUNC posix_putenv, pxe_n_putenv
+    MODULE_ADD_FUNC posix_unsetenv, pxe_n_unsetenv
+    add rsp, 8
+    pop r12
+    leave
+    ret
+END_FUNC posixproc_register_env
+
+section .rodata
+pxe_n_putenv:   db "putenv", 0
+pxe_n_unsetenv: db "unsetenv", 0
+section .text

@@ -1700,6 +1700,17 @@ DEF_FUNC sym_enclosing_binds, SEB_FRAME
     ; `__classdict__` is, which is what lets a PEP 695 type-parameter wrapper
     ; read the body it is nested in.  Neither can be written in source: both
     ; are put there by the symbol table itself, and only where they are needed.
+    ;
+    ; The MODULE is not function-like either, and the exception is not its:
+    ; outside a class body `__class__` is an ordinary name.  Letting it through
+    ; here made a module-level `__class__` free in the block that read it, and
+    ; .bound_here then gave the module a CELL for it -- a module frame has
+    ; none, so the LOAD_DEREF read through a NULL cell and the process died.
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_CLASS
+    jne .loop
     mov rdi, rbx
     lea rsi, [rel sym_class_name]
     call comp_intern_cstr
@@ -2025,6 +2036,17 @@ DEF_FUNC sym_promote_cells, SPC_FRAME
     or ecx, SYM_FREE << SCOPE_SHIFT
     jmp .store_scope
 .bound_here:
+    ; The module never boxes anything.  Its frame carries no cells, so a cell
+    ; made here is a NULL one and every LOAD_DEREF through it is a wild read;
+    ; CPython runs analyze_cells for a FunctionBlock only.  Nothing should
+    ; reach here with a module scope now that sym_enclosing_binds stops at one,
+    ; but the cost of being wrong about that is a segfault, not a wrong answer.
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_MODULE
+    je .next_name
+
     ; A function-like block boxes the name: the two frames have to share one
     ; storage location, and a fast slot cannot be shared.
     ;

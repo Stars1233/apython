@@ -429,8 +429,16 @@ DEF_FUNC_BARE op_raise_varargs
 
 .raise_exc:
     ; TOS is the exception to raise
+    xor r15d, r15d                 ; no `from` clause
     VPOP_VAL rdi, r8
     mov [rel eval_saved_r13], r13  ; update saved stack — VPOP consumed the item
+
+.raise_normalize:
+    ; rdi/r8 = the exception operand, r15 = the raw `from` operand as a Value
+    ; (0 when there is no `from`).  Both forms of the opcode arrive here, and
+    ; the exception is normalised BEFORE the cause is looked at -- which is
+    ; the order CPython reports the two errors in, so `raise 5 from 5`
+    ; complains about the exception rather than about the cause.
 
     ; Check if it's already an exception object or a type
     ; If it's a type, create an instance with no args
@@ -501,56 +509,136 @@ DEF_FUNC_BARE op_raise_varargs
 .raise_exc_obj:
     ; rdi = exception object, owned -- the value stack's reference, which
     ; exc_install takes over along with the __context__ rule.
+    test r15, r15
+    jz .raise_install              ; plain `raise X`
+
+    ; `raise X from Y`.  The cause is applied HERE, and not where it was
+    ; popped, because until now rdi may still have been the exception CLASS:
+    ; PyExceptionObject.exc_suppress and PyTypeObject.tp_getattr are both at
+    ; +72, so writing the suppress flag into a class stored 1 in its getattr
+    ; slot and the next attribute access on that class called address 1.
+    push rdi
+    push rdi                      ; and a pad: this handler carves no frame
+    mov rdi, r15
+    call raise_coerce_cause
+    pop rdi
+    pop rdi
+    cmp rax, -1
+    je .raise_bad_cause
+    mov qword [rdi + PyExceptionObject.exc_suppress], 1
+    mov [rdi + PyExceptionObject.exc_cause], rax
+
+.raise_install:
     extern exc_install
     call exc_install
     jmp eval_exception_unwind
+
+.raise_bad_cause:
+    ; The exception itself was fine; only the cause was not.  Release it and
+    ; report the cause, the way CPython words it.
+    call obj_decref
+    RAISE exc_TypeError_type, "exception causes must derive from BaseException"
 
 .raise_bad:
     ; DECREF the bad value (pointer guaranteed here) and raise TypeError
     call obj_decref
 .raise_bad_no_decref:
+    XDECREF_V r15, rax            ; a `from` operand this raise never reached
     RAISE exc_TypeError_type, "exceptions must derive from BaseException"
 
 .raise_from:
-    ; TOS = cause, TOS1 = exception
-    VPOP_VAL rsi, rcx         ; cause payload + tag
-    push rcx                 ; save cause tag
-    push rsi                 ; save cause payload
-    VPOP_VAL rdi, r8          ; exception payload
-    mov [rel eval_saved_r13], r13  ; update saved stack — VPOPs consumed both items
-    push rdi                 ; save exception
-
-    ; Store __cause__ on exception object (if exception is a pointer)
-    ; cause is at [rsp+8], cause_tag at [rsp+16]
-    mov rax, [rsp + 8]      ; cause payload
-    mov rcx, [rsp + 16]     ; cause tag
-    ; `raise X from Y` suppresses the implicit context either way, and
-    ; `from None` leaves no cause at all -- storing the None singleton there
-    ; made the traceback printer read a traceback off a 16-byte object.
-    mov qword [rdi + PyExceptionObject.exc_suppress], 1
-    test ecx, TAG_RC_BIT
-    jz .raise_from_no_cause
-    lea rdx, [rel none_singleton]
-    cmp rax, rdx
-    je .raise_from_no_cause
-    ; Store cause (transfer ownership — no INCREF, we own the ref from VPOP)
-    mov [rdi + PyExceptionObject.exc_cause], rax
-    jmp .raise_from_done
-
-.raise_from_no_cause:
-    ; Non-pointer cause or None — DECREF if needed and set cause to NULL
-    mov rdi, rax
-    mov rsi, rcx
-    DECREF_VAL rdi, rsi
-    mov rdi, [rsp]           ; restore exception
-    mov qword [rdi + PyExceptionObject.exc_cause], 0
-
-.raise_from_done:
-    ; Raise the exception
-    pop rdi
-    add rsp, 16
-    jmp .raise_exc_obj
+    ; TOS = cause, TOS1 = exception.  The cause is carried in r15 (callee-saved,
+    ; so it survives the normaliser's calls) and applied at .raise_exc_obj.
+    VPOP r15                  ; cause, as an encoded Value; never 0 here
+    VPOP_VAL rdi, r8          ; exception
+    mov [rel eval_saved_r13], r13  ; update saved stack — VPOPs consumed both
+    jmp .raise_normalize
 END_FUNC op_raise_varargs
+
+
+;; ============================================================================
+;; raise_coerce_cause(rdi = the `from` operand as a Value, an owned reference
+;;   when it is a pointer) -> rax
+;;
+;;   0    the operand was None: no __cause__, though the clause still
+;;        suppresses the implicit __context__
+;;   -1   the operand is not an exception at all; the caller raises TypeError
+;;   else an OWNED exception instance to store as __cause__
+;;
+;; The reference handed in is consumed either way.  A CLASS is instantiated,
+;; exactly as the exception operand of `raise` is -- `raise X from KeyError`
+;; must store a KeyError(), not the class, or the traceback printer reads a
+;; traceback out of a type object.
+;; ============================================================================
+RCC_FRAME equ 8               ; + 1 push = 16, so the calls below are aligned
+DEF_FUNC_LOCAL raise_coerce_cause, RCC_FRAME
+    push rbx
+    mov rbx, rdi
+
+    ; None is a singleton, so identity is the whole test.
+    lea rax, [rel none_singleton]
+    cmp rbx, rax
+    je .rcc_none
+
+    ; An int, a float or a NULL cannot be an exception.
+    V_TEST_PTR rbx, rax
+    ja .rcc_bad
+    test rbx, rbx
+    jz .rcc_bad
+
+    ; An INSTANCE of an exception is the cause itself.
+    mov rdi, [rbx + PyObject.ob_type]
+    test rdi, rdi
+    jz .rcc_bad
+    call type_is_exc_subclass
+    test eax, eax
+    jnz .rcc_instance
+
+    ; Otherwise it has to be an exception CLASS.  Verify it is a type at all
+    ; before asking whether it is one: type_is_exc_subclass walks tp_mro.
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel type_type]
+    cmp rax, rcx
+    je .rcc_is_type
+    lea rcx, [rel exc_metatype]
+    cmp rax, rcx
+    je .rcc_is_type
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    jne .rcc_bad
+
+.rcc_is_type:
+    mov rdi, rbx
+    call type_is_exc_subclass
+    test eax, eax
+    jz .rcc_bad
+    ; Instantiate it with no arguments.  The class reference stays held, as
+    ; .raise_type's does: exc_new stores the type without INCREFing it.
+    mov rdi, rbx
+    xor esi, esi
+    xor edx, edx
+    call exc_new
+    jmp .rcc_out
+
+.rcc_instance:
+    mov rax, rbx                  ; keep the reference we were handed
+    jmp .rcc_out
+
+.rcc_none:
+    mov rdi, rbx
+    call obj_decref
+    xor eax, eax
+    jmp .rcc_out
+
+.rcc_bad:
+    DECREF_V rbx, rax
+    mov rax, -1
+
+.rcc_out:
+    pop rbx
+    leave
+    ret
+END_FUNC raise_coerce_cause
 
 ;; ============================================================================
 ;; op_reraise (119) - Re-raise the current exception

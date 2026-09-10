@@ -444,6 +444,31 @@ DEF_FUNC dunder_call_2
 END_FUNC dunder_call_2
 
 ;; ============================================================================
+;; mapping_getitem_opt(rdi = the mapping, rsi = the key, a pointer)
+;;   -> rax = an OWNED Value, or 0
+;;
+;; `m[key]` for a mapping that is not a dict, asked in a way the CALLER can
+;; recover from.
+;;
+;; A heaptype's mp_subscript is slot_mp_subscript, which does NOT return when
+;; __getitem__ raises: it tail-jumps into the unwinder.  So the opcodes that
+;; have to absorb a miss -- LOAD_NAME's probe of a custom locals, and
+;; SETUP_ANNOTATIONS -- cannot go through the slot at all.  The dunder itself
+;; answers a NULL Value and leaves the exception pending, which is what
+;; CPython's PyObject_GetItem does for them.
+;;
+;; A NULL answer with NOTHING pending means there is no __getitem__ at all.
+;; ============================================================================
+global mapping_getitem_opt
+DEF_FUNC mapping_getitem_opt
+    lea rdx, [rel dunder_getitem]
+    mov ecx, TAG_PTR            ; the key is a pointer; its Value is itself
+    call dunder_call_2
+    leave
+    ret
+END_FUNC mapping_getitem_opt
+
+;; ============================================================================
 ;; dunder_call_3(PyObject *self, PyObject *arg1, PyObject *arg2, const char *name,
 ;;               int arg2_tag)
 ;;   -> rax = the result Value, or 0 when the dunder is absent, is not

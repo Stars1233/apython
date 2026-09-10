@@ -146,6 +146,7 @@ section .rodata
 ;; trick and the same reasoning.
 ;; ============================================================================
 align 16
+global set_empty_entries
 set_empty_entries:
     times SET_ENTRY_SIZE / 8 dq 0
 
@@ -847,7 +848,9 @@ END_FUNC set_clone_into
 ;; set_add(set, key, key_tag) -> void
 ;; set_add(rdi=set, rsi=key Value) -> int
 ;; ============================================================================
-DEF_FUNC set_add
+SAD_TABLE equ 8             ; the entries array the probe started on
+SAD_FRAME equ 16            ; + 4 pushes = 48, 16-aligned
+DEF_FUNC set_add, SAD_FRAME
     push rbx
     push r12
     push r13
@@ -858,6 +861,7 @@ DEF_FUNC set_add
 
     SET_HASH_VALUE r12, r13     ; r13 = hash
 
+.sad_retry:
     ; Make the room BEFORE probing rather than after inserting.
     ;
     ; A fresh set points at the shared read-only empty table, so the free
@@ -879,6 +883,8 @@ DEF_FUNC set_add
     mov rdi, rbx
     call set_resize
 .have_room:
+    mov rcx, [rbx + PyDictObject.entries]
+    mov [rbp - SAD_TABLE], rcx
 
     ; Find slot
     mov rdi, rbx                ; set
@@ -886,6 +892,17 @@ DEF_FUNC set_add
     mov rdx, r13                ; hash
     call set_find_slot
     ; rax = entry ptr, edx = 1 if existing, 0 if empty
+
+    ; set_find_slot runs the keys' __eq__, and that is arbitrary Python: it
+    ; can `.clear()` this very set, which frees the entries array and installs
+    ; the shared read-only empty table.  set_find_slot restarts its own probe
+    ; when the table moves, but it then answers about the NEW table -- and if
+    ; that is the shared one, the free slot it hands back is in .rodata and
+    ; the store below is a fault at a mapped-read-only address.  Making the
+    ; room again is what gives the set a table of its own, so start over.
+    mov rcx, [rbx + PyDictObject.entries]
+    cmp rcx, [rbp - SAD_TABLE]
+    jne .sad_retry
 
     test edx, edx
     jnz .done                   ; key already exists, do nothing
@@ -1024,17 +1041,16 @@ DEF_FUNC set_richcompare, SRC_FRAME
     mov [rbp - SRC_OTHER], rsi
     mov [rbp - SRC_OP], rdx
 
-    ; Check other is a set or frozenset
+    ; Check other is a set or frozenset -- or a SUBCLASS of either, which the
+    ; exact-pointer compare this used to be refused: `S() <= S()` for
+    ; `class S(set)` came out NotImplemented and then TypeError.  Both static
+    ; types carry TYPE_FLAG_SET_SUBCLASS and every subclass inherits it, so
+    ; the flag is exactly the question being asked.
     test r8d, TAG_RC_BIT
     jz .src_not_impl
     mov rax, [rsi + PyObject.ob_type]
-    lea rcx, [rel set_type]
-    cmp rax, rcx
-    je .src_is_set
-    lea rcx, [rel frozenset_type]
-    cmp rax, rcx
-    je .src_is_set
-    jmp .src_not_impl
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_SET_SUBCLASS
+    jz .src_not_impl
 
 .src_is_set:
     cmp edx, PY_EQ

@@ -2554,6 +2554,12 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     lea rdi, [rel tuple_type]
     mov edx, 1
     call tuple_type_call        ; raises for a non-iterable, as CPython does
+    ; ...and it can fail for a reason of its own: draining the iterable runs
+    ; whatever produced it, and a generator that raises part way through
+    ; leaves NULL here with the exception already pending.  Reading ob_size
+    ; off that NULL is what str.join did too.
+    test rax, rax
+    jz .bj_materialise_failed
     mov [rbp - BJ_TMP], rax
     mov [rbp - BJ_LIST], rax
     mov rcx, rax
@@ -2730,6 +2736,19 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     lea rsi, [rel bj_msgbuf]
     call raise_exception
     ud2
+
+.bj_materialise_failed:
+    ; Nothing to raise: whatever the iterable did is already pending, and the
+    ; NULL is what says so.
+    xor eax, eax
+    xor edx, edx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .bj_not_iterable_pop:
     add rsp, 8

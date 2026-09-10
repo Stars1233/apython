@@ -213,6 +213,87 @@ DEF_FUNC dict_release_tables, 8         ; + 1 push = 16, 16-aligned
 END_FUNC dict_release_tables
 
 ;; ============================================================================
+;; dict_clear_all(rdi = dict) -> void
+;; Empty a dict and release everything it held.
+;;
+;; The tables are DETACHED first, and only then walked.  Releasing a value runs
+;; its __del__, which is arbitrary Python and may call clear() on this same
+;; dict -- and a second call that still found these entries installed released
+;; every one of them a second time, freeing objects the first call was in the
+;; middle of.  CPython's PyDict_Clear installs the empty table before it drops
+;; a single reference, for exactly this reason.  Nothing hands out a pointer to
+;; the detached table, so the walk below needs no re-reading and no clearing.
+;; ============================================================================
+DCA_BASE    equ 8              ; the detached entry array, to free
+DCA_CUR     equ 16             ; the cursor into it
+DCA_INDICES equ 24             ; the detached index array, to free
+DCA_COUNT   equ 32
+DCA_VAL     equ 40
+DCA_FRAME   equ 56             ; + 1 push = 64, 16-aligned
+DEF_FUNC dict_clear_all, DCA_FRAME
+    push rbx
+    mov rbx, rdi
+
+    mov rax, [rbx + PyDictObject.entries]
+    mov rcx, [rbx + PyDictObject.dk_indices]
+    mov rdx, [rbx + PyDictObject.capacity]
+    mov [rbp - DCA_BASE], rax
+    mov [rbp - DCA_CUR], rax
+    mov [rbp - DCA_INDICES], rcx
+    mov [rbp - DCA_COUNT], rdx
+
+    lea rcx, [rel dict_empty_entries]
+    cmp rax, rcx
+    jne .dca_detach
+    ; Already sharing the empty table: nothing of ours to release or free.
+    mov qword [rbp - DCA_BASE], 0
+    mov qword [rbp - DCA_COUNT], 0
+    jmp .dca_reset
+
+.dca_detach:
+    mov [rbx + PyDictObject.entries], rcx
+    lea rcx, [rel dict_empty_indices]
+    mov [rbx + PyDictObject.dk_indices], rcx
+    mov qword [rbx + PyDictObject.capacity], 1
+    mov qword [rbx + PyDictObject.dk_kind], 1   ; no keys left to disprove it
+
+.dca_reset:
+    mov qword [rbx + PyDictObject.ob_size], 0
+    mov qword [rbx + PyDictObject.dk_nentries], 0
+    mov qword [rbx + PyDictObject.dk_tombstones], 0
+    inc qword [rbx + PyDictObject.dk_version]
+
+.dca_loop:
+    cmp qword [rbp - DCA_COUNT], 0
+    je .dca_free
+    dec qword [rbp - DCA_COUNT]
+    mov rax, [rbp - DCA_CUR]
+    mov rdi, [rax + DictEntry.key]
+    test rdi, rdi
+    jz .dca_next                    ; empty slot or tombstone
+    mov rcx, [rax + DictEntry.value]
+    mov [rbp - DCA_VAL], rcx
+    DECREF_V rdi, rax
+    mov rdi, [rbp - DCA_VAL]
+    DECREF_V rdi, rax
+.dca_next:
+    add qword [rbp - DCA_CUR], DICT_ENTRY_SIZE
+    jmp .dca_loop
+
+.dca_free:
+    cmp qword [rbp - DCA_BASE], 0
+    je .dca_done
+    mov rdi, [rbp - DCA_BASE]
+    call ap_free
+    mov rdi, [rbp - DCA_INDICES]
+    call ap_free
+.dca_done:
+    pop rbx
+    leave
+    ret
+END_FUNC dict_clear_all
+
+;; ============================================================================
 ;; dict_alloc_tables(rdi = dict, rsi = capacity)
 ;; Allocates the dense entry array (zeroed, so the unused tail reads as empty)
 ;; and the sparse index array (all DICT_IX_EMPTY).  Sets .capacity.
@@ -1671,8 +1752,9 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
 END_FUNC dict_nb_ior
 
 ;; ============================================================================
-;; dict_richcompare(left, right, op, left_tag, right_tag) -> (payload, tag)
-;; rdi=left, rsi=right, edx=op, rcx=left_tag, r8=right_tag
+;; dict_richcompare(rdi = left, rsi = right, edx = op, rcx = left tag,
+;;                  r8 = right tag) -> (rax = payload, edx = tag)
+;;
 ;; Only supports Py_EQ (2) and Py_NE (3).
 ;; Two dicts are equal if they have the same size and all key-value pairs match.
 ;; ============================================================================
@@ -1680,11 +1762,35 @@ END_FUNC dict_nb_ior
 DRC_LEFT  equ 8
 DRC_RIGHT equ 16
 DRC_OP    equ 24
-DRC_LVAL  equ 32
-DRC_LTAG  equ 40
-DRC_FRAME equ 48            ; + 0 pushes = 48
+DRC_LVAL  equ 32            ; the left value, held for the turn
+DRC_RVAL  equ 40            ; the right value, held for the turn
+DRC_KEY   equ 48            ; the key, held for the turn
+DRC_IDX   equ 56
+DRC_RES   equ 64            ; the comparison's verdict, across the releases
+DRC_FRAME equ 80            ; + 0 pushes = 80
 
-DEF_FUNC dict_richcompare, DRC_FRAME
+; Comparing two dicts that reach each other -- x = {}; x['foo'] = x, twice --
+; recursed until the machine stack ran out; the identity fast path inside only
+; catches x == x.  The body is wrapped so its several exits need not each be
+; touched, exactly as list_richcompare and tuple_richcompare are.  CPython's
+; test_copy.test_deepcopy_reflexive_dict is the test for it.
+extern c_recursion_depth
+extern recursion_limit
+extern exc_RecursionError_type
+DEF_FUNC dict_richcompare
+    C_RECURSION_ENTER .drc_too_deep
+    call dict_richcompare_inner
+    C_RECURSION_LEAVE
+    leave
+    ret
+.drc_too_deep:
+    C_RECURSION_LEAVE
+    RAISE exc_RecursionError_type, "maximum recursion depth exceeded in comparison"
+END_FUNC dict_richcompare
+
+;; dict_richcompare_inner(the same arguments) -> (rax = payload, edx = tag)
+;; The comparison itself; the wrapper above only bounds the recursion.
+DEF_FUNC_LOCAL dict_richcompare_inner, DRC_FRAME
     V_UNPACK rdi, rcx           ; left  Value -> (payload, tag)
     V_UNPACK rsi, r8            ; right Value -> (payload, tag)
     ; edx = op (PY_EQ=2, PY_NE=3)
@@ -1732,103 +1838,100 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     cmp rax, rcx
     jne .drc_not_equal
 
-    ; Same size — check all key-value pairs from left exist in right with same value
-    mov r9, [rdi + PyDictObject.capacity]
-    xor r10d, r10d                  ; index = 0
+    ; Same size — check all key-value pairs from left exist in right with same
+    ; value.  Neither the capacity nor the entries pointer may be cached
+    ; across the loop and nothing in an entry may be used borrowed: the
+    ; comparison below is the values' own __eq__, and releasing a value runs
+    ; its __del__.  Either can empty or resize either dict -- CPython's own
+    ; test_dict does exactly that, twice, because CPython segfaulted on it
+    ; too.  So each turn re-reads the table and takes a reference to the key
+    ; and to both values for as long as it needs them.
+    mov qword [rbp - DRC_IDX], 0
 
 .drc_loop:
-    cmp r10, r9
-    jge .drc_equal
-
     mov rdi, [rbp - DRC_LEFT]
-    imul rax, r10, DICT_ENTRY_SIZE
-    add rax, [rdi + PyDictObject.entries]
+    mov rax, [rbp - DRC_IDX]
+    cmp rax, [rdi + PyDictObject.capacity]
+    jge .drc_equal
+    mov rcx, [rdi + PyDictObject.entries]
+    test rcx, rcx
+    jz .drc_equal                   ; emptied under us: nothing left to walk
+    imul rax, rax, DICT_ENTRY_SIZE
+    add rax, rcx
 
-    ; Skip empty entries
-    cmp qword [rax + DictEntry.key], 0   ; occupied?
-    je .drc_next
-
-    ; Save entry data to stack slots (safe across function calls)
-    push r9
-    push r10
-    mov r11, [rax + DictEntry.value]        ; left value
-    V_UNPACK r11, r9
-    mov [rbp - DRC_LVAL], r11               ; save to stack slot
-    mov [rbp - DRC_LTAG], r9                ; save to stack slot
-
-    ; Lookup key in right dict
-    mov rdi, [rbp - DRC_RIGHT]
+    ; Occupied?  An empty slot and a tombstone both have a NULL key.
     mov rsi, [rax + DictEntry.key]
+    test rsi, rsi
+    jz .drc_next
+
+    ; Hold the key and the left value for the turn.  A key is a Value like any
+    ; other -- an int key is an immediate -- so it is INCREF_V, not INCREF.
+    mov [rbp - DRC_KEY], rsi
+    INCREF_V rsi, rcx
+    mov r11, [rax + DictEntry.value]
+    mov [rbp - DRC_LVAL], r11
+    INCREF_V r11, rax
+
+    ; Look the key up in the right dict.  dict_get hands back a borrowed
+    ; Value, or 0 when the key is not there.
+    mov rdi, [rbp - DRC_RIGHT]
+    mov rsi, [rbp - DRC_KEY]
     call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    ; rax = right value, edx = tag (0 = not found)
-    ; NOTE: r11 and r9 are caller-saved and may be clobbered by dict_get
-    test edx, edx
-    jz .drc_not_equal_pop           ; key not in right
-
-    ; Reload left value and tag from stack slots
-    mov r11, [rbp - DRC_LVAL]
-    mov r9d, [rbp - DRC_LTAG]
-
-    ; Quick compare: same payload and same tag → equal
-    cmp rax, r11
-    jne .drc_values_differ
-    cmp edx, r9d
-    je .drc_values_match
-
-.drc_values_differ:
-    ; For SmallInt: both TAG_SMALLINT, compare payloads directly
-    cmp r9d, TAG_SMALLINT
-    jne .drc_ptr_compare
-    cmp edx, TAG_SMALLINT
-    jne .drc_not_equal_pop
-    ; Both SmallInt, payloads differ → not equal
-    jmp .drc_not_equal_pop
-
-.drc_ptr_compare:
-    ; Both TAG_PTR: use tp_richcompare
-    cmp r9d, TAG_PTR
-    jne .drc_not_equal_pop
-    cmp edx, TAG_PTR
-    jne .drc_not_equal_pop
-    ; Call tp_richcompare(left_val, right_val, PY_EQ, TAG_PTR, TAG_PTR)
-    mov rdi, r11                    ; left value
-    mov rsi, rax                    ; right value
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_richcompare]
+    mov [rbp - DRC_RVAL], rax
     test rax, rax
-    jz .drc_not_equal_pop           ; no tp_richcompare
-    mov edx, 2                      ; PY_EQ
-    mov ecx, TAG_PTR
-    mov r8d, TAG_PTR
-    V_PACK rdi, rcx             ; left  -> Value
-    V_PACK rsi, r8              ; right -> Value
-    call rax
-    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
-    ; Result: (rax=payload, edx=tag).  True and False are heap singletons
-    ; now, so test truthiness instead of looking for an inline bool payload.
-    extern obj_is_true
-    test edx, edx
-    jz .drc_not_equal_pop           ; NULL result: treat as not equal
-    mov rdi, rax
-    mov rsi, rdx
-    push rax
-    push rdx
-    V_PACK rdi, rsi
-    call obj_is_true
-    pop rdx
-    pop rdi
-    mov r11d, eax                   ; truthiness
-    push r11
-    DECREF_VAL rdi, rdx
-    pop r11
-    test r11d, r11d
-    jz .drc_not_equal_pop
-    jmp .drc_values_match
+    jz .drc_not_equal_rel           ; key not in right
+    INCREF_V rax, rcx
 
-.drc_not_equal_pop:
-    pop r10
-    pop r9
+    ; Compare them the way Python does.  This used to be a hand-rolled
+    ; payload-and-tag comparison that answered "not equal" whenever the two
+    ; Values were not the same KIND -- so `{1: 1} == {1: 1.0}` was False, and
+    ; so was `{1: True} == {1: 1}`.  obj_richcompare_bool is what every other
+    ; container search uses: identity first, then __eq__, then the reflected
+    ; operand, and -1 when the comparison raised.
+    extern obj_richcompare_bool
+    mov rdi, [rbp - DRC_LVAL]
+    mov rsi, [rbp - DRC_RVAL]
+    mov edx, 2                      ; PY_EQ
+    call obj_richcompare_bool
+
+    ; Release the turn's references before acting on the answer.  The verdict
+    ; goes in a frame slot and not a register: DECREF_V reaches obj_dealloc,
+    ; which clobbers every caller-saved register there is, and a __del__ under
+    ; it runs arbitrary Python.
+    mov [rbp - DRC_RES], eax
+    mov rdi, [rbp - DRC_KEY]
+    DECREF_V rdi, rax
+    mov rdi, [rbp - DRC_LVAL]
+    DECREF_V rdi, rax
+    mov rdi, [rbp - DRC_RVAL]
+    DECREF_V rdi, rax
+
+    mov eax, [rbp - DRC_RES]
+    test eax, eax
+    js .drc_raised                  ; -1: the comparison raised
+    jz .drc_not_equal
+
+.drc_next:
+    inc qword [rbp - DRC_IDX]
+    jmp .drc_loop
+
+.drc_not_equal_rel:
+    ; The key was absent from the right dict: drop what this turn is holding.
+    mov rdi, [rbp - DRC_KEY]
+    DECREF_V rdi, rax
+    mov rdi, [rbp - DRC_LVAL]
+    DECREF_V rdi, rax
+    jmp .drc_not_equal
+
+.drc_raised:
+    ; The comparison raised.  Returning NULL would be read as NotImplemented,
+    ; and the caller would fall back to identity and answer False with the
+    ; exception still pending -- so hand it to the unwinder, which is what
+    ; list_richcompare_inner does with the same -1.
+    extern eval_exception_unwind
+    leave
+    jmp eval_exception_unwind
+
 .drc_not_equal:
     ; Return based on op: EQ→False, NE→True
     cmp dword [rbp - DRC_OP], 3     ; NE?
@@ -1837,14 +1940,6 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     RET_BOOL_RAX
     leave
     ret
-
-.drc_values_match:
-    pop r10
-    pop r9
-
-.drc_next:
-    inc r10
-    jmp .drc_loop
 
 .drc_equal:
     ; Return based on op: EQ→True, NE→False
@@ -1861,7 +1956,7 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     RET_BOOL_RAX
     leave
     ret
-END_FUNC dict_richcompare
+END_FUNC dict_richcompare_inner
 
 ;; ============================================================================
 ;; dict_reversed(args, nargs) -> PyDictIterObject* (reverse key iterator)

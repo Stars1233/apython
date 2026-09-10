@@ -355,7 +355,7 @@ DEF_FUNC op_format_value, FV_FRAME
 .fv_conv_done:
     V_UNPACK rax, rdx
     test edx, edx
-    jz .fv_conv_failed
+    jz .fv_have_result          ; !s/!r/!a raised: (0,0) is the failure Value
     push rax
     push rdx
     mov rdi, [rbp - FV_VALUE]
@@ -395,7 +395,7 @@ DEF_FUNC op_format_value, FV_FRAME
     ; NULL is either "no __format__" or "__format__ raised"; falling through
     ; in the second case replaced the exception with a formatting result.
     cmp qword [rel current_exception], 0
-    jne .fv_conv_failed
+    jne .fv_have_result         ; it raised; rax:rdx is already (0,0)
     mov rdi, [rbp - FV_VALUE]   ; no __format__: fall through as before
 
 .fv_spec_not_ptr:
@@ -467,7 +467,7 @@ DEF_FUNC op_format_value, FV_FRAME
     test edx, edx
     jnz .fv_have_result
     cmp qword [rel current_exception], 0
-    jne .fv_conv_failed
+    jne .fv_have_result         ; it raised; rax:rdx is already (0,0)
     ; No __format__: fall through to str() as before.
     mov rdi, [rbp - FV_VALUE]
     mov rsi, [rbp - FV_VTAG]
@@ -503,6 +503,14 @@ DEF_FUNC op_format_value, FV_FRAME
 .fv_push:
     pop rax                    ; result payload
     pop rdx                    ; result tag
+    ; A NULL result means the conversion raised, and every arm now arrives
+    ; here rather than leaving early, so the value and the spec are released
+    ; exactly once either way.  Pushing NULL instead left BUILD_STRING to
+    ; report "build_string expects str" over the top of the real exception --
+    ; which 3.12 makes reachable from `%` too, since its compiler rewrites
+    ; `"lit %r" % (x,)` into FORMAT_VALUE/BUILD_STRING.
+    test edx, edx
+    jz .fv_conv_failed
     VPUSH_VAL rax, rdx
     leave
     DISPATCH

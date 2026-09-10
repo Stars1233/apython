@@ -889,20 +889,27 @@ END_FUNC sys_getprofile_func
 ;; instructions around the call, as CPython's _PyEval_CallTracing is.
 ;; ============================================================================
 SCT_SAVED equ 8
-SCT_FRAME equ 16            ; + 0 pushes = 16
+SCT_ARG2  equ 16            ; the second argument, for the refusal below
+SCT_FRAME equ 32            ; + 0 pushes = 32
 global sys_call_tracing_func
 DEF_FUNC sys_call_tracing_func, SCT_FRAME
     cmp rsi, 2
-    jne .sct_args
+    jne .sct_arity
     mov rdx, [rdi + 8]              ; the args tuple
     mov rdi, [rdi]                  ; the callable
+    ; It is a VALUE, and an int is an immediate: `sys.call_tracing(type, 2)`
+    ; -- which is the whole of CPython's own test for this function -- read
+    ; ob_type off the number 2.
+    mov [rbp - SCT_ARG2], rdx
+    V_TEST_PTR rdx, rax
+    ja .sct_not_tuple
     test rdx, rdx
-    jz .sct_args
+    jz .sct_not_tuple
     mov rcx, [rdx + PyObject.ob_type]
     extern tuple_type
     lea rax, [rel tuple_type]
     cmp rcx, rax
-    jne .sct_args
+    jne .sct_not_tuple
 
     mov rax, [rel tracing_depth]
     mov [rbp - SCT_SAVED], rax
@@ -916,7 +923,17 @@ DEF_FUNC sys_call_tracing_func, SCT_FRAME
     pop rax
     leave
     ret
-.sct_args:
-    extern exc_TypeError_type
-    RAISE exc_TypeError_type, "call_tracing() takes exactly 2 arguments"
+.sct_arity:
+    ; CPython says how many it got, and the two refusals are different
+    ; sentences: the count is an arity error, the type is an argument error.
+    extern raise_type_error_counted
+    CSTRING rdi, "call_tracing expected 2 arguments, got "
+    xor edx, edx
+    jmp raise_type_error_counted
+
+.sct_not_tuple:
+    mov rsi, [rbp - SCT_ARG2]
+    CSTRING rdi, `call_tracing() argument 2 must be tuple, not \x02`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC sys_call_tracing_func
