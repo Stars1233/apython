@@ -227,6 +227,7 @@ test_float
 test_float_repr
 test_float_repr_ties
 test_fmtspec
+test_for_iter_list_reuse
 test_for_loops
 test_format_fields
 test_format_float_spec

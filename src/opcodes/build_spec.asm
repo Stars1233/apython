@@ -142,6 +142,14 @@ DEF_FUNC_BARE op_for_iter_list
 
     ; Inline list_iter_next
     mov rax, [rdi + PyListIterObject.it_seq]       ; list ptr
+    ; ...including the test it opens with.  An iterator that has already run
+    ; out has had it_seq CLEARED -- .fil_exhausted below does it, so that a
+    ; __del__ re-entering the iterator finds it empty rather than pointing at
+    ; storage being freed -- and reading ob_size off that NULL is a
+    ; dereference of address zero.  Two `for` loops over one iterator is all it
+    ; takes, and itertools.dropwhile is written exactly that way.
+    test rax, rax
+    jz .fil_exhausted
     mov rcx, [rdi + PyListIterObject.it_index]     ; current index
 
     ; Check bounds
