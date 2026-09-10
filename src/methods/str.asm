@@ -1282,6 +1282,12 @@ DEF_FUNC str_method_join
     lea rsi, [r15 + 8]
     mov edx, 1
     call tuple_type_call
+    ; It can fail: draining the iterable runs whatever produced it, and a
+    ; generator that raises part way through leaves NULL here with the
+    ; exception already pending.  `"".join(codecs.iterdecode(gen, "idna"))`
+    ; is exactly that, and this read ob_size off the NULL.
+    test rax, rax
+    jz .join_materialise_failed
     mov [rbp - SJ_TMP], rax
     mov r12, rax
 .join_seq_ready:
@@ -1435,6 +1441,22 @@ DEF_FUNC str_method_join
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.join_materialise_failed:
+    ; Nothing to raise: whatever the iterable did is already pending, and this
+    ; hands back the NULL that says so.
+    mov rdi, rbx
+    call obj_decref             ; the separator this borrowed
+    xor eax, eax
+    xor edx, edx
+    add rsp, 56
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .join_not_iterable:

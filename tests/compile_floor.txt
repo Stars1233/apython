@@ -335,6 +335,7 @@ test_iter_sentinel
 test_itertools_gc
 test_itertools
 test_itertools_tail
+test_join_iterable_raises
 test_kwargs
 test_layout_conflict
 test_lazy_instance_dict
