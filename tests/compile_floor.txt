@@ -550,6 +550,7 @@ test_subscr_spec
 test_sum_compensated
 test_sum_int_fast
 test_sum_protocol
+test_super_bad_object
 test_super_descriptors
 test_super_object
 test_syntax_error_args

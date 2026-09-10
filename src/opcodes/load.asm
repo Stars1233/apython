@@ -16,6 +16,8 @@
 %include "object.inc"
 %include "opcodes.inc"
 
+extern exc_TypeError_type
+
 section .text
 
 extern eval_dispatch
@@ -77,6 +79,7 @@ LSA_ATTR_TAG equ 40
 LSA_ATTR     equ 48
 LSA_BIND     equ 56
 LSA_ORIGIN   equ 64      ; the MRO super() searches: the instance's, not the class's
+LSA_SELFTAG  equ 72      ; self is a Value, and need not be a pointer at all
 LSA_FRAME    equ 88         ; + 0 pushes = 80
 
 ;; ============================================================================
@@ -1459,28 +1462,55 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     ; Pop self, class, global_super
     VPOP_VAL rax, rdx              ; self
     mov [rbp - LSA_SELF], rax
+    mov [rbp - LSA_SELFTAG], rdx
     VPOP_VAL rax, rdx              ; class
     mov [rbp - LSA_CLASS], rax
     VPOP rdi              ; global_super -- DECREF and discard
     DECREF_V rdi, rsi
 
+    ; Everything below reads self as an object -- it is decref'd unconditionally
+    ; and handed to super_lookup -- so an immediate has to be refused here.
+    ; `super(C, 5).f` walked an int as if it had a tp_mro; CPython's supercheck
+    ; refuses the same argument with the message below.
+    cmp qword [rbp - LSA_SELFTAG], TAG_PTR
+    jne .lsa_bad_self
+
     ; super() searches the *instance's* MRO starting just past the class the
     ; method was defined in -- that is the whole point of it in a diamond,
     ; and following the defining class's own tp_base chain skipped the
     ; sibling branch entirely.
+    ; The second argument is a VALUE and need not be a pointer at all, and
+    ; type_is_subtype walks a tp_mro -- so asking it about the object read a
+    ; field of an ordinary instance as an MRO tuple, and dereferenced an int
+    ; or a float outright.  `super(C, 5).f` was a segfault, and so was
+    ; CPython's own test_descr.test_proxy_super, which reaches here with a
+    ; proxy object.
     extern type_is_subtype
+    extern value_type
     mov rdi, [rbp - LSA_SELF]
-    mov rdi, [rdi + PyObject.ob_type]
+    call value_type
+    test rax, rax
+    jz .lsa_origin_try_self
+    mov [rbp - LSA_ORIGIN], rax     ; the instance's type, if it turns out to fit
+    mov rdi, rax
     mov rsi, [rbp - LSA_CLASS]
     call type_is_subtype
     test eax, eax
     jz .lsa_origin_try_self
-    mov rax, [rbp - LSA_SELF]
-    mov rax, [rax + PyObject.ob_type]
+    mov rax, [rbp - LSA_ORIGIN]
     jmp .lsa_have_origin
 .lsa_origin_try_self:
-    ; A classmethod gets the class itself as the second argument.
+    ; A classmethod gets the class itself as the second argument.  Whether it
+    ; IS a class is a flag on its type -- TYPE_FLAG_METATYPE is set on type,
+    ; on both metatypes here and on any class deriving from type -- and not a
+    ; pointer compare, because a class built by a metaclass of its own has a
+    ; metatype of its own.
     mov rdi, [rbp - LSA_SELF]
+    V_TEST_PTR rdi, rax
+    ja .lsa_origin_class
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .lsa_origin_class
     mov rsi, [rbp - LSA_CLASS]
     call type_is_subtype
     test eax, eax
@@ -1488,6 +1518,31 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rax, [rbp - LSA_SELF]
     jmp .lsa_have_origin
 .lsa_origin_class:
+    ; Neither the object's type nor the object itself is a subtype of the
+    ; class.  CPython's supercheck asks one more question before refusing --
+    ; what the object says its class is -- and that is what makes super() work
+    ; through a proxy that forwards attribute access, which is what
+    ; test_descr.test_proxy_super is for.  The answer is used as a yes and
+    ; nothing more: the walk still starts from the class, as it always did, so
+    ; nothing here has to hold a class it does not own.
+    mov rdi, [rbp - LSA_SELF]
+    IS_NONE rdi, rax
+    je .lsa_not_found               ; super(C, None) is CPython's UNBOUND super
+    extern obj_declared_class
+    call obj_declared_class
+    test rax, rax
+    jz .lsa_bad_self
+    push rax
+    push rax                        ; and a pad: the calls below stay aligned
+    mov rdi, rax
+    mov rsi, [rbp - LSA_CLASS]
+    call type_is_subtype
+    mov [rbp - LSA_ORIGIN], rax     ; the verdict, across the release
+    pop rdi
+    pop rdi
+    call obj_decref                 ; obj_declared_class hands over a reference
+    cmp qword [rbp - LSA_ORIGIN], 0
+    je .lsa_bad_self
     mov rax, [rbp - LSA_CLASS]
 .lsa_have_origin:
     mov [rbp - LSA_ORIGIN], rax
@@ -1551,6 +1606,17 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rax, rcx
     test rax, rax
     jnz .lsa_walk
+
+.lsa_bad_self:
+    ; Release what was popped -- the tag says how -- and say what CPython says.
+    mov rdi, [rbp - LSA_SELF]
+    mov rsi, [rbp - LSA_SELFTAG]
+    DECREF_VAL rdi, rsi
+    mov rdi, [rbp - LSA_CLASS]
+    call obj_decref
+    ; DISPATCH saved the stack top from before the three operands were popped.
+    mov [rel eval_saved_r13], r13
+    RAISE exc_TypeError_type, "super(type, obj): obj must be an instance or subtype of type"
 
 .lsa_not_found:
     ; DECREF class and self

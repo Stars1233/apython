@@ -112,6 +112,27 @@ reasoning that chose them and what changing one would cost.
   `.raise_type` calls `exc_new`, on the path every `raise ValueError` takes,
   so it is a hot path and wants measuring rather than just changing.
 
+- **`super(C, obj)` on a PROXY answers differently depending on what comes
+  after it in the file.**  CPython's supercheck asks an object what class it
+  says it is when neither its type nor the object itself is a subtype, which
+  is what makes super() work through a proxy that forwards attribute access --
+  `test_descr.test_proxy_super` is exactly that.  It works on its own; in a
+  longer program the same call refuses with "obj must be an instance or
+  subtype of type", and DELETING an unrelated statement that comes AFTER it
+  makes it work again.
+
+  valgrind is clean over both, so it is not memory corruption: it is
+  `obj_declared_class` answering 0, which means the `__class__` lookup did not
+  produce the class.  That lookup runs the proxy's own `__getattribute__` --
+  Python, from inside an opcode handler, which is the one thing this path does
+  that no other form of super() does, and it recurses once more because
+  `self.__obj` goes through `__getattribute__` too.  Something about that
+  nested eval, and not about the object, decides the answer.
+
+  `tests/test_super_bad_object.py` covers the refusals and leaves the proxy
+  out for this reason; the shape that fails is the file that test was cut
+  down from, with the proxy call followed by two more statements.
+
 - **`scandir()` on a BYTES path yields str entries.**  CPython gives a bytes
   path bytes names and bytes paths back; here the argument goes through
   `posix_path_arg`, which hands over a C string, and the entries are built
