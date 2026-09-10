@@ -450,6 +450,7 @@ test_recursion
 test_relative_import
 test_re_module
 test_re_opcodes
+test_repr_element_raises
 test_repr
 test_re_review
 test_review_regressions
@@ -535,6 +536,7 @@ test_str_maketrans
 test_str_methods_extra
 test_str_methods_fix
 test_str_mod_buffer
+test_str_mod_raises
 test_str_mod_subclass
 test_str_predicates
 test_strsearch_boundaries
