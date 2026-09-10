@@ -218,16 +218,125 @@ DEF_FUNC main, 8
     jl .usage
 .no_trace_flag:
 
-    ; Save argv[1] (the .pyc filename, after -t shift if any)
+    ; --- interpreter flags, and -c ---
+    ;
+    ; What test.support's script_helper sends is
+    ;   [sys.executable, '-X', 'faulthandler'] + ('-I' or '-E') + the caller's
+    ;   arguments, which are usually '-c' and a command.  Forty of CPython's
+    ;   test modules cannot reach their first test without it.
+    ;
+    ; Accepting and IGNORING -E/-I/-S/-B/-u and their friends is the correct
+    ; behaviour here rather than a stub: apython has no site machinery and no
+    ; environment-driven configuration for them to switch off, and sys.flags
+    ; already reports every one of them as off.  Unknown flags are still
+    ; refused -- a lenient scan would swallow a filename beginning with '-'.
+    mov qword [rel cmd_source], 0
+.flag_loop:
+    cmp r14d, 2
+    jl .usage
+    mov rax, [r15 + 8]
+    cmp byte [rax], '-'
+    jne .flags_done
+    cmp byte [rax + 1], 0
+    je .flags_done              ; a bare "-" is a filename, not a flag
+
+    ; -c <command>.  CPython leaves sys.argv[0] as "-c" and drops the command
+    ; itself, so move the "-c" token down over it and shift by one; what is
+    ; left is ["-c", *the rest].
+    cmp byte [rax + 1], 'c'
+    jne .flag_not_c
+    cmp byte [rax + 2], 0
+    jne .flag_not_c
+    cmp r14d, 3
+    jl .usage
+    mov rcx, [r15 + 8]          ; the "-c" token
+    mov rdx, [r15 + 16]         ; the command
+    mov [rel cmd_source], rdx
+    mov [r15 + 16], rcx
+    add r15, 8
+    dec r14d
+    jmp .flags_done
+
+.flag_not_c:
+    ; -X <opt> and -W <spec> take a second token; both are ignored whole.
+    cmp byte [rax + 2], 0
+    jne .flag_word
+    movzx ecx, byte [rax + 1]
+    cmp cl, 'X'
+    je .flag_two
+    cmp cl, 'W'
+    je .flag_two
+
+.flag_word:
+    ; Every character after the '-' has to be one this accepts, so that -OO
+    ; and -bb work and -z does not.
+    lea rcx, [rax + 1]
+.flag_char:
+    movzx edx, byte [rcx]
+    test dl, dl
+    jz .flag_one
+    lea rsi, [rel main_noop_flags]
+.flag_char_scan:
+    movzx edi, byte [rsi]
+    test dil, dil
+    jz .usage                   ; not one of ours
+    cmp dil, dl
+    je .flag_char_next
+    inc rsi
+    jmp .flag_char_scan
+.flag_char_next:
+    inc rcx
+    jmp .flag_char
+
+.flag_one:
+    add r15, 8
+    dec r14d
+    jmp .flag_loop
+.flag_two:
+    cmp r14d, 3
+    jl .usage
+    add r15, 16
+    sub r14d, 2
+    jmp .flag_loop
+
+.flags_done:
+
+    ; Save argv[1] (the .pyc filename, or "-c", after any shift)
     mov rbx, [r15 + 8]         ; rbx = argv[1]
 
     ; Initialize subsystems
     call bool_init
 
     ; Load the file -> code object.  A .py is compiled here; anything else is
-    ; read as marshalled bytecode.
+    ; read as marshalled bytecode.  With -c there is no file: the command is
+    ; compiled in exec mode, exactly as `exec()` compiles a string.
+    mov rdi, [rel cmd_source]
+    test rdi, rdi
+    jz .load_from_path
+    ; r12 and r13 are the code object and the builtins dict further down, and
+    ; are free until then; being callee-saved they survive the calls here.
+    extern ap_strlen
+    call ap_strlen
+    mov r13, rax                ; the command's length
+    extern str_from_cstr_heap
+    CSTRING rdi, "<string>"
+    call str_from_cstr_heap
+    mov r12, rax                ; the filename compile_source records
+    mov rdi, [rel cmd_source]
+    mov rsi, r13
+    mov rdx, r12
+    mov ecx, CMODE_EXEC
+    extern compile_source
+    call compile_source
+    mov r13, rax
+    mov rdi, r12
+    call obj_decref
+    mov rax, r13
+    jmp .have_code
+.load_from_path:
     mov rdi, rbx
     call code_from_path
+.have_code:
     test rax, rax
     jz .load_failed
     mov r12, rax                ; r12 = code object
@@ -605,6 +714,17 @@ DEF_FUNC main, 8
     CSTRING rdi, "Error: failed to load file"
     call fatal_error
 END_FUNC main
+
+section .rodata
+; The single-letter flags accepted and ignored: -E -I -S -B -u -b -d -q -v -O,
+; and any repetition of them (-OO, -bb, -vv).  Every one of these switches off
+; machinery apython does not have, so ignoring them is the answer rather than a
+; stub -- and sys.flags already reports each as off.
+main_noop_flags: db "EISBubdqvO", 0
+
+section .bss
+; The -c command, or 0 when a file was named.
+cmd_source: resq 1
 
 section .rodata
 help_flag: db "--help", 0

@@ -204,6 +204,99 @@ END_FUNC sm_sort_names
 SMI_ARGC  equ 8
 SMI_ARGV  equ 16
 SMI_TMP   equ 24            ; whichever object is being installed just now
+
+; One prefix name from SME_DIR, keeping the reference for the next.
+%macro SME_ADD_DIR 1
+    mov rdi, [rbp - SME_DIR]
+    INCREF rdi
+    CSTRING rdi, %1
+    mov rsi, [rbp - SME_DIR]
+    mov rdx, [rbp - SME_DICT]
+    call sm_add_owned
+%endmacro
+
+;; ============================================================================
+;; sm_add_exe_paths(rdi = the sys module dict) -> nothing; six names installed
+;;
+;; sys.executable, sys._base_executable, and the four prefix names, all from
+;; /proc/self/exe.  These were the empty string, and script_helper's
+;; interpreter_requires_environment() spawns `[sys.executable, '-E', '-c', ...]`
+;; and catches only CalledProcessError -- so an empty one was an uncaught
+;; FileNotFoundError raised while test.support was still being imported, and
+;; forty of CPython's test modules died before their first test.
+;;
+;; prefix, exec_prefix and the base_ pair name the interpreter's own directory:
+;; there is no virtualenv here for them to differ across, and no installation
+;; layout for them to point above.
+;; ============================================================================
+SME_DICT  equ 8
+SME_EXE   equ 16            ; the executable path, as a str
+SME_DIR   equ 24            ; its directory, likewise
+SME_LEN   equ 32            ; the path length, across the calls that clobber rax
+SME_BUF   equ 4152          ; 4096 bytes of path, [rbp-4152, rbp-56)
+SME_FRAME equ 4152          ; + 1 push = 4160, 16-aligned
+DEF_FUNC_LOCAL sm_add_exe_paths, SME_FRAME
+    push rbx
+    mov [rbp - SME_DICT], rdi
+
+    lea rbx, [rbp - SME_BUF]
+    mov rdi, rbx
+    mov esi, 4090               ; readlink writes no NUL; leave room for ours
+    extern exe_path
+    extern str_new_heap
+    call exe_path
+    mov [rbp - SME_LEN], rax
+    mov byte [rbx + rax], 0
+
+    mov rdi, rbx
+    mov rsi, rax
+    call str_new_heap
+    mov [rbp - SME_EXE], rax
+
+    ; The directory, cut at the last '/' with the slash dropped, so
+    ; "/a/b/apython" becomes "/a/b".  A path with no slash at all -- and the
+    ; empty one /proc gives when it is not mounted -- both come out empty,
+    ; which is what all four names held before and is still the honest answer.
+    mov rcx, [rbp - SME_LEN]
+.sme_trim:
+    test rcx, rcx
+    jz .sme_have_dir
+    dec rcx
+    cmp byte [rbx + rcx], '/'
+    jne .sme_trim
+.sme_have_dir:
+    mov rdi, rbx
+    mov rsi, rcx
+    call str_new_heap
+    mov [rbp - SME_DIR], rax
+
+    ; sm_add_owned takes the reference it is handed, so every use but the last
+    ; of each string needs one of its own.
+    mov rdi, [rbp - SME_EXE]
+    INCREF rdi
+    CSTRING rdi, "executable"
+    mov rsi, [rbp - SME_EXE]
+    mov rdx, [rbp - SME_DICT]
+    call sm_add_owned
+
+    CSTRING rdi, "_base_executable"
+    mov rsi, [rbp - SME_EXE]
+    mov rdx, [rbp - SME_DICT]
+    call sm_add_owned
+
+    SME_ADD_DIR "prefix"
+    SME_ADD_DIR "exec_prefix"
+    SME_ADD_DIR "base_prefix"
+    CSTRING rdi, "base_exec_prefix"
+    mov rsi, [rbp - SME_DIR]
+    mov rdx, [rbp - SME_DICT]
+    call sm_add_owned
+
+    pop rbx
+    leave
+    ret
+END_FUNC sm_add_exe_paths
+
 ;; ============================================================================
 ;; sm_add_str(rdi = name cstr, rsi = value cstr, rdx = the module dict)
 ;;
@@ -512,44 +605,15 @@ DEF_FUNC sys_module_init, 40
     mov rdi, rbx
     call obj_decref
 
-    ; --- sys.executable ---
-    lea rdi, [rel sm_empty]
-    call str_from_cstr_heap
-    push rax
-    lea rdi, [rel sm_executable]
-    call str_from_cstr_heap
-    push rax
+    ; --- sys.executable, sys._base_executable, and the four prefix names ---
+    ; All six come from /proc/self/exe.  base_prefix and base_exec_prefix are
+    ; what a virtualenv leaves pointing at the installation it was made from;
+    ; with no virtualenv all four name the same place.  CPython's getopt,
+    ; gettext and optparse read the base_ pair unconditionally, so their
+    ; absence was an AttributeError at import rather than anything the program
+    ; could ask about.
     mov rdi, r15
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
-
-    ; --- sys.prefix / exec_prefix, and the base_ pair beside them ---
-    ; base_prefix and base_exec_prefix are what a virtualenv leaves pointing
-    ; at the installation it was made from; with no virtualenv all four name
-    ; the same place.  CPython's getopt, gettext and optparse read the base_
-    ; pair unconditionally, so their absence was an AttributeError at import
-    ; rather than anything the program could ask about.
-    lea rdi, [rel sm_prefix]
-    lea rsi, [rel sm_empty]
-    mov rdx, r15
-    call sm_add_str
-    lea rdi, [rel sm_exec_prefix]
-    lea rsi, [rel sm_empty]
-    mov rdx, r15
-    call sm_add_str
-    lea rdi, [rel sm_base_prefix]
-    lea rsi, [rel sm_empty]
-    mov rdx, r15
-    call sm_add_str
-    lea rdi, [rel sm_base_exec_prefix]
-    lea rsi, [rel sm_empty]
-    mov rdx, r15
-    call sm_add_str
+    call sm_add_exe_paths
 
     ; --- sys.platlibdir ---
     ; The directory name a platform puts its libraries in: "lib" everywhere

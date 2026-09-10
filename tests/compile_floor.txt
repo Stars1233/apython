@@ -588,6 +588,7 @@ test_sys_argv
 test_sys_attrs
 test_sys_call_tracing
 test_sys_exception
+test_sys_executable
 test_sys_exit
 test_termios
 test_time_module
