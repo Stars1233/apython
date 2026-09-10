@@ -354,6 +354,9 @@ DEF_FUNC_BARE int_hash
     push rbp
     mov rbp, rsp
     push rbx
+    sub rsp, 8              ; rbp and one callee-saved push leave the frame
+                            ; eight bytes out of 16-alignment, and the ABI
+                            ; wants rsp % 16 == 0 at the call below
     mov rbx, rdi
     INT_NEED_MPZ rbx
     lea rdi, [rbx + PyIntObject.mpz]
@@ -369,6 +372,7 @@ DEF_FUNC_BARE int_hash
     jne .done2
     mov rax, -2
 .done2:
+    add rsp, 8
     pop rbx
     pop rbp
     ret
@@ -788,6 +792,17 @@ END_FUNC int_mul
 ;; ============================================================================
 ;; int_floordiv(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
+FD_RTAG   equ 32            ; the right operand's tag, across a conversion call
+FD_NEW    equ 40            ; the result object, across the GMP calls
+FD_LOCALS equ 24            ; those two and the pad that keeps .gmp_path's
+                            ; every call 16-aligned: with rbp and three
+                            ; callee-saved pushes the frame is 32 bytes deep,
+                            ; and 24 more is the next multiple of 16.  The two
+                            ; `push`es these slots replace each flipped the
+                            ; parity for a stretch of the body, and GMP is
+                            ; called from both stretches -- __gmpz_cmp_si
+                            ; below was reached eight bytes out on every
+                            ; big-integer floor division.
 DEF_FUNC_BARE int_floordiv
     call int_binop_unpack       ; rdi/edx = left, rsi/ecx = right, both ints
     test eax, eax
@@ -850,9 +865,10 @@ DEF_FUNC_BARE int_floordiv
     push rbx
     push r12
     push r13
+    sub rsp, FD_LOCALS
     mov rbx, rdi
     mov r12, rsi
-    push rcx                ; save right_tag
+    mov [rbp - FD_RTAG], rcx    ; save right_tag
     cmp edx, TAG_SMALLINT
     jne .a_ready
     mov rdi, rbx
@@ -863,7 +879,7 @@ DEF_FUNC_BARE int_floordiv
 .a_ready:
     xor r13d, r13d
 .check_b:
-    pop rcx                 ; restore right_tag
+    mov rcx, [rbp - FD_RTAG]    ; restore right_tag
     cmp ecx, TAG_SMALLINT
     jne .b_ready
     mov rdi, r12
@@ -880,7 +896,7 @@ DEF_FUNC_BARE int_floordiv
     jz .gmp_zdiv_error
 
     call int_alloc_raw
-    push rax
+    mov [rbp - FD_NEW], rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
@@ -888,7 +904,7 @@ DEF_FUNC_BARE int_floordiv
     INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
-    mov rax, [rsp]
+    mov rax, [rbp - FD_NEW]
     INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     INT_NEED_MPZ rbx
@@ -906,8 +922,9 @@ DEF_FUNC_BARE int_floordiv
     mov rdi, r12
     call int_dealloc
 .no_free_b:
-    pop rax
+    mov rax, [rbp - FD_NEW]
     mov edx, TAG_PTR
+    add rsp, FD_LOCALS
     pop r13
     pop r12
     pop rbx
@@ -2076,7 +2093,12 @@ END_FUNC int_lshift
 ;; ============================================================================
 ;; Right shift: int_rshift(PyObject *a, PyObject *b) -> rax = Value
 ;; ============================================================================
-DEF_FUNC int_rshift
+RS_NEW   equ 8              ; the result object, across the two GMP calls
+RS_MPZ   equ 16             ; the shift count's mpz, across __gmpz_fits_slong_p
+RS_FRAME equ 16             ; + 4 pushes = 48, 16-aligned.  Both slots were
+                            ; a `push` before, and each left the GMP call it
+                            ; spanned eight bytes out.
+DEF_FUNC int_rshift, RS_FRAME
     call int_binop_unpack       ; rdi/edx = left, rsi/ecx = right, both ints
     test eax, eax
     jnz .operands_ok
@@ -2103,10 +2125,10 @@ DEF_FUNC int_rshift
     ; by the sign.
     INT_NEED_MPZ r12
     lea rdi, [r12 + PyIntObject.mpz]
-    push rdi
+    mov [rbp - RS_MPZ], rdi
     extern __gmpz_fits_slong_p
     call __gmpz_fits_slong_p wrt ..plt
-    pop rdi
+    mov rdi, [rbp - RS_MPZ]
     test eax, eax
     jz .rshift_all_out
     call __gmpz_get_si wrt ..plt
@@ -2150,7 +2172,7 @@ DEF_FUNC int_rshift
 
 .gmp_path:
     call int_alloc_raw
-    push rax
+    mov [rbp - RS_NEW], rax
     mov qword [rax + PyObject.ob_refcnt], 1
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
@@ -2158,15 +2180,14 @@ DEF_FUNC int_rshift
     INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_init wrt ..plt
-    mov rax, [rsp]
+    mov rax, [rbp - RS_NEW]
     INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     INT_NEED_MPZ rbx
     lea rsi, [rbx + PyIntObject.mpz]
     mov rdx, r13
     call __gmpz_fdiv_q_2exp wrt ..plt
-    pop rax
-    mov rdi, rax
+    mov rdi, [rbp - RS_NEW]
     call int_shrink
     mov edx, TAG_PTR
     pop r14
