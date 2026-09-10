@@ -63,6 +63,9 @@ print("d is dir:", st_mod.S_ISDIR(by_name["d"].stat().st_mode))
 print("link follows:", by_name["link"].stat().st_size)
 print("link itself:", st_mod.S_ISLNK(by_name["link"].stat(follow_symlinks=False).st_mode))
 print("inode matches:", by_name["f.txt"].inode() == by_name["f.txt"].stat().st_ino)
+# os.walk() calls is_junction() beside is_dir() on every entry; off Windows it
+# is False for all of them, and CPython still supplies the method.
+print("junctions:", [e.is_junction() for e in entries])
 
 # A dangling symlink: following it fails, not following it does not.
 d = by_name["dangling"]

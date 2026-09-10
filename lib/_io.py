@@ -1577,8 +1577,21 @@ def open(file, mode="r", buffering=-1, encoding=None, errors=None,
     binary -- a TextIOWrapper.  Every layer owns the one below it, so closing
     the top closes all of them.
     """
-    if not isinstance(file, int) and not isinstance(file, str):
-        raise TypeError("invalid file: %r" % file)
+    if not isinstance(file, int):
+        # Anything os.fspath() takes, which is what CPython's open() takes:
+        # a str, a bytes, or an object with __fspath__.  The dunder is looked
+        # up on the TYPE, as the protocol says -- an instance attribute named
+        # __fspath__ is not a path.  os is not importable from here (it is
+        # what imports this), so the lookup is done by hand.
+        fspath = getattr(type(file), "__fspath__", None)
+        if fspath is not None:
+            file = fspath(file)
+            if not isinstance(file, (str, bytes)):
+                raise TypeError("expected __fspath__() to return str or bytes")
+        if isinstance(file, bytes):
+            file = file.decode()
+        if not isinstance(file, str):
+            raise TypeError("invalid file: %r" % file)
     if not isinstance(mode, str):
         raise TypeError("open() argument 'mode' must be str, not %s"
                         % type(mode).__name__)

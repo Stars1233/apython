@@ -432,6 +432,17 @@ DEF_FUNC direntry_m_is_symlink, 8            ; + 1 push = 16, 16-aligned
     ret
 END_FUNC direntry_m_is_symlink
 
+;; direntry_m_is_junction(rdi = args, rsi = nargs) -> rax = Value, always False
+;; A junction is an NTFS reparse point.  CPython gives DirEntry the method on
+;; every platform and answers False off Windows, and os.walk calls it beside
+;; is_dir() on every entry it sees.
+DEF_FUNC direntry_m_is_junction
+    lea rax, [rel bool_false]
+    inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+END_FUNC direntry_m_is_junction
+
 ;; direntry_m_inode(rdi = args, rsi = nargs) -> Value (int)
 DEF_FUNC direntry_m_inode
     mov rdi, [rdi]
@@ -947,6 +958,7 @@ DEF_FUNC posixdir_register, PDR_FRAME
     PD_ADD_FN de_n_is_symlink, direntry_m_is_symlink
     PD_ADD_FN de_n_stat,       direntry_m_stat
     PD_ADD_FN de_n_inode,      direntry_m_inode
+    PD_ADD_FN de_n_is_junction, direntry_m_is_junction
     PD_ADD_FN de_n_fspath,     direntry_m_fspath
 
     call dict_new
@@ -993,6 +1005,7 @@ de_n_is_file:    db "is_file", 0
 de_n_is_symlink: db "is_symlink", 0
 de_n_stat:       db "stat", 0
 de_n_inode:      db "inode", 0
+de_n_is_junction: db "is_junction", 0
 de_n_fspath:     db "__fspath__", 0
 
 sd_n_close:  db "close", 0

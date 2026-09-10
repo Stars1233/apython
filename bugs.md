@@ -120,6 +120,16 @@ reasoning that chose them and what changing one would cost.
   `.raise_type` calls `exc_new`, on the path every `raise ValueError` takes,
   so it is a hot path and wants measuring rather than just changing.
 
+- **`scandir()` on a BYTES path yields str entries.**  CPython gives a bytes
+  path bytes names and bytes paths back; here the argument goes through
+  `posix_path_arg`, which hands over a C string, and the entries are built
+  from it as str.  Everything works, and works on the right files -- what
+  differs is the type of `.name` and `.path`, which `os.walk(b'.')` and the
+  bytes half of `glob` then propagate.  Fixing it means carrying the
+  argument's own kind through the getdents64 loop and building bytes objects
+  on that side, which is the second half of every string-building step in
+  `posix_scandir`.
+
 - **`f(*5)` does not name the callable.**  CPython says
   "__main__.f() argument after * must be an iterable, not int"; this says
   "Value after * must be an iterable, not int", which is CPython's message

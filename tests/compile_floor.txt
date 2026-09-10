@@ -395,6 +395,7 @@ test_object_new_gate
 test_object_ordering
 test_oop
 test_open_errors
+test_open_pathlike
 test_open
 test_operand_types
 test_operator_messages
