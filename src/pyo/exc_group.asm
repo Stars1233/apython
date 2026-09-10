@@ -29,6 +29,8 @@ extern exc_getattr
 extern exc_isinstance
 extern exc_metatype
 extern exc_repr
+extern exc_setattr
+extern exc_AttributeError_type
 extern exc_str
 extern exc_TypeError_type
 extern exc_ValueError_type
@@ -658,6 +660,52 @@ DEF_FUNC eg_str, EST_FRAME
 END_FUNC eg_str
 
 ;; ============================================================================
+;; eg_setattr(rdi = the group, rsi = the name, rdx = the value Value,
+;;            rcx = its tag) -> rax = 0, or does not return
+;;
+;; The two names eg_getattr answers out of the object's FIELDS are read-only,
+;; as CPython's member table has them.  exc_setattr would have put them in the
+;; instance dict, where nothing ever reads them again: `g.message = "x"` was
+;; accepted and then invisible.  Everything else is an ordinary exception
+;; attribute and goes to exc_setattr.
+;; ============================================================================
+EST2_NAME  equ 8
+EST2_SELF  equ 16
+EST2_VAL   equ 24
+EST2_TAG   equ 32
+EST2_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
+DEF_FUNC eg_setattr, EST2_FRAME
+    mov [rbp - EST2_SELF], rdi
+    mov [rbp - EST2_NAME], rsi
+    mov [rbp - EST2_VAL], rdx
+    mov [rbp - EST2_TAG], rcx
+
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "message"
+    call ap_strcmp
+    test eax, eax
+    jz .egs_readonly
+
+    mov rdi, [rbp - EST2_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "exceptions"
+    call ap_strcmp
+    test eax, eax
+    jz .egs_readonly
+
+    mov rdi, [rbp - EST2_SELF]
+    mov rsi, [rbp - EST2_NAME]
+    mov rdx, [rbp - EST2_VAL]
+    mov rcx, [rbp - EST2_TAG]
+    leave
+    jmp exc_setattr
+
+.egs_readonly:
+    leave
+    RAISE exc_AttributeError_type, "readonly attribute"
+END_FUNC eg_setattr
+
+;; ============================================================================
 ;; eg_getattr(PyExceptionGroupObject *eg, PyStrObject *name) -> rax = Value or NULL
 ;; Handle: message, exceptions, args, __context__, __cause__, __traceback__
 ;; ============================================================================
@@ -1172,7 +1220,11 @@ exc_BaseExceptionGroup_type:
     dq 0                        ; tp_hash
     dq 0                ; tp_call  (instances are not callable)
     dq eg_getattr               ; tp_getattr
-    dq 0                        ; tp_setattr
+    ; A setter at all.  There was none, so `e.__traceback__ = tb` on a group
+    ; was "AttributeError: cannot set attribute" -- which is what unittest's
+    ; _clean_tracebacks does to every error it reports, so CPython's
+    ; test_exception_group could not even print its first failure.
+    dq eg_setattr               ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
@@ -1205,7 +1257,11 @@ exc_ExceptionGroup_type:
     dq 0                        ; tp_hash
     dq 0                ; tp_call  (instances are not callable)
     dq eg_getattr               ; tp_getattr
-    dq 0                        ; tp_setattr
+    ; A setter at all.  There was none, so `e.__traceback__ = tb` on a group
+    ; was "AttributeError: cannot set attribute" -- which is what unittest's
+    ; _clean_tracebacks does to every error it reports, so CPython's
+    ; test_exception_group could not even print its first failure.
+    dq eg_setattr               ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
