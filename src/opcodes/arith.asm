@@ -2101,7 +2101,14 @@ DEF_FUNC_BARE op_compare_op
     push rdx                   ; save comparison op before call
     V_PACK rdi, rcx             ; left  -> Value
     V_PACK rsi, r8              ; right -> Value
+    ; A handler is entered ALIGNED, and BO_SIZE is a multiple of 16, so the
+    ; lone push above leaves this call eight out -- and tp_richcompare for an
+    ; int is int_compare, which reaches GMP.  451 of the 1,609 misaligned GMP
+    ; calls in the tree came through here.  The pad is inside the call rather
+    ; than around the push, so every `[rsp + 8 + BO_*]` below stays right.
+    sub rsp, 8
     call rax
+    add rsp, 8
     V_UNPACK rax, rdx           ; tp_richcompare returns a Value
     ; rax = result payload, edx = result tag
     ; Check for NotImplemented (NULL return = tag 0)
