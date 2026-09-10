@@ -325,6 +325,7 @@ test_io
 test_io_subclass
 test_io_tail
 test_isinstance_hostile
+test_islice_consumes
 test_iterable_arguments
 test_iterator_cycles
 test_iterator_slots

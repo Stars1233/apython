@@ -45,19 +45,23 @@ def islice(iterable, *args):
         raise TypeError("islice expected 2-4 arguments")
 
     it = iter(iterable)
-    # Skip start elements
-    for i in range(start):
+    # Exactly `stop` elements are taken and no more: the one that would sit AT
+    # the stop index is never pulled.  Checking after pulling it ate an extra
+    # element, so a second islice over the same iterator started one late --
+    # `it = iter([1,2,3,4]); islice(it, 2)` gave [1, 2] and left the iterator
+    # at 4.  The index also has to be counted from the start of the iterable,
+    # not from after `start` was skipped, or `step` lands on the wrong ones.
+    i = 0
+    wanted = start
+    while stop is None or i < stop:
         try:
-            next(it)
+            item = next(it)
         except StopIteration:
             return
-
-    count = 0
-    for i, item in enumerate(it):
-        if stop is not None and start + i >= stop:
-            return
-        if i % step == 0:
+        if i == wanted:
             yield item
+            wanted += step
+        i += 1
 
 
 def count(start=0, step=1):
