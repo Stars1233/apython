@@ -498,6 +498,7 @@ test_set_probe_sequence
 test_sets
 test_set_subclass_clear_dealloc
 test_set_subclass_compare
+test_set_subclass_protocol
 test_set_tombstone_reuse
 test_set_value_probe
 test_set_variadic

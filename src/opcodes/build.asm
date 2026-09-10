@@ -2601,12 +2601,8 @@ DEF_FUNC op_set_update
     ; rehashes, to hold five ints.  set/frozenset/list/tuple all keep their
     ; element count at ob_size, and none of the four can lie about it.
     mov rax, [rsi + PyObject.ob_type]
-    lea rdx, [rel set_type]
-    cmp rax, rdx
-    je .su_presize
-    lea rdx, [rel frozenset_type]
-    cmp rax, rdx
-    je .su_presize
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_SET_SUBCLASS
+    jnz .su_presize
     lea rdx, [rel list_type]
     cmp rax, rdx
     je .su_presize
@@ -2624,12 +2620,14 @@ DEF_FUNC op_set_update
     ; already the list of its elements, so an iterator object would be an
     ; allocation to answer a question the table answers.
     mov rax, [rsi + PyObject.ob_type]
-    lea rdx, [rel set_type]
-    cmp rax, rdx
-    je .su_from_set
-    lea rdx, [rel frozenset_type]
-    cmp rax, rdx
-    je .su_from_set
+    ; A set or a frozenset -- or a SUBCLASS of either.  Both static types
+    ; carry TYPE_FLAG_SET_SUBCLASS and every subclass inherits it, so one
+    ; test asks the whole question; the two exact-pointer compares this
+    ; replaces sent a subclass down the generic iterator path, where its own
+    ; __iter__ was asked.  CPython never asks: PyAnySet_Check sends every one
+    ; of them to the table.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_SET_SUBCLASS
+    jnz .su_from_set
 
     ; Generic: get_iterator_opt, which also accepts the legacy __getitem__
     ; protocol.  `{*seq}` compiles to this.

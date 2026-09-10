@@ -468,13 +468,15 @@ DEF_FUNC_LOCAL set_update_one, SU_FRAME
     V_TEST_PTR r12, rax
     ja .supd_materialise
     mov rax, [r12 + PyObject.ob_type]
-    lea rcx, [rel set_type]
-    cmp rax, rcx
-    je .supd_from_set
+    ; A set or a frozenset -- or a SUBCLASS of either.  Both static types
+    ; carry TYPE_FLAG_SET_SUBCLASS and every subclass inherits it, so one
+    ; test asks the whole question; the two exact-pointer compares this
+    ; replaces sent a subclass down the generic iterator path, where its own
+    ; __iter__ was asked.  CPython never asks: PyAnySet_Check sends every one
+    ; of them to the table.
     extern frozenset_type
-    lea rcx, [rel frozenset_type]
-    cmp rax, rcx
-    je .supd_from_set
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_SET_SUBCLASS
+    jnz .supd_from_set
 
 .supd_materialise:
     ; Any other iterable: materialise it and add the elements one by one.

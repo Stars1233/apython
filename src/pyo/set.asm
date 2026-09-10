@@ -957,10 +957,21 @@ DEF_FUNC set_contains, SCT_FRAME
     ja .sct_not_set
     test rsi, rsi
     jz .sct_not_set
+    ; The retry belongs to an UNHASHABLE set-like, which is what CPython's
+    ; TypeError-and-retry amounts to: set and its subclasses have tp_hash 0,
+    ; a frozenset has one of its own, and a subclass that DEFINES __hash__ is
+    ; hashable and has to be looked up as itself.  The exact-type compare
+    ; this replaces raised "unhashable type" for every set subclass.
     mov rax, [rsi + PyObject.ob_type]
-    lea rcx, [rel set_type]
-    cmp rax, rcx
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_SET_SUBCLASS
+    jz .sct_not_set
+    mov rcx, [rax + PyTypeObject.tp_hash]
+    test rcx, rcx
+    jz .sct_unhashable
+    lea rdx, [rel hash_not_implemented]
+    cmp rcx, rdx
     jne .sct_not_set
+.sct_unhashable:
     mov [rbp - SCT_KEY], rsi
     push rdi
     lea rsi, [rbp - SCT_KEY]
@@ -1433,12 +1444,14 @@ DEF_FUNC set_type_call, STC_FRAME
     ; are coming, so the room is taken once instead of rehashing at 7, 14,
     ; 28, 56 on the way.
     mov rax, [r12 + PyObject.ob_type]
-    lea rcx, [rel set_type]
-    cmp rax, rcx
-    je .stc_clone
-    lea rcx, [rel frozenset_type]
-    cmp rax, rcx
-    je .stc_clone
+    ; A set or a frozenset -- or a SUBCLASS of either.  Both static types
+    ; carry TYPE_FLAG_SET_SUBCLASS and every subclass inherits it, so one
+    ; test asks the whole question; the two exact-pointer compares this
+    ; replaces sent a subclass down the generic iterator path, where its own
+    ; __iter__ was asked.  CPython never asks: PyAnySet_Check sends every one
+    ; of them to the table.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_SET_SUBCLASS
+    jnz .stc_clone
     lea rcx, [rel list_type]
     cmp rax, rcx
     je .stc_reserve
@@ -1741,9 +1754,14 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     ; A set source is cloned and a sized one is presized, exactly as in
     ; set_type_call above.
     mov rax, [r12 + PyObject.ob_type]
-    lea rcx, [rel set_type]
-    cmp rax, rcx
-    je .ftc_clone
+    ; A set or a frozenset -- or a SUBCLASS of either.  Both static types
+    ; carry TYPE_FLAG_SET_SUBCLASS and every subclass inherits it, so one
+    ; test asks the whole question; the two exact-pointer compares this
+    ; replaces sent a subclass down the generic iterator path, where its own
+    ; __iter__ was asked.  CPython never asks: PyAnySet_Check sends every one
+    ; of them to the table.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_SET_SUBCLASS
+    jnz .ftc_clone
     lea rcx, [rel list_type]
     cmp rax, rcx
     je .ftc_reserve
