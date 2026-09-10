@@ -1026,6 +1026,31 @@ S_IFIFO  equ 0o010000
 ; next record and is TWO bytes: a 64-bit read of it ORs in d_type and five
 ; bytes of the name, which is exactly the multi-gigabyte-memcpy bug CLAUDE.md
 ; records.  lint.py derives widths from `resd` and so does not catch a `resw`.
+; posix.DirEntry -- one directory entry, as scandir() hands it back.  It keeps
+; what getdents64 already told us (the name and d_type) so the ordinary
+; is_dir()/is_file() questions cost no syscall at all, which is the whole point
+; of scandir over listdir + stat.
+struc PyDirEntryObject
+    .ob_refcnt: resq 1      ; +0
+    .ob_type:   resq 1      ; +8
+    .de_name:   resq 1      ; +16: PyStrObject*, owned
+    .de_path:   resq 1      ; +24: PyStrObject*, owned -- the scandir argument
+                            ;      joined to the name, which is what .path is
+    .de_type:   resq 1      ; +32: d_type from the dirent, DT_UNKNOWN if the
+                            ;      filesystem did not say
+    .de_ino:    resq 1      ; +40: d_ino, what .inode() answers
+endstruc
+
+; The iterator scandir() returns.  It holds the entries it has already built --
+; the directory is read in one pass, where CPython reads it lazily -- and a
+; context manager's close() drops them.
+struc PyScandirIterObject
+    .ob_refcnt: resq 1      ; +0
+    .ob_type:   resq 1      ; +8
+    .sd_list:   resq 1      ; +16: PyListObject* of DirEntry, owned; 0 = closed
+    .sd_index:  resq 1      ; +24
+endstruc
+
 struc LinuxDirent64
     .d_ino:    resq 1   ; +0
     .d_off:    resq 1   ; +8

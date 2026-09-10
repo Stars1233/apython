@@ -3105,6 +3105,9 @@ DEF_FUNC posix_module_create, 40
     MODULE_ADD_FUNC posix_lstat, pm_n_lstat
     MODULE_ADD_FUNC posix_fstat, pm_n_fstat
     MODULE_ADD_FUNC posix_listdir, pm_n_listdir
+    extern posixdir_register
+    mov rdi, r12
+    call posixdir_register      ; scandir and DirEntry, from posixdir.asm
     MODULE_ADD_FUNC posix_getcwd, pm_n_getcwd
     MODULE_ADD_FUNC posix_getcwdb, pm_n_getcwdb
     MODULE_ADD_FUNC posix_open, pm_n_open
