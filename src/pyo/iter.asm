@@ -2631,7 +2631,15 @@ DEF_FUNC range_obj_repr, ROR_FRAME
 .ror_wide:
     mov rdi, rbx
     call range_repr_wide
+    ; range_repr_wide answers 0 when obj_repr of a bound raised, and a caller
+    ; that classifies the result by its TAG -- builtins_obj's ascii() does --
+    ; would then read PyStrObject.data off NULL.  The tag stays TAG_NULL for
+    ; that answer, which is what "there is no string here" means.
+    xor edx, edx
+    test rax, rax
+    jz .ror_out
     mov edx, TAG_PTR
+.ror_out:
     pop r14
     pop r13
     pop r12
