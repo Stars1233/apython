@@ -82,25 +82,6 @@ reasoning that chose them and what changing one would cost.
   function reached by `call` -- assume the wrong one and every handler in the
   tree reports as broken.
 
-- **A set or frozenset SUBCLASS is not treated as a set by `update`.**
-  CPython asks `PyAnySet_Check`, which is a subtype test; two places here
-  still compare the type pointer against `set_type` and `frozenset_type`
-  exactly, and a subclass fails both.  (`set_richcompare` was the third and
-  is fixed: it asks TYPE_FLAG_SET_SUBCLASS now.)
-
-  `s.update(sub)` and `{*sub}` fall through to the generic iterator path, so
-  a subclass that defines `__iter__` is asked -- CPython ignores it and reads
-  the table, which is what makes `{*FS([1,2,3])}` `{1, 2, 3}` there and
-  `{99}` here.  `set_contains`'s frozenset-for-a-set-key arm is the second,
-  and the milder: `SubSet() in s` raises where CPython answers False.
-
-  The fix is the flag test in both, and what makes it more than a one-liner
-  is the site it implies: `set_coerce_operand` already accepts a subclass
-  through `REQUIRE_SET_TYPE`, so the method forms and the operator forms
-  currently disagree with each other as well as with CPython, and the
-  remaining exact-type tests have to move together with a test that fixes the
-  whole surface at once.
-
 - **`except*` does not look inside a NESTED group, and a group publishes
   neither `split` nor `subgroup` nor `derive`.**  `except* KeyError` over
   `ExceptionGroup("outer", [ExceptionGroup("inner", [KeyError()]), OSError()])`
