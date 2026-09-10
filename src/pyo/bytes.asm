@@ -2497,6 +2497,7 @@ bytes_type:
 
 ; bytes_iter type object
 align 8
+global bytes_iter_type
 bytes_iter_type:
     dq 1                        ; ob_refcnt
     dq type_type                ; ob_type

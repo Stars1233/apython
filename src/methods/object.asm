@@ -792,6 +792,79 @@ extern range_obj_type
 ; list and tuple already have hand-written ones.
 DEF_DUNDER_LEN dict
 DEF_DUNDER_LEN str
+;; ============================================================================
+;; DEF_DUNDER_NEXT %1 -- generates %1_dunder_next, the tp_dict entry for
+;; %1_type's __next__.  (rdi = args, rsi = nargs) -> rax = a Value
+;;
+;; The stdlib asks for __next__ by NAME -- heapq.py does `next = it.__next__`
+;; at module level -- and a slot with no matching tp_dict entry answers that
+;; wrong.  This reads the DEFINING type's tp_iternext, never the argument's,
+;; so a subclass that defines __next__ does not re-dispatch into itself.
+;;
+;; The exhaustion arm is builtin_next_fn's: a NULL from tp_iternext is a clean
+;; stop OR a raise, and manufacturing a StopIteration without asking which
+;; would report a dict mutated during iteration as the end of the dict.  A
+;; RAISE here is right where a tp_iternext's would be wrong -- this is called
+;; from a live Python frame, and the slot wrapper is what turns a StopIteration
+;; back into exhaustion.
+;; ============================================================================
+DN_EXC   equ 8
+DN_FRAME equ 24             ; + 0 pushes = 24 ... see the pad in the prologue
+
+%macro DEF_DUNDER_NEXT 1
+DEF_FUNC %1_dunder_next, DN_FRAME
+    cmp rsi, 1                  ; exactly self
+    jne %%arity
+    mov rdi, [rdi]
+    lea rsi, [rel %1_type]
+    xor edx, edx
+    CSTRING rcx, "__next__"
+    extern dunder_require_self
+    call dunder_require_self
+    mov rdi, rax
+
+    DUNDER_EXC_SAVE [rbp - DN_EXC]
+    lea rax, [rel %1_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    test rax, rax
+    jz %%bad
+    call rax
+    V_UNPACK rax, rdx           ; tp_iternext answers a Value
+    test edx, edx
+    jz %%stop
+    leave
+    V_PACK rax, rdx
+    ret
+
+%%stop:
+    EXC_RAISED_SINCE [rbp - DN_EXC], rcx, %%failed
+    xor esi, esi                ; a bare StopIteration: str(e) is ""
+    extern exc_StopIteration_type
+    lea rdi, [rel exc_StopIteration_type]
+    extern exc_new
+    call exc_new
+    mov rdi, rax
+    extern raise_exception_obj
+    call raise_exception_obj    ; does not return
+
+%%failed:
+    xor eax, eax
+    xor edx, edx
+    leave
+    V_PACK rax, rdx
+    ret
+
+%%arity:
+    dec rsi
+    xor edi, edi
+    xor edx, edx                ; check_num_args' wording, with no gap
+    extern raise_wrapper_arity
+    call raise_wrapper_arity
+%%bad:
+    RAISE exc_TypeError_type, "object is not an iterator"
+END_FUNC %1_dunder_next
+%endmacro
+
 DEF_DUNDER_LEN set
 DEF_DUNDER_LEN frozenset
 DEF_DUNDER_LEN bytes
@@ -804,6 +877,79 @@ DEF_DUNDER_ITER frozenset
 DEF_DUNDER_ITER bytes
 DEF_DUNDER_LEN range
 DEF_DUNDER_ITER range
+
+;; The builtin iterators, which had a tp_iternext and a tp_iter and no way
+;; to reach either by name.  heapq.py's `next = it.__next__` and
+;; inspect.py's `iter(lines).__next__` are what noticed.
+
+extern list_iter_type
+extern tuple_iter_type
+extern range_iter_type
+extern longrange_iter_type
+extern str_iter_type
+extern bytes_iter_type
+extern bytearray_iter_type
+extern memoryview_iter_type
+extern set_iter_type
+extern dict_iter_type
+extern dict_value_iter_type
+extern dict_item_iter_type
+extern dict_rev_iter_type
+extern enumerate_iter_type
+extern zip_iter_type
+extern map_iter_type
+extern filter_iter_type
+extern callable_iter_type
+extern seq_iter_type
+extern reversed_iter_type
+extern sre_scanner_type
+extern scandir_iter_type
+
+DEF_DUNDER_ITER list_iter
+DEF_DUNDER_NEXT list_iter
+DEF_DUNDER_ITER tuple_iter
+DEF_DUNDER_NEXT tuple_iter
+DEF_DUNDER_ITER range_iter
+DEF_DUNDER_NEXT range_iter
+DEF_DUNDER_ITER longrange_iter
+DEF_DUNDER_NEXT longrange_iter
+DEF_DUNDER_ITER str_iter
+DEF_DUNDER_NEXT str_iter
+DEF_DUNDER_ITER bytes_iter
+DEF_DUNDER_NEXT bytes_iter
+DEF_DUNDER_ITER bytearray_iter
+DEF_DUNDER_NEXT bytearray_iter
+DEF_DUNDER_ITER memoryview_iter
+DEF_DUNDER_NEXT memoryview_iter
+DEF_DUNDER_ITER set_iter
+DEF_DUNDER_NEXT set_iter
+DEF_DUNDER_ITER dict_iter
+DEF_DUNDER_NEXT dict_iter
+DEF_DUNDER_ITER dict_value_iter
+DEF_DUNDER_NEXT dict_value_iter
+DEF_DUNDER_ITER dict_item_iter
+DEF_DUNDER_NEXT dict_item_iter
+DEF_DUNDER_ITER dict_rev_iter
+DEF_DUNDER_NEXT dict_rev_iter
+DEF_DUNDER_ITER enumerate_iter
+DEF_DUNDER_NEXT enumerate_iter
+DEF_DUNDER_ITER zip_iter
+DEF_DUNDER_NEXT zip_iter
+DEF_DUNDER_ITER map_iter
+DEF_DUNDER_NEXT map_iter
+DEF_DUNDER_ITER filter_iter
+DEF_DUNDER_NEXT filter_iter
+DEF_DUNDER_ITER callable_iter
+DEF_DUNDER_NEXT callable_iter
+DEF_DUNDER_ITER seq_iter
+DEF_DUNDER_NEXT seq_iter
+DEF_DUNDER_ITER reversed_iter
+DEF_DUNDER_NEXT reversed_iter
+DEF_DUNDER_ITER sre_scanner
+DEF_DUNDER_NEXT sre_scanner
+DEF_DUNDER_ITER scandir_iter
+DEF_DUNDER_NEXT scandir_iter
+
 ; A generator is its own iterator, and CPython's type says so by name.
 extern gen_type
 extern coro_type

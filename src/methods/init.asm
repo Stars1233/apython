@@ -2739,6 +2739,12 @@ DEF_FUNC methods_init
     mov rdi, rax
     call type_stamp_methods
 
+    ; The builtin iterators, from a table in methods/init_iter.asm: twenty-one
+    ; types whose tp_iternext and tp_iter had no name to reach them by.  Its
+    ; own file because this one is within a couple of kilobytes of the cap.
+    extern iter_types_init
+    call iter_types_init
+
     pop r12
     pop rbx
     leave
@@ -2900,7 +2906,9 @@ mn___format__:  db "__format__", 0
 mn___sizeof__:  db "__sizeof__", 0
 mn___doc__:     db "__doc__", 0
 mn___init_subclass__: db "__init_subclass__", 0
+global mn___iter__
 mn___iter__:    db "__iter__", 0
+global mn___next__
 mn___next__:    db "__next__", 0
 mn___await__:   db "__await__", 0
 mn___dir__:     db "__dir__", 0
