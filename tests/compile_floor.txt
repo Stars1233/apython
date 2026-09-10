@@ -15,6 +15,7 @@ test_ast_mangling
 test_ast
 test_ast_type_comments
 test_async_argument_types
+test_async_awaitable
 test_async_await
 test_async_cancel
 test_async_coro
