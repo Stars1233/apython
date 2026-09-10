@@ -596,6 +596,7 @@ test_value_funnel_guards
 test_value_typeconfusion
 test_warnings
 test_weakref
+test_weakref_subclass_kwargs
 test_weakref_types
 test_with_exit_raises
 test_wrong_answers

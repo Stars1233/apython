@@ -1600,6 +1600,8 @@ DEF_FUNC methods_init
     call add_new_staticmethod
     extern ref_dunder_init
     ADD_FN_N mn___init__, ref_dunder_init, 1, 3
+    extern ref_dunder_call
+    ADD_FN_N mn___call__, ref_dunder_call, 1, 1
     mov rdi, rbx
     call add_class_getitem
     extern weakref_type
