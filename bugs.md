@@ -38,6 +38,33 @@ reasoning that chose them and what changing one would cost.
   LENGTH is not a control -- build the comparison at a path of the same
   length, or the answer is about the path.
 
+- **Eighty-five calls into GMP are still made with a misaligned stack.**
+  The SysV ABI wants `rsp % 16 == 0` at a `call`, and glibc's float paths do
+  use aligned SSE.  7593761 fixed the three worst offenders and took a bignum
+  workload from 337 misaligned GMP calls to 85; these are what is left.
+
+  All of them sit just after an `INT_NEED_MPZ` expansion inside a
+  `DEF_FUNC_BARE` body: `__gmpz_cmp_si` from `int_floordiv` (src/pyo/int.asm
+  around the `.done` of the macro before the compare) and from `int_mod`
+  take 83 of the 85, with one `__gmpz_init` and one `__gmpz_fdiv_r` from
+  `int_compare`.
+
+  It is not a one-line fix, and that is the point.  These functions reach
+  their calls at DIFFERENT PARITIES ON DIFFERENT PATHS -- some arms push an
+  odd number of registers before branching in -- so no correction at the call
+  site is right for all of them, and a comment claiming one would be wrong
+  half the time.  The fix is to give each of them a real frame, the way
+  `int_promote_mpz` now saves rsp and `and`s it, rather than to keep counting
+  pushes.  `lint.py` cannot help: `check_alignment` exempts `DEF_FUNC_BARE`
+  because it has no frame to reason about, and it counts only the pushes that
+  precede the first non-push instruction, so mid-body pushes are invisible to
+  it in every function.
+
+  Reproduce it by breaking on every `call *@plt` to a GMP entry in the
+  disassembly and printing `((long)$rsp) % 16` -- that is how these were
+  found, and it is the only sound way, because NASM macros hide both pushes
+  and branches from any source-level check.
+
 - **A set or frozenset SUBCLASS is not treated as a set by `update` or by
   the comparisons.**  CPython asks `PyAnySet_Check`, which is a subtype test;
   three places here compare the type pointer against `set_type` and
