@@ -156,6 +156,30 @@ DEF_FUNC_BARE obj_dealloc
 
 .no_finalizer:
 
+    ; The object is dead: take it out of the collector's lists NOW, before a
+    ; single field is released.  This used to happen last, inside gc_dealloc,
+    ; so for the whole of a container's teardown -- every field released and
+    ; every __del__ those releases fire -- it sat in a generation list with a
+    ; refcount of zero, and anything walking the generations from inside one
+    ; of those finalizers found it.  gc.get_objects() took a reference to a
+    ; dead object and freed it a second time when the list went;
+    ; gc.collect() computed gc_refs = 0 for it, cleared it, and left the
+    ; freed block in its own young list.  CPython untracks at the top of
+    ; every tp_dealloc, and this is the one funnel they all come through.
+    ;
+    ; After the finalizer, not before it: __del__ runs with the object
+    ; tracked and held at one, which is what CPython's subtype_dealloc
+    ; arranges by re-tracking around the call.  gc_untrack is idempotent, so
+    ; the one inside gc_dealloc still runs, harmlessly.
+    mov rax, [rbx + PyObject.ob_type]
+    test rax, rax
+    jz .no_untrack
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .no_untrack
+    mov rdi, rbx
+    call gc_untrack
+.no_untrack:
+
     ; Weak references to this object have to be emptied, and their callbacks
     ; run, before it is freed.  The links live in a side table rather than in
     ; the object, so the check is one compare against a counter that stays
