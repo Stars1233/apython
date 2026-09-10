@@ -490,6 +490,7 @@ SSC_I     equ 32
 SSC_N     equ 40
 SSC_EXC   equ 48            ; current_exception on entry, to tell a raising
                             ; __next__ from a clean exhaustion
+SSC_MAX   equ 56            ; n_fields: the tail is constructible too
 SSC_FRAME equ 64            ; + 0 pushes = 64
 
 DEF_FUNC structseq_type_new, SSC_FRAME
@@ -498,9 +499,17 @@ DEF_FUNC structseq_type_new, SSC_FRAME
     jz .ssc_argerr
     cmp rdx, 2
     jg .ssc_argerr
+    ; TWO limits, not one.  n_in_sequence is the tuple's length and the
+    ; MINIMUM; n_fields counts the named-only tail as well and is the
+    ; maximum.  CPython accepts anything between them and leaves the rest
+    ; None -- `time.struct_time(tt[:time._STRUCT_TM_ITEMS])` is the last line
+    ; of _strptime.py and hands over all eleven -- and demanding exactly nine
+    ; was every strptime call in the stdlib.
     mov rax, [rdi + STRUCTSEQ_DESC]
+    mov rcx, [rax + StructSeqDesc.n_fields]
     mov rax, [rax + StructSeqDesc.n_in_sequence]
     mov [rbp - SSC_N], rax
+    mov [rbp - SSC_MAX], rcx
 
     ; The sequence is walked with the ordinary iterator protocol, so a list, a
     ; tuple and a generator all work -- as they do in CPython.
@@ -532,7 +541,7 @@ DEF_FUNC structseq_type_new, SSC_FRAME
     jz .ssc_iter_end            ; NULL: the sequence ended, or __next__ raised
 
     mov rcx, [rbp - SSC_I]
-    cmp rcx, [rbp - SSC_N]
+    cmp rcx, [rbp - SSC_MAX]
     jge .ssc_too_long_item
     V_PACK rax, rdx
     mov rdx, rax
@@ -550,9 +559,12 @@ DEF_FUNC structseq_type_new, SSC_FRAME
     EXC_RAISED_SINCE [rbp - SSC_EXC], rax, .ssc_propagate
 
 .ssc_exhausted:
+    ; Short of the minimum is an error; short of the maximum is not.  A tail
+    ; field nobody supplied stays the zero structseq_new left there, and
+    ; structseq_getattr already answers None for one.
     mov rcx, [rbp - SSC_I]
     cmp rcx, [rbp - SSC_N]
-    jne .ssc_bad_len
+    jl .ssc_too_short
     mov rdi, [rbp - SSC_ITER]
     call obj_decref
     mov rax, [rbp - SSC_OBJ]
@@ -571,7 +583,7 @@ DEF_FUNC structseq_type_new, SSC_FRAME
     ; keeps an endless iterator from spinning here for ever.
     inc qword [rbp - SSC_I]
     mov rax, [rbp - SSC_I]
-    cmp rax, [rbp - SSC_N]
+    cmp rax, [rbp - SSC_MAX]
     ja .ssc_bad_len             ; one over is enough to report
 .ssc_drain:
     mov rdi, [rbp - SSC_ITER]
@@ -590,10 +602,34 @@ DEF_FUNC structseq_type_new, SSC_FRAME
     jmp .ssc_drain
 
 .ssc_bad_len:
+    ; Too many.  The bound to name is n_fields, and the wording is "at most"
+    ; -- unless the two counts are equal, in which case there is no range to
+    ; describe and CPython says "a": os.terminal_size takes a 2-sequence and
+    ; nothing else.  Pick the word BEFORE overwriting the count with it.
+    mov rax, [rbp - SSC_MAX]
+    lea rcx, [rel ssq_takes_atmost]
+    cmp rax, [rbp - SSC_N]
+    jne .ssc_bad_len_word
+    lea rcx, [rel ssq_takes]
+.ssc_bad_len_word:
+    mov [rbp - SSC_N], rax
+    jmp .ssc_len_error
+.ssc_too_short:
+    ; Too few, and the minimum is already in SSC_N.
+    mov rax, [rbp - SSC_MAX]
+    lea rcx, [rel ssq_takes_atleast]
+    cmp rax, [rbp - SSC_N]
+    jne .ssc_len_error
+    lea rcx, [rel ssq_takes]
+.ssc_len_error:
+    push rcx                    ; across the two decrefs below
+    push rcx                    ; twice, to keep rsp 16-byte aligned
     mov rdi, [rbp - SSC_OBJ]
     call obj_decref
     mov rdi, [rbp - SSC_ITER]
     call obj_decref
+    pop rcx
+    pop rcx
     mov rdi, [rbp - SSC_TYPE]
     mov rsi, [rbp - SSC_N]
     mov rdx, [rbp - SSC_I]
@@ -623,20 +659,26 @@ DEF_FUNC structseq_type_new, SSC_FRAME
     RAISE exc_TypeError_type, "structseq() missing required argument 'sequence' (pos 1)"
 END_FUNC structseq_type_new
 
-;; structseq_raise_length(rdi = type, rsi = wanted, rdx = given)
-;; "os.terminal_size() takes a 2-sequence (3-sequence given)"
+;; structseq_raise_length(rdi = type, rsi = wanted, rdx = given,
+;;                        rcx = the connective, one of the three ssq_takes_*)
+;; "os.terminal_size() takes a 2-sequence (3-sequence given)", or the "at
+;; least" / "at most" wording where the field count and the sequence length
+;; differ.
 DEF_FUNC structseq_raise_length
     push rbx
     push r12
+    push r13
+    push r13                    ; twice, to keep rsp 16-byte aligned
     mov rbx, rsi
     mov r12, rdx
+    mov r13, rcx
     mov rsi, [rdi + PyTypeObject.tp_name]
     lea rdi, [rel ssq_msgbuf]
     mov edx, 60
     call ssq_copy
     mov rdi, rax
-    lea rsi, [rel ssq_takes]
-    mov edx, 20
+    mov rsi, r13
+    mov edx, 32
     call ssq_copy
     mov rdi, rax
     mov rsi, rbx
@@ -731,7 +773,9 @@ END_FUNC structseq_init_type
 ;; ============================================================================
 section .rodata
 
-ssq_takes:     db "() takes a ", 0
+ssq_takes:         db "() takes a ", 0
+ssq_takes_atleast: db "() takes an at least ", 0
+ssq_takes_atmost:  db "() takes an at most ", 0
 ssq_seq_open:  db "-sequence (", 0
 ssq_seq_close: db "-sequence given)", 0
 
