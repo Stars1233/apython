@@ -131,6 +131,15 @@ AP_SPAN_TRY_2    equ   16 * 1024 * 1024
 AP_SPAN_MAX      equ 1024 * 1024 * 1024
 AP_NPOOLS_MAX    equ AP_SPAN_MAX >> AP_POOL_SHIFT   ; 65536 bytes of side table
 
+; ap_pool_szidx is sized from AP_SPAN_MAX and indexed by the pool number,
+; which comes from whichever rung of the ladder was mapped.  Raising the first
+; rung -- the obvious knob, three lines up -- without raising AP_SPAN_MAX
+; would make ap_new_pool write past the end of that table and into whatever
+; .bss follows it, with nothing wrong at the write and everything wrong later.
+%if AP_SPAN_TRY_0 > AP_SPAN_MAX
+%error "AP_SPAN_TRY_0 exceeds AP_SPAN_MAX: ap_pool_szidx would be indexed past its end"
+%endif
+
 ;; Two pools of slop: one absorbs the alignment of the mmap base up to a pool
 ;; boundary, and one sits above the carve limit so that a word-at-a-time string
 ;; scanner reading past the last block of the last pool cannot walk off the

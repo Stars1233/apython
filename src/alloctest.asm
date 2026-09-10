@@ -121,6 +121,7 @@ DEF_FUNC alloc_selftest, AT_FRAME
 
     mov rax, 0x243F6A8885A308D3
     mov [rel at_state], rax
+    mov qword [rbp - AT_SLOT], 0
 
     ; --- the boundary sizes, all live at once ------------------------------
     ; 0 and 1 either side of the smallest class, the 15/16/17 and 511/512/513
@@ -129,6 +130,7 @@ DEF_FUNC alloc_selftest, AT_FRAME
 .at_bl_loop:
     cmp r12d, at_bounds_n
     jae .at_bl_done
+    mov [rbp - AT_SLOT], r12    ; so a failure here names the size it was on
     lea rax, [rel at_bounds]
     mov r13, [rax + r12*8]      ; the size
     mov rdi, r13
@@ -152,6 +154,7 @@ DEF_FUNC alloc_selftest, AT_FRAME
 .at_bv_loop:
     cmp r12d, at_bounds_n
     jae .at_bv_done
+    mov [rbp - AT_SLOT], r12
     lea rax, [rel at_bounds]
     mov r13, [rax + r12*8]
     lea rax, [rel at_bslots]
