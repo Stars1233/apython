@@ -1999,6 +1999,39 @@ DEF_DUNDER_STRREPR int, repr, "__repr__"
 DEF_DUNDER_STRREPR float, repr, "__repr__"
 DEF_DUNDER_STRREPR complex, repr, "__repr__"
 
+; The containers, for the same reason and one more: pprint keys its dispatch
+; table on the UNBOUND repr -- `_dispatch[list.__repr__] = _pprint_list`, and
+; nine lines like it -- so while every one of these resolved through the MRO to
+; object's, they all collapsed onto a single key holding whichever line ran
+; last.  pprint then handed a list to the SimpleNamespace printer, which is
+; where every `'list' object has no attribute '__dict__'` came from.
+;
+; __repr__ only: CPython gives none of these a __str__ of its own, and
+; `list.__str__ is object.__str__` is a question enum asks.
+extern namespace_type
+extern mappingproxy_type
+extern memoryview_type
+extern dict_keys_view_type
+extern dict_values_view_type
+extern dict_items_view_type
+
+DEF_DUNDER_STRREPR list, repr, "__repr__"
+DEF_DUNDER_STRREPR tuple, repr, "__repr__"
+DEF_DUNDER_STRREPR dict, repr, "__repr__"
+DEF_DUNDER_STRREPR set, repr, "__repr__"
+DEF_DUNDER_STRREPR frozenset, repr, "__repr__"
+DEF_DUNDER_STRREPR bytearray, repr, "__repr__"
+DEF_DUNDER_STRREPR bool, repr, "__repr__"
+DEF_DUNDER_STRREPR range_obj, repr, "__repr__"
+DEF_DUNDER_STRREPR slice, repr, "__repr__"
+DEF_DUNDER_STRREPR type, repr, "__repr__"
+DEF_DUNDER_STRREPR namespace, repr, "__repr__"
+DEF_DUNDER_STRREPR mappingproxy, repr, "__repr__"
+DEF_DUNDER_STRREPR memoryview, repr, "__repr__"
+DEF_DUNDER_STRREPR dict_keys_view, repr, "__repr__"
+DEF_DUNDER_STRREPR dict_values_view, repr, "__repr__"
+DEF_DUNDER_STRREPR dict_items_view, repr, "__repr__"
+
 ;; ############################################################################
 ;;                         SET METHODS
 ;; ############################################################################

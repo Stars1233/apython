@@ -2745,6 +2745,12 @@ DEF_FUNC methods_init
     extern iter_types_init
     call iter_types_init
 
+    ; The containers' __repr__, from a table in methods/init_repr.asm.  Must
+    ; run after every tp_dict above is installed: it adds into the one it
+    ; finds and only builds a dict where there is none.
+    extern repr_types_init
+    call repr_types_init
+
     pop r12
     pop rbx
     leave
@@ -2909,6 +2915,7 @@ mn___init_subclass__: db "__init_subclass__", 0
 global mn___iter__
 mn___iter__:    db "__iter__", 0
 global mn___next__
+global mn___repr__
 mn___next__:    db "__next__", 0
 mn___await__:   db "__await__", 0
 mn___dir__:     db "__dir__", 0

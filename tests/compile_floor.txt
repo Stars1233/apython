@@ -145,6 +145,7 @@ test_complex
 test_comprehension_inline
 test_container_dunders
 test_container_operator_names
+test_container_repr_dunder
 test_contains_fallback
 test_context_chain_cycle
 test_control_flow
