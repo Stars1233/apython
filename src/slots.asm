@@ -1244,6 +1244,45 @@ DEF_FUNC type_install_slots, TIS_FRAME
     mov rcx, [rbp - TIS_OWNER]
     test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jz .from_builtin
+
+    ; A builtin method assigned by NAME into a class body is that builtin's
+    ; own slot wearing a name, not a definition this class made.  The owner
+    ; that answered is a heaptype -- the value is in ITS dict -- so the test
+    ; above says nothing; what tells them apart is what the value IS.
+    ;
+    ; `__hash__ = ref.__hash__`, which is how weakref.WeakMethod is written,
+    ; got the generic wrapper installed over it.  The wrapper looks the name
+    ; up, finds the builtin, and the builtin dispatches on the ARGUMENT's type
+    ; -- straight back into the wrapper.  hash() on one of those recursed
+    ; until the C stack ran out, which is what CPython's test_weakref has been
+    ; dying on.  update_one_slot recognises the same shape and installs the
+    ; defining type's own function.
+    ;
+    ; Only when this type actually DERIVES from the one the method was stamped
+    ; onto.  `class C: __hash__ = int.__hash__` is not that, and CPython
+    ; leaves it to fail on the receiver check, which it does here too.
+    ; edx still carries the tag dunder_lookup_owner answered with.
+    cmp edx, TAG_PTR
+    jne .own_definition
+    mov rax, [rbp - TIS_FOUND]
+    mov rcx, [rax + PyObject.ob_type]
+    extern builtin_func_type
+    lea rdx, [rel builtin_func_type]
+    cmp rcx, rdx
+    jne .own_definition
+    mov rcx, [rax + PyBuiltinObject.func_owner]
+    test rcx, rcx
+    jz .own_definition
+    mov [rbp - TIS_OWNER], rcx      ; whose slot .from_builtin will install
+    mov rdi, [rbp - TIS_TYPE]
+    mov rsi, rcx
+    extern type_is_subtype
+    call type_is_subtype
+    mov rbx, [rbp - TIS_ENTRY]      ; the walk's cursor, across the call
+    test eax, eax
+    jnz .from_builtin
+
+.own_definition:
     ; A dunder explicitly set to None is NOT skipped.  update_one_slot
     ; special-cases None for tp_hash alone; everywhere else the generic
     ; wrapper is installed and the call fails as "'NoneType' object is not

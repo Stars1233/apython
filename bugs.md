@@ -14,29 +14,21 @@ reasoning that chose them and what changing one would cost.
 
 ## Correctness
 
-- **CPython's test_weakref overflows the C stack.**  `WeakMethodTestCase.
-  test_hashing` and two of its sibling classes die with an unbounded
-  recursion whose top frame is `dict_lookup`; valgrind reports "can't grow
-  stack" rather than an invalid access.  The test in isolation passes, and so
-  does every reduction of it tried so far -- it needs the rest of the module,
-  so the state that arms it comes from an earlier test.  The Python-level
-  recursion limit is in place and works (`sys.getrecursionlimit()` is 1000
-  and a runaway Python function raises RecursionError), so whatever recurses
-  here is doing it below the eval loop, where nothing counts the depth.
+- **CPython's test_weakref reports 44 valgrind errors of one kind**: an object
+  freed by an explicit `gc.collect()` while a live frame still held it -- the
+  collector deciding something is unreachable that is not.  The C-stack
+  overflow that used to head this entry is gone: it was `hash()` on a class
+  written `__hash__ = ref.__hash__`, where the generic slot wrapper and the
+  builtin it found dispatched into each other for ever, and the module no
+  longer crashes.
 
-  The same file also reports 44 valgrind errors of a second kind, all of them
-  an object freed by an explicit `gc.collect()` while a live frame still held
-  it -- the collector deciding something is unreachable that is not.  Both
-  predate the round that recorded them.
-
-  CPython's test_sys_settrace dies of the same thing, in `gc_visit_decref`
-  under `exc_traverse` at shutdown, and it is HEAP-LAYOUT SENSITIVE: the same
-  commit built at `/tmp/apy-base` passes and built at
-  `/home/jgarzik/repo/apython` crashes, because the DWARF path length changes
-  the binary's size and with it every allocation address.  A git worktree is
-  the usual way to compare two commits, and a worktree whose path differs in
-  LENGTH is not a control -- build the comparison at a path of the same
-  length, or the answer is about the path.
+  CPython's test_sys_settrace dies in `gc_visit_decref` under `exc_traverse`
+  at shutdown, and it is HEAP-LAYOUT SENSITIVE: the same commit built at
+  `/tmp/apy-base` passes and built at `/home/jgarzik/repo/apython` crashes,
+  because the DWARF path length changes the binary's size and with it every
+  allocation address.  A git worktree is the usual way to compare two commits,
+  and a worktree whose path differs in LENGTH is not a control -- build the
+  comparison at a path of the same length, or the answer is about the path.
 
 - **Calls made with a misaligned stack, everywhere except the paths into
   GMP.**  The SysV ABI wants `rsp % 16 == 0` at a `call`, and glibc's float
