@@ -259,6 +259,164 @@ DEF_CLOCK_NS time_perf_counter_ns_func, CLOCK_MONOTONIC, "perf_counter_ns() take
 DEF_CLOCK_NS time_process_time_ns_func, CLOCK_PROCESS_CPUTIME_ID, "process_time_ns() takes no arguments"
 
 ;; ============================================================================
+;; time_get_clock_info_func(PyObject **args, int64_t nargs) -> rax = Value
+;;
+;; What a named clock is and how good it is, as the types.SimpleNamespace with
+;; four fields CPython answers with.  It is here because asyncio cannot start
+;; without it: BaseEventLoop.__init__ opens with
+;;
+;;     self._clock_resolution = time.get_clock_info('monotonic').resolution
+;;
+;; so every asyncio module -- gather, TaskGroup, timeout, the streams -- died
+;; on an AttributeError before running a line of its own.
+;;
+;; Every one of the five is clock_gettime, whose timespec counts nanoseconds,
+;; so the resolution is 1e-09 for all of them; CPython reports the same figure
+;; for the same reason, answering with clock_getres' number rather than the
+;; clock's true precision.  A fifth table column holding one constant five
+;; times would say less than this paragraph does.
+;;
+;; thread_time is in the table although time.thread_time() is not in this
+;; module.  get_clock_info describes the platform's clocks, and refusing a
+;; name CPython knows would be the worse answer of the two.
+;; ============================================================================
+TCI_ARGS  equ 8             ; the name argument, as handed to us
+TCI_TMP   equ 16            ; whichever owned field value is in flight
+TCI_FRAME equ 32            ; + 2 pushes = 48, 16-aligned
+
+extern namespace_new
+extern namespace_set
+extern bool_true
+extern bool_false
+extern raise_type_error_counted
+extern raise_type_error_with_name
+extern none_singleton
+extern ap_strcmp
+extern str_type
+
+DEF_FUNC time_get_clock_info_func, TCI_FRAME
+    push rbx
+    push r12
+    cmp rsi, 1
+    jne .gci_arity
+
+    mov rax, [rdi]
+    mov [rbp - TCI_ARGS], rax
+    V_TEST_PTR rax, rdx
+    ja .gci_not_str
+    test rax, rax
+    jz .gci_not_str
+    mov rdx, [rax + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rdx, rcx
+    jne .gci_not_str
+
+    lea rbx, [rel tci_table]
+.gci_scan:
+    cmp qword [rbx + TCI_NAME], 0
+    je .gci_unknown
+    mov rdi, [rbp - TCI_ARGS]
+    lea rdi, [rdi + PyStrObject.data]
+    mov rsi, [rbx + TCI_NAME]
+    call ap_strcmp
+    test eax, eax
+    jz .gci_found
+    add rbx, TCI_ROW_SIZE
+    jmp .gci_scan
+
+.gci_found:
+    call namespace_new
+    test rax, rax
+    jz .gci_fail
+    mov r12, rax
+
+    ; implementation: an owned str, released once namespace_set's dict_set has
+    ; taken its own reference.
+    mov rdi, [rbx + TCI_IMPL]
+    call str_from_cstr_heap
+    test rax, rax
+    jz .gci_fail_ns
+    mov [rbp - TCI_TMP], rax
+    mov rdi, r12
+    lea rsi, [rel tci_f_impl]
+    mov rdx, rax
+    call namespace_set
+    mov rdi, [rbp - TCI_TMP]
+    call obj_decref
+
+    ; monotonic and adjustable: the two immortal singletons, which the store
+    ; INCREFs and we never owned.
+    lea rdx, [rel bool_false]
+    cmp qword [rbx + TCI_MONO], 0
+    je .gci_mono
+    lea rdx, [rel bool_true]
+.gci_mono:
+    mov rdi, r12
+    lea rsi, [rel tci_f_mono]
+    call namespace_set
+
+    lea rdx, [rel bool_false]
+    cmp qword [rbx + TCI_ADJ], 0
+    je .gci_adj
+    lea rdx, [rel bool_true]
+.gci_adj:
+    mov rdi, r12
+    lea rsi, [rel tci_f_adj]
+    call namespace_set
+
+    ; resolution.  A float Value is NaN-boxed, so V_PACK allocates nothing and
+    ; there is nothing to own -- DECREF_V is here because the ownership rule
+    ; and not the representation is what a reader should have to follow.
+    movsd xmm0, [rel tci_resolution]
+    call float_from_f64
+    V_PACK rax, rdx
+    mov [rbp - TCI_TMP], rax
+    mov rdi, r12
+    lea rsi, [rel tci_f_res]
+    mov rdx, rax
+    call namespace_set
+    mov rdi, [rbp - TCI_TMP]
+    DECREF_V rdi, rax
+
+    mov rax, r12
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.gci_fail_ns:
+    mov rdi, r12
+    call obj_decref
+.gci_fail:
+    pop r12
+    pop rbx
+    leave
+    RET_NULL
+    ret
+
+.gci_arity:
+    CSTRING rdi, "get_clock_info() takes exactly 1 argument ("
+    CSTRING rdx, " given)"
+    call raise_type_error_counted
+
+.gci_not_str:
+    ; CPython's _PyArg_BadArgument spells None as "None" rather than as its
+    ; type; the shared \x01 helper spells every type the same way, and it has
+    ; fifty-odd other callers whose wording this must not move.
+    mov rsi, [rbp - TCI_ARGS]
+    lea rax, [rel none_singleton]
+    cmp rsi, rax
+    je .gci_not_str_none
+    CSTRING rdi, `get_clock_info() argument 1 must be str, not \x01`
+    call raise_type_error_with_name
+.gci_not_str_none:
+    RAISE exc_TypeError_type, "get_clock_info() argument 1 must be str, not None"
+
+.gci_unknown:
+    RAISE exc_ValueError_type, "unknown clock"
+END_FUNC time_get_clock_info_func
+
+;; ============================================================================
 ;; time_time_func(PyObject **args, int64_t nargs) -> rax = Value
 ;; Seconds since the epoch, as a float.  The wall clock, where monotonic is
 ;; the one that cannot go backwards.
@@ -459,6 +617,9 @@ DEF_FUNC time_module_create
     TIME_ADD_FUNC time_strftime_func,  tm_strftime
     TIME_ADD_FUNC time_asctime_func,   tm_asctime
     TIME_ADD_FUNC time_ctime_func,     tm_ctime
+
+    ; asyncio's event loop asks for this before it does anything else.
+    TIME_ADD_FUNC time_get_clock_info_func, tci_get_clock_info
 
     ; --- tzname / timezone / altzone / daylight ---
     ;
@@ -674,6 +835,39 @@ tm_monotonic_ns:    db "monotonic_ns", 0
 tm_perf_counter_ns: db "perf_counter_ns", 0
 tm_process_time_ns: db "process_time_ns", 0
 tm_struct_tm_items: db "_STRUCT_TM_ITEMS", 0
+
+; --- get_clock_info ---
+;
+; One row per clock: the name asked for, the implementation string CPython
+; reports for it, and whether it is monotonic and whether it is adjustable.
+; The names of the first four are the ones already spelled for the functions
+; that read those clocks, so only thread_time needs a string of its own.
+TCI_NAME     equ 0
+TCI_IMPL     equ 8
+TCI_MONO     equ 16
+TCI_ADJ      equ 24
+TCI_ROW_SIZE equ 32
+
+tci_n_thread_time: db "thread_time", 0
+tci_i_realtime:    db "clock_gettime(CLOCK_REALTIME)", 0
+tci_i_monotonic:   db "clock_gettime(CLOCK_MONOTONIC)", 0
+tci_i_process:     db "clock_gettime(CLOCK_PROCESS_CPUTIME_ID)", 0
+tci_i_thread:      db "clock_gettime(CLOCK_THREAD_CPUTIME_ID)", 0
+tci_f_impl:        db "implementation", 0
+tci_f_mono:        db "monotonic", 0
+tci_f_adj:         db "adjustable", 0
+tci_f_res:         db "resolution", 0
+tci_get_clock_info: db "get_clock_info", 0
+
+align 8
+tci_resolution: dq 0x3E112E0BE826D695    ; 1e-09
+tci_table:
+    dq tm_time,           tci_i_realtime,  0, 1
+    dq tm_monotonic,      tci_i_monotonic, 1, 0
+    dq tm_perf_counter,   tci_i_monotonic, 1, 0
+    dq tm_process_time,   tci_i_process,   1, 0
+    dq tci_n_thread_time, tci_i_thread,    1, 0
+    dq 0, 0, 0, 0
 
 
 ; --- struct_time ---
