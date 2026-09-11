@@ -470,6 +470,30 @@ DEF_FUNC_LOCAL cg_s_expr, CST_FRAME
     call cg_expr
     test eax, eax
     jz .fail
+
+    ; In "single" mode a bare expression at MODULE level is displayed rather
+    ; than discarded -- that is what makes a REPL echo, and what doctest reads
+    ; its expected output from.  CPython emits CALL_INTRINSIC_1 INTRINSIC_PRINT
+    ; before the POP_TOP; it calls sys.displayhook, which is where the echo
+    ; and the `_` binding live.  Inside a function the statement is an
+    ; ordinary discard, in single mode as in exec.
+    cmp dword [rbx + Comp.mode], CMODE_SINGLE
+    jne .plain_discard
+    mov rdi, rbx
+    mov esi, [r12 + CompUnit.scope]
+    extern sym_at
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_MODULE
+    jne .plain_discard
+    mov rdi, r12
+    mov esi, OP_CALL_INTRINSIC_1
+    mov edx, INTRINSIC_PRINT
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+    test eax, eax
+    jz .fail
+
+.plain_discard:
     mov rdi, r12
     mov esi, OP_POP_TOP
     xor edx, edx
