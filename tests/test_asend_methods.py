@@ -418,4 +418,34 @@ for bad in ((), (ValueError, 1, 2, 3)):
     except TypeError as e:
         print("athrow arity:", e)
 
+# athrow's first argument has to BE an exception class or instance.  It was
+# handed straight to type_call, which jumps through whatever sits at tp_call
+# in an object of another shape -- `athrow(5, 6)` was a segfault from ordinary
+# Python.  And a value that is ALREADY an instance of the class is the
+# exception, not an argument to build one from.
+# (GeneratorExit is NOT caught below, so a generator left suspended closes
+# cleanly at the end and none of this prints "Exception ignored in".)
+async def catching2():
+    try:
+        yield 1
+    except (ValueError, KeyError) as e:
+        yield (type(e).__name__, e.args)
+
+
+async def use2(args):
+    g = catching2()
+    await g.asend(None)
+    try:
+        return await g.athrow(*args)
+    except TypeError as e:
+        return ("TypeError", str(e))
+    finally:
+        await g.aclose()
+
+
+for args in ((ValueError("x"), "y", None), (5, 6), ("s", "t"), ([1], 2),
+             (None, 1), (ValueError, ValueError("z")), (ValueError, "w"),
+             (ValueError, None), (KeyError,)):
+    print(args[0].__class__.__name__, "->", drive(use2(args)))
+
 print("done 3")

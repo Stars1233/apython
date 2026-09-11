@@ -831,7 +831,9 @@ END_FUNC _agen_aclose_impl
 ;; ============================================================================
 AAT_EXC   equ 8             ; the exception, across the receiver check
 AAT_OWNED equ 16            ; non-zero when AAT_EXC is a reference of ours
-AAT_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+AAT_N     equ 24            ; the argument count, likewise
+AAT_ARGS  equ 32            ; and the array
+AAT_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
 DEF_FUNC_LOCAL _agen_athrow_impl, AAT_FRAME
     ; CPython takes athrow(typ[, val[, tb]]): the two- and three-argument
     ; spellings are deprecated but its own test_asyncgen uses them, and the
@@ -854,12 +856,61 @@ DEF_FUNC_LOCAL _agen_athrow_impl, AAT_FRAME
     test eax, eax
     jz .raised                  ; a filter made it an error
 .not_deprecated:
+    mov [rbp - AAT_N], rsi      ; the count, across every call below
     mov rax, [rdi + 8]          ; the exception or its type, borrowed
     mov [rbp - AAT_EXC], rax    ; a frame slot: a lone push left both calls
                                 ; below, and ap_malloc under the second, eight
                                 ; bytes out
-    cmp rsi, 3
+    mov [rbp - AAT_ARGS], rdi
+
+    ; It has to BE an exception class or instance.  gen_throw is going to
+    ; raise it, and the type_call below would otherwise jump through whatever
+    ; sits at tp_call in an object of another shape -- `athrow(5, 6)` was a
+    ; segfault from ordinary Python.
+    V_TEST_PTR rax, rcx
+    ja .not_an_exception
+    test rax, rax
+    jz .not_an_exception
+    mov rcx, [rax + PyObject.ob_type]
+    extern type_type
+    lea rdx, [rel type_type]
+    cmp rcx, rdx
+    je .athrow_class
+    extern exc_metatype
+    lea rdx, [rel exc_metatype]
+    cmp rcx, rdx
+    je .athrow_class
+    extern user_type_metatype
+    lea rdx, [rel user_type_metatype]
+    cmp rcx, rdx
+    je .athrow_class
+
+    ; An INSTANCE: its type must derive from BaseException, and a separate
+    ; value is refused rather than used.
+    mov rdi, rcx
+    extern type_is_exc_subclass
+    call type_is_exc_subclass
+    test eax, eax
+    jz .not_an_exception
+    cmp qword [rbp - AAT_N], 3
     jl .have_exc
+    mov rdi, [rbp - AAT_ARGS]
+    mov rdx, [rdi + 16]
+    lea rcx, [rel none_singleton]
+    cmp rdx, rcx
+    je .have_exc
+    test rdx, rdx
+    jz .have_exc
+    RAISE exc_TypeError_type, "instance exception may not have a separate value"
+
+.athrow_class:
+    mov rdi, rax
+    call type_is_exc_subclass
+    test eax, eax
+    jz .not_an_exception
+    cmp qword [rbp - AAT_N], 3
+    jl .have_exc
+    mov rdi, [rbp - AAT_ARGS]
     mov rdx, [rdi + 16]         ; the value
     lea rcx, [rel none_singleton]
     cmp rdx, rcx
@@ -867,24 +918,44 @@ DEF_FUNC_LOCAL _agen_athrow_impl, AAT_FRAME
     test rdx, rdx
     jz .have_exc
 
+    ; A value that is ALREADY an instance of the class is the exception, not
+    ; an argument to build one from -- _PyErr_SetObject's rule, and without it
+    ; `athrow(ValueError, ValueError('z'))` raised ValueError(ValueError('z')).
+    V_TEST_PTR rdx, rcx
+    ja .athrow_build
+    test rdx, rdx
+    jz .athrow_build
+    push rdx
+    sub rsp, 8
+    mov rdi, [rdx + PyObject.ob_type]
+    mov rsi, [rbp - AAT_EXC]
+    extern type_is_subtype
+    call type_is_subtype
+    add rsp, 8
+    pop rdx
+    test eax, eax
+    jz .athrow_build
+    mov [rbp - AAT_EXC], rdx
+    jmp .have_exc
+
+.athrow_build:
     ; typ(val), which is what CPython's _PyErr_CreateException does with the
     ; pair.  Its reference is this function's until async_gen_athrow_new takes
     ; one of its own.
-    push rdi
-    sub rsp, 8
-    lea rsi, [rdi + 16]
-    mov rdi, rax
+    mov rdi, [rbp - AAT_EXC]
+    lea rsi, [rbp - AAT_ARGS]
+    mov rsi, [rsi]
+    add rsi, 16
     mov edx, 1
     extern type_call
     call type_call
-    add rsp, 8
-    pop rdi
     test rax, rax
     jz .raised
     mov [rbp - AAT_EXC], rax
     mov qword [rbp - AAT_OWNED], 1
 
 .have_exc:
+    mov rdi, [rbp - AAT_ARGS]
     mov rdi, [rdi]
     call _agen_check_receiver
     mov rsi, [rbp - AAT_EXC]
@@ -906,6 +977,12 @@ DEF_FUNC_LOCAL _agen_athrow_impl, AAT_FRAME
     extern eval_exception_unwind
     leave
     jmp eval_exception_unwind
+
+.not_an_exception:
+    mov rsi, [rbp - AAT_EXC]
+    CSTRING rdi, `exceptions must be classes or instances deriving from BaseException, not \x01`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name      ; does not return
 
 .arity:
     ; _PyArg_CheckPositional's wording, which names the count it got.
@@ -2174,9 +2251,12 @@ DEF_FUNC_LOCAL ags_send_core, AGSS_FRAME
     ; asend(v).send(w) is CPython's "w wins", so what asend() left here is
     ; released rather than leaked.
     push rdx
+    sub rsp, 8                  ; a pad: XDECREF_V expands to a call, and a
+                                ; lone push leaves it eight out
     mov rdi, [rax + AsyncGenASend.ags_sendval]
     mov qword [rax + AsyncGenASend.ags_sendval], 0
     XDECREF_V rdi, rcx
+    add rsp, 8
     pop rdx
     mov rax, [rbp - AGSS_SELF]
     INCREF_V rdx, rcx
@@ -2223,8 +2303,10 @@ DEF_FUNC_LOCAL ags_send_core, AGSS_FRAME
     ; item once per drive -- five objects for five turns of a hand-driven
     ; `async for`, invisible to every gate because nothing crashed.
     push rax
+    sub rsp, 8                  ; a pad, as above
     mov rdi, [rbp - AGSS_VAL]
     XDECREF_V rdi, rcx
+    add rsp, 8
     pop rdi
     call raise_exception_obj
 
