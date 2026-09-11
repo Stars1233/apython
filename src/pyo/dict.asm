@@ -2098,9 +2098,44 @@ DEF_FUNC_BARE dict_rev_iter_next
     dec rcx
     mov [rdi + PyDictIterObject.it_index], rcx
 
+    ; Which half, or both: the same it_kind the forward iterator reads.  This
+    ; walked keys unconditionally, because reversed(d) was its only caller --
+    ; and then reversed(d.values()) and reversed(d.items()), once the views
+    ; grew a __reversed__, quietly answered with keys.
+    mov r10, [rdi + PyDictIterObject.it_kind]
+    cmp r10, 1
+    je .dri_return_value
+    ja .dri_return_item
+
     ; Return key
     mov rax, [rax + DictEntry.key]
     INCREF_V rax, rdx
+    ret
+
+.dri_return_value:
+    mov rax, [rax + DictEntry.value]
+    INCREF_V rax, rdx
+    ret
+
+.dri_return_item:
+    ; A (key, value) pair, as the forward iterator builds it.
+    push rbx
+    push r12
+    mov rbx, rax                ; save the entry
+    mov edi, 2
+    call tuple_new
+    mov r12, rax
+    mov r9, [r12 + PyTupleObject.ob_item]
+    mov rax, [rbx + DictEntry.key]
+    INCREF_V rax, rdx
+    mov [r9], rax
+    mov rax, [rbx + DictEntry.value]
+    INCREF_V rax, rdx
+    mov [r9 + 8], rax
+    mov rax, r12
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
     ret
 
 .dri_skip:

@@ -2089,31 +2089,6 @@ DEF_FUNC methods_init
     mov rdi, rax
     call type_stamp_methods
 
-    ;; --- Ellipsis and NotImplemented: what they pickle as ---
-    ;; Neither type had a tp_dict at all, so both inherited object.__reduce__
-    ;; and were refused by pickle.  CPython answers with the NAME, which
-    ;; pickle resolves as a global in builtins -- the two singletons are the
-    ;; only objects reduced that way.
-    call dict_new
-    mov rbx, rax
-    extern ellipsis_reduce
-    ADD_FN_N mn___reduce__, ellipsis_reduce, 1, 1
-    extern ellipsis_type
-    lea rax, [rel ellipsis_type]
-    mov [rax + PyTypeObject.tp_dict], rbx
-    mov rdi, rax
-    call type_stamp_methods
-
-    call dict_new
-    mov rbx, rax
-    extern notimpl_reduce
-    ADD_FN_N mn___reduce__, notimpl_reduce, 1, 1
-    extern notimpl_type
-    lea rax, [rel notimpl_type]
-    mov [rax + PyTypeObject.tp_dict], rbx
-    mov rdi, rax
-    call type_stamp_methods
-
     ;; --- int_type methods ---
     call dict_new
     mov rbx, rax
@@ -2850,6 +2825,12 @@ DEF_FUNC methods_init
     ; finds and only builds a dict where there is none.
     extern repr_types_init
     call repr_types_init
+
+    ; The attributes a type's own tp_getattr answers, published so that dir(),
+    ; inspect.getmembers and everything else that asks by NAME can see them.
+    ; After the two above, for the same reason: it adds into the dict it finds.
+    extern attr_types_init
+    call attr_types_init
 
     pop r12
     pop rbx

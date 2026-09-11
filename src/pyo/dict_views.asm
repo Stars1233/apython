@@ -803,6 +803,78 @@ dict_items_view_seq_methods:
     dq 0                        ; sq_inplace_repeat
 
 ; Dict keys view type
+section .text
+
+;; ============================================================================
+;; dict_view_reversed(rdi = args Value[], rsi = nargs) -> rax = a reverse
+;; iterator over this view, as a Value
+;;
+;; `reversed(d.keys())` was "'dict_keys' object is not reversible": the dict
+;; itself had a __reversed__ and its three views had none, though the iterator
+;; type already carries the kind that tells keys from values from items.  So
+;; this is dict_reversed with the view's own dv_kind rather than a hardcoded
+;; zero, which is exactly what CPython's dictview_reversed does.
+;; ============================================================================
+DVREV_FRAME equ 24          ; + 1 push = 32, 16-aligned
+DEF_FUNC dict_view_reversed, DVREV_FRAME
+    push rbx
+    test rsi, rsi
+    jz .dvr_args
+    mov rbx, [rdi]                  ; the view
+
+    mov rdi, [rbx + PyDictViewObject.dv_dict]
+    test rdi, rdi
+    jz .dvr_args
+    push rdi
+    push rdi
+    mov edi, PyDictIterObject_size
+    extern dict_rev_iter_type
+    lea rsi, [rel dict_rev_iter_type]
+    extern gc_alloc
+    call gc_alloc
+    pop rdi
+    pop rdi                         ; rdi = the dict again
+
+    mov [rax + PyDictIterObject.it_dict], rdi
+    ; From the end, as dict_reversed does: the scan walks the entry array down.
+    mov rcx, [rdi + PyDictObject.capacity]
+    dec rcx
+    mov [rax + PyDictIterObject.it_index], rcx
+    mov rcx, [rbx + PyDictViewObject.dv_kind]
+    mov [rax + PyDictIterObject.it_kind], rcx
+    ; The SIZE, for mutation detection -- see dict_reversed on why not
+    ; dk_version.
+    mov rcx, [rdi + PyDictObject.ob_size]
+    mov [rax + PyDictIterObject.it_version], rcx
+
+    push rax
+    push rax
+    extern obj_incref
+    call obj_incref                 ; the iterator holds the dict
+    pop rax
+    pop rax
+    push rax
+    push rax
+    mov rdi, rax
+    extern gc_track
+    call gc_track
+    pop rax
+    pop rax
+
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.dvr_args:
+    extern exc_TypeError_type
+    extern raise_exception
+    RAISE exc_TypeError_type, "__reversed__() takes exactly one argument"
+END_FUNC dict_view_reversed
+
+section .data
+
+
 align 8
 global dict_keys_view_type
 dict_keys_view_type:

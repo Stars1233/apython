@@ -204,6 +204,7 @@ test_dict_update_mapping
 test_dict_update_raises
 test_dict_view_set
 test_dict_views
+test_dir_published
 test_dir
 test_dunder_descriptor
 test_dunder_protocols

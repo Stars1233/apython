@@ -2366,6 +2366,52 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+
+.tga_empty_type_params:
+    ; A class with no type parameters has an EMPTY tuple, not no attribute --
+    ; typing and dataclasses both read it unguarded, and so does int's.
+    xor edi, edi
+    extern tuple_new
+    call tuple_new
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.tga_make_annotations:
+    ; CPython creates the dict on first read and KEEPS it, so that
+    ; `C.__annotations__['x'] = int` persists -- but only for a class that has
+    ; a dict of its own to keep it in.  A static type answers AttributeError
+    ; there and here.
+    mov r12, [rbp - TGA_ORIGIN]
+    test qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .tga_really_really_not_found
+    mov rdi, [r12 + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .tga_really_really_not_found
+    push rdi
+    push rdi
+    call dict_new
+    pop rdi
+    pop rdi
+    test rax, rax
+    jz .tga_really_really_not_found
+    push rax
+    push rax
+    mov rdx, rax
+    mov rsi, rbx                ; the name, "__annotations__"
+    call dict_set
+    pop rax
+    pop rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+    ret
 .tga_mod_plain:
     CSTRING rdi, "builtins"
     extern str_from_cstr_heap
@@ -2493,6 +2539,24 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     ret
 
 .tga_really_not_found:
+    ; Two names every class answers even when nothing in its MRO holds them,
+    ; and they are asked HERE rather than in the ladder above so that a class
+    ; which DOES hold one -- a PEP 695 generic, or a body with annotations --
+    ; is found by the walk first.
+    cmp byte [rbx + PyStrObject.data], '_'
+    jne .tga_really_really_not_found
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__type_params__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_empty_type_params
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__annotations__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_make_annotations
+
+.tga_really_really_not_found:
     RET_NULL
     pop r12
     pop rbx

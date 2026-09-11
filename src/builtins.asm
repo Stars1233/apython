@@ -374,9 +374,21 @@ DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
     leave
     ret
 .bfg_missing:
-    ; A plain function is not bound to anything, and CPython's has no
-    ; __self__ either; answering NULL lets the caller raise its own
-    ; AttributeError.
+    ; A module-level builtin is bound to its MODULE, which for everything here
+    ; is builtins: CPython's `len.__self__` is <module 'builtins'>, and its
+    ; meth_reduce reads it to decide between a bare name and a getattr pair.
+    ; The comment that used to sit here said CPython had no __self__ for one,
+    ; and it does.
+    extern builtins_module_obj
+    mov rax, [rel builtins_module_obj]
+    test rax, rax
+    jz .bfg_no_module
+    INCREF rax
+    pop rbx
+    leave
+    ret
+.bfg_no_module:
+    ; Before the module exists -- during start-up -- there is nothing to name.
     xor eax, eax
     pop rbx
     leave
