@@ -2515,6 +2515,7 @@ str_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; str_iter type data
 align 8
@@ -2551,6 +2552,7 @@ str_iter_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 
 section .data

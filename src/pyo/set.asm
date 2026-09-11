@@ -2176,6 +2176,7 @@ set_type:
     dq set_clear_gc                        ; tp_clear
     dq 0         ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; Frozenset type object
 align 8
@@ -2209,6 +2210,7 @@ frozenset_type:
     dq set_clear_gc                        ; tp_clear
     dq 0         ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; Set iterator type
 align 8
@@ -2242,6 +2244,7 @@ set_iter_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 section .text
 

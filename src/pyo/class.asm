@@ -2788,6 +2788,7 @@ user_type_metatype:
     dq type_clear               ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; object_type - base type for all Python objects
 ; Used as explicit base class: class Foo(object): pass
@@ -2830,6 +2831,7 @@ object_type:
     dq instance_clear                        ; tp_clear
     dq 0           ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 
 section .text

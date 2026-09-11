@@ -906,6 +906,7 @@ dict_keys_view_type:
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; Dict values view type
 align 8
@@ -939,6 +940,7 @@ dict_values_view_type:
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; Dict items view type
 align 8
@@ -972,3 +974,4 @@ dict_items_view_type:
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer

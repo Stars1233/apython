@@ -470,6 +470,7 @@ module_type:
     ; thing with offsetof(PyModuleObject, md_dict).
     dq PyModuleObject.mod_dict  ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ;; ============================================================================
 ;; (was src/pyo/namespace.asm)
@@ -1012,6 +1013,7 @@ namespace_type:
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 section .text
 

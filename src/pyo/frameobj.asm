@@ -1172,6 +1172,7 @@ frame_object_type:
     dq frameobj_clear           ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 section .rodata
 fo_name: db "frame", 0

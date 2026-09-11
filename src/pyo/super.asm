@@ -963,6 +963,7 @@ super_type:
     dq super_clear              ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 sup_msg_nargs:     db "super() expected at most 2 arguments, got ", 1, 0
 sup_msg_noattr:    db "'super' object has no attribute '", 1, "'", 0

@@ -1242,6 +1242,7 @@ exc_BaseExceptionGroup_type:
     dq eg_clear                 ; tp_clear
     dq PyExceptionObject.exc_dict ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; ExceptionGroup type — base = BaseExceptionGroup (also inherits from Exception)
 align 8
@@ -1279,6 +1280,7 @@ exc_ExceptionGroup_type:
     dq eg_clear                 ; tp_clear
     dq PyExceptionObject.exc_dict ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ;; ExceptionGroup is the one builtin with two bases: BaseExceptionGroup for
 ;; the group machinery and Exception so that `except Exception` catches it.

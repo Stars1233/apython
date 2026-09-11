@@ -3551,6 +3551,7 @@ stat_result_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
     dq sr_desc                  ; STRUCTSEQ_DESC
 
 align 8
@@ -3584,6 +3585,7 @@ uname_result_type:
     dq 0
     dq 0
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
     dq un_desc                  ; STRUCTSEQ_DESC, one qword past the type
 
 align 8
@@ -3617,6 +3619,7 @@ terminal_size_type:
     dq 0
     dq 0
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
     dq ts_desc                  ; STRUCTSEQ_DESC, one qword past the type
 
 section .rodata

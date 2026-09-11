@@ -2644,6 +2644,7 @@ gen_type:
     dq gen_clear                        ; tp_clear
     dq 0      ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 align 8
 global coro_type
@@ -2676,6 +2677,7 @@ coro_type:
     dq gen_clear                        ; tp_clear
     dq 0      ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 align 8
 global async_gen_type
@@ -2708,6 +2710,7 @@ async_gen_type:
     dq gen_clear                        ; tp_clear
     dq 0      ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ags_name_str: db "async_generator_asend", 0
 
@@ -2721,7 +2724,7 @@ async_gen_wrapped_type:
     dq agw_name_str             ; tp_name
     dq AsyncGenWrapped_size     ; tp_basicsize
     dq agw_dealloc              ; tp_dealloc
-    times 23 dq 0               ; the rest: this box is never used as a value
+    times 24 dq 0               ; the rest: this box is never used as a value
 
 align 8
 global async_gen_asend_type
@@ -2754,6 +2757,7 @@ async_gen_asend_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 agt_name_str: db "async_generator_athrow", 0
 align 8
@@ -2787,6 +2791,7 @@ async_gen_athrow_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 section .text
 

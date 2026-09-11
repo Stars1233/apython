@@ -838,6 +838,7 @@ version_info_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
     dq vi_desc                  ; STRUCTSEQ_DESC, one qword past the type
 
 ;; ============================================================================
@@ -897,6 +898,7 @@ asyncgen_hooks_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
     dq agh_desc                 ; STRUCTSEQ_DESC, one qword past the type
 
 ;; ============================================================================
@@ -960,6 +962,7 @@ unraisable_args_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
     dq uh_desc                  ; STRUCTSEQ_DESC, one qword past the type
 
 section .text
@@ -1038,6 +1041,7 @@ float_info_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
     dq float_info_desc          ; STRUCTSEQ_DESC, one qword past the type
 
 ;; sys.int_info
@@ -1094,6 +1098,7 @@ int_info_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
     dq int_info_desc            ; STRUCTSEQ_DESC, one qword past the type
 
 ;; sys.hash_info
@@ -1160,6 +1165,7 @@ hash_info_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
     dq hash_info_desc           ; STRUCTSEQ_DESC, one qword past the type
 
 section .rodata
@@ -1263,4 +1269,5 @@ flags_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
     dq flags_desc               ; STRUCTSEQ_DESC

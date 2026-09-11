@@ -896,6 +896,20 @@ struc PyTypeObject
     ; every other type, which is what a static table that predates the field
     ; reads as.
     .tp_tailslots:   resq 1  ; +216
+    ; How to reach an object's raw bytes: CPython's tp_as_buffer, reduced to
+    ; the one question everything here asks -- "where is the memory and how
+    ; much of it is there".  bytes_like_ptr_len consults it when its own
+    ; hard-coded chain misses, which is what lets memoryview(), bytes(),
+    ; FileIO.write, marshal, sre and the twenty-odd bytes methods take an
+    ; array, or any exporter added later, without each learning the type by
+    ; name.
+    ;
+    ; The signature is
+    ;     tp_getbuffer(rdi = obj) -> rax = data ptr, rdx = length in BYTES,
+    ;                                ecx = 1 when it answered, 0 when not
+    ; so a type whose buffer can be absent -- a released memoryview -- says so
+    ; without raising, which is the contract bytes_like_ptr_len already keeps.
+    .tp_as_buffer:   resq 1  ; +224
 endstruc
 
 TYPE_OBJECT_SIZE equ PyTypeObject_size

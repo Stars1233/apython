@@ -2802,6 +2802,7 @@ staticmethod_type:
     dq staticmethod_clear                        ; tp_clear
     dq 0               ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; classmethod_type - type descriptor for classmethod wrapper
 align 8
@@ -2835,6 +2836,7 @@ classmethod_type:
     dq classmethod_clear                        ; tp_clear
     dq 0              ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; property_type - type descriptor for property descriptor
 align 8
@@ -2868,6 +2870,7 @@ property_type:
     dq property_clear                        ; tp_clear
     dq 0           ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; member_descr_type - type descriptor for __slots__ member descriptors
 md_name_str: db "member_descriptor", 0
@@ -2902,6 +2905,7 @@ member_descr_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 align 8
 u_name_str: db "types.UnionType", 0
@@ -2937,6 +2941,7 @@ union_type:
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 
 section .text
@@ -3003,6 +3008,7 @@ getset_descr_type:
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 align 8
 mp_name_str: db "mappingproxy", 0
@@ -3038,6 +3044,7 @@ mappingproxy_type:
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 align 8
 mappingproxy_seq_methods:

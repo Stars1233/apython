@@ -2768,6 +2768,7 @@ list_iter_type:
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; Tuple iterator type
 align 8
@@ -2801,6 +2802,7 @@ tuple_iter_type:
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; Range iterator type
 align 8
@@ -2834,6 +2836,7 @@ longrange_iter_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 align 8
 global range_iter_type
@@ -2866,6 +2869,7 @@ range_iter_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; Range object type (reusable sequence, creates fresh iterators)
 align 8
@@ -2918,6 +2922,7 @@ range_obj_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; Range object sequence methods
 align 8

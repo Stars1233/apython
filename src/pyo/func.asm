@@ -1767,6 +1767,7 @@ func_type:
     dq func_clear                        ; tp_clear
     dq 0       ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ;; ============================================================================
 ;; (was src/pyo/cell.asm)
@@ -1880,6 +1881,7 @@ cell_type:
     dq cell_clear                        ; tp_clear
     dq 0       ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 section .text
 

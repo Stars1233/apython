@@ -2428,6 +2428,7 @@ exc_metatype:
     dq 0                    ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; The metatype is implementation detail -- it exists so an exception class can
 ; carry a tp_call of its own -- and it says `type`, as user_type_metatype

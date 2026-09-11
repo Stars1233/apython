@@ -2851,6 +2851,7 @@ sre_scanner_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 align 8
 
@@ -2885,6 +2886,7 @@ sre_pattern_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 section .rodata
 sp_type_name:     db "re.Pattern", 0
