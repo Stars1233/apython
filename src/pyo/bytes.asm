@@ -2317,11 +2317,29 @@ extern str_set_length
     extern raise_type_error_counted
     jmp raise_type_error_counted
 .bls_bad_type:
+    ; Reached both when the argument is the wrong TYPE and when materialising
+    ; it RAISED -- list_type_call answers 0 for either.  Substituting "cannot
+    ; convert 'map' object to bytes" over a pending exception threw the real
+    ; one away: a generator or a map that raises part way through reported a
+    ; type error, which is exactly the shape str.join was fixed for.
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    jne .bls_propagate
     mov rdi, [rbp - BLS_ARGS]
     mov rsi, [rdi]
     mov rdi, [rbp - BLS_CONVMSG]
     extern raise_type_error_with_name
     jmp raise_type_error_with_name
+
+.bls_propagate:
+    ; A (0, 0) return means "empty", so there is no value to report failure
+    ; with: the exception already pending is carried out the way every other
+    ; error in this function leaves, non-locally.
+    pop r12
+    pop rbx
+    leave
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
 END_FUNC byteslike_source
 
 BTC_TYPE  equ 8

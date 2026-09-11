@@ -506,8 +506,26 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
     jmp raise_type_error_counted
 
 .dtc_error:
+    ; Reached both when the argument is the wrong TYPE and when reading it
+    ; RAISED -- dict_method_update answers 0 for either, as the comment at
+    ; .dtc_try_iterable says.  Substituting a type error over a pending
+    ; exception threw the real one away: dict(map(f, xs)) for an f that raises
+    ; reported "dict() argument must be a mapping or iterable".
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    jne .dtc_propagate
     extern exc_TypeError_type
     RAISE exc_TypeError_type, "dict() argument must be a mapping or iterable"
+
+.dtc_propagate:
+    extern eval_exception_unwind
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    jmp eval_exception_unwind
 END_FUNC dict_type_call
 
 
