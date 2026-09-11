@@ -181,6 +181,34 @@ item with and would read one byte where four were meant.  Giving the slot a
 format to report is the easy half; the decode, the strides and the release
 protocol are the rest of `memoryview`.
 
+## `sys.stdout.buffer` is a FileIO beside the text half, not underneath it
+
+`sys.stdout` is the assembly file object, which writes to its descriptor
+directly and keeps its own 8 KB buffer; CPython's is a `TextIOWrapper` sitting
+ON a `BufferedWriter`, and `sys.stdout.buffer` IS that writer.  Here the binary
+half is an `_io.FileIO` over the same descriptor, built the first time it is
+asked for and kept.
+
+It is built lazily because building it eagerly means importing `_io` before
+anything runs, and that is **1.1 ms to 2.9 ms on every invocation** of the
+interpreter -- measured, not estimated.  Only a program that asks for the
+binary half pays for it.
+
+Two consequences.  `type(sys.stdout.buffer).__name__` is `FileIO` rather than
+`BufferedWriter`.  And because the two halves reach one descriptor
+independently rather than one sitting on the other, handing out the binary half
+turns the text half's buffering OFF -- which keeps
+
+    print("one"); sys.stdout.buffer.write(b"two\n"); print("three")
+
+in program order, where CPython, whose buffered text is flushed last, emits
+`two` first.  Giving up the buffering is the cheaper of the two wrongs: a
+program that mixes the halves is asking about order, and one that does not
+never reaches the rule.
+
+Making `sys.stdout` a real `TextIOWrapper` over a real `BufferedWriter` closes
+all of it, and costs the start-up above.
+
 `array.frombytes` is the one place the narrow model is visible in the other
 direction.  CPython asks for `PyBUF_SIMPLE`, which an exporter carrying its own
 format declines, so `a.frombytes(another_array)` is a TypeError there -- and

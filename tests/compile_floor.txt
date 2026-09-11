@@ -573,6 +573,7 @@ test_sre_scanner_and_boundary
 test_static_bases
 test_stdlib_glue
 test_stdlib_shims
+test_stdout_binary_half
 test_stdout_buffering
 test_store_attr_per_name
 test_store_attr_spec

@@ -656,6 +656,13 @@ struc PyFileObject
     .file_buffered: resq 1 ; +40: 1 = accumulate; 0 = one write per call
     .file_len:    resq 1  ; +48: bytes waiting in .file_buf
     .file_buf:    resb FILE_BUFSZ  ; +56
+    ; The binary half this stream is a text layer over, built on first ask and
+    ; kept.  sys.stdout is this object rather than a Python TextIOWrapper, so
+    ; `sys.stdout.buffer` has nothing to hand back until something builds one;
+    ; making it eagerly would mean importing _io at start-up, which costs
+    ; 1.1 ms -> 2.9 ms on EVERY run.  Built lazily, only a program that asks
+    ; pays.
+    .file_binary: resq 1  ; owned, or 0
 endstruc
 
 ; _io.FileIO.  The first three fields are PyInstanceObject's, because FileIO
