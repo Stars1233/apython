@@ -457,6 +457,7 @@ test_percent_star
 test_percent_typecheck
 test_phase4
 test_phase6
+test_pickle_builtins
 test_poll_eintr
 test_posix_files
 test_posix_more

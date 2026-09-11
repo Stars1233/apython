@@ -28,6 +28,9 @@ extern type_stamp_methods
 
 extern mn___iter__
 extern mn___next__
+extern mn___reduce__
+extern mn___setstate__
+extern mn___length_hint__
 
 ;; ============================================================================
 ;; iter_types_init() -> nothing; every builtin iterator gains a tp_dict
@@ -68,6 +71,30 @@ DEF_FUNC iter_types_init, ITI_FRAME
     mov rdx, [rbx + ITER_ROW_NEXT]
     call dict_add_builtin_func
 
+    ; The pickle half, for the rows that have one.  A 0 means this iterator
+    ; cannot be rebuilt from its state and CPython refuses to pickle it too.
+    mov rdx, [rbx + ITER_ROW_REDUCE]
+    test rdx, rdx
+    jz .iti_no_reduce
+    mov rdi, [rbp - ITI_DICT]
+    lea rsi, [rel mn___reduce__]
+    call dict_add_builtin_func
+.iti_no_reduce:
+    mov rdx, [rbx + ITER_ROW_SETSTATE]
+    test rdx, rdx
+    jz .iti_no_setstate
+    mov rdi, [rbp - ITI_DICT]
+    lea rsi, [rel mn___setstate__]
+    call dict_add_builtin_func
+.iti_no_setstate:
+    mov rdx, [rbx + ITER_ROW_HINT]
+    test rdx, rdx
+    jz .iti_no_hint
+    mov rdi, [rbp - ITI_DICT]
+    lea rsi, [rel mn___length_hint__]
+    call dict_add_builtin_func
+.iti_no_hint:
+
     ; The dict goes on the type, and then type_stamp_methods walks it to give
     ; every entry its func_owner -- which is what makes builtin_func_call
     ; refuse a wrong receiver, and what gives these two the slot-wrapper
@@ -88,27 +115,46 @@ DEF_FUNC iter_types_init, ITI_FRAME
 END_FUNC iter_types_init
 
 section .rodata
-ITER_ROW_TYPE equ 0
-ITER_ROW_ITER equ 8
-ITER_ROW_NEXT equ 16
-ITER_ROW_SIZE equ 24
+ITER_ROW_TYPE     equ 0
+ITER_ROW_ITER     equ 8
+ITER_ROW_NEXT     equ 16
+ITER_ROW_REDUCE   equ 24
+ITER_ROW_SETSTATE equ 32
+ITER_ROW_HINT     equ 40
+ITER_ROW_SIZE     equ 48
 
+;; ITER_ROW type -- __iter__ and __next__ only, for an iterator pickle cannot
+;; rebuild.  ITER_ROW_PICKLE adds the three that make one picklable: CPython
+;; gives every iterator it can reconstruct a __reduce__, and pickle, copy and
+;; deepcopy all go through it.
 %macro ITER_ROW 1
     extern %1_type
     extern %1_dunder_iter
     extern %1_dunder_next
-    dq %1_type, %1_dunder_iter, %1_dunder_next
+    dq %1_type, %1_dunder_iter, %1_dunder_next, 0, 0, 0
 %endmacro
+
+%macro ITER_ROW_PICKLE 4        ; type, __reduce__, __setstate__, __length_hint__
+    extern %1_type
+    extern %1_dunder_iter
+    extern %1_dunder_next
+    extern %2
+    dq %1_type, %1_dunder_iter, %1_dunder_next, %2, %3, %4
+%endmacro
+
+extern seqiter_setstate
+extern seqiter_length_hint
+extern range_iter_length_hint
 
 align 8
 iter_type_table:
-    ITER_ROW list_iter
-    ITER_ROW tuple_iter
-    ITER_ROW range_iter
+    ITER_ROW_PICKLE list_iter, list_iter_reduce, seqiter_setstate, seqiter_length_hint
+    ITER_ROW_PICKLE tuple_iter, tuple_iter_reduce, seqiter_setstate, seqiter_length_hint
+    ITER_ROW_PICKLE range_iter, range_iter_reduce, 0, range_iter_length_hint
     ITER_ROW longrange_iter
-    ITER_ROW str_iter
-    ITER_ROW bytes_iter
-    ITER_ROW bytearray_iter
+    ITER_ROW_PICKLE str_iter, str_iter_reduce, seqiter_setstate, seqiter_length_hint
+    ITER_ROW_PICKLE bytes_iter, bytes_iter_reduce, seqiter_setstate, seqiter_length_hint
+    ITER_ROW_PICKLE bytearray_iter, bytearray_iter_reduce, seqiter_setstate, seqiter_length_hint
     ITER_ROW memoryview_iter
     ITER_ROW set_iter
     ITER_ROW dict_iter
