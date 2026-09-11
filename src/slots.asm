@@ -1064,6 +1064,8 @@ STC_MAX   equ 16              ; args held in the frame; above this, ap_malloc
 STC_SELF  equ 8
 STC_FUNC  equ 16
 STC_HEAP  equ 24              ; the malloc'd buffer, or 0
+STC_BOUND equ 32              ; 1 when __call__ was a descriptor and __get__
+                              ; has already bound self into the callable
 STC_BUF   equ 48 + (STC_MAX + 1) * 8
 STC_FRAME equ ((STC_BUF + 15) / 16) * 16 + 8    ; + 3 pushes = 16-aligned
 
@@ -1097,6 +1099,7 @@ DEF_FUNC slot_tp_call, STC_FRAME
     mov qword [rbp - STC_HEAP], 0
     mov qword [rbp - STC_FUNC], 0   ; the first .stc_not_callable jump is
                                     ; before the lookup that fills it
+    mov qword [rbp - STC_BOUND], 0
 
     ; __call__ on the type, along the MRO.
     mov rdi, [rdi + PyObject.ob_type]
@@ -1104,7 +1107,22 @@ DEF_FUNC slot_tp_call, STC_FRAME
     call dunder_lookup
     test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .stc_not_callable
+
+    ; A __call__ that is a DESCRIPTOR is bound first, and then takes the
+    ; arguments unchanged: the self it would have been handed is already in
+    ; the callable __get__ answered.  Calling the descriptor object itself is
+    ; what every dunder call used to do, and for one with no __call__ of its
+    ; own that is a jump to a NULL tp_call.
+    mov rdi, rax
+    mov rsi, [rbp - STC_SELF]
+    extern dunder_bind
+    call dunder_bind
+    cmp edx, 2
+    je .stc_get_raised
     mov [rbp - STC_FUNC], rax
+    mov [rbp - STC_BOUND], rdx
+    test rdx, rdx
+    jnz .stc_bound_call
 
     ; Where the self-prepended copy goes.
     lea r13, [rbp - STC_BUF]
@@ -1145,8 +1163,17 @@ DEF_FUNC slot_tp_call, STC_FRAME
 
     mov rdi, [rbp - STC_HEAP]
     test rdi, rdi
-    jz .stc_return
+    jz .stc_released
     call ap_free
+.stc_released:
+    cmp qword [rbp - STC_BOUND], 0
+    je .stc_return
+    push rbx
+    sub rsp, 8
+    mov rdi, [rbp - STC_FUNC]   ; the bound callable was ours
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rbx
 
 .stc_return:
     C_RECURSION_LEAVE
@@ -1167,6 +1194,27 @@ DEF_FUNC slot_tp_call, STC_FRAME
     leave
     ret
 
+.stc_bound_call:
+    ; Bound: the arguments go through as they came, and this frame owes the
+    ; callable a release.
+    mov rax, [rbp - STC_FUNC]
+    V_TEST_PTR rax, rcx
+    ja .stc_not_callable
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_call]
+    test rcx, rcx
+    jz .stc_not_callable
+    mov rdi, rax
+    mov rsi, rbx
+    mov rdx, r12
+    call rcx
+    mov rbx, rax                ; the result, kept across the release below
+    jmp .stc_released
+
+.stc_get_raised:
+    ; __get__ raised; its exception is pending and is the caller's.
+    jmp .stc_fail
+
 .stc_no_memory:
     SET_EXC exc_MemoryError_type, "out of memory"
     jmp .stc_fail
@@ -1180,6 +1228,8 @@ DEF_FUNC slot_tp_call, STC_FRAME
     mov rax, [rbp - STC_FUNC]
     test rax, rax
     jz .stc_nc_anon
+    V_TEST_PTR rax, rcx
+    ja .stc_nc_value
     mov rsi, [rax + PyObject.ob_type]
     CSTRING rdi, `'\x01' object is not callable`
     extern type_name_message
@@ -1189,6 +1239,22 @@ DEF_FUNC slot_tp_call, STC_FRAME
     extern set_exception
     call set_exception
     jmp .stc_fail
+.stc_nc_value:
+    ; __get__ answered an immediate -- an int, a float -- which has no ob_type
+    ; to read.  value_type is the one that takes a Value.
+    mov rdi, rax
+    extern value_type
+    call value_type
+    test rax, rax
+    jz .stc_nc_anon
+    mov rsi, rax
+    CSTRING rdi, `'\x01' object is not callable`
+    call type_name_message
+    mov rsi, rax
+    lea rdi, [rel exc_TypeError_type]
+    call set_exception
+    jmp .stc_fail
+
 .stc_nc_anon:
     SET_EXC exc_TypeError_type, "object is not callable"
 

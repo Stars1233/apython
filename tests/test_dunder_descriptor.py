@@ -217,3 +217,54 @@ with open(path) as f:
 os.unlink(path)
 
 print("done 2")
+
+
+# ---------------------------------------------------------------------------
+# __call__ had the same private lookup: slot_tp_call found it on the MRO and
+# called it with self prepended, whatever it was.
+class CallProxy:
+    def __get__(self, obj, objtype=None):
+        return lambda *a, **k: ("call", a, k)
+
+
+C = type("C", (), {})
+C.__call__ = CallProxy()
+c = C()
+print(c())
+print(c(1, 2))
+print(c(1, x=2))
+print(callable(c))
+
+# ...and it is reached through every road into a call.
+print(list(map(c, [1])))
+f = c
+print(f(*[1, 2], **{"k": 3}))
+
+# An ordinary __call__ must not have changed.
+class Ordinary:
+    def __call__(self, *a, **k):
+        return ("ordinary", a, k)
+
+
+o = Ordinary()
+print(o(), o(1), o(1, k=2), callable(o))
+
+# A __call__ that is not callable at all still says so.
+C = type("C", (), {})
+C.__call__ = CallProxy()
+c = C()
+
+
+class NotCallableGet:
+    def __get__(self, obj, objtype=None):
+        return 42
+
+
+C2 = type("C2", (), {})
+C2.__call__ = NotCallableGet()
+try:
+    C2()()
+except TypeError as e:
+    print("bound to an int:", e)
+
+print("done 3")

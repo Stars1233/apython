@@ -288,7 +288,8 @@ DB_SELF  equ 16
 DB_FRAME equ 32             ; + 0 pushes = 32, 16-aligned
 extern classmethod_type
 extern obj_dealloc
-DEF_FUNC_LOCAL dunder_bind, DB_FRAME
+global dunder_bind
+DEF_FUNC dunder_bind, DB_FRAME
     mov [rbp - DB_FOUND], rdi
     mov [rbp - DB_SELF], rsi
     mov rax, [rdi + PyObject.ob_type]
