@@ -539,14 +539,12 @@ END_FUNC sys_io_uring_setup
 ;; sys_io_uring_enter(fd, to_submit, min_complete, flags, sig, sigsz) -> int
 ;; ============================================================================
 DEF_FUNC_BARE sys_io_uring_enter
-    ; EINTR is retried here, because SA_RESTART used to do it: see the note
-    ; above sys_write.
+    ; NOT retried: like poll, it is a WAIT with a deadline of its own and the
+    ; kernel does not restart it.  The event loop sees the EINTR, as it did
+    ; when SA_RESTART was set.
     mov r10, rcx               ; 4th arg
-.retry:
     mov rax, SYS_io_uring_enter
     syscall
-    cmp rax, -EINTR
-    je .retry
     ret
 END_FUNC sys_io_uring_enter
 
@@ -596,13 +594,12 @@ END_FUNC sys_accept4
 ;; sys_connect(fd, addr*, addrlen) -> int
 ;; ============================================================================
 DEF_FUNC_BARE sys_connect
-    ; EINTR is retried here, because SA_RESTART used to do it: see the note
-    ; above sys_write.
-.retry:
+    ; NOT retried, and not restartable either: after EINTR the kernel
+    ; continues the connection asynchronously, so a second connect() on the
+    ; same descriptor answers EALREADY or EISCONN rather than finishing the
+    ; first.  CPython waits with poll instead of calling again.
     mov rax, SYS_connect
     syscall
-    cmp rax, -EINTR
-    je .retry
     ret
 END_FUNC sys_connect
 
@@ -680,13 +677,13 @@ END_FUNC sys_getpeername
 ;; wrapper returns -1 in a 32-bit register and leaves the reason in errno.
 ;; ============================================================================
 DEF_FUNC_BARE sys_poll
-    ; EINTR is retried here, because SA_RESTART used to do it: see the note
-    ; above sys_write.
-.retry:
+    ; NOT retried here.  Linux never restarts poll() whatever SA_RESTART says
+    ; -- the timeout is absolute to the call -- so a retry is not what the
+    ; flag used to do: it re-issued the wait with the WHOLE timeout again and
+    ; ran no handler, which is an unkillable poll.  The caller with a Python
+    ; frame does it, with the remaining time: see socket_poll.
     mov rax, SYS_poll
     syscall
-    cmp rax, -EINTR
-    je .retry
     ret
 END_FUNC sys_poll
 

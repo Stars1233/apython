@@ -442,6 +442,7 @@ test_percent_star
 test_percent_typecheck
 test_phase4
 test_phase6
+test_poll_eintr
 test_posix_files
 test_posix_more
 test_posix_pathlike
