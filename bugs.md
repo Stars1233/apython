@@ -109,6 +109,25 @@ reasoning that chose them and what changing one would cost.
   appends; and `float()` reports its ARGUMENT's type rather than
   `C.__float__ returned non-float (type str)`.
 
+- **A plain builtin function stored in a class body is BOUND.**  CPython has
+  three types where this tree has one: `builtin_function_or_method`, which has
+  no `tp_descr_get` and therefore does not bind, and `method_descriptor` and
+  `wrapper_descriptor`, which do.  So `class C: f = len` gives `C().f` a bound
+  method here and the bare function there, and `C().f([1,2,3])` is
+  "len() takes exactly one argument (2 given)".  `hasattr(len, '__get__')` is
+  True for the same reason and False in CPython.
+
+  The field that would tell them apart is `PyBuiltinObject.func_kind`, and it
+  cannot: `builtin_func_new` makes everything BUILTIN_KIND_FUNCTION, and only
+  `type_stamp_methods` upgrades it -- which runs over the tables `methods/init*.asm`
+  builds and not over the ones `io.asm`, `socket.asm`, `array.asm`,
+  `posixdir.asm` and `abcmod.asm` build for themselves.  Binding on the kind
+  was tried and unbinds every method in those modules.  Nor can the stamping
+  simply be extended to every type: it MUTATES the builtin object, so stamping
+  a user class's dict would give the process-wide `len` a `func_owner` of that
+  class.  Closing it means a second type, or a per-object flag set where the
+  builtin is created rather than where it is registered.
+
 - **`print` to a broken pipe reports nothing.**  SIGPIPE is ignored now, so
   the process survives and `os.write`/`file.write` raise BrokenPipeError --
   but `print` itself answers None and the output is silently lost, where
