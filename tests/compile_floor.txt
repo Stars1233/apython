@@ -223,6 +223,7 @@ test_exception_init
 test_exception_instance_dict
 test_exception_kwargs
 test_exception_metatype
+test_exception_notes
 test_exceptions
 test_exception_str_repr
 test_exception_subclass_init

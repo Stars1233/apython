@@ -2243,6 +2243,126 @@ DEF_FUNC exc_method_new, EMN_FRAME
 END_FUNC exc_method_new
 
 ;; ============================================================================
+;; exc_method_add_note(args, nargs) -> Value: None
+;;
+;; PEP 678.  It needs no field on the exception and CPython's does not have
+;; one either: __notes__ is an ordinary instance attribute, created on the
+;; first call and appended to afterwards.  That is why a program can replace
+;; it, delete it, and see it in vars(e) -- all of which CPython's does too,
+;; and all of which a field would have taken away.
+;;
+;; The lookup goes straight to the instance dict rather than through
+;; exc_getattr.  A __notes__ that a CLASS happens to define is not this
+;; exception's, and a getattr walk could run Python on the way -- neither of
+;; which belongs on the path a traceback printer also takes.
+;; ============================================================================
+EAN_SELF  equ 8
+EAN_NOTE  equ 16
+EAN_LIST  equ 24
+EAN_NAME  equ 32
+EAN_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
+
+extern list_new
+extern list_append
+extern list_type
+extern type_is_subtype
+
+DEF_FUNC exc_method_add_note, EAN_FRAME
+    cmp rsi, 2
+    jne .ean_arity
+    mov rax, [rdi]
+    mov [rbp - EAN_SELF], rax
+    mov rax, [rdi + 8]
+    mov [rbp - EAN_NOTE], rax
+    mov qword [rbp - EAN_NAME], 0
+
+    ; A str or a subclass of one, which is what PyUnicode_Check takes.
+    V_TEST_PTR rax, rcx
+    ja .ean_not_str
+    test rax, rax
+    jz .ean_not_str
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel str_type]
+    call type_is_subtype
+    test eax, eax
+    jz .ean_not_str
+
+    CSTRING rdi, "__notes__"
+    call str_from_cstr_heap
+    test rax, rax
+    jz .ean_out
+    mov [rbp - EAN_NAME], rax
+
+    mov rdi, [rbp - EAN_SELF]
+    mov rdi, [rdi + PyExceptionObject.exc_dict]
+    test rdi, rdi
+    jz .ean_make
+    mov rsi, [rbp - EAN_NAME]
+    call dict_get
+    test rax, rax
+    jz .ean_make
+
+    ; Present, so it has to be a list -- CPython refuses anything else rather
+    ; than replacing it, because a program that put something there meant it.
+    V_TEST_PTR rax, rcx
+    ja .ean_not_list
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel list_type]
+    cmp rcx, rdx
+    jne .ean_not_list
+    mov [rbp - EAN_LIST], rax           ; borrowed: the dict owns it
+    jmp .ean_append
+
+.ean_make:
+    xor edi, edi
+    call list_new
+    test rax, rax
+    jz .ean_out
+    mov [rbp - EAN_LIST], rax
+    mov rdi, [rbp - EAN_SELF]
+    mov rsi, [rbp - EAN_NAME]
+    mov rdx, rax
+    xor ecx, ecx
+    call exc_setattr                    ; creates exc_dict when there is none
+    ; The dict holds it now.  Dropping the constructor's reference leaves one
+    ; owner, so the list a program reads back is the one appended to here.
+    mov rdi, [rbp - EAN_LIST]
+    call obj_decref
+
+.ean_append:
+    mov rdi, [rbp - EAN_LIST]
+    mov rsi, [rbp - EAN_NOTE]
+    call list_append
+
+.ean_out:
+    mov rdi, [rbp - EAN_NAME]
+    test rdi, rdi
+    jz .ean_none
+    call obj_decref
+.ean_none:
+    RET_NONE
+    leave
+    ret
+
+.ean_not_list:
+    mov rdi, [rbp - EAN_NAME]
+    call obj_decref
+    RAISE exc_TypeError_type, "Cannot add note: __notes__ is not a list"
+
+.ean_not_str:
+    mov rsi, [rbp - EAN_NOTE]
+    CSTRING rdi, `note must be a str, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+
+.ean_arity:
+    dec rsi                             ; the count CPython reports excludes self
+    CSTRING rdi, "BaseException.add_note() takes exactly one argument ("
+    CSTRING rdx, " given)"
+    jmp raise_type_error_counted
+END_FUNC exc_method_add_note
+
+;; ============================================================================
 ;; exc_install_methods() -- give BaseException a tp_dict with __init__ in it
 ;;
 ;; One dict on the root of the exception hierarchy is enough: every other
@@ -2321,6 +2441,7 @@ DEF_FUNC exc_install_methods, EIM_FRAME
     extern builtin_func_new
     EXC_ADD_METHOD exc_method_init, "__init__"
     EXC_ADD_METHOD exc_method_with_traceback, "with_traceback"
+    EXC_ADD_METHOD exc_method_add_note, "add_note"
     ; Stamp the owner on it, which is what makes builtin_func_call check the
     ; receiver.  Without it `BaseException.__init__([], 'a')` wrote a tuple
     ; into a list's 57th byte -- exc_args' offset -- and released whatever
