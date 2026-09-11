@@ -1160,6 +1160,7 @@ DEF_FUNC sys_module_init, 40
     SYS_ADD_FUNC_ALIAS sys_excepthook_func, sm_excepthook, sm_dunder_excepthook
     SYS_ADD_FUNC_ALIAS sys_displayhook_func, sm_displayhook, sm_dunder_displayhook
     SYS_ADD_FUNC sys_getrefcount_func, sm_getrefcount
+    SYS_ADD_FUNC sys_is_finalizing_func, sm_is_finalizing
     SYS_ADD_FUNC_ALIAS sys_unraisablehook_func, sm_unraisablehook, \
                        sm_dunder_unraisablehook
     SYS_ADD_FUNC sys_exc_info_func, sm_exc_info
@@ -1701,6 +1702,7 @@ sm_path_hooks:   db "path_hooks", 0
 sm_displayhook:  db "displayhook", 0
 sm_dunder_displayhook: db "__displayhook__", 0
 sm_getrefcount:  db "getrefcount", 0
+sm_is_finalizing: db "is_finalizing", 0
 sm_underscore:   db "_", 0
 sm_dunder_stdout: db "__stdout__", 0
 sm_dunder_stderr: db "__stderr__", 0
@@ -1734,6 +1736,14 @@ sys_module_obj: resq 1
 
 global sys_stdout_obj
 sys_stdout_obj: resq 1
+
+; Set once, by main's teardown, before the first finalizer runs.  It is what
+; sys.is_finalizing() answers, and the reason it is here rather than in main is
+; that the reader is here: a __del__ asking "am I running at shutdown?" is
+; asking whether the interpreter around it is still whole, and from Python
+; there is only one way to ask.
+global interp_finalizing
+interp_finalizing: resq 1
 
 section .data
 align 8
@@ -1793,6 +1803,38 @@ DEF_FUNC sys_getrefcount_func
 .sgr_args:
     RAISE exc_TypeError_type, "getrefcount() takes exactly one argument"
 END_FUNC sys_getrefcount_func
+
+;; ============================================================================
+;; sys_is_finalizing_func(args, nargs) -> Value: True during teardown
+;;
+;; Whether the interpreter is shutting down.  A finalizer is the only Python
+;; that runs after teardown begins, and this is the only way one can ask --
+;; asyncio's BaseEventLoop.close() and unix_events.py open with it, and
+;; threading, logging and concurrent.futures all branch on it before touching
+;; anything they might no longer own.
+;;
+;; main's teardown sets the flag before the shutdown collection, which is
+;; where those finalizers run, and nothing clears it: there is no way back.
+;; ============================================================================
+DEF_FUNC sys_is_finalizing_func
+    test rsi, rsi
+    jne .sif_args
+    lea rax, [rel bool_false]
+    cmp qword [rel interp_finalizing], 0
+    je .sif_out
+    lea rax, [rel bool_true]
+.sif_out:
+    mov rdi, rax
+    push rax
+    push rax                    ; pad: obj_incref must be called aligned
+    call obj_incref
+    pop rax
+    pop rax
+    leave
+    ret
+.sif_args:
+    RAISE exc_TypeError_type, "is_finalizing() takes no arguments"
+END_FUNC sys_is_finalizing_func
 
 ;; ============================================================================
 ;; sys_displayhook_func(args, nargs) -> Value: None

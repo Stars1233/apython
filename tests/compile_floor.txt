@@ -276,6 +276,7 @@ test_gc_dealloc_untrack
 test_gc_finalizer_order
 test_gc_generations
 test_gc_module
+test_gc_reentrant_collect
 test_gen_adv
 test_generator_close_on_drop
 test_generator_close_throw
@@ -613,6 +614,7 @@ test_sys_call_tracing
 test_sys_exception
 test_sys_executable
 test_sys_exit
+test_sys_is_finalizing
 test_termios
 test_time_clock_info
 test_time_module
