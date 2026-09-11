@@ -795,6 +795,10 @@ DEF_FUNC_BARE op_return_generator
     ; Save current execution state in frame for later resumption
     mov [r12 + PyFrame.instr_ptr], rbx
     mov [r12 + PyFrame.stack_ptr], r13
+    ; And drop the caller link, for the reason op_yield_value gives: this
+    ; frame is about to leave the call stack and outlive the call that built
+    ; it.  A generator that is never started has to answer None here too.
+    mov qword [r12 + PyFrame.prev_frame], 0
 
     ; Check co_flags to decide which object type to create
     mov rax, [r12 + PyFrame.code]
@@ -839,6 +843,14 @@ DEF_FUNC_BARE op_yield_value
     ; Save frame state for resumption
     mov [r12 + PyFrame.instr_ptr], rbx
     mov [r12 + PyFrame.stack_ptr], r13
+    ; A suspended generator is off the call stack, so it has no caller until
+    ; something resumes it -- and eval_frame links that caller in again on
+    ; every resume.  Keeping the old link is a dangling pointer: the frame it
+    ; names is freed and handed back out by the frame pool as soon as the call
+    ; that resumed us returns.  It reads from Python as an f_back that should
+    ; be None, and it segfaulted in frameobj_for when frameobj_detach followed
+    ; it to give a surviving frame object its chain outward.
+    mov qword [r12 + PyFrame.prev_frame], 0
 
     ; Return yielded value from eval_frame
     jmp eval_return
