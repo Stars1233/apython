@@ -183,6 +183,7 @@ test_dict_bugs
 test_dict_clear_reentrant
 test_dict_compare
 test_dict_copy
+test_dict_display_mapping
 test_dict_dunder_args
 test_dict_empty
 test_dict_fromkeys
@@ -537,6 +538,7 @@ test_slicing
 test_slot_builtin_dunder_assign
 test_slot_clear_and_none
 test_slot_descr_receiver
+test_slots_dict
 test_slots_mangling
 test_slots
 test_slots_store_cache

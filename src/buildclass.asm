@@ -825,13 +825,72 @@ bc_qualname_name:    db "__qualname__", 0
 bc_qualname_not_str: db "type __qualname__ must be a str, not ", 1, 0
 section .text
 
+
+;; ============================================================================
+;; bc_slot_is_dict_name(rdi = a slot-name str) -> eax = 1 when it is __dict__
+;; ============================================================================
+DEF_FUNC_LOCAL bc_slot_is_dict_name
+    lea rsi, [rdi + PyStrObject.data]
+    CSTRING rdi, "__dict__"
+    xchg rdi, rsi
+    extern ap_strcmp
+    call ap_strcmp
+    test eax, eax
+    jnz .bsidn_no
+    mov eax, 1
+    leave
+    ret
+.bsidn_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC bc_slot_is_dict_name
+
+;; ============================================================================
+;; bc_slots_name_dict(rdi = slots tuple, rsi = nslots) -> eax = 1 when one of
+;; them is the string "__dict__".  Asked before the layout is decided, because
+;; it is what decides it.
+;; ============================================================================
+BSND_I     equ 8
+BSND_N     equ 16
+BSND_ITEMS equ 24
+BSND_FRAME equ 32           ; 0 pushes, 16-aligned
+DEF_FUNC_LOCAL bc_slots_name_dict, BSND_FRAME
+    mov [rbp - BSND_N], rsi
+    mov rax, [rdi + PyTupleObject.ob_item]
+    mov [rbp - BSND_ITEMS], rax
+    mov qword [rbp - BSND_I], 0
+.bsnd_loop:
+    mov rcx, [rbp - BSND_I]
+    cmp rcx, [rbp - BSND_N]
+    jge .bsnd_no
+    mov rax, [rbp - BSND_ITEMS]
+    mov rdi, [rax + rcx*8]
+    V_TEST_PTR rdi, rdx
+    ja .bsnd_next               ; a non-string entry is skipped below anyway
+    call bc_slot_is_dict_name
+    test eax, eax
+    jnz .bsnd_yes
+.bsnd_next:
+    inc qword [rbp - BSND_I]
+    jmp .bsnd_loop
+.bsnd_yes:
+    mov eax, 1
+    leave
+    ret
+.bsnd_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC bc_slots_name_dict
+
 DEF_FUNC type_from_parts
     push rbx
     push r12
     push r13
     push r14
     push r15
-    sub rsp, 56             ; the epilogue's `add rsp` must match this
+    sub rsp, 72             ; the epilogue's `add rsp` must match this
 
 TFP_BASE  equ 48            ; the layout base: the widest of the bases
 TFP_BASES equ 56            ; the bases tuple, or NULL
@@ -839,6 +898,7 @@ TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
 TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
 TFP_SLOT1 equ 80            ; a one-tuple built for `__slots__ = 'name'`, owned
 TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
+TFP_WANTDICT equ 96         ; 1 when __slots__ names '__dict__' itself
     mov r14, rdi                ; class name str
     mov r15, rdx                ; namespace dict, becomes tp_dict
     mov [rbp - TFP_BASES], rsi
@@ -1393,6 +1453,30 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
 .bc_have_slots:
     mov qword [rbp - TFP_TAIL], 0
 
+    ; A __slots__ that NAMES '__dict__' is asking for the instance dict back:
+    ; the other names become fast slots and everything else still goes in the
+    ; dict.  CPython's type_new reads it the same way, and refuses it when a
+    ; base already supplies one.  Treated as an ordinary slot name it got a
+    ; descriptor over a word of its own and the instances still had no dict,
+    ; so every attribute that was not a slot raised -- which is the whole of
+    ; why pure-Python functools.partial, whose __slots__ names both
+    ; '__dict__' and '__weakref__', could not carry an attribute.
+    mov qword [rbp - TFP_WANTDICT], 0
+    mov rdi, rbx
+    mov rsi, r13
+    call bc_slots_name_dict
+    test eax, eax
+    jz .bc_slots_no_dict_name
+    mov qword [rbp - TFP_WANTDICT], 1
+    call bc_base_has_dict
+    test eax, eax
+    jnz .bc_slots_double_dict
+    jmp .bc_slots_no_dict_name
+.bc_slots_double_dict:
+    extern exc_TypeError_type
+    RAISE exc_TypeError_type, "__dict__ slot disallowed: we already got one"
+.bc_slots_no_dict_name:
+
     ; A str subclass keeps its characters inline, so there is no fixed offset
     ; past the header to lay a slot at: one put there writes over the string's
     ; own bytes, which is why this used to be refused outright.  Its slots go
@@ -1439,6 +1523,10 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     ; When a base does provide a dict, the class shares it and the slots go
     ; after the whole header, dict word included: putting them at the base's
     ; basicsize instead lands the first slot on top of the dict pointer.
+    ; A __slots__ naming '__dict__' keeps the dict word, exactly as an
+    ; inherited dict does, and the slots go after the whole header.
+    cmp qword [rbp - TFP_WANTDICT], 0
+    jne .bc_slots_share_dict
     call bc_base_has_dict
     test eax, eax
     jnz .bc_slots_share_dict
@@ -1480,6 +1568,18 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     V_UNPACK rcx, r8
     cmp r8d, TAG_PTR
     jne .bc_slot_skip               ; skip non-string slots
+
+    ; '__dict__' is consumed by the layout above, not by a descriptor: the
+    ; instance dict answers it.  Its word stays reserved and unused, which is
+    ; what '__weakref__' has always done here.
+    push rcx
+    push rdx
+    mov rdi, rcx
+    call bc_slot_is_dict_name
+    pop rdx
+    pop rcx
+    test eax, eax
+    jnz .bc_slot_skip
 
     ; Compute the descriptor's offset: base_basicsize + i*8 for an ordinary
     ; class, and -(1 + inherited) - i for a str subclass, whose slots are at
@@ -2053,7 +2153,7 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov qword [rel build_class_pending], 0
     mov rax, r12
 
-    add rsp, 56                 ; must match the sub in the prologue
+    add rsp, 72                 ; must match the sub in the prologue
     pop r15
     pop r14
     pop r13
@@ -2069,7 +2169,7 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov rdi, r12
     call obj_decref
     xor eax, eax
-    add rsp, 56                 ; must match the sub in the prologue
+    add rsp, 72                 ; must match the sub in the prologue
     pop r15
     pop r14
     pop r13
