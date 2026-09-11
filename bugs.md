@@ -152,6 +152,14 @@ reasoning that chose them and what changing one would cost.
   auditing across every builtin type first, because a flag missing by accident
   would start refusing subclasses that work today.
 
+- **`random.randbytes` is ~2.4 seconds per megabyte**, where CPython's is
+  instant: `_random` is Python here and CPython's is C.  That is the whole of
+  why `test_zlib` times out -- `check_big_compress_buffer` opens with
+  `random.randbytes(10 * 1024 * 1024)`, and CPython's `bigmemtest` runs it
+  even without `-M` (at a small size, but the ten megabytes are generated
+  regardless).  Nothing is wrong; it is slow.  `test_zipfile64` is the same
+  shape, one order of magnitude larger.
+
 - **`test_sys_settrace`'s `test_jump_extended_args_for_iter` hangs.**  The
   compile is fast -- a hundred thousand lines in 0.8s -- so it is the trace
   machinery under `sys.settrace` and a jump, not the compiler.  It sits with
