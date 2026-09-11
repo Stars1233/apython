@@ -1218,6 +1218,14 @@ TYPE_FLAG_FINAL          equ 0x100000
 ; type_from_parts, which calls the refresh, so the bit is always current.
 TYPE_FLAG_HAS_DEL        equ 0x200000
 
+; The type's instances are AWAITABLE through tp_iter -- CPython's
+; tp_as_async->am_await, which this tree has no slot for.  GET_AWAITABLE and
+; GET_ANEXT fall back to tp_iter for the awaitables the interpreter builds
+; for itself, and without a marker that fallback accepted every ORDINARY
+; iterable too: `__anext__` returning an empty tuple made `async for` spin
+; for ever, because the tuple's iterator is a perfectly good iterator.
+TYPE_FLAG_AWAITABLE      equ 0x400000
+
 ; The type's VERSION lives in the high 32 bits of tp_flags, which the flags
 ; above leave free -- they stop at bit 20.  It is a stamp from one global
 ; counter, so a version identifies a particular type in a particular state of

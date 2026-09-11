@@ -1365,7 +1365,7 @@ task_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_AWAITABLE        ; tp_flags
     dq 0                        ; tp_bases
     dq task_traverse            ; tp_traverse
     dq task_clear               ; tp_clear

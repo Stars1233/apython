@@ -136,8 +136,16 @@ DEF_FUNC_LOCAL async_awaitable_iter, AAI_FRAME
     jmp .aai_check
 
 .aai_try_iter:
+    ; tp_iter stands in for CPython's am_await, which this tree has no slot
+    ; for -- but ONLY for the awaitables the interpreter builds for itself,
+    ; and TYPE_FLAG_AWAITABLE is what says so.  Without that test every
+    ; ordinary iterable passed: `__anext__` returning an empty tuple gave
+    ; `async for` a perfectly good tuple iterator to drive, and the loop spun
+    ; for ever where CPython raises.
     mov rdi, [rbp - AAI_OBJ]
     mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_AWAITABLE
+    jz .aai_no
     mov rax, [rax + PyTypeObject.tp_iter]
     test rax, rax
     jz .aai_no

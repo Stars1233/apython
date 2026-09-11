@@ -225,3 +225,144 @@ except StopIteration as e:
     print("returned:", e.value)
 
 print("done")
+
+
+# GET_AWAITABLE and GET_ANEXT fall back to tp_iter, because this tree has no
+# am_await slot and the awaitables the interpreter builds for itself -- an
+# async generator's asend, a sleep, a gather, a task -- answer through it.
+#
+# That fallback accepted every ORDINARY iterable too.  An __anext__ returning
+# an empty tuple handed `async for` a perfectly good tuple iterator to drive,
+# so the loop ran for ever where CPython raises TypeError -- and it is
+# CPython's own test_coroutines that does it, three tests in a row.
+class TupleAnext:
+    def __aiter__(self):
+        return self
+
+    def __anext__(self):
+        return ()
+
+
+class ListAnext:
+    def __aiter__(self):
+        return self
+
+    def __anext__(self):
+        return [1, 2, 3]
+
+
+class StrAnext:
+    def __aiter__(self):
+        return self
+
+    def __anext__(self):
+        return "ab"
+
+
+class DictAnext:
+    def __aiter__(self):
+        return self
+
+    def __anext__(self):
+        return {1: 2}
+
+
+class SetAnext:
+    def __aiter__(self):
+        return self
+
+    def __anext__(self):
+        return {1}
+
+
+class GenAnext:
+    # A plain generator is not awaitable either: only one carrying
+    # CO_ITERABLE_COROUTINE is, which is what @types.coroutine sets.
+    def __aiter__(self):
+        return self
+
+    def __anext__(self):
+        return (x for x in (1, 2))
+
+
+async def over(o):
+    n = 0
+    async for i in o:
+        n += 1
+        if n > 3:
+            return "RUNAWAY"
+    return n
+
+
+for cls in (TupleAnext, ListAnext, StrAnext, DictAnext, SetAnext, GenAnext):
+    drive(lambda cls=cls: over(cls()), cls.__name__)
+
+# The same for a bare await.
+async def await_iterable(o):
+    return await o
+
+
+for o in ((), [1], "a", {1: 2}, {1}, (x for x in (1,))):
+    drive(lambda o=o: await_iterable(o), type(o).__name__)
+
+
+# ...and the things that ARE awaitable still are.
+import types
+
+
+@types.coroutine
+def iterable_coro():
+    yield "from a generator-based coroutine"
+    return "done-gen"
+
+
+async def uses_iterable_coro():
+    return await iterable_coro()
+
+
+c = uses_iterable_coro()
+try:
+    while True:
+        print("yielded:", c.send(None))
+except StopIteration as e:
+    print("returned:", e.value)
+
+
+async def inner():
+    return "inner"
+
+
+async def uses_coro():
+    return await inner()
+
+
+c = uses_coro()
+try:
+    while True:
+        c.send(None)
+except StopIteration as e:
+    print("returned:", e.value)
+
+
+async def agen():
+    yield 1
+    yield 2
+
+
+async def uses_agen():
+    out = []
+    async for v in agen():
+        out.append(v)
+    g = agen()
+    out.append(await g.asend(None))
+    return out
+
+
+c = uses_agen()
+try:
+    while True:
+        c.send(None)
+except StopIteration as e:
+    print("returned:", e.value)
+
+print("done 2")

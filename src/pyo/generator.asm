@@ -2609,7 +2609,7 @@ async_gen_asend_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_AWAITABLE      ; tp_flags -- tp_iter IS am_await here
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
@@ -2642,7 +2642,7 @@ async_gen_athrow_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_AWAITABLE      ; tp_flags -- tp_iter IS am_await here
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
