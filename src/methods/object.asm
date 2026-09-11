@@ -2221,10 +2221,14 @@ DEF_FUNC object_method_ne
     lea rax, [rel notimpl_singleton]
     jmp .omn_out
 .omn_identity:
+    ; No tp_richcompare to delegate to, so this stands in for object's own
+    ; __eq__ and inverts it: identity is the only thing it answers True to,
+    ; and everything else is NotImplemented -- a DECLINE, which is what lets
+    ; the other operand's __ne__ be asked.  Answering True here made
+    ; `R() != Ord()` True where CPython calls Ord.__ne__, for every plain
+    ; class with no comparison of its own.
     cmp rdi, rbx
-    je .omn_same
-    lea rax, [rel bool_true]
-    jmp .omn_out
+    jne .omn_notimpl
 .omn_same:
     lea rax, [rel bool_false]
 .omn_out:
