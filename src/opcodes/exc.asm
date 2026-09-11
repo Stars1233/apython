@@ -494,17 +494,53 @@ DEF_FUNC_BARE op_raise_varargs
     jmp .raise_bad
 
 .raise_type:
-    ; rdi = exception type - create instance with no message
+    ; rdi = exception type.  CALL it, rather than assembling an instance
+    ; behind its back.
+    ;
+    ; exc_new allocates the object and builds its args tuple directly: it
+    ; never consults tp_new and never runs __init__.  So a class with a
+    ; constructor of its own got none of it, and `raise OSError` produced an
+    ; object with no errno attribute at all -- OSError's whole constructor,
+    ; the one that rewrites the class from the errno and fills the four named
+    ; fields, is a tp_new this was stepping around.
+    ;
+    ; The metatype's tp_call is the one call that is right for both kinds of
+    ; exception class: exc_metatype's is exc_type_call, which finds a builtin
+    ; tp_new along tp_base, and user_type_metatype's is type_call, which runs
+    ; the Python __init__ afterwards.  .raise_check_type has already proved
+    ; the metatype is one of the three, so the load is safe.
+    ;
+    ; kw_names_pending is 0 here: RAISE_VARARGS always follows a CALL that
+    ; consumed it, and exc_type_call subtracts it from nargs.
+    ; The second push is the pad this frameless handler needs, and it carries
+    ; the exception in flight before the construction -- a Python __init__
+    ; that raises comes BACK here with the object built and its own exception
+    ; pending, so rax alone does not say whether the construction succeeded.
     push rdi
-    push rdi                  ; and a pad: this handler carves no frame,
-                              ; so a lone push leaves the call 8 out
-    xor esi, esi              ; no message
-    xor edx, edx              ; no tag (NULL msg)
-    call exc_new
-    pop rdi
-    pop rdi                  ; discard type (immortal, no DECREF needed)
+    mov rax, [rel current_exception]
+    push rax
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    xor esi, esi              ; no arguments
+    xor edx, edx              ; nargs = 0
+    call rax
+    pop rcx                   ; the snapshot
+    pop rdi                   ; discard type (immortal, no DECREF needed)
+    test rax, rax
+    jz .raise_propagate
+    cmp rcx, [rel current_exception]
+    jne .raise_ctor_raised    ; __new__ or __init__ raised; THAT is the
+                              ; exception now, and it is already pending
     mov rdi, rax
     jmp .raise_exc_obj
+
+.raise_ctor_raised:
+    ; The half-built object is dropped, as CPython drops it.
+    mov rdi, rax
+    call obj_decref
+.raise_propagate:
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
 
 .raise_exc_obj:
     ; rdi = exception object, owned -- the value stack's reference, which
@@ -612,12 +648,16 @@ DEF_FUNC_LOCAL raise_coerce_cause, RCC_FRAME
     call type_is_exc_subclass
     test eax, eax
     jz .rcc_bad
-    ; Instantiate it with no arguments.  The class reference stays held, as
-    ; .raise_type's does: exc_new stores the type without INCREFing it.
+    ; CALL it with no arguments, for the reason .raise_type does: a cause
+    ; spelled as a class deserves its own constructor as much as the exception
+    ; being raised does, and `raise X from OSError` was reaching exc_new too.
+    ; raise_coerce_cause is entered with a real frame, so no pad is needed.
     mov rdi, rbx
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
     xor esi, esi
     xor edx, edx
-    call exc_new
+    call rax
     jmp .rcc_out
 
 .rcc_instance:

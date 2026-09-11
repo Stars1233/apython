@@ -468,6 +468,7 @@ test_property_raises
 test_pyc_hardening
 test_pyc_staleness
 test_raise_cause
+test_raise_class_init
 test_raise_from
 test_range_overflow
 test_range_protocol
