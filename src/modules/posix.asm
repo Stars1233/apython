@@ -1665,10 +1665,19 @@ DEF_FUNC posix_read, PRD_FRAME
 END_FUNC posix_read
 
 ;; posix.write(fd, data) -> int
-DEF_FUNC posix_write, 16
+;;
+;; 24, not 16: the `push rbx` below comes after a branch, so `push rbp` plus
+;; the frame plus that push left rsp eight out for the whole body.  That was
+;; harmless while the only call was a leaf syscall; io_write_retry reaches
+;; signal_run_pending and from there arbitrary Python.
+DEF_FUNC posix_write, 24
+    ; The push comes BEFORE the arity branch: after it, lint's push counter --
+    ; which stops at the first non-push instruction -- could not see it, and
+    ; the frame that satisfies the real parity looked wrong to the gate.  The
+    ; refusal below does not return, so it owes nothing back.
+    push rbx
     cmp rsi, 2
     jl .pwr_argerr
-    push rbx
     mov rbx, rdi
     mov rdi, [rbx]
     call posix_int_arg

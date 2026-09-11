@@ -2218,10 +2218,14 @@ DEF_FUNC_BARE op_compare_op
     ; reported itself as '<' -- and whether it raised at all depended on what
     ; dunder_call_2 happened to leave behind.
     push rcx
-    mov rsi, [rsp + 8 + BO_LEFT]   ; other = left payload
-    mov ecx, [rsp + 8 + BO_LTAG]   ; other_tag = left's tag
+    sub rsp, 8                     ; a pad: this call is made at an EVEN depth
+                                   ; elsewhere in the function, and
+                                   ; dunder_call_2 dispatches into Python
+    mov rsi, [rsp + 16 + BO_LEFT]  ; other = left payload
+    mov ecx, [rsp + 16 + BO_LTAG]  ; other_tag = left's tag
     call dunder_call_2
     V_UNPACK rax, rdx           ; returns a Value
+    add rsp, 8
     pop rcx
 
     ; Check if dunder returned NULL
