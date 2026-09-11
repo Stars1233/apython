@@ -1084,12 +1084,61 @@ DEF_FUNC_LOCAL zip_iternext, 8            ; 5 pushes, so rsp is 16-aligned
 .zip_strict_decref_err:
     ; DECREF the extra value we got from the longer iterator
     mov rdi, rax
+    push r14
+    sub rsp, 8
     DECREF_V rdi, rsi
+    add rsp, 8
+    pop r14
+    mov r15, r14                ; the index of the LONGER one
+    mov r14d, 1
+    jmp .zip_strict_build
 .zip_strict_mismatch:
+    ; r15 already holds the index of the SHORTER one.
+    xor r14d, r14d
+
+.zip_strict_build:
+    ; CPython says WHICH argument and in which direction:
+    ;   zip() argument 2 is shorter than argument 1
+    ;   zip() argument 3 is shorter than arguments 1-2
+    ; and the same two shapes for "longer".  This said "zip() has arguments
+    ; with different lengths" whichever happened -- and the index and the
+    ; direction are both in hand at the raise, so it was wording rather than
+    ; machinery.  The plural arrives with the third argument.
+    lea rdi, [rel zip_msg_buf]
+    extern rbt_append_cstr
+    CSTRING rsi, "zip() argument "
+    call rbt_append_cstr
+    mov rdi, rax
+    lea rsi, [r15 + 1]
+    extern msg_append_i64
+    call msg_append_i64
+    mov rdi, rax
+    test r14d, r14d
+    jz .zip_msg_shorter
+    CSTRING rsi, " is longer than argument"
+    jmp .zip_msg_joined
+.zip_msg_shorter:
+    CSTRING rsi, " is shorter than argument"
+.zip_msg_joined:
+    call rbt_append_cstr
+    mov rdi, rax
+    cmp r15, 1
+    je .zip_msg_one
+    CSTRING rsi, "s 1-"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, r15
+    call msg_append_i64
+    jmp .zip_msg_done
+.zip_msg_one:
+    CSTRING rsi, " 1"
+    call rbt_append_cstr
+.zip_msg_done:
+
     ; Set exception without longjmp — return NULL so callers can clean up
     extern exc_from_cstr
     lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "zip() has arguments with different lengths"
+    lea rsi, [rel zip_msg_buf]
     call exc_from_cstr
     ; rax = exception object
     push rax
@@ -1112,6 +1161,12 @@ DEF_FUNC_LOCAL zip_iternext, 8            ; 5 pushes, so rsp is 16-aligned
     leave
     ret
 END_FUNC zip_iternext
+
+section .bss
+;; Where zip(strict=True) composes its refusal.  A raise follows immediately,
+;; so nothing outlives the call.
+zip_msg_buf: resb 96
+section .text
 
 ;; zip_dealloc(self)
 DEF_FUNC_LOCAL zip_dealloc, 8            ; 3 pushes, so rsp is 16-aligned

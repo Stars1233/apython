@@ -238,14 +238,6 @@ reasoning that chose them and what changing one would cost.
   apart.  Closing it means paying the MRO walk on every attribute access, or
   finding a cheaper way to notice that the class changed underneath.
 
-- **`zip(..., strict=True)` does not say which argument was short.**
-  CPython's is "zip() argument 2 is shorter than argument 1" (and
-  "...longer..."), with an "argument%s 1-%d" plural once there are more than
-  two; this says "zip() has arguments with different lengths" whichever
-  happened.  The information is all there at the raise -- `zip_iternext`
-  knows the index and which direction it found -- so this is wording rather
-  than machinery.
-
 - **A user `__eq__` that reaches itself answers False instead of raising
   RecursionError.**  `class D: def __eq__(s, o): return s.me == o.me` with
   `p.me = p` gives False here and RecursionError in CPython.  The container
