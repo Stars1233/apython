@@ -2333,6 +2333,17 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     jne .fmt_propagate
     jmp .fmt_apply_spec
 .fmt_dunder_ok:
+    ; It has to BE a str.  Nothing checked, so `def __format__(self, spec):
+    ; return 5` handed an int to f-strings and to str.format, both of which
+    ; then read a string out of it.
+    push rax
+    push rdx
+    mov rdi, rax
+    mov rsi, rdx
+    extern format_require_str
+    call format_require_str     ; a str, or it does not return
+    pop rdx
+    pop rax
     ; If an empty spec was allocated here, release it.
     cmp rbx, 2
     jge .fmt_done

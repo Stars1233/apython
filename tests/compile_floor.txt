@@ -201,6 +201,7 @@ test_dir
 test_dunder_descriptor
 test_dunder_protocols
 test_dunder_receiver
+test_dunder_returns_str
 test_dunders
 test_empty_bases
 test_encodings

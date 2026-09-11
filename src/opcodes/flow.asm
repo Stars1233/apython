@@ -391,7 +391,19 @@ DEF_FUNC op_format_value, FV_FRAME
     call dunder_call_2
     V_UNPACK rax, rdx
     test edx, edx
-    jnz .fv_have_result         ; __format__ produced the string
+    jz .fv_spec_dunder_none
+    ; It has to BE a str: an int answered here reached the f-string machinery,
+    ; which read a string out of it.
+    push rax
+    push rdx
+    mov rdi, rax
+    mov rsi, rdx
+    extern format_require_str
+    call format_require_str     ; raises and does not return when it is not
+    pop rdx
+    pop rax
+    jmp .fv_have_result         ; __format__ produced the string
+.fv_spec_dunder_none:
     ; NULL is either "no __format__" or "__format__ raised"; falling through
     ; in the second case replaced the exception with a formatting result.
     cmp qword [rel current_exception], 0
@@ -465,7 +477,16 @@ DEF_FUNC op_format_value, FV_FRAME
     pop rdx
     pop rax
     test edx, edx
-    jnz .fv_have_result
+    jz .fv_bare_dunder_none
+    push rax
+    push rdx
+    mov rdi, rax
+    mov rsi, rdx
+    call format_require_str     ; a str, or it does not return
+    pop rdx
+    pop rax
+    jmp .fv_have_result
+.fv_bare_dunder_none:
     cmp qword [rel current_exception], 0
     jne .fv_have_result         ; it raised; rax:rdx is already (0,0)
     ; No __format__: fall through to str() as before.

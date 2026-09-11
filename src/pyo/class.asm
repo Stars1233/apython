@@ -578,7 +578,37 @@ DEF_FUNC_LOCAL instance_repr_inner, IR_FRAME
     call dunder_call_1
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
+    jz .ir_dunder_none
+    ; ...and it has to BE a str; see instance_str.
+    ; V_UNPACK has already run, so rax is a PAYLOAD: an int payload of 5
+    ; passes a pointer test and dereferences address 5.  The TAG is what says
+    ; whether there is an ob_type to read.
+    cmp edx, TAG_PTR
+    jne .ir_not_a_string
+    mov rcx, [rax + PyObject.ob_type]
+    lea r8, [rel str_type]
+    cmp rcx, r8
+    je .done
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
     jnz .done
+.ir_not_a_string:
+    mov rsi, rax
+    VALUE_FOR_TYPE rsi, rdx     ; the payload, back to something that names a type
+    ; str() with no __str__ of its own is object.__str__, which is repr -- and
+    ; CPython checks the result at the str() level, so it says __str__ there.
+    ; instance_str sets this on its way into the fallback and clears it on the
+    ; way out; the arm here does not return, so a stale one cannot outlive a
+    ; failure.
+    cmp byte [rel ir_report_as_str], 0
+    jne .ir_not_a_string_from_str
+    CSTRING rdi, `__repr__ returned non-string (type \x01)`
+    jmp raise_type_error_with_name
+.ir_not_a_string_from_str:
+    CSTRING rdi, `__str__ returned non-string (type \x01)`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name      ; does not return
+
+.ir_dunder_none:
     DUNDER_RAISED [rbp - IR_EXC], .failed   ; __repr__ ran and raised
 
 .ir_no_dunder:
@@ -784,7 +814,30 @@ DEF_FUNC_LOCAL instance_str_inner, IS_FRAME
     call dunder_call_1
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
+    jz .is_dunder_none
+    ; It has to BE a str.  Nothing checked, so `def __str__(self): return 5`
+    ; handed an int to every caller of str() -- and an f-string, a %-format
+    ; and str.join all read PyStrObject.data off it, which is a segfault from
+    ; four lines of ordinary Python.
+    ; V_UNPACK has already run, so rax is a PAYLOAD: an int payload of 5
+    ; passes a pointer test and dereferences address 5.  The TAG is what says
+    ; whether there is an ob_type to read.
+    cmp edx, TAG_PTR
+    jne .is_not_a_string
+    mov rcx, [rax + PyObject.ob_type]
+    lea r8, [rel str_type]
+    cmp rcx, r8
+    je .done
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
     jnz .done
+.is_not_a_string:
+    mov rsi, rax
+    VALUE_FOR_TYPE rsi, rdx     ; the payload, back to something that names a type
+    CSTRING rdi, `__str__ returned non-string (type \x01)`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name      ; does not return
+
+.is_dunder_none:
     DUNDER_RAISED [rbp - IS_EXC], .failed   ; __str__ ran and raised
 
 .is_no_dunder:
@@ -822,8 +875,10 @@ DEF_FUNC_LOCAL instance_str_inner, IS_FRAME
     jmp .done
 
 .is_generic:
+    mov byte [rel ir_report_as_str], 1
     mov rdi, rbx
     call instance_repr
+    mov byte [rel ir_report_as_str], 0
 
 .done:
     pop rbx
@@ -2489,6 +2544,7 @@ section .rodata
 id_del_ignored_msg: db "Exception ignored in __del__", 10
 id_del_ignored_len equ $ - id_del_ignored_msg
 section .bss
+ir_report_as_str: resb 1
 align 8
 ;; The three names type_call resolves on every construction, memoised by
 ;; TC_NAME.  Immortal once set: the intern table never evicts.
