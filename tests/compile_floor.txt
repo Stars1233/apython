@@ -464,6 +464,7 @@ test_pow
 test_prepare_raises
 test_print_file
 test_print_tag
+test_print_to_object
 test_property_callables
 test_property_doc
 test_property_getattr_hook
