@@ -210,6 +210,33 @@ DEF_FUNC import_resolve_relative, IRR_FRAME
 END_FUNC import_resolve_relative
 
 ;; ============================================================================
+;; exe_path(rdi = a buffer, rsi = its size) -> rax = the length written, or 0
+;;
+;; Where this interpreter's binary is, from /proc/self/exe.  NOT from argv[0]:
+;; main() shifts argv past `-t`, so argv[0] is sometimes "-t", and a bare
+;; "./apython" would not survive a chdir -- which is exactly what a subprocess
+;; spawned from a temporary working directory does.
+;;
+;; The buffer is NOT NUL-terminated by readlink, so the caller writes its own
+;; terminator at the returned length; the size passed should leave room for it.
+;; sys.executable and sys.prefix are the other caller.
+;; ============================================================================
+global exe_path
+DEF_FUNC exe_path               ; + 0 pushes, 16-aligned at the call below
+    mov rdx, rsi                ; size, before rdi is spent on the path
+    mov rsi, rdi                ; buf
+    CSTRING rdi, "/proc/self/exe"
+    extern readlink
+    call readlink
+    test rax, rax
+    jg .ep_out
+    xor eax, eax                ; a failure reads as an empty path
+.ep_out:
+    leave
+    ret
+END_FUNC exe_path
+
+;; ============================================================================
 IAR_SUFFIX equ 8
 IAR_BUF    equ 4128            ; 4096 bytes of path, [rbp-4128, rbp-32)
 IAR_FRAME  equ 4144         ; + 2 pushes = 4160

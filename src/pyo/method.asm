@@ -33,8 +33,14 @@ extern func_getattr
 extern func_type
 extern builtin_func_type
 extern type_type
+extern kw_names_pending
+extern none_singleton
+extern exc_TypeError_type
+extern raise_exception
+extern raise_type_error_counted
 
 global method_new
+global method_construct
 global method_type
 global method_traverse
 global method_clear
@@ -79,6 +85,85 @@ DEF_FUNC method_new
     leave
     ret
 END_FUNC method_new
+
+;; ============================================================================
+;; method_construct(rdi = the class, rsi = args, rdx = nargs)
+;;   -> rax = the bound method, edx = TAG_PTR
+;;
+;; tp_new for method_type -- `types.MethodType(func, obj)`.  There was none,
+;; so type_call fell through to .normal_type_call and TC_REFUSE_EXTRA_ARGS
+;; answered "method() takes no arguments" for every call; contextlib's
+;; `return MethodType(cm_exit, cm)` is the line that put twenty-four of
+;; CPython's test modules on the floor.
+;;
+;; The class is ignored rather than dispatched on: method_type carries
+;; TYPE_FLAG_FINAL, as CPython's does, so it can only ever be method_type.
+;; ============================================================================
+MTN_NARGS equ 8
+MTN_FRAME equ 24            ; + 1 push, 16-aligned
+DEF_FUNC method_construct, MTN_FRAME
+    push rbx
+    mov rbx, rsi                ; args
+    mov [rbp - MTN_NARGS], rdx
+
+    ; Keyword values arrive in the same array with their names in
+    ; kw_names_pending, so a bare arity check would count them as positional.
+    ; CPython's method_new refuses them outright, and so does this.
+    mov rax, [rel kw_names_pending]
+    test rax, rax
+    jnz .mtn_kwargs
+
+    cmp rdx, 2
+    jne .mtn_arity
+
+    mov rdi, [rbx]              ; args[0], the function
+    V_TEST_PTR rdi, rax
+    ja .mtn_not_callable        ; an immediate has no tp_call to read
+    test rdi, rdi
+    jz .mtn_not_callable
+    mov rax, [rdi + PyObject.ob_type]
+    cmp qword [rax + PyTypeObject.tp_call], 0
+    je .mtn_not_callable
+
+    ; self is a Value: binding to an immediate int is legitimate, and
+    ; method_new's INCREF_V is already written for it.  None is not -- CPython
+    ; names it, because `MethodType(f, None)` is how an unbound method used to
+    ; be spelled and silence there would be a trap.
+    mov rsi, [rbx + 8]
+    test rsi, rsi
+    jz .mtn_none
+    lea rax, [rel none_singleton]
+    cmp rsi, rax
+    je .mtn_none
+
+    call method_new
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+
+.mtn_kwargs:
+    mov qword [rel kw_names_pending], 0   ; consumed, however this ends
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "method() takes no keyword arguments"
+    call raise_exception
+
+.mtn_arity:
+    mov rsi, [rbp - MTN_NARGS]
+    CSTRING rdi, "method expected 2 arguments, got "
+    xor edx, edx
+    jmp raise_type_error_counted
+
+.mtn_not_callable:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "first argument must be callable"
+    call raise_exception
+
+.mtn_none:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "instance must not be None"
+    call raise_exception
+END_FUNC method_construct
 
 ;; ============================================================================
 ;; method_call(self_method, args, nargs) -> rax = Value
@@ -145,9 +230,18 @@ DEF_FUNC_LOCAL method_call, MC_FRAME
 .mc_copy_done:
 
     ; Call im_func's tp_call(im_func, new_args, nargs+1)
+    ;
+    ; A method's function need not be callable: types.MethodType refuses one
+    ; that is not, but every other road to method_new -- a descriptor binding
+    ; among them -- can hand over anything.  This jumped to a NULL tp_call,
+    ; which is a segfault at address zero with no diagnostic at all.
     mov rdi, [rbx + PyMethodObject.im_func]
+    V_TEST_PTR rdi, rax
+    ja .mc_not_callable
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz .mc_not_callable
     mov rsi, r14
     lea rdx, [r13 + 1]
     call rax
@@ -171,6 +265,23 @@ DEF_FUNC_LOCAL method_call, MC_FRAME
     leave
     V_PACK rax, rdx             ; tp_call returns one Value
     ret
+
+.mc_not_callable:
+    ; The temporary argument array, if there was one, is left to the raise:
+    ; this path does not return, and the unwinder frees the frame it sits in.
+    mov rdi, [rbp - MC_FREE]
+    test rdi, rdi
+    jz .mc_nc_named
+    push rdi
+    push rdi
+    call ap_free
+    pop rdi
+    pop rdi
+.mc_nc_named:
+    mov rsi, [rbx + PyMethodObject.im_func]
+    CSTRING rdi, `'\x01' object is not callable`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC method_call
 
 ;; ============================================================================
@@ -277,12 +388,16 @@ END_FUNC method_getattr
 ;; ============================================================================
 MR_SELF  equ 8
 MR_LEN   equ 16
+MR_NAME  equ 24             ; an owned name string, or 0.  Inside MR_BUF's
+                            ; span but above where the copy loop can reach:
+                            ; r12 stops at MR_BUF - 64.
 MR_BUF   equ 1048
 MR_FRAME equ 1056           ; + 2 pushes = 1072
 DEF_FUNC method_repr, MR_FRAME
     push rbx
     push r12
     mov [rbp - MR_SELF], rdi
+    mov qword [rbp - MR_NAME], 0
     lea rbx, [rbp - MR_BUF]
     xor r12d, r12d
 
@@ -343,9 +458,31 @@ DEF_FUNC method_repr, MR_FRAME
     jz .mr_of
     jmp .mr_copy_name
 .mr_builtin_name:
-    mov rdi, [rax + PyBuiltinObject.func_name]
-    test rdi, rdi
+    ; Not a Python function, and builtin_func_type was routed away above -- so
+    ; this is some OTHER callable, and reading PyBuiltinObject.func_name off it
+    ; was a read of whatever sat at +24.  `types.MethodType(C(), o)` for a
+    ; class with __call__ is the ordinary way to get one, and repr() of the
+    ; result segfaulted.
+    mov rdi, rax
+    call mr_func_name
+    test rax, rax
+    jz .mr_unknown_name
+.mr_name_owned:
+    mov [rbp - MR_NAME], rax    ; released at .mr_of, whichever road gets there
+    mov rdi, rax
+    jmp .mr_copy_name
+
+.mr_unknown_name:
+    CSTRING rsi, "?"
+.mr_unknown_loop:
+    movzx eax, byte [rsi]
+    test al, al
     jz .mr_of
+    inc rsi
+    mov [rbx + r12], al
+    inc r12
+    jmp .mr_unknown_loop
+
 .mr_copy_name:
     mov rcx, [rdi + PyStrObject.ob_size]
     lea rsi, [rdi + PyStrObject.data]
@@ -362,6 +499,18 @@ DEF_FUNC method_repr, MR_FRAME
     jmp .mr_name_loop
 
 .mr_of:
+    ; The name from the generic lookup is owned; every other road here holds a
+    ; borrowed one and left this slot at 0.
+    mov rdi, [rbp - MR_NAME]
+    test rdi, rdi
+    jz .mr_of_open
+    mov qword [rbp - MR_NAME], 0
+    push rbx
+    push r12
+    call obj_decref
+    pop r12
+    pop rbx
+.mr_of_open:
     CSTRING rsi, " of "
 .mr_of_loop:
     movzx eax, byte [rsi]
@@ -510,6 +659,71 @@ mr_builtin_classmethod:
     ret
 
 END_FUNC method_repr
+
+;; ============================================================================
+;; mr_func_name(rdi = a method's im_func) -> rax = an owned str, or 0
+;;
+;; CPython's method_repr asks the object itself: __qualname__, and __name__
+;; only when __qualname__ is ABSENT.  A __qualname__ that is present but is
+;; not a str gives "?" -- it does not fall back -- which is what
+;; `Py_SETREF(funcname, NULL)` after the two lookups amounts to.
+;; ============================================================================
+MFN_FUNC  equ 8
+MFN_NAME  equ 16
+MFN_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+extern str_from_cstr_heap
+extern str_type
+extern obj_getattr_opt
+DEF_FUNC_LOCAL mr_func_name, MFN_FRAME
+    mov [rbp - MFN_FUNC], rdi
+    CSTRING rdi, "__qualname__"
+    call str_from_cstr_heap
+    mov [rbp - MFN_NAME], rax
+    mov rdi, [rbp - MFN_FUNC]
+    mov rsi, rax
+    call obj_getattr_opt
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - MFN_NAME]
+    call obj_decref
+    add rsp, 8
+    pop rax
+    test rax, rax
+    jnz .mfn_check              ; present: it decides, str or not
+
+    CSTRING rdi, "__name__"
+    call str_from_cstr_heap
+    mov [rbp - MFN_NAME], rax
+    mov rdi, [rbp - MFN_FUNC]
+    mov rsi, rax
+    call obj_getattr_opt
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - MFN_NAME]
+    call obj_decref
+    add rsp, 8
+    pop rax
+    test rax, rax
+    jz .mfn_none
+
+.mfn_check:
+    V_TEST_PTR rax, rcx
+    ja .mfn_release
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .mfn_release
+    leave
+    ret
+
+.mfn_release:
+    mov rdi, rax
+    DECREF_V rdi, rcx
+.mfn_none:
+    xor eax, eax
+    leave
+    ret
+END_FUNC mr_func_name
 
 ;; ============================================================================
 ;; method_richcompare(left, right, op, left_tag, right_tag) -> (rax, edx)
@@ -671,14 +885,14 @@ method_type:
     dq 0                        ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
-    dq 0                        ; tp_new
+    dq method_construct         ; tp_new
     dq 0                        ; tp_as_number
     dq 0                        ; tp_as_sequence
     dq 0                        ; tp_as_mapping
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_FINAL      ; tp_flags
     dq 0                        ; tp_bases
     dq method_traverse                        ; tp_traverse
     dq method_clear                        ; tp_clear

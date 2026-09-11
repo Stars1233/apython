@@ -2695,3 +2695,34 @@ fpc_msgbuf: resb 96
 
 section .text
 END_FUNC fmt_percent_coerce
+
+;; ============================================================================
+;; format_require_str(rdi = the payload __format__ answered, rsi = its tag)
+;;   -> returns when it is a str or a str subclass; raises and does not
+;;      return otherwise
+;;
+;; CPython's "__format__ must return a str, not int".  Nothing checked, so a
+;; __format__ answering an int reached the f-string machinery, which read a
+;; string out of it.
+;; ============================================================================
+extern raise_type_error_with_name
+extern str_type
+global format_require_str
+DEF_FUNC_BARE format_require_str
+    cmp rsi, TAG_PTR
+    jne .frs_bad
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    je .frs_ok
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .frs_bad
+.frs_ok:
+    ret
+.frs_bad:
+    mov rdx, rsi
+    mov rsi, rdi
+    VALUE_FOR_TYPE rsi, rdx     ; a payload, back to something that names a type
+    CSTRING rdi, `__format__ must return a str, not \x01`
+    jmp raise_type_error_with_name
+END_FUNC format_require_str

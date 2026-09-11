@@ -49,96 +49,175 @@ extern opcode_table
 extern opcode_dispatch_table
 
 ;; ============================================================================
-;; op_get_awaitable - GET_AWAITABLE (131)
+;; async_awaitable_iter(rdi = the object) -> rax = an owned awaitable, or 0
+;;   On failure edx says why: 0 = not awaitable at all, 1 = __await__ raised
+;;   and the exception is pending, 2 = __await__ answered a non-iterator, and
+;;   rcx is what it answered.
 ;;
-;; TOS = the object to await.  A coroutine is already awaitable and is left
-;; alone.  Anything else has to define __await__ and return an ITERATOR from
-;; it -- CPython's _PyCoro_GetAwaitableIter -- which is how asyncio.Future,
+;; CPython's _PyCoro_GetAwaitableIter, which GET_AWAITABLE and GET_ANEXT both
+;; need.  A coroutine is its own awaitable; a plain generator is one only when
+;; it carries CO_ITERABLE_COROUTINE, which is how @types.coroutine and the
+;; stdlib's generator-based coroutines survive; anything else has to define
+;; __await__ and return an ITERATOR from it, which is how asyncio.Future,
 ;; every asyncio lock and condition, and essentially every third-party
 ;; awaitable are written.
 ;;
-;; This used to look for tp_iter, which is __iter__ and a different protocol
-;; entirely: a class defining __await__ has no tp_iter, so every one of them
-;; was refused.  Nothing here noticed, because apython's own asyncio is
-;; native and never goes through the protocol; CPython's cannot run without
-;; it.
+;; This used to be inlined in GET_AWAITABLE and GET_ANEXT did not do it at
+;; all -- it pushed whatever __anext__ answered, so an __anext__ returning a
+;; plain int did not raise: the SEND that follows spun on it for ever, and a
+;; hang is the one failure that leaves no diagnostic at all.
+;;
+;; The message is the CALLER's in every failing case, which is why none is
+;; raised here.  There are five -- await, async for, __aenter__, __aexit__,
+;; and __await__'s non-iterator -- and GET_ANEXT overrides even the last of
+;; them: CPython's _PyErr_FormatFromCause replaces whatever went wrong inside
+;; with "'async for' received an invalid object from __anext__" and keeps the
+;; original as the cause.
 ;; ============================================================================
-DEF_FUNC_BARE op_get_awaitable
-    VPEEK rdi                  ; the object; not popped until it is resolved
+AAI_OBJ   equ 8
+AAI_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+extern current_exception
+extern dunder_lookup
+extern dunder_call_1
+extern raise_type_error_with_name
 
+DEF_FUNC_LOCAL async_awaitable_iter, AAI_FRAME
+    mov [rbp - AAI_OBJ], rdi
     V_TEST_PTR rdi, rax
-    ja .gaw_error              ; an immediate has no type to ask
+    ja .aai_no
+    test rdi, rdi
+    jz .aai_no
 
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel coro_type]
     cmp rax, rcx
-    je .gaw_done               ; a coroutine is its own awaitable
+    je .aai_self
 
-    ; A plain generator is not awaitable.  One decorated with
-    ; @types.coroutine IS, and says so with CO_ITERABLE_COROUTINE, which is
-    ; how the stdlib's own generator-based coroutines survive.
     lea rcx, [rel gen_type]
     cmp rax, rcx
-    jne .gaw_await
+    jne .aai_await
     mov rcx, [rdi + PyGenObject.gi_frame]
     test rcx, rcx
-    jz .gaw_error
+    jz .aai_no
     mov rcx, [rcx + PyFrame.code]
     test rcx, rcx
-    jz .gaw_error
+    jz .aai_no
     mov ecx, [rcx + PyCodeObject.co_flags]
     test ecx, CO_ITERABLE_COROUTINE
-    jnz .gaw_done
-    jmp .gaw_error
+    jz .aai_no
 
-.gaw_await:
+.aai_self:
+    ; The caller gets a reference of its own, so every road out of here is
+    ; owned and the two call sites need no special case for this one.
+    mov rax, [rbp - AAI_OBJ]
+    INCREF rax
+    xor edx, edx
+    leave
+    ret
+
+.aai_await:
     ; __await__ if the type defines it; otherwise tp_iter, which is what the
     ; awaitables this interpreter builds for itself use -- an async
     ; generator's asend object is an iterator with no dunder of its own.
     ; CPython's tp_as_async->am_await covers both; there is one slot fewer
     ; here, so the two are asked in turn.
-    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a handler
-    push rdi                   ; the original, for the DECREF below
-    mov rax, [rdi + PyObject.ob_type]
-    mov rdi, rax
+    mov rdi, [rbp - AAI_OBJ]
+    mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel gaw_await_name]
-    extern dunder_lookup
     call dunder_lookup
     test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
-    jz .gaw_try_iter
+    jz .aai_try_iter
 
-    mov rdi, [rsp]
+    mov rdi, [rbp - AAI_OBJ]
     lea rsi, [rel gaw_await_name]
-    extern dunder_call_1
     call dunder_call_1
-    test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
-    jz .gaw_await_failed
-    jmp .gaw_have_result
+    test rax, rax               ; 0 is absent-or-raised
+    jz .aai_failed
+    jmp .aai_check
 
-.gaw_try_iter:
-    mov rdi, [rsp]
+.aai_try_iter:
+    ; tp_iter stands in for CPython's am_await, which this tree has no slot
+    ; for -- but ONLY for the awaitables the interpreter builds for itself,
+    ; and TYPE_FLAG_AWAITABLE is what says so.  Without that test every
+    ; ordinary iterable passed: `__anext__` returning an empty tuple gave
+    ; `async for` a perfectly good tuple iterator to drive, and the loop spun
+    ; for ever where CPython raises.
+    mov rdi, [rbp - AAI_OBJ]
     mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_AWAITABLE
+    jz .aai_no
     mov rax, [rax + PyTypeObject.tp_iter]
     test rax, rax
-    jz .gaw_await_failed
+    jz .aai_no
     call rax                    ; tp_iter(obj) -> the iterator, or NULL
     test rax, rax
-    jz .gaw_await_failed
+    jz .aai_failed
 
-.gaw_have_result:
-    pop rdi                    ; the original; still on the value stack too
-    add rsp, 8
-
+.aai_check:
     ; It has to be an iterator, and not a coroutine: CPython refuses
     ; __await__ returning a coroutine because awaiting it would recurse.
     V_TEST_PTR rax, rcx
-    ja .gaw_not_iter
+    ja .aai_not_iter
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel coro_type]
     cmp rcx, rdx
-    je .gaw_not_iter
+    je .aai_not_iter
     cmp qword [rcx + PyTypeObject.tp_iternext], 0
-    je .gaw_not_iter
+    je .aai_not_iter
+    xor edx, edx
+    leave
+    ret
+
+.aai_failed:
+    ; __await__ raised, or tp_iter did.  A pending exception is the caller's
+    ; to propagate or to chain; say which happened rather than guess for it.
+    cmp qword [rel current_exception], 0
+    jne .aai_pending
+.aai_no:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+.aai_pending:
+    xor eax, eax
+    mov edx, 1
+    leave
+    ret
+
+.aai_not_iter:
+    ; rax holds what __await__ answered, owned.  It is handed back in rcx and
+    ; not released: every caller's road from here ends in a TypeError that
+    ; names its TYPE and does not return, so there is no moment at which a
+    ; decref would be safe.  One object on a path that raises.
+    mov rcx, rax
+    xor eax, eax
+    mov edx, 2
+    leave
+    ret
+END_FUNC async_awaitable_iter
+
+;; ============================================================================
+;; op_get_awaitable - GET_AWAITABLE (131)
+;;
+;; TOS = the object to await, replaced by the iterator that awaits it.
+;;
+;; The oparg says which syntax asked, and CPython words the refusal
+;; differently for each: 0 is a bare `await`, 1 is the value `__aenter__`
+;; returned and 2 is `__aexit__`'s.  Both `async with` messages read "does not
+;; implement __await__", which is the actual advice; the bare one does not,
+;; because `await 5` has no dunder to add.
+;; ============================================================================
+DEF_FUNC_BARE op_get_awaitable
+    VPEEK rdi                  ; the object; not popped until it is resolved
+
+    push rcx                   ; the oparg, across the call below
+    sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a handler
+    call async_awaitable_iter
+    add rsp, 8
+    mov r8, rcx                ; what __await__ answered, when edx says 2 --
+    pop rcx                    ; read before the oparg comes back into rcx
+    test rax, rax
+    jz .gaw_failed
 
     ; Replace the original on the value stack with what it awaits.  Its
     ; reference is released exactly once, here: an iterator's own tp_iter
@@ -151,38 +230,35 @@ DEF_FUNC_BARE op_get_awaitable
     add rsp, 8
     pop rax
     VPUSH_PTR rax
-
-.gaw_done:
     DISPATCH
 
-.gaw_await_failed:
-    ; No __await__ at all, or one that raised.  dunder_call_1 leaves the
-    ; exception pending in the second case, and a pending one is the caller's.
-    pop rdi
-    add rsp, 8
-    extern current_exception
-    cmp qword [rel current_exception], 0
-    jne .gaw_propagate
-    jmp .gaw_error
+.gaw_failed:
+    cmp edx, 1
+    je .gaw_propagate
+    cmp edx, 2
+    je .gaw_not_iter
+    VPEEK rsi
+    cmp ecx, 1
+    je .gaw_aenter
+    cmp ecx, 2
+    je .gaw_aexit
+    CSTRING rdi, `object \x01 can't be used in 'await' expression`
+    jmp raise_type_error_with_name
+.gaw_aenter:
+    CSTRING rdi, `'async with' received an object from __aenter__ that does not implement __await__: \x01`
+    jmp raise_type_error_with_name
+.gaw_aexit:
+    CSTRING rdi, `'async with' received an object from __aexit__ that does not implement __await__: \x01`
+    jmp raise_type_error_with_name
+
+.gaw_not_iter:
+    mov rsi, r8
+    CSTRING rdi, `__await__() returned non-iterator of type '\x01'`
+    jmp raise_type_error_with_name
 
 .gaw_propagate:
     extern eval_exception_unwind
     jmp eval_exception_unwind
-
-.gaw_not_iter:
-    ; rax holds what __await__ answered, owned.  It is not released: the
-    ; message names its TYPE, and raise_type_error_with_name does not return,
-    ; so there is no moment between reading the type and unwinding at which a
-    ; decref would be safe.  One object on a path that ends in a TypeError.
-    mov rsi, rax
-    CSTRING rdi, `__await__() returned non-iterator of type '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
-
-.gaw_error:
-    VPEEK rsi
-    CSTRING rdi, `object \x01 can't be used in 'await' expression`
-    jmp raise_type_error_with_name
 
 
 section .rodata
@@ -372,10 +448,41 @@ DEF_FUNC_BARE op_get_anext
     DISPATCH
 
 .gan_by_name:
+    ; What __anext__ answered has to be an awaitable ITERATOR before the SEND
+    ; that follows can drive it -- CPython's GET_ANEXT runs
+    ; _PyCoro_GetAwaitableIter over it here.  Pushing it raw is what made an
+    ; __anext__ returning a plain int spin for ever rather than raise.
+    ;
+    ; The async generator's own slot, below, is exempt for the same reason it
+    ; is in CPython: am_anext already hands back an awaitable.
+    sub rsp, 8                  ; pad: rsp is 16-aligned on entry to a handler
+    push rax                    ; the raw result, owned
+    mov rdi, rax
+    call async_awaitable_iter
+    pop rdi
+    add rsp, 8
+    test rax, rax
+    jz .gan_not_awaitable
+
+    push rax
+    sub rsp, 8
+    DECREF_V rdi, rcx           ; what __anext__ answered, now converted
+    add rsp, 8
+    pop rax
+
     ; The aiter was peeked, not popped, so the stack still owns it; the
     ; awaitable is a new reference and goes on top.
-    VPUSH_VAL rax, rdx
+    VPUSH_PTR rax
     DISPATCH
+
+.gan_not_awaitable:
+    ; rdi is what __anext__ answered.  CPython replaces whatever __await__
+    ; may have left pending with this message and chains the old one as the
+    ; cause; raise_exception already sets __context__, which is the half of
+    ; that a reader sees.
+    mov rsi, rdi
+    CSTRING rdi, `'async for' received an invalid object from __anext__: \x01`
+    jmp raise_type_error_with_name
 
 .gan_null:
     ; Exhausted, or raised.  Manufacturing a StopAsyncIteration for both is

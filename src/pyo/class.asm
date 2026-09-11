@@ -55,230 +55,6 @@ extern property_type
 
 
 ;; ============================================================================
-;; type_setattr(PyTypeObject *type, PyObject *name, PyObject *value, ecx=value_tag)
-;; Set an attribute on a type's tp_dict.
-;; rdi = type, rsi = name, rdx = value, ecx = value_tag
-;; ============================================================================
-DEF_FUNC type_setattr
-    push rbx
-    push rcx                    ; keep the stack aligned
-
-    ; --- a static type is immutable ---
-    ; `str.foo = 1` used to succeed and put a key in str's own tp_dict, for
-    ; every process-wide str from then on.  CPython refuses: only a heaptype
-    ; is writable, everything else is Py_TPFLAGS_IMMUTABLETYPE.  The check has
-    ; to be ahead of the __name__ rename below, which has its own narrower
-    ; version of it, and ahead of the tp_dict allocation, which would
-    ; otherwise hand a static type a dict just to reject the write into it.
-    mov rax, [rdi + PyTypeObject.tp_flags]
-    test rax, TYPE_FLAG_HEAPTYPE
-    jz .ts_immutable
-
-    ; --- __name__ renames the class ---
-    ; A class's name is tp_name, not a dict entry, so `C.__name__ = "x"` set a
-    ; key nothing ever read and the class kept its old name.  typing.py
-    ; renames two classes and then registers them in sys.modules UNDER THE
-    ; NEW NAME -- so `sys.modules["re"]` became typing's deprecated `re`
-    ; class, and the next `import re` handed a class to everything that
-    ; wanted the module.
-    mov rbx, rdi
-    test rsi, rsi
-    jz .ts_not_name
-    mov rax, [rsi + PyObject.ob_type]
-    lea rcx, [rel str_type]
-    cmp rax, rcx
-    jne .ts_not_name
-    lea rdi, [rsi + PyStrObject.data]
-    push rsi
-    push rdx
-    CSTRING rsi, "__name__"
-    call ap_strcmp
-    pop rdx
-    pop rsi
-    test eax, eax
-    jz .ts_rename
-.ts_not_name:
-    mov rdi, rbx
-    mov rdi, [rbx + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jnz .ts_have_dict
-
-    ; Allocate a new dict for this type
-    push rsi
-    push rdx
-    call dict_new
-    mov [rbx + PyTypeObject.tp_dict], rax
-    mov rdi, rax
-    pop rdx
-    pop rsi
-
-.ts_have_dict:
-    ; A NULL value means DELETE, not "store a NULL".  dict_set was called
-    ; either way, so `del C.attr` left the key in the type's dict bound to a
-    ; NULL Value.  Lookup answered correctly -- `k in C.__dict__` was False and
-    ; `C.__dict__[k]` raised KeyError -- but the entry was still occupied, so
-    ; keys() and items() went on yielding it, and items() handed out the NULL
-    ; Value itself.
-    ;
-    ; That is how a NULL reached ordinary builtins: enum.py deletes five names
-    ; from Enum, doctest walks Enum.__dict__.items(), and inspect called
-    ; type() and isinstance() on the hole.  isinstance() then released an
-    ; uninitialised frame slot, and the decrement landed inside a live code
-    ; object's bytecode -- one byte of a RETURN_VALUE, which the eval loop
-    ; then refused as opcode 82.
-    ;
-    ; instance_setattr already had this fix; type_setattr was missed.
-    test rdx, rdx
-    jz .ts_dict_del
-    ; dict_set(dict, name Value, value Value)
-    pop rcx
-    call dict_set
-    jmp .ts_wrote
-
-.ts_dict_del:
-    ; The alignment push is still on the stack here, so this call is aligned
-    ; where the dict_set above is not; borrow that word to carry the name
-    ; across, since rsi does not survive a call and there is no frame.
-    mov [rsp], rsi
-    extern dict_del_opt
-    call dict_del_opt           ; -1 when it was never there
-    mov rsi, [rsp]
-    pop rcx
-    test eax, eax
-    jnz .ts_del_missing
-
-.ts_wrote:
-    ; Assigning a dunder after the class exists has to take effect, the way
-    ; `C.__eq__ = f` does in CPython: the slot is installed at class creation
-    ; from what the body defined, and nothing re-ran this.  Only a heaptype
-    ; has slots to install; a static type's are in its table.
-    mov rax, [rbx + PyTypeObject.tp_flags]
-    test rax, TYPE_FLAG_HEAPTYPE
-    jz .ts_done
-    mov rdi, rbx
-    extern type_install_slots_tree
-    call type_install_slots_tree
-
-    ; And the __getattribute__ bit, which unlike a slot is inherited -- so
-    ; this pushes the new answer down every subclass, not just this type.
-    ; Without it `Base.__getattribute__ = f` would leave an already-built D
-    ; saying "no override" and the hook would silently never run.
-    mov rdi, rbx
-    call type_refresh_attr_flags
-.ts_done:
-
-    pop rbx
-    leave
-    ret
-
-.ts_del_missing:
-    ; `del C.nosuch` succeeded silently while dict_set was storing a NULL over
-    ; a key that was never there.  CPython raises, and so does the instance
-    ; path next door.  rsi is the name, restored above.
-    mov rdi, rbx                ; the type -- a pointer is its own Value
-    mov edx, 1                  ; a delete is a set, as far as the wording goes
-    extern raise_no_attribute
-    call raise_no_attribute     ; does not return
-
-.ts_rename:
-    ; tp_name points into a PyStrObject's data, and the type owns a reference
-    ; to that string -- user_type_dealloc recovers it the same way.  So a
-    ; rename is: take the new one, point at its data, drop the old.
-    mov rax, rdx
-    test rax, rax
-    jz .ts_rename_bad
-    V_TEST_PTR rax, rcx
-    ja .ts_rename_bad
-    mov rcx, [rax + PyObject.ob_type]
-    lea rdi, [rel str_type]
-    cmp rcx, rdi
-    jne .ts_rename_bad
-    mov rcx, [rbx + PyTypeObject.tp_flags]
-    test rcx, TYPE_FLAG_HEAPTYPE
-    jz .ts_rename_static
-    mov rdi, rax
-    push rax
-    call obj_incref
-    pop rax
-    mov rcx, [rbx + PyTypeObject.tp_name]
-    lea rdx, [rax + PyStrObject.data]
-    mov [rbx + PyTypeObject.tp_name], rdx
-    test rcx, rcx
-    jz .ts_rename_done
-    sub rcx, PyStrObject.data
-    mov rdi, rcx
-    call obj_decref
-.ts_rename_done:
-    xor eax, eax
-    pop rcx
-    pop rbx
-    leave
-    ret
-.ts_immutable:
-    ; "cannot set 'foo' attribute of immutable type 'str'".  Both halves are
-    ; the caller's, so the message is built rather than named.  CPython says
-    ; "set" for a delete too -- its check is ahead of the point where the two
-    ; part company -- so this does not look at the value.
-    mov rbx, rdi                        ; the type
-    lea r8, [rel ts_imm_buf]
-    xor ecx, ecx
-    CSTRING r9, "cannot set '"
-    call ts_imm_append
-    ; the attribute name
-    xor r9d, r9d
-    test rsi, rsi
-    jz .ts_imm_after_name
-    mov rax, [rsi + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rax, rdx
-    jne .ts_imm_after_name
-    lea r9, [rsi + PyStrObject.data]
-.ts_imm_after_name:
-    call ts_imm_append
-    CSTRING r9, "' attribute of immutable type '"
-    call ts_imm_append
-    mov r9, [rbx + PyTypeObject.tp_name]
-    call ts_imm_append
-    CSTRING r9, "'"
-    call ts_imm_append
-    mov byte [r8 + rcx], 0
-    lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel ts_imm_buf]
-    call raise_exception
-
-.ts_rename_static:
-    RAISE exc_TypeError_type, "cannot set __name__ of a built-in type"
-.ts_rename_bad:
-    RAISE exc_TypeError_type, "can only assign string to __name__"
-END_FUNC type_setattr
-
-;; ============================================================================
-;; ts_imm_append(r8 = buffer, rcx = length, r9 = NUL-terminated source or 0)
-;;   -> rcx advanced past what was copied
-;;
-;; The one piece of string building type_setattr's refusal needs.  Everything
-;; else it touches is caller-saved and it is on a path that ends in a raise,
-;; so it keeps to r8/rcx/r9 and clobbers only rax.
-;; ============================================================================
-DEF_FUNC_LOCAL ts_imm_append
-    test r9, r9
-    jz .tia_done
-.tia_loop:
-    movzx eax, byte [r9]
-    test al, al
-    jz .tia_done
-    cmp rcx, TS_IMM_BUFSZ - 2
-    jae .tia_done
-    mov [r8 + rcx], al
-    inc rcx
-    inc r9
-    jmp .tia_loop
-.tia_done:
-    leave
-    ret
-END_FUNC ts_imm_append
-
-;; ============================================================================
 ;; instance_dealloc(PyObject *self)
 ;; Deallocate an instance: DECREF inst_dict, DECREF ob_type, free self.
 ;; rdi = instance
@@ -729,6 +505,8 @@ DEF_FUNC base_slot
 END_FUNC base_slot
 
 IR_EXC   equ 8
+IR_ASSTR equ 16            ; 1 when str() sent us here, so a non-str answer is
+                           ; reported as __str__ and not as __repr__
 IR_FRAME equ 24            ; + 1 push = 32, 16-aligned
 
 ;; ============================================================================
@@ -749,6 +527,7 @@ extern recursion_limit
 extern exc_RecursionError_type
 extern set_exception
 DEF_FUNC instance_repr
+    xor esi, esi                ; repr() asked, so report __repr__
     C_RECURSION_ENTER .ir_too_deep
     call instance_repr_inner
     C_RECURSION_LEAVE
@@ -763,10 +542,41 @@ DEF_FUNC instance_repr
     ret
 END_FUNC instance_repr
 
+;; ============================================================================
+;; instance_repr_as_str(rdi = an instance) -> the same as instance_repr
+;;
+;; What str() falls back to when the class has no __str__ of its own.  It is
+;; instance_repr with one difference, and the difference is only in the
+;; message a non-str answer gets: CPython checks that result at the str()
+;; level, so it says "__str__ returned non-string".
+;; ============================================================================
+DEF_FUNC_LOCAL instance_repr_as_str
+    mov esi, 1
+    C_RECURSION_ENTER .iras_too_deep
+    call instance_repr_inner
+    C_RECURSION_LEAVE
+    leave
+    ret
+.iras_too_deep:
+    C_RECURSION_LEAVE
+    SET_EXC exc_RecursionError_type, \
+            "maximum recursion depth exceeded while getting the repr of an object"
+    RET_NULL
+    leave
+    ret
+END_FUNC instance_repr_as_str
+
 ;; instance_repr_inner(rdi = an instance) -> the same; the wrapper above only
 ;; bounds the recursion.
 DEF_FUNC_LOCAL instance_repr_inner, IR_FRAME
     push rbx
+    ; AFTER the push, so lint's counter -- which stops at the first non-push
+    ; instruction -- can still see it and check the frame's parity.
+    mov [rbp - IR_ASSTR], rsi   ; a frame slot, not a global: a __repr__ that
+                                ; calls str() on something else nests, and a
+                                ; global would be cleared by the inner call --
+                                ; or left set by an inner RAISE, which no
+                                ; save-and-restore around the call can undo
     mov rbx, rdi
     DUNDER_EXC_SAVE [rbp - IR_EXC]
 
@@ -802,7 +612,34 @@ DEF_FUNC_LOCAL instance_repr_inner, IR_FRAME
     call dunder_call_1
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
+    jz .ir_dunder_none
+    ; ...and it has to BE a str; see instance_str.
+    ; V_UNPACK has already run, so rax is a PAYLOAD: an int payload of 5
+    ; passes a pointer test and dereferences address 5.  The TAG is what says
+    ; whether there is an ob_type to read.
+    cmp edx, TAG_PTR
+    jne .ir_not_a_string
+    mov rcx, [rax + PyObject.ob_type]
+    lea r8, [rel str_type]
+    cmp rcx, r8
+    je .done
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
     jnz .done
+.ir_not_a_string:
+    mov rsi, rax
+    VALUE_FOR_TYPE rsi, rdx     ; the payload, back to something that names a type
+    ; str() with no __str__ of its own is object.__str__, which is repr -- and
+    ; CPython checks the result at the str() level, so it says __str__ there.
+    cmp qword [rbp - IR_ASSTR], 0
+    jne .ir_not_a_string_from_str
+    CSTRING rdi, `__repr__ returned non-string (type \x01)`
+    jmp raise_type_error_with_name
+.ir_not_a_string_from_str:
+    CSTRING rdi, `__str__ returned non-string (type \x01)`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name      ; does not return
+
+.ir_dunder_none:
     DUNDER_RAISED [rbp - IR_EXC], .failed   ; __repr__ ran and raised
 
 .ir_no_dunder:
@@ -1008,7 +845,30 @@ DEF_FUNC_LOCAL instance_str_inner, IS_FRAME
     call dunder_call_1
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
+    jz .is_dunder_none
+    ; It has to BE a str.  Nothing checked, so `def __str__(self): return 5`
+    ; handed an int to every caller of str() -- and an f-string, a %-format
+    ; and str.join all read PyStrObject.data off it, which is a segfault from
+    ; four lines of ordinary Python.
+    ; V_UNPACK has already run, so rax is a PAYLOAD: an int payload of 5
+    ; passes a pointer test and dereferences address 5.  The TAG is what says
+    ; whether there is an ob_type to read.
+    cmp edx, TAG_PTR
+    jne .is_not_a_string
+    mov rcx, [rax + PyObject.ob_type]
+    lea r8, [rel str_type]
+    cmp rcx, r8
+    je .done
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
     jnz .done
+.is_not_a_string:
+    mov rsi, rax
+    VALUE_FOR_TYPE rsi, rdx     ; the payload, back to something that names a type
+    CSTRING rdi, `__str__ returned non-string (type \x01)`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name      ; does not return
+
+.is_dunder_none:
     DUNDER_RAISED [rbp - IS_EXC], .failed   ; __str__ ran and raised
 
 .is_no_dunder:
@@ -1047,7 +907,7 @@ DEF_FUNC_LOCAL instance_str_inner, IS_FRAME
 
 .is_generic:
     mov rdi, rbx
-    call instance_repr
+    call instance_repr_as_str
 
 .done:
     pop rbx
@@ -2350,18 +2210,17 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
 
 .tga_return_qualname:
     ; A class defined in Python records its own, which carries the enclosing
-    ; scope -- "outer.<locals>.Local".  Only a builtin type falls through to
-    ; __name__.
-    mov rdi, [r12 + PyTypeObject.tp_dict]
-    test rdi, rdi
+    ; scope -- "outer.<locals>.Local".  It lives in ht_qualname, past the type
+    ; and only on a heaptype, because it is a getset on `type` in CPython and
+    ; must not be visible in tp_dict or from an instance.  Only a builtin type
+    ; falls through to __name__.
+    test qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jz .tga_return_name
-    mov rsi, rbx
-    extern dict_get
-    call dict_get
+    mov rax, [r12 + HT_QUALNAME]
     test rax, rax
     jz .tga_return_name
-    V_UNPACK rax, rdx
-    INCREF_VAL rax, rdx
+    INCREF rax
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -2649,6 +2508,14 @@ DEF_FUNC user_type_dealloc, 16           ; 2 pushes, so rsp is 16-aligned
     call obj_decref
 .utd_no_name:
 
+    ; ...and ht_qualname, which the dict no longer holds for us.
+    mov rdi, [rbx + HT_QUALNAME]
+    test rdi, rdi
+    jz .utd_no_qualname
+    mov qword [rbx + HT_QUALNAME], 0
+    call obj_decref
+.utd_no_qualname:
+
     ; DECREF tp_base if present
     mov rdi, [rbx + PyTypeObject.tp_base]
     test rdi, rdi
@@ -2713,10 +2580,6 @@ tc_abstract_name_obj: resq 1
 tc_new_name_obj:      resq 1
 tc_init_name_obj:     resq 1
 
-;; Where type_setattr builds its refusal for a static type.  A raise follows
-;; immediately, so nothing outlives the call.
-TS_IMM_BUFSZ equ 256
-ts_imm_buf: resb TS_IMM_BUFSZ
 section .data
 
 instance_repr_cstr: db "<instance>", 0
@@ -2748,6 +2611,7 @@ user_type_metatype:
     dq 0                        ; tp_hash
     dq type_call                ; tp_call — calling a class creates instances
     dq type_getattr             ; tp_getattr — accessing class vars via tp_dict
+    extern type_setattr
     dq type_setattr             ; tp_setattr — setting class vars in tp_dict
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter

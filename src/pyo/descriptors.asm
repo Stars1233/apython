@@ -1900,6 +1900,292 @@ DEF_FUNC member_check_receiver, MCR_FRAME
     call raise_exception        ; does not return
 END_FUNC member_check_receiver
 
+;; ============================================================================
+;; member_descr_get(rdi = the descriptor, rsi = the instance Value)
+;;   -> rax = the slot's Value, owned; raises and does not return when the
+;;      slot has never been assigned or the receiver is of the wrong layout
+;;
+;; The read half of a __slots__ descriptor, as a function rather than as five
+;; lines inlined at each attribute-access site -- __get__ needs one to call.
+;; ============================================================================
+MDG_SELF  equ 8
+MDG_RECV  equ 16
+MDG_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+global member_descr_get
+DEF_FUNC member_descr_get, MDG_FRAME
+    mov [rbp - MDG_SELF], rdi
+    mov [rbp - MDG_RECV], rsi
+    call member_check_receiver  ; raises when the layouts do not match
+
+    mov rdi, [rbp - MDG_SELF]
+    mov rsi, [rbp - MDG_RECV]
+    mov rcx, [rdi + PyMemberDescrObject.md_offset]
+    SLOT_ADDR rdx, rsi, rcx
+    mov rax, [rdx]
+    test rax, rax
+    jz .mdg_unset
+    INCREF_V rax, rdx
+    leave
+    ret
+
+.mdg_unset:
+    ; CPython names the type and the attribute, exactly as an ordinary missing
+    ; attribute does -- this is the same absence.
+    mov rdi, [rbp - MDG_RECV]
+    mov rcx, [rbp - MDG_SELF]
+    mov rsi, [rcx + PyMemberDescrObject.md_name]
+    extern raise_no_attribute
+    call raise_no_attribute      ; does not return
+END_FUNC member_descr_get
+
+;; ============================================================================
+;; member_descr_set(rdi = the descriptor, rsi = the instance Value,
+;;                  rdx = the new Value, or 0 to DELETE) -> eax = 0
+;;
+;; The write half.  A delete of a slot that was never assigned is an
+;; AttributeError naming the slot -- CPython's PyMember_SetOne for T_OBJECT_EX
+;; -- where this used to store 0 over 0 and report success, so `del o.x`
+;; twice worked and absence could not be told from presence.
+;; ============================================================================
+MDS_SELF  equ 8
+MDS_RECV  equ 16
+MDS_VAL   equ 24
+MDS_ADDR  equ 32            ; the slot's address, across the release below
+MDS_OLD   equ 40            ; and what was in it
+MDS_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
+global member_descr_set
+DEF_FUNC member_descr_set, MDS_FRAME
+    mov [rbp - MDS_SELF], rdi
+    mov [rbp - MDS_RECV], rsi
+    mov [rbp - MDS_VAL], rdx
+    call member_check_receiver
+
+    mov rdi, [rbp - MDS_SELF]
+    mov rsi, [rbp - MDS_RECV]
+    mov rcx, [rdi + PyMemberDescrObject.md_offset]
+    SLOT_ADDR rdx, rsi, rcx
+    mov rax, [rdx]              ; the old Value
+    mov rcx, [rbp - MDS_VAL]
+    test rcx, rcx
+    jnz .mds_store
+    test rax, rax
+    jz .mds_unset               ; deleting what was never there
+
+.mds_store:
+    ; The new value is counted BEFORE the old one is released: they may be the
+    ; same object, and `o.x = o.x` would otherwise free it between the two.
+    ; The slot's ADDRESS and the old Value go into frame slots rather than onto
+    ; the machine stack: XDECREF_V expands to `call obj_dealloc`, which runs
+    ; __del__, and a lone `pop` before it left that call eight bytes out.
+    mov [rbp - MDS_ADDR], rdx
+    mov [rbp - MDS_OLD], rax
+    mov rdi, [rbp - MDS_VAL]
+    INCREF_V rdi, rcx
+    mov rdi, [rbp - MDS_OLD]    ; the old Value
+    XDECREF_V rdi, rcx
+    mov rdx, [rbp - MDS_ADDR]
+    mov rcx, [rbp - MDS_VAL]
+    mov [rdx], rcx
+    xor eax, eax
+    leave
+    ret
+
+.mds_unset:
+    mov rcx, [rbp - MDS_SELF]
+    mov rsi, [rcx + PyMemberDescrObject.md_name]
+    lea rdi, [rel exc_AttributeError_type]
+    lea rsi, [rsi + PyStrObject.data]
+    extern exc_AttributeError_type
+    call raise_exception        ; does not return
+END_FUNC member_descr_set
+
+;; ============================================================================
+;; member_descr_getattr(rdi = the descriptor, rsi = the name str)
+;;   -> rax = a Value, or 0 for a miss
+;;
+;; __name__, __qualname__ and __objclass__, the three a descriptor fished out
+;; of a type's dict is asked for.  getset_descr_getattr is the same function
+;; over the sibling type; the fields differ, so the two cannot be shared.
+;; ============================================================================
+MDA_SELF  equ 8
+MDA_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL member_descr_getattr, MDA_FRAME
+    mov [rbp - MDA_SELF], rdi
+    test rsi, rsi
+    jz .mda_miss
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .mda_miss
+
+    lea rdi, [rsi + PyStrObject.data]
+    push rsi
+    CSTRING rsi, "__name__"
+    call ap_strcmp
+    pop rsi
+    test eax, eax
+    jz .mda_name
+
+    lea rdi, [rsi + PyStrObject.data]
+    push rsi
+    CSTRING rsi, "__qualname__"
+    call ap_strcmp
+    pop rsi
+    test eax, eax
+    jz .mda_qualname
+
+    lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__objclass__"
+    call ap_strcmp
+    test eax, eax
+    jz .mda_objclass
+.mda_miss:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+
+.mda_name:
+    mov rax, [rbp - MDA_SELF]
+    mov rax, [rax + PyMemberDescrObject.md_name]
+    test rax, rax
+    jz .mda_miss
+    mov rdi, rax
+    push rax
+    call obj_incref
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.mda_qualname:
+    ; "C.x": the owning type's name, then the slot's.
+    mov rax, [rbp - MDA_SELF]
+    mov rcx, [rax + PyMemberDescrObject.md_owner]
+    test rcx, rcx
+    jz .mda_name
+    mov rax, [rax + PyMemberDescrObject.md_name]
+    test rax, rax
+    jz .mda_miss
+    lea rdi, [rel gda_buf]
+    mov rsi, [rcx + PyTypeObject.tp_name]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "."
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rcx, [rbp - MDA_SELF]
+    mov rsi, [rcx + PyMemberDescrObject.md_name]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    lea rdi, [rel gda_buf]
+    call str_from_cstr
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+
+.mda_objclass:
+    mov rax, [rbp - MDA_SELF]
+    mov rax, [rax + PyMemberDescrObject.md_owner]
+    test rax, rax
+    jz .mda_miss
+    mov rdi, rax
+    push rax
+    call obj_incref
+    pop rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC member_descr_getattr
+
+;; ============================================================================
+;; member_descr_dunder_get(rdi = args, rsi = nargs) -> rax = Value
+;;
+;; descr.__get__(obj[, type]), the first of the three by NAME.  A __slots__ descriptor worked through attribute access
+;; and answered "'member_descriptor' object has no attribute '__get__'" to
+;; every program that reached for the protocol itself -- which
+;; inspect.getattr_static, inspect.isdatadescriptor and anything walking
+;; type.__dict__ do.
+;; ============================================================================
+global member_descr_dunder_get
+DEF_FUNC member_descr_dunder_get
+    cmp rsi, 2
+    jl .mdg_bad
+    cmp rsi, 3
+    jg .mdg_bad
+    mov rax, [rdi]              ; the descriptor
+    mov rcx, rsi                ; the COUNT, read before rsi becomes the arg
+    mov rsi, [rdi + 8]          ; the instance
+    ; descr.__get__(None, cls) answers the descriptor itself; with no cls it
+    ; is CPython's "__get__(None, None) is invalid".
+    IS_NONE rsi, rdx
+    jne .mdg_go
+    cmp rcx, 3
+    jl .mdg_none_none
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.mdg_go:
+    mov rdi, rax
+    call member_descr_get
+    leave
+    ret
+.mdg_none_none:
+    RAISE exc_TypeError_type, "__get__(None, None) is invalid"
+.mdg_bad:
+    RAISE exc_TypeError_type, "expected 1 or 2 arguments"
+END_FUNC member_descr_dunder_get
+
+;; ============================================================================
+;; member_descr_dunder_set(rdi = args, rsi = nargs) -> rax = None
+;;
+;; descr.__set__(obj, value).
+;; ============================================================================
+global member_descr_dunder_set
+DEF_FUNC member_descr_dunder_set
+    cmp rsi, 3
+    jne .mds_bad
+    mov rax, [rdi]
+    mov rsi, [rdi + 8]
+    mov rdx, [rdi + 16]
+    mov rdi, rax
+    call member_descr_set
+    RET_NONE
+    leave
+    V_PACK rax, rdx
+    ret
+.mds_bad:
+    RAISE exc_TypeError_type, "expected 2 arguments"
+END_FUNC member_descr_dunder_set
+
+;; ============================================================================
+;; member_descr_dunder_delete(rdi = args, rsi = nargs) -> rax = None
+;;
+;; descr.__delete__(obj).  A __slots__ descriptor is a DATA descriptor
+;; whether or not the slot has ever been assigned, so all three names exist.
+;; ============================================================================
+global member_descr_dunder_delete
+DEF_FUNC member_descr_dunder_delete
+    cmp rsi, 2
+    jne .mdd_bad
+    mov rax, [rdi]
+    mov rsi, [rdi + 8]
+    xor edx, edx                ; a NULL Value: delete rather than assign
+    mov rdi, rax
+    call member_descr_set
+    RET_NONE
+    leave
+    V_PACK rax, rdx
+    ret
+.mdd_bad:
+    RAISE exc_TypeError_type, "expected 1 argument"
+END_FUNC member_descr_dunder_delete
+
 section .rodata
 mcr_for:   db "' for '", 0
 mcr_quote: db "' objects", 0
@@ -1975,6 +2261,10 @@ section .data
 sm_name_str: db "staticmethod", 0
 descr_func_name: db "__func__", 0
 descr_wrapped_name: db "__wrapped__", 0
+descr_fwd_name:     db "__name__", 0
+descr_fwd_qualname: db "__qualname__", 0
+descr_fwd_doc:      db "__doc__", 0
+descr_fwd_module:   db "__module__", 0
 align 8
 cm_name_str: db "classmethod", 0
 prop_name_str: db "property", 0
@@ -1988,6 +2278,13 @@ section .text
 ;; __func__, the wrapped function.  It is the only way to reach the function
 ;; through the wrapper, and collections.namedtuple needs it: after building
 ;; _make as a classmethod it does `_make.__func__.__doc__ = ...`.
+;;
+;; __name__, __qualname__, __doc__ and __module__ are FORWARDED to it, which
+;; is what CPython 3.10 made these two wrappers do (bpo-43682) -- a
+;; staticmethod is "callable as a regular function" and reads like one.  A
+;; module-level callable that must not bind when a class body stores it can
+;; only be spelled as a staticmethod here, and lib/select.py does; without the
+;; forwarding, `select.select.__name__` was an AttributeError.
 ;;
 ;; One function serves both wrappers -- sm_callable and cm_callable are the
 ;; same slot -- so both type tables point straight at it.
@@ -2010,7 +2307,53 @@ DEF_FUNC descr_func_attr, DF_FRAME
     lea rsi, [rel descr_wrapped_name]
     call ap_strcmp
     test eax, eax
+    je .have
+
+    ; Anything else the wrapped callable answers for itself.  Only the four
+    ; CPython forwards, so a name the function happens to carry does not leak
+    ; through the wrapper.
+    mov rsi, [rbp - DF_NAME]
+    lea rdi, [rsi + PyStrObject.data]
+    lea rsi, [rel descr_fwd_name]
+    call ap_strcmp
+    test eax, eax
+    je .forward
+    mov rsi, [rbp - DF_NAME]
+    lea rdi, [rsi + PyStrObject.data]
+    lea rsi, [rel descr_fwd_qualname]
+    call ap_strcmp
+    test eax, eax
+    je .forward
+    mov rsi, [rbp - DF_NAME]
+    lea rdi, [rsi + PyStrObject.data]
+    lea rsi, [rel descr_fwd_doc]
+    call ap_strcmp
+    test eax, eax
+    je .forward
+    mov rsi, [rbp - DF_NAME]
+    lea rdi, [rsi + PyStrObject.data]
+    lea rsi, [rel descr_fwd_module]
+    call ap_strcmp
+    test eax, eax
     jne .none
+
+.forward:
+    mov rax, [rbx + PyClassMethodObject.cm_callable]
+    V_TEST_PTR rax, rcx
+    ja .none
+    test rax, rax
+    jz .none
+    mov rdi, rax
+    mov rsi, [rbp - DF_NAME]
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    test rax, rax
+    jz .none
+    V_UNPACK rax, rdx
+    pop rbx
+    leave
+    ret
+
 .have:
     mov rax, [rbx + PyClassMethodObject.cm_callable]
     test rax, rax
@@ -2540,7 +2883,7 @@ member_descr_type:
     dq 0                            ; tp_str
     dq 0                            ; tp_hash
     dq 0                            ; tp_call
-    dq 0                            ; tp_getattr
+    dq member_descr_getattr         ; tp_getattr
     dq 0                            ; tp_setattr
     dq 0                            ; tp_richcompare
     dq 0                            ; tp_iter

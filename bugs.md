@@ -22,6 +22,25 @@ reasoning that chose them and what changing one would cost.
   builtin it found dispatched into each other for ever, and the module no
   longer crashes.
 
+  The same defect is what stands between `time.get_clock_info` and the six
+  asyncio modules.  CPython's `BaseEventLoop.__init__` reads
+  `time.get_clock_info('monotonic').resolution` and gets no further without
+  it, so those modules never ran; supply it -- a pure-Python one injected
+  into an unmodified build is enough -- and test_contextlib_async, test_logging
+  and test_sys_settrace segfault instead, in `gc_list_remove` under
+  `gc_visit_reachable`, walking a block the allocator has already handed back.
+
+  Traced: the object is an asyncio `Task`'s `_context`, a `contextvars.Context`
+  with `__slots__`, sitting in the Task's instance dict at a live dense index
+  with a live key.  A hardware watchpoint over its whole refcount history
+  shows fifteen writes, every LOAD_FAST matched by its DECREF, and **no
+  `dict_set` among them** -- so the dict entry that holds it never took a
+  reference.  The last decref is `tuple_dealloc` under `list_ass_subscript`,
+  and the block is freed and reused while the dict still names it.  Watching
+  the entry slot instead shows the entries array moving under a resize, so the
+  write that put the pointer there is not the one the watch caught.  That is
+  as far as it is reduced; the two halves have not been seen in one timeline.
+
   CPython's test_sys_settrace dies in `gc_visit_decref` under `exc_traverse`
   at shutdown, and it is HEAP-LAYOUT SENSITIVE: the same commit built at
   `/tmp/apy-base` passes and built at `/home/jgarzik/repo/apython` crashes,
@@ -63,25 +82,6 @@ reasoning that chose them and what changing one would cost.
   function reached by `call` -- assume the wrong one and every handler in the
   tree reports as broken.
 
-- **A set or frozenset SUBCLASS is not treated as a set by `update`.**
-  CPython asks `PyAnySet_Check`, which is a subtype test; two places here
-  still compare the type pointer against `set_type` and `frozenset_type`
-  exactly, and a subclass fails both.  (`set_richcompare` was the third and
-  is fixed: it asks TYPE_FLAG_SET_SUBCLASS now.)
-
-  `s.update(sub)` and `{*sub}` fall through to the generic iterator path, so
-  a subclass that defines `__iter__` is asked -- CPython ignores it and reads
-  the table, which is what makes `{*FS([1,2,3])}` `{1, 2, 3}` there and
-  `{99}` here.  `set_contains`'s frozenset-for-a-set-key arm is the second,
-  and the milder: `SubSet() in s` raises where CPython answers False.
-
-  The fix is the flag test in both, and what makes it more than a one-liner
-  is the site it implies: `set_coerce_operand` already accepts a subclass
-  through `REQUIRE_SET_TYPE`, so the method forms and the operator forms
-  currently disagree with each other as well as with CPython, and the
-  remaining exact-type tests have to move together with a test that fixes the
-  whole surface at once.
-
 - **`except*` does not look inside a NESTED group, and a group publishes
   neither `split` nor `subgroup` nor `derive`.**  `except* KeyError` over
   `ExceptionGroup("outer", [ExceptionGroup("inner", [KeyError()]), OSError()])`
@@ -97,6 +97,75 @@ reasoning that chose them and what changing one would cost.
   itself rather than into `ExceptionGroup`.  Publishing the three and routing
   the internal split through `derive` is one change, because the type the
   halves get is decided there.
+
+- **A dunder's RESULT is not type-checked except for `__str__`, `__repr__` and
+  `__format__`.**  Those three are refused now, because a non-str reaching an
+  f-string or a container repr is a segfault rather than a wrong answer.  The
+  rest differ only in WORDING, and each says less than CPython's does:
+  `__bool__ should return bool` where CPython adds `, returned tuple`;
+  `'str' object cannot be interpreted as an integer` for a `__hash__` where
+  CPython says `__hash__ method should return an integer`; `__int__ returned
+  non-int` and `__index__ returned non-int` without the `(type str)` CPython
+  appends; and `float()` reports its ARGUMENT's type rather than
+  `C.__float__ returned non-float (type str)`.
+
+- **A plain builtin function stored in a class body is BOUND.**  CPython has
+  three types where this tree has one: `builtin_function_or_method`, which has
+  no `tp_descr_get` and therefore does not bind, and `method_descriptor` and
+  `wrapper_descriptor`, which do.  So `class C: f = len` gives `C().f` a bound
+  method here and the bare function there, and `C().f([1,2,3])` is
+  "len() takes exactly one argument (2 given)".  `hasattr(len, '__get__')` is
+  True for the same reason and False in CPython.
+
+  The field that would tell them apart is `PyBuiltinObject.func_kind`, and it
+  cannot: `builtin_func_new` makes everything BUILTIN_KIND_FUNCTION, and only
+  `type_stamp_methods` upgrades it -- which runs over the tables `methods/init*.asm`
+  builds and not over the ones `io.asm`, `socket.asm`, `array.asm`,
+  `posixdir.asm` and `abcmod.asm` build for themselves.  Binding on the kind
+  was tried and unbinds every method in those modules.  Nor can the stamping
+  simply be extended to every type: it MUTATES the builtin object, so stamping
+  a user class's dict would give the process-wide `len` a `func_owner` of that
+  class.  Closing it means a second type, or a per-object flag set where the
+  builtin is created rather than where it is registered.
+
+- **`print` to a broken pipe reports nothing.**  SIGPIPE is ignored now, so
+  the process survives and `os.write`/`file.write` raise BrokenPipeError --
+  but `print` itself answers None and the output is silently lost, where
+  CPython raises.  `apython foo.py | head` exits 0 with the tail of its output
+  discarded.  The write it makes does not check its result.
+
+- **A class's `__dict__` is short of `__dict__`, `__doc__` and
+  `__weakref__`.**  `sorted(C.__dict__)` for a plain class is
+  `['__module__']` here and `['__dict__', '__doc__', '__module__',
+  '__weakref__']` in CPython.  `__qualname__` was a fourth difference in the
+  other direction and is fixed; these three are entries type_new adds that
+  type_from_parts does not.  Anything that walks a class's own dict and
+  expects the descriptors -- `inspect.getattr_static`, `__slots__` validation,
+  pickling by reference -- sees a shorter one.
+
+- **A struct-sequence type can be subclassed.**  `class X(os.stat_result)`
+  builds a class here and is `TypeError: type 'os.stat_result' is not an
+  acceptable base type` in CPython: those types do not carry
+  TYPE_FLAG_BASETYPE and nothing tests it.  The subclass has no descriptor
+  word of its own, so the struct-sequence accessors read past its allocation.
+  The general check -- refuse a base without TYPE_FLAG_BASETYPE -- wants
+  auditing across every builtin type first, because a flag missing by accident
+  would start refusing subclasses that work today.
+
+- **`random.randbytes` is seconds per megabyte**, where CPython's is instant:
+  `_random` is Python here and CPython's is C.  2.4 s/MiB through this tree's
+  own `lib/random.py`, and 35 s/MiB through CPython's `Lib/random.py`, which
+  is what a test run with its stdlib on the path gets.  That is the whole of
+  why `test_zlib` times out -- `check_big_compress_buffer` opens with
+  `random.randbytes(10 * 1024 * 1024)`, and CPython's `bigmemtest` runs it
+  even without `-M` (at a small size, but the ten megabytes are generated
+  regardless).  Nothing is wrong; it is slow.  `test_zipfile64` is the same
+  shape, one order of magnitude larger.
+
+- **`test_sys_settrace`'s `test_jump_extended_args_for_iter` hangs.**  The
+  compile is fast -- a hundred thousand lines in 0.8s -- so it is the trace
+  machinery under `sys.settrace` and a jump, not the compiler.  It sits with
+  the rest of the settrace divergence below.
 
 - **`raise SomeExceptionClass` does not run the class's `__init__`.**  The
   class form of the operand reaches `exc_new`, which builds the object and its
@@ -128,15 +197,6 @@ reasoning that chose them and what changing one would cost.
   `tests/test_super_bad_object.py` covers the refusals and leaves the proxy
   out for this reason; the shape that fails is the file that test was cut
   down from, with the proxy call followed by two more statements.
-
-- **`member_descriptor` publishes no `__get__`, `__set__` or `__delete__`.**
-  A `__slots__` descriptor works through attribute access, and answers
-  `AttributeError: 'member_descriptor' object has no attribute '__get__'` when
-  a program reaches for the protocol by name -- which
-  `inspect.getattr_static`, the descriptor tests and anything walking
-  `type.__dict__` do.  The receiver check they would need is
-  `member_check_receiver`, which is already there; what is missing is the
-  three entries in the type's dict and the thunks behind them.
 
 - **`scandir()` on a BYTES path yields str entries.**  CPython gives a bytes
   path bytes names and bytes paths back; here the argument goes through
@@ -187,14 +247,6 @@ reasoning that chose them and what changing one would cost.
   across the probe now -- and no ordinary program can tell the two orders
   apart.  Closing it means paying the MRO walk on every attribute access, or
   finding a cheaper way to notice that the class changed underneath.
-
-- **`zip(..., strict=True)` does not say which argument was short.**
-  CPython's is "zip() argument 2 is shorter than argument 1" (and
-  "...longer..."), with an "argument%s 1-%d" plural once there are more than
-  two; this says "zip() has arguments with different lengths" whichever
-  happened.  The information is all there at the raise -- `zip_iternext`
-  knows the index and which direction it found -- so this is wording rather
-  than machinery.
 
 - **A user `__eq__` that reaches itself answers False instead of raising
   RecursionError.**  `class D: def __eq__(s, o): return s.me == o.me` with

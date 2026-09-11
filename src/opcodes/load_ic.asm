@@ -168,8 +168,20 @@ END_FUNC op_load_global_builtin
 ;; op_load_attr_method (203) - Specialized LOAD_ATTR for method-style loads
 ;;
 ;; Fast path for flag=1 method loads from type dict (no tp_getattr path).
-;; Guards: ob_type matches cached type_ptr, tp_dict dk_version matches.
-;; CACHE layout at rbx: [+0]=dk_version(16b), [+2]=type_ptr(64b), [+10]=descr(64b)
+;; Guards: the type's VERSION matches, tp_dict dk_version matches, and the
+;; instance dict cannot shadow the name.
+;; CACHE layout at rbx: [+0]=type version(32b), [+4]=dk_version(16b),
+;;                      [+6]=descr(64b)
+;;
+;; The version, and not the type POINTER this used to hold: versions come from
+;; one global counter and are never reused, where an address is.  A class
+;; freed and another allocated in its place passed the pointer compare, with
+;; only sixteen bits of dk_version behind it and a cached descriptor belonging
+;; to the dead class's dict -- so a warm site answered from the wrong class.
+;; It takes a program that creates and drops classes at one call site to see,
+;; which CPython's test_copy does, and whether the addresses coincide depends
+;; on the heap: valgrind was clean over it and a different build laid it out
+;; so it did not happen.
 ;;
 ;; Stack effect: ..., obj -> ..., obj(self), method
 ;; (obj stays as self, cached method pushed on top)
@@ -183,15 +195,17 @@ DEF_FUNC_BARE op_load_attr_method
     V_TEST_PTR rdi, rax
     ja .lam_deopt
 
-    ; Guard 1: ob_type == cached type_ptr
+    ; Guard 1: the type's VERSION == the cached one
     mov rax, [rdi + PyObject.ob_type]
-    cmp rax, [rbx + 2]            ; compare 8 bytes at CACHE[+2]
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    shr rdx, TYPE_VERSION_SHIFT
+    cmp edx, [rbx]                 ; CACHE[+0]
     jne .lam_deopt
 
     ; Guard 2: type->tp_dict->dk_version == cached dk_version
     mov rax, [rax + PyTypeObject.tp_dict]
     mov rax, [rax + PyDictObject.dk_version]
-    cmp ax, word [rbx]             ; compare low 16 bits at CACHE[+0]
+    cmp ax, word [rbx + 4]         ; CACHE[+4]
     jne .lam_deopt
 
     ; Guard 3: the INSTANCE dict cannot shadow the name.
@@ -285,7 +299,7 @@ DEF_FUNC_BARE op_load_attr_method
 
     ; Guards passed! CPython order: method (deeper), obj/self (TOS)
     ; obj is currently at [r13-8]; overwrite it with method, push obj on top
-    mov rax, [rbx + 10]           ; cached descriptor (method ptr)
+    mov rax, [rbx + 6]            ; cached descriptor (method ptr)
     INCREF rax
     mov rcx, [r13 - 8]            ; save obj (payload of TOS)
     mov [r13 - 8], rax            ; overwrite obj position with method

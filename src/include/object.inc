@@ -832,8 +832,11 @@ struc AsyncGenASend
     .ags_gen:       resq 1  ; +16: pointer to async generator (INCREF'd)
     .ags_state:     resd 1  ; +24: 0=initial, 1=yielded, 2=closed
     .pad0:          resd 1  ; +28
-    .pad1:          resq 1  ; +32
-    .pad2:          resq 1  ; +40
+    .ags_sendval:   resq 1  ; +32: the Value asend.send() will resume with,
+                            ;      owned, 0 for None
+    .ags_started:   resd 1  ; +40: athrow only -- 1 once the throw has been
+                            ;      delivered, so a later drive resumes instead
+    .pad2:          resd 1  ; +44
     .gi_return_value: resq 1 ; +48: yielded Value (for SEND exhaustion path)
 endstruc
 
@@ -889,6 +892,18 @@ struc PyTypeObject
 endstruc
 
 TYPE_OBJECT_SIZE equ PyTypeObject_size
+
+; Two words past the type, for a HEAPTYPE only -- a static type's table ends at
+; tp_tailslots and nothing reads past it.
+;
+; The first is where a struct sequence keeps its descriptor (STRUCTSEQ_DESC,
+; below), so a class that derives from one finds it where it looks; the second
+; is CPython's ht_qualname.  __qualname__ cannot stay in tp_dict: it is a
+; getset on `type` in CPython, so `'__qualname__' in C.__dict__` is False
+; there and an INSTANCE of C cannot see it -- and here every instance of every
+; class answered its class's, and vars(C) had an entry CPython's does not.
+HT_QUALNAME        equ PyTypeObject_size + 8
+HEAPTYPE_ALLOC_SIZE equ PyTypeObject_size + 16
 
 ; Number methods structure
 struc PyNumberMethods
@@ -1202,6 +1217,14 @@ TYPE_FLAG_FINAL          equ 0x100000
 ; `class C: pass` construction loop.  Every heaptype comes from
 ; type_from_parts, which calls the refresh, so the bit is always current.
 TYPE_FLAG_HAS_DEL        equ 0x200000
+
+; The type's instances are AWAITABLE through tp_iter -- CPython's
+; tp_as_async->am_await, which this tree has no slot for.  GET_AWAITABLE and
+; GET_ANEXT fall back to tp_iter for the awaitables the interpreter builds
+; for itself, and without a marker that fallback accepted every ORDINARY
+; iterable too: `__anext__` returning an empty tuple made `async for` spin
+; for ever, because the tuple's iterator is a perfectly good iterator.
+TYPE_FLAG_AWAITABLE      equ 0x400000
 
 ; The type's VERSION lives in the high 32 bits of tp_flags, which the flags
 ; above leave free -- they stop at bit 20.  It is a stamp from one global

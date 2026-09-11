@@ -1258,7 +1258,7 @@ DEF_FUNC fileio_read_fn, FR_FRAME
     mov rdi, [rdi + PyFileIOObject.fio_fd]
     mov rsi, rax
     mov rdx, [rbp - FR_SIZE]
-    call sys_read
+    call io_read_retry
     test rax, rax
     js .fr_failed
     mov rdi, [rbp - FR_BUF]
@@ -1288,6 +1288,8 @@ DEF_FUNC fileio_read_fn, FR_FRAME
     ret
 
 .fr_failed:
+    cmp rax, -EINTR_ERRNO
+    je .fr_handler_raised
     neg rax
     cmp rax, EAGAIN
     je .fr_would_block
@@ -1298,6 +1300,15 @@ DEF_FUNC fileio_read_fn, FR_FRAME
     xor esi, esi
     call raise_oserror
     ud2
+.fr_handler_raised:
+    ; A Python signal handler raised; its exception is the caller's, and the
+    ; buffer this frame allocated is not.
+    mov rdi, [rbp - FR_BUF]
+    call ap_free
+    extern eval_exception_unwind
+    leave
+    jmp eval_exception_unwind
+
 .fr_would_block:
     mov rdi, [rbp - FR_BUF]
     call ap_free
@@ -1315,6 +1326,65 @@ DEF_FUNC fileio_read_fn, FR_FRAME
 .fr_argerr:
     RAISE exc_TypeError_type, "read() missing self"
 END_FUNC fileio_read_fn
+
+;; ============================================================================
+;; io_read_retry(rdi = fd, rsi = buf, rdx = len)  -> rax = ssize_t or -errno
+;; io_write_retry(rdi = fd, rsi = buf, rdx = len) -> rax = ssize_t or -errno
+;;
+;; What PEP 475 asks for, and what SA_RESTART cannot do: the syscall RETURNS
+;; on EINTR, the Python signal handler runs, and only then is the call retried.
+;; A handler that unblocks the read -- `signal.alarm(1)` whose handler writes
+;; the rest of the data, which is CPython's own test_io case -- can only work
+;; this way round.
+;;
+;; -EINTR comes back only when a handler RAISED: the exception is pending and
+;; the caller propagates it instead of turning an errno into an OSError.
+;; Every other EINTR is consumed here.
+;;
+;; The raw sys_read/sys_write retry EINTR themselves with nothing in between,
+;; which is right for their fifty-odd callers that have no frame to run a
+;; handler on; these two are the versions that do.
+;; ============================================================================
+IRR_FD    equ 8
+IRR_BUF   equ 16
+IRR_LEN   equ 24
+IRR_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+extern sys_read_intr
+extern sys_write_intr
+extern signal_any_pending
+extern signal_run_pending
+
+%macro DEF_IO_RETRY 2           ; %1 = name suffix, %2 = the raw syscall
+DEF_FUNC io_%1_retry, IRR_FRAME
+    mov [rbp - IRR_FD], rdi
+    mov [rbp - IRR_BUF], rsi
+    mov [rbp - IRR_LEN], rdx
+%%again:
+    mov rdi, [rbp - IRR_FD]
+    mov rsi, [rbp - IRR_BUF]
+    mov rdx, [rbp - IRR_LEN]
+    call %2
+    cmp rax, -EINTR_ERRNO
+    jne %%out
+    cmp qword [rel signal_any_pending], 0
+    je %%again                  ; interrupted by something with no handler
+    call signal_run_pending
+    test eax, eax
+    jnz %%raised
+    jmp %%again
+%%out:
+    leave
+    ret
+%%raised:
+    mov rax, -EINTR_ERRNO
+    leave
+    ret
+END_FUNC io_%1_retry
+%endmacro
+
+EINTR_ERRNO equ 4
+DEF_IO_RETRY read, sys_read_intr
+DEF_IO_RETRY write, sys_write_intr
 
 ;; ============================================================================
 ;; fileio_readall_impl(rdi = self) -> rax = bytes
@@ -1365,7 +1435,7 @@ DEF_FUNC_LOCAL fileio_readall_impl, FRA_FRAME
     add rsi, [rbp - FRA_LEN]
     mov rdx, [rbp - FRA_CAP]
     sub rdx, [rbp - FRA_LEN]
-    call sys_read
+    call io_read_retry
     test rax, rax
     js .fra_failed
     jz .fra_eof
@@ -1384,6 +1454,8 @@ DEF_FUNC_LOCAL fileio_readall_impl, FRA_FRAME
     ret
 
 .fra_failed:
+    cmp rax, -EINTR_ERRNO
+    je .fra_handler_raised
     neg rax
     cmp rax, EAGAIN
     je .fra_eof                 ; what has been read so far is the answer
@@ -1394,6 +1466,12 @@ DEF_FUNC_LOCAL fileio_readall_impl, FRA_FRAME
     xor esi, esi
     call raise_oserror
     ud2
+.fra_handler_raised:
+    mov rdi, [rbp - FRA_BUF]
+    call ap_free
+    leave
+    jmp eval_exception_unwind
+
 .fra_nomem_free:
     mov rdi, [rbp - FRA_BUF]
     call ap_free
@@ -1440,7 +1518,7 @@ DEF_FUNC fileio_readinto_fn, FRI_FRAME
     mov rdx, r10
     mov rdi, [rbp - FRI_SELF]
     mov rdi, [rdi + PyFileIOObject.fio_fd]
-    call sys_read
+    call io_read_retry
     test rax, rax
     js .fri_failed
     mov rdx, rax
@@ -1449,6 +1527,8 @@ DEF_FUNC fileio_readinto_fn, FRI_FRAME
     leave
     ret
 .fri_failed:
+    cmp rax, -EINTR_ERRNO
+    je .fri_handler_raised
     neg rax
     cmp rax, EAGAIN
     je .fri_would_block
@@ -1456,6 +1536,10 @@ DEF_FUNC fileio_readinto_fn, FRI_FRAME
     xor esi, esi
     call raise_oserror
     ud2
+.fri_handler_raised:
+    leave
+    jmp eval_exception_unwind
+
 .fri_would_block:
     LOAD_NONE rax
     mov rdi, rax
@@ -1534,7 +1618,7 @@ DEF_FUNC fileio_write_fn, FW_FRAME
     mov rdx, r10
     mov rdi, [rbp - FW_SELF]
     mov rdi, [rdi + PyFileIOObject.fio_fd]
-    call sys_write
+    call io_write_retry
     test rax, rax
     js .fw_failed
     mov rdx, rax
@@ -1543,6 +1627,8 @@ DEF_FUNC fileio_write_fn, FW_FRAME
     leave
     ret
 .fw_failed:
+    cmp rax, -EINTR_ERRNO
+    je .fw_handler_raised
     neg rax
     cmp rax, EAGAIN
     je .fw_would_block
@@ -1550,6 +1636,10 @@ DEF_FUNC fileio_write_fn, FW_FRAME
     xor esi, esi
     call raise_oserror
     ud2
+.fw_handler_raised:
+    leave
+    jmp eval_exception_unwind
+
 .fw_would_block:
     LOAD_NONE rax
     mov rdi, rax

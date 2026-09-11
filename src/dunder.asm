@@ -268,6 +268,117 @@ DEF_FUNC dunder_lookup_after, DLA_FRAME
 END_FUNC dunder_lookup_after
 
 ;; ============================================================================
+;; dunder_bind(rdi = what dunder_lookup found, rsi = self)
+;;   -> rax = the callable to use; edx = 0 when self is prepended to its
+;;      arguments and rax is borrowed, 1 when it is already bound and rax is
+;;      OWNED, 2 when __get__ raised and rax is 0
+;;
+;; CPython's lookup_maybe_method.  A plain function is a METHOD_DESCRIPTOR and
+;; is called unbound, with self as its first argument; anything else goes
+;; through its own __get__ first and is then called WITHOUT self.
+;;
+;; The three dunder_call_* used to prepend self unconditionally, so a dunder
+;; that is a DESCRIPTOR was never bound at all -- its __get__ never ran and
+;; the descriptor OBJECT was called instead.  For one with no __call__ that is
+;; a jump to a NULL tp_call: unittest.mock installs exactly this shape
+;; (MagicProxy, one per magic method), and every MagicMock test segfaulted.
+;; ============================================================================
+DB_FOUND equ 8
+DB_SELF  equ 16
+DB_FRAME equ 32             ; + 0 pushes = 32, 16-aligned
+extern classmethod_type
+extern obj_dealloc
+global dunder_bind
+DEF_FUNC dunder_bind, DB_FRAME
+    mov [rbp - DB_FOUND], rdi
+    mov [rbp - DB_SELF], rsi
+    mov rax, [rdi + PyObject.ob_type]
+    extern func_type
+    lea rcx, [rel func_type]
+    cmp rax, rcx
+    je .db_unbound
+    extern builtin_func_type
+    lea rcx, [rel builtin_func_type]
+    cmp rax, rcx
+    je .db_unbound              ; its own convention is args[0] = self
+
+    ; Anything else: bind it if its type says how.
+    mov rdi, rax
+    lea rsi, [rel dunder_get]
+    call dunder_lookup
+    V_TEST_PTR rax, rcx
+    ja .db_unbound              ; absent, or not something that can be called
+
+    mov rdi, [rbp - DB_FOUND]
+    mov rsi, [rbp - DB_SELF]
+    mov rdx, [rsi + PyObject.ob_type]
+    lea rcx, [rel dunder_get]
+    mov r8d, TAG_PTR            ; both are heap pointers
+    call dunder_call_3
+    test rax, rax
+    jz .db_raised
+    mov edx, 1
+    leave
+    ret
+
+.db_unbound:
+    mov rax, [rbp - DB_FOUND]
+    xor edx, edx
+    leave
+    ret
+
+.db_raised:
+    xor eax, eax
+    mov edx, 2
+    leave
+    ret
+END_FUNC dunder_bind
+
+;; ============================================================================
+;; dunder_lookup_special(rdi = the object, rsi = the dunder name C string)
+;;   -> rax = an OWNED callable that takes no self, or 0 (with an exception
+;;      pending only when __get__ raised)
+;;
+;; CPython's _PyObject_LookupSpecial: the type's own MRO, then the descriptor
+;; protocol, and a plain function becomes a bound method.  BEFORE_WITH needs
+;; the RESULT rather than the call, because __exit__ is pushed and invoked
+;; later; everything else goes through dunder_call_*.
+;; ============================================================================
+DLS_OBJ   equ 8
+DLS_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+global dunder_lookup_special
+DEF_FUNC dunder_lookup_special, DLS_FRAME
+    mov [rbp - DLS_OBJ], rdi
+    mov rdi, [rdi + PyObject.ob_type]
+    call dunder_lookup
+    V_TEST_PTR rax, rcx
+    ja .dls_miss
+
+    mov rdi, rax
+    mov rsi, [rbp - DLS_OBJ]
+    call dunder_bind
+    cmp edx, 2
+    je .dls_raised
+    test edx, edx
+    jnz .dls_owned
+
+    ; A plain function: bind it the way an attribute access would.
+    mov rdi, rax
+    mov rsi, [rbp - DLS_OBJ]
+    extern method_new
+    call method_new
+.dls_owned:
+    leave
+    ret
+
+.dls_miss:
+.dls_raised:
+    xor eax, eax
+    leave
+    ret
+END_FUNC dunder_lookup_special
+
+;; ============================================================================
 ;; dunder_call_1(PyObject *self, const char *name) -> (rax=payload, rdx=tag)
 ;;
 ;; dunder_call_1(rdi = self, rsi = dunder name C string) -> rax = the result
@@ -301,18 +412,35 @@ DEF_FUNC dunder_call_1
     IS_NONE rax, r9
     je .dunder_is_none
 
-    ; Call: tp_call(dunder_func, &[self], 1)
-    mov r12, rax            ; r12 = dunder func
+    ; Bind it, if it is a descriptor rather than a plain function.
+    mov rdi, rax
+    mov rsi, rbx
+    call dunder_bind
+    cmp edx, 2
+    je .bind_raised
+    mov r12, rax            ; r12 = the callable
+    mov r13, rdx            ; 1 = already bound, so self is not an argument
+
+    ; __get__ can answer anything at all, an immediate included, and an
+    ; immediate has no ob_type to read.
+    V_TEST_PTR r12, r9
+    ja .bind_uncallable
+
+    ; Call: tp_call(func, &[self], 1) -- or with no arguments at all
     mov rax, [r12 + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
-    jz .not_found
+    jz .bind_uncallable
 
     sub rsp, 16             ; one Value; 16 keeps rsp aligned
     mov [rsp], rbx          ; args[0] = self
     mov rdi, r12            ; callable
     mov rsi, rsp            ; args ptr
     mov edx, 1              ; nargs
+    test r13, r13
+    jz .dc1_have_args
+    xor edx, edx            ; bound: self is already in the callable
+.dc1_have_args:
     push r15
     push r15                ; pushed twice: rsp must stay 16-byte aligned
     DUNDER_KW_SAVE r15      ; at the call, and the args pointer was taken
@@ -323,12 +451,63 @@ DEF_FUNC dunder_call_1
     add rsp, 16             ; pop args
     ; rax = result payload, rdx = result tag
 
+    test r13, r13
+    jz .dc1_done
+    push rax
+    sub rsp, 8
+    mov rdi, r12            ; the bound callable was ours
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
+.dc1_done:
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
     ret                     ; rax is already the Value
+
+.bind_uncallable:
+    ; A bound result that is not callable, or a descriptor object with no
+    ; __call__.  The caller reads a NULL as "absent", and a slot wrapper turns
+    ; that into "failed without an exception", so say what is wrong.
+    ; COMPOSE FIRST, then release: the message names the bound object's TYPE
+    ; and this is usually its last reference, so naming it afterwards read a
+    ; freed object.
+    mov rdi, r12
+    extern value_type
+    call value_type
+    test rax, rax
+    jz .dc1_name_it
+    mov rsi, rax
+    CSTRING rdi, `'\x01' object is not callable`
+    extern type_name_message
+    call type_name_message      ; rax = the composed C string
+    mov r14, rax
+    test r13, r13
+    jz .dc1_raise_composed
+    mov rdi, r12
+    DECREF_V rdi, rcx
+.dc1_raise_composed:
+    lea rdi, [rel exc_TypeError_type]
+    mov rsi, r14
+    call raise_exception        ; does not return
+.dc1_name_it:
+    mov rsi, r12
+    CSTRING rdi, `'\x01' object is not callable`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+
+.bind_raised:
+    ; __get__ raised.  A pending exception with a NULL answer is this
+    ; function's documented shape, so it is the caller's to propagate.
+    RET_NULL
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .dunder_is_none:
     ; A dunder explicitly set to None is not "absent": CPython installs the
@@ -389,12 +568,25 @@ DEF_FUNC dunder_call_2
     IS_NONE rax, r9
     je .dunder_is_none
 
-    ; Call: tp_call(dunder_func, &[self, other], 2)
-    mov r13, rax            ; r13 = dunder func
+    ; Bind it, if it is a descriptor rather than a plain function.
+    mov rdi, rax
+    mov rsi, rbx
+    call dunder_bind
+    cmp edx, 2
+    je .bind_raised
+    mov r13, rax            ; r13 = the callable
+    push rdx                ; the bound flag; r15 is the caller's
+    push rdx
+
+    ; __get__ can answer anything at all, an immediate included.
+    V_TEST_PTR r13, r9
+    ja .bind_uncallable
+
+    ; Call: tp_call(func, &[self, other], 2) -- or &[other], 1 when bound
     mov rax, [r13 + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
-    jz .not_found
+    jz .bind_uncallable
 
     sub rsp, 16             ; 2 Values
     mov [rsp], rbx          ; args[0] = self
@@ -403,6 +595,11 @@ DEF_FUNC dunder_call_2
     mov rdi, r13            ; callable
     mov rsi, rsp            ; args ptr
     mov edx, 2              ; nargs
+    cmp qword [rsp + 16], 0
+    je .dc2_have_args
+    lea rsi, [rsp + 8]      ; bound: self is already in the callable
+    mov edx, 1
+.dc2_have_args:
     push r15
     push r15                ; pushed twice: rsp must stay 16-byte aligned
     DUNDER_KW_SAVE r15      ; at the call, and the args pointer was taken
@@ -413,12 +610,70 @@ DEF_FUNC dunder_call_2
     add rsp, 16             ; pop args
     ; rax = result payload, rdx = result tag
 
+    pop rcx
+    pop rcx                 ; the bound flag
+    test rcx, rcx
+    jz .dc2_done
+    push rax
+    sub rsp, 8
+    mov rdi, r13            ; the bound callable was ours
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
+.dc2_done:
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
     ret                     ; rax is already the Value
+
+.bind_uncallable:
+    pop rcx
+    pop rcx
+    ; COMPOSE FIRST, then release: the message names the bound object's TYPE
+    ; and this is usually its last reference, so naming it afterwards read a
+    ; freed object.
+    push rcx
+    push rcx
+    mov rdi, r13
+    call value_type
+    pop rcx
+    pop rcx
+    test rax, rax
+    jz .dc2_name_it
+    push rcx
+    push rcx
+    mov rsi, rax
+    CSTRING rdi, `'\x01' object is not callable`
+    call type_name_message      ; rax = the composed C string
+    pop rcx
+    pop rcx
+    mov r14, rax
+    test rcx, rcx
+    jz .dc2_raise_composed
+    mov rdi, r13
+    DECREF_V rdi, rcx
+.dc2_raise_composed:
+    lea rdi, [rel exc_TypeError_type]
+    mov rsi, r14
+    call raise_exception        ; does not return
+.dc2_name_it:
+    mov rsi, r13
+    CSTRING rdi, `'\x01' object is not callable`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+
+.bind_raised:
+    ; __get__ raised; a pending exception with a NULL answer is this
+    ; function's documented shape.
+    RET_NULL
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .dunder_is_none:
     ; A dunder explicitly set to None is not "absent": CPython installs the
@@ -480,7 +735,10 @@ END_FUNC mapping_getitem_opt
 ;; r8d = arg2 tag (use TAG_PTR if arg2 is always a heap ptr).
 ;; Returns: result fat value (rax=payload, rdx=tag), or (0, TAG_NULL) if not found.
 ;; ============================================================================
-DEF_FUNC dunder_call_3, 8            ; 5 pushes, so rsp is 16-aligned
+DC3_BOUND equ 8             ; 1 when __get__ bound it and self is not an argument
+DC3_ARG2  equ 16            ; arg2 as a Value, packed before r15 is needed again
+DC3_FRAME equ 24            ; + 5 pushes = 64, 16-aligned
+DEF_FUNC dunder_call_3, DC3_FRAME
     push rbx
     push r12
     push r13
@@ -505,21 +763,43 @@ DEF_FUNC dunder_call_3, 8            ; 5 pushes, so rsp is 16-aligned
     IS_NONE rax, r9
     je .dunder_is_none
 
-    ; Call: tp_call(dunder_func, &[self, arg1, arg2], 3)
-    mov r14, rax            ; r14 = dunder func
+    ; Bind it, if it is a descriptor rather than a plain function.  This is
+    ; also the call dunder_bind itself makes, for __get__: that one is an
+    ; ordinary function on every class that defines it, so the recursion stops
+    ; at the func_type arm.
+    V_PACK r13, r15         ; arg2 as a Value, before r15 is needed again
+    mov [rbp - DC3_ARG2], r13
+    mov rdi, rax
+    mov rsi, rbx
+    call dunder_bind
+    cmp edx, 2
+    je .bind_raised
+    mov r14, rax            ; r14 = the callable
+    mov [rbp - DC3_BOUND], rdx
+
+    ; __get__ can answer anything at all, an immediate included.
+    V_TEST_PTR r14, r9
+    ja .bind_uncallable
+
+    ; Call: tp_call(func, &[self, arg1, arg2], 3) -- or &[arg1, arg2], 2
     mov rax, [r14 + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
-    jz .not_found
+    jz .bind_uncallable
 
     sub rsp, 32             ; 3 Values, rounded up to keep rsp aligned
     mov [rsp], rbx          ; args[0] = self
     mov [rsp+8], r12        ; args[1] = arg1
-    V_PACK r13, r15         ; args[2] = arg2
-    mov [rsp+16], r13
+    mov r13, [rbp - DC3_ARG2]
+    mov [rsp+16], r13       ; args[2] = arg2
     mov rdi, r14            ; callable
     mov rsi, rsp            ; args ptr
     mov edx, 3              ; nargs
+    cmp qword [rbp - DC3_BOUND], 0
+    je .dc3_have_args
+    lea rsi, [rsp + 8]      ; bound: self is already in the callable
+    mov edx, 2
+.dc3_have_args:
     push r15
     push r15                ; pushed twice: rsp must stay 16-byte aligned
     DUNDER_KW_SAVE r15      ; at the call, and the args pointer was taken
@@ -530,6 +810,16 @@ DEF_FUNC dunder_call_3, 8            ; 5 pushes, so rsp is 16-aligned
     add rsp, 32             ; pop args
     ; rax = result payload, rdx = result tag
 
+    cmp qword [rbp - DC3_BOUND], 0
+    je .dc3_done
+    push rax
+    sub rsp, 8
+    mov rdi, r14            ; the bound callable was ours
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
+.dc3_done:
+
     pop r15
     pop r14
     pop r13
@@ -537,6 +827,44 @@ DEF_FUNC dunder_call_3, 8            ; 5 pushes, so rsp is 16-aligned
     pop rbx
     leave
     ret                     ; rax is already the Value
+
+.bind_uncallable:
+    ; COMPOSE FIRST, then release: the message names the bound object's TYPE
+    ; and this is usually its last reference, so naming it afterwards read a
+    ; freed object.
+    mov rdi, r14
+    call value_type
+    test rax, rax
+    jz .dc3_name_it
+    mov rsi, rax
+    CSTRING rdi, `'\x01' object is not callable`
+    call type_name_message      ; rax = the composed C string
+    mov r15, rax
+    cmp qword [rbp - DC3_BOUND], 0
+    je .dc3_raise_composed
+    mov rdi, r14
+    DECREF_V rdi, rcx
+.dc3_raise_composed:
+    lea rdi, [rel exc_TypeError_type]
+    mov rsi, r15
+    call raise_exception        ; does not return
+.dc3_name_it:
+    mov rsi, r14
+    CSTRING rdi, `'\x01' object is not callable`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+
+.bind_raised:
+    ; __get__ raised; a pending exception with a NULL answer is this
+    ; function's documented shape.
+    RET_NULL
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .dunder_is_none:
     ; A dunder explicitly set to None is not "absent": CPython installs the
@@ -720,6 +1048,7 @@ global dunder_repr
 global dunder_str
 global dunder_matmul
 global dunder_get
+global dunder_enter
 global dunder_set
 global dunder_del
 
@@ -781,6 +1110,7 @@ dunder_repr:     db "__repr__", 0
 dunder_str:      db "__str__", 0
 dunder_matmul:   db "__matmul__", 0
 dunder_get:      db "__get__", 0
+dunder_enter:    db "__enter__", 0
 dunder_set:      db "__set__", 0
 dunder_del:      db "__del__", 0
 

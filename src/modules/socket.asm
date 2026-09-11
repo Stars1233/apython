@@ -1122,6 +1122,7 @@ SPL_FDS   equ 24
 SPL_TMO   equ 32
 SPL_OUT   equ 40
 SPL_I     equ 48
+SPL_DEADLINE equ 56         ; monotonic ns at which the wait expires, or -1
 SPL_FRAME equ 64            ; + 1 push = 72... see the pad below
 DEF_FUNC sock_poll_fn, 56
     push rbx
@@ -1188,6 +1189,24 @@ DEF_FUNC sock_poll_fn, 56
     jmp .spl_fill
 
 .spl_ready:
+    ; A finite timeout becomes a DEADLINE, because the retry below must not
+    ; start it again.
+    mov qword [rbp - SPL_DEADLINE], -1
+    mov eax, [rbp - SPL_TMO]
+    test eax, eax
+    js .spl_wait                    ; negative: wait for ever
+    movsxd rax, eax
+    mov ecx, 1000000
+    imul rax, rcx
+    push rax
+    sub rsp, 8
+    call spl_monotonic_ns
+    add rsp, 8
+    pop rcx
+    add rax, rcx
+    mov [rbp - SPL_DEADLINE], rax
+
+.spl_wait:
     ; sys_poll, not glibc's poll: the wrapper answers -1 in eax and leaves the
     ; reason in errno, so the -4095 test below could never fire and an error
     ; came back as an array of zero revents -- "nothing is ready", forever.
@@ -1197,6 +1216,52 @@ DEF_FUNC sock_poll_fn, 56
     call sys_poll
     cmp rax, -4095
     jb .spl_polled
+
+    ; EINTR: run the Python handler and wait out what is LEFT.  Linux never
+    ; restarts poll(), so SA_RESTART never did this and a retry in the syscall
+    ; funnel would start the whole timeout again and run no handler at all --
+    ; an unkillable wait.  CPython's select_poll_poll keeps a deadline for
+    ; exactly this.
+    cmp rax, -4
+    jne .spl_failed
+    cmp qword [rel signal_any_pending], 0
+    je .spl_remaining
+    extern signal_any_pending
+    extern signal_run_pending
+    call signal_run_pending
+    test eax, eax
+    jnz .spl_handler_raised
+
+.spl_remaining:
+    cmp qword [rbp - SPL_DEADLINE], -1
+    je .spl_wait                    ; no timeout to shorten
+    call spl_monotonic_ns
+    mov rcx, [rbp - SPL_DEADLINE]
+    sub rcx, rax                    ; nanoseconds left
+    jle .spl_expired
+    mov rax, rcx
+    xor edx, edx
+    mov ecx, 1000000
+    div rcx                         ; to milliseconds, rounding down
+    mov [rbp - SPL_TMO], eax
+    jmp .spl_wait
+.spl_expired:
+    mov dword [rbp - SPL_TMO], 0
+    jmp .spl_wait
+
+.spl_handler_raised:
+    push rax
+    push rax
+    mov rdi, [rbp - SPL_FDS]
+    call ap_free
+    pop rax
+    pop rax
+    extern eval_exception_unwind
+    pop rbx
+    leave
+    jmp eval_exception_unwind
+
+.spl_failed:
     push rax
     push rax
     mov rdi, [rbp - SPL_FDS]
@@ -1245,6 +1310,28 @@ DEF_FUNC sock_poll_fn, 56
 .spl_args:
     RAISE exc_TypeError_type, "poll() takes exactly 2 arguments"
 END_FUNC sock_poll_fn
+
+;; ============================================================================
+;; spl_monotonic_ns() -> rax = CLOCK_MONOTONIC in nanoseconds
+;;
+;; What poll()'s retry measures its remaining timeout against.  The event
+;; loop has one of these too, in eventloop_poll.asm, but that file is one of
+;; two interchangeable backends and this is not.
+;; ============================================================================
+SMN_TS    equ 16            ; struct timespec: two 8-byte fields
+SMN_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+extern clock_gettime
+DEF_FUNC_LOCAL spl_monotonic_ns, SMN_FRAME
+    mov edi, 1                      ; CLOCK_MONOTONIC
+    lea rsi, [rbp - SMN_TS]
+    call clock_gettime
+    mov rax, [rbp - SMN_TS]         ; tv_sec
+    mov ecx, 1000000000
+    imul rax, rcx
+    add rax, [rbp - SMN_TS + 8]     ; tv_nsec
+    leave
+    ret
+END_FUNC spl_monotonic_ns
 
 ;; ============================================================================
 ;; socket_module_create() -> PyObject*

@@ -899,24 +899,29 @@ DEF_FUNC op_before_with
     cmp edx, TAG_PTR
     jne .bw_not_a_manager
 
-    ; Get "__exit__" from the type dict (heap — dict key, DECREFed)
-    lea rdi, [rel bw_str_exit]
-    call str_from_cstr_heap
-    mov r12, rax                    ; r12 = exit name str
-    mov rdi, [rbx + PyObject.ob_type]
-    mov rdi, [rdi + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jz .bw_exit_via_getattr
-    mov rsi, r12
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
-    jnz .bw_have_exit
+    ; __exit__, through the descriptor protocol -- CPython's
+    ; _PyObject_LookupSpecial.  This read the type's OWN tp_dict and called
+    ; whatever it found: no MRO walk, and no __get__, so a context manager
+    ; whose __exit__ is a descriptor bound the DESCRIPTOR as the method.  For
+    ; one with no __call__ that is a jump to a NULL tp_call; unittest.mock's
+    ; MagicMock is exactly that shape.
+    mov rdi, rbx
+    lea rsi, [rel bw_str_exit]
+    extern dunder_lookup_special
+    call dunder_lookup_special
+    test rax, rax
+    jnz .bw_exit_bound
+    cmp qword [rel current_exception], 0
+    jne .bw_lookup_raised
 
-.bw_exit_via_getattr:
     ; Some types serve their attributes from tp_getattr rather than a type
     ; dict -- a file object is one -- so `with open(...) as f` reported that
     ; a file is not a context manager.
+    lea rdi, [rel bw_str_exit]
+    call str_from_cstr_heap
+    mov r12, rax                    ; r12 = exit name str
+
+.bw_exit_via_getattr:
     mov rax, [rbx + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_getattr]
     test rax, rax
@@ -938,35 +943,24 @@ DEF_FUNC op_before_with
     VPUSH_PTR rax
     jmp .bw_exit_pushed
 
-.bw_have_exit:
-
-    ; Got __exit__ function — create bound method(exit_func, mgr)
+.bw_exit_bound:
+    ; Already bound, and owned: the value stack takes the reference.
     mov [rbp - BW_EXIT], rax
-    mov rdi, r12
-    call obj_decref                 ; DECREF exit name string
-
-    mov rdi, [rbp - BW_EXIT]       ; func
-    mov rsi, [rbp - BW_MGR]        ; self = mgr
-    call method_new                 ; rax = bound exit method
-    mov [rbp - BW_EXIT], rax
-
-    ; Push bound __exit__ method (single item, matching CPython)
     VPUSH_PTR rax
 .bw_exit_pushed:
 
-    ; Now look up __enter__ on mgr's type
+    ; __enter__, the same way.
+    mov rdi, rbx
+    lea rsi, [rel bw_str_enter]
+    call dunder_lookup_special
+    test rax, rax
+    jnz .bw_enter_bound
+    cmp qword [rel current_exception], 0
+    jne .bw_lookup_raised_after_exit
+
     lea rdi, [rel bw_str_enter]
     call str_from_cstr_heap
     mov r12, rax                    ; r12 = enter name str
-    mov rdi, [rbx + PyObject.ob_type]
-    mov rdi, [rdi + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jz .bw_enter_via_getattr
-    mov rsi, r12
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
-    jnz .bw_have_enter
 
 .bw_enter_via_getattr:
     ; As for __exit__: a type may serve its attributes from tp_getattr.
@@ -1003,30 +997,27 @@ DEF_FUNC op_before_with
     mov [rbp - BW_RETTAG], rdx
     jmp .bw_enter_called
 
-.bw_have_enter:
-    ; Got __enter__ function - call it with mgr as self
-    push rax                        ; save func
-    push rax                        ; and a pad, as above
-    mov rdi, r12
-    call obj_decref                 ; DECREF enter name
-    pop rax
-    pop rax                         ; restore func
-
-    ; Call __enter__(mgr): tp_call(enter_func, &mgr, 1)
-    mov rcx, [rax + PyObject.ob_type]
+.bw_enter_bound:
+    ; Bound and owned, so it takes no self argument and this frame owes it a
+    ; release -- r12's name string is not needed on this road.
+    mov r12, rax
+    V_TEST_PTR r12, rcx
+    ja .bw_no_enter
+    mov rcx, [r12 + PyObject.ob_type]
     mov rcx, [rcx + PyTypeObject.tp_call]
     test rcx, rcx
     jz .bw_no_enter
-
-    ; Set up call: build fat arg on stack
-    mov r8, [rbp - BW_MGR]
-    SPUSH_PTR r8                   ; args[0] = mgr
-    mov rdi, rax                   ; callable = __enter__
-    mov rsi, rsp                   ; args ptr
-    mov edx, 1                      ; nargs = 1
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
     call rcx
-    add rsp, 16                    ; pop fat arg
-    test rax, rax               ; a NULL Value is a raise -- see .bw_enter_raised
+    push rax
+    push rax                        ; and a pad, as above
+    mov rdi, r12
+    call obj_decref
+    pop rax
+    pop rax
+    test rax, rax               ; a NULL Value is a raise
     jz .bw_enter_raised
     V_UNPACK rax, rdx           ; tp_call returns a Value
     mov [rbp - BW_ENTER], rax              ; save __enter__ result
@@ -1082,8 +1073,27 @@ DEF_FUNC op_before_with
     call obj_decref
 .bw_no_exit:
     ; CPython reports a missing __enter__/__exit__ as a protocol TypeError,
-    ; not as a bare AttributeError on the dunder name.
-    RAISE exc_TypeError_type, "object does not support the context manager protocol"
+    ; not as a bare AttributeError on the dunder name -- and it names the type.
+    ;
+    ; It also says WHICH of the two was missing, but only when __enter__ was
+    ; there: it looks __enter__ up first, so an object with neither gets the
+    ; plain message.  This looks __exit__ up first, because __exit__ is what
+    ; goes on the value stack; asking the cheap question again on this one
+    ; failing path is what keeps the two wordings apart.
+    extern dunder_enter
+    mov rdi, [rbx + PyObject.ob_type]
+    lea rsi, [rel dunder_enter]
+    extern dunder_lookup
+    call dunder_lookup
+    mov rsi, rbx
+    V_TEST_PTR rax, rcx
+    ja .bw_no_either
+    CSTRING rdi, `'\x01' object does not support the context manager protocol (missed __exit__ method)`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+.bw_no_either:
+    CSTRING rdi, `'\x01' object does not support the context manager protocol`
+    jmp raise_type_error_with_name
 
 .bw_no_enter_decref_name:
     mov rdi, r12
@@ -1094,12 +1104,48 @@ DEF_FUNC op_before_with
     ; back what is in the slot, which is the method, and nobody gives back the
     ; reference VPOP_VAL took on mgr.  .bw_no_exit above needs no such line --
     ; it is reached before the push, with mgr still in its own slot.
+    ; COMPOSE FIRST, then release.  The message names the manager's TYPE, and
+    ; this decref can be the last one -- an __exit__ bound from a descriptor
+    ; whose __get__ answered a module-level function holds no reference to it
+    ; -- so naming the type afterwards read a freed object.
+    mov rsi, [rbx + PyObject.ob_type]
+    CSTRING rdi, `'\x01' object does not support the context manager protocol`
+    extern type_name_message
+    call type_name_message      ; rax = the composed C string, in a static buffer
+    push rax
+    push rax
     mov rdi, [rbp - BW_MGR]
     call obj_decref
-    RAISE exc_TypeError_type, "object does not support the context manager protocol"
+    pop rsi
+    pop rax
+    lea rdi, [rel exc_TypeError_type]
+    call raise_exception        ; does not return
+
+.bw_lookup_raised_after_exit:
+    ; __exit__ is on the value stack in mgr's slot; the unwinder gives that
+    ; back, and the reference VPOP_VAL took on mgr is this frame's.
+    mov rdi, [rbp - BW_MGR]
+    call obj_decref
+.bw_lookup_raised:
+    ; A __get__ on one of the two raised.  Its exception is the caller's.
+    ;
+    ; r13 is NOT published here, unlike .bw_enter_raised: reached before the
+    ; push, mgr is still in the slot the unwinder will release; reached after
+    ; it, __exit__ is, and the arm above has already given mgr back.
+    add rsp, 40
+    pop r12
+    pop rbx
+    pop rbp
+    jmp eval_exception_unwind
 
 .bw_not_a_manager:
-    RAISE exc_TypeError_type, "object does not support the context manager protocol"
+    ; An int, a float or None.  BW_MGR holds the PAYLOAD, not a Value, so the
+    ; tag VPOP_VAL left in rdx is what turns it back into one that names a
+    ; type -- reading the payload as a pointer is what an int payload is not.
+    mov rsi, [rbp - BW_MGR]
+    VALUE_FOR_TYPE rsi, rdx
+    CSTRING rdi, `'\x01' object does not support the context manager protocol`
+    jmp raise_type_error_with_name
 END_FUNC op_before_with
 
 section .rodata

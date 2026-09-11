@@ -299,6 +299,8 @@ DEF_FUNC async_gen_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     mov [rax + PyObject.ob_type], rcx
     mov [rax + AsyncGenASend.ags_gen], rbx
     mov dword [rax + AsyncGenASend.ags_state], 0   ; initial
+    mov qword [rax + AsyncGenASend.ags_sendval], 0 ; resume with None
+    mov dword [rax + AsyncGenASend.ags_started], 0 ; athrow's flag
     mov qword [rax + AsyncGenASend.gi_return_value], 0
 
     ; INCREF the async generator (wrapper holds a ref)
@@ -350,9 +352,19 @@ DEF_FUNC ags_iternext
     ; Mark as running
     mov qword [r12 + PyGenObject.gi_running], 1
 
-    ; Push None as sent value onto the generator's frame stack
+    ; Push the sent value onto the generator's frame stack.  None unless
+    ; asend.send(v) put one there, in which case the reference it took moves
+    ; onto the frame with it.
     mov rdi, [r12 + PyGenObject.gi_frame]
+    mov rax, [rbx + AsyncGenASend.ags_sendval]
+    test rax, rax
+    jz .agsi_send_none
+    mov qword [rbx + AsyncGenASend.ags_sendval], 0
+    FRAME_PUSH_VALUE rdi, rax, rcx
+    jmp .agsi_sent
+.agsi_send_none:
     FRAME_PUSH_NONE rdi, rax
+.agsi_sent:
 
     ; Resume execution of the async generator
     mov rdi, [r12 + PyGenObject.gi_frame]
@@ -528,7 +540,13 @@ DEF_FUNC ags_iternext
     ret
 
 .agsi_closed:
-    ; State 2: closed — raise StopAsyncIteration
+    ; State 2: closed.  CPython refuses a REUSE rather than reporting
+    ; exhaustion -- an asend is one step of one iteration, and driving the
+    ; same one twice is a bug in the caller, not the end of the generator.
+    ; `async for` never reuses one: GET_ANEXT builds a fresh wrapper per turn.
+    RAISE exc_RuntimeError_type, "cannot reuse already awaited __anext__()/asend()"
+
+.agsi_closed_unused:
     lea rdi, [rel exc_StopAsyncIteration_type]
     xor esi, esi
     xor edx, edx
@@ -604,6 +622,13 @@ DEF_FUNC ags_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     V_UNPACK rdi, rsi
     DECREF_VAL rdi, rsi
 
+    ; ...and the value the awaitable was going to resume with, which is
+    ; asend's argument or athrow's exception.  Both are owned, and neither
+    ; was released when the awaitable was dropped unawaited.
+    mov rdi, [rbx + AsyncGenASend.ags_sendval]
+    mov qword [rbx + AsyncGenASend.ags_sendval], 0
+    DECREF_V rdi, rsi
+
     ; DECREF the async generator
     mov rdi, [rbx + AsyncGenASend.ags_gen]
     call obj_decref
@@ -616,6 +641,433 @@ DEF_FUNC ags_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     ret
 END_FUNC ags_dealloc
+
+;; ============================================================================
+;; agt_iternext(AsyncGenASend *self) -> one Value, or 0
+;;
+;; What `await agen.aclose()` and `await agen.athrow(exc)` drive.  Both used
+;; to be aliases for the SYNCHRONOUS gen_close/gen_throw, which answered None
+;; and the raw yielded box respectively -- so `await agen.aclose()` awaited
+;; None and raised TypeError, and every `async with` over an
+;; @asynccontextmanager generator failed there.  CPython answers an awaitable
+;; from both, and this is it: one object, told apart by whether ags_sendval
+;; carries an exception.
+;;
+;; The operation happens on the FIRST drive and its result reaches `await`
+;; through the exhaustion path -- tp_iternext answers 0 with gi_return_value
+;; set, which is what SEND reads.  A generator that awaits inside its own
+;; except or finally passes that outward instead, and ags_started is what
+;; makes the next drive resume it rather than throw again.
+;; ============================================================================
+AGT_EXC   equ 8             ; the exception, across gen_throw
+AGT_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
+DEF_FUNC agt_iternext, AGT_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi
+
+    ; An aclose or an athrow is ONE awaitable: it completes on the drive that
+    ; delivers its result, and driving it again is the caller's bug.  asend
+    ; parks at state 1 instead because SEND reads gi_return_value on the same
+    ; call and its own by-name path is what marks it used.
+    mov eax, [rbx + AsyncGenASend.ags_state]
+    cmp eax, 1
+    jae .agt_reuse
+
+    cmp dword [rbx + AsyncGenASend.ags_started], 0
+    jne .agt_resume
+
+    mov dword [rbx + AsyncGenASend.ags_started], 1
+    mov r12, [rbx + AsyncGenASend.ags_gen]
+
+    ; The exception is consumed here: gen_throw takes its own reference, and
+    ; leaving it in place would make .agt_resume push it as a SENT value.
+    mov rsi, [rbx + AsyncGenASend.ags_sendval]
+    mov qword [rbx + AsyncGenASend.ags_sendval], 0
+    test rsi, rsi
+    jz .agt_close
+
+    mov [rbp - AGT_EXC], rsi    ; a frame slot, not a push: a lone push would
+                                ; leave gen_throw -- and every finally body it
+                                ; runs -- called eight bytes out
+    mov rdi, r12
+    call gen_throw
+    push rax
+    push rdx
+    mov rdi, [rbp - AGT_EXC]
+    DECREF_V rdi, rsi
+    pop rdx
+    pop rax
+
+    test edx, edx
+    jz .agt_throw_done
+
+    ; A value came out.  The generator's own yield is a wrapped box; anything
+    ; else is an `await` inside the handler passing outward, and reaches the
+    ; loop unchanged with ags_state left at 0 so the next drive resumes.
+    V_PACK rax, rdx
+    V_TEST_PTR rax, rcx
+    ja .agt_out
+    test rax, rax
+    jz .agt_out
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel async_gen_wrapped_type]
+    cmp rcx, rdx
+    jne .agt_out
+
+    mov rcx, [rax + AsyncGenWrapped.agw_value]
+    INCREF_V rcx, rdx
+    mov [rbx + AsyncGenASend.gi_return_value], rcx
+    mov rdi, rax
+    DECREF_REG rdi
+    mov dword [rbx + AsyncGenASend.ags_state], 2
+    jmp .agt_null
+
+.agt_throw_done:
+    ; The generator finished.  If it did not handle the throw its exception
+    ; is pending and belongs to the awaiting frame; if it swallowed it and
+    ; returned, the athrow ends the way an exhausted iteration does.
+    mov dword [rbx + AsyncGenASend.ags_state], 2
+    cmp qword [rel current_exception], 0
+    jne .agt_null
+    lea rdi, [rel exc_StopAsyncIteration_type]
+    xor esi, esi
+    xor edx, edx
+    call exc_new
+    mov rdi, rax
+    call raise_exception_obj
+    jmp .agt_null
+
+.agt_close:
+    ; aclose().  gen_close runs the finally blocks and answers None; it
+    ; leaves through the unwinder itself if one of them raises.
+    mov rdi, r12
+    call gen_close
+    V_PACK rax, rdx
+    mov [rbx + AsyncGenASend.gi_return_value], rax
+    mov dword [rbx + AsyncGenASend.ags_state], 2
+    jmp .agt_null
+
+.agt_out:
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.agt_null:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.agt_resume:
+    ; The throw has been delivered and the generator suspended on an await of
+    ; its own; from here it is an ordinary resume, which is asend's job.
+    pop r12
+    pop rbx
+    leave
+    jmp ags_iternext
+
+.agt_reuse:
+    RAISE exc_RuntimeError_type, "cannot reuse already awaited aclose()/athrow()"
+END_FUNC agt_iternext
+
+;; ============================================================================
+;; async_gen_athrow_new(rdi = the async generator, rsi = the exception Value
+;;                      or 0 for aclose) -> rax = the awaitable, owned
+;; ============================================================================
+DEF_FUNC async_gen_athrow_new               ; 2 pushes, so rsp is 16-aligned
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+
+    mov edi, AsyncGenASend_size
+    call ap_malloc
+
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel async_gen_athrow_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov [rax + AsyncGenASend.ags_gen], rbx
+    mov dword [rax + AsyncGenASend.ags_state], 0
+    mov [rax + AsyncGenASend.ags_sendval], r12
+    mov dword [rax + AsyncGenASend.ags_started], 0
+    mov qword [rax + AsyncGenASend.gi_return_value], 0
+
+    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF_V r12, rcx
+
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC async_gen_athrow_new
+
+;; ============================================================================
+;; _agen_aclose_impl(rdi = args, rsi = nargs) -> rax = Value
+;;
+;; agen.aclose().  Answers the awaitable above rather than doing the work,
+;; which is what makes `await` on it legal.
+;; ============================================================================
+DEF_FUNC_LOCAL _agen_aclose_impl
+    cmp rsi, 1
+    jne .arity
+    mov rdi, [rdi]
+    call _agen_check_receiver
+    xor esi, esi                ; no exception: this is a close
+    call async_gen_athrow_new
+    leave
+    ret
+.arity:
+    RAISE exc_TypeError_type, "aclose() takes no arguments"
+END_FUNC _agen_aclose_impl
+
+;; ============================================================================
+;; _agen_athrow_impl(rdi = args, rsi = nargs) -> rax = Value
+;;
+;; agen.athrow(exc), the other half of aclose above: the same awaitable,
+;; carrying the exception rather than the GeneratorExit aclose implies.
+;; ============================================================================
+AAT_EXC   equ 8             ; the exception, across the receiver check
+AAT_OWNED equ 16            ; non-zero when AAT_EXC is a reference of ours
+AAT_N     equ 24            ; the argument count, likewise
+AAT_ARGS  equ 32            ; and the array
+AAT_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
+DEF_FUNC_LOCAL _agen_athrow_impl, AAT_FRAME
+    ; CPython takes athrow(typ[, val[, tb]]): the two- and three-argument
+    ; spellings are deprecated but its own test_asyncgen uses them, and the
+    ; value is what the type is CALLED with.  The traceback is accepted and
+    ; ignored, as it is nowhere else in this tree either.
+    cmp rsi, 2
+    jl .arity
+    cmp rsi, 4
+    jg .arity
+    mov qword [rbp - AAT_OWNED], 0
+    cmp rsi, 2
+    jle .not_deprecated
+    ; CPython warns before it does anything else, and a suite that turns
+    ; warnings into errors reads that as the deprecation firing.
+    mov [rbp - AAT_EXC], rdi
+    lea rdi, [rel aat_deprecated]
+    extern deprecation_warn
+    call deprecation_warn
+    mov rdi, [rbp - AAT_EXC]
+    test eax, eax
+    jz .raised                  ; a filter made it an error
+.not_deprecated:
+    mov [rbp - AAT_N], rsi      ; the count, across every call below
+    mov rax, [rdi + 8]          ; the exception or its type, borrowed
+    mov [rbp - AAT_EXC], rax    ; a frame slot: a lone push left both calls
+                                ; below, and ap_malloc under the second, eight
+                                ; bytes out
+    mov [rbp - AAT_ARGS], rdi
+
+    ; It has to BE an exception class or instance.  gen_throw is going to
+    ; raise it, and the type_call below would otherwise jump through whatever
+    ; sits at tp_call in an object of another shape -- `athrow(5, 6)` was a
+    ; segfault from ordinary Python.
+    V_TEST_PTR rax, rcx
+    ja .not_an_exception
+    test rax, rax
+    jz .not_an_exception
+    mov rcx, [rax + PyObject.ob_type]
+    extern type_type
+    lea rdx, [rel type_type]
+    cmp rcx, rdx
+    je .athrow_class
+    extern exc_metatype
+    lea rdx, [rel exc_metatype]
+    cmp rcx, rdx
+    je .athrow_class
+    extern user_type_metatype
+    lea rdx, [rel user_type_metatype]
+    cmp rcx, rdx
+    je .athrow_class
+
+    ; An INSTANCE: its type must derive from BaseException, and a separate
+    ; value is refused rather than used.
+    mov rdi, rcx
+    extern type_is_exc_subclass
+    call type_is_exc_subclass
+    test eax, eax
+    jz .not_an_exception
+    cmp qword [rbp - AAT_N], 3
+    jl .have_exc
+    mov rdi, [rbp - AAT_ARGS]
+    mov rdx, [rdi + 16]
+    lea rcx, [rel none_singleton]
+    cmp rdx, rcx
+    je .have_exc
+    test rdx, rdx
+    jz .have_exc
+    RAISE exc_TypeError_type, "instance exception may not have a separate value"
+
+.athrow_class:
+    mov rdi, rax
+    call type_is_exc_subclass
+    test eax, eax
+    jz .not_an_exception
+    cmp qword [rbp - AAT_N], 3
+    jl .have_exc
+    mov rdi, [rbp - AAT_ARGS]
+    mov rdx, [rdi + 16]         ; the value
+    lea rcx, [rel none_singleton]
+    cmp rdx, rcx
+    je .have_exc
+    test rdx, rdx
+    jz .have_exc
+
+    ; A value that is ALREADY an instance of the class is the exception, not
+    ; an argument to build one from -- _PyErr_SetObject's rule, and without it
+    ; `athrow(ValueError, ValueError('z'))` raised ValueError(ValueError('z')).
+    V_TEST_PTR rdx, rcx
+    ja .athrow_build
+    test rdx, rdx
+    jz .athrow_build
+    push rdx
+    sub rsp, 8
+    mov rdi, [rdx + PyObject.ob_type]
+    mov rsi, [rbp - AAT_EXC]
+    extern type_is_subtype
+    call type_is_subtype
+    add rsp, 8
+    pop rdx
+    test eax, eax
+    jz .athrow_build
+    mov [rbp - AAT_EXC], rdx
+    jmp .have_exc
+
+.athrow_build:
+    ; typ(val), which is what CPython's _PyErr_CreateException does with the
+    ; pair.  Its reference is this function's until async_gen_athrow_new takes
+    ; one of its own.
+    mov rdi, [rbp - AAT_EXC]
+    lea rsi, [rbp - AAT_ARGS]
+    mov rsi, [rsi]
+    add rsi, 16
+    mov edx, 1
+    extern type_call
+    call type_call
+    test rax, rax
+    jz .raised
+    mov [rbp - AAT_EXC], rax
+    mov qword [rbp - AAT_OWNED], 1
+
+.have_exc:
+    mov rdi, [rbp - AAT_ARGS]
+    mov rdi, [rdi]
+    call _agen_check_receiver
+    mov rsi, [rbp - AAT_EXC]
+    call async_gen_athrow_new
+    cmp qword [rbp - AAT_OWNED], 0
+    je .out
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - AAT_EXC]
+    call obj_decref
+    add rsp, 8
+    pop rax
+.out:
+    leave
+    ret
+
+.raised:
+    ; The type refused the value; its exception is the caller's.
+    extern eval_exception_unwind
+    leave
+    jmp eval_exception_unwind
+
+.not_an_exception:
+    mov rsi, [rbp - AAT_EXC]
+    CSTRING rdi, `exceptions must be classes or instances deriving from BaseException, not \x01`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name      ; does not return
+
+.arity:
+    ; _PyArg_CheckPositional's wording, which names the count it got.
+    dec rsi                     ; self is not one of them
+    lea rdi, [rel aat_buf]
+    push rsi
+    sub rsp, 8
+    cmp rsi, 1
+    jl .too_few
+    CSTRING rsi, "athrow expected at most 3 arguments, got "
+    jmp .say
+.too_few:
+    CSTRING rsi, "athrow expected at least 1 argument, got "
+.say:
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    add rsp, 8
+    pop rsi
+    mov rdi, rax
+    extern msg_append_i64
+    call msg_append_i64
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel aat_buf]
+    call raise_exception        ; does not return
+END_FUNC _agen_athrow_impl
+
+section .rodata
+aat_deprecated: db "the (type, exc, tb) signature of athrow() is deprecated, use the single-arg signature instead.", 0
+section .bss
+aat_buf: resb 96
+section .text
+
+;; ============================================================================
+;; _agen_check_receiver(rdi = the candidate) -> rax = it, unchanged
+;;
+;; Raises rather than returning when it is not an async generator, so every
+;; caller can ignore the failing case.
+;; ============================================================================
+DEF_FUNC_LOCAL _agen_check_receiver
+    V_TEST_PTR rdi, rcx
+    ja .bad
+    test rdi, rdi
+    jz .bad
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rdx, [rel async_gen_type]
+    cmp rcx, rdx
+    jne .bad
+    mov rax, rdi
+    leave
+    ret
+.bad:
+    RAISE exc_TypeError_type, "descriptor requires an async_generator object"
+END_FUNC _agen_check_receiver
+
+;; ============================================================================
+;; _get_agen_aclose_builtin() -> rax = the `aclose` builtin, borrowed
+;; ============================================================================
+DEF_FUNC_LOCAL _get_agen_aclose_builtin
+    mov rax, [rel _agen_aclose_cache]
+    test rax, rax
+    jnz .ret
+    lea rdi, [rel _agen_aclose_impl]
+    CSTRING rsi, "aclose"
+    call builtin_func_new
+    mov [rel _agen_aclose_cache], rax
+.ret:
+    leave
+    ret
+END_FUNC _get_agen_aclose_builtin
+
+;; ============================================================================
+;; _get_agen_athrow_builtin() -> rax = the `athrow` builtin, borrowed
+;; ============================================================================
+DEF_FUNC_LOCAL _get_agen_athrow_builtin
+    mov rax, [rel _agen_athrow_cache]
+    test rax, rax
+    jnz .ret
+    lea rdi, [rel _agen_athrow_impl]
+    CSTRING rsi, "athrow"
+    call builtin_func_new
+    mov [rel _agen_athrow_cache], rax
+.ret:
+    leave
+    ret
+END_FUNC _get_agen_athrow_builtin
 
 ;; ============================================================================
 ;; gen_dealloc(PyObject *self)
@@ -1510,7 +1962,7 @@ DEF_FUNC async_gen_getattr
     CSTRING rsi, "asend"
     call ap_strcmp
     test eax, eax
-    jz .aga_send
+    jz .aga_asend
 
     lea rdi, [r12 + PyStrObject.data]
     CSTRING rsi, "send"
@@ -1522,7 +1974,7 @@ DEF_FUNC async_gen_getattr
     CSTRING rsi, "aclose"
     call ap_strcmp
     test eax, eax
-    jz .aga_close
+    jz .aga_aclose
 
     lea rdi, [r12 + PyStrObject.data]
     CSTRING rsi, "close"
@@ -1534,7 +1986,7 @@ DEF_FUNC async_gen_getattr
     CSTRING rsi, "athrow"
     call ap_strcmp
     test eax, eax
-    jz .aga_throw
+    jz .aga_athrow
 
     lea rdi, [r12 + PyStrObject.data]
     CSTRING rsi, "throw"
@@ -1543,6 +1995,47 @@ DEF_FUNC async_gen_getattr
     jz .aga_throw
 
     RET_NULL
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.aga_aclose:
+    ; aclose is NOT close, for the reason asend is not send: `await` needs an
+    ; awaitable, and close answers None.
+    call _get_agen_aclose_builtin
+    mov rdi, rax
+    mov rsi, rbx
+    call method_new
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.aga_athrow:
+    call _get_agen_athrow_builtin
+    mov rdi, rax
+    mov rsi, rbx
+    call method_new
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+
+.aga_asend:
+    ; asend is NOT send: it answers the awaitable, and `send` resumes.  They
+    ; shared an arm, so `await agen.asend(v)` awaited the wrapped yield the
+    ; sync path had already produced and v never reached the generator.
+    call _get_agen_asend_builtin
+    mov rdi, rax
+    mov rsi, rbx
+    call method_new
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -1661,8 +2154,211 @@ DEF_FUNC _gen_send_impl, 8            ; 1 pushes, so rsp is 16-aligned
     RAISE exc_TypeError_type, "send() takes exactly one argument"
 END_FUNC _gen_send_impl
 
+;; ============================================================================
+;; _ags_send_impl(rdi = args, rsi = nargs) -> rax = Value
+;;
+;; asend.send(value) and asend.__next__(), which are one function in CPython
+;; too.  The asend object had a live tp_iternext and no tp_dict at all, so
+;; `agen.__anext__().send(None)` -- the only way to drive an async generator
+;; without an event loop, and exactly what CPython's own test_asyncgen does
+;; -- raised AttributeError, and the whole "compare a sync generator with an
+;; async one" half of that file with it.
+;;
+;; ags_iternext answers NULL for the generator's own item and leaves it in
+;; gi_return_value, because that is the shape op_send's exhaustion path
+;; reads.  By NAME the protocol is the other one: StopIteration carrying the
+;; value, the same as a generator's own send().
+;;
+;; send() wants its argument and __next__() refuses one, so the arity check
+;; cannot be shared even though everything after it is.
+;; ============================================================================
+AGSS_SELF  equ 8
+AGSS_VAL   equ 16           ; the item, held across exc_new so it can be freed
+AGSS_FRAME equ 32           ; + 0 pushes = 32, 16-aligned
+
+global _ags_send_impl
+DEF_FUNC_BARE _ags_send_impl
+    cmp rsi, 2
+    jne .send_arity
+    jmp ags_send_core
+.send_arity:
+    RAISE exc_TypeError_type, "send() takes exactly one argument"
+END_FUNC _ags_send_impl
+
+;; ============================================================================
+;; _ags_next_impl(rdi = args, rsi = nargs) -> rax = Value
+;;
+;; asend.__next__(), which is send(None) under the name a for-loop uses.
+;; ============================================================================
+global _ags_next_impl
+DEF_FUNC_BARE _ags_next_impl
+    cmp rsi, 1
+    jne .next_arity
+    jmp ags_send_core
+.next_arity:
+    RAISE exc_TypeError_type, "__next__() takes no arguments"
+END_FUNC _ags_next_impl
+
+;; ============================================================================
+;; ags_send_core(rdi = args, rsi = nargs) -> rax = Value
+;;
+;; Everything send() and __next__() share, past the arity check that is all
+;; that separates them.  Drives the awaitable through its own tp_iternext:
+;; the aclose/athrow object shares this method and has a different one.
+;; ============================================================================
+DEF_FUNC_LOCAL ags_send_core, AGSS_FRAME
+    mov rax, [rdi]              ; self
+    V_TEST_PTR rax, rcx
+    ja .agss_receiver
+    test rax, rax
+    jz .agss_receiver
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel async_gen_asend_type]
+    cmp rcx, rdx
+    je .agss_asend
+    lea rdx, [rel async_gen_athrow_type]
+    cmp rcx, rdx
+    jne .agss_receiver
+
+    ; --- the aclose/athrow awaitable ---
+    ; ags_sendval is NOT a resume value here: it is the exception agt_iternext
+    ; is going to throw.  Storing the sent value over it handed gen_throw a
+    ; plain int to raise -- a segfault from ordinary Python -- and dropped the
+    ; exception's reference on the way.  CPython refuses the send instead.
+    mov [rbp - AGSS_SELF], rax
+    cmp rsi, 2
+    jne .agss_go
+    mov rdx, [rdi + 8]
+    lea rcx, [rel none_singleton]
+    cmp rdx, rcx
+    je .agss_go
+    cmp dword [rax + AsyncGenASend.ags_started], 0
+    jne .agss_store             ; already thrown: this is an ordinary resume
+    RAISE exc_RuntimeError_type, "can't send non-None value to a just-started coroutine"
+
+.agss_asend:
+    ; The sent value.  ags_iternext resumes with None; anything else is
+    ; stashed for it to push instead, and the reference goes with it.
+    mov [rbp - AGSS_SELF], rax
+    cmp rsi, 2
+    jne .agss_go
+    mov rdx, [rdi + 8]
+    lea rcx, [rel none_singleton]
+    cmp rdx, rcx
+    je .agss_go
+
+.agss_store:
+    ; asend(v).send(w) is CPython's "w wins", so what asend() left here is
+    ; released rather than leaked.
+    push rdx
+    sub rsp, 8                  ; a pad: XDECREF_V expands to a call, and a
+                                ; lone push leaves it eight out
+    mov rdi, [rax + AsyncGenASend.ags_sendval]
+    mov qword [rax + AsyncGenASend.ags_sendval], 0
+    XDECREF_V rdi, rcx
+    add rsp, 8
+    pop rdx
+    mov rax, [rbp - AGSS_SELF]
+    INCREF_V rdx, rcx
+    mov [rax + AsyncGenASend.ags_sendval], rdx
+
+.agss_go:
+    ; Through the slot, not through ags_iternext: the athrow awaitable shares
+    ; this method and has a tp_iternext of its own.
+    mov rdi, [rbp - AGSS_SELF]
+    mov rax, [rdi + PyObject.ob_type]
+    call [rax + PyTypeObject.tp_iternext]
+    test rax, rax
+    jnz .agss_out               ; an `await` passing outward: hand it back
+
+    ; NULL means the item is ready, unless the body raised or the generator
+    ; is finished -- ags_iternext raises StopAsyncIteration for the second,
+    ; and a pending exception is the caller's either way.
+    cmp qword [rel current_exception], 0
+    jne .agss_propagate
+
+    ; The item, and with it the end of this awaitable: a second send() on the
+    ; same asend is the reuse CPython refuses.  Only the name path marks it,
+    ; because op_send reads state 1 and gi_return_value for its own
+    ; exhaustion arm and must keep finding them.
+    mov rcx, [rbp - AGSS_SELF]
+    mov rsi, [rcx + AsyncGenASend.gi_return_value]
+    mov qword [rcx + AsyncGenASend.gi_return_value], 0   ; the reference moves
+    mov [rbp - AGSS_VAL], rsi   ; ...to here, and is released below
+    mov dword [rcx + AsyncGenASend.ags_state], 2
+    lea rdi, [rel exc_StopIteration_type]
+    test rsi, rsi
+    jz .agss_no_val
+    ; A bare StopIteration for None, as a generator returning None raises,
+    ; so str(e) is "" rather than "None".
+    lea rax, [rel none_singleton]
+    cmp rsi, rax
+    jne .agss_have_val
+.agss_no_val:
+    xor esi, esi
+.agss_have_val:
+    call exc_new
+    ; exc_new took a reference of its own, so the one moved out of the
+    ; wrapper is this function's to drop.  Leaving it held leaked the yielded
+    ; item once per drive -- five objects for five turns of a hand-driven
+    ; `async for`, invisible to every gate because nothing crashed.
+    push rax
+    sub rsp, 8                  ; a pad, as above
+    mov rdi, [rbp - AGSS_VAL]
+    XDECREF_V rdi, rcx
+    add rsp, 8
+    pop rdi
+    call raise_exception_obj
+
+.agss_propagate:
+    extern eval_exception_unwind
+    leave
+    jmp eval_exception_unwind
+
+.agss_out:
+    leave
+    ret                         ; ags_iternext already answers one Value
+
+.agss_receiver:
+    RAISE exc_TypeError_type, "send() requires an async_generator_asend"
+END_FUNC ags_send_core
+
+;; ============================================================================
+;; _ags_close_impl(rdi = args, rsi = nargs) -> rax = Value
+;;
+;; asend.close().  CPython's does nothing but mark the awaitable closed --
+;; the generator behind it is not touched, because closing THAT is aclose()'s
+;; job and this object is one step of one iteration.
+;; ============================================================================
+global _ags_close_impl
+DEF_FUNC _ags_close_impl
+    cmp rsi, 1
+    jne .agsc_arity
+    mov rax, [rdi]
+    V_TEST_PTR rax, rcx
+    ja .agsc_receiver
+    test rax, rax
+    jz .agsc_receiver
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel async_gen_asend_type]
+    cmp rcx, rdx
+    je .agsc_ok
+    lea rdx, [rel async_gen_athrow_type]
+    cmp rcx, rdx
+    jne .agsc_receiver
+.agsc_ok:
+    mov dword [rax + AsyncGenASend.ags_state], 2
+    RET_NONE
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+.agsc_receiver:
+    RAISE exc_TypeError_type, "close() requires an async_generator_asend"
+.agsc_arity:
+    RAISE exc_TypeError_type, "close() takes no arguments"
+END_FUNC _ags_close_impl
+
 ;; _gen_close_impl(args, nargs) — gen.close()
-global _gen_close_impl
 global _gen_close_impl
 DEF_FUNC _gen_close_impl
     mov rdi, [rdi]             ; gen = args[0]
@@ -1673,7 +2369,6 @@ DEF_FUNC _gen_close_impl
 END_FUNC _gen_close_impl
 
 ;; _gen_throw_impl(args, nargs) — gen.throw(exc_type)
-global _gen_throw_impl
 global _gen_throw_impl
 DEF_FUNC _gen_throw_impl, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
@@ -1735,6 +2430,72 @@ DEF_FUNC _gen_throw_impl, 8            ; 1 pushes, so rsp is 16-aligned
 END_FUNC _gen_throw_impl
 
 ;; Lazy-init helpers for gen method builtins
+;; ============================================================================
+;; _agen_asend_impl(rdi = args, rsi = nargs) -> rax = Value (AsyncGenASend*)
+;;
+;; agen.asend(value).  It answers an AWAITABLE, the same object
+;; `agen.__anext__()` answers, carrying the value the generator will resume
+;; with -- it does not resume anything itself.  It used to be an alias for
+;; the sync `send`, which resumed the generator immediately and handed back
+;; the wrapped yield, so `await agen.asend(v)` awaited an
+;; async_generator_wrapped_value and the value never reached the generator
+;; at all.
+;; ============================================================================
+DEF_FUNC_LOCAL _agen_asend_impl
+    cmp rsi, 2
+    jne .arity
+    mov rax, [rdi]              ; the async generator
+    V_TEST_PTR rax, rcx
+    ja .receiver
+    test rax, rax
+    jz .receiver
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel async_gen_type]
+    cmp rcx, rdx
+    jne .receiver
+
+    push rbx
+    push r12
+    mov rbx, rax
+    mov r12, [rdi + 8]          ; the value to resume with, borrowed
+
+    mov rdi, rbx
+    call async_gen_iternext     ; the wrapper, with ags_sendval clear
+
+    lea rcx, [rel none_singleton]
+    cmp r12, rcx
+    je .done                    ; None is what the wrapper already resumes with
+    INCREF_V r12, rcx
+    mov [rax + AsyncGenASend.ags_sendval], r12
+.done:
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.receiver:
+    RAISE exc_TypeError_type, "asend() requires an async_generator"
+.arity:
+    RAISE exc_TypeError_type, "asend() takes exactly one argument"
+END_FUNC _agen_asend_impl
+
+;; ============================================================================
+;; _get_agen_asend_builtin() -> rax = the `asend` builtin, borrowed
+;; Built once and cached, as every other generator method is.
+;; ============================================================================
+DEF_FUNC_LOCAL _get_agen_asend_builtin
+    mov rax, [rel _agen_asend_cache]
+    test rax, rax
+    jnz .ret
+    lea rdi, [rel _agen_asend_impl]
+    CSTRING rsi, "asend"
+    call builtin_func_new
+    mov [rel _agen_asend_cache], rax
+.ret:
+    leave
+    ret
+END_FUNC _get_agen_asend_builtin
+
 DEF_FUNC_LOCAL _get_gen_send_builtin
     mov rax, [rel _gen_send_cache]
     test rax, rax
@@ -1791,6 +2552,9 @@ align 8
 _gen_send_cache: dq 0
 _gen_close_cache: dq 0
 _gen_throw_cache: dq 0
+_agen_asend_cache: dq 0
+_agen_aclose_cache: dq 0
+_agen_athrow_cache: dq 0
 
 align 8
 global gen_type
@@ -1927,7 +2691,40 @@ async_gen_asend_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_AWAITABLE      ; tp_flags -- tp_iter IS am_await here
+    dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
+
+agt_name_str: db "async_generator_athrow", 0
+align 8
+global async_gen_athrow_type
+async_gen_athrow_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq agt_name_str             ; tp_name
+    dq AsyncGenASend_size       ; tp_basicsize -- the same box as asend
+    dq ags_dealloc              ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq ags_iter_self            ; tp_iter (return self)
+    dq agt_iternext             ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq TYPE_FLAG_AWAITABLE      ; tp_flags -- tp_iter IS am_await here
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear

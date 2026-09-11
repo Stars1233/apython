@@ -1,0 +1,5 @@
+restore_signals=True clears SIGPIPE
+restore_signals=False keeps it
+parent still ignores SIGPIPE
+parent write raises BrokenPipeError
+done

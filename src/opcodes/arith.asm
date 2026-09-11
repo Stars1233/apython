@@ -2004,7 +2004,7 @@ DEF_FUNC_BARE op_compare_op
 
     ; Dunder not found. If NE, try __eq__ + negate (auto-derivation)
     cmp ecx, PY_NE
-    jne .cmp_identity           ; not NE → identity fallback
+    jne .cmp_decline_left       ; not NE → ask the other operand
 
     ; Every class inherits object's comparison dunders now, and object's
     ; answer for two different objects is NotImplemented.  That is not a
@@ -2023,7 +2023,16 @@ DEF_FUNC_BARE op_compare_op
     pop rcx
     cmp ecx, PY_NE
     je .cmp_ne_from_eq
-    jmp .cmp_identity
+
+.cmp_decline_left:
+    ; NotImplemented from the left operand is a DECLINE, not an answer:
+    ; do_richcompare asks the OTHER operand before it falls back to identity.
+    ; This jumped straight to the fallback, so a reflected ordering dunder was
+    ; never reached at all -- `R() < Ord()` raised TypeError where CPython
+    ; calls Ord.__gt__, for every plain class on the left.  The
+    ; tp_richcompare path beside it has always gone on to .cmp_try_right.
+    push rcx
+    jmp .cmp_try_right
 
 .cmp_ne_from_eq:
     ; Try __eq__ on left's heaptype
@@ -2037,7 +2046,7 @@ DEF_FUNC_BARE op_compare_op
     V_UNPACK rax, rdx           ; returns a Value
     pop rcx
     test edx, edx
-    jz .cmp_identity            ; __eq__ also not found → identity
+    jz .cmp_decline_left        ; __eq__ also declined: ask the other operand
     cmp edx, TAG_PTR
     jne .cmp_ne_negate
     extern notimpl_singleton
@@ -2048,7 +2057,7 @@ DEF_FUNC_BARE op_compare_op
     mov rdi, rax
     call obj_decref
     pop rcx
-    jmp .cmp_identity
+    jmp .cmp_decline_left
 .cmp_ne_negate:
 
     ; Negate __eq__ result: if True → False, if False → True
@@ -2200,10 +2209,24 @@ DEF_FUNC_BARE op_compare_op
 
     ; dunder_call_2(self=right, other=left, name, other_tag)
     ; rdi = right (already set)
-    mov rsi, [rsp + BO_LEFT]   ; other = left payload
-    mov ecx, [rsp + BO_LTAG]   ; other_tag = left's tag
+    ;
+    ; The op goes on the stack first.  It is in ecx, which is BOTH the
+    ; register the other_tag argument goes in and one dunder_call_2 clobbers,
+    ; and `.cmp_identity` reads ecx to decide whether the pair is orderable
+    ; and to name the operator.  The left-hand path above has always saved it;
+    ; this one had not, so every unsupported ordering that got this far
+    ; reported itself as '<' -- and whether it raised at all depended on what
+    ; dunder_call_2 happened to leave behind.
+    push rcx
+    sub rsp, 8                     ; a pad: this call is made at an EVEN depth
+                                   ; elsewhere in the function, and
+                                   ; dunder_call_2 dispatches into Python
+    mov rsi, [rsp + 16 + BO_LEFT]  ; other = left payload
+    mov ecx, [rsp + 16 + BO_LTAG]  ; other_tag = left's tag
     call dunder_call_2
     V_UNPACK rax, rdx           ; returns a Value
+    add rsp, 8
+    pop rcx
 
     ; Check if dunder returned NULL
     test edx, edx

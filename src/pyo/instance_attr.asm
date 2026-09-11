@@ -1244,6 +1244,16 @@ DEF_FUNC instance_setattr
     mov rcx, [r9 + PyMemberDescrObject.md_offset]
     SLOT_ADDR rdx, rbx, rcx
 
+    ; A DELETE of a slot that was never assigned is an AttributeError naming
+    ; the slot -- CPython's PyMember_SetOne for T_OBJECT_EX.  This stored 0
+    ; over 0 and reported success, so `del o.x` twice worked and the slot's
+    ; absence could not be told from its presence.
+    test r13, r13
+    jnz .sa_member_store
+    cmp qword [rdx], 0
+    je .sa_member_unset
+.sa_member_store:
+
     ; XDECREF old value at slot
     push rdx
     mov rdi, [rdx]             ; old Value
@@ -1260,6 +1270,13 @@ DEF_FUNC instance_setattr
     pop rbx
     leave
     ret
+
+.sa_member_unset:
+    mov rsi, [r9 + PyMemberDescrObject.md_name]
+    lea rsi, [rsi + PyStrObject.data]
+    extern exc_AttributeError_type
+    lea rdi, [rel exc_AttributeError_type]
+    call raise_exception        ; does not return
 
 .sa_no_slot:
     ; No slot found. Fall back to the instance dict.

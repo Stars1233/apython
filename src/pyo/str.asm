@@ -2516,6 +2516,7 @@ align 8
 str_iter_name: db "str_iterator", 0
 
 align 8
+global str_iter_type
 str_iter_type:
     dq 1                        ; ob_refcnt
     dq type_type                ; ob_type

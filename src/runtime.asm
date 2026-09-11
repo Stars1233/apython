@@ -92,24 +92,71 @@ SYS_alarm           equ 37
 SYS_pause           equ 34
 
 ;; ============================================================================
+;; EINTR, and why these funnels retry it themselves.
+;;
+;; Signal handlers used to be installed with SA_RESTART, so an interrupted
+;; slow syscall was restarted by the KERNEL and no caller ever saw EINTR.  But
+;; that also meant a Python handler could not run while a read was blocked:
+;; the handler that `signal.alarm(1)` fires during `f.read(6)` never ran, and
+;; a program waiting for it to write the rest of the data waited for ever.
+;; CPython installs with sa_flags = 0 exactly so that the read RETURNS, and
+;; does the retry itself around a PyErr_CheckSignals.
+;;
+;; So SA_RESTART is gone (see signal_install), and what it used to do is done
+;; here instead: these two retry EINTR with nothing in between, which is what
+;; every one of their fifty-odd low-level callers -- a write to stderr, the
+;; compiler reading a file -- already assumed.  sys_read_intr and
+;; sys_write_intr are the same syscalls WITHOUT the retry, for the one caller
+;; that has a Python frame to run a handler on: the _iocore file object.
+;; ============================================================================
+EINTR equ 4
+
+;; ============================================================================
 ;; sys_write(int fd, const void *buf, size_t len) -> ssize_t
 ;; ============================================================================
 DEF_FUNC_BARE sys_write
+.retry:
     mov rax, SYS_write
     ; rdi=fd, rsi=buf, rdx=len already in place
     syscall
+    cmp rax, -EINTR
+    je .retry
     ret
 END_FUNC sys_write
+
+;; ============================================================================
+;; sys_write_intr(int fd, const void *buf, size_t len) -> ssize_t, -EINTR and
+;; all
+;; ============================================================================
+global sys_write_intr
+DEF_FUNC_BARE sys_write_intr
+    mov rax, SYS_write
+    syscall
+    ret
+END_FUNC sys_write_intr
 
 ;; ============================================================================
 ;; sys_read(int fd, void *buf, size_t len) -> ssize_t
 ;; ============================================================================
 DEF_FUNC_BARE sys_read
+.retry:
     mov rax, SYS_read
     ; rdi=fd, rsi=buf, rdx=len already in place
     syscall
+    cmp rax, -EINTR
+    je .retry
     ret
 END_FUNC sys_read
+
+;; ============================================================================
+;; sys_read_intr(int fd, void *buf, size_t len) -> ssize_t, -EINTR and all
+;; ============================================================================
+global sys_read_intr
+DEF_FUNC_BARE sys_read_intr
+    mov rax, SYS_read
+    syscall
+    ret
+END_FUNC sys_read_intr
 
 ;; ============================================================================
 ;; sys_open(const char *path, int flags, int mode) -> int fd
@@ -423,9 +470,14 @@ END_FUNC sys_uname
 ;; sys_wait4(pid_t pid, int *status, int options, struct rusage *ru) -> pid_t
 ;; ============================================================================
 DEF_FUNC_BARE sys_wait4
-    mov rax, SYS_wait4
+    ; EINTR is retried here, because SA_RESTART used to do it: see the note
+    ; above sys_write.
     mov r10, rcx               ; 4th arg -- and syscall clobbers rcx, so first
+.retry:
+    mov rax, SYS_wait4
     syscall
+    cmp rax, -EINTR
+    je .retry
     ret
 END_FUNC sys_wait4
 
@@ -487,8 +539,11 @@ END_FUNC sys_io_uring_setup
 ;; sys_io_uring_enter(fd, to_submit, min_complete, flags, sig, sigsz) -> int
 ;; ============================================================================
 DEF_FUNC_BARE sys_io_uring_enter
-    mov rax, SYS_io_uring_enter
+    ; NOT retried: like poll, it is a WAIT with a deadline of its own and the
+    ; kernel does not restart it.  The event loop sees the EINTR, as it did
+    ; when SA_RESTART was set.
     mov r10, rcx               ; 4th arg
+    mov rax, SYS_io_uring_enter
     syscall
     ret
 END_FUNC sys_io_uring_enter
@@ -524,9 +579,14 @@ END_FUNC sys_listen
 ;; sys_accept4(fd, addr*, addrlen*, flags) -> int
 ;; ============================================================================
 DEF_FUNC_BARE sys_accept4
-    mov rax, SYS_accept4
+    ; EINTR is retried here, because SA_RESTART used to do it: see the note
+    ; above sys_write.
     mov r10, rcx               ; 4th arg
+.retry:
+    mov rax, SYS_accept4
     syscall
+    cmp rax, -EINTR
+    je .retry
     ret
 END_FUNC sys_accept4
 
@@ -534,6 +594,10 @@ END_FUNC sys_accept4
 ;; sys_connect(fd, addr*, addrlen) -> int
 ;; ============================================================================
 DEF_FUNC_BARE sys_connect
+    ; NOT retried, and not restartable either: after EINTR the kernel
+    ; continues the connection asynchronously, so a second connect() on the
+    ; same descriptor answers EALREADY or EISCONN rather than finishing the
+    ; first.  CPython waits with poll instead of calling again.
     mov rax, SYS_connect
     syscall
     ret
@@ -543,9 +607,14 @@ END_FUNC sys_connect
 ;; sys_sendto(fd, buf, len, flags, dest_addr*, addrlen) -> ssize_t
 ;; ============================================================================
 DEF_FUNC_BARE sys_sendto
-    mov rax, SYS_sendto
+    ; EINTR is retried here, because SA_RESTART used to do it: see the note
+    ; above sys_write.
     mov r10, rcx               ; 4th arg
+.retry:
+    mov rax, SYS_sendto
     syscall
+    cmp rax, -EINTR
+    je .retry
     ret
 END_FUNC sys_sendto
 
@@ -553,9 +622,14 @@ END_FUNC sys_sendto
 ;; sys_recvfrom(fd, buf, len, flags, src_addr*, addrlen*) -> ssize_t
 ;; ============================================================================
 DEF_FUNC_BARE sys_recvfrom
-    mov rax, SYS_recvfrom
+    ; EINTR is retried here, because SA_RESTART used to do it: see the note
+    ; above sys_write.
     mov r10, rcx               ; 4th arg
+.retry:
+    mov rax, SYS_recvfrom
     syscall
+    cmp rax, -EINTR
+    je .retry
     ret
 END_FUNC sys_recvfrom
 
@@ -603,6 +677,11 @@ END_FUNC sys_getpeername
 ;; wrapper returns -1 in a 32-bit register and leaves the reason in errno.
 ;; ============================================================================
 DEF_FUNC_BARE sys_poll
+    ; NOT retried here.  Linux never restarts poll() whatever SA_RESTART says
+    ; -- the timeout is absolute to the call -- so a retry is not what the
+    ; flag used to do: it re-issued the wait with the WHOLE timeout again and
+    ; ran no handler, which is an unkillable poll.  The caller with a Python
+    ; frame does it, with the remaining time: see socket_poll.
     mov rax, SYS_poll
     syscall
     ret

@@ -1183,6 +1183,50 @@ DEF_FUNC methods_init
     mov rdi, rax
     call type_stamp_methods
 
+    ;; --- the asend awaitable --------------------------------------------
+    ;; What async_gen.__anext__() answers.  It had a live tp_iternext and no
+    ;; tp_dict, so driving an async generator by hand -- `.__anext__()` then
+    ;; `.send(None)`, which is what CPython's test_asyncgen does throughout
+    ;; and the only way to do it without an event loop -- raised
+    ;; AttributeError on send.
+    call dict_new
+    mov rbx, rax
+
+    extern _ags_send_impl
+    ADD_FN mn_send, _ags_send_impl
+    extern _ags_next_impl
+    ADD_FN mn___next__, _ags_next_impl
+    extern _ags_close_impl
+    ADD_FN mn_close, _ags_close_impl
+    extern async_gen_asend_dunder_iter
+    ADD_FN mn___iter__, async_gen_asend_dunder_iter
+    ADD_FN mn___await__, async_gen_asend_dunder_iter
+
+    extern async_gen_asend_type
+    lea rax, [rel async_gen_asend_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
+    ;; --- the aclose/athrow awaitable ------------------------------------
+    ;; The same five names over its own tp_iternext, so `await agen.aclose()`
+    ;; and a hand-driven `.send(None)` reach the same object.
+    call dict_new
+    mov rbx, rax
+
+    ADD_FN mn_send, _ags_send_impl
+    ADD_FN mn___next__, _ags_next_impl
+    ADD_FN mn_close, _ags_close_impl
+    extern async_gen_athrow_dunder_iter
+    ADD_FN mn___iter__, async_gen_athrow_dunder_iter
+    ADD_FN mn___await__, async_gen_athrow_dunder_iter
+
+    extern async_gen_athrow_type
+    lea rax, [rel async_gen_athrow_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
     ;; A coroutine is awaited rather than iterated, so it gets the same
     ;; three methods and the cr_* spellings of the same fields.
     call dict_new
@@ -1999,6 +2043,25 @@ DEF_FUNC methods_init
     mov rdi, rax
     call type_stamp_methods
 
+    ;; --- member_descriptor: the __slots__ descriptor, by NAME ---
+    ; It worked through attribute access and answered "'member_descriptor'
+    ; object has no attribute '__get__'" to every program that reached for the
+    ; protocol itself -- inspect.getattr_static, inspect.isdatadescriptor and
+    ; anything walking type.__dict__.
+    call dict_new
+    mov rbx, rax
+    extern member_descr_dunder_get
+    ADD_FN mn___get__, member_descr_dunder_get
+    extern member_descr_dunder_set
+    ADD_FN mn___set__, member_descr_dunder_set
+    extern member_descr_dunder_delete
+    ADD_FN mn___delete__, member_descr_dunder_delete
+    extern member_descr_type
+    lea rax, [rel member_descr_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
     ;; --- builtin_function_or_method: a NON-data descriptor by name ---
     ; __get__ and no __set__ is how inspect and the enum and dataclasses
     ; classifiers tell a method from a getset.
@@ -2739,6 +2802,18 @@ DEF_FUNC methods_init
     mov rdi, rax
     call type_stamp_methods
 
+    ; The builtin iterators, from a table in methods/init_iter.asm: twenty-one
+    ; types whose tp_iternext and tp_iter had no name to reach them by.  Its
+    ; own file because this one is within a couple of kilobytes of the cap.
+    extern iter_types_init
+    call iter_types_init
+
+    ; The containers' __repr__, from a table in methods/init_repr.asm.  Must
+    ; run after every tp_dict above is installed: it adds into the one it
+    ; finds and only builds a dict where there is none.
+    extern repr_types_init
+    call repr_types_init
+
     pop r12
     pop rbx
     leave
@@ -2900,7 +2975,10 @@ mn___format__:  db "__format__", 0
 mn___sizeof__:  db "__sizeof__", 0
 mn___doc__:     db "__doc__", 0
 mn___init_subclass__: db "__init_subclass__", 0
+global mn___iter__
 mn___iter__:    db "__iter__", 0
+global mn___next__
+global mn___repr__
 mn___next__:    db "__next__", 0
 mn___await__:   db "__await__", 0
 mn___dir__:     db "__dir__", 0

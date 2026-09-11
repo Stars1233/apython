@@ -2268,15 +2268,21 @@ END_FUNC builtin_ascii_fn
 global builtin_format_fn
 FMT_OBJ     equ 8
 FMT_SPEC    equ 24
-FMT_FRAME   equ 32          ; + 0 pushes = 32
+FMT_FRAME   equ 24          ; + 1 push = 32, 16-aligned
+;
+; 24 and a push, not 32 and an unseen one: the `push rbx` used to come after
+; the arity branch, where lint's counter -- which stops at the first non-push
+; instruction -- could not see it.  The declared frame was then the one that
+; balanced ZERO pushes, and the body ran eight bytes out with dunder_call_2
+; into arbitrary Python inside it.
 DEF_FUNC builtin_format_fn, FMT_FRAME
+    push rbx
 
     cmp rsi, 1
     jb .fmt_too_few
     cmp rsi, 2
     ja .fmt_nargs_error
 
-    push rbx
     mov rbx, rsi               ; rbx = nargs
 
     ; Save obj.  args[0] is a Value; the slot below used to be filled from
@@ -2333,6 +2339,17 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     jne .fmt_propagate
     jmp .fmt_apply_spec
 .fmt_dunder_ok:
+    ; It has to BE a str.  Nothing checked, so `def __format__(self, spec):
+    ; return 5` handed an int to f-strings and to str.format, both of which
+    ; then read a string out of it.
+    push rax
+    push rdx
+    mov rdi, rax
+    mov rsi, rdx
+    extern format_require_str
+    call format_require_str     ; a str, or it does not return
+    pop rdx
+    pop rax
     ; If an empty spec was allocated here, release it.
     cmp rbx, 2
     jge .fmt_done

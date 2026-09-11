@@ -970,6 +970,15 @@ DEF_FUNC posixdir_register, PDR_FRAME
     PD_ADD_FN sd_n_close, scandir_iter_m_close
     PD_ADD_FN sd_n_enter, scandir_iter_m_enter
     PD_ADD_FN sd_n_exit,  scandir_iter_m_exit
+    ; ...and the two the iterator protocol is asked for BY NAME.  init_iter's
+    ; table leaves this type out because it already has a tp_dict, and its
+    ; header says the two entries are added "in the block that built it" --
+    ; which is this one, and they were not: hasattr(os.scandir('.'),
+    ; '__next__') was False and both thunks were dead code.
+    extern scandir_iter_dunder_next
+    extern scandir_iter_dunder_iter
+    PD_ADD_FN sd_n_next, scandir_iter_dunder_next
+    PD_ADD_FN sd_n_iter, scandir_iter_dunder_iter
 .pdr_no_dict:
 
     lea rax, [rel direntry_type]
@@ -1009,6 +1018,8 @@ de_n_is_junction: db "is_junction", 0
 de_n_fspath:     db "__fspath__", 0
 
 sd_n_close:  db "close", 0
+sd_n_next:   db "__next__", 0
+sd_n_iter:   db "__iter__", 0
 sd_n_enter:  db "__enter__", 0
 sd_n_exit:   db "__exit__", 0
 

@@ -1477,10 +1477,20 @@ DEF_FUNC str_method_join
     mov rax, [rax + rcx * 8]
     push rcx
     push rax
+    ; A reference of OUR OWN on the offending item before anything is
+    ; released.  The temporary sequence holds the only one when the argument
+    ; was a generator -- `"".join(C() for _ in range(1))` -- and the message
+    ; names the item's TYPE, so releasing it first read ob_type out of the
+    ; block just freed.  It is not given back: this path ends in a raise that
+    ; does not return, and there is no moment between reading the type and
+    ; unwinding at which a decref would be safe.  One object on a path that
+    ; raises, as GET_AWAITABLE's own non-iterator arm says.
+    mov rdi, rax
+    INCREF_V rdi, rdx
     mov rdi, rbx
     call obj_decref         ; DECREF owned separator
     JOIN_RELEASE_TMP
-    pop rdi                 ; the offending item
+    pop rdi                 ; the offending item, held by the count above
     extern value_type
     call value_type
     mov rsi, rax
@@ -2162,18 +2172,44 @@ DEF_FUNC str_method_format, SF_FRAME
     mov [rsp], rax              ; the expansion is what gets released
     call obj_decref
 .fm_spec_plain:
-    mov rdi, [rbp - SF_VALUE]
-    mov rsi, [rsp]
-    extern format_apply_spec
-    call format_apply_spec
+    ; format(value, spec), not format_apply_spec: a class formats ITSELF
+    ; through __format__, and this went straight to the spec machinery -- so
+    ; "{:x}".format(obj) for a class with a __format__ of its own reported
+    ; that the object could not be interpreted as an integer, and "{}" of it
+    ; printed the default repr.  f-strings have always called the dunder;
+    ; str.format is the same operation and now shares its funnel.
+    ;
+    ; 24, because this arm is reached with the SPEC pushed: the function's
+    ; body runs 16-byte aligned, that push leaves it eight out, and the frame
+    ; is what puts it back.  The plain arm below is reached with nothing
+    ; pushed and takes 16.
+    sub rsp, 24
+    mov rax, [rbp - SF_VALUE]
+    mov [rsp], rax              ; args[0] = the value
+    mov rax, [rsp + 24]
+    mov [rsp + 8], rax          ; args[1] = the spec
+    mov rdi, rsp
+    mov esi, 2
+    extern builtin_format_fn
+    call builtin_format_fn
+    V_UNPACK rax, rdx
+    add rsp, 24
     mov r14, rax
     pop rdi
     call obj_decref
     jmp .fm_have_text
 
 .fm_plain_str:
-    mov rdi, [rbp - SF_VALUE]
-    call obj_str
+    ; 16, because this arm is reached with nothing pushed: the body is already
+    ; aligned and the array is all the room it needs.
+    sub rsp, 16
+    mov rax, [rbp - SF_VALUE]
+    mov [rsp], rax              ; args[0] = the value, and no spec
+    mov rdi, rsp
+    mov esi, 1
+    call builtin_format_fn
+    V_UNPACK rax, rdx
+    add rsp, 16
     mov r14, rax
 
 .fm_have_text:

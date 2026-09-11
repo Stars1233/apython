@@ -503,11 +503,14 @@ DEF_FUNC raise_new_bad_class, RNB_FRAME
 END_FUNC raise_new_bad_class
 
 ;; ============================================================================
-;; rca_fetch(rdi = an object, rsi = an attribute name as a C string)
+;; obj_getattr_str_opt(rdi = an object, rsi = an attribute name as a C string)
 ;;   -> rax = the attribute when it is a str, a NEW reference; else 0
 ;;
 ;; getattr with no exception and no surprises: anything that is not a str is
-;; treated as absent, which is what CPython's fallback amounts to.
+;; treated as absent, which is what CPython's fallback amounts to.  Shared
+;; with method_repr, which asks the same question of a method's im_func --
+;; CPython's method_repr asks for __qualname__ and then __name__ exactly this
+;; way, and falls back to "?".
 ;; ============================================================================
 RAC_STR   equ 8
 RAC_VAL   equ 16
@@ -517,7 +520,8 @@ extern str_from_cstr_heap
 extern obj_decref
 extern str_type
 extern obj_dealloc
-DEF_FUNC_LOCAL rca_fetch, RAC_FRAME
+global obj_getattr_str_opt
+DEF_FUNC_LOCAL obj_getattr_str_opt, RAC_FRAME
     push rbx
     mov rbx, rdi
     mov rdi, rsi
@@ -549,7 +553,7 @@ DEF_FUNC_LOCAL rca_fetch, RAC_FRAME
     pop rbx
     leave
     ret
-END_FUNC rca_fetch
+END_FUNC obj_getattr_str_opt
 
 ;; ============================================================================
 ;; raise_callable_arg(rdi = the callable, rsi = a C string to append,
@@ -585,7 +589,7 @@ DEF_FUNC raise_callable_arg, RCA_FRAME
 
     mov rdi, [rbp - RCA_FUNC]
     CSTRING rsi, "__module__"
-    call rca_fetch
+    call obj_getattr_str_opt
     test rax, rax
     jz .rca_no_module
     mov [rbp - RCA_HELD], rax
@@ -609,12 +613,12 @@ DEF_FUNC raise_callable_arg, RCA_FRAME
 
     mov rdi, [rbp - RCA_FUNC]
     CSTRING rsi, "__qualname__"
-    call rca_fetch
+    call obj_getattr_str_opt
     test rax, rax
     jnz .rca_have_name
     mov rdi, [rbp - RCA_FUNC]
     CSTRING rsi, "__name__"
-    call rca_fetch
+    call obj_getattr_str_opt
     test rax, rax
     jz .rca_use_type
 .rca_have_name:

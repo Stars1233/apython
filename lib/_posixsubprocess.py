@@ -119,9 +119,22 @@ def fork_exec(args, executable_list, close_fds, fds_to_keep, cwd, env_list,
         if cwd is not None:
             posix.chdir(cwd if isinstance(cwd, str) else cwd.decode("utf-8"))
 
-        # restore_signals is honoured by having nothing to restore: this
-        # interpreter installs no handlers, so a child starts with the
-        # dispositions it inherited, which is what the flag asks for.
+        # restore_signals: SIG_IGN SURVIVES execve -- only installed handlers
+        # are reset by it -- and this interpreter ignores SIGPIPE at start-up
+        # the way CPython does.  So without this every child inherited a
+        # SIGPIPE it cannot receive, and `yes | head -1` never ended.  CPython
+        # resets the same three in its own fork_exec, which is where the flag
+        # means something.
+        if restore_signals:
+            try:
+                import signal as _sig
+                for _name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
+                    _num = getattr(_sig, _name, None)
+                    if _num is not None:
+                        _sig.signal(_num, _sig.SIG_DFL)
+            except Exception:
+                pass
+
         if preexec_fn is not None:
             preexec_fn()
 

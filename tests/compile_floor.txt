@@ -11,10 +11,12 @@ test_annotations
 test_argument_messages
 test_arithmetic
 test_array
+test_asend_methods
 test_ast_mangling
 test_ast
 test_ast_type_comments
 test_async_argument_types
+test_async_awaitable
 test_async_await
 test_async_cancel
 test_async_coro
@@ -33,6 +35,7 @@ test_async_streams
 test_async_tasks
 test_async_wait_for
 test_async_with
+test_attr_cache_type_reuse
 test_awaitable
 test_await_raises
 test_bad_arguments
@@ -86,6 +89,7 @@ test_codecs_registry_bridge
 test_codecs_registry
 test_code_gc
 test_code_replace
+test_compare_reflected_op
 test_comparisons
 test_compile_annotation_scan
 test_compile_annotations
@@ -145,6 +149,7 @@ test_complex
 test_comprehension_inline
 test_container_dunders
 test_container_operator_names
+test_container_repr_dunder
 test_contains_fallback
 test_context_chain_cycle
 test_control_flow
@@ -194,8 +199,10 @@ test_dict_update_raises
 test_dict_view_set
 test_dict_views
 test_dir
+test_dunder_descriptor
 test_dunder_protocols
 test_dunder_receiver
+test_dunder_returns_str
 test_dunders
 test_empty_bases
 test_encodings
@@ -225,6 +232,7 @@ test_exec_custom_locals
 test_extended_slice
 test_fileio
 test_final_types
+test_float_as_integer_ratio
 test_float_big_int
 test_float_compare_spec
 test_float_complex_subclass
@@ -339,6 +347,7 @@ test_isinstance_hostile
 test_islice_consumes
 test_iterable_arguments
 test_iterator_cycles
+test_iterator_dunders
 test_iterator_slots
 test_iter_free_during_iteration
 test_iter_sentinel
@@ -374,6 +383,7 @@ test_match_mapping_types
 test_match
 test_math_more
 test_math
+test_member_descriptor_protocol
 test_membership
 test_memmove_boundaries
 test_memoryview_released
@@ -385,9 +395,12 @@ test_metaclass_resolution
 test_method_equality
 test_method_hostile
 test_method_load_unbound
+test_method_repr_callables
 test_methods
+test_method_type
 test_misc_ops
 test_module_attr_call
+test_module_attr_not_descriptor
 test_module_delattr
 test_module_doc_and_repr_depth
 test_module_file_attr
@@ -419,6 +432,7 @@ test_operator_messages
 test_ordereddict
 test_ordering_typeerror
 test_oserror
+test_os_write_buffer
 test_pep646
 test_pep695_classdict
 test_pep695
@@ -429,6 +443,7 @@ test_percent_star
 test_percent_typecheck
 test_phase4
 test_phase6
+test_poll_eintr
 test_posix_files
 test_posix_more
 test_posix_pathlike
@@ -492,10 +507,14 @@ test_set_probe_sequence
 test_sets
 test_set_subclass_clear_dealloc
 test_set_subclass_compare
+test_set_subclass_protocol
 test_set_tombstone_reuse
 test_set_value_probe
 test_set_variadic
+test_shutdown_finalizer
+test_signal_eintr
 test_signal
+test_sigpipe_ignored
 test_simplenamespace
 test_singleton_construct
 test_size_and_recursion_limits
@@ -542,6 +561,7 @@ test_str_char_singletons
 test_str_compare_spec
 test_str_decode
 test_strfmt
+test_str_format_dunder
 test_str_format
 test_strings2
 test_strings
@@ -566,6 +586,7 @@ test_str_translate_mapping
 test_str_translate
 test_struct_binascii
 test_structseq
+test_structseq_tail
 test_str_unicode_space
 test_subclass_binop
 test_subclass_compare_float
@@ -574,6 +595,7 @@ test_subclasses
 test_subclass_first
 test_subclass_item_slots
 test_subprocess_child
+test_subprocess_signal_reset
 test_subscr_spec
 test_sum_compensated
 test_sum_int_fast
@@ -588,15 +610,18 @@ test_sys_argv
 test_sys_attrs
 test_sys_call_tracing
 test_sys_exception
+test_sys_executable
 test_sys_exit
 test_termios
 test_time_module
+test_time_ns
 test_traceback_carets
 test_traceback
 test_traceback_tb_next
 test_truthiness
 test_tuple_identity
 test_tuples
+test_typealias_scope_name
 test_type_cache
 test_type_comments
 test_type_constructors
@@ -606,10 +631,12 @@ test_type_flags
 test_type_immutable_and_subclasses
 test_type_layout
 test_type_metatype
+test_type_qualname
 test_type_repr
 test_type_three_arg
 test_unary
 test_unbound_local
+test_uncallable_bind_lifetime
 test_unicode_case
 test_unicode_names
 test_unicode_numbers
@@ -633,6 +660,7 @@ test_weakref_types
 test_with_exit_raises
 test_wrong_answers
 test_zero_valued_lookup
+test_zip_strict_message
 test_zip_strict
 test_zip_uneven
 test_zlib

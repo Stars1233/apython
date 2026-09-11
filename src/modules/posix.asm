@@ -1609,7 +1609,13 @@ DEF_FUNC posix_read, PRD_FRAME
     mov rdi, r12
     mov rsi, rax
     mov rdx, rbx
-    call sys_read
+    ; io_read_retry, not sys_read: os.read blocks, and a Python signal
+    ; handler has to run while it is blocked.  _pyio's FileIO is built on
+    ; os.read, so CPython's test_io hangs on this one too.
+    extern io_read_retry
+    call io_read_retry
+    cmp rax, -4
+    je .prd_handler_raised
     cmp rax, -4095
     jb .prd_ok
     push rax
@@ -1619,6 +1625,17 @@ DEF_FUNC posix_read, PRD_FRAME
     pop rax
     pop rax
     POSIX_CHECK rax, 0
+.prd_handler_raised:
+    ; A Python signal handler raised while the read was interrupted; its
+    ; exception is the caller's, and the buffer is this frame's.
+    mov rdi, [rbp - PRD_BUF]
+    call ap_free
+    extern eval_exception_unwind
+    pop r12
+    pop rbx
+    leave
+    jmp eval_exception_unwind
+
 .prd_ok:
     mov rdi, [rbp - PRD_BUF]
     mov rsi, rax
@@ -1648,39 +1665,44 @@ DEF_FUNC posix_read, PRD_FRAME
 END_FUNC posix_read
 
 ;; posix.write(fd, data) -> int
-DEF_FUNC posix_write, 16
+;;
+;; 24, not 16: the `push rbx` below comes after a branch, so `push rbp` plus
+;; the frame plus that push left rsp eight out for the whole body.  That was
+;; harmless while the only call was a leaf syscall; io_write_retry reaches
+;; signal_run_pending and from there arbitrary Python.
+DEF_FUNC posix_write, 24
+    ; The push comes BEFORE the arity branch: after it, lint's push counter --
+    ; which stops at the first non-push instruction -- could not see it, and
+    ; the frame that satisfies the real parity looked wrong to the gate.  The
+    ; refusal below does not return, so it owes nothing back.
+    push rbx
     cmp rsi, 2
     jl .pwr_argerr
-    push rbx
     mov rbx, rdi
     mov rdi, [rbx]
     call posix_int_arg
     mov rdi, rax                    ; fd... but the buffer comes next
     push rdi
     push rdi
+    ; Anything bytes-LIKE, which is what CPython's Py_buffer means here.  This
+    ; took bytes and bytearray only, so a MEMORYVIEW was refused -- and
+    ; subprocess's _communicate writes one: `os.write(key.fd, chunk)` where
+    ; chunk is a slice of memoryview(input).  Every communicate() with input
+    ; died there, and with the pipe still open the child never saw EOF and
+    ; nobody ever exited.
     mov rdi, [rbx + 8]
-    V_TEST_PTR rdi, rax
-    ja .pwr_badbuf
-    mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel bytes_type]
-    cmp rax, rcx
-    je .pwr_bytes
-    lea rcx, [rel bytearray_type]
-    cmp rax, rcx
-    jne .pwr_badbuf
-    ; A bytearray keeps its data out of line, so it cannot be read through
-    ; the bytes offsets -- which is what this did while the two layouts
-    ; happened to match.
-    mov rdx, [rdi + PyByteArrayObject.ob_size]
-    mov rsi, [rdi + PyByteArrayObject.ob_bytes]
-    jmp .pwr_have_buf
-.pwr_bytes:
-    mov rdx, [rdi + PyBytesObject.ob_size]
-    lea rsi, [rdi + PyBytesObject.data]
-.pwr_have_buf:
+    extern bytes_like_ptr_len
+    call bytes_like_ptr_len         ; rax = data, r10 = length, ecx = ok
+    test ecx, ecx
+    jz .pwr_badbuf
+    mov rsi, rax
+    mov rdx, r10
     pop rdi
     pop rdi
-    call sys_write
+    extern io_write_retry
+    call io_write_retry
+    cmp rax, -4
+    je .pwr_handler_raised
     POSIX_CHECK rax, 0
     mov rdi, rax
     call int_from_i64
@@ -1689,6 +1711,14 @@ DEF_FUNC posix_write, 16
     pop rbx
     leave
     ret
+.pwr_handler_raised:
+    ; A Python signal handler raised while the write was interrupted; its
+    ; exception is the caller's.
+    extern eval_exception_unwind
+    pop rbx
+    leave
+    jmp eval_exception_unwind
+
 .pwr_badbuf:
     pop rdi
     pop rdi

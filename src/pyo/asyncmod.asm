@@ -1335,7 +1335,7 @@ io_wait_awaitable_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_AWAITABLE        ; tp_flags
     dq 0                        ; tp_bases
     dq io_wait_awaitable_traverse ; tp_traverse
     dq 0                        ; tp_clear
@@ -1366,7 +1366,7 @@ sleep_awaitable_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_AWAITABLE                        ; tp_flags
     dq 0                        ; tp_bases
     dq sleep_awaitable_traverse                        ; tp_traverse
     dq 0                        ; tp_clear
@@ -1398,7 +1398,7 @@ gather_awaitable_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_AWAITABLE                        ; tp_flags
     dq 0                        ; tp_bases
     dq gather_awaitable_traverse                        ; tp_traverse
     dq gather_awaitable_clear                        ; tp_clear
@@ -1430,7 +1430,7 @@ wait_for_awaitable_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC                        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_AWAITABLE                        ; tp_flags
     dq 0                        ; tp_bases
     dq wait_for_awaitable_traverse                        ; tp_traverse
     dq wait_for_awaitable_clear                        ; tp_clear
