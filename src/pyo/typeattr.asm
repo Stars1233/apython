@@ -455,6 +455,20 @@ DEF_FUNC type_setattr
     pop rsi
     test eax, eax
     jz .ts_rename
+
+    ; --- __qualname__ is ht_qualname, not a dict entry ---
+    ; It comes out of the class body's namespace at build time, so a later
+    ; `C.__qualname__ = "x"` has to go to the same place or the class keeps
+    ; the one it was born with.
+    lea rdi, [rsi + PyStrObject.data]
+    push rsi
+    push rdx
+    CSTRING rsi, "__qualname__"
+    call ap_strcmp
+    pop rdx
+    pop rsi
+    test eax, eax
+    jz .ts_requalify
 .ts_not_name:
     mov rdi, rbx
     mov rdi, [rbx + PyTypeObject.tp_dict]
@@ -572,6 +586,82 @@ DEF_FUNC type_setattr
     pop rbx
     leave
     ret
+.ts_requalify:
+    ; CPython refuses a non-str and refuses a delete.  A heaptype is the only
+    ; kind that reaches here at all; the static-type refusal is above.
+    mov rax, rdx
+    test rax, rax
+    jz .ts_requalify_del
+    V_TEST_PTR rax, rcx
+    ja .ts_requalify_bad
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdi, [rel str_type]
+    cmp rcx, rdi
+    jne .ts_requalify_bad
+    mov rdi, rax
+    push rax
+    call obj_incref
+    pop rax
+    mov rcx, [rbx + HT_QUALNAME]
+    mov [rbx + HT_QUALNAME], rax
+    test rcx, rcx
+    jz .ts_rename_done
+    mov rdi, rcx
+    call obj_decref
+    jmp .ts_rename_done
+
+.ts_requalify_bad:
+    ; "can only assign string to C.__qualname__, not 'int'" -- both halves are
+    ; the caller's, so it is built the way the immutable-type refusal below is.
+    ;
+    ; The value goes on the machine stack, not into a callee-saved register:
+    ; r13 is the eval loop's value-stack top, and this path leaves through the
+    ; unwinder rather than returning.
+    push rdx
+    push rdx                            ; and a pad, to keep rsp even
+    lea r8, [rel ts_imm_buf]
+    xor ecx, ecx
+    CSTRING r9, "can only assign string to "
+    call ts_imm_append
+    mov r9, [rbx + PyTypeObject.tp_name]
+    call ts_imm_append
+    CSTRING r9, ".__qualname__, not '"
+    call ts_imm_append
+    mov rdi, [rsp]
+    push r8
+    push rcx
+    call value_type
+    pop rcx
+    pop r8
+    xor r9d, r9d
+    test rax, rax
+    jz .ts_requalify_nameless
+    mov r9, [rax + PyTypeObject.tp_name]
+.ts_requalify_nameless:
+    call ts_imm_append
+    CSTRING r9, "'"
+    call ts_imm_append
+    mov byte [r8 + rcx], 0
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel ts_imm_buf]
+    call raise_exception
+
+.ts_requalify_del:
+    ; CPython says "immutable type" here even for a class that is not one:
+    ; type_setattro reaches its shared refusal before the two part company.
+    lea r8, [rel ts_imm_buf]
+    xor ecx, ecx
+    CSTRING r9, "cannot delete '__qualname__' attribute of immutable type '"
+    call ts_imm_append
+    mov r9, [rbx + PyTypeObject.tp_name]
+    call ts_imm_append
+    CSTRING r9, "'"
+    call ts_imm_append
+    mov byte [r8 + rcx], 0
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel ts_imm_buf]
+    call raise_exception
+
 .ts_immutable:
     ; "cannot set 'foo' attribute of immutable type 'str'".  Both halves are
     ; the caller's, so the message is built rather than named.  CPython says

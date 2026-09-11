@@ -893,6 +893,18 @@ endstruc
 
 TYPE_OBJECT_SIZE equ PyTypeObject_size
 
+; Two words past the type, for a HEAPTYPE only -- a static type's table ends at
+; tp_tailslots and nothing reads past it.
+;
+; The first is where a struct sequence keeps its descriptor (STRUCTSEQ_DESC,
+; below), so a class that derives from one finds it where it looks; the second
+; is CPython's ht_qualname.  __qualname__ cannot stay in tp_dict: it is a
+; getset on `type` in CPython, so `'__qualname__' in C.__dict__` is False
+; there and an INSTANCE of C cannot see it -- and here every instance of every
+; class answered its class's, and vars(C) had an entry CPython's does not.
+HT_QUALNAME        equ PyTypeObject_size + 8
+HEAPTYPE_ALLOC_SIZE equ PyTypeObject_size + 16
+
 ; Number methods structure
 struc PyNumberMethods
     .nb_add:           resq 1  ; +0

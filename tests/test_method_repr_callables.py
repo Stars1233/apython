@@ -52,6 +52,16 @@ f.__qualname__ = 42
 f.__name__ = "not used"
 print(name_of(types.MethodType(f, o)))
 
+# __name__ is reached only when there is no __qualname__ at all.
+class NoQual:
+    def __call__(self, *a):
+        return 8
+
+
+f = NoQual()
+f.__name__ = "by_name"
+print(name_of(types.MethodType(f, o)))
+
 # An empty name is a name.
 f = Callable()
 f.__qualname__ = ""

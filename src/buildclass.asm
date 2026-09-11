@@ -716,6 +716,65 @@ DEF_FUNC_LOCAL bc_solid_base
     ret
 END_FUNC bc_solid_base
 
+;; ============================================================================
+;; bc_take_qualname(r12 = the new heaptype) -> nothing; may raise
+;;
+;; Moves __qualname__ out of tp_dict and into ht_qualname.  CPython's type_new
+;; does the same and refuses a non-str with "type __qualname__ must be a str,
+;; not X" -- so does this, and the class is not built.
+;; ============================================================================
+BTQ_KEY   equ 8
+BTQ_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL bc_take_qualname, BTQ_FRAME
+    mov rdi, [r12 + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .btq_done
+    lea rdi, [rel bc_qualname_name]
+    call str_from_cstr_heap
+    test rax, rax
+    jz .btq_done
+    mov [rbp - BTQ_KEY], rax
+    mov rdi, [r12 + PyTypeObject.tp_dict]
+    mov rsi, rax
+    call dict_get
+    test rax, rax
+    jz .btq_release_key
+
+    ; A str, or nothing doing.  dict_get answers a borrowed Value.
+    V_TEST_PTR rax, rcx
+    ja .btq_not_str
+    mov rcx, [rax + PyObject.ob_type]
+    extern str_type
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    jne .btq_not_str
+
+    INCREF rax                  ; ht_qualname owns it
+    mov [r12 + HT_QUALNAME], rax
+    mov rdi, [r12 + PyTypeObject.tp_dict]
+    mov rsi, [rbp - BTQ_KEY]
+    extern dict_del_opt
+    call dict_del_opt
+
+.btq_release_key:
+    mov rdi, [rbp - BTQ_KEY]
+    call obj_decref
+.btq_done:
+    leave
+    ret
+
+.btq_not_str:
+    mov rsi, rax
+    lea rdi, [rel bc_qualname_not_str]
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name      ; does not return
+END_FUNC bc_take_qualname
+
+section .rodata
+bc_qualname_name:    db "__qualname__", 0
+bc_qualname_not_str: db "type __qualname__ must be a str, not ", 1, 0
+section .text
+
 DEF_FUNC type_from_parts
     push rbx
     push r12
@@ -940,8 +999,10 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     mov rax, [rbp - TFP_BASE]
     mov rdx, r15                ; restore namespace (scan clobbered rdx)
 
-    ; Allocate the type object (GC-tracked)
-    mov edi, TYPE_OBJECT_SIZE
+    ; Allocate the type object (GC-tracked).  A heaptype gets two words past
+    ; the table: the struct-sequence descriptor slot a derived class inherits
+    ; the meaning of, and ht_qualname -- see object.inc.
+    mov edi, HEAPTYPE_ALLOC_SIZE
     lea rsi, [rel user_type_metatype]
     call gc_alloc
     mov r12, rax            ; r12 = new type object (ob_refcnt=1, ob_type set)
@@ -969,7 +1030,7 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     ; Zero-fill the type object (skip ob_refcnt and ob_type, already set by gc_alloc)
     lea rdi, [r12 + 16]
     xor eax, eax
-    mov ecx, (TYPE_OBJECT_SIZE - 16) / 8
+    mov ecx, (HEAPTYPE_ALLOC_SIZE - 16) / 8
     rep stosq
 
     ; tp_name: point to class_name string's data area
@@ -1106,6 +1167,13 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
 
     ; tp_dict = class_dict (ownership transferred from r15, no INCREF needed)
     mov [r12 + PyTypeObject.tp_dict], r15
+
+    ; __qualname__ comes OUT of the dict and into ht_qualname, as CPython's
+    ; type_new takes it out.  It is a getset on `type` there, so
+    ; `'__qualname__' in C.__dict__` is False and an instance of C cannot see
+    ; it; here it sat in tp_dict, so every instance of every class answered
+    ; its class's -- and vars(C) had an entry CPython's does not.
+    call bc_take_qualname
 
     ; __new__ is an implicit staticmethod.  Without the wrapper, looking it up
     ; through the class or through super() binds it like an ordinary method

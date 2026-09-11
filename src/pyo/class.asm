@@ -2126,18 +2126,17 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
 
 .tga_return_qualname:
     ; A class defined in Python records its own, which carries the enclosing
-    ; scope -- "outer.<locals>.Local".  Only a builtin type falls through to
-    ; __name__.
-    mov rdi, [r12 + PyTypeObject.tp_dict]
-    test rdi, rdi
+    ; scope -- "outer.<locals>.Local".  It lives in ht_qualname, past the type
+    ; and only on a heaptype, because it is a getset on `type` in CPython and
+    ; must not be visible in tp_dict or from an instance.  Only a builtin type
+    ; falls through to __name__.
+    test qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jz .tga_return_name
-    mov rsi, rbx
-    extern dict_get
-    call dict_get
+    mov rax, [r12 + HT_QUALNAME]
     test rax, rax
     jz .tga_return_name
-    V_UNPACK rax, rdx
-    INCREF_VAL rax, rdx
+    INCREF rax
+    mov edx, TAG_PTR
     pop r12
     pop rbx
     leave
@@ -2424,6 +2423,14 @@ DEF_FUNC user_type_dealloc, 16           ; 2 pushes, so rsp is 16-aligned
     sub rdi, PyStrObject.data   ; point back to PyStrObject base
     call obj_decref
 .utd_no_name:
+
+    ; ...and ht_qualname, which the dict no longer holds for us.
+    mov rdi, [rbx + HT_QUALNAME]
+    test rdi, rdi
+    jz .utd_no_qualname
+    mov qword [rbx + HT_QUALNAME], 0
+    call obj_decref
+.utd_no_qualname:
 
     ; DECREF tp_base if present
     mov rdi, [rbx + PyTypeObject.tp_base]
