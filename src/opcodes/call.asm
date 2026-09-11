@@ -1104,11 +1104,22 @@ DEF_FUNC op_before_with
     ; back what is in the slot, which is the method, and nobody gives back the
     ; reference VPOP_VAL took on mgr.  .bw_no_exit above needs no such line --
     ; it is reached before the push, with mgr still in its own slot.
+    ; COMPOSE FIRST, then release.  The message names the manager's TYPE, and
+    ; this decref can be the last one -- an __exit__ bound from a descriptor
+    ; whose __get__ answered a module-level function holds no reference to it
+    ; -- so naming the type afterwards read a freed object.
+    mov rsi, [rbx + PyObject.ob_type]
+    CSTRING rdi, `'\x01' object does not support the context manager protocol`
+    extern type_name_message
+    call type_name_message      ; rax = the composed C string, in a static buffer
+    push rax
+    push rax
     mov rdi, [rbp - BW_MGR]
     call obj_decref
-    mov rsi, rbx
-    CSTRING rdi, `'\x01' object does not support the context manager protocol`
-    jmp raise_type_error_with_name
+    pop rsi
+    pop rax
+    lea rdi, [rel exc_TypeError_type]
+    call raise_exception        ; does not return
 
 .bw_lookup_raised_after_exit:
     ; __exit__ is on the value stack in mgr's slot; the unwinder gives that

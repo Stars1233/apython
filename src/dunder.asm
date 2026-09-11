@@ -471,14 +471,27 @@ DEF_FUNC dunder_call_1
     ; A bound result that is not callable, or a descriptor object with no
     ; __call__.  The caller reads a NULL as "absent", and a slot wrapper turns
     ; that into "failed without an exception", so say what is wrong.
-    test r13, r13
+    ; COMPOSE FIRST, then release: the message names the bound object's TYPE
+    ; and this is usually its last reference, so naming it afterwards read a
+    ; freed object.
+    mov rdi, r12
+    extern value_type
+    call value_type
+    test rax, rax
     jz .dc1_name_it
-    push r12
-    push r12
+    mov rsi, rax
+    CSTRING rdi, `'\x01' object is not callable`
+    extern type_name_message
+    call type_name_message      ; rax = the composed C string
+    mov r14, rax
+    test r13, r13
+    jz .dc1_raise_composed
     mov rdi, r12
     DECREF_V rdi, rcx
-    pop r12
-    pop r12
+.dc1_raise_composed:
+    lea rdi, [rel exc_TypeError_type]
+    mov rsi, r14
+    call raise_exception        ; does not return
 .dc1_name_it:
     mov rsi, r12
     CSTRING rdi, `'\x01' object is not callable`
@@ -618,14 +631,33 @@ DEF_FUNC dunder_call_2
 .bind_uncallable:
     pop rcx
     pop rcx
-    test rcx, rcx
+    ; COMPOSE FIRST, then release: the message names the bound object's TYPE
+    ; and this is usually its last reference, so naming it afterwards read a
+    ; freed object.
+    push rcx
+    push rcx
+    mov rdi, r13
+    call value_type
+    pop rcx
+    pop rcx
+    test rax, rax
     jz .dc2_name_it
-    push r13
-    push r13
+    push rcx
+    push rcx
+    mov rsi, rax
+    CSTRING rdi, `'\x01' object is not callable`
+    call type_name_message      ; rax = the composed C string
+    pop rcx
+    pop rcx
+    mov r14, rax
+    test rcx, rcx
+    jz .dc2_raise_composed
     mov rdi, r13
     DECREF_V rdi, rcx
-    pop r13
-    pop r13
+.dc2_raise_composed:
+    lea rdi, [rel exc_TypeError_type]
+    mov rsi, r14
+    call raise_exception        ; does not return
 .dc2_name_it:
     mov rsi, r13
     CSTRING rdi, `'\x01' object is not callable`
@@ -797,14 +829,25 @@ DEF_FUNC dunder_call_3, DC3_FRAME
     ret                     ; rax is already the Value
 
 .bind_uncallable:
+    ; COMPOSE FIRST, then release: the message names the bound object's TYPE
+    ; and this is usually its last reference, so naming it afterwards read a
+    ; freed object.
+    mov rdi, r14
+    call value_type
+    test rax, rax
+    jz .dc3_name_it
+    mov rsi, rax
+    CSTRING rdi, `'\x01' object is not callable`
+    call type_name_message      ; rax = the composed C string
+    mov r15, rax
     cmp qword [rbp - DC3_BOUND], 0
-    je .dc3_name_it
-    push r14
-    push r14
+    je .dc3_raise_composed
     mov rdi, r14
     DECREF_V rdi, rcx
-    pop r14
-    pop r14
+.dc3_raise_composed:
+    lea rdi, [rel exc_TypeError_type]
+    mov rsi, r15
+    call raise_exception        ; does not return
 .dc3_name_it:
     mov rsi, r14
     CSTRING rdi, `'\x01' object is not callable`

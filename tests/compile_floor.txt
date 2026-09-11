@@ -595,6 +595,7 @@ test_subclasses
 test_subclass_first
 test_subclass_item_slots
 test_subprocess_child
+test_subprocess_signal_reset
 test_subscr_spec
 test_sum_compensated
 test_sum_int_fast
@@ -635,6 +636,7 @@ test_type_repr
 test_type_three_arg
 test_unary
 test_unbound_local
+test_uncallable_bind_lifetime
 test_unicode_case
 test_unicode_names
 test_unicode_numbers

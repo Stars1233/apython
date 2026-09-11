@@ -1213,16 +1213,32 @@ DEF_FUNC slot_tp_call, STC_FRAME
     jmp .stc_released
 
 .stc_bound_uncallable:
-    ; The message names what __get__ answered, so the release has to come
-    ; after the name is composed -- .stc_not_callable does that and then
-    ; raises, so the reference is dropped here and STC_BOUND cleared.
-    mov qword [rbp - STC_BOUND], 0
-    push rax
-    push rax
+    ; The message names what __get__ answered, and this is usually its last
+    ; reference -- so COMPOSE FIRST and release after.  The order used to be
+    ; the other way round, whatever the comment said, and .stc_not_callable
+    ; read the freed object's ob_type.
     mov rdi, rax
+    extern value_type
+    call value_type
+    test rax, rax
+    jz .stc_bound_anon
+    mov rsi, rax
+    CSTRING rdi, `'\x01' object is not callable`
+    call type_name_message      ; rax = the composed C string
+    mov rbx, rax                ; rbx is this frame's, and pops below restore it
+    mov rdi, [rbp - STC_FUNC]
     DECREF_V rdi, rcx
-    pop rax
-    pop rax
+    mov qword [rbp - STC_BOUND], 0
+    lea rdi, [rel exc_TypeError_type]
+    mov rsi, rbx
+    call set_exception
+    jmp .stc_fail
+
+.stc_bound_anon:
+    mov rdi, [rbp - STC_FUNC]
+    DECREF_V rdi, rcx
+    mov qword [rbp - STC_BOUND], 0
+    mov qword [rbp - STC_FUNC], 0
     jmp .stc_not_callable
 
 .stc_get_raised:
