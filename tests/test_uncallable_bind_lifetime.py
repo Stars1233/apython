@@ -81,3 +81,35 @@ except TypeError as e:
     print("with 2:", e)
 
 print("done")
+
+
+# ---------------------------------------------------------------------------
+# The same rule in a different place: str.join names the offending item's TYPE,
+# and the temporary sequence it materialised holds the ONLY reference to that
+# item when the argument was a generator.  Releasing the temporary first read
+# ob_type out of the block just freed.
+class Weird:
+    pass
+
+
+for call in (lambda: "".join(Weird() for _ in range(1)),
+             lambda: ",".join(Weird() for _ in range(3)),
+             lambda: "".join(x for x in ["ok", Weird()]),
+             lambda: "".join(iter([Weird()])),
+             lambda: "-".join(x for x in (1,)),
+             lambda: "".join([Weird()])):
+    try:
+        call()
+    except TypeError as e:
+        print(e)
+
+# bytes.join takes the same road and must stay right.
+for call in (lambda: b"".join(Weird() for _ in range(1)),
+             lambda: b",".join(type("E2", (), {})() for _ in range(2)),
+             lambda: b"".join([1])):
+    try:
+        call()
+    except TypeError as e:
+        print(e)
+
+print("done 2")

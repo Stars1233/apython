@@ -1477,10 +1477,20 @@ DEF_FUNC str_method_join
     mov rax, [rax + rcx * 8]
     push rcx
     push rax
+    ; A reference of OUR OWN on the offending item before anything is
+    ; released.  The temporary sequence holds the only one when the argument
+    ; was a generator -- `"".join(C() for _ in range(1))` -- and the message
+    ; names the item's TYPE, so releasing it first read ob_type out of the
+    ; block just freed.  It is not given back: this path ends in a raise that
+    ; does not return, and there is no moment between reading the type and
+    ; unwinding at which a decref would be safe.  One object on a path that
+    ; raises, as GET_AWAITABLE's own non-iterator arm says.
+    mov rdi, rax
+    INCREF_V rdi, rdx
     mov rdi, rbx
     call obj_decref         ; DECREF owned separator
     JOIN_RELEASE_TMP
-    pop rdi                 ; the offending item
+    pop rdi                 ; the offending item, held by the count above
     extern value_type
     call value_type
     mov rsi, rax
