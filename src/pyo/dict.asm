@@ -1249,8 +1249,9 @@ dict_len:
     ret
 
 ;; ============================================================================
-;; dict_subscript(rdi=dict, rsi=key, edx=key_tag) -> (rax=value, edx=value_tag)
-;; mp_subscript: look up key, raise KeyError if not found
+;; dict_subscript(rdi = dict, rsi = key Value) -> rax = the value, as a Value
+;; mp_subscript: look up the key; a dict SUBCLASS with a __missing__ answers
+;; its own misses, and anything else raises KeyError naming the key.
 ;; ============================================================================
 DSUB_DICT  equ 8
 DSUB_FRAME equ 24           ; + 1 push = 32, 16-aligned
@@ -1301,10 +1302,12 @@ DEF_FUNC dict_subscript, DSUB_FRAME
     call raise_key_error
 
 .ds_missing_answered:
-    mov edx, TAG_PTR            ; the Value is whatever __missing__ returned
+    ; dunder_call_2 hands back a Value and this function ANSWERS with a Value
+    ; -- the docblock above still described the old (payload, tag) pair, and
+    ; unpacking here turned a returned int immediate into a pointer to the
+    ; number.  `__missing__` returning 42 dereferenced address 42.
     pop rbx
     leave
-    V_UNPACK rax, rdx
     ret
 
 .ds_missing_raised:

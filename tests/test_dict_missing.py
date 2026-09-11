@@ -62,6 +62,23 @@ except ValueError as e:
     print(True, "a raising __missing__ propagates:", e)
 
 
+# What __missing__ RETURNS is a Value, and an int or a float is an immediate
+# rather than a pointer -- unpacking one on the way out turned 42 into a
+# pointer to address 42.  Every kind, therefore, not just the str this test
+# used to check.
+class Kinds(dict):
+    def __init__(self, answer):
+        self.answer = answer
+
+    def __missing__(self, key):
+        return self.answer
+
+
+for answer in (42, -7, 2 ** 70, 1.5, -0.0, None, True, False, "s", (1, 2), [3]):
+    got = Kinds(answer)["k"]
+    print(repr(got), got == answer, "__missing__ returning %s" % type(answer).__name__)
+
+
 # The one in the standard library.
 d = collections.defaultdict(list)
 d["a"].append(1)
