@@ -634,11 +634,23 @@ DEF_FUNC_BARE ast_rawname_at
 END_FUNC ast_rawname_at
 
 ;; ============================================================================
-;; ast_obj_at(Comp *c, uint32_t idx) -> rax = the borrowed Value
+;; ast_obj_at(Comp *c, uint32_t idx) -> rax = the borrowed Value, or 0 when
+;;   the index is past the end
+;;
+;; BOUNDS-CHECKED, as ast_rawname_at above it is.  Object indices and node
+;; indices come from different arenas and overlap freely, so a caller that
+;; reads a NODE field as an object index -- which is the oldest bug pattern in
+;; this compiler -- was a wild read here rather than a miss.  Every caller
+;; already treats 0 as "not a name".
 ;; ============================================================================
 DEF_FUNC_BARE ast_obj_at
+    cmp rsi, [rdi + Comp.objs + Buf.len]
+    jae .aoa_none
     mov rax, [rdi + Comp.objs + Buf.data]
     mov rax, [rax + rsi*8]
+    ret
+.aoa_none:
+    xor eax, eax
     ret
 END_FUNC ast_obj_at
 

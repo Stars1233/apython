@@ -620,6 +620,7 @@ test_traceback_tb_next
 test_truthiness
 test_tuple_identity
 test_tuples
+test_typealias_scope_name
 test_type_cache
 test_type_comments
 test_type_constructors

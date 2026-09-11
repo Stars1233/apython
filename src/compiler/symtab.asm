@@ -3021,6 +3021,38 @@ DEF_FUNC sym_enter_typealias, SET_FRAME
     mov rcx, r13
     call sym_new
     mov r12, rax
+
+    ; The scope's NAME.  sym_new reads node.a as an OBJECT index, which is
+    ; right for a function or a class and wrong here: ps_type_alias puts an
+    ; AST_NAME NODE index there, and the two arenas overlap freely -- so it
+    ; read whatever sat at that offset in comp.objs, past the end of it for
+    ; any but the smallest file.  The name is one level further in.
+    mov rdi, rbx
+    mov esi, r13d
+    call ast_at
+    mov esi, [rax + AstNode.a]          ; the AST_NAME node
+    mov rdi, rbx
+    call ast_at
+    mov esi, [rax + AstNode.a]          ; its object index: the interned str
+    mov rdi, rbx
+    call ast_obj_at
+    V_TEST_PTR rax, rcx
+    ja .set_unnamed
+    test rax, rax
+    jz .set_unnamed
+    ; sym_new answers an INDEX, not a pointer; sym_at is what turns one into
+    ; the other, and it has to be recomputed here because the buffer may have
+    ; moved since.
+    push rax
+    sub rsp, 8
+    mov rdi, rbx
+    mov esi, r12d
+    call sym_at
+    add rsp, 8
+    pop rcx
+    mov [rax + Scope.name], rcx
+.set_unnamed:
+
     mov rdi, rbx
     mov rsi, r13
     call ast_at
