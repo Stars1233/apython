@@ -507,6 +507,7 @@ test_set_tombstone_reuse
 test_set_value_probe
 test_set_variadic
 test_shutdown_finalizer
+test_signal_eintr
 test_signal
 test_simplenamespace
 test_singleton_construct

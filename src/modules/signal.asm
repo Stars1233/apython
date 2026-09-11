@@ -105,9 +105,20 @@ END_FUNC signal_trampoline
 ;; ============================================================================
 ;; signal_install(rdi = signum, rsi = the C handler to install) -> rax = 0 ok
 ;;
-;; sigaction(2) with SA_RESTART, which is what CPython installs: a slow
-;; syscall interrupted by a handled signal is restarted rather than failing
-;; with EINTR, and PEP 475 made that the language's behaviour.
+;; sigaction(2) with sa_flags = 0, which is what CPython's PyOS_setsig passes.
+;;
+;; It used to pass SA_RESTART, on the reading that PEP 475 made restarting the
+;; language's behaviour.  PEP 475 says the retry happens -- it does not say the
+;; KERNEL does it, and CPython deliberately does not let it: with SA_RESTART a
+;; blocked read never returns, so the Python handler cannot run until the read
+;; finishes, and a program whose handler is what UNBLOCKS the read waits for
+;; ever.  `signal.alarm(1)` during `f.read(6)`, where the handler writes the
+;; rest of the data, is exactly that shape, and it is CPython's own
+;; test_io.check_interrupted_read_retry.
+;;
+;; The restart PEP 475 promises is done in software instead: the syscall
+;; funnels in runtime.asm retry EINTR themselves, and the ones with a Python
+;; frame to run a handler on run signal_run_pending in between.
 ;; ============================================================================
 SI_NUM   equ 8
 SI_FRAME equ 16             ; + 0 pushes = 16
@@ -115,7 +126,7 @@ DEF_FUNC_LOCAL signal_install, SI_FRAME
     mov [rbp - SI_NUM], rdi
     lea rax, [rel sig_act]
     mov [rax], rsi                          ; sa_handler
-    mov dword [rax + SIG_SA_FLAGS], SIG_SA_RESTART
+    mov dword [rax + SIG_SA_FLAGS], 0
     ; An empty sa_mask: only the signal being delivered is blocked, which is
     ; sigaction's own default and what CPython asks for.
     lea rdi, [rax + SIG_SA_MASK]
