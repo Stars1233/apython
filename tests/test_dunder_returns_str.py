@@ -95,3 +95,36 @@ print("%s %r" % (o, o))
 print([o], {1: o})
 
 print("done")
+
+
+# A __repr__ that calls str() on something else NESTS.  The choice of which
+# name to report has to be per-invocation: a global flag is cleared by the
+# inner call on the way out, and left set by an inner raise.
+class Inner:
+    pass
+
+
+class Outer:
+    def __repr__(self):
+        str(Inner())
+        return 5
+
+
+show("str(Outer)", lambda: str(Outer()))
+show("repr(Outer)", lambda: repr(Outer()))
+show("str again", lambda: str(Outer()))
+
+
+class Deep:
+    def __repr__(self):
+        try:
+            str(Outer())
+        except TypeError:
+            pass
+        return 7
+
+
+show("str(Deep)", lambda: str(Deep()))
+show("repr(Deep)", lambda: repr(Deep()))
+
+print("done 2")

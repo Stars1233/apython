@@ -1196,20 +1196,34 @@ DEF_FUNC slot_tp_call, STC_FRAME
 
 .stc_bound_call:
     ; Bound: the arguments go through as they came, and this frame owes the
-    ; callable a release.
+    ; callable a release -- on the failing road too, which is why that one
+    ; does not jump straight to .stc_not_callable.
     mov rax, [rbp - STC_FUNC]
     V_TEST_PTR rax, rcx
-    ja .stc_not_callable
+    ja .stc_bound_uncallable
     mov rcx, [rax + PyObject.ob_type]
     mov rcx, [rcx + PyTypeObject.tp_call]
     test rcx, rcx
-    jz .stc_not_callable
+    jz .stc_bound_uncallable
     mov rdi, rax
     mov rsi, rbx
     mov rdx, r12
     call rcx
     mov rbx, rax                ; the result, kept across the release below
     jmp .stc_released
+
+.stc_bound_uncallable:
+    ; The message names what __get__ answered, so the release has to come
+    ; after the name is composed -- .stc_not_callable does that and then
+    ; raises, so the reference is dropped here and STC_BOUND cleared.
+    mov qword [rbp - STC_BOUND], 0
+    push rax
+    push rax
+    mov rdi, rax
+    DECREF_V rdi, rcx
+    pop rax
+    pop rax
+    jmp .stc_not_callable
 
 .stc_get_raised:
     ; __get__ raised; its exception is pending and is the caller's.

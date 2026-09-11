@@ -505,6 +505,8 @@ DEF_FUNC base_slot
 END_FUNC base_slot
 
 IR_EXC   equ 8
+IR_ASSTR equ 16            ; 1 when str() sent us here, so a non-str answer is
+                           ; reported as __str__ and not as __repr__
 IR_FRAME equ 24            ; + 1 push = 32, 16-aligned
 
 ;; ============================================================================
@@ -525,6 +527,7 @@ extern recursion_limit
 extern exc_RecursionError_type
 extern set_exception
 DEF_FUNC instance_repr
+    xor esi, esi                ; repr() asked, so report __repr__
     C_RECURSION_ENTER .ir_too_deep
     call instance_repr_inner
     C_RECURSION_LEAVE
@@ -539,10 +542,41 @@ DEF_FUNC instance_repr
     ret
 END_FUNC instance_repr
 
+;; ============================================================================
+;; instance_repr_as_str(rdi = an instance) -> the same as instance_repr
+;;
+;; What str() falls back to when the class has no __str__ of its own.  It is
+;; instance_repr with one difference, and the difference is only in the
+;; message a non-str answer gets: CPython checks that result at the str()
+;; level, so it says "__str__ returned non-string".
+;; ============================================================================
+DEF_FUNC_LOCAL instance_repr_as_str
+    mov esi, 1
+    C_RECURSION_ENTER .iras_too_deep
+    call instance_repr_inner
+    C_RECURSION_LEAVE
+    leave
+    ret
+.iras_too_deep:
+    C_RECURSION_LEAVE
+    SET_EXC exc_RecursionError_type, \
+            "maximum recursion depth exceeded while getting the repr of an object"
+    RET_NULL
+    leave
+    ret
+END_FUNC instance_repr_as_str
+
 ;; instance_repr_inner(rdi = an instance) -> the same; the wrapper above only
 ;; bounds the recursion.
 DEF_FUNC_LOCAL instance_repr_inner, IR_FRAME
     push rbx
+    ; AFTER the push, so lint's counter -- which stops at the first non-push
+    ; instruction -- can still see it and check the frame's parity.
+    mov [rbp - IR_ASSTR], rsi   ; a frame slot, not a global: a __repr__ that
+                                ; calls str() on something else nests, and a
+                                ; global would be cleared by the inner call --
+                                ; or left set by an inner RAISE, which no
+                                ; save-and-restore around the call can undo
     mov rbx, rdi
     DUNDER_EXC_SAVE [rbp - IR_EXC]
 
@@ -596,10 +630,7 @@ DEF_FUNC_LOCAL instance_repr_inner, IR_FRAME
     VALUE_FOR_TYPE rsi, rdx     ; the payload, back to something that names a type
     ; str() with no __str__ of its own is object.__str__, which is repr -- and
     ; CPython checks the result at the str() level, so it says __str__ there.
-    ; instance_str sets this on its way into the fallback and clears it on the
-    ; way out; the arm here does not return, so a stale one cannot outlive a
-    ; failure.
-    cmp byte [rel ir_report_as_str], 0
+    cmp qword [rbp - IR_ASSTR], 0
     jne .ir_not_a_string_from_str
     CSTRING rdi, `__repr__ returned non-string (type \x01)`
     jmp raise_type_error_with_name
@@ -875,10 +906,8 @@ DEF_FUNC_LOCAL instance_str_inner, IS_FRAME
     jmp .done
 
 .is_generic:
-    mov byte [rel ir_report_as_str], 1
     mov rdi, rbx
-    call instance_repr
-    mov byte [rel ir_report_as_str], 0
+    call instance_repr_as_str
 
 .done:
     pop rbx
@@ -2544,7 +2573,6 @@ section .rodata
 id_del_ignored_msg: db "Exception ignored in __del__", 10
 id_del_ignored_len equ $ - id_del_ignored_msg
 section .bss
-ir_report_as_str: resb 1
 align 8
 ;; The three names type_call resolves on every construction, memoised by
 ;; TC_NAME.  Immortal once set: the intern table never evicts.

@@ -2256,6 +2256,10 @@ section .data
 sm_name_str: db "staticmethod", 0
 descr_func_name: db "__func__", 0
 descr_wrapped_name: db "__wrapped__", 0
+descr_fwd_name:     db "__name__", 0
+descr_fwd_qualname: db "__qualname__", 0
+descr_fwd_doc:      db "__doc__", 0
+descr_fwd_module:   db "__module__", 0
 align 8
 cm_name_str: db "classmethod", 0
 prop_name_str: db "property", 0
@@ -2269,6 +2273,13 @@ section .text
 ;; __func__, the wrapped function.  It is the only way to reach the function
 ;; through the wrapper, and collections.namedtuple needs it: after building
 ;; _make as a classmethod it does `_make.__func__.__doc__ = ...`.
+;;
+;; __name__, __qualname__, __doc__ and __module__ are FORWARDED to it, which
+;; is what CPython 3.10 made these two wrappers do (bpo-43682) -- a
+;; staticmethod is "callable as a regular function" and reads like one.  A
+;; module-level callable that must not bind when a class body stores it can
+;; only be spelled as a staticmethod here, and lib/select.py does; without the
+;; forwarding, `select.select.__name__` was an AttributeError.
 ;;
 ;; One function serves both wrappers -- sm_callable and cm_callable are the
 ;; same slot -- so both type tables point straight at it.
@@ -2291,7 +2302,53 @@ DEF_FUNC descr_func_attr, DF_FRAME
     lea rsi, [rel descr_wrapped_name]
     call ap_strcmp
     test eax, eax
+    je .have
+
+    ; Anything else the wrapped callable answers for itself.  Only the four
+    ; CPython forwards, so a name the function happens to carry does not leak
+    ; through the wrapper.
+    mov rsi, [rbp - DF_NAME]
+    lea rdi, [rsi + PyStrObject.data]
+    lea rsi, [rel descr_fwd_name]
+    call ap_strcmp
+    test eax, eax
+    je .forward
+    mov rsi, [rbp - DF_NAME]
+    lea rdi, [rsi + PyStrObject.data]
+    lea rsi, [rel descr_fwd_qualname]
+    call ap_strcmp
+    test eax, eax
+    je .forward
+    mov rsi, [rbp - DF_NAME]
+    lea rdi, [rsi + PyStrObject.data]
+    lea rsi, [rel descr_fwd_doc]
+    call ap_strcmp
+    test eax, eax
+    je .forward
+    mov rsi, [rbp - DF_NAME]
+    lea rdi, [rsi + PyStrObject.data]
+    lea rsi, [rel descr_fwd_module]
+    call ap_strcmp
+    test eax, eax
     jne .none
+
+.forward:
+    mov rax, [rbx + PyClassMethodObject.cm_callable]
+    V_TEST_PTR rax, rcx
+    ja .none
+    test rax, rax
+    jz .none
+    mov rdi, rax
+    mov rsi, [rbp - DF_NAME]
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    test rax, rax
+    jz .none
+    V_UNPACK rax, rdx
+    pop rbx
+    leave
+    ret
+
 .have:
     mov rax, [rbx + PyClassMethodObject.cm_callable]
     test rax, rax

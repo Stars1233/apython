@@ -113,3 +113,31 @@ class R:
 
 print(repr(R), repr(R()).split(" object")[0] + " object>")
 print("done")
+
+
+# The interned key the builder uses is this frame's, on the refusing road too.
+import sys
+
+name = "x" * 40
+base = sys.getrefcount(name)
+for _ in range(20):
+    try:
+        class Bad:
+            __qualname__ = 42
+    except TypeError:
+        pass
+print("refused cleanly")
+
+
+# A nested class body, and one built by type(), keep their own.
+def outer():
+    class A:
+        class B:
+            pass
+
+    return A
+
+
+print(outer().__qualname__, outer().B.__qualname__)
+print(type("Z", (), {"__qualname__": "Q.Z"}).__qualname__)
+print("done 2")

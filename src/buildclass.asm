@@ -717,11 +717,11 @@ DEF_FUNC_LOCAL bc_solid_base
 END_FUNC bc_solid_base
 
 ;; ============================================================================
-;; bc_take_qualname(r12 = the new heaptype) -> nothing; may raise
+;; bc_take_qualname(r12 = the new heaptype) -> nothing
 ;;
 ;; Moves __qualname__ out of tp_dict and into ht_qualname.  CPython's type_new
-;; does the same and refuses a non-str with "type __qualname__ must be a str,
-;; not X" -- so does this, and the class is not built.
+;; does the same.  Whether it IS a str was settled by bc_check_qualname before
+;; the type existed, so nothing here raises.
 ;; ============================================================================
 BTQ_KEY   equ 8
 BTQ_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
@@ -740,14 +740,14 @@ DEF_FUNC_LOCAL bc_take_qualname, BTQ_FRAME
     test rax, rax
     jz .btq_release_key
 
-    ; A str, or nothing doing.  dict_get answers a borrowed Value.
+    ; A str, and bc_check_qualname has already said so.
     V_TEST_PTR rax, rcx
-    ja .btq_not_str
+    ja .btq_release_key
     mov rcx, [rax + PyObject.ob_type]
     extern str_type
     lea rdx, [rel str_type]
     cmp rcx, rdx
-    jne .btq_not_str
+    jne .btq_release_key
 
     INCREF rax                  ; ht_qualname owns it
     mov [r12 + HT_QUALNAME], rax
@@ -763,12 +763,62 @@ DEF_FUNC_LOCAL bc_take_qualname, BTQ_FRAME
     leave
     ret
 
-.btq_not_str:
+END_FUNC bc_take_qualname
+
+;; ============================================================================
+;; bc_check_qualname(rdi = the class body namespace, or 0) -> nothing; may
+;;   raise and then does not return
+;;
+;; "type __qualname__ must be a str, not int", which CPython's type_new says
+;; before it builds anything.  Separate from the move above because it has to
+;; run BEFORE the type object exists: a raise from after the half-built class
+;; is registered in build_class_pending goes through a teardown this early
+;; stage is not ready for.
+;; ============================================================================
+BCQ_KEY   equ 8
+BCQ_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL bc_check_qualname, BCQ_FRAME
+    test rdi, rdi
+    jz .bcq_done
+    mov rax, [rdi + PyObject.ob_type]
+    extern dict_type
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    jne .bcq_done               ; a __prepare__ mapping: type_new does not look
+    push rdi
+    sub rsp, 8
+    lea rdi, [rel bc_qualname_name]
+    call str_from_cstr_heap
+    add rsp, 8
+    pop rdi
+    test rax, rax
+    jz .bcq_done
+    mov [rbp - BCQ_KEY], rax
+    mov rsi, rax
+    call dict_get
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - BCQ_KEY]
+    call obj_decref
+    add rsp, 8
+    pop rax
+    test rax, rax
+    jz .bcq_done
+    V_TEST_PTR rax, rcx
+    ja .bcq_not_str
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    je .bcq_done
+.bcq_not_str:
     mov rsi, rax
     lea rdi, [rel bc_qualname_not_str]
     extern raise_type_error_with_name
     jmp raise_type_error_with_name      ; does not return
-END_FUNC bc_take_qualname
+.bcq_done:
+    leave
+    ret
+END_FUNC bc_check_qualname
 
 section .rodata
 bc_qualname_name:    db "__qualname__", 0
@@ -996,6 +1046,13 @@ TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
     extern raise_type_error_with_typename
     call raise_type_error_with_typename
 .tfp_slots_ok:
+    ; __qualname__ is checked HERE, before the type object exists.  Refusing
+    ; it once the half-built class is registered in build_class_pending
+    ; unwinds through a teardown that is not prepared for a raise from this
+    ; early -- and the symptom was an interned name released one time too
+    ; many, surfacing at shutdown in an unrelated code object's co_names.
+    mov rdi, r15
+    call bc_check_qualname
     mov rax, [rbp - TFP_BASE]
     mov rdx, r15                ; restore namespace (scan clobbered rdx)
 

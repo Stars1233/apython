@@ -268,3 +268,42 @@ except TypeError as e:
     print("bound to an int:", e)
 
 print("done 3")
+
+
+# ---------------------------------------------------------------------------
+# A __call__ whose __get__ answers something uncallable: the bound object is
+# this frame's to release, on the failing road as well as the working one.
+class BadGet:
+    def __get__(self, obj, objtype=None):
+        return "not callable"
+
+
+import sys
+
+C = type("C", (), {})
+C.__call__ = BadGet()
+c = C()
+s = "not callable"
+base = sys.getrefcount(s)
+for _ in range(5):
+    try:
+        c()
+    except TypeError as e:
+        msg = str(e)
+print(msg)
+print("leak:", sys.getrefcount(s) - base)
+
+# ...and one whose __get__ answers an immediate, which has no type to read.
+class IntGet:
+    def __get__(self, obj, objtype=None):
+        return 42
+
+
+C2 = type("C2", (), {})
+C2.__call__ = IntGet()
+try:
+    C2()()
+except TypeError as e:
+    print(e)
+
+print("done 4")
