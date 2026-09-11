@@ -217,6 +217,7 @@ test_exception_class_lifetime
 test_exception_context
 test_exception_dunder_str
 test_exception_group_deep
+test_exception_group_new
 test_exception_group_setattr
 test_exception_group_subclass
 test_exception_init

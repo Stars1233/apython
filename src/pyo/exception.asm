@@ -82,8 +82,24 @@ DEF_FUNC exc_new, EN_FRAME
     mov rbx, rdi            ; type
     mov r12, rsi            ; msg Value (0 = no message)
 
-    ; Allocate exception object (GC-tracked)
+    ; Allocate exception object (GC-tracked), at the TYPE's size rather than
+    ; at the base layout's.
+    ;
+    ; A fixed PyExceptionObject_size is right for the sixty-nine builtins and
+    ; wrong for anything wider.  BaseExceptionGroup carries eg_exceptions past
+    ; the end of that layout, so a group reaching here -- which is what
+    ; `super().__new__(cls, msg, excs)` in an ExceptionGroup subclass does,
+    ; through BaseException.__new__ -- was allocated eight bytes short and
+    ; eg_split read the field off the end of the block.  A subclass with
+    ; __slots__ is the same shape: type_from_parts puts them after
+    ; tp_basicsize, which this was not consulting.
+    ;
+    ; Floored at the base size, because a type whose tp_basicsize is somehow
+    ; smaller must still have room for the fields zeroed below.
     mov edi, PyExceptionObject_size
+    mov rax, [rbx + PyTypeObject.tp_basicsize]
+    cmp rax, rdi
+    cmovg rdi, rax
     mov rsi, rbx               ; type
     call gc_alloc
     ; ob_refcnt=1, ob_type set by gc_alloc -- but gc_alloc does not count the
@@ -361,7 +377,6 @@ DEF_FUNC exc_dealloc, ED_FRAME
     leave
     ret
 END_FUNC exc_dealloc
-
 
 ;; ============================================================================
 ;; exc_getattr(PyExceptionObject *exc, PyStrObject *name) -> PyObject* or NULL
@@ -1483,6 +1498,20 @@ DEF_FUNC exc_method_new, EMN_FRAME
     call type_is_subtype
     test eax, eax
     jz .emn_not_an_exc
+
+    ; A group is BaseExceptionGroup's to build, not this one's: eg_new fills
+    ; eg_exceptions and nothing here would.  `super().__new__(cls, msg, excs)`
+    ; inside an ExceptionGroup subclass lands here -- BaseExceptionGroup
+    ; publishes no __new__ of its own, so the MRO walk runs past it to this
+    ; one -- and used to get back a plain exception whose eg_exceptions was
+    ; never written, which eg_split then read as a tuple.
+    mov rdi, rbx
+    extern exc_BaseExceptionGroup_type
+    lea rsi, [rel exc_BaseExceptionGroup_type]
+    call type_is_subtype
+    test eax, eax
+    jnz .emn_group
+
     mov [rbp - EMN_TYPE], rbx
 
     ; A bare instance: no message, so exc_new builds an empty args tuple.
@@ -1554,6 +1583,19 @@ DEF_FUNC exc_method_new, EMN_FRAME
     CSTRING rdi, `BaseException.__new__(X): X is not a type object (\x01)`
     extern raise_type_error_with_name
     jmp raise_type_error_with_name
+.emn_group:
+    ; Hand the whole call on, minus the class, which eg_type_call takes as its
+    ; first argument in the tp_new shape rather than in the args array.
+    mov rdi, rbx
+    mov rsi, [rbp - EMN_ARGS]
+    add rsi, 8
+    mov rdx, [rbp - EMN_NARGS]
+    dec rdx
+    pop rbx
+    leave
+    extern eg_type_call
+    jmp eg_type_call
+
 .emn_not_an_exc:
     ; raise_type_error_with_TYPENAME: the argument here IS a class, so the
     ; name wanted is its own and not its type's, which is always "type".
