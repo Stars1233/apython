@@ -292,7 +292,9 @@ extern raise_type_error_counted
 extern raise_type_error_with_name
 extern none_singleton
 extern ap_strcmp
+extern ap_strlen
 extern str_type
+extern type_is_subtype
 
 DEF_FUNC time_get_clock_info_func, TCI_FRAME
     push rbx
@@ -306,10 +308,22 @@ DEF_FUNC time_get_clock_info_func, TCI_FRAME
     ja .gci_not_str
     test rax, rax
     jz .gci_not_str
-    mov rdx, [rax + PyObject.ob_type]
-    lea rcx, [rel str_type]
-    cmp rdx, rcx
-    jne .gci_not_str
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel str_type]
+    call type_is_subtype            ; PyUnicode_Check takes a subclass
+    test eax, eax
+    jz .gci_not_str
+
+    ; The table below is scanned with a C string compare, which stops at the
+    ; first NUL -- so "time\0junk" would match the row for "time".  CPython's
+    ; converter refuses an embedded NUL before the lookup happens at all, and
+    ; so does this: a str that is shorter as a C string than its ob_size says
+    ; has one in it.
+    mov rbx, [rbp - TCI_ARGS]
+    lea rdi, [rbx + PyStrObject.data]
+    call ap_strlen
+    cmp rax, [rbx + PyStrObject.ob_size]
+    jne .gci_embedded_nul
 
     lea rbx, [rel tci_table]
 .gci_scan:
@@ -411,6 +425,9 @@ DEF_FUNC time_get_clock_info_func, TCI_FRAME
     call raise_type_error_with_name
 .gci_not_str_none:
     RAISE exc_TypeError_type, "get_clock_info() argument 1 must be str, not None"
+
+.gci_embedded_nul:
+    RAISE exc_ValueError_type, "embedded null character"
 
 .gci_unknown:
     RAISE exc_ValueError_type, "unknown clock"

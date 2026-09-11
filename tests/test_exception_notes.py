@@ -49,6 +49,26 @@ try:
 except TypeError as ex:
     print("TypeError:", ex)
 
+# A list SUBCLASS is a list: CPython's check is PyList_Check, which takes one,
+# and PyList_Append goes to the underlying list rather than to an overridden
+# append.  A tuple is still refused.
+class MyList(list):
+    def append(self, x):
+        raise AssertionError("own append must not be called")
+
+
+sub = ValueError("s")
+sub.__notes__ = MyList(["pre"])
+sub.add_note("added")
+print(list(sub.__notes__), type(sub.__notes__).__name__)
+
+tup = ValueError("t")
+tup.__notes__ = ("a",)
+try:
+    tup.add_note("b")
+except TypeError as ex:
+    print("TypeError:", ex)
+
 f = ValueError("x")
 f.__notes__ = 5
 try:
@@ -97,3 +117,20 @@ print(n.__notes__)
 
 print(BaseException.add_note)
 print(callable(e.add_note))
+
+# The rendering side reads __notes__ too, and a list or tuple SUBCLASS is
+# iterated there as well -- it keeps both offsets, so the same loop serves it.
+# (The report itself is diffed by the CPython Lib/test sweep; what is checked
+# here is that the value reaches the renderer in the right shape.)
+class MyList(list):
+    pass
+
+
+class MyTuple(tuple):
+    pass
+
+
+for holder in (MyList(["a", "b"]), MyTuple(["c"]), ["d"], ("e",)):
+    h = ValueError("h")
+    h.__notes__ = holder
+    print(type(h.__notes__).__name__, list(h.__notes__))

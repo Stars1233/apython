@@ -35,6 +35,21 @@ for bad in ("nope", "", "MONOTONIC", "monotonic "):
     except ValueError as e:
         print("ValueError:", e)
 
+# A str SUBCLASS is a str, as PyUnicode_Check takes one...
+class MyStr(str):
+    pass
+
+
+print("subclass:", time.get_clock_info(MyStr("perf_counter")).implementation)
+
+# ...but a name with an embedded NUL is not a name: the table is scanned with
+# a C string compare, which would stop at the NUL and match "time".
+for bad in ("time\0junk", "\0", "monotonic\0"):
+    try:
+        time.get_clock_info(bad)
+    except ValueError as e:
+        print("ValueError:", e)
+
 for bad in (5, None, b"monotonic", ("monotonic",)):
     try:
         time.get_clock_info(bad)

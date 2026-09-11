@@ -1807,6 +1807,7 @@ TPN_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
 extern list_type
 extern obj_repr
 extern dict_get
+extern type_is_subtype
 
 DEF_FUNC_LOCAL tb_print_notes, TPN_FRAME
     mov rax, [rel current_exception]
@@ -1834,15 +1835,25 @@ DEF_FUNC_LOCAL tb_print_notes, TPN_FRAME
     jz .tpn_out
     V_TEST_PTR rax, rcx
     ja .tpn_repr
-    mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel list_type]
-    cmp rcx, rdx
-    je .tpn_seq
-    lea rdx, [rel tuple_type]
-    cmp rcx, rdx
-    jne .tpn_repr
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel list_type]
+    call type_is_subtype
+    test eax, eax
+    jnz .tpn_seq
+    mov rax, [rbp - TPN_NOTES]
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel tuple_type]
+    call type_is_subtype
+    test eax, eax
+    jz .tpn_repr
 
 .tpn_seq:
+    ; A SUBCLASS of either is one, and keeps both offsets -- type_from_parts
+    ; puts a subclass's own fields after tp_basicsize.  CPython iterates any
+    ; sequence that is not a str or bytes; anything more exotic than these two
+    ; takes the repr path here, because asking a Python __getitem__ from
+    ; inside an exception report is the one thing this must not do.
+    mov rax, [rbp - TPN_NOTES]
     mov rcx, [rax + PyListObject.ob_size]
     mov [rbp - TPN_N], rcx
     mov qword [rbp - TPN_IDX], 0

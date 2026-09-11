@@ -1669,13 +1669,17 @@ DEF_FUNC exc_method_add_note, EAN_FRAME
 
     ; Present, so it has to be a list -- CPython refuses anything else rather
     ; than replacing it, because a program that put something there meant it.
+    ; A SUBCLASS of list is one: the check is PyList_Check, and PyList_Append
+    ; goes to the underlying list rather than to an overridden append, which
+    ; is what list_append does too.
     V_TEST_PTR rax, rcx
     ja .ean_not_list
-    mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel list_type]
-    cmp rcx, rdx
-    jne .ean_not_list
     mov [rbp - EAN_LIST], rax           ; borrowed: the dict owns it
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel list_type]
+    call type_is_subtype
+    test eax, eax
+    jz .ean_not_list
     jmp .ean_append
 
 .ean_make:
