@@ -532,6 +532,29 @@ DEF_FUNC_BARE op_raise_varargs
     jne .raise_ctor_raised    ; __new__ or __init__ raised; THAT is the
                               ; exception now, and it is already pending
     mov rdi, rax
+
+    ; And what came back has to BE an exception.  A __new__ that answers
+    ; something else has taken the construction over, and type_call hands that
+    ; back untouched -- `class E(Exception): __new__ = lambda cls, *a: object()`
+    ; then `raise E` would otherwise install a plain object as the exception
+    ; in flight, and the first thing to read its __cause__ would not find one.
+    ; CPython refuses it with the message the non-exception operand gets, and
+    ; has a named test for it.
+    V_TEST_PTR rdi, rax
+    ja .raise_bad
+    test rdi, rdi
+    jz .raise_bad_no_decref
+    mov rax, [rdi + PyObject.ob_type]
+    test rax, rax
+    jz .raise_bad
+    push rdi
+    push rdi                  ; and a pad, as above
+    mov rdi, rax
+    call type_is_exc_subclass
+    pop rdi
+    pop rdi
+    test eax, eax
+    jz .raise_bad
     jmp .raise_exc_obj
 
 .raise_ctor_raised:
