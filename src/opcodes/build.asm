@@ -2082,7 +2082,7 @@ DEF_FUNC op_dict_update
 
     VPOP_VAL rsi, r8           ; rsi = mapping to merge from
     cmp r8d, TAG_PTR
-    jne .du_type_error
+    jne .du_not_mapping_val    ; an int or a float is not a mapping either
     mov [rbp - DU_SOURCE], rsi
 
     ; dict is at stack[-(ecx)] after pop (payload slots)
@@ -2091,9 +2091,14 @@ DEF_FUNC op_dict_update
     mov rdi, [r13 + rcx]
     mov [rbp - DU_DICT], rdi          ; target dict
 
-    ; mapping must be a dict (for now)
+    ; A real dict takes the dense walk below.  Anything else is read the way
+    ; dict.update reads it -- through keys() and indexing -- which is the same
+    ; resolution DICT_MERGE reaches for `f(**m)`, and the same one CPython's
+    ; BUILD_MAP/DICT_UPDATE pair makes.  Gating on "must be a dict" meant
+    ; `{**os.environ, 'K': v}`, which is how a child environment is built, was
+    ; a TypeError.
     mov rax, [rsi + PyObject.ob_type]
-    REQUIRE_DICT_TYPE rax, rdx, .du_type_error
+    REQUIRE_DICT_TYPE rax, rdx, .du_mapping
 
     ; Iterate over the source's DENSE array, with room taken once.
     mov rdi, [rbp - DU_DICT]
@@ -2171,9 +2176,85 @@ DEF_FUNC op_dict_update
     leave
     DISPATCH
 
+.du_mapping:
+    ; This handler carves an odd frame, so everything below it calls eight
+    ; bytes out without a pad -- the same reason the dense walk above pushes
+    ; one.  `leave` puts rsp back, so no exit has to undo this.
+    sub rsp, 8
+    ; `{**x}` wants a MAPPING.  dict.update also takes a sequence of pairs,
+    ; and letting it have that here would make `{**"ab"}` a ValueError about
+    ; element lengths where CPython says the str is not a mapping -- so the
+    ; keys() test is made first, as DICT_MERGE makes it.
+    CSTRING rdi, "keys"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    mov rbx, rax
+    mov rdi, [rbp - DU_SOURCE]
+    mov rsi, rbx
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    mov r14, rax
+    mov rdi, rbx
+    extern obj_decref
+    call obj_decref
+    test r14, r14
+    jz .du_not_mapping
+    mov rdi, r14
+    call obj_decref             ; the bound keys, wanted only as a test
+
+    ; dict_method_update(args, nargs) with args = [target, source].  It owns
+    ; how a mapping is read -- keys() and indexing -- so that is not repeated.
+    sub rsp, 16
+    mov rax, [rbp - DU_DICT]
+    mov [rsp], rax
+    mov rax, [rbp - DU_SOURCE]
+    mov [rsp + 8], rax
+    ; kw_names_pending belongs to whatever CALL is in flight; dict.update
+    ; consumes it, so park it across the call rather than letting the callee
+    ; eat a keyword tuple that is not its own.
+    extern kw_names_pending
+    mov rbx, [rel kw_names_pending]
+    mov qword [rel kw_names_pending], 0
+    mov rdi, rsp
+    mov esi, 2
+    extern dict_method_update
+    call dict_method_update
+    mov [rel kw_names_pending], rbx
+    add rsp, 16
+    test rax, rax
+    jz .du_propagate
+    DECREF_V rax, rcx
+    add rsp, 72                 ; 64 + the alignment pad taken at .du_mapping
+    pop r14
+    pop rbx
+    leave
+    DISPATCH
+
+.du_propagate:
+    add rsp, 72                 ; as above: rbx is the bytecode IP, so the
+    pop r14                     ; pops must come off at the right depth
+    pop rbx
+    leave
+    jmp eval_exception_unwind
+
 .du_mutated:
     extern exc_RuntimeError_type
     RAISE exc_RuntimeError_type, "dict mutated during update"
+
+.du_not_mapping_val:
+    ; A non-pointer operand, still named by its type: V_PACK rebuilds the
+    ; Value that raise_type_error_with_name wants.
+    mov rdx, r8
+    V_PACK rsi, rdx
+    jmp .du_name_it
+
+.du_not_mapping:
+    ; CPython's wording for `{**x}` where x has no keys().
+    mov rsi, [rbp - DU_SOURCE]
+.du_name_it:
+    CSTRING rdi, `'\x01' object is not a mapping`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 
 .du_type_error:
     RAISE exc_TypeError_type, "dict.update() argument must be a dict"
