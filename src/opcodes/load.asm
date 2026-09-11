@@ -977,12 +977,25 @@ DEF_FUNC op_load_attr, LA_FRAME
     test rdx, rdx
     jz .la_method_push             ; no tp_dict, skip
 
-    ; Write CACHE: [+0]=dk_version(16b), [+2]=type_ptr(64b), [+10]=descr(64b)
+    ; Write CACHE: [+0]=type version(32b), [+4]=dk_version(16b), [+6]=descr(64b)
+    ;
+    ; The VERSION, not the type POINTER, is what says "the same class in the
+    ; same state".  Versions come from one global counter and are never
+    ; reused; an address is, and a class freed and another allocated in its
+    ; place passed the pointer compare -- with the dk_version guard only
+    ; sixteen bits wide behind it, and a cached DESCRIPTOR belonging to the
+    ; dead class's dict.  The site then called the wrong class's method, or a
+    ; freed one.  Every other cache in load_ic.asm already guards this way,
+    ; and typecache.asm's header says why.
+    mov rax, [rcx + PyTypeObject.tp_flags]
+    shr rax, TYPE_VERSION_SHIFT
+    test eax, eax
+    jz .la_method_push             ; no version: not cacheable
+    mov [rbx], eax                 ; CACHE[+0] = type version
     mov rdx, [rdx + PyDictObject.dk_version]
-    mov word [rbx], dx             ; CACHE[0] = dk_version (low 16 bits)
-    mov [rbx + 2], rcx             ; CACHE[1..4] = type_ptr (8 bytes unaligned)
+    mov word [rbx + 4], dx         ; CACHE[+4] = dk_version (low 16 bits)
     mov rax, [rbp - LA_ATTR]
-    mov [rbx + 10], rax            ; CACHE[5..8] = descr (8 bytes unaligned)
+    mov [rbx + 6], rax             ; CACHE[+6] = descr (8 bytes unaligned)
     mov byte [rbx - 2], 203       ; rewrite opcode to LOAD_ATTR_METHOD
 
 .la_method_push:
