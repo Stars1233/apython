@@ -211,6 +211,7 @@ test_error_messages
 test_exc_catchable
 test_exc_context
 test_excepthook
+test_exception_args_assign
 test_exception_class_lifetime
 test_exception_context
 test_exception_dunder_str

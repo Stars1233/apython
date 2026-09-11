@@ -1591,6 +1591,18 @@ DEF_FUNC exc_setattr, ESA_FRAME
     ; the report the traceback printer produced had no cause chain in it.
     ; `raise x from y` goes through the fields directly, which is why only the
     ; hand-written form was affected.
+    ; args is the first name exc_getattr compares, and it answers out of the
+    ; exc_args FIELD without ever reading the dict -- so an assignment that
+    ; fell through to the generic dict_set below was silently dropped, and
+    ; e.args went on reading the old tuple.  That is the whole of CPython's
+    ; test_configparser, whose exception classes end __init__ with
+    ; `self.args = (section, source, lineno)`; func_setattr's comment records
+    ; the identical failure for f.__name__.
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "args"
+    call ap_strcmp
+    test eax, eax
+    jz .esa_args
     lea rdi, [r12 + PyStrObject.data]
     CSTRING rsi, "__cause__"
     call ap_strcmp
@@ -1679,6 +1691,15 @@ DEF_FUNC exc_setattr, ESA_FRAME
     RAISE exc_TypeError_type, "__dict__ must be set to a dictionary"
 
 .esa_delete:
+    ; `del e.args` is refused rather than reported as a missing attribute:
+    ; the field always exists, and CPython names it.
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "args"
+    call ap_strcmp
+    test eax, eax
+    jnz .esa_delete_dict
+    RAISE exc_TypeError_type, "args may not be deleted"
+.esa_delete_dict:
     mov rax, [rbx + PyExceptionObject.exc_dict]
     test rax, rax
     jz .esa_del_missing
@@ -1703,6 +1724,35 @@ DEF_FUNC exc_setattr, ESA_FRAME
     pop rbx
     leave
     jmp raise_no_attribute      ; does not return
+
+.esa_args:
+    ; CPython's BaseException_set_args is PySequence_Tuple(val) then
+    ; Py_XSETREF, and tuple_type_call IS PySequence_Tuple: an exact tuple is
+    ; handed straight back (so `e.args = t; e.args is t` holds, as it does
+    ; there), anything else iterable is drained into a new one, and a
+    ; non-iterable raises "'int' object is not iterable" from get_iterator --
+    ; which is the wording CPython's own arrives at by the same route.
+    extern tuple_type_call
+    lea rdi, [rel tuple_type]
+    lea rsi, [rbp - ESA_VAL]        ; a one-Value argument array
+    mov edx, 1
+    call tuple_type_call
+    test rax, rax
+    jz .esa_args_out                ; an iterable that raised part way; the
+                                    ; exception stands and op_store_attr's
+                                    ; DUNDER_RAISED finds it
+    mov rdi, [rbx + PyExceptionObject.exc_args]
+    mov [rbx + PyExceptionObject.exc_args], rax     ; the new tuple is owned
+    test rdi, rdi
+    jz .esa_args_out
+    call obj_decref
+.esa_args_out:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
 
     ; Each field holds a strong reference, and None means "none of it": the
     ; report walks a NULL field, not a None one.
