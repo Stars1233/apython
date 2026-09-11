@@ -1609,7 +1609,13 @@ DEF_FUNC posix_read, PRD_FRAME
     mov rdi, r12
     mov rsi, rax
     mov rdx, rbx
-    call sys_read
+    ; io_read_retry, not sys_read: os.read blocks, and a Python signal
+    ; handler has to run while it is blocked.  _pyio's FileIO is built on
+    ; os.read, so CPython's test_io hangs on this one too.
+    extern io_read_retry
+    call io_read_retry
+    cmp rax, -4
+    je .prd_handler_raised
     cmp rax, -4095
     jb .prd_ok
     push rax
@@ -1619,6 +1625,17 @@ DEF_FUNC posix_read, PRD_FRAME
     pop rax
     pop rax
     POSIX_CHECK rax, 0
+.prd_handler_raised:
+    ; A Python signal handler raised while the read was interrupted; its
+    ; exception is the caller's, and the buffer is this frame's.
+    mov rdi, [rbp - PRD_BUF]
+    call ap_free
+    extern eval_exception_unwind
+    pop r12
+    pop rbx
+    leave
+    jmp eval_exception_unwind
+
 .prd_ok:
     mov rdi, [rbp - PRD_BUF]
     mov rsi, rax
@@ -1680,7 +1697,10 @@ DEF_FUNC posix_write, 16
 .pwr_have_buf:
     pop rdi
     pop rdi
-    call sys_write
+    extern io_write_retry
+    call io_write_retry
+    cmp rax, -4
+    je .pwr_handler_raised
     POSIX_CHECK rax, 0
     mov rdi, rax
     call int_from_i64
@@ -1689,6 +1709,14 @@ DEF_FUNC posix_write, 16
     pop rbx
     leave
     ret
+.pwr_handler_raised:
+    ; A Python signal handler raised while the write was interrupted; its
+    ; exception is the caller's.
+    extern eval_exception_unwind
+    pop rbx
+    leave
+    jmp eval_exception_unwind
+
 .pwr_badbuf:
     pop rdi
     pop rdi

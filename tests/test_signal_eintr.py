@@ -77,6 +77,28 @@ signal.alarm(0)
 rio.close()
 os.close(r)
 
+# os.read and os.write are the other pair: CPython's _pyio builds its FileIO
+# on them, so its half of test_io hung for the same reason the C half did.
+r, w = os.pipe()
+ran = []
+
+
+def writing_handler(sig, frame):
+    ran.append(sig)
+    os.write(w, b"bar")
+
+
+signal.signal(signal.SIGALRM, writing_handler)
+os.write(w, b"foo")
+signal.alarm(1)
+got = b""
+while len(got) < 6:
+    got += os.read(r, 6 - len(got))
+signal.alarm(0)
+print(got, ran == [signal.SIGALRM])
+os.close(w)
+os.close(r)
+
 signal.signal(signal.SIGALRM, old)
 
 # An ordinary read is unaffected.
