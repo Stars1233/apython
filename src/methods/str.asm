@@ -2168,34 +2168,38 @@ DEF_FUNC str_method_format, SF_FRAME
     ; that the object could not be interpreted as an integer, and "{}" of it
     ; printed the default repr.  f-strings have always called the dunder;
     ; str.format is the same operation and now shares its funnel.
-    sub rsp, 16
+    ;
+    ; 24, because this arm is reached with the SPEC pushed: the function's
+    ; body runs 16-byte aligned, that push leaves it eight out, and the frame
+    ; is what puts it back.  The plain arm below is reached with nothing
+    ; pushed and takes 16.
+    sub rsp, 24
     mov rax, [rbp - SF_VALUE]
     mov [rsp], rax              ; args[0] = the value
-    mov rax, [rsp + 16]
+    mov rax, [rsp + 24]
     mov [rsp + 8], rax          ; args[1] = the spec
     mov rdi, rsp
     mov esi, 2
     extern builtin_format_fn
     call builtin_format_fn
     V_UNPACK rax, rdx
-    add rsp, 16
+    add rsp, 24
     mov r14, rax
     pop rdi
     call obj_decref
     jmp .fm_have_text
 
 .fm_plain_str:
-    ; 24, not 16: this arm is reached WITHOUT the spec push the other one
-    ; makes, so the two call at opposite parities and one of them has to pay
-    ; for it.  The array goes at rsp+8 so the pad is below it.
-    sub rsp, 24
+    ; 16, because this arm is reached with nothing pushed: the body is already
+    ; aligned and the array is all the room it needs.
+    sub rsp, 16
     mov rax, [rbp - SF_VALUE]
-    mov [rsp + 8], rax          ; args[0] = the value, and no spec
-    lea rdi, [rsp + 8]
+    mov [rsp], rax              ; args[0] = the value, and no spec
+    mov rdi, rsp
     mov esi, 1
     call builtin_format_fn
     V_UNPACK rax, rdx
-    add rsp, 24
+    add rsp, 16
     mov r14, rax
 
 .fm_have_text:

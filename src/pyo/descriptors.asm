@@ -1950,7 +1950,9 @@ END_FUNC member_descr_get
 MDS_SELF  equ 8
 MDS_RECV  equ 16
 MDS_VAL   equ 24
-MDS_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+MDS_ADDR  equ 32            ; the slot's address, across the release below
+MDS_OLD   equ 40            ; and what was in it
+MDS_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
 global member_descr_set
 DEF_FUNC member_descr_set, MDS_FRAME
     mov [rbp - MDS_SELF], rdi
@@ -1972,13 +1974,16 @@ DEF_FUNC member_descr_set, MDS_FRAME
 .mds_store:
     ; The new value is counted BEFORE the old one is released: they may be the
     ; same object, and `o.x = o.x` would otherwise free it between the two.
-    push rdx
-    push rax
+    ; The slot's ADDRESS and the old Value go into frame slots rather than onto
+    ; the machine stack: XDECREF_V expands to `call obj_dealloc`, which runs
+    ; __del__, and a lone `pop` before it left that call eight bytes out.
+    mov [rbp - MDS_ADDR], rdx
+    mov [rbp - MDS_OLD], rax
     mov rdi, [rbp - MDS_VAL]
     INCREF_V rdi, rcx
-    pop rdi                     ; the old Value
+    mov rdi, [rbp - MDS_OLD]    ; the old Value
     XDECREF_V rdi, rcx
-    pop rdx
+    mov rdx, [rbp - MDS_ADDR]
     mov rcx, [rbp - MDS_VAL]
     mov [rdx], rcx
     xor eax, eax
