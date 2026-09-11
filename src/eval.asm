@@ -723,10 +723,31 @@ DEF_FUNC_BARE eval_exception_unwind
     mov qword [rel c_recursion_depth], 0
 
     ; gc_collecting is set for the duration of a collection and cleared at
-    ; the end.  A __del__ that raises during phase 5 longjmps out of that,
-    ; leaving it set forever -- after which the reentrancy guard makes the
-    ; collector a permanent no-op and cyclic garbage accumulates silently.
+    ; the end.  A raise that escapes the collector -- one with no Python frame
+    ; beneath it, which lands in an OUTER frame and so discards
+    ; gc_collect_gen's -- would leave it set forever, after which the
+    ; reentrancy guard makes the collector a permanent no-op and cyclic
+    ; garbage accumulates silently.
+    ;
+    ; But clearing it unconditionally was worse.  A __del__ that raises and is
+    ; merely reported unwinds only as far as the finalizer's OWN frame and
+    ; returns to the collector, which is still walking lists anchored in its
+    ; own stack frame -- with the guard now switched off behind it.  The
+    ; finalizer's next allocation past the gen0 threshold, or its next
+    ; gc.collect(), then started a second pass over those same lists, and the
+    ; outer pass was left following links into a frame that had moved on.  It
+    ; surfaced as a segfault in gc_list_remove, pages from anything at fault.
+    ;
+    ; The stack grows down, so the landing point tells the two apart exactly:
+    ; below the collector's frame it survives, above it it is gone.
+    mov rax, [rel gc_collect_rsp]
+    test rax, rax
+    jz .gc_flag_done            ; no collection running; nothing to decide
+    cmp rax, [rel eval_base_rsp]
+    ja .gc_flag_done            ; landing deeper: the collector is still there
     mov qword [rel gc_collecting], 0
+    mov qword [rel gc_collect_rsp], 0
+.gc_flag_done:
 
     ; Free stale cfex_temp_pending buffer if set
     mov rdi, [rel cfex_temp_pending]
@@ -734,6 +755,7 @@ DEF_FUNC_BARE eval_exception_unwind
     jz .no_cfex_temp
     mov qword [rel cfex_temp_pending], 0
     extern gc_collecting
+    extern gc_collect_rsp
 extern ap_free
 extern repr_depth
 extern exc_RecursionError_type

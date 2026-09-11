@@ -68,10 +68,26 @@ gc_garbage_list: dq 0
 global gc_stat_counters
 gc_stat_counters: times 9 dq 0
 
-global gc_collecting        ; eval_exception_unwind resets this: a raising
-                            ; __del__ during a collection longjmps out and
-                            ; would otherwise latch it on for good
-gc_collecting:  dq 0    ; reentrancy guard
+global gc_collecting        ; reentrancy guard: gc_track and gc_collect_gen
+                            ; both refuse to start a pass while it is set
+gc_collecting:  dq 0
+
+; Where gc_collect_gen's frame is, while it is running; 0 when it is not.
+;
+; eval_exception_unwind has to clear gc_collecting for a raise that escapes
+; the collector -- one with no Python frame beneath it lands in an OUTER
+; frame, which discards this one, and nothing would ever clear the flag
+; again.  It must NOT clear it for a raise inside a finalizer, which lands in
+; the finalizer's own frame and comes back here with the collection still
+; running; clearing it there let the finalizer's next allocation, or its next
+; gc.collect(), start a second pass over the lists this frame holds.
+;
+; The two are told apart by where the unwind LANDS.  The machine stack grows
+; down, so a landing point below this is a frame nested inside the collection
+; and the collector survives; a landing point above it discards the
+; collector's frame.  One comparison, and it is exact.
+global gc_collect_rsp
+gc_collect_rsp: dq 0
 
 ; Generation table (for indexed access).  Only the sentinel is ever read
 ; through it: the count and threshold columns it used to carry were named
@@ -542,8 +558,10 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     mov qword [rbp - GCG_FOUND], 0
     mov qword [rbp - GCG_RANFIN], 0
 
-    ; Set collecting flag
+    ; Set collecting flag, and say where this frame is, so that a raise from
+    ; inside a finalizer can be told from one that discards this frame.
     mov qword [rel gc_collecting], 1
+    mov [rel gc_collect_rsp], rsp
 
     test qword [rel gc_debug], GC_DEBUG_STATS
     jz .no_stats_start
@@ -1073,6 +1091,7 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
 .collect_done:
     ; Clear collecting flag
     mov qword [rel gc_collecting], 0
+    mov qword [rel gc_collect_rsp], 0
     mov rax, [rbp - GCG_FOUND]
 
     ; What gc.get_stats() reports: how many collections have run in this
