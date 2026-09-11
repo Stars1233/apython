@@ -98,6 +98,46 @@ reasoning that chose them and what changing one would cost.
   the internal split through `derive` is one change, because the type the
   halves get is decided there.
 
+- **A dunder's RESULT is not type-checked except for `__str__`, `__repr__` and
+  `__format__`.**  Those three are refused now, because a non-str reaching an
+  f-string or a container repr is a segfault rather than a wrong answer.  The
+  rest differ only in WORDING, and each says less than CPython's does:
+  `__bool__ should return bool` where CPython adds `, returned tuple`;
+  `'str' object cannot be interpreted as an integer` for a `__hash__` where
+  CPython says `__hash__ method should return an integer`; `__int__ returned
+  non-int` and `__index__ returned non-int` without the `(type str)` CPython
+  appends; and `float()` reports its ARGUMENT's type rather than
+  `C.__float__ returned non-float (type str)`.
+
+- **`print` to a broken pipe reports nothing.**  SIGPIPE is ignored now, so
+  the process survives and `os.write`/`file.write` raise BrokenPipeError --
+  but `print` itself answers None and the output is silently lost, where
+  CPython raises.  `apython foo.py | head` exits 0 with the tail of its output
+  discarded.  The write it makes does not check its result.
+
+- **A class's `__dict__` is short of `__dict__`, `__doc__` and
+  `__weakref__`.**  `sorted(C.__dict__)` for a plain class is
+  `['__module__']` here and `['__dict__', '__doc__', '__module__',
+  '__weakref__']` in CPython.  `__qualname__` was a fourth difference in the
+  other direction and is fixed; these three are entries type_new adds that
+  type_from_parts does not.  Anything that walks a class's own dict and
+  expects the descriptors -- `inspect.getattr_static`, `__slots__` validation,
+  pickling by reference -- sees a shorter one.
+
+- **A struct-sequence type can be subclassed.**  `class X(os.stat_result)`
+  builds a class here and is `TypeError: type 'os.stat_result' is not an
+  acceptable base type` in CPython: those types do not carry
+  TYPE_FLAG_BASETYPE and nothing tests it.  The subclass has no descriptor
+  word of its own, so the struct-sequence accessors read past its allocation.
+  The general check -- refuse a base without TYPE_FLAG_BASETYPE -- wants
+  auditing across every builtin type first, because a flag missing by accident
+  would start refusing subclasses that work today.
+
+- **`test_sys_settrace`'s `test_jump_extended_args_for_iter` hangs.**  The
+  compile is fast -- a hundred thousand lines in 0.8s -- so it is the trace
+  machinery under `sys.settrace` and a jump, not the compiler.  It sits with
+  the rest of the settrace divergence below.
+
 - **`raise SomeExceptionClass` does not run the class's `__init__`.**  The
   class form of the operand reaches `exc_new`, which builds the object and its
   args tuple directly rather than CALLING the type, so
