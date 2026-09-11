@@ -2162,18 +2162,40 @@ DEF_FUNC str_method_format, SF_FRAME
     mov [rsp], rax              ; the expansion is what gets released
     call obj_decref
 .fm_spec_plain:
-    mov rdi, [rbp - SF_VALUE]
-    mov rsi, [rsp]
-    extern format_apply_spec
-    call format_apply_spec
+    ; format(value, spec), not format_apply_spec: a class formats ITSELF
+    ; through __format__, and this went straight to the spec machinery -- so
+    ; "{:x}".format(obj) for a class with a __format__ of its own reported
+    ; that the object could not be interpreted as an integer, and "{}" of it
+    ; printed the default repr.  f-strings have always called the dunder;
+    ; str.format is the same operation and now shares its funnel.
+    sub rsp, 16
+    mov rax, [rbp - SF_VALUE]
+    mov [rsp], rax              ; args[0] = the value
+    mov rax, [rsp + 16]
+    mov [rsp + 8], rax          ; args[1] = the spec
+    mov rdi, rsp
+    mov esi, 2
+    extern builtin_format_fn
+    call builtin_format_fn
+    V_UNPACK rax, rdx
+    add rsp, 16
     mov r14, rax
     pop rdi
     call obj_decref
     jmp .fm_have_text
 
 .fm_plain_str:
-    mov rdi, [rbp - SF_VALUE]
-    call obj_str
+    ; 24, not 16: this arm is reached WITHOUT the spec push the other one
+    ; makes, so the two call at opposite parities and one of them has to pay
+    ; for it.  The array goes at rsp+8 so the pad is below it.
+    sub rsp, 24
+    mov rax, [rbp - SF_VALUE]
+    mov [rsp + 8], rax          ; args[0] = the value, and no spec
+    lea rdi, [rsp + 8]
+    mov esi, 1
+    call builtin_format_fn
+    V_UNPACK rax, rdx
+    add rsp, 24
     mov r14, rax
 
 .fm_have_text:

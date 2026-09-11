@@ -557,6 +557,7 @@ test_str_char_singletons
 test_str_compare_spec
 test_str_decode
 test_strfmt
+test_str_format_dunder
 test_str_format
 test_strings2
 test_strings
