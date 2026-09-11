@@ -1675,26 +1675,19 @@ DEF_FUNC posix_write, 16
     mov rdi, rax                    ; fd... but the buffer comes next
     push rdi
     push rdi
+    ; Anything bytes-LIKE, which is what CPython's Py_buffer means here.  This
+    ; took bytes and bytearray only, so a MEMORYVIEW was refused -- and
+    ; subprocess's _communicate writes one: `os.write(key.fd, chunk)` where
+    ; chunk is a slice of memoryview(input).  Every communicate() with input
+    ; died there, and with the pipe still open the child never saw EOF and
+    ; nobody ever exited.
     mov rdi, [rbx + 8]
-    V_TEST_PTR rdi, rax
-    ja .pwr_badbuf
-    mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel bytes_type]
-    cmp rax, rcx
-    je .pwr_bytes
-    lea rcx, [rel bytearray_type]
-    cmp rax, rcx
-    jne .pwr_badbuf
-    ; A bytearray keeps its data out of line, so it cannot be read through
-    ; the bytes offsets -- which is what this did while the two layouts
-    ; happened to match.
-    mov rdx, [rdi + PyByteArrayObject.ob_size]
-    mov rsi, [rdi + PyByteArrayObject.ob_bytes]
-    jmp .pwr_have_buf
-.pwr_bytes:
-    mov rdx, [rdi + PyBytesObject.ob_size]
-    lea rsi, [rdi + PyBytesObject.data]
-.pwr_have_buf:
+    extern bytes_like_ptr_len
+    call bytes_like_ptr_len         ; rax = data, r10 = length, ecx = ok
+    test ecx, ecx
+    jz .pwr_badbuf
+    mov rsi, rax
+    mov rdx, r10
     pop rdi
     pop rdi
     extern io_write_retry
