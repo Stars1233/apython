@@ -2071,11 +2071,23 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     mov rax, [rax + PyTypeObject.tp_bases]
     test rax, rax
     jnz .tga_return_tuple
-    ; A static type keeps no tuple; build one from tp_base.
+    ; A static type keeps no tuple; build one from tp_base.  Its chain ends at
+    ; 0 rather than at object -- type_mro_next, type_mro_len and type_mro_fill
+    ; each substitute the object that anchors the end, and this did not, so
+    ; every builtin reported no bases at all while reporting a two-entry
+    ; __mro__.  Nothing in the language notices until something walks
+    ; __bases__ itself: functools._c3_mro(str) answered [str], _find_impl
+    ; answered None, and singledispatch raised "'NoneType' object is not
+    ; callable" on its first call, before anything had been registered.
     mov rcx, [rbp - TGA_ORIGIN]
     mov rcx, [rcx + PyTypeObject.tp_base]
     test rcx, rcx
-    jz .tga_empty_tuple
+    jnz .tga_bases_one
+    ; object is the one type that really has no bases; everything else has it.
+    lea rcx, [rel object_type]
+    cmp rcx, [rbp - TGA_ORIGIN]
+    je .tga_empty_tuple
+.tga_bases_one:
     push rcx
     mov edi, 1
     call tuple_new
@@ -2132,11 +2144,15 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
 
 .tga_return_base:
     ; The one base a class's layout comes from.  `object.__base__` is None,
-    ; which is also the answer for any other type with no tp_base.
+    ; and only object's is: a static type's tp_base is 0 and its base is
+    ; object, the same substitution __bases__ makes above.
     mov rax, [rbp - TGA_ORIGIN]
     mov rax, [rax + PyTypeObject.tp_base]
     test rax, rax
     jnz .tga_return_object
+    lea rax, [rel object_type]
+    cmp rax, [rbp - TGA_ORIGIN]
+    jne .tga_return_object
     extern none_singleton
     lea rax, [rel none_singleton]
 .tga_return_object:
