@@ -2199,8 +2199,9 @@ DEF_FUNC op_dict_update
     call obj_decref
     test r14, r14
     jz .du_not_mapping
-    mov rdi, r14
-    call obj_decref             ; the bound keys, wanted only as a test
+    ; A Value, so DECREF_V: obj_decref writes through what it is handed, and
+    ; `class M: keys = 1` then `{**M()}` decremented address 1.
+    DECREF_V r14, rcx           ; the bound keys, wanted only as a test
 
     ; dict_method_update(args, nargs) with args = [target, source].  It owns
     ; how a mapping is read -- keys() and indexing -- so that is not repeated.

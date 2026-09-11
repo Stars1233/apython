@@ -741,9 +741,9 @@ DEF_FUNC fileobj_buffer, FBF_FRAME
     mov rsi, rax
     extern obj_getattr_opt
     call obj_getattr_opt
-    mov rbx, rax
+    mov rbx, rax                ; a Value: _io.FileIO, whatever it is
     pop rdi
-    call obj_decref
+    call obj_decref             ; the name, which is always a str
     test rbx, rbx
     jz .fbf_fail
 
@@ -767,7 +767,7 @@ DEF_FUNC fileobj_buffer, FBF_FRAME
     push rax
     push rax
     mov rdi, rbx
-    call obj_decref                 ; the FileIO class
+    DECREF_V rdi, rcx               ; the FileIO class, released as a Value
     pop rax
     pop rax
     test rax, rax

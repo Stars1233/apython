@@ -38,6 +38,7 @@ test_async_wait_for
 test_async_with_inherited
 test_async_with
 test_attr_cache_type_reuse
+test_attr_value_immediates
 test_awaitable
 test_await_raises
 test_bad_arguments

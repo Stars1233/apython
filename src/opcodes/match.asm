@@ -858,8 +858,10 @@ DEF_FUNC_LOCAL intrinsic_display, ID_FRAME
     call obj_call_n
     add rsp, 16
     mov [rbp - ID_VAL], rax     ; the hook's result, or 0
+    ; A Value: sys.displayhook is whatever a program put there, and obj_decref
+    ; would write through an immediate.
     mov rdi, [rbp - ID_HOOK]
-    call obj_decref
+    DECREF_V rdi, rcx
     mov rax, [rbp - ID_VAL]
     test rax, rax
     jz .id_raised

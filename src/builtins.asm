@@ -1014,15 +1014,19 @@ DEF_FUNC_LOCAL print_sink_resolve, PSR_FRAME
     mov rax, [rbp - PSR_SINK]
     test rax, rax
     jz .psr_none
-    ; obj_getattr_opt hands back a reference; print holds the sink only for
-    ; the duration of the call, and sys.stdout is reachable from sys the
-    ; whole time, so give it straight back and keep a borrowed pointer.
+    ; obj_getattr_opt hands back a VALUE, and a reference; print holds the sink
+    ; only for the duration of the call, and sys.stdout is reachable from sys
+    ; the whole time, so give the reference straight back and keep a borrowed
+    ; one.  DECREF_V and not obj_decref: obj_decref writes through what it is
+    ; handed, so `sys.stdout = 5` decremented address 5 and dumped core.
     mov rdi, rax
     push rax
-    call obj_decref
+    DECREF_V rdi, rcx
     pop rax
-    V_TEST_PTR rax, rcx
-    ja .psr_none                ; sys.stdout is not an object at all
+    ; Only None means "no stream".  Anything ELSE, immediate or not, goes
+    ; through to the write attempt, which is what names the type: CPython
+    ; answers `sys.stdout = 5; print(x)` with "'int' object has no attribute
+    ; 'write'", where producing nothing silently loses the output.
     lea rcx, [rel none_singleton]
     cmp rax, rcx
     je .psr_none
@@ -1093,7 +1097,7 @@ DEF_FUNC_LOCAL print_sink_write, PSW_FRAME
     push rax
     mov rdi, rbx
     call obj_decref             ; the name
-    pop rbx                     ; rbx = the bound write, owned, or 0
+    pop rbx                     ; rbx = the bound write, a Value, or 0
     test rbx, rbx
     jz .psw_no_write
 
@@ -1107,10 +1111,12 @@ DEF_FUNC_LOCAL print_sink_write, PSW_FRAME
     call obj_call_n
     add rsp, 16
     push rax
+    push rax
     mov rdi, rbx
-    call obj_decref             ; the bound write
+    DECREF_V rdi, rcx           ; the bound write, which is a Value
     mov rdi, [rbp - PSW_STR]
-    call obj_decref             ; the text
+    call obj_decref             ; the text, which is always a str
+    pop rax
     pop rax
     test rax, rax
     jz .psw_raised
@@ -1190,8 +1196,10 @@ DEF_FUNC_LOCAL print_sink_flush, PSF_FRAME
     xor edx, edx
     call obj_call_n
     push rax
+    push rax
     mov rdi, rbx
-    call obj_decref
+    DECREF_V rdi, rcx           ; a Value, as obj_getattr_opt answers
+    pop rax
     pop rax
     test rax, rax
     jz .psf_failed
