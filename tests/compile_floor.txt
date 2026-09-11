@@ -41,6 +41,7 @@ test_await_raises
 test_bad_arguments
 test_binary_dunders
 test_binop_calls_once
+test_binop_concat_declines
 test_binop_matrix
 test_binop_right_slot
 test_bitwise

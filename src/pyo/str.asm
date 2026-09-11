@@ -2420,7 +2420,8 @@ str_name: db "str", 0
 ; String number methods (for + and * operators)
 align 8
 str_number_methods:
-    dq str_concat           ; nb_add          +0
+    dq 0                    ; nb_add -- see list_number_methods; str_concat
+                            ; is str_sequence_methods.sq_concat now
     dq 0                    ; nb_subtract     +8
     dq str_repeat           ; nb_multiply     +16
     dq str_mod              ; nb_remainder    +24
@@ -2460,7 +2461,11 @@ str_number_methods:
 align 8
 str_sequence_methods:
     dq str_len              ; sq_length       +0
-    dq 0                    ; sq_concat       +8
+    ; str_concat lives here rather than in nb_add, so that `"a" + obj` asks
+    ; obj's __radd__ before falling back to it -- PyNumber_Add tries both
+    ; operands' nb_add and only then the left's sq_concat, and this one
+    ; raises rather than declining, as CPython's does.
+    dq str_concat           ; sq_concat       +8
     ; str_repeat is also nb_multiply, but it has to be here as well: the
     ; reflected form `3 * "ab"` reaches a sequence only through sq_repeat, and
     ; with this NULL the int's nb_multiply took the string and read its length.

@@ -1617,7 +1617,8 @@ section .data
 ; bytes number methods (for % formatting)
 align 8
 bytes_number_methods:
-    dq bytes_concat         ; nb_add          +0
+    dq 0                    ; nb_add -- see list_number_methods: the concat
+                            ; is sq_concat so the reflected half is reachable
     dq 0                    ; nb_subtract     +8
     dq bytes_repeat         ; nb_multiply     +16
     dq bytes_mod            ; nb_remainder    +24

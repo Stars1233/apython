@@ -53,6 +53,13 @@ BO_LTAG  equ 24
 ; up on -- so the message read binary_op_symbols[0] and every operator in the
 ; interpreter reported itself as '+'.
 BO_OP    equ 40
+; The pad, put to work.  CPython's PyNumber_Add tries BOTH operands' nb_add --
+; the reflected half included -- before it falls back to the left's sq_concat,
+; and a sequence's sq_concat raises rather than declining, in this tree as in
+; CPython.  So the right operand has to be asked FIRST or it is never asked at
+; all.  This says "the right slot was tried for a concat; if it declined, the
+; left's sq_concat is still owed a turn", and .binop_try_dunder reads it.
+BO_SEQFB equ 32
 BO_SIZE  equ 48
 ; op_compare_op saves the same four words in the same order and needs no op
 ; index -- its own is in a register nothing calls across.  It had shared
@@ -765,7 +772,7 @@ DEF_FUNC_BARE op_binary_op
     ; Save operands + tags for DECREF after call (push on machine stack)
     ; Stack layout: [rsp+BO_RIGHT], [rsp+BO_RTAG], [rsp+BO_LEFT], [rsp+BO_LTAG]
     push rcx                   ; the op index, for the error path at the end
-    push rcx                   ; ...and a pad, so the push list stays even
+    push 0                     ; BO_SEQFB, and a pad so the push list stays even
     push r9                    ; save left tag
     push rdi                   ; save left
     push r8                    ; save right tag
@@ -1207,13 +1214,28 @@ DEF_FUNC_BARE op_binary_op
     jmp .binop_try_right_slot
 
 .binop_seq_iconcat:
+    ; The right operand's own nb_add gets its turn before this does; see
+    ; .binop_seq_concat.  `a += obj` for an obj with only an __radd__ is
+    ; obj.__radd__(a) in CPython, and reaching sq_inplace_concat first made it
+    ; "'obj' object is not iterable".
+    cmp qword [rsp + BO_SEQFB], 0
+    jne .binop_seq_iconcat_direct
+    mov qword [rsp + BO_SEQFB], 1
+    jmp .binop_try_right_slot
+.binop_seq_iconcat_direct:
+    mov qword [rsp + BO_SEQFB], 0
+    mov rdi, [rsp + BO_LEFT]    ; as .binop_seq_concat_direct: both clobbered
+    mov rsi, [rsp + BO_RIGHT]
+    mov rax, rdi
+    mov rax, [rax + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
     ; The comment above said sq_inplace_concat and the code read sq_concat, so
     ; `ba += b"x"` built a NEW bytearray and rebound the name: an alias never
     ; saw the change, and `c is d` went False across it.  bytearray's
     ; sq_inplace_concat has existed all along and nothing reached it.
     mov rcx, [rax + PySequenceMethods.sq_inplace_concat]
     test rcx, rcx
-    jz .binop_seq_concat
+    jz .binop_seq_concat_direct ; the right slot has had its turn already
     mov rax, rcx
     jmp .binop_seq_have_concat
 
@@ -1225,6 +1247,26 @@ DEF_FUNC_BARE op_binary_op
     jmp .binop_seq_have_repeat
 
 .binop_seq_concat:
+    ; CPython asks the RIGHT operand's nb_add before it falls back to the
+    ; left's sq_concat, and a sequence's sq_concat raises instead of
+    ; declining -- so asking it first meant `[1] + obj` for an obj with an
+    ; __radd__ never reached the __radd__ at all.  Go round by the right slot
+    ; once, and come back here when it declines.
+    cmp qword [rsp + BO_SEQFB], 0
+    jne .binop_seq_concat_direct
+    mov qword [rsp + BO_SEQFB], 1
+    jmp .binop_try_right_slot
+.binop_seq_concat_direct:
+    mov qword [rsp + BO_SEQFB], 0
+    ; .binop_seq_have_concat takes the operands out of rdi and rsi, not off
+    ; the stack, and the trip through .binop_try_right_slot clobbers both.
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    mov rax, rdi
+    mov rax, [rax + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .binop_try_dunder
     mov rax, [rax + PySequenceMethods.sq_concat]
     test rax, rax
     jz .binop_try_right_slot
@@ -1369,6 +1411,16 @@ DEF_FUNC_BARE op_binary_op
     jmp .binop_try_dunder
 
 .binop_try_dunder:
+    ; A concat that went round by the right slot first is owed its own turn
+    ; now that the right slot has declined.
+    cmp qword [rsp + BO_SEQFB], 0
+    je .binop_dunder_start
+    mov ecx, r9d
+    cmp ecx, 13
+    je .binop_seq_iconcat_direct
+    jmp .binop_seq_concat_direct
+
+.binop_dunder_start:
     ; Try dunder method on heaptype objects
     extern binop_dunder_table
     extern binop_rdunder_table

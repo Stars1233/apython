@@ -2414,7 +2414,9 @@ list_name_str: db "list", 0
 ; List number methods (just bool)
 align 8
 list_number_methods:
-    dq list_concat          ; nb_add (list concatenation)
+    dq 0                    ; nb_add -- concatenation is sq_concat, as in
+                            ; CPython, so that PyNumber_Add can ask the RIGHT
+                            ; operand before falling back to it
     dq 0                    ; nb_subtract
     dq list_repeat          ; nb_multiply (list repetition)
     dq 0                    ; nb_remainder
@@ -2435,7 +2437,11 @@ list_number_methods:
     dq 0                    ; nb_floor_divide
     dq 0                    ; nb_true_divide
     dq 0                    ; nb_index
-    dq list_inplace_concat      ; nb_iadd         +168
+    dq 0                        ; nb_iadd -- `l += x` is sq_inplace_concat, as
+                                ; in CPython.  Through nb_iadd it ran ahead of
+                                ; the reflected half, so `l += obj` for an obj
+                                ; with only an __radd__ reported that the obj
+                                ; was not iterable instead of asking it.
     dq 0                        ; nb_isub         +176
     dq list_inplace_repeat      ; nb_imul         +184
     dq 0                        ; nb_irem         +192
