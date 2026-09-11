@@ -214,6 +214,13 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   the constructor that rewrites its own class from the errno, the four named
   attributes beside `.args`, the message assembled from them, and CPython's
   errno-to-subclass table
+- `src/pyo/exc_str.asm` — how an exception renders itself: `repr()` and
+  `str()` for every exception, plus the two that are not the general case --
+  SyntaxError, which shows the file, the line and a caret before it says what
+  was wrong, and UnicodeError, whose `str()` is assembled from five named
+  attributes rather than from `.args`.  Split off when `exception.asm` reached
+  the 100k cap; what stayed is the exception ITSELF -- the type table,
+  construction, teardown, attribute access and the methods
 - `src/pyo/*.asm` — Type implementations (int, str, list, dict, tuple, func,
   class, iter, singleton, bytes, bytearray, memoryview, code).
   `dict_views.asm` is the three view types `dict.keys()`, `.values()` and
