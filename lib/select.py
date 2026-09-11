@@ -79,6 +79,17 @@ def select(rlist, wlist, xlist, timeout=None):
     return out
 
 
+# CPython's select() is a C function, which is NOT a descriptor: storing it in
+# a class body keeps the function, and `self._select(r, w, x, t)` passes four
+# arguments.  Lib/selectors.py is written against exactly that --
+# `_select = select.select` in SelectSelector's body -- and a PYTHON function
+# there binds instead, so every call arrived one argument too long.  A
+# staticmethod is the Python spelling of "callable, and not a descriptor that
+# binds": subprocess.communicate() over the select backend could not run
+# without it, and hung with the child's pipe still open.
+select = staticmethod(select)
+
+
 class poll:
     """The poll object: a registry of descriptors and the events wanted."""
 

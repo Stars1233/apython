@@ -515,6 +515,19 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov qword [rbp - LA_OWNMRO], 1
     jmp .la_getattr_done
 .la_call_getattr:
+    ; A MODULE's tp_getattr reads the module's own dict, which is INSTANCE
+    ; storage: CPython's module_getattro hands the value back as it stands, so
+    ; a staticmethod in a module dict is a staticmethod object and not the
+    ; function inside it.  The descriptor block below ran over it and unwrapped
+    ; it -- and lib/select.py keeps one there on purpose, because CPython's
+    ; select.select is a C function that does NOT bind when a class body stores
+    ; it, which is exactly what Lib/selectors.py does with it.
+    extern module_getattr
+    lea rdx, [rel module_getattr]
+    cmp rax, rdx
+    jne .la_getattr_go
+    mov qword [rbp - LA_FROMINST], 1
+.la_getattr_go:
     call rax
     V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
@@ -2086,6 +2099,18 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     mov qword [rbp - GA_OWNMRO], 1
     jmp .ga_getattr_done
 .ga_call_getattr:
+    ; A MODULE's tp_getattr reads the module's own dict, which is INSTANCE
+    ; storage: CPython's module_getattro hands the value back as it stands, so
+    ; a staticmethod in a module dict is a staticmethod object and not the
+    ; function inside it.  The descriptor block below ran over it and unwrapped
+    ; it -- and lib/select.py keeps one there on purpose, because CPython's
+    ; select.select is a C function that does NOT bind when a class body stores
+    ; it, which is exactly what Lib/selectors.py does with it.
+    lea rdx, [rel module_getattr]
+    cmp rcx, rdx
+    jne .ga_getattr_go
+    mov qword [rbp - GA_FROMINST], 1
+.ga_getattr_go:
     call rcx
     V_UNPACK rax, rdx
     test edx, edx
