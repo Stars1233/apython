@@ -22,24 +22,46 @@ reasoning that chose them and what changing one would cost.
   builtin it found dispatched into each other for ever, and the module no
   longer crashes.
 
-  The same defect is what stands between `time.get_clock_info` and the six
-  asyncio modules.  CPython's `BaseEventLoop.__init__` reads
-  `time.get_clock_info('monotonic').resolution` and gets no further without
-  it, so those modules never ran; supply it -- a pure-Python one injected
-  into an unmodified build is enough -- and test_contextlib_async, test_logging
-  and test_sys_settrace segfault instead, in `gc_list_remove` under
-  `gc_visit_reachable`, walking a block the allocator has already handed back.
+  The same defect is what `time.get_clock_info` now exposes.  That function
+  exists, so CPython's `BaseEventLoop.__init__` gets past its first line and
+  asyncio starts -- and **test_asyncgen, test_contextlib_async, test_logging
+  and test_sys_settrace segfault** where they used to stop on an
+  AttributeError, in `gc_list_remove` under `gc_visit_reachable`.  They are
+  the four crashes in an otherwise crash-free sweep of CPython's 406 modules,
+  and they are one defect, not four.
 
-  Traced: the object is an asyncio `Task`'s `_context`, a `contextvars.Context`
-  with `__slots__`, sitting in the Task's instance dict at a live dense index
-  with a live key.  A hardware watchpoint over its whole refcount history
-  shows fifteen writes, every LOAD_FAST matched by its DECREF, and **no
-  `dict_set` among them** -- so the dict entry that holds it never took a
-  reference.  The last decref is `tuple_dealloc` under `list_ass_subscript`,
-  and the block is freed and reused while the dict still names it.  Watching
-  the entry slot instead shows the entries array moving under a resize, so the
-  write that put the pointer there is not the one the watch caught.  That is
-  as far as it is reduced; the two halves have not been seen in one timeline.
+  What is known now, which is more than the refcount trace above found:
+
+  * The repro is a single module, `test_contextlib_async`, not a suite.
+  * valgrind over it reports exactly TWO errors and both are the fault
+    itself; everything before it is clean.  So there is no earlier
+    use-after-free to find -- the corruption is a single wild write.
+  * The object is confirmed: a `contextvars.Context`, reached from an asyncio
+    `Task`'s instance dict under the key `_context`, read out of the
+    DictEntry at the moment of the fault.
+  * The store into that entry DID go through `dict_set`, which INCREFs -- a
+    watchpoint on the entry slot caught it, at `instance_setattr` under
+    `op_store_attr`.  So the "the dict never took a reference" reading above
+    is wrong.
+  * The damage is to the object's GC HEAD, not to the dict: `gc_next`'s low
+    four bytes are overwritten with a small number -- 32767 under the pool
+    allocator, 31 under libc's -- while the high four are left intact.  A
+    four-byte store, of a value that looks like a mask or a version.
+  * Every generation list is internally consistent at the START of every
+    collection, checked by walking all three and comparing each node against
+    its neighbour's back pointer.  So the node is not in a generation list at
+    all: it is reached only through `dict_traverse` during phase 4.
+  * Disabling STORE_ATTR specialization entirely -- both the instance and the
+    slot caches -- does not stop it.
+  * `gc.disable()` does not stop it either; it moves the fault to the
+    shutdown collection, which means the corruption is already in the object
+    graph and any collection trips over it.
+
+  What that leaves is a four-byte write into a live object's GC head from
+  something that is not the collector and not the store caches.  Set a
+  hardware watchpoint on the head under `setarch -R` -- the address is stable
+  across runs with ASLR off, and a two-pass script (find it, then watch it)
+  is how the facts above were got.
 
   CPython's test_sys_settrace dies in `gc_visit_decref` under `exc_traverse`
   at shutdown, and it is HEAP-LAYOUT SENSITIVE: the same commit built at
@@ -166,16 +188,6 @@ reasoning that chose them and what changing one would cost.
   compile is fast -- a hundred thousand lines in 0.8s -- so it is the trace
   machinery under `sys.settrace` and a jump, not the compiler.  It sits with
   the rest of the settrace divergence below.
-
-- **`raise SomeExceptionClass` does not run the class's `__init__`.**  The
-  class form of the operand reaches `exc_new`, which builds the object and its
-  args tuple directly rather than CALLING the type, so
-  `class C(Exception):` with an `__init__` of its own is constructed with none
-  of it: `raise C` gives `C()` where CPython gives whatever `C()` gives.  The
-  `from` clause instantiates a class cause the same way and inherits the same
-  limit.  Fixing it means calling the type -- `exc_type_call` -- where
-  `.raise_type` calls `exc_new`, on the path every `raise ValueError` takes,
-  so it is a hot path and wants measuring rather than just changing.
 
 - **`super(C, obj)` on a PROXY answers differently depending on what comes
   after it in the file.**  CPython's supercheck asks an object what class it

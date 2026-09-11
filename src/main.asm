@@ -602,6 +602,13 @@ DEF_FUNC main, 8
     xor ebx, ebx
 
 .exit_cleanup:
+    ; From here on the interpreter is coming apart, and the Python that still
+    ; runs -- every __del__ the collection below fires -- is entitled to know
+    ; it.  asyncio's loop.close() asks before touching its selector, and
+    ; threading, logging and concurrent.futures all branch on the answer.
+    extern interp_finalizing
+    mov qword [rel interp_finalizing], 1
+
     ; Whatever is still waiting in stdout's buffer goes out first, and before
     ; the collection below: a __del__ that prints has to reach the same
     ; stream, in order, and a buffer abandoned at exit is output that was

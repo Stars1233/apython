@@ -1769,6 +1769,18 @@ DEF_FUNC type_call
 .exc_subclass_call:
     ; User-defined exception subclass — create PyExceptionObject via exc_type_call
     ; rbx = type, r12 = args, r13 = nargs
+
+    ; ...unless the class defines __new__ in Python.  exc_type_call finds a
+    ; BUILTIN tp_new along tp_base and nothing here used to ask whether there
+    ; was a Python one, so `class E(Exception): def __new__(...)` had its
+    ; constructor silently skipped -- for `E()` as much as for `raise E`.
+    extern exc_user_new
+    extern obj_call_n
+    mov rdi, rbx
+    call exc_user_new
+    test rax, rax
+    jnz .exc_sub_user_new
+
     extern exc_type_call
     mov rdi, rbx
     mov rsi, r12
@@ -1776,6 +1788,54 @@ DEF_FUNC type_call
     call exc_type_call
     ; rax = exception object (PyExceptionObject)
     mov r14, rax                ; r14 = instance
+    jmp .exc_sub_have_instance
+
+.exc_sub_user_new:
+    ; Call it as (cls, *args).  __new__ is a staticmethod, so the class is
+    ; passed explicitly; the array is built on the stack the same way the
+    ; __init__ call below builds its own.
+    mov [rbp - TC_NEW_FUNC], rax
+    lea rax, [r13 + 2]          ; nargs + 1 slots...
+    and rax, -2                 ; ...rounded up to a pair, so rsp stays
+    shl rax, 3                  ; 16-aligned for the call below
+    sub rsp, rax
+    mov r15, rsp
+    mov [r15], rbx              ; args[0] = the class
+    xor ecx, ecx
+.exc_sub_new_copy:
+    cmp rcx, r13
+    jge .exc_sub_new_call
+    mov rdx, [r12 + rcx*8]
+    mov [r15 + rcx*8 + 8], rdx
+    inc rcx
+    jmp .exc_sub_new_copy
+.exc_sub_new_call:
+    mov rdi, [rbp - TC_NEW_FUNC]
+    mov rsi, r15
+    lea rdx, [r13 + 1]
+    call obj_call_n
+    mov r14, rax
+    ; The stack goes back before anything branches, so every exit below is the
+    ; ordinary one.
+    lea rax, [r13 + 2]
+    and rax, -2
+    shl rax, 3
+    add rsp, rax
+    test r14, r14
+    jz .exc_sub_new_failed
+
+    ; CPython runs __init__ only when what came back is an instance of the
+    ; class that was asked for -- a __new__ that answers something else has
+    ; taken over the construction entirely.
+    V_TEST_PTR r14, rax
+    ja .exc_sub_new_other
+    mov rdi, [r14 + PyObject.ob_type]
+    mov rsi, rbx
+    call type_is_subtype
+    test eax, eax
+    jz .exc_sub_new_other
+
+.exc_sub_have_instance:
 
     ; The __init__ to run, found along the MRO rather than in this type's own
     ; slot: it is inherited, and `class F(E): pass` runs E's.  tp_init is set
@@ -1828,6 +1888,10 @@ DEF_FUNC type_call
     shl rax, 3                  ; 16-aligned for the tp_call below
     add rsp, rax
 
+.exc_sub_new_other:
+    ; __new__ answered something that is not an instance of the class asked
+    ; for, so it has taken the construction over and __init__ does not run --
+    ; type_call's rule, applied here.
 .exc_sub_no_init:
     mov rax, r14
     mov edx, TAG_PTR
@@ -1839,6 +1903,18 @@ DEF_FUNC type_call
     pop rbx
     leave
     V_PACK rax, rdx             ; tp_call returns one Value
+    ret
+
+.exc_sub_new_failed:
+    ; __new__ raised; the exception is pending and there is nothing to return.
+    add rsp, 56                 ; undo the locals; must match the sub above
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    RET_NULL
     ret
 
 .int_subclass_call:
@@ -2071,11 +2147,23 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     mov rax, [rax + PyTypeObject.tp_bases]
     test rax, rax
     jnz .tga_return_tuple
-    ; A static type keeps no tuple; build one from tp_base.
+    ; A static type keeps no tuple; build one from tp_base.  Its chain ends at
+    ; 0 rather than at object -- type_mro_next, type_mro_len and type_mro_fill
+    ; each substitute the object that anchors the end, and this did not, so
+    ; every builtin reported no bases at all while reporting a two-entry
+    ; __mro__.  Nothing in the language notices until something walks
+    ; __bases__ itself: functools._c3_mro(str) answered [str], _find_impl
+    ; answered None, and singledispatch raised "'NoneType' object is not
+    ; callable" on its first call, before anything had been registered.
     mov rcx, [rbp - TGA_ORIGIN]
     mov rcx, [rcx + PyTypeObject.tp_base]
     test rcx, rcx
-    jz .tga_empty_tuple
+    jnz .tga_bases_one
+    ; object is the one type that really has no bases; everything else has it.
+    lea rcx, [rel object_type]
+    cmp rcx, [rbp - TGA_ORIGIN]
+    je .tga_empty_tuple
+.tga_bases_one:
     push rcx
     mov edi, 1
     call tuple_new
@@ -2132,11 +2220,15 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
 
 .tga_return_base:
     ; The one base a class's layout comes from.  `object.__base__` is None,
-    ; which is also the answer for any other type with no tp_base.
+    ; and only object's is: a static type's tp_base is 0 and its base is
+    ; object, the same substitution __bases__ makes above.
     mov rax, [rbp - TGA_ORIGIN]
     mov rax, [rax + PyTypeObject.tp_base]
     test rax, rax
     jnz .tga_return_object
+    lea rax, [rel object_type]
+    cmp rax, [rbp - TGA_ORIGIN]
+    jne .tga_return_object
     extern none_singleton
     lea rax, [rel none_singleton]
 .tga_return_object:

@@ -520,6 +520,24 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     push r14
     push r15
 
+    ; A collection already running is a collection this one must not join.
+    ;
+    ; Phase 3 and phase 4.5 keep their unreachable and finalize sentinels in
+    ; THIS frame, and phase 4.5 runs ordinary Python -- every __del__ on an
+    ; unreachable object with one.  A finalizer that called gc.collect()
+    ; started a second pass over the same generation lists and rebuilt them
+    ; around this frame's stack addresses, leaving the outer pass walking
+    ; links into a frame that had moved on.
+    ;
+    ; The flag was already set here and already tested by gc_track, which is
+    ; why an allocation inside a finalizer was safe and an explicit collect
+    ; was not -- and CPython's test suite calls support.gc_collect() from
+    ; tearDown constantly, with event-loop and stream finalizers underneath.
+    ; CPython answers 0 to the same question, in gcmodule.c's
+    ; "if (gcstate->collecting) return 0"; so does this.
+    cmp qword [rel gc_collecting], 0
+    jne .already_collecting
+
     mov [rbp - GCG_GEN], edi    ; save generation
     mov qword [rbp - GCG_FOUND], 0
     mov qword [rbp - GCG_RANFIN], 0
@@ -1068,6 +1086,18 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     inc qword [rdx + rcx]
     add [rdx + rcx + 8], rax
 
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.already_collecting:
+    ; No stats row either: nothing was walked, so nothing is counted.  The
+    ; flag stays set -- the collection that owns it will clear it.
+    xor eax, eax
     pop r15
     pop r14
     pop r13

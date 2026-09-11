@@ -1777,6 +1777,128 @@ END_FUNC traceback_print_unraisable
 ;; traceback_print(rdi = exception)
 ;; Prints the CPython-shaped report for an uncaught exception, on stderr.
 ;; ============================================================================
+
+;; ============================================================================
+;; tb_print_notes(rdi = the exception) -> nothing
+;;
+;; PEP 678's notes, one per line, immediately after the exception line -- which
+;; is where CPython's print_exception_notes puts them.  tb_print_one recurses
+;; for the cause and context chain, so a note on a chained exception prints at
+;; its own level with nothing further to do.
+;;
+;; __notes__ is read straight out of the instance dict rather than through
+;; exc_getattr.  This runs while an exception is being REPORTED: a getattr walk
+;; could reach a class attribute that is not this exception's, and could run
+;; Python and raise a second one underneath the first.  For the same reason
+;; current_exception is put back exactly as it was -- a note whose str() raises
+;; is skipped, not allowed to derail the report it is part of.
+;;
+;; A list or a tuple is iterated; anything else is printed as its repr, which
+;; is what CPython's _safe_string arrives at for the same case.  list and tuple
+;; share ob_size at +16 and ob_item at +32, so one loop serves both.
+;; ============================================================================
+TPN_NOTES equ 8
+TPN_IDX   equ 16
+TPN_N     equ 24
+TPN_TMP   equ 32
+TPN_EXC   equ 40            ; current_exception on entry, put back on the way out
+TPN_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
+
+extern list_type
+extern obj_repr
+extern dict_get
+extern type_is_subtype
+
+DEF_FUNC_LOCAL tb_print_notes, TPN_FRAME
+    mov rax, [rel current_exception]
+    mov [rbp - TPN_EXC], rax
+    mov qword [rbp - TPN_NOTES], 0
+
+    mov rax, [rdi + PyExceptionObject.exc_dict]
+    test rax, rax
+    jz .tpn_out
+    mov [rbp - TPN_TMP], rax
+    CSTRING rdi, "__notes__"
+    call str_from_cstr_heap
+    test rax, rax
+    jz .tpn_out
+    mov [rbp - TPN_IDX], rax                ; the name, owned, briefly
+    mov rdi, [rbp - TPN_TMP]
+    mov rsi, rax
+    call dict_get
+    mov [rbp - TPN_NOTES], rax
+    mov rdi, [rbp - TPN_IDX]
+    call obj_decref
+
+    mov rax, [rbp - TPN_NOTES]
+    test rax, rax
+    jz .tpn_out
+    V_TEST_PTR rax, rcx
+    ja .tpn_repr
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel list_type]
+    call type_is_subtype
+    test eax, eax
+    jnz .tpn_seq
+    mov rax, [rbp - TPN_NOTES]
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel tuple_type]
+    call type_is_subtype
+    test eax, eax
+    jz .tpn_repr
+
+.tpn_seq:
+    ; A SUBCLASS of either is one, and keeps both offsets -- type_from_parts
+    ; puts a subclass's own fields after tp_basicsize.  CPython iterates any
+    ; sequence that is not a str or bytes; anything more exotic than these two
+    ; takes the repr path here, because asking a Python __getitem__ from
+    ; inside an exception report is the one thing this must not do.
+    mov rax, [rbp - TPN_NOTES]
+    mov rcx, [rax + PyListObject.ob_size]
+    mov [rbp - TPN_N], rcx
+    mov qword [rbp - TPN_IDX], 0
+.tpn_loop:
+    mov rcx, [rbp - TPN_IDX]
+    cmp rcx, [rbp - TPN_N]
+    jge .tpn_out
+    mov rax, [rbp - TPN_NOTES]
+    mov rax, [rax + PyListObject.ob_item]
+    mov rdi, [rax + rcx*8]
+    call obj_str
+    V_UNPACK rax, rdx
+    test rax, rax
+    jz .tpn_next                            ; str() raised; skip this note
+    mov [rbp - TPN_TMP], rax
+    mov rdi, rax
+    call tb_write_str
+    mov rdi, [rbp - TPN_TMP]
+    call obj_decref
+    CSTRING rdi, `\n`
+    call tb_write_cstr
+.tpn_next:
+    inc qword [rbp - TPN_IDX]
+    jmp .tpn_loop
+
+.tpn_repr:
+    mov rdi, [rbp - TPN_NOTES]
+    call obj_repr
+    test rax, rax
+    jz .tpn_out
+    mov [rbp - TPN_TMP], rax
+    mov rdi, rax
+    call tb_write_str
+    mov rdi, [rbp - TPN_TMP]
+    call obj_decref
+    CSTRING rdi, `\n`
+    call tb_write_cstr
+
+.tpn_out:
+    mov rax, [rbp - TPN_EXC]
+    mov [rel current_exception], rax
+    leave
+    ret
+END_FUNC tb_print_notes
+
 TP_EXC   equ 8
 TP_TB    equ 16
 TP_TMP   equ 24
@@ -1992,6 +2114,8 @@ DEF_FUNC tb_print_one, TP_FRAME
 .tp_newline:
     CSTRING rdi, `\n`
     call tb_write_cstr
+    mov rdi, [rbp - TP_EXC]
+    call tb_print_notes
     mov eax, 1                      ; something was printed
     pop rbx
     leave

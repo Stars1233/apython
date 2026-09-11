@@ -84,6 +84,7 @@ test_class_name_at_module
 test_class_namespace_copy
 test_closures
 test_codec_args
+test_codecs_binding
 test_codecs
 test_codecs_registry_bridge
 test_codecs_registry
@@ -211,16 +212,20 @@ test_error_messages
 test_exc_catchable
 test_exc_context
 test_excepthook
+test_exception_args_assign
 test_exception_class_lifetime
 test_exception_context
 test_exception_dunder_str
 test_exception_group_deep
+test_exception_group_new
 test_exception_group_setattr
 test_exception_group_subclass
 test_exception_init
 test_exception_instance_dict
 test_exception_kwargs
 test_exception_metatype
+test_exception_new
+test_exception_notes
 test_exceptions
 test_exception_str_repr
 test_exception_subclass_init
@@ -276,6 +281,7 @@ test_gc_dealloc_untrack
 test_gc_finalizer_order
 test_gc_generations
 test_gc_module
+test_gc_reentrant_collect
 test_gen_adv
 test_generator_close_on_drop
 test_generator_close_throw
@@ -464,6 +470,7 @@ test_property_raises
 test_pyc_hardening
 test_pyc_staleness
 test_raise_cause
+test_raise_class_init
 test_raise_from
 test_range_overflow
 test_range_protocol
@@ -550,6 +557,7 @@ test_sre_groupdict_refcount
 test_sre_position
 test_sre
 test_sre_scanner_and_boundary
+test_static_bases
 test_stdlib_glue
 test_stdlib_shims
 test_stdout_buffering
@@ -612,7 +620,9 @@ test_sys_call_tracing
 test_sys_exception
 test_sys_executable
 test_sys_exit
+test_sys_is_finalizing
 test_termios
+test_time_clock_info
 test_time_module
 test_time_ns
 test_traceback_carets

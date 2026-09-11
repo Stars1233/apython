@@ -1201,3 +1201,90 @@ _ALIASES = {
     "unicodeescape": "unicode_escape",
     "rawunicodeescape": "raw_unicode_escape",
 }
+
+
+# --- the ex_decode pair -----------------------------------------------------
+#
+# encodings/utf_16.py and utf_32.py call these on every chunk an incremental
+# decoder is handed, and nothing else does.  The contract is CPython's:
+# byteorder 0 means "look for a BOM" and the answer reports what was found
+# (-1 little, 1 big, 0 nothing, in which case the data was read little-endian
+# as the native order); a byteorder that is already known is used as given,
+# no BOM is stripped, and it is handed straight back.
+
+def utf_16_ex_decode(data, errors=None, byteorder=0, final=False):
+    b = _as_bytes(data)
+    if byteorder == 0:
+        if b[:2] == b"\xff\xfe":
+            s, n = _utf_n_decode(b[2:], errors, 2, False, "utf-16-le", 2)
+            return (s, n, -1)
+        if b[:2] == b"\xfe\xff":
+            s, n = _utf_n_decode(b[2:], errors, 2, True, "utf-16-be", 2)
+            return (s, n, 1)
+        s, n = _utf_n_decode(b, errors, 2, False, "utf-16-le")
+        return (s, n, 0)
+    big = byteorder > 0
+    name = "utf-16-be" if big else "utf-16-le"
+    s, n = _utf_n_decode(b, errors, 2, big, name)
+    return (s, n, byteorder)
+
+
+def utf_32_ex_decode(data, errors=None, byteorder=0, final=False):
+    b = _as_bytes(data)
+    if byteorder == 0:
+        if b[:4] == b"\xff\xfe\x00\x00":
+            s, n = _utf_n_decode(b[4:], errors, 4, False, "utf-32-le", 4)
+            return (s, n, -1)
+        if b[:4] == b"\x00\x00\xfe\xff":
+            s, n = _utf_n_decode(b[4:], errors, 4, True, "utf-32-be", 4)
+            return (s, n, 1)
+        s, n = _utf_n_decode(b, errors, 4, False, "utf-32-le")
+        return (s, n, 0)
+    big = byteorder > 0
+    name = "utf-32-be" if big else "utf-32-le"
+    s, n = _utf_n_decode(b, errors, 4, big, name)
+    return (s, n, byteorder)
+
+
+# --- what a class body may hold ---------------------------------------------
+#
+# CPython's encodings/*.py store these in class bodies -- utf_16_le.py has
+# `decode = codecs.utf_16_le_decode` inside its StreamReader, and every other
+# encoding module does the same.  That works there because CPython's _codecs
+# is C and a builtin_function_or_method is not a descriptor.  These are
+# ordinary Python functions and DID bind, so `self` arrived where the data
+# belonged and every stream read raised "cannot convert 'StreamReader' object
+# to bytes".
+#
+# staticmethod is the smallest thing that answers it: callable directly since
+# 3.10, not a descriptor in a class body, and it forwards __name__,
+# __module__, __qualname__ and __doc__ to the function underneath, so nothing
+# that introspects a codec can tell the difference.
+#
+# The list is explicit rather than a decorator on each def, so that what is
+# PUBLIC is written down in one place -- the private helpers (_utf_n_decode,
+# _as_bytes, the charmap internals) are deliberately not here, because nothing
+# outside this file may hold them in a class body.
+for _name in (
+    "ascii_encode", "ascii_decode",
+    "latin_1_encode", "latin_1_decode",
+    "iso8859_1_encode", "iso8859_1_decode",
+    "utf_8_encode", "utf_8_decode",
+    "utf_8_sig_encode", "utf_8_sig_decode",
+    "utf_7_encode", "utf_7_decode",
+    "utf_16_encode", "utf_16_decode", "utf_16_ex_decode",
+    "utf_16_le_encode", "utf_16_le_decode",
+    "utf_16_be_encode", "utf_16_be_decode",
+    "utf_32_encode", "utf_32_decode", "utf_32_ex_decode",
+    "utf_32_le_encode", "utf_32_le_decode",
+    "utf_32_be_encode", "utf_32_be_decode",
+    "unicode_escape_encode", "unicode_escape_decode",
+    "raw_unicode_escape_encode", "raw_unicode_escape_decode",
+    "escape_encode", "escape_decode",
+    "charmap_encode", "charmap_decode", "charmap_build",
+    "readbuffer_encode",
+):
+    _f = globals().get(_name)
+    if _f is not None and not isinstance(_f, staticmethod):
+        globals()[_name] = staticmethod(_f)
+del _name, _f
