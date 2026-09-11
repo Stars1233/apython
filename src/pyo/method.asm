@@ -230,9 +230,18 @@ DEF_FUNC_LOCAL method_call, MC_FRAME
 .mc_copy_done:
 
     ; Call im_func's tp_call(im_func, new_args, nargs+1)
+    ;
+    ; A method's function need not be callable: types.MethodType refuses one
+    ; that is not, but every other road to method_new -- a descriptor binding
+    ; among them -- can hand over anything.  This jumped to a NULL tp_call,
+    ; which is a segfault at address zero with no diagnostic at all.
     mov rdi, [rbx + PyMethodObject.im_func]
+    V_TEST_PTR rdi, rax
+    ja .mc_not_callable
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz .mc_not_callable
     mov rsi, r14
     lea rdx, [r13 + 1]
     call rax
@@ -256,6 +265,23 @@ DEF_FUNC_LOCAL method_call, MC_FRAME
     leave
     V_PACK rax, rdx             ; tp_call returns one Value
     ret
+
+.mc_not_callable:
+    ; The temporary argument array, if there was one, is left to the raise:
+    ; this path does not return, and the unwinder frees the frame it sits in.
+    mov rdi, [rbp - MC_FREE]
+    test rdi, rdi
+    jz .mc_nc_named
+    push rdi
+    push rdi
+    call ap_free
+    pop rdi
+    pop rdi
+.mc_nc_named:
+    mov rsi, [rbx + PyMethodObject.im_func]
+    CSTRING rdi, `'\x01' object is not callable`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 END_FUNC method_call
 
 ;; ============================================================================

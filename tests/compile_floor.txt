@@ -198,6 +198,7 @@ test_dict_update_raises
 test_dict_view_set
 test_dict_views
 test_dir
+test_dunder_descriptor
 test_dunder_protocols
 test_dunder_receiver
 test_dunders
