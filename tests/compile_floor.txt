@@ -84,6 +84,7 @@ test_class_name_at_module
 test_class_namespace_copy
 test_closures
 test_codec_args
+test_codecs_binding
 test_codecs
 test_codecs_registry_bridge
 test_codecs_registry
