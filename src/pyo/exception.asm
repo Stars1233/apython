@@ -2472,6 +2472,77 @@ END_FUNC exc_install_methods
 ;; stores .args, and it is what refuses keywords.
 ;; ============================================================================
 global exc_user_init
+
+;; ============================================================================
+;; exc_user_new(rdi = the class) -> rax = its Python __new__, borrowed, or 0
+;;
+;; The same question exc_user_init asks about __init__, about __new__: is
+;; there one defined in PYTHON anywhere along this class's MRO?  A builtin
+;; answer is the default -- object's or BaseException's -- and means "no", so
+;; that a class with no constructor of its own keeps the fast path.
+;;
+;; type_call's exception arm went straight to exc_type_call, which finds a
+;; BUILTIN tp_new along tp_base, and never asked this: a __new__ written in
+;; Python was skipped for `E()` as much as for `raise E`.
+;;
+;; A __new__ in a class body is implicitly a staticmethod, so what comes back
+;; is usually a staticmethod object.  It is callable as it stands, and the
+;; class has to be passed explicitly either way, so it is handed back as it
+;; is rather than unwrapped.
+;; ============================================================================
+global exc_user_new
+DEF_FUNC exc_user_new, 8            ; 1 push, so rsp is 16-aligned
+    push rbx
+    mov rbx, rdi
+    test rdi, rdi
+    jz .eun_none
+    lea rsi, [rel exc_new_name]
+    call dunder_lookup
+    V_UNPACK rax, rdx
+    test edx, edx
+    jz .eun_none
+    cmp edx, TAG_PTR
+    jne .eun_none
+    test rax, rax
+    jz .eun_none
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel builtin_func_type]
+    cmp rcx, rdx
+    je .eun_none                ; a builtin: the default, not a definition
+    ; A staticmethod wrapping a builtin is the same default: BaseException's
+    ; own __new__ is registered that way, and unwrapping is how to see it.
+    extern staticmethod_type
+    lea rdx, [rel staticmethod_type]
+    cmp rcx, rdx
+    jne .eun_out
+    mov rcx, [rax + PyStaticMethodObject.sm_callable]
+    test rcx, rcx
+    jz .eun_none
+    V_TEST_PTR rcx, rdx
+    ja .eun_out
+    mov rcx, [rcx + PyObject.ob_type]
+    lea rdx, [rel builtin_func_type]
+    cmp rcx, rdx
+    je .eun_none
+.eun_out:
+    pop rbx
+    leave
+    ret
+.eun_none:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC exc_user_new
+
+;; ============================================================================
+;; exc_user_init(rdi = the class) -> rax = its Python __init__, borrowed, or 0
+;;
+;; The __init__ to run, found along the MRO rather than in the class's own
+;; slot: it is inherited, and `class F(E): pass` runs E's.  A builtin answer is
+;; BaseException's default and means "no", which is what keeps a class with no
+;; constructor of its own on the fast path.
+;; ============================================================================
 DEF_FUNC exc_user_init, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
@@ -2995,6 +3066,7 @@ exc_metatype:
 ; <class 'exception_metatype'> where CPython prints <class 'type'>.
 exc_meta_name: db "type", 0
 exc_init_name: db "__init__", 0
+exc_new_name:  db "__new__", 0
 
 
 ; Macro to define an exception type singleton

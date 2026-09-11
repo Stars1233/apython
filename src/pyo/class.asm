@@ -1769,6 +1769,18 @@ DEF_FUNC type_call
 .exc_subclass_call:
     ; User-defined exception subclass — create PyExceptionObject via exc_type_call
     ; rbx = type, r12 = args, r13 = nargs
+
+    ; ...unless the class defines __new__ in Python.  exc_type_call finds a
+    ; BUILTIN tp_new along tp_base and nothing here used to ask whether there
+    ; was a Python one, so `class E(Exception): def __new__(...)` had its
+    ; constructor silently skipped -- for `E()` as much as for `raise E`.
+    extern exc_user_new
+    extern obj_call_n
+    mov rdi, rbx
+    call exc_user_new
+    test rax, rax
+    jnz .exc_sub_user_new
+
     extern exc_type_call
     mov rdi, rbx
     mov rsi, r12
@@ -1776,6 +1788,54 @@ DEF_FUNC type_call
     call exc_type_call
     ; rax = exception object (PyExceptionObject)
     mov r14, rax                ; r14 = instance
+    jmp .exc_sub_have_instance
+
+.exc_sub_user_new:
+    ; Call it as (cls, *args).  __new__ is a staticmethod, so the class is
+    ; passed explicitly; the array is built on the stack the same way the
+    ; __init__ call below builds its own.
+    mov [rbp - TC_NEW_FUNC], rax
+    lea rax, [r13 + 2]          ; nargs + 1 slots...
+    and rax, -2                 ; ...rounded up to a pair, so rsp stays
+    shl rax, 3                  ; 16-aligned for the call below
+    sub rsp, rax
+    mov r15, rsp
+    mov [r15], rbx              ; args[0] = the class
+    xor ecx, ecx
+.exc_sub_new_copy:
+    cmp rcx, r13
+    jge .exc_sub_new_call
+    mov rdx, [r12 + rcx*8]
+    mov [r15 + rcx*8 + 8], rdx
+    inc rcx
+    jmp .exc_sub_new_copy
+.exc_sub_new_call:
+    mov rdi, [rbp - TC_NEW_FUNC]
+    mov rsi, r15
+    lea rdx, [r13 + 1]
+    call obj_call_n
+    mov r14, rax
+    ; The stack goes back before anything branches, so every exit below is the
+    ; ordinary one.
+    lea rax, [r13 + 2]
+    and rax, -2
+    shl rax, 3
+    add rsp, rax
+    test r14, r14
+    jz .exc_sub_new_failed
+
+    ; CPython runs __init__ only when what came back is an instance of the
+    ; class that was asked for -- a __new__ that answers something else has
+    ; taken over the construction entirely.
+    V_TEST_PTR r14, rax
+    ja .exc_sub_new_other
+    mov rdi, [r14 + PyObject.ob_type]
+    mov rsi, rbx
+    call type_is_subtype
+    test eax, eax
+    jz .exc_sub_new_other
+
+.exc_sub_have_instance:
 
     ; The __init__ to run, found along the MRO rather than in this type's own
     ; slot: it is inherited, and `class F(E): pass` runs E's.  tp_init is set
@@ -1828,6 +1888,10 @@ DEF_FUNC type_call
     shl rax, 3                  ; 16-aligned for the tp_call below
     add rsp, rax
 
+.exc_sub_new_other:
+    ; __new__ answered something that is not an instance of the class asked
+    ; for, so it has taken the construction over and __init__ does not run --
+    ; type_call's rule, applied here.
 .exc_sub_no_init:
     mov rax, r14
     mov edx, TAG_PTR
@@ -1839,6 +1903,18 @@ DEF_FUNC type_call
     pop rbx
     leave
     V_PACK rax, rdx             ; tp_call returns one Value
+    ret
+
+.exc_sub_new_failed:
+    ; __new__ raised; the exception is pending and there is nothing to return.
+    add rsp, 56                 ; undo the locals; must match the sub above
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    RET_NULL
     ret
 
 .int_subclass_call:
