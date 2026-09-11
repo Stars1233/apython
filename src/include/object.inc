@@ -631,6 +631,13 @@ struc PyGenObject
     .gi_code:   resq 1    ; +32: code object
     .gi_name:   resq 1    ; +40: name string
     .gi_return_value: resq 1 ; +48: return Value (for StopIteration.value)
+    ; PEP 525's hooks, for an ASYNC generator only.  The firstiter hook fires
+    ; once, the first time the generator is used, and the finalizer is
+    ; snapshotted at that same moment -- so a generator collected after its
+    ; event loop has moved on is still closed by the loop that started it,
+    ; which is what CPython's ag_origin_or_finalizer does.
+    .ag_hooks_done: resq 1   ; +56: 1 once firstiter has fired
+    .ag_finalizer: resq 1    ; +64: the finalizer that was installed then, owned
 endstruc
 
 ; File object (for sys.stdout, sys.stderr, sys.stdin)

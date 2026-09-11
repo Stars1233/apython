@@ -146,6 +146,8 @@ DEF_FUNC async_gen_new
 
     mov qword [r12 + PyGenObject.gi_name], 0
     mov qword [r12 + PyGenObject.gi_return_value], 0
+    mov qword [r12 + PyGenObject.ag_hooks_done], 0
+    mov qword [r12 + PyGenObject.ag_finalizer], 0
 
     mov rdi, r12
     call gc_track
@@ -279,15 +281,70 @@ DEF_FUNC gen_iternext
 END_FUNC gen_iternext
 
 ;; ============================================================================
+;; async_gen_init_hooks(rdi = an async generator) -> nothing
+;;
+;; PEP 525's firstiter, fired once per generator, and the finalizer snapshotted
+;; beside it.  Anything the hook raises is left pending: the caller is building
+;; an asend wrapper and has no way to report, and CPython's own
+;; async_gen_init_hooks propagates it from the same place.
+;; ============================================================================
+AGIH_GEN   equ 8
+AGIH_FRAME equ 16           ; 0 pushes, 16-aligned
+DEF_FUNC_LOCAL async_gen_init_hooks, AGIH_FRAME
+    cmp qword [rdi + PyGenObject.ag_hooks_done], 0
+    jne .agih_done
+    mov qword [rdi + PyGenObject.ag_hooks_done], 1
+    mov [rbp - AGIH_GEN], rdi
+
+    extern asyncgen_finalizer_hook
+    mov rax, [rel asyncgen_finalizer_hook]
+    test rax, rax
+    jz .agih_no_final
+    mov [rdi + PyGenObject.ag_finalizer], rax
+    mov rdi, rax
+    call obj_incref
+.agih_no_final:
+
+    extern asyncgen_firstiter_hook
+    mov rax, [rel asyncgen_firstiter_hook]
+    test rax, rax
+    jz .agih_done
+    sub rsp, 16
+    mov rcx, [rbp - AGIH_GEN]
+    mov [rsp], rcx
+    mov rdi, rax
+    mov rsi, rsp
+    mov edx, 1
+    extern obj_call_n
+    call obj_call_n
+    add rsp, 16
+    test rax, rax
+    jz .agih_done               ; the hook raised; the exception stays pending
+    DECREF_V rax, rcx
+.agih_done:
+    leave
+    ret
+END_FUNC async_gen_init_hooks
+
+;; ============================================================================
 ;; async_gen_iternext(PyGenObject *self) -> fat value (AsyncGenASend wrapper)
 ;; Called by GET_ANEXT. Creates an AsyncGenASend wrapper that, when iterated
 ;; by SEND, actually resumes the async generator.
 ;; rdi = async generator
 ;; Returns: (rax=AsyncGenASend*, edx=TAG_PTR)
 ;; ============================================================================
+
+
 DEF_FUNC async_gen_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi               ; rbx = async generator
+
+    ; PEP 525: the first time an async generator is used, the event loop's
+    ; firstiter hook is told about it -- that is how asyncio builds the set
+    ; shutdown_asyncgens() closes -- and the finalizer in force at that moment
+    ; is kept on the generator, so one collected later is still closed by the
+    ; loop that started it.
+    call async_gen_init_hooks
 
     ; Allocate AsyncGenASend wrapper
     mov edi, AsyncGenASend_size
