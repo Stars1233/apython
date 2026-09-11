@@ -1252,9 +1252,12 @@ dict_len:
 ;; dict_subscript(rdi=dict, rsi=key, edx=key_tag) -> (rax=value, edx=value_tag)
 ;; mp_subscript: look up key, raise KeyError if not found
 ;; ============================================================================
-DEF_FUNC dict_subscript, 8            ; 1 pushes, so rsp is 16-aligned
+DSUB_DICT  equ 8
+DSUB_FRAME equ 24           ; + 1 push = 32, 16-aligned
+DEF_FUNC dict_subscript, DSUB_FRAME
     push rbx
 
+    mov [rbp - DSUB_DICT], rdi ; the mapping, for __missing__ below
     mov rbx, rsi               ; save the key Value for the error message
     call dict_get              ; both take a key Value
     test rax, rax              ; a Value, and 0 is the only miss
@@ -1265,11 +1268,50 @@ DEF_FUNC dict_subscript, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 
 .key_error:
+    ; A dict SUBCLASS gets to answer for itself first.  CPython's
+    ; dict_subscript asks __missing__ on any mapping that is not exactly a
+    ; dict, and collections.defaultdict is only the best-known user of it:
+    ; urllib.parse.quote builds a memoising dict subclass exactly this way, so
+    ; quoting any character that was not already cached raised KeyError.
+    mov rax, [rbp - DSUB_DICT]
+    mov rax, [rax + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    je .plain_key_error
+
+    mov rdi, [rbp - DSUB_DICT]
+    mov rsi, rbx
+    V_UNPACK rsi, rcx           ; dunder_call_2 wants (payload, tag)
+    CSTRING rdx, "__missing__"
+    extern dunder_call_2
+    call dunder_call_2
+    test rax, rax
+    jnz .ds_missing_answered
+    ; 0 is "no __missing__" or "it raised"; only the first falls through to
+    ; the KeyError this lookup was always going to give.
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    jne .ds_missing_raised
+
+.plain_key_error:
     ; The key itself is the argument, as in CPython: d["k"] reports
     ; KeyError('k'), not a fixed "key not found".  rbx already holds it.
     mov rdi, rbx               ; the key Value, saved on entry
     extern raise_key_error
     call raise_key_error
+
+.ds_missing_answered:
+    mov edx, TAG_PTR            ; the Value is whatever __missing__ returned
+    pop rbx
+    leave
+    V_UNPACK rax, rdx
+    ret
+
+.ds_missing_raised:
+    pop rbx
+    leave
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
 END_FUNC dict_subscript
 
 ;; ============================================================================
