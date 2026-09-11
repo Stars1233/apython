@@ -821,11 +821,14 @@ extern bool_true
 extern bool_false
 
 ;; ============================================================================
-;; bytes_like_ptr_len(rdi = a pointer) -> rax = data, r10 = length, ecx = 1
-;;   ecx = 0 when it is neither bytes nor bytearray.
+;; bytes_like_ptr_len(rdi = a Value) -> rax = data, r10 = length, ecx = 1
+;;   ecx = 0 when the object has no readable bytes at all.
 ;;
-;; The two keep their data in different places -- bytes inline, bytearray out
-;; of line -- so anything that reads both goes through here.
+;; bytes, bytearray and memoryview keep their data in three different places --
+;; inline, out of line, and borrowed -- so anything that reads any of them goes
+;; through here.  Anything ELSE is asked through its type's tp_as_buffer, which
+;; is what makes one added arm reach all forty-odd callers: memoryview(),
+;; bytes(), FileIO.write, marshal, sre and the bytes methods.
 ;; ============================================================================
 DEF_FUNC bytes_like_ptr_len, 8            ; 1 push, so rsp is 16-aligned
     push rbx
@@ -859,7 +862,26 @@ DEF_FUNC bytes_like_ptr_len, 8            ; 1 push, so rsp is 16-aligned
     lea rsi, [rel bytearray_type]
     call type_is_subtype
     test eax, eax
+    jnz .bpl_bytearray_sub
+
+    ; Neither, and no subclass of either: ask the TYPE where its bytes are.
+    ; That is what tp_as_buffer is for, and it is how array -- or any exporter
+    ; added later -- becomes readable by every one of this function's forty-odd
+    ; callers at once, instead of each learning the type by name.
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_buffer]
+    test rax, rax
     jz .bpl_no
+    mov rdi, rbx
+    call rax
+    test ecx, ecx
+    jz .bpl_no
+    mov r10, rdx                ; the slot answers in rdx; this returns in r10
+    pop rbx
+    leave
+    ret
+
+.bpl_bytearray_sub:
     mov rdi, rbx
     jmp .bpl_bytearray_have
 
@@ -2017,7 +2039,45 @@ extern str_set_length
     lea rcx, [rel str_type]
     cmp rax, rcx
     je .bls_need_encoding
-    jmp .bls_iterable
+
+    ; A buffer EXPORTER is copied as bytes, not iterated as a sequence of
+    ; ints.  CPython's bytes() asks for the buffer first, so
+    ; bytes(array('i', [1, 2])) is the array's eight raw bytes -- here it fell
+    ; through to the iterable road and answered b'\x01\x02', two bytes taken
+    ; from the two ITEMS.  The explicit arms above are bytes, bytearray and
+    ; memoryview; this is everything else that can hand over a run of bytes.
+    mov rax, [rax + PyTypeObject.tp_as_buffer]
+    test rax, rax
+    jz .bls_iterable
+    jmp .bls_copy_buffer
+
+.bls_copy_buffer:
+    ; bytes_like_ptr_len asks the slot and hands back (data, length); the copy
+    ; below is the same one the bytes and bytearray arms make.
+    mov rdi, [rbp - BLS_ARGS]
+    mov rdi, [rdi]
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .bls_iterable            ; the slot declined after all
+    test r10, r10
+    jz .bls_empty
+    mov rbx, rax                ; the source bytes
+    mov r12, r10                ; and how many
+    lea rdi, [r12 + 8]
+    call ap_malloc
+    test rax, rax
+    jz .bls_empty
+    push rax
+    mov rdi, rax
+    mov rsi, rbx
+    mov rdx, r12
+    call ap_memcpy
+    pop rax
+    mov rdx, r12
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .bls_empty:
     xor eax, eax

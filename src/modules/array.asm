@@ -1344,6 +1344,43 @@ array_mapping_methods:
 
 align 8
 global array_type
+section .text
+
+;; ============================================================================
+;; array_getbuffer(rdi = an array) -> rax = data, rdx = length in BYTES,
+;;                                    ecx = 1 always
+;;
+;; The tp_as_buffer slot.  An array is a flat run of fixed-size scalars, which
+;; is exactly what a buffer consumer wants; `memoryview(array('i', [1, 2]))`
+;; was "a bytes-like object is required" before there was a slot to ask.
+;;
+;; ob_size counts ITEMS and every consumer counts bytes, so the length is
+;; ob_size * ob_isize.  An empty array has no buffer at all, and answers a
+;; length of zero over a pointer nothing will read.
+;; ============================================================================
+DEF_FUNC_BARE array_getbuffer
+    mov rax, [rdi + PyArrayObject.ob_data]
+    mov rdx, [rdi + PyArrayObject.ob_size]
+    imul rdx, [rdi + PyArrayObject.ob_isize]
+    test rax, rax
+    jnz .agb_yes
+    xor edx, edx                ; no buffer: nothing to read, and no length
+    lea rax, [rel array_empty_data]
+.agb_yes:
+    mov ecx, 1
+    ret
+END_FUNC array_getbuffer
+
+section .rodata
+array_empty_data: db 0
+
+; Back to the section the table below lives in: it is WRITTEN at start-up --
+; array_module_create stores its tp_dict -- so leaving it in .text faults on
+; that store.  lint checks for a function emitted in a DATA section; this is
+; the mirror of it, and nothing checks for it.
+section .data
+
+align 8
 array_type:
     dq 1                        ; ob_refcnt (immortal)
     dq type_type                ; ob_type
@@ -1379,7 +1416,7 @@ array_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
-    dq 0                        ; tp_as_buffer
+    dq array_getbuffer          ; tp_as_buffer -- a flat run of scalars
 section .text
 
 ;; ============================================================================
@@ -1485,7 +1522,9 @@ END_FUNC array_m_tobytes
 ;;   The bytes must be a whole number of items, which is what CPython checks.
 AFB_ARR   equ 8
 AFB_FRAME equ 16            ; + 1 push = 24 ... padded below
-DEF_FUNC array_m_frombytes, 24
+AFB_SRC equ 24              ; the incoming data pointer, whatever held it
+AFB_LEN equ 32              ; and its length in bytes
+DEF_FUNC array_m_frombytes, 40
     push rbx
     cmp rsi, 2
     jne .afb_arity
@@ -1493,14 +1532,39 @@ DEF_FUNC array_m_frombytes, 24
     mov rdi, [rdi]
     mov [rbp - AFB_ARR], rdi
 
+    ; Anything bytes-LIKE, which is what CPython takes: a bytes, a bytearray or
+    ; a memoryview.  An exact-bytes test refused the other two.
+    ;
+    ; NOT a generic buffer exporter, and not another array: CPython asks for
+    ; PyBUF_SIMPLE, which an exporter carrying its own format refuses, so
+    ; `a.frombytes(other_array)` is a TypeError there.  This slot does not model
+    ; the request flags, so the three are named instead.
     V_TEST_PTR rbx, rax
     ja .afb_need_bytes
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel bytes_type]
     cmp rax, rcx
+    je .afb_kind_ok
+    extern bytearray_type
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .afb_kind_ok
+    extern memoryview_type
+    lea rcx, [rel memoryview_type]
+    cmp rax, rcx
     jne .afb_need_bytes
-
-    mov rax, [rbx + PyBytesObject.ob_size]
+.afb_kind_ok:
+    push rbx
+    mov rdi, rbx
+    extern bytes_like_ptr_len
+    call bytes_like_ptr_len
+    pop rbx
+    test ecx, ecx
+    jz .afb_need_bytes
+    mov [rbp - AFB_SRC], rax    ; where the incoming bytes are
+    mov [rbp - AFB_LEN], r10    ; and how many there are
+    mov rdi, [rbp - AFB_ARR]
+    mov rax, r10
     xor edx, edx
     mov rcx, [rdi + PyArrayObject.ob_isize]
     div rcx
@@ -1522,8 +1586,8 @@ DEF_FUNC array_m_frombytes, 24
     add rax, [rdi + PyArrayObject.ob_data]
     push rsi
     mov rdi, rax
-    lea rsi, [rbx + PyBytesObject.data]
-    mov rdx, [rbx + PyBytesObject.ob_size]
+    mov rsi, [rbp - AFB_SRC]    ; wherever the source keeps its bytes
+    mov rdx, [rbp - AFB_LEN]
     call ap_memcpy
     pop rsi
     mov rdi, [rbp - AFB_ARR]

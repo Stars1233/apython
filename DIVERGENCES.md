@@ -154,6 +154,39 @@ deliberately filters `'opcode'` out of the one case that asks for it.
   general limit stands, and is why the `bytes %` leak recorded in `bugs.md`
   cannot be fixed by catching.
 
+## A buffer reached through `tp_as_buffer` is a read-only view of BYTES
+
+`PyTypeObject` carries a `tp_as_buffer`, and it answers one question -- where
+the memory is and how much of it there is.  CPython's `Py_buffer` answers six
+more: the item format, the item size, the shape, the strides, the suboffsets
+and whether the consumer may write.  So a `memoryview` obtained through the
+slot differs from CPython's in two ways:
+
+- It is **read-only**.  An exporter reached this way has said where its bytes
+  are and nothing about whether they can MOVE -- an `array`'s do, the moment it
+  grows -- so a write through the view is refused rather than silently aimed at
+  a pointer the exporter has already abandoned.  CPython's view over an array is
+  writable because its protocol lets the exporter say so and be told when the
+  view is released.
+- It is a view of **bytes**: `format` is `'B'` and `itemsize` is `1`, so
+  `len(memoryview(array('i', [1, 2])))` is 8 here and 2 in CPython, and
+  indexing yields a byte rather than an item.  `bytes(m)` and `m.tobytes()`
+  agree exactly, which is what every caller of `bytes_like_ptr_len` actually
+  reads.
+
+The second follows from the first two-thirds of `memoryview` being absent
+rather than from a choice: `cast()` to a multi-byte format is not implemented
+either, so a view carrying `format='i'` would have no machinery to decode an
+item with and would read one byte where four were meant.  Giving the slot a
+format to report is the easy half; the decode, the strides and the release
+protocol are the rest of `memoryview`.
+
+`array.frombytes` is the one place the narrow model is visible in the other
+direction.  CPython asks for `PyBUF_SIMPLE`, which an exporter carrying its own
+format declines, so `a.frombytes(another_array)` is a TypeError there -- and
+since the slot does not model the request flags, the three types CPython
+accepts in practice are named instead of asked.
+
 ## Test oracles
 
 Three tests compare against a recorded transcript in `tests/expected/` rather

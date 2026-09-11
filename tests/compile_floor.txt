@@ -49,6 +49,7 @@ test_binop_right_slot
 test_bitwise
 test_bool_arith
 test_bool
+test_buffer_protocol
 test_builtin_arity
 test_builtin_dunder_str
 test_builtin_func_attrs

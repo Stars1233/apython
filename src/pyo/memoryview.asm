@@ -184,10 +184,62 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     jmp raise_type_error_counted
 
 .mv_error:
+    ; Before refusing, ask the TYPE.  bytes, bytearray and memoryview each have
+    ; an arm above because each needs its own export accounting and its own
+    ; readonly answer; anything else that can hand over a run of bytes says so
+    ; through tp_as_buffer, and array is the first.
+    mov rdi, [rbp - MV_ARG]
+    V_TEST_PTR rdi, rax
+    ja .mv_really_error
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_buffer]
+    test rax, rax
+    jnz .mv_from_slot
+
+.mv_really_error:
     mov rsi, [rbp - MV_ARG]
     CSTRING rdi, `memoryview: a bytes-like object is required, not '\x01'`
     extern raise_type_error_with_name
     jmp raise_type_error_with_name
+.mv_from_slot:
+    ; The generic exporter road: a read-only view of one-byte items over
+    ; whatever the slot points at.  Read-only because a buffer reached this way
+    ; has told us where its bytes are and nothing about whether they may move
+    ; -- array's can, when it grows -- so writing through the view is refused
+    ; rather than silently aimed at a stale pointer.
+    push rdi
+    mov edi, PyMemoryViewObject_size
+    call ap_malloc
+    pop rdi
+    mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
+    lea rcx, [rel memoryview_type]
+    mov [rax + PyMemoryViewObject.ob_type], rcx
+    mov [rax + PyMemoryViewObject.mv_source], rdi
+    push rax
+    push rdi
+    INCREF rdi                      ; the view holds its source
+    pop rdi
+    pop rax
+
+    push rax
+    push rax
+    mov rcx, [rdi + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_buffer]
+    call rcx                        ; rax = data, rdx = length, ecx = answered
+    mov r10, rax
+    mov r11, rdx
+    pop rax
+    pop rax
+    mov [rax + PyMemoryViewObject.mv_buf], r10
+    mov [rax + PyMemoryViewObject.mv_len], r11
+    mov qword [rax + PyMemoryViewObject.mv_itemsize], 1
+    mov qword [rax + PyMemoryViewObject.mv_stride], 1
+    lea rcx, [rel mv_format_B]
+    mov [rax + PyMemoryViewObject.mv_format], rcx
+    mov qword [rax + PyMemoryViewObject.mv_readonly], 1
+    mov edx, TAG_PTR
+    leave
+    ret
 END_FUNC memoryview_type_call
 
 
