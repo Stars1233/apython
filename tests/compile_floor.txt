@@ -219,6 +219,7 @@ test_empty_bases
 test_encodings
 test_errno
 test_error_messages
+test_eval_tuple
 test_exc_catchable
 test_exc_context
 test_excepthook

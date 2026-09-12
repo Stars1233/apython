@@ -527,21 +527,132 @@ DEF_FUNC comp_set_pending, 8
 END_FUNC comp_set_pending
 
 ;; ============================================================================
-;; par_eval_root(Comp *c) -> rax = the root expression node, 0 on error
-;; The `eval` start symbol: one expression, then optional blank lines, then end
-;; of input.  Trailing junk is an error here rather than being ignored, which
-;; is what makes eval("1 2") a syntax error.
+;; per_star_check(Comp *c, uint32_t node) -> eax = 1 when the node is not a
+;;     starred element, 0 after recording the SyntaxError that says it is
+;;
+;; eval's start symbol is `testlist` where a statement's is
+;; `testlist_star_expr`, so `eval("*a")` and `eval("1, *a")` are syntax errors
+;; while `exec` takes both.  CPython blames the star itself, one character
+;; wide, which is what the node's own line and column are: par_starred_bp
+;; takes them from the star token.
 ;; ============================================================================
-DEF_FUNC par_eval_root, 16      ; + 2 pushes = 32
+DEF_FUNC_LOCAL per_star_check, 8        ; + 1 push = 16
+    push rbx
+    mov rbx, rdi
+    call ast_at
+    cmp byte [rax + AstNode.kind], AST_STARRED
+    je .star
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.star:
+    mov ecx, [rax + AstNode.lineno]
+    mov r8d, [rax + AstNode.col]
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "invalid syntax"
+    call comp_error                     ; answers 0, which is our answer too
+    pop rbx
+    leave
+    ret
+END_FUNC per_star_check
+
+;; ============================================================================
+;; par_eval_root(Comp *c) -> rax = the root expression node, 0 on error
+;; The `eval` start symbol: CPython's is `eval_input: testlist NEWLINE*
+;; ENDMARKER`, and a testlist is COMMA-SEPARATED -- so `eval("1, 2")` is a
+;; tuple, not a syntax error.  This called par_expr, which parses one `test`
+;; and stops at the comma, and the ENDMARKER check below then refused the
+;; rest; ast.literal_eval of any tuple went the same way.
+;;
+;; The loop is par_exprlist_stmt's, not a call to it, because the two start
+;; symbols differ in one place: a statement's is `testlist_star_expr` and
+;; takes `*a`, and eval's does not.  Calling it and rejecting starred children
+;; afterwards cannot tell `eval("1, *a")`, which is an error, from
+;; `eval("(*a,)")`, which is not -- both arrive as a tuple with a starred
+;; child, and only the first one's star is at the top level.
+;;
+;; Trailing junk is still an error rather than being ignored, which is what
+;; makes eval("1 2") a syntax error.
+;; ============================================================================
+PER_FIRST equ 8
+PER_LINE  equ 16
+PER_MARK  equ 24
+PER_FRAME equ 32                ; + 2 pushes = 48
+DEF_FUNC par_eval_root, PER_FRAME
     push rbx
     push r12
     mov rbx, rdi
 
-    xor esi, esi                    ; BP_NONE
+    call par_peek
+    TOK_POS rax
+    mov [rbp - PER_LINE], rcx
+
+    mov rdi, rbx
+    mov esi, BP_NONE
+    call par_expr
+    test rax, rax
+    jz .fail
+    mov [rbp - PER_FIRST], rax
+    mov rdi, rbx
+    mov esi, eax
+    call per_star_check
+    test eax, eax
+    jz .fail
+
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COMMA
+    jne .single
+
+    mov rdi, rbx
+    call ast_mark
+    mov [rbp - PER_MARK], rax
+    mov rdi, rbx
+    mov rsi, [rbp - PER_FIRST]
+    call ast_push
+.tuple_loop:
+    mov rdi, rbx
+    call par_advance                    ; consume ','
+    mov rdi, rbx
+    call par_kind
+    ; A trailing comma ends the tuple: eval("1,") is a one-tuple.
+    cmp eax, TOK_NEWLINE
+    je .tuple_done
+    cmp eax, TOK_ENDMARKER
+    je .tuple_done
+    mov rdi, rbx
+    mov esi, BP_NONE
     call par_expr
     test rax, rax
     jz .fail
     mov r12, rax
+    mov rdi, rbx
+    mov esi, eax
+    call per_star_check
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, r12
+    call ast_push
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_COMMA
+    je .tuple_loop
+.tuple_done:
+    mov rdi, rbx
+    mov esi, AST_TUPLE
+    mov rdx, [rbp - PER_LINE]
+    mov rcx, [rbp - PER_MARK]
+    call par_finish_list
+    test rax, rax
+    jz .fail
+    mov r12, rax
+    jmp .skip_newlines
+
+.single:
+    mov r12, [rbp - PER_FIRST]
 
 .skip_newlines:
     mov rdi, rbx
