@@ -14,6 +14,68 @@ reasoning that chose them and what changing one would cost.
 
 ## Correctness
 
+- **`pyexpat`'s `buffer_text` reads back `True` and does nothing.**  Setting
+  it is accepted, the attribute answers `True`, and `CharacterDataHandler`
+  still receives one call per fragment: `<a>hello &amp; goodbye world</a>`
+  calls it three times -- `['hello ', '&', ' goodbye world']` -- where CPython
+  coalesces them into one.  The buffer and `buffer_used` exist on the handle
+  and `buffer_size` is validated and stored; what is missing is the
+  accumulate-and-flush in `px_cb_chardata`, and the flush-before-every-other-
+  callback that goes with it (the call sites are already in place, so the
+  ORDER will be right when the body arrives).  Until then a caller has no way
+  to detect the no-op, which is the shape
+  [[half-implemented-is-worse]] is about.
+
+- **Six of pyexpat's twenty-two handlers are stored, read back, and never
+  fire.**  `DefaultHandler`, `DefaultHandlerExpand`, `NotStandaloneHandler`,
+  `ExternalEntityRefHandler`, `EntityDeclHandler` and `ElementDeclHandler`
+  have `dq 0, 0` rows in `px_installers`, so setting one registers the
+  attribute and installs nothing.  Measured: `DefaultHandler`,
+  `EntityDeclHandler` and `ElementDeclHandler` all fire in CPython over a
+  document with an internal subset and none of them fire here.  `ElementDecl`
+  is the one with real work behind it -- its `model` argument is a nested
+  `(type, quant, name, children)` tuple walked out of libexpat's
+  `XML_Content` tree, which must then be released with
+  `XML_FreeContentModel` on every path including the raising ones.
+  `xml.sax` is the one consumer still blocked, on `ExternalEntityRefHandler`
+  plus `SetParamEntityParsing` and `ExternalEntityParserCreate`, which are
+  also absent.
+
+- **An internally raised `AttributeError` has no `.name` and no `.obj`.**
+  CPython sets both on every attribute error it raises, and its "did you mean"
+  machinery in `traceback` reads them; ours are absent entirely, so
+  `getattr(e, 'name', None)` answers None where CPython answers the attribute.
+  The keyword form -- `AttributeError("m", name=n, obj=o)` -- does work, and
+  the family's refcounting is now correct, so what is missing is filling the
+  two in at the raise sites.  `exc_from_cstr` is the wrong place for it: it is
+  on the path of every internally raised exception, StopIteration from
+  `call_iternext` included, and a `type_is_subtype` plus two `dict_set`s there
+  would be paid by every `for` loop that ends.  The import machinery's own
+  errors set theirs individually for exactly that reason, and attribute errors
+  want the same treatment -- there are far more sites.
+
+- **`cannot import name` never reports a circular import.**  CPython has a
+  fourth wording for it, chosen by `__spec__._initializing`:
+  `cannot import name 'X' from partially initialized module 'm' (most likely
+  due to a circular import) (PATH)`.  Our modules carry `__spec__ = None` --
+  nothing builds a ModuleSpec, because the import system is assembly rather
+  than `importlib._bootstrap` -- so the condition cannot be asked.  Detecting
+  it needs a during-body flag on the module object, which is a real change to
+  module construction rather than a message fix.  The other three wordings,
+  and `.name`/`.path`, match.
+
+- **A relative import with no `__name__` in globals raises the wrong type.**
+  `exec("from ... import x", {})` answers `ImportError: attempted relative
+  import with no known parent package`; CPython answers
+  `KeyError: "'__name__' not in globals"`, which falls out of
+  `_calc___package__` doing `globals['__name__']` rather than being a message
+  anyone chose.  CPython's own test suite does not test it, and ours is the
+  more informative of the two, so this is recorded rather than matched.  Every
+  other import-error shape measured -- missing module, missing submodule,
+  not-a-package at any depth, a blocked None, and all three reachable
+  `cannot import name` wordings -- now matches CPython exactly, attributes
+  included.
+
 - **Calls made with a misaligned stack, everywhere except the paths into
   GMP.**  The SysV ABI wants `rsp % 16 == 0` at a `call`, and glibc's float
   paths and GMP both use aligned SSE.  Every call into GMP is now made

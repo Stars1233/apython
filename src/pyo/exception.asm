@@ -2274,7 +2274,13 @@ DEF_FUNC_LOCAL exc_store_named, ESN_FRAME
     jnz .esn_have1
     lea rdx, [rel none_singleton]
 .esn_have1:
-    INCREF_V rdx, rcx
+    ; No INCREF here.  exc_setattr's generic path is dict_set, which takes its
+    ; own reference -- so an INCREF on top of it left the value with one
+    ; reference too many, and every ImportError(name=n, path=p) and
+    ; AttributeError(name=n, obj=o) leaked both values.  Invisible for years
+    ; because almost every call passes string CONSTANTS out of co_consts,
+    ; which outlive the exception anyway, and because the defaults are the
+    ; None singleton.
     xor ecx, ecx
     call exc_setattr
     add rsp, 8
@@ -2298,8 +2304,7 @@ DEF_FUNC_LOCAL exc_store_named, ESN_FRAME
     jnz .esn_have2
     lea rdx, [rel none_singleton]
 .esn_have2:
-    INCREF_V rdx, rcx
-    xor ecx, ecx
+    xor ecx, ecx                ; borrowed, as above
     call exc_setattr
     add rsp, 8
     pop rdi
@@ -2307,6 +2312,75 @@ DEF_FUNC_LOCAL exc_store_named, ESN_FRAME
     leave
     ret
 END_FUNC exc_store_named
+
+;; ============================================================================
+;; exc_raise_import(rdi = the type, rsi = message C string,
+;;                  rdx = the `name` Value or 0, rcx = the `path` Value or 0,
+;;                  r8 = 1 to release rdx and rcx afterwards, 0 to borrow them)
+;;     -- does not return
+;;
+;; The import machinery's own ImportErrors, with the two named attributes
+;; CPython's carry.  exc_from_cstr cannot do this for the family in general:
+;; it is on the path of every internally raised exception, StopIteration from
+;; call_iternext included, and a type_is_subtype plus two dict_sets there
+;; would be paid by every `for` loop that ends.  So the import sites ask for
+;; it and nothing else does.
+;;
+;; exc_store_named substitutes None for a 0 and hands the value to
+;; exc_setattr, whose generic path is dict_set -- and dict_set takes its own
+;; reference.  So the two values arrive here BORROWED: storing one does not
+;; consume the caller's reference.
+;;
+;; r8 = 1 releases them after they have been stored, which is what a caller
+;; that built the name string only for this needs -- it cannot release it
+;; itself, because this does not return.
+;; ============================================================================
+ERI_NAME  equ 8
+ERI_PATH  equ 16
+ERI_OWN   equ 24
+ERI_FRAME equ 32                ; + 0 pushes = 32, 16-aligned
+DEF_FUNC exc_raise_import, ERI_FRAME
+    mov [rbp - ERI_NAME], rdx
+    mov [rbp - ERI_PATH], rcx
+    mov [rbp - ERI_OWN], r8
+    call exc_from_cstr
+    test rax, rax
+    jz .eri_oom
+    mov rdi, rax
+    push rax
+    sub rsp, 8
+    mov esi, 2                  ; the ImportError family: name and path
+    mov rdx, [rbp - ERI_NAME]
+    mov rcx, [rbp - ERI_PATH]
+    call exc_store_named
+    add rsp, 8
+    pop rdi
+    cmp qword [rbp - ERI_OWN], 0
+    je .eri_raise
+    push rdi
+    sub rsp, 8
+    mov rdi, [rbp - ERI_NAME]
+    test rdi, rdi
+    jz .eri_drop_path
+    call obj_decref
+.eri_drop_path:
+    mov rdi, [rbp - ERI_PATH]
+    test rdi, rdi
+    jz .eri_dropped
+    call obj_decref
+.eri_dropped:
+    add rsp, 8
+    pop rdi
+.eri_raise:
+    call raise_exception_obj
+    ud2
+.eri_oom:
+    ; No memory for the exception itself; the unwinder still has to run, and
+    ; exc_install handles a 0 by leaving whatever is pending in place.
+    xor edi, edi
+    call raise_exception_obj
+    ud2
+END_FUNC exc_raise_import
 
 
 

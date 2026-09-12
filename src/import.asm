@@ -17,6 +17,10 @@ extern str_from_cstr_heap
 extern str_new_heap
 extern str_type
 extern none_singleton
+extern module_type
+extern exc_raise_import
+extern str_from_cstr_heap
+extern str_intern_cstr
 extern dict_new
 extern dict_get
 extern dict_set
@@ -75,6 +79,8 @@ IF_EXC      equ 88           ; current_exception on entry (see .import_error)
 IF_POS      equ 96           ; byte position while walking a dotted name
 IF_PARENT   equ 104          ; the module the next component hangs off
 IF_LEAF     equ 112          ; the module the walk has reached
+IF_FAILLEN  equ 120          ; length of the prefix to blame in an error
+IF_FAILPAR  equ 128          ; length of its parent, when that is the reason
 IF_FRAME    equ 136            ; + 5 pushes = 176, 16-aligned
 
 ; --- import_find_and_load frame layout ---
@@ -449,42 +455,235 @@ DEF_FUNC import_init
 END_FUNC import_init
 
 ;; ============================================================================
-;; import_raise_not_found(rdi = module name C string) -- does not return
-;; Raises ModuleNotFoundError("No module named 'x'"), matching CPython.
+;; import_raise_no_module(rdi = name C string, rsi = name length,
+;;                        rdx = parent length or 0) -- does not return
+;;
+;; Raises ModuleNotFoundError, matching CPython's two wordings:
+;;
+;;     No module named 'a.b'
+;;     No module named 'a.b'; 'a' is not a package
+;;
+;; The name is given as a LENGTH into the full dotted string rather than as a
+;; NUL-terminated one, because the prefix to blame is rarely the whole request:
+;; `import sys.foo.bar` fails at `sys.foo`, and CPython names that.  The parent
+;; is a second length into the same buffer, so neither needs a copy.
 ;; ============================================================================
-IRNF_BUF equ 256
-DEF_FUNC_LOCAL import_raise_not_found, IRNF_BUF
-    mov rsi, rdi                ; the name
-    lea rdi, [rbp - IRNF_BUF]
+IRNM_BUF equ 520                ; + 3 pushes = 544, 16-aligned
+DEF_FUNC_LOCAL import_raise_no_module, IRNM_BUF
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi                ; the name buffer
+    mov r12, rsi                ; the name length
+    mov r13, rdx                ; the parent length, or 0
+    lea rdi, [rbp - IRNM_BUF]
     xor ecx, ecx
     lea rdx, [rel im_no_module_prefix]
-.irnf_prefix:
+    call irnm_cat_cstr
+    mov rdx, rbx
+    mov rsi, r12
+    call irnm_cat_n
+    mov byte [rdi + rcx], 0x27  ; closing quote
+    inc rcx
+    test r13, r13
+    jz .irnm_done
+    lea rdx, [rel im_not_pkg_mid]
+    call irnm_cat_cstr
+    mov rdx, rbx
+    mov rsi, r13
+    call irnm_cat_n
+    lea rdx, [rel im_not_pkg_tail]
+    call irnm_cat_cstr
+.irnm_done:
+    mov byte [rdi + rcx], 0
+    ; .name is the prefix that actually failed -- `import sys.foo.bar` reports
+    ; 'sys.foo' -- so it is built from the same two values the message used.
+    push rdi                    ; the message buffer, on this frame
+    sub rsp, 8
+    mov rdi, rbx
+    mov rsi, r12
+    call str_new_heap           ; 0 is tolerated: it becomes None
+    add rsp, 8
+    pop rsi                     ; the message
+    mov rdx, rax                ; .name
+    lea rdi, [rel exc_ModuleNotFoundError_type]
+    xor ecx, ecx                ; .path is None
+    mov r8d, 1                  ; the name string is ours to hand over
+    call exc_raise_import
+    ud2
+END_FUNC import_raise_no_module
+
+;; ============================================================================
+;; irnm_cat_cstr(rdi = buffer, rcx = offset, rdx = NUL-terminated source)
+;;     -> rcx advanced.  Clobbers rax and rdx only; rdi and every other
+;;        register the caller is holding survive, because the caller keeps its
+;;        buffer in rdi across a run of these.
+;; ============================================================================
+DEF_FUNC_BARE irnm_cat_cstr
+.loop:
     movzx eax, byte [rdx]
     test al, al
-    jz .irnf_name
+    jz .done
+    inc rdx
+    cmp rcx, IRNM_BUF - 64      ; room for the longest remaining tail
+    jae .done
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .loop
+.done:
+    ret
+END_FUNC irnm_cat_cstr
+
+;; ============================================================================
+;; irnm_cat_n(rdi = buffer, rcx = offset, rdx = source, rsi = source length)
+;;     -> rcx advanced.  Same contract as irnm_cat_cstr, for a counted string.
+;; ============================================================================
+DEF_FUNC_BARE irnm_cat_n
+    xor eax, eax
+.loop:
+    cmp rax, rsi
+    jae .done
+    cmp rcx, IRNM_BUF - 64
+    jae .done
+    mov r8b, [rdx + rax]
+    mov [rdi + rcx], r8b
+    inc rax
+    inc rcx
+    jmp .loop
+.done:
+    ret
+END_FUNC irnm_cat_n
+
+;; ============================================================================
+;; import_parent_is_package(rdi = whatever sys.modules holds for the parent)
+;;     -> rax = 1 if a submodule of it may be imported, 0 if not
+;;
+;; CPython reads `parent.__path__` and turns an AttributeError into "'a' is not
+;; a package".  A plain module without __path__ answers no, and so does the
+;; None a blocker leaves behind -- which is why `import blocked.sub` reports
+;; not-a-package rather than the halted message.
+;;
+;; Anything that is NOT a plain module answers YES, deliberately.  A module
+;; subclass (the lazy-import trick) keeps its __path__ somewhere this cannot
+;; see, and refusing it would break an import that works today; the cost is
+;; that an exotic non-package object left in sys.modules keeps the older,
+;; shorter message.  None is excluded from that leniency because a blocker is
+;; the one case where the object is known not to be a package at all.
+;; ============================================================================
+IPP_FRAME equ 8                 ; + 1 push = 16, 16-aligned
+DEF_FUNC_LOCAL import_parent_is_package, IPP_FRAME
+    push rbx
+    mov rbx, rdi
+    test rbx, rbx
+    jz .ipp_no
+    V_TEST_PTR rbx, rax
+    ja .ipp_yes                 ; an immediate is not a module; be lenient
+    lea rax, [rel none_singleton]
+    cmp rbx, rax
+    je .ipp_no
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel module_type]
+    cmp rax, rcx
+    jne .ipp_yes
+    mov rax, [rbx + PyModuleObject.mod_dict]
+    test rax, rax
+    jz .ipp_no
+
+    ; the interned "__path__", built once and kept for the process
+    mov rax, [rel im_path_key]
+    test rax, rax
+    jnz .ipp_have_key
+    lea rdi, [rel im_dunder_path]
+    call str_intern_cstr
+    test rax, rax
+    jz .ipp_yes                 ; out of memory: do not invent a refusal
+    mov [rel im_path_key], rax
+.ipp_have_key:
+    mov rsi, rax
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    call dict_get               ; a Value; 0 is the miss
+    test rax, rax
+    jz .ipp_no
+.ipp_yes:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.ipp_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC import_parent_is_package
+
+;; ============================================================================
+;; import_raise_halted(rdi = module name C string) -- does not return
+;;
+;; A None sitting in sys.modules is a deliberate BLOCK, not a cached module.
+;; `test.support.import_fresh_module(m, blocked=[x])` puts one there and
+;; expects the import of x to fail; we used to take the dict hit and hand the
+;; None back, so `import x` bound None and raised nothing at all.
+;;
+;; CPython raises this from _bootstrap._find_and_load, right after the
+;; sys.modules hit and before anything else, so it is checked for the name
+;; actually being imported and only for that name -- `import a.b` with `a`
+;; blocked is reported by the parent's own "is not a package" path instead.
+;; The type is ModuleNotFoundError, an ImportError subclass.
+;; ============================================================================
+IRH_BUF equ 264                 ; + 1 push = 272, 16-aligned
+DEF_FUNC_LOCAL import_raise_halted, IRH_BUF
+    push rbx
+    mov rbx, rdi                ; the name, kept across the message build
+    mov rsi, rdi                ; the name
+    lea rdi, [rbp - IRH_BUF]
+    xor ecx, ecx
+    lea rdx, [rel im_halted_prefix]
+.irh_prefix:
+    movzx eax, byte [rdx]
+    test al, al
+    jz .irh_name
     inc rdx
     mov [rdi + rcx], al
     inc rcx
-    jmp .irnf_prefix
-.irnf_name:
+    jmp .irh_prefix
+.irh_name:
     movzx eax, byte [rsi]
     test al, al
-    jz .irnf_close
+    jz .irh_suffix
     inc rsi
-    cmp rcx, IRNF_BUF - 4
-    jae .irnf_close
+    cmp rcx, IRH_BUF - 40       ; room for the whole suffix and the NUL
+    jae .irh_suffix
     mov [rdi + rcx], al
     inc rcx
-    jmp .irnf_name
-.irnf_close:
-    mov byte [rdi + rcx], 0x27      ; closing quote
+    jmp .irh_name
+.irh_suffix:
+    lea rdx, [rel im_halted_suffix]
+.irh_suffix_loop:
+    movzx eax, byte [rdx]
+    test al, al
+    jz .irh_done
+    inc rdx
+    mov [rdi + rcx], al
     inc rcx
+    jmp .irh_suffix_loop
+.irh_done:
     mov byte [rdi + rcx], 0
-    mov rsi, rdi
+    ; CPython sets .name to the module that was blocked, and leaves .path None.
+    ; The string is built only for this, and exc_raise_import does not return,
+    ; so it is handed over to be released there.
+    push rdi                    ; the message buffer, on this frame
+    sub rsp, 8
+    mov rdi, rbx
+    call str_from_cstr_heap     ; 0 is tolerated: it becomes None
+    add rsp, 8
+    pop rsi                     ; the message
+    mov rdx, rax                ; .name
     lea rdi, [rel exc_ModuleNotFoundError_type]
-    call raise_exception
+    xor ecx, ecx                ; .path is None
+    mov r8d, 1                  ; the name string is ours to hand over
+    call exc_raise_import
     ud2
-END_FUNC import_raise_not_found
+END_FUNC import_raise_halted
 
 ;; ============================================================================
 ;; import_module(PyObject *name_str, PyObject *fromlist, int64_t level) -> PyObject*
@@ -510,6 +709,8 @@ DEF_FUNC import_module, IF_FRAME
     mov rdi, [rbp - IF_NAME]
     lea rbx, [rdi + PyStrObject.data]  ; rbx = name cstr
     mov r14, [rdi + PyStrObject.ob_size] ; r14 = name length
+    mov [rbp - IF_FAILLEN], r14     ; blame the whole name unless a walk
+    mov qword [rbp - IF_FAILPAR], 0 ; narrows it to a failing prefix
 
     ; Check sys.modules first
     mov rdi, [rel sys_modules_dict]
@@ -579,6 +780,44 @@ DEF_FUNC import_module, IF_FRAME
     call dict_get
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .walk_have_module
+
+    ; A parent that is not a package cannot have submodules -- but ONLY ask
+    ; that once the child's own sys.modules entry has missed, which is
+    ; CPython's order in _find_and_load_unlocked:
+    ;
+    ;     if parent not in sys.modules: import_(parent)
+    ;     # Crazy side-effects!
+    ;     if name in sys.modules: return sys.modules[name]
+    ;     parent_module = sys.modules[parent]
+    ;     try: path = parent_module.__path__
+    ;     except AttributeError: ... 'x' is not a package
+    ;
+    ; A package may install its own submodule there, and `os` is exactly that
+    ; arrangement: it is NOT a package, and lib/os.py ends with
+    ; `sys.modules['os.path'] = path`.  Asking about `os.__path__` first made
+    ; `import os.path` a ModuleNotFoundError.
+    ;
+    ; The check still has to come before import_find_and_load, which falls
+    ; back to sys.path when the parent has no __path__ to search -- so with a
+    ; top-level foo.py importable, `import sys.foo` SUCCEEDED and bound it as
+    ; sys.foo.  Between the two lookups is the only place both are true.
+    mov rax, [rbp - IF_PARENT]
+    test rax, rax
+    jz .walk_load
+    mov rdi, rax
+    call import_parent_is_package
+    test eax, eax
+    jnz .walk_load
+    mov rcx, [rsp + 8]              ; where this component ends
+    mov [rbp - IF_FAILLEN], rcx     ; the child, `sys.foo`
+    mov rax, [rbp - IF_POS]
+    dec rax                         ; less the dot: the parent, `sys`
+    mov [rbp - IF_FAILPAR], rax
+    mov rdi, [rsp]
+    call obj_decref                 ; the prefix string; the stack itself is
+    jmp .import_error               ; restored by the epilogue's `leave`
+
+.walk_load:
     mov rdi, [rsp]
     call import_find_and_load
     test rax, rax
@@ -673,6 +912,7 @@ DEF_FUNC import_module, IF_FRAME
     pop rdi                     ; the prefix string
     call obj_decref
     pop rcx                     ; where the component ended
+    mov [rbp - IF_FAILLEN], rcx ; `import sys.foo.bar` fails at `sys.foo`
     jmp .import_error
 
 .walk_oom:
@@ -680,6 +920,14 @@ DEF_FUNC import_module, IF_FRAME
     jmp .import_error
 
 .found_cached:
+    ; A None here is a BLOCK, not a module -- see import_raise_halted.  It has
+    ; to be tested before the want-top rewrite below, which would otherwise
+    ; read PyStrObject fields off the None while looking for the first
+    ; component.
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .cached_blocked
+
     ; Found in sys.modules.  With an empty fromlist a dotted import still
     ; evaluates to the *top* package -- `import a.b` binds `a` -- so a cache
     ; hit on the full name has to hand back the first component instead, or
@@ -724,6 +972,11 @@ DEF_FUNC import_module, IF_FRAME
     jz .cached_as_is            ; not cached after all; the full one will do
     mov rax, rcx
     jmp .cached_as_is
+.cached_blocked:
+    mov rdi, rbx                ; the name C string, still live from the entry
+    call import_raise_halted
+    ud2
+
 .cached_pop_as_is:
     pop rax
 .cached_as_is:
@@ -745,8 +998,10 @@ DEF_FUNC import_module, IF_FRAME
     ; ModuleNotFoundError, not a bare ImportError: it is an ImportError
     ; subclass and stdlib code catches it specifically.  CPython's wording
     ; is "No module named 'x'".
-    mov rdi, rbx                ; module name cstr
-    call import_raise_not_found
+    mov rdi, rbx                ; the dotted name buffer
+    mov rsi, [rbp - IF_FAILLEN] ; the prefix that actually failed
+    mov rdx, [rbp - IF_FAILPAR] ; and its parent, when that is the reason
+    call import_raise_no_module
     ; does not return
 
 .propagate_pending:
@@ -1051,6 +1306,15 @@ DEF_FUNC import_find_and_load, FL_FRAME
     ret
 
 .found_in_sysmod:
+    ; A None here is a BLOCK, not a module; see import_raise_halted.
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    jne .fis_real
+    mov rdi, [rbp - FL_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    call import_raise_halted
+    ud2
+.fis_real:
     ; Already imported — return INCREF'd reference
     inc qword [rax + PyObject.ob_refcnt]
     pop r15
@@ -2283,6 +2547,10 @@ END_FUNC import_load_module
 section .rodata
 
 im_no_module_prefix: db "No module named '", 0
+im_not_pkg_mid:     db "; '", 0
+im_not_pkg_tail:    db "' is not a package", 0
+im_halted_prefix:    db "import of ", 0
+im_halted_suffix:    db " halted; None in sys.modules", 0
 irr_package_key:    db "__package__", 0
 im_lib_path:        db "lib", 0
 im_tests_cpython_path: db "tests/cpython", 0
@@ -2318,6 +2586,7 @@ isp_suffix: db ".cpython-312.pyc", 0
 isp_marker: db "/__pycache__/", 0
 
 section .bss
+im_path_key:        resq 1      ; the interned "__path__", built on first use
 ISP_BUFSZ equ 4096
 isp_buf: resb ISP_BUFSZ
 

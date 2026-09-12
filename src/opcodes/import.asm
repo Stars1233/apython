@@ -9,6 +9,10 @@ extern import_module
 extern obj_decref
 extern raise_exception
 extern exc_ImportError_type
+extern exc_raise_import
+extern dict_get
+extern str_from_cstr_heap
+extern str_type
 extern eval_co_names
 extern eval_saved_rbx
 extern obj_dealloc
@@ -290,7 +294,11 @@ DEF_FUNC op_import_from, IF2_FRAME
     ; "cannot import name" over it would hide the real cause.
     cmp qword [rel current_exception], 0
     jne .propagate_from_exc
-    RAISE exc_ImportError_type, "cannot import name"
+    mov [rel eval_saved_r13], r13
+    mov rdi, [rbp - IF2_MOD]
+    mov rsi, [rbp - IF_ATTR]
+    call import_from_error
+    ud2
 
 .propagate_from_exc:
     mov [rel eval_saved_r13], r13
@@ -302,3 +310,191 @@ section .rodata
 if_dunder_name: db "__name__", 0
 if_dot_str: db ".", 0
 section .text
+
+;; ============================================================================
+;; import_from_error(rdi = the module, rsi = the attribute name str)
+;;     -- does not return
+;;
+;; CPython's ceval.c import_from names the attribute, the module, and where
+;; the module came from:
+;;
+;;     cannot import name 'X' from 'm' (/path/to/m.py)
+;;     cannot import name 'X' from 'm' (unknown location)
+;;     cannot import name 'X' from '<unknown module name>' (unknown location)
+;;
+;; and sets .name to the module's __name__ and .path to its __file__, which is
+;; how a caller distinguishes "no such module" from "that module has no such
+;; name".  We raised a bare "cannot import name" with neither in it.
+;;
+;; The fourth CPython wording -- "from partially initialized module 'm' (most
+;; likely due to a circular import)" -- is not reachable here: it is decided by
+;; __spec__._initializing, and our modules carry __spec__ = None.  bugs.md.
+;;
+;; %R of a str is its repr, but every name that can appear in an import
+;; statement is an identifier and every __name__ a dotted one, so plain quotes
+;; are exactly CPython's output rather than an approximation of it.
+;; ============================================================================
+IFE_ATTR  equ 8
+IFE_MOD   equ 16
+IFE_NAME  equ 24                ; __name__, if it is a str
+IFE_PATH  equ 32                ; __file__, if it is a str
+IFE_CAP   equ 1024
+IFE_BUF   equ 32 + IFE_CAP
+IFE_FRAME equ IFE_BUF           ; + 0 pushes, and IFE_BUF is a multiple of 16
+DEF_FUNC_LOCAL import_from_error, IFE_FRAME
+    mov [rbp - IFE_MOD], rdi
+    mov [rbp - IFE_ATTR], rsi
+    mov qword [rbp - IFE_NAME], 0
+    mov qword [rbp - IFE_PATH], 0
+
+    mov rdi, [rbp - IFE_MOD]
+    call import_module_dict
+    test rax, rax
+    jz .ife_build
+    mov [rbp - IFE_MOD], rax        ; the dict from here on
+
+    mov rdi, rax
+    CSTRING rsi, "__name__"
+    call ife_str_field
+    mov [rbp - IFE_NAME], rax
+    mov rdi, [rbp - IFE_MOD]
+    CSTRING rsi, "__file__"
+    call ife_str_field
+    mov [rbp - IFE_PATH], rax
+
+.ife_build:
+    lea rdi, [rbp - IFE_BUF]
+    xor ecx, ecx
+    CSTRING rdx, "cannot import name '"
+    call ife_cat_z
+    mov rdx, [rbp - IFE_ATTR]
+    call ife_cat_str
+    CSTRING rdx, "' from '"
+    call ife_cat_z
+    mov rdx, [rbp - IFE_NAME]
+    test rdx, rdx
+    jz .ife_no_name
+    call ife_cat_str
+    jmp .ife_after_name
+.ife_no_name:
+    CSTRING rdx, "<unknown module name>"
+    call ife_cat_z
+.ife_after_name:
+    CSTRING rdx, "' ("
+    call ife_cat_z
+    mov rdx, [rbp - IFE_PATH]
+    test rdx, rdx
+    jz .ife_no_path
+    call ife_cat_str
+    jmp .ife_after_path
+.ife_no_path:
+    CSTRING rdx, "unknown location"
+    call ife_cat_z
+.ife_after_path:
+    CSTRING rdx, ")"
+    call ife_cat_z
+    mov byte [rdi + rcx], 0
+
+    lea rdi, [rel exc_ImportError_type]
+    lea rsi, [rbp - IFE_BUF]
+    mov rdx, [rbp - IFE_NAME]
+    mov rcx, [rbp - IFE_PATH]
+    xor r8d, r8d                    ; both borrowed from the module dict
+    call exc_raise_import
+    ud2
+END_FUNC import_from_error
+
+;; ============================================================================
+;; ife_str_field(rdi = a dict, rsi = key C string) -> rax = the value when it
+;;     is a str, else 0
+;;
+;; A non-str answers 0, because CPython requires a str for both __name__ and
+;; __file__ and falls back to its "unknown" wording otherwise -- a module whose
+;; __file__ someone set to an int must not reach the message builder as a
+;; pointer.
+;; ============================================================================
+ISF_DICT  equ 8
+ISF_KEY   equ 16
+ISF_FRAME equ 40                ; + 1 push = 48, 16-aligned
+DEF_FUNC_LOCAL ife_str_field, ISF_FRAME
+    push rbx
+    mov [rbp - ISF_DICT], rdi
+    mov rdi, rsi
+    call str_from_cstr_heap
+    test rax, rax
+    jz .isf_none
+    mov [rbp - ISF_KEY], rax
+    mov rdi, [rbp - ISF_DICT]
+    mov rsi, rax
+    call dict_get                   ; a Value; 0 is the miss
+    mov rbx, rax
+    mov rdi, [rbp - ISF_KEY]
+    call obj_decref
+    test rbx, rbx
+    jz .isf_none
+    V_TEST_PTR rbx, rax
+    ja .isf_none                    ; an immediate is not a str
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .isf_none
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+.isf_none:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC ife_str_field
+
+;; ============================================================================
+;; ife_cat_str(rdi = buffer, rcx = offset, rdx = a PyStrObject) -> rcx advanced
+;;
+;; Clobbers rax, rsi, r8 and rdx only.  rdi and rcx are the running buffer and
+;; offset the caller keeps across a whole run of these, and every other
+;; register it holds survives -- the message builder relies on that.
+;; ============================================================================
+DEF_FUNC_BARE ife_cat_str
+    mov rsi, [rdx + PyStrObject.ob_size]
+    lea rdx, [rdx + PyStrObject.data]
+    jmp ife_cat_n
+END_FUNC ife_cat_str
+
+;; ============================================================================
+;; ife_cat_z(rdi = buffer, rcx = offset, rdx = NUL-terminated source)
+;;     -> rcx advanced.  Same register contract as ife_cat_str.
+;; ============================================================================
+DEF_FUNC_BARE ife_cat_z
+    xor esi, esi
+.measure:
+    cmp byte [rdx + rsi], 0
+    je ife_cat_n
+    inc rsi
+    jmp .measure
+END_FUNC ife_cat_z
+
+;; ============================================================================
+;; ife_cat_n(rdi = buffer, rcx = offset, rdx = source, rsi = length)
+;;     -> rcx advanced.  Same register contract as ife_cat_str.
+;;
+;; Stops at IFE_CAP - 8, leaving room for the closing ")" and the NUL that
+;; import_from_error writes unconditionally, so a very long __file__ truncates
+;; the path rather than the message's shape.
+;; ============================================================================
+DEF_FUNC_BARE ife_cat_n
+    xor eax, eax
+.loop:
+    cmp rax, rsi
+    jae .done
+    cmp rcx, IFE_CAP - 8
+    jae .done
+    mov r8b, [rdx + rax]
+    mov [rdi + rcx], r8b
+    inc rax
+    inc rcx
+    jmp .loop
+.done:
+    ret
+END_FUNC ife_cat_n

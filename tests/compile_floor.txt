@@ -250,6 +250,7 @@ test_exception_str_repr
 test_exception_subclass_init
 test_exception_traceback_api
 test_except_star
+test_exc_named_attrs_refcount
 test_exc_state_frame
 test_exec_builtins_value
 test_exec_custom_locals
@@ -301,6 +302,7 @@ test_gc_dealloc_untrack
 test_gc_del_raises
 test_gc_finalizer_order
 test_gc_generations
+test_gc_instance_type
 test_gc_module
 test_gc_reentrant_collect
 test_gc_static_types
@@ -324,15 +326,20 @@ test_getattr_raises
 test_getset_descriptors
 test_getset_receiver
 test_hashlib_digests
+test_hashlib_openssl
+test_hashlib_sha3_blake2
 test_hash_protocol
 test_identity_values
 test_immediate_args
 test_immediate_operands
 test_imp_module
 test_import_errors
+test_import_from_name
 test_import_from
 test_import_kwargs
 test_import_module
+test_import_none_blocked
+test_import_not_a_package
 test_import_star_all
 test_import_submodule_binding
 test_import_sys
@@ -423,6 +430,7 @@ test_metaclass_lifetime
 test_metaclass_prepare
 test_metaclass
 test_metaclass_resolution
+test_method_attr_call
 test_method_equality
 test_method_hostile
 test_method_load_unbound
@@ -497,6 +505,9 @@ test_property
 test_property_raises
 test_pyc_hardening
 test_pyc_staleness
+test_pyexpat_decl
+test_pyexpat_module
+test_pyexpat_parse
 test_raise_cause
 test_raise_class_init
 test_raise_from
@@ -697,6 +708,7 @@ test_utf16_utf32
 test_utf8_validate_boundaries
 test_value_funnel_guards
 test_value_typeconfusion
+test_warnings_filters
 test_warnings
 test_weakref
 test_weakref_subclass_kwargs

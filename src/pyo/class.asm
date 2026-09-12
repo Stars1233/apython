@@ -2296,6 +2296,28 @@ DEF_FUNC instance_traverse
     VISIT_PTR rdi
 .no_inst_dict:
 
+    ; Visit the CLASS.  CPython's subtype_traverse says why in as many words:
+    ; "For a heaptype, the instances count as references to the type.  Traverse
+    ; the type so the collector can find cycles involving this link."
+    ;
+    ; Without it, an instance freed by the COLLECTOR rather than by
+    ; refcounting never accounted for the reference it held to its class, and
+    ; the class survived -- about 900 bytes of class, dict and methods every
+    ; time.  It needs both a class whose lifetime is shorter than the program's
+    ; (defined in a function, or built by type()) AND an instance only the
+    ; collector can free, which is why a module-level class never showed it.
+    ; `self.callback = self.method` is the everyday way to make such an
+    ; instance, so every callback-registering object had this.
+    ;
+    ; ONLY for a heaptype.  A static type has no GC head, and handing one to
+    ; the collector is the shape that made an earlier crash
+    ; layout-dependent -- the flag test is the whole guard.
+    mov rax, [rbx + PyObject.ob_type]
+    test dword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .no_type_visit
+    VISIT_PTR rax
+.no_type_visit:
+
     ; Visit __slots__ values (one Value each, after the instance header).
     ; The header ends at tp_dictoffset plus the dict word, or at
     ; PyInstanceObject_size when the family keeps no dict.

@@ -24,7 +24,7 @@ src/compiler/symtab.asm                6
 src/eval.asm                           9
 src/frame.asm                          3
 src/gc.asm                             13
-src/import.asm                         4
+src/import.asm                         5
 src/itertools.asm                      21
 src/marshal.asm                        7
 src/methods/bytes_str.asm              18
@@ -50,7 +50,7 @@ src/opcodes/build.asm                  23
 src/opcodes/call.asm                   3
 src/opcodes/exc.asm                    5
 src/opcodes/flow.asm                   17
-src/opcodes/import.asm                 2
+src/opcodes/import.asm                 3
 src/opcodes/load.asm                   14
 src/opcodes/match.asm                  12
 src/opcodes/store.asm                  11
@@ -67,7 +67,7 @@ src/pyo/eventloop.asm                  19
 src/pyo/eventloop_iouring.asm          6
 src/pyo/eventloop_poll.asm             8
 src/pyo/exc_group.asm                  1
-src/pyo/exception.asm                  11
+src/pyo/exception.asm                  12
 src/pyo/fileobj.asm                    7
 src/pyo/float.asm                      12
 src/pyo/frameobj.asm                   3

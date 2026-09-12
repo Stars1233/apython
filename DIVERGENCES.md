@@ -429,3 +429,66 @@ what Python-level code actually reads.  `tests/test_type_flags.py` asserts the
 bits that mean the same thing on both sides rather than the whole word, since
 a test comparing values would be asserting this divergence rather than the
 translation.
+
+## A shake length is validated where CPython's OpenSSL wrapper is not
+
+`_hashlib.HASHXOF.digest(n)` and `.hexdigest(n)` refuse a negative `n` with
+`ValueError: value must be positive`, and refuse an `n` at or above `1 << 29`
+with `ValueError: length is too large`.
+
+CPython's own `_hashlib` checks neither.  Measured against 3.12:
+
+```
+>>> _hashlib.new('shake_128').digest(-1)
+SystemError: Negative size passed to PyBytes_FromStringAndSize
+>>> _hashlib.new('shake_128').digest(2**32)      # tries to allocate 4 GiB
+```
+
+Its *builtin* `_sha3` does check, and the two wordings above are that module's
+own -- so this is not an invention, it is applying the builtin module's rule
+to the OpenSSL one as well.  `1 << 29` is where CPython's `_sha3` draws the
+line, measured exactly: `(1 << 29) - 1` is accepted and `1 << 29` is not.
+
+Reproducing a `SystemError` would be reproducing a bug, and honouring a
+four-gigabyte request from a single `digest()` call is worse than refusing it.
+`tests/test_hashlib_openssl.py` therefore asserts only that the lengths ARE
+refused, not how, because the alternative is comparing against a SystemError.
+
+## `_hashlib` serves hashlib's fourteen names and no more
+
+CPython's `_hashlib.openssl_md_meth_names` is everything the linked provider
+offers -- 19 names on an ordinary OpenSSL 3, including `md4`, `ripemd160`,
+`sm3` and `sha512_224`.  Ours is `hashlib.algorithms_guaranteed`: the same
+fourteen, and nothing else.
+
+So `hashlib.algorithms_available == hashlib.algorithms_guaranteed` here, where
+in CPython the first is a superset.  Both satisfy what the documentation
+promises -- `algorithms_available` is what this interpreter can serve -- and a
+program that consults it, which is what it is for, gets a true answer either
+way.  `_hashlib.new('ripemd160')` is a `ValueError` here rather than a digest.
+
+The names reported ARE normalised, which is not optional: CPython's
+`_hashopenssl` maps OpenSSL's spellings onto hashlib's, and `test_hashlib`
+asserts `'blake2b512' not in hashlib.algorithms_available` and `'sha3-512' not
+in` it either.  `blake2b` and `blake2s` are reported but get no
+`openssl_blake2b`/`openssl_blake2s` constructor, exactly as in CPython:
+`hashlib` routes both to `_blake2` unconditionally because OpenSSL's BLAKE2
+supports neither keying nor the tree parameters, so an OpenSSL constructor for
+them could only ever be reached by mistake.
+
+## `hmac`'s OpenSSL fast path is chosen by name, not by callable type
+
+`hmac.py` takes `_functype = type(_hashopenssl.openssl_sha256)` and then asks
+`isinstance(digestmod, (str, _functype))` to decide whether to use the C HMAC.
+In CPython that type is `builtin_function_or_method`; here `openssl_sha256` is
+an ordinary Python function, so a caller's `digestmod=lambda: ...` passes the
+same test and arrives at `_hashlib.hmac_new` too.
+
+`hmac_new` and `hmac_digest` answer `UnsupportedDigestmodError` for any
+`digestmod` that is neither a `str` nor one of our own `openssl_*` functions --
+which is precisely the exception `hmac.py` catches, at its lines 61 and 199, to
+fall back to its own Python implementation.  So the wrong path is entered and
+then declined, and the observable behaviour is CPython's; what differs is
+which of `hmac.py`'s two branches runs for a lambda.  This is the
+single-builtin-callable-type divergence recorded above, reaching one more
+module.

@@ -10,6 +10,42 @@ constants of the algorithm -- so both are tables here and the round is one
 loop.
 """
 
+def _tobytes(data):
+    """The bytes-like argument every update() and constructor takes.
+
+    NOT `bytes(data)`: `bytes(100)` is a hundred zero bytes and `bytes([1])`
+    is b"\\x01", so an int or a list passed where a message was meant became a
+    legitimate-looking buffer instead of an error.  memoryview refuses an int,
+    a list and a None, which is the set CPython refuses, with CPython's
+    wording.
+    """
+    if isinstance(data, str):
+        raise TypeError("Strings must be encoded before hashing")
+    if isinstance(data, (bytes, bytearray)):
+        return data
+    try:
+        return memoryview(data).tobytes()
+    except TypeError:
+        raise TypeError("object supporting the buffer API required") from None
+
+
+class _Immutable(type):
+    """CPython's hash types are C types with no settable attributes, and
+    `test_hashlib.test_readonly_types` asserts it for every constructor it
+    knows.  A plain Python class is mutable, so the refusal comes from here;
+    instances are unaffected, it is the TYPE that is frozen.  Each of these
+    modules carries its own copy because each has to import on its own.
+    """
+
+    def __setattr__(cls, name, value):
+        raise TypeError("cannot set %r attribute of immutable type %r"
+                        % (name, cls.__name__))
+
+    def __delattr__(cls, name):
+        raise TypeError("cannot delete %r attribute of immutable type %r"
+                        % (name, cls.__name__))
+
+
 _M32 = 0xFFFFFFFF
 
 # The per-round sine constants: floor(abs(sin(i + 1)) * 2**32).
@@ -34,7 +70,7 @@ def _rotl(x, n):
     return ((x << n) | (x >> (32 - n))) & _M32
 
 
-class _Md5:
+class _Md5(metaclass=_Immutable):
     name = "md5"
     block_size = 64
     digest_size = 16
@@ -45,9 +81,7 @@ class _Md5:
         self._len = 0
 
     def update(self, data):
-        if isinstance(data, str):
-            raise TypeError("Strings must be encoded before hashing")
-        data = bytes(data)
+        data = _tobytes(data)
         self._len += len(data)
         buf = self._buf + data
         n = len(buf) - (len(buf) % 64)
@@ -101,6 +135,7 @@ class _Md5:
 
 def md5(data=b"", *, usedforsecurity=True):
     obj = _Md5()
-    if data:
-        obj.update(data)
+    # Unconditional: a FALSY non-buffer -- None or 0 -- has to be refused too,
+    # and `if data:` skipped the check entirely for both.
+    obj.update(data)
     return obj

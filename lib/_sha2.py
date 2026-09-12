@@ -57,6 +57,43 @@ _K512 = (
     0x5FCB6FAB3AD6FAEC, 0x6C44198C4A475817,
 )
 
+def _tobytes(data):
+    """The bytes-like argument every update() and constructor takes.
+
+    NOT `bytes(data)`: `bytes(100)` is a hundred zero bytes and `bytes([1])`
+    is b"\\x01", so an int or a list passed where a message was meant became a
+    legitimate-looking buffer instead of an error.  memoryview refuses an int,
+    a list and a None, which is the set CPython refuses, with CPython's
+    wording.
+    """
+    if isinstance(data, str):
+        raise TypeError("Strings must be encoded before hashing")
+    if isinstance(data, (bytes, bytearray)):
+        return data
+    try:
+        return memoryview(data).tobytes()
+    except TypeError:
+        raise TypeError("object supporting the buffer API required") from None
+
+
+class _Immutable(type):
+    """CPython's hash types are C types with no settable attributes, and
+    `test_hashlib.test_readonly_types` asserts it for every constructor it
+    knows.  A plain Python class is mutable, so the refusal comes from here.
+    Instances are unaffected; it is the TYPE that is frozen.  Each of _md5,
+    _sha1, _sha3 and _blake2 carries its own copy, because every one of these
+    modules has to be importable on its own.
+    """
+
+    def __setattr__(cls, name, value):
+        raise TypeError("cannot set %r attribute of immutable type %r"
+                        % (name, cls.__name__))
+
+    def __delattr__(cls, name):
+        raise TypeError("cannot delete %r attribute of immutable type %r"
+                        % (name, cls.__name__))
+
+
 _M32 = 0xFFFFFFFF
 _M64 = 0xFFFFFFFFFFFFFFFF
 
@@ -69,7 +106,7 @@ def _rotr64(x, n):
     return ((x >> n) | (x << (64 - n))) & _M64
 
 
-class _Sha2:
+class _Sha2(metaclass=_Immutable):
     """One of the four, whichever the constructor chose.
 
     The state is the eight working words, the bytes not yet in a block, and
@@ -87,9 +124,7 @@ class _Sha2:
         self._len = 0
 
     def update(self, data):
-        if isinstance(data, str):
-            raise TypeError("Strings must be encoded before hashing")
-        data = bytes(data)
+        data = _tobytes(data)
         self._len += len(data)
         buf = self._buf + data
         bs = self.block_size
@@ -143,8 +178,8 @@ class _Sha2:
                    for x, y in zip(self._h, (a, b, c, d, e, f, g, h))]
 
     def copy(self):
-        other = _Sha2(self.name, self._h, self.block_size, self.digest_size,
-                      self._wide)
+        other = self.__class__(self.name, self._h, self.block_size,
+                               self.digest_size, self._wide)
         other._buf = self._buf
         other._len = self._len
         return other
@@ -181,25 +216,47 @@ _H512 = (0x6A09E667F3BCC908, 0xBB67AE8584CAA73B, 0x3C6EF372FE94F82B,
          0x1F83D9ABFB41BD6B, 0x5BE0CD19137E2179)
 
 
-def _make(name, h, block_size, digest_size, wide, data=b"", *,
+def _make(cls, name, h, block_size, digest_size, wide, data=b"", *,
           usedforsecurity=True):
-    obj = _Sha2(name, h, block_size, digest_size, wide)
-    if data:
-        obj.update(data)
+    obj = cls(name, h, block_size, digest_size, wide)
+    # Unconditional: a FALSY non-buffer -- None, 0, b"" -- has to be refused
+    # too, and `if data:` skipped the check entirely for the first two.
+    obj.update(data)
     return obj
 
 
+# These four carry no behaviour whatever.  They exist so that the default
+# repr NAMES the algorithm: test_hashlib's check_blocksize_name asserts
+# `name.split("_")[0] in repr(m).lower()`, and `<_sha2._Sha2 object at ...>`
+# does not contain "sha224".  CPython's builtin module has SHA224Type and
+# friends for the same reason and with the same emptiness.
+class SHA224Type(_Sha2):
+    pass
+
+
+class SHA256Type(_Sha2):
+    pass
+
+
+class SHA384Type(_Sha2):
+    pass
+
+
+class SHA512Type(_Sha2):
+    pass
+
+
 def sha224(data=b"", *, usedforsecurity=True):
-    return _make("sha224", _H224, 64, 28, False, data)
+    return _make(SHA224Type, "sha224", _H224, 64, 28, False, data)
 
 
 def sha256(data=b"", *, usedforsecurity=True):
-    return _make("sha256", _H256, 64, 32, False, data)
+    return _make(SHA256Type, "sha256", _H256, 64, 32, False, data)
 
 
 def sha384(data=b"", *, usedforsecurity=True):
-    return _make("sha384", _H384, 128, 48, True, data)
+    return _make(SHA384Type, "sha384", _H384, 128, 48, True, data)
 
 
 def sha512(data=b"", *, usedforsecurity=True):
-    return _make("sha512", _H512, 128, 64, True, data)
+    return _make(SHA512Type, "sha512", _H512, 128, 64, True, data)
