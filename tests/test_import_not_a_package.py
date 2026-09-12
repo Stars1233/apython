@@ -13,6 +13,27 @@
 # parent, not the whole dotted name that was requested: `import sys.foo.bar`
 # stops at `sys.foo`, because the walk never gets as far as `bar`.
 #
+# The ORDER of the two checks is what this file mostly exists to pin down, and
+# getting it wrong broke `import os.path`.  CPython's
+# _find_and_load_unlocked does three things, in this order:
+#
+#     if parent not in sys.modules:
+#         _call_with_frames_removed(import_, parent)
+#     # Crazy side-effects!
+#     if name in sys.modules:
+#         return sys.modules[name]
+#     parent_module = sys.modules[parent]
+#     try:
+#         path = parent_module.__path__
+#     except AttributeError:
+#         ... 'x' is not a package
+#
+# So a submodule the PARENT installed in sys.modules itself wins, and the
+# parent is never asked whether it is a package.  `os` is not a package and
+# `lib/os.py` ends with `sys.modules['os.path'] = path`, which is exactly the
+# arrangement that comment is about -- asking about `os.__path__` first makes
+# `import os.path` a ModuleNotFoundError.
+#
 # The blocked-parent case belongs here too.  `sys.modules['x'] = None` makes
 # CPython skip importing the parent, so `parent_module` IS the None and
 # reading `__path__` off it lands in exactly this arm -- which is why the
@@ -59,7 +80,31 @@ show("from blocked_p.sub import x", "from blocked_p.sub import x")
 print("sys is still a module:", type(sys).__name__)
 print("blocked_p still None:", sys.modules["blocked_p"] is None)
 
-# A genuine package keeps working after all of the above.
+print()
+print("== a submodule the parent installed itself is found, not refused ==")
+# os is NOT a package; lib/os.py registers os.path in sys.modules by hand.
+show("import os.path", "import os.path")
+show("import os.path as p", "import os.path as p")
+show("from os.path import join", "from os.path import join")
+import os.path
+
+print("os.path works:", os.path.join("a", "b"))
+print("and is the registered object:", sys.modules["os.path"] is os.path)
+
+# The same arrangement by hand, so the rule is pinned down without depending
+# on how os.py happens to be written.
+import sys as _sys
+
+_sys.modules["blocked_q"] = _sys                 # a module, not a package
+_sys.modules["blocked_q.sub"] = _sys.modules["os"]
+show("parent installed the child", "import blocked_q.sub")
+print("resolved to the registered module:",
+      _sys.modules["blocked_q.sub"] is _sys.modules["os"])
+# But a DIFFERENT child of the same non-package parent is still refused.
+show("a sibling it did not install", "import blocked_q.other")
+
+print()
+print("== a genuine package keeps working after all of the above ==")
 import collections.abc
 
 print("collections.abc ok:", collections.abc.__name__)

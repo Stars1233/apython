@@ -767,26 +767,6 @@ DEF_FUNC import_module, IF_FRAME
     inc rcx
     jmp .walk_scan
 .walk_have_end:
-    ; A parent that is not a package cannot have submodules, and this has to
-    ; be settled BEFORE the child is looked for: import_find_and_load falls
-    ; back to sys.path when the parent has no __path__ to search, so with a
-    ; top-level foo.py importable `import sys.foo` used to SUCCEED and bind it
-    ; as sys.foo.  CPython refuses at the parent and names it.
-    mov rax, [rbp - IF_PARENT]
-    test rax, rax
-    jz .walk_parent_ok
-    push rcx
-    mov rdi, rax
-    call import_parent_is_package
-    pop rcx
-    test eax, eax
-    jnz .walk_parent_ok
-    mov [rbp - IF_FAILLEN], rcx     ; the child, `sys.foo`
-    mov rax, [rbp - IF_POS]
-    dec rax                         ; less the dot: the parent, `sys`
-    mov [rbp - IF_FAILPAR], rax
-    jmp .import_error
-.walk_parent_ok:
     push rcx                    ; where this component ends
     mov rdi, rbx
     mov rsi, rcx
@@ -800,6 +780,44 @@ DEF_FUNC import_module, IF_FRAME
     call dict_get
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .walk_have_module
+
+    ; A parent that is not a package cannot have submodules -- but ONLY ask
+    ; that once the child's own sys.modules entry has missed, which is
+    ; CPython's order in _find_and_load_unlocked:
+    ;
+    ;     if parent not in sys.modules: import_(parent)
+    ;     # Crazy side-effects!
+    ;     if name in sys.modules: return sys.modules[name]
+    ;     parent_module = sys.modules[parent]
+    ;     try: path = parent_module.__path__
+    ;     except AttributeError: ... 'x' is not a package
+    ;
+    ; A package may install its own submodule there, and `os` is exactly that
+    ; arrangement: it is NOT a package, and lib/os.py ends with
+    ; `sys.modules['os.path'] = path`.  Asking about `os.__path__` first made
+    ; `import os.path` a ModuleNotFoundError.
+    ;
+    ; The check still has to come before import_find_and_load, which falls
+    ; back to sys.path when the parent has no __path__ to search -- so with a
+    ; top-level foo.py importable, `import sys.foo` SUCCEEDED and bound it as
+    ; sys.foo.  Between the two lookups is the only place both are true.
+    mov rax, [rbp - IF_PARENT]
+    test rax, rax
+    jz .walk_load
+    mov rdi, rax
+    call import_parent_is_package
+    test eax, eax
+    jnz .walk_load
+    mov rcx, [rsp + 8]              ; where this component ends
+    mov [rbp - IF_FAILLEN], rcx     ; the child, `sys.foo`
+    mov rax, [rbp - IF_POS]
+    dec rax                         ; less the dot: the parent, `sys`
+    mov [rbp - IF_FAILPAR], rax
+    mov rdi, [rsp]
+    call obj_decref                 ; the prefix string; the stack itself is
+    jmp .import_error               ; restored by the epilogue's `leave`
+
+.walk_load:
     mov rdi, [rsp]
     call import_find_and_load
     test rax, rax
