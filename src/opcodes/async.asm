@@ -607,11 +607,20 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     cmp qword [rel current_exception], 0
     jne .baw_lookup_raised
 .baw_no_exit:
+    ; The wording is not CPython's, which names the object and distinguishes
+    ; "no __aenter__ either" from "only __aexit__ missing" -- op_before_with
+    ; does both and this does not.  bugs.md records it; a first attempt at it
+    ; here got the operand cleanup wrong and segfaulted, and the cleanup is
+    ; the part that matters on this path.
     RAISE exc_TypeError_type, "'async with' requires __aexit__ method"
 
 .baw_lookup_raised:
-    mov rdi, [rbp - BAW_MGR]
-    call obj_decref
+    ; A __get__ raised.  This is reached only from .baw_exit_missing, which is
+    ; BEFORE anything is pushed -- so mgr is still in the value-stack slot
+    ; VPOP_VAL read it from, and the unwinder releases that.  Releasing it
+    ; here as well took one reference per failure, and the third `async with`
+    ; over the same manager segfaulted in gc_list_remove.  The synchronous
+    ; twin's .bw_lookup_raised records the same rule.
     leave
     jmp eval_exception_unwind
 
