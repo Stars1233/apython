@@ -581,6 +581,7 @@ DEF_FUNC gc_mod_is_tracked
     mov rax, [rdi + PyObject.ob_type]
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
     jz .git_false
+    GC_SKIP_STATIC_TYPE rdi, rax, .git_false
     cmp qword [rdi - GC_HEAD_SIZE + PyGC_Head.gc_next], 0
     je .git_false
     RET_TRUE

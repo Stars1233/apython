@@ -1136,6 +1136,7 @@ DEF_FUNC_BARE gc_visit_decref
     mov rax, [rdi + PyObject.ob_type]
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
     jz .skip
+    GC_SKIP_STATIC_TYPE rdi, rax, .skip
     ; gc = obj - GC_HEAD_SIZE
     lea rax, [rdi - GC_HEAD_SIZE]
     ; Check if object is tracked (gc_next != 0)
@@ -1173,6 +1174,7 @@ DEF_FUNC gc_visit_reachable, GVR_FRAME
     mov rax, [rdi + PyObject.ob_type]
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
     jz .done
+    GC_SKIP_STATIC_TYPE rdi, rax, .done
     ; gc = obj - GC_HEAD_SIZE
     lea rbx, [rdi - GC_HEAD_SIZE]
     ; Check if tracked
