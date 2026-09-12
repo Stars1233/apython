@@ -230,11 +230,18 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   codecs that are not a table, the UTF-8 validator under them, and the
   UnicodeDecodeError worded the way CPython words it.  Split off when
   `bytes.asm` reached the 100k cap; what stayed is bytes *itself*.  `class.asm` is
-  the metatype, the instance and attribute access; `instance_alloc.asm` is
+  the class and the instance -- construction, the reprs, dealloc and the
+  collector's view of both -- while `typeattr.asm` is reading and writing a
+  class's attributes, `type_getattr` included.  Split off when `class.asm`
+  reached the 100k cap a second time.  `instance_alloc.asm` is
   where an instance comes from, including the constructors a subclass of a
   builtin needs; `method.asm` is the bound method; `str_mod.asm` is the `%`
   operator, for str and for bytes both -- the conversion is only known there,
-  so the argument is converted there
+  so the argument is converted there.  `asyncgen.asm` is the three objects an
+  async generator hands out -- the asend and athrow awaitables and the box each
+  `yield` arrives in -- and what drives them; `generator.asm` is the generator,
+  the coroutine and the async generator themselves.  Split off when
+  `generator.asm` reached the 100k cap
 - `src/marshal.asm` — .pyc marshal deserializer, the .pyc file reader, and
   the `marshal` module `importlib` calls `loads` on
 - `src/main.asm` — argument parsing, startup order, and the `-t`/`--dis` modes
