@@ -49,6 +49,7 @@ extern obj_as_index
 extern raise_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
+extern exc_MemoryError_type
 extern tuple_new
 extern bool_true
 extern bool_false
@@ -476,6 +477,7 @@ END_FUNC hc_lookup
 MN_TUP    equ 8
 MN_N      equ 16
 MN_ROW    equ 24
+MN_ITEMS  equ 32
 MN_FRAME  equ 40                ; + 3 pushes = 64, 16-aligned
 DEF_FUNC hc_md_names, MN_FRAME
     push rbx
@@ -504,6 +506,8 @@ DEF_FUNC hc_md_names, MN_FRAME
     test rax, rax
     jz .oom
     mov [rbp - MN_TUP], rax
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov [rbp - MN_ITEMS], rax
     xor ebx, ebx                ; the write index
     lea r12, [rel hc_name_table]
 .fill:
@@ -519,9 +523,8 @@ DEF_FUNC hc_md_names, MN_FRAME
     mov rdi, [r12]
     call str_from_cstr_heap
     test rax, rax
-    jz .fill_next
-    mov rcx, [rbp - MN_TUP]
-    mov rcx, [rcx + PyTupleObject.ob_item]  ; a POINTER to the payload array
+    jz .oom_partial             ; never leave a NULL in a sized tuple
+    mov rcx, [rbp - MN_ITEMS]   ; a POINTER to the payload array
     mov [rcx + rbx*8], rax
     inc rbx
 .fill_next:
@@ -529,22 +532,38 @@ DEF_FUNC hc_md_names, MN_FRAME
     add r12, 16
     jmp .fill
 .done:
-    mov rax, [rbp - MN_TUP]
+    ; The count and the fill walk the same table under the same filter, so
+    ; rbx should equal the counted size -- but publish what was WRITTEN, so a
+    ; tuple can never be handed out with a NULL item in its tail.
+    mov rcx, [rbp - MN_TUP]
+    mov [rcx + PyTupleObject.ob_size], rbx
+    mov rax, rcx
     mov rsp, r13
     pop r13
     pop r12
     pop rbx
     leave
     ret
+.oom_partial:
+    ; Shrink to what was filled, then release it: a sized tuple with a NULL
+    ; item is a latent crash for anything that reads it later.
+    mov rcx, [rbp - MN_TUP]
+    mov [rcx + PyTupleObject.ob_size], rbx
+    mov rdi, rcx
+    call obj_decref
 .oom:
-    lea rax, [rel none_singleton]
-    INCREF rax
+    ; A raise, not an INCREF'd None.  Answering None made
+    ; `frozenset(_core.md_names())` a confusing TypeError instead of the
+    ; MemoryError it actually was; this entry point is reached from Python
+    ; with a live frame, so raise_exception is correct here.
     mov rsp, r13
     pop r13
     pop r12
     pop rbx
-    leave
-    ret
+    lea rdi, [rel exc_MemoryError_type]
+    lea rsi, [rel hc_e_oom]
+    call raise_exception
+    ud2
 END_FUNC hc_md_names
 
 ;; ============================================================================
@@ -1208,10 +1227,14 @@ DEF_FUNC_LOCAL hc_info_tuple, IT_FRAME
     leave
     ret
 .oom:
-    lea rax, [rel none_singleton]
-    INCREF rax
+    ; A raise, not an INCREF'd None: the caller unpacks a 4-tuple, and None
+    ; there surfaces as a TypeError about iteration rather than as the
+    ; MemoryError it is.
     leave
-    ret
+    lea rdi, [rel exc_MemoryError_type]
+    lea rsi, [rel hc_e_oom]
+    call raise_exception
+    ud2
 END_FUNC hc_info_tuple
 
 ;; ============================================================================

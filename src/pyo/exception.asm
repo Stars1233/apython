@@ -2326,10 +2326,14 @@ END_FUNC exc_store_named
 ;; would be paid by every `for` loop that ends.  So the import sites ask for
 ;; it and nothing else does.
 ;;
-;; exc_store_named INCREFs what it keeps and substitutes None for a 0, so the
-;; two values are BORROWED by default.  r8 = 1 releases them after it has
-;; stored them, which is what a caller that built the name string only for
-;; this needs -- it cannot release it itself, because this does not return.
+;; exc_store_named substitutes None for a 0 and hands the value to
+;; exc_setattr, whose generic path is dict_set -- and dict_set takes its own
+;; reference.  So the two values arrive here BORROWED: storing one does not
+;; consume the caller's reference.
+;;
+;; r8 = 1 releases them after they have been stored, which is what a caller
+;; that built the name string only for this needs -- it cannot release it
+;; itself, because this does not return.
 ;; ============================================================================
 ERI_NAME  equ 8
 ERI_PATH  equ 16
