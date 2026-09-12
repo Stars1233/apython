@@ -32,6 +32,7 @@ extern cg_name
 extern cg_unit_free
 extern cg_unit_init
 extern comp_error
+extern cg_error
 extern cg_unwind_finallys
 extern obj_incref
 extern comp_intern_cstr
@@ -280,11 +281,8 @@ DEF_FUNC cg_nameop, CN2_FRAME
 
 .missing:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "internal error: name has no local slot"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    CSTRING rsi, "internal error: name has no local slot"
+    call cg_error
     xor eax, eax
 .ret:
     pop r13
@@ -932,11 +930,8 @@ DEF_FUNC cg_closure_tuple, CC3_FRAME
     jmp .ret
 .not_found:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "internal error: free variable has no cell in the enclosing scope"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    CSTRING rsi, "internal error: free variable has no cell in the enclosing scope"
+    call cg_error
     mov rax, -1
 .ret:
     pop r13

@@ -30,6 +30,7 @@ extern cg_pop_handler
 extern cg_push_handler
 extern cg_store
 extern comp_error
+extern cg_error
 
 extern buf_push_ptr
 extern none_singleton
@@ -284,11 +285,8 @@ DEF_FUNC cg_unwind_finallys, UF_FRAME
     jmp .loop
 .in_except_star:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "'break', 'continue' and 'return' cannot appear in an except* block"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    CSTRING rsi, "'break', 'continue' and 'return' cannot appear in an except* block"
+    call cg_error
     jmp .fail
 
 .a_finally_end:
@@ -1806,12 +1804,8 @@ DEF_FUNC_LOCAL cg_one_star_except, OS_FRAME
 
 .bare:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "except* must name an exception type"
-    mov rax, r13
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    CSTRING rsi, "except* must name an exception type"
+    call cg_error
 .fail:
     xor eax, eax
 .ret:

@@ -110,3 +110,11 @@ try:\n    pass\nelse:\n    pass\n
 x = 1\ntry:\n    a = 1\n    b = 2\n
 def f():\n    try:\n        pass\n
 if 1:\n    try:\n        pass\n    x = 1\n
+x = 1\ny = 2\nbreak\n
+x = 1\nfor i in []:\n    pass\ncontinue\n
+x = 1\nwhile 0:\n    pass\nbreak\n
+a = 1\nclass C:\n    [q := 1 for w in []]\n
+a = 1\nwhile 1:\n    try:\n        pass\n    except* E:\n        break\n
+a = 1\nwhile 1:\n    try:\n        pass\n    except* E:\n        continue\n
+a = 1\ndef f():\n    nonlocal zz\n
+a = 1\nmatch a:\n    case {q: w}:\n        pass\n

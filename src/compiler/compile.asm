@@ -54,6 +54,7 @@ extern str_all_name_chars
 extern asm_assemble
 extern ast_obj
 extern ast_at
+extern ast_span_at
 extern ast_obj_at
 extern cg_const
 extern cg_emit
@@ -2371,6 +2372,63 @@ DEF_FUNC_BARE comp_error_span
     xor eax, eax
     ret
 END_FUNC comp_error_span
+
+;; ============================================================================
+;; comp_error_node(Comp *c, uint32_t node, const char *msg) -> rax = 0, always
+;;
+;; A SyntaxError at a NODE's own span, for the passes that have a node rather
+;; than a token: the symbol table, and the pattern compiler.  Both used to
+;; pass a literal ZERO for the line, and comp_attach_location derives the
+;; source TEXT from the line -- so the message came out with line 0, offset 1,
+;; no source line and no caret.
+;;
+;; The node's start is on the node; its end comes from the parallel span
+;; table, and an end of -1 means it was never recorded, in which case the span
+;; is the one character comp_error would have given.
+;; ============================================================================
+CEN_NODE  equ 8
+CEN_MSG   equ 16
+CEN_LINE  equ 24
+CEN_COL   equ 32
+CEN_FRAME equ 40                ; + 1 push = 48, 16-aligned
+global comp_error_node
+DEF_FUNC comp_error_node, CEN_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - CEN_NODE], rsi
+    mov [rbp - CEN_MSG], rdx
+
+    mov rdi, rbx
+    mov esi, [rbp - CEN_NODE]
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    mov [rbp - CEN_LINE], ecx
+    mov ecx, [rax + AstNode.col]
+    mov [rbp - CEN_COL], ecx
+
+    mov rdi, rbx
+    mov esi, [rbp - CEN_NODE]
+    call ast_span_at
+    mov ecx, [rbp - CEN_LINE]
+    mov r8d, [rbp - CEN_COL]
+    mov r9d, ecx
+    lea r10d, [r8d + 1]
+    test rax, rax
+    jz .cen_go
+    cmp dword [rax + AstSpan.end_lineno], -1
+    je .cen_go
+    mov r9d, [rax + AstSpan.end_lineno]
+    mov r10d, [rax + AstSpan.end_col]
+.cen_go:
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    mov rdx, [rbp - CEN_MSG]
+    call comp_error_span
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC comp_error_node
 
 ;; ============================================================================
 ;; comp_failed(Comp *c) -> rax = non-zero once an error has been recorded

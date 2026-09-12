@@ -35,6 +35,7 @@ extern buf_reserve
 extern comp_msg_start
 extern comp_msg_cstr
 extern comp_error
+extern comp_error_node
 extern comp_intern_cstr
 
 extern dict_get
@@ -318,6 +319,7 @@ DEF_FUNC sym_add, SA2_FRAME
     ret
 END_FUNC sym_add
 
+
 ;; ============================================================================
 ;; sym_visit(Comp *c, uint32_t scope, uint32_t node) -> rax = 1 ok, 0 error
 ;;
@@ -539,12 +541,14 @@ DEF_FUNC sym_visit, SV_FRAME
 ;; every comprehension scope in between.  Without that, `[y := i for i in r]`
 ;; left y visible only inside the comprehension.
 .ne_in_class:
+    ; CPython blames the TARGET NAME, not the whole `q := 1`.
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
+    mov esi, r13d
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
     CSTRING rdx, "assignment expression within a comprehension cannot be used in a class body"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    call comp_error_node
     jmp .fail
 
 .namedexpr:
@@ -899,37 +903,10 @@ DEF_FUNC sym_visit, SV_FRAME
     je .children
     CSTRING rdx, "'return' outside function"
 .out_of_scope:
-    ; rdx = the message.  The node's own start, and its end from the span
-    ; table -- an end of -1 means it was never recorded, and then the span
-    ; falls back to the one character comp_error would have given.
-    push rdx
-    mov rdi, rbx
-    mov rsi, r13
-    call ast_at
-    mov ecx, [rax + AstNode.lineno]
-    mov r8d, [rax + AstNode.col]
-    push rcx
-    push r8
+    ; rdx = the message, r13 = the node it is about.
     mov rdi, rbx
     mov esi, r13d
-    extern ast_span_at
-    call ast_span_at
-    pop r8
-    pop rcx
-    mov r9d, ecx
-    lea r10d, [r8d + 1]
-    test rax, rax
-    jz .oos_have_span
-    cmp dword [rax + AstSpan.end_lineno], -1
-    je .oos_have_span
-    mov r9d, [rax + AstSpan.end_lineno]
-    mov r10d, [rax + AstSpan.end_col]
-.oos_have_span:
-    pop rdx
-    mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    extern comp_error_span
-    call comp_error_span
+    call comp_error_node
     jmp .fail
 
 ;; `await` makes the enclosing block a coroutine, exactly as `yield` makes it a

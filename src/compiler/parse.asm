@@ -353,14 +353,25 @@ DEF_FUNC par_syntax_error, PS_FRAME
     ret
 
 .ps_here:
+    ; The span covers the WHOLE token, which is what CPython underlines: it
+    ; says (1, 1)-(1, 7) for a stray `except` and this said (1, 1)-(1, 2).
+    ; A zero-length token -- NEWLINE, ENDMARKER, a DEDENT -- keeps the one
+    ; character comp_error would have given.
     mov rdi, rbx
     call par_peek
     TOK_POS rax
     mov r8d, [rax + Token.col]
+    mov r9d, ecx
+    mov r10d, [rax + Token.len]
+    test r10d, r10d
+    jnz .ps_have_len
+    mov r10d, 1
+.ps_have_len:
+    add r10d, r8d
     mov rdi, rbx
     lea rsi, [rel exc_SyntaxError_type]
     mov rdx, [rbp - PS_MSG]
-    call comp_error
+    call comp_error_span
     xor eax, eax
     pop rbx
     leave
