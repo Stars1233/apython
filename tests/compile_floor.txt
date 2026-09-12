@@ -302,6 +302,7 @@ test_gc_dealloc_untrack
 test_gc_del_raises
 test_gc_finalizer_order
 test_gc_generations
+test_gc_instance_type
 test_gc_module
 test_gc_reentrant_collect
 test_gc_static_types
@@ -505,6 +506,7 @@ test_property_raises
 test_pyc_hardening
 test_pyc_staleness
 test_pyexpat_module
+test_pyexpat_parse
 test_raise_cause
 test_raise_class_init
 test_raise_from

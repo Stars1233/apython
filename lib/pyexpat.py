@@ -303,17 +303,75 @@ class xmlparser:
             # last component on both sides.
             "'pyexpat.xmlparser' object has no attribute %r" % (name,))
 
+    # -- parsing ------------------------------------------------------------
+
+    def Parse(self, data, isfinal=False):
+        """Feed a chunk of the document.
+
+        The core answers three different things and they are three different
+        things: 1 for a clean parse, 0 when libexpat reported an error and
+        NOTHING is pending, and None -- a NULL Value -- when a HANDLER raised,
+        in which case the exception is already on its way out and there is
+        nothing to do here but return.
+
+        That split is why there is no `except ValueError` anywhere near this.
+        `plistlib`'s handler raises InvalidFileException, `expatreader`'s raise
+        SAXException and ElementTree's target raises ParseError; a converting
+        handler here would swallow whichever of them happened to be a
+        ValueError and report an ExpatError instead.
+        """
+        status = _core.parser_parse(self._h, data, isfinal)
+        if status == 1:
+            return 1
+        # status is 0: libexpat's own error, and it is ours to raise.
+        code, lineno, column = _core.parser_status(self._h)[:3]
+        raise _expat_error(code, lineno, column)
+
+    def ParseFile(self, file):
+        """Parse a whole file-like object, a chunk at a time.
+
+        In Python rather than in the core: CPython uses XML_GetBuffer and
+        XML_ParseBuffer to save one copy per chunk, and the copy is not worth
+        an entry point -- while `readinst`'s two error messages are much
+        easier to match here.
+        """
+        while True:
+            chunk = file.read(2048)
+            if not isinstance(chunk, (bytes, bytearray)):
+                if isinstance(chunk, str):
+                    raise TypeError("read() did not return a bytes object "
+                                    "(type=str)")
+                raise TypeError("read() did not return a bytes object (type=%s)"
+                                % type(chunk).__name__)
+            self.Parse(chunk, not chunk)
+            if not chunk:
+                return 1
+
     def __setattr__(self, name, value):
         if name.startswith("_"):
             object.__setattr__(self, name, value)
             return
         index = _HANDLER_INDEX.get(name)
         if index is not None:
+            # The core is told FIRST and BORROWS; this list OWNS.  An owning
+            # reference in the core's malloc'd struct is invisible to the
+            # collector, which made every parser -> bound method -> parser
+            # cycle look externally reachable and leaked all of them -- the
+            # shape all five stdlib consumers build.  Telling the core first
+            # means the pointer it holds is always to an object something else
+            # owns: the caller's reference now, this list's in a moment.
+            _core.parser_set_handler(self._h, index, value)
             self._handlers[index] = value
             return
         if name in ("buffer_text", "ordered_attributes",
                     "specified_attributes", "namespace_prefixes"):
-            object.__setattr__(self, _FLAG_SLOT[name], bool(value))
+            flag = bool(value)
+            object.__setattr__(self, _FLAG_SLOT[name], flag)
+            # The trampolines read these while building their arguments, so
+            # the core needs its own copy -- it must not cross back into
+            # Python to ask.  This side keeps one so the attribute reads back
+            # as a real bool rather than as the int the core stores.
+            _core.parser_set_flag(self._h, _FLAG_INDEX[name], int(flag))
             return
         if name == "buffer_size":
             if not isinstance(value, int) or isinstance(value, bool):
@@ -321,6 +379,7 @@ class xmlparser:
             if value <= 0:
                 raise ValueError("buffer_size must be greater than zero")
             object.__setattr__(self, "_buffer_size", value)
+            _core.parser_set_flag(self._h, _FLAG_INDEX["buffer_size"], value)
             return
         # Anything else is refused, and that arm is load-bearing:
         # `xmlrpc.client` and `expatreader` both do
@@ -379,3 +438,19 @@ def ParserCreate(encoding=None, namespace_separator=None, intern=None):
 def ErrorString(code):
     """The message expat gives for an error code."""
     return _core.ErrorString(code)
+
+
+def _expat_error(code, lineno, column):
+    """The ExpatError libexpat's own failures become.
+
+    CPython's wording, from pyexpat.c's set_error: "%s: line %d, column %d",
+    and `.offset` IS the column -- there is no separate byte offset in the
+    message.
+    """
+    err = ExpatError("%s: line %d, column %d"
+                     % (_core.ErrorString(code) or "unknown error",
+                        lineno, column))
+    err.code = code
+    err.lineno = lineno
+    err.offset = column
+    return err
