@@ -1226,6 +1226,7 @@ END_FUNC fir_pow2_scale
 ;; inf and NaN are also two different refusals in CPython, not one.
 ;; ============================================================================
 extern exc_OverflowError_type
+extern exc_MemoryError_type
 
 FIR_MANT  equ 8             ; the mantissa, across the calls that build the pair
 FIR_FRAME equ 8             ; + 1 push = 16
@@ -1359,10 +1360,18 @@ END_FUNC float_method_as_integer_ratio
 
 ;; ============================================================================
 ;; float_method_hex(args, nargs) -> str
-;; Format double as '0x1.XXXXp+YY' hex string.
+;; Format double as CPython's '[-]0xH.HHHHHHHHHHHHHp[+-]D' hex string.
+;;
+;; A SUBNORMAL has no implicit leading 1 and its exponent is the smallest
+;; NORMAL one rather than one below it, which is what CPython's float_hex
+;; arrives at by frexp and a shift.  This hardcoded the leading '1' and
+;; subtracted the bias unconditionally, so 5e-324 came out as
+;; '0x1.0000000000001p-1023' -- a different NUMBER, and the hex()/fromhex()
+;; round trip did not close for any subnormal.
 ;; ============================================================================
 FH_BUF    equ 8
-FH_FRAME  equ 16            ; + 2 pushes = 32
+FH_EXP    equ 16            ; the unbiased exponent, across the digit loop
+FH_FRAME  equ 32            ; + 2 pushes: rsp is 16-aligned at every call
 
 DEF_FUNC float_method_hex, FH_FRAME
     push rbx
@@ -1405,20 +1414,27 @@ DEF_FUNC float_method_hex, FH_FRAME
     cmp rdx, rcx
     je .fh_nan
 
-    ; Normal float: extract exponent and mantissa
+    ; Extract exponent and mantissa.
     mov rdx, rax
     shr rdx, 52
     and edx, 0x7ff              ; biased exponent
+    mov r9d, '1'                ; the implicit leading bit, when there is one
+    test edx, edx
+    jnz .fh_have_exp
+    mov r9d, '0'                ; subnormal: no implicit 1 ...
+    mov edx, 1                  ; ... and the exponent is -1022, not -1023
+.fh_have_exp:
     sub edx, 1023               ; unbiased
+    mov [rbp - FH_EXP], edx
 
     mov rcx, rax
     mov r8, 0x000fffffffffffff
     and rcx, r8                 ; mantissa bits (52 bits)
 
-    ; Write "0x1."
+    ; Write "0x1." or, for a subnormal, "0x0."
     mov byte [r12], '0'
     mov byte [r12+1], 'x'
-    mov byte [r12+2], '1'
+    mov [r12+2], r9b
     mov byte [r12+3], '.'
     add r12, 4
 
@@ -1455,14 +1471,10 @@ DEF_FUNC float_method_hex, FH_FRAME
     mov byte [r12], 'p'
     inc r12
 
-    ; edx = unbiased exponent (stored in [rsp area])
-    ; We need to reload it; it was in edx before hex loop
-    ; Actually we lost edx. Let's recompute.
-    mov rax, rbx
-    btr rax, 63
-    shr rax, 52
-    and eax, 0x7ff
-    sub eax, 1023
+    ; The digit loop needed edx, so the exponent came from a frame slot: it
+    ; used to be recomputed here, and the recomputation was the second place
+    ; the subnormal rule had to be applied and was not.
+    mov eax, [rbp - FH_EXP]
 
     ; Write sign of exponent
     test eax, eax
@@ -1572,213 +1584,418 @@ DEF_FUNC float_method_hex, FH_FRAME
 END_FUNC float_method_hex
 
 ;; ============================================================================
-;; float_classmethod_fromhex(args, nargs) -> Float
-;; args[0]=cls (type), args[1]=hex string like "0x1.XXXXp+YY"
-;; Parses hex float string and returns TAG_FLOAT.
+;; ffh_isspace(ecx = one byte) -> eax = 1 when it is ASCII whitespace, else 0
+;;
+;; Py_ISSPACE's set, which is what float.fromhex skips at both ends: space and
+;; \t \n \v \f \r.  Not the Unicode set -- CPython's is ASCII here too.
 ;; ============================================================================
-FFH_STR   equ 8
-FFH_FRAME equ 24            ; + 3 pushes = 48, 16-aligned
+DEF_FUNC_BARE ffh_isspace
+    mov eax, 1
+    cmp cl, ' '
+    je .yes
+    lea edx, [rcx - 9]
+    cmp edx, 4                  ; 9..13 inclusive
+    jbe .yes
+    xor eax, eax
+.yes:
+    ret
+END_FUNC ffh_isspace
+
+;; ============================================================================
+;; ffh_ishex(ecx = one byte) -> eax = 1 when it is a hex digit, else 0
+;; ============================================================================
+DEF_FUNC_BARE ffh_ishex
+    mov eax, 1
+    lea edx, [rcx - '0']
+    cmp edx, 9
+    jbe .yes
+    mov edx, ecx
+    or dl, 0x20
+    sub edx, 'a'
+    cmp edx, 5
+    jbe .yes
+    xor eax, eax
+.yes:
+    ret
+END_FUNC ffh_ishex
+
+;; ============================================================================
+;; float_classmethod_fromhex(args, nargs) -> Value: a float, or cls(float)
+;; args[0] = cls, args[1] = the string
+;;
+;; CPython's grammar, in CPython's order
+;; (~/tmp/repo/cpython/Objects/floatobject.c, float_fromhex):
+;;
+;;     [ws] [sign] ( inf | infinity | nan
+;;                 | [0x] hexdigits [ . hexdigits ] [ p [sign] decdigits ] )
+;;     [ws] EOS
+;;
+;; with at least one hex digit overall, at least one exponent digit after a
+;; `p`, and the whole string consumed.  Nearly all of that was missing.  `0x`
+;; and `p` were both MANDATORY, so '0x1.8', '0x10', '1p3', 'inf' and 'nan'
+;; were refused; nothing checked the digit counts or the end of the string, so
+;; '0x1p', '0x1p+', '0xp1' and '0x1p1zzz' were accepted; there was no
+;; whitespace skipping; and the mantissa was accumulated into a 64-bit
+;; register with one `shl 4` per digit, so past 16 hex digits it silently
+;; WRAPPED -- '0x1.0000000000000000000001p+0' answered 3.2311742677852644e-27
+;; where CPython answers 1.0, and '0x1234567890abcdef123p0' was out by three
+;; orders of magnitude.  Those two were wrong ANSWERS, not refusals.
+;;
+;; The arithmetic is glibc's strtod, which parses C99 hex floats with correct
+;; round-half-even and which this tree already uses for every decimal float
+;; (src/compiler/parse.asm).  What the validation above buys is exactly the
+;; two places the grammars differ -- C99 requires the `0x` prefix and, for a
+;; hex significand, a `p` exponent, and CPython requires neither -- so the
+;; span is copied into a canonical `[-]0x<digits>p<exp>` before it is handed
+;; over.
+;;
+;; Overflow is read off the RESULT rather than out of errno: an infinity that
+;; no `inf` was spelled is CPython's OverflowError, and an underflow to zero
+;; is a zero there as it is here ('0x1p-1075' is 0.0 in both, by
+;; round-half-even at the subnormal boundary).
+;; ============================================================================
+FFH_STR    equ 8
+FFH_CLS    equ 16
+FFH_BUF    equ 24
+FFH_DSTART equ 32
+FFH_DLEN   equ 40
+FFH_ESTART equ 48
+FFH_ELEN   equ 56
+FFH_SIGN   equ 64
+FFH_RES    equ 72
+FFH_LIT    equ 80               ; 1 when inf/nan was spelled, so no strtod
+FFH_FRAME  equ 88               ; + 3 pushes: rsp is 16-aligned at every call
+
+extern strtod
+extern ap_memcpy
+extern exc_OverflowError_type
+extern exc_MemoryError_type
 
 DEF_FUNC float_classmethod_fromhex, FFH_FRAME
     push rbx
     push r12
     push r13
 
-    ; Get string arg.  Read as a PyStrObject whatever it was, so
-    ; `float.fromhex(0)` read a small integer's Value as a pointer and died,
-    ; and every other type came back as "invalid hexadecimal floating-point
-    ; string" where CPython refuses the TYPE.
-    mov rdi, [rdi + 8]            ; args[1]
+    mov rax, [rdi]                  ; args[0] = cls
+    mov [rbp - FFH_CLS], rax
+
+    ; Read as a PyStrObject whatever it was, so `float.fromhex(0)` refuses the
+    ; TYPE rather than reading a small integer's Value as a pointer.
+    mov rdi, [rdi + 8]              ; args[1]
     CSTRING rsi, "bad argument type for built-in operation"
     call str_require_str
-    mov rcx, rax
-    mov [rbp - FFH_STR], rcx
-    lea r12, [rcx + PyStrObject.data]  ; r12 = string data
+    mov [rbp - FFH_STR], rax
+    mov qword [rbp - FFH_BUF], 0
+    mov qword [rbp - FFH_ESTART], 0
+    mov qword [rbp - FFH_ELEN], 0
+    mov qword [rbp - FFH_LIT], 0
+    mov byte [rbp - FFH_SIGN], 0
 
-    ; Parse: optional '-', '0x', mantissa '1.XXXX', 'p', exponent
-    xor r13d, r13d                  ; r13 = sign (0 = positive)
-    xor ebx, ebx                   ; current position
+    ; rbx = cursor, r12 = one past the last byte.  The length is ob_size and
+    ; not a strlen, so an embedded NUL fails the "consumed it all" test below
+    ; rather than ending the parse early.
+    mov r12, [rax + PyStrObject.ob_size]
+    lea rbx, [rax + PyStrObject.data]
+    add r12, rbx
 
-    ; Check for sign
-    movzx eax, byte [r12]
+.ffh_lead_ws:
+    cmp rbx, r12
+    jae .ffh_bad                    ; nothing but whitespace
+    movzx ecx, byte [rbx]
+    call ffh_isspace
+    test eax, eax
+    jz .ffh_sign
+    inc rbx
+    jmp .ffh_lead_ws
+
+.ffh_sign:
+    movzx eax, byte [rbx]
     cmp al, '-'
-    jne .ffh_check_plus
-    mov r13d, 1
-    inc ebx
-    jmp .ffh_check_0x
-.ffh_check_plus:
+    je .ffh_sign_take
     cmp al, '+'
-    jne .ffh_check_0x
-    inc ebx
+    jne .ffh_maybe_lit
+.ffh_sign_take:
+    mov [rbp - FFH_SIGN], al
+    inc rbx
 
-.ffh_check_0x:
-    ; Expect '0x' or '0X'
-    cmp byte [r12 + rbx], '0'
-    jne .ffh_parse_error
-    inc ebx
-    movzx eax, byte [r12 + rbx]
-    or al, 0x20                     ; lowercase
-    cmp al, 'x'
-    jne .ffh_parse_error
-    inc ebx
+.ffh_maybe_lit:
+    ; inf / infinity / nan, case-insensitively, before anything numeric --
+    ; CPython's _Py_parse_inf_or_nan runs first for the same reason.
+    mov rax, r12
+    sub rax, rbx
+    cmp rax, 3
+    jb .ffh_number
+    movzx ecx, byte [rbx]
+    or cl, 0x20
+    cmp cl, 'i'
+    je .ffh_try_inf
+    cmp cl, 'n'
+    je .ffh_try_nan
+    jmp .ffh_number
 
-    ; Parse integer part (digits before '.')
-    xor ecx, ecx                   ; mantissa = 0 (as integer, shifted later)
-    ; Parse hex digits
-.ffh_int_digits:
-    movzx eax, byte [r12 + rbx]
-    call .ffh_hex_val               ; eax = hex value or -1
-    cmp eax, -1
-    je .ffh_int_done
-    shl rcx, 4
-    or rcx, rax
-    inc ebx
-    jmp .ffh_int_digits
+.ffh_try_inf:
+    movzx ecx, byte [rbx + 1]
+    or cl, 0x20
+    cmp cl, 'n'
+    jne .ffh_number
+    movzx ecx, byte [rbx + 2]
+    or cl, 0x20
+    cmp cl, 'f'
+    jne .ffh_number
+    add rbx, 3
+    ; "inity" may follow, and nothing else may take its place.
+    mov rax, r12
+    sub rax, rbx
+    cmp rax, 5
+    jb .ffh_inf_value
+    movzx ecx, byte [rbx]
+    or cl, 0x20
+    cmp cl, 'i'
+    jne .ffh_inf_value
+    movzx ecx, byte [rbx + 1]
+    or cl, 0x20
+    cmp cl, 'n'
+    jne .ffh_inf_value
+    movzx ecx, byte [rbx + 2]
+    or cl, 0x20
+    cmp cl, 'i'
+    jne .ffh_inf_value
+    movzx ecx, byte [rbx + 3]
+    or cl, 0x20
+    cmp cl, 't'
+    jne .ffh_inf_value
+    movzx ecx, byte [rbx + 4]
+    or cl, 0x20
+    cmp cl, 'y'
+    jne .ffh_inf_value
+    add rbx, 5
+.ffh_inf_value:
+    mov rax, 0x7ff0000000000000
+    jmp .ffh_lit_value
+
+.ffh_try_nan:
+    movzx ecx, byte [rbx + 1]
+    or cl, 0x20
+    cmp cl, 'a'
+    jne .ffh_number
+    movzx ecx, byte [rbx + 2]
+    or cl, 0x20
+    cmp cl, 'n'
+    jne .ffh_number
+    add rbx, 3
+    mov rax, 0x7ff8000000000000
+
+.ffh_lit_value:
+    cmp byte [rbp - FFH_SIGN], '-'
+    jne .ffh_lit_store
+    mov rcx, 0x8000000000000000
+    xor rax, rcx
+.ffh_lit_store:
+    mov [rbp - FFH_RES], rax
+    mov qword [rbp - FFH_LIT], 1
+    jmp .ffh_trailing_ws
+
+.ffh_number:
+    ; The `0x` prefix is OPTIONAL, and a lone leading `0` is just a digit --
+    ; CPython backtracks over it, and so does this.
+    mov rax, r12
+    sub rax, rbx
+    cmp rax, 2
+    jb .ffh_digits
+    cmp byte [rbx], '0'
+    jne .ffh_digits
+    movzx ecx, byte [rbx + 1]
+    or cl, 0x20
+    cmp cl, 'x'
+    jne .ffh_digits
+    add rbx, 2
+
+.ffh_digits:
+    mov [rbp - FFH_DSTART], rbx
+    xor r13d, r13d                  ; r13 = hex digits seen, point aside
+.ffh_int_loop:
+    cmp rbx, r12
+    jae .ffh_digits_end
+    movzx ecx, byte [rbx]
+    call ffh_ishex
+    test eax, eax
+    jz .ffh_int_done
+    inc r13
+    inc rbx
+    jmp .ffh_int_loop
 .ffh_int_done:
+    cmp byte [rbx], '.'
+    jne .ffh_digits_end
+    inc rbx
+.ffh_frac_loop:
+    cmp rbx, r12
+    jae .ffh_digits_end
+    movzx ecx, byte [rbx]
+    call ffh_ishex
+    test eax, eax
+    jz .ffh_digits_end
+    inc r13
+    inc rbx
+    jmp .ffh_frac_loop
 
-    ; Check for '.'
-    xor r8d, r8d                    ; frac_bits = 0 (count of hex digits after .)
-    cmp byte [r12 + rbx], '.'
-    jne .ffh_check_p
-    inc ebx
+.ffh_digits_end:
+    mov rax, rbx
+    sub rax, [rbp - FFH_DSTART]
+    mov [rbp - FFH_DLEN], rax
+    test r13, r13
+    jz .ffh_bad                     ; at least one hex digit, anywhere
 
-    ; Parse fractional hex digits
-.ffh_frac_digits:
-    movzx eax, byte [r12 + rbx]
-    push rcx
-    push r8
-    call .ffh_hex_val
-    pop r8
-    pop rcx
-    cmp eax, -1
-    je .ffh_check_p
-    shl rcx, 4
-    or rcx, rax
-    inc r8d
-    inc ebx
-    jmp .ffh_frac_digits
-
-.ffh_check_p:
-    ; rcx = combined mantissa, r8d = fractional hex digits
-    ; Expect 'p' or 'P'
-    movzx eax, byte [r12 + rbx]
-    or al, 0x20
-    cmp al, 'p'
-    jne .ffh_parse_error
-    inc ebx
-
-    ; Parse exponent (decimal, with optional sign)
-    xor r9d, r9d                    ; exp_sign = 0
-    movzx eax, byte [r12 + rbx]
-    cmp al, '-'
-    jne .ffh_exp_check_plus
-    mov r9d, 1
-    inc ebx
-    jmp .ffh_exp_digits
-.ffh_exp_check_plus:
-    cmp al, '+'
-    jne .ffh_exp_digits
-    inc ebx
-
-.ffh_exp_digits:
-    xor r10d, r10d                  ; exponent value
+    ; The `p` exponent is OPTIONAL too, but if it is there it needs a digit:
+    ; '0x1p' and '0x1p+' were both accepted as exponent zero.
+    cmp rbx, r12
+    jae .ffh_trailing_ws
+    movzx ecx, byte [rbx]
+    or cl, 0x20
+    cmp cl, 'p'
+    jne .ffh_trailing_ws
+    inc rbx
+    mov [rbp - FFH_ESTART], rbx
+    cmp rbx, r12
+    jae .ffh_bad
+    movzx ecx, byte [rbx]
+    cmp cl, '-'
+    je .ffh_exp_sign
+    cmp cl, '+'
+    jne .ffh_exp_first
+.ffh_exp_sign:
+    inc rbx
+.ffh_exp_first:
+    cmp rbx, r12
+    jae .ffh_bad
+    movzx ecx, byte [rbx]
+    sub ecx, '0'
+    cmp ecx, 9
+    ja .ffh_bad
 .ffh_exp_loop:
-    movzx eax, byte [r12 + rbx]
-    sub al, '0'
-    cmp al, 9
-    ja .ffh_exp_done
-    imul r10d, 10
-    movzx eax, al
-    add r10d, eax
-    inc ebx
-    jmp .ffh_exp_loop
+    inc rbx
+    cmp rbx, r12
+    jae .ffh_exp_done
+    movzx ecx, byte [rbx]
+    sub ecx, '0'
+    cmp ecx, 9
+    jbe .ffh_exp_loop
 .ffh_exp_done:
-    test r9d, r9d
-    jz .ffh_compute
-    neg r10d
+    mov rax, rbx
+    sub rax, [rbp - FFH_ESTART]
+    mov [rbp - FFH_ELEN], rax
 
-.ffh_compute:
-    ; rcx = mantissa bits, r8d = fractional hex digits, r10d = exponent
-    ; Actual exponent = r10d - (r8d * 4)  [each hex digit = 4 bits]
-    mov eax, r8d
-    shl eax, 2                      ; * 4
-    sub r10d, eax                   ; adjusted exponent
+.ffh_trailing_ws:
+    cmp rbx, r12
+    jae .ffh_consumed
+    movzx ecx, byte [rbx]
+    call ffh_isspace
+    test eax, eax
+    jz .ffh_bad                     ; trailing junk: '0x1p1zzz' was accepted
+    inc rbx
+    jmp .ffh_trailing_ws
 
-    ; Convert to double: value = mantissa * 2^exponent
-    ; Use integer -> double conversion then ldexp
-    cvtsi2sd xmm0, rcx             ; mantissa as double
+.ffh_consumed:
+    cmp qword [rbp - FFH_LIT], 0
+    jne .ffh_finish                 ; inf or nan: no arithmetic to do
 
-    ; Apply exponent via repeated multiply/divide by 2
-    test r10d, r10d
-    jz .ffh_apply_sign
-    js .ffh_neg_exp_apply
+    ; Canonicalise for strtod: sign, "0x", the digit span verbatim, then "p"
+    ; and either the exponent span or a zero.
+    mov rdi, [rbp - FFH_DLEN]
+    add rdi, [rbp - FFH_ELEN]
+    add rdi, 16                     ; sign, "0x", 'p', "0", NUL, and slack
+    call ap_malloc
+    test rax, rax
+    jz .ffh_nomem
+    mov [rbp - FFH_BUF], rax
+    mov r13, rax
+    movzx eax, byte [rbp - FFH_SIGN]
+    test al, al
+    jz .ffh_no_sign
+    mov [r13], al
+    inc r13
+.ffh_no_sign:
+    mov byte [r13], '0'
+    mov byte [r13 + 1], 'x'
+    add r13, 2
+    mov rdi, r13
+    mov rsi, [rbp - FFH_DSTART]
+    mov rdx, [rbp - FFH_DLEN]
+    call ap_memcpy
+    add r13, [rbp - FFH_DLEN]
+    mov byte [r13], 'p'
+    inc r13
+    cmp qword [rbp - FFH_ELEN], 0
+    jne .ffh_copy_exp
+    mov byte [r13], '0'
+    inc r13
+    jmp .ffh_buf_done
+.ffh_copy_exp:
+    mov rdi, r13
+    mov rsi, [rbp - FFH_ESTART]
+    mov rdx, [rbp - FFH_ELEN]
+    call ap_memcpy
+    add r13, [rbp - FFH_ELEN]
+.ffh_buf_done:
+    mov byte [r13], 0
 
-    ; Positive exponent: multiply by 2^exp
-.ffh_pos_exp:
-    ; Use a loop to multiply by 2 for each bit
-    mov ecx, r10d
-.ffh_mul_loop:
-    test ecx, ecx
-    jz .ffh_apply_sign
-    addsd xmm0, xmm0              ; xmm0 *= 2
-    dec ecx
-    jmp .ffh_mul_loop
+    mov rdi, [rbp - FFH_BUF]
+    xor esi, esi                    ; no endptr: the span is already validated
+    call strtod wrt ..plt
+    movq [rbp - FFH_RES], xmm0
+    mov rdi, [rbp - FFH_BUF]
+    call ap_free
+    mov qword [rbp - FFH_BUF], 0
 
-.ffh_neg_exp_apply:
-    neg r10d
-    mov ecx, r10d
-    mov rax, 0x3ff0000000000000    ; 1.0
-    movq xmm1, rax
-    mov rax, 0x4000000000000000    ; 2.0
-    movq xmm2, rax
-.ffh_div_loop:
-    test ecx, ecx
-    jz .ffh_apply_sign
-    divsd xmm0, xmm2              ; xmm0 /= 2
-    dec ecx
-    jmp .ffh_div_loop
+    ; An infinity nobody spelled overflowed.
+    mov rax, [rbp - FFH_RES]
+    mov rcx, 0x7fffffffffffffff
+    and rcx, rax
+    mov rdx, 0x7ff0000000000000
+    cmp rcx, rdx
+    je .ffh_overflow
 
-.ffh_apply_sign:
-    test r13d, r13d
-    jz .ffh_return
-    ; Negate
-    mov rax, 0x8000000000000000
-    movq xmm1, rax
-    xorpd xmm0, xmm1
-
-.ffh_return:
-    movq rax, xmm0
+.ffh_finish:
+    ; A subclass gets cls(result), as CPython's does.
+    mov rax, [rbp - FFH_CLS]
+    lea rcx, [rel float_type]
+    cmp rax, rcx
+    jne .ffh_wrap
+    mov rax, [rbp - FFH_RES]
     mov edx, TAG_FLOAT
+    V_PACK rax, rdx                 ; before the leave: its cold path is a call
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
-; Local helper: convert hex char in al to value in eax, or -1
-.ffh_hex_val:
-    movzx eax, byte [r12 + rbx]
-    cmp al, '0'
-    jb .ffh_hv_bad
-    cmp al, '9'
-    ja .ffh_hv_alpha
-    sub eax, '0'
-    ret
-.ffh_hv_alpha:
-    or al, 0x20                     ; lowercase
-    cmp al, 'a'
-    jb .ffh_hv_bad
-    cmp al, 'f'
-    ja .ffh_hv_bad
-    sub eax, 'a'
-    add eax, 10
-    ret
-.ffh_hv_bad:
-    mov eax, -1
+.ffh_wrap:
+    mov rax, [rbp - FFH_RES]
+    mov edx, TAG_FLOAT
+    V_PACK rax, rdx
+    mov [rbp - FFH_RES], rax        ; the float as a Value, the one argument
+    mov rdi, [rbp - FFH_CLS]
+    lea rsi, [rbp - FFH_RES]
+    mov edx, 1
+    call obj_call_n
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
-.ffh_parse_error:
+.ffh_nomem:
+    RAISE exc_MemoryError_type, "out of memory"
+
+.ffh_overflow:
+    RAISE exc_OverflowError_type, "hexadecimal value too large to represent as a float"
+
+.ffh_bad:
+    mov rdi, [rbp - FFH_BUF]
+    test rdi, rdi
+    jz .ffh_bad_raise
+    call ap_free
+.ffh_bad_raise:
     RAISE exc_ValueError_type, "invalid hexadecimal floating-point string"
 END_FUNC float_classmethod_fromhex
 
