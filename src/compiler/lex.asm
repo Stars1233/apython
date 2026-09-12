@@ -22,10 +22,19 @@
 
 extern buf_reserve
 extern comp_msg_start
+extern comp_msg_utf8
+extern comp_msg_ucode
+extern uflags_of
 extern comp_msg_cstr
 extern comp_msg_i64
 extern comp_error_span
 extern comp_error
+
+; uflag_starts bits, from src/compiler/gen_unicodecase.py.  Only the three an
+; identifier's rule needs; src/methods/str_case.asm has the whole set.
+UF_PRINTABLE  equ 256
+UF_XID_CONT   equ 512
+UF_XID_START  equ 1024
 
 extern cc_table
 extern kw_index
@@ -48,6 +57,8 @@ extern exc_SyntaxError_type
 ; The scan cursor stays in r12 throughout lex_run; everything that has to
 ; survive a call goes in a frame slot rather than a caller-saved register.
 LR_COMP  equ 8
+LR_CP    equ 16          ; a non-ASCII character: the code point in the low
+                         ; half, how many bytes it took in the high half
 LR_KIND  equ 24          ; its token kind
 LR_FLAGS equ 32          ; its TF_* flags
 LR_STRNL equ 40          ; lines a string literal spanned, not applied yet
@@ -324,6 +335,81 @@ DEF_FUNC_BARE lex_str_prefix
 END_FUNC lex_str_prefix
 
 ASM_INIT
+
+
+;; ============================================================================
+;; lex_cp_at(rdi = a source pointer, rsi = one past the last source byte)
+;;   -> eax = the code point there, edx = how many bytes it took
+;;
+;; A UTF-8 decoder over the raw source, for the one question cc_table cannot
+;; answer: whether a non-ASCII character may start or continue an identifier.
+;; A truncated or malformed sequence answers the lead byte and a length of 1,
+;; so the caller's scan always advances and the byte gets reported rather than
+;; skipped.
+;; ============================================================================
+DEF_FUNC_BARE lex_cp_at
+    movzx eax, byte [rdi]
+    mov edx, 1
+    test al, 0x80
+    jz .lca_done                    ; ASCII: the byte is the code point
+    mov ecx, eax
+    and ecx, 0xf8
+    cmp ecx, 0xf0
+    je .lca_four
+    mov ecx, eax
+    and ecx, 0xf0
+    cmp ecx, 0xe0
+    je .lca_three
+    mov ecx, eax
+    and ecx, 0xe0
+    cmp ecx, 0xc0
+    jne .lca_done                   ; a stray continuation byte: itself
+    lea rcx, [rdi + 2]
+    cmp rcx, rsi
+    ja .lca_done                    ; truncated
+    and eax, 0x1f
+    shl eax, 6
+    movzx ecx, byte [rdi + 1]
+    and ecx, 0x3f
+    or eax, ecx
+    mov edx, 2
+    ret
+.lca_three:
+    lea rcx, [rdi + 3]
+    cmp rcx, rsi
+    ja .lca_done
+    and eax, 0x0f
+    shl eax, 12
+    movzx ecx, byte [rdi + 1]
+    and ecx, 0x3f
+    shl ecx, 6
+    or eax, ecx
+    movzx ecx, byte [rdi + 2]
+    and ecx, 0x3f
+    or eax, ecx
+    mov edx, 3
+    ret
+.lca_four:
+    lea rcx, [rdi + 4]
+    cmp rcx, rsi
+    ja .lca_done
+    and eax, 0x07
+    shl eax, 18
+    movzx ecx, byte [rdi + 1]
+    and ecx, 0x3f
+    shl ecx, 12
+    or eax, ecx
+    movzx ecx, byte [rdi + 2]
+    and ecx, 0x3f
+    shl ecx, 6
+    or eax, ecx
+    movzx ecx, byte [rdi + 3]
+    and ecx, 0x3f
+    or eax, ecx
+    mov edx, 4
+.lca_done:
+    ret
+END_FUNC lex_cp_at
 
 ;; ============================================================================
 ;; lex_run(Comp *c, const char *start, const char *end, int lineno,
@@ -830,16 +916,67 @@ DEF_FUNC lex_run, LR_FRAME
     jmp .fail
 
 ;; --- identifiers, keywords, and prefixed string literals -------------------
+;;
+;; cc_table marks every byte over 0x7F as an identifier start and continue,
+;; which is a permissive UTF-8 lead and nothing more -- so an invisible NBSP
+;; or ZWSP, or a lone combining mark, compiled as a NAME.  CPython's rule is
+;; XID_Start XID_Continue*, the tables for it are generated already
+;; (uflag_starts, via uflags_of), and the bytes below 0x80 keep the one-load
+;; fast path they had.
 .ident:
     mov r15, r12                        ; r15 = start of the identifier
+    movzx eax, byte [r12]
+    test al, 0x80
+    jz .ident_first_ascii
+    mov rdi, r12
+    mov rsi, r13
+    call lex_cp_at
+    shl rdx, 32
+    or rax, rdx
+    mov [rbp - LR_CP], rax
+    mov edi, eax
+    call uflags_of
+    test eax, UF_XID_START
+    jz .ident_bad_char
+    mov rdx, [rbp - LR_CP]
+    shr rdx, 32
+    add r12, rdx
+    lea rcx, [rel cc_table]
+    jmp .ident_loop
+.ident_first_ascii:
+    inc r12
     lea rcx, [rel cc_table]
 .ident_loop:
-    inc r12
     cmp r12, r13
     jae .ident_done
     movzx eax, byte [r12]
+    test al, 0x80
+    jnz .ident_cont_wide
     test byte [rcx + rax], CC_IDCONT
-    jnz .ident_loop
+    jz .ident_done
+    inc r12
+    jmp .ident_loop
+.ident_cont_wide:
+    mov rdi, r12
+    mov rsi, r13
+    call lex_cp_at
+    shl rdx, 32
+    or rax, rdx
+    mov [rbp - LR_CP], rax
+    mov edi, eax
+    call uflags_of
+    test eax, UF_XID_CONT
+    jz .ident_wide_ends
+    mov rdx, [rbp - LR_CP]
+    shr rdx, 32
+    add r12, rdx
+    lea rcx, [rel cc_table]
+    jmp .ident_loop
+.ident_wide_ends:
+    ; Not a continuation: the identifier stops here, and the character is
+    ; whatever the next dispatch makes of it -- which, for one that cannot
+    ; start an identifier either, is .ident_bad_char on the next pass.
+    lea rcx, [rel cc_table]
 .ident_done:
     ; An identifier butted straight against a quote is a string prefix, not a
     ; name: rb"..", f'..'.  Only 1- and 2-character prefixes exist, so anything
@@ -886,6 +1023,51 @@ DEF_FUNC lex_run, LR_FRAME
     mov r8, [rbp - LR_FLAGS]
     call lex_emit
     jmp .scan
+
+.ident_bad_char:
+    ; eax = the character's flags, [rbp - LR_CP] its code point.  CPython
+    ; names the character when it is PRINTABLE and gives only the code point
+    ; when it is not -- an NBSP or a ZWSP would otherwise be reported with
+    ; nothing to see.  r12 still points at it, and the span, like the other
+    ; per-character ones here, ends where it begins.
+    mov [rbp - LR_KIND], rax            ; the flags, across comp_msg_start
+    call comp_msg_start
+    mov [rbp - LR_FLAGS], rax           ; the message
+    mov rdi, rax
+    test dword [rbp - LR_KIND], UF_PRINTABLE
+    jz .ibc_nonprint
+    CSTRING rsi, "invalid character '"
+    call comp_msg_cstr
+    mov rdi, rax
+    mov esi, [rbp - LR_CP]
+    call comp_msg_utf8
+    mov rdi, rax
+    CSTRING rsi, "' ("
+    call comp_msg_cstr
+    mov rdi, rax
+    mov esi, [rbp - LR_CP]
+    call comp_msg_ucode
+    mov rdi, rax
+    CSTRING rsi, ")"
+    call comp_msg_cstr
+    jmp .ibc_raise
+.ibc_nonprint:
+    CSTRING rsi, "invalid non-printable character "
+    call comp_msg_cstr
+    mov rdi, rax
+    mov esi, [rbp - LR_CP]
+    call comp_msg_ucode
+.ibc_raise:
+    mov rdx, [rbp - LR_FLAGS]
+    mov r8, r12
+    sub r8, [r14 + Lexer.line_start]
+    mov ecx, [r14 + Lexer.lineno]
+    mov r9d, ecx
+    mov r10d, r8d
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    call comp_error_span
+    jmp .fail
 
 ;; --- numeric literals ------------------------------------------------------
 ; The extent is scanned here; the value is built later from the token text, so

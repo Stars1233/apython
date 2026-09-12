@@ -288,6 +288,128 @@ DEF_FUNC comp_msg_i64
     ret
 END_FUNC comp_msg_i64
 
+;; ============================================================================
+;; comp_msg_utf8(rdi = a position in the buffer, rsi = a code point)
+;;   -> rax = the NUL it wrote
+;;
+;; The character itself, for the messages that show it: CPython says
+;; `invalid character '#' (U+0023)` and the quotes want the real thing
+;; between them.  A surrogate or an out-of-range value writes nothing, which
+;; leaves the code point in the parentheses as the only report -- and is what
+;; the non-printable wording does on purpose anyway.
+;; ============================================================================
+global comp_msg_utf8
+DEF_FUNC_BARE comp_msg_utf8
+    mov rax, rdi
+    cmp esi, 0x110000
+    jae .cmu_done
+    mov ecx, esi
+    and ecx, ~0x7ff
+    cmp ecx, 0xd800
+    je .cmu_done                    ; a lone surrogate is not encodable
+    cmp esi, 0x80
+    jb .cmu_one
+    cmp esi, 0x800
+    jb .cmu_two
+    cmp esi, 0x10000
+    jb .cmu_three
+    mov ecx, esi
+    shr ecx, 18
+    or cl, 0xf0
+    mov [rax], cl
+    mov ecx, esi
+    shr ecx, 12
+    and cl, 0x3f
+    or cl, 0x80
+    mov [rax + 1], cl
+    mov ecx, esi
+    shr ecx, 6
+    and cl, 0x3f
+    or cl, 0x80
+    mov [rax + 2], cl
+    mov ecx, esi
+    and cl, 0x3f
+    or cl, 0x80
+    mov [rax + 3], cl
+    add rax, 4
+    jmp .cmu_done
+.cmu_three:
+    mov ecx, esi
+    shr ecx, 12
+    or cl, 0xe0
+    mov [rax], cl
+    mov ecx, esi
+    shr ecx, 6
+    and cl, 0x3f
+    or cl, 0x80
+    mov [rax + 1], cl
+    mov ecx, esi
+    and cl, 0x3f
+    or cl, 0x80
+    mov [rax + 2], cl
+    add rax, 3
+    jmp .cmu_done
+.cmu_two:
+    mov ecx, esi
+    shr ecx, 6
+    or cl, 0xc0
+    mov [rax], cl
+    mov ecx, esi
+    and cl, 0x3f
+    or cl, 0x80
+    mov [rax + 1], cl
+    add rax, 2
+    jmp .cmu_done
+.cmu_one:
+    mov [rax], sil
+    inc rax
+.cmu_done:
+    mov byte [rax], 0
+    ret
+END_FUNC comp_msg_utf8
+
+;; ============================================================================
+;; comp_msg_ucode(rdi = a position in the buffer, rsi = a code point)
+;;   -> rax = the NUL it wrote
+;;
+;; `U+00A0`: CPython's spelling, uppercase hex, at least four digits and more
+;; when the code point needs them.
+;; ============================================================================
+global comp_msg_ucode
+DEF_FUNC_BARE comp_msg_ucode
+    mov byte [rdi], 'U'
+    mov byte [rdi + 1], '+'
+    add rdi, 2
+    mov ecx, 20                     ; the top nibble of 0x10FFFF's six
+.cmc_skip:
+    cmp ecx, 12
+    jle .cmc_emit
+    mov eax, esi
+    shr eax, cl
+    and eax, 0x0f
+    jnz .cmc_emit
+    sub ecx, 4
+    jmp .cmc_skip
+.cmc_emit:
+    mov eax, esi
+    shr eax, cl
+    and eax, 0x0f
+    cmp eax, 10
+    jb .cmc_digit
+    add eax, 'A' - 10
+    jmp .cmc_store
+.cmc_digit:
+    add eax, '0'
+.cmc_store:
+    mov [rdi], al
+    inc rdi
+    sub ecx, 4
+    jns .cmc_emit
+    mov byte [rdi], 0
+    mov rax, rdi
+    ret
+END_FUNC comp_msg_ucode
+
 
 section .bss
 comp_msgbuf: resb 256

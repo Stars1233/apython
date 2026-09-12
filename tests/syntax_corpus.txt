@@ -148,3 +148,16 @@ lambda: await x\n
 def f():\n    return [i := 0 for i in range(3)]\n
 [[i := 0 for i in a] for a in b]
 [x for x in range(3) if any(y := 1 for y in [1])]
+  = 1
+x  = 1
+​ = 1
+x =  
+́ = 1
+☃ = 1
+x = €
+x = ´
+a b = 1
+½ = 1
+① = 1
+٠ = 1
+f'''{ }'''
