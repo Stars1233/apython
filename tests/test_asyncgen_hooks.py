@@ -99,3 +99,75 @@ drive(unused.aclose())
 
 sys.set_asyncgen_hooks(*saved)
 print(sys.get_asyncgen_hooks() == saved, "restored at the end")
+
+
+# --- the finalizer the generator keeps --------------------------------------
+#
+# firstiter fires once and the FINALIZER is snapshotted beside it, so a
+# generator collected after its loop has moved on is still closed by the loop
+# that started it.  That snapshot is a reference the generator owns, and it was
+# owned by nothing: never released when the generator was freed, so five
+# generators took the finalizer's refcount from 3 to 8, and never handed to the
+# collector, so a finalizer that referred back to its own generator -- which is
+# exactly what a bound method of an event loop holding the generator does --
+# was a cycle nothing could break.
+#
+# And it was never CALLED.  CPython's gen_finalize hands a suspended async
+# generator to the finalizer INSTEAD of closing it, because closing it means
+# running `await` outside a loop; the hook schedules an aclose on the loop that
+# owns it.
+import gc
+
+
+def noop_finalizer(agen):
+    pass
+
+
+sys.set_asyncgen_hooks(firstiter=lambda a: None, finalizer=noop_finalizer)
+
+
+async def one():
+    yield 1
+    yield 2
+
+
+def start_and_drop():
+    # Started, so the hooks fire, and then dropped while still suspended.
+    it = one().__aiter__()
+    try:
+        it.__anext__().send(None)
+    except StopIteration:
+        pass
+    del it
+
+
+before = sys.getrefcount(noop_finalizer)
+for _ in range(5):
+    start_and_drop()
+gc.collect()
+print(sys.getrefcount(noop_finalizer) - before, "extra references after five")
+
+# The generator hands the finalizer over to the collector, so a cycle through
+# it is collectable.
+finalized = []
+
+
+class Loop:
+    def __init__(self):
+        self.held = []
+
+    def finalizer(self, agen):
+        # What asyncio does: keep the generator so it can be closed later.
+        self.held.append(agen)
+        finalized.append(1)
+
+
+loop = Loop()
+sys.set_asyncgen_hooks(firstiter=lambda a: None, finalizer=loop.finalizer)
+start_and_drop()
+gc.collect()
+print(len(finalized), "the finalizer ran for a suspended generator")
+print(len(loop.held), "and it could keep the generator")
+
+sys.set_asyncgen_hooks(*saved)
+print(sys.get_asyncgen_hooks() == saved, "restored again")

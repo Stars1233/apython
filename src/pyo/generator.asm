@@ -68,6 +68,14 @@ DEF_FUNC gen_new
     ; gi_return_value = NULL (no return value yet)
     mov qword [r12 + PyGenObject.gi_return_value], 0
 
+    ; The two PEP 525 words, which only an ASYNC generator ever uses.  All
+    ; three constructors allocate at PyGenObject_size, so the words are there
+    ; for an ordinary generator too -- and gc_alloc does not zero, so leaving
+    ; them meant gen_traverse and gen_dealloc read allocator leftovers as an
+    ; owned pointer the moment they started consulting the field.
+    mov qword [r12 + PyGenObject.ag_hooks_done], 0
+    mov qword [r12 + PyGenObject.ag_finalizer], 0
+
     mov rdi, r12
     call gc_track
 
@@ -107,6 +115,8 @@ DEF_FUNC coro_new
 
     mov qword [r12 + PyGenObject.gi_name], 0
     mov qword [r12 + PyGenObject.gi_return_value], 0
+    mov qword [r12 + PyGenObject.ag_hooks_done], 0   ; see gen_new
+    mov qword [r12 + PyGenObject.ag_finalizer], 0
 
     mov rdi, r12
     call gc_track
@@ -1238,8 +1248,38 @@ DEF_FUNC gen_dealloc, GD_FRAME
 .gd_no_pending:
     mov qword [rel current_exception], 0
 
+    ; An async generator with a finalizer is HANDED OVER rather than closed.
+    ; Closing it here would run its `await`s with no loop to run them on;
+    ; the hook exists so that the loop which started the generator schedules
+    ; an aclose of its own, and CPython's gen_finalize makes the same choice.
+    ; Only an async generator ever has this field set.
+    cmp qword [rbx + PyGenObject.ag_finalizer], 0
+    jne .gd_hand_over
+
     mov rdi, rbx
     call gen_dealloc_close
+    jmp .gd_closed
+
+.gd_hand_over:
+    sub rsp, 16
+    mov [rsp], rbx
+    mov rdi, [rbx + PyGenObject.ag_finalizer]
+    mov rsi, rsp
+    mov edx, 1
+    extern obj_call_n
+    call obj_call_n
+    add rsp, 16
+    test rax, rax
+    jz .gd_handed              ; it raised; reported below, as a close would be
+    DECREF_V rax, rcx
+.gd_handed:
+    ; Once.  The hook owns whatever it kept, and a second pass through this
+    ; dealloc -- after an aclose the hook scheduled, say -- must close rather
+    ; than hand the same generator over again.
+    mov rdi, [rbx + PyGenObject.ag_finalizer]
+    mov qword [rbx + PyGenObject.ag_finalizer], 0
+    call obj_decref
+.gd_closed:
 
     ; Anything the cleanup raised is reported and dropped, as an exception
     ; from __del__ is: there is no caller left to hand it to.
@@ -1260,6 +1300,7 @@ DEF_FUNC gen_dealloc, GD_FRAME
     ; Hand the reference taken above back to the global.
     mov [rel current_exception], r12
     dec qword [rbx + PyObject.ob_refcnt]
+    jnz .gd_resurrected         ; someone kept it: free nothing
 
 .gd_just_free:
     ; Free the frame if the close did not.
@@ -1279,10 +1320,34 @@ DEF_FUNC gen_dealloc, GD_FRAME
     mov rdi, [rbx + PyGenObject.gi_code]
     call obj_decref
 
+    ; The snapshotted finalizer, if it was never handed over -- a generator
+    ; that ran to the end keeps one and is freed without ever consulting it.
+    ; Owned since firstiter, and released by nobody until now: five started and
+    ; dropped generators took their finalizer's refcount from 3 to 8.
+    mov rdi, [rbx + PyGenObject.ag_finalizer]
+    test rdi, rdi
+    jz .gd_no_final
+    mov qword [rbx + PyGenObject.ag_finalizer], 0
+    call obj_decref
+.gd_no_final:
+
     ; Free self (GC-aware)
     mov rdi, rbx
     call gc_dealloc
 
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.gd_resurrected:
+    ; The cleanup, or the finalizer hook, took a reference to the generator and
+    ; still holds it.  Nothing here may be freed -- and it goes back into the
+    ; collector's lists, because obj_dealloc untracked it on the way in and a
+    ; cycle through a live object the collector cannot see is a leak.
+    mov rdi, rbx
+    extern gc_track
+    call gc_track
     pop r12
     pop rbx
     leave
@@ -2824,6 +2889,13 @@ DEF_FUNC gen_traverse, 8        ; rsp 16-aligned at the call the macros below ex
 
     VISIT_V rdi, rsi
 
+    ; The finalizer an async generator snapshotted at firstiter, which the
+    ; generator OWNS.  An event loop's finalizer is a bound method of the loop,
+    ; and the loop holds the generators started under it -- so this edge closes
+    ; a cycle, and without it nothing could break one.
+    mov rdi, [rbx + PyGenObject.ag_finalizer]
+    VISIT_PTR rdi
+
     ; Traverse frame localsplus if frame exists
     mov r12, [rbx + PyGenObject.gi_frame]
     test r12, r12
@@ -2887,6 +2959,15 @@ END_FUNC gen_traverse
 DEF_FUNC gen_clear, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
+
+    ; The snapshotted finalizer, which gen_traverse hands over: whatever this
+    ; breaks the cycle through has to be released here too.
+    mov rdi, [rbx + PyGenObject.ag_finalizer]
+    mov qword [rbx + PyGenObject.ag_finalizer], 0
+    test rdi, rdi
+    jz .gc_no_final
+    call obj_decref
+.gc_no_final:
 
     ; Clear return value
     mov rdi, [rbx + PyGenObject.gi_return_value]
