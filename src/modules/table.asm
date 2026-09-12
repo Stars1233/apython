@@ -38,6 +38,7 @@ extern marshal_module_init
 extern signal_module_create
 extern zlib_module_create
 extern hashlib_module_create
+extern pyexpat_module_create
 
 section .rodata
 
@@ -59,6 +60,7 @@ bm_n_marshal:  db "marshal", 0
 bm_n_signal:   db "_signal", 0
 bm_n_zlib:     db "_zlibcore", 0
 bm_n_hashlib:  db "_hashlibcore", 0
+bm_n_pyexpat:  db "_pyexpatcore", 0
 
 align 8
 global builtin_module_table
@@ -71,6 +73,7 @@ builtin_module_table:
     dq bm_n_asyncio,  asyncio_module_create
     dq bm_n_hashlib,  hashlib_module_create
     dq bm_n_io,       io_module_create
+    dq bm_n_pyexpat,  pyexpat_module_create
     dq bm_n_socket,   socket_module_create
     dq bm_n_signal,   signal_module_create
     dq bm_n_sre,      sre_module_create

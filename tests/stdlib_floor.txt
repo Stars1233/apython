@@ -100,6 +100,7 @@ ok pickletools
 ok pipes
 ok pkgutil
 ok platform
+ok plistlib
 ok poplib
 ok posixpath
 ok pprint
