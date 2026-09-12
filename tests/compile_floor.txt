@@ -334,6 +334,7 @@ test_import_from
 test_import_kwargs
 test_import_module
 test_import_none_blocked
+test_import_not_a_package
 test_import_star_all
 test_import_submodule_binding
 test_import_sys
