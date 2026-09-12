@@ -347,7 +347,8 @@ f-strings, async, comprehensions, PEP 695 type parameters.
 | `symtab.asm` | scopes, local/cell/free classification, name mangling |
 | `codegen.asm` | AST kind → emitter jump table; `_stmt`/`_func`/`_try`/`_comp`/`_match` for the rest.  `_try` also holds `except*`, `with` and `await`: they are one unwinder |
 | `assemble.asm` | EXTENDED_ARG fixpoint, stack depth, exception table, line table |
-| `compile.asm` | pipeline driver and lifetime; the `code_from_path` and `compile()`/`exec()`/`eval()` entry points; and `comp_error`, the record side of the error protocol |
+| `compile.asm` | pipeline driver and lifetime, and the `code_from_path` and `compile()`/`exec()`/`eval()` entry points |
+| `comperr.asm` | how a compile REPORTS rather than what it compiles: `comp_error` and its siblings (the compiler cannot raise, so an error is recorded and made pending after every buffer is freed), the message builder, the location a SyntaxError carries, and the deferred warnings.  Split off when `compile.asm` reached the 100k cap |
 | `unicodename.asm` | **generated** -- the names `\N{...}` resolves, front-coded: `db shared, cpdelta, "suffix", 0` per entry, decoded as the scan walks |
 | `gen_unicodename.py` | regenerates `unicodename.asm` from `unicodedata` |
 | `unicodecase.asm` | **generated** -- the case mappings and the character flags |

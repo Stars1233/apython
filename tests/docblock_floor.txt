@@ -13,7 +13,8 @@ src/compiler/codegen_func.asm          9
 src/compiler/codegen_match.asm         5
 src/compiler/codegen_stmt.asm          20
 src/compiler/codegen_try.asm           8
-src/compiler/compile.asm               7
+src/compiler/comperr.asm               1
+src/compiler/compile.asm               6
 src/compiler/dis.asm                   5
 src/compiler/fstring.asm               1
 src/compiler/parse.asm                 1
