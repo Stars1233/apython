@@ -14,6 +14,41 @@ reasoning that chose them and what changing one would cost.
 
 ## Correctness
 
+- **An internally raised `AttributeError` has no `.name` and no `.obj`.**
+  CPython sets both on every attribute error it raises, and its "did you mean"
+  machinery in `traceback` reads them; ours are absent entirely, so
+  `getattr(e, 'name', None)` answers None where CPython answers the attribute.
+  The keyword form -- `AttributeError("m", name=n, obj=o)` -- does work, and
+  the family's refcounting is now correct, so what is missing is filling the
+  two in at the raise sites.  `exc_from_cstr` is the wrong place for it: it is
+  on the path of every internally raised exception, StopIteration from
+  `call_iternext` included, and a `type_is_subtype` plus two `dict_set`s there
+  would be paid by every `for` loop that ends.  The import machinery's own
+  errors set theirs individually for exactly that reason, and attribute errors
+  want the same treatment -- there are far more sites.
+
+- **`cannot import name` never reports a circular import.**  CPython has a
+  fourth wording for it, chosen by `__spec__._initializing`:
+  `cannot import name 'X' from partially initialized module 'm' (most likely
+  due to a circular import) (PATH)`.  Our modules carry `__spec__ = None` --
+  nothing builds a ModuleSpec, because the import system is assembly rather
+  than `importlib._bootstrap` -- so the condition cannot be asked.  Detecting
+  it needs a during-body flag on the module object, which is a real change to
+  module construction rather than a message fix.  The other three wordings,
+  and `.name`/`.path`, match.
+
+- **A relative import with no `__name__` in globals raises the wrong type.**
+  `exec("from ... import x", {})` answers `ImportError: attempted relative
+  import with no known parent package`; CPython answers
+  `KeyError: "'__name__' not in globals"`, which falls out of
+  `_calc___package__` doing `globals['__name__']` rather than being a message
+  anyone chose.  CPython's own test suite does not test it, and ours is the
+  more informative of the two, so this is recorded rather than matched.  Every
+  other import-error shape measured -- missing module, missing submodule,
+  not-a-package at any depth, a blocked None, and all three reachable
+  `cannot import name` wordings -- now matches CPython exactly, attributes
+  included.
+
 - **Calls made with a misaligned stack, everywhere except the paths into
   GMP.**  The SysV ABI wants `rsp % 16 == 0` at a `call`, and glibc's float
   paths and GMP both use aligned SSE.  Every call into GMP is now made
