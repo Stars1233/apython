@@ -983,7 +983,7 @@ bfr_close:         db ">", 0
 section .text
 
 ;; ============================================================================
-;; print_sink_resolve() -> rax = the object sys.stdout names, or 0
+;; print_sink_resolve() -> rax = the object sys.stdout names, OWNED, or 0
 ;;
 ;; Read per call, not cached: `sys.stdout = buf` is how doctest, pdb,
 ;; unittest -b and contextlib.redirect_stdout all capture output, and the
@@ -1014,24 +1014,28 @@ DEF_FUNC_LOCAL print_sink_resolve, PSR_FRAME
     mov rax, [rbp - PSR_SINK]
     test rax, rax
     jz .psr_none
-    ; obj_getattr_opt hands back a VALUE, and a reference; print holds the sink
-    ; only for the duration of the call, and sys.stdout is reachable from sys
-    ; the whole time, so give the reference straight back and keep a borrowed
-    ; one.  DECREF_V and not obj_decref: obj_decref writes through what it is
-    ; handed, so `sys.stdout = 5` decremented address 5 and dumped core.
-    mov rdi, rax
-    push rax
-    DECREF_V rdi, rcx
-    pop rax
+    ; obj_getattr_opt hands back a VALUE, and a reference, and the caller KEEPS
+    ; it.  Giving it back and holding a borrowed one was wrong: "sys.stdout is
+    ; reachable from sys the whole time" stops being true the moment user code
+    ; reassigns it, and print resolves the sink BEFORE converting its
+    ; arguments -- so a __str__ that does `sys.stdout = other` dropped the last
+    ; reference to the sink and print then wrote through freed memory.
+    ; CPython is safe here because PyFile_WriteObject fetches the bound
+    ; `write` before it calls PyObject_Str.
+    ;
     ; Only None means "no stream".  Anything ELSE, immediate or not, goes
     ; through to the write attempt, which is what names the type: CPython
     ; answers `sys.stdout = 5; print(x)` with "'int' object has no attribute
     ; 'write'", where producing nothing silently loses the output.
     lea rcx, [rel none_singleton]
     cmp rax, rcx
-    je .psr_none
+    je .psr_is_none
     leave
     ret
+.psr_is_none:
+    ; None is not a stream, and the reference is ours to drop.
+    mov rdi, rax
+    DECREF_V rdi, rcx
 .psr_none:
     xor eax, eax
     leave
@@ -1244,6 +1248,18 @@ DEF_FUNC_LOCAL print_sink_flush, PSF_FRAME
     ret
 END_FUNC print_sink_flush
 
+; PRINT_DROP_SINK -- release the sink when print resolved it itself.  Used at
+; each of builtin_print's three exits; clobbers rdi and rcx, which none of
+; them has anything live in.
+%macro PRINT_DROP_SINK 0
+    cmp qword [rbp - PR_OWNSINK], 0
+    je %%done
+    mov qword [rbp - PR_OWNSINK], 0
+    mov rdi, [rbp - PR_SINK]
+    DECREF_V rdi, rcx
+%%done:
+%endmacro
+
 ;; ============================================================================
 ;; builtin_print(PyObject **args, int64_t nargs) -> PyObject*
 ;; Print each arg separated by spaces, followed by newline
@@ -1256,6 +1272,9 @@ PR_END       equ 24    ; end string ptr (0 = default "\n")
 PR_END_TAG   equ 32    ; end tag
 PR_SINK      equ 40    ; where the text goes: an object, or 0 for "sys.stdout"
 PR_FLUSH     equ 48    ; the flush= keyword, once it means something
+PR_OWNSINK   equ 56    ; 1 when PR_SINK is a reference of ours to release:
+                       ; print_sink_resolve hands one over, and `file=` does
+                       ; not -- that one is borrowed from the argument array
 PR_FRAME     equ 4168            ; + 5 pushes = 4208, 16-aligned
 
 extern kw_names_pending
@@ -1278,6 +1297,7 @@ DEF_FUNC builtin_print, PR_FRAME
     mov qword [rbp - PR_SEP], 0       ; NULL = default " "
     mov qword [rbp - PR_END], 0       ; NULL = default "\n"
     mov qword [rbp - PR_SINK], 0      ; 0 = "whatever sys.stdout names"
+    mov qword [rbp - PR_OWNSINK], 0
     mov qword [rbp - PR_FLUSH], 0
 
     ; Check for keyword arguments
@@ -1412,6 +1432,7 @@ DEF_FUNC builtin_print, PR_FRAME
     jne .print_have_sink
     call print_sink_resolve
     mov [rbp - PR_SINK], rax
+    mov qword [rbp - PR_OWNSINK], 1
 .print_have_sink:
 
 align 16
@@ -1565,6 +1586,7 @@ align 16
     ; write() raised, or the sink has none.  Whatever was already handed over
     ; stays handed over, as CPython's per-argument writes do, and the
     ; exception is the result.
+    PRINT_DROP_SINK
     xor eax, eax
     xor edx, edx
     pop r15
@@ -1590,6 +1612,7 @@ align 16
     mov rdx, r15
     call print_sink_write
 .psf_return:
+    PRINT_DROP_SINK
     xor eax, eax
     xor edx, edx
     pop r15
@@ -1677,6 +1700,7 @@ align 16
     test eax, eax
     jnz .print_sink_failed
 .print_no_flush:
+    PRINT_DROP_SINK
 
     ; Return None (with INCREF)
     lea rax, [rel none_singleton]
