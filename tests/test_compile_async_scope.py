@@ -151,3 +151,57 @@ asyncio.run(main())
 
 # `await (await x)` is legal; `await await x` is not.
 print(compile("async def f():\n    await (await x)\n", "<t>", "exec").co_name)
+
+
+# PEP 530 again, and the half the first cut of the scope check got wrong in
+# the OTHER direction: an enclosing GENERATOR EXPRESSION is as good as an
+# async def, because a genexp with an async comprehension inside it is itself
+# an async generator the caller drives.  The climb out of the comprehension
+# scopes has to STOP at one.
+def outer_genexp(y):
+    return ([i async for i in x] for x in y)
+
+
+def outer_genexp_set(y):
+    return ({i async for i in x} for x in y)
+
+
+def outer_genexp_dict(y):
+    return ({i: i async for i in x} for x in y)
+
+
+def outer_genexp_await(y):
+    return ([await i for i in x] for x in y)
+
+
+class HoldsGenexp:
+    maker = staticmethod(lambda y: ([i async for i in x] for x in y))
+
+
+def nested_genexps(w):
+    return (([i async for i in x] for x in y) for y in w)
+
+
+# What they ACCEPT is what this is about, and each of them builds SOMETHING
+# iterable.  What KIND is not yet right: a genexp containing an async
+# comprehension is an async generator in CPython and a plain generator when
+# our own compiler builds it, because the nested comprehension marks its own
+# scope a coroutine and not the genexp around it.  bugs.md records that, and
+# it is why the type names are not printed here -- they would differ between a
+# CPython .pyc and our compiler over the same source.
+for maker in (outer_genexp, outer_genexp_set, outer_genexp_dict,
+              outer_genexp_await, nested_genexps, HoldsGenexp.maker):
+    g = maker([])
+    print(maker.__name__ if hasattr(maker, "__name__") else "lambda",
+          hasattr(g, "__next__") or hasattr(g, "__anext__"))
+
+# A LIST comprehension around one is still refused; that pair is in
+# tests/syntax_corpus.txt with all five fields compared.
+for src in ("[[i async for i in x] for x in y]",
+            "{[i async for i in x] for x in y}",
+            "def f():\n    return [[i async for i in x] for x in y]\n"):
+    try:
+        compile(src, "<t>", "exec")
+        print("ACCEPTED", repr(src))
+    except SyntaxError as e:
+        print("rejected", e.lineno, e.offset, e.end_lineno, e.end_offset)

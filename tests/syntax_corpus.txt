@@ -161,3 +161,10 @@ a b = 1
 ① = 1
 ٠ = 1
 f'''{ }'''
+([i async for i in x] for x in y)
+def f():\n    return ([i async for i in x] for x in y)\n
+[[i async for i in x] for x in y]
+{[i async for i in x] for x in y}
+def f():\n    return [[i async for i in x] for x in y]\n
+[([i async for i in x] for x in y)]
+class C:\n    g = ([i async for i in x] for x in y)\n

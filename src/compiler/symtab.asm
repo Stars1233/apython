@@ -3223,6 +3223,8 @@ SEC_N     equ 48
 SEC_CL    equ 56
 SEC_P     equ 64          ; the scope being climbed, for the async check
 SEC_ITBL  equ 72          ; the enclosing in_comp_iterable, across this walk
+SEC_OUT   equ 80          ; the OUTERMOST comprehension of the chain, which is
+                          ; what CPython blames for an async one
 SEC_FRAME equ 88          ; + 3 pushes = 112, and rsp 16-aligned at every call
 DEF_FUNC sym_enter_comp, SEC_FRAME
     push rbx
@@ -3419,6 +3421,7 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     call sym_at
     test dword [rax + Scope.flags], SCF_COROUTINE
     jz .comp_ok
+    mov [rbp - SEC_OUT], r13            ; blamed unless a comprehension encloses it
     mov ecx, [rax + Scope.parent]
 .comp_climb:
     ; Out through any enclosing comprehensions to the nearest function.
@@ -3431,6 +3434,26 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     mov ecx, [rax + Scope.kind]
     cmp ecx, SCOPE_COMP
     jne .comp_have
+    ; An enclosing GENERATOR EXPRESSION is as good as an async def, and the
+    ; climb stops there.  A genexp with an async comprehension inside it is
+    ; itself an async generator the caller drives, so
+    ; `([i async for i in x] for x in y)` is legal anywhere -- including a
+    ; plain def and a class body -- while the same thing inside a LIST
+    ; comprehension is not.  Climbing past the genexp refused all of it.
+    mov ecx, [rax + Scope.node]
+    mov rdi, rbx
+    mov esi, ecx
+    call ast_at
+    cmp byte [rax + AstNode.kind], AST_GENEXP
+    je .comp_ok
+    ; Not a genexp, so keep climbing -- and remember it: CPython blames the
+    ; OUTERMOST comprehension of the chain, so `[[i async for i in x] for x
+    ; in y]` is reported at the outer one and not at the inner.
+    mov rdi, rbx
+    mov rsi, [rbp - SEC_P]
+    call sym_at
+    mov ecx, [rax + Scope.node]
+    mov [rbp - SEC_OUT], rcx
     mov ecx, [rax + Scope.parent]
     jmp .comp_climb
 .comp_have:
@@ -3446,7 +3469,7 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     jmp .ret
 .comp_bad:
     mov rdi, rbx
-    mov esi, r13d
+    mov esi, [rbp - SEC_OUT]
     CSTRING rdx, "asynchronous comprehension outside of an asynchronous function"
     call comp_error_node
     xor eax, eax
