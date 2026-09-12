@@ -2308,6 +2308,49 @@ DEF_FUNC_LOCAL exc_store_named, ESN_FRAME
     ret
 END_FUNC exc_store_named
 
+;; ============================================================================
+;; exc_raise_import(rdi = the type, rsi = message C string,
+;;                  rdx = the `name` Value or 0, rcx = the `path` Value or 0)
+;;     -- does not return
+;;
+;; The import machinery's own ImportErrors, with the two named attributes
+;; CPython's carry.  exc_from_cstr cannot do this for the family in general:
+;; it is on the path of every internally raised exception, StopIteration from
+;; call_iternext included, and a type_is_subtype plus two dict_sets there
+;; would be paid by every `for` loop that ends.  So the import sites ask for
+;; it and nothing else does.
+;;
+;; Both values are BORROWED; exc_store_named INCREFs what it keeps and
+;; substitutes None for a 0.
+;; ============================================================================
+ERI_NAME  equ 8
+ERI_PATH  equ 16
+ERI_FRAME equ 32                ; + 0 pushes = 32, 16-aligned
+DEF_FUNC exc_raise_import, ERI_FRAME
+    mov [rbp - ERI_NAME], rdx
+    mov [rbp - ERI_PATH], rcx
+    call exc_from_cstr
+    test rax, rax
+    jz .eri_oom
+    mov rdi, rax
+    push rax
+    sub rsp, 8
+    mov esi, 2                  ; the ImportError family: name and path
+    mov rdx, [rbp - ERI_NAME]
+    mov rcx, [rbp - ERI_PATH]
+    call exc_store_named
+    add rsp, 8
+    pop rdi
+    call raise_exception_obj
+    ud2
+.eri_oom:
+    ; No memory for the exception itself; the unwinder still has to run, and
+    ; exc_install handles a 0 by leaving whatever is pending in place.
+    xor edi, edi
+    call raise_exception_obj
+    ud2
+END_FUNC exc_raise_import
+
 
 
 
