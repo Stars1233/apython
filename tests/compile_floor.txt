@@ -629,6 +629,7 @@ test_sum_int_fast
 test_sum_protocol
 test_super_bad_object
 test_super_descriptors
+test_super_immediate
 test_super_object
 test_syntax_error_args
 test_syntax_error_location
