@@ -24,6 +24,7 @@ extern buf_reserve
 extern comp_msg_start
 extern comp_msg_utf8
 extern comp_msg_ucode
+extern comp_msg_hex2
 extern uflags_of
 extern comp_msg_cstr
 extern comp_msg_i64
@@ -339,13 +340,26 @@ ASM_INIT
 
 ;; ============================================================================
 ;; lex_cp_at(rdi = a source pointer, rsi = one past the last source byte)
-;;   -> eax = the code point there, edx = how many bytes it took
+;;   -> eax = the code point there, edx = how many bytes it took;
+;;      edx = 0 with eax = the offending BYTE when the sequence is not valid
+;;      UTF-8
 ;;
 ;; A UTF-8 decoder over the raw source, for the one question cc_table cannot
 ;; answer: whether a non-ASCII character may start or continue an identifier.
-;; A truncated or malformed sequence answers the lead byte and a length of 1,
-;; so the caller's scan always advances and the byte gets reported rather than
-;; skipped.
+;;
+;; It VALIDATES, and that is not a nicety.  The first cut checked the length
+;; and nothing else, and returned an unrecognised lead byte as its own code
+;; point -- several of which (0xAA, 0xB5, 0xBA, 0xF8..0xFF) are XID_Start.
+;; So `\xff = 1` compiled, and bound a name whose one code point was U+1C0000:
+;; outside Unicode, and a str whose code-point count did not match its bytes,
+;; which str_repr then wrote past.  Worse in the quiet direction: a Latin-1
+;; source silently compiled to a DIFFERENT PROGRAM -- in `x = caf\xe9\ny = 2`
+;; the 0xE9 claimed three bytes, swallowing the newline and the `y`, and two
+;; statements became one.
+;;
+;; Refused: a lead byte that is not one (0x80..0xBF, 0xC0, 0xC1, 0xF5..0xFF),
+;; a truncated sequence, a byte in a continuation slot that is not one, an
+;; overlong encoding, a surrogate, and anything above U+10FFFF.
 ;; ============================================================================
 DEF_FUNC_BARE lex_cp_at
     movzx eax, byte [rdi]
@@ -363,13 +377,19 @@ DEF_FUNC_BARE lex_cp_at
     mov ecx, eax
     and ecx, 0xe0
     cmp ecx, 0xc0
-    jne .lca_done                   ; a stray continuation byte: itself
+    jne .lca_bad                    ; a continuation byte, or 0xF8 and up
+    cmp al, 0xc2
+    jb .lca_bad                     ; 0xC0/0xC1: overlong by construction
     lea rcx, [rdi + 2]
     cmp rcx, rsi
-    ja .lca_done                    ; truncated
+    ja .lca_bad                     ; truncated
+    movzx ecx, byte [rdi + 1]
+    mov r8d, ecx
+    and r8d, 0xc0
+    cmp r8d, 0x80
+    jne .lca_bad
     and eax, 0x1f
     shl eax, 6
-    movzx ecx, byte [rdi + 1]
     and ecx, 0x3f
     or eax, ecx
     mov edx, 2
@@ -377,36 +397,72 @@ DEF_FUNC_BARE lex_cp_at
 .lca_three:
     lea rcx, [rdi + 3]
     cmp rcx, rsi
-    ja .lca_done
+    ja .lca_bad
+    movzx ecx, byte [rdi + 1]
+    mov r8d, ecx
+    and r8d, 0xc0
+    cmp r8d, 0x80
+    jne .lca_bad
+    movzx r9d, byte [rdi + 2]
+    mov r8d, r9d
+    and r8d, 0xc0
+    cmp r8d, 0x80
+    jne .lca_bad
     and eax, 0x0f
     shl eax, 12
-    movzx ecx, byte [rdi + 1]
     and ecx, 0x3f
     shl ecx, 6
     or eax, ecx
-    movzx ecx, byte [rdi + 2]
-    and ecx, 0x3f
-    or eax, ecx
+    and r9d, 0x3f
+    or eax, r9d
+    cmp eax, 0x800
+    jb .lca_bad                     ; overlong
+    mov ecx, eax
+    and ecx, ~0x7ff
+    cmp ecx, 0xd800
+    je .lca_bad                     ; a surrogate is not a character
     mov edx, 3
     ret
 .lca_four:
+    cmp al, 0xf5
+    jae .lca_bad                    ; past U+10FFFF by the lead byte alone
     lea rcx, [rdi + 4]
     cmp rcx, rsi
-    ja .lca_done
+    ja .lca_bad
+    movzx ecx, byte [rdi + 1]
+    mov r8d, ecx
+    and r8d, 0xc0
+    cmp r8d, 0x80
+    jne .lca_bad
+    movzx r9d, byte [rdi + 2]
+    mov r8d, r9d
+    and r8d, 0xc0
+    cmp r8d, 0x80
+    jne .lca_bad
+    movzx r10d, byte [rdi + 3]
+    mov r8d, r10d
+    and r8d, 0xc0
+    cmp r8d, 0x80
+    jne .lca_bad
     and eax, 0x07
     shl eax, 18
-    movzx ecx, byte [rdi + 1]
     and ecx, 0x3f
     shl ecx, 12
     or eax, ecx
-    movzx ecx, byte [rdi + 2]
-    and ecx, 0x3f
-    shl ecx, 6
-    or eax, ecx
-    movzx ecx, byte [rdi + 3]
-    and ecx, 0x3f
-    or eax, ecx
+    and r9d, 0x3f
+    shl r9d, 6
+    or eax, r9d
+    and r10d, 0x3f
+    or eax, r10d
+    cmp eax, 0x10000
+    jb .lca_bad                     ; overlong
+    cmp eax, 0x110000
+    jae .lca_bad
     mov edx, 4
+    ret
+.lca_bad:
+    movzx eax, byte [rdi]           ; the byte itself, for the message
+    xor edx, edx
 .lca_done:
     ret
 END_FUNC lex_cp_at
@@ -931,6 +987,8 @@ DEF_FUNC lex_run, LR_FRAME
     mov rdi, r12
     mov rsi, r13
     call lex_cp_at
+    test edx, edx
+    jz .ident_bad_utf8
     shl rdx, 32
     or rax, rdx
     mov [rbp - LR_CP], rax
@@ -960,6 +1018,8 @@ DEF_FUNC lex_run, LR_FRAME
     mov rdi, r12
     mov rsi, r13
     call lex_cp_at
+    test edx, edx
+    jz .ident_bad_utf8
     shl rdx, 32
     or rax, rdx
     mov [rbp - LR_CP], rax
@@ -1023,6 +1083,24 @@ DEF_FUNC lex_run, LR_FRAME
     mov r8, [rbp - LR_FLAGS]
     call lex_emit
     jmp .scan
+
+.ident_bad_utf8:
+    ; Not valid UTF-8 at all: eax is the offending byte.  CPython refuses the
+    ; whole file for this, as a codec error with a position of its own --
+    ; "(unicode error) 'utf-8' codec can't decode byte 0xe9 in position 3" --
+    ; and bugs.md records the wording difference.  What matters is that the
+    ; byte is refused rather than becoming part of a name: a Latin-1 source
+    ; used to compile to a different program.
+    mov [rbp - LR_CP], rax
+    call comp_msg_start
+    mov [rbp - LR_FLAGS], rax
+    mov rdi, rax
+    CSTRING rsi, "invalid non-UTF-8 byte 0x"
+    call comp_msg_cstr
+    mov rdi, rax
+    mov esi, [rbp - LR_CP]
+    call comp_msg_hex2
+    jmp .ibc_raise
 
 .ident_bad_char:
     ; eax = the character's flags, [rbp - LR_CP] its code point.  CPython

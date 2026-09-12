@@ -410,6 +410,37 @@ DEF_FUNC_BARE comp_msg_ucode
     ret
 END_FUNC comp_msg_ucode
 
+;; ============================================================================
+;; comp_msg_hex2(rdi = a position in the buffer, rsi = a byte)
+;;   -> rax = the NUL it wrote
+;;
+;; Two lowercase hex digits, for a message that names a raw byte rather than a
+;; character: `invalid non-UTF-8 byte 0xe9`.  comp_msg_ucode is the other
+;; spelling, uppercase and at least four digits, for a code point.
+;; ============================================================================
+global comp_msg_hex2
+DEF_FUNC_BARE comp_msg_hex2
+    mov ecx, 4
+.cmh_emit:
+    mov eax, esi
+    shr eax, cl
+    and eax, 0x0f
+    cmp eax, 10
+    jb .cmh_digit
+    add eax, 'a' - 10
+    jmp .cmh_store
+.cmh_digit:
+    add eax, '0'
+.cmh_store:
+    mov [rdi], al
+    inc rdi
+    sub ecx, 4
+    jns .cmh_emit
+    mov byte [rdi], 0
+    mov rax, rdi
+    ret
+END_FUNC comp_msg_hex2
+
 
 section .bss
 comp_msgbuf: resb 256
