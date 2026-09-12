@@ -201,6 +201,14 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   is written against.  Neither needs to be assembly: one thread means the
   import lock is a counter, there are no frozen or extension modules, and
   `source_hash` is CPython's siphash13 in Python
+- `lib/_md5.py`, `lib/_sha1.py`, `lib/_sha2.py`, `lib/_sha3.py` and
+  `lib/_blake2.py` — the digests in Python, which is what `hashlib` reaches
+  for when there is no `_hashlib` and what `_blake2` is used for even when
+  there is.  `_sha3` is one sponge over Keccak-f[1600]; `_blake2` carries the
+  whole parameter block, and its constructors have to be CLASSES because
+  callers read `MAX_DIGEST_SIZE` and three more limits off the constructor.
+  All five carry an `_Immutable` metaclass, because CPython's are C types and
+  `test_hashlib` asserts the type cannot be written to
 - `lib/_typing.py` — the objects PEP 695's syntax builds: TypeVar, ParamSpec,
   TypeVarTuple, TypeAliasType and Generic.  Reached from the
   `CALL_INTRINSIC_1`/`_2` handlers in `src/opcodes/match.asm`, the same split
@@ -259,6 +267,17 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   shim over `-lz`, on the precedent `-lgmp` set; `lib/zlib.py` is the module
   surface -- the Compress and Decompress objects, the constants, `zlib.error`
   and every default -- so each core call takes fixed positional arguments
+- `src/modules/hashlib.asm` — the `_hashlibcore` module: OpenSSL's
+  EVP_MD_CTX and HMAC_CTX, PBKDF2, scrypt and a constant-time compare, behind
+  a handle table.  A shim over `-lcrypto`, the same split again:
+  `lib/_hashlib.py` is the HASH, HASHXOF and HMAC objects and the
+  `openssl_<name>` constructors CPython's `hashlib.py` and `hmac.py` are
+  written against.  What it buys over `lib/_sha2.py` and its siblings is
+  `pbkdf2_hmac` and `scrypt`, which have no honest Python form at the
+  iteration counts anyone uses, and the speed to hash gigabytes.
+  `lib/hashlib.py` decides the routing: OpenSSL for twelve of the fourteen,
+  and `lib/_blake2.py` for blake2b and blake2s always, because OpenSSL's
+  BLAKE2 supports neither keying nor the tree parameters
 - `src/modules/socket.asm` — the `_socketcore` module: the socket syscalls and the
   constant table, taking and returning sockaddrs as opaque bytes.  The socket
   type, the address packing and `select` are `lib/_socket.py` and
