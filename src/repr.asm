@@ -120,10 +120,32 @@ extern exc_TypeError_type
 extern current_exception
     RAISE exc_RecursionError_type, "maximum recursion depth exceeded while getting the repr of an object"
 
-; Pop from repr_stack
+; Pop from repr_stack, with a floor at zero.
+;
+; eval_exception_unwind ZEROES repr_depth, because a raise from inside a
+; nested __repr__ skips the pop and leaves the entries stale.  But an unwind
+; can land INSIDE an outer container repr rather than outside it -- a Python
+; __repr__ that calls another repr, and catches what that one raises -- and
+; the outer repr then still pops on its way out.  Unclamped the counter went
+; NEGATIVE, and repr_check_active's `dec rcx` loop walked backwards out of the
+; array from there: thirteen lines reproduce it, and CPython's test_wsgiref
+; segfaulted in tuple_repr.
+;
+; This is the shape gc_collecting has, recorded in eval.asm: the unwinder
+; cannot tell "escaped the C routine" from "landed inside it" by the fact of
+; the raise alone.  Here the floor is enough -- the entries the counter
+; indexes were discarded by that same reset, so nothing is lost by counting
+; the remainder of an abandoned repr as zero.
+;
+; It touches no register: callers pop with the finished repr in rax, which the
+; first cut of this clamp clobbered -- and a print that answered nothing at all
+; is what that looked like.
 global repr_pop
 repr_pop:
+    cmp qword [rel repr_depth], 0
+    je .rp_floor
     dec qword [rel repr_depth]
+.rp_floor:
     ret
 
 ; The growable buffer every container repr builds into, as three frame slots.
