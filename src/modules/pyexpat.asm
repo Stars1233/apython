@@ -70,10 +70,36 @@ extern XML_SetStartElementHandler
 extern XML_SetEndElementHandler
 extern XML_SetCharacterDataHandler
 extern XML_SetReturnNSTriplet
+extern XML_SetProcessingInstructionHandler
+extern XML_SetUnparsedEntityDeclHandler
+extern XML_SetNotationDeclHandler
+extern XML_SetStartNamespaceDeclHandler
+extern XML_SetEndNamespaceDeclHandler
+extern XML_SetCommentHandler
+extern XML_SetStartCdataSectionHandler
+extern XML_SetEndCdataSectionHandler
+extern XML_SetStartDoctypeDeclHandler
+extern XML_SetEndDoctypeDeclHandler
+extern XML_SetXmlDeclHandler
+extern XML_SetAttlistDeclHandler
+extern XML_SetSkippedEntityHandler
 
 extern px_cb_start_element
 extern px_cb_end_element
 extern px_cb_chardata
+extern px_cb_processing_instr
+extern px_cb_unparsed_entity
+extern px_cb_notation_decl
+extern px_cb_start_ns
+extern px_cb_end_ns
+extern px_cb_comment
+extern px_cb_start_cdata
+extern px_cb_end_cdata
+extern px_cb_start_doctype
+extern px_cb_end_doctype
+extern px_cb_xml_decl
+extern px_cb_attlist_decl
+extern px_cb_skipped_entity
 extern px_flush
 extern bytes_type
 extern bytearray_type
@@ -97,26 +123,26 @@ align 8
 px_installers:
     dq XML_SetStartElementHandler,   px_cb_start_element    ; 0  StartElement
     dq XML_SetEndElementHandler,     px_cb_end_element      ; 1  EndElement
-    dq 0, 0                                                 ; 2  ProcessingInstr
+    dq XML_SetProcessingInstructionHandler, px_cb_processing_instr   ; 2  ProcessingInstr
     dq XML_SetCharacterDataHandler,  px_cb_chardata         ; 3  CharacterData
-    dq 0, 0                                                 ; 4  UnparsedEntity
-    dq 0, 0                                                 ; 5  NotationDecl
-    dq 0, 0                                                 ; 6  StartNamespace
-    dq 0, 0                                                 ; 7  EndNamespace
-    dq 0, 0                                                 ; 8  Comment
-    dq 0, 0                                                 ; 9  StartCdata
-    dq 0, 0                                                 ; 10 EndCdata
+    dq XML_SetUnparsedEntityDeclHandler, px_cb_unparsed_entity    ; 4  UnparsedEntity
+    dq XML_SetNotationDeclHandler,      px_cb_notation_decl      ; 5  NotationDecl
+    dq XML_SetStartNamespaceDeclHandler, px_cb_start_ns           ; 6  StartNamespace
+    dq XML_SetEndNamespaceDeclHandler,  px_cb_end_ns             ; 7  EndNamespace
+    dq XML_SetCommentHandler,           px_cb_comment            ; 8  Comment
+    dq XML_SetStartCdataSectionHandler, px_cb_start_cdata        ; 9  StartCdata
+    dq XML_SetEndCdataSectionHandler,   px_cb_end_cdata          ; 10 EndCdata
     dq 0, 0                                                 ; 11 Default
     dq 0, 0                                                 ; 12 DefaultExpand
     dq 0, 0                                                 ; 13 NotStandalone
     dq 0, 0                                                 ; 14 ExternalEntity
-    dq 0, 0                                                 ; 15 StartDoctype
-    dq 0, 0                                                 ; 16 EndDoctype
+    dq XML_SetStartDoctypeDeclHandler,  px_cb_start_doctype      ; 15 StartDoctype
+    dq XML_SetEndDoctypeDeclHandler,    px_cb_end_doctype        ; 16 EndDoctype
     dq 0, 0                                                 ; 17 EntityDecl
-    dq 0, 0                                                 ; 18 XmlDecl
+    dq XML_SetXmlDeclHandler,           px_cb_xml_decl           ; 18 XmlDecl
     dq 0, 0                                                 ; 19 ElementDecl
-    dq 0, 0                                                 ; 20 AttlistDecl
-    dq 0, 0                                                 ; 21 SkippedEntity
+    dq XML_SetAttlistDeclHandler,       px_cb_attlist_decl       ; 20 AttlistDecl
+    dq XML_SetSkippedEntityHandler,     px_cb_skipped_entity     ; 21 SkippedEntity
 
 px_modname:     db "_pyexpatcore", 0
 

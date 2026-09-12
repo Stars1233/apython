@@ -63,12 +63,175 @@ extern XML_SetStartElementHandler
 extern XML_SetEndElementHandler
 extern XML_SetCharacterDataHandler
 extern XML_GetSpecifiedAttributeCount
+extern XML_SetProcessingInstructionHandler
+extern XML_SetCommentHandler
+extern XML_SetStartCdataSectionHandler
+extern XML_SetEndCdataSectionHandler
+extern XML_SetUnparsedEntityDeclHandler
+extern XML_SetNotationDeclHandler
+extern XML_SetStartNamespaceDeclHandler
+extern XML_SetEndNamespaceDeclHandler
+extern XML_SetStartDoctypeDeclHandler
+extern XML_SetEndDoctypeDeclHandler
+extern XML_SetXmlDeclHandler
+extern XML_SetAttlistDeclHandler
+extern XML_SetSkippedEntityHandler
+extern int_from_i64
 extern list_new_filled
 
-section .rodata
-px_cb_e_call: db "a pyexpat handler is not callable", 0
-
 section .text
+
+; The common frame every macro-built trampoline uses.  One layout rather than
+; one per handler, because the bodies differ only in how many strings arrive
+; and which of them are interned.
+CB_H     equ 8                  ; the PxHandle*
+CB_RAW   equ 56                 ; up to 6 const char*, at [rbp-56 .. rbp-16]
+CB_INT   equ 64                 ; the trailing int, for the handlers that have one
+CB_ARGS  equ 120                ; up to 7 Values, at [rbp-120 .. rbp-72]
+CB_FRAME equ 128                ; + 0 pushes = 128, 16-aligned
+
+;; Save the C string arguments, which arrive in rsi, rdx, rcx, r8, r9.  They
+;; have to be saved BEFORE anything else runs: px_flush calls Python.
+%macro PX_SAVE_RAW 1            ; %1 = how many
+    mov [rbp - CB_RAW], rsi
+%if %1 > 1
+    mov [rbp - CB_RAW + 8], rdx
+%endif
+%if %1 > 2
+    mov [rbp - CB_RAW + 16], rcx
+%endif
+%if %1 > 3
+    mov [rbp - CB_RAW + 24], r8
+%endif
+%if %1 > 4
+    mov [rbp - CB_RAW + 32], r9
+%endif
+%endmacro
+
+;; A trampoline whose arguments are N C strings and nothing else.
+;;
+;;   PX_CB_STR name, handler_index, count, intern_mask
+;;
+;; Bit i of the mask means "intern argument i".  The split is CPython's and it
+;; is not arbitrary: a NAME repeats across a document and a VALUE usually does
+;; not, so interning the first saves memory and interning the second wastes it.
+%macro PX_CB_STR 4
+DEF_FUNC %1, CB_FRAME
+    mov [rbp - CB_H], rdi
+    PX_SAVE_RAW %3
+    cmp qword [rdi + PxHandle.magic], PX_MAGIC
+    jne %%out
+    cmp qword [rel current_exception], 0
+    jne %%out
+    call px_flush               ; every handler but character data flushes
+    test eax, eax
+    js %%out
+    mov rdi, [rbp - CB_H]
+    lea rsi, [rbp - CB_RAW]
+    mov edx, %3
+    mov ecx, %4
+    lea r8, [rbp - CB_ARGS]
+    call px_marshal
+    test eax, eax
+    js %%out
+    mov rdi, [rbp - CB_H]
+    mov esi, %2
+    lea rdx, [rbp - CB_ARGS]
+    mov ecx, %3
+    call px_call
+    test rax, rax
+    jz %%release
+    mov rdi, rax
+    DECREF_V rdi, rcx
+%%release:
+    lea rdi, [rbp - CB_ARGS]
+    mov esi, %3
+    call px_release
+%%out:
+    leave
+    ret
+END_FUNC %1
+%endmacro
+
+;; The same, plus a trailing int: has_internal_subset, standalone,
+;; isrequired, is_parameter_entity.
+%macro PX_CB_STR_INT 4          ; %1 name, %2 index, %3 string count, %4 mask
+DEF_FUNC %1, CB_FRAME
+    mov [rbp - CB_H], rdi
+    PX_SAVE_RAW %3
+%if %3 == 1
+    mov [rbp - CB_INT], rdx
+%elif %3 == 2
+    mov [rbp - CB_INT], rcx
+%elif %3 == 3
+    mov [rbp - CB_INT], r8
+%elif %3 == 4
+    mov [rbp - CB_INT], r9
+%endif
+    cmp qword [rdi + PxHandle.magic], PX_MAGIC
+    jne %%out
+    cmp qword [rel current_exception], 0
+    jne %%out
+    call px_flush
+    test eax, eax
+    js %%out
+    mov rdi, [rbp - CB_H]
+    lea rsi, [rbp - CB_RAW]
+    mov edx, %3
+    mov ecx, %4
+    lea r8, [rbp - CB_ARGS]
+    call px_marshal
+    test eax, eax
+    js %%out
+    movsx rdi, dword [rbp - CB_INT]
+    call int_from_i64
+    V_PACK rax, rdx
+    mov [rbp - CB_ARGS + %3 * 8], rax
+    mov rdi, [rbp - CB_H]
+    mov esi, %2
+    lea rdx, [rbp - CB_ARGS]
+    mov ecx, %3 + 1
+    call px_call
+    test rax, rax
+    jz %%release
+    mov rdi, rax
+    DECREF_V rdi, rcx
+%%release:
+    lea rdi, [rbp - CB_ARGS]
+    mov esi, %3 + 1
+    call px_release
+%%out:
+    leave
+    ret
+END_FUNC %1
+%endmacro
+
+;; A trampoline with no arguments at all: the two CDATA boundaries and the end
+;; of a doctype.
+%macro PX_CB_VOID 2             ; %1 name, %2 index
+DEF_FUNC %1, CB_FRAME
+    mov [rbp - CB_H], rdi
+    cmp qword [rdi + PxHandle.magic], PX_MAGIC
+    jne %%out
+    cmp qword [rel current_exception], 0
+    jne %%out
+    call px_flush
+    test eax, eax
+    js %%out
+    mov rdi, [rbp - CB_H]
+    mov esi, %2
+    xor edx, edx
+    xor ecx, ecx
+    call px_call
+    test rax, rax
+    jz %%out
+    mov rdi, rax
+    DECREF_V rdi, rcx
+%%out:
+    leave
+    ret
+END_FUNC %1
+%endmacro
 
 ;; ============================================================================
 ;; px_call(rdi = PxHandle*, esi = handler index, rdx = Value *args,
@@ -599,3 +762,127 @@ DEF_FUNC px_cb_chardata, 48
     leave
     ret
 END_FUNC px_cb_chardata
+
+;; ============================================================================
+;; px_marshal(rdi = PxHandle*, rsi = const char*[], edx = count,
+;;            ecx = intern bitmask, r8 = Value out[]) -> eax = 0, or -1 with
+;;            nothing left built
+;;
+;; The one place a handler's string arguments are turned into Python objects.
+;; A NULL `char*` becomes None either way -- Py_BuildValue's "z" rule, which
+;; is what CPython uses for every one of these -- and px_intern happens to do
+;; the same, including interning the None as a key.
+;; ============================================================================
+PM_H      equ 8
+PM_RAW    equ 16
+PM_N      equ 24
+PM_MASK   equ 32
+PM_OUT    equ 40
+PM_I      equ 48
+PM_FRAME  equ 64                ; + 0 pushes = 64, 16-aligned
+DEF_FUNC px_marshal, PM_FRAME
+    mov [rbp - PM_H], rdi
+    mov [rbp - PM_RAW], rsi
+    mov [rbp - PM_N], rdx
+    mov [rbp - PM_MASK], rcx
+    mov [rbp - PM_OUT], r8
+    mov qword [rbp - PM_I], 0
+.next:
+    mov rax, [rbp - PM_I]
+    cmp rax, [rbp - PM_N]
+    jae .done
+    mov rcx, [rbp - PM_RAW]
+    mov rsi, [rcx + rax*8]
+    ; Is this one interned?  bt is exactly the question the mask asks.
+    mov rcx, [rbp - PM_MASK]
+    bt rcx, rax
+    jnc .plain
+    mov rdi, [rbp - PM_H]
+    call px_intern
+    jmp .stored
+.plain:
+    test rsi, rsi
+    jz .as_none
+    mov rdi, rsi
+    call str_from_cstr_heap
+    jmp .stored
+.as_none:
+    lea rax, [rel none_singleton]
+    INCREF rax
+.stored:
+    test rax, rax
+    jz .fail
+    mov rcx, [rbp - PM_OUT]
+    mov rdx, [rbp - PM_I]
+    mov [rcx + rdx*8], rax
+    inc qword [rbp - PM_I]
+    jmp .next
+.done:
+    xor eax, eax
+    leave
+    ret
+.fail:
+    ; Release what was built, so a failure leaves nothing behind.
+    mov rdi, [rbp - PM_OUT]
+    mov rsi, [rbp - PM_I]
+    call px_release
+    mov eax, -1
+    leave
+    ret
+END_FUNC px_marshal
+
+;; ============================================================================
+;; px_release(rdi = Value[], esi = count) -> nothing
+;;
+;; Drops a marshalled argument array.  The trampolines hand their arguments to
+;; px_call and then release them whatever happened, because obj_call_n borrows
+;; them.
+;; ============================================================================
+PR_ARR   equ 8
+PR_N     equ 16
+PR_I     equ 24
+PR_FRAME equ 32                 ; + 0 pushes = 32, 16-aligned
+DEF_FUNC px_release, PR_FRAME
+    mov [rbp - PR_ARR], rdi
+    mov [rbp - PR_N], rsi
+    mov qword [rbp - PR_I], 0
+.next:
+    mov rax, [rbp - PR_I]
+    cmp rax, [rbp - PR_N]
+    jae .done
+    mov rcx, [rbp - PR_ARR]
+    mov rdi, [rcx + rax*8]
+    test rdi, rdi
+    jz .skip
+    DECREF_V rdi, rcx
+.skip:
+    inc qword [rbp - PR_I]
+    jmp .next
+.done:
+    leave
+    ret
+END_FUNC px_release
+
+;; ============================================================================
+;; The uniform trampolines.
+;;
+;; Each is one line because the bodies differ only in how many strings arrive
+;; and which of them are interned.  The interning split is CPython's:
+;; a processing instruction's TARGET repeats and its DATA does not; a comment's
+;; text never repeats at all.
+;; ============================================================================
+    PX_CB_STR px_cb_processing_instr, PX_H_PROCESSING_INSTR, 2, 0x1
+    PX_CB_STR px_cb_comment,          PX_H_COMMENT,          1, 0x0
+    PX_CB_STR px_cb_notation_decl,    PX_H_NOTATION_DECL,    4, 0xF
+    PX_CB_STR px_cb_unparsed_entity,  PX_H_UNPARSED_ENTITY,  5, 0x1F
+    PX_CB_STR px_cb_start_ns,         PX_H_START_NS_DECL,    2, 0x3
+    PX_CB_STR px_cb_end_ns,           PX_H_END_NS_DECL,      1, 0x1
+
+    PX_CB_STR_INT px_cb_start_doctype, PX_H_START_DOCTYPE_DECL, 3, 0x7
+    PX_CB_STR_INT px_cb_xml_decl,      PX_H_XML_DECL,           2, 0x0
+    PX_CB_STR_INT px_cb_attlist_decl,  PX_H_ATTLIST_DECL,       4, 0x3
+    PX_CB_STR_INT px_cb_skipped_entity, PX_H_SKIPPED_ENTITY,    1, 0x1
+
+    PX_CB_VOID px_cb_start_cdata,  PX_H_START_CDATA
+    PX_CB_VOID px_cb_end_cdata,    PX_H_END_CDATA
+    PX_CB_VOID px_cb_end_doctype,  PX_H_END_DOCTYPE_DECL

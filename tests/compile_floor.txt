@@ -505,6 +505,7 @@ test_property
 test_property_raises
 test_pyc_hardening
 test_pyc_staleness
+test_pyexpat_decl
 test_pyexpat_module
 test_pyexpat_parse
 test_raise_cause
