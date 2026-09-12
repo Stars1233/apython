@@ -709,7 +709,13 @@ DEF_FUNC op_delete_subscr, DS_FRAME
     DISPATCH
 
 .ds_raised:
+    ; Same shape as .da_propagate: DISPATCH saved the stack top from BEFORE
+    ; the two operands came off it, and the unwinder cleans up from there --
+    ; so jumping without republishing r13 released both a second time.  A
+    ; refused `del a[99]` on an array freed the array's own header and printed
+    ; `array('[', [1675724320, 32139, 3])`.
     leave
+    mov [rel eval_saved_r13], r13
     jmp eval_exception_unwind
 
 .ds_error:
