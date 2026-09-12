@@ -34,6 +34,7 @@ extern par_syntax_error
 extern par_suite
 extern par_suite_into
 extern par_name_obj
+extern par_last_pushed
 extern psu_what
 extern psu_line
 
@@ -68,6 +69,7 @@ PT2_SAVEE equ 104         ; whether an error was already recorded
 PT2_PAREN equ 112         ; 1 while inside a parenthesised item list
 PT2_STAR  equ 88
 PT2_HLINE equ 120         ; where THIS handler's `except` is, not the `try`
+PT2_LAST  equ 128         ; the body's last statement, to blame a missing clause
 PT2_FRAME equ 152         ; + 1 push = 160, 16-byte aligned
 DEF_FUNC ps_try, PT2_FRAME
     push rbx
@@ -87,16 +89,34 @@ DEF_FUNC ps_try, PT2_FRAME
     call par_suite_into
     test eax, eax
     jz .fail
+    ; The body's last statement, for the message below.  It has to be sampled
+    ; HERE: the else and finally suites push onto the same stack.
+    mov rdi, rbx
+    call par_last_pushed
+    mov [rbp - PT2_LAST], rax
     mov qword [rbp - PT2_HAND], 0
     mov qword [rbp - PT2_ELSE], 0
     mov qword [rbp - PT2_FIN], 0
     mov qword [rbp - PT2_STAR], 0
 
-    ; --- except clauses ---
+    ; CPython's grammar is `'try' ':' block (except_block+ [else] [finally]
+    ; | finally_block)`, so the token after the body MUST be `except` or
+    ; `finally`.  This used to be checked at the very END of the statement
+    ; instead, after the else and finally clauses had been parsed, and it
+    ; blamed a node index in a frame slot that only the handler loop ever
+    ; wrote -- so on the one path that reached it the slot held stack garbage.
+    ; valgrind saw the branch on it; when the garbage happened to be a valid
+    ; index it reported an unrelated node's line, and `try:\n pass\nelse:`
+    ; reported a line PAST the end of the file.
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_EXCEPT
-    jne .else_clause
+    je .have_except
+    cmp eax, TOK_FINALLY
+    je .else_clause                     ; no handlers, but a finally
+    jmp .no_clause
+
+.have_except:
 
     mov rdi, rbx
     call ast_mark
@@ -209,7 +229,7 @@ DEF_FUNC ps_try, PT2_FRAME
     mov rdi, rbx
     call par_kind
     cmp eax, TOK_FINALLY
-    jne .check
+    jne .build
     SUITE_FOR_HERE "'finally' statement"
     mov rdi, rbx
     call par_advance
@@ -219,16 +239,35 @@ DEF_FUNC ps_try, PT2_FRAME
     test rax, rax
     jz .fail
     mov [rbp - PT2_FIN], rax
+    jmp .build
 
-.check:
-    cmp qword [rbp - PT2_HAND], 0
-    jne .build
-    cmp qword [rbp - PT2_FIN], 0
-    jne .build
-    ; CPython blames the END of the try's body -- the place a handler should
-    ; have followed -- and runs the span to the end of that line.
+.no_clause:
+    ; A real token there is blamed whole -- `else` is (col, col+4), which is
+    ; what CPython reports.  At the end of the block there is no token to
+    ; blame, so it is the END of the body, with the span running off the line
+    ; (CPython's end_offset is -1 there, so end_col is -2).
+    cmp eax, TOK_ENDMARKER
+    je .no_clause_at_end
+    cmp eax, TOK_DEDENT
+    je .no_clause_at_end
+    cmp eax, TOK_NEWLINE
+    je .no_clause_at_end
     mov rdi, rbx
-    mov esi, [rbp - PT2_BODY]
+    call par_peek
+    mov ecx, [rax + Token.lineno]
+    mov r8d, [rax + Token.col]
+    mov r9d, ecx
+    mov r10d, [rax + Token.len]
+    add r10d, r8d
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    CSTRING rdx, "expected 'except' or 'finally' block"
+    call comp_error_span
+    jmp .fail
+
+.no_clause_at_end:
+    mov rdi, rbx
+    mov esi, [rbp - PT2_LAST]
     call ast_span_at
     test rax, rax
     jz .try_no_span

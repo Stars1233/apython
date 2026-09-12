@@ -104,3 +104,9 @@ x = b"\x"
 x = 1e
 x = 1j2
 x = .
+try:\n    pass\n
+x = 1\ntry:\n    pass\n
+try:\n    pass\nelse:\n    pass\n
+x = 1\ntry:\n    a = 1\n    b = 2\n
+def f():\n    try:\n        pass\n
+if 1:\n    try:\n        pass\n    x = 1\n
