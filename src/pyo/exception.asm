@@ -2274,7 +2274,13 @@ DEF_FUNC_LOCAL exc_store_named, ESN_FRAME
     jnz .esn_have1
     lea rdx, [rel none_singleton]
 .esn_have1:
-    INCREF_V rdx, rcx
+    ; No INCREF here.  exc_setattr's generic path is dict_set, which takes its
+    ; own reference -- so an INCREF on top of it left the value with one
+    ; reference too many, and every ImportError(name=n, path=p) and
+    ; AttributeError(name=n, obj=o) leaked both values.  Invisible for years
+    ; because almost every call passes string CONSTANTS out of co_consts,
+    ; which outlive the exception anyway, and because the defaults are the
+    ; None singleton.
     xor ecx, ecx
     call exc_setattr
     add rsp, 8
@@ -2298,8 +2304,7 @@ DEF_FUNC_LOCAL exc_store_named, ESN_FRAME
     jnz .esn_have2
     lea rdx, [rel none_singleton]
 .esn_have2:
-    INCREF_V rdx, rcx
-    xor ecx, ecx
+    xor ecx, ecx                ; borrowed, as above
     call exc_setattr
     add rsp, 8
     pop rdi

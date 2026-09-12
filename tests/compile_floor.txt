@@ -250,6 +250,7 @@ test_exception_str_repr
 test_exception_subclass_init
 test_exception_traceback_api
 test_except_star
+test_exc_named_attrs_refcount
 test_exc_state_frame
 test_exec_builtins_value
 test_exec_custom_locals
