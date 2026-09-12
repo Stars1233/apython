@@ -21,8 +21,10 @@ section .rodata
 ;; in the lexer is a load and a test against this table.
 ;;
 ;; Bytes 0x80..0xFF are marked CC_IDSTART|CC_IDCONT: a permissive UTF-8 lead.
-;; That accepts a few identifiers CPython rejects (non-XID_Start code points)
-;; and avoids shipping Unicode property tables.  Deliberate deviation.
+;; That is all a per-BYTE table can say.  The lexer decodes the character
+;; and asks uflags_of for XID_Start / XID_Continue, so the answer here is a
+;; fast path and not the rule -- it used to BE the rule, and an invisible
+;; NBSP was a variable name.
 ;; ---------------------------------------------------------------------------
 align 64
 global cc_table
