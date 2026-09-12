@@ -113,6 +113,42 @@ print("attr names interned:", list(attrs[1])[0] is list(attrs[2])[0])
 print("attr values are not:", attrs[1]["k"] != attrs[2]["k"])
 
 print()
+print("== the intern dict is the CALLER's, and may hold anything ==")
+# `parser.intern` is documented and public, and expatbuilder writes into it
+# with setdefault -- so a caller can put a non-string, or an int, in it, and
+# whatever is there is what the handler receives.  CPython hands it back
+# without a type check; the values are VALUES, so an immediate int or float
+# must not be dereferenced.
+for label, table in (("int value", {"a": 5}),
+                     ("float value", {"a": 1.5}),
+                     ("None value", {"a": None}),
+                     ("bool value", {"a": True}),
+                     ("a str, as usual", {"a": "REPLACED"}),
+                     ("a big int", {"a": 1 << 70}),
+                     ("empty", {})):
+    out = []
+    ip = pyexpat.ParserCreate(intern=table)
+    ip.StartElementHandler = lambda n, at: out.append(n)
+    ip.EndElementHandler = lambda n: out.append(n)
+    ip.Parse("<a><a/></a>", True)
+    print("%-18s %r" % (label, out))
+# A pre-seeded entry is used rather than replaced, and a new name is added.
+seeded = {"a": "FROM-TABLE"}
+ip = pyexpat.ParserCreate(intern=seeded)
+names = []
+ip.StartElementHandler = lambda n, at: names.append(n)
+ip.Parse("<a><b/></a>", True)
+print("seeded name used:", names)
+print("new name added to the caller's dict:", sorted(k for k in seeded))
+# Attribute names go through the same table.
+seeded2 = {"k": 99}
+ip = pyexpat.ParserCreate(intern=seeded2)
+got = []
+ip.StartElementHandler = lambda n, at: got.append(at)
+ip.Parse('<r k="v"/>', True)
+print("attribute name from the table:", got)
+
+print()
 print("== ordered_attributes gives a FLAT LIST, not a dict ==")
 # ElementTree sets this and then indexes the result numerically, so a dict
 # there is a KeyError rather than a slower answer.

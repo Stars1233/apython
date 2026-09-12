@@ -259,17 +259,23 @@ class xmlparser:
                  "_ordered", "_specified", "_nsprefixes", "_reparse")
 
     def __init__(self, encoding=None, namespace_separator=None, intern=None):
-        self._handlers = [None] * len(_HANDLER_NAMES)
-        self._intern = intern
-        self._buffer_text = False
-        self._buffer_size = 8192
-        self._ordered = False
-        self._specified = False
-        self._nsprefixes = False
+        # object.__setattr__ throughout, because __setattr__ REFUSES every
+        # private name: `PxHandle.handlers` borrows and `_handlers` is the only
+        # owner, so `p._handlers = [None]*22` dropped the last reference while
+        # the core kept calling the pointer -- a use-after-free that reached a
+        # recycled object.  CPython's parser has no such attribute to rebind.
+        set = object.__setattr__
+        set(self, "_handlers", [None] * len(_HANDLER_NAMES))
+        set(self, "_intern", intern)
+        set(self, "_buffer_text", False)
+        set(self, "_buffer_size", 8192)
+        set(self, "_ordered", False)
+        set(self, "_specified", False)
+        set(self, "_nsprefixes", False)
         # libexpat has no XML_GetReparseDeferralEnabled -- only the setter --
         # so the state is kept here, as CPython keeps it on the object.
-        self._reparse = True
-        self._h = _core.parser_new(encoding, namespace_separator, intern)
+        set(self, "_reparse", True)
+        set(self, "_h", _core.parser_new(encoding, namespace_separator, intern))
 
     # -- attributes ---------------------------------------------------------
     #
@@ -349,8 +355,13 @@ class xmlparser:
 
     def __setattr__(self, name, value):
         if name.startswith("_"):
-            object.__setattr__(self, name, value)
-            return
+            # Refused, not forwarded.  `_handlers` owns the references the
+            # core BORROWS, and `_h` is the handle it dereferences; rebinding
+            # either is a use-after-free rather than a mistake the caller pays
+            # for.  __init__ goes through object.__setattr__ directly.
+            raise AttributeError(
+                "'pyexpat.xmlparser' object attribute %r is read-only"
+                % (name,))
         index = _HANDLER_INDEX.get(name)
         if index is not None:
             # The core is told FIRST and BORROWS; this list OWNS.  An owning
@@ -427,6 +438,10 @@ def ParserCreate(encoding=None, namespace_separator=None, intern=None):
         if len(namespace_separator) > 1:
             raise ValueError("namespace_separator must be at most one "
                              "character, omitted, or None")
+        # An EMPTY separator is legal and is NOT the same as None: it still
+        # builds a namespace-aware parser, joining uri and local name with a
+        # NUL.  CPython accepts it, so the core has to be told the difference
+        # between "" and absent.
     if intern is None:
         # CPython gives every parser an intern dict of its own unless one is
         # passed, and `expatbuilder` reaches into it with

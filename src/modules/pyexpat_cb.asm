@@ -59,9 +59,8 @@ extern set_exception
 extern exc_TypeError_type
 
 extern XML_StopParser
-extern XML_SetStartElementHandler
-extern XML_SetEndElementHandler
 extern XML_SetCharacterDataHandler
+extern px_installers
 extern XML_GetSpecifiedAttributeCount
 extern XML_SetProcessingInstructionHandler
 extern XML_SetCommentHandler
@@ -321,17 +320,23 @@ END_FUNC px_call
 ;; XML_STATUS_ERROR and any later Parse answers XML_ERROR_FINISHED rather than
 ;; carrying on with a half-built tree.
 ;;
-;; Then every handler pointer is removed, so nothing else fires while the
-;; exception makes its way out.  The character-data handler is REPLACED with a
-;; no-op rather than removed, which is CPython's own arrangement and its
-;; comment gives the reason: it cannot be safely removed from inside itself.
+;; Then EVERY handler libexpat currently holds is taken back, by walking
+;; px_installers rather than by naming them: the table is the list of handlers
+;; that have a C side, so this stays complete as rows are filled in.  Naming
+;; three of them by hand was how the docblock came to claim something the code
+;; did not do.
+;;
+;; The character-data handler is REPLACED with a no-op rather than removed,
+;; which is CPython's own arrangement and its comment gives the reason: it
+;; cannot be safely removed from inside itself.
 ;;
 ;; `.raised` is set so parser_parse can tell "a handler raised" from "libexpat
 ;; found a syntax error" without inspecting an exception type -- see the
 ;; three-valued return there.
 ;; ============================================================================
 PST_H     equ 8
-PST_FRAME equ 16                ; + 0 pushes = 16, 16-aligned
+PST_I     equ 16
+PST_FRAME equ 32                ; + 0 pushes = 32, 16-aligned
 DEF_FUNC px_stop, PST_FRAME
     mov [rbp - PST_H], rdi
     mov qword [rdi + PxHandle.raised], 1
@@ -341,20 +346,28 @@ DEF_FUNC px_stop, PST_FRAME
     xor esi, esi                ; XML_FALSE: not resumable
     call XML_StopParser wrt ..plt
 
-    mov rdi, [rbp - PST_H]
-    mov rdi, [rdi + PxHandle.parser]
+    mov qword [rbp - PST_I], 0
+.strip:
+    mov rax, [rbp - PST_I]
+    cmp rax, PX_H_COUNT
+    jae .out
+    shl rax, 4                  ; two qwords a row; x86 has no *16 scale
+    lea rcx, [rel px_installers]
+    add rcx, rax
+    mov rdx, [rcx]              ; the libexpat setter, or 0 for no C side
+    test rdx, rdx
+    jz .strip_next
+    mov rcx, [rbp - PST_H]
+    mov rdi, [rcx + PxHandle.parser]
     xor esi, esi
-    call XML_SetStartElementHandler wrt ..plt
-    mov rdi, [rbp - PST_H]
-    mov rdi, [rdi + PxHandle.parser]
-    xor esi, esi
-    call XML_SetEndElementHandler wrt ..plt
-    ; A no-op, not NULL: CPython replaces rather than removes this one
-    ; because it cannot be taken away from inside itself.
-    mov rdi, [rbp - PST_H]
-    mov rdi, [rdi + PxHandle.parser]
+    cmp qword [rbp - PST_I], PX_H_CHARACTER_DATA
+    jne .strip_call
     lea rsi, [rel px_cb_noop_chardata]
-    call XML_SetCharacterDataHandler wrt ..plt
+.strip_call:
+    call rdx
+.strip_next:
+    inc qword [rbp - PST_I]
+    jmp .strip
 .out:
     leave
     ret
@@ -406,11 +419,19 @@ DEF_FUNC px_intern, 40
     test rax, rax
     jz .insert
     ; A hit: hand back the stored one and drop the copy just built.
+    ;
+    ; dict_get answers a VALUE, and `parser.intern` is the CALLER's dict --
+    ; documented, public, and written into by expatbuilder with setdefault --
+    ; so it can hold an int, a float or None as easily as a str.  CPython hands
+    ; back whatever is there without a type check, and so does this; but the
+    ; refcounting has to be Value-aware, or an immediate int is dereferenced
+    ; as a pointer to 0xFFF8...  `ParserCreate(intern={"a": 5})` then parsing
+    ; `<a/>` segfaulted.  Every release of an interned result below is
+    ; DECREF_V for the same reason.
     mov rbx, rax
-    mov rdi, rbx
-    call obj_incref
+    INCREF_V rbx, rcx
     mov rdi, [rbp - PI_STR]
-    call obj_decref
+    call obj_decref             ; always a fresh str, so always a pointer
     mov rax, rbx
     pop rbx
     leave
@@ -595,39 +616,42 @@ DEF_FUNC px_cb_start_element, 120
     call dict_set
     add rsp, 8
     pop rdi
-    call obj_decref             ; dict_set took its own reference
+    call obj_decref             ; dict_set took its own reference; the value
+                                ;   is a fresh str, so always a pointer
     mov rdi, [rbp - SE_KEY]
-    call obj_decref
+    DECREF_V rdi, rcx           ; the KEY is interned: a Value
     jmp .pair_next
 .store_list:
     ; The list slots take the references straight over -- no INCREF, no
     ; DECREF: the two were built for this and the list owns them now.
+    ;
+    ; ob_size is published HERE rather than once at the end, so that an
+    ; allocation failure later in the walk releases the pairs already
+    ; written: obj_decref on the list frees ob_size items, and a list still
+    ; claiming 0 of them freed none.
     mov rcx, [rbp - SE_ITEMS]
     mov rdx, [rbp - SE_AT]
     add rdx, rdx
     mov rsi, [rbp - SE_KEY]
     mov [rcx + rdx*8], rsi
     mov [rcx + rdx*8 + 8], rax
+    add rdx, 2
+    mov rcx, [rbp - SE_DICT]
+    mov [rcx + PyListObject.ob_size], rdx
 .pair_next:
     inc qword [rbp - SE_AT]
     add rbx, 16
     jmp .pair
 .drop_key:
     mov rdi, [rbp - SE_KEY]
-    call obj_decref
+    DECREF_V rdi, rcx
     jmp .out
 
 .call:
-    ; list_new_filled allocates the slots and leaves ob_size at 0 -- the
-    ; caller sets it, which is its whole contract.  Use what was actually
-    ; WRITTEN rather than SE_N, so a walk that stopped at the terminator
-    ; early does not publish uninitialised slots.
-    cmp qword [rbp - SE_ISLIST], 0
-    je .args
-    mov rax, [rbp - SE_AT]
-    add rax, rax
-    mov rcx, [rbp - SE_DICT]
-    mov [rcx + PyListObject.ob_size], rax
+    ; ob_size is already right: .store_list publishes it per pair, which is
+    ; what makes the failure paths release correctly.  list_new_filled leaves
+    ; it at 0 and the caller sets it -- that is its whole contract -- so a walk
+    ; that stopped early publishes only what it wrote.
 .args:
     mov rax, [rbp - SE_NAME]
     mov [rbp - SE_ARGS], rax
@@ -647,7 +671,7 @@ DEF_FUNC px_cb_start_element, 120
     mov rdi, [rbp - SE_NAME]
     test rdi, rdi
     jz .no_name
-    call obj_decref
+    DECREF_V rdi, rcx           ; interned: a Value, not necessarily a pointer
 .no_name:
     mov rdi, [rbp - SE_DICT]
     test rdi, rdi
@@ -701,7 +725,7 @@ DEF_FUNC px_cb_end_element, EE_FRAME
     mov rdi, [rbp - EE_NAME]
     test rdi, rdi
     jz .no_name
-    call obj_decref
+    DECREF_V rdi, rcx           ; interned: a Value, not necessarily a pointer
 .no_name:
     pop rbx
     leave

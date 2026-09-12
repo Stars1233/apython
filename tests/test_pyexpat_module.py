@@ -181,6 +181,44 @@ except AttributeError as e:
     print("get nosuchattr:", e)
 
 print()
+print("== the private slots are read-only ==")
+# `PxHandle.handlers` BORROWS its references and `_handlers` is the only
+# owner, so rebinding it dropped the last reference while the core kept
+# calling the pointer -- a use-after-free that reached a recycled object and
+# called it.  `_h` is the handle the core dereferences.  CPython's parser has
+# no such attribute to rebind at all, so refusing is also what it does.
+ro = pyexpat.ParserCreate()
+ro.StartElementHandler = lambda n, a: None
+for name in ("_handlers", "_h", "_intern", "_buffer_text", "_nosuch"):
+    try:
+        setattr(ro, name, None)
+        print("%-14s ACCEPTED" % name)
+    except AttributeError:
+        print("%-14s AttributeError" % name)
+print("and it still parses:", ro.Parse("<a/>", True))
+
+print()
+print("== namespace_separator: absent, empty, and one character ==")
+# An EMPTY separator is not the same as None: it still builds a
+# namespace-aware parser, joining uri and local name with a NUL.
+for label, kwargs in (("absent", {}),
+                      ("None", {"namespace_separator": None}),
+                      ("empty", {"namespace_separator": ""}),
+                      ("space", {"namespace_separator": " "}),
+                      ("brace", {"namespace_separator": "}"})):
+    out = []
+    np = pyexpat.ParserCreate(**kwargs)
+    np.StartElementHandler = lambda n, a: out.append(n)
+    np.Parse('<r xmlns="urn:u"><c/></r>', True)
+    print("%-8s %r" % (label, out))
+for bad in ("ab", "abc"):
+    try:
+        pyexpat.ParserCreate(namespace_separator=bad)
+        print("%-6r ACCEPTED" % bad)
+    except ValueError as e:
+        print("%-6r ValueError: %s" % (bad, e))
+
+print()
 print("== ParserCreate's arguments ==")
 print("with an encoding:", type(pyexpat.ParserCreate("utf-8")).__name__)
 print("with a separator:", type(pyexpat.ParserCreate(None, " ")).__name__)

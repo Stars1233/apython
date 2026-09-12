@@ -115,6 +115,7 @@ px_handle_n:    dq 0
 
 section .rodata
 align 8
+global px_installers
 ; One row per handler index: the libexpat setter, and our trampoline.  A ZERO
 ; row means the C side is not written yet -- the reference is still kept on the
 ; handle and read back from Python, so a later commit fills the row in and
@@ -361,15 +362,23 @@ DEF_FUNC px_parser_new, PN_FRAME
     call px_arg_str_or_none
     test rax, rax
     jz .no_sep
-    ; Exactly one character, and ASCII: libexpat takes an XML_Char, so a
-    ; multi-byte separator cannot be expressed and must be refused rather
-    ; than truncated.
+    ; At most one character, and ASCII: libexpat takes an XML_Char, so a
+    ; multi-byte separator cannot be expressed and must be refused rather than
+    ; truncated.  An EMPTY one is legal, and is not the same as None -- it
+    ; still builds a namespace-aware parser, joining uri and local name with a
+    ; NUL byte, which is what CPython does.
     mov rdi, [rbp - PN_ARGS]
     mov rdi, [rdi + 8]
-    cmp qword [rdi + PyStrObject.ob_size], 1
+    mov rcx, [rdi + PyStrObject.ob_size]
+    test rcx, rcx
+    jz .nul_sep
+    cmp rcx, 1
     jne .bad_sep
     movzx ecx, byte [rax]
     mov [rbp - PN_SEP], rcx
+    jmp .have_sep
+.nul_sep:
+    mov qword [rbp - PN_SEP], 0
     jmp .have_sep
 .no_sep:
     mov qword [rbp - PN_SEP], -1    ; -1 means "no separator"
