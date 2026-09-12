@@ -642,6 +642,7 @@ test_sys_exception
 test_sys_executable
 test_sys_exit
 test_sys_is_finalizing
+test_sys_version_platform
 test_termios
 test_time_clock_info
 test_time_module

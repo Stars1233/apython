@@ -1618,7 +1618,13 @@ sm_maxsize:      db "maxsize", 0
 sm_platform:     db "platform", 0
 sm_linux:        db "linux", 0
 sm_version:      db "version", 0
-sm_version_val:  db "3.12.0 (apython ", VERSION_STR, ")", 0
+; platform._sys_version's regex ends in `\[([^\]]+)\]?`, so a BRACKETED
+; compiler field is not optional: without it every call into `platform` raised
+; "failed to parse CPython sys.version".  The name a program should read for
+; the implementation is sys.implementation.name, which is "apython";
+; platform.python_implementation() has no hook for one and answers "CPython".
+; DIVERGENCES.md records that.
+sm_version_val:  db "3.12.0 (apython ", VERSION_STR, ") [NASM x86-64]", 0
 sm_version_info: db "version_info", 0
 sm_float_info:   db "float_info", 0
 sm_flags:        db "flags", 0

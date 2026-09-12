@@ -380,6 +380,27 @@ a TypeError naming all three rather than "unexpected keyword argument", so
 the message says what is missing rather than pretending the field does not
 exist.
 
+## `platform.python_implementation()` answers `CPython`
+
+`sys.version` is `3.12.0 (apython 0.6.0) [NASM x86-64]`, and the bracketed
+compiler field at the end is there because `platform._sys_version` will not
+parse the string without one -- its regex ends in `\[([^\]]+)\]?`, and every
+call into `platform` raised `ValueError: failed to parse CPython sys.version`
+while the field was missing.  `platform` is reached by a great deal of
+ordinary code; `test_wsgiref`'s thirty-five tests all ended there.
+
+What the string cannot do is say `apython`.  `python_implementation()` is
+`_sys_version()[0]`, and the name is chosen before the regex runs, by three
+hardcoded probes: `sys.platform.startswith('java')` gives `Jython`, `"PyPy" in
+sys.version` gives `PyPy`, and anything else gives `CPython`.  There is no
+hook, and the PyPy branch additionally demands a `[PyPy ...]` bracket and a
+`(#buildno, builddate, buildtime)` triple -- so the only two answers available
+are `CPython` and a `platform` module that does not work at all.
+
+`sys.implementation.name` is `apython` and is the attribute a program should
+read; `sys.implementation.cache_tag` stays `cpython-312`, because that is what
+names the `.pyc` files this interpreter reads and writes.
+
 ## `type.__flags__` reports a subset of CPython's Py_TPFLAGS_*
 
 `tp_flags` cannot be handed back raw -- the low 32 bits are this tree's own
