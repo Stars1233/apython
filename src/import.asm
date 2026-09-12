@@ -18,6 +18,8 @@ extern str_new_heap
 extern str_type
 extern none_singleton
 extern module_type
+extern exc_raise_import
+extern str_from_cstr_heap
 extern str_intern_cstr
 extern dict_new
 extern dict_get
@@ -494,9 +496,20 @@ DEF_FUNC_LOCAL import_raise_no_module, IRNM_BUF
     call irnm_cat_cstr
 .irnm_done:
     mov byte [rdi + rcx], 0
-    mov rsi, rdi
+    ; .name is the prefix that actually failed -- `import sys.foo.bar` reports
+    ; 'sys.foo' -- so it is built from the same two values the message used.
+    push rdi                    ; the message buffer, on this frame
+    sub rsp, 8
+    mov rdi, rbx
+    mov rsi, r12
+    call str_new_heap           ; 0 is tolerated: it becomes None
+    add rsp, 8
+    pop rsi                     ; the message
+    mov rdx, rax                ; .name
     lea rdi, [rel exc_ModuleNotFoundError_type]
-    call raise_exception
+    xor ecx, ecx                ; .path is None
+    mov r8d, 1                  ; the name string is ours to hand over
+    call exc_raise_import
     ud2
 END_FUNC import_raise_no_module
 
@@ -617,8 +630,10 @@ END_FUNC import_parent_is_package
 ;; blocked is reported by the parent's own "is not a package" path instead.
 ;; The type is ModuleNotFoundError, an ImportError subclass.
 ;; ============================================================================
-IRH_BUF equ 256
+IRH_BUF equ 264                 ; + 1 push = 272, 16-aligned
 DEF_FUNC_LOCAL import_raise_halted, IRH_BUF
+    push rbx
+    mov rbx, rdi                ; the name, kept across the message build
     mov rsi, rdi                ; the name
     lea rdi, [rbp - IRH_BUF]
     xor ecx, ecx
@@ -653,9 +668,20 @@ DEF_FUNC_LOCAL import_raise_halted, IRH_BUF
     jmp .irh_suffix_loop
 .irh_done:
     mov byte [rdi + rcx], 0
-    mov rsi, rdi
+    ; CPython sets .name to the module that was blocked, and leaves .path None.
+    ; The string is built only for this, and exc_raise_import does not return,
+    ; so it is handed over to be released there.
+    push rdi                    ; the message buffer, on this frame
+    sub rsp, 8
+    mov rdi, rbx
+    call str_from_cstr_heap     ; 0 is tolerated: it becomes None
+    add rsp, 8
+    pop rsi                     ; the message
+    mov rdx, rax                ; .name
     lea rdi, [rel exc_ModuleNotFoundError_type]
-    call raise_exception
+    xor ecx, ecx                ; .path is None
+    mov r8d, 1                  ; the name string is ours to hand over
+    call exc_raise_import
     ud2
 END_FUNC import_raise_halted
 

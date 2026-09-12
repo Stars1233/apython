@@ -399,6 +399,7 @@ DEF_FUNC_LOCAL import_from_error, IFE_FRAME
     lea rsi, [rbp - IFE_BUF]
     mov rdx, [rbp - IFE_NAME]
     mov rcx, [rbp - IFE_PATH]
+    xor r8d, r8d                    ; both borrowed from the module dict
     call exc_raise_import
     ud2
 END_FUNC import_from_error

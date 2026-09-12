@@ -30,6 +30,8 @@ def show(label, fn):
         fn()
     except BaseException as e:
         print("%-24s %s: %s" % (label, type(e).__name__, e))
+        print("%-24s   name=%r path=%r" % ("", getattr(e, "name", "ABSENT"),
+                                            getattr(e, "path", "ABSENT")))
     else:
         print("%-24s NO RAISE" % label)
 

@@ -2315,7 +2315,8 @@ END_FUNC exc_store_named
 
 ;; ============================================================================
 ;; exc_raise_import(rdi = the type, rsi = message C string,
-;;                  rdx = the `name` Value or 0, rcx = the `path` Value or 0)
+;;                  rdx = the `name` Value or 0, rcx = the `path` Value or 0,
+;;                  r8 = 1 to release rdx and rcx afterwards, 0 to borrow them)
 ;;     -- does not return
 ;;
 ;; The import machinery's own ImportErrors, with the two named attributes
@@ -2325,15 +2326,19 @@ END_FUNC exc_store_named
 ;; would be paid by every `for` loop that ends.  So the import sites ask for
 ;; it and nothing else does.
 ;;
-;; Both values are BORROWED; exc_store_named INCREFs what it keeps and
-;; substitutes None for a 0.
+;; exc_store_named INCREFs what it keeps and substitutes None for a 0, so the
+;; two values are BORROWED by default.  r8 = 1 releases them after it has
+;; stored them, which is what a caller that built the name string only for
+;; this needs -- it cannot release it itself, because this does not return.
 ;; ============================================================================
 ERI_NAME  equ 8
 ERI_PATH  equ 16
+ERI_OWN   equ 24
 ERI_FRAME equ 32                ; + 0 pushes = 32, 16-aligned
 DEF_FUNC exc_raise_import, ERI_FRAME
     mov [rbp - ERI_NAME], rdx
     mov [rbp - ERI_PATH], rcx
+    mov [rbp - ERI_OWN], r8
     call exc_from_cstr
     test rax, rax
     jz .eri_oom
@@ -2346,6 +2351,23 @@ DEF_FUNC exc_raise_import, ERI_FRAME
     call exc_store_named
     add rsp, 8
     pop rdi
+    cmp qword [rbp - ERI_OWN], 0
+    je .eri_raise
+    push rdi
+    sub rsp, 8
+    mov rdi, [rbp - ERI_NAME]
+    test rdi, rdi
+    jz .eri_drop_path
+    call obj_decref
+.eri_drop_path:
+    mov rdi, [rbp - ERI_PATH]
+    test rdi, rdi
+    jz .eri_dropped
+    call obj_decref
+.eri_dropped:
+    add rsp, 8
+    pop rdi
+.eri_raise:
     call raise_exception_obj
     ud2
 .eri_oom:
