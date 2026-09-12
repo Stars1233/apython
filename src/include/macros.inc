@@ -861,6 +861,31 @@ TP_DICT_AT_TAIL equ -1
 %%set_like:
 %endmacro
 
+; An object that its type's TYPE_FLAG_HAVE_GC says is collectable, but which
+; has no GC head all the same: a STATIC type.  Every metatype carries HAVE_GC,
+; because the heap types it makes are collected, so `object`, `str` and `type`
+; itself pass the flag test -- while the sixteen bytes in front of a static
+; type's table are whatever the assembler put there, usually a string.  Read as
+; a PyGC_Head, those bytes put the static type into a collection list and the
+; next phase traversed it; the fault landed in gc_list_remove, and WHICH bytes
+; were there depended on the binary's layout, so it appeared and vanished with
+; edits that had nothing to do with it.
+;
+; A type's own GC-ness is what CPython asks through tp_is_gc, and `type`'s
+; implementation of that slot is exactly "is this a heap type".  Every visitor
+; and every is-it-tracked question has to ask it, because a tp_traverse hands
+; over ob_type, tp_base and every tp_mro entry, and those are static types in
+; any program at all.
+; %1 = the object, %2 = its type, already loaded.  %3 = label to take when the
+; object has no GC head.  Neither register is touched.
+%macro GC_SKIP_STATIC_TYPE 3
+    test qword [%2 + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz %%not_a_type             ; not a class: the flag answered already
+    test qword [%1 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz %3                       ; a static type has no head to read
+%%not_a_type:
+%endmacro
+
 ; Require that a type object is str or a str subclass; jump away if not.
 ; The exact-type test these replace rejected a str subclass everywhere it
 ; appeared -- "a" + MyStr("b") was a TypeError, and "a" == MyStr("a") was

@@ -838,7 +838,68 @@ version_info_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
     dq vi_desc                  ; STRUCTSEQ_DESC, one qword past the type
+
+;; ============================================================================
+;; sys.asyncgen_hooks -- what sys.get_asyncgen_hooks() answers with
+;;
+;; PEP 525's pair.  It has to be a struct sequence rather than a namespace
+;; because CPython's own event loop restores it by splatting --
+;; `sys.set_asyncgen_hooks(*old_agen_hooks)` -- while reading the halves by
+;; name elsewhere, so it must be BOTH a two-tuple and named.
+;; ============================================================================
+section .rodata
+
+agh_name:       db "asyncgen_hooks", 0
+agh_f_first:    db "firstiter", 0
+agh_f_final:    db "finalizer", 0
+
+align 8
+agh_fields:
+    dq agh_f_first, 0
+    dq agh_f_final, 1
+
+align 8
+agh_desc:
+    dq 2                        ; n_in_sequence
+    dq 2                        ; n_fields
+    dq agh_fields
+
+section .data
+align 8
+global asyncgen_hooks_type
+asyncgen_hooks_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq agh_name                 ; tp_name
+    dq PyTupleObject_size       ; tp_basicsize: no named-only tail
+    dq structseq_dealloc        ; tp_dealloc
+    dq structseq_repr           ; tp_repr
+    dq structseq_repr           ; tp_str
+    dq 0                        ; tp_hash          } copied from tuple_type
+    dq 0                        ; tp_call          } by structseq_init_type,
+    dq structseq_getattr        ; tp_getattr       } which must run first
+    dq 0                        ; tp_setattr       }
+    dq 0                        ; tp_richcompare
+    dq 0                        ; tp_iter
+    dq 0                        ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq TYPE_FLAG_TUPLE_SUBCLASS ; tp_flags -- no HAVE_GC: it owns no cycles
+    dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
+    dq 0                        ; tp_dictoffset
+    dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
+    dq agh_desc                 ; STRUCTSEQ_DESC, one qword past the type
 
 ;; ============================================================================
 ;; sys.UnraisableHookArgs -- what sys.unraisablehook is handed
@@ -901,6 +962,7 @@ unraisable_args_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
     dq uh_desc                  ; STRUCTSEQ_DESC, one qword past the type
 
 section .text
@@ -979,6 +1041,7 @@ float_info_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
     dq float_info_desc          ; STRUCTSEQ_DESC, one qword past the type
 
 ;; sys.int_info
@@ -1035,6 +1098,7 @@ int_info_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
     dq int_info_desc            ; STRUCTSEQ_DESC, one qword past the type
 
 ;; sys.hash_info
@@ -1101,6 +1165,7 @@ hash_info_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
     dq hash_info_desc           ; STRUCTSEQ_DESC, one qword past the type
 
 section .rodata
@@ -1204,4 +1269,5 @@ flags_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
     dq flags_desc               ; STRUCTSEQ_DESC

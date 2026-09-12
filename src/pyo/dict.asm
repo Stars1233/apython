@@ -506,8 +506,26 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
     jmp raise_type_error_counted
 
 .dtc_error:
+    ; Reached both when the argument is the wrong TYPE and when reading it
+    ; RAISED -- dict_method_update answers 0 for either, as the comment at
+    ; .dtc_try_iterable says.  Substituting a type error over a pending
+    ; exception threw the real one away: dict(map(f, xs)) for an f that raises
+    ; reported "dict() argument must be a mapping or iterable".
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    jne .dtc_propagate
     extern exc_TypeError_type
     RAISE exc_TypeError_type, "dict() argument must be a mapping or iterable"
+
+.dtc_propagate:
+    extern eval_exception_unwind
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    jmp eval_exception_unwind
 END_FUNC dict_type_call
 
 
@@ -1231,12 +1249,16 @@ dict_len:
     ret
 
 ;; ============================================================================
-;; dict_subscript(rdi=dict, rsi=key, edx=key_tag) -> (rax=value, edx=value_tag)
-;; mp_subscript: look up key, raise KeyError if not found
+;; dict_subscript(rdi = dict, rsi = key Value) -> rax = the value, as a Value
+;; mp_subscript: look up the key; a dict SUBCLASS with a __missing__ answers
+;; its own misses, and anything else raises KeyError naming the key.
 ;; ============================================================================
-DEF_FUNC dict_subscript, 8            ; 1 pushes, so rsp is 16-aligned
+DSUB_DICT  equ 8
+DSUB_FRAME equ 24           ; + 1 push = 32, 16-aligned
+DEF_FUNC dict_subscript, DSUB_FRAME
     push rbx
 
+    mov [rbp - DSUB_DICT], rdi ; the mapping, for __missing__ below
     mov rbx, rsi               ; save the key Value for the error message
     call dict_get              ; both take a key Value
     test rax, rax              ; a Value, and 0 is the only miss
@@ -1247,11 +1269,52 @@ DEF_FUNC dict_subscript, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 
 .key_error:
+    ; A dict SUBCLASS gets to answer for itself first.  CPython's
+    ; dict_subscript asks __missing__ on any mapping that is not exactly a
+    ; dict, and collections.defaultdict is only the best-known user of it:
+    ; urllib.parse.quote builds a memoising dict subclass exactly this way, so
+    ; quoting any character that was not already cached raised KeyError.
+    mov rax, [rbp - DSUB_DICT]
+    mov rax, [rax + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    je .plain_key_error
+
+    mov rdi, [rbp - DSUB_DICT]
+    mov rsi, rbx
+    V_UNPACK rsi, rcx           ; dunder_call_2 wants (payload, tag)
+    CSTRING rdx, "__missing__"
+    extern dunder_call_2
+    call dunder_call_2
+    test rax, rax
+    jnz .ds_missing_answered
+    ; 0 is "no __missing__" or "it raised"; only the first falls through to
+    ; the KeyError this lookup was always going to give.
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    jne .ds_missing_raised
+
+.plain_key_error:
     ; The key itself is the argument, as in CPython: d["k"] reports
     ; KeyError('k'), not a fixed "key not found".  rbx already holds it.
     mov rdi, rbx               ; the key Value, saved on entry
     extern raise_key_error
     call raise_key_error
+
+.ds_missing_answered:
+    ; dunder_call_2 hands back a Value and this function ANSWERS with a Value
+    ; -- the docblock above still described the old (payload, tag) pair, and
+    ; unpacking here turned a returned int immediate into a pointer to the
+    ; number.  `__missing__` returning 42 dereferenced address 42.
+    pop rbx
+    leave
+    ret
+
+.ds_missing_raised:
+    pop rbx
+    leave
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
 END_FUNC dict_subscript
 
 ;; ============================================================================
@@ -2035,9 +2098,44 @@ DEF_FUNC_BARE dict_rev_iter_next
     dec rcx
     mov [rdi + PyDictIterObject.it_index], rcx
 
+    ; Which half, or both: the same it_kind the forward iterator reads.  This
+    ; walked keys unconditionally, because reversed(d) was its only caller --
+    ; and then reversed(d.values()) and reversed(d.items()), once the views
+    ; grew a __reversed__, quietly answered with keys.
+    mov r10, [rdi + PyDictIterObject.it_kind]
+    cmp r10, 1
+    je .dri_return_value
+    ja .dri_return_item
+
     ; Return key
     mov rax, [rax + DictEntry.key]
     INCREF_V rax, rdx
+    ret
+
+.dri_return_value:
+    mov rax, [rax + DictEntry.value]
+    INCREF_V rax, rdx
+    ret
+
+.dri_return_item:
+    ; A (key, value) pair, as the forward iterator builds it.
+    push rbx
+    push r12
+    mov rbx, rax                ; save the entry
+    mov edi, 2
+    call tuple_new
+    mov r12, rax
+    mov r9, [r12 + PyTupleObject.ob_item]
+    mov rax, [rbx + DictEntry.key]
+    INCREF_V rax, rdx
+    mov [r9], rax
+    mov rax, [rbx + DictEntry.value]
+    INCREF_V rax, rdx
+    mov [r9 + 8], rax
+    mov rax, r12
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
     ret
 
 .dri_skip:
@@ -2169,6 +2267,7 @@ dict_type:
     dq dict_clear_gc                        ; tp_clear
     dq 0          ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; Dict key iterator type
 align 8
@@ -2202,6 +2301,7 @@ dict_iter_type:
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; The values and items iterators differ from the keys iterator in nothing
 ; but their name, which is what `type(iter(d.items())).__name__` answers
@@ -2238,6 +2338,7 @@ dict_value_iter_type:
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 align 8
 global dict_item_iter_type
@@ -2270,6 +2371,7 @@ dict_item_iter_type:
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; Dict reverse key iterator type
 align 8
@@ -2303,6 +2405,7 @@ dict_rev_iter_type:
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 
 section .rodata

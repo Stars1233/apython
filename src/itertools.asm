@@ -2488,6 +2488,7 @@ enumerate_iter_type:
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; Zip iterator type
 align 8
@@ -2521,6 +2522,7 @@ zip_iter_type:
     dq iters_array_clear                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; Map iterator type
 align 8
@@ -2554,6 +2556,7 @@ map_iter_type:
     dq map_clear                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; Filter iterator type
 align 8
@@ -2587,6 +2590,7 @@ filter_iter_type:
     dq filter_clear                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; Sequence iterator type (__getitem__ protocol)
 align 8
@@ -2621,6 +2625,7 @@ callable_iter_type:
     dq callable_iter_clear      ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 align 8
 global seq_iter_type
@@ -2653,6 +2658,7 @@ seq_iter_type:
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; Reversed iterator type
 align 8
@@ -2686,4 +2692,5 @@ reversed_iter_type:
     dq iter_clear_one                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 

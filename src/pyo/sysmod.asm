@@ -569,6 +569,11 @@ DEF_FUNC sys_module_init, 40
     extern unraisable_args_type
     lea rdi, [rel unraisable_args_type]
     call structseq_init_type
+    ; sys.asyncgen_hooks, which get_asyncgen_hooks answers with.  Only the type
+    ; is registered here; an instance is built per call.
+    extern asyncgen_hooks_type
+    lea rdi, [rel asyncgen_hooks_type]
+    call structseq_init_type
     lea rdi, [rel version_info_type]
     call structseq_new
     mov rbx, rax                ; rbx = the version_info object
@@ -1163,6 +1168,8 @@ DEF_FUNC sys_module_init, 40
     SYS_ADD_FUNC sys_is_finalizing_func, sm_is_finalizing
     SYS_ADD_FUNC_ALIAS sys_unraisablehook_func, sm_unraisablehook, \
                        sm_dunder_unraisablehook
+    SYS_ADD_FUNC sys_get_asyncgen_hooks_func, sm_get_asyncgen_hooks
+    SYS_ADD_FUNC sys_set_asyncgen_hooks_func, sm_set_asyncgen_hooks
     SYS_ADD_FUNC sys_exc_info_func, sm_exc_info
     SYS_ADD_FUNC sys_exception_func, sm_exception
 
@@ -1611,7 +1618,13 @@ sm_maxsize:      db "maxsize", 0
 sm_platform:     db "platform", 0
 sm_linux:        db "linux", 0
 sm_version:      db "version", 0
-sm_version_val:  db "3.12.0 (apython ", VERSION_STR, ")", 0
+; platform._sys_version's regex ends in `\[([^\]]+)\]?`, so a BRACKETED
+; compiler field is not optional: without it every call into `platform` raised
+; "failed to parse CPython sys.version".  The name a program should read for
+; the implementation is sys.implementation.name, which is "apython";
+; platform.python_implementation() has no hook for one and answers "CPython".
+; DIVERGENCES.md records that.
+sm_version_val:  db "3.12.0 (apython ", VERSION_STR, ") [NASM x86-64]", 0
 sm_version_info: db "version_info", 0
 sm_float_info:   db "float_info", 0
 sm_flags:        db "flags", 0
@@ -1699,6 +1712,10 @@ sm_path_importer_cache: db "path_importer_cache", 0
 sm_meta_path:    db "meta_path", 0
 sm_pycache_prefix: db "pycache_prefix", 0
 sm_path_hooks:   db "path_hooks", 0
+sm_get_asyncgen_hooks: db "get_asyncgen_hooks", 0
+sm_set_asyncgen_hooks: db "set_asyncgen_hooks", 0
+sm_firstiter:    db "firstiter", 0
+sm_finalizer:    db "finalizer", 0
 sm_displayhook:  db "displayhook", 0
 sm_dunder_displayhook: db "__displayhook__", 0
 sm_getrefcount:  db "getrefcount", 0
@@ -1736,6 +1753,16 @@ sys_module_obj: resq 1
 
 global sys_stdout_obj
 sys_stdout_obj: resq 1
+
+; PEP 525's two hooks, per interpreter.  An event loop installs them so that it
+; learns about every async generator started under it and can close the ones
+; still suspended when it shuts down; CPython's BaseEventLoop.run_forever reads
+; them on its first line, which is why their absence stopped asyncio outright.
+; NULL means "no hook", which is what a program sees as None.
+global asyncgen_firstiter_hook
+asyncgen_firstiter_hook: resq 1
+global asyncgen_finalizer_hook
+asyncgen_finalizer_hook: resq 1
 
 ; Set once, by main's teardown, before the first finalizer runs.  It is what
 ; sys.is_finalizing() answers, and the reason it is here rather than in main is
@@ -1835,6 +1862,249 @@ DEF_FUNC sys_is_finalizing_func
 .sif_args:
     RAISE exc_TypeError_type, "is_finalizing() takes no arguments"
 END_FUNC sys_is_finalizing_func
+
+;; ============================================================================
+;; sys_get_asyncgen_hooks_func(args, nargs) -> Value: an asyncgen_hooks pair
+;;
+;; PEP 525.  A struct sequence rather than a namespace, because CPython's event
+;; loop restores the pair by splatting it back -- `set_asyncgen_hooks(*old)` --
+;; while reading .firstiter and .finalizer by name elsewhere.  NULL storage
+;; reads as None, which is what "no hook" looks like from Python.
+;; ============================================================================
+GAH_OBJ   equ 8
+GAH_FRAME equ 24            ; + 1 push = 32, 16-aligned
+DEF_FUNC sys_get_asyncgen_hooks_func, GAH_FRAME
+    push rbx
+    test rsi, rsi
+    jnz .gah_args
+    extern asyncgen_hooks_type
+    lea rdi, [rel asyncgen_hooks_type]
+    call structseq_new
+    test rax, rax
+    jz .gah_nomem
+    mov [rbp - GAH_OBJ], rax
+
+    ; obj_incref answers nothing -- rax still holds the object structseq_new
+    ; gave back -- so the value is carried in rbx rather than read out of rax.
+    ; Taken from rax, the pair stored ITSELF in both fields, and its repr
+    ; recursed until the machine stack ran out.
+    mov rbx, [rel asyncgen_firstiter_hook]
+    test rbx, rbx
+    jnz .gah_have_first
+    lea rbx, [rel none_singleton]
+.gah_have_first:
+    mov rdi, rbx
+    call obj_incref             ; structseq_set takes over a reference
+    mov rdi, [rbp - GAH_OBJ]
+    xor esi, esi
+    mov rdx, rbx
+    call structseq_set
+
+    mov rbx, [rel asyncgen_finalizer_hook]
+    test rbx, rbx
+    jnz .gah_have_final
+    lea rbx, [rel none_singleton]
+.gah_have_final:
+    mov rdi, rbx
+    call obj_incref
+    mov rdi, [rbp - GAH_OBJ]
+    mov esi, 1
+    mov rdx, rbx
+    call structseq_set
+
+    mov rax, [rbp - GAH_OBJ]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.gah_args:
+    RAISE exc_TypeError_type, "get_asyncgen_hooks() takes no arguments"
+.gah_nomem:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC sys_get_asyncgen_hooks_func
+
+;; ============================================================================
+;; sys_set_asyncgen_hooks_func(args, nargs) -> Value: None
+;;
+;; Takes firstiter and finalizer, positionally or by keyword -- CPython's event
+;; loop uses the keyword form to install and the positional splat to restore.
+;; An argument left out leaves that half alone, as CPython's does; None clears
+;; it; anything else must be callable.
+;; ============================================================================
+SAH_ARGS  equ 8
+SAH_NARGS equ 16
+SAH_FRAME equ 40            ; + 1 push = 48, 16-aligned
+DEF_FUNC sys_set_asyncgen_hooks_func, SAH_FRAME
+    push rbx
+    mov [rbp - SAH_ARGS], rdi
+    mov [rbp - SAH_NARGS], rsi
+
+    ; The keyword names, if any, are in kw_names_pending, and the values sit
+    ; at the end of the positional array -- the shape every builtin here reads.
+    extern kw_names_pending
+    mov rbx, [rel kw_names_pending]
+    mov qword [rel kw_names_pending], 0
+
+    ; Positional first: args[0] is firstiter, args[1] is finalizer.
+    xor ecx, ecx                ; i = 0
+    mov rdx, [rbp - SAH_NARGS]
+    test rbx, rbx
+    jz .sah_pos_count
+    sub rdx, [rbx + PyTupleObject.ob_size]   ; the keywords are not positional
+.sah_pos_count:
+    cmp rdx, 2
+    jg .sah_too_many
+.sah_pos_loop:
+    cmp rcx, rdx
+    jge .sah_kw
+    mov rax, [rbp - SAH_ARGS]
+    mov rdi, [rax + rcx*8]
+    mov esi, ecx                ; 0 = firstiter, 1 = finalizer
+    push rcx
+    push rdx
+    call sah_store
+    pop rdx
+    pop rcx
+    test eax, eax
+    jz .sah_bad
+    inc rcx
+    jmp .sah_pos_loop
+
+.sah_kw:
+    test rbx, rbx
+    jz .sah_done
+    xor ecx, ecx
+.sah_kw_loop:
+    cmp rcx, [rbx + PyTupleObject.ob_size]
+    jge .sah_done
+    mov rax, [rbx + PyTupleObject.ob_item]
+    mov rdi, [rax + rcx*8]      ; the keyword name str
+    lea rsi, [rdi + PyStrObject.data]
+    CSTRING rdi, "firstiter"
+    push rcx
+    push rsi
+    call ap_strcmp
+    pop rsi
+    pop rcx
+    test eax, eax
+    jz .sah_kw_first
+    CSTRING rdi, "finalizer"
+    push rcx
+    push rsi
+    call ap_strcmp
+    pop rsi
+    pop rcx
+    test eax, eax
+    jnz .sah_bad_keyword
+    mov esi, 1
+    jmp .sah_kw_have
+.sah_kw_first:
+    xor esi, esi
+.sah_kw_have:
+    ; The value: the keyword block sits at the tail of the positional array.
+    mov rax, [rbp - SAH_NARGS]
+    sub rax, [rbx + PyTupleObject.ob_size]
+    add rax, rcx
+    mov rdx, [rbp - SAH_ARGS]
+    mov rdi, [rdx + rax*8]
+    push rcx
+    push rsi
+    call sah_store
+    pop rsi
+    pop rcx
+    test eax, eax
+    jz .sah_bad
+    inc rcx
+    jmp .sah_kw_loop
+
+.sah_done:
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.sah_bad:
+    ; Unreachable: sah_store raises rather than returning 0.  Kept so the
+    ; caller reads as a checked call.
+    pop rbx
+    leave
+    ret
+.sah_too_many:
+    RAISE exc_TypeError_type, "set_asyncgen_hooks() takes at most 2 arguments"
+.sah_bad_keyword:
+    RAISE exc_TypeError_type, \
+        "set_asyncgen_hooks() got an unexpected keyword argument"
+END_FUNC sys_set_asyncgen_hooks_func
+
+;; ============================================================================
+;; sah_store(rdi = Value, esi = 0 for firstiter / 1 for finalizer)
+;;   -> eax = 1 stored, 0 with a TypeError recorded
+;;
+;; None clears the hook; anything else has to be callable, which is the one
+;; thing CPython checks here.  The hook is held for the life of the setting,
+;; so the old one is released.
+;; ============================================================================
+SAHS_VAL   equ 8
+SAHS_WHICH equ 16
+SAHS_FRAME equ 16           ; 0 pushes, 16-aligned
+DEF_FUNC_LOCAL sah_store, SAHS_FRAME
+    mov [rbp - SAHS_VAL], rdi
+    mov [rbp - SAHS_WHICH], rsi
+
+    lea rcx, [rel none_singleton]
+    cmp rdi, rcx
+    je .sahs_clear
+    V_TEST_PTR rdi, rax
+    ja .sahs_not_callable
+    ; Callable is one line, as builtin_callable's comment says: a type whose
+    ; tp_call is set has callable instances.
+    mov rax, [rdi + PyObject.ob_type]
+    cmp qword [rax + PyTypeObject.tp_call], 0
+    je .sahs_not_callable
+    mov rdi, [rbp - SAHS_VAL]
+    call obj_incref
+    mov rdx, [rbp - SAHS_VAL]
+    jmp .sahs_put
+.sahs_clear:
+    xor edx, edx
+.sahs_put:
+    cmp qword [rbp - SAHS_WHICH], 0
+    jne .sahs_final
+    mov rdi, [rel asyncgen_firstiter_hook]
+    mov [rel asyncgen_firstiter_hook], rdx
+    jmp .sahs_release
+.sahs_final:
+    mov rdi, [rel asyncgen_finalizer_hook]
+    mov [rel asyncgen_finalizer_hook], rdx
+.sahs_release:
+    test rdi, rdi
+    jz .sahs_ok
+    call obj_decref
+.sahs_ok:
+    mov eax, 1
+    leave
+    ret
+.sahs_not_callable:
+    ; CPython names the half it was given, so the message says which argument
+    ; was wrong.
+    mov rsi, [rbp - SAHS_VAL]
+    cmp qword [rbp - SAHS_WHICH], 0
+    jne .sahs_bad_final
+    CSTRING rdi, `callable firstiter expected, got \x01`
+    jmp .sahs_raise
+.sahs_bad_final:
+    CSTRING rdi, `callable finalizer expected, got \x01`
+.sahs_raise:
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name  ; does not return
+END_FUNC sah_store
 
 ;; ============================================================================
 ;; sys_displayhook_func(args, nargs) -> Value: None

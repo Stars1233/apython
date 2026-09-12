@@ -53,6 +53,7 @@ extern cg_s_with
 extern cg_s_functiondef
 extern cg_s_return
 extern comp_error
+extern cg_error
 
 extern comp_empty_string
 extern none_singleton
@@ -134,20 +135,14 @@ DEF_FUNC cg_stmt, CST_FRAME
 
 .unsupported:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "this statement is not supported yet"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    CSTRING rsi, "this statement is not supported yet"
+    call cg_error
     xor eax, eax
     jmp .ret
 .bad:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "invalid syntax"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    CSTRING rsi, "invalid syntax"
+    call cg_error
     xor eax, eax
 .ret:
     pop r13
@@ -406,19 +401,13 @@ DEF_FUNC cg_store, CSV_FRAME
 
 .two_stars:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "two starred expressions in assignment"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    CSTRING rsi, "two starred expressions in assignment"
+    call cg_error
     jmp .fail
 .bad:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "cannot assign to that expression"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    CSTRING rsi, "cannot assign to that expression"
+    call cg_error
 .fail:
     xor eax, eax
     jmp .ret
@@ -470,6 +459,30 @@ DEF_FUNC_LOCAL cg_s_expr, CST_FRAME
     call cg_expr
     test eax, eax
     jz .fail
+
+    ; In "single" mode a bare expression at MODULE level is displayed rather
+    ; than discarded -- that is what makes a REPL echo, and what doctest reads
+    ; its expected output from.  CPython emits CALL_INTRINSIC_1 INTRINSIC_PRINT
+    ; before the POP_TOP; it calls sys.displayhook, which is where the echo
+    ; and the `_` binding live.  Inside a function the statement is an
+    ; ordinary discard, in single mode as in exec.
+    cmp dword [rbx + Comp.mode], CMODE_SINGLE
+    jne .plain_discard
+    mov rdi, rbx
+    mov esi, [r12 + CompUnit.scope]
+    extern sym_at
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_MODULE
+    jne .plain_discard
+    mov rdi, r12
+    mov esi, OP_CALL_INTRINSIC_1
+    mov edx, INTRINSIC_PRINT
+    mov rcx, [rbp - CST_LINE]
+    call cg_emit
+    test eax, eax
+    jz .fail
+
+.plain_discard:
     mov rdi, r12
     mov esi, OP_POP_TOP
     xor edx, edx
@@ -1635,11 +1648,8 @@ DEF_FUNC cg_delete_target, CST_FRAME
     jmp .ok
 .bad:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "cannot delete that expression"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    CSTRING rsi, "cannot delete that expression"
+    call cg_error
 .fail:
     xor eax, eax
     jmp .ret
@@ -2837,11 +2847,8 @@ DEF_FUNC_LOCAL cg_s_break, CST_FRAME
     jmp .ret
 .outside:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "'break' outside loop"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    CSTRING rsi, "'break' outside loop"
+    call cg_error
     xor eax, eax
 .ret:
     pop r13
@@ -2892,11 +2899,8 @@ DEF_FUNC_LOCAL cg_s_continue, CST_FRAME
     jmp .ret
 .outside:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "'continue' not properly in loop"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    CSTRING rsi, "'continue' not properly in loop"
+    call cg_error
     xor eax, eax
 .ret:
     pop r13

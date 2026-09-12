@@ -819,6 +819,61 @@ DEF_FUNC cg_set_loc, SLOC_FRAME
 END_FUNC cg_set_loc
 
 ;; ============================================================================
+;; cg_error(Comp *c, const char *msg) -> rax = 0
+;;
+;; A codegen-time SyntaxError, at the location the emitters are generating
+;; for.  Every one of these used to pass a literal ZERO for the line, and
+;; comp_attach_location derives the source TEXT from the line -- so
+;; "'break' outside loop" came out as line 0, offset 1, no source line and no
+;; caret, where CPython underlines the keyword.
+;;
+;; Nothing new is tracked for it.  Comp.cur_unit is the unit cg_stmt is
+;; dispatching into, and the four CompUnit.cur* fields are what cg_set_loc
+;; already maintains from the node for the line table; curcol == -1 is its
+;; "no location", and then there is nothing better to say than what the old
+;; code said.
+;; ============================================================================
+CGE_COMP  equ 8
+CGE_MSG   equ 16
+CGE_FRAME equ 24                ; + 1 push = 32, 16-aligned
+global cg_error
+DEF_FUNC cg_error, CGE_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - CGE_MSG], rsi
+
+    mov rax, [rdi + Comp.cur_unit]
+    test rax, rax
+    jz .cge_nowhere
+    cmp dword [rax + CompUnit.curcol], -1
+    je .cge_nowhere
+    mov ecx, [rax + CompUnit.curline]
+    mov r8d, [rax + CompUnit.curcol]
+    mov r9d, [rax + CompUnit.curend]
+    mov r10d, [rax + CompUnit.curendcol]
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    mov rdx, [rbp - CGE_MSG]
+    call comp_error_span
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.cge_nowhere:
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    mov rdx, [rbp - CGE_MSG]
+    xor ecx, ecx
+    xor r8d, r8d
+    call comp_error
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC cg_error
+
+;; ============================================================================
 ;; cg_expr(Comp *c, CompUnit *u, uint32_t node) -> rax = 1 ok, 0 error
 ;;
 ;; Dispatches on the node kind.  Every emitter reached from here leaves exactly
@@ -929,11 +984,8 @@ DEF_FUNC cg_expr, CE_FRAME
 
 .bad_node:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "invalid syntax"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    CSTRING rsi, "invalid syntax"
+    call cg_error
     xor eax, eax
     pop r13
     pop r12
@@ -2789,11 +2841,8 @@ DEF_FUNC_LOCAL cg_e_call, CC2_FRAME
 
 .pos_after_kw:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "positional argument follows keyword argument"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    CSTRING rsi, "positional argument follows keyword argument"
+    call cg_error
 .fail:
     xor eax, eax
     jmp .ret
@@ -2990,11 +3039,8 @@ DEF_FUNC cg_super_attr, ZS_FRAME
 
 .bad_context:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "super(): no arguments and no enclosing method"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    CSTRING rsi, "super(): no arguments and no enclosing method"
+    call cg_error
 .err:
     mov rax, -1
     jmp .ret
@@ -3230,11 +3276,8 @@ DEF_FUNC cg_call_args_only, CA_FRAME
     jmp .ret
 .unsupported:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    CSTRING rdx, "unpacking is not supported in a class base list"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    CSTRING rsi, "unpacking is not supported in a class base list"
+    call cg_error
 .fail:
     mov rax, -1
 .ret:

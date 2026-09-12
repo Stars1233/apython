@@ -45,6 +45,7 @@ DEF_FUNC fileobj_new, 8            ; 3 pushes, so rsp is 16-aligned
     mov [rdi + PyObject.ob_type], rax
     mov [rdi + PyFileObject.file_fd], rbx
     mov qword [rdi + PyFileObject.file_len], 0
+    mov qword [rdi + PyFileObject.file_binary], 0
 
     ; Block-buffered when it is not a terminal, which is CPython's rule and
     ; the only one that is observable: a terminal wants each line as it is
@@ -603,6 +604,206 @@ DEF_FUNC fileobj_readline, FRL_FRAME
 END_FUNC fileobj_readline
 
 ;; ============================================================================
+;; fileobj_writelines(rdi = args Value[], rsi = nargs) -> rax = None
+;;
+;; write() for each item of an iterable, which is all CPython's writelines is
+;; -- it adds no separator.  Its absence is what stopped test_audit: anything
+;; handed a list of lines calls this rather than joining them itself.
+;; ============================================================================
+FWL_SELF  equ 8
+FWL_ITER  equ 16
+FWL_ARGS  equ 24
+FWL_FRAME equ 40            ; + 1 push = 48, 16-aligned
+DEF_FUNC fileobj_writelines, FWL_FRAME
+    push rbx
+    cmp rsi, 2
+    jl .fwl_args
+    mov rbx, [rdi]              ; the file
+    mov [rbp - FWL_SELF], rbx
+    mov rdi, [rdi + 8]          ; the iterable
+    ; get_iterator_opt still takes the old (payload, tag) pair, so a Value has
+    ; to be taken apart first: handed one whole with a hardcoded TAG_PTR, it
+    ; read ob_type off the number in `writelines(42)`.
+    V_UNPACK rdi, rsi
+    extern get_iterator_opt
+    call get_iterator_opt
+    test rax, rax
+    jz .fwl_not_iterable
+    V_UNPACK rax, rdx
+    mov [rbp - FWL_ITER], rax
+
+.fwl_loop:
+    mov rdi, [rbp - FWL_ITER]
+    extern call_iternext
+    call call_iternext
+    test rax, rax
+    jz .fwl_done                ; exhausted, or it raised
+    mov [rbp - FWL_ARGS], rax
+    sub rsp, 16
+    mov rcx, [rbp - FWL_SELF]
+    mov [rsp], rcx
+    mov rcx, [rbp - FWL_ARGS]
+    mov [rsp + 8], rcx
+    mov rdi, rsp
+    mov esi, 2
+    call fileobj_write
+    add rsp, 16
+    push rax
+    push rax
+    mov rdi, [rbp - FWL_ARGS]
+    DECREF_V rdi, rcx
+    pop rax
+    pop rax
+    test rax, rax
+    jz .fwl_failed
+    DECREF_V rax, rcx
+    jmp .fwl_loop
+
+.fwl_done:
+    mov rdi, [rbp - FWL_ITER]
+    call obj_decref
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    jne .fwl_raised
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.fwl_failed:
+    mov rdi, [rbp - FWL_ITER]
+    call obj_decref
+.fwl_raised:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+
+.fwl_not_iterable:
+    RAISE exc_TypeError_type, "writelines() argument must be iterable"
+.fwl_args:
+    RAISE exc_TypeError_type, "writelines() takes exactly one argument"
+END_FUNC fileobj_writelines
+
+;; ============================================================================
+;; fileobj_buffer(rdi = the file) -> rax = its binary half, or 0 raising
+;;
+;; `sys.stdout.buffer`.  This object is a text layer with no separate binary
+;; one underneath -- it writes to the descriptor itself -- so the buffer is an
+;; _io.FileIO over the same fd, built on first ask and kept.  Built lazily
+;; because building it eagerly means importing _io at start-up, and that is
+;; 1.1 ms -> 2.9 ms on EVERY run of the interpreter.
+;;
+;; Whatever is waiting in the text buffer is written out first, and the text
+;; half stops buffering from then on: the two halves write to one descriptor,
+;; and a program that mixes them expects to see its output in the order it
+;; wrote it.  CPython needs no such rule, because its text layer sits on its
+;; binary one and both go through the same BufferedWriter.
+;; ============================================================================
+FBF_SELF  equ 8
+FBF_MOD   equ 16
+FBF_NAME  equ 24            ; the attribute name, in a slot rather than pushed:
+                            ; a lone push before a call misaligns it, and rsp
+                            ; alignment is what lint cannot see past a prologue
+FBF_FRAME equ 40            ; + 1 push = 48, 16-aligned
+DEF_FUNC fileobj_buffer, FBF_FRAME
+    push rbx
+    mov rbx, rdi
+    mov rax, [rbx + PyFileObject.file_binary]
+    test rax, rax
+    jnz .fbf_have
+
+    mov [rbp - FBF_SELF], rbx
+    call fileobj_drain              ; ordering: the text half goes out first
+    mov rdi, rbx
+
+    ; _io.FileIO(fd, mode, closefd=False) -- and closefd matters: this fd
+    ; belongs to the process, not to the wrapper.
+    CSTRING rdi, "_io"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    mov [rbp - FBF_NAME], rax
+    mov rdi, rax
+    xor esi, esi                    ; no fromlist
+    xor edx, edx                    ; absolute
+    extern import_module
+    call import_module
+    mov [rbp - FBF_MOD], rax
+    mov rdi, [rbp - FBF_NAME]
+    call obj_decref
+    cmp qword [rbp - FBF_MOD], 0
+    je .fbf_fail
+    CSTRING rdi, "FileIO"
+    call str_from_cstr_heap
+    mov [rbp - FBF_NAME], rax
+    mov rdi, [rbp - FBF_MOD]
+    mov rsi, rax
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    mov rbx, rax                ; a Value: _io.FileIO, whatever it is
+    mov rdi, [rbp - FBF_NAME]
+    call obj_decref             ; the name, which is always a str
+    test rbx, rbx
+    jz .fbf_fail
+
+    sub rsp, 32
+    mov rcx, [rbp - FBF_SELF]
+    mov rcx, [rcx + PyFileObject.file_fd]
+    V_PACK_I64 rcx, rdx
+    mov [rsp], rcx
+    mov rcx, [rbp - FBF_SELF]
+    mov rcx, [rcx + PyFileObject.file_mode]
+    mov [rsp + 8], rcx
+    extern bool_false
+    lea rcx, [rel bool_false]
+    mov [rsp + 16], rcx
+    mov rdi, rbx
+    mov rsi, rsp
+    mov edx, 3
+    extern obj_call_n
+    call obj_call_n
+    add rsp, 32
+    push rax
+    push rax
+    mov rdi, rbx
+    DECREF_V rdi, rcx               ; the FileIO class, released as a Value
+    pop rax
+    pop rax
+    test rax, rax
+    jz .fbf_fail
+    mov rbx, [rbp - FBF_SELF]
+    mov [rbx + PyFileObject.file_binary], rax   ; kept, owned
+    ; The two halves write to ONE descriptor and this one keeps its own buffer,
+    ; so a program that mixes them would see its print() output arrive after
+    ; raw writes made later.  CPython has no such split -- its text layer sits
+    ; ON its binary one, and both go through the same BufferedWriter -- so the
+    ; ordering is kept here by giving the buffering up: once the binary half is
+    ; out in the open, the text half writes straight through.
+    mov qword [rbx + PyFileObject.file_buffered], 0
+.fbf_have:
+    push rax
+    push rax
+    mov rdi, rax
+    extern obj_incref
+    call obj_incref
+    pop rax
+    pop rax
+    pop rbx
+    leave
+    ret
+.fbf_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC fileobj_buffer
+
+
+;; ============================================================================
 ;; fileobj_getattr(PyObject *self, PyObject *name_str) -> rax = Value
 ;; Attribute access for file objects: encoding, errors, name, mode, methods
 ;; ============================================================================
@@ -748,12 +949,52 @@ DEF_FUNC fileobj_getattr
     test eax, eax
     jz .ret_line_buffering
 
+    ; Check "writelines"
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel fa_writelines]
+    call ap_strcmp
+    test eax, eax
+    jz .ret_writelines
+
+    ; Check "buffer"
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel fa_buffer]
+    call ap_strcmp
+    test eax, eax
+    jz .ret_buffer
+
     ; Unknown attribute
     RET_NULL
     pop r12
     pop rbx
     leave
     V_PACK rax, rdx             ; return one Value
+    ret
+
+.ret_writelines:
+    lea rdi, [rel fileobj_writelines]
+    lea rsi, [rel fa_writelines]
+    call builtin_func_new
+    jmp .bind_method
+
+.ret_buffer:
+    ; Not a method: the binary stream itself.
+    mov rdi, rbx
+    call fileobj_buffer
+    test rax, rax
+    jz .fg_buffer_failed
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.fg_buffer_failed:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
     ret
 
 .ret_write:
@@ -922,6 +1163,8 @@ fileobj_type_name: db "TextIOWrapper", 0
 
 ; Attribute names
 fa_write:     db "write", 0
+fa_writelines: db "writelines", 0
+fa_buffer:    db "buffer", 0
 fa_flush:     db "flush", 0
 fa_fileno:    db "fileno", 0
 fa_isatty:    db "isatty", 0
@@ -976,3 +1219,4 @@ file_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer

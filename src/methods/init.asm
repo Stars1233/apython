@@ -1084,6 +1084,8 @@ DEF_FUNC methods_init
     xor ecx, ecx
     call dict_add_getset
 
+    extern range_reduce
+    ADD_FN_N mn___reduce__, range_reduce, 1, 1
     extern range_obj_type
     lea rax, [rel range_obj_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1099,6 +1101,8 @@ DEF_FUNC methods_init
 
     extern slice_method_indices
     ADD_FN_N mn_indices, slice_method_indices, 2, 2
+    extern slice_reduce
+    ADD_FN_N mn___reduce__, slice_reduce, 1, 1
     mov rdi, rbx
     lea rsi, [rel gs_start]
     extern slice_get_start
@@ -1198,6 +1202,8 @@ DEF_FUNC methods_init
     ADD_FN mn___next__, _ags_next_impl
     extern _ags_close_impl
     ADD_FN mn_close, _ags_close_impl
+    extern _agt_throw_impl
+    ADD_FN mn_throw, _agt_throw_impl    ; see the athrow block below
     extern async_gen_asend_dunder_iter
     ADD_FN mn___iter__, async_gen_asend_dunder_iter
     ADD_FN mn___await__, async_gen_asend_dunder_iter
@@ -1217,6 +1223,11 @@ DEF_FUNC methods_init
     ADD_FN mn_send, _ags_send_impl
     ADD_FN mn___next__, _ags_next_impl
     ADD_FN mn_close, _ags_close_impl
+    ; collections.abc.Coroutine is a structural check over send, throw, close
+    ; and __await__, and asyncio's create_task makes it: without `throw` the
+    ; object agen.aclose() answers was "not a coroutine" there.
+    extern _agt_throw_impl
+    ADD_FN mn_throw, _agt_throw_impl
     extern async_gen_athrow_dunder_iter
     ADD_FN mn___iter__, async_gen_athrow_dunder_iter
     ADD_FN mn___await__, async_gen_athrow_dunder_iter
@@ -1893,6 +1904,10 @@ DEF_FUNC methods_init
     mov rbx, rax
     extern method_dunder_call
     ADD_FN mn___call__, method_dunder_call
+    ; A bound method reduces to (getattr, (self, name)), as CPython's does --
+    ; without it anything holding one could not be pickled.
+    extern method_reduce
+    ADD_FN_N mn___reduce__, method_reduce, 1, 1
     extern method_type
     lea rax, [rel method_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2071,6 +2086,10 @@ DEF_FUNC methods_init
     ADD_FN mn___get__, builtin_func_dunder_get
     extern builtin_func_dunder_call
     ADD_FN mn___call__, builtin_func_dunder_call
+    ; An unbound builtin reduces to its own NAME, which pickle saves as a
+    ; global lookup.  `iter` is one, and every iterator's reduce names it.
+    extern builtin_func_reduce
+    ADD_FN_N mn___reduce__, builtin_func_reduce, 1, 1
     extern builtin_func_type
     lea rax, [rel builtin_func_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2814,6 +2833,12 @@ DEF_FUNC methods_init
     extern repr_types_init
     call repr_types_init
 
+    ; The attributes a type's own tp_getattr answers, published so that dir(),
+    ; inspect.getmembers and everything else that asks by NAME can see them.
+    ; After the two above, for the same reason: it adds into the dict it finds.
+    extern attr_types_init
+    call attr_types_init
+
     pop r12
     pop rbx
     leave
@@ -2982,7 +3007,12 @@ global mn___repr__
 mn___next__:    db "__next__", 0
 mn___await__:   db "__await__", 0
 mn___dir__:     db "__dir__", 0
+global mn___reduce__
 mn___reduce__:  db "__reduce__", 0
+global mn___setstate__
+mn___setstate__: db "__setstate__", 0
+global mn___length_hint__
+mn___length_hint__: db "__length_hint__", 0
 mn___reduce_ex__: db "__reduce_ex__", 0
 mn___getitem__: db "__getitem__", 0
 mn___setitem__: db "__setitem__", 0

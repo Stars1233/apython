@@ -324,6 +324,10 @@ DEF_FUNC import_init
     mov rsi, [rel builtins_dict_global]
     call module_new
     mov rbx, rax                ; builtins module
+    ; Kept, borrowed, because a module-level builtin's __self__ IS this module
+    ; in CPython -- `len.__self__` is <module 'builtins'> there, and pickling
+    ; a builtin by name goes through it.  sys.modules holds the reference.
+    mov [rel builtins_module_obj], rax
     pop rdi                     ; DECREF name (module_new INCREF'd)
     call obj_decref
 
@@ -2318,4 +2322,10 @@ ISP_BUFSZ equ 4096
 isp_buf: resb ISP_BUFSZ
 
 section .bss
+; The builtins module, borrowed: sys.modules holds the reference for the life
+; of the interpreter.  A module-level builtin's __self__ is this, as CPython's
+; is, and pickling one by name reads it.
+global builtins_module_obj
+builtins_module_obj: resq 1
+
 import_path_buf_ptr: resq 1    ; malloc'd path buffer (lazy-allocated)

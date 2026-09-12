@@ -63,7 +63,9 @@ section .text
 ;; ============================================================================
 global memoryview_type_call
 MV_ARG   equ 8              ; args[0] as it arrived, for the refusal
-MV_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+MV_BUF   equ 16             ; what a tp_as_buffer slot answered, held across
+MV_LEN   equ 24             ;   the allocation and the acquire
+MV_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC memoryview_type_call, MV_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     cmp rdx, 1
@@ -155,9 +157,8 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     push rax
     push rdi
     mov rdi, rcx
-    call bytearray_export_acquired
-    call io_buffer_acquired     ; a second view over a BytesIO is a second
-    pop rdi                     ; export, and its release will decrement
+    call mv_source_acquired     ; a second view is a second export, on every
+    pop rdi                     ; counter the dealloc will decrement
     pop rax
 .mv_view_no_src:
     mov rcx, [rdi + PyMemoryViewObject.mv_buf]
@@ -184,12 +185,117 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     jmp raise_type_error_counted
 
 .mv_error:
+    ; Before refusing, ask the TYPE.  bytes, bytearray and memoryview each have
+    ; an arm above because each needs its own export accounting and its own
+    ; readonly answer; anything else that can hand over a run of bytes says so
+    ; through tp_as_buffer, and array is the first.
+    mov rdi, [rbp - MV_ARG]
+    V_TEST_PTR rdi, rax
+    ja .mv_really_error
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_buffer]
+    test rax, rax
+    jnz .mv_from_slot
+
+.mv_really_error:
     mov rsi, [rbp - MV_ARG]
     CSTRING rdi, `memoryview: a bytes-like object is required, not '\x01'`
     extern raise_type_error_with_name
     jmp raise_type_error_with_name
+.mv_from_slot:
+    ; The generic exporter road: a read-only view of one-byte items over
+    ; whatever the slot points at.  Read-only because a buffer reached this way
+    ; has told us where its bytes are and nothing about whether they may move
+    ; -- array's can, when it grows -- so writing through the view is refused
+    ; rather than silently aimed at a stale pointer.
+    ;
+    ; The buffer is fetched BEFORE the view is allocated, because the slot may
+    ; decline: its ecx says whether it answered at all, and building a view
+    ; around whatever was left in rax is how a declining exporter would have
+    ; become a wild pointer.
+    mov [rbp - MV_ARG], rdi
+    mov rcx, [rdi + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_buffer]
+    mov esi, BUF_GET
+    call rcx                        ; rax = data, rdx = length, ecx = answered
+    test ecx, ecx
+    jz .mv_really_error
+    mov [rbp - MV_BUF], rax
+    mov [rbp - MV_LEN], rdx
+
+    mov edi, PyMemoryViewObject_size
+    call ap_malloc
+    mov rdi, [rbp - MV_ARG]
+    mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
+    lea rcx, [rel memoryview_type]
+    mov [rax + PyMemoryViewObject.ob_type], rcx
+    mov [rax + PyMemoryViewObject.mv_source], rdi
+    push rax
+    push rdi
+    INCREF rdi                      ; the view holds its source
+    pop rdi
+    pop rax
+
+    ; And the exporter counts it, so that a resize while this view is alive is
+    ; refused rather than leaving the pointer below dangling.
+    push rax
+    push rax
+    mov rcx, [rdi + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_buffer]
+    mov esi, BUF_ACQUIRE
+    call rcx
+    pop rax
+    pop rax
+
+    mov r10, [rbp - MV_BUF]
+    mov r11, [rbp - MV_LEN]
+    mov [rax + PyMemoryViewObject.mv_buf], r10
+    mov [rax + PyMemoryViewObject.mv_len], r11
+    mov qword [rax + PyMemoryViewObject.mv_itemsize], 1
+    mov qword [rax + PyMemoryViewObject.mv_stride], 1
+    lea rcx, [rel mv_format_B]
+    mov [rax + PyMemoryViewObject.mv_format], rcx
+    mov qword [rax + PyMemoryViewObject.mv_readonly], 1
+    mov edx, TAG_PTR
+    leave
+    ret
 END_FUNC memoryview_type_call
 
+
+;; ============================================================================
+;; mv_source_acquired(rdi = the object a derived view is now sharing)
+;;   -> nothing
+;;
+;; The three counts an exporter may keep, taken together: bytearray's own,
+;; BytesIO's own, and tp_as_buffer's BUF_ACQUIRE.
+;;
+;; memoryview_dealloc_proper releases all three unconditionally, so a
+;; constructor that took only the first two left the slot's count one BELOW
+;; what was outstanding -- and the exporter then allowed a resize under a live
+;; view.  All three DERIVED constructors did: a slice, a cast, and a view of a
+;; view.  `array.array` is the exporter that shows it, and lib/_io.py's
+;; readinto does `b = b.cast("B")`, so it is the ordinary path and not a
+;; corner.
+;; ============================================================================
+MSA_FRAME equ 8                 ; + 1 push: rsp is 16-aligned at every call
+DEF_FUNC_LOCAL mv_source_acquired, MSA_FRAME
+    push rbx
+    mov rbx, rdi
+    call bytearray_export_acquired
+    mov rdi, rbx
+    call io_buffer_acquired
+    mov rcx, [rbx + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_buffer]
+    test rcx, rcx
+    jz .msa_no_slot
+    mov rdi, rbx
+    mov esi, BUF_ACQUIRE
+    call rcx
+.msa_no_slot:
+    pop rbx
+    leave
+    ret
+END_FUNC mv_source_acquired
 
 ;; Proper dealloc:
 DEF_FUNC memoryview_dealloc_proper, 8            ; 1 pushes, so rsp is 16-aligned
@@ -200,6 +306,16 @@ DEF_FUNC memoryview_dealloc_proper, 8            ; 1 pushes, so rsp is 16-aligne
     push rdi
     call bytearray_export_released
     call io_buffer_released
+    ; A source reached through the slot counts its exports there.  Released
+    ; before the decref below, because that may be the source's last reference.
+    mov rdi, [rsp]
+    mov rcx, [rdi + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_buffer]
+    test rcx, rcx
+    jz .mvd_no_slot
+    mov esi, BUF_RELEASE
+    call rcx
+.mvd_no_slot:
     pop rdi
     call obj_decref
 .mvd_no_source:
@@ -749,9 +865,24 @@ DEF_FUNC memoryview_method_release, MVM_FRAME
     test rax, rax
     jz .mvrl_done
     push rax                    ; io_buffer_released returns in rax, so the
-    mov rdi, rax                ; source has to survive the call in a slot
+    push rax                    ; source has to survive the calls; and a pad
+    mov rdi, rax
     call bytearray_export_released
     call io_buffer_released     ; a BytesIO counts its live views
+    ; And tp_as_buffer's own count, which the dealloc releases and this did
+    ; not -- so `m.release()` and `with memoryview(a):` left an array pinned
+    ; for good, and the append after them was a BufferError where CPython
+    ; allows it.  mv_source was zeroed above, so the dealloc will not release
+    ; it a second time.
+    mov rdi, [rsp]
+    mov rcx, [rdi + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_buffer]
+    test rcx, rcx
+    jz .mvrl_no_slot
+    mov esi, BUF_RELEASE
+    call rcx
+.mvrl_no_slot:
+    pop rdi
     pop rdi
     call obj_decref
 .mvrl_done:
@@ -886,8 +1017,7 @@ DEF_FUNC memoryview_method_cast, MVC_FRAME
     push rax
     push rdi
     mov rdi, rcx
-    call bytearray_export_acquired
-    call io_buffer_acquired
+    call mv_source_acquired
     pop rdi
     pop rax
 .mvc_no_src:
@@ -1208,9 +1338,10 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     jz .ms_no_source
     inc qword [rcx + PyObject.ob_refcnt]
     push rax
+    push rax                    ; and a pad: the call below stays aligned
     mov rdi, rcx
-    call bytearray_export_acquired
-    call io_buffer_acquired
+    call mv_source_acquired
+    pop rax
     pop rax
 .ms_no_source:
     mov edx, TAG_PTR
@@ -1590,6 +1721,7 @@ memoryview_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 section .rodata
 ; The one-character format codes a view can carry.  cast() accepts only the

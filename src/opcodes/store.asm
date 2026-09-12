@@ -94,7 +94,9 @@ DS_OBJ    equ 8
 DS_KEY    equ 16
 DS_OTAG   equ 24
 DS_KTAG   equ 32
-DS_FRAME  equ 40            ; + 0 pushes = 32
+DS_RET    equ 40            ; what mp_ass_subscript answered, across the DECREFs
+DS_FRAME  equ 56            ; + 0 pushes = 56, which is 8 mod 16: a handler is
+                            ;   entered aligned, so its calls want the odd frame
 
 ;; ============================================================================
 ;; op_store_fast - Store TOS into localsplus[arg]
@@ -683,6 +685,8 @@ DEF_FUNC op_delete_subscr, DS_FRAME
     V_PACK rsi, rcx            ; key Value
     xor edx, edx               ; value = 0 (delete)
     call rax
+    movsxd rax, eax
+    mov [rbp - DS_RET], rax    ; DECREF_VAL below clobbers it
 
     ; DECREF key and obj (tag-aware)
     mov rdi, [rbp - DS_KEY]
@@ -692,8 +696,27 @@ DEF_FUNC op_delete_subscr, DS_FRAME
     mov rsi, [rbp - DS_OTAG]
     DECREF_VAL rdi, rsi
 
+    ; Most of the tree's mp_ass_subscript implementations raise and never come
+    ; back, which is why this used to discard the answer.  array's reports
+    ; failure the other way -- SET_EXC and -1 -- and discarding that meant a
+    ; refused delete simply did not happen, with the exception left pending to
+    ; surface at whatever opcode ran next: `del a[99]` printed nothing at all
+    ; and an IndexError arrived from somewhere else later.
+    cmp qword [rbp - DS_RET], 0
+    jl .ds_raised
+
     leave
     DISPATCH
+
+.ds_raised:
+    ; Same shape as .da_propagate: DISPATCH saved the stack top from BEFORE
+    ; the two operands came off it, and the unwinder cleans up from there --
+    ; so jumping without republishing r13 released both a second time.  A
+    ; refused `del a[99]` on an array freed the array's own header and printed
+    ; `array('[', [1675724320, 32139, 3])`.
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
 
 .ds_error:
     RAISE exc_TypeError_type, "object does not support item deletion"

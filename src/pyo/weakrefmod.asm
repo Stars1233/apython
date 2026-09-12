@@ -1364,6 +1364,7 @@ weakref_type:
     dq ref_clear                ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 align 8
 global proxy_type
@@ -1396,6 +1397,7 @@ proxy_type:
     dq 0
     dq 0
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 align 8
 global callableproxy_type
@@ -1428,6 +1430,7 @@ callableproxy_type:
     dq 0
     dq 0
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 section .rodata
 wrm_name:              db "_weakref", 0

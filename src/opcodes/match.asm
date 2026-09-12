@@ -138,6 +138,8 @@ END_FUNC ci_unsupported
 ;;   6 = INTRINSIC_LIST_TO_TUPLE
 ;; ============================================================================
 DEF_FUNC_BARE op_call_intrinsic_1
+    cmp ecx, 1
+    je .ci1_print
     cmp ecx, 2
     je .ci1_import_star
     cmp ecx, 3
@@ -183,6 +185,24 @@ DEF_FUNC_BARE op_call_intrinsic_1
 .ci1_subscript_generic:
     CSTRING rdi, "_subscript_generic"
     jmp .ci1_typing_one
+;; INTRINSIC_PRINT (arg=1): what makes an interactive statement echo.
+;; TOS is the value of a bare expression compiled in "single" mode; it is
+;; handed to sys.displayhook, which prints its repr and binds `_`.  The
+;; attribute is looked up rather than the builtin called directly, because
+;; replacing sys.displayhook is how a program takes the echo over --
+;; code.InteractiveInterpreter and IDLE both do.  TOS stays where it is: the
+;; POP_TOP that CPython emits after this one drops it.
+.ci1_print:
+    VPEEK rdi
+    push rdi                    ; two pushes: this handler carves no frame
+    push rdi
+    call intrinsic_display
+    pop rdi
+    pop rdi
+    test eax, eax
+    jnz eval_exception_unwind
+    DISPATCH
+
 .ci1_typealias:
     CSTRING rdi, "_typealias"
 .ci1_typing_one:
@@ -791,6 +811,70 @@ extern obj_decref
 .ci1_l2t_error:
     RAISE exc_TypeError_type, "list expected"
 END_FUNC op_call_intrinsic_1
+
+;; ============================================================================
+;; intrinsic_display(rdi = Value) -> rax = 0 ok, 1 with an exception pending
+;;
+;; INTRINSIC_PRINT's body, out of line because the handler carves no frame.
+;; Calls sys.displayhook(value) -- the attribute, so that a program which
+;; replaced it is the one that decides what an interactive statement echoes.
+;; With no sys module there is nothing to display and nothing to report.
+;; ============================================================================
+ID_VAL    equ 8
+ID_NAME   equ 16
+ID_HOOK   equ 24
+ID_FRAME  equ 32            ; 0 pushes, 16-aligned
+DEF_FUNC_LOCAL intrinsic_display, ID_FRAME
+    mov [rbp - ID_VAL], rdi
+    extern sys_module_obj
+    mov rax, [rel sys_module_obj]
+    test rax, rax
+    jz .id_ok
+    mov [rbp - ID_HOOK], rax
+
+    CSTRING rdi, "displayhook"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    mov [rbp - ID_NAME], rax
+    mov rdi, [rbp - ID_HOOK]
+    mov rsi, rax
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    mov [rbp - ID_HOOK], rax
+    mov rdi, [rbp - ID_NAME]
+    extern obj_decref
+    call obj_decref
+    mov rax, [rbp - ID_HOOK]
+    test rax, rax
+    jz .id_ok                   ; no displayhook: nothing to echo through
+
+    sub rsp, 16
+    mov rax, [rbp - ID_VAL]
+    mov [rsp], rax
+    mov rdi, [rbp - ID_HOOK]
+    mov rsi, rsp
+    mov edx, 1
+    extern obj_call_n
+    call obj_call_n
+    add rsp, 16
+    mov [rbp - ID_VAL], rax     ; the hook's result, or 0
+    ; A Value: sys.displayhook is whatever a program put there, and obj_decref
+    ; would write through an immediate.
+    mov rdi, [rbp - ID_HOOK]
+    DECREF_V rdi, rcx
+    mov rax, [rbp - ID_VAL]
+    test rax, rax
+    jz .id_raised
+    DECREF_V rax, rcx
+.id_ok:
+    xor eax, eax
+    leave
+    ret
+.id_raised:
+    mov eax, 1
+    leave
+    ret
+END_FUNC intrinsic_display
 
 ;; ============================================================================
 ;; op_get_len - Push len(TOS) without popping TOS

@@ -26,6 +26,7 @@ test_async_gather_nested
 test_async_gather
 test_async_gc
 test_async_gen_await
+test_asyncgen_hooks
 test_async_gen
 test_async_gen_sleep
 test_async_iterator_protocol
@@ -34,18 +35,23 @@ test_async_run
 test_async_streams
 test_async_tasks
 test_async_wait_for
+test_async_with_inherited
+test_async_with_lookup_raises
 test_async_with
 test_attr_cache_type_reuse
+test_attr_value_immediates
 test_awaitable
 test_await_raises
 test_bad_arguments
 test_binary_dunders
 test_binop_calls_once
+test_binop_concat_declines
 test_binop_matrix
 test_binop_right_slot
 test_bitwise
 test_bool_arith
 test_bool
+test_buffer_protocol
 test_builtin_arity
 test_builtin_dunder_str
 test_builtin_func_attrs
@@ -59,6 +65,7 @@ test_bytearray_repeat
 test_bytes_affix_range
 test_bytes_bytearray_args
 test_bytes_bytearray_repr
+test_bytes_dunder
 test_bytes_hash_tuple_cmp
 test_bytesio
 test_bytes_methods
@@ -77,6 +84,7 @@ test_call_instance
 test_call_kwargs_errors
 test_call_recursion
 test_call_spec
+test_class_annotations
 test_classcell_not_a_cell
 test_classes
 test_classmethod_metaclass
@@ -89,12 +97,14 @@ test_codecs
 test_codecs_registry_bridge
 test_codecs_registry
 test_code_gc
+test_code_localsplus
 test_code_replace
 test_compare_reflected_op
 test_comparisons
 test_compile_annotation_scan
 test_compile_annotations
 test_compile_async
+test_compile_async_scope
 test_compile_augassign
 test_compile_call_ex
 test_compile_class_body_cell
@@ -118,6 +128,7 @@ test_compile_fstring_debug
 test_compile_fstring
 test_compile_func
 test_compile_global_closure
+test_compile_identifier_chars
 test_compile_import_dotted
 test_compile_import_scope
 test_compile_import_star
@@ -140,6 +151,7 @@ test_compile_ternary_or
 test_compile_try
 test_compile_unpack_gaps
 test_compile_unwind
+test_compile_utf8_source
 test_compile_walrus_comp
 test_compile_warnings
 test_compile_with_as_unpack
@@ -167,6 +179,7 @@ test_del_dict
 test_del_during_unwind
 test_delete_name
 test_delete
+test_delete_subscr_refused
 test_del
 test_del_resurrect
 test_deopt_extended_arg
@@ -182,11 +195,13 @@ test_dict_bugs
 test_dict_clear_reentrant
 test_dict_compare
 test_dict_copy
+test_dict_display_mapping
 test_dict_dunder_args
 test_dict_empty
 test_dict_fromkeys
 test_dict_int_keys
 test_dict_ior
+test_dict_missing
 test_dict_mutate_iter
 test_dict_mutate_under_write
 test_dict_numkey
@@ -197,8 +212,10 @@ test_dicts
 test_dict_str_keys
 test_dict_update_mapping
 test_dict_update_raises
+test_dict_update_refcount
 test_dict_view_set
 test_dict_views
+test_dir_published
 test_dir
 test_dunder_descriptor
 test_dunder_protocols
@@ -209,6 +226,8 @@ test_empty_bases
 test_encodings
 test_errno
 test_error_messages
+test_eval_tuple
+test_exc_buffer_slot
 test_exc_catchable
 test_exc_context
 test_excepthook
@@ -242,6 +261,7 @@ test_float_big_int
 test_float_compare_spec
 test_float_complex_subclass
 test_float_format_diff
+test_float_fromhex_grammar
 test_float_fromhex
 test_float_int_mixed
 test_float_methods
@@ -278,13 +298,16 @@ test_function_attrs
 test_functions
 test_future_import
 test_gc_dealloc_untrack
+test_gc_del_raises
 test_gc_finalizer_order
 test_gc_generations
 test_gc_module
 test_gc_reentrant_collect
+test_gc_static_types
 test_gen_adv
 test_generator_close_on_drop
 test_generator_close_throw
+test_generator_frame_back
 test_generator_frame
 test_generators
 test_generic_alias_ctor
@@ -351,6 +374,7 @@ test_io_subclass
 test_io_tail
 test_isinstance_hostile
 test_islice_consumes
+test_iterable_arg_errors
 test_iterable_arguments
 test_iterator_cycles
 test_iterator_dunders
@@ -392,6 +416,7 @@ test_math
 test_member_descriptor_protocol
 test_membership
 test_memmove_boundaries
+test_memoryview_exports
 test_memoryview_released
 test_memoryview_stride
 test_metaclass_lifetime
@@ -449,6 +474,7 @@ test_percent_star
 test_percent_typecheck
 test_phase4
 test_phase6
+test_pickle_builtins
 test_poll_eintr
 test_posix_files
 test_posix_more
@@ -461,7 +487,9 @@ test_pow_dunder
 test_pow
 test_prepare_raises
 test_print_file
+test_print_sink_lifetime
 test_print_tag
+test_print_to_object
 test_property_callables
 test_property_doc
 test_property_getattr_hook
@@ -484,6 +512,7 @@ test_reflexive_compare
 test_relative_import
 test_re_module
 test_re_opcodes
+test_repr_depth_unwind
 test_repr_element_raises
 test_repr
 test_repr_str_cycle
@@ -533,6 +562,7 @@ test_slicing
 test_slot_builtin_dunder_assign
 test_slot_clear_and_none
 test_slot_descr_receiver
+test_slots_dict
 test_slots_mangling
 test_slots
 test_slots_store_cache
@@ -560,6 +590,7 @@ test_sre_scanner_and_boundary
 test_static_bases
 test_stdlib_glue
 test_stdlib_shims
+test_stdout_binary_half
 test_stdout_buffering
 test_store_attr_per_name
 test_store_attr_spec
@@ -610,6 +641,7 @@ test_sum_int_fast
 test_sum_protocol
 test_super_bad_object
 test_super_descriptors
+test_super_immediate
 test_super_object
 test_syntax_error_args
 test_syntax_error_location
@@ -621,6 +653,7 @@ test_sys_exception
 test_sys_executable
 test_sys_exit
 test_sys_is_finalizing
+test_sys_version_platform
 test_termios
 test_time_clock_info
 test_time_module
@@ -632,6 +665,7 @@ test_truthiness
 test_tuple_identity
 test_tuples
 test_typealias_scope_name
+test_type_annotations_meta
 test_type_cache
 test_type_comments
 test_type_constructors

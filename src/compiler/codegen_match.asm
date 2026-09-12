@@ -48,6 +48,8 @@ extern cg_label_bind
 extern cg_label_new
 extern cg_nameop
 extern comp_error
+extern cg_error
+extern comp_error_node
 extern exc_SyntaxError_type
 extern none_singleton
 extern bool_true
@@ -251,12 +253,9 @@ DEF_FUNC cg_pattern, CP3_FRAME
     cmp eax, AST_PAT_CLASS
     je .class_pattern
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
+    mov esi, r13d
     CSTRING rdx, "unsupported pattern"
-    mov rax, r13
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    call comp_error_node
     jmp .fail
 
 ;; `x` binds and always matches; `_` matches and binds nothing.
@@ -778,12 +777,9 @@ DEF_FUNC_LOCAL cg_pat_sequence, PS2_FRAME
 
 .too_many:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
+    mov esi, r13d
     CSTRING rdx, "too many sub-patterns in one pattern"
-    mov rax, r13
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    call comp_error_node
 .fail:
     xor eax, eax
 .ret:
@@ -962,12 +958,9 @@ DEF_FUNC_LOCAL cg_pat_class, PK2_FRAME
 
 .too_many:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
+    mov esi, r13d
     CSTRING rdx, "too many sub-patterns in one pattern"
-    mov rax, r13
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    call comp_error_node
 .fail:
     xor eax, eax
 .ret:
@@ -1275,12 +1268,9 @@ DEF_FUNC_LOCAL cg_pat_mapping, PM2_FRAME
 
 .too_many:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
+    mov esi, r13d
     CSTRING rdx, "too many sub-patterns in one pattern"
-    mov rax, r13
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    call comp_error_node
 .fail:
     xor eax, eax
 .ret:
@@ -1469,12 +1459,9 @@ DEF_FUNC_LOCAL cg_pat_keys, PY2_FRAME
     jmp .ret
 .not_literal:
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
+    mov esi, r13d
     CSTRING rdx, "a mapping pattern's keys must be literals"
-    mov rax, r13
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    call comp_error_node
 .fail:
     xor eax, eax
 .ret:

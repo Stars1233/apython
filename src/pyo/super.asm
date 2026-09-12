@@ -47,6 +47,7 @@ extern exc_TypeError_type
 extern exc_RuntimeError_type
 extern none_singleton
 extern value_type
+extern obj_dealloc
 extern exc_AttributeError_type
 
 ; Room for a message plus a type name; a tp_name is a literal in an assembled
@@ -168,20 +169,29 @@ END_FUNC super_no_attribute
 ;; which case its type is what gets searched -- or a subclass of it, which is
 ;; what a classmethod's first argument is, and then the object IS the type to
 ;; search.  Anything else is a TypeError, worded as CPython words it.
+;;
+;; The object is a VALUE, so its type comes from value_type and not from a raw
+;; ob_type read: `super(int, 1)` and `super(float, 1.5)` hand over a NaN-boxed
+;; immediate, and reading a header off one is reading the number as an
+;; address.  `super(int, 10**30)` worked all along because a big int is boxed.
 ;; ============================================================================
 SC_CLASS equ 8
 SC_OBJ   equ 16
-SC_FRAME equ 32                 ; 16 used + 16 pad = 32, 16-aligned
+SC_OBJTY equ 24
+SC_FRAME equ 32                 ; 24 used + 8 pad = 32, 16-aligned
 global super_check
 DEF_FUNC super_check, SC_FRAME
     mov [rbp - SC_CLASS], rdi
     mov [rbp - SC_OBJ], rsi
 
+    mov rdi, rsi
+    call value_type
+    mov [rbp - SC_OBJTY], rax
+
     ; A class that derives from the class: search that class's own MRO.
-    mov rax, [rsi + PyObject.ob_type]
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
     jz .sc_instance
-    mov rdi, rsi                        ; the candidate subclass
+    mov rdi, [rbp - SC_OBJ]             ; the candidate subclass
     mov rsi, [rbp - SC_CLASS]
     call type_is_subtype
     test eax, eax
@@ -191,14 +201,12 @@ DEF_FUNC super_check, SC_FRAME
     ret
 
 .sc_instance:
-    mov rdi, [rbp - SC_OBJ]
-    mov rdi, [rdi + PyObject.ob_type]
+    mov rdi, [rbp - SC_OBJTY]
     mov rsi, [rbp - SC_CLASS]
     call type_is_subtype
     test eax, eax
     jz .sc_bad
-    mov rax, [rbp - SC_OBJ]
-    mov rax, [rax + PyObject.ob_type]
+    mov rax, [rbp - SC_OBJTY]
     leave
     ret
 
@@ -581,8 +589,6 @@ DEF_FUNC super_construct, SN_FRAME
     mov rax, [rbp - SN_OBJ]
     test rax, rax
     jz .sn_alloc                ; super(B): no object, no __self_class__
-    V_TEST_PTR rax, rcx
-    ja .sn_bad_obj
     lea rcx, [rel none_singleton]
     cmp rax, rcx
     je .sn_none_obj
@@ -613,10 +619,7 @@ DEF_FUNC super_construct, SN_FRAME
     mov rdi, [rbp - SN_TYPE]
     call obj_incref
     mov rdi, [rbp - SN_OBJ]
-    test rdi, rdi
-    jz .sn_no_obj_ref
-    call obj_incref
-.sn_no_obj_ref:
+    INCREF_V rdi, rcx           ; a Value: super(int, 1) holds an immediate
     mov rdi, [rbp - SN_OBJTY]
     test rdi, rdi
     jz .sn_no_objty_ref
@@ -646,8 +649,6 @@ DEF_FUNC super_construct, SN_FRAME
     lea rsi, [rel sup_msg_argtype]
     call sup_error
     jmp .sn_fail
-.sn_bad_obj:
-    SET_EXC exc_TypeError_type, "super(type, obj): obj must be an instance or subtype of type"
 .sn_fail:
     xor eax, eax
     xor edx, edx
@@ -656,10 +657,100 @@ DEF_FUNC super_construct, SN_FRAME
 END_FUNC super_construct
 
 ;; ============================================================================
+;; super_own_attr(rdi = the name, rsi = __thisclass__, rdx = __self__ as a
+;;                Value, rcx = __self_class__ or 0)
+;;   -> rax = an OWNED Value, or 0 when the name is not one super answers
+;;
+;; The four names a super answers for itself, without a super object to ask.
+;; LOAD_SUPER_ATTR is `super(C, o).attr` written out in full and has no super
+;; object -- it has the three operands -- so it searched the MRO for these and
+;; came back empty: `super(list, [1]).__self__` was an AttributeError where
+;; CPython, whose unspecialised path builds a real super and getattrs it,
+;; answers the list.
+;;
+;; super_getattr keeps its own copy of the comparisons rather than calling
+;; this, because it has to tell "one of mine" from "absent" to fall through to
+;; the MRO search, and it reaches __class__ through the generic path.
+;; ============================================================================
+SOA_NAME  equ 8
+SOA_CLASS equ 16
+SOA_SELF  equ 24
+SOA_OBJTY equ 32
+SOA_FRAME equ 48                ; 32 used + 16 pad = 48, 16-aligned
+global super_own_attr
+DEF_FUNC super_own_attr, SOA_FRAME
+    mov [rbp - SOA_NAME], rdi
+    mov [rbp - SOA_CLASS], rsi
+    mov [rbp - SOA_SELF], rdx
+    mov [rbp - SOA_OBJTY], rcx
+
+    lea rdi, [rdi + PyStrObject.data]
+    lea rsi, [rel sup_a_self]
+    call sup_streq
+    test eax, eax
+    jz .soa_self
+
+    mov rdi, [rbp - SOA_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    lea rsi, [rel sup_a_thisclass]
+    call sup_streq
+    test eax, eax
+    jz .soa_thisclass
+
+    mov rdi, [rbp - SOA_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    lea rsi, [rel sup_a_selfclass]
+    call sup_streq
+    test eax, eax
+    jz .soa_selfclass
+
+    mov rdi, [rbp - SOA_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    lea rsi, [rel sup_a_class]
+    call sup_streq
+    test eax, eax
+    jz .soa_class
+
+    xor eax, eax                ; not ours
+    leave
+    ret
+
+.soa_self:
+    mov rax, [rbp - SOA_SELF]
+    test rax, rax
+    jz .soa_none                ; the unbound form
+    jmp .soa_one
+.soa_thisclass:
+    mov rax, [rbp - SOA_CLASS]
+    jmp .soa_one
+.soa_selfclass:
+    mov rax, [rbp - SOA_OBJTY]
+    test rax, rax
+    jz .soa_none
+    jmp .soa_one
+.soa_class:
+    lea rax, [rel super_type]
+    jmp .soa_one
+.soa_none:
+    lea rax, [rel none_singleton]
+.soa_one:
+    INCREF_V rax, rcx           ; __self__ may be an immediate
+    leave
+    ret
+END_FUNC super_own_attr
+
+;; ============================================================================
 ;; super_getattr(rdi = the super object, rsi = the name)
 ;;   -> rax = payload, rdx = tag; (0, 0) for "not here, try the generic path"
 ;;
-;; tp_getattr.  The three attributes of its own answer first -- CPython keeps
+;; The (payload, tag) worker behind super_getattr_value, which is the slot:
+;; tp_getattr answers a VALUE, and this was in the table until __self__ could
+;; be an immediate.  Every answer used to be a pointer, and a pointer is its
+;; own Value, so the mismatch was invisible -- until `super(int, 1).__self__`
+;; came back as the payload 1, which op_load_attr's V_UNPACK then read as a
+;; pointer to address 1.
+;;
+;; The three attributes of its own answer first -- CPython keeps
 ;; them as members, and `s.__self__` must not be looked for in the MRO -- and
 ;; everything else is super_lookup.  An unbound super has no __self_class__
 ;; and so nothing to search, which is what makes `super(B).__class__` answer
@@ -712,7 +803,11 @@ DEF_FUNC super_getattr, SG_FRAME
     mov rax, [rax + PySuperObject.su_obj]
     test rax, rax
     jz .sg_none
-    jmp .sg_one
+    ; A Value: an immediate is not a pointer to INCREF, and not a TAG_PTR.
+    INCREF_V rax, rcx
+    V_UNPACK rax, rdx
+    leave
+    ret
 .sg_thisclass:
     mov rax, [rbp - SG_SELF]
     mov rax, [rax + PySuperObject.su_type]
@@ -741,18 +836,20 @@ END_FUNC super_getattr
 ;; ============================================================================
 ;; super_getattr_value(rdi = the super object, rsi = the name) -> rax = Value
 ;;
-;; super_getattr in the shape a getset descriptor's getter is called in: it
-;; answers a (payload, tag) pair and this packs it.  The three names it owns
-;; -- __self__, __self_class__ and __thisclass__ -- are the only ones ever
-;; reached through it, because they are the only ones a descriptor is
-;; registered for; everything else still goes through the slot.
+;; super_getattr in the shape both tp_getattr and a getset descriptor's getter
+;; are called in: it answers a (payload, tag) pair and this packs it.  It is
+;; the tp_getattr slot as well as the getter for the three names it owns --
+;; __self__, __self_class__ and __thisclass__ -- so the pair never escapes.
+;;
+;; V_PACK runs BEFORE the leave: its cold path is a call, and after the leave
+;; that call is made at the caller's stack parity rather than this frame's.
 ;; ============================================================================
 DEF_FUNC super_getattr_value
     call super_getattr
     test edx, edx
     jz .sgv_absent
-    leave
     V_PACK rax, rdx
+    leave
     ret
 .sgv_absent:
     xor eax, eax
@@ -861,6 +958,10 @@ END_FUNC super_repr
 ;; All three fields are strong: an unbound super has only the first, and a
 ;; bound one holds its instance, which is how a super stored on that instance
 ;; makes a cycle the collector has to be able to see.
+;;
+;; su_obj is a VALUE and the other two are types, so it is the one released,
+;; visited and cleared as a Value -- an immediate is neither a reference to
+;; drop nor an edge for the collector to follow.
 ;; ============================================================================
 DEF_FUNC_LOCAL super_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
@@ -871,10 +972,7 @@ DEF_FUNC_LOCAL super_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     call obj_decref
 .sd_no_type:
     mov rdi, [rbx + PySuperObject.su_obj]
-    test rdi, rdi
-    jz .sd_no_obj
-    call obj_decref
-.sd_no_obj:
+    DECREF_V rdi, rax
     mov rdi, [rbx + PySuperObject.su_obj_type]
     test rdi, rdi
     jz .sd_no_objty
@@ -896,7 +994,7 @@ DEF_FUNC super_traverse
     mov rdi, [rbx + PySuperObject.su_type]
     VISIT_PTR rdi
     mov rdi, [rbx + PySuperObject.su_obj]
-    VISIT_PTR rdi
+    VISIT_V rdi, rax
     mov rdi, [rbx + PySuperObject.su_obj_type]
     VISIT_PTR rdi
     pop r12
@@ -918,9 +1016,7 @@ DEF_FUNC super_clear
     shl rax, 3
     mov rdi, [rbx + PySuperObject.su_type + rax]
     mov qword [rbx + PySuperObject.su_type + rax], 0
-    test rdi, rdi
-    jz .scl_next
-    call obj_decref
+    DECREF_V rdi, rax           ; su_obj may be an immediate; the rest are types
 .scl_next:
     inc r12d
     jmp .scl_loop
@@ -944,7 +1040,7 @@ super_type:
     dq 0                        ; tp_str
     dq 0                        ; tp_hash
     dq 0                        ; tp_call  (a super is not callable)
-    dq super_getattr            ; tp_getattr
+    dq super_getattr_value      ; tp_getattr -- answers a Value, not a pair
     dq 0                        ; tp_setattr
     dq 0                        ; tp_richcompare
     dq 0                        ; tp_iter
@@ -963,6 +1059,7 @@ super_type:
     dq super_clear              ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 sup_msg_nargs:     db "super() expected at most 2 arguments, got ", 1, 0
 sup_msg_noattr:    db "'super' object has no attribute '", 1, "'", 0
@@ -973,6 +1070,7 @@ sup_class_name:    db "__class__", 0
 sup_a_self:        db "__self__", 0
 sup_a_thisclass:   db "__thisclass__", 0
 sup_a_selfclass:   db "__self_class__", 0
+sup_a_class:       db "__class__", 0
 
 section .bss
 sup_msg_buf: resb SUP_MSG_MAX + 24      ; the message, then room for the digits

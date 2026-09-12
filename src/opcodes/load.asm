@@ -79,7 +79,7 @@ LSA_ATTR_TAG equ 40
 LSA_ATTR     equ 48
 LSA_BIND     equ 56
 LSA_ORIGIN   equ 64      ; the MRO super() searches: the instance's, not the class's
-LSA_SELFTAG  equ 72      ; self is a Value, and need not be a pointer at all
+LSA_SELFTAG  equ 72      ; unused: LSA_SELF holds the Value itself
 LSA_CLASSTAG equ 80      ; and so is the class
 LSA_FRAME    equ 104        ; + 0 pushes; a handler is entered by jmp, so
                          ; this is 8 mod 16 and not 0
@@ -1527,10 +1527,12 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rax, [rsi + rax]          ; name string
     mov [rbp - LSA_NAME], rax
 
-    ; Pop self, class, global_super
-    VPOP_VAL rax, rdx              ; self
+    ; Pop self, class, global_super.  self stays a VALUE -- it is handed to
+    ; super_lookup and to method_new, both of which take one, and it is
+    ; released with DECREF_V; unpacking it would turn the immediate int of
+    ; `super(int, 1).bit_length` into a pointer to address 1.
+    VPOP rax                       ; self
     mov [rbp - LSA_SELF], rax
-    mov [rbp - LSA_SELFTAG], rdx
     VPOP_VAL rax, rdx              ; class
     mov [rbp - LSA_CLASS], rax
     mov [rbp - LSA_CLASSTAG], rdx
@@ -1550,13 +1552,6 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rax, [rdi + PyObject.ob_type]
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
     jz .lsa_bad_class
-
-    ; Everything below reads self as an object -- it is decref'd unconditionally
-    ; and handed to super_lookup -- so an immediate has to be refused here.
-    ; `super(C, 5).f` walked an int as if it had a tp_mro; CPython's supercheck
-    ; refuses the same argument with the message below.
-    cmp qword [rbp - LSA_SELFTAG], TAG_PTR
-    jne .lsa_bad_self
 
     ; super() searches the *instance's* MRO starting just past the class the
     ; method was defined in -- that is the whole point of it in a diamond,
@@ -1610,7 +1605,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     ; nothing here has to hold a class it does not own.
     mov rdi, [rbp - LSA_SELF]
     IS_NONE rdi, rax
-    je .lsa_not_found               ; super(C, None) is CPython's UNBOUND super
+    je .lsa_unbound                 ; super(C, None) is CPython's UNBOUND super
     extern obj_declared_class
     call obj_declared_class
     test rax, rax
@@ -1630,6 +1625,20 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
 .lsa_have_origin:
     mov [rbp - LSA_ORIGIN], rax
 
+    ; The four names super answers for ITSELF.  This opcode has the three
+    ; operands and no super object, so it searched the MRO for them and came
+    ; back empty -- `super(list, [1]).__self__` was an AttributeError where
+    ; CPython, whose unspecialised path builds a real super and getattrs it,
+    ; answers the list.
+    mov rdi, [rbp - LSA_NAME]
+    mov rsi, [rbp - LSA_CLASS]
+    mov rdx, [rbp - LSA_SELF]
+    mov rcx, [rbp - LSA_ORIGIN]
+    extern super_own_attr
+    call super_own_attr
+    test rax, rax
+    jnz .lsa_own_attr
+
     ; The attribute form is super_lookup, which is also what a super OBJECT's
     ; tp_getattr calls -- the descriptor rules live in one place, and the two
     ; cannot answer differently.  The method form below keeps arms of its own,
@@ -1647,7 +1656,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rdi, [rbp - LSA_CLASS]
     call obj_decref
     mov rdi, [rbp - LSA_SELF]
-    call obj_decref
+    DECREF_V rdi, rax
     RESTORE_FAT_RESULT
     test edx, edx
     jz .lsa_attr_failed
@@ -1689,6 +1698,42 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rax, rcx
     test rax, rax
     jnz .lsa_walk
+    ; The MRO is exhausted: nothing after __thisclass__ defines the name.
+    ; This used to FALL THROUGH into .lsa_bad_class, so
+    ; `super(list, [1]).__len__()` reported "super() argument 1 must be a
+    ; type, not type" instead of an AttributeError naming the attribute.
+    jmp .lsa_not_found
+
+.lsa_unbound:
+    ; CPython's unbound super: there is no instance, so nothing to search --
+    ; but its own four names still answer, with __self__ and __self_class__
+    ; both None.
+    mov qword [rbp - LSA_ORIGIN], 0
+    mov rdi, [rbp - LSA_NAME]
+    mov rsi, [rbp - LSA_CLASS]
+    mov rdx, [rbp - LSA_SELF]
+    xor ecx, ecx
+    call super_own_attr
+    test rax, rax
+    jnz .lsa_own_attr
+    jmp .lsa_not_found
+
+.lsa_own_attr:
+    ; One of super's own.  Release the operands, then push -- in method mode
+    ; with a NULL beneath it, the way .lsa_prop_one does, because this is a
+    ; value and not a method.
+    mov [rbp - LSA_ATTR], rax
+    mov rdi, [rbp - LSA_CLASS]
+    call obj_decref
+    mov rdi, [rbp - LSA_SELF]
+    DECREF_V rdi, rax
+    cmp qword [rbp - LSA_FLAG], 0
+    je .lsa_own_one
+    VPUSH_NULL
+.lsa_own_one:
+    mov rax, [rbp - LSA_ATTR]
+    VPUSH rax
+    jmp .lsa_done
 
 .lsa_bad_class:
     ; Compose the message while the operands are still held, then release them
@@ -1714,8 +1759,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     call type_name_message
     mov [rbp - LSA_ORIGIN], rax     ; the composed text, across the releases
     mov rdi, [rbp - LSA_SELF]
-    mov rsi, [rbp - LSA_SELFTAG]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     mov rdi, [rbp - LSA_CLASS]
     mov rsi, [rbp - LSA_CLASSTAG]
     DECREF_VAL rdi, rsi
@@ -1728,10 +1772,9 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     jmp raise_exception
 
 .lsa_bad_self:
-    ; Release what was popped -- the tag says how -- and say what CPython says.
+    ; Release what was popped and say what CPython says.
     mov rdi, [rbp - LSA_SELF]
-    mov rsi, [rbp - LSA_SELFTAG]
-    DECREF_VAL rdi, rsi
+    DECREF_V rdi, rsi
     mov rdi, [rbp - LSA_CLASS]
     call obj_decref
     ; DISPATCH saved the stack top from before the three operands were popped.
@@ -1743,7 +1786,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rdi, [rbp - LSA_CLASS]
     call obj_decref
     mov rdi, [rbp - LSA_SELF]
-    call obj_decref
+    DECREF_V rdi, rax
 .lsa_absent:
     ; CPython's wording names the attribute; ours said only "super: attribute
     ; not found", which is the same information minus the one part a reader
@@ -1797,7 +1840,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rdx, [rbp - LSA_ATTR_TAG]
     VPUSH_VAL rax, rdx             ; push func (deeper = callable)
     mov rax, [rbp - LSA_SELF]     ; self (already has ref from stack)
-    VPUSH_PTR rax                  ; push self (TOS)
+    VPUSH rax                      ; push self (TOS) -- a Value
     jmp .lsa_done
 
 .lsa_attr_mode:
@@ -1831,7 +1874,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rdi, [rbp - LSA_ATTR]
     call obj_decref                ; release our ref on the function
     mov rdi, [rbp - LSA_SELF]
-    call obj_decref                ; and on self
+    DECREF_V rdi, rax              ; and on self
     pop rax
     VPUSH_PTR rax
     jmp .lsa_done
@@ -1849,7 +1892,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
 .lsa_attr_value:
     push rax                      ; save attr
     mov rdi, [rbp - LSA_SELF]
-    call obj_decref
+    DECREF_V rdi, rax
     pop rax
     mov rdx, [rbp - LSA_ATTR_TAG]
     VPUSH_VAL rax, rdx             ; push attr
@@ -1864,7 +1907,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rdi, [rbp - LSA_ATTR]
     call obj_decref
     mov rdi, [rbp - LSA_SELF]
-    call obj_decref
+    DECREF_V rdi, rax
     RESTORE_FAT_RESULT
     test edx, edx
     jz .lsa_propagate              ; the getter raised
@@ -1894,7 +1937,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     pop rdi                        ; the wrapper
     call obj_decref
     mov rdi, [rbp - LSA_SELF]
-    call obj_decref                ; not binding self
+    DECREF_V rdi, rax              ; not binding self
     cmp qword [rbp - LSA_FLAG], 0
     je .lsa_sm_one
     VPUSH_NULL
@@ -1914,9 +1957,11 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     pop rdi                        ; the wrapper
     call obj_decref
 
-    ; class = self when self is already a type, else type(self)
+    ; class = self when self is already a type, else type(self).  self is a
+    ; Value, so its type comes from value_type: `super(int, 1).from_bytes`
+    ; read the immediate's low bits as an object header.
     mov rdi, [rbp - LSA_SELF]
-    mov rax, [rdi + PyObject.ob_type]
+    call value_type
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
     jnz .lsa_cm_self_is_type
     mov [rbp - LSA_BIND], rax
@@ -1924,11 +1969,12 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     call obj_incref
     jmp .lsa_cm_have_class
 .lsa_cm_self_is_type:
+    mov rdi, [rbp - LSA_SELF]
     mov [rbp - LSA_BIND], rdi
     call obj_incref
 .lsa_cm_have_class:
     mov rdi, [rbp - LSA_SELF]
-    call obj_decref                ; the class stands in for self
+    DECREF_V rdi, rax              ; the class stands in for self
 
     cmp qword [rbp - LSA_FLAG], 0
     jne .lsa_cm_flag1

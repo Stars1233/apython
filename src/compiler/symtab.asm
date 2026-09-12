@@ -35,6 +35,7 @@ extern buf_reserve
 extern comp_msg_start
 extern comp_msg_cstr
 extern comp_error
+extern comp_error_node
 extern comp_intern_cstr
 
 extern dict_get
@@ -318,6 +319,7 @@ DEF_FUNC sym_add, SA2_FRAME
     ret
 END_FUNC sym_add
 
+
 ;; ============================================================================
 ;; sym_visit(Comp *c, uint32_t scope, uint32_t node) -> rax = 1 ok, 0 error
 ;;
@@ -333,7 +335,9 @@ SV_KIND  equ 56
 SV_NAME  equ 64          ; the walrus target, across the scope walk
 SV_TASCOPE equ 72        ; a `type` statement's own block, before PEP 695's
                          ; type-parameter wrapper displaces it
-SV_FRAME equ 88          ; + 3 pushes = 112
+SV_TARGET equ 88         ; a walrus's target NAME node, which PEP 572's two
+SV_MSG    equ 96         ; refusals blame, and the message one of them builds
+SV_FRAME equ 104         ; + 3 pushes = 128
 DEF_FUNC sym_visit, SV_FRAME
     push rbx
     push r12
@@ -425,6 +429,14 @@ DEF_FUNC sym_visit, SV_FRAME
     jne .name_flags
     or r8d, DEF_UNBOUND
 .name_flags:
+    ; A store reached while visiting a comprehension clause's TARGET is an
+    ; iteration variable, and PEP 572 forbids a walrus from rebinding one.
+    test r8d, DEF_LOCAL
+    jz .name_store_done
+    cmp dword [rbx + Comp.in_comp_iter], 0
+    je .name_store_done
+    or r8d, DEF_COMP_ITER
+.name_store_done:
     mov rdi, rbx
     mov rsi, r12
     mov rcx, r8
@@ -539,12 +551,14 @@ DEF_FUNC sym_visit, SV_FRAME
 ;; every comprehension scope in between.  Without that, `[y := i for i in r]`
 ;; left y visible only inside the comprehension.
 .ne_in_class:
+    ; CPython blames the TARGET NAME, not the whole `q := 1`.
     mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
+    mov esi, r13d
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
     CSTRING rdx, "assignment expression within a comprehension cannot be used in a class body"
-    xor ecx, ecx
-    xor r8d, r8d
-    call comp_error
+    call comp_error_node
     jmp .fail
 
 .namedexpr:
@@ -553,6 +567,75 @@ DEF_FUNC sym_visit, SV_FRAME
     call .visit_field
     test eax, eax
     jz .fail
+
+    ; PEP 572 forbids a walrus in two PLACES inside a comprehension, and both
+    ; used to compile: sixty assertions in CPython's test_named_expressions.
+    ; The iterable rule is checked first, because
+    ; `[i for i in a for i2 in (i := b)]` breaks both and CPython reports that
+    ; one.
+    cmp dword [rbx + Comp.in_comp_iterable], 0
+    je .ne_not_in_iterable
+    mov rdi, rbx
+    mov esi, r13d
+    CSTRING rdx, "assignment expression cannot be used in a comprehension iterable expression"
+    call comp_error_node
+    jmp .fail
+.ne_not_in_iterable:
+
+    ; The target's NAME node -- what CPython blames for the rebind rule -- and
+    ; the name itself, which the scope walk below wants anyway.
+    mov rax, [rbp - SV_NPTR]
+    mov ecx, [rax + AstNode.a]
+    mov [rbp - SV_TARGET], rcx
+    mov rdi, rbx
+    mov esi, ecx
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov [rbp - SV_NAME], rax
+
+    ; A walrus may not rebind an ITERATION VARIABLE of a comprehension it is
+    ; written in, nor of one it escapes on the way out.
+    mov [rbp - SV_N], r12
+.ne_iter_climb:
+    mov rdi, rbx
+    mov rsi, [rbp - SV_N]
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_COMP
+    jne .ne_iter_done
+    mov ecx, [rax + Scope.parent]
+    mov [rbp - SV_I], rcx               ; the parent, across sym_get
+    mov rdi, rbx
+    mov rsi, [rbp - SV_N]
+    mov rdx, [rbp - SV_NAME]
+    call sym_get
+    test eax, DEF_COMP_ITER
+    jnz .ne_rebind
+    mov rcx, [rbp - SV_I]
+    test ecx, ecx
+    jz .ne_iter_done
+    mov [rbp - SV_N], rcx
+    jmp .ne_iter_climb
+.ne_rebind:
+    call comp_msg_start
+    mov [rbp - SV_MSG], rax
+    mov rdi, rax
+    CSTRING rsi, "assignment expression cannot rebind comprehension iteration variable '"
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SV_NAME]
+    add rsi, PyStrObject.data
+    call comp_msg_cstr
+    mov rdi, rax
+    CSTRING rsi, "'"
+    call comp_msg_cstr
+    mov rdi, rbx
+    mov esi, [rbp - SV_TARGET]
+    mov rdx, [rbp - SV_MSG]
+    call comp_error_node
+    jmp .fail
+.ne_iter_done:
 
     ; Find the nearest enclosing scope that is not a comprehension.
     mov [rbp - SV_N], r12               ; the scope the target belongs to
@@ -797,7 +880,9 @@ DEF_FUNC sym_visit, SV_FRAME
     mov edx, [rax + AstNode.b]          ; its iterable
     mov rdi, rbx
     mov rsi, r12
+    inc dword [rbx + Comp.in_comp_iterable]
     call sym_visit
+    dec dword [rbx + Comp.in_comp_iterable]
     test eax, eax
     jz .fail
     mov rdi, rbx
@@ -883,6 +968,16 @@ DEF_FUNC sym_visit, SV_FRAME
     CSTRING rdx, "'yield' outside function"
     jmp .out_of_scope
 .mg_ok:
+    ; `yield` makes an async def an ASYNC GENERATOR, which is legal; a
+    ; `yield from` in one is not, and CPython says so by name.
+    mov rcx, [rbp - SV_NPTR]
+    cmp byte [rcx + AstNode.kind], AST_YIELDFROM
+    jne .mg_store
+    test dword [rax + Scope.flags], SCF_ASYNC_DEF
+    jz .mg_store
+    CSTRING rdx, "'yield from' inside async function"
+    jmp .out_of_scope
+.mg_store:
     or dword [rax + Scope.flags], SCF_GENERATOR
     jmp .children
 
@@ -899,55 +994,62 @@ DEF_FUNC sym_visit, SV_FRAME
     je .children
     CSTRING rdx, "'return' outside function"
 .out_of_scope:
-    ; rdx = the message.  The node's own start, and its end from the span
-    ; table -- an end of -1 means it was never recorded, and then the span
-    ; falls back to the one character comp_error would have given.
-    push rdx
-    mov rdi, rbx
-    mov rsi, r13
-    call ast_at
-    mov ecx, [rax + AstNode.lineno]
-    mov r8d, [rax + AstNode.col]
-    push rcx
-    push r8
+    ; rdx = the message, r13 = the node it is about.
     mov rdi, rbx
     mov esi, r13d
-    extern ast_span_at
-    call ast_span_at
-    pop r8
-    pop rcx
-    mov r9d, ecx
-    lea r10d, [r8d + 1]
-    test rax, rax
-    jz .oos_have_span
-    cmp dword [rax + AstSpan.end_lineno], -1
-    je .oos_have_span
-    mov r9d, [rax + AstSpan.end_lineno]
-    mov r10d, [rax + AstSpan.end_col]
-.oos_have_span:
-    pop rdx
-    mov rdi, rbx
-    lea rsi, [rel exc_SyntaxError_type]
-    extern comp_error_span
-    call comp_error_span
+    call comp_error_node
     jmp .fail
 
 ;; `await` makes the enclosing block a coroutine, exactly as `yield` makes it a
 ;; generator.  A block that has both is an async generator; the two flags are
 ;; independent here and only combine in the code generator.
+;;
+;; It also has to BE one.  This checked the scope's KIND and nothing else, so
+;; `def f(): await x`, `def f(): async for ...` and a comprehension with an
+;; `async for` in it all compiled -- thirty-four assertions in CPython's
+;; test_coroutines.  A comprehension is the one case decided elsewhere: it has
+;; a scope of its own, and CPython reports at the COMPREHENSION rather than at
+;; the await inside it, so sym_enter_comp does it after the walk.
 .mark_coroutine:
     mov rdi, rbx
     mov rsi, r12
     call sym_at
-    cmp dword [rax + Scope.kind], SCOPE_FUNCTION
+    mov ecx, [rax + Scope.kind]
+    cmp ecx, SCOPE_COMP
     je .mc_ok
-    cmp dword [rax + Scope.kind], SCOPE_LAMBDA
-    je .mc_ok
-    cmp dword [rax + Scope.kind], SCOPE_COMP
-    je .mc_ok
+    cmp ecx, SCOPE_FUNCTION
+    je .mc_in_func
+    cmp ecx, SCOPE_LAMBDA
+    je .mc_in_func
+    ; A module or a class body.  `await` there is "outside function"; an
+    ; `async for` or `async with` keeps the async wording, as CPython's does.
+    mov rax, [rbp - SV_NPTR]
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_AWAIT
+    jne .mc_async_word
     CSTRING rdx, "'await' outside function"
     jmp .out_of_scope
+.mc_in_func:
+    test dword [rax + Scope.flags], SCF_ASYNC_DEF
+    jnz .mc_ok
+    mov rax, [rbp - SV_NPTR]
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_AWAIT
+    jne .mc_async_word
+    CSTRING rdx, "'await' outside async function"
+    jmp .out_of_scope
+.mc_async_word:
+    cmp ecx, AST_FOR
+    jne .mc_with_word
+    CSTRING rdx, "'async for' outside async function"
+    jmp .out_of_scope
+.mc_with_word:
+    CSTRING rdx, "'async with' outside async function"
+    jmp .out_of_scope
 .mc_ok:
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
     or dword [rax + Scope.flags], SCF_COROUTINE
     jmp .children
 
@@ -1357,7 +1459,9 @@ DEF_FUNC sym_enter_function, SE_FRAME
     mov [rax + AstNode.flags], r12w
 
     ; `async def` is a property of the block itself, not of anything inside it,
-    ; so it is stamped here rather than discovered by the walk.
+    ; so it is stamped here rather than discovered by the walk.  SCF_ASYNC_DEF
+    ; is the half that says DECLARED async: SCF_COROUTINE is also what a bare
+    ; `await` sets, and an `await` in a plain def has to be refused.
     movzx ecx, byte [rax + AstNode.kind]
     cmp ecx, AST_FUNCTIONDEF
     jne .not_async
@@ -1366,7 +1470,7 @@ DEF_FUNC sym_enter_function, SE_FRAME
     mov rdi, rbx
     mov rsi, r12
     call sym_at
-    or dword [rax + Scope.flags], SCF_COROUTINE
+    or dword [rax + Scope.flags], SCF_COROUTINE | SCF_ASYNC_DEF
 .not_async:
 
     ; Parameters bind in the new scope, in signature order.  A class body has
@@ -3117,7 +3221,11 @@ SEC_SCOPE equ 32
 SEC_I     equ 40
 SEC_N     equ 48
 SEC_CL    equ 56
-SEC_FRAME equ 56          ; + 3 pushes = 80
+SEC_P     equ 64          ; the scope being climbed, for the async check
+SEC_ITBL  equ 72          ; the enclosing in_comp_iterable, across this walk
+SEC_OUT   equ 80          ; the OUTERMOST comprehension of the chain, which is
+                          ; what CPython blames for an async one
+SEC_FRAME equ 88          ; + 3 pushes = 112, and rsp 16-aligned at every call
 DEF_FUNC sym_enter_comp, SEC_FRAME
     push rbx
     push r12
@@ -3126,6 +3234,14 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     mov [rbp - SEC_PARENT], rsi
     mov r13, rdx
     mov [rbp - SEC_NODE], rdx
+
+    ; A comprehension written inside an ITERABLE is visited with that flag up,
+    ; and its own element is not an iterable -- `[i for i in [k for k in a]]`
+    ; may put a walrus in the inner element.  Its own clauses raise the flag
+    ; again where they need it.
+    mov eax, [rbx + Comp.in_comp_iterable]
+    mov [rbp - SEC_ITBL], eax
+    mov dword [rbx + Comp.in_comp_iterable], 0
 
     ; Every comprehension gets a scope of its own, generator expression or
     ; not.  PEP 709 inlines the three eager kinds into the block they are
@@ -3218,17 +3334,24 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
 .not_async_clause:
 
     ; The target binds in this scope; the conditions are evaluated here too.
+    ; Its names are the comprehension's ITERATION VARIABLES, which is what
+    ; the flag marks -- .name ORs DEF_COMP_ITER onto every store it sees
+    ; while it is up.
     mov rdi, rbx
     mov rsi, [rbp - SEC_CL]
     call ast_at
     mov edx, [rax + AstNode.a]
     mov rdi, rbx
     mov rsi, r12
+    inc dword [rbx + Comp.in_comp_iter]
     call sym_visit
+    dec dword [rbx + Comp.in_comp_iter]
     test eax, eax
     jz .fail
 
     ; Every iterable but the outermost is evaluated inside the comprehension.
+    ; No walrus may appear in ANY of them, the outermost included -- that one
+    ; is visited by sym_visit's .comprehension arm, which raises the same flag.
     cmp qword [rbp - SEC_I], 0
     je .conds
     mov rdi, rbx
@@ -3237,7 +3360,9 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     mov edx, [rax + AstNode.b]
     mov rdi, rbx
     mov rsi, r12
+    inc dword [rbx + Comp.in_comp_iterable]
     call sym_visit
+    dec dword [rbx + Comp.in_comp_iterable]
     test eax, eax
     jz .fail
 .conds:
@@ -3275,11 +3400,85 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     test eax, eax
     jz .fail
 .ok:
+    ; An ASYNCHRONOUS comprehension -- one with an `async for` clause, or one
+    ; whose body awaits -- is only legal inside an async def.  Both set
+    ; SCF_COROUTINE on this scope, so one test after the walk covers them; and
+    ; it is here rather than in .mark_coroutine because CPython reports at the
+    ; COMPREHENSION and not at the await inside it.
+    ;
+    ; A GENERATOR EXPRESSION is exempt, and completely: PEP 530 lets
+    ; `(i async for i in a)` and `(await i for i in a)` appear anywhere,
+    ; because the thing they build is an async generator the caller drives
+    ; rather than something this block has to await.  test_asyncgen returns
+    ; one from a plain def on line 1743.
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    cmp byte [rax + AstNode.kind], AST_GENEXP
+    je .comp_ok
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
+    test dword [rax + Scope.flags], SCF_COROUTINE
+    jz .comp_ok
+    mov [rbp - SEC_OUT], r13            ; blamed unless a comprehension encloses it
+    mov ecx, [rax + Scope.parent]
+.comp_climb:
+    ; Out through any enclosing comprehensions to the nearest function.
+    test ecx, ecx
+    jz .comp_bad                        ; module level: no function at all
+    mov [rbp - SEC_P], rcx
+    mov rdi, rbx
+    mov rsi, rcx
+    call sym_at
+    mov ecx, [rax + Scope.kind]
+    cmp ecx, SCOPE_COMP
+    jne .comp_have
+    ; An enclosing GENERATOR EXPRESSION is as good as an async def, and the
+    ; climb stops there.  A genexp with an async comprehension inside it is
+    ; itself an async generator the caller drives, so
+    ; `([i async for i in x] for x in y)` is legal anywhere -- including a
+    ; plain def and a class body -- while the same thing inside a LIST
+    ; comprehension is not.  Climbing past the genexp refused all of it.
+    mov ecx, [rax + Scope.node]
+    mov rdi, rbx
+    mov esi, ecx
+    call ast_at
+    cmp byte [rax + AstNode.kind], AST_GENEXP
+    je .comp_ok
+    ; Not a genexp, so keep climbing -- and remember it: CPython blames the
+    ; OUTERMOST comprehension of the chain, so `[[i async for i in x] for x
+    ; in y]` is reported at the outer one and not at the inner.
+    mov rdi, rbx
+    mov rsi, [rbp - SEC_P]
+    call sym_at
+    mov ecx, [rax + Scope.node]
+    mov [rbp - SEC_OUT], rcx
+    mov ecx, [rax + Scope.parent]
+    jmp .comp_climb
+.comp_have:
+    cmp ecx, SCOPE_FUNCTION
+    je .comp_want_async
+    cmp ecx, SCOPE_LAMBDA
+    jne .comp_bad                       ; a class body is not a function
+.comp_want_async:
+    test dword [rax + Scope.flags], SCF_ASYNC_DEF
+    jz .comp_bad
+.comp_ok:
     mov eax, 1
+    jmp .ret
+.comp_bad:
+    mov rdi, rbx
+    mov esi, [rbp - SEC_OUT]
+    CSTRING rdx, "asynchronous comprehension outside of an asynchronous function"
+    call comp_error_node
+    xor eax, eax
     jmp .ret
 .fail:
     xor eax, eax
 .ret:
+    mov ecx, [rbp - SEC_ITBL]
+    mov [rbx + Comp.in_comp_iterable], ecx
     pop r13
     pop r12
     pop rbx

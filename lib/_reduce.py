@@ -68,10 +68,28 @@ def _reduce_newobj(obj):
 def object_reduce_ex(obj, protocol):
     """What object.__reduce_ex__ answers.
 
-    Protocol 0 and 1 take copyreg's _reconstructor route; 2 and later take
-    the __newobj__ one.  object.__reduce__(self) is protocol 0, as CPython's
-    is.
+    A type that OVERRIDES __reduce__ is asked first, and its answer is the
+    whole answer -- that is how every builtin iterator, range, slice, Ellipsis
+    and NotImplemented get pickled, and CPython's object___reduce_ex___impl
+    makes the same test before anything else.  Without it, a __reduce__ added
+    to a builtin type had no effect at all: pickle and copy both come through
+    here, and both went straight past it to the generic reduction, which then
+    refused the type it could not rebuild from a class and a state dict.
+
+    Otherwise: protocol 0 and 1 take copyreg's _reconstructor route, and 2 and
+    later take the __newobj__ one.  object.__reduce__(self) is protocol 0, as
+    CPython's is.
     """
+    reduce = getattr(obj, "__reduce__", None)
+    if reduce is not None:
+        cls_reduce = getattr(type(obj), "__reduce__", None)
+        if cls_reduce is not None and cls_reduce is not _OBJECT_REDUCE:
+            return reduce()
     if protocol >= 2:
         return _reduce_newobj(obj)
     return copyreg._reduce_ex(obj, protocol)
+
+
+# object's own __reduce__, to compare a type's against.  Read once, at import,
+# because the comparison runs on every pickle of every object.
+_OBJECT_REDUCE = object.__reduce__

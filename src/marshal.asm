@@ -3,6 +3,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "opcodes.inc"
 
 ;; ============================================================================
 ;; The marshal type codes and .pyc header constants
@@ -1374,7 +1375,8 @@ mdo_code:
     mov eax, [rsp + 4]
     mov [r13 + PyCodeObject.co_kwonlyargcount], eax
 
-    ; co_nlocals = len(co_localsplusnames)
+    ; r15d = len(co_localsplusnames), which IS co_nlocalsplus and is used for
+    ; it below.
     mov rax, [rsp + 40]        ; co_localsplusnames tuple
     test rax, rax
     jz .code_nlocals_zero
@@ -1384,7 +1386,30 @@ mdo_code:
 .code_nlocals_zero:
     xor r15d, r15d
 .code_nlocals_set:
-    mov [r13 + PyCodeObject.co_nlocals], r15d
+
+    ; co_nlocals is NOT that: it is the number of CO_FAST_LOCAL slots, which
+    ; is len(co_varnames), and CPython guarantees the two agree.  3.12's
+    ; marshal does not store the count -- CPython derives it from the kinds
+    ; too -- and storing nlocalsplus here reported a function's cells and free
+    ; variables as locals.  code_new derives it the same way for our own
+    ; compiler's output.
+    xor eax, eax
+    mov rdx, [rsp + 48]        ; co_localspluskinds bytes
+    test rdx, rdx
+    jz .code_nlocals_done
+    mov rcx, [rdx + PyBytesObject.ob_size]
+    xor esi, esi
+.code_nlocals_scan:
+    cmp rsi, rcx
+    jae .code_nlocals_done
+    test byte [rdx + PyBytesObject.data + rsi], CO_FAST_LOCAL
+    jz .code_nlocals_next
+    inc eax
+.code_nlocals_next:
+    inc rsi
+    jmp .code_nlocals_scan
+.code_nlocals_done:
+    mov [r13 + PyCodeObject.co_nlocals], eax
 
     mov eax, [rsp + 8]
     mov [r13 + PyCodeObject.co_stacksize], eax

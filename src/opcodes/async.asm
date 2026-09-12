@@ -538,83 +538,51 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     mov [rbp - BAW_MGR], rax
     mov rbx, rax               ; rbx = mgr
 
-    ; Look up __aexit__ on mgr's type
-    mov rax, [rbx + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_dict]
+    ; __aexit__, through the descriptor protocol -- CPython's
+    ; _PyObject_LookupSpecial, which is what the synchronous BEFORE_WITH was
+    ; converted to and this was left out of.  Reading the type's OWN tp_dict
+    ; meant an INHERITED __aexit__ was invisible, so every mixin-based async
+    ; context manager -- asyncio.Lock, Condition, Semaphore, all of which get
+    ; theirs from _ContextManagerMixin -- was "'async with' requires __aexit__
+    ; method".  And calling method_new on whatever came back bound a
+    ; DESCRIPTOR as the method rather than asking it for __get__.
+    mov rdi, rbx
+    lea rsi, [rel baw_str_aexit]
+    extern dunder_lookup_special
+    call dunder_lookup_special
     test rax, rax
-    jz .baw_no_exit
-
-    ; Get "__aexit__" from type dict
-    lea rdi, [rel baw_str_aexit]
-    call str_from_cstr_heap
-    mov r12, rax               ; r12 = aexit name str
-    mov rdi, [rbx + PyObject.ob_type]
-    mov rdi, [rdi + PyTypeObject.tp_dict]
-    mov rsi, r12
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    ; rax = value payload, edx = tag
-    test edx, edx               ; the tag, not the payload: a hit may be int 0
-    jz .baw_no_exit_decref_name
-    cmp edx, TAG_PTR
-    jne .baw_no_exit_decref_name
-
-    ; Got __aexit__ function — create bound method
-    mov [rbp - BAW_EXIT], rax
-    mov rdi, r12
-    call obj_decref            ; DECREF aexit name str
-
-    mov rdi, [rbp - BAW_EXIT]  ; func
-    mov rsi, [rbp - BAW_MGR]   ; self = mgr
-    call method_new
+    jz .baw_exit_missing
     mov [rbp - BAW_EXIT], rax
 
     ; Push bound __aexit__ method
     VPUSH_PTR rax
 
-    ; Now look up __aenter__ on mgr's type
-    mov rdi, [rbx + PyObject.ob_type]
-    mov rdi, [rdi + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jz .baw_no_enter
+    ; And __aenter__ the same way.  It is already bound, so there is no
+    ; receiver to prepend below.
+    mov rdi, rbx
+    lea rsi, [rel baw_str_aenter]
+    call dunder_lookup_special
+    test rax, rax
+    jz .baw_enter_missing
 
-    lea rdi, [rel baw_str_aenter]
-    call str_from_cstr_heap
-    mov r12, rax               ; r12 = aenter name str
-    mov rdi, [rbx + PyObject.ob_type]
-    mov rdi, [rdi + PyTypeObject.tp_dict]
-    mov rsi, r12
-    call dict_get
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    test edx, edx
-    jz .baw_no_enter_decref_name
-    cmp edx, TAG_PTR
-    jne .baw_no_enter_decref_name
-
-    ; Got __aenter__ function — call it with mgr as self
-    push rax                   ; save aenter func
-    push rax                   ; ...and a pad: this is the one call in the
-                               ; handler with an odd push under it
-    mov rdi, r12
-    call obj_decref            ; DECREF aenter name str
-    pop rax                    ; drop the pad
-    pop rax                    ; restore aenter func
-
-    ; Call __aenter__(mgr): tp_call(aenter_func, &mgr, 1)
-    mov rcx, [rax + PyObject.ob_type]
-    mov rcx, [rcx + PyTypeObject.tp_call]
-    test rcx, rcx
-    jz .baw_no_enter
-
-    ; Build fat arg on stack
-    mov r8, [rbp - BAW_MGR]
-    SPUSH_PTR r8               ; args[0] = mgr
-    mov rdi, rax               ; callable = __aenter__
-    mov rsi, rsp               ; args ptr
-    mov edx, 1                      ; nargs = 1
-    call rcx
-    V_UNPACK rax, rdx           ; tp_call returns a Value
-    add rsp, 16                ; pop fat arg
+    ; Got the bound __aenter__.  It carries its receiver already -- that is
+    ; what dunder_lookup_special returns -- so it is called with NO arguments,
+    ; where the old open-coded lookup had to prepend mgr by hand.
+    mov [rbp - BAW_ENTER], rax
+    mov rdi, rax
+    xor esi, esi                    ; no args array
+    xor edx, edx                    ; nargs = 0
+    extern obj_call_n
+    call obj_call_n
+    V_UNPACK rax, rdx
+    push rax
+    push rdx
+    mov rdi, [rbp - BAW_ENTER]
+    call obj_decref                 ; the bound aenter
+    pop rdx
+    pop rax
+    test rax, rax
+    jz .baw_enter_raised
     mov [rbp - BAW_ENTER], rax
     mov edx, edx               ; zero-extend 32-bit tag to 64-bit
     mov [rbp - BAW_RETTAG], rdx
@@ -633,18 +601,44 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     leave
     DISPATCH
 
-.baw_no_exit_decref_name:
-    mov rdi, r12
-    call obj_decref
+.baw_exit_missing:
+    ; dunder_lookup_special answers 0 for "absent" and for "the lookup itself
+    ; raised"; only the first is a TypeError of our own.
+    cmp qword [rel current_exception], 0
+    jne .baw_lookup_raised
 .baw_no_exit:
+    ; The wording is not CPython's, which names the object and distinguishes
+    ; "no __aenter__ either" from "only __aexit__ missing" -- op_before_with
+    ; does both and this does not.  bugs.md records it; a first attempt at it
+    ; here got the operand cleanup wrong and segfaulted, and the cleanup is
+    ; the part that matters on this path.
     RAISE exc_TypeError_type, "'async with' requires __aexit__ method"
+
+.baw_lookup_raised:
+    ; A __get__ raised.  This is reached only from .baw_exit_missing, which is
+    ; BEFORE anything is pushed -- so mgr is still in the value-stack slot
+    ; VPOP_VAL read it from, and the unwinder releases that.  Releasing it
+    ; here as well took one reference per failure, and the third `async with`
+    ; over the same manager segfaulted in gc_list_remove.  The synchronous
+    ; twin's .bw_lookup_raised records the same rule.
+    leave
+    jmp eval_exception_unwind
 
 .baw_not_ptr:
     DECREF_VAL rax, rdx
     RAISE exc_TypeError_type, "'async with' requires a context manager object"
-.baw_no_enter_decref_name:
-    mov rdi, r12
+.baw_enter_raised:
+    ; __aenter__ itself raised.  The bound __aexit__ pushed above stands where
+    ; mgr did, so the unwinder releases that; mgr's own reference is this
+    ; handler's to drop.
+    mov rdi, [rbp - BAW_MGR]
     call obj_decref
+    leave
+    jmp eval_exception_unwind
+
+.baw_enter_missing:
+    cmp qword [rel current_exception], 0
+    jne .baw_enter_raised
 .baw_no_enter:
     ; The __aexit__ method pushed above has taken mgr's slot, so the unwinder
     ; releases that and not mgr.  Same shape as op_before_with's .bw_no_enter.

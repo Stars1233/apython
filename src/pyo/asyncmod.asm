@@ -1341,6 +1341,7 @@ io_wait_awaitable_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 align 8
 sleep_awaitable_type:
@@ -1372,6 +1373,7 @@ sleep_awaitable_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 align 8
 global wait_for_awaitable_type
@@ -1404,6 +1406,7 @@ gather_awaitable_type:
     dq gather_awaitable_clear                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 align 8
 global gather_awaitable_type
@@ -1436,3 +1439,4 @@ wait_for_awaitable_type:
     dq wait_for_awaitable_clear                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer

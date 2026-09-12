@@ -58,22 +58,40 @@ PYEOF
 "$PYTHON" -m py_compile "$WORK/probe.py" 2>/dev/null || {
     echo "probe.py does not compile under $PYTHON"; exit 1; }
 
-"$PYTHON" "$WORK/probe.py" 2>/dev/null | sort -t'|' -k1,1n > "$WORK/cpython.txt"
+"$PYTHON" "$WORK/probe.py" 2>/dev/null > "$WORK/cpython.txt"
 timeout 60 "$APY" "$WORK/__pycache__/probe.cpython-312.pyc" 2>/dev/null \
-    | sort -t'|' -k1,1n > "$WORK/apython.txt"
+    > "$WORK/apython.txt"
 
 if [ ! -s "$WORK/apython.txt" ]; then
     echo -e "${RED}FAIL${NC} syntax probe: apython produced nothing"
     exit 1
 fi
 
-join -t'|' -o 0,1.2,2.2 -j1 \
-     <(sed 's/|/\t/' "$WORK/cpython.txt" | awk -F'\t' '{print $1 "|" $2}') \
-     <(sed 's/|/\t/' "$WORK/apython.txt" | awk -F'\t' '{print $1 "|" $2}') \
-     > "$WORK/both.txt" 2>/dev/null
+# Compare the WHOLE record, not just the message.  This used to be a `join`
+# on the first field with `-o 1.2,2.2`, and under `-t'|'` field 2 is the
+# message alone -- so lineno, offset, end_lineno and end_offset were never
+# compared, which is three quarters of what this probe says it measures.  A
+# snippet only one side reported counts as differing rather than vanishing.
+"$PYTHON" - "$WORK/cpython.txt" "$WORK/apython.txt" \
+            "$WORK/agree.txt" "$WORK/differ.txt" <<'PYEOF'
+import sys
 
-awk -F'|' '$2 == $3 {print $1}' "$WORK/both.txt" | sort > "$WORK/agree.txt"
-awk -F'|' '$2 != $3 {print $1}' "$WORK/both.txt" | sort -n > "$WORK/differ.txt"
+def load(path):
+    out = {}
+    for line in open(path, encoding="utf-8", errors="replace"):
+        line = line.rstrip("\n")
+        if "|" in line:
+            n, rest = line.split("|", 1)
+            out[n] = rest
+    return out
+
+cp, ap = load(sys.argv[1]), load(sys.argv[2])
+agree, differ = [], []
+for n in cp:
+    (agree if cp.get(n) == ap.get(n) else differ).append(n)
+open(sys.argv[3], "w").write("".join(n + "\n" for n in sorted(agree)))
+open(sys.argv[4], "w").write("".join(n + "\n" for n in sorted(differ, key=int)))
+PYEOF
 
 AGREE=$(wc -l < "$WORK/agree.txt")
 DIFFER=$(wc -l < "$WORK/differ.txt")

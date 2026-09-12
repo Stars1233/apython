@@ -154,6 +154,68 @@ deliberately filters `'opcode'` out of the one case that asks for it.
   general limit stands, and is why the `bytes %` leak recorded in `bugs.md`
   cannot be fixed by catching.
 
+## A buffer reached through `tp_as_buffer` is a read-only view of BYTES
+
+`PyTypeObject` carries a `tp_as_buffer`, and it answers one question -- where
+the memory is and how much of it there is.  CPython's `Py_buffer` answers six
+more: the item format, the item size, the shape, the strides, the suboffsets
+and whether the consumer may write.  So a `memoryview` obtained through the
+slot differs from CPython's in two ways:
+
+- It is **read-only**, because the slot has no way to say otherwise: CPython's
+  consumer asks for write access and the exporter grants or refuses it, and
+  there is no request here to carry that in.  A write is refused rather than
+  guessed at.  (Where the bytes may MOVE is a separate question, and the slot
+  does answer it: a view acquires an export and the exporter refuses a resize
+  while one is outstanding, which is why `a.append(x)` under a live view raises
+  BufferError exactly as CPython's does.)
+- It is a view of **bytes**: `format` is `'B'` and `itemsize` is `1`, so
+  `len(memoryview(array('i', [1, 2])))` is 8 here and 2 in CPython, and
+  indexing yields a byte rather than an item.  `bytes(m)` and `m.tobytes()`
+  agree exactly, which is what every caller of `bytes_like_ptr_len` actually
+  reads.
+
+The second follows from the first two-thirds of `memoryview` being absent
+rather than from a choice: `cast()` to a multi-byte format is not implemented
+either, so a view carrying `format='i'` would have no machinery to decode an
+item with and would read one byte where four were meant.  Giving the slot a
+format to report is the easy half; the decode, the strides and the release
+protocol are the rest of `memoryview`.
+
+## `sys.stdout.buffer` is a FileIO beside the text half, not underneath it
+
+`sys.stdout` is the assembly file object, which writes to its descriptor
+directly and keeps its own 8 KB buffer; CPython's is a `TextIOWrapper` sitting
+ON a `BufferedWriter`, and `sys.stdout.buffer` IS that writer.  Here the binary
+half is an `_io.FileIO` over the same descriptor, built the first time it is
+asked for and kept.
+
+It is built lazily because building it eagerly means importing `_io` before
+anything runs, and that is **1.1 ms to 2.9 ms on every invocation** of the
+interpreter -- measured, not estimated.  Only a program that asks for the
+binary half pays for it.
+
+Two consequences.  `type(sys.stdout.buffer).__name__` is `FileIO` rather than
+`BufferedWriter`.  And because the two halves reach one descriptor
+independently rather than one sitting on the other, handing out the binary half
+turns the text half's buffering OFF -- which keeps
+
+    print("one"); sys.stdout.buffer.write(b"two\n"); print("three")
+
+in program order, where CPython, whose buffered text is flushed last, emits
+`two` first.  Giving up the buffering is the cheaper of the two wrongs: a
+program that mixes the halves is asking about order, and one that does not
+never reaches the rule.
+
+Making `sys.stdout` a real `TextIOWrapper` over a real `BufferedWriter` closes
+all of it, and costs the start-up above.
+
+`array.frombytes` is the one place the narrow model is visible in the other
+direction.  CPython asks for `PyBUF_SIMPLE`, which an exporter carrying its own
+format declines, so `a.frombytes(another_array)` is a TypeError there -- and
+since the slot does not model the request flags, the three types CPython
+accepts in practice are named instead of asked.
+
 ## Test oracles
 
 Three tests compare against a recorded transcript in `tests/expected/` rather
@@ -317,6 +379,27 @@ bytecode that addresses it has broken the code object either way.  They raise
 a TypeError naming all three rather than "unexpected keyword argument", so
 the message says what is missing rather than pretending the field does not
 exist.
+
+## `platform.python_implementation()` answers `CPython`
+
+`sys.version` is `3.12.0 (apython 0.6.0) [NASM x86-64]`, and the bracketed
+compiler field at the end is there because `platform._sys_version` will not
+parse the string without one -- its regex ends in `\[([^\]]+)\]?`, and every
+call into `platform` raised `ValueError: failed to parse CPython sys.version`
+while the field was missing.  `platform` is reached by a great deal of
+ordinary code; `test_wsgiref`'s thirty-five tests all ended there.
+
+What the string cannot do is say `apython`.  `python_implementation()` is
+`_sys_version()[0]`, and the name is chosen before the regex runs, by three
+hardcoded probes: `sys.platform.startswith('java')` gives `Jython`, `"PyPy" in
+sys.version` gives `PyPy`, and anything else gives `CPython`.  There is no
+hook, and the PyPy branch additionally demands a `[PyPy ...]` bracket and a
+`(#buildno, builddate, buildtime)` triple -- so the only two answers available
+are `CPython` and a `platform` module that does not work at all.
+
+`sys.implementation.name` is `apython` and is the attribute a program should
+read; `sys.implementation.cache_tag` stays `cpython-312`, because that is what
+names the `.pyc` files this interpreter reads and writes.
 
 ## `type.__flags__` reports a subset of CPython's Py_TPFLAGS_*
 

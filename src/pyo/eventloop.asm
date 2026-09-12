@@ -1371,6 +1371,7 @@ task_type:
     dq task_clear               ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 section .bss
 align 8

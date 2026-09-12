@@ -104,3 +104,67 @@ x = b"\x"
 x = 1e
 x = 1j2
 x = .
+try:\n    pass\n
+x = 1\ntry:\n    pass\n
+try:\n    pass\nelse:\n    pass\n
+x = 1\ntry:\n    a = 1\n    b = 2\n
+def f():\n    try:\n        pass\n
+if 1:\n    try:\n        pass\n    x = 1\n
+x = 1\ny = 2\nbreak\n
+x = 1\nfor i in []:\n    pass\ncontinue\n
+x = 1\nwhile 0:\n    pass\nbreak\n
+a = 1\nclass C:\n    [q := 1 for w in []]\n
+a = 1\nwhile 1:\n    try:\n        pass\n    except* E:\n        break\n
+a = 1\nwhile 1:\n    try:\n        pass\n    except* E:\n        continue\n
+a = 1\ndef f():\n    nonlocal zz\n
+a = 1\nmatch a:\n    case {q: w}:\n        pass\n
+def f():\n    await x\n
+def f():\n    async for i in x:\n        pass\n
+def f():\n    async with x:\n        pass\n
+[x async for x in y]\n
+def f():\n    [await i for i in e]\n
+async def f():\n    def g():\n        [i async for i in e]\n
+async def f():\n    await await x\n
+async def f():\n    yield from []\n
+{i async for i in e}\n
+{i: i async for i in e}\n
+def f():\n    [i for i in e if await i]\n
+async for i in x:\n    pass\n
+async with x:\n    pass\n
+class C:\n    await x\n
+lambda: await x\n
+[i := 0 for i in range(3)]
+{i := 0 for i in range(3)}
+{(i := 0): 1 for i in range(3)}
+[i for i in range(3) if (i := 1)]
+[i for i in (j := range(3))]
+[i for i in range(3) for j in (k := [1])]
+[i for i in [k for k in (j := [1])]]
+[i for i, j in z if (i := 1)]
+[i for (i, j) in z if (j := 1)]
+((i := 0) for i in range(3))
+{i: (i := 0) for i in range(3)}
+[i for i in range(3) for i2 in (i := [1])]
+def f():\n    return [i := 0 for i in range(3)]\n
+[[i := 0 for i in a] for a in b]
+[x for x in range(3) if any(y := 1 for y in [1])]
+  = 1
+x  = 1
+​ = 1
+x =  
+́ = 1
+☃ = 1
+x = €
+x = ´
+a b = 1
+½ = 1
+① = 1
+٠ = 1
+f'''{ }'''
+([i async for i in x] for x in y)
+def f():\n    return ([i async for i in x] for x in y)\n
+[[i async for i in x] for x in y]
+{[i async for i in x] for x in y}
+def f():\n    return [[i async for i in x] for x in y]\n
+[([i async for i in x] for x in y)]
+class C:\n    g = ([i async for i in x] for x in y)\n

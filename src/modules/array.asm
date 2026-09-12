@@ -162,6 +162,7 @@ DEF_FUNC array_new_empty, 8
     mov [rax + PyArrayObject.ob_isize], rcx
     mov rcx, [rbx + ArrayCode.kind]
     mov [rax + PyArrayObject.ob_kind], rcx
+    mov qword [rax + PyArrayObject.ob_exports], 0
 .ane_out:
     pop rbx
     leave
@@ -182,6 +183,13 @@ DEF_FUNC array_reserve, AR_FRAME
     mov [rbp - AR_WANT], rsi
     cmp rsi, [rdi + PyArrayObject.ob_cap]
     jle .arr_ok
+
+    ; Nothing may be holding a pointer into the buffer: it is about to move.
+    call array_no_exports
+    test eax, eax
+    jz .arr_raised
+    mov rdi, [rbp - AR_ARR]
+    mov rsi, [rbp - AR_WANT]
 
     ; new capacity = max(want, cap * 2, 8)
     mov rax, [rdi + PyArrayObject.ob_cap]
@@ -208,6 +216,10 @@ DEF_FUNC array_reserve, AR_FRAME
     mov [rdi + PyArrayObject.ob_cap], rcx
 .arr_ok:
     mov eax, 1
+    leave
+    ret
+.arr_raised:
+    xor eax, eax
     leave
     ret
 .arr_nomem:
@@ -837,6 +849,13 @@ AAV_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC array_append_value, AAV_FRAME
     mov [rbp - AAV_ARR], rdi
     mov [rbp - AAV_VAL], rsi
+    ; Any change to the LENGTH is refused while a view is out, not only one
+    ; that moves the buffer: CPython's array_resize makes this test first, and
+    ; an append that happens to fit the spare capacity is a resize all the same.
+    call array_no_exports
+    test eax, eax
+    jz .aav_fail
+    mov rdi, [rbp - AAV_ARR]
     mov rsi, [rdi + PyArrayObject.ob_size]
     inc rsi
     call array_reserve
@@ -873,6 +892,12 @@ DEF_FUNC array_extend_iterable, 40
     push rbx
     mov [rbp - AEI_ARR], rdi
     mov rbx, rsi
+
+    ; As in array_append_value: the length is about to change.
+    call array_no_exports
+    test eax, eax
+    jz .aei_fail
+    mov rdi, [rbp - AEI_ARR]
 
     ; The same typecode: a straight copy, and the only path that does not go
     ; through the per-item range check -- it cannot need one.
@@ -1288,7 +1313,12 @@ DEF_FUNC array_ass_subscript, AAS_FRAME
 
 .aas_delete:
     ; Shift the tail down one item.  The buffer does not shrink: capacity is
-    ; not what ob_size means.
+    ; not what ob_size means.  It is still a resize, and a view over the array
+    ; would be left describing bytes that have moved.
+    mov rdi, [rbp - AAS_ARR]
+    call array_no_exports
+    test eax, eax
+    jz .aas_fail
     mov rdi, [rbp - AAS_ARR]
     mov rcx, [rdi + PyArrayObject.ob_isize]
     mov rax, [rbp - AAS_IDX]
@@ -1344,6 +1374,83 @@ array_mapping_methods:
 
 align 8
 global array_type
+section .text
+
+;; ============================================================================
+;; array_getbuffer(rdi = an array, esi = BUF_GET / BUF_ACQUIRE / BUF_RELEASE)
+;;   -> for BUF_GET: rax = data, rdx = length in BYTES, ecx = 1 always
+;;
+;; The tp_as_buffer slot.  An array is a flat run of fixed-size scalars, which
+;; is exactly what a buffer consumer wants; `memoryview(array('i', [1, 2]))`
+;; was "a bytes-like object is required" before there was a slot to ask.
+;;
+;; ob_size counts ITEMS and every consumer counts bytes, so the length is
+;; ob_size * ob_isize.  An empty array has no buffer at all, and answers a
+;; length of zero over a pointer nothing will read.
+;;
+;; The other two modes are the accounting a LASTING view needs.  A view keeps
+;; the pointer and an array's buffer MOVES when it grows -- array_reserve
+;; reallocs -- so `m = memoryview(a)` then `a.append(x)` left the view aimed at
+;; freed memory, and reading it printed whatever the allocator had put there.
+;; ============================================================================
+DEF_FUNC_BARE array_getbuffer
+    cmp esi, BUF_GET
+    jne .agb_count
+    mov rax, [rdi + PyArrayObject.ob_data]
+    mov rdx, [rdi + PyArrayObject.ob_size]
+    imul rdx, [rdi + PyArrayObject.ob_isize]
+    test rax, rax
+    jnz .agb_yes
+    xor edx, edx                ; no buffer: nothing to read, and no length
+    lea rax, [rel array_empty_data]
+.agb_yes:
+    mov ecx, 1
+    ret
+.agb_count:
+    cmp esi, BUF_ACQUIRE
+    jne .agb_release
+    inc qword [rdi + PyArrayObject.ob_exports]
+    ret
+.agb_release:
+    ; Clamped: a release that is somehow not paired must not make the count
+    ; negative and silently permit every resize after it.
+    cmp qword [rdi + PyArrayObject.ob_exports], 0
+    jle .agb_done
+    dec qword [rdi + PyArrayObject.ob_exports]
+.agb_done:
+    ret
+END_FUNC array_getbuffer
+
+;; ============================================================================
+;; array_no_exports(rdi = an array) -> eax = 1 when it may be resized, or 0
+;;                                     with BufferError set
+;;
+;; CPython's array_resize makes this test first, with this wording.
+;; ============================================================================
+DEF_FUNC array_no_exports
+    cmp qword [rdi + PyArrayObject.ob_exports], 0
+    jne .anx_exporting
+    mov eax, 1
+    leave
+    ret
+.anx_exporting:
+    extern exc_BufferError_type
+    SET_EXC exc_BufferError_type, "cannot resize an array that is exporting buffers"
+    xor eax, eax
+    leave
+    ret
+END_FUNC array_no_exports
+
+section .rodata
+array_empty_data: db 0
+
+; Back to the section the table below lives in: it is WRITTEN at start-up --
+; array_module_create stores its tp_dict -- so leaving it in .text faults on
+; that store.  lint checks for a function emitted in a DATA section; this is
+; the mirror of it, and nothing checks for it.
+section .data
+
+align 8
 array_type:
     dq 1                        ; ob_refcnt (immortal)
     dq type_type                ; ob_type
@@ -1379,6 +1486,7 @@ array_type:
     dq 0                        ; tp_clear
     dq 0                        ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq array_getbuffer          ; tp_as_buffer -- a flat run of scalars
 section .text
 
 ;; ============================================================================
@@ -1484,7 +1592,9 @@ END_FUNC array_m_tobytes
 ;;   The bytes must be a whole number of items, which is what CPython checks.
 AFB_ARR   equ 8
 AFB_FRAME equ 16            ; + 1 push = 24 ... padded below
-DEF_FUNC array_m_frombytes, 24
+AFB_SRC equ 24              ; the incoming data pointer, whatever held it
+AFB_LEN equ 32              ; and its length in bytes
+DEF_FUNC array_m_frombytes, 40
     push rbx
     cmp rsi, 2
     jne .afb_arity
@@ -1492,14 +1602,44 @@ DEF_FUNC array_m_frombytes, 24
     mov rdi, [rdi]
     mov [rbp - AFB_ARR], rdi
 
+    ; As in array_append_value: the length is about to change.
+    call array_no_exports
+    test eax, eax
+    jz .afb_fail
+
+    ; Anything bytes-LIKE, which is what CPython takes: a bytes, a bytearray or
+    ; a memoryview.  An exact-bytes test refused the other two.
+    ;
+    ; NOT a generic buffer exporter, and not another array: CPython asks for
+    ; PyBUF_SIMPLE, which an exporter carrying its own format refuses, so
+    ; `a.frombytes(other_array)` is a TypeError there.  This slot does not model
+    ; the request flags, so the three are named instead.
     V_TEST_PTR rbx, rax
     ja .afb_need_bytes
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel bytes_type]
     cmp rax, rcx
+    je .afb_kind_ok
+    extern bytearray_type
+    lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .afb_kind_ok
+    extern memoryview_type
+    lea rcx, [rel memoryview_type]
+    cmp rax, rcx
     jne .afb_need_bytes
-
-    mov rax, [rbx + PyBytesObject.ob_size]
+.afb_kind_ok:
+    push rbx
+    mov rdi, rbx
+    extern bytes_like_ptr_len
+    call bytes_like_ptr_len
+    pop rbx
+    test ecx, ecx
+    jz .afb_need_bytes
+    mov [rbp - AFB_SRC], rax    ; where the incoming bytes are
+    mov [rbp - AFB_LEN], r10    ; and how many there are
+    mov rdi, [rbp - AFB_ARR]
+    mov rax, r10
     xor edx, edx
     mov rcx, [rdi + PyArrayObject.ob_isize]
     div rcx
@@ -1521,8 +1661,8 @@ DEF_FUNC array_m_frombytes, 24
     add rax, [rdi + PyArrayObject.ob_data]
     push rsi
     mov rdi, rax
-    lea rsi, [rbx + PyBytesObject.data]
-    mov rdx, [rbx + PyBytesObject.ob_size]
+    mov rsi, [rbp - AFB_SRC]    ; wherever the source keeps its bytes
+    mov rdx, [rbp - AFB_LEN]
     call ap_memcpy
     pop rsi
     mov rdi, [rbp - AFB_ARR]

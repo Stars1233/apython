@@ -230,11 +230,18 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   codecs that are not a table, the UTF-8 validator under them, and the
   UnicodeDecodeError worded the way CPython words it.  Split off when
   `bytes.asm` reached the 100k cap; what stayed is bytes *itself*.  `class.asm` is
-  the metatype, the instance and attribute access; `instance_alloc.asm` is
+  the class and the instance -- construction, the reprs, dealloc and the
+  collector's view of both -- while `typeattr.asm` is reading and writing a
+  class's attributes, `type_getattr` included.  Split off when `class.asm`
+  reached the 100k cap a second time.  `instance_alloc.asm` is
   where an instance comes from, including the constructors a subclass of a
   builtin needs; `method.asm` is the bound method; `str_mod.asm` is the `%`
   operator, for str and for bytes both -- the conversion is only known there,
-  so the argument is converted there
+  so the argument is converted there.  `asyncgen.asm` is the three objects an
+  async generator hands out -- the asend and athrow awaitables and the box each
+  `yield` arrives in -- and what drives them; `generator.asm` is the generator,
+  the coroutine and the async generator themselves.  Split off when
+  `generator.asm` reached the 100k cap
 - `src/marshal.asm` — .pyc marshal deserializer, the .pyc file reader, and
   the `marshal` module `importlib` calls `loads` on
 - `src/main.asm` — argument parsing, startup order, and the `-t`/`--dis` modes
@@ -333,13 +340,15 @@ f-strings, async, comprehensions, PEP 695 type parameters.
 | `parse_str.asm` | string literals: the escapes, `\N{...}`, implicit concatenation, and whether a run is an f-string |
 | `prule.asm` | **generated** -- `prule_table`, the precedence grammar |
 | `parse_stmt.asm` | statements, and the soft keywords `match` and `type` |
+| `parse_try.asm` | `try` and `with`, which share a frame layout because they are the same shape -- a suite, then clauses that run whether it finished or not.  Split off when `parse_stmt.asm` reached the 100k cap, along the seam `codegen_try.asm` already uses |
 | `pattern.asm` | `match` patterns |
 | `fstring.asm` | f-string fields, lexed as spans of the same source |
 | `fstrscan.asm` | where a literal ends, under PEP 701 -- the one definition the lexer and both field scanners share |
 | `symtab.asm` | scopes, local/cell/free classification, name mangling |
 | `codegen.asm` | AST kind → emitter jump table; `_stmt`/`_func`/`_try`/`_comp`/`_match` for the rest.  `_try` also holds `except*`, `with` and `await`: they are one unwinder |
 | `assemble.asm` | EXTENDED_ARG fixpoint, stack depth, exception table, line table |
-| `compile.asm` | pipeline driver and lifetime; the `code_from_path` and `compile()`/`exec()`/`eval()` entry points; and `comp_error`, the record side of the error protocol |
+| `compile.asm` | pipeline driver and lifetime, and the `code_from_path` and `compile()`/`exec()`/`eval()` entry points |
+| `comperr.asm` | how a compile REPORTS rather than what it compiles: `comp_error` and its siblings (the compiler cannot raise, so an error is recorded and made pending after every buffer is freed), the message builder, the location a SyntaxError carries, and the deferred warnings.  Split off when `compile.asm` reached the 100k cap |
 | `unicodename.asm` | **generated** -- the names `\N{...}` resolves, front-coded: `db shared, cpdelta, "suffix", 0` per entry, decoded as the scan walks |
 | `gen_unicodename.py` | regenerates `unicodename.asm` from `unicodedata` |
 | `unicodecase.asm` | **generated** -- the case mappings and the character flags |

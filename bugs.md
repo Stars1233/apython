@@ -14,63 +14,6 @@ reasoning that chose them and what changing one would cost.
 
 ## Correctness
 
-- **CPython's test_weakref reports 44 valgrind errors of one kind**: an object
-  freed by an explicit `gc.collect()` while a live frame still held it -- the
-  collector deciding something is unreachable that is not.  The C-stack
-  overflow that used to head this entry is gone: it was `hash()` on a class
-  written `__hash__ = ref.__hash__`, where the generic slot wrapper and the
-  builtin it found dispatched into each other for ever, and the module no
-  longer crashes.
-
-  The same defect is what `time.get_clock_info` now exposes.  That function
-  exists, so CPython's `BaseEventLoop.__init__` gets past its first line and
-  asyncio starts -- and **test_asyncgen, test_contextlib_async, test_logging
-  and test_sys_settrace segfault** where they used to stop on an
-  AttributeError, in `gc_list_remove` under `gc_visit_reachable`.  They are
-  the four crashes in an otherwise crash-free sweep of CPython's 406 modules,
-  and they are one defect, not four.
-
-  What is known now, which is more than the refcount trace above found:
-
-  * The repro is a single module, `test_contextlib_async`, not a suite.
-  * valgrind over it reports exactly TWO errors and both are the fault
-    itself; everything before it is clean.  So there is no earlier
-    use-after-free to find -- the corruption is a single wild write.
-  * The object is confirmed: a `contextvars.Context`, reached from an asyncio
-    `Task`'s instance dict under the key `_context`, read out of the
-    DictEntry at the moment of the fault.
-  * The store into that entry DID go through `dict_set`, which INCREFs -- a
-    watchpoint on the entry slot caught it, at `instance_setattr` under
-    `op_store_attr`.  So the "the dict never took a reference" reading above
-    is wrong.
-  * The damage is to the object's GC HEAD, not to the dict: `gc_next`'s low
-    four bytes are overwritten with a small number -- 32767 under the pool
-    allocator, 31 under libc's -- while the high four are left intact.  A
-    four-byte store, of a value that looks like a mask or a version.
-  * Every generation list is internally consistent at the START of every
-    collection, checked by walking all three and comparing each node against
-    its neighbour's back pointer.  So the node is not in a generation list at
-    all: it is reached only through `dict_traverse` during phase 4.
-  * Disabling STORE_ATTR specialization entirely -- both the instance and the
-    slot caches -- does not stop it.
-  * `gc.disable()` does not stop it either; it moves the fault to the
-    shutdown collection, which means the corruption is already in the object
-    graph and any collection trips over it.
-
-  What that leaves is a four-byte write into a live object's GC head from
-  something that is not the collector and not the store caches.  Set a
-  hardware watchpoint on the head under `setarch -R` -- the address is stable
-  across runs with ASLR off, and a two-pass script (find it, then watch it)
-  is how the facts above were got.
-
-  CPython's test_sys_settrace dies in `gc_visit_decref` under `exc_traverse`
-  at shutdown, and it is HEAP-LAYOUT SENSITIVE: the same commit built at
-  `/tmp/apy-base` passes and built at `/home/jgarzik/repo/apython` crashes,
-  because the DWARF path length changes the binary's size and with it every
-  allocation address.  A git worktree is the usual way to compare two commits,
-  and a worktree whose path differs in LENGTH is not a control -- build the
-  comparison at a path of the same length, or the answer is about the path.
-
 - **Calls made with a misaligned stack, everywhere except the paths into
   GMP.**  The SysV ABI wants `rsp % 16 == 0` at a `call`, and glibc's float
   paths and GMP both use aligned SSE.  Every call into GMP is now made
@@ -278,6 +221,112 @@ reasoning that chose them and what changing one would cost.
   CALL_FUNCTION_EX to materialise an arbitrary iterable -- it takes a tuple
   or a list today.  The `**` half is done: DICT_MERGE names the callable and
   accepts any mapping.
+
+- **`bytes(obj)` does not take an `__index__`-only object as a count.**
+  `bytes(C())` where `C.__index__` returns 3 is three zero bytes in CPython --
+  its `PyIndex_Check` arm runs before the buffer and the iterable -- and
+  "cannot convert 'C' object to bytes" here: `byteslike_source`'s count arm
+  takes an int, an int subclass and bool by name.  `__bytes__` is consulted
+  now and wins over `__index__` as it should, so only the object whose ONLY
+  numeric face is `__index__` differs.  Closing it means asking the type for
+  `__index__` where the int check is, which puts a dunder lookup on the path
+  of every `bytes(x)` whose argument is not one of the four named types.
+
+- **A generator expression containing an async comprehension is not itself an
+  async generator.**  `([i async for i in x] for x in y)` is an
+  `async_generator` in CPython and a plain `generator` when our own compiler
+  builds it -- a `.pyc` gets it right, because the flag comes from the
+  marshalled code object.  The nested comprehension marks its OWN scope
+  SCF_COROUTINE and nothing propagates that to the genexp around it; CPython's
+  symtable does.  The refusals and acceptances all match
+  (`tests/test_compile_async_scope.py`); only the kind of object is wrong, and
+  it makes `async for lst in that_genexp` a TypeError.
+
+- **Source that is not valid UTF-8 is refused with our own wording, and one
+  column off for a bad four-byte lead.**  CPython reports a codec error --
+  `(unicode error) 'utf-8' codec can't decode byte 0xe9 in position 3:
+  unexpected end of data` -- with a position of its own; `src/compiler/lex.asm`
+  says `invalid non-UTF-8 byte 0xe9` at the byte's own column.  The accept /
+  reject decision and the LINE match on eleven shapes
+  (`tests/test_compile_utf8_source.py`), and bytes inside a comment are
+  accepted by both.
+
+- **Three messages that name no type.**  `b"x" in ValueError()` is
+  "argument of type is not iterable" where CPython says "argument of type
+  'ValueError' is not iterable"; `async with` over an object with no
+  `__aexit__` is "'async with' requires __aexit__ method" where CPython names
+  the object and distinguishes "no `__aenter__` either" from "only
+  `__aexit__` missing" -- `op_before_with` does both and its async twin does
+  not; and `__bytes__` returning a non-bytes omits CPython's `(type int)`
+  suffix.  The first attempt at the async one got the operand cleanup wrong
+  and segfaulted: that path releases nothing and lets the unwinder take the
+  manager out of the value-stack slot, which is what any rewrite has to keep.
+
+- **A `bytes` SUBCLASS from `__bytes__` is refused, and `C(x)` for a bytes
+  subclass answers a plain bytes.**  The check is `ob_type == bytes_type`
+  where CPython uses `PyBytes_Check`, which takes a subclass; and
+  `bytes_type_call` hands back the dunder's own object without asking the
+  subclass to adopt it.
+
+- **`co_freevars` is in source order and CPython's is sorted**, and a module
+  code object reports its globals in `co_varnames`.  The first is the order
+  our symbol table appends free variables in; the second is that a module
+  scope puts its names in `Scope.varnames` at all, where CPython gives a
+  module body no fast locals. `co_varnames`, `co_cellvars`, `co_freevars` and
+  `co_nlocals` agree with CPython for every function shape tested
+  (`tests/test_code_localsplus.py`); these two are what is left.
+
+- **PEP 3131's NFKC normalisation of identifiers is absent.**  `class T: µ = 1`
+  then `T.µ` works and `T.μ` is an AttributeError: CPython normalises every
+  identifier to NFKC, so the MICRO SIGN U+00B5 and GREEK SMALL LETTER MU
+  U+03BC are the same name there and two names here.  The XID_Start /
+  XID_Continue half of the rule is checked now (`src/compiler/lex.asm`, over
+  the flags `gen_unicodecase.py` emits), which is what stopped an invisible
+  NBSP from being a variable; normalisation is the other half and wants the
+  decomposition and composition tables, which are a generated artefact an
+  order of magnitude larger than the case mappings.  It is the one thing
+  CPython's `test_unicode_identifiers` still fails on.
+
+- **Seven syntax errors differ from CPython in a POSITION rather than in the
+  message**, recorded in `tests/syntax_floor.txt` as differing and shown by
+  `bash tests/syntax_probe.sh --show`:
+
+  `no binding for nonlocal 'x' found` reports line 0.  It is raised by the
+  analyze pass, which holds a scope but no node -- `comp_error_node` needs
+  one -- and closing it means recording the declaring node per NAME, because
+  a scope may have several `nonlocal` statements and the message is about one
+  of them.  Every other symbol-table and codegen error carries its real line
+  now.
+
+  A mapping pattern's non-literal key differs in wording as well as span:
+  `case {q: w}` is "invalid syntax" in CPython, which rejects it in the
+  grammar, and "a mapping pattern's keys must be literals" here, from the
+  pattern compiler.
+
+  The other five are columns: an unexpected indent and an unindent that
+  matches no outer level (CPython blames the first non-space character and
+  runs the span off the line), the bare `*` in `def f(*)`, the location of a
+  missing indented block after a header that ends in whitespace, and the
+  column of `unexpected character after line continuation character`.
+
+- **An f-string's field errors differ in wording**, though both interpreters
+  raise a SyntaxError: `f'{3!g}'` is "f-string: invalid conversion character
+  'g': expected 's', 'r', or 'a'" in CPython and "f-string: invalid
+  conversion, expected 's', 'r' or 'a'" here, and `f'{}'` is "f-string: valid
+  expression required before '}'" there against whatever the empty span makes
+  the expression parser say here.  `src/compiler/fstring.asm` has two
+  messages where CPython has a dozen, and they are reported at the whole
+  f-string token rather than inside the field.  That is most of what
+  CPython's `test_fstring` still counts: the rejection is right and the
+  sentence is not.
+
+- **`super(C, obj)` reaches its own four attributes through the opcode now,
+  but our compiler emits LOAD_SUPER_ATTR where CPython's does not.**  CPython
+  only specialises `super(...).attr` inside a function; at module level it
+  compiles an ordinary call and a LOAD_ATTR.  The two paths answer the same
+  thing for every shape tested, so nothing is observably wrong -- but there
+  are two paths where CPython has one, and the opcode's is the one with
+  arms of its own.
 
 - **Missing C modules.**  The ranking here is by what actually stands in the
   way rather than by which import fails first -- the two are not the same,

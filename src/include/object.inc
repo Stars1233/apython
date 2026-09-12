@@ -126,6 +126,7 @@ struc PyArrayObject
     .ob_code:    resq 1   ; +40: the typecode letter
     .ob_isize:   resq 1   ; +48: bytes per item
     .ob_kind:    resq 1   ; +56: AK_SIGNED / AK_UNSIGNED / AK_FLOAT / AK_UNICODE
+    .ob_exports: resq 1   ; +64: live views over ob_data, which block a resize
 endstruc
 
 struc PyByteArrayObject
@@ -631,6 +632,13 @@ struc PyGenObject
     .gi_code:   resq 1    ; +32: code object
     .gi_name:   resq 1    ; +40: name string
     .gi_return_value: resq 1 ; +48: return Value (for StopIteration.value)
+    ; PEP 525's hooks, for an ASYNC generator only.  The firstiter hook fires
+    ; once, the first time the generator is used, and the finalizer is
+    ; snapshotted at that same moment -- so a generator collected after its
+    ; event loop has moved on is still closed by the loop that started it,
+    ; which is what CPython's ag_origin_or_finalizer does.
+    .ag_hooks_done: resq 1   ; +56: 1 once firstiter has fired
+    .ag_finalizer: resq 1    ; +64: the finalizer that was installed then, owned
 endstruc
 
 ; File object (for sys.stdout, sys.stderr, sys.stdin)
@@ -649,6 +657,13 @@ struc PyFileObject
     .file_buffered: resq 1 ; +40: 1 = accumulate; 0 = one write per call
     .file_len:    resq 1  ; +48: bytes waiting in .file_buf
     .file_buf:    resb FILE_BUFSZ  ; +56
+    ; The binary half this stream is a text layer over, built on first ask and
+    ; kept.  sys.stdout is this object rather than a Python TextIOWrapper, so
+    ; `sys.stdout.buffer` has nothing to hand back until something builds one;
+    ; making it eagerly would mean importing _io at start-up, which costs
+    ; 1.1 ms -> 2.9 ms on EVERY run.  Built lazily, only a program that asks
+    ; pays.
+    .file_binary: resq 1  ; owned, or 0
 endstruc
 
 ; _io.FileIO.  The first three fields are PyInstanceObject's, because FileIO
@@ -831,7 +846,11 @@ struc AsyncGenASend
     .ob_type:       resq 1  ; +8
     .ags_gen:       resq 1  ; +16: pointer to async generator (INCREF'd)
     .ags_state:     resd 1  ; +24: 0=initial, 1=yielded, 2=closed
-    .pad0:          resd 1  ; +28
+    .ags_aclose:    resd 1  ; +28: 1 when this athrow came from aclose() rather
+                            ;      than athrow(exc).  CPython tells them apart
+                            ;      by whether agt_args is NULL, which it never
+                            ;      clears; ags_sendval IS cleared when the throw
+                            ;      is delivered, so the mode needs its own word
     .ags_sendval:   resq 1  ; +32: the Value asend.send() will resume with,
                             ;      owned, 0 for None
     .ags_started:   resd 1  ; +40: athrow only -- 1 once the throw has been
@@ -889,7 +908,35 @@ struc PyTypeObject
     ; every other type, which is what a static table that predates the field
     ; reads as.
     .tp_tailslots:   resq 1  ; +216
+    ; How to reach an object's raw bytes: CPython's tp_as_buffer, reduced to
+    ; the one question everything here asks -- "where is the memory and how
+    ; much of it is there".  bytes_like_ptr_len consults it when its own
+    ; hard-coded chain misses, which is what lets memoryview(), bytes(),
+    ; FileIO.write, marshal, sre and the twenty-odd bytes methods take an
+    ; array, or any exporter added later, without each learning the type by
+    ; name.
+    ;
+    ; The signature is
+    ;     tp_getbuffer(rdi = obj, esi = BUF_GET) -> rax = data ptr,
+    ;                                rdx = length in BYTES,
+    ;                                ecx = 1 when it answered, 0 when not
+    ; so a type whose buffer can be absent -- a released memoryview -- says so
+    ; without raising, which is the contract bytes_like_ptr_len already keeps.
+    ;
+    ; BUF_ACQUIRE and BUF_RELEASE are the accounting a LASTING view needs, and
+    ; they answer nothing.  A view keeps the POINTER, and an exporter's storage
+    ; can move -- an array's does, when it grows -- so an exporter has to be
+    ; able to refuse a resize while someone holds one.  CPython splits this
+    ; across bf_getbuffer and bf_releasebuffer; one slot answers all three here.
+    ; A caller that only reads the bytes and is done with them before any other
+    ; code runs passes BUF_GET alone, which is what every caller of
+    ; bytes_like_ptr_len does.
+    .tp_as_buffer:   resq 1  ; +224
 endstruc
+
+BUF_GET     equ 0
+BUF_ACQUIRE equ 1
+BUF_RELEASE equ 2
 
 TYPE_OBJECT_SIZE equ PyTypeObject_size
 

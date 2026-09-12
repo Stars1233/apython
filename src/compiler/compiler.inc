@@ -171,6 +171,36 @@ TOKEN_SHIFT equ 5
     or  rcx, r11
 %endmacro
 
+;; ============================================================================
+;; SUITE_FOR text, line -- what an indented block is expected AFTER
+;;
+;; CPython says "expected an indented block after 'if' statement on line 3",
+;; and the statement is the one thing par_suite cannot see: it is called from
+;; fourteen places and takes only a Comp*.  Two words in parse_stmt.asm carry
+;; it, which is safe because par_suite reads them before it can descend into a
+;; nested suite that would overwrite them.  The macros live here rather than
+;; in parse_stmt.asm because parse_try.asm writes them too.
+;; ============================================================================
+%macro SUITE_FOR 2              ; %1 = the text, %2 = a source of the line
+    CSTRING rax, %1
+    mov [rel psu_what], rax
+    mov eax, %2
+    mov [rel psu_line], eax
+%endmacro
+
+;; SUITE_FOR_HERE text -- the same, for a clause that is its own statement.
+;; `else`, `except` and `finally` are blamed on THEIR line, not on the line
+;; the `if` or the `try` opened on, so the line comes from the token the
+;; parser is looking at.  Clobbers rax and rdi; rbx must be the Comp*.
+%macro SUITE_FOR_HERE 1
+    mov rdi, rbx
+    call par_peek
+    mov eax, [rax + Token.lineno]
+    mov [rel psu_line], eax
+    CSTRING rax, %1
+    mov [rel psu_what], rax
+%endmacro
+
 ;; ===========================================================================
 ;; Character classes.  One 256-byte table drives every scanning decision in
 ;; the lexer.
@@ -608,6 +638,13 @@ struc Comp
                                     ; will own it -- `for x in y:  # type: int`
                                     ; is the For's, and the For node does not
                                     ; exist until its body has been parsed
+    ; PEP 572's two rules about a walrus in a comprehension, which are about
+    ; WHERE in the comprehension it is written rather than about any scope.
+    ; The symbol table sets each around the one visit it covers.
+    .in_comp_iter: resd 1           ; visiting a `for` TARGET: the names bound
+                                    ; here are iteration variables
+    .in_comp_iterable: resd 1       ; visiting a clause's ITERABLE, where no
+                                    ; walrus may appear at all
     .err:       resb CompErr_size
     .warn_n:    resd 1              ; how many of .warns are filled
     .warn_pad:  resd 1
@@ -755,6 +792,11 @@ DEF_UNBOUND  equ 0x040
 ; dictbytype(symbols, FREE, DEF_FREE_CLASS, ncells) is what lands the name in
 ; co_freevars without disturbing its scope.
 DEF_FREE_CLASS equ 0x080
+; A comprehension's iteration variable, in the comprehension's own scope.
+; PEP 572 forbids a walrus from rebinding one, and the check needs to know
+; which of the scope's locals came from a `for` target rather than from an
+; ordinary assignment inside the body.
+DEF_COMP_ITER  equ 0x100
 
 ; The resolved answer, stored in bits 12..14.
 SCOPE_SHIFT      equ 12
@@ -768,6 +810,11 @@ SYM_CELL            equ 5
 ; Scope.flags
 SCF_GENERATOR equ 0x01
 SCF_COROUTINE equ 0x02
+; SCF_COROUTINE says "this block is a coroutine", and a bare `await` sets it
+; just as `async def` does -- so it cannot answer "was this block DECLARED
+; async", which is what refusing an `await` in a plain def needs.  This bit
+; is set only by sym_enter_function, and only for an `async def`.
+SCF_ASYNC_DEF equ 0x08
 ; PEP 695: this block is a type-parameter wrapper sitting directly inside a
 ; CLASS body, so a name that would otherwise be an implicit global is looked
 ; for in that body's namespace first.  Ordinary scoping cannot do it -- a

@@ -780,6 +780,7 @@ slice_type:
     dq slice_clear_gc                        ; tp_clear
     dq 0           ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 section .text
 

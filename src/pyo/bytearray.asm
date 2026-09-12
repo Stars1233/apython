@@ -1909,6 +1909,7 @@ bytearray_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; What bytearray_data hands back when ob_bytes is NULL, so no reader has to
 ; test for it.
@@ -1953,6 +1954,7 @@ memoryview_iter_type:
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 align 8
 global bytearray_iter_type
@@ -1985,6 +1987,7 @@ bytearray_iter_type:
     dq 0                            ; tp_clear
     dq 0                            ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 section .rodata
 ; The extended-slice assignment's two-part message, and the constructor's.

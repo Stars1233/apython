@@ -374,9 +374,21 @@ DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
     leave
     ret
 .bfg_missing:
-    ; A plain function is not bound to anything, and CPython's has no
-    ; __self__ either; answering NULL lets the caller raise its own
-    ; AttributeError.
+    ; A module-level builtin is bound to its MODULE, which for everything here
+    ; is builtins: CPython's `len.__self__` is <module 'builtins'>, and its
+    ; meth_reduce reads it to decide between a bare name and a getattr pair.
+    ; The comment that used to sit here said CPython had no __self__ for one,
+    ; and it does.
+    extern builtins_module_obj
+    mov rax, [rel builtins_module_obj]
+    test rax, rax
+    jz .bfg_no_module
+    INCREF rax
+    pop rbx
+    leave
+    ret
+.bfg_no_module:
+    ; Before the module exists -- during start-up -- there is nothing to name.
     xor eax, eax
     pop rbx
     leave
@@ -971,6 +983,284 @@ bfr_close:         db ">", 0
 section .text
 
 ;; ============================================================================
+;; print_sink_resolve() -> rax = the object sys.stdout names, OWNED, or 0
+;;
+;; Read per call, not cached: `sys.stdout = buf` is how doctest, pdb,
+;; unittest -b and contextlib.redirect_stdout all capture output, and the
+;; startup snapshot in sys_stdout_obj does not follow an assignment.  0 when
+;; sys is not up yet (during startup) or when sys.stdout is None, both of
+;; which mean "produce nothing", as CPython's print does.
+;; ============================================================================
+PSR_SINK  equ 8
+PSR_NAME  equ 16
+PSR_FRAME equ 16            ; 0 pushes, 16-aligned
+DEF_FUNC_LOCAL print_sink_resolve, PSR_FRAME
+    extern sys_module_obj
+    mov rax, [rel sys_module_obj]
+    test rax, rax
+    jz .psr_none
+    mov [rbp - PSR_SINK], rax
+    CSTRING rdi, "stdout"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    mov [rbp - PSR_NAME], rax
+    mov rdi, [rbp - PSR_SINK]
+    mov rsi, rax
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    mov [rbp - PSR_SINK], rax   ; the sink, owned
+    mov rdi, [rbp - PSR_NAME]
+    call obj_decref             ; the name
+    mov rax, [rbp - PSR_SINK]
+    test rax, rax
+    jz .psr_none
+    ; obj_getattr_opt hands back a VALUE, and a reference, and the caller KEEPS
+    ; it.  Giving it back and holding a borrowed one was wrong: "sys.stdout is
+    ; reachable from sys the whole time" stops being true the moment user code
+    ; reassigns it, and print resolves the sink BEFORE converting its
+    ; arguments -- so a __str__ that does `sys.stdout = other` dropped the last
+    ; reference to the sink and print then wrote through freed memory.
+    ; CPython is safe here because PyFile_WriteObject fetches the bound
+    ; `write` before it calls PyObject_Str.
+    ;
+    ; Only None means "no stream".  Anything ELSE, immediate or not, goes
+    ; through to the write attempt, which is what names the type: CPython
+    ; answers `sys.stdout = 5; print(x)` with "'int' object has no attribute
+    ; 'write'", where producing nothing silently loses the output.
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .psr_is_none
+    leave
+    ret
+.psr_is_none:
+    ; None is not a stream, and the reference is ours to drop.
+    mov rdi, rax
+    DECREF_V rdi, rcx
+.psr_none:
+    xor eax, eax
+    leave
+    ret
+END_FUNC print_sink_resolve
+
+;; ============================================================================
+;; print_sink_write(rdi = sink, rsi = buf, rdx = len) -> rax = 0 ok, 1 raised
+;;
+;; The three startup streams are the assembly file_type and keep their own
+;; buffer, so they are written through fileobj_emit and the ordering against
+;; everything else that writes them is preserved.  Anything else is an
+;; ordinary object and is asked for its `write` -- which is all print()
+;; requires of a file, and all it has ever required in CPython.
+;; ============================================================================
+PSW_SINK  equ 8
+PSW_BUF   equ 16
+PSW_LEN   equ 24
+PSW_STR   equ 32
+PSW_NAME  equ 40            ; the attribute name, in a slot rather than pushed:
+                            ; a lone push around a call misaligns it, and lint
+                            ; counts only the pushes in a prologue
+PSW_FRAME equ 56            ; + 1 push = 64, 16-aligned
+DEF_FUNC_LOCAL print_sink_write, PSW_FRAME
+    push rbx
+    test rdi, rdi
+    jz .psw_ok                  ; nothing to write to: produce nothing
+    test rdx, rdx
+    jz .psw_ok                  ; nothing to write
+    mov [rbp - PSW_SINK], rdi
+    mov [rbp - PSW_BUF], rsi
+    mov [rbp - PSW_LEN], rdx
+
+    ; file= takes any Value, so an int or a float gets here too; asking it for
+    ; ob_type would read the number.  It has no `write` either way, and
+    ; raise_no_attribute names a Value's type correctly.
+    V_TEST_PTR rdi, rax
+    ja .psw_not_object
+
+    extern file_type
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel file_type]
+    cmp rax, rcx
+    jne .psw_object
+
+    extern fileobj_emit
+    call fileobj_emit
+    jmp .psw_ok
+
+.psw_object:
+    ; The text becomes a str, because that is what write() takes.
+    mov rdi, [rbp - PSW_BUF]
+    mov rsi, [rbp - PSW_LEN]
+    extern str_new_heap
+    call str_new_heap
+    test rax, rax
+    jz .psw_raised
+    mov [rbp - PSW_STR], rax
+
+    CSTRING rdi, "write"
+    call str_from_cstr_heap
+    mov rbx, rax
+    mov rdi, [rbp - PSW_SINK]
+    mov rsi, rbx
+    call obj_getattr_opt
+    mov [rbp - PSW_NAME], rax
+    mov rdi, rbx
+    call obj_decref             ; the name
+    mov rbx, [rbp - PSW_NAME]   ; rbx = the bound write, a Value, or 0
+    test rbx, rbx
+    jz .psw_no_write
+
+    sub rsp, 16
+    mov rax, [rbp - PSW_STR]
+    mov [rsp], rax
+    mov rdi, rbx
+    mov rsi, rsp
+    mov edx, 1
+    extern obj_call_n
+    call obj_call_n
+    add rsp, 16
+    push rax
+    push rax
+    mov rdi, rbx
+    DECREF_V rdi, rcx           ; the bound write, which is a Value
+    mov rdi, [rbp - PSW_STR]
+    call obj_decref             ; the text, which is always a str
+    pop rax
+    pop rax
+    test rax, rax
+    jz .psw_raised
+    ; The result is discarded, as CPython discards write()'s return.
+    DECREF_V rax, rcx
+    jmp .psw_ok
+
+.psw_no_write:
+    ; CPython's message, and it is the one a caller catches: a file= that is
+    ; not a file says so by name rather than by silently writing nowhere.
+    ; Unless the LOOKUP raised -- obj_getattr_opt answers 0 for that too, and
+    ; reporting a `write` property that raised as a missing `write` loses the
+    ; exception the program actually has to see.
+    mov rdi, [rbp - PSW_STR]
+    call obj_decref
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    jne .psw_raised
+.psw_not_object:
+    CSTRING rdi, "write"
+    call str_from_cstr_heap
+    mov rsi, rax
+    mov rdi, [rbp - PSW_SINK]
+    xor edx, edx                ; a get, not a set
+    extern raise_no_attribute
+    call raise_no_attribute
+    ; does not return
+
+.psw_raised:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.psw_ok:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC print_sink_write
+
+;; ============================================================================
+;; print_sink_flush(rdi = sink) -> rax = 0 ok, 1 raised
+;;
+;; What flush=True asks of the sink.  A startup stream is drained directly;
+;; anything else is asked for its `flush` -- and, once asked, a sink without
+;; one is an error.  CPython requires only `write` of a file, but flush=True
+;; is `PyObject_CallMethodNoArgs(file, &_Py_ID(flush))` with its result tested,
+;; so `print(x, file=write_only, flush=True)` raises AttributeError there.
+;; Treating a missing flush as a flush that had already happened made this the
+;; one place a print could fail silently.
+;; ============================================================================
+PSF_SINK  equ 8
+PSF_NAME  equ 16            ; a slot, not a push: see PSW_NAME above
+PSF_FRAME equ 24            ; + 1 push = 32, 16-aligned
+DEF_FUNC_LOCAL print_sink_flush, PSF_FRAME
+    push rbx
+    test rdi, rdi
+    jz .psf_ok
+    V_TEST_PTR rdi, rax
+    ja .psf_ok                  ; not an object: print_sink_write said so
+    mov [rbp - PSF_SINK], rdi
+
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel file_type]
+    cmp rax, rcx
+    jne .psf_object
+    extern fileobj_drain
+    call fileobj_drain
+    jmp .psf_ok
+
+.psf_object:
+    CSTRING rdi, "flush"
+    call str_from_cstr_heap
+    mov rbx, rax
+    mov rdi, [rbp - PSF_SINK]
+    mov rsi, rbx
+    call obj_getattr_opt
+    mov [rbp - PSF_NAME], rax
+    mov rdi, rbx
+    call obj_decref             ; the name
+    mov rbx, [rbp - PSF_NAME]
+    test rbx, rbx
+    jz .psf_no_flush
+
+    mov rdi, rbx
+    xor esi, esi
+    xor edx, edx
+    call obj_call_n
+    push rax
+    push rax
+    mov rdi, rbx
+    DECREF_V rdi, rcx           ; a Value, as obj_getattr_opt answers
+    pop rax
+    pop rax
+    test rax, rax
+    jz .psf_failed
+    DECREF_V rax, rcx
+.psf_ok:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.psf_no_flush:
+    ; Missing, or the lookup raised -- the same 0 for both, so ask.
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    jne .psf_failed
+    CSTRING rdi, "flush"
+    call str_from_cstr_heap
+    mov rsi, rax
+    mov rdi, [rbp - PSF_SINK]
+    xor edx, edx                ; a get, not a set
+    extern raise_no_attribute
+    call raise_no_attribute
+    ; does not return
+
+.psf_failed:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC print_sink_flush
+
+; PRINT_DROP_SINK -- release the sink when print resolved it itself.  Used at
+; each of builtin_print's three exits; clobbers rdi and rcx, which none of
+; them has anything live in.
+%macro PRINT_DROP_SINK 0
+    cmp qword [rbp - PR_OWNSINK], 0
+    je %%done
+    mov qword [rbp - PR_OWNSINK], 0
+    mov rdi, [rbp - PR_SINK]
+    DECREF_V rdi, rcx
+%%done:
+%endmacro
+
+;; ============================================================================
 ;; builtin_print(PyObject **args, int64_t nargs) -> PyObject*
 ;; Print each arg separated by spaces, followed by newline
 ;; Buffered: builds output in stack buffer, single fwrite() at end
@@ -980,12 +1270,16 @@ PR_SEP       equ 8     ; sep string ptr (0 = default " ")
 PR_SEP_TAG   equ 16    ; sep tag
 PR_END       equ 24    ; end string ptr (0 = default "\n")
 PR_END_TAG   equ 32    ; end tag
-PR_FILE_FD   equ 40    ; file descriptor (1 = stdout)
+PR_SINK      equ 40    ; where the text goes: an object, or 0 for "sys.stdout"
 PR_FLUSH     equ 48    ; the flush= keyword, once it means something
+PR_OWNSINK   equ 56    ; 1 when PR_SINK is a reference of ours to release:
+                       ; print_sink_resolve hands one over, and `file=` does
+                       ; not -- that one is borrowed from the argument array
 PR_FRAME     equ 4168            ; + 5 pushes = 4208, 16-aligned
 
 extern kw_names_pending
 extern ap_strcmp
+
 
 DEF_FUNC builtin_print, PR_FRAME
     push rbx
@@ -1002,7 +1296,8 @@ DEF_FUNC builtin_print, PR_FRAME
     ; Initialize defaults
     mov qword [rbp - PR_SEP], 0       ; NULL = default " "
     mov qword [rbp - PR_END], 0       ; NULL = default "\n"
-    mov qword [rbp - PR_FILE_FD], 1   ; stdout
+    mov qword [rbp - PR_SINK], 0      ; 0 = "whatever sys.stdout names"
+    mov qword [rbp - PR_OWNSINK], 0
     mov qword [rbp - PR_FLUSH], 0
 
     ; Check for keyword arguments
@@ -1108,12 +1403,15 @@ DEF_FUNC builtin_print, PR_FRAME
     jmp .print_kw_next
 
 .print_kw_file:
-    ; file kwarg: get file descriptor from file object
-    mov rax, [rbx + r11]           ; file object Value
-    V_TEST_PTR rax, rdx
-    ja .print_kw_next               ; non-pointer file= → ignore
-    mov rax, [rax + PyFileObject.file_fd]
-    mov [rbp - PR_FILE_FD], rax
+    ; file kwarg: the OBJECT, kept as it is.  Reading PyFileObject.file_fd off
+    ; whatever pointer arrived meant a StringIO wrote to whatever its second
+    ; word happened to hold, and a non-pointer was dropped without a word.
+    ; None means sys.stdout, which is the 0 the slot already holds.
+    mov rax, [rbx + r11]
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .print_kw_next
+    mov [rbp - PR_SINK], rax
     jmp .print_kw_next
 
 .print_kw_next:
@@ -1127,6 +1425,15 @@ DEF_FUNC builtin_print, PR_FRAME
     mov qword [rel kw_names_pending], 0
 
 .print_no_kw:
+    ; No file=, or file=None: whatever sys.stdout names RIGHT NOW.  Resolved
+    ; here rather than at start-up, because reassigning sys.stdout is how
+    ; every capture in the standard library works.
+    cmp qword [rbp - PR_SINK], 0
+    jne .print_have_sink
+    call print_sink_resolve
+    mov [rbp - PR_SINK], rax
+    mov qword [rbp - PR_OWNSINK], 1
+.print_have_sink:
 
 align 16
 .print_loop:
@@ -1220,17 +1527,21 @@ align 16
     ; Flush what is buffered, then write the separator straight out.
     test r15, r15
     jz .print_sep_write
-    mov rdi, [rbp - PR_FILE_FD]
+    mov rdi, [rbp - PR_SINK]
     lea rsi, [rbp - PR_FRAME]
     mov rdx, r15
-    call fileobj_write_fd
+    call print_sink_write
+    test eax, eax
+    jnz .print_sink_failed
     xor r15d, r15d
 .print_sep_write:
     mov rax, [rbp - PR_SEP]
-    mov rdi, [rbp - PR_FILE_FD]
+    mov rdi, [rbp - PR_SINK]
     lea rsi, [rax + PyStrObject.data]
     mov rdx, [rax + PyStrObject.ob_size]
-    call fileobj_write_fd
+    call print_sink_write
+    test eax, eax
+    jnz .print_sink_failed
     jmp .print_loop
 
 .print_default_sep_fallback:
@@ -1243,24 +1554,48 @@ align 16
     ; First flush buffer
     test r15, r15
     jz .write_direct
-    mov edi, 1                  ; fd = stdout
+    mov rdi, [rbp - PR_SINK]
     lea rsi, [rbp - PR_FRAME]      ; buf
     mov rdx, r15                ; len
-    call fileobj_write_fd
+    call print_sink_write
+    test eax, eax
+    jnz .print_sink_failed_held
     xor r15d, r15d              ; reset offset
 
 .write_direct:
     ; Write this string directly
-    mov edi, 1                  ; fd = stdout
+    mov rdi, [rbp - PR_SINK]
     lea rsi, [r14 + PyStrObject.data]
     mov rdx, [r14 + PyStrObject.ob_size]  ; len
-    call fileobj_write_fd
+    call print_sink_write
+    test eax, eax
+    jnz .print_sink_failed_held
 
     ; DECREF the string representation (known TAG_PTR heap string;
     ; r9 tag was clobbered by sys_write calls above)
     mov rdi, r14
     call obj_decref
     jmp .skip_arg
+
+.print_sink_failed_held:
+    ; As .print_sink_failed, but with the str() of the current argument still
+    ; held in r14.
+    mov rdi, r14
+    call obj_decref
+.print_sink_failed:
+    ; write() raised, or the sink has none.  Whatever was already handed over
+    ; stays handed over, as CPython's per-argument writes do, and the
+    ; exception is the result.
+    PRINT_DROP_SINK
+    xor eax, eax
+    xor edx, edx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .print_str_failed:
     ; str() on an argument raised.  Skipping the argument left the exception
@@ -1272,11 +1607,12 @@ align 16
     ; this one is already out; flush that much and propagate.
     test r15, r15
     jz .psf_return
-    mov rdi, [rbp - PR_FILE_FD]
+    mov rdi, [rbp - PR_SINK]
     lea rsi, [rbp - PR_FRAME]
     mov rdx, r15
-    call fileobj_write_fd
+    call print_sink_write
 .psf_return:
+    PRINT_DROP_SINK
     xor eax, eax
     xor edx, edx
     pop r15
@@ -1327,17 +1663,21 @@ align 16
 .print_end_direct:
     test r15, r15
     jz .print_end_write
-    mov rdi, [rbp - PR_FILE_FD]
+    mov rdi, [rbp - PR_SINK]
     lea rsi, [rbp - PR_FRAME]
     mov rdx, r15
-    call fileobj_write_fd
+    call print_sink_write
+    test eax, eax
+    jnz .print_sink_failed
     xor r15d, r15d
 .print_end_write:
     mov rax, [rbp - PR_END]
-    mov rdi, [rbp - PR_FILE_FD]
+    mov rdi, [rbp - PR_SINK]
     lea rsi, [rax + PyStrObject.data]
     mov rdx, [rax + PyStrObject.ob_size]
-    call fileobj_write_fd
+    call print_sink_write
+    test eax, eax
+    jnz .print_sink_failed
     jmp .print_do_flush
 
 .print_default_end:
@@ -1345,17 +1685,22 @@ align 16
     inc r15
 
 .print_do_flush:
-    ; Single sys_write for entire output
-    mov rdi, [rbp - PR_FILE_FD]  ; fd (1 = stdout)
+    ; Single write for the whole line
+    mov rdi, [rbp - PR_SINK]
     lea rsi, [rbp - PR_FRAME]      ; buf
     mov rdx, r15                ; len
-    call fileobj_write_fd
+    call print_sink_write
+    test eax, eax
+    jnz .print_sink_failed
 
     cmp qword [rbp - PR_FLUSH], 0
     je .print_no_flush
-    extern fileobj_flush_std
-    call fileobj_flush_std
+    mov rdi, [rbp - PR_SINK]
+    call print_sink_flush
+    test eax, eax
+    jnz .print_sink_failed
 .print_no_flush:
+    PRINT_DROP_SINK
 
     ; Return None (with INCREF)
     lea rax, [rel none_singleton]
@@ -3134,3 +3479,4 @@ builtin_func_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer

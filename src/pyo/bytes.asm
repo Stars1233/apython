@@ -821,11 +821,14 @@ extern bool_true
 extern bool_false
 
 ;; ============================================================================
-;; bytes_like_ptr_len(rdi = a pointer) -> rax = data, r10 = length, ecx = 1
-;;   ecx = 0 when it is neither bytes nor bytearray.
+;; bytes_like_ptr_len(rdi = a Value) -> rax = data, r10 = length, ecx = 1
+;;   ecx = 0 when the object has no readable bytes at all.
 ;;
-;; The two keep their data in different places -- bytes inline, bytearray out
-;; of line -- so anything that reads both goes through here.
+;; bytes, bytearray and memoryview keep their data in three different places --
+;; inline, out of line, and borrowed -- so anything that reads any of them goes
+;; through here.  Anything ELSE is asked through its type's tp_as_buffer, which
+;; is what makes one added arm reach all forty-odd callers: memoryview(),
+;; bytes(), FileIO.write, marshal, sre and the bytes methods.
 ;; ============================================================================
 DEF_FUNC bytes_like_ptr_len, 8            ; 1 push, so rsp is 16-aligned
     push rbx
@@ -859,7 +862,27 @@ DEF_FUNC bytes_like_ptr_len, 8            ; 1 push, so rsp is 16-aligned
     lea rsi, [rel bytearray_type]
     call type_is_subtype
     test eax, eax
+    jnz .bpl_bytearray_sub
+
+    ; Neither, and no subclass of either: ask the TYPE where its bytes are.
+    ; That is what tp_as_buffer is for, and it is how array -- or any exporter
+    ; added later -- becomes readable by every one of this function's forty-odd
+    ; callers at once, instead of each learning the type by name.
+    mov rax, [rbx + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_buffer]
+    test rax, rax
     jz .bpl_no
+    mov rdi, rbx
+    mov esi, BUF_GET            ; read it and be done; no view outlives this
+    call rax
+    test ecx, ecx
+    jz .bpl_no
+    mov r10, rdx                ; the slot answers in rdx; this returns in r10
+    pop rbx
+    leave
+    ret
+
+.bpl_bytearray_sub:
     mov rdi, rbx
     jmp .bpl_bytearray_have
 
@@ -1617,7 +1640,8 @@ section .data
 ; bytes number methods (for % formatting)
 align 8
 bytes_number_methods:
-    dq bytes_concat         ; nb_add          +0
+    dq 0                    ; nb_add -- see list_number_methods: the concat
+                            ; is sq_concat so the reflected half is reachable
     dq 0                    ; nb_subtract     +8
     dq bytes_repeat         ; nb_multiply     +16
     dq bytes_mod            ; nb_remainder    +24
@@ -2016,7 +2040,45 @@ extern str_set_length
     lea rcx, [rel str_type]
     cmp rax, rcx
     je .bls_need_encoding
-    jmp .bls_iterable
+
+    ; A buffer EXPORTER is copied as bytes, not iterated as a sequence of
+    ; ints.  CPython's bytes() asks for the buffer first, so
+    ; bytes(array('i', [1, 2])) is the array's eight raw bytes -- here it fell
+    ; through to the iterable road and answered b'\x01\x02', two bytes taken
+    ; from the two ITEMS.  The explicit arms above are bytes, bytearray and
+    ; memoryview; this is everything else that can hand over a run of bytes.
+    mov rax, [rax + PyTypeObject.tp_as_buffer]
+    test rax, rax
+    jz .bls_iterable
+    jmp .bls_copy_buffer
+
+.bls_copy_buffer:
+    ; bytes_like_ptr_len asks the slot and hands back (data, length); the copy
+    ; below is the same one the bytes and bytearray arms make.
+    mov rdi, [rbp - BLS_ARGS]
+    mov rdi, [rdi]
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .bls_iterable            ; the slot declined after all
+    test r10, r10
+    jz .bls_empty
+    mov rbx, rax                ; the source bytes
+    mov r12, r10                ; and how many
+    lea rdi, [r12 + 8]
+    call ap_malloc
+    test rax, rax
+    jz .bls_empty
+    push rax
+    mov rdi, rax
+    mov rsi, rbx
+    mov rdx, r12
+    call ap_memcpy
+    pop rax
+    mov rdx, r12
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .bls_empty:
     xor eax, eax
@@ -2316,11 +2378,29 @@ extern str_set_length
     extern raise_type_error_counted
     jmp raise_type_error_counted
 .bls_bad_type:
+    ; Reached both when the argument is the wrong TYPE and when materialising
+    ; it RAISED -- list_type_call answers 0 for either.  Substituting "cannot
+    ; convert 'map' object to bytes" over a pending exception threw the real
+    ; one away: a generator or a map that raises part way through reported a
+    ; type error, which is exactly the shape str.join was fixed for.
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    jne .bls_propagate
     mov rdi, [rbp - BLS_ARGS]
     mov rsi, [rdi]
     mov rdi, [rbp - BLS_CONVMSG]
     extern raise_type_error_with_name
     jmp raise_type_error_with_name
+
+.bls_propagate:
+    ; A (0, 0) return means "empty", so there is no value to report failure
+    ; with: the exception already pending is carried out the way every other
+    ; error in this function leaves, non-locally.
+    pop r12
+    pop rbx
+    leave
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
 END_FUNC byteslike_source
 
 BTC_TYPE  equ 8
@@ -2331,6 +2411,51 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     push rbx
     mov [rbp - BTC_TYPE], rdi
+
+    ; CPython asks the object for __bytes__ before it tries a buffer, an
+    ; index or an iterable, and this asked nothing -- so `bytes(headers)` on
+    ; wsgiref's Headers, which has one, fell through to the iterable path and
+    ; indexed the mapping with integers until something asked an int to
+    ; .lower().  Only a HEAPTYPE instance is asked: none of the builtins
+    ; byteslike_source handles natively defines the dunder, so the order
+    ; between them is not observable, and `bytes(5)` stays five zero bytes.
+    cmp rdx, 1
+    jne .btc_no_dunder
+    mov rax, [rsi]                      ; args[0]
+    V_TEST_PTR rax, rcx
+    ja .btc_no_dunder
+    mov rcx, [rax + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .btc_no_dunder
+    mov [rbp - BTC_BUF], rsi            ; args, across the call
+    mov [rbp - BTC_LEN], rdx            ; nargs
+    mov rdi, rax
+    CSTRING rsi, "__bytes__"
+    extern dunder_call_1
+    call dunder_call_1
+    test rax, rax
+    jz .btc_dunder_absent               ; absent, not callable, or it raised
+    V_TEST_PTR rax, rcx
+    ja .btc_dunder_bad
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    jne .btc_dunder_bad
+    ; The dunder's own answer IS the answer, exactly as CPython's is -- the
+    ; type argument is ignored, and `class B(bytes)` with a __bytes__ gets
+    ; whatever it returned.
+    pop rbx
+    leave
+    ret
+.btc_dunder_bad:
+    mov rdi, rax
+    RAISE exc_TypeError_type, "__bytes__ returned non-bytes"
+.btc_dunder_absent:
+    cmp qword [rel current_exception], 0
+    jne .btc_propagate                  ; it raised: that is the answer
+    mov rsi, [rbp - BTC_BUF]
+    mov rdx, [rbp - BTC_LEN]
+.btc_no_dunder:
     mov rdi, rsi
     mov rsi, rdx
     lea rdx, [rel bytes_range_msg]
@@ -2397,6 +2522,13 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     pop rbx
     leave
     ret
+.btc_propagate:
+    extern eval_saved_r13
+    mov [rel eval_saved_r13], r13
+    pop rbx
+    leave
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
 END_FUNC bytes_type_call
 
 ;; ============================================================================
@@ -2494,6 +2626,7 @@ bytes_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; bytes_iter type object
 align 8
@@ -2527,6 +2660,7 @@ bytes_iter_type:
     dq 0                        ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 section .rodata
 bytes_range_msg: db "bytes must be in range(0, 256)", 0

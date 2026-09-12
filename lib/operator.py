@@ -88,10 +88,36 @@ def index(a):
     return a.__index__()
 
 def length_hint(obj, default=0):
+    """How many items obj will produce, if it can say.
+
+    len() first, then the type's __length_hint__, then the default -- which is
+    CPython's order, and the reason an iterator can size the list built from
+    it.  Only len() was consulted here, so every iterator answered `default`
+    and list(it) started from nothing however much it was about to yield.
+    """
+    if not isinstance(default, int):
+        raise TypeError("'%s' object cannot be interpreted as an integer"
+                        % type(default).__name__)
     try:
         return len(obj)
     except TypeError:
+        pass
+    try:
+        hint = type(obj).__length_hint__
+    except AttributeError:
         return default
+    try:
+        val = hint(obj)
+    except TypeError:
+        return default
+    if val is NotImplemented:
+        return default
+    if not isinstance(val, int):
+        raise TypeError("__length_hint__ must be an integer, not %s"
+                        % type(val).__name__)
+    if val < 0:
+        raise ValueError("__length_hint__() should return >= 0")
+    return val
 
 class itemgetter:
     __slots__ = ('_items', '_call')

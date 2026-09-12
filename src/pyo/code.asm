@@ -2,6 +2,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "opcodes.inc"
 
 extern exc_TypeError_type
 extern raise_exception
@@ -143,10 +144,28 @@ DEF_FUNC code_new, CN_FRAME
     mov [r12 + PyCodeObject.co_firstlineno], eax
     mov dword [r12 + PyCodeObject.co_pad0], 0
 
-    ; co_nlocals is the true len(varnames) from the spec.  (marshal stores
-    ; nlocalsplus there instead; nothing but code_getattr reads the field, so
-    ; the two disagree harmlessly and this one matches CPython.)
-    mov eax, [rbx + CodeSpec.nlocals]
+    ; co_nlocals is DERIVED from the kinds, not taken from the spec: it is the
+    ; number of CO_FAST_LOCAL slots, which is exactly len(co_varnames), and
+    ; CPython guarantees the two agree.  Deriving it here is what makes that
+    ; hold for a .pyc as well as for our own compiler -- 3.12's marshal does
+    ; not store the count at all, and the spec's own field carried
+    ; len(varnames), which over-counts a local a nested block captured.
+    xor eax, eax
+    mov rdx, [rbx + CodeSpec.localspluskinds]
+    test rdx, rdx
+    jz .nlocals_done
+    mov rcx, [rdx + PyBytesObject.ob_size]
+    xor esi, esi
+.nlocals_scan:
+    cmp rsi, rcx
+    jae .nlocals_done
+    test byte [rdx + PyBytesObject.data + rsi], CO_FAST_LOCAL
+    jz .nlocals_next
+    inc eax
+.nlocals_next:
+    inc rsi
+    jmp .nlocals_scan
+.nlocals_done:
     mov [r12 + PyCodeObject.co_nlocals], eax
 
     ; co_nlocalsplus is derived from the tuple, exactly as marshal derives it
@@ -335,6 +354,118 @@ END_FUNC code_repr
 ;; ============================================================================
 ;; code_getattr(PyCodeObject *self, PyObject *name) -> (rax, edx) or NULL
 ;; rdi = code object, rsi = name string
+
+;; ============================================================================
+;; code_names_of_kind(rdi = a code object, esi = a CO_FAST_* mask)
+;;   -> rax = a new tuple of the co_localsplusnames whose kind has that bit,
+;;      or 0 on an allocation failure
+;;
+;; This code object keeps ONE co_localsplusnames with a parallel
+;; co_localspluskinds saying which of local, cell and free each entry is --
+;; the 3.11 layout, and what the frame's localsplus is addressed by.  CPython
+;; keeps three tuples and hands them out directly, so co_varnames,
+;; co_cellvars and co_freevars are each a FILTER over the pair here.
+;;
+;; co_varnames answered the whole of co_localsplusnames, cells and frees
+;; included -- `('a','b','z')` where CPython says `('a','b')` -- and the other
+;; two were published in the type's dict by init_attrs and then refused as
+;; "attribute is not readable", which is exactly what that file's own header
+;; forbids.
+;;
+;; An entry may carry two bits: an argument a nested function captures is both
+;; CO_FAST_LOCAL and CO_FAST_CELL, and CPython lists it in co_varnames and in
+;; co_cellvars both.  A mask test rather than an equality is what gets that.
+;; ============================================================================
+CNK_CODE  equ 8
+CNK_MASK  equ 16
+CNK_TUP   equ 24
+CNK_N     equ 32
+CNK_FRAME equ 40            ; + 3 pushes = 64, 16-aligned
+DEF_FUNC_LOCAL code_names_of_kind, CNK_FRAME
+    push rbx
+    push r12
+    push r13
+    mov [rbp - CNK_CODE], rdi
+    mov [rbp - CNK_MASK], rsi
+
+    ; Count first: a tuple is allocated at its final size.
+    mov rbx, [rdi + PyCodeObject.co_localspluskinds]
+    mov r12, [rdi + PyCodeObject.co_localsplusnames]
+    xor r13d, r13d                  ; how many match
+    test rbx, rbx
+    jz .cnk_have_count
+    test r12, r12
+    jz .cnk_have_count
+    mov rcx, [rbx + PyBytesObject.ob_size]
+    xor edx, edx
+.cnk_count:
+    cmp rdx, rcx
+    jae .cnk_have_count
+    movzx eax, byte [rbx + PyBytesObject.data + rdx]
+    test eax, [rbp - CNK_MASK]
+    jz .cnk_count_next
+    inc r13
+.cnk_count_next:
+    inc rdx
+    jmp .cnk_count
+.cnk_have_count:
+    mov [rbp - CNK_N], r13
+
+    mov rdi, r13
+    call tuple_new
+    test rax, rax
+    jz .cnk_fail
+    mov [rbp - CNK_TUP], rax
+    cmp qword [rbp - CNK_N], 0
+    je .cnk_done
+
+    mov rbx, [rbp - CNK_CODE]
+    mov r12, [rbx + PyCodeObject.co_localsplusnames]
+    mov rbx, [rbx + PyCodeObject.co_localspluskinds]
+    mov rax, [rbp - CNK_TUP]
+    mov r8, [rax + PyTupleObject.ob_item]
+    mov r9, [r12 + PyTupleObject.ob_item]
+    mov rcx, [rbx + PyBytesObject.ob_size]
+    xor edx, edx
+    xor r13d, r13d                  ; write index
+.cnk_fill:
+    cmp rdx, rcx
+    jae .cnk_done
+    movzx eax, byte [rbx + PyBytesObject.data + rdx]
+    test eax, [rbp - CNK_MASK]
+    jz .cnk_fill_next
+    mov rax, [r9 + rdx*8]
+    mov [r8 + r13*8], rax
+    INCREF_V rax, rsi
+    inc r13
+.cnk_fill_next:
+    inc rdx
+    jmp .cnk_fill
+.cnk_done:
+    mov rax, [rbp - CNK_TUP]
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.cnk_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC code_names_of_kind
+
+;; ============================================================================
+;; code_getattr(rdi = a code object, rsi = the name) -> rax = a Value, owned,
+;;     or 0 for "no such attribute"
+;;
+;; tp_getattr.  co_varnames, co_cellvars and co_freevars are filters over
+;; co_localsplusnames (see code_names_of_kind); co_positions and co_lines are
+;; methods; co_code is built on demand because the bytecode lives inside the
+;; object; and everything else is a straight field read through
+;; code_attr_table.
 ;; ============================================================================
 DEF_FUNC code_getattr
     push rbx
@@ -357,12 +488,25 @@ DEF_FUNC code_getattr
     test eax, eax
     jz .return_argcount
 
-    ; Check for co_varnames (return co_localsplusnames)
+    ; co_varnames, co_cellvars and co_freevars are each a FILTER over the one
+    ; co_localsplusnames this code object keeps, by the parallel kinds string.
     lea rdi, [rel co_attr_varnames]
     lea rsi, [r12 + PyStrObject.data]
     call ap_strcmp
     test eax, eax
     jz .return_varnames
+
+    lea rdi, [rel co_attr_cellvars]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_cellvars
+
+    lea rdi, [rel co_attr_freevars]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_freevars
 
     ; co_positions() is a method, not a field.
     lea rdi, [rel co_attr_positions]
@@ -523,10 +667,18 @@ DEF_FUNC code_getattr
     ret
 
 .return_varnames:
-    mov rax, [rbx + PyCodeObject.co_localsplusnames]
+    mov esi, CO_FAST_LOCAL
+    jmp .return_of_kind
+.return_cellvars:
+    mov esi, CO_FAST_CELL
+    jmp .return_of_kind
+.return_freevars:
+    mov esi, CO_FAST_FREE
+.return_of_kind:
+    mov rdi, rbx
+    call code_names_of_kind
     test rax, rax
     jz .return_none
-    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -718,6 +870,8 @@ section .data
 co_attr_kwonlyargcount: db "co_kwonlyargcount", 0
 co_attr_argcount:       db "co_argcount", 0
 co_attr_varnames:       db "co_varnames", 0
+co_attr_cellvars:       db "co_cellvars", 0
+co_attr_freevars:       db "co_freevars", 0
 code_repr_str: db "<code object>", 0
 code_type_name: db "code", 0
 
@@ -753,6 +907,7 @@ code_type:
     dq code_clear       ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 
 section .rodata

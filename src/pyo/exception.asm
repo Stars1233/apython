@@ -2428,6 +2428,7 @@ exc_metatype:
     dq 0                    ; tp_clear
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
 
 ; The metatype is implementation detail -- it exists so an exception class can
 ; carry a tp_call of its own -- and it says `type`, as user_type_metatype
@@ -2479,6 +2480,14 @@ global %1
     ; constructor allocates exactly PyExceptionObject_size.
     dq PyExceptionObject.exc_dict ; tp_dictoffset
     dq 0                        ; tp_tailslots
+    ; An exception exports no buffer.  This row was MISSING: the commit that
+    ; added tp_as_buffer appended it to all 96 literal static tables and not
+    ; to this macro, so every one of the hundred-odd exception types read the
+    ; NEXT table's ob_refcnt -- 1 or 2 -- as a function pointer.  The tables
+    ; are laid out back to back, so `b"x" == ValueError("y")` called address
+    ; 2 by way of bytes_like_ptr_len.  lint's table check counts only literal
+    ; tables and cannot see a macro, which is why the tree linted clean.
+    dq 0                        ; tp_as_buffer
 %endmacro
 
 ; Define all exception types
