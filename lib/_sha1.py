@@ -5,6 +5,23 @@ is here for the same reason _sha2 is: `hashlib` will not give out a digest it
 has no module for, and several of CPython's own Lib/ modules ask for one.
 """
 
+class _Immutable(type):
+    """CPython's hash types are C types with no settable attributes, and
+    `test_hashlib.test_readonly_types` asserts it for every constructor it
+    knows.  A plain Python class is mutable, so the refusal comes from here;
+    instances are unaffected, it is the TYPE that is frozen.  Each of these
+    modules carries its own copy because each has to import on its own.
+    """
+
+    def __setattr__(cls, name, value):
+        raise TypeError("cannot set %r attribute of immutable type %r"
+                        % (name, cls.__name__))
+
+    def __delattr__(cls, name):
+        raise TypeError("cannot delete %r attribute of immutable type %r"
+                        % (name, cls.__name__))
+
+
 _M32 = 0xFFFFFFFF
 
 
@@ -12,7 +29,7 @@ def _rotl(x, n):
     return ((x << n) | (x >> (32 - n))) & _M32
 
 
-class _Sha1:
+class _Sha1(metaclass=_Immutable):
     name = "sha1"
     block_size = 64
     digest_size = 20

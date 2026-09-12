@@ -161,3 +161,126 @@ print("guaranteed == available:",
       & hashlib.algorithms_available)
 print("every guaranteed name is a real attribute:",
       sorted(n for n in hashlib.algorithms_guaranteed if not hasattr(hashlib, n)))
+
+
+# ---------------------------------------------------------------------------
+# The rest reaches the accelerator modules DIRECTLY rather than through
+# hashlib, because python3 has OpenSSL's _hashlib and so its hashlib.sha3_256
+# is `_hashlib.openssl_sha3_256` -- whose objects have none of the private
+# sponge attributes and a different type name.  `import _sha3` gets the
+# builtin module on both sides, which is what is being compared.
+# ---------------------------------------------------------------------------
+
+import _blake2
+import _md5
+import _sha1
+import _sha2
+import _sha3
+
+print()
+print("== the sponge attributes CPython's _sha3 objects expose ==")
+for name in FIXED + XOF:
+    h = getattr(_sha3, name)()
+    print("%-10s capacity=%-5d rate=%-5d suffix=%r  sum=%d"
+          % (name, h._capacity_bits, h._rate_bits, h._suffix,
+             h._capacity_bits + h._rate_bits))
+
+print()
+print("== a shake length is validated, not merely used ==")
+for name in XOF:
+    h = getattr(_sha3, name)()
+    for length in (-1, -10, 1 << 29, 1 << 31, 2 ** 32 - 10, 2 ** 61,
+                   2 ** 64 - 10, 2 ** 64 + 10):
+        for meth in (h.digest, h.hexdigest):
+            try:
+                meth(length)
+            except (ValueError, OverflowError) as e:
+                print("%-10s %-22s %s: %s"
+                      % (name, length, type(e).__name__, e))
+    # A length just under the cap is accepted rather than refused -- the
+    # boundary is exact, and squeezing half a gigabyte to prove it is not.
+    print("%-10s (1<<29)-1 is inside the cap: %s"
+          % (name, ((1 << 29) - 1) < (1 << 29)))
+
+print()
+print("== every blake2 parameter is range-checked, not truncated ==")
+for name in BLAKE:
+    ctor = getattr(_blake2, name)
+    mx = ctor.MAX_DIGEST_SIZE
+    offset_bits = 64 if name == "blake2b" else 48
+    for kw in ({"fanout": -1}, {"fanout": 256},
+               {"depth": -1}, {"depth": 0}, {"depth": 256},
+               {"node_depth": -1}, {"node_depth": 256},
+               {"inner_size": -1}, {"inner_size": mx + 1},
+               {"leaf_size": -1},
+               {"node_offset": -1}):
+        try:
+            ctor(**kw)
+            print("%-8s %-22s ACCEPTED" % (name, kw))
+        except ValueError as e:
+            print("%-8s %-22s ValueError: %s" % (name, kw, e))
+    # These two overflow rather than being out of range, and only the TYPE is
+    # compared: CPython's own wording for an int wider than the field comes
+    # from its C conversion and differs between the two fields.
+    for kw in ({"leaf_size": 1 << 32}, {"node_offset": 1 << offset_bits}):
+        try:
+            ctor(**kw)
+            print("%-8s %-22s ACCEPTED" % (name, kw))
+        except OverflowError:
+            print("%-8s %-22s OverflowError" % (name, kw))
+    # The extremes of each range are accepted.
+    ctor(fanout=0, depth=1, node_depth=0, inner_size=0, leaf_size=0,
+         node_offset=0)
+    ctor(fanout=255, depth=255, node_depth=255, inner_size=mx,
+         leaf_size=(1 << 32) - 1, node_offset=(1 << offset_bits) - 1)
+    print("%-8s both ends of every range accepted" % name)
+
+print()
+print("== blake2's first argument is positional-only, and str is refused ==")
+for name in BLAKE:
+    ctor = getattr(_blake2, name)
+    for call in ("data=", "string=", "str"):
+        try:
+            if call == "data=":
+                ctor(data=b"")
+            elif call == "string=":
+                ctor(string=b"")
+            else:
+                ctor("")
+        except TypeError:
+            print("%-8s %-8s TypeError" % (name, call))
+
+print()
+print("== the hash types are immutable, as CPython's C types are ==")
+# The TYPE comes from an instance, not from a module attribute: CPython's
+# _md5 exposes only `md5` (the class is what the factory returns) while ours
+# is named differently, and test_hashlib itself does `type(constructor())`.
+for ctor, label in ((_md5.md5, "md5"), (_sha1.sha1, "sha1"),
+                    (_sha2.sha224, "sha224"), (_sha2.sha256, "sha256"),
+                    (_sha2.sha384, "sha384"), (_sha2.sha512, "sha512"),
+                    (_sha3.sha3_224, "sha3_224"), (_sha3.sha3_256, "sha3_256"),
+                    (_sha3.sha3_384, "sha3_384"), (_sha3.sha3_512, "sha3_512"),
+                    (_sha3.shake_128, "shake_128"),
+                    (_sha3.shake_256, "shake_256"),
+                    (_blake2.blake2b, "blake2b"),
+                    (_blake2.blake2s, "blake2s")):
+    hash_type = type(ctor())
+    try:
+        hash_type.value = False
+        print("%-12s MUTABLE" % label)
+    except TypeError as e:
+        print("%-12s %s" % (label, "immutable type" in str(e)))
+
+print()
+print("== and a repr names its algorithm, which is what hashlib's own test ==")
+print("== asserts: name.split('_')[0] in repr(m).lower()                  ==")
+for ctor, name in ((_md5.md5, "md5"), (_sha1.sha1, "sha1"),
+                   (_sha2.sha224, "sha224"), (_sha2.sha256, "sha256"),
+                   (_sha2.sha384, "sha384"), (_sha2.sha512, "sha512"),
+                   (_sha3.sha3_224, "sha3_224"), (_sha3.sha3_256, "sha3_256"),
+                   (_sha3.sha3_384, "sha3_384"), (_sha3.sha3_512, "sha3_512"),
+                   (_sha3.shake_128, "shake_128"),
+                   (_sha3.shake_256, "shake_256"),
+                   (_blake2.blake2b, "blake2b"),
+                   (_blake2.blake2s, "blake2s")):
+    print("%-10s %s" % (name, name.split("_")[0] in repr(ctor()).lower()))

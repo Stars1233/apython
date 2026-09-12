@@ -10,6 +10,23 @@ constants of the algorithm -- so both are tables here and the round is one
 loop.
 """
 
+class _Immutable(type):
+    """CPython's hash types are C types with no settable attributes, and
+    `test_hashlib.test_readonly_types` asserts it for every constructor it
+    knows.  A plain Python class is mutable, so the refusal comes from here;
+    instances are unaffected, it is the TYPE that is frozen.  Each of these
+    modules carries its own copy because each has to import on its own.
+    """
+
+    def __setattr__(cls, name, value):
+        raise TypeError("cannot set %r attribute of immutable type %r"
+                        % (name, cls.__name__))
+
+    def __delattr__(cls, name):
+        raise TypeError("cannot delete %r attribute of immutable type %r"
+                        % (name, cls.__name__))
+
+
 _M32 = 0xFFFFFFFF
 
 # The per-round sine constants: floor(abs(sin(i + 1)) * 2**32).
@@ -34,7 +51,7 @@ def _rotl(x, n):
     return ((x << n) | (x >> (32 - n))) & _M32
 
 
-class _Md5:
+class _Md5(metaclass=_Immutable):
     name = "md5"
     block_size = 64
     digest_size = 16

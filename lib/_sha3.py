@@ -17,6 +17,26 @@ constructor here is a CLASS rather than a function, because CPython's are:
 then read attributes off it.
 """
 
+class _Immutable(type):
+    """CPython's hash types are C types with no settable attributes.
+
+    `test_hashlib.test_readonly_types` asserts exactly that, for every
+    constructor it knows, and a plain Python class is mutable -- so the
+    refusal has to come from a metaclass.  Instances are unaffected; it is the
+    TYPE that is frozen.  _md5, _sha1, _sha2 and _blake2 each carry a copy,
+    rather than sharing one from somewhere, because every one of these modules
+    has to be importable on its own.
+    """
+
+    def __setattr__(cls, name, value):
+        raise TypeError("cannot set %r attribute of immutable type %r"
+                        % (name, cls.__name__))
+
+    def __delattr__(cls, name):
+        raise TypeError("cannot delete %r attribute of immutable type %r"
+                        % (name, cls.__name__))
+
+
 _M = 0xFFFFFFFFFFFFFFFF
 
 _RC = (
@@ -104,11 +124,26 @@ def _keccak_f(a):
         a[0] ^= rc
 
 
-class _Keccak:
+class _Keccak(metaclass=_Immutable):
     """The sponge.  Subclasses supply _rate, _dsbyte and the attributes."""
 
     _rate = 0
     _dsbyte = 0x06
+
+    # Three attributes CPython's _sha3 objects expose and test_hashlib reads
+    # back.  Derived from the rate rather than tabulated, because the whole
+    # point of a sponge is that capacity + rate is always the state size.
+    @property
+    def _rate_bits(self):
+        return self._rate * 8
+
+    @property
+    def _capacity_bits(self):
+        return 1600 - self._rate * 8
+
+    @property
+    def _suffix(self):
+        return bytes([self._dsbyte])
 
     def __init__(self, data=b"", *, usedforsecurity=True):
         # usedforsecurity is accepted and ignored, as in _sha2: it selects a
@@ -193,11 +228,28 @@ class _Shake(_Keccak):
     _dsbyte = 0x1F
     digest_size = 0
 
+    # CPython refuses a negative length, anything it cannot fit in a C
+    # unsigned long, and -- measured, the boundary is exact -- any length at
+    # or above 1 << 29.
+    _MAX_LENGTH = 1 << 29
+
+    @classmethod
+    def _check_length(cls, length):
+        length = length.__index__()
+        if length < 0:
+            raise ValueError("value must be positive")
+        if length >= 1 << 64:
+            raise OverflowError(
+                "Python int too large to convert to C unsigned long")
+        if length >= cls._MAX_LENGTH:
+            raise ValueError("length is too large")
+        return length
+
     def digest(self, length):
-        return self._squeeze(length)
+        return self._squeeze(self._check_length(length))
 
     def hexdigest(self, length):
-        return self._squeeze(length).hex()
+        return self._squeeze(self._check_length(length)).hex()
 
 
 class sha3_224(_Sha3):

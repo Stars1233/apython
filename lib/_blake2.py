@@ -52,13 +52,57 @@ _SIGMA = (
 )
 
 
+class _Immutable(type):
+    """CPython's hash types are C types with no settable attributes, and
+    `test_hashlib.test_readonly_types` asserts it for every constructor it
+    knows.  A plain Python class is mutable, so the refusal comes from here;
+    instances are unaffected, it is the TYPE that is frozen.
+    """
+
+    def __setattr__(cls, name, value):
+        raise TypeError("cannot set %r attribute of immutable type %r"
+                        % (name, cls.__name__))
+
+    def __delattr__(cls, name):
+        raise TypeError("cannot delete %r attribute of immutable type %r"
+                        % (name, cls.__name__))
+
+
+def _byte_field(value, name, low, high):
+    """One of the single-byte parameter-block fields, range-checked.
+
+    CPython refuses each of these rather than truncating, and `test_hashlib`
+    walks every value in range and both values just outside it.  The wordings
+    are CPython's, including `inner_size`'s -- "must be between 0 and is 64"
+    reads like a typo because it is one, in blake2module.c.
+    """
+    value = value.__index__()
+    if not low <= value <= high:
+        raise ValueError("%s must be between %d and %d" % (name, low, high))
+    return value
+
+
+def _wide_field(value, name, bits):
+    """leaf_size and node_offset: positive, and small enough for their width.
+
+    CPython separates the two failures -- ValueError for a negative and
+    OverflowError for too large -- and test_hashlib asserts each by type.
+    """
+    value = value.__index__()
+    if value < 0:
+        raise ValueError("value must be positive")
+    if value >> bits:
+        raise OverflowError("%s is too large" % name)
+    return value
+
+
 def _as_bytes(value, what):
     if isinstance(value, str):
         raise TypeError("Strings must be encoded before hashing")
     return bytes(value)
 
 
-class _Blake2:
+class _Blake2(metaclass=_Immutable):
     """The compression function and the sponge around it, for both widths.
 
     Subclasses supply the word size, the IV, the rotation constants, the round
@@ -76,12 +120,19 @@ class _Blake2:
     MAX_KEY_SIZE = 0
     MAX_DIGEST_SIZE = 0
 
-    def __init__(self, data=b"", *, digest_size=None, key=b"", salt=b"",
+    def __init__(self, data=b"", /, *, digest_size=None, key=b"", salt=b"",
                  person=b"", fanout=1, depth=1, leaf_size=0, node_offset=0,
                  node_depth=0, inner_size=0, last_node=False,
                  usedforsecurity=True):
+        # data is positional-only, as CPython's is: both `blake2b(data=b"")`
+        # and `blake2b(string=b"")` are TypeErrors there.
+        if isinstance(data, str):
+            # Checked here rather than left to update(), which is not reached
+            # for an EMPTY string -- and `blake2b("")` is a TypeError.
+            raise TypeError("Strings must be encoded before hashing")
         if digest_size is None:
             digest_size = self.MAX_DIGEST_SIZE
+        digest_size = digest_size.__index__()
         if not 1 <= digest_size <= self.MAX_DIGEST_SIZE:
             raise ValueError("digest_size must be between 1 and %d bytes"
                              % self.MAX_DIGEST_SIZE)
@@ -98,6 +149,19 @@ class _Blake2:
             raise ValueError("maximum person length is %d bytes"
                              % self.PERSON_SIZE)
 
+        fanout = _byte_field(fanout, "fanout", 0, 255)
+        depth = _byte_field(depth, "depth", 1, 255)
+        node_depth = _byte_field(node_depth, "node_depth", 0, 255)
+        # inner_size's upper bound is the digest limit, not 255, and its
+        # message is CPython's own malformed one.
+        inner_size = inner_size.__index__()
+        if not 0 <= inner_size <= self.MAX_DIGEST_SIZE:
+            raise ValueError("inner_size must be between 0 and is %d"
+                             % self.MAX_DIGEST_SIZE)
+        leaf_size = _wide_field(leaf_size, "leaf_size", 32)
+        node_offset = _wide_field(node_offset, "node_offset",
+                                  64 if self._bits == 64 else 48)
+
         self.digest_size = digest_size
         self._last_node = bool(last_node)
         self._keyed = bool(key)
@@ -109,21 +173,21 @@ class _Blake2:
         p = bytearray(self.block_size // 2)
         p[0] = digest_size
         p[1] = len(key)
-        p[2] = fanout & 0xFF
-        p[3] = depth & 0xFF
-        p[4:8] = (leaf_size & 0xFFFFFFFF).to_bytes(4, "little")
+        p[2] = fanout
+        p[3] = depth
+        p[4:8] = leaf_size.to_bytes(4, "little")
         if w == 8:
-            p[8:16] = (node_offset & 0xFFFFFFFFFFFFFFFF).to_bytes(8, "little")
-            p[16] = node_depth & 0xFF
-            p[17] = inner_size & 0xFF
+            p[8:16] = node_offset.to_bytes(8, "little")
+            p[16] = node_depth
+            p[17] = inner_size
             p[32:32 + len(salt)] = salt
             p[48:48 + len(person)] = person
         else:
             # BLAKE2s packs node_offset into six bytes, so it shares a word
             # with node_depth and inner_size.
-            p[8:14] = (node_offset & 0xFFFFFFFFFFFF).to_bytes(6, "little")
-            p[14] = node_depth & 0xFF
-            p[15] = inner_size & 0xFF
+            p[8:14] = node_offset.to_bytes(6, "little")
+            p[14] = node_depth
+            p[15] = inner_size
             p[16:16 + len(salt)] = salt
             p[24:24 + len(person)] = person
 
