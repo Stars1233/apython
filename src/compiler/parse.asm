@@ -3113,6 +3113,11 @@ END_FUNC pf_yield
 ;; table alone -- calls, subscripts and attributes (BP_POSTFIX) bind into the
 ;; operand, while `**` (BP_POWER, just below) does not, so `await f() ** 2` is
 ;; `(await f()) ** 2` and `await -x` is rejected.
+;;
+;; What the table does NOT get is `await await x`: the recursion re-enters the
+;; PREFIX table, where AWAIT maps back to this function, so it parsed as
+;; `await (await x)` where CPython refuses it.  The parenthesised form stays
+;; legal, which is why the refusal is on the token and not on the node.
 ;; ============================================================================
 PAW_LINE  equ 8
 PAW_FRAME equ 24          ; + 1 push = 24
@@ -3126,6 +3131,10 @@ DEF_FUNC pf_await, PAW_FRAME
     mov rdi, rbx
     call par_advance                    ; `await`
 
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_AWAIT
+    je .double
     mov rdi, rbx
     mov esi, BP_AWAIT
     call par_expr
@@ -3142,6 +3151,10 @@ DEF_FUNC pf_await, PAW_FRAME
     pop rbx
     leave
     ret
+.double:
+    mov rdi, rbx
+    CSTRING rsi, "invalid syntax"
+    call par_syntax_error
 .fail:
     xor eax, eax
     pop rbx

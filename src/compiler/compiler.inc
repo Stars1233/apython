@@ -798,6 +798,11 @@ SYM_CELL            equ 5
 ; Scope.flags
 SCF_GENERATOR equ 0x01
 SCF_COROUTINE equ 0x02
+; SCF_COROUTINE says "this block is a coroutine", and a bare `await` sets it
+; just as `async def` does -- so it cannot answer "was this block DECLARED
+; async", which is what refusing an `await` in a plain def needs.  This bit
+; is set only by sym_enter_function, and only for an `async def`.
+SCF_ASYNC_DEF equ 0x08
 ; PEP 695: this block is a type-parameter wrapper sitting directly inside a
 ; CLASS body, so a name that would otherwise be an implicit global is looked
 ; for in that body's namespace first.  Ordinary scoping cannot do it -- a

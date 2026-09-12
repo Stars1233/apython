@@ -118,3 +118,18 @@ a = 1\nwhile 1:\n    try:\n        pass\n    except* E:\n        break\n
 a = 1\nwhile 1:\n    try:\n        pass\n    except* E:\n        continue\n
 a = 1\ndef f():\n    nonlocal zz\n
 a = 1\nmatch a:\n    case {q: w}:\n        pass\n
+def f():\n    await x\n
+def f():\n    async for i in x:\n        pass\n
+def f():\n    async with x:\n        pass\n
+[x async for x in y]\n
+def f():\n    [await i for i in e]\n
+async def f():\n    def g():\n        [i async for i in e]\n
+async def f():\n    await await x\n
+async def f():\n    yield from []\n
+{i async for i in e}\n
+{i: i async for i in e}\n
+def f():\n    [i for i in e if await i]\n
+async for i in x:\n    pass\n
+async with x:\n    pass\n
+class C:\n    await x\n
+lambda: await x\n

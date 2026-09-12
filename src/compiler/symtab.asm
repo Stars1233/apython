@@ -887,6 +887,16 @@ DEF_FUNC sym_visit, SV_FRAME
     CSTRING rdx, "'yield' outside function"
     jmp .out_of_scope
 .mg_ok:
+    ; `yield` makes an async def an ASYNC GENERATOR, which is legal; a
+    ; `yield from` in one is not, and CPython says so by name.
+    mov rcx, [rbp - SV_NPTR]
+    cmp byte [rcx + AstNode.kind], AST_YIELDFROM
+    jne .mg_store
+    test dword [rax + Scope.flags], SCF_ASYNC_DEF
+    jz .mg_store
+    CSTRING rdx, "'yield from' inside async function"
+    jmp .out_of_scope
+.mg_store:
     or dword [rax + Scope.flags], SCF_GENERATOR
     jmp .children
 
@@ -912,19 +922,53 @@ DEF_FUNC sym_visit, SV_FRAME
 ;; `await` makes the enclosing block a coroutine, exactly as `yield` makes it a
 ;; generator.  A block that has both is an async generator; the two flags are
 ;; independent here and only combine in the code generator.
+;;
+;; It also has to BE one.  This checked the scope's KIND and nothing else, so
+;; `def f(): await x`, `def f(): async for ...` and a comprehension with an
+;; `async for` in it all compiled -- thirty-four assertions in CPython's
+;; test_coroutines.  A comprehension is the one case decided elsewhere: it has
+;; a scope of its own, and CPython reports at the COMPREHENSION rather than at
+;; the await inside it, so sym_enter_comp does it after the walk.
 .mark_coroutine:
     mov rdi, rbx
     mov rsi, r12
     call sym_at
-    cmp dword [rax + Scope.kind], SCOPE_FUNCTION
+    mov ecx, [rax + Scope.kind]
+    cmp ecx, SCOPE_COMP
     je .mc_ok
-    cmp dword [rax + Scope.kind], SCOPE_LAMBDA
-    je .mc_ok
-    cmp dword [rax + Scope.kind], SCOPE_COMP
-    je .mc_ok
+    cmp ecx, SCOPE_FUNCTION
+    je .mc_in_func
+    cmp ecx, SCOPE_LAMBDA
+    je .mc_in_func
+    ; A module or a class body.  `await` there is "outside function"; an
+    ; `async for` or `async with` keeps the async wording, as CPython's does.
+    mov rax, [rbp - SV_NPTR]
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_AWAIT
+    jne .mc_async_word
     CSTRING rdx, "'await' outside function"
     jmp .out_of_scope
+.mc_in_func:
+    test dword [rax + Scope.flags], SCF_ASYNC_DEF
+    jnz .mc_ok
+    mov rax, [rbp - SV_NPTR]
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_AWAIT
+    jne .mc_async_word
+    CSTRING rdx, "'await' outside async function"
+    jmp .out_of_scope
+.mc_async_word:
+    cmp ecx, AST_FOR
+    jne .mc_with_word
+    CSTRING rdx, "'async for' outside async function"
+    jmp .out_of_scope
+.mc_with_word:
+    CSTRING rdx, "'async with' outside async function"
+    jmp .out_of_scope
 .mc_ok:
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
     or dword [rax + Scope.flags], SCF_COROUTINE
     jmp .children
 
@@ -1334,7 +1378,9 @@ DEF_FUNC sym_enter_function, SE_FRAME
     mov [rax + AstNode.flags], r12w
 
     ; `async def` is a property of the block itself, not of anything inside it,
-    ; so it is stamped here rather than discovered by the walk.
+    ; so it is stamped here rather than discovered by the walk.  SCF_ASYNC_DEF
+    ; is the half that says DECLARED async: SCF_COROUTINE is also what a bare
+    ; `await` sets, and an `await` in a plain def has to be refused.
     movzx ecx, byte [rax + AstNode.kind]
     cmp ecx, AST_FUNCTIONDEF
     jne .not_async
@@ -1343,7 +1389,7 @@ DEF_FUNC sym_enter_function, SE_FRAME
     mov rdi, rbx
     mov rsi, r12
     call sym_at
-    or dword [rax + Scope.flags], SCF_COROUTINE
+    or dword [rax + Scope.flags], SCF_COROUTINE | SCF_ASYNC_DEF
 .not_async:
 
     ; Parameters bind in the new scope, in signature order.  A class body has
@@ -3094,7 +3140,8 @@ SEC_SCOPE equ 32
 SEC_I     equ 40
 SEC_N     equ 48
 SEC_CL    equ 56
-SEC_FRAME equ 56          ; + 3 pushes = 80
+SEC_P     equ 64          ; the scope being climbed, for the async check
+SEC_FRAME equ 72          ; + 3 pushes = 96, and rsp 16-aligned at every call
 DEF_FUNC sym_enter_comp, SEC_FRAME
     push rbx
     push r12
@@ -3252,7 +3299,58 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     test eax, eax
     jz .fail
 .ok:
+    ; An ASYNCHRONOUS comprehension -- one with an `async for` clause, or one
+    ; whose body awaits -- is only legal inside an async def.  Both set
+    ; SCF_COROUTINE on this scope, so one test after the walk covers them; and
+    ; it is here rather than in .mark_coroutine because CPython reports at the
+    ; COMPREHENSION and not at the await inside it.
+    ;
+    ; A GENERATOR EXPRESSION is exempt, and completely: PEP 530 lets
+    ; `(i async for i in a)` and `(await i for i in a)` appear anywhere,
+    ; because the thing they build is an async generator the caller drives
+    ; rather than something this block has to await.  test_asyncgen returns
+    ; one from a plain def on line 1743.
+    mov rdi, rbx
+    mov rsi, r13
+    call ast_at
+    cmp byte [rax + AstNode.kind], AST_GENEXP
+    je .comp_ok
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
+    test dword [rax + Scope.flags], SCF_COROUTINE
+    jz .comp_ok
+    mov ecx, [rax + Scope.parent]
+.comp_climb:
+    ; Out through any enclosing comprehensions to the nearest function.
+    test ecx, ecx
+    jz .comp_bad                        ; module level: no function at all
+    mov [rbp - SEC_P], rcx
+    mov rdi, rbx
+    mov rsi, rcx
+    call sym_at
+    mov ecx, [rax + Scope.kind]
+    cmp ecx, SCOPE_COMP
+    jne .comp_have
+    mov ecx, [rax + Scope.parent]
+    jmp .comp_climb
+.comp_have:
+    cmp ecx, SCOPE_FUNCTION
+    je .comp_want_async
+    cmp ecx, SCOPE_LAMBDA
+    jne .comp_bad                       ; a class body is not a function
+.comp_want_async:
+    test dword [rax + Scope.flags], SCF_ASYNC_DEF
+    jz .comp_bad
+.comp_ok:
     mov eax, 1
+    jmp .ret
+.comp_bad:
+    mov rdi, rbx
+    mov esi, r13d
+    CSTRING rdx, "asynchronous comprehension outside of an asynchronous function"
+    call comp_error_node
+    xor eax, eax
     jmp .ret
 .fail:
     xor eax, eax
