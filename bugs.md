@@ -232,6 +232,50 @@ reasoning that chose them and what changing one would cost.
   `__index__` where the int check is, which puts a dunder lookup on the path
   of every `bytes(x)` whose argument is not one of the four named types.
 
+- **A generator expression containing an async comprehension is not itself an
+  async generator.**  `([i async for i in x] for x in y)` is an
+  `async_generator` in CPython and a plain `generator` when our own compiler
+  builds it -- a `.pyc` gets it right, because the flag comes from the
+  marshalled code object.  The nested comprehension marks its OWN scope
+  SCF_COROUTINE and nothing propagates that to the genexp around it; CPython's
+  symtable does.  The refusals and acceptances all match
+  (`tests/test_compile_async_scope.py`); only the kind of object is wrong, and
+  it makes `async for lst in that_genexp` a TypeError.
+
+- **Source that is not valid UTF-8 is refused with our own wording, and one
+  column off for a bad four-byte lead.**  CPython reports a codec error --
+  `(unicode error) 'utf-8' codec can't decode byte 0xe9 in position 3:
+  unexpected end of data` -- with a position of its own; `src/compiler/lex.asm`
+  says `invalid non-UTF-8 byte 0xe9` at the byte's own column.  The accept /
+  reject decision and the LINE match on eleven shapes
+  (`tests/test_compile_utf8_source.py`), and bytes inside a comment are
+  accepted by both.
+
+- **Three messages that name no type.**  `b"x" in ValueError()` is
+  "argument of type is not iterable" where CPython says "argument of type
+  'ValueError' is not iterable"; `async with` over an object with no
+  `__aexit__` is "'async with' requires __aexit__ method" where CPython names
+  the object and distinguishes "no `__aenter__` either" from "only
+  `__aexit__` missing" -- `op_before_with` does both and its async twin does
+  not; and `__bytes__` returning a non-bytes omits CPython's `(type int)`
+  suffix.  The first attempt at the async one got the operand cleanup wrong
+  and segfaulted: that path releases nothing and lets the unwinder take the
+  manager out of the value-stack slot, which is what any rewrite has to keep.
+
+- **A `bytes` SUBCLASS from `__bytes__` is refused, and `C(x)` for a bytes
+  subclass answers a plain bytes.**  The check is `ob_type == bytes_type`
+  where CPython uses `PyBytes_Check`, which takes a subclass; and
+  `bytes_type_call` hands back the dunder's own object without asking the
+  subclass to adopt it.
+
+- **`co_freevars` is in source order and CPython's is sorted**, and a module
+  code object reports its globals in `co_varnames`.  The first is the order
+  our symbol table appends free variables in; the second is that a module
+  scope puts its names in `Scope.varnames` at all, where CPython gives a
+  module body no fast locals. `co_varnames`, `co_cellvars`, `co_freevars` and
+  `co_nlocals` agree with CPython for every function shape tested
+  (`tests/test_code_localsplus.py`); these two are what is left.
+
 - **PEP 3131's NFKC normalisation of identifiers is absent.**  `class T: µ = 1`
   then `T.µ` works and `T.μ` is an AttributeError: CPython normalises every
   identifier to NFKC, so the MICRO SIGN U+00B5 and GREEK SMALL LETTER MU

@@ -36,6 +36,7 @@ test_async_streams
 test_async_tasks
 test_async_wait_for
 test_async_with_inherited
+test_async_with_lookup_raises
 test_async_with
 test_attr_cache_type_reuse
 test_attr_value_immediates
@@ -96,6 +97,7 @@ test_codecs
 test_codecs_registry_bridge
 test_codecs_registry
 test_code_gc
+test_code_localsplus
 test_code_replace
 test_compare_reflected_op
 test_comparisons
@@ -149,6 +151,7 @@ test_compile_ternary_or
 test_compile_try
 test_compile_unpack_gaps
 test_compile_unwind
+test_compile_utf8_source
 test_compile_walrus_comp
 test_compile_warnings
 test_compile_with_as_unpack
@@ -176,6 +179,7 @@ test_del_dict
 test_del_during_unwind
 test_delete_name
 test_delete
+test_delete_subscr_refused
 test_del
 test_del_resurrect
 test_deopt_extended_arg
@@ -223,6 +227,7 @@ test_encodings
 test_errno
 test_error_messages
 test_eval_tuple
+test_exc_buffer_slot
 test_exc_catchable
 test_exc_context
 test_excepthook
@@ -411,6 +416,7 @@ test_math
 test_member_descriptor_protocol
 test_membership
 test_memmove_boundaries
+test_memoryview_exports
 test_memoryview_released
 test_memoryview_stride
 test_metaclass_lifetime
@@ -481,6 +487,7 @@ test_pow_dunder
 test_pow
 test_prepare_raises
 test_print_file
+test_print_sink_lifetime
 test_print_tag
 test_print_to_object
 test_property_callables
@@ -658,6 +665,7 @@ test_truthiness
 test_tuple_identity
 test_tuples
 test_typealias_scope_name
+test_type_annotations_meta
 test_type_cache
 test_type_comments
 test_type_constructors
