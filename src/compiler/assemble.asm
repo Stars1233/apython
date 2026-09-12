@@ -33,6 +33,7 @@ extern code_new
 extern code_spec_clear
 extern comp_error
 extern sym_at
+extern ap_strcmp
 extern tuple_new
 extern op_meta
 
@@ -1250,6 +1251,8 @@ DEF_FUNC asm_assemble, AA_FRAME
     mov rsi, r12
     call asm_kinds_bytes
     mov [rbp - AA_SPEC + CodeSpec.localspluskinds], rax
+    mov rax, [rel akb_nlocal_out]
+    mov [rbp - AA_SPEC + CodeSpec.nlocals], eax
 
     ; --- the exception table ---
     mov rdi, r12
@@ -1286,8 +1289,9 @@ DEF_FUNC asm_assemble, AA_FRAME
     mov [rbp - AA_SPEC + CodeSpec.kwonlyargcount], eax
     mov rdi, rbx
     mov rsi, r12
+    ; nlocals is set beside the kinds above, from the CO_FAST_LOCAL count
+    ; those settle -- a captured local is not one, and len(varnames) was.
     call asm_nlocals
-    mov [rbp - AA_SPEC + CodeSpec.nlocals], eax
     mov eax, [r12 + CompUnit.stacksize]
     mov [rbp - AA_SPEC + CodeSpec.stacksize], eax
     mov eax, [r12 + CompUnit.flags]
@@ -1427,6 +1431,59 @@ DEF_FUNC asm_ncells, 8
 END_FUNC asm_ncells
 
 ;; ============================================================================
+;; akb_is_cell(rdi = a Scope*, rsi = a PyStrObject* name)
+;;   -> eax = 1 when the name is among the scope's cellvars, else 0
+;;
+;; A STRING compare, not a pointer one: the object arena holds a str per
+;; occurrence rather than one per distinct name, so the same identifier can be
+;; two objects -- which is why sym_add_unique compares text too.
+;; ============================================================================
+AIC_NAME  equ 8
+AIC_FRAME equ 32            ; + 2 pushes = 56: rsp is 16-aligned at the call
+DEF_FUNC_LOCAL akb_is_cell, AIC_FRAME
+    push rbx
+    push r12
+    lea rax, [rsi + PyStrObject.data]
+    mov [rbp - AIC_NAME], rax
+    mov r12, [rdi + Scope.cellvars + Buf.len]
+    mov rbx, [rdi + Scope.cellvars + Buf.data]
+.aic_scan:
+    test r12, r12
+    jz .aic_no
+    mov rdi, [rbx]
+    lea rdi, [rdi + PyStrObject.data]
+    mov rsi, [rbp - AIC_NAME]
+    call ap_strcmp
+    test eax, eax
+    jz .aic_yes
+    add rbx, 8
+    dec r12
+    jmp .aic_scan
+.aic_yes:
+    mov eax, 1
+    pop r12
+    pop rbx
+    leave
+    ret
+.aic_no:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC akb_is_cell
+
+; How many CO_FAST_LOCAL slots the last call wrote.  CPython guarantees
+; co_nlocals == len(co_varnames), and once a captured local stopped being
+; LOCAL the old count -- len(varnames) -- was one too many for exactly those
+; functions.  A file-local word rather than a second return value, because
+; asm_kinds_bytes already answers with the bytes object and the only caller
+; reads this on the next line.
+section .bss
+akb_nlocal_out: resq 1
+section .text
+
+;; ============================================================================
 ;; asm_kinds_bytes(rdi = localsplusnames tuple, rsi = the CompUnit)
 ;;   -> rax = bytes, or 0
 ;;
@@ -1439,11 +1496,25 @@ END_FUNC asm_ncells
 ;; function's own cell (UnboundLocalError) or a free variable from an
 ;; enclosing scope (NameError), and those are CPython's two different
 ;; exceptions.
+;;
+;; And read for more than that now.  co_varnames, co_cellvars and co_freevars
+;; are each a FILTER over the one names tuple by these bytes, so a local that
+;; a nested block CAPTURED has to carry CO_FAST_CELL even though this layout
+;; leaves it in the varnames region -- `def outer(): z = 1; def inner(): ...`
+;; reported co_varnames ('z', 'inner') and co_cellvars () where CPython says
+;; ('inner',) and ('z',).  CPython's rule, which the same filter over a
+;; CPython .pyc's own kinds bytes already produces: a captured local is CELL,
+;; and LOCAL as well only when it is a PARAMETER.
 ;; ============================================================================
 AKB_UNIT   equ 8
 AKB_NLOCAL equ 16
 AKB_NCELL  equ 24
-AKB_FRAME  equ 32           ; + 2 pushes = 8 + 32 + 16 = 56, not 16-aligned
+AKB_NAMES  equ 32           ; the localsplusnames tuple
+AKB_SCOPE  equ 40           ; its Scope, for cellvars and the parameter count
+AKB_NPARAM equ 48           ; how many of the varnames are parameters
+AKB_IDX    equ 56           ; the slot being classified, across the compares
+AKB_FRAME  equ 64           ; + 2 pushes = 8 + 64 + 16 = 88, not 16-aligned
+
 DEF_FUNC asm_kinds_bytes, AKB_FRAME
     push rbx
     push r12
@@ -1457,6 +1528,9 @@ DEF_FUNC asm_kinds_bytes, AKB_FRAME
     xor eax, eax
     mov [rbp - AKB_NLOCAL], rax
     mov [rbp - AKB_NCELL], rax
+    mov [rbp - AKB_NAMES], rdi
+    mov qword [rbp - AKB_SCOPE], 0
+    mov qword [rbp - AKB_NPARAM], 0
     test rsi, rsi
     jz .sizes_done
     mov rsi, [rbp - AKB_UNIT]   ; asm_nlocals reads the unit from rsi
@@ -1466,27 +1540,84 @@ DEF_FUNC asm_kinds_bytes, AKB_FRAME
     mov rsi, [rbp - AKB_UNIT]
     call asm_ncells
     mov [rbp - AKB_NCELL], eax
+
+    ; The Scope itself, for the cellvars list and the parameter count: the
+    ; varnames region begins with the parameters, so a slot below that many is
+    ; one.  There is no field for *args and **kwargs, and co_flags says.
+    mov rsi, [rbp - AKB_UNIT]
+    mov rax, [rsi + CompUnit.comp]
+    test rax, rax
+    jz .sizes_done
+    mov rdi, rax
+    mov esi, [rsi + CompUnit.scope]
+    call sym_at
+    mov [rbp - AKB_SCOPE], rax
+    ; The counts come from the COMPUNIT, not the Scope: Scope.argcount,
+    ; .kwonly and .co_flags are declared and never written -- reading them
+    ; made every parameter look like an ordinary local, and a captured
+    ; argument then lost its place in co_varnames.
+    mov rsi, [rbp - AKB_UNIT]
+    mov ecx, [rsi + CompUnit.argcount]
+    add ecx, [rsi + CompUnit.kwonly]
+    mov edx, [rsi + CompUnit.flags]
+    test edx, CO_VARARGS
+    jz .akb_no_star
+    inc ecx
+.akb_no_star:
+    test edx, CO_VARKEYWORDS
+    jz .akb_no_dstar
+    inc ecx
+.akb_no_dstar:
+    mov [rbp - AKB_NPARAM], ecx
 .sizes_done:
 
     mov rdi, r12
     add rdi, 8
     call ap_malloc
     mov rbx, rax
+    mov qword [rel akb_nlocal_out], 0
     xor ecx, ecx
 .fill:
     cmp rcx, r12
     jae .make
-    mov eax, CO_FAST_LOCAL
     cmp ecx, [rbp - AKB_NLOCAL]
-    jb .fill_store
+    jb .fill_in_locals
     mov eax, CO_FAST_CELL
     mov edx, [rbp - AKB_NLOCAL]
     add edx, [rbp - AKB_NCELL]
     cmp ecx, edx
     jb .fill_store
     mov eax, CO_FAST_FREE
+    jmp .fill_store
+
+.fill_in_locals:
+    ; A slot in the varnames region.  CELL as well when a nested block
+    ; captured it, and then LOCAL only if it is also a parameter.
+    mov [rbp - AKB_IDX], rcx
+    mov eax, CO_FAST_LOCAL
+    mov rdi, [rbp - AKB_SCOPE]
+    test rdi, rdi
+    jz .fill_store
+    mov rsi, [rbp - AKB_NAMES]
+    mov rsi, [rsi + PyTupleObject.ob_item]
+    mov rsi, [rsi + rcx*8]          ; localsplusnames[slot]
+    call akb_is_cell
+    mov rcx, [rbp - AKB_IDX]
+    test eax, eax
+    jz .fill_local_plain
+    mov eax, CO_FAST_CELL
+    cmp ecx, [rbp - AKB_NPARAM]
+    jae .fill_store
+    or eax, CO_FAST_LOCAL
+    jmp .fill_store
+.fill_local_plain:
+    mov eax, CO_FAST_LOCAL
 .fill_store:
     mov [rbx + rcx], al
+    test al, CO_FAST_LOCAL
+    jz .fill_next
+    inc qword [rel akb_nlocal_out]
+.fill_next:
     inc rcx
     jmp .fill
 .make:
