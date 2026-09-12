@@ -157,9 +157,8 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     push rax
     push rdi
     mov rdi, rcx
-    call bytearray_export_acquired
-    call io_buffer_acquired     ; a second view over a BytesIO is a second
-    pop rdi                     ; export, and its release will decrement
+    call mv_source_acquired     ; a second view is a second export, on every
+    pop rdi                     ; counter the dealloc will decrement
     pop rax
 .mv_view_no_src:
     mov rcx, [rdi + PyMemoryViewObject.mv_buf]
@@ -262,6 +261,41 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     ret
 END_FUNC memoryview_type_call
 
+
+;; ============================================================================
+;; mv_source_acquired(rdi = the object a derived view is now sharing)
+;;   -> nothing
+;;
+;; The three counts an exporter may keep, taken together: bytearray's own,
+;; BytesIO's own, and tp_as_buffer's BUF_ACQUIRE.
+;;
+;; memoryview_dealloc_proper releases all three unconditionally, so a
+;; constructor that took only the first two left the slot's count one BELOW
+;; what was outstanding -- and the exporter then allowed a resize under a live
+;; view.  All three DERIVED constructors did: a slice, a cast, and a view of a
+;; view.  `array.array` is the exporter that shows it, and lib/_io.py's
+;; readinto does `b = b.cast("B")`, so it is the ordinary path and not a
+;; corner.
+;; ============================================================================
+MSA_FRAME equ 8                 ; + 1 push: rsp is 16-aligned at every call
+DEF_FUNC_LOCAL mv_source_acquired, MSA_FRAME
+    push rbx
+    mov rbx, rdi
+    call bytearray_export_acquired
+    mov rdi, rbx
+    call io_buffer_acquired
+    mov rcx, [rbx + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_buffer]
+    test rcx, rcx
+    jz .msa_no_slot
+    mov rdi, rbx
+    mov esi, BUF_ACQUIRE
+    call rcx
+.msa_no_slot:
+    pop rbx
+    leave
+    ret
+END_FUNC mv_source_acquired
 
 ;; Proper dealloc:
 DEF_FUNC memoryview_dealloc_proper, 8            ; 1 pushes, so rsp is 16-aligned
@@ -831,9 +865,24 @@ DEF_FUNC memoryview_method_release, MVM_FRAME
     test rax, rax
     jz .mvrl_done
     push rax                    ; io_buffer_released returns in rax, so the
-    mov rdi, rax                ; source has to survive the call in a slot
+    push rax                    ; source has to survive the calls; and a pad
+    mov rdi, rax
     call bytearray_export_released
     call io_buffer_released     ; a BytesIO counts its live views
+    ; And tp_as_buffer's own count, which the dealloc releases and this did
+    ; not -- so `m.release()` and `with memoryview(a):` left an array pinned
+    ; for good, and the append after them was a BufferError where CPython
+    ; allows it.  mv_source was zeroed above, so the dealloc will not release
+    ; it a second time.
+    mov rdi, [rsp]
+    mov rcx, [rdi + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_buffer]
+    test rcx, rcx
+    jz .mvrl_no_slot
+    mov esi, BUF_RELEASE
+    call rcx
+.mvrl_no_slot:
+    pop rdi
     pop rdi
     call obj_decref
 .mvrl_done:
@@ -968,8 +1017,7 @@ DEF_FUNC memoryview_method_cast, MVC_FRAME
     push rax
     push rdi
     mov rdi, rcx
-    call bytearray_export_acquired
-    call io_buffer_acquired
+    call mv_source_acquired
     pop rdi
     pop rax
 .mvc_no_src:
@@ -1290,9 +1338,10 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     jz .ms_no_source
     inc qword [rcx + PyObject.ob_refcnt]
     push rax
+    push rax                    ; and a pad: the call below stays aligned
     mov rdi, rcx
-    call bytearray_export_acquired
-    call io_buffer_acquired
+    call mv_source_acquired
+    pop rax
     pop rax
 .ms_no_source:
     mov edx, TAG_PTR
