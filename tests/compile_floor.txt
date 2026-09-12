@@ -64,6 +64,7 @@ test_bytearray_repeat
 test_bytes_affix_range
 test_bytes_bytearray_args
 test_bytes_bytearray_repr
+test_bytes_dunder
 test_bytes_hash_tuple_cmp
 test_bytesio
 test_bytes_methods
@@ -504,6 +505,7 @@ test_reflexive_compare
 test_relative_import
 test_re_module
 test_re_opcodes
+test_repr_depth_unwind
 test_repr_element_raises
 test_repr
 test_repr_str_cycle

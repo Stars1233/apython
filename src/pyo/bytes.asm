@@ -2411,6 +2411,51 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     push rbx
     mov [rbp - BTC_TYPE], rdi
+
+    ; CPython asks the object for __bytes__ before it tries a buffer, an
+    ; index or an iterable, and this asked nothing -- so `bytes(headers)` on
+    ; wsgiref's Headers, which has one, fell through to the iterable path and
+    ; indexed the mapping with integers until something asked an int to
+    ; .lower().  Only a HEAPTYPE instance is asked: none of the builtins
+    ; byteslike_source handles natively defines the dunder, so the order
+    ; between them is not observable, and `bytes(5)` stays five zero bytes.
+    cmp rdx, 1
+    jne .btc_no_dunder
+    mov rax, [rsi]                      ; args[0]
+    V_TEST_PTR rax, rcx
+    ja .btc_no_dunder
+    mov rcx, [rax + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .btc_no_dunder
+    mov [rbp - BTC_BUF], rsi            ; args, across the call
+    mov [rbp - BTC_LEN], rdx            ; nargs
+    mov rdi, rax
+    CSTRING rsi, "__bytes__"
+    extern dunder_call_1
+    call dunder_call_1
+    test rax, rax
+    jz .btc_dunder_absent               ; absent, not callable, or it raised
+    V_TEST_PTR rax, rcx
+    ja .btc_dunder_bad
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    jne .btc_dunder_bad
+    ; The dunder's own answer IS the answer, exactly as CPython's is -- the
+    ; type argument is ignored, and `class B(bytes)` with a __bytes__ gets
+    ; whatever it returned.
+    pop rbx
+    leave
+    ret
+.btc_dunder_bad:
+    mov rdi, rax
+    RAISE exc_TypeError_type, "__bytes__ returned non-bytes"
+.btc_dunder_absent:
+    cmp qword [rel current_exception], 0
+    jne .btc_propagate                  ; it raised: that is the answer
+    mov rsi, [rbp - BTC_BUF]
+    mov rdx, [rbp - BTC_LEN]
+.btc_no_dunder:
     mov rdi, rsi
     mov rsi, rdx
     lea rdx, [rel bytes_range_msg]
@@ -2477,6 +2522,13 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     pop rbx
     leave
     ret
+.btc_propagate:
+    extern eval_saved_r13
+    mov [rel eval_saved_r13], r13
+    pop rbx
+    leave
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
 END_FUNC bytes_type_call
 
 ;; ============================================================================

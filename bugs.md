@@ -222,6 +222,68 @@ reasoning that chose them and what changing one would cost.
   or a list today.  The `**` half is done: DICT_MERGE names the callable and
   accepts any mapping.
 
+- **`bytes(obj)` does not take an `__index__`-only object as a count.**
+  `bytes(C())` where `C.__index__` returns 3 is three zero bytes in CPython --
+  its `PyIndex_Check` arm runs before the buffer and the iterable -- and
+  "cannot convert 'C' object to bytes" here: `byteslike_source`'s count arm
+  takes an int, an int subclass and bool by name.  `__bytes__` is consulted
+  now and wins over `__index__` as it should, so only the object whose ONLY
+  numeric face is `__index__` differs.  Closing it means asking the type for
+  `__index__` where the int check is, which puts a dunder lookup on the path
+  of every `bytes(x)` whose argument is not one of the four named types.
+
+- **PEP 3131's NFKC normalisation of identifiers is absent.**  `class T: µ = 1`
+  then `T.µ` works and `T.μ` is an AttributeError: CPython normalises every
+  identifier to NFKC, so the MICRO SIGN U+00B5 and GREEK SMALL LETTER MU
+  U+03BC are the same name there and two names here.  The XID_Start /
+  XID_Continue half of the rule is checked now (`src/compiler/lex.asm`, over
+  the flags `gen_unicodecase.py` emits), which is what stopped an invisible
+  NBSP from being a variable; normalisation is the other half and wants the
+  decomposition and composition tables, which are a generated artefact an
+  order of magnitude larger than the case mappings.  It is the one thing
+  CPython's `test_unicode_identifiers` still fails on.
+
+- **Seven syntax errors differ from CPython in a POSITION rather than in the
+  message**, recorded in `tests/syntax_floor.txt` as differing and shown by
+  `bash tests/syntax_probe.sh --show`:
+
+  `no binding for nonlocal 'x' found` reports line 0.  It is raised by the
+  analyze pass, which holds a scope but no node -- `comp_error_node` needs
+  one -- and closing it means recording the declaring node per NAME, because
+  a scope may have several `nonlocal` statements and the message is about one
+  of them.  Every other symbol-table and codegen error carries its real line
+  now.
+
+  A mapping pattern's non-literal key differs in wording as well as span:
+  `case {q: w}` is "invalid syntax" in CPython, which rejects it in the
+  grammar, and "a mapping pattern's keys must be literals" here, from the
+  pattern compiler.
+
+  The other five are columns: an unexpected indent and an unindent that
+  matches no outer level (CPython blames the first non-space character and
+  runs the span off the line), the bare `*` in `def f(*)`, the location of a
+  missing indented block after a header that ends in whitespace, and the
+  column of `unexpected character after line continuation character`.
+
+- **An f-string's field errors differ in wording**, though both interpreters
+  raise a SyntaxError: `f'{3!g}'` is "f-string: invalid conversion character
+  'g': expected 's', 'r', or 'a'" in CPython and "f-string: invalid
+  conversion, expected 's', 'r' or 'a'" here, and `f'{}'` is "f-string: valid
+  expression required before '}'" there against whatever the empty span makes
+  the expression parser say here.  `src/compiler/fstring.asm` has two
+  messages where CPython has a dozen, and they are reported at the whole
+  f-string token rather than inside the field.  That is most of what
+  CPython's `test_fstring` still counts: the rejection is right and the
+  sentence is not.
+
+- **`super(C, obj)` reaches its own four attributes through the opcode now,
+  but our compiler emits LOAD_SUPER_ATTR where CPython's does not.**  CPython
+  only specialises `super(...).attr` inside a function; at module level it
+  compiles an ordinary call and a LOAD_ATTR.  The two paths answer the same
+  thing for every shape tested, so nothing is observably wrong -- but there
+  are two paths where CPython has one, and the opcode's is the one with
+  arms of its own.
+
 - **Missing C modules.**  The ranking here is by what actually stands in the
   way rather than by which import fails first -- the two are not the same,
   and `_imp` was reached by twelve modules a few lines after some other
