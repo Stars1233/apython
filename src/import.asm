@@ -487,6 +487,62 @@ DEF_FUNC_LOCAL import_raise_not_found, IRNF_BUF
 END_FUNC import_raise_not_found
 
 ;; ============================================================================
+;; import_raise_halted(rdi = module name C string) -- does not return
+;;
+;; A None sitting in sys.modules is a deliberate BLOCK, not a cached module.
+;; `test.support.import_fresh_module(m, blocked=[x])` puts one there and
+;; expects the import of x to fail; we used to take the dict hit and hand the
+;; None back, so `import x` bound None and raised nothing at all.
+;;
+;; CPython raises this from _bootstrap._find_and_load, right after the
+;; sys.modules hit and before anything else, so it is checked for the name
+;; actually being imported and only for that name -- `import a.b` with `a`
+;; blocked is reported by the parent's own "is not a package" path instead.
+;; The type is ModuleNotFoundError, an ImportError subclass.
+;; ============================================================================
+IRH_BUF equ 256
+DEF_FUNC_LOCAL import_raise_halted, IRH_BUF
+    mov rsi, rdi                ; the name
+    lea rdi, [rbp - IRH_BUF]
+    xor ecx, ecx
+    lea rdx, [rel im_halted_prefix]
+.irh_prefix:
+    movzx eax, byte [rdx]
+    test al, al
+    jz .irh_name
+    inc rdx
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .irh_prefix
+.irh_name:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .irh_suffix
+    inc rsi
+    cmp rcx, IRH_BUF - 40       ; room for the whole suffix and the NUL
+    jae .irh_suffix
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .irh_name
+.irh_suffix:
+    lea rdx, [rel im_halted_suffix]
+.irh_suffix_loop:
+    movzx eax, byte [rdx]
+    test al, al
+    jz .irh_done
+    inc rdx
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .irh_suffix_loop
+.irh_done:
+    mov byte [rdi + rcx], 0
+    mov rsi, rdi
+    lea rdi, [rel exc_ModuleNotFoundError_type]
+    call raise_exception
+    ud2
+END_FUNC import_raise_halted
+
+;; ============================================================================
 ;; import_module(PyObject *name_str, PyObject *fromlist, int64_t level) -> PyObject*
 ;; Main import entry point
 ;; name_str = module name from co_names
@@ -680,6 +736,14 @@ DEF_FUNC import_module, IF_FRAME
     jmp .import_error
 
 .found_cached:
+    ; A None here is a BLOCK, not a module -- see import_raise_halted.  It has
+    ; to be tested before the want-top rewrite below, which would otherwise
+    ; read PyStrObject fields off the None while looking for the first
+    ; component.
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .cached_blocked
+
     ; Found in sys.modules.  With an empty fromlist a dotted import still
     ; evaluates to the *top* package -- `import a.b` binds `a` -- so a cache
     ; hit on the full name has to hand back the first component instead, or
@@ -724,6 +788,11 @@ DEF_FUNC import_module, IF_FRAME
     jz .cached_as_is            ; not cached after all; the full one will do
     mov rax, rcx
     jmp .cached_as_is
+.cached_blocked:
+    mov rdi, rbx                ; the name C string, still live from the entry
+    call import_raise_halted
+    ud2
+
 .cached_pop_as_is:
     pop rax
 .cached_as_is:
@@ -1051,6 +1120,15 @@ DEF_FUNC import_find_and_load, FL_FRAME
     ret
 
 .found_in_sysmod:
+    ; A None here is a BLOCK, not a module; see import_raise_halted.
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    jne .fis_real
+    mov rdi, [rbp - FL_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    call import_raise_halted
+    ud2
+.fis_real:
     ; Already imported — return INCREF'd reference
     inc qword [rax + PyObject.ob_refcnt]
     pop r15
@@ -2283,6 +2361,8 @@ END_FUNC import_load_module
 section .rodata
 
 im_no_module_prefix: db "No module named '", 0
+im_halted_prefix:    db "import of ", 0
+im_halted_suffix:    db " halted; None in sys.modules", 0
 irr_package_key:    db "__package__", 0
 im_lib_path:        db "lib", 0
 im_tests_cpython_path: db "tests/cpython", 0
