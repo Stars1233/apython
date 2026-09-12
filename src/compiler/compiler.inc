@@ -638,6 +638,13 @@ struc Comp
                                     ; will own it -- `for x in y:  # type: int`
                                     ; is the For's, and the For node does not
                                     ; exist until its body has been parsed
+    ; PEP 572's two rules about a walrus in a comprehension, which are about
+    ; WHERE in the comprehension it is written rather than about any scope.
+    ; The symbol table sets each around the one visit it covers.
+    .in_comp_iter: resd 1           ; visiting a `for` TARGET: the names bound
+                                    ; here are iteration variables
+    .in_comp_iterable: resd 1       ; visiting a clause's ITERABLE, where no
+                                    ; walrus may appear at all
     .err:       resb CompErr_size
     .warn_n:    resd 1              ; how many of .warns are filled
     .warn_pad:  resd 1
@@ -785,6 +792,11 @@ DEF_UNBOUND  equ 0x040
 ; dictbytype(symbols, FREE, DEF_FREE_CLASS, ncells) is what lands the name in
 ; co_freevars without disturbing its scope.
 DEF_FREE_CLASS equ 0x080
+; A comprehension's iteration variable, in the comprehension's own scope.
+; PEP 572 forbids a walrus from rebinding one, and the check needs to know
+; which of the scope's locals came from a `for` target rather than from an
+; ordinary assignment inside the body.
+DEF_COMP_ITER  equ 0x100
 
 ; The resolved answer, stored in bits 12..14.
 SCOPE_SHIFT      equ 12

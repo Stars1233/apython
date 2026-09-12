@@ -335,7 +335,9 @@ SV_KIND  equ 56
 SV_NAME  equ 64          ; the walrus target, across the scope walk
 SV_TASCOPE equ 72        ; a `type` statement's own block, before PEP 695's
                          ; type-parameter wrapper displaces it
-SV_FRAME equ 88          ; + 3 pushes = 112
+SV_TARGET equ 88         ; a walrus's target NAME node, which PEP 572's two
+SV_MSG    equ 96         ; refusals blame, and the message one of them builds
+SV_FRAME equ 104         ; + 3 pushes = 128
 DEF_FUNC sym_visit, SV_FRAME
     push rbx
     push r12
@@ -427,6 +429,14 @@ DEF_FUNC sym_visit, SV_FRAME
     jne .name_flags
     or r8d, DEF_UNBOUND
 .name_flags:
+    ; A store reached while visiting a comprehension clause's TARGET is an
+    ; iteration variable, and PEP 572 forbids a walrus from rebinding one.
+    test r8d, DEF_LOCAL
+    jz .name_store_done
+    cmp dword [rbx + Comp.in_comp_iter], 0
+    je .name_store_done
+    or r8d, DEF_COMP_ITER
+.name_store_done:
     mov rdi, rbx
     mov rsi, r12
     mov rcx, r8
@@ -557,6 +567,75 @@ DEF_FUNC sym_visit, SV_FRAME
     call .visit_field
     test eax, eax
     jz .fail
+
+    ; PEP 572 forbids a walrus in two PLACES inside a comprehension, and both
+    ; used to compile: sixty assertions in CPython's test_named_expressions.
+    ; The iterable rule is checked first, because
+    ; `[i for i in a for i2 in (i := b)]` breaks both and CPython reports that
+    ; one.
+    cmp dword [rbx + Comp.in_comp_iterable], 0
+    je .ne_not_in_iterable
+    mov rdi, rbx
+    mov esi, r13d
+    CSTRING rdx, "assignment expression cannot be used in a comprehension iterable expression"
+    call comp_error_node
+    jmp .fail
+.ne_not_in_iterable:
+
+    ; The target's NAME node -- what CPython blames for the rebind rule -- and
+    ; the name itself, which the scope walk below wants anyway.
+    mov rax, [rbp - SV_NPTR]
+    mov ecx, [rax + AstNode.a]
+    mov [rbp - SV_TARGET], rcx
+    mov rdi, rbx
+    mov esi, ecx
+    call ast_at
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    mov [rbp - SV_NAME], rax
+
+    ; A walrus may not rebind an ITERATION VARIABLE of a comprehension it is
+    ; written in, nor of one it escapes on the way out.
+    mov [rbp - SV_N], r12
+.ne_iter_climb:
+    mov rdi, rbx
+    mov rsi, [rbp - SV_N]
+    call sym_at
+    cmp dword [rax + Scope.kind], SCOPE_COMP
+    jne .ne_iter_done
+    mov ecx, [rax + Scope.parent]
+    mov [rbp - SV_I], rcx               ; the parent, across sym_get
+    mov rdi, rbx
+    mov rsi, [rbp - SV_N]
+    mov rdx, [rbp - SV_NAME]
+    call sym_get
+    test eax, DEF_COMP_ITER
+    jnz .ne_rebind
+    mov rcx, [rbp - SV_I]
+    test ecx, ecx
+    jz .ne_iter_done
+    mov [rbp - SV_N], rcx
+    jmp .ne_iter_climb
+.ne_rebind:
+    call comp_msg_start
+    mov [rbp - SV_MSG], rax
+    mov rdi, rax
+    CSTRING rsi, "assignment expression cannot rebind comprehension iteration variable '"
+    call comp_msg_cstr
+    mov rdi, rax
+    mov rsi, [rbp - SV_NAME]
+    add rsi, PyStrObject.data
+    call comp_msg_cstr
+    mov rdi, rax
+    CSTRING rsi, "'"
+    call comp_msg_cstr
+    mov rdi, rbx
+    mov esi, [rbp - SV_TARGET]
+    mov rdx, [rbp - SV_MSG]
+    call comp_error_node
+    jmp .fail
+.ne_iter_done:
 
     ; Find the nearest enclosing scope that is not a comprehension.
     mov [rbp - SV_N], r12               ; the scope the target belongs to
@@ -801,7 +880,9 @@ DEF_FUNC sym_visit, SV_FRAME
     mov edx, [rax + AstNode.b]          ; its iterable
     mov rdi, rbx
     mov rsi, r12
+    inc dword [rbx + Comp.in_comp_iterable]
     call sym_visit
+    dec dword [rbx + Comp.in_comp_iterable]
     test eax, eax
     jz .fail
     mov rdi, rbx
@@ -3141,7 +3222,8 @@ SEC_I     equ 40
 SEC_N     equ 48
 SEC_CL    equ 56
 SEC_P     equ 64          ; the scope being climbed, for the async check
-SEC_FRAME equ 72          ; + 3 pushes = 96, and rsp 16-aligned at every call
+SEC_ITBL  equ 72          ; the enclosing in_comp_iterable, across this walk
+SEC_FRAME equ 88          ; + 3 pushes = 112, and rsp 16-aligned at every call
 DEF_FUNC sym_enter_comp, SEC_FRAME
     push rbx
     push r12
@@ -3150,6 +3232,14 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     mov [rbp - SEC_PARENT], rsi
     mov r13, rdx
     mov [rbp - SEC_NODE], rdx
+
+    ; A comprehension written inside an ITERABLE is visited with that flag up,
+    ; and its own element is not an iterable -- `[i for i in [k for k in a]]`
+    ; may put a walrus in the inner element.  Its own clauses raise the flag
+    ; again where they need it.
+    mov eax, [rbx + Comp.in_comp_iterable]
+    mov [rbp - SEC_ITBL], eax
+    mov dword [rbx + Comp.in_comp_iterable], 0
 
     ; Every comprehension gets a scope of its own, generator expression or
     ; not.  PEP 709 inlines the three eager kinds into the block they are
@@ -3242,17 +3332,24 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
 .not_async_clause:
 
     ; The target binds in this scope; the conditions are evaluated here too.
+    ; Its names are the comprehension's ITERATION VARIABLES, which is what
+    ; the flag marks -- .name ORs DEF_COMP_ITER onto every store it sees
+    ; while it is up.
     mov rdi, rbx
     mov rsi, [rbp - SEC_CL]
     call ast_at
     mov edx, [rax + AstNode.a]
     mov rdi, rbx
     mov rsi, r12
+    inc dword [rbx + Comp.in_comp_iter]
     call sym_visit
+    dec dword [rbx + Comp.in_comp_iter]
     test eax, eax
     jz .fail
 
     ; Every iterable but the outermost is evaluated inside the comprehension.
+    ; No walrus may appear in ANY of them, the outermost included -- that one
+    ; is visited by sym_visit's .comprehension arm, which raises the same flag.
     cmp qword [rbp - SEC_I], 0
     je .conds
     mov rdi, rbx
@@ -3261,7 +3358,9 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     mov edx, [rax + AstNode.b]
     mov rdi, rbx
     mov rsi, r12
+    inc dword [rbx + Comp.in_comp_iterable]
     call sym_visit
+    dec dword [rbx + Comp.in_comp_iterable]
     test eax, eax
     jz .fail
 .conds:
@@ -3355,6 +3454,8 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
 .fail:
     xor eax, eax
 .ret:
+    mov ecx, [rbp - SEC_ITBL]
+    mov [rbx + Comp.in_comp_iterable], ecx
     pop r13
     pop r12
     pop rbx
