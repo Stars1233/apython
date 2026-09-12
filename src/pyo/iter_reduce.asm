@@ -68,24 +68,31 @@ section .text
 ;; reduce, so it is looked up once and kept.  Borrowed: builtins holds it for
 ;; the life of the interpreter.
 ;; ============================================================================
-DEF_FUNC ir_iter_builtin
+IIB_DICT  equ 8
+IIB_NAME  equ 16
+IIB_FRAME equ 16            ; 0 pushes, 16-aligned
+DEF_FUNC ir_iter_builtin, IIB_FRAME
     mov rax, [rel ir_iter_cached]
     test rax, rax
     jnz .iib_done
     mov rdi, [rel builtins_dict_global]
     test rdi, rdi
     jz .iib_none
-    push rdi
+    ; Frame slots rather than pushes: a lone push before each of these three
+    ; calls left every one of them eight bytes out, and a misaligned call
+    ; propagates into everything beneath it -- obj_decref reaches obj_dealloc
+    ; and ap_free.
+    mov [rbp - IIB_DICT], rdi
     CSTRING rdi, "iter"
     call str_from_cstr_heap
+    mov [rbp - IIB_NAME], rax
+    mov rdi, [rbp - IIB_DICT]
     mov rsi, rax
-    pop rdi
-    push rsi
     call dict_get
-    pop rdi
-    push rax
+    mov [rbp - IIB_DICT], rax   ; the answer, borrowed from builtins
+    mov rdi, [rbp - IIB_NAME]
     call obj_decref             ; the name
-    pop rax
+    mov rax, [rbp - IIB_DICT]
     test rax, rax
     jz .iib_none
     mov [rel ir_iter_cached], rax
@@ -152,6 +159,11 @@ DEF_FUNC ir_reduce_tuple, IRT_FRAME
     leave
     ret
 .irt_fail:
+    ; The args tuple's reference was taken on the way in, so failing to build
+    ; the outer tuple has to release it -- a caller that reads 0 as "it raised"
+    ; has already handed ownership over and will not free it.
+    mov rdi, [rbp - IRT_ARGS]
+    call obj_decref             ; NULL-safe, and always a real tuple
     xor eax, eax
     pop rbx
     leave
@@ -446,24 +458,27 @@ END_FUNC seqiter_length_hint
 ;; CPython pickles both a bound method and a bound builtin, and it is the only
 ;; reduction that can name something reachable only through an object.
 ;; ============================================================================
-DEF_FUNC ir_getattr_builtin
+IGB_DICT  equ 8
+IGB_NAME  equ 16
+IGB_FRAME equ 16            ; 0 pushes, 16-aligned
+DEF_FUNC ir_getattr_builtin, IGB_FRAME
     mov rax, [rel ir_getattr_cached]
     test rax, rax
     jnz .igb_done
     mov rdi, [rel builtins_dict_global]
     test rdi, rdi
     jz .igb_none
-    push rdi
+    mov [rbp - IGB_DICT], rdi   ; slots, not pushes: see ir_iter_builtin
     CSTRING rdi, "getattr"
     call str_from_cstr_heap
+    mov [rbp - IGB_NAME], rax
+    mov rdi, [rbp - IGB_DICT]
     mov rsi, rax
-    pop rdi
-    push rsi
     call dict_get
-    pop rdi
-    push rax
+    mov [rbp - IGB_DICT], rax
+    mov rdi, [rbp - IGB_NAME]
     call obj_decref
-    pop rax
+    mov rax, [rbp - IGB_DICT]
     test rax, rax
     jz .igb_none
     mov [rel ir_getattr_cached], rax

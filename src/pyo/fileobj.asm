@@ -706,6 +706,9 @@ END_FUNC fileobj_writelines
 ;; ============================================================================
 FBF_SELF  equ 8
 FBF_MOD   equ 16
+FBF_NAME  equ 24            ; the attribute name, in a slot rather than pushed:
+                            ; a lone push before a call misaligns it, and rsp
+                            ; alignment is what lint cannot see past a prologue
 FBF_FRAME equ 40            ; + 1 push = 48, 16-aligned
 DEF_FUNC fileobj_buffer, FBF_FRAME
     push rbx
@@ -723,26 +726,26 @@ DEF_FUNC fileobj_buffer, FBF_FRAME
     CSTRING rdi, "_io"
     extern str_from_cstr_heap
     call str_from_cstr_heap
-    push rax
+    mov [rbp - FBF_NAME], rax
     mov rdi, rax
     xor esi, esi                    ; no fromlist
     xor edx, edx                    ; absolute
     extern import_module
     call import_module
     mov [rbp - FBF_MOD], rax
-    pop rdi
+    mov rdi, [rbp - FBF_NAME]
     call obj_decref
     cmp qword [rbp - FBF_MOD], 0
     je .fbf_fail
     CSTRING rdi, "FileIO"
     call str_from_cstr_heap
-    push rax
+    mov [rbp - FBF_NAME], rax
     mov rdi, [rbp - FBF_MOD]
     mov rsi, rax
     extern obj_getattr_opt
     call obj_getattr_opt
     mov rbx, rax                ; a Value: _io.FileIO, whatever it is
-    pop rdi
+    mov rdi, [rbp - FBF_NAME]
     call obj_decref             ; the name, which is always a str
     test rbx, rbx
     jz .fbf_fail
