@@ -82,6 +82,7 @@ test_call_instance
 test_call_kwargs_errors
 test_call_recursion
 test_call_spec
+test_class_annotations
 test_classcell_not_a_cell
 test_classes
 test_classmethod_metaclass
@@ -204,6 +205,7 @@ test_dicts
 test_dict_str_keys
 test_dict_update_mapping
 test_dict_update_raises
+test_dict_update_refcount
 test_dict_view_set
 test_dict_views
 test_dir_published
@@ -291,6 +293,7 @@ test_gc_finalizer_order
 test_gc_generations
 test_gc_module
 test_gc_reentrant_collect
+test_gc_static_types
 test_gen_adv
 test_generator_close_on_drop
 test_generator_close_throw

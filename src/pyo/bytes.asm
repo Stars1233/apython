@@ -873,6 +873,7 @@ DEF_FUNC bytes_like_ptr_len, 8            ; 1 push, so rsp is 16-aligned
     test rax, rax
     jz .bpl_no
     mov rdi, rbx
+    mov esi, BUF_GET            ; read it and be done; no view outlives this
     call rax
     test ecx, ecx
     jz .bpl_no

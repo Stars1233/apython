@@ -63,7 +63,9 @@ section .text
 ;; ============================================================================
 global memoryview_type_call
 MV_ARG   equ 8              ; args[0] as it arrived, for the refusal
-MV_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+MV_BUF   equ 16             ; what a tp_as_buffer slot answered, held across
+MV_LEN   equ 24             ;   the allocation and the acquire
+MV_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC memoryview_type_call, MV_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     cmp rdx, 1
@@ -207,10 +209,24 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     ; has told us where its bytes are and nothing about whether they may move
     ; -- array's can, when it grows -- so writing through the view is refused
     ; rather than silently aimed at a stale pointer.
-    push rdi
+    ;
+    ; The buffer is fetched BEFORE the view is allocated, because the slot may
+    ; decline: its ecx says whether it answered at all, and building a view
+    ; around whatever was left in rax is how a declining exporter would have
+    ; become a wild pointer.
+    mov [rbp - MV_ARG], rdi
+    mov rcx, [rdi + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_buffer]
+    mov esi, BUF_GET
+    call rcx                        ; rax = data, rdx = length, ecx = answered
+    test ecx, ecx
+    jz .mv_really_error
+    mov [rbp - MV_BUF], rax
+    mov [rbp - MV_LEN], rdx
+
     mov edi, PyMemoryViewObject_size
     call ap_malloc
-    pop rdi
+    mov rdi, [rbp - MV_ARG]
     mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
     lea rcx, [rel memoryview_type]
     mov [rax + PyMemoryViewObject.ob_type], rcx
@@ -221,15 +237,19 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     pop rdi
     pop rax
 
+    ; And the exporter counts it, so that a resize while this view is alive is
+    ; refused rather than leaving the pointer below dangling.
     push rax
     push rax
     mov rcx, [rdi + PyObject.ob_type]
     mov rcx, [rcx + PyTypeObject.tp_as_buffer]
-    call rcx                        ; rax = data, rdx = length, ecx = answered
-    mov r10, rax
-    mov r11, rdx
+    mov esi, BUF_ACQUIRE
+    call rcx
     pop rax
     pop rax
+
+    mov r10, [rbp - MV_BUF]
+    mov r11, [rbp - MV_LEN]
     mov [rax + PyMemoryViewObject.mv_buf], r10
     mov [rax + PyMemoryViewObject.mv_len], r11
     mov qword [rax + PyMemoryViewObject.mv_itemsize], 1
@@ -252,6 +272,16 @@ DEF_FUNC memoryview_dealloc_proper, 8            ; 1 pushes, so rsp is 16-aligne
     push rdi
     call bytearray_export_released
     call io_buffer_released
+    ; A source reached through the slot counts its exports there.  Released
+    ; before the decref below, because that may be the source's last reference.
+    mov rdi, [rsp]
+    mov rcx, [rdi + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_buffer]
+    test rcx, rcx
+    jz .mvd_no_slot
+    mov esi, BUF_RELEASE
+    call rcx
+.mvd_no_slot:
     pop rdi
     call obj_decref
 .mvd_no_source:

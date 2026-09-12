@@ -80,3 +80,58 @@ print(bytes(memoryview(b"ab")), bytes(memoryview(bytearray(b"cd"))),
       "bytes and bytearray views are untouched")
 print(memoryview(b"ab").readonly, memoryview(bytearray(b"ab")).readonly,
       "and so is their readonly answer")
+
+
+# --- an exported buffer pins the exporter's storage --------------------------
+#
+# A view through the slot holds a POINTER into the exporter's memory, and an
+# array's buffer moves when it grows: array_reserve reallocs.  So the view was
+# left aimed at freed memory, and reading it printed whatever the allocator had
+# put there -- a use-after-free reachable from two lines of ordinary Python.
+#
+# CPython's answer is to refuse the resize while a view is outstanding, and to
+# count the outstanding views so that the refusal lifts when the last one goes.
+# bytearray already worked that way here; the slot exporter now does too.
+def delete_first(arr):
+    del arr[0]
+
+
+a = array.array("i", [1, 2, 3, 4])
+m = memoryview(a)
+print(bytes(m) == a.tobytes(), "the view agrees with the array")
+
+for label, resize in (("append", lambda: a.append(5)),
+                      ("extend", lambda: a.extend([6, 7])),
+                      ("fromlist", lambda: a.fromlist([8])),
+                      ("frombytes", lambda: a.frombytes(b"\x09\x00\x00\x00")),
+                      ("del", lambda: delete_first(a))):
+    try:
+        resize()
+        print("NO ERROR: %s resized an array that is exporting buffers" % label)
+    except BufferError as e:
+        print("%-10s BufferError: %s" % (label, e))
+
+# Everything that does not resize is still allowed.
+a[0] = 99
+print(a.tolist(), "assignment to an existing item is fine")
+print(bytes(m)[:4] == b"\x63\x00\x00\x00", "and the view sees it")
+print(a.tolist() == list(a), "iteration is fine")
+print(len(a), a.buffer_info()[1], "so are len and buffer_info")
+
+# The refusal lifts when the last view goes.
+del m
+a.append(5)
+print(a.tolist(), "the array grows once nothing is exporting it")
+
+# Two views, and it takes both.
+m1 = memoryview(a)
+m2 = memoryview(a)
+del m1
+try:
+    a.append(6)
+    print("NO ERROR: one release was enough for two views")
+except BufferError:
+    print("two views take two releases")
+del m2
+a.append(6)
+print(len(a), "and then it grows")

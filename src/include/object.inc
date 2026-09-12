@@ -126,6 +126,7 @@ struc PyArrayObject
     .ob_code:    resq 1   ; +40: the typecode letter
     .ob_isize:   resq 1   ; +48: bytes per item
     .ob_kind:    resq 1   ; +56: AK_SIGNED / AK_UNSIGNED / AK_FLOAT / AK_UNICODE
+    .ob_exports: resq 1   ; +64: live views over ob_data, which block a resize
 endstruc
 
 struc PyByteArrayObject
@@ -912,12 +913,26 @@ struc PyTypeObject
     ; name.
     ;
     ; The signature is
-    ;     tp_getbuffer(rdi = obj) -> rax = data ptr, rdx = length in BYTES,
+    ;     tp_getbuffer(rdi = obj, esi = BUF_GET) -> rax = data ptr,
+    ;                                rdx = length in BYTES,
     ;                                ecx = 1 when it answered, 0 when not
     ; so a type whose buffer can be absent -- a released memoryview -- says so
     ; without raising, which is the contract bytes_like_ptr_len already keeps.
+    ;
+    ; BUF_ACQUIRE and BUF_RELEASE are the accounting a LASTING view needs, and
+    ; they answer nothing.  A view keeps the POINTER, and an exporter's storage
+    ; can move -- an array's does, when it grows -- so an exporter has to be
+    ; able to refuse a resize while someone holds one.  CPython splits this
+    ; across bf_getbuffer and bf_releasebuffer; one slot answers all three here.
+    ; A caller that only reads the bytes and is done with them before any other
+    ; code runs passes BUF_GET alone, which is what every caller of
+    ; bytes_like_ptr_len does.
     .tp_as_buffer:   resq 1  ; +224
 endstruc
+
+BUF_GET     equ 0
+BUF_ACQUIRE equ 1
+BUF_RELEASE equ 2
 
 TYPE_OBJECT_SIZE equ PyTypeObject_size
 

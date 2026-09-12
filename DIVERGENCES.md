@@ -162,12 +162,13 @@ more: the item format, the item size, the shape, the strides, the suboffsets
 and whether the consumer may write.  So a `memoryview` obtained through the
 slot differs from CPython's in two ways:
 
-- It is **read-only**.  An exporter reached this way has said where its bytes
-  are and nothing about whether they can MOVE -- an `array`'s do, the moment it
-  grows -- so a write through the view is refused rather than silently aimed at
-  a pointer the exporter has already abandoned.  CPython's view over an array is
-  writable because its protocol lets the exporter say so and be told when the
-  view is released.
+- It is **read-only**, because the slot has no way to say otherwise: CPython's
+  consumer asks for write access and the exporter grants or refuses it, and
+  there is no request here to carry that in.  A write is refused rather than
+  guessed at.  (Where the bytes may MOVE is a separate question, and the slot
+  does answer it: a view acquires an export and the exporter refuses a resize
+  while one is outstanding, which is why `a.append(x)` under a live view raises
+  BufferError exactly as CPython's does.)
 - It is a view of **bytes**: `format` is `'B'` and `itemsize` is `1`, so
   `len(memoryview(array('i', [1, 2])))` is 8 here and 2 in CPython, and
   indexing yields a byte rather than an item.  `bytes(m)` and `m.tobytes()`
