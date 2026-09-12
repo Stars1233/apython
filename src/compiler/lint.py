@@ -732,6 +732,44 @@ def check_type_tables(files, nfields):
             i += 1
     return bad
 
+def check_macro_type_tables(files, nfields):
+    """A type table a MACRO emits must be the whole PyTypeObject too.
+
+    check_type_tables anchors on a `name_type:` label, and a macro writes
+    `%1:` -- so DEF_EXC_TYPE, which builds every one of the hundred-odd
+    exception types, was invisible to it.  When tp_as_buffer was appended to
+    all 96 literal tables the macro was left at 28 qwords, and each exception
+    type read the NEXT table's ob_refcnt -- 1 or 2 -- as its buffer slot:
+    `b"x" == ValueError("y")` called address 2.
+
+    A macro body is taken for a type table when it lays out both ob_refcnt
+    and tp_name, which no other macro in the tree does.
+    """
+    if not nfields:
+        return []
+    dq = re.compile(r'^\s*(?:dq|times\s+(\d+)\s+dq)\s')
+    bad = []
+    for path in files:
+        src = open(path).read()
+        for m in re.finditer(r'^%macro\s+(\w+)\s+\d+\s*$(.*?)^%endmacro',
+                             src, re.S | re.M):
+            body = m.group(2)
+            if 'ob_refcnt' not in body or 'tp_name' not in body:
+                continue
+            n = 0
+            for L in body.split('\n'):
+                d = dq.match(L)
+                if d:
+                    n += int(d.group(1)) if d.group(1) else 1
+            if n != nfields:
+                line = src[:m.start()].count('\n') + 1
+                bad.append((path, line,
+                            "macro %s lays out %d qwords, PyTypeObject is %d"
+                            % (m.group(1), n, nfields),
+                            "every type it builds reads the next object's fields"))
+    return bad
+
+
 def all_asm():
     """Every hand-written .asm in the tree."""
     return sorted(glob.glob('src/*.asm') + glob.glob('src/*/*.asm'))
@@ -1189,6 +1227,7 @@ def main():
                 + check_separators(everything) + check_file_size(everything) + check_docblocks(everything)
                 + check_text(everything) + check_guards(headers)
                 + check_type_tables(everything, nfields)
+                + check_macro_type_tables(everything, nfields)
                 + check_alignment(everything)
                 + check_encoding(everything)
                 + check_const_value(everything)
