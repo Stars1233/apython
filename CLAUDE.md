@@ -340,6 +340,7 @@ f-strings, async, comprehensions, PEP 695 type parameters.
 | `parse_str.asm` | string literals: the escapes, `\N{...}`, implicit concatenation, and whether a run is an f-string |
 | `prule.asm` | **generated** -- `prule_table`, the precedence grammar |
 | `parse_stmt.asm` | statements, and the soft keywords `match` and `type` |
+| `parse_try.asm` | `try` and `with`, which share a frame layout because they are the same shape -- a suite, then clauses that run whether it finished or not.  Split off when `parse_stmt.asm` reached the 100k cap, along the seam `codegen_try.asm` already uses |
 | `pattern.asm` | `match` patterns |
 | `fstring.asm` | f-string fields, lexed as spans of the same source |
 | `fstrscan.asm` | where a literal ends, under PEP 701 -- the one definition the lexer and both field scanners share |

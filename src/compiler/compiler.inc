@@ -171,6 +171,36 @@ TOKEN_SHIFT equ 5
     or  rcx, r11
 %endmacro
 
+;; ============================================================================
+;; SUITE_FOR text, line -- what an indented block is expected AFTER
+;;
+;; CPython says "expected an indented block after 'if' statement on line 3",
+;; and the statement is the one thing par_suite cannot see: it is called from
+;; fourteen places and takes only a Comp*.  Two words in parse_stmt.asm carry
+;; it, which is safe because par_suite reads them before it can descend into a
+;; nested suite that would overwrite them.  The macros live here rather than
+;; in parse_stmt.asm because parse_try.asm writes them too.
+;; ============================================================================
+%macro SUITE_FOR 2              ; %1 = the text, %2 = a source of the line
+    CSTRING rax, %1
+    mov [rel psu_what], rax
+    mov eax, %2
+    mov [rel psu_line], eax
+%endmacro
+
+;; SUITE_FOR_HERE text -- the same, for a clause that is its own statement.
+;; `else`, `except` and `finally` are blamed on THEIR line, not on the line
+;; the `if` or the `try` opened on, so the line comes from the token the
+;; parser is looking at.  Clobbers rax and rdi; rbx must be the Comp*.
+%macro SUITE_FOR_HERE 1
+    mov rdi, rbx
+    call par_peek
+    mov eax, [rax + Token.lineno]
+    mov [rel psu_line], eax
+    CSTRING rax, %1
+    mov [rel psu_what], rax
+%endmacro
+
 ;; ===========================================================================
 ;; Character classes.  One 256-byte table drives every scanning decision in
 ;; the lexer.

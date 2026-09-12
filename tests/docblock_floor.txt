@@ -17,7 +17,7 @@ src/compiler/compile.asm               7
 src/compiler/dis.asm                   5
 src/compiler/fstring.asm               1
 src/compiler/parse.asm                 1
-src/compiler/parse_stmt.asm            15
+src/compiler/parse_stmt.asm            13
 src/compiler/pattern.asm               1
 src/compiler/symtab.asm                6
 src/eval.asm                           9
@@ -57,7 +57,7 @@ src/pyo/abcmod.asm                     4
 src/pyo/asyncmod.asm                   26
 src/pyo/bytearray.asm                  19
 src/pyo/bytes.asm                      11
-src/pyo/class.asm                      9
+src/pyo/class.asm                      8
 src/pyo/code.asm                       6
 src/pyo/complex.asm                    9
 src/pyo/descriptors.asm                32
@@ -71,7 +71,7 @@ src/pyo/fileobj.asm                    7
 src/pyo/float.asm                      12
 src/pyo/frameobj.asm                   3
 src/pyo/func.asm                       9
-src/pyo/generator.asm                  16
+src/pyo/generator.asm                  14
 src/pyo/instance_alloc.asm             4
 src/pyo/int.asm                        2
 src/pyo/iter.asm                       11
@@ -79,7 +79,7 @@ src/pyo/list.asm                       7
 src/pyo/memoryview.asm                 17
 src/pyo/method.asm                     3
 src/pyo/module.asm                     5
-src/pyo/set.asm                        6
+src/pyo/set.asm                        5
 src/pyo/singleton.asm                  1
 src/pyo/slice.asm                      3
 src/pyo/sre_match.asm                  7
@@ -93,7 +93,7 @@ src/pyo/sysmod.asm                     8
 src/pyo/timemod.asm                    4
 src/pyo/tuple.asm                      5
 src/pyo/weakrefmod.asm                 18
-src/runtime.asm                        4
+src/runtime.asm                        3
 src/slots.asm                          3
 src/sre.asm                            5
 src/traceback.asm                      16
