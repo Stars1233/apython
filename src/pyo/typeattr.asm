@@ -876,6 +876,25 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     test eax, eax
     jz .tga_return_flags
 
+    ; These two are answered from the class's OWN dict and nothing else, so
+    ; they belong in front of the walk -- CPython answers both from a getset on
+    ; `type`, and a data descriptor on the metatype wins over whatever the
+    ; class inherits through its own MRO.  Asked at the END of the walk, as
+    ; they were, `class Sub(Base): pass` reported BASE's annotations, and
+    ; because the dict is handed out by reference
+    ; `Sub.__annotations__['y'] = str` then wrote into Base's.
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__annotations__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_annotations
+
+    lea rdi, [rbx + PyStrObject.data]
+    CSTRING rsi, "__type_params__"
+    call ap_strcmp
+    test eax, eax
+    jz .tga_type_params
+
     ; Check type->tp_dict, then walk tp_base chain
 .tga_walk:
     mov rdi, [r12 + PyTypeObject.tp_dict]
@@ -1146,6 +1165,27 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     V_PACK rax, rdx             ; return one Value
     ret
 
+.tga_annotations:
+    ; The class's own dict, and then the create-and-keep below.
+    mov rdi, [r12 + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .tga_make_annotations
+    mov rsi, rbx
+    call dict_get               ; a Value; 0 is the only miss
+    test rax, rax
+    jnz .tga_found
+    jmp .tga_make_annotations
+
+.tga_type_params:
+    mov rdi, [r12 + PyTypeObject.tp_dict]
+    test rdi, rdi
+    jz .tga_empty_type_params
+    mov rsi, rbx
+    call dict_get
+    test rax, rax
+    jnz .tga_found
+    ; falls through
+
 .tga_empty_type_params:
     ; A class with no type parameters has an EMPTY tuple, not no attribute --
     ; typing and dataclasses both read it unguarded, and so does int's.
@@ -1318,23 +1358,9 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     ret
 
 .tga_really_not_found:
-    ; Two names every class answers even when nothing in its MRO holds them,
-    ; and they are asked HERE rather than in the ladder above so that a class
-    ; which DOES hold one -- a PEP 695 generic, or a body with annotations --
-    ; is found by the walk first.
-    cmp byte [rbx + PyStrObject.data], '_'
-    jne .tga_really_really_not_found
-    lea rdi, [rbx + PyStrObject.data]
-    CSTRING rsi, "__type_params__"
-    call ap_strcmp
-    test eax, eax
-    jz .tga_empty_type_params
-    lea rdi, [rbx + PyStrObject.data]
-    CSTRING rsi, "__annotations__"
-    call ap_strcmp
-    test eax, eax
-    jz .tga_make_annotations
-
+    ; __annotations__ and __type_params__ used to be asked here, after the
+    ; walk, which is what made a subclass answer its base's.  They are in the
+    ; ladder now.
 .tga_really_really_not_found:
     RET_NULL
     pop r12
