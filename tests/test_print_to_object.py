@@ -116,3 +116,63 @@ cap = io.StringIO()
 with contextlib.redirect_stdout(cap):
     print("redirected")
 print(cap.getvalue() == "redirected\n", "redirect_stdout captures print")
+
+
+# --- what print() requires of a sink, and when it says so ------------------
+#
+# CPython's print asks for `write` and, under flush=True, for `flush` -- and
+# neither is optional once asked for.  A sink with no flush was treated here as
+# "a flush that has already happened", so `print(x, file=w, flush=True)`
+# against a write-only object produced no error where CPython raises
+# AttributeError.  And a lookup that RAISES is not a lookup that came up empty:
+# obj_getattr_opt answers 0 for both, so a `write` or `flush` property that
+# raised was reported as a missing attribute -- or, worse, swallowed, leaving
+# the real exception pending to surface at the next opcode.
+class WriteOnly:
+    def __init__(self):
+        self.chunks = []
+
+    def write(self, text):
+        self.chunks.append(text)
+        return len(text)
+
+
+class RaisingFlush:
+    def write(self, text):
+        return len(text)
+
+    @property
+    def flush(self):
+        raise ValueError("looking up flush raised")
+
+
+class RaisingWrite:
+    @property
+    def write(self):
+        raise ValueError("looking up write raised")
+
+
+w = WriteOnly()
+print(w.write("") == 0, "a write-only sink writes")
+try:
+    print("x", file=w, flush=True)
+    print("NO ERROR for flush=True against a sink with no flush")
+except AttributeError as e:
+    print("AttributeError:", e)
+
+# Without flush=True it is never asked for, so this one is fine.
+w = WriteOnly()
+print("y", file=w)
+print("".join(w.chunks) == "y\n", "and no flush is asked for without it")
+
+try:
+    print("x", file=RaisingFlush(), flush=True)
+    print("NO ERROR for a flush lookup that raises")
+except ValueError as e:
+    print("ValueError:", e)
+
+try:
+    print("x", file=RaisingWrite())
+    print("NO ERROR for a write lookup that raises")
+except ValueError as e:
+    print("ValueError:", e)

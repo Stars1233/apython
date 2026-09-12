@@ -2198,7 +2198,7 @@ DEF_FUNC op_dict_update
     extern obj_decref
     call obj_decref
     test r14, r14
-    jz .du_not_mapping
+    jz .du_keys_missing
     ; A Value, so DECREF_V: obj_decref writes through what it is handed, and
     ; `class M: keys = 1` then `{**M()}` decremented address 1.
     DECREF_V r14, rcx           ; the bound keys, wanted only as a test
@@ -2224,12 +2224,28 @@ DEF_FUNC op_dict_update
     add rsp, 16
     test rax, rax
     jz .du_propagate
-    DECREF_V rax, rcx
+    DECREF_V rax, rcx           ; update() answers None
+    ; And the SOURCE, whose reference came off the stack with the pop.  The
+    ; dense walk above releases it at .du_done and this arm did not, so every
+    ; `{**m}` over anything but a dict pinned the mapping: five of them took a
+    ; refcount from 2 to 7.  Only this exit needs it -- an unwind releases what
+    ; the frame was holding, which is why the refusal below does not.
+    mov rdi, [rbp - DU_SOURCE]
+    DECREF_V rdi, rcx
     add rsp, 72                 ; 64 + the alignment pad taken at .du_mapping
     pop r14
     pop rbx
     leave
     DISPATCH
+
+.du_keys_missing:
+    ; obj_getattr_opt answers 0 both for "there is no keys" and for "looking
+    ; for it raised", so the two have to be told apart here: a `keys` property
+    ; that raises is not a report that the object is not a mapping.
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    jne .du_propagate
+    jmp .du_not_mapping
 
 .du_propagate:
     add rsp, 72                 ; as above: rbx is the bytecode IP, so the

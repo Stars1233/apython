@@ -1051,6 +1051,9 @@ PSW_SINK  equ 8
 PSW_BUF   equ 16
 PSW_LEN   equ 24
 PSW_STR   equ 32
+PSW_NAME  equ 40            ; the attribute name, in a slot rather than pushed:
+                            ; a lone push around a call misaligns it, and lint
+                            ; counts only the pushes in a prologue
 PSW_FRAME equ 56            ; + 1 push = 64, 16-aligned
 DEF_FUNC_LOCAL print_sink_write, PSW_FRAME
     push rbx
@@ -1094,10 +1097,10 @@ DEF_FUNC_LOCAL print_sink_write, PSW_FRAME
     mov rdi, [rbp - PSW_SINK]
     mov rsi, rbx
     call obj_getattr_opt
-    push rax
+    mov [rbp - PSW_NAME], rax
     mov rdi, rbx
     call obj_decref             ; the name
-    pop rbx                     ; rbx = the bound write, a Value, or 0
+    mov rbx, [rbp - PSW_NAME]   ; rbx = the bound write, a Value, or 0
     test rbx, rbx
     jz .psw_no_write
 
@@ -1127,8 +1130,14 @@ DEF_FUNC_LOCAL print_sink_write, PSW_FRAME
 .psw_no_write:
     ; CPython's message, and it is the one a caller catches: a file= that is
     ; not a file says so by name rather than by silently writing nowhere.
+    ; Unless the LOOKUP raised -- obj_getattr_opt answers 0 for that too, and
+    ; reporting a `write` property that raised as a missing `write` loses the
+    ; exception the program actually has to see.
     mov rdi, [rbp - PSW_STR]
     call obj_decref
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    jne .psw_raised
 .psw_not_object:
     CSTRING rdi, "write"
     call str_from_cstr_heap
@@ -1155,11 +1164,15 @@ END_FUNC print_sink_write
 ;; print_sink_flush(rdi = sink) -> rax = 0 ok, 1 raised
 ;;
 ;; What flush=True asks of the sink.  A startup stream is drained directly;
-;; anything else is asked for its `flush`, and a sink without one is no error
-;; -- CPython's print only requires `write`, and a flush that is not there is
-;; a flush that has already happened.
+;; anything else is asked for its `flush` -- and, once asked, a sink without
+;; one is an error.  CPython requires only `write` of a file, but flush=True
+;; is `PyObject_CallMethodNoArgs(file, &_Py_ID(flush))` with its result tested,
+;; so `print(x, file=write_only, flush=True)` raises AttributeError there.
+;; Treating a missing flush as a flush that had already happened made this the
+;; one place a print could fail silently.
 ;; ============================================================================
 PSF_SINK  equ 8
+PSF_NAME  equ 16            ; a slot, not a push: see PSW_NAME above
 PSF_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC_LOCAL print_sink_flush, PSF_FRAME
     push rbx
@@ -1184,12 +1197,12 @@ DEF_FUNC_LOCAL print_sink_flush, PSF_FRAME
     mov rdi, [rbp - PSF_SINK]
     mov rsi, rbx
     call obj_getattr_opt
-    push rax
+    mov [rbp - PSF_NAME], rax
     mov rdi, rbx
-    call obj_decref
-    pop rbx
+    call obj_decref             ; the name
+    mov rbx, [rbp - PSF_NAME]
     test rbx, rbx
-    jz .psf_ok                  ; no flush: nothing to do
+    jz .psf_no_flush
 
     mov rdi, rbx
     xor esi, esi
@@ -1209,6 +1222,21 @@ DEF_FUNC_LOCAL print_sink_flush, PSF_FRAME
     pop rbx
     leave
     ret
+
+.psf_no_flush:
+    ; Missing, or the lookup raised -- the same 0 for both, so ask.
+    extern current_exception
+    cmp qword [rel current_exception], 0
+    jne .psf_failed
+    CSTRING rdi, "flush"
+    call str_from_cstr_heap
+    mov rsi, rax
+    mov rdi, [rbp - PSF_SINK]
+    xor edx, edx                ; a get, not a set
+    extern raise_no_attribute
+    call raise_no_attribute
+    ; does not return
+
 .psf_failed:
     mov eax, 1
     pop rbx
