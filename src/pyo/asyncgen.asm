@@ -1036,6 +1036,7 @@ END_FUNC ags_send_core
 ;; ============================================================================
 AGTT_SELF  equ 8
 AGTT_GEN   equ 16
+AGTT_VAL   equ 24           ; the unwrapped yield, across the box's release
 AGTT_FRAME equ 32           ; + 0 pushes = 32, 16-aligned
 global _agt_throw_impl
 DEF_FUNC _agt_throw_impl, AGTT_FRAME
@@ -1085,10 +1086,14 @@ DEF_FUNC _agt_throw_impl, AGTT_FRAME
     jne .agtt_out
     mov rcx, [rax + AsyncGenWrapped.agw_value]
     INCREF_V rcx, rdx
-    push rcx
+    ; A frame slot and not a push: DECREF_REG is `call obj_dealloc`, and a
+    ; lone push before it made that call at rsp % 16 == 8.  The value has a
+    ; name, so it gets a slot -- which is what bugs.md prescribes for this
+    ; shape rather than a pad.
+    mov [rbp - AGTT_VAL], rcx
     mov rdi, rax
     DECREF_REG rdi
-    pop rsi
+    mov rsi, [rbp - AGTT_VAL]
     mov rcx, [rbp - AGTT_SELF]
     mov dword [rcx + AsyncGenASend.ags_state], 2
     ; In ACLOSE mode a yield is not an answer: the generator was told to shut
