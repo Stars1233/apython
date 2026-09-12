@@ -846,7 +846,11 @@ struc AsyncGenASend
     .ob_type:       resq 1  ; +8
     .ags_gen:       resq 1  ; +16: pointer to async generator (INCREF'd)
     .ags_state:     resd 1  ; +24: 0=initial, 1=yielded, 2=closed
-    .pad0:          resd 1  ; +28
+    .ags_aclose:    resd 1  ; +28: 1 when this athrow came from aclose() rather
+                            ;      than athrow(exc).  CPython tells them apart
+                            ;      by whether agt_args is NULL, which it never
+                            ;      clears; ags_sendval IS cleared when the throw
+                            ;      is delivered, so the mode needs its own word
     .ags_sendval:   resq 1  ; +32: the Value asend.send() will resume with,
                             ;      owned, 0 for None
     .ags_started:   resd 1  ; +40: athrow only -- 1 once the throw has been

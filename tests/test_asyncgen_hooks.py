@@ -171,3 +171,83 @@ print(len(loop.held), "and it could keep the generator")
 
 sys.set_asyncgen_hooks(*saved)
 print(sys.get_asyncgen_hooks() == saved, "restored again")
+
+
+# --- and the awaitables can be thrown into ----------------------------------
+#
+# The finalizer hook's whole purpose is to schedule an aclose, and asyncio does
+# that with create_task -- which asks isinstance(x, collections.abc.Coroutine).
+# That ABC is a STRUCTURAL check over send, throw, close and __await__, and the
+# aclose awaitable had no `throw`, so create_task refused it with "a coroutine
+# was expected" and the aclose the hook asked for never ran.  Throwing is also
+# how a task awaiting one of these gets CANCELLED.
+import collections.abc
+
+
+async def two():
+    try:
+        yield 1
+    except ValueError as e:
+        yield "caught %s" % e
+
+
+agen = two()
+print(isinstance(agen.__anext__(), collections.abc.Coroutine),
+      isinstance(agen.aclose(), collections.abc.Coroutine),
+      isinstance(agen.athrow(ValueError), collections.abc.Coroutine),
+      "all three awaitables are coroutines")
+
+it = two().__aiter__()
+first = it.__anext__()
+try:
+    first.send(None)
+except StopIteration as e:
+    print(e.value, "the first item")
+
+# An async yield COMPLETES the await, so it arrives as StopIteration's value.
+second = it.__anext__()
+try:
+    second.throw(ValueError("boom"))
+    print("NO StopIteration from a throw the generator handled")
+except StopIteration as e:
+    print(e.value, "what the generator yielded after handling the throw")
+
+# Thrown into an aclose, an exception the generator does not handle propagates.
+async def plain():
+    yield 1
+    yield 2
+
+
+def started(agen_factory):
+    it = agen_factory().__aiter__()
+    try:
+        it.__anext__().send(None)
+    except StopIteration:
+        pass
+    return it
+
+
+closer = started(plain).aclose()
+try:
+    closer.throw(ValueError("cancel"))
+    print("NO ERROR from a throw into aclose")
+except ValueError as e:
+    print("ValueError:", e, "propagates out of an aclose")
+except BaseException as e:
+    print("UNEXPECTED", type(e).__name__, e)
+
+# Whether an awaitable whose throw already propagated may be thrown into again
+# is not pinned here: 3.12.3 re-raises and 3.12.14 refuses with "cannot reuse
+# already awaited aclose()/athrow()", so the answer would be a test of which
+# patch level is installed.
+
+# A generator that CATCHES what aclose throws and yields anyway has ignored the
+# shutdown, which is its own error rather than an answer.
+catcher = started(two).aclose()
+try:
+    catcher.throw(ValueError("cancel"))
+    print("NO ERROR from a generator that kept going")
+except RuntimeError as e:
+    print("RuntimeError:", e)
+except BaseException as e:
+    print("UNEXPECTED", type(e).__name__, e)

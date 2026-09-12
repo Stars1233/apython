@@ -1202,6 +1202,8 @@ DEF_FUNC methods_init
     ADD_FN mn___next__, _ags_next_impl
     extern _ags_close_impl
     ADD_FN mn_close, _ags_close_impl
+    extern _agt_throw_impl
+    ADD_FN mn_throw, _agt_throw_impl    ; see the athrow block below
     extern async_gen_asend_dunder_iter
     ADD_FN mn___iter__, async_gen_asend_dunder_iter
     ADD_FN mn___await__, async_gen_asend_dunder_iter
@@ -1221,6 +1223,11 @@ DEF_FUNC methods_init
     ADD_FN mn_send, _ags_send_impl
     ADD_FN mn___next__, _ags_next_impl
     ADD_FN mn_close, _ags_close_impl
+    ; collections.abc.Coroutine is a structural check over send, throw, close
+    ; and __await__, and asyncio's create_task makes it: without `throw` the
+    ; object agen.aclose() answers was "not a coroutine" there.
+    extern _agt_throw_impl
+    ADD_FN mn_throw, _agt_throw_impl
     extern async_gen_athrow_dunder_iter
     ADD_FN mn___iter__, async_gen_athrow_dunder_iter
     ADD_FN mn___await__, async_gen_athrow_dunder_iter
