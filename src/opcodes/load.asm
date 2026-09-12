@@ -964,6 +964,18 @@ DEF_FUNC op_load_attr, LA_FRAME
     lea rcx, [rel super_type]
     cmp rax, rcx
     je .la_not_method
+    ; And a BOUND METHOD, whose method_getattr answers `__func__` with the
+    ; plain function under it and delegates everything else to that function's
+    ; own __dict__.  Neither is a method OF the bound method, so binding it as
+    ; self passed three arguments where two were written:
+    ; `bm.__func__(a, 1)` was "A.im() takes 2 positional arguments but 3 were
+    ; given".  It matters most for what a decorator hangs off its wrapper --
+    ; `obj.method.cache_clear()` on an lru_cache'd method is this shape.
+    ; The value was never wrong; only the fused call site was, so a two-step
+    ; `m = bm.__func__` worked and hid it.
+    lea rcx, [rel method_type]
+    cmp rax, rcx
+    je .la_not_method
     jmp .la_method_push            ; built-in tp_getattr → [func, self]
 
 .la_ic_check:

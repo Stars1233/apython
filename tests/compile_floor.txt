@@ -428,6 +428,7 @@ test_metaclass_lifetime
 test_metaclass_prepare
 test_metaclass
 test_metaclass_resolution
+test_method_attr_call
 test_method_equality
 test_method_hostile
 test_method_load_unbound
