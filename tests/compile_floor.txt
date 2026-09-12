@@ -325,6 +325,7 @@ test_getattr_raises
 test_getset_descriptors
 test_getset_receiver
 test_hashlib_digests
+test_hashlib_openssl
 test_hashlib_sha3_blake2
 test_hash_protocol
 test_identity_values

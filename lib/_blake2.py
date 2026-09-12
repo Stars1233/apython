@@ -52,6 +52,25 @@ _SIGMA = (
 )
 
 
+def _tobytes(data):
+    """The bytes-like argument every update() and constructor takes.
+
+    NOT `bytes(data)`: `bytes(100)` is a hundred zero bytes and `bytes([1])`
+    is b"\\x01", so an int or a list passed where a message was meant became a
+    legitimate-looking buffer instead of an error.  memoryview refuses an int,
+    a list and a None, which is the set CPython refuses, with CPython's
+    wording.
+    """
+    if isinstance(data, str):
+        raise TypeError("Strings must be encoded before hashing")
+    if isinstance(data, (bytes, bytearray)):
+        return data
+    try:
+        return memoryview(data).tobytes()
+    except TypeError:
+        raise TypeError("object supporting the buffer API required") from None
+
+
 class _Immutable(type):
     """CPython's hash types are C types with no settable attributes, and
     `test_hashlib.test_readonly_types` asserts it for every constructor it
@@ -97,9 +116,8 @@ def _wide_field(value, name, bits):
 
 
 def _as_bytes(value, what):
-    if isinstance(value, str):
-        raise TypeError("Strings must be encoded before hashing")
-    return bytes(value)
+    """key, salt and person: bytes-like, and a str is refused."""
+    return _tobytes(value)
 
 
 class _Blake2(metaclass=_Immutable):
@@ -201,13 +219,11 @@ class _Blake2(metaclass=_Immutable):
         if key:
             self.update(key + b"\0" * (self.block_size - len(key)))
 
-        if data:
-            self.update(data)
+        # Unconditional, so a FALSY non-buffer is refused too.
+        self.update(data)
 
     def update(self, data):
-        if isinstance(data, str):
-            raise TypeError("Strings must be encoded before hashing")
-        data = bytes(data)
+        data = _tobytes(data)
         buf = self._buf + data
         bs = self.block_size
         # The LAST block is never compressed here: the final call needs the

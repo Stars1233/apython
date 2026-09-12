@@ -57,6 +57,25 @@ _K512 = (
     0x5FCB6FAB3AD6FAEC, 0x6C44198C4A475817,
 )
 
+def _tobytes(data):
+    """The bytes-like argument every update() and constructor takes.
+
+    NOT `bytes(data)`: `bytes(100)` is a hundred zero bytes and `bytes([1])`
+    is b"\\x01", so an int or a list passed where a message was meant became a
+    legitimate-looking buffer instead of an error.  memoryview refuses an int,
+    a list and a None, which is the set CPython refuses, with CPython's
+    wording.
+    """
+    if isinstance(data, str):
+        raise TypeError("Strings must be encoded before hashing")
+    if isinstance(data, (bytes, bytearray)):
+        return data
+    try:
+        return memoryview(data).tobytes()
+    except TypeError:
+        raise TypeError("object supporting the buffer API required") from None
+
+
 class _Immutable(type):
     """CPython's hash types are C types with no settable attributes, and
     `test_hashlib.test_readonly_types` asserts it for every constructor it
@@ -105,9 +124,7 @@ class _Sha2(metaclass=_Immutable):
         self._len = 0
 
     def update(self, data):
-        if isinstance(data, str):
-            raise TypeError("Strings must be encoded before hashing")
-        data = bytes(data)
+        data = _tobytes(data)
         self._len += len(data)
         buf = self._buf + data
         bs = self.block_size
@@ -202,8 +219,9 @@ _H512 = (0x6A09E667F3BCC908, 0xBB67AE8584CAA73B, 0x3C6EF372FE94F82B,
 def _make(cls, name, h, block_size, digest_size, wide, data=b"", *,
           usedforsecurity=True):
     obj = cls(name, h, block_size, digest_size, wide)
-    if data:
-        obj.update(data)
+    # Unconditional: a FALSY non-buffer -- None, 0, b"" -- has to be refused
+    # too, and `if data:` skipped the check entirely for the first two.
+    obj.update(data)
     return obj
 
 

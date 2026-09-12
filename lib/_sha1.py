@@ -5,6 +5,25 @@ is here for the same reason _sha2 is: `hashlib` will not give out a digest it
 has no module for, and several of CPython's own Lib/ modules ask for one.
 """
 
+def _tobytes(data):
+    """The bytes-like argument every update() and constructor takes.
+
+    NOT `bytes(data)`: `bytes(100)` is a hundred zero bytes and `bytes([1])`
+    is b"\\x01", so an int or a list passed where a message was meant became a
+    legitimate-looking buffer instead of an error.  memoryview refuses an int,
+    a list and a None, which is the set CPython refuses, with CPython's
+    wording.
+    """
+    if isinstance(data, str):
+        raise TypeError("Strings must be encoded before hashing")
+    if isinstance(data, (bytes, bytearray)):
+        return data
+    try:
+        return memoryview(data).tobytes()
+    except TypeError:
+        raise TypeError("object supporting the buffer API required") from None
+
+
 class _Immutable(type):
     """CPython's hash types are C types with no settable attributes, and
     `test_hashlib.test_readonly_types` asserts it for every constructor it
@@ -40,9 +59,7 @@ class _Sha1(metaclass=_Immutable):
         self._len = 0
 
     def update(self, data):
-        if isinstance(data, str):
-            raise TypeError("Strings must be encoded before hashing")
-        data = bytes(data)
+        data = _tobytes(data)
         self._len += len(data)
         buf = self._buf + data
         n = len(buf) - (len(buf) % 64)
@@ -95,6 +112,7 @@ class _Sha1(metaclass=_Immutable):
 
 def sha1(data=b"", *, usedforsecurity=True):
     obj = _Sha1()
-    if data:
-        obj.update(data)
+    # Unconditional: a FALSY non-buffer -- None or 0 -- has to be refused too,
+    # and `if data:` skipped the check entirely for both.
+    obj.update(data)
     return obj

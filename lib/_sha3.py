@@ -17,6 +17,25 @@ constructor here is a CLASS rather than a function, because CPython's are:
 then read attributes off it.
 """
 
+def _tobytes(data):
+    """The bytes-like argument every update() and constructor takes.
+
+    NOT `bytes(data)`: `bytes(100)` is a hundred zero bytes and `bytes([1])`
+    is b"\\x01", so an int or a list passed where a message was meant became a
+    legitimate-looking buffer instead of an error.  memoryview refuses an int,
+    a list and a None, which is the set CPython refuses, with CPython's
+    wording.
+    """
+    if isinstance(data, str):
+        raise TypeError("Strings must be encoded before hashing")
+    if isinstance(data, (bytes, bytearray)):
+        return data
+    try:
+        return memoryview(data).tobytes()
+    except TypeError:
+        raise TypeError("object supporting the buffer API required") from None
+
+
 class _Immutable(type):
     """CPython's hash types are C types with no settable attributes.
 
@@ -151,13 +170,12 @@ class _Keccak(metaclass=_Immutable):
         # nothing to a Python implementation.
         self._state = [0] * 25
         self._buf = b""
-        if data:
-            self.update(data)
+        # Unconditional: a FALSY non-buffer has to be refused too, and
+        # `if data:` skipped the check for None and 0 entirely.
+        self.update(data)
 
     def update(self, data):
-        if isinstance(data, str):
-            raise TypeError("Strings must be encoded before hashing")
-        data = bytes(data)
+        data = _tobytes(data)
         buf = self._buf + data
         rate = self._rate
         n = len(buf) - (len(buf) % rate)
