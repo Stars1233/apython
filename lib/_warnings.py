@@ -40,15 +40,40 @@ def _match(pattern, text):
         return pattern == text
 
 
+def _live(name, fallback):
+    """The value `warnings` currently has for `name`, not the one here.
+
+    `catch_warnings.__enter__` does `warnings.filters = warnings.filters[:]`
+    -- it REBINDS the attribute rather than mutating the list -- so inside
+    such a block `warnings.filters` and this module's `filters` are two
+    different lists, and every simplefilter() call goes into the one this
+    module was not reading.  The whole error action was therefore dead inside
+    a catch_warnings block, which is how every test suite asserts a warning.
+
+    CPython's C half re-reads the attribute off the warnings module on every
+    warning -- `get_warnings_attr(interp, &_Py_ID(filters), ...)` -- and that
+    dynamic lookup is exactly what makes the rebinding work.  This is the same
+    thing, and warn_explicit already reached for `showwarning` this way.
+
+    The module's own value is the fallback, for the window before `warnings`
+    has finished importing: `importlib._bootstrap` can warn during it.
+    """
+    import sys
+    mod = sys.modules.get("warnings")
+    if mod is None:
+        return fallback
+    return getattr(mod, name, fallback)
+
+
 def _find_action(message, category, module, lineno):
-    for item in filters:
+    for item in _live("filters", filters):
         action, msg, cat, mod, ln = item
         if ((msg is None or _match(msg, str(message)))
                 and (cat is None or issubclass(category, cat))
                 and (mod is None or _match(mod, module))
                 and (ln == 0 or lineno == ln)):
             return action
-    return _defaultaction
+    return _live("defaultaction", _defaultaction)
 
 
 def _caller(stacklevel):
@@ -160,9 +185,10 @@ def warn_explicit(message, category, filename, lineno, module=None,
         if registry is not None:
             registry[key] = 1
         oncekey = (text, category)
-        if _onceregistry.get(oncekey):
+        once = _live("onceregistry", _onceregistry)
+        if once.get(oncekey):
             return
-        _onceregistry[oncekey] = 1
+        once[oncekey] = 1
     elif action == "module":
         if registry is not None:
             registry[key] = 1
