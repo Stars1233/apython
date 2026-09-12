@@ -750,7 +750,10 @@ extern tuple_new
 TGA_ORIGIN equ 8            ; the type the MRO walk started from
 TGA_META   equ 16           ; its metatype, for the second walk
 TGA_FROMMETA equ 24         ; where to report which walk answered, or 0
-TGA_FRAME  equ 32           ; + 2 pushes = 48
+TGA_FALLBACK equ 32         ; what a total miss means: 0 = no attribute,
+                            ; 1 = an empty __annotations__ to create and keep,
+                            ; 2 = an empty __type_params__ tuple
+TGA_FRAME  equ 48           ; + 2 pushes = 64
 DEF_FUNC_BARE type_getattr
     xor edx, edx                ; no caller wants to know where it came from
     jmp type_getattr_meta
@@ -783,6 +786,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     mov rbx, rsi                ; rbx = name
     mov r12, rdi                ; r12 = type (walks)
     mov [rbp - TGA_ORIGIN], rdi
+    mov qword [rbp - TGA_FALLBACK], 0
 
     ; Every name the ladder below can match begins with "__", and there are
     ; twelve of them, each an ap_strcmp CALL made before any dict is touched.
@@ -1166,25 +1170,34 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     ret
 
 .tga_annotations:
-    ; The class's own dict, and then the create-and-keep below.
+    ; The class's OWN dict -- never the MRO's, which is what made
+    ; `class Sub(Base): pass` report Base's -- then the METATYPE's, and only
+    ; then the create-and-keep below.  Skipping the metatype walk was the
+    ; other half of the same commit's mistake: a metaclass with annotations of
+    ; its own supplies them to its instances, and
+    ; `class Meta(type): registry: dict = {}` gave `C.__annotations__` as {}.
     mov rdi, [r12 + PyTypeObject.tp_dict]
     test rdi, rdi
-    jz .tga_make_annotations
+    jz .tga_ann_try_meta
     mov rsi, rbx
     call dict_get               ; a Value; 0 is the only miss
     test rax, rax
     jnz .tga_found
-    jmp .tga_make_annotations
+.tga_ann_try_meta:
+    mov qword [rbp - TGA_FALLBACK], 1
+    jmp .tga_meta_start
 
 .tga_type_params:
     mov rdi, [r12 + PyTypeObject.tp_dict]
     test rdi, rdi
-    jz .tga_empty_type_params
+    jz .tga_tp_try_meta
     mov rsi, rbx
     call dict_get
     test rax, rax
     jnz .tga_found
-    ; falls through
+.tga_tp_try_meta:
+    mov qword [rbp - TGA_FALLBACK], 2
+    jmp .tga_meta_start
 
 .tga_empty_type_params:
     ; A class with no type parameters has an EMPTY tuple, not no attribute --
@@ -1286,6 +1299,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     ; Only a user metaclass is walked: the three builtin metatypes hold
     ; entries meant for `type` itself, and offering those on every class would
     ; shadow what a class inherits from object.
+.tga_meta_start:
     mov r12, [rbp - TGA_ORIGIN]
     mov r12, [r12 + PyObject.ob_type]
     test r12, r12
@@ -1360,7 +1374,12 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
 .tga_really_not_found:
     ; __annotations__ and __type_params__ used to be asked here, after the
     ; walk, which is what made a subclass answer its base's.  They are in the
-    ; ladder now.
+    ; ladder now -- and they come back HERE when both walks miss, because
+    ; each has an empty value to invent rather than an attribute to refuse.
+    cmp qword [rbp - TGA_FALLBACK], 1
+    je .tga_make_annotations
+    cmp qword [rbp - TGA_FALLBACK], 2
+    je .tga_empty_type_params
 .tga_really_really_not_found:
     RET_NULL
     pop r12
