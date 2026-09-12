@@ -101,3 +101,65 @@ class PartialLike:
 p = PartialLike(len)
 p.converter = "set on a slotted object"
 print(p.func is len, p.converter, "the functools.partial shape works")
+
+
+# --- a str subclass asks the same way ---------------------------------------
+#
+# A str subclass keeps its characters inline, so its slots go at the TAIL and
+# the layout decision is made on a different branch -- one that never read the
+# '__dict__' answer, so `class S(str): __slots__ = ('__dict__',)` still had no
+# dict and every attribute raised.
+class StrWithDict(str):
+    __slots__ = ("a", "__dict__")
+
+
+s = StrWithDict("text")
+s.a = 1
+s.z = 3
+print(s, s.a, s.z, s.__dict__, "a str subclass gets its dict back")
+
+
+class StrNoDict(str):
+    __slots__ = ("a",)
+
+
+sn = StrNoDict("text")
+sn.a = 1
+try:
+    sn.z = 3
+    print("NO ERROR: a plain str subclass with __slots__ took an attribute")
+except AttributeError as e:
+    print("AttributeError:", e)
+
+
+# --- what __slots__ may contain ---------------------------------------------
+#
+# CPython's valid_identifier: every item must be a str, and every str must be
+# an identifier.  Non-strings were silently skipped here, which is worse than
+# refusing them -- `__slots__ = (42,)` produced a class whose declared slot did
+# not exist -- and the '__dict__' test read PyStrObject.data off whatever
+# pointer it was handed, so a bytes item was compared as a string.
+def refuse(label, body):
+    try:
+        body()
+        print("%-40s accepted" % label)
+    except TypeError as e:
+        print("%-40s TypeError: %s" % (label, e))
+
+
+refuse("an int item", lambda: type("C", (), {"__slots__": (42,)}))
+refuse("a bytes item", lambda: type("C", (), {"__slots__": (b"__dict__",)}))
+refuse("a None item", lambda: type("C", (), {"__slots__": (None,)}))
+refuse("a tuple item", lambda: type("C", (), {"__slots__": (("a",),)}))
+refuse("a non-identifier", lambda: type("C", (), {"__slots__": ("a b",)}))
+refuse("an empty name", lambda: type("C", (), {"__slots__": ("",)}))
+refuse("a digit first", lambda: type("C", (), {"__slots__": ("1a",)}))
+refuse("__dict__ twice",
+       lambda: type("C", (), {"__slots__": ("__dict__", "__dict__")}))
+refuse("__dict__ when a base has one",
+       lambda: type("C", (Plain,), {"__slots__": ("__dict__",)}))
+
+# And the things that are still fine.
+ok = type("C", (), {"__slots__": ("a", "_b", "__c", "d1", "é")})
+print(sorted(n for n in vars(ok) if not n.startswith("__module__")) != [],
+      "identifiers, including a non-ASCII one, are accepted")

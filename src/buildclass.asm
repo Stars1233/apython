@@ -828,6 +828,11 @@ section .text
 
 ;; ============================================================================
 ;; bc_slot_is_dict_name(rdi = a slot-name str) -> eax = 1 when it is __dict__
+;;
+;; A str, and its callers are what guarantee that: this reads PyStrObject.data
+;; off what it is handed, so a bytes or an int item would be compared as a
+;; string.  bc_slots_validate refuses every non-str before anything below gets
+;; to look at one.
 ;; ============================================================================
 DEF_FUNC_LOCAL bc_slot_is_dict_name
     lea rsi, [rdi + PyStrObject.data]
@@ -847,42 +852,88 @@ DEF_FUNC_LOCAL bc_slot_is_dict_name
 END_FUNC bc_slot_is_dict_name
 
 ;; ============================================================================
-;; bc_slots_name_dict(rdi = slots tuple, rsi = nslots) -> eax = 1 when one of
-;; them is the string "__dict__".  Asked before the layout is decided, because
-;; it is what decides it.
+;; bc_slots_validate(rdi = slots sequence, rsi = nslots, edx = 1 when a base
+;;                   already supplies an instance dict)
+;;   -> eax = 1 when one of the names is '__dict__'; raises and does not return
+;;      when an item is not a usable slot name
+;;
+;; CPython's valid_identifier, plus type_new_slots_impl's two special cases.
+;; Every item must be a str and every str must be an identifier: a non-str was
+;; SKIPPED here, which is worse than refusing it -- `__slots__ = (42,)` built a
+;; class whose declared slot did not exist -- and '__dict__' was only ever
+;; looked for, never counted, so naming it twice was accepted where CPython
+;; says "we already got one".  The same message covers a base that has a dict
+;; already, and the order of the two checks is CPython's, so a __slots__ that
+;; is wrong in more than one way names the same complaint it does.
 ;; ============================================================================
-BSND_I     equ 8
-BSND_N     equ 16
-BSND_ITEMS equ 24
-BSND_FRAME equ 32           ; 0 pushes, 16-aligned
-DEF_FUNC_LOCAL bc_slots_name_dict, BSND_FRAME
-    mov [rbp - BSND_N], rsi
+BSV_N      equ 8
+BSV_ITEMS  equ 16
+BSV_I      equ 24
+BSV_MAYNOT equ 32           ; a base has a dict, so '__dict__' is an error
+BSV_SEEN   equ 40           ; '__dict__' has already been named
+BSV_FRAME  equ 48           ; 0 pushes, 16-aligned
+DEF_FUNC_LOCAL bc_slots_validate, BSV_FRAME
+    mov [rbp - BSV_N], rsi
+    mov [rbp - BSV_MAYNOT], rdx
+    mov qword [rbp - BSV_SEEN], 0
     mov rax, [rdi + PyTupleObject.ob_item]
-    mov [rbp - BSND_ITEMS], rax
-    mov qword [rbp - BSND_I], 0
-.bsnd_loop:
-    mov rcx, [rbp - BSND_I]
-    cmp rcx, [rbp - BSND_N]
-    jge .bsnd_no
-    mov rax, [rbp - BSND_ITEMS]
+    mov [rbp - BSV_ITEMS], rax
+    mov qword [rbp - BSV_I], 0
+.bsv_loop:
+    mov rcx, [rbp - BSV_I]
+    cmp rcx, [rbp - BSV_N]
+    jge .bsv_done
+    mov rax, [rbp - BSV_ITEMS]
     mov rdi, [rax + rcx*8]
+
+    ; A str, or the whole __slots__ is refused.  An int or a float gets here
+    ; as an immediate, so the pointer test comes first -- asking one for its
+    ; ob_type would read the number.
     V_TEST_PTR rdi, rdx
-    ja .bsnd_next               ; a non-string entry is skipped below anyway
+    ja .bsv_not_str
+    mov rax, [rdi + PyObject.ob_type]
+    REQUIRE_STR_TYPE rax, rdx, .bsv_not_str
+
+    ; And an identifier, which is the same test str.isidentifier makes.
+    extern str_pred_impl
+    push rdi
+    mov esi, 10                 ; the isidentifier predicate
+    call str_pred_impl
+    pop rdi
+    test eax, eax
+    jz .bsv_not_identifier
+
     call bc_slot_is_dict_name
     test eax, eax
-    jnz .bsnd_yes
-.bsnd_next:
-    inc qword [rbp - BSND_I]
-    jmp .bsnd_loop
-.bsnd_yes:
-    mov eax, 1
+    jz .bsv_next
+    cmp qword [rbp - BSV_MAYNOT], 0
+    jne .bsv_double_dict
+    cmp qword [rbp - BSV_SEEN], 0
+    jne .bsv_double_dict
+    mov qword [rbp - BSV_SEEN], 1
+.bsv_next:
+    inc qword [rbp - BSV_I]
+    jmp .bsv_loop
+.bsv_done:
+    mov rax, [rbp - BSV_SEEN]
     leave
     ret
-.bsnd_no:
-    xor eax, eax
-    leave
-    ret
-END_FUNC bc_slots_name_dict
+
+.bsv_not_str:
+    ; rdi is still the item, and raise_type_error_with_name names a Value's
+    ; type whether it is a pointer or not.
+    mov rsi, rdi
+    CSTRING rdi, `__slots__ items must be strings, not '\x01'`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+
+.bsv_not_identifier:
+    extern exc_TypeError_type
+    RAISE exc_TypeError_type, "__slots__ must be identifiers"
+
+.bsv_double_dict:
+    RAISE exc_TypeError_type, "__dict__ slot disallowed: we already got one"
+END_FUNC bc_slots_validate
 
 DEF_FUNC type_from_parts
     push rbx
@@ -1461,21 +1512,16 @@ TFP_WANTDICT equ 96         ; 1 when __slots__ names '__dict__' itself
     ; so every attribute that was not a slot raised -- which is the whole of
     ; why pure-Python functools.partial, whose __slots__ names both
     ; '__dict__' and '__weakref__', could not carry an attribute.
-    mov qword [rbp - TFP_WANTDICT], 0
+    ; Every item is checked here, before any of it is believed: a str, an
+    ; identifier, and '__dict__' at most once and only when no base already
+    ; supplies one.  bc_slots_validate raises and does not return when it is
+    ; not, so everything below reads names it has vouched for.
+    call bc_base_has_dict
+    mov edx, eax
     mov rdi, rbx
     mov rsi, r13
-    call bc_slots_name_dict
-    test eax, eax
-    jz .bc_slots_no_dict_name
-    mov qword [rbp - TFP_WANTDICT], 1
-    call bc_base_has_dict
-    test eax, eax
-    jnz .bc_slots_double_dict
-    jmp .bc_slots_no_dict_name
-.bc_slots_double_dict:
-    extern exc_TypeError_type
-    RAISE exc_TypeError_type, "__dict__ slot disallowed: we already got one"
-.bc_slots_no_dict_name:
+    call bc_slots_validate
+    mov [rbp - TFP_WANTDICT], rax
 
     ; A str subclass keeps its characters inline, so there is no fixed offset
     ; past the header to lay a slot at: one put there writes over the string's
@@ -1495,11 +1541,23 @@ TFP_WANTDICT equ 96         ; 1 when __slots__ names '__dict__' itself
     ; subclass keeps U's tail dict and must still take arbitrary attributes.
     ; The tail word is reserved either way, so the slot indices past it do
     ; not depend on which case this is.
+    ;
+    ; And a __slots__ that NAMES '__dict__' keeps it, the same as an inherited
+    ; one -- this branch is reached instead of .bc_slots_not_tail, and only
+    ; that one read the answer, so `class S(str): __slots__ = ('__dict__',)`
+    ; had no dict and every attribute on it raised.
     push rax
+    cmp qword [rbp - TFP_WANTDICT], 0
+    jne .bc_tail_keep_dict_pop
     call bc_base_has_dict
     pop rcx
     test eax, eax
     jnz .bc_tail_keep_dict
+    jmp .bc_tail_no_dict
+.bc_tail_keep_dict_pop:
+    pop rcx
+    jmp .bc_tail_keep_dict
+.bc_tail_no_dict:
     or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
     mov qword [r12 + PyTypeObject.tp_dictoffset], 0
 .bc_tail_keep_dict:
