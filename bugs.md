@@ -267,16 +267,6 @@ reasoning that chose them and what changing one would cost.
   or a list today.  The `**` half is done: DICT_MERGE names the callable and
   accepts any mapping.
 
-- **A generator expression containing an async comprehension is not itself an
-  async generator.**  `([i async for i in x] for x in y)` is an
-  `async_generator` in CPython and a plain `generator` when our own compiler
-  builds it -- a `.pyc` gets it right, because the flag comes from the
-  marshalled code object.  The nested comprehension marks its OWN scope
-  SCF_COROUTINE and nothing propagates that to the genexp around it; CPython's
-  symtable does.  The refusals and acceptances all match
-  (`tests/test_compile_async_scope.py`); only the kind of object is wrong, and
-  it makes `async for lst in that_genexp` a TypeError.
-
 - **Source that is not valid UTF-8 is refused with our own wording, and one
   column off for a bad four-byte lead.**  CPython reports a codec error --
   `(unicode error) 'utf-8' codec can't decode byte 0xe9 in position 3:

@@ -183,17 +183,18 @@ def nested_genexps(w):
 
 
 # What they ACCEPT is what this is about, and each of them builds SOMETHING
-# iterable.  What KIND is not yet right: a genexp containing an async
-# comprehension is an async generator in CPython and a plain generator when
-# our own compiler builds it, because the nested comprehension marks its own
-# scope a coroutine and not the genexp around it.  bugs.md records that, and
-# it is why the type names are not printed here -- they would differ between a
-# CPython .pyc and our compiler over the same source.
+# iterable.  What KIND it is can be printed now: a genexp containing an async
+# comprehension is an async_generator, because the inner comprehension marks
+# the genexp's scope a coroutine on its way out -- which is what
+# symtable_handle_comprehension does, and what this did not.  nested_genexps is
+# the control: a genexp inside a genexp stays a plain generator, because a
+# genexp does not propagate.
 for maker in (outer_genexp, outer_genexp_set, outer_genexp_dict,
               outer_genexp_await, nested_genexps, HoldsGenexp.maker):
     g = maker([])
     print(maker.__name__ if hasattr(maker, "__name__") else "lambda",
-          hasattr(g, "__next__") or hasattr(g, "__anext__"))
+          hasattr(g, "__next__") or hasattr(g, "__anext__"),
+          type(g).__name__)
 
 # A LIST comprehension around one is still refused; that pair is in
 # tests/syntax_corpus.txt with all five fields compared.

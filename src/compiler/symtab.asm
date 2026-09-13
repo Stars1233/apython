@@ -3422,6 +3422,34 @@ DEF_FUNC sym_enter_comp, SEC_FRAME
     test dword [rax + Scope.flags], SCF_COROUTINE
     jz .comp_ok
     mov [rbp - SEC_OUT], r13            ; blamed unless a comprehension encloses it
+
+    ; ...and the ENCLOSING block becomes a coroutine too.  CPython's
+    ; symtable_handle_comprehension computes
+    ; `is_async = ste_coroutine && !is_generator` and, after exiting the
+    ; comprehension's block, sets ste_coroutine on the block it returns to.
+    ; Nothing here did, so `([i async for i in x] for x in y)` compiled to a
+    ; plain generator: cg_comp_body reads SCF_COROUTINE off the GENEXP's own
+    ; scope to choose CO_ASYNC_GENERATOR over CO_GENERATOR, and the flag was
+    ; only ever on the inner comprehension.  `async for lst in that_genexp`
+    ; was a TypeError.  A .pyc got it right, because the flag came from the
+    ; marshalled code object rather than from here.
+    ;
+    ; The `!is_generator` half is the `je .comp_ok` above: a genexp does not
+    ; propagate, which is what keeps a genexp nested in a genexp a plain
+    ; generator.
+    mov ecx, [rax + Scope.parent]
+    test ecx, ecx
+    jz .sec_no_enclosing
+    mov rdi, rbx
+    mov esi, ecx
+    call sym_at
+    or dword [rax + Scope.flags], SCF_COROUTINE
+.sec_no_enclosing:
+    ; The legality climb below wants rax back as THIS scope and ecx as its
+    ; parent, which is where the two calls above left off.
+    mov rdi, rbx
+    mov rsi, r12
+    call sym_at
     mov ecx, [rax + Scope.parent]
 .comp_climb:
     ; Out through any enclosing comprehensions to the nearest function.
