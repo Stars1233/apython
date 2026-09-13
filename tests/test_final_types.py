@@ -9,7 +9,19 @@
 
 import sys
 
-FINAL = [bool, range, memoryview, slice]
+# The struct sequences are the rest of the family: CPython's
+# PyStructSequence_InitType2 asks for no Py_TPFLAGS_BASETYPE, so none of them
+# is an acceptable base.  Every one of these was subclassable here, and the
+# subclass had no descriptor word of its own -- structseq_getattr and
+# structseq_dealloc read a NULL desc off it.
+import os
+import time
+
+STRUCTSEQ = [os.stat_result, os.terminal_size, time.struct_time,
+             type(sys.version_info), type(sys.float_info), type(sys.int_info),
+             type(sys.hash_info), type(sys.flags)]
+
+FINAL = [bool, range, memoryview, slice] + STRUCTSEQ
 OPEN = [object, int, float, str, bytes, bytearray, list, tuple, dict, set,
         frozenset, complex, type, BaseException, Exception]
 

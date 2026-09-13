@@ -170,15 +170,6 @@ reasoning that chose them and what changing one would cost.
   expects the descriptors -- `inspect.getattr_static`, `__slots__` validation,
   pickling by reference -- sees a shorter one.
 
-- **A struct-sequence type can be subclassed.**  `class X(os.stat_result)`
-  builds a class here and is `TypeError: type 'os.stat_result' is not an
-  acceptable base type` in CPython: those types do not carry
-  TYPE_FLAG_BASETYPE and nothing tests it.  The subclass has no descriptor
-  word of its own, so the struct-sequence accessors read past its allocation.
-  The general check -- refuse a base without TYPE_FLAG_BASETYPE -- wants
-  auditing across every builtin type first, because a flag missing by accident
-  would start refusing subclasses that work today.
-
 - **`random.randbytes` is seconds per megabyte**, where CPython's is instant:
   `_random` is Python here and CPython's is C.  2.4 s/MiB through this tree's
   own `lib/random.py`, and 35 s/MiB through CPython's `Lib/random.py`, which

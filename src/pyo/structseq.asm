@@ -746,6 +746,19 @@ DEF_FUNC_LOCAL ssq_append_i64   ; (rdi = dest, rsi = value) -> the NUL
 END_FUNC ssq_append_i64
 
 DEF_FUNC structseq_init_type
+    ; Not an acceptable base.  CPython's PyStructSequence_InitType2 asks for no
+    ; Py_TPFLAGS_BASETYPE, so none of these twelve can be subclassed there, and
+    ; all twelve could be here.  What came out was not merely something CPython
+    ; would not have let you make: the subclass has no STRUCTSEQ_DESC word of
+    ; its own and type_from_parts zero-fills it, so structseq_getattr and
+    ; structseq_dealloc read a NULL desc off the instance.
+    ;
+    ; Set here rather than in the twelve tables because every one of them
+    ; passes through this function at start-up -- and TYPE_FLAG_FINAL is the
+    ; INVERSE of CPython's flag, so this is one line rather than an audit.
+    ; type_cpython_flags already reports CPY_TPFLAGS_BASETYPE from the absence
+    ; of FINAL, so __flags__ comes right with it.
+    or qword [rdi + PyTypeObject.tp_flags], TYPE_FLAG_FINAL
     lea rax, [rel tuple_type]
     mov [rdi + PyTypeObject.tp_base], rax
     ; tp_new, so that type_call does not fall through to tuple's -- which
