@@ -88,6 +88,7 @@ test_call_recursion
 test_call_spec
 test_class_annotations
 test_classcell_not_a_cell
+test_class_doc_entry
 test_classes
 test_classmethod_metaclass
 test_class_name_at_module

@@ -1429,6 +1429,35 @@ TFP_WANTDICT equ 96         ; 1 when __slots__ names '__dict__' itself
     pop rdi
     call obj_decref
 
+    ; __doc__ is in EVERY class's own dict, None when the body wrote no
+    ; docstring -- type_dict_set_doc puts it there during PyType_Ready.  Without
+    ; it the name was simply absent and the MRO walk answered with a BASE's
+    ; docstring: `class D(W): pass` over a documented W had D.__doc__ == 'base
+    ; doc' where CPython says None, and inspect.getdoc's own inheritance walk
+    ; was therefore looking at an answer it had not chosen.
+    ;
+    ; Last of the fill-ins, which is where CPython puts it: type_dict_set_doc
+    ; runs after add_getsets, so `class D: pass` lists __doc__ after the rest
+    ; while a class with a docstring has it where the body put it.
+    lea rdi, [rel bc_doc_name]
+    call str_from_cstr_heap
+    test rax, rax
+    jz .bc_have_doc_key
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    call dict_get
+    test rax, rax               ; a Value; 0 is the miss
+    jnz .bc_have_doc
+    mov rdi, r15
+    mov rsi, [rsp]
+    lea rdx, [rel none_singleton]
+    call dict_set
+.bc_have_doc:
+    pop rdi
+    call obj_decref
+.bc_have_doc_key:
+
     ; INCREF class_name (type object refers to it via tp_name)
     mov rdi, r14
     call obj_incref
@@ -2645,6 +2674,7 @@ global bc_prepare_name
 bc_prepare_name: db "__prepare__", 0
 tsn_name: db "__set_name__", 0
 bc_init_name: db "__init__", 0
+bc_doc_name:   db "__doc__", 0
 bc_module_name: db "__module__", 0
 bc_dunder_name_name: db "__name__", 0
 bc_classcell_name: db "__classcell__", 0
