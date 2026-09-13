@@ -1066,7 +1066,8 @@ BL1_OUT   equ 24
 BL1_POS   equ 32
 BL1_FRAME equ 48            ; + 0 pushes = 48
 
-DEF_FUNC_LOCAL bytes_latin1_to_str, BL1_FRAME
+global bytes_latin1_to_str
+DEF_FUNC bytes_latin1_to_str, BL1_FRAME
     mov [rbp - BL1_SRC], rdi
     mov [rbp - BL1_LEN], rsi
     lea rdi, [rsi + rsi]

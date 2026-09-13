@@ -936,6 +936,9 @@ DEF_FUNC methods_init
     extern str_dunder_ne
     ADD_FN_N mn___ne__, str_dunder_ne, 2, 2
 
+    extern str_method_getnewargs
+    ADD_FN_N mn___getnewargs__, str_method_getnewargs, 1, 1
+
     lea rax, [rel str_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1406,6 +1409,9 @@ DEF_FUNC methods_init
     extern tuple_dunder_ne
     ADD_FN_N mn___ne__, tuple_dunder_ne, 2, 2
 
+    extern tuple_method_getnewargs
+    ADD_FN_N mn___getnewargs__, tuple_method_getnewargs, 1, 1
+
     lea rax, [rel tuple_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1476,6 +1482,12 @@ DEF_FUNC methods_init
     extern set_dunder_ne
     ADD_FN_N mn___ne__, set_dunder_ne, 2, 2
 
+    ; Registered per type rather than through the shared helper: each call
+    ; builds its own builtin object, so type_stamp_methods gives each its own
+    ; owner and the receiver check refuses the other type, as CPython does.
+    extern set_method_reduce
+    ADD_FN_N mn___reduce__, set_method_reduce, 1, 1
+
     lea rax, [rel set_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1525,6 +1537,12 @@ DEF_FUNC methods_init
     ADD_FN_N mn___eq__, frozenset_dunder_eq, 2, 2
     extern frozenset_dunder_ne
     ADD_FN_N mn___ne__, frozenset_dunder_ne, 2, 2
+
+    ; Registered per type rather than through the shared helper: each call
+    ; builds its own builtin object, so type_stamp_methods gives each its own
+    ; owner and the receiver check refuses the other type, as CPython does.
+    extern set_method_reduce
+    ADD_FN_N mn___reduce__, set_method_reduce, 1, 1
 
     lea rax, [rel frozenset_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2150,6 +2168,9 @@ DEF_FUNC methods_init
     extern bytes_dunder_ne
     ADD_FN_N mn___ne__, bytes_dunder_ne, 2, 2
 
+    extern bytes_method_getnewargs
+    ADD_FN_N mn___getnewargs__, bytes_method_getnewargs, 1, 1
+
     lea rax, [rel bytes_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -2271,6 +2292,12 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___hash__]
     call dict_add_none
+
+    ; Registered per type rather than through the shared helper: each call
+    ; builds its own builtin object, so type_stamp_methods gives each its own
+    ; owner and the receiver check refuses the other type, as CPython does.
+    extern bytearray_method_reduce
+    ADD_FN_N mn___reduce__, bytearray_method_reduce, 1, 1
 
     lea rax, [rel bytearray_type]
     mov [rax + PyTypeObject.tp_dict], rbx

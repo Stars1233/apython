@@ -236,10 +236,34 @@ reasoning that chose them and what changing one would cost.
   `errno`, `strerror`, `filename` and `filename2` are C fields in CPython and
   do not appear in `vars(e)`; here `exc_oserror` writes them into `exc_dict`,
   so `OSError(2, 'x').__dict__` has four entries CPython's has none of.  Every
-  read of them agrees, and so does `args`; what differs is only what
-  `__dict__`, `vars()` and `__getstate__` report.  Moving them means four more
-  fields on PyExceptionObject and a getattr arm for each, which is what
-  CPython does.
+  read of them agrees, and so does `args`; what differs is what `__dict__`,
+  `vars()`, `__getstate__` and now `__reduce__` report.  Moving them means
+  four more fields on PyExceptionObject and a getattr arm for each, which is
+  what CPython does.
+
+  `__reduce__` is the visible consequence.  `BaseException.__reduce__` adds a
+  third element when the instance dict is not empty, and OSError's never is --
+  so `OSError(2, 'no').__reduce__()` is `(cls, (2, 'no'), {errno: 2, ...})`
+  where CPython answers the two-tuple `(cls, (2, 'no'))`.  CPython also
+  re-packs the filename INTO the arguments, because its constructor takes it
+  back there and its `args` does not carry it; this does not.  Every value
+  survives a round trip either way -- the reconstructor sets the four from the
+  state instead of from the arguments -- and only the tuple's shape differs.
+  Closing it is the same change: the fields, and then an `OSError.__reduce__`
+  that packs them into the args as CPython's does.
+
+- **`bytes` has no `__new__`, so a bytes SUBCLASS cannot be reconstructed.**
+  Every other variable-size builtin publishes one -- `str` and `tuple` do --
+  and `bytes_type.tp_new` is 0 with nothing in its `tp_dict`, so
+  `B.__new__` resolves along the MRO to `object.__new__`, which refuses a
+  variable-size type: `object.__new__(B) is not safe, use B.__new__()`.
+  `copy.copy` and `copy.deepcopy` of a bytes subclass both end there, and so
+  would a pickle.  `bytes.__getnewargs__` is in place, so the arguments are
+  ready for the day the constructor is; what is missing is the constructor,
+  which has to allocate the subclass's own `tp_basicsize` plus the data and
+  then copy it inline, the way `instance_alloc` does for a str subclass.
+  `bytearray` is not affected -- its data is out of line and it has a
+  constructor of its own.
 
 - **The attribute lookup order is instance-dict-first unless the MRO holds a
   data descriptor**, which is observable when user code mutates the class

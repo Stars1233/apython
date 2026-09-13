@@ -668,3 +668,93 @@ BA_SHARED removeprefix, bytes_method_removeprefix, 1
 ;; the result becomes a bytearray.
 ;; ============================================================================
 BA_SHARED removesuffix, bytes_method_removesuffix, 1
+
+;; ============================================================================
+;; bytearray.__reduce__(self) -> (type(self), (str, 'latin-1'), None)
+;;
+;; CPython's shape exactly, including that an EMPTY bytearray answers with no
+;; constructor arguments at all rather than with ('', 'latin-1').  The data is
+;; carried as a str decoded latin-1 -- one code point per byte, so the round
+;; trip is exact -- because that is what bytearray(str, encoding) takes back.
+;;
+;; type(self), so a subclass rebuilds as itself.
+;; ============================================================================
+global bytearray_method_reduce
+BRD_SELF  equ 8
+BRD_STR   equ 16
+BRD_ARGS  equ 24
+BRD_FRAME equ 40            ; + 1 push = 48, 16-aligned
+DEF_FUNC bytearray_method_reduce, BRD_FRAME
+    push rbx
+    mov rbx, [rdi]                      ; args[0] = self, always a pointer
+    mov [rbp - BRD_SELF], rbx
+
+    mov rdi, [rbx + PyByteArrayObject.ob_size]
+    test rdi, rdi
+    jz .brd_empty
+
+    mov rdi, [rbx + PyByteArrayObject.ob_bytes]
+    mov rsi, [rbx + PyByteArrayObject.ob_size]
+    extern bytes_latin1_to_str
+    call bytes_latin1_to_str
+    test rax, rax
+    jz .brd_failed
+    mov [rbp - BRD_STR], rax
+
+    mov edi, 2
+    extern tuple_new
+    call tuple_new
+    test rax, rax
+    jz .brd_drop_str
+    mov [rbp - BRD_ARGS], rax
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov rdx, [rbp - BRD_STR]
+    mov [rcx], rdx                      ; the tuple takes the str's reference
+    CSTRING rdi, "latin-1"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    test rax, rax
+    jz .brd_drop_args
+    mov rcx, [rbp - BRD_ARGS]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx + 8], rax
+    jmp .brd_wrap
+
+.brd_empty:
+    xor edi, edi
+    call tuple_new
+    test rax, rax
+    jz .brd_failed
+    mov [rbp - BRD_ARGS], rax
+
+.brd_wrap:
+    mov rsi, [rbp - BRD_ARGS]           ; its reference is taken
+    mov rdi, [rbp - BRD_SELF]
+    mov rdi, [rdi + PyObject.ob_type]
+    extern none_singleton
+    lea rdx, [rel none_singleton]
+    mov ecx, 1
+    extern ir_reduce_tuple
+    call ir_reduce_tuple
+    test rax, rax
+    jz .brd_failed
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.brd_drop_args:
+    mov rdi, [rbp - BRD_ARGS]
+    call obj_decref                     ; releases the str it already holds
+    jmp .brd_failed
+.brd_drop_str:
+    mov rdi, [rbp - BRD_STR]
+    call obj_decref
+.brd_failed:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+END_FUNC bytearray_method_reduce

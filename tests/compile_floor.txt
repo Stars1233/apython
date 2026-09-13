@@ -537,6 +537,7 @@ test_range_wide
 test_re_bytes_pattern_hash
 test_recursion_and_repr
 test_recursion
+test_reduce_protocol
 test_reflexive_compare
 test_relative_import
 test_re_module

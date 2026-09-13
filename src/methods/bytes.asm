@@ -2852,3 +2852,44 @@ empty_str_cstr: db 0
 
 section .text
 
+;; ============================================================================
+;; bytes.__getnewargs__(self) -> (bytes(self),)
+;;
+;; The same thing str.__getnewargs__ is for, and for the same reason: without
+;; it a bytes SUBCLASS rebuilds empty, and object.__new__ refuses it outright
+;; ("object.__new__(B) is not safe").  A plain bytes, even when self is exact.
+;; ============================================================================
+global bytes_method_getnewargs
+BGNA_OBJ   equ 8
+BGNA_TUP   equ 16
+BGNA_FRAME equ 32           ; + 0 pushes = 32, 16-aligned
+DEF_FUNC bytes_method_getnewargs, BGNA_FRAME
+    mov rdi, [rdi]                      ; args[0] = self, always a pointer
+    mov rsi, [rdi + PyBytesObject.ob_size]
+    lea rdi, [rdi + PyBytesObject.data]
+    extern bytes_from_data
+    call bytes_from_data
+    test rax, rax
+    jz .bgna_failed
+    mov [rbp - BGNA_OBJ], rax
+    mov edi, 1
+    call tuple_new
+    test rax, rax
+    jz .bgna_drop
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rcx, [rbp - BGNA_OBJ]
+    mov [rdx], rcx                      ; the tuple takes the copy's reference
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx
+    ret
+.bgna_drop:
+    mov rdi, [rbp - BGNA_OBJ]
+    call obj_decref
+.bgna_failed:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+END_FUNC bytes_method_getnewargs
+

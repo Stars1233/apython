@@ -1648,3 +1648,67 @@ DEF_FUNC set_sub_fill, SSF_FRAME
     leave
     ret
 END_FUNC set_sub_fill
+
+;; ============================================================================
+;; set.__reduce__(self) / frozenset.__reduce__(self)
+;;   -> (type(self), (list(self),), None)
+;;
+;; Without this, copy.deepcopy of a set answered set() -- not an error, an
+;; empty set, silently.  lib/_reduce.py's override test finds object's
+;; __reduce__ unchanged, falls through to _reduce_newobj, and that names the
+;; class and never its contents; a set is not a list or a dict, so it has no
+;; listitems or dictitems either.
+;;
+;; type(self), not `set`, so a SUBCLASS rebuilds as itself.  The state is a
+;; real None rather than absent, which is the shape CPython answers with and
+;; what tells __setstate__ apart from having none.
+;; ============================================================================
+global set_method_reduce
+SRD_SELF  equ 8
+SRD_LIST  equ 16
+SRD_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC set_method_reduce, SRD_FRAME
+    mov rdi, [rdi]                      ; args[0] = self, always a pointer
+    mov [rbp - SRD_SELF], rdi
+
+    ; list(self) -- the argument the constructor takes back.
+    extern list_type
+    extern obj_call_n
+    lea rdi, [rel list_type]
+    lea rsi, [rbp - SRD_SELF]           ; the one-Value argument array
+    mov edx, 1
+    call obj_call_n
+    test rax, rax
+    jz .srd_failed
+    mov [rbp - SRD_LIST], rax
+
+    mov rdi, rax
+    extern ir_one_tuple
+    call ir_one_tuple                   ; takes the list's reference
+    test rax, rax
+    jz .srd_drop_list
+
+    mov rsi, rax                        ; the args tuple; its reference is taken
+    mov rdi, [rbp - SRD_SELF]
+    mov rdi, [rdi + PyObject.ob_type]   ; type(self), borrowed; incref'd inside
+    extern none_singleton
+    lea rdx, [rel none_singleton]
+    mov ecx, 1                          ; there IS a state, and it is None
+    extern ir_reduce_tuple
+    call ir_reduce_tuple
+    test rax, rax
+    jz .srd_failed
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx                     ; builtins return one Value
+    ret
+
+.srd_drop_list:
+    mov rdi, [rbp - SRD_LIST]
+    call obj_decref
+.srd_failed:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+END_FUNC set_method_reduce

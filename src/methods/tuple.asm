@@ -11,6 +11,9 @@
 extern obj_as_slice_index
 
 extern tuple_type
+extern tuple_new
+extern obj_incref
+extern obj_decref
 extern bool_false
 
 extern bool_true
@@ -279,3 +282,70 @@ DEF_FUNC tuple_method_count, TCT_FRAME
     leave
     jmp eval_exception_unwind
 END_FUNC tuple_method_count
+
+;; ============================================================================
+;; tuple.__getnewargs__(self) -> (tuple(self),)
+;;
+;; An EXACT tuple hands itself over -- it is immutable, so there is nothing to
+;; copy and CPython does the same -- while a subclass hands over a plain tuple,
+;; because the argument is about to be given to tuple.__new__ and a subclass
+;; instance is a different thing to ask for.
+;; ============================================================================
+global tuple_method_getnewargs
+TGNA_SELF  equ 8
+TGNA_INNER equ 16
+TGNA_FRAME equ 40           ; + 1 push = 48, 16-aligned
+DEF_FUNC tuple_method_getnewargs, TGNA_FRAME
+    push rbx
+    mov rbx, [rdi]                      ; args[0] = self, always a pointer
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    jne .tgna_subclass
+    mov rdi, rbx
+    call obj_incref
+    mov [rbp - TGNA_INNER], rbx
+    jmp .tgna_wrap
+
+.tgna_subclass:
+    mov rdi, [rbx + PyTupleObject.ob_size]
+    call tuple_new
+    test rax, rax
+    jz .tgna_failed
+    mov [rbp - TGNA_INNER], rax
+    mov rsi, [rbx + PyTupleObject.ob_item]
+    mov rdi, [rax + PyTupleObject.ob_item]
+    xor ecx, ecx
+.tgna_copy:
+    cmp rcx, [rbx + PyTupleObject.ob_size]
+    jge .tgna_wrap
+    mov rdx, [rsi + rcx * 8]
+    INCREF_V rdx, rax
+    mov [rdi + rcx * 8], rdx
+    inc rcx
+    jmp .tgna_copy
+
+.tgna_wrap:
+    mov edi, 1
+    call tuple_new
+    test rax, rax
+    jz .tgna_drop
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rcx, [rbp - TGNA_INNER]
+    mov [rdx], rcx                      ; the outer tuple takes that reference
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.tgna_drop:
+    mov rdi, [rbp - TGNA_INNER]
+    call obj_decref
+.tgna_failed:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+END_FUNC tuple_method_getnewargs

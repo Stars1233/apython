@@ -3119,5 +3119,55 @@ DEF_FUNC_BARE str_method_rsplit
     jmp str_split_impl
 END_FUNC str_method_rsplit
 
+;; ============================================================================
+;; str.__getnewargs__(self) -> (str(self),)
+;;
+;; What makes a str SUBCLASS survive copy and pickle.  The reduction protocol
+;; rebuilds an object as cls.__new__(cls, *args), and without these args it
+;; rebuilds empty -- copy.deepcopy of a str subclass used to hand back the
+;; same object uncopied, and once copy dispatched on the exact type instead it
+;; handed back S('').
+;;
+;; The argument is a PLAIN str even when self is exact, as CPython's is: the
+;; constructor is about to be given it, and handing a subclass instance back
+;; into its own constructor is a different thing to ask for.
+;; ============================================================================
+global str_method_getnewargs
+SGNA_STR   equ 8
+SGNA_TUP   equ 16
+SGNA_FRAME equ 32           ; + 0 pushes = 32, 16-aligned
+DEF_FUNC str_method_getnewargs, SGNA_FRAME
+    mov rdi, [rdi]                      ; args[0] = self, always a pointer
+    mov rsi, [rdi + PyStrObject.ob_size]
+    lea rdi, [rdi + PyStrObject.data]
+    extern str_new_heap
+    call str_new_heap
+    test rax, rax
+    jz .sgna_failed
+    mov [rbp - SGNA_STR], rax
+    mov edi, 1
+    extern tuple_new
+    call tuple_new
+    test rax, rax
+    jz .sgna_drop
+    mov [rbp - SGNA_TUP], rax
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rcx, [rbp - SGNA_STR]
+    mov [rdx], rcx                      ; the tuple takes the copy's reference
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx                     ; builtins return one Value
+    ret
+.sgna_drop:
+    mov rdi, [rbp - SGNA_STR]
+    extern obj_decref
+    call obj_decref
+.sgna_failed:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+END_FUNC str_method_getnewargs
+
 section .rodata
 empty_str_cstr: db 0
