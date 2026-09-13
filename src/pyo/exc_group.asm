@@ -966,7 +966,18 @@ DEF_FUNC eg_split, EGS_FRAME
     ret
 
 .split_nomem:
-    ; list_new failed; nothing is owned yet that the caller could be handed.
+    ; list_new failed.  Unreachable while ap_malloc's contract holds -- out of
+    ; memory is fatal_error there, not a NULL -- but the arm exists, so it has
+    ; to be right: on the SECOND failure the first list is already owned.
+    ;
+    ; Only MLIST.  EGS_RLIST is not merely NULL on the first failure, it is
+    ; uninitialised frame memory, so releasing it unguarded would decref
+    ; whatever was there; and on the second failure it holds the 0 just stored.
+    mov rdi, [rbp - EGS_MLIST]
+    test rdi, rdi
+    jz .split_nomem_out
+    call obj_decref
+.split_nomem_out:
     xor eax, eax
     xor edx, edx
     pop r13
@@ -1313,6 +1324,19 @@ DEF_FUNC_LOCAL eg_method_split, EMS_FRAME
     leave
     ret
 .ems_fail:
+    ; tuple_new failed, which ap_malloc's contract says cannot happen -- but
+    ; both halves eg_split handed over are OURS, and dropping them here would
+    ; leak two fresh groups.
+    mov rdi, [rbp - EMS_MATCH]
+    test rdi, rdi
+    jz .ems_drop_rest
+    call obj_decref
+.ems_drop_rest:
+    mov rdi, [rbp - EMS_REST]
+    test rdi, rdi
+    jz .ems_out
+    call obj_decref
+.ems_out:
     xor eax, eax
     xor edx, edx
     leave
