@@ -32,6 +32,7 @@ extern errno_module_create
 extern posix_module_create
 extern io_module_create
 extern gc_module_create
+extern cmath_module_create
 extern math_module_create
 extern unicodedata_module_create
 extern socket_module_create
@@ -55,6 +56,7 @@ bm_n_weakref:  db "_weakref", 0
 bm_n_posix:    db "posix", 0
 bm_n_io:       db "_iocore", 0
 bm_n_gc:       db "gc", 0
+bm_n_cmath:    db "cmath", 0
 bm_n_math:     db "math", 0
 bm_n_unicodedata: db "unicodedata", 0
 bm_n_socket:   db "_socketcore", 0
@@ -82,6 +84,7 @@ builtin_module_table:
     dq bm_n_weakref,  weakref_module_create
     dq bm_n_zlib,     zlib_module_create
     dq bm_n_builtins, 0                 ; wraps builtins_dict_global
+    dq bm_n_cmath,    cmath_module_create
     dq bm_n_errno,    errno_module_create
     dq bm_n_gc,       gc_module_create
     dq bm_n_marshal,  marshal_module_init

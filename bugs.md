@@ -392,6 +392,17 @@ reasoning that chose them and what changing one would cost.
   hold what an int64 holds rather than a uint64, because `obj_as_index`
   refuses anything wider.
 
+  `cmath` is there now, and it is C99's complex functions reached directly --
+  a `double complex` is two SSE eightbytes under the SysV ABI, which is
+  exactly how a PyComplexObject's two doubles already arrive and leave.  So
+  its branch cuts are libm's, where CPython's are its own: the two agree on
+  every cut and on every error, and differ in the last ulp or two on ordinary
+  values, which is what `tests/test_cmath.py` compares to twelve digits rather
+  than seventeen.  Two of CPython's own `test_cmath` checks still fail on
+  that: one signed zero and one nan, both from `test_specific_values`.  `e`,
+  the half-float, is the one native `memoryview.cast()` format in the same
+  position.
+
   `math`'s `gamma`, `lgamma`, the n-ary `hypot` and `sumprod` round
   differently from CPython's, which uses its own Lanczos approximation and
   double-double arithmetic where these use glibc and a Neumaier sum.  `dist`

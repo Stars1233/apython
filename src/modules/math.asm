@@ -1435,7 +1435,8 @@ MBK_OUT   equ 32
 MBK_KW    equ 40
 MBK_I     equ 48
 MBK_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
-DEF_FUNC_LOCAL math_bind_kw, MBK_FRAME
+global math_bind_kw
+DEF_FUNC math_bind_kw, MBK_FRAME
     mov [rbp - MBK_ARGS], rdi
     mov [rbp - MBK_NPOS], rsi
     mov [rbp - MBK_NAMES], rdx
