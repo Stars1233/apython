@@ -102,6 +102,7 @@ test_codecs_registry_bridge
 test_codecs_registry
 test_codec_surrogates
 test_code_gc
+test_code_lines_scaling
 test_code_localsplus
 test_code_replace
 test_compare_raises

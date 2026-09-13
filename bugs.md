@@ -168,10 +168,31 @@ reasoning that chose them and what changing one would cost.
   regardless).  Nothing is wrong; it is slow.  `test_zipfile64` is the same
   shape, one order of magnitude larger.
 
-- **`test_sys_settrace`'s `test_jump_extended_args_for_iter` hangs.**  The
-  compile is fast -- a hundred thousand lines in 0.8s -- so it is the trace
-  machinery under `sys.settrace` and a jump, not the compiler.  It sits with
-  the rest of the settrace divergence below.
+- **`frame.f_lineno` cannot be assigned, so `pdb`'s `jump` does not work.**
+  `frameobj_setattr` refuses it outright: moving the instruction pointer to
+  the start of another line means re-deriving the block stack for the
+  destination, and refusing is CPython's own answer for a jump it cannot make.
+  Every other `frame` attribute is writable or readable as CPython has it.
+
+  What that costs is most of `test_sys_settrace`.  Its `JumpTestCase` is a
+  hundred and one tests, all of which jump; the refusal makes them fail, and
+  two of them then do not terminate --
+  `test_no_jump_infinite_while_loop` jumps OUT of a `while True:` that appends
+  to a list, so without the jump the loop runs until the allocator gives up
+  and the module dies with "Fatal: out of memory" before it can report.
+
+  Closing it is CPython's `frame_setlineno`, and it is a project rather than a
+  patch: `marklines` over the line table to find which instructions start a
+  line, `first_line_not_before` to pick the destination, and `mark_stacks` --
+  an abstract interpretation over the whole bytecode that propagates an
+  encoded block stack to a fixpoint, seeding every exception-table handler --
+  so that `compatible_stack` can refuse a jump into a `for` body or an
+  `except` block with the sentence CPython uses.
+
+  The module used to TIME OUT rather than fail, with 18 of its tests run, and
+  that was a different bug: `co_lines()` and `co_positions()` were quadratic
+  in a code object's length and unittest formats a traceback through the
+  second.  That is fixed; 84 tests run now.
 
 - **`super()` searches the written class's MRO, not the declared class's, when
   the opcode handles it.**  `super(C, p).f()` for a proxy whose `__class__` is
