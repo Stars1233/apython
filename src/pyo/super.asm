@@ -186,6 +186,19 @@ END_FUNC super_no_attribute
 ;; a declared class that is a strict subclass of the written one, its MRO holds
 ;; classes the written one's does not.
 ;;
+;; **Every `ret` in this function must write edx**, including the arms that can
+;; only ever answer "borrowed".  It is an out-parameter, so a path that leaves
+;; it is not returning a stale flag -- it is returning whatever the last `call`
+;; happened to put in rdx.  The metatype arm did exactly that, and because
+;; super_construct reads it as "the reference is already ours" and skips its
+;; incref, every `super()` written inside a classmethod took one reference off
+;; a live heaptype.  Nothing failed where the mistake was: the class was freed
+;; while still reachable and the segfault landed in dict_lookup, type_mro_next
+;; or tuple_clear, thousands of instructions away.  make check, make
+;; check-cpython, both -source gates and lint.py were green over it; eight of
+;; CPython's own test modules segfaulted.  tests/test_super_classmethod_refcount.py
+;; is the shape.
+;;
 ;; The object is a VALUE, so its type comes from value_type and not from a raw
 ;; ob_type read: `super(int, 1)` and `super(float, 1.5)` hand over a NaN-boxed
 ;; immediate, and reading a header off one is reading the number as an
@@ -214,6 +227,7 @@ DEF_FUNC super_check, SC_FRAME
     test eax, eax
     jz .sc_instance
     mov rax, [rbp - SC_OBJ]
+    xor edx, edx                    ; borrowed: it is the caller's own argument
     leave
     ret
 
