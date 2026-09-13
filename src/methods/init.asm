@@ -1143,6 +1143,12 @@ DEF_FUNC methods_init
     call add_new_staticmethod       ; __new__ takes the class, not an instance
     extern module_method_init
     ADD_FN mn___init__, module_method_init
+    ; PEP 562: a module's own __dir__ lives in its INSTANCE dict, where
+    ; builtin_dir's type-side lookup cannot see it.  module.__dir__ is what
+    ; does the probe, and having it here is also what makes
+    ; hasattr(m, "__dir__") answer True, as CPython's does.
+    extern module_dunder_dir
+    ADD_FN_N mn___dir__, module_dunder_dir, 1, 1
 
     extern module_type
     lea rax, [rel module_type]
