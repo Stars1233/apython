@@ -724,6 +724,7 @@ test_value_typeconfusion
 test_warnings_filters
 test_warnings
 test_weakref
+test_weakref_slots_dict
 test_weakref_subclass_kwargs
 test_weakref_types
 test_with_exit_raises

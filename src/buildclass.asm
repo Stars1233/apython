@@ -1517,6 +1517,12 @@ TFP_WANTDICT equ 96         ; 1 when __slots__ names '__dict__' itself
     ; rax = slots list — get size and item pointers (same layout as tuple for ob_size/ob_item)
 .bc_slots_tuple:
     ; rax = slots sequence (tuple or list, both have ob_size at same offset)
+    ;
+    ; The class DECLARED __slots__, whatever is in them and whether or not the
+    ; instance dict survives it.  TYPE_FLAG_HAS_SLOTS below answers the other
+    ; question -- "has no instance dict" -- and the two part company for a
+    ; __slots__ naming '__dict__'.  weakref_referenceable needs this one.
+    or qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_DECLARED_SLOTS
     mov rbx, rax                    ; rbx = slots sequence
     mov r13, [rbx + PyTupleObject.ob_size]  ; r13 = nslots (works for both)
     test r13, r13

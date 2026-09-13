@@ -734,7 +734,12 @@ DEF_FUNC weakref_referenceable, WRR_FRAME
     jz .wrr_from_adds
     test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jz .wrr_static
-    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+    ; DECLARED __slots__, not HAS_SLOTS.  The latter means "this class has no
+    ; instance dict", which a __slots__ naming '__dict__' leaves clear -- so
+    ; such a class read as slot-free here and its instances were
+    ; weak-referenceable, where CPython refuses them: naming '__dict__' does not
+    ; excuse a __slots__ from suppressing the weakref word.
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_DECLARED_SLOTS
     jnz .wrr_next
     mov qword [rbp - WRR_ADDS], 1
 .wrr_next:

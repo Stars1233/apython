@@ -1273,6 +1273,17 @@ TYPE_FLAG_HAS_DEL        equ 0x200000
 ; for ever, because the tuple's iterator is a perfectly good iterator.
 TYPE_FLAG_AWAITABLE      equ 0x400000
 
+; The class body declared __slots__ -- ANY __slots__, including one that names
+; '__dict__' and so keeps the instance dict.
+;
+; TYPE_FLAG_HAS_SLOTS is not that question: it means "this class has no instance
+; dict", which a __slots__ naming '__dict__' leaves clear, and a __slots__ on a
+; class whose base already supplies a dict leaves clear too.
+; weakref_referenceable asked HAS_SLOTS and so read such a class as slot-free,
+; making its instances weak-referenceable where CPython refuses them -- naming
+; '__dict__' does not excuse a __slots__ from suppressing the weakref word.
+TYPE_FLAG_DECLARED_SLOTS equ 0x800000
+
 ; The type's VERSION lives in the high 32 bits of tp_flags, which the flags
 ; above leave free -- they stop at bit 20.  It is a stamp from one global
 ; counter, so a version identifies a particular type in a particular state of
