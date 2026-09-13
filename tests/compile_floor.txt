@@ -179,6 +179,7 @@ test_csv
 test_data_descriptor_precedence
 test_decode_errors
 test_deep_dealloc
+test_defaultdict_is_dict
 test_default_repr
 test_defaults
 test_del_and_gc_state
@@ -205,6 +206,7 @@ test_dict_copy
 test_dict_display_mapping
 test_dict_dunder_args
 test_dict_empty
+test_dict_fromkeys_class
 test_dict_fromkeys
 test_dict_int_keys
 test_dict_ior
@@ -399,6 +401,7 @@ test_iterator_dunders
 test_iterator_slots
 test_iter_free_during_iteration
 test_iter_sentinel
+test_itertools_compress_batched
 test_itertools_gc
 test_itertools
 test_itertools_tail
