@@ -21,6 +21,11 @@ extern sys_exit_now
 extern sys_kill
 extern sys_setsid
 extern sys_close_range
+extern sys_wait4
+extern int_from_i64
+extern tuple_new
+extern bool_true
+extern bool_false
 extern posix_int_arg
 extern posix_path_arg
 extern posix_raise_missing
@@ -46,6 +51,9 @@ global posix_exit_now
 global posix_kill
 global posix_setsid
 global posix_close_range
+; The W* readers are exported by the macro that defines them, below.
+global posix_waitpid
+global posix_waitstatus_to_exitcode
 global posix_register_at_fork
 global pm_atfork_before
 global pm_atfork_parent
@@ -867,3 +875,202 @@ section .rodata
 pxe_n_putenv:   db "putenv", 0
 pxe_n_unsetenv: db "unsetenv", 0
 section .text
+
+;; ============================================================================
+;; posix.waitpid(pid, options) -> (pid, status), and the W* status readers.
+;;
+;; The status word's encoding, which subprocess and multiprocessing decode by
+;; hand through these:
+;;   low 7 bits == 0x7f  -> stopped, and (status >> 8) & 0xff is the signal
+;;   low 7 bits == 0     -> exited,  and (status >> 8) & 0xff is the code
+;;   otherwise           -> signalled, and the low 7 bits are the signal
+;;   bit 7 within a signalled status is the core-dump flag
+;; ============================================================================
+PWP_STATUS equ 8
+PWP_TUP    equ 16
+PWP_FRAME  equ 32           ; + 0 pushes = 32
+
+DEF_FUNC posix_waitpid, PWP_FRAME
+    cmp rsi, 2
+    jl .pwp_argerr
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx]
+    call posix_int_arg
+    push rax
+    push rax
+    mov rdi, [rbx + 8]
+    call posix_int_arg
+    mov rdx, rax                    ; options
+    pop rdi
+    pop rdi                         ; pid
+    lea rsi, [rbp - PWP_STATUS]
+    mov qword [rbp - PWP_STATUS], 0
+    xor ecx, ecx                    ; no rusage
+    call sys_wait4
+    POSIX_CHECK rax, 0
+    push rax
+    push rax
+    mov edi, 2
+    call tuple_new
+    pop rdi
+    pop rdi                         ; the pid wait4 reported
+    test rax, rax
+    jz .pwp_fail
+    mov [rbp - PWP_TUP], rax
+    call int_from_i64
+    V_PACK rax, rdx
+    mov rcx, [rbp - PWP_TUP]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx], rax
+    mov edi, [rbp - PWP_STATUS]
+    movsxd rdi, edi
+    call int_from_i64
+    V_PACK rax, rdx
+    mov rcx, [rbp - PWP_TUP]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx + 8], rax
+    mov rax, [rbp - PWP_TUP]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.pwp_fail:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+.pwp_argerr:
+    RAISE exc_TypeError_type, "waitpid() takes exactly 2 arguments"
+END_FUNC posix_waitpid
+
+;; The status readers.  Each takes the status word and answers an int or a
+;; bool; every one of them is pure bit arithmetic on it.
+%macro POSIX_WSTATUS 3          ; %1 = name, %2 = the body label, %3 = message
+DEF_FUNC %1, 16
+    test rsi, rsi
+    jz %%argerr
+    mov rdi, [rdi]
+    call posix_int_arg
+    jmp %2
+%%argerr:
+    RAISE exc_TypeError_type, %3
+END_FUNC %1
+%endmacro
+
+;; Shared tails.  Each expects the status in rax and leaves through the
+;; caller's frame, so each is entered with `jmp` from a wrapper that has one.
+; Plain labels, not functions: each wrapper reaches them with `jmp` after
+; setting up its own frame, and the `leave` here pops that one.  A prologue
+; would push a second rbp that nothing ever pops.
+pw_ret_int:
+    mov rdi, rax
+    call int_from_i64
+    V_PACK rax, rdx
+    mov edx, TAG_PTR
+    leave
+    ret
+
+pw_ret_bool:
+    test eax, eax
+    jz .prb_false
+    lea rax, [rel bool_true]
+    jmp .prb_out
+.prb_false:
+    lea rax, [rel bool_false]
+.prb_out:
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+
+pw_exitstatus:
+    shr rax, 8
+    and rax, 0xff
+    jmp pw_ret_int
+pw_termsig:
+    and rax, 0x7f
+    jmp pw_ret_int
+pw_stopsig:
+    shr rax, 8
+    and rax, 0xff
+    jmp pw_ret_int
+pw_ifexited:
+    and eax, 0x7f
+    test eax, eax
+    setz al
+    movzx eax, al
+    jmp pw_ret_bool
+pw_ifstopped:
+    and eax, 0xff
+    cmp eax, 0x7f
+    sete al
+    movzx eax, al
+    jmp pw_ret_bool
+pw_ifsignaled:
+    ; glibc: ((signed char) (((status) & 0x7f) + 1) >> 1) > 0
+    ;
+    ; The signed-char cast is the whole macro.  0x7f + 1 is 128, which as a
+    ; signed byte is -128 and shifts to -64 -- not greater than zero, which is
+    ; how a STOPPED status (low byte 0x7f) and a CONTINUED one (0xffff) are
+    ; excluded.  Without the cast both answered "signalled".
+    mov ecx, eax
+    and ecx, 0x7f
+    inc ecx
+    movsx ecx, cl
+    sar ecx, 1
+    xor eax, eax
+    test ecx, ecx
+    setg al                     ; signed, not setnz
+    jmp pw_ret_bool
+pw_ifcontinued:
+    cmp eax, 0xffff
+    sete al
+    movzx eax, al
+    jmp pw_ret_bool
+pw_coredump:
+    and eax, 0x80
+    jmp pw_ret_bool
+
+POSIX_WSTATUS posix_wexitstatus, pw_exitstatus, "WEXITSTATUS() takes exactly 1 argument"
+POSIX_WSTATUS posix_wtermsig,    pw_termsig,    "WTERMSIG() takes exactly 1 argument"
+POSIX_WSTATUS posix_wstopsig,    pw_stopsig,    "WSTOPSIG() takes exactly 1 argument"
+POSIX_WSTATUS posix_wifexited,   pw_ifexited,   "WIFEXITED() takes exactly 1 argument"
+POSIX_WSTATUS posix_wifstopped,  pw_ifstopped,  "WIFSTOPPED() takes exactly 1 argument"
+POSIX_WSTATUS posix_wifsignaled, pw_ifsignaled, "WIFSIGNALED() takes exactly 1 argument"
+POSIX_WSTATUS posix_wifcontinued, pw_ifcontinued, "WIFCONTINUED() takes exactly 1 argument"
+POSIX_WSTATUS posix_wcoredump,   pw_coredump,   "WCOREDUMP() takes exactly 1 argument"
+
+;; posix.waitstatus_to_exitcode(status) -> int
+;; Exited: the code.  Signalled: minus the signal.  Anything else: ValueError.
+DEF_FUNC posix_waitstatus_to_exitcode, 16
+    test rsi, rsi
+    jz .pwe_argerr
+    mov rdi, [rdi]
+    call posix_int_arg
+    mov ecx, eax
+    and ecx, 0x7f
+    test ecx, ecx
+    jnz .pwe_signalled
+    shr rax, 8
+    and rax, 0xff
+    jmp pw_ret_int
+.pwe_signalled:
+    ; The same signed-char test: a stopped or continued status is neither an
+    ; exit nor a signal, and CPython raises for it.
+    mov ecx, eax
+    and ecx, 0x7f
+    inc ecx
+    movsx ecx, cl
+    sar ecx, 1
+    test ecx, ecx
+    jle .pwe_bad
+    and eax, 0x7f
+    neg rax
+    jmp pw_ret_int
+.pwe_bad:
+    RAISE exc_ValueError_type, "Invalid wait status"
+.pwe_argerr:
+    RAISE exc_TypeError_type, "waitstatus_to_exitcode() takes exactly 1 argument"
+END_FUNC posix_waitstatus_to_exitcode
