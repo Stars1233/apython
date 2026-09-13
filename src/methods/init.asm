@@ -1832,6 +1832,11 @@ DEF_FUNC methods_init
     mov rbx, rax
     extern method_dunder_call
     ADD_FN mn___call__, method_dunder_call
+    ; A bound method is a descriptor that answers itself, as CPython's is:
+    ; hasattr(c.m, '__get__') is True there, and it is what a class body full
+    ; of already-bound methods relies on.
+    extern method_dunder_get
+    ADD_FN_N mn___get__, method_dunder_get, 2, 3
     ; A bound method reduces to (getattr, (self, name)), as CPython's does --
     ; without it anything holding one could not be pickled.
     extern method_reduce
@@ -2010,8 +2015,9 @@ DEF_FUNC methods_init
     ; classifiers tell a method from a getset.
     call dict_new
     mov rbx, rax
-    extern builtin_func_dunder_get
-    ADD_FN mn___get__, builtin_func_dunder_get
+    ; __get__ is NOT here: builtin_func_getattr answers it, because whether a
+    ; builtin is a descriptor is a per-object question and a type dict is
+    ; shared by every instance of the type.
     extern builtin_func_dunder_call
     ADD_FN mn___call__, builtin_func_dunder_call
     ; An unbound builtin reduces to its own NAME, which pickle saves as a

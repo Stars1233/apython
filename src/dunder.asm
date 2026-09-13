@@ -116,6 +116,11 @@ align 8
 dunder_cache_keys: resq DUNDER_CACHE_SLOTS
 dunder_cache_vals: resq DUNDER_CACHE_SLOTS
 
+extern builtin_func_type
+extern value_type
+extern type_is_subtype
+extern raise_descriptor_receiver
+
 section .text
 
 ;; ============================================================================
@@ -1256,3 +1261,100 @@ binop_inplace_dunder_table:
     dq dunder_isub           ; 10 = NB_SUBTRACT -> __isub__
     dq dunder_itruediv       ; 11 = NB_TRUE_DIVIDE -> __itruediv__
     dq dunder_ixor           ; 12 = NB_XOR -> __ixor__
+
+section .text
+
+;; ============================================================================
+;; builtin_should_bind(rdi = the attribute, as a Value; rsi = the receiver
+;;                     Value, or 0 not to check it)
+;;   -> eax = 1 to bind it to the receiver, 0 to hand it over as it stands
+;;
+;; With a receiver, does NOT return when the attribute is a descriptor whose
+;; owner the receiver is not an instance of: that is a TypeError at the
+;; ACCESS, which is where CPython raises it, and raise_descriptor_receiver
+;; already words it both ways.
+;;
+;; rsi = 0 asks the first half only -- "is this a descriptor at all" -- and is
+;; what the call sites that have not yet decided the receiver pass.
+;; op_load_attr's method form is one: its own exclusions for a module, a
+;; function, a super and a bound method come AFTER this point, and a receiver
+;; check here would refuse `list.append` read off the class before the arm
+;; that correctly answers it unbound was ever reached.
+;;
+;; CPython has three types where this tree has one.
+;; builtin_function_or_method carries no tp_descr_get and so does not bind;
+;; method_descriptor and wrapper_descriptor do.  There is no tp_descr_get here
+;; at all -- "is this a descriptor" was a comparison against builtin_func_type,
+;; open-coded at each of seven attribute-lookup sites -- so the question is
+;; asked of the OBJECT instead.
+;;
+;; func_kind is what answers it, and what makes that trustworthy is that every
+;; type's dict is stamped: type_stamp_methods marks what a TYPE holds and
+;; nothing marks what a MODULE holds, which is exactly the line CPython draws.
+;; The io and posix.DirEntry tables were the exception and are stamped now.
+;;
+;; A Python function always binds; it is a descriptor in CPython too.
+;; ============================================================================
+extern func_type
+global builtin_should_bind
+BSB_FN    equ 8
+BSB_RECV  equ 16
+BSB_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC builtin_should_bind, BSB_FRAME
+    V_TEST_PTR rdi, rax
+    ja .bsb_no                      ; an immediate is not a descriptor
+    test rdi, rdi
+    jz .bsb_no
+    mov [rbp - BSB_FN], rdi
+    mov [rbp - BSB_RECV], rsi
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel func_type]
+    cmp rax, rcx
+    je .bsb_yes
+    lea rcx, [rel builtin_func_type]
+    cmp rax, rcx
+    jne .bsb_no
+
+    ; A module-level builtin -- len, os.unlink -- is not a descriptor, and
+    ; `class C: f = len` must leave it alone.  That was 219 failures in
+    ; CPython's test_tempfile on its own.
+    mov rcx, [rdi + PyBuiltinObject.func_kind]
+    cmp rcx, BUILTIN_KIND_FUNCTION
+    je .bsb_no
+    cmp rcx, BUILTIN_KIND_ON_TYPE
+    je .bsb_no                      ; its receiver is a class; the wrapper binds
+
+    ; A descriptor, so the receiver has to be one of the owner's -- when the
+    ; caller gave one to check.
+    test rsi, rsi
+    jz .bsb_yes
+    mov rcx, [rdi + PyBuiltinObject.func_owner]
+    test rcx, rcx
+    jz .bsb_yes                     ; unstamped: nothing to check it against
+    mov rdi, rsi
+    extern value_type
+    call value_type
+    test rax, rax
+    jz .bsb_wrong
+    mov rdi, rax
+    mov rsi, [rbp - BSB_FN]
+    mov rsi, [rsi + PyBuiltinObject.func_owner]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jz .bsb_wrong
+.bsb_yes:
+    mov eax, 1
+    leave
+    ret
+.bsb_no:
+    xor eax, eax
+    leave
+    ret
+.bsb_wrong:
+    mov rdi, [rbp - BSB_FN]
+    mov rsi, [rbp - BSB_RECV]
+    extern raise_descriptor_receiver
+    leave
+    jmp raise_descriptor_receiver   ; does not return
+END_FUNC builtin_should_bind

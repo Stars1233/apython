@@ -72,7 +72,20 @@ DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
     mov [rbp - BFG_SELF], rdi
     mov [rbp - BFG_NAME], rsi
 
+    ; __get__ is answered here rather than from the type's dict, because it is
+    ; a per-OBJECT question: CPython's method_descriptor and wrapper_descriptor
+    ; have one and its builtin_function_or_method does not, and this tree has
+    ; a single type for all three.  The stdlib asks hasattr(f, '__get__') to
+    ; decide whether something is a descriptor -- inspect, enum and dataclasses
+    ; all do -- so a shared tp_dict entry answered True for `len`.
     lea rdi, [rsi + PyStrObject.data]
+    CSTRING rsi, "__get__"
+    call ap_strcmp
+    test eax, eax
+    jz .bfg_get
+
+    mov rdi, [rbp - BFG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
     CSTRING rsi, "__name__"
     call ap_strcmp
     test eax, eax
@@ -138,6 +151,31 @@ DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
     leave
     ret
 
+.bfg_get:
+    ; Only a descriptor has one.  A module-level builtin and the payload of a
+    ; class or static method answer absent, which is what makes
+    ; hasattr(len, '__get__') False, as it is in CPython.
+    mov rcx, [rbx + PyBuiltinObject.func_kind]
+    cmp rcx, BUILTIN_KIND_FUNCTION
+    je .bfg_absent
+    cmp rcx, BUILTIN_KIND_ON_TYPE
+    je .bfg_absent
+    call bfg_get_builtin
+    test rax, rax
+    jz .bfg_absent
+    mov rdi, rax
+    mov rsi, rbx
+    extern method_new
+    call method_new
+    pop rbx
+    leave
+    ret
+
+.bfg_absent:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 
 
 .bfg_name:
@@ -190,6 +228,27 @@ DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
     leave
     ret
 END_FUNC builtin_func_getattr
+;; ============================================================================
+;; bfg_get_builtin() -> rax = the shared `__get__` builtin, borrowed, or 0
+;;
+;; One object for the process, bound to each descriptor on demand.  It used to
+;; live in builtin_func_type's tp_dict, which is exactly why it could not tell
+;; a descriptor from a plain function: a type dict is shared by every instance.
+;; ============================================================================
+DEF_FUNC_LOCAL bfg_get_builtin
+    mov rax, [rel bfg_get_cached]
+    test rax, rax
+    jnz .bgb_done
+    lea rdi, [rel builtin_func_dunder_get]
+    CSTRING rsi, "__get__"
+    call builtin_func_new
+    test rax, rax
+    jz .bgb_done
+    mov [rel bfg_get_cached], rax
+.bgb_done:
+    leave
+    ret
+END_FUNC bfg_get_builtin
 
 
 ;; ============================================================================

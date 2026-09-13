@@ -129,6 +129,7 @@ extern int_type
 
 extern dict_add_builtin_func
 
+extern bfg_get_builtin
 extern builtin_func_dealloc
 extern builtin_func_dunder_get
 extern builtin_func_getattr
@@ -3038,4 +3039,5 @@ builtin_func_type:
     dq 0                        ; tp_as_buffer
 
 section .bss
+global bfg_get_cached
 bfg_get_cached: resq 1      ; the shared `__get__` builtin, built once

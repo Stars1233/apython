@@ -776,18 +776,19 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     cmp rcx, rdx
     je .found_type_raw
 
-    ; Only bind func_type and builtin_func_type as methods
-    ; Types, classes, and other callables are returned as-is
-    lea rdx, [rel func_type]
-    cmp rcx, rdx
-    je .bind_method
-
-    extern builtin_func_type
-    lea rdx, [rel builtin_func_type]
-    cmp rcx, rdx
-    je .bind_method
-
-    jmp .found_type_raw         ; not a function — return raw
+    ; Whether it binds is the object's question, not its type's: a Python
+    ; function always does, and a builtin does only when it is a method or a
+    ; wrapper descriptor rather than a module-level function.  Types, classes
+    ; and other callables are returned as they stand.  builtin_should_bind
+    ; also raises when a descriptor meets a receiver of the wrong class, which
+    ; is where CPython raises it -- at the access, not at the call.
+    mov rdi, r13
+    mov rsi, rbx
+    extern builtin_should_bind
+    call builtin_should_bind
+    test eax, eax
+    jnz .bind_method
+    jmp .found_type_raw
 
 .bind_method:
     ; A caller that is about to CALL this does not need the wrapper: it wants
@@ -1015,6 +1016,12 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     ; It hands back an *unbound* builtin -- its own instances reach it through
     ; LOAD_ATTR's method form -- so bind it here, where the caller is about to
     ; be told the answer came from a heaptype and needs no self.
+    ;
+    ; Unconditionally, unlike the type-dict path above: what a base's
+    ; tp_getattr answers is built on the spot and never stamped, so its
+    ; func_kind says FUNCTION and builtin_should_bind would decline it.  It is
+    ; a method of that base by construction -- bytes.decode reached from a
+    ; bytes subclass -- so the question does not arise.
     cmp edx, TAG_PTR
     jne .base_getattr_done
     mov rcx, [rax + PyObject.ob_type]

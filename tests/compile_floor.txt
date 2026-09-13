@@ -58,6 +58,7 @@ test_builtin_dunder_str
 test_builtin_func_attrs
 test_builtin_hostile
 test_builtin_kwargs
+test_builtin_not_descriptor
 test_builtins_extra
 test_builtins
 test_builtin_subclass

@@ -1340,17 +1340,23 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     ; not TAG_PTR, so INCREF_VAL did nothing and the metatype's tp_dict was
     ; left holding a property its caller then released -- a use-after-free
     ; that reproduces as `class Meta(type)` with a property, read twice.
-    lea r8, [rel func_type]
-    cmp rcx, r8
-    je .tga_meta_bind
-    ; A builtin binds too, as it does everywhere else a method is fetched.
-    ; type.__subclasses__ is one, and this walk is the ONLY road to it for a
-    ; class whose metatype is a metaclass of its own -- every ABC and every
-    ; Enum -- so A.__subclasses__() came back unbound and answered
-    ; "takes no arguments".
-    lea r8, [rel builtin_func_type]
-    cmp rcx, r8
-    jne .tga_meta_plain
+    ; A builtin binds too when it is a descriptor, as it does everywhere else
+    ; a method is fetched.  type.__subclasses__ is one, and this walk is the
+    ; ONLY road to it for a class whose metatype is a metaclass of its own --
+    ; every ABC and every Enum -- so A.__subclasses__() came back unbound and
+    ; answered "takes no arguments".  A module-level builtin stored on a
+    ; metaclass is not a descriptor and is handed over as it stands.
+    push rax
+    push rdx
+    mov rdi, rax
+    xor esi, esi                   ; the receiver here is a CLASS, by design
+    extern builtin_should_bind
+    call builtin_should_bind
+    mov ecx, eax
+    pop rdx
+    pop rax
+    test ecx, ecx
+    jz .tga_meta_plain
 .tga_meta_bind:
     mov rdi, rax
     mov rsi, [rbp - TGA_ORIGIN]

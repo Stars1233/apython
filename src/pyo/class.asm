@@ -1587,6 +1587,34 @@ DEF_FUNC type_call
     cmp rax, rdx
     je .init_have_callable
 
+    ; A builtin is asked directly rather than through its type.  __get__ used
+    ; to sit in builtin_func_type's tp_dict, where every instance of the type
+    ; shared it, so asking the TYPE said "descriptor" for `len` as loudly as
+    ; for `type.__init__`.  It is answered per object now, and func_kind is
+    ; what answers it: a method or a wrapper binds, a module-level function
+    ; does not -- which is CPython's rule, where the first two have a
+    ; tp_descr_get and builtin_function_or_method has none.
+    extern builtin_func_type
+    lea rdx, [rel builtin_func_type]
+    cmp rax, rdx
+    jne .init_ask_type_get
+    mov qword [rbp - TC_NO_SELF], 1     ; either way, no manual prepend
+    mov rdi, rbx
+    xor esi, esi                        ; the receiver check is type_call's own
+    extern builtin_should_bind
+    call builtin_should_bind
+    test eax, eax
+    jz .init_have_callable              ; not a descriptor: call it as written
+    mov rdi, rbx
+    mov rsi, r14
+    call method_new
+    test rax, rax
+    jz .init_bind_raised
+    mov rbx, rax
+    mov qword [rbp - TC_INIT_BOUND], 1  ; owned; released after the call
+    jmp .init_have_callable
+
+.init_ask_type_get:
     ; Does its type define __get__?
     mov rdi, rax
     lea rsi, [rel dunder_get]

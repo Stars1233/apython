@@ -601,6 +601,7 @@ prop_msg_getter: db "getter", 0
 section .bss
 prop_msg_buf: resb 256
 
+
 section .text
 
 ;; ============================================================================
