@@ -310,7 +310,11 @@ END_FUNC posix_exit_now
 ;; ============================================================================
 ;; posix.kill(pid, sig) -> None
 ;; ============================================================================
-DEF_FUNC posix_kill, 16
+DEF_FUNC posix_kill, 8         ; lint: pushes=1 -- the `push rbx` below sits after the
+                            ; argument test, and lint counts only the pushes before
+                            ; the first non-push instruction.  Unannotated it read
+                            ; this frame as pushless and demanded the size that
+                            ; MISALIGNS it.
     cmp rsi, 2
     jl .pk_argerr
     push rbx
@@ -350,7 +354,11 @@ END_FUNC posix_kill
 ;; Errors are swallowed, as CPython's is: closing a descriptor that was never
 ;; open is the ordinary case, not a failure.
 ;; ============================================================================
-DEF_FUNC posix_close_range, 16
+DEF_FUNC posix_close_range, 8         ; lint: pushes=1 -- the `push rbx` below sits after the
+                            ; argument test, and lint counts only the pushes before
+                            ; the first non-push instruction.  Unannotated it read
+                            ; this frame as pushless and demanded the size that
+                            ; MISALIGNS it.
     cmp rsi, 2
     jl .pcr_argerr
     push rbx
@@ -888,9 +896,13 @@ section .text
 ;; ============================================================================
 PWP_STATUS equ 8
 PWP_TUP    equ 16
-PWP_FRAME  equ 32           ; + 0 pushes = 32
+; 24 and not 32: the `push rbx` below is a push, wherever it sits.  It comes
+; after the arity test rather than before it, and lint's alignment check counts
+; only the pushes BEFORE the first non-push instruction -- so it read this frame
+; as pushless and passed it, while every call in the body was made eight out.
+PWP_FRAME  equ 24           ; + 1 push = 32, 16-aligned
 
-DEF_FUNC posix_waitpid, PWP_FRAME
+DEF_FUNC posix_waitpid, PWP_FRAME   ; lint: pushes=1 -- see PWP_FRAME above
     cmp rsi, 2
     jl .pwp_argerr
     push rbx

@@ -2150,7 +2150,11 @@ END_FUNC posix_isatty
 ;; ============================================================================
 ;; posix.ftruncate(fd, length)
 ;; ============================================================================
-DEF_FUNC posix_ftruncate, 16
+DEF_FUNC posix_ftruncate, 8         ; lint: pushes=1 -- the `push rbx` below sits after the
+                            ; argument test, and lint counts only the pushes before
+                            ; the first non-push instruction.  Unannotated it read
+                            ; this frame as pushless and demanded the size that
+                            ; MISALIGNS it.
     cmp rsi, 2
     jl .pft_argerr
     push rbx
@@ -2404,7 +2408,11 @@ END_FUNC %1
 POSIX_FD_INT posix_fchmod, sys_fchmod, "fchmod", "mode", 2
 
 ;; posix.dup2(fd, fd2) -> fd2.  Unlike the others this ANSWERS the descriptor.
-DEF_FUNC posix_dup2, 16
+DEF_FUNC posix_dup2, 8         ; lint: pushes=1 -- the `push rbx` below sits after the
+                            ; argument test, and lint counts only the pushes before
+                            ; the first non-push instruction.  Unannotated it read
+                            ; this frame as pushless and demanded the size that
+                            ; MISALIGNS it.
     cmp rsi, 2
     jl .pd2_argerr
     push rbx

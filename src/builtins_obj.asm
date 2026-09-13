@@ -1699,9 +1699,13 @@ END_FUNC dir_default
 BD_OBJ    equ 8       ; the object, as a Value
 BD_SORT   equ 24      ; END of the two-Value args buffer for extend and sort
 BD_EXC    equ 32      ; current_exception before __dir__ was called
-BD_FRAME  equ 48            ; + 0 pushes = 48, 16-aligned
+; 40 and not 48: the `push rbx` below is a push even though DUNDER_EXC_SAVE --
+; whose own push and pop balance -- stands above it.  lint counts only the
+; pushes before the first non-push instruction and so read this frame as
+; pushless, while every call in the body was made eight out.
+BD_FRAME  equ 40            ; + 1 push = 48, 16-aligned
 
-DEF_FUNC builtin_dir, BD_FRAME
+DEF_FUNC builtin_dir, BD_FRAME  ; lint: pushes=1 -- see BD_FRAME above
     DUNDER_EXC_SAVE [rbp - BD_EXC]
     push rbx
 
