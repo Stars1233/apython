@@ -297,12 +297,6 @@ reasoning that chose them and what changing one would cost.
   and segfaulted: that path releases nothing and lets the unwinder take the
   manager out of the value-stack slot, which is what any rewrite has to keep.
 
-- **A `bytes` SUBCLASS from `__bytes__` is refused, and `C(x)` for a bytes
-  subclass answers a plain bytes.**  The check is `ob_type == bytes_type`
-  where CPython uses `PyBytes_Check`, which takes a subclass; and
-  `bytes_type_call` hands back the dunder's own object without asking the
-  subclass to adopt it.
-
 - **`co_freevars` is in source order and CPython's is sorted**, and a module
   code object reports its globals in `co_varnames`.  The first is the order
   our symbol table appends free variables in; the second is that a module

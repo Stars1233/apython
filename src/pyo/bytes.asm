@@ -2528,15 +2528,47 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     V_TEST_PTR rax, rcx
     ja .btc_dunder_bad
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel bytes_type]
-    cmp rcx, rdx
-    jne .btc_dunder_bad
-    ; The dunder's own answer IS the answer, exactly as CPython's is -- the
-    ; type argument is ignored, and `class B(bytes)` with a __bytes__ gets
-    ; whatever it returned.
+    ; PyBytes_Check, which takes a SUBCLASS, where this asked for the exact
+    ; type -- so a __bytes__ answering a `class Sub(bytes)` instance was
+    ; refused as "returned non-bytes".  The flag is set on bytes_type itself,
+    ; so type_from_parts propagates it to every subclass.
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
+    jz .btc_dunder_bad
+
+    ; Whose type the answer gets is two rules, not one.  bytes() hands over the
+    ; dunder's own object, subclass and all -- measured: bytes(C()) whose
+    ; __bytes__ answers a Sub is a Sub.  A SUBCLASS constructor ADOPTS it
+    ; instead, which is CPython's bytes_subtype_new: Other(C()) is an Other.
+    mov rdx, [rbp - BTC_TYPE]
+    lea rcx, [rel bytes_type]
+    cmp rdx, rcx
+    jne .btc_dunder_adopt
     pop rbx
     leave
     ret
+
+.btc_dunder_adopt:
+    ; Copied into a buffer of the shape byteslike_source hands back -- len + 8,
+    ; and freed by .btc_no_free -- so the allocation tail below, which already
+    ; honours TP_DICT_AT_TAIL, the GC head and the NUL, is reached unchanged.
+    ; Borrowing the dunder object's own data instead would hand that tail a
+    ; pointer into the middle of a live object for it to ap_free.
+    mov rbx, rax                        ; the dunder's bytes, ours to release
+    mov rcx, [rbx + PyBytesObject.ob_size]
+    mov [rbp - BTC_LEN], rcx
+    lea rdi, [rcx + 8]
+    call ap_malloc
+    mov [rbp - BTC_BUF], rax
+    mov rdx, [rbp - BTC_LEN]
+    test rdx, rdx
+    jz .btc_adopt_copied
+    mov rdi, rax
+    lea rsi, [rbx + PyBytesObject.data]
+    call ap_memcpy
+.btc_adopt_copied:
+    mov rdi, rbx
+    call obj_decref                     ; the dunder's answer was ours
+    jmp .btc_have_buf
 .btc_dunder_bad:
     mov rdi, rax
     RAISE exc_TypeError_type, "__bytes__ returned non-bytes"
@@ -2556,7 +2588,8 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     mov [rbp - BTC_BUF], rax
     mov [rbp - BTC_LEN], rdx
 
-    mov rcx, rdx
+.btc_have_buf:
+    mov rcx, [rbp - BTC_LEN]
     mov rdx, [rbp - BTC_TYPE]
     lea rdi, [rcx + PyBytesObject.data + 8]
     ; A subclass carrying a __dict__ at its tail needs one more word for it.
