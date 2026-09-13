@@ -68,6 +68,7 @@ test_bytes_bytearray_args
 test_bytes_bytearray_repr
 test_bytes_dunder
 test_bytes_hash_tuple_cmp
+test_bytes_index_count
 test_bytesio
 test_bytes_methods
 test_bytes_percent

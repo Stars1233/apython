@@ -1983,6 +1983,9 @@ BLS_ARITY equ 72
 ; "cannot convert '\x01' object to bytes", which likewise names one or
 ; the other constructor.
 BLS_CONVMSG equ 80
+; What __index__ answered, held across int_fits_i64 and int_to_i64.  A frame
+; slot rather than a push, because the calls below have to stay aligned.
+BLS_IDXOBJ equ 88
 BLS_FRAME equ 96            ; + 2 pushes = 112, 16-aligned
 DEF_FUNC byteslike_source, BLS_FRAME
     push rbx
@@ -2033,6 +2036,93 @@ DEF_FUNC byteslike_source, BLS_FRAME
     lea rcx, [rel bool_type]
     cmp rax, rcx
     je .bls_count_obj
+
+    ; ...and anything else whose only numeric face is __index__.  CPython's
+    ; bytes_new_impl asks PyIndex_Check here, between __bytes__ and
+    ; PyBytes_FromObject, so `bytes(C())` for a C whose __index__ answers 3 is
+    ; three zero bytes.  This arm named int, an int subclass and bool, so such
+    ; an object fell past the buffer test into the iterable road and came back
+    ; as "cannot convert 'C' object to bytes".
+    ;
+    ; The slot is PEEKED and then called directly rather than going through
+    ; obj_as_index, for one reason: CPython asks PyNumber_AsSsize_t and CLEARS
+    ; a TypeError from it before falling through to PyBytes_FromObject, so an
+    ; __index__ that answers a non-int leaves the argument to be tried as an
+    ; ITERABLE.  obj_as_index raises instead, non-locally, and there would be
+    ; nothing to catch.  Two loads, and only for an argument that is none of
+    ; the four named types above.
+    mov rcx, [rax + PyTypeObject.tp_as_number]
+    test rcx, rcx
+    jz .bls_not_index
+    mov rcx, [rcx + PyNumberMethods.nb_index]
+    test rcx, rcx
+    jz .bls_not_index
+    call rcx                    ; nb_index answers an owned Value
+    test rax, rax
+    jz .bls_propagate           ; __index__ itself raised
+    mov [rbp - BLS_IDXOBJ], rax
+    V_IS_INT rax, rcx
+    jae .bls_index_immediate
+    V_TEST_PTR rax, rcx
+    ja .bls_index_not_int       ; a float immediate is not an int
+    mov rcx, [rax + PyObject.ob_type]
+    REQUIRE_INT_TYPE rcx, rsi, .bls_index_not_int
+
+    ; A heap int, which may be wider than an index.
+    mov rdi, rax
+    mov edx, TAG_PTR
+    call int_fits_i64
+    test eax, eax
+    jz .bls_index_overflow
+    mov rdi, [rbp - BLS_IDXOBJ]
+    mov edx, TAG_PTR
+    call int_to_i64
+    mov rbx, rax
+    mov rdi, [rbp - BLS_IDXOBJ]
+    call obj_decref
+    jmp .bls_count_have
+
+.bls_index_immediate:
+    V_TO_I64 rax
+    mov rbx, rax
+    jmp .bls_count_have
+
+.bls_index_not_int:
+    ; __index__ answered something that is not an int at all.  Nothing was
+    ; raised, so falling through to the iterable road IS CPython's cleared
+    ; TypeError: bytes(C()) for such a C is "cannot convert 'C' object to
+    ; bytes", unless C is also iterable, in which case it is iterated.
+    ;
+    ; The road resumed at expects rdi = the argument and rax = its TYPE, the
+    ; two the dispatch above set up.  Both were spent getting here, so both are
+    ; put back; reading a float immediate's bits as a type was a segfault.
+    mov rdi, [rbp - BLS_IDXOBJ]
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - BLS_ARGS]
+    mov rdi, [rdi]
+    mov rax, [rdi + PyObject.ob_type]
+    jmp .bls_not_index
+
+.bls_index_overflow:
+    ; Named for the ORIGINAL argument, as PyNumber_AsSsize_t names it:
+    ; bytes(2**70) says 'int' and bytes(C()) says 'C'.
+    mov rdi, [rbp - BLS_IDXOBJ]
+    call obj_decref
+    mov rdi, [rbp - BLS_ARGS]
+    mov rdi, [rdi]
+    extern value_type
+    call value_type
+    mov rsi, rax
+    CSTRING rdi, `cannot fit '\x01' into an index-sized integer`
+    extern type_name_message
+    call type_name_message
+    mov rsi, rax
+    lea rdi, [rel exc_OverflowError_type]
+    extern raise_exception
+    call raise_exception
+    ud2
+
+.bls_not_index:
     extern str_type
 extern codec_error_id
 extern exc_LookupError_type

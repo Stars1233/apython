@@ -267,16 +267,6 @@ reasoning that chose them and what changing one would cost.
   or a list today.  The `**` half is done: DICT_MERGE names the callable and
   accepts any mapping.
 
-- **`bytes(obj)` does not take an `__index__`-only object as a count.**
-  `bytes(C())` where `C.__index__` returns 3 is three zero bytes in CPython --
-  its `PyIndex_Check` arm runs before the buffer and the iterable -- and
-  "cannot convert 'C' object to bytes" here: `byteslike_source`'s count arm
-  takes an int, an int subclass and bool by name.  `__bytes__` is consulted
-  now and wins over `__index__` as it should, so only the object whose ONLY
-  numeric face is `__index__` differs.  Closing it means asking the type for
-  `__index__` where the int check is, which puts a dunder lookup on the path
-  of every `bytes(x)` whose argument is not one of the four named types.
-
 - **A generator expression containing an async comprehension is not itself an
   async generator.**  `([i async for i in x] for x in y)` is an
   `async_generator` in CPython and a plain `generator` when our own compiler
