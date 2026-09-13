@@ -68,6 +68,7 @@ test_bytes_bytearray_args
 test_bytes_bytearray_repr
 test_bytes_dunder
 test_bytes_hash_tuple_cmp
+test_bytes_index_count
 test_bytesio
 test_bytes_methods
 test_bytes_percent
@@ -87,7 +88,9 @@ test_call_recursion
 test_call_spec
 test_class_annotations
 test_classcell_not_a_cell
+test_class_doc_entry
 test_classes
+test_class_layout_entries
 test_classmethod_metaclass
 test_class_name_at_module
 test_class_namespace_copy
@@ -101,6 +104,7 @@ test_codec_surrogates
 test_code_gc
 test_code_localsplus
 test_code_replace
+test_compare_raises
 test_compare_reflected_op
 test_comparisons
 test_compile_annotation_scan
@@ -220,6 +224,7 @@ test_dict_views
 test_dir_published
 test_dir
 test_dunder_descriptor
+test_dunder_not_callable
 test_dunder_protocols
 test_dunder_receiver
 test_dunder_returns_str
@@ -240,6 +245,7 @@ test_exception_dunder_str
 test_exception_group_deep
 test_exception_group_new
 test_exception_group_setattr
+test_exceptiongroup_split
 test_exception_group_subclass
 test_exception_init
 test_exception_instance_dict
@@ -251,6 +257,7 @@ test_exceptions
 test_exception_str_repr
 test_exception_subclass_init
 test_exception_traceback_api
+test_except_star_nested
 test_except_star
 test_exc_named_attrs_refcount
 test_exc_state_frame
@@ -486,6 +493,7 @@ test_phase4
 test_phase6
 test_pickle_builtins
 test_poll_eintr
+test_posix_bytes_paths
 test_posix_files
 test_posix_more
 test_posix_pathlike
@@ -496,6 +504,7 @@ test_posix_scandir
 test_pow_dunder
 test_pow
 test_prepare_raises
+test_print_broken_pipe
 test_print_file
 test_print_sink_lifetime
 test_print_tag
@@ -658,6 +667,7 @@ test_super_bad_object
 test_super_descriptors
 test_super_immediate
 test_super_object
+test_super_proxy
 test_syntax_error_args
 test_syntax_error_location
 test_syntax_error_offset
@@ -715,6 +725,7 @@ test_value_typeconfusion
 test_warnings_filters
 test_warnings
 test_weakref
+test_weakref_slots_dict
 test_weakref_subclass_kwargs
 test_weakref_types
 test_with_exit_raises

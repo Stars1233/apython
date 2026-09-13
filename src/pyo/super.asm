@@ -163,12 +163,28 @@ END_FUNC super_no_attribute
 
 ;; ============================================================================
 ;; super_check(rdi = the class super was written with, rsi = the object)
-;;   -> rax = __self_class__, borrowed, or 0 with a TypeError pending
+;;   -> rax = __self_class__, or 0 with a TypeError pending
+;;   -> edx = 1 when that reference is HANDED OVER, 0 when it is borrowed
 ;;
 ;; CPython's supercheck.  The object is either an instance of the class -- in
 ;; which case its type is what gets searched -- or a subclass of it, which is
 ;; what a classmethod's first argument is, and then the object IS the type to
-;; search.  Anything else is a TypeError, worded as CPython words it.
+;; search, or -- the third question -- it SAYS it is an instance of the class,
+;; which is what makes super() work through a proxy that forwards attribute
+;; access.  Anything else is a TypeError, worded as CPython words it.
+;;
+;; Only the first two were asked, so every shape that does not compile to
+;; LOAD_SUPER_ATTR refused a proxy outright: `s = super(C, p)` then `s.f()`,
+;; `getattr(super(C, p), "f")`, and a super object passed anywhere.  The opcode
+;; handler asks all three, which is why test_descr.test_proxy_super passed --
+;; it happens to use the one shape that specialises -- and why bugs.md read the
+;; difference as position-dependent.
+;;
+;; The third answer is the one place the result is owned: obj_declared_class
+;; composes it, and it may be a property's fresh object with no other
+;; reference.  edx says which, because the search has to START from it -- for
+;; a declared class that is a strict subclass of the written one, its MRO holds
+;; classes the written one's does not.
 ;;
 ;; The object is a VALUE, so its type comes from value_type and not from a raw
 ;; ob_type read: `super(int, 1)` and `super(float, 1.5)` hand over a NaN-boxed
@@ -178,7 +194,8 @@ END_FUNC super_no_attribute
 SC_CLASS equ 8
 SC_OBJ   equ 16
 SC_OBJTY equ 24
-SC_FRAME equ 32                 ; 24 used + 8 pad = 32, 16-aligned
+SC_DECL  equ 32                 ; what the object says its class is, owned
+SC_FRAME equ 48                 ; 32 used + 16 pad = 48, 16-aligned
 global super_check
 DEF_FUNC super_check, SC_FRAME
     mov [rbp - SC_CLASS], rdi
@@ -205,14 +222,42 @@ DEF_FUNC super_check, SC_FRAME
     mov rsi, [rbp - SC_CLASS]
     call type_is_subtype
     test eax, eax
-    jz .sc_bad
+    jz .sc_declared
     mov rax, [rbp - SC_OBJTY]
+    xor edx, edx                    ; borrowed: the object holds its own type
     leave
     ret
+
+.sc_declared:
+    ; Neither the object's type nor the object itself is a subtype.  Ask what
+    ; the object SAYS its class is.  obj_declared_class answers 0 for anything
+    ; without a __class__ of its own, and unwinds if __class__ raised something
+    ; other than an AttributeError -- which is safe here, because nothing in
+    ; this frame is owned yet.
+    mov rdi, [rbp - SC_OBJ]
+    extern obj_declared_class
+    call obj_declared_class
+    test rax, rax
+    jz .sc_bad
+    mov [rbp - SC_DECL], rax
+    mov rdi, rax
+    mov rsi, [rbp - SC_CLASS]
+    call type_is_subtype
+    test eax, eax
+    jz .sc_decl_no
+    mov rax, [rbp - SC_DECL]
+    mov edx, 1                      ; handed over
+    leave
+    ret
+.sc_decl_no:
+    mov rdi, [rbp - SC_DECL]
+    call obj_decref
+    ; ...and fall into the refusal.
 
 .sc_bad:
     SET_EXC exc_TypeError_type, "super(type, obj): obj must be an instance or subtype of type"
     xor eax, eax
+    xor edx, edx
     leave
     ret
 END_FUNC super_check
@@ -527,11 +572,13 @@ SN_TYPE   equ 8
 SN_OBJ    equ 16
 SN_OBJTY  equ 24
 SN_SELF   equ 32
-SN_FRAME  equ 48                ; 32 used + 16 pad = 48, 16-aligned
+SN_OBJTY_OWNED equ 40           ; super_check's third arm hands the class over
+SN_FRAME  equ 48                ; 40 used + 8 pad = 48, 16-aligned
 global super_construct
 DEF_FUNC super_construct, SN_FRAME
     mov qword [rbp - SN_OBJ], 0
     mov qword [rbp - SN_OBJTY], 0
+    mov qword [rbp - SN_OBJTY_OWNED], 0
     test rdx, rdx
     je .sn_zero_arg
     cmp rdx, 1
@@ -598,6 +645,8 @@ DEF_FUNC super_construct, SN_FRAME
     test rax, rax
     jz .sn_fail                 ; super_check set the TypeError
     mov [rbp - SN_OBJTY], rax
+    mov [rbp - SN_OBJTY_OWNED], rdx ; 1 when super_check handed the reference
+                                    ; over: its third arm composes the class
     jmp .sn_alloc
 
 .sn_none_obj:
@@ -623,6 +672,8 @@ DEF_FUNC super_construct, SN_FRAME
     mov rdi, [rbp - SN_OBJTY]
     test rdi, rdi
     jz .sn_no_objty_ref
+    cmp qword [rbp - SN_OBJTY_OWNED], 0
+    jne .sn_no_objty_ref        ; already ours
     call obj_incref
 .sn_no_objty_ref:
     ; gc_track only now, for the reason code_new gives: tracking can trigger a

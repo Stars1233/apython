@@ -114,6 +114,18 @@ extern sys_chown
 extern sys_fchmod
 extern sys_fsync
 extern posix_fork
+; waitpid and the W* status readers live in posixproc.asm, with the rest of
+; the process family -- posix.asm reached the 100k cap.
+extern posix_waitpid
+extern posix_waitstatus_to_exitcode
+extern posix_wifexited
+extern posix_wexitstatus
+extern posix_wifsignaled
+extern posix_wtermsig
+extern posix_wifstopped
+extern posix_wstopsig
+extern posix_wifcontinued
+extern posix_wcoredump
 extern posix_execv
 extern posix_close_range
 extern posix_exit_now
@@ -225,10 +237,22 @@ PPA_EXC   equ 32            ; current_exception before __fspath__ ran
 PPA_ORIG  equ 40            ; the argument as given, for the message
 PPA_WHO   equ 48            ; "<func>: <arg>", for the message, or 0
 PPA_KINDS equ 56            ; which kinds this caller accepts
-PPA_FRAME equ 64            ; + 0 pushes = 64
+; Whether the path RESOLVED to a bytes -- after __fspath__, which may answer
+; either kind.  CPython gives a bytes path bytes results, and this function
+; threw the distinction away: .ppa_str and .ppa_bytes converged and every
+; caller built str.  os.scandir(b'.'), os.listdir(b'.') and os.readlink on a
+; bytes path were all str here.
+PPA_ISBYTES equ 64
+PPA_FRAME equ 80            ; + 0 pushes = 80, 16-aligned
 
 ;; posix_path_arg(rdi = the argument Value, rsi = a "<func>: <arg>" prefix or
 ;;                0, edx = the accepted kinds)
+;;   -> rax = a NUL-terminated C string, rdx = an object to release or 0,
+;;      rcx = 1 when the path resolved to a BYTES, 0 when it was a str
+;;
+;; rcx is a real return value, not leftover scratch: a caller that builds a
+;; name or a path out of what it finds has to build it of the argument's own
+;; kind.  Callers that only pass the string to a syscall ignore it.
 ;;
 ;; CPython names the function and the argument in its refusal -- "stat: path
 ;; should be string, bytes, os.PathLike or integer, not float" -- and lists
@@ -286,10 +310,12 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     jmp .ppa_classify
 
 .ppa_str:
+    mov qword [rbp - PPA_ISBYTES], 0
     mov rcx, [rdi + PyStrObject.ob_size]
     lea rax, [rdi + PyStrObject.data]
     jmp .ppa_checked
 .ppa_bytes:
+    mov qword [rbp - PPA_ISBYTES], 1
     mov rcx, [rdi + PyBytesObject.ob_size]
     lea rax, [rdi + PyBytesObject.data]
 
@@ -307,6 +333,7 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     jne .ppa_embedded_nul
     mov rax, [rbp - PPA_PTR]
     mov rdx, [rbp - PPA_OWNED]  ; the __fspath__ result, now the caller's
+    mov rcx, [rbp - PPA_ISBYTES]
     leave
     ret
 
@@ -397,6 +424,58 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     call raise_exception
     ud2
 END_FUNC posix_path_arg
+
+;; ============================================================================
+;; posix_name_object(rdi = a NUL-terminated C string, esi = 1 for bytes)
+;;   -> rax = a str or a bytes holding it, or 0
+;;
+;; A directory entry's name, of the kind the ARGUMENT was.  CPython gives a
+;; bytes path bytes names and a str path str names, and posix_path_arg used to
+;; discard which it had been handed, so every caller built str.
+;;
+;; Shared with posixdir.asm, which needs the same decision three times.
+;; ============================================================================
+PNO_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+global posix_name_object
+DEF_FUNC posix_name_object, PNO_FRAME
+    test esi, esi
+    jnz .pno_bytes
+    call str_from_cstr_heap
+    leave
+    ret
+.pno_bytes:
+    push rdi
+    push rdi                    ; twice: rsp stays 16-byte aligned
+    call ap_strlen
+    pop rdi
+    pop rdi
+    mov rsi, rax
+    call bytes_from_data
+    leave
+    ret
+END_FUNC posix_name_object
+
+;; ============================================================================
+;; posix_sized_object(rdi = data, rsi = length, rdx = 1 for bytes)
+;;   -> (rax, edx) = a str or a bytes holding it
+;;
+;; The same decision for a run of bytes that is NOT NUL-terminated, which is
+;; what readlink(2) writes.
+;; ============================================================================
+PSO_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+global posix_sized_object
+DEF_FUNC posix_sized_object, PSO_FRAME
+    test rdx, rdx
+    jnz .pso_bytes
+    call str_new_heap
+    leave
+    ret
+.pso_bytes:
+    call bytes_from_data
+    mov edx, TAG_PTR            ; bytes_from_data answers a bare pointer
+    leave
+    ret
+END_FUNC posix_sized_object
 
 ;; ============================================================================
 ;; posix_stat_result(rdi = struct stat *) -> rax = a stat_result, or 0
@@ -707,9 +786,10 @@ PLD_BUF   equ 32
 PLD_N     equ 40            ; bytes getdents64 wrote this round
 PLD_OFF   equ 48            ; the cursor into the buffer
 PLD_OWNED equ 56            ; what posix_path_arg asked us to release
+PLD_ISBYTES equ 72          ; the argument's kind, so the names are built of it
 PLD_ERR   equ 64            ; the errno of a failed getdents64, held across
                             ; the cleanup that has to happen before it raises
-PLD_FRAME equ 64            ; + 2 pushes = 80, 16-byte aligned
+PLD_FRAME equ 80            ; + 2 pushes = 96, 16-byte aligned
 
 DEF_FUNC posix_listdir, PLD_FRAME
     push rbx
@@ -733,9 +813,11 @@ DEF_FUNC posix_listdir, PLD_FRAME
     jz .pld_fail
     mov rbx, rax
     mov [rbp - PLD_OWNED], rdx
+    mov [rbp - PLD_ISBYTES], rcx    ; a bytes path gets bytes names
     jmp .pld_open
 .pld_dot:
     mov qword [rbp - PLD_PATH], 0
+    mov qword [rbp - PLD_ISBYTES], 0
     CSTRING rbx, "."
 
 .pld_open:
@@ -813,7 +895,11 @@ DEF_FUNC posix_listdir, PLD_FRAME
     je .pld_next
 
 .pld_keep:
-    call str_from_cstr_heap
+    ; Of the argument's own kind: os.listdir(b'.') is a list of bytes in
+    ; CPython and was a list of str here -- the same defect as scandir's,
+    ; in the same function, and not recorded beside it.
+    mov esi, [rbp - PLD_ISBYTES]
+    call posix_name_object
     test rax, rax
     jz .pld_fail
     mov rbx, rax
@@ -1295,7 +1381,8 @@ PRL_BUF   equ 16
 PRL_SIZE  equ 24
 PRL_PTR   equ 32
 PRL_OWNED equ 40            ; what posix_path_arg asked us to release
-PRL_FRAME equ 48            ; + 0 pushes = 48
+PRL_ISBYTES equ 48          ; the argument's kind: the answer is built of it
+PRL_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
 
 DEF_FUNC posix_readlink, PRL_FRAME
     test rsi, rsi
@@ -1310,6 +1397,7 @@ DEF_FUNC posix_readlink, PRL_FRAME
     jz .prl_fail
     mov [rbp - PRL_PTR], rax
     mov [rbp - PRL_OWNED], rdx
+    mov [rbp - PRL_ISBYTES], rcx
     mov qword [rbp - PRL_SIZE], 512
 .prl_try:
     mov rdi, [rbp - PRL_SIZE]
@@ -1350,9 +1438,13 @@ DEF_FUNC posix_readlink, PRL_FRAME
     POSIX_PATH_CHECK rax, [rbp - PRL_PATH], [rbp - PRL_OWNED]
 .prl_have:
     POSIX_PATH_DONE [rbp - PRL_OWNED]
+    ; readlink(b'x') answers a bytes in CPython, as scandir and listdir do.
+    ; The target is not NUL-terminated -- readlink does not terminate it -- so
+    ; the length is carried rather than measured.
     mov rdi, [rbp - PRL_BUF]
     mov rsi, rax
-    call str_new_heap
+    mov rdx, [rbp - PRL_ISBYTES]
+    call posix_sized_object
     push rax
     push rdx
     mov rdi, [rbp - PRL_BUF]
@@ -2058,7 +2150,11 @@ END_FUNC posix_isatty
 ;; ============================================================================
 ;; posix.ftruncate(fd, length)
 ;; ============================================================================
-DEF_FUNC posix_ftruncate, 16
+DEF_FUNC posix_ftruncate, 8         ; lint: pushes=1 -- the `push rbx` below sits after the
+                            ; argument test, and lint counts only the pushes before
+                            ; the first non-push instruction.  Unannotated it read
+                            ; this frame as pushless and demanded the size that
+                            ; MISALIGNS it.
     cmp rsi, 2
     jl .pft_argerr
     push rbx
@@ -2312,7 +2408,11 @@ END_FUNC %1
 POSIX_FD_INT posix_fchmod, sys_fchmod, "fchmod", "mode", 2
 
 ;; posix.dup2(fd, fd2) -> fd2.  Unlike the others this ANSWERS the descriptor.
-DEF_FUNC posix_dup2, 16
+DEF_FUNC posix_dup2, 8         ; lint: pushes=1 -- the `push rbx` below sits after the
+                            ; argument test, and lint counts only the pushes before
+                            ; the first non-push instruction.  Unannotated it read
+                            ; this frame as pushless and demanded the size that
+                            ; MISALIGNS it.
     cmp rsi, 2
     jl .pd2_argerr
     push rbx
@@ -2796,205 +2896,6 @@ DEF_FUNC posix_fspath, PFS_FRAME
 .pfs_argerr:
     RAISE exc_TypeError_type, "fspath() takes exactly 1 argument"
 END_FUNC posix_fspath
-
-;; ============================================================================
-;; posix.waitpid(pid, options) -> (pid, status), and the W* status readers.
-;;
-;; The status word's encoding, which subprocess and multiprocessing decode by
-;; hand through these:
-;;   low 7 bits == 0x7f  -> stopped, and (status >> 8) & 0xff is the signal
-;;   low 7 bits == 0     -> exited,  and (status >> 8) & 0xff is the code
-;;   otherwise           -> signalled, and the low 7 bits are the signal
-;;   bit 7 within a signalled status is the core-dump flag
-;; ============================================================================
-PWP_STATUS equ 8
-PWP_TUP    equ 16
-PWP_FRAME  equ 32           ; + 0 pushes = 32
-
-DEF_FUNC posix_waitpid, PWP_FRAME
-    cmp rsi, 2
-    jl .pwp_argerr
-    push rbx
-    mov rbx, rdi
-    mov rdi, [rbx]
-    call posix_int_arg
-    push rax
-    push rax
-    mov rdi, [rbx + 8]
-    call posix_int_arg
-    mov rdx, rax                    ; options
-    pop rdi
-    pop rdi                         ; pid
-    lea rsi, [rbp - PWP_STATUS]
-    mov qword [rbp - PWP_STATUS], 0
-    xor ecx, ecx                    ; no rusage
-    call sys_wait4
-    POSIX_CHECK rax, 0
-    push rax
-    push rax
-    mov edi, 2
-    call tuple_new
-    pop rdi
-    pop rdi                         ; the pid wait4 reported
-    test rax, rax
-    jz .pwp_fail
-    mov [rbp - PWP_TUP], rax
-    call int_from_i64
-    V_PACK rax, rdx
-    mov rcx, [rbp - PWP_TUP]
-    mov rcx, [rcx + PyTupleObject.ob_item]
-    mov [rcx], rax
-    mov edi, [rbp - PWP_STATUS]
-    movsxd rdi, edi
-    call int_from_i64
-    V_PACK rax, rdx
-    mov rcx, [rbp - PWP_TUP]
-    mov rcx, [rcx + PyTupleObject.ob_item]
-    mov [rcx + 8], rax
-    mov rax, [rbp - PWP_TUP]
-    mov edx, TAG_PTR
-    pop rbx
-    leave
-    ret
-.pwp_fail:
-    xor eax, eax
-    xor edx, edx
-    pop rbx
-    leave
-    ret
-.pwp_argerr:
-    RAISE exc_TypeError_type, "waitpid() takes exactly 2 arguments"
-END_FUNC posix_waitpid
-
-;; The status readers.  Each takes the status word and answers an int or a
-;; bool; every one of them is pure bit arithmetic on it.
-%macro POSIX_WSTATUS 3          ; %1 = name, %2 = the body label, %3 = message
-DEF_FUNC %1, 16
-    test rsi, rsi
-    jz %%argerr
-    mov rdi, [rdi]
-    call posix_int_arg
-    jmp %2
-%%argerr:
-    RAISE exc_TypeError_type, %3
-END_FUNC %1
-%endmacro
-
-;; Shared tails.  Each expects the status in rax and leaves through the
-;; caller's frame, so each is entered with `jmp` from a wrapper that has one.
-; Plain labels, not functions: each wrapper reaches them with `jmp` after
-; setting up its own frame, and the `leave` here pops that one.  A prologue
-; would push a second rbp that nothing ever pops.
-pw_ret_int:
-    mov rdi, rax
-    call int_from_i64
-    V_PACK rax, rdx
-    mov edx, TAG_PTR
-    leave
-    ret
-
-pw_ret_bool:
-    test eax, eax
-    jz .prb_false
-    lea rax, [rel bool_true]
-    jmp .prb_out
-.prb_false:
-    lea rax, [rel bool_false]
-.prb_out:
-    inc qword [rax + PyObject.ob_refcnt]
-    mov edx, TAG_PTR
-    leave
-    ret
-
-pw_exitstatus:
-    shr rax, 8
-    and rax, 0xff
-    jmp pw_ret_int
-pw_termsig:
-    and rax, 0x7f
-    jmp pw_ret_int
-pw_stopsig:
-    shr rax, 8
-    and rax, 0xff
-    jmp pw_ret_int
-pw_ifexited:
-    and eax, 0x7f
-    test eax, eax
-    setz al
-    movzx eax, al
-    jmp pw_ret_bool
-pw_ifstopped:
-    and eax, 0xff
-    cmp eax, 0x7f
-    sete al
-    movzx eax, al
-    jmp pw_ret_bool
-pw_ifsignaled:
-    ; glibc: ((signed char) (((status) & 0x7f) + 1) >> 1) > 0
-    ;
-    ; The signed-char cast is the whole macro.  0x7f + 1 is 128, which as a
-    ; signed byte is -128 and shifts to -64 -- not greater than zero, which is
-    ; how a STOPPED status (low byte 0x7f) and a CONTINUED one (0xffff) are
-    ; excluded.  Without the cast both answered "signalled".
-    mov ecx, eax
-    and ecx, 0x7f
-    inc ecx
-    movsx ecx, cl
-    sar ecx, 1
-    xor eax, eax
-    test ecx, ecx
-    setg al                     ; signed, not setnz
-    jmp pw_ret_bool
-pw_ifcontinued:
-    cmp eax, 0xffff
-    sete al
-    movzx eax, al
-    jmp pw_ret_bool
-pw_coredump:
-    and eax, 0x80
-    jmp pw_ret_bool
-
-POSIX_WSTATUS posix_wexitstatus, pw_exitstatus, "WEXITSTATUS() takes exactly 1 argument"
-POSIX_WSTATUS posix_wtermsig,    pw_termsig,    "WTERMSIG() takes exactly 1 argument"
-POSIX_WSTATUS posix_wstopsig,    pw_stopsig,    "WSTOPSIG() takes exactly 1 argument"
-POSIX_WSTATUS posix_wifexited,   pw_ifexited,   "WIFEXITED() takes exactly 1 argument"
-POSIX_WSTATUS posix_wifstopped,  pw_ifstopped,  "WIFSTOPPED() takes exactly 1 argument"
-POSIX_WSTATUS posix_wifsignaled, pw_ifsignaled, "WIFSIGNALED() takes exactly 1 argument"
-POSIX_WSTATUS posix_wifcontinued, pw_ifcontinued, "WIFCONTINUED() takes exactly 1 argument"
-POSIX_WSTATUS posix_wcoredump,   pw_coredump,   "WCOREDUMP() takes exactly 1 argument"
-
-;; posix.waitstatus_to_exitcode(status) -> int
-;; Exited: the code.  Signalled: minus the signal.  Anything else: ValueError.
-DEF_FUNC posix_waitstatus_to_exitcode, 16
-    test rsi, rsi
-    jz .pwe_argerr
-    mov rdi, [rdi]
-    call posix_int_arg
-    mov ecx, eax
-    and ecx, 0x7f
-    test ecx, ecx
-    jnz .pwe_signalled
-    shr rax, 8
-    and rax, 0xff
-    jmp pw_ret_int
-.pwe_signalled:
-    ; The same signed-char test: a stopped or continued status is neither an
-    ; exit nor a signal, and CPython raises for it.
-    mov ecx, eax
-    and ecx, 0x7f
-    inc ecx
-    movsx ecx, cl
-    sar ecx, 1
-    test ecx, ecx
-    jle .pwe_bad
-    and eax, 0x7f
-    neg rax
-    jmp pw_ret_int
-.pwe_bad:
-    RAISE exc_ValueError_type, "Invalid wait status"
-.pwe_argerr:
-    RAISE exc_TypeError_type, "waitstatus_to_exitcode() takes exactly 1 argument"
-END_FUNC posix_waitstatus_to_exitcode
 
 ;; ============================================================================
 ;; posix.environ, a dict[bytes, bytes] built from glibc's `environ`.

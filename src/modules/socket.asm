@@ -362,7 +362,11 @@ END_FUNC sock_connect_ex_fn
 ;; ============================================================================
 ;; listen(fd, backlog) / shutdown(fd, how)
 ;; ============================================================================
-DEF_FUNC sock_listen_fn, 16
+DEF_FUNC sock_listen_fn, 8         ; lint: pushes=1 -- the `push rbx` below sits after the
+                            ; argument test, and lint counts only the pushes before
+                            ; the first non-push instruction.  Unannotated it read
+                            ; this frame as pushless and demanded the size that
+                            ; MISALIGNS it.
     cmp rsi, 2
     jl .sl_args
     push rbx
@@ -384,7 +388,11 @@ DEF_FUNC sock_listen_fn, 16
     RAISE exc_TypeError_type, "listen() takes exactly 2 arguments"
 END_FUNC sock_listen_fn
 
-DEF_FUNC sock_shutdown_fn, 16
+DEF_FUNC sock_shutdown_fn, 8         ; lint: pushes=1 -- the `push rbx` below sits after the
+                            ; argument test, and lint counts only the pushes before
+                            ; the first non-push instruction.  Unannotated it read
+                            ; this frame as pushless and demanded the size that
+                            ; MISALIGNS it.
     cmp rsi, 2
     jl .sh_args
     push rbx

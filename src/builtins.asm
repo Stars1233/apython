@@ -1083,7 +1083,21 @@ DEF_FUNC_LOCAL print_sink_write, PSW_FRAME
 
     extern fileobj_emit
     call fileobj_emit
-    jmp .psw_ok
+    test rax, rax
+    jns .psw_ok
+    ; The one hole print had.  A start-up stream IS a file_type, so the DEFAULT
+    ; case took this arm -- and it threw the write's result away, which is why
+    ; `apython x.py | head` exited 0 with the tail of its output silently gone.
+    ; The .psw_object arm below has propagated all along.
+    ;
+    ; Set rather than raise: print holds a str() of the current argument and the
+    ; sink across this, and .print_sink_failed is what releases them.
+    neg eax
+    mov edi, eax
+    xor esi, esi
+    extern set_oserror
+    call set_oserror
+    jmp .psw_raised
 
 .psw_object:
     ; The text becomes a str, because that is what write() takes.
@@ -1192,7 +1206,14 @@ DEF_FUNC_LOCAL print_sink_flush, PSF_FRAME
     jne .psf_object
     extern fileobj_drain
     call fileobj_drain
-    jmp .psf_ok
+    test rax, rax
+    jns .psf_ok
+    neg eax
+    mov edi, eax
+    xor esi, esi
+    extern set_oserror
+    call set_oserror
+    jmp .psf_failed
 
 .psf_object:
     CSTRING rdi, "flush"
@@ -2360,6 +2381,10 @@ DEF_FUNC builtins_init, 8            ; 1 push, so rsp is 16-aligned
     ; exception subclass reaches something that sets .args.
     extern exc_install_methods
     call exc_install_methods
+    ; split, subgroup and derive, on BaseExceptionGroup -- which ExceptionGroup
+    ; and every user subclass reach through the MRO walk in eg_getattr.
+    extern eg_install_methods
+    call eg_install_methods
 
     ; Create the builtins dict
     call dict_new

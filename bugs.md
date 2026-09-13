@@ -109,22 +109,6 @@ reasoning that chose them and what changing one would cost.
   function reached by `call` -- assume the wrong one and every handler in the
   tree reports as broken.
 
-- **`except*` does not look inside a NESTED group, and a group publishes
-  neither `split` nor `subgroup` nor `derive`.**  `except* KeyError` over
-  `ExceptionGroup("outer", [ExceptionGroup("inner", [KeyError()]), OSError()])`
-  matches the OSError and leaves the outer group unhandled, where CPython
-  recurses and matches the KeyError through the nesting.  The split is
-  `eg_split`, and it walks one level.
-
-  The three methods are the other half of the same gap: the splitting exists
-  only as the thing `except*` calls, so a program cannot do it itself.  And
-  where CPython's `split` asks the group to `derive()` a new one -- whose
-  default builds a plain `ExceptionGroup` -- `eg_split` constructs one of the
-  group's OWN type, so a subclass of `ExceptionGroup` splits into more of
-  itself rather than into `ExceptionGroup`.  Publishing the three and routing
-  the internal split through `derive` is one change, because the type the
-  halves get is decided there.
-
 - **A dunder's RESULT is not type-checked except for `__str__`, `__repr__` and
   `__format__`.**  Those three are refused now, because a non-str reaching an
   f-string or a container repr is a segfault rather than a wrong answer.  The
@@ -135,20 +119,6 @@ reasoning that chose them and what changing one would cost.
   non-int` and `__index__ returned non-int` without the `(type str)` CPython
   appends; and `float()` reports its ARGUMENT's type rather than
   `C.__float__ returned non-float (type str)`.
-
-- **A dunder whose value is not callable at all reports the wrong thing, and
-  an immediate reports nothing.**  `type("C", (), {"__len__": 5})` then
-  `len(c)` is `RuntimeError: slot wrapper failed without an exception` where
-  CPython says `TypeError: 'int' object is not callable`, and the same with a
-  float.  A POINTER that is not callable -- `None`, `True`, `"x"` -- is
-  reported correctly, so what differs is only the int and float immediates:
-  the slot wrapper's failure arm asks the value for a type it has no header
-  to answer from, and returns without setting an exception.  `__next__` is
-  the one that answers WRONGLY rather than confusingly:
-  `type("C", (), {"__next__": 5})` makes `next(c)` a clean StopIteration, so
-  a `for` over it is empty where CPython raises.  Found while fixing
-  `dunder_bind`'s third arm and confirmed to pre-date it -- the behaviour is
-  identical on a binary built before that change.
 
 - **A plain builtin function stored in a class body is BOUND.**  CPython has
   three types where this tree has one: `builtin_function_or_method`, which has
@@ -169,29 +139,24 @@ reasoning that chose them and what changing one would cost.
   class.  Closing it means a second type, or a per-object flag set where the
   builtin is created rather than where it is registered.
 
-- **`print` to a broken pipe reports nothing.**  SIGPIPE is ignored now, so
-  the process survives and `os.write`/`file.write` raise BrokenPipeError --
-  but `print` itself answers None and the output is silently lost, where
-  CPython raises.  `apython foo.py | head` exits 0 with the tail of its output
-  discarded.  The write it makes does not check its result.
+- **`sys.stdout`'s repr is `<stdout>`, where CPython's is
+  `<_io.TextIOWrapper name='<stdout>' mode='w' encoding='utf-8'>`.**  Visible
+  wherever an unraisable report names the stream -- the "Exception ignored in:"
+  line a failed exit-time flush prints.  The exception line under it matches
+  exactly, and so does the exit code; only the object's own repr differs,
+  because the start-up streams are a `file_type` here rather than a Python
+  wrapper over a FileIO.
 
-- **A class's `__dict__` is short of `__dict__`, `__doc__` and
-  `__weakref__`.**  `sorted(C.__dict__)` for a plain class is
-  `['__module__']` here and `['__dict__', '__doc__', '__module__',
-  '__weakref__']` in CPython.  `__qualname__` was a fourth difference in the
-  other direction and is fixed; these three are entries type_new adds that
-  type_from_parts does not.  Anything that walks a class's own dict and
-  expects the descriptors -- `inspect.getattr_static`, `__slots__` validation,
-  pickling by reference -- sees a shorter one.
-
-- **A struct-sequence type can be subclassed.**  `class X(os.stat_result)`
-  builds a class here and is `TypeError: type 'os.stat_result' is not an
-  acceptable base type` in CPython: those types do not carry
-  TYPE_FLAG_BASETYPE and nothing tests it.  The subclass has no descriptor
-  word of its own, so the struct-sequence accessors read past its allocation.
-  The general check -- refuse a base without TYPE_FLAG_BASETYPE -- wants
-  auditing across every builtin type first, because a flag missing by accident
-  would start refusing subclasses that work today.
+- **`o.__dict__ = d` and `o.__weakref__ = x` go into the instance dict.**  The
+  two getsets are in the class dict now and the READ side finds them, but they
+  carry `GS_LAYOUT` so that `TYPE_FLAG_MRO_HAS_DATA_DESCR` stays clear on every
+  class -- and the store side (`instance_setattr`, `op_store_attr`) gates on
+  exactly that bit.  So `c.__dict__ = d` adds a `'__dict__'` KEY rather than
+  replacing the dict, and `c.__weakref__ = 5` succeeds where CPython says
+  `attribute '__weakref__' of 'C' objects is not writable`.  Both did the same
+  before the descriptors existed, so this is what is LEFT rather than anything
+  new; closing it means a name test on the store fallback, which every
+  `self.x = v` would pay for.
 
 - **`random.randbytes` is seconds per megabyte**, where CPython's is instant:
   `_random` is Python here and CPython's is C.  2.4 s/MiB through this tree's
@@ -208,36 +173,26 @@ reasoning that chose them and what changing one would cost.
   machinery under `sys.settrace` and a jump, not the compiler.  It sits with
   the rest of the settrace divergence below.
 
-- **`super(C, obj)` on a PROXY answers differently depending on what comes
-  after it in the file.**  CPython's supercheck asks an object what class it
-  says it is when neither its type nor the object itself is a subtype, which
-  is what makes super() work through a proxy that forwards attribute access --
-  `test_descr.test_proxy_super` is exactly that.  It works on its own; in a
-  longer program the same call refuses with "obj must be an instance or
-  subtype of type", and DELETING an unrelated statement that comes AFTER it
-  makes it work again.
+- **`super()` searches the written class's MRO, not the declared class's, when
+  the opcode handles it.**  `super(C, p).f()` for a proxy whose `__class__` is
+  an `E(C, X)` is `X.f` in CPython -- the search starts after C in *E's* MRO --
+  and `B.f` here, with `__self_class__` answering C rather than E.  The
+  unspecialised path is right: `super_check` hands the declared class over and
+  `super_new` installs it as `su_obj_type`.  `op_load_super_attr` uses the
+  declared class as a yes and nothing more, because `LSA_ORIGIN` is borrowed
+  and a dozen exits would each have to release it.  So the two paths disagree
+  for this one shape, and only for a declared class that is a STRICT subclass
+  of the written one; a proxy of a plain `C()` -- which is
+  `test_descr.test_proxy_super` and `tests/test_super_proxy.py` -- agrees.
 
-  valgrind is clean over both, so it is not memory corruption: it is
-  `obj_declared_class` answering 0, which means the `__class__` lookup did not
-  produce the class.  That lookup runs the proxy's own `__getattribute__` --
-  Python, from inside an opcode handler, which is the one thing this path does
-  that no other form of super() does, and it recurses once more because
-  `self.__obj` goes through `__getattribute__` too.  Something about that
-  nested eval, and not about the object, decides the answer.
-
-  `tests/test_super_bad_object.py` covers the refusals and leaves the proxy
-  out for this reason; the shape that fails is the file that test was cut
-  down from, with the proxy call followed by two more statements.
-
-- **`scandir()` on a BYTES path yields str entries.**  CPython gives a bytes
-  path bytes names and bytes paths back; here the argument goes through
-  `posix_path_arg`, which hands over a C string, and the entries are built
-  from it as str.  Everything works, and works on the right files -- what
-  differs is the type of `.name` and `.path`, which `os.walk(b'.')` and the
-  bytes half of `glob` then propagate.  Fixing it means carrying the
-  argument's own kind through the getdents64 loop and building bytes objects
-  on that side, which is the second half of every string-building step in
-  `posix_scandir`.
+- **An unbound `super` is not a descriptor.**  `super` carries no
+  `tp_descr_get`, so `hasattr(super(C), '__get__')` is False where CPython says
+  True, and the idiom `C._C__super = super(C)` then `self.__super.meth(a)` --
+  which is what `test_descr.test_supers` does -- reads the unbound super back
+  unchanged and fails with `'super' object has no attribute 'meth'`.  CPython's
+  `super_descr_get` builds a new, bound super from the unbound one.  Everything
+  the two- and three-argument forms do is right; this is the one-argument form
+  stored on a class.
 
 - **A raise from a C-level slot is a non-local jump, so a C caller cannot
   absorb it.**  `slot_mp_subscript` and its siblings end in `slot_reraise`,
@@ -279,14 +234,6 @@ reasoning that chose them and what changing one would cost.
   apart.  Closing it means paying the MRO walk on every attribute access, or
   finding a cheaper way to notice that the class changed underneath.
 
-- **A user `__eq__` that reaches itself answers False instead of raising
-  RecursionError.**  `class D: def __eq__(s, o): return s.me == o.me` with
-  `p.me = p` gives False here and RecursionError in CPython.  The container
-  comparisons are guarded (`C_RECURSION_ENTER` in list, tuple and dict) and
-  Python-level recursion is guarded by `recursion_depth`, so something on the
-  instance-comparison path is deciding the answer before either limit is
-  reached rather than recursing; which one has not been traced.
-
 - **`f(*5)` does not name the callable.**  CPython says
   "__main__.f() argument after * must be an iterable, not int"; this says
   "Value after * must be an iterable, not int", which is CPython's message
@@ -297,26 +244,6 @@ reasoning that chose them and what changing one would cost.
   CALL_FUNCTION_EX to materialise an arbitrary iterable -- it takes a tuple
   or a list today.  The `**` half is done: DICT_MERGE names the callable and
   accepts any mapping.
-
-- **`bytes(obj)` does not take an `__index__`-only object as a count.**
-  `bytes(C())` where `C.__index__` returns 3 is three zero bytes in CPython --
-  its `PyIndex_Check` arm runs before the buffer and the iterable -- and
-  "cannot convert 'C' object to bytes" here: `byteslike_source`'s count arm
-  takes an int, an int subclass and bool by name.  `__bytes__` is consulted
-  now and wins over `__index__` as it should, so only the object whose ONLY
-  numeric face is `__index__` differs.  Closing it means asking the type for
-  `__index__` where the int check is, which puts a dunder lookup on the path
-  of every `bytes(x)` whose argument is not one of the four named types.
-
-- **A generator expression containing an async comprehension is not itself an
-  async generator.**  `([i async for i in x] for x in y)` is an
-  `async_generator` in CPython and a plain `generator` when our own compiler
-  builds it -- a `.pyc` gets it right, because the flag comes from the
-  marshalled code object.  The nested comprehension marks its OWN scope
-  SCF_COROUTINE and nothing propagates that to the genexp around it; CPython's
-  symtable does.  The refusals and acceptances all match
-  (`tests/test_compile_async_scope.py`); only the kind of object is wrong, and
-  it makes `async for lst in that_genexp` a TypeError.
 
 - **Source that is not valid UTF-8 is refused with our own wording, and one
   column off for a bad four-byte lead.**  CPython reports a codec error --
@@ -337,12 +264,6 @@ reasoning that chose them and what changing one would cost.
   suffix.  The first attempt at the async one got the operand cleanup wrong
   and segfaulted: that path releases nothing and lets the unwinder take the
   manager out of the value-stack slot, which is what any rewrite has to keep.
-
-- **A `bytes` SUBCLASS from `__bytes__` is refused, and `C(x)` for a bytes
-  subclass answers a plain bytes.**  The check is `ob_type == bytes_type`
-  where CPython uses `PyBytes_Check`, which takes a subclass; and
-  `bytes_type_call` hands back the dunder's own object without asking the
-  subclass to adopt it.
 
 - **`co_freevars` is in source order and CPython's is sorted**, and a module
   code object reports its globals in `co_varnames`.  The first is the order

@@ -110,6 +110,81 @@ DEF_FUNC_LOCAL weakref_chain, 8            ; 1 pushes, so rsp is 16-aligned
 END_FUNC weakref_chain
 
 ;; ============================================================================
+;; weakref_slot_get(rdi = the referent, rsi = the name, unused) -> rax = Value
+;;
+;; __weakref__, which CPython answers from *tp_weaklistoffset: the HEAD of the
+;; object's weak reference list, or None when there is none.  The links are in
+;; the side table here rather than in a slot, so the head has to be picked out
+;; of the chain -- and "head" is not simply "entry zero", for two reasons:
+;;
+;;   - ref_clear ZEROES a dying reference's slot in place rather than removing
+;;     it, so the list keeps NULL holes and ob_size never shrinks.  Reading
+;;     entry zero answered a hole as a NULL Value, which the getset wrapper
+;;     turns into "attribute is not readable" -- so `p.__weakref__` raised
+;;     instead of answering None once its only reference had died.
+;;   - CPython puts the callback-free reference at the head and appends the
+;;     ones with callbacks after it, and this tree appends both.  Measured:
+;;     with a basic and a callback reference alive, CPython's __weakref__ is
+;;     the basic one whichever order they were made in, and with only a
+;;     callback reference it is that.  So: the first live entry with no
+;;     callback, else the first live entry, else None.
+;;
+;; Shaped as a tp_getattr because it is registered as a GS_NAMED getset on every
+;; class that adds weak-referenceability; the name is not read.
+;; ============================================================================
+WSG_ANY   equ 8             ; the first live entry, whatever its callback
+WSG_FRAME equ 24            ; + 1 push = 32, 16-aligned
+global weakref_slot_get
+DEF_FUNC weakref_slot_get, WSG_FRAME
+    push rbx
+    mov qword [rbp - WSG_ANY], 0
+    V_TEST_PTR rdi, rax
+    ja .wsg_none                ; an immediate has no weak references
+    test rdi, rdi
+    jz .wsg_none
+    call weakref_chain
+    test rax, rax
+    jz .wsg_none
+    mov rcx, [rax + PyListObject.ob_size]
+    mov rdx, [rax + PyListObject.ob_item]
+    xor r8d, r8d
+.wsg_scan:
+    cmp r8, rcx
+    jge .wsg_scanned
+    mov rbx, [rdx + r8*8]
+    test rbx, rbx
+    jz .wsg_next                ; a hole ref_clear left behind
+    cmp qword [rbp - WSG_ANY], 0
+    jne .wsg_have_any
+    mov [rbp - WSG_ANY], rbx
+.wsg_have_any:
+    cmp qword [rbx + PyWeakRefObject.wr_callback], 0
+    je .wsg_found               ; callback-free: CPython's head
+.wsg_next:
+    inc r8
+    jmp .wsg_scan
+.wsg_scanned:
+    mov rbx, [rbp - WSG_ANY]
+    test rbx, rbx
+    jz .wsg_none
+.wsg_found:
+    mov rdi, rbx
+    call obj_incref
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+.wsg_none:
+    lea rbx, [rel none_singleton]
+    mov rdi, rbx
+    call obj_incref
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+END_FUNC weakref_slot_get
+
+;; ============================================================================
 ;; weakref_clear_for(rdi = object about to be freed)
 ;;
 ;; Called from obj_dealloc, and only when the table is non-empty.  Every
@@ -734,7 +809,12 @@ DEF_FUNC weakref_referenceable, WRR_FRAME
     jz .wrr_from_adds
     test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jz .wrr_static
-    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+    ; DECLARED __slots__, not HAS_SLOTS.  The latter means "this class has no
+    ; instance dict", which a __slots__ naming '__dict__' leaves clear -- so
+    ; such a class read as slot-free here and its instances were
+    ; weak-referenceable, where CPython refuses them: naming '__dict__' does not
+    ; excuse a __slots__ from suppressing the weakref word.
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_DECLARED_SLOTS
     jnz .wrr_next
     mov qword [rbp - WRR_ADDS], 1
 .wrr_next:

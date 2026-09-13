@@ -106,3 +106,50 @@ print(bytes(array.array("b", [1, 2])))
 
 # bytearray does NOT consult it: CPython's bytearray_init has no such arm.
 print(bytearray(Iterable()))
+
+
+# A bytes SUBCLASS from __bytes__ is a bytes: CPython's check is
+# PyBytes_Check, which takes one, and this asked `ob_type == bytes_type`.
+class Sub(bytes):
+    pass
+
+
+class ReturnsSub:
+    def __bytes__(self):
+        return Sub(b"ab")
+
+
+r = bytes(ReturnsSub())
+print("subclass from __bytes__:", r, type(r).__name__)
+
+# ...and the requested type decides what comes back.  bytes() hands over the
+# dunder's own object, subclass and all; a SUBCLASS constructor adopts it,
+# which is CPython's bytes_subtype_new.
+class Other(bytes):
+    pass
+
+
+print("adopted:", type(Other(ReturnsSub())).__name__)
+
+
+class ReturnsPlain:
+    def __bytes__(self):
+        return b"xy"
+
+
+print("adopted plain:", type(Other(ReturnsPlain())).__name__,
+      bytes(Other(ReturnsPlain())))
+
+# A bytearray is still not a bytes, subclass rule or no.
+class ReturnsBytearray:
+    def __bytes__(self):
+        return bytearray(b"ab")
+
+
+try:
+    bytes(ReturnsBytearray())
+except TypeError:
+    print("TypeError for a bytearray __bytes__")
+
+# The subclass's own value still wins when it has no __bytes__ of its own.
+print("plain subclass ctor:", type(Sub(b"zz")).__name__, Sub(b"zz"))
