@@ -718,6 +718,7 @@ test_unary
 test_unbound_local
 test_uncallable_bind_lifetime
 test_unicode_case
+test_unicodedata
 test_unicode_names
 test_unicode_numbers
 test_unicode_predicates

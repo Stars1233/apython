@@ -362,9 +362,19 @@ reasoning that chose them and what changing one would cost.
   over `-lz` on the precedent `-lgmp` set, and `gzip` with it -- and
   `zipfile`, `tarfile` and `shutil`, which imported before and could not
   compress.  So is `array`, which was the largest of these by reach.  What
-  is left is genuinely C: `unicodedata`, `_tracemalloc`, `_symtable`, `_ssl`,
-  `_sqlite3`, `_crypt`, `_lzma`, `_bz2`, `_ctypes`, `_curses`, `pyexpat` and
-  `_tkinter`.
+  is left is genuinely C: `_tracemalloc`, `_symtable`, `_ssl`,
+  `_sqlite3`, `_crypt`, `_lzma`, `_bz2`, `_ctypes`, `_curses` and `_tkinter`.
+
+  `unicodedata` is there now, over tables generated from a running CPython the
+  way `\N{...}`'s names and the case mappings already were.  Two of its
+  functions are not: **`decomposition()` and `normalize()`**, which need the
+  canonical AND compatibility decompositions, the composition exclusions and
+  the Hangul algorithm -- an order of magnitude more data than the seven
+  properties that did land, and the thing PEP 3131's identifier
+  normalisation and `idna`/`punycode` all wait on.  **`ucd_3_2_0`** is not
+  either: it is a second, frozen copy of the whole database, which is what
+  `stringprep` imports and the only thing keeping `test_stringprep` from
+  running.
   (`_io` is not among them: `src/modules/io.asm` supplies `_iocore` and
   `lib/_io.py` assembles both halves under the name `_io`.  `_socket` and
   `select` are the same split over `_socketcore`.  Neither are `math`,

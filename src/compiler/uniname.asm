@@ -212,4 +212,170 @@ DEF_FUNC uniname_lookup, UN_FRAME
     ret
 END_FUNC uniname_lookup
 
+;; ============================================================================
+;; uniname_name(rdi = codepoint, rsi = out buffer, rdx = its size)
+;;   -> rax = the name's length, or -1 when the character has none
+;;
+;; The same blob and the same decoder as uniname_lookup, walked for a
+;; CODEPOINT instead of a name.  The buffer must be at least UN_BUFSZ bytes:
+;; the decoder needs the previous entry's prefix in it whether or not that
+;; entry is the answer.
+;;
+;; Two things stop the scan early, and the second is not an optimisation.  The
+;; blob is in codepoint order, so a running codepoint past the target means
+;; the target has no entry.  And the ALIASES are appended after it, out of
+;; order -- a codepoint that DECREASES is where they start.  They must not be
+;; reached: `unicodedata.lookup('LF')` is U+000A in CPython and
+;; `unicodedata.name('\n')` is a ValueError, because an alias is a way in and
+;; not the character's name.
+;;
+;; CJK UNIFIED IDEOGRAPH-XXXX is synthesised, as it is parsed on the way in.
+;; ============================================================================
+UNN_CP    equ 8
+UNN_OUT   equ 16
+UNN_SIZE  equ 24
+UNN_FRAME equ 40            ; + 3 pushes = 64, 16-aligned
+DEF_FUNC uniname_name, UNN_FRAME
+    push rbx
+    push r12
+    push r13
+    mov [rbp - UNN_CP], rdi
+    mov [rbp - UNN_OUT], rsi
+    mov [rbp - UNN_SIZE], rdx
+    cmp rdx, UN_BUFSZ
+    jl .unn_miss
+
+    ; The algorithmic family first: its names are not in the blob.
+    lea rcx, [rel uniname_cjk_ranges]
+    lea rdx, [rel uniname_cjk_ranges_end]
+.unn_cjk_range:
+    cmp rcx, rdx
+    jae .unn_scan
+    mov eax, [rcx]
+    cmp rdi, rax
+    jb .unn_cjk_next
+    mov eax, [rcx + 4]
+    cmp rdi, rax
+    jbe .unn_cjk_hit
+.unn_cjk_next:
+    add rcx, 8
+    jmp .unn_cjk_range
+
+.unn_cjk_hit:
+    ; "CJK UNIFIED IDEOGRAPH-" and the codepoint in uppercase hex, with at
+    ; least four digits, which is how the UCD writes it.
+    mov rdi, [rbp - UNN_OUT]
+    lea rsi, [rel uniname_cjk_prefix]
+    xor ecx, ecx
+.unn_cjk_copy:
+    cmp rcx, UNINAME_CJK_PREFIX_LEN
+    jae .unn_cjk_hex
+    mov al, [rsi + rcx]
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .unn_cjk_copy
+.unn_cjk_hex:
+    ; How many digits: four, or more when the codepoint needs them.
+    mov r8, [rbp - UNN_CP]
+    mov r9d, 4
+    mov rax, r8
+    shr rax, 16
+    test rax, rax
+    jz .unn_cjk_digits
+    mov r9d, 5
+    mov rax, r8
+    shr rax, 20
+    test rax, rax
+    jz .unn_cjk_digits
+    mov r9d, 6
+.unn_cjk_digits:
+    lea r10, [rcx + r9]                 ; the total length
+    mov r11, r9
+.unn_cjk_digit:
+    dec r11
+    js .unn_cjk_done
+    mov rax, r8
+    mov edx, r11d
+    shl edx, 2
+    mov ecx, edx
+    shr rax, cl
+    and eax, 15
+    cmp eax, 9
+    jbe .unn_cjk_num
+    add eax, 'A' - 10
+    jmp .unn_cjk_put
+.unn_cjk_num:
+    add eax, '0'
+.unn_cjk_put:
+    ; r11 counts DOWN from the most significant digit, and the most
+    ; significant one goes FIRST: position is (digits - 1 - r11), not r11.
+    ; Writing it the other way spelled U+4E00 as 00E4.
+    lea rcx, [r9 - 1]
+    sub rcx, r11
+    add rcx, UNINAME_CJK_PREFIX_LEN
+    mov [rdi + rcx], al
+    jmp .unn_cjk_digit
+.unn_cjk_done:
+    mov byte [rdi + r10], 0
+    mov rax, r10
+    jmp .unn_done
+
+.unn_scan:
+    lea rbx, [rel uniname_blob]
+    lea r13, [rel uniname_blob_end]
+    xor r12, r12                        ; the running codepoint
+    mov r9, -1                          ; the previous one
+.unn_entry:
+    cmp rbx, r13
+    jae .unn_miss
+    movzx ecx, byte [rbx]
+    movzx eax, byte [rbx + 1]
+    add rbx, 2
+    cmp eax, 255
+    jne .unn_delta
+    mov eax, [rbx]
+    add rbx, 4
+    mov r12d, eax
+    jmp .unn_cp_done
+.unn_delta:
+    add r12, rax
+.unn_cp_done:
+    ; Out of the ordered region: what follows is the aliases.
+    cmp r12, r9
+    jl .unn_miss
+    mov r9, r12
+
+    ; The suffix goes in after the prefix already there, whether or not this
+    ; entry is the one: the next entry's prefix is this entry's.
+    mov rdx, [rbp - UNN_OUT]
+    add rdx, rcx
+.unn_copy:
+    mov al, [rbx]
+    inc rbx
+    mov [rdx], al
+    inc rdx
+    test al, al
+    jnz .unn_copy
+
+    cmp r12, [rbp - UNN_CP]
+    je .unn_hit
+    jg .unn_miss
+    jmp .unn_entry
+
+.unn_hit:
+    mov rax, [rbp - UNN_OUT]
+    sub rdx, rax                        ; the NUL is counted
+    lea rax, [rdx - 1]
+    jmp .unn_done
+
+.unn_miss:
+    mov rax, -1
+.unn_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC uniname_name
+
 ASM_INIT

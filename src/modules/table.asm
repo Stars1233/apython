@@ -33,6 +33,7 @@ extern posix_module_create
 extern io_module_create
 extern gc_module_create
 extern math_module_create
+extern unicodedata_module_create
 extern socket_module_create
 extern marshal_module_init
 extern signal_module_create
@@ -55,6 +56,7 @@ bm_n_posix:    db "posix", 0
 bm_n_io:       db "_iocore", 0
 bm_n_gc:       db "gc", 0
 bm_n_math:     db "math", 0
+bm_n_unicodedata: db "unicodedata", 0
 bm_n_socket:   db "_socketcore", 0
 bm_n_marshal:  db "marshal", 0
 bm_n_signal:   db "_signal", 0
@@ -87,6 +89,7 @@ builtin_module_table:
     dq bm_n_posix,    posix_module_create
     dq bm_n_sys,      0                 ; built by sys_module_init
     dq bm_n_time,     time_module_create
+    dq bm_n_unicodedata, unicodedata_module_create
 bmt_end:
 
 ; The row count, computed rather than declared.  It used to be a hand-kept
