@@ -189,12 +189,26 @@ slot differs from CPython's in two ways:
   agree exactly, which is what every caller of `bytes_like_ptr_len` actually
   reads.
 
-The second follows from the first two-thirds of `memoryview` being absent
-rather than from a choice: `cast()` to a multi-byte format is not implemented
-either, so a view carrying `format='i'` would have no machinery to decode an
-item with and would read one byte where four were meant.  Giving the slot a
-format to report is the easy half; the decode, the strides and the release
-protocol are the rest of `memoryview`.
+The second is now only half true.  `cast()` handles the native format codes --
+signed and unsigned integers of every width, `f`, `d`, `?` and `c` -- so a
+view MADE by cast() decodes its items correctly.  What a view obtained through
+the SLOT reports is still `'B'` and itemsize 1, because the slot has no field
+to carry a format in: widening it means a new calling convention and every
+`bytes_like_ptr_len` caller with it.
+
+Two things remain absent inside `memoryview` itself, and neither is what the
+slot's narrowness forces:
+
+- **A shaped cast.**  `cast(fmt, shape)` ignores the shape, so `ndim` is
+  always 1 and `shape` a 1-tuple.  CPython refuses multi-dimensional
+  sub-views and iteration outright -- `m[0]` on a 2-D view is a
+  NotImplementedError there -- so what is missing is `ndim`, `shape`,
+  `strides`, a nested `tolist()` and a tuple index.  Measured against
+  CPython's own test_memoryview, it buys nothing: not one of that module's
+  remaining failures here mentions shape or ndim.  Recorded rather than
+  built for exactly that reason.
+- **`e`, the half-float.**  The one native code `cast()` refuses and CPython
+  accepts.  Its decode is a bit layout rather than a load.
 
 ## `sys.stdout.buffer` is a FileIO beside the text half, not underneath it
 

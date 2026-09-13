@@ -1921,6 +1921,42 @@ END_FUNC memoryview_dunder_len
 ;; ============================================================================
 ;; Type object
 ;; ============================================================================
+;; ============================================================================
+;; memoryview_sq_item(rdi = self, rsi = the item index) -> rax = the item Value,
+;;   or 0 with an IndexError pending
+;;
+;; The sequence protocol's single-item read.  It was 0, so `reversed(mv)` was
+;; "'memoryview' object is not reversible" -- builtin_reversed asks for
+;; sq_item, and a mapping's mp_subscript is not it.  CPython's memoryview
+;; carries both for the same reason.
+;;
+;; The index arrives already adjusted for a negative, as sq_item's does.
+;; ============================================================================
+MSQ_SELF  equ 8
+MSQ_IDX   equ 16            ; the index, across the two calls
+MSQ_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL memoryview_sq_item, MSQ_FRAME
+    ; Frame slots, not pushes: a lone push before a call leaves it eight bytes
+    ; out of alignment, and everything under it inherits that.
+    mov [rbp - MSQ_SELF], rdi
+    mov [rbp - MSQ_IDX], rsi
+    call memoryview_check
+    mov rdi, [rbp - MSQ_SELF]
+    call memoryview_nitems
+    mov rsi, [rbp - MSQ_IDX]
+    test rsi, rsi
+    jl .msqi_range
+    cmp rsi, rax
+    jge .msqi_range
+    mov rdi, [rbp - MSQ_SELF]
+    call memoryview_item_value
+    mov edx, TAG_PTR
+    leave
+    ret
+.msqi_range:
+    RAISE exc_IndexError_type, "index out of bounds"
+END_FUNC memoryview_sq_item
+
 section .data
 
 align 8
@@ -1931,7 +1967,7 @@ memoryview_seq_methods:
     dq memoryview_len       ; +0: sq_length
     dq 0                    ; +8: sq_concat
     dq 0                    ; +16: sq_repeat
-    dq 0                    ; +24: sq_item
+    dq memoryview_sq_item   ; +24: sq_item
     dq 0                    ; +32: sq_ass_item
     dq 0                    ; +40: sq_contains
     dq 0                    ; +48: sq_inplace_concat

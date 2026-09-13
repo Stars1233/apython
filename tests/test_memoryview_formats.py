@@ -171,4 +171,19 @@ for fmt in "bBc?hi":
     except ValueError as e:
         print("hash %s refused: %s" % (fmt, e))
 
+# --- the sequence protocol ---------------------------------------------------
+#
+# sq_item was 0, so reversed() refused a memoryview outright: builtin_reversed
+# asks for it, and a mapping's mp_subscript is not it.
+
+print()
+print("reversed bytes:", list(reversed(memoryview(b"abc"))))
+print("reversed cast:", list(reversed(memoryview(b"\xff\xfe\x01\x02").cast("b"))))
+print("reversed empty:", list(reversed(memoryview(b""))))
+print("reversed wide:", list(reversed(memoryview(b"\x01\x00\x02\x00").cast("h"))))
+try:
+    memoryview(b"abc")[9]
+except IndexError as e:
+    print("out of bounds:", e)
+
 print("done")
