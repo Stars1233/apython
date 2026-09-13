@@ -638,6 +638,38 @@ DEF_FUNC main, 8
     ; emptied.  CPython flushes after finalization for the same reason.
     call fileobj_flush_std
 
+    ; stdout could not be emptied.  No Python saw this failure -- the bytes
+    ; never left the buffer -- so CPython reports it through the unraisable
+    ; hook and then exits 120, OVERRIDING whatever status the program asked
+    ; for: `print("x"); sys.exit(3)` down a closed pipe exits 120, not 3.
+    ; Reported here, after the traceback of an uncaught exception, because that
+    ; is the order CPython prints the two in, and while allocation is still
+    ; safe -- the collection just above has already run arbitrary __del__s.
+    extern stdout_flush_errno
+    mov rax, [rel stdout_flush_errno]
+    test rax, rax
+    jz .no_flush_failure
+    mov qword [rel stdout_flush_errno], 0   ; report it once
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    extern raise_oserror_build
+    call raise_oserror_build        ; rax = a BrokenPipeError, owned
+    test rax, rax
+    jz .no_flush_failure
+    push rax
+    push rax                        ; twice: the call below stays aligned
+    mov rdi, rax
+    extern sys_stdout_obj
+    mov rsi, [rel sys_stdout_obj]
+    extern traceback_unraisable_default
+    call traceback_unraisable_default
+    pop rdi
+    pop rdi
+    call obj_decref
+    mov ebx, 120
+.no_flush_failure:
+
     ; Break sys.modules cycle, now that no more Python can run: sys_modules_dict -> sys module -> sys_dict
     ;   -> "modules" entry -> sys_modules_dict
     ; NULL out sys_module.mod_dict and DECREF the old dict twice:

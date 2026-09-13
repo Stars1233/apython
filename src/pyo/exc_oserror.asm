@@ -543,6 +543,30 @@ DEF_FUNC raise_oserror, RO_FRAME
     call raise_exception_obj        ; does not return
 END_FUNC raise_oserror
 
+;; ============================================================================
+;; set_oserror(rdi = errno, rsi = filename PyStrObject* or 0) -> nothing
+;;
+;; raise_oserror without the unwind: exc_install rather than
+;; raise_exception_obj.  A function whose contract is already "report failure by
+;; RETURNING" cannot use raise_oserror -- that tail-jumps into
+;; eval_exception_unwind and abandons the C stack, so every owned reference
+;; between here and the eval frame leaks.  set_exception in eval.asm exists for
+;; the same reason, for a type-and-message pair rather than an errno.
+;; ============================================================================
+global set_oserror
+DEF_FUNC set_oserror
+    xor edx, edx                ; no second path
+    call raise_oserror_build    ; rax = the exception, owned
+    test rax, rax
+    jz .so_out
+    mov rdi, rax
+    extern exc_install
+    call exc_install            ; adopts the reference
+.so_out:
+    leave
+    ret
+END_FUNC set_oserror
+
 ;; raise_oserror_build(rdi = errno, rsi = filename or 0, rdx = a second
 ;;                     filename or 0) -> rax = the exception
 ;;

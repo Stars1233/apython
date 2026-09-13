@@ -139,11 +139,13 @@ reasoning that chose them and what changing one would cost.
   class.  Closing it means a second type, or a per-object flag set where the
   builtin is created rather than where it is registered.
 
-- **`print` to a broken pipe reports nothing.**  SIGPIPE is ignored now, so
-  the process survives and `os.write`/`file.write` raise BrokenPipeError --
-  but `print` itself answers None and the output is silently lost, where
-  CPython raises.  `apython foo.py | head` exits 0 with the tail of its output
-  discarded.  The write it makes does not check its result.
+- **`sys.stdout`'s repr is `<stdout>`, where CPython's is
+  `<_io.TextIOWrapper name='<stdout>' mode='w' encoding='utf-8'>`.**  Visible
+  wherever an unraisable report names the stream -- the "Exception ignored in:"
+  line a failed exit-time flush prints.  The exception line under it matches
+  exactly, and so does the exit code; only the object's own repr differs,
+  because the start-up streams are a `file_type` here rather than a Python
+  wrapper over a FileIO.
 
 - **A class's `__dict__` is short of `__dict__`, `__doc__` and
   `__weakref__`.**  `sorted(C.__dict__)` for a plain class is

@@ -168,11 +168,27 @@ DEF_FUNC fileobj_write
     mov rdx, r8                 ; len
     call fileobj_emit           ; rdi = self, rsi = buf, rdx = len
     pop rdi                     ; length
+    test rax, rax
+    js .write_failed
 
     ; Return char count as int
     call int_from_i64
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.write_failed:
+    ; CPython's sys.stdout.write raises when the underlying write actually
+    ; happens, and answers the count when the text only reached the buffer --
+    ; which is exactly what propagating fileobj_emit gives, since a buffered
+    ; write reports 0.
+    neg eax
+    mov edi, eax
+    xor esi, esi
+    extern set_oserror
+    call set_oserror
+    RET_NULL
+    leave
     ret
 
 .write_error:
@@ -185,7 +201,54 @@ DEF_FUNC fileobj_write
 END_FUNC fileobj_write
 
 ;; ============================================================================
-;; fileobj_emit(rdi = self, rsi = data, rdx = length)
+;; fileobj_write_all(rdi = fd, rsi = buf, rdx = length) -> rax = 0, or -errno
+;;
+;; write(2) is entitled to write less than it was asked, and the three writers
+;; below each discarded the count: a short write dropped the tail in silence.
+;; EINTR is already retried inside sys_write; this loops over progress.
+;;
+;; A zero-byte return for a non-zero length cannot happen on a blocking
+;; descriptor, and would spin for ever if it did, so it is reported as EIO.
+;; ============================================================================
+EIO equ 5
+FWA_FD    equ 8
+FWA_BUF   equ 16
+FWA_LEN   equ 24
+FWA_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC_LOCAL fileobj_write_all, FWA_FRAME
+    mov [rbp - FWA_FD], rdi
+    mov [rbp - FWA_BUF], rsi
+    mov [rbp - FWA_LEN], rdx
+.fwa_loop:
+    cmp qword [rbp - FWA_LEN], 0
+    jle .fwa_done
+    mov rdi, [rbp - FWA_FD]
+    mov rsi, [rbp - FWA_BUF]
+    mov rdx, [rbp - FWA_LEN]
+    call sys_write
+    test rax, rax
+    js .fwa_out                 ; rax is already -errno
+    jz .fwa_stalled
+    add [rbp - FWA_BUF], rax
+    sub [rbp - FWA_LEN], rax
+    jmp .fwa_loop
+.fwa_done:
+    xor eax, eax
+.fwa_out:
+    leave
+    ret
+.fwa_stalled:
+    mov eax, -EIO
+    leave
+    ret
+END_FUNC fileobj_write_all
+
+;; ============================================================================
+;; fileobj_emit(rdi = self, rsi = data, rdx = length) -> rax = 0, or -errno
+;;
+;; The result used to be whatever sys_write left behind and every caller threw
+;; it away, so a write that FAILED was indistinguishable from one that worked:
+;; `apython x.py | head` exited 0 with the tail of its output gone.
 ;;
 ;; One write, or a buffered one.  Anything longer than the buffer goes
 ;; straight out behind whatever is already waiting, which keeps the order
@@ -210,6 +273,11 @@ DEF_FUNC fileobj_emit, FE_FRAME
     cmp rax, FILE_BUFSZ
     jbe .fe_append
     call fileobj_drain
+    test rax, rax
+    js .fe_out                  ; the waiting bytes could not go out, so this
+                                ; chunk must not be buffered on top of them --
+                                ; the order would be wrong and the exit-time
+                                ; flush would report the failure a second time
     mov rdi, [rbp - FE_SELF]
     mov rdx, [rbp - FE_LEN]
     cmp rdx, FILE_BUFSZ
@@ -226,6 +294,8 @@ DEF_FUNC fileobj_emit, FE_FRAME
     mov rdi, [rbp - FE_SELF]
     mov rax, [rbp - FE_LEN]
     add [rdi + PyFileObject.file_len], rax
+    xor eax, eax
+.fe_out:
     leave
     ret
 
@@ -234,14 +304,16 @@ DEF_FUNC fileobj_emit, FE_FRAME
     mov rdi, [rdi + PyFileObject.file_fd]
     mov rsi, [rbp - FE_DATA]
     mov rdx, [rbp - FE_LEN]
-    call sys_write
+    call fileobj_write_all
     leave
     ret
 END_FUNC fileobj_emit
 
 ;; ============================================================================
-;; fileobj_drain(rdi = self) -- write out whatever is waiting.  Safe on an
-;; unbuffered file, where there never is any.
+;; fileobj_drain(rdi = self) -> rax = 0, or -errno
+;;
+;; Write out whatever is waiting.  Safe on an unbuffered file, where there never
+;; is any.
 ;; ============================================================================
 global fileobj_drain
 DEF_FUNC fileobj_drain, 8            ; 1 push, so rsp is 16-aligned
@@ -250,18 +322,27 @@ DEF_FUNC fileobj_drain, 8            ; 1 push, so rsp is 16-aligned
     mov rdx, [rbx + PyFileObject.file_len]
     test rdx, rdx
     jz .fd_done
+    ; The buffer is dropped whether or not the write succeeds, which is
+    ; deliberate and is what CPython does: a flush that failed mid-run gives
+    ; exit 1 and one traceback, where a buffer that never got written at all
+    ; gives the "Exception ignored" report at exit.  Keeping the bytes would
+    ; report the same failure twice.
     mov qword [rbx + PyFileObject.file_len], 0
     mov rdi, [rbx + PyFileObject.file_fd]
     lea rsi, [rbx + PyFileObject.file_buf]
-    call sys_write
+    call fileobj_write_all
+    pop rbx
+    leave
+    ret
 .fd_done:
+    xor eax, eax
     pop rbx
     leave
     ret
 END_FUNC fileobj_drain
 
 ;; ============================================================================
-;; fileobj_write_fd(rdi = fd, rsi = data, rdx = length)
+;; fileobj_write_fd(rdi = fd, rsi = data, rdx = length) -> rax = 0, or -errno
 ;;
 ;; What print() writes through.  print assembles a line in a stack buffer and
 ;; hands it to a descriptor rather than to a file object -- the `file=`
@@ -304,28 +385,55 @@ DEF_FUNC fileobj_write_fd, WFD_FRAME
     mov rdi, [rbp - WFD_FD]
     mov rsi, [rbp - WFD_BUF]
     mov rdx, [rbp - WFD_LEN]
-    call sys_write
+    call fileobj_write_all
     leave
     ret
 END_FUNC fileobj_write_fd
 
 ;; ============================================================================
-;; fileobj_flush_std() -- drain sys.stdout, wherever the interpreter is about
-;; to write somewhere else or stop.  Called at exit, and before anything is
-;; read from stdin.
+;; fileobj_flush_std() -> rax = 0, or -errno, which every caller ignores
+;;
+;; Drain sys.stdout, wherever the interpreter is about to write somewhere else
+;; or stop.  Called at exit, and before anything is read from stdin -- so it
+;; must NOT raise: two of its callers are inside the traceback printer and two
+;; more run past interp_finalizing.  A failure is recorded instead, and main
+;; reports it the way CPython's unraisable hook does.
 ;; ============================================================================
+section .bss
+; The errno of the FIRST flush of stdout that no Python could see, or 0.
+;
+; Set only here -- a write that failed while the program was running is reported
+; to the program as a BrokenPipeError and must not be reported a second time at
+; exit.  CPython draws the line in the same place: `for i in range(N): print(i)`
+; down a closed pipe exits 1 with one traceback, while `print("x")`, whose bytes
+; never left the buffer, gets the "Exception ignored" report and exit 120.
+global stdout_flush_errno
+stdout_flush_errno: resq 1
+section .text
+
 global fileobj_flush_std
 DEF_FUNC fileobj_flush_std
     extern sys_stdout_obj
     mov rdi, [rel sys_stdout_obj]
     test rdi, rdi
-    jz .ffs_done
+    jz .ffs_none
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel file_type]
     cmp rax, rcx
-    jne .ffs_done               ; sys.stdout was replaced by a Python object
+    jne .ffs_none               ; sys.stdout was replaced by a Python object
     call fileobj_drain
+    test rax, rax
+    jns .ffs_done
+    cmp qword [rel stdout_flush_errno], 0
+    jne .ffs_done               ; the first failure is the one reported
+    mov rcx, rax
+    neg rcx
+    mov [rel stdout_flush_errno], rcx
 .ffs_done:
+    leave
+    ret
+.ffs_none:
+    xor eax, eax
     leave
     ret
 END_FUNC fileobj_flush_std
@@ -336,9 +444,19 @@ END_FUNC fileobj_flush_std
 DEF_FUNC fileobj_flush
     mov rdi, [rdi]              ; self
     call fileobj_drain
+    test rax, rax
+    js .flush_failed
     RET_NONE
     leave                       ; then read it as an int tag and biased the
     V_PACK rax, rdx             ; singleton pointer into a large integer
+    ret
+.flush_failed:
+    neg eax
+    mov edi, eax
+    xor esi, esi
+    call set_oserror
+    RET_NULL
+    leave
     ret
 END_FUNC fileobj_flush
 
@@ -719,6 +837,9 @@ DEF_FUNC fileobj_buffer, FBF_FRAME
 
     mov [rbp - FBF_SELF], rbx
     call fileobj_drain              ; ordering: the text half goes out first
+    test rax, rax
+    js .fbf_drain_failed            ; handing out the binary half over bytes
+                                    ; that never went is the wrong order
     mov rdi, rbx
 
     ; _io.FileIO(fd, mode, closefd=False) -- and closefd matters: this fd
@@ -795,6 +916,11 @@ DEF_FUNC fileobj_buffer, FBF_FRAME
     pop rbx
     leave
     ret
+.fbf_drain_failed:
+    neg eax
+    mov edi, eax
+    xor esi, esi
+    call set_oserror
 .fbf_fail:
     xor eax, eax
     pop rbx
