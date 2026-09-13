@@ -63,7 +63,12 @@ extern posix_stat_result
 extern raise_exception
 extern raise_oserror
 extern str_concat
+extern str_type
 extern str_from_cstr_heap
+extern posix_name_object
+extern bytes_concat
+extern bytes_repr
+extern bytes_from_data
 extern sys_close
 extern sys_getdents64
 extern sys_lstat
@@ -160,10 +165,21 @@ DEF_FUNC direntry_repr, DER_FRAME
     jz .drp_out
     mov [rbp - DER_PART], rax
 
+    ; The name's repr, which is its own type's: a bytes entry shows b'x' where
+    ; a str entry shows 'x', exactly as CPython's DirEntry repr does.  str_repr
+    ; over a bytes would read its header at the wrong offsets.
     mov rdi, [rbp - DER_SELF]
     mov rdi, [rdi + PyDirEntryObject.de_name]
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rax, [rel str_type]
+    cmp rcx, rax
+    jne .drp_bytes_name
     extern str_repr
     call str_repr
+    jmp .drp_have_name
+.drp_bytes_name:
+    call bytes_repr
+.drp_have_name:
     test rax, rax
     jz .drp_fail_part
     push rax
@@ -194,6 +210,13 @@ DEF_FUNC direntry_repr, DER_FRAME
     mov rax, [rbp - DER_PART]
 
 .drp_out:
+    ; The TAG, which this function never set.  obj_repr TAIL-CALLS tp_repr, so
+    ; whatever (rax, edx) this leaves IS obj_repr's answer -- and edx was
+    ; whatever the last call happened to leave, which under the pool allocator
+    ; was usable and under APYTHON_MALLOC=libc was not: repr(entry) came back
+    ; as an int holding the string's ADDRESS.  bytes_repr_impl carries a
+    ; comment about the identical trap.
+    mov edx, TAG_PTR
     leave
     ret
 
@@ -203,7 +226,7 @@ DEF_FUNC direntry_repr, DER_FRAME
     jz .drp_zero
     call obj_decref
 .drp_zero:
-    xor eax, eax
+    RET_NULL
     leave
     ret
 END_FUNC direntry_repr
@@ -279,16 +302,48 @@ DEF_FUNC posixdir_follow_arg, PFA_FRAME
 END_FUNC posixdir_follow_arg
 
 ;; ============================================================================
+;; psd_join(rdi = the prefix, rsi = the name) -> rax = the two joined, or 0
+;;
+;; Both are the argument's own kind, so the concatenation is chosen from the
+;; prefix's type rather than threaded through another argument.  str_concat and
+;; bytes_concat both take Values and answer one; a pointer is its own Value.
+;; ============================================================================
+PJ_FRAME equ 16             ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL psd_join, PJ_FRAME
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .pj_bytes
+    call str_concat
+    leave
+    ret
+.pj_bytes:
+    call bytes_concat
+    leave
+    ret
+END_FUNC psd_join
+
+;; ============================================================================
 ;; direntry_statbuf(rdi = self, esi = follow, rdx = StatBuf*) -> eax
 ;;   0 = filled in, else the errno
 ;;
-;; The path is the entry's own, so there is no argument conversion to do: it
-;; was built as a str when the entry was, and a str's data is already the
-;; NUL-terminated bytes the syscall wants.
+;; The path is the entry's own, so there is no argument conversion to do: it is
+;; already the NUL-terminated bytes the syscall wants.  Which KIND it is has to
+;; be asked, though: a scandir over a bytes argument builds bytes entries, and
+;; PyBytesObject.data is at +24 where PyStrObject.data is at +40 -- reading one
+;; at the other's offset is sixteen bytes past the start of the object.
 ;; ============================================================================
 DEF_FUNC_BARE direntry_statbuf
     mov rax, [rdi + PyDirEntryObject.de_path]
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdi, [rel str_type]
+    cmp rcx, rdi
+    jne .dsb_bytes_path
     lea rdi, [rax + PyStrObject.data]
+    jmp .dsb_have_path
+.dsb_bytes_path:
+    lea rdi, [rax + PyBytesObject.data]
+.dsb_have_path:
     mov rax, rsi
     mov rsi, rdx
     test eax, eax
@@ -655,6 +710,10 @@ PSD_OWNED  equ 56           ; what posix_path_arg asked us to release
 PSD_ERR    equ 64           ; an errno held across the cleanup before it raises
 PSD_PREFIX equ 72           ; the directory, with a separator, as a str
 PSD_ITER   equ 80
+; Whether the argument was a BYTES.  CPython gives a bytes path bytes .name
+; and .path, and posix_path_arg used to discard the distinction, so both were
+; str -- which os.walk(b'.') and the bytes half of glob then propagate.
+PSD_ISBYTES equ 88
 PSD_FRAME  equ 96           ; + 2 pushes = 112, 16-aligned
 
 DEF_FUNC posix_scandir, PSD_FRAME
@@ -681,9 +740,11 @@ DEF_FUNC posix_scandir, PSD_FRAME
     jz .psd_fail
     mov rbx, rax
     mov [rbp - PSD_OWNED], rdx
+    mov [rbp - PSD_ISBYTES], rcx    ; a bytes path gets bytes names and paths
     jmp .psd_prefix
 .psd_dot:
     mov qword [rbp - PSD_PATH], 0
+    mov qword [rbp - PSD_ISBYTES], 0
     CSTRING rbx, "."
 
 .psd_prefix:
@@ -691,25 +752,36 @@ DEF_FUNC posix_scandir, PSD_FRAME
     ; argument that already ends in a separator does not get a second one, and
     ; an empty one gets none at all -- which is what os.path.join does and
     ; what makes scandir('') behave like scandir('.') with bare names.
+    ; ob_size is the length in bytes for both kinds, and .data is at a
+    ; different offset for each -- so the separator test branches too.
     mov rdi, rbx
-    call str_from_cstr_heap
+    mov esi, [rbp - PSD_ISBYTES]
+    call posix_name_object
     test rax, rax
     jz .psd_fail
     mov [rbp - PSD_PREFIX], rax
-    mov rcx, [rax + PyStrObject.ob_size]
+    mov rcx, [rax + PyStrObject.ob_size]    ; ob_size is +16 for both
     test rcx, rcx
     jz .psd_open                    ; empty: no separator
+    cmp qword [rbp - PSD_ISBYTES], 0
+    jne .psd_prefix_sep_bytes
     cmp byte [rax + PyStrObject.data + rcx - 1], '/'
     je .psd_open
+    jmp .psd_prefix_add_sep
+.psd_prefix_sep_bytes:
+    cmp byte [rax + PyBytesObject.data + rcx - 1], '/'
+    je .psd_open
+.psd_prefix_add_sep:
     push rax
     CSTRING rdi, "/"
-    call str_from_cstr_heap
+    mov esi, [rbp - PSD_ISBYTES]
+    call posix_name_object
     test rax, rax
     jz .psd_fail_pop
     mov rsi, rax
     mov rdi, [rbp - PSD_PREFIX]
     push rsi
-    call str_concat
+    call psd_join
     pop rsi
     mov r12, rax
     mov rdi, rsi
@@ -796,13 +868,14 @@ DEF_FUNC posix_scandir, PSD_FRAME
     je .psd_next
 
 .psd_keep:
-    call str_from_cstr_heap
+    mov esi, [rbp - PSD_ISBYTES]
+    call posix_name_object
     test rax, rax
     jz .psd_fail
     push rax                        ; the name
     mov rdi, [rbp - PSD_PREFIX]
     mov rsi, rax
-    call str_concat
+    call psd_join
     test rax, rax
     jz .psd_fail_pop
     push rax                        ; the path

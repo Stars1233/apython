@@ -237,10 +237,22 @@ PPA_EXC   equ 32            ; current_exception before __fspath__ ran
 PPA_ORIG  equ 40            ; the argument as given, for the message
 PPA_WHO   equ 48            ; "<func>: <arg>", for the message, or 0
 PPA_KINDS equ 56            ; which kinds this caller accepts
-PPA_FRAME equ 64            ; + 0 pushes = 64
+; Whether the path RESOLVED to a bytes -- after __fspath__, which may answer
+; either kind.  CPython gives a bytes path bytes results, and this function
+; threw the distinction away: .ppa_str and .ppa_bytes converged and every
+; caller built str.  os.scandir(b'.'), os.listdir(b'.') and os.readlink on a
+; bytes path were all str here.
+PPA_ISBYTES equ 64
+PPA_FRAME equ 80            ; + 0 pushes = 80, 16-aligned
 
 ;; posix_path_arg(rdi = the argument Value, rsi = a "<func>: <arg>" prefix or
 ;;                0, edx = the accepted kinds)
+;;   -> rax = a NUL-terminated C string, rdx = an object to release or 0,
+;;      rcx = 1 when the path resolved to a BYTES, 0 when it was a str
+;;
+;; rcx is a real return value, not leftover scratch: a caller that builds a
+;; name or a path out of what it finds has to build it of the argument's own
+;; kind.  Callers that only pass the string to a syscall ignore it.
 ;;
 ;; CPython names the function and the argument in its refusal -- "stat: path
 ;; should be string, bytes, os.PathLike or integer, not float" -- and lists
@@ -298,10 +310,12 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     jmp .ppa_classify
 
 .ppa_str:
+    mov qword [rbp - PPA_ISBYTES], 0
     mov rcx, [rdi + PyStrObject.ob_size]
     lea rax, [rdi + PyStrObject.data]
     jmp .ppa_checked
 .ppa_bytes:
+    mov qword [rbp - PPA_ISBYTES], 1
     mov rcx, [rdi + PyBytesObject.ob_size]
     lea rax, [rdi + PyBytesObject.data]
 
@@ -319,6 +333,7 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     jne .ppa_embedded_nul
     mov rax, [rbp - PPA_PTR]
     mov rdx, [rbp - PPA_OWNED]  ; the __fspath__ result, now the caller's
+    mov rcx, [rbp - PPA_ISBYTES]
     leave
     ret
 
@@ -409,6 +424,58 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     call raise_exception
     ud2
 END_FUNC posix_path_arg
+
+;; ============================================================================
+;; posix_name_object(rdi = a NUL-terminated C string, esi = 1 for bytes)
+;;   -> rax = a str or a bytes holding it, or 0
+;;
+;; A directory entry's name, of the kind the ARGUMENT was.  CPython gives a
+;; bytes path bytes names and a str path str names, and posix_path_arg used to
+;; discard which it had been handed, so every caller built str.
+;;
+;; Shared with posixdir.asm, which needs the same decision three times.
+;; ============================================================================
+PNO_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+global posix_name_object
+DEF_FUNC posix_name_object, PNO_FRAME
+    test esi, esi
+    jnz .pno_bytes
+    call str_from_cstr_heap
+    leave
+    ret
+.pno_bytes:
+    push rdi
+    push rdi                    ; twice: rsp stays 16-byte aligned
+    call ap_strlen
+    pop rdi
+    pop rdi
+    mov rsi, rax
+    call bytes_from_data
+    leave
+    ret
+END_FUNC posix_name_object
+
+;; ============================================================================
+;; posix_sized_object(rdi = data, rsi = length, rdx = 1 for bytes)
+;;   -> (rax, edx) = a str or a bytes holding it
+;;
+;; The same decision for a run of bytes that is NOT NUL-terminated, which is
+;; what readlink(2) writes.
+;; ============================================================================
+PSO_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+global posix_sized_object
+DEF_FUNC posix_sized_object, PSO_FRAME
+    test rdx, rdx
+    jnz .pso_bytes
+    call str_new_heap
+    leave
+    ret
+.pso_bytes:
+    call bytes_from_data
+    mov edx, TAG_PTR            ; bytes_from_data answers a bare pointer
+    leave
+    ret
+END_FUNC posix_sized_object
 
 ;; ============================================================================
 ;; posix_stat_result(rdi = struct stat *) -> rax = a stat_result, or 0
@@ -719,9 +786,10 @@ PLD_BUF   equ 32
 PLD_N     equ 40            ; bytes getdents64 wrote this round
 PLD_OFF   equ 48            ; the cursor into the buffer
 PLD_OWNED equ 56            ; what posix_path_arg asked us to release
+PLD_ISBYTES equ 72          ; the argument's kind, so the names are built of it
 PLD_ERR   equ 64            ; the errno of a failed getdents64, held across
                             ; the cleanup that has to happen before it raises
-PLD_FRAME equ 64            ; + 2 pushes = 80, 16-byte aligned
+PLD_FRAME equ 80            ; + 2 pushes = 96, 16-byte aligned
 
 DEF_FUNC posix_listdir, PLD_FRAME
     push rbx
@@ -745,9 +813,11 @@ DEF_FUNC posix_listdir, PLD_FRAME
     jz .pld_fail
     mov rbx, rax
     mov [rbp - PLD_OWNED], rdx
+    mov [rbp - PLD_ISBYTES], rcx    ; a bytes path gets bytes names
     jmp .pld_open
 .pld_dot:
     mov qword [rbp - PLD_PATH], 0
+    mov qword [rbp - PLD_ISBYTES], 0
     CSTRING rbx, "."
 
 .pld_open:
@@ -825,7 +895,11 @@ DEF_FUNC posix_listdir, PLD_FRAME
     je .pld_next
 
 .pld_keep:
-    call str_from_cstr_heap
+    ; Of the argument's own kind: os.listdir(b'.') is a list of bytes in
+    ; CPython and was a list of str here -- the same defect as scandir's,
+    ; in the same function, and not recorded beside it.
+    mov esi, [rbp - PLD_ISBYTES]
+    call posix_name_object
     test rax, rax
     jz .pld_fail
     mov rbx, rax
@@ -1307,7 +1381,8 @@ PRL_BUF   equ 16
 PRL_SIZE  equ 24
 PRL_PTR   equ 32
 PRL_OWNED equ 40            ; what posix_path_arg asked us to release
-PRL_FRAME equ 48            ; + 0 pushes = 48
+PRL_ISBYTES equ 48          ; the argument's kind: the answer is built of it
+PRL_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
 
 DEF_FUNC posix_readlink, PRL_FRAME
     test rsi, rsi
@@ -1322,6 +1397,7 @@ DEF_FUNC posix_readlink, PRL_FRAME
     jz .prl_fail
     mov [rbp - PRL_PTR], rax
     mov [rbp - PRL_OWNED], rdx
+    mov [rbp - PRL_ISBYTES], rcx
     mov qword [rbp - PRL_SIZE], 512
 .prl_try:
     mov rdi, [rbp - PRL_SIZE]
@@ -1362,9 +1438,13 @@ DEF_FUNC posix_readlink, PRL_FRAME
     POSIX_PATH_CHECK rax, [rbp - PRL_PATH], [rbp - PRL_OWNED]
 .prl_have:
     POSIX_PATH_DONE [rbp - PRL_OWNED]
+    ; readlink(b'x') answers a bytes in CPython, as scandir and listdir do.
+    ; The target is not NUL-terminated -- readlink does not terminate it -- so
+    ; the length is carried rather than measured.
     mov rdi, [rbp - PRL_BUF]
     mov rsi, rax
-    call str_new_heap
+    mov rdx, [rbp - PRL_ISBYTES]
+    call posix_sized_object
     push rax
     push rdx
     mov rdi, [rbp - PRL_BUF]

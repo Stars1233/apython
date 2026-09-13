@@ -206,16 +206,6 @@ reasoning that chose them and what changing one would cost.
   the two- and three-argument forms do is right; this is the one-argument form
   stored on a class.
 
-- **`scandir()` on a BYTES path yields str entries.**  CPython gives a bytes
-  path bytes names and bytes paths back; here the argument goes through
-  `posix_path_arg`, which hands over a C string, and the entries are built
-  from it as str.  Everything works, and works on the right files -- what
-  differs is the type of `.name` and `.path`, which `os.walk(b'.')` and the
-  bytes half of `glob` then propagate.  Fixing it means carrying the
-  argument's own kind through the getdents64 loop and building bytes objects
-  on that side, which is the second half of every string-building step in
-  `posix_scandir`.
-
 - **A raise from a C-level slot is a non-local jump, so a C caller cannot
   absorb it.**  `slot_mp_subscript` and its siblings end in `slot_reraise`,
   which tail-jumps into `eval_exception_unwind`; a builtin's own miss --
