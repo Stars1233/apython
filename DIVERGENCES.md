@@ -84,6 +84,20 @@ the reasoning rather than from scratch.
   each group rather than sharing the source iterator, and `tee` materialises
   the source.  Every observable answer matches for a finite iterable.
 
+- **`itertools`' functions are functions, where CPython's are classes.**
+  `lib/itertools.py` writes all but `chain` as generator functions, so
+  `type(itertools.count(1))` is `generator` rather than `itertools.count`,
+  `isinstance(x, itertools.count)` is a TypeError rather than an answer, the
+  reprs read as a generator's, and none of them pickle -- CPython's each carry
+  a `__reduce__`.
+
+  Every VALUE they produce is CPython's; what differs is what the iterator
+  itself says it is.  Closing it means eighteen classes with `__iter__`,
+  `__next__`, `__reduce__` and `__setstate__` apiece, in place of eighteen
+  `yield` statements, for introspection that only CPython's own test_itertools
+  asks about.  `chain` is a class already, because `from_iterable` needed
+  somewhere to live.
+
 - **bytearray's read-only methods copy.**  bytes keeps its data inline and
   bytearray keeps it out of line, so the shared method bodies cannot read a
   bytearray directly; each wrapper builds a temporary bytes, runs the bytes
