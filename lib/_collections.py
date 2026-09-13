@@ -27,58 +27,72 @@ __all__ = ["deque", "defaultdict"]
 # defaultdict have no such fallback there and must stay.
 
 
-class defaultdict:
-    """Dict-like that calls a factory function for missing keys."""
+class defaultdict(dict):
+    """defaultdict(default_factory=None, /, [...]) --> dict with a default.
 
-    def __init__(self, default_factory=None, *args, **kwargs):
-        self._data = dict(*args, **kwargs)
+    A real dict subclass, which is not a detail: isinstance(d, dict) is what
+    json, pprint, copy and a great deal of ordinary code branch on, and every
+    dict method this class does not mention -- setdefault, clear, popitem,
+    fromkeys, ==, reversed -- is inherited rather than forwarded.  It used to
+    be a plain class holding a dict in self._data, and CPython's own
+    test_defaultdict reported 988 errors against it.
+
+    __missing__ is the whole of the default behaviour, and the interpreter
+    already consults it on any dict subclass: dict_subscript checks the type
+    and calls it, so `d[k]` reaches this without a __getitem__ here.  Defining
+    one would be worse than redundant -- it would force a mapping slot table
+    of this class's own and lose the direct read.
+    """
+
+    __slots__ = ("default_factory",)
+
+    def __init__(self, default_factory=None, /, *args, **kwargs):
+        if default_factory is not None and not callable(default_factory):
+            raise TypeError("first argument must be callable or None")
+        super().__init__(*args, **kwargs)
         self.default_factory = default_factory
 
-    def __getitem__(self, key):
-        try:
-            return self._data[key]
-        except KeyError:
-            if self.default_factory is None:
-                raise
-            value = self.default_factory()
-            self._data[key] = value
-            return value
-
-    def __setitem__(self, key, value):
-        self._data[key] = value
-
-    def __delitem__(self, key):
-        del self._data[key]
-
-    def __contains__(self, key):
-        return key in self._data
-
-    def __len__(self):
-        return len(self._data)
-
-    def __iter__(self):
-        return iter(self._data)
+    def __missing__(self, key):
+        if self.default_factory is None:
+            raise KeyError(key)
+        value = self.default_factory()
+        self[key] = value
+        return value
 
     def __repr__(self):
-        return "defaultdict(%r, %r)" % (self.default_factory, self._data)
+        # dict.__repr__ carries the recursion guard, so a dict that contains
+        # itself prints {...} rather than running out of stack.
+        return "%s(%r, %s)" % (type(self).__name__, self.default_factory,
+                               dict.__repr__(self))
 
-    def get(self, key, default=None):
-        return self._data.get(key, default)
+    def copy(self):
+        return type(self)(self.default_factory, self)
 
-    def keys(self):
-        return self._data.keys()
+    __copy__ = copy
 
-    def values(self):
-        return self._data.values()
+    def __reduce__(self):
+        args = () if self.default_factory is None else (self.default_factory,)
+        return type(self), args, None, None, iter(self.items())
 
-    def items(self):
-        return self._data.items()
+    # The three merge operators answer a defaultdict, keeping the factory, as
+    # CPython's do -- dict's own would hand back a plain dict.
+    def __or__(self, other):
+        if not isinstance(other, dict):
+            return NotImplemented
+        new = self.copy()
+        new.update(other)
+        return new
 
-    def pop(self, key, *args):
-        return self._data.pop(key, *args)
+    def __ror__(self, other):
+        if not isinstance(other, dict):
+            return NotImplemented
+        new = type(self)(self.default_factory, other)
+        new.update(self)
+        return new
 
-    def update(self, *args, **kwargs):
-        self._data.update(*args, **kwargs)
+    def __ior__(self, other):
+        self.update(other)
+        return self
 
 
 class deque:
