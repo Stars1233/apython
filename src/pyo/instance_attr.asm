@@ -345,6 +345,22 @@ DEF_FUNC dict_has_data_descr
     test r12, r12
     jz .dhdd_next
     mov rdi, [rax + DictEntry.value]
+    ; __dict__ and __weakref__ are in nearly every class's dict and must not
+    ; make this answer yes for all of them -- see GS_LAYOUT in object.inc.
+    ; attr_may_be_data_descr still says yes for them, which is what the live
+    ; ranking check and the per-name inline-cache question need; this is the
+    ; cached per-class over-approximation, and only it skips them.
+    V_TEST_PTR rdi, rcx
+    ja .dhdd_ask
+    test rdi, rdi
+    jz .dhdd_next
+    mov rcx, [rdi + PyObject.ob_type]
+    lea rdx, [rel getset_descr_type]
+    cmp rcx, rdx
+    jne .dhdd_ask
+    test qword [rdi + PyGetSetDescrObject.gs_flags], GS_LAYOUT
+    jnz .dhdd_next
+.dhdd_ask:
     call attr_may_be_data_descr
     test eax, eax
     jnz .dhdd_yes

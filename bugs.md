@@ -147,48 +147,16 @@ reasoning that chose them and what changing one would cost.
   because the start-up streams are a `file_type` here rather than a Python
   wrapper over a FileIO.
 
-- **A class's `__dict__` is short of `__dict__` and `__weakref__`.**  `__doc__`
-  was the third and is fixed.  `sorted(C.__dict__)` for a plain class is
-  `['__doc__', '__module__']` here and
-  `['__dict__', '__doc__', '__module__', '__weakref__']` in CPython.  Anything
-  that walks a class's own dict and expects the descriptors sees a shorter one;
-  `inspect.getattr_static` is the load-bearing one, because its
-  `_shadowed_dict` requires `type(C.__dict__['__dict__'])` to be
-  `types.GetSetDescriptorType` with a matching `__name__` and `__objclass__`,
-  and treats anything else as a dict that SHADOWS the real one -- so a
-  stand-in object will not do, and neither will a shared singleton.
-
-  **The rule, measured**, is CPython's `type_new_descriptors` and not "always
-  add two": the `__dict__` getset appears only when THIS class contributes the
-  instance dict (`base->tp_dictoffset == 0`), and the `__weakref__` getset only
-  when it contributes weak-referenceability (`base->tp_weaklistoffset == 0 &&
-  base->tp_itemsize == 0`).  So a subclass of a plain class gets neither, a
-  subclass of a slotted one gets both, an `int`/`bytes`/`tuple` subclass gets
-  `__dict__` only, a `str`/`list`/`dict`/`float` subclass gets both, an
-  `Exception` subclass gets `__weakref__` only, and a metaclass gets neither.
-  A `__slots__` naming either name keeps its own entry for it.
-
-  **The trap that makes this more than a fill-in**: a getset IS a data
-  descriptor here (`attr_is_data_descr`), so `dict_has_data_descr` would answer
-  yes for EVERY user class and `type_refresh_attr_flags` would set
-  TYPE_FLAG_MRO_HAS_DATA_DESCR process-wide -- forcing the descriptor-first
-  attribute order on everything, which is the order the entry below is about
-  and which `src/typecache.asm` exists to avoid.  The inline caches are already
-  safe (they ask the per-NAME `attr_may_be_data_descr`, so `o.__dict__` is
-  simply never specialised); only the cached per-class flag would be wrong.
-  The way out is a flag on the descriptor -- these two stand for slots in the
-  instance LAYOUT rather than for anything the class chose to keep, and the
-  names cannot reach an instance dict by any ordinary route -- excluded in
-  `dict_has_data_descr` only, so `attr_is_data_descr` keeps answering
-  truthfully for the live ranking check.
-
-  `__weakref__` also needs a reader: weakrefs live in the side table in
-  `src/pyo/weakrefmod.asm` rather than in a slot, so the getset's getter is a
-  new `weakref_chain` lookup answering the first reference or None.  And
-  because the store side gates on the same flag this deliberately leaves clear,
-  `c.__dict__ = d` would keep adding a `'__dict__'` KEY rather than replacing
-  the dict -- which is what it does today, so not a regression, but it is the
-  part that stays open after the read side lands.
+- **`o.__dict__ = d` and `o.__weakref__ = x` go into the instance dict.**  The
+  two getsets are in the class dict now and the READ side finds them, but they
+  carry `GS_LAYOUT` so that `TYPE_FLAG_MRO_HAS_DATA_DESCR` stays clear on every
+  class -- and the store side (`instance_setattr`, `op_store_attr`) gates on
+  exactly that bit.  So `c.__dict__ = d` adds a `'__dict__'` KEY rather than
+  replacing the dict, and `c.__weakref__ = 5` succeeds where CPython says
+  `attribute '__weakref__' of 'C' objects is not writable`.  Both did the same
+  before the descriptors existed, so this is what is LEFT rather than anything
+  new; closing it means a name test on the store fallback, which every
+  `self.x = v` would pay for.
 
 - **`random.randbytes` is seconds per megabyte**, where CPython's is instant:
   `_random` is Python here and CPython's is C.  2.4 s/MiB through this tree's

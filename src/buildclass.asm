@@ -941,7 +941,7 @@ DEF_FUNC type_from_parts
     push r13
     push r14
     push r15
-    sub rsp, 72             ; the epilogue's `add rsp` must match this
+    sub rsp, 88             ; the epilogue's `add rsp` must match this
 
 TFP_BASE  equ 48            ; the layout base: the widest of the bases
 TFP_BASES equ 56            ; the bases tuple, or NULL
@@ -950,6 +950,12 @@ TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
 TFP_SLOT1 equ 80            ; a one-tuple built for `__slots__ = 'name'`, owned
 TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
 TFP_WANTDICT equ 96         ; 1 when __slots__ names '__dict__' itself
+; Whether THIS class contributes the instance dict, and whether it contributes
+; weak-referenceability -- the two questions that decide the __dict__ and
+; __weakref__ entries.  Both are answered where TFP_BASE is in scope, because
+; bc_base_has_dict reads it through the saved rbp.
+TFP_ADDDICT equ 104
+TFP_ADDWEAK equ 112
     mov r14, rdi                ; class name str
     mov r15, rdx                ; namespace dict, becomes tp_dict
     mov [rbp - TFP_BASES], rsi
@@ -2157,6 +2163,64 @@ TFP_WANTDICT equ 96         ; 1 when __slots__ names '__dict__' itself
     mov rdi, r12
     call subclass_register
 
+    ; __dict__ and __weakref__, the two entries type_new adds that this did not.
+    ;
+    ; CPython's rule is not "this class's instances have them", it is "THIS
+    ; CLASS contributes them": type_new_descriptors sets tp_dictoffset and
+    ; tp_weaklistoffset only for what the class itself adds, and
+    ; type_new_set_slots picks the getset table off those two fields before
+    ; PyType_Ready inherits anything.  So `class D(C): pass` over a plain C gets
+    ; neither, `class S(Slotted): pass` gets both, an int subclass gets the
+    ; dict and not the weakref -- int keeps its value inline and variable-sized
+    ; -- and a metaclass gets neither.
+    ;
+    ; Asked HERE because the metatype branch above has had its say about
+    ; tp_dictoffset, mro_compute has run (weakref_referenceable does a dunder
+    ; lookup), and type_refresh_attr_flags below has not -- so the flag it sets
+    ; is computed once, over the final dict.
+    mov qword [rbp - TFP_ADDDICT], 0
+    mov qword [rbp - TFP_ADDWEAK], 0
+
+    ; Does this class contribute the instance dict?  Its instances have one
+    ; (tp_dictoffset non-zero, and no __slots__ suppressing it) and the layout
+    ; base did not already supply one.  bc_base_has_dict is called from here
+    ; and nowhere else: it reads TFP_BASE out of this frame.
+    cmp qword [r12 + PyTypeObject.tp_dictoffset], 0
+    je .bc_layout_weak
+    test qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HAS_SLOTS
+    jnz .bc_layout_weak
+    call bc_base_has_dict
+    test eax, eax
+    jnz .bc_layout_weak
+    mov qword [rbp - TFP_ADDDICT], 1
+
+.bc_layout_weak:
+    ; ...and weak-referenceability.  weakref_referenceable already answers
+    ; CPython's question -- it walks down to the first static ancestor and
+    ; knows which three keep their value inline -- so "this class adds it" is
+    ; "its instances can be referenced and its base's could not".  Asked before
+    ; anything is written, because the getset installed below is itself what a
+    ; later call would find.
+    mov rdi, r12
+    extern weakref_referenceable
+    call weakref_referenceable
+    test eax, eax
+    jz .bc_layout_install
+    mov rdi, [rbp - TFP_BASE]
+    test rdi, rdi
+    jz .bc_layout_adds_weak     ; no base yet: object, which is not referenceable
+    call weakref_referenceable
+    test eax, eax
+    jnz .bc_layout_install      ; the base already had it
+.bc_layout_adds_weak:
+    mov qword [rbp - TFP_ADDWEAK], 1
+
+.bc_layout_install:
+    mov rdi, r12
+    mov rsi, [rbp - TFP_ADDDICT]
+    mov rdx, [rbp - TFP_ADDWEAK]
+    call bc_layout_entries
+
     ; Does anything in this MRO define a __getattribute__ of its own?  Asked
     ; once, here, instead of on every attribute access.  tp_mro, tp_dict and
     ; tp_bases are all set by now, which is all it reads.
@@ -2246,7 +2310,7 @@ TFP_WANTDICT equ 96         ; 1 when __slots__ names '__dict__' itself
     mov qword [rel build_class_pending], 0
     mov rax, r12
 
-    add rsp, 72                 ; must match the sub in the prologue
+    add rsp, 88                 ; must match the sub in the prologue
     pop r15
     pop r14
     pop r13
@@ -2262,7 +2326,7 @@ TFP_WANTDICT equ 96         ; 1 when __slots__ names '__dict__' itself
     mov rdi, r12
     call obj_decref
     xor eax, eax
-    add rsp, 72                 ; must match the sub in the prologue
+    add rsp, 88                 ; must match the sub in the prologue
     pop r15
     pop r14
     pop r13
@@ -2385,6 +2449,122 @@ DEF_FUNC_LOCAL bc_base_has_dict
     leave
     ret
 END_FUNC bc_base_has_dict
+
+;; ============================================================================
+;; bc_layout_entries(rdi = the new heaptype, rsi = 1 to add __dict__,
+;;                   rdx = 1 to add __weakref__) -> nothing
+;;
+;; One read-only GS_NAMED getset per name, owned by the type, and skipped when
+;; the name is already taken -- which is what keeps a `__slots__` naming either
+;; of them from losing the member descriptor the slot loop just made.
+;;
+;; The descriptors are per-class and carry gs_owner, because
+;; inspect._shadowed_dict tests `class_dict.__objclass__ is entry` and treats
+;; anything else as a dict that SHADOWS the real one: a shared singleton would
+;; stop getattr_static reading instance attributes for every class in the
+;; process.  gs_owner is borrowed, as everywhere else -- the type owns the dict
+;; that owns the descriptor, so it cannot outlive it.
+;;
+;; Read-only on purpose.  CPython's __weakref__ getset has no setter at all,
+;; and __dict__'s cannot be reached from here anyway: the store side gates on
+;; TYPE_FLAG_MRO_HAS_DATA_DESCR, which GS_LAYOUT deliberately keeps clear.
+;; bugs.md carries what that leaves open.
+;; ============================================================================
+BLE_TYPE  equ 8
+BLE_DICT  equ 16
+BLE_ADDD  equ 24
+BLE_ADDW  equ 32
+BLE_FRAME equ 40            ; + 1 push = 48, 16-aligned
+DEF_FUNC_LOCAL bc_layout_entries, BLE_FRAME
+    push rbx
+    mov [rbp - BLE_TYPE], rdi
+    mov [rbp - BLE_ADDD], rsi
+    mov [rbp - BLE_ADDW], rdx
+    mov rbx, [rdi + PyTypeObject.tp_dict]
+    mov [rbp - BLE_DICT], rbx
+    test rbx, rbx
+    jz .ble_done
+
+    cmp qword [rbp - BLE_ADDD], 0
+    je .ble_weak
+    lea rdi, [rel ble_dict_name]
+    mov rsi, [rbp - BLE_TYPE]
+    extern obj_generic_attr
+    lea rdx, [rel obj_generic_attr]
+    call bc_add_layout_getset
+
+.ble_weak:
+    cmp qword [rbp - BLE_ADDW], 0
+    je .ble_done
+    lea rdi, [rel ble_weakref_name]
+    mov rsi, [rbp - BLE_TYPE]
+    extern weakref_slot_get
+    lea rdx, [rel weakref_slot_get]
+    call bc_add_layout_getset
+
+.ble_done:
+    pop rbx
+    leave
+    ret
+END_FUNC bc_layout_entries
+
+;; ============================================================================
+;; bc_add_layout_getset(rdi = name cstr, rsi = the owning type,
+;;                      rdx = a tp_getattr-shaped getter) -> nothing
+;;
+;; GS_NAMED means the getter is called (self, gs_name) and answers from the
+;; name, which is what obj_generic_attr and weakref_slot_get both are; see
+;; dict_add_getattr in methods/init.asm, which this mirrors for a dict that is
+;; not a static type's.
+;; ============================================================================
+BAL_NAME  equ 8
+BAL_DESC  equ 16
+BAL_OWNER equ 24
+BAL_GET   equ 32
+BAL_FRAME equ 40            ; + 1 push = 48, 16-aligned
+DEF_FUNC_LOCAL bc_add_layout_getset, BAL_FRAME
+    push rbx
+    mov [rbp - BAL_OWNER], rsi
+    mov [rbp - BAL_GET], rdx
+    extern str_intern_cstr
+    call str_intern_cstr
+    test rax, rax
+    jz .bal_done
+    mov [rbp - BAL_NAME], rax
+    mov rbx, [rbp - BAL_OWNER]
+    mov rbx, [rbx + PyTypeObject.tp_dict]
+    mov rdi, rbx
+    mov rsi, rax
+    call dict_get
+    test rax, rax               ; a Value; 0 is the miss
+    jnz .bal_drop_name          ; the class already has the name
+
+    mov rdi, [rbp - BAL_GET]
+    xor esi, esi                ; read-only
+    mov rdx, [rbp - BAL_NAME]
+    extern getset_descr_new
+    call getset_descr_new
+    test rax, rax
+    jz .bal_drop_name
+    mov [rbp - BAL_DESC], rax
+    mov qword [rax + PyGetSetDescrObject.gs_flags], GS_NAMED | GS_LAYOUT
+    mov rcx, [rbp - BAL_OWNER]
+    mov [rax + PyGetSetDescrObject.gs_owner], rcx   ; borrowed
+    mov rdi, rbx
+    mov rsi, [rbp - BAL_NAME]
+    mov rdx, rax
+    call dict_set
+    mov rdi, [rbp - BAL_DESC]
+    call obj_decref             ; dict_set took its own
+.bal_drop_name:
+    mov rdi, [rbp - BAL_NAME]
+    call obj_decref             ; str_intern_cstr's, and getset_descr_new took
+                                ; one of its own for gs_name
+.bal_done:
+    pop rbx
+    leave
+    ret
+END_FUNC bc_add_layout_getset
 
 ;; ============================================================================
 ;; type_apply_hash_rule(rdi = the type, rsi = the class dict)
@@ -2680,6 +2860,8 @@ global bc_prepare_name
 bc_prepare_name: db "__prepare__", 0
 tsn_name: db "__set_name__", 0
 bc_init_name: db "__init__", 0
+ble_dict_name:    db "__dict__", 0
+ble_weakref_name: db "__weakref__", 0
 bc_doc_name:   db "__doc__", 0
 bc_module_name: db "__module__", 0
 bc_dunder_name_name: db "__name__", 0

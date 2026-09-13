@@ -422,6 +422,23 @@ endstruc
 ; would need a thunk of its own whose only content is the name it passes on.
 GS_NAMED    equ 1
 
+; A getset that stands for a slot in the instance LAYOUT rather than for
+; something the class chose to keep: __dict__ and __weakref__, which type_new
+; puts in the dict of very nearly every class.
+;
+; It is a data descriptor like any other getset, and attr_is_data_descr still
+; says so -- that is what makes `o.__dict__` find it ahead of a stray instance
+; entry, and what keeps LOAD_ATTR_INSTANCE from specialising the name into a
+; plain dict read.  But it is in EVERY class's dict, so COUNTING it in
+; TYPE_FLAG_MRO_HAS_DATA_DESCR would set that bit process-wide and force the
+; descriptor-first attribute order on every class in the tree -- the one thing
+; typecache.asm exists to avoid.
+;
+; The names it carries cannot reach an instance dict by any ordinary route, so
+; the instance-dict-first order is also the CORRECT order for them; only
+; dict_has_data_descr, which is that cached over-approximation, skips it.
+GS_LAYOUT   equ 2
+
 ; types.SimpleNamespace: attributes are the entries of a dict.
 struc PySimpleNamespaceObject
     .ob_refcnt: resq 1  ; +0
