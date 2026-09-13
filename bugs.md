@@ -185,26 +185,26 @@ reasoning that chose them and what changing one would cost.
   machinery under `sys.settrace` and a jump, not the compiler.  It sits with
   the rest of the settrace divergence below.
 
-- **`super(C, obj)` on a PROXY answers differently depending on what comes
-  after it in the file.**  CPython's supercheck asks an object what class it
-  says it is when neither its type nor the object itself is a subtype, which
-  is what makes super() work through a proxy that forwards attribute access --
-  `test_descr.test_proxy_super` is exactly that.  It works on its own; in a
-  longer program the same call refuses with "obj must be an instance or
-  subtype of type", and DELETING an unrelated statement that comes AFTER it
-  makes it work again.
+- **`super()` searches the written class's MRO, not the declared class's, when
+  the opcode handles it.**  `super(C, p).f()` for a proxy whose `__class__` is
+  an `E(C, X)` is `X.f` in CPython -- the search starts after C in *E's* MRO --
+  and `B.f` here, with `__self_class__` answering C rather than E.  The
+  unspecialised path is right: `super_check` hands the declared class over and
+  `super_new` installs it as `su_obj_type`.  `op_load_super_attr` uses the
+  declared class as a yes and nothing more, because `LSA_ORIGIN` is borrowed
+  and a dozen exits would each have to release it.  So the two paths disagree
+  for this one shape, and only for a declared class that is a STRICT subclass
+  of the written one; a proxy of a plain `C()` -- which is
+  `test_descr.test_proxy_super` and `tests/test_super_proxy.py` -- agrees.
 
-  valgrind is clean over both, so it is not memory corruption: it is
-  `obj_declared_class` answering 0, which means the `__class__` lookup did not
-  produce the class.  That lookup runs the proxy's own `__getattribute__` --
-  Python, from inside an opcode handler, which is the one thing this path does
-  that no other form of super() does, and it recurses once more because
-  `self.__obj` goes through `__getattribute__` too.  Something about that
-  nested eval, and not about the object, decides the answer.
-
-  `tests/test_super_bad_object.py` covers the refusals and leaves the proxy
-  out for this reason; the shape that fails is the file that test was cut
-  down from, with the proxy call followed by two more statements.
+- **An unbound `super` is not a descriptor.**  `super` carries no
+  `tp_descr_get`, so `hasattr(super(C), '__get__')` is False where CPython says
+  True, and the idiom `C._C__super = super(C)` then `self.__super.meth(a)` --
+  which is what `test_descr.test_supers` does -- reads the unbound super back
+  unchanged and fails with `'super' object has no attribute 'meth'`.  CPython's
+  `super_descr_get` builds a new, bound super from the unbound one.  Everything
+  the two- and three-argument forms do is right; this is the one-argument form
+  stored on a class.
 
 - **`scandir()` on a BYTES path yields str entries.**  CPython gives a bytes
   path bytes names and bytes paths back; here the argument goes through

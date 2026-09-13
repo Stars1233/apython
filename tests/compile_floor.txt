@@ -660,6 +660,7 @@ test_super_bad_object
 test_super_descriptors
 test_super_immediate
 test_super_object
+test_super_proxy
 test_syntax_error_args
 test_syntax_error_location
 test_syntax_error_offset
