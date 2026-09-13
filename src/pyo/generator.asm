@@ -967,7 +967,12 @@ DEF_FUNC gen_throw, GT_FRAME
     jz .gt_forward
     mov rdi, [rbp - GT_YF]
     call gen_close_iter
-    jmp .gt_local
+    test eax, eax
+    jz .gt_local
+    ; The child's cleanup raised.  CPython resumes this generator with THAT
+    ; pending rather than raising GeneratorExit over the top of it, so an
+    ; outer `finally` sees what actually went wrong.
+    jmp .gt_resume_throwing
 
 .gt_forward:
     mov rax, [rbp - GT_YF]
@@ -1099,8 +1104,13 @@ DEF_FUNC gen_throw, GT_FRAME
     ; Mark as not running
     mov qword [rbx + PyGenObject.gi_running], 0
 
-    ; Check if exhausted
+    ; Check if exhausted.  gi_frame can be gone already: the generator may have
+    ; closed ITSELF while unwinding -- a delegating generator whose child
+    ; finishes the throw reaches here that way -- and reading instr_ptr off a
+    ; NULL frame is a dereference of address 40.
     mov rdi, [rbx + PyGenObject.gi_frame]
+    test rdi, rdi
+    jz .gt_frame_gone
     cmp qword [rdi + PyFrame.instr_ptr], 0
     jne .gt_yielded
 
@@ -1116,8 +1126,11 @@ DEF_FUNC gen_throw, GT_FRAME
 
     ; Exhausted.  Clear before freeing, as gen_iternext does.
     mov rdi, [rbx + PyGenObject.gi_frame]
+    test rdi, rdi
+    jz .gt_no_frame_to_free
     mov qword [rbx + PyGenObject.gi_frame], 0
     call frame_free
+.gt_no_frame_to_free:
     V_PACK r12, r13
     mov [rbx + PyGenObject.gi_return_value], r12
 
@@ -1128,6 +1141,15 @@ DEF_FUNC gen_throw, GT_FRAME
     pop rbx
     leave
     ret
+
+.gt_frame_gone:
+    ; It closed itself on the way out; there is nothing left to free and the
+    ; exhausted bookkeeping below is still what the caller needs.
+    cmp qword [rel current_exception], 0
+    jne .gt_exhausted_propagating
+    mov rcx, [rbp - GT_SAVED_EXC]
+    mov [rel current_exception], rcx
+    jmp .gt_exhausted_propagating
 
 .gt_yielded:
     ; The generator is suspended.  Whatever it is handling went into its
@@ -1242,8 +1264,12 @@ END_FUNC gen_yf
 ;; allowed -- `yield from [1, 2, 3]` delegates to a list iterator, which has
 ;; none and needs no cleanup.
 ;;
-;; An exception the child's close raises is left pending for the caller, which
-;; is what makes `close()` report a failing cleanup rather than swallow it.
+;; An exception the child's close raises is left pending and reported in eax,
+;; which is what makes `close()` report a failing cleanup rather than swallow
+;; it -- and what keeps it from unwinding out of the three frames it is nested
+;; inside.
+;;
+;;   -> eax = 1 when an exception is pending, 0 otherwise
 ;; ============================================================================
 GCI_IT    equ 8
 GCI_NAME  equ 16
@@ -1266,8 +1292,9 @@ DEF_FUNC gen_close_iter, GCI_FRAME
     jne .gci_by_name
 .gci_generator:
     mov rdi, [rbp - GCI_IT]
-    call gen_close
-    jmp .gci_done
+    call gen_close_impl
+    leave
+    ret
 
 .gci_by_name:
     CSTRING rdi, "close"
@@ -1296,7 +1323,7 @@ DEF_FUNC gen_close_iter, GCI_FRAME
     call obj_decref             ; the bound method
     mov rdi, [rbp - GCI_NAME]
     test rdi, rdi
-    jz .gci_done                ; it raised; leave that pending
+    jz .gci_raised              ; it raised; leave that pending
     DECREF_V rdi, rcx
     jmp .gci_done
 
@@ -1315,18 +1342,54 @@ DEF_FUNC gen_close_iter, GCI_FRAME
     call obj_decref
 
 .gci_done:
+    xor eax, eax
+    leave
+    ret
+.gci_raised:
+    mov eax, 1
     leave
     ret
 END_FUNC gen_close_iter
 
 ;; ============================================================================
-;; gen_close(PyGenObject *gen) -> None
-;; Close the generator by marking it as exhausted.
-;; rdi = generator
+;; gen_close(PyGenObject *gen) -> rax = None, as a Value
+;;
+;; The Python-facing close(): an exception out of the cleanup propagates the
+;; only way this interpreter can propagate, by jumping into the unwinder.
+;; ============================================================================
+GCW_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC gen_close, GCW_FRAME
+    call gen_close_impl
+    test eax, eax
+    jnz .gcw_propagate
+    lea rax, [rel none_singleton]
+    mov rdi, rax
+    call obj_incref
+    lea rax, [rel none_singleton]
+    mov edx, TAG_PTR
+    leave
+    ret
+.gcw_propagate:
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
+END_FUNC gen_close
+
+;; ============================================================================
+;; gen_close_impl(rdi = the generator) -> eax = 1 when an exception is left
+;;   pending, 0 when the generator closed cleanly
+;;
+;; RETURNS the failure rather than raising it, which is what lets one
+;; generator close another.  gen_close_iter calls this from inside gen_throw,
+;; which is inside another gen_close, and a raise here is a non-local jump
+;; into the unwinder -- it abandons all three frames and resumes the eval loop
+;; with rbx pointing at nothing.  CPython's gen_close returns an int for the
+;; same reason, and its caller resumes the outer generator with the child's
+;; exception pending instead of raising GeneratorExit over the top of it.
 ;; ============================================================================
 GC_GEN   equ 8
 GC_FRAME equ 24            ; + 1 push = 32, 16-aligned
-DEF_FUNC gen_close, GC_FRAME
+DEF_FUNC gen_close_impl, GC_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - GC_GEN], rbx
@@ -1383,29 +1446,27 @@ DEF_FUNC gen_close, GC_FRAME
     mov qword [rbx + PyGenObject.gi_frame], 0
     call frame_free
 .gc_no_frame:
-
-    lea rax, [rel none_singleton]
-    mov rdi, rax
-    push rax
-    call obj_incref
-    pop rax
-    mov edx, TAG_PTR             ; None is a heap pointer
-
+    xor eax, eax
     pop rbx
     leave
     ret
 
 .gc_ignored_exit:
-    ; It yielded instead of finishing, which Python reports.
+    ; It yielded instead of finishing, which Python reports.  Set rather than
+    ; raised, for the reason in this function's header.
     extern exc_RuntimeError_type
-    RAISE exc_RuntimeError_type, "generator ignored GeneratorExit"
-
-.gc_propagate:
+    SET_EXC exc_RuntimeError_type, "generator ignored GeneratorExit"
+    mov eax, 1
     pop rbx
     leave
-    mov [rel eval_saved_r13], r13
-    jmp eval_exception_unwind
-END_FUNC gen_close
+    ret
+
+.gc_propagate:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC gen_close_impl
 
 ;; ============================================================================
 ;; gen_getattr(PyGenObject *self, PyObject *name) -> rax = Value
