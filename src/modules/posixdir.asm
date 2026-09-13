@@ -1052,6 +1052,17 @@ DEF_FUNC posixdir_register, PDR_FRAME
     extern scandir_iter_dunder_iter
     PD_ADD_FN sd_n_next, scandir_iter_dunder_next
     PD_ADD_FN sd_n_iter, scandir_iter_dunder_iter
+
+    ; Stamp both, as every type built in src/methods/init.asm is stamped.
+    ; Without it a method here is indistinguishable from a module-level
+    ; function -- same type, same func_kind, no owner -- so nothing can tell
+    ; that DirEntry.is_dir is a descriptor and os.unlink is not.  It also
+    ; installs the receiver check and gives the repr a method's wording.
+    extern type_stamp_methods
+    lea rdi, [rel direntry_type]
+    call type_stamp_methods
+    lea rdi, [rel scandir_iter_type]
+    call type_stamp_methods
 .pdr_no_dict:
 
     lea rax, [rel direntry_type]

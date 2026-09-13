@@ -297,6 +297,16 @@ DEF_FUNC io_module_create, IMC_FRAME
     lea rsi, [rel im_n_exit]
     lea rdx, [rel iobase_exit_fn]
     call io_add_method
+    ; Stamp the owner and the kind on everything the dict holds, as every type
+    ; built in src/methods/init.asm is stamped.  Without it a method here is
+    ; indistinguishable from a module-level function: same type, same
+    ; func_kind, no owner -- so nothing could tell that `FileIO.read` is a
+    ; descriptor and `len` is not.  It is also what installs the receiver
+    ; check builtin_func_call makes, and what makes the repr read as a
+    ; method's.
+    mov rdi, rbx
+    extern type_stamp_methods
+    call type_stamp_methods
     mov rdi, rbx
     call obj_incref
     IO_ADD_OBJ im_n_IOBase, rbx
@@ -2502,6 +2512,8 @@ DEF_FUNC_LOCAL io_make_fileio, MFI_FRAME
     mov rdx, [rbp - MFI_NS]
     call type_from_parts        ; takes over the namespace
     mov rbx, rax
+    mov rdi, rbx
+    call type_stamp_methods     ; see _IOBase above
 
     mov rdi, [rbp - MFI_NAME]
     call obj_decref
@@ -3487,6 +3499,8 @@ DEF_FUNC_LOCAL io_make_bytesio, MBI_FRAME
     mov rdx, [rbp - MBI_NS]
     call type_from_parts
     mov rbx, rax
+    mov rdi, rbx
+    call type_stamp_methods     ; see _IOBase above
     mov rdi, [rbp - MBI_NAME]
     call obj_decref
     mov rdi, [rbp - MBI_BASES]
