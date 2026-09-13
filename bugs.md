@@ -109,22 +109,6 @@ reasoning that chose them and what changing one would cost.
   function reached by `call` -- assume the wrong one and every handler in the
   tree reports as broken.
 
-- **`except*` does not look inside a NESTED group, and a group publishes
-  neither `split` nor `subgroup` nor `derive`.**  `except* KeyError` over
-  `ExceptionGroup("outer", [ExceptionGroup("inner", [KeyError()]), OSError()])`
-  matches the OSError and leaves the outer group unhandled, where CPython
-  recurses and matches the KeyError through the nesting.  The split is
-  `eg_split`, and it walks one level.
-
-  The three methods are the other half of the same gap: the splitting exists
-  only as the thing `except*` calls, so a program cannot do it itself.  And
-  where CPython's `split` asks the group to `derive()` a new one -- whose
-  default builds a plain `ExceptionGroup` -- `eg_split` constructs one of the
-  group's OWN type, so a subclass of `ExceptionGroup` splits into more of
-  itself rather than into `ExceptionGroup`.  Publishing the three and routing
-  the internal split through `derive` is one change, because the type the
-  halves get is decided there.
-
 - **A dunder's RESULT is not type-checked except for `__str__`, `__repr__` and
   `__format__`.**  Those three are refused now, because a non-str reaching an
   f-string or a container repr is a segfault rather than a wrong answer.  The

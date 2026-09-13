@@ -243,6 +243,7 @@ test_exception_dunder_str
 test_exception_group_deep
 test_exception_group_new
 test_exception_group_setattr
+test_exceptiongroup_split
 test_exception_group_subclass
 test_exception_init
 test_exception_instance_dict
@@ -254,6 +255,7 @@ test_exceptions
 test_exception_str_repr
 test_exception_subclass_init
 test_exception_traceback_api
+test_except_star_nested
 test_except_star
 test_exc_named_attrs_refcount
 test_exc_state_frame

@@ -2360,6 +2360,10 @@ DEF_FUNC builtins_init, 8            ; 1 push, so rsp is 16-aligned
     ; exception subclass reaches something that sets .args.
     extern exc_install_methods
     call exc_install_methods
+    ; split, subgroup and derive, on BaseExceptionGroup -- which ExceptionGroup
+    ; and every user subclass reach through the MRO walk in eg_getattr.
+    extern eg_install_methods
+    call eg_install_methods
 
     ; Create the builtins dict
     call dict_new

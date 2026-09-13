@@ -46,6 +46,15 @@ extern tuple_new
 extern str_type
 extern tuple_type
 extern type_type
+extern dict_new
+extern dict_set
+extern str_from_cstr_heap
+extern builtin_func_new
+extern type_stamp_methods
+extern obj_getattr_opt
+extern obj_call_n
+extern raise_type_error_counted
+extern raise_type_error_with_name
 
 ;; ============================================================================
 ;; eg_new(PyTypeObject *type, PyObject *msg_str, PyObject *exc_tuple)
@@ -779,7 +788,17 @@ END_FUNC eg_getattr
 ;; eg_split(PyExceptionGroupObject *eg, PyTypeObject *match_type)
 ;;   -> rax = match_eg (or NULL if none matched)
 ;;   -> rdx = rest_eg  (or NULL if all matched)
-;; Flat partition of sub-exceptions by isinstance check.
+;;
+;; CPython's BaseExceptionGroup.split, which RECURSES: a sub-exception that is
+;; itself a group is split in turn and each half kept in the matching side, so
+;; the nesting survives in both.  This walked one level, so
+;; `except* KeyError` over
+;; ExceptionGroup("outer", [ExceptionGroup("inner", [KeyError()]), OSError()])
+;; matched only the OSError and left the outer group unhandled -- the nested
+;; group went whole into `rest` because nothing asked whether it was a group.
+;;
+;; A sub-group that contributes to neither side appears in neither, which falls
+;; out of the empty-list test: eg_half answers NULL for an empty half.
 ;; ============================================================================
 EGS_EG       equ 8
 EGS_MTYPE    equ 16
@@ -787,7 +806,12 @@ EGS_MLIST    equ 24
 EGS_RLIST    equ 32
 EGS_IDX      equ 40
 EGS_COUNT    equ 48
-EGS_FRAME    equ 56            ; + 3 pushes = 80, 16-aligned
+EGS_SUBM     equ 56            ; a recursive call's two halves, held across the
+EGS_SUBR     equ 64            ; appends that take them
+; 72 and not 80: with three pushes the frame has to be 8 mod 16, as the 56 it
+; replaced was.  An even multiple puts every call in here 8 out, and the first
+; thing that notices is the allocator.
+EGS_FRAME    equ 72            ; + 3 pushes = 96, 16-aligned
 DEF_FUNC eg_split, EGS_FRAME
     push rbx
     push r12
@@ -798,17 +822,26 @@ DEF_FUNC eg_split, EGS_FRAME
 
     ; Get exceptions tuple
     mov rax, [rdi + PyExceptionGroupObject.eg_exceptions]
-    mov rcx, [rax + PyTupleObject.ob_size]
-    mov [rbp - EGS_COUNT], rcx
-
-    ; Create two lists for match and rest
+    test rax, rax
+    jz .split_no_excs
+    mov rax, [rax + PyTupleObject.ob_size]
+    mov [rbp - EGS_COUNT], rax
+    jmp .split_lists
+.split_no_excs:
+    mov qword [rbp - EGS_COUNT], 0
+.split_lists:
+    ; list_new takes a CAPACITY, so rdi has to be cleared: left holding the
+    ; group pointer it asked the allocator for a list of 2^46 slots.
     xor edi, edi
     call list_new
     mov [rbp - EGS_MLIST], rax
-
+    test rax, rax
+    jz .split_nomem
     xor edi, edi
     call list_new
     mov [rbp - EGS_RLIST], rax
+    test rax, rax
+    jz .split_nomem
 
     ; Iterate sub-exceptions
     mov qword [rbp - EGS_IDX], 0
@@ -818,6 +851,18 @@ DEF_FUNC eg_split, EGS_FRAME
     jge .split_done
 
     ; Get exc = eg.eg_exceptions[i]
+    mov rax, [rbp - EGS_EG]
+    mov rax, [rax + PyExceptionGroupObject.eg_exceptions]
+    mov r8, [rax + PyTupleObject.ob_item]
+    mov rdi, [r8 + rcx*8]
+
+    ; A sub-exception that is itself a GROUP is split in turn, whether or not
+    ; the group as a whole isinstance-matches: CPython asks the leaves.
+    call eg_is_base_exception_group
+    test eax, eax
+    jnz .split_nested
+
+    mov rcx, [rbp - EGS_IDX]
     mov rax, [rbp - EGS_EG]
     mov rax, [rax + PyExceptionGroupObject.eg_exceptions]
     mov r8, [rax + PyTupleObject.ob_item]
@@ -848,103 +893,59 @@ DEF_FUNC eg_split, EGS_FRAME
     mov rsi, [r8 + rcx*8]
     mov rdi, [rbp - EGS_RLIST]
     call list_append
+    jmp .split_next
+
+.split_nested:
+    ; Recurse.  Each half that came back is a NEW group this frame owns, where
+    ; the flat path above appends a borrowed element -- so each append is
+    ; followed by a release of our own reference.
+    ;
+    ; rdi is re-read: eg_is_base_exception_group walks an MRO and uses rdi as
+    ; the scratch for type_mro_next, so the sub-exception is not still in it.
+    ; Recursing on whatever was left ran until the allocator gave up.
+    mov rcx, [rbp - EGS_IDX]
+    mov rax, [rbp - EGS_EG]
+    mov rax, [rax + PyExceptionGroupObject.eg_exceptions]
+    mov r8, [rax + PyTupleObject.ob_item]
+    mov rdi, [r8 + rcx*8]
+    mov rsi, [rbp - EGS_MTYPE]
+    call eg_split
+    mov [rbp - EGS_SUBM], rax
+    mov [rbp - EGS_SUBR], rdx
+
+    cmp qword [rbp - EGS_SUBM], 0
+    je .split_nested_rest
+    mov rdi, [rbp - EGS_MLIST]
+    mov rsi, [rbp - EGS_SUBM]
+    call list_append
+    mov rdi, [rbp - EGS_SUBM]
+    call obj_decref
+.split_nested_rest:
+    cmp qword [rbp - EGS_SUBR], 0
+    je .split_next
+    mov rdi, [rbp - EGS_RLIST]
+    mov rsi, [rbp - EGS_SUBR]
+    call list_append
+    mov rdi, [rbp - EGS_SUBR]
+    call obj_decref
 
 .split_next:
     inc qword [rbp - EGS_IDX]
     jmp .split_loop
 
 .split_done:
-    ; Build match EG if match_list non-empty, else NULL
-    mov rax, [rbp - EGS_MLIST]
-    mov rcx, [rax + PyListObject.ob_size]
-    test rcx, rcx
-    jz .no_match_eg
+    mov rdi, [rbp - EGS_EG]
+    mov rsi, [rbp - EGS_MLIST]
+    call eg_half
+    mov r12, rax                    ; r12 = match_eg, or 0
 
-    ; Convert match_list to tuple
-    push rcx
-    mov rdi, rcx
-    call tuple_new
-    mov rbx, rax             ; rbx = match_tuple
-    pop rcx
-    mov rax, [rbp - EGS_MLIST]
-    mov r8, [rax + PyListObject.ob_item]       ; list payloads
-    xor edx, edx
-.copy_match:
-    cmp rdx, rcx
-    jge .match_tuple_done
-    push rcx
-    mov rdi, [r8 + rdx*8]      ; list item payload
-    V_UNPACK rdi, r11
-    INCREF_VAL rdi, r11
-    mov r10, [rbx + PyTupleObject.ob_item]       ; tuple payloads
-    V_PACK rdi, r11
-    mov [r10 + rdx * 8], rdi
-    pop rcx
-    inc rdx
-    jmp .copy_match
-.match_tuple_done:
-    ; Create match EG with same message
-    mov rax, [rbp - EGS_EG]
-    mov rdi, [rax + PyExceptionGroupObject.ob_type]
-    mov rsi, [rax + PyExceptionGroupObject.exc_value]
-    mov rdx, rbx
-    call eg_new
-    mov r12, rax             ; r12 = match_eg
-    ; DECREF match_tuple (eg_new INCREFed it)
-    mov rdi, rbx
-    call obj_decref
-    jmp .build_rest
+    mov rdi, [rbp - EGS_EG]
+    mov rsi, [rbp - EGS_RLIST]
+    call eg_half
+    mov r13, rax                    ; r13 = rest_eg, or 0
 
-.no_match_eg:
-    xor r12d, r12d           ; match_eg = NULL
-
-.build_rest:
-    ; Build rest EG if rest_list non-empty, else NULL
-    mov rax, [rbp - EGS_RLIST]
-    mov rcx, [rax + PyListObject.ob_size]
-    test rcx, rcx
-    jz .no_rest_eg
-
-    ; Convert rest_list to tuple
-    push rcx
-    mov rdi, rcx
-    call tuple_new
-    mov rbx, rax             ; rbx = rest_tuple
-    pop rcx
-    mov rax, [rbp - EGS_RLIST]
-    mov r8, [rax + PyListObject.ob_item]       ; list payloads
-    xor edx, edx
-.copy_rest:
-    cmp rdx, rcx
-    jge .rest_tuple_done
-    push rcx
-    mov rdi, [r8 + rdx*8]      ; list item payload
-    V_UNPACK rdi, r11
-    INCREF_VAL rdi, r11
-    mov r10, [rbx + PyTupleObject.ob_item]       ; tuple payloads
-    V_PACK rdi, r11
-    mov [r10 + rdx * 8], rdi
-    pop rcx
-    inc rdx
-    jmp .copy_rest
-.rest_tuple_done:
-    ; Create rest EG with same message
-    mov rax, [rbp - EGS_EG]
-    mov rdi, [rax + PyExceptionGroupObject.ob_type]
-    mov rsi, [rax + PyExceptionGroupObject.exc_value]
-    mov rdx, rbx
-    call eg_new
-    mov r13, rax             ; r13 = rest_eg
-    ; DECREF rest_tuple (eg_new INCREFed it)
-    mov rdi, rbx
-    call obj_decref
-    jmp .cleanup
-
-.no_rest_eg:
-    xor r13d, r13d           ; rest_eg = NULL
-
-.cleanup:
-    ; DECREF the two temp lists
+    ; DECREF the two temp lists.  eg_half gave each new group a reference of
+    ; its own, through args[1].
     push r12
     push r13
     mov rdi, [rbp - EGS_MLIST]
@@ -963,7 +964,459 @@ DEF_FUNC eg_split, EGS_FRAME
     pop rbx
     leave
     ret
+
+.split_nomem:
+    ; list_new failed; nothing is owned yet that the caller could be handed.
+    xor eax, eax
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC eg_split
+
+;; ============================================================================
+;; eg_half(rdi = the group being split, rsi = a LIST of exceptions)
+;;   -> rax = a new group carrying them, or 0 when the list is empty
+;;
+;; One of the two halves.  eg_exceptions is a TUPLE, so the list is copied into
+;; one -- but `.args` holds the sequence as PASSED, which for CPython's split is
+;; the list `derive` was handed: `eg.split(T)[0].args` is ('msg', [...]) there
+;; and was ('msg', (...)) here, because eg_new stores what it is given in both
+;; places and only the constructor corrected it.
+;;
+;; The new group comes from the source's own derive(), as CPython's split does,
+;; so a subclass decides what its halves are: the default derive builds a plain
+;; BaseExceptionGroup -- whose constructor picks ExceptionGroup when every
+;; member is an Exception -- and an override builds whatever it likes.  Building
+;; from the group's own ob_type instead, which is what this did, made a subclass
+;; of ExceptionGroup split into more of itself.
+;; ============================================================================
+EGH_EG    equ 8
+EGH_LIST  equ 16
+EGH_TUPLE equ 24
+EGH_NEW   equ 32
+EGH_FRAME equ 40            ; + 1 push = 48, 16-aligned
+DEF_FUNC_LOCAL eg_half, EGH_FRAME
+    push rbx
+    mov [rbp - EGH_EG], rdi
+    mov [rbp - EGH_LIST], rsi
+
+    mov rcx, [rsi + PyListObject.ob_size]
+    test rcx, rcx
+    jz .egh_empty
+
+    mov rdi, rcx
+    call tuple_new
+    test rax, rax
+    jz .egh_empty
+    mov [rbp - EGH_TUPLE], rax
+
+    mov rbx, rax                    ; rbx = the tuple
+    mov rax, [rbp - EGH_LIST]
+    mov rcx, [rax + PyListObject.ob_size]
+    mov r8, [rax + PyListObject.ob_item]
+    xor edx, edx
+.egh_copy:
+    cmp rdx, rcx
+    jge .egh_copied
+    push rcx
+    push r8
+    mov rdi, [r8 + rdx*8]
+    V_UNPACK rdi, r11
+    INCREF_VAL rdi, r11
+    mov r10, [rbx + PyTupleObject.ob_item]
+    V_PACK rdi, r11
+    mov [r10 + rdx*8], rdi
+    pop r8
+    pop rcx
+    inc rdx
+    jmp .egh_copy
+.egh_copied:
+    ; The tuple is not what the new group is built FROM any more -- derive is
+    ; handed the list, as CPython hands it -- but it is what eg_exceptions has
+    ; to end up holding, and the derived group's constructor makes its own.  So
+    ; the tuple is only the thing this frame must not leak.
+    mov rdi, [rbp - EGH_TUPLE]
+    call obj_decref
+    mov qword [rbp - EGH_TUPLE], 0
+
+    mov rdi, [rbp - EGH_EG]
+    mov rsi, [rbp - EGH_LIST]
+    call eg_derive
+    pop rbx
+    leave
+    ret
+
+.egh_drop_tuple:
+    mov rdi, [rbp - EGH_TUPLE]
+    call obj_decref
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.egh_empty:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC eg_half
+
+;; ============================================================================
+;; eg_derive(rdi = the source group, rsi = a LIST of exceptions)
+;;   -> rax = a new group, or 0 with an exception pending
+;;
+;; CPython's split and subgroup both build their halves through the group's own
+;; derive(), and then copy the metadata the original carried.  Looking the name
+;; up rather than calling the default directly is the whole point: a subclass
+;; that defines derive decides what its halves are.
+;; ============================================================================
+EGDV_EG    equ 8
+EGDV_LIST  equ 16
+EGDV_NEW   equ 24
+EGDV_FRAME equ 40            ; + 1 push = 48, 16-aligned
+DEF_FUNC_LOCAL eg_derive, EGDV_FRAME
+    push rbx
+    mov [rbp - EGDV_EG], rdi
+    mov [rbp - EGDV_LIST], rsi
+
+    CSTRING rdi, "derive"
+    call str_from_cstr_heap
+    test rax, rax
+    jz .egd_fail
+    mov rbx, rax
+    mov rdi, [rbp - EGDV_EG]
+    mov rsi, rbx
+    call obj_getattr_opt            ; bound, through the MRO
+    push rax
+    push rax
+    mov rdi, rbx
+    call obj_decref                 ; the name
+    pop rax
+    pop rax
+    test rax, rax
+    jz .egd_fail                    ; no derive at all: cannot happen once
+                                    ; eg_install_methods has run, and a pending
+                                    ; exception is the honest answer if it does
+    mov rbx, rax                    ; rbx = the bound derive
+    sub rsp, 16
+    mov rax, [rbp - EGDV_LIST]
+    mov [rsp], rax
+    mov rdi, rbx
+    mov rsi, rsp
+    mov edx, 1
+    call obj_call_n
+    add rsp, 16
+    mov [rbp - EGDV_NEW], rax
+    push rax
+    push rax
+    mov rdi, rbx
+    call obj_decref                 ; the bound method
+    pop rax
+    pop rax
+    test rax, rax
+    jz .egd_fail
+
+    ; derive() may answer anything; CPython requires a BaseExceptionGroup.
+    V_TEST_PTR rax, rcx
+    ja .egd_bad
+    mov rdi, rax
+    call eg_is_base_exception_group
+    test eax, eax
+    jz .egd_bad_ref
+
+    ; The metadata CPython copies onto each half: the traceback, the cause, the
+    ; context, the suppress flag and __notes__.  Without them a split loses the
+    ; traceback of the group it came from.
+    mov rbx, [rbp - EGDV_NEW]
+    mov rax, [rbp - EGDV_EG]
+    mov rcx, [rax + PyExceptionGroupObject.exc_tb]
+    test rcx, rcx
+    jz .egd_no_tb
+    mov rdi, rcx
+    call obj_incref
+    mov rbx, [rbp - EGDV_NEW]
+    mov rax, [rbp - EGDV_EG]
+    mov rcx, [rax + PyExceptionGroupObject.exc_tb]
+    mov rdx, [rbx + PyExceptionGroupObject.exc_tb]
+    mov [rbx + PyExceptionGroupObject.exc_tb], rcx
+    test rdx, rdx
+    jz .egd_no_tb
+    mov rdi, rdx
+    call obj_decref
+.egd_no_tb:
+    mov rbx, [rbp - EGDV_NEW]
+    mov rax, [rbp - EGDV_EG]
+    mov rcx, [rax + PyExceptionGroupObject.exc_cause]
+    test rcx, rcx
+    jz .egd_no_cause
+    mov rdi, rcx
+    call obj_incref
+    mov rbx, [rbp - EGDV_NEW]
+    mov rax, [rbp - EGDV_EG]
+    mov rcx, [rax + PyExceptionGroupObject.exc_cause]
+    mov [rbx + PyExceptionGroupObject.exc_cause], rcx
+.egd_no_cause:
+    mov rbx, [rbp - EGDV_NEW]
+    mov rax, [rbp - EGDV_EG]
+    mov rcx, [rax + PyExceptionGroupObject.exc_context]
+    test rcx, rcx
+    jz .egd_no_context
+    mov rdi, rcx
+    call obj_incref
+    mov rbx, [rbp - EGDV_NEW]
+    mov rax, [rbp - EGDV_EG]
+    mov rcx, [rax + PyExceptionGroupObject.exc_context]
+    mov [rbx + PyExceptionGroupObject.exc_context], rcx
+.egd_no_context:
+    mov rbx, [rbp - EGDV_NEW]
+    mov rax, [rbp - EGDV_EG]
+    mov rcx, [rax + PyExceptionGroupObject.exc_suppress]
+    mov [rbx + PyExceptionGroupObject.exc_suppress], rcx
+
+    ; __notes__, which lives in the instance dict.
+    CSTRING rdi, "__notes__"
+    call str_from_cstr_heap
+    test rax, rax
+    jz .egd_done
+    mov rbx, rax
+    mov rdi, [rbp - EGDV_EG]
+    mov rsi, rbx
+    call obj_getattr_opt
+    test rax, rax
+    jz .egd_notes_absent
+    push rax
+    push rax
+    mov rdi, [rbp - EGDV_NEW]
+    mov rsi, rbx
+    mov rdx, [rsp]
+    xor ecx, ecx
+    call exc_setattr
+    pop rdi
+    pop rdi
+    call obj_decref                 ; obj_getattr_opt's reference
+.egd_notes_absent:
+    ; A missing __notes__ leaves an AttributeError pending, which is the
+    ; ordinary answer to a lookup and not this function's failure.
+    extern current_exception
+    extern attr_error_pending
+    cmp qword [rel current_exception], 0
+    je .egd_notes_clean
+    cmp qword [rel attr_error_pending], 0
+    je .egd_notes_clean
+    mov qword [rel current_exception], 0
+.egd_notes_clean:
+    mov rdi, rbx
+    call obj_decref                 ; the name
+
+.egd_done:
+    mov rax, [rbp - EGDV_NEW]
+    pop rbx
+    leave
+    ret
+
+.egd_bad_ref:
+    mov rdi, [rbp - EGDV_NEW]
+    call obj_decref
+.egd_bad:
+    mov rsi, [rbp - EGDV_NEW]
+    CSTRING rdi, `derive must return an instance of BaseExceptionGroup, not '\x01'`
+    call raise_type_error_with_name
+.egd_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC eg_derive
+
+;; ============================================================================
+;; eg_method_derive(rdi = args Value*, rsi = nargs)
+;;   -> rax = BaseExceptionGroup(self.message, excs), or 0
+;;
+;; BaseExceptionGroup.derive(self, excs).  The default, which is why a subclass
+;; of ExceptionGroup splits into ExceptionGroup and not into more of itself: the
+;; constructor picks the class from the contents, as BaseExceptionGroup.__new__
+;; does.
+;; ============================================================================
+; The two constructor arguments, adjacent and in order, because eg_type_call
+; reads them as an args array.
+EMD_EXCS  equ 8
+EMD_MSG   equ 16
+EMD_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC_LOCAL eg_method_derive, EMD_FRAME
+    cmp rsi, 2
+    jne .emd_arity
+    mov rax, [rdi]                  ; self
+    mov rcx, [rdi + 8]              ; excs
+    mov [rbp - EMD_EXCS], rcx
+    mov rax, [rax + PyExceptionGroupObject.exc_value]
+    mov [rbp - EMD_MSG], rax
+    lea rdi, [rel exc_BaseExceptionGroup_type]
+    lea rsi, [rbp - EMD_MSG]
+    mov edx, 2
+    call eg_type_call
+    leave
+    ret
+.emd_arity:
+    dec rsi
+    CSTRING rdi, "BaseExceptionGroup.derive() takes exactly one argument ("
+    CSTRING rdx, " given)"
+    jmp raise_type_error_counted
+END_FUNC eg_method_derive
+
+;; ============================================================================
+;; eg_method_split(rdi = args Value*, rsi = nargs)
+;;   -> rax = a (match, rest) tuple, each half a group or None, or 0
+;;
+;; BaseExceptionGroup.split(self, condition).  The splitting existed only as the
+;; thing `except*` calls, so a program could not do it itself.  The condition is
+;; a type or a tuple of them -- the callable form CPython also takes is not
+;; here, and `except*` does not need it.
+;; ============================================================================
+EMS_SELF  equ 8
+EMS_MATCH equ 16
+EMS_REST  equ 24
+EMS_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
+DEF_FUNC_LOCAL eg_method_split, EMS_FRAME
+    cmp rsi, 2
+    jne .ems_arity
+    mov rax, [rdi]
+    mov [rbp - EMS_SELF], rax
+    mov rsi, [rdi + 8]              ; the condition
+    mov rdi, rax
+    call eg_split
+    mov [rbp - EMS_MATCH], rax
+    mov [rbp - EMS_REST], rdx
+
+    mov edi, 2
+    call tuple_new
+    test rax, rax
+    jz .ems_fail
+    mov r8, [rax + PyTupleObject.ob_item]
+    mov rcx, [rbp - EMS_MATCH]
+    test rcx, rcx
+    jnz .ems_have_match
+    lea rcx, [rel none_singleton]
+    inc qword [rcx + PyObject.ob_refcnt]
+.ems_have_match:
+    mov [r8], rcx
+    mov rcx, [rbp - EMS_REST]
+    test rcx, rcx
+    jnz .ems_have_rest
+    lea rcx, [rel none_singleton]
+    inc qword [rcx + PyObject.ob_refcnt]
+.ems_have_rest:
+    mov [r8 + 8], rcx
+    mov edx, TAG_PTR
+    leave
+    ret
+.ems_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+.ems_arity:
+    dec rsi
+    CSTRING rdi, "BaseExceptionGroup.split() takes exactly one argument ("
+    CSTRING rdx, " given)"
+    jmp raise_type_error_counted
+END_FUNC eg_method_split
+
+;; ============================================================================
+;; eg_method_subgroup(rdi = args Value*, rsi = nargs)
+;;   -> rax = the match half, or None, or 0
+;;
+;; BaseExceptionGroup.subgroup(self, condition): split's first half, with the
+;; second released.
+;; ============================================================================
+ESG_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC_LOCAL eg_method_subgroup, ESG_FRAME
+    cmp rsi, 2
+    jne .esg_arity
+    mov rax, [rdi]
+    mov rsi, [rdi + 8]
+    mov rdi, rax
+    call eg_split
+    ; The rest half is not this caller's; only the match is.
+    test rdx, rdx
+    jz .esg_have
+    push rax
+    push rax
+    mov rdi, rdx
+    call obj_decref
+    pop rax
+    pop rax
+.esg_have:
+    test rax, rax
+    jnz .esg_out
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+.esg_out:
+    mov edx, TAG_PTR
+    leave
+    ret
+.esg_arity:
+    dec rsi
+    CSTRING rdi, "BaseExceptionGroup.subgroup() takes exactly one argument ("
+    CSTRING rdx, " given)"
+    jmp raise_type_error_counted
+END_FUNC eg_method_subgroup
+
+; EGI_ADD impl, "name" -- one method into BaseExceptionGroup's tp_dict.
+; rbx holds the dict.  Above the docblock rather than below it, because
+; lint walks back from the DEF_FUNC over the layout constants and stops
+; at a %endmacro -- a docblock behind one reads as absent.
+%macro EGI_ADD 2
+    CSTRING rdi, %2
+    call str_from_cstr_heap
+    mov [rbp - EGI_KEY], rax
+    lea rdi, [rel %1]
+    CSTRING rsi, %2
+    call builtin_func_new
+    mov [rbp - EGI_FN], rax
+    mov rdi, rbx
+    mov rsi, [rbp - EGI_KEY]
+    mov rdx, rax
+    call dict_set
+    mov rdi, [rbp - EGI_KEY]
+    call obj_decref
+    mov rdi, [rbp - EGI_FN]
+    call obj_decref
+%endmacro
+
+;; ============================================================================
+;; eg_install_methods() -> nothing; BaseExceptionGroup.tp_dict is left holding
+;;   split, subgroup and derive, or left at 0 if the dict could not be made.
+;;
+;; One dict on BaseExceptionGroup serves ExceptionGroup too: eg_getattr walks
+;; the type MRO's tp_dicts, so both builtins and every user subclass reach it.
+;; Modelled on exc_install_methods, stamp included -- that is what makes
+;; `g.split(T)` check its receiver.
+;; ============================================================================
+EGI_KEY   equ 8
+EGI_FN    equ 16
+EGI_FRAME equ 40            ; + 1 push = 48, 16-aligned
+DEF_FUNC eg_install_methods, EGI_FRAME
+    push rbx
+    call dict_new
+    test rax, rax
+    jz .egi_out
+    mov rbx, rax
+    mov [rel exc_BaseExceptionGroup_type + PyTypeObject.tp_dict], rbx
+
+    EGI_ADD eg_method_split, "split"
+    EGI_ADD eg_method_subgroup, "subgroup"
+    EGI_ADD eg_method_derive, "derive"
+
+    lea rdi, [rel exc_BaseExceptionGroup_type]
+    call type_stamp_methods
+.egi_out:
+    pop rbx
+    leave
+    ret
+END_FUNC eg_install_methods
 
 ;; ============================================================================
 ;; eg_is_base_exception_group(PyObject *obj) -> int (0/1)
@@ -1208,6 +1661,7 @@ exc_name_ExceptionGroup:     db "ExceptionGroup", 0
 
 ; BaseExceptionGroup type — base = BaseException
 align 8
+global eg_install_methods
 global exc_BaseExceptionGroup_type
 exc_BaseExceptionGroup_type:
     dq 1                        ; ob_refcnt (immortal)
