@@ -440,6 +440,7 @@ test_member_descriptor_protocol
 test_membership
 test_memmove_boundaries
 test_memoryview_exports
+test_memoryview_formats
 test_memoryview_released
 test_memoryview_stride
 test_metaclass_lifetime
