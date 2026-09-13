@@ -26,7 +26,6 @@ extern ap_memcpy
 extern type_type
 extern gc_untrack
 extern obj_is_true
-extern float_compare
 extern int_type
 extern eval_exception_unwind
 extern obj_richcompare_bool
@@ -806,7 +805,9 @@ DEF_FUNC_LOCAL tuple_richcompare_inner, TRC_FRAME
     mov rcx, [rdi + PyTupleObject.ob_size]   ; left_len
     mov r8, [rsi + PyTupleObject.ob_size]    ; right_len
 
-    ; min_len = min(left_len, right_len)
+    ; min_len = min(left_len, right_len).  Read once, unlike list's, which
+    ; re-reads both every iteration: an element's __eq__ can empty a list and
+    ; cannot shorten a tuple.
     mov rax, rcx
     cmp rax, r8
     jle .trc_have_min
@@ -822,123 +823,30 @@ DEF_FUNC_LOCAL tuple_richcompare_inner, TRC_FRAME
     cmp rax, [rbp - TRC_MINLEN]
     jge .trc_elements_equal
 
-    ; Get left[i] and right[i] (payload + tag arrays)
-    mov rdi, [rbp - TRC_LEFT]
-    mov r10, [rdi + PyTupleObject.ob_item]       ; left items
-    mov rdi, [rbp - TRC_RIGHT]
-    mov rsi, [rdi + PyTupleObject.ob_item]       ; right items
-    mov rdi, [r10 + rax * 8]
-    mov rsi, [rsi + rax * 8]
-    V_UNPACK rdi, rcx               ; left  (payload, tag)
-    V_UNPACK rsi, r8                ; right (payload, tag)
-
-    ; Fast path: both same tag and same payload → elements equal, skip
-    cmp rcx, r8
-    jne .trc_elem_compare
-    cmp rdi, rsi
-    je .trc_elem_next
-
-.trc_elem_compare:
-    ; Compare elements for EQ using element type's tp_richcompare
-    push rdi                        ; left_payload
-    push rcx                        ; left_tag
-    push rsi                        ; right_payload
-    push r8                         ; right_tag
-
-    ; Float coercion: if either is TAG_FLOAT, use float_compare
-    cmp ecx, TAG_FLOAT
-    je .trc_elem_float
-    cmp r8d, TAG_FLOAT
-    je .trc_elem_float
-
-    ; Resolve left type
-    cmp ecx, TAG_SMALLINT
-    je .trc_elem_int_type
-    ; TAG_PTR: get ob_type
-    mov rax, [rdi + PyObject.ob_type]
-    jmp .trc_elem_have_type
-
-.trc_elem_int_type:
-    lea rax, [rel int_type]
-    jmp .trc_elem_have_type
-.trc_elem_bool_type:
-    lea rax, [rel bool_type]
-    jmp .trc_elem_have_type
-.trc_elem_none_type:
-    lea rax, [rel none_type]
-    jmp .trc_elem_have_type
-.trc_elem_have_type:
-    mov rax, [rax + PyTypeObject.tp_richcompare]
-    test rax, rax
-    jz .trc_elem_not_equal          ; no richcompare → not equal
-
-    ; Call tp_richcompare(left, right, PY_EQ, left_tag, right_tag)
-    pop r8                          ; right_tag
-    pop rsi                         ; right_payload
-    pop rcx                         ; left_tag
-    pop rdi                         ; left_payload
+    ; Get left[i] and right[i], as Values
+    mov rcx, [rbp - TRC_LEFT]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rdi, [rcx + rax * 8]
+    mov rcx, [rbp - TRC_RIGHT]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rsi, [rcx + rax * 8]
+    ; The two questions a Value can answer without calling anything; see
+    ; VALUE_EQ_FAST.  For tuples of small integers this is the whole
+    ; comparison, which is what CPython's per-element `if (vitem == witem)`
+    ; buys it.
+    VALUE_EQ_FAST rdi, rsi, rdx, .trc_elem_next, .trc_elem_differ
     mov edx, PY_EQ
-    V_PACK rdi, rcx             ; left  -> Value
-    V_PACK rsi, r8              ; right -> Value
-    call rax
-    V_UNPACK rax, rdx           ; tp_richcompare returns a Value
-    ; Check for NotImplemented (NULL return = tag 0)
-    test edx, edx
-    jz .trc_elem_not_equal_nopop
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .trc_error
+    test eax, eax
+    jz .trc_elem_differ             ; first differing element
 
-    ; Check result for truthiness
-    push rax
-    push rdx
-    mov rdi, rax
-    mov rsi, rdx
-    V_PACK rdi, rsi
-    call obj_is_true
-    mov ecx, eax                    ; ecx = truthiness (0/1)
-    pop rdx                         ; result tag
-    pop rdi                         ; result payload
-    push rcx                        ; save truthiness
-    mov rsi, rdx
-    DECREF_VAL rdi, rsi
-    pop rcx                         ; restore truthiness
-    test ecx, ecx
-    jnz .trc_elem_next              ; equal → continue
+.trc_elem_next:
+    inc qword [rbp - TRC_IDX]
+    jmp .trc_elem_loop
 
-    ; Elements not equal
-    jmp .trc_elem_not_equal_nopop
-
-.trc_elem_float:
-    pop r8
-    pop rsi
-    pop rcx
-    pop rdi
-    mov edx, PY_EQ
-    V_PACK rdi, rcx
-    V_PACK rsi, r8
-    call float_compare
-    V_UNPACK rax, rdx           ; float_compare returns a Value
-    ; Check for NotImplemented (NULL return = tag 0)
-    test edx, edx
-    jz .trc_elem_not_equal_nopop
-    push rax
-    push rdx
-    mov rdi, rax
-    mov rsi, rdx
-    V_PACK rdi, rsi
-    call obj_is_true
-    mov ecx, eax
-    pop rdx
-    pop rdi
-    push rcx
-    mov rsi, rdx
-    DECREF_VAL rdi, rsi
-    pop rcx
-    test ecx, ecx
-    jnz .trc_elem_next
-    jmp .trc_elem_not_equal_nopop
-
-.trc_elem_not_equal:
-    add rsp, 32                     ; clean up 4 pushes
-.trc_elem_not_equal_nopop:
+.trc_elem_differ:
     ; Elements at index i differ.
     ; For EQ: return False. For NE: return True.
     ; For ordering: compare these elements with the requested op.
@@ -948,117 +856,26 @@ DEF_FUNC_LOCAL tuple_richcompare_inner, TRC_FRAME
     cmp ecx, PY_NE
     je .trc_return_true
 
-    ; Ordering ops: compare the differing elements with the actual op
     mov rax, [rbp - TRC_IDX]
-
-    mov rdi, [rbp - TRC_LEFT]
-    mov r10, [rdi + PyTupleObject.ob_item]
-    mov rdi, [rbp - TRC_RIGHT]
-    mov rsi, [rdi + PyTupleObject.ob_item]
-    mov rdi, [r10 + rax * 8]
-    mov rsi, [rsi + rax * 8]
-    V_UNPACK rdi, rcx               ; left  (payload, tag)
-    V_UNPACK rsi, r8                ; right (payload, tag)
-
-    ; Resolve left type (again)
-    push rcx
-    push r8
-    ; Float coercion: if either operand is TAG_FLOAT, use float_compare
-    cmp ecx, TAG_FLOAT
-    je .trc_order_float
-    cmp r8d, TAG_FLOAT
-    je .trc_order_float
-    cmp ecx, TAG_SMALLINT
-    je .trc_order_int_type
-    test rcx, rcx
-    js .trc_order_str_type
-    mov rax, [rdi + PyObject.ob_type]
-    jmp .trc_order_have_type
-.trc_order_int_type:
-    lea rax, [rel int_type]
-    jmp .trc_order_have_type
-.trc_order_bool_type:
-    lea rax, [rel bool_type]
-    jmp .trc_order_have_type
-.trc_order_none_type:
-    lea rax, [rel none_type]
-    jmp .trc_order_have_type
-.trc_order_str_type:
-    lea rax, [rel str_type]
-.trc_order_have_type:
-    mov r10, rax                    ; save type ptr
-    mov rax, [rax + PyTypeObject.tp_richcompare]
-    test rax, rax
-    jz .trc_order_fallback
-    pop r8
-    pop rcx
+    mov rcx, [rbp - TRC_LEFT]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rdi, [rcx + rax * 8]
+    mov rcx, [rbp - TRC_RIGHT]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rsi, [rcx + rax * 8]
     mov edx, [rbp - TRC_OP]
-    V_PACK rdi, rcx             ; left  -> Value
-    V_PACK rsi, r8              ; right -> Value
-    call rax
+    call obj_richcompare_bool
+    cmp eax, -1
+    je .trc_error
+    RET_BOOL_RAX
     leave
     ret
-.trc_order_float:
-    pop r8
-    pop rcx
-    mov edx, [rbp - TRC_OP]
-    V_PACK rdi, rcx
-    V_PACK rsi, r8
-    call float_compare
-    leave
-    ret
-.trc_order_fallback:
-    ; tp_richcompare is NULL — check if heaptype with dunders
-    mov rax, [r10 + PyTypeObject.tp_flags]
-    test rax, TYPE_FLAG_HEAPTYPE
-    jz .trc_order_notimpl           ; not heaptype → return NotImplemented
-    ; Heaptype: try dunder for ordering op
-    pop r8                          ; right_tag
-    pop rcx                         ; left_tag (unused, dunder_call_2 uses ecx=right_tag)
-    mov ecx, r8d                    ; ecx = right_tag for dunder_call_2
-    ; rdi = left_payload (still set from line 698)
-    ; rsi = right_payload (still set from line 702)
-    mov eax, [rbp - TRC_OP]
-    cmp eax, PY_LT
-    je .trc_order_dunder_lt
-    cmp eax, PY_LE
-    je .trc_order_dunder_le
-    cmp eax, PY_GT
-    je .trc_order_dunder_gt
-    cmp eax, PY_GE
-    je .trc_order_dunder_ge
-    jmp .trc_order_notimpl_nopop    ; shouldn't reach here
-.trc_order_dunder_lt:
-    extern dunder_lt
-    lea rdx, [rel dunder_lt]
-    jmp .trc_order_dunder_call
-.trc_order_dunder_le:
-    extern dunder_le
-    lea rdx, [rel dunder_le]
-    jmp .trc_order_dunder_call
-.trc_order_dunder_gt:
-    extern dunder_gt
-    lea rdx, [rel dunder_gt]
-    jmp .trc_order_dunder_call
-.trc_order_dunder_ge:
-    extern dunder_ge
-    lea rdx, [rel dunder_ge]
-.trc_order_dunder_call:
-    extern dunder_call_2
-    call dunder_call_2
-    V_UNPACK rax, rdx           ; returns a Value
-    leave
-    ret
-.trc_order_notimpl:
-    add rsp, 16                     ; clean up 2 pushes
-.trc_order_notimpl_nopop:
+
+.trc_error:
+    ; The element comparison raised; obj_richcompare_bool left it pending.
     RET_NULL
     leave
     ret
-
-.trc_elem_next:
-    inc qword [rbp - TRC_IDX]
-    jmp .trc_elem_loop
 
 .trc_elements_equal:
     ; All min_len elements are equal.

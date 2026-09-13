@@ -101,6 +101,7 @@ test_codec_surrogates
 test_code_gc
 test_code_localsplus
 test_code_replace
+test_compare_raises
 test_compare_reflected_op
 test_comparisons
 test_compile_annotation_scan

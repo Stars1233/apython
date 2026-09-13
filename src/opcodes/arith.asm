@@ -65,7 +65,51 @@ BO_SIZE  equ 48
 ; index -- its own is in a register nothing calls across.  It had shared
 ; BO_SIZE, so widening that one would have discarded two words it never
 ; pushed.
-CO_SIZE  equ 32
+; ...and two words under them, so CO_SIZE is 48 rather than 32.  CO_EXC holds
+; the exception that was pending on the way IN, which is what tells a
+; comparison that DECLINED from one that RAISED: both report a NULL Value.
+; The second word is a pad.  Every `[rsp + BO_*]` in op_compare_op, and every
+; `sub rsp, 8` that aligns a call inside it, is written against a base of four
+; pushes from an aligned entry -- so anything added has to sit DEEPER than all
+; of them and has to come in pairs.
+CO_EXC   equ 32
+CO_SIZE  equ 48
+
+; Did the comparison just RAISE, or merely decline?
+;
+; tp_richcompare and dunder_call_2 both report "no opinion" by returning a
+; NULL Value, and a raise arrives as the same NULL.  op_compare_op told the
+; two apart by not asking, so every exception out of a user __eq__ was
+; swallowed and the answer came from the identity fallback: `a == b` was False
+; and `a == a` was True where CPython raises, and the ordering operators
+; reported "'<' not supported between instances of ..." instead of whatever
+; had been raised.  The exception was never cleared either, so it resurfaced
+; at interpreter shutdown.
+;
+; A frame may already be handling an exception -- inside an `except` block it
+; is -- so "is anything pending now" is not the question; "is the pending one
+; different from the one that was pending before the call" is.  This is
+; EXC_RAISED_SINCE's rule; the macro itself cannot be used here because it
+; pushes a scratch register, and every operand in this handler is addressed
+; through rsp.
+;
+; %1 = bytes pushed above the four-word base at this point
+; %2 = where to go when it really was a decline
+;
+; rax is the scratch: every path that reaches this had a zero Value, so
+; V_UNPACK left rax and edx both zero.  edx is left alone -- the decline paths
+; read it.
+%macro CMP_DECLINED_OR_RAISED 2
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz %2
+    cmp rax, [rsp + %1 + CO_EXC]
+    je %2
+%if %1 != 0
+    add rsp, %1
+%endif
+    jmp .cmp_raised
+%endmacro
 
 ; A dunder that answers the NotImplemented singleton is DECLINING, exactly as
 ; a slot declines with a NULL Value -- the protocol is supposed to move on to
@@ -1914,10 +1958,18 @@ DEF_FUNC_BARE op_compare_op
 .cmp_slow_real:
     ; Save operands + tags and comparison op
     ; Stack layout: [rsp+BO_RIGHT], [rsp+BO_RTAG], [rsp+BO_LEFT], [rsp+BO_LTAG]
+    ;
+    ; ...and, under all four, the exception that is pending on the way in.
+    ; CMP_DECLINED_OR_RAISED reads it to tell a comparison that declined from
+    ; one that raised; see the comment on CO_EXC.
+    push rax                   ; the pad, so CO_SIZE stays a multiple of 16
+    push rax                   ; CO_EXC, written two lines below
     push r9                    ; save left tag
     push rdi                   ; save left
     push r8                    ; save right tag
     push rsi                   ; save right
+    mov rax, [rel current_exception]
+    mov [rsp + CO_EXC], rax
 
     ; Float coercion: use float_compare when one operand is a float AND the
     ; other is something it accepts.  Short-circuiting on the tag alone sent
@@ -1992,9 +2044,10 @@ DEF_FUNC_BARE op_compare_op
     mov edx, TAG_PTR
     jmp .cmp_do_call_result
 .cmp_subclass_raised:
+.cmp_raised:
     ; No DECREFs here: the unwinder cleans up from eval_saved_r13, which is
     ; where the stack was BEFORE these two came off it, so it releases them.
-    add rsp, 32
+    add rsp, CO_SIZE
     jmp eval_exception_unwind
 .cmp_no_subclass_first:
     mov rdi, [rsp + BO_LEFT]
@@ -2053,7 +2106,9 @@ DEF_FUNC_BARE op_compare_op
 
     test edx, edx
     jnz .cmp_have_dunder_result ; got result, proceed
+    CMP_DECLINED_OR_RAISED 0, .cmp_dunder_absent
 
+.cmp_dunder_absent:
     ; Dunder not found. If NE, try __eq__ + negate (auto-derivation)
     cmp ecx, PY_NE
     jne .cmp_decline_left       ; not NE → ask the other operand
@@ -2098,7 +2153,9 @@ DEF_FUNC_BARE op_compare_op
     V_UNPACK rax, rdx           ; returns a Value
     pop rcx
     test edx, edx
-    jz .cmp_decline_left        ; __eq__ also declined: ask the other operand
+    jnz .cmp_ne_from_eq_have
+    CMP_DECLINED_OR_RAISED 0, .cmp_decline_left
+.cmp_ne_from_eq_have:
     cmp edx, TAG_PTR
     jne .cmp_ne_negate
     extern notimpl_singleton
@@ -2148,7 +2205,9 @@ DEF_FUNC_BARE op_compare_op
     V_UNPACK rax, rdx           ; float_compare returns a Value
     ; Check for NotImplemented (NULL return = tag 0)
     test edx, edx
-    jz .cmp_try_right          ; try right operand's tp_richcompare
+    jnz .cmp_float_have
+    CMP_DECLINED_OR_RAISED 8, .cmp_try_right
+.cmp_float_have:
     add rsp, 8                 ; discard saved comparison op
     jmp .cmp_do_call_result
 
@@ -2174,7 +2233,9 @@ DEF_FUNC_BARE op_compare_op
     ; rax = result payload, edx = result tag
     ; Check for NotImplemented (NULL return = tag 0)
     test edx, edx
-    jz .cmp_try_right
+    jnz .cmp_slot_have
+    CMP_DECLINED_OR_RAISED 8, .cmp_try_right
+.cmp_slot_have:
     add rsp, 8                 ; discard saved comparison op
 
 .cmp_do_call_result:
@@ -2282,7 +2343,9 @@ DEF_FUNC_BARE op_compare_op
 
     ; Check if dunder returned NULL
     test edx, edx
-    jz .cmp_identity           ; no dunder → identity fallback
+    jnz .cmp_right_dunder_have
+    CMP_DECLINED_OR_RAISED 0, .cmp_identity
+.cmp_right_dunder_have:
 
     ; ...and the NotImplemented SINGLETON is a decline too, not a result.
     ; Only NULL was tested here, so a reflected __eq__ that answered
@@ -2323,6 +2386,8 @@ DEF_FUNC_BARE op_compare_op
     ; Check for NotImplemented again
     test edx, edx
     jnz .cmp_try_right_ok
+    CMP_DECLINED_OR_RAISED 8, .cmp_right_both_decline
+.cmp_right_both_decline:
     ; Both sides returned NotImplemented → identity fallback
     pop rcx                    ; restore original comparison op (ecx) for .cmp_identity
     jmp .cmp_identity

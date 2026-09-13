@@ -279,14 +279,6 @@ reasoning that chose them and what changing one would cost.
   apart.  Closing it means paying the MRO walk on every attribute access, or
   finding a cheaper way to notice that the class changed underneath.
 
-- **A user `__eq__` that reaches itself answers False instead of raising
-  RecursionError.**  `class D: def __eq__(s, o): return s.me == o.me` with
-  `p.me = p` gives False here and RecursionError in CPython.  The container
-  comparisons are guarded (`C_RECURSION_ENTER` in list, tuple and dict) and
-  Python-level recursion is guarded by `recursion_depth`, so something on the
-  instance-comparison path is deciding the answer before either limit is
-  reached rather than recursing; which one has not been traced.
-
 - **`f(*5)` does not name the callable.**  CPython says
   "__main__.f() argument after * must be an iterable, not int"; this says
   "Value after * must be an iterable, not int", which is CPython's message
