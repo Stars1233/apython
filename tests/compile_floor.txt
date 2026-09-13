@@ -221,6 +221,7 @@ test_dict_views
 test_dir_published
 test_dir
 test_dunder_descriptor
+test_dunder_not_callable
 test_dunder_protocols
 test_dunder_receiver
 test_dunder_returns_str

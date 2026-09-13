@@ -435,12 +435,19 @@ DEF_FUNC dunder_call_1
     mov rdi, [rbx + PyObject.ob_type]
     ; rsi = name already set
     call dunder_lookup
-    ; Absent, or present but not a pointer, is not callable -- and for a Value
-    ; those are the same test: `ja` covers NULL and every immediate at once.
-    ; This was V_UNPACK plus two tag tests; dunder_lookup already returns the
-    ; Value, so the tag it synthesised was thrown away either way.
+    ; Absent and "present but not callable" are different answers, and
+    ; V_TEST_PTR alone cannot tell them apart: a pointer is its own Value, so
+    ; NULL and every immediate fail that test together.  Routing both to
+    ; `.not_found` -- a NULL with no exception set -- made an int or a float
+    ; read as ABSENT, and each caller then reported its own idea of a missing
+    ; protocol: `__len__ = 5` became "slot wrapper failed without an
+    ; exception", and `__next__ = 5` became a clean StopIteration, so a `for`
+    ; over it was silently EMPTY where CPython raises.  NULL first, then the
+    ; immediates.
+    test rax, rax
+    jz .not_found
     V_TEST_PTR rax, r9
-    ja .not_found
+    ja .lookup_uncallable
     IS_NONE rax, r9
     je .dunder_is_none
 
@@ -498,6 +505,14 @@ DEF_FUNC dunder_call_1
     pop rbx
     leave
     ret                     ; rax is already the Value
+
+.lookup_uncallable:
+    ; The dunder is there and is an immediate.  .bind_uncallable words this
+    ; already; it only needs telling that this one is BORROWED from a tp_dict,
+    ; so r13 = 0 and nothing is released.
+    mov r12, rax
+    xor r13d, r13d
+    jmp .bind_uncallable
 
 .bind_uncallable:
     ; A bound result that is not callable, or a descriptor object with no
@@ -591,12 +606,19 @@ DEF_FUNC dunder_call_2
     mov rdi, [rbx + PyObject.ob_type]
     mov rsi, rdx            ; name
     call dunder_lookup
-    ; Absent, or present but not a pointer, is not callable -- and for a Value
-    ; those are the same test: `ja` covers NULL and every immediate at once.
-    ; This was V_UNPACK plus two tag tests; dunder_lookup already returns the
-    ; Value, so the tag it synthesised was thrown away either way.
+    ; Absent and "present but not callable" are different answers, and
+    ; V_TEST_PTR alone cannot tell them apart: a pointer is its own Value, so
+    ; NULL and every immediate fail that test together.  Routing both to
+    ; `.not_found` -- a NULL with no exception set -- made an int or a float
+    ; read as ABSENT, and each caller then reported its own idea of a missing
+    ; protocol: `__len__ = 5` became "slot wrapper failed without an
+    ; exception", and `__next__ = 5` became a clean StopIteration, so a `for`
+    ; over it was silently EMPTY where CPython raises.  NULL first, then the
+    ; immediates.
+    test rax, rax
+    jz .not_found
     V_TEST_PTR rax, r9
-    ja .not_found
+    ja .lookup_uncallable
     IS_NONE rax, r9
     je .dunder_is_none
 
@@ -659,6 +681,15 @@ DEF_FUNC dunder_call_2
     pop rbx
     leave
     ret                     ; rax is already the Value
+
+.lookup_uncallable:
+    ; As dunder_call_1's: the value is borrowed, and .bind_uncallable reads the
+    ; owned flag off the stack, where the bound path pushes it twice.
+    mov r13, rax
+    xor ecx, ecx
+    push rcx
+    push rcx
+    jmp .bind_uncallable
 
 .bind_uncallable:
     pop rcx
@@ -786,12 +817,19 @@ DEF_FUNC dunder_call_3, DC3_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     mov rsi, rcx            ; name
     call dunder_lookup
-    ; Absent, or present but not a pointer, is not callable -- and for a Value
-    ; those are the same test: `ja` covers NULL and every immediate at once.
-    ; This was V_UNPACK plus two tag tests; dunder_lookup already returns the
-    ; Value, so the tag it synthesised was thrown away either way.
+    ; Absent and "present but not callable" are different answers, and
+    ; V_TEST_PTR alone cannot tell them apart: a pointer is its own Value, so
+    ; NULL and every immediate fail that test together.  Routing both to
+    ; `.not_found` -- a NULL with no exception set -- made an int or a float
+    ; read as ABSENT, and each caller then reported its own idea of a missing
+    ; protocol: `__len__ = 5` became "slot wrapper failed without an
+    ; exception", and `__next__ = 5` became a clean StopIteration, so a `for`
+    ; over it was silently EMPTY where CPython raises.  NULL first, then the
+    ; immediates.
+    test rax, rax
+    jz .not_found
     V_TEST_PTR rax, r9
-    ja .not_found
+    ja .lookup_uncallable
     IS_NONE rax, r9
     je .dunder_is_none
 
@@ -859,6 +897,12 @@ DEF_FUNC dunder_call_3, DC3_FRAME
     pop rbx
     leave
     ret                     ; rax is already the Value
+
+.lookup_uncallable:
+    ; As dunder_call_1's; here the owned flag is a frame slot.
+    mov r14, rax
+    mov qword [rbp - DC3_BOUND], 0
+    jmp .bind_uncallable
 
 .bind_uncallable:
     ; COMPOSE FIRST, then release: the message names the bound object's TYPE

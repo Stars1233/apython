@@ -1115,6 +1115,15 @@ DEF_FUNC slot_tp_call, STC_FRAME
     call dunder_lookup
     test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .stc_not_callable
+    ; ...and a Value that is not a POINTER is not callable either -- and has no
+    ; ob_type for dunder_bind to read, so `__call__ = 5` segfaulted on that
+    ; function's first instruction.  Every other caller of dunder_bind guards
+    ; it; this one tested only for NULL.  .stc_not_callable already words the
+    ; immediate case through value_type, so it just has to be told what was
+    ; found -- and STC_BOUND stays 0, so nothing tries to release it.
+    mov [rbp - STC_FUNC], rax
+    V_TEST_PTR rax, rcx
+    ja .stc_not_callable
 
     ; A __call__ that is a DESCRIPTOR is bound first, and then takes the
     ; arguments unchanged: the self it would have been handed is already in
