@@ -742,6 +742,7 @@ test_unicode_names
 test_unicode_numbers
 test_unicode_predicates
 test_unicode
+test_uninstantiable_types
 test_union_flatten
 test_union_generic_alias
 test_union_hash
