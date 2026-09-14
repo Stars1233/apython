@@ -91,7 +91,7 @@ $(shell mkdir -p build; printf '%s\n' '$(NASMFLAGS)' | cmp -s - $(FLAGSTAMP) \
 # Python compiler for tests
 PYTHON = python3
 
-.PHONY: all clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-re check-source check-pyc check-arity check-syntax check-dtoa check-round lib-pyc
+.PHONY: all clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-pkg rc-sweep rc-sweep-control check-re check-source check-pyc check-arity check-syntax check-dtoa check-round lib-pyc
 
 all: $(TARGET) lib-pyc
 
@@ -176,6 +176,25 @@ check-source: $(TARGET) lib-pyc
 # to point at its Lib/ directory.  Skips cleanly when it is absent.
 check-stdlib: $(TARGET)
 	@bash tests/stdlib_probe.sh
+
+# CPython's PACKAGE-style test directories -- test_email/, test_unittest/,
+# test_asyncio/ and eighteen more.  Every sweep before this one globbed
+# Lib/test/test_*.py and so never ran any of them; three segfaulted the first
+# time they were tried.  Ratchets against tests/pkg_floor.txt on the passing
+# count per directory and on the crash set.  Same CPYTHON_LIB requirement as
+# check-stdlib, and skips cleanly without it.
+check-pkg: $(TARGET)
+	@bash tests/pkg_probe.sh
+
+# The release-candidate measurement: all of Lib/test/test_*.py, and the same
+# corpus under CPython for a control.  A report, not a ratchet -- ten minutes
+# a side is too long to gate on.  `make check-pkg` and `make check-stdlib`
+# are the ratchets over subsets of the same ground.
+rc-sweep: $(TARGET)
+	@bash tests/rc_sweep.sh ap
+
+rc-sweep-control:
+	@bash tests/rc_sweep.sh cp
 
 # The regex engine, diffed against CPython over a few hundred patterns.  Not
 # in `make check`: `re` is a Python module, so it comes from $CPYTHON_LIB.
