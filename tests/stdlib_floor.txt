@@ -77,6 +77,7 @@ ok lib2to3
 ok linecache
 ok locale
 ok logging
+ok lzma
 ok mailbox
 ok mailcap
 ok _markupbase

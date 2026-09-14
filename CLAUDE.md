@@ -104,7 +104,7 @@ diff /tmp/expected.txt /tmp/actual.txt
 ```
 
 **Dependencies:** nasm, gcc (linker), libgmp-dev, zlib1g-dev, libbz2-dev,
-libssl-dev, libexpat1-dev, python3.12
+liblzma-dev, libssl-dev, libexpat1-dev, python3.12
 
 ## Register Convention (eval loop)
 
@@ -276,6 +276,14 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   answers `BZ_PARAM_ERROR` rather than doing nothing, because "no progress"
   and "bad call" share a code there; and `avail_in`/`avail_out` are 32-bit
   while the buffers need not be
+- `src/modules/lzma.asm` — the `_lzmacore` module: liblzma's lzma_stream, the
+  filter chain and its option structs, and the handle table.  A shim over
+  `-llzma`; `lib/_lzma.py` is the LZMACompressor and LZMADecompressor objects,
+  the constants and LZMAError that CPython's own `lzma.py` is written against.
+  A filter chain crosses the boundary as a list of TUPLES OF INTS rather than
+  as the dicts a caller writes: the option names, the defaults and the
+  per-filter error wordings are Python's business, the struct layout is the
+  assembly's
 - `src/modules/hashlib.asm` — the `_hashlibcore` module: OpenSSL's
   EVP_MD_CTX and HMAC_CTX, PBKDF2, scrypt and a constant-time compare, behind
   a handle table.  A shim over `-lcrypto`, the same split again:
