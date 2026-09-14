@@ -1370,8 +1370,10 @@ DEF_FUNC gen_close, GCW_FRAME
     leave
     ret
 .gcw_propagate:
+    ; As in _gen_throw_impl's .gti_propagate below: eval_saved_r13 is not
+    ; republished, because r13 here is whatever the caller left in it and a
+    ; bound method leaves nargs.  eval_dispatch published the right one.
     leave
-    mov [rel eval_saved_r13], r13
     jmp eval_exception_unwind
 END_FUNC gen_close
 
@@ -1673,10 +1675,27 @@ DEF_FUNC coro_getattr
     V_PACK rax, rdx             ; return one Value
     ret
 
+    ; The three below are *bound* methods.  Returning the raw builtin with an
+    ; incref left the coroutine out of the callable entirely, and the
+    ; attribute then worked only by accident: LOAD_ATTR's method fast path
+    ; supplies a receiver of its own, so `o.close()` written out in full
+    ; happened to pass one.  Store the attribute in a variable, or spread the
+    ; arguments, and there is none -- `f = sc().close; f(*())` read args[0]
+    ; off a NULL array, and `f()` read whatever the caller's stack had left
+    ; there and treated it as a generator.
+    ;
+    ; gen_getattr above had the identical defect and was fixed; its comment
+    ; names this exact failure.  async_gen_getattr was written correctly.
+    ; This was the third copy, and it did not come along.
+    ;
+    ; unittest's addCleanup is the shape in the wild: it stores a bound
+    ; method and calls it later with no arguments at all, which is what
+    ; CPython's test_asyncio.test_base_events.test_call_coroutine does.
 .cga_send:
     call _get_gen_send_builtin
     mov rdi, rax
-    call obj_incref
+    mov rsi, rbx
+    call method_new
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1687,7 +1706,8 @@ DEF_FUNC coro_getattr
 .cga_close:
     call _get_gen_close_builtin
     mov rdi, rax
-    call obj_incref
+    mov rsi, rbx
+    call method_new
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1698,7 +1718,8 @@ DEF_FUNC coro_getattr
 .cga_throw:
     call _get_gen_throw_builtin
     mov rdi, rax
-    call obj_incref
+    mov rsi, rbx
+    call method_new
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1986,11 +2007,24 @@ DEF_FUNC _gen_throw_impl, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 
 .gti_propagate:
+    ; The generator did not handle it, so the exception leaves throw().
+    ;
+    ; eval_saved_r13 is NOT republished here.  r13 is the value stack only
+    ; when this is reached straight from the eval loop, which is what
+    ; LOAD_ATTR's method fast path does; through a bound method it is
+    ; method_call's copy of nargs, and publishing that sent the unwinder
+    ; walking from address 1.  `t = gen.throw` and then `t(ValueError())`
+    ; inside a try/except was a SIGSEGV in eval_exception_unwind itself --
+    ; and `addCleanup(coro.close)` is the same shape, which is how
+    ; test_asyncio found it.
+    ;
+    ; The right value is already published: eval_dispatch writes all three of
+    ; eval_saved_rbx/r12/r13 for the frame whose opcode is running, and that
+    ; is the frame this exception is leaving into.  src/pyo/class.asm's
+    ; .init_raised carries the same note for the same reason.
     extern eval_exception_unwind
-    extern eval_saved_r13
     pop rbx
     leave
-    mov [rel eval_saved_r13], r13
     jmp eval_exception_unwind
 
 .gti_error:
