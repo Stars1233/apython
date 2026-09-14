@@ -42,6 +42,7 @@ extern none_singleton
 extern raise_exception
 extern set_exception
 extern ap_strlen
+extern posix_embedded_nul
 extern exc_TypeError_type
 extern exc_OSError_type
 extern exc_OverflowError_type
@@ -1097,6 +1098,19 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     ; so there is no descriptor to leak on the way out either.
     cmp qword [rbp - FI_CLOSEFD], 0
     je .fi_closefd_path
+    ; A C path ends at its first NUL and a Python str does not, so open("a\0b")
+    ; opened "a" -- a checked path silently becoming a different one.  Every
+    ; os.* entry point already refuses this through posix_path_arg; open() did
+    ; not, because it reaches the syscall from here instead.
+    push rdi
+    push rdi                            ; twice, to keep rsp 16-byte aligned
+    mov rsi, [rdi + PyStrObject.ob_size]
+    add rdi, PyStrObject.data
+    call posix_embedded_nul
+    pop rdi
+    pop rdi
+    test eax, eax
+    jnz .fi_embedded_nul
     lea rdi, [rdi + PyStrObject.data]
     mov rsi, [rbp - FI_OFLAGS]
     mov edx, 0o666
@@ -1201,6 +1215,10 @@ DEF_FUNC fileio_init_fn, FI_FRAME
 .fi_closefd_path:
     FI_DROP_MODE
     RAISE exc_ValueError_type, "Cannot use closefd=False with file name"
+
+.fi_embedded_nul:
+    FI_DROP_MODE
+    RAISE exc_ValueError_type, "embedded null byte"
 
 
 .fi_open_failed:

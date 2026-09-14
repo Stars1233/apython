@@ -245,6 +245,43 @@ PPA_KINDS equ 56            ; which kinds this caller accepts
 PPA_ISBYTES equ 64
 PPA_FRAME equ 80            ; + 0 pushes = 80, 16-aligned
 
+;; ============================================================================
+;; posix_embedded_nul(rdi = a pointer to the characters, rsi = the declared
+;;                    length in bytes)
+;;   -> eax = 1 when there is a NUL before the end, 0 when the string is
+;;      clean
+;;
+;; A C string ends at the first NUL and a Python str does not, so handing one
+;; straight to a syscall acts on a PREFIX of what the caller asked for --
+;; silently, which is how a checked path becomes a different path.  CPython
+;; refuses rather than truncating, and so does everything here.
+;;
+;; The test is the declared length against the C length.  It is safe to run
+;; ap_strlen past the characters because every PyStrObject and every
+;; PyBytesObject is NUL-terminated; src/pyo/bytes.asm's header records that
+;; this comparison is the reason.
+;;
+;; Its callers are posix_path_arg below, the three string vectors in
+;; posixproc.asm, and FileIO's own open path in modules/io.asm.  The last
+;; four had no check at all: os.execv(p, ["sh", "-c", "x\0y"]) passed "x",
+;; and open("a\0b") opened "a".
+;; ============================================================================
+PNUL_LEN equ 8
+PNUL_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC posix_embedded_nul, PNUL_FRAME
+    mov [rbp - PNUL_LEN], rsi
+    call ap_strlen
+    cmp rax, [rbp - PNUL_LEN]
+    jne .pnul_yes
+    xor eax, eax
+    leave
+    ret
+.pnul_yes:
+    mov eax, 1
+    leave
+    ret
+END_FUNC posix_embedded_nul
+
 ;; posix_path_arg(rdi = the argument Value, rsi = a "<func>: <arg>" prefix or
 ;;                0, edx = the accepted kinds)
 ;;   -> rax = a NUL-terminated C string, rdx = an object to release or 0,
@@ -323,14 +360,12 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     ; The declared length and the C length must agree, or there is a NUL in
     ; the middle and the syscall would act on a prefix.
     mov [rbp - PPA_PTR], rax
-    push rcx
-    push rax                            ; twice, to keep rsp 16-byte aligned
     mov rdi, rax
-    call ap_strlen
-    pop rcx
-    pop rcx                             ; the declared length
-    cmp rax, rcx
-    jne .ppa_embedded_nul
+    mov rsi, rcx                        ; the declared length
+    call posix_embedded_nul
+    test eax, eax
+    jnz .ppa_embedded_nul
+    mov rax, [rbp - PPA_PTR]
     mov rax, [rbp - PPA_PTR]
     mov rdx, [rbp - PPA_OWNED]  ; the __fspath__ result, now the caller's
     mov rcx, [rbp - PPA_ISBYTES]

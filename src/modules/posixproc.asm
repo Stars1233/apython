@@ -28,6 +28,7 @@ extern bool_true
 extern bool_false
 extern posix_int_arg
 extern posix_path_arg
+extern posix_embedded_nul
 extern posix_raise_missing
 extern raise_oserror
 extern none_singleton
@@ -528,6 +529,17 @@ DEF_FUNC_LOCAL pxv_string_vector, 40    ; + 1 push = 48, 16-aligned
     lea rdx, [rel str_type]
     cmp rcx, rdx
     jne .psv_seqerr
+    ; An embedded NUL would truncate this argument where the exec'd program
+    ; reads it, and nothing downstream could tell.  Refused, as CPython does.
+    push r10
+    push rdi                            ; twice, to keep rsp 16-byte aligned
+    mov rsi, [rdi + PyStrObject.ob_size]
+    add rdi, PyStrObject.data
+    call posix_embedded_nul
+    pop rdi
+    pop r10
+    test eax, eax
+    jnz .psv_nul
     add rdi, PyStrObject.data
     mov rax, [rbp - PSV_OUT]
     mov [rax + r10*8], rdi
@@ -544,6 +556,8 @@ DEF_FUNC_LOCAL pxv_string_vector, 40    ; + 1 push = 48, 16-aligned
     RAISE exc_TypeError_type, "execv() takes a sequence of strings"
 .psv_toomany:
     RAISE exc_ValueError_type, "execv() was given too many strings"
+.psv_nul:
+    RAISE exc_ValueError_type, "embedded null byte"
 END_FUNC pxv_string_vector
 
 ;; ============================================================================
@@ -609,6 +623,48 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     cmp rcx, rax
     jne .pev_bad
 
+    ; pev_append copies up to the first NUL, so an embedded one truncates the
+    ; entry where execve reads it -- and a NUL in the KEY produces an entry
+    ; with no '=' in it at all, which is not an environment variable of any
+    ; name.  Both halves are checked here, before anything is written, so a
+    ; refusal leaves no half-built entry in the buffer.
+    push rdi
+    push rsi                            ; an even count keeps rsp 16-aligned
+    mov rsi, [rdi + PyStrObject.ob_size]
+    add rdi, PyStrObject.data
+    call posix_embedded_nul
+    test eax, eax
+    jnz .pev_nul
+    mov rdi, [rsp]                      ; the value
+    mov rsi, [rdi + PyStrObject.ob_size]
+    add rdi, PyStrObject.data
+    call posix_embedded_nul
+    test eax, eax
+    jnz .pev_nul
+    pop rsi
+    pop rdi
+
+    ; An '=' in the NAME is the same failure wearing a different byte: the
+    ; entry is built as "<key>=<value>", so a key of "FRUIT=ORANGE" with the
+    ; value "lemon" becomes "FRUIT=ORANGE=lemon" -- which sets FRUIT, not the
+    ; variable that was asked for.  CPython refuses it, and names it
+    ; separately because it is not a NUL.
+    push rdi
+    push rsi                            ; an even count keeps rsp 16-aligned
+    mov rcx, [rdi + PyStrObject.ob_size]
+    add rdi, PyStrObject.data
+    xor eax, eax
+.pev_eq_scan:
+    cmp rax, rcx
+    jge .pev_eq_ok
+    cmp byte [rdi + rax], '='
+    je .pev_badname
+    inc rax
+    jmp .pev_eq_scan
+.pev_eq_ok:
+    pop rsi
+    pop rdi
+
     ; This entry's text starts where the buffer has got to.
     mov rax, [rbp - PEV_OUT]
     mov rcx, [rbp - PEV_POS]
@@ -663,6 +719,12 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
 .pev_toomany:
 .pev_full:
     RAISE exc_ValueError_type, "execve() environment is too large"
+.pev_nul:
+    ; The two pushes are abandoned: RAISE does not return, and the unwinder
+    ; reloads rsp from eval_base_rsp.
+    RAISE exc_ValueError_type, "embedded null byte"
+.pev_badname:
+    RAISE exc_ValueError_type, "illegal environment variable name"
 
 ; Local: append a NUL-terminated string to the scratch buffer, advancing
 ; PEV_POS in this frame.  eax = 0 when it would not fit.
