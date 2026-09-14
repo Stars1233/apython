@@ -27,12 +27,9 @@
 # build never depends on an out-of-tree checkout.
 #
 # A package cannot be named on the command line the way a file can, so each
-# is driven through unittest's own loader:
+# is driven through unittest's own loader, the way CPython's own suite is:
 #
-#   apython -c "import sys,unittest
-#               sys.argv=['x','test.<pkg>']; unittest.main(module=None)"
-#
-# which is what `python -m unittest test.<pkg>` does.
+#   apython -m unittest test.<pkg>
 
 set -u
 
@@ -88,10 +85,8 @@ probe_one() {
     out="$WORK/$pkg.txt"
     ( ulimit -v "$VLIMIT" 2>/dev/null
       cd "$ROOT" || exit
-      PYTHONPATH="$CPYTHON_LIB" timeout "$TIMEOUT" "$APY" -c \
-        "import sys, unittest
-sys.argv = ['x', 'test.$pkg']
-unittest.main(module=None)" ) > "$out" 2>&1
+      PYTHONPATH="$CPYTHON_LIB" timeout "$TIMEOUT" "$APY" -m unittest \
+        "test.$pkg" ) > "$out" 2>&1
     rc=$?
     # grep -a: a test that writes a NUL turns the log into a binary file, and
     # grep then answers nothing at all rather than the count.  That trap cost

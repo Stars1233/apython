@@ -238,7 +238,7 @@ DEF_FUNC main, 8
     cmp byte [rax], '-'
     jne .flags_done
     cmp byte [rax + 1], 0
-    je .flags_done              ; a bare "-" is a filename, not a flag
+    je .flag_stdin              ; a bare "-" is the program on stdin
 
     ; -c <command>.  CPython leaves sys.argv[0] as "-c" and drops the command
     ; itself, so move the "-c" token down over it and shift by one; what is
@@ -258,6 +258,30 @@ DEF_FUNC main, 8
     jmp .flags_done
 
 .flag_not_c:
+    ; -m <module>.  Resolving a module name means walking sys.path and asking
+    ; the import machinery, and neither exists this early -- code_from_path
+    ; above runs before builtins_init and import_init.  So the flag becomes a
+    ; fixed bootstrap command and the module NAME takes argv[1]'s place: that
+    ; is where lib/_runmodule.py reads it from, and where CPython leaves the
+    ; module's own file once it is resolved.
+    ;
+    ; sys.argv therefore comes out as [<module>, *the rest], which is
+    ; CPython's shape, and sys_path_add_script_dir sees a name with no slash
+    ; in it and answers "." -- the working directory, which is what CPython
+    ; puts at sys.path[0] for -m.
+    cmp byte [rax + 1], 'm'
+    jne .flag_not_m
+    cmp byte [rax + 2], 0
+    jne .flag_not_m
+    cmp r14d, 3
+    jl .usage
+    lea rax, [rel main_runmodule_cmd]
+    mov [rel cmd_source], rax
+    add r15, 8
+    dec r14d
+    jmp .flags_done
+
+.flag_not_m:
     ; -X <opt> and -W <spec> take a second token; both are ignored whole.
     cmp byte [rax + 2], 0
     jne .flag_word
@@ -299,6 +323,19 @@ DEF_FUNC main, 8
     sub r14d, 2
     jmp .flag_loop
 
+.flag_stdin:
+    ; `apython -` reads the program from standard input, as CPython does.  It
+    ; used to be treated as a filename and reached pyc_read_file, which said
+    ; "pyc: cannot open file" -- and a pipeline is how a generated program is
+    ; usually handed to an interpreter.  The text is slurped whole and
+    ; compiled like -c, under the filename CPython gives it.
+    call main_read_stdin
+    test rax, rax
+    jz .stdin_failed
+    mov [rel cmd_source], rax
+    mov qword [rel cmd_is_stdin], 1
+    jmp .flags_done
+
 .flags_done:
 
     ; Save argv[1] (the .pyc filename, or "-c", after any shift)
@@ -320,6 +357,10 @@ DEF_FUNC main, 8
     mov r13, rax                ; the command's length
     extern str_from_cstr_heap
     CSTRING rdi, "<string>"
+    cmp qword [rel cmd_is_stdin], 0
+    je .cmd_have_name
+    CSTRING rdi, "<stdin>"
+.cmd_have_name:
     call str_from_cstr_heap
     mov r12, rax                ; the filename compile_source records
     mov rdi, [rel cmd_source]
@@ -725,9 +766,16 @@ DEF_FUNC main, 8
     leave
     ret
 
-.usage:
-    CSTRING rdi, "usage: apython [option] ... <file>; try `apython --help'"
+.stdin_failed:
+    CSTRING rdi, "Error: cannot read the program from standard input"
     call fatal_error
+
+.usage:
+    ; A usage error exits 2, as CPython's does -- 1 is a program that ran and
+    ; failed, and a caller that tells the two apart (script_helper does) reads
+    ; a bad invocation as a failed run otherwise.
+    CSTRING rdi, "usage: apython [option] ... [-c cmd | -m mod | file | -]; try `apython --help'"
+    call main_usage_error
 
 .load_failed:
     ; A source file that failed to compile has a real SyntaxError pending, with
@@ -766,25 +814,135 @@ DEF_FUNC main, 8
     call fatal_error
 END_FUNC main
 
+;; ============================================================================
+;; main_usage_error(rdi = the message) -> does not return; exits 2
+;;
+;; fatal_error's own status is 1, which is right for an interpreter that
+;; started and could not go on.  A command line it could not parse is
+;; CPython's exit 2, and the difference matters to a caller that distinguishes
+;; a bad invocation from a program that ran and failed.
+;; ============================================================================
+DEF_FUNC_LOCAL main_usage_error, 8   ; + 1 push = 16, 16-aligned
+    push rdi
+    mov edi, 2
+    CSTRING rsi, "Error: "
+    mov edx, 7
+    extern sys_write
+    call sys_write
+    pop rdi
+    push rdi
+    call ap_strlen
+    mov rdx, rax
+    pop rsi
+    mov edi, 2
+    call sys_write
+    mov edi, 2
+    lea rsi, [rel main_nl]
+    mov edx, 1
+    call sys_write
+    mov edi, 2
+    extern sys_exit_now
+    call sys_exit_now
+    ud2
+END_FUNC main_usage_error
+
+;; ============================================================================
+;; main_read_stdin() -> rax = a NUL-terminated buffer, or 0
+;;
+;; The whole of standard input, for `apython -`.  It is read rather than
+;; mapped because stdin is as likely to be a pipe as a file, and grown by
+;; doubling because a pipe cannot be sized in advance.  The buffer is never
+;; freed: it lives as long as the program compiled from it, which is as long
+;; as the process.
+;; ============================================================================
+MRS_BUF  equ 8
+MRS_CAP  equ 16
+MRS_LEN  equ 24
+MRS_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC_LOCAL main_read_stdin, MRS_FRAME
+    mov edi, 65536
+    mov [rbp - MRS_CAP], rdi
+    extern ap_malloc
+    call ap_malloc
+    test rax, rax
+    jz .mrs_fail
+    mov [rbp - MRS_BUF], rax
+    mov qword [rbp - MRS_LEN], 0
+.mrs_loop:
+    ; Always leave one byte for the terminator.
+    mov rdx, [rbp - MRS_CAP]
+    sub rdx, [rbp - MRS_LEN]
+    dec rdx
+    test rdx, rdx
+    jg .mrs_have_room
+    mov rdi, [rbp - MRS_BUF]
+    mov rsi, [rbp - MRS_CAP]
+    shl rsi, 1
+    mov [rbp - MRS_CAP], rsi
+    extern ap_realloc
+    call ap_realloc
+    test rax, rax
+    jz .mrs_fail
+    mov [rbp - MRS_BUF], rax
+    jmp .mrs_loop
+.mrs_have_room:
+    mov rsi, [rbp - MRS_BUF]
+    add rsi, [rbp - MRS_LEN]
+    xor edi, edi                ; fd 0
+    extern sys_read
+    call sys_read
+    test rax, rax
+    jl .mrs_fail
+    jz .mrs_done
+    add [rbp - MRS_LEN], rax
+    jmp .mrs_loop
+.mrs_done:
+    mov rax, [rbp - MRS_BUF]
+    mov rcx, [rbp - MRS_LEN]
+    mov byte [rax + rcx], 0
+    mov [rel stdin_buf], rax
+    leave
+    ret
+.mrs_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC main_read_stdin
+
 section .rodata
-; The single-letter flags accepted and ignored: -E -I -S -B -u -b -d -q -v -O,
-; and any repetition of them (-OO, -bb, -vv).  Every one of these switches off
-; machinery apython does not have, so ignoring them is the answer rather than a
-; stub -- and sys.flags already reports each as off.
-main_noop_flags: db "EISBubdqvO", 0
+; The single-letter flags accepted and ignored: -E -I -S -B -u -b -d -q -v -O
+; -P -R, and any repetition of them (-OO, -bb, -vv).  Every one of these
+; switches off machinery apython does not have, so ignoring them is the answer
+; rather than a stub -- and sys.flags already reports each as off.  -P and -R
+; joined the list because script_helper and subprocess invocations in the wild
+; pass them and an unknown flag is refused outright.
+main_noop_flags: db "EISBubdqvOPR", 0
+main_nl: db 10
+
+; What -m runs.  The module name is in sys.argv[0]; see the -m arm above.
+main_runmodule_cmd: db "import _runmodule; _runmodule.run()", 0
 
 section .bss
-; The -c command, or 0 when a file was named.
+; The -c command, the -m bootstrap, or the text read from stdin; 0 when a
+; file was named.
 cmd_source: resq 1
+; 1 when cmd_source came from standard input, which only changes the filename
+; the traceback shows.
+cmd_is_stdin: resq 1
+; The stdin text, kept so it is not freed while the compile reads it.
+stdin_buf: resq 1
 
 section .rodata
 help_flag: db "--help", 0
 help_short_flag: db "-h", 0
 help_q_flag: db "-?", 0
 help_msg:
-    db "usage: apython [option] ... [file]", 10
+    db "usage: apython [option] ... [-c cmd | -m mod | file | -] [arg] ...", 10
     db "Options:", 10
     db "-h     : print this help message and exit (also -? or --help)", 10
+    db "-c <cmd> : run the string <cmd> as a program", 10
+    db "-m <mod> : run the module <mod> as __main__", 10
+    db "-        : run the program read from standard input", 10
     db "-t     : trace opcodes (partial: DISPATCH-terminated handlers are", 10
     db "         not traced -- see bugs.md)", 10
     db "--version : print the apython version number and exit", 10

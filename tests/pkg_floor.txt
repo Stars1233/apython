@@ -3,14 +3,14 @@
 # its number, and a new crash fails the target.
 # Regenerate with: bash tests/pkg_probe.sh --record
 crash test_asyncio
-pass test_ast 86
+pass test_ast 87
 pass test_asyncio 0
 pass test_capi 78
 pass test_cext 5
 pass test_concurrent_futures 0
 pass test_cppext 5
 pass test_ctypes 0
-pass test_dataclasses 216
+pass test_dataclasses 218
 pass test_doctest 1
 pass test_email 1667
 pass test_future_stmt 17

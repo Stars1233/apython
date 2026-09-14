@@ -96,6 +96,7 @@ test_class_layout_entries
 test_classmethod_metaclass
 test_class_name_at_module
 test_class_namespace_copy
+test_cli
 test_closures
 test_cmath
 test_codec_args
