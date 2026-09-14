@@ -1399,6 +1399,8 @@ section .text
 ;; freed memory, and reading it printed whatever the allocator had put there.
 ;; ============================================================================
 DEF_FUNC_BARE array_getbuffer
+    cmp esi, BUF_GETINFO
+    je .agb_info
     cmp esi, BUF_GET
     jne .agb_count
     mov rax, [rdi + PyArrayObject.ob_data]
@@ -1409,6 +1411,24 @@ DEF_FUNC_BARE array_getbuffer
     xor edx, edx                ; no buffer: nothing to read, and no length
     lea rax, [rel array_empty_data]
 .agb_yes:
+    mov ecx, 1
+    ret
+.agb_info:
+    ; What a memoryview needs and a byte reader does not: the item size, the
+    ; struct format, and whether it may be written through.  Without this the
+    ; view was built with the slot's defaults -- one-byte items, format "B",
+    ; read-only -- so memoryview(array("i", [1, 2, 3])) had length 12 and
+    ; tolist() answered the twelve bytes.
+    ;
+    ; Writable, because an array's storage moving is what ob_exports is for:
+    ; array_reserve refuses to grow while a view is out, so the pointer the
+    ; view holds cannot go stale under it.
+    mov rdx, [rdi + PyArrayObject.ob_isize]
+    mov rax, [rdi + PyArrayObject.ob_code]
+    and eax, 0x7f
+    shl eax, 1
+    lea rcx, [rel array_format_strs]
+    add rax, rcx
     mov ecx, 1
     ret
 .agb_count:
@@ -1425,6 +1445,21 @@ DEF_FUNC_BARE array_getbuffer
 .agb_done:
     ret
 END_FUNC array_getbuffer
+
+section .rodata
+align 2
+;; One NUL-terminated string per ASCII typecode letter, so array_getbuffer can
+;; hand a memoryview a format pointer without allocating: the string for
+;; letter n is at array_format_strs + n*2.  256 bytes of rodata against a
+;; fourteen-row table and a search; the letters are the index.
+array_format_strs:
+%assign afs_i 0
+%rep 128
+    db afs_i, 0
+%assign afs_i afs_i+1
+%endrep
+
+section .text
 
 ;; ============================================================================
 ;; array_no_exports(rdi = an array) -> eax = 1 when it may be resized, or 0

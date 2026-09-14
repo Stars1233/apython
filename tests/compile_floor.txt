@@ -446,6 +446,7 @@ test_math
 test_member_descriptor_protocol
 test_membership
 test_memmove_boundaries
+test_memoryview_buffer
 test_memoryview_exports
 test_memoryview_formats
 test_memoryview_released
