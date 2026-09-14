@@ -32,6 +32,7 @@ extern obj_as_index_seq
 extern seq_repeat_check_count
 extern set_exception
 extern slice_indices
+extern slice_indices_live
 extern slice_type
 section .text
 
@@ -422,8 +423,9 @@ DEF_FUNC bytearray_subscript, BSU_FRAME
 .bsu_slice:
     mov rdi, [rbp - BSU_KEY]
     mov rcx, [rbp - BSU_SELF]
-    mov rsi, [rcx + PyByteArrayObject.ob_size]
-    call slice_indices          ; rax = start, rdx = stop, rcx = step
+    ; The LIVE length: a bound's __index__ can clear this very bytearray.
+    lea rsi, [rcx + PyByteArrayObject.ob_size]
+    call slice_indices_live     ; rax = start, rdx = stop, rcx = step
     mov [rbp - BSU_START], rax
     mov [rbp - BSU_STEP], rcx
     ; The element count, which slice_length computes for any step.
@@ -608,8 +610,8 @@ DEF_FUNC bytearray_ass_subscript, 104
 .bas_slice:
     mov rdi, [rbp - BAS_KEY]
     mov rcx, [rbp - BAS_SELF]
-    mov rsi, [rcx + PyByteArrayObject.ob_size]
-    call slice_indices
+    lea rsi, [rcx + PyByteArrayObject.ob_size]      ; the LIVE length
+    call slice_indices_live
     mov [rbp - BAS_START], rax
     mov [rbp - BAS_STOP], rdx
     mov [rbp - BAS_STEP], rcx

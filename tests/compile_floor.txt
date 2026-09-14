@@ -595,6 +595,7 @@ test_singleton_construct
 test_size_and_recursion_limits
 test_slice_and_star_args
 test_slice_assign
+test_slice_bound_mutates
 test_slice_compare
 test_slice_index_protocol
 test_slice_indices
