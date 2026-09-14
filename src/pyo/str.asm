@@ -1596,14 +1596,55 @@ extern dict_get
 section .text
 
 ;; ============================================================================
-;; str_str(PyObject *self) -> PyObject*
-;; tp_str: returns self with INCREF (no quotes)
+;; str_str(PyObject *self) -> (rax = PyStrObject*, edx = TAG_PTR)
+;;
+;; tp_str: an exact str is handed straight back with an INCREF, and a
+;; SUBCLASS is copied into an exact one.  That second half is CPython's
+;; unicode_result_unchanged, and it is not decoration: `type(str(x))` is `str`
+;; there for every x, and str was the ONE builtin here that answered its own
+;; subclass -- bytes, int, float, tuple, list and dict all already normalise.
+;;
+;; What it cost was a crash, not a wrong repr.  A str subclass tells pickle
+;; and copy how to rebuild itself with
+;;
+;;     def __getnewargs__(self): return (str(self), self.token_type)
+;;
+;; which is how every token class in CPython's email._header_value_parser is
+;; written.  With str(self) answering the subclass, __getnewargs__ handed the
+;; reconstructor an object of the very type it was reducing, copy.deepcopy
+;; recursed for ever, and the native stack went before the recursion limit
+;; could fire.
+;;
+;; This one function is the whole fix, because both spellings arrive here:
+;; `str(x)` through builtin_str_fn -> obj_str -> tp_str, and `str.__str__(x)`
+;; through DEF_DUNDER_STRREPR, which calls the DEFINING type's slot.
 ;; ============================================================================
 DEF_FUNC_BARE str_str
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne str_str_copy
     inc qword [rdi + PyObject.ob_refcnt]
     mov rax, rdi
+    mov edx, TAG_PTR
     ret
 END_FUNC str_str
+
+;; ============================================================================
+;; str_str_copy(PyStrObject *self) -> (rax = an exact str, edx = TAG_PTR)
+;;
+;; The subclass arm of str_str, out of line because it is the rare one.  A str
+;; subclass keeps its characters inline -- that is what TP_DICT_AT_TAIL is for
+;; -- so ob_size and data read the same as on an exact str, and str_new_heap
+;; stamps str_type on the copy by construction.
+;; ============================================================================
+DEF_FUNC str_str_copy
+    mov rsi, [rdi + PyStrObject.ob_size]
+    add rdi, PyStrObject.data
+    call str_new_heap
+    leave
+    ret
+END_FUNC str_str_copy
 
 ;; ============================================================================
 ;; str_hash(PyObject *self) -> int64
