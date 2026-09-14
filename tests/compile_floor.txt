@@ -594,6 +594,7 @@ test_size_and_recursion_limits
 test_slice_and_star_args
 test_slice_assign
 test_slice_compare
+test_slice_index_protocol
 test_slice_indices
 test_slice_negative_step
 test_slicing

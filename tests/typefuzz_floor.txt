@@ -670,8 +670,12 @@ set().union(object)
 set().union('s')
 set().union(True)
 slice(10**60).indices(3)
+slice(1.5).indices(3)
 slice(1).indices(3)
+slice([]).indices(3)
 slice(None).indices(3)
+slice(object).indices(3)
+slice('s').indices(3)
 slice(True).indices(3)
 '%s'%None
 '%s'%object

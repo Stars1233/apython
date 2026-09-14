@@ -28,6 +28,7 @@ extern int_type
 extern type_type
 extern raise_exception
 extern exc_TypeError_type
+extern obj_as_index_clamped_msg
 extern ap_strcmp
 
 ;; ============================================================================
@@ -377,8 +378,20 @@ DEF_FUNC_BARE pyobj_to_i64
     mov rax, 0x7fffffffffffffff  ; sentinel for "not specified"
     ret
 .not_an_index:
-    RAISE exc_TypeError_type, "slice indices must be integers or None"
+    ; Not an int, but __index__ makes an object usable as a slice bound --
+    ; numpy's integers, IntEnum members, and the `X` whose __index__ has a
+    ; side effect that CPython's own test_mmap builds.  obj_as_index_clamped
+    ; is the single funnel for that protocol, and clamping is already what a
+    ; bound wants; only the wording is this caller's own.
+    mov edx, esi
+    lea rsi, [rel slice_index_msg]
+    jmp obj_as_index_clamped_msg
 END_FUNC pyobj_to_i64
+
+section .rodata
+slice_index_msg:
+    db "slice indices must be integers or None or have an __index__ method", 0
+section .text
 
 ;; ============================================================================
 ;; slice_indices(PySliceObject *slice, int64 length)

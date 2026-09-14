@@ -798,7 +798,13 @@ oai_body:
     ret
 
 .oai_bad_index:
-    RAISE exc_TypeError_type, "__index__ returned non-int"
+    ; Name what it did return.  CPython says "__index__ returned non-int
+    ; (type str)", and the word that identifies the mistake was the one
+    ; missing.
+    mov rsi, rax
+    V_PACK rsi, rdx
+    lea rdi, [rel oai_bad_index_msg]
+    jmp raise_type_error_with_name
 
 .oai_error:
     ; Name the type.  This is the single funnel for every __index__ context --
@@ -905,8 +911,23 @@ DEF_FUNC obj_as_index_clamped, OAI_FRAME
     jmp oai_body
 END_FUNC obj_as_index_clamped
 
+;; ============================================================================
+;; obj_as_index_clamped_msg(rdi = payload, edx = tag, rsi = the refusal's
+;;                          template, whose \x01 stands for the type, or 0)
+;;   -> rax = int64
+;; The same again, with the caller's wording.  A slice bound has its own:
+;; CPython says "slice indices must be integers or None or have an __index__
+;; method" and names no type at all.
+;; ============================================================================
+global obj_as_index_clamped_msg
+DEF_FUNC obj_as_index_clamped_msg, OAI_FRAME
+    mov qword [rbp - OAI_MODE], 1
+    jmp oai_body
+END_FUNC obj_as_index_clamped_msg
+
 section .rodata
 oai_not_an_index: db "'", 1, "' object cannot be interpreted as an integer", 0
+oai_bad_index_msg: db "__index__ returned non-int (type ", 1, ")", 0
 section .text
 
 ;; ============================================================================
