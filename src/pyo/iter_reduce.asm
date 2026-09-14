@@ -553,9 +553,45 @@ DEF_FUNC builtin_func_reduce
     test rsi, rsi
     jz .bfr_args
     mov rdi, [rdi]
+    ; A DESCRIPTOR reduces through the class it was found on.  CPython has a
+    ; separate descr_reduce for method_descriptor and wrapper_descriptor --
+    ; (getattr, (__objclass__, __name__)) -- and meth_reduce, the bare name,
+    ; is for a MODULE-level builtin.  One function answered the bare name for
+    ; every kind here, so pickle went looking for str.count under __main__
+    ; and said "it's not found as __main__.count"; test_pickle, test_descr
+    ; and test_functools carried about a hundred and eighty of those.
+    mov rcx, [rdi + PyBuiltinObject.func_kind]
+    cmp rcx, BUILTIN_KIND_METHOD
+    je .bfr_descr
+    cmp rcx, BUILTIN_KIND_WRAPPER
+    je .bfr_descr
+    cmp rcx, BUILTIN_KIND_ON_TYPE
+    je .bfr_descr               ; int.__new__: its owner is its __self__ too
     mov rax, [rdi + PyBuiltinObject.func_name]
     mov rdi, rax
     call obj_incref
+    leave
+    ret
+.bfr_descr:
+    mov rax, [rdi + PyBuiltinObject.func_owner]
+    test rax, rax
+    jz .bfr_plain               ; unstamped: nothing to name it by
+    mov rsi, [rdi + PyBuiltinObject.func_name]
+    mov rdi, rax
+    call ir_bound_reduce
+    test rax, rax
+    jz .bfr_failed
+    leave
+    ret
+.bfr_plain:
+    mov rax, [rdi + PyBuiltinObject.func_name]
+    mov rdi, rax
+    call obj_incref
+    leave
+    ret
+.bfr_failed:
+    xor eax, eax
+    xor edx, edx
     leave
     ret
 .bfr_args:
