@@ -437,7 +437,16 @@ DEF_FUNC slice_indices
     add rax, r14           ; start += length
     test rax, rax
     jns .start_pos
-    xor eax, eax           ; clamp to 0
+    ; Still below the start of the sequence.  The lower bound is 0 for a
+    ; positive step and -1 for a negative one -- PySlice_AdjustIndices again:
+    ; -1 is "one before the first index", which is where a downward walk
+    ; stops.  Clamping both to 0 made slice(-300, None, -1).indices(256)
+    ; answer (0, -1, -1), a one-element slice, where CPython answers
+    ; (-1, -1, -1) and the slice is empty.
+    xor eax, eax
+    test r15, r15
+    jns .start_pos
+    mov rax, -1
 .start_pos:
     cmp rax, r14
     jl .start_ok

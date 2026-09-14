@@ -16,6 +16,16 @@
 # built a bytes whose ob_size was NEGATIVE, and b"..."[0:256:-1] was
 # "Fatal: out of memory".
 #
+# The start bound has the same asymmetry and had the same defect: a start
+# below the sequence clamps to 0 for a positive step and to -1 for a negative
+# one, -1 being "one before the first index", which is where a downward walk
+# stops.  slice(-300, None, -1).indices(256) answered (0, -1, -1) -- a
+# ONE-element slice -- where CPython answers (-1, -1, -1) and it is empty.
+#
+# That half is invisible to a matrix that compares one sequence against
+# another, because every sequence reads the same slice_indices and so every
+# one of them is wrong together.  Only the printed indices catch it.
+#
 # It is a shape that hides well.  Every other sequence -- list, tuple, str,
 # bytearray, range, memoryview -- got it right, so a test over "slicing" that
 # used a list would have proved nothing, and the usual way to write a reversed
@@ -37,6 +47,10 @@ CASES = [
     (0, None, -2), (-31, -300, -1), (256, 256, -1), (255, 255, -1),
     (0, 1, -1), (1, 0, -1), (-1, -1, -1), (None, 256, -1),
     (0, 256, 1), (0, 300, 1), (None, None, 1), (0, None, 3),
+    # A start below the sequence, which clamps to -1 for a negative step.
+    (-300, None, -1), (-300, -300, -1), (-300, 0, -1), (-300, 255, -1),
+    (-256, None, -1), (-257, None, -1), (-300, None, 1), (-300, None, 2),
+    (None, -300, -1), (-1, -300, -1), (0, -300, -1), (-300, -1, -1),
 ]
 for args in CASES:
     print("%-28s %s" % (args, slice(*args).indices(256)))
