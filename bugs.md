@@ -139,16 +139,6 @@ reasoning that chose them and what changing one would cost.
   new; closing it means a name test on the store fallback, which every
   `self.x = v` would pay for.
 
-- **`random.randbytes` is seconds per megabyte**, where CPython's is instant:
-  `_random` is Python here and CPython's is C.  2.4 s/MiB through this tree's
-  own `lib/random.py`, and 35 s/MiB through CPython's `Lib/random.py`, which
-  is what a test run with its stdlib on the path gets.  That is the whole of
-  why `test_zlib` times out -- `check_big_compress_buffer` opens with
-  `random.randbytes(10 * 1024 * 1024)`, and CPython's `bigmemtest` runs it
-  even without `-M` (at a small size, but the ten megabytes are generated
-  regardless).  Nothing is wrong; it is slow.  `test_zipfile64` is the same
-  shape, one order of magnitude larger.
-
 - **`frame.f_lineno` cannot be assigned, so `pdb`'s `jump` does not work.**
   `frameobj_setattr` refuses it outright: moving the instruction pointer to
   the start of another line means re-deriving the block stack for the

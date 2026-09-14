@@ -34,6 +34,7 @@ extern io_module_create
 extern gc_module_create
 extern cmath_module_create
 extern math_module_create
+extern random_module_create
 extern unicodedata_module_create
 extern socket_module_create
 extern marshal_module_init
@@ -58,6 +59,7 @@ bm_n_io:       db "_iocore", 0
 bm_n_gc:       db "gc", 0
 bm_n_cmath:    db "cmath", 0
 bm_n_math:     db "math", 0
+bm_n_randomcore: db "_randomcore", 0
 bm_n_unicodedata: db "unicodedata", 0
 bm_n_socket:   db "_socketcore", 0
 bm_n_marshal:  db "marshal", 0
@@ -75,6 +77,7 @@ builtin_module_table:
     dq bm_n_abc,      abc_module_create
     dq bm_n_array,    array_module_create
     dq bm_n_asyncio,  asyncio_module_create
+    dq bm_n_randomcore, random_module_create
     dq bm_n_hashlib,  hashlib_module_create
     dq bm_n_io,       io_module_create
     dq bm_n_pyexpat,  pyexpat_module_create

@@ -1,78 +1,72 @@
-"""_random - the Mersenne Twister behind random.Random.
+"""_random - the class surface over the MT19937 in src/modules/random.asm.
 
-CPython puts MT19937 in C for speed.  This is the same generator, in Python:
-the same state, the same tempering, and the same init_by_array seeding, so a
-given seed produces the same sequence CPython produces.  random.Random
-subclasses this and gets everything else from it.
+CPython puts the Mersenne Twister in C for speed, and so does this: the twist
+is a 624-iteration loop of shifts and xors, and an interpreter running it one
+bytecode at a time cannot be made fast.  What was here before was that loop in
+Python, and it cost 47x CPython on `random()` and nearly two seconds per
+megabyte of `randbytes` -- which is why test_zlib timed out, since CPython's
+check_big_compress_buffer opens with randbytes(10 * 1024 * 1024) whether or
+not -M was given.
+
+So the split is the one `_iocore`/`_io` and `_zlibcore`/`zlib` already use.
+`_randomcore` holds the state, the twist and the tempering, and takes fixed
+positional arguments; this holds the class, the seeding rules, the argument
+checking and the state tuple CPython's random.py pickles.
+
+The sequence is the contract.  MT19937 is fully specified and every recorded
+seed in CPython's tests depends on the exact stream, so `random()` takes 27
+bits from the first word and 26 from the second in that order, `getrandbits`
+composes little-endian words with the LAST one narrowed, and the state tuple
+is 624 words followed by the cursor.  All of it is checked against CPython's
+own output rather than against a distribution.
 """
 
+import _randomcore as _core
+
 _N = 624
-_M = 397
-_MATRIX_A = 0x9908b0df
-_UPPER_MASK = 0x80000000
-_LOWER_MASK = 0x7fffffff
 _MASK32 = 0xffffffff
 
 
 class Random:
     """MT19937.  The five methods random.Random actually calls."""
 
-    __slots__ = ("_mt", "_mti", "_gauss_next")
+    __slots__ = ("_h", "_gauss_next")
 
-    def __new__(cls, x=None):
+    def __new__(cls, x=None, *args, **kwargs):
         """The state is built HERE, not in __init__.
 
         CPython's is a C type whose state belongs to the object rather than
         to any Python-level constructor, and random.Random -- which
-        subclasses it -- overrides __init__ and calls self.seed(x) without
+        subclasses this -- overrides __init__ and calls self.seed(x) without
         ever chaining to ours.  Building the state in __init__ meant that
         subclass had none, and seeding it raised.
+
+        The extra arguments are swallowed for the reason object.__new__
+        swallows them: a subclass that overrides __init__ is handed the same
+        argument list here, and `class Sub(Random): def __init__(self,
+        newarg=None)` then constructs with a keyword this knows nothing
+        about.
         """
         self = super().__new__(cls)
-        self._mt = [0] * _N
-        self._mti = _N + 1
+        self._h = _core.new()
         self._gauss_next = None
         return self
 
-    def __init__(self, x=None):
+    def __init__(self, x=None, *args, **kwargs):
         self.seed(x)
 
+    def __del__(self):
+        # The handle is an index into a table the module owns, so it has to be
+        # given back by hand; nothing else will.
+        try:
+            h = self._h
+        except AttributeError:
+            return
+        if h is not None:
+            self._h = None
+            _core.free(h)
+
     # -- seeding ---------------------------------------------------------
-    def _init_genrand(self, s):
-        mt = self._mt
-        mt[0] = s & _MASK32
-        for i in range(1, _N):
-            mt[i] = (1812433253 * (mt[i - 1] ^ (mt[i - 1] >> 30)) + i) & _MASK32
-        self._mti = _N
-
-    def _init_by_array(self, key):
-        self._init_genrand(19650218)
-        mt = self._mt
-        i = 1
-        j = 0
-        k = _N if _N > len(key) else len(key)
-        while k:
-            mt[i] = ((mt[i] ^ ((mt[i - 1] ^ (mt[i - 1] >> 30)) * 1664525))
-                     + key[j] + j) & _MASK32
-            i += 1
-            j += 1
-            if i >= _N:
-                mt[0] = mt[_N - 1]
-                i = 1
-            if j >= len(key):
-                j = 0
-            k -= 1
-        k = _N - 1
-        while k:
-            mt[i] = ((mt[i] ^ ((mt[i - 1] ^ (mt[i - 1] >> 30)) * 1566083941))
-                     - i) & _MASK32
-            i += 1
-            if i >= _N:
-                mt[0] = mt[_N - 1]
-                i = 1
-            k -= 1
-        mt[0] = 0x80000000
-
     def seed(self, a=None, version=2):
         """CPython's rule, from _randommodule.c: None means the OS entropy
         source, an exact int is used by absolute value, and anything else is
@@ -98,72 +92,46 @@ class Random:
         while a:
             key.append(a & _MASK32)
             a >>= 32
-        self._init_by_array(key)
+        _core.seed_words(self._h, key)
 
     # -- generation ------------------------------------------------------
-    def _genrand_uint32(self):
-        mt = self._mt
-        if self._mti >= _N:
-            if self._mti == _N + 1:
-                self._init_genrand(5489)
-            for kk in range(_N - _M):
-                y = (mt[kk] & _UPPER_MASK) | (mt[kk + 1] & _LOWER_MASK)
-                mt[kk] = mt[kk + _M] ^ (y >> 1) ^ (_MATRIX_A if y & 1 else 0)
-            for kk in range(_N - _M, _N - 1):
-                y = (mt[kk] & _UPPER_MASK) | (mt[kk + 1] & _LOWER_MASK)
-                mt[kk] = (mt[kk + (_M - _N)] ^ (y >> 1)
-                          ^ (_MATRIX_A if y & 1 else 0))
-            y = (mt[_N - 1] & _UPPER_MASK) | (mt[0] & _LOWER_MASK)
-            mt[_N - 1] = mt[_M - 1] ^ (y >> 1) ^ (_MATRIX_A if y & 1 else 0)
-            self._mti = 0
-
-        y = mt[self._mti]
-        self._mti += 1
-        y ^= y >> 11
-        y ^= (y << 7) & 0x9d2c5680
-        y ^= (y << 15) & 0xefc60000
-        y &= _MASK32
-        y ^= y >> 18
-        return y
-
     def random(self):
-        """A double in [0, 1), from 53 bits -- CPython's split of the two
-        words is what makes the sequences match."""
-        a = self._genrand_uint32() >> 5
-        b = self._genrand_uint32() >> 6
-        return (a * 67108864.0 + b) * (1.0 / 9007199254740992.0)
+        """A double in [0, 1), from 53 bits."""
+        return _core.random(self._h)
 
     def getrandbits(self, k):
         if not isinstance(k, int):
-            raise TypeError("number of bits must be an integer")
+            # CPython's argument clinic takes an `int k`, so the refusal is
+            # __index__'s wording rather than one of our own.
+            try:
+                k = k.__index__()
+            except AttributeError:
+                raise TypeError(
+                    "'%s' object cannot be interpreted as an integer"
+                    % (type(k).__name__,)) from None
         if k < 0:
             raise ValueError("number of bits must be non-negative")
-        if k == 0:
-            return 0
         if k <= 32:
-            return self._genrand_uint32() >> (32 - k)
-        words = (k + 31) // 32
-        result = 0
-        shift = 0
-        for i in range(words):
-            bits = k - 32 * i
-            if bits > 32:
-                bits = 32
-            r = self._genrand_uint32() >> (32 - bits)
-            result |= r << shift
-            shift += bits
-        return result
+            return _core.bits(self._h, k)
+        # One word per 32 bits, least significant first, last one narrowed --
+        # assembled as bytes and imported in one step rather than shifted
+        # together here, which is what makes randbytes() of a megabyte cheap.
+        return int.from_bytes(_core.words(self._h, k), "little")
 
+    # -- the state tuple CPython's random.py pickles ----------------------
     def getstate(self):
-        return tuple(self._mt) + (self._mti,)
+        raw = _core.getstate(self._h)
+        return tuple([int.from_bytes(raw[i:i + 4], "little")
+                      for i in range(0, len(raw), 4)])
 
     def setstate(self, state):
         if not isinstance(state, tuple):
             raise TypeError("state vector must be a tuple")
         if len(state) != _N + 1:
             raise ValueError("state vector is the wrong size")
-        self._mt = [int(v) & _MASK32 for v in state[:_N]]
         mti = int(state[_N])
         if mti < 0 or mti > _N:
             raise ValueError("invalid state")
-        self._mti = mti
+        raw = b"".join([(int(v) & _MASK32).to_bytes(4, "little")
+                        for v in state[:_N]])
+        _core.setstate(self._h, raw + mti.to_bytes(4, "little"))
