@@ -150,22 +150,55 @@ def lookup(encoding):
 # --- error handlers -------------------------------------------------------
 #
 # Each takes the exception and returns (replacement, resume position).
+#
+# And each CHECKS what it was handed first.  They read .object, .start and
+# .end, so anything else used to reach them as an AttributeError --
+# "'FakeUnicodeError' object has no attribute 'object'" -- where CPython
+# refuses with a TypeError naming the type.  That is most of CPython's own
+# test_codeccallbacks, which passes both a str subclass and an Exception
+# subclass whose __class__ claims to be a UnicodeError.
+#
+# Which is why the test cannot be isinstance: isinstance honours __class__
+# and CPython's PyObject_TypeCheck does not.  issubclass over the REAL type
+# is the same question CPython asks.
+#
+# Which handler accepts which exception is not uniform, and the shape is
+# CPython's: xmlcharrefreplace and namereplace are encode-only, the two
+# surrogate handlers refuse a translate error, and ignore, replace and
+# backslashreplace take all three.
+
+
+def _require(exc, *classes):
+    """CPython's PyUnicode*Error_Check, and its refusal when it fails."""
+    if not issubclass(type(exc), classes):
+        raise TypeError("don't know how to handle %s in error callback"
+                        % type(exc).__name__)
+
 
 def strict_errors(exc):
+    # The one handler whose refusal is worded differently, because it does not
+    # read the attributes -- it only has to be something raisable.
+    if not issubclass(type(exc), BaseException):
+        raise TypeError("codec must pass exception instance")
     raise exc
 
 
 def ignore_errors(exc):
+    _require(exc, UnicodeEncodeError, UnicodeDecodeError,
+             UnicodeTranslateError)
     return ("", exc.end)
 
 
 def replace_errors(exc):
-    if isinstance(exc, UnicodeEncodeError):
+    _require(exc, UnicodeEncodeError, UnicodeDecodeError,
+             UnicodeTranslateError)
+    if issubclass(type(exc), UnicodeEncodeError):
         return ("?", exc.end)
     return ("�", exc.end)
 
 
 def xmlcharrefreplace_errors(exc):
+    _require(exc, UnicodeEncodeError)
     parts = []
     for ch in exc.object[exc.start:exc.end]:
         parts.append("&#" + str(ord(ch)) + ";")
@@ -176,6 +209,8 @@ def backslashreplace_errors(exc):
     # A decode error's .object is bytes, and iterating bytes gives ints; an
     # encode error's is a str.  Both reach here, and CPython escapes each byte
     # of the first and each character of the second.
+    _require(exc, UnicodeEncodeError, UnicodeDecodeError,
+             UnicodeTranslateError)
     parts = []
     for item in exc.object[exc.start:exc.end]:
         n = item if isinstance(item, int) else ord(item)
@@ -189,7 +224,26 @@ def backslashreplace_errors(exc):
 
 
 def namereplace_errors(exc):
-    return backslashreplace_errors(exc)
+    """CPython's namereplace: \\N{THE CHARACTER'S NAME} where there is one.
+
+    Encode-only, as CPython's is: there is no name to give a byte.  A
+    character the database has no name for falls back to the \\x/\\u/\\U
+    escape, which is what CPython does too -- and is all this used to do,
+    because there was no unicodedata to ask.
+    """
+    _require(exc, UnicodeEncodeError)
+    try:
+        from unicodedata import name as _uniname
+    except ImportError:
+        return backslashreplace_errors(exc)
+    parts = []
+    for ch in exc.object[exc.start:exc.end]:
+        try:
+            parts.append("\\N{" + _uniname(ch) + "}")
+        except ValueError:
+            parts.append(backslashreplace_errors(
+                UnicodeEncodeError(exc.encoding, ch, 0, 1, exc.reason))[0])
+    return ("".join(parts), exc.end)
 
 
 def surrogateescape_errors(exc):
@@ -206,14 +260,15 @@ def surrogateescape_errors(exc):
     be unescaped; anything else re-raises, which is CPython's behaviour and
     the reason `'\ud800'.encode('utf-8', 'surrogateescape')` still fails.
     """
-    if isinstance(exc, UnicodeDecodeError):
+    _require(exc, UnicodeEncodeError, UnicodeDecodeError)
+    if issubclass(type(exc), UnicodeDecodeError):
         parts = []
         for b in exc.object[exc.start:exc.end]:
             if b < 0x80:
                 raise exc
             parts.append(chr(0xDC00 + b))
         return ("".join(parts), exc.end)
-    if isinstance(exc, UnicodeEncodeError):
+    if issubclass(type(exc), UnicodeEncodeError):
         # A bytes replacement is legal for an encode handler, and it is the
         # only way to put back a byte that is not a character.
         out = bytearray()
@@ -270,11 +325,12 @@ def surrogatepass_errors(exc):
     what `lib/_io.py` asks for when a caller wants a text stream that does not
     lose a surrogate.
     """
+    _require(exc, UnicodeEncodeError, UnicodeDecodeError)
     name, width = _standard_encoding(getattr(exc, "encoding", None) or "")
     if name is None:
         raise exc
 
-    if isinstance(exc, UnicodeEncodeError):
+    if issubclass(type(exc), UnicodeEncodeError):
         out = bytearray()
         for ch in exc.object[exc.start:exc.end]:
             n = ord(ch)
@@ -302,7 +358,7 @@ def surrogatepass_errors(exc):
                 out.append(n & 0xFF)
         return (bytes(out), exc.end)
 
-    if isinstance(exc, UnicodeDecodeError):
+    if issubclass(type(exc), UnicodeDecodeError):
         b = exc.object
         i = exc.start
         # `exc.end` is where the STRICT decoder gave up, which for utf-8 is
@@ -1202,7 +1258,8 @@ def _utf_n_encode(s, errors, width, big):
     return (bytes(out), len(s))
 
 
-def _utf_n_decode(data, errors, width, big, codec, offset=0):
+def _utf_n_decode(data, errors, width, big, codec, offset=0,
+                  final=True):
     """Decode UTF-16 or UTF-32, running the error handler on every refusal.
 
     Only a truncated tail was detected at all, and it RAISED rather than
@@ -1239,6 +1296,15 @@ def _utf_n_decode(data, errors, width, big, codec, offset=0):
 
     while i < n:
         if n - i < width:
+            # An incomplete trailing unit is only an ERROR at the end of the
+            # input.  An incremental decoder hands over whatever arrived and
+            # says how much of it was used, so the tail can be carried into
+            # the next call: `final` is that distinction, and it was accepted
+            # by every decoder here and passed to none of them.  So
+            # codecs.getincrementaldecoder("utf-16-le")().decode(b"\x00")
+            # raised where CPython buffers one byte and waits.
+            if not final:
+                break
             replacement, i = fail(i, n, "truncated data")
             out.append(replacement)
             continue
@@ -1286,7 +1352,7 @@ def _utf_n_decode(data, errors, width, big, codec, offset=0):
                 continue
         out.append(chr(v))
         i += width
-    return ("".join(out), n + offset)
+    return ("".join(out), i + offset)
 
 
 def _bom_prefix(width, big):
@@ -1304,11 +1370,11 @@ def utf_16_be_encode(s, errors=None):
 
 
 def utf_16_le_decode(data, errors=None, final=False):
-    return _utf_n_decode(data, errors, 2, False, "utf-16-le")
+    return _utf_n_decode(data, errors, 2, False, "utf-16-le", final=final)
 
 
 def utf_16_be_decode(data, errors=None, final=False):
-    return _utf_n_decode(data, errors, 2, True, "utf-16-be")
+    return _utf_n_decode(data, errors, 2, True, "utf-16-be", final=final)
 
 
 def utf_16_encode(s, errors=None):
@@ -1321,10 +1387,13 @@ def utf_16_decode(data, errors=None, final=False):
     # reports 'utf-16-le' for a little-endian stream, not 'utf-16'.
     b = _as_bytes(data)
     if b[:2] == b"\xff\xfe":
-        return _utf_n_decode(b[2:], errors, 2, False, "utf-16-le", 2)
+        return _utf_n_decode(b[2:], errors, 2, False, "utf-16-le", 2,
+                             final=final)
     if b[:2] == b"\xfe\xff":
-        return _utf_n_decode(b[2:], errors, 2, True, "utf-16-be", 2)
-    return _utf_n_decode(b, errors, 2, False, "utf-16-le")
+        return _utf_n_decode(b[2:], errors, 2, True, "utf-16-be", 2,
+                             final=final)
+    return _utf_n_decode(b, errors, 2, False, "utf-16-le",
+                         final=final)
 
 
 def utf_32_le_encode(s, errors=None):
@@ -1336,11 +1405,11 @@ def utf_32_be_encode(s, errors=None):
 
 
 def utf_32_le_decode(data, errors=None, final=False):
-    return _utf_n_decode(data, errors, 4, False, "utf-32-le")
+    return _utf_n_decode(data, errors, 4, False, "utf-32-le", final=final)
 
 
 def utf_32_be_decode(data, errors=None, final=False):
-    return _utf_n_decode(data, errors, 4, True, "utf-32-be")
+    return _utf_n_decode(data, errors, 4, True, "utf-32-be", final=final)
 
 
 def utf_32_encode(s, errors=None):
@@ -1351,10 +1420,13 @@ def utf_32_encode(s, errors=None):
 def utf_32_decode(data, errors=None, final=False):
     b = _as_bytes(data)
     if b[:4] == b"\xff\xfe\x00\x00":
-        return _utf_n_decode(b[4:], errors, 4, False, "utf-32-le", 4)
+        return _utf_n_decode(b[4:], errors, 4, False, "utf-32-le", 4,
+                             final=final)
     if b[:4] == b"\x00\x00\xfe\xff":
-        return _utf_n_decode(b[4:], errors, 4, True, "utf-32-be", 4)
-    return _utf_n_decode(b, errors, 4, False, "utf-32-le")
+        return _utf_n_decode(b[4:], errors, 4, True, "utf-32-be", 4,
+                             final=final)
+    return _utf_n_decode(b, errors, 4, False, "utf-32-le",
+                         final=final)
 
 
 _BUILTIN_CODECS = {
@@ -1422,16 +1494,16 @@ def utf_16_ex_decode(data, errors=None, byteorder=0, final=False):
     b = _as_bytes(data)
     if byteorder == 0:
         if b[:2] == b"\xff\xfe":
-            s, n = _utf_n_decode(b[2:], errors, 2, False, "utf-16-le", 2)
+            s, n = _utf_n_decode(b[2:], errors, 2, False, "utf-16-le", 2, final=final)
             return (s, n, -1)
         if b[:2] == b"\xfe\xff":
-            s, n = _utf_n_decode(b[2:], errors, 2, True, "utf-16-be", 2)
+            s, n = _utf_n_decode(b[2:], errors, 2, True, "utf-16-be", 2, final=final)
             return (s, n, 1)
-        s, n = _utf_n_decode(b, errors, 2, False, "utf-16-le")
+        s, n = _utf_n_decode(b, errors, 2, False, "utf-16-le", final=final)
         return (s, n, 0)
     big = byteorder > 0
     name = "utf-16-be" if big else "utf-16-le"
-    s, n = _utf_n_decode(b, errors, 2, big, name)
+    s, n = _utf_n_decode(b, errors, 2, big, name, final=final)
     return (s, n, byteorder)
 
 
@@ -1439,16 +1511,16 @@ def utf_32_ex_decode(data, errors=None, byteorder=0, final=False):
     b = _as_bytes(data)
     if byteorder == 0:
         if b[:4] == b"\xff\xfe\x00\x00":
-            s, n = _utf_n_decode(b[4:], errors, 4, False, "utf-32-le", 4)
+            s, n = _utf_n_decode(b[4:], errors, 4, False, "utf-32-le", 4, final=final)
             return (s, n, -1)
         if b[:4] == b"\x00\x00\xfe\xff":
-            s, n = _utf_n_decode(b[4:], errors, 4, True, "utf-32-be", 4)
+            s, n = _utf_n_decode(b[4:], errors, 4, True, "utf-32-be", 4, final=final)
             return (s, n, 1)
-        s, n = _utf_n_decode(b, errors, 4, False, "utf-32-le")
+        s, n = _utf_n_decode(b, errors, 4, False, "utf-32-le", final=final)
         return (s, n, 0)
     big = byteorder > 0
     name = "utf-32-be" if big else "utf-32-le"
-    s, n = _utf_n_decode(b, errors, 4, big, name)
+    s, n = _utf_n_decode(b, errors, 4, big, name, final=final)
     return (s, n, byteorder)
 
 
