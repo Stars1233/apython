@@ -65,6 +65,47 @@ type_cache: resb TC_SLOTS * TC_ENTRY
 section .text
 
 ;; ============================================================================
+;; type_cache_clear() -> nothing
+;;
+;; Empty every slot.  The cache is an invisible optimisation, so a test that
+;; changes a class and asks whether the change took effect has to be able to
+;; empty it -- test_type_cache and test_descr both call sys._clear_type_cache,
+;; and there was no way to.
+;;
+;; TC_NAME is the one OWNED field, so it is released rather than just
+;; overwritten; zeroing TC_VERSION is what makes a slot unused, and the rest
+;; is never read once it is.
+;; ============================================================================
+DEF_FUNC type_cache_clear
+    push rbx
+    push r12
+    lea rbx, [rel type_cache]
+    xor r12d, r12d
+.tcc_loop:
+    cmp r12, TC_SLOTS
+    jge .tcc_done
+    mov rax, r12
+    shl rax, TC_SHIFT
+    add rax, rbx
+    cmp qword [rax + TC_VERSION], 0
+    je .tcc_next
+    mov qword [rax + TC_VERSION], 0
+    mov rdi, [rax + TC_NAME]
+    test rdi, rdi
+    jz .tcc_next
+    mov qword [rax + TC_NAME], 0
+    call obj_decref
+.tcc_next:
+    inc r12
+    jmp .tcc_loop
+.tcc_done:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC type_cache_clear
+
+;; ============================================================================
 ;; type_lookup_cached(rdi = a type, rsi = an interned name)
 ;;   -> rax = the payload, edx = the tag (0 = not found), rcx = the owner
 ;;

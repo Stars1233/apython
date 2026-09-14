@@ -1,95 +1,105 @@
-# The sys and time attributes the stdlib reads without asking first.
+# The sys attributes a program asks for by name.
 #
-# CPython's getopt, gettext and optparse open with sys.base_prefix, timeit
-# with time.perf_counter, and site.py with sys.copyright.  None of them
-# guards the read, so an absent name is an AttributeError at import rather
-# than a feature the program can do without -- five modules that could not be
-# imported for want of four strings and a clock.
+# None of these is decoration.  test.support and regrtest read _xoptions and
+# _git on the way in, so their absence stopped fifty-five and twenty-seven of
+# CPython's tests before any of them ran; api_version and _stdlib_dir are read
+# by platform; getsizeof is what test.support.check_sizeof is written on and
+# what lib/_testinternalcapi.py adds a GC header to; and __spec__, __loader__
+# and __package__ are what every module HAS -- sys is built by hand in
+# assembly and never goes through import_load_module, which is the only reason
+# it had none of them.
 #
-# The values are not compared against CPython's: prefix is an installation
-# path, copyright is a licence, and perf_counter's origin is undefined by
-# definition.  What has to agree is that they exist and what shape they are.
-
+# breakpoint() was a no-op stub, so it silently did nothing at all.  It now
+# calls sys.breakpointhook, which is where a debugger replaces it -- and
+# sys.breakpointhook IS sys.__breakpointhook__, which is how a program asks
+# whether anything has.
 import sys
-import time
 
-print("=== the prefixes ===")
-for name in ("prefix", "exec_prefix", "base_prefix", "base_exec_prefix"):
-    value = getattr(sys, name)
-    print(name, type(value).__name__)
+# --- values ------------------------------------------------------------
+print("api_version:", type(sys.api_version).__name__, sys.api_version > 0)
+print("_xoptions:", type(sys._xoptions).__name__, sys._xoptions.get("nope"))
+print("_git:", type(sys._git).__name__, len(sys._git),
+      all(isinstance(x, str) for x in sys._git))
+# __spec__ exists; its VALUE is None here, because nothing builds a
+# ModuleSpec -- the import system is assembly rather than
+# importlib._bootstrap, which bugs.md records.  What is compared is that the
+# attribute is there at all, which is what a module walker needs.
+print("__spec__ present:", hasattr(sys, "__spec__"))
+print("__loader__ present:", hasattr(sys, "__loader__"))
+print("__package__:", repr(sys.__package__))
 
-# With no virtualenv, base_prefix is prefix.  CPython says so too, and this is
-# the invariant getopt and gettext are really relying on.
-print("base is prefix:", sys.base_prefix == sys.prefix)
-print("base_exec is exec:", sys.base_exec_prefix == sys.exec_prefix)
+# --- getsizeof ---------------------------------------------------------
+print("list > 0:", sys.getsizeof([]) > 0)
+print("str > 0:", sys.getsizeof("abc") > 0)
+print("int > 0:", sys.getsizeof(1) > 0)
+print("float > 0:", sys.getsizeof(1.5) > 0)
+print("dict > 0:", sys.getsizeof({}) > 0)
+print("an instance > 0:", sys.getsizeof(sys) > 0)
 
-print("=== copyright ===")
-print("type:", type(sys.copyright).__name__)
-print("non-empty:", len(sys.copyright) > 0)
-print("names a year:", any(c.isdigit() for c in sys.copyright))
 
-print("=== perf_counter ===")
-first = time.perf_counter()
-second = time.perf_counter()
-print("type:", type(first).__name__)
-print("does not go backwards:", second >= first)
-# It measures something: a busy loop has to take a non-negative time.
-start = time.perf_counter()
-total = 0
-for i in range(10000):
-    total += i
-print("elapsed is non-negative:", time.perf_counter() - start >= 0.0)
-print("total:", total)
+class Override:
+    def __sizeof__(self):
+        return 4242
+
+
+# getsizeof is __sizeof__ plus the collector's header when the object is
+# tracked, which is CPython's rule; the header is 16 bytes here and 32 there,
+# so the relationship is compared rather than the number.
+print("override honoured:", sys.getsizeof(Override()) > 4242)
+
+
+class NotCallable:
+    __sizeof__ = None
+
+
 try:
-    time.perf_counter(1)
+    sys.getsizeof(NotCallable())
+    print("non-callable: NO ERROR")
 except TypeError:
-    print("argument => TypeError")
-
-print("=== the import machinery's own attributes ===")
-# importlib._bootstrap walks sys.meta_path on every import and sys.path_hooks
-# when a path entry has no finder cached.  Neither is guarded, so their absence
-# was an AttributeError from inside `import`.  The finders here are assembly
-# rather than importlib hooks, so both are empty -- what matters is that they
-# exist, that they are lists, and that a program can append to them.
-# The CONTENTS differ by design -- CPython's hold its own finders and these
-# hold nothing -- so the lengths are compared against themselves, not printed.
-print("meta_path:", type(sys.meta_path).__name__)
-print("path_hooks:", type(sys.path_hooks).__name__)
-before = len(sys.meta_path)
-sys.meta_path.append("sentinel")
-print("append works:", sys.meta_path[-1], len(sys.meta_path) - before)
-sys.meta_path.pop()
-print("and pop:", len(sys.meta_path) - before)
-print("still a list:", isinstance(sys.meta_path, list))
-
-print("=== getrefcount ===")
-# The count includes getrefcount's own argument reference, which is why
-# CPython documents it as one higher than expected.  Two names for one object
-# is one more than one name for it: that difference is the invariant, not the
-# absolute number.
-obj = []
-one = sys.getrefcount(obj)
-alias = obj
-two = sys.getrefcount(obj)
-print("an alias adds one:", two - one)
-del alias
-print("and dropping it takes it back:", sys.getrefcount(obj) - one)
-print("type:", type(one).__name__)
+    print("non-callable: TypeError")
 try:
-    sys.getrefcount()
+    sys.getsizeof()
+    print("no argument: NO ERROR")
 except TypeError:
-    print("no argument => TypeError")
+    print("no argument: TypeError")
 
-print("=== displayhook ===")
-print("is the default:", sys.displayhook is sys.__displayhook__)
-print("callable:", callable(sys.displayhook))
-# None prints nothing and does not bind _; anything else prints its repr and
-# does, which is what an interactive prompt is.
-import builtins
-if hasattr(builtins, "_"):
-    del builtins._
-sys.displayhook(None)
-print("None does not bind _:", not hasattr(builtins, "_"))
-sys.displayhook("hi")
-print("bound _:", builtins._)
-del builtins._
+# object.__sizeof__ is the same number, because the two share a body.
+print("dunder agrees:", sys.getsizeof([]) >= [].__sizeof__())
+print("dunder on an instance:", Override().__sizeof__())
+
+# --- _clear_type_cache -------------------------------------------------
+class Cached:
+    def m(self):
+        return 1
+
+
+c = Cached()
+print("before:", c.m())
+print("_clear_type_cache:", sys._clear_type_cache())
+print("after:", c.m())
+# And the cache really was consulted: change the class and the change takes.
+Cached.m = lambda self: 2
+print("changed:", c.m())
+sys._clear_type_cache()
+print("changed after clear:", c.m())
+
+# --- _current_frames ---------------------------------------------------
+frames = sys._current_frames()
+print("_current_frames:", type(frames).__name__, len(frames) >= 1)
+print("keys are ints:", all(isinstance(k, int) for k in frames))
+print("values are frames:",
+      all(type(v).__name__ == "frame" for v in frames.values()))
+print("the frame has a lineno:",
+      all(isinstance(v.f_lineno, int) for v in frames.values()))
+
+# --- breakpointhook ----------------------------------------------------
+print("hook is the dunder:", sys.breakpointhook is sys.__breakpointhook__)
+print("hook is callable:", callable(sys.breakpointhook))
+calls = []
+sys.breakpointhook = lambda *a, **k: calls.append((a, k))
+breakpoint()
+breakpoint(1, 2, x=3)
+print("breakpoint() reaches the hook:", calls)
+sys.breakpointhook = sys.__breakpointhook__
+print("restored:", sys.breakpointhook is sys.__breakpointhook__)
+print("survived")

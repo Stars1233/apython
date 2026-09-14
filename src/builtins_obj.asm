@@ -3032,13 +3032,69 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
 END_FUNC builtin_import_fn
 
 ;; ============================================================================
-;; builtin_breakpoint(rdi = args, rsi = nargs) - breakpoint() stub (no-op)
-;;   -> rax = Value
+;; builtin_breakpoint(rdi = args, rsi = nargs) -> rax = Value
+;;
+;; CPython's breakpoint() calls sys.breakpointhook with whatever it was
+;; handed, and that indirection IS the feature: a debugger replaces the hook
+;; and every breakpoint() in the program reaches it.  This was a no-op that
+;; answered None, so breakpoint() silently did nothing -- the
+;; half-implemented shape, because a caller had no way to tell.
+;;
+;; The arguments go through untouched, keywords included: kw_names_pending is
+;; already set by the CALL that reached here, and the hook is called with the
+;; same array, so it sees exactly what breakpoint() saw.
 ;; ============================================================================
-DEF_FUNC_BARE builtin_breakpoint
-    ; No-op: return None
+BBP_ARGS  equ 8
+BBP_NARGS equ 16
+BBP_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC builtin_breakpoint, BBP_FRAME
+    mov [rbp - BBP_ARGS], rdi
+    mov [rbp - BBP_NARGS], rsi
+    extern sys_module_obj
+    mov rdi, [rel sys_module_obj]
+    test rdi, rdi
+    jz .bbp_none
+    extern str_from_cstr_heap
+    CSTRING rdi, "breakpointhook"
+    call str_from_cstr_heap
+    test rax, rax
+    jz .bbp_none
+    mov rsi, rax
+    mov rdi, [rel sys_module_obj]
+    push rsi
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    pop rdi
+    push rax
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .bbp_none
+    mov rdi, rax
+    push rdi
+    mov rsi, [rbp - BBP_ARGS]
+    mov rdx, [rbp - BBP_NARGS]
+    extern obj_call_n
+    call obj_call_n
+    pop rdi
+    push rax
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .bbp_raised
+    leave
+    ret                         ; already a Value
+.bbp_raised:
     xor eax, eax
+    xor edx, edx
+    leave
+    ret
+.bbp_none:
+    ; No sys, or no hook on it.  None, as a breakpoint with nowhere to go.
+    extern current_exception
+    mov qword [rel current_exception], 0
     RET_NONE
+    leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC builtin_breakpoint
