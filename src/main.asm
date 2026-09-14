@@ -54,6 +54,35 @@ DEF_FUNC main, 8
     mov r14d, edi               ; r14 = argc
     mov r15, rsi                ; r15 = argv
 
+    ; And keep a COPY of the original pointer array, for sys.orig_argv.  Not
+    ; the array itself: the flag loop shifts r15 past what it consumes and
+    ; -c writes its own token OVER the command in place, so by the time sys
+    ; is built the caller's array no longer holds what the process was
+    ; started with.  sys.orig_argv is every one of those tokens, which is how
+    ; a program re-execs itself with the same options.
+    mov [rel main_orig_argc], rdi
+    push rdi
+    push rsi
+    shl rdi, 3
+    extern ap_malloc
+    call ap_malloc
+    pop rsi
+    pop rdi
+    test rax, rax
+    jz .orig_argv_skipped
+    mov [rel main_orig_argv], rax
+    xor ecx, ecx
+.orig_argv_copy:
+    cmp rcx, rdi
+    jge .orig_argv_skipped
+    mov rdx, [rsi + rcx*8]
+    mov [rax + rcx*8], rdx
+    inc rcx
+    jmp .orig_argv_copy
+.orig_argv_skipped:
+    mov r14d, edi               ; the copy loop clobbered neither, but be
+    mov r15, rsi                ; explicit: these are the working pair
+
     ; Check for --version flag
     mov rax, [r15 + 8]          ; rax = argv[1]
     cmp word [rax], 0x2d2d      ; "--" little-endian
@@ -923,6 +952,11 @@ main_nl: db 10
 main_runmodule_cmd: db "import _runmodule; _runmodule.run()", 0
 
 section .bss
+global main_orig_argc
+global main_orig_argv
+; argc and argv as the process received them, for sys.orig_argv.
+main_orig_argc: resq 1
+main_orig_argv: resq 1
 ; The -c command, the -m bootstrap, or the text read from stdin; 0 when a
 ; file was named.
 cmd_source: resq 1

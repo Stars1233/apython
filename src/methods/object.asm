@@ -2721,3 +2721,4 @@ NEW_THUNK str_dunder_new,       str_type,       scalar_dunder_new
 NEW_THUNK float_dunder_new,     float_type,     scalar_dunder_new, "float() takes no keyword arguments"
 NEW_THUNK complex_dunder_new,   complex_type,   scalar_dunder_new
 NEW_THUNK module_dunder_new,    module_type,    module_method_new
+
