@@ -84,6 +84,38 @@ for cp in list(range(0, 0x350)) + list(range(0x2000, 0x2100)) + \
         round_tripped += 1
 print("round trips: %d of %d" % (round_tripped, checked))
 
+# A DENSE walk, because name() is answered from a checkpoint index over the
+# front-coded blob and a checkpoint is exactly where it can go wrong.  The
+# index records the state BEFORE an entry is decoded, so a resume point whose
+# codepoint IS the one being asked for steps straight past the answer -- four
+# characters lost their name that way, and the sampled round trip above is
+# what caught it.  These ranges cross scores of checkpoints.
+dense = 0
+dense_names = 0
+for cp in (list(range(0, 0x3000)) + list(range(0xFB00, 0xFE00)) +
+           list(range(0x1D400, 0x1D800)) + list(range(0x1F300, 0x1F600))):
+    try:
+        n = unicodedata.name(chr(cp))
+    except ValueError:
+        continue
+    dense_names += 1
+    for c in n:
+        dense = (dense * 131 + ord(c)) % (2 ** 61 - 1)
+    dense = (dense * 131 + cp) % (2 ** 61 - 1)
+print("dense names: %d digest %s" % (dense_names, dense))
+
+# Every one of them has to come back through lookup(), which is the other
+# direction over the same blob.
+inverse = 0
+for cp in range(0, 0x3000):
+    try:
+        n = unicodedata.name(chr(cp))
+    except ValueError:
+        continue
+    if unicodedata.lookup(n) == chr(cp):
+        inverse += 1
+print("dense inverse:", inverse)
+
 # --- decimal() ---------------------------------------------------------------
 
 print()
