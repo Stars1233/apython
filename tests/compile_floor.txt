@@ -457,6 +457,7 @@ test_method_repr_callables
 test_methods
 test_method_type
 test_misc_ops
+test_mmap
 test_module_attr_call
 test_module_attr_not_descriptor
 test_module_delattr

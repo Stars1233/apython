@@ -32,6 +32,8 @@ SYS_fstat           equ 5
 SYS_mmap            equ 9
 SYS_munmap          equ 11
 SYS_madvise         equ 28
+SYS_msync           equ 26
+SYS_mremap          equ 25
 SYS_socket          equ 41
 SYS_connect         equ 42
 SYS_accept4         equ 288
@@ -510,6 +512,33 @@ DEF_FUNC_BARE sys_munmap
     syscall
     ret
 END_FUNC sys_munmap
+
+;; ============================================================================
+;; sys_msync(addr, len, flags) -> int
+;;
+;; What mmap.flush() is.  The mapping is already coherent with the file
+;; through the page cache, so this is about DURABILITY -- MS_SYNC is what a
+;; caller asking for a flush means.
+;; ============================================================================
+DEF_FUNC_BARE sys_msync
+    mov rax, SYS_msync
+    syscall
+    ret
+END_FUNC sys_msync
+
+;; ============================================================================
+;; sys_mremap(old_addr, old_len, new_len, flags, new_addr) -> void*
+;;
+;; What mmap.resize() is.  MREMAP_MAYMOVE is the only flag worth passing:
+;; without it a grow fails whenever anything is mapped directly above, which
+;; on a heap this allocator has already carved is most of the time.
+;; ============================================================================
+DEF_FUNC_BARE sys_mremap
+    mov rax, SYS_mremap
+    mov r10, rcx               ; Linux syscall: 4th arg in r10, not rcx
+    syscall
+    ret
+END_FUNC sys_mremap
 
 ;; ============================================================================
 ;; sys_madvise(addr, len, advice) -> int

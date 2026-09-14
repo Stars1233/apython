@@ -63,6 +63,22 @@ the reasoning rather than from scratch.
   `pathlib` and `tempfile`'s cleanup -- 730 NameErrors across CPython's suite,
   and every one of those modules unusable.
 
+- **An `mmap` object exports no buffer.**  `src/modules/mmap.asm` is the
+  mapping -- mmap, munmap, mremap, msync, madvise, the raw bytes and the
+  search over them -- and `lib/mmap.py` is the object, on the split
+  `_zlibcore`/`zlib` and `_iocore`/`_io` already use.  A Python class has no
+  `tp_as_buffer`, so `memoryview(m)` refuses, and so does anything that asks
+  for one: `re.search(pat, m)` is the case CPython's own test_mmap uses, and
+  it is the single test of the forty-six that still fails.
+
+  Reading and writing through the object's own syntax is unaffected -- `m[i]`,
+  `m[a:b]`, `m[a:b] = data`, `read`, `write`, `find`, `move`, `flush`,
+  `resize`, `madvise` -- which is what the stdlib's own users of mmap do.
+  Closing it would mean either a real assembly type with a buffer slot, or
+  PEP 688's `__buffer__` honoured for Python classes; the second is the
+  smaller of the two and would also serve every other `lib/` stand-in, so
+  that is the way in if it is ever wanted.
+
 - **`faulthandler` reports deliberate faults, and is silent for a real
   crash.**  CPython's is a C module and has to be: its whole point is to
   report a crash, and by then calling into the interpreter is not safe -- its
