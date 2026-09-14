@@ -750,4 +750,5 @@ test_zero_valued_lookup
 test_zip_strict_message
 test_zip_strict
 test_zip_uneven
+test_zlib_max_length
 test_zlib
