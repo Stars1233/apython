@@ -343,32 +343,189 @@ DEF_FUNC memoryview_released_error
 END_FUNC memoryview_released_error
 
 ;; ============================================================================
-;; memoryview_item_value(rdi = self, rsi = item index) -> rax = the item Value
+;; memoryview_item_value(rdi = self, rsi = item index) -> rax = the item, as a
+;;   complete Value
 ;;
-;; itemsize bytes, read little-endian and unsigned -- which is all the
-;; formats below need, since cast() accepts only the unsigned ones.
+;; It used to read itemsize bytes little-endian and unsigned and hand back a
+;; bare integer, because that was all cast()'s five accepted formats needed --
+;; and the three callers each stamped TAG_SMALLINT on it themselves.  With the
+;; signed, float, bool and char codes the item is no longer always an int, so
+;; the Value is built here and handed over whole.
+;;
+;; The signedness rule is the character's case, which is not a coincidence:
+;; the struct module gives every signed code a lowercase letter and its
+;; unsigned partner the uppercase one, and c/?/f/d are decided before it.
 ;; ============================================================================
-DEF_FUNC_BARE memoryview_item_value
-    mov rcx, [rdi + PyMemoryViewObject.mv_itemsize]
+MIV_SELF  equ 8
+MIV_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC memoryview_item_value, MIV_FRAME
+    mov r9, [rdi + PyMemoryViewObject.mv_itemsize]
+    mov rcx, [rdi + PyMemoryViewObject.mv_format]
+    movzx ecx, byte [rcx]
     MV_ITEM_ADDR rax, rdi, rsi, r8
-    cmp rcx, 1
-    je .miv_1
-    cmp rcx, 2
-    je .miv_2
-    cmp rcx, 4
-    je .miv_4
+
+    cmp cl, 'f'
+    je .miv_f32
+    cmp cl, 'd'
+    je .miv_f64
+    cmp cl, '?'
+    je .miv_bool
+    cmp cl, 'c'
+    je .miv_char
+
+    cmp cl, 'a'
+    jb .miv_unsigned
+
+    ; Signed.
+    cmp r9, 1
+    je .miv_s1
+    cmp r9, 2
+    je .miv_s2
+    cmp r9, 4
+    je .miv_s4
     mov rax, [rax]
-    ret
-.miv_1:
+    jmp .miv_int
+.miv_s1:
+    movsx rax, byte [rax]
+    jmp .miv_int
+.miv_s2:
+    movsx rax, word [rax]
+    jmp .miv_int
+.miv_s4:
+    movsxd rax, dword [rax]
+    jmp .miv_int
+
+.miv_unsigned:
+    cmp r9, 1
+    je .miv_u1
+    cmp r9, 2
+    je .miv_u2
+    cmp r9, 4
+    je .miv_u4
+    ; Eight bytes unsigned is the one width that does not fit an i64: a Q of
+    ; all-ones is 18446744073709551615, not -1, and packing it as signed would
+    ; be a wrong ANSWER rather than an overflow.
+    mov rax, [rax]
+    test rax, rax
+    js .miv_big
+    jmp .miv_int
+.miv_u1:
     movzx eax, byte [rax]
-    ret
-.miv_2:
+    jmp .miv_int
+.miv_u2:
     movzx eax, word [rax]
+    jmp .miv_int
+.miv_u4:
+    mov eax, [rax]                      ; a 32-bit load zero-extends
+    jmp .miv_int
+
+.miv_int:
+    V_PACK_I64 rax, rcx
+    leave
     ret
-.miv_4:
-    mov eax, [rax]
+
+.miv_big:
+    mov rdi, rax
+    call mv_value_from_u64
+    leave
+    ret
+
+.miv_f32:
+    movss xmm0, [rax]
+    cvtss2sd xmm0, xmm0
+    movq rax, xmm0
+    V_FROM_F64 rax, rcx
+    leave
+    ret
+
+.miv_f64:
+    mov rax, [rax]
+    V_FROM_F64 rax, rcx
+    leave
+    ret
+
+.miv_bool:
+    movzx eax, byte [rax]
+    test eax, eax
+    jz .miv_false
+    lea rax, [rel bool_true]
+    leave
+    ret
+.miv_false:
+    lea rax, [rel bool_false]
+    leave
+    ret
+
+.miv_char:
+    ; CPython's 'c' is a one-byte BYTES, not an int.
+    mov rdi, rax                        ; the item's own address
+    mov esi, 1
+    extern bytes_from_data
+    call bytes_from_data
+    leave
     ret
 END_FUNC memoryview_item_value
+
+;; ============================================================================
+;; mv_value_from_u64(rdi = an unsigned 64-bit value with its top bit set)
+;;   -> rax = the value as a Value, or 0
+;;
+;; The magnitude is above 2**63, so it is not an i64 and not an immediate
+;; either; GMP is the only place it fits.  Only reached for Q, L, N and P,
+;; and only for the half of their range that a signed pack would answer
+;; negative for.
+;; ============================================================================
+MVU_VAL   equ 8
+MVU_M     equ 32            ; the mpz_t, which is 16 bytes
+MVU_FRAME equ 56            ; + 1 push = 64, 16-aligned
+DEF_FUNC_LOCAL mv_value_from_u64, MVU_FRAME
+    push rbx
+    mov [rbp - MVU_VAL], rdi
+    lea rdi, [rbp - MVU_M]
+    extern __gmpz_init
+    call __gmpz_init wrt ..plt
+    sub rsp, 16
+    lea rax, [rbp - MVU_VAL]
+    mov [rsp], rax                      ; the seventh argument: the source
+    lea rdi, [rbp - MVU_M]
+    mov esi, 8                           ; eight "words"...
+    mov edx, -1                          ; ...least significant first
+    mov ecx, 1                           ; one byte each
+    xor r8d, r8d                         ; endian, irrelevant at size 1
+    xor r9d, r9d                         ; no nails
+    extern __gmpz_import
+    call __gmpz_import wrt ..plt
+    add rsp, 16
+
+    xor edi, edi
+    extern int_new_compact
+    call int_new_compact
+    test rax, rax
+    jz .mvu_fail
+    mov rbx, rax
+    extern int_promote_mpz
+    INT_NEED_MPZ rbx
+    lea rdi, [rbx + PyIntObject.mpz]
+    lea rsi, [rbp - MVU_M]
+    extern __gmpz_set
+    call __gmpz_set wrt ..plt
+    lea rdi, [rbp - MVU_M]
+    extern __gmpz_clear
+    call __gmpz_clear wrt ..plt
+    mov rdi, rbx
+    extern int_shrink
+    call int_shrink
+    pop rbx
+    leave
+    ret
+.mvu_fail:
+    lea rdi, [rbp - MVU_M]
+    call __gmpz_clear wrt ..plt
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC mv_value_from_u64
 
 ;; ============================================================================
 ;; memoryview_hash(rdi = self) -> rax = the hash
@@ -384,6 +541,19 @@ DEF_FUNC memoryview_hash, 8            ; 1 pushes, so rsp is 16-aligned
     call memoryview_check
     cmp qword [rbx + PyMemoryViewObject.mv_readonly], 0
     je .mvh_writable
+    ; CPython restricts hashing to the byte-shaped formats, and it is not
+    ; fussiness: the hash is over the raw bytes, so two views that compare
+    ; EQUAL under a wider format -- which compares items -- would have to hash
+    ; the same, and over the raw bytes they need not.
+    mov rcx, [rbx + PyMemoryViewObject.mv_format]
+    movzx ecx, byte [rcx]
+    cmp cl, 'B'
+    je .mvh_ok
+    cmp cl, 'b'
+    je .mvh_ok
+    cmp cl, 'c'
+    jne .mvh_badfmt
+.mvh_ok:
     mov rdi, rbx
     call memoryview_as_bytes
     test rax, rax
@@ -399,6 +569,10 @@ DEF_FUNC memoryview_hash, 8            ; 1 pushes, so rsp is 16-aligned
     pop rbx
     leave
     ret
+.mvh_badfmt:
+    RAISE exc_ValueError_type, \
+        "memoryview: hashing is restricted to formats 'B', 'b' or 'c'"
+
 .mvh_fail:
     xor eax, eax
     pop rbx
@@ -961,28 +1135,18 @@ DEF_FUNC memoryview_method_cast, MVC_FRAME
     jne .mvc_badfmt
     movzx eax, byte [rcx + PyStrObject.data]
 
-    lea rdx, [rel mv_format_B]
-    mov esi, 1
-    cmp al, 'B'
-    je .mvc_have_fmt
-    cmp al, 'b'
-    je .mvc_have_fmt
-    lea rdx, [rel mv_format_H]
-    mov esi, 2
-    cmp al, 'H'
-    je .mvc_have_fmt
-    lea rdx, [rel mv_format_I]
-    mov esi, 4
-    cmp al, 'I'
-    je .mvc_have_fmt
-    lea rdx, [rel mv_format_L]
-    mov esi, 8
-    cmp al, 'L'
-    je .mvc_have_fmt
-    lea rdx, [rel mv_format_Q]
-    mov esi, 8
-    cmp al, 'Q'
-    jne .mvc_badfmt
+    lea rcx, [rel mv_format_table]
+.mvc_scan:
+    movzx edx, byte [rcx]
+    test dl, dl
+    jz .mvc_badfmt
+    cmp dl, al
+    je .mvc_row
+    add rcx, 16
+    jmp .mvc_scan
+.mvc_row:
+    movzx esi, byte [rcx + 1]           ; the itemsize
+    mov rdx, [rcx + 8]                  ; the string the view reports
 .mvc_have_fmt:
     mov [rbp - MVC_SIZE], rsi
     mov [rbp - MVC_FMT], rdx
@@ -1077,7 +1241,6 @@ DEF_FUNC memoryview_method_tolist, 40
     mov rdi, [rbp - MVL_SELF]
     mov rsi, rbx
     call memoryview_item_value
-    V_PACK_I64 rax, rcx
     mov rsi, rax
     mov rdi, [rbp - MVL_OUT]
     push rsi
@@ -1221,7 +1384,6 @@ DEF_FUNC_BARE memoryview_iter_next
     call memoryview_item_value
     pop rdi                     ; the iterator
     inc qword [rdi + PyBytesIterObject.it_index]
-    V_PACK_I64 rax, rcx
     ret
 .mvin_pop_done:
     pop rdi
@@ -1372,9 +1534,8 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     jge .ms_index_error
     mov rdi, [rbp - MS_OBJ]
     call memoryview_item_value
-    mov edx, TAG_SMALLINT
+    mov edx, TAG_PTR
     leave
-    V_PACK rax, rdx
     ret
 
 .ms_int_index_heap:
@@ -1437,7 +1598,8 @@ MA_COUNT  equ 40
 MA_STEP   equ 48
 MA_SRC    equ 56
 MA_I      equ 64
-MA_FRAME  equ 80            ; 64 used + 16 pad = 80, + 0 pushes
+MA_FMT    equ 72            ; the format character, kept across the range checks
+MA_FRAME  equ 80            ; 72 used + 8 pad = 80, + 0 pushes
 
 DEF_FUNC memoryview_ass_subscript, MA_FRAME
     mov [rbp - MA_OBJ], rdi
@@ -1473,6 +1635,23 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     jge .ma_index_error
     mov [rbp - MA_START], rsi
 
+    ; The encode side of the format table.  It used to range-check 0..255 and
+    ; store itemsize bytes whatever the format said, so a cast('b') refused -1
+    ; and a cast('f') stored an integer.
+    mov rdi, [rbp - MA_OBJ]
+    mov rcx, [rdi + PyMemoryViewObject.mv_format]
+    movzx ecx, byte [rcx]
+    mov [rbp - MA_FMT], rcx
+
+    cmp cl, 'f'
+    je .ma_put_float
+    cmp cl, 'd'
+    je .ma_put_float
+    cmp cl, 'c'
+    je .ma_put_char
+    cmp cl, '?'
+    je .ma_put_bool
+
     mov rdi, [rbp - MA_VAL]
     V_UNPACK rdi, rdx
     call int_is_integer         ; not a tag test: a heap int, a bool and an
@@ -1481,15 +1660,41 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     mov rdi, [rbp - MA_VAL]
     V_UNPACK rdi, rdx
     call obj_as_index
+
+    ; The range is the format's, not the byte's.  An eight-byte field takes
+    ; whatever obj_as_index answered, which is already an i64.
+    mov rdi, [rbp - MA_OBJ]
+    mov r9, [rdi + PyMemoryViewObject.mv_itemsize]
+    cmp r9, 8
+    je .ma_range_ok
+    mov rcx, [rbp - MA_FMT]
+    cmp cl, 'a'
+    jb .ma_range_unsigned
+    ; Signed: -(1 << (8n-1)) .. (1 << (8n-1)) - 1
+    mov edx, 1
+    lea rcx, [r9 * 8 - 1]
+    shl rdx, cl                 ; 1 << (8n - 1)
+    cmp rax, rdx
+    jge .ma_value_range
+    neg rdx
+    cmp rax, rdx
+    jl .ma_value_range
+    jmp .ma_range_ok
+.ma_range_unsigned:
     test rax, rax
     jl .ma_value_range
-    cmp rax, 255
-    jg .ma_value_range
+    mov edx, 1
+    lea rcx, [r9 * 8]
+    shl rdx, cl                 ; 1 << 8n
+    cmp rax, rdx
+    jge .ma_value_range
+.ma_range_ok:
 
     mov rdi, [rbp - MA_OBJ]
     mov rcx, [rbp - MA_START]
     MV_ITEM_ADDR rsi, rdi, rcx, r8
     mov rcx, [rdi + PyMemoryViewObject.mv_itemsize]
+.ma_store_sized:
     cmp rcx, 1
     je .ma_store1
     cmp rcx, 2
@@ -1510,6 +1715,58 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     xor eax, eax
     leave
     ret
+
+.ma_put_float:
+    mov rdi, [rbp - MA_VAL]
+    extern math_to_double
+    call math_to_double         ; xmm0, eax = 0 when it is not a number
+    test eax, eax
+    jz .ma_value_type
+    mov rdi, [rbp - MA_OBJ]
+    mov rcx, [rbp - MA_START]
+    MV_ITEM_ADDR rsi, rdi, rcx, r8
+    mov rcx, [rbp - MA_FMT]
+    cmp cl, 'd'
+    je .ma_put_f64
+    cvtsd2ss xmm0, xmm0
+    movss [rsi], xmm0
+    jmp .ma_ok
+.ma_put_f64:
+    movsd [rsi], xmm0
+    jmp .ma_ok
+
+.ma_put_bool:
+    mov rdi, [rbp - MA_VAL]
+    extern obj_is_true
+    call obj_is_true
+    mov rdi, [rbp - MA_OBJ]
+    mov rcx, [rbp - MA_START]
+    push rax
+    MV_ITEM_ADDR rsi, rdi, rcx, r8
+    pop rax
+    mov [rsi], al
+    jmp .ma_ok
+
+.ma_put_char:
+    ; 'c' takes a one-byte bytes, as CPython's does.
+    mov rax, [rbp - MA_VAL]
+    V_TEST_PTR rax, rcx
+    ja .ma_value_type
+    test rax, rax
+    jz .ma_value_type
+    mov rcx, [rax + PyObject.ob_type]
+    extern bytes_type
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    jne .ma_value_type
+    cmp qword [rax + PyBytesObject.ob_size], 1
+    jne .ma_value_range
+    movzx r10d, byte [rax + PyBytesObject.data]
+    mov rdi, [rbp - MA_OBJ]
+    mov rcx, [rbp - MA_START]
+    MV_ITEM_ADDR rsi, rdi, rcx, r8
+    mov [rsi], r10b
+    jmp .ma_ok
 
 .ma_maybe_slice:
     test rsi, rsi
@@ -1664,6 +1921,42 @@ END_FUNC memoryview_dunder_len
 ;; ============================================================================
 ;; Type object
 ;; ============================================================================
+;; ============================================================================
+;; memoryview_sq_item(rdi = self, rsi = the item index) -> rax = the item Value,
+;;   or 0 with an IndexError pending
+;;
+;; The sequence protocol's single-item read.  It was 0, so `reversed(mv)` was
+;; "'memoryview' object is not reversible" -- builtin_reversed asks for
+;; sq_item, and a mapping's mp_subscript is not it.  CPython's memoryview
+;; carries both for the same reason.
+;;
+;; The index arrives already adjusted for a negative, as sq_item's does.
+;; ============================================================================
+MSQ_SELF  equ 8
+MSQ_IDX   equ 16            ; the index, across the two calls
+MSQ_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL memoryview_sq_item, MSQ_FRAME
+    ; Frame slots, not pushes: a lone push before a call leaves it eight bytes
+    ; out of alignment, and everything under it inherits that.
+    mov [rbp - MSQ_SELF], rdi
+    mov [rbp - MSQ_IDX], rsi
+    call memoryview_check
+    mov rdi, [rbp - MSQ_SELF]
+    call memoryview_nitems
+    mov rsi, [rbp - MSQ_IDX]
+    test rsi, rsi
+    jl .msqi_range
+    cmp rsi, rax
+    jge .msqi_range
+    mov rdi, [rbp - MSQ_SELF]
+    call memoryview_item_value
+    mov edx, TAG_PTR
+    leave
+    ret
+.msqi_range:
+    RAISE exc_IndexError_type, "index out of bounds"
+END_FUNC memoryview_sq_item
+
 section .data
 
 align 8
@@ -1674,7 +1967,7 @@ memoryview_seq_methods:
     dq memoryview_len       ; +0: sq_length
     dq 0                    ; +8: sq_concat
     dq 0                    ; +16: sq_repeat
-    dq 0                    ; +24: sq_item
+    dq memoryview_sq_item   ; +24: sq_item
     dq 0                    ; +32: sq_ass_item
     dq 0                    ; +40: sq_contains
     dq 0                    ; +48: sq_inplace_concat
@@ -1724,13 +2017,77 @@ memoryview_type:
     dq 0                        ; tp_as_buffer
 
 section .rodata
-; The one-character format codes a view can carry.  cast() accepts only the
-; unsigned ones, which is what memoryview_item_value reads.
+; The one-character format codes a view can carry, and the itemsize each one
+; means in NATIVE terms -- which is the only mode cast() has, so `l` and `L`
+; are eight bytes here as they are on any LP64 CPython.
+;
+; The table is what the decoder reads, and the two have to be widened
+; together: cast() used to accept only the five unsigned codes because reading
+; itemsize bytes little-endian and unsigned was all memoryview_item_value
+; could do, and it ALIASED `b` onto `B` rather than refusing it -- so
+; `memoryview(b'\xff').cast('b')[0]` was 255, and `.format` then said 'B'.
+;
+; `e`, the half-float, is the one native code CPython accepts that this does
+; not: its decode is a bit layout rather than a load, and nothing in the
+; corpus asks for it.
 global mv_format_B
+mv_format_c: db "c", 0
+mv_format_b: db "b", 0
 mv_format_B: db "B", 0
+mv_format_bool: db "?", 0
+mv_format_h: db "h", 0
 mv_format_H: db "H", 0
+mv_format_i: db "i", 0
 mv_format_I: db "I", 0
+mv_format_l: db "l", 0
 mv_format_L: db "L", 0
+mv_format_q: db "q", 0
 mv_format_Q: db "Q", 0
+mv_format_n: db "n", 0
+mv_format_N: db "N", 0
+mv_format_f: db "f", 0
+mv_format_d: db "d", 0
+mv_format_P: db "P", 0
+
+align 8
+; One row per accepted code: the character, its itemsize, and the string the
+; view reports.  Terminated by a zero character.
+mv_format_table:
+    db 'c', 1, 0, 0, 0, 0, 0, 0
+    dq mv_format_c
+    db 'b', 1, 0, 0, 0, 0, 0, 0
+    dq mv_format_b
+    db 'B', 1, 0, 0, 0, 0, 0, 0
+    dq mv_format_B
+    db '?', 1, 0, 0, 0, 0, 0, 0
+    dq mv_format_bool
+    db 'h', 2, 0, 0, 0, 0, 0, 0
+    dq mv_format_h
+    db 'H', 2, 0, 0, 0, 0, 0, 0
+    dq mv_format_H
+    db 'i', 4, 0, 0, 0, 0, 0, 0
+    dq mv_format_i
+    db 'I', 4, 0, 0, 0, 0, 0, 0
+    dq mv_format_I
+    db 'l', 8, 0, 0, 0, 0, 0, 0
+    dq mv_format_l
+    db 'L', 8, 0, 0, 0, 0, 0, 0
+    dq mv_format_L
+    db 'q', 8, 0, 0, 0, 0, 0, 0
+    dq mv_format_q
+    db 'Q', 8, 0, 0, 0, 0, 0, 0
+    dq mv_format_Q
+    db 'n', 8, 0, 0, 0, 0, 0, 0
+    dq mv_format_n
+    db 'N', 8, 0, 0, 0, 0, 0, 0
+    dq mv_format_N
+    db 'f', 4, 0, 0, 0, 0, 0, 0
+    dq mv_format_f
+    db 'd', 8, 0, 0, 0, 0, 0, 0
+    dq mv_format_d
+    db 'P', 8, 0, 0, 0, 0, 0, 0
+    dq mv_format_P
+    db 0, 0, 0, 0, 0, 0, 0, 0
+    dq 0
 
 

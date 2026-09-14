@@ -58,6 +58,7 @@ test_builtin_dunder_str
 test_builtin_func_attrs
 test_builtin_hostile
 test_builtin_kwargs
+test_builtin_not_descriptor
 test_builtins_extra
 test_builtins
 test_builtin_subclass
@@ -79,6 +80,7 @@ test_bytes_rsplit
 test_bytes_strmethods
 test_bytes_str_text
 test_bytes_subclass_dict
+test_bz2
 test_call_arg_order
 test_call_arg_ownership
 test_call_ex
@@ -95,6 +97,7 @@ test_classmethod_metaclass
 test_class_name_at_module
 test_class_namespace_copy
 test_closures
+test_cmath
 test_codec_args
 test_codecs_binding
 test_codecs
@@ -102,6 +105,7 @@ test_codecs_registry_bridge
 test_codecs_registry
 test_codec_surrogates
 test_code_gc
+test_code_lines_scaling
 test_code_localsplus
 test_code_replace
 test_compare_raises
@@ -178,6 +182,7 @@ test_csv
 test_data_descriptor_precedence
 test_decode_errors
 test_deep_dealloc
+test_defaultdict_is_dict
 test_default_repr
 test_defaults
 test_del_and_gc_state
@@ -204,6 +209,7 @@ test_dict_copy
 test_dict_display_mapping
 test_dict_dunder_args
 test_dict_empty
+test_dict_fromkeys_class
 test_dict_fromkeys
 test_dict_int_keys
 test_dict_ior
@@ -244,6 +250,7 @@ test_exception_context
 test_exception_dunder_str
 test_exception_group_deep
 test_exception_group_new
+test_exception_group_notes
 test_exception_group_setattr
 test_exceptiongroup_split
 test_exception_group_subclass
@@ -264,6 +271,7 @@ test_exc_state_frame
 test_exec_builtins_value
 test_exec_custom_locals
 test_extended_slice
+test_faulthandler
 test_fileio
 test_final_types
 test_float_as_integer_ratio
@@ -321,6 +329,7 @@ test_generator_close_throw
 test_generator_frame_back
 test_generator_frame
 test_generators
+test_generator_throw_delegation
 test_generic_alias_ctor
 test_generic_alias_value
 test_gen_exc_info
@@ -383,9 +392,11 @@ test_int_subclass_methods
 test_int_subclass_new
 test_int_truediv
 test_int_truediv_spec
+test_io_enter_closed
 test_io_module
 test_io_prereqs
 test_io
+test_io_size_args
 test_io_subclass
 test_io_tail
 test_isinstance_hostile
@@ -397,6 +408,7 @@ test_iterator_dunders
 test_iterator_slots
 test_iter_free_during_iteration
 test_iter_sentinel
+test_itertools_compress_batched
 test_itertools_gc
 test_itertools
 test_itertools_tail
@@ -418,6 +430,7 @@ test_load_attr_method_shadow
 test_load_attr_per_name
 test_load_attr_property_ic
 test_load_from_dict_or_globals
+test_lzma
 test_maketrans
 test_map_multi
 test_mappingproxy_call
@@ -433,6 +446,7 @@ test_member_descriptor_protocol
 test_membership
 test_memmove_boundaries
 test_memoryview_exports
+test_memoryview_formats
 test_memoryview_released
 test_memoryview_stride
 test_metaclass_lifetime
@@ -447,11 +461,13 @@ test_method_repr_callables
 test_methods
 test_method_type
 test_misc_ops
+test_mmap
 test_module_attr_call
 test_module_attr_not_descriptor
 test_module_delattr
 test_module_doc_and_repr_depth
 test_module_file_attr
+test_module_getattr
 test_module_repr_and_property_msg
 test_module_type_new
 test_multiple_inheritance
@@ -476,6 +492,7 @@ test_open_errors
 test_open_pathlike
 test_open
 test_operand_types
+test_operator_index
 test_operator_messages
 test_ordereddict
 test_ordering_typeerror
@@ -523,6 +540,8 @@ test_pyexpat_parse
 test_raise_cause
 test_raise_class_init
 test_raise_from
+test_random
+test_range_iter_overflow
 test_range_overflow
 test_range_protocol
 test_range
@@ -531,6 +550,7 @@ test_range_wide
 test_re_bytes_pattern_hash
 test_recursion_and_repr
 test_recursion
+test_reduce_protocol
 test_reflexive_compare
 test_relative_import
 test_re_module
@@ -579,8 +599,11 @@ test_singleton_construct
 test_size_and_recursion_limits
 test_slice_and_star_args
 test_slice_assign
+test_slice_bound_mutates
 test_slice_compare
+test_slice_index_protocol
 test_slice_indices
+test_slice_negative_step
 test_slicing
 test_slot_bound_builtin
 test_slot_builtin_dunder_assign
@@ -664,6 +687,7 @@ test_sum_compensated
 test_sum_int_fast
 test_sum_protocol
 test_super_bad_object
+test_super_classmethod_refcount
 test_super_descriptors
 test_super_immediate
 test_super_object
@@ -707,6 +731,7 @@ test_unary
 test_unbound_local
 test_uncallable_bind_lifetime
 test_unicode_case
+test_unicodedata
 test_unicode_names
 test_unicode_numbers
 test_unicode_predicates
@@ -734,4 +759,5 @@ test_zero_valued_lookup
 test_zip_strict_message
 test_zip_strict
 test_zip_uneven
+test_zlib_max_length
 test_zlib

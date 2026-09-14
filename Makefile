@@ -54,7 +54,7 @@ CC = cc
 # src/pyo/complex.asm calls for the general complex power and for abs().
 # float.asm avoids libm by doing its own x87 sequence; complex does not, since
 # the polar form needs all seven and hand-rolling them would be a worse bargain.
-LDFLAGS = -no-pie -lc -lm -lgmp -lz -lcrypto -lexpat
+LDFLAGS = -no-pie -lc -lm -lgmp -lz -lcrypto -lexpat -lbz2 -llzma
 TARGET = apython
 
 # Source files.  Everything the interpreter is built from lives under src/:
@@ -108,6 +108,8 @@ regen:
 	mv src/compiler/unicodename.asm.new src/compiler/unicodename.asm
 	$(PYTHON) src/compiler/gen_unicodecase.py > src/compiler/unicodecase.asm.new
 	mv src/compiler/unicodecase.asm.new src/compiler/unicodecase.asm
+	$(PYTHON) src/compiler/gen_unicodedata.py > src/modules/unicodedataprops.asm.new
+	mv src/modules/unicodedataprops.asm.new src/modules/unicodedataprops.asm
 	$(PYTHON) src/compiler/gen_ast.py > lib/_ast.py.new
 	mv lib/_ast.py.new lib/_ast.py
 	$(PYTHON) src/compiler/gen_encodings.py lib/encodings

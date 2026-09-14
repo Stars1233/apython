@@ -1798,6 +1798,87 @@ EIM_FRAME equ 40            ; + 1 push = 48, 16-aligned
     call obj_decref
 %endmacro
 
+;; ============================================================================
+;; BaseException.__reduce__(self) -> (type(self), self.args)
+;;   or (type(self), self.args, self.__dict__) when the dict is not empty
+;;
+;; One body serves every exception type: only exc_BaseException_type carries a
+;; tp_dict and all ~100 others inherit along tp_base, which is how CPython
+;; arranges it too.
+;;
+;; Without it, copy.deepcopy(ValueError('x')) was ValueError() and a pickle
+;; round trip lost .args -- lib/_reduce.py falls through to _reduce_newobj,
+;; which names the class and stops.  The args tuple is exactly what the
+;; constructor takes back, so this is the whole reduction.
+;;
+;; OSError does NOT get its own here, and the difference is recorded in
+;; bugs.md beside its cause: its errno, strerror, filename and filename2 live
+;; in the instance dict rather than in fields, so they come back as a STATE
+;; where CPython, which keeps them as C members, answers a two-tuple and
+;; re-packs the filename into the args instead.  Every value survives the
+;; round trip either way; the tuple's shape differs.
+;; ============================================================================
+ERD_SELF  equ 8
+ERD_ARGS  equ 16
+ERD_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC_LOCAL exc_method_reduce, ERD_FRAME
+    mov rdi, [rdi]                      ; args[0] = self, always a pointer
+    mov [rbp - ERD_SELF], rdi
+
+    ; .args, which is always a real tuple once the constructor has run -- but
+    ; a subclass that never calls it can leave the field NULL, and an empty
+    ; tuple is the honest answer there rather than a NULL in a reduction.
+    mov rax, [rdi + PyExceptionObject.exc_args]
+    test rax, rax
+    jnz .erd_have_args
+    xor edi, edi
+    extern tuple_new
+    call tuple_new
+    test rax, rax
+    jz .erd_failed
+    jmp .erd_args_ready
+.erd_have_args:
+    mov rdi, rax
+    call obj_incref
+    mov rax, [rbp - ERD_SELF]
+    mov rax, [rax + PyExceptionObject.exc_args]
+.erd_args_ready:
+    mov [rbp - ERD_ARGS], rax           ; owned; ir_reduce_tuple takes it
+
+    ; A non-empty instance dict becomes the third element, which is what
+    ; carries an attribute a program set on the exception itself.
+    mov rcx, [rbp - ERD_SELF]
+    mov rcx, [rcx + PyExceptionObject.exc_dict]
+    test rcx, rcx
+    jz .erd_no_state
+    cmp qword [rcx + PyDictObject.ob_size], 0
+    je .erd_no_state
+    mov rdx, rcx
+    mov ecx, 1
+    jmp .erd_build
+.erd_no_state:
+    xor edx, edx
+    xor ecx, ecx
+.erd_build:
+    mov rsi, [rbp - ERD_ARGS]
+    mov rdi, [rbp - ERD_SELF]
+    mov rdi, [rdi + PyObject.ob_type]   ; type(self), borrowed
+    extern ir_reduce_tuple
+    call ir_reduce_tuple
+    test rax, rax
+    jz .erd_failed
+    mov edx, TAG_PTR
+    leave
+    V_PACK rax, rdx                     ; builtins return one Value
+    ret
+
+.erd_failed:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+END_FUNC exc_method_reduce
+
 global exc_install_methods
 DEF_FUNC exc_install_methods, EIM_FRAME
     push rbx
@@ -1811,6 +1892,7 @@ DEF_FUNC exc_install_methods, EIM_FRAME
     EXC_ADD_METHOD exc_method_init, "__init__"
     EXC_ADD_METHOD exc_method_with_traceback, "with_traceback"
     EXC_ADD_METHOD exc_method_add_note, "add_note"
+    EXC_ADD_METHOD exc_method_reduce, "__reduce__"
     ; Stamp the owner on it, which is what makes builtin_func_call check the
     ; receiver.  Without it `BaseException.__init__([], 'a')` wrote a tuple
     ; into a list's 57th byte -- exc_args' offset -- and released whatever

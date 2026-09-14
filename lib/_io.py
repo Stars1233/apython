@@ -146,6 +146,46 @@ def _make_encoder(encoding, errors):
 # all: it hands back the raw file itself, with no buffered layer above it.
 
 
+def _size_or_none(value):
+    """A size argument that accepts None, converted as CPython converts it.
+
+    Every size here is a C Py_ssize_t on CPython's side, so the conversion
+    happens BEFORE the method does anything -- which matters, because a
+    method that validates late has already moved its cursor.  `read(0.0)` on a
+    BufferedReader raised TypeError from a slice deep inside, having first
+    written a FLOAT into _read_pos; every later read on that object then
+    failed too.
+    """
+    if value is None or isinstance(value, int):
+        return value
+    try:
+        method = type(value).__index__
+    except AttributeError:
+        raise TypeError("argument should be integer or None, not '%s'"
+                        % (type(value).__name__,)) from None
+    result = method(value)
+    if not isinstance(result, int):
+        raise TypeError("__index__ returned non-int (type %s)"
+                        % (type(result).__name__,))
+    return result
+
+
+def _ssize(value):
+    """A size argument that does NOT accept None; CPython's other wording."""
+    if isinstance(value, int):
+        return value
+    try:
+        method = type(value).__index__
+    except AttributeError:
+        raise TypeError("'%s' object cannot be interpreted as an integer"
+                        % (type(value).__name__,)) from None
+    result = method(value)
+    if not isinstance(result, int):
+        raise TypeError("__index__ returned non-int (type %s)"
+                        % (type(result).__name__,))
+    return result
+
+
 def _iobase_readline(self, size=-1):
     if size is None:
         size = -1
@@ -335,6 +375,7 @@ class IOBase(_iocore._IOBase, metaclass=abc.ABCMeta):
     def readline(self, size=-1):
         # peek() is the fast path: without it a line costs one read() per
         # character, which is what a stream with no peek falls back to.
+        size = _size_or_none(size)
         if size is None:
             size = -1
         peek = getattr(self, "peek", None)
@@ -371,6 +412,7 @@ class IOBase(_iocore._IOBase, metaclass=abc.ABCMeta):
         return line
 
     def readlines(self, hint=None):
+        hint = _size_or_none(hint)
         if hint is None or hint <= 0:
             return list(self)
         n = 0
@@ -612,6 +654,7 @@ class BufferedReader(_BufferedIOMixin):
         return False
 
     def read(self, size=None):
+        size = _size_or_none(size)
         if size is not None and size < -1:
             raise ValueError("invalid number of bytes to read")
         return self._read_unlocked(size)
@@ -660,7 +703,7 @@ class BufferedReader(_BufferedIOMixin):
         return out[:n] if out else nodata_val
 
     def peek(self, size=0):
-        return self._peek_unlocked(size)
+        return self._peek_unlocked(_ssize(size))
 
     def _peek_unlocked(self, n=0):
         self._checkDetached()
@@ -676,6 +719,7 @@ class BufferedReader(_BufferedIOMixin):
 
     def read1(self, size=-1):
         self._checkDetached()
+        size = _ssize(size)
         if size < 0:
             size = self.buffer_size
         if size == 0:
@@ -828,6 +872,7 @@ class BufferedRandom(BufferedWriter, BufferedReader):
         return BufferedReader.tell(self)
 
     def read(self, size=None):
+        size = _size_or_none(size)
         if size is None:
             size = -1
         self.flush()
@@ -838,10 +883,12 @@ class BufferedRandom(BufferedWriter, BufferedReader):
         return BufferedReader.readinto(self, b)
 
     def peek(self, size=0):
+        size = _ssize(size)
         self.flush()
         return BufferedReader.peek(self, size)
 
     def read1(self, size=-1):
+        size = _ssize(size)
         self.flush()
         return BufferedReader.read1(self, size)
 
@@ -880,6 +927,7 @@ class BufferedRWPair(BufferedIOBase):
         self.writer = BufferedWriter(writer, buffer_size)
 
     def read(self, size=-1):
+        size = _size_or_none(size)
         if size is None:
             size = -1
         return self.reader.read(size)
@@ -891,10 +939,10 @@ class BufferedRWPair(BufferedIOBase):
         return self.writer.write(b)
 
     def peek(self, size=0):
-        return self.reader.peek(size)
+        return self.reader.peek(_ssize(size))
 
     def read1(self, size=-1):
-        return self.reader.read1(size)
+        return self.reader.read1(_ssize(size))
 
     def readinto1(self, b):
         return self.reader.readinto1(b)
@@ -1369,6 +1417,7 @@ class TextIOWrapper(TextIOBase):
     def read(self, size=None):
         self._checkClosed()
         self._checkReadable()
+        size = _size_or_none(size)
         if size is None:
             size = -1
         decoder = self._decoder or self._get_decoder()
@@ -1397,6 +1446,8 @@ class TextIOWrapper(TextIOBase):
     def readline(self, size=None):
         if self.closed:
             raise ValueError("read from closed file")
+        if size is not None:
+            size = _ssize(size)
         if size is None:
             size = -1
         line = self._get_decoded_chars()

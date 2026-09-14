@@ -1,10 +1,31 @@
 """_operator - the C accelerator behind operator.py.
 
 operator.py falls back to its own pure-Python definitions when this is
-missing, so only the one name that has NO fallback needs to be here:
-`_compare_digest`, which hmac imports directly and which is what kept hmac,
-and everything behind it, from loading.
+missing, so what belongs here is the names whose fallback is WRONG rather
+than merely slower: `_compare_digest`, which hmac imports directly and which
+is what kept hmac and everything behind it from loading, and `index`, whose
+fallback reports a float as an AttributeError.
 """
+
+
+def index(a):
+    """a.__index__(), with PyNumber_Index's refusals rather than __index__'s.
+
+    operator.py's fallback is `return a.__index__()`, so a float arrives as
+    an AttributeError -- and `random.randrange(0, 42, 0.0)`, which calls this
+    on each of its arguments, then raised AttributeError where CPython raises
+    TypeError.  PyNumber_Index also insists the result really is an int.
+    """
+    try:
+        method = type(a).__index__
+    except AttributeError:
+        raise TypeError("'%s' object cannot be interpreted as an integer"
+                        % (type(a).__name__,)) from None
+    result = method(a)
+    if not isinstance(result, int):
+        raise TypeError("__index__ returned non-int (type %s)"
+                        % (type(result).__name__,))
+    return result
 
 
 def _compare_digest(a, b):

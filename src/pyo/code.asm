@@ -719,7 +719,8 @@ CPO_L0    equ 80            ; start line
 CPO_L1    equ 72            ; end line
 CPO_L2    equ 64            ; start column, or -1
 CPO_L3    equ 56            ; end column, or -1
-CPO_FRAME equ 96            ; + 0 pushes = 96
+CPO_CUR   equ 120           ; the three-word resume cursor, ascending from here
+CPO_FRAME equ 128           ; + 0 pushes = 128
 DEF_FUNC code_method_co_positions, CPO_FRAME
     cmp rsi, 1                  ; bound, so self is the only argument
     jne .cpo_args
@@ -736,6 +737,12 @@ DEF_FUNC code_method_co_positions, CPO_FRAME
     jz .cpo_failed
     mov [rbp - CPO_LIST], rax
     mov qword [rbp - CPO_I], 0
+    ; The walk asks about ascending offsets, so it carries a cursor: without
+    ; one, every code unit rescans the whole line table and co_positions()
+    ; costs the square of the code object's length.
+    mov qword [rbp - CPO_CUR], 0
+    mov qword [rbp - CPO_CUR + 8], 0
+    mov qword [rbp - CPO_CUR + 16], 0
 
 .cpo_loop:
     mov rax, [rbp - CPO_I]
@@ -749,8 +756,9 @@ DEF_FUNC code_method_co_positions, CPO_FRAME
     mov rdi, [rbp - CPO_CODE]
     mov rsi, rax
     lea rdx, [rbp - CPO_L0]
-    extern code_addr2location
-    call code_addr2location
+    lea rcx, [rbp - CPO_CUR]
+    extern code_addr2location_at
+    call code_addr2location_at
 
     mov edi, 4
     extern tuple_new
@@ -1253,7 +1261,8 @@ COL_START equ 40            ; where the current run began, in code units
 COL_LINE  equ 48            ; the line that run is on
 COL_TUP   equ 56
 COL_LOC   equ 96            ; the four out-slots, ascending from here
-COL_FRAME equ 112           ; + 0 pushes = 112
+COL_CUR   equ 136           ; the three-word resume cursor, ascending from here
+COL_FRAME equ 144           ; + 0 pushes = 144
 DEF_FUNC code_method_co_lines, COL_FRAME
     cmp rsi, 1                  ; bound, so self is the only argument
     jne .col_args
@@ -1273,6 +1282,10 @@ DEF_FUNC code_method_co_lines, COL_FRAME
     mov qword [rbp - COL_I], 0
     mov qword [rbp - COL_START], 0
     mov qword [rbp - COL_LINE], -2      ; neither a line nor "no location"
+    ; Ascending offsets, so the walk carries a cursor; see co_positions.
+    mov qword [rbp - COL_CUR], 0
+    mov qword [rbp - COL_CUR + 8], 0
+    mov qword [rbp - COL_CUR + 16], 0
 
 .col_loop:
     mov rax, [rbp - COL_I]
@@ -1285,8 +1298,9 @@ DEF_FUNC code_method_co_lines, COL_FRAME
     mov rdi, [rbp - COL_CODE]
     mov rsi, rax
     lea rdx, [rbp - COL_LOC]
-    extern code_addr2location
-    call code_addr2location
+    lea rcx, [rbp - COL_CUR]
+    extern code_addr2location_at
+    call code_addr2location_at
     mov rcx, [rbp - COL_LOC]
     cmp qword [rbp - COL_I], 0
     je .col_first

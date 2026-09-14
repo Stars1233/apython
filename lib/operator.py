@@ -85,7 +85,23 @@ def delitem(a, b):
     del a[b]
 
 def index(a):
-    return a.__index__()
+    """a.__index__(), with CPython's refusals rather than __index__'s own.
+
+    This was `a.__index__()`, which reports a float as an AttributeError --
+    and random.randrange, which calls this on its arguments, then raised
+    AttributeError where CPython raises TypeError.  PyNumber_Index also
+    insists the result really is an int.
+    """
+    try:
+        method = type(a).__index__
+    except AttributeError:
+        raise TypeError("'%s' object cannot be interpreted as an integer"
+                        % (type(a).__name__,)) from None
+    result = method(a)
+    if not isinstance(result, int):
+        raise TypeError("__index__ returned non-int (type %s)"
+                        % (type(result).__name__,))
+    return result
 
 def length_hint(obj, default=0):
     """How many items obj will produce, if it can say.

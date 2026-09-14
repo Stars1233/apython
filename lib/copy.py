@@ -5,129 +5,188 @@ class Error(Exception):
     pass
 
 
+def _copy_immutable(x):
+    return x
+
+
 def copy(x):
     """Create a shallow copy of x."""
     cls = type(x)
 
-    # Try __copy__
-    copier = getattr(cls, '__copy__', None)
+    copier = _copy_dispatch.get(cls)
     if copier is not None:
         return copier(x)
 
-    # Built-in immutable types: return as-is
-    if isinstance(x, (int, float, bool, str, bytes, tuple, frozenset)):
-        return x
-    if x is None:
-        return x
+    if issubclass(cls, type):
+        # A class is treated as atomic, as CPython treats it.
+        return _copy_immutable(x)
 
-    # Lists
-    if isinstance(x, list):
-        return list(x)
+    copier = getattr(cls, "__copy__", None)
+    if copier is not None:
+        return copier(x)
 
-    # Dicts
-    if isinstance(x, dict):
-        return dict(x)
-
-    # Sets
-    if isinstance(x, set):
-        return set(x)
-
-    # Bytearrays
-    if isinstance(x, bytearray):
-        return bytearray(x)
-
-    # Generic: try to reconstruct
-    reductor = getattr(x, '__reduce_ex__', None)
+    reductor = _dispatch_table().get(cls)
     if reductor is not None:
-        rv = reductor(4)
+        rv = reductor(x)
     else:
-        reductor = getattr(x, '__reduce__', None)
+        reductor = getattr(x, "__reduce_ex__", None)
         if reductor is not None:
-            rv = reductor()
+            rv = reductor(4)
         else:
-            raise Error("un(shallow)copyable object of type %s" % cls)
+            reductor = getattr(x, "__reduce__", None)
+            if reductor is not None:
+                rv = reductor()
+            else:
+                raise Error("un(shallow)copyable object of type %s" % cls)
+
+    if isinstance(rv, str):
+        return x
     return _reconstruct(x, rv)
 
 
-def deepcopy(x, memo=None):
+def deepcopy(x, memo=None, _nil=[]):
     """Create a deep copy of x."""
     if memo is None:
         memo = {}
 
     d = id(x)
-    y = memo.get(d)
-    if y is not None:
+    y = memo.get(d, _nil)
+    if y is not _nil:
         return y
 
     cls = type(x)
 
-    # Try __deepcopy__
-    copier = getattr(cls, '__deepcopy__', None)
+    copier = _deepcopy_dispatch.get(cls)
     if copier is not None:
         y = copier(x, memo)
-        memo[d] = y
-        return y
-
-    # Immutable types
-    if isinstance(x, (int, float, bool, str, bytes, type)):
-        return x
-    if x is None:
-        return x
-
-    # Tuples
-    if isinstance(x, tuple):
-        y = tuple(deepcopy(item, memo) for item in x)
-        memo[d] = y
-        return y
-
-    # Frozensets
-    if isinstance(x, frozenset):
-        y = frozenset(deepcopy(item, memo) for item in x)
-        memo[d] = y
-        return y
-
-    # Lists
-    if isinstance(x, list):
-        y = []
-        memo[d] = y
-        for item in x:
-            y.append(deepcopy(item, memo))
-        return y
-
-    # Dicts
-    if isinstance(x, dict):
-        y = {}
-        memo[d] = y
-        for key, value in x.items():
-            y[deepcopy(key, memo)] = deepcopy(value, memo)
-        return y
-
-    # Sets
-    if isinstance(x, set):
-        y = set()
-        memo[d] = y
-        for item in x:
-            y.add(deepcopy(item, memo))
-        return y
-
-    # Bytearrays
-    if isinstance(x, bytearray):
-        y = bytearray(x)
-        memo[d] = y
-        return y
-
-    # Generic: try __reduce_ex__
-    reductor = getattr(x, '__reduce_ex__', None)
-    if reductor is not None:
-        rv = reductor(4)
+    elif issubclass(cls, type):
+        y = _copy_immutable(x)
     else:
-        reductor = getattr(x, '__reduce__', None)
-        if reductor is not None:
-            rv = reductor()
+        copier = getattr(cls, "__deepcopy__", None)
+        if copier is not None:
+            y = copier(x, memo)
         else:
-            raise Error("un(deep)copyable object of type %s" % cls)
+            reductor = _dispatch_table().get(cls)
+            if reductor is not None:
+                rv = reductor(x)
+            else:
+                reductor = getattr(x, "__reduce_ex__", None)
+                if reductor is not None:
+                    rv = reductor(4)
+                else:
+                    reductor = getattr(x, "__reduce__", None)
+                    if reductor is not None:
+                        rv = reductor()
+                    else:
+                        raise Error("un(deep)copyable object of type %s" % cls)
+            if isinstance(rv, str):
+                y = x
+            else:
+                y = _reconstruct(x, rv, memo)
 
-    return _reconstruct(x, rv, memo)
+    # memo[id(x)] must be kept alive for as long as the memo is, or a later
+    # id() may land on freed memory and match.
+    if y is not x:
+        memo[d] = y
+        memo.setdefault(id(memo), []).append(x)
+    return y
+
+
+def _dispatch_table():
+    # copyreg is imported lazily: copy is reached during interpreter start-up
+    # on paths where copyreg is not up yet, and an empty table is the right
+    # answer there.
+    try:
+        import copyreg
+    except ImportError:
+        return {}
+    return copyreg.dispatch_table
+
+
+def _deepcopy_atomic(x, memo):
+    return x
+
+
+def _deepcopy_list(x, memo):
+    y = []
+    memo[id(x)] = y
+    for item in x:
+        y.append(deepcopy(item, memo))
+    return y
+
+
+def _deepcopy_tuple(x, memo):
+    y = [deepcopy(item, memo) for item in x]
+    # A tuple of things that each copied to themselves IS itself, which is
+    # what keeps `deepcopy((1, 2))` from allocating.
+    for a, b in zip(x, y):
+        if a is not b:
+            return tuple(y)
+    return x
+
+
+def _deepcopy_dict(x, memo):
+    y = {}
+    memo[id(x)] = y
+    for key, value in x.items():
+        y[deepcopy(key, memo)] = deepcopy(value, memo)
+    return y
+
+
+def _deepcopy_set(x, memo):
+    y = set()
+    memo[id(x)] = y
+    for item in x:
+        y.add(deepcopy(item, memo))
+    return y
+
+
+def _deepcopy_frozenset(x, memo):
+    return frozenset(deepcopy(item, memo) for item in x)
+
+
+def _deepcopy_bytearray(x, memo):
+    return bytearray(x)
+
+
+def _deepcopy_method(x, memo):
+    return type(x)(x.__func__, deepcopy(x.__self__, memo))
+
+
+# The dispatch tables are keyed on the EXACT type, which is the point of them.
+# These used to be an isinstance ladder, and a ladder answers for a subclass
+# with its base's arm: deepcopy of a defaultdict gave a plain dict, of a tuple
+# subclass a plain tuple, and of a str subclass the SAME OBJECT uncopied.  An
+# exact-type miss falls through to the reduce protocol, which is where a
+# subclass is rebuilt as itself.
+_copy_dispatch = {}
+_deepcopy_dispatch = {}
+
+for _t in (type(None), type(Ellipsis), type(NotImplemented), int, float, bool,
+           complex, bytes, str, tuple, frozenset, type, range, slice,
+           type(copy), type(len)):
+    _copy_dispatch[_t] = _copy_immutable
+    _deepcopy_dispatch[_t] = _deepcopy_atomic
+
+_copy_dispatch[list] = list.copy
+_copy_dispatch[dict] = dict.copy
+_copy_dispatch[set] = set.copy
+_copy_dispatch[bytearray] = bytearray.copy
+
+_deepcopy_dispatch[list] = _deepcopy_list
+_deepcopy_dispatch[tuple] = _deepcopy_tuple
+_deepcopy_dispatch[dict] = _deepcopy_dict
+# set, frozenset and bytearray are in CPython's table by way of their own
+# __reduce_ex__, which this tree does not supply for them yet; until it does,
+# an exact-type entry is what keeps deepcopy of a set from answering set().
+_deepcopy_dispatch[set] = _deepcopy_set
+_deepcopy_dispatch[frozenset] = _deepcopy_frozenset
+_deepcopy_dispatch[bytearray] = _deepcopy_bytearray
+try:
+    _deepcopy_dispatch[type(_deepcopy_atomic.__get__(0))] = _deepcopy_method
+except (AttributeError, TypeError):
+    pass
+del _t
 
 
 def _reconstruct(x, info, memo=None):

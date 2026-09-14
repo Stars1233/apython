@@ -88,8 +88,16 @@ DEF_FUNC_BARE op_for_iter_range
     ; Return current as SmallInt (no INCREF needed for SmallInt)
     mov rdx, rax
 
-    ; Advance: current += step
+    ; Advance: current += step.  A SIGNED overflow means the next value is
+    ; past anything an int64 holds, so the run is over; saturating at stop
+    ; makes the next pass report exhaustion.  range_iter_next has had this
+    ; guard since `range(2**63-2, 2**63-1, 2)` looped for ever, and this copy
+    ; of it did not -- so `for i in range(1, 256, sys.maxsize)` was right
+    ; until the site specialised and wrong on every pass after.
     add rax, r9
+    jno .fir_no_overflow
+    mov rax, r8
+.fir_no_overflow:
     mov [rdi + PyRangeIterObject.it_current], rax
 
     VPUSH_INT rdx, r15                  ; push value

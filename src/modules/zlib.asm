@@ -125,6 +125,7 @@ zn_adler32:      db "adler32", 0
 zn_stream_new:   db "stream_new", 0
 zn_stream_feed:  db "stream_feed", 0
 zn_stream_state: db "stream_state", 0
+zn_stream_drop_tail: db "stream_drop_tail", 0
 zn_stream_free:  db "stream_free", 0
 zn_version:      db "ZLIB_VERSION", 0
 zc_e_init:       db "failed to initialise the compression stream", 0
@@ -979,6 +980,52 @@ DEF_FUNC zc_stream_state, ZS_FRAME
 END_FUNC zc_stream_state
 
 ;; ============================================================================
+;; _zlibcore.stream_drop_tail(handle) -> None
+;;
+;; Forget the unconsumed input the last feed parked, without decompressing it.
+;;
+;; Two objects are built on this stream and they disagree about who owns that
+;; input.  _ZlibDecompressor holds it -- `needs_input` is how its reader knows
+;; whether to go back to the file -- so stream_feed prepending the leftover to
+;; the next call is exactly right for it.  zlib.Decompress does not: CPython
+;; hands the leftover back as `unconsumed_tail` and the CALLER feeds it in
+;; again, which is what every documented max_length loop does.  Prepending as
+;; well meant the input doubled every round -- 315 bytes, then 630, then 1260
+;; from a 356-byte stream -- until the process ran out of memory.  So
+;; Decompress.decompress drops the parked copy first and passes the caller's.
+;;
+;; Decompress.flush does NOT, because CPython's flush() really does inflate
+;; whatever is left in unconsumed_tail.
+;; ============================================================================
+ZD_FRAME equ 16             ; + 0 pushes = 16, 16-aligned
+DEF_FUNC zc_stream_drop_tail, ZD_FRAME
+    cmp rsi, 1
+    jne .zd_nargs
+    xor esi, esi
+    call zc_arg_int
+    mov rdi, rax
+    call zc_handle_at
+    test rax, rax
+    jz .zd_bad_handle
+    mov rdi, [rax + ZHandle.tail]
+    mov qword [rax + ZHandle.tail], 0
+    mov qword [rax + ZHandle.tail_len], 0
+    test rdi, rdi
+    jz .zd_done
+    call ap_free
+.zd_done:
+    RET_NONE
+    leave
+    V_PACK rax, rdx
+    ret
+
+.zd_bad_handle:
+    RAISE exc_ValueError_type, "invalid stream handle"
+.zd_nargs:
+    RAISE exc_TypeError_type, "_zlibcore: wrong number of arguments"
+END_FUNC zc_stream_drop_tail
+
+;; ============================================================================
 ;; zc_bytes_or_empty(rdi = data or 0, rsi = length) -> rax = a bytes object
 ;; ============================================================================
 DEF_FUNC_LOCAL zc_bytes_or_empty
@@ -1082,6 +1129,7 @@ DEF_FUNC zlib_module_create, ZM_FRAME
     MODULE_ADD_FUNC zc_adler32,      zn_adler32
     MODULE_ADD_FUNC zc_stream_new,   zn_stream_new
     MODULE_ADD_FUNC zc_stream_feed,  zn_stream_feed
+    MODULE_ADD_FUNC zc_stream_drop_tail, zn_stream_drop_tail
     MODULE_ADD_FUNC zc_stream_state, zn_stream_state
     MODULE_ADD_FUNC zc_stream_free,  zn_stream_free
 

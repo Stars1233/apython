@@ -758,12 +758,15 @@ DFK_DICT  equ 16
 DFK_VAL   equ 24
 DFK_VTAG  equ 32
 DFK_EXC   equ 40            ; current_exception before the iteration started
+DFK_CLS   equ 48            ; args[0]: the class the result must be
 DFK_FRAME equ 56            ; + 3 pushes = 80, 16-aligned
 
 DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     push rbx
     push r12
     push r13
+    mov rax, [rdi]                 ; args[0] = cls
+    mov [rbp - DFK_CLS], rax
 
     ; Default value = None
     extern none_singleton
@@ -781,17 +784,47 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
 
 .dfk_get_iter:
     ; Get iterator from args[1] (iterable)
-    ; args array: [0]=cls, [8]=cls_tag, [16]=iterable, [24]=iterable_tag, ...
+    ; One Value per argument slot, so args[1] is at +8 and args[2] at +16.
     mov rax, rdi                   ; save args ptr
-    mov rdi, [rax + 8]            ; iterable payload
-    V_UNPACK rdi, rsi       ; args[1]
+    mov rdi, [rax + 8]            ; args[1], the iterable
+    V_UNPACK rdi, rsi             ; get_iterator takes a (payload, tag) pair
     extern get_iterator
     call get_iterator
+    test rax, rax
+    jz .dfk_no_iter
     mov [rbp - DFK_ITER], rax
 
-    ; Create new dict
+    ; The result must be of the class this was called ON: D.fromkeys() answers
+    ; a D, not a dict, and every dict subclass in the stdlib -- defaultdict,
+    ; OrderedDict, Counter -- is reached that way.  An exact dict takes the
+    ; direct constructor; anything else is built by calling the class with no
+    ; arguments, which is what CPython does, and is why a subclass whose
+    ; __init__ demands one cannot be fromkeys'd there either.
+    mov rax, [rbp - DFK_CLS]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    je .dfk_exact
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    extern obj_call_n
+    call obj_call_n
+    test rax, rax
+    jz .dfk_ctor_failed
+    ; The keys go in with dict_set, which wants the dict layout.  A class that
+    ; is not a dict subclass has no such layout, and would be written through
+    ; as though it had.  (CPython reaches PyObject_SetItem here, so it also
+    ; honours an overridden __setitem__, which this does not.)
+    mov rcx, [rax + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_DICT_SUBCLASS
+    jz .dfk_not_a_dict
+    jmp .dfk_have_dict
+.dfk_exact:
     call dict_new
+.dfk_have_dict:
     mov [rbp - DFK_DICT], rax
+    test rax, rax
+    jz .dfk_ctor_failed
 
     DUNDER_EXC_SAVE [rbp - DFK_EXC]
 .dfk_loop:
@@ -841,7 +874,28 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
 .dfk_raised:
     mov rdi, [rbp - DFK_DICT]
     call obj_decref
+.dfk_no_iter:
     xor eax, eax                ; a NULL Value, with the exception pending
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dfk_not_a_dict:
+    mov rdi, rax
+    call obj_decref
+    mov rdi, [rbp - DFK_ITER]
+    call obj_decref
+    RAISE exc_TypeError_type, \
+        "fromkeys() requires a dict subclass"
+
+.dfk_ctor_failed:
+    ; The class refused to build, and said why.
+    mov rdi, [rbp - DFK_ITER]
+    call obj_decref
+    xor eax, eax
     xor edx, edx
     pop r13
     pop r12

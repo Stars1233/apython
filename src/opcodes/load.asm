@@ -899,17 +899,24 @@ DEF_FUNC op_load_attr, LA_FRAME
     cmp rcx, rdx
     je .la_unwrap_bound_method
 
-    ; Only bind func_type and builtin_func_type as methods
-    ; Types and other callables should NOT be bound
-    lea rdx, [rel func_type]
-    cmp rcx, rdx
+    ; Whether it binds is the object's question: a Python function always
+    ; does, a builtin only when it is a method or wrapper descriptor rather
+    ; than a module-level function.  Types and other callables never do.
+    ;
+    ; Only for an attribute that came from a TYPE DICT.  What a tp_getattr
+    ; answers is built on the spot and never stamped -- a generator's `send`,
+    ; a coroutine's, a file's -- so its func_kind says FUNCTION and this would
+    ; decline it; the arms below already decide that case, by asking what kind
+    ; of object the RECEIVER is.
+    cmp qword [rbp - LA_FROM_TYPE], 0
     je .la_is_method_func
-
-    extern builtin_func_type
-    lea rdx, [rel builtin_func_type]
-    cmp rcx, rdx
-    je .la_is_method_func
-
+    mov rdi, rax
+    xor esi, esi                   ; the receiver is decided further down
+    extern builtin_should_bind
+    call builtin_should_bind
+    test eax, eax
+    mov rax, [rbp - LA_ATTR]
+    jnz .la_is_method_func
     jmp .la_not_method
 
 .la_is_method_func:
@@ -1848,11 +1855,34 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     cmp qword [rbp - LSA_FLAG], 0
     je .lsa_attr_mode
 
-    ; Method mode: CPython order: push func (deeper), then self (TOS)
+    ; Method mode: CPython order: push func (deeper), then self (TOS) -- but
+    ; only for something that BINDS.  A module-level builtin parked in a class
+    ; body does not, and pushing self under it prepends the receiver to its
+    ; arguments: `super().f([1,2])` for `f = len` became len(self, [1,2]).
+    cmp qword [rbp - LSA_ATTR_TAG], TAG_PTR
+    jne .lsa_method_unbound
+    mov [rbp - LSA_ATTR], rax
+    mov rdi, rax
+    xor esi, esi                   ; super() has already chosen the receiver
+    call builtin_should_bind
+    mov ecx, eax
+    mov rax, [rbp - LSA_ATTR]
+    test ecx, ecx
+    jz .lsa_method_unbound
     mov rdx, [rbp - LSA_ATTR_TAG]
     VPUSH_VAL rax, rdx             ; push func (deeper = callable)
     mov rax, [rbp - LSA_SELF]     ; self (already has ref from stack)
     VPUSH rax                      ; push self (TOS) -- a Value
+    jmp .lsa_done
+
+.lsa_method_unbound:
+    ; NULL then the attribute, which is what a call with no receiver expects.
+    mov rdi, [rbp - LSA_SELF]
+    DECREF_V rdi, rcx              ; self is not going on the stack
+    VPUSH_NULL
+    mov rax, [rbp - LSA_ATTR]
+    mov rdx, [rbp - LSA_ATTR_TAG]
+    VPUSH_VAL rax, rdx
     jmp .lsa_done
 
 .lsa_attr_mode:
@@ -1865,17 +1895,18 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     ; method mode for it, which is why this went unnoticed.
     cmp qword [rbp - LSA_ATTR_TAG], TAG_PTR
     jne .lsa_attr_plain
-    mov rcx, [rax + PyObject.ob_type]
-    extern func_type
-    lea rdx, [rel func_type]
-    cmp rcx, rdx
-    je .lsa_attr_bind
-    ; A builtin method is equally a descriptor: super().__init__ on a list
-    ; subclass resolves to list.__init__, which is one of these.
-    extern builtin_func_type
-    lea rdx, [rel builtin_func_type]
-    cmp rcx, rdx
-    jne .lsa_attr_plain
+    ; A builtin method is equally a descriptor -- super().__init__ on a list
+    ; subclass resolves to list.__init__, which is one of these -- but a
+    ; module-level builtin parked in a class body is not, and super().f must
+    ; hand that one over as it stands.
+    mov [rbp - LSA_ATTR], rax
+    mov rdi, rax
+    xor esi, esi                   ; super() has already chosen the receiver
+    extern builtin_should_bind
+    call builtin_should_bind
+    mov rax, [rbp - LSA_ATTR]
+    test eax, eax
+    jz .lsa_attr_plain
 
 .lsa_attr_bind:
     mov [rbp - LSA_ATTR], rax

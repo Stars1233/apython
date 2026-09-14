@@ -12,6 +12,7 @@ ok asyncio
 ok base64
 ok bdb
 ok bisect
+ok bz2
 ok calendar
 ok cgi
 ok cgitb
@@ -76,6 +77,7 @@ ok lib2to3
 ok linecache
 ok locale
 ok logging
+ok lzma
 ok mailbox
 ok mailcap
 ok _markupbase

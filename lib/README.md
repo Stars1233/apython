@@ -17,7 +17,7 @@ repository (`../LICENSE`).
 | CPython, unmodified | `abc.py`, `ast.py`, `_collections_abc.py`, `collections/abc.py`, `contextlib.py`, `copyreg.py`, `enum.py`, `functools.py`, `genericpath.py`, `os.py`, `posixpath.py`, `re/`, `reprlib.py`, `selectors.py`, `socket.py`, `stat.py`, `types.py` |
 | Generated from CPython | `_ast.py` |
 | CPython, modified for apython | `__future__.py`, `collections/`, `copy.py`, `io.py`, `operator.py`, `pickle.py`, `string.py`, `unittest/`, `warnings.py`, `test/` |
-| Written for apython | `_ast_build.py`, `atexit.py`, `binascii.py`, `_codecs.py`, `_collections.py`, `_contextvars.py`, `_io.py`, `itertools.py`, `_operator.py`, `_random.py`, `select.py`, `_socket.py`, `_string.py`, `_struct.py`, `_thread.py`, `_tokenize.py` |
+| Written for apython | `_ast_build.py`, `atexit.py`, `binascii.py`, `_codecs.py`, `_collections.py`, `_contextvars.py`, `_io.py`, `itertools.py`, `_operator.py`, `_random.py`, `select.py`, `_socket.py`, `_string.py`, `_struct.py`, `_thread.py`, `_tokenize.py` , `faulthandler.py`|
 
 `re/` is the wrapper around the `_sre` engine, which is assembly.  It comes
 over unmodified, and with it the modules it needs that were not here:

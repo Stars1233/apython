@@ -120,25 +120,6 @@ reasoning that chose them and what changing one would cost.
   appends; and `float()` reports its ARGUMENT's type rather than
   `C.__float__ returned non-float (type str)`.
 
-- **A plain builtin function stored in a class body is BOUND.**  CPython has
-  three types where this tree has one: `builtin_function_or_method`, which has
-  no `tp_descr_get` and therefore does not bind, and `method_descriptor` and
-  `wrapper_descriptor`, which do.  So `class C: f = len` gives `C().f` a bound
-  method here and the bare function there, and `C().f([1,2,3])` is
-  "len() takes exactly one argument (2 given)".  `hasattr(len, '__get__')` is
-  True for the same reason and False in CPython.
-
-  The field that would tell them apart is `PyBuiltinObject.func_kind`, and it
-  cannot: `builtin_func_new` makes everything BUILTIN_KIND_FUNCTION, and only
-  `type_stamp_methods` upgrades it -- which runs over the tables `methods/init*.asm`
-  builds and not over the ones `io.asm`, `socket.asm`, `array.asm`,
-  `posixdir.asm` and `abcmod.asm` build for themselves.  Binding on the kind
-  was tried and unbinds every method in those modules.  Nor can the stamping
-  simply be extended to every type: it MUTATES the builtin object, so stamping
-  a user class's dict would give the process-wide `len` a `func_owner` of that
-  class.  Closing it means a second type, or a per-object flag set where the
-  builtin is created rather than where it is registered.
-
 - **`sys.stdout`'s repr is `<stdout>`, where CPython's is
   `<_io.TextIOWrapper name='<stdout>' mode='w' encoding='utf-8'>`.**  Visible
   wherever an unraisable report names the stream -- the "Exception ignored in:"
@@ -158,20 +139,31 @@ reasoning that chose them and what changing one would cost.
   new; closing it means a name test on the store fallback, which every
   `self.x = v` would pay for.
 
-- **`random.randbytes` is seconds per megabyte**, where CPython's is instant:
-  `_random` is Python here and CPython's is C.  2.4 s/MiB through this tree's
-  own `lib/random.py`, and 35 s/MiB through CPython's `Lib/random.py`, which
-  is what a test run with its stdlib on the path gets.  That is the whole of
-  why `test_zlib` times out -- `check_big_compress_buffer` opens with
-  `random.randbytes(10 * 1024 * 1024)`, and CPython's `bigmemtest` runs it
-  even without `-M` (at a small size, but the ten megabytes are generated
-  regardless).  Nothing is wrong; it is slow.  `test_zipfile64` is the same
-  shape, one order of magnitude larger.
+- **`frame.f_lineno` cannot be assigned, so `pdb`'s `jump` does not work.**
+  `frameobj_setattr` refuses it outright: moving the instruction pointer to
+  the start of another line means re-deriving the block stack for the
+  destination, and refusing is CPython's own answer for a jump it cannot make.
+  Every other `frame` attribute is writable or readable as CPython has it.
 
-- **`test_sys_settrace`'s `test_jump_extended_args_for_iter` hangs.**  The
-  compile is fast -- a hundred thousand lines in 0.8s -- so it is the trace
-  machinery under `sys.settrace` and a jump, not the compiler.  It sits with
-  the rest of the settrace divergence below.
+  What that costs is most of `test_sys_settrace`.  Its `JumpTestCase` is a
+  hundred and one tests, all of which jump; the refusal makes them fail, and
+  two of them then do not terminate --
+  `test_no_jump_infinite_while_loop` jumps OUT of a `while True:` that appends
+  to a list, so without the jump the loop runs until the allocator gives up
+  and the module dies with "Fatal: out of memory" before it can report.
+
+  Closing it is CPython's `frame_setlineno`, and it is a project rather than a
+  patch: `marklines` over the line table to find which instructions start a
+  line, `first_line_not_before` to pick the destination, and `mark_stacks` --
+  an abstract interpretation over the whole bytecode that propagates an
+  encoded block stack to a fixpoint, seeding every exception-table handler --
+  so that `compatible_stack` can refuse a jump into a `for` body or an
+  `except` block with the sentence CPython uses.
+
+  The module used to TIME OUT rather than fail, with 18 of its tests run, and
+  that was a different bug: `co_lines()` and `co_positions()` were quadratic
+  in a code object's length and unittest formats a traceback through the
+  second.  That is fixed; 84 tests run now.
 
 - **`super()` searches the written class's MRO, not the declared class's, when
   the opcode handles it.**  `super(C, p).f()` for a proxy whose `__class__` is
@@ -215,10 +207,34 @@ reasoning that chose them and what changing one would cost.
   `errno`, `strerror`, `filename` and `filename2` are C fields in CPython and
   do not appear in `vars(e)`; here `exc_oserror` writes them into `exc_dict`,
   so `OSError(2, 'x').__dict__` has four entries CPython's has none of.  Every
-  read of them agrees, and so does `args`; what differs is only what
-  `__dict__`, `vars()` and `__getstate__` report.  Moving them means four more
-  fields on PyExceptionObject and a getattr arm for each, which is what
-  CPython does.
+  read of them agrees, and so does `args`; what differs is what `__dict__`,
+  `vars()`, `__getstate__` and now `__reduce__` report.  Moving them means
+  four more fields on PyExceptionObject and a getattr arm for each, which is
+  what CPython does.
+
+  `__reduce__` is the visible consequence.  `BaseException.__reduce__` adds a
+  third element when the instance dict is not empty, and OSError's never is --
+  so `OSError(2, 'no').__reduce__()` is `(cls, (2, 'no'), {errno: 2, ...})`
+  where CPython answers the two-tuple `(cls, (2, 'no'))`.  CPython also
+  re-packs the filename INTO the arguments, because its constructor takes it
+  back there and its `args` does not carry it; this does not.  Every value
+  survives a round trip either way -- the reconstructor sets the four from the
+  state instead of from the arguments -- and only the tuple's shape differs.
+  Closing it is the same change: the fields, and then an `OSError.__reduce__`
+  that packs them into the args as CPython's does.
+
+- **`bytes` has no `__new__`, so a bytes SUBCLASS cannot be reconstructed.**
+  Every other variable-size builtin publishes one -- `str` and `tuple` do --
+  and `bytes_type.tp_new` is 0 with nothing in its `tp_dict`, so
+  `B.__new__` resolves along the MRO to `object.__new__`, which refuses a
+  variable-size type: `object.__new__(B) is not safe, use B.__new__()`.
+  `copy.copy` and `copy.deepcopy` of a bytes subclass both end there, and so
+  would a pickle.  `bytes.__getnewargs__` is in place, so the arguments are
+  ready for the day the constructor is; what is missing is the constructor,
+  which has to allocate the subclass's own `tp_basicsize` plus the data and
+  then copy it inline, the way `instance_alloc` does for a str subclass.
+  `bytearray` is not affected -- its data is out of line and it has a
+  constructor of its own.
 
 - **The attribute lookup order is instance-dict-first unless the MRO holds a
   data descriptor**, which is observable when user code mutates the class
@@ -336,9 +352,19 @@ reasoning that chose them and what changing one would cost.
   over `-lz` on the precedent `-lgmp` set, and `gzip` with it -- and
   `zipfile`, `tarfile` and `shutil`, which imported before and could not
   compress.  So is `array`, which was the largest of these by reach.  What
-  is left is genuinely C: `unicodedata`, `_tracemalloc`, `_symtable`, `_ssl`,
-  `_sqlite3`, `_crypt`, `_lzma`, `_bz2`, `_ctypes`, `_curses`, `pyexpat` and
-  `_tkinter`.
+  is left is genuinely C: `_tracemalloc`, `_symtable`, `_ssl`,
+  `_sqlite3`, `_crypt`, `_lzma`, `_bz2`, `_ctypes`, `_curses` and `_tkinter`.
+
+  `unicodedata` is there now, over tables generated from a running CPython the
+  way `\N{...}`'s names and the case mappings already were.  Two of its
+  functions are not: **`decomposition()` and `normalize()`**, which need the
+  canonical AND compatibility decompositions, the composition exclusions and
+  the Hangul algorithm -- an order of magnitude more data than the seven
+  properties that did land, and the thing PEP 3131's identifier
+  normalisation and `idna`/`punycode` all wait on.  **`ucd_3_2_0`** is not
+  either: it is a second, frozen copy of the whole database, which is what
+  `stringprep` imports and the only thing keeping `test_stringprep` from
+  running.
   (`_io` is not among them: `src/modules/io.asm` supplies `_iocore` and
   `lib/_io.py` assembles both halves under the name `_io`.  `_socket` and
   `select` are the same split over `_socketcore`.  Neither are `math`,
@@ -355,6 +381,17 @@ reasoning that chose them and what changing one would cost.
   `codecs` and the compression family.  What is left out is that `L` and `Q`
   hold what an int64 holds rather than a uint64, because `obj_as_index`
   refuses anything wider.
+
+  `cmath` is there now, and it is C99's complex functions reached directly --
+  a `double complex` is two SSE eightbytes under the SysV ABI, which is
+  exactly how a PyComplexObject's two doubles already arrive and leave.  So
+  its branch cuts are libm's, where CPython's are its own: the two agree on
+  every cut and on every error, and differ in the last ulp or two on ordinary
+  values, which is what `tests/test_cmath.py` compares to twelve digits rather
+  than seventeen.  Two of CPython's own `test_cmath` checks still fail on
+  that: one signed zero and one nan, both from `test_specific_values`.  `e`,
+  the half-float, is the one native `memoryview.cast()` format in the same
+  position.
 
   `math`'s `gamma`, `lgamma`, the n-ary `hypot` and `sumprod` round
   differently from CPython's, which uses its own Lanczos approximation and

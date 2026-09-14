@@ -222,7 +222,13 @@ DEF_FUNC op_import_from, IF2_FRAME
     test edx, edx
     jnz .if_got_attr
 
-    ; tp_getattr returned NULL — try dict_get directly
+    ; tp_getattr returned NULL -- try dict_get directly.  A module's PEP 562
+    ; __getattr__ reports "absent" by raising AttributeError, and CPython's
+    ; import_from swallows that before trying the submodule of the same name:
+    ; `from pkg import sub` must reach the submodule, not report what the hook
+    ; said about a name that was never meant to be an attribute.
+    extern import_clear_attr_error
+    call import_clear_attr_error
     mov rdi, [rbp - IF2_MOD]
     call import_module_dict
     mov rdi, rax

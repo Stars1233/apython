@@ -28,6 +28,7 @@ extern int_type
 extern type_type
 extern raise_exception
 extern exc_TypeError_type
+extern obj_as_index_clamped_msg
 extern ap_strcmp
 
 ;; ============================================================================
@@ -377,28 +378,88 @@ DEF_FUNC_BARE pyobj_to_i64
     mov rax, 0x7fffffffffffffff  ; sentinel for "not specified"
     ret
 .not_an_index:
-    RAISE exc_TypeError_type, "slice indices must be integers or None"
+    ; Not an int, but __index__ makes an object usable as a slice bound --
+    ; numpy's integers, IntEnum members, and the `X` whose __index__ has a
+    ; side effect that CPython's own test_mmap builds.  obj_as_index_clamped
+    ; is the single funnel for that protocol, and clamping is already what a
+    ; bound wants; only the wording is this caller's own.
+    mov edx, esi
+    lea rsi, [rel slice_index_msg]
+    jmp obj_as_index_clamped_msg
 END_FUNC pyobj_to_i64
+
+section .rodata
+slice_index_msg:
+    db "slice indices must be integers or None or have an __index__ method", 0
+section .text
 
 ;; ============================================================================
 ;; slice_indices(PySliceObject *slice, int64 length)
 ;;   -> (start, stop, step) in rax, rdx, rcx
-;; Resolves None values, handles negatives, clamps to bounds.
+;; slice_indices_live(PySliceObject *slice, int64 *length)
+;;   -> the same, reading the length AFTER the bounds are resolved
+;;
+;; Resolves None, handles negatives, clamps to bounds -- CPython's
+;; PySlice_Unpack followed by PySlice_AdjustIndices, and the order of those
+;; two is the point.
+;;
+;; A bound may be any object with __index__, so resolving one RUNS PYTHON
+;; CODE, and that code can empty the very container being sliced.  CPython
+;; splits the work for exactly this reason: Unpack converts, then the caller
+;; reads the length, then AdjustIndices clamps.  This function does all three,
+;; so it has to convert all three bounds before it looks at the length --
+;; which the `_live` entry point then loads through a pointer to the
+;; container's own size field.
+;;
+;; The plain entry point is for the immutable sequences and for
+;; slice.indices(n), where the length is a number and cannot change.
+;;
+;; A caller that took the `_live` form must also RE-READ its data pointer
+;; afterwards: a list that shrank has been reallocated, and the pointer it
+;; held is the old one.  CPython's issue #27863 is this same shape, and
+;; `e[0:10:X()] = []` with an X whose __index__ empties e is the test that
+;; found it here.
 ;; ============================================================================
-DEF_FUNC slice_indices
+SLI_LENP  equ 8             ; the live length pointer, or 0
+SLI_SNONE equ 16            ; start was None
+SLI_TNONE equ 24            ; stop was None
+SLI_FRAME equ 40            ; + 5 pushes = 80, 16-aligned
+DEF_FUNC slice_indices, SLI_FRAME
     push rbx
     push r12
     push r13
     push r14
     push r15
-    sub rsp, 8             ; align
+    mov r14, rsi                ; the length, already known
+    mov qword [rbp - SLI_LENP], 0
+    jmp sli_body
+END_FUNC slice_indices
 
-    mov rbx, rdi           ; slice
-    mov r14, rsi           ; length
+
+;; ============================================================================
+;; slice_indices_live(PySliceObject *slice, int64 *length)
+;;   -> (start, stop, step) in rax, rdx, rcx
+;;
+;; The same body, sharing it from `sli_body`: the only difference is that the
+;; length is loaded through the pointer once every bound is resolved.  See the
+;; block above slice_indices for why that matters.
+;; ============================================================================
+global slice_indices_live
+DEF_FUNC slice_indices_live, SLI_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov [rbp - SLI_LENP], rsi   ; read it once the bounds are resolved
+    xor r14d, r14d
+sli_body:
+    mov rbx, rdi                ; slice
 
     extern none_singleton
 
-    ; Get step (default 1)
+    ; --- convert, which is where user code may run -------------------------
+    ; step (default 1)
     mov rdi, [rbx + PySliceObject.step]
     IS_NONE rdi, rcx
     je .step_is_none
@@ -413,85 +474,114 @@ DEF_FUNC slice_indices
     ; here covers all six callers.
     test rax, rax
     jz .step_is_zero
-    mov r15, rax           ; r15 = step
+    mov r15, rax                ; r15 = step
 
-    ; Get start (default: 0 if step>0, length-1 if step<0)
+    ; start
+    mov qword [rbp - SLI_SNONE], 0
     mov rdi, [rbx + PySliceObject.start]
     IS_NONE rdi, rcx
     je .start_is_none
     V_UNPACK rdi, rsi
     call pyobj_to_i64
+    mov r12, rax
     jmp .have_start
 .start_is_none:
-    test r15, r15
-    js .start_neg_step
-    xor eax, eax           ; start = 0
-    jmp .have_start
-.start_neg_step:
-    mov rax, r14
-    dec rax                ; start = length - 1
+    mov qword [rbp - SLI_SNONE], 1
+    xor r12d, r12d
 .have_start:
-    ; Handle negative start
-    test rax, rax
-    jns .start_pos
-    add rax, r14           ; start += length
-    test rax, rax
-    jns .start_pos
-    xor eax, eax           ; clamp to 0
-.start_pos:
-    cmp rax, r14
-    jl .start_ok
-    ; start >= length: clamp to length-1 if step<0, length if step>0
-    mov rax, r14
-    test r15, r15
-    jns .start_ok
-    dec rax                ; start = length - 1 for negative step
-.start_ok:
-    mov r12, rax           ; r12 = start
 
-    ; Get stop (default: length if step>0, -1 if step<0)
+    ; stop
+    mov qword [rbp - SLI_TNONE], 0
     mov rdi, [rbx + PySliceObject.stop]
     IS_NONE rdi, rcx
     je .stop_is_none
     V_UNPACK rdi, rsi
     call pyobj_to_i64
+    mov r13, rax
     jmp .have_stop
 .stop_is_none:
-    test r15, r15
-    js .stop_neg_step
-    mov rax, r14           ; stop = length
-    jmp .have_stop
-.stop_neg_step:
-    mov rax, -1            ; stop = -1 (before start)
-    jmp .stop_ok           ; default value is already correct, skip adjustment
+    mov qword [rbp - SLI_TNONE], 1
+    xor r13d, r13d
 .have_stop:
-    ; Handle negative stop
-    test rax, rax
-    jns .stop_pos
-    add rax, r14           ; stop += length
-    test rax, rax
-    jns .stop_pos
-    ; For negative step, clamp to -1 (means "go to beginning")
-    test r15, r15
-    js .stop_neg_clamp
-    xor eax, eax           ; clamp to 0 for positive step
-    jmp .stop_ok
-.stop_neg_clamp:
-    mov rax, -1            ; clamp to -1 for negative step
-    jmp .stop_ok
-.stop_pos:
-    cmp rax, r14
-    jle .stop_ok
-    mov rax, r14           ; clamp to length
-.stop_ok:
-    mov r13, rax           ; r13 = stop
 
-    ; Return: rax=start, rdx=stop, rcx=step
+    ; --- the length, now that nothing more can run -------------------------
+    mov rcx, [rbp - SLI_LENP]
+    test rcx, rcx
+    jz .have_length
+    mov r14, [rcx]
+.have_length:
+
+    ; --- clamp -------------------------------------------------------------
+    ; start: default 0 for a positive step, length - 1 for a negative one
+    cmp qword [rbp - SLI_SNONE], 0
+    je .start_given
+    test r15, r15
+    js .start_default_neg
+    xor r12d, r12d
+    jmp .start_done
+.start_default_neg:
+    mov r12, r14
+    dec r12
+    jmp .start_done
+.start_given:
+    test r12, r12
+    jns .start_high
+    add r12, r14                ; start += length
+    test r12, r12
+    jns .start_high
+    ; Still below the start of the sequence.  The lower bound is 0 for a
+    ; positive step and -1 for a negative one -- -1 is "one before the first
+    ; index", which is where a downward walk stops.
+    xor r12d, r12d
+    test r15, r15
+    jns .start_done
+    mov r12, -1
+    jmp .start_done
+.start_high:
+    cmp r12, r14
+    jl .start_done
+    ; At or past the end: length for a positive step, length - 1 for a
+    ; negative one.
+    mov r12, r14
+    test r15, r15
+    jns .start_done
+    dec r12
+.start_done:
+
+    ; stop: default length for a positive step, -1 for a negative one
+    cmp qword [rbp - SLI_TNONE], 0
+    je .stop_given
+    test r15, r15
+    js .stop_default_neg
+    mov r13, r14
+    jmp .stop_done
+.stop_default_neg:
+    mov r13, -1
+    jmp .stop_done
+.stop_given:
+    test r13, r13
+    jns .stop_high
+    add r13, r14
+    test r13, r13
+    jns .stop_high
+    xor r13d, r13d
+    test r15, r15
+    jns .stop_done
+    mov r13, -1
+    jmp .stop_done
+.stop_high:
+    cmp r13, r14
+    jl .stop_done
+    mov r13, r14
+    test r15, r15
+    jns .stop_done
+    dec r13
+.stop_done:
+
     mov rax, r12
     mov rdx, r13
     mov rcx, r15
 
-    add rsp, 8
     pop r15
     pop r14
     pop r13
@@ -501,7 +591,7 @@ DEF_FUNC slice_indices
     ret
 .step_is_zero:
     RAISE exc_ValueError_type, "slice step cannot be zero"
-END_FUNC slice_indices
+END_FUNC slice_indices_live
 
 ;; ============================================================================
 ;; slice_getattr(PySliceObject *self, PyObject *name) -> (rax, edx) fat value

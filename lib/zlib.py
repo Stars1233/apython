@@ -174,6 +174,12 @@ class Decompress(_Stream):
             self.unused_data += unused
 
     def decompress(self, data, max_length=0):
+        # CPython hands the leftover back as unconsumed_tail and the CALLER
+        # feeds it in again -- which is what every documented max_length loop
+        # does -- so the copy the core parked has to go, or the input doubles
+        # every round.  _ZlibDecompressor is the other way round and keeps it.
+        if self._handle >= 0:
+            _zlibcore.stream_drop_tail(self._handle)
         out = self._feed(data, Z_NO_FLUSH, max_length)
         self._refresh()
         return out
@@ -181,6 +187,8 @@ class Decompress(_Stream):
     def flush(self, length=DEF_BUF_SIZE):
         if self._handle < 0:
             return b""
+        # Not dropped here: CPython's flush() really does inflate whatever is
+        # left in unconsumed_tail.
         out = self._feed(b"", Z_FINISH)
         self._refresh()
         self._close()

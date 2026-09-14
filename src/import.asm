@@ -26,6 +26,7 @@ extern dict_get
 extern dict_set
 extern dict_del
 extern current_exception
+extern attr_error_pending
 extern eval_exception_unwind
 extern list_new
 extern list_append
@@ -553,6 +554,31 @@ DEF_FUNC_BARE irnm_cat_n
 .done:
     ret
 END_FUNC irnm_cat_n
+
+;; ============================================================================
+;; import_clear_attr_error() -> void
+;;
+;; A module's PEP 562 __getattr__ may raise AttributeError, and module_getattr
+;; leaves that pending with attr_error_pending set so getattr()'s default and
+;; hasattr() can still see it.  The import machinery asks modules for names it
+;; expects to be missing -- `__path__` on a plain module, and the attribute
+;; IMPORT_FROM is about before it tries a submodule of the same name -- and for
+;; those a miss is an answer, not a failure.  CPython reads them with
+;; _PyObject_LookupAttr, which swallows the AttributeError for the same reason.
+;;
+;; Only an AttributeError the hook raised is cleared: attr_error_pending says
+;; so, and anything else pending is a real failure that must keep propagating.
+;; ============================================================================
+global import_clear_attr_error
+DEF_FUNC import_clear_attr_error
+    cmp qword [rel attr_error_pending], 0
+    je .ica_done
+    mov qword [rel attr_error_pending], 0
+    mov qword [rel current_exception], 0
+.ica_done:
+    leave
+    ret
+END_FUNC import_clear_attr_error
 
 ;; ============================================================================
 ;; import_parent_is_package(rdi = whatever sys.modules holds for the parent)
@@ -1242,7 +1268,12 @@ DEF_FUNC import_find_and_load, FL_FRAME
     call obj_decref
 
     test r12, r12
-    jz .search_sys_path
+    jnz .have_parent_path
+    ; A plain module has no __path__, and under PEP 562 its own __getattr__ may
+    ; have said so by raising; that is an answer here, not a failure.
+    call import_clear_attr_error
+    jmp .search_sys_path
+.have_parent_path:
 
     ; r12 = parent's __path__ (a list). Search it for the leaf module.
     mov rdi, r12                ; search_list = __path__

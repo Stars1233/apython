@@ -1087,7 +1087,9 @@ END_FUNC eg_half
 EGDV_EG    equ 8
 EGDV_LIST  equ 16
 EGDV_NEW   equ 24
-EGDV_FRAME equ 40            ; + 1 push = 48, 16-aligned
+EGDV_NOTES equ 32            ; __notes__ as obj_getattr_opt answered it: a Value
+EGDV_COPY  equ 40            ; list(__notes__), the copy that is stored
+EGDV_FRAME equ 56            ; + 1 push = 64, 16-aligned
 DEF_FUNC_LOCAL eg_derive, EGDV_FRAME
     push rbx
     mov [rbp - EGDV_EG], rdi
@@ -1187,27 +1189,65 @@ DEF_FUNC_LOCAL eg_derive, EGDV_FRAME
     mov rcx, [rax + PyExceptionGroupObject.exc_suppress]
     mov [rbx + PyExceptionGroupObject.exc_suppress], rcx
 
-    ; __notes__, which lives in the instance dict.
+    ; __notes__, which lives in the instance dict.  CPython copies it onto the
+    ; derived group only when it is a SEQUENCE, and copies it as a LIST --
+    ; PySequence_List -- so a str arrives as a list of its characters and a
+    ; tuple as a list.  Anything else is left alone rather than reported:
+    ; split() is not a good place to tell a program it put a number there.
+    ;
+    ; obj_getattr_opt answers a VALUE.  This released it with obj_decref, which
+    ; dereferences whatever it is handed, so `eg.__notes__ = 5` decremented a
+    ; refcount at address 5 -- which is exactly what CPython's own
+    ; test_split_does_not_copy_non_sequence_notes does.  DECREF_V is the
+    ; release that admits an immediate.  The block above copies exc_tb,
+    ; exc_cause and exc_context with a plain obj_incref/obj_decref and is right
+    ; to: those are genuine PyObject* fields on the group.  This one borrowed
+    ; that idiom across the boundary where it stops being true.
     CSTRING rdi, "__notes__"
     call str_from_cstr_heap
     test rax, rax
     jz .egd_done
-    mov rbx, rax
+    mov rbx, rax                    ; rbx = the name, for the rest of the block
     mov rdi, [rbp - EGDV_EG]
     mov rsi, rbx
     call obj_getattr_opt
+    mov [rbp - EGDV_NOTES], rax
     test rax, rax
     jz .egd_notes_absent
-    push rax
-    push rax
+
+    ; PySequence_Check: not a dict, and the type answers sq_item.  An immediate
+    ; is not a pointer, so it is never a sequence and never gets this far.
+    V_TEST_PTR rax, rcx
+    ja .egd_notes_release
+    mov rcx, [rax + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_DICT_SUBCLASS
+    jnz .egd_notes_release
+    mov rcx, [rcx + PyTypeObject.tp_as_sequence]
+    test rcx, rcx
+    jz .egd_notes_release
+    cmp qword [rcx + PySequenceMethods.sq_item], 0
+    je .egd_notes_release
+
+    ; list(notes): the shallow copy, so each half carries a notes list of its
+    ; own and appending to one does not reach the other.
+    lea rdi, [rel list_type]
+    lea rsi, [rbp - EGDV_NOTES]     ; the one-Value argument array
+    mov edx, 1
+    call obj_call_n
+    mov [rbp - EGDV_COPY], rax
+    test rax, rax
+    jz .egd_notes_raised
     mov rdi, [rbp - EGDV_NEW]
     mov rsi, rbx
-    mov rdx, [rsp]
-    xor ecx, ecx
+    mov rdx, rax
+    mov ecx, TAG_PTR
     call exc_setattr
-    pop rdi
-    pop rdi
-    call obj_decref                 ; obj_getattr_opt's reference
+    mov rdi, [rbp - EGDV_COPY]
+    call obj_decref                 ; exc_setattr took a reference of its own
+
+.egd_notes_release:
+    mov rdi, [rbp - EGDV_NOTES]
+    DECREF_V rdi, rcx               ; obj_getattr_opt's reference, a Value
 .egd_notes_absent:
     ; A missing __notes__ leaves an AttributeError pending, which is the
     ; ordinary answer to a lookup and not this function's failure.
@@ -1224,6 +1264,22 @@ DEF_FUNC_LOCAL eg_derive, EGDV_FRAME
 
 .egd_done:
     mov rax, [rbp - EGDV_NEW]
+    pop rbx
+    leave
+    ret
+
+.egd_notes_raised:
+    ; list(__notes__) raised.  The notes Value and the name are still ours, and
+    ; the half that was built has to go: eg_derive answers 0 only with an
+    ; exception pending, so returning the group here would hand the caller both
+    ; a result and a pending raise.
+    mov rdi, [rbp - EGDV_NOTES]
+    DECREF_V rdi, rcx
+    mov rdi, rbx
+    call obj_decref                 ; the name
+    mov rdi, [rbp - EGDV_NEW]
+    call obj_decref
+    xor eax, eax
     pop rbx
     leave
     ret

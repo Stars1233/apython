@@ -32,7 +32,13 @@ extern errno_module_create
 extern posix_module_create
 extern io_module_create
 extern gc_module_create
+extern cmath_module_create
 extern math_module_create
+extern random_module_create
+extern mmap_module_create
+extern bz2_module_create
+extern lzma_module_create
+extern unicodedata_module_create
 extern socket_module_create
 extern marshal_module_init
 extern signal_module_create
@@ -54,7 +60,13 @@ bm_n_weakref:  db "_weakref", 0
 bm_n_posix:    db "posix", 0
 bm_n_io:       db "_iocore", 0
 bm_n_gc:       db "gc", 0
+bm_n_cmath:    db "cmath", 0
 bm_n_math:     db "math", 0
+bm_n_randomcore: db "_randomcore", 0
+bm_n_mmapcore: db "_mmapcore", 0
+bm_n_bz2core: db "_bz2core", 0
+bm_n_lzmacore: db "_lzmacore", 0
+bm_n_unicodedata: db "unicodedata", 0
 bm_n_socket:   db "_socketcore", 0
 bm_n_marshal:  db "marshal", 0
 bm_n_signal:   db "_signal", 0
@@ -71,6 +83,10 @@ builtin_module_table:
     dq bm_n_abc,      abc_module_create
     dq bm_n_array,    array_module_create
     dq bm_n_asyncio,  asyncio_module_create
+    dq bm_n_randomcore, random_module_create
+    dq bm_n_mmapcore, mmap_module_create
+    dq bm_n_bz2core, bz2_module_create
+    dq bm_n_lzmacore, lzma_module_create
     dq bm_n_hashlib,  hashlib_module_create
     dq bm_n_io,       io_module_create
     dq bm_n_pyexpat,  pyexpat_module_create
@@ -80,6 +96,7 @@ builtin_module_table:
     dq bm_n_weakref,  weakref_module_create
     dq bm_n_zlib,     zlib_module_create
     dq bm_n_builtins, 0                 ; wraps builtins_dict_global
+    dq bm_n_cmath,    cmath_module_create
     dq bm_n_errno,    errno_module_create
     dq bm_n_gc,       gc_module_create
     dq bm_n_marshal,  marshal_module_init
@@ -87,6 +104,7 @@ builtin_module_table:
     dq bm_n_posix,    posix_module_create
     dq bm_n_sys,      0                 ; built by sys_module_init
     dq bm_n_time,     time_module_create
+    dq bm_n_unicodedata, unicodedata_module_create
 bmt_end:
 
 ; The row count, computed rather than declared.  It used to be a hand-kept

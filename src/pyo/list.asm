@@ -26,6 +26,7 @@ extern bool_false
 extern obj_incref
 extern slice_type
 extern slice_indices
+extern slice_indices_live
 extern type_type
 extern int_type
 extern eval_exception_unwind
@@ -643,8 +644,10 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
 
     ; Get slice indices relative to list length
     mov rdi, rsi           ; slice
-    mov rsi, [rbx + PyListObject.ob_size]
-    call slice_indices
+    ; The LIVE length: a bound's __index__ can empty this very list, so the
+    ; clamp has to see the length it left behind, not the one from before.
+    lea rsi, [rbx + PyListObject.ob_size]
+    call slice_indices_live
     ; rax = start, rdx = stop, rcx = step
     mov r13, rax           ; r13 = start
     mov r14, rdx           ; r14 = stop
@@ -1428,8 +1431,8 @@ DEF_FUNC list_getslice
 
     ; Get slice indices
     mov rdi, r12               ; slice
-    mov rsi, [rbx + PyListObject.ob_size]  ; length
-    call slice_indices
+    lea rsi, [rbx + PyListObject.ob_size]  ; the LIVE length; see above
+    call slice_indices_live
     ; rax = start, rdx = stop, rcx = step
     mov r13, rax               ; r13 = start
     mov r14, rdx               ; r14 = stop

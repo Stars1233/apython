@@ -129,6 +129,14 @@ extern int_type
 
 extern dict_add_builtin_func
 
+extern bfg_get_builtin
+extern builtin_func_dealloc
+extern builtin_func_dunder_get
+extern builtin_func_getattr
+extern builtin_func_repr
+extern builtin_kind_of
+extern type_stamp_methods
+
 section .text
 
 ;; ============================================================================
@@ -303,503 +311,11 @@ DEF_FUNC_BARE builtin_func_call
     jmp raise_builtin_arity     ; rdi = the descriptor; does not return
 END_FUNC builtin_func_call
 
-;; ============================================================================
-;; builtin_func_getattr(rdi = the builtin, rsi = a name str) -> rax = a Value,
-;; or 0 when there is no such attribute
-;;
-;; __name__, __qualname__ and __module__.  The stdlib asks for the first two
-;; by name -- statistics decorates with functools and reads f.__name__, and
-;; anything that builds a wrapper does the same -- and a builtin had no
-;; tp_getattr at all, so the lookup fell through to a type-dict search that
-;; answered nothing.
-;;
-;; __qualname__ is "str.upper" for a method and just the name for a plain
-;; function, which is the distinction func_owner already records.  __module__
-;; is "builtins" for a plain builtin and None for a method, as CPython's is.
-;; ============================================================================
-BFG_SELF  equ 8
-BFG_NAME  equ 16
-BFG_BUF   equ 208
-BFG_FRAME equ 208           ; + 1 push = 216... one word more to land right
-global builtin_func_getattr
-DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
-    push rbx
-    mov rbx, rdi
-    mov [rbp - BFG_SELF], rdi
-    mov [rbp - BFG_NAME], rsi
-
-    lea rdi, [rsi + PyStrObject.data]
-    CSTRING rsi, "__name__"
-    call ap_strcmp
-    test eax, eax
-    jz .bfg_name
-
-    mov rdi, [rbp - BFG_NAME]
-    lea rdi, [rdi + PyStrObject.data]
-    CSTRING rsi, "__qualname__"
-    call ap_strcmp
-    test eax, eax
-    jz .bfg_qualname
-
-    mov rdi, [rbp - BFG_NAME]
-    lea rdi, [rdi + PyStrObject.data]
-    CSTRING rsi, "__module__"
-    call ap_strcmp
-    test eax, eax
-    jz .bfg_module
-
-    mov rdi, [rbp - BFG_NAME]
-    lea rdi, [rdi + PyStrObject.data]
-    CSTRING rsi, "__self__"
-    call ap_strcmp
-    test eax, eax
-    jz .bfg_self
-
-    xor eax, eax
-    pop rbx
-    leave
-    ret
-
-.bfg_self:
-    ; The type this method was found on.  `int.__new__.__self__ is int` is
-    ; not decoration: copyreg._reduce_ex walks the MRO comparing
-    ; `base.__new__.__self__ is base` to find the last non-heap base, and
-    ; without it every protocol-0 and protocol-1 reduction was an
-    ; AttributeError -- which is `copy.copy` and every old pickle.
-    mov rax, [rbx + PyBuiltinObject.func_owner]
-    test rax, rax
-    jz .bfg_missing
-    INCREF rax
-    pop rbx
-    leave
-    ret
-.bfg_missing:
-    ; A module-level builtin is bound to its MODULE, which for everything here
-    ; is builtins: CPython's `len.__self__` is <module 'builtins'>, and its
-    ; meth_reduce reads it to decide between a bare name and a getattr pair.
-    ; The comment that used to sit here said CPython had no __self__ for one,
-    ; and it does.
-    extern builtins_module_obj
-    mov rax, [rel builtins_module_obj]
-    test rax, rax
-    jz .bfg_no_module
-    INCREF rax
-    pop rbx
-    leave
-    ret
-.bfg_no_module:
-    ; Before the module exists -- during start-up -- there is nothing to name.
-    xor eax, eax
-    pop rbx
-    leave
-    ret
-
-.bfg_name:
-    mov rax, [rbx + PyBuiltinObject.func_name]
-    test rax, rax
-    jz .bfg_none
-    INCREF rax
-    pop rbx
-    leave
-    ret
-
-.bfg_qualname:
-    ; A method is qualified by the type that owns it.
-    cmp qword [rbx + PyBuiltinObject.func_owner], 0
-    je .bfg_name
-    lea rdi, [rbp - BFG_BUF]
-    mov rsi, [rbx + PyBuiltinObject.func_owner]
-    mov rsi, [rsi + PyTypeObject.tp_name]
-    call rbt_append_cstr
-    mov rdi, rax
-    CSTRING rsi, "."
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, [rbx + PyBuiltinObject.func_name]
-    test rsi, rsi
-    jz .bfg_qual_done
-    add rsi, PyStrObject.data
-    call rbt_append_cstr
-.bfg_qual_done:
-    lea rdi, [rbp - BFG_BUF]
-    call str_from_cstr_heap
-    pop rbx
-    leave
-    ret
-
-.bfg_module:
-    ; CPython gives a plain builtin "builtins" and a method None.
-    cmp qword [rbx + PyBuiltinObject.func_owner], 0
-    jne .bfg_none
-    CSTRING rdi, "builtins"
-    call str_from_cstr_heap
-    pop rbx
-    leave
-    ret
-
-.bfg_none:
-    lea rax, [rel none_singleton]
-    INCREF rax
-    pop rbx
-    leave
-    ret
-END_FUNC builtin_func_getattr
-
-;; ============================================================================
-;; builtin_func_dealloc(PyObject *self)
-;; Free the builtin function wrapper
-;; ============================================================================
-DEF_FUNC_LOCAL builtin_func_dealloc, 8            ; 1 push, so rsp is 16-aligned
-    push rbx
-    mov rbx, rdi
-
-    ; DECREF the name string
-    mov rdi, [rbx + PyBuiltinObject.func_name]
-    test rdi, rdi
-    jz .no_name
-    call obj_decref
-.no_name:
-
-    ; Free the object
-    mov rdi, rbx
-    call ap_free
-
-    pop rbx
-    leave
-    ret
-END_FUNC builtin_func_dealloc
-
-;; ============================================================================
-;; builtin_func_repr(PyObject *self) -> PyObject*
-;; Returns "<built-in function len>", "<method 'bit_length' of 'int'
-;; objects>" or "<slot wrapper '__add__' of 'int' objects>", depending on
-;; func_kind.
-;;
-;; It used to INCREF func_name and hand it back verbatim, so repr(len) was
-;; 'len' and repr(int.bit_length) was 'bit_length'.  That is not cosmetic:
-;; the stdlib classifies a callable by reading its repr, and the three forms
-;; are three different CPython types.
-;; ============================================================================
-BFR_BUF   equ 264           ; the composed repr; two 80-char names plus text
-BFR_FRAME equ 280            ; + 1 push = 288, 16-aligned
-extern rbt_append_cstr
-DEF_FUNC_LOCAL builtin_func_repr, BFR_FRAME
-    push rbx
-    mov rbx, rdi
-
-    mov rax, [rbx + PyBuiltinObject.func_name]
-    test rax, rax
-    jz .fallback
-
-    mov rcx, [rbx + PyBuiltinObject.func_owner]
-    test rcx, rcx
-    jz .plain
-
-    ; A classmethod's or staticmethod's callable, reached without binding:
-    ; "<built-in method maketrans of type object at 0x...>", naming the type
-    ; it was found on.  method_repr has the same form for the bound case.
-    cmp qword [rbx + PyBuiltinObject.func_kind], BUILTIN_KIND_ON_TYPE
-    je .on_type
-
-    ; "<method '" or "<slot wrapper '"
-    lea rdi, [rbp - BFR_BUF]
-    lea rsi, [rel bfr_method_open]
-    cmp qword [rbx + PyBuiltinObject.func_kind], BUILTIN_KIND_WRAPPER
-    jne .have_open
-    lea rsi, [rel bfr_wrapper_open]
-.have_open:
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, [rbx + PyBuiltinObject.func_name]
-    add rsi, PyStrObject.data
-    call rbt_append_cstr
-    mov rdi, rax
-    lea rsi, [rel bfr_of]
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, [rbx + PyBuiltinObject.func_owner]
-    mov rsi, [rsi + PyTypeObject.tp_name]
-    call rbt_append_cstr
-    mov rdi, rax
-    lea rsi, [rel bfr_objects]
-    call rbt_append_cstr
-    lea rdi, [rbp - BFR_BUF]
-    call str_from_cstr
-    pop rbx
-    leave
-    ret
-
-.on_type:
-    lea rdi, [rbp - BFR_BUF]
-    lea rsi, [rel bfr_on_type_open]
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, [rbx + PyBuiltinObject.func_name]
-    add rsi, PyStrObject.data
-    call rbt_append_cstr
-    mov rdi, rax
-    lea rsi, [rel bfr_of_type_object]
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, [rbx + PyBuiltinObject.func_owner]
-    extern obj_repr_address
-    call obj_repr_address       ; writes " at 0xADDR>"
-    lea rdi, [rbp - BFR_BUF]
-    call str_from_cstr
-    pop rbx
-    leave
-    ret
-
-.plain:
-    lea rdi, [rbp - BFR_BUF]
-    lea rsi, [rel bfr_function_open]
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, [rbx + PyBuiltinObject.func_name]
-    add rsi, PyStrObject.data
-    call rbt_append_cstr
-    mov rdi, rax
-    lea rsi, [rel bfr_close]
-    call rbt_append_cstr
-    lea rdi, [rbp - BFR_BUF]
-    call str_from_cstr
-    pop rbx
-    leave
-    ret
-
-.fallback:
-    lea rdi, [rel builtin_func_repr_unknown_str]
-    call str_from_cstr
-    pop rbx
-    leave
-    ret
-END_FUNC builtin_func_repr
-
-;; ============================================================================
-;; type_stamp_methods(rdi = a type whose tp_dict is complete)
-;;
-;; Walks the type's dict and tells every PyBuiltinObject in it which type it
-;; belongs to and which of CPython's three descriptor kinds it is.  Called
-;; once per type from methods_init, after the dict is stored.
-;;
-;; A stamp rather than an argument on each of the three hundred registration
-;; sites, and it also catches the methods a shared helper registered -- the
-;; set/frozenset table, the DEF_DUNDER_* generators -- which no per-site
-;; argument would have reached without touching every one of them.
-;;
-;; Only a bare PyBuiltinObject is stamped.  A staticmethod or classmethod
-;; wrapper is skipped, which is right: CPython reprs those differently again,
-;; and with an address this tree does not print.
-;; ============================================================================
-TSM_TYPE  equ 8
-TSM_FRAME equ 32            ; + 2 pushes = 8 + 32 + 16 = 56, not 16-aligned
-global type_stamp_methods
-DEF_FUNC type_stamp_methods, TSM_FRAME
-    push rbx
-    push r12
-    mov [rbp - TSM_TYPE], rdi
-    mov rbx, [rdi + PyTypeObject.tp_dict]
-    test rbx, rbx
-    jz .tsm_done
-
-    mov r12, [rbx + PyDictObject.entries]
-    test r12, r12
-    jz .tsm_done
-    mov rcx, [rbx + PyDictObject.capacity]
-    xor r8d, r8d
-.tsm_loop:
-    cmp r8, rcx
-    jge .tsm_done
-    mov rax, r8
-    imul rax, DICT_ENTRY_SIZE
-    add rax, r12
-    mov rdx, [rax + DictEntry.key]
-    test rdx, rdx
-    jz .tsm_next
-    mov rax, [rax + DictEntry.value]
-    V_TEST_PTR rax, r9
-    ja .tsm_next                ; an immediate is not a method
-    test rax, rax
-    jz .tsm_next
-    extern getset_descr_type
-    lea r9, [rel getset_descr_type]
-    cmp [rax + PyObject.ob_type], r9
-    je .tsm_getset
-    extern classmethod_type
-    lea r9, [rel classmethod_type]
-    cmp [rax + PyObject.ob_type], r9
-    je .tsm_on_type
-    extern staticmethod_type
-    lea r9, [rel staticmethod_type]
-    cmp [rax + PyObject.ob_type], r9
-    je .tsm_on_type
-    lea r9, [rel builtin_func_type]
-    cmp [rax + PyObject.ob_type], r9
-    jne .tsm_next
-    cmp qword [rax + PyBuiltinObject.func_owner], 0
-    jne .tsm_next               ; a shared body keeps its first owner
-
-    push rcx
-    push r8
-    push rax
-    sub rsp, 8
-    mov rdi, [rbp - TSM_TYPE]
-    mov rsi, [rax + PyBuiltinObject.func_name]
-    call builtin_kind_of
-    add rsp, 8
-    pop rdx                     ; the builtin
-    mov rcx, [rbp - TSM_TYPE]
-    mov [rdx + PyBuiltinObject.func_owner], rcx
-    mov [rdx + PyBuiltinObject.func_kind], rax
-    pop r8
-    pop rcx
-    mov r12, [rbx + PyDictObject.entries]
-    jmp .tsm_next
-.tsm_on_type:
-    ; int.from_bytes, float.fromhex, dict.fromkeys and str.maketrans are
-    ; builtins wrapped in a classmethod or a staticmethod, and skipping the
-    ; wrapper left the builtin inside unstamped -- so a bound one reprd as
-    ; "<bound method from_bytes of <class 'int'>>" and an unbound one as
-    ; "<built-in function maketrans>", where CPython says "<built-in method
-    ; from_bytes of type object at 0x...>" for both.  Reach through and stamp
-    ; the callable.  The two wrappers keep cm_callable and sm_callable at the
-    ; same offset, which is why one arm serves both.
-    mov rdx, [rax + PyClassMethodObject.cm_callable]
-    test rdx, rdx
-    jz .tsm_next
-    lea r9, [rel builtin_func_type]
-    cmp [rdx + PyObject.ob_type], r9
-    jne .tsm_next
-    cmp qword [rdx + PyBuiltinObject.func_owner], 0
-    jne .tsm_next
-    mov r9, [rbp - TSM_TYPE]
-    mov [rdx + PyBuiltinObject.func_owner], r9
-    mov qword [rdx + PyBuiltinObject.func_kind], BUILTIN_KIND_ON_TYPE
-    jmp .tsm_next
-
-.tsm_getset:
-    ; A getset carries its owner for the same reason, and for the same repr.
-    cmp qword [rax + PyGetSetDescrObject.gs_owner], 0
-    jne .tsm_next
-    mov rdx, [rbp - TSM_TYPE]
-    mov [rax + PyGetSetDescrObject.gs_owner], rdx
-.tsm_next:
-    inc r8
-    jmp .tsm_loop
-.tsm_done:
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC type_stamp_methods
-
-;; ============================================================================
-;; builtin_func_dunder_get(args, nargs) -- method.__get__(obj[, type])
-;;
-;; A method descriptor is a NON-data descriptor: hasattr(int.bit_length,
-;; '__get__') is True and __set__ is absent, and that pair is exactly how
-;; inspect and the enum and dataclasses classifiers tell a method from a
-;; getset.  builtin_func_type had no tp_dict, so it answered False to both.
-;;
-;; The binding itself already happens in op_load_attr; this is the same thing
-;; reachable by name.
-;; ============================================================================
-global builtin_func_dunder_get
-DEF_FUNC builtin_func_dunder_get
-    cmp rsi, 2
-    jl .bfg_bad
-    cmp rsi, 3
-    jg .bfg_bad
-    mov rax, [rdi]              ; args[0] = the method
-    mov rsi, [rdi + 8]          ; args[1] = the instance
-    IS_NONE rsi, rcx
-    je .bfg_self
-    V_TEST_PTR rsi, rcx
-    ja .bfg_self                ; an immediate binds nothing, as loads do
-    mov rdi, rax
-    extern method_new
-    call method_new
-    mov edx, TAG_PTR
-    leave
-    V_PACK rax, rdx
-    ret
-.bfg_self:
-    INCREF rax
-    mov edx, TAG_PTR
-    leave
-    V_PACK rax, rdx
-    ret
-.bfg_bad:
-    RAISE exc_TypeError_type, "expected 1 or 2 arguments"
-END_FUNC builtin_func_dunder_get
-
-;; ============================================================================
-;; builtin_kind_of(rdi = the owning type, rsi = the name string)
-;;   -> rax = BUILTIN_KIND_METHOD or BUILTIN_KIND_WRAPPER
-;;
-;; CPython builds a wrapper_descriptor for every name in its slotdefs table
-;; and a method_descriptor for everything else, so the answer is a name
-;; lookup -- with two names that go both ways.  dict and set answer
-;; __contains__ from a real method and list answers __getitem__ from one,
-;; where str, bytes, tuple and range answer both from a slot.
-;; ============================================================================
-BKO_TYPE  equ 8
-BKO_FRAME equ 24            ; + 1 push = 32, 16-aligned
-DEF_FUNC_LOCAL builtin_kind_of, BKO_FRAME
-    push rbx
-    mov [rbp - BKO_TYPE], rdi
-    lea rbx, [rsi + PyStrObject.data]
-
-    ; Only a dunder can be a slot wrapper.
-    cmp byte [rbx], '_'
-    jne .bko_method
-    cmp byte [rbx + 1], '_'
-    jne .bko_method
-
-    ; The two names that go both ways, each with its own short list of types
-    ; that answer it from a real method rather than from a slot.
-    lea rdi, [rel bko_contains_name]
-    call bko_name_is
-    test eax, eax
-    jz .bko_try_getitem
-    lea rdi, [rel bko_contains_methods]
-    mov rsi, [rbp - BKO_TYPE]
-    call bko_type_in_table
-    test eax, eax
-    jnz .bko_method
-    jmp .bko_wrapper
-.bko_try_getitem:
-    lea rdi, [rel bko_getitem_name]
-    call bko_name_is
-    test eax, eax
-    jz .bko_check_wrapper
-    lea rdi, [rel bko_getitem_methods]
-    mov rsi, [rbp - BKO_TYPE]
-    call bko_type_in_table
-    test eax, eax
-    jnz .bko_method
-    jmp .bko_wrapper
-
-.bko_check_wrapper:
-    lea rdi, [rel bko_wrapper_names]
-    call bko_name_in_table
-    test eax, eax
-    jz .bko_method
-.bko_wrapper:
-    mov eax, BUILTIN_KIND_WRAPPER
-    pop rbx
-    leave
-    ret
-.bko_method:
-    mov eax, BUILTIN_KIND_METHOD
-    pop rbx
-    leave
-    ret
-END_FUNC builtin_kind_of
 
 ;; bko_name_in_table(rdi = a NULL-terminated table of C strings) -> eax
 ;; rbx holds the name being looked for; the caller keeps it there.
-DEF_FUNC_LOCAL bko_name_in_table
+global bko_name_in_table
+DEF_FUNC bko_name_in_table
     mov r8, rdi
 .bnt_loop:
     mov rsi, [r8]
@@ -830,7 +346,8 @@ DEF_FUNC_LOCAL bko_name_in_table
 END_FUNC bko_name_in_table
 
 ;; bko_name_is(rdi = a C string) -> eax = 1 when it is the name in rbx
-DEF_FUNC_LOCAL bko_name_is
+global bko_name_is
+DEF_FUNC bko_name_is
     mov rsi, rdi
     xor ecx, ecx
 .bni_cmp:
@@ -854,7 +371,8 @@ END_FUNC bko_name_is
 
 ;; bko_type_in_table(rdi = a NULL-terminated table of type pointers,
 ;;                   rsi = a type) -> eax = 1 when it is in the table
-DEF_FUNC_LOCAL bko_type_in_table
+global bko_type_in_table
+DEF_FUNC bko_type_in_table
 .bti_loop:
     mov rax, [rdi]
     test rax, rax
@@ -883,6 +401,7 @@ section .rodata
 
 section .data
 align 8
+global bko_wrapper_names
 bko_wrapper_names:
 section .rodata
 BKO_NAME "__abs__"
@@ -948,18 +467,22 @@ section .data
     dq 0
 
 section .rodata
+global bko_contains_name
 bko_contains_name: db "__contains__", 0
+global bko_getitem_name
 bko_getitem_name:  db "__getitem__", 0
 
 ; The types whose __contains__ and __getitem__ CPython builds from a real
 ; method rather than from a slot.  Everything else answers both from a slot.
 section .data
 align 8
+global bko_contains_methods
 bko_contains_methods:
     dq dict_type
     dq set_type
     dq frozenset_type
     dq 0
+global bko_getitem_methods
 bko_getitem_methods:
     dq dict_type
     dq list_type
@@ -971,14 +494,23 @@ extern frozenset_type
 extern list_type
 
 section .rodata
+global builtin_func_repr_unknown_str
 builtin_func_repr_unknown_str: db "<built-in function>", 0
+global bfr_function_open
 bfr_function_open: db "<built-in function ", 0
+global bfr_on_type_open
 bfr_on_type_open:  db "<built-in method ", 0
+global bfr_of_type_object
 bfr_of_type_object: db " of type object", 0
+global bfr_method_open
 bfr_method_open:   db "<method '", 0
+global bfr_wrapper_open
 bfr_wrapper_open:  db "<slot wrapper '", 0
+global bfr_of
 bfr_of:            db "' of '", 0
+global bfr_objects
 bfr_objects:       db "' objects>", 0
+global bfr_close
 bfr_close:         db ">", 0
 section .text
 
@@ -3505,3 +3037,7 @@ builtin_func_type:
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
     dq 0                        ; tp_as_buffer
+
+section .bss
+global bfg_get_cached
+bfg_get_cached: resq 1      ; the shared `__get__` builtin, built once

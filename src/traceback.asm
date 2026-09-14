@@ -174,6 +174,30 @@ END_FUNC code_addr2line
 ;;                                start_col, end_col)
 ;;   -> eax = 1 when the table covers the offset, 0 otherwise
 ;;
+;; code_addr2location_at takes a fourth argument: rcx = a three-word RESUME
+;; cursor owned by the caller, or 0 for none.  A walk that asks about
+;; ascending offsets -- which is what co_lines() and co_positions() do, once
+;; per code unit -- otherwise rescans the table from byte zero every time, so
+;; listing a code object's lines costs the SQUARE of its length.  For the
+;; hundred-thousand-line function CPython's test_jump_extended_args_for_iter
+;; builds, that is not slow but indefinite: unittest formats the failure's
+;; traceback through co_positions(), and the whole module timed out, so none
+;; of its 438 tests ran.  CPython walks the table once.
+;;
+;; The cursor holds the state at the START of the entry last matched -- byte
+;; cursor, that entry's code-unit offset, and the running line before its
+;; delta was applied -- so resuming re-decodes that entry and moves forward
+;; from it; the next offset asked about is usually still inside it.  Asking
+;; about an offset BELOW the cursor is still correct: the scan starts over.
+;; Zero the three words before the first call; that means "no state yet".
+;;
+;; It lives in the CALLER's frame deliberately, not on the code object and not
+;; in a global.  A cursor that outlives its walk would have to be invalidated
+;; when the code object dies, and an address is reused where a version is not:
+;; a stale cursor whose code pointer matches a new object at the same address
+;; decodes another table's bytes.  One that cannot outlive the loop cannot go
+;; stale.
+;;
 ;; The same walk as code_addr2line, keeping the columns this time.  The
 ;; columns are BYTE offsets into the source line, zero-based; -1 means the
 ;; entry does not carry them, which is what CPython reports for a NO_COLUMNS
@@ -189,9 +213,30 @@ END_FUNC code_addr2line
 ;; ============================================================================
 A2C_OUT   equ 8
 A2C_LINE  equ 16
-A2C_FRAME equ 32            ; + 4 pushes = 64
+A2C_STATE equ 24            ; the caller's resume cursor, or 0
+A2C_SCUR  equ 32            ; byte cursor at the current entry's first byte
+A2C_SOFF  equ 40            ; that entry's code-unit offset
+A2C_SLINE equ 48            ; the running line before that entry's delta
+A2C_FRAME equ 64            ; + 4 pushes = 96, 16-aligned
 
-DEF_FUNC code_addr2location, A2C_FRAME
+DEF_FUNC code_addr2location
+    xor ecx, ecx                ; no resume cursor
+    leave
+    jmp code_addr2location_at
+END_FUNC code_addr2location
+
+;; ============================================================================
+;; code_addr2location_at(rdi = PyCodeObject*, rsi = offset in code units,
+;;                       rdx = out: four qwords, rcx = a three-word resume
+;;                       cursor owned by the caller, or 0)
+;;   -> eax = 1 when the table covers the offset, 0 otherwise
+;;
+;; The body of both.  See code_addr2location above for what the cursor is for
+;; and why it belongs to the caller.
+;; ============================================================================
+global code_addr2location_at
+DEF_FUNC code_addr2location_at, A2C_FRAME
+    mov [rbp - A2C_STATE], rcx
     push rbx
     push r12
     push r13
@@ -220,7 +265,32 @@ DEF_FUNC code_addr2location, A2C_FRAME
     add r9, r8                                  ; end
     xor r10d, r10d                              ; code-unit offset of entry
 
+    ; Resume, when the caller kept a cursor and is asking at or after the entry
+    ; it left off at.  A cursor from another table fails the range test and a
+    ; backwards question fails the offset test; both start over, which is
+    ; correct, only slower.
+    mov rcx, [rbp - A2C_STATE]
+    test rcx, rcx
+    jz .a2c_entry
+    mov rax, [rcx]
+    cmp rax, r8
+    jb .a2c_entry
+    cmp rax, r9
+    jae .a2c_entry
+    cmp rsi, [rcx + 8]
+    jb .a2c_entry
+    mov r8, rax
+    mov r10, [rcx + 8]
+    mov rax, [rcx + 16]
+    mov [rbp - A2C_LINE], rax
+
 .a2c_entry:
+    ; Where this entry begins, so a hit hands back a cursor that re-decodes it
+    ; rather than one already past it.
+    mov [rbp - A2C_SCUR], r8
+    mov [rbp - A2C_SOFF], r10
+    mov rax, [rbp - A2C_LINE]
+    mov [rbp - A2C_SLINE], rax
     cmp r8, r9
     jae .a2c_none
     movzx ecx, byte [r8]
@@ -309,7 +379,7 @@ DEF_FUNC code_addr2location, A2C_FRAME
     movsxd rax, r13d
     mov [rdx + 24], rax
     mov eax, 1
-    jmp .a2c_out
+    jmp .a2c_hit
 .a2c_advance_long:
     pop rax
     add r10, rdx
@@ -332,7 +402,7 @@ DEF_FUNC code_addr2location, A2C_FRAME
     movsxd rax, r13d
     mov [rdx + 24], rax
     mov eax, 1
-    jmp .a2c_out
+    jmp .a2c_hit
 
 .a2c_advance:
     add r10, rdx
@@ -340,9 +410,23 @@ DEF_FUNC code_addr2location, A2C_FRAME
 
 .a2c_out_none:
     mov eax, 1
-    jmp .a2c_out
+    jmp .a2c_hit
 .a2c_none:
     xor eax, eax
+    jmp .a2c_out
+
+.a2c_hit:
+    ; Hand the cursor back, so the caller's next question resumes here.
+    mov rcx, [rbp - A2C_STATE]
+    test rcx, rcx
+    jz .a2c_out
+    mov rdx, [rbp - A2C_SCUR]
+    mov [rcx], rdx
+    mov rdx, [rbp - A2C_SOFF]
+    mov [rcx + 8], rdx
+    mov rdx, [rbp - A2C_SLINE]
+    mov [rcx + 16], rdx
+
 .a2c_out:
     pop r14
     pop r13
@@ -350,7 +434,7 @@ DEF_FUNC code_addr2location, A2C_FRAME
     pop rbx
     leave
     ret
-END_FUNC code_addr2location
+END_FUNC code_addr2location_at
 
 ;; ============================================================================
 ;; traceback_here(rdi = exception, rsi = code object, rdx = lasti in code units)

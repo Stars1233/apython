@@ -17,8 +17,16 @@ jobs:
         with:
           python-version: '3.12'
 
+      # Everything the single LDFLAGS line in the Makefile links, not just the
+      # two that used to be named here: -lz, -lcrypto and -lexpat happened to
+      # be on the runner image, so nothing noticed they were missing from this
+      # list until -lbz2 and -llzma were not.  The list matches the
+      # Dependencies line in CLAUDE.md; keep the three in step.
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y nasm libgmp-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm libgmp-dev zlib1g-dev libbz2-dev \
+            liblzma-dev libssl-dev libexpat1-dev
 
       - name: Build
         run: make

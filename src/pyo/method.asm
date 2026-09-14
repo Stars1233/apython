@@ -938,3 +938,27 @@ DEF_FUNC method_clear, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     ret
 END_FUNC method_clear
+
+;; ============================================================================
+;; method.__get__(self, obj, objtype=None) -> self
+;;
+;; A bound method is already bound, so binding it again answers itself -- which
+;; is CPython's method_descr_get, and what makes `hasattr(c.m, '__get__')` True
+;; there.  It matters because that is how inspect, enum and dataclasses ask
+;; whether something is a descriptor, and a bound method stored in a class body
+;; must stay the method it already is.
+;; ============================================================================
+global method_dunder_get
+DEF_FUNC method_dunder_get
+    cmp rsi, 2
+    jl .mdg_arity
+    cmp rsi, 3
+    jg .mdg_arity
+    mov rax, [rdi]              ; args[0] = self, the bound method
+    INCREF_V rax, rcx
+    mov edx, TAG_PTR
+    leave
+    ret
+.mdg_arity:
+    RAISE exc_TypeError_type, "__get__() takes 2 or 3 arguments"
+END_FUNC method_dunder_get

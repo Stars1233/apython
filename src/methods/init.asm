@@ -313,63 +313,7 @@ extern tuple_method_index
 ;; These were open-coded: four instructions per method, six for a checked one,
 ;; 455 times, which is most of what made this file 115k.  The expansion is
 ;; identical -- the object file is unchanged to the byte.
-; A name a type's own tp_getattr already answers, published as a read-only
-; getset descriptor so the type's dict holds it too.  The dict is in rbx, as
-; ADD_FN wants it.
-%macro TYPE_GETATTR 2           ; %1 = the name symbol, %2 = the getattr fn
-    mov rdi, rbx
-    lea rsi, [rel %1]
-    lea rdx, [rel %2]
-    call dict_add_getattr
-%endmacro
-
-%macro MV_GETATTR 1
-    TYPE_GETATTR %1, memoryview_getattr
-%endmacro
-
-%macro PROP_GETATTR 1
-    TYPE_GETATTR %1, property_getattr
-%endmacro
-
-%macro DESCR_GETATTR 1
-    TYPE_GETATTR %1, descr_func_attr
-%endmacro
-
-%macro ADD_FN 2
-    mov rdi, rbx
-    lea rsi, [rel %1]
-    lea rdx, [rel %2]
-    call dict_add_builtin_func
-%endmacro
-
-;; ADD_FN_D slot, name, func -- the same, for the few blocks whose dict is in a
-;; frame slot rather than in rbx.
-%macro ADD_FN_D 3
-    mov rdi, [rbp - %1]
-    lea rsi, [rel %2]
-    lea rdx, [rel %3]
-    call dict_add_builtin_func
-%endmacro
-
-; The same with an explicit dict, for the shared blocks that keep theirs in
-; a frame slot rather than in rbx.
-%macro ADD_FN_DN 5
-    mov rdi, [rbp - %1]
-    lea rsi, [rel %2]
-    lea rdx, [rel %3]
-    mov rcx, %4
-    mov r8, %5
-    call add_method_to_dict_checked
-%endmacro
-
-%macro ADD_FN_N 4
-    mov rdi, rbx
-    lea rsi, [rel %1]
-    lea rdx, [rel %2]
-    mov rcx, %3
-    mov r8, %4
-    call add_method_to_dict_checked
-%endmacro
+%include "methodinit.inc"
 
 section .text
 
@@ -550,7 +494,8 @@ END_FUNC dict_add_getattr
 ;; Like dict_add_builtin_func but sets arg count bounds.
 ;; ============================================================================
 extern builtin_func_new_checked
-DEF_FUNC_LOCAL add_method_to_dict_checked, 8            ; 3 pushes, so rsp is 16-aligned
+global add_method_to_dict_checked
+DEF_FUNC add_method_to_dict_checked, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -654,7 +599,8 @@ END_FUNC add_staticmethod
 ;; as the type's __new__, wrapped so it is not bound to the instance.
 extern staticmethod_construct
 extern staticmethod_type
-DEF_FUNC_LOCAL add_new_staticmethod, 8            ; 3 pushes, so rsp is 16-aligned
+global add_new_staticmethod
+DEF_FUNC add_new_staticmethod, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
@@ -839,48 +785,6 @@ END_FUNC set_add_operator_methods
 ;; ADD_CLASSMETHOD_N name, impl, min, max -- the same, with argument-count
 ;; bounds.  A classmethod took none, so `float.fromhex()` reached an
 ;; implementation that reads args[1] and read past the array.
-%macro ADD_CLASSMETHOD 2
-    ADD_CLASSMETHOD_N %1, %2, 0, -1
-%endmacro
-
-%macro ADD_CLASSMETHOD_N 4
-    lea rdi, [rel %2]
-    lea rsi, [rel %1]
-    mov rdx, %3
-    mov rcx, %4
-    call builtin_func_new_checked
-    push rax
-    mov edi, PyClassMethodObject_size
-    lea rsi, [rel classmethod_type]
-    call gc_alloc
-    pop rcx
-    mov [rax + PyClassMethodObject.cm_callable], rcx
-    push rax
-    mov rdi, rax
-    call gc_track
-    pop rax
-    push rax
-    lea rdi, [rel %1]
-    call str_intern_cstr
-    push rax
-    mov rdi, rbx
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
-%endmacro
-
-%macro GEN_GETSET 2             ; %1 = the name string, %2 = the getter
-    mov rdi, rbx
-    lea rsi, [rel %1]
-    extern %2
-    lea rdx, [rel %2]
-    xor ecx, ecx
-    call dict_add_getset
-%endmacro
 
 DEF_FUNC methods_init
     push rbx
@@ -1032,6 +936,9 @@ DEF_FUNC methods_init
     extern str_dunder_ne
     ADD_FN_N mn___ne__, str_dunder_ne, 2, 2
 
+    extern str_method_getnewargs
+    ADD_FN_N mn___getnewargs__, str_method_getnewargs, 1, 1
+
     lea rax, [rel str_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1143,6 +1050,12 @@ DEF_FUNC methods_init
     call add_new_staticmethod       ; __new__ takes the class, not an instance
     extern module_method_init
     ADD_FN mn___init__, module_method_init
+    ; PEP 562: a module's own __dir__ lives in its INSTANCE dict, where
+    ; builtin_dir's type-side lookup cannot see it.  module.__dir__ is what
+    ; does the probe, and having it here is also what makes
+    ; hasattr(m, "__dir__") answer True, as CPython's does.
+    extern module_dunder_dir
+    ADD_FN_N mn___dir__, module_dunder_dir, 1, 1
 
     extern module_type
     lea rax, [rel module_type]
@@ -1496,6 +1409,9 @@ DEF_FUNC methods_init
     extern tuple_dunder_ne
     ADD_FN_N mn___ne__, tuple_dunder_ne, 2, 2
 
+    extern tuple_method_getnewargs
+    ADD_FN_N mn___getnewargs__, tuple_method_getnewargs, 1, 1
+
     lea rax, [rel tuple_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1566,6 +1482,12 @@ DEF_FUNC methods_init
     extern set_dunder_ne
     ADD_FN_N mn___ne__, set_dunder_ne, 2, 2
 
+    ; Registered per type rather than through the shared helper: each call
+    ; builds its own builtin object, so type_stamp_methods gives each its own
+    ; owner and the receiver check refuses the other type, as CPython does.
+    extern set_method_reduce
+    ADD_FN_N mn___reduce__, set_method_reduce, 1, 1
+
     lea rax, [rel set_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1615,6 +1537,12 @@ DEF_FUNC methods_init
     ADD_FN_N mn___eq__, frozenset_dunder_eq, 2, 2
     extern frozenset_dunder_ne
     ADD_FN_N mn___ne__, frozenset_dunder_ne, 2, 2
+
+    ; Registered per type rather than through the shared helper: each call
+    ; builds its own builtin object, so type_stamp_methods gives each its own
+    ; owner and the receiver check refuses the other type, as CPython does.
+    extern set_method_reduce
+    ADD_FN_N mn___reduce__, set_method_reduce, 1, 1
 
     lea rax, [rel frozenset_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1904,6 +1832,11 @@ DEF_FUNC methods_init
     mov rbx, rax
     extern method_dunder_call
     ADD_FN mn___call__, method_dunder_call
+    ; A bound method is a descriptor that answers itself, as CPython's is:
+    ; hasattr(c.m, '__get__') is True there, and it is what a class body full
+    ; of already-bound methods relies on.
+    extern method_dunder_get
+    ADD_FN_N mn___get__, method_dunder_get, 2, 3
     ; A bound method reduces to (getattr, (self, name)), as CPython's does --
     ; without it anything holding one could not be pickled.
     extern method_reduce
@@ -2082,8 +2015,9 @@ DEF_FUNC methods_init
     ; classifiers tell a method from a getset.
     call dict_new
     mov rbx, rax
-    extern builtin_func_dunder_get
-    ADD_FN mn___get__, builtin_func_dunder_get
+    ; __get__ is NOT here: builtin_func_getattr answers it, because whether a
+    ; builtin is a descriptor is a per-object question and a type dict is
+    ; shared by every instance of the type.
     extern builtin_func_dunder_call
     ADD_FN mn___call__, builtin_func_dunder_call
     ; An unbound builtin reduces to its own NAME, which pickle saves as a
@@ -2096,418 +2030,13 @@ DEF_FUNC methods_init
     mov rdi, rax
     call type_stamp_methods
 
-    ;; --- int_type methods ---
-    call dict_new
-    mov rbx, rax
-
-    ADD_FN_N mn___repr__, int_dunder_repr, 1, 1
-
-    ; int.__new__ / str.__new__: enum builds each member with
-    ; `member_type.__new__(cls, *args)`, and decides which base is the data
-    ; type by asking whether __new__ is in its __dict__.
-    mov rdi, rbx
-    lea rsi, [rel int_dunder_new]
-    call add_new_staticmethod
-
-    ADD_FN_N mn_bit_length, int_method_bit_length, 1, 1
-
-    ; The names dir(int) was short of.  __round__ IS builtin_round_fn: a
-    ; method's (args, nargs) is the shape round()'s own arguments arrive in.
-    extern int_method_is_integer
-    ADD_FN_N mn_is_integer, int_method_is_integer, 1, 1
-
-    extern int_method_as_integer_ratio
-    ADD_FN_N mn_as_integer_ratio, int_method_as_integer_ratio, 1, 1
-
-    extern int_method_round
-    ADD_FN_N mn___round__, int_method_round, 1, 2
-
-    extern int_method_identity
-    ADD_FN_N mn___floor__, int_method_identity, 1, 1
-
-    ADD_FN_N mn___ceil__, int_method_identity, 1, 1
-
-    extern int_method_getnewargs
-    ADD_FN_N mn___getnewargs__, int_method_getnewargs, 1, 1
-
-    ADD_FN_N mn_bit_count, int_method_bit_count, 1, 1
-
-    ADD_FN_N mn_conjugate, int_method_conjugate, 1, 1
-
-    ADD_FN_N mn_to_bytes, int_method_to_bytes, 1, 3
-
-
-    ; Add from_bytes as classmethod
-    lea rdi, [rel int_classmethod_from_bytes]
-    lea rsi, [rel mn_from_bytes]
-    call builtin_func_new
-    push rax                    ; save builtin_func
-
-    ; Wrap in PyClassMethodObject (GC-tracked)
-    mov edi, PyClassMethodObject_size
-    lea rsi, [rel classmethod_type]
-    call gc_alloc
-    pop rcx                     ; builtin_func
-    mov [rax + PyClassMethodObject.cm_callable], rcx
-    push rax                    ; save classmethod wrapper
-    mov rdi, rax
-    call gc_track
-    pop rax
-    push rax                    ; re-save
-
-    ; Create key string
-    lea rdi, [rel mn_from_bytes]
-    call str_intern_cstr
-    push rax                    ; save key
-
-    ; dict_set(dict, key, classmethod_wrapper, TAG_PTR, TAG_PTR)
-    mov rdi, rbx
-    mov rsi, rax                ; key
-    mov rdx, [rsp + 8]         ; classmethod wrapper
-    call dict_set
-
-    ; DECREF key
-    pop rdi
-    call obj_decref
-    ; DECREF classmethod wrapper (dict_set did INCREF)
-    pop rdi
-    call obj_decref
-
-    ;; The unary operators, by name.  Without these an MRO lookup for
-    ;; __invert__ on `class I(int, M)` could not find int's before M's, since
-    ;; int had nothing in its dict to find, and type_install_slots wrote M's
-    ;; wrapper over the nb_invert the class had already inherited.
-    extern int_dunder_neg
-    ADD_FN_N mn___neg__, int_dunder_neg, 1, 1
-    extern int_dunder_pos
-    ADD_FN_N mn___pos__, int_dunder_pos, 1, 1
-    extern int_dunder_abs
-    ADD_FN_N mn___abs__, int_dunder_abs, 1, 1
-    extern int_dunder_invert
-    ADD_FN_N mn___invert__, int_dunder_invert, 1, 1
-    extern int_dunder_int
-    ADD_FN_N mn___int__, int_dunder_int, 1, 1
-    extern int_dunder_float
-    ADD_FN_N mn___float__, int_dunder_float, 1, 1
-    extern int_dunder_index
-    ADD_FN_N mn___index__, int_dunder_index, 1, 1
-    extern int_dunder_trunc
-    ADD_FN_N mn___trunc__, int_dunder_trunc, 1, 1
-    extern int_dunder_bool
-    ADD_FN_N mn___bool__, int_dunder_bool, 1, 1
-
-    ;; and the binary family, forward and reflected.
-    extern int_dunder_add
-    ADD_FN_N mn___add__, int_dunder_add, 2, 2
-    extern int_dunder_sub
-    ADD_FN_N mn___sub__, int_dunder_sub, 2, 2
-    extern int_dunder_mul
-    ADD_FN_N mn___mul__, int_dunder_mul, 2, 2
-    extern int_dunder_mod
-    ADD_FN_N mn___mod__, int_dunder_mod, 2, 2
-    extern int_dunder_divmod
-    ADD_FN_N mn___divmod__, int_dunder_divmod, 2, 2
-    extern int_dunder_pow
-    ADD_FN_N mn___pow__, int_dunder_pow, 2, 3
-    extern int_dunder_lshift
-    ADD_FN_N mn___lshift__, int_dunder_lshift, 2, 2
-    extern int_dunder_rshift
-    ADD_FN_N mn___rshift__, int_dunder_rshift, 2, 2
-    extern int_dunder_and
-    ADD_FN_N mn___and__, int_dunder_and, 2, 2
-    extern int_dunder_xor
-    ADD_FN_N mn___xor__, int_dunder_xor, 2, 2
-    extern int_dunder_or
-    ADD_FN_N mn___or__, int_dunder_or, 2, 2
-    extern int_dunder_floordiv
-    ADD_FN_N mn___floordiv__, int_dunder_floordiv, 2, 2
-    extern int_dunder_truediv
-    ADD_FN_N mn___truediv__, int_dunder_truediv, 2, 2
-    extern int_dunder_radd
-    ADD_FN_N mn___radd__, int_dunder_radd, 2, 2
-    extern int_dunder_rsub
-    ADD_FN_N mn___rsub__, int_dunder_rsub, 2, 2
-    extern int_dunder_rmul
-    ADD_FN_N mn___rmul__, int_dunder_rmul, 2, 2
-    extern int_dunder_rmod
-    ADD_FN_N mn___rmod__, int_dunder_rmod, 2, 2
-    extern int_dunder_rdivmod
-    ADD_FN_N mn___rdivmod__, int_dunder_rdivmod, 2, 2
-    extern int_dunder_rpow
-    ADD_FN_N mn___rpow__, int_dunder_rpow, 2, 3
-    extern int_dunder_rlshift
-    ADD_FN_N mn___rlshift__, int_dunder_rlshift, 2, 2
-    extern int_dunder_rrshift
-    ADD_FN_N mn___rrshift__, int_dunder_rrshift, 2, 2
-    extern int_dunder_rand
-    ADD_FN_N mn___rand__, int_dunder_rand, 2, 2
-    extern int_dunder_rxor
-    ADD_FN_N mn___rxor__, int_dunder_rxor, 2, 2
-    extern int_dunder_ror
-    ADD_FN_N mn___ror__, int_dunder_ror, 2, 2
-    extern int_dunder_rfloordiv
-    ADD_FN_N mn___rfloordiv__, int_dunder_rfloordiv, 2, 2
-    extern int_dunder_rtruediv
-    ADD_FN_N mn___rtruediv__, int_dunder_rtruediv, 2, 2
-
-    ;; real, imag, numerator and denominator, as getset descriptors.  int's
-    ;; tp_getattr answers an instance read before this dict is consulted;
-    ;; these are what make `int.real` an attribute of the type, and what put
-    ;; the four names in dir().
-    mov rdi, rbx
-    lea rsi, [rel gs_real]
-    extern int_get_real
-    lea rdx, [rel int_get_real]
-    xor ecx, ecx
-    call dict_add_getset
-    mov rdi, rbx
-    lea rsi, [rel gs_numerator]
-    lea rdx, [rel int_get_real]
-    xor ecx, ecx
-    call dict_add_getset
-    mov rdi, rbx
-    lea rsi, [rel gs_imag]
-    extern int_get_imag
-    lea rdx, [rel int_get_imag]
-    xor ecx, ecx
-    call dict_add_getset
-    mov rdi, rbx
-    lea rsi, [rel gs_denominator]
-    extern int_get_denominator
-    lea rdx, [rel int_get_denominator]
-    xor ecx, ecx
-    call dict_add_getset
-
-    ; Store in int_type.tp_dict
-    ADD_FN_N mn___format__, builtin_method_format, 2, 2
-
-    extern int_dunder_hash
-    ADD_FN_N mn___hash__, int_dunder_hash, 1, 1
-
-    extern int_dunder_lt
-    ADD_FN_N mn___lt__, int_dunder_lt, 2, 2
-    extern int_dunder_le
-    ADD_FN_N mn___le__, int_dunder_le, 2, 2
-    extern int_dunder_gt
-    ADD_FN_N mn___gt__, int_dunder_gt, 2, 2
-    extern int_dunder_ge
-    ADD_FN_N mn___ge__, int_dunder_ge, 2, 2
-    extern int_dunder_eq
-    ADD_FN_N mn___eq__, int_dunder_eq, 2, 2
-    extern int_dunder_ne
-    ADD_FN_N mn___ne__, int_dunder_ne, 2, 2
-
-    lea rax, [rel int_type]
-    mov [rax + PyTypeObject.tp_dict], rbx
-    mov rdi, rax
-    call type_stamp_methods
-
-    ;; --- complex_type methods ---
-    ;
-    ; __repr__ goes through DEF_DUNDER_STRREPR, which calls the DEFINING
-    ; type's slot rather than the argument's; the naive form recurses on a
-    ; subclass (bugs.md).  There is deliberately no __str__: CPython's complex
-    ; has no tp_str of its own, so `complex.__str__ is object.__str__` is True
-    ; there, and leaving it out reproduces that while tp_str = complex_repr
-    ; still keeps print(2j) fast.
-    call dict_new
-    mov rbx, rax
-
-    ADD_FN_N mn___repr__, complex_dunder_repr, 1, 1
-
-    mov rdi, rbx
-    lea rsi, [rel complex_dunder_new]
-    call add_new_staticmethod
-
-    ADD_FN_N mn_conjugate, complex_method_conjugate, 1, 1
-
-    ADD_FN_N mn___complex__, complex_method_complex, 1, 1
-
-    ADD_FN_N mn___getnewargs__, complex_method_getnewargs, 1, 1
-
-    ADD_FN_N mn___format__, builtin_method_format, 2, 2
-
-    mov rdi, rbx
-    lea rsi, [rel gs_real]
-    extern complex_get_real
-    lea rdx, [rel complex_get_real]
-    xor ecx, ecx
-    call dict_add_getset
-    mov rdi, rbx
-    lea rsi, [rel gs_imag]
-    extern complex_get_imag
-    lea rdx, [rel complex_get_imag]
-    xor ecx, ecx
-    call dict_add_getset
-
-    extern complex_dunder_hash
-    ADD_FN_N mn___hash__, complex_dunder_hash, 1, 1
-
-    extern complex_dunder_bool
-    ADD_FN_N mn___bool__, complex_dunder_bool, 1, 1
-
-    ;; The binary family, forward and reflected, and the unary three.  They
-    ;; went through the slots and nothing else, so `complex(1,2).__add__` did
-    ;; not exist -- and a class that dispatches on NotImplemented, as the
-    ;; numeric tower does, cannot ask a type that has no __add__ to try.
-    extern complex_dunder_add
-    ADD_FN_N mn___add__, complex_dunder_add, 2, 2
-    extern complex_dunder_sub
-    ADD_FN_N mn___sub__, complex_dunder_sub, 2, 2
-    extern complex_dunder_mul
-    ADD_FN_N mn___mul__, complex_dunder_mul, 2, 2
-    extern complex_dunder_truediv
-    ADD_FN_N mn___truediv__, complex_dunder_truediv, 2, 2
-    extern complex_dunder_pow
-    ADD_FN_N mn___pow__, complex_dunder_pow, 2, 3
-    extern complex_dunder_radd
-    ADD_FN_N mn___radd__, complex_dunder_radd, 2, 2
-    extern complex_dunder_rsub
-    ADD_FN_N mn___rsub__, complex_dunder_rsub, 2, 2
-    extern complex_dunder_rmul
-    ADD_FN_N mn___rmul__, complex_dunder_rmul, 2, 2
-    extern complex_dunder_rtruediv
-    ADD_FN_N mn___rtruediv__, complex_dunder_rtruediv, 2, 2
-    extern complex_dunder_rpow
-    ADD_FN_N mn___rpow__, complex_dunder_rpow, 2, 3
-    extern complex_dunder_neg
-    ADD_FN_N mn___neg__, complex_dunder_neg, 1, 1
-    extern complex_dunder_pos
-    ADD_FN_N mn___pos__, complex_dunder_pos, 1, 1
-    extern complex_dunder_abs
-    ADD_FN_N mn___abs__, complex_dunder_abs, 1, 1
-
-    lea rax, [rel complex_type]
-    mov [rax + PyTypeObject.tp_dict], rbx
-    mov rdi, rax
-    call type_stamp_methods
-
-    ;; --- float_type methods ---
-    call dict_new
-    mov rbx, rax
-
-    ADD_FN_N mn___repr__, float_dunder_repr, 1, 1
-
-    ; float.__new__, for the same reason int and str carry one: a subclass
-    ; that overrides __new__ reaches the base's through super(), and enum
-    ; looks the name up in __dict__ to pick its data type.
-    mov rdi, rbx
-    lea rsi, [rel float_dunder_new]
-    call add_new_staticmethod
-
-    ADD_FN_N mn_is_integer, float_method_is_integer, 1, 1
-
-    ; float's four.  __floor__ and __ceil__ do exactly what MATH_ROUNDER's
-    ; native arm does, because adding them newly routes a float SUBCLASS
-    ; instance through the dunder: that arm reaches only an immediate.
-    ADD_FN_N mn___round__, int_method_round, 1, 2
-
-    extern float_method_floor
-    ADD_FN_N mn___floor__, float_method_floor, 1, 1
-
-    extern float_method_ceil
-    ADD_FN_N mn___ceil__, float_method_ceil, 1, 1
-
-    extern float_method_getnewargs
-    ADD_FN_N mn___getnewargs__, float_method_getnewargs, 1, 1
-
-    ADD_FN_N mn_conjugate, float_method_conjugate, 1, 1
-
-    ADD_FN_N mn_as_integer_ratio, float_method_as_integer_ratio, 1, 1
-
-    ADD_FN_N mn_hex, float_method_hex, 1, 1
-
-
-    ; Add fromhex as classmethod
-    ADD_CLASSMETHOD_N mn_fromhex, float_classmethod_fromhex, 2, 2
-    ADD_CLASSMETHOD_N mn___getformat__, float_classmethod_getformat, 2, 2
-
-    ADD_FN_N mn___format__, builtin_method_format, 2, 2
-
-    extern float_dunder_neg
-    ADD_FN_N mn___neg__, float_dunder_neg, 1, 1
-    extern float_dunder_pos
-    ADD_FN_N mn___pos__, float_dunder_pos, 1, 1
-    extern float_dunder_abs
-    ADD_FN_N mn___abs__, float_dunder_abs, 1, 1
-    extern float_dunder_int
-    ADD_FN_N mn___int__, float_dunder_int, 1, 1
-    extern float_dunder_float
-    ADD_FN_N mn___float__, float_dunder_float, 1, 1
-
-    ;; the binary family, forward and reflected.
-    extern float_dunder_add
-    ADD_FN_N mn___add__, float_dunder_add, 2, 2
-    extern float_dunder_sub
-    ADD_FN_N mn___sub__, float_dunder_sub, 2, 2
-    extern float_dunder_mul
-    ADD_FN_N mn___mul__, float_dunder_mul, 2, 2
-    extern float_dunder_mod
-    ADD_FN_N mn___mod__, float_dunder_mod, 2, 2
-    extern float_dunder_divmod
-    ADD_FN_N mn___divmod__, float_dunder_divmod, 2, 2
-    extern float_dunder_pow
-    ADD_FN_N mn___pow__, float_dunder_pow, 2, 3
-    extern float_dunder_floordiv
-    ADD_FN_N mn___floordiv__, float_dunder_floordiv, 2, 2
-    extern float_dunder_truediv
-    ADD_FN_N mn___truediv__, float_dunder_truediv, 2, 2
-    extern float_dunder_radd
-    ADD_FN_N mn___radd__, float_dunder_radd, 2, 2
-    extern float_dunder_rsub
-    ADD_FN_N mn___rsub__, float_dunder_rsub, 2, 2
-    extern float_dunder_rmul
-    ADD_FN_N mn___rmul__, float_dunder_rmul, 2, 2
-    extern float_dunder_rmod
-    ADD_FN_N mn___rmod__, float_dunder_rmod, 2, 2
-    extern float_dunder_rdivmod
-    ADD_FN_N mn___rdivmod__, float_dunder_rdivmod, 2, 2
-    extern float_dunder_rpow
-    ADD_FN_N mn___rpow__, float_dunder_rpow, 2, 3
-    extern float_dunder_rfloordiv
-    ADD_FN_N mn___rfloordiv__, float_dunder_rfloordiv, 2, 2
-    extern float_dunder_rtruediv
-    ADD_FN_N mn___rtruediv__, float_dunder_rtruediv, 2, 2
-    extern float_dunder_trunc
-    ADD_FN_N mn___trunc__, float_dunder_trunc, 1, 1
-    extern float_dunder_bool
-    ADD_FN_N mn___bool__, float_dunder_bool, 1, 1
-
-    ; real and imag; float has no numerator or denominator, as CPython has not
-    mov rdi, rbx
-    lea rsi, [rel gs_real]
-    extern float_get_real
-    lea rdx, [rel float_get_real]
-    xor ecx, ecx
-    call dict_add_getset
-    mov rdi, rbx
-    lea rsi, [rel gs_imag]
-    extern float_get_imag
-    lea rdx, [rel float_get_imag]
-    xor ecx, ecx
-    call dict_add_getset
-
-    ; Store in float_type.tp_dict
-    extern float_dunder_hash
-    ADD_FN_N mn___hash__, float_dunder_hash, 1, 1
-
-    extern float_dunder_lt
-    ADD_FN_N mn___lt__, float_dunder_lt, 2, 2
-    extern float_dunder_le
-    ADD_FN_N mn___le__, float_dunder_le, 2, 2
-    extern float_dunder_gt
-    ADD_FN_N mn___gt__, float_dunder_gt, 2, 2
-    extern float_dunder_ge
-    ADD_FN_N mn___ge__, float_dunder_ge, 2, 2
-    extern float_dunder_eq
-    ADD_FN_N mn___eq__, float_dunder_eq, 2, 2
-    extern float_dunder_ne
-    ADD_FN_N mn___ne__, float_dunder_ne, 2, 2
-
-    lea rax, [rel float_type]
-    mov [rax + PyTypeObject.tp_dict], rbx
-    mov rdi, rax
-    call type_stamp_methods
+    ;; --- int, complex and float, in init_num.asm ---
+    ;; Moved when this file reached the 100k cap for a hand-written file.
+    ;; The seam is the one src/methods/num.asm already uses: the numeric
+    ;; method BODIES are in that file, and their registration is now beside
+    ;; it rather than here.
+    extern init_num_types
+    call init_num_types
 
     ;; --- bytes_type methods (extend tp_dict, keep tp_getattr for .decode()) ---
     call dict_new
@@ -2645,6 +2174,9 @@ DEF_FUNC methods_init
     extern bytes_dunder_ne
     ADD_FN_N mn___ne__, bytes_dunder_ne, 2, 2
 
+    extern bytes_method_getnewargs
+    ADD_FN_N mn___getnewargs__, bytes_method_getnewargs, 1, 1
+
     lea rax, [rel bytes_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -2766,6 +2298,12 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn___hash__]
     call dict_add_none
+
+    ; Registered per type rather than through the shared helper: each call
+    ; builds its own builtin object, so type_stamp_methods gives each its own
+    ; owner and the receiver check refuses the other type, as CPython does.
+    extern bytearray_method_reduce
+    ADD_FN_N mn___reduce__, bytearray_method_reduce, 1, 1
 
     lea rax, [rel bytearray_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2965,21 +2503,35 @@ mn_translate:   db "translate", 0
 mn_format_map:  db "format_map", 0
 mn_maketrans:   db "maketrans", 0
 ; int method names
+global mn_to_bytes
 mn_to_bytes:    db "to_bytes", 0
+global mn_from_bytes
 mn_from_bytes:  db "from_bytes", 0
+global mn_bit_length
 mn_bit_length:  db "bit_length", 0
+global mn_bit_count
 mn_bit_count:   db "bit_count", 0
+global mn_conjugate
 mn_conjugate:   db "conjugate", 0
+global mn___round__
 mn___round__:  db "__round__", 0
+global mn___floor__
 mn___floor__:  db "__floor__", 0
+global mn___ceil__
 mn___ceil__:   db "__ceil__", 0
+global mn___getnewargs__
 mn___getnewargs__: db "__getnewargs__", 0
+global mn___complex__
 mn___complex__: db "__complex__", 0
 ; float method names
+global mn_is_integer
 mn_is_integer:  db "is_integer", 0
+global mn_as_integer_ratio
 mn_as_integer_ratio: db "as_integer_ratio", 0
 ; float method names (continued)
+global mn_fromhex
 mn_fromhex:     db "fromhex", 0
+global mn___getformat__
 mn___getformat__: db "__getformat__", 0
 ; bytes method names
 mn_decode:            db "decode", 0
@@ -2992,10 +2544,12 @@ mn_cast:             db "cast", 0
 mn_release:          db "release", 0
 mn___enter__:        db "__enter__", 0
 mn___exit__:         db "__exit__", 0
+global mn_hex
 mn_hex:         db "hex", 0
 ; dict method names (continued)
 mn_fromkeys:    db "fromkeys", 0
 mn___reversed__: db "__reversed__", 0
+global mn___format__
 mn___format__:  db "__format__", 0
 mn___sizeof__:  db "__sizeof__", 0
 mn___doc__:     db "__doc__", 0
@@ -3019,20 +2573,35 @@ mn___setitem__: db "__setitem__", 0
 mn___delitem__: db "__delitem__", 0
 mn___contains__: db "__contains__", 0
 mn___len__:     db "__len__", 0
+global mn___lt__
 mn___lt__:      db "__lt__", 0
+global mn___le__
 mn___le__:      db "__le__", 0
+global mn___gt__
 mn___gt__:      db "__gt__", 0
+global mn___ge__
 mn___ge__:      db "__ge__", 0
+global mn___neg__
 mn___neg__:     db "__neg__", 0
+global mn___pos__
 mn___pos__:     db "__pos__", 0
+global mn___abs__
 mn___abs__:     db "__abs__", 0
+global mn___invert__
 mn___invert__:  db "__invert__", 0
+global mn___int__
 mn___int__:     db "__int__", 0
+global mn___float__
 mn___float__:   db "__float__", 0
+global mn___index__
 mn___index__:   db "__index__", 0
+global mn___trunc__
 mn___trunc__:   db "__trunc__", 0
+global mn___bool__
 mn___bool__:    db "__bool__", 0
+global gs_real
 gs_real:        db "real", 0
+global gs_imag
 gs_imag:        db "imag", 0
 gs_start:       db "start", 0
 gs_stop:        db "stop", 0
@@ -3045,10 +2614,15 @@ gs_gi_running:  db "gi_running", 0
 gs_cr_frame:    db "cr_frame", 0
 gs_cr_code:     db "cr_code", 0
 gs_cr_running:  db "cr_running", 0
+global gs_numerator
 gs_numerator:   db "numerator", 0
+global gs_denominator
 gs_denominator: db "denominator", 0
+global mn___eq__
 mn___eq__: db "__eq__", 0
+global mn___ne__
 mn___ne__: db "__ne__", 0
+global mn___hash__
 mn___hash__:    db "__hash__", 0
 mn___subclasshook__: db "__subclasshook__", 0
 mn___getstate__: db "__getstate__", 0
@@ -3062,31 +2636,57 @@ mn___ixor__: db "__ixor__", 0
 mn___imul__: db "__imul__", 0
 mn___subclasses__: db "__subclasses__", 0
 mn_mro:            db "mro", 0
+global mn___add__
 mn___add__:     db "__add__", 0
+global mn___radd__
 mn___radd__: db "__radd__", 0
+global mn___sub__
 mn___sub__: db "__sub__", 0
+global mn___rsub__
 mn___rsub__: db "__rsub__", 0
+global mn___mod__
 mn___mod__: db "__mod__", 0
+global mn___rmod__
 mn___rmod__: db "__rmod__", 0
+global mn___divmod__
 mn___divmod__: db "__divmod__", 0
+global mn___rdivmod__
 mn___rdivmod__: db "__rdivmod__", 0
+global mn___pow__
 mn___pow__: db "__pow__", 0
+global mn___rpow__
 mn___rpow__: db "__rpow__", 0
+global mn___lshift__
 mn___lshift__: db "__lshift__", 0
+global mn___rlshift__
 mn___rlshift__: db "__rlshift__", 0
+global mn___rshift__
 mn___rshift__: db "__rshift__", 0
+global mn___rrshift__
 mn___rrshift__: db "__rrshift__", 0
+global mn___and__
 mn___and__: db "__and__", 0
+global mn___rand__
 mn___rand__: db "__rand__", 0
+global mn___xor__
 mn___xor__: db "__xor__", 0
+global mn___rxor__
 mn___rxor__: db "__rxor__", 0
+global mn___or__
 mn___or__: db "__or__", 0
+global mn___ror__
 mn___ror__: db "__ror__", 0
+global mn___floordiv__
 mn___floordiv__: db "__floordiv__", 0
+global mn___rfloordiv__
 mn___rfloordiv__: db "__rfloordiv__", 0
+global mn___truediv__
 mn___truediv__: db "__truediv__", 0
+global mn___rtruediv__
 mn___rtruediv__: db "__rtruediv__", 0
+global mn___mul__
 mn___mul__:     db "__mul__", 0
+global mn___rmul__
 mn___rmul__:    db "__rmul__", 0
 mn___iadd__:    db "__iadd__", 0
 mn___init__:    db "__init__", 0

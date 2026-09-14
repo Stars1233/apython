@@ -103,7 +103,8 @@ python3 tests/test_foo.py > /tmp/expected.txt
 diff /tmp/expected.txt /tmp/actual.txt
 ```
 
-**Dependencies:** nasm, gcc (linker), libgmp-dev, zlib1g-dev, python3.12
+**Dependencies:** nasm, gcc (linker), libgmp-dev, zlib1g-dev, libbz2-dev,
+liblzma-dev, libssl-dev, libexpat1-dev, python3.12
 
 ## Register Convention (eval loop)
 
@@ -267,6 +268,22 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   shim over `-lz`, on the precedent `-lgmp` set; `lib/zlib.py` is the module
   surface -- the Compress and Decompress objects, the constants, `zlib.error`
   and every default -- so each core call takes fixed positional arguments
+- `src/modules/bz2.asm` — the `_bz2core` module: libbzip2's bz_stream, the
+  output buffer that grows while the codec writes into it, and the handle
+  table.  A shim over `-lbz2`, the same split again: `lib/_bz2.py` is the
+  BZ2Compressor and BZ2Decompressor objects CPython's own `bz2.py` is written
+  against.  Two things about libbzip2 to know: `BZ_RUN` with no input left
+  answers `BZ_PARAM_ERROR` rather than doing nothing, because "no progress"
+  and "bad call" share a code there; and `avail_in`/`avail_out` are 32-bit
+  while the buffers need not be
+- `src/modules/lzma.asm` — the `_lzmacore` module: liblzma's lzma_stream, the
+  filter chain and its option structs, and the handle table.  A shim over
+  `-llzma`; `lib/_lzma.py` is the LZMACompressor and LZMADecompressor objects,
+  the constants and LZMAError that CPython's own `lzma.py` is written against.
+  A filter chain crosses the boundary as a list of TUPLES OF INTS rather than
+  as the dicts a caller writes: the option names, the defaults and the
+  per-filter error wordings are Python's business, the struct layout is the
+  assembly's
 - `src/modules/hashlib.asm` — the `_hashlibcore` module: OpenSSL's
   EVP_MD_CTX and HMAC_CTX, PBKDF2, scrypt and a constant-time compare, behind
   a handle table.  A shim over `-lcrypto`, the same split again:

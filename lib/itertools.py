@@ -64,6 +64,25 @@ def islice(iterable, *args):
         i += 1
 
 
+def batched(iterable, n):
+    """batched(iterable, n) -- successive n-length TUPLES from the iterable.
+
+    batched('ABCDEFG', 3) --> ABC DEF G
+
+    The last batch is short rather than padded, and the batches are tuples --
+    which is what lets a caller keep one after taking the next, unlike the
+    groups groupby hands out.
+    """
+    if n < 1:
+        raise ValueError("n must be at least one")
+    it = iter(iterable)
+    while True:
+        batch = tuple(islice(it, n))
+        if not batch:
+            return
+        yield batch
+
+
 def count(start=0, step=1):
     """count(start=0, step=1) --> count object
     Return a count object whose .__next__() method returns consecutive values."""
@@ -159,6 +178,19 @@ def filterfalse(predicate, iterable):
     for x in iterable:
         if not predicate(x):
             yield x
+
+
+def compress(data, selectors):
+    """compress(data, selectors) -- the items of data whose selector is true.
+
+    compress('ABCDEF', [1,0,1,0,1,1]) --> A C E F
+
+    zip is what ends it, and what decides how far each side is consumed: it
+    pulls from data first, so a selectors that runs out has already taken one
+    more item from data.  CPython's C version does the same, and a program
+    that keeps the data iterator afterwards can see the difference.
+    """
+    return (d for d, s in zip(data, selectors) if s)
 
 
 def zip_longest(*iterables, fillvalue=None):

@@ -297,6 +297,16 @@ DEF_FUNC io_module_create, IMC_FRAME
     lea rsi, [rel im_n_exit]
     lea rdx, [rel iobase_exit_fn]
     call io_add_method
+    ; Stamp the owner and the kind on everything the dict holds, as every type
+    ; built in src/methods/init.asm is stamped.  Without it a method here is
+    ; indistinguishable from a module-level function: same type, same
+    ; func_kind, no owner -- so nothing could tell that `FileIO.read` is a
+    ; descriptor and `len` is not.  It is also what installs the receiver
+    ; check builtin_func_call makes, and what makes the repr read as a
+    ; method's.
+    mov rdi, rbx
+    extern type_stamp_methods
+    call type_stamp_methods
     mov rdi, rbx
     call obj_incref
     IO_ADD_OBJ im_n_IOBase, rbx
@@ -447,6 +457,7 @@ extern dict_new
 extern instance_dealloc
 extern bytes_like_ptr_len
 extern obj_is_true
+extern obj_getattr_opt
 extern kw_names_pending
 extern ap_strcmp
 extern obj_repr
@@ -2329,17 +2340,77 @@ END_FUNC io_add_method
 ;; __exit__ calls close() by NAME, so a subclass that overrides it -- which
 ;; every stream in the compression stack does -- gets its own.
 ;; ============================================================================
-DEF_FUNC iobase_enter_fn
+IBE_SELF  equ 8
+IBE_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC iobase_enter_fn, IBE_FRAME
     test rsi, rsi
     jz .ibe_argerr
     mov rax, [rdi]              ; self, already a Value
+    mov [rbp - IBE_SELF], rax
+
+    ; CPython's __enter__ refuses a closed file, and it asks by NAME: every
+    ; stream in the compression stack overrides `closed` with a property of
+    ; its own, so reading a flag out of the core object would answer for the
+    ; wrong half.  bz2.BZ2File is the case -- `with f:` on a closed one has to
+    ; raise, and did not.
+    mov rdi, rax
+    call iob_closed_name
+    test rax, rax
+    jz .ibe_ok                  ; no memory for the name: treat as not closed
+    mov rsi, rax
+    mov rdi, [rbp - IBE_SELF]
+    call obj_getattr_opt
+    test rax, rax
+    jz .ibe_ok                  ; no `closed` attribute at all
+    mov rdi, rax
+    push rax
+    sub rsp, 8
+    call obj_is_true
+    add rsp, 8
+    pop rdi
+    push rax
+    sub rsp, 8
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
+    test rax, rax
+    jnz .ibe_closed
+
+.ibe_ok:
+    mov rax, [rbp - IBE_SELF]
     INCREF_V rax, rcx
     mov edx, TAG_PTR
     leave
     ret
+.ibe_closed:
+    RAISE exc_ValueError_type, "I/O operation on closed file."
 .ibe_argerr:
     RAISE exc_TypeError_type, "__enter__() missing self"
 END_FUNC iobase_enter_fn
+
+;; ============================================================================
+;; iob_closed_name() -> rax = the str "closed", borrowed, or 0
+;;
+;; Built once and kept, the way src/pyo/module.asm keeps PEP 562's hook name:
+;; __enter__ asks for it on every `with`.
+;; ============================================================================
+DEF_FUNC_LOCAL iob_closed_name
+    mov rax, [rel iob_closed_cached]
+    test rax, rax
+    jnz .icn_done
+    CSTRING rdi, "closed"
+    call str_from_cstr_heap
+    test rax, rax
+    jz .icn_done
+    mov [rel iob_closed_cached], rax
+.icn_done:
+    leave
+    ret
+END_FUNC iob_closed_name
+
+section .bss
+iob_closed_cached: resq 1
+section .text
 
 ;; ============================================================================
 ;; iobase_exit_fn(rdi = args, rsi = nargs) -> rax = None, or 0 with the
@@ -2502,6 +2573,8 @@ DEF_FUNC_LOCAL io_make_fileio, MFI_FRAME
     mov rdx, [rbp - MFI_NS]
     call type_from_parts        ; takes over the namespace
     mov rbx, rax
+    mov rdi, rbx
+    call type_stamp_methods     ; see _IOBase above
 
     mov rdi, [rbp - MFI_NAME]
     call obj_decref
@@ -3487,6 +3560,8 @@ DEF_FUNC_LOCAL io_make_bytesio, MBI_FRAME
     mov rdx, [rbp - MBI_NS]
     call type_from_parts
     mov rbx, rax
+    mov rdi, rbx
+    call type_stamp_methods     ; see _IOBase above
     mov rdi, [rbp - MBI_NAME]
     call obj_decref
     mov rdi, [rbp - MBI_BASES]

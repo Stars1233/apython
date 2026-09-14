@@ -63,6 +63,44 @@ the reasoning rather than from scratch.
   `pathlib` and `tempfile`'s cleanup -- 730 NameErrors across CPython's suite,
   and every one of those modules unusable.
 
+- **An `mmap` object exports no buffer.**  `src/modules/mmap.asm` is the
+  mapping -- mmap, munmap, mremap, msync, madvise, the raw bytes and the
+  search over them -- and `lib/mmap.py` is the object, on the split
+  `_zlibcore`/`zlib` and `_iocore`/`_io` already use.  A Python class has no
+  `tp_as_buffer`, so `memoryview(m)` refuses, and so does anything that asks
+  for one: `re.search(pat, m)` is the case CPython's own test_mmap uses, and
+  it is the single test of the forty-six that still fails.
+
+  Reading and writing through the object's own syntax is unaffected -- `m[i]`,
+  `m[a:b]`, `m[a:b] = data`, `read`, `write`, `find`, `move`, `flush`,
+  `resize`, `madvise` -- which is what the stdlib's own users of mmap do.
+  Closing it would mean either a real assembly type with a buffer slot, or
+  PEP 688's `__buffer__` honoured for Python classes; the second is the
+  smaller of the two and would also serve every other `lib/` stand-in, so
+  that is the way in if it is ever wanted.
+
+- **`faulthandler` reports deliberate faults, and is silent for a real
+  crash.**  CPython's is a C module and has to be: its whole point is to
+  report a crash, and by then calling into the interpreter is not safe -- its
+  handler writes the traceback from the signal context itself.  `lib/`'s is
+  Python over the `signal` module, so its handlers run the way every
+  Python-level signal handler in this tree runs: the C handler records the
+  signal and the eval loop delivers it at the top of an instruction.
+
+  That is enough for a signal a program RAISES -- `register(SIGUSR1)` really
+  does dump -- and for `dump_traceback_later`, which is `setitimer` with
+  SIGALRM and really does fire.  It is not enough for a genuine SIGSEGV: the
+  process is already somewhere the eval loop will not be reached, so the
+  report never comes.
+
+  Writing it in assembly would not be enough either; it would have to walk
+  r12's frame chain from the signal context and write with a raw `write(2)`,
+  never touching the allocator or the eval loop.  That is a real piece of
+  work for a report that only matters when the interpreter has already
+  failed, and having the module at all is what 113 of test_regrtest's tests
+  were waiting on.  `all_threads` is accepted and ignored, because there is
+  only ever one.
+
 - **`_thread` is a single-threaded stand-in.**  `lib/_thread.py` gives
   `get_ident` a constant, makes locks uncontended, and raises from
   `start_new_thread`.  Everything in the stdlib that only takes a lock works;
@@ -83,6 +121,20 @@ the reasoning rather than from scratch.
   `popleft` are O(1) there and O(n) here; `itertools.groupby` materialises
   each group rather than sharing the source iterator, and `tee` materialises
   the source.  Every observable answer matches for a finite iterable.
+
+- **`itertools`' functions are functions, where CPython's are classes.**
+  `lib/itertools.py` writes all but `chain` as generator functions, so
+  `type(itertools.count(1))` is `generator` rather than `itertools.count`,
+  `isinstance(x, itertools.count)` is a TypeError rather than an answer, the
+  reprs read as a generator's, and none of them pickle -- CPython's each carry
+  a `__reduce__`.
+
+  Every VALUE they produce is CPython's; what differs is what the iterator
+  itself says it is.  Closing it means eighteen classes with `__iter__`,
+  `__next__`, `__reduce__` and `__setstate__` apiece, in place of eighteen
+  `yield` statements, for introspection that only CPython's own test_itertools
+  asks about.  `chain` is a class already, because `from_iterable` needed
+  somewhere to live.
 
 - **bytearray's read-only methods copy.**  bytes keeps its data inline and
   bytearray keeps it out of line, so the shared method bodies cannot read a
@@ -175,12 +227,26 @@ slot differs from CPython's in two ways:
   agree exactly, which is what every caller of `bytes_like_ptr_len` actually
   reads.
 
-The second follows from the first two-thirds of `memoryview` being absent
-rather than from a choice: `cast()` to a multi-byte format is not implemented
-either, so a view carrying `format='i'` would have no machinery to decode an
-item with and would read one byte where four were meant.  Giving the slot a
-format to report is the easy half; the decode, the strides and the release
-protocol are the rest of `memoryview`.
+The second is now only half true.  `cast()` handles the native format codes --
+signed and unsigned integers of every width, `f`, `d`, `?` and `c` -- so a
+view MADE by cast() decodes its items correctly.  What a view obtained through
+the SLOT reports is still `'B'` and itemsize 1, because the slot has no field
+to carry a format in: widening it means a new calling convention and every
+`bytes_like_ptr_len` caller with it.
+
+Two things remain absent inside `memoryview` itself, and neither is what the
+slot's narrowness forces:
+
+- **A shaped cast.**  `cast(fmt, shape)` ignores the shape, so `ndim` is
+  always 1 and `shape` a 1-tuple.  CPython refuses multi-dimensional
+  sub-views and iteration outright -- `m[0]` on a 2-D view is a
+  NotImplementedError there -- so what is missing is `ndim`, `shape`,
+  `strides`, a nested `tolist()` and a tuple index.  Measured against
+  CPython's own test_memoryview, it buys nothing: not one of that module's
+  remaining failures here mentions shape or ndim.  Recorded rather than
+  built for exactly that reason.
+- **`e`, the half-float.**  The one native code `cast()` refuses and CPython
+  accepts.  Its decode is a bit layout rather than a load.
 
 ## `sys.stdout.buffer` is a FileIO beside the text half, not underneath it
 

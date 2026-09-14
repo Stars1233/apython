@@ -25,6 +25,15 @@ extern dict_set
 extern type_type
 extern none_singleton
 extern ap_strcmp
+extern str_from_cstr_heap
+extern obj_call_n
+extern current_exception
+extern attr_error_pending
+extern exc_AttributeError_type
+extern type_is_subtype
+extern eval_exception_unwind
+extern dir_default
+global module_dunder_dir
 
 ;; ============================================================================
 ;; module_new(PyObject *name_str, PyObject *dict) -> PyModuleObject*
@@ -179,10 +188,128 @@ DEF_FUNC_LOCAL module_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
 END_FUNC module_dealloc
 
 ;; ============================================================================
-;; module_getattr(PyObject *self, PyObject *name_str) -> rax = Value
-;; Look up attribute in module's dict
+;; mg_getattr_name() -> rax = the str "__getattr__", borrowed, or 0
+;;
+;; PEP 562's hook is looked up by name on every module attribute that MISSES,
+;; so the name is built once and kept rather than allocated per miss.  Borrowed
+;; for the life of the interpreter, like the builtins the reduce protocol
+;; caches.
 ;; ============================================================================
-DEF_FUNC module_getattr
+DEF_FUNC_LOCAL mg_getattr_name
+    mov rax, [rel mg_name_cached]
+    test rax, rax
+    jnz .mgn_done
+    CSTRING rdi, "__getattr__"
+    call str_from_cstr_heap
+    test rax, rax
+    jz .mgn_done                ; 0, and the caller treats it as "no hook"
+    mov [rel mg_name_cached], rax
+.mgn_done:
+    leave
+    ret
+END_FUNC mg_getattr_name
+
+;; ============================================================================
+;; mg_dir_name() -> rax = the str "__dir__", borrowed, or 0
+;;
+;; Built once and kept, for the same reason mg_getattr_name is.
+;; ============================================================================
+DEF_FUNC_LOCAL mg_dir_name
+    mov rax, [rel mg_dir_cached]
+    test rax, rax
+    jnz .mdn_done
+    CSTRING rdi, "__dir__"
+    call str_from_cstr_heap
+    test rax, rax
+    jz .mdn_done
+    mov [rel mg_dir_cached], rax
+.mdn_done:
+    leave
+    ret
+END_FUNC mg_dir_name
+
+;; ============================================================================
+;; module_dunder_dir(rdi = args Value*, rsi = nargs) -> rax = a list, as a Value
+;;   args[0] = the module
+;;
+;; PEP 562's other half.  A module may define its own __dir__ as a plain
+;; module-level function, and it lives in mod_dict -- which is the module's
+;; INSTANCE namespace, not its type's -- so builtin_dir's dunder_call_1, which
+;; searches the type, would never find it.  This method is what the type
+;; answers with, and it does the instance-dict probe on the module's behalf.
+;;
+;; It has to be a real entry in module_type.tp_dict rather than an arm inside
+;; dir_default: the stdlib asks `hasattr(m, "__dir__")` and CPython says True
+;; for every module.  That is the "a builtin's behaviour that lives only in a
+;; slot" rule, pointing the other way.
+;;
+;; builtin_dir sorts whatever comes back and accepts any iterable, so a
+;; module's own __dir__ may answer a tuple or a generator, as CPython's may.
+;; ============================================================================
+MDD_FRAME equ 24             ; + 1 push = 40; DEF_FUNC's push rbp makes it 16-aligned
+DEF_FUNC_LOCAL module_dunder_dir, MDD_FRAME
+    push rbx
+    mov rbx, [rdi]              ; args[0] = self
+
+    ; Not a module -- a SimpleNamespace shares this file but not this dict --
+    ; so fall through to the ordinary answer rather than reading mod_dict off
+    ; whatever it is.
+    V_TEST_PTR rbx, rax
+    ja .mdd_default
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel module_type]
+    cmp rax, rcx
+    jne .mdd_default
+
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    test rdi, rdi
+    jz .mdd_default
+    call mg_dir_name
+    test rax, rax
+    jz .mdd_default
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    call dict_get               ; a Value; 0 is the miss, and it never raises
+    test rax, rax
+    jz .mdd_default
+
+    ; The module's own __dir__, called with no arguments.  obj_call_n refuses a
+    ; non-callable with a TypeError, which is what CPython answers too.
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    call obj_call_n
+    pop rbx
+    leave
+    ret
+
+.mdd_default:
+    mov rdi, rbx
+    call dir_default
+    pop rbx
+    leave
+    ret
+END_FUNC module_dunder_dir
+
+;; ============================================================================
+;; module_getattr(PyObject *self, PyObject *name_str) -> rax = Value
+;; Look up attribute in module's dict, then PEP 562's __getattr__.
+;;
+;; The hook runs only on a MISS, which is why it is here rather than at the
+;; three call sites -- op_load_attr, obj_getattr_opt and op_import_from each
+;; turn this function's 0 into an error of their own, and each would have
+;; needed its own copy.
+;;
+;; An AttributeError out of the hook is the protocol saying "absent", and
+;; getattr(m, n, default) and hasattr() have to be able to see that; anything
+;; else is a genuine failure in the middle of a lookup and keeps unwinding.
+;; That is the same handshake instance_getattr's .getattr_raised uses, down to
+;; the attr_error_pending flag raise_no_attribute reads.
+;; ============================================================================
+MG_SELF   equ 8
+MG_NAME   equ 16             ; the attribute name, as the hook's one argument
+MG_FRAME  equ 32             ; + 2 pushes = 48, 16-aligned
+DEF_FUNC module_getattr, MG_FRAME
     push rbx
     push r12
     mov rbx, rdi                ; self
@@ -227,6 +354,73 @@ DEF_FUNC module_getattr
     ret
 
 .not_found:
+    ; PEP 562.  The module's own __getattr__, if it has one, answers the miss.
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    test rdi, rdi
+    jz .mg_really_not_found
+
+    ; Never on the hook's own name: looking __getattr__ up in the dict and
+    ; missing must not ask the hook for itself.
+    lea rdi, [r12 + PyStrObject.data]
+    lea rsi, [rel mg_dunder_getattr]
+    call ap_strcmp
+    test eax, eax
+    jz .mg_really_not_found
+
+    call mg_getattr_name
+    test rax, rax
+    jz .mg_really_not_found
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    call dict_get               ; a Value; 0 is the miss, and it never raises
+    test rax, rax
+    jz .mg_really_not_found
+
+    ; The hook, called with the attribute name.  obj_call_n returns rather
+    ; than unwinding, and refuses a non-callable with a TypeError of its own --
+    ; which is CPython's answer for `m.__getattr__ = 5` too, so it is left to
+    ; do that.  Nothing in this frame is owned at that point.
+    mov [rbp - MG_SELF], rax
+    mov [rbp - MG_NAME], r12    ; the one-Value argument array
+    mov rdi, rax
+    lea rsi, [rbp - MG_NAME]
+    mov edx, 1
+    call obj_call_n
+    test rax, rax
+    jz .mg_hook_raised
+    pop r12
+    pop rbx
+    leave
+    ret                         ; already a Value, and owned
+
+.mg_hook_raised:
+    ; An AttributeError is "absent" and has to reach getattr()'s default and
+    ; hasattr(); raise_no_attribute reads attr_error_pending and propagates
+    ; this one rather than replacing it, so `m.missing` still reports what the
+    ; hook said.  Anything else keeps unwinding.
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .mg_really_not_found
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel exc_AttributeError_type]
+    call type_is_subtype
+    test eax, eax
+    jz .mg_hook_unwind
+    mov qword [rel attr_error_pending], 1
+    RET_NULL
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.mg_hook_unwind:
+    pop r12
+    pop rbx
+    leave
+    jmp eval_exception_unwind
+
+.mg_really_not_found:
     RET_NULL
     pop r12
     pop rbx
@@ -432,6 +626,7 @@ mod_repr_from:    db "' from '", 0
 mod_repr_close:   db "'>", 0
 module_type_name: db "module", 0
 ma_dunder_dict: db "__dict__", 0
+mg_dunder_getattr: db "__getattr__", 0
 
 section .data
 align 8
@@ -1374,3 +1569,7 @@ mtn_loader_key:  db "__loader__", 0
 mtn_package_key: db "__package__", 0
 mtn_spec_key:    db "__spec__", 0
 mod_empty_name:  db "", 0
+
+section .bss
+mg_name_cached: resq 1        ; the str "__getattr__", built once
+mg_dir_cached:  resq 1        ; the str "__dir__", built once

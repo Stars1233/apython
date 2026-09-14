@@ -4,6 +4,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "opcodes.inc"
 
 extern bool_true
 extern bool_false
@@ -809,6 +810,112 @@ DEF_FUNC gen_send
 END_FUNC gen_send
 
 ;; ============================================================================
+;; gt_is_generator_exit(rdi = throw()'s argument, a class or an instance)
+;;   -> eax = 1 when it is GeneratorExit or a subclass of it
+;;
+;; close() reaches gen_throw with the class; a program may throw an instance.
+;; Both have to answer yes, because it is what decides whether a sub-iterator
+;; is closed or thrown into.
+;; ============================================================================
+DEF_FUNC_LOCAL gt_is_generator_exit
+    V_TEST_PTR rdi, rax
+    ja .gige_no
+    test rdi, rdi
+    jz .gige_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel exc_metatype]
+    cmp rax, rcx
+    je .gige_class
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    je .gige_class
+    lea rcx, [rel type_type]
+    cmp rax, rcx
+    je .gige_class
+    mov rdi, rax                ; an instance: ask about its type
+.gige_class:
+    lea rsi, [rel exc_GeneratorExit_type]
+    extern type_is_subtype
+    call type_is_subtype
+    leave
+    ret
+.gige_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC gt_is_generator_exit
+
+;; ============================================================================
+;; gt_throw_by_name(rdi = the sub-iterator, rsi = the exception, class or
+;;                  instance) -> rax/edx = what its throw answered, or 0
+;;
+;; PEP 380's fallback for a sub-iterator that is not a generator: look for a
+;; `throw` method and call it.  Not having one is allowed and means the
+;; exception is raised in the delegating generator instead, which is what the
+;; 0/0 answer here asks the caller to do -- so it is told apart from a throw
+;; that RAISED by whether anything is pending.
+;; ============================================================================
+GTBN_IT   equ 8
+GTBN_EXC  equ 16
+GTBN_TMP  equ 24
+GTBN_FRAME equ 32           ; + 0 pushes = 32, 16-aligned
+DEF_FUNC_LOCAL gt_throw_by_name, GTBN_FRAME
+    mov [rbp - GTBN_IT], rdi
+    mov [rbp - GTBN_EXC], rsi
+    CSTRING rdi, "throw"
+    call str_from_cstr_heap
+    test rax, rax
+    jz .gtbn_none
+    mov [rbp - GTBN_TMP], rax
+    mov rdi, [rbp - GTBN_IT]
+    mov rsi, rax
+    call obj_getattr_opt
+    mov [rbp - GTBN_IT], rax
+    mov rdi, [rbp - GTBN_TMP]
+    call obj_decref
+    cmp qword [rbp - GTBN_IT], 0
+    je .gtbn_absent
+    mov rdi, [rbp - GTBN_IT]
+    lea rsi, [rbp - GTBN_EXC]       ; the one-Value argument array
+    mov edx, 1
+    call obj_call_n
+    mov [rbp - GTBN_TMP], rax
+    mov rdi, [rbp - GTBN_IT]
+    call obj_decref                 ; the bound method
+    mov rax, [rbp - GTBN_TMP]
+    test rax, rax
+    jz .gtbn_raised
+    V_UNPACK rax, rdx
+    xor ecx, ecx
+    leave
+    ret
+
+.gtbn_raised:
+    xor eax, eax
+    xor edx, edx
+    xor ecx, ecx
+    leave
+    ret
+
+.gtbn_absent:
+    ; No throw at all, which is not this function's failure.
+    cmp qword [rel current_exception], 0
+    je .gtbn_none
+    cmp qword [rel attr_error_pending], 0
+    je .gtbn_none
+    mov qword [rel attr_error_pending], 0
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    call obj_decref
+.gtbn_none:
+    xor eax, eax
+    xor edx, edx
+    mov ecx, 1
+    leave
+    ret
+END_FUNC gt_throw_by_name
+
+;; ============================================================================
 ;; gen_throw(PyGenObject *gen, PyObject *exc_type) -> fat value
 ;; Throw an exception into a generator/coroutine.
 ;; If gi_frame == NULL → re-raise (generator exhausted).
@@ -818,6 +925,7 @@ END_FUNC gen_send
 ;; rdi = generator, rsi = exc_type (PyTypeObject*)
 ;; ============================================================================
 GT_SAVED_EXC equ 24    ; the caller's pending exception, put aside
+GT_YF        equ 32    ; the sub-iterator, when this is a delegation
 GT_FRAME equ 40            ; + 3 pushes = 64, 16-aligned
 DEF_FUNC gen_throw, GT_FRAME
     push rbx
@@ -836,14 +944,105 @@ DEF_FUNC gen_throw, GT_FRAME
     cmp qword [rbx + PyGenObject.gi_running], 1
     je .gt_error
 
-    ; Mark as running
-    mov qword [rbx + PyGenObject.gi_running], 1
-
-    ; Set the thrown exception as current.  The caller's is put aside rather
-    ; than released: it belongs to the caller, and DECREFing it here freed an
-    ; exception that was still being handled out there.
+    ; The caller's pending exception is put aside rather than released: it
+    ; belongs to the caller, and DECREFing it here freed an exception that was
+    ; still being handled out there.  Before the delegation below, because the
+    ; sub-iterator's throw runs arbitrary code.
     mov rax, [rel current_exception]
     mov [rbp - GT_SAVED_EXC], rax
+
+    ; --- PEP 380: a `yield from` throws into the SUB-iterator first --------
+    mov rdi, rbx
+    call gen_yf
+    mov [rbp - GT_YF], rax
+    test rax, rax
+    jz .gt_local
+
+    ; GeneratorExit is the exception: the child is CLOSED rather than thrown
+    ; into, so its `except GeneratorExit` sees its own close.  That is
+    ; CPython's close_on_genexit, and gen_close reaches here through it.
+    mov rdi, r12
+    call gt_is_generator_exit
+    test eax, eax
+    jz .gt_forward
+    mov rdi, [rbp - GT_YF]
+    call gen_close_iter
+    test eax, eax
+    jz .gt_local
+    ; The child's cleanup raised.  CPython resumes this generator with THAT
+    ; pending rather than raising GeneratorExit over the top of it, so an
+    ; outer `finally` sees what actually went wrong.
+    jmp .gt_resume_throwing
+
+.gt_forward:
+    mov rax, [rbp - GT_YF]
+    V_TEST_PTR rax, rcx
+    ja .gt_local                    ; an immediate has no throw
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel gen_type]
+    cmp rcx, rdx
+    je .gt_forward_gen
+    lea rdx, [rel coro_type]
+    cmp rcx, rdx
+    je .gt_forward_gen
+    lea rdx, [rel async_gen_type]
+    cmp rcx, rdx
+    je .gt_forward_gen
+    ; Anything else answers a `throw` method, or does not -- `yield from
+    ; [1,2,3]` delegates to a list iterator, which has none, and then the
+    ; exception is raised here as though there were no delegation at all.
+    mov rdi, rax
+    mov rsi, r12
+    call gt_throw_by_name
+    test ecx, ecx
+    jnz .gt_local               ; no throw method: raise it here instead
+    jmp .gt_child_done
+
+.gt_forward_gen:
+    mov rdi, [rbp - GT_YF]
+    mov rsi, r12
+    call gen_throw
+
+.gt_child_done:
+    test edx, edx
+    jz .gt_child_finished
+    ; The child yielded, so this generator is still suspended at the same
+    ; `yield from` and that value is its answer.
+    mov rcx, [rbp - GT_SAVED_EXC]
+    mov [rel current_exception], rcx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.gt_child_finished:
+    ; The child is done.  If it RAISED, this generator is resumed in throwing
+    ; mode so its own handlers -- and the CLEANUP_THROW over the yield -- get
+    ; the exception.  If it merely finished, it is resumed normally: the
+    ; delegation loop re-enters SEND, finds the child exhausted and takes its
+    ; return value, which is what a `value = yield from sub` is waiting for.
+    cmp qword [rel current_exception], 0
+    jne .gt_resume_throwing
+
+    mov rcx, [rbp - GT_SAVED_EXC]
+    mov [rel current_exception], rcx
+    mov rdi, rbx
+    lea rsi, [rel none_singleton]
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    jmp gen_send
+
+.gt_resume_throwing:
+    mov qword [rbx + PyGenObject.gi_running], 1
+    mov r13, [rbx + PyGenObject.gi_frame]
+    jmp .gt_resume
+
+.gt_local:
+    ; Mark as running
+    mov qword [rbx + PyGenObject.gi_running], 1
     ; throw() takes either an exception class or an already-built instance.
     ; This always called exc_new on it, so g.throw(ValueError("x")) built an
     ; exception whose type was the *instance* -- and `except ValueError`
@@ -878,6 +1077,7 @@ DEF_FUNC gen_throw, GT_FRAME
 .gt_have_exc:
     mov [rel current_exception], rax
 
+.gt_resume:
     ; Push dummy value onto frame stack (eval_frame expects TOS after YIELD_VALUE)
     FRAME_PUSH_NONE r13, rax
 
@@ -904,8 +1104,13 @@ DEF_FUNC gen_throw, GT_FRAME
     ; Mark as not running
     mov qword [rbx + PyGenObject.gi_running], 0
 
-    ; Check if exhausted
+    ; Check if exhausted.  gi_frame can be gone already: the generator may have
+    ; closed ITSELF while unwinding -- a delegating generator whose child
+    ; finishes the throw reaches here that way -- and reading instr_ptr off a
+    ; NULL frame is a dereference of address 40.
     mov rdi, [rbx + PyGenObject.gi_frame]
+    test rdi, rdi
+    jz .gt_frame_gone
     cmp qword [rdi + PyFrame.instr_ptr], 0
     jne .gt_yielded
 
@@ -921,8 +1126,11 @@ DEF_FUNC gen_throw, GT_FRAME
 
     ; Exhausted.  Clear before freeing, as gen_iternext does.
     mov rdi, [rbx + PyGenObject.gi_frame]
+    test rdi, rdi
+    jz .gt_no_frame_to_free
     mov qword [rbx + PyGenObject.gi_frame], 0
     call frame_free
+.gt_no_frame_to_free:
     V_PACK r12, r13
     mov [rbx + PyGenObject.gi_return_value], r12
 
@@ -933,6 +1141,15 @@ DEF_FUNC gen_throw, GT_FRAME
     pop rbx
     leave
     ret
+
+.gt_frame_gone:
+    ; It closed itself on the way out; there is nothing left to free and the
+    ; exhausted bookkeeping below is still what the caller needs.
+    cmp qword [rel current_exception], 0
+    jne .gt_exhausted_propagating
+    mov rcx, [rbp - GT_SAVED_EXC]
+    mov [rel current_exception], rcx
+    jmp .gt_exhausted_propagating
 
 .gt_yielded:
     ; The generator is suspended.  Whatever it is handling went into its
@@ -996,13 +1213,183 @@ DEF_FUNC gen_throw, GT_FRAME
 END_FUNC gen_throw
 
 ;; ============================================================================
-;; gen_close(PyGenObject *gen) -> None
-;; Close the generator by marking it as exhausted.
-;; rdi = generator
+;; gen_yf(rdi = the generator) -> rax = the sub-iterator it is delegating to,
+;;                                BORROWED, or 0
+;;
+;; CPython's _PyGen_yf.  A generator suspended at a `yield from` is not
+;; suspended at a yield of its own: the value came from a sub-iterator, and
+;; PEP 380 says throw() and close() must reach that one first.
+;;
+;; There is no gi_yieldfrom field here, and none is needed, because the shape
+;; the compiler emits says it:
+;;
+;;     <iterable>; GET_YIELD_FROM_ITER; LOAD_CONST None
+;;   top: SEND end
+;;     YIELD_VALUE; RESUME 2
+;;     JUMP_BACKWARD_NO_INTERRUPT top
+;;   end: END_SEND
+;;
+;; op_yield_value leaves instr_ptr AFTER its own instruction word, so a frame
+;; suspended in a delegation has instr_ptr on that RESUME, and its argument is
+;; 2 or more only there -- a function's own opening RESUME carries 0.  The
+;; sub-iterator is what SEND left under the yielded value, at stack_ptr - 8.
+;; CPython reads exactly the same two facts.
+;; ============================================================================
+DEF_FUNC_BARE gen_yf
+    mov rax, [rdi + PyGenObject.gi_frame]
+    test rax, rax
+    jz .gyf_none
+    cmp qword [rdi + PyGenObject.gi_running], 0
+    jne .gyf_none               ; executing: it is not suspended anywhere
+    mov rcx, [rax + PyFrame.instr_ptr]
+    test rcx, rcx
+    jz .gyf_none                ; finished
+    cmp byte [rcx], OP_RESUME
+    jne .gyf_none
+    cmp byte [rcx + 1], 2
+    jb .gyf_none
+    mov rcx, [rax + PyFrame.stack_ptr]
+    mov rax, [rcx - 8]
+    ret
+.gyf_none:
+    xor eax, eax
+    ret
+END_FUNC gen_yf
+
+;; ============================================================================
+;; gen_close_iter(rdi = the sub-iterator, as a Value) -> void
+;;
+;; CPython's gen_close_iter.  A generator or coroutine is closed directly; for
+;; anything else the protocol is a `close` method, and not having one is
+;; allowed -- `yield from [1, 2, 3]` delegates to a list iterator, which has
+;; none and needs no cleanup.
+;;
+;; An exception the child's close raises is left pending and reported in eax,
+;; which is what makes `close()` report a failing cleanup rather than swallow
+;; it -- and what keeps it from unwinding out of the three frames it is nested
+;; inside.
+;;
+;;   -> eax = 1 when an exception is pending, 0 otherwise
+;; ============================================================================
+GCI_IT    equ 8
+GCI_NAME  equ 16
+GCI_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC gen_close_iter, GCI_FRAME
+    V_TEST_PTR rdi, rax
+    ja .gci_done                ; an immediate has no close
+    test rdi, rdi
+    jz .gci_done
+    mov [rbp - GCI_IT], rdi
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel gen_type]
+    cmp rax, rcx
+    je .gci_generator
+    lea rcx, [rel coro_type]
+    cmp rax, rcx
+    je .gci_generator
+    lea rcx, [rel async_gen_type]
+    cmp rax, rcx
+    jne .gci_by_name
+.gci_generator:
+    mov rdi, [rbp - GCI_IT]
+    call gen_close_impl
+    leave
+    ret
+
+.gci_by_name:
+    CSTRING rdi, "close"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    test rax, rax
+    jz .gci_done
+    mov [rbp - GCI_NAME], rax
+    mov rdi, [rbp - GCI_IT]
+    mov rsi, rax
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    mov [rbp - GCI_IT], rax     ; the bound close, or 0
+    mov rdi, [rbp - GCI_NAME]
+    call obj_decref
+    mov rax, [rbp - GCI_IT]
+    test rax, rax
+    jz .gci_no_close
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    extern obj_call_n
+    call obj_call_n
+    mov [rbp - GCI_NAME], rax   ; whatever it answered, or 0 with a raise
+    mov rdi, [rbp - GCI_IT]
+    call obj_decref             ; the bound method
+    mov rdi, [rbp - GCI_NAME]
+    test rdi, rdi
+    jz .gci_raised              ; it raised; leave that pending
+    DECREF_V rdi, rcx
+    jmp .gci_done
+
+.gci_no_close:
+    ; No close at all is not an error: obj_getattr_opt leaves an
+    ; AttributeError pending the way every miss does, and it is not this
+    ; function's failure.
+    extern attr_error_pending
+    cmp qword [rel current_exception], 0
+    je .gci_done
+    cmp qword [rel attr_error_pending], 0
+    je .gci_done
+    mov qword [rel attr_error_pending], 0
+    mov rdi, [rel current_exception]
+    mov qword [rel current_exception], 0
+    call obj_decref
+
+.gci_done:
+    xor eax, eax
+    leave
+    ret
+.gci_raised:
+    mov eax, 1
+    leave
+    ret
+END_FUNC gen_close_iter
+
+;; ============================================================================
+;; gen_close(PyGenObject *gen) -> rax = None, as a Value
+;;
+;; The Python-facing close(): an exception out of the cleanup propagates the
+;; only way this interpreter can propagate, by jumping into the unwinder.
+;; ============================================================================
+GCW_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC gen_close, GCW_FRAME
+    call gen_close_impl
+    test eax, eax
+    jnz .gcw_propagate
+    lea rax, [rel none_singleton]
+    mov rdi, rax
+    call obj_incref
+    lea rax, [rel none_singleton]
+    mov edx, TAG_PTR
+    leave
+    ret
+.gcw_propagate:
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
+END_FUNC gen_close
+
+;; ============================================================================
+;; gen_close_impl(rdi = the generator) -> eax = 1 when an exception is left
+;;   pending, 0 when the generator closed cleanly
+;;
+;; RETURNS the failure rather than raising it, which is what lets one
+;; generator close another.  gen_close_iter calls this from inside gen_throw,
+;; which is inside another gen_close, and a raise here is a non-local jump
+;; into the unwinder -- it abandons all three frames and resumes the eval loop
+;; with rbx pointing at nothing.  CPython's gen_close returns an int for the
+;; same reason, and its caller resumes the outer generator with the child's
+;; exception pending instead of raising GeneratorExit over the top of it.
 ;; ============================================================================
 GC_GEN   equ 8
 GC_FRAME equ 24            ; + 1 push = 32, 16-aligned
-DEF_FUNC gen_close, GC_FRAME
+DEF_FUNC gen_close_impl, GC_FRAME
     push rbx
     mov rbx, rdi
     mov [rbp - GC_GEN], rbx
@@ -1011,9 +1398,18 @@ DEF_FUNC gen_close, GC_FRAME
     test rdi, rdi
     jz .gc_done                     ; already exhausted: nothing to unwind
 
-    ; Throw GeneratorExit in, so that finally blocks and context managers
-    ; run.  This used to free the frame outright, so a generator's finally
-    ; simply never executed.
+    ; Throw GeneratorExit in, so that finally blocks and context managers run.
+    ; gen_throw is where the delegation lives: a generator suspended at a
+    ; `yield from` has its SUB-iterator closed first, and then GeneratorExit
+    ; is raised here rather than forwarded, so an inner `except GeneratorExit`
+    ; sees its own close and not a throw from above.  Doing the closing here
+    ; as well closed the child twice.
+    ;
+    ; This used to look as though it delegated.  The unwinder pops the outer
+    ; frame's value stack, which drops the last reference to the sub-generator,
+    ; and gen_dealloc ran its finally -- so the cleanup happened by REFCOUNT
+    ; rather than by delegation.  Hold a second reference to the inner
+    ; generator and it stayed suspended, its finally never running at all.
     extern exc_GeneratorExit_type
     mov rdi, rbx
     lea rsi, [rel exc_GeneratorExit_type]
@@ -1050,29 +1446,27 @@ DEF_FUNC gen_close, GC_FRAME
     mov qword [rbx + PyGenObject.gi_frame], 0
     call frame_free
 .gc_no_frame:
-
-    lea rax, [rel none_singleton]
-    mov rdi, rax
-    push rax
-    call obj_incref
-    pop rax
-    mov edx, TAG_PTR             ; None is a heap pointer
-
+    xor eax, eax
     pop rbx
     leave
     ret
 
 .gc_ignored_exit:
-    ; It yielded instead of finishing, which Python reports.
+    ; It yielded instead of finishing, which Python reports.  Set rather than
+    ; raised, for the reason in this function's header.
     extern exc_RuntimeError_type
-    RAISE exc_RuntimeError_type, "generator ignored GeneratorExit"
-
-.gc_propagate:
+    SET_EXC exc_RuntimeError_type, "generator ignored GeneratorExit"
+    mov eax, 1
     pop rbx
     leave
-    mov [rel eval_saved_r13], r13
-    jmp eval_exception_unwind
-END_FUNC gen_close
+    ret
+
+.gc_propagate:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC gen_close_impl
 
 ;; ============================================================================
 ;; gen_getattr(PyGenObject *self, PyObject *name) -> rax = Value
