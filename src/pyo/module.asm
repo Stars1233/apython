@@ -246,6 +246,8 @@ END_FUNC mg_dir_name
 ;; builtin_dir sorts whatever comes back and accepts any iterable, so a
 ;; module's own __dir__ may answer a tuple or a generator, as CPython's may.
 ;; ============================================================================
+MDD_HOOK  equ 8              ; the module's own __dir__, owned across the call
+MDD_RES   equ 16             ; its result, parked across the release
 MDD_FRAME equ 24             ; + 1 push = 40; DEF_FUNC's push rbp makes it 16-aligned
 DEF_FUNC_LOCAL module_dunder_dir, MDD_FRAME
     push rbx
@@ -275,10 +277,24 @@ DEF_FUNC_LOCAL module_dunder_dir, MDD_FRAME
 
     ; The module's own __dir__, called with no arguments.  obj_call_n refuses a
     ; non-callable with a TypeError, which is what CPython answers too.
+    ;
+    ; dict_get handed back a BORROWED reference and the call runs arbitrary
+    ; Python, so own it for the duration: a hook whose body is
+    ; `del globals()["__dir__"]` otherwise drops the last reference to the
+    ; function that is executing, and this frame goes on using freed memory.
+    INCREF_V rax, rcx
+    mov [rbp - MDD_HOOK], rax
     mov rdi, rax
     xor esi, esi
     xor edx, edx
     call obj_call_n
+    ; Release it before returning.  The result -- or the 0 that says the hook
+    ; raised -- goes to a frame slot across the DECREF, because obj_dealloc
+    ; clobbers every caller-saved register, rax included.
+    mov [rbp - MDD_RES], rax
+    mov rdi, [rbp - MDD_HOOK]
+    DECREF_V rdi, rcx
+    mov rax, [rbp - MDD_RES]
     pop rbx
     leave
     ret
@@ -306,7 +322,7 @@ END_FUNC module_dunder_dir
 ;; That is the same handshake instance_getattr's .getattr_raised uses, down to
 ;; the attr_error_pending flag raise_no_attribute reads.
 ;; ============================================================================
-MG_SELF   equ 8
+MG_HOOK   equ 8              ; the module's own __getattr__, owned across the call
 MG_NAME   equ 16             ; the attribute name, as the hook's one argument
 MG_FRAME  equ 32             ; + 2 pushes = 48, 16-aligned
 DEF_FUNC module_getattr, MG_FRAME
@@ -379,13 +395,32 @@ DEF_FUNC module_getattr, MG_FRAME
     ; The hook, called with the attribute name.  obj_call_n returns rather
     ; than unwinding, and refuses a non-callable with a TypeError of its own --
     ; which is CPython's answer for `m.__getattr__ = 5` too, so it is left to
-    ; do that.  Nothing in this frame is owned at that point.
-    mov [rbp - MG_SELF], rax
+    ; do that.
+    ;
+    ; dict_get handed back a BORROWED reference, and the call runs arbitrary
+    ; Python -- which may unbind the hook.  A body of
+    ; `del globals()["__getattr__"]` then drops the last reference to the
+    ; function that is currently executing, and every instruction after the
+    ; call reads freed memory.  So own it for the duration.  CPython's own
+    ; Lib/test/test_module/bad_getattr3.py is exactly this, and its comment is
+    ; "these lookups should not crash".
+    INCREF_V rax, rcx
+    mov [rbp - MG_HOOK], rax
     mov [rbp - MG_NAME], r12    ; the one-Value argument array
     mov rdi, rax
     lea rsi, [rbp - MG_NAME]
     mov edx, 1
     call obj_call_n
+    ; Release it here, before anything branches: the hook is finished with,
+    ; and one release point on the straight line is worth four on the exits --
+    ; the unwind tail below abandons this frame into eval_exception_unwind and
+    ; would be the easy one to forget.  The result, or the 0 that says the
+    ; hook raised, goes to a frame slot across the DECREF, because obj_dealloc
+    ; clobbers every caller-saved register, rax included.
+    mov [rbp - MG_NAME], rax
+    mov rdi, [rbp - MG_HOOK]
+    DECREF_V rdi, rcx
+    mov rax, [rbp - MG_NAME]
     test rax, rax
     jz .mg_hook_raised
     pop r12
