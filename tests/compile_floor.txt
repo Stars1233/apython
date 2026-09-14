@@ -391,6 +391,7 @@ test_int_subclass_methods
 test_int_subclass_new
 test_int_truediv
 test_int_truediv_spec
+test_io_enter_closed
 test_io_module
 test_io_prereqs
 test_io
