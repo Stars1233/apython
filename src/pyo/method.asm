@@ -29,7 +29,6 @@ extern obj_repr_address
 extern rbt_append_cstr
 extern str_from_cstr
 extern str_new_heap
-extern func_getattr
 extern func_type
 extern builtin_func_type
 extern type_type
@@ -338,22 +337,43 @@ DEF_FUNC method_getattr, MG_FRAME
     test eax, eax
     jz .mg_func
 
-    ; The underlying callable decides which getattr answers: func_getattr
-    ; reads a PyFunctionObject's own dict, and a builtin does not have one.
+    ; Everything else is the underlying callable's, and the callable's OWN
+    ; type says who answers.  This used to be a single comparison against
+    ; builtin_func_type with func_getattr as the else -- so anything that was
+    ; neither was read as a PyFunctionObject.  func_getattr fetches func_dict
+    ; at +64 and hands it to dict_get; +64 on a PyTypeObject is tp_call, a
+    ; code pointer, and the lookup jumped through it.
+    ;
+    ; That is not a hypothetical binding.  types.MethodType takes any
+    ; callable, and `classmethod(types.GenericAlias)` is how CPython spells
+    ; __class_getitem__ on asyncio.Future and dozens of other classes; asking
+    ; such a bound method for any name but __self__/__func__ went through the
+    ; garbage pointer.  inspect.unwrap probes __wrapped__ on everything, which
+    ; is how mock.Mock(spec=cls) reached it.
+    ;
+    ; Reading the slot gets func_getattr and builtin_func_getattr for the two
+    ; cases that were handled, and the right answer for every other callable.
+    ; The receiver is im_func and never the method: PyMethodObject is 32 bytes
+    ; with im_func at +16 and im_self at +24, which is exactly where a
+    ; generic alias keeps ga_origin and ga_args, so a method handed to the
+    ; wrong getattr reads as a plausible object of the other kind.
     mov rdi, [rbp - MG_SELF]
     mov rdi, [rdi + PyMethodObject.im_func]
     mov rsi, [rbp - MG_NAME]    ; the comparison above clobbered it
     mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel builtin_func_type]
-    cmp rax, rcx
-    je .mg_builtin
-    extern func_getattr
-    call func_getattr           ; already returns a Value
+    mov rax, [rax + PyTypeObject.tp_getattr]
+    test rax, rax
+    jz .mg_no_attr
+    call rax                    ; every tp_getattr returns a Value, or 0
     leave
     ret
-.mg_builtin:
-    extern builtin_func_getattr
-    call builtin_func_getattr
+
+.mg_no_attr:
+    ; A callable whose type has no tp_getattr at all has no attributes to
+    ; delegate to.  0 with nothing raised is "no such attribute"; the caller
+    ; -- op_load_attr, obj_getattr_opt or hasattr -- words the error.
+    xor eax, eax
+    xor edx, edx
     leave
     ret
 
