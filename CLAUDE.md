@@ -103,7 +103,8 @@ python3 tests/test_foo.py > /tmp/expected.txt
 diff /tmp/expected.txt /tmp/actual.txt
 ```
 
-**Dependencies:** nasm, gcc (linker), libgmp-dev, zlib1g-dev, python3.12
+**Dependencies:** nasm, gcc (linker), libgmp-dev, zlib1g-dev, libbz2-dev,
+libssl-dev, libexpat1-dev, python3.12
 
 ## Register Convention (eval loop)
 
@@ -267,6 +268,14 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   shim over `-lz`, on the precedent `-lgmp` set; `lib/zlib.py` is the module
   surface -- the Compress and Decompress objects, the constants, `zlib.error`
   and every default -- so each core call takes fixed positional arguments
+- `src/modules/bz2.asm` — the `_bz2core` module: libbzip2's bz_stream, the
+  output buffer that grows while the codec writes into it, and the handle
+  table.  A shim over `-lbz2`, the same split again: `lib/_bz2.py` is the
+  BZ2Compressor and BZ2Decompressor objects CPython's own `bz2.py` is written
+  against.  Two things about libbzip2 to know: `BZ_RUN` with no input left
+  answers `BZ_PARAM_ERROR` rather than doing nothing, because "no progress"
+  and "bad call" share a code there; and `avail_in`/`avail_out` are 32-bit
+  while the buffers need not be
 - `src/modules/hashlib.asm` — the `_hashlibcore` module: OpenSSL's
   EVP_MD_CTX and HMAC_CTX, PBKDF2, scrypt and a constant-time compare, behind
   a handle table.  A shim over `-lcrypto`, the same split again:

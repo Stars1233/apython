@@ -12,6 +12,7 @@ ok asyncio
 ok base64
 ok bdb
 ok bisect
+ok bz2
 ok calendar
 ok cgi
 ok cgitb

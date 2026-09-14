@@ -80,6 +80,7 @@ test_bytes_rsplit
 test_bytes_strmethods
 test_bytes_str_text
 test_bytes_subclass_dict
+test_bz2
 test_call_arg_order
 test_call_arg_ownership
 test_call_ex
