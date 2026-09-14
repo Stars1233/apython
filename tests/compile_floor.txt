@@ -270,6 +270,7 @@ test_exc_state_frame
 test_exec_builtins_value
 test_exec_custom_locals
 test_extended_slice
+test_faulthandler
 test_fileio
 test_final_types
 test_float_as_integer_ratio

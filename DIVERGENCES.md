@@ -63,6 +63,28 @@ the reasoning rather than from scratch.
   `pathlib` and `tempfile`'s cleanup -- 730 NameErrors across CPython's suite,
   and every one of those modules unusable.
 
+- **`faulthandler` reports deliberate faults, and is silent for a real
+  crash.**  CPython's is a C module and has to be: its whole point is to
+  report a crash, and by then calling into the interpreter is not safe -- its
+  handler writes the traceback from the signal context itself.  `lib/`'s is
+  Python over the `signal` module, so its handlers run the way every
+  Python-level signal handler in this tree runs: the C handler records the
+  signal and the eval loop delivers it at the top of an instruction.
+
+  That is enough for a signal a program RAISES -- `register(SIGUSR1)` really
+  does dump -- and for `dump_traceback_later`, which is `setitimer` with
+  SIGALRM and really does fire.  It is not enough for a genuine SIGSEGV: the
+  process is already somewhere the eval loop will not be reached, so the
+  report never comes.
+
+  Writing it in assembly would not be enough either; it would have to walk
+  r12's frame chain from the signal context and write with a raw `write(2)`,
+  never touching the allocator or the eval loop.  That is a real piece of
+  work for a report that only matters when the interpreter has already
+  failed, and having the module at all is what 113 of test_regrtest's tests
+  were waiting on.  `all_threads` is accepted and ignored, because there is
+  only ever one.
+
 - **`_thread` is a single-threaded stand-in.**  `lib/_thread.py` gives
   `get_ident` a constant, makes locks uncontended, and raises from
   `start_new_thread`.  Everything in the stdlib that only takes a lock works;
