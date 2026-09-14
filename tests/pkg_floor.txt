@@ -3,8 +3,6 @@
 # its number, and a new crash fails the target.
 # Regenerate with: bash tests/pkg_probe.sh --record
 crash test_asyncio
-crash test_email
-crash test_module
 pass test_ast 86
 pass test_asyncio 0
 pass test_capi 78
@@ -14,7 +12,7 @@ pass test_cppext 5
 pass test_ctypes 0
 pass test_dataclasses 216
 pass test_doctest 1
-pass test_email 0
+pass test_email 1667
 pass test_future_stmt 17
 pass test_gdb 0
 pass test_import 0
@@ -22,7 +20,7 @@ pass test_importlib 999
 pass test_inspect 0
 pass test_json 0
 pass test_lib2to3 655
-pass test_module 0
+pass test_module 26
 pass test_multiprocessing_fork 4
 pass test_multiprocessing_forkserver 4
 pass test_multiprocessing_spawn 4
