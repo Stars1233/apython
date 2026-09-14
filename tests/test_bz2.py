@@ -106,6 +106,18 @@ print("capped:", b"".join(pieces) == DATA, "rounds:", rounds > 1, "eof:", d.eof)
 d = _bz2.BZ2Decompressor()
 d.decompress(blob, 16)
 print("needs_input while holding:", d.needs_input)
+
+# needs_input is not simply "nothing is parked".  CPython sets it FALSE when
+# the output buffer filled exactly at the cap, because the codec may still be
+# holding bytes the next call will emit -- a caller told to go read more of
+# the file would stall.  Sweeping the cap is what exercises both arms: the
+# sizes where the two run out together are the ones that matter, and they are
+# not predictable from the outside.
+for cap in (1, 2, 3, 7, 15, 16, 17, 31, 64, 100, 255, 256, 1000, 4096):
+    dd = _bz2.BZ2Decompressor()
+    got = dd.decompress(blob, cap)
+    print("cap %-5d out=%-5d needs_input=%-5s eof=%s"
+          % (cap, len(got), dd.needs_input, dd.eof))
 d2 = _bz2.BZ2Decompressor()
 d2.decompress(blob[:20])
 print("needs_input while hungry:", d2.needs_input)

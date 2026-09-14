@@ -102,6 +102,7 @@ struc BHandle
     .mode:       resq 1  ; BC_COMPRESS or BC_DECOMPRESS
     .eof:        resq 1  ; the decoder reached BZ_STREAM_END
     .ended:      resq 1  ; bzCompressEnd/bzDecompressEnd has run
+    .needs_input: resq 1 ; what CPython's rule below makes it
     .tail:       resq 1  ; input the last feed did not consume, ours to free
     .tail_len:   resq 1
     .unused:     resq 1  ; input past the end of the stream, ours
@@ -339,6 +340,7 @@ DEF_FUNC bc_stream_new, BN_FRAME
     mov qword [rax + BHandle.magic], BC_MAGIC
     mov rcx, [rbp - BN_MODE]
     mov [rax + BHandle.mode], rcx
+    mov qword [rax + BHandle.needs_input], 1
     lea rdi, [rax + BHandle.bs]
     cmp rcx, BC_COMPRESS
     jne .bn_decompress
@@ -715,6 +717,25 @@ DEF_FUNC bc_stream_feed, BF_FRAME
     call ap_memcpy
 
 .bf_no_tail:
+    ; needs_input, by CPython's rule: false when the stream has ended, false
+    ; when input is parked, and false when the output buffer filled exactly at
+    ; the cap -- the codec may still be holding bytes that the next call will
+    ; emit, and a caller told to read more of the file would stall.
+    mov eax, 1
+    cmp qword [rbx + BHandle.eof], 0
+    jne .bf_no_need
+    cmp qword [rbx + BHandle.tail_len], 0
+    jne .bf_no_need
+    mov rcx, [rbp - BF_MAX]
+    test rcx, rcx
+    js .bf_set_need
+    cmp [rbp - BF_OUTLEN], rcx
+    jb .bf_set_need
+.bf_no_need:
+    xor eax, eax
+.bf_set_need:
+    mov [rbx + BHandle.needs_input], rax
+
     mov dword [rbx + BHandle.bs + BzStream.avail_in], 0
     mov qword [rbx + BHandle.bs + BzStream.next_in], 0
     mov qword [rbp - BF_INLEFT], 0
@@ -820,13 +841,12 @@ DEF_FUNC bc_stream_state, BT_FRAME
     mov rdx, [rdx + PyTupleObject.ob_item]
     mov [rdx], rax
 
-    ; needs_input is "nothing is parked": a max_length call that stopped short
-    ; leaves a tail, and the caller must send b"" rather than more input.
+    ; needs_input as the last feed worked it out; see the rule there.
     mov rcx, [rbp - BT_H]
-    lea rax, [rel bool_true]
-    cmp qword [rcx + BHandle.tail_len], 0
-    je .bt_have_needs
     lea rax, [rel bool_false]
+    cmp qword [rcx + BHandle.needs_input], 0
+    je .bt_have_needs
+    lea rax, [rel bool_true]
 .bt_have_needs:
     INCREF rax
     mov rdx, [rbp - BT_TUP]
