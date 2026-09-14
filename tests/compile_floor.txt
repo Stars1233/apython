@@ -595,6 +595,7 @@ test_slice_and_star_args
 test_slice_assign
 test_slice_compare
 test_slice_indices
+test_slice_negative_step
 test_slicing
 test_slot_bound_builtin
 test_slot_builtin_dunder_assign

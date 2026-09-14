@@ -481,8 +481,18 @@ DEF_FUNC slice_indices
     jmp .stop_ok
 .stop_pos:
     cmp rax, r14
-    jle .stop_ok
-    mov rax, r14           ; clamp to length
+    jl .stop_ok
+    ; At or past the end.  The upper bound is length for a positive step and
+    ; length - 1 for a negative one, exactly as PySlice_AdjustIndices has it:
+    ; a negative step walks DOWN from start, and the largest index it can ever
+    ; name is length - 1.  Clamping both to length made `b"..."[0:256:-1]` on
+    ; a 256-byte object report a stop ABOVE every valid index, and the callers
+    ; that size a buffer from (start - stop) then computed a negative count
+    ; and allocated it unsigned.
+    mov rax, r14
+    test r15, r15
+    jns .stop_ok
+    dec rax
 .stop_ok:
     mov r13, rax           ; r13 = stop
 

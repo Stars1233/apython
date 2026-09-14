@@ -260,9 +260,15 @@ DEF_FUNC bytes_subscript
     ; Extended slice: compute length
     test r15, r15
     jg .bs_pos_step
-    ; Negative step
+    ; Negative step.  The span has to be tested before it is divided: a stop
+    ; at or above start means the slice is empty, and (start - stop - 1) is
+    ; then negative -- which `div` reads as a number near 2^64 and `bytes_new`
+    ; tries to allocate.  The positive arm has had this guard all along;
+    ; b"..."[5:10:-1] built a bytes whose ob_size was negative, and
+    ; b"..."[0:256:-1] was "Fatal: out of memory".
     mov rax, r13
     sub rax, r14
+    jle .bs_empty
     dec rax
     mov rcx, r15
     neg rcx
