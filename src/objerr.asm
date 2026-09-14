@@ -212,6 +212,81 @@ DEF_FUNC raise_descriptor_receiver, RDR_FRAME
 END_FUNC raise_descriptor_receiver
 
 ;; ============================================================================
+;; raise_missing_receiver(rdi = the PyBuiltinObject)
+;;   -> does not return: the message is raised as a TypeError
+;;
+;; A method descriptor or a slot wrapper reached UNBOUND and called with no
+;; arguments at all.  There is no receiver to check, so raise_descriptor_
+;; receiver above cannot word it; CPython has a separate pair for this, and
+;; the same split by kind:
+;;   unbound method generator.close() needs an argument
+;;   descriptor '__get__' of 'classmethod' object needs an argument
+;;
+;; The shape reaching here is `type(g()).close(*())` -- an unbound method and
+;; an empty argument sequence.  It cannot arrive through a bound method,
+;; which always prepends its receiver, which is why tests/arity_probe.sh
+;; could not see it: the probe calls every method through an instance, so
+;; nargs is never 0 there.
+;; ============================================================================
+RMR_DESC  equ 8
+RMR_BUF   equ 240
+RMR_FRAME equ 240           ; + 0 pushes = 240, 16-aligned
+global raise_missing_receiver
+DEF_FUNC raise_missing_receiver, RMR_FRAME
+    mov [rbp - RMR_DESC], rdi
+    lea rdi, [rbp - RMR_BUF]
+    mov rcx, [rbp - RMR_DESC]
+    cmp qword [rcx + PyBuiltinObject.func_kind], BUILTIN_KIND_WRAPPER
+    je .rmr_wrapper
+
+    ; unbound method <owner>.<name>() needs an argument
+    CSTRING rsi, "unbound method "
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rmr_owner_name
+    mov rdi, rax
+    CSTRING rsi, "."
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rmr_func_name
+    mov rdi, rax
+    CSTRING rsi, "() needs an argument"
+    call rbt_append_cstr
+    jmp .rmr_raise
+
+.rmr_wrapper:
+    ; descriptor '<name>' of '<owner>' object needs an argument
+    CSTRING rsi, "descriptor '"
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rmr_func_name
+    mov rdi, rax
+    CSTRING rsi, "' of '"
+    call rbt_append_cstr
+    mov rdi, rax
+    call .rmr_owner_name
+    mov rdi, rax
+    CSTRING rsi, "' object needs an argument"
+    call rbt_append_cstr
+
+.rmr_raise:
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RMR_BUF]
+    call raise_exception
+
+.rmr_owner_name:
+    mov rcx, [rbp - RMR_DESC]
+    mov rcx, [rcx + PyBuiltinObject.func_owner]
+    mov rsi, [rcx + PyTypeObject.tp_name]
+    jmp rbt_append_cstr
+.rmr_func_name:
+    mov rcx, [rbp - RMR_DESC]
+    mov rsi, [rcx + PyBuiltinObject.func_name]
+    lea rsi, [rsi + PyStrObject.data]
+    jmp rbt_append_cstr
+END_FUNC raise_missing_receiver
+
+;; ============================================================================
 ;; raise_wrapper_arity(rdi = the number of arguments wanted, not counting
 ;;                     self; rsi = the number given, likewise)
 ;;   -> does not return: the message is raised as a TypeError

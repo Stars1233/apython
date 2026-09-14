@@ -225,7 +225,7 @@ DEF_FUNC_BARE builtin_func_call
     cmp qword [rdi + PyBuiltinObject.func_kind], BUILTIN_KIND_ON_TYPE
     je .bfc_receiver_ok         ; its receiver is a class, not an instance
     test rdx, rdx
-    jz .bfc_receiver_ok         ; no arguments at all: the arity check ruled
+    jz .bfc_no_receiver         ; no arguments at all, so no receiver either
     push rdi
     push rsi
     push rdx
@@ -280,6 +280,25 @@ DEF_FUNC_BARE builtin_func_call
     mov rdi, rsi                ; args
     mov rsi, rdx                ; nargs
     jmp rax
+
+.bfc_no_receiver:
+    ; A method descriptor reached unbound with NO arguments at all.  This used
+    ; to fall through to the arity check with the comment "the arity check
+    ; ruled" -- and that was the bug, because min_args is 0 for everything
+    ; registered with ADD_FN rather than ADD_FN_N, and 0 means "no check".  So
+    ; the body was entered with a NULL args array and dereferenced args[0].
+    ;
+    ;     def g(): yield 1
+    ;     type(g()).close(*())
+    ;
+    ; is five lines and a SIGSEGV, and seven more methods had the same hole:
+    ; coroutine.close, BaseException/OSError/StopIteration.__reduce__, and
+    ; __get__ on property, classmethod and staticmethod.  Checking it here
+    ; rather than in each of them is what makes the next one impossible --
+    ; every builtin method funnels through this function, which is why the
+    ; receiver TYPE check above lives here too.
+    extern raise_missing_receiver
+    jmp raise_missing_receiver      ; rdi = the descriptor; does not return
 
 .bfc_wrong_receiver:
     add rsp, 8
@@ -416,6 +435,7 @@ BKO_NAME "__eq__"
 BKO_NAME "__float__"
 BKO_NAME "__floordiv__"
 BKO_NAME "__ge__"
+BKO_NAME "__get__"
 BKO_NAME "__getattribute__"
 BKO_NAME "__gt__"
 BKO_NAME "__hash__"
