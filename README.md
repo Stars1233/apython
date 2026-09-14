@@ -40,7 +40,8 @@ x86-64 assembly would not have been feasible for 1 person without LLM.
 
 ## Quick start
 
-**Dependencies:** nasm, gcc (linker), libgmp-dev, zlib1g-dev, python3.12
+**Dependencies:** nasm, gcc (linker), libgmp-dev, zlib1g-dev, libbz2-dev,
+liblzma-dev, libssl-dev, libexpat1-dev, python3.12
 
 ```bash
 make                # build ./apython
@@ -332,7 +333,15 @@ tests/                  the test suite
 - `gcc` — linker
 - `libgmp-dev` — arbitrary precision integers
 - `zlib1g-dev` — deflate, for `zlib` and everything behind it
+- `libbz2-dev` — bzip2, for `bz2` and the `.bz2` members of a tarball
+- `liblzma-dev` — xz, for `lzma` and the `.xz` members of a tarball
+- `libssl-dev` — OpenSSL's digests, for `_hashlib`'s `pbkdf2_hmac` and `scrypt`
+- `libexpat1-dev` — the XML parser behind `pyexpat` and `xml.etree`
 - `python3.12` — compiling test `.py` files to `.pyc`
+
+These are what the single `LDFLAGS` line in the Makefile links; the same list
+is in `CLAUDE.md` and in `.github/workflows/ci.yml`, and the three are kept in
+step.
 
 **Make targets:**
 
