@@ -394,6 +394,7 @@ test_int_truediv_spec
 test_io_module
 test_io_prereqs
 test_io
+test_io_size_args
 test_io_subclass
 test_io_tail
 test_isinstance_hostile
