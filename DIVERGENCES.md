@@ -646,3 +646,20 @@ happens to hold more than one reference to: `FLAG_REF` is set from
 `ob_refcnt > 1` there, so `marshal.dumps(0)` carries it in CPython and not
 here.  Both are valid streams and each reads the other's; what is not stable
 is the bytes.
+
+## `sys.getsizeof()` reports the allocation, not CPython's number
+
+`sys.getsizeof(1)` is 48 here and 28 in CPython; `sys.getsizeof('abc')` is 40
+against 44.  The sizes are honest for this interpreter and simply describe a
+different object: an int carries a compact `ival` and an `mpz_t` slot that is
+only initialised on overflow, where CPython's is a variable-length digit array;
+a str keeps UTF-8 with a byte length and a code-point length, where CPython's
+keeps a latin-1/UCS-2/UCS-4 body with a different header.
+
+`object.__sizeof__` answers `tp_basicsize` and each type that knows better
+adds its own variable part, which is the shape CPython uses -- so the numbers
+move correctly with the data even though they do not match.
+
+What this costs is `test.support.check_sizeof`, which asserts exact figures:
+those tests fail rather than crash, and they are measuring CPython's layout
+rather than a property of the language.

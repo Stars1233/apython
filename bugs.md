@@ -404,49 +404,13 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **A dict view has no `isdisjoint` and no `mapping`.**  `{1: 2}.keys()`
-  answers AttributeError for both, where CPython's `dict_keys` carries an
-  `isdisjoint` that short-circuits on the first common element and a
-  `mapping` that is a read-only `mappingproxy` over the dict itself.
-  `collections.abc.Set` registers `dict_keys` and its `isdisjoint` is the one
-  every set-algebra caller reaches for.  The three views share one `tp_dict`
-  builder in `init_attrs.asm` (`dict_view_add_reversed`), so both are rows
-  there; `mapping` needs a `mappingproxy` over `PyDictViewObject.dv_dict`,
-  and `mappingproxy` is already a type here.
-
-- **`code.co_lnotab` is absent.**  It is deprecated in favour of
-  `co_lines()`, which this tree has, and it is still what `dis`, `pdb` and
-  several of CPython's own tests read.  It is a computed getter over
-  `co_linetable` -- the same table `code_method_co_lines` already walks, in
-  the older byte-pair encoding -- so it is a translation rather than a second
-  side table.
-
-- **`re.Match` is not subscriptable.**  `re.Match[str]` is
-  "TypeError: type 're.Match' is not subscriptable", where CPython answers a
-  `types.GenericAlias`.  It is one `__class_getitem__` row on the match
-  type's `tp_dict`; `test_clinic` aborts on it at module scope, and typing a
-  regex result is ordinary in annotated code.
-
-- **Four slots have no `tp_dict` entry.**  `bytes.__bytes__`,
-  `range.__bool__` and `NoneType.__bool__` all work through the protocol and
-  answer AttributeError when asked for by name.  That is the shape CLAUDE.md
-  records under "a builtin's behaviour that lives only in a slot": the stdlib
-  asks by name, and a slot with no matching row answers wrong.
-
-- **`marshal` reads and does not write.**  `marshal.dumps`, `marshal.dump`
-  and the `__pycache__` writing that would use them are absent; the reader is
-  complete.  Nothing in the reader is reusable on the write side -- there is
-  no output buffer, no writers, and `marshal_refs` is an indexed array that
-  cannot answer "have I written this object before?", which the `FLAG_REF`
-  memo needs as an identity table.  The consequence that costs most is not
-  `marshal` itself: nothing writes `__pycache__`, so `lib/` is recompiled
-  from source on every start.
-
 - **`str.find` and `str.count` are the naive O(n*m) search.**  CPython's is
   Crochemore-Perrin two-way with a Bloom-filter skip, which is O(n + m), and
   its own test says so: `string_tests.test_adaptive_find` searches a
-  1,000,000-character haystack built to defeat the naive scan, and
-  test_userstring and test_string time out on it here rather than failing.
+  1,000,000-character haystack built to defeat the naive scan, and it is what
+  makes `test_bytes`, `test_unicode`, `test_userstring` and `test_string` time
+  out rather than fail -- the four that the RC sweep still reports as HANG,
+  beside `test_zipfile64`, which is a multi-gigabyte test by design.
   Ordinary searches are unaffected -- the shapes that hurt are the ones with
   long repeated prefixes.
 
