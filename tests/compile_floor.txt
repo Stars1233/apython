@@ -683,6 +683,7 @@ test_str_subclass_slots
 test_str_translate_mapping
 test_str_translate
 test_struct_binascii
+test_struct_module
 test_structseq
 test_structseq_tail
 test_str_unicode_space
