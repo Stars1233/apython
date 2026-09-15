@@ -137,4 +137,40 @@ src = "from __future__ import annotations\ndef k(x: Missing) -> Gone: pass\n"
 ns = {}
 exec(compile(src, "<s>", "exec"), ns)
 print("compiled from a string:", ns["k"].__annotations__)
+# --- the statement is validated, which it never was --------------------
+# CPython's future.c refuses a name that is not one of the ten features, the
+# star form (which names none), and `braces`, which has had its own answer
+# since 3.0.  None of the three was checked here: `from __future__ import *`
+# compiled and bound whatever __all__ listed.
+for src, what in (
+        ("from __future__ import *\n", "the star form"),
+        ("from __future__ import rested_snopes\n", "a misspelling"),
+        ("from __future__ import braces\n", "braces"),
+        ("from __future__ import annotations, nope\n", "one of two bad"),
+):
+    try:
+        compile(src, "<s>", "exec")
+        print("%-18s NOT REFUSED" % what)
+    except SyntaxError as exc:
+        print("%-18s %s (col %s)" % (what, exc.msg, exc.offset))
+
+# All ten real ones are accepted, together and apart.
+import __future__ as _f
+
+for name in _f.all_feature_names:
+    try:
+        compile("from __future__ import %s\n" % name, "<s>", "exec")
+        print("%-18s accepted" % name)
+    except SyntaxError as exc:
+        print("%-18s REFUSED %s" % (name, exc.msg))
+compile("from __future__ import %s\n" % ", ".join(_f.all_feature_names),
+        "<s>", "exec")
+print("all ten at once: accepted")
+
+# A module actually called __future__ under a relative import is not one.
+try:
+    compile("from .__future__ import annotations\n", "<s>", "exec")
+    print("a relative import: compiled")
+except SyntaxError as exc:
+    print("a relative import:", exc.msg)
 print("survived")
