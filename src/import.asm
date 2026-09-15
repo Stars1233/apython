@@ -1494,7 +1494,8 @@ END_FUNC pyc_is_stale
 ;; import_source_path(rdi = the path a search matched) -> rax = the path to
 ;;   record as __file__, which is rdi itself unless it is a __pycache__ entry
 ;;
-;; "<dir>/__pycache__/<name>.cpython-312.pyc" becomes "<dir>/<name>.py".  The
+;; "<dir>/__pycache__/<name>.<tag>.pyc" becomes "<dir>/<name>.py", for either
+;; of the two cache tags im_open_pyc reads.  The
 ;; other two cache shapes the search tries -- a bare "<name>.cpython-312.pyc"
 ;; beside the source, and a package's __init__ -- are handled by the same
 ;; rewrite, since both keep the name in the last component.  A .pyc that is
@@ -1512,7 +1513,7 @@ DEF_FUNC import_source_path
     push r14                    ; four pushes keep rsp 16-aligned at the call
     mov rbx, rdi
 
-    ; It has to end in ".cpython-312.pyc".
+    ; It has to end in one of the two cache tags.
     mov rdi, rbx
     call ap_strlen
     mov r12, rax                ; the length
@@ -1526,7 +1527,14 @@ DEF_FUNC import_source_path
     mov edx, 16
     call ap_memcmp
     test eax, eax
+    jz .isp_tagged
+    lea rdi, [rbx + r12 - 16]
+    lea rsi, [rel isp_ap_suffix]
+    mov edx, 16
+    call ap_memcmp
+    test eax, eax
     jnz .isp_keep
+.isp_tagged:
 
     ; ...and contain "/__pycache__/" somewhere before the last component.
     xor r13, r13                ; the index of the marker, once found
@@ -1601,6 +1609,75 @@ DEF_FUNC import_source_path
     leave
     ret
 END_FUNC import_source_path
+
+;; ============================================================================
+;; im_open_pyc(rdi = a path ending in a sixteen-byte cache tag, rsi = its
+;;   length) -> rax = an open fd on a FRESH .pyc, or -1
+;;
+;; Two spellings are tried, in order: ".apython-312.pyc" and
+;; ".cpython-312.pyc".  They are the same sixteen characters long, so the
+;; second is the first with the tag overwritten in place.
+;;
+;; The two tags exist because this interpreter both READS CPython's caches --
+;; `make check` feeds it .pyc files python3 compiled, and it must -- and now
+;; WRITES its own.  Writing under CPython's tag would put bytecode from this
+;; compiler where a python3 running in the same tree would pick it up: valid
+;; 3.12 bytecode, but not the bytecode CPython would have produced, and the
+;; sweeps in tests/ measure apython against exactly such a shared tree.  So:
+;; read both, write ours.  PEP 3147's cache tag is there for this.
+;; ============================================================================
+IOP_BUF   equ 8
+IOP_LEN   equ 16
+IOP_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC_LOCAL im_open_pyc, IOP_FRAME
+    mov [rbp - IOP_BUF], rdi
+    mov [rbp - IOP_LEN], rsi
+    cmp rsi, IM_TAG_LEN
+    jb .iop_none
+
+    lea rsi, [rel im_ap_pyc_tag]
+    mov rdi, [rbp - IOP_BUF]
+    add rdi, [rbp - IOP_LEN]
+    sub rdi, IM_TAG_LEN
+    mov edx, IM_TAG_LEN
+    call ap_memcpy
+    mov rdi, [rbp - IOP_BUF]
+    xor esi, esi                        ; O_RDONLY
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    js .iop_second
+    mov rdi, rax
+    mov rsi, [rbp - IOP_BUF]
+    call sd_pyc_ok
+    test rax, rax
+    jnz .iop_out
+
+.iop_second:
+    lea rsi, [rel im_cp_pyc_tag]
+    mov rdi, [rbp - IOP_BUF]
+    add rdi, [rbp - IOP_LEN]
+    sub rdi, IM_TAG_LEN
+    mov edx, IM_TAG_LEN
+    call ap_memcpy
+    mov rdi, [rbp - IOP_BUF]
+    xor esi, esi
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    js .iop_none
+    mov rdi, rax
+    mov rsi, [rbp - IOP_BUF]
+    call sd_pyc_ok
+    test rax, rax
+    jnz .iop_out
+
+.iop_none:
+    mov rax, -1
+.iop_out:
+    leave
+    ret
+END_FUNC im_open_pyc
 
 ;; ============================================================================
 ;; import_search_dirs(PyListObject *dirs, const char *leaf, int64_t leaf_len) -> int
@@ -1707,18 +1784,11 @@ DEF_FUNC import_search_dirs, SD_FRAME
     add r14, im_pkg_pyc_suffix_len
     mov byte [r12 + r14], 0
 
-    ; Try to open
     mov rdi, r12
-    xor esi, esi                ; O_RDONLY
-    xor edx, edx
-    call sys_open
+    mov rsi, r14
+    call im_open_pyc
     test rax, rax
-    js .sd_p2
-    mov rdi, rax
-    mov rsi, r12
-    call sd_pyc_ok
-    test eax, eax
-    jnz .sd_found_package
+    jns .sd_found_package
 
 .sd_p2:
     ; --- Pattern 2: <dir>/__pycache__/<leaf>.cpython-312.pyc ---
@@ -1755,18 +1825,11 @@ DEF_FUNC import_search_dirs, SD_FRAME
     add r13, im_pyc_suffix_len
     mov byte [r12 + r13], 0
 
-    ; Try to open
     mov rdi, r12
-    xor esi, esi
-    xor edx, edx
-    call sys_open
+    mov rsi, r13
+    call im_open_pyc
     test rax, rax
-    js .sd_p3
-    mov rdi, rax
-    mov rsi, r12
-    call sd_pyc_ok
-    test eax, eax
-    jnz .sd_found_module
+    jns .sd_found_module
 
 .sd_p3:
     ; --- Pattern 3: <dir>/<leaf>.cpython-312.pyc ---
@@ -1793,18 +1856,11 @@ DEF_FUNC import_search_dirs, SD_FRAME
     add r13, im_pyc_suffix_len
     mov byte [r12 + r13], 0
 
-    ; Try to open
     mov rdi, r12
-    xor esi, esi
-    xor edx, edx
-    call sys_open
+    mov rsi, r13
+    call im_open_pyc
     test rax, rax
-    js .sd_p4
-    mov rdi, rax
-    mov rsi, r12
-    call sd_pyc_ok
-    test eax, eax
-    jnz .sd_found_module
+    jns .sd_found_module
 
 .sd_p4:
     ; --- Pattern 4: <dir>/<leaf>/__init__.py (a package, from source) ---
@@ -2068,16 +2124,10 @@ DEF_FUNC import_search_syspath, SS_FRAME
     mov byte [r12 + r14], 0
 
     mov rdi, r12
-    xor esi, esi
-    xor edx, edx
-    call sys_open
+    mov rsi, r14
+    call im_open_pyc
     test rax, rax
-    js .ss_after_pyc0
-    mov rdi, rax
-    mov rsi, r12
-    call sd_pyc_ok
-    test eax, eax
-    jnz .ss_found_package
+    jns .ss_found_package
 .ss_after_pyc0:
 
     ; --- Pattern 2: <dir>/__pycache__/<leaf>.cpython-312.pyc ---
@@ -2110,16 +2160,10 @@ DEF_FUNC import_search_syspath, SS_FRAME
     mov byte [r12 + r13], 0
 
     mov rdi, r12
-    xor esi, esi
-    xor edx, edx
-    call sys_open
+    mov rsi, r13
+    call im_open_pyc
     test rax, rax
-    js .ss_after_pyc1
-    mov rdi, rax
-    mov rsi, r12
-    call sd_pyc_ok
-    test eax, eax
-    jnz .ss_found_module
+    jns .ss_found_module
 .ss_after_pyc1:
 
     ; --- Pattern 3: <dir>/<leaf>.cpython-312.pyc ---
@@ -2145,16 +2189,10 @@ DEF_FUNC import_search_syspath, SS_FRAME
     mov byte [r12 + r13], 0
 
     mov rdi, r12
-    xor esi, esi
-    xor edx, edx
-    call sys_open
+    mov rsi, r13
+    call im_open_pyc
     test rax, rax
-    js .ss_after_pyc2
-    mov rdi, rax
-    mov rsi, r12
-    call sd_pyc_ok
-    test eax, eax
-    jnz .ss_found_module
+    jns .ss_found_module
 .ss_after_pyc2:
 
     ; --- Pattern 4: <dir>/<full>/__init__.py (a package, from source) ---
@@ -3034,6 +3072,12 @@ im_pyc_suffix_len      equ $ - im_pyc_suffix - 1
 im_legacy_pyc_suffix:     db ".pyc", 0
 im_legacy_pyc_suffix_len  equ $ - im_legacy_pyc_suffix - 1
 
+; The two cache tags im_open_pyc swaps between, without their NULs: they must
+; be the same length, and they are.
+im_ap_pyc_tag:         db ".apython-312.pyc"
+im_cp_pyc_tag:         db ".cpython-312.pyc"
+IM_TAG_LEN             equ 16
+
 im_pkg_py_suffix:      db "/__init__.py", 0
 im_pkg_py_suffix_len   equ $ - im_pkg_py_suffix - 1
 
@@ -3042,6 +3086,7 @@ im_py_suffix_len       equ $ - im_py_suffix - 1
 
 section .rodata
 isp_suffix: db ".cpython-312.pyc", 0
+isp_ap_suffix: db ".apython-312.pyc", 0
 isp_marker: db "/__pycache__/", 0
 
 section .bss

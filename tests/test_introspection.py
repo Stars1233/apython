@@ -89,7 +89,10 @@ import sys
 
 # .name is legitimately "apython" here, so only the parts a loader
 # depends on are compared against CPython.
-print(isinstance(sys.implementation.name, str), sys.implementation.cache_tag)
+# cache_tag names the interpreter that WROTE a .pyc, and ours is not
+# CPython's; see tests/test_pycache_write.py.
+print(isinstance(sys.implementation.name, str),
+      sys.implementation.cache_tag.endswith("-312"))
 print(type(sys.implementation).__name__, sys.warnoptions)
 
 # PEP 585 and PEP 604

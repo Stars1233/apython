@@ -853,7 +853,9 @@ DEF_FUNC sys_module_init, 40
     ; --- sys.implementation ---
     ; types.py takes SimpleNamespace from `type(sys.implementation)`, so this
     ; has to be a namespace rather than a tuple or a dict.  cache_tag is what
-    ; a loader uses to find .pyc files, and apython reads CPython 3.12 ones.
+    ; a loader uses to NAME a .pyc, so it is this interpreter's own: apython
+    ; reads CPython 3.12's caches as well, but it must not write under their
+    ; name, or a python3 in the same tree picks up bytecode from our compiler.
     ; r14/r15 belong to the module dicts here, so the namespace lives in a
     ; frame slot.
     extern namespace_new
@@ -2005,7 +2007,7 @@ sm_implementation: db "implementation", 0
 sm_name:         db "name", 0
 sm_apython_name: db "apython", 0
 sm_cache_tag:    db "cache_tag", 0
-sm_cache_tag_val: db "cpython-312", 0
+sm_cache_tag_val: db "apython-312", 0
 sm_warnoptions:  db "warnoptions", 0
 sm_builtin_module_names: db "builtin_module_names", 0
 

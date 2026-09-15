@@ -1138,7 +1138,7 @@ END_FUNC marshal_load_fn
 ;; pyc_cache_path(rdi = a source path as a C string)
 ;;   -> rax = the cache path, in a static buffer, or 0 when there is none
 ;;
-;; "<dir>/foo.py" becomes "<dir>/__pycache__/foo.cpython-312.pyc".  Anything
+;; "<dir>/foo.py" becomes "<dir>/__pycache__/foo.apython-312.pyc".  Anything
 ;; not ending in ".py" has no cache path: a sourceless .pyc IS its own cache
 ;; file, and the finder hands over other things besides.
 ;;
@@ -1235,7 +1235,7 @@ END_FUNC pyc_cache_path
 ;;   -> nothing.  Every failure is silent.
 ;;
 ;; What stops lib/ being recompiled from source on every start.  The layout is
-;; CPython's: "<dir>/__pycache__/<stem>.cpython-312.pyc", a sixteen-byte header
+;; CPython's: "<dir>/__pycache__/<stem>.apython-312.pyc", a sixteen-byte header
 ;; of magic / flags / source mtime / source size, then the marshalled code --
 ;; the same header pyc_read_file validates, read from the other side.
 ;;
@@ -1448,7 +1448,11 @@ END_FUNC pyc_write_cache
 section .rodata
 pycw_dirname:     db "__pycache__", 0
 pycw_dirname_len  equ 11
-pycw_suffix:      db ".cpython-312.pyc", 0
+; The tag is this interpreter's, not CPython's.  import.asm READS both and
+; writes only this one: bytecode from our compiler under CPython's tag would
+; be picked up by a python3 running in the same tree, and the sweeps in tests/
+; measure apython against exactly such a shared tree.
+pycw_suffix:      db ".apython-312.pyc", 0
 pycw_suffix_len   equ 17
 
 section .bss

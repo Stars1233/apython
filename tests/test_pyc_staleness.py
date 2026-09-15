@@ -6,11 +6,12 @@ it again silently runs the old code -- which is what happened here, and what
 makes the compiled `lib/` a trap rather than a cache the moment one of its
 sources is touched by hand.
 
-The cache this needs is built by copying one that already exists, because
-this interpreter never writes a .pyc of its own and marshal.dumps is not
-here to make one.  Aligning the copy's mtime with the header makes the pair
-agree; appending a line to the source makes them disagree in both the size
-and the mtime, which is the case the check is for.
+The cache this needs is built by copying one that already exists rather than
+by importing: what is under test is the CHECK, and a cache this interpreter
+wrote would agree with its source by construction.  Aligning the copy's mtime
+with the header makes the pair agree; appending a line to the source makes
+them disagree in both the size and the mtime, which is the case the check is
+for.
 """
 
 import os
@@ -73,7 +74,10 @@ import stalemod as restored
 
 print(restored.S_IFDIR, hasattr(restored, "MARKER"))
 
-os.unlink(target_cache)
+# Everything in the cache directory, not just the file this test wrote: an
+# import through apython leaves its own tag's entry beside it.
+for _name in sorted(os.listdir(cachedir)):
+    os.unlink(os.path.join(cachedir, _name))
 os.unlink(target_src)
 os.rmdir(cachedir)
 os.rmdir(root)

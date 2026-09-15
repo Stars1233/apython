@@ -72,4 +72,9 @@ print("implementation is a namespace with a name:",
       isinstance(sys.implementation.name, str) and sys.implementation.name.islower())
 print("implementation.version agrees with version_info:",
       tuple(sys.implementation.version)[:3] == tuple(sys.version_info)[:3])
-print("implementation.cache_tag:", sys.implementation.cache_tag)
+# The tag itself is this interpreter's own -- apython writes
+# "<name>.apython-312.pyc" so that a python3 in the same tree is never handed
+# bytecode from our compiler -- so what is compared is its SHAPE.
+_tag = sys.implementation.cache_tag
+print("implementation.cache_tag:", _tag.endswith("-312"),
+      _tag.split("-")[0].endswith("python"))

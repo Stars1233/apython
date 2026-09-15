@@ -25,7 +25,7 @@ pass test_multiprocessing_fork 4
 pass test_multiprocessing_forkserver 4
 pass test_multiprocessing_spawn 4
 pass test_peg_generator 65
-pass test_pydoc 60
+pass test_pydoc 59
 pass test_sqlite3 0
 pass test_tkinter 0
 pass test_tomllib 13

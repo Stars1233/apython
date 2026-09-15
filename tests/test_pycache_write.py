@@ -10,7 +10,10 @@ import os
 import sys
 
 
-SUFFIX = ".cpython-312.pyc"
+# The tag is this interpreter's own, so a python3 in the same tree is not
+# handed bytecode from our compiler.  Both tags are READ; only ours is written.
+SUFFIX = getattr(sys.implementation, "cache_tag", "cpython-312")
+SUFFIX = "." + SUFFIX + ".pyc"
 MAGIC = (3531).to_bytes(2, "little") + b"\r\n"
 
 
