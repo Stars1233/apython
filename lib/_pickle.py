@@ -23,3 +23,56 @@ the arrangement.
 # Unpickler, which is the whole implementation here.  No names are re-exported
 # for the reason _json.py gives: pickle would take them as the fast path, and
 # they would be the slow one wearing its name.
+#
+# PickleBuffer is the exception, and it is not an accelerator: it is a TYPE,
+# and protocol 5 is defined in terms of it.  CPython has nowhere else to put
+# it -- `from _pickle import PickleBuffer` at pickle.py's module scope is the
+# only way in -- so without it the whole out-of-band buffer protocol is
+# missing and pickle.py's own `dispatch[PickleBuffer]` arm is unreachable.
+
+
+class PickleBuffer:
+    """A wrapper around a buffer, for PEP 574's out-of-band pickling.
+
+    CPython's is a C type that supports the buffer protocol itself; this one
+    cannot, which is the one thing it does not do.  Nothing in pickle.py
+    needs that: it reaches for `raw()` and uses the memoryview, and the
+    Unpickler hands the buffers from `buffers=` straight back.
+
+    A released PickleBuffer refuses raw() rather than answering a dangling
+    view, and a non-contiguous buffer is refused at raw() rather than at
+    construction -- both CPython's choices, and both what test_pickle asks.
+    """
+
+    __slots__ = ("_view",)
+
+    def __init__(self, buffer):
+        self._view = memoryview(buffer)
+
+    def raw(self):
+        """-> a NEW one-dimensional memoryview of unsigned bytes.
+
+        New every time, and that is not an optimisation to skip: pickle.py
+        writes `with obj.raw() as m:`, so whatever this returns is RELEASED
+        when the block ends.  Handing back the stored view meant the second
+        call found it released, and the out-of-band path -- which calls raw()
+        once inside the dump and once more on the buffer the callback kept --
+        died with "operation forbidden on released memoryview object".
+        """
+        view = self._view
+        if view is None:
+            raise ValueError(
+                "operation forbidden on released PickleBuffer object")
+        if not view.contiguous:
+            raise BufferError(
+                "cannot extract raw buffer from non-contiguous buffer")
+        if view.format == "B" and view.ndim == 1:
+            return view[:]
+        return view.cast("B")
+
+    def release(self):
+        """Drop the view.  Idempotent, as CPython's is."""
+        view = self._view
+        if view is not None:
+            self._view = None
+            view.release()
