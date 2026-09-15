@@ -480,12 +480,12 @@ DEF_FUNC func_call
     inc esi
     jmp .check_args_loop
 .args_missing:
-    ; Free the frame before raising
-    push rsi
-    mov rdi, r12
-    call frame_free
-    pop rsi
-    RAISE exc_TypeError_type, "function missing required argument"
+    ; The names of what is missing come out of the frame's empty slots, so
+    ; the raiser frees the frame rather than the caller.
+    mov rdi, rbx
+    mov rsi, r12
+    extern raise_missing_arguments
+    call raise_missing_arguments
 .args_valid:
     ; === Phase 7: Call eval_frame ===
     mov rdi, r12
@@ -1626,12 +1626,19 @@ END_FUNC func_repr
 ;; Does not return.
 ;; ============================================================================
 RTMP_BUF  equ 256
+; Whether the count being reported is 1.  CPython pluralises "argument" on
+; that count rather than unconditionally, so "takes 1 positional arguments"
+; was wrong -- and only in the exact-count form: the "from N to M" wording is
+; always plural.  A slot rather than a register, because this function's
+; push list sets the frame's alignment.
+RTMP_SINGULAR equ RTMP_BUF + 8
 RTMP_FRAME equ RTMP_BUF + 24
 DEF_FUNC raise_too_many_positional, RTMP_FRAME
     push rbx
     push r12
     mov rbx, rdi               ; func
     mov r12d, esi              ; nargs_given
+    mov qword [rbp - RTMP_SINGULAR], 0
 
     ; Get qualname C-string
     mov rax, [rbx + PyFuncObject.func_code]
@@ -1706,13 +1713,20 @@ DEF_FUNC raise_too_many_positional, RTMP_FRAME
 
 .rtmp_exact_count:
     ; Just "{max} "
+    cmp eax, 1
+    jne .rtmp_exact_plural
+    mov qword [rbp - RTMP_SINGULAR], 1
+.rtmp_exact_plural:
     call .rtmp_itoa
 
 .rtmp_msg_cont:
     ; " positional argument(s) but {given} were given"
-    ; Check singular/plural
     push rdi
     lea rsi, [rel rtmp_pos_args]
+    cmp qword [rbp - RTMP_SINGULAR], 0
+    je .rtmp_pos_plural
+    lea rsi, [rel rtmp_pos_arg]
+.rtmp_pos_plural:
     call .rtmp_strcpy
     pop rdi
     add rdi, rax               ; advance by length
@@ -1804,6 +1818,7 @@ END_FUNC raise_too_many_positional
 
 section .rodata
 rtmp_pos_args:     db " positional arguments but ", 0
+rtmp_pos_arg:      db " positional argument but ", 0
 rtmp_were_given:   db " were given", 0
 rtmp_was_given:    db " was given", 0
 

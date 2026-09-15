@@ -735,3 +735,227 @@ DEF_FUNC raise_callable_arg, RCA_FRAME
     lea rsi, [rbp - RCA_BUF]
     call raise_exception
 END_FUNC raise_callable_arg
+
+;; ============================================================================
+;; raise_missing_arguments(rdi = the PyFuncObject, rsi = its half-filled frame)
+;;   -> does not return: the composed message is raised as a TypeError
+;;
+;;   f() missing 1 required positional argument: 'b'
+;;   f() missing 2 required positional arguments: 'a' and 'b'
+;;   f() missing 3 required positional arguments: 'a', 'b', and 'c'
+;;   g() missing 1 required keyword-only argument: 'k'
+;;
+;; What this replaced was the one string "function missing required argument",
+;; for every shape of wrong call: it named neither the function, nor the
+;; arguments, nor how many were wanted.  It is the most-seen error message in
+;; Python -- a typo in a call produces it -- and a test that asserts on a
+;; TypeError almost always asserts on this one.
+;;
+;; A missing POSITIONAL wins.  CPython reports the positionals when any are
+;; missing and the keyword-only ones only once the positionals are all
+;; filled, so the two never appear in one message; which family it is also
+;; decides the middle word and is not derivable from the slot range, because
+;; a function with no positional parameters has its keyword-only ones at slot
+;; zero.
+;;
+;; The name list is CPython's and is not a plain join: one name stands bare,
+;; two are joined with " and ", and three or more are comma-separated with an
+;; Oxford comma before the last.
+;;
+;; The frame is freed here, because the caller cannot free it first -- the
+;; empty slots are what says which arguments are missing.
+;; ============================================================================
+RMA_FUNC    equ 8
+RMA_FRAME_P equ 16
+RMA_NAMES   equ 24
+RMA_DEST    equ 32
+RMA_FIRST   equ 40
+RMA_LAST    equ 48
+RMA_KWONLY  equ 56
+RMA_WRITTEN equ 64
+RMA_IDX     equ 72
+RMA_SLOTS   equ 80
+; The names are user identifiers of any length, so the buffer is derived
+; rather than hand-picked and every name is written under a bound: an
+; append helper has none of its own, and six long parameter names would
+; otherwise run off the end of the frame.
+RMA_BUFLEN  equ 512
+RMA_ROOM    equ 128            ; kept free, so a name never lands half-written
+RMA_BUF     equ RMA_SLOTS + RMA_BUFLEN
+RMA_FRAME   equ RMA_BUF        ; + 4 pushes = 640, 16-aligned
+
+extern frame_free
+
+global raise_missing_arguments
+DEF_FUNC raise_missing_arguments, RMA_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov rbx, rdi                        ; the function
+    mov r12, rsi                        ; its frame
+    mov r13, [rbx + PyFuncObject.func_code]
+    mov rcx, [r13 + PyCodeObject.co_localsplusnames]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rbp - RMA_NAMES], rcx
+
+    ; --- the positional range first: slots [0, co_argcount)
+    mov qword [rbp - RMA_FIRST], 0
+    mov qword [rbp - RMA_KWONLY], 0
+    xor esi, esi
+    mov edx, [r13 + PyCodeObject.co_argcount]
+    movsxd rax, edx
+    mov [rbp - RMA_LAST], rax
+    mov rdi, r12
+    call .rma_count
+    test eax, eax
+    jnz .rma_have_range
+
+    ; --- else the keyword-only range: [co_argcount, + co_kwonlyargcount)
+    mov qword [rbp - RMA_KWONLY], 1
+    mov esi, [r13 + PyCodeObject.co_argcount]
+    movsxd rax, esi
+    mov [rbp - RMA_FIRST], rax
+    mov edx, esi
+    add edx, [r13 + PyCodeObject.co_kwonlyargcount]
+    movsxd rax, edx
+    mov [rbp - RMA_LAST], rax
+    mov rdi, r12
+    call .rma_count
+    test eax, eax
+    jz .rma_nothing_missing
+
+.rma_have_range:
+    mov r14d, eax                       ; how many are missing, at least 1
+
+    ; --- "<qualname>() missing <n> required "
+    mov rdi, [r13 + PyCodeObject.co_qualname]
+    test rdi, rdi
+    jnz .rma_have_qualname
+    mov rdi, [rbx + PyFuncObject.func_name]
+    test rdi, rdi
+    jz .rma_nothing_missing
+.rma_have_qualname:
+    lea rsi, [rdi + PyStrObject.data]
+    lea rdi, [rbp - RMA_BUF]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "() missing "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov esi, r14d
+    call msg_append_i64
+    mov rdi, rax
+
+    cmp qword [rbp - RMA_KWONLY], 0
+    jne .rma_word_kwonly
+    CSTRING rsi, " required positional argument"
+    jmp .rma_word_chosen
+.rma_word_kwonly:
+    CSTRING rsi, " required keyword-only argument"
+.rma_word_chosen:
+    call rbt_append_cstr
+    mov rdi, rax
+    cmp r14d, 1
+    je .rma_singular
+    CSTRING rsi, "s"
+    call rbt_append_cstr
+    mov rdi, rax
+.rma_singular:
+    CSTRING rsi, ": "
+    call rbt_append_cstr
+    mov [rbp - RMA_DEST], rax
+    mov qword [rbp - RMA_WRITTEN], 0
+
+    ; --- the names, each from co_localsplusnames at its own slot
+    mov rax, [rbp - RMA_FIRST]
+    mov [rbp - RMA_IDX], rax
+.rma_name_loop:
+    mov rcx, [rbp - RMA_IDX]
+    cmp rcx, [rbp - RMA_LAST]
+    jge .rma_names_done
+    cmp qword [r12 + PyFrame.localsplus + rcx*8], 0
+    jne .rma_name_next
+    ; Stop rather than overrun: the room left has to hold a name, its quotes
+    ; and a separator.
+    mov rax, [rbp - RMA_DEST]
+    lea rdx, [rbp - RMA_BUF]
+    sub rax, rdx
+    cmp rax, RMA_BUFLEN - RMA_ROOM
+    jge .rma_names_done
+
+    ; A separator, unless this is the first name.  The last of several takes
+    ; ", and " -- or " and " when there are exactly two.
+    cmp qword [rbp - RMA_WRITTEN], 0
+    je .rma_no_separator
+    mov rax, [rbp - RMA_WRITTEN]
+    inc rax
+    cmp eax, r14d
+    jne .rma_plain_separator
+    cmp r14d, 2
+    jne .rma_oxford
+    CSTRING rsi, " and "
+    jmp .rma_write_separator
+.rma_oxford:
+    CSTRING rsi, ", and "
+    jmp .rma_write_separator
+.rma_plain_separator:
+    CSTRING rsi, ", "
+.rma_write_separator:
+    mov rdi, [rbp - RMA_DEST]
+    call rbt_append_cstr
+    mov [rbp - RMA_DEST], rax
+.rma_no_separator:
+    mov rdi, [rbp - RMA_DEST]
+    CSTRING rsi, "'"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rcx, [rbp - RMA_IDX]
+    mov rsi, [rbp - RMA_NAMES]
+    mov rsi, [rsi + rcx*8]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "'"
+    call rbt_append_cstr
+    mov [rbp - RMA_DEST], rax
+    inc qword [rbp - RMA_WRITTEN]
+.rma_name_next:
+    inc qword [rbp - RMA_IDX]
+    jmp .rma_name_loop
+
+.rma_names_done:
+    mov rdi, r12
+    call frame_free
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RMA_BUF]
+    call raise_exception
+
+.rma_nothing_missing:
+    ; Unreachable from func_call, which only comes here having found an empty
+    ; slot.  Kept so that a future caller with a different notion of "filled"
+    ; gets a message rather than "missing 0 required arguments".
+    mov rdi, r12
+    call frame_free
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "function missing required argument"
+    call raise_exception
+
+;; rdi = frame, esi = first slot, edx = one past the last
+;;   -> eax = how many of those slots are empty
+.rma_count:
+    xor eax, eax
+    mov ecx, esi
+.rma_count_loop:
+    cmp ecx, edx
+    jge .rma_count_done
+    movsxd r9, ecx
+    cmp qword [rdi + PyFrame.localsplus + r9*8], 0
+    jne .rma_count_next
+    inc eax
+.rma_count_next:
+    inc ecx
+    jmp .rma_count_loop
+.rma_count_done:
+    ret
+END_FUNC raise_missing_arguments
