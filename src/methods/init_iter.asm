@@ -138,13 +138,25 @@ ITER_ROW_SIZE     equ 48
     extern %1_type
     extern %1_dunder_iter
     extern %1_dunder_next
-    extern %2
     dq %1_type, %1_dunder_iter, %1_dunder_next, %2, %3, %4
 %endmacro
 
+; The __reduce__ implementations the rows above name.  They used to be
+; declared by the macro itself, which cannot work now that a row may have
+; none: `extern 0` is not a declaration.
+extern list_iter_reduce
+extern tuple_iter_reduce
+extern range_iter_reduce
+extern str_iter_reduce
+extern bytes_iter_reduce
+extern bytearray_iter_reduce
 extern seqiter_setstate
 extern seqiter_length_hint
 extern range_iter_length_hint
+extern dictiter_length_hint
+extern setiter_length_hint
+extern dictrev_length_hint
+extern reversed_length_hint
 
 align 8
 iter_type_table:
@@ -156,17 +168,22 @@ iter_type_table:
     ITER_ROW_PICKLE bytes_iter, bytes_iter_reduce, seqiter_setstate, seqiter_length_hint
     ITER_ROW_PICKLE bytearray_iter, bytearray_iter_reduce, seqiter_setstate, seqiter_length_hint
     ITER_ROW memoryview_iter
-    ITER_ROW set_iter
-    ITER_ROW dict_iter
-    ITER_ROW dict_value_iter
-    ITER_ROW dict_item_iter
-    ITER_ROW dict_rev_iter
+    ; The four that walk a sparse entry table, plus the set's: what is left
+    ; is the occupied slots from the index on, which is what
+    ; dictiter_length_hint counts.  They have no __reduce__ of their own --
+    ; CPython's pickles such an iterator by draining it into a list, and
+    ; nothing here does that yet -- so the row carries the hint alone.
+    ITER_ROW_PICKLE set_iter, 0, 0, setiter_length_hint
+    ITER_ROW_PICKLE dict_iter, 0, 0, dictiter_length_hint
+    ITER_ROW_PICKLE dict_value_iter, 0, 0, dictiter_length_hint
+    ITER_ROW_PICKLE dict_item_iter, 0, 0, dictiter_length_hint
+    ITER_ROW_PICKLE dict_rev_iter, 0, 0, dictrev_length_hint
     ITER_ROW enumerate_iter
     ITER_ROW zip_iter
     ITER_ROW map_iter
     ITER_ROW filter_iter
     ITER_ROW callable_iter
     ITER_ROW seq_iter
-    ITER_ROW reversed_iter
+    ITER_ROW_PICKLE reversed_iter, 0, 0, reversed_length_hint
     ITER_ROW sre_scanner
 ITER_TYPE_COUNT equ ($ - iter_type_table) / ITER_ROW_SIZE

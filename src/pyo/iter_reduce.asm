@@ -34,6 +34,7 @@
 %include "object.inc"
 %include "value.inc"
 
+extern int_from_i64
 extern tuple_new
 extern list_new
 extern str_new_heap
@@ -895,3 +896,156 @@ END_FUNC range_iter_length_hint
 section .bss
 ir_iter_cached: resq 1
 ir_getattr_cached: resq 1
+
+section .text
+
+;; ============================================================================
+;; dictiter_length_hint(rdi = args Value[], rsi = nargs) -> rax = an int Value
+;; setiter_length_hint -- the same, over a set's narrower entries
+;; dictrev_length_hint -- the same, counting DOWN
+;;
+;; How many entries the iterator has left.  CPython keeps a counter it
+;; decrements per next(); these index a SPARSE entry table, so the answer is
+;; the occupied slots between the index and the end -- O(n) where CPython's
+;; is O(1), and called once, by a caller about to walk all n anyway.
+;;
+;; Three entry points rather than one, because the walk differs in two ways
+;; that cannot be read off the object.  A set shares PyDictObject's HEADER
+;; and not its entries: SET_ENTRY_SIZE is sixteen bytes where DictEntry_size
+;; is twenty-four, and using the wrong stride reports a plausible wrong
+;; number -- a ten-element set read as a dict answered 47.  And the
+;; reversed-dict iterator starts at the end and counts DOWN, so its remaining
+;; entries are the ones BELOW its index.
+;; ============================================================================
+DLH_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC dictiter_length_hint, DLH_FRAME
+    test rsi, rsi
+    jz .dlh_args
+    mov rdi, [rdi]
+    mov r8d, DictEntry_size
+    xor r9d, r9d                        ; forward
+    call dlh_count
+    V_PACK rax, rdx
+    leave
+    ret
+.dlh_args:
+    RAISE exc_TypeError_type, "__length_hint__() takes exactly one argument"
+END_FUNC dictiter_length_hint
+
+;; ============================================================================
+;; setiter_length_hint(rdi = args Value[], rsi = nargs) -> rax = an int Value
+;; ============================================================================
+DEF_FUNC setiter_length_hint, DLH_FRAME
+    test rsi, rsi
+    jz .slhx_args
+    mov rdi, [rdi]
+    mov r8d, SET_ENTRY_SIZE
+    xor r9d, r9d
+    call dlh_count
+    V_PACK rax, rdx
+    leave
+    ret
+.slhx_args:
+    RAISE exc_TypeError_type, "__length_hint__() takes exactly one argument"
+END_FUNC setiter_length_hint
+
+;; ============================================================================
+;; dictrev_length_hint(rdi = args Value[], rsi = nargs) -> rax = an int Value
+;; ============================================================================
+DEF_FUNC dictrev_length_hint, DLH_FRAME
+    test rsi, rsi
+    jz .drlh_args
+    mov rdi, [rdi]
+    mov r8d, DictEntry_size
+    mov r9d, 1                          ; backward
+    call dlh_count
+    V_PACK rax, rdx
+    leave
+    ret
+.drlh_args:
+    RAISE exc_TypeError_type, "__length_hint__() takes exactly one argument"
+END_FUNC dictrev_length_hint
+
+;; ============================================================================
+;; dlh_count(rdi = the iterator, r8 = the entry stride, r9 = 1 to count
+;;           downward) -> rax = an int Value's payload, edx = its tag
+;;
+;; An entry is occupied when its key is non-zero; a tombstone leaves the hash
+;; set and the key clear, so one test covers both kinds of hole.
+;; ============================================================================
+DEF_FUNC_LOCAL dlh_count, 16
+    mov rax, [rdi + PyDictIterObject.it_dict]
+    test rax, rax
+    jz .dlc_zero                    ; dropped, or cleared by the collector
+    mov rcx, [rdi + PyDictIterObject.it_index]
+    mov rsi, [rax + PyDictObject.entries]
+    test r9, r9
+    jnz .dlc_back
+    mov rdx, [rax + PyDictObject.capacity]
+    xor r10d, r10d
+.dlc_fwd:
+    cmp rcx, rdx
+    jge .dlc_done
+    mov rax, rcx
+    imul rax, r8
+    add rax, rsi
+    cmp qword [rax + SET_ENTRY_KEY], 0
+    je .dlc_fwd_next
+    inc r10
+.dlc_fwd_next:
+    inc rcx
+    jmp .dlc_fwd
+
+.dlc_back:
+    ; The index is the next slot to VISIT, so it counts itself; an index
+    ; below zero is exhaustion.
+    xor r10d, r10d
+.dlc_bck:
+    test rcx, rcx
+    js .dlc_done
+    mov rax, rcx
+    imul rax, r8
+    add rax, rsi
+    cmp qword [rax + SET_ENTRY_KEY], 0
+    je .dlc_bck_next
+    inc r10
+.dlc_bck_next:
+    dec rcx
+    jmp .dlc_bck
+
+.dlc_done:
+    mov rdi, r10
+    call int_from_i64
+    leave
+    ret
+.dlc_zero:
+    xor edi, edi
+    call int_from_i64
+    leave
+    ret
+END_FUNC dlh_count
+
+;; ============================================================================
+;; reversed_length_hint(rdi = args Value[], rsi = nargs) -> rax = an int Value
+;;
+;; A reversed iterator counts DOWN, so what is left is the index plus one --
+;; and an index of -1 is exhaustion, which answers 0 rather than a negative.
+;; ============================================================================
+RLH_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC reversed_length_hint, RLH_FRAME
+    test rsi, rsi
+    jz .rlh_args
+    mov rdi, [rdi]
+    mov rax, [rdi + PyDictIterObject.it_index]
+    inc rax
+    jns .rlh_have
+    xor eax, eax
+.rlh_have:
+    mov rdi, rax
+    call int_from_i64
+    V_PACK rax, rdx
+    leave
+    ret
+.rlh_args:
+    RAISE exc_TypeError_type, "__length_hint__() takes exactly one argument"
+END_FUNC reversed_length_hint

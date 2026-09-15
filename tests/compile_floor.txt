@@ -339,6 +339,7 @@ test_generator_close_on_drop
 test_generator_close_throw
 test_generator_frame_back
 test_generator_frame
+test_generator_introspection
 test_generators
 test_generator_throw_delegation
 test_generic_alias_ctor
@@ -416,6 +417,7 @@ test_iterable_arg_errors
 test_iterable_arguments
 test_iterator_cycles
 test_iterator_dunders
+test_iterator_length_hint
 test_iterator_slots
 test_iter_free_during_iteration
 test_iter_sentinel
