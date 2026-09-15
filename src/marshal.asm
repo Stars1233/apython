@@ -1634,6 +1634,24 @@ mdo_list:
     call list_new
     mov r14, rax
 
+    ; Publish the container into its reserved ref slot NOW, not after the
+    ; children are read.  A list can hold itself, and the TYPE_REF that says
+    ; so is read inside the loop below -- filling the slot at the end left it
+    ; NULL for the whole of that read, and the element came back as a NULL
+    ; Value that nothing raised on.  CPython's r_ref does the same thing in
+    ; the same place.
+    mov rax, [rsp + 0]
+    test eax, eax
+    jz .mlist_no_publish
+    test r14, r14
+    jz .mlist_no_publish
+    mov rax, [rsp + 8]
+    mov rcx, [rel marshal_refs]
+    mov [rcx + rax*8], r14
+    mov rdi, r14
+    call obj_incref
+.mlist_no_publish:
+
     xor r15d, r15d
 .mlist_loop:
     ; A refusal already recorded means every read below returns nothing and
@@ -1675,15 +1693,6 @@ mdo_list:
     jmp .mlist_loop
 
 .mlist_done:
-    mov rax, [rsp + 0]
-    test eax, eax
-    jz .mlist_no_fixup
-    mov rax, [rsp + 8]
-    mov rcx, [rel marshal_refs]
-    mov [rcx + rax*8], r14
-    mov rdi, r14
-    call obj_incref
-.mlist_no_fixup:
     mov rax, r14
     mov edx, TAG_PTR
     add rsp, 16
@@ -1717,6 +1726,24 @@ mdo_dict:
     extern dict_new
     call dict_new
     mov r14, rax
+
+    ; Publish the container into its reserved ref slot NOW, not after the
+    ; children are read.  A dict can hold itself, and the TYPE_REF that says
+    ; so is read inside the loop below -- filling the slot at the end left it
+    ; NULL for the whole of that read, and the element came back as a NULL
+    ; Value that nothing raised on.  CPython's r_ref does the same thing in
+    ; the same place.
+    mov rax, [rsp + 0]
+    test eax, eax
+    jz .mdict_no_publish
+    test r14, r14
+    jz .mdict_no_publish
+    mov rax, [rsp + 8]
+    mov rcx, [rel marshal_refs]
+    mov [rcx + rax*8], r14
+    mov rdi, r14
+    call obj_incref
+.mdict_no_publish:
 
 .mdict_loop:
     ; A refusal already recorded means every read below returns nothing and
@@ -1758,15 +1785,6 @@ mdo_dict:
     jmp .mdict_loop
 
 .mdict_done:
-    mov rax, [rsp + 0]
-    test eax, eax
-    jz .mdict_no_fixup
-    mov rax, [rsp + 8]
-    mov rcx, [rel marshal_refs]
-    mov [rcx + rax*8], r14
-    mov rdi, r14
-    call obj_incref
-.mdict_no_fixup:
     mov rax, r14
     mov edx, TAG_PTR
     add rsp, 16
@@ -2258,6 +2276,63 @@ DEF_FUNC marshal_module_init, 24        ; + 1 push = 32, 16-aligned
     test rbx, rbx
     jz .mmi_fail
     mov [rbp - MMI_MOD], rbx
+
+    extern marshal_load_fn
+    lea rdi, [rel marshal_load_fn]
+    CSTRING rsi, "load"
+    call builtin_func_new
+    test rax, rax
+    jz .mmi_fail
+    push rax
+    CSTRING rdi, "load"
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    extern marshal_dump_fn
+    lea rdi, [rel marshal_dump_fn]
+    CSTRING rsi, "dump"
+    call builtin_func_new
+    test rax, rax
+    jz .mmi_fail
+    push rax
+    CSTRING rdi, "dump"
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    extern marshal_dumps_fn
+    lea rdi, [rel marshal_dumps_fn]
+    CSTRING rsi, "dumps"
+    call builtin_func_new
+    test rax, rax
+    jz .mmi_fail
+    push rax
+    CSTRING rdi, "dumps"
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
 
     lea rdi, [rel marshal_loads_fn]
     CSTRING rsi, "loads"

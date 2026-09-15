@@ -622,3 +622,27 @@ then declined, and the observable behaviour is CPython's; what differs is
 which of `hmac.py`'s two branches runs for a lambda.  This is the
 single-builtin-callable-type divergence recorded above, reaching one more
 module.
+
+## `marshal.load()` reads the whole stream, not one object
+
+CPython's `marshal.load()` pulls bytes from the file as the reader needs them,
+so a file holding several marshalled objects is walked with one call per
+object, and the file is left positioned after the one just read.  Ours calls
+`file.read()` once and hands the whole result to the same reader `loads` uses.
+
+For the only shape anybody writes -- a `.pyc`, or a file holding one object --
+the two agree.  They differ for a file holding two: the second `load()` sees
+an empty read and raises `EOFError`, and a file that is not seekable is
+consumed whole rather than up to the object's end.
+
+The reason is that the reader is written against a contiguous buffer with a
+position in it (`marshal_buf`/`marshal_pos`/`marshal_len`), which is what a
+`.pyc` already is.  Making it pull would mean an input abstraction under every
+one of its read primitives, for a form of the call that nothing in the stdlib
+makes.
+
+`marshal.dumps()` also differs from CPython's byte for byte on values CPython
+happens to hold more than one reference to: `FLAG_REF` is set from
+`ob_refcnt > 1` there, so `marshal.dumps(0)` carries it in CPython and not
+here.  Both are valid streams and each reads the other's; what is not stable
+is the bytes.
