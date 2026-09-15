@@ -1320,6 +1320,244 @@ DEF_FUNC sock_poll_fn, 56
 END_FUNC sock_poll_fn
 
 ;; ============================================================================
+;; sock_epoll_create_fn(flags) -> the epoll descriptor
+;;
+;; epoll_create1(2).  The Python half is lib/select.py's epoll object, the
+;; same split poll() already uses: the syscalls are here and the registry,
+;; the timeout arithmetic and the context manager are Python.
+;; ============================================================================
+extern sys_epoll_create1
+extern sys_epoll_ctl
+extern sys_epoll_wait
+DEF_FUNC sock_epoll_create_fn, 16       ; + 0 pushes = 16, 16-aligned
+    test rsi, rsi
+    jz .sec_noflags
+    mov rdi, [rdi]
+    call sk_int_arg
+    mov rdi, rax
+    jmp .sec_go
+.sec_noflags:
+    xor edi, edi
+.sec_go:
+    call sys_epoll_create1
+    SOCK_CHECK rax
+    mov rdi, rax
+    call int_from_i64
+    V_PACK rax, rdx
+    leave
+    ret
+END_FUNC sock_epoll_create_fn
+
+;; ============================================================================
+;; sock_epoll_ctl_fn(epfd, op, fd, events) -> None
+;;
+;; epoll_ctl(2).  The event's `data` is set to the descriptor itself, which is
+;; what lets epoll_wait below answer (fd, events) pairs without a side table.
+;;
+;; struct epoll_event is PACKED on x86-64: a u32 of events followed by the
+;; 8-byte union, twelve bytes in all and not sixteen.  Writing it as two
+;; aligned words puts the descriptor four bytes past where the kernel reads
+;; it, and every event comes back for descriptor zero.
+;; ============================================================================
+SEC_EV    equ 16            ; the twelve-byte event, padded to the slot
+SEC_FRAME equ 24            ; + 0 pushes = 24... padded to 16 below
+DEF_FUNC sock_epoll_ctl_fn, 32
+    cmp rsi, 4
+    jne .sctl_args
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + 24]                 ; events
+    call sk_int_arg
+    mov [rbp - SEC_EV], eax
+    mov rdi, [rbx + 16]                 ; fd
+    call sk_int_arg
+    mov [rbp - SEC_EV + 4], rax         ; data.u64 = the descriptor
+    mov rdi, [rbx + 8]                  ; op
+    call sk_int_arg
+    push rax
+    mov rdi, [rbx]                      ; epfd
+    call sk_int_arg
+    pop rsi
+    mov rdi, rax
+    mov rdx, [rbp - SEC_EV + 4]         ; fd, again
+    lea rcx, [rbp - SEC_EV]
+    call sys_epoll_ctl
+    SOCK_CHECK rax
+    pop rbx
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.sctl_args:
+    RAISE exc_TypeError_type, "epoll_ctl() takes exactly 4 arguments"
+END_FUNC sock_epoll_ctl_fn
+
+;; ============================================================================
+;; sock_epoll_wait_fn(epfd, maxevents, timeout_ms) -> [fd, events, fd, ...]
+;;
+;; epoll_wait(2), answering the flat list poll() answers in: one descriptor
+;; and one mask per ready file, which the Python half pairs up.
+;;
+;; EINTR is handled the way poll()'s is, and for the same reason: Linux never
+;; restarts epoll_wait, so the Python handler has to run here and the wait
+;; resume against a DEADLINE rather than starting its timeout again.
+;; ============================================================================
+SEW_EVS   equ 8
+SEW_MAX   equ 16
+SEW_TMO   equ 24
+SEW_OUT   equ 32
+SEW_I     equ 40
+SEW_N     equ 48
+SEW_DEADLINE equ 56
+SEW_EPFD  equ 64
+SEW_FRAME equ 72            ; + 1 push = 80, 16-aligned
+DEF_FUNC sock_epoll_wait_fn, SEW_FRAME
+    push rbx
+    cmp rsi, 3
+    jne .sew_args
+    mov rbx, rdi
+    mov rdi, [rbx]
+    call sk_int_arg
+    mov [rbp - SEW_EPFD], rax
+    mov rdi, [rbx + 8]
+    call sk_int_arg
+    test rax, rax
+    jle .sew_badmax
+    mov [rbp - SEW_MAX], rax
+    mov rdi, [rbx + 16]
+    call sk_int_arg
+    mov [rbp - SEW_TMO], rax
+
+    ; Twelve bytes each; the allocation is rounded up so a partial trailing
+    ; event can never be written past the end.
+    mov rdi, [rbp - SEW_MAX]
+    imul rdi, rdi, 12
+    add rdi, 16
+    call ap_malloc
+    test rax, rax
+    jz .sew_fail
+    mov [rbp - SEW_EVS], rax
+
+    mov qword [rbp - SEW_DEADLINE], -1
+    mov rax, [rbp - SEW_TMO]
+    test rax, rax
+    js .sew_wait
+    mov ecx, 1000000
+    imul rax, rcx
+    push rax
+    sub rsp, 8
+    call spl_monotonic_ns
+    add rsp, 8
+    pop rcx
+    add rax, rcx
+    mov [rbp - SEW_DEADLINE], rax
+
+.sew_wait:
+    mov rdi, [rbp - SEW_EPFD]
+    mov rsi, [rbp - SEW_EVS]
+    mov rdx, [rbp - SEW_MAX]
+    mov rcx, [rbp - SEW_TMO]
+    call sys_epoll_wait
+    cmp rax, -4095
+    jb .sew_waited
+    cmp rax, -4
+    jne .sew_failed
+    cmp qword [rel signal_any_pending], 0
+    je .sew_remaining
+    call signal_run_pending
+    test eax, eax
+    jnz .sew_handler_raised
+.sew_remaining:
+    cmp qword [rbp - SEW_DEADLINE], -1
+    je .sew_wait
+    call spl_monotonic_ns
+    mov rcx, [rbp - SEW_DEADLINE]
+    sub rcx, rax
+    jle .sew_expired
+    mov rax, rcx
+    xor edx, edx
+    mov ecx, 1000000
+    div rcx
+    mov [rbp - SEW_TMO], rax
+    jmp .sew_wait
+.sew_expired:
+    mov qword [rbp - SEW_TMO], 0
+    jmp .sew_wait
+
+.sew_handler_raised:
+    mov rdi, [rbp - SEW_EVS]
+    call ap_free
+    pop rbx
+    leave
+    jmp eval_exception_unwind
+
+.sew_failed:
+    push rax
+    push rax
+    mov rdi, [rbp - SEW_EVS]
+    call ap_free
+    pop rax
+    pop rax
+    SOCK_CHECK rax
+
+.sew_waited:
+    mov [rbp - SEW_N], rax
+    mov rdi, rax
+    add rdi, rdi
+    call list_new
+    test rax, rax
+    jz .sew_freefail
+    mov [rbp - SEW_OUT], rax
+    xor ecx, ecx
+    mov [rbp - SEW_I], rcx
+.sew_out:
+    mov rcx, [rbp - SEW_I]
+    cmp rcx, [rbp - SEW_N]
+    jae .sew_done
+    imul rcx, rcx, 12
+    mov rdx, [rbp - SEW_EVS]
+    mov rdi, [rdx + rcx + 4]            ; data.u64 -- the descriptor
+    call int_from_i64
+    V_PACK rax, rdx
+    mov rdi, [rbp - SEW_OUT]
+    mov rsi, rax
+    call list_append
+    mov rcx, [rbp - SEW_I]
+    imul rcx, rcx, 12
+    mov rdx, [rbp - SEW_EVS]
+    mov edi, [rdx + rcx]                ; the mask
+    call int_from_i64
+    V_PACK rax, rdx
+    mov rdi, [rbp - SEW_OUT]
+    mov rsi, rax
+    call list_append
+    inc qword [rbp - SEW_I]
+    jmp .sew_out
+.sew_done:
+    mov rdi, [rbp - SEW_EVS]
+    call ap_free
+    mov rax, [rbp - SEW_OUT]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.sew_freefail:
+    mov rdi, [rbp - SEW_EVS]
+    call ap_free
+.sew_fail:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+.sew_badmax:
+    RAISE exc_ValueError_type, "maxevents must be positive"
+.sew_args:
+    RAISE exc_TypeError_type, "epoll_wait() takes exactly 3 arguments"
+END_FUNC sock_epoll_wait_fn
+
+;; ============================================================================
 ;; spl_monotonic_ns() -> rax = CLOCK_MONOTONIC in nanoseconds
 ;;
 ;; What poll()'s retry measures its remaining timeout against.  The event
@@ -1385,6 +1623,9 @@ DEF_FUNC socket_module_create, SMC_FRAME
     MODULE_ADD_FUNC sock_get_blocking_fn, sk_n_get_blocking
     MODULE_ADD_FUNC sock_gethostname_fn,  sk_n_gethostname
     MODULE_ADD_FUNC sock_poll_fn,         sk_n_poll
+    MODULE_ADD_FUNC sock_epoll_create_fn, sk_n_epoll_create
+    MODULE_ADD_FUNC sock_epoll_ctl_fn,    sk_n_epoll_ctl
+    MODULE_ADD_FUNC sock_epoll_wait_fn,   sk_n_epoll_wait
 
     lea rbx, [rel sk_consts]
 .smc_loop:
@@ -1462,6 +1703,9 @@ sk_n_set_blocking: db "set_blocking", 0
 sk_n_get_blocking: db "get_blocking", 0
 sk_n_gethostname:  db "gethostname", 0
 sk_n_poll:         db "poll", 0
+sk_n_epoll_create: db "epoll_create1", 0
+sk_n_epoll_ctl:    db "epoll_ctl", 0
+sk_n_epoll_wait:   db "epoll_wait", 0
 
 ; One row of the constants table, and the name it is spelled with.  The name
 ; goes in a section of its own: emitted here it would land in the middle of
@@ -1476,6 +1720,28 @@ sk_n_poll:         db "poll", 0
 
 align 8
 sk_consts:
+    ; epoll's, which lib/select.py re-exports.  EPOLLIN and its neighbours
+    ; share their values with POLLIN and its, which is Linux's doing and not
+    ; a coincidence worth relying on -- they are written out.
+    SKCONST EPOLLIN, 0x001
+    SKCONST EPOLLPRI, 0x002
+    SKCONST EPOLLOUT, 0x004
+    SKCONST EPOLLERR, 0x008
+    SKCONST EPOLLHUP, 0x010
+    SKCONST EPOLLRDNORM, 0x040
+    SKCONST EPOLLRDBAND, 0x080
+    SKCONST EPOLLWRNORM, 0x100
+    SKCONST EPOLLWRBAND, 0x200
+    SKCONST EPOLLMSG, 0x400
+    SKCONST EPOLLRDHUP, 0x2000
+    SKCONST EPOLLEXCLUSIVE, 0x10000000
+    SKCONST EPOLLWAKEUP, 0x20000000
+    SKCONST EPOLLONESHOT, 0x40000000
+    SKCONST EPOLLET, 0x80000000
+    SKCONST EPOLL_CLOEXEC, 0o2000000
+    SKCONST EPOLL_CTL_ADD, 1
+    SKCONST EPOLL_CTL_DEL, 2
+    SKCONST EPOLL_CTL_MOD, 3
     SKCONST AF_UNSPEC, 0
     SKCONST AF_UNIX, 1
     SKCONST AF_LOCAL, 1

@@ -1,12 +1,17 @@
 """select - waiting on descriptors, over poll().
 
-CPython's select module wraps four different multiplexers; this one is
-poll(), which _socketcore provides, with select() written on top of it.  Both
-of the interfaces Lib/selectors.py knows how to use are here, so its
-DefaultSelector picks PollSelector and nothing has to fall back.
+CPython's select module wraps four different multiplexers; two of them are
+here -- poll() and epoll() -- with select() written on top of poll.  Both are
+_socketcore's syscalls with the registry, the timeouts and the object
+lifetime in Python, which is the same split the socket type itself uses.
 
-epoll, kqueue and devpoll are absent, and their absence is the supported way
-to say so: selectors and asyncio both ask with hasattr.
+kqueue and devpoll are absent, and their absence is the supported way to say
+so: selectors and asyncio both ask with hasattr.
+
+Adding epoll changes what Lib/selectors.py's DefaultSelector picks --
+EpollSelector rather than PollSelector -- because that file gates on
+`hasattr(select, "epoll")`.  tests/test_async_backends.py runs the async
+suite over both.
 """
 
 import _socketcore as _c
@@ -18,6 +23,23 @@ POLLERR = _c.POLLERR
 POLLHUP = _c.POLLHUP
 POLLNVAL = _c.POLLNVAL
 
+EPOLLIN = _c.EPOLLIN
+EPOLLPRI = _c.EPOLLPRI
+EPOLLOUT = _c.EPOLLOUT
+EPOLLERR = _c.EPOLLERR
+EPOLLHUP = _c.EPOLLHUP
+EPOLLRDHUP = _c.EPOLLRDHUP
+EPOLLRDNORM = _c.EPOLLRDNORM
+EPOLLRDBAND = _c.EPOLLRDBAND
+EPOLLWRNORM = _c.EPOLLWRNORM
+EPOLLWRBAND = _c.EPOLLWRBAND
+EPOLLMSG = _c.EPOLLMSG
+EPOLLEXCLUSIVE = _c.EPOLLEXCLUSIVE
+EPOLLWAKEUP = _c.EPOLLWAKEUP
+EPOLLONESHOT = _c.EPOLLONESHOT
+EPOLLET = _c.EPOLLET
+EPOLL_CLOEXEC = _c.EPOLL_CLOEXEC
+
 error = OSError
 
 __all__ = ["select", "poll", "error", "POLLIN", "POLLPRI", "POLLOUT",
@@ -25,11 +47,21 @@ __all__ = ["select", "poll", "error", "POLLIN", "POLLPRI", "POLLOUT",
 
 
 def _fileno(obj):
+    """-> the descriptor, CPython's PyObject_AsFileDescriptor.
+
+    A negative one is a ValueError there rather than an EBADF from the
+    syscall, and the message names the number -- which is what a caller that
+    passed a closed object's -1 needs to see.
+    """
     if isinstance(obj, int):
-        return obj
-    fd = obj.fileno()
-    if not isinstance(fd, int):
-        raise TypeError("fileno() returned a non-integer")
+        fd = obj
+    else:
+        fd = obj.fileno()
+        if not isinstance(fd, int):
+            raise TypeError("fileno() returned a non-integer")
+    if fd < 0:
+        raise ValueError(
+            "file descriptor cannot be a negative integer (%d)" % (fd,))
     return fd
 
 
@@ -128,4 +160,98 @@ class poll:
         for i in range(len(fds)):
             if revents[i]:
                 out.append((fds[i][0], revents[i]))
+        return out
+
+
+class epoll:
+    """epoll(7), with the same surface CPython's select.epoll has.
+
+    The descriptor is owned: close() releases it, __del__ is the safety net,
+    and every method after close() raises ValueError rather than acting on a
+    number the kernel has given to someone else.  That is the whole reason
+    this is a class rather than three functions.
+
+    `sizehint` is accepted and ignored, as CPython's is -- the kernel has not
+    used it since 2.6.8 -- and so is `flags` beyond EPOLL_CLOEXEC.
+    """
+
+    __slots__ = ("_fd",)
+
+    def __init__(self, sizehint=-1, flags=0):
+        self._fd = _c.epoll_create1(flags)
+
+    @classmethod
+    def fromfd(cls, fd):
+        """Wrap an existing epoll descriptor.  It becomes ours to close."""
+        self = cls.__new__(cls)
+        self._fd = _fileno(fd)
+        return self
+
+    def fileno(self):
+        self._check()
+        return self._fd
+
+    @property
+    def closed(self):
+        return self._fd < 0
+
+    def close(self):
+        fd = self._fd
+        if fd >= 0:
+            self._fd = -1
+            import posix
+
+            posix.close(fd)
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __enter__(self):
+        self._check()
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def _check(self):
+        if self._fd < 0:
+            raise ValueError("I/O operation on closed epoll object")
+
+    def register(self, fd, eventmask=EPOLLIN | EPOLLPRI | EPOLLOUT):
+        self._check()
+        _c.epoll_ctl(self._fd, _c.EPOLL_CTL_ADD, _fileno(fd), eventmask)
+
+    def modify(self, fd, eventmask):
+        self._check()
+        _c.epoll_ctl(self._fd, _c.EPOLL_CTL_MOD, _fileno(fd), eventmask)
+
+    def unregister(self, fd):
+        self._check()
+        # EPOLL_CTL_DEL ignores the event, but the kernel wanted a non-NULL
+        # pointer before 2.6.9 and CPython still passes one; so does this.
+        _c.epoll_ctl(self._fd, _c.EPOLL_CTL_DEL, _fileno(fd), 0)
+
+    def poll(self, timeout=None, maxevents=-1):
+        """-> [(fd, events), ...], the ready descriptors.
+
+        `timeout` is in SECONDS here and milliseconds in the syscall, which
+        is CPython's interface and the one asymmetry worth pointing at: poll()
+        above takes milliseconds because select.poll does.
+        """
+        self._check()
+        if timeout is None or timeout < 0:
+            ms = -1
+        else:
+            ms = int(timeout * 1000.0)
+        if maxevents == 0:
+            raise ValueError("maxevents must be greater than 0, got 0")
+        if maxevents < 0:
+            maxevents = 1023
+        flat = _c.epoll_wait(self._fd, maxevents, ms)
+        out = []
+        for i in range(0, len(flat), 2):
+            out.append((flat[i], flat[i + 1]))
         return out

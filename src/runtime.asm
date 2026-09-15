@@ -68,6 +68,9 @@ SYS_chmod           equ 90
 SYS_getcwd          equ 79
 SYS_getdents64      equ 217
 SYS_pipe2           equ 293
+SYS_epoll_create1   equ 291
+SYS_epoll_ctl       equ 233
+SYS_epoll_wait      equ 232
 SYS_getrandom       equ 318
 SYS_ftruncate       equ 77
 SYS_uname           equ 63
@@ -345,6 +348,36 @@ DEF_FUNC_BARE sys_pipe2
     syscall
     ret
 END_FUNC sys_pipe2
+
+;; ============================================================================
+;; sys_epoll_create1(int flags) -> int fd, or -errno
+;; ============================================================================
+DEF_FUNC_BARE sys_epoll_create1
+    mov rax, SYS_epoll_create1
+    syscall
+    ret
+END_FUNC sys_epoll_create1
+
+;; ============================================================================
+;; sys_epoll_ctl(int epfd, int op, int fd, struct epoll_event *ev) -> 0/-errno
+;; ============================================================================
+DEF_FUNC_BARE sys_epoll_ctl
+    mov r10, rcx
+    mov rax, SYS_epoll_ctl
+    syscall
+    ret
+END_FUNC sys_epoll_ctl
+
+;; ============================================================================
+;; sys_epoll_wait(int epfd, struct epoll_event *evs, int max, int timeout_ms)
+;;   -> int ready, or -errno
+;; ============================================================================
+DEF_FUNC_BARE sys_epoll_wait
+    mov r10, rcx
+    mov rax, SYS_epoll_wait
+    syscall
+    ret
+END_FUNC sys_epoll_wait
 
 ;; ============================================================================
 ;; sys_getdents64(int fd, void *dirp, unsigned count) -> int bytes read
