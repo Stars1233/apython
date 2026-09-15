@@ -29,14 +29,29 @@ BAD = "a\0b"
 BADB = b"a\0b"
 
 
+def normalise(msg):
+    """Collapse the one message CPython 3.12 changed mid-series.
+
+    3.12.3 says "embedded null byte" for every path that reaches a syscall;
+    3.12.14 says "stat: embedded null character in path", naming the function
+    and the parameter.  The suite diffs against whichever python3 is installed
+    -- 3.12.3 on this box, 3.12.14 in CI -- so the wording cannot be compared
+    and the fact can.  Anything else is printed as it stands, which is what
+    keeps "illegal environment variable name" pinned.
+    """
+    if "null" in msg.lower():
+        return "embedded null"
+    return msg
+
+
 def check(label, fn):
     try:
         fn()
         print("%-30s NOT REFUSED" % label)
     except ValueError as e:
-        print("%-30s ValueError: %s" % (label, e))
+        print("%-30s ValueError: %s" % (label, normalise(str(e))))
     except TypeError as e:
-        print("%-30s TypeError: %s" % (label, e))
+        print("%-30s TypeError: %s" % (label, normalise(str(e))))
 
 
 # The two that were missing.
@@ -66,10 +81,7 @@ check("os.rename", lambda: os.rename("/tmp/a\0b", "/tmp/c"))
 check("os.putenv", lambda: os.putenv(BAD, "v"))
 
 # bytes paths take the same route and are refused too.  Only the refusal is
-# compared: CPython reaches a different argument converter for a bytes path
-# and words it "stat: embedded null character in path", naming the function
-# and the parameter, where this says "embedded null byte" for both kinds.
-# That difference predates this and is a message, not a behaviour.
+# compared, for the reason normalise() above gives.
 def refused(label, fn):
     try:
         fn()

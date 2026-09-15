@@ -152,7 +152,14 @@ for src, what in (
         compile(src, "<s>", "exec")
         print("%-18s NOT REFUSED" % what)
     except SyntaxError as exc:
-        print("%-18s %s (col %s)" % (what, exc.msg, exc.offset))
+        # The message is compared; the COLUMN only for being on the line.
+        # CPython 3.12 moved this offset mid-series -- 3.12.3 points at the
+        # start of the statement and 3.12.14 at the offending alias -- and the
+        # suite diffs against whichever python3 is installed, which is 3.12.14
+        # in CI and older here.
+        line = src.rstrip("\n")
+        on_line = exc.lineno == 1 and 1 <= exc.offset <= len(line)
+        print("%-18s %s (on line: %s)" % (what, exc.msg, on_line))
 
 # All ten real ones are accepted, together and apart.
 import __future__ as _f
