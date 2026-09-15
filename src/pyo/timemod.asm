@@ -73,6 +73,11 @@ END_FUNC tm_add_int
 ;; TIME_ADD_FUNC impl, name -- the module dict is in r12, so this is
 ;; MODULE_ADD_FUNC by another name; it is spelled out here because the file
 ;; predates the macro and the other six registrations still use the long form.
+extern tzset
+extern tzname
+extern timezone
+extern daylight
+
 %macro TIME_ADD_FUNC 2
     lea rdi, [rel %1]
     lea rsi, [rel %2]
@@ -120,6 +125,17 @@ END_FUNC tm_add_int
 CLOCK_REALTIME           equ 0
 CLOCK_MONOTONIC          equ 1
 CLOCK_PROCESS_CPUTIME_ID equ 2
+CLOCK_THREAD_CPUTIME_ID  equ 3
+CLOCK_MONOTONIC_RAW      equ 4
+CLOCK_REALTIME_COARSE    equ 5
+CLOCK_MONOTONIC_COARSE   equ 6
+CLOCK_BOOTTIME           equ 7
+CLOCK_REALTIME_ALARM     equ 8
+CLOCK_BOOTTIME_ALARM     equ 9
+CLOCK_TAI                equ 11
+SYS_clock_gettime        equ 228
+SYS_clock_settime        equ 227
+SYS_clock_getres         equ 229
 
 ;; ============================================================================
 ;; time_process_time_func(PyObject **args, int64_t nargs) -> rax = Value
@@ -257,6 +273,184 @@ DEF_CLOCK_NS time_time_ns_func, CLOCK_REALTIME, "time_ns() takes no arguments"
 DEF_CLOCK_NS time_monotonic_ns_func, CLOCK_MONOTONIC, "monotonic_ns() takes no arguments"
 DEF_CLOCK_NS time_perf_counter_ns_func, CLOCK_MONOTONIC, "perf_counter_ns() takes no arguments"
 DEF_CLOCK_NS time_process_time_ns_func, CLOCK_PROCESS_CPUTIME_ID, "process_time_ns() takes no arguments"
+
+;; ============================================================================
+;; time_clock_gettime_func(rdi = the argument array, rsi = how many)
+;;   -> rax = a float Value: the clock's reading in seconds
+;;
+;; The same syscall the five fixed readers above make, with the clock taken
+;; from an argument instead of a literal -- and that is exactly why the
+;; RETURN VALUE has to be checked here and does not have to be there.  A
+;; hardcoded CLOCK_MONOTONIC cannot fail; a caller-supplied number can, and
+;; EINVAL for a clock this kernel does not have is the answer rather than a
+;; timespec of whatever was on the stack.
+;;
+;; None of the five existing readers checks it.  That is safe for them and
+;; would not be for these, which is the whole distinction.
+;; ============================================================================
+TCG_TS    equ 16            ; struct timespec: tv_sec, tv_nsec
+TCG_FRAME equ 24            ; + 1 push = 32, 16-aligned
+extern int_from_i64
+DEF_FUNC time_clock_gettime_func, TCG_FRAME
+    push rbx
+    test rsi, rsi
+    jz .tcg_args
+    mov rdi, [rdi]
+    call tm_clock_id_arg
+    mov rdi, rax
+    lea rsi, [rbp - TCG_TS]
+    mov eax, SYS_clock_gettime
+    syscall
+    cmp rax, -4095
+    jae .tcg_failed
+    mov rax, [rbp - TCG_TS]
+    cvtsi2sd xmm0, rax
+    mov rax, [rbp - TCG_TS + 8]
+    cvtsi2sd xmm1, rax
+    divsd xmm1, [rel tm_1e9]
+    addsd xmm0, xmm1
+    movq rax, xmm0
+    V_FROM_F64 rax, rcx
+    pop rbx
+    leave
+    ret
+.tcg_failed:
+    mov rdi, rax
+    neg rdi
+    xor esi, esi
+    extern raise_oserror
+    call raise_oserror
+.tcg_args:
+    RAISE exc_TypeError_type, "clock_gettime() takes exactly 1 argument"
+END_FUNC time_clock_gettime_func
+
+;; ============================================================================
+;; time_clock_gettime_ns_func(rdi = the arguments, rsi = how many)
+;;   -> rax = an int Value: the same reading in nanoseconds
+;; ============================================================================
+DEF_FUNC time_clock_gettime_ns_func, TCG_FRAME
+    push rbx
+    test rsi, rsi
+    jz .tcgn_args
+    mov rdi, [rdi]
+    call tm_clock_id_arg
+    mov rdi, rax
+    lea rsi, [rbp - TCG_TS]
+    mov eax, SYS_clock_gettime
+    syscall
+    cmp rax, -4095
+    jae .tcgn_failed
+    mov rax, [rbp - TCG_TS]
+    mov ecx, 1000000000
+    imul rax, rcx
+    add rax, [rbp - TCG_TS + 8]
+    mov rdi, rax
+    call int_from_i64
+    V_PACK rax, rdx
+    pop rbx
+    leave
+    ret
+.tcgn_failed:
+    mov rdi, rax
+    neg rdi
+    xor esi, esi
+    call raise_oserror
+.tcgn_args:
+    RAISE exc_TypeError_type, "clock_gettime_ns() takes exactly 1 argument"
+END_FUNC time_clock_gettime_ns_func
+
+;; ============================================================================
+;; time_clock_getres_func(rdi = the arguments, rsi = how many)
+;;   -> rax = a float Value: the clock's resolution in seconds
+;; ============================================================================
+DEF_FUNC time_clock_getres_func, TCG_FRAME
+    push rbx
+    test rsi, rsi
+    jz .tcr_args
+    mov rdi, [rdi]
+    call tm_clock_id_arg
+    mov rdi, rax
+    lea rsi, [rbp - TCG_TS]
+    mov eax, SYS_clock_getres
+    syscall
+    cmp rax, -4095
+    jae .tcr_failed
+    mov rax, [rbp - TCG_TS]
+    cvtsi2sd xmm0, rax
+    mov rax, [rbp - TCG_TS + 8]
+    cvtsi2sd xmm1, rax
+    divsd xmm1, [rel tm_1e9]
+    addsd xmm0, xmm1
+    movq rax, xmm0
+    V_FROM_F64 rax, rcx
+    pop rbx
+    leave
+    ret
+.tcr_failed:
+    mov rdi, rax
+    neg rdi
+    xor esi, esi
+    call raise_oserror
+.tcr_args:
+    RAISE exc_TypeError_type, "clock_getres() takes exactly 1 argument"
+END_FUNC time_clock_getres_func
+
+;; ============================================================================
+;; tm_clock_id_arg(rdi = a Value) -> rax = the clock id
+;;
+;; An int, and nothing else.  CPython's clinic takes a clockid_t, which means
+;; __index__ is honoured; obj_as_index is that.
+;; ============================================================================
+extern obj_as_index
+DEF_FUNC_LOCAL tm_clock_id_arg, 16
+    ; obj_as_index takes the legacy (payload, tag) PAIR, not a Value -- hand
+    ; it only rdi and it reads whatever was in edx as the tag, which made
+    ; clock_gettime("x") an EINVAL from the syscall instead of the TypeError
+    ; it owes.
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    leave
+    ret
+END_FUNC tm_clock_id_arg
+
+;; ============================================================================
+;; time_thread_time_ns_func(rdi, rsi) -> rax = an int Value: the nanoseconds
+;;   of CPU this thread has used
+;;
+;; CLOCK_THREAD_CPUTIME_ID.  get_clock_info has described this clock all
+;; along -- the comment there says the function is what is missing -- and
+;; with one thread it answers what process_time does, which is the right
+;; answer rather than a coincidence.
+;; ============================================================================
+DEF_CLOCK_NS time_thread_time_ns_func, CLOCK_THREAD_CPUTIME_ID, "thread_time_ns() takes no arguments"
+
+;; ============================================================================
+;; time_thread_time_func(rdi, rsi) -> rax = a float Value: the same in seconds
+;; ============================================================================
+TT_TS    equ 16
+TT_FRAME equ 24             ; + 1 push = 32, 16-aligned
+DEF_FUNC time_thread_time_func, TT_FRAME
+    push rbx
+    test rsi, rsi
+    jnz .tt_args
+    mov eax, SYS_clock_gettime
+    mov edi, CLOCK_THREAD_CPUTIME_ID
+    lea rsi, [rbp - TT_TS]
+    syscall
+    mov rax, [rbp - TT_TS]
+    cvtsi2sd xmm0, rax
+    mov rax, [rbp - TT_TS + 8]
+    cvtsi2sd xmm1, rax
+    divsd xmm1, [rel tm_1e9]
+    addsd xmm0, xmm1
+    movq rax, xmm0
+    V_FROM_F64 rax, rcx
+    pop rbx
+    leave
+    ret
+.tt_args:
+    RAISE exc_TypeError_type, "thread_time() takes no arguments"
+END_FUNC time_thread_time_func
 
 ;; ============================================================================
 ;; time_get_clock_info_func(PyObject **args, int64_t nargs) -> rax = Value
@@ -594,6 +788,241 @@ DEF_FUNC time_sleep_func, TSL_FRAME
 END_FUNC time_sleep_func
 
 ;; ============================================================================
+;; time_strptime_func(rdi = the argument array, rsi = how many)
+;;   -> rax = a struct_time Value, or 0 with the exception pending
+;;
+;; CPython's time.strptime is C only in name: it imports _strptime and calls
+;; _strptime_time, because the parsing is a regex over locale tables and has
+;; no honest assembly form.  This does the same, and the import is LAZY --
+;; _strptime imports `time`, so doing it at module init would close the
+;; circle before this module exists.
+;;
+;; The looked-up function is cached for the process, the way deprecation_warn
+;; caches _warnings.warn and for the same reason: the import is the expensive
+;; half and it cannot change.
+;; ============================================================================
+;; The argument array grows UPWARD from its base, so its offset is the
+;; LARGER number: args[0] is at [rbp - TSP_ARGS] and args[1] eight bytes
+;; above it.  Writing TSP_ARGS as 8 put args[1] at [rbp], which is the saved
+;; rbp.
+TSP_ARGS  equ 24            ; the two Values handed to _strptime_time
+TSP_NARGS equ 32            ; how many -- rsi does not survive the import
+TSP_TMP   equ 40
+TSP_MOD   equ 48            ; the module, and then the function, while looked up
+TSP_KW    equ 56            ; the parked kw_names_pending
+TSP_FRAME equ 72            ; + 1 push = 80, 16-aligned
+extern import_module
+extern kw_names_pending
+extern dict_get
+extern obj_incref
+extern obj_call_n
+DEF_FUNC time_strptime_func, TSP_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - TSP_NARGS], rsi
+
+    cmp qword [rel tm_strptime_impl], 0
+    jne .tsp_have
+
+    ; The pending keyword names belong to the call in flight, not to the
+    ; import about to run a module body.
+    mov rax, [rel kw_names_pending]
+    mov [rbp - TSP_KW], rax
+    mov qword [rel kw_names_pending], 0
+
+    lea rdi, [rel tm_strptime_mod]
+    call str_from_cstr_heap
+    mov [rbp - TSP_TMP], rax
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    call import_module
+    mov [rbp - TSP_MOD], rax
+    mov rdi, [rbp - TSP_TMP]
+    call obj_decref
+    cmp qword [rbp - TSP_MOD], 0
+    je .tsp_no_impl
+
+    lea rdi, [rel tm_strptime_attr]
+    call str_from_cstr_heap
+    mov [rbp - TSP_TMP], rax
+    mov rdi, [rbp - TSP_MOD]
+    mov rdi, [rdi + PyModuleObject.mod_dict]
+    mov rsi, rax
+    call dict_get
+    mov [rbp - TSP_MOD], rax
+    mov rdi, [rbp - TSP_TMP]
+    call obj_decref
+    mov rax, [rbp - TSP_MOD]
+    test rax, rax
+    jz .tsp_no_impl
+    mov rdi, rax
+    call obj_incref
+    mov rax, [rbp - TSP_MOD]
+    mov [rel tm_strptime_impl], rax
+
+    mov rax, [rbp - TSP_KW]
+    mov [rel kw_names_pending], rax
+
+.tsp_have:
+    ; strptime(string) and strptime(string, format), which is CPython's
+    ; signature; _strptime_time has the same default.
+    mov rsi, [rbp - TSP_NARGS]
+    test rsi, rsi
+    jz .tsp_args
+    cmp rsi, 2
+    ja .tsp_args
+    mov qword [rbp - TSP_TMP], 0
+    mov rax, [rbx]
+    mov [rbp - TSP_ARGS], rax
+    cmp rsi, 2
+    jne .tsp_default_format
+    mov rax, [rbx + 8]
+    mov [rbp - TSP_ARGS + 8], rax
+    jmp .tsp_call
+.tsp_default_format:
+    lea rdi, [rel tm_strptime_default]
+    call str_from_cstr_heap
+    test rax, rax
+    jz .tsp_fail
+    mov [rbp - TSP_ARGS + 8], rax
+    mov [rbp - TSP_TMP], rax            ; ours to release
+.tsp_call:
+    mov rdi, [rel tm_strptime_impl]
+    lea rsi, [rbp - TSP_ARGS]
+    mov edx, 2
+    call obj_call_n
+    mov [rbp - TSP_MOD], rax            ; the answer, across the release
+    mov rdi, [rbp - TSP_TMP]
+    test rdi, rdi
+    jz .tsp_done
+    call obj_decref
+.tsp_done:
+    mov rax, [rbp - TSP_MOD]
+    pop rbx
+    leave
+    ret
+
+.tsp_no_impl:
+    mov rax, [rbp - TSP_KW]
+    mov [rel kw_names_pending], rax
+    RAISE exc_TypeError_type, "strptime() needs the _strptime module"
+.tsp_fail:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+.tsp_args:
+    RAISE exc_TypeError_type, "strptime() takes 1 or 2 arguments"
+END_FUNC time_strptime_func
+
+section .rodata
+tm_strptime_mod:     db "_strptime", 0
+tm_strptime_attr:    db "_strptime_time", 0
+tm_strptime_default: db "%a %b %d %H:%M:%S %Y", 0
+section .bss
+; _strptime._strptime_time, looked up once and kept for the process.
+tm_strptime_impl: resq 1
+section .text
+
+;; ============================================================================
+;; tm_publish_tz() -> nothing; r12 = the module dict
+;;
+;; tzset(3) and the four names it fills: tzname, timezone, altzone, daylight.
+;; Called at import and again by time.tzset(), which is the only reason the
+;; module dict is kept in a global -- a caller that changes $TZ and calls
+;; tzset() has to see the new zone in these four, and nothing else in this
+;; file needs the dict after import.
+;; ============================================================================
+DEF_FUNC_LOCAL tm_publish_tz, 16      ; + 0 pushes = 16, 16-aligned
+    call tzset
+    lea rax, [rel tzname]
+    mov rdi, [rax]
+    call str_from_cstr_heap
+    push rax
+    lea rax, [rel tzname]
+    mov rdi, [rax + 8]
+    call str_from_cstr_heap
+    push rax
+    mov edi, 2
+    call tuple_new
+    mov rcx, [rax + PyTupleObject.ob_item]
+    pop rdx
+    mov [rcx + 8], rdx
+    pop rdx
+    mov [rcx], rdx
+    push rax
+    lea rdi, [rel tm_tzname]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    ; The offset west of UTC in seconds, as CPython reports it: `timezone` is
+    ; standard time, `altzone` is the same less an hour when the zone has DST,
+    ; and `daylight` says whether it has any.
+    lea rax, [rel timezone]
+    mov rdi, [rax]
+    lea rsi, [rel tm_timezone]
+    call tm_add_int
+    lea rax, [rel timezone]
+    mov rdi, [rax]
+    lea rcx, [rel daylight]
+    mov ecx, [rcx]
+    test ecx, ecx
+    jz .ptz_no_dst
+    sub rdi, 3600
+.ptz_no_dst:
+    lea rsi, [rel tm_altzone]
+    call tm_add_int
+    lea rax, [rel daylight]
+    movsxd rdi, dword [rax]
+    lea rsi, [rel tm_daylight]
+    call tm_add_int
+
+    leave
+    ret
+END_FUNC tm_publish_tz
+
+;; ============================================================================
+;; time_tzset_func(rdi = the arguments, rsi = how many) -> rax = None
+;; Re-reads $TZ and republishes the four names it sets.
+;; ============================================================================
+DEF_FUNC time_tzset_func, 16          ; + 0 pushes = 16, 16-aligned
+    test rsi, rsi
+    jnz .tzs_args
+    push r12
+    push r12                            ; a pair, so the call stays aligned
+    mov r12, [rel tm_module_dict]
+    test r12, r12
+    jz .tzs_none
+    call tm_publish_tz
+.tzs_none:
+    pop r12
+    pop r12
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    ret
+.tzs_args:
+    RAISE exc_TypeError_type, "tzset() takes no arguments"
+END_FUNC time_tzset_func
+
+section .bss
+; The `time` module's dict, so tzset() can republish into it.  Borrowed: the
+; module owns it for the life of the interpreter.
+tm_module_dict: resq 1
+section .text
+
+;; ============================================================================
 ;; time_module_create() -> PyObject*
 ;; Creates and returns the time module
 ;; ============================================================================
@@ -643,60 +1072,12 @@ DEF_FUNC time_module_create
     ; The four glibc sets from $TZ, and _strptime reads tzname
     ; unconditionally at import.  tzset() is what fills them; localtime_r
     ; calls it too, but not before this runs.
-    extern tzset
-    call tzset
-    extern tzname
-    extern timezone
-    extern daylight
-    lea rax, [rel tzname]
-    mov rdi, [rax]
-    call str_from_cstr_heap
-    push rax
-    lea rax, [rel tzname]
-    mov rdi, [rax + 8]
-    call str_from_cstr_heap
-    push rax
-    mov edi, 2
-    call tuple_new
-    mov rcx, [rax + PyTupleObject.ob_item]
-    pop rdx
-    mov [rcx + 8], rdx
-    pop rdx
-    mov [rcx], rdx
-    push rax
-    lea rdi, [rel tm_tzname]
-    call str_from_cstr_heap
-    push rax
-    mov rdi, r12
-    mov rsi, rax
-    mov rdx, [rsp + 8]
-    call dict_set
-    pop rdi
-    call obj_decref
-    pop rdi
-    call obj_decref
-
-    ; The offset west of UTC in seconds, as CPython reports it: `timezone` is
-    ; standard time, `altzone` is the same less an hour when the zone has DST,
-    ; and `daylight` says whether it has any.
-    lea rax, [rel timezone]
-    mov rdi, [rax]
-    lea rsi, [rel tm_timezone]
-    call tm_add_int
-    lea rax, [rel timezone]
-    mov rdi, [rax]
-    lea rcx, [rel daylight]
-    mov ecx, [rcx]
-    test ecx, ecx
-    jz .ti_no_dst
-    sub rdi, 3600
-.ti_no_dst:
-    lea rsi, [rel tm_altzone]
-    call tm_add_int
-    lea rax, [rel daylight]
-    movsxd rdi, dword [rax]
-    lea rsi, [rel tm_daylight]
-    call tm_add_int
+    ; The four names glibc sets from $TZ, published into the module dict.
+    ; time.tzset() does the same work again, which is what makes it a
+    ; function rather than a no-op: a program that changes $TZ and calls it
+    ; has to see the new zone here.
+    mov [rel tm_module_dict], r12
+    call tm_publish_tz
 
     lea rdi, [rel struct_time_type]
     call structseq_init_type
@@ -725,6 +1106,42 @@ DEF_FUNC time_module_create
     TIME_ADD_FUNC time_monotonic_ns_func,    tm_monotonic_ns
     TIME_ADD_FUNC time_perf_counter_ns_func, tm_perf_counter_ns
     TIME_ADD_FUNC time_process_time_ns_func, tm_process_time_ns
+
+    ; The clock a caller names, rather than one of the five above.
+    TIME_ADD_FUNC time_clock_gettime_func,    tm_clock_gettime
+    TIME_ADD_FUNC time_clock_gettime_ns_func, tm_clock_gettime_ns
+    TIME_ADD_FUNC time_clock_getres_func,     tm_clock_getres
+    TIME_ADD_FUNC time_thread_time_func,      tm_thread_time
+    TIME_ADD_FUNC time_thread_time_ns_func,   tm_thread_time_ns
+    TIME_ADD_FUNC time_tzset_func,            tm_tzset
+    TIME_ADD_FUNC time_strptime_func,         tm_strptime
+
+    ; The clock ids those four take.  CLOCK_TAI is 11 and there is no 10;
+    ; the gap is Linux's, not a transcription slip.  The two _COARSE ids are
+    ; deliberately not published: CPython does not export them either, and a
+    ; name this module has and CPython's does not is as much a divergence as
+    ; one it lacks.
+    mov edi, CLOCK_REALTIME
+    lea rsi, [rel tm_n_CLOCK_REALTIME]
+    call tm_add_int
+    mov edi, CLOCK_MONOTONIC
+    lea rsi, [rel tm_n_CLOCK_MONOTONIC]
+    call tm_add_int
+    mov edi, CLOCK_PROCESS_CPUTIME_ID
+    lea rsi, [rel tm_n_CLOCK_PROCESS_CPUTIME_ID]
+    call tm_add_int
+    mov edi, CLOCK_THREAD_CPUTIME_ID
+    lea rsi, [rel tm_n_CLOCK_THREAD_CPUTIME_ID]
+    call tm_add_int
+    mov edi, CLOCK_MONOTONIC_RAW
+    lea rsi, [rel tm_n_CLOCK_MONOTONIC_RAW]
+    call tm_add_int
+    mov edi, CLOCK_BOOTTIME
+    lea rsi, [rel tm_n_CLOCK_BOOTTIME]
+    call tm_add_int
+    mov edi, CLOCK_TAI
+    lea rsi, [rel tm_n_CLOCK_TAI]
+    call tm_add_int
 
     mov edi, 11
     lea rsi, [rel tm_struct_tm_items]
@@ -847,6 +1264,20 @@ tm_timezone:     db "timezone", 0
 tm_altzone:      db "altzone", 0
 tm_daylight:     db "daylight", 0
 tm_struct_time:  db "struct_time", 0
+tm_clock_gettime:    db "clock_gettime", 0
+tm_clock_gettime_ns: db "clock_gettime_ns", 0
+tm_clock_getres:     db "clock_getres", 0
+tm_thread_time:      db "thread_time", 0
+tm_thread_time_ns:   db "thread_time_ns", 0
+tm_tzset:            db "tzset", 0
+tm_strptime:         db "strptime", 0
+tm_n_CLOCK_REALTIME:           db "CLOCK_REALTIME", 0
+tm_n_CLOCK_MONOTONIC:          db "CLOCK_MONOTONIC", 0
+tm_n_CLOCK_PROCESS_CPUTIME_ID: db "CLOCK_PROCESS_CPUTIME_ID", 0
+tm_n_CLOCK_THREAD_CPUTIME_ID:  db "CLOCK_THREAD_CPUTIME_ID", 0
+tm_n_CLOCK_MONOTONIC_RAW:      db "CLOCK_MONOTONIC_RAW", 0
+tm_n_CLOCK_BOOTTIME:           db "CLOCK_BOOTTIME", 0
+tm_n_CLOCK_TAI:                db "CLOCK_TAI", 0
 tm_time_ns:         db "time_ns", 0
 tm_monotonic_ns:    db "monotonic_ns", 0
 tm_perf_counter_ns: db "perf_counter_ns", 0

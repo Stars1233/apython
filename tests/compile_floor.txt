@@ -736,6 +736,7 @@ test_sys_is_finalizing
 test_sys_version_platform
 test_termios
 test_time_clock_info
+test_time_clocks
 test_time_module
 test_time_ns
 test_traceback_carets
