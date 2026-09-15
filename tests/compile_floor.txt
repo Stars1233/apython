@@ -447,6 +447,7 @@ test_mappingproxy_call
 test_marshal_hostile
 test_marshal_interned
 test_marshal_module
+test_match_args_errors
 test_match_class
 test_match_mapping_keys
 test_match_mapping_types
