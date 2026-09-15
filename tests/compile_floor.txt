@@ -540,6 +540,7 @@ test_pow_dunder
 test_pow
 test_prepare_namespace
 test_prepare_raises
+test_print_broken_pipe
 test_print_file
 test_print_sink_lifetime
 test_print_tag
@@ -765,6 +766,7 @@ test_uninstantiable_types
 test_union_flatten
 test_union_generic_alias
 test_union_hash
+test_unittest_package
 test_unpack_dict
 test_unpack_refcount
 test_unpack_spec

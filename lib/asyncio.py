@@ -29,8 +29,68 @@ from _asynciocore import (CancelledError, Task, TimeoutError, create_task,
 
 __all__ = ["CancelledError", "IncompleteReadError", "LimitOverrunError",
            "Server", "StreamReader", "StreamWriter", "Task", "TimeoutError",
-           "create_task", "gather", "get_running_loop", "open_connection",
-           "run", "sleep", "start_server", "wait_for", "wait_fd"]
+           "coroutines", "create_task", "gather", "get_running_loop",
+           "iscoroutine",
+           "iscoroutinefunction", "open_connection", "run", "sleep",
+           "start_server", "wait_for", "wait_fd"]
+
+# The `_is_coroutine` marker object, and the two predicates written against
+# it.  CPython puts them in asyncio.coroutines and re-exports them from the
+# package; they are here because they are two lines and because callers
+# import them from `asyncio` by that name.  unittest.mock does, at module
+# scope, to decide whether a patched function needs an AsyncMock.
+_is_coroutine = object()
+
+
+def iscoroutinefunction(func):
+    """-> True if `func` is a coroutine function, or marked as one.
+
+    The marker half is what @asyncio.coroutine used to set and what a
+    wrapper sets to say it returns an awaitable; CPython still honours it.
+    """
+    import inspect
+
+    return (inspect.iscoroutinefunction(func)
+            or getattr(func, "_is_coroutine", None) is _is_coroutine)
+
+
+def iscoroutine(obj):
+    """-> True if `obj` is a coroutine object."""
+    import inspect
+
+    return inspect.iscoroutine(obj)
+
+
+def _make_coroutines_submodule():
+    """Publish `asyncio.coroutines`, which is where CPython keeps these.
+
+    CPython's asyncio is a package and these three live in its `coroutines`
+    submodule; this one is a single file, because the loop itself is
+    assembly and what is left fits in it.  Callers still reach for the
+    submodule path -- unittest.mock reads
+    `asyncio.coroutines._is_coroutine` to decide whether a patched function
+    needs an AsyncMock -- so the name has to resolve.
+
+    A module object registered in sys.modules rather than a file, so that
+    both `asyncio.coroutines._is_coroutine` and `import asyncio.coroutines`
+    answer, and both answer with the SAME objects this module exports.
+    """
+    import sys
+    import types
+
+    existing = sys.modules.get("asyncio.coroutines")
+    if existing is not None:
+        return existing
+    module = types.ModuleType("asyncio.coroutines")
+    module.__doc__ = "asyncio.coroutines, as much of it as this tree has."
+    module._is_coroutine = _is_coroutine
+    module.iscoroutine = iscoroutine
+    module.iscoroutinefunction = iscoroutinefunction
+    sys.modules["asyncio.coroutines"] = module
+    return module
+
+
+coroutines = _make_coroutines_submodule()
 
 # The poll masks the two backends take, and what CPython's add_reader and
 # add_writer amount to.
