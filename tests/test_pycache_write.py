@@ -5,6 +5,7 @@ import of it is the one under test.  The temporary directory is built by hand:
 `tempfile` is not among the modules this interpreter ships.
 """
 
+import importlib
 import os
 import sys
 
@@ -42,6 +43,11 @@ def main():
         src2 = os.path.join(tmp, "pycachedprobe2.py")
         cache2 = os.path.join(tmp, "__pycache__", "pycachedprobe2" + SUFFIX)
         write(src2, "VALUE = 3\n", 1600000000)
+        src3 = os.path.join(tmp, "pycachedprobe3.py")
+        cache3 = os.path.join(tmp, "__pycache__", "pycachedprobe3" + SUFFIX)
+        write(src3, "VALUE = 4\n", 1600000000)
+        src4 = os.path.join(tmp, "pycachedprobe4.py")
+        write(src4, "VALUE = 5\n", 1600000000)
         sys.path.insert(0, tmp)
         print("before:", os.path.exists(cache))
 
@@ -74,6 +80,38 @@ def main():
         print("refreshed:", int.from_bytes(header[8:12], "little")
               == 1600000010)
 
+        # __cached__ names the cache file, absolute, whether or not one has
+        # been written; __file__ names the source.
+        mod = sys.modules["pycachedprobe"]
+        print("cached:", mod.__cached__ == os.path.abspath(cache))
+        print("file:", mod.__file__ == os.path.abspath(src))
+
+        # The cache file gets the source's permissions, with the write bit
+        # forced on so a read-only source still yields a replaceable cache.
+        old_mask = os.umask(0o022)
+        try:
+            os.chmod(src3, 0o400)
+            import pycachedprobe3
+            print("readonly source:", pycachedprobe3.VALUE)
+            print("cache mode:", oct(os.stat(cache3).st_mode & 0o777))
+        finally:
+            os.umask(old_mask)
+
+        # A bare "<name>.pyc" beside the source is CPython's sourceless form,
+        # and is found when nothing else answers.
+        legacy = os.path.join(tmp, "pycachedprobe4.pyc")
+        import pycachedprobe4
+        os.rename(os.path.join(tmp, "__pycache__",
+                               "pycachedprobe4" + SUFFIX), legacy)
+        os.unlink(src4)
+        del sys.modules["pycachedprobe4"]
+        # The directory changed under a finder that caches its listing.
+        importlib.invalidate_caches()
+        import pycachedprobe4 as sourceless
+        print("sourceless:", sourceless.VALUE)
+        print("sourceless cached:", sourceless.__cached__ ==
+              os.path.abspath(legacy))
+
         # sys.dont_write_bytecode is read on every write, not once at startup.
         # It starts False here; -B is what makes it True.
         print("default flag:", sys.dont_write_bytecode)
@@ -84,7 +122,8 @@ def main():
         sys.dont_write_bytecode = False
     finally:
         sys.path.remove(tmp)
-        for name in ("pycachedprobe", "pycachedprobe2"):
+        for name in ("pycachedprobe", "pycachedprobe2", "pycachedprobe3",
+                     "pycachedprobe4"):
             sys.modules.pop(name, None)
         pyc = os.path.join(tmp, "__pycache__")
         if os.path.isdir(pyc):

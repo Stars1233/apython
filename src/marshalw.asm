@@ -1135,6 +1135,102 @@ DEF_FUNC marshal_load_fn, MDL_FRAME
 END_FUNC marshal_load_fn
 
 ;; ============================================================================
+;; pyc_cache_path(rdi = a source path as a C string)
+;;   -> rax = the cache path, in a static buffer, or 0 when there is none
+;;
+;; "<dir>/foo.py" becomes "<dir>/__pycache__/foo.cpython-312.pyc".  Anything
+;; not ending in ".py" has no cache path: a sourceless .pyc IS its own cache
+;; file, and the finder hands over other things besides.
+;;
+;; The answer lives in one static buffer, so a caller that needs to keep it
+;; must copy.  pycw_dirlen is left holding the offset of the '/' after
+;; "__pycache__", which is where the directory name ends for the mkdir.
+;; ============================================================================
+PCP_SRC   equ 8
+PCP_LEN   equ 16
+PCP_STEM  equ 24
+PCP_FRAME equ 40            ; + 1 push = 48, 16-aligned
+global pyc_cache_path
+DEF_FUNC pyc_cache_path, PCP_FRAME
+    push rbx
+    mov [rbp - PCP_SRC], rdi
+    test rdi, rdi
+    jz .pcp_no
+    call ap_strlen
+    mov [rbp - PCP_LEN], rax
+    cmp rax, 4
+    jb .pcp_no
+    cmp rax, PYCW_PATHMAX
+    ja .pcp_no
+    mov rdi, [rbp - PCP_SRC]
+    mov ecx, dword [rdi + rax - 3]
+    and ecx, 0x00ffffff
+    cmp ecx, 0x0079702e                 ; ".py", little-endian
+    jne .pcp_no
+
+    ; Split at the last '/': everything before it is the directory, and what
+    ; follows is the stem the cache file is named for.
+    mov rcx, [rbp - PCP_LEN]
+    mov qword [rbp - PCP_STEM], 0
+.pcp_scan:
+    test rcx, rcx
+    jz .pcp_scanned
+    dec rcx
+    mov rdi, [rbp - PCP_SRC]
+    cmp byte [rdi + rcx], '/'
+    jne .pcp_scan
+    inc rcx
+    mov [rbp - PCP_STEM], rcx
+.pcp_scanned:
+
+    lea rdi, [rel pycw_path]
+    mov rsi, [rbp - PCP_SRC]
+    mov rdx, [rbp - PCP_STEM]
+    call ap_memcpy
+    mov rbx, [rbp - PCP_STEM]
+    lea rdi, [rel pycw_path]
+    add rdi, rbx
+    lea rsi, [rel pycw_dirname]
+    mov edx, pycw_dirname_len
+    call ap_memcpy
+    add rbx, pycw_dirname_len
+    mov [rel pycw_dirlen], rbx
+
+    lea rdi, [rel pycw_path]
+    mov byte [rdi + rbx], '/'
+    inc rbx
+    mov rdx, [rbp - PCP_LEN]
+    sub rdx, [rbp - PCP_STEM]
+    sub rdx, 3                          ; the stem, without its ".py"
+    lea rdi, [rel pycw_path]
+    add rdi, rbx
+    mov rsi, [rbp - PCP_SRC]
+    add rsi, [rbp - PCP_STEM]
+    push rdx
+    call ap_memcpy
+    pop rdx
+    add rbx, rdx
+    lea rdi, [rel pycw_path]
+    add rdi, rbx
+    lea rsi, [rel pycw_suffix]
+    mov edx, pycw_suffix_len + 1        ; the NUL too
+    call ap_memcpy
+    add rbx, pycw_suffix_len
+    cmp rbx, PYCW_PATHMAX
+    ja .pcp_no
+    mov [rel pycw_len], rbx
+    lea rax, [rel pycw_path]
+    pop rbx
+    leave
+    ret
+.pcp_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC pyc_cache_path
+
+;; ============================================================================
 ;; pyc_write_cache(rdi = the source path as a C string, rsi = the code object)
 ;;   -> nothing.  Every failure is silent.
 ;;
@@ -1165,15 +1261,12 @@ extern sys_module_obj
 PYCW_MAGIC       equ 0x0a0d0dcb
 PYCW_STAT_SIZE   equ 144
 PYCW_ST_SIZE     equ 48
+PYCW_ST_MODE     equ 24
 PYCW_ST_MTIME    equ 88
 PYCW_PATHMAX     equ 4000
 
 PW_SRC    equ 8
 PW_CODE   equ 16
-PW_LEN    equ 24            ; the source path's length
-PW_STEM   equ 32            ; where the last component starts, within the path
-PW_DIRLEN equ 40            ; the cache path's length up to and including the
-                            ; "__pycache__" component
 PW_CLEN   equ 48            ; the cache path's full length
 PW_BYTES  equ 56            ; the marshalled code, as a bytes object
 PW_FD     equ 64
@@ -1222,91 +1315,31 @@ DEF_FUNC pyc_write_cache, PW_FRAME
     jne .pw_out
 .pw_have_flag:
 
-    ; The path has to end in ".py": a sourceless .pyc has no cache to write,
-    ; and neither has anything else the finder handed over.
     mov rdi, [rbp - PW_SRC]
-    call ap_strlen
-    mov [rbp - PW_LEN], rax
-    cmp rax, 4
-    jb .pw_out
-    cmp rax, PYCW_PATHMAX
-    ja .pw_out
-    mov rdi, [rbp - PW_SRC]
-    mov ecx, dword [rdi + rax - 3]
-    and ecx, 0x00ffffff
-    cmp ecx, 0x0079702e                 ; ".py", little-endian
-    jne .pw_out
+    call pyc_cache_path
+    test rax, rax
+    jz .pw_out
+    mov rax, [rel pycw_len]
+    mov [rbp - PW_CLEN], rax
 
-    ; The source's mtime and size, which are what the header records and what
-    ; a reader compares against.
+    ; The source's mtime, size and MODE.  The first two are what the header
+    ; records and what a reader compares against; the third is what the cache
+    ; file is created with, because CPython gives the .pyc the source's
+    ; permissions rather than the umask's default.
     mov rdi, [rbp - PW_SRC]
     lea rsi, [rbp - PW_STAT]
     call sys_stat
     test rax, rax
     js .pw_out
 
-    ; Split at the last '/': everything before it is the directory, and what
-    ; follows is the stem the cache file is named for.
-    mov rcx, [rbp - PW_LEN]
-    mov qword [rbp - PW_STEM], 0
-.pw_scan:
-    test rcx, rcx
-    jz .pw_scanned
-    dec rcx
-    mov rdi, [rbp - PW_SRC]
-    cmp byte [rdi + rcx], '/'
-    jne .pw_scan
-    inc rcx
-    mov [rbp - PW_STEM], rcx
-.pw_scanned:
-
-    ; "<dir>/__pycache__/<stem minus .py>.cpython-312.pyc"
-    lea rdi, [rel pycw_path]
-    mov rsi, [rbp - PW_SRC]
-    mov rdx, [rbp - PW_STEM]
-    call ap_memcpy
-    mov rbx, [rbp - PW_STEM]
-    lea rdi, [rel pycw_path]
-    add rdi, rbx
-    lea rsi, [rel pycw_dirname]
-    mov edx, pycw_dirname_len
-    call ap_memcpy
-    add rbx, pycw_dirname_len
-    mov [rbp - PW_DIRLEN], rbx          ; ".../__pycache__", for the mkdir
-
-    lea rdi, [rel pycw_path]
-    mov byte [rdi + rbx], '/'
-    inc rbx
-    ; the stem, without its ".py"
-    mov rdx, [rbp - PW_LEN]
-    sub rdx, [rbp - PW_STEM]
-    sub rdx, 3
-    lea rdi, [rel pycw_path]
-    add rdi, rbx
-    mov rsi, [rbp - PW_SRC]
-    add rsi, [rbp - PW_STEM]
-    push rdx
-    call ap_memcpy
-    pop rdx
-    add rbx, rdx
-    lea rdi, [rel pycw_path]
-    add rdi, rbx
-    lea rsi, [rel pycw_suffix]
-    mov edx, pycw_suffix_len + 1        ; the NUL too
-    call ap_memcpy
-    add rbx, pycw_suffix_len
-    mov [rbp - PW_CLEN], rbx
-    cmp rbx, PYCW_PATHMAX
-    ja .pw_out
-
     ; The directory, which usually exists; EEXIST is the ordinary answer.
     lea rdi, [rel pycw_path]
-    mov rbx, [rbp - PW_DIRLEN]
+    mov rbx, [rel pycw_dirlen]
     mov byte [rdi + rbx], 0
     mov esi, 0o777
     call sys_mkdir
     lea rdi, [rel pycw_path]
-    mov rbx, [rbp - PW_DIRLEN]
+    mov rbx, [rel pycw_dirlen]
     mov byte [rdi + rbx], '/'
 
     ; The temporary: the target plus ".<pid>", renamed into place at the end.
@@ -1350,9 +1383,14 @@ DEF_FUNC pyc_write_cache, PW_FRAME
     jz .pw_out
     mov [rbp - PW_BYTES], rax
 
+    ; The mode is the source's, with the write bit forced on and the execute
+    ; bits masked off -- CPython's _bootstrap_external does exactly this, so
+    ; that a read-only source still yields a .pyc that can be replaced.
+    mov edx, dword [rbp - PW_STAT + PYCW_ST_MODE]
+    or edx, 0o200
+    and edx, 0o666
     lea rdi, [rel pycw_tmp]
     mov esi, 0o1101                     ; O_WRONLY|O_CREAT|O_TRUNC
-    mov edx, 0o666
     call sys_open
     test rax, rax
     js .pw_free
@@ -1417,5 +1455,7 @@ section .bss
 pycw_path:  resb PYCW_PATHMAX + 64
 pycw_tmp:   resb PYCW_PATHMAX + 64
 pycw_hdr:   resb 16
+pycw_dirlen: resq 1
+pycw_len:   resq 1
 
 section .text

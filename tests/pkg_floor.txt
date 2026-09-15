@@ -15,8 +15,8 @@ pass test_doctest 1
 pass test_email 1667
 pass test_future_stmt 22
 pass test_gdb 0
-pass test_import 82
-pass test_importlib 999
+pass test_import 87
+pass test_importlib 1008
 pass test_inspect 0
 pass test_json 162
 pass test_lib2to3 655
@@ -25,7 +25,7 @@ pass test_multiprocessing_fork 4
 pass test_multiprocessing_forkserver 4
 pass test_multiprocessing_spawn 4
 pass test_peg_generator 65
-pass test_pydoc 59
+pass test_pydoc 60
 pass test_sqlite3 0
 pass test_tkinter 0
 pass test_tomllib 13

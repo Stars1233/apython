@@ -8,6 +8,7 @@ extern ap_malloc
 extern ap_free
 extern ap_memcpy
 extern ap_strlen
+extern sys_getcwd
 extern ap_strcmp
 extern ap_memcmp
 extern obj_decref
@@ -1864,6 +1865,43 @@ DEF_FUNC import_search_dirs, SD_FRAME
     test rax, rax
     jns .sd_found_module
 
+    ; --- Pattern 5b: <dir>/<leaf>.pyc (CPython's sourceless form) ---
+    ; Last, as CPython's FileFinder puts it last: a .py beside it wins.  The
+    ; tagged "<leaf>.cpython-312.pyc" above is what this tree writes; a bare
+    ; "<leaf>.pyc" is what a distributor ships with the sources stripped, and
+    ; what `os.rename(cache_from_source(p), p + "c")` leaves behind.
+    mov r13, [rbx + PyStrObject.ob_size]
+    test r13, r13
+    jz .sd_p5b_no_slash
+    inc r13
+.sd_p5b_no_slash:
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SD_LEAF]
+    mov rdx, [rbp - SD_LEAFLEN]
+    call ap_memcpy
+    add r13, [rbp - SD_LEAFLEN]
+
+    mov rdi, r12
+    add rdi, r13
+    lea rsi, [rel im_legacy_pyc_suffix]
+    mov rdx, im_legacy_pyc_suffix_len
+    call ap_memcpy
+    add r13, im_legacy_pyc_suffix_len
+    mov byte [r12 + r13], 0
+
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    js .sd_next
+    mov rdi, rax
+    mov rsi, r12
+    call sd_pyc_ok
+    test eax, eax
+    jnz .sd_found_module
+
 .sd_next:
     inc qword [rbp - SD_IDX]
     jmp .sd_loop
@@ -2175,6 +2213,42 @@ DEF_FUNC import_search_syspath, SS_FRAME
     test rax, rax
     jns .ss_found_module
 
+    ; --- Pattern 5b: <dir>/<leaf>.pyc (CPython's sourceless form) ---
+    ; Last of the file patterns, as CPython's FileFinder has it: a .py beside
+    ; it wins.  See the same pattern in import_search_dirs for why it exists.
+    mov r13, [rbx + PyStrObject.ob_size]
+    test r13, r13
+    jz .ss_p5b_no_slash
+    inc r13
+.ss_p5b_no_slash:
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SS_LEAF]
+    mov rdx, [rbp - SS_LEAFLEN]
+    call ap_memcpy
+    add r13, [rbp - SS_LEAFLEN]
+
+    mov rdi, r12
+    add rdi, r13
+    lea rsi, [rel im_legacy_pyc_suffix]
+    mov rdx, im_legacy_pyc_suffix_len
+    call ap_memcpy
+    add r13, im_legacy_pyc_suffix_len
+    mov byte [r12 + r13], 0
+
+    mov rdi, r12
+    xor esi, esi
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    js .ss_p6
+    mov rdi, rax
+    mov rsi, r12
+    call sd_pyc_ok
+    test eax, eax
+    jnz .ss_found_module
+
+.ss_p6:
     ; --- Pattern 6: <dir>/<full> is a DIRECTORY (PEP 420) ---
     ; Recorded rather than returned; see the header.  Nothing here can be a
     ; regular package, because patterns 1 and 4 have already asked this same
@@ -2422,6 +2496,75 @@ DEF_FUNC_LOCAL import_make_namespace, IMN_FRAME
 END_FUNC import_make_namespace
 
 ;; ============================================================================
+;; import_abspath(rdi = a path as a C string) -> rax = an absolute path in a
+;;   static buffer, or rdi unchanged when it is already absolute or will not fit
+;;
+;; `__file__` and `__cached__` are absolute in CPython from 3.4 onward, and a
+;; relative sys.path entry -- "." is what `-m` puts there -- made ours
+;; relative.  test_import compares __cached__ against
+;; os.path.join(os.getcwd(), ...) and saw "./__pycache__/x.pyc".
+;;
+;; A leading "./" is dropped rather than kept, because os.path.join produces
+;; no such segment and the comparison is textual.
+;; ============================================================================
+IAP_PATH  equ 8
+IAP_FRAME equ 24            ; + 1 push = 32, 16-aligned
+global import_abspath
+DEF_FUNC import_abspath, IAP_FRAME
+    push rbx
+    mov [rbp - IAP_PATH], rdi
+    test rdi, rdi
+    jz .iap_asis
+    cmp byte [rdi], '/'
+    je .iap_asis
+
+    lea rdi, [rel iap_buf]
+    mov esi, IAP_BUFSZ - 1
+    call sys_getcwd
+    test rax, rax
+    js .iap_asis
+    lea rdi, [rel iap_buf]
+    call ap_strlen
+    mov rbx, rax
+    cmp rbx, 1
+    jbe .iap_have_cwd                   ; "/" already ends in a slash
+    lea rdi, [rel iap_buf]
+    mov byte [rdi + rbx], '/'
+    inc rbx
+.iap_have_cwd:
+
+    mov rsi, [rbp - IAP_PATH]
+    cmp word [rsi], 0x2f2e               ; "./", little-endian
+    jne .iap_copy
+    add rsi, 2
+.iap_copy:
+    push rsi
+    mov rdi, rsi
+    call ap_strlen
+    pop rsi
+    lea rcx, [rbx + rax]
+    cmp rcx, IAP_BUFSZ - 1
+    jae .iap_asis
+    lea rdi, [rel iap_buf]
+    add rdi, rbx
+    mov rdx, rax
+    add rbx, rax                        ; ap_memcpy answers the DEST, not the
+                                        ; length, so the sum is taken first
+    call ap_memcpy
+    lea rdi, [rel iap_buf]
+    mov byte [rdi + rbx], 0
+    mov rax, rdi
+    pop rbx
+    leave
+    ret
+.iap_asis:
+    mov rax, [rbp - IAP_PATH]
+    pop rbx
+    leave
+    ret
+END_FUNC import_abspath
+
+;; ============================================================================
 ;; import_load_module(PyObject *name_str, const char *path_cstr, int is_package) -> PyObject*
 ;; Load a .pyc file and execute it as a module
 ;; ============================================================================
@@ -2519,9 +2662,41 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r12                ; path cstr
     call import_source_path     ; -> the .py, or r12 unchanged
     mov rdi, rax
+    call import_abspath
+    mov rdi, rax
     call str_from_cstr_heap
     push rax                    ; file str
     lea rdi, [rel im_dunder_file]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rsp + 8]
+    call dict_set
+    pop rdi
+    call obj_decref
+    pop rdi
+    call obj_decref
+
+    ; Set __cached__
+    ;
+    ; The other half of __file__: where the bytecode is, or would be.  A .pyc
+    ; the finder matched IS its own cache file; a .py names the __pycache__
+    ; entry beside it whether or not one has been written yet, which is what
+    ; CPython records and what importlib and the pycache tests read back.
+    mov rdi, r12                        ; path cstr
+    extern pyc_cache_path
+    call pyc_cache_path
+    test rax, rax
+    jnz .have_cached
+    mov rax, r12                        ; not a source: it is its own cache
+.have_cached:
+    mov rdi, rax
+    call import_abspath
+    mov rdi, rax
+    call str_from_cstr_heap
+    push rax
+    lea rdi, [rel im_dunder_cached]
     call str_from_cstr_heap
     push rax
     mov rdi, r15
@@ -2835,6 +3010,7 @@ im_tests_cpython_path: db "tests/cpython", 0
 im_builtins:        db "builtins", 0
 im_dunder_name:     db "__name__", 0
 im_dunder_file:     db "__file__", 0
+im_dunder_cached:   db "__cached__", 0
 im_dunder_loader:   db "__loader__", 0
 im_dunder_spec:     db "__spec__", 0
 im_dunder_package:  db "__package__", 0
@@ -2853,6 +3029,11 @@ im_pycache_prefix_len  equ $ - im_pycache_prefix - 1
 im_pyc_suffix:         db ".cpython-312.pyc", 0
 im_pyc_suffix_len      equ $ - im_pyc_suffix - 1
 
+; CPython's sourceless form: a .pyc beside the module rather than under
+; __pycache__, which is what a stripped distribution ships.
+im_legacy_pyc_suffix:     db ".pyc", 0
+im_legacy_pyc_suffix_len  equ $ - im_legacy_pyc_suffix - 1
+
 im_pkg_py_suffix:      db "/__init__.py", 0
 im_pkg_py_suffix_len   equ $ - im_pkg_py_suffix - 1
 
@@ -2867,6 +3048,8 @@ section .bss
 im_path_key:        resq 1      ; the interned "__path__", built on first use
 ISP_BUFSZ equ 4096
 isp_buf: resb ISP_BUFSZ
+IAP_BUFSZ equ 4096
+iap_buf: resb IAP_BUFSZ
 
 section .bss
 ; The builtins module, borrowed: sys.modules holds the reference for the life
