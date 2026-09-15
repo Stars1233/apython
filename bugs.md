@@ -423,15 +423,15 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **`str.find` and `str.count` are the naive O(n*m) search.**  CPython's is
-  Crochemore-Perrin two-way with a Bloom-filter skip, which is O(n + m), and
-  its own test says so: `string_tests.test_adaptive_find` searches a
-  1,000,000-character haystack built to defeat the naive scan, and it is what
-  makes `test_bytes`, `test_unicode`, `test_userstring` and `test_string` time
-  out rather than fail -- the four that the RC sweep still reports as HANG,
-  beside `test_zipfile64`, which is a multi-gigabyte test by design.
-  Ordinary searches are unaffected -- the shapes that hurt are the ones with
-  long repeated prefixes.
+- **`rfind` and `rindex` are still the naive backward scan.**  The forward
+  direction is Crochemore-Perrin two-way now -- `ap_memfind` counts the
+  candidates its memchr scan rejects and switches once that work would exceed
+  the haystack's own length -- so `find`, `count`, `index` and `in` are
+  O(n + m) for str, bytes and bytearray alike.  `ap_memrfind` walks down one
+  position at a time and is O(n*m) on the same shapes; CPython runs the
+  two-way search over the reversed strings for it.  Nothing in CPython's own
+  suite measures that direction, which is why it is recorded rather than
+  written.
 
 - **Indexing a non-ASCII string is O(n), so a loop over one is quadratic.**
   `str_cp_offset` and `str_byte_to_cp` walk from byte 0 every time, because

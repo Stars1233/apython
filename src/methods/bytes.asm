@@ -1067,6 +1067,10 @@ DEF_FUNC bytes_method_count, BC_FRAME
     xor r10d, r10d              ; count = 0
 
 .bc_loop:
+    ; ap_memfind per OCCURRENCE, not ap_memcmp per position: the same change
+    ; find got, and for the same reason -- a per-position memcmp is O(n*m)
+    ; and has no fast path, where this reaches memchr for a one-byte needle
+    ; and the two-way search when the scan starts wasting work.
     mov rax, r8
     sub rax, r11                ; remaining = self_len - offset
     cmp rax, r9
@@ -1074,27 +1078,27 @@ DEF_FUNC bytes_method_count, BC_FRAME
 
     mov rdi, [rbp - BC_SELF]
     add rdi, r11
-    mov rsi, [rbp - BC_SUB]
-    mov rdx, r9
+    mov rsi, rax
+    mov rdx, [rbp - BC_SUB]
+    mov rcx, r9
     push r8
     push r9
     push r10
     push r11
-    call ap_memcmp
+    extern ap_memfind
+    call ap_memfind
     pop r11
     pop r10
     pop r9
     pop r8
-    test eax, eax
-    jnz .bc_nomatch
+    test rax, rax
+    jz .bc_result
 
     ; Match found
     inc r10
+    sub rax, [rbp - BC_SELF]
+    mov r11, rax
     add r11, r9                 ; skip sub_len (non-overlapping)
-    jmp .bc_loop
-
-.bc_nomatch:
-    inc r11
     jmp .bc_loop
 
 .bc_result:
@@ -1289,6 +1293,12 @@ DEF_FUNC bytes_find_impl, BF_FRAME
     jmp .bf_found
 
 .bf_loop:
+    ; One call, not one per position.  This used to walk the range a byte at
+    ; a time calling ap_memcmp, which is O(n*m) and has no fast path at all --
+    ; ap_memfind reaches memchr for a one-byte needle and, when the scan is
+    ; wasting more work than the haystack is long, the two-way search.  That
+    ; is what CPython's own test_adaptive_find measures, and what made
+    ; test_bytes a timeout rather than a row of results.
     mov rax, r8
     sub rax, r11                ; remaining
     cmp rax, r9
@@ -1296,20 +1306,15 @@ DEF_FUNC bytes_find_impl, BF_FRAME
 
     mov rdi, [rbp - BF_SELF]
     add rdi, r11
-    mov rsi, [rbp - BF_SUB]
-    mov rdx, r9
-    push r8
-    push r9
-    push r11
-    call ap_memcmp
-    pop r11
-    pop r9
-    pop r8
-    test eax, eax
-    jz .bf_found
-
-    inc r11
-    jmp .bf_loop
+    mov rsi, rax
+    mov rdx, [rbp - BF_SUB]
+    mov rcx, r9
+    extern ap_memfind
+    call ap_memfind
+    test rax, rax
+    jz .bf_not_found
+    sub rax, [rbp - BF_SELF]
+    mov r11, rax
 
 .bf_found:
     mov rax, r11

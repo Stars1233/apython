@@ -1304,7 +1304,9 @@ AMF_HAY    equ 8
 AMF_NEEDLE equ 16
 AMF_NLEN   equ 24
 AMF_LAST   equ 32           ; the last offset a match could start at
-AMF_FRAME  equ 40           ; + 1 push = 48, 16-byte aligned
+AMF_HLEN   equ 40
+AMF_LIMIT  equ 48           ; rejected candidates before two-way takes over
+AMF_FRAME  equ 48           ; + 2 pushes = 64, 16-byte aligned
 
 DEF_FUNC_BARE ap_memfind
     ; No stack frame on this path.  str.count calls this once per occurrence,
@@ -1342,13 +1344,33 @@ END_FUNC ap_memfind
 ;; ============================================================================
 DEF_FUNC_LOCAL ap_memfind_multi, AMF_FRAME
     push rbx
+    push r12
     mov [rbp - AMF_HAY], rdi
+    mov [rbp - AMF_HLEN], rsi
     mov [rbp - AMF_NEEDLE], rdx
     mov [rbp - AMF_NLEN], rcx
     mov rax, rsi
     sub rax, rcx
     mov [rbp - AMF_LAST], rax
     mov rbx, rdi                ; rbx = where the next scan starts
+    ; How many candidates the memchr scan is allowed to reject before the
+    ; two-way search takes over.  CPython's adaptive_find keeps the same kind
+    ; of tally and for the same reason: this loop is O(n*m) on a needle whose
+    ; prefix repeats, and the two-way search is O(n+m) but pays a
+    ; factorization up front, so the switch has to be earned.
+    ;
+    ; A rejected candidate costs at most nlen bytes, so hlen/nlen + 1 of them
+    ; cost at most hlen + nlen -- which makes the whole search linear whether
+    ; it switches or not.  For an ordinary short needle in a long text the
+    ; limit is in the hundreds of thousands and is never reached; for the
+    ; `("a"*N + "b"*N)` shapes CPython's own test_adaptive_find builds it is
+    ; two or three.
+    mov rax, rsi
+    xor edx, edx
+    div rcx
+    inc rax
+    mov [rbp - AMF_LIMIT], rax
+    xor r12d, r12d
 
 .amf_loop:
     ; The first byte is found by ap_memchr rather than compared one at a time,
@@ -1377,19 +1399,454 @@ DEF_FUNC_LOCAL ap_memfind_multi, AMF_FRAME
     test eax, eax
     jz .amf_hit
     inc rbx
-    jmp .amf_loop
+
+    ; A candidate that got as far as ap_memcmp and failed cost the whole
+    ; needle.  Once that has happened more times than the needle is long, and
+    ; there is enough haystack left to pay the factorization back, hand the
+    ; rest to the two-way search.
+    inc r12
+    cmp r12, [rbp - AMF_LIMIT]
+    jbe .amf_loop
+    mov rax, [rbp - AMF_HAY]
+    add rax, [rbp - AMF_HLEN]
+    sub rax, rbx                ; bytes of haystack left from here
+    cmp rax, 2000
+    jl .amf_loop
+    mov rdi, rbx
+    mov rsi, rax
+    mov rdx, [rbp - AMF_NEEDLE]
+    mov rcx, [rbp - AMF_NLEN]
+    call ap_memfind_twoway
+    jmp .amf_out
 
 .amf_hit:
     mov rax, rbx
-    pop rbx
-    leave
-    ret
+    jmp .amf_out
 .amf_no_match:
     xor eax, eax
+.amf_out:
+    pop r12
     pop rbx
     leave
     ret
 END_FUNC ap_memfind_multi
+
+
+;; ============================================================================
+;; tw_lex_search(rdi = needle, rsi = nlen, edx = invert) -> rax = max_suffix,
+;;                                                          rdx = period
+;;
+;; The maximal suffix of the needle under the ordinary alphabet order, or
+;; under the inverted one when `invert` is set, and the period of the right
+;; half that falls out of the same walk.  Crochemore and Perrin's critical
+;; factorization is the later of the two cuts.
+;;
+;; Each iteration increases candidate + k + max_suffix, so the loop is linear
+;; in the needle.
+;; ============================================================================
+DEF_FUNC_LOCAL tw_lex_search
+    xor eax, eax                ; max_suffix
+    mov r8d, 1                  ; candidate
+    xor r9d, r9d                ; k
+    mov r10d, 1                 ; period
+.tls_loop:
+    lea r11, [r8 + r9]
+    cmp r11, rsi
+    jge .tls_done
+    movzx ecx, byte [rdi + r11] ; a = needle[candidate + k]
+    lea r11, [rax + r9]
+    movzx r11d, byte [rdi + r11] ; b = needle[max_suffix + k]
+    test edx, edx
+    jz .tls_plain
+    xchg ecx, r11d              ; inverted alphabet: compare b < a instead
+.tls_plain:
+    cmp ecx, r11d
+    jb .tls_short
+    ja .tls_better
+    ; a == b
+    lea r11, [r9 + 1]
+    cmp r11, r10
+    je .tls_whole_period
+    mov r9, r11
+    jmp .tls_loop
+.tls_whole_period:
+    add r8, r10
+    xor r9d, r9d
+    jmp .tls_loop
+.tls_short:
+    lea r8, [r8 + r9 + 1]
+    xor r9d, r9d
+    mov r10, r8
+    sub r10, rax                ; period = candidate - max_suffix
+    jmp .tls_loop
+.tls_better:
+    mov rax, r8
+    inc r8
+    xor r9d, r9d
+    mov r10d, 1
+    jmp .tls_loop
+.tls_done:
+    mov rdx, r10
+    leave
+    ret
+END_FUNC tw_lex_search
+
+;; ============================================================================
+;; ap_memfind_twoway(rdi = hay, rsi = hlen, rdx = needle, rcx = nlen)
+;;   -> rax = pointer to the first match, or 0
+;;
+;; Crochemore and Perrin's (1991) two-way algorithm, as CPython's
+;; Objects/stringlib/fastsearch.h implements it: O(n + m) whatever the input,
+;; where the memchr-driven scan beside it is O(n * m) on a needle whose
+;; prefix repeats.  CPython's own string_tests.test_adaptive_find builds
+;; exactly that -- `("a"*N + "b"*N)` shapes at N = 1,000,000 -- and it is why
+;; test_bytes, test_unicode and test_userstring used to be reported as HANG
+;; rather than as failures.
+;;
+;; Three parts: the critical factorization (tw_lex_search, twice), a
+;; compressed Boyer-Moore bad-character table over the low six bits of each
+;; byte, and a window walk with two arms -- one for a periodic needle, which
+;; needs a memory of how much of the last window already matched, and one for
+;; an aperiodic needle, which does not.
+;;
+;; hlen >= nlen >= 2 is the caller's to establish.
+;; ============================================================================
+TW_HAY    equ 8
+TW_HLEN   equ 16
+TW_NEEDLE equ 24
+TW_NLEN   equ 32
+TW_CUT    equ 40
+TW_PERIOD equ 48
+TW_GAP    equ 56
+TW_GJE    equ 64            ; gap_jump_end, the aperiodic arm's split
+TW_MEMORY equ 72
+TW_TABLE  equ 144           ; 64 one-byte shifts
+TW_FRAME  equ 144           ; + 4 pushes = 176, 16-aligned
+
+global ap_memfind_twoway
+DEF_FUNC ap_memfind_twoway, TW_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov [rbp - TW_HAY], rdi
+    mov [rbp - TW_HLEN], rsi
+    mov [rbp - TW_NEEDLE], rdx
+    mov [rbp - TW_NLEN], rcx
+    mov rbx, rdi
+    mov r12, rdx
+
+    ; --- the critical factorization: the later of the two maximal suffixes --
+    mov rdi, r12
+    mov rsi, rcx
+    xor edx, edx
+    call tw_lex_search
+    ; The first pair goes straight into the frame: tw_lex_search itself uses
+    ; r8 through r11, so holding cut1 and period1 in registers across the
+    ; second call handed the periodicity test a cut of whatever the second
+    ; search had left there -- and `"aba".find("aa")` answered 1.
+    mov [rbp - TW_CUT], rax
+    mov [rbp - TW_PERIOD], rdx
+    mov rdi, r12
+    mov rsi, [rbp - TW_NLEN]
+    mov edx, 1
+    call tw_lex_search
+    ; Take the LATER cut, with the period that came with it.
+    cmp [rbp - TW_CUT], rax
+    jg .tw_take_first
+    mov [rbp - TW_CUT], rax
+    mov [rbp - TW_PERIOD], rdx
+.tw_take_first:
+    mov r8, [rbp - TW_CUT]
+    mov r9, [rbp - TW_PERIOD]
+
+    ; --- periodic?  needle[:cut] == needle[period:period+cut] --------------
+    mov rdi, r12
+    mov rsi, r12
+    add rsi, r9
+    mov rdx, r8
+    test rdx, rdx
+    jz .tw_periodic             ; an empty left half compares equal
+    call ap_memcmp
+    test eax, eax
+    jnz .tw_aperiodic
+.tw_periodic:
+    mov qword [rbp - TW_GAP], 0
+    mov r10d, 1                 ; is_periodic
+    jmp .tw_table
+
+.tw_aperiodic:
+    ; period = max(cut, nlen - cut) + 1
+    mov rax, [rbp - TW_NLEN]
+    sub rax, [rbp - TW_CUT]
+    cmp rax, [rbp - TW_CUT]
+    jge .tw_ap_have
+    mov rax, [rbp - TW_CUT]
+.tw_ap_have:
+    inc rax
+    mov [rbp - TW_PERIOD], rax
+    ; gap = the distance back to the previous byte equivalent (mod 64) to the
+    ; last one, or nlen when there is none.
+    mov rax, [rbp - TW_NLEN]
+    mov [rbp - TW_GAP], rax
+    mov rcx, rax
+    dec rcx
+    movzx r11d, byte [r12 + rcx]
+    and r11d, 63
+    dec rcx
+.tw_gap_loop:
+    test rcx, rcx
+    js .tw_gap_done
+    movzx eax, byte [r12 + rcx]
+    and eax, 63
+    cmp eax, r11d
+    je .tw_gap_found
+    dec rcx
+    jmp .tw_gap_loop
+.tw_gap_found:
+    mov rax, [rbp - TW_NLEN]
+    dec rax
+    sub rax, rcx
+    mov [rbp - TW_GAP], rax
+.tw_gap_done:
+    xor r10d, r10d              ; not periodic
+
+.tw_table:
+    ; --- the compressed bad-character table --------------------------------
+    ; not_found_shift = min(nlen, 255), then the last `not_found_shift` bytes
+    ; of the needle each write their own distance from the end.
+    mov rax, [rbp - TW_NLEN]
+    cmp rax, 255
+    jle .tw_nfs_ok
+    mov eax, 255
+.tw_nfs_ok:
+    mov r11, rax                ; not_found_shift
+    lea rdi, [rbp - TW_TABLE]
+    xor ecx, ecx
+.tw_fill:
+    cmp rcx, 64
+    jge .tw_filled
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .tw_fill
+.tw_filled:
+    mov rcx, [rbp - TW_NLEN]
+    sub rcx, r11                ; i = nlen - not_found_shift
+.tw_shift_loop:
+    cmp rcx, [rbp - TW_NLEN]
+    jge .tw_shifted
+    movzx eax, byte [r12 + rcx]
+    and eax, 63
+    mov rdx, [rbp - TW_NLEN]
+    dec rdx
+    sub rdx, rcx                ; nlen - 1 - i
+    mov [rdi + rax], dl
+    inc rcx
+    jmp .tw_shift_loop
+.tw_shifted:
+
+    mov r13, [rbp - TW_NLEN]
+    dec r13                     ; window_last = nlen - 1
+    test r10d, r10d
+    jnz .tw_periodic_search
+
+    ; =====================================================================
+    ; The aperiodic arm.
+    ; =====================================================================
+    ; period = max(gap, period); gap_jump_end = min(nlen, cut + gap)
+    mov rax, [rbp - TW_GAP]
+    cmp rax, [rbp - TW_PERIOD]
+    jle .tw_ap_period_ok
+    mov [rbp - TW_PERIOD], rax
+.tw_ap_period_ok:
+    mov rax, [rbp - TW_CUT]
+    add rax, [rbp - TW_GAP]
+    cmp rax, [rbp - TW_NLEN]
+    jle .tw_gje_ok
+    mov rax, [rbp - TW_NLEN]
+.tw_gje_ok:
+    mov [rbp - TW_GJE], rax
+
+.tw_window_loop:
+    cmp r13, [rbp - TW_HLEN]
+    jge .tw_none
+.tw_horspool:
+    movzx eax, byte [rbx + r13]
+    and eax, 63
+    lea rdi, [rbp - TW_TABLE]
+    movzx eax, byte [rdi + rax]
+    add r13, rax
+    test eax, eax
+    jz .tw_aligned
+    cmp r13, [rbp - TW_HLEN]
+    jge .tw_none
+    jmp .tw_horspool
+.tw_aligned:
+    ; window = window_last - nlen + 1
+    mov r8, r13
+    sub r8, [rbp - TW_NLEN]
+    inc r8                      ; r8 = window index into hay
+
+    ; the early right half: a mismatch here is worth exactly `gap`
+    mov r14, [rbp - TW_CUT]
+.tw_early:
+    cmp r14, [rbp - TW_GJE]
+    jge .tw_late_start
+    mov rax, r8
+    add rax, r14
+    movzx ecx, byte [rbx + rax]
+    cmp cl, [r12 + r14]
+    jne .tw_early_bad
+    inc r14
+    jmp .tw_early
+.tw_early_bad:
+    add r13, [rbp - TW_GAP]
+    jmp .tw_window_loop
+
+.tw_late_start:
+    mov r14, [rbp - TW_GJE]
+.tw_late:
+    cmp r14, [rbp - TW_NLEN]
+    jge .tw_left_start
+    mov rax, r8
+    add rax, r14
+    movzx ecx, byte [rbx + rax]
+    cmp cl, [r12 + r14]
+    jne .tw_late_bad
+    inc r14
+    jmp .tw_late
+.tw_late_bad:
+    add r13, r14
+    sub r13, [rbp - TW_CUT]
+    inc r13
+    jmp .tw_window_loop
+
+.tw_left_start:
+    xor r14d, r14d
+.tw_left:
+    cmp r14, [rbp - TW_CUT]
+    jge .tw_found
+    mov rax, r8
+    add rax, r14
+    movzx ecx, byte [rbx + rax]
+    cmp cl, [r12 + r14]
+    jne .tw_left_bad
+    inc r14
+    jmp .tw_left
+.tw_left_bad:
+    add r13, [rbp - TW_PERIOD]
+    jmp .tw_window_loop
+
+.tw_found:
+    lea rax, [rbx + r8]
+    jmp .tw_out
+.tw_none:
+    xor eax, eax
+.tw_out:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+    ; =====================================================================
+    ; The periodic arm.  `memory` records how much of the window the last
+    ; comparison already proved, so a needle that is its own repetition does
+    ; not re-compare the overlap -- which is what keeps this linear.
+    ; =====================================================================
+.tw_periodic_search:
+    mov qword [rbp - TW_MEMORY], 0
+.tw_pwindow_loop:
+    cmp r13, [rbp - TW_HLEN]
+    jge .tw_none
+.tw_phorspool:
+    movzx eax, byte [rbx + r13]
+    and eax, 63
+    lea rdi, [rbp - TW_TABLE]
+    movzx eax, byte [rdi + rax]
+    add r13, rax
+    test eax, eax
+    jz .tw_pno_shift
+    cmp r13, [rbp - TW_HLEN]
+    jge .tw_none
+    jmp .tw_phorspool
+
+.tw_pno_shift:
+    mov r8, r13
+    sub r8, [rbp - TW_NLEN]
+    inc r8                      ; window index
+
+    ; the right half, from max(cut, memory)
+    mov r14, [rbp - TW_CUT]
+    cmp r14, [rbp - TW_MEMORY]
+    jge .tw_pright
+    mov r14, [rbp - TW_MEMORY]
+.tw_pright:
+    cmp r14, [rbp - TW_NLEN]
+    jge .tw_pleft_start
+    mov rax, r8
+    add rax, r14
+    movzx ecx, byte [rbx + rax]
+    cmp cl, [r12 + r14]
+    jne .tw_pright_bad
+    inc r14
+    jmp .tw_pright
+.tw_pright_bad:
+    add r13, r14
+    sub r13, [rbp - TW_CUT]
+    inc r13
+    mov qword [rbp - TW_MEMORY], 0
+    jmp .tw_pwindow_loop
+
+.tw_pleft_start:
+    mov r14, [rbp - TW_MEMORY]
+.tw_pleft:
+    cmp r14, [rbp - TW_CUT]
+    jge .tw_pfound
+    mov rax, r8
+    add rax, r14
+    movzx ecx, byte [rbx + rax]
+    cmp cl, [r12 + r14]
+    jne .tw_pleft_bad
+    inc r14
+    jmp .tw_pleft
+.tw_pleft_bad:
+    ; The left half failed: shift by a whole period and remember that the
+    ; overlap is already known to match.
+    add r13, [rbp - TW_PERIOD]
+    mov rax, [rbp - TW_NLEN]
+    sub rax, [rbp - TW_PERIOD]
+    mov [rbp - TW_MEMORY], rax
+    cmp r13, [rbp - TW_HLEN]
+    jge .tw_none
+    movzx eax, byte [rbx + r13]
+    and eax, 63
+    lea rdi, [rbp - TW_TABLE]
+    movzx eax, byte [rdi + rax]
+    test eax, eax
+    jz .tw_pno_shift            ; still aligned: compare again from memory
+    ; A mismatch was identified to the right of where the next comparison
+    ; would start, so at least the first-comparison jump is safe.
+    mov rcx, [rbp - TW_CUT]
+    cmp rcx, [rbp - TW_MEMORY]
+    jge .tw_pmem_have
+    mov rcx, [rbp - TW_MEMORY]
+.tw_pmem_have:
+    sub rcx, [rbp - TW_CUT]
+    inc rcx                     ; mem_jump
+    cmp rax, rcx
+    jge .tw_pjump
+    mov rax, rcx
+.tw_pjump:
+    mov qword [rbp - TW_MEMORY], 0
+    add r13, rax
+    jmp .tw_pwindow_loop
+
+.tw_pfound:
+    lea rax, [rbx + r8]
+    jmp .tw_out
+END_FUNC ap_memfind_twoway
 
 ;; ============================================================================
 ;; ap_memrfind(rdi = hay, rsi = hlen, rdx = needle, rcx = nlen)
