@@ -556,6 +556,7 @@ test_pyexpat_parse
 test_raise_cause
 test_raise_class_init
 test_raise_from
+test_random_bisect
 test_random
 test_range_iter_overflow
 test_range_overflow
