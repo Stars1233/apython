@@ -111,6 +111,7 @@ test_code_gc
 test_code_lines_scaling
 test_code_localsplus
 test_code_replace
+test_collections_module
 test_compare_raises
 test_compare_reflected_op
 test_comparisons
