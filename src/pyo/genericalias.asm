@@ -36,6 +36,8 @@ extern obj_decref
 extern obj_dealloc
 extern obj_hash
 extern obj_incref
+extern str_from_cstr_heap
+extern obj_getattr_opt
 extern obj_repr
 extern obj_richcompare_bool
 extern raise_exception
@@ -555,6 +557,17 @@ DEF_FUNC generic_alias_getattr, GAG_FRAME
     test eax, eax
     jz .gag_args
 
+    ; typing walks __parameters__ to find the TypeVars an alias is still
+    ; generic over.  It is the TypeVars among the arguments, in first-seen
+    ; order, and it answered nothing at all -- so list[T].__parameters__ was
+    ; an AttributeError where CPython says (~T,).
+    mov rdi, [rbp - GAG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "__parameters__"
+    call ap_strcmp
+    test eax, eax
+    jz .gag_parameters
+
     ; PEP 646 asks whether an alias is the unpacked form, and typing reads it
     ; by name.
     mov rdi, [rbp - GAG_NAME]
@@ -571,6 +584,21 @@ DEF_FUNC generic_alias_getattr, GAG_FRAME
     lea rax, [rel bool_false]
 .gag_bool:
     INCREF rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.gag_parameters:
+    ; Built each time rather than cached: CPython caches it on the object and
+    ; the field would have to be traversed by the collector, and nothing here
+    ; asks for it in a loop.  A TypeVar is anything with a __typing_subst__,
+    ; which is how typing itself recognises one.
+    mov rdi, rbx
+    call generic_alias_parameters
+    test rax, rax
+    jz .gag_missing
     mov edx, TAG_PTR
     pop rbx
     leave
@@ -636,6 +664,332 @@ DEF_FUNC generic_alias_getattr, GAG_FRAME
     leave
     ret
 END_FUNC generic_alias_getattr
+
+;; ============================================================================
+;; generic_alias_parameters(rdi = a generic alias) -> rax = a tuple, owned,
+;;   or 0
+;;
+;; The TypeVars among the alias's arguments, in first-seen order and without
+;; repeats -- which is what typing walks to find what an alias is still
+;; generic over.  `list[T].__parameters__` was an AttributeError; CPython
+;; answers (~T,).
+;;
+;; A TypeVar is recognised the way typing itself recognises one: by having a
+;; __typing_subst__.  That keeps this from naming lib/_typing.py's classes,
+;; so a TypeVar from a real typing module counts too.
+;; ============================================================================
+GAP_SELF  equ 8
+GAP_OUT   equ 16
+GAP_N     equ 24
+GAP_FRAME equ 32            ; + 2 pushes = 48, 16-aligned
+DEF_FUNC_LOCAL generic_alias_parameters, GAP_FRAME
+    push rbx
+    push r12
+    mov [rbp - GAP_SELF], rdi
+    mov qword [rbp - GAP_N], 0
+
+    ; The arguments, always as a tuple: ga_args holds the bare object when the
+    ; subscript was one thing.
+    mov rbx, [rdi + PyGenericAliasObject.ga_args]
+    test rbx, rbx
+    jz .gap_empty
+    V_TEST_PTR rbx, rcx
+    ja .gap_single
+    lea rcx, [rel tuple_type]
+    cmp [rbx + PyObject.ob_type], rcx
+    jne .gap_single
+    mov r12, [rbx + PyTupleObject.ob_size]
+    jmp .gap_have_n
+.gap_single:
+    mov r12d, 1
+.gap_have_n:
+
+    ; One pass to count, one to fill: a tuple cannot grow.  The counting pass
+    ; runs with no output tuple, and gap_already then has nothing to dedup
+    ; against -- so it walks the arguments it has already passed instead.
+    ; That cannot see a TypeVar contributed by a NESTED alias, so the count
+    ; may come out high; the fill pass dedups properly and the tuple is
+    ; trimmed to what it actually wrote.
+    xor eax, eax
+    mov [rbp - GAP_OUT], rax
+    call gap_collect             ; counts into GAP_N
+    mov rdi, [rbp - GAP_N]
+    call tuple_new
+    test rax, rax
+    jz .gap_fail
+    mov [rbp - GAP_OUT], rax
+    mov qword [rbp - GAP_N], 0
+    call gap_collect             ; fills GAP_OUT
+    ; Trim: the counting pass could not dedup across nested aliases, so the
+    ; tuple may be longer than what was written.  The tail is NULL, and a
+    ; tuple with a NULL in it is not a tuple anyone may see.
+    mov rax, [rbp - GAP_OUT]
+    mov rcx, [rbp - GAP_N]
+    cmp rcx, [rax + PyTupleObject.ob_size]
+    je .gap_exact
+    mov rdi, rcx
+    call tuple_new
+    test rax, rax
+    jz .gap_fail_out
+    mov rdx, [rbp - GAP_OUT]
+    mov rdx, [rdx + PyTupleObject.ob_item]
+    mov r8, [rax + PyTupleObject.ob_item]
+    xor ecx, ecx
+.gap_trim:
+    cmp rcx, [rbp - GAP_N]
+    jge .gap_trimmed
+    mov r9, [rdx + rcx*8]
+    mov [r8 + rcx*8], r9
+    mov rdi, r9
+    push rax
+    push rcx
+    call obj_incref
+    pop rcx
+    pop rax
+    inc rcx
+    jmp .gap_trim
+.gap_trimmed:
+    push rax
+    mov rdi, [rbp - GAP_OUT]
+    call obj_decref
+    pop rax
+    pop r12
+    pop rbx
+    leave
+    ret
+.gap_exact:
+    mov rax, [rbp - GAP_OUT]
+    pop r12
+    pop rbx
+    leave
+    ret
+.gap_fail_out:
+    mov rdi, [rbp - GAP_OUT]
+    call obj_decref
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.gap_empty:
+    xor edi, edi
+    call tuple_new
+    pop r12
+    pop rbx
+    leave
+    ret
+.gap_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC generic_alias_parameters
+
+;; ============================================================================
+;; gap_collect() -- one pass over the arguments of the alias
+;; generic_alias_parameters parked in its frame.  Counts into GAP_N, and fills
+;; GAP_OUT when it is not 0.  Only callable from there.
+;;   -> nothing
+;; ============================================================================
+DEF_FUNC_BARE gap_collect
+    push rbx
+    push r12
+    push r13
+    push r14                    ; four, so rsp stays 16-aligned at the calls
+    mov r13, [rbp - GAP_SELF]
+    mov r13, [r13 + PyGenericAliasObject.ga_args]
+    xor r14d, r14d              ; the index into the arguments
+.gapc_loop:
+    cmp r14, r12
+    jge .gapc_done
+    ; The argument at r14 -- or the bare object, when there is only one.
+    mov rbx, r13
+    V_TEST_PTR rbx, rcx
+    ja .gapc_have_arg
+    lea rcx, [rel tuple_type]
+    cmp [rbx + PyObject.ob_type], rcx
+    jne .gapc_have_arg
+    mov rax, [rbx + PyTupleObject.ob_item]
+    mov rbx, [rax + r14*8]
+.gapc_have_arg:
+    V_TEST_PTR rbx, rcx
+    ja .gapc_next
+    test rbx, rbx
+    jz .gapc_next
+
+    ; A NESTED alias contributes its own parameters, not itself:
+    ; list[list[T]].__parameters__ is (~T,) in CPython.  generic_alias_
+    ; parameters has a frame of its own, so this recurses, and the tuple it
+    ; answers is walked through the same TypeVar test and the same dedup.
+    lea rcx, [rel generic_alias_type]
+    cmp [rbx + PyObject.ob_type], rcx
+    jne .gapc_plain
+    mov rdi, rbx
+    call generic_alias_parameters
+    test rax, rax
+    jz .gapc_next
+    push rax
+    mov r15, rax
+    xor ecx, ecx
+.gapc_nested:
+    cmp rcx, [r15 + PyTupleObject.ob_size]
+    jge .gapc_nested_done
+    push rcx
+    mov rax, [r15 + PyTupleObject.ob_item]
+    mov rbx, [rax + rcx*8]
+    call gap_take
+    pop rcx
+    inc rcx
+    jmp .gapc_nested
+.gapc_nested_done:
+    pop rdi
+    call obj_decref
+    jmp .gapc_next
+
+.gapc_plain:
+    ; Is it a TypeVar?  typing asks by __typing_subst__, and so does this.
+    mov rdi, rbx
+    CSTRING rsi, "__typing_subst__"
+    call gap_has_attr
+    test eax, eax
+    jz .gapc_next
+    call gap_take
+.gapc_next:
+    inc r14
+    jmp .gapc_loop
+.gapc_done:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+END_FUNC gap_collect
+
+;; ============================================================================
+;; gap_take() -- record the TypeVar in rbx, unless it is already there
+;;
+;; Counts on the first pass and fills on the second, the way gap_collect
+;; does; only callable from generic_alias_parameters' frame.
+;;   -> nothing
+;; ============================================================================
+DEF_FUNC_BARE gap_take
+    push rbx
+    mov rdi, rbx
+    call gap_already
+    test eax, eax
+    jnz .gapt_done
+    mov rax, [rbp - GAP_OUT]
+    test rax, rax
+    jz .gapt_count
+    mov rcx, [rbp - GAP_N]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov [rax + rcx*8], rbx
+    mov rdi, rbx
+    call obj_incref
+.gapt_count:
+    inc qword [rbp - GAP_N]
+.gapt_done:
+    pop rbx
+    ret
+END_FUNC gap_take
+
+;; ============================================================================
+;; gap_has_attr(rdi = an object, rsi = a name cstr) -> eax = 1 when it has it
+;;
+;; hasattr, without leaving an exception behind: obj_getattr_opt answers 0 for
+;; a miss and may leave one for a raise, and a probe must not.
+;; ============================================================================
+GHA_NAME  equ 8
+GHA_FRAME equ 24            ; + 1 push = 32, 16-aligned
+DEF_FUNC_LOCAL gap_has_attr, GHA_FRAME
+    push rdi
+    mov rdi, rsi
+    call str_from_cstr_heap
+    mov [rbp - GHA_NAME], rax
+    pop rdi
+    test rax, rax
+    jz .gha_no
+    mov rsi, rax
+    call obj_getattr_opt
+    push rax
+    mov rdi, [rbp - GHA_NAME]
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .gha_clear
+    mov rdi, rax
+    V_TEST_PTR rdi, rcx
+    ja .gha_yes
+    call obj_decref
+.gha_yes:
+    mov eax, 1
+    leave
+    ret
+.gha_clear:
+    extern current_exception
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .gha_no
+    mov qword [rel current_exception], 0
+    call obj_decref
+.gha_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC gap_has_attr
+
+;; ============================================================================
+;; gap_already(rdi = a TypeVar) -> eax = 1 when GAP_OUT already holds it
+;;
+;; By identity, as CPython's does: two TypeVars with the same name are two
+;; parameters.  Answers 0 on the counting pass, when there is no tuple yet --
+;; which would overcount a repeat, so the counting pass keeps its own guard
+;; by walking the arguments it has already passed.
+;; ============================================================================
+DEF_FUNC_BARE gap_already
+    push rbx
+    mov rbx, [rbp - GAP_OUT]
+    test rbx, rbx
+    jz .gapa_scan_args
+    mov rcx, [rbp - GAP_N]
+    mov rax, [rbx + PyTupleObject.ob_item]
+    xor edx, edx
+.gapa_loop:
+    cmp rdx, rcx
+    jge .gapa_no
+    cmp [rax + rdx*8], rdi
+    je .gapa_yes
+    inc rdx
+    jmp .gapa_loop
+.gapa_scan_args:
+    ; The counting pass: look back over the arguments already visited.
+    mov rax, [rbp - GAP_SELF]
+    mov rax, [rax + PyGenericAliasObject.ga_args]
+    V_TEST_PTR rax, rcx
+    ja .gapa_no
+    lea rcx, [rel tuple_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .gapa_no
+    mov rax, [rax + PyTupleObject.ob_item]
+    xor edx, edx
+.gapa_back:
+    cmp rdx, r14
+    jge .gapa_no
+    cmp [rax + rdx*8], rdi
+    je .gapa_yes
+    inc rdx
+    jmp .gapa_back
+.gapa_yes:
+    mov eax, 1
+    pop rbx
+    ret
+.gapa_no:
+    xor eax, eax
+    pop rbx
+    ret
+END_FUNC gap_already
 
 ;; ga_emit_name(rdi = Value, rsi = buffer, rdx = length, r8 = capacity)
 ;;   -> rax = new length

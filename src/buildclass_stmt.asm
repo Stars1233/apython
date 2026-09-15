@@ -249,15 +249,35 @@ DEF_FUNC_LOCAL bc_prepare_namespace, BPN_FRAME
     jmp .none
 .have_ns:
 
-    ; Only a real object can be a namespace; anything else keeps the fallback.
+    ; It has to be a MAPPING.  Anything else was treated as "keep the
+    ; fallback", and None is a pointer -- so a __prepare__ returning None
+    ; passed the test below, the real dict was released, and the class body
+    ; executed with None as its locals.  The first STORE_NAME then handed None
+    ; to dict_set, which read its header as a dict: a SIGSEGV inside
+    ; dict_lookup, from seven lines of ordinary Python.  CPython refuses with
+    ; "BadMeta.__prepare__() must return a mapping, not NoneType", and
+    ; test_types.test_bad___prepare__ is exactly this.
     V_TEST_PTR rbx, rcx
-    ja .none
+    ja .bad_prepare
+    test rbx, rbx
+    jz .bad_prepare
+    mov rcx, [rbx + PyObject.ob_type]
+    cmp qword [rcx + PyTypeObject.tp_as_mapping], 0
+    je .bad_prepare
     mov rdi, [rbp - BPN_FALL]
     call obj_decref
     mov rax, rbx
     pop rbx
     leave
     ret
+
+.bad_prepare:
+    ; The metaclass names itself when it is a type; CPython writes
+    ; "<metaclass>" for anything else, which is what `metaclass=BadMeta()`
+    ; for a plain class gives.
+    mov rdi, [rbp - BPN_META]
+    mov rsi, rbx
+    call bc_raise_bad_prepare   ; does not return
 .none:
     xor eax, eax
     pop rbx
@@ -269,6 +289,64 @@ DEF_FUNC_LOCAL bc_prepare_namespace, BPN_FRAME
     leave
     ret
 END_FUNC bc_prepare_namespace
+
+;; ============================================================================
+;; bc_raise_bad_prepare(rdi = the metaclass, rsi = what __prepare__ returned)
+;;   -> does not return: raises CPython's TypeError
+;;
+;;   BadMeta.__prepare__() must return a mapping, not NoneType
+;;   <metaclass>.__prepare__() must return a mapping, not NoneType
+;;
+;; The second form is CPython's when the metaclass is not a type -- there is
+;; no tp_name to quote.
+;; ============================================================================
+BRP_META  equ 8
+BRP_GOT   equ 16
+BRP_BUF   equ 288
+BRP_FRAME equ 288           ; + 0 pushes = 288, 16-aligned
+DEF_FUNC_LOCAL bc_raise_bad_prepare, BRP_FRAME
+    mov [rbp - BRP_META], rdi
+    mov [rbp - BRP_GOT], rsi
+
+    ; Is the metaclass a type?  Asked FIRST, because type_check_is_class takes
+    ; the object in rdi and the buffer wants rdi too.
+    mov rdi, [rbp - BRP_META]
+    call type_check_is_class
+    lea rdi, [rbp - BRP_BUF]
+    test eax, eax
+    jz .brp_anon
+    mov rcx, [rbp - BRP_META]
+    mov rsi, [rcx + PyTypeObject.tp_name]
+    jmp .brp_have_name
+.brp_anon:
+    CSTRING rsi, "<metaclass>"
+.brp_have_name:
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, ".__prepare__() must return a mapping, not "
+    call rbt_append_cstr
+    mov rdi, rax
+    ; value_type, not ob_type: an int or a float may be the Value itself, and
+    ; reading a header off one gave "object" where CPython names the type.
+    push rdi
+    mov rdi, [rbp - BRP_GOT]
+    extern value_type
+    call value_type
+    pop rdi
+    test rax, rax
+    jz .brp_unknown
+    mov rsi, [rax + PyTypeObject.tp_name]
+    jmp .brp_join
+.brp_unknown:
+    CSTRING rsi, "object"
+.brp_join:
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - BRP_BUF]
+    call raise_exception
+    ud2
+END_FUNC bc_raise_bad_prepare
 
 ;; ============================================================================
 ;; builtin___build_class__(PyObject **args, int64_t nargs) -> rax = Value
