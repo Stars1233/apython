@@ -354,6 +354,9 @@ DEF_FUNC_BARE eval_inline_resume
     jz .eir_propagate
     VPUSH rax
     add rbx, 6                          ; skip 3 CACHE entries
+    ; A specialised handler is a second copy of the generic one, and a check
+    ; added to only one of them shows up only on cold sites.
+    CHECK_EVAL_SIGNALS
     DISPATCH
 
 .eir_propagate:

@@ -386,6 +386,10 @@ DEF_FUNC op_call, CL_FRAME
     add rbx, 6
 
     leave
+    ; A call is where a signal arrives: the process was inside a syscall, and
+    ; this is the instruction that made it.  CPython checks the eval breaker
+    ; here for the same reason.
+    CHECK_EVAL_SIGNALS
     DISPATCH
 
 .propagate_exc:
