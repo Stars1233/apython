@@ -181,6 +181,7 @@ test_container_repr_dunder
 test_contains_fallback
 test_context_chain_cycle
 test_control_flow
+test_converter_dunders
 test_copyreg
 test_coro_bound_methods
 test_crash_regressions

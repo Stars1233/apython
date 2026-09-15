@@ -1623,7 +1623,15 @@ BF_ENDPTR equ 16            ; where strtod stopped
 BF_OBJ    equ 24            ; the str object itself, for the error message
 BF_XLAT   equ 32            ; a Unicode-to-ASCII copy of it, or 0
 BF_XLEN   equ 40            ; and the length of what is being parsed
-BF_FRAME equ 48             ; + 0 pushes = 48
+BF_ARG    equ 48            ; the object being converted, across the nb_float call
+BF_RET    equ 56            ; and what its __float__ answered with
+; CPython names BOTH classes in "Wrong.__float__ returned non-float (type
+; int)" and the raiser takes one, so the receiver's name is baked into the
+; template here and the raiser fills in the other.  Derived rather than
+; hand-picked, so growing the scalars above cannot walk into it.
+BF_TMPLLEN equ 320
+BF_TMPL   equ 64 + BF_TMPLLEN
+BF_FRAME  equ BF_TMPL       ; + 0 pushes = 384, 16-aligned
 DEF_FUNC builtin_float, BF_FRAME
 
     test rsi, rsi
@@ -1667,14 +1675,155 @@ DEF_FUNC builtin_float, BF_FRAME
     mov rcx, [rcx + PyNumberMethods.nb_float]
     test rcx, rcx
     jz .float_numeric
-    call rcx                    ; nb_float returns a Value
+    mov [rbp - BF_ARG], rdi     ; the call clobbers rdi, and both exits want it
+    call rcx                    ; nb_float returns a Value, or 0 if it raised
+    test rax, rax
+    jz .float_dunder_raised
     mov rdi, rax
     V_UNPACK rdi, rdx
     cmp edx, TAG_FLOAT
-    jne .float_numeric          ; not a float: let the generic path complain
+    jne .float_dunder_wrong     ; it answered, but not with a float
     mov rax, rdi
     mov edx, TAG_FLOAT
     leave
+    ret
+
+.float_dunder_raised:
+    ; A NULL is "it raised" and nothing else.  Untested, it fell through to
+    ; the generic path -- which reads ob_type off rdi, and rdi was the NULL's
+    ; own payload, so the exception became a SIGSEGV.
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+
+.float_dunder_wrong:
+    ; Falling through to the generic path was worse than wrong: rdi held the
+    ; unpacked PAYLOAD of whatever __float__ returned rather than the object,
+    ; so `def __float__(self): return 1` had binop_is_number read ob_type off
+    ; address 1.
+    ;
+    ; CPython names BOTH classes here -- "Wrong.__float__ returned non-float
+    ; (type int)" -- so the receiver's name goes into a template and the
+    ; raiser fills in the other.
+    mov [rbp - BF_RET], rax
+    call .float_recv_prefix     ; rax = where to keep writing in BF_TMPL
+
+    ; A strict subclass of float is ACCEPTED, and deprecated: CPython returns
+    ; the exact float and warns.  __int__ already does this for a subclass of
+    ; int; this is the same rule one type over.
+    mov rdi, [rbp - BF_RET]
+    V_TEST_PTR rdi, rcx
+    ja .float_wrong_msg
+    test rdi, rdi
+    jz .float_wrong_msg
+    mov rcx, [rdi + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_FLOAT_SUBCLASS
+    jz .float_wrong_msg
+
+    mov rdi, rax
+    CSTRING rsi, `__float__ returned non-float (type \x01).  The ability to return an instance of a strict subclass of float is deprecated, and may be removed in a future version of Python.`
+    call .float_append
+    lea rdi, [rbp - BF_TMPL]
+    mov rsi, [rbp - BF_RET]
+    mov rsi, [rsi + PyObject.ob_type]
+    extern type_name_message
+    call type_name_message
+    mov rdi, rax
+    extern deprecation_warn
+    call deprecation_warn
+    test eax, eax
+    jz .float_dunder_warn_raised
+    ; ...and the value comes back as an EXACT float, as CPython's does.
+    mov rdi, [rbp - BF_RET]
+    mov rax, [rdi + PyFloatObject.value]
+    push rax
+    push rax                    ; a pair, so the call stays 16-byte aligned
+    mov rsi, TAG_PTR
+    DECREF_VAL rdi, rsi
+    pop rax
+    pop rax
+    mov edx, TAG_FLOAT
+    leave
+    ret
+
+.float_dunder_warn_raised:
+    mov rdi, [rbp - BF_RET]
+    mov rsi, TAG_PTR
+    DECREF_VAL rdi, rsi
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+
+.float_wrong_msg:
+    mov rdi, rax
+    CSTRING rsi, `__float__ returned non-float (type \x01)`
+    call .float_append
+    lea rdi, [rbp - BF_TMPL]
+    mov rsi, [rbp - BF_RET]
+    extern raise_type_error_with_name
+    call raise_type_error_with_name
+
+;; Writes "<the receiver's type name>." into BF_TMPL and answers the NUL it
+;; left behind, so the caller appends the rest of the message there.  A type
+;; with no name, or a name too long for the buffer, leaves the prefix out --
+;; which is the wording int() and index() use anyway.
+.float_recv_prefix:
+    lea rax, [rbp - BF_TMPL]
+    mov byte [rax], 0
+    push rax
+    push rax                    ; a pair, so the calls stay 16-byte aligned
+    mov rdi, [rbp - BF_ARG]
+    extern value_type
+    call value_type
+    test rax, rax
+    jz .frp_done
+    mov rsi, [rax + PyTypeObject.tp_name]
+    test rsi, rsi
+    jz .frp_done
+    mov rdi, rsi
+    extern ap_strlen
+    call ap_strlen
+    cmp rax, 64
+    jae .frp_done
+    mov rdi, [rbp - BF_ARG]
+    call value_type
+    mov rsi, [rax + PyTypeObject.tp_name]
+    lea rdi, [rbp - BF_TMPL]
+    call .float_append
+    mov rdi, rax
+    CSTRING rsi, "."
+    call .float_append
+    add rsp, 16
+    ret
+.frp_done:
+    pop rax
+    pop rax
+    ret
+
+;; .float_append(rdi = where to write, rsi = a C string) -> rax = the NUL
+;;
+;; rbt_append_cstr caps at eighty characters, which is right for the type
+;; names it was written for and silently cuts the deprecation text in half --
+;; that is where "...return an instance of a " ended.  This one is bounded by
+;; the end of BF_TMPL instead.
+.float_append:
+    lea rcx, [rbp - BF_TMPL]
+    add rcx, BF_TMPLLEN - 1     ; the last byte the NUL may occupy
+    mov rax, rdi
+.fa_loop:
+    cmp rax, rcx
+    jae .fa_done
+    mov dl, [rsi]
+    test dl, dl
+    jz .fa_done
+    mov [rax], dl
+    inc rax
+    inc rsi
+    jmp .fa_loop
+.fa_done:
+    mov byte [rax], 0
     ret
 
 .float_numeric:
