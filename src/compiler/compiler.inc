@@ -645,6 +645,16 @@ struc Comp
                                     ; here are iteration variables
     .in_comp_iterable: resd 1       ; visiting a clause's ITERABLE, where no
                                     ; walrus may appear at all
+    .future_anno: resd 1            ; PEP 563: `from __future__ import
+                                    ; annotations` was seen, so every
+                                    ; annotation is stored as its SOURCE TEXT
+                                    ; rather than evaluated.  A Comp field
+                                    ; rather than a CompUnit one because it is
+                                    ; a property of the FILE: a nested def
+                                    ; inherits it, and there is nowhere to
+                                    ; inherit it from once the enclosing unit
+                                    ; is finished
+    .future_pad: resd 1
     .err:       resb CompErr_size
     .warn_n:    resd 1              ; how many of .warns are filled
     .warn_pad:  resd 1

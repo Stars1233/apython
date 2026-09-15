@@ -585,6 +585,83 @@ DEF_FUNC cg_defaults, CD2_FRAME
 END_FUNC cg_defaults
 
 ;; ============================================================================
+;; cg_annotation(rdi = Comp*, rsi = CompUnit*, edx = the annotation node,
+;;               rcx = the line) -> eax = 1 ok, 0 reported
+;;
+;; Emits one annotation, which under PEP 563 is not the same thing as
+;; evaluating it.  `from __future__ import annotations` makes every
+;; annotation a STRING of its own source text, which is what lets a module
+;; refer forward to a name that does not exist yet:
+;;
+;;     from __future__ import annotations
+;;     def f(x: Nope) -> Later: ...
+;;
+;; Without it that is a NameError at def time, and every module written for
+;; the future import failed at IMPORT rather than at use.
+;;
+;; The three emit sites -- a parameter's, a return's and an AnnAssign's --
+;; all come here, because the flag is a property of the file and applies to
+;; all three.
+;; ============================================================================
+CGA_NODE  equ 8
+CGA_LINE  equ 16
+CGA_UNIT  equ 24
+CGA_FRAME equ 40            ; + 1 push = 48, 16-aligned
+global cg_annotation
+DEF_FUNC cg_annotation, CGA_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - CGA_UNIT], rsi
+    mov [rbp - CGA_NODE], rdx
+    mov [rbp - CGA_LINE], rcx
+
+    cmp dword [rbx + Comp.future_anno], 0
+    jne .cga_as_text
+.cga_evaluate:
+    mov rdi, rbx
+    mov rsi, [rbp - CGA_UNIT]
+    mov rdx, [rbp - CGA_NODE]
+    call cg_expr
+    pop rbx
+    leave
+    ret
+
+.cga_as_text:
+    mov rdi, rbx
+    mov rsi, [rbp - CGA_NODE]
+    extern comp_source_span
+    call comp_source_span
+    test rax, rax
+    jz .cga_evaluate                    ; no span recorded: evaluate it
+    ; CompUnit.consts holds BORROWED references and the object arena owns
+    ; them, so the string has to go in through comp_intern_keep -- which also
+    ; takes the slice directly, and dedups the annotations a file repeats.
+    mov rsi, rax
+    mov rdi, rbx
+    extern comp_intern_keep
+    call comp_intern_keep
+    test rax, rax
+    jz .cga_fail
+    mov rdi, [rbp - CGA_UNIT]
+    mov rsi, rax
+    call cg_const
+    mov rdx, rax
+    mov rdi, [rbp - CGA_UNIT]
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - CGA_LINE]
+    call cg_emit
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.cga_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC cg_annotation
+
+;; ============================================================================
 ;; cg_annotations(Comp *c, CompUnit *u, uint32_t args, uint32_t returns,
 ;;                int line) -> rax = MAKE_FUNCTION bits, or -1 on error
 ;;
@@ -714,7 +791,8 @@ DEF_FUNC cg_annotations, CA_FRAME
     mov rdx, [rbp - CA_RET]
     mov rdi, rbx
     mov rsi, [rbp - CA_UNIT]
-    call cg_expr
+    mov rcx, [rbp - CA_LINE]
+    call cg_annotation
     test eax, eax
     jz .fail
     inc r12
@@ -807,6 +885,20 @@ DEF_FUNC cg_annotations, CA_FRAME
     ; a TypeVarTuple's __iter__ yields Unpack[Ts], which is the value that
     ; belongs in __annotations__.  Nothing unwrapped it, so cg_expr saw a
     ; Starred where none is allowed and called it a syntax error.
+    ; Under PEP 563 the annotation is its own source text, and `*Ts` reads
+    ; back as '*Ts' -- so the star is part of the string and there is no
+    ; sequence to unpack.
+    cmp dword [rbx + Comp.future_anno], 0
+    je .op_check_star
+    mov rdi, rbx
+    mov rsi, [rbp - CA_UNIT]
+    mov rdx, [rbp - CA_ANN]
+    mov rcx, [rbp - CA_LINE]
+    call cg_annotation
+    test eax, eax
+    jz .op_fail
+    jmp .op_ann_done
+.op_check_star:
     mov rdi, rbx
     mov rsi, [rbp - CA_ANN]
     call ast_at

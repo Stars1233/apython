@@ -1407,7 +1407,9 @@ DEF_FUNC_LOCAL cg_s_annassign, CST_FRAME
     jz .ann_done
     mov rdi, rbx
     mov rsi, r12
-    call cg_expr
+    mov rcx, [rbp - CST_LINE]
+    extern cg_annotation
+    call cg_annotation                  ; PEP 563 turns this into its text
     test eax, eax
     jz .fail
 

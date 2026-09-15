@@ -31,6 +31,7 @@ extern exc_SyntaxError_type
 extern comp_msg_start
 extern comp_msg_cstr
 extern ap_strcmp
+extern ast_child
 extern par_bad_target
 extern comp_msg_i64
 extern comp_error_span
@@ -1462,6 +1463,13 @@ DEF_FUNC_LOCAL ps_from, PFR_FRAME
     mov [rax + AstNode.a], edx
     mov rdx, [rbp - PFR_LEVEL]
     mov [rax + AstNode.subkind], dl
+    ; PEP 563: `from __future__ import annotations` changes how every
+    ; annotation in the FILE is compiled, so it is recorded on the Comp the
+    ; moment it is read.  A future import is an ordinary ImportFrom
+    ; everywhere else, and still binds its names.
+    mov rdi, rbx
+    mov rsi, [rbp - PK_NODE]
+    call ps_note_future
     mov rax, [rbp - PK_NODE]
     pop r12
     pop rbx
@@ -1474,6 +1482,93 @@ DEF_FUNC_LOCAL ps_from, PFR_FRAME
     leave
     ret
 END_FUNC ps_from
+
+;; ============================================================================
+;; ps_note_future(rdi = Comp*, rsi = an AST_IMPORTFROM node) -> nothing
+;;
+;; Sets Comp.future_anno when the statement is `from __future__ import
+;; annotations`.  Nothing else about __future__ is acted on: the other
+;; features it names are either already the language's behaviour or are not
+;; implemented, and binding the name is what the import does anyway.
+;;
+;; The level is checked too -- `from .__future__ import annotations` is a
+;; relative import of a module that happens to be called that, and CPython
+;; treats it as an ordinary one.
+;; ============================================================================
+PNF_COMP equ 8
+PNF_NODE equ 16
+PNF_I    equ 24
+PNF_N    equ 32
+PNF_FRAME equ 40            ; + 1 push = 48, 16-aligned
+DEF_FUNC_LOCAL ps_note_future, PNF_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PNF_NODE], rsi
+
+    mov rdi, rbx
+    mov rsi, [rbp - PNF_NODE]
+    call ast_at
+    test rax, rax
+    jz .pnf_done
+    movzx ecx, byte [rax + AstNode.subkind]
+    test ecx, ecx
+    jnz .pnf_done                       ; a relative import, not __future__
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - PNF_N], rcx
+    mov ecx, [rax + AstNode.a]
+    test ecx, ecx
+    jz .pnf_done                        ; `from . import x` has no module
+    mov rdi, rbx
+    mov esi, ecx
+    call ast_obj_at
+    test rax, rax
+    jz .pnf_done
+    lea rdi, [rax + PyStrObject.data]
+    CSTRING rsi, "__future__"
+    call ap_strcmp
+    test eax, eax
+    jnz .pnf_done
+
+    mov qword [rbp - PNF_I], 0
+.pnf_loop:
+    mov rax, [rbp - PNF_I]
+    cmp rax, [rbp - PNF_N]
+    jae .pnf_done
+    mov rdi, rbx
+    mov rsi, [rbp - PNF_NODE]
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - PNF_I]
+    mov rdi, rbx
+    call ast_child
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    test rax, rax
+    jz .pnf_next
+    mov ecx, [rax + AstNode.a]          ; the imported name
+    test ecx, ecx
+    jz .pnf_next                        ; the star form
+    mov rdi, rbx
+    mov esi, ecx
+    call ast_obj_at
+    test rax, rax
+    jz .pnf_next
+    lea rdi, [rax + PyStrObject.data]
+    CSTRING rsi, "annotations"
+    call ap_strcmp
+    test eax, eax
+    jnz .pnf_next
+    mov dword [rbx + Comp.future_anno], 1
+    jmp .pnf_done
+.pnf_next:
+    inc qword [rbp - PNF_I]
+    jmp .pnf_loop
+.pnf_done:
+    pop rbx
+    leave
+    ret
+END_FUNC ps_note_future
 
 
 

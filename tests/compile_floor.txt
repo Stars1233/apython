@@ -324,6 +324,7 @@ test_func_defaults_write
 test_func_dunder_get
 test_function_attrs
 test_functions
+test_future_annotations
 test_future_import
 test_gc_dealloc_untrack
 test_gc_del_raises
