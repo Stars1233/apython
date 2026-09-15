@@ -316,6 +316,7 @@ test_fstring_build
 test_fstring_pep701
 test_fstrings
 test_func_attrs
+test_func_defaults_write
 test_func_dunder_get
 test_function_attrs
 test_functions

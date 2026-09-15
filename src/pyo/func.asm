@@ -23,6 +23,7 @@ extern frame_new
 extern frame_free
 extern tuple_new
 extern tuple_type
+extern type_is_subtype
 extern dict_type
 extern code_type
 extern type_type
@@ -766,6 +767,21 @@ DEF_FUNC func_setattr, SC_FRAME
     test eax, eax
     jz .set_kwdefaults
 
+    ; And __defaults__, which is the one that was missing.  Every attribute
+    ; named in this function is here for the same reason -- func_getattr
+    ; answers it from a FIELD, so an assignment that lands in func_dict reads
+    ; back as whatever the `def` was written with.  For __defaults__ nothing
+    ; raised and nothing took effect: `f.__defaults__ = (9,)` stored a dict
+    ; entry nobody reads, `f.__defaults__` still answered None, and `f(1)`
+    ; still wanted both arguments.  collections.namedtuple is built on
+    ; exec() followed by `__new__.__defaults__ = tuple(defaults)`, so every
+    ; namedtuple with a `defaults=` argument had none.
+    lea rdi, [rel fn_attr_defaults]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .set_defaults
+
     ; __name__ has a field of its own, and CPython keeps it there rather than
     ; in __dict__.  Storing it in func_dict like any other attribute was what
     ; made `f.__name__ = "x"` read back as the old name: func_getattr answered
@@ -1015,22 +1031,100 @@ DEF_FUNC func_setattr, SC_FRAME
 .set_name_type_error:
     RAISE exc_TypeError_type, "__name__ must be set to a string object"
 
-.set_kwdefaults:
-    ; XDECREF old kwdefaults
-    mov rdi, [rbx + PyFuncObject.func_kwdefaults]
-    test rdi, rdi
-    jz .no_old_kwd
-    call obj_decref
-.no_old_kwd:
-    ; Store new kwdefaults — only a heap pointer can be a dict
+.set_defaults:
+    ; A delete arrives as a NULL Value, and None means the same thing: no
+    ; defaults.  Everything else must be a tuple -- CPython's setter says so,
+    ; and with no setter at all a list was accepted in silence.
+    test r13, r13
+    jz .set_defaults_clear
+    lea rax, [rel none_singleton]
+    cmp r13, rax
+    je .set_defaults_clear
+    ; An int or float immediate is not a tuple either, and dereferencing one
+    ; to read ob_type would read the number.
     V_TEST_PTR r13, r14
-    ja .store_kwd_null
+    ja .set_defaults_type_error
+    mov rax, [r13 + PyObject.ob_type]
+    lea rcx, [rel tuple_type]
+    cmp rax, rcx
+    je .set_defaults_store
+    ; A tuple SUBCLASS is accepted, because CPython's PyTuple_Check is.
+    mov rdi, rax
+    mov rsi, rcx
+    call type_is_subtype
+    test eax, eax
+    jz .set_defaults_type_error
+.set_defaults_store:
     mov rdi, r13
     call obj_incref
-    mov [rbx + PyFuncObject.func_kwdefaults], r13
+    mov rdi, [rbx + PyFuncObject.func_defaults]
+    mov [rbx + PyFuncObject.func_defaults], r13
+    test rdi, rdi
+    jz .setattr_done
+    call obj_decref
     jmp .setattr_done
-.store_kwd_null:
+
+.set_defaults_clear:
+    mov rdi, [rbx + PyFuncObject.func_defaults]
+    mov qword [rbx + PyFuncObject.func_defaults], 0
+    test rdi, rdi
+    jz .setattr_done
+    call obj_decref
+    jmp .setattr_done
+
+.set_defaults_type_error:
+    RAISE exc_TypeError_type, "__defaults__ must be set to a tuple object"
+
+.set_kwdefaults:
+    ; func_call reads this field with dict_get, so whatever is here has to be
+    ; a dict or NULL and nothing else.  The test used to be only "is it a
+    ; heap pointer", which None and a list both pass -- so
+    ; `f.__kwdefaults__ = None` and `f.__kwdefaults__ = [1]` each stored an
+    ; object dict_get then read as a dict header, and a plain assignment
+    ; segfaulted.  CPython maps both NULL and None to "no kw-only defaults"
+    ; and refuses anything that is not a dict.
+    test r13, r13
+    jz .set_kwd_clear
+    lea rax, [rel none_singleton]
+    cmp r13, rax
+    je .set_kwd_clear
+    ; An int or float immediate has no ob_type to read.
+    V_TEST_PTR r13, r14
+    ja .set_kwd_type_error
+    mov rax, [r13 + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    je .set_kwd_store
+    ; A dict SUBCLASS is accepted, because CPython's PyDict_Check is.
+    mov rdi, rax
+    mov rsi, rcx
+    call type_is_subtype
+    test eax, eax
+    jz .set_kwd_type_error
+.set_kwd_store:
+    ; Store first, release second: the old value and the new one can be the
+    ; same object, and releasing it before the store would free what is
+    ; about to be installed.
+    mov rdi, r13
+    call obj_incref
+    mov rdi, [rbx + PyFuncObject.func_kwdefaults]
+    mov [rbx + PyFuncObject.func_kwdefaults], r13
+    test rdi, rdi
+    jz .setattr_done
+    call obj_decref
+    jmp .setattr_done
+
+.set_kwd_clear:
+    mov rdi, [rbx + PyFuncObject.func_kwdefaults]
     mov qword [rbx + PyFuncObject.func_kwdefaults], 0
+    test rdi, rdi
+    jz .setattr_done
+    call obj_decref
+    jmp .setattr_done
+
+.set_kwd_type_error:
+    RAISE exc_TypeError_type, "__kwdefaults__ must be set to a dict object"
+
 .setattr_done:
     pop r14
     pop r13
