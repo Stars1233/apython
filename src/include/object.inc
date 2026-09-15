@@ -49,8 +49,15 @@ endstruc
     call int_promote_mpz
 %else
     push rdi
+    sub rsp, 8                  ; the lone push flips the parity, and
+                                ; int_promote_mpz reaches GMP.  Only visible
+                                ; under INT_STRESS=1, where the promotion
+                                ; actually fires: tests/gmp_align_probe.sh
+                                ; counted 26 misaligned calls to
+                                ; __gmpz_fits_slong_p through here.
     mov rdi, %1
     call int_promote_mpz
+    add rsp, 8
     pop rdi
 %endif
 %%done:

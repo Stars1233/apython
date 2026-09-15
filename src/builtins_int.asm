@@ -944,9 +944,16 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     je .int_base_si_from_index
     ; heap int — check if it fits in i64 first
     push rax
+    sub rsp, 8                   ; the lone push flips the parity, and the
+                                 ; next call is into GMP.  tests/
+                                 ; gmp_align_probe.sh found this one; only an
+                                 ; INT_STRESS=1 build reaches it, because an
+                                 ; ordinary base is a small int.
     INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_fits_slong_p wrt ..plt
+    add rsp, 8                   ; before the test: `add` writes ZF, and the
+                                 ; branch below reads the one `test` sets
     test eax, eax
     pop rdi                      ; rdi = __index__ result
     jz .int_base_range_error     ; doesn't fit → definitely out of 2-36 range
@@ -961,9 +968,16 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 .int_base_heap_int:
     ; rax = heap int object (GMP). Check if it fits in i64.
     push rax
+    sub rsp, 8                   ; the lone push flips the parity, and the
+                                 ; next call is into GMP.  tests/
+                                 ; gmp_align_probe.sh found this one; only an
+                                 ; INT_STRESS=1 build reaches it, because an
+                                 ; ordinary base is a small int.
     INT_NEED_MPZ rax
     lea rdi, [rax + PyIntObject.mpz]
     call __gmpz_fits_slong_p wrt ..plt
+    add rsp, 8                   ; before the test: `add` writes ZF, and the
+                                 ; branch below reads the one `test` sets
     test eax, eax
     pop rdi                      ; rdi = heap int obj
     jz .int_base_range_error     ; doesn't fit → out of 2-36 range

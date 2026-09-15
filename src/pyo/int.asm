@@ -2226,6 +2226,10 @@ END_FUNC int_rshift
 IPW_ETAG  equ 8             ; the exponent's tag, across the GMP calls
 IPW_BASED equ 16            ; the base as a double, likewise
 IPW_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+; The widest result int_power will build: 2^34 bits is two gigabytes of digits,
+; far past anything a program means to compute and far short of the size GMP
+; aborts on.
+IPW_MAX_BITS equ 1 << 34
 DEF_FUNC int_power, IPW_FRAME
     call int_binop_unpack       ; rdi/edx = base, rsi/ecx = exponent, both ints
     test eax, eax
@@ -2320,6 +2324,40 @@ DEF_FUNC int_power, IPW_FRAME
     mov rbx, rax
     mov cl, 1
 .base_gmp:
+    ; Refuse a result too wide to build, BEFORE asking GMP to build it.
+    ; __gmpz_pow_ui reaches __gmp_overflow_in_mpz on a size it cannot
+    ; represent, and that raises SIGFPE and kills the process -- there is no
+    ; error return to check afterwards.  `Decimal(10**19).sqrt()` at
+    ; decimal's MAX_PREC asks for one, which is how test_decimal took the
+    ; whole sweep down with it.
+    ;
+    ; CPython reaches MemoryError by failing the allocation; this reaches the
+    ; same answer without trying, since the width is known from the base's
+    ; and the exponent's.
+    push rcx
+    push rcx                            ; twice: one push flips the parity
+    INT_NEED_MPZ rbx
+    lea rdi, [rbx + PyIntObject.mpz]
+    mov esi, 2
+    call __gmpz_sizeinbase wrt ..plt    ; the base's width in bits
+    pop rcx
+    pop rcx
+    ; 0, 1 and -1 answer in one bit however large the exponent is, and every
+    ; other base needs at least two -- so this one compare is the whole
+    ; special case, and `1 ** 10**19` stays 1 rather than becoming a refusal.
+    cmp rax, 1
+    jbe .pow_size_ok
+    mul r13                             ; rdx:rax = bits * exponent
+    test rdx, rdx
+    jnz .pow_too_big
+    ; Through a register: a 64-bit immediate does not fit in a cmp, and NASM
+    ; truncates rather than refusing, so `cmp rax, 1 << 34` compared against
+    ; zero and refused 2 ** 64.
+    mov rdx, IPW_MAX_BITS
+    cmp rax, rdx
+    ja .pow_too_big
+.pow_size_ok:
+
     push rcx
     call int_alloc_raw
     push rax
@@ -2359,6 +2397,19 @@ DEF_FUNC int_power, IPW_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+
+.pow_too_big:
+    test cl, cl
+    jz .ptb_raise
+    mov rdi, rbx                        ; the base this path converted
+    call int_dealloc
+.ptb_raise:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    extern exc_MemoryError_type
+    RAISE exc_MemoryError_type, "integer result too large to represent"
 
 .neg_exp:
     ; int ** negative -> float.  This used to compute 1.0 / base**|exp| with
