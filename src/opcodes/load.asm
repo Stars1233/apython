@@ -2056,8 +2056,18 @@ END_FUNC op_load_super_attr
 ;; rdi = name string object
 ;; Does not return.
 ;; ============================================================================
-RNND_BUF   equ 256
-RNND_FRAME equ RNND_BUF
+; The copy below is BOUNDED, and was not: a name long enough to fill the
+; buffer wrote straight past the frame.  `if True: ` + `a` * 256 is a valid
+; statement and its NameError carries a 256-character name, which overflowed a
+; 256-byte buffer by the prefix, the suffix and the NUL -- and the crash landed
+; in eval_return's DECREF of a frame field holding the bytes "efined".
+; test_traceback's test_traceback_very_long_line is where it showed.
+; 200 is CPython's own bound, not a buffer size: NAME_ERROR_MSG is
+; "name '%.200s' is not defined", so a longer name is truncated there too and
+; the messages match exactly.
+RNND_BUF     equ 512
+RNND_MAXNAME equ 200
+RNND_FRAME   equ RNND_BUF
 DEF_FUNC raise_name_not_defined, RNND_FRAME
     ; Build "name 'X' is not defined" in stack buffer
     lea rcx, [rbp - RNND_BUF]
@@ -2069,13 +2079,17 @@ DEF_FUNC raise_name_not_defined, RNND_FRAME
     add rcx, 6
 
     ; Copy name
+    mov edx, RNND_MAXNAME
 .rnnd_copy:
+    test edx, edx
+    jz .rnnd_name_done
     mov al, [rsi]
     test al, al
     jz .rnnd_name_done
     mov [rcx], al
     inc rcx
     inc rsi
+    dec edx
     jmp .rnnd_copy
 .rnnd_name_done:
 
