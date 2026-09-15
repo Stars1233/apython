@@ -24,6 +24,7 @@ extern union_type
 ; --- the rest of the tree ---
 extern ap_free
 extern ap_malloc
+extern builtin_sub_alloc
 extern ap_strcmp
 extern bool_false
 extern bool_true
@@ -62,15 +63,46 @@ section .text
 ;;   a new reference, or 0 with the exception pending
 ;; ============================================================================
 DEF_FUNC generic_alias_new
+    mov rdx, rsi                ; the argument
+    mov rsi, rdi                ; origin
+    lea rdi, [rel generic_alias_type]
+    call generic_alias_new_for
+    leave
+    ret
+END_FUNC generic_alias_new
+
+;; ============================================================================
+;; generic_alias_new_for(rdi = cls, rsi = origin, rdx = the argument Value)
+;;   -> rax = a new alias of class `cls`, or 0 with the exception pending
+;;
+;; The same record, built as a SUBCLASS.  `_CallableGenericAlias(GenericAlias)`
+;; in _collections_abc calls `super().__new__(cls, origin, args)` and the
+;; object that comes back has to be a _CallableGenericAlias, or its own
+;; __repr__ and __getitem__ are never reached and `collections.abc.Callable`
+;; reprs as a plain alias.
+;;
+;; A subclass's tp_basicsize is at least ours -- __slots__ = () keeps it equal,
+;; a subclass without __slots__ adds a dict word -- so the tail past our three
+;; fields is zeroed here rather than assumed.
+;; ============================================================================
+DEF_FUNC generic_alias_new_for
     push rbx
     push r12
-    mov rbx, rdi                ; origin
-    mov r12, rsi                ; args
-    mov edi, PyGenericAliasObject_size
-    call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel generic_alias_type]
-    mov [rax + PyObject.ob_type], rcx
+    push r13
+    push r14
+    mov r13, rdi                ; cls
+    mov rbx, rsi                ; origin
+    mov r12, rdx                ; args
+    ; builtin_sub_alloc is the allocation half every builtin constructor that
+    ; honours its class uses: it reads tp_basicsize, routes a heaptype through
+    ; gc_alloc (a heaptype ALWAYS carries TYPE_FLAG_HAVE_GC, and a plain
+    ; ap_malloc hands the collector a pointer sixteen bytes short of what it
+    ; gave out) and a static type through ap_malloc, and zeroes the tail so a
+    ; subclass's __dict__ and slots start empty.
+    mov rdi, r13
+    call builtin_sub_alloc
+    test rax, rax
+    jz .gan_oom
     mov [rax + PyGenericAliasObject.ga_origin], rbx
     mov [rax + PyGenericAliasObject.ga_args], r12
     mov qword [rax + PyGenericAliasObject.ga_starred], 0
@@ -81,13 +113,29 @@ DEF_FUNC generic_alias_new
     ; and obj_incref on one writes through the number.
     mov rax, r12
     INCREF_V rax, rcx
+    ; A heaptype subclass is named by its instances and must be held.
+    lea rcx, [rel generic_alias_type]
+    cmp r13, rcx
+    je .gan_done
+    mov rdi, r13
+    call obj_incref
 .gan_done:
     pop rax
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
     ret
-END_FUNC generic_alias_new
+.gan_oom:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC generic_alias_new_for
 
 ;; ============================================================================
 ;; generic_alias_dealloc(rdi = the alias) -> nothing; the object is freed
@@ -187,19 +235,48 @@ END_FUNC generic_alias_iter
 DEF_FUNC generic_alias_construct
     cmp rdx, 2
     jne .gac_error
-    mov rdi, [rsi]              ; the origin
-    mov rsi, [rsi + 8]          ; the argument, whatever it is
-    V_TEST_PTR rdi, rax
+    ; rdi is the class to build, and it is not always ours: a subclass
+    ; reaching super().__new__(cls, ...) has to get an instance of ITSELF, or
+    ; its own __repr__ and __getitem__ are never found.
+    mov rcx, [rsi + 8]          ; the argument, whatever it is
+    mov rsi, [rsi]              ; the origin
+    V_TEST_PTR rsi, rax
     ja .gac_error
-    test rdi, rdi
+    test rsi, rsi
     jz .gac_error
-    call generic_alias_new
+    mov rdx, rcx
+    call generic_alias_new_for
+    test rax, rax
+    jz .gac_failed
     mov edx, TAG_PTR            ; a constructor returns the (payload, tag) pair
+    leave
+    ret
+.gac_failed:
+    xor edx, edx
     leave
     ret
 .gac_error:
     RAISE exc_TypeError_type, "GenericAlias expected 2 arguments"
 END_FUNC generic_alias_construct
+
+;; ============================================================================
+;; generic_alias_dunder_new(args, nargs) -> Value    -- types.GenericAlias.__new__
+;;
+;; The constructor lives in tp_new and the type had no tp_dict at all, so
+;; `super().__new__(cls, ...)` in a subclass walked past it to object.__new__
+;; and was refused.  `_CallableGenericAlias` in _collections_abc is written
+;; exactly that way, which made `collections.abc.Callable[[int], int]` a
+;; TypeError outright.
+;; ============================================================================
+extern new_from_slot
+DEF_FUNC generic_alias_dunder_new
+    mov rdx, rsi
+    mov rsi, rdi
+    lea rdi, [rel generic_alias_type]
+    call new_from_slot
+    leave
+    ret
+END_FUNC generic_alias_dunder_new
 
 ;; ============================================================================
 ;; generic_alias_class_getitem(rdi = args, rsi = nargs) -> Value: the alias

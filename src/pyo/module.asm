@@ -1241,7 +1241,12 @@ namespace_type:
     dq 0                            ; tp_bases
     dq 0                            ; tp_traverse
     dq 0                            ; tp_clear
-    dq 0                            ; tp_dictoffset
+    ; ns_dict IS the instance dict, and saying so is what lets the generic
+    ; machinery find it: object.__getstate__ reads tp_dictoffset, so with a
+    ; zero here `copy.copy(SimpleNamespace(a=1))` answered `namespace()` --
+    ; a namespace with every attribute silently dropped.  CPython reports 16
+    ; for the same field.
+    dq PySimpleNamespaceObject.ns_dict  ; tp_dictoffset
     dq 0                        ; tp_tailslots
     dq 0                        ; tp_as_buffer
 
@@ -1597,6 +1602,28 @@ DEF_FUNC module_method_init, MMI_FRAME
 .mmi_arity:
     RAISE exc_TypeError_type, "module.__init__() takes at most 2 arguments"
 END_FUNC module_method_init
+
+extern new_from_slot
+
+;; ============================================================================
+;; namespace_dunder_new(args, nargs) -> Value    -- types.SimpleNamespace.__new__
+;;
+;; types.SimpleNamespace keeps its constructor in tp_new and had no entry of its own in
+;; tp_dict, so `types.SimpleNamespace.__new__` resolved along the MRO to object.__new__ and
+;; was refused.  That is every `super().__new__(cls, ...)` in a subclass, and
+;; every copy, deepcopy and pickle of one, since the reduce protocol
+;; reconstructs through __new__.  The slot called is the OWNER's, so a Python
+;; subclass defining __new__ does not re-enter itself.
+;; ============================================================================
+DEF_FUNC namespace_dunder_new
+    mov rdx, rsi
+    mov rsi, rdi
+    lea rdi, [rel namespace_type]
+    call new_from_slot
+    leave
+    ret
+END_FUNC namespace_dunder_new
+
 
 
 section .rodata

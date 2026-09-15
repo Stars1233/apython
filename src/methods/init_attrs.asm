@@ -33,6 +33,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern add_new_staticmethod
 extern dict_new
 extern dict_add_getattr
 extern dict_add_builtin_func
@@ -150,6 +151,12 @@ DEF_FUNC_LOCAL singleton_add_reduce, SAR_FRAME
     lea rsi, [rel an_reduce]
     lea rdx, [rel ellipsis_reduce]
     call dict_add_builtin_func
+    ; EllipsisType keeps its constructor in tp_new; without an entry here
+    ; `EllipsisType.__new__` resolved to object.__new__ and was refused.
+    extern ellipsis_dunder_new
+    mov rdi, rbx
+    lea rsi, [rel ellipsis_dunder_new]
+    call add_new_staticmethod
     lea rax, [rel ellipsis_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -161,6 +168,12 @@ DEF_FUNC_LOCAL singleton_add_reduce, SAR_FRAME
     lea rsi, [rel an_reduce]
     lea rdx, [rel notimpl_reduce]
     call dict_add_builtin_func
+    ; NotImplementedType keeps its constructor in tp_new; without an entry here
+    ; `NotImplementedType.__new__` resolved to object.__new__ and was refused.
+    extern notimpl_dunder_new
+    mov rdi, rbx
+    lea rsi, [rel notimpl_dunder_new]
+    call add_new_staticmethod
     lea rax, [rel notimpl_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -177,6 +190,12 @@ DEF_FUNC_LOCAL singleton_add_reduce, SAR_FRAME
     lea rdx, [rel none_dunder_bool]
     call dict_add_builtin_func
     extern none_type
+    ; NoneType keeps its constructor in tp_new; without an entry here
+    ; `NoneType.__new__` resolved to object.__new__ and was refused.
+    extern none_dunder_new
+    mov rdi, rbx
+    lea rsi, [rel none_dunder_new]
+    call add_new_staticmethod
     lea rax, [rel none_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax

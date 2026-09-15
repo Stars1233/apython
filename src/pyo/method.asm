@@ -982,3 +982,25 @@ DEF_FUNC method_dunder_get
 .mdg_arity:
     RAISE exc_TypeError_type, "__get__() takes 2 or 3 arguments"
 END_FUNC method_dunder_get
+
+extern new_from_slot
+
+;; ============================================================================
+;; method_dunder_new(args, nargs) -> Value    -- method.__new__
+;;
+;; method keeps its constructor in tp_new and had no entry of its own in
+;; tp_dict, so `method.__new__` resolved along the MRO to object.__new__ and
+;; was refused.  That is every `super().__new__(cls, ...)` in a subclass, and
+;; every copy, deepcopy and pickle of one, since the reduce protocol
+;; reconstructs through __new__.  The slot called is the OWNER's, so a Python
+;; subclass defining __new__ does not re-enter itself.
+;; ============================================================================
+DEF_FUNC method_dunder_new
+    mov rdx, rsi
+    mov rsi, rdi
+    lea rdi, [rel method_type]
+    call new_from_slot
+    leave
+    ret
+END_FUNC method_dunder_new
+
