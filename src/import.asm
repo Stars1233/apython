@@ -1357,8 +1357,11 @@ DEF_FUNC import_find_and_load, FL_FRAME
     ret
 
 .found_result:
-    ; rax = 1 (package) or 2 (module); path is in import_path_buf_ptr
+    ; rax = 1 (package), 2 (module) or 3 (a PEP 420 namespace package, which
+    ; has no file to load); path is in import_path_buf_ptr
     mov r12d, eax               ; save type
+    cmp r12d, 3
+    je .load_as_namespace
     mov rdi, [rbp - FL_NAME]
     mov rsi, [rel import_path_buf_ptr]
     xor edx, edx
@@ -1367,6 +1370,18 @@ DEF_FUNC import_find_and_load, FL_FRAME
     mov edx, 1                  ; is_package = 1
 .load_as_module:
     call import_load_module
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.load_as_namespace:
+    mov rdi, [rbp - FL_NAME]
+    call import_make_namespace
 
     pop r15
     pop r14
@@ -1898,7 +1913,18 @@ END_FUNC import_search_dirs
 ;;   <dir>/<full_component>/__pycache__/__init__.cpython-312.pyc (package)
 ;;   <dir>/__pycache__/<leaf>.cpython-312.pyc (module)
 ;;   <dir>/<leaf>.cpython-312.pyc (module, no __pycache__)
-;; Returns 1 (package), 2 (module), or 0 (not found).
+;; Returns 1 (package), 2 (module), 3 (a PEP 420 namespace package, whose
+;; portion directories are left in import_ns_portions), or 0 (not found).
+;;
+;; The namespace case is the last pattern and it does NOT return: a directory
+;; with no __init__.py is a package under PEP 420, but only if nothing else on
+;; the whole of sys.path answers to the name.  A regular package or module
+;; WINS wherever it sits, which is the opposite of the first-match rule every
+;; other pattern follows -- so a matching bare directory is recorded and the
+;; scan continues, and the portions are the answer only if the loop runs out.
+;; They accumulate, because a namespace package's __path__ is every matching
+;; directory rather than the first; that is what lets two distributions each
+;; ship part of one package, and it is the point of the PEP.
 ;; ============================================================================
 
 SS_DIRS     equ 8
@@ -1907,7 +1933,9 @@ SS_LEAFLEN  equ 24
 SS_FULL     equ 32            ; full path component (dots->slashes)
 SS_IDX      equ 40
 SS_COUNT    equ 48
-SS_FRAME    equ 56          ; + 5 pushes = 96
+SS_STAT     equ 56 + 144      ; STAT_SIZE, for the is-it-a-directory test
+SS_DIRLEN   equ SS_STAT + 8   ; how long <dir>/<full> came out
+SS_FRAME    equ ((SS_DIRLEN + 15) / 16) * 16 + 8   ; + 5 pushes = 16-aligned
 
 DEF_FUNC import_search_syspath, SS_FRAME
     push rbx
@@ -1924,6 +1952,9 @@ DEF_FUNC import_search_syspath, SS_FRAME
     mov r14, [rdi + PyListObject.ob_size]
     mov [rbp - SS_COUNT], r14
     mov qword [rbp - SS_IDX], 0
+
+    ; Any portions a previous search collected are not this one's.
+    call import_ns_portions_clear
 
 .ss_loop:
     mov rax, [rbp - SS_IDX]
@@ -2144,6 +2175,37 @@ DEF_FUNC import_search_syspath, SS_FRAME
     test rax, rax
     jns .ss_found_module
 
+    ; --- Pattern 6: <dir>/<full> is a DIRECTORY (PEP 420) ---
+    ; Recorded rather than returned; see the header.  Nothing here can be a
+    ; regular package, because patterns 1 and 4 have already asked this same
+    ; directory for its __init__.
+    mov r13, [rbx + PyStrObject.ob_size]
+    test r13, r13
+    jz .ss_p6_no_slash
+    inc r13
+.ss_p6_no_slash:
+    mov rdi, r12
+    add rdi, r13
+    mov rsi, [rbp - SS_FULL]
+    mov rdx, r15                ; the dotted component's length, from pattern 1
+    call ap_memcpy
+    add r13, r15
+    mov byte [r12 + r13], 0
+    mov [rbp - SS_DIRLEN], r13
+
+    mov rdi, r12
+    lea rsi, [rbp - SS_STAT]
+    call sys_stat
+    test rax, rax
+    js .ss_next
+    mov eax, [rbp - SS_STAT + StatBuf.st_mode]   ; 32-bit field
+    and eax, S_IFMT
+    cmp eax, S_IFDIR
+    jne .ss_next
+    mov rdi, r12
+    mov rsi, [rbp - SS_DIRLEN]
+    call import_ns_portions_add
+
 .ss_next:
     inc qword [rbp - SS_IDX]
     jmp .ss_loop
@@ -2173,6 +2235,22 @@ DEF_FUNC import_search_syspath, SS_FRAME
     ret
 
 .ss_not_found:
+    ; Nothing regular answered to the name anywhere, so the bare directories
+    ; recorded along the way are the package.
+    mov rax, [rel import_ns_portions]
+    test rax, rax
+    jz .ss_really_not_found
+    cmp qword [rax + PyListObject.ob_size], 0
+    je .ss_really_not_found
+    mov eax, 3
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.ss_really_not_found:
     xor eax, eax
     pop r15
     pop r14
@@ -2182,6 +2260,166 @@ DEF_FUNC import_search_syspath, SS_FRAME
     leave
     ret
 END_FUNC import_search_syspath
+
+;; ============================================================================
+;; import_ns_portions_clear() -> nothing; drops whatever the last search
+;;   collected, so a search never inherits another's portions
+;;
+;; The PEP 420 portions live in a global between import_search_syspath and
+;; the caller that turns them into a module.  A global rather than an
+;; out-parameter because the path itself already travels that way, in
+;; import_path_buf_ptr, and the search's answer is an int -- one more channel
+;; of the shape already there rather than a new one.
+;; ============================================================================
+DEF_FUNC_LOCAL import_ns_portions_clear
+    mov rdi, [rel import_ns_portions]
+    test rdi, rdi
+    jz .inpc_done
+    mov qword [rel import_ns_portions], 0
+    call obj_decref
+.inpc_done:
+    leave
+    ret
+END_FUNC import_ns_portions_clear
+
+;; ============================================================================
+;; import_ns_portions_add(rdi = a directory path, rsi = its length)
+;;   -> nothing; the path is appended to the portion list, which is built on
+;;      first use.  A failure to allocate leaves the list as it was, and the
+;;      search then answers "not found" rather than a short namespace package.
+;; ============================================================================
+INPA_PATH equ 8
+INPA_LEN  equ 16
+INPA_STR  equ 24
+INPA_FRAME equ 32           ; + 0 pushes = 32, 16-aligned
+DEF_FUNC_LOCAL import_ns_portions_add, INPA_FRAME
+    mov [rbp - INPA_PATH], rdi
+    mov [rbp - INPA_LEN], rsi
+
+    mov rax, [rel import_ns_portions]
+    test rax, rax
+    jnz .inpa_have_list
+    xor edi, edi
+    call list_new
+    test rax, rax
+    jz .inpa_done
+    mov [rel import_ns_portions], rax
+.inpa_have_list:
+    mov rdi, [rbp - INPA_PATH]
+    mov rsi, [rbp - INPA_LEN]
+    call str_new_heap
+    test rax, rax
+    jz .inpa_done
+    mov [rbp - INPA_STR], rax
+    mov rdi, [rel import_ns_portions]
+    mov rsi, rax
+    call list_append
+    ; list_append took its own reference.
+    mov rdi, [rbp - INPA_STR]
+    call obj_decref
+.inpa_done:
+    leave
+    ret
+END_FUNC import_ns_portions_add
+
+;; ============================================================================
+;; import_make_namespace(rdi = the dotted name, as a str) -> PyObject*
+;;   the new module, registered in sys.modules, or 0
+;;
+;; A PEP 420 namespace package: the directories import_search_syspath
+;; collected become its __path__, and there is no code to run, because there
+;; is no __init__.py -- that is what makes it one.  Everything else a module
+;; carries is set the way import_load_module sets it, with __file__ None
+;; rather than absent, which is what CPython leaves on a namespace module and
+;; what a caller that asks for it sees.
+;; ============================================================================
+IMN_NAME  equ 8
+IMN_DICT  equ 16
+IMN_MOD   equ 24
+IMN_KEY   equ 32
+IMN_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
+DEF_FUNC_LOCAL import_make_namespace, IMN_FRAME
+    mov [rbp - IMN_NAME], rdi
+
+    call dict_new
+    test rax, rax
+    jz .imn_fail
+    mov [rbp - IMN_DICT], rax
+
+    ; __name__ = the dotted name
+    lea rdi, [rel im_dunder_name]
+    mov rsi, [rbp - IMN_NAME]
+    call .imn_set
+    ; __package__ = the same: a namespace package IS a package
+    lea rdi, [rel im_dunder_package]
+    mov rsi, [rbp - IMN_NAME]
+    call .imn_set
+    ; __path__ = the portions
+    lea rdi, [rel im_dunder_path]
+    mov rsi, [rel import_ns_portions]
+    call .imn_set
+    ; __file__, __loader__ and __spec__ are all None here.  None rather than
+    ; absent for __file__: CPython leaves the name bound, and code that asks
+    ; whether a module has a file reads None rather than catching.
+    lea rdi, [rel im_dunder_file]
+    lea rsi, [rel none_singleton]
+    call .imn_set
+    lea rdi, [rel im_dunder_loader]
+    lea rsi, [rel none_singleton]
+    call .imn_set
+    lea rdi, [rel im_dunder_spec]
+    lea rsi, [rel none_singleton]
+    call .imn_set
+    lea rdi, [rel im_dunder_builtins]
+    mov rsi, [rel builtins_dict_global]
+    call .imn_set
+
+    mov rdi, [rbp - IMN_NAME]
+    mov rsi, [rbp - IMN_DICT]
+    call module_new
+    test rax, rax
+    jz .imn_fail_dict
+    mov [rbp - IMN_MOD], rax
+
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, [rbp - IMN_NAME]
+    mov rdx, rax
+    call dict_set
+
+    ; The module owns the dict now; release what dict_new gave us.
+    mov rdi, [rbp - IMN_DICT]
+    call obj_decref
+    mov rax, [rbp - IMN_MOD]
+    leave
+    ret
+
+.imn_fail_dict:
+    mov rdi, [rbp - IMN_DICT]
+    call obj_decref
+.imn_fail:
+    xor eax, eax
+    leave
+    ret
+
+;; rdi = the key, as a C string; rsi = the value.  The key is interned into a
+;; str, set, and released -- the shape every dunder store above it uses.
+.imn_set:
+    mov [rbp - IMN_KEY], rsi
+    call str_from_cstr_heap
+    test rax, rax
+    jz .imn_set_done
+    mov rdi, [rbp - IMN_DICT]
+    mov rsi, rax
+    mov rdx, [rbp - IMN_KEY]
+    push rax
+    push rax                    ; a pair, so the call stays 16-byte aligned
+    call dict_set
+    pop rdi
+    pop rdi
+    call obj_decref
+.imn_set_done:
+    ret
+END_FUNC import_make_namespace
 
 ;; ============================================================================
 ;; import_load_module(PyObject *name_str, const char *path_cstr, int is_package) -> PyObject*
@@ -2629,3 +2867,7 @@ global builtins_module_obj
 builtins_module_obj: resq 1
 
 import_path_buf_ptr: resq 1    ; malloc'd path buffer (lazy-allocated)
+
+; The PEP 420 portion directories the last search collected, as a list of
+; str, or 0.  Owned; cleared at the start of every search.
+import_ns_portions: resq 1

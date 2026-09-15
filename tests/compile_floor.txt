@@ -484,6 +484,7 @@ test_module_repr_and_property_msg
 test_module_type_new
 test_mro_entries
 test_multiple_inheritance
+test_namespace_packages
 test_nanbox_float
 test_nanbox_int
 test_new
