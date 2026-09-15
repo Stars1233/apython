@@ -573,6 +573,7 @@ test_repr_element_raises
 test_repr
 test_repr_str_cycle
 test_re_review
+test_re_sub_raises
 test_review_regressions
 test_richcompare_bool
 test_richcompare_byname
