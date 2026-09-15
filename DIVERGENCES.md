@@ -179,6 +179,22 @@ the reasoning rather than from scratch.
   nothing to undo, which is exactly what a program calling the pair in
   sequence would see either way.
 
+## `pwd` and `grp` read the files, where CPython's go through NSS
+
+CPython's are C modules over `getpwnam(3)` and `getgrnam(3)`, which consult
+`nsswitch.conf` and so can answer from LDAP, SSSD, systemd-homed or anything
+else configured there.  These read `/etc/passwd` and `/etc/group` directly,
+which is what NSS resolves to on an ordinary machine and nothing more.
+
+What it costs is a host whose users are not in the file: every lookup here is
+a `KeyError` where CPython's would have found the entry.  What it buys is that
+the modules exist at all -- `getpass`, `shutil.chown`, `tarfile`'s ownership
+restore and `os.path.expanduser` all import one of them, and `import pwd`
+failing took each of those with it.
+
+Reaching NSS properly means `dlopen`ing the `libnss_*` modules and calling
+through their ABI, which is a project rather than a module.
+
 ## `f_trace_opcodes` works, and CPython 3.12's does not
 
 `sys.settrace` plus `frame.f_trace_opcodes = True` delivers an `'opcode'`
