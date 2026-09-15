@@ -5,7 +5,7 @@
 crash test_asyncio
 pass test_ast 87
 pass test_asyncio 0
-pass test_capi 98
+pass test_capi 112
 pass test_cext 5
 pass test_concurrent_futures 0
 pass test_cppext 5
@@ -16,8 +16,8 @@ pass test_email 1667
 pass test_future_stmt 22
 pass test_gdb 0
 pass test_import 87
-pass test_importlib 1008
-pass test_inspect 0
+pass test_importlib 1061
+pass test_inspect 260
 pass test_json 162
 pass test_lib2to3 655
 pass test_module 26
@@ -31,7 +31,7 @@ pass test_tkinter 0
 pass test_tomllib 13
 pass test_tools 4
 pass test_ttk 0
-pass test_unittest 0
+pass test_unittest 1006
 pass test_warnings 120
 pass test_zipfile 19
-pass test_zoneinfo 0
+pass test_zoneinfo 179

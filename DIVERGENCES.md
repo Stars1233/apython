@@ -341,6 +341,21 @@ cheap and finishing one -- line continuation, the input hook, readline, the
 traceback rules an interactive statement has -- is not; it is its own
 feature rather than a missing piece of this one.
 
+`-i` is refused with the usage message, which is where this costs something
+measurable: `test_cmd_line_script`'s `interactive_python` helper is
+
+    while True:
+        data = stderr.read(4)
+        if data == b">>> ":
+            break
+        stderr.readline()
+
+and a subprocess that exited leaves both calls answering `b''` forever, so
+the four REPL-flush tests spin rather than fail.  The module reports nothing
+either way -- it did not import at all before `_frozen_importlib_external`
+arrived -- so nothing is lost by it, but it is why that module is a HANG in
+the sweep rather than a row of failures.
+
 ## The alias modules in lib/
 
 `_datetime`, `_json`, `_pickle` and `_decimal` are stand-ins for CPython's C

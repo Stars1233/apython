@@ -17,7 +17,7 @@ repository (`../LICENSE`).
 | CPython, unmodified | `__future__.py`, `abc.py`, `argparse.py`, `ast.py`, `bisect.py`, `codecs.py`, `_collections_abc.py`, `collections/`, `calendar.py`, `_compat_pickle.py`, `contextlib.py`, `contextvars.py`, `copyreg.py`, `dataclasses.py`, `datetime.py`, `_pydatetime.py`, `difflib.py`, `dis.py`, `enum.py`, `fnmatch.py`, `functools.py`, `genericpath.py`, `gettext.py`, `heapq.py`, `importlib/`, `inspect.py`, `keyword.py`, `linecache.py`, `locale.py`, `opcode.py`, `operator.py`, `os.py`, `pickle.py`, `pkgutil.py`, `posixpath.py`, `pprint.py`, `random.py`, `re/`, `reprlib.py`, `selectors.py`, `shutil.py`, `socket.py`, `stat.py`, `string.py`, `_strptime.py`, `struct.py`, `textwrap.py`, `threading.py`, `token.py`, `tokenize.py`, `traceback.py`, `types.py`, `typing.py`, `unittest/`, `warnings.py`, `weakref.py`, `_weakrefset.py` |
 | Generated from CPython | `_ast.py` |
 | CPython, modified for apython | `copy.py`, `io.py`, `test/` |
-| Written for apython | `_ast_build.py`, `atexit.py`, `binascii.py`, `_codecs.py`, `_collections.py`, `_contextvars.py`, `_io.py`, `itertools.py`, `_operator.py`, `_random.py`, `select.py`, `_socket.py`, `_string.py`, `_struct.py`, `_thread.py`, `_tokenize.py` , `faulthandler.py`|
+| Written for apython | `_ast_build.py`, `atexit.py`, `binascii.py`, `_codecs.py`, `_collections.py`, `_contextvars.py`, `_frozen_importlib.py`, `_frozen_importlib_external.py`, `_io.py`, `itertools.py`, `_operator.py`, `_random.py`, `select.py`, `_socket.py`, `_string.py`, `_struct.py`, `_thread.py`, `_tokenize.py` , `faulthandler.py`|
 
 `re/` is the wrapper around the `_sre` engine, which is assembly.  It comes
 over unmodified, and with it the modules it needs that were not here:

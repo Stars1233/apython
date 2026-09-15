@@ -63,3 +63,218 @@ def run_in_subinterp_with_config(code, **config):
     raise NotImplementedError(
         "_testcapi.run_in_subinterp_with_config is not implemented; see "
         "run_in_subinterp")
+
+
+# ---------------------------------------------------------------------------
+# The C integer limits.
+#
+# These are read as plain numbers -- "the value at which a C int parameter
+# overflows" -- and the syscall wrappers in src/modules/ really do take C ints
+# for file descriptors, backlogs and timeouts, so the limits are this
+# interpreter's too.  test_exceptions carries its own `INT_MAX = 2**31 - 1`
+# fallback, which is the value to agree with.
+#
+# They are not decoration: test_socket reads INT_MAX at MODULE scope
+# (socklen_t_limit = min(0x7fffffff, _testcapi.INT_MAX)), so their absence was
+# 732 tests that never ran rather than a handful that failed.
+# ---------------------------------------------------------------------------
+INT_MAX = 2 ** 31 - 1
+INT_MIN = -(2 ** 31)
+UINT_MAX = 2 ** 32 - 1
+SHRT_MAX = 2 ** 15 - 1
+SHRT_MIN = -(2 ** 15)
+USHRT_MAX = 2 ** 16 - 1
+LONG_MAX = 2 ** 63 - 1
+LONG_MIN = -(2 ** 63)
+ULONG_MAX = 2 ** 64 - 1
+LLONG_MAX = 2 ** 63 - 1
+LLONG_MIN = -(2 ** 63)
+ULLONG_MAX = 2 ** 64 - 1
+PY_SSIZE_T_MAX = 2 ** 63 - 1
+PY_SSIZE_T_MIN = -(2 ** 63)
+SIZE_MAX = 2 ** 64 - 1
+
+
+# ---------------------------------------------------------------------------
+# The three classes test_call builds its calling-convention matrix from.
+#
+# CPython's are C types whose methods are each registered under a different
+# METH_* convention -- VARARGS, VARARGS|KEYWORDS, O, NOARGS, FASTCALL,
+# FASTCALL|KEYWORDS -- and the point of the matrix is that all six arrive at
+# the same answer.  Here there is ONE calling convention, so these are six
+# ordinary methods wearing the C names, and what they prove is that the answer
+# is the same, not that six conventions reached it.  That is the honest claim,
+# and it is worth making: test_call's line 479 builds an instance at CLASS-BODY
+# scope, so without these the whole module -- 181 tests -- died before it ran.
+#
+# What is NOT here: pyobject_fastcall, pyobject_vectorcall,
+# pyobject_fastcalldict, make_vectorcall_class, has_vectorcall_flag and the
+# MethodDescriptor family.  Those exercise the C vectorcall protocol itself
+# rather than a result, there is no such protocol here, and a stand-in would
+# be claiming to test something that does not exist.  The tests that reach for
+# them fail by name, which is the report a reader can act on.
+# ---------------------------------------------------------------------------
+class MethInstance:
+    """Instance methods under every name CPython gives a calling convention.
+
+    One convention here; see the module comment.
+    """
+
+    def meth_varargs(self, *args):
+        return (self, args)
+
+    def meth_varargs_keywords(self, *args, **kwargs):
+        return (self, args, kwargs)
+
+    def meth_o(self, arg):
+        return (self, arg)
+
+    def meth_noargs(self):
+        return self
+
+    def meth_fastcall(self, *args):
+        return (self, args)
+
+    def meth_fastcall_keywords(self, *args, **kwargs):
+        return (self, args, kwargs)
+
+
+class MethClass:
+    """The same six as class methods, so `self` is the class either way."""
+
+    @classmethod
+    def meth_varargs(cls, *args):
+        return (cls, args)
+
+    @classmethod
+    def meth_varargs_keywords(cls, *args, **kwargs):
+        return (cls, args, kwargs)
+
+    @classmethod
+    def meth_o(cls, arg):
+        return (cls, arg)
+
+    @classmethod
+    def meth_noargs(cls):
+        return cls
+
+    @classmethod
+    def meth_fastcall(cls, *args):
+        return (cls, args)
+
+    @classmethod
+    def meth_fastcall_keywords(cls, *args, **kwargs):
+        return (cls, args, kwargs)
+
+
+class MethStatic:
+    """The same six as static methods, so there is no receiver to report."""
+
+    @staticmethod
+    def meth_varargs(*args):
+        return (None, args)
+
+    @staticmethod
+    def meth_varargs_keywords(*args, **kwargs):
+        return (None, args, kwargs)
+
+    @staticmethod
+    def meth_o(arg):
+        return (None, arg)
+
+    @staticmethod
+    def meth_noargs():
+        return None
+
+    @staticmethod
+    def meth_fastcall(*args):
+        return (None, args)
+
+    @staticmethod
+    def meth_fastcall_keywords(*args, **kwargs):
+        return (None, args, kwargs)
+
+
+# The module-level row of the same matrix.  A C function defined on a module
+# is handed that module as its receiver, so these answer with this one.
+def _self():
+    import sys
+    return sys.modules[__name__]
+
+
+def meth_varargs(*args):
+    return (_self(), args)
+
+
+def meth_varargs_keywords(*args, **kwargs):
+    return (_self(), args, kwargs)
+
+
+def meth_o(arg):
+    return (_self(), arg)
+
+
+def meth_noargs():
+    return _self()
+
+
+def meth_fastcall(*args):
+    return (_self(), args)
+
+
+def meth_fastcall_keywords(*args, **kwargs):
+    return (_self(), args, kwargs)
+
+
+# ---------------------------------------------------------------------------
+# The type-version tag.
+#
+# This interpreter HAS one -- it lives in the high 32 bits of tp_flags and the
+# attribute caches are built on it -- but nothing publishes it to Python, and
+# `type.__flags__` deliberately does not report it (the low bits are this
+# tree's own layout).  So the honest answer to "what version is this type at"
+# is 0, which is precisely CPython's answer for a type that has no valid tag,
+# and it is what makes test_type_cache's own `if type_get_version(t) == 0:
+# continue` guards skip rather than assert against a number we made up.
+#
+# The four names are fetched together at test_type_cache's MODULE scope, so
+# all four have to exist for any of the module to run.
+# ---------------------------------------------------------------------------
+def type_get_version(cls):
+    if not isinstance(cls, type):
+        raise TypeError("argument must be a type")
+    return 0
+
+
+def type_modified(cls):
+    if not isinstance(cls, type):
+        raise TypeError("argument must be a type")
+    import sys
+    sys._clear_type_cache()
+
+
+def type_assign_version(cls):
+    if not isinstance(cls, type):
+        raise TypeError("argument must be a type")
+    return 0            # 0 = no tag was assigned, as CPython reports it
+
+
+def type_assign_specific_version_unsafe(cls, version):
+    raise NotImplementedError(
+        "_testcapi.type_assign_specific_version_unsafe is not implemented: "
+        "the type version is not writable from Python here")
+
+
+# ---------------------------------------------------------------------------
+# The five feature macros, and only those five: test_stable_abi_ctypes asserts
+# `set(get_feature_macros()) == EXPECTED_FEATURE_MACROS` against a hardcoded
+# five-element set, at module scope.  The values describe this build.
+# ---------------------------------------------------------------------------
+def get_feature_macros():
+    return {
+        "HAVE_FORK": True,              # src/modules/posixproc.asm
+        "MS_WINDOWS": False,
+        "PY_HAVE_THREAD_NATIVE_ID": True,   # lib/_thread.get_native_id
+        "Py_REF_DEBUG": False,
+        "USE_STACKCHECK": False,
+    }

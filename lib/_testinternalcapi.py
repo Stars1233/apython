@@ -130,3 +130,73 @@ def assemble_code_object(*args, **kwargs):
     raise NotImplementedError(
         "_testinternalcapi.assemble_code_object is not implemented; see "
         "compiler_codegen")
+
+
+def set_config(config):
+    raise NotImplementedError(
+        "_testinternalcapi.set_config is not implemented: there is no "
+        "PyConfig to write back.  It is here so the failure says that, "
+        "rather than arriving as an AttributeError -- and a version that "
+        "accepted the dict and did nothing would be worse than both, since "
+        "_test_embed_set_config reads the values straight back off sys and "
+        "would report a mismatch instead of a missing feature.")
+
+
+# ---------------------------------------------------------------------------
+# The locale codec round trip, which test_codecs.LocaleCodecTest exercises.
+#
+# CPython's pair wrap _Py_DecodeLocaleEx/_Py_EncodeLocaleEx -- the C library's
+# mbstowcs under the LC_CTYPE locale, or the filesystem encoding.  Both call
+# sites pass current_locale=0, which means "use the filesystem encoding", and
+# sys.getfilesystemencoding() is always 'utf-8' here (DIVERGENCES.md records
+# why), so that is the encoding to use.
+#
+# The three outcomes are the ones the C switch reports, and the tests read all
+# three: a result, a RuntimeError whose text they match with a regex, and a
+# ValueError for an error handler the C layer does not offer.  In particular
+# 'backslashreplace' has to be REFUSED even though this interpreter's own
+# str.encode accepts it -- _Py_GetErrorHandler does not know it.
+# ---------------------------------------------------------------------------
+_LOCALE_ERROR_HANDLERS = frozenset((
+    "strict", "surrogateescape", "surrogatepass", "replace", "ignore",
+))
+
+
+def _locale_encoding(current_locale):
+    import sys
+    if current_locale:
+        # No LC_CTYPE handling here; the filesystem encoding is the only one.
+        return sys.getfilesystemencoding()
+    return sys.getfilesystemencoding()
+
+
+def _check_locale_errors(errors):
+    if errors is None:
+        return "strict"
+    if errors not in _LOCALE_ERROR_HANDLERS:
+        raise ValueError("unsupported error handler")
+    return errors
+
+
+def EncodeLocaleEx(text, current_locale=0, errors=None):
+    if not isinstance(text, str):
+        raise TypeError("argument 1 must be str, not %s"
+                        % type(text).__name__)
+    handler = _check_locale_errors(errors)
+    try:
+        return text.encode(_locale_encoding(current_locale), handler)
+    except UnicodeEncodeError as exc:
+        raise RuntimeError("encode error: pos=%d, reason=%s"
+                           % (exc.start, exc.reason)) from None
+
+
+def DecodeLocaleEx(encoded, current_locale=0, errors=None):
+    if not isinstance(encoded, (bytes, bytearray)):
+        raise TypeError("argument 1 must be bytes, not %s"
+                        % type(encoded).__name__)
+    handler = _check_locale_errors(errors)
+    try:
+        return bytes(encoded).decode(_locale_encoding(current_locale), handler)
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("decode error: pos=%d, reason=%s"
+                           % (exc.start, exc.reason)) from None

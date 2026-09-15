@@ -66,6 +66,16 @@ build_time_vars = {
     "abs_srcdir": _prefix,
     "abs_builddir": _prefix,
 
+    # Where the tz database lives on this platform.  zoneinfo._tzpath reads
+    # exactly this key -- PYTHONTZPATH first, then sysconfig's TZPATH -- and
+    # a missing one is not a missing config var, it is `zoneinfo.TZPATH == ()`
+    # and every ZoneInfo('America/New_York') a ZoneInfoNotFoundError.  This is
+    # CPython's own configure default, and a true fact about where the files
+    # are rather than an invented C-build value, which is what this file's
+    # policy asks for.
+    "TZPATH": "/usr/share/zoneinfo:/usr/lib/zoneinfo:"
+              "/usr/share/lib/zoneinfo:/etc/zoneinfo",
+
     # --- what a C build would have recorded ------------------------------
     #
     # Empty rather than invented.  A program that reads CC to compile an
