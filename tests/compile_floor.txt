@@ -110,6 +110,7 @@ test_codecs_registry
 test_codec_surrogates
 test_code_gc
 test_code_lines_scaling
+test_code_lnotab
 test_code_localsplus
 test_code_replace
 test_collections_module
@@ -786,6 +787,7 @@ test_utf16_utf32
 test_utf8_validate_boundaries
 test_value_funnel_guards
 test_value_typeconfusion
+test_view_and_slots
 test_warning_registry
 test_warnings_filters
 test_warnings_module

@@ -653,7 +653,8 @@ END_FUNC add_new_staticmethod
 ;; PEP 585: list[int] and friends.  The __class_getitem__ path in
 ;; op_binary_subscr is already wired for type objects; what was missing was an
 ;; entry to find.  _collections_abc takes GenericAlias from `type(list[int])`.
-DEF_FUNC_LOCAL add_class_getitem
+global add_class_getitem
+DEF_FUNC add_class_getitem
     push rbx
     push r12
     mov rbx, rdi
@@ -993,6 +994,9 @@ DEF_FUNC methods_init
 
     extern range_reduce
     ADD_FN_N mn___reduce__, range_reduce, 1, 1
+    ; nb_bool by name: `bool(range(0))` always worked, `range.__bool__` did not.
+    extern range_dunder_bool
+    ADD_FN_N mn___bool__, range_dunder_bool, 1, 1
     extern range_obj_type
     lea rax, [rel range_obj_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2170,6 +2174,8 @@ DEF_FUNC methods_init
     ; the slots, reachable by name: the stdlib reaches for them directly.
     ADD_FN_N mn___len__, bytes_dunder_len, 1, 1
     ADD_FN_N mn___iter__, bytes_dunder_iter, 1, 1
+    extern bytes_dunder_bytes
+    ADD_FN_N mn___bytes__, bytes_dunder_bytes, 1, 1
 
     mov rdi, rbx
     lea rsi, [rel mn_maketrans]
@@ -2627,6 +2633,7 @@ global mn___trunc__
 mn___trunc__:   db "__trunc__", 0
 global mn___bool__
 mn___bool__:    db "__bool__", 0
+mn___bytes__:   db "__bytes__", 0
 global gs_real
 gs_real:        db "real", 0
 global gs_imag

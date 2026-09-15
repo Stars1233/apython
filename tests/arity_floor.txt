@@ -510,6 +510,10 @@ bytes.__add__/0
 bytes.__add__/1
 bytes.__add__/2
 bytes.__add__/3
+bytes.__bytes__/0
+bytes.__bytes__/1
+bytes.__bytes__/2
+bytes.__bytes__/3
 bytes.capitalize/0
 bytes.capitalize/1
 bytes.capitalize/2
@@ -1734,6 +1738,10 @@ memoryview.toreadonly/0
 memoryview.toreadonly/1
 memoryview.toreadonly/2
 memoryview.toreadonly/3
+range.__bool__/0
+range.__bool__/1
+range.__bool__/2
+range.__bool__/3
 range.__class__/0
 range.__class__/1
 range.__class__/2

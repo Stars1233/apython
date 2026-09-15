@@ -552,6 +552,7 @@ DEF_FUNC_LOCAL dvr_all_contained_in, DAC_FRAME
     DUNDER_EXC_SAVE [rbp - DAC_EXC]
 
     mov esi, TAG_PTR            ; a is always a set or a view, so a pointer
+    extern current_exception
     extern get_iterator
     call get_iterator
     test rax, rax
@@ -871,6 +872,145 @@ DEF_FUNC dict_view_reversed, DVREV_FRAME
     extern raise_exception
     RAISE exc_TypeError_type, "__reversed__() takes exactly one argument"
 END_FUNC dict_view_reversed
+
+section .text
+
+;; ============================================================================
+;; dict_view_get_mapping(rdi = the view as a Value) -> rax = Value
+;;
+;; `d.keys().mapping`: a read-only proxy onto the dict the view came from.
+;; CPython added it in 3.10 so that a view can be used where a mapping is
+;; wanted without handing out the mutable original, and `collections.abc`'s
+;; own registration tests read it.
+;; ============================================================================
+DEF_FUNC dict_view_get_mapping
+    mov rdi, [rdi + PyDictViewObject.dv_dict]
+    test rdi, rdi
+    jz .dvgm_none
+    extern mappingproxy_new
+    call mappingproxy_new
+    mov edx, TAG_PTR
+    leave
+    ret
+.dvgm_none:
+    extern none_singleton
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC dict_view_get_mapping
+
+;; ============================================================================
+;; dict_view_isdisjoint(rdi = args Value[], rsi = nargs) -> rax = a bool Value
+;;
+;; `d.keys().isdisjoint(other)`, for the two views that are set-like.  CPython
+;; takes any iterable, not just a set, and walks it asking the view whether it
+;; holds each item -- which is a dict lookup for a keys view and a key-and-value
+;; comparison for an items view.  Both are already written as sq_contains, so
+;; this is the walk and nothing else.
+;; ============================================================================
+DVJ_SELF  equ 8
+DVJ_ITER  equ 16
+DVJ_FRAME equ 24            ; + 1 push = 32, 16-aligned
+global dict_view_isdisjoint
+DEF_FUNC dict_view_isdisjoint, DVJ_FRAME
+    push rbx
+    cmp rsi, 2
+    jne .dvj_args
+    mov rax, [rdi]
+    mov [rbp - DVJ_SELF], rax
+    mov rdi, [rdi + 8]
+
+    ; get_iterator and call_iternext still speak the old (payload, tag) pair.
+    V_UNPACK rdi, rsi
+    extern get_iterator
+    call get_iterator
+    test rax, rax
+    jz .dvj_raised
+    mov [rbp - DVJ_ITER], rax
+
+.dvj_loop:
+    mov rdi, [rbp - DVJ_ITER]
+    extern call_iternext
+    call call_iternext
+    test rax, rax
+    jz .dvj_exhausted
+    V_PACK rax, rdx
+    mov rbx, rax                        ; the item, ours
+
+    ; sq_contains on the view's own type, which is what `x in view` calls.
+    mov rdi, [rbp - DVJ_SELF]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .dvj_item_done
+    mov rax, [rax + PySequenceMethods.sq_contains]
+    test rax, rax
+    jz .dvj_item_done
+    mov rdi, [rbp - DVJ_SELF]
+    mov rsi, rbx
+    call rax
+    push rax
+    push rax
+    mov rdi, rbx
+    DECREF_V rdi, rcx
+    pop rax
+    pop rcx
+    test eax, eax
+    jnz .dvj_false
+    ; sq_contains has no error channel -- an unhashable probe answers 0 with
+    ; the exception already pending -- so the pending one is what says whether
+    ; the 0 meant "no" or "it raised".
+    cmp qword [rel current_exception], 0
+    jne .dvj_raised_iter
+    jmp .dvj_loop
+
+.dvj_item_done:
+    mov rdi, rbx
+    DECREF_V rdi, rcx
+    jmp .dvj_loop
+
+.dvj_exhausted:
+    ; call_iternext answers 0 both for exhaustion and for a raise; the
+    ; pending exception is what tells them apart.
+    cmp qword [rel current_exception], 0
+    jne .dvj_raised_iter
+    mov rdi, [rbp - DVJ_ITER]
+    DECREF_V rdi, rcx
+    extern bool_true
+    lea rax, [rel bool_true]
+    INCREF rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+
+.dvj_false:
+    mov rdi, [rbp - DVJ_ITER]
+    DECREF_V rdi, rcx
+    extern bool_false
+    lea rax, [rel bool_false]
+    INCREF rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+
+.dvj_raised_iter:
+    mov rdi, [rbp - DVJ_ITER]
+    DECREF_V rdi, rcx
+.dvj_raised:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+.dvj_args:
+    extern exc_TypeError_type
+    extern raise_exception
+    RAISE exc_TypeError_type, "isdisjoint() takes exactly one argument"
+END_FUNC dict_view_isdisjoint
 
 section .data
 

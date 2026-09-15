@@ -71,6 +71,7 @@ DEF_FUNC attr_types_init, ATI_FRAME
     ; reversible", though the dict itself has had one all along and the
     ; reverse iterator already carries the kind that tells the three apart.
     call dict_view_add_reversed
+    call sre_add_class_getitem
     call singleton_add_reduce
 
     mov qword [rbp - ATI_IDX], 0
@@ -164,6 +165,22 @@ DEF_FUNC_LOCAL singleton_add_reduce, SAR_FRAME
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
     call type_stamp_methods
+
+    ; NoneType has no tp_dict either, and its nb_bool could not be reached by
+    ; name.  __reduce__ is not among these: None pickles as a type code, not
+    ; through the reduction protocol.
+    call dict_new
+    mov rbx, rax
+    mov rdi, rbx
+    lea rsi, [rel an_bool]
+    extern none_dunder_bool
+    lea rdx, [rel none_dunder_bool]
+    call dict_add_builtin_func
+    extern none_type
+    lea rax, [rel none_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
     pop rbx
     leave
     ret
@@ -193,9 +210,27 @@ DEF_FUNC_LOCAL dict_view_add_reversed, DVA_FRAME
     mov [rbx + PyTypeObject.tp_dict], rax
 .dva_have:
     mov rdi, rax
+    push rax
     lea rsi, [rel an_reversed]
     lea rdx, [rel dict_view_reversed]
     call dict_add_builtin_func
+    ; .mapping is on all three; .isdisjoint only on the two that are set-like,
+    ; which is the order dict_view_types is in.
+    mov rdi, [rsp]
+    lea rsi, [rel an_mapping]
+    extern dict_view_get_mapping
+    lea rdx, [rel dict_view_get_mapping]
+    xor ecx, ecx
+    extern dict_add_getset
+    call dict_add_getset
+    pop rdi
+    cmp qword [rbp - DVA_IDX], 1
+    je .dva_stamp
+    lea rsi, [rel an_isdisjoint]
+    extern dict_view_isdisjoint
+    lea rdx, [rel dict_view_isdisjoint]
+    call dict_add_builtin_func
+.dva_stamp:
     mov rdi, rbx
     call type_stamp_methods
     inc qword [rbp - DVA_IDX]
@@ -206,13 +241,61 @@ DEF_FUNC_LOCAL dict_view_add_reversed, DVA_FRAME
     ret
 END_FUNC dict_view_add_reversed
 
+;; ============================================================================
+;; sre_add_class_getitem() -> nothing; re.Match and re.Pattern become
+;; subscriptable
+;;
+;; PEP 585 on the two regex types: `re.Match[str]` and `re.Pattern[bytes]` are
+;; what a typed stdlib writes, and `test_clinic` reads `re.Match[str]` at
+;; module scope -- so its absence aborted the whole file.  Neither type has a
+;; tp_dict of its own, so one is made here; nothing else needs one.
+;; ============================================================================
+SCG_IDX   equ 8
+SCG_FRAME equ 24            ; + 1 push = 32, 16-aligned
+DEF_FUNC_LOCAL sre_add_class_getitem, SCG_FRAME
+    push rbx
+    mov qword [rbp - SCG_IDX], 0
+.scg_loop:
+    mov rax, [rbp - SCG_IDX]
+    cmp rax, 2
+    jge .scg_done
+    lea rcx, [rel sre_subscriptable_types]
+    mov rbx, [rcx + rax*8]
+    mov rax, [rbx + PyTypeObject.tp_dict]
+    test rax, rax
+    jnz .scg_have
+    call dict_new
+    mov [rbx + PyTypeObject.tp_dict], rax
+.scg_have:
+    mov rdi, rax
+    extern add_class_getitem
+    call add_class_getitem
+    mov rdi, rbx
+    call type_stamp_methods
+    inc qword [rbp - SCG_IDX]
+    jmp .scg_loop
+.scg_done:
+    pop rbx
+    leave
+    ret
+END_FUNC sre_add_class_getitem
+
 section .rodata
 an_reversed:  db "__reversed__", 0
+an_mapping:   db "mapping", 0
+an_isdisjoint: db "isdisjoint", 0
 an_reduce:    db "__reduce__", 0
+an_bool:      db "__bool__", 0
 
 align 8
 dict_view_types:
     dq dict_keys_view_type, dict_values_view_type, dict_items_view_type
+
+align 8
+extern sre_match_type
+extern sre_pattern_type
+sre_subscriptable_types:
+    dq sre_match_type, sre_pattern_type
 
 ; --- exceptions: what exc_getattr answers -----------------------------------
 ; sorted(dir(ValueError(1))) was short of every one of these, so
