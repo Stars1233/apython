@@ -534,6 +534,7 @@ test_pickle_module
 test_poll_eintr
 test_posix_bytes_paths
 test_posix_files
+test_posix_identity
 test_posix_more
 test_posix_pathlike
 test_posix_process

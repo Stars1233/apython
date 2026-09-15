@@ -3077,6 +3077,10 @@ DEF_FUNC posix_module_create, 40
     extern posixdir_register
     mov rdi, r12
     call posixdir_register      ; scandir and DirEntry, from posixdir.asm
+    extern posixid_register
+    mov rdi, r12
+    call posixid_register       ; the credentials and the constants, from
+                                ; posixid.asm
     MODULE_ADD_FUNC posix_getcwd, pm_n_getcwd
     MODULE_ADD_FUNC posix_getcwdb, pm_n_getcwdb
     MODULE_ADD_FUNC posix_open, pm_n_open
