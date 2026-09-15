@@ -320,6 +320,17 @@ DEF_FUNC exc_dealloc, ED_FRAME
 
     mov rbx, rdi
 
+    ; UNTRACK FIRST, which is the first line of CPython's
+    ; BaseException_dealloc and was the last thing here.  Everything below
+    ; releases a field, and a release runs arbitrary code -- a __del__, a
+    ; container teardown, an allocation that trips a collection -- with this
+    ; object at refcount 0 and still on a generation list.  The collector
+    ; then sees it as garbage, clears and frees it, and gc_dealloc below
+    ; untracks a block that is no longer ours: a SIGSEGV in gc_list_remove
+    ; with nothing on the stack to connect it to the exception.
+    extern gc_untrack
+    call gc_untrack
+
     ; XDECREF exc_value (tag-aware: may be SmallInt)
     mov rdi, [rbx + PyExceptionObject.exc_value]
     XDECREF_V rdi, rsi
@@ -2793,6 +2804,13 @@ DEF_FUNC exc_traverse, 8        ; rsp 16-aligned at the call the macros below ex
     VISIT_PTR rdi
     mov rdi, [rbx + PyExceptionObject.exc_args]
     VISIT_PTR rdi
+    ; The instance dict, which CPython's BaseException_traverse visits first
+    ; and this did not.  Leaving an edge out does not merely leak: the
+    ; collector counts the references it is SHOWN, so an exception whose only
+    ; referrer is reached through its own dict looks unreferenced and is
+    ; collected while that referrer still holds it.
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    VISIT_PTR rdi
 
     pop rbx
     leave
@@ -2833,6 +2851,15 @@ DEF_FUNC exc_clear_gc, 8            ; 1 pushes, so rsp is 16-aligned
     jz .no_args
     call obj_decref
 .no_args:
+    ; The dict, for the reason exc_traverse gives: an edge the collector is
+    ; shown has to be an edge it can also break, or the cycle survives the
+    ; sweep that found it.
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    mov qword [rbx + PyExceptionObject.exc_dict], 0
+    test rdi, rdi
+    jz .no_dict_gc
+    call obj_decref
+.no_dict_gc:
 
     pop rbx
     leave

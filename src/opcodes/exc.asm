@@ -110,28 +110,43 @@ DEF_FUNC_BARE op_pop_except
     VPOP rax                 ; rax = exception to restore
     dec dword [r12 + PyFrame.exc_depth]
 
-    ; XDECREF old handled_exception
+    ; Install the restored exception FIRST, and only then release the one it
+    ; replaces.  That release runs arbitrary code -- a __del__ on anything the
+    ; dying exception still holds -- and entering a Python frame swaps
+    ; handled_exception into PyFrame.exc_state and back, counting it both
+    ; times.  With the global still pointing at an object at refcount 0, that
+    ; took it 0 -> 1 -> 0 and ran obj_dealloc on it a SECOND time; the symptom
+    ; was a SIGSEGV in gc_list_remove from the outer dealloc, whose block had
+    ; been freed and reused underneath it.  `AttributeError.obj` is what made
+    ; it reachable -- it is the first thing to put an arbitrary object, and so
+    ; an arbitrary __del__, inside an exception.
+    mov rcx, [rel handled_exception]    ; the one being taken down
+    lea rdx, [rel none_singleton]
+    cmp rax, rdx
+    je .pe_none
+    mov [rel handled_exception], rax    ; the stack's reference moves into it
+    xor eax, eax                        ; and nothing is left over to release
+    jmp .pe_release
+.pe_none:
+    ; None on the stack means there was nothing being handled; the None is
+    ; still this handler's to release.
+    mov qword [rel handled_exception], 0
+
+.pe_release:
     sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
                                ; handler, so a call needs an even push list
     push rax
-    mov rdi, [rel handled_exception]
+    mov rdi, rcx
     test rdi, rdi
     jz .no_old
     call obj_decref
 .no_old:
-    pop rax
+    pop rdi
     add rsp, 8
-
-    ; Set restored exception as handled (or NULL if None)
-    lea rdx, [rel none_singleton]
-    cmp rax, rdx
-    jne .set_exc
-    ; It's None - set handled to NULL and DECREF the None
-    mov qword [rel handled_exception], 0
-    DECREF rax
-    DISPATCH
-.set_exc:
-    mov [rel handled_exception], rax
+    test rdi, rdi
+    jz .pe_done
+    call obj_decref
+.pe_done:
     DISPATCH
 END_FUNC op_pop_except
 
