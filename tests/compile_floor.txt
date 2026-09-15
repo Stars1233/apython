@@ -102,6 +102,7 @@ test_cmath
 test_codec_args
 test_codec_handlers
 test_codecs_binding
+test_codecs_module
 test_codecs
 test_codecs_registry_bridge
 test_codecs_registry

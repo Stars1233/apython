@@ -70,19 +70,42 @@ def _bootstrap():
     _search_functions.insert(0, encodings.search_function)
 
 
-class _CodecInfo(tuple):
-    """codecs.CodecInfo without the codecs module.
+def _CodecInfo(encode, decode, name, _raw_decode=None, _key=None):
+    """-> a real codecs.CodecInfo, with all seven of its fields filled.
 
-    lookup() checks the shape -- a 4-tuple -- and everything downstream of it
-    reaches for .encode and .decode by name, so a plain tuple will not do.
+    This used to be a tuple subclass of its own carrying three fields --
+    encode, decode and name -- because `codecs` was not in lib/ at all.  Two
+    things were wrong with that.  Everything that reaches past the stateless
+    pair got AttributeError: codecs.getincrementaldecoder, codecs.getreader,
+    and through lib/_io.py's fallback, open() in any encoding the assembly
+    does not do itself.  And `type()` and `isinstance()` answered wrong, which
+    is what CPython's own test_codecs asks.
+
+    So the four remaining fields are built here, from the stateless pair, the
+    way CPython's two hundred encodings/*.py modules build theirs -- and
+    `codecs` is imported from inside this function rather than at the top of
+    the module, because codecs.py does `from _codecs import *`.  That is the
+    same layering CPython has: its `encodings` package depends on `codecs`
+    while its C `_codecs` does not, and a search function is exactly where
+    that dependency belongs.  Nothing on the startup path calls this --
+    TextIOWrapper decodes utf-8, ascii and latin-1 without the registry.
+
+    `_raw_decode`, when given, is the three-argument decoder that takes
+    `final`, which is what an incremental decoder needs and what `decode` has
+    already had bound to True.  Without it the codec is taken to be one whose
+    decode can never leave a partial unit, which is the charmap family.
     """
+    import codecs
 
-    def __new__(cls, encode, decode, name):
-        self = tuple.__new__(cls, (encode, decode, None, None))
-        self.encode = encode
-        self.decode = decode
-        self.name = name
-        return self
+    if _raw_decode is not None:
+        incremental_encoder, incremental_decoder = _incremental_pair(
+            _key, encode, _raw_decode)
+    else:
+        incremental_encoder = _stateless_encoder(encode)
+        incremental_decoder = _final_decoder(decode)
+    reader, writer = _stream_pair(codecs, encode, decode)
+    return codecs.CodecInfo(encode, decode, reader, writer,
+                            incremental_encoder, incremental_decoder, name)
 
 
 class _Whole:
@@ -122,7 +145,8 @@ def _builtin_search(name):
     # registers -- 'utf-8', not the 'utf_8' the lookup normalised to -- and
     # TextIOWrapper.encoding is read from it.
     return _CodecInfo(entry[0], _Whole(entry[1]),
-                      _BUILTIN_NAMES.get(key, key))
+                      _BUILTIN_NAMES.get(key, key),
+                      _raw_decode=entry[1], _key=key)
 
 
 def lookup(encoding):
@@ -1113,6 +1137,11 @@ def utf_7_decode(data, errors=None, final=False):
     i = 0
     shifted = False
     shift_start = 0
+    # How much of `out` was already settled when the current run opened.  A
+    # run that is still open when the data ends is given back to the caller
+    # from the '+' that began it, so everything decoded INSIDE it has to be
+    # given back too -- see the tail below.
+    shift_out = 0
     seen = 0
     bits = 0
     acc = 0
@@ -1184,6 +1213,7 @@ def utf_7_decode(data, errors=None, final=False):
                 continue
             shifted = True
             shift_start = i
+            shift_out = len(out)
             seen = 0
             bits = 0
             acc = 0
@@ -1198,6 +1228,14 @@ def utf_7_decode(data, errors=None, final=False):
 
     if shifted:
         if not final:
+            # The run is unfinished, so the caller keeps it from the '+' --
+            # and must be told that NOTHING inside it was decoded, or it
+            # decodes the run again on the next chunk and every character in
+            # it comes out twice.  `codecs.getincrementaldecoder("utf-7")`
+            # fed one byte at a time turned "aé中" into "aéééé中é中":
+            # correct characters, each emitted once per chunk that arrived
+            # after it, with no error anywhere.
+            del out[shift_out:]
             return ("".join(out), shift_start)
         if surrogate or bits >= 6 or (bits and acc):
             fail(shift_start, n, "unterminated shift sequence")
@@ -1220,15 +1258,33 @@ def decode(obj, encoding="utf-8", errors="strict"):
 # BOM'd form of utf-8, the fixed-width UTF families, and utf-7, which is a
 # state machine over modified base64 rather than a mapping.
 
+# The byte-order mark utf-8 does not need and Windows writes anyway.  Named,
+# because it is written in three places and a BOM spelled wrong is six bytes
+# of mojibake rather than an error.
+_BOM_UTF8 = b"\xef\xbb\xbf"
+
+
 def utf_8_sig_encode(s, errors=None):
-    return (b"\xef\xbb\xbf" + s.encode("utf-8", errors or "strict"), len(s))
+    return (_BOM_UTF8 + s.encode("utf-8", errors or "strict"), len(s))
 
 
 def utf_8_sig_decode(data, errors=None, final=False):
+    """utf-8 with a leading BOM stripped, CPython's encodings/utf_8_sig.py.
+
+    Two things this got wrong.  It ignored `final`, so it called str.decode
+    -- which has no partial mode -- and a chunk ending mid-character raised
+    "unexpected end of data" where an incremental decoder must hold the tail
+    back.  And the count it returned was the length of the input AFTER the
+    BOM was removed, so a caller that consumed by it lost three bytes at the
+    front of every BOM'd stream; CPython adds the prefix back.
+    """
     b = _as_bytes(data)
-    if b[:3] == b"\xef\xbb\xbf":
+    prefix = 0
+    if b[:3] == _BOM_UTF8:
         b = b[3:]
-    return (b.decode("utf-8", errors or "strict"), len(b))
+        prefix = 3
+    text, consumed = utf_8_decode(b, errors, final)
+    return (text, consumed + prefix)
 
 
 def _utf_n_encode(s, errors, width, big):
@@ -1522,6 +1578,349 @@ def utf_32_ex_decode(data, errors=None, byteorder=0, final=False):
     name = "utf-32-be" if big else "utf-32-le"
     s, n = _utf_n_decode(b, errors, 4, big, name, final=final)
     return (s, n, byteorder)
+
+
+# --- the incremental codecs, and the stream pair ----------------------------
+#
+# A CodecInfo has seven fields and this module supplied three.  In CPython the
+# other four come from the per-codec module: encodings/utf_16.py defines its
+# own IncrementalEncoder, IncrementalDecoder, StreamReader and StreamWriter,
+# two hundred files over, and the C registry just carries what they built.
+# There is no per-codec module here -- `encodings` is one file and a table --
+# so a lookup answered a three-field CodecInfo and every caller that reached
+# past the stateless pair got AttributeError:
+#
+#     codecs.getincrementaldecoder("utf-16")      # '_CodecInfo' object has
+#     codecs.getreader("cp1252")                  #   no attribute ...
+#     open(path, encoding="utf-16")               # through _io's fallback
+#
+# The last of those is the one that mattered: lib/_io.py handles utf-8, ascii
+# and latin-1 itself and hands everything else to codecs.getincrementaldecoder,
+# so a standalone apython could not open a file in any other encoding at all.
+#
+# The four are built here, from the stateless functions, by _CodecInfo above.
+
+
+# Which order "native" is.  utf_16_decode and utf_32_decode already answer
+# this by hardcoding little-endian in their no-BOM arm, because this
+# interpreter is x86-64 only; reading sys.byteorder here would be the same
+# answer through an import this module deliberately does not have at its top
+# level.  One name, so the two places agree.
+_NATIVE_LITTLE = True
+
+
+class _IncrementalEncoder:
+    """CPython's codecs.IncrementalEncoder, without the codecs module.
+
+    The same shape, because callers use it: `.errors` is writable, `reset()`
+    and `getstate()`/`setstate()` exist, and encode() takes `final`.
+    """
+
+    def __init__(self, errors="strict"):
+        self.errors = errors
+        self.buffer = ""
+
+    def encode(self, input, final=False):
+        raise NotImplementedError
+
+    def reset(self):
+        pass
+
+    def getstate(self):
+        return 0
+
+    def setstate(self, state):
+        pass
+
+
+class _IncrementalDecoder:
+    """CPython's codecs.IncrementalDecoder, likewise."""
+
+    def __init__(self, errors="strict"):
+        self.errors = errors
+
+    def decode(self, input, final=False):
+        raise NotImplementedError
+
+    def reset(self):
+        pass
+
+    def getstate(self):
+        return (b"", 0)
+
+    def setstate(self, state):
+        pass
+
+
+def _stateless_encoder(encode):
+    """-> an IncrementalEncoder class for a codec with no start state.
+
+    Every chunk encodes on its own.  True for utf-8, ascii, latin-1, the
+    fixed-order UTF forms, both escape codecs and the whole charmap family;
+    NOT true for the three that write a BOM, which have their own factories
+    below.  utf-7 is here too, and for CPython's reason: its own
+    encodings/utf_7.py encodes each chunk from scratch, so a shift sequence
+    does not span a chunk boundary there either.
+
+    A closure rather than a class attribute holding the function: a plain
+    function in a class body becomes a method, which is the trap the `_Whole`
+    docstring above records.
+    """
+
+    class IncrementalEncoder(_IncrementalEncoder):
+        def encode(self, input, final=False):
+            return encode(input, self.errors)[0]
+
+    return IncrementalEncoder
+
+
+def _bom_encoder(bom, encode_rest, encode_first=None):
+    """-> an IncrementalEncoder that writes `bom` before the first chunk.
+
+    utf-8-sig, utf-16 and utf-32.  CPython writes the BOM by calling the
+    BOM-writing encoder once and the fixed-order one thereafter, which is
+    what `encode_first` is for -- utf_16_encode emits the BOM and picks the
+    native order in one step, and the order it picked has to be the one every
+    later chunk uses.
+    """
+
+    class IncrementalEncoder(_IncrementalEncoder):
+        def __init__(self, errors="strict"):
+            _IncrementalEncoder.__init__(self, errors)
+            self.first = True
+
+        def encode(self, input, final=False):
+            if self.first:
+                self.first = False
+                if encode_first is not None:
+                    return encode_first(input, self.errors)[0]
+                return bom + encode_rest(input, self.errors)[0]
+            return encode_rest(input, self.errors)[0]
+
+        def reset(self):
+            _IncrementalEncoder.reset(self)
+            self.first = True
+
+        def getstate(self):
+            return 1 if self.first else 0
+
+        def setstate(self, state):
+            self.first = bool(state)
+
+    return IncrementalEncoder
+
+
+def _buffered_decoder(buffer_decode):
+    """-> an IncrementalDecoder that carries a partial unit between chunks.
+
+    CPython's codecs.BufferedIncrementalDecoder: prepend what is left over,
+    decode, keep the unconsumed tail.  `buffer_decode(input, errors, final)`
+    returns `(text, consumed)`, which is exactly the signature every decoder
+    in this module already has -- the `final` flag was threaded through them
+    so that a truncated trailing unit is an error only at the end of the
+    input, and this is what it was for.
+    """
+
+    class IncrementalDecoder(_IncrementalDecoder):
+        def __init__(self, errors="strict"):
+            _IncrementalDecoder.__init__(self, errors)
+            self.buffer = b""
+
+        def decode(self, input, final=False):
+            data = self.buffer + bytes(_as_bytes(input))
+            text, consumed = buffer_decode(data, self.errors, final)
+            self.buffer = data[consumed:]
+            return text
+
+        def reset(self):
+            _IncrementalDecoder.reset(self)
+            self.buffer = b""
+
+        def getstate(self):
+            return (self.buffer, 0)
+
+        def setstate(self, state):
+            self.buffer = state[0]
+
+    return IncrementalDecoder
+
+
+def _bom_sniffing_decoder(ex_decode, le_decode, be_decode, name):
+    """-> an IncrementalDecoder that LATCHES the byte order it found.
+
+    utf-16 and utf-32, and the one place a plain buffered decoder is wrong.
+    utf_16_decode sniffs a BOM on every call, and after the first chunk the
+    BOM has been consumed and is no longer in the buffer -- so the second
+    chunk of a big-endian stream would be sniffed again, find nothing, and be
+    decoded in the NATIVE order.  Half a file in the wrong endianness, with no
+    error anywhere.  CPython's encodings/utf_16.py keeps the decision in
+    `self.decoder` for exactly this, and so does this.
+    """
+
+    class IncrementalDecoder(_IncrementalDecoder):
+        def __init__(self, errors="strict"):
+            _IncrementalDecoder.__init__(self, errors)
+            self.buffer = b""
+            self.decoder = None
+
+        def _buffer_decode(self, data, errors, final):
+            if self.decoder is not None:
+                return self.decoder(data, errors, final)
+            text, consumed, byteorder = ex_decode(data, errors, 0, final)
+            if byteorder == -1:
+                self.decoder = le_decode
+            elif byteorder == 1:
+                self.decoder = be_decode
+            elif final:
+                # No BOM and the stream is over: CPython's utf_16 decoder
+                # takes the native order, which is what ex_decode already
+                # did.  Nothing to latch.
+                pass
+            return text, consumed
+
+        def decode(self, input, final=False):
+            data = self.buffer + bytes(_as_bytes(input))
+            text, consumed = self._buffer_decode(data, self.errors, final)
+            self.buffer = data[consumed:]
+            return text
+
+        def reset(self):
+            _IncrementalDecoder.reset(self)
+            self.buffer = b""
+            self.decoder = None
+
+        def getstate(self):
+            return (self.buffer, 0 if self.decoder is None else 1)
+
+        def setstate(self, state):
+            self.buffer = state[0]
+
+    IncrementalDecoder.__name__ = name
+    return IncrementalDecoder
+
+
+def _utf_8_sig_decoder():
+    """-> the IncrementalDecoder for utf-8-sig, which needs one bit of state.
+
+    A plain buffered decoder over utf_8_sig_decode is nearly right and wrong
+    in one place: it re-checks for the BOM on every chunk, so a U+FEFF that
+    arrives in the MIDDLE of a stream -- legitimate content, since only a
+    leading one is a mark -- is silently eaten as a second BOM.  CPython's
+    encodings/utf_8_sig.py keeps a `first` flag for exactly this, and also
+    for the case this cannot decide yet: one or two bytes that are a PREFIX
+    of the BOM are not yet known to be one, so nothing is consumed and the
+    question is asked again with more input.
+    """
+
+    class IncrementalDecoder(_IncrementalDecoder):
+        def __init__(self, errors="strict"):
+            _IncrementalDecoder.__init__(self, errors)
+            self.buffer = b""
+            self.first = True
+
+        def _buffer_decode(self, data, errors, final):
+            if self.first:
+                if len(data) < 3:
+                    if _BOM_UTF8.startswith(data):
+                        # Cannot tell yet whether this is the mark.
+                        return "", 0
+                    self.first = False
+                else:
+                    self.first = False
+                    if data[:3] == _BOM_UTF8:
+                        text, consumed = utf_8_decode(data[3:], errors, final)
+                        return text, consumed + 3
+            return utf_8_decode(data, errors, final)
+
+        def decode(self, input, final=False):
+            data = self.buffer + bytes(_as_bytes(input))
+            text, consumed = self._buffer_decode(data, self.errors, final)
+            self.buffer = data[consumed:]
+            return text
+
+        def reset(self):
+            _IncrementalDecoder.reset(self)
+            self.buffer = b""
+            self.first = True
+
+        def getstate(self):
+            return (self.buffer, 1 if self.first else 0)
+
+        def setstate(self, state):
+            self.buffer = state[0]
+            self.first = bool(state[1])
+
+    return IncrementalDecoder
+
+
+def _final_decoder(decode):
+    """-> an IncrementalDecoder for a decoder with no `final` parameter.
+
+    The charmap family: one byte is one character, so there is never a partial
+    unit to carry and every chunk consumes all of itself.  `decode` here is
+    the CodecInfo's own two-argument decode.
+    """
+
+    def buffer_decode(data, errors, final):
+        text, consumed = decode(data, errors)
+        return text, consumed
+
+    return _buffered_decoder(buffer_decode)
+
+
+def _incremental_pair(key, encode, raw_decode):
+    """-> (IncrementalEncoder, IncrementalDecoder) for a built-in codec.
+
+    `key` is the normalised name, `encode` the stateless encoder and
+    `raw_decode` the three-argument decoder that takes `final`.
+    """
+    if key == "utf_8_sig":
+        enc = _bom_encoder(_BOM_UTF8, utf_8_encode)
+    elif key == "utf_16":
+        enc = _bom_encoder(None, utf_16_le_encode if _NATIVE_LITTLE
+                           else utf_16_be_encode, utf_16_encode)
+    elif key == "utf_32":
+        enc = _bom_encoder(None, utf_32_le_encode if _NATIVE_LITTLE
+                           else utf_32_be_encode, utf_32_encode)
+    else:
+        enc = _stateless_encoder(encode)
+
+    if key == "utf_8_sig":
+        dec = _utf_8_sig_decoder()
+    elif key == "utf_16":
+        dec = _bom_sniffing_decoder(utf_16_ex_decode, utf_16_le_decode,
+                                    utf_16_be_decode, "IncrementalDecoder")
+    elif key == "utf_32":
+        dec = _bom_sniffing_decoder(utf_32_ex_decode, utf_32_le_decode,
+                                    utf_32_be_decode, "IncrementalDecoder")
+    else:
+        dec = _buffered_decoder(raw_decode)
+    return enc, dec
+
+
+def _stream_pair(codecs, encode, decode):
+    """-> (StreamReader, StreamWriter) over one codec's stateless pair.
+
+    CPython's per-codec module writes these two as three-line subclasses of
+    codecs.StreamReader and codecs.StreamWriter, overriding nothing but
+    `decode` and `encode`.  That is all this does.  The module is passed in
+    rather than imported here, because the caller has already imported it and
+    cannot do so at the top of this file.
+    """
+
+    class StreamWriter(codecs.StreamWriter):
+        pass
+
+    class StreamReader(codecs.StreamReader):
+        pass
+
+    # Assigned after the class body rather than in it, for the reason the
+    # `_Whole` docstring above gives: a plain function in a class body is a
+    # method, and these take no self.  A staticmethod is what CPython's
+    # encodings modules end up with, because theirs are builtins.
+    StreamWriter.encode = staticmethod(encode)
+    StreamReader.decode = staticmethod(decode)
+    return StreamReader, StreamWriter
 
 
 # --- what a class body may hold ---------------------------------------------
