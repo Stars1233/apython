@@ -18,6 +18,17 @@ import io
 print("encode/decode:", codecs.encode("abc", "utf-8"), codecs.decode(b"abc", "utf-8"))
 print("lookup:", codecs.lookup("utf-8").name, codecs.lookup("cp1252").name,
       codecs.lookup("UTF_16_LE").name)
+
+# `encodings.aliases` is the MODULE and the table inside it is
+# `aliases.aliases`, as in CPython.  This package bound the name to the dict,
+# which was invisible here and wrong for everyone else -- locale.py reaches
+# for encodings.aliases.aliases and got AttributeError on a dict.
+import encodings.aliases
+
+print("encodings.aliases is a module:",
+      type(encodings.aliases).__name__,
+      encodings.aliases.aliases["latin"],
+      encodings.aliases.aliases["u8"])
 print("BOMs:", codecs.BOM_UTF8, codecs.BOM_UTF16_LE, codecs.BOM_UTF32_BE)
 
 # --- the incremental encoders ------------------------------------------
