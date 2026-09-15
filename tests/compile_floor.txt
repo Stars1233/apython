@@ -663,6 +663,7 @@ test_str_decode
 test_strfmt
 test_str_format_dunder
 test_str_format
+test_string_operator
 test_strings2
 test_strings
 test_str_inplace_add
