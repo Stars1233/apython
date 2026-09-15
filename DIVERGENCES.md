@@ -301,6 +301,65 @@ than against CPython, because CPython cannot serve as an oracle for them:
 Any *new* recorded-oracle test needs the same justification, or it risks
 blessing a divergence instead of catching it.
 
+## Threads are deferred
+
+`lib/_thread.py` is a single-threaded stand-in: `get_ident` answers a
+constant, the locks are uncontended, and anything that would actually START a
+thread raises rather than pretending.  CPython's `threading.py` runs on it
+unchanged -- RLock, Event, Condition, Semaphore, local and current_thread all
+behave as one thread can observe them -- so a program that uses those
+primitives for their API rather than for concurrency works, and one that
+spawns is told plainly that it cannot.
+
+That is the shape a deferred feature should have, and it is why this is here
+rather than in `bugs.md`: `Thread.start()` refusing is a decision, not an
+omission waiting to be filled in.  Real threads mean a GIL or fine-grained
+locking over every object this interpreter has, which is a project of its own.
+
+## The CJK codecs are deferred
+
+`_multibytecodec` and the six codec modules over it -- the Chinese, Japanese
+and Korean multi-byte encodings -- are absent.  They are a large generated
+table apiece and a shared state machine, and nothing in this tree's own
+corpus needs them; `encodings/` answers for every single-byte codec and
+`_codecs` for the tableless ones.  `test_codecencodings_*` and
+`test_multibytecodec` are what they would unblock.
+
+## sys.monitoring is absent
+
+PEP 669's monitoring API has no implementation here.  `sys.settrace` and
+`sys.setprofile` are, which is what `pdb`, `trace` and every coverage tool
+older than 3.12 use; `sys.monitoring` is the newer interface over the same
+events and needs per-code-object instrumentation that this interpreter's
+dispatch does not have a place for yet.
+
+## There is no REPL
+
+`./apython` reads a file, `-c`, `-m` or stdin.  There is no interactive
+prompt.  `CMODE_SINGLE` and `sys.displayhook` both exist, so starting one is
+cheap and finishing one -- line continuation, the input hook, readline, the
+traceback rules an interactive statement has -- is not; it is its own
+feature rather than a missing piece of this one.
+
+## The alias modules in lib/
+
+`_datetime`, `_json`, `_pickle` and `_decimal` are stand-ins for CPython's C
+accelerators, and each says so in its own header.  They exist because
+`test.support.import_fresh_module` returns **None** when a module in its
+`fresh` list cannot be imported, and a test file that then reads
+`module.__dict__` dies while its body is still executing -- taking every test
+in the file with it.
+
+None of them is faster than what it re-exports, and no number measured
+through one should be read as native speed.  `_pickle` is the exception to
+its own rule: it carries `PickleBuffer`, which is a TYPE rather than an
+accelerator and which `pickle.py` imports at module scope.
+
+`_testcapi` and `_testinternalcapi` are the same arrangement for CPython's
+test harness: every name in them answers a true fact about this interpreter
+or raises NotImplementedError, and nothing pretends to exercise a C API that
+is not here.
+
 ## PEP 563 stores a raw source slice, not an unparse
 
 `from __future__ import annotations` makes every annotation a string of its
