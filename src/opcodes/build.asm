@@ -1765,7 +1765,30 @@ DEF_FUNC_BARE op_contains_op
     ; Fall through to type error
 
 .contains_type_error:
-    RAISE exc_TypeError_type, "argument of type is not iterable"
+    ; CPython names the type: "argument of type 'ValueError' is not iterable".
+    ; The container is on the push frame as a (payload, tag) PAIR -- this
+    ; handler is not converted -- so it has to become a Value before anything
+    ; reads its type.  Only the NAME is wanted, so an immediate is replaced by
+    ; a canonical one of its own kind rather than boxed: V_PACK on a wide
+    ; smallint allocates, and this path raises rather than returning.
+    mov rdi, [rsp + CN_RIGHT]
+    mov rdx, [rsp + CN_RTAG]
+    cmp edx, TAG_PTR
+    je .cte_named
+    cmp edx, TAG_FLOAT
+    je .cte_float
+    mov rdi, V_INT(0)           ; any int immediate names `int`
+    jmp .cte_named
+.cte_float:
+    xor edi, edi                ; 0.0 names `float`
+    V_FROM_F64 rdi, rax
+.cte_named:
+    CSTRING rsi, "argument of type '"
+    CSTRING rdx, "' is not iterable"
+    sub rsp, 8                  ; five pushes: realign before the call, which
+                                ; does not return, so nothing undoes this
+    extern raise_typed_message
+    call raise_typed_message
 END_FUNC op_contains_op
 
 ;; ============================================================================

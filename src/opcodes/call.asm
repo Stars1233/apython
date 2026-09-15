@@ -564,7 +564,7 @@ DEF_FUNC op_call_function_ex
     ; count and [obj+32] as the Value array, which is memory corruption on
     ; every other type and a plain dereference of the payload for f(*5).
     V_TEST_PTR_M [rbp - CFX_ARGS], rcx
-    ja .cfex_args_not_iterable
+    ja .cfex_star_not_iterable      ; an immediate is never iterable
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel tuple_type]
     cmp rcx, rdx
@@ -573,6 +573,32 @@ DEF_FUNC op_call_function_ex
     lea rdx, [rel list_type]
     cmp rcx, rdx
     je .cfex_args_ok
+    ; A type with neither tp_iter nor sq_item is refused HERE rather than by
+    ; the materialisation below, because CPython's check_args_iterable runs
+    ; before the conversion and so has the callable to name: `f(*5)` is
+    ; "__main__.f() argument after * must be an iterable, not int" and not the
+    ; anonymous "'int' object is not iterable" the iterator protocol words.
+    ; The callable is on the value stack -- args has just been popped, so it
+    ; is TOS -- and is still owned by the frame.
+    cmp qword [rcx + PyTypeObject.tp_iter], 0
+    jne .cfex_materialise
+    mov rdx, [rcx + PyTypeObject.tp_as_sequence]
+    test rdx, rdx
+    jz .cfex_star_try_mapping
+    cmp qword [rdx + PySequenceMethods.sq_item], 0
+    jne .cfex_materialise
+.cfex_star_try_mapping:
+    ; CPython asks PySequence_Check, which is sq_item alone -- but a class
+    ; whose only indexing dunder is __getitem__ gets mp_subscript here and no
+    ; sq_item, and `f(*obj)` over such a class is legal: the iterator protocol
+    ; falls back to indexing from 0 until IndexError.
+    mov rdx, [rcx + PyTypeObject.tp_as_mapping]
+    test rdx, rdx
+    jz .cfex_star_not_iterable
+    cmp qword [rdx + PyMappingMethods.mp_subscript], 0
+    je .cfex_star_not_iterable
+
+.cfex_materialise:
     ; Anything else: materialise it through the iterator protocol.  This
     ; raises for a non-iterable, which is what CPython does too.
     extern tuple_type_call
@@ -809,6 +835,39 @@ DEF_FUNC op_call_function_ex
     call obj_decref
 
     jmp .cfex_cleanup_shared
+
+.cfex_star_not_iterable:
+    ; The message names the callee and the type it was handed.  The value
+    ; stack still owns func, the NULL under it and the sequence -- this raise
+    ; abandons the frame and the unwinder releases all three from
+    ; eval_saved_r13, which DISPATCH set before the pops.
+    VPEEK rdi
+    V_TEST_PTR rdi, rcx
+    ja .cfex_args_not_iterable      ; an immediate callable: no name to read
+    mov rdi, [rbp - CFX_ARGS]
+    V_TEST_PTR rdi, rcx
+    jbe .cfex_star_heap
+    extern int_type
+    extern float_type
+    lea rax, [rel int_type]
+    V_IS_INT rdi, rcx           ; CF clear (jae) for an int immediate
+    jae .cfex_star_named
+    lea rax, [rel float_type]
+    jmp .cfex_star_named
+.cfex_star_heap:
+    mov rax, [rdi + PyObject.ob_type]
+.cfex_star_named:
+    mov rsi, [rax + PyTypeObject.tp_name]
+    VPEEK rdi
+    CSTRING rdx, " argument after * must be an iterable, not "
+    xor ecx, ecx
+    mov [rel eval_saved_r13], r13
+    extern raise_callable_arg
+    add rsp, CFX_CARVE
+    pop r12
+    pop rbx
+    leave
+    jmp raise_callable_arg
 
 .cfex_args_not_iterable:
     RAISE exc_TypeError_type, "argument after * must be an iterable"

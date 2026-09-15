@@ -2692,6 +2692,64 @@ DEF_FUNC_LOCAL cg_e_call, CC2_FRAME
     jmp .ret
 
 .unpacked:
+    ; CPython compiles a call whose positional arguments are exactly one `*x`
+    ; to a BARE CALL_FUNCTION_EX: the expression IS the argument sequence, with
+    ; no list built around it.  That is not cosmetic -- the refusal then comes
+    ; from the call, which knows the callee, so `f(*5)` reads
+    ; "__main__.f() argument after * must be an iterable, not int" instead of
+    ; the anonymous sentence LIST_EXTEND words for `f(*a, *b)` and `[*5]`.
+    mov qword [rbp - CC2_NPOS], 0       ; plain positional arguments seen
+    mov qword [rbp - CC2_NKW], 0        ; reused here as the count of *a
+    mov qword [rbp - CC2_I], 0
+.lone_scan:
+    mov rax, [rbp - CC2_I]
+    cmp rax, [rbp - CC2_N]
+    jae .lone_decide
+    call .child_at
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    movzx eax, byte [rax + AstNode.kind]
+    cmp eax, AST_KEYWORD
+    je .lone_next
+    cmp eax, AST_DOUBLESTARRED
+    je .lone_next
+    cmp eax, AST_STARRED
+    je .lone_star
+    inc qword [rbp - CC2_NPOS]
+    jmp .lone_next
+.lone_star:
+    inc qword [rbp - CC2_NKW]
+.lone_next:
+    inc qword [rbp - CC2_I]
+    jmp .lone_scan
+.lone_decide:
+    cmp qword [rbp - CC2_NPOS], 0
+    jne .build_args
+    cmp qword [rbp - CC2_NKW], 1
+    jne .build_args
+    mov qword [rbp - CC2_I], 0
+.lone_find:
+    call .child_at
+    mov [rbp - CC2_CHILD], rax
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_STARRED
+    je .lone_emit
+    inc qword [rbp - CC2_I]
+    jmp .lone_find
+.lone_emit:
+    mov edx, [rax + AstNode.a]
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    jmp .kwargs
+
+.build_args:
     ; Positional arguments become a list, extended by each *a, then a tuple.
     mov rdi, r12
     mov esi, OP_BUILD_LIST
@@ -2753,6 +2811,7 @@ DEF_FUNC_LOCAL cg_e_call, CC2_FRAME
     mov rcx, [rbp - CC2_LINE]
     call cg_emit
 
+.kwargs:
     ; Keywords become a dict, merged by each **k.  It is emitted only when
     ; there are any: CALL_FUNCTION_EX's bit 0 says whether one is present.
     mov rdi, rbx

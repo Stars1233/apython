@@ -1645,6 +1645,12 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel super_dunder_new]
     call add_new_staticmethod
+    ;; An unbound super is a descriptor: it binds itself to the instance the
+    ;; class attribute was read from.  The name has to be in the dict as well
+    ;; as reachable from the flag, because the stdlib asks by name --
+    ;; `hasattr(x, '__get__')` is how inspect and functools decide.
+    extern super_dunder_get
+    ADD_FN_N mn___get__, super_dunder_get, 2, 3
     extern super_type
     lea rax, [rel super_type]
     mov [rax + PyTypeObject.tp_dict], rbx

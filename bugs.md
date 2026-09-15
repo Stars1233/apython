@@ -41,19 +41,6 @@ reasoning that chose them and what changing one would cost.
   plus `SetParamEntityParsing` and `ExternalEntityParserCreate`, which are
   also absent.
 
-- **An internally raised `AttributeError` has no `.name` and no `.obj`.**
-  CPython sets both on every attribute error it raises, and its "did you mean"
-  machinery in `traceback` reads them; ours are absent entirely, so
-  `getattr(e, 'name', None)` answers None where CPython answers the attribute.
-  The keyword form -- `AttributeError("m", name=n, obj=o)` -- does work, and
-  the family's refcounting is now correct, so what is missing is filling the
-  two in at the raise sites.  `exc_from_cstr` is the wrong place for it: it is
-  on the path of every internally raised exception, StopIteration from
-  `call_iternext` included, and a `type_is_subtype` plus two `dict_set`s there
-  would be paid by every `for` loop that ends.  The import machinery's own
-  errors set theirs individually for exactly that reason, and attribute errors
-  want the same treatment -- there are far more sites.
-
 - **`cannot import name` never reports a circular import.**  CPython has a
   fourth wording for it, chosen by `__spec__._initializing`:
   `cannot import name 'X' from partially initialized module 'm' (most likely
@@ -147,17 +134,6 @@ reasoning that chose them and what changing one would cost.
   because the start-up streams are a `file_type` here rather than a Python
   wrapper over a FileIO.
 
-- **`o.__dict__ = d` and `o.__weakref__ = x` go into the instance dict.**  The
-  two getsets are in the class dict now and the READ side finds them, but they
-  carry `GS_LAYOUT` so that `TYPE_FLAG_MRO_HAS_DATA_DESCR` stays clear on every
-  class -- and the store side (`instance_setattr`, `op_store_attr`) gates on
-  exactly that bit.  So `c.__dict__ = d` adds a `'__dict__'` KEY rather than
-  replacing the dict, and `c.__weakref__ = 5` succeeds where CPython says
-  `attribute '__weakref__' of 'C' objects is not writable`.  Both did the same
-  before the descriptors existed, so this is what is LEFT rather than anything
-  new; closing it means a name test on the store fallback, which every
-  `self.x = v` would pay for.
-
 - **`frame.f_lineno` cannot be assigned, so `pdb`'s `jump` does not work.**
   `frameobj_setattr` refuses it outright: moving the instruction pointer to
   the start of another line means re-deriving the block stack for the
@@ -184,27 +160,6 @@ reasoning that chose them and what changing one would cost.
   in a code object's length and unittest formats a traceback through the
   second.  That is fixed; 84 tests run now.
 
-- **`super()` searches the written class's MRO, not the declared class's, when
-  the opcode handles it.**  `super(C, p).f()` for a proxy whose `__class__` is
-  an `E(C, X)` is `X.f` in CPython -- the search starts after C in *E's* MRO --
-  and `B.f` here, with `__self_class__` answering C rather than E.  The
-  unspecialised path is right: `super_check` hands the declared class over and
-  `super_new` installs it as `su_obj_type`.  `op_load_super_attr` uses the
-  declared class as a yes and nothing more, because `LSA_ORIGIN` is borrowed
-  and a dozen exits would each have to release it.  So the two paths disagree
-  for this one shape, and only for a declared class that is a STRICT subclass
-  of the written one; a proxy of a plain `C()` -- which is
-  `test_descr.test_proxy_super` and `tests/test_super_proxy.py` -- agrees.
-
-- **An unbound `super` is not a descriptor.**  `super` carries no
-  `tp_descr_get`, so `hasattr(super(C), '__get__')` is False where CPython says
-  True, and the idiom `C._C__super = super(C)` then `self.__super.meth(a)` --
-  which is what `test_descr.test_supers` does -- reads the unbound super back
-  unchanged and fails with `'super' object has no attribute 'meth'`.  CPython's
-  `super_descr_get` builds a new, bound super from the unbound one.  Everything
-  the two- and three-argument forms do is right; this is the one-argument form
-  stored on a class.
-
 - **A raise from a C-level slot is a non-local jump, so a C caller cannot
   absorb it.**  `slot_mp_subscript` and its siblings end in `slot_reraise`,
   which tail-jumps into `eval_exception_unwind`; a builtin's own miss --
@@ -226,22 +181,15 @@ reasoning that chose them and what changing one would cost.
   `errno`, `strerror`, `filename` and `filename2` are C fields in CPython and
   do not appear in `vars(e)`; here `exc_oserror` writes them into `exc_dict`,
   so `OSError(2, 'x').__dict__` has four entries CPython's has none of.  Every
-  read of them agrees, and so does `args`; what differs is what `__dict__`,
-  `vars()`, `__getstate__` and now `__reduce__` report.  Moving them means
-  four more fields on PyExceptionObject and a getattr arm for each, which is
-  what CPython does.
-
-  `__reduce__` is the visible consequence.  `BaseException.__reduce__` adds a
-  third element when the instance dict is not empty, and OSError's never is --
-  so `OSError(2, 'no').__reduce__()` is `(cls, (2, 'no'), {errno: 2, ...})`
-  where CPython answers the two-tuple `(cls, (2, 'no'))`.  CPython also
-  re-packs the filename INTO the arguments, because its constructor takes it
-  back there and its `args` does not carry it; this does not.  Every value
-  survives a round trip either way -- the reconstructor sets the four from the
-  state instead of from the arguments -- and only the tuple's shape differs.
-  Closing it is the same change: the fields, and then an `OSError.__reduce__`
-  that packs them into the args as CPython's does.
-
+  read of them agrees, `args` agrees, and `__reduce__` agrees -- OSError has
+  one of its own now, which re-packs the filename into the arguments and
+  strips the four names out of the state, so a pickle and a deepcopy of every
+  shape round-trip identically.  What is LEFT is what `__dict__`, `vars()` and
+  `__getstate__` report.  Closing it means four more fields on
+  PyExceptionObject, a getattr and a setattr arm for each, and a positive
+  marker -- a type flag, not a `tp_basicsize` comparison, because a
+  `__slots__` subclass of any other exception has a larger basicsize too and
+  those words are its slots.
 - **`bytes` has no `__new__`, so a bytes SUBCLASS cannot be reconstructed.**
   Every other variable-size builtin publishes one -- `str` and `tuple` do --
   and `bytes_type.tp_new` is 0 with nothing in its `tp_dict`, so
@@ -269,17 +217,6 @@ reasoning that chose them and what changing one would cost.
   apart.  Closing it means paying the MRO walk on every attribute access, or
   finding a cheaper way to notice that the class changed underneath.
 
-- **`f(*5)` does not name the callable.**  CPython says
-  "__main__.f() argument after * must be an iterable, not int"; this says
-  "Value after * must be an iterable, not int", which is CPython's message
-  for the OTHER shape -- `f(*a, *b)` and `[*5]`.  The two differ because
-  CPython compiles a lone `*x` to a bare CALL_FUNCTION_EX and this compiles
-  it to BUILD_LIST + LIST_EXTEND, so the refusal comes from a different
-  opcode.  Matching it means matching the codegen, and then teaching
-  CALL_FUNCTION_EX to materialise an arbitrary iterable -- it takes a tuple
-  or a list today.  The `**` half is done: DICT_MERGE names the callable and
-  accepts any mapping.
-
 - **Source that is not valid UTF-8 is refused with our own wording, and one
   column off for a bad four-byte lead.**  CPython reports a codec error --
   `(unicode error) 'utf-8' codec can't decode byte 0xe9 in position 3:
@@ -288,17 +225,6 @@ reasoning that chose them and what changing one would cost.
   reject decision and the LINE match on eleven shapes
   (`tests/test_compile_utf8_source.py`), and bytes inside a comment are
   accepted by both.
-
-- **Three messages that name no type.**  `b"x" in ValueError()` is
-  "argument of type is not iterable" where CPython says "argument of type
-  'ValueError' is not iterable"; `async with` over an object with no
-  `__aexit__` is "'async with' requires __aexit__ method" where CPython names
-  the object and distinguishes "no `__aenter__` either" from "only
-  `__aexit__` missing" -- `op_before_with` does both and its async twin does
-  not; and `__bytes__` returning a non-bytes omits CPython's `(type int)`
-  suffix.  The first attempt at the async one got the operand cleanup wrong
-  and segfaulted: that path releases nothing and lets the unwinder take the
-  manager out of the value-stack slot, which is what any rewrite has to keep.
 
 - **`co_freevars` is in source order and CPython's is sorted**, and a module
   code object reports its globals in `co_varnames`.  The first is the order

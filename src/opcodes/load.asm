@@ -81,7 +81,9 @@ LSA_BIND     equ 56
 LSA_ORIGIN   equ 64      ; the MRO super() searches: the instance's, not the class's
 LSA_SELFTAG  equ 72      ; unused: LSA_SELF holds the Value itself
 LSA_CLASSTAG equ 80      ; and so is the class
-LSA_FRAME    equ 104        ; + 0 pushes; a handler is entered by jmp, so
+LSA_SAVEDEXC equ 88      ; current_exception before the proxy path's lookup
+LSA_ARGS     equ 104     ; the two-element array super_construct reads
+LSA_FRAME    equ 120        ; + 0 pushes; a handler is entered by jmp, so
                          ; this is 8 mod 16 and not 0
 
 ;; ============================================================================
@@ -638,9 +640,10 @@ DEF_FUNC op_load_attr, LA_FRAME
     je .la_handle_getset
 
     ; General descriptor protocol: check for __get__ on attr's type
-    ; Only check if attr's type is a heaptype (user-defined descriptor)
+    ; Only check if attr's type is a heaptype (user-defined descriptor), or a
+    ; static one that says it is a descriptor -- `super` is the only such.
     mov rdx, [rcx + PyTypeObject.tp_flags]
-    test rdx, TYPE_FLAG_HEAPTYPE
+    test rdx, TYPE_FLAG_HEAPTYPE | TYPE_FLAG_DESCRIPTOR
     jz .la_check_flag
 
     ; Check if attr's type has __get__
@@ -1619,9 +1622,12 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     ; class.  CPython's supercheck asks one more question before refusing --
     ; what the object says its class is -- and that is what makes super() work
     ; through a proxy that forwards attribute access, which is what
-    ; test_descr.test_proxy_super is for.  The answer is used as a yes and
-    ; nothing more: the walk still starts from the class, as it always did, so
-    ; nothing here has to hold a class it does not own.
+    ; test_descr.test_proxy_super is for.  The declared class is what CPython
+    ; then searches and reports as __self_class__, and it arrives OWNED; every
+    ; exit below would have to release it, so this shape is handed to the
+    ; unspecialised path instead -- .lsa_via_object builds the real super
+    ; object, whose constructor owns the declared class for as long as it
+    ; lives.  Only a proxy ever reaches there.
     mov rdi, [rbp - LSA_SELF]
     IS_NONE rdi, rax
     je .lsa_unbound                 ; super(C, None) is CPython's UNBOUND super
@@ -1640,7 +1646,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     call obj_decref                 ; obj_declared_class hands over a reference
     cmp qword [rbp - LSA_ORIGIN], 0
     je .lsa_bad_self
-    mov rax, [rbp - LSA_CLASS]
+    jmp .lsa_via_object
 .lsa_have_origin:
     mov [rbp - LSA_ORIGIN], rax
 
@@ -1736,6 +1742,54 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     test rax, rax
     jnz .lsa_own_attr
     jmp .lsa_not_found
+
+.lsa_via_object:
+    ; A proxy: read the attribute off a real super object, which is the
+    ; unspecialised path and is already right about the declared class.  The
+    ; two operands stay held until the answer is in hand, so nothing here is
+    ; owed if super_construct or a getter raises -- .lsa_propagate republishes
+    ; the pre-pop stack top and lets the unwinder release them.
+    mov rax, [rbp - LSA_CLASS]
+    mov [rbp - LSA_ARGS], rax
+    mov rax, [rbp - LSA_SELF]
+    mov [rbp - LSA_ARGS + 8], rax
+    extern super_construct
+    extern super_type
+    lea rdi, [rel super_type]
+    lea rsi, [rbp - LSA_ARGS]
+    mov edx, 2
+    call super_construct
+    test rax, rax
+    jz .lsa_propagate
+    mov [rbp - LSA_BIND], rax       ; the super object, owned
+
+    DUNDER_EXC_SAVE [rbp - LSA_SAVEDEXC]
+    mov rdi, rax
+    mov rsi, [rbp - LSA_NAME]
+    extern super_getattr_value
+    call super_getattr_value
+    mov [rbp - LSA_ATTR], rax
+    mov rdi, [rbp - LSA_BIND]
+    call obj_decref
+    cmp qword [rbp - LSA_ATTR], 0
+    jne .lsa_via_have
+    ; A zero is either "nothing on the MRO has the name", which this words,
+    ; or a property getter that raised, which is already pending.
+    EXC_RAISED_SINCE [rbp - LSA_SAVEDEXC], rax, .lsa_propagate
+    jmp .lsa_not_found
+
+.lsa_via_have:
+    mov rdi, [rbp - LSA_CLASS]
+    call obj_decref
+    mov rdi, [rbp - LSA_SELF]
+    DECREF_V rdi, rax
+    cmp qword [rbp - LSA_FLAG], 0
+    je .lsa_via_one
+    VPUSH_NULL                      ; a value, not a method: NULL beneath it
+.lsa_via_one:
+    mov rax, [rbp - LSA_ATTR]
+    VPUSH rax
+    jmp .lsa_done
 
 .lsa_own_attr:
     ; One of super's own.  Release the operands, then push -- in method mode
@@ -2312,8 +2366,9 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     cmp rcx, rdx
     je .ga_getset
 
-    ; A user-defined descriptor: a heaptype whose own type defines __get__.
-    test dword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    ; A user-defined descriptor: a heaptype whose own type defines __get__,
+    ; or a static type that declares itself one (`super`).
+    test dword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE | TYPE_FLAG_DESCRIPTOR
     jz .ga_plain
     mov rdi, rcx
     lea rsi, [rel dunder_get]

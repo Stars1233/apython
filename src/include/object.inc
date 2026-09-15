@@ -1332,6 +1332,21 @@ TYPE_FLAG_AWAITABLE      equ 0x400000
 ; '__dict__' does not excuse a __slots__ from suppressing the weakref word.
 TYPE_FLAG_DECLARED_SLOTS equ 0x800000
 
+; A STATIC type whose tp_dict defines __get__, so an instance of it found in a
+; class dict is a descriptor and has to be bound on the way out.
+;
+; The attribute paths ask "is this a descriptor?" by looking __get__ up on the
+; attribute's own type, and they gate that lookup on TYPE_FLAG_HEAPTYPE --
+; every builtin descriptor that matters (property, getset, classmethod,
+; staticmethod, function) is special-cased by identity above it, so the
+; general arm exists for user-written ones and the gate keeps an ordinary
+; `C.x = 3` from paying a dict probe.  `super` is the one builtin that is a
+; descriptor and is NOT special-cased: `C._C__super = super(C)` then
+; `self.__super.meth()` read the unbound super straight back.  This bit opens
+; the same arm for it, and for anything else that grows a __get__ later,
+; without widening the gate to every static type.
+TYPE_FLAG_DESCRIPTOR     equ 0x1000000
+
 ; The type's VERSION lives in the high 32 bits of tp_flags, which the flags
 ; above leave free -- they stop at bit 20.  It is a stamp from one global
 ; counter, so a version identifies a particular type in a particular state of

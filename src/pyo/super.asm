@@ -939,6 +939,53 @@ DEF_FUNC super_dunder_new
 END_FUNC super_dunder_new
 
 ;; ============================================================================
+;; super_dunder_get(args, nargs) -> Value    -- super.__get__(obj[, owner])
+;;
+;; An unbound super binds itself to the instance on the way out, exactly as a
+;; function does, which is what makes `C._C__super = super(C)` and then
+;; `self.__super.meth(a)` work -- the idiom test_descr.test_supers is built
+;; on.  Without it `hasattr(super(C), '__get__')` was False, the attribute
+;; paths handed the unbound super back unchanged, and every name on it missed.
+;;
+;; Already bound, or bound to nothing, is the identity: CPython's
+;; super_descr_get returns self for both.  A strict subclass of super is built
+;; through super_construct too rather than through its own type; that differs
+;; from CPython only for a subclass that overrides __new__, which the tree has
+;; no other machinery for either.
+;; ============================================================================
+SDG_ARGS  equ 16            ; the two-element array super_construct reads
+SDG_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+global super_dunder_get
+DEF_FUNC super_dunder_get, SDG_FRAME
+    mov rax, [rdi]              ; self, always a pointer
+    cmp rsi, 2
+    jl .sdg_as_is
+    mov rcx, [rdi + 8]          ; the instance
+    test rcx, rcx
+    jz .sdg_as_is
+    lea rdx, [rel none_singleton]
+    cmp rcx, rdx
+    je .sdg_as_is
+    cmp qword [rax + PySuperObject.su_obj], 0
+    jne .sdg_as_is              ; already bound
+
+    mov rdx, [rax + PySuperObject.su_type]
+    mov [rbp - SDG_ARGS], rdx
+    mov [rbp - SDG_ARGS + 8], rcx
+    lea rdi, [rel super_type]
+    lea rsi, [rbp - SDG_ARGS]
+    mov edx, 2
+    call super_construct        ; answers a Value, and does the supercheck
+    leave
+    ret
+
+.sdg_as_is:
+    INCREF rax
+    leave
+    ret
+END_FUNC super_dunder_get
+
+;; ============================================================================
 ;; super_repr(rdi = the super object) -> rax = PyStrObject*, rdx = TAG_PTR
 ;;
 ;; CPython's two forms: "<super: <class 'B'>, <B object>>" when it is bound,
@@ -1118,7 +1165,7 @@ super_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq TYPE_FLAG_HAVE_GC        ; tp_flags
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_DESCRIPTOR  ; tp_flags
     dq 0                        ; tp_bases
     dq super_traverse           ; tp_traverse
     dq super_clear              ; tp_clear

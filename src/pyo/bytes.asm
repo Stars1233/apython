@@ -2578,7 +2578,11 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     jmp .btc_have_buf
 .btc_dunder_bad:
     mov rdi, rax
-    RAISE exc_TypeError_type, "__bytes__ returned non-bytes"
+    ; "__bytes__ returned non-bytes (type int)" -- the type is the point.
+    CSTRING rsi, "__bytes__ returned non-bytes (type "
+    CSTRING rdx, ")"
+    extern raise_typed_message
+    call raise_typed_message
 .btc_dunder_absent:
     cmp qword [rel current_exception], 0
     jne .btc_propagate                  ; it raised: that is the answer

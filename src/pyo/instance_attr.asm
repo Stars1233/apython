@@ -904,6 +904,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     ; CPython names the type and the attribute here as it does everywhere else.
     mov rdi, rbx
     mov rsi, [rbp - IG_NAME]
+    xor edx, edx                ; a get, so .name and .obj are filled in
     extern raise_no_attribute
     call raise_no_attribute
 
@@ -1302,6 +1303,28 @@ DEF_FUNC instance_setattr
     call raise_exception        ; does not return
 
 .sa_no_slot:
+    ; __dict__ and __weakref__ are the two names that reach here and must NOT
+    ; become instance-dict keys.  Their getsets carry GS_LAYOUT, which stays
+    ; deliberately out of TYPE_FLAG_MRO_HAS_DATA_DESCR (see object.inc), so
+    ; the descriptor walk above is skipped for every class -- and
+    ; `o.__dict__ = d` added a key spelled '__dict__' and left the real dict
+    ; exactly as it was, while `o.__weakref__ = x` quietly succeeded.  A
+    ; two-byte compare gates the rest, so an ordinary `self.x = v` pays one
+    ; instruction.
+    cmp word [r12 + PyStrObject.data], '__'
+    jne .sa_plain_name
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__dict__"
+    extern ap_strcmp
+    call ap_strcmp
+    test eax, eax
+    jz .sa_layout_dict
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "__weakref__"
+    call ap_strcmp
+    test eax, eax
+    jz .sa_layout_weakref
+.sa_plain_name:
     ; No slot found. Fall back to the instance dict.
     LOAD_INST_DICT rdi, rbx, .sa_no_dict_slot
     test rdi, rdi
@@ -1360,7 +1383,75 @@ DEF_FUNC instance_setattr
 .sa_del_missing:
     mov rdi, rbx
     mov rsi, r12
+    mov edx, 1                  ; a delete: CPython fills in neither attribute
     call raise_no_attribute     ; does not return
+
+.sa_layout_dict:
+    ; Replace the instance dict outright.  CPython's subtype_setdict: only a
+    ; dict (or a subclass of one) is accepted, and a DELETE clears the slot --
+    ; after which the next read builds a fresh empty one, which is why
+    ; `del o.__dict__` leaves `o.__dict__` as {}.
+    test r13, r13
+    jz .sa_layout_dict_clear
+    V_TEST_PTR r13, rax
+    ja .sa_layout_dict_bad
+    mov rax, [r13 + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    je .sa_layout_dict_ok
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_DICT_SUBCLASS
+    jz .sa_layout_dict_bad
+.sa_layout_dict_ok:
+    mov rdi, r13
+    call obj_incref
+.sa_layout_dict_clear:
+    ; The old dict is released only after the new one is installed: it may be
+    ; the sole owner of the value being stored back into it.
+    LOAD_INST_DICT r14, rbx, .sa_no_dict_slot
+    STORE_INST_DICT rbx, r13, rcx, .sa_no_dict_slot
+    test r14, r14
+    jz .sa_layout_done
+    mov rdi, r14
+    call obj_decref
+.sa_layout_done:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sa_layout_dict_bad:
+    ; "not a 'int'" -- the quotes are CPython's, and so is naming the type of
+    ; the value rather than the attribute.
+    mov rdi, r13
+    extern value_type
+    call value_type             ; 0 for an immediate; the marker drops out
+    CSTRING rdi, `__dict__ must be set to a dictionary, not a '\x01'`
+    mov rsi, rax
+    extern type_name_message
+    call type_name_message
+    mov rsi, rax
+    extern exc_TypeError_type
+    lea rdi, [rel exc_TypeError_type]
+    call raise_exception        ; does not return
+
+.sa_layout_weakref:
+    ; CPython's __weakref__ getset has no setter at all, so both a store and a
+    ; delete are refused, and the message names the class.  A class whose
+    ; instances cannot be weak-referenced at all has no such getset to refuse
+    ; with, and says "has no attribute" instead.
+    mov rdi, [rbx + PyObject.ob_type]
+    extern weakref_referenceable
+    call weakref_referenceable
+    test eax, eax
+    jz .sa_no_dict_slot
+    mov rsi, [rbx + PyObject.ob_type]
+    CSTRING rdi, `attribute '__weakref__' of '\x01' objects is not writable`
+    call type_name_message
+    mov rsi, rax
+    lea rdi, [rel exc_AttributeError_type]
+    call raise_exception        ; does not return
 
 .sa_no_dict_error:
 .sa_no_dict_slot:
@@ -1370,6 +1461,7 @@ DEF_FUNC instance_setattr
     ; bare "object has no attribute" said neither.
     mov rdi, rbx
     mov rsi, r12
+    mov edx, 1                  ; only a store or a delete lands here
     extern raise_no_attribute
     call raise_no_attribute
 END_FUNC instance_setattr

@@ -158,6 +158,7 @@ DEF_FUNC builtin_getattr, 32
     ; sentence with both nouns taken out of it.
     mov rdi, [rbx]
     mov rsi, [rbx + 8]
+    xor edx, edx                ; a get, so .name and .obj are filled in
     extern raise_no_attribute
     call raise_no_attribute
 
