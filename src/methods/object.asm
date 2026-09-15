@@ -415,7 +415,10 @@ DEF_FUNC_LOCAL object_reduce_impl, ORI_FRAME
     V_UNPACK rax, rdx
     cmp edx, TAG_PTR
     jne .ori_fail
-    mov [rel omr_cached], rax   ; borrowed: _reduce stays in sys.modules
+    INCREF rax                  ; the cache holds it for the process's life --
+                                ; sys.modules is not an owner anyone can rely
+                                ; on, and import_fresh_module drops entries
+    mov [rel omr_cached], rax
 .ori_out:
     leave
     ret

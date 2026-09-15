@@ -2410,7 +2410,10 @@ DEF_FUNC_LOCAL co_ast_builder, CAB_FRAME
     V_UNPACK rax, rdx
     cmp edx, TAG_PTR
     jne .cab_fail
-    mov [rel co_from_raw], rax  ; borrowed: _ast stays in sys.modules
+    INCREF rax                  ; the cache holds it for the process's life --
+                                ; sys.modules is not an owner anyone can rely
+                                ; on, and import_fresh_module drops entries
+    mov [rel co_from_raw], rax
 .cab_out:
     leave
     ret
