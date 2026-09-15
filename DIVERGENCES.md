@@ -301,23 +301,28 @@ than against CPython, because CPython cannot serve as an oracle for them:
 Any *new* recorded-oracle test needs the same justification, or it risks
 blessing a divergence instead of catching it.
 
-## A generic class has no `Generic` base
+## PEP 563 stores a raw source slice, not an unparse
 
-`class C[T]` gives C its `__type_params__`, and everything a program can ask
-about the parameters answers what CPython's does.  What it does not do is put
-`Generic[T]` in the class's bases: CPython threads the parameter tuple through
-a cell so the class BODY can see it and pass `Generic[T]` as an extra base, so
-`C.__mro__` there is `(C, Generic, object)` and here it is `(C, object)`.
+`from __future__ import annotations` makes every annotation a string of its
+own source text, and this tree takes that string by SLICING the file between
+the annotation node's start and the end its AstSpan records.  CPython stores
+what its own unparser produces from the same node.
 
-Nothing in this tree consumes `Generic` -- it exists in `lib/_typing.py` for
-the intrinsic that builds `Generic[T]`, and nothing subscripts it for a
-purpose -- so the cell and the extra base would be machinery with no reader.
-`typing.Protocol` and the parts of `typing` that walk a generic's MRO would
-need it; they are not here either.
+The two agree for every ordinary annotation and differ in three ways:
+redundant parentheses survive here (`x: (int)` is `'(int)'` rather than
+`'int'`), a multi-line annotation keeps its newlines and indentation, and a
+string literal keeps the quote it was written with (`x: "s"` is `'"s"'` here
+and `"'s'"` there).
 
-Changing it means the cell: a `.type_params` cellvar in the wrapper scope,
-`LOAD_CLOSURE` into the class body's own closure, and `INTRINSIC_SUBSCRIPT_GENERIC`
-between the body and the `__build_class__` call.
+The string still evaluates to the same object, which is what
+`typing.get_type_hints` and every other consumer does with it.  Matching the
+unparser exactly means writing one -- `lib/ast.py`'s `unparse` is present to
+diff against if it is ever wanted.
+
+`class C[T](*bases)` is the one shape that does not get its `Generic[T]`
+base: the starred form builds its base tuple with CALL_FUNCTION_EX, and one
+more element has to go into the tuple rather than onto the stack.  Every
+written-out base list gets it.
 
 ## A builtin method bound to an instance is a `method`
 

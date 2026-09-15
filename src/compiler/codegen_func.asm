@@ -2122,6 +2122,48 @@ DEF_FUNC cg_class_args_ex, CAX_FRAME
 END_FUNC cg_class_args_ex
 
 ;; ============================================================================
+;; cg_emit_generic_base(rdi = CompUnit*, esi = how many positional bases are
+;;                      already on the stack, rdx = the line)
+;;   -> nothing
+;;
+;; PEP 695's extra base.  `class C[T]` passes Generic[T] to __build_class__
+;; as one more base, which is what puts Generic on the MRO and makes C[int]
+;; mean something.
+;;
+;; The parameter tuple is not kept in a cell, as CPython keeps it: the
+;; wrapper scope already left it on the stack, under everything the class
+;; call has emitted since -- NULL, __build_class__, the body function, the
+;; name and the positional bases -- so it is COPIED up from exactly that
+;; depth.  Hence the count: five fixed words plus however many bases are
+;; above it.
+;;
+;; WHERE this goes matters.  Generic[T] is a positional argument, so it has
+;; to be emitted after the last written base and BEFORE the first keyword --
+;; `class C[T](metaclass=M)` puts it after the metaclass otherwise, and CALL
+;; reads the count as though a keyword were positional.
+;; ============================================================================
+CEGB_UNIT equ 8
+CEGB_LINE equ 16
+CEGB_FRAME equ 24           ; + 0 pushes = 24... padded below
+global cg_emit_generic_base
+DEF_FUNC cg_emit_generic_base, 32
+    mov [rbp - CEGB_UNIT], rdi
+    mov [rbp - CEGB_LINE], rdx
+    movsxd rdx, esi
+    add rdx, 5
+    mov esi, OP_COPY
+    mov rcx, [rbp - CEGB_LINE]
+    call cg_emit
+    mov rdi, [rbp - CEGB_UNIT]
+    mov esi, OP_CALL_INTRINSIC_1
+    mov edx, INTRINSIC_SUBSCRIPT_GENERIC
+    mov rcx, [rbp - CEGB_LINE]
+    call cg_emit
+    leave
+    ret
+END_FUNC cg_emit_generic_base
+
+;; ============================================================================
 ;; cg_s_classdef - `class C(bases): body`
 ;;
 ;;     PUSH_NULL; LOAD_BUILD_CLASS
@@ -2138,7 +2180,9 @@ CC4_CODE  equ 48
 CC4_NAME  equ 56
 CC4_BASES equ 64
 CC4_NARGS equ 72
-CC4_UNIT2 equ 80 + CompUnit_size
+CC4_GENERIC equ 80          ; PEP 695: the parameter tuple is on the stack
+                            ; below, and Generic[*it] is an extra base
+CC4_UNIT2 equ 88 + CompUnit_size
 CC4_FRAME equ ((CC4_UNIT2 + 15) / 16) * 16 + 8      ; + 3 pushes = 16-aligned
 DEF_FUNC cg_class_value, CC4_FRAME
     push rbx
@@ -2147,6 +2191,7 @@ DEF_FUNC cg_class_value, CC4_FRAME
     mov rbx, rdi
     mov r12, rsi
     mov r13, rdx
+    mov [rbp - CC4_GENERIC], rcx
 
     mov rdi, rbx
     mov rsi, r13
@@ -2239,7 +2284,17 @@ DEF_FUNC cg_class_value, CC4_FRAME
 
     mov qword [rbp - CC4_NARGS], 2
     cmp qword [rbp - CC4_BASES], 0
+    jne .have_bases
+    ; `class C[T]:` with nothing written: Generic[T] is the only base.
+    cmp qword [rbp - CC4_GENERIC], 0
     je .call
+    mov rdi, r12
+    xor esi, esi                        ; no positional bases above the tuple
+    mov rdx, [rbp - CC4_LINE]
+    call cg_emit_generic_base
+    inc qword [rbp - CC4_NARGS]
+    jmp .call
+.have_bases:
 
     ; `class C(*bases)` cannot be a plain CALL: the bases have to become one
     ; tuple first, which is what CALL_FUNCTION_EX takes.
@@ -2260,9 +2315,13 @@ DEF_FUNC cg_class_value, CC4_FRAME
 
 .plain_bases:
     ; The bases were parsed as a call's argument list; emit them the same way.
+    ; The PEP 695 flag travels with them, because the extra base belongs
+    ; between the last positional and the first keyword and only that loop
+    ; knows where the seam is.
     mov rdi, rbx
     mov rsi, r12
     mov rdx, [rbp - CC4_BASES]
+    mov rcx, [rbp - CC4_GENERIC]
     call cg_call_args_only
     cmp rax, -1
     je .fail
@@ -2310,6 +2369,7 @@ DEF_FUNC cg_s_classdef, CSF_FRAME
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
+    xor ecx, ecx                        ; not the PEP 695 form
     call cg_class_value
     test eax, eax
     jz .fail
@@ -2456,6 +2516,7 @@ DEF_FUNC cg_s_decorated, CD3_FRAME
     mov rdi, rbx
     mov rsi, r12
     mov rdx, [rbp - CD3_TGT]
+    xor ecx, ecx                        ; not the PEP 695 form
     call cg_class_value
     test eax, eax
     jz .fail
@@ -3201,6 +3262,7 @@ DEF_FUNC_LOCAL cg_generic_body, CGB_FRAME
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
+    mov ecx, 1                          ; the PEP 695 form: Generic[*params]
     call cg_class_value
     test eax, eax
     jz .cgb_fail

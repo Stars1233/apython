@@ -100,6 +100,28 @@ DEF_FUNC cg_set_qualname, SQ_FRAME
     pop rsi
     cmp dword [rax + Scope.kind], SCOPE_MODULE
     je .sq_have_chain
+    ; PEP 695 wraps a `def f[T]` or a `class C[T]` in a hidden function scope
+    ; that binds T.  It has no name, so it used to reach .sq_drop below and
+    ; take the WHOLE chain with it -- `class TopG[T]: class Nested[U]` gave
+    ; "Nested" where CPython gives "TopG.Nested", and every generic method
+    ; lost its class.  It is not part of the qualname anywhere: CPython's
+    ; compiler_set_qualname skips the same block.
+    push rsi
+    push rax
+    mov esi, [rax + Scope.node]
+    mov rdi, [rbp - SQ_COMP]
+    extern ast_at
+    call ast_at
+    test rax, rax
+    jz .sq_not_wrapper
+    cmp byte [rax + AstNode.kind], AST_TYPEPARAMS
+    jne .sq_not_wrapper
+    pop rax
+    pop rsi
+    jmp .sq_walk                        ; skipped, and the walk goes on out
+.sq_not_wrapper:
+    pop rax
+    pop rsi
     mov rcx, [rbp - SQ_DEPTH]
     cmp rcx, SQ_MAX
     jge .sq_have_chain                  ; deeper than any qualname anyone reads
@@ -3182,12 +3204,27 @@ END_FUNC cg_kwnames_tuple
 ;; or the CALL itself.  The class statement's base list is an argument list, so
 ;; it reuses this rather than a near-copy; a keyword there is `metaclass=M`,
 ;; which __build_class__ takes like any other.
+;;
+;; rcx = 1 when this is a PEP 695 class's base list, which gets one more
+;; positional base -- Generic[*type_params] -- emitted after the last written
+;; one and BEFORE the first keyword.  Only this loop knows where that seam
+;; is, which is why the flag comes here rather than staying with the caller.
 ;; ============================================================================
 CA_I     equ 32
 CA_N     equ 40
 CA_LINE  equ 48
 CA_NKW   equ 56
-CA_FRAME equ 56          ; + 3 pushes = 80
+CA_GENERIC equ 64        ; PEP 695: one extra positional base is owed
+CA_NPOS  equ 72          ; how many positional ones are on the stack
+CA_KWNODE equ 80         ; the keyword node, across the call that pays the
+                         ; PEP 695 base -- a slot rather than a push, because
+                         ; a push here flips the parity the calls inside that
+                         ; subroutine were aligned for
+CA_EXTRA equ 88          ; the PEP 695 base, counted apart from CA_N -- which
+                         ; is the LOOP BOUND, so adding to it walks one child
+                         ; past the end and hands cg_expr a node that is not
+                         ; one
+CA_FRAME equ 104         ; + 3 pushes = 128
 DEF_FUNC cg_call_args_only, CA_FRAME
     push rbx
     push r12
@@ -3195,6 +3232,9 @@ DEF_FUNC cg_call_args_only, CA_FRAME
     mov rbx, rdi
     mov r12, rsi
     mov r13, rdx
+    mov [rbp - CA_GENERIC], rcx
+    mov qword [rbp - CA_NPOS], 0
+    mov qword [rbp - CA_EXTRA], 0
     mov rdi, rbx
     mov rsi, r13
     call ast_at
@@ -3234,8 +3274,13 @@ DEF_FUNC cg_call_args_only, CA_FRAME
     call cg_expr
     test eax, eax
     jz .fail
+    inc qword [rbp - CA_NPOS]
     jmp .next
 .keyword:
+    ; rdx is the keyword node and .pay_generic calls through to cg_emit.
+    mov [rbp - CA_KWNODE], rdx
+    call .pay_generic                   ; before the first keyword, if owed
+    mov rdx, [rbp - CA_KWNODE]
     mov rdi, rbx
     mov rsi, rdx
     call ast_at
@@ -3251,6 +3296,7 @@ DEF_FUNC cg_call_args_only, CA_FRAME
     jmp .loop
 
 .kwnames:
+    call .pay_generic                   ; no keywords at all: it goes last
     cmp qword [rbp - CA_NKW], 0
     je .done
     mov rdi, rbx
@@ -3271,8 +3317,31 @@ DEF_FUNC cg_call_args_only, CA_FRAME
     mov esi, OP_KW_NAMES
     mov rcx, [rbp - CA_LINE]
     call cg_emit
+    jmp .done
+
+;; The PEP 695 extra base, paid once, at whichever seam comes first: just
+;; before the first keyword argument, or after the last positional when there
+;; are no keywords.  A local subroutine because both sites want it and
+;; neither is the other's fallthrough.
+.pay_generic:
+    cmp qword [rbp - CA_GENERIC], 0
+    je .pg_done
+    mov qword [rbp - CA_GENERIC], 0     ; once
+    sub rsp, 8
+    mov rdi, r12
+    mov esi, [rbp - CA_NPOS]
+    mov rdx, [rbp - CA_LINE]
+    extern cg_emit_generic_base
+    call cg_emit_generic_base
+    add rsp, 8
+    inc qword [rbp - CA_NPOS]
+    inc qword [rbp - CA_EXTRA]          ; it is an argument like any other
+.pg_done:
+    ret
+
 .done:
     mov rax, [rbp - CA_N]
+    add rax, [rbp - CA_EXTRA]
     jmp .ret
 .unsupported:
     mov rdi, rbx

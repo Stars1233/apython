@@ -520,6 +520,7 @@ test_oserror
 test_os_write_buffer
 test_pep646
 test_pep695_classdict
+test_pep695_generic_class
 test_pep695
 test_percent_and_ior
 test_percent_errors
