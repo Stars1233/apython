@@ -355,6 +355,19 @@ through one should be read as native speed.  `_pickle` is the exception to
 its own rule: it carries `PickleBuffer`, which is a TYPE rather than an
 accelerator and which `pickle.py` imports at module scope.
 
+Each has to answer for **both** halves of the arrangement it is standing in
+for, and getting that wrong is not a smaller divergence -- it is a module
+that dies at import.  `import_fresh_module` is used twice per test file, once
+with the accelerator blocked and once with the pure module blocked, so a
+stand-in that merely re-exports the pure one fails the second call and takes
+the whole file with it.  `_datetime` therefore reads `_pydatetime`'s SOURCE
+when the import is refused: blocking a module stops `import`, not `open`.
+And `import _pickle` succeeding means `from _pickle import dump, ...` has to
+succeed too, so the nine names CPython publishes are forwarded through PEP
+562's module `__getattr__` -- deferred, because `pickle.py` reaches for
+`PickleBuffer` before it has a Pickler to forward to.  What comes back is
+`pickle`'s own object, so there is still exactly one implementation.
+
 `_testcapi` and `_testinternalcapi` are the same arrangement for CPython's
 test harness: every name in them answers a true fact about this interpreter
 or raises NotImplementedError, and nothing pretends to exercise a C API that
