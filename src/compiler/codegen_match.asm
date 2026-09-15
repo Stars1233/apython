@@ -1148,19 +1148,14 @@ DEF_FUNC_LOCAL cg_pat_mapping, PM2_FRAME
     mov rcx, [rbp - PM2_LINE]
     call cg_emit_jump
 
-    ; The keys, as one constant tuple.
+    ; The keys.  cg_pat_keys emits them -- one LOAD_CONST when they are all
+    ; literals, and an expression apiece plus a BUILD_TUPLE when they are not.
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
     call cg_pat_keys
     test eax, eax
     jz .fail
-    mov rdx, rax
-    dec rdx
-    mov rdi, r12
-    mov esi, OP_LOAD_CONST
-    mov rcx, [rbp - PM2_LINE]
-    call cg_emit
     mov rdi, r12
     mov esi, OP_MATCH_KEYS
     xor edx, edx
@@ -1383,7 +1378,19 @@ DEF_FUNC_LOCAL cg_pat_rest, PT3_FRAME
 END_FUNC cg_pat_rest
 
 ;; ============================================================================
-;; cg_pat_keys(Comp *c, CompUnit *u, uint32_t pat) -> 1 + const index, or 0
+;; cg_pat_keys(Comp *c, CompUnit *u, uint32_t pat) -> 1 ok, 0 reported
+;;
+;; Emits the key tuple MATCH_KEYS is about, leaving it on the stack.
+;;
+;; It used to fold the keys into one compile-time tuple and hand its constant
+;; index back, which is why it accepted AST_CONST and nothing else -- a key
+;; that is not a literal has no value at compile time and nowhere to go.  So
+;; `case {Color.RED: v}:` was "a mapping pattern's keys must be literals",
+;; and typing's own examples are written that way.  The all-literal fold is
+;; still the fast path, because it is what nearly every mapping pattern is;
+;; a key that is not one is emitted like any other expression and the tuple
+;; is built at run time.  What may be written there at all is settled in the
+;; parser, by pat_mapping_key_ok.
 ;; The tuple of keys MATCH_KEYS looks up.  They are constant expressions --
 ;; literals or dotted names -- but only literals can be folded into a tuple
 ;; here, which is why a non-literal key is rejected rather than emitted.
@@ -1391,7 +1398,8 @@ END_FUNC cg_pat_rest
 PY2_TUPLE equ 32
 PY2_I     equ 40
 PY2_N     equ 48
-PY2_FRAME equ 56          ; + 3 pushes = 80
+PY2_LINE  equ 56          ; the pattern's line, for the ops this now emits
+PY2_FRAME equ 72          ; + 3 pushes = 96
 DEF_FUNC_LOCAL cg_pat_keys, PY2_FRAME
     push rbx
     push r12
@@ -1404,6 +1412,8 @@ DEF_FUNC_LOCAL cg_pat_keys, PY2_FRAME
     mov rsi, r13
     call ast_at
     mov ecx, [rax + AstNode.nchild]
+    mov edx, [rax + AstNode.lineno]
+    mov [rbp - PY2_LINE], rdx
     shr rcx, 1
     mov [rbp - PY2_N], rcx
     mov rdi, rcx
@@ -1426,19 +1436,14 @@ DEF_FUNC_LOCAL cg_pat_keys, PY2_FRAME
     cmp rax, [rbp - PY2_N]
     jae .done
     mov rdi, rbx
-    mov rsi, r13
-    call ast_at
-    mov rsi, rax
-    mov rdx, [rbp - PY2_I]
-    shl rdx, 1
-    mov rdi, rbx
-    call ast_child
+    mov rsi, [rbp - PY2_I]
+    call .key_node
     mov rdi, rbx
     mov rsi, rax
     call ast_at
     movzx ecx, byte [rax + AstNode.kind]
     cmp ecx, AST_CONST
-    jne .not_literal
+    jne .not_all_const
     mov esi, [rax + AstNode.a]
     mov rdi, rbx
     call ast_obj_at
@@ -1452,16 +1457,61 @@ DEF_FUNC_LOCAL cg_pat_keys, PY2_FRAME
     inc qword [rbp - PY2_I]
     jmp .loop
 .done:
+    ; Every key was a literal: one LOAD_CONST of a tuple built here.
     mov rdi, r12
     mov rsi, [rbp - PY2_TUPLE]
     call cg_const
-    inc rax
+    mov rdx, rax
+    mov rdi, r12
+    mov esi, OP_LOAD_CONST
+    mov rcx, [rbp - PY2_LINE]
+    call cg_emit
+    mov eax, 1
     jmp .ret
-.not_literal:
+
+.not_all_const:
+    ; One of them is not, so every key is emitted as an expression and the
+    ; tuple is built at run time.  The half-filled constant tuple is left to
+    ; the arena, which owns it.
+    mov qword [rbp - PY2_I], 0
+.expr_loop:
+    mov rax, [rbp - PY2_I]
+    cmp rax, [rbp - PY2_N]
+    jae .expr_done
     mov rdi, rbx
-    mov esi, r13d
-    CSTRING rdx, "a mapping pattern's keys must be literals"
-    call comp_error_node
+    mov rsi, [rbp - PY2_I]
+    call .key_node
+    mov edx, eax
+    mov rdi, rbx
+    mov rsi, r12
+    call cg_expr
+    test eax, eax
+    jz .fail
+    inc qword [rbp - PY2_I]
+    jmp .expr_loop
+.expr_done:
+    mov rdi, r12
+    mov esi, OP_BUILD_TUPLE
+    mov rdx, [rbp - PY2_N]
+    mov rcx, [rbp - PY2_LINE]
+    call cg_emit
+    mov eax, 1
+    jmp .ret
+
+;; rdi = Comp, rsi = which pair -> eax = the key's node index
+.key_node:
+    push rsi
+    push rsi                        ; a pair, so the calls stay aligned
+    mov rsi, r13
+    call ast_at
+    mov rsi, rax
+    pop rdx
+    pop rcx
+    shl rdx, 1                      ; the key half of the pair
+    mov rdi, rbx
+    call ast_child
+    ret
+
 .fail:
     xor eax, eax
 .ret:

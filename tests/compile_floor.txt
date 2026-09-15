@@ -448,6 +448,7 @@ test_marshal_hostile
 test_marshal_interned
 test_marshal_module
 test_match_class
+test_match_mapping_keys
 test_match_mapping_types
 test_match
 test_math_more
