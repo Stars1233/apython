@@ -796,18 +796,25 @@ DEF_FUNC_LOCAL mw_code_fields, MCF_FRAME
     mov edi, [rbx + PyCodeObject.co_flags]
     call mw_long
 
-    ; co_code, as bytes.  A temporary object, because the reader wants a
-    ; bytes and this one has no permanent home.
+    ; co_code, as bytes.  The code is stored INLINE in the code object, so
+    ; there is no bytes object to hand over and one is built here.
+    ;
+    ; It is written UNFLAGGED -- straight through mw_byte rather than through
+    ; mw_ref -- because it is a temporary.  Memoising it puts its address in
+    ; the table and then frees it, and the next code object's temporary is
+    ; allocated at the same address; mw_memo_find matched, and the inner code
+    ; object of `class A(property)` was handed the OUTER one's bytecode.  It
+    ; read back as a valid code object running the wrong instructions, which
+    ; is how it surfaced: a class body that stored its own docstring onto
+    ; `property.__doc__`.  Nothing is lost by not memoising it -- no two code
+    ; objects share one co_code, so the entry could never have been hit.
+    mov edi, MARSHAL_TYPE_STRING
+    call mw_byte
+    movsxd rdi, dword [rbx + PyCodeObject.co_code_len]
+    call mw_long
     lea rdi, [rbx + PyCodeObject.co_code]
     movsxd rsi, dword [rbx + PyCodeObject.co_code_len]
-    call bytes_from_data
-    test rax, rax
-    jz .mcf_oom
-    mov [rbp - MCF_TMP], rax
-    mov rdi, rax
-    call mw_object
-    mov rdi, [rbp - MCF_TMP]
-    call obj_decref
+    call mw_bytes
 
     mov rdi, [rbx + PyCodeObject.co_consts]
     call mw_object
@@ -1126,3 +1133,289 @@ DEF_FUNC marshal_load_fn, MDL_FRAME
 .mdl_args:
     RAISE exc_TypeError_type, "load() takes 1 or 2 arguments"
 END_FUNC marshal_load_fn
+
+;; ============================================================================
+;; pyc_write_cache(rdi = the source path as a C string, rsi = the code object)
+;;   -> nothing.  Every failure is silent.
+;;
+;; What stops lib/ being recompiled from source on every start.  The layout is
+;; CPython's: "<dir>/__pycache__/<stem>.cpython-312.pyc", a sixteen-byte header
+;; of magic / flags / source mtime / source size, then the marshalled code --
+;; the same header pyc_read_file validates, read from the other side.
+;;
+;; The bytes go to a temporary beside the target and are renamed into place, so
+;; a reader never sees a half-written file, and two interpreters starting at
+;; once cannot interleave into one.  Nothing here reports: a read-only
+;; directory is the ordinary case for a system install, and CPython is silent
+;; about it too.
+;; ============================================================================
+extern sys_open
+extern sys_write
+extern sys_close
+extern sys_stat
+extern sys_mkdir
+extern sys_unlink
+extern sys_rename
+extern sys_getpid
+extern ap_strlen
+extern ap_memset
+extern dict_get
+extern sys_module_obj
+
+PYCW_MAGIC       equ 0x0a0d0dcb
+PYCW_STAT_SIZE   equ 144
+PYCW_ST_SIZE     equ 48
+PYCW_ST_MTIME    equ 88
+PYCW_PATHMAX     equ 4000
+
+PW_SRC    equ 8
+PW_CODE   equ 16
+PW_LEN    equ 24            ; the source path's length
+PW_STEM   equ 32            ; where the last component starts, within the path
+PW_DIRLEN equ 40            ; the cache path's length up to and including the
+                            ; "__pycache__" component
+PW_CLEN   equ 48            ; the cache path's full length
+PW_BYTES  equ 56            ; the marshalled code, as a bytes object
+PW_FD     equ 64
+PW_STAT   equ 64 + PYCW_STAT_SIZE
+PW_FRAME  equ PW_STAT + 8   ; + 1 push = 224, 16-aligned
+global pyc_write_cache
+DEF_FUNC pyc_write_cache, PW_FRAME
+    push rbx
+    mov [rbp - PW_SRC], rdi
+    mov [rbp - PW_CODE], rsi
+    test rdi, rdi
+    jz .pw_out
+    test rsi, rsi
+    jz .pw_out
+
+    ; sys.dont_write_bytecode, read here rather than cached: a program may set
+    ; it, and -B is only the initial value.
+    mov rax, [rel sys_module_obj]
+    test rax, rax
+    jz .pw_out
+    mov rdi, [rax + PyModuleObject.mod_dict]
+    test rdi, rdi
+    jz .pw_out
+    CSTRING rsi, "dont_write_bytecode"
+    push rdi
+    mov rdi, rsi
+    call str_intern_cstr
+    pop rdi
+    test rax, rax
+    jz .pw_out
+    mov rsi, rax
+    push rax
+    push rax
+    call dict_get
+    pop rcx
+    pop rdi
+    push rax
+    push rax
+    call obj_decref                     ; the interned name; ours only
+    pop rax
+    pop rcx
+    test rax, rax
+    jz .pw_have_flag                    ; absent means write
+    lea rcx, [rel bool_false]
+    cmp rax, rcx
+    jne .pw_out
+.pw_have_flag:
+
+    ; The path has to end in ".py": a sourceless .pyc has no cache to write,
+    ; and neither has anything else the finder handed over.
+    mov rdi, [rbp - PW_SRC]
+    call ap_strlen
+    mov [rbp - PW_LEN], rax
+    cmp rax, 4
+    jb .pw_out
+    cmp rax, PYCW_PATHMAX
+    ja .pw_out
+    mov rdi, [rbp - PW_SRC]
+    mov ecx, dword [rdi + rax - 3]
+    and ecx, 0x00ffffff
+    cmp ecx, 0x0079702e                 ; ".py", little-endian
+    jne .pw_out
+
+    ; The source's mtime and size, which are what the header records and what
+    ; a reader compares against.
+    mov rdi, [rbp - PW_SRC]
+    lea rsi, [rbp - PW_STAT]
+    call sys_stat
+    test rax, rax
+    js .pw_out
+
+    ; Split at the last '/': everything before it is the directory, and what
+    ; follows is the stem the cache file is named for.
+    mov rcx, [rbp - PW_LEN]
+    mov qword [rbp - PW_STEM], 0
+.pw_scan:
+    test rcx, rcx
+    jz .pw_scanned
+    dec rcx
+    mov rdi, [rbp - PW_SRC]
+    cmp byte [rdi + rcx], '/'
+    jne .pw_scan
+    inc rcx
+    mov [rbp - PW_STEM], rcx
+.pw_scanned:
+
+    ; "<dir>/__pycache__/<stem minus .py>.cpython-312.pyc"
+    lea rdi, [rel pycw_path]
+    mov rsi, [rbp - PW_SRC]
+    mov rdx, [rbp - PW_STEM]
+    call ap_memcpy
+    mov rbx, [rbp - PW_STEM]
+    lea rdi, [rel pycw_path]
+    add rdi, rbx
+    lea rsi, [rel pycw_dirname]
+    mov edx, pycw_dirname_len
+    call ap_memcpy
+    add rbx, pycw_dirname_len
+    mov [rbp - PW_DIRLEN], rbx          ; ".../__pycache__", for the mkdir
+
+    lea rdi, [rel pycw_path]
+    mov byte [rdi + rbx], '/'
+    inc rbx
+    ; the stem, without its ".py"
+    mov rdx, [rbp - PW_LEN]
+    sub rdx, [rbp - PW_STEM]
+    sub rdx, 3
+    lea rdi, [rel pycw_path]
+    add rdi, rbx
+    mov rsi, [rbp - PW_SRC]
+    add rsi, [rbp - PW_STEM]
+    push rdx
+    call ap_memcpy
+    pop rdx
+    add rbx, rdx
+    lea rdi, [rel pycw_path]
+    add rdi, rbx
+    lea rsi, [rel pycw_suffix]
+    mov edx, pycw_suffix_len + 1        ; the NUL too
+    call ap_memcpy
+    add rbx, pycw_suffix_len
+    mov [rbp - PW_CLEN], rbx
+    cmp rbx, PYCW_PATHMAX
+    ja .pw_out
+
+    ; The directory, which usually exists; EEXIST is the ordinary answer.
+    lea rdi, [rel pycw_path]
+    mov rbx, [rbp - PW_DIRLEN]
+    mov byte [rdi + rbx], 0
+    mov esi, 0o777
+    call sys_mkdir
+    lea rdi, [rel pycw_path]
+    mov rbx, [rbp - PW_DIRLEN]
+    mov byte [rdi + rbx], '/'
+
+    ; The temporary: the target plus ".<pid>", renamed into place at the end.
+    lea rdi, [rel pycw_tmp]
+    lea rsi, [rel pycw_path]
+    mov rdx, [rbp - PW_CLEN]
+    call ap_memcpy
+    call sys_getpid
+    mov rbx, [rbp - PW_CLEN]
+    lea rdi, [rel pycw_tmp]
+    mov byte [rdi + rbx], '.'
+    inc rbx
+    ; the pid in decimal, written backwards into the buffer then reversed is
+    ; more code than it is worth: five hex digits name it as well.
+    mov ecx, 5
+.pw_pid:
+    mov rdx, rax
+    shr rdx, 16
+    and edx, 15
+    add dl, '0'
+    cmp dl, '9'
+    jbe .pw_pid_digit
+    add dl, 'a' - '0' - 10
+.pw_pid_digit:
+    lea rdi, [rel pycw_tmp]
+    mov [rdi + rbx], dl
+    inc rbx
+    shl rax, 4
+    dec ecx
+    jnz .pw_pid
+    lea rdi, [rel pycw_tmp]
+    mov byte [rdi + rbx], 0
+
+    ; The payload.  mw_begin/mw_end are the same pair marshal.dumps uses, so
+    ; an unmarshallable code object simply produces nothing here.
+    call mw_begin
+    mov rdi, [rbp - PW_CODE]
+    call mw_object
+    call mw_end
+    test rax, rax
+    jz .pw_out
+    mov [rbp - PW_BYTES], rax
+
+    lea rdi, [rel pycw_tmp]
+    mov esi, 0o1101                     ; O_WRONLY|O_CREAT|O_TRUNC
+    mov edx, 0o666
+    call sys_open
+    test rax, rax
+    js .pw_free
+    mov [rbp - PW_FD], rax
+
+    ; The header.  A 32-bit mtime is what the format carries; CPython truncates
+    ; it the same way and the reader only ever compares it for equality.
+    mov dword [rel pycw_hdr], PYCW_MAGIC
+    mov dword [rel pycw_hdr + 4], 0
+    mov rax, [rbp - PW_STAT + PYCW_ST_MTIME]
+    mov dword [rel pycw_hdr + 8], eax
+    mov rax, [rbp - PW_STAT + PYCW_ST_SIZE]
+    mov dword [rel pycw_hdr + 12], eax
+
+    mov rdi, [rbp - PW_FD]
+    lea rsi, [rel pycw_hdr]
+    mov edx, 16
+    call sys_write
+    cmp rax, 16
+    jne .pw_close_fail
+
+    mov rbx, [rbp - PW_BYTES]
+    mov rdi, [rbp - PW_FD]
+    lea rsi, [rbx + PyBytesObject.data]
+    mov rdx, [rbx + PyBytesObject.ob_size]
+    call sys_write
+    cmp rax, [rbx + PyBytesObject.ob_size]
+    jne .pw_close_fail
+
+    mov rdi, [rbp - PW_FD]
+    call sys_close
+    lea rdi, [rel pycw_tmp]
+    lea rsi, [rel pycw_path]
+    call sys_rename
+    test rax, rax
+    jns .pw_free
+    lea rdi, [rel pycw_tmp]
+    call sys_unlink
+    jmp .pw_free
+
+.pw_close_fail:
+    mov rdi, [rbp - PW_FD]
+    call sys_close
+    lea rdi, [rel pycw_tmp]
+    call sys_unlink
+.pw_free:
+    mov rdi, [rbp - PW_BYTES]
+    call obj_decref
+.pw_out:
+    pop rbx
+    leave
+    ret
+END_FUNC pyc_write_cache
+
+section .rodata
+pycw_dirname:     db "__pycache__", 0
+pycw_dirname_len  equ 11
+pycw_suffix:      db ".cpython-312.pyc", 0
+pycw_suffix_len   equ 17
+
+section .bss
+pycw_path:  resb PYCW_PATHMAX + 64
+pycw_tmp:   resb PYCW_PATHMAX + 64
+pycw_hdr:   resb 16
+
+section .text

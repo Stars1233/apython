@@ -338,6 +338,12 @@ DEF_FUNC main, 8
     inc rsi
     jmp .flag_char_scan
 .flag_char_next:
+    ; -B is the one flag in that string that is not quite a no-op: it is the
+    ; initial value of sys.dont_write_bytecode, which pyc_write_cache reads.
+    cmp dl, 'B'
+    jne .flag_char_step
+    mov byte [rel main_no_bytecode], 1
+.flag_char_step:
     inc rcx
     jmp .flag_char
 
@@ -947,6 +953,12 @@ section .rodata
 ; pass them and an unknown flag is refused outright.
 main_noop_flags: db "EISBubdqvOPR", 0
 main_nl: db 10
+
+section .bss
+global main_no_bytecode
+main_no_bytecode: resb 1
+
+section .rodata
 
 ; What -m runs.  The module name is in sys.argv[0]; see the -m arm above.
 main_runmodule_cmd: db "import _runmodule; _runmodule.run()", 0

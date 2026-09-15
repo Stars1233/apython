@@ -2463,6 +2463,15 @@ DEF_FUNC import_load_module, IF_FRAME
     jz .load_failed
     mov r14, rax                ; r14 = code object
 
+    ; Cache the bytecode when the finder handed over a .py.  Without this,
+    ; lib/ is recompiled from source on every start -- and pyc_write_cache
+    ; itself decides whether the path is a source file and whether
+    ; sys.dont_write_bytecode forbids it.
+    extern pyc_write_cache
+    mov rdi, r12
+    mov rsi, r14
+    call pyc_write_cache
+
     ; Free inner import's marshal refs array (if allocated)
     mov rdi, [rel marshal_refs]
     test rdi, rdi

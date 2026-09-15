@@ -252,7 +252,11 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   the coroutine and the async generator themselves.  Split off when
   `generator.asm` reached the 100k cap
 - `src/marshal.asm` — .pyc marshal deserializer, the .pyc file reader, and
-  the `marshal` module `importlib` calls `loads` on
+  the `marshal` module `importlib` calls `loads` on.  `src/marshalw.asm` is
+  the other direction: the output buffer, the writers, the identity memo
+  FLAG_REF needs on the way out, `dumps`/`dump`/`load`, and
+  `pyc_write_cache`, which is what puts a `__pycache__` entry beside a `.py`
+  the first time it is imported
 - `src/main.asm` — argument parsing, startup order, and the `-t`/`--dis` modes
 - `src/import.asm` — the import system: finders, `sys.modules`, packages
 - `src/modules/io.asm` — the `_iocore` module: the four `_IOBase` types the rest

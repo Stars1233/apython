@@ -1250,9 +1250,17 @@ DEF_FUNC sys_module_init, 40
     lea rsi, [rel sm_short]
     mov rdx, r15
     call sm_add_str
-    ; Nothing in this tree writes a .pyc -- import.asm only reads them and
-    ; marshal has no writer -- so this is a fact, not a switch.
+    ; import.asm caches what it compiles, so this is a switch now rather than
+    ; a fact.  -B is the initial value; a program may set it either way, and
+    ; pyc_write_cache reads it back on every write.
+    extern main_no_bytecode
+    cmp byte [rel main_no_bytecode], 0
+    jne .sm_no_bytecode
+    SYS_ADD_OBJ sm_dont_write_bytecode, bool_false
+    jmp .sm_bytecode_done
+.sm_no_bytecode:
     SYS_ADD_OBJ sm_dont_write_bytecode, bool_true
+.sm_bytecode_done:
     ; None, and importlib._bootstrap_external reads it on every path it
     ; caches -- unguarded, so its absence stopped importlib installing its
     ; own finders and left sys.meta_path empty.

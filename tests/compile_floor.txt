@@ -558,6 +558,7 @@ test_property_doc
 test_property_getattr_hook
 test_property
 test_property_raises
+test_pycache_write
 test_pyc_hardening
 test_pyc_staleness
 test_pyexpat_decl

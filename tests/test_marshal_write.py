@@ -80,6 +80,30 @@ def main():
     print("code fields:", rt(code).co_name, rt(code).co_filename,
           rt(code).co_argcount)
 
+    # Every nested code object keeps its OWN bytecode.  A writer that
+    # memoises a temporary bytes built for co_code hands the next one a back
+    # reference to the address the first was freed from, and the inner code
+    # comes back running the outer's instructions.
+    nested = compile(
+        "class A(property):\n"
+        "    'doc'\n"
+        "    def m(self):\n"
+        "        return 1\n"
+        "def g():\n"
+        "    return 2\n",
+        "<nest>", "exec")
+
+    def walk(c):
+        yield c
+        for k in c.co_consts:
+            if hasattr(k, "co_code"):
+                yield from walk(k)
+
+    before = [c.co_code for c in walk(nested)]
+    after = [c.co_code for c in walk(rt(nested))]
+    print("nested codes:", len(before), before == after,
+          len(set(before)) == len(before))
+
     # dump/load over a file object.
     buf = io.BytesIO()
     marshal.dump({"a": [1, 2], "b": (3.5,)}, buf)
