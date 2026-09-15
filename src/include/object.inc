@@ -656,6 +656,11 @@ struc PyGenObject
     ; which is what CPython's ag_origin_or_finalizer does.
     .ag_hooks_done: resq 1   ; +56: 1 once firstiter has fired
     .ag_finalizer: resq 1    ; +64: the finalizer that was installed then, owned
+    ; 1 once the body has been entered at least once.  gi_suspended is the
+    ; difference between a generator stopped at a yield and one that has
+    ; never run, and instr_ptr cannot tell them apart: it is non-zero for
+    ; both and zero only once the generator is finished.
+    .gi_started: resq 1      ; +72
 endstruc
 
 ; File object (for sys.stdout, sys.stderr, sys.stdin)

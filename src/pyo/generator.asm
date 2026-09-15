@@ -73,8 +73,20 @@ DEF_FUNC gen_new
     mov rdi, rdx
     call obj_incref
 
-    ; gi_name = NULL (not critical)
-    mov qword [r12 + PyGenObject.gi_name], 0
+    ; The name is the code object's.  "not critical" was wrong: gen_get_name
+    ; is what answers __name__ and __qualname__, so every generator and
+    ; coroutine reported None -- to inspect, to a traceback, and to asyncio,
+    ; which names a Task after the coroutine it wraps.
+    mov rcx, [rdx + PyCodeObject.co_name]
+    mov [r12 + PyGenObject.gi_name], rcx
+    test rcx, rcx
+    jz .gn_no_name1
+    push rdx
+    mov rdi, rcx
+    call obj_incref
+    pop rdx
+.gn_no_name1:
+    mov qword [r12 + PyGenObject.gi_started], 0
 
     ; gi_return_value = NULL (no return value yet)
     mov qword [r12 + PyGenObject.gi_return_value], 0
@@ -124,7 +136,20 @@ DEF_FUNC coro_new
     mov rdi, rdx
     call obj_incref
 
-    mov qword [r12 + PyGenObject.gi_name], 0
+    ; The name is the code object's.  "not critical" was wrong: gen_get_name
+    ; is what answers __name__ and __qualname__, so every generator and
+    ; coroutine reported None -- to inspect, to a traceback, and to asyncio,
+    ; which names a Task after the coroutine it wraps.
+    mov rcx, [rdx + PyCodeObject.co_name]
+    mov [r12 + PyGenObject.gi_name], rcx
+    test rcx, rcx
+    jz .gn_no_name2
+    push rdx
+    mov rdi, rcx
+    call obj_incref
+    pop rdx
+.gn_no_name2:
+    mov qword [r12 + PyGenObject.gi_started], 0
     mov qword [r12 + PyGenObject.gi_return_value], 0
     mov qword [r12 + PyGenObject.ag_hooks_done], 0   ; see gen_new
     mov qword [r12 + PyGenObject.ag_finalizer], 0
@@ -165,10 +190,22 @@ DEF_FUNC async_gen_new
     mov rdi, rdx
     call obj_incref
 
-    mov qword [r12 + PyGenObject.gi_name], 0
+    ; The name is the code object's, as a generator's and a coroutine's are:
+    ; an async generator with no __name__ is what inspect and every debugger
+    ; see, and gen_get_name reads this field.
+    mov rcx, [rdx + PyCodeObject.co_name]
+    mov [r12 + PyGenObject.gi_name], rcx
+    test rcx, rcx
+    jz .agn_no_name
+    push rdx
+    mov rdi, rcx
+    call obj_incref
+    pop rdx
+.agn_no_name:
     mov qword [r12 + PyGenObject.gi_return_value], 0
     mov qword [r12 + PyGenObject.ag_hooks_done], 0
     mov qword [r12 + PyGenObject.ag_finalizer], 0
+    mov qword [r12 + PyGenObject.gi_started], 0
 
     mov rdi, r12
     call gc_track
@@ -202,8 +239,10 @@ DEF_FUNC gen_iternext
     cmp qword [rbx + PyGenObject.gi_running], 1
     je .running_error
 
-    ; Mark as running
+    ; Mark as running, and as started: what gi_suspended asks is whether the
+    ; body has been entered, which instr_ptr cannot say.
     mov qword [rbx + PyGenObject.gi_running], 1
+    mov qword [rbx + PyGenObject.gi_started], 1
 
     ; Push None as the "sent" value onto the frame's value stack
     FRAME_PUSH_NONE r12, rax
@@ -700,8 +739,10 @@ DEF_FUNC gen_send
     cmp qword [rbx + PyGenObject.gi_running], 1
     je .gs_error
 
-    ; Mark as running
+    ; Mark as running, and as started: what gi_suspended asks is whether the
+    ; body has been entered, which instr_ptr cannot say.
     mov qword [rbx + PyGenObject.gi_running], 1
+    mov qword [rbx + PyGenObject.gi_started], 1
 
     ; INCREF the sent value while its tag is still around, then pack it
     INCREF_VAL r13, r14
@@ -1041,8 +1082,10 @@ DEF_FUNC gen_throw, GT_FRAME
     jmp .gt_resume
 
 .gt_local:
-    ; Mark as running
+    ; Mark as running, and as started: what gi_suspended asks is whether the
+    ; body has been entered, which instr_ptr cannot say.
     mov qword [rbx + PyGenObject.gi_running], 1
+    mov qword [rbx + PyGenObject.gi_started], 1
     ; throw() takes either an exception class or an already-built instance.
     ; This always called exc_new on it, so g.throw(ValueError("x")) built an
     ; exception whose type was the *instance* -- and `except ValueError`
@@ -2450,3 +2493,81 @@ DEF_FUNC async_gen_dunder_anext
 .agdn_error:
     RAISE exc_TypeError_type, "__anext__() takes exactly one argument"
 END_FUNC async_gen_dunder_anext
+
+;; ============================================================================
+;; gen_get_yieldfrom(rdi = the generator) -> rax = the sub-iterator, owned,
+;;   or None
+;;
+;; gi_yieldfrom, and cr_await for a coroutine: what a generator suspended at a
+;; `yield from` is delegating to.  gen_yf already answers it -- it is what
+;; throw() and close() use to reach the child first, under PEP 380 -- and
+;; borrows; this takes a reference, because an attribute read hands one over.
+;; ============================================================================
+DEF_FUNC gen_get_yieldfrom, 16        ; + 0 pushes = 16, 16-aligned
+    call gen_yf
+    test rax, rax
+    jnz .ggy_have
+    lea rax, [rel none_singleton]
+.ggy_have:
+    INCREF rax
+    leave
+    ret
+END_FUNC gen_get_yieldfrom
+
+;; ============================================================================
+;; gen_get_suspended(rdi = the generator) -> rax = True when it is stopped at
+;;   a yield rather than unstarted, running or finished
+;;
+;; CPython's gi_suspended, which inspect.getgeneratorstate answers from.  The
+;; frame is what says so: a generator that has never run and one that has
+;; returned both have none, and one that is RUNNING has gi_running set.
+;; ============================================================================
+extern frame_object_started
+DEF_FUNC gen_get_suspended, 16        ; + 0 pushes = 16, 16-aligned
+    mov rax, [rdi + PyGenObject.gi_running]
+    test rax, rax
+    jnz .ggs_false
+    mov rax, [rdi + PyGenObject.gi_frame]
+    test rax, rax
+    jz .ggs_false
+    ; A generator that has never been entered is CREATED, not SUSPENDED --
+    ; the distinction inspect's four states rest on, and one instr_ptr cannot
+    ; make: it is non-zero for a fresh generator as much as for a suspended
+    ; one, and zero only once the generator has finished.
+    cmp qword [rdi + PyGenObject.gi_started], 0
+    je .ggs_false
+    lea rax, [rel bool_true]
+    jmp .ggs_out
+.ggs_false:
+    lea rax, [rel bool_false]
+.ggs_out:
+    INCREF rax
+    leave
+    ret
+END_FUNC gen_get_suspended
+
+;; ============================================================================
+;; gen_get_qualname(rdi = the generator) -> rax = its qualified name, owned
+;;
+;; co_qualname, not co_name: a generator defined inside a function is
+;; `outer.<locals>.inner` and not `inner`, which is what a traceback and
+;; asyncio's task names show.  gi_name holds the short one, which is what
+;; __name__ is; nothing held the long one, so __qualname__ answered the short
+;; one too.
+;; ============================================================================
+DEF_FUNC gen_get_qualname, 16       ; + 0 pushes = 16, 16-aligned
+    mov rax, [rdi + PyGenObject.gi_code]
+    test rax, rax
+    jz .ggq_fallback
+    mov rax, [rax + PyCodeObject.co_qualname]
+    test rax, rax
+    jz .ggq_fallback
+    INCREF rax
+    leave
+    ret
+.ggq_fallback:
+    ; No code object, or no qualname on it: the short name is the better of
+    ; the two answers left.
+    leave
+    jmp gen_get_name
+END_FUNC gen_get_qualname

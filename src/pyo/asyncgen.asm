@@ -108,6 +108,7 @@ DEF_FUNC ags_iternext
 
     ; Mark as running
     mov qword [r12 + PyGenObject.gi_running], 1
+    mov qword [r12 + PyGenObject.gi_started], 1
 
     ; Push the sent value onto the generator's frame stack.  None unless
     ; asend.send(v) put one there, in which case the reference it took moves

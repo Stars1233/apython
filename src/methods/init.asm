@@ -1082,7 +1082,7 @@ DEF_FUNC methods_init
     ADD_FN mn_close, _gen_close_impl
 
     GEN_GETSET gs___name__,     gen_get_name
-    GEN_GETSET gs___qualname__, gen_get_name
+    GEN_GETSET gs___qualname__, gen_get_qualname
     ; gi_frame goes through frameobj_for, which hands out an owned frame
     ; object for a live pooled PyFrame -- the same thing sys._getframe
     ; answers with.  The note that used to be here said a PyFrame was not an
@@ -1093,6 +1093,14 @@ DEF_FUNC methods_init
     GEN_GETSET gs_gi_frame,     gen_get_frame
     GEN_GETSET gs_gi_code,      gen_get_code
     GEN_GETSET gs_gi_running,   gen_get_running
+    ; gi_yieldfrom has been answerable all along -- gen_yf is what throw()
+    ; and close() use to reach a delegated-to child first -- and was never
+    ; published.  inspect.getgeneratorstate reads gi_suspended.
+    extern gen_get_yieldfrom
+    extern gen_get_suspended
+    extern gen_get_qualname
+    GEN_GETSET gs_gi_yieldfrom, gen_get_yieldfrom
+    GEN_GETSET gs_gi_suspended, gen_get_suspended
 
     extern gen_type
     lea rax, [rel gen_type]
@@ -1163,10 +1171,13 @@ DEF_FUNC methods_init
     ADD_FN mn_close, _gen_close_impl
 
     GEN_GETSET gs___name__,     gen_get_name
-    GEN_GETSET gs___qualname__, gen_get_name
+    GEN_GETSET gs___qualname__, gen_get_qualname
     GEN_GETSET gs_cr_frame,     gen_get_frame
     GEN_GETSET gs_cr_code,      gen_get_code
     GEN_GETSET gs_cr_running,   gen_get_running
+    ; The coroutine spells the same two cr_await and cr_suspended.
+    GEN_GETSET gs_cr_await,     gen_get_yieldfrom
+    GEN_GETSET gs_cr_suspended, gen_get_suspended
 
     extern coro_type
     lea rax, [rel coro_type]
@@ -1186,6 +1197,23 @@ DEF_FUNC methods_init
     ADD_FN_N mn___aiter__, async_gen_dunder_aiter, 1, 1
     extern async_gen_dunder_anext
     ADD_FN_N mn___anext__, async_gen_dunder_anext, 1, 1
+    extern async_gen_asend
+    extern async_gen_athrow
+    extern async_gen_aclose
+
+    ;; The same five a generator and a coroutine answer, under the names an
+    ;; async generator spells them with.  The object IS a PyGenObject, so the
+    ;; readers are the same ones -- the coroutine block above does exactly
+    ;; this with the cr_* spellings.  Without them inspect, asyncio's
+    ;; shutdown_asyncgens and every debugger saw an object with no name, no
+    ;; frame and no code.
+    GEN_GETSET gs___name__,      gen_get_name
+    GEN_GETSET gs___qualname__,  gen_get_name
+    GEN_GETSET gs_ag_frame,      gen_get_frame
+    GEN_GETSET gs_ag_code,       gen_get_code
+    GEN_GETSET gs_ag_running,    gen_get_running
+    GEN_GETSET gs_ag_await,      gen_get_yieldfrom
+    GEN_GETSET gs_ag_suspended,  gen_get_suspended
 
     extern async_gen_type
     lea rax, [rel async_gen_type]
@@ -2614,6 +2642,15 @@ gs_gi_running:  db "gi_running", 0
 gs_cr_frame:    db "cr_frame", 0
 gs_cr_code:     db "cr_code", 0
 gs_cr_running:  db "cr_running", 0
+gs_gi_yieldfrom: db "gi_yieldfrom", 0
+gs_gi_suspended: db "gi_suspended", 0
+gs_cr_await:    db "cr_await", 0
+gs_cr_suspended: db "cr_suspended", 0
+gs_ag_frame:    db "ag_frame", 0
+gs_ag_code:     db "ag_code", 0
+gs_ag_running:  db "ag_running", 0
+gs_ag_await:    db "ag_await", 0
+gs_ag_suspended: db "ag_suspended", 0
 global gs_numerator
 gs_numerator:   db "numerator", 0
 global gs_denominator
