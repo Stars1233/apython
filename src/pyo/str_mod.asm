@@ -1402,6 +1402,19 @@ DEF_FUNC str_mod_impl, SM_FRAME
     call int_is_integer
     test eax, eax
     jz .sm_sc_char_bad
+    ; The range check belongs HERE rather than to builtin_chr, because the two
+    ; report it differently: chr() raises ValueError and `%c` raises
+    ; OverflowError, with a message naming the conversion.  The bytes arm just
+    ; below has always done its own for the same reason.
+    mov rdi, [rbp-SM_VALUE]
+    V_UNPACK rdi, rdx
+    extern int_to_i64
+    call int_to_i64
+    test rax, rax
+    js .sm_sc_char_range
+    mov ecx, 0x110000
+    cmp rax, rcx
+    jge .sm_sc_char_range
     sub rsp, 16
     mov rax, [rbp-SM_VALUE]
     mov [rsp], rax
@@ -1414,6 +1427,8 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov [rbp-SM_VALUE], rax
     mov qword [rbp-SM_OWNVAL], 1
     jmp .sm_sc_format
+.sm_sc_char_range:
+    RAISE exc_OverflowError_type, "%c arg not in range(0x110000)"
 .sm_sc_char_bad:
     RAISE exc_TypeError_type, "%c requires int or char"
 
@@ -1491,8 +1506,10 @@ DEF_FUNC str_mod_impl, SM_FRAME
 .sm_sc_format:
     mov rdi, [rbp-SM_VALUE]
     mov rsi, [rbp-SM_SPECOBJ]
-    extern format_apply_spec
-    call format_apply_spec
+    ; printf mode: the two mini-languages agree except on what a precision
+    ; means for an integer conversion, and this is the printf side.
+    extern format_apply_spec_printf
+    call format_apply_spec_printf
     V_UNPACK rax, rdx
     mov [rbp-SM_PIECE], rax
 
@@ -1535,6 +1552,7 @@ DEF_FUNC str_mod_impl, SM_FRAME
     ret
 
 END_FUNC str_mod_impl
+
 
 ;; ============================================================================
 ;; str_mod_subscript(rdi = the mapping, rsi = the key str) -> rax = Value, or 0

@@ -64,12 +64,41 @@ FS_SIGNGIVEN equ 136     ; 1 when a sign was actually written in the spec.
 FS_FILLGIVEN equ 144     ; 1 when a fill character was WRITTEN.  The `0` flag
                          ; supplies one only when none was, which FS_FILL
                          ; cannot answer for itself: it defaults to a space.
+FS_PRINTF equ 160        ; 1 when the caller is str_mod rather than format().
+                         ; The two mini-languages agree on everything except
+                         ; what a precision means for an integer: format()
+                         ; refuses one, printf zero-pads the digits to it.
 FS_ZCOERCE equ 152       ; PEP 682's `z`: a result that rounds to zero loses
                          ; its sign.  Only a float presentation takes it.
 FS_FRAME  equ 184           ; + 5 pushes = 224, 16-aligned
 
 ; The widest field this will build.  See .fs_after_width.
 FS_MAX_WIDTH equ 0x10000000
+
+section .bss
+; Set by format_apply_spec_printf and read once, at the top of
+; format_apply_spec, which zeroes it again immediately -- so a nested format
+; (a __format__ that formats something of its own) cannot inherit it.
+fs_printf_pending: resq 1
+section .text
+
+;; ============================================================================
+;; format_apply_spec_printf(rdi = value Value, rsi = spec str) -> Value
+;;
+;; format_apply_spec, with printf's reading of a precision on an integer
+;; conversion.  `'%.3d' % 5` is '005' and `'%#.4x' % 255` is '0x00ff'; the
+;; same spec written for format() is a ValueError, and stays one.
+;;
+;; str_mod has no integer path of its own -- it rewrites the printf spec into
+;; a format() spec and calls here -- so this is where the one difference
+;; between the two languages has to live.
+;; ============================================================================
+global format_apply_spec_printf
+DEF_FUNC format_apply_spec_printf
+    mov qword [rel fs_printf_pending], 1
+    leave
+    jmp format_apply_spec
+END_FUNC format_apply_spec_printf
 
 ;; ============================================================================
 ;; format_apply_spec(rdi = value Value, rsi = spec str) -> Value (a str)
@@ -88,6 +117,9 @@ DEF_FUNC format_apply_spec, FS_FRAME
     mov [rbp - FS_VALUE], rdi
     mov qword [rbp - FS_BODY], 0
     mov qword [rbp - FS_SIGNCH], 0
+    mov rax, [rel fs_printf_pending]
+    mov [rbp - FS_PRINTF], rax
+    mov qword [rel fs_printf_pending], 0
 
     ; ---- defaults ----------------------------------------------------------
     mov qword [rbp - FS_FILL], ' '
@@ -400,8 +432,8 @@ DEF_FUNC format_apply_spec, FS_FRAME
     cmp r15, rax
     je .fs_typed
     cmp rcx, 's'
-    je .fs_body_str
-    test rcx, rcx
+    je .fs_str_code             ; not straight to the body: a string
+    test rcx, rcx               ; presentation has three flags to refuse
     jnz .fs_typed
 
     ; No type letter: a str formats as a string, a number as itself.
@@ -641,7 +673,9 @@ DEF_FUNC format_apply_spec, FS_FRAME
     ; An integer presentation takes no precision.  CPython refuses it rather
     ; than ignoring it, and `n` is an integer presentation for this purpose.
     cmp qword [rbp - FS_PREC], -1
-    jne .fs_int_precision
+    je .fs_body_int
+    cmp qword [rbp - FS_PRINTF], 0
+    je .fs_int_precision
     jmp .fs_body_int
 
 .fs_int_precision:
@@ -659,7 +693,40 @@ DEF_FUNC format_apply_spec, FS_FRAME
 .fs_str_code:
     cmp qword [rbp - FS_ZCOERCE], 0
     jne .fs_z_on_str
+    ; Everything below is format()'s rule and NOT printf's.  `%s` takes any
+    ; object and str()s it, and takes a sign, an alternate form and a '0'
+    ; flag and ignores all three -- so `'%+5s' % 'x'` and `'%s' % (1, 2)` are
+    ; both legal where the same spec written for format() is not.
+    cmp qword [rbp - FS_PRINTF], 0
+    jne .fs_body_str
+    ; `s` is the STRING presentation, so it wants a string.  CPython says
+    ; "Unknown format code 's' for object of type 'int'"; this reached the
+    ; body and rendered the number, because the 's' arm short-circuited
+    ; straight there before any of these checks existed.
+    cmp qword [rbp - FS_TYPE], 's'
+    jne .fs_str_typed_ok
+    lea rax, [rel str_type]
+    cmp r15, rax
+    je .fs_str_typed_ok
+    test qword [r15 + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .fs_unknown_code
+.fs_str_typed_ok:
+    cmp qword [rbp - FS_SIGNGIVEN], 0
+    jne .fs_sign_on_str
+    cmp qword [rbp - FS_ALT], 0
+    jne .fs_alt_on_str
+    cmp qword [rbp - FS_ALIGN], '='
+    je .fs_equals_on_str
     jmp .fs_body_str
+
+.fs_sign_on_str:
+    RAISE exc_ValueError_type, "Sign not allowed in string format specifier"
+.fs_alt_on_str:
+    RAISE exc_ValueError_type, \
+          "Alternate form (#) not allowed in string format specifier"
+.fs_equals_on_str:
+    RAISE exc_ValueError_type, \
+          "'=' alignment not allowed in string format specifier"
 
 .fs_bad_group:
     ; "Cannot specify ',' with 'x'." -- the type letter goes in.
@@ -777,6 +844,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
     call format_int_body
     mov [rbp - FS_BODY], rax
     call fs_apply_grouping
+    call fs_printf_precision
     mov rdi, [rbp - FS_OWNED]
     test rdi, rdi
     jz .fs_pad
@@ -2726,3 +2794,102 @@ DEF_FUNC_BARE format_require_str
     CSTRING rdi, `__format__ must return a str, not \x01`
     jmp raise_type_error_with_name
 END_FUNC format_require_str
+
+;; ============================================================================
+;; fs_printf_precision() -> nothing (FS_BODY replaced when it has to grow)
+;;
+;; A local, not a function, exactly as fs_apply_grouping beside it is: it
+;; reads and writes the caller's FS_* slots, so it must not push a frame of
+;; its own -- one that did read FS_PRINTF out of its own locals and padded
+;; nothing.  Everything it needs lives in registers for the same reason.
+;;
+;; printf's precision on `d i u o x X` is a MINIMUM DIGIT COUNT, not a
+;; truncation: '%.3d' % 5 is '005'.  The digits start FS_SIGNCH bytes into the
+;; body -- format_int_body records exactly that, the count of leading
+;; characters before the first digit, so a sign and an 0x prefix are both
+;; already accounted for -- and the zeros go in right there, before .fs_pad
+;; applies the field width on top.
+;;
+;; A precision of zero takes nothing away: '%.0d' % 0 is '0' in Python, where
+;; C's printf gives the empty string.  Measured, not assumed -- the first
+;; version followed C here and was wrong.
+;; ============================================================================
+fs_printf_precision:
+    cmp qword [rbp - FS_PRINTF], 0
+    je .fpp_done
+    cmp qword [rbp - FS_PREC], -1
+    je .fpp_done
+    cmp qword [rbp - FS_BODY], 0
+    je .fpp_done
+    push rbx
+    push r12
+    push r13
+    sub rsp, 8                  ; keep rsp 16-aligned across the calls below
+    mov rbx, [rbp - FS_BODY]
+
+    ; digits already present = length - the leading characters
+    mov r12, [rbx + PyStrObject.ob_size]
+    sub r12, [rbp - FS_SIGNCH]
+    js .fpp_out
+
+    mov r13, [rbp - FS_PREC]
+
+.fpp_pad:
+    sub r13, r12                ; how many zeros to insert
+    jle .fpp_out
+    mov rdi, [rbx + PyStrObject.ob_size]
+    add rdi, r13
+    mov rsi, rdi                ; all ASCII, so bytes and code points agree
+    call str_alloc_bytes
+    test rax, rax
+    jz .fpp_out
+    push rax                    ; the new body, while the copies run
+    sub rsp, 8
+
+    ; the leading characters, as they were
+    mov rdx, [rbp - FS_SIGNCH]
+    test rdx, rdx
+    jz .fpp_zeros
+    lea rdi, [rax + PyStrObject.data]
+    lea rsi, [rbx + PyStrObject.data]
+    call ap_memcpy
+
+.fpp_zeros:
+    mov rax, [rsp + 8]
+    lea rdi, [rax + PyStrObject.data]
+    add rdi, [rbp - FS_SIGNCH]
+    mov rcx, r13
+.fpp_zero_loop:
+    test rcx, rcx
+    jz .fpp_digits
+    mov byte [rdi], '0'
+    inc rdi
+    dec rcx
+    jmp .fpp_zero_loop
+
+.fpp_digits:
+    mov rdx, r12
+    test rdx, rdx
+    jz .fpp_copied
+    mov rax, [rsp + 8]
+    lea rdi, [rax + PyStrObject.data]
+    add rdi, [rbp - FS_SIGNCH]
+    add rdi, r13
+    lea rsi, [rbx + PyStrObject.data]
+    add rsi, [rbp - FS_SIGNCH]
+    call ap_memcpy
+.fpp_copied:
+    add rsp, 8
+    pop r13                     ; r13 = the new body
+
+.fpp_swap:
+    mov rdi, rbx
+    call obj_decref
+    mov [rbp - FS_BODY], r13
+.fpp_out:
+    add rsp, 8
+    pop r13
+    pop r12
+    pop rbx
+.fpp_done:
+    ret
