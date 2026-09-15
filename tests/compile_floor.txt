@@ -237,6 +237,7 @@ test_dict_view_set
 test_dict_views
 test_dir_published
 test_dir
+test_dunder_descriptor_int
 test_dunder_descriptor
 test_dunder_not_callable
 test_dunder_protocols
@@ -539,7 +540,6 @@ test_pow_dunder
 test_pow
 test_prepare_namespace
 test_prepare_raises
-test_print_broken_pipe
 test_print_file
 test_print_sink_lifetime
 test_print_tag

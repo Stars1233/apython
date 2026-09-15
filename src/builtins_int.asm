@@ -76,6 +76,69 @@ int_dunder_trunc_msg: db `__trunc__ returned non-int (type \x01).  The ability t
 section .text
 
 ;; ============================================================================
+;; int_dunder_invoke(rax = what dunder_bind answered, edx = its verdict,
+;;                   rbx = self)
+;;   -> rax:edx = the Value the dunder answered with, or edx = 3 when what it
+;;      was bound to is not callable at all
+;;
+;; The three call sites below -- __int__, __trunc__, and __int__ on an int
+;; subclass -- were three copies of the same twenty lines, and a copy is how
+;; one of them drifts.  dunder_bind's verdict says whether self is an
+;; argument: 0 means it is and what came back is borrowed, 1 means __get__
+;; already supplied it and the reference is OURS to release.
+;; ============================================================================
+IDI_VERDICT equ 8
+IDI_FRAME   equ 16          ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL int_dunder_invoke, IDI_FRAME
+    mov [rbp - IDI_VERDICT], rdx
+    mov rcx, [rax + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_call]
+    test rcx, rcx
+    jz .idi_uncallable
+    cmp qword [rbp - IDI_VERDICT], 0
+    jne .idi_bound
+    SPUSH_PTR rbx                           ; args[0] = self (fat arg)
+    mov rdi, rax
+    mov rsi, rsp
+    mov edx, 1
+    call rcx
+    V_UNPACK rax, rdx                       ; tp_call returns a Value
+    add rsp, 16
+    leave
+    ret
+.idi_bound:
+    push rax
+    push rax                                ; a pair, so rsp stays aligned
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    call rcx
+    mov rdi, rax
+    mov rsi, rdx
+    pop rax
+    pop rcx
+    push rdi
+    push rsi
+    mov rdi, rax
+    call obj_decref                         ; what __get__ answered was ours
+    pop rdx
+    pop rax
+    V_UNPACK rax, rdx
+    leave
+    ret
+.idi_uncallable:
+    ; Release what __get__ answered, when that is what this is, and say so.
+    cmp qword [rbp - IDI_VERDICT], 0
+    je .idi_say
+    mov rdi, rax
+    call obj_decref
+.idi_say:
+    mov edx, 3
+    leave
+    ret
+END_FUNC int_dunder_invoke
+
+;; ============================================================================
 ;; builtin_int_fn(rdi = the argument array, rsi = how many) -> rax:edx = the
 ;;   Value, or 0 with the exception recorded
 ;;
@@ -101,6 +164,7 @@ BI_LEN    equ 48       ; the source length: bytes and bytearray keep it in
                        ; different fields, so the shared tail cannot re-read it
 BI_ARRLEN equ 88       ; the byte length of a buffer source: an array
                        ; counts ITEMS in ob_size, so it is not ob_size
+BI_BOUND  equ 96       ; dunder_bind's verdict: whether self is an argument
 BI_FRAME  equ 104           ; + 1 push = 112, 16-byte aligned
 
 global builtin_int_fn
@@ -452,18 +516,15 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jz .int_from_int_sub_extract ; no __int__, extract int_value
     lea rcx, [rel int_dunder_int_msg]
     mov [rbp - BI_DUNDER], rcx  ; which dunder the deprecation names
-    ; Call __int__(self) — rax = func (borrowed ref)
-    mov rcx, [rax + PyObject.ob_type]
-    mov rcx, [rcx + PyTypeObject.tp_call]
-    test rcx, rcx
-    jz .int_from_int
-    SPUSH_PTR rbx                ; args[0] = self (fat arg)
+    ; Call __int__(self), BOUND first -- see .int_call_dunder below.
     mov rdi, rax
-    mov rsi, rsp
-    mov edx, 1
-    call rcx
-    V_UNPACK rax, rdx           ; tp_call returns a Value
-    add rsp, 16
+    mov rsi, rbx
+    call dunder_bind
+    cmp edx, 2
+    je .int_bind_raised
+    call int_dunder_invoke
+    cmp edx, 3
+    je .int_from_int
     ; Check for exception (NULL return)
     test edx, edx
     jz .int_dunder_error
@@ -533,6 +594,10 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 
     jmp .int_type_error
 
+.int_bind_raised:
+    ; __get__ raised; the exception is already recorded.
+    jmp eval_exception_unwind
+
 .int_trunc_warn_raised:
     ; warn() raised, which is what a filter set to "error" does.  The
     ; exception is already recorded; unwind with it.
@@ -540,18 +605,24 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jmp eval_exception_unwind
 
 .int_call_dunder:
-    ; rax = func (borrowed ref), rbx = self
-    mov rcx, [rax + PyObject.ob_type]
-    mov rcx, [rcx + PyTypeObject.tp_call]
-    test rcx, rcx
-    jz .int_type_error
-    SPUSH_PTR rbx                ; args[0] = self (fat arg)
+    ; rax = what the MRO answered with, rbx = self.
+    ;
+    ; It has to be BOUND before it is called.  This was the one dunder call
+    ; site in the tree that never went through dunder_bind: it took whatever
+    ; dunder_lookup found and jumped straight to its tp_call with self
+    ; prepended, so a __int__ that is a DESCRIPTOR had the descriptor called
+    ; rather than what its __get__ answers.  unittest.mock installs exactly
+    ; that -- a MagicProxy per magic method -- so int(MagicMock()) raised
+    ; while float(), len(), hash() and every other conversion on the same
+    ; object worked.
     mov rdi, rax
-    mov rsi, rsp
-    mov edx, 1
-    call rcx
-    V_UNPACK rax, rdx           ; tp_call returns a Value
-    add rsp, 16
+    mov rsi, rbx
+    call dunder_bind
+    cmp edx, 2
+    je .int_bind_raised
+    call int_dunder_invoke
+    cmp edx, 3
+    je .int_type_error
     ; Check for exception (NULL return)
     test edx, edx
     jz .int_dunder_error
@@ -570,10 +641,11 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov r8, [rcx + PyTypeObject.tp_flags]
     test r8, TYPE_FLAG_INT_SUBCLASS
     jnz .int_subclass_result
-    ; Not int-like
-    mov rdi, rax
-    call obj_decref
-    RAISE exc_TypeError_type, "__int__ returned non-int"
+    ; Not int-like, and CPython names what it got.
+    mov rsi, rax
+    V_PACK rsi, rdx
+    CSTRING rdi, `__int__ returned non-int (type \x01)`
+    call raise_type_error_with_name
 
 .int_subclass_result:
     ; CPython accepts a strict subclass of int here and DEPRECATES it, naming
@@ -630,17 +702,14 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 
     ; Call __trunc__(self); result must be int-like or have __index__
     ; CPython 3.12: tries __index__ on result, but NOT __int__
-    mov rcx, [rax + PyObject.ob_type]
-    mov rcx, [rcx + PyTypeObject.tp_call]
-    test rcx, rcx
-    jz .int_type_error
-    SPUSH_PTR rbx                ; args[0] = self (fat arg)
     mov rdi, rax
-    mov rsi, rsp
-    mov edx, 1
-    call rcx
-    V_UNPACK rax, rdx           ; tp_call returns a Value
-    add rsp, 16
+    mov rsi, rbx
+    call dunder_bind
+    cmp edx, 2
+    je .int_bind_raised
+    call int_dunder_invoke
+    cmp edx, 3
+    je .int_type_error
     ; rax = result of __trunc__()
     ; Check for exception (NULL return)
     test edx, edx
