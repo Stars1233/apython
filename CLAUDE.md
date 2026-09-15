@@ -266,7 +266,14 @@ No hand-written file exceeds 100k bytes; only generated asm may.
 - `src/modules/posix.asm` / `src/modules/posixproc.asm` — the `posix` module: the file and
   directory syscalls in the first, and everything that makes a second process
   -- fork, execv, _exit, kill, setsid and PEP 3143's fork hooks -- in the
-  second.  `lib/_posixsubprocess.py` builds `subprocess`'s fork_exec on them
+  second.  `lib/_posixsubprocess.py` builds `subprocess`'s fork_exec on them.
+  `src/modules/posixpath.asm` is how an ARGUMENT becomes a path -- str, str
+  subclass, bytes, bytes subclass or one `__fspath__` step, with the embedded
+  NUL refused before the kernel sees it -- split off when `posix.asm` reached
+  the 100k cap, along the seam every syscall wrapper already begins at.  It is
+  not only posix's: `_io.FileIO` opens from there too, which is what makes
+  `open(b"...")` and `open()` of a str subclass work.  `src/include/posixpath.inc`
+  is the private ABI the two halves share
 - `src/modules/zlib.asm` — the `_zlibcore` module: libz's z_stream, the output
   buffer that grows while deflate writes into it, and the handle table.  A
   shim over `-lz`, on the precedent `-lgmp` set; `lib/zlib.py` is the module
