@@ -72,12 +72,51 @@ class Dialect:
     skipinitialspace = False
     lineterminator = "\r\n"
     quoting = QUOTE_MINIMAL
+    strict = False
 
-    def __init__(self):
-        if self.__class__ is Dialect:
-            raise TypeError("can't instantiate Dialect directly")
+    # CPython's dialect_new takes nine optional positional-or-keyword
+    # arguments, `dialect` first, and returns a VALIDATED dialect.  Taking
+    # none of them was not a smaller surface, it was a broken one:
+    # `Lib/csv.py` binds this class as `_Dialect` and its own Dialect._validate
+    # calls `_Dialect(self)`, so `csv.excel()` -- and every csv.Dialect
+    # subclass INSTANCE anyone writes -- raised
+    # "Dialect.__init__() takes 1 positional argument but 2 were given",
+    # reported as a csv.Error.
+    def __init__(self, dialect=None, delimiter=None, doublequote=None,
+                 escapechar=None, lineterminator=None, quotechar=None,
+                 quoting=None, skipinitialspace=None, strict=None):
+        kwargs = {}
+        for name, value in (("delimiter", delimiter),
+                            ("doublequote", doublequote),
+                            ("escapechar", escapechar),
+                            ("lineterminator", lineterminator),
+                            ("quotechar", quotechar),
+                            ("quoting", quoting),
+                            ("skipinitialspace", skipinitialspace),
+                            ("strict", strict)):
+            if value is not None:
+                kwargs[name] = value
+
+        if dialect is None:
+            source = _Default
+        elif isinstance(dialect, str):
+            source = get_dialect(dialect)
+        else:
+            source = dialect
+        if kwargs:
+            source = _Overrides(source, kwargs)
+
+        # One validation, and it is _Dialect's -- the same one every reader
+        # and writer runs, so a dialect that constructs here works there.
+        try:
+            checked = _Dialect(source)
+        except TypeError as exc:
+            raise Error(str(exc)) from None
+        for name in ("delimiter", "quotechar", "escapechar", "doublequote",
+                     "skipinitialspace", "lineterminator", "quoting",
+                     "strict"):
+            setattr(self, name, getattr(checked, name))
         self._valid = True
-        self._validate()
 
     def _validate(self):
         try:

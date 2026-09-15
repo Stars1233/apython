@@ -120,6 +120,25 @@ reasoning that chose them and what changing one would cost.
   appends; and `float()` reports its ARGUMENT's type rather than
   `C.__float__ returned non-float (type str)`.
 
+- **`pdb` blocks at its prompt when stdin is a pipe rather than a terminal.**
+  Three lines reproduce it:
+
+      printf 'raise ValueError("boom")\n' > r.py
+      printf 'c\nq\n' | ./apython -m pdb r.py      # never returns
+
+  CPython exits 0.  It is not `input()` -- `input()` at EOF raises EOFError
+  here, after prior reads as well -- and it is not `-m`: driving `pdb.main()`
+  from `-c` blocks identically.  The process sits in `pipe_read` with no CPU,
+  so it is a read that never sees the data or the EOF, somewhere in pdb's
+  restart/post-mortem path; `apython -m pdb` on a script that does NOT raise
+  consumes several commands first and blocks later.
+  It is what makes CPython's `test_pdb` a HANG rather than a row of failures.
+
+  Worth knowing: it was unreachable until `open()` learned to accept a str
+  SUBCLASS, because pdb's own `_ScriptTarget` is one and every script died on
+  the TypeError before pdb could run it.  The module scored 13 of 87 then and
+  0 now -- the arithmetic is worse, the interpreter is not.
+
 - **`sys.stdout`'s repr is `<stdout>`, where CPython's is
   `<_io.TextIOWrapper name='<stdout>' mode='w' encoding='utf-8'>`.**  Visible
   wherever an unraisable report names the stream -- the "Exception ignored in:"

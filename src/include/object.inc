@@ -693,6 +693,13 @@ struc PyFileObject
     ; 1.1 ms -> 2.9 ms on EVERY run.  Built lazily, only a program that asks
     ; pays.
     .file_binary: resq 1  ; owned, or 0
+    ; Set by close(), read by `closed` and by every operation that touches
+    ; the descriptor.  Without it close() shut the fd and left the object
+    ; looking open, so a write afterwards went to a dead descriptor and the
+    ; failure arrived at exit as "Exception ignored in: <stdout>" and an exit
+    ; status of 120 -- which is what `apython -m json.tool` did, because
+    ; json.tool writes through `with sys.stdout as out:`.
+    .file_closed: resq 1
 endstruc
 
 ; _io.FileIO.  The first three fields are PyInstanceObject's, because FileIO
