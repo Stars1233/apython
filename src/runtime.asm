@@ -50,6 +50,9 @@ SYS_getsockopt      equ 55
 SYS_shutdown        equ 48
 SYS_fcntl           equ 72
 SYS_ioctl           equ 16
+SYS_flock           equ 73
+SYS_getrusage       equ 98
+SYS_prlimit64       equ 302
 SYS_io_uring_setup  equ 425
 SYS_io_uring_enter  equ 426
 SYS_lseek           equ 8
@@ -777,6 +780,45 @@ DEF_FUNC_BARE sys_fcntl
     syscall
     ret
 END_FUNC sys_fcntl
+
+;; ============================================================================
+;; sys_prlimit64(pid, resource, const struct rlimit64 *new, struct rlimit64 *old)
+;;   -> int
+;;
+;; The modern form of getrlimit and setrlimit both: a NULL `new` reads and a
+;; NULL `old` writes, and pid 0 means this process.  The legacy pair carry a
+;; 32-bit rlim_t on some ABIs and this one never does.
+;; ============================================================================
+global sys_prlimit64
+DEF_FUNC_BARE sys_prlimit64
+    mov r10, rcx                ; the 4th argument; syscall clobbers rcx
+    mov rax, SYS_prlimit64
+    syscall
+    ret
+END_FUNC sys_prlimit64
+
+;; ============================================================================
+;; sys_getrusage(who, struct rusage *out) -> int
+;; ============================================================================
+global sys_getrusage
+DEF_FUNC_BARE sys_getrusage
+    mov rax, SYS_getrusage
+    syscall
+    ret
+END_FUNC sys_getrusage
+
+;; ============================================================================
+;; sys_flock(fd, operation) -> int
+;;
+;; BSD advisory locking.  Not an fcntl command: the two families are separate
+;; locks on the same file and do not see each other.
+;; ============================================================================
+global sys_flock
+DEF_FUNC_BARE sys_flock
+    mov rax, SYS_flock
+    syscall
+    ret
+END_FUNC sys_flock
 
 ;; ============================================================================
 ;; sys_ioctl(fd, request, arg) -> int

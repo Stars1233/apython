@@ -10,7 +10,7 @@ pass test_cext 5
 pass test_concurrent_futures 0
 pass test_cppext 5
 pass test_ctypes 0
-pass test_dataclasses 225
+pass test_dataclasses 228
 pass test_doctest 1
 pass test_email 1667
 pass test_future_stmt 22
@@ -18,7 +18,7 @@ pass test_gdb 0
 pass test_import 87
 pass test_importlib 1061
 pass test_inspect 260
-pass test_json 162
+pass test_json 170
 pass test_lib2to3 655
 pass test_module 26
 pass test_multiprocessing_fork 4

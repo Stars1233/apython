@@ -190,6 +190,7 @@ reasoning that chose them and what changing one would cost.
   marker -- a type flag, not a `tp_basicsize` comparison, because a
   `__slots__` subclass of any other exception has a larger basicsize too and
   those words are its slots.
+
 - **`bytes` has no `__new__`, so a bytes SUBCLASS cannot be reconstructed.**
   Every other variable-size builtin publishes one -- `str` and `tuple` do --
   and `bytes_type.tp_new` is 0 with nothing in its `tp_dict`, so
@@ -298,22 +299,31 @@ reasoning that chose them and what changing one would cost.
   `zipfile`, `tarfile` and `shutil`, which imported before and could not
   compress.  So is `array`, which was the largest of these by reach.  What
   is left is genuinely C: `_tracemalloc`, `_symtable`, `_ssl`,
-  `_sqlite3`, `_crypt`, `_ctypes`, `_curses` and `_tkinter`.  `_lzma` and
+  `_sqlite3`, `_crypt`, `_ctypes`, `_curses` and `_tkinter`.  `fcntl`,
+  `resource`, `syslog`, `pwd`, `grp`, `audioop` and `_lsprof` are there now
+  and none of them needed much: two descriptor calls in `posixfd.asm`, two
+  resource calls in `posixproc.asm`, and Python for the rest -- `syslog` over
+  a datagram socket rather than over libc's wrapper for it, `_lsprof` over
+  `sys.setprofile`, `pwd` and `grp` over the files rather than over NSS
+  (DIVERGENCES.md carries what that costs).  `_lzma` and
   `_bz2` are there now, each a shim over its library the way `zlib` is, and
   `lzma`, `bz2` and the compression halves of `tarfile` and `zipfile` with
   them.  `_multibytecodec` and the six CJK codec modules are deliberately
   deferred and are in DIVERGENCES.md rather than here.
 
   `unicodedata` is there now, over tables generated from a running CPython the
-  way `\N{...}`'s names and the case mappings already were.  Two of its
-  functions are not: **`decomposition()` and `normalize()`**, which need the
-  canonical AND compatibility decompositions, the composition exclusions and
-  the Hangul algorithm -- an order of magnitude more data than the seven
-  properties that did land, and the thing PEP 3131's identifier
-  normalisation and `idna`/`punycode` all wait on.  **`ucd_3_2_0`** is not
-  either: it is a second, frozen copy of the whole database, which is what
-  `stringprep` imports and the only thing keeping `test_stringprep` from
-  running.
+  way `\N{...}`'s names and the case mappings already were, and so are
+  `normalize()` and `decomposition()`: `src/modules/unicodenorm.asm` over
+  `unicodenorm_tables.asm`, verified byte for byte against CPython's own
+  answers for every code point and for 120,000 random sequences.  **`ucd_3_2_0`** is there
+  too -- the frozen Unicode 3.2 copy RFC 3454 is written against, which
+  `stringprep` imports -- as `src/modules/ucd32.asm` over
+  `ucd32_tables.asm`: the same engine pointed at a second table set, with the
+  five decompositions Corrigendum #4 corrected kept at their pre-corrigendum
+  values, because that is what a frozen database means and what CPython's own
+  copy answers.  Its `lookup`, `name` and the numeric values are not there:
+  nothing asks the 3.2 database for them, and each would be a second copy of a
+  table larger than all the rest together.
   (`_io` is not among them: `src/modules/io.asm` supplies `_iocore` and
   `lib/_io.py` assembles both halves under the name `_io`.  `_socket` and
   `select` are the same split over `_socketcore`.  Neither are `math`,

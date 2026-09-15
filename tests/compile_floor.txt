@@ -6,6 +6,7 @@ test_abc
 test_abc_spoofed_class
 test_abc_weakrefs
 test_abstract_and_str_subclass
+test_adaptive_search
 test_aiter_anext
 test_annotations
 test_argument_messages
@@ -42,6 +43,7 @@ test_async_with_lookup_raises
 test_async_with
 test_attr_cache_type_reuse
 test_attr_value_immediates
+test_audioop
 test_awaitable
 test_await_raises
 test_bad_arguments
@@ -55,6 +57,7 @@ test_bool_arith
 test_bool
 test_buffer_protocol
 test_builtin_arity
+test_builtin_dunder_new
 test_builtin_dunder_str
 test_builtin_func_attrs
 test_builtin_hostile
@@ -248,6 +251,7 @@ test_dunders
 test_empty_bases
 test_encodings
 test_errno
+test_error_context
 test_error_messages
 test_eval_tuple
 test_exc_buffer_slot
@@ -344,6 +348,7 @@ test_generator_introspection
 test_generators
 test_generator_throw_delegation
 test_generic_alias_ctor
+test_generic_alias_subst
 test_generic_alias_value
 test_gen_exc_info
 test_gen_return2
@@ -371,6 +376,7 @@ test_import_kwargs
 test_import_module
 test_import_none_blocked
 test_import_not_a_package
+test_import_self_replace
 test_import_star_all
 test_import_submodule_binding
 test_import_sys
@@ -486,6 +492,7 @@ test_misc_ops
 test_mmap
 test_module_attr_call
 test_module_attr_not_descriptor
+test_module_cache_lifetime
 test_module_delattr
 test_module_doc_and_repr_depth
 test_module_file_attr
@@ -514,6 +521,7 @@ test_object_eq_recursion
 test_object_new_gate
 test_object_ordering
 test_oop
+test_open_and_closed_files
 test_open_errors
 test_open_pathlike
 test_open
@@ -538,6 +546,7 @@ test_phase6
 test_pickle_builtins
 test_pickle_module
 test_poll_eintr
+test_pop_except_release
 test_posix_bytes_paths
 test_posix_files
 test_posix_identity
@@ -553,6 +562,7 @@ test_prepare_namespace
 test_prepare_raises
 test_print_broken_pipe
 test_print_file
+test_printf_precision
 test_print_sink_lifetime
 test_print_tag
 test_print_to_object
@@ -624,6 +634,7 @@ test_set_subclass_protocol
 test_set_tombstone_reuse
 test_set_value_probe
 test_set_variadic
+test_shim_modules
 test_shutdown_finalizer
 test_signal_delivery
 test_signal_eintr
@@ -773,6 +784,7 @@ test_uncallable_bind_lifetime
 test_unicode_case
 test_unicodedata
 test_unicode_names
+test_unicode_normalize
 test_unicode_numbers
 test_unicode_predicates
 test_unicode

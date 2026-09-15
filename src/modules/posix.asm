@@ -2819,6 +2819,14 @@ DEF_FUNC posix_module_create, 40
     MODULE_ADD_FUNC posix_umask, pm_n_umask
     MODULE_ADD_FUNC posix_isatty, pm_n_isatty
     MODULE_ADD_FUNC posix_ioctl, pm_n_ioctl
+    extern posix_fcntl
+    MODULE_ADD_FUNC posix_fcntl, pm_n_fcntl
+    extern posix_flock
+    MODULE_ADD_FUNC posix_flock, pm_n_flock
+    extern posix_prlimit
+    MODULE_ADD_FUNC posix_prlimit, pm_n_prlimit
+    extern posix_getrusage
+    MODULE_ADD_FUNC posix_getrusage, pm_n_getrusage
     MODULE_ADD_FUNC posix_ftruncate, pm_n_ftruncate
     MODULE_ADD_FUNC posix_chdir, pm_n_chdir
     MODULE_ADD_FUNC posix_truncate, pm_n_truncate
@@ -3017,6 +3025,10 @@ pm_msg_fspath:   db ".__fspath__() to return str or bytes, not ", 0
 pm_n_umask:      db "umask", 0
 pm_n_isatty:     db "isatty", 0
 pm_n_ioctl:      db "ioctl", 0
+pm_n_fcntl:      db "fcntl", 0
+pm_n_flock:      db "flock", 0
+pm_n_prlimit:    db "prlimit", 0
+pm_n_getrusage:  db "getrusage", 0
 pm_n_ftruncate:  db "ftruncate", 0
 pm_n_chdir:      db "chdir", 0
 pm_n_truncate:   db "truncate", 0

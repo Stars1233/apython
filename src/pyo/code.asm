@@ -5,6 +5,7 @@
 %include "opcodes.inc"
 
 extern exc_TypeError_type
+extern exc_IndexError_type
 extern raise_exception
 extern none_singleton
 extern ap_free
@@ -522,6 +523,15 @@ DEF_FUNC code_getattr
     test eax, eax
     jz .return_lines
 
+    ; _varname_from_oparg(i), which is how dis names the operand of
+    ; LOAD_FAST and its family: the oparg indexes co_localsplusnames, not
+    ; co_varnames, so a cell or a free variable is reached by the same number.
+    lea rdi, [rel co_attr_varname]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_varname
+
     ; co_code is the bytecode, and it lives INSIDE the code object rather
     ; than behind a pointer -- so it is a copy, made on demand.  dis reads it.
     lea rdi, [rel co_n_code]
@@ -642,6 +652,18 @@ DEF_FUNC code_getattr
 
 .return_lines:
     call _get_co_lines_builtin
+    mov rdi, rax
+    mov rsi, rbx
+    call method_new
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.return_varname:
+    call _get_varname_builtin
     mov rdi, rax
     mov rsi, rbx
     call method_new
@@ -992,6 +1014,7 @@ section .bss
 _co_positions_cache: resq 1
 _co_lines_cache: resq 1
 _co_replace_cache: resq 1
+_varname_cache: resq 1
 
 section .text
 
@@ -1592,6 +1615,64 @@ DEF_FUNC_LOCAL _get_co_lines_builtin
     ret
 END_FUNC _get_co_lines_builtin
 
+;; ============================================================================
+;; code_method_varname_from_oparg(args, nargs) -> rax = a Value
+;;   -- code._varname_from_oparg(i)
+;;
+;; The name an oparg of the LOAD_FAST family stands for.  CPython's
+;; co_localsplusnames is one tuple over the locals, the cells and the free
+;; variables in that order, and the oparg indexes it directly; dis and
+;; test_dis both read this rather than reassembling the three tuples.
+;;
+;; Out of range is an IndexError, which is what PyTuple_GetItem raises there.
+;; ============================================================================
+global code_method_varname_from_oparg
+DEF_FUNC code_method_varname_from_oparg, 8   ; 1 push, so rsp is 16-aligned
+    push rbx
+    cmp rsi, 2
+    jne .vfo_argerr
+    mov rbx, [rdi]                      ; self, always a pointer
+    mov rdi, [rdi + 8]
+    V_UNPACK rdi, rdx                   ; obj_as_index takes the pair
+    extern obj_as_index
+    call obj_as_index                   ; names the type for a non-integer
+    mov rbx, [rbx + PyCodeObject.co_localsplusnames]
+    test rbx, rbx
+    jz .vfo_range
+    test rax, rax
+    js .vfo_range
+    cmp rax, [rbx + PyTupleObject.ob_size]
+    jge .vfo_range
+    mov rcx, [rbx + PyTupleObject.ob_item]
+    mov rax, [rcx + rax*8]
+    INCREF_V rax, rcx
+    pop rbx
+    leave
+    ret
+.vfo_range:
+    pop rbx
+    RAISE exc_IndexError_type, "tuple index out of range"
+.vfo_argerr:
+    pop rbx
+    RAISE exc_TypeError_type, "_varname_from_oparg() takes exactly 1 argument"
+END_FUNC code_method_varname_from_oparg
+
+;; ============================================================================
+;; _get_varname_builtin() -> rax = the _varname_from_oparg builtin, borrowed
+;; ============================================================================
+DEF_FUNC_LOCAL _get_varname_builtin
+    mov rax, [rel _varname_cache]
+    test rax, rax
+    jnz .gvn_ret
+    lea rdi, [rel code_method_varname_from_oparg]
+    lea rsi, [rel co_attr_varname]
+    call builtin_func_new
+    mov [rel _varname_cache], rax
+.gvn_ret:
+    leave
+    ret
+END_FUNC _get_varname_builtin
+
 DEF_FUNC_LOCAL _get_co_positions_builtin
     mov rax, [rel _co_positions_cache]
     test rax, rax
@@ -1609,3 +1690,4 @@ END_FUNC _get_co_positions_builtin
 section .rodata
 co_attr_positions: db "co_positions", 0
 co_attr_lines: db "co_lines", 0
+co_attr_varname: db "_varname_from_oparg", 0

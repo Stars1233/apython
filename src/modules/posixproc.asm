@@ -1148,3 +1148,196 @@ DEF_FUNC posix_waitstatus_to_exitcode, 16
 .pwe_argerr:
     RAISE exc_TypeError_type, "waitstatus_to_exitcode() takes exactly 1 argument"
 END_FUNC posix_waitstatus_to_exitcode
+
+section .text
+
+;; ============================================================================
+;; posix.prlimit(pid, resource, soft=None, hard=None) -> (soft, hard)
+;;
+;; getrlimit, setrlimit and prlimit in one entry point, because they are one
+;; syscall: `new` is NULL for a read and `old` is always asked for, so a set
+;; answers what the limit WAS, which is what CPython's prlimit returns.  pid 0
+;; is this process, and lib/resource.py builds getrlimit and setrlimit on it.
+;;
+;; RLIM_INFINITY is (unsigned)-1 to the kernel and CPython reports it as -1, so
+;; the two values are handed across as SIGNED 64-bit and converted at the
+;; boundary rather than in Python.
+;; ============================================================================
+PRL_NEW  equ 16             ; struct rlimit64 new: two u64
+PRL_OLD  equ 32             ; struct rlimit64 old
+PRL_PID  equ 40
+PRL_RES  equ 48
+PRL_FRAME equ 64            ; + 1 push = 72... padded below
+global posix_prlimit
+DEF_FUNC posix_prlimit, PRL_FRAME
+    push rbx
+    push r12
+    cmp rsi, 2
+    jb .prl_argerr
+    cmp rsi, 4
+    ja .prl_argerr
+    mov rbx, rdi
+    mov r12, rsi
+
+    mov rdi, [rbx]
+    call posix_int_arg
+    mov [rbp - PRL_PID], rax
+    mov rdi, [rbx + 8]
+    call posix_int_arg
+    mov [rbp - PRL_RES], rax
+
+    xor edx, edx                        ; no `new` unless both limits are given
+    cmp r12, 4
+    jb .prl_call
+    mov rax, [rbx + 16]
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .prl_call
+    mov rdi, rax
+    call posix_int_arg
+    mov [rbp - PRL_NEW], rax
+    mov rdi, [rbx + 24]
+    call posix_int_arg
+    mov [rbp - PRL_NEW + 8], rax
+    lea rdx, [rbp - PRL_NEW]
+
+.prl_call:
+    mov rdi, [rbp - PRL_PID]
+    mov rsi, [rbp - PRL_RES]
+    lea rcx, [rbp - PRL_OLD]
+    extern sys_prlimit64
+    call sys_prlimit64
+    test rax, rax
+    js .prl_failed
+
+    mov edi, 2
+    call tuple_new
+    test rax, rax
+    jz .prl_failed_nomem
+    mov rbx, rax
+    mov rdi, [rbp - PRL_OLD]
+    call int_from_i64
+    V_PACK rax, rdx                     ; a (payload, tag) pair, not a Value
+    mov rcx, [rbx + PyTupleObject.ob_item]
+    mov [rcx], rax
+    mov rdi, [rbp - PRL_OLD + 8]
+    call int_from_i64
+    V_PACK rax, rdx
+    mov rcx, [rbx + PyTupleObject.ob_item]
+    mov [rcx + 8], rax
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.prl_failed:
+    neg eax
+    mov edi, eax
+    xor esi, esi
+    call raise_oserror
+.prl_failed_nomem:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+.prl_argerr:
+    pop r12
+    pop rbx
+    RAISE exc_TypeError_type, "prlimit() takes 2 or 4 arguments"
+END_FUNC posix_prlimit
+
+;; ============================================================================
+;; posix.getrusage(who) -> a 16-tuple of the fields CPython's struct_rusage
+;;   carries, in its order
+;;
+;; struct rusage is two timevals and fourteen longs.  The two times come back
+;; as FLOATS of seconds, which is what CPython reports; everything after them
+;; is an integer, and the fields Linux does not maintain are 0 there too.
+;; lib/resource.py names them.
+;; ============================================================================
+GRU_BUF   equ 160           ; struct rusage is 144 bytes
+GRU_TUP   equ 168
+GRU_FRAME equ 176           ; + 1 push = 184... padded below
+global posix_getrusage
+DEF_FUNC posix_getrusage, GRU_FRAME
+    push rbx
+    push r12
+    test rsi, rsi
+    jz .gru_argerr
+    mov rdi, [rdi]
+    call posix_int_arg
+    mov rdi, rax
+    lea rsi, [rbp - GRU_BUF]
+    extern sys_getrusage
+    call sys_getrusage
+    test rax, rax
+    js .gru_failed
+
+    mov edi, 16
+    call tuple_new
+    test rax, rax
+    jz .gru_nomem
+    mov [rbp - GRU_TUP], rax
+
+    ; ru_utime and ru_stime, each a struct timeval at +0 and +16.
+    xor r12d, r12d
+.gru_time_loop:
+    mov rax, r12
+    shl rax, 4                          ; 0 then 16
+    lea rcx, [rbp - GRU_BUF]
+    cvtsi2sd xmm0, qword [rcx + rax]    ; tv_sec
+    cvtsi2sd xmm1, qword [rcx + rax + 8]; tv_usec
+    mov edi, 1000000
+    cvtsi2sd xmm2, rdi
+    divsd xmm1, xmm2
+    addsd xmm0, xmm1
+    movq rax, xmm0
+    V_FROM_F64 rax, rcx
+    mov rcx, [rbp - GRU_TUP]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx + r12*8], rax
+    inc r12
+    cmp r12, 2
+    jb .gru_time_loop
+
+    ; The fourteen longs that follow, at +32 upwards.
+.gru_long_loop:
+    lea rcx, [rbp - GRU_BUF]
+    mov rdi, [rcx + r12*8 + 16]         ; field i sits at 32 + (i-2)*8
+    call int_from_i64
+    V_PACK rax, rdx                     ; a (payload, tag) pair, not a Value
+    mov rcx, [rbp - GRU_TUP]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx + r12*8], rax
+    inc r12
+    cmp r12, 16
+    jb .gru_long_loop
+
+    mov rax, [rbp - GRU_TUP]
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.gru_failed:
+    neg eax
+    mov edi, eax
+    xor esi, esi
+    call raise_oserror
+.gru_nomem:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+.gru_argerr:
+    pop r12
+    pop rbx
+    RAISE exc_TypeError_type, "getrusage() takes exactly 1 argument"
+END_FUNC posix_getrusage

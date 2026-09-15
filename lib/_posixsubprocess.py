@@ -105,6 +105,20 @@ def fork_exec(args, executable_list, close_fds, fds_to_keep, cwd, env_list,
                 posix.dup2(src, dst)
 
         if close_fds:
+            # Every fd the caller asked to KEEP has to be made inheritable
+            # first, which is what CPython's make_inheritable() does here:
+            # `pass_fds` is usually a pipe from os.pipe(), and PEP 446 makes
+            # those close-on-exec, so keeping the descriptor open across
+            # _close_inherited is not enough -- execve would still shut it and
+            # the child's first write to it is EBADF.  errpipe_write is the
+            # exception and must STAY close-on-exec: the parent reads its
+            # closing as "exec succeeded".
+            for fd in (fds_to_keep or ()):
+                if fd != errpipe_write:
+                    try:
+                        posix.set_inheritable(fd, True)
+                    except OSError:
+                        pass
             _close_inherited(tuple(fds_to_keep or ()) + (errpipe_write,))
         else:
             for fd in (p2cread, p2cwrite, c2pread, c2pwrite, errread, errwrite):

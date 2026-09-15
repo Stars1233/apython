@@ -566,6 +566,12 @@ DEF_FUNC unicodedata_module_create, UMC_FRAME
     MODULE_ADD_FUNC unicodedata_mirrored, ud_n_mirrored
     MODULE_ADD_FUNC unicodedata_bidirectional, ud_n_bidirectional
     MODULE_ADD_FUNC unicodedata_east_asian_width, ud_n_eaw
+    ; The two that need the normalization tables, which are their own file:
+    ; src/modules/unicodenorm.asm over src/modules/unicodenorm_tables.asm.
+    extern unicodedata_normalize
+    MODULE_ADD_FUNC unicodedata_normalize, ud_n_normalize
+    extern unicodedata_decomposition
+    MODULE_ADD_FUNC unicodedata_decomposition, ud_n_decomposition
 
     ; The version the tables were generated from, which is the honest answer:
     ; gen_unicodename.py writes it into its own header from the CPython it
@@ -584,6 +590,29 @@ DEF_FUNC unicodedata_module_create, UMC_FRAME
     call obj_decref
     mov rdi, rbx
     call obj_decref
+
+    ; The frozen 3.2 copy, as an attribute rather than as a module of its own:
+    ; `from unicodedata import ucd_3_2_0` is how stringprep reaches it, and
+    ; CPython registers it nowhere either.
+    extern ucd32_module_create
+    call ucd32_module_create
+    test rax, rax
+    jz .no_ucd32
+    mov rbx, rax
+    lea rdi, [rel ud_n_ucd32]
+    call str_from_cstr_heap
+    push rax
+    push rax                    ; twice: rsp stays 16-byte aligned
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, rbx
+    call dict_set
+    pop rdi
+    pop rax
+    call obj_decref
+    mov rdi, rbx
+    call obj_decref
+.no_ucd32:
 
     lea rdi, [rel ud_name]
     call str_from_cstr_heap
@@ -604,6 +633,9 @@ END_FUNC unicodedata_module_create
 section .rodata
 ud_name:       db "unicodedata", 0
 ud_n_lookup:   db "lookup", 0
+ud_n_normalize: db "normalize", 0
+ud_n_ucd32:    db "ucd_3_2_0", 0
+ud_n_decomposition: db "decomposition", 0
 ud_n_name:     db "name", 0
 ud_n_decimal:  db "decimal", 0
 ud_n_digit:    db "digit", 0

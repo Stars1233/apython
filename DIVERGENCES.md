@@ -195,6 +195,35 @@ failing took each of those with it.
 Reaching NSS properly means `dlopen`ing the `libnss_*` modules and calling
 through their ABI, which is a project rather than a module.
 
+## `syslog` writes to `/dev/log` itself, where CPython's calls libc
+
+CPython's module is a wrapper on `openlog(3)`/`syslog(3)`/`closelog(3)`, which
+are themselves a few dozen lines around a datagram socket: connect to
+`/dev/log`, write `<priority>tag[pid]: message`, drop the message if nothing
+is listening.  `lib/syslog.py` does that directly, so the priority arithmetic,
+the mask, the ident and the option flags are all the same and no new C entry
+point was needed.
+
+Two things libc does that this does not: the `SOCK_STREAM` fallback for the
+few systems whose `/dev/log` is a stream socket, and `LOG_CONS`, which writes
+to `/dev/console` when the socket cannot be reached.  Neither is observable
+from Python -- a message that cannot be delivered is silently dropped either
+way, which is `syslog(3)`'s own contract -- so what a program sees differs
+only on a host where the console fallback would have been the only delivery.
+
+## `_lsprof` is Python over `sys.setprofile`, so it profiles itself
+
+CPython's profiler is C hooked into the same slot, and its own machinery costs
+nothing measurable.  `lib/_lsprof.py` is Python: the dispatch function runs
+per event, so a profiled run is slower here than there, and one row --
+`Profiler.disable`, which `cProfile.create_stats` calls -- appears as a Python
+frame where CPython reports `<method 'disable' of '_lsprof.Profiler'
+objects>`.  Every other row, and all four numbers in each, match: the
+`totaltime`/`inlinetime`/`callcount`/`reccallcount` arithmetic is CPython's,
+including that a recursive call adds to the two counts and not to
+`totaltime`, and a builtin is named by `normalizeUserObj`'s rule rather than
+by its repr.
+
 ## `f_trace_opcodes` works, and CPython 3.12's does not
 
 `sys.settrace` plus `frame.f_trace_opcodes = True` delivers an `'opcode'`
