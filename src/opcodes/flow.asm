@@ -279,29 +279,12 @@ DEF_FUNC_BARE op_jump_backward
     ; ecx = arg (instruction words to go back)
     shl ecx, 1                 ; ecx = arg * 2 (zero-extends to rcx)
     sub rbx, rcx
-    ; The top of every loop is where a signal is delivered.  A C signal
-    ; handler cannot run Python -- it has no frame and no value stack, and it
-    ; interrupted something half-finished -- so it sets a flag and this reads
-    ; it.  One load and one branch, and only here: CPython checks the same
-    ; place for the same reason.
-    extern signal_any_pending
-    cmp qword [rel signal_any_pending], 0
-    jne .jb_signals
+    ; The top of every loop is one of the two places a signal is delivered;
+    ; the other is the return of a call.  The IP is already advanced past this
+    ; instruction and the unwinder reads it from eval_saved_rbx, so a handler
+    ; that raises reports the line the loop was on.
+    CHECK_EVAL_SIGNALS
     DISPATCH
-.jb_signals:
-    ; The IP is already advanced past this instruction, and the unwinder reads
-    ; it from eval_saved_rbx, so a handler that raises reports the line the
-    ; loop was on.
-    mov [rel eval_saved_rbx], rbx
-    mov [rel eval_saved_r13], r13
-    extern signal_run_pending
-    call signal_run_pending
-    test eax, eax
-    jnz .jb_raised
-    DISPATCH
-.jb_raised:
-    extern eval_exception_unwind
-    jmp eval_exception_unwind
 END_FUNC op_jump_backward
 
 ;; ============================================================================

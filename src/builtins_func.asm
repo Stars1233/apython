@@ -112,6 +112,38 @@ DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
     test eax, eax
     jz .bfg_self
 
+    mov rdi, [rbp - BFG_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "__objclass__"
+    call ap_strcmp
+    test eax, eax
+    jz .bfg_objclass
+
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.bfg_objclass:
+    ; The class a DESCRIPTOR was found on.  CPython's method_descriptor and
+    ; wrapper_descriptor carry it and its builtin_function_or_method does
+    ; not; inspect reads it to classify, and descr_reduce reads it to pickle.
+    ; There was no arm at all, so str.count.__objclass__ was an
+    ; AttributeError.
+    mov rcx, [rbx + PyBuiltinObject.func_kind]
+    cmp rcx, BUILTIN_KIND_METHOD
+    je .bfg_owner
+    cmp rcx, BUILTIN_KIND_WRAPPER
+    jne .bfg_no_attr
+.bfg_owner:
+    mov rax, [rbx + PyBuiltinObject.func_owner]
+    test rax, rax
+    jz .bfg_no_attr
+    INCREF rax
+    pop rbx
+    leave
+    ret
+.bfg_no_attr:
     xor eax, eax
     pop rbx
     leave
@@ -123,6 +155,15 @@ DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
     ; `base.__new__.__self__ is base` to find the last non-heap base, and
     ; without it every protocol-0 and protocol-1 reduction was an
     ; AttributeError -- which is `copy.copy` and every old pickle.
+    ;
+    ; CPython's method_descriptor and wrapper_descriptor have no __self__ at
+    ; all -- only a bound method does, and it is the receiver -- and that
+    ; difference cannot be expressed here: __self__ is published as a getset
+    ; on the ONE type that stands for CPython's three kinds, so "absent"
+    ; would have to be a per-object answer from a per-type descriptor.
+    ; DIVERGENCES.md records it, beside the entry for a bound builtin being a
+    ; `method`.  What depended on it is fixed elsewhere: builtin_func_reduce
+    ; reads func_kind directly rather than inferring the kind from __self__.
     mov rax, [rbx + PyBuiltinObject.func_owner]
     test rax, rax
     jz .bfg_missing

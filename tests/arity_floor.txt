@@ -510,6 +510,10 @@ bytes.__add__/0
 bytes.__add__/1
 bytes.__add__/2
 bytes.__add__/3
+bytes.__bytes__/0
+bytes.__bytes__/1
+bytes.__bytes__/2
+bytes.__bytes__/3
 bytes.capitalize/0
 bytes.capitalize/1
 bytes.capitalize/2
@@ -570,6 +574,10 @@ bytes.__getitem__/0
 bytes.__getitem__/1
 bytes.__getitem__/2
 bytes.__getitem__/3
+bytes.__getnewargs__/0
+bytes.__getnewargs__/1
+bytes.__getnewargs__/2
+bytes.__getnewargs__/3
 bytes.__gt__/0
 bytes.__gt__/1
 bytes.__gt__/2
@@ -1730,6 +1738,10 @@ memoryview.toreadonly/0
 memoryview.toreadonly/1
 memoryview.toreadonly/2
 memoryview.toreadonly/3
+range.__bool__/0
+range.__bool__/1
+range.__bool__/2
+range.__bool__/3
 range.__class__/0
 range.__class__/1
 range.__class__/2
@@ -2090,6 +2102,10 @@ str.__getitem__/0
 str.__getitem__/1
 str.__getitem__/2
 str.__getitem__/3
+str.__getnewargs__/0
+str.__getnewargs__/1
+str.__getnewargs__/2
+str.__getnewargs__/3
 str.__gt__/0
 str.__gt__/1
 str.__gt__/2
@@ -2330,6 +2346,10 @@ tuple.__getitem__/0
 tuple.__getitem__/1
 tuple.__getitem__/2
 tuple.__getitem__/3
+tuple.__getnewargs__/0
+tuple.__getnewargs__/1
+tuple.__getnewargs__/2
+tuple.__getnewargs__/3
 tuple.__gt__/0
 tuple.__gt__/1
 tuple.__gt__/2

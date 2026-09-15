@@ -1005,7 +1005,12 @@ END_FUNC value_type
 ; deprecation rather than an error: CPython's "__index__ returned non-int
 ; (type bool).  The ability to return an instance of a strict subclass of int
 ; is deprecated..." is 155 characters before the type name goes in.
-RTN_BUFSZ equ 256
+; The longest is now float()'s subclass deprecation, which carries the
+; receiver's class name as well: "ReturnsSubclass.__float__ returned
+; non-float (type SubFloat).  The ability to return an instance of a strict
+; subclass of float is deprecated, and may be removed in a future version of
+; Python." -- two type names plus 160 fixed characters.
+RTN_BUFSZ equ 512
 
 section .rodata
 rbt_open:    db ": '", 0

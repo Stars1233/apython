@@ -353,7 +353,11 @@ reasoning that chose them and what changing one would cost.
   `zipfile`, `tarfile` and `shutil`, which imported before and could not
   compress.  So is `array`, which was the largest of these by reach.  What
   is left is genuinely C: `_tracemalloc`, `_symtable`, `_ssl`,
-  `_sqlite3`, `_crypt`, `_lzma`, `_bz2`, `_ctypes`, `_curses` and `_tkinter`.
+  `_sqlite3`, `_crypt`, `_ctypes`, `_curses` and `_tkinter`.  `_lzma` and
+  `_bz2` are there now, each a shim over its library the way `zlib` is, and
+  `lzma`, `bz2` and the compression halves of `tarfile` and `zipfile` with
+  them.  `_multibytecodec` and the six CJK codec modules are deliberately
+  deferred and are in DIVERGENCES.md rather than here.
 
   `unicodedata` is there now, over tables generated from a running CPython the
   way `\N{...}`'s names and the case mappings already were.  Two of its
@@ -403,8 +407,10 @@ reasoning that chose them and what changing one would cost.
 - **`str.find` and `str.count` are the naive O(n*m) search.**  CPython's is
   Crochemore-Perrin two-way with a Bloom-filter skip, which is O(n + m), and
   its own test says so: `string_tests.test_adaptive_find` searches a
-  1,000,000-character haystack built to defeat the naive scan, and
-  test_userstring and test_string time out on it here rather than failing.
+  1,000,000-character haystack built to defeat the naive scan, and it is what
+  makes `test_bytes`, `test_unicode`, `test_userstring` and `test_string` time
+  out rather than fail -- the four that the RC sweep still reports as HANG,
+  beside `test_zipfile64`, which is a multi-gigabyte test by design.
   Ordinary searches are unaffected -- the shapes that hurt are the ones with
   long repeated prefixes.
 

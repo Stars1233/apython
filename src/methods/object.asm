@@ -893,6 +893,46 @@ DEF_DUNDER_ITER bytes
 DEF_DUNDER_LEN range
 DEF_DUNDER_ITER range
 
+;; ============================================================================
+;; bytes_dunder_bytes(rdi = args, rsi = nargs) -> rax = a bytes, as a Value
+;;
+;; `bytes.__bytes__`, which CPython added in 3.11 so that bytes() over a
+;; bytes-like object has a protocol to ask rather than a type to recognise.
+;; Exact bytes answer with themselves; a subclass answers with an exact copy,
+;; as CPython's bytes_bytes does.
+;; ============================================================================
+extern bytes_type
+DEF_FUNC bytes_dunder_bytes
+    cmp rsi, 1
+    jne .bdb_bad
+    mov rdi, [rdi]
+    lea rsi, [rel bytes_type]
+    xor edx, edx
+    CSTRING rcx, "__bytes__"
+    call dunder_require_self
+    mov rdi, rax
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    jne .bdb_copy
+    INCREF rdi
+    mov rax, rdi
+    leave
+    ret
+.bdb_copy:
+    mov rsi, [rdi + PyBytesObject.ob_size]
+    lea rdi, [rdi + PyBytesObject.data]
+    extern bytes_from_data
+    call bytes_from_data
+    leave
+    ret
+.bdb_bad:
+    dec rsi
+    xor edi, edi
+    xor edx, edx
+    call raise_wrapper_arity
+END_FUNC bytes_dunder_bytes
+
 ;; The builtin iterators, which had a tp_iternext and a tp_iter and no way
 ;; to reach either by name.  heapq.py's `next = it.__next__` and
 ;; inspect.py's `iter(lines).__next__` are what noticed.
@@ -1558,6 +1598,12 @@ DEF_DUNDER_UNARY float, trunc, nb_int
 DEF_DUNDER_BOOL float
 ; complex has an nb_bool of its own; only the by-name half was missing.
 DEF_DUNDER_BOOL complex
+; range and NoneType both carry nb_bool and neither could be asked for it by
+; name.  `type(None).__bool__` is what test_descr reads to check that a type
+; whose truth is fixed still says so through the protocol.
+extern none_type
+DEF_DUNDER_BOOL range
+DEF_DUNDER_BOOL none
 
 ;; int's binary family, forward and reflected.
 DEF_DUNDER_BINARY int, add, nb_add, 0, dunder_operand_is_int
@@ -2721,3 +2767,4 @@ NEW_THUNK str_dunder_new,       str_type,       scalar_dunder_new
 NEW_THUNK float_dunder_new,     float_type,     scalar_dunder_new, "float() takes no keyword arguments"
 NEW_THUNK complex_dunder_new,   complex_type,   scalar_dunder_new
 NEW_THUNK module_dunder_new,    module_type,    module_method_new
+

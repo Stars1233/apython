@@ -301,23 +301,87 @@ than against CPython, because CPython cannot serve as an oracle for them:
 Any *new* recorded-oracle test needs the same justification, or it risks
 blessing a divergence instead of catching it.
 
-## A generic class has no `Generic` base
+## Threads are deferred
 
-`class C[T]` gives C its `__type_params__`, and everything a program can ask
-about the parameters answers what CPython's does.  What it does not do is put
-`Generic[T]` in the class's bases: CPython threads the parameter tuple through
-a cell so the class BODY can see it and pass `Generic[T]` as an extra base, so
-`C.__mro__` there is `(C, Generic, object)` and here it is `(C, object)`.
+`lib/_thread.py` is a single-threaded stand-in: `get_ident` answers a
+constant, the locks are uncontended, and anything that would actually START a
+thread raises rather than pretending.  CPython's `threading.py` runs on it
+unchanged -- RLock, Event, Condition, Semaphore, local and current_thread all
+behave as one thread can observe them -- so a program that uses those
+primitives for their API rather than for concurrency works, and one that
+spawns is told plainly that it cannot.
 
-Nothing in this tree consumes `Generic` -- it exists in `lib/_typing.py` for
-the intrinsic that builds `Generic[T]`, and nothing subscripts it for a
-purpose -- so the cell and the extra base would be machinery with no reader.
-`typing.Protocol` and the parts of `typing` that walk a generic's MRO would
-need it; they are not here either.
+That is the shape a deferred feature should have, and it is why this is here
+rather than in `bugs.md`: `Thread.start()` refusing is a decision, not an
+omission waiting to be filled in.  Real threads mean a GIL or fine-grained
+locking over every object this interpreter has, which is a project of its own.
 
-Changing it means the cell: a `.type_params` cellvar in the wrapper scope,
-`LOAD_CLOSURE` into the class body's own closure, and `INTRINSIC_SUBSCRIPT_GENERIC`
-between the body and the `__build_class__` call.
+## The CJK codecs are deferred
+
+`_multibytecodec` and the six codec modules over it -- the Chinese, Japanese
+and Korean multi-byte encodings -- are absent.  They are a large generated
+table apiece and a shared state machine, and nothing in this tree's own
+corpus needs them; `encodings/` answers for every single-byte codec and
+`_codecs` for the tableless ones.  `test_codecencodings_*` and
+`test_multibytecodec` are what they would unblock.
+
+## sys.monitoring is absent
+
+PEP 669's monitoring API has no implementation here.  `sys.settrace` and
+`sys.setprofile` are, which is what `pdb`, `trace` and every coverage tool
+older than 3.12 use; `sys.monitoring` is the newer interface over the same
+events and needs per-code-object instrumentation that this interpreter's
+dispatch does not have a place for yet.
+
+## There is no REPL
+
+`./apython` reads a file, `-c`, `-m` or stdin.  There is no interactive
+prompt.  `CMODE_SINGLE` and `sys.displayhook` both exist, so starting one is
+cheap and finishing one -- line continuation, the input hook, readline, the
+traceback rules an interactive statement has -- is not; it is its own
+feature rather than a missing piece of this one.
+
+## The alias modules in lib/
+
+`_datetime`, `_json`, `_pickle` and `_decimal` are stand-ins for CPython's C
+accelerators, and each says so in its own header.  They exist because
+`test.support.import_fresh_module` returns **None** when a module in its
+`fresh` list cannot be imported, and a test file that then reads
+`module.__dict__` dies while its body is still executing -- taking every test
+in the file with it.
+
+None of them is faster than what it re-exports, and no number measured
+through one should be read as native speed.  `_pickle` is the exception to
+its own rule: it carries `PickleBuffer`, which is a TYPE rather than an
+accelerator and which `pickle.py` imports at module scope.
+
+`_testcapi` and `_testinternalcapi` are the same arrangement for CPython's
+test harness: every name in them answers a true fact about this interpreter
+or raises NotImplementedError, and nothing pretends to exercise a C API that
+is not here.
+
+## PEP 563 stores a raw source slice, not an unparse
+
+`from __future__ import annotations` makes every annotation a string of its
+own source text, and this tree takes that string by SLICING the file between
+the annotation node's start and the end its AstSpan records.  CPython stores
+what its own unparser produces from the same node.
+
+The two agree for every ordinary annotation and differ in three ways:
+redundant parentheses survive here (`x: (int)` is `'(int)'` rather than
+`'int'`), a multi-line annotation keeps its newlines and indentation, and a
+string literal keeps the quote it was written with (`x: "s"` is `'"s"'` here
+and `"'s'"` there).
+
+The string still evaluates to the same object, which is what
+`typing.get_type_hints` and every other consumer does with it.  Matching the
+unparser exactly means writing one -- `lib/ast.py`'s `unparse` is present to
+diff against if it is ever wanted.
+
+`class C[T](*bases)` is the one shape that does not get its `Generic[T]`
+base: the starred form builds its base tuple with CALL_FUNCTION_EX, and one
+more element has to go into the tuple rather than onto the stack.  Every
+written-out base list gets it.
 
 ## A builtin method bound to an instance is a `method`
 
@@ -558,3 +622,44 @@ then declined, and the observable behaviour is CPython's; what differs is
 which of `hmac.py`'s two branches runs for a lambda.  This is the
 single-builtin-callable-type divergence recorded above, reaching one more
 module.
+
+## `marshal.load()` reads the whole stream, not one object
+
+CPython's `marshal.load()` pulls bytes from the file as the reader needs them,
+so a file holding several marshalled objects is walked with one call per
+object, and the file is left positioned after the one just read.  Ours calls
+`file.read()` once and hands the whole result to the same reader `loads` uses.
+
+For the only shape anybody writes -- a `.pyc`, or a file holding one object --
+the two agree.  They differ for a file holding two: the second `load()` sees
+an empty read and raises `EOFError`, and a file that is not seekable is
+consumed whole rather than up to the object's end.
+
+The reason is that the reader is written against a contiguous buffer with a
+position in it (`marshal_buf`/`marshal_pos`/`marshal_len`), which is what a
+`.pyc` already is.  Making it pull would mean an input abstraction under every
+one of its read primitives, for a form of the call that nothing in the stdlib
+makes.
+
+`marshal.dumps()` also differs from CPython's byte for byte on values CPython
+happens to hold more than one reference to: `FLAG_REF` is set from
+`ob_refcnt > 1` there, so `marshal.dumps(0)` carries it in CPython and not
+here.  Both are valid streams and each reads the other's; what is not stable
+is the bytes.
+
+## `sys.getsizeof()` reports the allocation, not CPython's number
+
+`sys.getsizeof(1)` is 48 here and 28 in CPython; `sys.getsizeof('abc')` is 40
+against 44.  The sizes are honest for this interpreter and simply describe a
+different object: an int carries a compact `ival` and an `mpz_t` slot that is
+only initialised on overflow, where CPython's is a variable-length digit array;
+a str keeps UTF-8 with a byte length and a code-point length, where CPython's
+keeps a latin-1/UCS-2/UCS-4 body with a different header.
+
+`object.__sizeof__` answers `tp_basicsize` and each type that knows better
+adds its own variable part, which is the shape CPython uses -- so the numbers
+move correctly with the data even though they do not match.
+
+What this costs is `test.support.check_sizeof`, which asserts exact figures:
+those tests fail rather than crash, and they are measuring CPython's layout
+rather than a property of the language.

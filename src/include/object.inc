@@ -49,8 +49,15 @@ endstruc
     call int_promote_mpz
 %else
     push rdi
+    sub rsp, 8                  ; the lone push flips the parity, and
+                                ; int_promote_mpz reaches GMP.  Only visible
+                                ; under INT_STRESS=1, where the promotion
+                                ; actually fires: tests/gmp_align_probe.sh
+                                ; counted 26 misaligned calls to
+                                ; __gmpz_fits_slong_p through here.
     mov rdi, %1
     call int_promote_mpz
+    add rsp, 8
     pop rdi
 %endif
 %%done:
@@ -656,6 +663,11 @@ struc PyGenObject
     ; which is what CPython's ag_origin_or_finalizer does.
     .ag_hooks_done: resq 1   ; +56: 1 once firstiter has fired
     .ag_finalizer: resq 1    ; +64: the finalizer that was installed then, owned
+    ; 1 once the body has been entered at least once.  gi_suspended is the
+    ; difference between a generator stopped at a yield and one that has
+    ; never run, and instr_ptr cannot tell them apart: it is non-zero for
+    ; both and zero only once the generator is finished.
+    .gi_started: resq 1      ; +72
 endstruc
 
 ; File object (for sys.stdout, sys.stderr, sys.stdin)
@@ -948,12 +960,24 @@ struc PyTypeObject
     ; A caller that only reads the bytes and is done with them before any other
     ; code runs passes BUF_GET alone, which is what every caller of
     ; bytes_like_ptr_len does.
+    ;
+    ; BUF_GETINFO is what a memoryview needs and a byte reader does not:
+    ;     tp_getbuffer(rdi = obj, esi = BUF_GETINFO)
+    ;       -> rax = a struct format cstr, or 0 to take the defaults
+    ;          rdx = the item size in bytes
+    ;          ecx = 1 when the buffer may be written through
+    ; Answering 0 keeps what memoryview assumed of every exporter before this
+    ; mode existed -- one-byte items, format "B", read-only -- so an exporter
+    ; that does not implement it is unaffected.  Without it
+    ; `memoryview(array("i", [1, 2, 3]))` had itemsize 1, format "B", length
+    ; 12 and tolist() of the twelve bytes.
     .tp_as_buffer:   resq 1  ; +224
 endstruc
 
 BUF_GET     equ 0
 BUF_ACQUIRE equ 1
 BUF_RELEASE equ 2
+BUF_GETINFO equ 3
 
 TYPE_OBJECT_SIZE equ PyTypeObject_size
 

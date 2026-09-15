@@ -1148,6 +1148,14 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     ; used as an address.
     add rsp, 16               ; pop fat array
 
+    ; A NULL here means the callable RAISED, and it means nothing else -- a
+    ; replacement of None is the none singleton, not 0.  Untested, the 0 went
+    ; to sre_concat as a string and the exception the caller was owed came
+    ; back as "expected str instance,  found", with the missing type name in
+    ; the middle of the message where the NULL had been.
+    test rax, rax
+    jz .sub_callable_raised
+
     ; Save replacement string
     push rax
     push rax                  ; keep the stack 16-byte aligned
@@ -1278,6 +1286,46 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.sub_callable_raised:
+    ; Give back the match the callable was handed and the two registers the
+    ; call site parked, then unwind the whole substitution.
+    mov rdi, r14
+    call obj_decref
+    pop r13
+    pop r12
+
+.sub_abort:
+    ; Every owned thing this frame holds, then the state, then NULL -- the
+    ; pending exception is already set and is what the caller must see.
+    mov rdi, [rbp - SUB_TMPL]
+    test rdi, rdi
+    jz .sub_abort_tmpl
+    mov qword [rbp - SUB_TMPL], 0
+    call obj_decref
+.sub_abort_tmpl:
+    mov rdi, [rbp - SUB_LITERAL]
+    test rdi, rdi
+    jz .sub_abort_literal
+    mov qword [rbp - SUB_LITERAL], 0
+    call obj_decref
+.sub_abort_literal:
+    mov rdi, [rbp - SUB_RESULT]
+    test rdi, rdi
+    jz .sub_abort_result
+    mov qword [rbp - SUB_RESULT], 0
+    call obj_decref
+.sub_abort_result:
+    lea rdi, [rbp - SUB_STATE]
+    call sre_state_fini
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .sub_error:
@@ -1587,6 +1635,10 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16
 
+    ; The same NULL as in sub above: the callable raised.
+    test rax, rax
+    jz .subn_callable_raised
+
     push rax
     push rdx
 
@@ -1721,6 +1773,42 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.subn_callable_raised:
+    mov rdi, r14
+    call obj_decref
+    pop r13
+    pop r12
+
+.subn_abort:
+    mov rdi, [rbp - SN_TMPL]
+    test rdi, rdi
+    jz .subn_abort_tmpl
+    mov qword [rbp - SN_TMPL], 0
+    call obj_decref
+.subn_abort_tmpl:
+    mov rdi, [rbp - SN_LITERAL]
+    test rdi, rdi
+    jz .subn_abort_literal
+    mov qword [rbp - SN_LITERAL], 0
+    call obj_decref
+.subn_abort_literal:
+    mov rdi, [rbp - SN_RESULT]
+    test rdi, rdi
+    jz .subn_abort_result
+    mov qword [rbp - SN_RESULT], 0
+    call obj_decref
+.subn_abort_result:
+    lea rdi, [rbp - SN_STATE]
+    call sre_state_fini
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .subn_error:

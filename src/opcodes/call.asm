@@ -386,6 +386,10 @@ DEF_FUNC op_call, CL_FRAME
     add rbx, 6
 
     leave
+    ; A call is where a signal arrives: the process was inside a syscall, and
+    ; this is the instruction that made it.  CPython checks the eval breaker
+    ; here for the same reason.
+    CHECK_EVAL_SIGNALS
     DISPATCH
 
 .propagate_exc:
@@ -576,6 +580,8 @@ DEF_FUNC op_call_function_ex
     lea rsi, [rbp - CFX_ARGS]
     mov edx, 1
     call tuple_type_call
+    test rax, rax
+    jz .cfex_args_raised
     mov rdi, [rbp - CFX_ARGS]       ; the original iterable, still owned
     mov [rbp - CFX_ARGS], rax
     call obj_decref
@@ -806,6 +812,36 @@ DEF_FUNC op_call_function_ex
 
 .cfex_args_not_iterable:
     RAISE exc_TypeError_type, "argument after * must be an iterable"
+
+.cfex_args_raised:
+    ; Materialising the iterable raised: a generator that throws part way, an
+    ; __iter__ or a __next__ that does.  The NULL used to be stored as the
+    ; argument sequence and its ob_type read a few lines below, which is a
+    ; dereference of address zero -- `copy.deepcopy(list[T] | int)` reaches it,
+    ; and that is two of CPython's test modules.
+    ;
+    ; func and the NULL under it are still on the value stack; the unwinder
+    ; releases them with the rest of the frame, which is why r13 is
+    ; republished rather than adjusted here.
+    mov rdi, [rbp - CFX_ARGS]
+    call obj_decref
+    mov qword [rbp - CFX_ARGS], 0
+    mov rdi, [rbp - CFX_KWARGS]
+    test rdi, rdi
+    jz .cfex_ar_no_kwargs
+    call obj_decref
+    mov qword [rbp - CFX_KWARGS], 0
+.cfex_ar_no_kwargs:
+    ; A 0 with nothing pending is the allocator failing rather than user code
+    ; raising, and the caller still needs to be told something.
+    cmp qword [rel current_exception], 0
+    je .cfex_args_not_iterable
+    add rsp, CFX_CARVE
+    pop r12
+    pop rbx
+    pop rbp
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
 
 .cfex_cleanup:
     ; Clear kw_names_pending (safety)

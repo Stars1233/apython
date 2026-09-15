@@ -117,7 +117,7 @@ def fork_exec(args, executable_list, close_fds, fds_to_keep, cwd, env_list,
         if start_new_session:
             posix.setsid()
         if cwd is not None:
-            posix.chdir(cwd if isinstance(cwd, str) else cwd.decode("utf-8"))
+            posix.chdir(_fsdecode(cwd))
 
         # restore_signals: SIG_IGN SURVIVES execve -- only installed handlers
         # are reset by it -- and this interpreter ignores SIGPIPE at start-up
@@ -140,8 +140,7 @@ def fork_exec(args, executable_list, close_fds, fds_to_keep, cwd, env_list,
 
         last = OSError(2, "No such file or directory")
         for exe in (executable_list or ()):
-            path = exe if isinstance(exe, str) else exe.decode("utf-8",
-                                                              "surrogateescape")
+            path = _fsdecode(exe)
             names = [a.decode("utf-8", "surrogateescape") for a in argv]
             try:
                 if envv is None:
@@ -157,7 +156,39 @@ def fork_exec(args, executable_list, close_fds, fds_to_keep, cwd, env_list,
     posix._exit(255)
 
 
+def _fspath(s):
+    """os.fspath, without importing os.
+
+    This module is imported from `subprocess`, which `os` itself may be on
+    the way to importing, so the dependency goes the other way: `posix` only.
+    A path argument may be a str, a bytes, or anything with __fspath__ --
+    pathlib.Path is the one every caller actually passes -- and converting
+    without asking turned `subprocess.run([Path("/bin/true")])` into
+    "'PosixPath' object has no attribute 'encode'".
+    """
+    if isinstance(s, (str, bytes)):
+        return s
+    try:
+        f = type(s).__fspath__
+    except AttributeError:
+        raise TypeError("expected str, bytes or os.PathLike object, not "
+                        + type(s).__name__) from None
+    p = f(s)
+    if isinstance(p, (str, bytes)):
+        return p
+    raise TypeError("expected %s.__fspath__() to return str or bytes, not %s"
+                    % (type(s).__name__, type(p).__name__))
+
+
 def _fsencode(s):
+    s = _fspath(s)
     if isinstance(s, bytes):
         return s
     return s.encode("utf-8", "surrogateescape")
+
+
+def _fsdecode(s):
+    s = _fspath(s)
+    if isinstance(s, str):
+        return s
+    return s.decode("utf-8", "surrogateescape")

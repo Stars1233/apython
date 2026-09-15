@@ -10,6 +10,7 @@ test_aiter_anext
 test_annotations
 test_argument_messages
 test_arithmetic
+test_arity_messages
 test_array_file
 test_array
 test_asend_methods
@@ -96,18 +97,23 @@ test_class_layout_entries
 test_classmethod_metaclass
 test_class_name_at_module
 test_class_namespace_copy
+test_cli
 test_closures
 test_cmath
 test_codec_args
+test_codec_handlers
 test_codecs_binding
+test_codecs_module
 test_codecs
 test_codecs_registry_bridge
 test_codecs_registry
 test_codec_surrogates
 test_code_gc
 test_code_lines_scaling
+test_code_lnotab
 test_code_localsplus
 test_code_replace
+test_collections_module
 test_compare_raises
 test_compare_reflected_op
 test_comparisons
@@ -176,7 +182,9 @@ test_container_repr_dunder
 test_contains_fallback
 test_context_chain_cycle
 test_control_flow
+test_converter_dunders
 test_copyreg
+test_coro_bound_methods
 test_crash_regressions
 test_csv
 test_data_descriptor_precedence
@@ -194,6 +202,7 @@ test_delete_subscr_refused
 test_del
 test_del_resurrect
 test_deopt_extended_arg
+test_deque_ops
 test_deque
 test_descr_freed_by_lookup
 test_descr_func_attr
@@ -229,6 +238,7 @@ test_dict_view_set
 test_dict_views
 test_dir_published
 test_dir
+test_dunder_descriptor_int
 test_dunder_descriptor
 test_dunder_not_callable
 test_dunder_protocols
@@ -311,9 +321,11 @@ test_fstring_build
 test_fstring_pep701
 test_fstrings
 test_func_attrs
+test_func_defaults_write
 test_func_dunder_get
 test_function_attrs
 test_functions
+test_future_annotations
 test_future_import
 test_gc_dealloc_untrack
 test_gc_del_raises
@@ -328,6 +340,7 @@ test_generator_close_on_drop
 test_generator_close_throw
 test_generator_frame_back
 test_generator_frame
+test_generator_introspection
 test_generators
 test_generator_throw_delegation
 test_generic_alias_ctor
@@ -382,6 +395,7 @@ test_int_from_bytes
 test_int_methods
 test_int_nan_compare
 test_int_parse_fast
+test_int_pow_huge
 test_int_pow_negative
 test_introspection
 test_int_shift_pow
@@ -405,6 +419,7 @@ test_iterable_arg_errors
 test_iterable_arguments
 test_iterator_cycles
 test_iterator_dunders
+test_iterator_length_hint
 test_iterator_slots
 test_iter_free_during_iteration
 test_iter_sentinel
@@ -430,6 +445,7 @@ test_load_attr_method_shadow
 test_load_attr_per_name
 test_load_attr_property_ic
 test_load_from_dict_or_globals
+test_long_name_error
 test_lzma
 test_maketrans
 test_map_multi
@@ -437,7 +453,10 @@ test_mappingproxy_call
 test_marshal_hostile
 test_marshal_interned
 test_marshal_module
+test_marshal_write
+test_match_args_errors
 test_match_class
+test_match_mapping_keys
 test_match_mapping_types
 test_match
 test_math_more
@@ -445,6 +464,7 @@ test_math
 test_member_descriptor_protocol
 test_membership
 test_memmove_boundaries
+test_memoryview_buffer
 test_memoryview_exports
 test_memoryview_formats
 test_memoryview_released
@@ -453,7 +473,9 @@ test_metaclass_lifetime
 test_metaclass_prepare
 test_metaclass
 test_metaclass_resolution
+test_method_alien_func
 test_method_attr_call
+test_method_descriptor
 test_method_equality
 test_method_hostile
 test_method_load_unbound
@@ -467,10 +489,13 @@ test_module_attr_not_descriptor
 test_module_delattr
 test_module_doc_and_repr_depth
 test_module_file_attr
+test_module_getattr_del
 test_module_getattr
 test_module_repr_and_property_msg
 test_module_type_new
+test_mro_entries
 test_multiple_inheritance
+test_namespace_packages
 test_nanbox_float
 test_nanbox_int
 test_new
@@ -478,6 +503,7 @@ test_new_subclass_init
 test_next_propagates
 test_none_bool_singleton
 test_none
+test_nul_paths
 test_number_real_imag
 test_numeric_dunders
 test_numeric_hash
@@ -500,6 +526,7 @@ test_oserror
 test_os_write_buffer
 test_pep646
 test_pep695_classdict
+test_pep695_generic_class
 test_pep695
 test_percent_and_ior
 test_percent_errors
@@ -509,9 +536,11 @@ test_percent_typecheck
 test_phase4
 test_phase6
 test_pickle_builtins
+test_pickle_module
 test_poll_eintr
 test_posix_bytes_paths
 test_posix_files
+test_posix_identity
 test_posix_more
 test_posix_pathlike
 test_posix_process
@@ -520,6 +549,7 @@ test_posix
 test_posix_scandir
 test_pow_dunder
 test_pow
+test_prepare_namespace
 test_prepare_raises
 test_print_broken_pipe
 test_print_file
@@ -531,6 +561,7 @@ test_property_doc
 test_property_getattr_hook
 test_property
 test_property_raises
+test_pycache_write
 test_pyc_hardening
 test_pyc_staleness
 test_pyexpat_decl
@@ -540,6 +571,7 @@ test_pyexpat_parse
 test_raise_cause
 test_raise_class_init
 test_raise_from
+test_random_bisect
 test_random
 test_range_iter_overflow
 test_range_overflow
@@ -560,12 +592,14 @@ test_repr_element_raises
 test_repr
 test_repr_str_cycle
 test_re_review
+test_re_sub_raises
 test_review_regressions
 test_richcompare_bool
 test_richcompare_byname
 test_richcompare_int
 test_round
 test_rsplit_boundaries
+test_select_epoll
 test_select
 test_sequence_iteration
 test_setattr_dunder
@@ -591,6 +625,7 @@ test_set_tombstone_reuse
 test_set_value_probe
 test_set_variadic
 test_shutdown_finalizer
+test_signal_delivery
 test_signal_eintr
 test_signal
 test_sigpipe_ignored
@@ -649,6 +684,7 @@ test_str_decode
 test_strfmt
 test_str_format_dunder
 test_str_format
+test_string_operator
 test_strings2
 test_strings
 test_str_inplace_add
@@ -667,10 +703,12 @@ test_str_search_primitives
 test_str_search
 test_str_split_spec
 test_str_subclass_dict
+test_str_subclass_exact
 test_str_subclass_slots
 test_str_translate_mapping
 test_str_translate
 test_struct_binascii
+test_struct_module
 test_structseq
 test_structseq_tail
 test_str_unicode_space
@@ -705,6 +743,7 @@ test_sys_is_finalizing
 test_sys_version_platform
 test_termios
 test_time_clock_info
+test_time_clocks
 test_time_module
 test_time_ns
 test_traceback_carets
@@ -729,6 +768,7 @@ test_type_repr
 test_type_three_arg
 test_unary
 test_unbound_local
+test_unbound_zero_args
 test_uncallable_bind_lifetime
 test_unicode_case
 test_unicodedata
@@ -736,9 +776,11 @@ test_unicode_names
 test_unicode_numbers
 test_unicode_predicates
 test_unicode
+test_uninstantiable_types
 test_union_flatten
 test_union_generic_alias
 test_union_hash
+test_unittest_package
 test_unpack_dict
 test_unpack_refcount
 test_unpack_spec
@@ -747,7 +789,10 @@ test_utf16_utf32
 test_utf8_validate_boundaries
 test_value_funnel_guards
 test_value_typeconfusion
+test_view_and_slots
+test_warning_registry
 test_warnings_filters
+test_warnings_module
 test_warnings
 test_weakref
 test_weakref_slots_dict

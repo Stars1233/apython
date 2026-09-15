@@ -251,11 +251,45 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     mov r11, [rbp - MV_LEN]
     mov [rax + PyMemoryViewObject.mv_buf], r10
     mov [rax + PyMemoryViewObject.mv_len], r11
+
+    ; The defaults, and then the exporter's own answer if it has one.  An
+    ; array's items are not bytes: without asking, memoryview(array("i", [1,
+    ; 2, 3])) had itemsize 1, format "B", length 12 and tolist() of the
+    ; twelve bytes.  An exporter that does not implement BUF_GETINFO answers
+    ; 0 and keeps exactly what was assumed of every exporter before the mode
+    ; existed.
     mov qword [rax + PyMemoryViewObject.mv_itemsize], 1
     mov qword [rax + PyMemoryViewObject.mv_stride], 1
     lea rcx, [rel mv_format_B]
     mov [rax + PyMemoryViewObject.mv_format], rcx
     mov qword [rax + PyMemoryViewObject.mv_readonly], 1
+
+    push rax
+    push rax                        ; an even count keeps rsp 16-aligned
+    mov rdi, [rbp - MV_ARG]
+    mov rcx, [rdi + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_buffer]
+    mov esi, BUF_GETINFO
+    call rcx                        ; rax = format cstr or 0, rdx = itemsize,
+                                    ; ecx = 1 when writable
+    mov r10, rax
+    mov r11, rdx
+    mov r8d, ecx
+    pop rax
+    pop rax
+    test r10, r10
+    jz .mv_slot_defaults
+    mov [rax + PyMemoryViewObject.mv_format], r10
+    mov [rax + PyMemoryViewObject.mv_itemsize], r11
+    ; mv_stride stays 1: it is a multiplier in ITEMS, and 1 is what
+    ; c_contiguous answers with -- not a byte stride.
+    xor ecx, ecx
+    test r8d, r8d
+    jnz .mv_slot_writable
+    mov ecx, 1
+.mv_slot_writable:
+    mov [rax + PyMemoryViewObject.mv_readonly], rcx
+.mv_slot_defaults:
     mov edx, TAG_PTR
     leave
     ret

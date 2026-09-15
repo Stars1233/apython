@@ -147,6 +147,31 @@ def warn(message, category=None, stacklevel=1, source=None, *,
                   source=source)
 
 
+def _already_warned(registry, key, should_set=False):
+    """-> True when this warning has been shown under the CURRENT filters.
+
+    The registry remembers what "once", "module" and "default" have already
+    shown, and that memory has to be thrown away whenever the filters change
+    -- otherwise a filter installed after a warning was seen can never show
+    it, and every `with warnings.catch_warnings():` block changes the filters
+    twice.  CPython stamps the registry with a version counter and CLEARS THE
+    WHOLE DICT when the stamp no longer matches.
+
+    This module wrote the stamp and never compared it, so the registry was
+    permanent: a "default" filter turned on after anything had warned from
+    the same line showed nothing at all, and nothing raised.
+    """
+    version = registry.get("version")
+    if type(version) is not int or version != _filters_version:
+        registry.clear()
+        registry["version"] = _filters_version
+    elif registry.get(key):
+        return True
+    if should_set:
+        registry[key] = True
+    return False
+
+
 def warn_explicit(message, category, filename, lineno, module=None,
                   registry=None, module_globals=None, source=None):
     """The whole of the action protocol, which used to be only "ignore".
@@ -169,32 +194,41 @@ def warn_explicit(message, category, filename, lineno, module=None,
         # it, and a recorded warning's .message is the instance -- which is
         # what a test reads .args off.
         message = category(text)
+    key = (text, category, lineno)
+    # The registry is consulted BEFORE the filters are, which is CPython's
+    # order and the reason the version stamp exists at all.
+    if registry is not None and _already_warned(registry, key):
+        return
     action = _find_action(message, category, module, lineno)
     if action == "ignore":
         return
-    key = (text, category, lineno)
-    if registry is not None:
-        if registry.get(key):
-            return
-        registry["version"] = _filters_version
     if action == "error":
         if isinstance(message, Warning):
             raise message
         raise category(message)
-    if action == "once":
+
+    # "Store in the registry that we've been here, except when the action is
+    # always."  The second key -- (text, category), with no line -- is what
+    # makes "once" and "module" forget the line, and consulting it is what
+    # suppresses the second occurrence.
+    rc = 0
+    if action != "always":
         if registry is not None:
-            registry[key] = 1
-        oncekey = (text, category)
-        once = _live("onceregistry", _onceregistry)
-        if once.get(oncekey):
-            return
-        once[oncekey] = 1
-    elif action == "module":
-        if registry is not None:
-            registry[key] = 1
-    elif action == "default":
-        if registry is not None:
-            registry[key] = 1
+            registry[key] = True
+        if action == "once":
+            once = registry
+            if once is None:
+                once = _live("onceregistry", _onceregistry)
+            rc = _already_warned(once, (text, category), should_set=True)
+        elif action == "module":
+            if registry is not None:
+                rc = _already_warned(registry, (text, category),
+                                     should_set=True)
+        elif action != "default":
+            raise RuntimeError("Unrecognized action (%r) in warnings.filters"
+                               % (action,))
+    if rc:
+        return
     line = _source_line(filename, lineno)
     mod = sys.modules.get("warnings")
     show = getattr(mod, "showwarning", None) if mod is not None else None

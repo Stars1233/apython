@@ -504,6 +504,20 @@ DEF_FUNC exc_getattr
     test edx, edx
     jnz .found_in_dict
 .uni_from_args:
+    ; A TRANSLATE error has four arguments, not five: there is no codec, so
+    ; args is (object, start, end, reason).  Reading it at the five-argument
+    ; offsets made UnicodeTranslateError("ab", 0, 1, "r").object answer 0 and
+    ; .end answer "r" -- which is what every error handler reads to find the
+    ; span it must replace, so a translate error's handler got nonsense.
+    mov rdi, rbx
+    lea rsi, [rel exc_UnicodeTranslateError_type]
+    call exc_isinstance
+    test eax, eax
+    jz .uni_have_index
+    test r14d, r14d
+    jz .return_none             ; no `encoding` on a translate error
+    dec r14d
+.uni_have_index:
     mov rax, [rbx + PyExceptionObject.exc_args]
     test rax, rax
     jz .return_none

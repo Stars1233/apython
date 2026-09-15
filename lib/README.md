@@ -14,9 +14,9 @@ repository (`../LICENSE`).
 
 | Origin | Files |
 |---|---|
-| CPython, unmodified | `abc.py`, `ast.py`, `_collections_abc.py`, `collections/abc.py`, `contextlib.py`, `copyreg.py`, `enum.py`, `functools.py`, `genericpath.py`, `os.py`, `posixpath.py`, `re/`, `reprlib.py`, `selectors.py`, `socket.py`, `stat.py`, `types.py` |
+| CPython, unmodified | `__future__.py`, `abc.py`, `argparse.py`, `ast.py`, `bisect.py`, `codecs.py`, `_collections_abc.py`, `collections/`, `calendar.py`, `_compat_pickle.py`, `contextlib.py`, `contextvars.py`, `copyreg.py`, `dataclasses.py`, `datetime.py`, `_pydatetime.py`, `difflib.py`, `dis.py`, `enum.py`, `fnmatch.py`, `functools.py`, `genericpath.py`, `gettext.py`, `heapq.py`, `importlib/`, `inspect.py`, `keyword.py`, `linecache.py`, `locale.py`, `opcode.py`, `operator.py`, `os.py`, `pickle.py`, `pkgutil.py`, `posixpath.py`, `pprint.py`, `random.py`, `re/`, `reprlib.py`, `selectors.py`, `shutil.py`, `socket.py`, `stat.py`, `string.py`, `_strptime.py`, `struct.py`, `textwrap.py`, `threading.py`, `token.py`, `tokenize.py`, `traceback.py`, `types.py`, `typing.py`, `unittest/`, `warnings.py`, `weakref.py`, `_weakrefset.py` |
 | Generated from CPython | `_ast.py` |
-| CPython, modified for apython | `__future__.py`, `collections/`, `copy.py`, `io.py`, `operator.py`, `pickle.py`, `string.py`, `unittest/`, `warnings.py`, `test/` |
+| CPython, modified for apython | `copy.py`, `io.py`, `test/` |
 | Written for apython | `_ast_build.py`, `atexit.py`, `binascii.py`, `_codecs.py`, `_collections.py`, `_contextvars.py`, `_io.py`, `itertools.py`, `_operator.py`, `_random.py`, `select.py`, `_socket.py`, `_string.py`, `_struct.py`, `_thread.py`, `_tokenize.py` , `faulthandler.py`|
 
 `re/` is the wrapper around the `_sre` engine, which is assembly.  It comes
@@ -34,6 +34,24 @@ and, more to the point, their ORDER are what `ast.dump` and every
 reason.  `_ast_build.py` beside it is hand-written: it is the half that turns
 apython's own parse tree into those classes, and keeping it in its own module
 is what lets `make regen` rewrite `_ast.py` wholesale.
+
+`unittest/` came over whole, and with it the dependency closure a modern
+test package has: traceback and linecache under the failure reports, inspect
+and dis under the signatures, difflib and pprint under the assertion
+messages, argparse and gettext under the command-line runner, and typing,
+dataclasses, weakref, shutil and the rest under mock.  Each of those is a
+module a program written for CPython expects to have, so the closure is a
+gain rather than a cost.
+
+`threading.py` is CPython's and runs unchanged on `_thread.py`, the
+single-threaded stand-in: every primitive one thread can observe works --
+RLock, Event, Condition, Semaphore, local, current_thread -- and
+`Thread.start()` raises rather than pretending.  Threads themselves are
+deferred; see DIVERGENCES.md.
+
+`importlib/` is here because inspect and pkgutil import it, not because it
+runs the import system: that is assembly, and `sys.meta_path` holds
+apython's own finder.
 
 The apython files stand in for CPython C extension modules of the same name;
 they are covered by the repository's MIT license.  Each carries a docstring

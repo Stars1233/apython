@@ -30,6 +30,9 @@ extern list_append
 extern tuple_new
 extern type_type
 extern module_new
+extern obj_call_n
+extern obj_getattr_opt
+extern dunder_call_1
 extern fileobj_new
 extern builtin_func_new
 extern fatal_error
@@ -287,8 +290,30 @@ DEF_FUNC_LOCAL sm_add_exe_paths, SME_FRAME
     SME_ADD_DIR "prefix"
     SME_ADD_DIR "exec_prefix"
     SME_ADD_DIR "base_prefix"
-    CSTRING rdi, "base_exec_prefix"
+    SME_ADD_DIR "base_exec_prefix"
+
+    ; sys._stdlib_dir is where the modules this interpreter SHIPS live, which
+    ; is lib/ beside the binary -- the same directory import_init appends to
+    ; sys.path.  CPython's names the installed stdlib and platform reads it.
     mov rsi, [rbp - SME_DIR]
+    mov rdx, [rsi + PyStrObject.ob_size]
+    lea rsi, [rsi + PyStrObject.data]
+    lea rdi, [rbp - SME_BUF]
+    extern ap_memcpy
+    call ap_memcpy
+    mov rax, [rbp - SME_DIR]
+    mov rax, [rax + PyStrObject.ob_size]
+    lea rcx, [rbp - SME_BUF]
+    mov byte [rcx + rax], '/'
+    mov byte [rcx + rax + 1], 'l'
+    mov byte [rcx + rax + 2], 'i'
+    mov byte [rcx + rax + 3], 'b'
+    mov byte [rcx + rax + 4], 0
+    lea rdi, [rbp - SME_BUF]
+    lea rsi, [rax + 4]
+    call str_new_heap
+    mov rsi, rax
+    CSTRING rdi, "_stdlib_dir"
     mov rdx, [rbp - SME_DICT]
     call sm_add_owned
 
@@ -494,6 +519,48 @@ DEF_FUNC sys_module_init, 40
     call obj_decref
     mov rdi, r13            ; DECREF sys.argv (dict_set INCREF'd)
     call obj_decref
+
+    ; --- sys.orig_argv ---
+    ; Every token the process was started with, interpreter and flags
+    ; included, where sys.argv starts at the script.  CPython's is how a
+    ; program re-execs itself with the same options, and platform and
+    ; multiprocessing both read it.  main shifts argv past the flags it
+    ; consumed, so this is what is LEFT of the original -- the honest answer
+    ; from here, and enough for the re-exec it exists for.
+    xor edi, edi
+    call list_new
+    mov r13, rax
+    extern main_orig_argc
+    extern main_orig_argv
+    mov rcx, [rel main_orig_argc]
+    mov rdx, [rel main_orig_argv]
+    test rdx, rdx
+    jz .oargv_done              ; not started from main: nothing to report
+    xor ebx, ebx                ; from index 0: the interpreter itself
+.oargv_loop:
+    cmp rbx, rcx
+    jge .oargv_done
+    push rcx
+    push rdx
+    push rbx
+    mov rdi, [rdx + rbx * 8]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r13
+    mov rsi, rax
+    call list_append
+    pop rdi
+    call obj_decref
+    pop rbx
+    pop rdx
+    pop rcx
+    inc rbx
+    jmp .oargv_loop
+.oargv_done:
+    lea rdi, [rel sm_orig_argv]
+    mov rsi, r13
+    mov rdx, r15
+    call sm_add_owned
 
     ; --- sys.maxsize ---
     mov rdi, 0x7fffffffffffffff
@@ -786,7 +853,9 @@ DEF_FUNC sys_module_init, 40
     ; --- sys.implementation ---
     ; types.py takes SimpleNamespace from `type(sys.implementation)`, so this
     ; has to be a namespace rather than a tuple or a dict.  cache_tag is what
-    ; a loader uses to find .pyc files, and apython reads CPython 3.12 ones.
+    ; a loader uses to NAME a .pyc, so it is this interpreter's own: apython
+    ; reads CPython 3.12's caches as well, but it must not write under their
+    ; name, or a python3 in the same tree picks up bytecode from our compiler.
     ; r14/r15 belong to the module dicts here, so the namespace lives in a
     ; frame slot.
     extern namespace_new
@@ -1183,9 +1252,17 @@ DEF_FUNC sys_module_init, 40
     lea rsi, [rel sm_short]
     mov rdx, r15
     call sm_add_str
-    ; Nothing in this tree writes a .pyc -- import.asm only reads them and
-    ; marshal has no writer -- so this is a fact, not a switch.
+    ; import.asm caches what it compiles, so this is a switch now rather than
+    ; a fact.  -B is the initial value; a program may set it either way, and
+    ; pyc_write_cache reads it back on every write.
+    extern main_no_bytecode
+    cmp byte [rel main_no_bytecode], 0
+    jne .sm_no_bytecode
+    SYS_ADD_OBJ sm_dont_write_bytecode, bool_false
+    jmp .sm_bytecode_done
+.sm_no_bytecode:
     SYS_ADD_OBJ sm_dont_write_bytecode, bool_true
+.sm_bytecode_done:
     ; None, and importlib._bootstrap_external reads it on every path it
     ; caches -- unguarded, so its absence stopped importlib installing its
     ; own finders and left sys.meta_path empty.
@@ -1230,6 +1307,15 @@ DEF_FUNC sys_module_init, 40
     extern sys_getframemodulename_func
     SYS_ADD_FUNC sys_getframe_func, sm_getframe
     SYS_ADD_FUNC sys_getframemodulename_func, sm_getframemodulename
+    SYS_ADD_FUNC sys_getsizeof_func, sm_getsizeof
+    SYS_ADD_FUNC sys_clear_type_cache_func, sm_clear_type_cache
+    extern sys_current_frames_func
+    SYS_ADD_FUNC sys_current_frames_func, sm_current_frames
+    ; breakpointhook and __breakpointhook__ are ONE object, as excepthook and
+    ; __excepthook__ are: `sys.breakpointhook is sys.__breakpointhook__` is
+    ; how a program asks whether a debugger has replaced it.
+    SYS_ADD_FUNC_ALIAS sys_breakpointhook_func, sm_breakpointhook, \
+                       sm_dunder_breakpointhook
 
     ; --- the tracing hooks ---
     ;
@@ -1298,6 +1384,71 @@ DEF_FUNC sys_module_init, 40
     pop rdi
     call obj_decref
 
+    ; --- the attributes a program asks for by name -----------------------
+    ;
+    ; None of these is decoration.  test.support and regrtest read _xoptions
+    ; and _git on the way in, so their absence stopped fifty-five and
+    ; twenty-seven of CPython's tests before any of them ran; api_version,
+    ; orig_argv and _stdlib_dir are read by platform, and __spec__,
+    ; __loader__ and __package__ are what every module HAS -- sys is built by
+    ; hand here and never goes through import_load_module, which is the only
+    ; reason it had none.
+    SYS_ADD_INT sm_api_version, 1013
+
+    ; -X options: an empty dict, and it has to BE a dict.  test.support does
+    ; `sys._xoptions.get(...)`, and absent is an AttributeError a dozen
+    ; modules do not survive.
+    call dict_new
+    lea rdi, [rel sm_xoptions]
+    mov rsi, rax
+    mov rdx, r15
+    call sm_add_owned
+
+    ; sys._git is (implementation, branch, revision).  CPython's carries its
+    ; own repository's; this names itself and leaves the other two empty,
+    ; which is the shape and the only honest content.
+    mov edi, 3
+    call tuple_new
+    push rax
+    lea rdi, [rel sm_apython]
+    call str_from_cstr_heap
+    mov rcx, [rsp]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx], rax
+    lea rdi, [rel sm_empty]
+    call str_from_cstr_heap
+    mov rcx, [rsp]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx + 8], rax
+    lea rdi, [rel sm_empty]
+    call str_from_cstr_heap
+    mov rcx, [rsp]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx + 16], rax
+    pop rsi
+    lea rdi, [rel sm_git]
+    mov rdx, r15
+    call sm_add_owned
+
+    ; The three every module has.  __spec__ is None here for the same reason
+    ; it is None on an imported module -- nothing builds a ModuleSpec, which
+    ; bugs.md records -- and __package__ is "" for a top-level module.
+    SYS_ADD_OBJ sm_dunder_spec, none_singleton
+    SYS_ADD_OBJ sm_dunder_loader, none_singleton
+    lea rdi, [rel sm_dunder_package]
+    lea rsi, [rel sm_empty]
+    mov rdx, r15
+    call sm_add_str
+
+    ; sys.stdlib_module_names is deliberately NOT here.  It is a frozenset
+    ; whose whole use is membership -- code asks whether a name is the
+    ; standard library's -- and the only set this tree can build honestly is
+    ; the builtin modules plus lib/'s C stand-ins.  `"os" in
+    ; sys.stdlib_module_names` would then be False, which is a wrong answer
+    ; where an AttributeError is merely a missing one; that is the
+    ; half-implemented-is-worse shape.  A complete list means a generated
+    ; table of what lib/ ships, which is `make regen` work.
+
     ; --- Create the sys module object ---
     lea rdi, [rel sm_sys]
     call str_from_cstr_heap
@@ -1325,6 +1476,200 @@ DEF_FUNC sys_module_init, 40
     leave
     ret
 END_FUNC sys_module_init
+
+;; ============================================================================
+;; sys.getsizeof(o[, default]) -> int
+;;
+;; CPython calls type(o).__sizeof__(o), so a type that overrides it is
+;; honoured; this does the same, through dunder_call_1.
+;; test.support.check_sizeof is written on it and
+;; lib/_testinternalcapi.py's SIZEOF_PYGC_HEAD is added to what it answers,
+;; so its absence stopped a dozen of CPython's test modules before their
+;; first test.
+;;
+;; object.__sizeof__ answers tp_basicsize and nothing more.  CPython adds
+;; ob_size * tp_itemsize for a variable-size type, and there is no
+;; tp_itemsize in this tree's PyTypeObject -- the types that carry their data
+;; inline each know their own stride and nothing central records it -- so a
+;; str, a tuple and a bytes all report the header alone.  DIVERGENCES.md
+;; records it; what reads this wants an int, and one that a type can override.
+;;
+;; The default argument is reached only when there is no __sizeof__ at all,
+;; which is what CPython uses it for too.
+;; ============================================================================
+SGS_ARGS  equ 8
+SGS_NARGS equ 16
+SGS_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC sys_getsizeof_func, SGS_FRAME
+    test rsi, rsi
+    jz .sgs_args
+    mov [rbp - SGS_ARGS], rdi
+    mov [rbp - SGS_NARGS], rsi
+    mov rdi, [rdi]              ; args[0], as a Value
+    ; dunder_call_1 takes a POINTER.  An immediate is its own Value and has no
+    ; object to look a dunder up on, so its own type answers for it: the size
+    ; of the PyIntObject or PyFloatObject it would have needed on the heap.
+    V_TEST_PTR rdi, rcx
+    ja .sgs_immediate
+    test rdi, rdi
+    jz .sgs_immediate
+    CSTRING rsi, "__sizeof__"
+    call dunder_call_1
+    test rax, rax
+    jz .sgs_no_sizeof
+    ; CPython adds the collector's header when the object is tracked, and
+    ; test.support.check_sizeof adds it back on the other side -- so the
+    ; relationship between getsizeof and __sizeof__ has to hold even where
+    ; the absolute numbers cannot.
+    mov rdi, [rbp - SGS_ARGS]
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rcx
+    ja .sgs_ret
+    test rdi, rdi
+    jz .sgs_ret
+    mov rcx, [rdi + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .sgs_ret
+    push rax
+    mov rdi, rax
+    V_UNPACK rdi, rdx
+    extern int_to_i64
+    call int_to_i64
+    add rax, GC_HEAD_SIZE
+    mov rdi, rax
+    call int_from_i64
+    V_PACK rax, rdx
+    mov [rsp], rax
+    pop rax
+.sgs_ret:
+    leave
+    ret                         ; already a Value
+.sgs_immediate:
+    mov rdi, [rbp - SGS_ARGS]
+    mov rdi, [rdi]
+    extern value_type
+    call value_type
+    test rax, rax
+    jz .sgs_no_sizeof
+    mov rdi, [rax + PyTypeObject.tp_basicsize]
+    call int_from_i64
+    leave
+    V_PACK rax, rdx
+    ret
+
+.sgs_no_sizeof:
+    ; Absent, not callable, or it raised.  A default was given, or this is
+    ; the TypeError CPython gives.
+    cmp qword [rbp - SGS_NARGS], 2
+    jl .sgs_no_default
+    extern current_exception
+    mov qword [rel current_exception], 0
+    mov rdi, [rbp - SGS_ARGS]
+    mov rax, [rdi + 8]
+    INCREF_V rax, rdx
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+.sgs_no_default:
+    RAISE exc_TypeError_type, "getsizeof() argument has no __sizeof__"
+.sgs_args:
+    RAISE exc_TypeError_type, "getsizeof() takes at least 1 argument"
+END_FUNC sys_getsizeof_func
+
+;; ============================================================================
+;; sys._clear_type_cache() -> None
+;;
+;; The method cache is an invisible optimisation, and a test that changes a
+;; class and asks whether the change took effect has to be able to empty it.
+;; test_type_cache and test_descr both call this.
+;; ============================================================================
+DEF_FUNC sys_clear_type_cache_func
+    extern type_cache_clear
+    call type_cache_clear
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC sys_clear_type_cache_func
+
+;; ============================================================================
+;; sys.breakpointhook(*args, **kwargs) -> whatever pdb.set_trace answers
+;;
+;; What breakpoint() calls.  CPython's default reads $PYTHONBREAKPOINT, and
+;; imports and calls whatever it names; the built-in default is
+;; pdb.set_trace.  The environment variable is not honoured here -- that is
+;; an import of an arbitrary dotted name -- and "0" is not either; what is
+;; honoured is the hook being REPLACEABLE, which is what a debugger and every
+;; test of one actually use.
+;;
+;; builtin_breakpoint used to be a no-op, so breakpoint() silently did
+;; nothing at all.
+;; ============================================================================
+DEF_FUNC sys_breakpointhook_func
+    extern import_module
+    extern str_from_cstr_heap
+    CSTRING rdi, "pdb"
+    call str_from_cstr_heap
+    test rax, rax
+    jz .sbh_none
+    mov rdi, rax
+    push rdi
+    xor esi, esi
+    xor edx, edx
+    call import_module
+    pop rdi
+    push rax
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .sbh_none
+    push rax
+    CSTRING rdi, "set_trace"
+    call str_from_cstr_heap
+    mov rsi, rax
+    mov rdi, [rsp]
+    push rsi
+    call obj_getattr_opt
+    pop rdi
+    push rax
+    call obj_decref
+    pop rax
+    pop rdi                     ; the module
+    push rax
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .sbh_none
+    mov rdi, rax
+    push rdi
+    xor esi, esi
+    xor edx, edx
+    call obj_call_n
+    pop rdi
+    push rax
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .sbh_raised
+    leave
+    ret
+.sbh_raised:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
+.sbh_none:
+    ; No pdb, or it would not import.  Answer None rather than raising: a
+    ; breakpoint() in a program with no debugger available should not stop it.
+    extern current_exception
+    mov qword [rel current_exception], 0
+    lea rax, [rel none_singleton]
+    INCREF rax
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC sys_breakpointhook_func
 
 ;; ============================================================================
 ;; sys.getrecursionlimit() / sys.setrecursionlimit(n)
@@ -1662,7 +2007,7 @@ sm_implementation: db "implementation", 0
 sm_name:         db "name", 0
 sm_apython_name: db "apython", 0
 sm_cache_tag:    db "cache_tag", 0
-sm_cache_tag_val: db "cpython-312", 0
+sm_cache_tag_val: db "apython-312", 0
 sm_warnoptions:  db "warnoptions", 0
 sm_builtin_module_names: db "builtin_module_names", 0
 
@@ -1725,6 +2070,19 @@ sm_dunder_stdout: db "__stdout__", 0
 sm_dunder_stderr: db "__stderr__", 0
 sm_dunder_stdin:  db "__stdin__", 0
 sm_getframe:     db "_getframe", 0
+sm_getsizeof:    db "getsizeof", 0
+sm_orig_argv:    db "orig_argv", 0
+sm_clear_type_cache: db "_clear_type_cache", 0
+sm_current_frames: db "_current_frames", 0
+sm_breakpointhook: db "breakpointhook", 0
+sm_dunder_breakpointhook: db "__breakpointhook__", 0
+sm_api_version:  db "api_version", 0
+sm_xoptions:     db "_xoptions", 0
+sm_git:          db "_git", 0
+sm_apython:      db "apython", 0
+sm_dunder_spec:  db "__spec__", 0
+sm_dunder_loader: db "__loader__", 0
+sm_dunder_package: db "__package__", 0
 sm_getframemodulename: db "_getframemodulename", 0
 sm_settrace:     db "settrace", 0
 sm_gettrace:     db "gettrace", 0

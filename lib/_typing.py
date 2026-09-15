@@ -306,7 +306,7 @@ class _GenericAlias:
 
     def __repr__(self):
         inner = ", ".join(_type_repr(a) for a in self.__args__)
-        return "%r[%s]" % (self.__origin__, inner)
+        return "%s[%s]" % (_type_repr(self.__origin__), inner)
 
     def __eq__(self, other):
         if not isinstance(other, _GenericAlias):
@@ -354,15 +354,22 @@ def _typevar(name):
 
 
 def _typevar_with_bound(name, evaluate_bound):
-    """INTRINSIC_TYPEVAR_WITH_BOUND: `T: int`, the bound a lazy thunk."""
-    tv = TypeVar(name)
+    """INTRINSIC_TYPEVAR_WITH_BOUND: `T: int`, the bound a lazy thunk.
+
+    Its variance is inferred, as every PEP 695 parameter's is -- which is
+    what makes its repr `T` rather than the `~T` an explicitly-declared
+    typing.TypeVar gets.  _typevar says the same and this did not.
+    """
+    tv = TypeVar(name, infer_variance=True)
     tv._evaluate_bound = evaluate_bound
     return tv
 
 
 def _typevar_with_constraints(name, evaluate_constraints):
-    """INTRINSIC_TYPEVAR_WITH_CONSTRAINTS: `T: (int, str)`, likewise lazy."""
-    tv = TypeVar(name)
+    """INTRINSIC_TYPEVAR_WITH_CONSTRAINTS: `T: (int, str)`, likewise lazy,
+    and with the variance inferred for the reason _typevar_with_bound gives.
+    """
+    tv = TypeVar(name, infer_variance=True)
     tv._evaluate_constraints = evaluate_constraints
     return tv
 
@@ -390,10 +397,23 @@ def _typealias(args):
 
 
 def _subscript_generic(params):
-    """INTRINSIC_SUBSCRIPT_GENERIC: `Generic[T, ...]` for a generic class."""
+    """INTRINSIC_SUBSCRIPT_GENERIC: `Generic[T, ...]` for a generic class.
+
+    The Generic this uses is `typing`'s when typing can be imported, which is
+    what CPython does -- its intrinsic caches typing.Generic on the
+    interpreter state and imports the module to get it.  It matters: a
+    program that asks `issubclass(C, typing.Generic)`, or runs C past
+    typing.get_type_hints or Protocol, is asking about THAT class and not
+    about a lookalike.  The one below is the fallback for an interpreter with
+    no typing on its path, which is what this module is for.
+    """
     if not isinstance(params, tuple):
         params = (params,)
-    return _GenericAlias(Generic, params)
+    try:
+        from typing import Generic as _real
+    except ImportError:
+        _real = Generic
+    return _GenericAlias(_real, params)
 
 
 def _set_function_type_params(func, params):

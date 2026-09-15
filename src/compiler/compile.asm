@@ -948,6 +948,21 @@ DEF_FUNC compile_ast_raw, CAR_FRAME
     jmp .car_cleanup
 END_FUNC compile_ast_raw
 
+section .bss
+;; PEP 563: whether the code that called compile(), exec() or eval() was
+;; itself compiled under `from __future__ import annotations`.  CPython
+;; inherits the future flags of the calling frame into a nested compile
+;; unless dont_inherit says otherwise, so the three builtins read their
+;; caller's co_flags and leave the answer here.  A global rather than a
+;; parameter because compile_source has four callers that are not builtins --
+;; `./apython foo.py` among them -- and none of them has a frame to inherit
+;; from.  CONSUMED by the next compile, so it can never leak into one that
+;; did not ask.
+global comp_inherit_future
+comp_inherit_future: resq 1
+section .text
+
+
 ;; compile_source(const char *src, int64_t len, PyStrObject *filename, int mode)
 ;;   -> rax = PyCodeObject*, or 0 with the exception already pending
 ;;
@@ -990,6 +1005,16 @@ DEF_FUNC compile_source, CS_FRAME
     mov rcx, [rbp - CS_FILE]
     mov r8, [rbp - CS_MODE]
     call comp_init
+
+    ; PEP 563 is inherited from the code that called compile()/exec()/eval(),
+    ; which is CPython's rule.  Consumed here, so it cannot leak into a
+    ; compile that did not ask.
+    mov rax, [rel comp_inherit_future]
+    mov qword [rel comp_inherit_future], 0
+    test rax, rax
+    jz .cs_no_inherit
+    mov dword [rbx + Comp.future_anno], 1
+.cs_no_inherit:
 
     lea r12, [rbp - CS_UNIT]
     mov rdi, r12
@@ -1048,6 +1073,12 @@ DEF_FUNC compile_source, CS_FRAME
     mov [r12 + CompUnit.scope], eax
     mov [r12 + CompUnit.comp], rbx
     mov [rbx + Comp.cur_scope], eax
+    ; The future import is parsed by now, so the module's code object can
+    ; carry the flag a nested compile() reads back.
+    cmp dword [rbx + Comp.future_anno], 0
+    je .cs_no_future_flag
+    or dword [r12 + CompUnit.flags], CO_FUTURE_ANNOTATIONS
+.cs_no_future_flag:
     mov rdi, rbx
     mov rsi, rax
     xor edx, edx                        ; a module has no parameters
@@ -2149,6 +2180,35 @@ DEF_FUNC ev_run_code, RC_FRAME
 END_FUNC ev_run_code
 
 ;; ============================================================================
+;; comp_note_caller_future() -> nothing
+;;
+;; Seeds comp_inherit_future from the code object of the frame that called
+;; compile(), exec() or eval().  CPython inherits the caller's __future__
+;; flags into a nested compile unless dont_inherit says otherwise, so
+;;
+;;     from __future__ import annotations
+;;     exec("def f(x: Missing): pass", ns)
+;;
+;; stores 'Missing' rather than raising NameError -- and without this the
+;; two halves of one file disagreed about what an annotation is.
+;; ============================================================================
+DEF_FUNC_LOCAL comp_note_caller_future
+    mov qword [rel comp_inherit_future], 0
+    mov rax, [rel eval_saved_r12]
+    test rax, rax
+    jz .cncf_done
+    mov rax, [rax + PyFrame.code]
+    test rax, rax
+    jz .cncf_done
+    test dword [rax + PyCodeObject.co_flags], CO_FUTURE_ANNOTATIONS
+    jz .cncf_done
+    mov qword [rel comp_inherit_future], 1
+.cncf_done:
+    leave
+    ret
+END_FUNC comp_note_caller_future
+
+;; ============================================================================
 ;; builtin_eval_fn(args, nargs) -> Value
 ;; ============================================================================
 DEF_FUNC builtin_eval_fn, EV_FRAME
@@ -2221,6 +2281,7 @@ DEF_FUNC builtin_eval_fn, EV_FRAME
     call str_from_cstr_heap
     mov [rbp - EV_CODE], rax            ; parked: the filename, "<string>"
 
+    call comp_note_caller_future        ; PEP 563 is inherited; see the helper
     mov rdi, r12
     mov rsi, r13
     mov rdx, [rbp - EV_CODE]
@@ -2529,6 +2590,7 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     mov ecx, CMODE_SINGLE
 .have_mode:
     mov [rbp - CO_MODE], rcx
+    call comp_note_caller_future        ; PEP 563 is inherited; see the helper
     mov rdi, [rbp - CO_SRC]
     mov rsi, [rbp - CO_SRCLEN]
     mov rdx, r12
@@ -2668,6 +2730,7 @@ DEF_FUNC builtin_exec_fn, EV_FRAME
     lea rdi, [rel ev_string_name]
     call str_from_cstr_heap
     mov [rbp - EV_CODE], rax
+    call comp_note_caller_future        ; PEP 563 is inherited; see the helper
     mov rdi, r12
     mov rsi, r13
     mov rdx, [rbp - EV_CODE]

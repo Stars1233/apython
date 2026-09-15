@@ -22,10 +22,23 @@ def index(a):
         raise TypeError("'%s' object cannot be interpreted as an integer"
                         % (type(a).__name__,)) from None
     result = method(a)
+    if type(result) is int:
+        return result
     if not isinstance(result, int):
         raise TypeError("__index__ returned non-int (type %s)"
                         % (type(result).__name__,))
-    return result
+    # A STRICT subclass of int is accepted, deprecated, and converted --
+    # PyNumber_Index returns an exact int, so `operator.index(x)` whose
+    # __index__ answered a subclass instance handed the subclass straight
+    # back, and the deprecation a test suite turns into an error never fired.
+    import warnings
+
+    warnings.warn(
+        "__index__ returned non-int (type %s).  The ability to return an "
+        "instance of a strict subclass of int is deprecated, and may be "
+        "removed in a future version of Python." % (type(result).__name__,),
+        DeprecationWarning, stacklevel=2)
+    return int(result)
 
 
 def _compare_digest(a, b):

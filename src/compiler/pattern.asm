@@ -838,7 +838,8 @@ MP_LINE  equ 8
 MP_MARK  equ 16
 MP_REST  equ 24
 MP_NODE  equ 32
-MP_FRAME equ 40           ; + 1 push = 48
+MP_KEY   equ 40           ; the key expression, across its two checks
+MP_FRAME equ 56           ; + 1 push = 64
 DEF_FUNC_LOCAL par_mapping_pattern, MP_FRAME
     push rbx
     mov rbx, rdi
@@ -860,15 +861,32 @@ DEF_FUNC_LOCAL par_mapping_pattern, MP_FRAME
     cmp eax, TOK_DOUBLESTAR
     je .rest
 
-    ; The key is an ordinary expression -- a literal or a dotted name -- and
-    ; never a pattern: `{"k": v}` looks up "k" rather than matching against it.
+    ; The key is a VALUE, not a pattern: `{"k": v}` looks up "k" rather than
+    ; matching against it.  CPython's grammar admits exactly what a value
+    ; pattern admits -- a literal, a signed number, a complex literal, or a
+    ; dotted name -- so it is parsed and checked by the same pair, and a key
+    ; that is none of those is refused here rather than three passes later.
+    ; par_expr with BP_TERNARY accepted every expression there is, and the
+    ; codegen then took only AST_CONST: `{Color.RED: v}` was "a mapping
+    ; pattern's keys must be literals", and so were `{-1: v}` and
+    ; `{1+2j: v}`, which CPython compiles.
     mov rdi, rbx
-    mov esi, BP_TERNARY
-    call par_expr
+    call par_pattern_value_expr
     test rax, rax
     jz .fail
+    mov [rbp - MP_KEY], rax
     mov rdi, rbx
     mov rsi, rax
+    call pat_complex_ok
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, [rbp - MP_KEY]
+    call pat_mapping_key_ok
+    test eax, eax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, [rbp - MP_KEY]
     call ast_push
     mov rdi, rbx
     mov esi, TOK_COLON
@@ -933,6 +951,62 @@ DEF_FUNC_LOCAL par_mapping_pattern, MP_FRAME
     leave
     ret
 END_FUNC par_mapping_pattern
+
+;; ============================================================================
+;; pat_mapping_key_ok(Comp *c, uint32_t node) -> eax = 1 legal, 0 and reported
+;;
+;; CPython's grammar writes a mapping pattern's key as
+;;   key_value_pattern: (literal_expr | attr) ':' pattern
+;; so a bare NAME, a call, a display and a parenthesised tuple are each a
+;; parse error there.  This tree parses the key with the same routine a value
+;; pattern uses, which admits one more shape than the grammar does, so the
+;; shape is checked here -- the same division par_value_pattern already uses
+;; for `case 1 * 2:`.
+;;
+;; `attr` is a dotted name and must have at least one dot: `{x: v}` is not a
+;; key, because a bare name in pattern position is a CAPTURE everywhere else
+;; and would read as one here.
+;; ============================================================================
+PMK_FRAME equ 8           ; + 1 push = 16, 16-aligned
+DEF_FUNC_LOCAL pat_mapping_key_ok, PMK_FRAME
+    push rbx
+    mov rbx, rdi
+    mov rdi, rbx
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_CONST
+    je .pmk_ok
+    cmp ecx, AST_BINOP
+    je .pmk_ok                      ; a complex literal; pat_complex_ok judged it
+    cmp ecx, AST_UNARYOP
+    je .pmk_ok                      ; a signed number, likewise
+.pmk_walk:
+    ; A dotted name, with at least one dot.  A bare NAME is not a key: in
+    ; pattern position it is a CAPTURE everywhere else and would read as one
+    ; here, which is why the grammar spells the alternative `attr`.
+    cmp ecx, AST_ATTRIBUTE
+    jne .pmk_bad
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_at
+    movzx ecx, byte [rax + AstNode.kind]
+    cmp ecx, AST_NAME
+    je .pmk_ok
+    jmp .pmk_walk
+.pmk_bad:
+    mov rdi, rbx
+    CSTRING rsi, "mapping pattern keys may only match literals and attribute lookups"
+    call par_syntax_error
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.pmk_ok:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+END_FUNC pat_mapping_key_ok
 
 ;; ============================================================================
 ;; pat_complex_ok(Comp *c, uint32_t node) -> eax = 1 legal, 0 and reported

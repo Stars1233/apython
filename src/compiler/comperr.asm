@@ -936,3 +936,130 @@ DEF_FUNC_BARE comp_failed
     mov eax, [rdi + Comp.err + CompErr.set]
     ret
 END_FUNC comp_failed
+
+;; ============================================================================
+;; comp_source_span(rdi = Comp*, esi = a node index)
+;;   -> rax = a pointer into Comp.src, rdx = its length; rax = 0 when the
+;;      node carries no end position
+;;
+;; The source text the node was written as, from its start to its end.  What
+;; PEP 563 stores in __annotations__.
+;;
+;; Both ends are (line, column) pairs: the start is in the node itself and the
+;; end in the parallel AstSpan, whose end_lineno is -1 when it was never
+;; recorded -- which is the one case this answers 0 for, so the caller can
+;; fall back to evaluating the annotation as it always did.
+;;
+;; This is a SLICE, not an unparse.  CPython emits the text its own unparser
+;; produces, so `x: (int)` is 'int' there and '(int)' here, and a multi-line
+;; annotation keeps its newlines; DIVERGENCES.md records that.  Everything
+;; the difference costs is cosmetic -- the string still evaluates to the same
+;; object, which is what typing.get_type_hints does with it.
+;; ============================================================================
+CSS_NODE  equ 8
+CSS_ENDL  equ 16
+CSS_ENDC  equ 24
+CSS_START equ 32
+CSS_FRAME equ 40            ; + 1 push = 48, 16-aligned
+global comp_source_span
+DEF_FUNC comp_source_span, CSS_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - CSS_NODE], rsi
+
+    mov rdi, rbx
+    mov esi, [rbp - CSS_NODE]
+    call ast_span_at
+    test rax, rax
+    jz .css_none
+    mov ecx, [rax + AstSpan.end_lineno]
+    cmp ecx, -1
+    je .css_none
+    movsxd rcx, ecx
+    mov [rbp - CSS_ENDL], rcx
+    mov ecx, [rax + AstSpan.end_col]
+    movsxd rcx, ecx
+    mov [rbp - CSS_ENDC], rcx
+
+    mov rdi, rbx
+    mov rsi, [rbp - CSS_NODE]
+    call ast_at
+    test rax, rax
+    jz .css_none
+    mov edx, [rax + AstNode.lineno]
+    mov ecx, [rax + AstNode.col]
+    mov rdi, rbx
+    movsxd rsi, edx
+    movsxd rdx, ecx
+    call css_offset
+    cmp rax, -1
+    je .css_none
+    mov [rbp - CSS_START], rax
+
+    mov rdi, rbx
+    mov rsi, [rbp - CSS_ENDL]
+    mov rdx, [rbp - CSS_ENDC]
+    call css_offset
+    cmp rax, -1
+    je .css_none
+    sub rax, [rbp - CSS_START]
+    jle .css_none
+    mov rdx, rax
+    mov rax, [rbx + Comp.src]
+    add rax, [rbp - CSS_START]
+    pop rbx
+    leave
+    ret
+.css_none:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+END_FUNC comp_source_span
+
+;; ============================================================================
+;; css_offset(rdi = Comp*, rsi = a 1-based line, rdx = a 0-based column)
+;;   -> rax = the byte offset into Comp.src, or -1
+;;
+;; The column is a BYTE offset within the line, which is what the lexer
+;; records; a source with a multi-byte character before the annotation is
+;; therefore sliced correctly without any code-point arithmetic.
+;; ============================================================================
+CSO_COL   equ 8
+CSO_FRAME equ 16            ; + 1 push = 24... 16 + 8 = 24, so pad
+DEF_FUNC_LOCAL css_offset, 8
+    push rbx
+    mov rbx, rdi
+    cmp rsi, 1
+    jl .cso_none
+    mov r8, [rbx + Comp.src]
+    test r8, r8
+    jz .cso_none
+    xor ecx, ecx                        ; byte position
+    mov r9d, 1                          ; current line
+.cso_scan:
+    cmp r9, rsi
+    jae .cso_at_line
+    cmp rcx, [rbx + Comp.srclen]
+    jae .cso_none
+    cmp byte [r8 + rcx], 10
+    jne .cso_next
+    inc r9
+.cso_next:
+    inc rcx
+    jmp .cso_scan
+.cso_at_line:
+    add rcx, rdx
+    cmp rcx, [rbx + Comp.srclen]
+    ja .cso_none
+    mov rax, rcx
+    pop rbx
+    leave
+    ret
+.cso_none:
+    mov rax, -1
+    pop rbx
+    leave
+    ret
+END_FUNC css_offset

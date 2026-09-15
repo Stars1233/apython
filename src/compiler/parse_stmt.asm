@@ -31,6 +31,9 @@ extern exc_SyntaxError_type
 extern comp_msg_start
 extern comp_msg_cstr
 extern ap_strcmp
+extern ast_child
+extern comp_error_node
+extern str_type
 extern par_bad_target
 extern comp_msg_i64
 extern comp_error_span
@@ -146,6 +149,72 @@ DEF_FUNC par_module, PM_FRAME
 END_FUNC par_module
 
 ;; ============================================================================
+;; ps_future_window(rdi = Comp*, esi = the statement just parsed) -> nothing
+;;
+;; Shuts the window a future statement may appear in.  It stays open across
+;; the module docstring and across other future statements, and closes on
+;; anything else -- CPython's rule, and it is checked per STATEMENT rather
+;; than per line: `from __future__ import x; import y; from __future__ import
+;; z` is three of them and the third is late.
+;;
+;; Comp.future_here is set by ps_note_future while the statement is being
+;; parsed, and consumed here; the count of statements already seen is what
+;; makes the docstring the FIRST one rather than any string expression.
+;; ============================================================================
+PID_COMP equ 8
+PID_FRAME equ 16            ; + 1 push = 24... padded to 16 below
+DEF_FUNC_LOCAL ps_future_window, 24
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PID_COMP], rsi           ; the statement node
+    cmp dword [rbx + Comp.future_shut], 0
+    jne .pid_out                        ; already shut
+    ; EVERY statement counts, including a future one -- `from __future__
+    ; import x` followed by a string followed by another future import is
+    ; badsyntax_future10, and the string is not a docstring there.
+    mov ecx, [rbx + Comp.future_nstmt]
+    mov dword [rbx + Comp.future_nstmt], 1
+    cmp dword [rbx + Comp.future_here], 0
+    je .pid_check
+    mov dword [rbx + Comp.future_here], 0
+    jmp .pid_out                        ; a future statement keeps it open
+.pid_check:
+    test ecx, ecx
+    jnz .pid_shut                       ; a docstring is only ever the first
+    mov rdi, rbx
+    mov esi, [rbp - PID_COMP]
+    call ast_at
+    test rax, rax
+    jz .pid_shut
+    cmp byte [rax + AstNode.kind], AST_EXPR_STMT
+    jne .pid_shut
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_at
+    test rax, rax
+    jz .pid_shut
+    cmp byte [rax + AstNode.kind], AST_CONST
+    jne .pid_shut
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    test rax, rax
+    jz .pid_shut
+    V_TEST_PTR rax, rcx
+    ja .pid_shut
+    mov rcx, [rax + PyObject.ob_type]
+    lea rax, [rel str_type]
+    cmp rcx, rax
+    je .pid_out                         ; a docstring; the window stays open
+.pid_shut:
+    mov dword [rbx + Comp.future_shut], 1
+.pid_out:
+    pop rbx
+    leave
+    ret
+END_FUNC ps_future_window
+
+;; ============================================================================
 ;; par_simple_stmts(Comp *c) -> rax = 1 ok, 0 error
 ;; One logical line: `stmt (';' stmt)* NEWLINE`, each pushed onto the pending
 ;; stack for whatever list is being built.
@@ -157,13 +226,17 @@ DEF_FUNC par_simple_stmts, 24           ; + 1 push = 32, 16-aligned
     mov rbx, rdi
     mov qword [rbp - PSS_STMT], 0
 .loop:
+    mov dword [rbx + Comp.future_here], 0
     mov rdi, rbx
     call par_statement
     test eax, eax
     jz .fail
     mov [rbp - PSS_STMT], rax
     mov rdi, rbx
-    mov rsi, rax
+    mov esi, eax
+    call ps_future_window
+    mov rdi, rbx
+    mov rsi, [rbp - PSS_STMT]           ; reloaded: the call above clobbers rax
     call ast_push
 
     mov rdi, rbx
@@ -1462,6 +1535,13 @@ DEF_FUNC_LOCAL ps_from, PFR_FRAME
     mov [rax + AstNode.a], edx
     mov rdx, [rbp - PFR_LEVEL]
     mov [rax + AstNode.subkind], dl
+    ; PEP 563: `from __future__ import annotations` changes how every
+    ; annotation in the FILE is compiled, so it is recorded on the Comp the
+    ; moment it is read.  A future import is an ordinary ImportFrom
+    ; everywhere else, and still binds its names.
+    mov rdi, rbx
+    mov rsi, [rbp - PK_NODE]
+    call ps_note_future
     mov rax, [rbp - PK_NODE]
     pop r12
     pop rbx
@@ -1474,6 +1554,253 @@ DEF_FUNC_LOCAL ps_from, PFR_FRAME
     leave
     ret
 END_FUNC ps_from
+
+;; ============================================================================
+;; ps_note_future(rdi = Comp*, rsi = an AST_IMPORTFROM node) -> nothing
+;;
+;; What `from __future__ import ...` means to the compiler.  Two things:
+;;
+;;   - `annotations` sets Comp.future_anno, which is PEP 563 and changes how
+;;     every annotation in the file is compiled.  The other nine features are
+;;     already the language's behaviour in 3.12, so naming one is a no-op --
+;;     but naming something that is NOT one of the ten is a SyntaxError, and
+;;     so is the star form, which has no feature name at all.  CPython's
+;;     future.c refuses both, and this did neither: `from __future__ import *`
+;;     compiled and bound whatever __all__ listed.
+;;
+;;   - barry_as_FLUFL is refused with the message it has had since 3.0, which
+;;     is not "is not defined".
+;;
+;; The level is checked too -- `from .__future__ import annotations` is a
+;; relative import of a module that happens to be called that, and CPython
+;; treats it as an ordinary one.
+;; ============================================================================
+PNF_COMP equ 8
+PNF_NODE equ 16
+PNF_I    equ 24
+PNF_N    equ 32
+PNF_NAME equ 40             ; the feature name being checked
+PNF_FRAME equ 40            ; + 1 push = 48, 16-aligned
+DEF_FUNC_LOCAL ps_note_future, PNF_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PNF_NODE], rsi
+
+    mov rdi, rbx
+    mov rsi, [rbp - PNF_NODE]
+    call ast_at
+    test rax, rax
+    jz .pnf_done
+    movzx ecx, byte [rax + AstNode.subkind]
+    test ecx, ecx
+    jnz .pnf_done                       ; a relative import, not __future__
+    mov ecx, [rax + AstNode.nchild]
+    mov [rbp - PNF_N], rcx
+    mov ecx, [rax + AstNode.a]
+    test ecx, ecx
+    jz .pnf_done                        ; `from . import x` has no module
+    mov rdi, rbx
+    mov esi, ecx
+    call ast_obj_at
+    test rax, rax
+    jz .pnf_done
+    lea rdi, [rax + PyStrObject.data]
+    CSTRING rsi, "__future__"
+    call ap_strcmp
+    test eax, eax
+    jnz .pnf_done
+
+    ; It is one, whatever it names -- so the window stays open for the next
+    ; statement, and a late one is refused before any name is looked at.
+    mov dword [rbx + Comp.future_here], 1
+    cmp dword [rbx + Comp.future_shut], 0
+    jne .pnf_late
+
+    mov qword [rbp - PNF_I], 0
+.pnf_loop:
+    mov rax, [rbp - PNF_I]
+    cmp rax, [rbp - PNF_N]
+    jae .pnf_done
+    mov rdi, rbx
+    mov rsi, [rbp - PNF_NODE]
+    call ast_at
+    mov rsi, rax
+    mov rdx, [rbp - PNF_I]
+    mov rdi, rbx
+    call ast_child
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_at
+    test rax, rax
+    jz .pnf_next
+    mov ecx, [rax + AstNode.a]          ; the imported name
+    test ecx, ecx
+    jz .pnf_star                        ; `from __future__ import *`
+    mov rdi, rbx
+    mov esi, ecx
+    call ast_obj_at
+    test rax, rax
+    jz .pnf_next
+    mov [rbp - PNF_NAME], rax
+
+    ; `braces` has had its own answer since 3.0 and is not "is not defined".
+    lea rdi, [rax + PyStrObject.data]
+    CSTRING rsi, "braces"
+    call ap_strcmp
+    test eax, eax
+    jz .pnf_braces
+
+    ; Every other name has to be one of the ten features.
+    mov rax, [rbp - PNF_NAME]
+    lea rdi, [rax + PyStrObject.data]
+    lea rsi, [rel pnf_feature_names]
+    call pnf_known
+    test eax, eax
+    jz .pnf_unknown
+
+    mov rax, [rbp - PNF_NAME]
+    lea rdi, [rax + PyStrObject.data]
+    CSTRING rsi, "annotations"
+    call ap_strcmp
+    test eax, eax
+    jnz .pnf_next
+    mov dword [rbx + Comp.future_anno], 1
+.pnf_next:
+    inc qword [rbp - PNF_I]
+    jmp .pnf_loop
+.pnf_done:
+    pop rbx
+    leave
+    ret
+
+.pnf_late:
+    mov rdi, rbx
+    mov esi, [rbp - PNF_NODE]
+    CSTRING rdx, "from __future__ imports must occur at the beginning of the file"
+    call comp_error_node
+    pop rbx
+    leave
+    ret
+
+.pnf_star:
+    mov rdi, rbx
+    mov esi, [rbp - PNF_NODE]
+    CSTRING rdx, "future feature * is not defined"
+    call comp_error_node
+    pop rbx
+    leave
+    ret
+
+.pnf_braces:
+    ; CPython's own wording, and it has never been anything else.
+    mov rdi, rbx
+    mov esi, [rbp - PNF_NODE]
+    CSTRING rdx, "not a chance"
+    call comp_error_node
+    pop rbx
+    leave
+    ret
+
+.pnf_unknown:
+    ; "future feature <name> is not defined", with the name in it.  The buffer
+    ; is static because CompErr keeps the POINTER rather than a copy, so a
+    ; stack one is freed before the message is ever read -- which showed as
+    ; three bytes of stack garbage where the feature name belonged.
+    lea rdi, [rel pnf_buf]
+    CSTRING rsi, "future feature "
+    call pnf_append
+    mov rdi, rax
+    mov rax, [rbp - PNF_NAME]
+    lea rsi, [rax + PyStrObject.data]
+    call pnf_append
+    mov rdi, rax
+    CSTRING rsi, " is not defined"
+    call pnf_append
+    mov rdi, rbx
+    mov esi, [rbp - PNF_NODE]
+    lea rdx, [rel pnf_buf]
+    call comp_error_node
+    pop rbx
+    leave
+    ret
+END_FUNC ps_note_future
+
+;; ============================================================================
+;; pnf_known(rdi = a NUL-terminated name, rsi = a NUL-separated, NUL-NUL
+;;           terminated list) -> eax = 1 when the name is in the list
+;; ============================================================================
+DEF_FUNC_LOCAL pnf_known, 8
+    push rbx
+    mov rbx, rdi
+.pk_next:
+    cmp byte [rsi], 0
+    je .pk_no
+    mov rdi, rbx
+    push rsi
+    call ap_strcmp
+    pop rsi
+    test eax, eax
+    jz .pk_yes
+    ; past this entry's NUL
+.pk_skip:
+    cmp byte [rsi], 0
+    je .pk_skipped
+    inc rsi
+    jmp .pk_skip
+.pk_skipped:
+    inc rsi
+    jmp .pk_next
+.pk_yes:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.pk_no:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC pnf_known
+
+;; ============================================================================
+;; pnf_append(rdi = where to write, rsi = a C string) -> rax = the NUL
+;; Bounded by pnf_buf's end; a feature name is an identifier and short, but
+;; the bound is what keeps a long one from running past it.
+;; ============================================================================
+DEF_FUNC_LOCAL pnf_append
+    mov rax, rdi
+    lea rcx, [rel pnf_buf]
+    add rcx, PNF_BUFLEN - 1
+.pa_loop:
+    cmp rax, rcx
+    jae .pa_done
+    mov dl, [rsi]
+    test dl, dl
+    jz .pa_done
+    mov [rax], dl
+    inc rax
+    inc rsi
+    jmp .pa_loop
+.pa_done:
+    mov byte [rax], 0
+    leave
+    ret
+END_FUNC pnf_append
+
+section .bss
+PNF_BUFLEN equ 128
+pnf_buf: resb PNF_BUFLEN
+
+section .rodata
+; The ten, NUL-separated and NUL-NUL terminated.  CPython's __future__.py
+; lists the same names in all_feature_names.
+pnf_feature_names:
+    db "nested_scopes", 0, "generators", 0, "division", 0
+    db "absolute_import", 0, "with_statement", 0, "print_function", 0
+    db "unicode_literals", 0, "barry_as_FLUFL", 0, "generator_stop", 0
+    db "annotations", 0
+    db 0
+section .text
 
 
 
@@ -1700,6 +2027,10 @@ DEF_FUNC par_statement_any, 8
     leave
     ret
 .compound:
+    ; A compound statement is never a future import and never a docstring, so
+    ; it shuts the window -- before its body is parsed, which is what refuses
+    ; one written inside a def at the top of a file.
+    mov dword [rbx + Comp.future_shut], 1
     mov rdi, rbx
     call par_statement
     test rax, rax

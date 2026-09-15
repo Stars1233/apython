@@ -139,6 +139,41 @@
     jmp [rdx + rax*8]             ; dispatch to handler
 %endmacro
 
+; CHECK_EVAL_SIGNALS -- run any Python signal handler that is waiting.
+;
+; A C signal handler cannot run Python: it has no frame and no value stack,
+; and it interrupted something half-finished.  So signal_trampoline sets a
+; flag and the eval loop reads it -- here, at the points CPython reads it.
+;
+; Those points are the top of a loop and THE RETURN OF A CALL.  The second was
+; missing, and it is the one that matters: a signal arrives while the process
+; is inside a syscall, and the instruction that was running is the call that
+; made it.  With only the loop check, `os.kill(os.getpid(), SIGINT)` followed
+; by straight-line code ran no handler at all -- the flag sat set until the
+; program happened to reach a backward jump, and a program with no loop after
+; it never delivered.
+;
+; Falls through when nothing is pending, which is every time but one; that
+; path is one load and one branch.  Jumps to the unwinder when a handler
+; raised, so KeyboardInterrupt lands on the instruction that was interrupted.
+; rbx must already be advanced past the instruction and r13 be the live stack
+; top: both are published for the unwinder, exactly as DISPATCH publishes
+; them.
+%macro CHECK_EVAL_SIGNALS 0
+    extern signal_any_pending
+    cmp qword [rel signal_any_pending], 0
+    je %%no_signals
+    mov [rel eval_saved_rbx], rbx
+    mov [rel eval_saved_r13], r13
+    extern signal_run_pending
+    call signal_run_pending
+    test eax, eax
+    jz %%no_signals
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
+%%no_signals:
+%endmacro
+
 ; Save/restore callee-saved registers used in eval loop
 %macro SAVE_EVAL_REGS 0
     push rbx

@@ -1421,7 +1421,17 @@ MC_MATCHARGS equ 48
 MC_IDX       equ 56
 MC_SUBJ_TAG  equ 64
 MC_ORIGIN    equ 72   ; the subject's type, for the __match_args__ walk
-MC_FRAME     equ 104            ; + 0 pushes = 96, 16-aligned
+MC_BADTYPE   equ 80   ; the type named in a __match_args__ TypeError
+MC_BADVAL    equ 88   ; and the payload it came from, before the release
+MC_BADTAG    equ 96   ; with its tag: dict_get answers the legacy pair here
+; The three __match_args__ messages carry a class name and sometimes two
+; counts, so they are composed rather than literal.  Derived, so growing the
+; scalars above cannot walk into the buffer.
+; A handler is entered aligned, so the frame has to be 8 mod 16 with no
+; pushes -- which is what the 104 this replaced was.
+MC_BUFLEN    equ 240
+MC_BUF       equ 104 + MC_BUFLEN
+MC_FRAME     equ MC_BUF         ; + 0 pushes = 344, which is 8 mod 16
 
 extern str_type
 
@@ -1516,11 +1526,32 @@ DEF_FUNC op_match_class, MC_FRAME
     test r8, r8
     jnz .mc_matchargs_walk
 
-    ; __match_args__ not found and npos > 0 — fail
-    jmp .mc_fail
+    ; __match_args__ nowhere on the MRO and npos > 0.  CPython raises
+    ; "accepts 0 positional sub-patterns"; MC_MATCHARGS is still 0, which is
+    ; the count the message reads.
+    jmp .mc_too_few
 
 .mc_matchargs_found:
-    ; rax = __match_args__ tuple (borrowed ref from dict_get)
+    ; rax = whatever the MRO answered with (borrowed, from dict_get).  It has
+    ; to BE a tuple: this read ob_size and ob_item off it unchecked, and
+    ; `__match_args__ = None` walked a pointer made of the singleton's
+    ; header.  CPython names the class and what it got.
+    ; An EXACT tuple, as CPython's PyTuple_CheckExact demands: a tuple
+    ; subclass is refused there too.
+    ;
+    ; rax and edx are a PAYLOAD and a TAG here, not a Value -- that is what
+    ; dict_get was unpacked into above -- so the question is asked of the
+    ; tag.  Asking V_TEST_PTR of the payload instead said that the payload of
+    ; `__match_args__ = 1` was a pointer, because 1 is a perfectly good
+    ; address, and the dereference below read type 1.
+    mov [rbp - MC_BADVAL], rax
+    mov [rbp - MC_BADTAG], rdx
+    cmp edx, TAG_PTR
+    jne .mc_matchargs_not_tuple
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel tuple_type]
+    cmp rcx, rdx
+    jne .mc_matchargs_not_tuple
     INCREF rax
     mov [rbp - MC_MATCHARGS], rax
 
@@ -1528,7 +1559,7 @@ DEF_FUNC op_match_class, MC_FRAME
     mov rcx, [rbp - MC_NPOS]
     mov rdx, [rax + PyTupleObject.ob_size]
     cmp rdx, rcx
-    jl .mc_fail                     ; not enough match_args
+    jl .mc_too_few                  ; CPython raises here rather than failing
 
 .mc_no_matchargs_needed:
     ;; --- Allocate result tuple: npos + len(kw_attrs) ---
@@ -1549,6 +1580,14 @@ DEF_FUNC op_match_class, MC_FRAME
     mov rax, [rbp - MC_MATCHARGS]
     mov rsi, [rax + PyTupleObject.ob_item]       ; payloads
     mov rsi, [rsi + rcx*8]                       ; name string
+    ; It has to BE a string: tp_getattr is about to read PyStrObject.data off
+    ; it, and an int element is an immediate with no header at all.
+    V_TEST_PTR rsi, rdx
+    ja .mc_bad_element
+    mov rdx, [rsi + PyObject.ob_type]
+    lea rax, [rel str_type]
+    cmp rdx, rax
+    jne .mc_bad_element
 
     ; Call subject's tp_getattr(subject, name)
     mov rdi, [rbp - MC_SUBJ]
@@ -1675,6 +1714,156 @@ DEF_FUNC op_match_class, MC_FRAME
     VPUSH_PTR rax
     leave
     DISPATCH
+
+.mc_matchargs_not_tuple:
+    ; Its TYPE outlives the release below, so that is what is kept; the class
+    ; name goes into the template first, because the class itself is
+    ; released too.
+    mov rdi, [rbp - MC_BADVAL]
+    mov rsi, [rbp - MC_BADTAG]
+    V_PACK rdi, rsi
+    extern value_type
+    call value_type
+    mov [rbp - MC_BADTYPE], rax
+    call .mc_class_prefix
+    mov rdi, rax
+    CSTRING rsi, `.__match_args__ must be a tuple (got \x01)`
+    call .mc_append
+    jmp .mc_raise_composed
+
+.mc_bad_element:
+    ; rsi = the element.  No class name in this one; CPython's wording names
+    ; only the element's type.
+    mov rdi, rsi
+    call value_type
+    mov [rbp - MC_BADTYPE], rax
+    lea rdi, [rbp - MC_BUF]
+    mov byte [rdi], 0
+    CSTRING rsi, `__match_args__ elements must be strings (got \x01)`
+    call .mc_append
+    jmp .mc_raise_composed
+
+.mc_raise_composed:
+    call .mc_release_all
+    lea rdi, [rbp - MC_BUF]
+    mov rsi, [rbp - MC_BADTYPE]
+    extern raise_type_error_with_typename
+    call raise_type_error_with_typename
+
+.mc_too_few:
+    ; "<Class>() accepts N positional sub-patterns (M given)".  Two counts
+    ; and a name, so the whole message is composed rather than templated.
+    ; Reached both when __match_args__ is shorter than the sub-patterns and
+    ; when there is none at all -- CPython raises in both, where this used to
+    ; report no match, so `case C(x):` against a class with no __match_args__
+    ; silently fell through to the next case.
+    call .mc_class_prefix
+    mov rdi, rax
+    CSTRING rsi, "() accepts "
+    call .mc_append
+    mov rdi, rax
+    mov rsi, [rbp - MC_MATCHARGS]
+    xor edx, edx
+    test rsi, rsi
+    jz .mc_few_have_len
+    mov rdx, [rsi + PyTupleObject.ob_size]
+.mc_few_have_len:
+    mov [rbp - MC_BADVAL], rdx      ; the count, across msg_append_i64
+    mov rsi, rdx
+    extern msg_append_i64
+    call msg_append_i64
+    mov rdx, [rbp - MC_BADVAL]      ; how many it accepts, for the plural
+    mov rdi, rax
+    cmp rdx, 1
+    je .mc_few_singular
+    CSTRING rsi, " positional sub-patterns ("
+    jmp .mc_few_count
+.mc_few_singular:
+    CSTRING rsi, " positional sub-pattern ("
+.mc_few_count:
+    call .mc_append
+    mov rdi, rax
+    mov rsi, [rbp - MC_NPOS]
+    call msg_append_i64
+    mov rdi, rax
+    CSTRING rsi, " given)"
+    call .mc_append
+    call .mc_release_all
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - MC_BUF]
+    extern exc_TypeError_type
+    extern raise_exception
+    call raise_exception
+
+;; Writes the matched class's name into MC_BUF and answers the NUL after it.
+;; A class with no name leaves the buffer empty, which is the wording without
+;; the prefix.
+.mc_class_prefix:
+    lea rax, [rbp - MC_BUF]
+    mov byte [rax], 0
+    mov rdx, [rbp - MC_CLASS]
+    test rdx, rdx
+    jz .mcp_done
+    mov rsi, [rdx + PyTypeObject.tp_name]
+    test rsi, rsi
+    jz .mcp_done
+    lea rdi, [rbp - MC_BUF]
+    jmp .mc_append
+.mcp_done:
+    ret
+
+;; .mc_append(rdi = where to write, rsi = a C string) -> rax = the NUL
+;; Bounded by the end of MC_BUF; rbt_append_cstr caps at eighty characters,
+;; which would cut these messages in half.
+.mc_append:
+    lea rcx, [rbp - MC_BUF]
+    add rcx, MC_BUFLEN - 1
+    mov rax, rdi
+.mca_loop:
+    cmp rax, rcx
+    jae .mca_done
+    mov dl, [rsi]
+    test dl, dl
+    jz .mca_done
+    mov [rax], dl
+    inc rax
+    inc rsi
+    jmp .mca_loop
+.mca_done:
+    mov byte [rax], 0
+    ret
+
+;; Everything this frame owns, released.  A RAISE abandons the frame, so what
+;; is not released here is leaked.
+.mc_release_all:
+    ; The unwinder cleans the value stack down from eval_saved_r13, which
+    ; DISPATCH set BEFORE this handler popped its three inputs -- so without
+    ; this it releases them a second time, and the double free surfaced as a
+    ; segfault in the NEXT match, reading ob_type off a class the allocator
+    ; had handed out again.  op_call's .propagate_exc republishes for exactly
+    ; this reason and says so.  Removing this line makes valgrind report a
+    ; use-after-free of the subject, which is how it was confirmed.
+    mov [rel eval_saved_r13], r13
+    mov rdi, [rbp - MC_RESULT]
+    test rdi, rdi
+    jz .mra_no_result
+    mov qword [rbp - MC_RESULT], 0
+    call obj_decref
+.mra_no_result:
+    mov rdi, [rbp - MC_MATCHARGS]
+    test rdi, rdi
+    jz .mra_no_args
+    mov qword [rbp - MC_MATCHARGS], 0
+    call obj_decref
+.mra_no_args:
+    mov rdi, [rbp - MC_SUBJ]
+    mov rsi, [rbp - MC_SUBJ_TAG]
+    DECREF_VAL rdi, rsi
+    mov rdi, [rbp - MC_CLASS]
+    DECREF_REG rdi
+    mov rdi, [rbp - MC_KWATTRS]
+    DECREF_REG rdi
+    ret
 
 section .rodata
 .mc_matchargs_cstr: db "__match_args__", 0

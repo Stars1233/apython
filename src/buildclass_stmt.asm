@@ -40,6 +40,8 @@ extern obj_getattr_opt
 extern obj_incref
 extern raise_exception
 extern str_from_cstr_heap
+extern dict_type
+extern dict_set
 extern str_type
 extern tuple_new
 extern tuple_type
@@ -247,15 +249,35 @@ DEF_FUNC_LOCAL bc_prepare_namespace, BPN_FRAME
     jmp .none
 .have_ns:
 
-    ; Only a real object can be a namespace; anything else keeps the fallback.
+    ; It has to be a MAPPING.  Anything else was treated as "keep the
+    ; fallback", and None is a pointer -- so a __prepare__ returning None
+    ; passed the test below, the real dict was released, and the class body
+    ; executed with None as its locals.  The first STORE_NAME then handed None
+    ; to dict_set, which read its header as a dict: a SIGSEGV inside
+    ; dict_lookup, from seven lines of ordinary Python.  CPython refuses with
+    ; "BadMeta.__prepare__() must return a mapping, not NoneType", and
+    ; test_types.test_bad___prepare__ is exactly this.
     V_TEST_PTR rbx, rcx
-    ja .none
+    ja .bad_prepare
+    test rbx, rbx
+    jz .bad_prepare
+    mov rcx, [rbx + PyObject.ob_type]
+    cmp qword [rcx + PyTypeObject.tp_as_mapping], 0
+    je .bad_prepare
     mov rdi, [rbp - BPN_FALL]
     call obj_decref
     mov rax, rbx
     pop rbx
     leave
     ret
+
+.bad_prepare:
+    ; The metaclass names itself when it is a type; CPython writes
+    ; "<metaclass>" for anything else, which is what `metaclass=BadMeta()`
+    ; for a plain class gives.
+    mov rdi, [rbp - BPN_META]
+    mov rsi, rbx
+    call bc_raise_bad_prepare   ; does not return
 .none:
     xor eax, eax
     pop rbx
@@ -267,6 +289,64 @@ DEF_FUNC_LOCAL bc_prepare_namespace, BPN_FRAME
     leave
     ret
 END_FUNC bc_prepare_namespace
+
+;; ============================================================================
+;; bc_raise_bad_prepare(rdi = the metaclass, rsi = what __prepare__ returned)
+;;   -> does not return: raises CPython's TypeError
+;;
+;;   BadMeta.__prepare__() must return a mapping, not NoneType
+;;   <metaclass>.__prepare__() must return a mapping, not NoneType
+;;
+;; The second form is CPython's when the metaclass is not a type -- there is
+;; no tp_name to quote.
+;; ============================================================================
+BRP_META  equ 8
+BRP_GOT   equ 16
+BRP_BUF   equ 288
+BRP_FRAME equ 288           ; + 0 pushes = 288, 16-aligned
+DEF_FUNC_LOCAL bc_raise_bad_prepare, BRP_FRAME
+    mov [rbp - BRP_META], rdi
+    mov [rbp - BRP_GOT], rsi
+
+    ; Is the metaclass a type?  Asked FIRST, because type_check_is_class takes
+    ; the object in rdi and the buffer wants rdi too.
+    mov rdi, [rbp - BRP_META]
+    call type_check_is_class
+    lea rdi, [rbp - BRP_BUF]
+    test eax, eax
+    jz .brp_anon
+    mov rcx, [rbp - BRP_META]
+    mov rsi, [rcx + PyTypeObject.tp_name]
+    jmp .brp_have_name
+.brp_anon:
+    CSTRING rsi, "<metaclass>"
+.brp_have_name:
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, ".__prepare__() must return a mapping, not "
+    call rbt_append_cstr
+    mov rdi, rax
+    ; value_type, not ob_type: an int or a float may be the Value itself, and
+    ; reading a header off one gave "object" where CPython names the type.
+    push rdi
+    mov rdi, [rbp - BRP_GOT]
+    extern value_type
+    call value_type
+    pop rdi
+    test rax, rax
+    jz .brp_unknown
+    mov rsi, [rax + PyTypeObject.tp_name]
+    jmp .brp_join
+.brp_unknown:
+    CSTRING rsi, "object"
+.brp_join:
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - BRP_BUF]
+    call raise_exception
+    ud2
+END_FUNC bc_raise_bad_prepare
 
 ;; ============================================================================
 ;; builtin___build_class__(PyObject **args, int64_t nargs) -> rax = Value
@@ -327,6 +407,11 @@ BCL_NPOS  equ 64        ; positional arg count (nargs minus the keywords)
 BCL_OMETA equ 88
 BCL_OKWN  equ 80
 BCL_OKWV  equ 72
+; The bases AS WRITTEN, kept only when __mro_entries__ changed them, so they
+; can be recorded as __orig_bases__ once the namespace exists.  96 rather than
+; a lower number because the five pushes above occupy [rbp-16, rbp-48]: the
+; carved space starts below them.
+BCL_ORIG  equ 96
     sub rsp, 64
 
     ; Check nargs >= 2
@@ -335,6 +420,7 @@ BCL_OKWV  equ 72
 
     mov rbx, rdi            ; rbx = args
     mov qword [rbp - BCL_META], 0
+    mov qword [rbp - BCL_ORIG], 0
     mov [rbp - BCL_NPOS], rsi
 
     ; `class C(metaclass=M)` passes M as a keyword, and it arrives in the
@@ -407,8 +493,17 @@ BCL_OKWV  equ 72
     jz .bc_bases_failed
     mov rcx, [rbp - BCL_BASES]
     mov [rbp - BCL_BASES], rax
+    cmp rax, rcx
+    jne .bc_bases_substituted
+    ; Nothing was replaced, and bc_resolve_bases answered the original
+    ; increfed -- so there are two references and one of them is ours.
     mov rdi, rcx
     call obj_decref
+    jmp .bc_no_base
+.bc_bases_substituted:
+    ; The written tuple survives as __orig_bases__; this reference becomes
+    ; that one.  It is released once the namespace has taken a copy.
+    mov [rbp - BCL_ORIG], rcx
     jmp .bc_no_base
 
 .bc_bases_failed:
@@ -619,6 +714,40 @@ BCL_OKWV  equ 72
     mov rdi, r12
     call frame_free
 
+    ; PEP 560's other half: when the bases were substituted, the ones AS
+    ; WRITTEN are recorded in the namespace.  `typing` reads __orig_bases__
+    ; throughout -- NamedTuple, TypedDict and every generic alias base -- and
+    ; nothing here set it; only types.new_class did.  It goes in after the
+    ; body has run and before the metaclass sees the namespace, which is
+    ; where CPython puts it.
+    cmp qword [rbp - BCL_ORIG], 0
+    je .bc_orig_done
+    test r15, r15
+    jz .bc_orig_release
+    ; Only a real dict is written into.  A metaclass __prepare__ may answer
+    ; any mapping, and going through the generic protocol here would run user
+    ; code between the body and the metaclass call; type.__prepare__ answers
+    ; a dict, which is every class the substitution can apply to.
+    lea rax, [rel dict_type]
+    cmp [r15 + PyObject.ob_type], rax
+    jne .bc_orig_release
+    CSTRING rdi, "__orig_bases__"
+    call str_from_cstr_heap
+    test rax, rax
+    jz .bc_orig_release
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, [rbp - BCL_ORIG]
+    call dict_set               ; takes its own reference
+    pop rdi
+    call obj_decref
+.bc_orig_release:
+    mov rdi, [rbp - BCL_ORIG]
+    mov qword [rbp - BCL_ORIG], 0
+    call obj_decref
+.bc_orig_done:
+
     ; With a metaclass, CPython calls meta(name, bases, ns) rather than
     ; building the type itself -- that is what runs M.__new__ and
     ; M.__init__, and what makes type(C) be M.
@@ -780,10 +909,12 @@ END_FUNC builtin___build_class__
 ;; needed replacing, or a fresh one.  0 with no exception means some base is
 ;; neither a class nor able to name one, which the caller reports.
 ;; ============================================================================
-BRB_ORIG equ 8
-BRB_OUT  equ 16
-BRB_N    equ 24
-BRB_FRAME equ 32            ; + 2 pushes = 48, 16-aligned
+BRB_ORIG  equ 8
+BRB_OUT   equ 16
+BRB_N     equ 24
+BRB_SCRAT equ 32            ; per-base: the class itself, or its entries tuple
+BRB_TOTAL equ 40            ; how many real bases those add up to
+BRB_FRAME equ 48            ; + 2 pushes = 64, 16-aligned
 DEF_FUNC_LOCAL bc_resolve_bases, BRB_FRAME
     push rbx
     push r12
@@ -791,6 +922,8 @@ DEF_FUNC_LOCAL bc_resolve_bases, BRB_FRAME
     mov rax, [rdi + PyTupleObject.ob_size]
     mov [rbp - BRB_N], rax
     mov qword [rbp - BRB_OUT], 0
+    mov qword [rbp - BRB_SCRAT], 0
+    mov qword [rbp - BRB_TOTAL], 0
 
     ; A first pass that only asks: is any of them not a class?  The common
     ; case allocates nothing.
@@ -819,15 +952,27 @@ DEF_FUNC_LOCAL bc_resolve_bases, BRB_FRAME
     ret
 
 .brb_needs_work:
+    ; Something has to be asked, and an answer may be any length -- so the
+    ; result cannot be written in place over a tuple sized like the input.
+    ; That was the old shape, and it is why every __mro_entries__ returning
+    ; anything but exactly one class came back as "bases must be types":
+    ; typing.List[T] answers two, the origin and Generic, so `class
+    ; C(typing.List[T])` could not be written at all.
+    ;
+    ; Two passes, over a SCRATCH tuple, because __mro_entries__ is user code
+    ; and must run exactly once per base.  Each scratch slot holds either the
+    ; class itself or the entries tuple that base stood for -- the two are
+    ; told apart by ob_type, and a class is never a tuple -- and the second
+    ; pass splices them into a tuple of the size they add up to.
     mov rdi, [rbp - BRB_N]
     call tuple_new
     test rax, rax
     jz .brb_fail
-    mov [rbp - BRB_OUT], rax
+    mov [rbp - BRB_SCRAT], rax
     xor rbx, rbx
 .brb_fill:
     cmp rbx, [rbp - BRB_N]
-    jge .brb_done
+    jge .brb_splice
     mov rax, [rbp - BRB_ORIG]
     mov rax, [rax + PyTupleObject.ob_item]
     mov r12, [rax + rbx*8]
@@ -837,24 +982,87 @@ DEF_FUNC_LOCAL bc_resolve_bases, BRB_FRAME
     jz .brb_ask
     mov rdi, r12
     call obj_incref
-    mov rax, [rbp - BRB_OUT]
+    mov rax, [rbp - BRB_SCRAT]
     mov rax, [rax + PyTupleObject.ob_item]
     mov [rax + rbx*8], r12
+    inc qword [rbp - BRB_TOTAL]
     inc rbx
     jmp .brb_fill
 .brb_ask:
     mov rdi, r12
     mov rsi, [rbp - BRB_ORIG]
-    call bc_mro_entry
+    call bc_mro_entries
     test rax, rax
     jz .brb_fail_out
-    mov rcx, [rbp - BRB_OUT]
+    mov rcx, [rbp - BRB_SCRAT]
     mov rcx, [rcx + PyTupleObject.ob_item]
-    mov [rcx + rbx*8], rax      ; bc_mro_entry hands over its reference
+    mov [rcx + rbx*8], rax      ; bc_mro_entries hands over its reference
+    mov rcx, [rax + PyTupleObject.ob_size]
+    add [rbp - BRB_TOTAL], rcx
     inc rbx
     jmp .brb_fill
 
+.brb_splice:
+    mov rdi, [rbp - BRB_TOTAL]
+    call tuple_new
+    test rax, rax
+    jz .brb_fail_out
+    mov [rbp - BRB_OUT], rax
+    xor rbx, rbx                ; index into the scratch
+    xor r12, r12                ; index into the output
+.brb_splice_loop:
+    cmp rbx, [rbp - BRB_N]
+    jge .brb_done
+    mov rax, [rbp - BRB_SCRAT]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rdi, [rax + rbx*8]
+    lea rcx, [rel tuple_type]
+    cmp [rdi + PyObject.ob_type], rcx
+    je .brb_splice_entries
+    ; a class: one base
+    call obj_incref
+    mov rax, [rbp - BRB_SCRAT]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rdi, [rax + rbx*8]
+    mov rax, [rbp - BRB_OUT]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov [rax + r12*8], rdi
+    inc r12
+    inc rbx
+    jmp .brb_splice_loop
+.brb_splice_entries:
+    ; an entries tuple: as many bases as it holds, in order
+    push rbx
+    push r12
+    xor ebx, ebx
+.brb_entry_loop:
+    mov rax, [rbp - BRB_SCRAT]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rcx, [rsp + 8]          ; the scratch index
+    mov rdi, [rax + rcx*8]      ; the entries tuple
+    cmp rbx, [rdi + PyTupleObject.ob_size]
+    jge .brb_entry_done
+    mov rax, [rdi + PyTupleObject.ob_item]
+    mov rdi, [rax + rbx*8]
+    push rdi
+    call obj_incref
+    pop rdi
+    mov rax, [rbp - BRB_OUT]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rcx, [rsp]              ; the output index
+    mov [rax + rcx*8], rdi
+    inc qword [rsp]
+    inc rbx
+    jmp .brb_entry_loop
+.brb_entry_done:
+    pop r12
+    pop rbx
+    inc rbx
+    jmp .brb_splice_loop
+
 .brb_done:
+    mov rdi, [rbp - BRB_SCRAT]
+    call obj_decref             ; releases the classes and the entries tuples
     mov rax, [rbp - BRB_OUT]
     pop r12
     pop rbx
@@ -862,7 +1070,13 @@ DEF_FUNC_LOCAL bc_resolve_bases, BRB_FRAME
     ret
 
 .brb_fail_out:
+    mov rdi, [rbp - BRB_SCRAT]
+    test rdi, rdi
+    jz .brb_fail
+    call obj_decref
     mov rdi, [rbp - BRB_OUT]
+    test rdi, rdi
+    jz .brb_fail
     call obj_decref
 .brb_fail:
     xor eax, eax
@@ -873,20 +1087,29 @@ DEF_FUNC_LOCAL bc_resolve_bases, BRB_FRAME
 END_FUNC bc_resolve_bases
 
 ;; ============================================================================
-;; bc_mro_entry(rdi = a base that is not a class, rsi = the bases tuple)
-;;   -> rax = the single class it stands for, owned, or 0
+;; bc_mro_entries(rdi = a base that is not a class, rsi = the bases tuple)
+;;   -> rax = the tuple of classes it stands for, owned, or 0
 ;;
-;; PEP 560's __mro_entries__.  `class C[T]` compiles to a base of Generic[T],
-;; which is not a type; the object answers a one-element tuple naming the
-;; class that should stand in its place.  A longer answer is refused rather
-;; than mis-spliced: the tuple this fills was sized before the call, and
-;; nothing in this tree or in typing returns more than one.
+;; PEP 560's __mro_entries__.  A base that is not a type is asked what it
+;; stands for, and answers a TUPLE -- of any length.  `class C[T]` compiles to
+;; a base of Generic[T], which answers one; typing.List[T] answers two, the
+;; origin and Generic; a proxy may legitimately answer none.
+;;
+;; The whole tuple is handed back rather than a single class, because it used
+;; to insist on exactly one: the caller's output tuple was sized like its
+;; input, so a longer answer had nowhere to go and was discarded.  Every shape
+;; but one-class then reached the caller's "bases must be types", which is
+;; why `class C(typing.List[T])` could not be written and test_typing aborted
+;; at import.
+;;
+;; A non-tuple answer is CPython's own error, and is raised rather than
+;; discarded -- it is a mistake in the object, not an object that declines.
 ;; ============================================================================
 BME_BASES equ 8
 BME_RES   equ 16
 BME_ARG   equ 24
 BME_FRAME equ 32            ; + 1 push = 40... one word more to land right
-DEF_FUNC_LOCAL bc_mro_entry, 40             ; + 1 push = 48, 16-aligned
+DEF_FUNC_LOCAL bc_mro_entries, 40           ; + 1 push = 48, 16-aligned
     push rbx
     mov rbx, rdi
     mov [rbp - BME_BASES], rsi
@@ -931,42 +1154,23 @@ DEF_FUNC_LOCAL bc_mro_entry, 40             ; + 1 push = 48, 16-aligned
     test rax, rax
     jz .bme_no
 
-    ; A tuple of exactly one class, and nothing else.
+    ; It has to be a tuple; what is IN it is the caller's business, and
+    ; type_from_parts words a non-class base the way CPython does.
     mov rbx, rax
     V_TEST_PTR rbx, rax
-    ja .bme_drop
+    ja .bme_not_tuple
     lea rcx, [rel tuple_type]
     cmp [rbx + PyObject.ob_type], rcx
-    jne .bme_drop
-    cmp qword [rbx + PyTupleObject.ob_size], 1
-    jne .bme_drop
-    mov rax, [rbx + PyTupleObject.ob_item]
-    mov rax, [rax]
-    push rax
-    mov rdi, rax
-    call obj_incref
-    mov rdi, rbx
-    call obj_decref
-    pop rax
-    push rax
-    mov rdi, rax
-    call type_check_is_class
-    pop rdx
-    test eax, eax
-    jz .bme_drop_one
-    mov rax, rdx
+    jne .bme_not_tuple
+    mov rax, rbx
     pop rbx
     leave
     ret
 
-.bme_drop_one:
-    mov rdi, rdx
-    call obj_decref
-    jmp .bme_no
-.bme_drop:
+.bme_not_tuple:
     mov rdi, rbx
     call obj_decref
-    jmp .bme_no
+    RAISE exc_TypeError_type, "__mro_entries__ must return a tuple"
 .bme_release:
     mov rdi, [rbp - BME_RES]
     call obj_decref
@@ -986,4 +1190,4 @@ DEF_FUNC_LOCAL bc_mro_entry, 40             ; + 1 push = 48, 16-aligned
     pop rbx
     leave
     ret
-END_FUNC bc_mro_entry
+END_FUNC bc_mro_entries

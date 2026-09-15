@@ -198,6 +198,12 @@ CO_GENERATOR        equ 0x20
 CO_COROUTINE        equ 0x80
 CO_ITERABLE_COROUTINE equ 0x100
 CO_ASYNC_GENERATOR  equ 0x200
+; PEP 563.  Set on every code object compiled from a file that said
+; `from __future__ import annotations`, and read back by compile() and exec()
+; so that a source compiled from inside such a file inherits it -- which is
+; CPython's rule, and the reason the flag is on the CODE rather than only in
+; the compiler.
+CO_FUTURE_ANNOTATIONS equ 0x1000000
 
 ; CALL_INTRINSIC_1 / _2 selectors, matching CPython 3.12's intrinsics table.
 INTRINSIC_1_INVALID          equ 0
@@ -208,6 +214,10 @@ INTRINSIC_ASYNC_GEN_WRAP     equ 4
 INTRINSIC_UNARY_POSITIVE     equ 5
 INTRINSIC_LIST_TO_TUPLE      equ 6
 INTRINSIC_TYPEVAR            equ 7
+INTRINSIC_PARAMSPEC          equ 8
+INTRINSIC_TYPEVARTUPLE       equ 9
+INTRINSIC_SUBSCRIPT_GENERIC  equ 10
+INTRINSIC_TYPEALIAS          equ 11
 
 ; CALL_INTRINSIC_2 selectors.
 INTRINSIC_PREP_RERAISE_STAR  equ 1

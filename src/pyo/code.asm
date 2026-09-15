@@ -530,6 +530,15 @@ DEF_FUNC code_getattr
     test eax, eax
     jz .return_code
 
+    ; co_lnotab is the pre-3.10 line table, computed on demand from the
+    ; modern one.  Deprecated since 3.12 and still read: coverage.py,
+    ; some debuggers, and test_code itself.
+    lea rdi, [rel co_n_lnotab]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_lnotab
+
     ; Check for replace
     lea rdi, [rel cr_attr_replace]
     lea rsi, [r12 + PyStrObject.data]
@@ -602,6 +611,16 @@ DEF_FUNC code_getattr
     mov rdi, rax
     mov rsi, rbx
     call method_new
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+
+.return_lnotab:
+    mov rdi, rbx
+    call code_build_lnotab
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -852,6 +871,7 @@ co_n_nlocals:     db "co_nlocals", 0
 co_n_stacksize:   db "co_stacksize", 0
 co_n_posonly:     db "co_posonlyargcount", 0
 co_n_linetable:   db "co_linetable", 0
+co_n_lnotab:      db "co_lnotab", 0
 co_n_exctable:    db "co_exceptiontable", 0
 co_n_code:        db "co_code", 0
 align 8
@@ -1377,6 +1397,181 @@ col_emit:
 .ce_done:
     ret
 END_FUNC code_method_co_lines
+
+;; ============================================================================
+;; code_build_lnotab(rdi = a PyCodeObject*) -> rax = a bytes object, owned
+;;
+;; co_lnotab: the line table as 3.9 and earlier wrote it, built from the one
+;; 3.12 actually carries.  Pairs of (bytecode delta, signed line delta), a
+;; pair per line CHANGE -- a delta too wide for its byte is split, with the
+;; bytecode delta spent on the first piece and zero on the rest.
+;;
+;; Built from co_lines() rather than from the line table, for the reason
+;; co_lines() itself gives: one decoder.  What co_lines reports as a run with
+;; no line -- a NO_LOCATION entry -- changes nothing here, which is what
+;; CPython's code_getlnotab does with the same entries.
+;; ============================================================================
+CBL_CODE     equ 8
+CBL_LIST     equ 16
+CBL_BUF      equ 24
+CBL_LEN      equ 32
+CBL_CAP      equ 40
+CBL_I        equ 48
+CBL_N        equ 56
+CBL_PREVADDR equ 64
+CBL_LINE     equ 72
+CBL_BD       equ 80
+CBL_LD       equ 88
+CBL_ARGS     equ 96         ; the one Value handed to co_lines()
+CBL_FRAME    equ 104        ; + 1 push = 112, 16-aligned
+DEF_FUNC_LOCAL code_build_lnotab, CBL_FRAME
+    push rbx
+    mov [rbp - CBL_CODE], rdi
+    mov [rbp - CBL_ARGS], rdi
+    lea rdi, [rbp - CBL_ARGS]
+    mov esi, 1
+    call code_method_co_lines
+    test rax, rax
+    jz .cbl_fail
+    mov [rbp - CBL_LIST], rax
+
+    mov edi, 64
+    extern ap_malloc
+    call ap_malloc
+    test rax, rax
+    jz .cbl_free_list
+    mov [rbp - CBL_BUF], rax
+    mov qword [rbp - CBL_CAP], 64
+    mov qword [rbp - CBL_LEN], 0
+    mov qword [rbp - CBL_PREVADDR], 0
+    mov rax, [rbp - CBL_CODE]
+    movsxd rax, dword [rax + PyCodeObject.co_firstlineno]
+    mov [rbp - CBL_LINE], rax
+    mov qword [rbp - CBL_I], 0
+    mov rax, [rbp - CBL_LIST]
+    mov rax, [rax + PyListObject.ob_size]
+    mov [rbp - CBL_N], rax
+
+.cbl_loop:
+    mov rax, [rbp - CBL_I]
+    cmp rax, [rbp - CBL_N]
+    jge .cbl_done
+    mov rcx, [rbp - CBL_LIST]
+    mov rcx, [rcx + PyListObject.ob_item]
+    mov rbx, [rcx + rax*8]              ; the (start, end, line) tuple
+    mov rcx, [rbx + PyTupleObject.ob_item]
+    mov rdx, [rcx + 16]                 ; the line
+    lea rax, [rel none_singleton]
+    cmp rdx, rax
+    je .cbl_next
+    V_TO_I64 rdx
+    cmp rdx, [rbp - CBL_LINE]
+    je .cbl_next
+
+    mov [rbp - CBL_LD], rdx             ; the new line, for a moment
+    mov rax, [rcx]                      ; the run's first byte offset
+    V_TO_I64 rax
+    mov rsi, rax
+    sub rsi, [rbp - CBL_PREVADDR]
+    mov [rbp - CBL_BD], rsi
+    mov [rbp - CBL_PREVADDR], rax
+    mov rdx, [rbp - CBL_LD]
+    mov rsi, rdx
+    sub rsi, [rbp - CBL_LINE]
+    mov [rbp - CBL_LD], rsi
+    mov [rbp - CBL_LINE], rdx
+
+.cbl_bchunk:
+    cmp qword [rbp - CBL_BD], 255
+    jle .cbl_lchunk
+    mov edi, 255
+    xor esi, esi
+    call cbl_pair
+    sub qword [rbp - CBL_BD], 255
+    jmp .cbl_bchunk
+.cbl_lchunk:
+    cmp qword [rbp - CBL_LD], 127
+    jle .cbl_lneg
+    mov rdi, [rbp - CBL_BD]
+    mov esi, 127
+    call cbl_pair
+    mov qword [rbp - CBL_BD], 0
+    sub qword [rbp - CBL_LD], 127
+    jmp .cbl_lchunk
+.cbl_lneg:
+    cmp qword [rbp - CBL_LD], -128
+    jge .cbl_emit
+    mov rdi, [rbp - CBL_BD]
+    mov esi, 128                        ; -128, as the byte it is written as
+    call cbl_pair
+    mov qword [rbp - CBL_BD], 0
+    add qword [rbp - CBL_LD], 128
+    jmp .cbl_lneg
+.cbl_emit:
+    mov rdi, [rbp - CBL_BD]
+    mov rsi, [rbp - CBL_LD]
+    call cbl_pair
+.cbl_next:
+    inc qword [rbp - CBL_I]
+    jmp .cbl_loop
+
+.cbl_done:
+    mov rdi, [rbp - CBL_BUF]
+    mov rsi, [rbp - CBL_LEN]
+    call bytes_from_data
+    mov rbx, rax
+    mov rdi, [rbp - CBL_BUF]
+    extern ap_free
+    call ap_free
+    mov rdi, [rbp - CBL_LIST]
+    call obj_decref
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+
+.cbl_free_list:
+    mov rdi, [rbp - CBL_LIST]
+    call obj_decref
+.cbl_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+;; One (bytecode delta, line delta) pair.  A local, because it reads and
+;; writes the caller's frame; it sits after every dotted label that names it.
+cbl_pair:
+    mov rax, [rbp - CBL_LEN]
+    add rax, 2
+    cmp rax, [rbp - CBL_CAP]
+    jbe .cp_room
+    push rdi
+    push rsi
+    sub rsp, 8                          ; three slots, so the call is aligned
+    mov rdi, [rbp - CBL_BUF]
+    mov rsi, [rbp - CBL_CAP]
+    add rsi, rsi
+    extern ap_realloc
+    call ap_realloc
+    add rsp, 8
+    pop rsi
+    pop rdi
+    test rax, rax
+    jz .cp_done                         ; out of memory: the pair is dropped
+    mov [rbp - CBL_BUF], rax
+    mov rcx, [rbp - CBL_CAP]
+    add rcx, rcx
+    mov [rbp - CBL_CAP], rcx
+.cp_room:
+    mov rax, [rbp - CBL_BUF]
+    mov rcx, [rbp - CBL_LEN]
+    mov [rax + rcx], dil
+    mov [rax + rcx + 1], sil
+    add qword [rbp - CBL_LEN], 2
+.cp_done:
+    ret
+END_FUNC code_build_lnotab
 
 ;; ============================================================================
 ;; _get_co_lines_builtin() -> rax = the co_lines builtin, borrowed

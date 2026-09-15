@@ -20,10 +20,14 @@ table is already in memory once `_tables` is.
 """
 import _codecs
 
-from . import aliases as _aliases_mod
+from . import aliases
 from . import _tables
 
-aliases = _aliases_mod.aliases
+# `aliases` is the MODULE, as it is in CPython's encodings package, and the
+# table inside it is `aliases.aliases`.  Binding the name to the dict instead
+# was invisible here and wrong for everyone else: locale.py reaches for
+# `encodings.aliases.aliases` and got AttributeError on a dict.
+_alias_table = aliases.aliases
 
 _cache = {}
 _unknown = "--unknown--"
@@ -96,7 +100,7 @@ def search_function(encoding):
         return entry
 
     norm = normalize_encoding(encoding)
-    name = aliases.get(norm.replace(".", "_"), norm)
+    name = _alias_table.get(norm.replace(".", "_"), norm)
     table = _table(name)
     if table is None and name != norm:
         table = _table(norm)

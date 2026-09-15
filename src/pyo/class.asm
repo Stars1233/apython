@@ -1252,7 +1252,7 @@ DEF_FUNC type_call
     jnz .normal_type_call
     mov rax, [rdi + PyTypeObject.tp_new]
     test rax, rax
-    jz .normal_type_call
+    jz .tc_no_constructor
     ; Avoid infinite recursion if a constructor is ever type_call itself
     lea rcx, [rel type_call]
     cmp rax, rcx
@@ -1265,6 +1265,33 @@ DEF_FUNC type_call
     add rsp, 8
     V_PACK rax, rdx
     ret
+
+.tc_no_constructor:
+    ; A STATIC type with no tp_new and no base to inherit one from is a type
+    ; only the interpreter may build: a generator, a coroutine, any of the
+    ; iterators, a dict view, os.scandir's iterator.  CPython gives each of
+    ; them a NULL tp_new and answers "cannot create 'generator' instances";
+    ; this fell through to .normal_type_call, which allocated one and left
+    ; every field holding whatever the allocator last put there.
+    ;
+    ; The consequence is not a curiosity.  `type(os.scandir(p))()` produced an
+    ; object with an uninitialised GC head, and the collector walked its
+    ; doubly-linked list through it -- a SIGSEGV in gc_list_remove several
+    ; hundred tests after the line that caused it.  CPython's
+    ; test_os.TestScandir.test_uninstantiable is three lines and does exactly
+    ; that.  It is the shape CLAUDE.md records for mappingproxy, one type
+    ; over.
+    ;
+    ; tp_base is checked as well as tp_new, so this cannot catch a static type
+    ; that inherits its constructor: every type it does catch has both at
+    ; zero.  A heaptype never arrives here at all -- type_new always gives one
+    ; a tp_new.
+    cmp qword [rdi + PyTypeObject.tp_base], 0
+    jne .normal_type_call
+    mov rsi, rdi                        ; the type, whose name fills the \x01
+    CSTRING rdi, `cannot create '\x01' instances`
+    extern raise_type_error_with_typename
+    jmp raise_type_error_with_typename  ; does not return
 
 .normal_type_call:
     push rbx

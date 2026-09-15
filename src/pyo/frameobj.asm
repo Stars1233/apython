@@ -31,6 +31,7 @@ ASM_INIT
 
 extern ap_malloc
 extern obj_decref
+extern obj_dealloc
 extern obj_incref
 extern type_type
 extern dict_new
@@ -747,6 +748,7 @@ END_FUNC frameobj_from_code
 ;; it to count.  The whole chain from there outward is snapshotted, because
 ;; f_back has to keep working after the live frames are gone.
 ;; ============================================================================
+
 SGF_DEPTH equ 8
 SGF_HEAD  equ 16
 SGF_PREV  equ 24
@@ -799,6 +801,76 @@ DEF_FUNC sys_getframe_func, SGF_FRAME
     pop rbx
     RAISE exc_ValueError_type, "call stack is not deep enough"
 END_FUNC sys_getframe_func
+
+;; ============================================================================
+;; sys._current_frames() -> {thread ident: frame}
+;;
+;; One thread, so one entry: the frame the caller is running in, under the
+;; ident lib/_thread.py answers for it.  CPython's is how a monitor or a
+;; profiler takes a stack sample of every thread, and threading, faulthandler
+;; and test.support all reach for it.
+;;
+;; The frame is the same snapshot sys._getframe(0) hands out, because f_back
+;; has to keep working after the live frames are gone.
+;; ============================================================================
+SCF_DICT  equ 8
+SCF_VIEW  equ 16
+SCF_KEY   equ 24
+SCF_FRAME equ 32            ; + 1 push = 40... one word more to land right
+DEF_FUNC sys_current_frames_func, 40    ; + 1 push = 48, 16-aligned
+    push rbx
+    mov qword [rbp - SCF_VIEW], 0
+    mov qword [rbp - SCF_KEY], 0
+    extern dict_new
+    call dict_new
+    test rax, rax
+    jz .scf_fail
+    mov [rbp - SCF_DICT], rax
+
+    mov rbx, [rel eval_saved_r12]
+    test rbx, rbx
+    jz .scf_done                ; no Python frame: an empty mapping
+
+    mov rdi, rbx
+    call frameobj_for
+    test rax, rax
+    jz .scf_drop
+    mov [rbp - SCF_VIEW], rax
+
+    ; The ident lib/_thread.py hands out for the only thread there is.
+    mov edi, 1
+    extern int_from_i64
+    call int_from_i64
+    V_PACK rax, rdx             ; an immediate int is its own Value
+    mov [rbp - SCF_KEY], rax
+
+    mov rdi, [rbp - SCF_DICT]
+    mov rsi, [rbp - SCF_KEY]
+    mov rdx, [rbp - SCF_VIEW]
+    extern dict_set
+    call dict_set               ; takes its own references
+
+    mov rax, [rbp - SCF_KEY]
+    DECREF_V rax, rcx
+    mov rdi, [rbp - SCF_VIEW]
+    call obj_decref
+.scf_done:
+    mov rax, [rbp - SCF_DICT]
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.scf_drop:
+    mov rdi, [rbp - SCF_DICT]
+    call obj_decref
+.scf_fail:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+END_FUNC sys_current_frames_func
 
 ;; ============================================================================
 ;; sys._getframemodulename([depth]) -> the __name__ of that frame's globals
