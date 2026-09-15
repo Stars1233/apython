@@ -33,6 +33,7 @@ extern comp_msg_cstr
 extern ap_strcmp
 extern ast_child
 extern comp_error_node
+extern str_type
 extern par_bad_target
 extern comp_msg_i64
 extern comp_error_span
@@ -148,6 +149,72 @@ DEF_FUNC par_module, PM_FRAME
 END_FUNC par_module
 
 ;; ============================================================================
+;; ps_future_window(rdi = Comp*, esi = the statement just parsed) -> nothing
+;;
+;; Shuts the window a future statement may appear in.  It stays open across
+;; the module docstring and across other future statements, and closes on
+;; anything else -- CPython's rule, and it is checked per STATEMENT rather
+;; than per line: `from __future__ import x; import y; from __future__ import
+;; z` is three of them and the third is late.
+;;
+;; Comp.future_here is set by ps_note_future while the statement is being
+;; parsed, and consumed here; the count of statements already seen is what
+;; makes the docstring the FIRST one rather than any string expression.
+;; ============================================================================
+PID_COMP equ 8
+PID_FRAME equ 16            ; + 1 push = 24... padded to 16 below
+DEF_FUNC_LOCAL ps_future_window, 24
+    push rbx
+    mov rbx, rdi
+    mov [rbp - PID_COMP], rsi           ; the statement node
+    cmp dword [rbx + Comp.future_shut], 0
+    jne .pid_out                        ; already shut
+    ; EVERY statement counts, including a future one -- `from __future__
+    ; import x` followed by a string followed by another future import is
+    ; badsyntax_future10, and the string is not a docstring there.
+    mov ecx, [rbx + Comp.future_nstmt]
+    mov dword [rbx + Comp.future_nstmt], 1
+    cmp dword [rbx + Comp.future_here], 0
+    je .pid_check
+    mov dword [rbx + Comp.future_here], 0
+    jmp .pid_out                        ; a future statement keeps it open
+.pid_check:
+    test ecx, ecx
+    jnz .pid_shut                       ; a docstring is only ever the first
+    mov rdi, rbx
+    mov esi, [rbp - PID_COMP]
+    call ast_at
+    test rax, rax
+    jz .pid_shut
+    cmp byte [rax + AstNode.kind], AST_EXPR_STMT
+    jne .pid_shut
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_at
+    test rax, rax
+    jz .pid_shut
+    cmp byte [rax + AstNode.kind], AST_CONST
+    jne .pid_shut
+    mov esi, [rax + AstNode.a]
+    mov rdi, rbx
+    call ast_obj_at
+    test rax, rax
+    jz .pid_shut
+    V_TEST_PTR rax, rcx
+    ja .pid_shut
+    mov rcx, [rax + PyObject.ob_type]
+    lea rax, [rel str_type]
+    cmp rcx, rax
+    je .pid_out                         ; a docstring; the window stays open
+.pid_shut:
+    mov dword [rbx + Comp.future_shut], 1
+.pid_out:
+    pop rbx
+    leave
+    ret
+END_FUNC ps_future_window
+
+;; ============================================================================
 ;; par_simple_stmts(Comp *c) -> rax = 1 ok, 0 error
 ;; One logical line: `stmt (';' stmt)* NEWLINE`, each pushed onto the pending
 ;; stack for whatever list is being built.
@@ -159,13 +226,17 @@ DEF_FUNC par_simple_stmts, 24           ; + 1 push = 32, 16-aligned
     mov rbx, rdi
     mov qword [rbp - PSS_STMT], 0
 .loop:
+    mov dword [rbx + Comp.future_here], 0
     mov rdi, rbx
     call par_statement
     test eax, eax
     jz .fail
     mov [rbp - PSS_STMT], rax
     mov rdi, rbx
-    mov rsi, rax
+    mov esi, eax
+    call ps_future_window
+    mov rdi, rbx
+    mov rsi, [rbp - PSS_STMT]           ; reloaded: the call above clobbers rax
     call ast_push
 
     mov rdi, rbx
@@ -1539,6 +1610,12 @@ DEF_FUNC_LOCAL ps_note_future, PNF_FRAME
     test eax, eax
     jnz .pnf_done
 
+    ; It is one, whatever it names -- so the window stays open for the next
+    ; statement, and a late one is refused before any name is looked at.
+    mov dword [rbx + Comp.future_here], 1
+    cmp dword [rbx + Comp.future_shut], 0
+    jne .pnf_late
+
     mov qword [rbp - PNF_I], 0
 .pnf_loop:
     mov rax, [rbp - PNF_I]
@@ -1592,6 +1669,15 @@ DEF_FUNC_LOCAL ps_note_future, PNF_FRAME
     inc qword [rbp - PNF_I]
     jmp .pnf_loop
 .pnf_done:
+    pop rbx
+    leave
+    ret
+
+.pnf_late:
+    mov rdi, rbx
+    mov esi, [rbp - PNF_NODE]
+    CSTRING rdx, "from __future__ imports must occur at the beginning of the file"
+    call comp_error_node
     pop rbx
     leave
     ret
@@ -1941,6 +2027,10 @@ DEF_FUNC par_statement_any, 8
     leave
     ret
 .compound:
+    ; A compound statement is never a future import and never a docstring, so
+    ; it shuts the window -- before its body is parsed, which is what refuses
+    ; one written inside a def at the top of a file.
+    mov dword [rbx + Comp.future_shut], 1
     mov rdi, rbx
     call par_statement
     test rax, rax

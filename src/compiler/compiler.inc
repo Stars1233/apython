@@ -645,6 +645,17 @@ struc Comp
                                     ; here are iteration variables
     .in_comp_iterable: resd 1       ; visiting a clause's ITERABLE, where no
                                     ; walrus may appear at all
+    ; A future statement is legal only at the top of the file: after the
+    ; docstring, and after any other future statements.  par_module closes
+    ; the window as soon as it parses anything else, and ps_note_future
+    ; refuses one that arrives late.  It matters more than it reads: the
+    ; whole file is parsed before anything is emitted, so a future import
+    ; three hundred lines down would otherwise change how the annotations
+    ; above it were compiled.
+    .future_shut: resd 1            ; no more future statements are allowed
+    .future_here: resd 1            ; the statement just parsed was one
+    .future_nstmt: resd 1           ; whether any statement has been seen, so
+                                    ; that a docstring is only ever the first
     .future_anno: resd 1            ; PEP 563: `from __future__ import
                                     ; annotations` was seen, so every
                                     ; annotation is stored as its SOURCE TEXT
@@ -654,7 +665,10 @@ struc Comp
                                     ; inherits it, and there is nowhere to
                                     ; inherit it from once the enclosing unit
                                     ; is finished
-    .future_pad: resd 1
+    ; Four of these and a pad, so the fields below keep their alignment: the
+    ; struct is a run of resd and an odd count shifts everything after it.
+    .future_pad3: resd 1
+    .future_pad4: resd 1
     .err:       resb CompErr_size
     .warn_n:    resd 1              ; how many of .warns are filled
     .warn_pad:  resd 1

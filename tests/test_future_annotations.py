@@ -167,6 +167,46 @@ compile("from __future__ import %s\n" % ", ".join(_f.all_feature_names),
         "<s>", "exec")
 print("all ten at once: accepted")
 
+# --- and it has to be at the top of the file --------------------------
+# Not decoration: the whole file is parsed before anything is emitted, so a
+# future import three hundred lines down would otherwise change how the
+# annotations above it were compiled.  The window stays open across the
+# docstring and across other future statements, and closes on anything else
+# -- per STATEMENT, not per line.
+OK_AT_TOP = [
+    ("bare", "from __future__ import annotations\n"),
+    ("after a docstring", "'d'\nfrom __future__ import annotations\n"),
+    ("after another", "'d'\nfrom __future__ import division\n"
+                      "from __future__ import annotations\n"),
+    ("after a comment", "# c\nfrom __future__ import annotations\n"),
+    ("after blank lines", "\n\nfrom __future__ import annotations\n"),
+    ("two on one line", "from __future__ import division; "
+                        "from __future__ import annotations\n"),
+]
+for what, src in OK_AT_TOP:
+    try:
+        compile(src, "<s>", "exec")
+        print("%-20s accepted" % what)
+    except SyntaxError as exc:
+        print("%-20s REFUSED %s" % (what, exc.msg))
+
+TOO_LATE = [
+    ("after a statement", "x = 1\nfrom __future__ import annotations\n"),
+    ("after an import", "import sys\nfrom __future__ import annotations\n"),
+    ("after two strings", "'d'\n'e'\nfrom __future__ import annotations\n"),
+    ("a string between", "from __future__ import division\n'd'\n"
+                         "from __future__ import annotations\n"),
+    ("mid-line", "from __future__ import division; import sys; "
+                 "from __future__ import annotations\n"),
+    ("inside a def", "def f():\n    from __future__ import annotations\n"),
+]
+for what, src in TOO_LATE:
+    try:
+        compile(src, "<s>", "exec")
+        print("%-20s NOT REFUSED" % what)
+    except SyntaxError as exc:
+        print("%-20s %s" % (what, exc.msg))
+
 # A module actually called __future__ under a relative import is not one.
 try:
     compile("from .__future__ import annotations\n", "<s>", "exec")
