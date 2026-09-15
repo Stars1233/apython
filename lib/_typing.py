@@ -101,6 +101,20 @@ class TypeVar:
     def __typing_subst__(self, arg):
         return arg
 
+    # `A | int` and `int | A`.  CPython's TypeVar is a C type carrying both,
+    # and what comes back is typing's own union rather than types.UnionType:
+    # `typing.Union[~A, int]`.  Without them the operator said "unsupported
+    # operand type(s) for |: 'TypeVar' and 'type'", which is an ordinary
+    # annotation refused.  typing is imported at CALL time for the reason
+    # Generic.__class_getitem__ gives -- typing imports this module first.
+    def __or__(self, right):
+        import typing
+        return typing.Union[self, right]
+
+    def __ror__(self, left):
+        import typing
+        return typing.Union[left, self]
+
     def __reduce__(self):
         return self._name
 
@@ -326,16 +340,34 @@ def _type_repr(obj):
 
 
 class Generic:
-    """The base a `class C[T]` gets.  CPython's carries the machinery for
-    __class_getitem__ and parameter substitution; what is needed here is that
-    it exists and that subscripting it answers something."""
+    """The base a `class C[T]` gets.
+
+    CPython's is a C type whose __class_getitem__ reaches back INTO typing and
+    builds a `typing._GenericAlias` -- the real one, with substitution,
+    `get_args`, `get_origin`, `__mro_entries__` and the rest.  Answering with
+    the local stand-in below instead was the shape half-implemented-is-worse
+    is about: the subscript did not raise, so nothing detected that
+    `C[T][int]` said "'_GenericAlias' object is not subscriptable" and that
+    every typing introspection of a user generic gave the wrong answer.
+
+    So this does what the C one does, and for the same reason it does it
+    LAZILY: typing imports this module at its own line 36, long before it has
+    defined _GenericAlias, and importing typing from here at module scope
+    would be circular.  The stand-in stays as the fallback for the one case
+    that has no typing yet -- a `class C[T]` compiled during bootstrap.
+    """
 
     __slots__ = ()
 
     def __class_getitem__(cls, params):
         if not isinstance(params, tuple):
             params = (params,)
-        return _GenericAlias(cls, params)
+        try:
+            import typing
+            real = typing._GenericAlias
+        except (ImportError, AttributeError):
+            return _GenericAlias(cls, params)
+        return real(cls, params)
 
 
 # ---------------------------------------------------------------------------
