@@ -370,6 +370,34 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
+- **Every shipped `lib/` module carries a RELATIVE `co_filename`, so a
+  traceback through one loses its source line from any directory but the repo
+  root.**  `collections.__file__` is absolute and `sys.path` holds the
+  absolute `lib/`, but `collections.OrderedDict.move_to_end.__code__` reports
+  `lib/collections/__init__.py`.  From the repo root the renderer opens that
+  by luck and shows the line; from anywhere else the `File` line is right and
+  the source line under it is simply gone -- which is the worst shape for it
+  to take, because the traceback still looks complete.
+
+  It is not an interpreter bug.  The Makefile byte-compiles the directory with
+  `find lib -name '*.py' -exec py_compile`, and `find lib` yields relative
+  paths, which `py_compile` records verbatim; CPython reading the same `.pyc`
+  answers the same relative name.  Both cache tags are affected, ours and
+  CPython's.
+
+  The fix is to compile from an absolute path, but it is not the one-liner it
+  looks like: `__pycache__` is committed for some of `lib/` and written at
+  run time for the rest, so an absolute `co_filename` would bake THIS
+  checkout's path into a file another checkout reads, and `marshalw`'s
+  `pyc_write_cache` has to agree with whatever the Makefile does.  The honest
+  form is probably to keep the path relative and teach the traceback renderer
+  to resolve it against the module's own `__file__`, the way CPython's
+  `linecache` falls back through `__loader__.get_source`.
+
+  Found by the sweep harness once each module got a cwd of its own: it is the
+  whole of `test_trace`'s `test_coverage`, which fails on
+  `FileNotFoundError: 'lib/_random.py'`.
+
 - **`rfind` and `rindex` are still the naive backward scan.**  The forward
   direction is Crochemore-Perrin two-way now -- `ap_memfind` counts the
   candidates its memchr scan rejects and switches once that work would exceed
