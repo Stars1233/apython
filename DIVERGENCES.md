@@ -179,6 +179,51 @@ the reasoning rather than from scratch.
   nothing to undo, which is exactly what a program calling the pair in
   sequence would see either way.
 
+## `pwd` and `grp` read the files, where CPython's go through NSS
+
+CPython's are C modules over `getpwnam(3)` and `getgrnam(3)`, which consult
+`nsswitch.conf` and so can answer from LDAP, SSSD, systemd-homed or anything
+else configured there.  These read `/etc/passwd` and `/etc/group` directly,
+which is what NSS resolves to on an ordinary machine and nothing more.
+
+What it costs is a host whose users are not in the file: every lookup here is
+a `KeyError` where CPython's would have found the entry.  What it buys is that
+the modules exist at all -- `getpass`, `shutil.chown`, `tarfile`'s ownership
+restore and `os.path.expanduser` all import one of them, and `import pwd`
+failing took each of those with it.
+
+Reaching NSS properly means `dlopen`ing the `libnss_*` modules and calling
+through their ABI, which is a project rather than a module.
+
+## `syslog` writes to `/dev/log` itself, where CPython's calls libc
+
+CPython's module is a wrapper on `openlog(3)`/`syslog(3)`/`closelog(3)`, which
+are themselves a few dozen lines around a datagram socket: connect to
+`/dev/log`, write `<priority>tag[pid]: message`, drop the message if nothing
+is listening.  `lib/syslog.py` does that directly, so the priority arithmetic,
+the mask, the ident and the option flags are all the same and no new C entry
+point was needed.
+
+Two things libc does that this does not: the `SOCK_STREAM` fallback for the
+few systems whose `/dev/log` is a stream socket, and `LOG_CONS`, which writes
+to `/dev/console` when the socket cannot be reached.  Neither is observable
+from Python -- a message that cannot be delivered is silently dropped either
+way, which is `syslog(3)`'s own contract -- so what a program sees differs
+only on a host where the console fallback would have been the only delivery.
+
+## `_lsprof` is Python over `sys.setprofile`, so it profiles itself
+
+CPython's profiler is C hooked into the same slot, and its own machinery costs
+nothing measurable.  `lib/_lsprof.py` is Python: the dispatch function runs
+per event, so a profiled run is slower here than there, and one row --
+`Profiler.disable`, which `cProfile.create_stats` calls -- appears as a Python
+frame where CPython reports `<method 'disable' of '_lsprof.Profiler'
+objects>`.  Every other row, and all four numbers in each, match: the
+`totaltime`/`inlinetime`/`callcount`/`reccallcount` arithmetic is CPython's,
+including that a recursive call adds to the two counts and not to
+`totaltime`, and a builtin is named by `normalizeUserObj`'s rule rather than
+by its repr.
+
 ## `f_trace_opcodes` works, and CPython 3.12's does not
 
 `sys.settrace` plus `frame.f_trace_opcodes = True` delivers an `'opcode'`
@@ -341,6 +386,21 @@ cheap and finishing one -- line continuation, the input hook, readline, the
 traceback rules an interactive statement has -- is not; it is its own
 feature rather than a missing piece of this one.
 
+`-i` is refused with the usage message, which is where this costs something
+measurable: `test_cmd_line_script`'s `interactive_python` helper is
+
+    while True:
+        data = stderr.read(4)
+        if data == b">>> ":
+            break
+        stderr.readline()
+
+and a subprocess that exited leaves both calls answering `b''` forever, so
+the four REPL-flush tests spin rather than fail.  The module reports nothing
+either way -- it did not import at all before `_frozen_importlib_external`
+arrived -- so nothing is lost by it, but it is why that module is a HANG in
+the sweep rather than a row of failures.
+
 ## The alias modules in lib/
 
 `_datetime`, `_json`, `_pickle` and `_decimal` are stand-ins for CPython's C
@@ -354,6 +414,19 @@ None of them is faster than what it re-exports, and no number measured
 through one should be read as native speed.  `_pickle` is the exception to
 its own rule: it carries `PickleBuffer`, which is a TYPE rather than an
 accelerator and which `pickle.py` imports at module scope.
+
+Each has to answer for **both** halves of the arrangement it is standing in
+for, and getting that wrong is not a smaller divergence -- it is a module
+that dies at import.  `import_fresh_module` is used twice per test file, once
+with the accelerator blocked and once with the pure module blocked, so a
+stand-in that merely re-exports the pure one fails the second call and takes
+the whole file with it.  `_datetime` therefore reads `_pydatetime`'s SOURCE
+when the import is refused: blocking a module stops `import`, not `open`.
+And `import _pickle` succeeding means `from _pickle import dump, ...` has to
+succeed too, so the nine names CPython publishes are forwarded through PEP
+562's module `__getattr__` -- deferred, because `pickle.py` reaches for
+`PickleBuffer` before it has a Pickler to forward to.  What comes back is
+`pickle`'s own object, so there is still exactly one implementation.
 
 `_testcapi` and `_testinternalcapi` are the same arrangement for CPython's
 test harness: every name in them answers a true fact about this interpreter

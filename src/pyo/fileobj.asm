@@ -46,6 +46,7 @@ DEF_FUNC fileobj_new, 8            ; 3 pushes, so rsp is 16-aligned
     mov [rdi + PyFileObject.file_fd], rbx
     mov qword [rdi + PyFileObject.file_len], 0
     mov qword [rdi + PyFileObject.file_binary], 0
+    mov qword [rdi + PyFileObject.file_closed], 0
 
     ; Block-buffered when it is not a terminal, which is CPython's rule and
     ; the only one that is observable: a terminal wants each line as it is
@@ -141,6 +142,12 @@ END_FUNC fileobj_repr
 DEF_FUNC fileobj_write
     cmp rsi, 2
     jl .write_error
+    push rdi
+    push rsi
+    mov rdi, [rdi]
+    call fileobj_check_open     ; raises for a closed stream and does not return
+    pop rsi
+    pop rdi
 
     ; rdi = args array, rsi = nargs
     ; args[0] = self (file obj), args[1] = string to write
@@ -443,6 +450,11 @@ END_FUNC fileobj_flush_std
 ;; ============================================================================
 DEF_FUNC fileobj_flush
     mov rdi, [rdi]              ; self
+    push rdi
+    sub rsp, 8
+    call fileobj_check_open
+    add rsp, 8
+    pop rdi
     call fileobj_drain
     test rax, rax
     js .flush_failed
@@ -465,6 +477,12 @@ END_FUNC fileobj_flush
 ;; ============================================================================
 DEF_FUNC fileobj_fileno
     mov rax, [rdi]              ; self
+    push rax
+    sub rsp, 8
+    mov rdi, rax
+    call fileobj_check_open
+    add rsp, 8
+    pop rax
     mov rdi, [rax + PyFileObject.file_fd]
     call int_from_i64
     leave
@@ -596,12 +614,42 @@ DEF_FUNC fileobj_exit
     ret
 END_FUNC fileobj_exit
 
+;; ============================================================================
+;; fileobj_check_open(rdi = the file object) -> returns when it is open;
+;;   raises ValueError and does not return when it has been closed
+;;
+;; CPython's "I/O operation on closed file." -- the same sentence _io's
+;; fileio_check raises, because it is the same question.  Every entry point
+;; that touches the descriptor asks it: without one, close() shut the fd and
+;; left the object looking open, so the next write went to a dead descriptor
+;; and the failure surfaced at exit rather than at the call.
+;; ============================================================================
+extern exc_ValueError_type
+DEF_FUNC fileobj_check_open
+    cmp qword [rdi + PyFileObject.file_closed], 0
+    jne .fco_closed
+    leave
+    ret
+.fco_closed:
+    RAISE exc_ValueError_type, "I/O operation on closed file."
+END_FUNC fileobj_check_open
+
 ; fileobj_close_method(PyObject **args, int64_t nargs) -> rax = Value
 ;; ============================================================================
-DEF_FUNC fileobj_close_method
-    mov rax, [rdi]              ; self
-    mov rdi, [rax + PyFileObject.file_fd]
+DEF_FUNC fileobj_close_method, 8            ; 1 push, so rsp is 16-aligned
+    push rbx
+    mov rbx, [rdi]              ; self
+    cmp qword [rbx + PyFileObject.file_closed], 0
+    jne .fcm_done               ; close() is idempotent, as CPython's is
+    ; Drain first: the buffered bytes belong to the stream, and closing the
+    ; descriptor under them threw them away.
+    mov rdi, rbx
+    call fileobj_drain
+    mov qword [rbx + PyFileObject.file_closed], 1
+    mov rdi, [rbx + PyFileObject.file_fd]
     call sys_close
+.fcm_done:
+    pop rbx
     RET_NONE
     leave                       ; then read it as an int tag and biased the
     V_PACK rax, rdx             ; singleton pointer into a large integer
@@ -617,6 +665,12 @@ extern sys_read
 
 FR_FRAME equ 8208  ; 8192 buf + 16 overhead
 DEF_FUNC fileobj_read, FR_FRAME
+    push rdi
+    push rsi
+    mov rdi, [rdi]
+    call fileobj_check_open     ; raises for a closed stream and does not return
+    pop rsi
+    pop rdi
     ; Anything waiting on stdout goes out before anything is read: a prompt
     ; written with print() and then read against has to be visible first,
     ; which is why CPython flushes stdout at the same point.
@@ -668,6 +722,12 @@ END_FUNC fileobj_read
 ;; ============================================================================
 FRL_FRAME equ 8208          ; + 3 pushes = 8232, not 16-aligned
 DEF_FUNC fileobj_readline, FRL_FRAME
+    push rdi
+    push rsi
+    mov rdi, [rdi]
+    call fileobj_check_open     ; raises for a closed stream and does not return
+    pop rsi
+    pop rdi
     ; Anything waiting on stdout goes out before anything is read: a prompt
     ; written with print() and then read against has to be visible first,
     ; which is why CPython flushes stdout at the same point.
@@ -737,6 +797,12 @@ DEF_FUNC fileobj_writelines, FWL_FRAME
     cmp rsi, 2
     jl .fwl_args
     mov rbx, [rdi]              ; the file
+    push rdi
+    push rsi
+    mov rdi, rbx
+    call fileobj_check_open
+    pop rsi
+    pop rdi
     mov [rbp - FWL_SELF], rbx
     mov rdi, [rdi + 8]          ; the iterable
     ; get_iterator_opt still takes the old (payload, tag) pair, so a Value has
@@ -1254,7 +1320,16 @@ DEF_FUNC fileobj_getattr
     ret
 
 .ret_closed:
+    cmp qword [rbx + PyFileObject.file_closed], 0
+    jne .ret_closed_true
     RET_FALSE
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; return one Value
+    ret
+.ret_closed_true:
+    RET_TRUE
     pop r12
     pop rbx
     leave

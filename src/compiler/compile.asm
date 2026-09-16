@@ -1271,9 +1271,17 @@ DEF_FUNC cs_return_none, 8
     mov [rbx + CompUnit.curendcol], edx
     mov rdx, rax                ; the const index, saved above
     call cg_emit
+    ; An EMPTY body leaves lastline at 0, and line 0 is what CPython gives
+    ; that return -- `compile("")` has the single run (0, 4, 0), covering the
+    ; RESUME and the RETURN_CONST together.  IF_LINE0 is how an instruction
+    ; says "line zero, and I mean it", which IF_NOLINE is not: marked as
+    ; having no location the return was trace-invisible, sys.settrace fired no
+    ; `line` event at all for an empty module, and nothing ever set pdb's
+    ; _user_requested_quit -- so `pdb empty.py` printed "The program finished
+    ; and will be restarted" for ever.
     cmp dword [rax + Instr.line], 0     ; cg_emit clobbered rcx
     jnz .crn_have_line
-    or byte [rax + Instr.flags], IF_NOLINE
+    or byte [rax + Instr.flags], IF_LINE0
 .crn_have_line:
     pop rbx
     leave
@@ -2410,7 +2418,10 @@ DEF_FUNC_LOCAL co_ast_builder, CAB_FRAME
     V_UNPACK rax, rdx
     cmp edx, TAG_PTR
     jne .cab_fail
-    mov [rel co_from_raw], rax  ; borrowed: _ast stays in sys.modules
+    INCREF rax                  ; the cache holds it for the process's life --
+                                ; sys.modules is not an owner anyone can rely
+                                ; on, and import_fresh_module drops entries
+    mov [rel co_from_raw], rax
 .cab_out:
     leave
     ret

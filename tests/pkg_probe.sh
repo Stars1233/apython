@@ -81,13 +81,20 @@ list_pkgs() {
 
 # One directory, one process.  Writes a single tab-separated row.
 probe_one() {
-    local pkg="$1" out rc ran fail err
+    local pkg="$1" out rc ran fail err cwd
     out="$WORK/$pkg.txt"
+    # A cwd of its own, thrown away afterwards, for the reason rc_sweep.sh
+    # gives at length: run in the repo root, a package that writes in its cwd
+    # leaves the file there, and a leftover `tempcwd/` then makes test_pydoc
+    # and test_warnings report failures that are not theirs.  Nothing here
+    # needs the root -- every path involved is absolute.
+    cwd=$(mktemp -d "$WORK/cwd-$pkg.XXXXXX") || return
     ( ulimit -v "$VLIMIT" 2>/dev/null
-      cd "$ROOT" || exit
+      cd "$cwd" || exit
       PYTHONPATH="$CPYTHON_LIB" timeout "$TIMEOUT" "$APY" -m unittest \
         "test.$pkg" ) > "$out" 2>&1
     rc=$?
+    rm -rf "$cwd"          # after rc is taken: rm would clobber it
     # grep -a: a test that writes a NUL turns the log into a binary file, and
     # grep then answers nothing at all rather than the count.  That trap cost
     # a whole undercounted sweep once already.

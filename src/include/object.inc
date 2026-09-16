@@ -693,6 +693,13 @@ struc PyFileObject
     ; 1.1 ms -> 2.9 ms on EVERY run.  Built lazily, only a program that asks
     ; pays.
     .file_binary: resq 1  ; owned, or 0
+    ; Set by close(), read by `closed` and by every operation that touches
+    ; the descriptor.  Without it close() shut the fd and left the object
+    ; looking open, so a write afterwards went to a dead descriptor and the
+    ; failure arrived at exit as "Exception ignored in: <stdout>" and an exit
+    ; status of 120 -- which is what `apython -m json.tool` did, because
+    ; json.tool writes through `with sys.stdout as out:`.
+    .file_closed: resq 1
 endstruc
 
 ; _io.FileIO.  The first three fields are PyInstanceObject's, because FileIO
@@ -1324,6 +1331,21 @@ TYPE_FLAG_AWAITABLE      equ 0x400000
 ; making its instances weak-referenceable where CPython refuses them -- naming
 ; '__dict__' does not excuse a __slots__ from suppressing the weakref word.
 TYPE_FLAG_DECLARED_SLOTS equ 0x800000
+
+; A STATIC type whose tp_dict defines __get__, so an instance of it found in a
+; class dict is a descriptor and has to be bound on the way out.
+;
+; The attribute paths ask "is this a descriptor?" by looking __get__ up on the
+; attribute's own type, and they gate that lookup on TYPE_FLAG_HEAPTYPE --
+; every builtin descriptor that matters (property, getset, classmethod,
+; staticmethod, function) is special-cased by identity above it, so the
+; general arm exists for user-written ones and the gate keeps an ordinary
+; `C.x = 3` from paying a dict probe.  `super` is the one builtin that is a
+; descriptor and is NOT special-cased: `C._C__super = super(C)` then
+; `self.__super.meth()` read the unbound super straight back.  This bit opens
+; the same arm for it, and for anything else that grows a __get__ later,
+; without widening the gate to every static type.
+TYPE_FLAG_DESCRIPTOR     equ 0x1000000
 
 ; The type's VERSION lives in the high 32 bits of tp_flags, which the flags
 ; above leave free -- they stop at bit 20.  It is a stamp from one global

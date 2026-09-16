@@ -320,6 +320,19 @@ DEF_FUNC exc_dealloc, ED_FRAME
 
     mov rbx, rdi
 
+    ; UNTRACK FIRST, which is the first line of CPython's
+    ; BaseException_dealloc and was the last thing here.  Everything below
+    ; releases a field, and a release runs arbitrary code -- a __del__, a
+    ; container teardown, an allocation that trips a collection -- with this
+    ; object at refcount 0 and still on a generation list.  The collector
+    ; then sees it as garbage, clears and frees it, and gc_dealloc below
+    ; untracks a block that is no longer ours: a SIGSEGV in gc_list_remove
+    ; with nothing on the stack to connect it to the exception.  It surfaced
+    ; when AttributeError started carrying `.obj`, because that is what first
+    ; put an arbitrary object in an exception's dict.
+    extern gc_untrack
+    call gc_untrack
+
     ; XDECREF exc_value (tag-aware: may be SmallInt)
     mov rdi, [rbx + PyExceptionObject.exc_value]
     XDECREF_V rdi, rsi
@@ -690,6 +703,51 @@ DEF_FUNC exc_getattr
     jnz .found_in_dict
 
 .not_found:
+    ; AttributeError's .name and .obj, and ImportError's .name and .path, are
+    ; C members in CPython: unset they read as None, not as a miss.  Only the
+    ; DEFAULT is answered here -- a raise site that fills one puts it in
+    ; exc_dict, which the walk above has already consulted.
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "name"
+    call ap_strcmp
+    test eax, eax
+    jz .eg_name_default
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "obj"
+    call ap_strcmp
+    test eax, eax
+    jz .eg_attr_default
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "path"
+    call ap_strcmp
+    test eax, eax
+    jz .eg_import_default
+    jmp .eg_really_not_found
+
+.eg_name_default:
+    ; `name` belongs to both, so ask about AttributeError and fall through to
+    ; the ImportError question.
+    mov rdi, rbx
+    lea rsi, [rel exc_AttributeError_type]
+    call exc_isinstance
+    test eax, eax
+    jnz .return_none
+.eg_import_default:
+    mov rdi, rbx
+    lea rsi, [rel exc_ImportError_type]
+    call exc_isinstance
+    test eax, eax
+    jnz .return_none
+    jmp .eg_really_not_found
+
+.eg_attr_default:
+    mov rdi, rbx
+    lea rsi, [rel exc_AttributeError_type]
+    call exc_isinstance
+    test eax, eax
+    jnz .return_none
+
+.eg_really_not_found:
     RET_NULL
     pop r14
     pop r13
@@ -1922,6 +1980,21 @@ DEF_FUNC exc_install_methods, EIM_FRAME
     ; args[0] for `ValueError("x").__new__(ValueError)`.  A staticmethod is
     ; what CPython makes __new__, and it is what stops both.
     EXC_ADD_STATIC exc_method_new, "__new__"
+
+    ; OSError keeps one method of its own, because its reduction is not the
+    ; general one: the filename goes back into the ARGUMENTS and the four
+    ; named attributes must not go out as a state.  A dict of one entry on
+    ; exc_OSError_type is all it takes -- everything else still resolves along
+    ; the MRO to BaseException's.
+    call dict_new
+    test rax, rax
+    jz .eim_out
+    mov rbx, rax
+    mov [rel exc_OSError_type + PyTypeObject.tp_dict], rbx
+    extern oserror_reduce
+    EXC_ADD_METHOD oserror_reduce, "__reduce__"
+    lea rdi, [rel exc_OSError_type]
+    call type_stamp_methods
 .eim_out:
     pop rbx
     leave
@@ -2793,6 +2866,16 @@ DEF_FUNC exc_traverse, 8        ; rsp 16-aligned at the call the macros below ex
     VISIT_PTR rdi
     mov rdi, [rbx + PyExceptionObject.exc_args]
     VISIT_PTR rdi
+    ; The instance dict, which CPython's BaseException_traverse visits first
+    ; and this did not.  Leaving an edge out does not merely leak: the
+    ; collector counts the references it is SHOWN, so an exception whose only
+    ; referrer is reached through its own dict looked unreferenced and was
+    ; collected while that referrer still held it.  Nothing put an arbitrary
+    ; object in an exception's dict until AttributeError started carrying
+    ; `.obj`, and then it was a SIGSEGV in gc_list_remove at an unrelated
+    ; POP_EXCEPT.
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    VISIT_PTR rdi
 
     pop rbx
     leave
@@ -2833,6 +2916,15 @@ DEF_FUNC exc_clear_gc, 8            ; 1 pushes, so rsp is 16-aligned
     jz .no_args
     call obj_decref
 .no_args:
+    ; The dict, for the reason exc_traverse gives: an edge the collector is
+    ; shown has to be an edge it can also break, or the cycle survives the
+    ; sweep that found it.
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    mov qword [rbx + PyExceptionObject.exc_dict], 0
+    test rdi, rdi
+    jz .no_dict_gc
+    call obj_decref
+.no_dict_gc:
 
     pop rbx
     leave

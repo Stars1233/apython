@@ -110,6 +110,10 @@ regen:
 	mv src/compiler/unicodecase.asm.new src/compiler/unicodecase.asm
 	$(PYTHON) src/compiler/gen_unicodedata.py > src/modules/unicodedataprops.asm.new
 	mv src/modules/unicodedataprops.asm.new src/modules/unicodedataprops.asm
+	$(PYTHON) src/compiler/gen_unicodenorm.py > src/modules/unicodenorm_tables.asm.new
+	mv src/modules/unicodenorm_tables.asm.new src/modules/unicodenorm_tables.asm
+	$(PYTHON) src/compiler/gen_ucd32.py > src/modules/ucd32_tables.asm.new
+	mv src/modules/ucd32_tables.asm.new src/modules/ucd32_tables.asm
 	$(PYTHON) src/compiler/gen_ast.py > lib/_ast.py.new
 	mv lib/_ast.py.new lib/_ast.py
 	$(PYTHON) src/compiler/gen_encodings.py lib/encodings

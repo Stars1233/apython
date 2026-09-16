@@ -458,11 +458,25 @@ DEF_FUNC systrace_call, 32
     mov rdi, rax
     call frameobj_refresh_pos
     mov rax, [rbp - STC_OBJ]
-    mov rcx, [rax + PyFrameObject.f_lineno]
-    mov [rax + PyFrameObject.ft_line], rcx
     mov rcx, [rax + PyFrameObject.f_lasti]
     sar rcx, 1
     mov [rax + PyFrameObject.ft_prev], rcx
+    ; ...but a seed of LINE ZERO suppresses nothing, because line 0 is not a
+    ; line: it is what a module's RESUME carries, and CPython reports the next
+    ; instruction whatever line it is on.  Seeding it meant an EMPTY module --
+    ; whose only other instruction is the implicit return, also at line 0 --
+    ; compared equal and fired no line event at all.  pdb sets
+    ; _user_requested_quit from a command read during a line event, so with no
+    ; event `pdb empty.py` printed "The program finished and will be
+    ; restarted" for ever.  Leaving the -1 the constructor wrote makes that
+    ; one instruction fire, and changes nothing for any frame that enters on a
+    ; real line -- a function, or a comprehension's own frame, which would
+    ; otherwise re-report the line it was called from.
+    mov rcx, [rax + PyFrameObject.f_lineno]
+    test rcx, rcx
+    jz .stc_seeded
+    mov [rax + PyFrameObject.ft_line], rcx
+.stc_seeded:
 
     mov rdi, [rel sys_tracefunc]
     mov rsi, rax

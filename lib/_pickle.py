@@ -76,3 +76,53 @@ class PickleBuffer:
         if view is not None:
             self._view = None
             view.release()
+
+
+# The nine names CPython's _pickle also publishes, resolved on first use.
+#
+# The comment above says they were left out so that pickle.py would not take
+# them as a fast path.  That was the wrong half of the trade, and it cost 855
+# tests: `import _pickle` SUCCEEDS here, so test_pickle sets
+# has_c_implementation and then does, at class-body scope,
+#
+#     from _pickle import dump, dumps, load, loads, Pickler, Unpickler
+#
+# which raises ImportError and takes the whole module down before a single
+# test runs.  A stand-in that answers `import` but not `from ... import` is
+# the half-implemented-is-worse shape.
+#
+# They cannot be plain assignments: pickle.py reaches for PickleBuffer above
+# at its line 43, long before it has defined a Pickler, so importing pickle
+# from here at module scope is circular.  PEP 562's module __getattr__ defers
+# the lookup to the first ACCESS, which is pickle.py's own line 1818 -- by
+# then pickle is fully executed, and the objects handed back are its own.
+# So `pickle.Pickler is pickle._Pickler` either way, exactly as the
+# except-ImportError branch would have left it, and nothing is a slow
+# implementation wearing a fast name: there is only one implementation.
+_FORWARDED = {
+    "PickleError": "PickleError",
+    "PicklingError": "PicklingError",
+    "UnpicklingError": "UnpicklingError",
+    "Pickler": "_Pickler",
+    "Unpickler": "_Unpickler",
+    "dump": "_dump",
+    "dumps": "_dumps",
+    "load": "_load",
+    "loads": "_loads",
+}
+
+
+def __getattr__(name):
+    try:
+        source = _FORWARDED[name]
+    except KeyError:
+        raise AttributeError(
+            "module %r has no attribute %r" % (__name__, name)) from None
+    import pickle
+    value = getattr(pickle, source)
+    globals()[name] = value         # resolve once; __getattr__ is the slow path
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_FORWARDED))

@@ -38,6 +38,15 @@
 #  3. A module that forks, or that execs, can replace or outlive the runner.
 #     The ulimit and the timeout are what keep one bad module from taking the
 #     sweep with it.
+#  4. Each module runs in a scratch directory of its own, thrown away
+#     afterwards.  They used to run in the REPO ROOT, and a test that writes
+#     in its cwd left the file there: `tempcwd/`, `@test_<pid>_tmp*` and once
+#     a 586 MB one from test_largefile.  Two things came of that.  The debris
+#     showed up as untracked files and got committed by anyone reaching for
+#     `git add -A`; and, worse, it perturbed the NEXT run -- a leftover
+#     `tempcwd/` makes test_pydoc, test_warnings, test_shutil, test_subprocess
+#     and test_tarfile report failures that are not there, which has been
+#     mistaken for a regression more than once.
 
 set -u
 
@@ -75,17 +84,29 @@ if [ ! -f "$CPYTHON_LIB/test/__pycache__/__init__.cpython-312.pyc" ]; then
     $PYTHON -m compileall -q -j0 "$CPYTHON_LIB" >/dev/null 2>&1
 fi
 
-mkdir -p "$OUTDIR/logs"
+mkdir -p "$OUTDIR/logs" "$OUTDIR/cwd"
 TSV="$OUTDIR/sweep-$SIDE.tsv"
 
+# Anything left in a scratch cwd by an earlier, killed run.  They are removed
+# per module below; this is for the sweep that did not get to finish.
+rm -rf "${OUTDIR:?}/cwd"/* 2>/dev/null
+
 run_one() {
-    local f="$1" b out rc ran nbad pass skip cat last
+    local f="$1" b out rc ran nbad pass skip cat last work
     b=$(basename "$f" .py)
     out="$OUTDIR/logs/$b.txt"
+    # A cwd of its own, so what the module writes there goes with it.  Nothing
+    # needs the repo root: the runner, the module and PYTHONPATH are all
+    # absolute paths, and apython finds lib/ relative to its own binary.
+    work=$(mktemp -d "$OUTDIR/cwd/$b.XXXXXX") || return
     ( ulimit -v "$VLIMIT" 2>/dev/null
-      cd "$ROOT" || exit
+      cd "$work" || exit
       PYTHONPATH="$CPYTHON_LIB" timeout "$TIMEOUT" "$RUNNER" "$f" ) > "$out" 2>&1
     rc=$?
+    # After rc is taken: rm would clobber it.  A module that forked and
+    # outlived the runner may still be writing in here, and removing the
+    # directory under it is the point -- the alternative is the repo.
+    rm -rf "$work"
     ran=$(grep -aoE '^Ran [0-9]+ test' "$out" | tail -1 | grep -oE '[0-9]+')
     skip=$(grep -aoE 'skipped=[0-9]+' "$out" | tail -1 | grep -oE '[0-9]+')
     : "${ran:=0}" "${skip:=0}"

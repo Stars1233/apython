@@ -660,3 +660,216 @@ oserror_n_strerror:  db "strerror", 0
 oserror_n_filename:  db "filename", 0
 oserror_n_filename2: db "filename2", 0
 
+
+section .text
+
+;; ============================================================================
+;; oserror_named(rdi = the exception, rsi = the attribute name as a C string)
+;;   -> rax = the value as a Value, borrowed, or 0
+;;
+;; 0 both when the dict has no such key and when the value is None: CPython
+;; keeps these as C fields, its test is `self->filename`, and a NULL field and
+;; a None are the same absence to it.
+;; ============================================================================
+ONM_DICT  equ 8
+ONM_KEY   equ 16
+ONM_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+extern str_intern_cstr
+DEF_FUNC_LOCAL oserror_named, ONM_FRAME
+    mov rdi, [rdi + PyExceptionObject.exc_dict]
+    test rdi, rdi
+    jz .onm_none
+    mov [rbp - ONM_DICT], rdi
+    mov rdi, rsi
+    call str_intern_cstr
+    test rax, rax
+    jz .onm_none
+    mov [rbp - ONM_KEY], rax
+    mov rdi, [rbp - ONM_DICT]
+    mov rsi, rax
+    call dict_get                       ; a borrowed Value, or 0 for a miss
+    mov [rbp - ONM_DICT], rax           ; ONM_DICT is spent; hold the answer
+    mov rdi, [rbp - ONM_KEY]
+    call obj_decref                     ; str_intern_cstr's own reference
+    mov rax, [rbp - ONM_DICT]
+    test rax, rax
+    jz .onm_none
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .onm_none
+    leave
+    ret
+.onm_none:
+    xor eax, eax
+    leave
+    ret
+END_FUNC oserror_named
+
+;; ============================================================================
+;; oserror_reduce(rdi = the argument array, rsi = the count) -> rax = a Value
+;;   -- OSError.__reduce__(self)
+;;
+;; CPython's OSError_reduce, and the only method OSError keeps of its own.
+;; Two things make it differ from BaseException's:
+;;
+;;   * a filename is re-packed INTO the arguments, because the constructor
+;;     takes it back there and `args` does not carry it -- a filename
+;;     truncates args to two items.  Three when there is one filename, five
+;;     when there are two: the fourth is the Windows-only winerror, which has
+;;     to be present as None for the fifth to land where the constructor reads
+;;     it.
+;;   * the state is the instance dict WITHOUT the four named attributes.  They
+;;     are C fields in CPython, so its dict never has them; here they live in
+;;     exc_dict (bugs.md carries why), and handing them on as a state would
+;;     make the reduction a three-tuple where CPython's is a two-tuple.  The
+;;     filter is what keeps the two answers identical.
+;; ============================================================================
+ORD_SELF   equ 8
+ORD_ARGS   equ 16           ; the args tuple to hand over, owned
+ORD_STATE  equ 24           ; the filtered dict, owned, or 0
+ORD_FNAME  equ 32
+ORD_FNAME2 equ 40
+ORD_ORIG   equ 48           ; the original args tuple, borrowed
+ORD_FRAME  equ 64           ; + 2 pushes = 80, 16-aligned
+extern obj_incref
+extern dict_copy_shallow
+extern dict_del_opt
+extern ir_reduce_tuple
+global oserror_reduce
+DEF_FUNC oserror_reduce, ORD_FRAME
+    push rbx
+    push r12
+    mov rax, [rdi]                      ; self, always a pointer
+    mov [rbp - ORD_SELF], rax
+    mov qword [rbp - ORD_STATE], 0
+
+    mov rdi, rax
+    lea rsi, [rel oserror_n_filename]
+    call oserror_named
+    mov [rbp - ORD_FNAME], rax
+    mov rdi, [rbp - ORD_SELF]
+    lea rsi, [rel oserror_n_filename2]
+    call oserror_named
+    mov [rbp - ORD_FNAME2], rax
+
+    mov rax, [rbp - ORD_SELF]
+    mov rax, [rax + PyExceptionObject.exc_args]
+    mov [rbp - ORD_ORIG], rax
+    test rax, rax
+    jz .ord_args_empty
+    cmp qword [rax + PyTupleObject.ob_size], 2
+    jne .ord_args_as_is
+    cmp qword [rbp - ORD_FNAME], 0
+    je .ord_args_as_is
+
+    mov edi, 3
+    cmp qword [rbp - ORD_FNAME2], 0
+    je .ord_alloc
+    mov edi, 5
+.ord_alloc:
+    call tuple_new
+    test rax, rax
+    jz .ord_failed
+    mov rbx, rax
+    mov r12, [rax + PyTupleObject.ob_item]
+    mov rax, [rbp - ORD_ORIG]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rcx, [rax]
+    INCREF_V rcx, rdx
+    mov [r12], rcx
+    mov rcx, [rax + 8]
+    INCREF_V rcx, rdx
+    mov [r12 + 8], rcx
+    mov rcx, [rbp - ORD_FNAME]
+    INCREF_V rcx, rdx
+    mov [r12 + 16], rcx
+    cmp qword [rbp - ORD_FNAME2], 0
+    je .ord_args_built
+    lea rcx, [rel none_singleton]       ; winerror, so filename2 lands at 4
+    INCREF rcx
+    mov [r12 + 24], rcx
+    mov rcx, [rbp - ORD_FNAME2]
+    INCREF_V rcx, rdx
+    mov [r12 + 32], rcx
+.ord_args_built:
+    mov [rbp - ORD_ARGS], rbx
+    jmp .ord_state
+
+.ord_args_empty:
+    xor edi, edi
+    call tuple_new
+    test rax, rax
+    jz .ord_failed
+    mov [rbp - ORD_ARGS], rax
+    jmp .ord_state
+
+.ord_args_as_is:
+    mov rdi, [rbp - ORD_ORIG]
+    call obj_incref
+    mov rax, [rbp - ORD_ORIG]
+    mov [rbp - ORD_ARGS], rax
+
+.ord_state:
+    mov rdi, [rbp - ORD_SELF]
+    mov rdi, [rdi + PyExceptionObject.exc_dict]
+    test rdi, rdi
+    jz .ord_build
+    call dict_copy_shallow
+    test rax, rax
+    jz .ord_build
+    mov rbx, rax
+    lea r12, [rel oserror_attr_names]
+.ord_strip:
+    mov rdi, [r12]
+    test rdi, rdi
+    jz .ord_stripped
+    call str_intern_cstr
+    test rax, rax
+    jz .ord_stripped
+    mov [rbp - ORD_ORIG], rax           ; ORD_ORIG is spent; hold the key
+    mov rdi, rbx
+    mov rsi, rax
+    call dict_del_opt                   ; -1 when it was never there
+    mov rdi, [rbp - ORD_ORIG]
+    call obj_decref
+    add r12, 8
+    jmp .ord_strip
+.ord_stripped:
+    cmp qword [rbx + PyDictObject.ob_size], 0
+    jne .ord_keep_state
+    mov rdi, rbx
+    call obj_decref
+    jmp .ord_build
+.ord_keep_state:
+    mov [rbp - ORD_STATE], rbx
+
+.ord_build:
+    mov rdi, [rbp - ORD_SELF]
+    mov rdi, [rdi + PyObject.ob_type]   ; type(self), borrowed
+    mov rsi, [rbp - ORD_ARGS]           ; the reference goes with it
+    mov rdx, [rbp - ORD_STATE]
+    xor ecx, ecx
+    test rdx, rdx
+    jz .ord_call
+    mov ecx, 1
+.ord_call:
+    call ir_reduce_tuple
+    mov [rbp - ORD_ARGS], rax           ; spent; hold the answer
+    mov rdi, [rbp - ORD_STATE]
+    test rdi, rdi
+    jz .ord_done
+    call obj_decref                     ; ir_reduce_tuple took its own
+.ord_done:
+    mov rax, [rbp - ORD_ARGS]
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.ord_failed:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC oserror_reduce

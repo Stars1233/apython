@@ -416,6 +416,8 @@ GENERATED = {
     'src/compiler/unicodecase.asm',
     'src/compiler/prule.asm',
     'src/modules/unicodedataprops.asm',
+    'src/modules/unicodenorm_tables.asm',
+    'src/modules/ucd32_tables.asm',
     'src/dtoa_tables.asm',
 }
 

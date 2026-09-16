@@ -101,6 +101,20 @@ class TypeVar:
     def __typing_subst__(self, arg):
         return arg
 
+    # `A | int` and `int | A`.  CPython's TypeVar is a C type carrying both,
+    # and what comes back is typing's own union rather than types.UnionType:
+    # `typing.Union[~A, int]`.  Without them the operator said "unsupported
+    # operand type(s) for |: 'TypeVar' and 'type'", which is an ordinary
+    # annotation refused.  typing is imported at CALL time for the reason
+    # Generic.__class_getitem__ gives -- typing imports this module first.
+    def __or__(self, right):
+        import typing
+        return typing.Union[self, right]
+
+    def __ror__(self, left):
+        import typing
+        return typing.Union[left, self]
+
     def __reduce__(self):
         return self._name
 
@@ -226,8 +240,25 @@ class Unpack:
 
     __slots__ = ("__typing_unpacked_tuple_args__",)
 
+    # typing's own checks read these three by name -- _is_unpacked_typevartuple
+    # asks for the flag, and _collect_parameters and the Generic[...] check
+    # read __origin__/__args__ off what CPython's _UnpackGenericAlias carries.
+    # Without them `class C[*Ts]` was refused with "Parameters to Generic[...]
+    # must all be type variables", because typing could not tell this stand-in
+    # from an ordinary object.
+    __typing_is_unpacked_typevartuple__ = True
+
     def __init__(self, arg):
         self.__typing_unpacked_tuple_args__ = arg
+
+    @property
+    def __origin__(self):
+        import typing
+        return typing.Unpack
+
+    @property
+    def __args__(self):
+        return (self.__typing_unpacked_tuple_args__,)
 
     def __repr__(self):
         # typing.Unpack[Ts], which is what CPython's _UnpackGenericAlias
@@ -325,17 +356,63 @@ def _type_repr(obj):
     return repr(obj)
 
 
+def _typing_hook(name):
+    """The typing function CPython's C Generic forwards to, or None.
+
+    None only during bootstrap: typing.py imports Generic from this module, so
+    while typing is still executing its own body the hook is not there yet and
+    a `class C[T]` compiled at that moment has to fall back.
+    """
+    try:
+        import typing
+        return getattr(typing, name)
+    except (ImportError, AttributeError):
+        return None
+
+
 class Generic:
-    """The base a `class C[T]` gets.  CPython's carries the machinery for
-    __class_getitem__ and parameter substitution; what is needed here is that
-    it exists and that subscripting it answers something."""
+    """The base a `class C[T]` gets.
+
+    CPython's is a C type whose __class_getitem__ reaches back INTO typing and
+    builds a `typing._GenericAlias` -- the real one, with substitution,
+    `get_args`, `get_origin`, `__mro_entries__` and the rest.  Answering with
+    the local stand-in below instead was the shape half-implemented-is-worse
+    is about: the subscript did not raise, so nothing detected that
+    `C[T][int]` said "'_GenericAlias' object is not subscriptable" and that
+    every typing introspection of a user generic gave the wrong answer.
+
+    So this does what the C one does, and for the same reason it does it
+    LAZILY: typing imports this module at its own line 36, long before it has
+    defined _GenericAlias, and importing typing from here at module scope
+    would be circular.  The stand-in stays as the fallback for the one case
+    that has no typing yet -- a `class C[T]` compiled during bootstrap.
+    """
 
     __slots__ = ()
 
+    # CPython's Generic is C and delegates BOTH of these to typing --
+    # Objects/typevarobject.c calls _generic_class_getitem and
+    # _generic_init_subclass by name.  This class IS typing.Generic (typing.py
+    # imports it from here), so doing the work locally instead skipped every
+    # rule the real ones carry: __init_subclass__ is what sets a subclass's
+    # __parameters__, and without it Foo.__parameters__ was an AttributeError,
+    # Foo[int, str] was accepted for a one-parameter Foo, get_args(Foo[None])
+    # answered (None,) rather than (NoneType,), and `Generic[int]` was allowed.
+
     def __class_getitem__(cls, params):
+        real = _typing_hook("_generic_class_getitem")
+        if real is not None:
+            return real(cls, params)
+        # No typing yet -- a `class C[T]` compiled during bootstrap.
         if not isinstance(params, tuple):
             params = (params,)
         return _GenericAlias(cls, params)
+
+    def __init_subclass__(cls, *args, **kwargs):
+        real = _typing_hook("_generic_init_subclass")
+        if real is not None:
+            return real(cls, *args, **kwargs)
+        super().__init_subclass__(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -412,8 +489,27 @@ def _subscript_generic(params):
     try:
         from typing import Generic as _real
     except ImportError:
-        _real = Generic
-    return _GenericAlias(_real, params)
+        # No typing on the path: the stand-in below is all there is.
+        return _GenericAlias(Generic, params)
+    # A TypeVarTuple reaches the base UNPACKED.  CPython's compiler emits
+    # `Generic[*Ts]` and the star iterates it into Unpack[Ts]; ours pushes the
+    # bare tuple, so the unpacking happens here instead -- and it has to,
+    # because typing's own check accepts only TypeVars, ParamSpecs and
+    # unpacked TypeVarTuples.
+    unpacked = []
+    for param in params:
+        if isinstance(param, TypeVarTuple):
+            unpacked.extend(param)
+        else:
+            unpacked.append(param)
+    params = tuple(unpacked)
+    # SUBSCRIPT it rather than building the alias by hand.  The two are not
+    # the same object: Generic[...] goes through typing's own machinery, and
+    # what comes back is the typing._GenericAlias that _collect_parameters
+    # recognises.  Handing a stand-in alias to the class statement instead
+    # left `class Box[T]` with an empty __parameters__ -- and then subscripting
+    # it raised "Box is not a generic class".
+    return _real[params]
 
 
 def _set_function_type_params(func, params):

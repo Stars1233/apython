@@ -19,6 +19,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "posixpath.inc"
 
 ASM_INIT
 
@@ -43,6 +44,7 @@ extern raise_exception
 extern set_exception
 extern ap_strlen
 extern posix_embedded_nul
+extern posix_path_arg
 extern exc_TypeError_type
 extern exc_OSError_type
 extern exc_OverflowError_type
@@ -898,7 +900,8 @@ FI_NARGS  equ 56
 ; the scalars above it the first time the struct grows.
 FI_NPOS   equ 64            ; positional count, once the keywords are split off
 FI_CLOSEFD equ 72           ; the closefd argument, defaulting to 1
-FI_STAT   equ 80 + StatBuf_size
+FI_PATHOBJ equ 80           ; what posix_path_arg wants released, or 0
+FI_STAT   equ 88 + StatBuf_size
 FI_FRAME  equ FI_STAT       ; 224, + 0 pushes, 16-aligned
 
 ; Every error exit below owns the mode string -- allocated for the default, or
@@ -1086,35 +1089,40 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     mov rdi, [rbp - FI_FILE]
     test rdi, rdi
     jz .fi_file_type
-    V_TEST_PTR rdi, rax
-    ja .fi_file_type
-    mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel str_type]
-    cmp rax, rcx
-    jne .fi_file_type
     ; A path this object opens itself must be closed by it: CPython raises
     ; rather than accepting closefd=False, and accepting it silently cleared
     ; the bit and leaked one descriptor per open.  Checked before sys_open,
     ; so there is no descriptor to leak on the way out either.
     cmp qword [rbp - FI_CLOSEFD], 0
     je .fi_closefd_path
-    ; A C path ends at its first NUL and a Python str does not, so open("a\0b")
-    ; opened "a" -- a checked path silently becoming a different one.  Every
-    ; os.* entry point already refuses this through posix_path_arg; open() did
-    ; not, because it reaches the syscall from here instead.
-    push rdi
-    push rdi                            ; twice, to keep rsp 16-byte aligned
-    mov rsi, [rdi + PyStrObject.ob_size]
-    add rdi, PyStrObject.data
-    call posix_embedded_nul
-    pop rdi
-    pop rdi
-    test eax, eax
-    jnz .fi_embedded_nul
-    lea rdi, [rdi + PyStrObject.data]
+    ; posix_path_arg is the one converter, and using it is what makes the
+    ; message above honest: this used to be an exact `cmp` against str_type
+    ; while promising "str, bytes or os.PathLike", so `open(b'/etc/hostname')`
+    ; and `open(S('/etc/hostname'))` for any str SUBCLASS were both refused --
+    ; and pdb's own _ScriptTarget is a str subclass, which is 49 of its tests.
+    ; It also brings the embedded-NUL check with it, which used to be
+    ; open-coded here: a C path ends at its first NUL and a Python str does
+    ; not, so open("a\0b") opened "a".
+    xor esi, esi                ; the whole sentence comes from the kind
+    mov edx, 3                  ; POSIX_PATH_KIND_IO: _io's own sentence
+    call posix_path_arg
+    test rax, rax
+    jz .fi_path_refused         ; 0 with the exception already pending
+    mov [rbp - FI_PATHOBJ], rdx
+    mov rdi, rax
     mov rsi, [rbp - FI_OFLAGS]
     mov edx, 0o666
     call sys_open
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - FI_PATHOBJ]
+    test rdi, rdi
+    jz .fi_path_released
+    mov qword [rbp - FI_PATHOBJ], 0
+    call obj_decref
+.fi_path_released:
+    add rsp, 8
+    pop rax
     test rax, rax
     js .fi_open_failed
     mov rdi, [rbp - FI_SELF]
@@ -1216,9 +1224,16 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     FI_DROP_MODE
     RAISE exc_ValueError_type, "Cannot use closefd=False with file name"
 
-.fi_embedded_nul:
+.fi_path_refused:
+    ; posix_path_arg answered 0 and left the exception pending, so this is the
+    ; one place the mode string can still be released -- which is what the
+    ; whole returning contract buys.  Nothing is pushed here: the frame is the
+    ; one DEF_FUNC carved.
     FI_DROP_MODE
-    RAISE exc_ValueError_type, "embedded null byte"
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
 
 
 .fi_open_failed:

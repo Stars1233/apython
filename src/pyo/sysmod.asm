@@ -621,10 +621,12 @@ DEF_FUNC sys_module_init, 40
     extern float_info_type
     extern int_info_type
     extern hash_info_type
+    extern thread_info_type
     extern float_info_v0
     extern float_info_v3
     extern float_info_v8
     extern hash_info_v5
+    extern thread_info_v0
     extern structseq_new
     extern structseq_set
     extern structseq_init_type
@@ -1168,6 +1170,46 @@ DEF_FUNC sys_module_init, 40
     mov rdi, rbx
     call obj_decref
 
+    ; --- sys.thread_info ---
+    ; Three fields, and the name is the honest one: `pthread-stubs` is what
+    ; CPython reports for a build whose threads do not start, which is what
+    ; lib/_thread.py is.  lock and version are None because there is nothing
+    ; to name, which is also how CPython leaves them when it cannot tell --
+    ; and it is what makes `if sys.thread_info.version:` guards skip.
+    lea rdi, [rel thread_info_type]
+    call structseq_init_type
+    lea rdi, [rel thread_info_type]
+    call structseq_new
+    mov rbx, rax
+    lea rdi, [rel thread_info_v0]
+    call str_from_cstr_heap
+    mov rdx, rax
+    mov rdi, rbx
+    xor esi, esi
+    call structseq_set
+    ; structseq_set takes over the caller's reference, so None needs one each.
+    lea rdx, [rel none_singleton]
+    inc qword [rdx + PyObject.ob_refcnt]
+    mov rdi, rbx
+    mov esi, 1
+    call structseq_set
+    lea rdx, [rel none_singleton]
+    inc qword [rdx + PyObject.ob_refcnt]
+    mov rdi, rbx
+    mov esi, 2
+    call structseq_set
+    lea rdi, [rel sm_thread_info]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, r15
+    mov rsi, rax
+    mov rdx, rbx
+    call dict_set
+    pop rdi
+    call obj_decref
+    mov rdi, rbx
+    call obj_decref
+
     ; --- sys.getdefaultencoding function ---
     lea rdi, [rel sys_getdefaultencoding_func]
     lea rsi, [rel sm_getdefaultencoding]
@@ -1383,6 +1425,12 @@ DEF_FUNC sys_module_init, 40
     call obj_decref
     pop rdi
     call obj_decref
+
+    ; --- sys.get/set_coroutine_origin_tracking_depth ---
+    SYS_ADD_FUNC sys_get_coroutine_origin_tracking_depth_func, \
+                 sm_get_coroutine_origin_tracking_depth
+    SYS_ADD_FUNC sys_set_coroutine_origin_tracking_depth_func, \
+                 sm_set_coroutine_origin_tracking_depth
 
     ; --- the attributes a program asks for by name -----------------------
     ;
@@ -1807,6 +1855,67 @@ DEF_FUNC sys_set_int_max_str_digits_func
 END_FUNC sys_set_int_max_str_digits_func
 
 ;; ============================================================================
+;; sys_get_coroutine_origin_tracking_depth_func(args, nargs) -> rax = Value
+;;
+;; -> the depth last set, as an int.  Zero until something sets it.
+;;
+;; asyncio's BaseEventLoop._set_coroutine_origin_tracking calls this on every
+;; run_forever, so its absence was not a missing introspection knob: it was
+;; every IsolatedAsyncioTestCase in the standard library dying before its
+;; first await, which is the whole of test_unittest and test_inspect and most
+;; of test_os.
+;; ============================================================================
+DEF_FUNC sys_get_coroutine_origin_tracking_depth_func
+    test rsi, rsi
+    jne .get_codt_error
+    mov rdi, [rel coroutine_origin_depth]
+    call int_from_i64
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+.get_codt_error:
+    extern exc_TypeError_type
+    RAISE exc_TypeError_type, \
+          "get_coroutine_origin_tracking_depth() takes no arguments"
+END_FUNC sys_get_coroutine_origin_tracking_depth_func
+
+;; ============================================================================
+;; sys_set_coroutine_origin_tracking_depth_func(args, nargs) -> rax = Value
+;;
+;; -> None.  Refuses a negative depth, as CPython's does.
+;;
+;; obj_as_index and not int_to_i64: that one reads PyIntObject.compact off
+;; whatever it is handed, so a float or a list was a dereference of the number
+;; and `set_coroutine_origin_tracking_depth("hello")` stored a str's ob_size.
+;; asyncio's _set_coroutine_origin_tracking forwards whatever it is given.
+;; ============================================================================
+DEF_FUNC sys_set_coroutine_origin_tracking_depth_func
+    cmp rsi, 1
+    jne .set_codt_error
+
+    mov rdi, [rdi]              ; args[0]
+    V_UNPACK rdi, rdx
+    extern obj_as_index
+    call obj_as_index           ; names the type for anything else
+    test rax, rax
+    js .set_codt_value_error
+
+    mov [rel coroutine_origin_depth], rax
+    RET_NONE
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.set_codt_value_error:
+    extern exc_ValueError_type
+    RAISE exc_ValueError_type, "depth must be >= 0"
+
+.set_codt_error:
+    RAISE exc_TypeError_type, \
+          "set_coroutine_origin_tracking_depth() takes exactly 1 argument"
+END_FUNC sys_set_coroutine_origin_tracking_depth_func
+
+;; ============================================================================
 ;; sys_path_add_script_dir(const char *pyc_path)
 ;; Extract directory from the .pyc path and prepend to sys.path[0]
 ;; ============================================================================
@@ -1975,6 +2084,7 @@ sm_float_info:   db "float_info", 0
 sm_flags:        db "flags", 0
 sm_int_info:     db "int_info", 0
 sm_hash_info:    db "hash_info", 0
+sm_thread_info:  db "thread_info", 0
 sm_final:        db "final", 0
 sm_executable:   db "executable", 0
 sm_prefix:       db "prefix", 0
@@ -2094,6 +2204,8 @@ sm_little:       db "little", 0
 sm_getdefaultencoding: db "getdefaultencoding", 0
 sm_get_int_max_str_digits: db "get_int_max_str_digits", 0
 sm_set_int_max_str_digits: db "set_int_max_str_digits", 0
+sm_get_coroutine_origin_tracking_depth: db "get_coroutine_origin_tracking_depth", 0
+sm_set_coroutine_origin_tracking_depth: db "set_coroutine_origin_tracking_depth", 0
 sm_utf8:         db "utf-8", 0
 sm_empty:        db "", 0
 sm_slash:        db "/", 0
@@ -2129,6 +2241,15 @@ asyncgen_finalizer_hook: resq 1
 ; there is only one way to ask.
 global interp_finalizing
 interp_finalizing: resq 1
+
+; PEP 567's coroutine-origin tracking depth.  Nothing here reads it -- a
+; coroutine carries no cr_origin -- but asyncio's event loop SETS it on every
+; run_forever and GETS it back on the way out, so a missing pair is not a
+; missing feature, it is a dead event loop.  An int that remembers what it was
+; told is the whole contract a caller can observe; CPython's affects only the
+; traceback a coroutine created under it carries.
+global coroutine_origin_depth
+coroutine_origin_depth: resq 1
 
 section .data
 align 8

@@ -2953,6 +2953,35 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     call obj_decref
 
+    ; A module body may REPLACE itself in sys.modules, and the value bound by
+    ; `import x` has to be what sys.modules holds when the body finishes, not
+    ; the object that was put there before it ran.  CPython's _bootstrap._load
+    ; re-reads it for exactly this reason:
+    ;
+    ;     module = sys.modules.pop(spec.name)
+    ;     sys.modules[spec.name] = module
+    ;     return module
+    ;
+    ; Returning the created object instead is not a cosmetic difference: the
+    ; replacement idiom is how an alias module names something else (it is
+    ; what `_frozen_importlib` does), and worse, the object we created has
+    ; already been released by the dict_set that overwrote it -- so `mov rax,
+    ; r13` could hand back freed memory.
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, rbx                ; name_str
+    call dict_get               ; borrowed Value, or 0 for a miss
+    test rax, rax
+    jz .fl_keep_created         ; the body deleted itself; hand back what we made
+    V_TEST_PTR rax, rcx
+    ja .fl_keep_created         ; not a pointer -- nothing sane to return
+    cmp rax, r13
+    je .fl_keep_created         ; the ordinary case: unchanged
+    INCREF rax                  ; our caller owns what it gets back
+    mov rdi, r13
+    mov r13, rax
+    call obj_decref             ; and the object we built is no longer ours
+.fl_keep_created:
+
     ; Return module (already in sys.modules with INCREF from dict_set)
     mov rax, r13
 

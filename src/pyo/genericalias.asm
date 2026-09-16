@@ -24,6 +24,7 @@ extern union_type
 ; --- the rest of the tree ---
 extern ap_free
 extern ap_malloc
+extern builtin_sub_alloc
 extern ap_strcmp
 extern bool_false
 extern bool_true
@@ -45,6 +46,9 @@ extern str_from_cstr
 extern str_new_heap
 extern str_type
 extern tuple_new
+extern obj_call_n
+extern rbt_append_cstr
+extern mapping_getitem_opt
 extern tuple_type
 extern type_type
 
@@ -62,15 +66,46 @@ section .text
 ;;   a new reference, or 0 with the exception pending
 ;; ============================================================================
 DEF_FUNC generic_alias_new
+    mov rdx, rsi                ; the argument
+    mov rsi, rdi                ; origin
+    lea rdi, [rel generic_alias_type]
+    call generic_alias_new_for
+    leave
+    ret
+END_FUNC generic_alias_new
+
+;; ============================================================================
+;; generic_alias_new_for(rdi = cls, rsi = origin, rdx = the argument Value)
+;;   -> rax = a new alias of class `cls`, or 0 with the exception pending
+;;
+;; The same record, built as a SUBCLASS.  `_CallableGenericAlias(GenericAlias)`
+;; in _collections_abc calls `super().__new__(cls, origin, args)` and the
+;; object that comes back has to be a _CallableGenericAlias, or its own
+;; __repr__ and __getitem__ are never reached and `collections.abc.Callable`
+;; reprs as a plain alias.
+;;
+;; A subclass's tp_basicsize is at least ours -- __slots__ = () keeps it equal,
+;; a subclass without __slots__ adds a dict word -- so the tail past our three
+;; fields is zeroed here rather than assumed.
+;; ============================================================================
+DEF_FUNC generic_alias_new_for
     push rbx
     push r12
-    mov rbx, rdi                ; origin
-    mov r12, rsi                ; args
-    mov edi, PyGenericAliasObject_size
-    call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel generic_alias_type]
-    mov [rax + PyObject.ob_type], rcx
+    push r13
+    push r14
+    mov r13, rdi                ; cls
+    mov rbx, rsi                ; origin
+    mov r12, rdx                ; args
+    ; builtin_sub_alloc is the allocation half every builtin constructor that
+    ; honours its class uses: it reads tp_basicsize, routes a heaptype through
+    ; gc_alloc (a heaptype ALWAYS carries TYPE_FLAG_HAVE_GC, and a plain
+    ; ap_malloc hands the collector a pointer sixteen bytes short of what it
+    ; gave out) and a static type through ap_malloc, and zeroes the tail so a
+    ; subclass's __dict__ and slots start empty.
+    mov rdi, r13
+    call builtin_sub_alloc
+    test rax, rax
+    jz .gan_oom
     mov [rax + PyGenericAliasObject.ga_origin], rbx
     mov [rax + PyGenericAliasObject.ga_args], r12
     mov qword [rax + PyGenericAliasObject.ga_starred], 0
@@ -81,13 +116,29 @@ DEF_FUNC generic_alias_new
     ; and obj_incref on one writes through the number.
     mov rax, r12
     INCREF_V rax, rcx
+    ; A heaptype subclass is named by its instances and must be held.
+    lea rcx, [rel generic_alias_type]
+    cmp r13, rcx
+    je .gan_done
+    mov rdi, r13
+    call obj_incref
 .gan_done:
     pop rax
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
     ret
-END_FUNC generic_alias_new
+.gan_oom:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC generic_alias_new_for
 
 ;; ============================================================================
 ;; generic_alias_dealloc(rdi = the alias) -> nothing; the object is freed
@@ -187,19 +238,48 @@ END_FUNC generic_alias_iter
 DEF_FUNC generic_alias_construct
     cmp rdx, 2
     jne .gac_error
-    mov rdi, [rsi]              ; the origin
-    mov rsi, [rsi + 8]          ; the argument, whatever it is
-    V_TEST_PTR rdi, rax
+    ; rdi is the class to build, and it is not always ours: a subclass
+    ; reaching super().__new__(cls, ...) has to get an instance of ITSELF, or
+    ; its own __repr__ and __getitem__ are never found.
+    mov rcx, [rsi + 8]          ; the argument, whatever it is
+    mov rsi, [rsi]              ; the origin
+    V_TEST_PTR rsi, rax
     ja .gac_error
-    test rdi, rdi
+    test rsi, rsi
     jz .gac_error
-    call generic_alias_new
+    mov rdx, rcx
+    call generic_alias_new_for
+    test rax, rax
+    jz .gac_failed
     mov edx, TAG_PTR            ; a constructor returns the (payload, tag) pair
+    leave
+    ret
+.gac_failed:
+    xor edx, edx
     leave
     ret
 .gac_error:
     RAISE exc_TypeError_type, "GenericAlias expected 2 arguments"
 END_FUNC generic_alias_construct
+
+;; ============================================================================
+;; generic_alias_dunder_new(args, nargs) -> Value    -- types.GenericAlias.__new__
+;;
+;; The constructor lives in tp_new and the type had no tp_dict at all, so
+;; `super().__new__(cls, ...)` in a subclass walked past it to object.__new__
+;; and was refused.  `_CallableGenericAlias` in _collections_abc is written
+;; exactly that way, which made `collections.abc.Callable[[int], int]` a
+;; TypeError outright.
+;; ============================================================================
+extern new_from_slot
+DEF_FUNC generic_alias_dunder_new
+    mov rdx, rsi
+    mov rsi, rdi
+    lea rdi, [rel generic_alias_type]
+    call new_from_slot
+    leave
+    ret
+END_FUNC generic_alias_dunder_new
 
 ;; ============================================================================
 ;; generic_alias_class_getitem(rdi = args, rsi = nargs) -> Value: the alias
@@ -788,6 +868,561 @@ DEF_FUNC_LOCAL generic_alias_parameters, GAP_FRAME
 END_FUNC generic_alias_parameters
 
 ;; ============================================================================
+;; generic_alias_subscript(rdi = the alias, rsi = the key Value) -> Value
+;;
+;; mp_subscript: PEP 585's parameter substitution, `list[T][int]` -> `list[int]`.
+;;
+;; The type carried no tp_as_mapping at all, so an alias that was still
+;; generic could not be filled in: `list[T][int]` said "'types.GenericAlias'
+;; object is not subscriptable", and so did every `C[T][int]` for a
+;; Generic subclass, since typing builds those on this.  It was the largest
+;; single cause of failure in CPython's own test_typing.
+;;
+;; CPython's _Py_subs_parameters, with its three arms per argument: a TypeVar
+;; is substituted through its own __typing_subst__, a nested alias that is
+;; still generic is subscripted with the items ITS parameters ask for, and
+;; anything else is carried over.
+;; ============================================================================
+GAS_SELF   equ 8
+GAS_KEY    equ 16
+GAS_PARAMS equ 24           ; __parameters__, owned
+GAS_ITEMS  equ 32           ; the key as a tuple, owned
+GAS_ARGS   equ 40           ; self's arguments as a tuple, owned
+GAS_NEW    equ 48           ; the tuple being built, owned
+GAS_I      equ 56
+GAS_FRAME  equ 64           ; + 2 pushes = 80, 16-aligned
+
+DEF_FUNC generic_alias_subscript, GAS_FRAME
+    push rbx
+    push r12
+    mov [rbp - GAS_SELF], rdi
+    mov [rbp - GAS_KEY], rsi
+    xor eax, eax
+    mov [rbp - GAS_PARAMS], rax
+    mov [rbp - GAS_ITEMS], rax
+    mov [rbp - GAS_ARGS], rax
+    mov [rbp - GAS_NEW], rax
+
+    call generic_alias_parameters
+    test rax, rax
+    jz .gas_fail
+    mov [rbp - GAS_PARAMS], rax
+    cmp qword [rax + PyTupleObject.ob_size], 0
+    je .gas_no_params
+
+    ; The key as a tuple.  `a[int]` and `a[int, str]` differ only in whether
+    ; the subscript already arrived as one.
+    mov rbx, [rbp - GAS_KEY]
+    call gas_as_tuple
+    test rax, rax
+    jz .gas_fail
+    mov [rbp - GAS_ITEMS], rax
+
+    mov rcx, [rbp - GAS_PARAMS]
+    mov rcx, [rcx + PyTupleObject.ob_size]
+    cmp [rax + PyTupleObject.ob_size], rcx
+    jl .gas_too_few
+    jg .gas_too_many
+
+    ; Our own arguments, as a tuple, the way __args__ reports them.
+    mov rdi, [rbp - GAS_SELF]
+    mov rbx, [rdi + PyGenericAliasObject.ga_args]
+    call gas_as_tuple
+    test rax, rax
+    jz .gas_fail
+    mov [rbp - GAS_ARGS], rax
+
+    mov rdi, [rax + PyTupleObject.ob_size]
+    call tuple_new
+    test rax, rax
+    jz .gas_fail
+    mov [rbp - GAS_NEW], rax
+
+    mov qword [rbp - GAS_I], 0
+.gas_loop:
+    mov rax, [rbp - GAS_ARGS]
+    mov rcx, [rbp - GAS_I]
+    cmp rcx, [rax + PyTupleObject.ob_size]
+    jge .gas_built
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rbx, [rax + rcx*8]              ; the argument, a Value
+
+    ; Arm one: a TypeVar, recognised as typing recognises one.
+    V_TEST_PTR rbx, rcx
+    ja .gas_keep
+    mov rdi, rbx
+    CSTRING rsi, "__typing_subst__"
+    call gap_has_attr
+    test eax, eax
+    jnz .gas_typevar
+
+    ; Arm two: something still generic of its own -- a nested alias.
+    mov rdi, rbx
+    CSTRING rsi, "__parameters__"
+    call gap_has_attr
+    test eax, eax
+    jnz .gas_nested
+
+.gas_keep:
+    mov rax, [rbp - GAS_NEW]
+    mov rcx, [rbp - GAS_I]
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov [rax + rcx*8], rbx
+    mov rax, rbx
+    INCREF_V rax, rcx
+    jmp .gas_next
+
+.gas_typevar:
+    ; items[params.index(arg)], handed to arg.__typing_subst__
+    mov rdi, rbx
+    mov rsi, [rbp - GAS_PARAMS]
+    mov rdx, [rbp - GAS_ITEMS]
+    call gas_item_for
+    test rax, rax
+    jz .gas_fail
+    mov r12, rax                        ; the item, borrowed from GAS_ITEMS
+    mov rdi, rbx
+    CSTRING rsi, "__typing_subst__"
+    mov rdx, r12
+    call gas_call_1
+    test rax, rax
+    jz .gas_fail
+    mov rcx, [rbp - GAS_NEW]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rdx, [rbp - GAS_I]
+    mov [rcx + rdx*8], rax              ; the call's reference goes in
+    jmp .gas_next
+
+.gas_nested:
+    mov rdi, rbx
+    mov rsi, [rbp - GAS_PARAMS]
+    mov rdx, [rbp - GAS_ITEMS]
+    call gas_subst_nested
+    test rax, rax
+    jz .gas_fail
+    mov rcx, [rbp - GAS_NEW]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rdx, [rbp - GAS_I]
+    mov [rcx + rdx*8], rax
+    jmp .gas_next
+
+.gas_next:
+    inc qword [rbp - GAS_I]
+    jmp .gas_loop
+
+.gas_built:
+    ; ga_args holds the bare object when the subscript was one thing, and a
+    ; tuple otherwise -- `list[int]` stores int, `tuple[int, str]` stores the
+    ; pair.  Handing back a one-tuple here instead would make
+    ; `list[T][int] == list[int]` False, since richcompare compares the field
+    ; rather than what __args__ wraps it into.
+    mov rsi, [rbp - GAS_NEW]
+    cmp qword [rsi + PyTupleObject.ob_size], 1
+    jne .gas_emit
+    mov rax, [rsi + PyTupleObject.ob_item]
+    mov rsi, [rax]
+.gas_emit:
+    mov rdi, [rbp - GAS_SELF]
+    mov rdi, [rdi + PyGenericAliasObject.ga_origin]
+    call generic_alias_new
+    test rax, rax
+    jz .gas_fail
+    push rax
+    call gas_release
+    pop rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.gas_fail:
+    call gas_release
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.gas_no_params:
+    mov rdi, [rbp - GAS_SELF]
+    CSTRING rsi, " is not a generic class"
+    jmp .gas_raise
+.gas_too_few:
+    mov rdi, [rbp - GAS_SELF]
+    CSTRING rsi, ": too few arguments"
+    jmp .gas_raise
+.gas_too_many:
+    mov rdi, [rbp - GAS_SELF]
+    CSTRING rsi, ": too many arguments"
+.gas_raise:
+    push rdi
+    push rsi
+    call gas_release
+    pop rsi
+    pop rdi
+    call gas_raise_named            ; does not return
+END_FUNC generic_alias_subscript
+
+;; ============================================================================
+;; gas_raise_named(rdi = the alias, rsi = the rest of the sentence, a cstr)
+;;   -> does not return: a TypeError naming the alias
+;;
+;; CPython words all three refusals around the alias's own repr -- "list[int]
+;; is not a generic class" -- and test_typing matches that phrase, so the
+;; repr has to be in the message rather than a generic stand-in for it.
+;; ============================================================================
+GRN_SUFFIX equ 8
+GRN_REPR   equ 16
+GRN_BUF    equ 208
+GRN_FRAME  equ 208          ; + 0 pushes = 208, 16-aligned
+DEF_FUNC_LOCAL gas_raise_named, GRN_FRAME
+    mov [rbp - GRN_SUFFIX], rsi
+    call obj_repr
+    mov [rbp - GRN_REPR], rax
+    lea rdi, [rbp - GRN_BUF]
+    test rax, rax
+    jz .grn_noname
+    lea rsi, [rax + PyStrObject.data]
+    call rbt_append_cstr
+    jmp .grn_suffix
+.grn_noname:
+    CSTRING rsi, "the alias"
+    call rbt_append_cstr
+.grn_suffix:
+    mov rdi, rax
+    mov rsi, [rbp - GRN_SUFFIX]
+    call rbt_append_cstr
+    mov rdi, [rbp - GRN_REPR]
+    test rdi, rdi
+    jz .grn_go
+    call obj_decref
+.grn_go:
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - GRN_BUF]
+    call raise_exception
+END_FUNC gas_raise_named
+
+;; ============================================================================
+;; gas_release() -- drop the four owned temporaries in the caller's frame
+;;
+;; Only callable from generic_alias_subscript's frame.  -> nothing
+;; ============================================================================
+DEF_FUNC_BARE gas_release
+    push rbx
+    push r12
+    sub rsp, 8                  ; entered by CALL, so rsp arrives 8 mod 16 and
+                                ; an EVEN push list leaves obj_decref below
+                                ; misaligned; the pad is what squares it
+    mov ebx, GAS_PARAMS
+.gasr_loop:
+    mov rax, rbp
+    sub rax, rbx
+    mov rdi, [rax]
+    test rdi, rdi
+    jz .gasr_next
+    mov qword [rax], 0
+    mov r12, rbx
+    call obj_decref
+    mov rbx, r12
+.gasr_next:
+    add rbx, 8
+    cmp rbx, GAS_NEW
+    jle .gasr_loop
+    add rsp, 8
+    pop r12
+    pop rbx
+    ret
+END_FUNC gas_release
+
+;; ============================================================================
+;; gas_as_tuple(rbx = a Value) -> rax = a tuple, OWNED, or 0
+;;
+;; The subscript and the argument list are both "a tuple, or the one thing
+;; that would have been in it".  A tuple is handed back with a reference
+;; taken, anything else is wrapped in a one-tuple, so the caller releases
+;; exactly one thing either way.
+;; ============================================================================
+DEF_FUNC_BARE gas_as_tuple
+    push rbx
+    test rbx, rbx
+    jz .gast_wrap
+    V_TEST_PTR rbx, rcx
+    ja .gast_wrap
+    lea rcx, [rel tuple_type]
+    cmp [rbx + PyObject.ob_type], rcx
+    jne .gast_wrap
+    mov rdi, rbx
+    call obj_incref
+    mov rax, rbx
+    pop rbx
+    ret
+.gast_wrap:
+    mov edi, 1
+    call tuple_new
+    test rax, rax
+    jz .gast_out
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov [rcx], rbx
+    push rax
+    mov rax, rbx
+    INCREF_V rax, rcx
+    pop rax
+.gast_out:
+    pop rbx
+    ret
+END_FUNC gas_as_tuple
+
+;; ============================================================================
+;; gas_item_for(rdi = a TypeVar, rsi = the __parameters__ tuple,
+;;              rdx = the items tuple) -> rax = the item chosen for it,
+;;   BORROWED from the items tuple, or 0 when the TypeVar is not among them
+;;
+;; The position of the TypeVar in __parameters__ chooses the item.  The two
+;; tuples are ARGUMENTS rather than frame slots because a nested alias reaches
+;; this through a function of its own: reading the caller's rbp worked only
+;; for the direct call, and `list[list[T]][int]` failed with nothing pending.
+;; ============================================================================
+DEF_FUNC_BARE gas_item_for
+    push rbx
+    push r12
+    mov r12, rdi
+    mov rcx, [rsi + PyTupleObject.ob_size]
+    mov rax, [rsi + PyTupleObject.ob_item]
+    xor ebx, ebx
+.gasi_loop:
+    cmp rbx, rcx
+    jge .gasi_missing
+    cmp [rax + rbx*8], r12
+    je .gasi_found
+    inc rbx
+    jmp .gasi_loop
+.gasi_found:
+    mov rax, [rdx + PyTupleObject.ob_item]
+    mov rax, [rax + rbx*8]
+    pop r12
+    pop rbx
+    ret
+.gasi_missing:
+    xor eax, eax
+    pop r12
+    pop rbx
+    ret
+END_FUNC gas_item_for
+
+;; ============================================================================
+;; gas_call_1(rdi = an object, rsi = a method name cstr, rdx = one argument
+;;   Value) -> rax = the result Value, or 0 with the exception pending
+;; ============================================================================
+GC1_ARG   equ 8
+GC1_FN    equ 16
+; Three values used to be carried across calls on the machine stack, one push
+; each -- and a single push makes the call after it misaligned, because
+; DEF_FUNC's frame already leaves rsp where the ABI wants it.  Frame slots
+; instead: they cost the same and they cannot be odd.
+GC1_OBJ   equ 24
+GC1_TMP   equ 32
+GC1_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
+DEF_FUNC_LOCAL gas_call_1, GC1_FRAME
+    mov [rbp - GC1_ARG], rdx
+    mov [rbp - GC1_OBJ], rdi
+    mov rdi, rsi
+    call str_from_cstr_heap
+    mov [rbp - GC1_FN], rax
+    mov rdi, [rbp - GC1_OBJ]
+    test rax, rax
+    jz .gc1_fail
+    mov rsi, rax
+    call obj_getattr_opt
+    mov [rbp - GC1_TMP], rax
+    mov rdi, [rbp - GC1_FN]
+    call obj_decref
+    mov rdi, [rbp - GC1_TMP]
+    test rdi, rdi
+    jz .gc1_fail
+    mov [rbp - GC1_FN], rdi             ; the bound method, ours to release
+    lea rsi, [rbp - GC1_ARG]
+    mov edx, 1
+    call obj_call_n
+    mov [rbp - GC1_TMP], rax
+    mov rdi, [rbp - GC1_FN]
+    DECREF_V rdi, rcx
+    mov rax, [rbp - GC1_TMP]
+    leave
+    ret
+.gc1_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC gas_call_1
+
+;; ============================================================================
+;; gas_subst_nested(rdi = an argument that is still generic,
+;;                   rsi = the outer __parameters__, rdx = the outer items)
+;;   -> rax = the argument with ITS parameters filled in, owned, or 0
+;;
+;; A nested alias asks for the items its own __parameters__ name, in its own
+;; order -- `dict[T, list[S]][int, str]` hands `list[S]` just the `str`.
+;; ============================================================================
+GSN_ARG    equ 8
+GSN_SUB    equ 16           ; its __parameters__, owned
+GSN_ITEMS  equ 24           ; the tuple built for it, owned
+GSN_OPARAM equ 32           ; the outer __parameters__, borrowed
+GSN_OITEMS equ 40           ; the outer items, borrowed
+GSN_FRAME  equ 56           ; + 1 push = 64, 16-aligned
+DEF_FUNC_LOCAL gas_subst_nested, GSN_FRAME
+    push rbx
+    mov [rbp - GSN_ARG], rdi
+    mov [rbp - GSN_OPARAM], rsi
+    mov [rbp - GSN_OITEMS], rdx
+    xor eax, eax
+    mov [rbp - GSN_SUB], rax
+    mov [rbp - GSN_ITEMS], rax
+
+    CSTRING rsi, "__parameters__"
+    call gas_getattr
+    test rax, rax
+    jz .gsn_keep
+    mov [rbp - GSN_SUB], rax
+    ; CPython's _Py_subs_parameters substitutes only when __parameters__ "is a
+    ; non-empty tuple" and otherwise CARRIES THE ARGUMENT OVER unchanged.  Both
+    ; of these used to be failures, so `dict[T, list[int]][str]` -- an ordinary
+    ; nested alias with nothing left to substitute -- raised "subscript failed
+    ; without an exception" instead of answering dict[str, list[int]].
+    lea rcx, [rel tuple_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .gsn_keep
+    mov rdi, [rax + PyTupleObject.ob_size]
+    test rdi, rdi
+    jz .gsn_keep
+    call tuple_new
+    test rax, rax
+    jz .gsn_fail
+    mov [rbp - GSN_ITEMS], rax
+
+    xor ebx, ebx
+.gsn_loop:
+    mov rax, [rbp - GSN_SUB]
+    cmp rbx, [rax + PyTupleObject.ob_size]
+    jge .gsn_filled
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rdi, [rax + rbx*8]
+    mov rsi, [rbp - GSN_OPARAM]
+    mov rdx, [rbp - GSN_OITEMS]
+    call gas_item_for
+    test rax, rax
+    jz .gsn_fail
+    mov rcx, [rbp - GSN_ITEMS]
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov [rcx + rbx*8], rax
+    INCREF_V rax, rdx
+    inc rbx
+    jmp .gsn_loop
+
+.gsn_filled:
+    mov rdi, [rbp - GSN_ARG]
+    mov rsi, [rbp - GSN_ITEMS]
+    call gas_subscript_any
+    push rax
+    mov rdi, [rbp - GSN_SUB]
+    call obj_decref
+    mov rdi, [rbp - GSN_ITEMS]
+    call obj_decref
+    pop rax
+    pop rbx
+    leave
+    ret
+
+.gsn_keep:
+    ; Nothing to substitute: hand the argument back as it stands, owned,
+    ; because the caller stores what this returns straight into the tuple.
+    mov rdi, [rbp - GSN_SUB]
+    test rdi, rdi
+    jz .gsn_keep_arg
+    call obj_decref
+.gsn_keep_arg:
+    mov rax, [rbp - GSN_ARG]
+    INCREF_V rax, rcx
+    pop rbx
+    leave
+    ret
+
+.gsn_fail:
+    mov rdi, [rbp - GSN_SUB]
+    test rdi, rdi
+    jz .gsn_fi
+    call obj_decref
+.gsn_fi:
+    mov rdi, [rbp - GSN_ITEMS]
+    test rdi, rdi
+    jz .gsn_out
+    call obj_decref
+.gsn_out:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC gas_subst_nested
+
+;; ============================================================================
+;; gas_getattr(rdi = an object, rsi = a name cstr) -> rax = the attribute,
+;;   owned, or 0 with nothing pending
+;; ============================================================================
+GGA_NAME  equ 8
+GGA_FRAME equ 24            ; + 1 push = 32, 16-aligned
+DEF_FUNC_LOCAL gas_getattr, GGA_FRAME
+    push rdi
+    mov rdi, rsi
+    call str_from_cstr_heap
+    mov [rbp - GGA_NAME], rax
+    pop rdi
+    test rax, rax
+    jz .gga_no
+    mov rsi, rax
+    call obj_getattr_opt
+    push rax
+    mov rdi, [rbp - GGA_NAME]
+    call obj_decref
+    pop rax
+    test rax, rax
+    jz .gga_no
+    V_TEST_PTR rax, rcx
+    ja .gga_drop
+    leave
+    ret
+.gga_drop:
+    xor eax, eax
+.gga_no:
+    leave
+    ret
+END_FUNC gas_getattr
+
+;; ============================================================================
+;; gas_subscript_any(rdi = an object, rsi = a tuple of items) -> rax = the
+;;   subscripted object, owned, or 0
+;;
+;; A nested argument may be one of ours or typing's own Python class, so the
+;; mapping slot is tried first and the dunder second -- which is the order
+;; op_binary_subscr uses.
+;; ============================================================================
+DEF_FUNC gas_subscript_any
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_as_mapping]
+    test rax, rax
+    jz .gsa_dunder
+    mov rax, [rax + PyMappingMethods.mp_subscript]
+    test rax, rax
+    jz .gsa_dunder
+    leave
+    jmp rax
+.gsa_dunder:
+    call mapping_getitem_opt
+    leave
+    ret
+END_FUNC gas_subscript_any
+
+;; ============================================================================
 ;; gap_collect() -- one pass over the arguments of the alias
 ;; generic_alias_parameters parked in its frame.  Counts into GAP_N, and fills
 ;; GAP_OUT when it is not 0.  Only callable from there.
@@ -1296,6 +1931,16 @@ END_FUNC generic_alias_richcompare
 section .data
 
 align 8
+; PEP 585's parameter substitution is a MAPPING subscript, which is the first
+; slot op_binary_subscr reads -- so `list[T][int]` needs no opcode change,
+; only somewhere to put mp_subscript.  Modelled on generic_alias_as_number,
+; which is the same shape one slot over.
+generic_alias_as_mapping:
+    dq 0                            ; mp_length
+    dq generic_alias_subscript      ; mp_subscript
+    dq 0                            ; mp_ass_subscript
+
+align 8
 global generic_alias_type
 generic_alias_type:
     dq 1                            ; ob_refcnt (immortal)
@@ -1316,7 +1961,7 @@ generic_alias_type:
     dq generic_alias_construct      ; tp_new
     dq generic_alias_as_number      ; tp_as_number
     dq 0                            ; tp_as_sequence
-    dq 0                            ; tp_as_mapping
+    dq generic_alias_as_mapping     ; tp_as_mapping
     dq 0                            ; tp_base
     dq 0                            ; tp_dict
     dq 0                            ; tp_mro

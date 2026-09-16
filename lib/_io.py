@@ -554,7 +554,7 @@ class _BufferedIOMixin(BufferedIOBase):
     def flush(self):
         raw = self._checkDetached()
         if self.closed:
-            raise ValueError("flush on closed file")
+            raise ValueError("flush of closed file")
         raw.flush()
 
     def close(self):
@@ -807,7 +807,7 @@ class BufferedWriter(_BufferedIOMixin):
 
     def flush(self):
         if self.closed:
-            raise ValueError("flush on closed file")
+            raise ValueError("flush of closed file")
         self._flush_unlocked()
 
     def _flush_unlocked(self):
@@ -1178,7 +1178,7 @@ class TextIOWrapper(TextIOBase):
 
     def flush(self):
         if self.closed:
-            raise ValueError("flush on closed file")
+            raise ValueError("I/O operation on closed file.")
         self.buffer.flush()
         self._telling = self._seekable
 
@@ -1224,7 +1224,7 @@ class TextIOWrapper(TextIOBase):
 
     def write(self, s):
         if self.closed:
-            raise ValueError("write to closed file")
+            raise ValueError("I/O operation on closed file.")
         if not isinstance(s, str):
             raise TypeError("can't write %s to text stream"
                             % s.__class__.__name__)
@@ -1642,7 +1642,12 @@ def open(file, mode="r", buffering=-1, encoding=None, errors=None,
         if isinstance(file, bytes):
             file = file.decode()
         if not isinstance(file, str):
-            raise TypeError("invalid file: %r" % file)
+            # CPython names the kinds it takes rather than showing the value:
+            # "expected str, bytes or os.PathLike object, not float".  The old
+            # wording here was _pyio's, and _pyio is not what `open` is.
+            raise TypeError(
+                "expected str, bytes or os.PathLike object, not %s"
+                % type(file).__name__)
     if not isinstance(mode, str):
         raise TypeError("open() argument 'mode' must be str, not %s"
                         % type(mode).__name__)

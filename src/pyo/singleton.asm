@@ -709,3 +709,52 @@ global ellipsis_singleton
 ellipsis_singleton:
     dq 0x7fffffffffffffff   ; ob_refcnt (max value, never reaches zero)
     dq ellipsis_type        ; ob_type
+
+;; ============================================================================
+;; The __new__ thunks for the three singleton types.
+;;
+;; `NoneType()`, `NotImplementedType()` and `EllipsisType()` all work, because
+;; the constructor is in tp_new -- but `NoneType.__new__` resolved along the
+;; MRO to object.__new__ and was refused, which is what `copy.copy` and every
+;; pickle of one reach for.  One thunk apiece rather than one shared: the
+;; slot called has to be the OWNER's, and there are three owners.
+;; ============================================================================
+section .text
+
+extern new_from_slot
+
+;; ============================================================================
+;; none_dunder_new(args, nargs) -> Value    -- NoneType.__new__
+;; ============================================================================
+DEF_FUNC none_dunder_new
+    mov rdx, rsi
+    mov rsi, rdi
+    lea rdi, [rel none_type]
+    call new_from_slot
+    leave
+    ret
+END_FUNC none_dunder_new
+
+;; ============================================================================
+;; notimpl_dunder_new(args, nargs) -> Value  -- NotImplementedType.__new__
+;; ============================================================================
+DEF_FUNC notimpl_dunder_new
+    mov rdx, rsi
+    mov rsi, rdi
+    lea rdi, [rel notimpl_type]
+    call new_from_slot
+    leave
+    ret
+END_FUNC notimpl_dunder_new
+
+;; ============================================================================
+;; ellipsis_dunder_new(args, nargs) -> Value  -- EllipsisType.__new__
+;; ============================================================================
+DEF_FUNC ellipsis_dunder_new
+    mov rdx, rsi
+    mov rsi, rdi
+    lea rdi, [rel ellipsis_type]
+    call new_from_slot
+    leave
+    ret
+END_FUNC ellipsis_dunder_new

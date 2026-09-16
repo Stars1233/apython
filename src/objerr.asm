@@ -97,6 +97,44 @@ DEF_FUNC raise_value_error_counted, RTC_FRAME
     call raise_exception
 END_FUNC raise_value_error_counted
 
+
+;; ============================================================================
+;; raise_typed_message(rdi = a Value, rsi = the text before the type name,
+;;                     rdx = the text after it, or 0)
+;;   -> does not return: a TypeError naming the argument's type
+;;
+;; The shape CPython uses for a refusal that is about WHAT it was handed:
+;; "argument of type 'ValueError' is not iterable", "__bytes__ returned
+;; non-bytes (type int)".  Three messages in this tree said the same thing
+;; with the type left out, each from a different file, because naming a type
+;; in a message meant building a buffer and none of them wanted to.
+;; ============================================================================
+RTM_VAL    equ 8
+RTM_SUFFIX equ 16
+RTM_BUF    equ 224
+RTM_FRAME  equ 224          ; + 0 pushes = 224, 16-aligned
+global raise_typed_message
+DEF_FUNC raise_typed_message, RTM_FRAME
+    mov [rbp - RTM_VAL], rdi
+    mov [rbp - RTM_SUFFIX], rdx
+    lea rdi, [rbp - RTM_BUF]
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RTM_VAL]
+    extern rbt_typename
+    call rbt_typename
+    mov rsi, [rbp - RTM_SUFFIX]
+    test rsi, rsi
+    jz .rtm_raise
+    mov rdi, rax
+    call rbt_append_cstr
+.rtm_raise:
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RTM_BUF]
+    call raise_exception
+    ud2
+END_FUNC raise_typed_message
+
 ;; ============================================================================
 ;; raise_final_base(rdi = the type's name, as a C string)
 ;;   -> does not return: the message is raised as a TypeError
@@ -959,3 +997,355 @@ DEF_FUNC raise_missing_arguments, RMA_FRAME
 .rma_count_done:
     ret
 END_FUNC raise_missing_arguments
+
+;; ============================================================================
+;; The AttributeError every failed attribute access ends in.  It moved here
+;; from object.asm, which crossed the 100k cap when the two attributes CPython
+;; hangs on the exception were added -- and this is objerr.asm's subject
+;; exactly: a message built into a buffer and handed to a raise that does not
+;; return.
+;; ============================================================================
+extern attr_error_pending
+extern current_exception
+extern eval_saved_r13
+extern eval_exception_unwind
+extern value_type
+extern module_type
+extern str_type
+extern exc_AttributeError_type
+extern exc_isinstance
+extern exc_from_cstr
+extern exc_setattr
+extern raise_exception_obj
+extern str_intern_cstr
+extern dict_get
+extern obj_decref
+extern none_singleton
+;; ============================================================================
+;; raise_no_attribute(rdi = the object as a Value, rsi = the attribute name,
+;;                     edx = 1 for a store or a delete, 0 for a read)
+;;   -> does not return: the AttributeError CPython raises
+;;
+;; The message names both nouns -- a module and a class name THEMSELVES rather
+;; than their type, because "'module' object has no attribute 'zzz'" tells a
+;; reader nothing about which module was asked.  A read also fills in the two
+;; attributes CPython hangs on the exception, `.name` and `.obj`; a store or a
+;; delete does not, which is CPython's own split.
+;; ============================================================================
+RNA_OBJ   equ 8
+RNA_NAME  equ 16
+RNA_ISSET equ 24            ; 1 for a store or a delete, 0 for a read
+; The message is built in the frame rather than in object.asm's shared rtn_buf:
+; that buffer stayed behind, and a raiser that never returns has no reason to
+; want a static one.
+RNA_BUFSZ equ 512
+RNA_BUF   equ 32 + RNA_BUFSZ
+RNA_FRAME equ RNA_BUF       ; + 2 pushes, 16-aligned
+
+; .rna_set_attr's own frame, which is its own rbp and not raise_no_attribute's.
+RSA_VAL   equ 8
+RSA_NAME  equ 16
+RSA_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+extern str_type
+DEF_FUNC raise_no_attribute, RNA_FRAME
+    push rbx
+    push r12
+    ; A __getattr__ that raised AttributeError already said what it wanted
+    ; said.  Replacing it here with a generic message threw that away, so
+    ; instance_getattr hands it over with this flag rather than unwinding --
+    ; which would skip getattr()'s and hasattr()'s own frames.
+    mov [rbp - RNA_NAME], rsi
+    mov [rbp - RNA_OBJ], rdi
+    mov [rbp - RNA_ISSET], rdx
+    cmp qword [rel attr_error_pending], 0
+    je .rna_fresh
+    mov qword [rel attr_error_pending], 0
+    cmp qword [rel current_exception], 0
+    je .rna_fresh
+
+    ; CPython's set_attribute_error_context runs after the hook as well, so a
+    ; __getattr__ that raised an AttributeError of its own still comes back
+    ; carrying the name that was asked for -- unless the hook named one
+    ; itself, which is what the probe below leaves alone.
+    cmp qword [rbp - RNA_ISSET], 0
+    jne .rna_pending_raise
+    mov rbx, [rel current_exception]
+    mov rdi, rbx
+    extern exc_AttributeError_type
+    lea rsi, [rel exc_AttributeError_type]
+    extern exc_isinstance
+    call exc_isinstance
+    test eax, eax
+    jz .rna_pending_raise
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    test rdi, rdi
+    jz .rna_pending_fill
+    extern str_intern_cstr
+    CSTRING rdi, "name"
+    call str_intern_cstr
+    test rax, rax
+    jz .rna_pending_raise
+    mov r12, rax
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    mov rsi, r12
+    extern dict_get
+    call dict_get
+    push rax
+    push rax                    ; twice: rsp stays 16-byte aligned
+    mov rdi, r12
+    call obj_decref
+    pop rax
+    pop rax
+    test rax, rax               ; a Value; 0 is the miss
+    jz .rna_pending_fill
+    ; AttributeError's constructor writes name=None and obj=None whether or
+    ; not the keywords were given (exc_store_named), so "absent" here is None
+    ; as well as missing -- CPython's members are NULL in both cases.
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    jne .rna_pending_raise
+.rna_pending_fill:
+    CSTRING rdi, "name"
+    mov rsi, [rbp - RNA_NAME]
+    call .rna_set_attr
+    CSTRING rdi, "obj"
+    mov rsi, [rbp - RNA_OBJ]
+    call .rna_set_attr
+
+.rna_pending_raise:
+    pop r12
+    pop rbx
+    leave
+    mov [rel eval_saved_r13], r13
+    jmp eval_exception_unwind
+.rna_fresh:
+    push rdi
+    call value_type
+    pop rdi
+    mov r12, rax
+
+    ; A module names itself rather than its type: CPython says
+    ; "module 'sys' has no attribute 'zzz'", not "'module' object has ...".
+    ; The name is the one thing that tells you WHICH module was asked.
+    extern module_type
+    lea rcx, [rel module_type]
+    cmp r12, rcx
+    je .rna_module
+
+    ; And a class names itself, for the same reason: CPython says
+    ; "type object 'C' has no attribute 'x'" where this said
+    ; "'type' object has no attribute 'x'" -- which names the metatype and so
+    ; tells you nothing about which class was asked.  The object here IS the
+    ; type, so its own tp_name is the one to print, and TYPE_FLAG_METATYPE on
+    ; its type is what says so: it is set on `type`, on both metatypes here,
+    ; and on any class deriving from type.
+    test r12, r12
+    jz .rna_plain
+    mov rax, [r12 + PyTypeObject.tp_flags]
+    test rax, TYPE_FLAG_METATYPE
+    jnz .rna_class
+
+.rna_plain:
+    lea rbx, [rbp - RNA_BUF]
+    xor ecx, ecx
+    mov byte [rbx], 39                  ; '
+    inc rcx
+    test r12, r12
+    jz .rna_after_type
+    mov rsi, [r12 + PyTypeObject.tp_name]
+    jmp .rna_type
+
+.rna_module:
+    lea rbx, [rbp - RNA_BUF]
+    xor ecx, ecx
+    mov rsi, [rdi + PyModuleObject.mod_name]
+    test rsi, rsi
+    jz .rna_module_unnamed
+    CSTRING rsi, "module '"
+    jmp .rna_module_prefix
+.rna_module_unnamed:
+    CSTRING rsi, "module '?"
+.rna_module_prefix:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .rna_module_name
+    inc rsi
+    mov [rbx + rcx], al
+    inc rcx
+    jmp .rna_module_prefix
+.rna_module_name:
+    mov rsi, [rdi + PyModuleObject.mod_name]
+    test rsi, rsi
+    jz .rna_after_module
+    lea rsi, [rsi + PyStrObject.data]
+.rna_module_loop:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .rna_after_module
+    inc rsi
+    cmp rcx, RNA_BUFSZ - 2
+    jae .rna_after_module
+    mov [rbx + rcx], al
+    inc rcx
+    jmp .rna_module_loop
+.rna_class:
+    lea rbx, [rbp - RNA_BUF]
+    xor ecx, ecx
+    CSTRING rsi, "type object '"
+.rna_class_prefix:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .rna_class_name
+    inc rsi
+    mov [rbx + rcx], al
+    inc rcx
+    jmp .rna_class_prefix
+.rna_class_name:
+    mov rsi, [rdi + PyTypeObject.tp_name]   ; a C string, as .rna_type reads it
+    test rsi, rsi
+    jz .rna_after_module
+.rna_class_loop:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .rna_after_module
+    inc rsi
+    cmp rcx, RNA_BUFSZ - 2
+    jae .rna_after_module
+    mov [rbx + rcx], al
+    inc rcx
+    jmp .rna_class_loop
+
+.rna_after_module:
+    CSTRING rsi, `' has no attribute '`
+    jmp .rna_mid
+
+.rna_type:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .rna_after_type
+    inc rsi
+    cmp rcx, RNA_BUFSZ - 2
+    jae .rna_after_type
+    mov [rbx + rcx], al
+    inc rcx
+    jmp .rna_type
+.rna_after_type:
+    CSTRING rsi, `' object has no attribute '`
+.rna_mid:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .rna_name
+    inc rsi
+    cmp rcx, RNA_BUFSZ - 2
+    jae .rna_name
+    mov [rbx + rcx], al
+    inc rcx
+    jmp .rna_mid
+.rna_name:
+    mov rsi, [rbp - RNA_NAME]
+    test rsi, rsi
+    jz .rna_close
+    mov rax, [rsi + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rax, rdx
+    jne .rna_close
+    mov rdx, [rsi + PyStrObject.ob_size]
+    lea rsi, [rsi + PyStrObject.data]
+    xor eax, eax
+.rna_name_copy:
+    cmp rax, rdx
+    jge .rna_close
+    cmp rcx, RNA_BUFSZ - 3
+    jae .rna_close
+    mov r8b, [rsi + rax]
+    mov [rbx + rcx], r8b
+    inc rcx
+    inc rax
+    jmp .rna_name_copy
+.rna_close:
+    mov byte [rbx + rcx], 39            ; '
+    inc rcx
+    mov byte [rbx + rcx], 0
+
+    ; PEP 678's two attributes.  They are filled HERE and not in exc_from_cstr,
+    ; which every internally raised exception passes through: `name` on a
+    ; StopIteration means something else entirely.  What reads them is the
+    ; suggestion machinery -- traceback's "Did you mean: ..." and
+    ; test_exceptions -- and `getattr(obj, n)` inside a __getattr__ hook, which
+    ; asks `e.obj is self` to tell its own miss from a nested one.
+    ; A store or a delete gets neither: CPython's set_attribute_error_context
+    ; is called only from the generic GET, so `del o.zzz` leaves .name None.
+    cmp qword [rbp - RNA_ISSET], 0
+    jne .rna_bare
+    lea rdi, [rel exc_AttributeError_type]
+    extern exc_AttributeError_type
+    mov rsi, rbx
+    extern exc_from_cstr
+    call exc_from_cstr
+    test rax, rax
+    jz .rna_bare
+
+    ; INSTALLED first, and only then written to.  A fresh exception is
+    ; GC-tracked and held by nothing but this register, and `exc_setattr`
+    ; allocates twice -- a dict and an interned str -- either of which can
+    ; run a collection.  Writing the attributes before the install left the
+    ; object collectable for the length of two calls, and what that produced
+    ; was a SIGSEGV in `gc_list_remove` from an unrelated `POP_EXCEPT` much
+    ; later.  exc_install takes the reference over, so afterwards
+    ; current_exception is a real owner.
+    mov rdi, rax
+    extern exc_install
+    call exc_install
+    mov rbx, [rel current_exception]
+    test rbx, rbx
+    jz .rna_installed
+
+    CSTRING rdi, "name"
+    mov rsi, [rbp - RNA_NAME]
+    call .rna_set_attr
+    CSTRING rdi, "obj"
+    mov rsi, [rbp - RNA_OBJ]
+    call .rna_set_attr
+
+.rna_installed:
+    ; The tail raise_exception has: it does not republish eval_saved_r13
+    ; either, because every caller here is inside a helper the opcode called
+    ; rather than an opcode that has popped operands of its own.
+    leave
+    jmp eval_exception_unwind
+
+.rna_bare:
+    ; A store, a delete, or an exc_from_cstr that could not allocate.
+    lea rdi, [rel exc_AttributeError_type]
+    mov rsi, rbx
+    call raise_exception
+    ud2
+
+;; A local helper, not a DEF_FUNC: rbx is the exception and rdi/rsi are the
+;; name and the value.  A NULL value is None, which is what CPython stores
+;; when the raise site has nothing to name.
+.rna_set_attr:
+    push rbp
+    mov rbp, rsp
+    sub rsp, RSA_FRAME
+    mov [rbp - RSA_VAL], rsi
+    call str_intern_cstr
+    test rax, rax
+    jz .rsa_done
+    mov [rbp - RSA_NAME], rax
+    mov rdx, [rbp - RSA_VAL]
+    test rdx, rdx
+    jnz .rsa_have
+    lea rdx, [rel none_singleton]
+.rsa_have:
+    mov rdi, rbx
+    mov rsi, rax
+    mov ecx, TAG_PTR                    ; rdx is already a Value
+    extern exc_setattr
+    call exc_setattr
+    mov rdi, [rbp - RSA_NAME]
+    call obj_decref                     ; str_intern_cstr's; dict_set took one
+.rsa_done:
+    leave
+    ret
+END_FUNC raise_no_attribute

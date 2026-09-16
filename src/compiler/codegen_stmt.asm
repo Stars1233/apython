@@ -497,10 +497,31 @@ DEF_FUNC_LOCAL cg_s_expr, CST_FRAME
     ret
 END_FUNC cg_s_expr
 
-;; cg_s_pass - nothing at all.  A `pass` exists to satisfy the grammar, not the
-;; code generator; an empty suite is impossible, so nothing needs emitting.
+;; cg_s_pass - no instruction, but a LOCATION.  A `pass` exists to satisfy the
+;; grammar, not the code generator; an empty suite is impossible, so nothing
+;; needs emitting.
+;;
+;; It still has to record where it was.  `lastline` is what cs_return_none
+;; gives the implicit return, and it only advances in cg_emit -- so a body
+;; that is nothing but `pass` left it at 0, and the module's return landed on
+;; line 0 where CPython puts it on the `pass`.  With no line of its own the
+;; return fired no trace event, and `pdb` on such a file never saw a command.
 DEF_FUNC_LOCAL cg_s_pass, CST_FRAME
+    ; One push, so the 104-byte frame lands 16-aligned at the call below.
+    push rbx
+    mov rbx, rsi                ; the CompUnit; rdi is already the Comp
+    mov rsi, rdx                ; the node
+    call ast_at
+    mov ecx, [rax + AstNode.lineno]
+    test ecx, ecx
+    jz .csp_done
+    mov [rbx + CompUnit.lastline], ecx
+    mov [rbx + CompUnit.lastend], ecx
+    mov dword [rbx + CompUnit.lastcol], -1
+    mov dword [rbx + CompUnit.lastendcol], -1
+.csp_done:
     mov eax, 1
+    pop rbx
     leave
     ret
 END_FUNC cg_s_pass

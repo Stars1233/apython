@@ -919,3 +919,25 @@ DEF_FUNC slice_clear_gc, 8        ; rsp 16-aligned at the call the macros below 
     leave
     ret
 END_FUNC slice_clear_gc
+
+extern new_from_slot
+
+;; ============================================================================
+;; slice_dunder_new(args, nargs) -> Value    -- slice.__new__
+;;
+;; slice keeps its constructor in tp_new and had no entry of its own in
+;; tp_dict, so `slice.__new__` resolved along the MRO to object.__new__ and
+;; was refused.  That is every `super().__new__(cls, ...)` in a subclass, and
+;; every copy, deepcopy and pickle of one, since the reduce protocol
+;; reconstructs through __new__.  The slot called is the OWNER's, so a Python
+;; subclass defining __new__ does not re-enter itself.
+;; ============================================================================
+DEF_FUNC slice_dunder_new
+    mov rdx, rsi
+    mov rsi, rdi
+    lea rdi, [rel slice_type]
+    call new_from_slot
+    leave
+    ret
+END_FUNC slice_dunder_new
+

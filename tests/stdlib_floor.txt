@@ -33,6 +33,7 @@ ok contextlib
 ok contextvars
 ok copy
 ok copyreg
+ok cProfile
 ok csv
 ok dataclasses
 ok datetime
@@ -144,6 +145,7 @@ ok sre_parse
 ok stat
 ok statistics
 ok string
+ok stringprep
 ok _strptime
 ok struct
 ok subprocess
@@ -183,4 +185,5 @@ ok xml
 ok xmlrpc
 ok zipapp
 ok zipfile
+ok zipimport
 ok zoneinfo

@@ -2254,6 +2254,71 @@ DEF_FUNC_LOCAL getset_descr_dealloc, 8            ; 1 pushes, so rsp is 16-align
     ret
 END_FUNC getset_descr_dealloc
 
+;; ============================================================================
+;; The __new__ thunks for the four types in this file whose constructor lives
+;; in tp_new and nowhere else.
+;;
+;; A builtin's constructor being a SLOT is not something Python can see: the
+;; stdlib asks by name.  `super().__new__(cls, ...)` in a subclass resolves
+;; along the MRO, finds no __new__ on the builtin, reaches object.__new__ and
+;; is refused -- which is how `collections.abc.Callable[[int], int]` came to
+;; be a TypeError, since _CallableGenericAlias is exactly that shape.  It is
+;; also every copy.copy, copy.deepcopy and pickle of a subclass of one of
+;; these, because the reduce protocol reconstructs through __new__.
+;;
+;; Each is `new_from_slot` with the owner named: the slot called is the
+;; owner's, never the argument's, so a Python subclass that defines __new__
+;; does not re-enter itself.
+;; ============================================================================
+extern new_from_slot
+
+;; ============================================================================
+;; staticmethod_dunder_new(args, nargs) -> Value    -- staticmethod.__new__
+;; ============================================================================
+DEF_FUNC staticmethod_dunder_new
+    mov rdx, rsi
+    mov rsi, rdi
+    lea rdi, [rel staticmethod_type]
+    call new_from_slot
+    leave
+    ret
+END_FUNC staticmethod_dunder_new
+
+;; ============================================================================
+;; classmethod_dunder_new(args, nargs) -> Value    -- classmethod.__new__
+;; ============================================================================
+DEF_FUNC classmethod_dunder_new
+    mov rdx, rsi
+    mov rsi, rdi
+    lea rdi, [rel classmethod_type]
+    call new_from_slot
+    leave
+    ret
+END_FUNC classmethod_dunder_new
+
+;; ============================================================================
+;; property_dunder_new(args, nargs) -> Value    -- property.__new__
+;; ============================================================================
+DEF_FUNC property_dunder_new
+    mov rdx, rsi
+    mov rsi, rdi
+    lea rdi, [rel property_type]
+    call new_from_slot
+    leave
+    ret
+END_FUNC property_dunder_new
+
+;; ============================================================================
+;; mappingproxy_dunder_new(args, nargs) -> Value    -- mappingproxy.__new__
+;; ============================================================================
+DEF_FUNC mappingproxy_dunder_new
+    mov rdx, rsi
+    mov rsi, rdi
+    lea rdi, [rel mappingproxy_type]
+    call new_from_slot
+    leave
+    ret
+END_FUNC mappingproxy_dunder_new
 
 
 

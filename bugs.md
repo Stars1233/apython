@@ -41,19 +41,6 @@ reasoning that chose them and what changing one would cost.
   plus `SetParamEntityParsing` and `ExternalEntityParserCreate`, which are
   also absent.
 
-- **An internally raised `AttributeError` has no `.name` and no `.obj`.**
-  CPython sets both on every attribute error it raises, and its "did you mean"
-  machinery in `traceback` reads them; ours are absent entirely, so
-  `getattr(e, 'name', None)` answers None where CPython answers the attribute.
-  The keyword form -- `AttributeError("m", name=n, obj=o)` -- does work, and
-  the family's refcounting is now correct, so what is missing is filling the
-  two in at the raise sites.  `exc_from_cstr` is the wrong place for it: it is
-  on the path of every internally raised exception, StopIteration from
-  `call_iternext` included, and a `type_is_subtype` plus two `dict_set`s there
-  would be paid by every `for` loop that ends.  The import machinery's own
-  errors set theirs individually for exactly that reason, and attribute errors
-  want the same treatment -- there are far more sites.
-
 - **`cannot import name` never reports a circular import.**  CPython has a
   fourth wording for it, chosen by `__spec__._initializing`:
   `cannot import name 'X' from partially initialized module 'm' (most likely
@@ -120,6 +107,25 @@ reasoning that chose them and what changing one would cost.
   appends; and `float()` reports its ARGUMENT's type rather than
   `C.__float__ returned non-float (type str)`.
 
+- **`pdb` blocks at its prompt when stdin is a pipe rather than a terminal.**
+  Three lines reproduce it:
+
+      printf 'raise ValueError("boom")\n' > r.py
+      printf 'c\nq\n' | ./apython -m pdb r.py      # never returns
+
+  CPython exits 0.  It is not `input()` -- `input()` at EOF raises EOFError
+  here, after prior reads as well -- and it is not `-m`: driving `pdb.main()`
+  from `-c` blocks identically.  The process sits in `pipe_read` with no CPU,
+  so it is a read that never sees the data or the EOF, somewhere in pdb's
+  restart/post-mortem path; `apython -m pdb` on a script that does NOT raise
+  consumes several commands first and blocks later.
+  It is what makes CPython's `test_pdb` a HANG rather than a row of failures.
+
+  Worth knowing: it was unreachable until `open()` learned to accept a str
+  SUBCLASS, because pdb's own `_ScriptTarget` is one and every script died on
+  the TypeError before pdb could run it.  The module scored 13 of 87 then and
+  0 now -- the arithmetic is worse, the interpreter is not.
+
 - **`sys.stdout`'s repr is `<stdout>`, where CPython's is
   `<_io.TextIOWrapper name='<stdout>' mode='w' encoding='utf-8'>`.**  Visible
   wherever an unraisable report names the stream -- the "Exception ignored in:"
@@ -127,17 +133,6 @@ reasoning that chose them and what changing one would cost.
   exactly, and so does the exit code; only the object's own repr differs,
   because the start-up streams are a `file_type` here rather than a Python
   wrapper over a FileIO.
-
-- **`o.__dict__ = d` and `o.__weakref__ = x` go into the instance dict.**  The
-  two getsets are in the class dict now and the READ side finds them, but they
-  carry `GS_LAYOUT` so that `TYPE_FLAG_MRO_HAS_DATA_DESCR` stays clear on every
-  class -- and the store side (`instance_setattr`, `op_store_attr`) gates on
-  exactly that bit.  So `c.__dict__ = d` adds a `'__dict__'` KEY rather than
-  replacing the dict, and `c.__weakref__ = 5` succeeds where CPython says
-  `attribute '__weakref__' of 'C' objects is not writable`.  Both did the same
-  before the descriptors existed, so this is what is LEFT rather than anything
-  new; closing it means a name test on the store fallback, which every
-  `self.x = v` would pay for.
 
 - **`frame.f_lineno` cannot be assigned, so `pdb`'s `jump` does not work.**
   `frameobj_setattr` refuses it outright: moving the instruction pointer to
@@ -165,33 +160,23 @@ reasoning that chose them and what changing one would cost.
   in a code object's length and unittest formats a traceback through the
   second.  That is fixed; 84 tests run now.
 
-- **`super()` searches the written class's MRO, not the declared class's, when
-  the opcode handles it.**  `super(C, p).f()` for a proxy whose `__class__` is
-  an `E(C, X)` is `X.f` in CPython -- the search starts after C in *E's* MRO --
-  and `B.f` here, with `__self_class__` answering C rather than E.  The
-  unspecialised path is right: `super_check` hands the declared class over and
-  `super_new` installs it as `su_obj_type`.  `op_load_super_attr` uses the
-  declared class as a yes and nothing more, because `LSA_ORIGIN` is borrowed
-  and a dozen exits would each have to release it.  So the two paths disagree
-  for this one shape, and only for a declared class that is a STRICT subclass
-  of the written one; a proxy of a plain `C()` -- which is
-  `test_descr.test_proxy_super` and `tests/test_super_proxy.py` -- agrees.
-
-- **An unbound `super` is not a descriptor.**  `super` carries no
-  `tp_descr_get`, so `hasattr(super(C), '__get__')` is False where CPython says
-  True, and the idiom `C._C__super = super(C)` then `self.__super.meth(a)` --
-  which is what `test_descr.test_supers` does -- reads the unbound super back
-  unchanged and fails with `'super' object has no attribute 'meth'`.  CPython's
-  `super_descr_get` builds a new, bound super from the unbound one.  Everything
-  the two- and three-argument forms do is right; this is the one-argument form
-  stored on a class.
-
 - **A raise from a C-level slot is a non-local jump, so a C caller cannot
   absorb it.**  `slot_mp_subscript` and its siblings end in `slot_reraise`,
   which tail-jumps into `eval_exception_unwind`; a builtin's own miss --
   `dict_subscript`'s KeyError, say -- goes through `RAISE`, which does the
   same.  Neither returns to its caller, so an opcode that wants to try a
   lookup and recover from the miss cannot go through the slot at all.
+
+  It also LEAKS.  `type_call` holds the new instance in a register across the
+  `__init__` call, and a builtin `__init__` that refuses its arguments raises
+  from inside itself -- so the instance is never released.  Measured at about
+  128 bytes per refusal, the same for every shape: `_io.FileIO("/no/such")`,
+  `_io.FileIO()` with no arguments, `_io.FileIO(path, "zz")` and
+  `_io.BytesIO(5.5)` all leak identically, while a Python `__init__` that
+  raises leaks nothing, because that one RETURNS with the exception set.  So
+  it is general to every builtin `__init__` registered in a type's dict, and
+  the fix is the same one this entry already names rather than anything local
+  to `_io`.
 
   `mapping_getitem_opt` is the way round it for a heaptype (ask
   `__getitem__` through `dunder_call_2`, which does return), and LOAD_NAME
@@ -207,21 +192,15 @@ reasoning that chose them and what changing one would cost.
   `errno`, `strerror`, `filename` and `filename2` are C fields in CPython and
   do not appear in `vars(e)`; here `exc_oserror` writes them into `exc_dict`,
   so `OSError(2, 'x').__dict__` has four entries CPython's has none of.  Every
-  read of them agrees, and so does `args`; what differs is what `__dict__`,
-  `vars()`, `__getstate__` and now `__reduce__` report.  Moving them means
-  four more fields on PyExceptionObject and a getattr arm for each, which is
-  what CPython does.
-
-  `__reduce__` is the visible consequence.  `BaseException.__reduce__` adds a
-  third element when the instance dict is not empty, and OSError's never is --
-  so `OSError(2, 'no').__reduce__()` is `(cls, (2, 'no'), {errno: 2, ...})`
-  where CPython answers the two-tuple `(cls, (2, 'no'))`.  CPython also
-  re-packs the filename INTO the arguments, because its constructor takes it
-  back there and its `args` does not carry it; this does not.  Every value
-  survives a round trip either way -- the reconstructor sets the four from the
-  state instead of from the arguments -- and only the tuple's shape differs.
-  Closing it is the same change: the fields, and then an `OSError.__reduce__`
-  that packs them into the args as CPython's does.
+  read of them agrees, `args` agrees, and `__reduce__` agrees -- OSError has
+  one of its own now, which re-packs the filename into the arguments and
+  strips the four names out of the state, so a pickle and a deepcopy of every
+  shape round-trip identically.  What is LEFT is what `__dict__`, `vars()` and
+  `__getstate__` report.  Closing it means four more fields on
+  PyExceptionObject, a getattr and a setattr arm for each, and a positive
+  marker -- a type flag, not a `tp_basicsize` comparison, because a
+  `__slots__` subclass of any other exception has a larger basicsize too and
+  those words are its slots.
 
 - **`bytes` has no `__new__`, so a bytes SUBCLASS cannot be reconstructed.**
   Every other variable-size builtin publishes one -- `str` and `tuple` do --
@@ -250,17 +229,6 @@ reasoning that chose them and what changing one would cost.
   apart.  Closing it means paying the MRO walk on every attribute access, or
   finding a cheaper way to notice that the class changed underneath.
 
-- **`f(*5)` does not name the callable.**  CPython says
-  "__main__.f() argument after * must be an iterable, not int"; this says
-  "Value after * must be an iterable, not int", which is CPython's message
-  for the OTHER shape -- `f(*a, *b)` and `[*5]`.  The two differ because
-  CPython compiles a lone `*x` to a bare CALL_FUNCTION_EX and this compiles
-  it to BUILD_LIST + LIST_EXTEND, so the refusal comes from a different
-  opcode.  Matching it means matching the codegen, and then teaching
-  CALL_FUNCTION_EX to materialise an arbitrary iterable -- it takes a tuple
-  or a list today.  The `**` half is done: DICT_MERGE names the callable and
-  accepts any mapping.
-
 - **Source that is not valid UTF-8 is refused with our own wording, and one
   column off for a bad four-byte lead.**  CPython reports a codec error --
   `(unicode error) 'utf-8' codec can't decode byte 0xe9 in position 3:
@@ -269,17 +237,6 @@ reasoning that chose them and what changing one would cost.
   reject decision and the LINE match on eleven shapes
   (`tests/test_compile_utf8_source.py`), and bytes inside a comment are
   accepted by both.
-
-- **Three messages that name no type.**  `b"x" in ValueError()` is
-  "argument of type is not iterable" where CPython says "argument of type
-  'ValueError' is not iterable"; `async with` over an object with no
-  `__aexit__` is "'async with' requires __aexit__ method" where CPython names
-  the object and distinguishes "no `__aenter__` either" from "only
-  `__aexit__` missing" -- `op_before_with` does both and its async twin does
-  not; and `__bytes__` returning a non-bytes omits CPython's `(type int)`
-  suffix.  The first attempt at the async one got the operand cleanup wrong
-  and segfaulted: that path releases nothing and lets the unwinder take the
-  manager out of the value-stack slot, which is what any rewrite has to keep.
 
 - **`co_freevars` is in source order and CPython's is sorted**, and a module
   code object reports its globals in `co_varnames`.  The first is the order
@@ -353,22 +310,31 @@ reasoning that chose them and what changing one would cost.
   `zipfile`, `tarfile` and `shutil`, which imported before and could not
   compress.  So is `array`, which was the largest of these by reach.  What
   is left is genuinely C: `_tracemalloc`, `_symtable`, `_ssl`,
-  `_sqlite3`, `_crypt`, `_ctypes`, `_curses` and `_tkinter`.  `_lzma` and
+  `_sqlite3`, `_crypt`, `_ctypes`, `_curses` and `_tkinter`.  `fcntl`,
+  `resource`, `syslog`, `pwd`, `grp`, `audioop` and `_lsprof` are there now
+  and none of them needed much: two descriptor calls in `posixfd.asm`, two
+  resource calls in `posixproc.asm`, and Python for the rest -- `syslog` over
+  a datagram socket rather than over libc's wrapper for it, `_lsprof` over
+  `sys.setprofile`, `pwd` and `grp` over the files rather than over NSS
+  (DIVERGENCES.md carries what that costs).  `_lzma` and
   `_bz2` are there now, each a shim over its library the way `zlib` is, and
   `lzma`, `bz2` and the compression halves of `tarfile` and `zipfile` with
   them.  `_multibytecodec` and the six CJK codec modules are deliberately
   deferred and are in DIVERGENCES.md rather than here.
 
   `unicodedata` is there now, over tables generated from a running CPython the
-  way `\N{...}`'s names and the case mappings already were.  Two of its
-  functions are not: **`decomposition()` and `normalize()`**, which need the
-  canonical AND compatibility decompositions, the composition exclusions and
-  the Hangul algorithm -- an order of magnitude more data than the seven
-  properties that did land, and the thing PEP 3131's identifier
-  normalisation and `idna`/`punycode` all wait on.  **`ucd_3_2_0`** is not
-  either: it is a second, frozen copy of the whole database, which is what
-  `stringprep` imports and the only thing keeping `test_stringprep` from
-  running.
+  way `\N{...}`'s names and the case mappings already were, and so are
+  `normalize()` and `decomposition()`: `src/modules/unicodenorm.asm` over
+  `unicodenorm_tables.asm`, verified byte for byte against CPython's own
+  answers for every code point and for 120,000 random sequences.  **`ucd_3_2_0`** is there
+  too -- the frozen Unicode 3.2 copy RFC 3454 is written against, which
+  `stringprep` imports -- as `src/modules/ucd32.asm` over
+  `ucd32_tables.asm`: the same engine pointed at a second table set, with the
+  five decompositions Corrigendum #4 corrected kept at their pre-corrigendum
+  values, because that is what a frozen database means and what CPython's own
+  copy answers.  Its `lookup`, `name` and the numeric values are not there:
+  nothing asks the 3.2 database for them, and each would be a second copy of a
+  table larger than all the rest together.
   (`_io` is not among them: `src/modules/io.asm` supplies `_iocore` and
   `lib/_io.py` assembles both halves under the name `_io`.  `_socket` and
   `select` are the same split over `_socketcore`.  Neither are `math`,
@@ -404,15 +370,43 @@ reasoning that chose them and what changing one would cost.
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
 
-- **`str.find` and `str.count` are the naive O(n*m) search.**  CPython's is
-  Crochemore-Perrin two-way with a Bloom-filter skip, which is O(n + m), and
-  its own test says so: `string_tests.test_adaptive_find` searches a
-  1,000,000-character haystack built to defeat the naive scan, and it is what
-  makes `test_bytes`, `test_unicode`, `test_userstring` and `test_string` time
-  out rather than fail -- the four that the RC sweep still reports as HANG,
-  beside `test_zipfile64`, which is a multi-gigabyte test by design.
-  Ordinary searches are unaffected -- the shapes that hurt are the ones with
-  long repeated prefixes.
+- **Every shipped `lib/` module carries a RELATIVE `co_filename`, so a
+  traceback through one loses its source line from any directory but the repo
+  root.**  `collections.__file__` is absolute and `sys.path` holds the
+  absolute `lib/`, but `collections.OrderedDict.move_to_end.__code__` reports
+  `lib/collections/__init__.py`.  From the repo root the renderer opens that
+  by luck and shows the line; from anywhere else the `File` line is right and
+  the source line under it is simply gone -- which is the worst shape for it
+  to take, because the traceback still looks complete.
+
+  It is not an interpreter bug.  The Makefile byte-compiles the directory with
+  `find lib -name '*.py' -exec py_compile`, and `find lib` yields relative
+  paths, which `py_compile` records verbatim; CPython reading the same `.pyc`
+  answers the same relative name.  Both cache tags are affected, ours and
+  CPython's.
+
+  The fix is to compile from an absolute path, but it is not the one-liner it
+  looks like: `__pycache__` is committed for some of `lib/` and written at
+  run time for the rest, so an absolute `co_filename` would bake THIS
+  checkout's path into a file another checkout reads, and `marshalw`'s
+  `pyc_write_cache` has to agree with whatever the Makefile does.  The honest
+  form is probably to keep the path relative and teach the traceback renderer
+  to resolve it against the module's own `__file__`, the way CPython's
+  `linecache` falls back through `__loader__.get_source`.
+
+  Found by the sweep harness once each module got a cwd of its own: it is the
+  whole of `test_trace`'s `test_coverage`, which fails on
+  `FileNotFoundError: 'lib/_random.py'`.
+
+- **`rfind` and `rindex` are still the naive backward scan.**  The forward
+  direction is Crochemore-Perrin two-way now -- `ap_memfind` counts the
+  candidates its memchr scan rejects and switches once that work would exceed
+  the haystack's own length -- so `find`, `count`, `index` and `in` are
+  O(n + m) for str, bytes and bytearray alike.  `ap_memrfind` walks down one
+  position at a time and is O(n*m) on the same shapes; CPython runs the
+  two-way search over the reversed strings for it.  Nothing in CPython's own
+  suite measures that direction, which is why it is recorded rather than
+  written.
 
 - **Indexing a non-ASCII string is O(n), so a loop over one is quadratic.**
   `str_cp_offset` and `str_byte_to_cp` walk from byte 0 every time, because

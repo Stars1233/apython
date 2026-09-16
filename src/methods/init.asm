@@ -1034,7 +1034,57 @@ DEF_FUNC methods_init
     call dict_add_getset
 
     extern slice_type
+    ; slice keeps its constructor in tp_new; without an entry here
+    ; `slice.__new__` resolved to object.__new__ and was refused.
+    extern slice_dunder_new
+    mov rdi, rbx
+    lea rsi, [rel slice_dunder_new]
+    call add_new_staticmethod
     lea rax, [rel slice_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
+    ;; --- the three types that had no tp_dict at all ---
+    ;; Each keeps its constructor in tp_new, and each had nowhere to publish
+    ;; a `__new__` to go with it, so `super().__new__(cls, ...)` in a subclass
+    ;; walked past them to object.__new__ and was refused.
+    ;;
+    ;; types.GenericAlias is the one that was visible from ordinary code:
+    ;; _collections_abc's _CallableGenericAlias is exactly that shape, so
+    ;; `collections.abc.Callable[[int], int]` was a TypeError outright.
+    call dict_new
+    mov rbx, rax
+    extern generic_alias_dunder_new
+    mov rdi, rbx
+    lea rsi, [rel generic_alias_dunder_new]
+    call add_new_staticmethod
+    extern generic_alias_type
+    lea rax, [rel generic_alias_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
+    call dict_new
+    mov rbx, rax
+    extern namespace_dunder_new
+    mov rdi, rbx
+    lea rsi, [rel namespace_dunder_new]
+    call add_new_staticmethod
+    extern namespace_type
+    lea rax, [rel namespace_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
+    call dict_new
+    mov rbx, rax
+    extern mappingproxy_dunder_new
+    mov rdi, rbx
+    lea rsi, [rel mappingproxy_dunder_new]
+    call add_new_staticmethod
+    extern mappingproxy_type
+    lea rax, [rel mappingproxy_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
     call type_stamp_methods
@@ -1595,6 +1645,12 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel super_dunder_new]
     call add_new_staticmethod
+    ;; An unbound super is a descriptor: it binds itself to the instance the
+    ;; class attribute was read from.  The name has to be in the dict as well
+    ;; as reachable from the flag, because the stdlib asks by name --
+    ;; `hasattr(x, '__get__')` is how inspect and functools decide.
+    extern super_dunder_get
+    ADD_FN_N mn___get__, super_dunder_get, 2, 3
     extern super_type
     lea rax, [rel super_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -1874,6 +1930,12 @@ DEF_FUNC methods_init
     extern method_reduce
     ADD_FN_N mn___reduce__, method_reduce, 1, 1
     extern method_type
+    ; types.MethodType keeps its constructor in tp_new; without an entry here
+    ; `types.MethodType.__new__` resolved to object.__new__ and was refused.
+    extern method_dunder_new
+    mov rdi, rbx
+    lea rsi, [rel method_dunder_new]
+    call add_new_staticmethod
     lea rax, [rel method_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1952,6 +2014,12 @@ DEF_FUNC methods_init
     DESCR_GETATTR mn___wrapped__
     extern descr_wrapper_isabstract
     TYPE_GETATTR mn___isabstractmethod__, descr_wrapper_isabstract
+    ; staticmethod keeps its constructor in tp_new; without an entry here
+    ; `staticmethod.__new__` resolved to object.__new__ and was refused.
+    extern staticmethod_dunder_new
+    mov rdi, rbx
+    lea rsi, [rel staticmethod_dunder_new]
+    call add_new_staticmethod
     lea rax, [rel staticmethod_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1966,6 +2034,12 @@ DEF_FUNC methods_init
     DESCR_GETATTR mn___func__
     DESCR_GETATTR mn___wrapped__
     TYPE_GETATTR mn___isabstractmethod__, descr_wrapper_isabstract
+    ; classmethod keeps its constructor in tp_new; without an entry here
+    ; `classmethod.__new__` resolved to object.__new__ and was refused.
+    extern classmethod_dunder_new
+    mov rdi, rbx
+    lea rsi, [rel classmethod_dunder_new]
+    call add_new_staticmethod
     lea rax, [rel classmethod_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -1999,6 +2073,12 @@ DEF_FUNC methods_init
     extern property_isabstract
     TYPE_GETATTR mn___isabstractmethod__, property_isabstract
     extern property_type
+    ; property keeps its constructor in tp_new; without an entry here
+    ; `property.__new__` resolved to object.__new__ and was refused.
+    extern property_dunder_new
+    mov rdi, rbx
+    lea rsi, [rel property_dunder_new]
+    call add_new_staticmethod
     lea rax, [rel property_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax

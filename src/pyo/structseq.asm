@@ -1193,6 +1193,72 @@ global hash_info_v5
 hash_info_v5: db "fnv", 0
 
 ;; ============================================================================
+;; sys.thread_info.  Three fields, as CPython's is, and the name is the honest
+;; one: `pthread-stubs` is what CPython itself reports for a build whose
+;; threads do not start, which is exactly what lib/_thread.py is.  `lock` and
+;; `version` are None, which is also CPython's answer when there is nothing to
+;; name -- and what makes test_os's and test_threadsignals' `if
+;; sys.thread_info.version` guards fall the right way.
+;; ============================================================================
+section .rodata
+
+thread_info_name: db "sys.thread_info", 0
+thread_info_f0: db "name", 0
+thread_info_f1: db "lock", 0
+thread_info_f2: db "version", 0
+global thread_info_v0
+thread_info_v0: db "pthread-stubs", 0
+
+align 8
+thread_info_fields:
+    dq thread_info_f0, 0
+    dq thread_info_f1, 1
+    dq thread_info_f2, 2
+
+align 8
+thread_info_desc:
+    dq 3
+    dq 3
+    dq thread_info_fields
+
+section .data
+align 8
+global thread_info_type
+thread_info_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq thread_info_name         ; tp_name
+    dq PyTupleObject_size       ; tp_basicsize: no named-only tail
+    dq structseq_dealloc        ; tp_dealloc
+    dq structseq_repr           ; tp_repr
+    dq structseq_repr           ; tp_str
+    dq 0                        ; tp_hash          } copied from tuple_type by
+    dq 0                        ; tp_call          } structseq_init_type, which
+    dq structseq_getattr        ; tp_getattr       } must run first
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq 0                        ; tp_iter
+    dq 0                        ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq TYPE_FLAG_TUPLE_SUBCLASS ; tp_flags -- no HAVE_GC
+    dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
+    dq 0                        ; tp_dictoffset
+    dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
+    dq thread_info_desc         ; STRUCTSEQ_DESC, one qword past the type
+
+section .rodata
+
+;; ============================================================================
 ;; sys.flags.  _pyio reads sys.flags.utf8_mode and .dev_mode at module level,
 ;; so without it the module could not be imported at all.  The values are the
 ;; ones that describe this interpreter, not CPython's defaults copied over:

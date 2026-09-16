@@ -607,12 +607,30 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     cmp qword [rel current_exception], 0
     jne .baw_lookup_raised
 .baw_no_exit:
-    ; The wording is not CPython's, which names the object and distinguishes
-    ; "no __aenter__ either" from "only __aexit__ missing" -- op_before_with
-    ; does both and this does not.  bugs.md records it; a first attempt at it
-    ; here got the operand cleanup wrong and segfaulted, and the cleanup is
-    ; the part that matters on this path.
-    RAISE exc_TypeError_type, "'async with' requires __aexit__ method"
+    ; The same two wordings op_before_with uses, and for the same reason:
+    ; CPython looks __aenter__ up FIRST, so an object with neither gets the
+    ; plain sentence and one with only __aenter__ gets the "(missed __aexit__
+    ; method)" suffix.  This looks __aexit__ up first -- it is what goes on
+    ; the value stack -- so the cheap question is asked again here, on the one
+    ; failing path.
+    ;
+    ; Nothing is released on the way out and nothing may be: this is reached
+    ; BEFORE the push, with mgr still in the value-stack slot VPOP_VAL read it
+    ; from, and the unwinder gives that slot back.  A first attempt added a
+    ; decref here and segfaulted for exactly that reason.
+    mov rdi, [rbx + PyObject.ob_type]
+    lea rsi, [rel baw_str_aenter]
+    extern dunder_lookup
+    call dunder_lookup
+    mov rsi, rbx
+    V_TEST_PTR rax, rcx
+    ja .baw_no_either
+    CSTRING rdi, `'\x01' object does not support the asynchronous context manager protocol (missed __aexit__ method)`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
+.baw_no_either:
+    CSTRING rdi, `'\x01' object does not support the asynchronous context manager protocol`
+    jmp raise_type_error_with_name
 
 .baw_lookup_raised:
     ; A __get__ raised.  This is reached only from .baw_exit_missing, which is
