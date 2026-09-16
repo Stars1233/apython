@@ -1172,10 +1172,15 @@ global posix_prlimit
 DEF_FUNC posix_prlimit, PRL_FRAME
     push rbx
     push r12
+    ; Exactly 2 or exactly 4.  Three used to be admitted and then silently
+    ; ignored: the `cmp r12, 4 / jb .prl_call` below skips the `new` struct
+    ; whenever the count is short, so posix.prlimit(0, res, 512) reported
+    ; success and set nothing.
     cmp rsi, 2
-    jb .prl_argerr
+    je .prl_have_argc
     cmp rsi, 4
-    ja .prl_argerr
+    jne .prl_argerr
+.prl_have_argc:
     mov rbx, rdi
     mov r12, rsi
 
@@ -1247,7 +1252,7 @@ DEF_FUNC posix_prlimit, PRL_FRAME
 .prl_argerr:
     pop r12
     pop rbx
-    RAISE exc_TypeError_type, "prlimit() takes 2 or 4 arguments"
+    RAISE exc_TypeError_type, "prlimit() takes exactly 2 or 4 arguments"
 END_FUNC posix_prlimit
 
 ;; ============================================================================

@@ -175,6 +175,47 @@ def test_stringprep_folds():
     assert stringprep.map_table_b2("A") == "a"
 
 
+def test_is_normalized():
+    """The question CPython answers from a quick-check table and this answers
+    by normalising: the same answer for every input, and what
+    test_unicodedata's run over NormalizationTest.txt needs to exist."""
+    assert unicodedata.is_normalized("NFC", "abc")
+    assert unicodedata.is_normalized("NFD", "abc")
+    assert not unicodedata.is_normalized("NFC", "e\u0301")
+    assert unicodedata.is_normalized("NFD", "e\u0301")
+    assert unicodedata.is_normalized("NFC", "\u00e9")
+    assert not unicodedata.is_normalized("NFKC", "\ufb01")
+    assert unicodedata.is_normalized("NFC", "\ufb01")
+    assert unicodedata.is_normalized("NFC", "")
+    # Hangul, which is arithmetic rather than a table row.
+    assert unicodedata.is_normalized("NFC", "\uac00")
+    assert not unicodedata.is_normalized("NFD", "\uac00")
+    # The frozen database answers it too.
+    assert unicodedata.ucd_3_2_0.is_normalized("NFC", "abc")
+    try:
+        unicodedata.is_normalized("NFX", "a")
+    except ValueError as e:
+        assert "normalization form" in str(e), e
+    else:
+        raise AssertionError("no ValueError")
+
+
+def test_str_subclasses_are_accepted():
+    """CPython's unicode converter takes a subclass; an exact ob_type compare
+    refused one at every entry point here."""
+
+    class S(str):
+        pass
+
+    assert unicodedata.normalize("NFC", S("e\u0301")) == "\u00e9"
+    assert unicodedata.is_normalized("NFD", S("abc"))
+    assert unicodedata.decomposition(S("\u00c0")) == "0041 0300"
+    assert unicodedata.category(S("a")) == "Ll"
+    assert unicodedata.combining(S("\u0301")) == 230
+    assert unicodedata.ucd_3_2_0.category(S("a")) == "Ll"
+    assert unicodedata.ucd_3_2_0.normalize("NFC", S("e\u0301")) == "\u00e9"
+
+
 for fn in (test_ascii_is_already_normalized,
            test_canonical_decomposition_and_composition,
            test_compatibility_only_shows_in_the_k_forms,
@@ -186,7 +227,9 @@ for fn in (test_ascii_is_already_normalized,
            test_longer_text,
            test_ucd_3_2_0_is_a_second_database,
            test_corrigendum_4_is_frozen_too,
-           test_stringprep_folds):
+           test_stringprep_folds,
+           test_is_normalized,
+           test_str_subclasses_are_accepted):
     fn()
     print(fn.__name__, 'ok')
 print('OK')

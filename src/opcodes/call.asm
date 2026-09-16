@@ -861,7 +861,10 @@ DEF_FUNC op_call_function_ex
     VPEEK rdi
     CSTRING rdx, " argument after * must be an iterable, not "
     xor ecx, ecx
-    mov [rel eval_saved_r13], r13
+    ; NO `mov [rel eval_saved_r13], r13` here.  DISPATCH set that global before
+    ; this handler popped its three operands, which is exactly what the comment
+    ; above relies on; republishing it now would point the unwinder BELOW them
+    ; and leak the starred sequence -- measured at 48 bytes per raise.
     extern raise_callable_arg
     add rsp, CFX_CARVE
     pop r12

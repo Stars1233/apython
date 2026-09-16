@@ -209,6 +209,100 @@ def test_varname_from_oparg():
         raise AssertionError("no TypeError")
 
 
+def test_lsprof_subentries_are_merged():
+    """One row per (caller, callee) pair, not one per call.
+
+    _display builds a NEW string for a builtin, so an identity test on it
+    never matched: fifty len() calls became fifty subentries of callcount 1,
+    and `calls` grew without bound on a hot loop.
+    """
+    import _lsprof
+
+    def work():
+        for _ in range(50):
+            len([1])
+
+    p = _lsprof.Profiler()
+    p.enable()
+    work()
+    p.disable()
+    for entry in p.getstats():
+        name = entry.code if isinstance(entry.code, str) else entry.code.co_name
+        if name == "work":
+            assert entry.calls is not None and len(entry.calls) == 1, entry.calls
+            assert entry.calls[0].callcount == 50, entry.calls[0].callcount
+            break
+    else:
+        raise AssertionError("no entry for work")
+
+
+def test_lsprof_enable_leaves_unset_flags_alone():
+    """CPython parses both with a -1 sentinel and changes neither when they
+    are not given; defaulting them to True discarded what the constructor was
+    told."""
+    import _lsprof
+
+    def work():
+        len([1])
+
+    def builtin_rows(profiler):
+        return [e for e in profiler.getstats() if isinstance(e.code, str)
+                and "builtins.len" in e.code]
+
+    # Asked for through behaviour rather than through the flags: CPython's
+    # Profiler is a C type and exposes neither as an attribute.
+    p = _lsprof.Profiler(subcalls=False, builtins=False)
+    p.enable()
+    work()
+    p.disable()
+    assert builtin_rows(p) == [], "a bare enable() re-enabled builtins"
+
+    p = _lsprof.Profiler(subcalls=False, builtins=False)
+    p.enable(builtins=True)
+    work()
+    p.disable()
+    assert builtin_rows(p) != [], "enable(builtins=True) was ignored"
+
+
+def test_fcntl_ioctl_buffer_sizes():
+    """CPython applies its 1024-byte ValueError to the read-only path only: a
+    writable bytearray goes to the kernel by pointer, which is how
+    SIOCGIFCONF is normally called, so refusing one outright was wrong."""
+    import fcntl
+    import termios
+    for n in (8, 400, 2048):
+        try:
+            fcntl.ioctl(0, termios.TIOCGWINSZ, bytearray(n))
+        except OSError:
+            pass                    # not a terminal: the ioctl was attempted
+        except ValueError as e:
+            raise AssertionError("refused a %d-byte bytearray: %s" % (n, e))
+    # A read-only argument keeps CPython's limit and its sentence.
+    try:
+        fcntl.ioctl(0, termios.TIOCGWINSZ, b"x" * 2048)
+    except ValueError as e:
+        assert str(e) == "ioctl string arg too long", e
+    except OSError:
+        raise AssertionError("2048 read-only bytes should be refused")
+
+
+def test_prlimit_takes_two_or_four():
+    """Three used to be admitted and then silently ignored: the limit was
+    never applied and the call reported success."""
+    import posix
+    import resource
+    if not hasattr(posix, "prlimit"):
+        return                      # CPython keeps prlimit in `resource` only
+    soft, hard = posix.prlimit(0, resource.RLIMIT_NOFILE)
+    try:
+        posix.prlimit(0, resource.RLIMIT_NOFILE, 512)
+    except TypeError as e:
+        assert "2 or 4" in str(e), e
+    else:
+        raise AssertionError("three arguments were accepted")
+    assert posix.prlimit(0, resource.RLIMIT_NOFILE) == (soft, hard)
+
+
 for fn in (test_fcntl_descriptor_flags,
            test_fcntl_takes_anything_with_a_fileno,
            test_flock_and_lockf,
@@ -216,7 +310,11 @@ for fn in (test_fcntl_descriptor_flags,
            test_resource_usage,
            test_syslog_arithmetic,
            test_lsprof_counts_calls,
-           test_varname_from_oparg):
+           test_varname_from_oparg,
+           test_lsprof_subentries_are_merged,
+           test_lsprof_enable_leaves_unset_flags_alone,
+           test_fcntl_ioctl_buffer_sizes,
+           test_prlimit_takes_two_or_four):
     fn()
     print(fn.__name__, 'ok')
 print('OK')

@@ -633,6 +633,18 @@ DEF_FUNC_LOCAL print_sink_write, PSW_FRAME
     cmp rax, rcx
     jne .psw_object
 
+    ; A closed stream is refused HERE and not inside fileobj_emit: that helper
+    ; is also the route write_fd takes when it recognises sys.stdout, which is
+    ; how a traceback reaches the terminal, and an error report must not raise.
+    ; Without this, `sys.stdout.close(); print(...)` appended to the closed
+    ; object's buffer and the failure surfaced at exit as "Exception ignored in
+    ; <stdout>: OSError: [Errno 9] Bad file descriptor" -- or, if the fd had
+    ; been reused by then, as text written into an unrelated file.
+    extern fileobj_check_open
+    call fileobj_check_open     ; raises ValueError and does not return
+    mov rdi, [rbp - PSW_SINK]
+    mov rsi, [rbp - PSW_BUF]
+    mov rdx, [rbp - PSW_LEN]
     extern fileobj_emit
     call fileobj_emit
     test rax, rax

@@ -2824,7 +2824,11 @@ fs_printf_precision:
     push rbx
     push r12
     push r13
-    sub rsp, 8                  ; keep rsp 16-aligned across the calls below
+    ; NO `sub rsp, 8`.  This is a bare label reached by `call`, so rsp arrives
+    ; 8 mod 16 and three pushes put it back at 0 -- already what the ABI wants
+    ; before a call.  The pad MADE the calls below misaligned rather than
+    ; aligning them, and lint cannot see it: it checks DEF_FUNC prologues and
+    ; opcode handlers, not a local label with a push list of its own.
     mov rbx, [rbp - FS_BODY]
 
     ; digits already present = length - the leading characters
@@ -2887,7 +2891,6 @@ fs_printf_precision:
     call obj_decref
     mov [rbp - FS_BODY], r13
 .fpp_out:
-    add rsp, 8
     pop r13
     pop r12
     pop rbx

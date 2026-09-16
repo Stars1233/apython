@@ -293,6 +293,72 @@ def test_star_refusal_names_the_callee():
         assert str(e) == "Value after * must be an iterable, not int", e
 
 
+# --- what a starred-call refusal owes the value stack ------------------------
+
+def test_star_refusal_releases_the_sequence():
+    """The refusal raises from inside the handler, and DISPATCH's saved stack
+    top -- set before the three operands came off -- is what the unwinder
+    releases them from.  Republishing it at the raise pointed the unwinder
+    BELOW them and leaked the starred sequence on every call."""
+    import gc
+
+    class NotIter:
+        pass
+
+    def f(*a):
+        pass
+
+    gc.collect()
+    for _ in range(200):
+        try:
+            f(*NotIter())
+        except TypeError:
+            pass
+    gc.collect()
+    # The instances are unreachable, so a collection must account for all of
+    # them; a leaked reference would keep them alive.
+    assert sum(1 for o in gc.get_objects()
+               if type(o).__name__ == "NotIter") == 0
+
+
+# --- print() is an I/O operation too -----------------------------------------
+
+def test_print_to_a_closed_stream():
+    """close() shuts the descriptor; print() went on appending to the closed
+    object's buffer and the failure surfaced at exit -- or, once the fd had
+    been reused, as text written into an unrelated file."""
+    import os
+    import sys
+    # sys.stdout at start-up is the built-in stream object, which is the one
+    # print() reaches through fileobj_emit -- a StringIO takes a different
+    # road.  Forking is the only way to close the real one and still be able
+    # to report what happened.
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.close(read_fd)
+            sys.stdout.close()
+            try:
+                print("x")
+            except ValueError as e:
+                os.write(write_fd, str(e).encode())
+            else:
+                os.write(write_fd, b"NO RAISE")
+        finally:
+            os._exit(0)
+    os.close(write_fd)
+    got = b""
+    while True:
+        chunk = os.read(read_fd, 256)
+        if not chunk:
+            break
+        got += chunk
+    os.close(read_fd)
+    os.waitpid(pid, 0)
+    assert got.startswith(b"I/O operation on closed file"), got
+
+
 # --- OSError's reduction ----------------------------------------------------
 
 def test_oserror_reduce():
@@ -334,6 +400,8 @@ for fn in (test_unbound_super_binds,
            test_a_store_fills_in_neither,
            test_a_finalizer_on_the_receiver,
            test_star_refusal_names_the_callee,
+           test_star_refusal_releases_the_sequence,
+           test_print_to_a_closed_stream,
            test_oserror_reduce):
     fn()
     print(fn.__name__, 'ok')

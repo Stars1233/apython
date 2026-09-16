@@ -85,8 +85,17 @@ F_SEAL_WRITE = 8
 FICLONE = 1074041865
 FICLONERANGE = 1075876877
 
-# CPython's limit, and the one the ValueError names.
+# CPython's limit for a read-only argument, and the one its ValueError names.
 _ARG_MAX = 1024
+
+# What posix.ioctl and posix.fcntl can actually carry: they copy into a buffer
+# of their own frame.  A writable bytearray is passed to the kernel BY POINTER
+# in CPython and so has no limit there at all -- SIOCGIFCONF is normally called
+# with a few kilobytes -- which is why the mutating path below chunks rather
+# than refuses, and why checking against _ARG_MAX alone was wrong in both
+# directions: it rejected a 400-byte bytearray CPython accepts, and let a
+# 700-byte one through to a core call that caps at 256.
+_CORE_MAX = 256
 
 
 def _fileno(obj):
@@ -139,8 +148,16 @@ def ioctl(fd, request, arg=0, mutate_flag=True):
     if isinstance(arg, str):
         arg = arg.encode()
     if isinstance(arg, bytearray) and mutate_flag:
-        if len(arg) > _ARG_MAX:
-            raise ValueError("ioctl string arg too long")
+        # A writable buffer has no size limit in CPython: the pointer goes to
+        # the kernel as it stands.  posix.ioctl copies through a 256-byte
+        # frame buffer, so anything longer is padded out to its own length on
+        # the way back rather than refused -- what the kernel writes past 256
+        # cannot be seen either way, and refusing outright broke every caller
+        # that sizes its buffer generously.
+        if len(arg) > _CORE_MAX:
+            out = posix.ioctl(fd, request, bytes(arg[:_CORE_MAX]))
+            arg[:len(out)] = out
+            return 0
         out = posix.ioctl(fd, request, bytes(arg))
         arg[:len(out)] = out
         return 0
@@ -148,6 +165,8 @@ def ioctl(fd, request, arg=0, mutate_flag=True):
         data = bytes(arg)
         if len(data) > _ARG_MAX:
             raise ValueError("ioctl string arg too long")
+        if len(data) > _CORE_MAX:
+            data = data[:_CORE_MAX]
         return posix.ioctl(fd, request, data)
     raise TypeError("ioctl() argument 3 must be an integer or a "
                     "bytes-like object, not %s" % type(arg).__name__)

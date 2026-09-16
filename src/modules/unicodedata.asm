@@ -82,7 +82,12 @@ DEF_FUNC_LOCAL ud_one_codepoint
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
-    jne .udoc_no
+    je .udoc_is_str
+    ; A str SUBCLASS is a str.  CPython's unicode converter takes one, and an
+    ; exact ob_type compare refused every property here for it.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .udoc_no
+.udoc_is_str:
     cmp qword [rdi + PyStrObject.ob_length], 1
     jne .udoc_no
     xor esi, esi
@@ -572,6 +577,8 @@ DEF_FUNC unicodedata_module_create, UMC_FRAME
     MODULE_ADD_FUNC unicodedata_normalize, ud_n_normalize
     extern unicodedata_decomposition
     MODULE_ADD_FUNC unicodedata_decomposition, ud_n_decomposition
+    extern unicodedata_is_normalized
+    MODULE_ADD_FUNC unicodedata_is_normalized, ud_n_is_normalized
 
     ; The version the tables were generated from, which is the honest answer:
     ; gen_unicodename.py writes it into its own header from the CPython it
@@ -636,6 +643,7 @@ ud_n_lookup:   db "lookup", 0
 ud_n_normalize: db "normalize", 0
 ud_n_ucd32:    db "ucd_3_2_0", 0
 ud_n_decomposition: db "decomposition", 0
+ud_n_is_normalized: db "is_normalized", 0
 ud_n_name:     db "name", 0
 ud_n_decimal:  db "decimal", 0
 ud_n_digit:    db "digit", 0

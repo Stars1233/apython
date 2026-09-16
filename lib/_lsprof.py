@@ -190,7 +190,11 @@ class Profiler:
                 calls = caller.calls = []
             shown = _display(key)
             for existing in calls:
-                if existing.code is shown:
+                # `==`, not `is`: _display builds a NEW string for a builtin,
+                # so an identity test never matched and every call appended a
+                # subentry of its own -- fifty len() calls became fifty rows of
+                # callcount 1, and `calls` grew without bound on a hot loop.
+                if existing.code == shown:
                     subentry = existing
                     break
             else:
@@ -259,9 +263,15 @@ class Profiler:
 
     # --- the surface cProfile uses -----------------------------------------
 
-    def enable(self, subcalls=True, builtins=True):
-        self.subcalls = bool(subcalls)
-        self.builtins = bool(builtins)
+    def enable(self, subcalls=None, builtins=None):
+        # CPython parses both with a -1 "not given" sentinel and leaves the
+        # flag alone; defaulting them to True here discarded what the
+        # constructor was told, so Profiler(subcalls=False, builtins=False)
+        # followed by a bare enable() profiled builtins after all.
+        if subcalls is not None:
+            self.subcalls = bool(subcalls)
+        if builtins is not None:
+            self.builtins = bool(builtins)
         self._enabled = True
         sys.setprofile(self._dispatch)
 

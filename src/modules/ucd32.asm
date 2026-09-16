@@ -35,6 +35,7 @@ extern int_from_i64
 extern udp_run_lookup
 extern ucd32_normalize
 extern ucd32_decomposition
+extern ucd32_is_normalized
 
 extern ucd32_category_starts
 extern ucd32_category_count
@@ -66,7 +67,11 @@ DEF_FUNC_LOCAL ucd32_one_codepoint
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
-    jne .no
+    je .is_str
+    ; A str SUBCLASS is a str, as in unicodenorm.asm.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .no
+.is_str:
     cmp qword [rdi + PyStrObject.ob_length], 1
     jne .no
     xor esi, esi
@@ -172,6 +177,7 @@ DEF_FUNC ucd32_module_create, UMC_FRAME
     MODULE_ADD_FUNC ucd32_mirrored, u32_n_mirrored
     MODULE_ADD_FUNC ucd32_normalize, u32_n_normalize
     MODULE_ADD_FUNC ucd32_decomposition, u32_n_decomposition
+    MODULE_ADD_FUNC ucd32_is_normalized, u32_n_is_normalized
 
     lea rdi, [rel u32_n_version]
     call str_from_cstr_heap
@@ -225,5 +231,6 @@ u32_n_combining:       db "combining", 0
 u32_n_mirrored:        db "mirrored", 0
 u32_n_normalize:       db "normalize", 0
 u32_n_decomposition:   db "decomposition", 0
+u32_n_is_normalized:   db "is_normalized", 0
 u32_n_version:         db "unidata_version", 0
 u32_v_version:         db "3.2.0", 0

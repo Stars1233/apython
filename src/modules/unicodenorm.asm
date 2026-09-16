@@ -46,6 +46,8 @@ extern ap_free
 extern ap_realloc
 extern ap_memcpy
 extern str_new_heap
+extern bool_true
+extern bool_false
 extern str_type
 extern obj_incref
 extern obj_decref
@@ -990,7 +992,10 @@ DEF_FUNC udn_normalize_body
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
-    jne .bad_form
+    je .form_is_str
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .bad_form
+.form_is_str:
 
     V_TEST_PTR r10, rcx
     ja .bad_str
@@ -999,7 +1004,10 @@ DEF_FUNC udn_normalize_body
     mov rcx, [r10 + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
-    jne .bad_str
+    je .arg_is_str
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .bad_str
+.arg_is_str:
 
     ; "NFC", "NFD", "NFKC", "NFKD" -- four short names, so the test is the
     ; bytes rather than a table.
@@ -1055,6 +1063,103 @@ DEF_FUNC udn_normalize_body
 .arity:
     RAISE exc_TypeError_type, "normalize() takes exactly 2 arguments"
 END_FUNC udn_normalize_body
+
+;; ============================================================================
+;; unicodedata_is_normalized(args, nargs) -> rax = a Value
+;;   -- unicodedata.is_normalized(form, unistr)
+;;
+;; CPython answers this from a quick check -- a per-character NFC/NFD quick-
+;; check property with a MAYBE state -- and falls back to normalising when the
+;; answer is MAYBE.  Only the fallback is here: normalise and compare, which
+;; is the same answer for every input and is what `test_unicodedata`'s
+;; conformance run over NormalizationTest.txt needs to exist at all.  The
+;; quick-check table would make it O(n) on already-normal text rather than
+;; O(n) plus an allocation; nothing in the tree is hot on it yet.
+;; ============================================================================
+INZ_STR   equ 8
+INZ_OUT   equ 16
+INZ_FN    equ 24            ; which database's normalize to ask
+INZ_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+global unicodedata_is_normalized
+DEF_FUNC_BARE unicodedata_is_normalized
+    lea rax, [rel unicodedata_normalize]
+    jmp udn_is_normalized_body
+END_FUNC udn_is_normalized_body
+
+;; ============================================================================
+;; ucd32_is_normalized(args, nargs) -> rax = a Value
+;;   -- unicodedata.ucd_3_2_0.is_normalized(form, unistr)
+;; ============================================================================
+global ucd32_is_normalized
+DEF_FUNC_BARE ucd32_is_normalized
+    lea rax, [rel ucd32_normalize]
+    jmp udn_is_normalized_body
+END_FUNC ucd32_is_normalized
+
+;; ============================================================================
+;; udn_is_normalized_body(rdi = args, rsi = nargs, rax = the normalize thunk
+;;   for this database) -> rax = a Value
+;;
+;; The shared body, as normalize and decomposition each have one.
+;; ============================================================================
+DEF_FUNC udn_is_normalized_body, INZ_FRAME
+    mov [rbp - INZ_FN], rax
+    cmp rsi, 2
+    jne .inz_arity
+    mov r10, [rdi + 8]              ; the string, checked by the shared body
+    mov [rbp - INZ_STR], r10
+    ; Through the THUNK, not the shared body: the thunk is what names the
+    ; database, and entering the body directly left udn_pending_tables holding
+    ; whatever was there last -- zero on the first call, which udn_select then
+    ; wrote through.
+    call [rbp - INZ_FN]             ; the form is parsed and refused there
+    test rax, rax
+    jz .inz_propagate
+    mov [rbp - INZ_OUT], rax
+
+    ; Equal as STRINGS, not as objects: the ASCII fast path hands the input
+    ; straight back, but a non-ASCII string that was already normal comes back
+    ; as a new object with the same characters.  Same byte length and same
+    ; bytes is the whole test -- both are UTF-8 and both are well formed.
+    mov rsi, [rbp - INZ_STR]
+    mov rdx, [rax + PyStrObject.ob_size]
+    cmp rdx, [rsi + PyStrObject.ob_size]
+    jne .inz_release_false
+    lea rdi, [rax + PyStrObject.data]
+    lea rsi, [rsi + PyStrObject.data]
+    extern ap_memcmp
+    call ap_memcmp
+    push rax
+    push rax                        ; twice: rsp stays 16-byte aligned
+    mov rdi, [rbp - INZ_OUT]
+    call obj_decref
+    pop rax
+    pop rcx
+    test eax, eax
+    jnz .inz_false
+    jmp .inz_true
+
+.inz_release_false:
+    mov rdi, [rbp - INZ_OUT]
+    call obj_decref
+    jmp .inz_false
+.inz_true:
+    lea rax, [rel bool_true]
+    jmp .inz_out
+.inz_false:
+    lea rax, [rel bool_false]
+.inz_out:
+    INCREF rax
+    leave
+    ret
+
+.inz_propagate:
+    xor eax, eax
+    leave
+    ret
+.inz_arity:
+    RAISE exc_TypeError_type, "is_normalized() takes exactly 2 arguments"
+END_FUNC unicodedata_is_normalized
 
 ;; ============================================================================
 ;; udn_raw_row_for(rdi = a code point) -> rax = the udn_raw_index row, or 0
@@ -1265,7 +1370,12 @@ DEF_FUNC_LOCAL ud_one_codepoint_ext
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
-    jne .no
+    je .is_str
+    ; A str SUBCLASS is a str: CPython's unicode converter accepts one, and an
+    ; exact ob_type compare refused every entry point here for it.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .no
+.is_str:
     cmp qword [rdi + PyStrObject.ob_length], 1
     jne .no
     xor esi, esi

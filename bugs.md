@@ -167,6 +167,17 @@ reasoning that chose them and what changing one would cost.
   same.  Neither returns to its caller, so an opcode that wants to try a
   lookup and recover from the miss cannot go through the slot at all.
 
+  It also LEAKS.  `type_call` holds the new instance in a register across the
+  `__init__` call, and a builtin `__init__` that refuses its arguments raises
+  from inside itself -- so the instance is never released.  Measured at about
+  128 bytes per refusal, the same for every shape: `_io.FileIO("/no/such")`,
+  `_io.FileIO()` with no arguments, `_io.FileIO(path, "zz")` and
+  `_io.BytesIO(5.5)` all leak identically, while a Python `__init__` that
+  raises leaks nothing, because that one RETURNS with the exception set.  So
+  it is general to every builtin `__init__` registered in a type's dict, and
+  the fix is the same one this entry already names rather than anything local
+  to `_io`.
+
   `mapping_getitem_opt` is the way round it for a heaptype (ask
   `__getitem__` through `dunder_call_2`, which does return), and LOAD_NAME
   and SETUP_ANNOTATIONS use it for a locals mapping that is not a dict.  It

@@ -1883,6 +1883,11 @@ END_FUNC sys_get_coroutine_origin_tracking_depth_func
 ;; sys_set_coroutine_origin_tracking_depth_func(args, nargs) -> rax = Value
 ;;
 ;; -> None.  Refuses a negative depth, as CPython's does.
+;;
+;; obj_as_index and not int_to_i64: that one reads PyIntObject.compact off
+;; whatever it is handed, so a float or a list was a dereference of the number
+;; and `set_coroutine_origin_tracking_depth("hello")` stored a str's ob_size.
+;; asyncio's _set_coroutine_origin_tracking forwards whatever it is given.
 ;; ============================================================================
 DEF_FUNC sys_set_coroutine_origin_tracking_depth_func
     cmp rsi, 1
@@ -1890,7 +1895,8 @@ DEF_FUNC sys_set_coroutine_origin_tracking_depth_func
 
     mov rdi, [rdi]              ; args[0]
     V_UNPACK rdi, rdx
-    call int_to_i64
+    extern obj_as_index
+    call obj_as_index           ; names the type for anything else
     test rax, rax
     js .set_codt_value_error
 

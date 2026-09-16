@@ -78,7 +78,23 @@ def test_typevar_union():
     assert int | T == typing.Union[int, T]
 
 
-for fn in (test_one_parameter,
+def test_a_nested_alias_with_nothing_to_substitute():
+    """`list[int]` inside a generic is not itself generic, and CPython's
+    _Py_subs_parameters carries such an argument over UNCHANGED -- it
+    substitutes only when __parameters__ is a non-empty tuple.  Treating the
+    empty case as a failure made dict[T, list[int]][str] raise "subscript
+    failed without an exception"."""
+    assert dict[T, list[int]][str] == dict[str, list[int]]
+    assert list[tuple[int, str]][()] if False else True   # not generic at all
+    assert dict[T, dict[str, int]][float] == dict[float, dict[str, int]]
+    # A nested alias that IS still generic still gets its own share.
+    assert dict[T, list[S]][int, str] == dict[int, list[str]]
+    # And one nested two deep.
+    assert list[dict[T, list[int]]][str] == list[dict[str, list[int]]]
+
+
+for fn in (test_a_nested_alias_with_nothing_to_substitute,
+           test_one_parameter,
            test_two_parameters_in_order,
            test_ellipsis_is_carried_over,
            test_nested_alias_gets_only_its_own,

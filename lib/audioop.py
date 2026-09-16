@@ -18,6 +18,7 @@ refusals are CPython's own sentences, because callers match on them.
 """
 
 
+import math as _math
 import warnings as _warnings
 
 # PEP 594: CPython 3.12 warns on import and removes the module in 3.13.  The
@@ -421,11 +422,27 @@ def findfit(fragment, reference):
             total += float(a[offset + i]) * float(b[i])
         return total
 
+    def _cdiv(num, den):
+        """C's division, which is where audioop.c does this arithmetic.
+
+        A window of pure silence makes `sum_aij_2` zero -- it is a sum of
+        squares -- and `sum_aij_ri` zero with it, so C evaluates 0.0/0.0 and
+        gets a nan, which loses every `<` comparison and leaves the window
+        unchosen.  Python raises ZeroDivisionError there instead, so leading
+        silence (the normal shape of a recording) turned findfit into an
+        exception.  The reference being silent divides by zero the same way
+        at the end, and CPython really does answer nan for it.
+        """
+        if den == 0.0:
+            return float('nan') if num == 0.0 else _math.copysign(
+                float('inf'), num)
+        return num / den
+
     sum_ri_2 = _sum2(cp2, cp2, 0, len2)
     sum_aij_2 = _sum2(cp1, cp1, 0, len2)
     sum_aij_ri = _sum2(cp1, cp2, 0, len2)
 
-    result = (sum_ri_2 * sum_aij_2 - sum_aij_ri * sum_aij_ri) / sum_aij_2
+    result = _cdiv(sum_ri_2 * sum_aij_2 - sum_aij_ri * sum_aij_ri, sum_aij_2)
     best_result = result
     best_j = 0
 
@@ -434,7 +451,8 @@ def findfit(fragment, reference):
         aj_lm1 = float(cp1[j + len2 - 1])
         sum_aij_2 = sum_aij_2 + aj_lm1 * aj_lm1 - aj_m1 * aj_m1
         sum_aij_ri = _sum2(cp1, cp2, j, len2)
-        result = (sum_ri_2 * sum_aij_2 - sum_aij_ri * sum_aij_ri) / sum_aij_2
+        result = _cdiv(sum_ri_2 * sum_aij_2 - sum_aij_ri * sum_aij_ri,
+                       sum_aij_2)
         if result < best_result:
             best_result = result
             best_j = j
@@ -442,7 +460,7 @@ def findfit(fragment, reference):
     # Py_BuildValue's "f" takes a C DOUBLE and builds a Python float from it
     # unnarrowed, whatever its name suggests -- narrowing to single precision
     # here answered 8038.7998046875 where CPython says 8038.8.
-    return best_j, _sum2(cp1, cp2, best_j, len2) / sum_ri_2
+    return best_j, _cdiv(_sum2(cp1, cp2, best_j, len2), sum_ri_2)
 
 
 def findmax(fragment, length):

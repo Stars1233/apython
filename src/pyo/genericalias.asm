@@ -1112,6 +1112,9 @@ END_FUNC gas_raise_named
 DEF_FUNC_BARE gas_release
     push rbx
     push r12
+    sub rsp, 8                  ; entered by CALL, so rsp arrives 8 mod 16 and
+                                ; an EVEN push list leaves obj_decref below
+                                ; misaligned; the pad is what squares it
     mov ebx, GAS_PARAMS
 .gasr_loop:
     mov rax, rbp
@@ -1127,6 +1130,7 @@ DEF_FUNC_BARE gas_release
     add rbx, 8
     cmp rbx, GAS_NEW
     jle .gasr_loop
+    add rsp, 8
     pop r12
     pop rbx
     ret
@@ -1213,32 +1217,38 @@ END_FUNC gas_item_for
 ;; ============================================================================
 GC1_ARG   equ 8
 GC1_FN    equ 16
-GC1_FRAME equ 32            ; + 0 pushes = 32
+; Three values used to be carried across calls on the machine stack, one push
+; each -- and a single push makes the call after it misaligned, because
+; DEF_FUNC's frame already leaves rsp where the ABI wants it.  Frame slots
+; instead: they cost the same and they cannot be odd.
+GC1_OBJ   equ 24
+GC1_TMP   equ 32
+GC1_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
 DEF_FUNC_LOCAL gas_call_1, GC1_FRAME
     mov [rbp - GC1_ARG], rdx
-    push rdi
+    mov [rbp - GC1_OBJ], rdi
     mov rdi, rsi
     call str_from_cstr_heap
     mov [rbp - GC1_FN], rax
-    pop rdi
+    mov rdi, [rbp - GC1_OBJ]
     test rax, rax
     jz .gc1_fail
     mov rsi, rax
     call obj_getattr_opt
-    push rax
+    mov [rbp - GC1_TMP], rax
     mov rdi, [rbp - GC1_FN]
     call obj_decref
-    pop rdi
+    mov rdi, [rbp - GC1_TMP]
     test rdi, rdi
     jz .gc1_fail
     mov [rbp - GC1_FN], rdi             ; the bound method, ours to release
     lea rsi, [rbp - GC1_ARG]
     mov edx, 1
     call obj_call_n
-    push rax
+    mov [rbp - GC1_TMP], rax
     mov rdi, [rbp - GC1_FN]
     DECREF_V rdi, rcx
-    pop rax
+    mov rax, [rbp - GC1_TMP]
     leave
     ret
 .gc1_fail:
@@ -1273,14 +1283,19 @@ DEF_FUNC_LOCAL gas_subst_nested, GSN_FRAME
     CSTRING rsi, "__parameters__"
     call gas_getattr
     test rax, rax
-    jz .gsn_fail
+    jz .gsn_keep
     mov [rbp - GSN_SUB], rax
+    ; CPython's _Py_subs_parameters substitutes only when __parameters__ "is a
+    ; non-empty tuple" and otherwise CARRIES THE ARGUMENT OVER unchanged.  Both
+    ; of these used to be failures, so `dict[T, list[int]][str]` -- an ordinary
+    ; nested alias with nothing left to substitute -- raised "subscript failed
+    ; without an exception" instead of answering dict[str, list[int]].
     lea rcx, [rel tuple_type]
     cmp [rax + PyObject.ob_type], rcx
-    jne .gsn_fail
+    jne .gsn_keep
     mov rdi, [rax + PyTupleObject.ob_size]
     test rdi, rdi
-    jz .gsn_fail
+    jz .gsn_keep
     call tuple_new
     test rax, rax
     jz .gsn_fail
@@ -1315,6 +1330,20 @@ DEF_FUNC_LOCAL gas_subst_nested, GSN_FRAME
     mov rdi, [rbp - GSN_ITEMS]
     call obj_decref
     pop rax
+    pop rbx
+    leave
+    ret
+
+.gsn_keep:
+    ; Nothing to substitute: hand the argument back as it stands, owned,
+    ; because the caller stores what this returns straight into the tuple.
+    mov rdi, [rbp - GSN_SUB]
+    test rdi, rdi
+    jz .gsn_keep_arg
+    call obj_decref
+.gsn_keep_arg:
+    mov rax, [rbp - GSN_ARG]
+    INCREF_V rax, rcx
     pop rbx
     leave
     ret
