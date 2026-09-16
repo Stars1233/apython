@@ -8,7 +8,9 @@ convert the second.  A raise from the second abandons the C stack, so the
 cleanup those callers have ready never runs -- and what leaks is the first
 path's resolved string, about 64 bytes per refusal, silently.
 
-The wordings below were all measured against CPython.
+The wordings below were all measured against CPython.  The one exception
+is the embedded-NUL message, which CPython 3.12 changed mid-series -- see
+`normalise` below.
 """
 
 import io
@@ -36,31 +38,47 @@ class Wrong:
         return 5
 
 
+def normalise(msg):
+    """Collapse the one message CPython 3.12 changed mid-series.
+
+    3.12.3 says "embedded null byte"; 3.12.9 and later say
+    "stat: embedded null character in path", naming the function and the
+    parameter.  The suite diffs against whichever python3 is installed --
+    3.12.3 on this box, a later one in CI -- so the wording cannot be
+    compared and the fact can.  `tests/test_nul_paths.py` and
+    `tests/test_posix.py` do the same, for the same reason.
+    """
+    if "null" in msg.lower():
+        return "embedded null"
+    return msg
+
+
 def refuse(fn, exc, text=None):
     try:
         fn()
     except exc as e:
         if text is not None:
-            assert str(e) == text, "%r != %r" % (str(e), text)
+            got = normalise(str(e))
+            assert got == text, "%r != %r" % (got, text)
         return
     raise AssertionError("%s was not raised" % exc.__name__)
 
 
 def test_the_four_refusals():
     refuse(lambda: os.stat(5.5), TypeError)
-    refuse(lambda: os.stat("/tmp/a\0b"), ValueError, "embedded null byte")
+    refuse(lambda: os.stat("/tmp/a\0b"), ValueError, "embedded null")
     refuse(lambda: os.stat(Raises()), RuntimeError, "boom")
     refuse(lambda: os.stat(Wrong()), TypeError)
     # A PathLike that resolves to something with a NUL is refused after the
     # __fspath__ step, which is the arm that owns its result.
     refuse(lambda: os.stat(Resolves("/tmp/a\0b")), ValueError,
-           "embedded null byte")
+           "embedded null")
 
 
 def test_io_takes_the_same_road():
     refuse(lambda: io.FileIO(5.5), TypeError,
            "expected str, bytes or os.PathLike object, not float")
-    refuse(lambda: io.FileIO("a\0b"), ValueError, "embedded null byte")
+    refuse(lambda: io.FileIO("a\0b"), ValueError, "embedded null")
     refuse(lambda: io.FileIO(Raises()), RuntimeError, "boom")
     refuse(lambda: io.FileIO(Wrong()), TypeError)
 
