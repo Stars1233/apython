@@ -26,6 +26,7 @@ extern exc_ValueError_type
 extern current_exception
 extern obj_decref
 extern raise_exception
+extern set_exception
 extern str_type
 extern bytes_type
 extern posix_copy_bounded
@@ -185,23 +186,39 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     test eax, eax
     jnz .ppa_embedded_nul
     mov rax, [rbp - PPA_PTR]
-    mov rax, [rbp - PPA_PTR]
     mov rdx, [rbp - PPA_OWNED]  ; the __fspath__ result, now the caller's
     mov rcx, [rbp - PPA_ISBYTES]
     leave
     ret
 
-.ppa_propagate:
-    extern eval_exception_unwind
-    POSIX_PATH_DONE [rbp - PPA_OWNED]
+;; Every refusal ends here: the exception is already pending and this answers
+;; 0, which is what the docblock above promises and what all twenty-four call
+;; sites are written for.  It used to RAISE instead, and a raise abandons the C
+;; stack -- so the cleanup each caller had ready for this never ran.  For the
+;; one-path callers that cost nothing; for rename, symlink, link and putenv,
+;; which resolve two paths and hold the first while converting the second, it
+;; leaked the first one's resolved path on every refusal of the second.
+.ppa_fail_out:
+    xor eax, eax
+    xor edx, edx
+    xor ecx, ecx
     leave
-    jmp eval_exception_unwind
+    ret
+
+.ppa_propagate:
+    ; __fspath__ raised: the exception is already the right one.
+    POSIX_PATH_DONE [rbp - PPA_OWNED]
+    jmp .ppa_fail_out
 
 .ppa_embedded_nul:
-    ; Both raise paths below still hold the __fspath__ result, and a raise
-    ; abandons the C stack: release it here or nobody will.
+    ; The __fspath__ result is still held here, and set_exception does not
+    ; abandon the frame -- but releasing before setting keeps the order the
+    ; other arms use.
     POSIX_PATH_DONE [rbp - PPA_OWNED]
-    RAISE exc_ValueError_type, "embedded null byte"
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "embedded null byte"
+    call set_exception
+    jmp .ppa_fail_out
 
 .ppa_bad:
     ; Two different failures share this label: the argument was never a path,
@@ -228,8 +245,8 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     POSIX_PATH_DONE [rbp - PPA_OWNED]
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel pm_msgbuf]
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .ppa_fail_out
 
 .ppa_bad_plain:
     POSIX_PATH_DONE [rbp - PPA_OWNED]
@@ -253,8 +270,8 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     call posix_typename_of
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel pm_msgbuf]
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .ppa_fail_out
 .ppa_no_who:
     lea rsi, [rel pm_msg_path]
     mov edx, 8
@@ -289,6 +306,6 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     call posix_typename_of
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel pm_msgbuf]
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .ppa_fail_out
 END_FUNC posix_path_arg

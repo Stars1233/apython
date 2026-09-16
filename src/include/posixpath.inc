@@ -44,7 +44,20 @@ POSIX_PATH_KIND_IO      equ 3
 ;; An embedded NUL is refused: the syscall would silently see a shorter path,
 ;; and CPython raises ValueError for exactly this.
 ;;
-;; Returns rax = 0 with an exception pending on a bad type.
+;; EVERY refusal answers rax = 0 with the exception already pending, and none
+;; of them raises: not a bad type, not an embedded NUL, not a __fspath__ that
+;; raised, not a __fspath__ that handed back something that is not a path.
+;; So every caller must test rax, and `jz` reaches a path that still has to
+;; clean up and return 0 itself.
+;;
+;; It returns rather than raising because of the callers that resolve TWO
+;; paths.  rename, symlink, link and putenv convert the first, hold what it
+;; owns, and then convert the second; a raise from the second abandons the C
+;; stack, so the cleanup they have ready never runs and the first path's
+;; resolved string leaks.  This used to raise, the line here used to claim it
+;; did not, and all twenty-four call sites had been written to the claim --
+;; their `jz` arms were dead code, and the four two-path ones leaked about 64
+;; bytes on every refusal of a second argument.
 ;; ============================================================================
 %macro POSIX_PATH_DONE 1        ; %1 = a frame slot holding what rdx returned
     push rax

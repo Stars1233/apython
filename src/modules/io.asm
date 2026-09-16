@@ -1106,6 +1106,8 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     xor esi, esi                ; the whole sentence comes from the kind
     mov edx, 3                  ; POSIX_PATH_KIND_IO: _io's own sentence
     call posix_path_arg
+    test rax, rax
+    jz .fi_path_refused         ; 0 with the exception already pending
     mov [rbp - FI_PATHOBJ], rdx
     mov rdi, rax
     mov rsi, [rbp - FI_OFLAGS]
@@ -1222,9 +1224,16 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     FI_DROP_MODE
     RAISE exc_ValueError_type, "Cannot use closefd=False with file name"
 
-.fi_embedded_nul:
+.fi_path_refused:
+    ; posix_path_arg answered 0 and left the exception pending, so this is the
+    ; one place the mode string can still be released -- which is what the
+    ; whole returning contract buys.  Nothing is pushed here: the frame is the
+    ; one DEF_FUNC carved.
     FI_DROP_MODE
-    RAISE exc_ValueError_type, "embedded null byte"
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
 
 
 .fi_open_failed:
